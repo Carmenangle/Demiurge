@@ -1,0 +1,82 @@
+{
+  "node_cases": [
+    {
+      "name": "Anima 分离式文生图",
+      "query": "用 Anima 模型搭建文生图工作流",
+      "expected_nodes": ["UNETLoader", "DualCLIPLoader", "CLIPLoader", "VAELoader"]
+    },
+    {
+      "name": "本机 Llama 反推",
+      "query": "使用本机 llama 模型反推图片提示词",
+      "expected_nodes": ["llama_cpp_model_loader", "llama_cpp_instruct_adv"]
+    },
+    {
+      "name": "ControlNet 姿态控制",
+      "query": "搭建 ControlNet 姿态控制工作流",
+      "expected_nodes": ["ControlNetLoader", "ControlNetApply", "AIO_Preprocessor"]
+    },
+    {
+      "name": "图生图",
+      "query": "搭建图生图工作流，加载参考图后编码采样",
+      "expected_nodes": ["LoadImage", "VAEEncode", "KSampler", "VAEDecode"]
+    },
+    {
+      "name": "图片放大",
+      "query": "搭建图片放大和超分辨率工作流",
+      "expected_nodes": ["UltimateSDUpscale", "ImageUpscaleWithModel", "ImageScale"]
+    },
+    {
+      "name": "Checkpoint 文生图",
+      "query": "搭建标准 Checkpoint 文生图工作流",
+      "expected_nodes": ["CheckpointLoaderSimple", "CLIPTextEncode", "EmptyLatentImage", "KSampler", "VAEDecode", "SaveImage"]
+    },
+    {
+      "name": "Anima 动漫反推与双模式完整链路",
+      "query": "搭建动漫工作流：以 Anima 分离式 UNET、CLIP 和 VAE 为主链；用开关切换文生图空 latent 与图生图 VAE 编码和 denoise；输入可选 D 站画廊或本地图片，D 站标签与画师标签单独输出并拼接提示词，也可切换本机 llama.cpp 反推；最后采样、解码、对比并保存。",
+      "expected_nodes": ["UNETLoader", "CLIPLoader", "VAELoader", "DanbooruGalleryNode", "llama_cpp_model_loader", "llama_cpp_instruct_adv", "EmptyLatentImage", "VAEEncode", "KSampler", "VAEDecode", "SaveImage"],
+      "expected_any": [
+        ["Any Switch (rgthree)", "ImpactConditionalBranch", "AnySwitch (Swwan)", "AnyBooleanSwitch (Swwan)"],
+        ["1hew_TextListToString", "CR Text Concatenate", "Text List Concatenate", "Text Concatenate"]
+      ]
+    },
+    {
+      "name": "场景人物替换完整链路",
+      "query": "搭建场景人物替换工作流：输入角色正面图和带姿势的场景参考图，使用 YOLO 与 SAM2 分割人物和背景、扩展遮罩并裁剪，移除参考图原人物；用姿势 ControlNet 和 Reference ControlNet 迁移姿势与构图，以 Flux2 分离式 UNET、CLIP、VAE 完成角色正视图、人物替换和风格重绘；可开关人脸增强、手部修复与高清分块放大，最后采样解码、对比预览并保存。",
+      "expected_nodes": ["LoadImage", "AILab_YoloV8", "SAM2Segment", "ACN_AdvancedControlNetApply_v2", "ACN_ReferenceControlNet", "ACN_ReferencePreprocessor", "UNETLoader", "CLIPLoader", "VAELoader", "VAEEncode", "VAEDecode", "SaveImage"],
+      "expected_any": [
+        ["GrowMask", "GrowMaskWithBlur"],
+        ["ImageCropByMask", "LayerUtility: CropByMask V2", "LayerUtility: CropByMask V3", "LayerUtility: CropByMask V4"],
+        ["SamplerCustomAdvanced", "KSampler"],
+        ["Any Switch (rgthree)", "ImpactConditionalBranch"],
+        ["LayerUtility: ImageScaleByAspectRatio V2", "SplitImageToTileList", "ImageMergeTileList", "UltimateSDUpscale"]
+      ]
+    }
+  ],
+  "knowledge_cases": [
+    {
+      "query": "如何选择专业工作流模板？",
+      "expected_contexts": ["指令 /w"],
+      "reference": "使用 /w 选择工作流模板。"
+    },
+    {
+      "query": "怎样启动已经确认的工作流出图？",
+      "expected_contexts": ["指令 /s"],
+      "reference": "使用 /s 提交已确认的工作流到 ComfyUI 出图。"
+    },
+    {
+      "query": "如何联网搜索绘画灵感？",
+      "expected_contexts": ["联网找灵感"],
+      "reference": "输入 /find 主题或直接要求搜索参考，且需要正确配置代理。"
+    },
+    {
+      "query": "生成过程中还能继续发送消息吗？",
+      "expected_contexts": ["生成进行中还能继续发消息"],
+      "reference": "可以，新消息会进入队列并在当前生成结束后依次发送。"
+    },
+    {
+      "query": "知识库有什么用途？",
+      "expected_contexts": ["知识库（每个仓库独立）"],
+      "reference": "知识库用于保存角色设定、画风说明等需要重复复用的仓库资料。"
+    }
+  ]
+}

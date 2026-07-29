@@ -1,0 +1,20 @@
+fastapi
+uvicorn[standard]
+pydantic
+python-multipart
+httpx
+requests
+websocket-client
+pillow
+langchain
+langchain-openai
+langchain-chroma  # 知识库 RAG 向量存储（代码 import langchain_chroma，此前漏写导致后端起不来）
+chromadb          # Chroma 本地持久化后端
+langgraph                      # 对话智能体编排（代码 import langgraph）
+langgraph-checkpoint-sqlite    # 多轮对话记忆落盘（SqliteSaver）
+langchain-mcp-adapters         # 接入 MCP 服务器工具（转成 langchain 工具给智能体调用）
+aiosqlite                      # langgraph sqlite checkpoint 异步依赖
+tiktoken                       # token 计数/切分
+rank_bm25  # 节点检索的稀疏(BM25 关键词)召回，与向量检索做 Hybrid（治专有名词点名却漏）
+# 可选本地 Cross-Encoder Reranker 见 requirements-reranker.txt。
+# 开发/CI 工具(pytest/ruff/mypy/import-linter/pre-commit)见 requirements-dev.txt，普通用户不装。

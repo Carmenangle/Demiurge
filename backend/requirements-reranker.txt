@@ -1,0 +1,3 @@
+# 源码开发的本地 Embedding / Cross-Encoder 可选依赖，不放入基础离线 vendor。
+# 固定 Runtime 由 release/runtime-targets.json 选择平台 Torch，不能在这里写死 CUDA。
+sentence-transformers>=5.0

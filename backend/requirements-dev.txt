@@ -1,0 +1,9 @@
+# 开发/CI 专用依赖：普通用户跑 start-dev 不装这些（见 requirements.txt 只留运行必需）。
+# 装：cd backend && .venv/Scripts/python -m pip install -r requirements-dev.txt
+# CI 与 pre-commit 用这份；五道门禁的工具都在这。
+-r requirements.txt
+pytest         # 单元测试：跑 python -m pytest
+import-linter  # 架构护栏：跑 lint-imports 校验分层依赖(见 .importlinter)
+ruff           # 静态检查门禁：跑 ruff check app（配置见 pyproject.toml）
+mypy           # 类型门禁：跑 mypy @mypy_files.txt 校验契约模块签名（清单见 mypy_files.txt）
+pre-commit     # 提交前本地门禁：pre-commit install（配置见根 .pre-commit-config.yaml）

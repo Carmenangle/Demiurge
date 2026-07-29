@@ -1,0 +1,41 @@
+# === 红线：密钥/用户态/运行期数据（backend/data 下全部）===
+# 密钥只允许落在被忽略的 backend/data/user_state.json，不得进源码/日志/发布包
+backend/data/
+
+# === 依赖与构建产物（独立重建，不入库）===
+backend/.venv/
+.venv/
+venv/
+node_modules/
+frontend/dist/
+frontend/node_modules/
+
+# === Python 缓存 ===
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# === 模型权重 / RAG 索引（指向或重建，不复制）===
+*.safetensors
+*.ckpt
+*.pt
+*.bin
+*.gguf
+chroma/
+*.chroma
+
+# === 日志与临时 ===
+*.log
+.env
+.DS_Store
+Thumbs.db
+
+# === 评估报告（写入被忽略的 data）===
+rag_evaluation_report.json
+
+# === IDE ===
+.idea/
+.vscode/

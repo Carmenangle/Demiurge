@@ -1,0 +1,22 @@
+# ruff 配置：护栏用的静态检查。跑：cd backend && .venv/Scripts/python -m ruff check app/
+# 显式固定 Ruff 0.15 的默认规则，避免工具升级扩大检查范围。
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+# E741：ComfyUI link 元组解析里用 l 作短名是刻意的，全项目忽略，避免为过检改逻辑变量名。
+ignore = ["E741"]
+
+# mypy 类型门禁：只盯「契约模块」——稳定接缝、零重依赖、签名是别人依赖的真源。
+# 不全库开（业务模块历史无注解，全开会淹没门禁）；follow_imports=silent 让被 import 的
+# 非契约模块不冒错。跑：cd backend && .venv/Scripts/python -m mypy @mypy_files.txt
+[tool.mypy]
+python_version = "3.11"
+follow_imports = "silent"
+ignore_missing_imports = true
+warn_unused_ignores = true
+# 契约模块内要求较严；其余靠 follow_imports=silent 兜住不外溢。
+disallow_untyped_defs = false
+check_untyped_defs = true
