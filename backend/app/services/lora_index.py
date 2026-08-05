@@ -20,6 +20,7 @@ from app.services import lora_scan, lora_store
 from app.services.rag_backend import EmbedConfig
 
 logger = logging.getLogger(__name__)
+DEFAULT_SUGGESTED_WEIGHT = 0.8
 
 # 同步进度（进程内单例，同一时刻只允许一个同步任务）：
 #   running 是否在跑，done/total 已处理/总文件数，current 当前文件名，
@@ -55,6 +56,8 @@ def _row_to_item(row) -> dict:
         "lora_name": row["lora_name"],
         "triggers": split_words(row["triggers"]),
         "note": row["note"],
+        "suggested_weight": float(row["suggested_weight"]),
+        "suggested_prompt": row["suggested_prompt"],
         "source": row["source"],
         "missing": bool(row["missing"]),
         "updated_at": row["updated_at"],
@@ -90,27 +93,85 @@ def get_triggers_map() -> dict[str, list[str]]:
     return out
 
 
+def get_trigger_status_map() -> dict[str, str]:
+    """返回每个现存 LoRA 的触发词确认状态。
+
+    configured：有要机械前置的触发词；not_required：用户手动保存了空词，明确
+    确认该 LoRA 无需触发词；unconfirmed：自动提取为空，尚未由用户确认。
+    """
+    with get_connection() as conn:
+        rows = conn.execute(
+            "select lora_name, triggers, source from lora_triggers where missing = 0"
+        ).fetchall()
+    out: dict[str, str] = {}
+    for row in rows:
+        if split_words(row["triggers"]):
+            out[row["lora_name"]] = "configured"
+        elif row["source"] == "manual":
+            out[row["lora_name"]] = "not_required"
+        else:
+            out[row["lora_name"]] = "unconfirmed"
+    return out
+
+
+def get_lora_data_map() -> dict[str, dict]:
+    """现存 LoRA 的触发词状态与建议权重，供模型选择器按文件名精确绑定。"""
+    with get_connection() as conn:
+        rows = conn.execute(
+            "select lora_name, triggers, source, suggested_weight "
+            "from lora_triggers where missing = 0"
+        ).fetchall()
+    out: dict[str, dict] = {}
+    for row in rows:
+        status = "configured" if split_words(row["triggers"]) else (
+            "not_required" if row["source"] == "manual" else "unconfirmed"
+        )
+        out[row["lora_name"]] = {
+            "trigger_status": status,
+            "suggested_weight": float(row["suggested_weight"]),
+        }
+    return out
+
+
+def normalize_suggested_weight(value: object) -> float:
+    try:
+        weight = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_SUGGESTED_WEIGHT
+    if weight != weight:  # NaN
+        return DEFAULT_SUGGESTED_WEIGHT
+    return max(0.0, min(2.0, weight))
+
+
 def save_item(lora_name: str, triggers: list[str], note: str = "",
-              cfg: EmbedConfig | None = None) -> dict:
+              cfg: EmbedConfig | None = None, *, suggested_weight: float = DEFAULT_SUGGESTED_WEIGHT,
+              suggested_prompt: str = "") -> dict:
     """用户手填/校正一条。固定标 source='manual'，此后同步不再覆盖它。"""
     # 再过一遍规范化：前端可能整条塞进来（如 `线条动漫、平涂`），
     # 前端切错不该成为最终结果 —— 后端才是权威。
     words = split_words(", ".join(t for t in triggers if t and t.strip()))
     joined = ", ".join(words)
+    weight = normalize_suggested_weight(suggested_weight)
+    author_prompt = (suggested_prompt or "").strip()
     now = int(time.time())
     with get_connection() as conn:
         conn.execute(
             """insert into lora_triggers
-                   (lora_name, triggers, note, source, missing, updated_at)
-               values (?, ?, ?, 'manual', 0, ?)
+                   (lora_name, triggers, note, suggested_weight, suggested_prompt,
+                    source, missing, updated_at)
+               values (?, ?, ?, ?, ?, 'manual', 0, ?)
                on conflict(lora_name) do update set
                    triggers = excluded.triggers, note = excluded.note,
+                   suggested_weight = excluded.suggested_weight,
+                   suggested_prompt = excluded.suggested_prompt,
                    source = 'manual', updated_at = excluded.updated_at""",
-            (lora_name, joined, note, now),
+            (lora_name, joined, note, weight, author_prompt, now),
         )
     if cfg is not None:
         _mirror_async(lora_store.index_lora, cfg, lora_name, words, note, "manual")
     return {"lora_name": lora_name, "triggers": words, "note": note,
+            "suggested_weight": weight,
+            "suggested_prompt": author_prompt,
             "source": "manual", "missing": False, "updated_at": now}
 
 

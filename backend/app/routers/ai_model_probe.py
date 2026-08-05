@@ -15,6 +15,7 @@ class ModelProbeRequest(BaseModel):
     api_key: str = ""
     model_name: str = ""
     model_dir: str = ""
+    proxy_url: str = ""
 
 
 @router.post("/model-probe")
@@ -23,4 +24,6 @@ def probe_model(req: ModelProbeRequest) -> dict[str, object]:
         return model_probe.probe_local_embedding(req.model_dir)
     if req.kind == "reranker-local":
         return model_probe.probe_local_reranker(req.model_dir)
-    return model_probe.probe_remote(req.kind, req.base_url, req.api_key, req.model_name)
+    return model_probe.probe_remote(
+        req.kind, req.base_url, req.api_key, req.model_name, proxy=req.proxy_url,
+    )

@@ -38,7 +38,19 @@ def _widget_names_for(ntype: str, object_info: dict) -> list[str] | None:
         t = spec[0] if isinstance(spec, list) and spec else None
         if isinstance(t, list):
             names.append(name)  # 枚举下拉
-        elif isinstance(t, str) and t in ("INT", "FLOAT", "STRING", "BOOLEAN"):
+        elif isinstance(t, str) and t in ("INT", "FLOAT", "STRING", "BOOLEAN", "COMBO"):
+            names.append(name)
+    return names
+
+
+def _widget_names_from_node(node: dict) -> list[str]:
+    """从现代 UI workflow 自带的 widget 元数据恢复无名 widgets_values 顺序。"""
+    names: list[str] = []
+    for item in node.get("inputs") or []:
+        if not isinstance(item, dict) or not isinstance(item.get("widget"), dict):
+            continue
+        name = str(item["widget"].get("name") or item.get("name") or "").strip()
+        if name:
             names.append(name)
     return names
 
@@ -133,11 +145,13 @@ def ui_to_api(workflow: dict, comfy_url: str = "") -> dict:
         # control_after_generate。否则后面的值会整体错位（如 sampler_name 取到数字）。
         widgets = node.get("widgets_values")
         if isinstance(widgets, list) and widgets:
-            oi_names = _widget_names_for(ntype, object_info)
-            if oi_names is not None:
-                # 有 object_info：按声明顺序逐位对齐
+            node_names = _widget_names_from_node(node)
+            schema_names = _widget_names_for(ntype, object_info)
+            names = node_names or schema_names
+            if names:
+                # 优先用工作流自身元数据；旧格式再用 object_info，均按声明顺序逐位对齐。
                 wi = 0
-                for nm in oi_names:
+                for nm in names:
                     if wi >= len(widgets):
                         break
                     if nm not in linked_names:

@@ -11,6 +11,11 @@ import pytest
 from app.services import node_update
 
 
+@pytest.fixture(autouse=True)
+def isolate_progress_persistence(monkeypatch):
+    monkeypatch.setattr(node_update.task_progress_store, "save", lambda *_args, **_kwargs: None)
+
+
 def _git(cwd, *args):
     return subprocess.run(["git", "-C", str(cwd), *args],
                           capture_output=True, text=True, check=True)
@@ -153,3 +158,50 @@ def test_progress_snapshot_shape_before_any_run():
     for key in ("running", "finished", "deps", "received_bytes", "speed_bps",
                 "old", "new", "changed", "pending_sensitive"):
         assert key in p
+
+
+def test_install_target_is_confined_to_custom_nodes(tmp_path):
+    target = node_update.install_target(str(tmp_path), "https://github.com/acme/example-node.git")
+    assert target == (tmp_path / "custom_nodes" / "example-node").resolve()
+
+
+@pytest.mark.parametrize("url", [
+    "http://github.com/acme/node.git",
+    "https://example.com/acme/node.git",
+    "file:///tmp/node",
+])
+def test_install_target_rejects_untrusted_repository(tmp_path, url):
+    with pytest.raises(ValueError):
+        node_update.install_target(str(tmp_path), url)
+
+
+def test_core_switch_rejects_invalid_version(tmp_path):
+    with pytest.raises(ValueError):
+        node_update.start_core_switch(str(tmp_path), "../../other")
+
+
+def test_tracked_node_install_reports_successful_terminal_state(monkeypatch, tmp_path):
+    target = tmp_path / "custom_nodes" / "example-node"
+
+    def clone(_repository, clone_target, _proxy=""):
+        clone_target.mkdir(parents=True)
+        (clone_target / ".git").mkdir()
+        return True, ""
+
+    monkeypatch.setattr(node_update, "install_target", lambda *_args: target)
+    monkeypatch.setattr(node_update, "_clone_with_progress", clone)
+
+    result = node_update.start_install(
+        str(tmp_path),
+        "https://github.com/acme/example-node.git",
+    )
+    assert result["already_running"] is False
+    progress = _wait()
+    assert progress["finished"] is True
+    assert progress["error"] == ""
+    assert progress["phase"] == "done"
+    assert progress["changed"] is True
+    assert progress["task_kind"] == "node-install"
+    assert progress["subject"] == "example-node"
+    assert progress["target_path"] == str(target)
+    assert "安装完成" in progress["message"]

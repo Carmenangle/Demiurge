@@ -11,6 +11,8 @@ create table lora_triggers (
     lora_name text primary key,
     triggers text not null default '',
     note text not null default '',
+    suggested_weight real not null default 0.8,
+    suggested_prompt text not null default '',
     source text not null default '',
     missing integer not null default 0,
     updated_at integer not null
@@ -49,6 +51,68 @@ def test_scan_dir_is_recursive_and_posix(tmp_path):
     (tmp_path / "note.txt").write_text("ignore me", encoding="utf-8")
     # 路径必须是正斜杠：要和 ComfyUI 的 lora_name 逐字对齐，Windows 上也一样
     assert lora_scan.scan_lora_dir(tmp_path) == ["anime/a.safetensors", "b.ckpt"]
+
+
+def test_available_endpoint_lists_disk_files_and_marks_triggers(tmp_path, monkeypatch):
+    from app.routers import loras as loras_router
+    _prepare_db(tmp_path, monkeypatch)
+    models = tmp_path / "models"
+    (models / "loras" / "anime").mkdir(parents=True)
+    (models / "loras" / "anime" / "a.safetensors").write_bytes(b"x")
+    (models / "loras" / "b.safetensors").write_bytes(b"x")
+    # 只给 a 录触发词 → has_triggers 仅 a 为真
+    lora_index.save_item("anime/a.safetensors", ["trig"], "", None)
+
+    items = loras_router.available_loras(str(models))["items"]
+    by_name = {it["lora_name"]: it["has_triggers"] for it in items}
+    assert set(by_name) == {"anime/a.safetensors", "b.safetensors"}  # 直接读盘，无需同步
+    assert by_name["anime/a.safetensors"] is True
+    assert by_name["b.safetensors"] is False
+    assert {it["suggested_weight"] for it in items} == {0.8}
+
+
+def test_suggested_weight_round_trip_and_sync_preserves_manual_value(tmp_path, monkeypatch):
+    _prepare_db(tmp_path, monkeypatch)
+    loras = tmp_path / "loras"
+    _write_safetensors(loras / "a.safetensors", {"10_x": {"trig": 10}})
+    _sync(loras)
+    saved = lora_index.save_item(
+        "a.safetensors", ["trig"], suggested_weight=1.15,
+        suggested_prompt="masterpiece, best quality",
+    )
+    assert saved["suggested_weight"] == 1.15
+    assert saved["suggested_prompt"] == "masterpiece, best quality"
+    _sync(loras)
+    assert lora_index.list_items()[0]["suggested_weight"] == 1.15
+    assert lora_index.list_items()[0]["suggested_prompt"] == "masterpiece, best quality"
+    assert lora_index.normalize_suggested_weight(9) == 2.0
+
+
+def test_available_endpoint_distinguishes_confirmed_triggerless_lora(tmp_path, monkeypatch):
+    from app.routers import loras as loras_router
+    _prepare_db(tmp_path, monkeypatch)
+    models = tmp_path / "models"
+    loras = models / "loras"
+    for name in ("configured.safetensors", "universal.safetensors", "unknown.safetensors"):
+        (loras / name).parent.mkdir(parents=True, exist_ok=True)
+        (loras / name).write_bytes(b"x")
+    lora_index.save_item("configured.safetensors", ["exact trigger"], "", None)
+    # 手动保存空触发词表示用户已确认：这是无需触发词的通用 LoRA。
+    lora_index.save_item("universal.safetensors", [], "", None)
+
+    items = loras_router.available_loras(str(models))["items"]
+    status = {it["lora_name"]: it["trigger_status"] for it in items}
+
+    assert status == {
+        "configured.safetensors": "configured",
+        "universal.safetensors": "not_required",
+        "unknown.safetensors": "unconfirmed",
+    }
+
+
+def test_available_endpoint_empty_when_no_dir():
+    from app.routers import loras as loras_router
+    assert loras_router.available_loras("")["items"] == []
 
 
 def test_scan_missing_dir_returns_empty(tmp_path):

@@ -30,8 +30,45 @@ def gen_prompt(req: PromptRequest) -> dict[str, object]:
     """根据场景描述生成出图提示词（调用用户配置的对话模型）。"""
     if not req.scene.strip():
         raise HTTPException(status_code=400, detail="场景描述为空")
-    prompt = chat(req.base_url, req.api_key, req.model, _SYSTEM, req.scene)
+    prompt = chat(
+        req.base_url, req.api_key, req.model, _SYSTEM, req.scene, proxy=req.proxy,
+    )
     return {"prompt": prompt}
+
+
+class ProfilePromptRequest(ChatModelReq):
+    profile: str
+    scene: dict[str, object]
+
+
+@router.get("/prompt/profile/defaults")
+def profile_prompt_defaults(profile: str, rating: str = "nsfw") -> dict[str, str]:
+    """设置页读取后端协议默认值，避免前端复制质量词真源。"""
+    from app.services import image_prompt_profiles
+
+    try:
+        return image_prompt_profiles.profile_defaults(profile, rating)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/prompt/profile")
+def gen_profile_prompt(req: ProfilePromptRequest) -> dict[str, object]:
+    """按多元数据插入选择的模型协议生成最终生图提示词。"""
+    from app.services import image_prompt_profiles
+
+    try:
+        result = image_prompt_profiles.generate_result(
+            req.profile,
+            req.scene,
+            lambda system, user: chat(
+                req.base_url, req.api_key, req.model, system, user,
+                temperature=0.3, proxy=req.proxy,
+            ),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {**result, "profile": req.profile}
 
 
 class KeywordsRequest(ChatModelReq):
@@ -51,7 +88,7 @@ def extract_keywords(req: KeywordsRequest) -> dict[str, object]:
     if not req.text.strip():
         return {"tags": []}
     out = chat(req.base_url, req.api_key, req.model, _KEYWORDS_SYSTEM, req.text,
-               temperature=0.2)
+               temperature=0.2, proxy=req.proxy)
     import re as _re
     tags = [t.strip() for t in _re.split(r"[,，;；\n]+", out) if t.strip()][:8]
     return {"tags": tags}
@@ -70,7 +107,7 @@ def inspiration(req: InspirationRequest) -> dict[str, object]:
     from app.services import inspiration as insp
     try:
         return insp.search_and_refine(req.query, req.base_url, req.api_key,
-                                      req.model, proxy=req.proxy_url)
+                                      req.model, proxy=req.proxy_url, chat_proxy=req.proxy)
     except insp.NoResults as e:
         raise HTTPException(status_code=502, detail=f"{e}，请重试或换关键词")
     except ValueError as e:
@@ -96,7 +133,9 @@ def describe_image(req: DescribeImageRequest) -> dict[str, object]:
     """反推：看图输出提示词（/r）。需视觉模型，复用「对话模型」配置。"""
     if not req.images:
         raise HTTPException(status_code=400, detail="没有图片输入")
-    llm = build_chat_model(req.base_url, req.api_key, req.model, temperature=0.3)
+    llm = build_chat_model(
+        req.base_url, req.api_key, req.model, temperature=0.3, proxy=req.proxy,
+    )
     from langchain_core.messages import HumanMessage, SystemMessage
     content: list = [{"type": "text", "text": req.hint or "请反推这张图片的提示词"}]
     content += [{"type": "image_url", "image_url": {"url": u}} for u in req.images]
@@ -126,7 +165,10 @@ def describe_workflow(req: DescribeRequest) -> dict[str, object]:
     lines = [f"#{n.get('id')} {n.get('type', '')} {n.get('title', '')}".strip()
              for n in req.nodes]
     user = f"工作流名称：{req.name}\n节点列表：\n" + "\n".join(lines)
-    desc = chat(req.base_url, req.api_key, req.model, _DESCRIBE_SYSTEM, user, temperature=0.3)
+    desc = chat(
+        req.base_url, req.api_key, req.model, _DESCRIBE_SYSTEM, user,
+        temperature=0.3, proxy=req.proxy,
+    )
     return {"description": desc}
 
 
@@ -147,7 +189,10 @@ def polish_description(req: PolishRequest) -> dict[str, object]:
     """基于用户已输入的能力描述文本润色，使其更便于 AI 理解。"""
     if not req.text.strip():
         raise HTTPException(status_code=400, detail="描述文本为空")
-    desc = chat(req.base_url, req.api_key, req.model, _POLISH_SYSTEM, req.text, temperature=0.4)
+    desc = chat(
+        req.base_url, req.api_key, req.model, _POLISH_SYSTEM, req.text,
+        temperature=0.4, proxy=req.proxy,
+    )
     return {"description": desc}
 
 
@@ -165,7 +210,10 @@ def translate(req: TranslateRequest) -> dict[str, object]:
     extra = "，并润色得通顺自然" if req.polish else ""
     system = (f"你是专业翻译。把用户文本翻译成{req.target_lang}{extra}。"
               "保留专业术语、模型名、参数、代码原样。只输出译文，不要解释、不要加引号。")
-    out = chat(req.base_url, req.api_key, req.model, system, req.text, temperature=0.3)
+    out = chat(
+        req.base_url, req.api_key, req.model, system, req.text,
+        temperature=0.3, proxy=req.proxy,
+    )
     return {"text": out}
 
 class WorkflowPortsRequest(ChatModelReq):
@@ -251,7 +299,10 @@ def workflow_ports(req: WorkflowPortsRequest) -> dict[str, object]:
         f"本轮用户提供的图片数量：{req.image_count}（按顺序记为图1、图2…）\n"
         f"选中节点的输入口结构（JSON）：\n{json.dumps(req.node_schema, ensure_ascii=False)}"
     )
-    raw = chat(req.base_url, req.api_key, req.model, system, user, temperature=0.3)
+    raw = chat(
+        req.base_url, req.api_key, req.model, system, user,
+        temperature=0.3, proxy=req.proxy,
+    )
     plan = _parse_plan_json(raw)
     if plan is None:
         raise HTTPException(status_code=502, detail=f"AI 未返回可解析的计划：{raw[:200]}")

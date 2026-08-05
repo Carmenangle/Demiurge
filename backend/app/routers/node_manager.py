@@ -106,6 +106,29 @@ def update_tracked(req: TrackedUpdateReq) -> dict:
                              req.allow_sensitive, req.skip_deps)
 
 
+class TrackedInstallReq(BaseModel):
+    path: str
+    repository: str
+    python_exe: str = ""
+    proxy: str = ""
+    allow_sensitive: bool = False
+    skip_deps: bool = False
+
+
+@router.post("/install-tracked")
+def install_tracked(req: TrackedInstallReq) -> dict:
+    """Git 节点安装 + 依赖预检，进度与更新共用 /update-progress。"""
+    from pathlib import Path
+    from app.services import comfy_launcher, node_update
+
+    python_exe = req.python_exe.strip() or (comfy_launcher.find_python(Path(req.path)) or "")
+    try:
+        return node_update.start_install(req.path, req.repository, python_exe, req.proxy,
+                                         req.allow_sensitive, req.skip_deps)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
 @router.get("/update-progress")
 def update_progress() -> dict:
     """更新进度快照（含已下载字节数、速度、依赖清单），前端轮询。"""
@@ -172,6 +195,25 @@ def update_comfyui(req: UrlReq) -> dict:
     return _guard(lambda: _mgr.update_comfyui(req.url))
 
 
+class TrackedCoreUpdateReq(BaseModel):
+    path: str
+    python_exe: str = ""
+    proxy: str = ""
+    allow_sensitive: bool = False
+    skip_deps: bool = False
+
+
+@router.post("/update-comfyui-tracked")
+def update_comfyui_tracked(req: TrackedCoreUpdateReq) -> dict:
+    """更新 ComfyUI 当前 Git 分支并公开真实下载进度。"""
+    from pathlib import Path
+    from app.services import comfy_launcher, node_update
+
+    python_exe = req.python_exe.strip() or (comfy_launcher.find_python(Path(req.path)) or "")
+    return node_update.start(req.path, python_exe, req.proxy, req.allow_sensitive,
+                             req.skip_deps, task_kind="comfyui-update", subject="ComfyUI")
+
+
 @router.post("/reboot")
 def reboot(req: UrlReq) -> dict:
     """重启 ComfyUI（装/更新/卸载后生效，走 Manager）。"""
@@ -211,6 +253,22 @@ class SwitchVerReq(BaseModel):
 def switch_comfyui(req: SwitchVerReq) -> dict:
     """切换 ComfyUI 到指定版本。随后需 /start + 重启。"""
     return _guard(lambda: _mgr.switch_comfyui_version(req.url, req.ver))
+
+
+class TrackedSwitchVerReq(BaseModel):
+    path: str
+    ver: str
+    proxy: str = ""
+
+
+@router.post("/switch-comfyui-tracked")
+def switch_comfyui_tracked(req: TrackedSwitchVerReq) -> dict:
+    """可视化拉取并切换 ComfyUI 版本。"""
+    from app.services import node_update
+    try:
+        return node_update.start_core_switch(req.path, req.ver, req.proxy)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 class AnalyzeReq(BaseModel):

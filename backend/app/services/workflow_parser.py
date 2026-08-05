@@ -20,6 +20,7 @@ WIDGET_NAMES: dict[str, list[str]] = {
     "CheckpointLoaderSimple": ["ckpt_name"],
     "VAELoader": ["vae_name"],
     "LoraLoader": ["lora_name", "strength_model", "strength_clip"],
+    "LoraLoaderModelOnly": ["lora_name", "strength_model"],
     "LoadImage": ["image", "upload"],
     "SaveImage": ["filename_prefix"],
     "ImageScale": ["upscale_method", "width", "height", "crop"],
@@ -79,7 +80,30 @@ def _fields_from_ui_node(node: dict) -> list[dict]:
                     "required": False,
                 }
             )
-    return fields
+    # 3) 按字段名去重：ComfyUI 把 widget「转成输入槽」后，同名字段会同时出现在 inputs（空值输入槽）
+    # 和 widgets_values（真实默认值）里，产出两个同名字段。而下游（前端 fieldKey、运行期注入 key）
+    # 都以 (节点id, 字段名) 为唯一键，重复会导致勾一个连带勾另一个、注入无法定位。这里合并同名：
+    # 已连线的版本优先（真实连接，不可暴露）；否则取带真实值的版本（widget 默认值）。
+    return _dedup_fields_by_name(fields)
+
+
+def _dedup_fields_by_name(fields: list[dict]) -> list[dict]:
+    """同名字段合并：linked 优先，其次取有非空 value 的，保持首次出现顺序。"""
+    by_name: dict[str, dict] = {}
+    order: list[str] = []
+    for f in fields:
+        name = f.get("name", "")
+        prev = by_name.get(name)
+        if prev is None:
+            by_name[name] = f
+            order.append(name)
+            continue
+        # 已有同名：按优先级决定是否替换
+        if f.get("linked") and not prev.get("linked"):
+            by_name[name] = f  # 连线版本胜出
+        elif not prev.get("linked") and prev.get("value") in (None, "") and f.get("value") not in (None, ""):
+            by_name[name] = f  # 空值版本被有值版本取代
+    return [by_name[n] for n in order]
 
 
 def parse_workflow(workflow: dict) -> list[dict]:

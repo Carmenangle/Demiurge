@@ -122,6 +122,48 @@ def _scan_asset_refs(old_root: Path, new_root: Path) -> list[AssetRef]:
     return refs
 
 
+def _scan_repo_folders(old_root: Path, new_root: Path) -> list[tuple[Path, Path]]:
+    """枚举 old_root 下"作品文件夹"(含 _repo.json 标记的子目录)，返回 (src_dir, dst_dir) 对。
+
+    只搬带标记的作品文件夹(图片+chat.json+state.json+narrative.db+reference/ 全在内)，
+    不碰 ComfyUI 散落在根目录的自有输出(共存安全)。作品名文件夹与 UUID 文件夹都带标记，均纳入。
+    """
+    pairs: list[tuple[Path, Path]] = []
+    try:
+        entries = list(old_root.iterdir())
+    except OSError:
+        return pairs
+    for d in entries:
+        if not d.is_dir():
+            continue
+        if (d / "_repo.json").is_file():
+            pairs.append((d, new_root / d.name))
+            continue
+        # 子仓库嵌在父作品文件夹下（父名/子名）：父层可能无标记，下探一层找子仓库标记。
+        # 父文件夹里的其它内容（角色卡/ 等快照）由 rel_root 保留原样一并迁移。
+        try:
+            children = list(d.iterdir())
+        except OSError:
+            continue
+        for c in children:
+            if c.is_dir() and (c / "_repo.json").is_file():
+                pairs.append((c, new_root / d.name / c.name))
+    return pairs
+
+
+def _enumerate_repo_files(folder_pairs: list[tuple[Path, Path]]) -> list[tuple[Path, Path]]:
+    """展开作品文件夹树下所有文件 → (src_file, dst_file) 对（含子目录如 reference/）。"""
+    files: list[tuple[Path, Path]] = []
+    for src_dir, dst_dir in folder_pairs:
+        for root, _dirs, names in os.walk(src_dir):
+            rel_root = Path(root).relative_to(src_dir)
+            for name in names:
+                if name.endswith(".tmp") or name.endswith(".migration.tmp"):
+                    continue
+                files.append((Path(root) / name, dst_dir / rel_root / name))
+    return files
+
+
 def _same_file(left: Path, right: Path) -> bool:
     if not left.is_file() or not right.is_file() or left.stat().st_size != right.stat().st_size:
         return False
@@ -136,29 +178,25 @@ def _same_file(left: Path, right: Path) -> bool:
     return digest(left) == digest(right)
 
 
-def _unique_files(refs: list[AssetRef]) -> list[tuple[Path, Path]]:
-    files: dict[str, tuple[Path, Path]] = {}
-    for ref in refs:
-        files.setdefault(_path_key(ref.source), (ref.source, ref.destination))
-    return list(files.values())
-
-
 def audit(old_dir: str, new_dir: str) -> dict[str, object]:
     old_root, new_root = _roots(old_dir, new_dir)
     if _path_key(old_root) == _path_key(new_root):
         return {"changed": False, "asset_count": 0, "file_count": 0,
                 "missing_count": 0, "conflict_count": 0, "total_bytes": 0}
-    refs = _scan_asset_refs(old_root, new_root)
-    files = _unique_files(refs)
-    existing_keys = {_path_key(source) for source, _ in files if source.is_file()}
-    existing_refs = [ref for ref in refs if _path_key(ref.source) in existing_keys]
-    existing_files = [(source, destination) for source, destination in files if source.is_file()]
-    missing = len(files) - len(existing_files)
+    # 作品文件夹整体迁移：枚举带 _repo.json 标记的子文件夹下所有文件（图片+会话+状态+往事+参考图）
+    folder_pairs = _scan_repo_folders(old_root, new_root)
+    all_files = _enumerate_repo_files(folder_pairs)
+    existing_files = [(s, d) for s, d in all_files if s.is_file()]
+    missing = len(all_files) - len(existing_files)
     conflicts = sum(
         1 for source, destination in existing_files
         if destination.exists() and not _same_file(source, destination)
     )
     total = sum(source.stat().st_size for source, _ in existing_files)
+    # asset_count 仍报 Chroma 索引到的图片数（前端据此判"有无可迁移资产"）
+    refs = _scan_asset_refs(old_root, new_root)
+    existing_keys = {_path_key(s) for s, _ in existing_files}
+    existing_refs = [ref for ref in refs if _path_key(ref.source) in existing_keys]
     return {
         "changed": True,
         "asset_count": len(existing_refs),
@@ -240,12 +278,17 @@ def _rewrite_value(value, destinations: dict[str, Path]) -> tuple[object, int]:
     return value, 0
 
 
-def _rewrite_json_references(files: list[tuple[Path, Path]]) -> tuple[list[tuple[Path, bytes]], int]:
+def _rewrite_json_references(
+    files: list[tuple[Path, Path]], extra_candidates: list[Path] | None = None,
+) -> tuple[list[tuple[Path, bytes]], int]:
     destinations = {_path_key(source): destination for source, destination in files}
     candidates = [DATA_DIR / "user_state.json"]
     snapshots = DATA_DIR / "chat_snapshots"
     if snapshots.is_dir():
-        candidates.extend(snapshots.glob("*.json"))
+        candidates.extend(snapshots.glob("*.json"))  # 未随作品文件夹迁移的存量会话（回退位置）
+    if extra_candidates:
+        # 作品文件夹化后 chat.json 已落新位置(dst/chat.json)，需在新位置重写内部旧图路径
+        candidates.extend(c for c in extra_candidates if c.is_file())
     backups: list[tuple[Path, bytes]] = []
     count = 0
     try:
@@ -285,24 +328,30 @@ def migrate(old_dir: str, new_dir: str) -> dict[str, object]:
     if _path_key(old_root) == _path_key(new_root):
         return {"migrated_files": 0, "updated_assets": 0, "updated_references": 0,
                 "delete_failures": 0, "skipped_missing": 0}
-    all_refs = _scan_asset_refs(old_root, new_root)
-    all_files = _unique_files(all_refs)
-    existing_keys = {_path_key(source) for source, _ in all_files if source.is_file()}
-    refs = [ref for ref in all_refs if _path_key(ref.source) in existing_keys]
-    files = [(source, destination) for source, destination in all_files if source.is_file()]
+    # 1) 整棵复制作品文件夹（图片+chat.json+state.json+narrative.db+reference/）
+    folder_pairs = _scan_repo_folders(old_root, new_root)
+    all_files = _enumerate_repo_files(folder_pairs)
+    files = [(s, d) for s, d in all_files if s.is_file()]
     _copy_files(files)
+    # 2) 重写 Chroma 索引里图片的绝对 URL（旧根→新根）
+    all_refs = _scan_asset_refs(old_root, new_root)
+    existing_keys = {_path_key(s) for s, _ in files}
+    refs = [ref for ref in all_refs if _path_key(ref.source) in existing_keys]
     applied = _update_index(refs)
+    # 3) 重写 JSON 引用：user_state 封面 + 各作品新位置的 chat.json 内部旧图路径
+    new_chat_snapshots = [dst / "chat.json" for _src, dst in folder_pairs]
     backups: list[tuple[Path, bytes]] = []
     try:
-        backups, reference_count = _rewrite_json_references(files)
+        backups, reference_count = _rewrite_json_references(files, extra_candidates=new_chat_snapshots)
     except Exception:
         _rollback_index(applied)
         raise
 
+    # 4) 删旧作品文件夹（复制已校验，尽力而为；失败记账供前端提示手动清理）
     delete_failures = 0
-    for source, _ in files:
+    for src_dir, _dst in folder_pairs:
         try:
-            source.unlink()
+            shutil.rmtree(src_dir)
         except OSError:
             delete_failures += 1
     return {

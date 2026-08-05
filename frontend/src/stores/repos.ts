@@ -15,6 +15,16 @@ export interface Repo {
   cover?: string; // 该仓库最新生成图片
   coverAt?: number; // 封面更新时间戳（用于父仓库取子仓库里最新的一张）
   createdAt: number;
+  cardName?: string; // 绑定的角色卡名（=character_store 文件夹名）；有值=剧情扮演作品
+  worldbookName?: string; // 绑定的独立世界书名（worldbookDir 下的 .json 名，不含扩展名）；空=不绑独立书
+  personaId?: string; // 绑定的用户人设档 id（settings.userPersonas）；空=用全局选中档
+}
+
+// 一个仓库的有效绑定：自身字段优先，缺则继承父仓库，皆空则回退全局（由调用方处理全局回退）。
+export interface RepoBinding {
+  cardName: string;
+  worldbookName: string;
+  personaId: string;
 }
 
 const KEY = "laf_repos";
@@ -29,6 +39,35 @@ function load(): Repo[] {
 
 function save(repos: Repo[]) {
   localStorage.setItem(KEY, JSON.stringify(repos));
+}
+
+// 规范化绑定（幂等）：①旧数据 cardName 误挂子仓库→上提到父；②子仓库三项绑定为空则从父下沉一份到自身字段，
+// 使子仓库 UI 直接显示「已绑定」（快照式：之后父改绑定不回灌，子可单独修改）。无变化则返回 null（不触发写回）。
+function normalizeBindings(repos: Repo[]): Repo[] | null {
+  const liftCard = new Map<string, string>(); // parentId -> cardName（从子上提）
+  for (const r of repos) {
+    if (r.parentId && r.cardName) {
+      const parent = repos.find((p) => p.id === r.parentId);
+      if (parent && !parent.cardName) liftCard.set(r.parentId, r.cardName);
+    }
+  }
+  let changed = false;
+  const withParents = repos.map((r) => {
+    if (liftCard.has(r.id) && !r.cardName) { changed = true; return { ...r, cardName: liftCard.get(r.id) }; }
+    return r;
+  });
+  const next = withParents.map((r) => {
+    if (!r.parentId) return r;
+    const parent = withParents.find((p) => p.id === r.parentId);
+    if (!parent) return r;
+    const patch: Partial<Repo> = {};
+    if (!r.cardName && parent.cardName) patch.cardName = parent.cardName;
+    if (!r.worldbookName && parent.worldbookName) patch.worldbookName = parent.worldbookName;
+    if (!r.personaId && parent.personaId) patch.personaId = parent.personaId;
+    if (Object.keys(patch).length) { changed = true; return { ...r, ...patch }; }
+    return r;
+  });
+  return changed ? next : null;
 }
 
 export function useRepos() {
@@ -50,6 +89,13 @@ export function useRepos() {
     return () => { alive = false; };
   }, []);
 
+  // 惰性迁移：①旧数据 cardName 上提到父；②子仓库空绑定从父下沉一份（快照式）。幂等，回填完成后跑到稳定。
+  useEffect(() => {
+    if (!hydrated) return;
+    const fixed = normalizeBindings(repos);
+    if (fixed) setRepos(fixed);
+  }, [hydrated, repos]);
+
   useEffect(() => {
     save(repos);
     if (hydrated) pushRepos(repos); // 回填完成后，本地变更（及升级时的本地存量）镜像到后端
@@ -63,6 +109,18 @@ export function useRepos() {
     );
   };
 
+  // 子仓库（存档）命名：SAVE01、SAVE02…按 parentId 下已有最大 SAVE 索引往后推，便于分支递推按索引号。
+  // 只认 SAVE\d+ 形式（重命名过的自定义名不参与计数），最大索引 +1，两位补零。
+  const nextSaveName = (parentId: string): string => {
+    let max = 0;
+    for (const r of repos) {
+      if (r.parentId !== parentId) continue;
+      const m = /^SAVE(\d+)$/.exec(r.name.trim());
+      if (m) max = Math.max(max, parseInt(m[1], 10));
+    }
+    return `SAVE${String(max + 1).padStart(2, "0")}`;
+  };
+
   // 新建：重名则拒绝，返回 false
   const addRepo = (name: string, parentId?: string): boolean => {
     if (!nameAvailable(name, parentId)) return false;
@@ -71,6 +129,58 @@ export function useRepos() {
       { id: crypto.randomUUID(), name, parentId, createdAt: Date.now() },
     ]);
     return true;
+  };
+
+  // 卡即作品：导入角色卡时建「大仓库(卡名) + 子仓库(对话记录)」，对话线挂在子仓库上。
+  // 已存在同名大仓库则复用；缺子仓库则补建。返回 { parentId, childId }，childId 用于进对话。
+  const addCardWork = (cardName: string): { parentId: string; childId: string } => {
+    const name = cardName.trim();
+    const parent = repos.find((r) => !r.parentId && r.name.trim() === name);
+    if (parent) {
+      // 复用大仓库：cardName 绑在父仓库上，子仓库靠 resolveBinding 继承。补建父绑定（兼容旧数据）。
+      const child = repos.find((r) => r.parentId === parent.id);
+      if (child) {
+        if (!parent.cardName) {
+          setRepos((prev) => prev.map((r) => (r.id === parent.id ? { ...r, cardName } : r)));
+        }
+        return { parentId: parent.id, childId: child.id };
+      }
+      const childId = crypto.randomUUID();
+      const saveName = nextSaveName(parent.id);
+      // 新子仓库复制父当前绑定到自身字段（快照），UI 直接显示已绑定。
+      setRepos((prev) => [
+        ...prev.map((r) => (r.id === parent.id ? { ...r, cardName } : r)),
+        {
+          id: childId, name: saveName, parentId: parent.id, cardName,
+          worldbookName: parent.worldbookName, personaId: parent.personaId, createdAt: Date.now(),
+        },
+      ]);
+      return { parentId: parent.id, childId };
+    }
+    const parentId = crypto.randomUUID();
+    const childId = crypto.randomUUID();
+    // cardName 绑在父仓库；SAVE01 创建时即复制一份父绑定到自身（此刻父仅有 cardName），UI 直接显示已绑定。
+    setRepos((prev) => [
+      ...prev,
+      { id: parentId, name: cardName, cardName, createdAt: Date.now() },
+      { id: childId, name: "SAVE01", parentId, cardName, createdAt: Date.now() },
+    ]);
+    return { parentId, childId };
+  };
+
+  // 分支：在 parentId 下建一个新兄弟子仓库，返回新子仓库 id。名称按当前最大 SAVE 索引递推（SAVE02…）。
+  // 复制父仓库当前绑定（卡/世界书/人设）到新子仓库自身字段（快照式，之后可单独改）。传入 cardName 优先。
+  const addBranch = (parentId: string, cardName?: string): string => {
+    const id = crypto.randomUUID();
+    const name = nextSaveName(parentId);
+    const parent = repos.find((r) => r.id === parentId);
+    setRepos((prev) => [...prev, {
+      id, name, parentId, createdAt: Date.now(),
+      cardName: cardName || parent?.cardName,
+      worldbookName: parent?.worldbookName,
+      personaId: parent?.personaId,
+    }]);
+    return id;
   };
 
   // 改名：重名则拒绝返回 false；成功则同步后端重命名文件夹+重写图片路径
@@ -89,6 +199,29 @@ export function useRepos() {
       }
     } catch { /* ignore */ }
     return true;
+  };
+
+  // 绑定角色卡/独立世界书/用户人设。patch 里字段=新值；传 "" 或 undefined 表示解绑该项。
+  // 三样独立，互不影响；大仓库、小仓库都可绑。
+  const bindRepo = (id: string, patch: Partial<RepoBinding>) => {
+    setRepos((prev) => prev.map((r) => {
+      if (r.id !== id) return r;
+      const next = { ...r };
+      if ("cardName" in patch) next.cardName = patch.cardName || undefined;
+      if ("worldbookName" in patch) next.worldbookName = patch.worldbookName || undefined;
+      if ("personaId" in patch) next.personaId = patch.personaId || undefined;
+      return next;
+    }));
+  };
+
+  // 解析某仓库的有效绑定：自身字段优先，缺则继承父仓库字段。全局回退（人设/世界书目录）交给调用方。
+  const resolveBinding = (repo: Repo): RepoBinding => {
+    const parent = repo.parentId ? repos.find((r) => r.id === repo.parentId) : undefined;
+    return {
+      cardName: repo.cardName || parent?.cardName || "",
+      worldbookName: repo.worldbookName || parent?.worldbookName || "",
+      personaId: repo.personaId || parent?.personaId || "",
+    };
   };
 
   // 手动选择旧图作为封面时不能改变“最新生成图”排序时间。
@@ -128,7 +261,8 @@ export function useRepos() {
   };
 
   return {
-    repos, addRepo, renameRepo, setCover, setGeneratedCover, relocateOutputPath,
+    repos, addRepo, addCardWork, addBranch, renameRepo, bindRepo, resolveBinding,
+    setCover, setGeneratedCover, relocateOutputPath,
     coverOf, deleteRepo, childrenOf,
   };
 }

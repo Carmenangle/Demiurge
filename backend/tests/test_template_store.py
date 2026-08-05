@@ -49,3 +49,54 @@ def test_primary_output_node_id_normalized_and_persisted(tmp_path, monkeypatch):
     assert template_store._normalize({})["primary_output_node_id"] == ""
     saved = template_store.save_template({"name": "x", "primary_output_node_id": " 9 "})
     assert template_store.get_template(saved["id"])["primary_output_node_id"] == "9"
+
+
+def test_unique_empty_latent_is_automatically_exposed_for_media_insert():
+    normalized = template_store._normalize({
+        "workflow_data": {"nodes": [
+            {"id": 4, "type": "EmptyLatentImage", "widgets_values": [832, 1216, 1]},
+            {"id": 8, "type": "KSampler", "widgets_values": []},
+        ]},
+        "exposed": [{
+            "node_id": "9", "field": "text", "semantic": "prompt",
+            "label": "提示词", "control": "textarea", "default": "",
+        }],
+    })
+
+    latent = [field for field in normalized["exposed"]
+              if field.get("semantic", "").startswith("latent_")]
+    assert latent == [
+        {"node_id": "4", "field": "width", "label": "Latent 宽度",
+         "control": "number", "semantic": "latent_width", "default": 832},
+        {"node_id": "4", "field": "height", "label": "Latent 高度",
+         "control": "number", "semantic": "latent_height", "default": 1216},
+    ]
+
+
+def test_multiple_empty_latents_require_explicit_semantics():
+    normalized = template_store._normalize({
+        "workflow_data": {"nodes": [
+            {"id": 4, "type": "EmptyLatentImage", "widgets_values": [832, 1216, 1]},
+            {"id": 5, "type": "EmptyLatentImage", "widgets_values": [1024, 1024, 1]},
+        ]},
+        "exposed": [],
+    })
+
+    assert normalized["exposed"] == []
+
+
+def test_unique_api_format_empty_latent_is_automatically_exposed():
+    normalized = template_store._normalize({
+        "workflow_data": {
+            "4": {"class_type": "EmptyLatentImage", "inputs": {
+                "width": 1024, "height": 1024, "batch_size": 1,
+            }},
+            "8": {"class_type": "KSampler", "inputs": {}},
+        },
+        "exposed": [],
+    })
+
+    assert [(field["node_id"], field["semantic"], field["default"])
+            for field in normalized["exposed"]] == [
+        ("4", "latent_width", 1024), ("4", "latent_height", 1024),
+    ]

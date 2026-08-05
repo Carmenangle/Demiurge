@@ -21,6 +21,7 @@ class _EmbedFields(BaseModel):
     embed_mode: Literal["remote", "local"] = "remote"
     embed_model_dir: str = ""
     reranker_model_dir: str = ""
+    proxy_url: str = ""
 
     def embed_cfg(self) -> EmbedConfig:
         return EmbedConfig(
@@ -30,6 +31,7 @@ class _EmbedFields(BaseModel):
             model_dir=self.embed_model_dir,
             reranker_dir=self.reranker_model_dir,
             mode=self.embed_mode,
+            proxy=self.proxy_url,
         )
 
 
@@ -83,6 +85,34 @@ def index_document(req: IndexDocRequest) -> dict[str, object]:
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"入库失败：{e}")
     return {"ok": True, "chunks": n}
+
+
+class ImportDoc(BaseModel):
+    text: str = ""
+    title: str = ""
+
+
+class ImportDocsRequest(_EmbedFields):
+    thread_id: str = "home"
+    docs: list[ImportDoc] = []
+
+
+@router.post("/import-documents")
+def import_documents(req: ImportDocsRequest) -> dict[str, object]:
+    """批量导入参考资料（从导出的 JSON 恢复 / 迁移到其它仓库）。返回导入的文档数与入库分块数。"""
+    docs = 0
+    chunks = 0
+    for d in req.docs:
+        if not d.text.strip():
+            continue
+        try:
+            n = rag_store.index_document(req.thread_id, req.embed_cfg(), d.text, d.title)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f"导入失败（已入 {docs} 篇）：{e}")
+        if n:
+            docs += 1
+            chunks += n
+    return {"ok": True, "documents": docs, "chunks": chunks}
 
 
 class RetrieveRequest(_EmbedFields):

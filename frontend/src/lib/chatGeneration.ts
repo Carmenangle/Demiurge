@@ -2,7 +2,174 @@
 // 让「图像门 / 快照瘦身 / 文本打分」这些真会咬人的分支可被单测。
 // 依赖注入原则：涉及落盘的部分（persist）由调用方传入函数，本模块只管遍历与决策。
 import type { ChatMessage, RegenerationSnapshot } from "../types/chat";
+import { regenerationPrompt } from "./regeneration";
 import type { Template } from "../api/workflows";
+import type { RichContent } from "../components/RichInput";
+export { prependLoraTriggers } from "./imagePromptProfiles";
+
+interface LoraTriggerRecord {
+  lora_name: string;
+  triggers: string[];
+  missing: boolean;
+  suggested_prompt?: string;
+}
+
+const QUALITY_PROMPT_PATTERN = /(?:\b(?:best|high|amazing|masterpiece|masterwork|quality|aesthetic|absurdres|newest|score_\d+|contrast|detail(?:ed)?|resolution|anatomy|shading|focus|blurr?y|depth of field|rim light|lighting|chiaroscuro|coloring|sketch|style|realistic|[248]k|hd|uhd)\b|画质|高质量|杰作|光影|景深|虚化|画风|风格|细节|分辨率|色彩|上色|阴影|锐利|清晰)/i;
+const SCENE_CONTROL_PATTERN = /(?:\b(?:close-up|wide angle|camera|shot|composition|perspective|portrait|full body|upper body|cowboy shot|dutch angle|low angle|high angle|from above|from below)\b|构图|镜头|特写|近景|中景|远景|全身|半身|俯拍|仰拍)/i;
+const CONTENT_PROMPT_PATTERN = /(?:\b(?:\d*(?:girl|boy)|woman|man|female|male|hair|eyes?|dress|skirt|shirt|pants|underwear|bra|panties|nude|naked|breasts?|nipples?|pussy|penis|standing|sitting|kneeling|lying|running|walking|holding|touching|kissing|sex|arms?|hands?|sword|forest|room|street|bedroom)\b|女孩|男孩|女人|男人|头发|眼睛|裙|衬衫|裤|内衣|裸体|乳房|乳头|阴部|阴茎|站立|坐着|跪|躺|奔跑|行走|手持|触摸|亲吻|性交|手臂|手部|剑|森林|房间|街道|卧室)/i;
+
+function splitPromptTags(value: string): string[] {
+  const tags: string[] = [];
+  let current = "";
+  let depth = 0;
+  for (const char of value.replace(/\r\n?/g, "\n")) {
+    if (char === "(") depth += 1;
+    else if (char === ")" && depth > 0) depth -= 1;
+    if ((char === "," || char === ";" || char === "\n") && depth === 0) {
+      if (current.trim()) tags.push(current.trim());
+      current = "";
+    } else {
+      current += char;
+    }
+  }
+  if (current.trim()) tags.push(current.trim());
+  return tags;
+}
+
+function isArtistSignature(tag: string): boolean {
+  const value = tag.trim().replace(/^\(+|\)+$/g, "");
+  return /^(?:artist\s*:|by\s+)/i.test(value)
+    || /^[a-z][\w]*(?:_\([^)]*\))?\s*:\s*\d+(?:\.\d+)?$/i.test(value);
+}
+
+function isQualityPromptTag(tag: string): boolean {
+  if (SCENE_CONTROL_PATTERN.test(tag)) return false;
+  if (QUALITY_PROMPT_PATTERN.test(tag)) return true;
+  if (CONTENT_PROMPT_PATTERN.test(tag)) return false;
+  return isArtistSignature(tag);
+}
+
+function uniquePromptTags(tags: readonly string[]): string[] {
+  const seen = new Set<string>();
+  return tags.filter((tag) => {
+    const key = tag.trim().toLowerCase();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+export function qualityPromptTagsFromSuggestion(
+  suggestion: string, _triggers: readonly string[],
+): string[] {
+  return uniquePromptTags(splitPromptTags(suggestion).filter(
+    (tag) => isQualityPromptTag(tag),
+  ));
+}
+
+export interface PromptHistoryItem {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export function promptHistory(msgs: readonly ChatMessage[]): PromptHistoryItem[] {
+  return msgs.flatMap((message) => {
+    const text = (message.text || "").trim() || (message.parts || [])
+      .filter((part) => part.type === "text" && part.text?.trim())
+      .map((part) => part.text!.trim())
+      .join("\n");
+    return text ? [{ role: message.role, content: text }] : [];
+  });
+}
+
+export function userMessagePlainText(msg: ChatMessage): string {
+  if (!msg.parts?.length) return msg.text || "";
+  return msg.parts
+    .filter((part) => part.type === "text")
+    .map((part) => part.text || "")
+    .join("");
+}
+
+export function userMessageRichContent(msg: ChatMessage): RichContent {
+  const text = userMessagePlainText(msg);
+  const images = (msg.parts || [])
+    .filter((part) => part.type === "image" && part.url)
+    .map((part) => part.url!);
+  if (msg.image && !images.includes(msg.image)) images.push(msg.image);
+  const maskedPart = (msg.parts || []).find(
+    (part) => part.type === "masked-image" && part.image && part.mask && part.url,
+  );
+  const maskedImage = maskedPart ? {
+    image: maskedPart.image!,
+    mask: maskedPart.mask!,
+    preview: maskedPart.url!,
+  } : undefined;
+  const inputParts: RichContent["parts"] = [];
+  for (const part of msg.parts || []) {
+    if (part.type === "text") inputParts.push({ type: "text", text: part.text || "" });
+    if (part.type === "image" && part.url) inputParts.push({ type: "image", url: part.url });
+    if (part.type === "masked-image" && part.url && part.image && part.mask) {
+      inputParts.push({
+        type: "masked-image", url: part.url, image: part.image, mask: part.mask,
+      });
+    }
+  }
+  return {
+    text,
+    images,
+    parts: inputParts.length ? inputParts : [
+      ...images.map((url) => ({ type: "image" as const, url })),
+      ...(text ? [{ type: "text" as const, text }] : []),
+    ],
+    ...(maskedImage ? { maskedImage } : {}),
+  };
+}
+
+export function prepareConversationRegeneration(
+  messages: readonly ChatMessage[], messageId: string,
+): { history: ChatMessage[]; retained: ChatMessage[]; content: RichContent } | null {
+  const index = messages.findIndex((message) => message.id === messageId);
+  if (index < 0 || messages[index].role !== "user") return null;
+  return {
+    history: messages.slice(0, index),
+    retained: messages.slice(0, index + 1),
+    content: userMessageRichContent(messages[index]),
+  };
+}
+
+export function triggersForSelectedLora(
+  items: readonly LoraTriggerRecord[], selectedLoraName: string,
+): string[] {
+  if (!selectedLoraName) return [];
+  const selected = items.find(
+    (item) => item.lora_name === selectedLoraName && !item.missing,
+  );
+  return selected ? [...selected.triggers] : [];
+}
+
+export function promptAdditionsForSelectedLora(
+  items: readonly LoraTriggerRecord[], selectedLoraName: string,
+): string[] {
+  if (!selectedLoraName) return [];
+  const selected = items.find(
+    (item) => item.lora_name === selectedLoraName && !item.missing,
+  );
+  if (!selected) return [];
+  const suggestion = selected.suggested_prompt?.trim() || "";
+  if (!suggestion) return [...selected.triggers];
+  const qualityTags = qualityPromptTagsFromSuggestion(suggestion, selected.triggers);
+  return uniquePromptTags([...selected.triggers, ...qualityTags]);
+}
+
+export function resolveGenerationPrompt(
+  pendingPrompt: string | undefined,
+  regeneration: Pick<RegenerationSnapshot, "kind" | "prompt"> | undefined,
+  resultText: string,
+): string {
+  return pendingPrompt?.trim()
+    || regenerationPrompt(regeneration as RegenerationSnapshot | undefined).trim()
+    || resultText;
+}
 
 // ===== 图像门（image gate）=====
 // 判断一个工作流模板是否声明了图像输入口，以及抓取到的画布里该输入口是否已填图。
@@ -118,6 +285,8 @@ export interface PendingGeneration {
   createdAt: number;
   outputNodeIds?: string[];   // 主输出节点过滤（切仓库/刷新后 resume 重挂轮询时复用）
   regeneration?: RegenerationSnapshot;
+  target?: { messageId: string; slotId: string; background: true };
+  prompt?: string;
 }
 
 export function registerPending(
@@ -126,6 +295,8 @@ export function registerPending(
   createdAt: number,
   outputNodeIds: string[] = [],
   regeneration?: RegenerationSnapshot,
+  target?: PendingGeneration["target"],
+  prompt = "",
 ): PendingGeneration[] {
   return [
     ...pending.filter((item) => item.prompt_id !== promptId),
@@ -134,6 +305,8 @@ export function registerPending(
       createdAt,
       ...(outputNodeIds.length ? { outputNodeIds } : {}),
       ...(regeneration ? { regeneration } : {}),
+      ...(target ? { target } : {}),
+      ...(prompt ? { prompt } : {}),
     },
   ];
 }
@@ -159,6 +332,16 @@ export function pollSchedule(tries: number): { releaseBusy: boolean; delayMs: nu
     releaseBusy: tries === 150,
     delayMs: tries < 150 ? 2000 : tries < 210 ? 15000 : null,
   };
+}
+
+export function generationResultAction(status: string): "complete" | "fail" | "poll" {
+  if (status === "completed") return "complete";
+  if (status === "failed") return "fail";
+  return "poll";
+}
+
+export function notFoundPollAction(consecutiveNotFound: number): "retry" | "fail" {
+  return consecutiveNotFound >= 5 ? "fail" : "retry";
 }
 
 // ===== 生成收尾去重双闸（纯判定）=====

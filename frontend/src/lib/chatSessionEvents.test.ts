@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ChatMessage } from "../types/chat";
-import { reduceChatStreamEvent } from "./chatSessionEvents";
+import { dropMediaSlot, reduceChatStreamEvent, resolveMediaSlot } from "./chatSessionEvents";
 
 const base = (): ChatMessage[] => [
   { id: "bot", role: "assistant", text: "" },
@@ -14,6 +14,14 @@ describe("reduceChatStreamEvent", () => {
     messages = reduceChatStreamEvent(messages, "bot", { type: "delta", text: "完成" });
 
     expect(messages[0].text).toBe("主管选择 image\n完成");
+  });
+
+  it("用最终清洗正文替换流式预览", () => {
+    let messages = reduceChatStreamEvent(base(), "bot", { type: "delta", text: "原始流" });
+    messages = reduceChatStreamEvent(messages, "bot", { type: "replace", text: "最终正文" });
+
+    expect(messages[0].text).toBe("最终正文");
+    expect(messages[0].parts).toBeUndefined();
   });
 
   it("upserts media by the protocol event id", () => {
@@ -45,5 +53,76 @@ describe("reduceChatStreamEvent", () => {
     });
 
     expect(messages[0].promptApproval?.status).toBe("cancelled");
+  });
+
+  it("按事件顺序形成文本—插槽—文本 parts", () => {
+    let messages = reduceChatStreamEvent(base(), "bot", { type: "delta", text: "高潮段落。" });
+    messages = reduceChatStreamEvent(messages, "bot", {
+      type: "illustrate_request", prompt: "1girl", motion: 0, actors: [], id: "slot-1",
+    });
+    messages = reduceChatStreamEvent(messages, "bot", { type: "delta", text: "\n后续段落。" });
+
+    expect(messages[0].text).toBe("高潮段落。\n后续段落。");
+    expect(messages[0].parts).toEqual([
+      { type: "text", text: "高潮段落。" },
+      { type: "media-slot", slotId: "slot-1", status: "pending" },
+      { type: "text", text: "\n后续段落。" },
+    ]);
+  });
+
+  it("按最终正文偏移插入流式插画槽", () => {
+    let messages = reduceChatStreamEvent(base(), "bot", { type: "replace", text: "高潮段落。后续段落。" });
+    messages = reduceChatStreamEvent(messages, "bot", {
+      type: "illustrate_request", prompt: "p", motion: 0, actors: [], id: "slot-1", offset: 5,
+    });
+
+    expect(messages[0].parts).toEqual([
+      { type: "text", text: "高潮段落。" },
+      { type: "media-slot", slotId: "slot-1", status: "pending" },
+      { type: "text", text: "后续段落。" },
+    ]);
+  });
+
+  it("图片完成后原位替换，失败时删除slot并保留正文", () => {
+    const current: ChatMessage[] = [{
+      id: "bot", role: "assistant", text: "前文后文", parts: [
+        { type: "text", text: "前文" },
+        { type: "media-slot", slotId: "slot-1", status: "pending" },
+        { type: "text", text: "后文" },
+      ],
+    }];
+    const ready = resolveMediaSlot(current, "bot", "slot-1", "local://image", "image");
+    expect(ready[0].parts?.[1]).toEqual({
+      type: "image", url: "local://image", slotId: "slot-1", status: "ready",
+    });
+    const failed = dropMediaSlot(current, "bot", "slot-1");
+    expect(failed[0].parts).toEqual([{ type: "text", text: "前文后文" }]);
+  });
+
+  it("重新生图按相同slot替换已有图片且不追加消息", () => {
+    const current: ChatMessage[] = [{
+      id: "bot", role: "assistant", text: "前文后文", parts: [
+        { type: "text", text: "前文" },
+        { type: "image", url: "local://old", slotId: "slot-1", status: "ready" },
+        { type: "text", text: "后文" },
+      ],
+    }];
+
+    const ready = resolveMediaSlot(current, "bot", "slot-1", "local://new", "image");
+
+    expect(ready).toHaveLength(1);
+    expect(ready[0].parts?.[1]).toEqual({
+      type: "image", url: "local://new", slotId: "slot-1", status: "ready",
+    });
+  });
+
+  it("仅有失败slot时移除parts", () => {
+    const current: ChatMessage[] = [{
+      id: "bot", role: "assistant", text: "正文", parts: [
+        { type: "media-slot", slotId: "slot-1", status: "pending" },
+      ],
+    }];
+
+    expect(dropMediaSlot(current, "bot", "slot-1")[0].parts).toBeUndefined();
   });
 });

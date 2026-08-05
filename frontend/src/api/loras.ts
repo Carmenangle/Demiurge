@@ -6,6 +6,8 @@ export interface LoraTriggerItem {
   lora_name: string;      // 相对 loras 目录，与 ComfyUI 的 LoraLoader.lora_name 一致
   triggers: string[];
   note: string;
+  suggested_weight: number;
+  suggested_prompt: string;
   source: string;         // metadata=从文件头提取 / sidecar=从 .civitai.info / manual=手填
   missing: boolean;       // 磁盘上已找不到该文件（记录保留，不删）
   updated_at: number;
@@ -42,6 +44,20 @@ export function listLoras() {
   return apiGet<{ items: LoraTriggerItem[] }>("/loras/");
 }
 
+// 磁盘上实际存在的 LoRA 文件（供选择器下拉，不依赖触发词同步）
+export interface AvailableLora {
+  lora_name: string;      // 相对 loras 目录，与 ComfyUI 的 LoraLoader.lora_name 一致
+  has_triggers: boolean;  // 触发词表里是否已录该文件（未录也能选，只是不自动注入触发词）
+  trigger_status?: "configured" | "not_required" | "unconfirmed";
+  suggested_weight: number;
+}
+
+export function availableLoras(modelsDir: string) {
+  return apiGet<{ items: AvailableLora[] }>(
+    `/loras/available?models_dir=${encodeURIComponent(modelsDir)}`,
+  );
+}
+
 export function getSyncProgress() {
   return apiGet<LoraSyncProgress>("/loras/sync-progress");
 }
@@ -56,11 +72,15 @@ export function syncLoras(embed: EmbedModel, modelsDir: string, full = false) {
 
 // 保存即标记为手填，此后同步不再覆盖
 export function saveLoraTriggers(
-  embed: EmbedModel, loraName: string, triggers: string[], note = "",
+  embed: EmbedModel, loraName: string, triggers: string[], note = "", suggestedWeight = 0.8,
+  suggestedPrompt = "",
 ) {
   return apiPut<LoraTriggerItem>(
     "/loras/item",
-    { ...embedBody(embed), lora_name: loraName, triggers, note },
+    {
+      ...embedBody(embed), lora_name: loraName, triggers, note,
+      suggested_weight: suggestedWeight, suggested_prompt: suggestedPrompt,
+    },
   );
 }
 

@@ -23,14 +23,17 @@ class NoResults(Exception):
 
 
 def search_and_refine(query: str, base_url: str, api_key: str, model: str,
-                      proxy: str = "") -> dict:
+                      proxy: str = "", chat_proxy: str = "") -> dict:
     """返回 {query, prompt, tags[], sources[]}。无搜索结果抛 NoResults；模型错误由 llm 抛。"""
     results = ws.web_search(query, max_results=6, proxy=proxy)
     if not results:
         raise NoResults("联网搜索无结果（网络或搜索源不可用）")
     corpus = "\n".join(f"- {r['title']}：{r['snippet']}" for r in results if r.get("title"))
     user = f"用户想找的灵感主题：{query}\n\n联网搜索到的参考：\n{corpus}"
-    prompt = _llm.chat(base_url, api_key, model, _SYSTEM, user, temperature=0.5).strip()
+    prompt = _llm.chat(
+        base_url, api_key, model, _SYSTEM, user,
+        temperature=0.5, proxy=chat_proxy,
+    ).strip()
     tags = [t.strip() for t in re.split(r"[,，;；\n]+", prompt) if t.strip()]
     sources = [{"title": r["title"], "url": r["url"]} for r in results[:5] if r.get("title")]
     return {"query": query, "prompt": prompt, "tags": tags, "sources": sources}

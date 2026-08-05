@@ -2,6 +2,7 @@ import { apiGet, apiPost } from "./client";
 import {
   decodeChatStreamEvent,
   type ChatStreamEvent,
+  type IllustrationSceneSpec,
   type StreamInspirationCard,
 } from "./chatStreamProtocol";
 import { openSSE } from "./sse";
@@ -19,9 +20,10 @@ type Embed = {
   modelName: string;
   modelDir?: string;
   rerankerDir?: string;
+  proxyUrl?: string;
 };
 // 对话模型三元组配置。
-type Chat = { baseUrl: string; apiKey: string; modelName: string };
+type Chat = { baseUrl: string; apiKey: string; modelName: string; proxyUrl?: string };
 
 // wire 格式序列化器（收口三元组，各调用方不再逐字段手拆）：
 // - chatBody：对话端点用 base_url/api_key/model
@@ -33,6 +35,7 @@ function chatBody(chat: Chat) {
     base_url: chat.baseUrl,
     api_key: chat.apiKey,
     model: chat.modelName,
+    proxy: chat.proxyUrl || "",
   };
 }
 function ragEmbed(embed?: Embed) {
@@ -43,6 +46,7 @@ function ragEmbed(embed?: Embed) {
     embed_mode: embed?.mode || "remote",
     embed_model_dir: embed?.modelDir || "",
     reranker_model_dir: embed?.rerankerDir || "",
+    proxy_url: embed?.proxyUrl || "",
   };
 }
 function sseEmbed(embed?: Embed) {
@@ -53,18 +57,20 @@ function sseEmbed(embed?: Embed) {
     embed_mode: embed?.mode || "remote",
     embed_model_dir: embed?.modelDir || "",
     reranker_model_dir: embed?.rerankerDir || "",
+    embed_proxy_url: embed?.proxyUrl || "",
   };
 }
 
 
 export interface GenPromptResult {
   prompt: string;
+  negative_prompt?: string;
 }
 
 // 根据场景描述生成出图提示词（用设置里的对话模型）
 export function genPrompt(
   scene: string,
-  chat: { baseUrl: string; apiKey: string; modelName: string },
+  chat: Chat,
 ) {
   return apiPost<GenPromptResult>("/ai/prompt", {
     scene,
@@ -75,7 +81,7 @@ export function genPrompt(
 // 反推：看图生成提示词（/r）。需视觉模型，复用对话模型配置。
 export function describeImage(
   images: string[],
-  chat: { baseUrl: string; apiKey: string; modelName: string },
+  chat: Chat,
   hint = "",
 ) {
   return apiPost<GenPromptResult>("/ai/describe-image", {
@@ -89,7 +95,7 @@ export function describeImage(
 export function translateText(
   text: string,
   targetLang: string,
-  chat: { baseUrl: string; apiKey: string; modelName: string },
+  chat: Chat,
   polish = false,
 ) {
   return apiPost<{ text: string }>("/ai/translate", {
@@ -108,7 +114,7 @@ export interface DescribeResult {
 export function describeWorkflow(
   name: string,
   nodes: { id: string; type: string; title: string }[],
-  chat: { baseUrl: string; apiKey: string; modelName: string },
+  chat: Chat,
 ) {
   return apiPost<DescribeResult>("/ai/describe-workflow", {
     name,
@@ -120,7 +126,7 @@ export function describeWorkflow(
 // 基于已输入的能力描述文本润色，使其更便于 AI 理解
 export function polishDescription(
   text: string,
-  chat: { baseUrl: string; apiKey: string; modelName: string },
+  chat: Chat,
 ) {
   return apiPost<DescribeResult>("/ai/polish-description", {
     text,
@@ -151,7 +157,7 @@ export function workflowPorts(
   imageCount: number,
   nodeSchema: unknown[],
   modelName: string,
-  chat: { baseUrl: string; apiKey: string; modelName: string },
+  chat: Chat,
   force = false,
   style = "",
   styleTemplate = "",
@@ -182,7 +188,7 @@ export type Inspiration = StreamInspirationCard;
 // 联网找灵感：DuckDuckGo 搜索 + 对话模型提炼英文提示词。/find 指令用。
 export function fetchInspiration(
   query: string,
-  chat: { baseUrl: string; apiKey: string; modelName: string },
+  chat: Chat,
   proxyUrl = "",
 ) {
   return apiPost<Inspiration>("/ai/inspiration", {
@@ -214,7 +220,7 @@ export function multiAgent(
     onEvent: (event: ChatStreamEvent) => void;
     onDone: (err?: string) => void;
   },
-  persist?: { outputDir: string; repoId: string; embed: { baseUrl: string; apiKey: string; modelName: string }; proxyUrl?: string; routeModel?: string; messageId?: string; userMessageId?: string; styleTemplate?: string; agentId?: string; contextMaxTokens?: number; imageQuality?: import("../lib/viewRouting").ImageQuality; video?: { baseUrl: string; apiKey: string; modelName: string } },
+  persist?: { outputDir: string; repoId: string; embed: { baseUrl: string; apiKey: string; modelName: string }; proxyUrl?: string; chatProxyUrl?: string; genProxyUrl?: string; videoProxyUrl?: string; embedProxyUrl?: string; routeModel?: string; messageId?: string; userMessageId?: string; styleTemplate?: string; agentId?: string; streamOutput?: boolean; contextMaxTokens?: number; historyPerRole?: number; history?: { role: "user" | "assistant"; content: string }[]; imageQuality?: import("../lib/viewRouting").ImageQuality; video?: { baseUrl: string; apiKey: string; modelName: string }; characterDir?: string; cardName?: string; presetDir?: string; presetName?: string; userName?: string; userPersona?: string; personaBound?: boolean; worldbookDir?: string; worldbookName?: string; illustrate?: boolean; comfyIllustrate?: boolean; promptProfile?: string; characterBaseImages?: Record<string, string>; illustrationActorNames?: string[]; styleBaseImage?: string },
   approvalAction?: { approvalId: string; action: "submit" | "change" | "cancel"; editedPrompt?: string },
   routeAction?: { route: import("../types/chat").AgentRoute; userMessageId: string },
   imageMask?: { image: string; mask: string },
@@ -237,16 +243,38 @@ export function multiAgent(
     repo_id: persist?.repoId || "",
     ...sseEmbed(persist?.embed),
     proxy_url: persist?.proxyUrl || "",
+    chat_proxy_url: persist?.chatProxyUrl || "",
+    gen_proxy_url: persist?.genProxyUrl || "",
+    video_proxy_url: persist?.videoProxyUrl || "",
+    embed_proxy_url: persist?.embedProxyUrl || "",
     route_model: persist?.routeModel || "",
     message_id: persist?.messageId || "",
     style_template: persist?.styleTemplate || "",
     agent_id: persist?.agentId || "",
-    context_max_tokens: persist?.contextMaxTokens || 20_000,
+    stream_output: persist?.streamOutput || false,
+    context_max_tokens: persist?.contextMaxTokens ?? 20_000,  // 0=无限，须用 ?? 保 0 不被吞
+    history_per_role: persist?.historyPerRole || 6,
+    history: persist?.history ?? null,
     approval_id: approvalAction?.approvalId || "",
     approval_action: approvalAction?.action || "",
     edited_prompt: approvalAction?.editedPrompt || "",
     forced_route: routeAction?.route || "",
     user_message_id: routeAction?.userMessageId || persist?.userMessageId || "",
+    character_dir: persist?.characterDir || "",
+    card_name: persist?.cardName || "",
+    preset_dir: persist?.presetDir || "",
+    preset_name: persist?.presetName || "",
+    user_name: persist?.userName || "",
+    user_persona: persist?.userPersona || "",
+    persona_bound: persist?.personaBound || false,
+    worldbook_dir: persist?.worldbookDir || "",
+    worldbook_name: persist?.worldbookName || "",
+    illustrate: persist?.illustrate || false,
+    comfy_illustrate: persist?.comfyIllustrate || false,
+    prompt_profile: persist?.promptProfile || "krea2",
+    character_base_images: persist?.characterBaseImages || {},
+    illustration_actor_names: persist?.illustrationActorNames || [],
+    style_base_image: persist?.styleBaseImage || "",
   }, (obj) => {
     const event = decodeChatStreamEvent(obj);
     if (event.type === "error") throw new Error(event.message);
@@ -256,12 +284,13 @@ export function multiAgent(
 
 export function regenerateImage(
   snapshot: AiImageRegeneration,
-  model: { apiKey: string },
+  model: { apiKey: string; proxyUrl?: string },
   persist: {
     threadId: string;
     repoId: string;
     outputDir: string;
     embed: { baseUrl: string; apiKey: string; modelName: string };
+    embedProxyUrl?: string;
   },
 ) {
   return apiPost<{
@@ -278,12 +307,14 @@ export function regenerateImage(
     gen_base_url: snapshot.model.baseUrl,
     gen_api_key: model.apiKey,
     gen_model: snapshot.model.modelName,
+    gen_proxy_url: model.proxyUrl || "",
     size: snapshot.size,
     image_quality: snapshot.quality,
     output_dir: persist.outputDir,
     embed_base_url: persist.embed.baseUrl,
     embed_api_key: persist.embed.apiKey,
     embed_model: persist.embed.modelName,
+    embed_proxy_url: persist.embedProxyUrl || "",
   }, 960000);
 }
 
@@ -312,12 +343,35 @@ export function compactHistory(
   );
 }
 
+let lastSnapshotRevision = Date.now();
+
 // 落盘前端完整消息流快照（含工作流卡/反推卡等非对话消息），作为可靠真源。
+// 单调版本保证较早发出的防抖请求即使晚到，也不能覆盖后发的删除结果。
 export function saveSnapshot(threadId: string, messages: unknown[]) {
-  return apiPost<{ ok: boolean }>("/ai/chat/snapshot/save", {
+  lastSnapshotRevision = Math.max(Date.now(), lastSnapshotRevision + 1);
+  return apiPost<{ ok: boolean; saved: boolean }>("/ai/chat/snapshot/save", {
     thread_id: threadId,
     messages,
+    revision: lastSnapshotRevision,
   });
+}
+
+export function genProfilePrompt(
+  profile: string,
+  scene: IllustrationSceneSpec,
+  chat: Chat,
+) {
+  return apiPost<GenPromptResult & { profile: string }>("/ai/prompt/profile", {
+    profile,
+    scene,
+    ...chatBody(chat),
+  });
+}
+
+export function getProfilePromptDefaults(profile: string, rating = "nsfw") {
+  return apiGet<{ quality_prompt: string; negative_prompt: string }>(
+    `/ai/prompt/profile/defaults?profile=${encodeURIComponent(profile)}&rating=${encodeURIComponent(rating)}`,
+  );
 }
 
 // 读取某仓库的消息流快照（localStorage 缺失时回填，关浏览器/清端口不丢）
@@ -325,6 +379,22 @@ export function fetchSnapshot(threadId: string) {
   return apiGet<{ items: unknown[] }>(
     `/ai/chat/snapshot?thread_id=${encodeURIComponent(threadId)}`,
   );
+}
+
+// 导出某作品的完整会话记录（剧情模式常用：备份/搬到别处）
+export function exportSnapshot(threadId: string) {
+  return apiGet<{ thread_id: string; messages: unknown[] }>(
+    `/ai/chat/snapshot/export?thread_id=${encodeURIComponent(threadId)}`,
+  );
+}
+
+// 导入会话记录到某作品：replace=整体覆盖，否则按消息 id 合并
+export function importSnapshot(threadId: string, messages: unknown[], replace = true) {
+  return apiPost<{ ok: boolean; count: number }>("/ai/chat/snapshot/import", {
+    thread_id: threadId,
+    messages,
+    replace,
+  });
 }
 
 // 该仓库是否有后台生成任务在跑（切回/刷新时据此轮询快照等落盘）
@@ -358,7 +428,16 @@ export function enqueueChatQueueTask(payload: {
   imageMask?: { image: string; mask: string } | null;
   chat: Chat; gen: Chat; video?: Chat; embed?: Embed;
   size: string; imageQuality: string; outputDir: string; repoId: string;
-  proxyUrl: string; styleTemplate: string; agentId: string; contextMaxTokens: number;
+  proxyUrl: string; chatProxyUrl: string; genProxyUrl: string; videoProxyUrl: string; embedProxyUrl: string;
+  styleTemplate: string; agentId: string; contextMaxTokens: number;
+  streamOutput: boolean;
+  historyPerRole: number;
+  history: { role: "user" | "assistant"; content: string }[];
+  characterDir: string; cardName: string; presetDir: string; presetName: string;
+  userName: string; userPersona: string; personaBound: boolean;
+  worldbookDir: string; worldbookName: string;
+  illustrate: boolean; comfyIllustrate: boolean; promptProfile: string;
+  characterBaseImages: Record<string, string>; illustrationActorNames: string[]; styleBaseImage: string;
 }) {
   return apiPost<{ task: ChatQueueTask }>("/ai/chat-queue/enqueue", {
     thread_id: payload.threadId,
@@ -373,7 +452,36 @@ export function enqueueChatQueueTask(payload: {
     output_dir: payload.outputDir, repo_id: payload.repoId,
     ...sseEmbed(payload.embed),
     proxy_url: payload.proxyUrl, style_template: payload.styleTemplate,
+    chat_proxy_url: payload.chatProxyUrl, gen_proxy_url: payload.genProxyUrl,
+    video_proxy_url: payload.videoProxyUrl, embed_proxy_url: payload.embedProxyUrl,
     agent_id: payload.agentId, context_max_tokens: payload.contextMaxTokens,
+    stream_output: payload.streamOutput,
+    history_per_role: payload.historyPerRole, history: payload.history,
+    character_dir: payload.characterDir, card_name: payload.cardName,
+    preset_dir: payload.presetDir, preset_name: payload.presetName,
+    user_name: payload.userName, user_persona: payload.userPersona,
+    persona_bound: payload.personaBound,
+    worldbook_dir: payload.worldbookDir, worldbook_name: payload.worldbookName,
+    illustrate: payload.illustrate, comfy_illustrate: payload.comfyIllustrate,
+    prompt_profile: payload.promptProfile,
+    character_base_images: payload.characterBaseImages,
+    illustration_actor_names: payload.illustrationActorNames,
+    style_base_image: payload.styleBaseImage,
+  });
+}
+
+export function reportIllustrationFailure(payload: {
+  threadId: string; repoId: string; messageId: string; slotId: string;
+  stage: string; error: string; promptId?: string;
+}) {
+  return apiPost<{ ok: boolean; removed: boolean }>("/ai/image-agent/illustration-failure", {
+    thread_id: payload.threadId,
+    repo_id: payload.repoId,
+    message_id: payload.messageId,
+    slot_id: payload.slotId,
+    stage: payload.stage,
+    error: payload.error,
+    prompt_id: payload.promptId || "",
   });
 }
 export function listChatQueueTasks(threadId = "") {
@@ -397,7 +505,8 @@ export function syncNodes(embed: Embed, comfyUrl: string, full = false) {
 
 export interface SyncProgress {
   running: boolean; done: number; total: number; current: string;
-  synced: number; skipped: number; error: string; finished: boolean;
+  synced: number; skipped: number; failed: number; failures: string[];
+  error: string; finished: boolean;
 }
 // 同步进度快照（轮询）
 export function syncProgress() {
@@ -584,6 +693,19 @@ export function indexDocument(
     thread_id: threadId,
     text,
     title,
+    ...ragEmbed(embed),
+  });
+}
+
+// ⑤ 批量导入参考资料（从导出 JSON 恢复 / 迁移仓库）
+export function importDocuments(
+  threadId: string,
+  docs: { text: string; title: string }[],
+  embed: { baseUrl: string; apiKey: string; modelName: string },
+) {
+  return apiPost<{ ok: boolean; documents: number; chunks: number }>("/rag/import-documents", {
+    thread_id: threadId,
+    docs,
     ...ragEmbed(embed),
   });
 }

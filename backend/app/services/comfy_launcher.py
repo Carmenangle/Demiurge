@@ -142,19 +142,32 @@ def _kill_by_port(port: int = 8188) -> int:
     import re
     killed = 0
     try:
-        out = subprocess.run(["netstat", "-ano"], capture_output=True, text=True, timeout=10).stdout
+        proc = subprocess.Popen(
+            ["netstat", "-ano"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        out, _ = proc.communicate(timeout=10)
     except Exception:
         return 0
     pids = set()
-    for line in out.splitlines():
+    for line in (out or "").splitlines():
         if f":{port} " in line and "LISTENING" in line:
             m = re.search(r"(\d+)\s*$", line.strip())
             if m:
                 pids.add(m.group(1))
     for pid in pids:
         try:
-            subprocess.run(["taskkill", "/F", "/T", "/PID", pid], capture_output=True, timeout=10)
-            killed += 1
+            result = subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", pid],
+                capture_output=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                killed += 1
         except Exception:
             pass
     return killed

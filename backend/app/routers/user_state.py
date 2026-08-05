@@ -64,6 +64,19 @@ def rename_folder(req: RenameRequest) -> dict:
     return repo_meta.rename_folder(req.output_dir, req.repo_id, req.old_name, req.new_name)
 
 
+class DeleteFolderRequest(BaseModel):
+    repo_id: str
+    name: str = ""
+    output_dir: str = ""
+
+
+@router.post("/delete-folder")
+def delete_folder(req: DeleteFolderRequest) -> dict:
+    """删仓库时清理其作品文件夹（快照卡/世界书/persona/会话/图）。只删作品自有文件夹，不碰源库。"""
+    from app.services import repo_meta
+    return repo_meta.delete_folder(req.output_dir, req.repo_id, req.name)
+
+
 class SyncMarkersRequest(BaseModel):
     output_dir: str
 

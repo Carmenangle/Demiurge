@@ -85,6 +85,9 @@ export interface UpdateProgress {
   error: string;
   message: string;
   pending_sensitive: string[];   // 非空=等用户确认是否改动这些共享依赖
+  task_kind: "" | "node-install" | "node-update" | "comfyui-update";
+  subject: string;
+  target_path: string;
 }
 
 export interface TrackedUpdateOptions {
@@ -106,6 +109,27 @@ export function startTrackedUpdate(path: string, pack: NodePack, o: TrackedUpdat
 
 export function updateProgress() {
   return apiGet<UpdateProgress>("/node-manager/update-progress");
+}
+
+export function startTrackedInstall(path: string, repository: string, o: TrackedUpdateOptions = {}) {
+  return apiPost<{ already_running: boolean }>("/node-manager/install-tracked", {
+    path, repository,
+    python_exe: o.pythonExe || "", proxy: o.proxy || "",
+    allow_sensitive: !!o.allowSensitive, skip_deps: !!o.skipDeps,
+  });
+}
+
+export function startTrackedComfyUpdate(path: string, o: TrackedUpdateOptions = {}) {
+  return apiPost<{ already_running: boolean }>("/node-manager/update-comfyui-tracked", {
+    path, python_exe: o.pythonExe || "", proxy: o.proxy || "",
+    allow_sensitive: !!o.allowSensitive, skip_deps: !!o.skipDeps,
+  });
+}
+
+export function startTrackedComfySwitch(path: string, ver: string, proxy = "") {
+  return apiPost<{ already_running: boolean }>("/node-manager/switch-comfyui-tracked", {
+    path, ver, proxy,
+  });
 }
 
 // 核对 ComfyUI 本体依赖（只预检不安装）。切版本只换代码不装依赖，

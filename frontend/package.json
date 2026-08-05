@@ -6,8 +6,12 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@types/dompurify": "^3.0.5",
     "@vitejs/plugin-react": "latest",
+    "dompurify": "^3.4.12",
     "lucide-react": "latest",
+    "marked": "^14.1.4",
+    "opencc-js": "^1.0.5",
     "react": "latest",
     "react-dom": "latest",
     "typescript": "latest",

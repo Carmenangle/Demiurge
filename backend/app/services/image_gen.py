@@ -6,6 +6,7 @@ httpx 直调（不依赖 langchain-community 的 DallEAPIWrapper，更可控）�
 trust_env=False 规避本地系统代理劫持 127.0.0.1 的坑（与 rag_store 一致）。
 """
 import logging
+import os
 import re
 import time
 import uuid
@@ -107,17 +108,26 @@ def _norm_edits_url(base_url: str) -> str:
     return url + "/images/edits"
 
 
-def _load_image_bytes(img: str) -> tuple[bytes, str, str]:
-    """把 data URI / http(s) URL 图片读成 (字节, 文件名, mime)。图生图上传用。"""
+def _load_image_bytes(img: str, proxy: str = "") -> tuple[bytes, str, str]:
+    """把 data URI / http(s) URL / 本地文件路径 图片读成 (字节, 文件名, mime)。图生图上传用。"""
     import base64
     import re
     if img.startswith("data:"):
         header, b64 = img.split(",", 1)
         data = base64.b64decode(re.sub(r"\s+", "", b64))
         mime = header.split(":", 1)[1].split(";")[0] if ":" in header else "image/png"
+    elif not re.match(r"^https?://", img) and os.path.isfile(img):
+        # 本地文件路径（角色底图走此路：桌面单机版后端可直读同机文件）
+        import mimetypes
+        with open(img, "rb") as f:
+            data = f.read()
+        mime = mimetypes.guess_type(img)[0] or "image/png"
     else:
         _max = 30 * 1024 * 1024  # 30MB 上限，防超大直链读爆内存
-        with httpx.Client(trust_env=False, timeout=120) as c:  # 规避本地代理劫持
+        client_kwargs = {"trust_env": False, "timeout": 120}
+        if proxy:
+            client_kwargs["proxy"] = proxy
+        with httpx.Client(**client_kwargs) as c:  # 显式代理优先；否则禁用环境代理
             with c.stream("GET", img) as r:
                 r.raise_for_status()
                 mime = r.headers.get("content-type", "image/png").split(";")[0]
@@ -134,7 +144,7 @@ def _load_image_bytes(img: str) -> tuple[bytes, str, str]:
 
 
 def generate(base_url: str, api_key: str, model: str, prompt: str,
-             size: str = "1024x1024", quality: str = "high") -> str:
+             size: str = "1024x1024", quality: str = "high", proxy: str = "") -> str:
     """纯文生图，返回可展示地址（http URL 或 data:image/...;base64,...）。
 
     失败抛异常，由调用方（工具/路由）捕获转成错误文本。
@@ -151,7 +161,10 @@ def generate(base_url: str, api_key: str, model: str, prompt: str,
     started = time.monotonic()
     _LOG.info("image request start request_id=%s endpoint=generations model=%s size=%s quality=%s",
               request_id, model, size, quality)
-    with httpx.Client(trust_env=False, timeout=_request_timeout(size)) as c:
+    client_kwargs = {"trust_env": False, "timeout": _request_timeout(size)}
+    if proxy:
+        client_kwargs["proxy"] = proxy
+    with httpx.Client(**client_kwargs) as c:
         try:
             r = c.post(url, headers=headers, json=payload)
         except httpx.TimeoutException as exc:
@@ -183,7 +196,8 @@ def generate(base_url: str, api_key: str, model: str, prompt: str,
 
 def generate_with_images(base_url: str, api_key: str, model: str, prompt: str,
                          images: list[str], size: str = "1024x1024",
-                         quality: str = "high", mask: str | None = None) -> str:
+                         quality: str = "high", mask: str | None = None,
+                         proxy: str = "") -> str:
     """图生图：把提示词 + 一张或多张参考图交给 images/edits 接口，返回图片地址。
 
     走 OpenAI 官方 multipart/form-data，多图用同名 image[] 字段全部上传；
@@ -202,11 +216,13 @@ def generate_with_images(base_url: str, api_key: str, model: str, prompt: str,
     files = []
     upload_bytes = 0
     for img in images:
-        data, name, mime = _load_image_bytes(img)
+        data, name, mime = _load_image_bytes(img, proxy) if proxy else _load_image_bytes(img)
         upload_bytes += len(data)
         files.append(("image[]", (name, data, mime)))
     if mask:
-        mask_data, mask_name, mask_mime = _load_image_bytes(mask)
+        mask_data, mask_name, mask_mime = (
+            _load_image_bytes(mask, proxy) if proxy else _load_image_bytes(mask)
+        )
         upload_bytes += len(mask_data)
         files.append(("mask", (f"mask_{mask_name}", mask_data, mask_mime)))
     payload = {"model": model, "prompt": prompt, "n": "1", "size": size,
@@ -216,7 +232,10 @@ def generate_with_images(base_url: str, api_key: str, model: str, prompt: str,
         "image request start request_id=%s endpoint=edits model=%s size=%s quality=%s images=%d mask=%s bytes=%d",
         request_id, model, size, quality, len(images), bool(mask), upload_bytes,
     )
-    with httpx.Client(trust_env=False, timeout=_request_timeout(size)) as c:
+    client_kwargs = {"trust_env": False, "timeout": _request_timeout(size)}
+    if proxy:
+        client_kwargs["proxy"] = proxy
+    with httpx.Client(**client_kwargs) as c:
         try:
             r = c.post(url, headers=headers, data=payload, files=files)
         except httpx.TimeoutException as exc:

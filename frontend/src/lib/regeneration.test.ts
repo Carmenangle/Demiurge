@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { AiImageRegeneration } from "../types/chat";
-import { resolveImageRegenerationModel, workflowRegenerationSnapshot } from "./regeneration";
+import {
+  legacyGenerationPrompt, resolveImageRegenerationModel, templateRegenerationSnapshot,
+  workflowRegenerationSnapshot,
+} from "./regeneration";
 
 describe("regeneration snapshots", () => {
   it("clones each workflow graph so later edits cannot change a result", () => {
@@ -29,5 +32,30 @@ describe("regeneration snapshots", () => {
 
     expect(resolveImageRegenerationModel(snapshot, models)?.apiKey).toBe("right");
     expect(resolveImageRegenerationModel(snapshot, models.slice(0, 1))).toBeUndefined();
+  });
+
+  it("保存自动插画模板和值供原槽重新生成", () => {
+    const values = { "39.text": "old prompt", "40.strength_model": 0.8 };
+    const snapshot = templateRegenerationSnapshot(
+      "tpl", values, "http://127.0.0.1:8188", ["45"], "old prompt",
+    );
+    values["39.text"] = "changed";
+
+    expect(snapshot).toEqual({
+      kind: "template",
+      templateId: "tpl",
+      values: { "39.text": "old prompt", "40.strength_model": 0.8 },
+      comfyuiUrl: "http://127.0.0.1:8188",
+      outputNodeIds: ["45"],
+      prompt: "old prompt",
+    });
+  });
+
+  it("旧自动插画按图片地址取资产库原提示词", () => {
+    expect(legacyGenerationPrompt("local://b", [
+      { image_url: "local://a", prompt: "prompt a" },
+      { image_url: "local://b", prompt: "  prompt b  " },
+    ])).toBe("prompt b");
+    expect(legacyGenerationPrompt("local://missing", [])).toBe("");
   });
 });

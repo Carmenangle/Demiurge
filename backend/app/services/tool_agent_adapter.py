@@ -22,6 +22,9 @@ def run(ctx: Any, message: str, images: list[str], trace: list[str]) -> dict:
             style_template=ctx.get("style_template", ""), agent_id=ctx.get("agent_id", ""),
             memory_mode="external_turn",
             image_quality=ctx.get("image_quality", "high"),
+            chat_proxy_url=ctx.get("chat_proxy", ""),
+            gen_proxy_url=ctx.get("gen_proxy", ""),
+            embed_proxy_url=ctx.get("embed_proxy", ""),
         ):
             if event.get("interrupted"):
                 interrupted = True

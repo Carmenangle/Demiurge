@@ -38,6 +38,25 @@ export function rawWorkflowByPath(path: string) {
   return apiGet<{ workflow: unknown }>(`/workflows/raw?path=${encodeURIComponent(path)}`);
 }
 
+// 多元数据插入语义约定：模板暴露字段标注为这些 semantic 时，剧情高潮点异步出图会按语义注入值。
+// prompt=写入后端提取的 booru 提示词；lora_name=写入角色 LoRA 文件名；lora_weight=写入 LoRA 权重。
+export const SEMANTIC_PROMPT = "prompt";
+export const SEMANTIC_NEGATIVE_PROMPT = "negative_prompt";
+export const SEMANTIC_LORA_NAME = "lora_name";
+export const SEMANTIC_LORA_WEIGHT = "lora_weight";
+export const SEMANTIC_BASE_IMAGE = "base_image";
+export const SEMANTIC_LATENT_WIDTH = "latent_width";
+export const SEMANTIC_LATENT_HEIGHT = "latent_height";
+export const MEDIA_INSERT_SEMANTICS = [
+  { value: SEMANTIC_PROMPT, label: "提示词（必选，写入 booru 提示词）" },
+  { value: SEMANTIC_NEGATIVE_PROMPT, label: "负面提示词（独立写入负向条件）" },
+  { value: SEMANTIC_LORA_NAME, label: "角色 LoRA 文件名" },
+  { value: SEMANTIC_LORA_WEIGHT, label: "角色 LoRA 权重" },
+  { value: SEMANTIC_BASE_IMAGE, label: "角色底图（图生图输入图节点）" },
+  { value: SEMANTIC_LATENT_WIDTH, label: "Latent 宽度（按 Agent 画幅比例换算）" },
+  { value: SEMANTIC_LATENT_HEIGHT, label: "Latent 高度（按 Agent 画幅比例换算）" },
+];
+
 // 控件类型
 export type ControlType = "text" | "textarea" | "number" | "select" | "image" | "seed" | "boolean";
 

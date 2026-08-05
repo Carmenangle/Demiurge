@@ -26,6 +26,15 @@ export function renameRepoFolder(args: {
   );
 }
 
+// 删仓库：只删该仓库在「仓库文件夹」里的作品文件夹（快照/会话/图），不碰源库角色卡/世界书。
+export function deleteRepoFolder(args: {
+  repo_id: string; name: string; output_dir: string;
+}) {
+  return apiPost<{ deleted: boolean; folder: string }>(
+    "/user-state/delete-folder", args,
+  );
+}
+
 // 上传对话背景图，返回后端保存的本地路径（填进 chatBgPath）
 export async function uploadChatBg(file: File): Promise<{ ok: boolean; path: string }> {
   const fd = new FormData();

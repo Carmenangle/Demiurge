@@ -2,11 +2,16 @@ import type { PortOp } from "../api/ai";
 
 // 图文混排片段：文本/图片穿插渲染
 export interface MsgPart {
-  type: "text" | "image" | "masked-image";
+  type: "text" | "image" | "video" | "masked-image" | "media-slot";
   text?: string;  // type=text
   url?: string;   // type=image（dataURI 或 http URL）
   image?: string; // type=masked-image 的原图
   mask?: string;  // type=masked-image 的独立 Alpha 蒙版
+  slotId?: string; // type=media-slot，异步图片/视频完成后据此原位替换
+  status?: "pending" | "ready" | "failed";
+  promptId?: string;
+  error?: string;
+  regeneration?: RegenerationSnapshot;
 }
 
 export interface PromptApproval {
@@ -52,7 +57,16 @@ export interface WorkflowRegeneration {
   prompt: string;
 }
 
-export type RegenerationSnapshot = AiImageRegeneration | WorkflowRegeneration;
+export interface TemplateRegeneration {
+  kind: "template";
+  templateId: string;
+  values: Record<string, unknown>;
+  comfyuiUrl: string;
+  outputNodeIds: string[];
+  prompt: string;
+}
+
+export type RegenerationSnapshot = AiImageRegeneration | WorkflowRegeneration | TemplateRegeneration;
 
 export interface ChatMessage {
   id: string;

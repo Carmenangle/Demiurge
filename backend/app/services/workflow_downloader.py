@@ -8,7 +8,6 @@
 """
 from __future__ import annotations
 
-import io
 import re
 import time
 import uuid
@@ -52,10 +51,10 @@ def _save_json_bytes(target_dir: Path, fname: str, data: bytes) -> str:
     return dest.name
 
 
-def _extract_from_zip(target_dir: Path, raw: bytes) -> list[str]:
+def _extract_from_zip(target_dir: Path, archive: Path) -> list[str]:
     """从 zip 里解出所有 .json 落盘，返回落盘文件名列表。"""
     saved: list[str] = []
-    with zipfile.ZipFile(io.BytesIO(raw)) as z:
+    with zipfile.ZipFile(archive) as z:
         for info in z.infolist():
             if info.is_dir() or not info.filename.lower().endswith(".json"):
                 continue
@@ -82,28 +81,45 @@ def _download(task_id: str, url: str, workflow_dir: str, civitai_token: str, pro
         u = url
         if civitai_token and "civitai.com" in u and "token=" not in u:
             u += ("&" if "?" in u else "?") + f"token={civitai_token}"
-        _md._set(task_id, status="downloading", downloaded=0, total=0, error="")
+        _md._set(task_id, status="downloading", phase="resolving", downloaded=0,
+                 total=0, speed_bps=0, error="", target_dir=str(target),
+                 updated_at=time.time())
         cli_kw: dict = {"trust_env": False, "follow_redirects": True, "timeout": None}
         if proxy and proxy.strip():
             cli_kw["proxy"] = proxy.strip()
+        temp = target / f".workflow-{task_id}.part"
         with httpx.Client(**cli_kw) as c:
-            r = c.get(u)
-            if r.status_code >= 400:
-                raise RuntimeError(f"HTTP {r.status_code}（可能需要 token 或链接失效）")
-            raw = r.content
-            fname = _filename_from_headers(r, "")
-            _md._set(task_id, filename=fname, total=len(raw), downloaded=len(raw))
-            lower = fname.lower()
-            ct = r.headers.get("content-type", "").lower()
-            if lower.endswith(".zip") or "zip" in ct:
-                saved = _extract_from_zip(target, raw)
+            with c.stream("GET", u) as r:
+                if r.status_code >= 400:
+                    raise RuntimeError(f"HTTP {r.status_code}（可能需要 token 或链接失效）")
+                fname = _filename_from_headers(r, "")
+                total = int(r.headers.get("content-length", 0) or 0)
+                ct = r.headers.get("content-type", "").lower()
+                _md._set(task_id, filename=fname, total=total, phase="downloading")
+                done = 0
+                sample = (time.monotonic(), 0)
+                with temp.open("wb") as f:
+                    for chunk in r.iter_bytes(256 * 1024):
+                        f.write(chunk)
+                        done += len(chunk)
+                        sample = _md._record_transfer(task_id, done, sample)
+            _md._set(task_id, phase="extracting" if fname.lower().endswith(".zip") or "zip" in ct else "saving",
+                     downloaded=done, speed_bps=0)
+            if fname.lower().endswith(".zip") or "zip" in ct:
+                saved = _extract_from_zip(target, temp)
             else:
-                saved = [_save_json_bytes(target, fname or "workflow.json", raw)]
+                saved = [_save_json_bytes(target, fname or "workflow.json", temp.read_bytes())]
+        temp.unlink(missing_ok=True)
         if not saved:
             raise RuntimeError("下载内容里没有可用的工作流 .json")
-        _md._set(task_id, status="done", filename="、".join(saved))
+        _md._set(task_id, status="done", phase="done", speed_bps=0,
+                 filename="、".join(saved), saved_files=[str(target / name) for name in saved],
+                 updated_at=time.time())
     except Exception as e:  # noqa: BLE001
-        _md._set(task_id, status="error", error=str(e))
+        if 'temp' in locals():
+            temp.unlink(missing_ok=True)
+        _md._set(task_id, status="error", phase="failed", speed_bps=0,
+                 error=str(e), updated_at=time.time())
 
 
 def start_download(url: str, workflow_dir: str, name: str = "",
@@ -117,8 +133,11 @@ def start_download(url: str, workflow_dir: str, name: str = "",
     import threading
     task_id = uuid.uuid4().hex
     disp = (name or "").strip() or (urlparse(url).path.split("/")[-1] or url)
-    _md._set(task_id, status="pending", downloaded=0, total=0, filename="", error="",
-             name=disp, model_type="工作流模板", created=time.time())
+    created = time.time()
+    _md._set(task_id, status="pending", phase="queued", downloaded=0, total=0,
+             speed_bps=0, filename="", error="", name=disp, model_type="工作流模板",
+             kind="workflow", target_dir=str(Path(workflow_dir)), saved_files=[],
+             created=created, started_at=created, updated_at=created)
     threading.Thread(target=_download, args=(task_id, url, workflow_dir, civitai_token, proxy),
                      daemon=True).start()
     return task_id

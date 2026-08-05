@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { type Settings, activeChatModel } from "../stores/settings";
+import { type Settings, activeChatModel, resolvedEmbedModel } from "../stores/settings";
 import { syncNodes, buildWorkflow } from "../api/ai";
 import { type DescribeValue } from "../components/DescribeModal";
 import {
@@ -36,7 +36,7 @@ export function useWorkflowTemplates(settings: Settings) {
   const [building, setBuilding] = useState(false);
   const [showBuild, setShowBuild] = useState(false);       // 搭建需求输入弹窗
   const [alertMsg, setAlertMsg] = useState<{ title: string; message: string } | null>(null);
-  const embed = { baseUrl: settings.embedModel.baseUrl, apiKey: settings.embedModel.apiKey, modelName: settings.embedModel.modelName };
+  const embed = resolvedEmbedModel(settings);
 
   // 同步节点知识库：扫描 ComfyUI 已装节点入库，供 AI 搭工作流检索
   const onSyncNodes = async () => {
@@ -61,7 +61,7 @@ export function useWorkflowTemplates(settings: Settings) {
     setError("");
     try {
       const r = await buildWorkflow({
-        need, chat: { baseUrl: cm.baseUrl, apiKey: cm.apiKey, modelName: cm.modelName },
+        need, chat: cm,
         embed, comfyUrl: settings.comfyuiUrl, workflowDir: settings.workflowDir,
       });
       if (r.ok) {

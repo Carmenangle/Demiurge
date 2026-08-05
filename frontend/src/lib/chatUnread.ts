@@ -7,7 +7,12 @@ export function messageActivityVersion(message: ChatMessage): string {
     tail(message.thinking),
     message.image || "",
     message.video || "",
-    (message.parts || []).map((part) => `${part.type}:${part.url || tail(part.text)}`).join("|"),
+    (message.parts || []).map((part) => [
+      part.type,
+      part.slotId || "",
+      part.status || "",
+      part.url || tail(part.text),
+    ].join(":")).join("|"),
     message.promptApproval
       ? `${message.promptApproval.status}:${message.promptApproval.stage || ""}:${tail(message.promptApproval.prompt)}`
       : "",

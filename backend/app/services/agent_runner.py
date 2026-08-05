@@ -7,7 +7,7 @@ import queue
 import threading
 from typing import Iterator
 
-from app.services import agent_graph, chat_memory, generation_store, thread_admission
+from app.services import agent_graph, chat_memory, generation_store, run_trace, thread_admission
 from app.services.agent_contracts import AgentEvent, RunContext
 from app.services.thread_admission import RunAlreadyActive  # noqa: F401  重导出，保调用方不变
 
@@ -27,6 +27,43 @@ def run_multi_stream(context: RunContext) -> "queue.Queue":
     approval_updates: list[dict] = []
     route_choice_updates: list[dict] = []
     admission = thread_admission.admit(context.thread_id, context.cancel_event)
+    run_trace.emit(
+        context, "turn.started",
+        raw_input=context.message,
+        image_count=len(context.input_images()),
+        message_id=context.message_id,
+        model=context.chat.model,
+        route_model=context.route_model or context.chat.model,
+        illustrate=context.illustrate,
+        comfy_illustrate=context.comfy_illustrate,
+        stream_output=context.stream_output,
+    )
+
+    def emit(event: AgentEvent) -> None:
+        if event.get("replace") is not None:
+            final_text[:] = [event["replace"]]
+            generation_store.persist_text(
+                context.thread_id, context.message_id, event["replace"],
+            )
+        elif event.get("delta"):
+            final_text.append(event["delta"])
+        if event.get("illustrate_request"):
+            request = event["illustrate_request"]
+            generation_store.persist_media_slot(
+                context.thread_id,
+                context.message_id,
+                str(event.get("id") or ""),
+                request.get("offset") if isinstance(request, dict) else None,
+            )
+        if event.get("approval"):
+            approval_updates.append(event["approval"])
+        if event.get("route_choice"):
+            route_choice_updates.append(event["route_choice"])
+        q.put(event)
+
+    # 即使正文关闭流式，也要允许 Roleplay 在最终正文就绪后立即发 replace/插画请求；
+    # stream_output 只控制模型 delta，不控制后台媒体事件通道。
+    context.stream_sink = emit
 
     def worker() -> None:
         interrupted = False
@@ -34,14 +71,9 @@ def run_multi_stream(context: RunContext) -> "queue.Queue":
             for event in agent_graph.stream_multi_agent(context):
                 if event.get("interrupted"):
                     interrupted = True
-                if event.get("delta"):
-                    final_text.append(event["delta"])
-                if event.get("approval"):
-                    approval_updates.append(event["approval"])
-                if event.get("route_choice"):
-                    route_choice_updates.append(event["route_choice"])
-                q.put(event)
+                emit(event)
         except Exception as exc:  # noqa: BLE001
+            run_trace.emit(context, "turn.error", error=str(exc))
             q.put({"error": str(exc)})
         finally:
             text = "".join(final_text).strip()
@@ -59,6 +91,13 @@ def run_multi_stream(context: RunContext) -> "queue.Queue":
                 )
             except Exception:
                 pass
+            run_trace.emit(
+                context, "turn.completed",
+                interrupted=interrupted,
+                assistant_output=text,
+                approval_count=len(approval_updates),
+                route_choice_count=len(route_choice_updates),
+            )
             thread_admission.release(admission)
             q.put(None)
 

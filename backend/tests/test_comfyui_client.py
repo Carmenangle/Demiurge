@@ -42,11 +42,35 @@ def test_fetch_result_no_filter_returns_all(monkeypatch):
     assert [v["filename"] for v in r["videos"]] == ["anim.gif"]
 
 
+def test_fetch_result_prefers_saved_output_over_temporary_preview(monkeypatch):
+    hist = {"pid": {"status": {"completed": True}, "outputs": {
+        "2": {"images": [{"filename": "first-pass.png", "subfolder": "", "type": "temp"}]},
+        "24": {"images": [{"filename": "final.png", "subfolder": "", "type": "output"}]},
+    }}}
+    monkeypatch.setattr(comfyui_client, "urlopen", lambda *a, **k: _FakeResp(hist))
+
+    r = comfyui_client.fetch_result("http://127.0.0.1:8188", "pid")
+
+    assert [image["filename"] for image in r["images"]] == ["final.png"]
+
+
 def test_fetch_result_filter_keeps_only_primary_node(monkeypatch):
     _patch(monkeypatch)
     r = comfyui_client.fetch_result("http://127.0.0.1:8188", "pid", ["20"])
     assert [i["filename"] for i in r["images"]] == ["final.png"]
     assert [v["filename"] for v in r["videos"]] == ["anim.gif"]
+
+
+def test_fetch_result_primary_node_temp_falls_back_to_final_saved_output(monkeypatch):
+    hist = {"pid": {"status": {"completed": True}, "outputs": {
+        "2": {"images": [{"filename": "first-pass.png", "subfolder": "", "type": "temp"}]},
+        "24": {"images": [{"filename": "second-pass.png", "subfolder": "", "type": "output"}]},
+    }}}
+    monkeypatch.setattr(comfyui_client, "urlopen", lambda *a, **k: _FakeResp(hist))
+
+    r = comfyui_client.fetch_result("http://127.0.0.1:8188", "pid", ["2"])
+
+    assert [image["filename"] for image in r["images"]] == ["second-pass.png"]
 
 
 def test_gif_in_images_reclassified_as_video(monkeypatch):
@@ -57,6 +81,29 @@ def test_gif_in_images_reclassified_as_video(monkeypatch):
     r = comfyui_client.fetch_result("http://127.0.0.1:8188", "pid")
     assert r["images"] == []
     assert [v["filename"] for v in r["videos"]] == ["clip.gif"]
+
+
+def test_fetch_result_exposes_execution_error_as_failed(monkeypatch):
+    hist = {"pid": {
+        "status": {
+            "completed": False,
+            "status_str": "error",
+            "messages": [["execution_error", {
+                "node_id": "42",
+                "node_type": "KSamplerAdvanced",
+                "exception_message": "mat1 and mat2 shapes cannot be multiplied",
+            }]],
+        },
+        "outputs": {},
+    }}
+    monkeypatch.setattr(comfyui_client, "urlopen", lambda *a, **k: _FakeResp(hist))
+
+    r = comfyui_client.fetch_result("http://127.0.0.1:8188", "pid")
+
+    assert r["status"] == "failed"
+    assert r["error"] == (
+        "KSamplerAdvanced (#42): mat1 and mat2 shapes cannot be multiplied"
+    )
 
 
 def test_local_comfyui_http_adapters_ignore_environment_proxies():

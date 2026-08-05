@@ -1,6 +1,19 @@
 # === 红线：密钥/用户态/运行期数据（backend/data 下全部）===
 # 密钥只允许落在被忽略的 backend/data/user_state.json，不得进源码/日志/发布包
 backend/data/
+userdata/
+
+# 用户导入的第三方预设可能包含私有提示词、代理配置或授权受限内容；
+# 只放行经构建脚本递归清洗的发布资源包。
+presets/*
+!presets/Demiurge-presets-regex/
+!presets/Demiurge-presets-regex/**
+
+# 本机 Agent 记忆含调试路径、测试作品和上游地址，不属于源码发布物
+docs/memory/
+.claude/
+.codex/
+.agents/
 
 # === 依赖与构建产物（独立重建，不入库）===
 backend/.venv/
@@ -26,12 +39,26 @@ __pycache__/
 *.gguf
 chroma/
 *.chroma
+*.db
+*.sqlite
+*.sqlite3
 
 # === 日志与临时 ===
 *.log
 .env
+.env.*
+!.env.example
 .DS_Store
 Thumbs.db
+*.tmp
+*.part
+
+# === 本地发布产物 ===
+.source-work/
+release-output/
+*.zip
+*.7z
+*.tar.gz
 
 # === 评估报告（写入被忽略的 data）===
 rag_evaluation_report.json

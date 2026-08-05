@@ -65,6 +65,16 @@ def test_4k请求使用更长的读取等待时间(monkeypatch):
     assert timeout.read == 900
 
 
+def test_生图模型显式代理传入http客户端(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(image_gen.httpx, "Client", _capture_client(captured))
+
+    image_gen.generate("https://img.test/v1", "key", "model", "prompt", proxy="http://proxy")
+
+    assert captured["client_kwargs"]["proxy"] == "http://proxy"
+    assert captured["client_kwargs"]["trust_env"] is False
+
+
 def test_connect_timeout明确请求未发送(monkeypatch):
     class ConnectTimeoutClient:
         def __init__(self, *args, **kwargs):

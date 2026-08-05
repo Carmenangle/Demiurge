@@ -15,6 +15,7 @@ export function probeModel(input: {
   apiKey?: string;
   modelName?: string;
   modelDir?: string;
+  proxyUrl?: string;
 }) {
   return apiPost<ModelProbeResult>("/ai/model-probe", {
     kind: input.kind,
@@ -22,5 +23,6 @@ export function probeModel(input: {
     api_key: input.apiKey || "",
     model_name: input.modelName || "",
     model_dir: input.modelDir || "",
+    proxy_url: input.proxyUrl || "",
   }, 180000);
 }

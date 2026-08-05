@@ -150,7 +150,27 @@ def fetch_result(url: str, prompt_id: str,
             # 队列查询失败时保守返回 pending，避免误判
             return {"status": "pending", "images": [], "videos": [], "texts": []}
 
-    completed = entry.get("status", {}).get("completed", False)
+    status_data = entry.get("status", {})
+    completed = status_data.get("completed", False)
+    if status_data.get("status_str") == "error":
+        error = "ComfyUI 工作流执行失败"
+        for message in reversed(status_data.get("messages", [])):
+            if not isinstance(message, list) or len(message) < 2 or message[0] != "execution_error":
+                continue
+            detail = message[1] if isinstance(message[1], dict) else {}
+            node_id = str(detail.get("node_id") or "").strip()
+            node_type = str(detail.get("node_type") or "").strip()
+            exception = str(detail.get("exception_message") or "").strip()
+            node = node_type + (f" (#{node_id})" if node_id else "")
+            error = f"{node}: {exception}" if node and exception else exception or node or error
+            break
+        return {
+            "status": "failed",
+            "error": error,
+            "images": [],
+            "videos": [],
+            "texts": [],
+        }
     images: list[dict[str, str]] = []
     videos: list[dict[str, str]] = []
     texts: list[str] = []
@@ -164,21 +184,40 @@ def fetch_result(url: str, prompt_id: str,
 
     _video_ext = (".mp4", ".webm", ".gif", ".mov", ".mkv", ".webp")
     allowed = set(filter_node_ids) if filter_node_ids else None
-    for node_id, node_out in entry.get("outputs", {}).items():
-        if allowed and node_id not in allowed:
-            continue
-        for img in node_out.get("images", []):
-            # 个别视频节点把产物塞进 images，按扩展名甄别改归 videos
-            if str(img.get("filename", "")).lower().endswith(_video_ext[:-1]):
-                videos.append(_as_ref(img))
-            else:
-                images.append(_as_ref(img))
-        # gifs：VHS_VideoCombine 等的标准视频/动图输出键
-        for vid in node_out.get("gifs", []) or []:
-            videos.append(_as_ref(vid))
-        for t in node_out.get("text", []) or []:
-            if isinstance(t, str) and t.strip():
-                texts.append(t)
+
+    def _collect(node_filter: set[str] | None) -> tuple[list[dict[str, str]],
+                                                          list[dict[str, str]], list[str]]:
+        found_images: list[dict[str, str]] = []
+        found_videos: list[dict[str, str]] = []
+        found_texts: list[str] = []
+        for node_id, node_out in entry.get("outputs", {}).items():
+            if node_filter and node_id not in node_filter:
+                continue
+            for img in node_out.get("images", []):
+                if str(img.get("filename", "")).lower().endswith(_video_ext[:-1]):
+                    found_videos.append(_as_ref(img))
+                else:
+                    found_images.append(_as_ref(img))
+            for vid in node_out.get("gifs", []) or []:
+                found_videos.append(_as_ref(vid))
+            for output_text in node_out.get("text", []) or []:
+                if isinstance(output_text, str) and output_text.strip():
+                    found_texts.append(output_text)
+        return found_images, found_videos, found_texts
+
+    images, videos, texts = _collect(allowed)
+    saved_images = [image for image in images if image.get("type") != "temp"]
+    saved_videos = [video for video in videos if video.get("type") != "temp"]
+    if allowed and (not saved_images and images):
+        all_images, _, _ = _collect(None)
+        saved_images = [image for image in all_images if image.get("type") != "temp"]
+    if allowed and (not saved_videos and videos):
+        _, all_videos, _ = _collect(None)
+        saved_videos = [video for video in all_videos if video.get("type") != "temp"]
+    if saved_images:
+        images = saved_images
+    if saved_videos:
+        videos = saved_videos
     return {
         "status": "completed" if completed else "running",
         "images": images,

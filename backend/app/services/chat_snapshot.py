@@ -1,19 +1,21 @@
 """前端消息流快照：按 thread_id 落盘成 JSON 文件，作为对话流的可靠真源。
 
-与 chat_memory（langgraph 多轮记忆）分工不同：
-  - chat_memory  ：喂给模型的对话上下文，只含「对话类」消息。
-  - chat_snapshot：前端完整渲染用的消息流，含工作流卡、反推卡等非对话消息。
+与 chat_memory（langgraph checkpoint）分工不同：
+  - chat_snapshot：前端显示与模型历史的真源，含工作流卡等非对话消息，入模前再筛文本。
+  - chat_memory  ：仅在快照文件尚不存在时兼容旧会话，不得复活快照中已删除的消息。
 前端 localStorage 仅作快取，关浏览器/清端口/换 origin 都不丢，因真源在磁盘。
 """
 import json
+import os
 import threading
 
 from app.config import DATA_DIR
 from app.services.pathnames import safe_seg
 
-SNAP_DIR = DATA_DIR / "chat_snapshots"
+SNAP_DIR = DATA_DIR / "chat_snapshots"   # 旧位置/未配置仓库文件夹时的回退
 _LOCKS: dict[str, threading.Lock] = {}
 _LOCKS_GUARD = threading.Lock()
+_REVISIONS: dict[str, int] = {}
 
 
 def _thread_lock(thread_id: str) -> threading.Lock:
@@ -27,13 +29,39 @@ def _safe(thread_id: str) -> str:
     return safe_seg(thread_id or "home", "home", strip=False)
 
 
-def _path(thread_id: str):
+def _legacy_path(thread_id: str):
+    """旧落点：backend/data/chat_snapshots/<id>.json。"""
     return SNAP_DIR / f"{_safe(thread_id)}.json"
 
 
+def _path(thread_id: str):
+    """会话记录落点：配了"仓库文件夹"则随图片同落 <仓库文件夹>/<作品名>/chat.json，
+    否则回退旧位置。thread_id == repo_id，复用 repo_meta 的作品文件夹命名（保中文）。
+
+    惰性迁移：新位置无文件但旧位置有 → 搬过去（一次性，静默失败回退旧位置），
+    让存量会话在下次打开时平滑归位，无需用户手动操作。
+    """
+    from app.services import repo_meta
+    output_dir = repo_meta.output_dir_from_state()
+    if not output_dir:
+        return _legacy_path(thread_id)
+    # 子仓库先从旧扁平/UUID 文件夹惰性搬到嵌套位置 <父名>/<子名>/（幂等），再取其下 chat.json
+    folder = repo_meta.migrate_legacy_folder(output_dir, thread_id)
+    new_path = folder / "chat.json"
+    if not new_path.exists():
+        legacy = _legacy_path(thread_id)
+        if legacy.is_file():
+            try:
+                new_path.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(legacy, new_path)
+            except OSError:
+                return legacy  # 搬迁失败 → 继续用旧位置，不丢数据
+    return new_path
+
+
 def _save_unlocked(thread_id: str, messages: list) -> None:
-    SNAP_DIR.mkdir(parents=True, exist_ok=True)
     p = _path(thread_id)
+    p.parent.mkdir(parents=True, exist_ok=True)  # 仓库文件夹或旧 SNAP_DIR，按解析结果建
     tmp = p.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(messages, ensure_ascii=False), encoding="utf-8")
     tmp.replace(p)
@@ -43,6 +71,18 @@ def save(thread_id: str, messages: list) -> None:
     """覆盖写入该 thread 的完整消息流，并与增量写串行化。"""
     with _thread_lock(thread_id):
         _save_unlocked(thread_id, messages)
+
+
+def save_if_newer(thread_id: str, messages: list, revision: int) -> bool:
+    """仅接受同一前端会话中更新的完整快照，阻止较早异步请求晚到后覆盖删除结果。"""
+    key = _safe(thread_id)
+    with _thread_lock(thread_id):
+        previous = _REVISIONS.get(key)
+        if previous is not None and revision <= previous:
+            return False
+        _save_unlocked(thread_id, messages)
+        _REVISIONS[key] = revision
+        return True
 
 
 def load_strict(thread_id: str) -> list:
@@ -57,6 +97,47 @@ def load(thread_id: str) -> list:
     """读取该 thread 的消息流，无则返回空列表。"""
     try:
         return load_strict(thread_id)
+    except Exception:
+        return []
+
+
+def to_prompt_history(messages: list) -> list[dict]:
+    """把前端完整消息快照转成只供模型上下文使用的对话历史。
+
+    快照是用户当前所见对话的真源；被删除的消息已不在列表中，不得从 checkpoint 复活。
+    工作流卡、空流式占位等非对话结构不进 prompt；parts 仅抽文本块。
+    """
+    history: list[dict] = []
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        text = (message.get("text") or "").strip()
+        if not text:
+            text = "\n".join(
+                (part.get("text") or "").strip()
+                for part in (message.get("parts") or [])
+                if isinstance(part, dict) and part.get("type") == "text"
+                and (part.get("text") or "").strip()
+            ).strip()
+        if text:
+            history.append({"role": role, "content": text})
+    return history
+
+
+def load_prompt_history(thread_id: str) -> list[dict] | None:
+    """读可见快照并转成 prompt 历史；仅快照文件不存在时返回 None。
+
+    已存在但为空的快照表示用户已删空对话，必须返回 [] 阻止 checkpoint 回退。
+    已存在但损坏时也安全地返回 []，宁可不上传历史也不复活用户已删内容。
+    """
+    path = _path(thread_id)
+    if not path.exists():
+        return None
+    try:
+        return to_prompt_history(json.loads(path.read_text(encoding="utf-8")))
     except Exception:
         return []
 
@@ -107,13 +188,118 @@ def merge_fields(thread_id: str, mid: str, **fields) -> None:
         _save_unlocked(thread_id, items)
 
 
+def resolve_media_slot(thread_id: str, message_id: str, slot_id: str, url: str,
+                       *, media_type: str = "image",
+                       regeneration: dict | None = None) -> bool:
+    """把指定消息的异步媒体槽原位替换为图片/视频；目标不存在时绝不追加新消息。"""
+    if not message_id or not slot_id or not url:
+        return False
+    kind = "video" if media_type == "video" else "image"
+    with _thread_lock(thread_id):
+        items = load(thread_id)
+        for item_index, item in enumerate(items):
+            if not isinstance(item, dict) or item.get("id") != message_id:
+                continue
+            parts = item.get("parts") or []
+            for part_index, part in enumerate(parts):
+                if (isinstance(part, dict) and part.get("type") in ("media-slot", "image", "video")
+                        and part.get("slotId") == slot_id):
+                    ready = {"type": kind, "url": url, "slotId": slot_id, "status": "ready"}
+                    if regeneration:
+                        ready["regeneration"] = regeneration
+                    next_parts = list(parts)
+                    next_parts[part_index] = ready
+                    items[item_index] = {**item, "parts": next_parts}
+                    _save_unlocked(thread_id, items)
+                    return True
+            return False
+    return False
+
+
+def remove_media_slot(thread_id: str, message_id: str, slot_id: str) -> bool:
+    """删除失败的异步媒体槽并合并相邻正文；目标不存在时不改快照。"""
+    if not message_id or not slot_id:
+        return False
+    with _thread_lock(thread_id):
+        items = load(thread_id)
+        for item_index, item in enumerate(items):
+            if not isinstance(item, dict) or item.get("id") != message_id:
+                continue
+            found = False
+            next_parts: list[dict] = []
+            for part in item.get("parts") or []:
+                if (isinstance(part, dict) and part.get("type") == "media-slot"
+                        and part.get("slotId") == slot_id):
+                    found = True
+                    continue
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "text":
+                    text = str(part.get("text") or "")
+                    if not text:
+                        continue
+                    if next_parts and next_parts[-1].get("type") == "text":
+                        next_parts[-1]["text"] = str(next_parts[-1].get("text") or "") + text
+                    else:
+                        next_parts.append({**part, "text": text})
+                else:
+                    next_parts.append(part)
+            if not found:
+                return False
+            updated = {**item}
+            if next_parts:
+                updated["parts"] = next_parts
+            else:
+                updated.pop("parts", None)
+            items[item_index] = updated
+            _save_unlocked(thread_id, items)
+            return True
+    return False
+
+
 def append_image(thread_id: str, mid: str, image_url: str, text: str = "") -> None:
     """按 mid upsert 一条带图 assistant 消息（mid 同时回传前端，重开不重复）。"""
     upsert(thread_id, _assistant_message(mid, text or "", image=image_url))
 
 
 def append_text(thread_id: str, mid: str, text: str) -> None:
-    """按 mid upsert 一条纯文本 assistant 消息（后台生成完成时落盘，mid=前端 botId）。"""
+    """按 mid 更新正文并保留已有媒体槽/审批等结构化字段。"""
     if not (text or "").strip():
         return
-    upsert(thread_id, _assistant_message(mid, text))
+    with _thread_lock(thread_id):
+        items = load(thread_id)
+        for i, item in enumerate(items):
+            if isinstance(item, dict) and item.get("id") == mid:
+                items[i] = {**item, "role": "assistant", "text": text}
+                _save_unlocked(thread_id, items)
+                return
+        items.append(_assistant_message(mid, text))
+        _save_unlocked(thread_id, items)
+
+
+def ensure_media_slot(thread_id: str, message_id: str, slot_id: str,
+                      *, offset: int | None = None) -> bool:
+    """确保指定正文含稳定媒体槽；重复事件幂等，消息不存在时失败关闭。"""
+    if not message_id or not slot_id:
+        return False
+    with _thread_lock(thread_id):
+        items = load(thread_id)
+        for index, item in enumerate(items):
+            if not isinstance(item, dict) or item.get("id") != message_id:
+                continue
+            existing = item.get("parts") or []
+            if any(isinstance(part, dict) and part.get("type") == "media-slot"
+                   and part.get("slotId") == slot_id for part in existing):
+                return True
+            text = str(item.get("text") or "")
+            position = len(text) if offset is None else max(0, min(len(text), int(offset)))
+            parts: list[dict] = []
+            if position:
+                parts.append({"type": "text", "text": text[:position]})
+            parts.append({"type": "media-slot", "slotId": slot_id, "status": "pending"})
+            if position < len(text):
+                parts.append({"type": "text", "text": text[position:]})
+            items[index] = {**item, "parts": parts}
+            _save_unlocked(thread_id, items)
+            return True
+    return False

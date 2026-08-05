@@ -1,5 +1,7 @@
 import type { ImageModel } from "../stores/settings";
-import type { AiImageRegeneration, WorkflowRegeneration } from "../types/chat";
+import type {
+  AiImageRegeneration, RegenerationSnapshot, TemplateRegeneration, WorkflowRegeneration,
+} from "../types/chat";
 
 export function workflowRegenerationSnapshot(
   graph: unknown,
@@ -13,6 +15,42 @@ export function workflowRegenerationSnapshot(
     outputNodeIds: [...outputNodeIds],
     prompt: "",
   };
+}
+
+export function templateRegenerationSnapshot(
+  templateId: string,
+  values: Record<string, unknown>,
+  comfyuiUrl: string,
+  outputNodeIds: string[],
+  prompt: string,
+): TemplateRegeneration {
+  return {
+    kind: "template",
+    templateId,
+    values: JSON.parse(JSON.stringify(values)),
+    comfyuiUrl,
+    outputNodeIds: [...outputNodeIds],
+    prompt,
+  };
+}
+
+export function comfyRegenerationUrl(snapshot: RegenerationSnapshot | undefined): string {
+  return snapshot?.kind === "workflow" || snapshot?.kind === "template"
+    ? snapshot.comfyuiUrl
+    : "";
+}
+
+export function regenerationPrompt(snapshot: RegenerationSnapshot | undefined): string {
+  return snapshot?.kind === "workflow" || snapshot?.kind === "template"
+    ? snapshot.prompt
+    : "";
+}
+
+export function legacyGenerationPrompt(
+  imageUrl: string,
+  generations: readonly { image_url: string; prompt: string }[],
+): string {
+  return generations.find((item) => item.image_url === imageUrl)?.prompt.trim() || "";
 }
 
 export function resolveImageRegenerationModel(

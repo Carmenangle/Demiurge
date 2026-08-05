@@ -25,7 +25,8 @@ def _result(status: str, message: str, *, source: str = "") -> dict[str, object]
     }
 
 
-def probe_remote(kind: str, base_url: str, api_key: str, model_name: str) -> dict[str, object]:
+def probe_remote(kind: str, base_url: str, api_key: str, model_name: str,
+                 proxy: str = "") -> dict[str, object]:
     label = _KIND_LABELS.get(kind, "模型")
     if not (base_url or "").strip():
         return _result("error", "请先填写 API URL")
@@ -35,7 +36,10 @@ def probe_remote(kind: str, base_url: str, api_key: str, model_name: str) -> dic
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     reachable: list[str] = []
     errors: list[str] = []
-    with httpx.Client(trust_env=False, timeout=12, follow_redirects=True) as client:
+    client_kwargs = {"trust_env": False, "timeout": 12, "follow_redirects": True}
+    if proxy:
+        client_kwargs["proxy"] = proxy
+    with httpx.Client(**client_kwargs) as client:
         for url in ai_provider_service.candidate_model_urls(base_url):
             try:
                 response = client.get(url, headers=headers)

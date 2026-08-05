@@ -6,13 +6,20 @@ from app.services import chat_stream_protocol as protocol
 @pytest.mark.parametrize(("source", "event_type", "data"), [
     ({"trace": "主管选择 image"}, "trace", {"text": "主管选择 image"}),
     ({"delta": "回答"}, "delta", {"text": "回答"}),
+    ({"replace": "最终回答"}, "replace", {"text": "最终回答"}),
     ({"image": "local://image", "id": "i1", "regeneration": {"prompt": "p"}},
      "image", {"url": "local://image", "id": "i1", "regeneration": {"prompt": "p"}}),
     ({"video": "local://video", "id": "v1"}, "video",
      {"url": "local://video", "id": "v1"}),
+    ({"illustrate_request": {"prompt": "1girl, smile", "motion": 2, "actors": ["爱丽丝"]}, "id": "illo-req-1"},
+     "illustrate_request", {"prompt": "1girl, smile", "motion": 2, "actors": ["爱丽丝"], "id": "illo-req-1"}),
+    ({"illustrate_request": {"prompt": "p", "motion": 0}, "id": "r2"},
+     "illustrate_request", {"prompt": "p", "motion": 0, "actors": [], "id": "r2"}),
     ({"insp": {"query": "服装"}}, "inspiration", {"card": {"query": "服装"}}),
     ({"approval": {"id": "a1"}}, "approval", {"approval": {"id": "a1"}}),
     ({"route_choice": {"id": "r1"}}, "route_choice", {"choice": {"id": "r1"}}),
+    ({"rag_status": {"state": "start", "kind": "worldbook", "count": 53}},
+     "rag_status", {"state": "start", "kind": "worldbook", "count": 53}),
     ({"interrupted": True}, "interrupted", {}),
     ({"error": "失败"}, "error", {"message": "失败"}),
 ])
@@ -34,3 +41,37 @@ def test_unknown_or_compound_event_is_rejected():
         protocol.encode_event({"delta": "text", "image": "url"})
     with pytest.raises(ValueError, match="只能包含一种"):
         protocol.encode_event({"new_field": "not registered"})
+
+
+def test_插画事件保留稳定插槽id():
+    event = protocol.encode_event({
+        "illustrate_request": {"prompt": "p", "motion": 1, "actors": []},
+        "id": "slot-1",
+    })
+
+    assert event["data"]["id"] == "slot-1"
+
+
+def test_流式插画事件保留最终正文偏移():
+    event = protocol.encode_event({
+        "illustrate_request": {"prompt": "p", "motion": 1, "actors": [], "offset": 12},
+        "id": "slot-1",
+    })
+
+    assert event["data"]["offset"] == 12
+
+
+def test_插画事件保留Profile生成所需场景源():
+    scene_spec = {
+        "narrative": "高潮段", "draft_prompt": "close-up", "wardrobe": "红裙",
+        "locale": "寝殿", "actors": ["爱丽丝"], "rating": "nsfw",
+    }
+    event = protocol.encode_event({
+        "illustrate_request": {
+            "prompt": "legacy", "motion": 1, "actors": ["爱丽丝"],
+            "scene_spec": scene_spec,
+        },
+        "id": "slot-1",
+    })
+
+    assert event["data"]["scene_spec"] == scene_spec

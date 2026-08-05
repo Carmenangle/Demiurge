@@ -27,18 +27,28 @@ services/  深模块层。业务逻辑全在这。彼此可依赖，但不 impor
 
 | 模块 | 拥有什么 | 加相关功能时 |
 |------|---------|------------|
-| `comfyui_client` | 与 ComfyUI 的全部 HTTP 对话（提交/轮询/取图/打断/上传），统一 `ComfyError` | 新增 ComfyUI 交互 → 加到这里，别在路由直接拼请求 |
-| `comfy_launcher` | ComfyUI **本地进程**生命周期：配置读写 + 独立解释器发现（整合包、`.venv/venv`、显式路径）+ 写 extra-paths YAML + 拉起子进程，持有进程句柄，统一 `LaunchError`。禁止回退应用 Embedded Runtime。**与 comfyui_client 是两个接缝（进程 vs HTTP），别合并** | 改启动/配置逻辑 → 这里，别在路由写 subprocess/文件 I/O |
+| `comfyui_client` | 与 ComfyUI 的全部 HTTP 对话（提交/轮询/取图/打断/上传），统一 `ComfyError`。`history.status_str=error`/`execution_error` 必须归一为带节点与异常摘要的 `failed` 终态，禁止因 `completed=false` 误报为持续 `running`。多阶段采样只把持久化 `output` 当最终图；主输出节点误指 `temp` 时回退全图的持久化输出 | 新增 ComfyUI 交互 → 加到这里，别在路由直接拼请求；结果状态变化同步前端 `GenResult`、轮询/恢复分支和双端测试 |
+| `comfy_launcher` | ComfyUI **本地进程**生命周期：配置读写 + 独立解释器发现（整合包、`.venv/venv`、显式路径）+ 写 extra-paths YAML + 拉起子进程，持有进程句柄，统一 `LaunchError`。Windows 外部进程按监听端口终止时用独立管道读取 `netstat`，不得假定 `subprocess.run().stdout` 非空。禁止回退应用 Embedded Runtime。**与 comfyui_client 是两个接缝（进程 vs HTTP），别合并** | 改启动/配置逻辑 → 这里，别在路由写 subprocess/文件 I/O |
 | `workflow_submission` | ComfyUI 模板/画布提交事务：校验在线、读取、转换、注入和提交 | `/submit` 与 `/submit_graph` 路由只映射 `WorkflowSubmissionError` |
-| `llm` | 建模型 + `normalize_base_url`（/v1 规则）+ `flatten_content`（分段展平） | 需要 base_url 归一或展平 LLM 输出 → 调这里，别内联 |
-| `agent_graph` | 多 Agent 主编排：Supervisor 是语义分派的单一属主，模型输出 `route/confidence/alternatives`；代码只校验合法路由、附件与工具能力 | 改任务理解 → 改 Supervisor 提示；不要再增加关键词/正则路由，也不要在路由或前端复制判定 |
-| `agent_context` | Agent 上下文窗口：各取 6 条、token 预算、历史文本与依赖上文的执行提示词整理 | 改上下文选择/裁剪 → 这里；`agent_graph` 不内联 token 算法 |
+| `model_downloader` / `workflow_downloader` | CivitAI、Hugging Face 模型与工作流下载任务；统一公开 `phase/downloaded/total/speed_bps/target_dir/saved_files`，流式写临时文件后再校验并落盘。状态经 `task_progress_store` 节流持久化，重启后保留历史并把在途任务归一为 `interrupted` | 新下载源仍复用同一任务状态合同；未知总量显示不定进度，失败必须清理 `.part`，禁止先整文件读入内存或用完成提示代替真实终态 |
+| `node_update` | 节点 Git 安装/更新、ComfyUI 本体拉取/切版和依赖预检；解析 Git/Pip 输出为对象进度、接收字节、速度与依赖清单，HEAD 变化才算真实更新。当前任务原子持久化，重启中断不会继续伪装运行 | 节点安装只允许可信 Git HTTPS 源并限制在 `custom_nodes`；共享依赖默认停在确认态；路由和前端统一消费 `UpdateProgress`，不得恢复 Manager 黑盒队列的“队列清空即成功”判断 |
+| `task_progress_store` | 后台任务进度的 UTF-8 JSON 原子快照、容量限制和重启中断归一 | 只存可恢复的状态，不存密钥和线程对象；高频调用方必须节流写盘，测试必须隔离真实 `DATA_DIR` |
+| `llm` | 建模型 + `normalize_base_url`（/v1 规则）+ `flatten_content`（分段展平）+ `chat_messages_stream`（流式增量与完整原文双输出） | 需要 base_url 归一、展平或流式调用 → 调这里，别内联；流式已由项目层控制重试，SDK 内层重试关闭，避免重试乘法 |
+| `agent_graph` | 多 Agent 主编排。无卡对话、带附件请求仍由 Supervisor 语义分派；**有卡纯文本直达 Roleplay**，仅对「画一张/生成视频/找灵感」等强执行命令做零 LLM 路由，避免把同一历史先交 Supervisor 再交主模型 | 模糊任务理解仍改 Supervisor；强执行规则必须保守、可单测，禁止复制到前端 |
+| `agent_graph.roleplay_node` | 酒馆 Agent（剧情扮演节点）：吃角色卡 persona（后续叠世界书/表格记忆），沉浸出演。区别于生图向的 `answer_node`。persona 由 `_resolve_persona(character_dir, card_name)` 在富集接缝从 `character_store` 读卡组装。模型漏 `<status>` 时沿用已持久化快照；未闭合 `<状态更新>` 或 `<illustration>` 仍按尾部控制块剥离；本地高潮兜底锚点被输出正则改写后，只能在最终显示正文重新定位。状态/表格/插画后处理异常时必须用结构化解析器返回干净可见正文，禁止把原始控制块或提示词回退给前端 | persona 组装规则 → `character_card.build_persona_system`（纯逻辑可单测）；有卡作品的通用对话统一并入 roleplay，别在节点内重复判路由；主模型显式但虚构的插画锚点仍失败关闭，禁止一律回退全文末尾；降级锚点只在 `<content>` 正文评分并落在所描绘动作段末 |
+| `agent_context` | Agent 上下文窗口：各取 6 条、token 预算、历史文本与依赖上文的执行提示词整理。生成历史按 **前端显式可见历史 → 已存在的聊天快照 → 仅快照文件不存在时才回退 checkpoint** 取值；显式 `[]` 和空快照都表示历史已清空，禁止旧 checkpoint 复活已删消息 | 改上下文选择/裁剪 → 这里；`agent_graph` 不内联 token 算法。任何新入口都必须遵守同一历史优先级 |
+| `agent_contracts` | 编排契约单一属主：`RunContext`(dataclass) + `ModelConfig` + `AgentEvent`。`history_override` 保存本次请求显式上传的可见历史（`None`=未提供，`[]`=明确无历史）；`stream_output/stream_sink` 控制节点实时增量出口。**RunContext 既是 dataclass 又当 dict 用**——图节点靠 `ctx["scene"]=…`(写瞬态)/`ctx.get("chat_base")`(读)/`ctx.pop("_瞬态键", default)`(消费瞬态)访问，由 `extras` 字段 + `__setitem__/__getitem__/get/pop/__contains__` + `_legacy()`(把 `chat`→`chat_base/chat_key/chat_model` 等扁平键)支撑；`pop` 只允许移除 extras，固定请求字段不可弹出 | 加固定字段→加 dataclass 字段并进 `_legacy()`；加瞬态键→直接 `ctx[key]=`(进 extras)；图节点新增跨节点标记还必须声明进 `AgentState`，否则 LangGraph 会丢弃；**动了这些方法必须重启后端** |
+| `chat_agent_queue` | 忙时消息持久队列；headless worker 必须把 `MultiAgentRequest` 的历史、卡、预设、人设、世界书、插画、流式选择和模型参数完整还原成 `RunContext` | 新增直连参数时同步补队列映射与回归测试；排队路径不得降级成无 GrayWill/RAG 或不同输出模式的另一条流程 |
+| `run_trace` | Agent 单轮结构化追踪：每次请求由 `RunContext.turn_id` 贯穿，按 UTF-8 JSONL 写 `backend/data/logs/agent-trace.jsonl`；记录原始/处理后输入、Supervisor 与各 Agent、完整模型消息与输出、世界书/RAG 注入、纪要/知识写入、状态写回、独立表格维护及首尾错误。按大小轮转并递归脱敏密钥，追踪失败不阻断主流程 | 新增运行阶段先复用 `run_trace.emit(ctx, event, **data)`；不得把 API key/token 放入自由文本。环境变量：`LAF_AGENT_TRACE`、`LAF_AGENT_TRACE_MAX_BYTES`、`LAF_AGENT_TRACE_BACKUPS` |
 | `tool_agent_adapter` | 把遗留 `image_agent` ReAct 流适配成专家节点结果 | `agent_graph` 不直接依赖其长参数和事件细节；替换旧实现只改 Adapter 后面 |
 | `generation_approval` | 提示词审批状态机 + 已批准的图像/视频执行 + 失败语义 | 改确认/更改/取消/重提流程 → 这里；`agent_graph` 只调用其 Interface |
-| `image_gen` | 云端文生图 `/images/generations` 与带参考图 `/images/edits`，统一超时、质量参数和 64–3840px 尺寸边界 | 新增图像供应商请求规则 → 这里，调用方不拼 payload |
-| `rag_backend` | RAG 基础设施 Adapter；`EmbedConfig`、OpenAI/Ollama/本地嵌入兼容、嵌入模型缓存与 Chroma 单例缓存 | 新增嵌入后端或修改缓存键 → 只改这里；上层不直接创建 Chroma/Embedding |
-| `rag_store` | 普通知识库与生成资产索引：系统资料、仓库文档、generation 元数据、Hybrid 检索入口 | 新增普通知识库操作 → 加到这里，签名收 `EmbedConfig`；不得再放节点索引逻辑 |
+| `image_gen` | 云端文生图 `/images/generations` 与带参考图 `/images/edits`，统一超时、质量参数和 64–3840px 尺寸边界；`_load_image_bytes` 支持 data-uri/http(s)/**本地文件路径**(角色底图,桌面单机后端直读同机文件) | 新增图像供应商请求规则 → 这里，调用方不拼 payload |
+| `image_prompt_profiles` | 多元数据插入提示词协议单一属主，三层顺序固定：①剧情事实底座（人物/稳定外貌/当前变化/服装/动作/地点）②跨模型艺术决策（唯一视觉命题→可见视觉装置→一个第一焦点+最多两个辅助元素→统一色彩材质母题→光影因果→服务命题的镜头构图）③转换为 Krea2、Anima、GPT Image/Banana 或 Niji 格式。人物互动高潮默认以人物面部、目光、动作、接触点或人物关系为第一视觉中心，物件只能通过反射、遮挡、引导线、色材呼应等方式把视线导回人物；仅当发现、开启、争夺或取得物件本身就是高潮时，物件才可成为第一焦点。无关字段允许简写/省略，禁止清单式等密度堆词和艺术化改写事实。主 Roleplay 同轮计划把艺术决策写入 `scene_spec.art_direction`；内联格式失效时独立 Profile 仍沿用它。独立 Anima Profile 必须先返回 `visual_hook/primary_focus/supporting_elements/content` 结构化合同，普通剧情清单、多焦点或“剧情有明确动作但 content 退化为静态肖像”触发一次重写；连续失败的降级路径从 narrative/draft_prompt 保守映射已有动作，不为纯肖像场景编造动作。最终只把 `content` 归一成两行，分析字段不得进入 ComfyUI。Anima 质量行按 SFW/NSFW 组装，内容用 tags 锁事实、英文句子表达关系与艺术意图；负面提示词独立返回 | 新增模型提示词协议或修改格式约束 → 只改这里和对应测试；四种格式可以不同，但事实底座、人物焦点规则与艺术决策不得降级；已有合规内联 `profile_prompt` 禁止再次调用模型覆盖，但同样必须通过动作事实校验；负面词禁止混入正向文本 |
+| `lora_index` | LoRA 数据保存单一属主：按完整文件名保存触发词、作者建议提示词和建议权重；建议权重归一到 0–2，自动元数据同步不得覆盖手填值 | LoRA 选择器只自动采用当前选中模型的建议权重；自动插画只读取当前实际生效 LoRA，前端从作者建议中筛选质量/风格/光影/景深效果/作者签名并排除分级词、人物外貌、服装、动作、关系和场景事实，再合并到质量首段；`close-up/wide angle/shot/composition/perspective` 等场景镜头控制也必须排除，镜头只归本轮剧情 Profile 所有。`sensitive/explicit/fair skin` 不属于 LoRA 质量补充。触发词始终采用当前记录的精确值并置于最前；禁止回退旧记录 |
+| `rag_backend` | RAG 基础设施 Adapter；`EmbedConfig`、OpenAI/Ollama/本地嵌入兼容、嵌入模型缓存与 Chroma 单例缓存；localhost/127.0.0.1/::1 回环端点强制直连，显式代理也不得介入 | 新增嵌入后端或修改缓存键 → 只改这里；上层不直接创建 Chroma/Embedding |
+| `rag_store` | 普通知识库与生成资产索引：系统资料、仓库文档、generation 元数据、Hybrid 检索入口；`include_system` 控制是否并入全局系统库，剧情召回固定 `False` 只读当前作品 | 新增普通知识库操作 → 加到这里，签名收 `EmbedConfig`；不得再放节点索引逻辑 |
 | `rag_retrieval` | 普通知识库的纯 BM25Plus、RRF 融合；不依赖 Chroma、路由或工作流 | 修改普通 RAG 排序算法 → 这里；I/O 留给 `rag_store/rag_backend` |
+| `worldbook` | 卡内嵌/独立世界书检索：解析 character_book 条目、constant 常驻 vs 非常驻拆分、按作品建独立 collection `worldbook_<repo_id>`。索引按正文 hash **条目级增删**，Curator 改一条只重嵌一条；运行时由 `schedule_index` 先做本地差异检查再后台同步，无变化不建线程。首次确有缺失条目时经 `rag_status/worldbook` 即时提示，主对话仍立即用关键词+内存 BM25；已有向量则 Dense+BM25，不得让索引阻塞主 Roleplay。`assemble_selection` 返回实际进入预算的原始快照 index，优先级 keyword→constant→retrieved | 改世界书激活/注入 → 这里；collection 与剧情/生图的 `repo_<id>` 物理隔离；主 Roleplay 的实际选择结果是本轮 Curator 可更新范围的唯一真源，禁止 Curator 再检索并补入未注入条目；关键词触发是 ST 语义，勿删 |
 | `rag_middleware` | 搭建需求的查询拆分、架构能力映射和可选 LLM 重写 | 新增模型架构/能力同义词 → 只改这里，别塞进搭建编排 |
 | `node_store` | 节点索引存储：完整包管理、能力分块、迁移就绪判断、单路 Dense+BM25+RRF；分块命中按 `pack_id` 聚合 | 改 collection、分块持久化或单路召回 → 这里；不得依赖 `rag_store` |
 | `node_index` | 节点索引编排：`object_info` 同步、卸载包清理、多查询加权融合、MMR、一次最终精排 | 改同步、多查询或排序策略 → 这里；安装事实仍不归它拥有 |
@@ -47,15 +57,23 @@ services/  深模块层。业务逻辑全在这。彼此可依赖，但不 impor
 | `workflow_build_turn` | 搭建回合：统一需求校验、完整历史视图、当前工作流快照、查询优化与节点候选 | 四种搭建模式必须先准备同一个 Build Turn，不能各自裁剪历史或重建查询 |
 | `workflow_graph_rules` | 工作流图规则：解释 `object_info`、规整 widget、拆缺失节点、硬校验与结构审核 | 新增图规则 → 只改这里；`workflow_builder` 只消费规则结果 |
 | `workflow_builder` | 完整、增量、直连和顾问四种搭建策略；模型调用、重试及结果组装 | 不得重新拥有历史整理、节点候选或图规则 Implementation |
-| `chat_stream_protocol` | 对话流事件 wire 协议 v1；把 Agent 内部领域事件编码成 `protocol/version/type/data` | 新增事件先扩展这里和前端解码联合；不允许路由手拼 SSE payload |
+| `chat_stream_protocol` | 对话流事件 wire 协议 v1；把 Agent 内部领域事件编码成 `protocol/version/type/data`。流式正文用 `delta`，完成后用 `replace` 校正为清洗/写回后的最终文本；`illustrate_request.id + offset` 保持媒体槽稳定且原位 | 新增事件先扩展这里和前端解码联合；不允许路由手拼 SSE payload；媒体槽 ID 不得在提交/轮询/恢复阶段重建 |
 | `sse` | SSE 传输 Adapter；分帧、异常信封与 `[DONE]` 收尾 | 只负责传输，payload 语义交给 `chat_stream_protocol` |
 | `rag_evaluation` | Hit/MRR/Recall/延迟统计与 RAGAS 四字段记录构造 | 修改检索链后运行固定评估集；未运行 Judge 不得宣称生成质量合格 |
-| `generation_store` | 「生成完成→留存→入库→写快照」后端管线 | 后端出图后的持久化 → 走 `persist_image` |
+| `generation_store` | 「生成完成→留存→入库→写快照」后端管线。Roleplay 发出最终 `replace`/`illustrate_request` 时先即时持久化正文与稳定媒体槽；带 `target_message_id + target_slot_id` 的自动插画只原位回填，不追加对话轮、不写提示词历史；失败写 `illustration.failed` Trace 并删除快照槽 | 后端出图后的持久化 → 走 `persist_image`；自动插画目标消息已删除时禁止复活或另添图片消息；generation RAG 是资产库成员与提示词真源，禁止扫描磁盘自动补录（会复活用户已删资产并丢提示词）；普通资产删除只删 RAG、保留文件，裂图清理只删本地文件已缺失的 RAG |
 | `workflow_injector` | 纯注入（套值 + 提示词），无 I/O | 改注入规则 → 这里，可直接单测 |
 | `image_store` / `image_utils` | 端点存图（抛异常）/ agent 存图（回退原 url） | 注意两者错误语义不同，别合并 |
+| `chat_snapshot` | 会话显示与生成历史真源（前端完整消息流）。`to_prompt_history` 只提取快照里仍存在的 user/assistant 文本；`load_prompt_history` 在文件存在但为空或损坏时返回 `[]`，失败关闭，不能回退旧 checkpoint。前端完整保存带单调 `revision`，`save_if_newer` 拒绝较旧异步请求晚到覆盖删除结果。`resolve_media_slot` 按 `messageId + slotId` 替换 pending 槽或已完成图片/视频，使重新生图仍原位覆盖；`remove_media_slot` 只在失败时删除 pending 槽并合并相邻正文，重新生图失败保留旧图；目标不存在均返回 false，绝不追加消息。落点：配了"仓库文件夹"(settings.outputDir)则随图片同落 `<仓库文件夹>/<作品名>/chat.json`（作品自包含），否则回退旧 `data/chat_snapshots/<id>.json`。`_path` 惰性迁移：新位置无而旧位置有 → 自动搬。thread_id==repo_id | 路径解析在 `_path`(经 `repo_meta.output_dir_from_state` 自解析 outputDir，不穿 caller)；导入/导出走 `ai_chat` 的 export/import 端点 |
+| `repo_meta` | 仓库元信息 + "仓库文件夹"根解析：`output_dir_from_state()` 读 user_state.json 的 settings.outputDir(单一真源)；`repo_folder(_path)` 决定作品文件夹名(保中文,回退UUID)+写 `_repo.json` 标记；`rename_folder` 改名迁移文件夹+重写快照/RAG 绝对路径(`snap_folder=dst` 定位随文件夹移动后的 chat.json) | 作品文件夹命名/改名迁移 → 这里；`_repo.json` 标记是迁移识别"作品文件夹"的依据 |
 | `local_media` | 本地媒体白名单、MIME、Range 校验与分块读取 | `/local-view` 只做 FastAPI Response 适配；文件读取规则进这里 |
 | `pathnames` | `safe_seg` 文件名清洗单点 | 需要清路径片段 → 用它 |
-| `workflow_parser` / `workflow_convert` | UI↔API 转换；`PASSTHROUGH_TYPES` 共享 | 改穿透集 → 改 parser 的共享常量；**PrimitiveNode 差异是有意的，别合并** |
+| `workflow_parser` / `workflow_convert` | UI↔API 转换；`PASSTHROUGH_TYPES` 共享。UI 的无名 `widgets_values` 优先按节点自身 `inputs[].widget.name` 还原，旧格式再回退实时 `object_info` 与内置表；新版 `COMBO` schema 也是 widget | 改穿透集 → 改 parser 的共享常量；**PrimitiveNode 差异是有意的，别合并**；不得让全量 `object_info` 超时导致模板默认参数丢失 |
+| `character_card` | 角色卡格式单一属主：解析 TavernCard V1/V2/V3（JSON 或 PNG 内嵌 `chara`/`ccv3` tEXt，base64）、归一到 `NormalizedCard`、拆出内嵌 `character_book`/`regex_scripts`。纯逻辑无 I/O，可单测 | 新增卡格式/字段 → 只改这里；PNG tEXt 解析是自实现（无第三方依赖），别引库 |
+| `character_store` | 角色卡落盘：每张卡=一个文件夹（`card.json`+`worldbook.json`+`regex.json`+`avatar.png`+`chat.json`）。同名覆盖、覆盖保留 `chat.json`、覆盖清理陈旧世界书。`scan_loose_cards(base)`：扫根目录下手动放入的散装 .json/.png → 解析入库(拆世界书/正则)+删源(同名跳过不覆盖)，前端刷新时调（"丢进文件夹即出现"）。**源库/作品解耦**：`characterDir` 是**源库**（浏览+预览）；`snapshot_to_work(character_dir, card_name, work_folder)` 新建作品时把卡快照进作品文件夹 `<work>/角色卡/<safe(卡名)>/`（幂等不覆盖=快照隔离，改源不回灌）；`work_card_base(output_dir, card_name)` 供运行时**快照优先**读（回退源库） | 落盘布局/覆盖/快照语义 → 这里；base 目录由调用方（前端设置 `characterDir`）注入，不读 config；运行时快照优先读的换 base 逻辑在 `agent_graph._card_source(ctx)` |
+| `worldbook_store` | 独立世界书与当前小仓库快照落盘。Curator 上下文只渲染主 Roleplay 本轮实际注入的 index；`apply_repo_ops` 在服务端再次校验允许集合，越界 `worldbook_update` 拒绝，`worldbook_add` 仍允许。角色更新只替换唯一 `【剧情进展·动态】` 并保留基础底座 | 独立世界书增删改 → 这里；检索/条目解析仍归 `worldbook`。角色长期动态是主要更新对象；机制/规则/历史背景默认只读，除非正文明确永久改变且有直接 evidence；即时外观状态归状态表 |
+| `regex_engine` | 正则引擎单一属主：对标 ST engine.js 纯逻辑。`run_scripts(text, placement, scripts, *, is_markdown, is_prompt, is_edit, depth, skip_depth_gated)`——三档过滤(markdownOnly仅显示/promptOnly仅发送/皆非改存储源)+placement(1用户输入/2AI输出/3快捷命令/5世界信息/6推理/**7出图提示词=Demiurge 扩展，破甲还原+清洗成干净 booru 串**)+depth门控；`skip_depth_gated`=跳过设了 min/maxDepth 的脚本，处理**本轮实时输入**时置真（深度语义只该作用于历史楼层，而 live 输入生成时尚未入历史，否则「删 history 最后一条用户消息」maxDepth=1 会把 depth=0 的当前输入误擦空→用户消息不进 prompt）；`from_st_dict` 归一 camelCase；JS→Python 方言转换(命名组 `(?<x>)`→`(?P<x>)`、flag、`$1`/`$<name>`/`{{match}}`/trimStrings)。无 I/O 可单测 | 改正则语义/新 placement → 这里；**前端 `lib/regexEngine.ts` 是同逻辑 JS 版**(显示层 markdownOnly 用，原生 JS 正则方言天然一致)，两者行为须对齐；roleplay_node 对 live 用户输入调 `_apply_regex(skip_depth_gated=True)` |
+| `regex_store` | 全局正则脚本持久化：`data/regex_scripts.json`（ST 格式数组，跨作品生效）。区别于卡内嵌 `regex.json`(随卡、`character_store.read_regex` 读)。落盘仿 `agent_store` | 全局正则增删改 → 这里；`agent_graph._resolve_regex_scripts` 合并全局+卡内喂引擎，前端「正则」按钮(顶栏方法功能栏)管这组 |
+| `preset_store` | 偏置预设单一属主：解析 ST OpenAI 预设(prompts/prompt_order/8 marker/采样参数，如 GrayWill)+ `assemble_messages(preset, markers, history)` 按各片段 role 组装**多条消息**(chatHistory marker 处原位插历史，ST 深度注入语义) + `assemble_system` 单串档(降级) + `substitute_macros`(`{{char}}`/`{{user}}`，缺省 user 回退「我」；**`{{lastUserMessage}}`/`{{lastCharMessage}}`**——ST 深度重注入范式配套宏，大小写不敏感，**无对应 marker 才留字面**避免误清空；marker 值也过替换) + **`select_chains(preset, scene, affinity, turn)`**(按真状态选思维链 `thinking_chains`，返回尾部/头部)。落盘 `presetDir/<安全名>.json` | 预设解析/组装/选链/增删改 → 这里；`roleplay_node._resolve_preset` 有激活预设走它(marker 填卡字段+世界书+`last_user_message`(=本轮实时输入)/`last_char_message`(=历史末条 AI)，采样温度透传，选中链尾部作独立 system 落历史后)，前端「预设」按钮(顶栏方法功能栏，仅剧情模式)管这组含思维链编辑区；**重注入 prompt(用 `{{lastUserMessage}}`)+ `skip_depth_gated` 是防用户消息被历史级删除正则擦空的双保险**。GrayWill 已启用「用户最新输入」且保持「所有最新输入」关闭（二选一）；该项在 chatHistory 后（`order[130]` vs `order[33]`），组装为完整独立 `role=user` 消息且无宏残留。预设热读，纯数据改动无需重启；RunContext 代码改动仍需重启 |
 
 路由拆分：`ai.py` 是聚合器，`include_router` 了 `ai_common`（模型请求基类 + 错误映射）/`ai_text`（单轮文本端点）/`ai_agent`（智能体 SSE）/`ai_chat`（多轮对话 SSE）。加 AI 端点 → 归到对应子路由，不要塞回一个大文件。
 
@@ -74,8 +92,8 @@ types/       共享类型。
 
 | 模块 | 职责 |
 |------|------|
-| `useChatSession` | 聊天会话引擎：messages + 生成生命周期 + 三级持久化 + 全部编排。ChatView 只消费它 |
-| `chatGeneration` | 生成流程的纯判定/整形：图像门（`needsImageInput`/`hasImageProvided`）+ 文本打分（`pickBestText`）+ 快照瘦身（`slimSnapshot`，persist 由调用方注入）。**从 useChatSession 闭包抽出，可直接单测** |
+| `useChatSession` | 聊天会话引擎：messages + 生成生命周期 + 三级持久化 + 全部编排。删除消息时同步更新 `messagesRef`、本地存储和后端快照；用户消息“重新生成”保留该消息、截断其后旧分支，并只用该消息之前的历史重新调用，普通图/蒙版输入完整恢复。每次直接生成显式上传当前可见历史，避免 600ms 快照防抖与下一次提交竞态。导航离开只释放前台流引用，不 abort 后台 Agent；只有显式停止才取消。自动插画提交时保存模板 ID、注入值、ComfyUI 地址、主输出节点和最终提示词的不可变快照；轮询和刷新恢复收到 `failed` 必须停止守望、删除 pending、原位清槽并只写失败 Trace，不得在对话追加错误。重新生图复用不可变快照并携带原 `messageId + slotId` 后台提交，完成后覆盖原图而不新增消息。旧自动插画无快照时按图片 URL 从当前作品资产库精确恢复原提示词，再套当前作品模板原位重生；找不到记录则失败关闭。ChatView 只消费它 |
+| `chatGeneration` | 生成流程的纯判定/整形：图像门、文本打分、快照瘦身、纯文本历史、重跑消息、当前 LoRA 精确绑定和作者建议质量词筛选、pending 恢复与 ComfyUI 短暂空窗判定。Anima 最终结构固定为首行「当前 LoRA 触发词 → 作者建议质量词 → 作品固定质量词」，第二行「剧情 tags + 英文关系描述」；`imagePromptProfiles.illustrationTemplateValues` 按 `prompt/negative_prompt/lora_name/lora_weight/base_image/latent_width/latent_height` 独立组值。用户只选 Latent 最长边 1K/2K/4K，主 Roleplay 从七种常用比例中选画幅，前端按 64 对齐基准换算宽高；提示词质量词不受尺寸换算影响。采样步数、CFG、起止步数完全归工作流模板所有，剧情插画设置不得覆盖。**从 useChatSession 闭包抽出，可直接单测** |
 | `generationLifecycle` | 生成三态 reducer（idle/agent/workflow）+ 派生 selector。**新增生成状态改这里，别加影子 ref** |
 | `workflowOrchestration` | 工作流输入口编排 hook（读节点→AI 出计划→写画布） |
 | `viewRouting` | `parseHash`/`buildHash`/`calcSize` 纯函数 |
@@ -87,7 +105,14 @@ types/       共享类型。
 | `useResizableChatInput` | 输入框拖动、键盘调整与高度持久化 |
 | `useChatMaintenance` | token 提醒、完整压缩与清缓存事务；拥有确认、快照提交和错误反馈 |
 | `api/chatStreamProtocol` | 对话流事件 v1 判别联合与唯一解码入口；未知版本/事件立即失败 |
-| `chatSessionEvents` | 消息归并纯 reducer；消费已解码事件并更新文本、媒体、审批与路由选择 |
+| `chatSessionEvents` | 消息归并纯 reducer；消费已解码事件并更新文本、媒体、审批与路由选择。文本与 `media-slot` 都是有序 `parts`，后续 delta 追加在槽后；完成按 slotId 原位替换 pending 槽或已有图片/视频，失败只删除 pending 槽并合并相邻正文 |
+| `textTools` | 文本清理、拼接、字符间插入、统计、UTF-8 转义/反解和 OpenCC 简繁转换的浏览器端纯函数 | 新文本工具算法进这里并补 Vitest；`views/tools` 只持有表单状态和展示，输入文本不得上传后端 |
+| `quickTextTools` | 快捷工具浮标到 `textTools` 的纯适配层：统一默认选项、分隔符解码与紧凑统计结果 | `QuickToolsWidget` 只持有本地 UI 状态；不得复制六项文本算法。快捷工具与后台活动通过 `laf-floating-panel-open` 互斥展开 |
+| `AppBody` | 根壳下面的页面分派器及所有页面级 `React.lazy` 边界 | `App.tsx` 只拥有导航、仓库选择、根状态和弹窗；新增页面映射进 `AppBody`。聊天、设置、资产、工作流、节点和工具不得重新静态导入根壳 |
+
+前端加载合同：根入口控制在约 300 kB 未压缩以内；`textTools/opencc-js` 属按需大字典，只允许在打开完整文本工具或快捷面板后加载。快捷工具进一步拆成常驻 `QuickToolsWidget` 外壳和首次点击才加载的 `QuickToolsPanel`。
+
+移动端应用壳的真实根节点是 `.app`。`max-width:720px` 时必须将其切为纵向，`.app-nav.sidebar` 统一变成顶部横栏；主题只能改变材质和颜色，不能各自复制或覆盖壳层几何。
 
 api 序列化器（**加带模型配置的端点时必用，别手拆三元组**）：
 - `chatBody(chat)` → `base_url/api_key/model`
@@ -113,7 +138,7 @@ AI 搭工作流
 
 禁止反向依赖：`rag_backend` 不知道知识库、节点或工作流；`node_store` 不依赖 `rag_store`；`rag_retrieval` 不依赖 Chroma。该方向由 `backend/.importlinter` 的 `rag-stack-layers` 合同执行。
 
-节点索引包含两个 collection：`node_index` 保存完整插件包，供管理页查看和人工编辑；`node_index_chunks_v1` 保存按顶层 category、最多 12 节点的能力分块，只用于召回。只有当前全部包都有分块且没有卸载插件残留时，`node_store` 才原子切换到分块检索。
+节点索引包含两个 collection：`node_index` 保存完整插件包，供管理页查看和人工编辑；`node_index_chunks_v1` 保存按顶层 category、最多 12 节点的能力分块，只用于召回。只有当前全部包都有分块且没有卸载插件残留时，`node_store` 才原子切换到分块检索。远程嵌入 Adapter 对文档按单条单批最多 2000 字限制请求，避免 CPU Ollama 上的大节点包超过上下文或 120 秒超时；原始文档仍完整存入 Chroma。同步按包隔离错误，单包失败进入 `failed/failures` 后继续后续包，不得整批终止。
 
 人工编辑插件包正文会把该包标记为 `manual`，并同时重建对应能力分块；后续增量或全量同步只刷新真实节点清单，不得覆盖人工正文。完整包、能力分块和就绪缓存的一致性由 `node_store` 单一拥有。
 
@@ -194,45 +219,13 @@ cd backend
 
 ## 发布架构
 
-发布有两个独立 Module，不得互相复制 Implementation：
+当前只支持**源码上传**。`scripts/release_preflight.py` 是上传边界的单一检查入口：它检查 Git 已追踪文件和未忽略的未追踪文件，阻断密钥、私钥、运行数据库、模型权重、超大文件及误纳入的用户目录，同时验证 `styles.css` 引用的主题资产存在且未被忽略。脚本只读，不暂存、不提交、不推送。
 
-- `release_preflight` 拥有源码版发布闭包校验，`release.ps1` 只调用它再执行 Git 归档。
-- `runtime_release` 拥有 Embedded Runtime 的目标矩阵、依赖选择、前端构建、PyInstaller 组装、Reranker 权重闭包、SHA256 清单、跨平台归档和 GitHub 资产分片。
+源码必须包含 `backend/app`、`frontend/src`、测试、依赖清单、`frontend/public` 主题资产和 `comfyui-ext` 扩展源码。源码禁止包含 `backend/data`、`userdata`、未清洗的 `presets`、`docs/memory`、会话、角色卡、世界书、生成图片、RAG 索引、模型/LoRA 权重、日志、环境目录和构建产物。唯一允许的预设目录是由 `build_resource_pack.py` 生成的 `presets/Demiurge-presets-regex`。详细清单见 `docs/RELEASE.md`。
 
-源码版集中保证：
+归档只能基于用户确认后的提交执行 `git archive HEAD`，禁止直接压缩工作目录。上传前必须逐项审计 `git status`；当前工作区存在大量历史改动时，禁止用未经审计的 `git add -A`。
 
-- `backend/requirements.txt` 在 CPython 3.10–3.14/win_amd64 的完整传递依赖可仅从 `vendor/pip` 离线解析；
-- `frontend/package-lock.json` 的完整依赖可仅从 `vendor/npm` 离线解析；
-- `styles.css` 引用的主题素材真实存在；
-- `scripts/theme_assets/*.json` 声明的全部产物已经生成；
-- 上述主题素材没有被 Git 忽略，执行 `git add -A` 后能进入 archive。
-
-源码版不含 `backend/requirements-reranker.txt`、Embedding/Reranker 模型权重、`backend/data`、`.env` 或用户状态。可选模型依赖缺失只能让 RAG 降级，不能阻断基础应用安装。
-
-### Runtime Release Seam
-
-`release/runtime-targets.json` 是 Runtime Target 的单一 Interface；GitHub Actions 先通过 `runtime_release.py matrix` 读取矩阵，再为每个目标调用同一个 `build` Interface。平台判断、Torch 来源、PyInstaller 收集规则、模型版本、清单和分片不能散落到 workflow 或 PowerShell。
-
-前端构建必须复制到 Runtime 工作目录后执行 `npm ci/build`，不得重建源码工作区的 `frontend/node_modules`；这样正在运行的 Vite 和主题开发可以与 Runtime 构建并行。
-
-Release Edition：
-
-| Edition | RAG 能力 | 终端用户安装 |
-|---|---|---|
-| `standard` | 远程/Ollama Embedding、Dense+BM25+RRF/MMR；未带本地 Cross-Encoder | 无 |
-| `full-rag` | 标准版全部能力 + 固定 SentenceTransformers/Torch + 内置 Qwen3-Reranker-0.6B | 无 |
-
-Runtime Target 目前为 Windows x64 Standard、Windows x64 Full RAG(CUDA)、macOS arm64 Standard、macOS arm64 Full RAG(MPS)、macOS x64 Standard。Intel Mac 不默认发布 CPU Full RAG，避免把无法进入交互精排的巨大依赖误称为完整版本。
-
-`runtime_entry` 是进程启动 Adapter：只设置可写 `data/`、前端、ComfyUI 扩展和内置 Reranker 路径，再启动后端。`app.config` 消费这些路径；开发模式未设置环境变量时保持原目录语义。前端由后端同源提供，最终用户不再运行 `pip`、`npm`、Vite 或 `start-dev`。
-
-应用 Embedded Runtime 与 ComfyUI Python 是两个不可混用的 Runtime。`comfy_launcher.find_python` 只接受用户显式路径、ComfyUI 内 `.venv/venv` 或常见整合包目录；找不到即返回可读错误。不得恢复 `sys.executable`/PATH Python 回退，否则 PyInstaller Runtime 会错误承担 ComfyUI 的节点与 Torch 依赖。
-
-工作流模板与画布提交都汇聚到 `workflow_submission`。该 Module 在调用 ComfyUI `/prompt` 前执行 Accelerator Handoff：`reranker` 提升缓存代际并清空入口，等待活跃精排完成，再执行 GC 与 CUDA/MPS cache 释放。加载中的旧代模型即使稍后完成也不能回写缓存；下一次 RAG 查询先使用 Hybrid 结果并重新后台预热。
-
-超过 GitHub 单资产上限的完整 RAG 包由 Module 自动切成小于 1.9GB 的有序分片并生成 SHA256 清单；`join-runtime.ps1/.sh` 只负责按清单流式还原和验签。
-
-主题与 Runtime 保持独立 Seam：Theme Asset Pack 仍落在 `frontend/public`，Theme Runtime 仍在 `styles.css`。每个 Runtime Target 都从当前提交重新构建同一前端，因此新增或替换主题不需要修改 Runtime Target、Torch 或打包规则。
+ComfyUI-Wrapping-paper 曾有 Standard/Full RAG Runtime、离线 vendor 和多平台便携包，但对应脚本、目标矩阵与 Actions 尚未迁入 Demiurge。当前不得宣称存在便携 Runtime 发布；若以后恢复，必须作为独立发布模块重新建立依赖闭包、平台矩阵、SHA256 清单和真实安装测试。模型权重与用户数据仍不得随任何 Edition 分发。
 
 ### Embedding Backend Seam
 
@@ -242,9 +235,117 @@ Runtime Target 目前为 Windows x64 Standard、Windows x64 Full RAG(CUDA)、mac
 
 `styles.css` 的 production theme runtime Interface 统一拥有按钮九宫格尺寸、输入区和拖动手柄几何、模态内容层级、装饰指针隔离、进度节点定位、头像尺寸和着陆页几何。bright/night/eye-care/green/gray 主题块只提供视觉差异和素材 URL；新增主题先接入共享 Interface（把 `[data-theme="<theme>"]` 加进这些 `:is(...)` 结构选择器列表），再补自己的 Asset Pack，不得复制整段结构选择器。`themeRuntime.test.ts` 与各主题资产测试共同验证该 Seam。
 
+## 剧情能动性引擎（联动链上半截 · 已落地，全绿）
+
+> 这一节既是**设计合同**又是**已落地接缝**。六模块（`character_state`/`agency`/`scene_illustration`/`scene_renderers`/renderer 接口/`roleplay_agency` 子图编排）全部落地并全绿，已接进 `roleplay_node`。加功能按此接缝建，别另起炉灶。
+
+### 要解决的本质问题
+
+酒馆是**用户主导**：角色只在被触发时被动响应。Demiurge 要**角色有能动性**——用户没提，爱慕他的角色会自发行动（如舞会下药、用户短期失去主导权），且行为不写死在卡里也能合理涌现。核心洞察：**角色卡的 `死穴`/`攻略路径`/`个体机制` 不是描述，是行为生成器**；系统每拍主动求值「以当前状态+场景，这角色会不会自己动手、怎么动」，机制既是自主性的燃料，也是防 OOC 的护栏。
+
+### 三条设计支柱（互相咬合成一个闭环）
+
+1. **动态条目 = core/state 分离**。`core`（人设根基/外观/死穴/机制/弧线）写在卡文件、**永不自动更**，是视觉锚与一致性来源；`state`（好感度数值 + 态度/心情/所在等叙事字段）按 `repo_id` 作用域、随剧情更。每次更新是**带证据的 StateDelta**（`from→to`+证据+turn+source），AI 召回读到的是「态度:戒备(因第3章救援)」= 角色发展而非矛盾。
+2. **能动性三方 = `roleplay_node` 内部子图**。世界 Agent 提案（LLM）→ 裁判仲裁（**纯规则 0 LLM**）→ 主控叙述（LLM）→ 状态更新。World 默认每个剧情回合做一次语义判断（`gateBaseRate=1`，设为 `0` 才明确关闭）；首轮没有好感记录按中性 `0` 评估，敌对角色也不因负好感失去自主性。输入只含在场 NPC 命中的世界书 core、动态状态、近历史与本轮 user，不重复整本世界书。提案必须保留「持续目标 + 本轮具体行动」；持续目标机械写入 `叙事/角色名·当前目标` 供下轮续用，裁判成功则落实，已实际尝试但失败也必须在正文呈现为未遂，不能静默消失。
+3. **剧情插画 = state 的第二用途**。触发仍是状态规则；提示词由当前正文 + core 外观锚 + state 衣着/所在直接组装，过 `IMAGE_PROMPT` 正则清洗，`motion` 用本地保守规则估算。自动插画默认 **0 额外 LLM**，不得再为构图分析重复提交高潮正文。
+4. **场景分类 = 一次判断驱动两件事**。`scene_classify` 把本轮归到 `dialogue/action/emotion/conflict/nsfw/climax`，**复用 supervisor 那次路由 LLM 调用**产出（零额外往返），写进 `ctx["scene"]`：既选**条件思维链**（P1，`preset_store.select_chains` 按真状态 scene/affinity/turn 命中链），又驱动**高潮出图触发**。若 Supervisor 误判且主 Roleplay 漏掉 `<illustration>`，写回接缝会对本轮用户输入和还原后的正文再做一次保守纯规则判断；只在明确 `nsfw/climax` 词命中时生成英文 tags 与高潮段锚点，不让整条 ComfyUI 请求静默消失。
+
+### 模块（单一属主）— ✅=已落地 / ⏳=规划
+
+| 模块 | 状态 | 拥有什么 | 边界 |
+|------|------|---------|------|
+| `character_state` | ✅ | 动态状态单一属主：按 `repo_id` 存可变状态（`数值`+`叙事`字段，每字段带 provenance 证据+turn+source）、`parse_deltas`/`apply_deltas`（带 from→to 审计历史，封顶 200）、`render_state_block`（紧凑 kv+内联证据）。**手改/回滚(缺口6)**：`current_turn`/`set_fields`(设精确值非累加，数值 clamp，标 `source=user`)/`rollback_last`(还原到审计 `from` + 弹历史)。落盘 `<base>/<repo_id>/state.json` 物理隔离 | core 字段永不被本模块写；纯逻辑无 I/O 可单测，load/save 是唯一 I/O；base 由调用方注入不读 config；`state.py` 路由(GET/PATCH/rollback)只做 HTTP 适配，前端 StatePanel 消费 |
+| `agency` | ✅ | 能动性**纯逻辑（0 I/O 0 LLM 全单测）**：`judge`(core依据→好感度门槛→掷骰) + `classify_roll(roll,chance)` **六档**(大成功/极难/困难/普通成功/失败/大失败，对齐正文 `<roll>` 语汇，骰≥96 恒大失败) + `should_consult_world`(廉价门控) + `tier_index`/`crossed_tier`(插画跨档)。裁判是确定性规则不是模型 | 吃好感度**快照**，**不 import `character_state`/`agent_graph`**；裁判不得做成 LLM 调用。正文 `<roll>` 由剧情推进 Agent 的 `rollInstruction` 提示词驱动(主模型打)，与本模块隐形裁判(管 NPC 自主行动)同一套六档语汇 |
+| `scene_illustration` | ✅ | 剧情插画**纯逻辑（0 I/O 0 LLM 全单测）**：`decide_trigger`(优先级 显式>失控>**场景nsfw\|climax**>跨档>每N段，跨档复用 `agency.crossed_tier`) + `build_scene_request`(从「段落动作+core外观+state衣着/场景」拼 prompt，非空过滤，出图管线的裸拼接降级档) + `fallback_illustration_anchor`（只在 `<content>` 正文评分，忽略 think/控制块，物体放置等可见动作优先）+ `illustration_anchor_offset`（高潮锚点逐字/破甲还原优先，轻微改写按段落相似度映射；指定锚点完全无效则失败关闭，禁止回退消息末尾）+ renderer 注册表(纯 dict) | 触发是规则不是导演 Agent；吃标量快照，**不 import `character_state`/`agent_graph`/`workflow_submission`/`image_gen`**（scene-illustration-purity 合同强制）；本模块不拥有出图管线 |
+| `scene_classify` | ✅ | 场景分类**纯逻辑（0 I/O 0 LLM）**：`normalize_scene`(模型给的场景字段→合法标签，中文别名+子串匹配+兜底空串)。标签 `dialogue/action/emotion/conflict/nsfw/climax`。信号复用 supervisor 路由那次 LLM（零额外往返），此处只解析规整 | **不 import `llm`/`agent_graph`**（scene-classify-purity 合同强制）；只规整不调模型 |
+| `image_prompt_extract` | ✅ | 自动插画的纯逻辑接缝：主 Roleplay 同次生成在视觉高潮后附 `<illustration>` 计划；anchor 必须取提示词所描绘高潮段末句，禁止选余韵/收束/尾句；动态字段必须是英文 Danbooru tags。本模块剥块并校验 `anchor/camera/composition/subjects.weight/prompt/motion/aspect_ratio`；模型被截断导致缺 `</illustration>` 时，从最后一个开标签到 EOF 仍必须整体剥离并返回空计划。`visible_narrative_text` 是场景分类与降级提示词的唯一正文边界：只读取 `<content>`，排除完整或未闭合的 `<think>`、状态、表格及插画控制块，并兼容图片插槽持久化造成的未闭合 `<content>`；只有未闭合思考而无可见正文时失败关闭，本轮不得出图。比例只允许 `1:1/2:3/3:2/3:4/4:3/9:16/16:9`，非法值回退 `2:3`。ComfyUI 提示词固定为「质量 tags 一行 + 内容 tags 一行」；英文 tag 分号先规整为逗号，中文/自然语言提示词失败关闭，不再拿剧情正文降级提交。`restore_jailbreak`/`infer_motion` 保留锚点与动作判断 | **不 import `llm`/`agent_graph`/`roleplay_agency`/`character_state`**；隐藏思考中的敏感词绝不能改变 rating 或触发成人降级；高潮识别、镜头设计与画幅选择由主生成完成，不得新增独立提取模型调用；LoRA 触发词只按本次最终生效 LoRA 的完整文件名精确读取，空触发词不注入 |
+| renderer 接口 | ✅ | 渲染器接口 `Renderer=Callable[[SceneRequest],str]` 在 `scene_illustration` 定义（register/get/available，纯 dict） | 新增图像格式=注册一个 renderer，不改 `scene_illustration` 触发逻辑 |
+| `scene_renderers` | ✅ | renderer concrete 适配器（有 I/O，8 测试）：`cloud_renderer`(云→按 `req.actors` 命中 `CloudConfig.character_base_images` 取底图,有则 `image_gen.generate_with_images` 图生图锁角色一致性,否则 `generate` 纯文生图；未命中回退 `style_base_image`) + `comfy_renderer`(本地→`submit_template` 提交 + `fetch_result` 轮询取图 → 拼 `/view` 直链，sleep/now 注入可测)。工厂绑定运行期 config 产出 Renderer 闭包 | import `scene_illustration`+既有出图管线；`scene_illustration` 不反向 import（纯度合同保证无环）；只返回图片地址，不回灌图像 token |
+| `narrative_memory` | ✅ | 纪要记忆**纯逻辑（0 I/O 0 LLM 全单测）**：默认每 3 个完整会话中的 assistant 回合新建一条独立 `overview/chronicle/dialogue/characters/keywords` 丰富纪要；召回把 FTS 命中与最近条目合并，优先当前出场人物，主 Roleplay 最多只注入 10 条短概览；旧分层压缩逻辑不得进入自动流程或删除频率索引 | **不 import `narrative_store`/`character_state`/`agent_graph`/`roleplay_agency`**（narrative-memory-purity 合同）；详细纪要与对白不回灌主上下文 |
+| `narrative_store` | ✅ | 纪要落盘+召回（SQLite FTS5 trigram，按 repo_id 物理隔离 `<base>/<repo_id>/chronicle.db`）：丰富字段往返并自动迁移旧 schema；自动流程 append-only，历史进度落后超过一个频率区间时停止生成跨区间大卡并交给手动补表；用户编辑与手动重填可更新/删除指定 rowid 或仅删除相交消息范围；保留 `get/set_last_turn` 和 FTS 重建 | import `narrative_memory` 取类型+查询构造；base 由调用方注入不读 config（同 character_state）；局部覆盖禁止清空整库 |
+| `manual_table_fill` | ✅ | 基于 `chat_snapshot` 文本历史的手动补表工作流：统计每表频率/未记录/上次回合，按所选表、最近 N 层和批次调用填表 Agent；范围重叠先返回确认，覆盖只替换相交消息范围，不覆盖则逐表跳过已处理消息 | 图片/媒体槽经 `chat_snapshot.to_prompt_history` 排除；确认前不得调用模型或改数据；进度按 repo_id 落 `table_progress.json` |
+| `roleplay_agency` | ✅ | 能动性子图编排。World 每轮从在场 NPC core 推导「长期目标→阶段目标→本轮动作」，提案 intent/goal 穿过裁判进入主叙事；多角色按各自 `角色名·好感度` 仲裁。**Recall 是零 LLM 检索接缝**，候选与 GrayWill、世界书、历史和本轮 user 合成一次主 Roleplay。Chronicle 保留周期抽取；Curator 默认 `gate=1` 写 RAG，并受控增改当前小仓库世界书快照，`gate=0` 可显式关闭 | import 接缝模块+llm，**不 import agent_graph**；Recall 不得恢复成独立生成；World/Curator 使用当前对话模型的独立代理选择 |
+
+> 当前默认调用链：**有卡纯文本零 LLM 直达 → World 对在场 NPC 做目标/行动提案并由规则裁判 → 小仓库世界书快照/RAG/Chronicle 候选机械组装（当前人物相关的最近 10 条概览）→ GrayWill + 状态/只读表格 + 可见历史 + 本轮 user + 已裁定 NPC 行动一次主 Roleplay（同时判断视觉高潮并产插画计划）→ 快速状态写回 → 立即发正文与锚点插画 → 独立表格维护 + Chronicle（每 3 轮，丰富纪要）+ Curator（默认开，写 RAG 并完善小仓库世界书）**。表格维护只返回 JSON 数组并写数据库/Trace，不进入对话；主计划缺失时只对明确场景做本地英文 tags + 高潮锚点兜底。GrayWill 可继续使用 `{{lastUserMessage}}` 防正则误删；Claude 发送边界会与末轮真实 user 去重。
+
+> **代理合同**：保留一个全局代理地址。每个对话/生图/视频/远程嵌入模型有 `proxyMode=on|off|inherit`，旧配置与新模型默认 `on`；非本地端点中，`on` 使用全局地址，`off` 直连，`inherit` 跟随全局开关。localhost/127.0.0.1/::1 回环端点始终直连，前端不得透传代理，后端 Adapter 必须再次忽略显式代理。前端解析为 `chat_proxy_url/gen_proxy_url/video_proxy_url/embed_proxy_url`，后端按模型类型隔离；`proxy_url` 仍只表示联网搜索代理。
+
+### 依赖方向（已由 importlinter 合同强制：能动性纯逻辑 / 插画纯逻辑 / 纪要纯逻辑 / 场景分类纯逻辑 / 出图提取纯逻辑 / 能动性子图编排方向 / 编排不得依赖 agent_graph）
+
+```text
+supervisor_node（路由，那次 LLM 顺带产出 scene → 写 ctx["scene"]）
+  → scene_classify（场景字段规整，纯逻辑 0 I/O 0 LLM）
+agent_graph.roleplay_node（编排，升级为能动性子图）
+  → preset_store.select_chains（按真状态 scene/affinity/turn 选思维链，纯函数）
+  → character_state（状态读写 + delta 应用/回滚）
+  → agency（门控 + 裁判，纯规则 0 LLM，纯函数）
+  → worldbook（既有，卡内嵌世界书检索）
+  → narrative_store（纪要 FTS5 落盘+召回，只增不改）
+      → narrative_memory（抽取/压缩/召回查询，纯逻辑 0 I/O 0 LLM）
+  → 主 Roleplay 同次输出 `<illustration>`（高潮锚点+镜头+构图+主体权重+画幅比例+prompt+motion）
+      → image_prompt_extract（剥块/校验/组装，纯逻辑 0 I/O 0 LLM；英文 tags → 质量行+内容行，坏格式不提交）
+  → 两条出图路径二选一（按 ctx.comfy_illustrate 分流）：
+    ① 同步 renderer（云端默认）：scene_illustration 触发判定 → renderer 插件（gpt-image…）→ image_gen，出图后随 image_recs 回传
+    ② 异步事件（前端已预设 ComfyUI 模板）：_build_renderer 返回 None 不同步付费，优先按主生成给出的原文锚点发 illustrate_request（稳定 slotId）
+        → SSE 顺序：高潮段及前文 delta → media-slot → 后续正文 delta
+        → 前端 useChatSession.submitIllustration：用户预设 Latent 最长边，按 Agent 画幅比例换算宽高；再按模板 exposed 的 semantic 组 values → /comfyui/submit → 后台 pollResult
+        → 完成后以 messageId+slotId 原位替换；目标消息已删除则丢弃结果，不新增消息
+        → 复用 laf_pending_gen_* + SupportWidget 徽记（进度/离开继续/点击返回）；motion>=2 且预设视频模板+smartVideo → 改出视频
+```
+
+> **异步出图闭环（多元数据插入）**：主 Roleplay 在生成正文时同时识别视觉高潮并给出原文锚点与艺术决策：`visual_thesis/hierarchy/palette_material/lighting_logic`，再据此生成镜头、构图、主体权重和所选模式的最终 `profile_prompt`。人物互动高潮必须以人物的面部、目光、动作、接触点或人物关系为第一视觉中心；物件只作辅助视觉装置，除非物件的发现、开启、争夺或取得本身就是高潮。`scene_spec` 保留高潮事实、人物稳定外貌与当前状态及 `art_direction`；即使内联格式失效，独立 Profile 也沿用同一视觉命题。前端按作品预设选择 Krea2、Anima、自然语言或 Niji profile；Anima 只保存固定质量行和固定负面词。正向先按 rating 替换固定质量行（SFW 强制剔除 `sensitive/explicit`），再把本次实际 LoRA 的触发词与作者建议质量词前置；内容行仅保留英文，最终严格两行；负面只写 `negative_prompt`。采样器参数由工作流模板原值决定，自动插画不得覆盖。`motion` 同计划产出，缺失时才由 `infer_motion` 降级。作品历史尚无 `user` 消息时，当前回复是首个真实剧情回复（角色卡开场白不占用该判定），插画开启后即使场景是普通 `dialogue/conflict` 也兜底发一次请求，并从人物动作、视线、关键物件和光影最集中的段落生成非空锚点，禁止空锚点落到正文末尾；后续仍按高潮、失控、显式计划等规则触发。
+
+**纪要 vs 角色条目（两种数据，非二选一）**：`character_state` 记「结构化活状态」（好感度数值+态度/心情/所在），同一人物按身份替换字段值；`narrative_store`/`narrative_memory` 记「事件叙事」（概览+详细纪要+重要对白+出场人物），以完整会话快照计算回合，每到填表频率永久新建一条独立索引卡，自动流程只增不改且不压缩删除；按 trigram/人物相关性召回，主 Roleplay 只读最多 10 条概览。抽取失败跳过且旧纪要不动；用户显式手动重填时才允许按相交消息范围局部替换。FTS5 trigram 旁路召回（中文免分词）与世界书 Chroma 语义检索互补。
+
+**通用多表（补 SillyTavern chatSheets 能力）**：`character_state`（好感度/角色状态）每轮更新，`narrative_store`（纪要）按独立频率新增；`table_store` 补其余七类默认表并落 `<output_dir>/<repo_id>/tables.json`。全局数据每轮完整替换唯一卡，保存上一轮结束后的时间、地点、世界状态与规则；主角信息按 `fillEvery` 更新唯一卡；重要角色按姓名一角色一卡，同名更新、新角色新增；技能/背包/任务按 `fillEvery` 增改，只有背包用尽或丢失允许删除，技能废除改为不可用，任务完成或失效仍保留；选项按 `fillEvery` 完整替换唯一卡，集中保存 AI 推导的用户后续动作。存量旧全局字段行、旧选项多行和无状态列技能表由 `load()` 兼容迁移。schema 也可由 TavernDB 模板或前端建表定义，**跳过好感度/纪要引擎表**避免重复。主 Roleplay 只读表格现状；正文发出后由独立 `table_maintenance` 调用根据本轮 user、正文和表格规则生成纯 JSON 操作并写回，维护响应不得进入会话。失败或 JSON 截断只写 Trace 并保留旧表；`<表格更新>` 仅用于清洗旧模型残留，完整或未闭合块都丢弃，不再作为当前生成协议。自建表沿用用户定义的身份列与增删规则。`table_update` 由 importlinter 纯逻辑合同锁死；追踪记录表格注入、独立维护请求/响应和写回。数据表弹窗统一呈现通用表、角色状态卡和丰富纪要卡；纪要重建支持局部覆盖确认。
+
+**角色状态唯一键**：`character_state` 在读取、自动写回和人工编辑时把 `角色名·字段`、旧的 `角色名身体状态` 及无归属 `身体状态` 规范为同一个 `角色名·身体状态` 键；无归属字段优先沿用同字段唯一已知 owner，不能盲目归到作品主卡。冲突按字段 `turn` 保留最新值。角色状态是当前值表，不是事件列表，同一角色同一字段必须覆盖，审计变化只追加到 `历史`。
+
+**用户自建表（引导式，已落地）**：schema 两个来源——导入 TavernDB 模板（`import_template`）或前端「数据表」弹窗**引导式建表**（`create_table`/`drop_table`/`set_meta`）。对标 TavernDB 三张图（DDL/四段触发 SQL/发送模板）**全部翻译成无 SQL 的引导表单**：用户只填①表名 ②「这张表记什么」(note) ③「何时增/改/删」(rule，自然语言替代四段 SQL) ④逐列(列名+文本/数字类型+可选身份列)。列 meta：`colTypes`(列名→文本/数字)、`keyCol`(身份列，替代 SQL 的 `UNIQUE`——`apply_ops` 里 update/delete 优先按身份列值 `_locate` 定位同一条、回退行号；导入模板时 `_key_from_ddl` 从 DDL 的 `NOT NULL UNIQUE` 行尾中文注释反解身份列)。**note/rule/keyCol 经 `render_tables_block` 注入给 AI**——这是 AI 知道每表用途与增删改时机的唯一依据，自建表尤其依赖（老版只发列名+行，AI 不知表义，已修）。新表零改自动纳入 `table_instruction`（遍历 `load()` 动态生成）。
+
+### 当前剧情稳定化基线（2026-08-05）
+
+1. **输入与历史**：前端只上传当前可见文字历史；图片、媒体槽和自动插画资产不进入模型上下文。快照存在即为真源，空快照也不得回退 checkpoint。Claude 在 `llm.prepare_messages` 边界合并 system、严格交替并只去除明确的末轮重复。
+2. **自主行动与主生成**：World 默认每个剧情回合判断在场 NPC 的持续目标和本轮动作，失败尝试也进入叙事；Recall 零 LLM。主 Roleplay 一次完成正文、状态增量和插画计划，只读表格上下文；控制块在任何成功或异常分支都必须剥离。
+3. **知识维护**：Curator 只可更新本轮实际注入的小仓库世界书 index；角色长期动态进唯一动态区，基础外貌不被覆盖。世界书首次索引后台增量化，未完成时主生成使用关键词和内存 BM25。
+4. **结构化数据**：角色状态按 `角色名·字段` 替换当前值；纪要默认每 3 个 assistant 回合 append 一张独立卡；全局、主角、重要角色、技能、背包、任务和选项分别遵守 `table_store` 的 singleton/keyed/deletePolicy 合同。
+5. **插画计划**：只读可见 `<content>` 判断高潮和分级，隐藏/未闭合 think 不得触发成人降级。人物稳定外貌、当前变化和高潮事实先形成唯一视觉命题、主体层级、色材母题与光影因果，再转换为 Krea2、Anima、GPT Image/Banana 或 Niji。
+6. **LoRA 融合**：按本次实际 LoRA 完整文件名读取触发词、建议权重和作者提示词；作者示例只提取质量/风格/镜头/光影/签名，排除人物、服装、动作、关系、场景和分级词。空触发词不注入，Civitai 的展示 `@` 不属于触发词。
+7. **异步媒体**：Agent 从固定比例集合选画幅，用户只选 Latent 最长边，工作流保有采样参数。SSE 在锚点处建立稳定槽，ComfyUI 与正文及记忆维护并行；最终持久化 output 按 `messageId + slotId` 原位回填，重新生图覆盖原图，失败只写 Trace。
+8. **故障边界**：ComfyUI `execution_error`、提交失败和轮询失败都是终态，不能永久 pending 或污染对话。模型 `/models` 成功不代表推理健康；502 必须以最小推理和跨模型对照区分项目故障与供应商线路故障。
+
+完整变更索引见 `docs/memory/stabilization-baseline-2026-08-05.md`。
+
+禁止反向：`agency` 不知道存储；`scene_illustration` 不拥有出图；renderer 不拥有触发；角色卡直达只处理纯文本和强执行命令，带附件/模糊工具请求仍归 Supervisor。
+
+### 插件化三插槽（复用既有 store，新增=注册项不改编排）
+
+- **renderer**（图像格式）：ComfyUI workflow / gpt-image / 其它。ComfyUI 工作流就是一种 renderer = 你要的「节点管理」。
+- **skills**（可下载 SKILLS 库）：`skills_store` 已在，提炼提示词/风格/角色行为片段做成可下载包。
+- **MCP**（外部工具）：`mcp_store` / `tool_agent_node` 已在。
+
 ## 明确不做的（别反复提议）
 
-- 4 个空 router（runs/loras/characters/assets）+ `list_ai` 桩：已挂载=在用端点，删了缩 API 面。
+- 3 个空 router（runs/loras/assets）+ `list_ai` 桩：已挂载=在用端点，删了缩 API 面。（`characters` 已从空桩转为角色卡导入/列表/删除/导出真实端点。）
+- 角色卡「一张卡=一个文件夹」的落盘格式（`character_store` 布局）是单一属主：卡本体、内嵌世界书、正则、原图、对话记录同处一个文件夹。Phase 2 世界书检索、Phase 3 正则/提示词都从这里读，别在别处另立卡的存储。
+- 偏置预设注入已升级为**多消息通道**：`preset_store.assemble_messages` 按各片段自身 role 组装多条消息（`_llm.chat_messages` 收消息数组发模型），`chatHistory` marker 处原位插历史（还原 ST 深度注入语义）。`assemble_system` 单串档保留作降级。**思维链**（`thinking_chains`）经 `select_chains` 按真状态 scene/affinity/turn 选，尾部链作独立 system 落历史后·本轮 user 前（离生成点最近，遵守最严）——这比 ST 的字符串宏变量更准（真状态判断，非文本插值）。改注入结构 → 这里，别退回单 system 串。
+- Claude 兼容中转的消息合同由 `llm.prepare_messages` 单独拥有：发送前把所有 system 按原顺序合并、连续 user/assistant 合并为严格交替，并仅对“倒数包装 user 已含末轮真实 user”的明确形态去重；非 Claude 消息结构不变。Roleplay Trace 记录该规范化后的实际发送结构。
+- 当前小仓库世界书快照落在 `<output_dir>/<repo_id>/worldbook.json`：首次从卡快照/绑定独立书复制并合并，之后读取和 Curator 写回都只作用于该文件，不回写源卡或独立世界书，也不串到兄弟小仓库。主 Roleplay 的本轮实际注入 index 会进入 Trace，并成为 Curator 唯一可见、可更新集合；未注入 index 即使模型提交也由服务端拒绝并追踪。角色长期进展写入唯一动态区，基础设定不被覆盖；机制类默认只读；即时外观状态仍归状态表。`worldbook_add` 不受允许集合影响，禁止自动删除。
+- 正则「后端跑存储/发送档 + 前端跑显示档」是两个 runtime 的同一逻辑（`regex_engine.py` / `lib/regexEngine.ts`）：显示层 markdownOnly 必须在前端渲染时跑（原生 JS 正则、不落库），改存储/发送在后端。别强行合并成一处。显示档来源=全局(`/regex/`)+当前卡(`/characters/regex`)合并，`ChatView.displayRegex` 取两者 markdownOnly 未禁用项。
+- 卡即作品=「大仓库(卡名) + 子仓库(对话记录)」两层（`repos.addCardWork` 返回 `{parentId,childId}`）：对话线挂**子仓库**(`repo.parentId` 有值)，资产库下钻双击子仓库进对话、能返回。别把卡建成顶层单仓库(会导致下钻进空子列表无法回对话)。
+- 检查点/分支是**纯前端**：检查点=`localStorage laf_ckpt_<threadId>` 存到某条为止的消息切片、可回滚(不新建仓库)；分支=`repos.addBranch` 在同大仓库下建兄弟子仓库、拷贝消息切片进新线(localStorage+后端快照)后跳转。都不新增后端端点。
+- 仓库三样绑定(卡/独立世界书/人设)是**前端存字段 `cardName`/`worldbookName`/`personaId` + 后端解析**：`resolveBinding` 自身优先缺则继承父仓库（子继承父，非合并），`App.activeWork` 把解析结果合并进 repo(id 不变)。绑定只保证「该给的资料都喂进上下文」，不改模型行为——别把"绑定后剧情稳"理解成模型质量保证。**世界书/人设注入只在 `roleplay_node`(需 `_has_card`)内跑**：故独立世界书/人设绑定要「同时绑了卡(自身或继承父)」才生效，单绑世界书不绑卡不进扮演流程——别在通用对话节点另接世界书注入。显式绑人设标 `persona_bound`，`_apply_work_persona` 见之不用作品快照 `persona.json` 覆盖（别去掉这个门，会让绑定失效）。
+- ComfyUI 界面模式画布是**页级单例，靠 iframe `ready`→`post("load")` 一次性推工作流**：切模板必须让 iframe 重挂(key 含 `sourcePath`)才会重新 `ready` 载新图——换整张不同工作流用整帧重挂(语义=刷新重启)，别学起源项目单节点卡的"软重发 load"(那是换同图节点用的，见 [[../d--tool-ComfyUI-ComfyUI-Wrapping-paper/memory/orchestration-route-and-nodecard-race]])。画布空白另有跨标签共享 store 争用根因(看 `N:x [0]` + 关旁标签能好)，只提示不代码根治。
+- 数据表渲染：通用表/纪要/角色状态统一用**卡片式**（每行或每角色一卡、字段带标签两列网格、长文本占整行、`.card-grid` 多列流式）。角色状态必须按人物聚合，把该人物的好感度、状态、来源、依据放在同卡；长状态用 textarea 完整换行，禁止退回固定列宽 HTML 表格。
+- AI 消息 HTML 渲染是**有意的、消毒后**：卡内正则把 `<status>`/`<roll>` 等标签换成带内联样式的 HTML 状态卡，`ChatMessages.looksLikeHtml` 检测块标签→`sanitizeHtml`(DOMPurify，留 style、禁 script/iframe/事件)→`dangerouslySetInnerHTML`。别改回纯文本(卡的状态栏设计就废了)，也别去掉消毒(XSS)。开场白 first_mes 的 HTML 同链路。
+- 删仓库连带删卡文件夹：卡即作品下删大仓库=对 `target+子仓库` 的 cardName 集合调 `deleteCharacter` 再 `deleteRepo`，否则卡残留磁盘。别只删 localStorage 记录。
 - `rag_backend._norm_url` 与 `image_gen._norm_url` 同名不同义：前者归一嵌入接口，后者归一图像接口，行为不同，别合并。
 - 后端 `generation_store` 与前端 `useChatSession` 两条留存管线：运行环境不同，强合并增险。
 - `ai_common` 的 `build_chat_model`/`chat` 薄封装：错误映射跨 8 端点复用，是深的。
+- 模型可用性以真实最小推理为准，`/models` 目录成功只证明连接、鉴权和目录接口。剧情出现 `502 upstream_error` 时先按 `run_trace` 定位调用阶段，再用当前模型极短请求、同家族模型、跨家族模型逐级对照；短请求也失败时禁止误归因于上下文、Claude 消息规范化、RAG、表格或插画后处理。
+- 剧情插画生成的图**只存 `url + 一句 caption`，绝不回灌为图像 token 进对话历史**：否则自动配图每回合翻倍烧 token。插画 prompt 从已跟踪的 state 构建，不额外拉上下文（见「剧情能动性引擎」支柱 3）。主 Roleplay 完成并剥离控制块后，最终正文 `replace` 与 `illustrate_request` 立即发出；前端异步启动 ComfyUI，同时后端继续 Chronicle/Curator/RAG 维护，三者互不等待。
+- 多元数据插入（ComfyUI 异步出图/视频）**不新加同步 renderer 分支、不改 workflow_injector 结构**：后端按高潮锚点发稳定槽事件，前端后台原位回填。`template_store` 仅在模板恰好有一个 `EmptyLatentImage` 且没有手动 Latent 语义时自动暴露宽高；多 Latent 工作流必须人工指定。智能模态使用本地 `infer_motion`，别另调 LLM 判断图/视频。
+- 后台活动点击返回作品必须同时更新 App 的父仓库 `repoId` 与小仓库 `workId`；只写 `#/chat/<threadId>` 不会驱动当前 App 状态。导航离开不是取消，显式停止才允许 abort。
+- 多角色状态字段用 `角色名·字段` 明确归属；无分隔符的旧字段只兼容识别“身体/精神”等类别，展示时归回同一角色卡，禁止把状态类别当作角色名。
+- 裁判（`agency`）是**纯规则引擎不是 LLM**：好感度档位阈值 + 掷骰 + core 一致性驳回。别改成「导演/裁判 Agent 每回合判断」——那与省 token 初衷冲突，且不可复现。创造力只留给「世界 Agent 生成动作」这一处。
+- 角色 `core`（人设/外观/死穴/机制）**永不自动更**，只有用户能改；只有 `state`（好感度+态度/心情/所在）随剧情走 StateDelta。人为乱改若不带证据 → `source:user, 证据:空`，AI 据此识别为「设定注入」而非剧情，不强行自圆其说到卡死。别把 core 做成可自动生成（人设会崩）。

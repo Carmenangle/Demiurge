@@ -6,22 +6,27 @@ import { type MutableRefObject, useEffect, useReducer, useRef, useState } from "
 import type { AgentRoute, ChatMessage, MsgPart, PromptApproval, RegenerationSnapshot, RouteChoice } from "../types/chat";
 import type { Repo } from "../stores/repos";
 import type { useSettings } from "../stores/settings";
-import { activeStyleTemplate } from "../stores/settings";
+import { activeStyleTemplate, activeUserPersona } from "../stores/settings";
 import type { RichContent } from "../components/RichInput";
+import { emitRagStatus } from "../components/RagToast";
 import type { Template } from "../api/workflows";
 import {
-  comfyStatus, startComfy, submitGraph, getResult, interruptComfy,
-  saveLocalSrc, localViewUrl, finalizeGeneration as persistWorkflowGeneration,
+  comfyStatus, startComfy, submitGraph, submitWorkflow, getResult, interruptComfy,
+  saveLocalSrc, localViewUrl, uploadImage, finalizeGeneration as persistWorkflowGeneration,
   type GenResult,
 } from "../api/comfyui";
+import { SEMANTIC_BASE_IMAGE } from "../api/workflows";
+import { listLoras } from "../api/loras";
 import {
   fetchHistory, multiAgent,
   saveSnapshot, fetchSnapshot, fetchAgentRunning, cancelAgent,
   fetchInspiration, regenerateImage as replayImageGeneration,
   enqueueChatQueueTask, listChatQueueTasks, cancelChatQueueTask,
+  reportIllustrationFailure, genProfilePrompt, listGenerations,
 } from "../api/ai";
 import { refreshChatBackgroundActivities } from "./chatBackgroundActivity";
-import type { ChatStreamEvent } from "../api/chatStreamProtocol";
+import { substituteMacros } from "./chatMacros";
+import type { ChatStreamEvent, IllustrationSceneSpec } from "../api/chatStreamProtocol";
 import {
   reduce as reduceGen, initialGenState,
   streamingBotId, needsConfirm, runningPromptId,
@@ -32,22 +37,58 @@ import { subscribeProgress } from "./comfyProgress";
 import {
   needsImageInput, hasImageProvided, pickBestText, shouldFinalize,
   registerPending, unregisterPending, pendingResumeAction, pollSchedule,
-  slimSnapshot as slimSnapshotPure,
+  generationResultAction, notFoundPollAction,
+  slimSnapshot as slimSnapshotPure, promptHistory,
+  prepareConversationRegeneration, promptAdditionsForSelectedLora, resolveGenerationPrompt,
+  type PendingGeneration,
 } from "./chatGeneration";
 import {
-  agentImageMessage, applyRouteChoice, reduceChatStreamEvent, upsertMessages, workflowMessages,
+  applyProfileLoraTriggers, illustrationTemplateValues, normalizePromptProfile,
+  replacePromptQualityLine, latentSizeFor,
+} from "./imagePromptProfiles";
+import {
+  agentImageMessage, applyRouteChoice, bindMediaSlotPrompt, dropMediaSlot,
+  reduceChatStreamEvent, resolveMediaSlot, upsertMessages, workflowMessages,
 } from "./chatSessionEvents";
 import { recoverCompactedSummaryImage } from "./contextManagement";
+import { characterDetail } from "../api/characters";
 import { recoverAgentRun, shouldRecoverAgentRun } from "./agentRecovery";
+import { releaseAgentStream, type ActiveAgentStream } from "./agentStreamLifecycle";
 import type { ImageQuality } from "./viewRouting";
 import { useChatMaintenance } from "./useChatMaintenance";
-import { resolveImageRegenerationModel, workflowRegenerationSnapshot } from "./regeneration";
+import {
+  comfyRegenerationUrl, legacyGenerationPrompt, resolveImageRegenerationModel,
+  templateRegenerationSnapshot, workflowRegenerationSnapshot,
+} from "./regeneration";
+import { resolveEndpointProxy, resolveModelProxy, type ProxyMode } from "./modelProxy";
 
-type Model = { baseUrl: string; apiKey: string; modelName: string };
+type Model = { baseUrl: string; apiKey: string; modelName: string; proxyMode?: ProxyMode };
+
+// ④ 检查点：当前小仓库内某条为止的消息快照，可回滚。存 localStorage laf_ckpt_<threadId>。
+export interface Checkpoint {
+  id: string;
+  label: string;
+  createdAt: number;
+  messages: ChatMessage[];
+}
 
 // 首页(home)=临时草稿区：草稿存模块级内存变量，随浏览器进程存活——
 // 页面刷新(进程重开)即重置为空，但应用运行期间切走首页再回来仍保留。不落 localStorage / 后端快照。
 let homeDraft: ChatMessage[] = [];
+
+// 卡即作品开场白：读关联角色卡的 first_mes，作首条 bot 消息，替换 {{char}}/{{user}} 宏。读不到/无返回空串。
+async function loadOpeningMessage(
+  characterDir: string, cardName: string, userName: string,
+): Promise<string> {
+  try {
+    const card = await characterDetail(characterDir, cardName);
+    const first = card?.first_mes;
+    const raw = typeof first === "string" ? first.trim() : "";
+    return raw ? substituteMacros(raw, cardName, userName) : "";
+  } catch {
+    return "";
+  }
+}
 
 // 斜杠指令大小写兼容：只把开头的指令词转小写，参数（模板名/主题）保留原样。
 const normCmd = (text: string): string => {
@@ -79,6 +120,8 @@ export function useChatSession(deps: ChatSessionDeps) {
   } = deps;
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const messagesRef = useRef<ChatMessage[]>(messages);
+  messagesRef.current = messages;
   // 破坏性操作确认弹窗：由 UI 渲染 ConfirmModal，用户选择后 resolve 这个 promise
   const [confirmReq, setConfirmReq] = useState<{ message: string; resolve: (ok: boolean) => void } | null>(null);
   const askConfirm = (message: string) =>
@@ -93,6 +136,37 @@ export function useChatSession(deps: ChatSessionDeps) {
   // 只读派生别名
   const streamingId = streamingBotId(gen);             // 正在流式的 bot 气泡 id（渲染转圈用）
   const wfRunning = gen.status.kind === "workflow";    // /s 工作流进行中
+  // 多元数据插入：插画开 且 本作品已预设图片/视频 ComfyUI 模板 → 高潮点走异步 ComfyUI 闭环（后端发 illustrate_request）
+  const mediaPreset = settings.mediaInsert?.[repo?.id || ""];
+  const comfyIllustrate = !!(settings.illustrate && (mediaPreset?.templateId || mediaPreset?.videoTemplateId));
+  const promptProfile = normalizePromptProfile(mediaPreset?.promptProfile);
+  const modelProxies = {
+    chatProxyUrl: resolveModelProxy(chat.proxyMode, settings.proxyUrl, settings.proxyEnabled),
+    genProxyUrl: resolveModelProxy(genModel.proxyMode, settings.proxyUrl, settings.proxyEnabled),
+    videoProxyUrl: resolveModelProxy(videoModel?.proxyMode, settings.proxyUrl, settings.proxyEnabled),
+    embedProxyUrl: resolveEndpointProxy(
+      settings.embedModel.baseUrl, settings.embedModel.proxyMode,
+      settings.proxyUrl, settings.proxyEnabled,
+    ),
+  };
+  const embedModel = { ...settings.embedModel, proxyUrl: modelProxies.embedProxyUrl };
+  // ⑥ 云端（gpt-image 系）出图无 ComfyUI 模板：把角色→底图映射传后端，按在场角色取底图锁一致性。
+  const characterBaseImages = Object.fromEntries(
+    Object.entries(mediaPreset?.characterLoras || {})
+      .filter(([, b]) => b.baseImage)
+      .map(([name, b]) => [name, b.baseImage as string]),
+  );
+  const illustrationActorNames = Object.keys(mediaPreset?.characterLoras || {});
+  const styleBaseImage = mediaPreset?.styleBaseImage || "";
+  // 有效用户人设：仓库绑定了 personaId 则用该档（并标 personaBound，后端不被作品快照覆盖）；否则用全局选中档。
+  const boundPersona = repo?.personaId
+    ? (settings.userPersonas || []).find((p) => p.id === repo.personaId)
+    : undefined;
+  const effectivePersona = boundPersona || activeUserPersona(settings);
+  const personaBound = !!boundPersona;
+  // 绑定的独立世界书（worldbookDir 下的 .json 名）：与卡内嵌世界书合并注入（后端处理）。
+  const worldbookDir = settings.worldbookDir || "";
+  const worldbookName = repo?.worldbookName || "";
   // 排队列表：后端持久化队列（离开页面/刷新后仍在），按本仓库过滤。
   // 内容(RichContent)后端只存 multiAgent payload；UI 的编辑回填/引导另存本地映射，缺失则用文本兜底。
   const [queued, setQueued] = useState<QueueItem[]>([]);
@@ -100,7 +174,7 @@ export function useChatSession(deps: ChatSessionDeps) {
   const [wfNode, setWfNode] = useState<string>("");  // 当前执行的节点显示名（WS executing 消息）
   const [regeneratingIds, setRegeneratingIds] = useState<Set<string>>(new Set());
   const wsUnsubRef = useRef<(() => void) | null>(null);  // 当前进度 WS 退订
-  const abortRef = useRef<{ botId: string; abort: () => void } | null>(null);  // 中断当前流式生成及其所有者
+  const abortRef = useRef<ActiveAgentStream | null>(null);  // 仅显式停止才中断；导航离开保持后台运行
   const bgRunningRef = useRef(false);  // 后台任务进行中：此时后端拥有快照写权，前端不抢写以免覆盖
   // 慢守望阶段（releaseBusy 后仍在轮询）：wfRunning 已 false，但仍需显示停止键
   const [slowWatchPromptId, setSlowWatchPromptId] = useState<string | null>(null);
@@ -203,7 +277,7 @@ export function useChatSession(deps: ChatSessionDeps) {
     isBusy: !!streamingId || wfRunning,
     isStreaming: !!streamingId,
     chat,
-    embed: settings.embedModel,
+    embed: embedModel,
     outputDir: settings.outputDir,
     reminderTokens: settings.contextReminderTokens,
     askConfirm,
@@ -278,20 +352,31 @@ export function useChatSession(deps: ChatSessionDeps) {
       try {
         const r = await fetchHistory(threadId);
         if (!alive) return;
-        setMessages(
-          (r.items || []).map((m) => {
-            const imgs = m.images || [];
-            const parts: MsgPart[] = [];
-            if (m.content) parts.push({ type: "text", text: m.content });
-            for (const u of imgs) parts.push({ type: "image", url: u });
-            return {
-              id: crypto.randomUUID(),
-              role: m.role === "assistant" ? "assistant" : "user",
-              text: m.content,
-              parts: parts.length > 0 ? parts : undefined,
-            };
-          }),
-        );
+        const historyMessages = (r.items || []).map((m) => {
+          const imgs = m.images || [];
+          const parts: MsgPart[] = [];
+          if (m.content) parts.push({ type: "text", text: m.content });
+          for (const u of imgs) parts.push({ type: "image", url: u });
+          return {
+            id: crypto.randomUUID(),
+            role: m.role === "assistant" ? "assistant" : "user",
+            text: m.content,
+            parts: parts.length > 0 ? parts : undefined,
+          } as ChatMessage;
+        });
+        // 卡即作品：全无历史(本地/快照/后端皆空)且关联角色卡 → 用卡的 first_mes 作开场白首条。
+        // 落一次后进快照，下次从快照恢复，不再重复注入（幂等）。
+        if (historyMessages.length === 0 && repo?.cardName && settings.characterDir) {
+          const opening = await loadOpeningMessage(settings.characterDir, repo.cardName, effectivePersona.name || "");
+          if (!alive) return;
+          if (opening) {
+            setMessages([{ id: crypto.randomUUID(), role: "assistant", text: opening }]);
+          } else {
+            setMessages(historyMessages);
+          }
+        } else {
+          setMessages(historyMessages);
+        }
       } catch { /* 后端未起/无历史，保持空 */ }
       finally { if (alive) loadedRef.current = true; }
       await maybeStartBgPoll();
@@ -302,8 +387,7 @@ export function useChatSession(deps: ChatSessionDeps) {
       recoveryTokenRef.current += 1;
       recoveryActiveRef.current = false;
       bgRunningRef.current = false;
-      abortRef.current?.abort();
-      abortRef.current = null;
+      abortRef.current = releaseAgentStream(abortRef.current, "navigation");
       if (snapTimer.current) { clearTimeout(snapTimer.current); snapTimer.current = null; }
       wsUnsubRef.current?.(); wsUnsubRef.current = null;  // 关进度 WS，避免切仓库泄漏连接
       dispatch({ t: "reset" });  // 清空生成状态 + 待发队列，避免串到新仓库
@@ -404,16 +488,18 @@ export function useChatSession(deps: ChatSessionDeps) {
 
   // ===== 进行中生图任务持久化（切仓库/刷新后可恢复）=====
   const pendingKey = `laf_pending_gen_${threadId}`;
-  const getPending = (): { prompt_id: string; createdAt: number; outputNodeIds?: string[]; regeneration?: RegenerationSnapshot }[] => {
+  const getPending = (): PendingGeneration[] => {
     try { return JSON.parse(localStorage.getItem(pendingKey) || "[]"); } catch { return []; }
   };
   const addPending = (
     promptId: string,
     outputNodeIds: string[] = [],
     regeneration?: RegenerationSnapshot,
+    target?: PendingGeneration["target"],
+    prompt = "",
   ) => {
     const list = registerPending(
-      getPending(), promptId, Date.now(), outputNodeIds, regeneration);
+      getPending(), promptId, Date.now(), outputNodeIds, regeneration, target, prompt);
     try { localStorage.setItem(pendingKey, JSON.stringify(list)); } catch { /* ignore */ }
   };
   const removePending = (promptId: string) => {
@@ -434,26 +520,41 @@ export function useChatSession(deps: ChatSessionDeps) {
     if (!promptId) return false;
     finalizedRef.current.add(promptId);
     try {
-      const savedRegeneration = pending.find((item) => item.prompt_id === promptId)?.regeneration;
-      const regeneration = savedRegeneration?.kind === "workflow"
-        ? { ...savedRegeneration, prompt: best }
+      const pendingItem = pending.find((item) => item.prompt_id === promptId);
+      const savedRegeneration = pendingItem?.regeneration;
+      const target = pendingItem?.target;
+      const generationPrompt = resolveGenerationPrompt(pendingItem?.prompt, savedRegeneration, best);
+      const regeneration = savedRegeneration?.kind === "workflow" || savedRegeneration?.kind === "template"
+        ? { ...savedRegeneration, prompt: generationPrompt }
         : savedRegeneration;
-      const comfyuiUrl = regeneration?.kind === "workflow"
-        ? regeneration.comfyuiUrl
-        : settings.comfyuiUrl;
+      const comfyuiUrl = comfyRegenerationUrl(regeneration) || settings.comfyuiUrl;
       const result = await persistWorkflowGeneration({
         threadId,
         repoId: repo?.id || "home",
         promptId,
-        prompt: best,
+        prompt: generationPrompt,
         images: r.images || [],
         videos: r.videos || [],
         outputDir: settings.outputDir,
         comfyuiUrl,
-        embed: settings.embedModel,
+        embed: embedModel,
         chat,
         regeneration,
+        target,
       });
+      if (target && result.target?.url) {
+        setMessages((current) => resolveMediaSlot(
+          current, target.messageId, target.slotId, result.target!.url,
+          result.target!.media_type, regeneration,
+        ));
+        if (result.target.media_type === "image" && repo?.id) {
+          setGeneratedCover(repo.id, result.target.url);
+        }
+        if (result.durable && result.images.some((image) => image.indexed)) {
+          window.dispatchEvent(new CustomEvent("laf-generation-saved", { detail: threadId }));
+        }
+        return true;
+      }
       const blocks = workflowMessages(result.messages);
       setMessages((current) => upsertMessages(current, blocks));
       const firstImage = blocks.find((message) => message.image)?.image;
@@ -477,16 +578,32 @@ export function useChatSession(deps: ChatSessionDeps) {
     setWfNode("");
   };
 
+  const discardFailedIllustration = (
+    messageId: string, slotId: string, stage: string, error: string, promptId = "",
+  ) => {
+    console.error("[auto-illustration]", {
+      threadId: repo?.id || "home", messageId, slotId, stage, error, promptId,
+    });
+    setMessages((current) => dropMediaSlot(current, messageId, slotId));
+    void reportIllustrationFailure({
+      threadId: repo?.id || "home",
+      repoId: repo?.id || "home",
+      messageId, slotId, stage, error, promptId,
+    }).catch((reportError) => {
+      console.error("[auto-illustration] failure log upload failed", reportError);
+    });
+  };
+
   const pollResult = (
     promptId: string,
     outputNodeIds: string[] = [],
     regeneration?: RegenerationSnapshot,
+    target?: PendingGeneration["target"],
+    prompt = "",
   ) => {
-    addPending(promptId, outputNodeIds, regeneration);  // 记进行中（含完整重放参数），切仓库/刷新后可恢复
-    const comfyuiUrl = regeneration?.kind === "workflow"
-      ? regeneration.comfyuiUrl
-      : settings.comfyuiUrl;
-    dispatch({ t: "workflowStart", promptId });  // 状态 C：工作流出图中
+    addPending(promptId, outputNodeIds, regeneration, target, prompt);  // 记进行中（含插槽目标与提示词），切仓库/刷新后可恢复
+    const comfyuiUrl = comfyRegenerationUrl(regeneration) || settings.comfyuiUrl;
+    if (!target?.background) dispatch({ t: "workflowStart", promptId });
     // 节点 id → 类型名映射（用 capturedGraph，API 格式 {id:{class_type,inputs}}）
     const graph = regeneration?.kind === "workflow" ? regeneration.graph : null;
     const nodeLabel = (id: string): string => {
@@ -496,41 +613,80 @@ export function useChatSession(deps: ChatSessionDeps) {
       } catch { return `节点 #${id}`; }
     };
     // 实时进度：直连 ComfyUI /ws（完成判定仍以下方轮询为准，WS 只驱动进度条）
-    stopProgress();
-    setWfProgress(0);
-    setWfNode("");
-    wsUnsubRef.current = subscribeProgress(comfyuiUrl, promptId, {
-      onProgress: (pct) => setWfProgress(pct),
-      onNode: (id) => setWfNode(nodeLabel(id)),
-    });
+    if (!target?.background) {
+      stopProgress();
+      setWfProgress(0);
+      setWfNode("");
+      wsUnsubRef.current = subscribeProgress(comfyuiUrl, promptId, {
+        onProgress: (pct) => setWfProgress(pct),
+        onNode: (id) => setWfNode(nodeLabel(id)),
+      });
+    }
     let tries = 0;
+    let consecutiveNotFound = 0;
     const tick = async () => {
       tries += 1;
       try {
         const r = await getResult(promptId, comfyuiUrl, outputNodeIds);
-        if (r.status === "completed") {
+        const resultAction = generationResultAction(r.status);
+        if (resultAction === "complete") {
           const got = await finalizeGeneration(r, promptId);
           if (!got && (r.images?.length || 0) === 0 && (r.videos?.length || 0) === 0 && !pickBestText(r.texts)) {
-            pushBot("生成完成，但没有输出（工作流未含 SaveImage / 视频合成 / 文字输出节点）。");
+            if (target) discardFailedIllustration(
+              target.messageId, target.slotId, "completed_without_media",
+              "生成完成但没有媒体输出", promptId,
+            );
+            else pushBot("生成完成，但没有输出（工作流未含 SaveImage / 视频合成 / 文字输出节点）。");
           }
           removePending(promptId);
-          stopProgress();
-          setSlowWatchPromptId(null);
-          dispatch({ t: "workflowDone", promptId });
+          if (!target?.background) {
+            stopProgress();
+            setSlowWatchPromptId(null);
+            dispatch({ t: "workflowDone", promptId });
+          }
+          return;
+        }
+        if (resultAction === "fail") {
+          removePending(promptId);
+          const error = r.error || "ComfyUI 工作流执行失败";
+          if (target) discardFailedIllustration(
+            target.messageId, target.slotId, "execution", error, promptId,
+          );
+          if (!target?.background) {
+            stopProgress();
+            setSlowWatchPromptId(null);
+            dispatch({ t: "workflowDone", promptId });
+            pushBot(`生成失败：${error}`);
+          }
+          refreshChatBackgroundActivities();
           return;
         }
         if (r.status === "not_found") {
+          consecutiveNotFound += 1;
+          if (notFoundPollAction(consecutiveNotFound) === "retry") {
+            const schedule = pollSchedule(tries);
+            if (schedule.delayMs !== null) setTimeout(tick, schedule.delayMs);
+            return;
+          }
           // 任务丢失：只有 promptId 还在 pending 里才报错，
           // 若已被 removePending 清掉说明任务已正常完成，静默结束轮询
           if (!getPending().some((p) => p.prompt_id === promptId)) { setSlowWatchPromptId(null); return; }
           removePending(promptId);
-          stopProgress();
-          setSlowWatchPromptId(null);
+          if (target) discardFailedIllustration(
+            target.messageId, target.slotId, "task_not_found", "出图任务已丢失", promptId,
+          );
+          if (!target?.background) {
+            stopProgress();
+            setSlowWatchPromptId(null);
+          }
           refreshChatBackgroundActivities();
-          dispatch({ t: "workflowDone", promptId });
-          pushBot("⚠️ 出图任务已丢失（ComfyUI 可能已重启或队列被清空）。如需重新生图，请点工作流卡片的「运转工作流」。");
+          if (!target?.background) {
+            dispatch({ t: "workflowDone", promptId });
+            pushBot("⚠️ 出图任务已丢失（ComfyUI 可能已重启或队列被清空）。如需重新生图，请点工作流卡片的「运转工作流」。");
+          }
           return;
         }
+        consecutiveNotFound = 0;
       } catch {
         // 历史还没出，继续等
       }
@@ -538,7 +694,7 @@ export function useChatSession(deps: ChatSessionDeps) {
       // 全程不 removePending：即使用户不切仓库干等，超长任务(实测 71 节点 4.4 分钟，
       // 甚至更久)出图后也能被这条守望自动 finalize，不再丢图。
       const schedule = pollSchedule(tries);
-      if (schedule.releaseBusy) {
+      if (schedule.releaseBusy && !target?.background) {
         // 快轮询阶段结束仍没完成：解除"运转中"占用不阻塞操作，进入慢守望。
         // 保留 slowWatchPromptId 使停止键继续可见，用户仍可取消。
         stopProgress();
@@ -550,7 +706,11 @@ export function useChatSession(deps: ChatSessionDeps) {
         setTimeout(tick, schedule.delayMs);
       } else {
         // 达上限仍未出：慢守望结束，清除停止键
-        setSlowWatchPromptId(null);
+        if (target) discardFailedIllustration(
+          target.messageId, target.slotId, "poll_timeout",
+          "后台出图等待超时，可刷新后继续恢复", promptId,
+        );
+        else setSlowWatchPromptId(null);
       }
       // 达 210 次(约 20 分钟)仍未出：停止本轮守望，但保留 pending，
       // 下次进仓库/刷新由 resume 兜底重查。
@@ -559,6 +719,136 @@ export function useChatSession(deps: ChatSessionDeps) {
   };
 
   // 模板是否定义了图像输入口 / 图值是否已填 → 见 lib/chatGeneration（纯逻辑，已抽出可测）
+
+  // 剧情高潮点异步出图/出视频：后端发来 booru 提示词 + motion 动态强度，按本作品预设组 values 提交 ComfyUI，
+  // 走 pollResult 现成异步闭环（徽记显示进度 + 离开继续 + 点击返回）。未预设模板 → 静默跳过。
+  // 智能模态：smartVideo 开 且 motion>=2 且 预设了视频模板 → 用视频模板，否则用图片模板。
+  const submitIllustration = async (
+    prompt: string, motion = 0, actors: string[] = [], messageId: string, slotId: string,
+    sceneSpec?: IllustrationSceneSpec,
+  ) => {
+    const failSlot = (stage: string, error: string) =>
+      discardFailedIllustration(messageId, slotId, stage, error);
+    const preset = settings.mediaInsert?.[repo?.id || ""];
+    if (!preset) { failSlot("configuration", "当前作品没有配置自动插画模板"); return; }
+    if (!prompt.trim() && !sceneSpec?.narrative.trim()) {
+      failSlot("prompt", "剧情出图提示词为空");
+      return;
+    }
+    const useVideo = !!(preset.smartVideo && preset.videoTemplateId && motion >= 2);
+    const chosenId = useVideo ? preset.videoTemplateId! : preset.templateId;
+    if (!chosenId) {
+      failSlot("configuration", "当前图/视频模式没有配置工作流模板");
+      return;
+    }
+    const tpl = templates.find((t) => t.id === chosenId);
+    if (!tpl) {
+      failSlot("configuration", "已保存的工作流模板不存在，请重新选择模板");
+      return;
+    }
+    // ⑥ 按在场角色挑 LoRA/底图：候选 = 分析出的在场角色 + 本作品主角色卡名兜底。
+    // 命中任一角色的配置：有其 LoRA → 用角色 LoRA；无 LoRA → 用风格 LoRA + 该角色底图。
+    // 都无角色配置 → 回退风格 LoRA/风格底图 或旧的单 preset.loraName（兼容旧数据）。
+    const candidates = [...actors, ...(repo?.cardName ? [repo.cardName] : [])];
+    const cmap = preset.characterLoras || {};
+    let loraName = "", loraWeight = 0.8, baseImage = "", characterLora = false;
+    for (const c of candidates) {
+      const b = cmap[c];
+      if (!b) continue;
+      if (b.loraName) {
+        loraName = b.loraName;
+        loraWeight = b.loraWeight ?? 0.8;
+        characterLora = true;
+      }
+      if (b.baseImage) baseImage = b.baseImage;
+      if (loraName || baseImage) break;
+    }
+    if (!loraName) {  // 角色无自己的 LoRA → 风格 LoRA 兜底（或旧单 LoRA）
+      loraName = preset.styleLora || preset.loraName || "";
+      loraWeight = preset.styleLoraWeight ?? preset.loraWeight ?? 0.8;
+    }
+    if (!baseImage) baseImage = preset.styleBaseImage || "";  // 无角色底图 → 风格底图兜底
+    let negativePrompt = preset.negativePrompt?.trim() || sceneSpec?.negative_prompt || "";
+    if (sceneSpec?.profile_prompt && sceneSpec.profile === promptProfile) {
+      prompt = sceneSpec.profile_prompt;
+    } else if (sceneSpec) {
+      try {
+        const rendered = await genProfilePrompt(
+          promptProfile,
+          { ...sceneSpec, actors, character_lora: characterLora },
+          { ...chat, proxyUrl: modelProxies.chatProxyUrl },
+        );
+        prompt = rendered.prompt;
+        negativePrompt = preset.negativePrompt?.trim() || rendered.negative_prompt || negativePrompt;
+      } catch (error) {
+        failSlot(
+          "prompt_profile",
+          error instanceof Error ? error.message : "智能提示词生成失败",
+        );
+        return;
+      }
+    }
+    if (!prompt.trim()) {
+      failSlot("prompt_profile", "智能提示词结果为空");
+      return;
+    }
+    if (promptProfile === "anima_tags") {
+      prompt = replacePromptQualityLine(
+        prompt, preset.qualityPrompt || "", sceneSpec?.rating || "sfw",
+      );
+    }
+    // 触发词自动前置：生效 LoRA 的触发词必须逐字精确（大脑会漏写/改写 → LoRA 不生效却看不出），
+    // 故按文件名查触发词表机械前置到正向提示词。对齐 /a 编排的 lora_inject 思路。
+    // 已在提示词里出现的词不重复注入（大小写不敏感）。查表失败/无触发词不阻断出图。
+    if (loraName) {
+      try {
+        const items = (await listLoras()).items || [];
+        prompt = applyProfileLoraTriggers(
+          prompt, promptProfile, promptAdditionsForSelectedLora(items, loraName),
+        );
+      } catch { /* 触发词查表失败 → 用原提示词，不阻断剧情出图 */ }
+    }
+    // 底图需先上传到 ComfyUI input 目录，取回可供 LoadImage 引用的文件名
+    let uploadedImage = "";
+    const needsImage = tpl.exposed.some((f) => f.semantic === SEMANTIC_BASE_IMAGE);
+    if (needsImage && baseImage) {
+      try {
+        const blob = await (await fetch(localViewUrl(baseImage))).blob();
+        const file = new File([blob], baseImage.split(/[\\/]/).pop() || "base.png", { type: blob.type || "image/png" });
+        uploadedImage = (await uploadImage(file, settings.comfyuiUrl)).name;
+      } catch { /* 底图上传失败 → 退化为纯文生图，不阻断 */ }
+    }
+    // 按 exposed 的 semantic 组 values（key = "节点id.字段"）：提示词/LoRA名/LoRA权重/底图
+    const values = illustrationTemplateValues(tpl.exposed, {
+      prompt, negativePrompt, loraName, loraWeight, baseImage: uploadedImage,
+      latentSize: latentSizeFor(
+        sceneSpec?.aspect_ratio || "2:3",
+        preset.latentLongEdge === 2048 || preset.latentLongEdge === 4096
+          ? preset.latentLongEdge : 1024,
+      ),
+    });
+    try {
+      const st = await comfyStatus(settings.comfyuiUrl);
+      if (!st.running) {
+        failSlot("comfyui_status", "ComfyUI 尚未启动");
+        return;
+      }
+      const r = await submitWorkflow(chosenId, values, settings.comfyuiUrl, prompt);
+      if (r.prompt_id) {
+        const outputNodeIds = tpl.primary_output_node_id ? [tpl.primary_output_node_id] : [];
+        const target = { messageId, slotId, background: true as const };
+        const regeneration = templateRegenerationSnapshot(
+          chosenId, values, settings.comfyuiUrl, outputNodeIds, prompt,
+        );
+        setMessages((current) => bindMediaSlotPrompt(current, messageId, slotId, r.prompt_id!));
+        pollResult(r.prompt_id, outputNodeIds, regeneration, target, prompt);
+      } else {
+        failSlot("submit", "ComfyUI 没有返回任务 ID");
+      }
+    } catch (error) {
+      failSlot("submit", error instanceof Error ? error.message : "自动插画提交失败");
+    }
+  };
   // APPEND3_HERE
 
   // /s 启动：取最近一张已确认的工作流卡，用抓取到的画布工作流提交生成
@@ -621,23 +911,41 @@ export function useChatSession(deps: ChatSessionDeps) {
         const action = pendingResumeAction(p, resumedRef.current, Date.now());
         if (action === "skip") continue;  // 本会话已处理过，不重复
         resumedRef.current.add(p.prompt_id);
-        if (action === "expire") { removePending(p.prompt_id); continue; }
+        if (action === "expire") {
+          if (p.target) discardFailedIllustration(
+            p.target.messageId, p.target.slotId, "resume_expired",
+            "后台出图任务已过期", p.prompt_id,
+          );
+          removePending(p.prompt_id);
+          continue;
+        }
         const outputNodeIds = p.outputNodeIds || [];  // 主输出过滤（提交时随 pending 落盘）
         try {
-            const comfyuiUrl = p.regeneration?.kind === "workflow"
-              ? p.regeneration.comfyuiUrl
-              : settings.comfyuiUrl;
+            const comfyuiUrl = comfyRegenerationUrl(p.regeneration) || settings.comfyuiUrl;
             const r = await getResult(p.prompt_id, comfyuiUrl, outputNodeIds);
           if (!alive) return;
-          if (r.status === "completed") {
+          const resultAction = generationResultAction(r.status);
+          if (resultAction === "complete") {
             await finalizeGeneration(r, p.prompt_id);
             removePending(p.prompt_id);
-            dispatch({ t: "workflowDone", promptId: p.prompt_id });  // 补清工作流态，否则切回后卡在"运转中"
+            if (!p.target?.background) {
+              dispatch({ t: "workflowDone", promptId: p.prompt_id });  // 前台任务补清工作流态
+            }
+          } else if (resultAction === "fail") {
+            removePending(p.prompt_id);
+            const error = r.error || "ComfyUI 工作流执行失败";
+            if (p.target) discardFailedIllustration(
+              p.target.messageId, p.target.slotId, "execution", error, p.prompt_id,
+            ); else {
+              dispatch({ t: "workflowDone", promptId: p.prompt_id });
+              pushBot(`生成失败：${error}`);
+            }
+            refreshChatBackgroundActivities();
           } else {
-            pollResult(p.prompt_id, outputNodeIds, p.regeneration);  // 仍在跑，重新挂轮询
+            pollResult(p.prompt_id, outputNodeIds, p.regeneration, p.target, p.prompt);  // 仍在跑，重新挂轮询
           }
         } catch {
-          pollResult(p.prompt_id, outputNodeIds, p.regeneration);    // 查询失败按仍在跑处理，继续轮询
+          pollResult(p.prompt_id, outputNodeIds, p.regeneration, p.target, p.prompt);    // 查询失败按仍在跑处理，继续轮询
         }
       }
     };
@@ -723,6 +1031,7 @@ export function useChatSession(deps: ChatSessionDeps) {
     if (threadId === "home") return;  // 首页临时草稿区不进后端队列
     const text = content.text.trim();
     const images = content.images || [];
+    const visibleHistory = promptHistory(messagesRef.current);
     void enqueueChatQueueTask({
       threadId,
       message: text,
@@ -732,12 +1041,22 @@ export function useChatSession(deps: ChatSessionDeps) {
       chat,
       gen: genModel,
       video: videoModel,
-      embed: settings.embedModel,
+      embed: embedModel,
       size, imageQuality,
       outputDir: settings.outputDir, repoId: repo?.id || threadId,
       proxyUrl: settings.proxyEnabled ? settings.proxyUrl : "",
+      ...modelProxies,
       styleTemplate: activeStyleTemplate(settings), agentId: settings.activeAgentId || "",
+      streamOutput: settings.streamOutput,
       contextMaxTokens: settings.contextMaxTokens,
+      historyPerRole: settings.historyPerRole,
+      history: visibleHistory,
+      characterDir: settings.characterDir, cardName: repo?.cardName || "",
+      presetDir: settings.presetDir, presetName: settings.activePresetName,
+      userName: effectivePersona.name, userPersona: effectivePersona.content, personaBound,
+      worldbookDir, worldbookName,
+      illustrate: settings.illustrate, comfyIllustrate, promptProfile,
+      characterBaseImages, illustrationActorNames, styleBaseImage,
     }).then((res) => {
       if (res.task?.id) saveQueueContent(res.task.id, content);
       void refreshQueue();
@@ -780,6 +1099,22 @@ export function useChatSession(deps: ChatSessionDeps) {
       }
       window.dispatchEvent(new CustomEvent("laf-generation-saved", { detail: threadId }));
     }
+    // 剧情高潮点出图请求：按本作品预设提交 ComfyUI 异步出图（不产气泡，出图完成后由 pollResult 补入）
+    if (event.type === "illustrate_request") {
+      const slotId = event.id || crypto.randomUUID();
+      setMessages((current) => reduceChatStreamEvent(
+        current, botId, { ...event, id: slotId },
+      ));
+      void submitIllustration(
+        event.prompt, event.motion, event.actors, botId, slotId, event.sceneSpec,
+      );
+      return;
+    }
+    // RAG 记忆库创建状态：右下角轻提示（创建中/成功/失败），不入气泡流
+    if (event.type === "rag_status") {
+      emitRagStatus({ state: event.state, kind: event.kind, count: event.count });
+      return;
+    }
     setMessages((current) => reduceChatStreamEvent(current, botId, event));
   };
 
@@ -787,7 +1122,11 @@ export function useChatSession(deps: ChatSessionDeps) {
   // 复用同一套生命周期（消息/图片/状态/落盘），是"前端生命周期与后端 agent 解耦"的体现。
   // skipUserMsg：用户气泡已由调用方（如编排判定前）提前 push，这里只补 bot 气泡，避免重复。
   // userMsgId：复用调用方预 push 的用户消息 id，保证后端 userMessageId 关联一致。
-  const runFreeText = (t: string, content?: RichContent, skipUserMsg = false, userMsgId?: string) => {
+  const runFreeText = (
+    t: string, content?: RichContent, skipUserMsg = false, userMsgId?: string,
+    historyMessages: readonly ChatMessage[] = messagesRef.current,
+  ) => {
+    const visibleHistory = promptHistory(historyMessages);
     const images = content?.images || [];
     const imageMask = content?.maskedImage
       ? { image: content.maskedImage.image, mask: content.maskedImage.mask }
@@ -824,13 +1163,23 @@ export function useChatSession(deps: ChatSessionDeps) {
         onEvent: (event) => handleAgentStreamEvent(botId, event),
         onDone,
       },
-      { outputDir: settings.outputDir, repoId: repo?.id || threadId, embed: settings.embedModel,
+      { outputDir: settings.outputDir, repoId: repo?.id || threadId, embed: embedModel,
         proxyUrl: settings.proxyEnabled ? settings.proxyUrl : "", messageId: botId,
+        ...modelProxies,
         userMessageId: userMsg.id,
         styleTemplate: activeStyleTemplate(settings), agentId: settings.activeAgentId || "",
+        streamOutput: settings.streamOutput,
         contextMaxTokens: settings.contextMaxTokens,
+        historyPerRole: settings.historyPerRole,
+        history: visibleHistory,
         imageQuality,
-        video: videoModel },
+        video: videoModel,
+        characterDir: settings.characterDir, cardName: repo?.cardName || "",
+        presetDir: settings.presetDir, presetName: settings.activePresetName,
+        userName: effectivePersona.name, userPersona: effectivePersona.content, personaBound,
+        worldbookDir, worldbookName,
+        illustrate: settings.illustrate, comfyIllustrate, promptProfile, characterBaseImages,
+        illustrationActorNames, styleBaseImage },
       undefined,
       undefined,
       imageMask,
@@ -838,11 +1187,34 @@ export function useChatSession(deps: ChatSessionDeps) {
     abortRef.current = { botId, abort };
   };
 
+  const regenerateMessage = async (messageId: string) => {
+    if (streamingId || wfRunning) return;
+    const replay = prepareConversationRegeneration(messagesRef.current, messageId);
+    if (!replay) return;
+    const discarded = messagesRef.current.length - replay.retained.length;
+    if (discarded > 1 && !await askConfirm(`重新生成将删除此消息后的 ${discarded} 条消息，是否继续？`)) {
+      return;
+    }
+    messagesRef.current = replay.retained;
+    setMessages(replay.retained);
+    if (threadId === "home") {
+      homeDraft = replay.retained;
+    } else {
+      try { localStorage.setItem(chatKey, JSON.stringify(replay.retained)); } catch { /* ignore */ }
+      void saveSnapshot(threadId, replay.retained).catch(() => {});
+    }
+    atBottomRef.current = true;
+    runFreeText(
+      replay.content.text.trim(), replay.content, true, messageId, replay.history,
+    );
+  };
+
   const actOnPromptApproval = (
     approval: PromptApproval,
     action: "submit" | "change" | "cancel",
     editedPrompt?: string,
   ): Promise<void> => new Promise((resolve) => {
+    const visibleHistory = promptHistory(messagesRef.current);
     const botId = crypto.randomUUID();
     const actionText = action === "submit" ? "确认提交" : action === "change" ? "更改提示词" : "取消";
     setMessages((messages) => [
@@ -866,14 +1238,24 @@ export function useChatSession(deps: ChatSessionDeps) {
       {
         outputDir: settings.outputDir,
         repoId: repo?.id || threadId,
-        embed: settings.embedModel,
+        embed: embedModel,
         proxyUrl: settings.proxyEnabled ? settings.proxyUrl : "",
+        ...modelProxies,
         messageId: botId,
         styleTemplate: activeStyleTemplate(settings),
         agentId: settings.activeAgentId || "",
+        streamOutput: settings.streamOutput,
         contextMaxTokens: settings.contextMaxTokens,
+        historyPerRole: settings.historyPerRole,
+        history: visibleHistory,
         imageQuality,
         video: videoModel,
+        characterDir: settings.characterDir, cardName: repo?.cardName || "",
+        presetDir: settings.presetDir, presetName: settings.activePresetName,
+        userName: effectivePersona.name, userPersona: effectivePersona.content, personaBound,
+        worldbookDir, worldbookName,
+        illustrate: settings.illustrate, comfyIllustrate, promptProfile, characterBaseImages,
+        illustrationActorNames, styleBaseImage,
       },
       { approvalId: approval.id, action, editedPrompt },
     );
@@ -884,6 +1266,7 @@ export function useChatSession(deps: ChatSessionDeps) {
     choice: RouteChoice,
     route: AgentRoute,
   ): Promise<void> => new Promise((resolve) => {
+    const visibleHistory = promptHistory(messagesRef.current);
     const source = messages.find((message) => message.id === choice.userMessageId);
     if (!source) {
       pushBot("原始消息已不存在，无法继续执行这次选择。请重新发送需求。");
@@ -926,15 +1309,25 @@ export function useChatSession(deps: ChatSessionDeps) {
       {
         outputDir: settings.outputDir,
         repoId: repo?.id || threadId,
-        embed: settings.embedModel,
+        embed: embedModel,
         proxyUrl: settings.proxyEnabled ? settings.proxyUrl : "",
+        ...modelProxies,
         messageId: botId,
         userMessageId: source.id,
         styleTemplate: activeStyleTemplate(settings),
         agentId: settings.activeAgentId || "",
+        streamOutput: settings.streamOutput,
         contextMaxTokens: settings.contextMaxTokens,
+        historyPerRole: settings.historyPerRole,
+        history: visibleHistory,
         imageQuality,
         video: videoModel,
+        characterDir: settings.characterDir, cardName: repo?.cardName || "",
+        presetDir: settings.presetDir, presetName: settings.activePresetName,
+        userName: effectivePersona.name, userPersona: effectivePersona.content, personaBound,
+        worldbookDir, worldbookName,
+        illustrate: settings.illustrate, comfyIllustrate, promptProfile, characterBaseImages,
+        illustrationActorNames, styleBaseImage,
       },
       undefined,
       { route, userMessageId: source.id },
@@ -977,8 +1370,7 @@ export function useChatSession(deps: ChatSessionDeps) {
     if (promptId) {
       try { await interruptComfy(settings.comfyuiUrl, promptId); } catch { /* 忽略 */ }
     }
-    abortRef.current?.abort();
-    abortRef.current = null;
+    abortRef.current = releaseAgentStream(abortRef.current, "stop");
   };
 
   // 中断当前生成（「停止」按钮）——兼容快轮询阶段（wfRunning）和慢守望阶段（slowWatchPromptId）
@@ -1033,10 +1425,15 @@ export function useChatSession(deps: ChatSessionDeps) {
     dispatchSend(item.content);  // 同 thread 新一轮：AI 带上下文续写 = 合并
   };
 
-  const regenerateResult = async (messageId: string) => {
+  const regenerateResult = async (messageId: string, slotId?: string) => {
     const message = messages.find((item) => item.id === messageId);
-    const snapshot = message?.regeneration;
-    if (!snapshot) {
+    const part = slotId
+      ? message?.parts?.find((item) => item.slotId === slotId)
+      : undefined;
+    const snapshot = slotId
+      ? part?.regeneration
+      : message?.regeneration;
+    if (!snapshot && !(slotId && part?.url)) {
       pushBot("这张历史图片生成时尚未保存完整参数，无法保证准确重生成。");
       return;
     }
@@ -1046,6 +1443,13 @@ export function useChatSession(deps: ChatSessionDeps) {
     }
     setRegeneratingIds((current) => new Set(current).add(messageId));
     try {
+      if (!snapshot) {
+        const generations = await listGenerations(repo?.id || "home", embedModel);
+        const prompt = legacyGenerationPrompt(part?.url || "", generations.items || []);
+        if (!prompt) throw new Error("资产库中未找到这张旧图的原提示词");
+        await submitIllustration(prompt, 0, [], messageId, slotId!);
+        return;
+      }
       if (snapshot.kind === "ai-image") {
         const model = resolveImageRegenerationModel(snapshot, settings.imageModels);
         if (!model) {
@@ -1053,11 +1457,15 @@ export function useChatSession(deps: ChatSessionDeps) {
             `原生图模型已不存在：${snapshot.model.modelName}（${snapshot.model.baseUrl}）`,
           );
         }
-        const rec = await replayImageGeneration(snapshot, { apiKey: model.apiKey }, {
+        const rec = await replayImageGeneration(snapshot, {
+          apiKey: model.apiKey,
+          proxyUrl: resolveModelProxy(model.proxyMode, settings.proxyUrl, settings.proxyEnabled),
+        }, {
           threadId,
           repoId: repo?.id || "home",
           outputDir: settings.outputDir,
-          embed: settings.embedModel,
+          embed: embedModel,
+          embedProxyUrl: modelProxies.embedProxyUrl,
         });
         setMessages((current) => upsertMessages(current, [
           agentImageMessage(rec.url, rec.id, rec.regeneration || snapshot),
@@ -1069,9 +1477,16 @@ export function useChatSession(deps: ChatSessionDeps) {
 
       const status = await comfyStatus(snapshot.comfyuiUrl);
       if (!status.running) throw new Error(`原 ComfyUI 地址未运行：${snapshot.comfyuiUrl}`);
-      const submitted = await submitGraph(snapshot.graph, snapshot.comfyuiUrl);
+      const submitted = snapshot.kind === "template"
+        ? await submitWorkflow(
+          snapshot.templateId, snapshot.values, snapshot.comfyuiUrl, snapshot.prompt,
+        )
+        : await submitGraph(snapshot.graph, snapshot.comfyuiUrl);
       if (!submitted.prompt_id) throw new Error("ComfyUI 未返回 prompt_id");
-      pollResult(submitted.prompt_id, snapshot.outputNodeIds, snapshot);
+      const target = slotId
+        ? { messageId, slotId, background: true as const }
+        : undefined;
+      pollResult(submitted.prompt_id, snapshot.outputNodeIds, snapshot, target, snapshot.prompt);
     } catch (error) {
       pushBot(`重新生图失败：${(error as Error).message}`);
     } finally {
@@ -1089,6 +1504,75 @@ export function useChatSession(deps: ChatSessionDeps) {
     setMessages([]);
   };
 
+  // ===== ④ AI 消息就地编辑 =====
+  // 改 text；若有 parts 则同步重建文本块（保留图片块），落盘走既有持久化 effect。
+  const editMessage = (id: string, text: string) => {
+    setMessages((ms) => ms.map((m) => {
+      if (m.id !== id) return m;
+      if (m.parts && m.parts.length > 0) {
+        const nonText = m.parts.filter((p) => p.type !== "text");
+        const parts = text ? [...nonText, { type: "text" as const, text }] : nonText;
+        return { ...m, text, parts };
+      }
+      return { ...m, text };
+    }));
+  };
+
+  // ===== ④ 检查点（回滚点）：当前小仓库内，快照到某条为止的消息，可回滚 =====
+  const ckptKey = `laf_ckpt_${threadId}`;
+  const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([]);
+  useEffect(() => {
+    try { setCheckpoints(JSON.parse(localStorage.getItem(ckptKey) || "[]")); }
+    catch { setCheckpoints([]); }
+  }, [ckptKey]);
+  const writeCheckpoints = (list: Checkpoint[]) => {
+    setCheckpoints(list);
+    try { localStorage.setItem(ckptKey, JSON.stringify(list)); } catch { /* 超额忽略 */ }
+  };
+  const createCheckpoint = (id: string) => {
+    const idx = messages.findIndex((m) => m.id === id);
+    if (idx < 0) return;
+    writeCheckpoints([{
+      id: crypto.randomUUID(),
+      label: new Date().toLocaleString(),
+      createdAt: Date.now(),
+      messages: messages.slice(0, idx + 1),
+    }, ...checkpoints]);
+  };
+  const restoreCheckpoint = (ckptId: string) => {
+    const cp = checkpoints.find((c) => c.id === ckptId);
+    if (cp) setMessages(cp.messages);
+  };
+  const deleteCheckpoint = (ckptId: string) =>
+    writeCheckpoints(checkpoints.filter((c) => c.id !== ckptId));
+
+  // ④ 分支：返回到某条为止的消息切片（新小仓库拷贝这段起头，创建+跳转在 App 层）
+  const messagesUpTo = (id: string): ChatMessage[] => {
+    const idx = messages.findIndex((m) => m.id === id);
+    return idx < 0 ? messages : messages.slice(0, idx + 1);
+  };
+
+  // 删除单条消息（用户/AI 均可）。立即更新 ref + 后端快照；下次请求同时显式上传该可见历史。
+  const deleteMessage = (id: string) => {
+    const next = messagesRef.current.filter((message) => message.id !== id);
+    messagesRef.current = next;
+    setMessages(next);
+    if (threadId === "home") {
+      homeDraft = next;
+      return;
+    }
+    try { localStorage.setItem(chatKey, JSON.stringify(next)); } catch { /* ignore */ }
+    void saveSnapshot(threadId, next).catch(() => {});
+  };
+
+  // 会话导入后重载：从后端快照重新拉取消息流覆盖当前视图（导入端点已落盘为真源）。
+  const reloadFromSnapshot = async () => {
+    try {
+      const snap = await fetchSnapshot(threadId);
+      setMessages((snap.items || []) as ChatMessage[]);
+    } catch { /* 拉取失败保持当前视图，用户可刷新 */ }
+  };
+
   return {
     messages, streamingId, wfRunning, slowWatchPromptId, wfProgress, wfNode, queued, regeneratingIds,
     send, runCommand, pushBot, pushMsg,
@@ -1098,6 +1582,8 @@ export function useChatSession(deps: ChatSessionDeps) {
     stopGenerating, guideQueued, cancelQueued,
     confirmReq, compact, compacting,
     contextReminder, dismissContextReminder,
-    clearHome, clearCache: clearCacheAction,
+    clearHome, clearCache: clearCacheAction, reloadFromSnapshot,
+    editMessage, deleteMessage, regenerateMessage,
+    checkpoints, createCheckpoint, restoreCheckpoint, deleteCheckpoint, messagesUpTo,
   };
 }

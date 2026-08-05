@@ -37,6 +37,29 @@ export function defaultPrompt() {
   return apiGet<{ prompt: string }>("/agents/default-prompt");
 }
 
+// ③ 内置智能体：图里所有默认 Agent 的元数据 + 默认值 + 当前生效值（含覆盖）
+export type BuiltinKind = "llm" | "rules" | "specialist";
+export interface BuiltinAgent {
+  id: string;
+  name: string;
+  kind: BuiltinKind;
+  role: string;
+  tools: string[];
+  editable: string[];              // 可覆盖字段名（llm: systemPrompt/temperature；rules: gateFloor/gateBaseRate/tiers）
+  defaults: Record<string, unknown>;
+  effective: Record<string, unknown>;  // 默认叠加用户覆盖后的生效值
+}
+// 覆盖表：{agent_id: {field: value}}
+export type BuiltinOverrides = Record<string, Record<string, unknown>>;
+
+export function listBuiltinAgents() {
+  return apiGet<BuiltinAgent[]>("/agents/builtin");
+}
+
+export function saveBuiltinOverrides(overrides: BuiltinOverrides) {
+  return apiPost<BuiltinAgent[]>("/agents/builtin", overrides);
+}
+
 export const DEFAULT_TOOLS: AgentTools = {
   generate_image: true, generate_video: true, image_to_image: true, analyze_image: true,
   search_inspiration: true,

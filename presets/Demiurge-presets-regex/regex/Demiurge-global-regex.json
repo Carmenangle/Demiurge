@@ -1,0 +1,411 @@
+[
+  {
+    "scriptName": "记忆召回折叠",
+    "findRegex": "<recall>([\\s\\S]*?)<\\/recall>",
+    "replaceString": "<details><summary>记忆召回</summary>$1</details>",
+    "trimStrings": [],
+    "placement": [
+      2,
+      1
+    ],
+    "disabled": false,
+    "markdownOnly": true,
+    "promptOnly": false,
+    "runOnEdit": true,
+    "minDepth": null,
+    "maxDepth": null,
+    "id": "f801dce8aa1f474b888e8fad2edb67eb"
+  },
+  {
+    "scriptName": "思考折叠",
+    "findRegex": "<thought>([\\s\\S]*?)<\\/thought>",
+    "replaceString": "<details><summary>思考过程</summary>$1</details>",
+    "trimStrings": [],
+    "placement": [
+      2,
+      1
+    ],
+    "disabled": false,
+    "markdownOnly": true,
+    "promptOnly": false,
+    "runOnEdit": true,
+    "minDepth": null,
+    "maxDepth": null,
+    "id": "835f8129186f48f6802d309661f39319"
+  },
+  {
+    "scriptName": "补充信息折叠",
+    "findRegex": "<supplement>([\\s\\S]*?)<\\/supplement>",
+    "replaceString": "<details><summary>补充信息</summary>$1</details>",
+    "trimStrings": [],
+    "placement": [
+      2,
+      1
+    ],
+    "disabled": false,
+    "markdownOnly": true,
+    "promptOnly": false,
+    "runOnEdit": true,
+    "minDepth": null,
+    "maxDepth": null,
+    "id": "b8d6055de9954a6e80163c94a1d731aa"
+  },
+  {
+    "scriptName": "隐藏远层楼层",
+    "findRegex": "/.*/s",
+    "replaceString": "",
+    "trimStrings": [],
+    "placement": [
+      2,
+      1
+    ],
+    "disabled": false,
+    "markdownOnly": true,
+    "promptOnly": false,
+    "runOnEdit": true,
+    "minDepth": 10,
+    "maxDepth": null,
+    "id": "2ef74f69895940798a5d1fbd3bace5cf"
+  },
+  {
+    "scriptName": "$",
+    "findRegex": "/\\$(.*?[^\\\\])\\$/gm",
+    "replaceString": "<code class=\"language-latex\">$1</code>",
+    "trimStrings": [],
+    "placement": [
+      2,
+      1,
+      3
+    ],
+    "disabled": false,
+    "markdownOnly": true,
+    "promptOnly": false,
+    "runOnEdit": false,
+    "minDepth": null,
+    "maxDepth": null,
+    "id": "72610f9ae78749fe8f4fac6a77fde531"
+  },
+  {
+    "scriptName": "$ - Legacy AsciiMath",
+    "findRegex": "/^(?:\\s*)\\$(.*)\\$(?:\\s*)$/gm",
+    "replaceString": "```asciimath\n$1\n```",
+    "trimStrings": [],
+    "placement": [
+      2,
+      1,
+      3
+    ],
+    "disabled": false,
+    "markdownOnly": true,
+    "promptOnly": false,
+    "runOnEdit": false,
+    "minDepth": null,
+    "maxDepth": null,
+    "id": "05c51175bff8401b96938047b27475d6"
+  },
+  {
+    "scriptName": "$$",
+    "findRegex": "/\\$\\$\\s*([\\s\\S]*?)\\s*\\$\\$/g",
+    "replaceString": "```latex\n$1\n```",
+    "trimStrings": [],
+    "placement": [
+      2,
+      1,
+      3
+    ],
+    "disabled": false,
+    "markdownOnly": true,
+    "promptOnly": false,
+    "runOnEdit": false,
+    "minDepth": null,
+    "maxDepth": null,
+    "id": "9a11abc80fa74547bad90b39403bdb8e"
+  },
+  {
+    "scriptName": "$$ - Legacy LaTeX",
+    "findRegex": "/^(?:\\s*)\\$\\$(.*)\\$\\$(?:\\s*)$/gm",
+    "replaceString": "```latex\n$1\n```",
+    "trimStrings": [],
+    "placement": [
+      2,
+      1,
+      3
+    ],
+    "disabled": false,
+    "markdownOnly": true,
+    "promptOnly": false,
+    "runOnEdit": false,
+    "minDepth": null,
+    "maxDepth": null,
+    "id": "985eb0c5bfe2474c9f461c135205b473"
+  },
+  {
+    "scriptName": "小cot折叠",
+    "findRegex": "/(<think>|<思考>|<thinking>)([\\s\\S]*?)(<\\/think>|<\\/思考>|<\\/thinking>)/g",
+    "replaceString": "<details><summary>推演内思考过程</summary>\n\n---\n$2\n</details>",
+    "trimStrings": [],
+    "placement": [
+      2
+    ],
+    "disabled": false,
+    "markdownOnly": true,
+    "promptOnly": false,
+    "runOnEdit": true,
+    "minDepth": null,
+    "maxDepth": null,
+    "id": "df879a6434ad4f47b365ac3a7eb83239"
+  },
+  {
+    "scriptName": "小cot对ai隐藏",
+    "findRegex": "/(<think>|<思考>|<thinking>)([\\s\\S]*?)(<\\/think>|<\\/思考>|<\\/thinking>)/g",
+    "replaceString": "",
+    "trimStrings": [],
+    "placement": [
+      2
+    ],
+    "disabled": false,
+    "markdownOnly": false,
+    "promptOnly": true,
+    "runOnEdit": true,
+    "minDepth": 2,
+    "maxDepth": null,
+    "id": "eee16d7d05144a05bbbda4f8b8402659"
+  },
+  {
+    "scriptName": "隐藏攻击",
+    "findRegex": "/<attack>.*?(?:<\\/attack>|$)/gs",
+    "replaceString": "",
+    "trimStrings": [],
+    "placement": [
+      2
+    ],
+    "disabled": false,
+    "markdownOnly": true,
+    "promptOnly": false,
+    "runOnEdit": true,
+    "minDepth": null,
+    "maxDepth": null,
+    "id": "a90d97c3ba0f415785e6eca7679fa14b"
+  },
+  {
+    "scriptName": "去-",
+    "findRegex": "/(?<=[\\u4e00-\\u9fa5\\u3400-\\u4DBF\\uF900-\\uFAFF])-(?=[\\u4e00-\\u9fa5\\u3400-\\u4DBF\\uF900-\\uFAFF])/gs",
+    "replaceString": "",
+    "trimStrings": [],
+    "placement": [
+      2,
+      1
+    ],
+    "disabled": false,
+    "markdownOnly": false,
+    "promptOnly": false,
+    "runOnEdit": true,
+    "minDepth": null,
+    "maxDepth": null,
+    "id": "2d1199436fcc4cadbe1b38a034fa117e"
+  },
+  {
+    "scriptName": "ai输出@(@)为@留空",
+    "findRegex": "/@\\(([^()]*)\\)(?=@)|@\\(([^()]*)\\)|\\(([^()]*)\\)@|@/g",
+    "replaceString": "$1$2$3",
+    "trimStrings": [],
+    "placement": [
+      2,
+      6
+    ],
+    "disabled": false,
+    "markdownOnly": true,
+    "promptOnly": false,
+    "runOnEdit": true,
+    "minDepth": null,
+    "maxDepth": null,
+    "id": "813d70e1049c4ee3b6137e3aa52471f9"
+  },
+  {
+    "scriptName": "移除额外tag和标题",
+    "findRegex": "/(?:### 正文|<\\/preparation>|<\\/?content>)|(<!--[\\s\\S]*?-->\\s*)/g",
+    "replaceString": "",
+    "trimStrings": [],
+    "placement": [
+      2
+    ],
+    "disabled": false,
+    "markdownOnly": true,
+    "promptOnly": true,
+    "runOnEdit": true,
+    "minDepth": null,
+    "maxDepth": null,
+    "substituteRegex": 0,
+    "id": "162add09e5804d36b7000566980aa8e7"
+  },
+  {
+    "scriptName": "单独杀一丝",
+    "findRegex": "/(一丝|生理性的)/g",
+    "replaceString": "",
+    "trimStrings": [],
+    "placement": [
+      2
+    ],
+    "disabled": false,
+    "markdownOnly": true,
+    "promptOnly": true,
+    "runOnEdit": true,
+    "minDepth": null,
+    "maxDepth": null,
+    "substituteRegex": 0,
+    "id": "6f18d61cf1a040a0bb129369f6ab11e5"
+  },
+  {
+    "scriptName": "否后肯八股",
+    "findRegex": "/(不再|不像|不是|与其|并非)[^，。：；\\n]*，(?:是|而是|更是|就是|不如)/g",
+    "replaceString": "",
+    "trimStrings": [],
+    "placement": [
+      2
+    ],
+    "disabled": false,
+    "markdownOnly": true,
+    "promptOnly": true,
+    "runOnEdit": true,
+    "minDepth": null,
+    "maxDepth": 1,
+    "substituteRegex": 0,
+    "id": "a93d93762ee5403393619a8a75dc5f39"
+  },
+  {
+    "scriptName": "美化选项列表",
+    "findRegex": "/<xx>\\s*([^<]+?)\\s*[:：]((?:.|\\n)*?)(?:Tips\\s*[:：]\\s*([^<]+?))?\\s*<\\/xx>/si",
+    "replaceString": "```html\n<!DOCTYPE html>\n<html>",
+    "trimStrings": [],
+    "placement": [
+      2
+    ],
+    "disabled": false,
+    "markdownOnly": true,
+    "promptOnly": false,
+    "runOnEdit": true,
+    "minDepth": null,
+    "maxDepth": 2,
+    "substituteRegex": 0,
+    "id": "d83ae0e6e7cd44899463e17fc084aeef"
+  },
+  {
+    "scriptName": "隐藏选项列表",
+    "findRegex": "/<xx[\\s\\S]*?</xx>/si",
+    "replaceString": "",
+    "trimStrings": [],
+    "placement": [
+      2
+    ],
+    "disabled": false,
+    "markdownOnly": true,
+    "promptOnly": true,
+    "runOnEdit": true,
+    "minDepth": 1,
+    "maxDepth": null,
+    "substituteRegex": 0,
+    "id": "ad32a0609030489d87c0135eeb2a6b18"
+  },
+  {
+    "scriptName": "删掉history中最后一条用户消息",
+    "findRegex": "^([\\s\\S]*)$",
+    "replaceString": "",
+    "trimStrings": [],
+    "placement": [
+      1
+    ],
+    "disabled": false,
+    "markdownOnly": false,
+    "promptOnly": true,
+    "runOnEdit": true,
+    "minDepth": null,
+    "maxDepth": 1,
+    "substituteRegex": 0,
+    "id": "a04a0d12fa564181a2c457c73c60d0f1"
+  },
+  {
+    "scriptName": "伏笔对用户隐藏",
+    "findRegex": "/(<记录>)([\\s\\S]*?)(<\\/记录>)/g",
+    "replaceString": "",
+    "trimStrings": [],
+    "placement": [
+      2
+    ],
+    "disabled": false,
+    "markdownOnly": true,
+    "promptOnly": false,
+    "runOnEdit": true,
+    "minDepth": null,
+    "maxDepth": null,
+    "substituteRegex": 0,
+    "id": "0e169611a05644d4af27f63ee5889584"
+  },
+  {
+    "scriptName": "去彩字占用的上下文",
+    "findRegex": "/<span\\s+style=\"color:[^\"]*\">([^<]*)</span>/g",
+    "replaceString": "$1",
+    "trimStrings": [],
+    "placement": [
+      2
+    ],
+    "disabled": false,
+    "markdownOnly": false,
+    "promptOnly": true,
+    "runOnEdit": true,
+    "minDepth": null,
+    "maxDepth": null,
+    "substituteRegex": 0,
+    "id": "f144c727fc8b46b1a84c5b580ce10970"
+  },
+  {
+    "scriptName": "杀描述天气",
+    "findRegex": "/，(?:像|仿佛|好像|如同|似乎|宛如|一如)[^，。？：（\"」]*(?:天气|聊家常|陈述|闲聊|说今天|唠嗑|谈论|报菜名)[^，。？：（\"」]*/g",
+    "replaceString": "",
+    "trimStrings": [],
+    "placement": [
+      2
+    ],
+    "disabled": false,
+    "markdownOnly": true,
+    "promptOnly": true,
+    "runOnEdit": true,
+    "minDepth": null,
+    "maxDepth": null,
+    "substituteRegex": 0,
+    "id": "65256444983449c0938392623202aa88"
+  },
+  {
+    "scriptName": "杀就像在说",
+    "findRegex": "/[。！？\\n][^。！？\\n]*?语气.{0,10}得(仿佛|像|好像|如同|似乎|宛如)[^。！？\\n]*?[。！？]/g",
+    "replaceString": "",
+    "trimStrings": [],
+    "placement": [
+      2
+    ],
+    "disabled": false,
+    "markdownOnly": true,
+    "promptOnly": true,
+    "runOnEdit": true,
+    "minDepth": null,
+    "maxDepth": null,
+    "substituteRegex": 0,
+    "id": "9f38243cbaa44e9286d7d4b32cf06463"
+  },
+  {
+    "scriptName": "弹幕",
+    "findRegex": "/·、/g",
+    "replaceString": "",
+    "trimStrings": [],
+    "placement": [
+      2
+    ],
+    "disabled": false,
+    "markdownOnly": true,
+    "promptOnly": false,
+    "runOnEdit": true,
+    "minDepth": null,
+    "maxDepth": null,
+    "substituteRegex": 0,
+    "id": "54317b90d49d4c119f47fea8ea3980b7"
+  }
+]

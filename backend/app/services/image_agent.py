@@ -51,14 +51,13 @@ def _build(chat_base: str, chat_key: str, chat_model: str,
            embed_base: str = "", embed_key: str = "", embed_model: str = "embedding-3",
            insp_sink: list[dict] | None = None, proxy_url: str = "", style: str = "",
            style_template: str = "", has_images: bool = False, agent_id: str = "",
-           memory_mode: str = "legacy_checkpoint", image_quality: str = "high"):
+           memory_mode: str = "legacy_checkpoint", image_quality: str = "high",
+           chat_proxy_url: str = "", gen_proxy_url: str = "", embed_proxy_url: str = ""):
     """构建 agent。image_sink 收集本轮生成的图片地址，供路由透出。
     出图时后端同步落盘：下载留存→入库→追加进 chat_snapshot，前端断开也不丢。
     has_images=True（本轮用户带图）时裁剪工具集，物理上只保留 image_to_image，
     从根上杜绝大脑绕道文生图/反推——比任何提示词约束都硬。
     agent_id 非空时按该 Agent 预设覆盖 system_prompt/工具/请求参数；空则用内置默认（原行为不变）。"""
-    from langchain.chat_models import init_chat_model
-
     # 读 Agent 预设（空 agent_id 或查不到 → agent=None，走内置默认，与加此功能前完全一致）
     agent_cfg = None
     try:
@@ -71,10 +70,10 @@ def _build(chat_base: str, chat_key: str, chat_model: str,
     if agent_cfg and isinstance(agent_cfg.get("temperature"), (int, float)):
         _temp = agent_cfg["temperature"]
 
-    url = _llm.normalize_base_url(chat_base)
-    llm = init_chat_model(chat_model, model_provider="openai",
-                          base_url=url, api_key=chat_key or "not-needed",
-                          temperature=_temp, timeout=120, max_retries=1)
+    llm = _llm.build_model(
+        chat_base, chat_key, chat_model, temperature=_temp,
+        proxy=chat_proxy_url, retries=1,
+    )
 
     @tool
     def analyze_image(state: Annotated[dict, InjectedState]) -> str:
@@ -109,7 +108,8 @@ def _build(chat_base: str, chat_key: str, chat_model: str,
         """根据英文提示词生成一张图片（纯文生图，不参考任何图）。用户只给文字描述想生图时调用，prompt 用逗号分隔的英文标签。"""
         try:
             url = image_gen.generate(
-                gen_base, gen_key, gen_model, prompt, size=size, quality=image_quality)
+                gen_base, gen_key, gen_model, prompt, size=size, quality=image_quality,
+                proxy=gen_proxy_url)
             # 留存+入库+写快照集中在 generation_store（前端断开也不丢；id 随事件回传去重）
             rec = generation_store.persist_image(
                 thread_id, repo_id, prompt, url, output_dir,
@@ -117,7 +117,7 @@ def _build(chat_base: str, chat_key: str, chat_model: str,
                     "kind": "ai-image", "prompt": prompt, "images": [],
                     "size": size, "quality": image_quality,
                     "model": {"baseUrl": gen_base, "modelName": gen_model},
-                })
+                }, embed_proxy=embed_proxy_url)
             image_sink.append(rec)  # {"id","url"}
             return f"SUCCESS: 已生成图片。提示词：{prompt}"
         except Exception as e:
@@ -148,14 +148,14 @@ def _build(chat_base: str, chat_key: str, chat_model: str,
         try:
             url = image_gen.generate_with_images(
                 gen_base, gen_key, gen_model, prompt, imgs,
-                size=size, quality=image_quality)
+                size=size, quality=image_quality, proxy=gen_proxy_url)
             rec = generation_store.persist_image(
                 thread_id, repo_id, prompt, url, output_dir,
                 embed_base, embed_key, embed_model, {
                     "kind": "ai-image", "prompt": prompt, "images": list(imgs),
                     "size": size, "quality": image_quality,
                     "model": {"baseUrl": gen_base, "modelName": gen_model},
-                })
+                }, embed_proxy=embed_proxy_url)
             image_sink.append(rec)
             return f"SUCCESS: 已基于 {len(imgs)} 张参考图生成图片。提示词：{prompt}"
         except Exception as e:
@@ -166,7 +166,10 @@ def _build(chat_base: str, chat_key: str, chat_model: str,
         """联网搜索服装/发型/画风等参考灵感，提炼成英文生图提示词。用户想找参考/流行款式/灵感时调用。query 用简短英文或中文描述主题。"""
         try:
             from app.services import inspiration as _insp
-            data = _insp.search_and_refine(query, chat_base, chat_key, chat_model, proxy=proxy_url)
+            data = _insp.search_and_refine(
+                query, chat_base, chat_key, chat_model,
+                proxy=proxy_url, chat_proxy=chat_proxy_url,
+            )
             if not data["prompt"]:
                 return "ERROR: 未能从搜索结果提炼出提示词。"
             card = generation_store.persist_inspiration(
@@ -268,7 +271,8 @@ def stream_agent(thread_id: str, message: str, images: list[str] | None,
                  embed_model: str = "embedding-3", cancel_event=None,
                  proxy_url: str = "", style: str = "", style_template: str = "",
                  agent_id: str = "", memory_mode: str = "legacy_checkpoint",
-                 image_quality: str = "high") -> Iterator[dict]:
+                 image_quality: str = "high", chat_proxy_url: str = "",
+                 gen_proxy_url: str = "", embed_proxy_url: str = "") -> Iterator[dict]:
     """运行智能体，逐步产出事件 dict：
     {"delta": "..."} 文本增量；{"image": "url"} 生成的图片；{"error": "..."}。
     历史按 thread_id 自动载入续写、落盘（复用 checkpointer）。
@@ -283,7 +287,8 @@ def stream_agent(thread_id: str, message: str, images: list[str] | None,
                    embed_base=embed_base, embed_key=embed_key, embed_model=embed_model,
                    insp_sink=insp, proxy_url=proxy_url, style=style, style_template=style_template,
                    has_images=bool(images), agent_id=agent_id, memory_mode=memory_mode,
-                   image_quality=image_quality)
+                   image_quality=image_quality, chat_proxy_url=chat_proxy_url,
+                   gen_proxy_url=gen_proxy_url, embed_proxy_url=embed_proxy_url)
     config = {"configurable": {"thread_id": thread_id}}
 
     history_messages = []

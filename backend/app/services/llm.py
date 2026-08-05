@@ -7,6 +7,7 @@
 
 不含 HTTP 语义（不抛 HTTPException）——路由层按需把 ValueError 包成 4xx/5xx。
 """
+from collections.abc import Callable
 from typing import Any
 
 
@@ -26,13 +27,16 @@ def flatten_content(content: Any) -> str:
 
 
 def build_model(base_url: str, api_key: str, model: str,
-                temperature: float = 0.7, streaming: bool = False, proxy: str = ""):
+                temperature: float = 0.7, streaming: bool = False, proxy: str = "",
+                top_p: float | None = None, max_tokens: int | None = None,
+                sdk_retries: int | None = None):
     """构建 OpenAI 兼容对话模型。缺配置抛 ValueError（由调用方决定如何呈现）。
 
     proxy **显式非空**时才注入代理 http_client；为空则**完全默认构造**——与仓库对话
     (image_agent 的 init_chat_model)走同一路径，那条路径一直能连通。
     ⚠教训：曾强行给无代理分支加 trust_env=False，反而切断了原本靠系统环境代理连中转的通路
     (表现 timed out / Connection error)。默认不碰 http_client 才是安全的。
+    top_p/max_tokens：非空才注入（此前自定义 Agent/预设存了这两项却从未生效，现打通到模型）。
     """
     if not base_url or not model:
         raise ValueError("请先在「设置 → 对话模型」配置接口地址与模型")
@@ -44,6 +48,12 @@ def build_model(base_url: str, api_key: str, model: str,
         temperature=temperature,
         streaming=streaming,
     )
+    if isinstance(top_p, (int, float)) and not isinstance(top_p, bool):
+        kw["top_p"] = float(top_p)
+    if isinstance(max_tokens, int) and not isinstance(max_tokens, bool) and max_tokens > 0:
+        kw["max_tokens"] = max_tokens
+    if isinstance(sdk_retries, int) and sdk_retries >= 0:
+        kw["max_retries"] = sdk_retries
     p = (proxy or "").strip()
     if p:
         import httpx
@@ -62,16 +72,72 @@ def _is_transient(err: Exception) -> bool:
         "temporarily", "overload", "rate limit", "429", "connection error"))
 
 
-def chat(base_url: str, api_key: str, model: str, system: str, user: str,
-         temperature: float = 0.7, proxy: str = "", retries: int = 2) -> str:
-    """非流式单轮对话，返回展平后的回复文本。proxy 透传；上游临时故障(502/超时等)退避重试。
-    调用失败抛 RuntimeError。"""
+_ROLE_MAP = {"system": "system", "user": "human", "assistant": "ai", "human": "human", "ai": "ai"}
+
+
+def prepare_messages(model: str, messages: list[dict]) -> list[dict[str, str]]:
+    """返回实际发送结构；仅 Claude 合并 system、交替历史并去除末轮重复。"""
+    cleaned = [
+        {"role": (m.get("role") or "user"), "content": m.get("content") or ""}
+        for m in messages if (m.get("content") or "").strip()
+    ]
+    if "claude" not in (model or "").casefold():
+        return cleaned
+
+    # GrayWill 常在倒数 user 包装 {{lastUserMessage}}，调用方又追加真实末轮 user。
+    # 只处理末两条非 system 都是 user 的明确形态，避免删除更早历史里的相同短句。
+    dialog_indexes = [i for i, m in enumerate(cleaned) if m["role"] != "system"]
+    if len(dialog_indexes) >= 2:
+        previous, current = dialog_indexes[-2:]
+        current_text = cleaned[current]["content"]
+        if (cleaned[previous]["role"] in ("user", "human")
+                and cleaned[current]["role"] in ("user", "human")
+                and current_text.strip() and current_text in cleaned[previous]["content"]):
+            cleaned[previous]["content"] = cleaned[previous]["content"].replace(current_text, "")
+
+    systems = [m["content"].strip() for m in cleaned if m["role"] == "system" and m["content"].strip()]
+    turns: list[dict[str, str]] = []
+    for message in cleaned:
+        role = message["role"]
+        if role == "system":
+            continue
+        canonical = "assistant" if role in ("assistant", "ai") else "user"
+        content = message["content"].strip()
+        if not content:
+            continue
+        if turns and turns[-1]["role"] == canonical:
+            turns[-1]["content"] += "\n\n" + content
+        else:
+            turns.append({"role": canonical, "content": content})
+
+    prepared: list[dict[str, str]] = []
+    if systems:
+        prepared.append({"role": "system", "content": "\n\n".join(systems)})
+    prepared.extend(turns)
+    return prepared or [{"role": "user", "content": ""}]
+
+
+def _payload(model: str, messages: list[dict]) -> list[tuple[str, str]]:
+    return [
+        (_ROLE_MAP.get(message["role"], "human"), message["content"])
+        for message in prepare_messages(model, messages)
+    ]
+
+
+def chat_messages(base_url: str, api_key: str, model: str, messages: list[dict],
+                  temperature: float = 0.7, proxy: str = "", retries: int = 2,
+                  top_p: float | None = None, max_tokens: int | None = None) -> str:
+    """多消息单轮对话：messages=[{"role":"system|user|assistant","content":..}]，保留各条 role
+    发给模型（不折叠成单 system 串），返回展平后的回复文本。空/无 content 的条目跳过。
+    上游临时故障退避重试；调用失败抛 RuntimeError。`chat` 是它 system+user 两条的特例。"""
     import time
-    llm = build_model(base_url, api_key, model, temperature=temperature, proxy=proxy)
+    payload = _payload(model, messages)
+    llm = build_model(base_url, api_key, model, temperature=temperature, proxy=proxy,
+                      top_p=top_p, max_tokens=max_tokens)
     last: Exception | None = None
     for i in range(max(1, retries)):
         try:
-            resp = llm.invoke([("system", system), ("user", user)])
+            resp = llm.invoke(payload)
             return flatten_content(resp.content).strip()
         except Exception as e:  # noqa: BLE001
             last = e
@@ -80,3 +146,48 @@ def chat(base_url: str, api_key: str, model: str, system: str, user: str,
                 continue
             break
     raise RuntimeError(f"调用对话模型失败：{last}")
+
+
+def chat_messages_stream(base_url: str, api_key: str, model: str, messages: list[dict],
+                         on_delta: Callable[[str], None], temperature: float = 0.7,
+                         proxy: str = "", retries: int = 2,
+                         top_p: float | None = None, max_tokens: int | None = None) -> str:
+    """流式调用多消息对话，并把每个正文增量交给调用方；同时返回完整原文供后处理。
+
+    仅在本次尝试尚未产生任何增量时重试，避免连接中断后把已显示的半段正文重复输出。
+    """
+    import time
+    payload = _payload(model, messages)
+    llm = build_model(
+        base_url, api_key, model, temperature=temperature, streaming=True, proxy=proxy,
+        top_p=top_p, max_tokens=max_tokens, sdk_retries=0,
+    )
+    last: Exception | None = None
+    for i in range(max(1, retries)):
+        parts: list[str] = []
+        try:
+            for chunk in llm.stream(payload):
+                delta = flatten_content(chunk.content)
+                if not delta:
+                    continue
+                parts.append(delta)
+                on_delta(delta)
+            return "".join(parts).strip()
+        except Exception as e:  # noqa: BLE001
+            last = e
+            if parts or i >= retries - 1 or not _is_transient(e):
+                break
+            time.sleep(2 ** i)
+    raise RuntimeError(f"调用对话模型失败：{last}")
+
+
+def chat(base_url: str, api_key: str, model: str, system: str, user: str,
+         temperature: float = 0.7, proxy: str = "", retries: int = 2,
+         top_p: float | None = None, max_tokens: int | None = None) -> str:
+    """非流式单轮对话（system+user 两条），返回展平后的回复文本。多角色片段用 chat_messages。"""
+    return chat_messages(
+        base_url, api_key, model,
+        [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        temperature=temperature, proxy=proxy, retries=retries,
+        top_p=top_p, max_tokens=max_tokens,
+    )

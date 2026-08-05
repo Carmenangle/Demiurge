@@ -147,6 +147,60 @@ def test_execute_headless_reuses_agent_runner(tmp_path, monkeypatch):
     assert captured == {"thread_id": "repo-1", "message": "画只猫"}
 
 
+def test_execute_headless保留直连剧情上下文参数(tmp_path, monkeypatch):
+    _prepare(tmp_path, monkeypatch)
+    captured = {}
+
+    def fake_run(context):
+        captured["context"] = context
+        return "Q"
+
+    monkeypatch.setattr(queue.agent_runner, "run_multi_stream", fake_run)
+    monkeypatch.setattr(queue.agent_runner, "drain", lambda q: iter([]))
+    history = [{"role": "user", "content": "保留的历史"}]
+    queue._execute({
+        "thread_id": "repo-1", "message": "继续剧情", "history": history,
+        "history_per_role": 9, "character_dir": "cards", "card_name": "Lyra",
+        "preset_dir": "presets", "preset_name": "GrayWill",
+        "user_name": "Carmen", "user_persona": "用户设定", "persona_bound": True,
+        "worldbook_dir": "worldbooks", "worldbook_name": "世界",
+        "illustrate": True, "comfy_illustrate": True, "prompt_profile": "anima_tags",
+        "stream_output": True,
+        "character_base_images": {"Lyra": "data:image/png;base64,x"},
+        "illustration_actor_names": ["Lyra", "Nia"],
+        "style_base_image": "data:image/png;base64,y",
+        "proxy_url": "search-proxy", "chat_proxy_url": "chat-proxy",
+        "gen_proxy_url": "image-proxy", "video_proxy_url": "video-proxy",
+        "embed_proxy_url": "embed-proxy",
+        "forced_route": "roleplay", "approval_id": "approval-1",
+        "approval_action": "change", "edited_prompt": "edited",
+    })
+
+    context = captured["context"]
+    assert context.history_override == history and context.history_per_role == 9
+    assert (context.character_dir, context.card_name) == ("cards", "Lyra")
+    assert (context.preset_dir, context.preset_name) == ("presets", "GrayWill")
+    assert (context.user_name, context.user_persona, context.persona_bound) == (
+        "Carmen", "用户设定", True,
+    )
+    assert (context.worldbook_dir, context.worldbook_name) == ("worldbooks", "世界")
+    assert context.illustrate is True and context.comfy_illustrate is True
+    assert context.prompt_profile == "anima_tags"
+    assert context.stream_output is True
+    assert context.character_base_images == {"Lyra": "data:image/png;base64,x"}
+    assert context.illustration_actor_names == ["Lyra", "Nia"]
+    assert context.style_base_image == "data:image/png;base64,y"
+    assert context.proxy_url == "search-proxy"
+    assert context.chat_proxy_url == "chat-proxy"
+    assert context.gen_proxy_url == "image-proxy"
+    assert context.video_proxy_url == "video-proxy"
+    assert context.embed_proxy_url == "embed-proxy"
+    assert context.forced_route == "roleplay"
+    assert (context.approval_id, context.approval_action, context.edited_prompt) == (
+        "approval-1", "change", "edited",
+    )
+
+
 def test_execute_lets_active_thread_stay_queued(tmp_path, monkeypatch):
     path = _prepare(tmp_path, monkeypatch)
     with _connection_factory(path)() as connection:

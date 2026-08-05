@@ -17,6 +17,32 @@ def list_loras() -> dict[str, object]:
     return {"items": lora_index.list_items()}
 
 
+@router.get("/available")
+def available_loras(models_dir: str = "") -> dict[str, object]:
+    """直接扫 ComfyUI loras 目录列出全部模型文件（供选择器下拉，不依赖触发词同步）。
+
+    触发词表（list_loras）要手动同步才有数据；而选 LoRA 出图只需文件名。这里直接读盘，
+    并合并触发词表标记哪些已录触发词，让选择器无需先同步就能用。目录无效返回空列表。
+    """
+    from app.services import lora_scan
+    if not models_dir.strip():
+        return {"items": []}
+    loras_dir = lora_index.resolve_loras_dir(models_dir)
+    names = lora_scan.scan_lora_dir(loras_dir)
+    data = lora_index.get_lora_data_map()
+    return {"items": [
+        {
+            "lora_name": name,
+            "has_triggers": data.get(name, {}).get("trigger_status") == "configured",
+            "trigger_status": data.get(name, {}).get("trigger_status", "unconfirmed"),
+            "suggested_weight": data.get(name, {}).get(
+                "suggested_weight", lora_index.DEFAULT_SUGGESTED_WEIGHT,
+            ),
+        }
+        for name in names
+    ]}
+
+
 class SyncRequest(EmbedModelReq):
     models_dir: str = ""       # ComfyUI 的 models 目录；前端留空时已回退成 comfyuiPath/models
     full: bool = False         # true=连手填条目一并重提（用户显式要求重建）
@@ -40,6 +66,8 @@ class SaveRequest(EmbedModelReq):
     lora_name: str = ""
     triggers: list[str] = []
     note: str = ""
+    suggested_weight: float = lora_index.DEFAULT_SUGGESTED_WEIGHT
+    suggested_prompt: str = ""
 
 
 @router.put("/item")
@@ -48,7 +76,9 @@ def save_item(req: SaveRequest) -> dict[str, object]:
     if not req.lora_name.strip():
         raise HTTPException(status_code=400, detail="lora_name 为空")
     return lora_index.save_item(req.lora_name.strip(), req.triggers,
-                                req.note, req.embed_cfg())
+                                req.note, req.embed_cfg(),
+                                suggested_weight=req.suggested_weight,
+                                suggested_prompt=req.suggested_prompt)
 
 
 class DeleteRequest(EmbedModelReq):

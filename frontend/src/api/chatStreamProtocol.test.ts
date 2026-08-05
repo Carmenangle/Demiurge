@@ -20,6 +20,9 @@ describe("chat stream protocol", () => {
       type: "image", url: "local://image", id: "i1", regeneration: { prompt: "p" },
     });
     expect(decodeChatStreamEvent(event("interrupted", {}))).toEqual({ type: "interrupted" });
+    expect(decodeChatStreamEvent(event("rag_status", {
+      state: "start", kind: "worldbook", count: 53,
+    }))).toEqual({ type: "rag_status", state: "start", kind: "worldbook", count: 53 });
   });
 
   it("rejects unknown versions and event types", () => {
@@ -34,5 +37,20 @@ describe("chat stream protocol", () => {
       .toThrow("data.url");
     expect(() => decodeChatStreamEvent(event("error", {})))
       .toThrow("data.message");
+  });
+
+  it("decodes illustration scene source for prompt profiles", () => {
+    const sceneSpec = {
+      narrative: "高潮段", draft_prompt: "close-up", appearance: "银发、蓝眼",
+      wardrobe: "红裙",
+      locale: "寝殿", actors: ["爱丽丝"], rating: "nsfw", aspect_ratio: "2:3",
+    };
+    expect(decodeChatStreamEvent(event("illustrate_request", {
+      prompt: "legacy", motion: 1, actors: ["爱丽丝"], id: "slot-1",
+      scene_spec: sceneSpec,
+    }))).toEqual({
+      type: "illustrate_request", prompt: "legacy", motion: 1,
+      actors: ["爱丽丝"], id: "slot-1", sceneSpec,
+    });
   });
 });

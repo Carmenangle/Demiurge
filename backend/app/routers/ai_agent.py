@@ -34,15 +34,20 @@ class ImageAgentRequest(EmbedModelReq):
     repo_id: str = ""                  # 留存/入库归属仓库（空则用 thread_id）
     message_id: str = ""               # 前端 botId：最终文本按此 id 落盘去重
     proxy_url: str = ""                # 联网搜索代理（search_inspiration 工具用）
+    chat_proxy_url: str = ""           # 当前对话模型代理（空=直连）
+    gen_proxy_url: str = ""            # 当前生图模型代理（空=直连）
+    video_proxy_url: str = ""          # 当前视频模型代理（空=直连）
     style: str = ""                    # 用户手动选的提示词风格 sd/gpt/banana/""(自动)
     style_template: str = ""           # 自定义风格存档的整段内容（非空时优先于 style）
     agent_id: str = ""                 # 多 Agent：选中的 Agent 预设 id（空=内置默认行为）
+    stream_output: bool = False         # 智能体正文是否通过 SSE 增量输出
     approval_id: str = ""              # 历史提示词审批卡 id
     approval_action: str = ""          # submit / change / cancel
     edited_prompt: str = ""            # change 时用户在卡片内修改后的提示词
     forced_route: str = ""              # 主管选择卡点击后的显式路由
     user_message_id: str = ""            # 选择卡关联的原用户消息 id
-    context_max_tokens: int = Field(default=20_000, ge=4_000, le=200_000)
+    context_max_tokens: int = Field(default=20_000, ge=0)  # 0=无上限（历史全量不裁剪），去掉 le 上限
+    history_per_role: int = Field(default=6, ge=1, le=50)  # 每角色最近历史条数
 
 
 # 单 agent 生成入口（POST /ai/image-agent → agent_runner.run_stream）已下线。
@@ -52,6 +57,22 @@ class ImageAgentRequest(EmbedModelReq):
 
 class MultiAgentRequest(ImageAgentRequest):
     route_model: str = ""   # supervisor 判分派用的（快）模型，空则用主对话模型
+    character_dir: str = ""  # 角色卡文件夹根（前端设置 characterDir），供剧情扮演读卡
+    card_name: str = ""      # 本作品关联的角色卡名（空=非扮演）
+    preset_dir: str = ""     # 偏置预设文件夹根（前端设置 presetDir）
+    preset_name: str = ""    # 当前激活预设名（空=不用预设）
+    user_name: str = ""      # 用户人设名（填 {{user}} 宏）
+    user_persona: str = ""   # 用户人设描述（填 personaDescription marker）
+    persona_bound: bool = False  # 仓库显式绑定了人设：为真时不被作品快照 persona.json 覆盖
+    worldbook_dir: str = ""  # 独立世界书文件夹根（前端设置 worldbookDir）
+    worldbook_name: str = "" # 仓库绑定的独立世界书名（空=不绑独立书；与卡内嵌世界书合并）
+    illustrate: bool = False  # 剧情插画开关（开=能动性 D 阶段自动配图）
+    comfy_illustrate: bool = False  # 前端已预设 ComfyUI 工作流模板：高潮点改发 illustrate_request 事件走异步闭环
+    prompt_profile: str = "krea2"
+    character_base_images: dict[str, str] = {}  # ⑥ 角色名→底图（gpt-image 系按在场角色取底图锁一致性）
+    illustration_actor_names: list[str] = []  # 自动插画可从正文机械识别的已配置角色名
+    style_base_image: str = ""  # ⑥ 无角色底图时的兜底风格底图（gpt-image 系）
+    history: list[dict] | None = None  # 前端当前可见历史；显式 [] 禁止回退旧 checkpoint
 
 
 @router.post("/multi-agent")
@@ -79,15 +100,37 @@ def multi_agent(req: MultiAgentRequest) -> StreamingResponse:
         repo_id=req.repo_id or req.thread_id,
         message_id=req.message_id,
         proxy_url=req.proxy_url,
+        chat_proxy_url=req.chat_proxy_url,
+        gen_proxy_url=req.gen_proxy_url,
+        video_proxy_url=req.video_proxy_url,
+        embed_proxy_url=req.embed_proxy_url,
         route_model=req.route_model,
         style_template=req.style_template,
         agent_id=req.agent_id,
+        stream_output=req.stream_output,
         approval_id=req.approval_id,
         approval_action=req.approval_action,
         edited_prompt=req.edited_prompt,
         forced_route=req.forced_route,
         user_message_id=req.user_message_id,
         context_max_tokens=req.context_max_tokens,
+        history_per_role=req.history_per_role,
+        history_override=req.history,
+        character_dir=req.character_dir,
+        card_name=req.card_name,
+        preset_dir=req.preset_dir,
+        preset_name=req.preset_name,
+        user_name=req.user_name,
+        user_persona=req.user_persona,
+        persona_bound=req.persona_bound,
+        worldbook_dir=req.worldbook_dir,
+        worldbook_name=req.worldbook_name,
+        illustrate=req.illustrate,
+        comfy_illustrate=req.comfy_illustrate,
+        prompt_profile=req.prompt_profile,
+        character_base_images=req.character_base_images or {},
+        illustration_actor_names=req.illustration_actor_names or [],
+        style_base_image=req.style_base_image,
     )
     try:
         q = agent_runner.run_multi_stream(context)
@@ -105,12 +148,14 @@ class RegenerateImageRequest(BaseModel):
     gen_base_url: str
     gen_api_key: str
     gen_model: str
+    gen_proxy_url: str = ""
     size: str = "1024x1024"
     image_quality: Literal["auto", "low", "medium", "high"] = "high"
     output_dir: str = ""
     embed_base_url: str = ""
     embed_api_key: str = ""
     embed_model: str = "embedding-3"
+    embed_proxy_url: str = ""
 
 
 @router.post("/regenerate-image")
@@ -132,19 +177,23 @@ def regenerate_image(req: RegenerateImageRequest) -> dict[str, object]:
             kwargs = {"size": req.size, "quality": req.image_quality}
             if req.image_mask:
                 kwargs["mask"] = req.image_mask.mask
+            if req.gen_proxy_url:
+                kwargs["proxy"] = req.gen_proxy_url
             url = image_gen.generate_with_images(
                 req.gen_base_url, req.gen_api_key, req.gen_model,
                 req.prompt, images, **kwargs,
             )
         else:
+            proxy_kw = {"proxy": req.gen_proxy_url} if req.gen_proxy_url else {}
             url = image_gen.generate(
                 req.gen_base_url, req.gen_api_key, req.gen_model,
-                req.prompt, size=req.size, quality=req.image_quality,
+                req.prompt, size=req.size, quality=req.image_quality, **proxy_kw,
             )
+        persist_kw = {"embed_proxy": req.embed_proxy_url} if req.embed_proxy_url else {}
         rec = generation_store.persist_image(
             req.thread_id, req.repo_id, req.prompt, url, req.output_dir,
             req.embed_base_url, req.embed_api_key, req.embed_model,
-            regeneration,
+            regeneration, **persist_kw,
         )
         return {"ok": True, **rec}
     except Exception as exc:  # noqa: BLE001
@@ -203,6 +252,32 @@ def chat_queue_cancel(req: ChatQueueCancelRequest) -> dict[str, object]:
 
 class CancelRequest(BaseModel):
     thread_id: str = "home"
+
+
+class IllustrationFailureRequest(BaseModel):
+    thread_id: str
+    repo_id: str = ""
+    message_id: str
+    slot_id: str
+    stage: str
+    error: str
+    prompt_id: str = ""
+
+
+@router.post("/image-agent/illustration-failure")
+def illustration_failure(req: IllustrationFailureRequest) -> dict[str, object]:
+    """记录自动插画失败并移除持久化槽，不向对话正文追加错误。"""
+    from app.services import generation_store
+    removed = generation_store.persist_illustration_failure(
+        thread_id=req.thread_id,
+        repo_id=req.repo_id or req.thread_id,
+        message_id=req.message_id,
+        slot_id=req.slot_id,
+        stage=req.stage,
+        error=req.error,
+        prompt_id=req.prompt_id,
+    )
+    return {"ok": True, "removed": removed}
 
 
 @router.post("/image-agent/cancel")

@@ -22,9 +22,12 @@ import json
 import re
 import subprocess
 import threading
+import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 from app.services import update_progress as up
+from app.services import task_progress_store
 
 # 动这些包极易连带弄坏别的插件（推理栈共享依赖），一律先问过用户。
 # 命名按 pip 规范化后比较（小写、-/_ 归一）。
@@ -37,7 +40,13 @@ SENSITIVE = {
 }
 
 _LOCK = threading.Lock()
-_PROGRESS: dict = {}
+_RESTORED = task_progress_store.load("node-update").get("current", {})
+_PROGRESS: dict = dict(_RESTORED)
+_LAST_PERSIST = 0.0
+
+task_progress_store.mark_interrupted(
+    {"current": _PROGRESS}, running_statuses={"pending", "running"},
+)
 
 
 def _blank(note: str = "") -> dict:
@@ -50,6 +59,7 @@ def _blank(note: str = "") -> dict:
         "old": "", "new": "", "changed": False,
         "error": "", "message": "",
         "pending_sensitive": [],
+        "task_kind": "", "subject": "", "target_path": "",
     }
 
 
@@ -61,6 +71,16 @@ def progress() -> dict:
 def _set(**kw) -> None:
     with _LOCK:
         _PROGRESS.update(kw)
+        _persist_locked(force=bool(kw.get("finished")))
+
+
+def _persist_locked(force: bool = False) -> None:
+    global _LAST_PERSIST
+    now = time.monotonic()
+    if not force and now - _LAST_PERSIST < 0.5:
+        return
+    task_progress_store.save("node-update", {"current": _PROGRESS}, limit=1)
+    _LAST_PERSIST = now
 
 
 def _norm(name: str) -> str:
@@ -156,6 +176,7 @@ def _install_requirements(python_exe: str, req: Path, proxy: str = "") -> tuple[
                 _PROGRESS["deps_total_bytes"] = sum(d["bytes"] for d in deps)
                 _PROGRESS["phase"] = "deps"
                 _PROGRESS["note"] = f"下载依赖 {ev['file']}（{up.human_bytes(ev['bytes'])}）"
+                _persist_locked()
         elif ev["kind"] == "installing":
             _set(phase="deps-install",
                  note="安装依赖：" + ", ".join(ev["packages"])[:160])
@@ -194,14 +215,18 @@ def check_core_requirements(comfy_path: str, python_exe: str,
 
 
 def start(pack_dir: str, python_exe: str = "", proxy: str = "",
-          allow_sensitive: bool = False, skip_deps: bool = False) -> dict:
+          allow_sensitive: bool = False, skip_deps: bool = False,
+          task_kind: str = "node-update", subject: str = "") -> dict:
     """启动一次更新（后台线程）。已有任务在跑时拒绝。"""
     with _LOCK:
         if _PROGRESS.get("running"):
             return {"already_running": True}
         _PROGRESS.clear()
         _PROGRESS.update(_blank("准备更新…"))
-        _PROGRESS["running"] = True
+        _PROGRESS.update(running=True, task_kind=task_kind,
+                         subject=subject or Path(pack_dir).name,
+                         target_path=str(Path(pack_dir)))
+        _persist_locked(force=True)
 
     d = Path(pack_dir)
     name = d.name
@@ -209,7 +234,7 @@ def start(pack_dir: str, python_exe: str = "", proxy: str = "",
     def run() -> None:
         try:
             if not (d / ".git").exists():
-                raise RuntimeError(f"「{name}」不是 git 安装的插件，无法用 git 更新。")
+                raise RuntimeError(f"「{name}」不是 git 安装的仓库，无法更新。")
             if not has_upstream(str(d)):
                 raise RuntimeError(
                     f"「{name}」当前分支没有上游追踪分支（可能是 detached HEAD），"
@@ -224,7 +249,7 @@ def start(pack_dir: str, python_exe: str = "", proxy: str = "",
             _set(new=new, changed=changed)
 
             # 代码没变就不折腾依赖 —— 这是「假更新」的另一半：明确告诉用户没变
-            if not changed:
+            if not changed and not allow_sensitive:
                 _set(running=False, finished=True, phase="done",
                      message=f"「{name}」已是最新（{new}），本次没有任何改动。")
                 return
@@ -269,13 +294,183 @@ def start(pack_dir: str, python_exe: str = "", proxy: str = "",
                 return
             with _LOCK:
                 total = _PROGRESS.get("deps_total_bytes", 0)
-            _set(running=False, finished=True, phase="done",
-                 message=f"「{name}」已更新（{old} → {new}），"
-                         f"依赖 {len(planned)} 个、共 {up.human_bytes(total)}。"
+            _set(running=False, finished=True, phase="done", changed=changed or allow_sensitive,
+                 message=(f"「{name}」依赖已处理，" if allow_sensitive and old == new
+                          else f"「{name}」已更新（{old} → {new}），")
+                         + f"依赖 {len(planned)} 个、共 {up.human_bytes(total)}。"
                          "重启 ComfyUI 后生效。")
         except Exception as e:
             _set(running=False, finished=True, phase="done", error=str(e),
                  message=f"更新「{name}」失败：{e}")
+
+    threading.Thread(target=run, daemon=True).start()
+    return {"already_running": False}
+
+
+_GIT_HOSTS = {"github.com", "gitlab.com", "bitbucket.org"}
+
+
+def install_target(comfy_path: str, repository: str) -> Path:
+    """校验仓库地址并解析 custom_nodes 内的唯一目标目录。"""
+    parsed = urlparse(repository.strip())
+    if parsed.scheme != "https" or (parsed.hostname or "").lower() not in _GIT_HOSTS:
+        raise ValueError("节点仓库只允许 GitHub、GitLab 或 Bitbucket 的 HTTPS 地址。")
+    name = Path(parsed.path.rstrip("/")).name
+    if name.lower().endswith(".git"):
+        name = name[:-4]
+    if not name or name in {".", ".."} or not re.fullmatch(r"[A-Za-z0-9._-]+", name):
+        raise ValueError("无法从仓库地址解析安全的节点目录名。")
+    root = (Path(comfy_path) / "custom_nodes").resolve()
+    target = (root / name).resolve()
+    if target.parent != root:
+        raise ValueError("节点目标目录越界。")
+    return target
+
+
+def _clone_with_progress(repository: str, target: Path, proxy: str = "") -> tuple[bool, str]:
+    args = ["git"]
+    if proxy.strip():
+        args += ["-c", f"http.proxy={proxy}", "-c", f"https.proxy={proxy}"]
+    args += ["clone", "--progress", repository, str(target)]
+    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, bufsize=1, encoding="utf-8", errors="replace")
+    collected: list[str] = []
+    assert proc.stdout is not None
+    for chunk in iter(proc.stdout.readline, ""):
+        collected.append(chunk)
+        for line in up.split_progress_stream(chunk):
+            ev = up.parse_git_line(line)
+            if ev:
+                _set(**ev)
+    proc.wait(timeout=1200)
+    return proc.returncode == 0, "".join(collected)[-2000:]
+
+
+def _git_command_with_progress(cwd: str, command: list[str], proxy: str = "",
+                               timeout: int = 1200) -> tuple[bool, str]:
+    args = ["git", "-C", cwd]
+    if proxy.strip():
+        args += ["-c", f"http.proxy={proxy}", "-c", f"https.proxy={proxy}"]
+    args += command
+    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, bufsize=1, encoding="utf-8", errors="replace")
+    collected: list[str] = []
+    assert proc.stdout is not None
+    for chunk in iter(proc.stdout.readline, ""):
+        collected.append(chunk)
+        for line in up.split_progress_stream(chunk):
+            ev = up.parse_git_line(line)
+            if ev:
+                _set(**ev)
+    proc.wait(timeout=timeout)
+    return proc.returncode == 0, "".join(collected)[-2000:]
+
+
+def start_install(comfy_path: str, repository: str, python_exe: str = "", proxy: str = "",
+                  allow_sensitive: bool = False, skip_deps: bool = False) -> dict:
+    """安装 Git 节点包并公开 clone/依赖下载进度。"""
+    target = install_target(comfy_path, repository)
+    with _LOCK:
+        if _PROGRESS.get("running"):
+            return {"already_running": True}
+        _PROGRESS.clear()
+        _PROGRESS.update(_blank("准备安装节点包…"))
+        _PROGRESS.update(running=True, task_kind="node-install", subject=target.name,
+                         target_path=str(target))
+        _persist_locked(force=True)
+
+    def run() -> None:
+        try:
+            # 敏感依赖确认后的第二次请求延续已完成的 clone，只处理依赖。
+            if not target.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                _set(phase="download", note=f"正在下载 {target.name}…")
+                ok, out = _clone_with_progress(repository, target, proxy)
+                if not ok:
+                    raise RuntimeError(f"git clone 失败：{out[-400:]}")
+            elif not ((allow_sensitive or skip_deps) and (target / ".git").is_dir()):
+                raise RuntimeError(f"目标目录已存在：{target}")
+
+            req = target / "requirements.txt"
+            if skip_deps or not req.is_file():
+                _set(running=False, finished=True, phase="done", changed=True,
+                     message=f"「{target.name}」安装完成。"
+                             + ("该插件没有 requirements.txt。" if not req.is_file() else "已跳过依赖。")
+                             + "重启 ComfyUI 后生效。")
+                return
+            if not python_exe:
+                _set(running=False, finished=True, phase="done", changed=True,
+                     message=f"「{target.name}」代码已安装，但没找到 ComfyUI 的 Python，依赖未处理。")
+                return
+            _set(phase="preflight", note="正在预检依赖改动（不会改动环境）…")
+            planned, sensitive = plan_requirements(python_exe, req, proxy)
+            if sensitive and not allow_sensitive:
+                _set(running=False, finished=True, phase="needs-confirm", changed=True,
+                     pending_sensitive=sensitive,
+                     message=f"「{target.name}」代码已下载，依赖涉及共享库，等待确认。")
+                return
+            if planned:
+                _set(phase="deps", note=f"开始安装 {len(planned)} 个依赖…")
+                ok, tail = _install_requirements(python_exe, req, proxy)
+                if not ok:
+                    raise RuntimeError(f"依赖安装失败：{tail[-400:]}")
+            _set(running=False, finished=True, phase="done", changed=True,
+                 message=f"「{target.name}」安装完成，重启 ComfyUI 后生效。")
+        except Exception as e:
+            _set(running=False, finished=True, phase="done", error=str(e),
+                 message=f"安装「{target.name}」失败：{e}")
+
+    threading.Thread(target=run, daemon=True).start()
+    return {"already_running": False}
+
+
+def start_core_switch(comfy_path: str, version: str, proxy: str = "") -> dict:
+    """拉取远端并切换 ComfyUI tag/开发分支，公开 Git 传输进度。"""
+    target_version = version.strip()
+    if target_version != "nightly" and not re.fullmatch(r"v\d+(?:\.\d+){1,3}(?:[-+._A-Za-z0-9]*)?", target_version):
+        raise ValueError("无效的 ComfyUI 版本。")
+    root = Path(comfy_path).resolve()
+    with _LOCK:
+        if _PROGRESS.get("running"):
+            return {"already_running": True}
+        _PROGRESS.clear()
+        _PROGRESS.update(_blank("准备切换 ComfyUI 版本…"))
+        _PROGRESS.update(running=True, task_kind="comfyui-update", subject="ComfyUI",
+                         target_path=str(root))
+        _persist_locked(force=True)
+
+    def run() -> None:
+        try:
+            if not (root / ".git").is_dir():
+                raise RuntimeError("ComfyUI 目录不是 git 仓库，无法切换版本。")
+            old = head(str(root))
+            _set(old=old, phase="download", note=f"正在获取 {target_version} 的代码…")
+            ok, out = _git_command_with_progress(str(root), ["fetch", "origin", "--tags", "--prune", "--progress"], proxy)
+            if not ok:
+                raise RuntimeError(f"git fetch 失败：{out[-400:]}")
+            _set(phase="resolve", percent=0, note=f"正在切换到 {target_version}…")
+            if target_version == "nightly":
+                remote_head = _git(str(root), ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], 15)
+                branch = (remote_head.stdout or "origin/master").strip().removeprefix("origin/")
+                checkout = _git(str(root), ["checkout", branch], 120)
+                if checkout.returncode != 0:
+                    checkout = _git(str(root), ["checkout", "-b", branch, "--track", f"origin/{branch}"], 120)
+                if checkout.returncode != 0:
+                    raise RuntimeError(f"切换开发分支失败：{(checkout.stderr or checkout.stdout)[-400:]}")
+                ok, out = _pull_with_progress(str(root), proxy)
+                if not ok:
+                    raise RuntimeError(f"更新开发分支失败：{out[-400:]}")
+            else:
+                checkout = _git(str(root), ["checkout", "--detach", target_version], 120)
+                if checkout.returncode != 0:
+                    raise RuntimeError(f"切换版本失败：{(checkout.stderr or checkout.stdout)[-400:]}")
+            new = head(str(root))
+            _set(running=False, finished=True, phase="done", percent=100,
+                 new=new, changed=bool(old and new and old != new),
+                 message=f"ComfyUI 已切换到 {target_version}（{old} → {new}），重启后生效。")
+        except Exception as e:
+            _set(running=False, finished=True, phase="done", error=str(e),
+                 message=f"ComfyUI 版本切换失败：{e}")
 
     threading.Thread(target=run, daemon=True).start()
     return {"already_running": False}

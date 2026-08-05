@@ -161,3 +161,33 @@ def test_restart_按停止等待启动顺序执行(monkeypatch):
         ("sleep", 1.5),
         ("start", "D:/ComfyUI", "http://127.0.0.1:8188", ""),
     ]
+
+
+def test_kill_by_port_用管道读取监听进程且不依赖run_stdout(monkeypatch):
+    class NetstatProcess:
+        def communicate(self, timeout):
+            assert timeout == 10
+            return (
+                "  TCP    127.0.0.1:8188    0.0.0.0:0    LISTENING    4321\n",
+                "",
+            )
+
+    commands = []
+    monkeypatch.setattr(
+        comfy_launcher.subprocess,
+        "Popen",
+        lambda *args, **kwargs: NetstatProcess(),
+    )
+
+    class Result:
+        returncode = 0
+        stdout = None
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        return Result()
+
+    monkeypatch.setattr(comfy_launcher.subprocess, "run", fake_run)
+
+    assert comfy_launcher._kill_by_port(8188) == 1
+    assert commands == [["taskkill", "/F", "/T", "/PID", "4321"]]

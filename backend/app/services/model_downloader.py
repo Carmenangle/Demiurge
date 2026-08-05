@@ -13,6 +13,7 @@ from urllib.parse import urlparse, unquote
 import httpx
 
 from app.services.pathnames import safe_seg
+from app.services import task_progress_store
 
 # model_type -> ComfyUI models 子目录（对齐 ComfyUI 原生 models 目录结构）
 TYPE_DIRS = {
@@ -43,13 +44,45 @@ TYPE_DIRS = {
 ALLOWED_HOSTS = {"huggingface.co", "civitai.com"}
 
 # 下载任务进度表：task_id -> {status, downloaded, total, filename, error}
-_TASKS: dict[str, dict] = {}
+_TASKS: dict[str, dict] = task_progress_store.load("downloads")
 _LOCK = threading.Lock()
+_LAST_PERSIST = 0.0
+
+task_progress_store.mark_interrupted(
+    _TASKS, running_statuses={"pending", "downloading"},
+)
+
+
+def _persist_locked(force: bool = False) -> None:
+    global _LAST_PERSIST
+    now = time.monotonic()
+    if not force and now - _LAST_PERSIST < 0.5:
+        return
+    task_progress_store.save("downloads", _TASKS)
+    _LAST_PERSIST = now
 
 
 def _set(task_id: str, **kw) -> None:
     with _LOCK:
         _TASKS.setdefault(task_id, {}).update(kw)
+        terminal = kw.get("status") in {"done", "error"} or kw.get("phase") in {
+            "done", "failed", "interrupted",
+        }
+        _persist_locked(force=terminal)
+
+
+def _record_transfer(task_id: str, done: int, sample: tuple[float, int],
+                     now: float | None = None) -> tuple[float, int]:
+    """更新字节数和短窗口速度；返回下一次采样基线。"""
+    current = time.monotonic() if now is None else now
+    sampled_at, sampled_bytes = sample
+    elapsed = current - sampled_at
+    if elapsed >= 0.25:
+        speed = max(0, int((done - sampled_bytes) / elapsed))
+        _set(task_id, downloaded=done, speed_bps=speed, updated_at=time.time())
+        return current, done
+    _set(task_id, downloaded=done, updated_at=time.time())
+    return sample
 
 
 def get_status(task_id: str) -> dict:
@@ -120,7 +153,9 @@ def _download(task_id: str, url: str, comfy_models_dir: str, model_type: str,
         headers = {}
         if "huggingface.co" in direct and hf_token:
             headers["Authorization"] = f"Bearer {hf_token}"
-        _set(task_id, status="downloading", downloaded=0, total=0, filename="", error="")
+        _set(task_id, status="downloading", phase="resolving", downloaded=0, total=0,
+             speed_bps=0, filename="", error="", target_dir=str(target_dir),
+             updated_at=time.time())
         # 外网下载必须走代理（huggingface.co/civitai.com 常被墙）；trust_env=False 不读系统环境，
         # 只用显式 proxy——与访问 127.0.0.1 本地服务的 trust_env=False 规则一致但目的相反。
         cli_kw: dict = {"trust_env": False, "follow_redirects": True, "timeout": None}
@@ -132,18 +167,23 @@ def _download(task_id: str, url: str, comfy_models_dir: str, model_type: str,
                     raise RuntimeError(f"HTTP {r.status_code}（可能需要 token 或链接失效）")
                 fname = _filename_from_headers(r, fname_hint)
                 total = int(r.headers.get("content-length", 0) or 0)
-                _set(task_id, filename=fname, total=total)
+                _set(task_id, filename=fname, total=total, phase="downloading")
                 part = target_dir / (fname + ".part")
                 done = 0
+                sample = (time.monotonic(), 0)
                 with open(part, "wb") as f:
                     for chunk in r.iter_bytes(1024 * 256):
                         f.write(chunk)
                         done += len(chunk)
-                        _set(task_id, downloaded=done)
-                part.replace(target_dir / fname)  # 原子重命名，避免半截文件被 ComfyUI 读到
-        _set(task_id, status="done")
+                        sample = _record_transfer(task_id, done, sample)
+                dest = target_dir / fname
+                _set(task_id, phase="saving", downloaded=done)
+                part.replace(dest)  # 原子重命名，避免半截文件被 ComfyUI 读到
+        _set(task_id, status="done", phase="done", speed_bps=0,
+             saved_files=[str(dest)], updated_at=time.time())
     except Exception as e:
-        _set(task_id, status="error", error=str(e))
+        _set(task_id, status="error", phase="failed", speed_bps=0,
+             error=str(e), updated_at=time.time())
 
 
 def start_download(url: str, comfy_models_dir: str, model_type: str,
@@ -159,8 +199,11 @@ def start_download(url: str, comfy_models_dir: str, model_type: str,
         raise ValueError(f"未知模型类型：{model_type}")
     task_id = uuid.uuid4().hex
     disp = (name or "").strip() or _safe_name(urlparse(url).path) or url
-    _set(task_id, status="pending", downloaded=0, total=0, filename="", error="",
-         name=disp, model_type=model_type, created=time.time())
+    created = time.time()
+    _set(task_id, status="pending", phase="queued", downloaded=0, total=0,
+         speed_bps=0, filename="", error="", name=disp, model_type=model_type,
+         kind="model", target_dir="", saved_files=[], created=created,
+         started_at=created, updated_at=created)
     t = threading.Thread(
         target=_download,
         args=(task_id, url, comfy_models_dir, model_type, hf_token, civitai_token, proxy),

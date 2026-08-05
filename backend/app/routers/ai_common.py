@@ -23,6 +23,7 @@ class EmbedModelReq(ChatModelReq):
     embed_mode: Literal["remote", "local"] = "remote"
     embed_model_dir: str = ""      # 可选：本地嵌入模型目录（不随发布包提供）
     reranker_model_dir: str = ""   # 可选：自定义 Cross-Encoder 目录；完整 RAG 版留空使用内置模型
+    embed_proxy_url: str = ""       # 远程嵌入模型代理（空=直连）
 
     def embed_cfg(self):
         """收成 rag_backend.EmbedConfig 单一属主对象（避免三元组散着传）。"""
@@ -34,15 +35,19 @@ class EmbedModelReq(ChatModelReq):
             model_dir=self.embed_model_dir,
             reranker_dir=self.reranker_model_dir,
             mode=self.embed_mode,
+            proxy=self.embed_proxy_url,
         )
 
 
 def build_chat_model(base_url: str, api_key: str, model: str,
-                     temperature: float = 0.7, streaming: bool = False):
+                     temperature: float = 0.7, streaming: bool = False,
+                     proxy: str = ""):
     """构建对话模型（委托 services.llm，把缺配置的 ValueError 包成 400）。"""
     from app.services import llm as _llm
     try:
-        return _llm.build_model(base_url, api_key, model, temperature, streaming)
+        return _llm.build_model(
+            base_url, api_key, model, temperature, streaming, proxy=proxy,
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

@@ -316,3 +316,34 @@ def test_sync_preserves_manual_pack_content_and_rebuilds_manual_chunks(monkeypat
     assert calls[1][1]["chunks"][0]["content"] == "人工用途说明"
     assert calls[1][1]["chunks"][0]["node_names"] == ["NodeA", "NodeB"]
     assert calls[1][1]["content_source"] == "manual"
+
+
+def test_sync_records_failed_pack_and_continues_with_later_packs(monkeypatch):
+    def pack(name):
+        return {
+            "title": name,
+            "python_module": f"custom_nodes.{name}",
+            "nodes": [{"name": name, "display": name, "desc": "", "category": "image"}],
+            "categories": {"image"},
+        }
+
+    indexed = []
+    monkeypatch.setattr(node_index._rag, "list_node_packs", lambda _cfg: [])
+    monkeypatch.setattr(node_index._rag, "index_node_chunks", lambda *_args, **_kwargs: None)
+
+    def index_pack(_cfg, *, pack_id, **_kwargs):
+        if pack_id == "bad":
+            raise TimeoutError("timed out")
+        indexed.append(pack_id)
+
+    monkeypatch.setattr(node_index._rag, "index_node_pack", index_pack)
+    node_index._set_progress(done=0, synced=0, skipped=0, failed=0, failures=[])
+
+    node_index._do_sync({"bad": pack("bad"), "good": pack("good")}, object(), full=False)
+
+    progress = node_index.sync_progress()
+    assert indexed == ["good"]
+    assert progress["done"] == 2
+    assert progress["synced"] == 1
+    assert progress["failed"] == 1
+    assert progress["failures"] == ["bad: timed out"]

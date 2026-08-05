@@ -1,0 +1,125 @@
+; 架构护栏：把根目录 ARCHITECTURE.md 的依赖规则变成可执行门禁。
+; 跑：cd backend && $env:PYTHONUTF8=1; .venv/Scripts/lint-imports
+[importlinter]
+root_package = app
+
+[importlinter:contract:services-not-depend-on-routers]
+name = services 层不得依赖 routers 层（分层：路由薄、业务下沉，service 可独立单测）
+type = forbidden
+source_modules =
+    app.services
+forbidden_modules =
+    app.routers
+
+[importlinter:contract:background-run-stack-layers]
+name = 后台运行栈方向：队列依赖 agent_runner，agent_runner 依赖底座(thread_admission/agent_contracts)，底座不得反向依赖
+type = layers
+layers =
+    app.services.chat_agent_queue
+    app.services.agent_runner
+    app.services.thread_admission | app.services.agent_contracts
+
+[importlinter:contract:rag-stack-layers]
+name = RAG 栈方向：编排依赖检索与存储，向量后端不得反向依赖
+type = layers
+layers =
+    app.services.node_index | app.services.rag_store | app.services.lora_index
+    app.services.node_store | app.services.rag_retrieval | app.services.reranker | app.services.lora_store
+    app.services.rag_backend
+
+[importlinter:contract:workflow-build-stack-layers]
+name = 搭建栈方向：编排依赖搭建回合与图规则，底层不得反向依赖
+type = layers
+layers =
+    app.services.workflow_build_tasks
+    app.services.workflow_builder
+    app.services.workflow_build_turn | app.services.workflow_graph_rules | app.services.workflow_merge
+    app.services.node_candidates
+    app.services.node_index
+    app.services.rag_middleware
+
+[importlinter:contract:chat-stream-protocol-layers]
+name = 对话流协议方向：SSE Adapter 依赖 wire 协议，协议不得反向依赖
+type = layers
+layers =
+    app.services.sse
+    app.services.chat_stream_protocol
+
+[importlinter:contract:agency-purity]
+name = 能动性纯逻辑：agency 只吃快照，不得依赖状态存储 / 图编排 / 出图管线
+type = forbidden
+source_modules =
+    app.services.agency
+forbidden_modules =
+    app.services.character_state
+    app.services.agent_graph
+    app.services.scene_illustration
+
+[importlinter:contract:scene-illustration-purity]
+name = 插画纯逻辑：scene_illustration 只判触发+组装，不得依赖状态存储 / 图编排 / 出图管线
+type = forbidden
+source_modules =
+    app.services.scene_illustration
+forbidden_modules =
+    app.services.character_state
+    app.services.agent_graph
+    app.services.workflow_submission
+    app.services.image_gen
+
+[importlinter:contract:narrative-memory-purity]
+name = 纪要纯逻辑：narrative_memory 只管抽取/压缩/召回查询的纯逻辑，不得依赖存储 / 图编排 / 编排
+type = forbidden
+source_modules =
+    app.services.narrative_memory
+forbidden_modules =
+    app.services.narrative_store
+    app.services.character_state
+    app.services.agent_graph
+    app.services.roleplay_agency
+
+[importlinter:contract:image-prompt-extract-purity]
+name = 出图提取纯逻辑：image_prompt_extract 只做破甲还原/解析/拼装，不依赖 LLM / 图编排 / 存储
+type = forbidden
+source_modules =
+    app.services.image_prompt_extract
+forbidden_modules =
+    app.services.llm
+    app.services.agent_graph
+    app.services.roleplay_agency
+    app.services.character_state
+
+[importlinter:contract:scene-classify-purity]
+name = 场景分类纯逻辑：scene_classify 只规整标签，不依赖 LLM / 图编排
+type = forbidden
+source_modules =
+    app.services.scene_classify
+forbidden_modules =
+    app.services.llm
+    app.services.agent_graph
+
+[importlinter:contract:table-update-purity]
+name = 表格更新纯逻辑：table_update 只做指令组装/解析，不依赖 LLM / 图编排
+type = forbidden
+source_modules =
+    app.services.table_update
+forbidden_modules =
+    app.services.llm
+    app.services.agent_graph
+    app.services.roleplay_agency
+
+[importlinter:contract:roleplay-agency-stack]
+name = 能动性子图编排方向：roleplay_agency 依赖接缝模块，接缝不得反向依赖编排，编排不得依赖 agent_graph
+type = layers
+layers =
+    app.services.roleplay_agency
+    app.services.scene_renderers | app.services.narrative_store
+    app.services.scene_illustration | app.services.character_state | app.services.narrative_memory
+    app.services.agency
+
+[importlinter:contract:roleplay-agency-not-depend-graph]
+name = 能动性编排不得依赖 agent_graph（单向：agent_graph 调 roleplay_agency，防环）
+type = forbidden
+source_modules =
+    app.services.roleplay_agency
+forbidden_modules =
+    app.services.agent_graph

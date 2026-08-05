@@ -1,8 +1,17 @@
 import { describe, it, expect } from "vitest";
 import {
   buildHash, calcSize, ASPECTS, IMAGE_QUALITIES, RES_TIERS, supportsImageQuality,
-  normalizeCustomDimension, resolveImageSize,
+  normalizeCustomDimension, resolveHomeWorkspace, resolveImageSize,
+  resolveActivityChatTarget,
 } from "./viewRouting";
+import type { Repo } from "../stores/repos";
+
+describe("home workspace", () => {
+  it.each(["story", "generate", "code"] as const)("%s mode binds to the selected work chat", (mode) => {
+    expect(resolveHomeWorkspace(mode, true)).toBe("chat");
+    expect(resolveHomeWorkspace(mode, false)).toBe("need-work");
+  });
+});
 
 describe("buildHash", () => {
   it("各视图映射到对应 hash", () => {
@@ -16,6 +25,22 @@ describe("buildHash", () => {
   it("repo-detail/chat 缺 repoId 回退首页", () => {
     expect(buildHash("repo-detail", null)).toBe("#/home");
     expect(buildHash("chat", null)).toBe("#/home");
+  });
+});
+
+describe("background activity navigation", () => {
+  const repos: Repo[] = [
+    { id: "parent", name: "大仓库", createdAt: 1 },
+    { id: "work", name: "SAVE01", parentId: "parent", createdAt: 2 },
+  ];
+
+  it("selects both parent repository and child work", () => {
+    expect(resolveActivityChatTarget(repos, "work")).toEqual({ repoId: "parent", workId: "work" });
+  });
+
+  it("rejects missing or top-level targets", () => {
+    expect(resolveActivityChatTarget(repos, "missing")).toBeNull();
+    expect(resolveActivityChatTarget(repos, "parent")).toBeNull();
   });
 });
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from app.services import chat_memory, llm as _llm
+from app.services import chat_memory, chat_snapshot, llm as _llm
 
 
 _TOKEN_CJK_RE = re.compile(r"[\u3400-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]")
@@ -48,10 +48,15 @@ def _clip_to_token_budget(text: str, budget: int) -> str:
 
 
 def recent_history(thread_id: str, max_tokens: int = 20_000,
-                   per_role: int = 6) -> list[dict]:
-    """分别取用户与 AI 最近六条消息，再在全局 token 上限内均衡裁剪。"""
+                   per_role: int = 6,
+                   history_override: list[dict] | None = None) -> list[dict]:
+    """分别取用户与 AI 各 per_role 条最近消息，再在 token 上限内均衡裁剪；max_tokens<=0 则不裁剪。"""
     try:
-        history = chat_memory.get_history(thread_id)
+        if history_override is not None:
+            history = history_override
+        else:
+            snapshot_history = chat_snapshot.load_prompt_history(thread_id)
+            history = snapshot_history if snapshot_history is not None else chat_memory.get_history(thread_id)
         selected: list[tuple[int, dict]] = []
         counts = {"user": 0, "assistant": 0}
         for index in range(len(history) - 1, -1, -1):
@@ -69,6 +74,10 @@ def recent_history(thread_id: str, max_tokens: int = 20_000,
         items = [item for _, item in sorted(selected, key=lambda pair: pair[0])]
         if not items:
             return []
+
+        # max_tokens<=0 表示无上限（剧情模式）：历史全量不裁剪，条数仍由 per_role 约束。
+        if max_tokens <= 0:
+            return items
 
         content_budget = max(1, max_tokens - len(items) * 4)
         full_costs = [estimate_tokens(item["content"]) for item in items]
@@ -115,9 +124,10 @@ def standalone_execution_prompt(ctx: Any, text: str) -> str:
     )
     user = history_text(ctx) + "本轮执行要求：" + original
     try:
+        proxy = (ctx.get("chat_proxy", "") or "").strip()
         resolved = chat_fn(
             ctx["chat_base"], ctx["chat_key"], ctx["chat_model"],
-            system, user, temperature=0.2, proxy=ctx.get("proxy", ""),
+            system, user, temperature=0.2, **({"proxy": proxy} if proxy else {}),
         )
         return (resolved or "").strip() or original
     except Exception:  # noqa: BLE001

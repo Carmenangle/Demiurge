@@ -90,3 +90,96 @@ def test_retrieve_with_trace_embeds_query_once_and_uses_bm25_fallback(monkeypatc
     assert calls == ["WD14Tagger"]
     assert any(hit["content"] == exact_doc.page_content and "bm25" in hit["channels"] for hit in hits)
     assert all(hit["kind"] != "generation" for hit in hits)
+
+
+def test_story_rag_can_exclude_global_system_collection(monkeypatch):
+    accessed = []
+
+    class FakeStore:
+        def get(self):
+            return {
+                "documents": ["作品内角色记忆"],
+                "metadatas": [{"kind": "document", "title": "角色记忆"}],
+            }
+
+        def similarity_search_by_vector(self, vector, k, filter):
+            return []
+
+    def fake_store(collection, cfg):
+        accessed.append(collection)
+        assert collection != rag_store.SYSTEM_COLLECTION
+        return FakeStore()
+
+    monkeypatch.setattr(rag_backend, "embed_query", lambda cfg, query: [0.1])
+    monkeypatch.setattr(rag_store, "_store", fake_store)
+    monkeypatch.setattr(rag_store.reranker, "rerank", lambda *args, **kwargs: [])
+
+    hits = rag_store.retrieve_with_trace(
+        "story", rag_backend.EmbedConfig(), "角色", 4, include_system=False)
+
+    assert accessed == [rag_store._repo_collection("story"), rag_store._repo_collection("story")]
+    assert hits and all(hit["source"] == "repo:story" for hit in hits)
+
+
+def test_asset_delete_removes_only_rag_record_and_keeps_local_file(tmp_path, monkeypatch):
+    image = tmp_path / "kept.png"
+    image.write_bytes(b"png")
+    deleted = []
+
+    class FakeStore:
+        def __init__(self, found):
+            self.found = found
+
+        def get(self, ids=None):
+            if ids and self.found:
+                return {
+                    "ids": ids,
+                    "documents": ["prompt"],
+                    "metadatas": [{
+                        "kind": "generation",
+                        "image_url": f"http://127.0.0.1:8010/api/local-view?path={image}",
+                    }],
+                }
+            return {"ids": [], "documents": [], "metadatas": []}
+
+        def delete(self, ids):
+            deleted.extend(ids)
+
+    system = FakeStore(False)
+    repo = FakeStore(True)
+    monkeypatch.setattr(
+        rag_store, "_store",
+        lambda collection, _cfg: system if collection == rag_store.SYSTEM_COLLECTION else repo,
+    )
+
+    assert rag_store.delete_doc("gen-1", "repo", rag_backend.EmbedConfig()) is True
+    assert deleted == ["gen-1"]
+    assert image.is_file()
+
+
+def test_prune_removes_only_missing_local_generation(tmp_path, monkeypatch):
+    existing = tmp_path / "existing.png"
+    existing.write_bytes(b"png")
+    missing = tmp_path / "missing.png"
+    deleted = []
+
+    class FakeStore:
+        def delete(self, ids):
+            deleted.extend(ids)
+
+    rows = [
+        {"id": "missing", "kind": "generation",
+         "image_url": f"http://127.0.0.1:8010/api/local-view?path={missing}"},
+        {"id": "existing", "kind": "generation",
+         "image_url": f"http://127.0.0.1:8010/api/local-view?path={existing}"},
+        {"id": "remote", "kind": "generation", "image_url": "https://example.com/image.png"},
+        {"id": "doc", "kind": "document",
+         "image_url": f"http://127.0.0.1:8010/api/local-view?path={missing}"},
+    ]
+    monkeypatch.setattr(rag_store, "_store", lambda *_args: FakeStore())
+    monkeypatch.setattr(rag_store, "_dump", lambda *_args: rows)
+
+    assert rag_store.prune_missing_generations(
+        "repo", rag_backend.EmbedConfig(),
+    ) == 1
+    assert deleted == ["missing"]

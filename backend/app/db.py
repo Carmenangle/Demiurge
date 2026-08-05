@@ -86,6 +86,8 @@ def init_db() -> None:
                 lora_name text primary key,        -- 相对 loras 目录，与 LoraLoader.lora_name 一致
                 triggers text not null default '', -- 逗号分隔
                 note text not null default '',
+                suggested_weight real not null default 0.8,
+                suggested_prompt text not null default '',
                 source text not null default '',   -- metadata | sidecar | manual
                 missing integer not null default 0,-- 1=文件已不在磁盘（不删，保住手填内容）
                 updated_at integer not null
@@ -102,4 +104,15 @@ def init_db() -> None:
         if "lease_expires_at" not in columns:
             connection.execute(
                 "alter table workflow_build_tasks add column lease_expires_at integer not null default 0"
+            )
+        lora_columns = {
+            row["name"] for row in connection.execute("pragma table_info(lora_triggers)")
+        }
+        if "suggested_weight" not in lora_columns:
+            connection.execute(
+                "alter table lora_triggers add column suggested_weight real not null default 0.8"
+            )
+        if "suggested_prompt" not in lora_columns:
+            connection.execute(
+                "alter table lora_triggers add column suggested_prompt text not null default ''"
             )

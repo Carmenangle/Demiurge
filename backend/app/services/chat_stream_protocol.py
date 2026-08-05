@@ -31,7 +31,8 @@ def error_event(message: str) -> ChatStreamEvent:
 def encode_event(event: Mapping[str, object]) -> ChatStreamEvent | None:
     """编码一个内部事件；完成信号由 SSE 传输层收尾，不重复进入 payload。"""
     signals: list[str] = []
-    for key in ("trace", "delta", "image", "video", "insp", "approval", "route_choice", "error"):
+    for key in ("trace", "delta", "replace", "image", "video", "illustrate_request", "insp",
+                "rag_status", "approval", "route_choice", "error"):
         if key in event and event[key] is not None:
             signals.append(key)
     if event.get("interrupted") is True:
@@ -45,7 +46,7 @@ def encode_event(event: Mapping[str, object]) -> ChatStreamEvent | None:
         raise ValueError(f"对话流内部事件必须且只能包含一种事件类型：{signals or list(event)}")
 
     kind = signals[0]
-    if kind in ("trace", "delta"):
+    if kind in ("trace", "delta", "replace"):
         return _wire(kind, {"text": str(event[kind])})
     if kind in ("image", "video"):
         data = {"url": str(event[kind])}
@@ -55,8 +56,29 @@ def encode_event(event: Mapping[str, object]) -> ChatStreamEvent | None:
         if kind == "image" and event.get("regeneration") is not None:
             data["regeneration"] = event["regeneration"]
         return _wire(kind, data)
+    if kind == "illustrate_request":
+        req = event["illustrate_request"]
+        prompt = req.get("prompt", "") if isinstance(req, Mapping) else ""
+        motion = req.get("motion", 0) if isinstance(req, Mapping) else 0
+        actors = req.get("actors", []) if isinstance(req, Mapping) else []
+        data: dict = {"prompt": str(prompt), "motion": int(motion) if isinstance(motion, (int, float)) else 0,
+                      "actors": [str(a) for a in actors] if isinstance(actors, list) else []}
+        if isinstance(req, Mapping) and isinstance(req.get("scene_spec"), Mapping):
+            data["scene_spec"] = dict(req["scene_spec"])
+        if isinstance(req, Mapping) and isinstance(req.get("offset"), (int, float)):
+            data["offset"] = max(0, int(req["offset"]))
+        if event.get("id"):
+            data["id"] = str(event["id"])
+        return _wire("illustrate_request", data)
     if kind == "insp":
         return _wire("inspiration", {"card": event["insp"]})
+    if kind == "rag_status":
+        rs = event["rag_status"]
+        rs = rs if isinstance(rs, Mapping) else {}
+        data = {"state": str(rs.get("state", "")), "kind": str(rs.get("kind", ""))}
+        if rs.get("count") is not None:
+            data["count"] = int(rs["count"]) if isinstance(rs["count"], (int, float)) else 0
+        return _wire("rag_status", data)
     if kind == "approval":
         return _wire("approval", {"approval": event["approval"]})
     if kind == "route_choice":

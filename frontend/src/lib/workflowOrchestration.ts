@@ -7,7 +7,7 @@ import { fmtOpResults } from "./opResults";
 import { isLafMessageFromStrict, postToFrame } from "./lafLock";
 import { walkModelChain } from "./modelChain";
 
-type Chat = { baseUrl: string; apiKey: string; modelName: string };
+type Chat = { baseUrl: string; apiKey: string; modelName: string; proxyUrl?: string };
 
 // 常见 ComfyUI 节点的 widget 顺序 → 真实 widget 名（UI 格式 widgets_values 无名，据此对齐）。
 // 仅用于未确认卡从 raw.workflow 解析；apply 按名匹配，故名字须与 ComfyUI 一致。

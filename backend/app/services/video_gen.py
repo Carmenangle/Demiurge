@@ -78,7 +78,7 @@ def _status_of(payload: dict) -> str:
 
 
 def generate(base_url: str, api_key: str, model: str, prompt: str,
-             size: str = "1024x1024") -> str:
+             size: str = "1024x1024", proxy: str = "") -> str:
     """文生视频，返回可展示地址（http URL 或 data:video/...;base64,...）。
 
     异步接口：提交拿 task_id，轮询状态直到成功取视频 URL；
@@ -90,7 +90,10 @@ def generate(base_url: str, api_key: str, model: str, prompt: str,
     headers = {"Authorization": f"Bearer {api_key or 'not-needed'}",
                "Content-Type": "application/json"}
     payload = {"model": model, "prompt": prompt, "size": size}
-    with httpx.Client(trust_env=False, timeout=300) as c:
+    client_kwargs = {"trust_env": False, "timeout": 300}
+    if proxy:
+        client_kwargs["proxy"] = proxy
+    with httpx.Client(**client_kwargs) as c:
         r = c.post(url, headers=headers, json=payload)
         if r.status_code >= 400:
             raise RuntimeError(f"生视频接口 {r.status_code}：{r.text[:300]}（请求地址 {url}）")

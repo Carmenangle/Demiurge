@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from app.services import agent_store
+from app.services import agent_store, builtin_agents
 
 router = APIRouter()
 
@@ -48,3 +48,19 @@ def default_prompt() -> dict:
     """返回内置默认系统提示词（普通对话优先 + 显式工具调用规则）。"""
     from app.services.image_agent import _AGENT_SYSTEM_BASE
     return {"prompt": _AGENT_SYSTEM_BASE}
+
+
+# ── ③ 内置智能体：展示图里所有默认 Agent + 参数 + 绑定工具，开放高价值字段覆盖 ──
+
+
+@router.get("/builtin")
+def list_builtin_agents() -> list[dict]:
+    """列出所有内置 Agent 的元数据 + 默认值 + 当前生效值（含用户覆盖）。"""
+    return builtin_agents.registry_view()
+
+
+@router.post("/builtin")
+def save_builtin_overrides(overrides: dict) -> list[dict]:
+    """保存内置 Agent 覆盖（{agent_id: {field: value}}），只接受注册表声明的可编辑字段。"""
+    builtin_agents.save_overrides(overrides)
+    return builtin_agents.registry_view()

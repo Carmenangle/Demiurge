@@ -1,7 +1,10 @@
 import { describe, it, expect } from "vitest";
 import {
   needsImageInput, hasImageProvided, pickBestText, shouldFinalize, slimSnapshot,
-  registerPending, unregisterPending, pendingResumeAction, pollSchedule,
+  registerPending, unregisterPending, pendingResumeAction, pollSchedule, promptHistory,
+  generationResultAction, notFoundPollAction,
+  prependLoraTriggers, prepareConversationRegeneration, resolveGenerationPrompt,
+  promptAdditionsForSelectedLora, triggersForSelectedLora,
 } from "./chatGeneration";
 import type { Template } from "../api/workflows";
 import type { ChatMessage } from "../types/chat";
@@ -62,6 +65,172 @@ describe("pickBestText", () => {
   });
   it("首尾空白被 trim", () => {
     expect(pickBestText(["  hello world  "])).toBe("hello world");
+  });
+});
+
+describe("promptHistory", () => {
+  it("只上传当前可见且有文本的对话消息", () => {
+    const visible: ChatMessage[] = [
+      { id: "u1", role: "user", text: "保留的用户消息" },
+      { id: "empty", role: "assistant", text: "", image: "generated.png" },
+      { id: "a1", role: "assistant", text: "", parts: [
+        { type: "image", url: "generated.png" },
+        { type: "media-slot", slotId: "slot-1", status: "ready" },
+        { type: "text", text: "保留的助手消息" },
+      ] },
+    ];
+    expect(promptHistory(visible)).toEqual([
+      { role: "user", content: "保留的用户消息" },
+      { role: "assistant", content: "保留的助手消息" },
+    ]);
+  });
+});
+
+describe("prepareConversationRegeneration", () => {
+  it("保留所选用户消息、删除后续回复并完整恢复图文输入", () => {
+    const messages: ChatMessage[] = [
+      { id: "a1", role: "assistant", text: "前情" },
+      {
+        id: "u1", role: "user", text: "重跑本轮",
+        parts: [
+          { type: "image", url: "image.png" },
+          { type: "masked-image", url: "preview.png", image: "base.png", mask: "mask.png" },
+          { type: "text", text: "重跑本轮" },
+        ],
+      },
+      { id: "a2", role: "assistant", text: "旧回复" },
+      { id: "u2", role: "user", text: "后续消息" },
+    ];
+
+    const replay = prepareConversationRegeneration(messages, "u1");
+
+    expect(replay?.history).toEqual([messages[0]]);
+    expect(replay?.retained).toEqual(messages.slice(0, 2));
+    expect(replay?.content).toEqual({
+      text: "重跑本轮",
+      images: ["image.png"],
+      parts: messages[1].parts,
+      maskedImage: { image: "base.png", mask: "mask.png", preview: "preview.png" },
+    });
+  });
+
+  it("拒绝助手消息和不存在的消息", () => {
+    const messages: ChatMessage[] = [{ id: "a1", role: "assistant", text: "回复" }];
+
+    expect(prepareConversationRegeneration(messages, "a1")).toBeNull();
+    expect(prepareConversationRegeneration(messages, "missing")).toBeNull();
+  });
+});
+
+describe("prependLoraTriggers", () => {
+  it("只把触发词插到质量行最前，内容行保持不变", () => {
+    const prompt = "masterpiece, best quality, score_9\n1girl, blue hair, looking at viewer";
+    expect(prependLoraTriggers(prompt, ["moby_d1ck"])).toBe(
+      "moby_d1ck, masterpiece, best quality, score_9\n1girl, blue hair, looking at viewer",
+    );
+  });
+
+  it("已有触发词时不重复插入", () => {
+    const prompt = "moby_d1ck, masterpiece\n1girl, blue hair";
+    expect(prependLoraTriggers(prompt, ["moby_d1ck"])).toBe(prompt);
+  });
+
+  it("触发词已在任意提示词段落出现时不重复前置", () => {
+    const prompt = "masterpiece, best quality\nmoby_d1ck, 1girl, blue hair";
+    expect(prependLoraTriggers(prompt, ["moby_d1ck"])).toBe(prompt);
+  });
+});
+
+describe("LoRA 触发词精确绑定", () => {
+  const items = [
+    { lora_name: "old.safetensors", triggers: ["old_trigger"], missing: false },
+    { lora_name: "selected.safetensors", triggers: ["selected_trigger"], missing: false },
+    { lora_name: "empty.safetensors", triggers: [], missing: false },
+  ];
+
+  it("只返回本次最终选择 LoRA 的触发词", () => {
+    expect(triggersForSelectedLora(items, "selected.safetensors")).toEqual(["selected_trigger"]);
+  });
+
+  it("只合并当前LoRA的触发词与作者建议提示词", () => {
+    const data = [
+      { ...items[0], suggested_prompt: "old quality" },
+      { ...items[1], suggested_prompt: "masterpiece, best quality" },
+    ];
+    expect(promptAdditionsForSelectedLora(data, "selected.safetensors")).toEqual([
+      "selected_trigger", "masterpiece", "best quality",
+    ]);
+    expect(promptAdditionsForSelectedLora(data, "missing.safetensors")).toEqual([]);
+  });
+
+  it("作者双段提示词只提取质量内容且已有触发词不重复", () => {
+    const data = [{
+      lora_name: "selected.safetensors", triggers: ["NJSW33T"], missing: false,
+      suggested_prompt: [
+        "NJSW33T, blurry background, depth of field, rim light, chiaroscuro, (anime coloring, flat color, sketch), (artist:pigeon666:0.67), by putimaxi",
+        "NJSW33T, close-up, best quality, masterpiece, amazing quality, newest, very aesthetic, absurdres, 8k, good anatomy, ultra detailed, high resolution, (semi-realistic), sharp focus, ((donghua style))",
+      ].join("\n\n"),
+    }];
+
+    const additions = promptAdditionsForSelectedLora(data, "selected.safetensors");
+
+    expect(additions.filter((item) => item.toLowerCase() === "njsw33t")).toHaveLength(1);
+    expect(additions).toContain("blurry background");
+    expect(additions).toContain("(artist:pigeon666:0.67)");
+    expect(additions).toContain("masterpiece");
+    expect(additions).toContain("((donghua style))");
+    expect(additions).not.toContain("close-up");
+  });
+
+  it("完整作者提示词排除人物服装动作，只保留质量与画风", () => {
+    const data = [{
+      lora_name: "selected.safetensors", triggers: ["style_trigger"], missing: false,
+      suggested_prompt: "masterpiece, cinematic lighting, anime style, 1girl, red dress, kneeling, holding sword, forest",
+    }];
+
+    expect(promptAdditionsForSelectedLora(data, "selected.safetensors")).toEqual([
+      "style_trigger", "masterpiece", "cinematic lighting", "anime style",
+    ]);
+  });
+
+  it("LoRA建议中的分级人物外貌与动作不得混入质量行", () => {
+    const data = [{
+      lora_name: "selected.safetensors", triggers: ["NJSW33T"], missing: false,
+      suggested_prompt: [
+        "NJSW33T, masterpiece, anime coloring, sensitive, explicit, fair skin",
+        "1girl, red dress, kissing, kneeling, intimate scene",
+      ].join("\n"),
+    }];
+
+    expect(promptAdditionsForSelectedLora(data, "selected.safetensors")).toEqual([
+      "NJSW33T", "masterpiece", "anime coloring",
+    ]);
+  });
+
+  it("未记录、无触发词或文件已缺失时不回退旧记录", () => {
+    expect(triggersForSelectedLora(items, "unknown.safetensors")).toEqual([]);
+    expect(triggersForSelectedLora(items, "empty.safetensors")).toEqual([]);
+    expect(triggersForSelectedLora([
+      { lora_name: "selected.safetensors", triggers: ["stale"], missing: true },
+      ...items.slice(0, 1),
+    ], "selected.safetensors")).toEqual([]);
+  });
+});
+
+describe("生成资产提示词", () => {
+  it("自动插画优先使用提交时持久化的提示词", () => {
+    expect(resolveGenerationPrompt(
+      "masterpiece\n1girl, climax action", undefined, "workflow text output",
+    )).toBe("masterpiece\n1girl, climax action");
+  });
+
+  it("普通工作流兼容重生成快照与文本输出", () => {
+    const regeneration = { kind: "workflow" as const, prompt: "saved prompt" };
+    expect(resolveGenerationPrompt("", regeneration, "result text")).toBe("saved prompt");
+    expect(resolveGenerationPrompt("", {
+      kind: "template" as const, prompt: "inline prompt",
+    }, "result text")).toBe("inline prompt");
+    expect(resolveGenerationPrompt("", undefined, "result text")).toBe("result text");
   });
 });
 
@@ -180,6 +349,26 @@ describe("pending generation", () => {
     ]);
   });
 
+  it("自动插画 pending 持久化目标消息与slot", () => {
+    const regeneration = {
+      kind: "template" as const,
+      templateId: "tpl",
+      values: { "39.text": "masterpiece\n1girl" },
+      comfyuiUrl: "http://127.0.0.1:8188",
+      outputNodeIds: ["45"],
+      prompt: "masterpiece\n1girl",
+    };
+    expect(registerPending([], "p1", 1, ["45"], regeneration, {
+      messageId: "bot-1", slotId: "slot-1", background: true,
+    }, "masterpiece\n1girl, climax action")).toEqual([{
+      prompt_id: "p1", createdAt: 1,
+      outputNodeIds: ["45"],
+      regeneration,
+      target: { messageId: "bot-1", slotId: "slot-1", background: true },
+      prompt: "masterpiece\n1girl, climax action",
+    }]);
+  });
+
   it("删除只移除指定任务并保持顺序", () => {
     const input = [
       { prompt_id: "p1", createdAt: 1 },
@@ -204,6 +393,18 @@ describe("pending generation", () => {
     [210, false, null],
   ])("第 %i 次轮询维持原调度", (tries, releaseBusy, delayMs) => {
     expect(pollSchedule(tries)).toEqual({ releaseBusy, delayMs });
+  });
+
+  it("ComfyUI execution_error 是失败终态，不能继续轮询", () => {
+    expect(generationResultAction("failed")).toBe("fail");
+    expect(generationResultAction("completed")).toBe("complete");
+    expect(generationResultAction("running")).toBe("poll");
+  });
+
+  it("完成瞬间短暂查不到 history 时继续轮询，连续五次才判丢失", () => {
+    expect(notFoundPollAction(1)).toBe("retry");
+    expect(notFoundPollAction(4)).toBe("retry");
+    expect(notFoundPollAction(5)).toBe("fail");
   });
 });
 

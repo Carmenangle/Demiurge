@@ -6,6 +6,10 @@ export interface DownloadStatus {
   total?: number;
   filename?: string;
   error?: string;
+  phase?: "queued" | "resolving" | "downloading" | "saving" | "extracting" | "done" | "failed";
+  speed_bps?: number;
+  target_dir?: string;
+  saved_files?: string[];
 }
 
 // 下载任务（跨 tab 下载面板用）：在 DownloadStatus 基础上带 id/展示名/类型/创建时间
@@ -14,6 +18,9 @@ export interface DownloadTask extends DownloadStatus {
   name?: string;
   model_type?: string;
   created?: number;
+  kind?: "model" | "workflow";
+  started_at?: number;
+  updated_at?: number;
 }
 
 export type ModelType =

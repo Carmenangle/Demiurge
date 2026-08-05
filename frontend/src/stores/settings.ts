@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
 import { getUserState } from "../api/userState";
 import { pushSettings } from "../lib/userStateSync";
+import {
+  normalizeProxyMode, resolveEndpointProxy, resolveModelProxy, type ProxyMode,
+} from "../lib/modelProxy";
 
 export type ManualTheme = "bright" | "night" | "eye-care" | "green" | "gray";
 export type Theme = ManualTheme | "system";
@@ -19,6 +22,8 @@ export interface ChatModel {
   apiKey: string;
   baseUrl: string;
   modelName: string;
+  proxyMode?: ProxyMode;
+  proxyUrl?: string; // 运行时解析值；不要求持久化
 }
 
 // 嵌入模型（知识库 RAG 用）：OpenAI 兼容形式，可填智谱/OpenAI/Ollama 等
@@ -29,6 +34,8 @@ export interface EmbedModel {
   apiKey: string;
   baseUrl: string;
   modelName: string;
+  proxyMode?: ProxyMode;
+  proxyUrl?: string; // 运行时解析值；不要求持久化
   /** 可选：本地嵌入模型目录；远程/Ollama 模式可留空。 */
   modelDir?: string;
   /** 可选：本地 Cross-Encoder Reranker 模型目录。 */
@@ -42,6 +49,7 @@ export interface ImageModel {
   baseUrl: string;
   modelName: string;
   supportsCustomSize?: boolean;
+  proxyMode?: ProxyMode;
 }
 
 export interface VideoModel {
@@ -50,6 +58,7 @@ export interface VideoModel {
   apiKey: string;
   baseUrl: string;
   modelName: string;
+  proxyMode?: ProxyMode;
 }
 
 // 用户自定义的提示词风格存档：content 是整段风格模板（画风/结构/负面词，自由粘贴），
@@ -58,6 +67,39 @@ export interface StylePreset {
   id: string;
   name: string;
   content: string;
+}
+
+// 用户人设存档：可定制多个「我是谁」，按情况自由切换。name 填 {{user}} 宏，content 填 personaDescription。
+// 运行时只把选中档的 name/content 透传后端（字段仍是 user_name/user_persona），后端零改。
+export interface UserPersona {
+  id: string;
+  name: string;
+  content: string;
+}
+
+// 多元数据插入预设（按作品绑定）：剧情高潮点用哪个 ComfyUI 工作流模板出图 + 可选角色 LoRA。
+// 提示词由后端从高潮段生成所选 profile，运行时按模板 exposed 的 semantic 组装到对应节点字段。
+// ⑥ 单角色的出图绑定：LoRA（ComfyUI 标签系用）+ 底图（gpt-image 系锁一致性用；无 LoRA 时必填）。
+export interface CharacterLoraBinding {
+  loraName?: string;    // 该角色的 LoRA 文件名（空=无角色 LoRA，回退风格 LoRA + 底图）
+  loraWeight?: number;  // LoRA 权重（默认 0.8）
+  baseImage?: string;   // 该角色底图（本地文件路径，走 local-view）；可选的一致性参考
+}
+
+export interface MediaInsertPreset {
+  templateId: string;       // 图片工作流模板 id（空=未预设，不异步出图）
+  promptProfile?: import("../lib/imagePromptProfiles").PromptProfileId;
+  qualityPrompt?: string;   // Anima 固定质量行；空则使用后端 profile 默认值
+  negativePrompt?: string;  // 独立负面提示词；仅模板暴露 negative_prompt 时注入
+  latentLongEdge?: 1024 | 2048 | 4096; // 用户只定最长边；Agent 决定画幅比例
+  loraName?: string;        // [兼容旧数据] 单角色 LoRA 文件名；已被 characterLoras 取代
+  loraWeight?: number;      // [兼容旧数据] LoRA 权重（默认 0.8）
+  characterLoras?: Record<string, CharacterLoraBinding>; // ⑥ 角色名→LoRA+底图；出图按在场角色取
+  styleLora?: string;       // ⑥ 兜底风格 LoRA（角色无自己的 LoRA 时用）
+  styleLoraWeight?: number; // ⑥ 风格 LoRA 权重（默认 0.8）
+  styleBaseImage?: string;  // ⑥ 兜底风格底图（在场角色都无底图时，gpt-image 系用）
+  videoTemplateId?: string; // 视频工作流模板 id（空=不出视频，恒用图片模板）
+  smartVideo?: boolean;     // 智能模态：开=剧情动态强时(motion>=2)自动改用视频模板，否则用图片
 }
 
 export interface Settings {
@@ -72,7 +114,17 @@ export interface Settings {
   imageStyle?: string;  // 生图提示词风格：""(自动)/sd/gpt/banana，或 "preset:<id>" 指向自定义存档
   stylePresets?: StylePreset[];  // 用户自定义风格存档
   workflowDir: string; // 工作流默认读取路径（后端扫描该目录及子目录的 .json）
-  outputDir: string; // 输出图片默认存放路径
+  outputDir: string; // 仓库文件夹：作品私有产物（图片+会话记录+好感度+往事+参考图）落 <此>/<作品名>/
+  characterDir: string; // 角色卡文件夹：导入的卡按「小仓库」落此目录（含卡本体+内嵌世界书/正则+对话）
+  worldbookDir: string; // 世界书文件夹：独立世界书文件落此目录（Phase 2）
+  presetDir: string; // 偏置预设文件夹：ST OpenAI 预设落此目录（仅剧情模式用）
+  activePresetName: string; // 当前激活的偏置预设名（空=不用预设，走内置扮演提示）
+  userName: string; // [兼容旧数据] 用户人设名；已迁移进 userPersonas，运行时读选中档
+  userPersona: string; // [兼容旧数据] 用户人设描述；已迁移进 userPersonas
+  userPersonas?: UserPersona[]; // 用户人设多档：可定制多个「我是谁」自由切换
+  activeUserPersonaId?: string; // 当前选中的用户人设 id（空=不注入用户人设）
+  illustrate: boolean; // 剧情插画开关：开=高潮点自动配图（复用生图模型，能动性 D 阶段）
+  mediaInsert?: Record<string, MediaInsertPreset>; // 多元数据插入预设，按作品(repoId)绑定 ComfyUI 模板+LoRA
   comfyuiPath: string; // ComfyUI 本体目录（含 main.py），用于后端启动
   comfyuiPython: string; // ComfyUI 自己的 Python；禁止使用本工具 Runtime 代替
   comfyuiUrl: string; // ComfyUI 访问地址，iframe 嵌入与 API 调用
@@ -89,37 +141,56 @@ export interface Settings {
   chatBgPosX?: number; // 水平位置 0~100（默认 50 居中）
   chatBgPosY?: number; // 垂直位置 0~100（默认 50 居中）
   activeAgentId?: string; // 当前对话选中的 Agent 预设 id（空=内置默认行为）
+  streamOutput: boolean; // 智能体回复是否按模型增量实时输出
   contextReminderTokens: number; // 累计上下文达到该估算 token 数时提醒压缩
   contextMaxTokens: number; // 每轮传给 Agent 的历史上下文估算 token 硬上限
+  historyPerRole: number; // 每角色（用户/AI）读取的最近历史条数，再在 token 上限内裁剪
 }
 
 export const DEFAULT_CONTEXT_REMINDER_TOKENS = 12_000;
 export const DEFAULT_CONTEXT_MAX_TOKENS = 20_000;
+export const DEFAULT_HISTORY_PER_ROLE = 6;
 
 export function normalizeContextBudgets(reminder: unknown, max: unknown) {
   const parsedMax = Number(max);
-  const safeMax = Number.isFinite(parsedMax)
-    ? Math.min(200_000, Math.max(4_000, Math.round(parsedMax)))
-    : DEFAULT_CONTEXT_MAX_TOKENS;
+  // max=0 表示「无上限」（剧情模式不裁历史，全量入上下文）；其余仍钳到 [4000, 200000]。
+  const safeMax = Number.isFinite(parsedMax) && parsedMax <= 0
+    ? 0
+    : Number.isFinite(parsedMax)
+      ? Math.min(200_000, Math.max(4_000, Math.round(parsedMax)))
+      : DEFAULT_CONTEXT_MAX_TOKENS;
+  // 无上限时提醒值不受 max 约束，只需 >=1000；有上限时仍须低于上限 1000。
+  const reminderCeil = safeMax === 0 ? Number.MAX_SAFE_INTEGER : safeMax - 1_000;
   const parsedReminder = Number(reminder);
   const safeReminder = Number.isFinite(parsedReminder)
-    ? Math.min(safeMax - 1_000, Math.max(1_000, Math.round(parsedReminder)))
-    : Math.min(DEFAULT_CONTEXT_REMINDER_TOKENS, safeMax - 1_000);
+    ? Math.min(reminderCeil, Math.max(1_000, Math.round(parsedReminder)))
+    : Math.min(DEFAULT_CONTEXT_REMINDER_TOKENS, reminderCeil);
   return { reminder: safeReminder, max: safeMax };
 }
 
-const KEY = "laf_settings";
+// Demiurge 专用 key：与源项目 ComfyUI-Wrapping-paper（同为 127.0.0.1:5173 同源、旧 key laf_settings）
+// 隔离 localStorage，避免两项目串数据（源项目模型配置/密钥漏进 Demiurge）。不迁移旧 key，干净起步。
+const KEY = "demiurge_settings";
 
 const DEFAULT: Settings = {
   theme: "system",
   chatModels: [],
-  embedModel: { mode: "remote", apiKey: "ollama", baseUrl: "http://localhost:11434/v1", modelName: "qwen3-embedding:latest" },
+  embedModel: { mode: "remote", apiKey: "ollama", baseUrl: "http://localhost:11434/v1", modelName: "qwen3-embedding:latest", proxyMode: "on" },
   imageModels: [],
   videoModels: [],
   imageStyle: "",
   stylePresets: [],
   workflowDir: "",
   outputDir: "",
+  characterDir: "",
+  worldbookDir: "",
+  presetDir: "",
+  activePresetName: "",
+  userName: "",
+  userPersona: "",
+  userPersonas: [],
+  illustrate: false,
+  mediaInsert: {},
   comfyuiPath: "",
   comfyuiPython: "",
   comfyuiUrl: "http://127.0.0.1:8188",
@@ -135,14 +206,17 @@ const DEFAULT: Settings = {
   chatBgScale: 1,
   chatBgPosX: 50,
   chatBgPosY: 50,
+  streamOutput: false,
   contextReminderTokens: DEFAULT_CONTEXT_REMINDER_TOKENS,
   contextMaxTokens: DEFAULT_CONTEXT_MAX_TOKENS,
+  historyPerRole: DEFAULT_HISTORY_PER_ROLE,
 };
 
 // 旧数据迁移：单 chatModel 字段 → chatModels 列表（向后兼容）
 function migrate(s: Record<string, unknown>): Settings {
   const merged = { ...DEFAULT, ...s } as Settings & { chatModel?: ChatModel };
   merged.theme = normalizeTheme(s.theme);
+  merged.streamOutput = s.streamOutput === true;
   const savedEmbed = (s.embedModel || {}) as Partial<EmbedModel>;
   merged.embedModel = {
     ...DEFAULT.embedModel,
@@ -150,6 +224,7 @@ function migrate(s: Record<string, unknown>): Settings {
     mode: savedEmbed.mode === "local" || savedEmbed.mode === "remote"
       ? savedEmbed.mode
       : savedEmbed.modelDir?.trim() ? "local" : "remote",
+    proxyMode: normalizeProxyMode(savedEmbed.proxyMode),
   };
   const contextBudgets = normalizeContextBudgets(
     s.contextReminderTokens,
@@ -157,6 +232,10 @@ function migrate(s: Record<string, unknown>): Settings {
   );
   merged.contextReminderTokens = contextBudgets.reminder;
   merged.contextMaxTokens = contextBudgets.max;
+  const parsedTurns = Number(s.historyPerRole);
+  merged.historyPerRole = Number.isFinite(parsedTurns)
+    ? Math.min(50, Math.max(1, Math.round(parsedTurns)))
+    : DEFAULT_HISTORY_PER_ROLE;
   if ((!merged.chatModels || merged.chatModels.length === 0) && merged.chatModel) {
     const old = merged.chatModel;
     if (old.baseUrl || old.modelName || old.apiKey) {
@@ -166,10 +245,25 @@ function migrate(s: Record<string, unknown>): Settings {
     }
   }
   // 给缺 id 的对话模型补 id
-  merged.chatModels = (merged.chatModels || []).map((m) =>
-    m.id ? m : { ...m, id: crypto.randomUUID() },
-  );
+  merged.chatModels = (merged.chatModels || []).map((m) => ({
+    ...m, id: m.id || crypto.randomUUID(), proxyMode: normalizeProxyMode(m.proxyMode),
+  }));
+  merged.imageModels = (merged.imageModels || []).map((m) => ({
+    ...m, proxyMode: normalizeProxyMode(m.proxyMode),
+  }));
+  merged.videoModels = (merged.videoModels || []).map((m) => ({
+    ...m, proxyMode: normalizeProxyMode(m.proxyMode),
+  }));
   delete merged.chatModel;
+  // 用户人设：旧单值(userName/userPersona) → 迁进 userPersonas[0] 并设为选中
+  merged.userPersonas = (merged.userPersonas || []).map((p) =>
+    p.id ? p : { ...p, id: crypto.randomUUID() },
+  );
+  if (merged.userPersonas.length === 0 && (merged.userName?.trim() || merged.userPersona?.trim())) {
+    const id = crypto.randomUUID();
+    merged.userPersonas = [{ id, name: merged.userName || "", content: merged.userPersona || "" }];
+    merged.activeUserPersonaId = id;
+  }
   return merged;
 }
 
@@ -191,15 +285,31 @@ function load(): Settings {
 
 // 取当前选中的对话模型（无选中则取第一个，再无则空配置）
 export function activeChatModel(s: Settings): ChatModel {
-  return (
+  const model = (
     s.chatModels.find((m) => m.id === s.activeChatModelId) ||
     s.chatModels[0] ||
-    { apiKey: "", baseUrl: "", modelName: "" }
+    { apiKey: "", baseUrl: "", modelName: "", proxyMode: "on" }
   );
+  return { ...model, proxyUrl: resolveModelProxy(model.proxyMode, s.proxyUrl, s.proxyEnabled) };
+}
+
+export function resolvedEmbedModel(s: Settings): EmbedModel {
+  return {
+    ...s.embedModel,
+    proxyUrl: resolveEndpointProxy(
+      s.embedModel.baseUrl, s.embedModel.proxyMode, s.proxyUrl, s.proxyEnabled,
+    ),
+  };
 }
 
 export function modelDisplayName(model: { displayName?: string; modelName: string }): string {
   return model.displayName?.trim() || model.modelName.trim() || "未命名模型";
+}
+
+// 取当前选中的用户人设（无选中或已删则返回空档，即不注入用户人设）。
+export function activeUserPersona(s: Settings): UserPersona {
+  const empty = { id: "", name: "", content: "" };
+  return (s.userPersonas || []).find((p) => p.id === s.activeUserPersonaId) || empty;
 }
 
 export function resolveTheme(theme: Theme, prefersDark: boolean): ManualTheme {
@@ -254,7 +364,7 @@ export function useSettings() {
       ...p,
       imageModels: [
         ...p.imageModels,
-        { id: crypto.randomUUID(), apiKey: "", baseUrl: "", modelName: "新模型" },
+        { id: crypto.randomUUID(), apiKey: "", baseUrl: "", modelName: "新模型", proxyMode: "on" },
       ],
     }));
 
@@ -294,6 +404,31 @@ export function useSettings() {
     settings, update, addImageModel, updateImageModel, removeImageModel,
     addStylePreset, updateStylePreset, removeStylePreset,
   };
+}
+
+// 导出设置为 JSON。keepKeys=false 时清空所有密钥/令牌字段（模型 apiKey、下载令牌等），
+// 只留结构与非敏感配置，便于分享/迁移不泄露凭证。
+export function exportSettings(s: Settings, keepKeys: boolean): string {
+  const out: Settings = JSON.parse(JSON.stringify(s));
+  if (!keepKeys) {
+    out.chatModels = out.chatModels.map((m) => ({ ...m, apiKey: "" }));
+    out.imageModels = out.imageModels.map((m) => ({ ...m, apiKey: "" }));
+    out.videoModels = out.videoModels.map((m) => ({ ...m, apiKey: "" }));
+    out.embedModel = { ...out.embedModel, apiKey: "" };
+    out.hfToken = "";
+    out.civitaiToken = "";
+    out.smitheryKey = "";
+  }
+  return JSON.stringify(out, null, 2);
+}
+
+// 从导出的 JSON 文本回填设置。走 migrate 做校验+旧字段迁移+补默认，非法 JSON 抛错。
+export function importSettings(json: string): Settings {
+  const parsed = JSON.parse(json);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("不是有效的设置 JSON");
+  }
+  return migrate(parsed as Record<string, unknown>);
 }
 
 // 从 imageStyle 取选中存档的 content（内置风格返回空串）。供生图链路透传给后端。

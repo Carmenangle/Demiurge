@@ -82,7 +82,8 @@ def _auto_tags(prompt: str, tags: str) -> list[str]:
 
 
 def index_generation(repo_id: str, cfg: EmbedConfig,
-                     prompt: str, tags: str = "", image_url: str = "") -> None:
+                     prompt: str, tags: str = "", image_url: str = "",
+                     created_at: int | None = None) -> None:
     """生图完成后入库：提示词 + 标签合为一条文档，附图片URL元数据。写入本仓库库。
 
     只要有图片就入库——智能体出图常无提示词文本，此时用占位文本嵌入，
@@ -108,7 +109,8 @@ def index_generation(repo_id: str, cfg: EmbedConfig,
                            "repo_id": repo_id or "", "tags": ",".join(tag_list),
                            # 权威排序键：入库毫秒时间戳。前端据此从新到旧，不再依赖文件名编号
                            # （文件改名/删图都不影响排序）。历史记录无此字段时前端回退到文件名。
-                           "created_at": int(time.time() * 1000)})
+                           "created_at": (created_at if created_at is not None
+                                          else int(time.time() * 1000))})
     ], ids=[doc_id])
 
 
@@ -127,6 +129,39 @@ def index_document(repo_id: str, cfg: EmbedConfig,
         for c in chunks
     ], ids=[str(uuid.uuid4()) for _ in chunks])
     return len(chunks)
+
+
+def index_table_rows(repo_id: str, cfg: EmbedConfig,
+                     table_uid: str, table_name: str, row_texts: list[str]) -> int:
+    """把某张检索表的当前所有行索引进本仓库库（kind=table_row）。先清该表旧行再重灌，保证与表一致。
+
+    表增删改后整表重灌（行数通常不大）：先删该 table_uid 下全部旧 table_row 条目，再按当前行重新入库。
+    行文本由 table_store.row_text 渲染；id 用 (table_uid, 序号) 确定性生成，同表重灌相同 id 覆盖。
+    与 curator 知识（kind=document）同库，一起被 retrieve 召回 → 真·表格+RAG 结合。返回入库行数。
+    """
+    if not (repo_id and table_uid):
+        return 0
+    store = _store(_repo_collection(repo_id), cfg)
+    # 清旧行：查该表已有 table_row 条目并删除（行删除/缩减时不留孤儿）
+    try:
+        got = store.get(where={"table_uid": table_uid})
+        old_ids = got.get("ids", []) or []
+        if old_ids:
+            store.delete(ids=old_ids)
+    except Exception:
+        pass
+    texts = [t for t in row_texts if t and t.strip()]
+    if not texts:
+        return 0
+    docs = [
+        Document(page_content=t,
+                 metadata={"kind": "table_row", "title": table_name or "",
+                           "table_uid": table_uid, "repo_id": repo_id or ""})
+        for t in texts
+    ]
+    ids = [f"trow-{table_uid}-{i}" for i in range(len(texts))]
+    store.add_documents(docs, ids=ids)
+    return len(texts)
 
 
 def _context_id(source: str, content: str, metadata: dict) -> str:
@@ -161,15 +196,18 @@ def _context_documents(collection: str, source: str, cfg: EmbedConfig) -> list[d
 
 
 def retrieve_with_trace(repo_id: str, cfg: EmbedConfig,
-                        query: str, k: int = 4) -> list[dict]:
-    """普通知识库 Hybrid 检索，返回可供评估追踪的结构化结果。"""
+                        query: str, k: int = 4, *, include_system: bool = True) -> list[dict]:
+    """Hybrid 检索，返回可供评估追踪的结构化结果。
+
+    普通知识问答默认合并系统库；剧情链路传 include_system=False，只召回当前作品，
+    避免节点帮助文档污染角色记忆。
+    """
     if not query.strip():
         return []
     candidate_k = max(k * 4, 12)
-    sources = [
-        (SYSTEM_COLLECTION, "system"),
-        (_repo_collection(repo_id), f"repo:{repo_id or 'home'}"),
-    ]
+    sources = [(_repo_collection(repo_id), f"repo:{repo_id or 'home'}")]
+    if include_system:
+        sources.insert(0, (SYSTEM_COLLECTION, "system"))
     rankings: list[tuple[str, list[dict]]] = []
     documents: list[dict] = []
     try:
@@ -202,13 +240,16 @@ def retrieve_with_trace(repo_id: str, cfg: EmbedConfig,
 
 
 def retrieve(repo_id: str, cfg: EmbedConfig,
-             query: str, k: int = 4) -> list[str]:
+             query: str, k: int = 4, *, include_system: bool = True) -> list[str]:
     """检索与 query 相关的片段（系统库 + 本仓库库合并），返回文本列表。
     只检索 kind != generation 的条目：单次出图的提示词/反推无复用价值，
     会污染对话检索；它们仍留在库里供资产库展示，只是不喂给 AI 检索。
     可复用知识（角色固定特征等）请走知识库手动录入（kind=document）。
     """
-    return [hit["content"] for hit in retrieve_with_trace(repo_id, cfg, query, k)]
+    return [
+        hit["content"]
+        for hit in retrieve_with_trace(repo_id, cfg, query, k, include_system=include_system)
+    ]
 
 
 def _dump(collection: str, cfg: EmbedConfig) -> list[dict]:

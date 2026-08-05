@@ -19,7 +19,8 @@ from app.services.rag_backend import EmbedConfig
 #   running 是否在跑，done/total 已处理/总包数，current 当前包名，
 #   synced/skipped 结果计数，error 失败信息，finished 是否已结束。
 _PROGRESS: dict = {"running": False, "done": 0, "total": 0, "current": "",
-                   "synced": 0, "skipped": 0, "error": "", "finished": False}
+                   "synced": 0, "skipped": 0, "failed": 0, "failures": [],
+                   "error": "", "finished": False}
 _LOCK = threading.Lock()
 
 
@@ -220,7 +221,7 @@ def start_sync(comfy_url: str, cfg: EmbedConfig, full: bool = False) -> dict:
     packs = _group_by_pack(object_info)
     total = len(packs)
     _set_progress(running=True, done=0, total=total, current="",
-                  synced=0, skipped=0, error="", finished=False)
+                  synced=0, skipped=0, failed=0, failures=[], error="", finished=False)
 
     def _run():
         try:
@@ -241,46 +242,55 @@ def _do_sync(packs: dict[str, dict], cfg: EmbedConfig, full: bool) -> None:
         existing.pop(stale_pack_id, None)
     synced = 0
     skipped = 0
+    failed = 0
+    failures: list[str] = []
     done = 0
     for pid, pack in packs.items():
         _set_progress(current=pid)
-        node_names = [n["name"] for n in pack["nodes"]]
-        prev = existing.get(pid)
-        unchanged = prev and set(prev.get("node_names", [])) == set(node_names)
-        chunks_ready = unchanged and _rag.node_chunks_ready(cfg, pid)
-        manual = bool(prev and prev.get("content_source") == "manual")
-        manual_detail = _rag.get_node_pack(cfg, pid) if manual else None
-        # 包与分块都完整才跳过；旧版本只有包文档时自动补建分块。
-        if not full and unchanged and chunks_ready:
-            skipped += 1
-        else:
-            if full or not unchanged:
-                content = (
-                    str(manual_detail.get("content", ""))
-                    if manual_detail else _pack_content(pack)
+        try:
+            node_names = [n["name"] for n in pack["nodes"]]
+            prev = existing.get(pid)
+            unchanged = prev and set(prev.get("node_names", [])) == set(node_names)
+            chunks_ready = unchanged and _rag.node_chunks_ready(cfg, pid)
+            manual = bool(prev and prev.get("content_source") == "manual")
+            manual_detail = _rag.get_node_pack(cfg, pid) if manual else None
+            # 包与分块都完整才跳过；旧版本只有包文档时自动补建分块。
+            if not full and unchanged and chunks_ready:
+                skipped += 1
+            else:
+                if full or not unchanged:
+                    content = (
+                        str(manual_detail.get("content", ""))
+                        if manual_detail else _pack_content(pack)
+                    )
+                    _rag.index_node_pack(
+                        cfg, pack_id=pid, title=pack["title"], content=content,
+                        node_names=node_names, categories=sorted(pack["categories"]),
+                        python_module=pack["python_module"],
+                        content_source="manual" if manual_detail else "auto",
+                    )
+                chunks = (
+                    [{
+                        "content": str(manual_detail.get("content", "")),
+                        "node_names": node_names,
+                        "categories": sorted(pack["categories"]),
+                    }]
+                    if manual_detail else _pack_chunks(pack)
                 )
-                _rag.index_node_pack(
-                    cfg, pack_id=pid, title=pack["title"], content=content,
-                    node_names=node_names, categories=sorted(pack["categories"]),
+                _rag.index_node_chunks(
+                    cfg, pack_id=pid, title=pack["title"], chunks=chunks,
                     python_module=pack["python_module"],
                     content_source="manual" if manual_detail else "auto",
                 )
-            chunks = (
-                [{
-                    "content": str(manual_detail.get("content", "")),
-                    "node_names": node_names,
-                    "categories": sorted(pack["categories"]),
-                }]
-                if manual_detail else _pack_chunks(pack)
-            )
-            _rag.index_node_chunks(
-                cfg, pack_id=pid, title=pack["title"], chunks=chunks,
-                python_module=pack["python_module"],
-                content_source="manual" if manual_detail else "auto",
-            )
-            synced += 1
+                synced += 1
+        except Exception as exc:  # noqa: BLE001 单包失败不得终止整批同步
+            failed += 1
+            failures.append(f"{pid}: {exc}")
         done += 1
-        _set_progress(done=done, synced=synced, skipped=skipped)
+        _set_progress(
+            done=done, synced=synced, skipped=skipped,
+            failed=failed, failures=list(failures),
+        )
 
 
 def search(cfg: EmbedConfig, need: str, k: int = 8) -> list[dict]:

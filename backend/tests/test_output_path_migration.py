@@ -19,77 +19,85 @@ def _ref(source: Path, destination: Path, doc_id: str = "asset-1") -> migration.
     )
 
 
-def test_audit_counts_asset_records_and_unique_files(tmp_path, monkeypatch):
+def _make_repo_folder(root: Path, name: str, files: dict[str, bytes]) -> Path:
+    """在 root 下建带 _repo.json 标记的作品文件夹并写入文件（值即内容）。"""
+    folder = root / name
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "_repo.json").write_text(json.dumps({"id": name, "name": name}), encoding="utf-8")
+    for rel, data in files.items():
+        p = folder / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+    return folder
+
+
+def test_audit_counts_repo_folder_files(tmp_path, monkeypatch):
     old_root, new_root = tmp_path / "old", tmp_path / "new"
-    source = old_root / "repo" / "a.png"
-    source.parent.mkdir(parents=True)
-    source.write_bytes(b"image")
-    refs = [_ref(source, new_root / "repo" / "a.png", "a"),
-            _ref(source, new_root / "repo" / "a.png", "b")]
-    monkeypatch.setattr(migration, "_scan_asset_refs", lambda *_: refs)
+    folder = _make_repo_folder(old_root, "repo", {"a.png": b"image", "chat.json": b"[]"})
+    source = folder / "a.png"
+    monkeypatch.setattr(migration, "_scan_asset_refs",
+                        lambda *_: [_ref(source, new_root / "repo" / "a.png", "a")])
 
     result = migration.audit(str(old_root), str(new_root))
 
-    assert result["asset_count"] == 2
-    assert result["file_count"] == 1
-    assert result["total_bytes"] == 5
+    assert result["changed"] is True
+    assert result["asset_count"] == 1              # Chroma 索引到的图片
+    assert result["file_count"] == 3               # a.png + chat.json + _repo.json 全搬
+    assert result["total_bytes"] == 5 + 2 + len(folder.joinpath("_repo.json").read_bytes())
     assert result["missing_count"] == 0
     assert result["conflict_count"] == 0
 
 
-def test_migrate_copies_updates_references_then_removes_source(tmp_path, monkeypatch):
+def test_migrate_moves_whole_repo_folder_and_rewrites(tmp_path, monkeypatch):
     old_root, new_root = tmp_path / "old", tmp_path / "new"
-    source = old_root / "repo" / "a.png"
+    folder = _make_repo_folder(old_root, "repo", {
+        "a.png": b"image", "chat.json": b"[]", "state.json": b"{}",
+    })
+    source = folder / "a.png"
     destination = new_root / "repo" / "a.png"
-    source.parent.mkdir(parents=True)
-    source.write_bytes(b"image")
-    refs = [_ref(source, destination)]
-    monkeypatch.setattr(migration, "_scan_asset_refs", lambda *_: refs)
+    seen = {}
+    monkeypatch.setattr(migration, "_scan_asset_refs", lambda *_: [_ref(source, destination)])
     monkeypatch.setattr(migration, "_update_index", lambda items: [])
-    monkeypatch.setattr(migration, "_rewrite_json_references", lambda files: ([], 3))
+    monkeypatch.setattr(migration, "_rewrite_json_references",
+                        lambda files, extra_candidates=None: seen.update(extra=extra_candidates) or ([], 3))
 
     result = migration.migrate(str(old_root), str(new_root))
 
-    assert not source.exists()
+    assert not folder.exists()                                  # 旧作品文件夹整体删除
     assert destination.read_bytes() == b"image"
-    assert result == {
-        "migrated_files": 1,
-        "updated_assets": 1,
-        "updated_references": 3,
-        "delete_failures": 0,
-        "skipped_missing": 0,
-    }
+    assert (new_root / "repo" / "chat.json").read_bytes() == b"[]"   # 会话随文件夹迁移
+    assert (new_root / "repo" / "state.json").read_bytes() == b"{}"  # 状态也随迁
+    assert (new_root / "repo" / "chat.json") in seen["extra"]        # 新位置 chat.json 参与重写
+    assert result["migrated_files"] == 4                        # a.png+chat.json+state.json+_repo.json
+    assert result["updated_assets"] == 1
+    assert result["updated_references"] == 3
+    assert result["delete_failures"] == 0
 
 
-def test_migrate_skips_already_missing_asset(tmp_path, monkeypatch):
+def test_migrate_ignores_unmarked_folders(tmp_path, monkeypatch):
+    """没有 _repo.json 标记的目录(ComfyUI 自有输出)不迁移，避免误搬。"""
     old_root, new_root = tmp_path / "old", tmp_path / "new"
-    missing = old_root / "repo" / "missing.png"
-    existing = old_root / "repo" / "existing.png"
-    existing.parent.mkdir(parents=True)
-    existing.write_bytes(b"image")
-    refs = [
-        _ref(missing, new_root / "repo" / "missing.png", "missing"),
-        _ref(existing, new_root / "repo" / "existing.png", "existing"),
-    ]
-    updated = []
-    monkeypatch.setattr(migration, "_scan_asset_refs", lambda *_: refs)
-    monkeypatch.setattr(migration, "_update_index", lambda items: updated.extend(items) or [])
-    monkeypatch.setattr(migration, "_rewrite_json_references", lambda files: ([], 1))
+    loose = old_root / "comfy_out"
+    loose.mkdir(parents=True)
+    (loose / "x.png").write_bytes(b"comfy")
+    monkeypatch.setattr(migration, "_scan_asset_refs", lambda *_: [])
+    monkeypatch.setattr(migration, "_update_index", lambda items: [])
+    monkeypatch.setattr(migration, "_rewrite_json_references",
+                        lambda files, extra_candidates=None: ([], 0))
 
     result = migration.migrate(str(old_root), str(new_root))
 
-    assert [item.doc_id for item in updated] == ["existing"]
-    assert result["skipped_missing"] == 1
-    assert (new_root / "repo" / "existing.png").is_file()
+    assert loose.joinpath("x.png").is_file()      # 原地不动
+    assert not (new_root / "comfy_out").exists()
+    assert result["migrated_files"] == 0
 
 
 def test_migrate_refuses_different_target_file(tmp_path, monkeypatch):
     old_root, new_root = tmp_path / "old", tmp_path / "new"
-    source = old_root / "repo" / "a.png"
+    folder = _make_repo_folder(old_root, "repo", {"a.png": b"old"})
+    source = folder / "a.png"
     destination = new_root / "repo" / "a.png"
-    source.parent.mkdir(parents=True)
     destination.parent.mkdir(parents=True)
-    source.write_bytes(b"old")
     destination.write_bytes(b"different")
     monkeypatch.setattr(migration, "_scan_asset_refs", lambda *_: [_ref(source, destination)])
 

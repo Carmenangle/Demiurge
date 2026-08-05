@@ -63,10 +63,34 @@ def test_agent上下文token上限契约():
     assert custom["context_max_tokens"] == 48_000
 
 
+def test_agent显式可见历史允许空列表覆盖checkpoint():
+    context = RunContext(thread_id="t", message="m", history_override=[])
+    assert context.history_override == []
+    assert context["history_override"] == []
+
+
+def test_agent上下文透传本轮原始输入():
+    ctx = RunContext(thread_id="t", message="完整用户输入")
+    assert ctx["message"] == "完整用户输入"
+    assert ctx.get("message") == "完整用户输入"
+    assert "message" in ctx
+
+
 def test_agent生图质量契约():
     assert RunContext(thread_id="t", message="m").image_quality == "high"
     custom = RunContext(thread_id="t", message="m", image_quality="medium")
     assert custom["image_quality"] == "medium"
+
+
+def test_agent按模型类型保留独立代理地址():
+    ctx = RunContext(
+        thread_id="t", message="m", proxy_url="search",
+        chat_proxy_url="chat", gen_proxy_url="image",
+        video_proxy_url="video", embed_proxy_url="embed",
+    )
+    assert ctx["proxy"] == "search"
+    assert (ctx["chat_proxy"], ctx["gen_proxy"]) == ("chat", "image")
+    assert (ctx["vid_proxy"], ctx["embed_proxy"]) == ("video", "embed")
 
 
 def test_agent蒙版原图只合并到视觉输入一次():
@@ -77,3 +101,33 @@ def test_agent蒙版原图只合并到视觉输入一次():
     assert context.input_images() == ["original.png", "reference.png"]
     context.images.insert(0, "original.png")
     assert context.input_images() == ["original.png", "reference.png"]
+
+
+def test_运行期瞬态键可写回并读出():
+    # 修复扮演失败 'RunContext' object does not support item assignment：
+    # graph 节点把 scene/_regex_scripts 等瞬态键写回 ctx，供后续节点读。
+    ctx = RunContext(thread_id="t", message="m")
+    assert ctx.get("scene") is None          # 未写入 → 默认 None
+    ctx["scene"] = "谷中冷倾雪"                # 曾抛 item assignment 错
+    ctx["_regex_scripts"] = [1, 2, 3]
+    assert ctx["scene"] == "谷中冷倾雪"
+    assert ctx.get("_regex_scripts") == [1, 2, 3]
+    assert "scene" in ctx
+    assert "context_max_tokens" in ctx        # __contains__ 也覆盖固定字段
+
+
+def test_运行期瞬态键支持弹出且缺失时返回默认值():
+    ctx = RunContext(thread_id="t", message="m")
+    ctx["_agency_goal_deltas"] = [{"field": "叙事/塞西莉亚·当前目标"}]
+
+    assert ctx.pop("_agency_goal_deltas") == [{"field": "叙事/塞西莉亚·当前目标"}]
+    assert ctx.pop("_agency_goal_deltas", []) == []
+    assert "_agency_goal_deltas" not in ctx
+
+
+def test_瞬态键不影响相等比较():
+    # extras compare=False：写瞬态键不改变 RunContext 相等性（幂等/去重语义不破）
+    a = RunContext(thread_id="t", message="m")
+    b = RunContext(thread_id="t", message="m")
+    a["scene"] = "x"
+    assert a == b

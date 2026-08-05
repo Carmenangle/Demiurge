@@ -9,8 +9,72 @@ export type View =
   | "tools"                                         // 多功能工具（非核心但偶尔要用的小工具）
   | "settings";                                     // 设置中心（整页路由）
 
+import type { Repo } from "../stores/repos";
+
 // 单段 hash 的 view 集合（无 repoId 参数），parse/build 共用避免重复。
 const SIMPLE_VIEWS: View[] = ["repos", "assets", "workflows", "ai-build", "node-index", "models", "node-manager", "tools", "settings"];
+
+// 导航模型（重设计 v2，对齐用户图一~图四）：
+// - WorkMode：三种创作模式，由左上 `Demiurge ▾` 下拉切换（像 ChatGPT 切模型）。
+//   三模式共用「首页」一个入口，首页内容随当前 WorkMode 变。
+//   剧情模式自带自动生成，调用提前备好的格式模版；多元生成是调模版的试验台。
+// - NavSection：左侧主导航目的地。home=首页(创作工作区)；三个管理类点进去钻入(左栏换子项+返回)。
+export type WorkMode = "story" | "generate" | "code";
+
+export const WORK_MODES: { id: WorkMode; label: string; hint: string }[] = [
+  { id: "story", label: "剧情模式", hint: "推进剧情，高潮点自动生成并内嵌" },
+  { id: "generate", label: "多元数据生成", hint: "调试格式模版的试验台" },
+  { id: "code", label: "编程模式", hint: "脚本/插件功能" },
+];
+
+export function isWorkMode(value: string): value is WorkMode {
+  return WORK_MODES.some((m) => m.id === value);
+}
+
+export type HomeWorkspace = "need-work" | "chat";
+
+export function resolveHomeWorkspace(workMode: WorkMode, hasActiveWork: boolean): HomeWorkspace {
+  if (!hasActiveWork) return "need-work";
+  switch (workMode) {
+    case "story":
+    case "generate":
+    case "code":
+      return "chat";
+  }
+}
+
+export type NavSection = "home" | "assets" | "workflows" | "system";
+
+export const NAV_SECTIONS: { id: NavSection; label: string }[] = [
+  { id: "home", label: "首页" },
+  { id: "assets", label: "资产管理" },
+  { id: "workflows", label: "工作流管理" },
+  { id: "system", label: "系统管理" },
+];
+
+export function isNavSection(value: string): value is NavSection {
+  return NAV_SECTIONS.some((s) => s.id === value);
+}
+
+// 三个管理类点进去钻入：左栏整体换成「返回 + 子项」。子项 id 复用老 View 语义。
+export const SECTION_SUBNAV: Record<Exclude<NavSection, "home">, { id: string; label: string }[]> = {
+  assets: [
+    { id: "works", label: "作品" },
+    { id: "character-cards", label: "角色卡" },
+    { id: "worldbook", label: "世界书" },
+    { id: "generations", label: "生成内容" },
+  ],
+  workflows: [
+    { id: "templates", label: "工作流模板库" },
+    { id: "ai-build", label: "AI 搭工作流" },
+    { id: "node-index", label: "节点知识库" },
+  ],
+  system: [
+    { id: "models", label: "模型下载" },
+    { id: "node-manager", label: "节点管理" },
+    { id: "tools", label: "多功能工具" },
+  ],
+};
 
 // URL hash <-> 视图状态：刷新后停留在当前页面
 export function parseHash(): { view: View; repoId: string | null } {
@@ -27,6 +91,14 @@ export function buildHash(view: View, repoId: string | null): string {
   if (view === "repo-detail" && repoId) return `#/repo/${repoId}`;
   if (view === "chat" && repoId) return `#/chat/${repoId}`;
   return "#/home";
+}
+
+export function resolveActivityChatTarget(
+  repos: readonly Repo[], threadId: string,
+): { repoId: string; workId: string } | null {
+  const work = repos.find((repo) => repo.id === threadId);
+  if (!work?.parentId || !repos.some((repo) => repo.id === work.parentId)) return null;
+  return { repoId: work.parentId, workId: work.id };
 }
 
 // 比例 + 分辨率档 → 像素宽高。最长边按档位取（1k=1280,2k=2560,4k=3840），

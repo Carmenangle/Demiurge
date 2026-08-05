@@ -45,6 +45,43 @@ def _normalize_ids(values) -> list[str]:
     return out
 
 
+def _auto_latent_fields(record: dict, exposed: list[dict]) -> list[dict]:
+    """唯一 EmptyLatentImage 可无歧义绑定；多节点工作流必须由用户手动标注。"""
+    if any(field.get("semantic") in ("latent_width", "latent_height") for field in exposed):
+        return exposed
+    workflow = record.get("workflow_data")
+    nodes = workflow.get("nodes") if isinstance(workflow, dict) else None
+    if isinstance(nodes, list):
+        latent_nodes = [
+            node for node in nodes
+            if isinstance(node, dict) and node.get("type") == "EmptyLatentImage"
+        ]
+    elif isinstance(workflow, dict):
+        latent_nodes = [
+            {**node, "id": node_id} for node_id, node in workflow.items()
+            if isinstance(node, dict) and node.get("class_type") == "EmptyLatentImage"
+        ]
+    else:
+        return exposed
+    if len(latent_nodes) != 1:
+        return exposed
+    node = latent_nodes[0]
+    node_id = str(node.get("id") or "").strip()
+    if not node_id:
+        return exposed
+    widgets = node.get("widgets_values")
+    inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+    width = widgets[0] if isinstance(widgets, list) and len(widgets) > 0 else inputs.get("width", 1024)
+    height = widgets[1] if isinstance(widgets, list) and len(widgets) > 1 else inputs.get("height", 1024)
+    return [
+        *exposed,
+        {"node_id": node_id, "field": "width", "label": "Latent 宽度",
+         "control": "number", "semantic": "latent_width", "default": width},
+        {"node_id": node_id, "field": "height", "label": "Latent 高度",
+         "control": "number", "semantic": "latent_height", "default": height},
+    ]
+
+
 def _normalize(record: dict) -> dict:
     """返回标准模板副本：节点 id 非空字符串、去重保序，并兼容旧输入字段。"""
     if not isinstance(record, dict):
@@ -60,6 +97,7 @@ def _normalize(record: dict) -> dict:
         node_id = str(field.get("node_id") or "").strip()
         if node_id:
             exposed.append({**field, "node_id": node_id})
+    exposed = _auto_latent_fields(record, exposed)
     normalized.update({
         "exposed": exposed,
         "node_order": _normalize_ids(record.get("node_order")),

@@ -14,6 +14,11 @@ from langchain_core.embeddings import Embeddings
 from app.config import CHROMA_DIR
 
 
+_MAX_REMOTE_TEXT_CHARS = 2_000
+_MAX_REMOTE_BATCH_ITEMS = 1
+_MAX_REMOTE_BATCH_CHARS = 2_000
+
+
 @dataclass(frozen=True)
 class EmbedConfig:
     """嵌入和可选重排模型配置的单一属主。"""
@@ -24,12 +29,22 @@ class EmbedConfig:
     model_dir: str = ""
     reranker_dir: str = ""
     mode: Literal["remote", "local"] = "remote"
+    proxy: str = ""
 
 def _norm_url(base_url: str) -> str:
     url = (base_url or "").rstrip("/")
     if not url.endswith("/v1") and "/chat/completions" not in url:
         url += "/v1"
     return url
+
+
+def _is_loopback_url(base_url: str) -> bool:
+    parsed = urlparse(base_url if "://" in base_url else f"//{base_url}")
+    return (parsed.hostname or "").lower() in {"localhost", "127.0.0.1", "::1"}
+
+
+def _effective_proxy(cfg: EmbedConfig) -> str:
+    return "" if _is_loopback_url(cfg.base_url) else cfg.proxy
 
 
 class _RemoteEmbeddings(Embeddings):
@@ -39,23 +54,45 @@ class _RemoteEmbeddings(Embeddings):
         self._url = _norm_url(cfg.base_url) + "/embeddings"
         self._headers = {"Authorization": f"Bearer {cfg.api_key or 'not-needed'}"}
         self._model = cfg.embed_model
-        self._keep_alive = (urlparse(cfg.base_url).hostname or "").lower() in {
-            "localhost", "127.0.0.1", "::1",
-        }
+        self._proxy = _effective_proxy(cfg)
+        self._keep_alive = _is_loopback_url(cfg.base_url)
 
     def _embed(self, texts: list[str]) -> list[list[float]]:
-        with httpx.Client(trust_env=False, timeout=120) as client:
-            payload = {"model": self._model, "input": texts}
-            if self._keep_alive:
-                payload["keep_alive"] = "30m"
-            response = client.post(self._url, headers=self._headers, json=payload)
-            if self._keep_alive and response.status_code in {400, 422}:
-                payload.pop("keep_alive", None)
+        client_kwargs = {"trust_env": False, "timeout": 120}
+        if self._proxy:
+            client_kwargs["proxy"] = self._proxy
+        bounded = [text[:_MAX_REMOTE_TEXT_CHARS] for text in texts]
+        batches: list[list[str]] = []
+        batch: list[str] = []
+        batch_chars = 0
+        for text in bounded:
+            if batch and (
+                len(batch) >= _MAX_REMOTE_BATCH_ITEMS
+                or batch_chars + len(text) > _MAX_REMOTE_BATCH_CHARS
+            ):
+                batches.append(batch)
+                batch = []
+                batch_chars = 0
+            batch.append(text)
+            batch_chars += len(text)
+        if batch:
+            batches.append(batch)
+
+        vectors: list[list[float]] = []
+        with httpx.Client(**client_kwargs) as client:
+            for texts_batch in batches:
+                payload = {"model": self._model, "input": texts_batch}
+                if self._keep_alive:
+                    payload["keep_alive"] = "30m"
                 response = client.post(self._url, headers=self._headers, json=payload)
-            response.raise_for_status()
-            data = response.json()["data"]
-        data.sort(key=lambda item: item.get("index", 0))
-        return [item["embedding"] for item in data]
+                if self._keep_alive and response.status_code in {400, 422}:
+                    payload.pop("keep_alive", None)
+                    response = client.post(self._url, headers=self._headers, json=payload)
+                response.raise_for_status()
+                data = response.json()["data"]
+                data.sort(key=lambda item: item.get("index", 0))
+                vectors.extend(item["embedding"] for item in data)
+        return vectors
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         return self._embed(texts)
@@ -103,7 +140,7 @@ def embedding_key(cfg: EmbedConfig) -> EmbeddingKey:
     """只包含会改变向量或嵌入调用的配置；reranker 不得分裂 Chroma 缓存。"""
     if cfg.mode == "local":
         return "local", cfg.model_dir
-    return "remote", cfg.base_url, cfg.api_key, cfg.embed_model
+    return "remote", cfg.base_url, cfg.api_key, cfg.embed_model, _effective_proxy(cfg)
 
 
 def embeddings(cfg: EmbedConfig) -> Embeddings:

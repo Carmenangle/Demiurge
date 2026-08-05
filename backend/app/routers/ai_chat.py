@@ -39,7 +39,7 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
     if not req.message.strip() and not req.images:
         raise HTTPException(status_code=400, detail="对话内容为空")
     llm = build_chat_model(req.base_url, req.api_key, req.model,
-                           temperature=req.temperature, streaming=True)
+                           temperature=req.temperature, streaming=True, proxy=req.proxy)
 
     # 检索本仓库知识库，把相关片段拼进 system
     system_text = req.system or _CHAT_SYSTEM
@@ -105,7 +105,9 @@ class CompactRequest(EmbedModelReq):
 def chat_compact(req: CompactRequest) -> dict[str, object]:
     """压缩对话与快照为同一摘要；generation/RAG 仅作为只读摘要输入。"""
     from app.services import chat_maintenance
-    llm = build_chat_model(req.base_url, req.api_key, req.model, temperature=0.3)
+    llm = build_chat_model(
+        req.base_url, req.api_key, req.model, temperature=0.3, proxy=req.proxy,
+    )
     try:
         return chat_maintenance.compact(req.thread_id, llm, req.embed_cfg())
     except chat_maintenance.NothingToCompact as exc:
@@ -139,14 +141,19 @@ def chat_append(req: AppendRequest) -> dict[str, object]:
 class SnapshotSaveRequest(BaseModel):
     thread_id: str = "home"
     messages: list = []           # 前端完整消息流（slim 版，已去大字段）
+    revision: int | None = None   # 前端单调版本；阻止旧异步保存晚到后覆盖删除结果
 
 
 @router.post("/chat/snapshot/save")
 def chat_snapshot_save(req: SnapshotSaveRequest) -> dict[str, object]:
     """落盘前端完整消息流快照，作为可靠真源（关浏览器/清端口不丢）。"""
     from app.services import chat_snapshot
-    chat_snapshot.save(req.thread_id, req.messages)
-    return {"ok": True}
+    saved = (
+        chat_snapshot.save_if_newer(req.thread_id, req.messages, req.revision)
+        if req.revision is not None
+        else (chat_snapshot.save(req.thread_id, req.messages) is None)
+    )
+    return {"ok": True, "saved": saved}
 
 
 @router.get("/chat/snapshot")
@@ -154,6 +161,32 @@ def chat_snapshot_load(thread_id: str = "home") -> dict[str, object]:
     """读取某 thread 的消息流快照，刷新/换设备回填前端。"""
     from app.services import chat_snapshot
     return {"items": chat_snapshot.load(thread_id)}
+
+
+@router.get("/chat/snapshot/export")
+def chat_snapshot_export(thread_id: str = "home") -> dict[str, object]:
+    """导出某作品的完整会话记录（剧情模式常用：备份/搬到别处）。"""
+    from app.services import chat_snapshot
+    return {"thread_id": thread_id, "messages": chat_snapshot.load(thread_id)}
+
+
+class SnapshotImportRequest(BaseModel):
+    thread_id: str = "home"
+    messages: list = []
+    replace: bool = True   # True=整体覆盖；False=按消息 id 合并（已存在则更新，否则追加）
+
+
+@router.post("/chat/snapshot/import")
+def chat_snapshot_import(req: SnapshotImportRequest) -> dict[str, object]:
+    """导入会话记录到某作品。replace=覆盖，否则按 id 合并。返回导入后条数。"""
+    from app.services import chat_snapshot
+    if req.replace:
+        chat_snapshot.save(req.thread_id, req.messages)
+    else:
+        for m in req.messages:
+            if isinstance(m, dict) and m.get("id"):
+                chat_snapshot.upsert(req.thread_id, m)
+    return {"ok": True, "count": len(chat_snapshot.load(req.thread_id))}
 
 
 class SupportRequest(EmbedModelReq):
@@ -174,7 +207,9 @@ def support_stream(req: SupportRequest) -> StreamingResponse:
 
     if not req.message.strip():
         raise HTTPException(status_code=400, detail="问题为空")
-    llm = build_chat_model(req.base_url, req.api_key, req.model, streaming=True)
+    llm = build_chat_model(
+        req.base_url, req.api_key, req.model, streaming=True, proxy=req.proxy,
+    )
     system_text = _SUPPORT_SYSTEM
     hits = rag_store.retrieve(req.repo_id, req.embed_cfg(), req.message, k=5)
     if hits:
@@ -190,4 +225,3 @@ def support_stream(req: SupportRequest) -> StreamingResponse:
                 yield {"delta": delta}
 
     return sse_response(events)
-

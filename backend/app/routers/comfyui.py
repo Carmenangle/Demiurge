@@ -163,6 +163,8 @@ class FinalizeGenerationRequest(BaseModel):
     chat_key: str = ""
     chat_model: str = ""
     regeneration: dict | None = None
+    target_message_id: str = ""
+    target_slot_id: str = ""
 
 
 @router.post("/finalize-generation")
@@ -185,6 +187,8 @@ def finalize_generation(req: FinalizeGenerationRequest) -> dict[str, object]:
             chat_key=req.chat_key,
             chat_model=req.chat_model,
             regeneration=req.regeneration,
+            target_message_id=req.target_message_id,
+            target_slot_id=req.target_slot_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

@@ -55,6 +55,107 @@ def test_runner_commits_turn_once(monkeypatch):
     assert agent_runner.is_running("t2") is False
 
 
+def test_runner接收节点实时增量并以最终文本替换落盘(monkeypatch):
+    def stream(context):
+        context.stream_sink({"delta": "生成"})
+        context.stream_sink({"delta": "中"})
+        yield {"replace": "最终正文"}
+        yield {"done": True}
+
+    monkeypatch.setattr(agent_runner.agent_graph, "stream_multi_agent", stream)
+    persisted = []
+    monkeypatch.setattr(agent_runner.generation_store, "persist_text",
+                        lambda *a, **k: persisted.append((a, k)))
+    monkeypatch.setattr(agent_runner.chat_memory, "append_turn", lambda *a, **k: None)
+
+    events = list(agent_runner.drain(agent_runner.run_multi_stream(
+        RunContext(thread_id="live", message="q", message_id="m", stream_output=True),
+    )))
+
+    assert events == [
+        {"delta": "生成"}, {"delta": "中"}, {"replace": "最终正文"}, {"done": True},
+    ]
+    assert persisted[0][0][2] == "最终正文"
+
+
+def test_runner非流式也提供即时媒体事件通道(monkeypatch):
+    def stream(context):
+        assert context.stream_sink is not None
+        context.stream_sink({"replace": "最终正文"})
+        context.stream_sink({
+            "illustrate_request": {"prompt": "完整提示词", "motion": 0, "actors": []},
+            "id": "slot-1",
+        })
+        yield {"done": True}
+
+    monkeypatch.setattr(agent_runner.agent_graph, "stream_multi_agent", stream)
+    monkeypatch.setattr(agent_runner.generation_store, "persist_text", lambda *a, **k: None)
+    monkeypatch.setattr(agent_runner.generation_store, "persist_media_slot", lambda *a, **k: None)
+    monkeypatch.setattr(agent_runner.chat_memory, "append_turn", lambda *a, **k: None)
+
+    events = list(agent_runner.drain(agent_runner.run_multi_stream(
+        RunContext(thread_id="ready", message="q", message_id="m", stream_output=False),
+    )))
+    assert events[:2] == [
+        {"replace": "最终正文"},
+        {"illustrate_request": {"prompt": "完整提示词", "motion": 0, "actors": []}, "id": "slot-1"},
+    ]
+
+
+def test_runner即时事件先持久化正文和媒体槽(monkeypatch):
+    def stream(context):
+        context.stream_sink({"replace": "最终正文"})
+        context.stream_sink({
+            "illustrate_request": {
+                "prompt": "完整提示词", "motion": 0, "actors": [], "offset": 2,
+            },
+            "id": "slot-1",
+        })
+        yield {"done": True}
+
+    persisted = []
+    monkeypatch.setattr(agent_runner.agent_graph, "stream_multi_agent", stream)
+    monkeypatch.setattr(
+        agent_runner.generation_store, "persist_text",
+        lambda *args, **kwargs: persisted.append(("text", args, kwargs)),
+    )
+    monkeypatch.setattr(
+        agent_runner.generation_store, "persist_media_slot",
+        lambda *args, **kwargs: persisted.append(("slot", args, kwargs)),
+    )
+    monkeypatch.setattr(agent_runner.chat_memory, "append_turn", lambda *a, **k: None)
+
+    list(agent_runner.drain(agent_runner.run_multi_stream(
+        RunContext(thread_id="durable", message="q", message_id="bot"),
+    )))
+
+    assert persisted[0] == ("text", ("durable", "bot", "最终正文"), {})
+    assert persisted[1] == ("slot", ("durable", "bot", "slot-1", 2), {})
+
+
+def test_runner用同一turn_id记录首尾事件(monkeypatch):
+    monkeypatch.setattr(agent_runner.agent_graph, "stream_multi_agent",
+                        lambda context: iter([{"delta": "答复"}, {"done": True}]))
+    monkeypatch.setattr(agent_runner.generation_store, "persist_text", lambda *a, **k: None)
+    monkeypatch.setattr(agent_runner.chat_memory, "append_turn", lambda *a, **k: None)
+    captured = []
+    monkeypatch.setattr(agent_runner.run_trace, "emit",
+                        lambda ctx, event, **data: captured.append((ctx.turn_id, event, data)))
+    context = RunContext(
+        thread_id="trace-thread", message="中文输入",
+        illustrate=True, comfy_illustrate=True,
+    )
+
+    list(agent_runner.drain(agent_runner.run_multi_stream(context)))
+
+    assert [item[1] for item in captured] == ["turn.started", "turn.completed"]
+    assert {item[0] for item in captured} == {context.turn_id}
+    assert captured[0][2]["raw_input"] == "中文输入"
+    assert captured[0][2]["illustrate"] is True
+    assert captured[0][2]["comfy_illustrate"] is True
+    assert captured[1][2]["assistant_output"] == "答复"
+
+
 def test_cancel_only_targets_active_run(monkeypatch):
     def stream(context):
         context.cancel_event.wait(1)

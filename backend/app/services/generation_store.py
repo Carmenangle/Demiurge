@@ -10,7 +10,7 @@ from pathlib import Path
 import httpx
 
 from app.services import (
-    chat_memory, chat_snapshot, image_store, rag_store, repo_meta, view_urls,
+    chat_memory, chat_snapshot, image_store, rag_store, repo_meta, run_trace, view_urls,
 )
 from app.services.rag_backend import EmbedConfig
 from app.services.pathnames import safe_seg
@@ -102,11 +102,12 @@ def _index_with_retry(repo_id: str, cfg: EmbedConfig, prompt: str,
 
 def persist_image(thread_id: str, repo_id: str, prompt: str, image_url: str,
                    output_dir: str, embed_base: str, embed_key: str,
-                   embed_model: str, regeneration: dict | None = None) -> dict:
+                   embed_model: str, regeneration: dict | None = None,
+                   embed_proxy: str = "") -> dict:
     """Agent 图片：容错留存后入库并追加快照，返回前后端共用身份。"""
     shown = _save_remote_image(image_url, output_dir, repo_id)
     mid = str(uuid.uuid4())
-    cfg = EmbedConfig(embed_base, embed_key, embed_model)
+    cfg = EmbedConfig(embed_base, embed_key, embed_model, proxy=embed_proxy)
     _index_with_retry(repo_id, cfg, prompt, image_url=shown)
     try:
         chat_snapshot.upsert(
@@ -192,6 +193,8 @@ def finalize_workflow_batch(
     chat_base: str = "", chat_key: str = "", chat_model: str = "",
     videos: list[dict] | None = None,
     regeneration: dict | None = None,
+    target_message_id: str = "",
+    target_slot_id: str = "",
 ) -> dict:
     """持久化一批已完成的 ComfyUI 产出；单图/单视频阶段失败不会阻断其他产出。
     videos 与 images 同结构({filename,subfolder,type})，消息以 video 字段承载。"""
@@ -206,6 +209,8 @@ def finalize_workflow_batch(
     tags = _extract_tags(prompt, chat_base, chat_key, chat_model) if durable else ""
     messages: list[dict] = []
     results: list[dict] = []
+    inline_target = bool(target_message_id and target_slot_id)
+    target: dict | None = None
 
     for index, image in enumerate(images):
         key = _workflow_key(thread_id, prompt_id, image)
@@ -239,16 +244,31 @@ def finalize_workflow_batch(
             mid, prompt if index == 0 else "", image=shown,
             **({"regeneration": regeneration} if regeneration else {}),
         )
-        messages.append(message)
+        if not inline_target:
+            messages.append(message)
         if durable:
             indexed = _index_with_retry(repo_id, cfg, prompt, tags, shown)
             if not indexed:
                 errors.append("index")
-            try:
-                chat_snapshot.upsert(thread_id, message)
-                snapshotted = True
-            except Exception:
-                errors.append("snapshot")
+            if inline_target and target is None:
+                try:
+                    snapshotted = chat_snapshot.resolve_media_slot(
+                        thread_id, target_message_id, target_slot_id, shown,
+                        media_type="image", regeneration=regeneration,
+                    )
+                    if not snapshotted:
+                        errors.append("snapshot")
+                except Exception:
+                    errors.append("snapshot")
+            elif not inline_target:
+                try:
+                    chat_snapshot.upsert(thread_id, message)
+                    snapshotted = True
+                except Exception:
+                    errors.append("snapshot")
+        if inline_target and target is None:
+            target = {"message_id": target_message_id, "slot_id": target_slot_id,
+                      "media_type": "image", "url": shown}
         results.append({
             "key": key, "message_id": mid, "display_url": shown,
             "persisted": persisted, "indexed": indexed,
@@ -285,13 +305,28 @@ def finalize_workflow_batch(
         # 首个产物（无图时）承载提示词文本
         head_text = prompt if (index == 0 and not images) else ""
         message = chat_snapshot.assistant_message(mid, head_text, video=shown)
-        messages.append(message)
+        if not inline_target:
+            messages.append(message)
         if durable:
-            try:
-                chat_snapshot.upsert(thread_id, message)
-                snapshotted = True
-            except Exception:
-                errors.append("snapshot")
+            if inline_target and target is None:
+                try:
+                    snapshotted = chat_snapshot.resolve_media_slot(
+                        thread_id, target_message_id, target_slot_id, shown,
+                        media_type="video", regeneration=regeneration,
+                    )
+                    if not snapshotted:
+                        errors.append("snapshot")
+                except Exception:
+                    errors.append("snapshot")
+            elif not inline_target:
+                try:
+                    chat_snapshot.upsert(thread_id, message)
+                    snapshotted = True
+                except Exception:
+                    errors.append("snapshot")
+        if inline_target and target is None:
+            target = {"message_id": target_message_id, "slot_id": target_slot_id,
+                      "media_type": "video", "url": shown}
         results.append({
             "key": key, "message_id": mid, "display_url": shown,
             "persisted": persisted, "indexed": False,
@@ -319,7 +354,7 @@ def finalize_workflow_batch(
             "snapshotted": snapshotted, "errors": errors,
         })
 
-    if durable:
+    if durable and not inline_target:
         memory_key = _workflow_key(thread_id, prompt_id)
         if memory_key not in _MEMORY_DONE:
             try:
@@ -334,7 +369,7 @@ def finalize_workflow_batch(
 
     complete = durable and all(not item["errors"] for item in results)
     return {"prompt_id": prompt_id, "durable": durable, "messages": messages,
-            "images": results, "complete": complete}
+            "images": results, "complete": complete, "target": target}
 
 
 def persist_inspiration(thread_id: str, query: str, prompt: str,
@@ -366,6 +401,38 @@ def persist_text(thread_id: str, message_id: str, text: str,
             chat_snapshot.append_text(thread_id, message_id, text)
     except Exception as exc:  # noqa: BLE001  文本落盘失败不阻断收尾，但要留痕
         _LOG.warning("persist_text 落盘失败 thread=%s mid=%s: %s", thread_id, message_id, exc)
+
+
+def persist_media_slot(thread_id: str, message_id: str, slot_id: str,
+                       offset: int | None = None) -> None:
+    """即时持久化自动插画槽，保证前端离页后异步产物仍有原位回填目标。"""
+    try:
+        chat_snapshot.ensure_media_slot(
+            thread_id, message_id, slot_id, offset=offset,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _LOG.warning("persist_media_slot 落盘失败 thread=%s mid=%s slot=%s: %s",
+                     thread_id, message_id, slot_id, exc)
+
+
+def persist_illustration_failure(
+    *, thread_id: str, repo_id: str, message_id: str, slot_id: str,
+    stage: str, error: str, prompt_id: str = "",
+) -> bool:
+    """记录自动插画失败并清除快照槽；失败信息不得进入对话正文。"""
+    removed = False
+    try:
+        removed = chat_snapshot.remove_media_slot(thread_id, message_id, slot_id)
+    except Exception as exc:  # noqa: BLE001
+        _LOG.warning("自动插画失败槽清理失败 thread=%s mid=%s slot=%s: %s",
+                     thread_id, message_id, slot_id, exc)
+    run_trace.emit(
+        {"thread_id": thread_id, "repo_id": repo_id},
+        "illustration.failed",
+        message_id=message_id, slot_id=slot_id, stage=stage, error=error,
+        prompt_id=prompt_id, slot_removed=removed,
+    )
+    return removed
 
 
 def persist_prompt_approval(thread_id: str, approval: dict) -> None:

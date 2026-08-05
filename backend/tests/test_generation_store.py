@@ -143,3 +143,61 @@ def test_workflow_batch_attaches_exact_snapshot_to_every_image(monkeypatch):
     ))
 
     assert [message["regeneration"] for message in result["messages"]] == [snapshot, snapshot]
+
+
+def test_自动插画只回填目标slot且不新增对话轮(monkeypatch):
+    generation_store._MEMORY_DONE.clear()
+    patched = []
+    monkeypatch.setattr(generation_store.image_store, "save_local", lambda *a, **k: "C:/out/a.png")
+    monkeypatch.setattr(generation_store, "_index_with_retry", lambda *a, **k: True)
+    monkeypatch.setattr(
+        generation_store.chat_snapshot, "resolve_media_slot",
+        lambda *args, **kwargs: patched.append((args, kwargs)) or True,
+    )
+    monkeypatch.setattr(
+        generation_store.chat_snapshot, "upsert",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("不得新增图片气泡")),
+    )
+    monkeypatch.setattr(
+        generation_store.chat_memory, "append_message",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("自动插画不得回灌图像历史")),
+    )
+
+    result = generation_store.finalize_workflow_batch(**_args(
+        target_message_id="bot-1", target_slot_id="slot-1",
+    ))
+
+    assert result["messages"] == []
+    assert result["target"] == {
+        "message_id": "bot-1", "slot_id": "slot-1",
+        "media_type": "image", "url": result["images"][0]["display_url"],
+    }
+    assert patched[0][0][:3] == ("thread", "bot-1", "slot-1")
+
+
+def test_自动插画失败写trace并删除快照slot(monkeypatch):
+    removed = []
+    traced = []
+    monkeypatch.setattr(
+        generation_store.chat_snapshot, "remove_media_slot",
+        lambda *args: removed.append(args) or True,
+    )
+    monkeypatch.setattr(
+        generation_store.run_trace, "emit",
+        lambda ctx, event, **data: traced.append((ctx, event, data)),
+    )
+
+    removed_ok = generation_store.persist_illustration_failure(
+        thread_id="thread-1", repo_id="repo-1", message_id="bot-1",
+        slot_id="slot-1", stage="submit", error="ComfyUI 未启动",
+        prompt_id="prompt-1",
+    )
+
+    assert removed_ok is True
+    assert removed == [("thread-1", "bot-1", "slot-1")]
+    assert traced == [({"thread_id": "thread-1", "repo_id": "repo-1"},
+                       "illustration.failed", {
+                           "message_id": "bot-1", "slot_id": "slot-1",
+                           "stage": "submit", "error": "ComfyUI 未启动",
+                           "prompt_id": "prompt-1", "slot_removed": True,
+                       })]
