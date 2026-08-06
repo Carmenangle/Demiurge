@@ -1,4 +1,4 @@
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -51,6 +51,17 @@ def test_utf8文件可创建读取列出和精确替换(tmp_path):
 def test_拒绝目录穿越和绝对路径(tmp_path, path):
     with pytest.raises(project_files.ProjectFileError):
         project_files.write_text(tmp_path.resolve(), path, "x")
+
+
+def test_windows绝对路径判定不依赖宿主平台(monkeypatch):
+    monkeypatch.setattr(project_files, "Path", PurePosixPath)
+
+    for path in (
+        "C:/outside.txt", r"C:\outside.txt", r"C:outside.txt",
+        r"\\server\share\outside.txt", r"\outside.txt",
+    ):
+        with pytest.raises(project_files.ProjectFileError):
+            project_files._relative_path(path)
 
 
 def test_拒绝符号链接逃逸(tmp_path):

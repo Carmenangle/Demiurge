@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from app.services import repo_meta
 
@@ -32,7 +32,7 @@ def _relative_path(path: str, *, allow_root: bool = False) -> Path:
             return Path()
         raise ProjectFileError("文件路径不能为空")
     candidate = Path(raw)
-    if candidate.is_absolute() or candidate.drive:
+    if candidate.is_absolute() or candidate.drive or PureWindowsPath(raw).anchor:
         raise ProjectFileError("只允许使用作品目录内的相对路径")
     if any(part in {"..", "."} for part in candidate.parts):
         raise ProjectFileError("路径不得包含 . 或 ..")
