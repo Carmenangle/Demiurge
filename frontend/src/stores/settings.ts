@@ -88,6 +88,7 @@ export interface CharacterLoraBinding {
 
 export interface MediaInsertPreset {
   templateId: string;       // 图片工作流模板 id（空=未预设，不异步出图）
+  appearanceSource?: "worldbook" | "character_card"; // 稳定外貌取世界书角色条目或绑定角色卡
   promptProfile?: import("../lib/imagePromptProfiles").PromptProfileId;
   qualityPrompt?: string;   // Anima 固定质量行；空则使用后端 profile 默认值
   negativePrompt?: string;  // 独立负面提示词；仅模板暴露 negative_prompt 时注入

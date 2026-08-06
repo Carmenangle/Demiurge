@@ -76,3 +76,30 @@ def emit(ctx: Any, event: str, /, **data: Any) -> None:
                 stream.write(line)
     except Exception:
         return
+
+
+def read_recent(repo_id: str, *, turn_id: str = "", limit: int = 50) -> list[dict[str, Any]]:
+    """读取当前 Trace 中指定作品的最近事件；不跨作品，不返回损坏行。"""
+    wanted_repo = (repo_id or "").strip()
+    if not wanted_repo or not TRACE_FILE.is_file():
+        return []
+    cap = max(1, min(int(limit), 200))
+    try:
+        lines = TRACE_FILE.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return []
+    records: list[dict[str, Any]] = []
+    for line in reversed(lines):
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict) or record.get("repo_id") != wanted_repo:
+            continue
+        if turn_id and record.get("turn_id") != turn_id:
+            continue
+        records.append(record)
+        if len(records) >= cap:
+            break
+    records.reverse()
+    return records

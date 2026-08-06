@@ -16,6 +16,8 @@ export interface Repo {
   coverAt?: number; // 封面更新时间戳（用于父仓库取子仓库里最新的一张）
   createdAt: number;
   cardName?: string; // 绑定的角色卡名（=character_store 文件夹名）；有值=剧情扮演作品
+  cardNames?: string[]; // 绑定的全部角色卡；cardName 保留为开场卡兼容别名
+  openingCardName?: string; // 首次空会话使用哪张卡的 first_mes
   worldbookName?: string; // 绑定的独立世界书名（worldbookDir 下的 .json 名，不含扩展名）；空=不绑独立书
   personaId?: string; // 绑定的用户人设档 id（settings.userPersonas）；空=用全局选中档
 }
@@ -23,6 +25,8 @@ export interface Repo {
 // 一个仓库的有效绑定：自身字段优先，缺则继承父仓库，皆空则回退全局（由调用方处理全局回退）。
 export interface RepoBinding {
   cardName: string;
+  cardNames: string[];
+  openingCardName: string;
   worldbookName: string;
   personaId: string;
 }
@@ -41,6 +45,16 @@ function save(repos: Repo[]) {
   localStorage.setItem(KEY, JSON.stringify(repos));
 }
 
+function normalizedCards(repo: Pick<Repo, "cardName" | "cardNames" | "openingCardName">): {
+  cardNames: string[]; openingCardName: string;
+} {
+  const cardNames = [...new Set((repo.cardNames || []).map((name) => name.trim()).filter(Boolean))];
+  if (repo.cardName?.trim() && !cardNames.includes(repo.cardName.trim())) cardNames.unshift(repo.cardName.trim());
+  const openingCardName = cardNames.includes(repo.openingCardName || "")
+    ? repo.openingCardName! : (cardNames.includes(repo.cardName || "") ? repo.cardName! : cardNames[0] || "");
+  return { cardNames, openingCardName };
+}
+
 // 规范化绑定（幂等）：①旧数据 cardName 误挂子仓库→上提到父；②子仓库三项绑定为空则从父下沉一份到自身字段，
 // 使子仓库 UI 直接显示「已绑定」（快照式：之后父改绑定不回灌，子可单独修改）。无变化则返回 null（不触发写回）。
 function normalizeBindings(repos: Repo[]): Repo[] | null {
@@ -53,7 +67,15 @@ function normalizeBindings(repos: Repo[]): Repo[] | null {
   }
   let changed = false;
   const withParents = repos.map((r) => {
-    if (liftCard.has(r.id) && !r.cardName) { changed = true; return { ...r, cardName: liftCard.get(r.id) }; }
+    const lifted = liftCard.has(r.id) && !r.cardName ? liftCard.get(r.id) : r.cardName;
+    const current = normalizedCards({ ...r, cardName: lifted });
+    if (lifted !== r.cardName || JSON.stringify(current.cardNames) !== JSON.stringify(r.cardNames || [])
+      || current.openingCardName !== (r.openingCardName || "")) {
+      changed = true;
+      return { ...r, cardName: current.openingCardName || undefined,
+        cardNames: current.cardNames.length ? current.cardNames : undefined,
+        openingCardName: current.openingCardName || undefined };
+    }
     return r;
   });
   const next = withParents.map((r) => {
@@ -61,7 +83,13 @@ function normalizeBindings(repos: Repo[]): Repo[] | null {
     const parent = withParents.find((p) => p.id === r.parentId);
     if (!parent) return r;
     const patch: Partial<Repo> = {};
-    if (!r.cardName && parent.cardName) patch.cardName = parent.cardName;
+    const ownCards = normalizedCards(r);
+    const parentCards = normalizedCards(parent);
+    if (!ownCards.cardNames.length && parentCards.cardNames.length) {
+      patch.cardNames = parentCards.cardNames;
+      patch.openingCardName = parentCards.openingCardName;
+      patch.cardName = parentCards.openingCardName;
+    }
     if (!r.worldbookName && parent.worldbookName) patch.worldbookName = parent.worldbookName;
     if (!r.personaId && parent.personaId) patch.personaId = parent.personaId;
     if (Object.keys(patch).length) { changed = true; return { ...r, ...patch }; }
@@ -141,7 +169,9 @@ export function useRepos() {
       const child = repos.find((r) => r.parentId === parent.id);
       if (child) {
         if (!parent.cardName) {
-          setRepos((prev) => prev.map((r) => (r.id === parent.id ? { ...r, cardName } : r)));
+          setRepos((prev) => prev.map((r) => (r.id === parent.id ? {
+            ...r, cardName, cardNames: [cardName], openingCardName: cardName,
+          } : r)));
         }
         return { parentId: parent.id, childId: child.id };
       }
@@ -149,9 +179,12 @@ export function useRepos() {
       const saveName = nextSaveName(parent.id);
       // 新子仓库复制父当前绑定到自身字段（快照），UI 直接显示已绑定。
       setRepos((prev) => [
-        ...prev.map((r) => (r.id === parent.id ? { ...r, cardName } : r)),
+        ...prev.map((r) => (r.id === parent.id ? {
+          ...r, cardName, cardNames: [cardName], openingCardName: cardName,
+        } : r)),
         {
           id: childId, name: saveName, parentId: parent.id, cardName,
+          cardNames: [cardName], openingCardName: cardName,
           worldbookName: parent.worldbookName, personaId: parent.personaId, createdAt: Date.now(),
         },
       ]);
@@ -162,23 +195,29 @@ export function useRepos() {
     // cardName 绑在父仓库；SAVE01 创建时即复制一份父绑定到自身（此刻父仅有 cardName），UI 直接显示已绑定。
     setRepos((prev) => [
       ...prev,
-      { id: parentId, name: cardName, cardName, createdAt: Date.now() },
-      { id: childId, name: "SAVE01", parentId, cardName, createdAt: Date.now() },
+      { id: parentId, name: cardName, cardName, cardNames: [cardName], openingCardName: cardName, createdAt: Date.now() },
+      { id: childId, name: "SAVE01", parentId, cardName, cardNames: [cardName], openingCardName: cardName, createdAt: Date.now() },
     ]);
     return { parentId, childId };
   };
 
   // 分支：在 parentId 下建一个新兄弟子仓库，返回新子仓库 id。名称按当前最大 SAVE 索引递推（SAVE02…）。
   // 复制父仓库当前绑定（卡/世界书/人设）到新子仓库自身字段（快照式，之后可单独改）。传入 cardName 优先。
-  const addBranch = (parentId: string, cardName?: string): string => {
+  const addBranch = (parentId: string, binding?: Partial<RepoBinding>): string => {
     const id = crypto.randomUUID();
     const name = nextSaveName(parentId);
     const parent = repos.find((r) => r.id === parentId);
+    const parentCards = parent ? normalizedCards(parent) : { cardNames: [], openingCardName: "" };
+    const branchCards = binding?.cardNames?.length ? binding.cardNames : parentCards.cardNames;
+    const openingCardName = branchCards.includes(binding?.openingCardName || "")
+      ? binding!.openingCardName! : parentCards.openingCardName || branchCards[0] || "";
     setRepos((prev) => [...prev, {
       id, name, parentId, createdAt: Date.now(),
-      cardName: cardName || parent?.cardName,
-      worldbookName: parent?.worldbookName,
-      personaId: parent?.personaId,
+      cardName: openingCardName || undefined,
+      cardNames: branchCards.length ? branchCards : undefined,
+      openingCardName: openingCardName || undefined,
+      worldbookName: binding?.worldbookName || parent?.worldbookName,
+      personaId: binding?.personaId || parent?.personaId,
     }]);
     return id;
   };
@@ -207,7 +246,15 @@ export function useRepos() {
     setRepos((prev) => prev.map((r) => {
       if (r.id !== id) return r;
       const next = { ...r };
-      if ("cardName" in patch) next.cardName = patch.cardName || undefined;
+      if ("cardNames" in patch || "openingCardName" in patch || "cardName" in patch) {
+        const requested = "cardNames" in patch ? patch.cardNames || [] : normalizedCards(next).cardNames;
+        const cardNames = [...new Set(requested.map((name) => name.trim()).filter(Boolean))];
+        const requestedOpening = patch.openingCardName || patch.cardName || "";
+        const openingCardName = cardNames.includes(requestedOpening) ? requestedOpening : cardNames[0] || "";
+        next.cardNames = cardNames.length ? cardNames : undefined;
+        next.openingCardName = openingCardName || undefined;
+        next.cardName = openingCardName || undefined;
+      }
       if ("worldbookName" in patch) next.worldbookName = patch.worldbookName || undefined;
       if ("personaId" in patch) next.personaId = patch.personaId || undefined;
       return next;
@@ -217,8 +264,12 @@ export function useRepos() {
   // 解析某仓库的有效绑定：自身字段优先，缺则继承父仓库字段。全局回退（人设/世界书目录）交给调用方。
   const resolveBinding = (repo: Repo): RepoBinding => {
     const parent = repo.parentId ? repos.find((r) => r.id === repo.parentId) : undefined;
+    const ownCards = normalizedCards(repo);
+    const inheritedCards = ownCards.cardNames.length || !parent ? ownCards : normalizedCards(parent);
     return {
-      cardName: repo.cardName || parent?.cardName || "",
+      cardName: inheritedCards.openingCardName,
+      cardNames: inheritedCards.cardNames,
+      openingCardName: inheritedCards.openingCardName,
       worldbookName: repo.worldbookName || parent?.worldbookName || "",
       personaId: repo.personaId || parent?.personaId || "",
     };

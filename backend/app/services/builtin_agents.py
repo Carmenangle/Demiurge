@@ -1,4 +1,4 @@
-"""内置 Agent 注册表 + 覆盖存储（叶子模块，只依赖 app.config）。
+"""内置 Agent 注册表 + 覆盖存储。
 
 图里的内置角色（supervisor / roleplay / answer / 世界 Agent / 裁判 / 各生图专家）默认参数
 原本硬编码埋在 agent_graph / roleplay_agency，前端看不见也改不了。本模块把这些默认抽成**单一属主**
@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 
 from app.config import DATA_DIR
+from app.services.edit_agent_profiles import SPECIALISTS
 
 # ── 单一属主：内置角色的默认提示词 / 参数（原埋在 agent_graph / roleplay_agency，现集中于此）──
 
@@ -220,6 +221,35 @@ REGISTRY: list[dict] = [
         "editable": ["gateFloor", "gateBaseRate", "tiers"],
         "defaults": {"gateFloor": GATE_FLOOR, "gateBaseRate": GATE_BASE_RATE, "tiers": list(DEFAULT_TIERS)},
     },
+    {
+        "id": "edit_supervisor", "name": "编辑主管", "kind": "specialist",
+        "role": "按任务语义确定角色卡、预设正则、脚本、排错或通用编辑专家；不调用模型。",
+        "tools": ["编辑任务路由"], "editable": [], "defaults": {},
+    },
+    *[
+        {
+            "id": specialist.id, "name": specialist.name, "kind": "llm",
+            "role": {
+                "edit_character_card": "按 Demiurge 归一化落盘、侧车文件和作品快照隔离制作角色卡与世界书。",
+                "edit_preset_regex": "按 Demiurge 的保存、激活、条件推理链与三层作用域制作预设和正则。",
+                "edit_import_adapter": "把外部角色卡、预设和正则转换为 Demiurge 项目格式。",
+                "edit_script": "依据 Demiurge 会话、媒体槽和作品快照合同制作可验证脚本。",
+                "edit_debug": "依据 Demiurge Trace、快照、后台队列和异步回填接缝定位问题。",
+                "edit_general": "按 Demiurge 文件属主处理当前作品内的通用编辑任务。",
+            }[specialist.id],
+            "tools": ["作品文件", "格式校验"] + (
+                ["外部格式转换"] if specialist.id == "edit_import_adapter" else []
+            ),
+            "editable": ["systemPrompt", "temperature", "topP", "maxTokens"],
+            "defaults": {
+                "systemPrompt": specialist.system_prompt,
+                "temperature": specialist.temperature,
+                "topP": None,
+                "maxTokens": None,
+            },
+        }
+        for specialist in SPECIALISTS.values()
+    ],
     {"id": "generate", "name": "文生图专家", "kind": "specialist",
      "role": "根据文本生成新图片，或执行无参考图的完整成稿提示词。", "tools": ["生图模型"],
      "editable": [], "defaults": {}},

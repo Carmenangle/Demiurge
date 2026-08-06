@@ -22,7 +22,7 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import { type Repo } from "../stores/repos";
+import { type Repo, type RepoBinding } from "../stores/repos";
 import { type WorkMode } from "../lib/viewRouting";
 import { modelDisplayName, resolvedEmbedModel, useSettings, activeUserPersona } from "../stores/settings";
 import { resolveModelProxy } from "../lib/modelProxy";
@@ -38,7 +38,7 @@ import { MediaInsertModal } from "../components/MediaInsertModal";
 import { UserMessage, AssistantMessage, InspirationCard, PortsPlanCard } from "../components/chat/ChatMessages";
 import { ModelSwitcher, SizeSwitcher } from "../components/chat/ChatControls";
 import { listRegex } from "../api/regex";
-import { characterRegex } from "../api/characters";
+import { avatarUrl, characterMedia, characterRegex, expressionUrl } from "../api/characters";
 import type { RegexScript } from "../lib/regexEngine";
 import { comfyStatus, startComfy, localViewUrl } from "../api/comfyui";
 import { listAgents, type Agent } from "../api/agents";
@@ -49,6 +49,7 @@ import { useGenerationPreferences } from "../lib/generationPreferences";
 import { useWorkflowTemplatePicker } from "../lib/workflowTemplatePicker";
 import { useResizableChatInput } from "../lib/useResizableChatInput";
 import { assistantAvatarState } from "../lib/assistantAvatar";
+import { resolveCharacterPortrait, type CharacterPortrait } from "../lib/characterPortrait";
 import {
   appendUniqueMessageIds,
   changedAssistantMessageIds,
@@ -76,7 +77,7 @@ export function ChatView({
   onBack?: () => void;
   initialImage?: string | null;              // 从资产库「发送至对话」带来的图，挂载后插入输入框
   onImageConsumed?: () => void;
-  onBranch?: (cardName: string | undefined, msgs: unknown[]) => void;  // ④ 分支：新小仓库+拷贝消息+跳转（App 层）
+  onBranch?: (binding: Partial<RepoBinding>, msgs: unknown[]) => void;
   workMode?: WorkMode;   // 决定输入框提示文案（三模式各异）
 }) {
   const streamRef = useRef<HTMLDivElement | null>(null);   // 对话滚动容器
@@ -89,13 +90,15 @@ export function ChatView({
   const chatInput = useResizableChatInput();
   // 显示层正则（markdownOnly）：全局脚本 + 当前卡内嵌脚本里的显示档，渲染 AI 正文前隐藏/压缩 <think> 等区块
   const [displayRegex, setDisplayRegex] = useState<RegexScript[]>([]);
-  const cardName = repo?.cardName || "";
+  const cardNames = repo?.cardNames?.length ? repo.cardNames : (repo?.cardName ? [repo.cardName] : []);
+  const cardName = repo?.openingCardName || repo?.cardName || cardNames[0] || "";
   const characterDir = settings.characterDir || "";
+  const [characterPortraits, setCharacterPortraits] = useState<Record<string, CharacterPortrait>>({});
   // 三模式输入框提示各异
   const inputPlaceholder = {
     story: "推进剧情、描写行动或对话；剧情高潮点会自动生成插画内嵌。Enter 发送，图片用上方 + 添加或直接粘贴",
     generate: "说出你想要的：描述画面直接生图、贴图让它反推或改图、提问绘画；/w 可选专业工作流。Enter 发送，图片用上方 + 添加或直接粘贴",
-    code: "描述要写的脚本/插件功能，或贴代码让它改；/w 可选专业工作流。Enter 发送",
+    code: "创建或检查角色卡、编写作品脚本、读取当前作品文件排错。Enter 发送",
   }[workMode];
   // 显示层宏：{{char}}→角色卡名、{{user}}→选中人设名(缺省「我」)。传给消息组件在渲染处统一替换。
   // useMemo 稳定引用，避免每次渲染新建对象打破消息组件 memo。
@@ -104,16 +107,34 @@ export function ChatView({
   useEffect(() => {
     const onlyDisplay = (arr: RegexScript[]) => arr.filter((s) => s.markdownOnly && !s.disabled);
     const global = listRegex().then((r) => r.items || []).catch(() => [] as RegexScript[]);
-    const card = cardName && characterDir
-      ? characterRegex(characterDir, cardName).then((r) => (r.items || []) as unknown as RegexScript[]).catch(() => [])
+    const cards = characterDir
+      ? Promise.all(cardNames.map((name) => characterRegex(characterDir, name)
+        .then((r) => (r.items || []) as unknown as RegexScript[]).catch(() => [])))
+        .then((groups) => groups.flat())
       : Promise.resolve([] as RegexScript[]);
     let alive = true;
     // 卡内嵌脚本在前（更贴近该卡），全局在后
-    Promise.all([card, global]).then(([c, g]) => {
+    Promise.all([cards, global]).then(([c, g]) => {
       if (alive) setDisplayRegex(onlyDisplay([...c, ...g]));
     });
     return () => { alive = false; };
-  }, [cardName, characterDir]);
+  }, [cardNames.join("\u0000"), characterDir]);
+  useEffect(() => {
+    let alive = true;
+    if (!characterDir || !cardNames.length) { setCharacterPortraits({}); return; }
+    Promise.all(cardNames.map(async (name) => {
+      const media = await characterMedia(characterDir, name, settings.outputDir, repo?.id || "");
+      return [name, {
+        name,
+        avatar: media.has_avatar ? avatarUrl(media.base || characterDir, media.folder) : undefined,
+        expressions: Object.fromEntries(media.expressions.map((item) => [
+          item.name, expressionUrl(media.base || characterDir, media.folder, item.file),
+        ])),
+      } satisfies CharacterPortrait] as const;
+    })).then((items) => { if (alive) setCharacterPortraits(Object.fromEntries(items)); })
+      .catch(() => { if (alive) setCharacterPortraits({}); });
+    return () => { alive = false; };
+  }, [cardNames.join("\u0000"), characterDir, settings.outputDir, repo?.id]);
 
   // 资产库带图进来：挂载后插入输入框一次
   useEffect(() => {
@@ -231,7 +252,7 @@ export function ChatView({
     clearHome, clearCache, reloadFromSnapshot,
     editMessage, deleteMessage, regenerateMessage, createCheckpoint, messagesUpTo,
   } = useChatSession({
-    repo, settings, setGeneratedCover, chat, genModel, videoModel,
+    repo, settings, setGeneratedCover, chat, genModel, videoModel, workMode,
     size: resolvedImageSize.size,
     imageQuality: generationPreferences.quality, templates, setShowPicker, atBottomRef,
   });
@@ -309,8 +330,11 @@ export function ChatView({
   messagesUpToRef.current = messagesUpTo;
   const onBranchRef = useRef(onBranch);
   onBranchRef.current = onBranch;
-  const repoCardNameRef = useRef(repo?.cardName);
-  repoCardNameRef.current = repo?.cardName;
+  const repoBindingRef = useRef<Partial<RepoBinding>>({});
+  repoBindingRef.current = {
+    cardName, cardNames, openingCardName: cardName,
+    worldbookName: repo?.worldbookName || "", personaId: repo?.personaId || "",
+  };
   const deleteMessageRef = useRef(deleteMessage);
   deleteMessageRef.current = deleteMessage;
   const regenerateMessageRef = useRef(regenerateMessage);
@@ -326,7 +350,7 @@ export function ChatView({
   const handleCreateCheckpoint = useCallback((id: string) => createCheckpointRef.current(id), []);
   const handleBranch = useCallback((id: string) => {
     if (!onBranchRef.current) return;
-    onBranchRef.current(repoCardNameRef.current, messagesUpToRef.current(id));
+    onBranchRef.current(repoBindingRef.current, messagesUpToRef.current(id));
   }, []);
   const [showTables, setShowTables] = useState(false);
   const [showMediaInsert, setShowMediaInsert] = useState(false);
@@ -594,6 +618,11 @@ export function ChatView({
                   msg={m}
                   streaming={m.id === streamingId}
                   avatarState={assistantAvatarState(m, m.id === streamingId)}
+                  portrait={resolveCharacterPortrait(
+                    m.text || "", cardNames, cardName, characterPortraits,
+                    messages.slice(Math.max(0, mIdx - 2), mIdx)
+                      .map((item) => item.text || "").filter(Boolean).join("\n"),
+                  )}
                   displayRegex={displayRegex}
                   depth={messages.length - 1 - mIdx}
                   macros={chatMacros}
@@ -962,6 +991,7 @@ export function ChatView({
         <MediaInsertModal
           templates={templates}
           cardName={repo?.cardName || ""}
+          cardNames={cardNames}
           modelsDir={settings.modelsDir || (settings.comfyuiPath ? `${settings.comfyuiPath}/models` : "")}
           preset={settings.mediaInsert?.[repo?.id || ""]}
           onSave={(preset) => {

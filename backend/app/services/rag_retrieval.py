@@ -6,7 +6,13 @@ import re
 
 def _tokenize(text: str) -> list[str]:
     value = (text or "").lower()
-    return re.findall(r"[a-z0-9]+", value) + re.findall(r"[一-鿿]", value)
+    tokens = re.findall(r"[a-z0-9]+", value)
+    for span in re.findall(r"[一-鿿]+", value):
+        if len(span) == 1:
+            tokens.append(span)
+        else:
+            tokens.extend(span[index:index + 2] for index in range(len(span) - 1))
+    return tokens
 
 
 def sparse_rank(query: str, documents: list[dict], k: int) -> list[dict]:

@@ -64,6 +64,9 @@ def consolidate_fields(state: "CharacterState") -> "CharacterState":
             current = result.get(key)
             if current is None or int(value.turn) >= int(current.turn):
                 result[key] = value
+        explicit_leaves = {key.split("·", 1)[1] for key in result if "·" in key}
+        for leaf in explicit_leaves:
+            result.pop(leaf, None)
         return result
 
     state.数值 = merge(state.数值)

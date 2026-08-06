@@ -4,6 +4,34 @@ import { describe, expect, it } from "vitest";
 import { MediaInsertModal, suggestedWeightForLora } from "./MediaInsertModal";
 
 describe("MediaInsertModal prompt profiles", () => {
+  it("uses the same full-width select layout for the appearance source", () => {
+    const html = renderToStaticMarkup(
+      <MediaInsertModal templates={[]} modelsDir=""
+        preset={{ templateId: "", appearanceSource: "character_card" }}
+        onSave={() => {}} onClose={() => {}} />,
+    );
+
+    expect(html).toContain("角色外貌来源");
+    expect(html).toContain("条目模式");
+    expect(html).toContain("角色卡模式");
+    expect(html).toContain('value="character_card" selected=""');
+    expect(html).not.toContain("media-source-switch");
+    expect(html).not.toContain("按角色配置（LoRA + 底图）");
+    expect(html).not.toContain("风格底图（可选）");
+    expect(html).toContain("全局风格 LoRA（可选）");
+  });
+
+  it("keeps role LoRA and fallback image controls in worldbook mode", () => {
+    const html = renderToStaticMarkup(
+      <MediaInsertModal templates={[]} modelsDir=""
+        preset={{ templateId: "", appearanceSource: "worldbook" }}
+        onSave={() => {}} onClose={() => {}} />,
+    );
+
+    expect(html).toContain("按角色配置（LoRA + 底图）");
+    expect(html).toContain("风格底图（可选）");
+  });
+
   it("shows all prompt modes and restores the selected mode", () => {
     const html = renderToStaticMarkup(
       <MediaInsertModal

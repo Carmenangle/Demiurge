@@ -17,7 +17,30 @@ def test_注册表覆盖全部内置角色(monkeypatch, tmp_path):
     # 图里的内置节点 + 世界 Agent + 裁判 + Recall 检索 + Curator 都应可见
     assert {"supervisor", "roleplay", "answer", "world", "judge",
             "recall", "curator",
+            "edit_supervisor", "edit_character_card", "edit_preset_regex",
+            "edit_import_adapter", "edit_script", "edit_debug", "edit_general",
             "generate", "img2img", "video", "analyze", "inspire", "tool_agent"} <= ids
+
+
+def test_编辑专家可覆盖提示词与采样参数(monkeypatch, tmp_path):
+    monkeypatch.setattr(ba, "DATA_DIR", tmp_path)
+    ba.save_overrides({
+        "edit_character_card": {
+            "systemPrompt": "作品专用角色卡规则", "temperature": 0.4,
+            "topP": 0.8, "maxTokens": 4096,
+        },
+    })
+    effective = ba.resolved()["edit_character_card"]
+    assert effective == {
+        "systemPrompt": "作品专用角色卡规则", "temperature": 0.4,
+        "topP": 0.8, "maxTokens": 4096,
+    }
+
+
+def test_迁移专家展示确定性转换工具(monkeypatch, tmp_path):
+    monkeypatch.setattr(ba, "DATA_DIR", tmp_path)
+    item = next(agent for agent in ba.registry_view() if agent["id"] == "edit_import_adapter")
+    assert "外部格式转换" in item["tools"]
 
 
 def test_llm类可覆盖topP与maxTokens(monkeypatch, tmp_path):

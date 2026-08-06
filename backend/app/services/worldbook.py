@@ -14,7 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from app.services import character_store, rag_backend, rag_retrieval
@@ -270,6 +270,17 @@ def _sparse_retrieve(entries: list[Entry], query: str, k: int) -> list[str]:
 class Selection:
     text: str
     indices: list[int]
+    keyword_indices: list[int] = field(default_factory=list)
+
+
+def keyword_match_indices(entries: list[Entry], query: str) -> list[int]:
+    """返回当前 query 精确触发 key 的原始条目 index，不含 constant/语义/BM25。"""
+    hits = {_hid(content) for content in _keyword_hits(entries, query)}
+    return [
+        entry.source_index if entry.source_index >= 0 else position
+        for position, entry in enumerate(entries)
+        if _hid(entry.content) in hits
+    ]
 
 
 def assemble_selection(repo_id: str, entries: list[Entry], query: str, cfg: EmbedConfig,
@@ -285,6 +296,7 @@ def assemble_selection(repo_id: str, entries: list[Entry], query: str, cfg: Embe
 
     candidates: list[tuple[int, Entry]] = []
     keyword_hashes = {_hid(text) for text in _keyword_hits(entries, query)}
+    keyword_indices = set(keyword_match_indices(entries, query))
     candidates.extend((index, entry) for index, entry in indexed
                       if _hid(entry.content) in keyword_hashes)
     candidates.extend((index, entry) for index, entry in indexed if entry.constant)
@@ -305,6 +317,7 @@ def assemble_selection(repo_id: str, entries: list[Entry], query: str, cfg: Embe
 
     picked: list[str] = []
     picked_indices: list[int] = []
+    picked_keyword_indices: list[int] = []
     seen: set[str] = set()
     used = 0
     for index, entry in candidates:
@@ -318,11 +331,15 @@ def assemble_selection(repo_id: str, entries: list[Entry], query: str, cfg: Embe
         seen.add(h)
         picked.append(text)
         picked_indices.append(index)
+        if index in keyword_indices:
+            picked_keyword_indices.append(index)
         used += cost
     if not picked:
         return Selection("", [])
     body = "\n\n".join(f"- {text}" for text in picked)
-    return Selection(f"【世界设定（相关条目）】\n{body}", picked_indices)
+    return Selection(
+        f"【世界设定（相关条目）】\n{body}", picked_indices, picked_keyword_indices,
+    )
 
 
 def assemble(repo_id: str, entries: list[Entry], query: str, cfg: EmbedConfig,

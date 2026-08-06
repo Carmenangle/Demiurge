@@ -2693,7 +2693,9 @@ body {
   justify-content: center;
   color: var(--text-muted);
   flex-shrink: 0;
+  overflow: hidden;
 }
+.bot-avatar > img { width: 100%; height: 100%; object-fit: cover; display: block; }
 
 .bot-content {
   position: relative;
@@ -3046,6 +3048,30 @@ textarea.state-value { min-height: 58px; }
 .bind-label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 4px; }
 .bind-field select { width: 100%; box-sizing: border-box; }
 .bind-hint { display: block; font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+.bind-card-list { display: grid; gap: 6px; max-height: 180px; overflow-y: auto; padding: 8px; border: 1px solid var(--border); }
+.bind-card-option { display: flex; align-items: center; gap: 8px; min-height: 28px; font-size: 13px; }
+.bind-card-option input { flex: 0 0 auto; }
+.character-modal-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.character-modal-head h3 { flex: 1; margin: 0; }
+.character-card-field { display: block; margin-bottom: 12px; }
+.character-card-field > span { display: block; margin-bottom: 4px; font-size: 12px; color: var(--text-muted); }
+.character-card-field textarea { width: 100%; min-height: 96px; resize: vertical; box-sizing: border-box; }
+.character-card-error { color: var(--danger, #c0392b); font-size: 13px; }
+.character-card-saved { color: var(--success, #2e7d32); font-size: 12px; align-self: center; }
+.character-media-modal { width: min(620px, 92vw); max-height: 84vh; overflow-y: auto; }
+.character-media-section { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 14px; align-items: center; margin-bottom: 18px; }
+.character-media-avatar { width: 112px; height: 112px; overflow: hidden; border: 1px solid var(--border); background: var(--surface-2); display: grid; place-items: center; color: var(--text-muted); }
+.character-media-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.character-media-section-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.character-expression-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 10px; }
+.character-expression-grid figure { margin: 0; min-width: 0; }
+.character-expression-grid img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; border: 1px solid var(--border); }
+.character-expression-grid figcaption { margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: center; font-size: 12px; }
+@media (max-width: 520px) {
+  .character-media-section { grid-template-columns: 88px minmax(0, 1fr); }
+  .character-media-avatar { width: 88px; height: 88px; }
+  .character-media-section-head { align-items: stretch; flex-direction: column; }
+}
 
 /* 编辑态：状态卡被 textarea 取代会让 shrink-to-fit 的气泡塌成窄条，编辑时强制撑到 max-width 宽度 */
 .bot-content:has(.bot-edit) { width: min(60vw, 720px); }

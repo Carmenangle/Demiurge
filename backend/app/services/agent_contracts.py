@@ -46,6 +46,7 @@ class RunContext:
     edited_prompt: str = ""
     forced_route: str = ""
     user_message_id: str = ""
+    workspace_mode: str = "story"  # story/generate/edit；edit 直达受限作品文件 Agent
     context_max_tokens: int = 20_000
     history_per_role: int = 6     # 每角色（用户/AI）读取的最近历史条数，全局上下文预算的一部分
     history_override: list[dict] | None = field(default=None, compare=False)  # 前端当前可见历史；显式 [] 表示已删空
@@ -59,6 +60,8 @@ class RunContext:
     # 剧情扮演：关联角色卡时透传，供 roleplay 节点组装 persona 系统提示词。
     character_dir: str = ""       # 角色卡文件夹根（前端设置 characterDir）
     card_name: str = ""           # 本作品关联的角色卡名（空=非扮演，走通用对话）
+    card_names: list[str] = field(default_factory=list, compare=False)  # 本作品绑定的全部角色卡
+    opening_card_name: str = ""    # 兼容 card_name 的开场卡真源
     persona: str = field(default="", compare=False)  # 运行时富集：从卡组装的 persona 系统片段
     preset_dir: str = ""          # 偏置预设文件夹根（前端设置 presetDir）
     preset_name: str = ""         # 当前激活预设名（空=不用预设，走内置扮演提示）
@@ -70,6 +73,7 @@ class RunContext:
     illustrate: bool = False      # 剧情插画开关（开=构建 renderer 通能动性 D 阶段自动配图）
     comfy_illustrate: bool = False  # 前端已预设 ComfyUI 工作流模板：高潮点不同步 render，改发 illustrate_request 事件由前端走异步闭环
     prompt_profile: str = "krea2"  # 当前作品自动插画提示词模式，由主 Roleplay 同轮生成最终提示词
+    appearance_source: str = "worldbook"  # worldbook / character_card
     character_base_images: dict = field(default_factory=dict, compare=False)  # ⑥ 角色名→底图（gpt-image 系无 LoRA，按在场角色取底图锁一致性）
     illustration_actor_names: list[str] = field(default_factory=list, compare=False)  # 自动插画可识别的已配置角色名
     style_base_image: str = ""    # ⑥ 无角色底图时的兜底风格底图（gpt-image 系）
@@ -105,12 +109,14 @@ class RunContext:
             "approval_id": self.approval_id, "approval_action": self.approval_action,
             "edited_prompt": self.edited_prompt, "forced_route": self.forced_route,
             "user_message_id": self.user_message_id, "cancel_event": self.cancel_event,
+            "workspace_mode": self.workspace_mode,
             "context_max_tokens": self.context_max_tokens,
             "history_per_role": self.history_per_role,
             "history_override": self.history_override,
             "agent_cfg": self.agent_cfg, "builtin": self.builtin, "history": self.history,
             "skill_frags": self.skill_frags, "has_mcp": self.has_mcp,
             "character_dir": self.character_dir, "card_name": self.card_name,
+            "card_names": self.card_names, "opening_card_name": self.opening_card_name,
             "persona": self.persona,
             "preset_dir": self.preset_dir, "preset_name": self.preset_name,
             "user_name": self.user_name, "user_persona": self.user_persona,
@@ -118,6 +124,7 @@ class RunContext:
             "worldbook_dir": self.worldbook_dir, "worldbook_name": self.worldbook_name,
             "illustrate": self.illustrate, "comfy_illustrate": self.comfy_illustrate,
             "prompt_profile": self.prompt_profile,
+            "appearance_source": self.appearance_source,
             "character_base_images": self.character_base_images,
             "illustration_actor_names": self.illustration_actor_names,
             "style_base_image": self.style_base_image,

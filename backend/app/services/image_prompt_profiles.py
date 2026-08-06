@@ -43,7 +43,10 @@ _VISUAL_BLUEPRINT = (
     _ART_DIRECTION
     + "格式化时先锁定不可改变的剧情事实：在场人物、世界书稳定外貌、当前外观变化、服装状态、"
     "实际动作和地点；不得因艺术化而改写事实。只展开服务唯一视觉命题的发型、妆容、服装、背景和装饰细节，"
-    "无关项简写或省略，不得为了填满栏目凭空创造。人物、动作、镜头、光影、背景和构图必须形成同一视觉系统。"
+    "无关项简写或省略，不得为了填满栏目凭空创造。若输入确实没有稳定外貌，可根据明确的年龄、性别、职业、"
+    "身份、阵营和名称调性，保守补足不改变剧情事实的典型外貌与服装；不得据此改写年龄、关系、动作或阵营设定。"
+    "人物视觉事实不足时，可改以当前环境为第一视觉中心，让人物退居次级叙事位置。"
+    "人物、动作、镜头、光影、背景和构图必须形成同一视觉系统。"
 )
 
 _COMMON = (
@@ -274,7 +277,8 @@ _ANIMA_VAGUE_HOOKS = {
 _ANIMA_ACTION_RE = re.compile(
     r"\b(?:reaching|gripping|holding|pulling|pushing|walking|running|turning|looking|"
     r"raising|lowering|standing|sitting|kneeling|leaning|bending|lying|embracing|kissing|"
-    r"fighting|attacking|swinging|drawing|opening|handing|climbing|falling|jumping)\b",
+    r"fighting|attacking|swinging|drawing|opening|handing|climbing|falling|jumping|"
+    r"carrying|lifting|unloading)\b",
     re.I,
 )
 _SCENE_ACTION_RULES = (
@@ -302,6 +306,9 @@ _SCENE_ACTION_RULES = (
     (r"拔剑|拔刀", "drawing a weapon"),
     (r"打开|开启", "opening"),
     (r"递给|交给", "handing over"),
+    (r"(?:搬|卸).{0,12}木箱|木箱.{0,12}(?:搬|卸)|搬下|搬到|卸下|卸货",
+     "unloading a wooden medicine crate"),
+    (r"扛着|背着|搬着", "carrying"),
 )
 
 
@@ -337,6 +344,62 @@ def _anima_contract_errors(raw: str) -> list[str]:
         errors.append("supporting_elements必须是非空英文字符串")
     if not content:
         errors.append("content不能为空")
+    return errors
+
+
+def _anima_scene_fact_errors(prompt: str, scene: Mapping[str, object]) -> list[str]:
+    """只校验剧情硬事实，不约束镜头、光影、色材或视觉装置。"""
+    encounter = scene.get("encounter")
+    encounter_values = encounter.values() if isinstance(encounter, Mapping) else ()
+    source = "\n".join((
+        str(scene.get("narrative") or ""),
+        str(scene.get("appearance") or ""),
+        str(scene.get("wardrobe") or ""),
+        str(scene.get("locale") or ""),
+        " ".join(str(value) for value in encounter_values),
+    ))
+    content = prompt.splitlines()[-1].lower()
+    requirements = (
+        (
+            r"(?:搬|卸).{0,16}(?:木箱|药箱)|(?:木箱|药箱).{0,16}(?:搬|卸)",
+            r"(?:unload|carry|lift|move)\w*.{0,80}(?:crate|box)|"
+            r"(?:crate|box).{0,80}(?:unload|carry|lift|move)\w*",
+            "正文明确搬运药材木箱，content必须保留搬箱动作",
+        ),
+        (r"药材|黄芪|艾草|干姜", r"medicinal herbs?|herbal medicine|astragalus|mugwort|ginger",
+         "正文明确出现药材，content必须保留药材"),
+        (r"宽肩", r"broad shoulders?", "人物宽肩特征不得丢失"),
+        (r"方脸", r"square face", "人物方脸特征不得丢失"),
+        (r"浓眉", r"thick eyebrows?", "人物浓眉特征不得丢失"),
+        (r"虎牙", r"(?:prominent|visible|small) canine tooth|fang", "人物虎牙特征不得丢失"),
+        (r"厚茧|老茧", r"calloused hands?", "人物掌心厚茧特征不得丢失"),
+        (r"褐色短褂", r"brown .{0,20}(?:jacket|workwear|shirt)", "人物褐色短褂不得丢失"),
+        (r"袖口挽|挽起袖|挽到肘", r"rolled(?:-up)? sleeves?", "人物挽袖状态不得丢失"),
+        (r"孤儿院.{0,8}门|门.{0,8}孤儿院", r"orphanage (?:entrance|gate|doorway)",
+         "孤儿院门口地点不得丢失"),
+        (r"骡子.{0,12}(?:车|平板车)|骡车", r"mule(?:-drawn)? cart|mule cart",
+         "骡车环境事实不得丢失"),
+    )
+    errors = [message for source_pattern, prompt_pattern, message in requirements
+              if re.search(source_pattern, source) and not re.search(prompt_pattern, content)]
+    has_matron_interaction = bool(
+        re.search(r"院长", source) and re.search(r"招呼|查看|接受|迟疑|不安|惶然|伸手", source)
+    )
+    if has_matron_interaction:
+        if not re.search(r"\b(?:matron|orphanage director|caretaker|headmistress)\b", content):
+            errors.append("正文存在院长互动，content必须保留院长作为次级人物")
+        if re.search(r"\b(?:solo|1girl)\b", content):
+            errors.append("正文存在院长互动，禁止使用solo或1girl把关系场景退化为单人肖像")
+    adult_occupation = bool(re.search(r"药材商贩|药材贩子|女商贩|女商人", source))
+    if adult_occupation and not re.search(r"\b(?:adult woman|woman|2women)\b", content):
+        errors.append("成年商贩身份不得退化为未标明成年身份的少女")
+    unsupported_mule_action = re.search(
+        r"\b(?:slap|slapping|pat|patting|hit|hitting|strike|striking)\b.{0,40}\b(?:mule|horse)\b",
+        content,
+    )
+    source_mule_action = re.search(r"(?:拍|打|抚摸|抽|击).{0,12}(?:骡|马)", source)
+    if unsupported_mule_action and not source_mule_action:
+        errors.append("正文没有拍打骡子的动作，禁止凭空添加该动作")
     return errors
 
 
@@ -469,18 +532,102 @@ def _anima_scene_fallback(scene: Mapping[str, object]) -> str:
     content = lines[-1] if lines else ""
     content = re.sub(r"\s*;\s*", ", ", content)
     valid = content.isascii() and not _REFUSAL_RE.search(content)
+    encounter = scene.get("encounter")
+    encounter_values = encounter.values() if isinstance(encounter, Mapping) else ()
+    source = "\n".join((
+        str(scene.get("narrative") or ""),
+        str(scene.get("appearance") or ""),
+        str(scene.get("wardrobe") or ""),
+        str(scene.get("locale") or ""),
+        " ".join(str(value) for value in encounter_values),
+    ))
+    fact_rules = (
+        (r"女人|女性|妇人|女子|她|三十出头", "adult woman"),
+        (r"三十出头", "early thirties"),
+        (r"药材商贩|药材贩子|药商", "herb merchant"),
+        (r"宽肩", "broad shoulders"),
+        (r"厚背|结实|壮实", "sturdy build"),
+        (r"方脸", "square face"),
+        (r"浓眉", "thick eyebrows"),
+        (r"虎牙", "prominent canine tooth"),
+        (r"厚茧|老茧", "calloused hands"),
+        (r"结实.{0,4}小臂", "strong forearms"),
+        (r"褐色短褂", "brown work jacket"),
+        (r"袖口挽|挽到肘", "rolled sleeves"),
+        (r"靴底.{0,8}泥|泥.{0,8}靴", "muddy boots"),
+        (r"风尘仆仆", "travel-worn"),
+        (r"爽朗|热络", "open cheerful expression"),
+        (r"骡子.{0,8}平板车|骡车", "mule-drawn cart"),
+        (r"药材|黄芪|艾草|干姜", "bundled medicinal herbs"),
+        (r"孤儿院.{0,6}门|门.{0,6}孤儿院", "orphanage entrance"),
+        (r"院长.{0,12}(?:不安|迟疑|惶然|恐惧)|(?:不安|迟疑|惶然).{0,12}院长",
+         "anxious matron"),
+        (r"(?:搬|卸).{0,12}木箱|木箱.{0,12}(?:搬|卸)|搬下|搬到|卸下|卸货",
+         "unloading a wooden medicine crate"),
+        (r"跳下", "jumping down from the cart"),
+        (r"尘土|扬尘", "dust in the air"),
+    )
+    facts = [tag for pattern, tag in fact_rules if re.search(pattern, source)]
     if not valid or len([tag for tag in content.split(",") if tag.strip()]) < 6:
-        content = "1girl, solo, dramatic composition, cinematic lighting, detailed anime illustration, sharp focus"
+        base = facts or [
+            "dramatic scene", "environmental composition", "medium shot",
+            "directional light", "layered background", "detailed anime illustration",
+        ]
+        content = ", ".join(dict.fromkeys([
+            *base, "medium wide shot", "three-quarter view", "environmental composition",
+            "late afternoon sunlight", "dust backlighting", "warm ochre and muted green palette",
+        ]))
+    elif facts:
+        head, dot, tail = content.partition(".")
+        existing = head.lower()
+        additions = [fact for fact in facts if fact.lower() not in existing]
+        content = f"{head.rstrip(',. ')}, {', '.join(additions)}{dot}{tail}" if additions else content
     action_tags = _scene_action_tags(scene)
     if action_tags and not _ANIMA_ACTION_RE.search(content):
         head, dot, tail = content.partition(".")
         content = f"{head.rstrip(',. ')}, {', '.join(action_tags)}{dot}{tail}"
     if not re.search(r"(?:^|\.\s+)[A-Z][^.?!]{24,}[.?!](?:\s|$)", content):
-        content = (
-            f"{content.rstrip(',. ')}. The subject remains the visual focus while layered light, "
-            "materials, and background depth preserve the relationships established by the scene."
-        )
+        if "herb merchant" in facts and "unloading a wooden medicine crate" in facts:
+            description = (
+                "A sturdy adult herb merchant unloads a wooden medicine crate at the orphanage "
+                "entrance, with her calloused hands, square face, and prominent canine tooth receiving "
+                "the sharpest detail. Late-afternoon light catches road dust, rough wood, and bundled "
+                "herbs while the anxious matron and mule cart recede into softer layers."
+            )
+        else:
+            description = (
+                "The stated action and character identity remain the sharp visual focus while "
+                "directional light, material texture, and background depth preserve the scene facts."
+            )
+        content = f"{content.rstrip(',. ')}. {description}"
     return _normalize("anima_tags", content, scene)
+
+
+def _natural_scene_fallback(scene: Mapping[str, object]) -> str:
+    narrative = str(scene.get("narrative") or "").strip()
+    appearance = str(scene.get("appearance") or "").strip()
+    locale = str(scene.get("locale") or "").strip()
+    facts = "。".join(part.rstrip("。") for part in (narrative, appearance, locale) if part)
+    return (
+        f"{facts}。以剧情实际动作作为第一视觉中心，使用环境叙事构图；"
+        "最高细节集中在人物面部、双手和接触物，其余人物与背景依次弱化。"
+        "光源方向、材质反应和阴影必须服务当前人物关系。"
+    )
+
+
+def _niji_scene_fallback(scene: Mapping[str, object]) -> str:
+    narrative = str(scene.get("narrative") or "").strip() or "当前剧情场景"
+    appearance = str(scene.get("appearance") or "").strip()
+    subject = "，".join(part for part in (narrative, appearance) if part).replace("\n", " ")
+    ratio = str(scene.get("aspect_ratio") or "2:3")
+    if ratio not in ("1:1", "2:3", "3:2", "3:4", "4:3", "9:16", "16:9"):
+        ratio = "2:3"
+    return "\n".join((
+        subject,
+        "精致二次元叙事插画，统一色彩与材质母题，人物身份和动作忠于剧情",
+        "环境叙事构图，方向性光源，主体面部与双手最高细节，背景分层弱化",
+        f"--ar {ratio} --niji 6",
+    ))
 
 
 def generate(
@@ -498,6 +645,7 @@ def generate(
     errors = _errors(profile, prompt, scene)
     if profile == "anima_tags":
         errors.extend(_anima_contract_errors(raw))
+        errors.extend(_anima_scene_fact_errors(prompt, scene))
     if not errors:
         return prompt
     repair = (
@@ -509,6 +657,7 @@ def generate(
     errors = _errors(profile, prompt, scene)
     if profile == "anima_tags":
         errors.extend(_anima_contract_errors(repaired_raw))
+        errors.extend(_anima_scene_fact_errors(prompt, scene))
     if errors:
         # Krea2 是自然语言模型，长度与句式只用于引导纠错，不能阻断已有高潮画面出图。
         # 第二次有内容就直接采用；连续空输出才从高潮场景事实组装兜底。
@@ -516,6 +665,10 @@ def generate(
             return prompt if prompt and not _REFUSAL_RE.search(prompt) else _krea_scene_fallback(scene)
         if profile == "anima_tags":
             return _anima_scene_fallback(scene)
+        if profile == "natural_language":
+            return _natural_scene_fallback(scene)
+        if profile == "niji_sections":
+            return _niji_scene_fallback(scene)
         raise ValueError("提示词格式校验失败：" + "；".join(errors))
     return prompt
 

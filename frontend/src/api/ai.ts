@@ -7,6 +7,7 @@ import {
 } from "./chatStreamProtocol";
 import { openSSE } from "./sse";
 import type { AiImageRegeneration, ChatMessage } from "../types/chat";
+import { workspaceModeForWire, type WorkMode } from "../lib/viewRouting";
 import {
   WORKFLOW_BUILD_EXECUTE_TIMEOUT_MS,
   WORKFLOW_BUILD_PLAN_TIMEOUT_MS,
@@ -220,7 +221,7 @@ export function multiAgent(
     onEvent: (event: ChatStreamEvent) => void;
     onDone: (err?: string) => void;
   },
-  persist?: { outputDir: string; repoId: string; embed: { baseUrl: string; apiKey: string; modelName: string }; proxyUrl?: string; chatProxyUrl?: string; genProxyUrl?: string; videoProxyUrl?: string; embedProxyUrl?: string; routeModel?: string; messageId?: string; userMessageId?: string; styleTemplate?: string; agentId?: string; streamOutput?: boolean; contextMaxTokens?: number; historyPerRole?: number; history?: { role: "user" | "assistant"; content: string }[]; imageQuality?: import("../lib/viewRouting").ImageQuality; video?: { baseUrl: string; apiKey: string; modelName: string }; characterDir?: string; cardName?: string; presetDir?: string; presetName?: string; userName?: string; userPersona?: string; personaBound?: boolean; worldbookDir?: string; worldbookName?: string; illustrate?: boolean; comfyIllustrate?: boolean; promptProfile?: string; characterBaseImages?: Record<string, string>; illustrationActorNames?: string[]; styleBaseImage?: string },
+  persist?: { outputDir: string; repoId: string; workspaceMode?: WorkMode; embed: { baseUrl: string; apiKey: string; modelName: string }; proxyUrl?: string; chatProxyUrl?: string; genProxyUrl?: string; videoProxyUrl?: string; embedProxyUrl?: string; routeModel?: string; messageId?: string; userMessageId?: string; styleTemplate?: string; agentId?: string; streamOutput?: boolean; contextMaxTokens?: number; historyPerRole?: number; history?: { role: "user" | "assistant"; content: string }[]; imageQuality?: import("../lib/viewRouting").ImageQuality; video?: { baseUrl: string; apiKey: string; modelName: string }; characterDir?: string; cardName?: string; cardNames?: string[]; openingCardName?: string; presetDir?: string; presetName?: string; userName?: string; userPersona?: string; personaBound?: boolean; worldbookDir?: string; worldbookName?: string; illustrate?: boolean; comfyIllustrate?: boolean; promptProfile?: string; appearanceSource?: "worldbook" | "character_card"; characterBaseImages?: Record<string, string>; illustrationActorNames?: string[]; styleBaseImage?: string },
   approvalAction?: { approvalId: string; action: "submit" | "change" | "cancel"; editedPrompt?: string },
   routeAction?: { route: import("../types/chat").AgentRoute; userMessageId: string },
   imageMask?: { image: string; mask: string },
@@ -241,6 +242,7 @@ export function multiAgent(
     image_quality: persist?.imageQuality || "high",
     output_dir: persist?.outputDir || "",
     repo_id: persist?.repoId || "",
+    workspace_mode: workspaceModeForWire(persist?.workspaceMode || "story"),
     ...sseEmbed(persist?.embed),
     proxy_url: persist?.proxyUrl || "",
     chat_proxy_url: persist?.chatProxyUrl || "",
@@ -262,6 +264,8 @@ export function multiAgent(
     user_message_id: routeAction?.userMessageId || persist?.userMessageId || "",
     character_dir: persist?.characterDir || "",
     card_name: persist?.cardName || "",
+    card_names: persist?.cardNames || [],
+    opening_card_name: persist?.openingCardName || persist?.cardName || "",
     preset_dir: persist?.presetDir || "",
     preset_name: persist?.presetName || "",
     user_name: persist?.userName || "",
@@ -272,6 +276,7 @@ export function multiAgent(
     illustrate: persist?.illustrate || false,
     comfy_illustrate: persist?.comfyIllustrate || false,
     prompt_profile: persist?.promptProfile || "krea2",
+    appearance_source: persist?.appearanceSource || "worldbook",
     character_base_images: persist?.characterBaseImages || {},
     illustration_actor_names: persist?.illustrationActorNames || [],
     style_base_image: persist?.styleBaseImage || "",
@@ -425,6 +430,7 @@ export interface ChatQueueTask {
 // multiAgent 完整参数落后端队列；worker 在前一条结束后串行认领执行。
 export function enqueueChatQueueTask(payload: {
   threadId: string; message: string; images: string[];
+  workMode: WorkMode;
   imageMask?: { image: string; mask: string } | null;
   chat: Chat; gen: Chat; video?: Chat; embed?: Embed;
   size: string; imageQuality: string; outputDir: string; repoId: string;
@@ -433,14 +439,16 @@ export function enqueueChatQueueTask(payload: {
   streamOutput: boolean;
   historyPerRole: number;
   history: { role: "user" | "assistant"; content: string }[];
-  characterDir: string; cardName: string; presetDir: string; presetName: string;
+  characterDir: string; cardName: string; cardNames: string[]; openingCardName: string; presetDir: string; presetName: string;
   userName: string; userPersona: string; personaBound: boolean;
   worldbookDir: string; worldbookName: string;
   illustrate: boolean; comfyIllustrate: boolean; promptProfile: string;
+  appearanceSource: "worldbook" | "character_card";
   characterBaseImages: Record<string, string>; illustrationActorNames: string[]; styleBaseImage: string;
 }) {
   return apiPost<{ task: ChatQueueTask }>("/ai/chat-queue/enqueue", {
     thread_id: payload.threadId,
+    workspace_mode: workspaceModeForWire(payload.workMode),
     message: payload.message,
     images: payload.images,
     image_mask: payload.imageMask || null,
@@ -458,12 +466,14 @@ export function enqueueChatQueueTask(payload: {
     stream_output: payload.streamOutput,
     history_per_role: payload.historyPerRole, history: payload.history,
     character_dir: payload.characterDir, card_name: payload.cardName,
+    card_names: payload.cardNames, opening_card_name: payload.openingCardName,
     preset_dir: payload.presetDir, preset_name: payload.presetName,
     user_name: payload.userName, user_persona: payload.userPersona,
     persona_bound: payload.personaBound,
     worldbook_dir: payload.worldbookDir, worldbook_name: payload.worldbookName,
     illustrate: payload.illustrate, comfy_illustrate: payload.comfyIllustrate,
     prompt_profile: payload.promptProfile,
+    appearance_source: payload.appearanceSource,
     character_base_images: payload.characterBaseImages,
     illustration_actor_names: payload.illustrationActorNames,
     style_base_image: payload.styleBaseImage,

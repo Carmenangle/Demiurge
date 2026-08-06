@@ -46,6 +46,7 @@ import {
   applyProfileLoraTriggers, illustrationTemplateValues, normalizePromptProfile,
   replacePromptQualityLine, latentSizeFor,
 } from "./imagePromptProfiles";
+import { illustrationRequestMedia, illustrationWorkflowMedia } from "./illustrationMedia";
 import {
   agentImageMessage, applyRouteChoice, bindMediaSlotPrompt, dropMediaSlot,
   reduceChatStreamEvent, resolveMediaSlot, upsertMessages, workflowMessages,
@@ -54,7 +55,7 @@ import { recoverCompactedSummaryImage } from "./contextManagement";
 import { characterDetail } from "../api/characters";
 import { recoverAgentRun, shouldRecoverAgentRun } from "./agentRecovery";
 import { releaseAgentStream, type ActiveAgentStream } from "./agentStreamLifecycle";
-import type { ImageQuality } from "./viewRouting";
+import type { ImageQuality, WorkMode } from "./viewRouting";
 import { useChatMaintenance } from "./useChatMaintenance";
 import {
   comfyRegenerationUrl, legacyGenerationPrompt, resolveImageRegenerationModel,
@@ -104,6 +105,7 @@ export interface ChatSessionDeps {
   chat: Model;                                   // 当前对话模型（智能体大脑+反推）
   genModel: Model;                               // 当前生图模型
   videoModel?: Model;                            // 当前视频模型（videoModels）
+  workMode: WorkMode;                            // 编辑模式由后端直达受限作品文件 Agent
   size: string;                                  // 生图尺寸 "宽x高"
   imageQuality: ImageQuality;                    // GPT Image 质量档；不支持的模型由后端省略
   templates: Template[];
@@ -115,7 +117,7 @@ export interface ChatSessionDeps {
 
 export function useChatSession(deps: ChatSessionDeps) {
   const {
-    repo, settings, setGeneratedCover, chat, genModel, videoModel, size, imageQuality,
+    repo, settings, setGeneratedCover, chat, genModel, videoModel, workMode, size, imageQuality,
     templates, setShowPicker, atBottomRef,
   } = deps;
 
@@ -140,6 +142,9 @@ export function useChatSession(deps: ChatSessionDeps) {
   const mediaPreset = settings.mediaInsert?.[repo?.id || ""];
   const comfyIllustrate = !!(settings.illustrate && (mediaPreset?.templateId || mediaPreset?.videoTemplateId));
   const promptProfile = normalizePromptProfile(mediaPreset?.promptProfile);
+  const cardNames = repo?.cardNames?.length ? repo.cardNames : (repo?.cardName ? [repo.cardName] : []);
+  const openingCardName = repo?.openingCardName || repo?.cardName || cardNames[0] || "";
+  const appearanceSource = mediaPreset?.appearanceSource === "character_card" ? "character_card" : "worldbook";
   const modelProxies = {
     chatProxyUrl: resolveModelProxy(chat.proxyMode, settings.proxyUrl, settings.proxyEnabled),
     genProxyUrl: resolveModelProxy(genModel.proxyMode, settings.proxyUrl, settings.proxyEnabled),
@@ -151,13 +156,8 @@ export function useChatSession(deps: ChatSessionDeps) {
   };
   const embedModel = { ...settings.embedModel, proxyUrl: modelProxies.embedProxyUrl };
   // ⑥ 云端（gpt-image 系）出图无 ComfyUI 模板：把角色→底图映射传后端，按在场角色取底图锁一致性。
-  const characterBaseImages = Object.fromEntries(
-    Object.entries(mediaPreset?.characterLoras || {})
-      .filter(([, b]) => b.baseImage)
-      .map(([name, b]) => [name, b.baseImage as string]),
-  );
-  const illustrationActorNames = Object.keys(mediaPreset?.characterLoras || {});
-  const styleBaseImage = mediaPreset?.styleBaseImage || "";
+  const { characterBaseImages, illustrationActorNames, styleBaseImage } =
+    illustrationRequestMedia(mediaPreset, cardNames);
   // 有效用户人设：仓库绑定了 personaId 则用该档（并标 personaBound，后端不被作品快照覆盖）；否则用全局选中档。
   const boundPersona = repo?.personaId
     ? (settings.userPersonas || []).find((p) => p.id === repo.personaId)
@@ -366,8 +366,8 @@ export function useChatSession(deps: ChatSessionDeps) {
         });
         // 卡即作品：全无历史(本地/快照/后端皆空)且关联角色卡 → 用卡的 first_mes 作开场白首条。
         // 落一次后进快照，下次从快照恢复，不再重复注入（幂等）。
-        if (historyMessages.length === 0 && repo?.cardName && settings.characterDir) {
-          const opening = await loadOpeningMessage(settings.characterDir, repo.cardName, effectivePersona.name || "");
+        if (historyMessages.length === 0 && openingCardName && settings.characterDir) {
+          const opening = await loadOpeningMessage(settings.characterDir, openingCardName, effectivePersona.name || "");
           if (!alive) return;
           if (opening) {
             setMessages([{ id: crypto.randomUUID(), role: "assistant", text: opening }]);
@@ -749,25 +749,8 @@ export function useChatSession(deps: ChatSessionDeps) {
     // ⑥ 按在场角色挑 LoRA/底图：候选 = 分析出的在场角色 + 本作品主角色卡名兜底。
     // 命中任一角色的配置：有其 LoRA → 用角色 LoRA；无 LoRA → 用风格 LoRA + 该角色底图。
     // 都无角色配置 → 回退风格 LoRA/风格底图 或旧的单 preset.loraName（兼容旧数据）。
-    const candidates = [...actors, ...(repo?.cardName ? [repo.cardName] : [])];
-    const cmap = preset.characterLoras || {};
-    let loraName = "", loraWeight = 0.8, baseImage = "", characterLora = false;
-    for (const c of candidates) {
-      const b = cmap[c];
-      if (!b) continue;
-      if (b.loraName) {
-        loraName = b.loraName;
-        loraWeight = b.loraWeight ?? 0.8;
-        characterLora = true;
-      }
-      if (b.baseImage) baseImage = b.baseImage;
-      if (loraName || baseImage) break;
-    }
-    if (!loraName) {  // 角色无自己的 LoRA → 风格 LoRA 兜底（或旧单 LoRA）
-      loraName = preset.styleLora || preset.loraName || "";
-      loraWeight = preset.styleLoraWeight ?? preset.loraWeight ?? 0.8;
-    }
-    if (!baseImage) baseImage = preset.styleBaseImage || "";  // 无角色底图 → 风格底图兜底
+    const { loraName, loraWeight, baseImage, characterLora } =
+      illustrationWorkflowMedia(preset, actors, cardNames);
     let negativePrompt = preset.negativePrompt?.trim() || sceneSpec?.negative_prompt || "";
     if (sceneSpec?.profile_prompt && sceneSpec.profile === promptProfile) {
       prompt = sceneSpec.profile_prompt;
@@ -1034,6 +1017,7 @@ export function useChatSession(deps: ChatSessionDeps) {
     const visibleHistory = promptHistory(messagesRef.current);
     void enqueueChatQueueTask({
       threadId,
+      workMode,
       message: text,
       images,
       imageMask: content.maskedImage
@@ -1051,11 +1035,12 @@ export function useChatSession(deps: ChatSessionDeps) {
       contextMaxTokens: settings.contextMaxTokens,
       historyPerRole: settings.historyPerRole,
       history: visibleHistory,
-      characterDir: settings.characterDir, cardName: repo?.cardName || "",
+      characterDir: settings.characterDir, cardName: openingCardName,
+      cardNames, openingCardName,
       presetDir: settings.presetDir, presetName: settings.activePresetName,
       userName: effectivePersona.name, userPersona: effectivePersona.content, personaBound,
       worldbookDir, worldbookName,
-      illustrate: settings.illustrate, comfyIllustrate, promptProfile,
+      illustrate: settings.illustrate, comfyIllustrate, promptProfile, appearanceSource,
       characterBaseImages, illustrationActorNames, styleBaseImage,
     }).then((res) => {
       if (res.task?.id) saveQueueContent(res.task.id, content);
@@ -1163,7 +1148,8 @@ export function useChatSession(deps: ChatSessionDeps) {
         onEvent: (event) => handleAgentStreamEvent(botId, event),
         onDone,
       },
-      { outputDir: settings.outputDir, repoId: repo?.id || threadId, embed: embedModel,
+      { outputDir: settings.outputDir, repoId: repo?.id || threadId, workspaceMode: workMode,
+        embed: embedModel,
         proxyUrl: settings.proxyEnabled ? settings.proxyUrl : "", messageId: botId,
         ...modelProxies,
         userMessageId: userMsg.id,
@@ -1174,11 +1160,12 @@ export function useChatSession(deps: ChatSessionDeps) {
         history: visibleHistory,
         imageQuality,
         video: videoModel,
-        characterDir: settings.characterDir, cardName: repo?.cardName || "",
+        characterDir: settings.characterDir, cardName: openingCardName,
+        cardNames, openingCardName,
         presetDir: settings.presetDir, presetName: settings.activePresetName,
         userName: effectivePersona.name, userPersona: effectivePersona.content, personaBound,
         worldbookDir, worldbookName,
-        illustrate: settings.illustrate, comfyIllustrate, promptProfile, characterBaseImages,
+        illustrate: settings.illustrate, comfyIllustrate, promptProfile, appearanceSource, characterBaseImages,
         illustrationActorNames, styleBaseImage },
       undefined,
       undefined,
@@ -1238,6 +1225,7 @@ export function useChatSession(deps: ChatSessionDeps) {
       {
         outputDir: settings.outputDir,
         repoId: repo?.id || threadId,
+        workspaceMode: workMode,
         embed: embedModel,
         proxyUrl: settings.proxyEnabled ? settings.proxyUrl : "",
         ...modelProxies,
@@ -1250,11 +1238,12 @@ export function useChatSession(deps: ChatSessionDeps) {
         history: visibleHistory,
         imageQuality,
         video: videoModel,
-        characterDir: settings.characterDir, cardName: repo?.cardName || "",
+        characterDir: settings.characterDir, cardName: openingCardName,
+        cardNames, openingCardName,
         presetDir: settings.presetDir, presetName: settings.activePresetName,
         userName: effectivePersona.name, userPersona: effectivePersona.content, personaBound,
         worldbookDir, worldbookName,
-        illustrate: settings.illustrate, comfyIllustrate, promptProfile, characterBaseImages,
+        illustrate: settings.illustrate, comfyIllustrate, promptProfile, appearanceSource, characterBaseImages,
         illustrationActorNames, styleBaseImage,
       },
       { approvalId: approval.id, action, editedPrompt },
@@ -1309,6 +1298,7 @@ export function useChatSession(deps: ChatSessionDeps) {
       {
         outputDir: settings.outputDir,
         repoId: repo?.id || threadId,
+        workspaceMode: workMode,
         embed: embedModel,
         proxyUrl: settings.proxyEnabled ? settings.proxyUrl : "",
         ...modelProxies,
@@ -1322,11 +1312,12 @@ export function useChatSession(deps: ChatSessionDeps) {
         history: visibleHistory,
         imageQuality,
         video: videoModel,
-        characterDir: settings.characterDir, cardName: repo?.cardName || "",
+        characterDir: settings.characterDir, cardName: openingCardName,
+        cardNames, openingCardName,
         presetDir: settings.presetDir, presetName: settings.activePresetName,
         userName: effectivePersona.name, userPersona: effectivePersona.content, personaBound,
         worldbookDir, worldbookName,
-        illustrate: settings.illustrate, comfyIllustrate, promptProfile, characterBaseImages,
+        illustrate: settings.illustrate, comfyIllustrate, promptProfile, appearanceSource, characterBaseImages,
         illustrationActorNames, styleBaseImage,
       },
       undefined,

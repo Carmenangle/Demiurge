@@ -74,6 +74,16 @@ def output_dir_from_state() -> str:
     return ""
 
 
+def setting_dir_from_state(key: str) -> str:
+    """读取后端已持久化的目录设置；编辑 Agent 发布源库时禁止采用请求传入路径。"""
+    settings = _load_state().get("settings")
+    if isinstance(settings, dict):
+        value = settings.get(key)
+        if isinstance(value, str):
+            return value.strip()
+    return ""
+
+
 def folder_name(repo_id: str) -> str:
     """决定该仓库的输出文件夹段（相对 output_dir）：有仓库名用仓库名(清洗保中文)，否则回退 UUID。
 

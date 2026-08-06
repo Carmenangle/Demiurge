@@ -128,6 +128,7 @@ export function CharacterCards({ characterDir, outputDir, worldbookDir, persona,
           folder={preview.folder}
           name={preview.name}
           onClose={() => setPreview(null)}
+          onChanged={refresh}
           onNewWork={() => { void startWork(preview.name); }}
         />
       )}

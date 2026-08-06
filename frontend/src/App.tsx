@@ -262,6 +262,7 @@ export function App() {
         <BindRepoModal
           repo={binding}
           characterDir={settings.characterDir}
+          outputDir={settings.outputDir}
           worldbookDir={settings.worldbookDir}
           personas={settings.userPersonas || []}
           onSave={(patch) => bindRepo(binding.id, patch)}

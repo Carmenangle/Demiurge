@@ -82,6 +82,7 @@ def test_assemble_selection_returns_original_indices_for_all_activation_paths(mo
     selection = wb.assemble_selection("r1", entries, "冷倾雪醒来", None)
 
     assert selection.indices == [1, 2, 3]
+    assert selection.keyword_indices == [1]
     assert "关键词命中" in selection.text
     assert "常驻设定" in selection.text
     assert "语义命中" in selection.text
@@ -99,6 +100,22 @@ def test_assemble_uses_in_memory_sparse_retrieval_while_index_is_empty(monkeypat
 
     assert "塞西莉亚是幽影帝国的统治者" in selection.text
     assert "奥萝拉掌控碧海航路" not in selection.text
+
+
+def test_中文稀疏召回不因常见单字污染其他角色条目(monkeypatch):
+    monkeypatch.setattr(wb, "_retrieve", lambda *args, **kwargs: [])
+    entries = wb.parse_entries({"entries": [
+        {"content": "帝国通用规则：夜间实行宵禁。", "constant": True},
+        {"content": "露娜负责王城路线与贵族礼仪。", "keys": ["露娜"]},
+        {"content": "米拉负责边境诊疗与药材鉴定。", "keys": ["米拉"]},
+    ]})
+
+    selection = wb.assemble_selection("repo", entries, "让米拉检查药材", None)
+
+    assert selection.indices == [2, 0]
+    assert selection.keyword_indices == [2]
+    assert "米拉负责边境诊疗" in selection.text
+    assert "露娜负责王城路线" not in selection.text
 
 
 def test_load_entries_from_saved_card(tmp_path):

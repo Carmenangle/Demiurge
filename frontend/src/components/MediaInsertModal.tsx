@@ -16,6 +16,7 @@ import {
 interface Props {
   templates: Template[];
   cardName?: string;   // 本作品主角色卡名，用于预填首行角色
+  cardNames?: string[]; // 本作品绑定的全部角色卡
   modelsDir: string;   // ComfyUI models 目录，用于直接扫 loras 子目录列出可选模型
   preset?: MediaInsertPreset;
   onSave: (preset: MediaInsertPreset) => void;
@@ -37,20 +38,23 @@ export function suggestedWeightForLora(loras: readonly AvailableLora[], loraName
   return loras.find((lora) => lora.lora_name === loraName)?.suggested_weight ?? 0.8;
 }
 
-function initialRows(preset?: MediaInsertPreset, cardName?: string): CharRow[] {
+function initialRows(preset?: MediaInsertPreset, cardName?: string, cardNames: string[] = []): CharRow[] {
   const map = preset?.characterLoras || {};
   const rows: CharRow[] = Object.entries(map).map(([name, b]) => ({ name, ...b }));
-  // 主角色卡名缺省补一行（方便直接配），已有则不重复
-  if (cardName && !rows.some((r) => r.name === cardName)) {
-    rows.unshift({ name: cardName });
+  const bound = [...new Set([...cardNames, ...(cardName ? [cardName] : [])].filter(Boolean))];
+  for (const name of [...bound].reverse()) {
+    if (!rows.some((r) => r.name === name)) rows.unshift({ name });
   }
   return rows.length ? rows : [{ name: cardName || "" }];
 }
 
 // 多元数据插入：为本作品预设剧情高潮点异步出图用的 ComfyUI 工作流模板 + 按角色 LoRA/底图。
 // 提示词由后端高潮点提取，运行时按在场角色取该角色 LoRA/底图，无则回退风格 LoRA + 风格底图。
-export function MediaInsertModal({ templates, cardName, modelsDir, preset, onSave, onClose }: Props) {
+export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDir, preset, onSave, onClose }: Props) {
   const [templateId, setTemplateId] = useState(preset?.templateId || "");
+  const [appearanceSource, setAppearanceSource] = useState<"worldbook" | "character_card">(
+    preset?.appearanceSource === "character_card" ? "character_card" : "worldbook",
+  );
   const [promptProfile, setPromptProfile] = useState(() => normalizePromptProfile(preset?.promptProfile));
   const [qualityPrompt, setQualityPrompt] = useState(preset?.qualityPrompt || "");
   const [negativePrompt, setNegativePrompt] = useState(preset?.negativePrompt || "");
@@ -58,7 +62,7 @@ export function MediaInsertModal({ templates, cardName, modelsDir, preset, onSav
     preset?.latentLongEdge === 2048 || preset?.latentLongEdge === 4096
       ? preset.latentLongEdge : 1024,
   );
-  const [rows, setRows] = useState<CharRow[]>(() => initialRows(preset, cardName));
+  const [rows, setRows] = useState<CharRow[]>(() => initialRows(preset, cardName, cardNames));
   const [styleLora, setStyleLora] = useState(preset?.styleLora || "");
   const [styleLoraWeight, setStyleLoraWeight] = useState(preset?.styleLoraWeight ?? 0.8);
   const [styleBaseImage, setStyleBaseImage] = useState(preset?.styleBaseImage || "");
@@ -137,6 +141,7 @@ export function MediaInsertModal({ templates, cardName, modelsDir, preset, onSav
     }
     onSave({
       templateId,
+      appearanceSource,
       promptProfile,
       qualityPrompt: promptProfile === "anima_tags" ? qualityPrompt.trim() : undefined,
       negativePrompt: promptProfile === "anima_tags" ? negativePrompt.trim() : undefined,
@@ -154,6 +159,20 @@ export function MediaInsertModal({ templates, cardName, modelsDir, preset, onSav
     <div className="modal-mask" onClick={onClose}>
       <div className="modal" style={{ width: 560, maxWidth: "94vw", maxHeight: "86vh", overflowY: "auto" }} onClick={(e) => e.stopPropagation()}>
         <h3>多元数据插入</h3>
+        <label style={{ display: "block", marginBottom: 12 }}>
+          <span style={{ display: "block", marginBottom: 4, fontSize: 13 }}>角色外貌来源</span>
+          <select value={appearanceSource}
+            onChange={(event) => setAppearanceSource(event.target.value as "worldbook" | "character_card")}
+            style={{ width: "100%" }}>
+            <option value="worldbook">条目模式</option>
+            <option value="character_card">角色卡模式</option>
+          </select>
+        </label>
+        <p className="bind-hint" style={{ marginTop: -8, marginBottom: 12 }}>
+          {appearanceSource === "worldbook"
+            ? "从当前小仓库世界书中命中的角色视觉条目读取外貌。"
+            : "从本作品绑定角色卡的描述读取外貌，适合纯机制世界书。"}
+        </p>
         <p style={{ color: "#666", marginTop: 0, fontSize: 13 }}>
           预设本作品剧情高潮点自动出图用的工作流模板。保存后会自动开启「剧情插画」；提示词由剧情自动提取，LoRA 无触发词记录也不会阻断出图。
         </p>
@@ -228,11 +247,12 @@ export function MediaInsertModal({ templates, cardName, modelsDir, preset, onSav
           </p>
         )}
 
-        <hr style={{ border: "none", borderTop: "1px solid #eee", margin: "16px 0" }} />
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-          <strong style={{ fontSize: 13 }}>按角色配置（LoRA + 底图）</strong>
-          <button className="btn" onClick={addRow}>+ 添加角色</button>
-        </div>
+        {appearanceSource === "worldbook" && (<>
+          <hr style={{ border: "none", borderTop: "1px solid #eee", margin: "16px 0" }} />
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+            <strong style={{ fontSize: 13 }}>按角色配置（LoRA + 底图）</strong>
+            <button className="btn" onClick={addRow}>+ 添加角色</button>
+          </div>
         {templateId && !hasLoraSlot && (
           <p style={{ color: "#c0392b", fontSize: 12, marginTop: -2 }}>该模板未标注 LoRA 字段，角色 LoRA 选了也不生效。</p>
         )}
@@ -291,9 +311,12 @@ export function MediaInsertModal({ templates, cardName, modelsDir, preset, onSav
             </div>
           </div>
         ))}
+        </>)}
 
         <hr style={{ border: "none", borderTop: "1px solid #eee", margin: "16px 0" }} />
-        <strong style={{ fontSize: 13, display: "block", marginBottom: 8 }}>兜底风格（角色未单配时用）</strong>
+        <strong style={{ fontSize: 13, display: "block", marginBottom: 8 }}>
+          {appearanceSource === "character_card" ? "全局风格 LoRA（可选）" : "兜底风格（角色未单配时用）"}
+        </strong>
         <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
           <select value={styleLora} onChange={(e) => {
             const loraName = e.target.value;
@@ -315,7 +338,7 @@ export function MediaInsertModal({ templates, cardName, modelsDir, preset, onSav
             />
           )}
         </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, marginBottom: 8 }}>
+        {appearanceSource === "worldbook" && <div style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, marginBottom: 8 }}>
           {styleBaseImage
             ? <img src={localViewUrl(styleBaseImage)} alt="" style={{ width: 40, height: 40, objectFit: "cover", borderRadius: 4 }} />
             : <span style={{ color: "#999" }}>风格底图（可选）</span>}
@@ -324,7 +347,7 @@ export function MediaInsertModal({ templates, cardName, modelsDir, preset, onSav
             <input type="file" accept="image/*" hidden onChange={(e) => { pickStyleBase(e.target.files?.[0]); e.target.value = ""; }} />
           </label>
           {styleBaseImage && <button className="btn" onClick={() => setStyleBaseImage("")}>清除</button>}
-        </div>
+        </div>}
 
         <hr style={{ border: "none", borderTop: "1px solid #eee", margin: "16px 0" }} />
         <label style={{ display: "block", marginBottom: 12 }}>
@@ -342,7 +365,7 @@ export function MediaInsertModal({ templates, cardName, modelsDir, preset, onSav
             智能模态：剧情动作剧烈时（如奔跑/律动）自动改用视频模板，静态画面仍出图
           </label>
         )}
-        {missingBase && (
+        {appearanceSource === "worldbook" && missingBase && (
           <p style={{ color: "#c0392b", fontSize: 12 }}>有角色既无 LoRA 也无底图，且无兜底风格——该角色出图将缺少一致性锚点。</p>
         )}
         <div className="modal-actions">

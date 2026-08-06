@@ -153,6 +153,135 @@ def test_anima连续失败时仍从剧情保留具体动作而非退化为特写
     assert "pulling another person" in content
 
 
+def test_anima新角色Profile连续失败时从中文场景保留身份外貌动作与环境():
+    scene = {
+        **_scene(),
+        "narrative": (
+            "骡子拉的平板车停在边地孤儿院门口。方葛是三十出头的药材商贩，方脸浓眉，"
+            "宽肩厚背，褐色短褂袖口挽起，露出结实小臂和掌心厚茧，笑时露出小虎牙。"
+            "她把第一口药材木箱搬到门前石台上，招呼不安的院长查看黄芪。"
+        ),
+        "draft_prompt": "",
+        "actors": ["方葛"],
+        "encounter": {
+            "who": "方葛（伪装药材商贩）",
+            "where": "边地孤儿院门口",
+            "mood": "风尘仆仆的爽朗热络",
+        },
+    }
+
+    prompt = profiles.generate(
+        "anima_tags", scene, lambda _system, _user: "I can't help with this request.",
+    )
+
+    content = prompt.splitlines()[1]
+    for fact in (
+        "adult woman", "early thirties", "broad shoulders", "square face",
+        "thick eyebrows", "prominent canine tooth", "calloused hands", "brown work jacket",
+        "rolled sleeves", "unloading a wooden medicine crate", "mule-drawn cart",
+        "medicinal herbs", "orphanage entrance", "anxious matron",
+    ):
+        assert fact in content
+    assert "1girl, solo, dramatic composition" not in content
+
+
+def test_anima新角色提示词事实错误时重写且不固定艺术方案():
+    scene = {
+        **_scene(),
+        "narrative": (
+            "方葛是药材商贩，方脸浓眉、宽肩厚背，褐色短褂挽起袖口，掌心厚茧，"
+            "笑时露出小虎牙。她把药材木箱搬到孤儿院门前，招呼不安的院长查看黄芪，"
+            "骡车停在身后。"
+        ),
+        "draft_prompt": "",
+        "actors": ["方葛"],
+        "encounter": {"who": "方葛（伪装药材商贩）", "where": "孤儿院门前"},
+    }
+    wrong = _anima_json(
+        "1girl, solo, brown jacket, one hand raised, looking at viewer, low angle, mule cart. "
+        "She freezes after slapping the mule's neck while the dark animal fills the frame.",
+        visual_hook="the mule silhouette frames her raised hand",
+        primary_focus="her raised hand beside the mule",
+    )
+    repaired = _anima_json(
+        "2women, adult woman, herb merchant, broad shoulders, sturdy build, square face, "
+        "thick eyebrows, prominent canine tooth, calloused hands, brown work jacket, rolled sleeves, "
+        "unloading a wooden medicine crate, medicinal herbs, anxious matron, orphanage entrance, "
+        "mule-drawn cart, diagonal composition, selective focus. The crate edge becomes a leading "
+        "diagonal from her calloused hands to the matron's hesitant reach, while warm light on rough "
+        "wood and muted herbs carries the scene's trust-building tension.",
+        visual_hook="the crate edge forms a diagonal between both women's hands",
+        primary_focus="the merchant's calloused hands unloading the medicine crate",
+        supporting_elements=["the matron's hesitant reach", "softened mule cart"],
+    )
+    outputs = iter([wrong, repaired])
+    users = []
+
+    prompt = profiles.generate(
+        "anima_tags", scene,
+        lambda _system, user: (users.append(user), next(outputs))[1],
+    )
+
+    assert len(users) == 2
+    assert "药材木箱" in users[1]
+    assert "院长" in users[1]
+    assert "正文没有拍打骡子的动作" in users[1]
+    assert "diagonal composition" in prompt
+    assert "warm light on rough wood" in prompt
+    assert "slapping the mule" not in prompt
+
+
+def test_anima满足事实合同的不同艺术方案首轮直接通过():
+    scene = {
+        **_scene(),
+        "narrative": (
+            "方葛是药材商贩，方脸浓眉、宽肩厚背，褐色短褂挽起袖口，掌心厚茧，"
+            "笑时露出小虎牙。她把药材木箱搬到孤儿院门前，院长迟疑地伸手查看药材。"
+        ),
+        "actors": ["方葛"],
+    }
+    artistic = _anima_json(
+        "2women, adult woman, herb merchant, broad shoulders, square face, thick eyebrows, "
+        "prominent canine tooth, calloused hands, brown work jacket, rolled sleeves, unloading a "
+        "wooden medicine crate, medicinal herbs, anxious matron, orphanage entrance, overhead shot, "
+        "frame within frame, cool shadows, amber highlights. The open crate forms a bright rectangle "
+        "inside the dark doorway, linking the merchant's rough hands to the matron's hesitant reach.",
+        visual_hook="the bright open crate creates a frame within the dark doorway",
+        primary_focus="both hands meeting across the medicine crate",
+        supporting_elements=["amber herb slices", "cool doorway shadow"],
+    )
+    calls = []
+
+    prompt = profiles.generate(
+        "anima_tags", scene,
+        lambda _system, user: (calls.append(user), artistic)[1],
+    )
+
+    assert len(calls) == 1
+    assert "overhead shot" in prompt
+    assert "frame within frame" in prompt
+    assert "cool shadows, amber highlights" in prompt
+
+
+@pytest.mark.parametrize("profile", ["natural_language", "niji_sections"])
+def test_非Anima_Profile连续失败仍保留场景而不取消插画(profile):
+    scene = {
+        **_scene(),
+        "narrative": "方葛把药材木箱搬到孤儿院门前，院长迟疑地伸手接过。",
+        "actors": ["方葛"],
+    }
+
+    prompt = profiles.generate(
+        profile, scene, lambda _system, _user: "I can't help with this request.",
+    )
+
+    assert "方葛" in prompt
+    assert "药材木箱" in prompt
+    if profile == "niji_sections":
+        assert len(prompt.splitlines()) == 4
+        assert prompt.splitlines()[-1].startswith("--")
+
+
 def test_anima负面提示词独立返回且不混入正向两行():
     result = profiles.generate_result(
         "anima_tags", _scene(),

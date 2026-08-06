@@ -161,10 +161,12 @@ def test_execute_headless保留直连剧情上下文参数(tmp_path, monkeypatch
     queue._execute({
         "thread_id": "repo-1", "message": "继续剧情", "history": history,
         "history_per_role": 9, "character_dir": "cards", "card_name": "Lyra",
+        "card_names": ["Lyra", "Nia"], "opening_card_name": "Lyra",
         "preset_dir": "presets", "preset_name": "GrayWill",
-        "user_name": "Carmen", "user_persona": "用户设定", "persona_bound": True,
+        "user_name": "测试用户", "user_persona": "用户设定", "persona_bound": True,
         "worldbook_dir": "worldbooks", "worldbook_name": "世界",
         "illustrate": True, "comfy_illustrate": True, "prompt_profile": "anima_tags",
+        "appearance_source": "character_card",
         "stream_output": True,
         "character_base_images": {"Lyra": "data:image/png;base64,x"},
         "illustration_actor_names": ["Lyra", "Nia"],
@@ -174,18 +176,22 @@ def test_execute_headless保留直连剧情上下文参数(tmp_path, monkeypatch
         "embed_proxy_url": "embed-proxy",
         "forced_route": "roleplay", "approval_id": "approval-1",
         "approval_action": "change", "edited_prompt": "edited",
+        "workspace_mode": "edit",
     })
 
     context = captured["context"]
     assert context.history_override == history and context.history_per_role == 9
     assert (context.character_dir, context.card_name) == ("cards", "Lyra")
+    assert context.card_names == ["Lyra", "Nia"]
+    assert context.opening_card_name == "Lyra"
     assert (context.preset_dir, context.preset_name) == ("presets", "GrayWill")
     assert (context.user_name, context.user_persona, context.persona_bound) == (
-        "Carmen", "用户设定", True,
+        "测试用户", "用户设定", True,
     )
     assert (context.worldbook_dir, context.worldbook_name) == ("worldbooks", "世界")
     assert context.illustrate is True and context.comfy_illustrate is True
     assert context.prompt_profile == "anima_tags"
+    assert context.appearance_source == "character_card"
     assert context.stream_output is True
     assert context.character_base_images == {"Lyra": "data:image/png;base64,x"}
     assert context.illustration_actor_names == ["Lyra", "Nia"]
@@ -196,6 +202,7 @@ def test_execute_headless保留直连剧情上下文参数(tmp_path, monkeypatch
     assert context.video_proxy_url == "video-proxy"
     assert context.embed_proxy_url == "embed-proxy"
     assert context.forced_route == "roleplay"
+    assert context.workspace_mode == "edit"
     assert (context.approval_id, context.approval_action, context.edited_prompt) == (
         "approval-1", "change", "edited",
     )

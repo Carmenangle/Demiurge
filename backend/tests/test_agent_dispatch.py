@@ -20,6 +20,113 @@ def test_agent_state保留流式完成标记():
     assert "_streamed_result" in ag.AgentState.__annotations__
 
 
+def test_多角色persona只发送本轮出场角色描述并按剧情选择生图外貌(monkeypatch):
+    from app.services import character_store
+
+    cards = {
+        "露娜": {"name": "露娜", "description": "银发蓝眼"},
+        "米拉": {"name": "米拉", "description": "黑发金眼"},
+    }
+    monkeypatch.setattr(character_store, "read_card", lambda _base, name: cards.get(name))
+    ctx = _ctx(
+        character_dir="cards", card_name="露娜", opening_card_name="露娜",
+        card_names=["露娜", "米拉"], appearance_source="character_card",
+    )
+
+    opening = ag._resolve_personas(ctx, "米拉走进房间", opening_only=True)
+    assert "【角色：露娜】" in opening and "银发蓝眼" in opening
+    assert "米拉" not in opening and "黑发金眼" not in opening
+
+    later = ag._resolve_personas(ctx, "米拉走进房间")
+    assert "【角色：米拉】" in later and "黑发金眼" in later
+    assert "露娜" not in later and "银发蓝眼" not in later
+
+    together = ag._resolve_personas(ctx, "露娜与米拉一同进入房间")
+    assert "银发蓝眼" in together and "黑发金眼" in together
+    assert ag._resolve_personas(ctx, "走进空房间") == ""
+    exact_worldbook = ag._resolve_personas(
+        ctx, "继续", worldbook_names=["米拉"],
+        fallback_query="露娜上一轮已经离场",
+    )
+    assert "黑发金眼" in exact_worldbook and "银发蓝眼" not in exact_worldbook
+    continued = ag._resolve_personas(ctx, "继续", fallback_query="米拉仍在房间")
+    assert "黑发金眼" in continued and "银发蓝眼" not in continued
+
+    cards["米拉"]["description"] = ""
+    assert ag._resolve_personas(ctx, "米拉走进房间") == ""
+    cards["米拉"]["description"] = "黑发金眼"
+    assert ag._card_visual_profiles(ctx, "米拉走进房间") == "米拉：黑发金眼"
+    ctx["_illustration_visual_profiles"] = "米拉：黑发金眼"
+    assert ag._illustration_appearance(ctx) == "米拉：黑发金眼"
+
+
+@pytest.mark.parametrize(
+    ("history", "expected", "excluded"),
+    [
+        ([{"role": "assistant", "content": "露娜的开场白"}], "银发蓝眼", "黑发金眼"),
+        ([{"role": "user", "content": "上一轮"}, {"role": "assistant", "content": "露娜离场"}],
+         "黑发金眼", "银发蓝眼"),
+    ],
+)
+def test_roleplay在世界书解析后按首轮或出场角色选择描述(
+    monkeypatch, history, expected, excluded,
+):
+    from app.services import character_store
+
+    cards = {
+        "露娜": {"name": "露娜", "description": "银发蓝眼"},
+        "米拉": {"name": "米拉", "description": "黑发金眼"},
+    }
+    captured = {}
+    monkeypatch.setattr(character_store, "read_card", lambda _base, name: cards.get(name))
+    def resolve_worldbook(ctx, query):
+        ctx["_worldbook_character_names"] = ["米拉"]
+        return "【米拉】已进入房间"
+
+    monkeypatch.setattr(ag, "_resolve_worldbook", resolve_worldbook)
+
+    def resolve_preset(ctx, wb, **kwargs):
+        captured["persona"] = ctx.get("persona") or ""
+        return [], None, False, [], []
+
+    monkeypatch.setattr(ag, "_resolve_preset", resolve_preset)
+    monkeypatch.setattr(ag._llm, "chat_messages", lambda *args, **kwargs: "剧情正文")
+    ctx = _card_ctx(
+        opening_card_name="露娜", card_names=["露娜", "米拉"],
+        history=history, persona="不应沿用的全量角色卡",
+    )
+
+    ag.roleplay_node({"user_text": "继续", "images": [], "_ctx": ctx})
+
+    assert expected in captured["persona"]
+    assert excluded not in captured["persona"]
+
+
+def test_预设角色描述marker使用本轮已筛选内容(monkeypatch):
+    from app.services import preset_store
+
+    captured = {}
+    monkeypatch.setattr(preset_store, "read_preset", lambda *_args: {"prompts": [{}]})
+    monkeypatch.setattr(
+        preset_store, "assemble_messages",
+        lambda preset, markers, history: captured.update(markers) or [],
+    )
+    monkeypatch.setattr(preset_store, "has_history_marker", lambda _preset: False)
+    monkeypatch.setattr(preset_store, "select_chains", lambda *args, **kwargs: ([], []))
+    monkeypatch.setattr(preset_store, "sampling_params", lambda _preset: {})
+    ctx = _card_ctx(
+        preset_dir="presets", preset_name="active", persona="【角色：米拉】\n黑发金眼",
+        _selected_persona_names=["米拉"],
+    )
+
+    ag._resolve_preset(ctx, "", turn=2)
+
+    assert captured["char_name"] == "米拉"
+    assert captured["char_description"] == "【角色：米拉】\n黑发金眼"
+    assert captured["char_personality"] == ""
+    assert captured["scenario"] == ""
+
+
 def test_主剧情世界书选择范围贯通到curator读写与trace(monkeypatch, tmp_path):
     repo_id = "work"
     book = {"entries": [
@@ -51,6 +158,105 @@ def test_主剧情世界书选择范围贯通到curator读写与trace(monkeypatc
     ]) == 1
     scope = next(data for event, data in events if event == "worldbook.update_scope")
     assert scope == {"allowed_indices": [0], "rejected_indices": [1]}
+
+
+def test_世界书模糊召回不激活角色卡且当前精确别名优先(monkeypatch):
+    book = {"entries": [
+        {"content": "帝国通用规则：夜间实行宵禁。", "constant": True},
+        {"content": "露娜负责王城路线与贵族礼仪。", "keys": ["露娜"]},
+        {"content": "米拉负责边境诊疗与药材鉴定。", "keys": ["米拉", "医生"]},
+    ]}
+    monkeypatch.setattr(ag, "_repo_worldbook", lambda ctx: book)
+    monkeypatch.setattr(worldbook, "schedule_index", lambda *args, **kwargs: False)
+    monkeypatch.setattr(worldbook, "_retrieve", lambda *args, **kwargs: [])
+    ctx = _ctx(
+        repo_id="work", card_name="露娜", opening_card_name="露娜",
+        card_names=["露娜", "米拉"],
+        history=[{"role": "assistant", "content": "露娜已经离场。"}],
+    )
+
+    injected = ag._resolve_worldbook(ctx, "请医生检查药材")
+
+    assert "米拉负责边境诊疗" in injected
+    assert ctx["_keyword_worldbook_indices"] == [2]
+    assert ctx["_worldbook_character_names"] == ["米拉"]
+
+
+def test_角色描述历史回退排除已离场角色(monkeypatch):
+    from app.services import character_store
+
+    cards = {
+        "露娜": {"name": "露娜", "description": "银发蓝眼的向导"},
+        "米拉": {"name": "米拉", "description": "黑发金眼的医师"},
+    }
+    monkeypatch.setattr(character_store, "read_card", lambda _base, name: cards.get(name))
+    ctx = _ctx(
+        character_dir="cards", card_name="露娜", opening_card_name="露娜",
+        card_names=["露娜", "米拉"],
+    )
+
+    persona = ag._resolve_personas(
+        ctx, "继续", fallback_query="米拉已经离开诊室，露娜仍留在这里。",
+    )
+
+    assert "银发蓝眼的向导" in persona
+    assert "黑发金眼的医师" not in persona
+
+
+def test_角色描述选择不受绑定顺序影响(monkeypatch):
+    from app.services import character_store
+
+    cards = {
+        "露娜": {"description": "露娜描述"},
+        "米拉": {"description": "米拉描述"},
+        "诺雅": {"description": "诺雅描述"},
+    }
+    monkeypatch.setattr(character_store, "read_card", lambda _base, name: cards.get(name))
+    for order in (["露娜", "米拉", "诺雅"], ["诺雅", "露娜", "米拉"], ["米拉", "诺雅", "露娜"]):
+        ctx = _ctx(
+            character_dir="cards", card_name="露娜", opening_card_name="露娜",
+            card_names=order,
+        )
+        persona = ag._resolve_personas(ctx, "请医生检查", worldbook_names=["米拉"])
+        assert "米拉描述" in persona
+        assert "露娜描述" not in persona and "诺雅描述" not in persona
+
+
+@pytest.mark.parametrize(
+    "context",
+    ["米拉没有离开诊室。", "米拉离开后又回到诊室。", "米拉仍在诊室整理药材。"],
+)
+def test_角色历史回退保留否定离场与重新入场(context):
+    assert ag._active_fallback_names(["露娜", "米拉"], context) == ["米拉"]
+
+
+def test_角色历史回退只读取最近一条AI剧情():
+    ctx = _ctx(history=[
+        {"role": "assistant", "content": "米拉正在诊室。"},
+        {"role": "user", "content": "转场"},
+        {"role": "assistant", "content": "露娜正在王城门口等待。"},
+    ])
+    assert ag._recent_character_context(ctx) == "露娜正在王城门口等待。"
+
+
+def test_包含关系角色名使用最长非重叠匹配(monkeypatch):
+    from app.services import character_store
+
+    cards = {
+        "莉亚": {"description": "短名角色"},
+        "塞西莉亚": {"description": "完整名称角色"},
+    }
+    monkeypatch.setattr(character_store, "read_card", lambda _base, name: cards.get(name))
+    ctx = _ctx(
+        character_dir="cards", card_name="塞西莉亚", opening_card_name="塞西莉亚",
+        card_names=["莉亚", "塞西莉亚"],
+    )
+
+    only_long = ag._resolve_personas(ctx, "塞西莉亚走进房间")
+    both = ag._resolve_personas(ctx, "塞西莉亚让莉亚留在房间")
+
+    assert "完整名称角色" in only_long and "短名角色" not in only_long
+    assert "完整名称角色" in both and "短名角色" in both
 
 
 def test_首次世界书索引立即发送非阻塞状态事件(monkeypatch):
@@ -99,6 +305,35 @@ def _dispatch(text, *, images=None, ctx=None) -> dict:
 
 def _route(text, *, images=None, ctx=None) -> str:
     return _dispatch(text, images=images, ctx=ctx)["route"]
+
+
+def test_编辑模式固定直达编辑Agent且不调用主管模型():
+    def should_not_call(*_args, **_kwargs):
+        raise AssertionError("编辑模式不应调用 Supervisor 模型")
+
+    assert _route("创建角色卡", ctx=_ctx(
+        workspace_mode="edit", chat_fn=should_not_call, card_name="角色卡",
+        character_dir="cards",
+    )) == "edit"
+
+
+def test_编辑节点把当前输入和附件交给受限Agent(monkeypatch):
+    captured = {}
+
+    def fake_run(ctx, text, images, trace):
+        captured.update(ctx=ctx, text=text, images=images, trace=trace)
+        return {"result_text": "done", "trace": trace}
+
+    monkeypatch.setattr(ag.edit_agent, "run", fake_run)
+    ctx = _ctx(repo_id="work", workspace_mode="edit")
+    result = ag.edit_node({
+        "_ctx": ctx, "user_text": "修复 scripts/a.js", "images": ["error.png"], "trace": [],
+    })
+
+    assert result["result_text"] == "done"
+    assert captured["ctx"] is ctx
+    assert captured["text"] == "修复 scripts/a.js"
+    assert captured["images"] == ["error.png"]
 
 
 def test_每个普通轮次都由主管模型判断并收到上下文与附件状态():
@@ -830,6 +1065,67 @@ def test_首轮隐藏思考中的成人词不会污染收养开局插画(monkeyp
         "adult characters", "explicit", "intimate scene", "做爱", "性交", "色情",
     ))
     assert trace[-1][1]["inferred_scene"] == "conflict"
+
+
+def test_非首轮新角色登场以外貌段为锚点触发插画(monkeypatch, tmp_path):
+    from app.services import character_state
+
+    trace = []
+    monkeypatch.setattr(
+        ag.run_trace, "emit",
+        lambda ctx, event, **data: trace.append((event, data)),
+    )
+    deps = ra.AgencyDeps(
+        chat_fn=lambda *a, **k: "[]", rng=random.Random(0), state_base=str(tmp_path),
+    )
+    monkeypatch.setattr(ra, "extract_status_snapshot", lambda reply: {})
+    monkeypatch.setattr(ra, "parse_state_block", lambda reply: (reply, []))
+    monkeypatch.setattr(ra, "writeback", lambda *a, **k: (10.0, 10.0))
+    monkeypatch.setattr(character_state, "load_state", lambda *a, **k: {})
+    monkeypatch.setattr(ra, "_narr", lambda *a, **k: "")
+    arrival = "骡子拉的平板车停在孤儿院门口，赶车人跳下来时带起一阵尘土。"
+    appearance = (
+        "方脸，浓眉，宽肩厚背，褐色短褂袖口挽到肘弯，露出结实小臂和掌心厚茧，"
+        "咧嘴一笑时露出小虎牙。"
+    )
+    action = "方葛把第一口药材木箱搬到门前石台上，招呼仍然不安的院长查看黄芪。"
+    reply = (
+        "<content>院长压低声音结束了谈话。\n\n" + arrival + "\n\n"
+        "<encounter>\n[WHO] 方葛（伪装药材商贩）\n"
+        "[WHERE] 边地孤儿院门口\n[MOOD] 风尘仆仆的爽朗热络\n</encounter>\n\n"
+        + appearance + "\n\n" + action + "\n</content>"
+    )
+
+    _, images, request = ag._agency_writeback(
+        _ctx(
+            repo_id="work", thread_id="work", card_name="神权大陆",
+            scene="conflict", comfy_illustrate=True, persona="",
+            history=[
+                {"role": "user", "content": "此前的对话"},
+                {"role": "assistant", "content": "此前的回复"},
+            ], proxy="",
+        ),
+        deps,
+        reply,
+        turn=4,
+        affinity=10.0,
+        lost=False,
+        user_text="如实告知",
+    )
+
+    assert images == []
+    assert request["actors"] == ["方葛"]
+    assert request["anchor"] == appearance
+    assert arrival in request["scene_spec"]["narrative"]
+    assert appearance in request["scene_spec"]["narrative"]
+    assert action in request["scene_spec"]["narrative"]
+    assert request["scene_spec"]["encounter"]["who"] == "方葛（伪装药材商贩）"
+    assert request["scene_spec"]["rating"] == "sfw"
+    assert request["scene_spec"]["aspect_ratio"] == "4:3"
+    assert request["allow_anchor_fallback"] is True
+    assert trace[-1][0] == "illustration.request"
+    assert trace[-1][1]["status"] == "emitted"
+    assert trace[-1][1]["reason"] == "character_encounter"
 
 
 def test_首轮只有未闭合隐藏思考时不提交插画(monkeypatch, tmp_path):

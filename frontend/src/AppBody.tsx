@@ -1,7 +1,7 @@
 import { lazy } from "react";
 import { resolveHomeWorkspace, type NavSection, type WorkMode } from "./lib/viewRouting";
 import { activeUserPersona, type useSettings } from "./stores/settings";
-import { type Repo, type useRepos } from "./stores/repos";
+import { type Repo, type RepoBinding, type useRepos } from "./stores/repos";
 import { SectionPlaceholder } from "./modes/SectionPlaceholder";
 import { saveSnapshot } from "./api/ai";
 
@@ -41,7 +41,7 @@ export interface AppBodyProps {
   onDelete: (repo: Repo) => void;
   onOpenWork: (repoId: string, workId: string) => void;
   addCardWork: (cardName: string) => { parentId: string; childId: string };
-  addBranch: (parentId: string, cardName?: string) => string;
+  addBranch: (parentId: string, binding?: Partial<RepoBinding>) => string;
   marketSearch: string;
   setMarketSearch: (query: string) => void;
 }
@@ -62,10 +62,10 @@ export function AppBody(props: AppBodyProps) {
     return <ChatView key={activeWork.id} repo={activeWork} workMode={props.workMode}
       settings={settings} update={settingsStore.update} presets={settingsStore}
       setCover={props.setCover} setGeneratedCover={props.setGeneratedCover}
-      onBranch={(cardName, messages) => {
+      onBranch={(binding, messages) => {
         const parentId = activeWork.parentId;
         if (!parentId) return;
-        const childId = props.addBranch(parentId, cardName);
+        const childId = props.addBranch(parentId, binding);
         try { localStorage.setItem(`laf_chat_${childId}`, JSON.stringify(messages)); } catch { /* 超额忽略 */ }
         saveSnapshot(childId, messages).catch(() => { /* 后端未起：本地已存 */ });
         props.onOpenWork(parentId, childId);

@@ -17,8 +17,12 @@ COMFY_EXT_DIR = Path(
 ).expanduser().resolve()
 
 COMFYUI_BASE_URL = "http://127.0.0.1:8188"
-COMFYUI_INPUT_DIR = Path(r"D:\tool\ComfyUI\input")
-COMFYUI_OUTPUT_DIR = Path(r"D:\tool\ComfyUI\output")
+COMFYUI_INPUT_DIR = Path(
+    os.environ.get("LAF_COMFYUI_INPUT_DIR", str(DATA_DIR / "comfyui-input"))
+).expanduser().resolve()
+COMFYUI_OUTPUT_DIR = Path(
+    os.environ.get("LAF_COMFYUI_OUTPUT_DIR", str(DATA_DIR / "comfyui-output"))
+).expanduser().resolve()
 
 # 后端自身对外地址（前端通过它回取本地留存图；生成产出 URL 据此拼接）
 BACKEND_BASE_URL = "http://127.0.0.1:8010"

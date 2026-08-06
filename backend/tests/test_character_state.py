@@ -77,6 +77,23 @@ def test_无归属状态沿用同字段唯一已有角色而非主卡名():
     assert st.叙事["冷倾雪·身体状态"].value == "最新值"
 
 
+def test_明确归属字段淘汰同名无归属旧副本():
+    st = cs.CharacterState(card_name="神权大陆", repo_id="r")
+    st.数值["塞西莉亚·好感度"] = cs.NumericField(10, turn=4)
+    st.数值["好感度"] = cs.NumericField(2, turn=3)
+    st.叙事["塞西莉亚·态度"] = cs.NarrativeField("玩味浓厚", turn=4)
+    st.叙事["院长·态度"] = cs.NarrativeField("压抑不安", turn=4)
+    st.叙事["态度"] = cs.NarrativeField("旧值", turn=3)
+    st.叙事["我·所在"] = cs.NarrativeField("自己房间", turn=4)
+    st.叙事["塞西莉亚·所在"] = cs.NarrativeField("马车内", turn=4)
+    st.叙事["所在"] = cs.NarrativeField("旧地点", turn=3)
+
+    cs.consolidate_fields(st)
+
+    assert set(st.数值) == {"塞西莉亚·好感度"}
+    assert set(st.叙事) == {"塞西莉亚·态度", "院长·态度", "我·所在", "塞西莉亚·所在"}
+
+
 def test_写入同角色同字段时替换而非新增别名():
     st = cs.CharacterState(card_name="冷倾雪", repo_id="r")
     st.叙事["冷倾雪·精神状态"] = cs.NarrativeField("平静", turn=1)

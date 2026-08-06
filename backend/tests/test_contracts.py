@@ -76,6 +76,23 @@ def test_agent上下文透传本轮原始输入():
     assert "message" in ctx
 
 
+def test_agent工作区模式契约():
+    assert RunContext(thread_id="t", message="m").workspace_mode == "story"
+    context = RunContext(thread_id="t", message="m", workspace_mode="edit")
+    assert context["workspace_mode"] == "edit"
+
+
+def test_agent多角色卡与生图外貌来源契约():
+    context = RunContext(
+        thread_id="t", message="m", card_name="露娜",
+        card_names=["露娜", "米拉"], opening_card_name="露娜",
+        appearance_source="character_card",
+    )
+    assert context["card_names"] == ["露娜", "米拉"]
+    assert context["opening_card_name"] == "露娜"
+    assert context["appearance_source"] == "character_card"
+
+
 def test_agent生图质量契约():
     assert RunContext(thread_id="t", message="m").image_quality == "high"
     custom = RunContext(thread_id="t", message="m", image_quality="medium")

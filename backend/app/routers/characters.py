@@ -63,6 +63,23 @@ def snapshot_to_work(req: SnapshotRequest) -> dict[str, object]:
     return {"ok": True, "created": created, "persona_created": persona_created}
 
 
+class RepoSnapshotRequest(BaseModel):
+    character_dir: str
+    card_names: list[str]
+    output_dir: str
+    repo_id: str
+
+
+@router.post("/snapshot-to-repo")
+def snapshot_to_repo(req: RepoSnapshotRequest) -> dict[str, object]:
+    """绑定保存时把所选角色卡快照到当前仓库，供角色卡模式和头像表情读取。"""
+    if not (req.character_dir and req.output_dir and req.repo_id):
+        raise HTTPException(status_code=400, detail="缺少角色卡目录、仓库目录或仓库 ID")
+    return {"ok": True, **character_store.snapshot_cards_to_repo(
+        req.character_dir, req.card_names, req.output_dir, req.repo_id,
+    )}
+
+
 @router.post("/preview")
 async def preview_import(file: UploadFile = File(...)) -> dict[str, object]:
     """只解析不落盘：返回卡名、是否带世界书/正则，供前端做 bundle/覆盖确认。"""
@@ -128,6 +145,71 @@ def get_character(base: str, name: str) -> dict[str, object]:
     if card is None:
         raise HTTPException(status_code=404, detail="角色卡不存在")
     return card
+
+
+class CardUpdateRequest(BaseModel):
+    base: str
+    name: str
+    description: str = ""
+    first_mes: str = ""
+    creator_notes: str = ""
+
+
+@router.patch("/detail")
+def update_character(req: CardUpdateRequest) -> dict[str, object]:
+    """保存角色描述、开场白与创作者注释；空字符串是有效值。"""
+    if not (req.base and req.name):
+        raise HTTPException(status_code=400, detail="缺少角色卡目录或名称")
+    try:
+        return character_store.update_card_fields(req.base, req.name, req.model_dump())
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="角色卡不存在") from exc
+
+
+@router.get("/media")
+def get_character_media(
+    base: str, name: str, output_dir: str = "", repo_id: str = "",
+) -> dict[str, object]:
+    resolved_base = character_store.repo_card_base(output_dir, repo_id, name) or base
+    if not character_store.card_exists(resolved_base, name):
+        raise HTTPException(status_code=404, detail="角色卡不存在")
+    return {
+        "base": resolved_base,
+        "folder": character_store.card_dir(resolved_base, name).name,
+        "has_avatar": (character_store.card_dir(resolved_base, name) / character_store.AVATAR_FILE).is_file(),
+        "expressions": character_store.list_expressions(resolved_base, name),
+    }
+
+
+@router.post("/avatar")
+async def upload_avatar(
+    file: UploadFile = File(...), base: str = Form(...), name: str = Form(...),
+) -> dict[str, object]:
+    raw = await file.read()
+    if not raw.startswith(character_card.PNG_SIGNATURE):
+        raise HTTPException(status_code=400, detail="头像必须是 PNG 图片")
+    try:
+        character_store.write_avatar(base, name, raw)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="角色卡不存在") from exc
+    return {"ok": True}
+
+
+@router.post("/expression")
+async def upload_expression(
+    file: UploadFile = File(...), base: str = Form(...), name: str = Form(...),
+    expression: str = Form(...),
+) -> dict[str, object]:
+    raw = await file.read()
+    if not raw.startswith(character_card.PNG_SIGNATURE):
+        raise HTTPException(status_code=400, detail="表情必须是 PNG 图片")
+    try:
+        filename = character_store.write_expression(base, name, expression, raw)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="角色卡不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "file": filename}
 
 
 @router.get("/regex")

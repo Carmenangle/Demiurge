@@ -43,6 +43,12 @@ def test_场景低于失控优先级():
     assert si.decide_trigger(agency_lost=True, scene="nsfw").reason == si.TRIGGER_AGENCY_LOST
 
 
+def test_新角色登场独立触发普通场景():
+    trigger = si.decide_trigger(scene="dialogue", character_encounter=True)
+    assert trigger.fire is True
+    assert trigger.reason == si.TRIGGER_ENCOUNTER
+
+
 def test_组装拼接顺序与非空过滤():
     r = si.build_scene_request(
         paragraph="她俯身贴近", appearance="银发红瞳", wardrobe="", locale="舞会大厅",
@@ -152,6 +158,44 @@ def test_无指定锚点时按高潮词选段而非整篇正文():
     text = "日常铺垫。\n\n她在决战关头拔剑冲向高台。\n\n众人返回营地。"
 
     assert si.illustration_scene_excerpt(text) == "她在决战关头拔剑冲向高台。"
+
+
+def test_新角色登场提取前一段外貌锚点与角色名():
+    text = (
+        "<think>关于<encounter>块的内部规划，不得被解析。</think>\n"
+        "<content>骡子拉的平板车停在孤儿院门口，赶车人跳下来时带起一阵尘土。\n\n"
+        "<encounter>\n[WHO] 方葛（伪装药材商贩）\n"
+        "[WHERE] 边地孤儿院门口\n[MOOD] 风尘仆仆的爽朗热络\n</encounter>\n\n"
+        "方脸，浓眉，宽肩厚背，褐色短褂袖口挽到肘弯，露出结实小臂和掌心厚茧，"
+        "咧嘴一笑时露出小虎牙。\n\n"
+        "方葛把第一口药材木箱搬到门前石台上，招呼仍然不安的院长查看黄芪。\n"
+        "</content>"
+    )
+
+    anchor, narrative, actors, facts = si.encounter_illustration_context(text)
+
+    assert anchor == (
+        "方脸，浓眉，宽肩厚背，褐色短褂袖口挽到肘弯，露出结实小臂和掌心厚茧，"
+        "咧嘴一笑时露出小虎牙。"
+    )
+    assert actors == ["方葛"]
+    assert "骡子拉的平板车" in narrative
+    assert "方葛把第一口药材木箱搬到门前石台上" in narrative
+    assert "内部规划" not in narrative
+    assert facts == {
+        "who": "方葛（伪装药材商贩）",
+        "where": "边地孤儿院门口",
+        "mood": "风尘仆仆的爽朗热络",
+    }
+
+
+def test_残缺或无角色名的encounter不触发生图():
+    assert si.encounter_illustration_context(
+        "<content>庭院里风声渐紧。\n\n<encounter>[WHO] 方葛"
+    ) == ("", "", [], {})
+    assert si.encounter_illustration_context(
+        "<content>庭院里风声渐紧。\n\n<encounter>[WHAT] 有人来访</encounter></content>"
+    ) == ("", "", [], {})
 
 
 def test_renderer注册与查询():

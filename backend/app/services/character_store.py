@@ -26,6 +26,7 @@ CARD_FILE = "card.json"
 WORLDBOOK_FILE = "worldbook.json"
 REGEX_FILE = "regex.json"
 AVATAR_FILE = "avatar.png"
+EXPRESSIONS_DIR = "expressions"
 CHAT_FILE = "chat.json"
 
 
@@ -66,6 +67,22 @@ def work_card_base(output_dir: str, card_name: str) -> str | None:
     return None
 
 
+def repo_card_base(output_dir: str, repo_id: str, card_name: str) -> str | None:
+    """当前小仓库绑定卡的读取 base：当前仓库优先，再查父作品快照和旧版卡名目录。"""
+    if not ((output_dir or "").strip() and (repo_id or "").strip() and (card_name or "").strip()):
+        return None
+    from app.services import repo_meta
+
+    folder = repo_meta.repo_folder_path(output_dir, repo_id)
+    candidates = [folder / WORK_CARD_SUBDIR]
+    if repo_meta.parent_folder_seg(repo_id):
+        candidates.append(folder.parent / WORK_CARD_SUBDIR)
+    for base in candidates:
+        if (card_dir(base, card_name) / CARD_FILE).is_file():
+            return str(base)
+    return work_card_base(output_dir, card_name)
+
+
 def snapshot_to_work(character_dir: str, card_name: str, work_folder: str) -> bool:
     """把源库卡（card.json+worldbook.json+regex.json+avatar.png）快照进作品文件夹。
 
@@ -85,7 +102,63 @@ def snapshot_to_work(character_dir: str, card_name: str, work_folder: str) -> bo
         sp = src / fname
         if sp.is_file():
             shutil.copy2(sp, dst / fname)
+    expressions = src / EXPRESSIONS_DIR
+    if expressions.is_dir():
+        shutil.copytree(expressions, dst / EXPRESSIONS_DIR, dirs_exist_ok=True)
     return True
+
+
+def snapshot_cards_to_repo(
+    character_dir: str, card_names: list[str], output_dir: str, repo_id: str,
+) -> dict[str, list[str]]:
+    """把绑定角色卡快照到指定仓库；已有卡保持隔离，不覆盖。"""
+    result: dict[str, list[str]] = {"created": [], "existing": [], "missing": []}
+    if not ((character_dir or "").strip() and (output_dir or "").strip() and (repo_id or "").strip()):
+        return result
+    from app.services import repo_meta
+
+    folder = repo_meta.repo_folder(output_dir, repo_id)
+    for raw_name in dict.fromkeys(card_names):
+        name = str(raw_name or "").strip()
+        if not name:
+            continue
+        if not card_exists(character_dir, name):
+            result["missing"].append(name)
+        elif snapshot_to_work(character_dir, name, str(folder)):
+            result["created"].append(name)
+        else:
+            result["existing"].append(name)
+    return result
+
+
+def write_avatar(base: str, name: str, image: bytes) -> None:
+    folder = card_dir(base, name)
+    if not (folder / CARD_FILE).is_file():
+        raise FileNotFoundError(name)
+    (folder / AVATAR_FILE).write_bytes(image)
+
+
+def write_expression(base: str, name: str, expression: str, image: bytes) -> str:
+    folder = card_dir(base, name)
+    if not (folder / CARD_FILE).is_file():
+        raise FileNotFoundError(name)
+    safe_name = safe_dir(Path(expression).stem)
+    if not safe_name:
+        raise ValueError("表情名称为空")
+    target = folder / EXPRESSIONS_DIR / f"{safe_name}.png"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(image)
+    return target.name
+
+
+def list_expressions(base: str, name: str) -> list[dict[str, str]]:
+    folder = card_dir(base, name) / EXPRESSIONS_DIR
+    if not folder.is_dir():
+        return []
+    return [
+        {"name": path.stem, "file": path.name}
+        for path in sorted(folder.glob("*.png")) if path.is_file()
+    ]
 
 
 # 作品仓库绑定的用户人设快照：<作品文件夹>/persona.json（{name, content}）。
@@ -331,6 +404,22 @@ def read_card(base: str, name: str) -> dict[str, Any] | None:
         return data if isinstance(data, dict) else None
     except (json.JSONDecodeError, OSError):
         return None
+
+
+EDITABLE_CARD_FIELDS = ("description", "first_mes", "creator_notes")
+
+
+def update_card_fields(base: str, name: str, updates: dict[str, Any]) -> dict[str, Any]:
+    """只更新角色卡可编辑正文，保留其余格式字段、侧车与媒体。"""
+    card = read_card(base, name)
+    if card is None:
+        raise FileNotFoundError(name)
+    for field_name in EDITABLE_CARD_FIELDS:
+        if field_name in updates:
+            card[field_name] = str(updates[field_name] or "")
+    target = card_dir(base, name) / CARD_FILE
+    target.write_text(json.dumps(card, ensure_ascii=False, indent=2), encoding="utf-8")
+    return card
 
 
 def read_regex(base: str, name: str) -> list[dict[str, Any]]:

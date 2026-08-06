@@ -288,7 +288,7 @@ def maybe_illustrate(
     deps: AgencyDeps, *, paragraph: str, appearance: str, wardrobe: str, locale: str,
     actors: list[str], before: float | None, after: float | None,
     turn: int, cadence: int, explicit: bool, lost: bool,
-    scene: str = "", prompt_override: str = "",
+    scene: str = "", prompt_override: str = "", character_encounter: bool = False,
 ) -> dict | None:
     """按规则判该不该配图，命中则组装 SceneRequest 交 renderer 出图。返回 {url,caption,reason} 或 None。
 
@@ -302,7 +302,8 @@ def maybe_illustrate(
     trig = scene_illustration.decide_trigger(
         explicit=explicit, agency_lost=lost,
         tier_before=before, tier_after=after, thresholds=deps.thresholds,
-        turn=turn, cadence=cadence, scene=scene)
+        turn=turn, cadence=cadence, scene=scene,
+        character_encounter=character_encounter)
     if not trig.fire:
         return None
     if prompt_override.strip():

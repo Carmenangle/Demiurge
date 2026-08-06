@@ -56,9 +56,12 @@ class ImageAgentRequest(EmbedModelReq):
 
 
 class MultiAgentRequest(ImageAgentRequest):
+    workspace_mode: Literal["story", "generate", "edit"] = "story"
     route_model: str = ""   # supervisor 判分派用的（快）模型，空则用主对话模型
     character_dir: str = ""  # 角色卡文件夹根（前端设置 characterDir），供剧情扮演读卡
     card_name: str = ""      # 本作品关联的角色卡名（空=非扮演）
+    card_names: list[str] = []  # 本作品绑定的全部角色卡
+    opening_card_name: str = "" # 新会话开场卡；card_name 为兼容别名
     preset_dir: str = ""     # 偏置预设文件夹根（前端设置 presetDir）
     preset_name: str = ""    # 当前激活预设名（空=不用预设）
     user_name: str = ""      # 用户人设名（填 {{user}} 宏）
@@ -69,6 +72,7 @@ class MultiAgentRequest(ImageAgentRequest):
     illustrate: bool = False  # 剧情插画开关（开=能动性 D 阶段自动配图）
     comfy_illustrate: bool = False  # 前端已预设 ComfyUI 工作流模板：高潮点改发 illustrate_request 事件走异步闭环
     prompt_profile: str = "krea2"
+    appearance_source: Literal["worldbook", "character_card"] = "worldbook"
     character_base_images: dict[str, str] = {}  # ⑥ 角色名→底图（gpt-image 系按在场角色取底图锁一致性）
     illustration_actor_names: list[str] = []  # 自动插画可从正文机械识别的已配置角色名
     style_base_image: str = ""  # ⑥ 无角色底图时的兜底风格底图（gpt-image 系）
@@ -85,6 +89,11 @@ def multi_agent(req: MultiAgentRequest) -> StreamingResponse:
     if not req.message.strip() and not req.images and not req.image_mask:
         raise HTTPException(status_code=400, detail="内容为空")
 
+    bound_cards = list(dict.fromkeys(
+        [name.strip() for name in req.card_names if name.strip()]
+        + ([req.card_name.strip()] if req.card_name.strip() else [])
+    ))
+    opening_card = req.opening_card_name.strip() or req.card_name.strip() or (bound_cards[0] if bound_cards else "")
     context = RunContext(
         thread_id=req.thread_id,
         message=req.message,
@@ -113,11 +122,14 @@ def multi_agent(req: MultiAgentRequest) -> StreamingResponse:
         edited_prompt=req.edited_prompt,
         forced_route=req.forced_route,
         user_message_id=req.user_message_id,
+        workspace_mode=req.workspace_mode,
         context_max_tokens=req.context_max_tokens,
         history_per_role=req.history_per_role,
         history_override=req.history,
         character_dir=req.character_dir,
-        card_name=req.card_name,
+        card_name=opening_card,
+        card_names=bound_cards,
+        opening_card_name=opening_card,
         preset_dir=req.preset_dir,
         preset_name=req.preset_name,
         user_name=req.user_name,
@@ -128,6 +140,7 @@ def multi_agent(req: MultiAgentRequest) -> StreamingResponse:
         illustrate=req.illustrate,
         comfy_illustrate=req.comfy_illustrate,
         prompt_profile=req.prompt_profile,
+        appearance_source=req.appearance_source,
         character_base_images=req.character_base_images or {},
         illustration_actor_names=req.illustration_actor_names or [],
         style_base_image=req.style_base_image,

@@ -28,6 +28,7 @@ TRIGGER_AGENCY_LOST = "主导权失控"
 TRIGGER_CROSS_TIER = "好感度跨档"
 TRIGGER_CADENCE = "每N段兜底"
 TRIGGER_SCENE = "高潮场景"
+TRIGGER_ENCOUNTER = "新角色登场"
 
 # 触发出图的场景标签（scene_classify 的标签子集：高潮/情色是天然出图点）
 _TRIGGER_SCENES = ("nsfw", "climax")
@@ -70,6 +71,7 @@ def decide_trigger(
     turn: int = 0,
     cadence: int = 0,
     scene: str = "",
+    character_encounter: bool = False,
 ) -> Trigger:
     """判本段该不该配图（纯规则，命中优先级最高的一条即返回）。
 
@@ -83,6 +85,8 @@ def decide_trigger(
     """
     if explicit:
         return Trigger(True, TRIGGER_EXPLICIT)
+    if character_encounter:
+        return Trigger(True, TRIGGER_ENCOUNTER)
     if agency_lost:
         return Trigger(True, TRIGGER_AGENCY_LOST)
     if scene in _TRIGGER_SCENES:
@@ -93,6 +97,55 @@ def decide_trigger(
     if cadence > 0 and turn > 0 and turn % cadence == 0:
         return Trigger(True, TRIGGER_CADENCE)
     return Trigger(False, "")
+
+
+def encounter_illustration_context(
+    text: str,
+) -> tuple[str, str, list[str], dict[str, str]]:
+    """提取新角色登场的插入锚点、完整视觉上下文、角色名与结构化事实。"""
+    empty: tuple[str, str, list[str], dict[str, str]] = ("", "", [], {})
+    source = re.sub(
+        r"<think\b[^>]*>[\s\S]*?</think>\s*|<think\b[^>]*>[\s\S]*$",
+        "", text or "", flags=re.I,
+    )
+    content = re.search(r"<content\b[^>]*>(.*?)</content>", source, re.I | re.S)
+    body = content.group(1) if content else source
+    encounter = re.search(r"<encounter\b[^>]*>(.*?)</encounter>", body, re.I | re.S)
+    if not encounter:
+        return empty
+    facts = {
+        match.group(1).strip().lower(): match.group(2).strip()
+        for match in re.finditer(
+            r"^\s*\[([A-Z_]+)\]\s*([^\r\n]+)", encounter.group(1), re.I | re.M,
+        )
+        if match.group(2).strip()
+    }
+    actor = re.split(r"[（(]", facts.get("who", ""), maxsplit=1)[0].strip()
+    if not actor:
+        return empty
+
+    def visible_paragraphs(value: str) -> list[str]:
+        return [
+            part.strip()
+            for part in re.split(r"(?:\r?\n){2,}", value)
+            if part.strip() and not part.lstrip().startswith("<")
+        ]
+
+    before = visible_paragraphs(body[:encounter.start()])
+    after = visible_paragraphs(body[encounter.end():])
+    anchor = after[0] if after else (before[-1] if before else "")
+    if not anchor:
+        return empty
+    fact_text = "；".join(
+        f"{key.upper()}：{value}" for key, value in facts.items()
+    )
+    narrative_parts = [
+        part.strip()
+        for part in [before[-1] if before else "", fact_text, *after[:3]]
+        if part.strip()
+    ]
+    narrative = "\n\n".join(narrative_parts)[:2500]
+    return anchor, narrative, [actor], facts
 
 
 def build_scene_request(

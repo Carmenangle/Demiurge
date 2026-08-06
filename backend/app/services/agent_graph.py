@@ -13,7 +13,7 @@ import logging
 import re
 from typing import TypedDict, Iterator
 
-from app.services import agent_context, builtin_agents, generation_approval, generation_store, run_trace, scene_classify, tool_agent_adapter
+from app.services import agent_context, builtin_agents, edit_agent, generation_approval, generation_store, run_trace, scene_classify, tool_agent_adapter
 from app.services import llm as _llm
 from app.services.agent_contracts import RunContext
 
@@ -141,6 +141,7 @@ _ROUTE_LABELS = {
     "video": "生成视频",
     "inspire": "查找灵感",
     "tool_agent": "调用工具",
+    "edit": "编辑作品文件",
 }
 _ROUTE_DESCRIPTIONS = {
     "answer": "普通对话、问答，以及审查、解释、评价或优化已有内容",
@@ -151,6 +152,7 @@ _ROUTE_DESCRIPTIONS = {
     "video": "生成视频、动画或动图",
     "inspire": "联网查找参考、灵感、流行款式或趋势",
     "tool_agent": "调用已接入的外部工具、接口、文件或数据库能力",
+    "edit": "创建角色卡、编写作品脚本、读取和修改当前作品文件并排错",
 }
 
 
@@ -228,6 +230,9 @@ def supervisor_node(state: AgentState) -> dict:
     run_trace.emit(ctx, "agent.started", agent="supervisor")
     text = state.get("user_text", "")
     has_images = bool(state.get("images"))
+    if ctx.get("workspace_mode") == "edit":
+        run_trace.emit(ctx, "agent.completed", agent="supervisor", route="edit", forced=True)
+        return {"route": "edit", "trace": state.get("trace", []) + ["📝 进入编辑模式"]}
     # 对话兜底：关联角色卡的作品默认走剧情扮演，否则通用对话。
     chat_default = "roleplay" if _has_card(ctx) else "answer"
     forced_route = str(ctx.get("forced_route") or "").strip().lower()
@@ -423,6 +428,14 @@ def tool_agent_node(state: AgentState) -> dict:
     return tool_agent_adapter.run(ctx, text, imgs, trace)
 
 
+def edit_node(state: AgentState) -> dict:
+    ctx = state["_ctx"]
+    text = state.get("user_text", "")
+    images = state.get("images", [])
+    trace = state.get("trace", []) + ["📝 编辑 Agent 执行中…"]
+    return edit_agent.run(ctx, text, images, trace)
+
+
 def answer_node(state: AgentState) -> dict:
     ctx = state["_ctx"]
     run_trace.emit(ctx, "agent.started", agent="answer")
@@ -482,6 +495,23 @@ def roleplay_node(state: AgentState) -> dict:
         run_trace.emit(
             ctx, "worldbook.resolved", injected=bool(wb), content=wb or "",
             selected_indices=ctx.get("_selected_worldbook_indices") or [],
+            keyword_indices=ctx.get("_keyword_worldbook_indices") or [],
+            character_names=ctx.get("_worldbook_character_names") or [],
+        )
+        first_story_reply = not any(
+            item.get("role") == "user" and str(item.get("content") or "").strip()
+            for item in (ctx.get("history") or [])
+        )
+        ctx["persona"] = _resolve_personas(
+            ctx, text, opening_only=first_story_reply,
+            worldbook_names=ctx.get("_worldbook_character_names") or [],
+            fallback_query=_recent_character_context(ctx),
+        )
+        run_trace.emit(
+            ctx, "character_cards.resolved",
+            opening_only=first_story_reply,
+            selected=ctx.get("_selected_persona_names") or [],
+            injected=bool(ctx.get("persona")),
         )
         # 能动性子图·准备：算 turn/读好感度/state 注入块（无卡或无 output_dir → deps=None 静默跳过）
         deps, turn, affinity, st_block = _agency_prelude(ctx, text)
@@ -559,8 +589,12 @@ def roleplay_node(state: AgentState) -> dict:
             if getattr(deps, "renderer", None) is not None or ctx.get("comfy_illustrate"):
                 from app.services import image_prompt_extract, worldbook_store
                 visual_query = (agent_context.history_text(ctx)[-2000:] + "\n" + text).strip()
-                visual_profiles = worldbook_store.repo_visual_profiles(
-                    ctx.get("output_dir") or "", repo_id, visual_query,
+                visual_profiles = (
+                    _card_visual_profiles(ctx, visual_query)
+                    if ctx.get("appearance_source") == "character_card"
+                    else worldbook_store.repo_visual_profiles(
+                        ctx.get("output_dir") or "", repo_id, visual_query,
+                    )
                 )
                 ctx["_illustration_visual_profiles"] = visual_profiles
                 base += image_prompt_extract.build_inline_plan_instruction(
@@ -886,8 +920,15 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
         local_scene = scene_classify.infer_scene(
             "\n".join((user_text, visible_story)),
         )
+        from app.services import scene_illustration
         local_scene_fallback = (
             not illustration_plan and local_scene in ("nsfw", "climax")
+        )
+        (encounter_anchor, encounter_narrative, encounter_actors,
+         encounter_facts) = scene_illustration.encounter_illustration_context(clean)
+        character_encounter = bool(
+            not illustration_plan and encounter_anchor
+            and (deps.renderer is not None or ctx.get("comfy_illustrate"))
         )
         first_story_reply = not any(
             item.get("role") == "user" and str(item.get("content") or "").strip()
@@ -896,7 +937,7 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
         at_climax = bool(illustration_plan) or (
             bool(visible_story) and (
                 lost or scene in ("nsfw", "climax")
-                or local_scene_fallback or first_story_reply
+                or local_scene_fallback or first_story_reply or character_encounter
             )
         )
         prompt_override, profile_prompt, motion, actors = "", "", 0, []
@@ -927,8 +968,11 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
             actors = [card_name] if card_name else []
         elif (deps.renderer is not None or ctx.get("comfy_illustrate")) and at_climax:
             prompt_override, motion, actors = _build_image_prompt(
-                ctx, paragraph=visible_story, appearance=ctx.get("persona") or "",
+                ctx, paragraph=encounter_narrative if character_encounter else visible_story,
+                appearance=_illustration_appearance(ctx),
                 wardrobe=wardrobe, locale=locale)
+            if character_encounter:
+                actors = encounter_actors
         # comfy_illustrate：不同步 render，把 prompt + motion + actors 作为出图请求返回，
         # 前端据 motion 智能选图/视频、据 actors 按角色选 LoRA/底图，走异步 ComfyUI 闭环。
         if ctx.get("comfy_illustrate"):
@@ -939,35 +983,40 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
             request_prompt = prompt_override.strip()
             prompt_source = "extracted"
             if at_climax and not request_prompt:
-                from app.services import scene_illustration
                 request_prompt = scene_illustration.build_scene_request(
-                    paragraph=visible_story,
-                    appearance=ctx.get("persona") or "",
+                    paragraph=encounter_narrative if character_encounter else visible_story,
+                    appearance=_illustration_appearance(ctx),
                     wardrobe=wardrobe,
                     locale=locale,
                     actors=request_actors,
                 ).prompt
                 prompt_source = "fallback"
             fallback_anchor = ""
-            if visible_story and (local_scene_fallback or first_story_reply) and not illustration_plan:
-                from app.services import scene_illustration
+            if character_encounter:
+                fallback_anchor = encounter_anchor
+            elif visible_story and (local_scene_fallback or first_story_reply) and not illustration_plan:
                 fallback_anchor = scene_illustration.fallback_illustration_anchor(clean)
             requested_anchor = illustration_plan.get("anchor", "") or fallback_anchor
-            from app.services import scene_illustration
             scene_spec = {
-                "narrative": scene_illustration.illustration_scene_excerpt(
-                    visible_story, requested_anchor,
+                "narrative": encounter_narrative if character_encounter else (
+                    scene_illustration.illustration_scene_excerpt(
+                        visible_story, requested_anchor,
+                    )
                 ),
                 "draft_prompt": request_prompt,
-                "appearance": (
-                    ctx.get("_illustration_visual_profiles") or ctx.get("persona") or ""
-                ).strip(),
+                "appearance": _illustration_appearance(ctx),
                 "wardrobe": wardrobe,
                 "locale": locale,
                 "actors": request_actors,
                 "rating": image_rating,
-                "aspect_ratio": illustration_plan.get("aspect_ratio", "2:3"),
+                "aspect_ratio": illustration_plan.get("aspect_ratio") or (
+                    "4:3" if character_encounter else "2:3"
+                ),
             }
+            if ctx.get("appearance_source") in {"worldbook", "character_card"}:
+                scene_spec["appearance_source"] = ctx.get("appearance_source")
+            if character_encounter:
+                scene_spec["encounter"] = encounter_facts
             if illustration_plan.get("art_direction"):
                 scene_spec["art_direction"] = illustration_plan["art_direction"]
             from app.services import image_prompt_profiles
@@ -986,7 +1035,9 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
                 {"prompt": request_prompt, "motion": motion, "actors": request_actors,
                  "anchor": requested_anchor, "scene_spec": scene_spec,
                  "allow_anchor_fallback": (
-                     bool(visible_story) and (local_scene_fallback or first_story_reply)
+                     bool(visible_story) and (
+                         local_scene_fallback or first_story_reply or character_encounter
+                     )
                  ) and not illustration_plan}
                 if at_climax and (request_prompt or scene_spec["narrative"]) else {}
             )
@@ -996,6 +1047,7 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
                 status="emitted" if illustrate_req else "skipped",
                 reason=("main_profile" if profile_prompt and illustrate_req else
                         "main_plan" if illustration_plan and illustrate_req else
+                        "character_encounter" if character_encounter and illustrate_req else
                         "local_scene_fallback" if local_scene_fallback and illustrate_req else
                         "first_story_reply" if first_story_reply and illustrate_req else
                         prompt_source if illustrate_req else
@@ -1007,11 +1059,12 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
             )
             return clean, [], illustrate_req
         illo = roleplay_agency.maybe_illustrate(
-            deps, paragraph=clean, appearance=ctx.get("persona") or "",
+            deps, paragraph=clean, appearance=_illustration_appearance(ctx),
             wardrobe=wardrobe, locale=locale,
             actors=actors or ([card_name] if card_name else []), before=before, after=after,
             turn=turn, cadence=0, explicit=bool(illustration_plan), lost=lost,
-            scene=scene, prompt_override=prompt_override)
+            scene=scene, prompt_override=prompt_override,
+            character_encounter=character_encounter)
         if illo:
             rec = {"id": f"illo-{repo_id}-{turn}", "url": illo["url"], "caption": illo["caption"]}
             return clean, [rec], {}
@@ -1261,6 +1314,7 @@ def _build_graph():
     g.add_node("analyze", analyze_node)
     g.add_node("inspire", inspire_node)
     g.add_node("tool_agent", tool_agent_node)
+    g.add_node("edit", edit_node)
     g.add_node("answer", answer_node)
     g.add_node("roleplay", roleplay_node)
     g.add_node("clarify", clarify_node)
@@ -1270,9 +1324,9 @@ def _build_graph():
                             {"generate": "generate", "video": "video", "img2img": "img2img",
                              "analyze": "analyze", "inspire": "inspire",
                              "tool_agent": "tool_agent", "answer": "answer",
-                             "roleplay": "roleplay", "clarify": "clarify"})
+                             "edit": "edit", "roleplay": "roleplay", "clarify": "clarify"})
     # 单专家任务：干完直接 END，不回 supervisor 二次判断（慢中转下省一次往返）
-    for n in ("generate", "video", "img2img", "analyze", "inspire", "tool_agent", "answer", "roleplay", "clarify"):
+    for n in ("generate", "video", "img2img", "analyze", "inspire", "tool_agent", "edit", "answer", "roleplay", "clarify"):
         g.add_edge(n, END)
     return g.compile()
 
@@ -1320,20 +1374,86 @@ def _render_user_persona(ctx: dict) -> str:
     return head + ("\n" + desc if desc else "")
 
 
-def _card_source(ctx: dict) -> tuple[str, str]:
+def _bound_card_names(ctx: dict) -> list[str]:
+    names = [str(name).strip() for name in (ctx.get("card_names") or []) if str(name).strip()]
+    opening = str(ctx.get("opening_card_name") or ctx.get("card_name") or "").strip()
+    if opening and opening not in names:
+        names.insert(0, opening)
+    return list(dict.fromkeys(names))
+
+
+_CHARACTER_DEPARTURE = re.compile(
+    r"离开|离场|退出|告辞|走远|远去|消失|不在|已经走了|已走|返回(?:自己的|原来的)?(?:房间|住处|领地)",
+)
+_CHARACTER_RETURN = re.compile(r"回来|回到|返回现场|重新出现|进入|走进|来到|抵达|仍在|还在|留下")
+_NEGATED_DEPARTURE = re.compile(r"没有离开|并未离开|未离开|不曾离开|没有走|并未走")
+
+
+def _recent_character_context(ctx: dict) -> str:
+    """角色回退只看最近一条 AI 剧情，避免更早楼层角色持续滞留。"""
+    for item in reversed(ctx.get("history") or []):
+        if item.get("role") != "assistant":
+            continue
+        content = str(item.get("content") or "").strip()
+        if content:
+            return content[-2000:]
+    return ""
+
+
+def _mentioned_bound_names(names: list[str], text: str) -> list[str]:
+    """角色名有包含关系时优先最长实体；独立出现的短名仍保留。"""
+    spans: list[tuple[int, int, str]] = []
+    for name in names:
+        start = 0
+        while start < len(text):
+            index = text.find(name, start)
+            if index < 0:
+                break
+            spans.append((index, index + len(name), name))
+            start = index + len(name)
+    accepted: list[tuple[int, int, str]] = []
+    for span in sorted(spans, key=lambda item: (-(item[1] - item[0]), item[0])):
+        if any(span[0] < other[1] and other[0] < span[1] for other in accepted):
+            continue
+        accepted.append(span)
+    matched = {name for _start, _end, name in accepted}
+    return [name for name in names if name in matched]
+
+
+def _active_fallback_names(names: list[str], text: str) -> list[str]:
+    """从最近剧情按角色最后一次出现的分句排除明确离场者。"""
+    selected: list[str] = []
+    for name in _mentioned_bound_names(names, text):
+        index = text.rfind(name)
+        if index < 0:
+            continue
+        tail = text[index + len(name):]
+        clause = re.split(r"[，,。！？!?；;\n]", tail, maxsplit=1)[0][:80]
+        departure = _CHARACTER_DEPARTURE.search(clause)
+        returned = _CHARACTER_RETURN.search(clause)
+        negated = _NEGATED_DEPARTURE.search(clause)
+        if departure and not negated and (not returned or returned.start() < departure.start()):
+            continue
+        selected.append(name)
+    return selected
+
+
+def _card_source(ctx: dict, selected_name: str = "") -> tuple[str, str]:
     """作品用卡/世界书/正则的读取 base：**快照优先**。
 
     新建作品时卡已快照进作品文件夹（<outputDir>/<卡名>/角色卡/）；命中则运行时读快照——
     改源库的卡不回灌已建作品（快照隔离）。无快照（存量作品/未快照）→ 回退源库 characterDir。
     返回 (base, card_name)；两值任一空表示无卡，调用方各自处理。
     """
-    card_name = ctx.get("card_name") or ""
+    card_name = selected_name or ctx.get("opening_card_name") or ctx.get("card_name") or ""
     character_dir = ctx.get("character_dir") or ""
     if not card_name:
         return character_dir, card_name
     try:
         from app.services import character_store
-        snap = character_store.work_card_base(ctx.get("output_dir") or "", card_name)
+        snap = character_store.repo_card_base(
+            ctx.get("output_dir") or "", ctx.get("repo_id") or "", card_name,
+        )
         if snap:
             return snap, card_name
     except Exception:  # noqa: BLE001
@@ -1377,12 +1497,84 @@ def _resolve_persona(character_dir: str, card_name: str) -> str:
         return ""
 
 
+def _resolve_personas(
+    ctx: dict, query: str = "", *, opening_only: bool = False, fallback_query: str = "",
+    worldbook_names: list[str] | None = None,
+) -> str:
+    """只注入本轮出场角色的非空 description；首轮固定为开场卡。"""
+    names = _bound_card_names(ctx)
+    if opening_only:
+        opening = str(ctx.get("opening_card_name") or ctx.get("card_name") or "").strip()
+        selected = [opening] if opening in names else []
+    else:
+        explicit = set(worldbook_names or [])
+        direct = set(_mentioned_bound_names(names, query))
+        selected = [name for name in names if name in direct or name in explicit]
+        if not selected and fallback_query:
+            selected = _active_fallback_names(names, fallback_query)
+
+    profiles: list[str] = []
+    injected_names: list[str] = []
+    try:
+        from app.services import character_store
+        for name in selected:
+            base, card_name = _card_source(ctx, name)
+            card = character_store.read_card(base, card_name) if base and card_name else None
+            description = str((card or {}).get("description") or "").strip()
+            if not description:
+                continue
+            profiles.append(f"【角色：{card_name}】\n{description}")
+            injected_names.append(card_name)
+    except Exception:  # noqa: BLE001
+        profiles = []
+        injected_names = []
+    ctx["_selected_persona_names"] = injected_names
+    if not profiles:
+        return ""
+    selection = (
+        "【本轮角色卡描述】只按角色名使用下列实际出场角色的描述；"
+        "不得把一名角色的外貌、经历或行为特征转移给另一名角色。"
+    )
+    return selection + "\n\n" + "\n\n".join(profiles)
+
+
+def _card_visual_profiles(ctx: dict, query: str) -> str:
+    """角色卡模式的生图外貌真源；只读取本轮出现的绑定卡，未命中时回退开场卡。"""
+    names = _bound_card_names(ctx)
+    selected = [name for name in names if name in query]
+    if not selected and names:
+        selected = [str(ctx.get("opening_card_name") or ctx.get("card_name") or names[0])]
+    profiles: list[str] = []
+    try:
+        from app.services import character_store
+        for name in selected:
+            base, card_name = _card_source(ctx, name)
+            card = character_store.read_card(base, card_name) if base and card_name else None
+            if not card:
+                continue
+            description = str(card.get("description") or "").strip()
+            if description:
+                profiles.append(f"{card_name}：{description}")
+    except Exception:  # noqa: BLE001
+        return ""
+    return "\n".join(profiles)
+
+
+def _illustration_appearance(ctx: dict) -> str:
+    selected = str(ctx.get("_illustration_visual_profiles") or "").strip()
+    if ctx.get("appearance_source") in {"worldbook", "character_card"}:
+        return selected
+    return selected or str(ctx.get("persona") or "").strip()
+
+
 def _resolve_worldbook(ctx: dict, query: str) -> str:
     """卡内嵌世界书：constant 常驻 + 非常驻按当前上下文语义检索，组装注入文本。
 
     查询用「最近历史 + 本轮输入」以贴合当前剧情。无卡/无书/读不到 → 空串。
     """
     ctx["_selected_worldbook_indices"] = []
+    ctx["_keyword_worldbook_indices"] = []
+    ctx["_worldbook_character_names"] = []
     try:
         from app.services import worldbook
         from app.services.rag_backend import EmbedConfig
@@ -1411,6 +1603,19 @@ def _resolve_worldbook(ctx: dict, query: str) -> str:
         scan = (agent_context.history_text(ctx) + "\n" + query).strip()
         selection = worldbook.assemble_selection(ctx.get("repo_id", ""), entries, scan, cfg)
         ctx["_selected_worldbook_indices"] = selection.indices
+        current_keyword_indices = set(worldbook.keyword_match_indices(entries, query))
+        selected_current_indices = current_keyword_indices.intersection(selection.indices)
+        ctx["_keyword_worldbook_indices"] = [
+            index for index in selection.indices if index in selected_current_indices
+        ]
+        bound_names = _bound_card_names(ctx)
+        activated_text = "\n".join(
+            entry.content + "\n" + entry.comment + "\n" + "\n".join(entry.keys)
+            for position, entry in enumerate(entries)
+            if (entry.source_index if entry.source_index >= 0 else position)
+            in selected_current_indices
+        )
+        ctx["_worldbook_character_names"] = _mentioned_bound_names(bound_names, activated_text)
         return selection.text
     except Exception:  # noqa: BLE001
         return ""
@@ -1420,11 +1625,12 @@ def _worldbook_sources(ctx: dict) -> list[dict]:
     """读取卡快照/源卡与绑定独立书，仅供首次建立小仓库世界书快照。"""
     from app.services import character_store, worldbook_store
     books: list[dict] = []
-    character_dir, card_name = _card_source(ctx)
-    if character_dir and card_name:
-        embedded = character_store.read_worldbook(character_dir, card_name)
-        if isinstance(embedded, dict):
-            books.append(embedded)
+    for name in _bound_card_names(ctx):
+        character_dir, card_name = _card_source(ctx, name)
+        if character_dir and card_name:
+            embedded = character_store.read_worldbook(character_dir, card_name)
+            if isinstance(embedded, dict):
+                books.append(embedded)
     wb_dir = ctx.get("worldbook_dir") or ""
     wb_name = ctx.get("worldbook_name") or ""
     if wb_dir and not wb_name and card_name:
@@ -1526,9 +1732,11 @@ def _resolve_regex_scripts(ctx: dict) -> list:
             for raw in preset_store.read_regex(preset_dir, preset_name):
                 scripts.append(regex_engine.from_st_dict(raw))
         # ③ 卡内嵌正则（随卡、仅该卡，快照优先回退源库）
-        character_dir, card_name = _card_source(ctx)
-        if character_dir and card_name:
-            from app.services import character_store
+        from app.services import character_store
+        for name in _bound_card_names(ctx):
+            character_dir, card_name = _card_source(ctx, name)
+            if not (character_dir and card_name):
+                continue
             for raw in character_store.read_regex(character_dir, card_name):
                 scripts.append(regex_engine.from_st_dict(raw))
     except Exception:  # noqa: BLE001
@@ -1587,14 +1795,14 @@ def _resolve_preset(
     if not (preset_dir and preset_name):
         return [], None, False, [], []
     try:
-        from app.services import character_store, preset_store
+        from app.services import preset_store
         preset = preset_store.read_preset(preset_dir, preset_name)
         if not preset:
             return [], None, False, [], []
-        card = {}
-        character_dir, card_name = _card_source(ctx)  # 快照优先，回退源库
-        if character_dir and card_name:
-            card = character_store.read_card(character_dir, card_name) or {}
+        selected_names = [
+            str(name).strip() for name in (ctx.get("_selected_persona_names") or [])
+            if str(name).strip()
+        ]
         history = ctx.get("history") or []
         # ST 深度重注入范式：{{lastUserMessage}}=本轮实时输入（未入历史），{{lastCharMessage}}=历史里
         # 最后一条 AI 消息。配套「擦除历史最后一条用户消息 + 在指定深度重注入 {{lastUserMessage}}」越甲。
@@ -1604,11 +1812,11 @@ def _resolve_preset(
                 last_char = (h.get("content") or "").strip()
                 break
         markers = {
-            "char_name": (card.get("name") or "").strip(),
-            "char_description": (card.get("description") or "").strip(),
-            "char_personality": (card.get("personality") or "").strip(),
-            "scenario": (card.get("scenario") or "").strip(),
-            "dialogue_examples": (card.get("mes_example") or "").strip(),
+            "char_name": "、".join(selected_names),
+            "char_description": (ctx.get("persona") or "").strip(),
+            "char_personality": "",
+            "scenario": "",
+            "dialogue_examples": "",
             "worldbook": worldbook_text or "",
             "persona": (ctx.get("user_persona") or "").strip(),
             "user_name": (ctx.get("user_name") or "").strip(),
@@ -1765,11 +1973,11 @@ def stream_multi_agent(context: RunContext) -> Iterator[dict]:
         history_override=context.history_override,
     )
     context.skill_frags = _resolve_skills(context.agent_cfg)
-    _card_base, _card_nm = _card_source(context)  # 快照优先：已建作品读自身快照，回退源库
-    context.persona = _resolve_persona(_card_base, _card_nm)
+    context.persona = ""
     _apply_work_persona(context)  # 作品绑定人设快照优先，回退前端透传
     run_trace.emit(context, "turn.context_ready", history=context.history,
                    history_count=len(context.history), card_name=context.card_name,
+                   card_names=context.card_names,
                    preset_name=context.preset_name, has_mcp=context.has_mcp)
     pending_events = _handle_pending_approval(context)
     if pending_events is not None:

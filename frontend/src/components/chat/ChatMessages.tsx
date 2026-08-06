@@ -315,7 +315,7 @@ export function RouteChoiceCard({
   );
 }
 
-function AssistantMessageBase({ msg, streaming, avatarState = "default", displayRegex, depth, macros, onSendImage, onMaskImage, onRunCommand, onSetCover, onPromptApproval, onRouteChoice, onRegenerate, regenerating = false, onEdit, onDelete, onCreateCheckpoint, onBranch }: { msg: ChatMessage; streaming?: boolean; avatarState?: AssistantAvatarState; displayRegex?: RegexScript[]; depth?: number; macros?: { char: string; user: string }; onSendImage: (url: string) => void; onMaskImage?: (url: string) => void; onRunCommand?: (cmd: string) => void; onSetCover?: (url: string) => void; onPromptApproval?: (approval: PromptApproval, action: "submit" | "change" | "cancel", editedPrompt?: string) => Promise<void>; onRouteChoice?: (choice: RouteChoice, route: AgentRoute) => Promise<void>; onRegenerate?: (messageId: string, slotId?: string) => void; regenerating?: boolean; onEdit?: (id: string, text: string) => void; onDelete?: (id: string) => void; onCreateCheckpoint?: (id: string) => void; onBranch?: (id: string) => void }) {
+function AssistantMessageBase({ msg, streaming, avatarState = "default", portrait, displayRegex, depth, macros, onSendImage, onMaskImage, onRunCommand, onSetCover, onPromptApproval, onRouteChoice, onRegenerate, regenerating = false, onEdit, onDelete, onCreateCheckpoint, onBranch }: { msg: ChatMessage; streaming?: boolean; avatarState?: AssistantAvatarState; portrait?: { name: string; url: string } | null; displayRegex?: RegexScript[]; depth?: number; macros?: { char: string; user: string }; onSendImage: (url: string) => void; onMaskImage?: (url: string) => void; onRunCommand?: (cmd: string) => void; onSetCover?: (url: string) => void; onPromptApproval?: (approval: PromptApproval, action: "submit" | "change" | "cancel", editedPrompt?: string) => Promise<void>; onRouteChoice?: (choice: RouteChoice, route: AgentRoute) => Promise<void>; onRegenerate?: (messageId: string, slotId?: string) => void; regenerating?: boolean; onEdit?: (id: string, text: string) => void; onDelete?: (id: string) => void; onCreateCheckpoint?: (id: string) => void; onBranch?: (id: string) => void }) {
   const [showThinking, setShowThinking] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
@@ -410,7 +410,9 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", display
   return (
     <div className="msg-bot">
       <div className={`bot-avatar bot-avatar-${avatarState}`}>
-        <Bot size={18} />
+        {portrait
+          ? <img src={portrait.url} alt={`${portrait.name}头像`} title={portrait.name} />
+          : <Bot size={18} />}
       </div>
       <div className="bot-content">
         {!streaming && (onEdit || onCreateCheckpoint || onBranch || onDelete) && (

@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   buildHash, calcSize, ASPECTS, IMAGE_QUALITIES, RES_TIERS, supportsImageQuality,
   normalizeCustomDimension, resolveHomeWorkspace, resolveImageSize,
-  resolveActivityChatTarget,
+  resolveActivityChatTarget, WORK_MODES, workspaceModeForWire,
 } from "./viewRouting";
 import type { Repo } from "../stores/repos";
 
@@ -10,6 +10,16 @@ describe("home workspace", () => {
   it.each(["story", "generate", "code"] as const)("%s mode binds to the selected work chat", (mode) => {
     expect(resolveHomeWorkspace(mode, true)).toBe("chat");
     expect(resolveHomeWorkspace(mode, false)).toBe("need-work");
+  });
+});
+
+describe("edit mode", () => {
+  it("uses the edit label while preserving the compatible code id", () => {
+    expect(WORK_MODES.find((mode) => mode.id === "code")).toMatchObject({
+      label: "编辑模式", hint: "角色卡、作品脚本与排错",
+    });
+    expect(workspaceModeForWire("code")).toBe("edit");
+    expect(workspaceModeForWire("story")).toBe("story");
   });
 });
 

@@ -24,8 +24,14 @@ export type WorkMode = "story" | "generate" | "code";
 export const WORK_MODES: { id: WorkMode; label: string; hint: string }[] = [
   { id: "story", label: "剧情模式", hint: "推进剧情，高潮点自动生成并内嵌" },
   { id: "generate", label: "多元数据生成", hint: "调试格式模版的试验台" },
-  { id: "code", label: "编程模式", hint: "脚本/插件功能" },
+  { id: "code", label: "编辑模式", hint: "角色卡、作品脚本与排错" },
 ];
+
+export type WorkspaceMode = "story" | "generate" | "edit";
+
+export function workspaceModeForWire(mode: WorkMode): WorkspaceMode {
+  return mode === "code" ? "edit" : mode;
+}
 
 export function isWorkMode(value: string): value is WorkMode {
   return WORK_MODES.some((m) => m.id === value);

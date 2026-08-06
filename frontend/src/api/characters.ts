@@ -1,4 +1,4 @@
-import { apiGet, apiPost, apiUrl } from "./client";
+import { apiGet, apiPatch, apiPost, apiUrl } from "./client";
 
 export interface CardSummary {
   name: string;
@@ -42,6 +42,15 @@ export function snapshotToWork(
       character_dir: characterDir, card_name: cardName, output_dir: outputDir,
       user_name: persona?.name || "", user_persona: persona?.content || "",
     },
+  );
+}
+
+export function snapshotCardsToRepo(
+  characterDir: string, cardNames: string[], outputDir: string, repoId: string,
+) {
+  return apiPost<{ ok: boolean; created: string[]; existing: string[]; missing: string[] }>(
+    "/characters/snapshot-to-repo",
+    { character_dir: characterDir, card_names: cardNames, output_dir: outputDir, repo_id: repoId },
   );
 }
 
@@ -93,6 +102,51 @@ export function characterDetail(base: string, name: string) {
   );
 }
 
+export interface CharacterEditableFields {
+  description: string;
+  first_mes: string;
+  creator_notes: string;
+}
+
+export function updateCharacter(base: string, name: string, fields: CharacterEditableFields) {
+  return apiPatch<Record<string, unknown>>("/characters/detail", { base, name, ...fields });
+}
+
+export interface CharacterMedia {
+  base: string;
+  folder: string;
+  has_avatar: boolean;
+  expressions: { name: string; file: string }[];
+}
+
+export function characterMedia(base: string, name: string, outputDir = "", repoId = "") {
+  const q = new URLSearchParams({ base, name });
+  if (outputDir) q.set("output_dir", outputDir);
+  if (repoId) q.set("repo_id", repoId);
+  return apiGet<CharacterMedia>(
+    `/characters/media?${q.toString()}`,
+  );
+}
+
+async function uploadCardPng(path: string, base: string, name: string, file: File, expression = "") {
+  const fd = new FormData();
+  fd.append("base", base);
+  fd.append("name", name);
+  fd.append("file", file);
+  if (expression) fd.append("expression", expression);
+  const resp = await fetch(apiUrl(path), { method: "POST", body: fd });
+  if (!resp.ok) throw new Error(await extractDetail(resp));
+  return resp.json();
+}
+
+export function uploadCharacterAvatar(base: string, name: string, file: File) {
+  return uploadCardPng("/characters/avatar", base, name, file);
+}
+
+export function uploadCharacterExpression(base: string, name: string, expression: string, file: File) {
+  return uploadCardPng("/characters/expression", base, name, file, expression);
+}
+
 // 该卡内嵌正则（regex.json，ST 格式数组）；显示层脚本渲染时用
 export function characterRegex(base: string, name: string) {
   return apiGet<{ items: Record<string, unknown>[] }>(
@@ -103,6 +157,10 @@ export function characterRegex(base: string, name: string) {
 // PNG 卡原图 URL（走 local-view 读盘），无原图返回空
 export function avatarUrl(base: string, folder: string): string {
   return apiUrl(`/local-view?path=${encodeURIComponent(`${base}\\${folder}\\avatar.png`)}`);
+}
+
+export function expressionUrl(base: string, folder: string, file: string): string {
+  return apiUrl(`/local-view?path=${encodeURIComponent(`${base}\\${folder}\\expressions\\${file}`)}`);
 }
 
 async function extractDetail(resp: Response): Promise<string> {
