@@ -209,7 +209,7 @@ cd ..
 
 # 固定 Runtime 目标矩阵与定向测试
 ./backend/.venv/Scripts/python.exe scripts/runtime_release.py matrix
-cd backend && ./.venv/Scripts/python.exe -m pytest -q tests/test_runtime_release.py tests/test_runtime_config.py
+cd backend && ./.venv/Scripts/python.exe -m pytest -q tests/test_runtime_entry.py tests/test_runtime_release.py tests/test_portable_release.py tests/test_unix_portable_release.py
 
 # RAG 固定真实评估（报告写入被忽略的 data）
 cd backend
@@ -227,13 +227,17 @@ cd backend
 
 ## 发布架构
 
-当前只支持**源码上传**。`scripts/release_preflight.py` 是上传边界的单一检查入口：它检查 Git 已追踪文件和未忽略的未追踪文件，阻断密钥、私钥、运行数据库、模型权重、超大文件及误纳入的用户目录，同时验证 `styles.css` 引用的主题资产存在且未被忽略。脚本只读，不暂存、不提交、不推送。
+源码上传与终端用户 Runtime 是两条独立发布链。`scripts/release_preflight.py` 是源码上传边界的单一检查入口：它检查 Git 已追踪文件和未忽略的未追踪文件，阻断密钥、私钥、运行数据库、模型权重、超大文件及误纳入的用户目录，同时验证 `styles.css` 引用的主题资产存在且未被忽略。脚本只读，不暂存、不提交、不推送。
 
 源码必须包含 `backend/app`、`frontend/src`、测试、依赖清单、`frontend/public` 主题资产和 `comfyui-ext` 扩展源码。源码禁止包含 `backend/data`、`userdata`、未清洗的 `presets`、`docs/memory`、会话、角色卡、世界书、生成图片、RAG 索引、模型/LoRA 权重、日志、环境目录和构建产物。唯一允许的预设目录是由 `build_resource_pack.py` 生成的 `presets/Demiurge-presets-regex`。详细清单见 `docs/RELEASE.md`。
 
 归档只能基于用户确认后的提交执行 `git archive HEAD`，禁止直接压缩工作目录。上传前必须逐项审计 `git status`；当前工作区存在大量历史改动时，禁止用未经审计的 `git add -A`。
 
-ComfyUI-Wrapping-paper 曾有 Standard/Full RAG Runtime、离线 vendor 和多平台便携包，但对应脚本、目标矩阵与 Actions 尚未迁入 Demiurge。当前不得宣称存在便携 Runtime 发布；若以后恢复，必须作为独立发布模块重新建立依赖闭包、平台矩阵、SHA256 清单和真实安装测试。模型权重与用户数据仍不得随任何 Edition 分发。
+`scripts/runtime_release.py` 是固定 Runtime 的单一构建 Implementation，`release/runtime-targets.json` 是平台、架构、Python 与 Torch 的唯一矩阵。终端用户仅发布 Full RAG，包含 Python、基础后端依赖、已构建前端、Chroma/BM25，以及平台对应的 Torch、Transformers 与 SentenceTransformers 依赖层；不包含 Embedding/Reranker 权重、Hugging Face 缓存、ComfyUI、密钥、用户数据或 RAG 索引。
+
+Runtime 采用 Base/Application/RAG 分层清单，每层逐文件归档并记录 SHA256，超过 GitHub 单资产限制时按 1.9 GB 分片。`runtime_entry.py` 只负责组装层路径、设置可写数据目录、执行模块自检并在 8010 同源服务已构建前端；ComfyUI 必须使用独立 Python，禁止回退应用 Runtime。Windows `portable_release.py` 组装 `start-dev.bat`/`stop-dev.bat`、分层 Runtime 与 MinGit；启动脚本用 PID 文件绑定当前包的 Runtime，停止脚本必须核验进程路径，禁止仅按端口误杀。macOS/Linux `unix_portable_release.py` 生成可执行启动脚本。终端用户包必须做到解压即用，不运行 pip、npm，也不依赖系统 Python/Node。
+
+`.github/workflows/runtime-release.yml` 在版本标签上执行双端门禁、三目标 Full RAG 矩阵构建、真实冻结 Runtime 自检和 Release 上传；`portable-release.yml` 只消费已校验分层资产组装 `00-USER-DOWNLOAD` 包。任何新平台、Torch 或 Python 版本只改目标矩阵；新增运行依赖先确认 Base 或 RAG 层属主，禁止把依赖同时写进工作流和多个脚本。
 
 ### Embedding Backend Seam
 

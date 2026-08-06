@@ -1,0 +1,146 @@
+name: runtime-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "发布版本，例如 v0.14"
+        required: true
+        type: string
+  push:
+    tags: ["v*"]
+
+permissions:
+  actions: write
+  contents: write
+
+env:
+  PYTHONUTF8: "1"
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13.11"
+      - id: matrix
+        shell: bash
+        run: echo "matrix=$(python scripts/runtime_release.py matrix)" >> "$GITHUB_OUTPUT"
+      - id: version
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+        run: echo "version=${INPUT_VERSION:-$REF_NAME}" >> "$GITHUB_OUTPUT"
+
+  quality:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13.11"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: 后端门禁
+        run: |
+          python -m pip install -r requirements-dev.txt
+          ruff check app
+          lint-imports
+          python -m mypy @mypy_files.txt
+          python scripts/check_hardcode.py
+          python -m pytest -q
+      - name: 前端门禁
+        working-directory: frontend
+        run: |
+          npm ci
+          npm test
+          npm run build
+
+  vendor-closure:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13.11"
+      - name: 发布闭包门禁
+        run: python scripts/release_preflight.py
+
+  build:
+    needs: [plan, quality, vendor-closure]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-reranker.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: 构建固定 Runtime
+        shell: pwsh
+        run: >-
+          python scripts/runtime_release.py build
+          --target "${{ matrix.target }}"
+          --version "${{ needs.plan.outputs.version }}"
+          --output-dir "release-assets"
+          --work-dir ".runtime-work/${{ matrix.target }}"
+          --install-deps
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: 组装 Windows 便携支撑包
+        run: |
+          sudo apt-get update && sudo apt-get install -y p7zip-full
+          python scripts/portable_release.py build --target windows-x64-full-rag --version "${{ needs.plan.outputs.version }}" --assets-dir release-assets --output-dir release-assets --work-dir .portable-work
+      - name: 附加分片合并工具
+        run: cp scripts/join-runtime.ps1 scripts/join-runtime.sh release-assets/
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          body_path: RELEASE_NOTES.md
+          fail_on_unmatched_files: true
+          overwrite_files: true
+      - name: 触发全平台用户一键包组装
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh workflow run portable-release.yml
+          --ref "${{ github.ref_name }}"
+          -f version="${{ needs.plan.outputs.version }}"

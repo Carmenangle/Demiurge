@@ -56,6 +56,12 @@ Thumbs.db
 # === 本地发布产物 ===
 .source-work/
 release-output/
+release-assets/
+user-assets/
+.runtime-work*/
+.launcher-work*/
+.portable-work*/
+.portable-smoke*/
 *.zip
 *.7z
 *.tar.gz

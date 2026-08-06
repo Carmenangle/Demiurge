@@ -2,6 +2,17 @@
 
 Demiurge 是面向本地 ComfyUI 与 OpenAI 兼容模型的多智能体创作工作台。项目包含剧情会话、角色卡与世界书、RAG、状态表、工作流搭建、自动插画、模型和节点管理，以及本地文本工具。
 
+## 用户下载
+
+GitHub Release 中名称带 `00-USER-DOWNLOAD` 的文件是终端用户包，解压即可运行，无需安装 Python、Node.js、pip 或 npm。
+
+- Windows x64：运行 `start-dev.bat`，关闭时运行 `stop-dev.bat`。
+- macOS ARM64：运行 `Start-Demiurge.command`。
+- Linux x64：运行 `start-demiurge.sh`。
+- 仅发布 Full RAG 版，内含本地 Embedding/Reranker 所需的 Torch、Transformers 与 SentenceTransformers 运行依赖；模型权重仍由用户自行下载。
+
+ComfyUI 是独立程序，必须使用自己的 Python 环境；首次使用时在设置中选择其目录。
+
 ## 本地启动
 
 要求：Windows、Python 3.11、Node.js/npm，以及独立安装的 ComfyUI。
@@ -21,7 +32,7 @@ Demiurge 是面向本地 ComfyUI 与 OpenAI 兼容模型的多智能体创作工
 - `userdata/`：角色卡、世界书、会话、生成图片和作品仓库。
 - `presets/`：默认排除用户导入的第三方预设及私有提示词；仅提交 `presets/Demiurge-presets-regex/` 中经脚本清洗的发布资源包。
 - `docs/memory/`：本机 Agent 记忆、调试路径和测试记录。
-- Python/Node 依赖、构建产物、ComfyUI 模型权重与缓存。
+- 源码仓库不包含 Python/Node 安装目录、Runtime 构建产物、ComfyUI 模型权重与缓存。
 
 `frontend/public/` 是界面运行所需的主题资产，`comfyui-ext/` 是配套 ComfyUI 扩展源码，两者属于项目源码。
 

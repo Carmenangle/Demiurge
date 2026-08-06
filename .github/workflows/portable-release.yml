@@ -1,0 +1,54 @@
+name: portable-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release tag
+        required: true
+        default: v0.15
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - windows-x64-full-rag
+          - macos-arm64-full-rag
+          - linux-x64-full-rag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 下载已验证的本平台分层资产
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "${{ inputs.version }}" --pattern "*${{ matrix.target }}*" --dir release-assets
+      - name: 生成用户一键包
+        run: |
+          if [[ "${{ matrix.target }}" == "windows-x64-full-rag" || "${{ matrix.target }}" == "linux-x64-full-rag" ]] && ! command -v 7z >/dev/null; then
+            sudo apt-get update && sudo apt-get install -y p7zip-full
+          fi
+          if [[ "${{ matrix.target }}" == windows-* ]]; then
+            python scripts/portable_release.py build --target "${{ matrix.target }}" --version "${{ inputs.version }}" --assets-dir release-assets --output-dir user-assets --work-dir .portable-work
+          else
+            python scripts/unix_portable_release.py --target "${{ matrix.target }}" --version "${{ inputs.version }}" --assets-dir release-assets --output-dir user-assets --work-dir .portable-work
+          fi
+      - name: 上传一键包
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ inputs.version }}" user-assets/* --clobber
+
+  notes:
+    needs: [package]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 更新下载说明
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "${{ inputs.version }}" --notes-file RELEASE_NOTES.md
