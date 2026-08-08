@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Pencil, RefreshCw, Trash2 } from "lucide-react";
+import { Pencil, RefreshCw, Sparkles, Trash2 } from "lucide-react";
 import { PageShell, StateHint } from "../../components/layout/PageShell";
 import { ConfirmModal } from "../../components/Modal";
 import { resolvedEmbedModel, useSettings } from "../../stores/settings";
@@ -7,6 +7,8 @@ import {
   listLoras, syncLoras, getSyncProgress, saveLoraTriggers, deleteLoraTriggers,
   type LoraTriggerItem,
 } from "../../api/loras";
+import { distillLoraSuggestedPrompt } from "../../lib/workflowLoraData";
+import { splitPromptTags } from "../../lib/chatGeneration";
 
 // 来源列文案：让用户一眼看出哪些是自动提的、哪些是自己改过的（改过的同步不会被覆盖）
 const SOURCE_TEXT: Record<string, string> = {
@@ -15,7 +17,7 @@ const SOURCE_TEXT: Record<string, string> = {
   manual: "手动填写",
 };
 
-function LoraDataModal({ item, onConfirm, onCancel }: {
+export function LoraDataModal({ item, onConfirm, onCancel }: {
   item: LoraTriggerItem;
   onConfirm: (triggers: string, suggestedWeight: number, suggestedPrompt: string) => void;
   onCancel: () => void;
@@ -23,6 +25,7 @@ function LoraDataModal({ item, onConfirm, onCancel }: {
   const [triggers, setTriggers] = useState(item.triggers.join(", "));
   const [weight, setWeight] = useState(item.suggested_weight ?? 0.8);
   const [suggestedPrompt, setSuggestedPrompt] = useState(item.suggested_prompt || "");
+  const [distillStatus, setDistillStatus] = useState("");
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => event.key === "Escape" && onCancel();
     window.addEventListener("keydown", onKey);
@@ -47,6 +50,20 @@ function LoraDataModal({ item, onConfirm, onCancel }: {
             style={{ width: "100%", minHeight: 280, resize: "vertical", boxSizing: "border-box" }}
             onChange={(event) => setSuggestedPrompt(event.target.value)} />
         </label>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: -4, marginBottom: 12 }}>
+          <button className="btn" type="button" onClick={() => {
+            const triggerTags = splitPromptTags(triggers);
+            const refined = distillLoraSuggestedPrompt(suggestedPrompt, triggerTags);
+            setSuggestedPrompt(refined.join(", "));
+            setDistillStatus(refined.length > 0
+              ? `已提炼 ${refined.length} 个质量标签`
+              : "没有识别到可保留的质量标签");
+          }}>
+            <Sparkles size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />
+            提炼质量/风格/光影/材质/作者标签
+          </button>
+          {distillStatus && <span style={{ color: "var(--text-muted)", fontSize: 12 }}>{distillStatus}</span>}
+        </div>
         <div className="modal-actions">
           <button className="btn" onClick={onCancel}>取消</button>
           <button className="btn primary"
@@ -57,7 +74,7 @@ function LoraDataModal({ item, onConfirm, onCancel }: {
   );
 }
 
-export function LoraTriggersTab({ onBack }: { onBack: () => void }) {
+export function LoraTriggersTab({ onBack }: { onBack?: () => void }) {
   const { settings } = useSettings();
   // 设置里没单独填 models 目录时回退 comfyuiPath/models（对齐 ModelDownload 的回退）
   const modelsDir = settings.modelsDir || (settings.comfyuiPath ? `${settings.comfyuiPath}/models` : "");

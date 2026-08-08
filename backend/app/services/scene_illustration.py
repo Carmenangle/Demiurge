@@ -43,6 +43,25 @@ _FALLBACK_ANCHOR_TERMS = (
     (3, ("匣子", "信物", "徽章")),
     (2, ("光", "影", "火焰", "雷", "鲜血", "长发", "眼眸", "瞳", "衣摆")),
 )
+_STATE_CHANGE_ACTION_TERMS = (
+    "写下", "书写", "下令", "下达", "对折", "折叠", "化作", "变成",
+    "飞出", "穿出", "送出", "发送", "掷出", "射出", "消失",
+)
+_STATIC_RESOLUTION_TERMS = (
+    "靠回", "靠着", "静坐", "沉默", "目光", "凝视", "嘴角", "浅笑", "微笑", "余韵",
+)
+
+
+def _anchor_score(paragraph: str) -> int:
+    visible = image_prompt_extract.restore_jailbreak(paragraph)
+    score = sum(
+        weight for weight, words in _FALLBACK_ANCHOR_TERMS
+        if any(word in visible for word in words)
+    )
+    score += 5 * sum(word in visible for word in _STATE_CHANGE_ACTION_TERMS)
+    if any(word in visible for word in _STATIC_RESOLUTION_TERMS):
+        score -= 3
+    return score
 
 
 @dataclass
@@ -187,12 +206,27 @@ def fallback_illustration_anchor(text: str) -> str:
     candidates = [part.strip() for part in re.split(r"(?:\r?\n){2,}", body) if part.strip()]
     scored: list[tuple[int, int, str]] = []
     for index, paragraph in enumerate(candidates):
-        visible = image_prompt_extract.restore_jailbreak(paragraph)
-        score = sum(weight for weight, words in _FALLBACK_ANCHOR_TERMS
-                    if any(word in visible for word in words))
+        score = _anchor_score(paragraph)
         if score:
             scored.append((score, -index, paragraph))
     return max(scored)[2] if scored else (candidates[0] if candidates else "")
+
+
+def resolve_illustration_anchor(text: str, requested_anchor: str = "") -> str:
+    """只在模型选中静态收束、正文另有状态变化动作时纠正锚点。"""
+    requested = image_prompt_extract.restore_jailbreak(requested_anchor or "").strip()
+    fallback = image_prompt_extract.restore_jailbreak(
+        fallback_illustration_anchor(text),
+    ).strip()
+    if not requested or not fallback:
+        return requested or fallback
+    requested_excerpt = illustration_scene_excerpt(text, requested)
+    fallback_has_action = any(word in fallback for word in _STATE_CHANGE_ACTION_TERMS)
+    requested_has_action = any(word in requested_excerpt for word in _STATE_CHANGE_ACTION_TERMS)
+    requested_is_static = any(word in requested_excerpt for word in _STATIC_RESOLUTION_TERMS)
+    if fallback_has_action and requested_is_static and not requested_has_action:
+        return fallback
+    return requested
 
 
 def illustration_scene_excerpt(text: str, requested_anchor: str = "") -> str:

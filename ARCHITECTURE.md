@@ -15,6 +15,20 @@
 3. **接口即测试面**：纯逻辑（无 I/O）要能被单测。写在服务/lib 里、导出，不要埋进路由体或 React 组件闭包。
 4. **单一属主**：同一份配置/协议/清洗规则只在一处定义，别处引用。
 
+## 架构深化进度（2026-08-07）
+
+1. **工作流抓取事务（已完成）**：`workflowCapture` 统一拥有完整画布载入、单次帧请求、可选 ops、原生 `graphToPrompt` 抓取、来源校验、重试、超时与清理。`WorkflowCard`、`AIBuildView` 共用同一 Interface；卡片不再实现隐藏 iframe 事务。模板工作流是拓扑真源，单节点 iframe 只回传参数；捕获结果必须保留真源全部节点，残缺旧草稿自动回退模板，禁止单节点画布覆盖完整图。
+2. **会话生成生命周期（已完成）**：`workflowGenerationRuntime` 统一拥有 pending 持久化、轮询节奏、连续 `not_found`、恢复检查、超时保留和并发 finalize 双闸。`useChatSession` 只提供媒体落盘与界面反馈 Adapter；前台轮询和刷新恢复不再各写一套收尾顺序。
+3. **剧情回合事务（第一阶段完成）**：`roleplay_turn` 统一拥有主生成 → 状态/插画写回 → 输出正则 → 正文提前发布 → Curator/纪要/表格维护的顺序，并通过公开 Interface 测试。`agent_graph` 保留路由及世界书、角色卡、预设、RAG、表格只读上下文装配；这部分合同复杂且当前稳定，不做机械拆分。后续只有出现跨入口复用或真实顺序故障时再继续深化。
+4. **Agent 调用事务（已完成）**：前端 `AgentInvocation` + `agentInvocationBody` 统一编码即时 SSE 与后台队列的完整上下文；后端 `agent_request_context.from_payload` 统一把 HTTP 请求和队列 payload 转为 `RunContext`。角色卡、世界书、历史、代理、插画和模型字段只映射一次。
+5. **工作流端口编排（已完成）**：`workflow_port_planner` 统一拥有编排提示词、模型调用、JSON 容错、强制编排、模型名校验、LoRA 和色板增强顺序；`ai_text` router 只做请求适配和错误映射。
+6. **会话历史事务（已完成）**：`ConversationHistoryRuntime` 统一拥有编辑、删除、重生成裁剪、检查点恢复、导入重载的状态发布与持久化顺序，保证 React 状态、同步 ref、本地缓存和后端快照不分叉。
+7. **AI 搭建工作区生命周期（已完成）**：`BuildWorkspaceRuntime` 取代浅层 `useBuildSession`，统一拥有会话代际、最近会话、自动保存资格和后台终态任务认领；任务仅在会话成功回载后标记完成，临时失败可以重试。
+8. **聊天与表格展示编排（已完成）**：`useChatAgentQueue`、`useChatPresentationAssets`、`useChatUnreadTracker`、`useChatTransfer` 和 `useTableWorkflows` 分别拥有队列、头像表情、未读、导入导出和表格工作流；`useChatSession`、`ChatView`、`TableModal` 只连接状态、依赖与展示。
+9. **双端 wire 合同（已完成）**：`shared/schemas/agent-invocation.schema.json` 是 Agent 调用字段真源；`scripts/generate_wire_contracts.py` 生成并校验 TypeScript/Python 类型，生成物随源码发布，运行时不依赖生成器。
+10. **真实浏览器恢复门禁（已完成）**：Playwright 在隔离端口运行真实前端、模拟 API 与 ComfyUI，覆盖刷新恢复、后台生成跨刷新可见及 `messageId + slotId` 原位替换。
+11. **Full RAG 可重复发布（已完成）**：Base/Application/RAG 内容寻址；RAG 顶层依赖和完整传递依赖锁分离，平台 Torch 仍由目标矩阵固定。便携启动默认 8010，并允许 `DEMIURGE_PORT` 在验收或端口冲突时覆盖；Windows x64 已从正式归档全新解压并通过启停、HTTP 和 Full RAG 自检。
+
 ## 后端分层
 
 ```
@@ -29,12 +43,13 @@ services/  深模块层。业务逻辑全在这。彼此可依赖，但不 impor
 |------|---------|------------|
 | `comfyui_client` | 与 ComfyUI 的全部 HTTP 对话（提交/轮询/取图/打断/上传），统一 `ComfyError`。`history.status_str=error`/`execution_error` 必须归一为带节点与异常摘要的 `failed` 终态，禁止因 `completed=false` 误报为持续 `running`。多阶段采样只把持久化 `output` 当最终图；主输出节点误指 `temp` 时回退全图的持久化输出 | 新增 ComfyUI 交互 → 加到这里，别在路由直接拼请求；结果状态变化同步前端 `GenResult`、轮询/恢复分支和双端测试 |
 | `comfy_launcher` | ComfyUI **本地进程**生命周期：配置读写 + 独立解释器发现（整合包、`.venv/venv`、显式路径）+ 写 extra-paths YAML + 拉起子进程，持有进程句柄，统一 `LaunchError`。Windows 外部进程按监听端口终止时用独立管道读取 `netstat`，不得假定 `subprocess.run().stdout` 非空。禁止回退应用 Embedded Runtime。**与 comfyui_client 是两个接缝（进程 vs HTTP），别合并** | 改启动/配置逻辑 → 这里，别在路由写 subprocess/文件 I/O |
-| `workflow_submission` | ComfyUI 模板/画布提交事务：校验在线、读取、转换、注入和提交 | `/submit` 与 `/submit_graph` 路由只映射 `WorkflowSubmissionError` |
+| `workflow_submission` | ComfyUI 模板/画布提交事务：校验在线、读取、转换、注入和提交；`/submit_graph` 提交前按实时 `object_info.output_node` 验证至少一个可执行输出节点 | `/submit` 与 `/submit_graph` 路由只映射 `WorkflowSubmissionError`；无输出残片必须在本地拒绝，不得请求 ComfyUI |
 | `model_downloader` / `workflow_downloader` | CivitAI、Hugging Face 模型与工作流下载任务；统一公开 `phase/downloaded/total/speed_bps/target_dir/saved_files`，流式写临时文件后再校验并落盘。状态经 `task_progress_store` 节流持久化，重启后保留历史并把在途任务归一为 `interrupted` | 新下载源仍复用同一任务状态合同；未知总量显示不定进度，失败必须清理 `.part`，禁止先整文件读入内存或用完成提示代替真实终态 |
 | `node_update` | 节点 Git 安装/更新、ComfyUI 本体拉取/切版和依赖预检；解析 Git/Pip 输出为对象进度、接收字节、速度与依赖清单，HEAD 变化才算真实更新。当前任务原子持久化，重启中断不会继续伪装运行 | 节点安装只允许可信 Git HTTPS 源并限制在 `custom_nodes`；共享依赖默认停在确认态；路由和前端统一消费 `UpdateProgress`，不得恢复 Manager 黑盒队列的“队列清空即成功”判断 |
 | `task_progress_store` | 后台任务进度的 UTF-8 JSON 原子快照、容量限制和重启中断归一 | 只存可恢复的状态，不存密钥和线程对象；高频调用方必须节流写盘，测试必须隔离真实 `DATA_DIR` |
 | `llm` | 建模型 + `normalize_base_url`（/v1 规则）+ `flatten_content`（分段展平）+ `chat_messages_stream`（流式增量与完整原文双输出） | 需要 base_url 归一、展平或流式调用 → 调这里，别内联；流式已由项目层控制重试，SDK 内层重试关闭，避免重试乘法 |
 | `agent_graph` | 多 Agent 主编排。编辑模式按 `workspace_mode=edit` 零模型直达 `edit_node`；无卡对话、带附件请求仍由 Supervisor 语义分派；**有卡纯文本直达 Roleplay** | 编辑模式不得进入 Roleplay/生图/MCP 分派；模糊任务理解仍改 Supervisor；强执行规则必须保守、可单测 |
+| `roleplay_turn` | 剧情回合执行事务：主生成后依次做状态/插画写回、输出正则、原位锚点、正文提前发布，再做 Curator/纪要/表格维护；无 Agent 路由知识 | 改正文发布与维护顺序只动这里并测公开 Interface；上下文装配仍归 `agent_graph`，不得让维护重新阻塞正文或把控制内容写入对话 |
 | `edit_agent` / `edit_agent_profiles` / `edit_session` / `edit_publication` | 编辑主管确定性选择六类专家；`edit_session` 在工具层强制只读/写入意图、先列后写、先读后覆盖和写前+完成前机械校验；`edit_publication` 把小仓库产物受控发布到后端设置中的 characterDir/presetDir，并支持 PNG 附件保存为头像/表情；排错可按当前 repo/turn 读取脱敏 Trace | 普通文件工具只操作当前小仓库；源库根只读后端 user_state，不信任请求路径；角色卡内部必须扁平且 worldbook/regex 只走侧车；PNG 卡元数据迁移仍走导入 UI |
 | `edit_import_adapter` | 外部 JSON 资源到 Demiurge 的确定性转换：纯角色卡只生成扁平 card，内嵌内容拆为 worldbook/regex 侧车；独立世界书统一 entries/key/enabled；预设剥离连接鉴权并补项目扩展；正则补 ID 和运行字段后编译校验 | 只读当前小仓库内源 JSON，默认拒绝覆盖目标且不删除源文件；PNG 卡必须走现有角色卡导入入口保留头像与元数据 |
 | `edit_artifacts` | 编辑产物机械校验：Demiurge 归一化角色卡、世界书侧车、预设 identifier/order、注入字段、`thinking_chains`、三层正则字段与编译、Python 语法及基础 JSON | 自动推断必须先按项目文件名和归一化卡字段识别，禁止因 `card.json.regex_scripts` 把整卡误判为正则；格式失败写 Trace，禁止把模型自述当验证结果 |
@@ -42,13 +57,14 @@ services/  深模块层。业务逻辑全在这。彼此可依赖，但不 impor
 | `agent_graph.roleplay_node` | 酒馆 Agent（剧情扮演节点）：作品可绑定多张角色卡，并由 `opening_card_name` 决定空会话第一句及首个真实剧情回复唯一可注入的角色描述；后续在世界书检索后，只把本轮输入直接角色名与本轮输入精确触发的世界书 key 当作角色出场证据，均未命中时才回退最近一条 AI 剧情。历史回退按角色最后出现分句识别离开/离场/不在、否定离场及重新入场；角色名采用最长非重叠实体匹配，避免“莉亚/塞西莉亚”串卡。`constant`、Dense、BM25 条目可以提供设定但不得激活角色卡。`_resolve_personas` 只发送选中卡的非空 `description`，普通 system 与预设 marker 共用同一筛选结果，禁止因已绑定而全量发送。后续叠世界书/表格记忆。模型漏 `<status>` 时沿用已持久化快照；未闭合 `<状态更新>` 或 `<illustration>` 仍按尾部控制块剥离；本地高潮兜底锚点被输出正则改写后，只能在最终显示正文重新定位。状态/表格/插画后处理异常时必须用结构化解析器返回干净可见正文，禁止把原始控制块或提示词回退给前端 | 单卡 `card_name` 仅为开场卡兼容别名；其他绑定卡不得出现在开场；同轮多卡仅在本轮均有直接/精确证据时注入；空描述不注入；有卡作品的通用对话统一并入 roleplay |
 | `agent_context` | Agent 上下文窗口：各取 6 条、token 预算、历史文本与依赖上文的执行提示词整理。生成历史按 **前端显式可见历史 → 已存在的聊天快照 → 仅快照文件不存在时才回退 checkpoint** 取值；显式 `[]` 和空快照都表示历史已清空，禁止旧 checkpoint 复活已删消息 | 改上下文选择/裁剪 → 这里；`agent_graph` 不内联 token 算法。任何新入口都必须遵守同一历史优先级 |
 | `agent_contracts` | 编排契约单一属主：`RunContext`(dataclass) + `ModelConfig` + `AgentEvent`。多卡固定字段为 `card_names/opening_card_name`，`card_name` 是兼容别名；生图外貌来源为 `appearance_source=worldbook|character_card`。`history_override` 保存本次请求显式上传的可见历史；`stream_output/stream_sink` 控制节点实时增量出口。**RunContext 既是 dataclass 又当 dict 用**，由 `extras` 与 `_legacy()` 支撑 | 新固定字段必须同时加入 dataclass、`_legacy()`、实时请求、后台队列和双端测试；图节点新增跨节点标记还必须声明进 `AgentState`；**动了这些方法必须重启后端** |
+| `agent_request_context` | 即时请求与持久队列共用的 `RunContext` 构造真源；统一默认值、多卡去重、开场卡兼容、显式空历史和全部模型/代理/插画字段 | 新请求字段只在请求模型、前端 `AgentInvocation` 编码和这里各声明一次；禁止 router 或 worker 再手写第二套转换 |
 | `chat_agent_queue` | 忙时消息持久队列；headless worker 必须把 `MultiAgentRequest` 的工作区模式、历史、卡、预设、人设、世界书、插画、流式选择和模型参数完整还原成 `RunContext` | 新增直连参数时同步补队列映射与回归测试；编辑任务排队后仍必须走编辑 Agent |
 | `run_trace` | Agent 单轮结构化追踪：每次请求由 `RunContext.turn_id` 贯穿，按 UTF-8 JSONL 写 `backend/data/logs/agent-trace.jsonl`；记录原始/处理后输入、Supervisor 与各 Agent、完整模型消息与输出、世界书/RAG 注入、纪要/知识写入、状态写回、独立表格维护及首尾错误。按大小轮转并递归脱敏密钥，追踪失败不阻断主流程 | 新增运行阶段先复用 `run_trace.emit(ctx, event, **data)`；不得把 API key/token 放入自由文本。环境变量：`LAF_AGENT_TRACE`、`LAF_AGENT_TRACE_MAX_BYTES`、`LAF_AGENT_TRACE_BACKUPS` |
 | `tool_agent_adapter` | 把遗留 `image_agent` ReAct 流适配成专家节点结果 | `agent_graph` 不直接依赖其长参数和事件细节；替换旧实现只改 Adapter 后面 |
 | `generation_approval` | 提示词审批状态机 + 已批准的图像/视频执行 + 失败语义 | 改确认/更改/取消/重提流程 → 这里；`agent_graph` 只调用其 Interface |
 | `image_gen` | 云端文生图 `/images/generations` 与带参考图 `/images/edits`，统一超时、质量参数和 64–3840px 尺寸边界；`_load_image_bytes` 支持 data-uri/http(s)/**本地文件路径**(角色底图,桌面单机后端直读同机文件) | 新增图像供应商请求规则 → 这里，调用方不拼 payload |
 | `image_prompt_profiles` | 多元数据插入提示词协议单一属主，三层顺序固定：①剧情事实底座（人物/稳定外貌/当前变化/服装/动作/地点）②跨模型艺术决策（唯一视觉命题→可见视觉装置→一个第一焦点+最多两个辅助元素→统一色彩材质母题→光影因果→服务命题的镜头构图）③转换为 Krea2、Anima、GPT Image/Banana 或 Niji 格式。人物互动高潮默认以人物面部、目光、动作、接触点或人物关系为第一视觉中心，物件只能通过反射、遮挡、引导线、色材呼应等方式把视线导回人物；仅当发现、开启、争夺或取得物件本身就是高潮时，物件才可成为第一焦点。无关字段允许简写/省略，禁止清单式等密度堆词和艺术化改写事实。主 Roleplay 同轮计划把艺术决策写入 `scene_spec.art_direction`；内联格式失效时独立 Profile 仍沿用它。独立 Anima Profile 必须先返回 `visual_hook/primary_focus/supporting_elements/content` 结构化合同，普通剧情清单、多焦点或“剧情有明确动作但 content 退化为静态肖像”触发一次重写；连续失败的降级路径从 narrative/draft_prompt 保守映射已有动作，不为纯肖像场景编造动作。最终只把 `content` 归一成两行，分析字段不得进入 ComfyUI。Anima 质量行按 SFW/NSFW 组装，内容用 tags 锁事实、英文句子表达关系与艺术意图；负面提示词独立返回 | 新增模型提示词协议或修改格式约束 → 只改这里和对应测试；四种格式可以不同，但事实底座、人物焦点规则与艺术决策不得降级；已有合规内联 `profile_prompt` 禁止再次调用模型覆盖，但同样必须通过动作事实校验；负面词禁止混入正向文本 |
-| `lora_index` | LoRA 数据保存单一属主：按完整文件名保存触发词、作者建议提示词和建议权重；建议权重归一到 0–2，自动元数据同步不得覆盖手填值 | LoRA 选择器只自动采用当前选中模型的建议权重；自动插画只读取当前实际生效 LoRA，前端从作者建议中筛选质量/风格/光影/景深效果/作者签名并排除分级词、人物外貌、服装、动作、关系和场景事实，再合并到质量首段；`close-up/wide angle/shot/composition/perspective` 等场景镜头控制也必须排除，镜头只归本轮剧情 Profile 所有。`sensitive/explicit/fair skin` 不属于 LoRA 质量补充。触发词始终采用当前记录的精确值并置于最前；禁止回退旧记录 |
+| `lora_index` | LoRA 数据保存单一属主：按完整文件名保存触发词、作者建议提示词和建议权重；建议权重归一到 0–2，自动元数据同步不得覆盖手填值 | LoRA 选择器只采用当前选中模型的建议权重；编辑弹窗可把作者示例提炼并回填为质量/风格/光影/材质/作者标签。自动插画与工作流卡只读取当前实际生效 LoRA，排除分级词、人物外貌、服装、动作、关系、场景事实及 `close-up/wide angle/shot/composition/perspective` 等镜头控制。工作流“选择完毕”检测最终 API 图，有精确记录时先询问是否覆盖；同意后才覆盖权重，把触发词放正向 CLIP 第一行、去重质量词放第二行开头，负向 CLIP 不改。`/s` 只提交已确认图，不得再次覆盖用户值；禁止回退旧记录 |
 | `rag_backend` | RAG 基础设施 Adapter；`EmbedConfig`、OpenAI/Ollama/本地嵌入兼容、嵌入模型缓存与 Chroma 单例缓存；localhost/127.0.0.1/::1 回环端点强制直连，显式代理也不得介入 | 新增嵌入后端或修改缓存键 → 只改这里；上层不直接创建 Chroma/Embedding |
 | `rag_store` | 普通知识库与生成资产索引：系统资料、仓库文档、generation 元数据、Hybrid 检索入口；`include_system` 控制是否并入全局系统库，剧情召回固定 `False` 只读当前作品 | 新增普通知识库操作 → 加到这里，签名收 `EmbedConfig`；不得再放节点索引逻辑 |
 | `rag_retrieval` | 普通知识库的纯 BM25Plus、RRF 融合；中文连续文本用双字 token，禁止以“与/用”等单字公共噪声制造跨角色命中；不依赖 Chroma、路由或工作流 | 修改普通 RAG 排序算法 → 这里；I/O 留给 `rag_store/rag_backend` |
@@ -61,7 +77,8 @@ services/  深模块层。业务逻辑全在这。彼此可依赖，但不 impor
 | `workflow_build_turn` | 搭建回合：统一需求校验、完整历史视图、当前工作流快照、查询优化与节点候选 | 四种搭建模式必须先准备同一个 Build Turn，不能各自裁剪历史或重建查询 |
 | `workflow_graph_rules` | 工作流图规则：解释 `object_info`、规整 widget、拆缺失节点、硬校验与结构审核 | 新增图规则 → 只改这里；`workflow_builder` 只消费规则结果 |
 | `workflow_builder` | 完整、增量、直连和顾问四种搭建策略；模型调用、重试及结果组装 | 不得重新拥有历史整理、节点候选或图规则 Implementation |
-| `chat_stream_protocol` | 对话流事件 wire 协议 v1；把 Agent 内部领域事件编码成 `protocol/version/type/data`。流式正文用 `delta`，完成后用 `replace` 校正为清洗/写回后的最终文本；`illustrate_request.id + offset` 保持媒体槽稳定且原位 | 新增事件先扩展这里和前端解码联合；不允许路由手拼 SSE payload；媒体槽 ID 不得在提交/轮询/恢复阶段重建 |
+| `workflow_port_planner` | 工作流输入口 AI 编排事务：提示词、模型调用、JSON 容错、强制意图、模型名校验、LoRA 注入、色板注入 | `ai_text` router 只映射 `WorkflowPortPlanError`；增强顺序固定为模型校验 → LoRA → 色板 |
+| `chat_stream_protocol` | 对话流事件 wire 协议 v1；把 Agent 内部领域事件编码成 `protocol/version/type/data`。流式正文用 `delta`，完成后用 `replace` 校正为清洗/写回后的最终文本；`illustrate_request.id + offset` 保持媒体槽稳定且原位，`turn_id` 随事件贯穿到前端供提交回报关联本轮 Trace | 新增事件先扩展这里和前端解码联合；不允许路由手拼 SSE payload；媒体槽 ID 不得在提交/轮询/恢复阶段重建 |
 | `sse` | SSE 传输 Adapter；分帧、异常信封与 `[DONE]` 收尾 | 只负责传输，payload 语义交给 `chat_stream_protocol` |
 | `rag_evaluation` | Hit/MRR/Recall/延迟统计与 RAGAS 四字段记录构造 | 修改检索链后运行固定评估集；未运行 Judge 不得宣称生成质量合格 |
 | `generation_store` | 「生成完成→留存→入库→写快照」后端管线。Roleplay 发出最终 `replace`/`illustrate_request` 时先即时持久化正文与稳定媒体槽；带 `target_message_id + target_slot_id` 的自动插画只原位回填，不追加对话轮、不写提示词历史；失败写 `illustration.failed` Trace 并删除快照槽 | 后端出图后的持久化 → 走 `persist_image`；自动插画目标消息已删除时禁止复活或另添图片消息；generation RAG 是资产库成员与提示词真源，禁止扫描磁盘自动补录（会复活用户已删资产并丢提示词）；普通资产删除只删 RAG、保留文件，裂图清理只删本地文件已缺失的 RAG |
@@ -98,10 +115,17 @@ types/       共享类型。
 
 | 模块 | 职责 |
 |------|------|
-| `useChatSession` | 聊天会话引擎：messages + 生成生命周期 + 三级持久化 + 全部编排。删除消息时同步更新 `messagesRef`、本地存储和后端快照；用户消息“重新生成”保留该消息、截断其后旧分支，并只用该消息之前的历史重新调用，普通图/蒙版输入完整恢复。每次直接生成显式上传当前可见历史，避免 600ms 快照防抖与下一次提交竞态。导航离开只释放前台流引用，不 abort 后台 Agent；只有显式停止才取消。自动插画提交时保存模板 ID、注入值、ComfyUI 地址、主输出节点和最终提示词的不可变快照；轮询和刷新恢复收到 `failed` 必须停止守望、删除 pending、原位清槽并只写失败 Trace，不得在对话追加错误。重新生图复用不可变快照并携带原 `messageId + slotId` 后台提交，完成后覆盖原图而不新增消息。旧自动插画无快照时按图片 URL 从当前作品资产库精确恢复原提示词，再套当前作品模板原位重生；找不到记录则失败关闭。ChatView 只消费它 |
-| `chatGeneration` | 生成流程的纯判定/整形：图像门、文本打分、快照瘦身、纯文本历史、重跑消息、当前 LoRA 精确绑定和作者建议质量词筛选、pending 恢复与 ComfyUI 短暂空窗判定。Anima 最终结构固定为首行「当前 LoRA 触发词 → 作者建议质量词 → 作品固定质量词」，第二行「剧情 tags + 英文关系描述」；`imagePromptProfiles.illustrationTemplateValues` 按 `prompt/negative_prompt/lora_name/lora_weight/base_image/latent_width/latent_height` 独立组值。用户只选 Latent 最长边 1K/2K/4K，主 Roleplay 从七种常用比例中选画幅，前端按 64 对齐基准换算宽高；提示词质量词不受尺寸换算影响。采样步数、CFG、起止步数完全归工作流模板所有，剧情插画设置不得覆盖。**从 useChatSession 闭包抽出，可直接单测** |
+| `useChatSession` | 聊天会话引擎：messages、聊天/队列编排、快照与媒体落盘 Adapter。删除、重新生成、显式历史、导航后台化和自动插画提交合同保持不变；ComfyUI pending/轮询/恢复/finalize 顺序委托 `workflowGenerationRuntime` | 不得重新内联 pending localStorage、轮询计数或恢复分支；界面提示、媒体原位回填和进度 WS 留在 Hook |
+| `useChatAgentQueue` / `useChatTransfer` | 队列提交/取消/恢复和会话导入导出事务 | `useChatSession` 只传依赖与消费结果，不得重新复制 API 顺序 |
+| `useChatPresentationAssets` / `useChatUnreadTracker` | 角色头像表情投影与后台完成未读跟踪 | `ChatView` 只渲染投影结果，不直接维护跨刷新状态 |
+| `useTableWorkflows` | 表格统计、重建、手动补表与覆盖确认的前端事务 | `TableModal` 只保留弹窗本地输入和展示，不直接编排 API |
+| `chatGeneration` | 生成流程的纯判定/整形：图像门、文本打分、快照瘦身、纯文本历史、重跑消息、当前 LoRA 精确绑定和作者建议质量词筛选。Anima 最终结构固定为首行「当前 LoRA 触发词 → 作者建议质量词 → 作品固定质量词」，第二行「剧情 tags + 英文关系描述」；`imagePromptProfiles.illustrationTemplateValues` 按语义独立组值 | pending/轮询/finalize 不属于此 Module；提示词质量词不受尺寸换算影响，采样参数仍归工作流模板 |
 | `generationLifecycle` | 生成三态 reducer（idle/agent/workflow）+ 派生 selector。**新增生成状态改这里，别加影子 ref** |
+| `workflowGenerationRuntime` | ComfyUI 生成生命周期深模块：pending 存储、提交后守望、恢复检查、轮询节奏、连续丢失、超时保留和幂等 finalize 双闸 | Hook 通过 Observer 接收完成/失败/释放/超时；前台与恢复路径必须共用同一 Runtime 实例 |
 | `workflowOrchestration` | 工作流输入口编排 hook（读节点→AI 出计划→写画布） |
+| `workflowCapture` | laf_lock 帧事务：单次请求/回复及隐藏完整画布的 load→ops→原生 API 图抓取；统一来源校验、重试、超时和清理。NodeCard IFrame 载入前通过 `clearComfyStorage` 清理 localStorage/sessionStorage 中工作流残留，防止之前打开的大工作流被 ComfyUI 会话恢复覆盖导致只显示整图而非单个节点 | `WorkflowCard`、`AIBuildView` 不得自行监听同类 `api_prompt` 生命周期；节点局部画布的自愈时序仍归各自展示场景 |
+| `workflowTemplateExposure` | 参数清单与画布选择节点时，将未连线字段确定性转换为 `ExposedField`；字段名、label、semantic、默认值均保持原工作流定义，节点类型只生成不可见内部 binding | 旧人工别名迁移到 binding；禁止仅凭 `width/height/text/image` 猜用途；移除节点同步移除暴露字段 |
+| `workflowLoraData` | 多元数据生成的 LoRA 确定性补全：按最终 API 图精确识别 LoRA，提炼作者质量标签，生成建议权重与正向 CLIP 覆盖 ops；触发词固定第一行，去重质量词固定第二行开头，负向 CLIP 不得修改 |
 | `viewRouting` | `parseHash`/`buildHash`/`calcSize` 纯函数 |
 | `lafLock` | laf_lock 子帧 postMessage 协议原语（`lockUrl`/`postToFrame`/`isLafMessage`） |
 | `opResults` | `fmtOpResults` 编排结果格式化 |
@@ -126,6 +150,12 @@ api 序列化器（**加带模型配置的端点时必用，别手拆三元组**
 - `chatBody(chat)` → `base_url/api_key/model`
 - `ragEmbed(embed)` → `base_url/api_key/embed_model/embed_model_dir/reranker_model_dir`（RAG POST）
 - `sseEmbed(embed)` → `embed_base_url/embed_api_key/embed_model/embed_model_dir/reranker_model_dir`（SSE）
+
+跨端字段合同：
+
+- `shared/schemas/agent-invocation.schema.json` 是 Agent 调用 wire 的唯一字段真源。
+- `scripts/generate_wire_contracts.py` 生成 `frontend/src/generated/wireContracts.ts` 与 `backend/app/generated/wire_contracts.py`；生成物必须提交，终端 Runtime 不运行生成器。
+- 修改 schema 后先生成，再运行 `python scripts/generate_wire_contracts.py --check`；CI、前端编码器和后端请求模型覆盖测试共同阻止字段漂移。
 
 ## RAG 依赖方向
 
@@ -185,7 +215,7 @@ Agent 内部领域事件
 - **要碰普通知识库？** → 领域操作进 `rag_store`，纯排序进 `rag_retrieval`，嵌入/Chroma 进 `rag_backend`。
 - **要碰节点索引？** → 单路存储与召回进 `node_store`，同步/多查询融合进 `node_index`，安装判断只读 `object_info`。
 - **要改 AI 搭工作流？** → 回合上下文进 `workflow_build_turn`，图规则进 `workflow_graph_rules`，模式差异与模型重试才进 `workflow_builder`。
-- **要动生成流程/持久化？** → 后端进 `generation_store`，前端进 `useChatSession`。
+- **要动生成流程/持久化？** → 后端进 `generation_store`；前端生命周期顺序进 `workflowGenerationRuntime`，媒体投影与界面反馈进 `useChatSession`。
 - **要加页面/子帧交互？** → 组件收 props 渲染；协议走 `lafLock`；纯算法进 `lib/` 并导出。
 - **写了带分支的纯函数？** → 放服务/lib 顶层并导出，配一个测试（见下）。
 
@@ -196,6 +226,7 @@ Agent 内部领域事件
 cd backend && ./.venv/Scripts/python.exe -m pytest -q
 # 前端
 cd frontend && npm test
+cd frontend && npm run check:wire && npm run test:e2e && npm run build
 
 # 后端架构/静态门禁
 cd backend
@@ -237,6 +268,8 @@ cd backend
 
 Runtime 采用 Base/Application/RAG 分层清单，每层逐文件归档并记录 SHA256，超过 GitHub 单资产限制时按 1.9 GB 分片。`runtime_entry.py` 只负责组装层路径、设置可写数据目录、执行模块自检并在 8010 同源服务已构建前端；ComfyUI 必须使用独立 Python，禁止回退应用 Runtime。Windows `portable_release.py` 组装 `start-dev.bat`/`stop-dev.bat`、分层 Runtime 与 MinGit；启动脚本用 PID 文件绑定当前包的 Runtime，停止脚本必须核验进程路径，禁止仅按端口误杀。macOS/Linux `unix_portable_release.py` 生成可执行启动脚本。终端用户包必须做到解压即用，不运行 pip、npm，也不依赖系统 Python/Node。
 
+RAG 构建使用 `backend/requirements-reranker.txt` 声明直接能力、`release/requirements-rag.lock` 固定跨平台传递依赖、`release/runtime-targets.json` 固定各平台 Torch。三者共同进入 RAG definition ID；禁止只写 `>=` 后让新构建静默漂移。CUDA 驱动和 ComfyUI Python 不属于 Demiurge 依赖层，构建可以复用已校验层或 pip wheel 缓存，但发布包必须自带隔离文件。Windows 便携启动可用 `DEMIURGE_PORT` 覆盖默认 8010；Runtime 接收对应 `LAF_RUNTIME_PORT`，默认用户行为不变。
+
 `.github/workflows/runtime-release.yml` 在版本标签上执行双端门禁、三目标 Full RAG 矩阵构建、真实冻结 Runtime 自检和 Release 上传；`portable-release.yml` 只消费已校验分层资产组装 `00-USER-DOWNLOAD` 包。任何新平台、Torch 或 Python 版本只改目标矩阵；新增运行依赖先确认 Base 或 RAG 层属主，禁止把依赖同时写进工作流和多个脚本。
 
 ### Embedding Backend Seam
@@ -268,9 +301,9 @@ Runtime 采用 Base/Application/RAG 分层清单，每层逐文件归档并记�
 |------|------|---------|------|
 | `character_state` | ✅ | 动态状态单一属主：按 `repo_id` 存可变状态（`数值`+`叙事`字段，每字段带 provenance 证据+turn+source）、`parse_deltas`/`apply_deltas`（带 from→to 审计历史，封顶 200）、`render_state_block`（紧凑 kv+内联证据）。**手改/回滚(缺口6)**：`current_turn`/`set_fields`(设精确值非累加，数值 clamp，标 `source=user`)/`rollback_last`(还原到审计 `from` + 弹历史)。落盘 `<base>/<repo_id>/state.json` 物理隔离 | core 字段永不被本模块写；纯逻辑无 I/O 可单测，load/save 是唯一 I/O；base 由调用方注入不读 config；`state.py` 路由(GET/PATCH/rollback)只做 HTTP 适配，前端 StatePanel 消费 |
 | `agency` | ✅ | 能动性**纯逻辑（0 I/O 0 LLM 全单测）**：`judge`(core依据→好感度门槛→掷骰) + `classify_roll(roll,chance)` **六档**(大成功/极难/困难/普通成功/失败/大失败，对齐正文 `<roll>` 语汇，骰≥96 恒大失败) + `should_consult_world`(廉价门控) + `tier_index`/`crossed_tier`(插画跨档)。裁判是确定性规则不是模型 | 吃好感度**快照**，**不 import `character_state`/`agent_graph`**；裁判不得做成 LLM 调用。正文 `<roll>` 由剧情推进 Agent 的 `rollInstruction` 提示词驱动(主模型打)，与本模块隐形裁判(管 NPC 自主行动)同一套六档语汇 |
-| `scene_illustration` | ✅ | 剧情插画**纯逻辑（0 I/O 0 LLM 全单测）**：`decide_trigger`(优先级 显式>失控>**场景nsfw\|climax**>跨档>每N段，跨档复用 `agency.crossed_tier`) + `build_scene_request`(从「段落动作+core外观+state衣着/场景」拼 prompt，非空过滤，出图管线的裸拼接降级档) + `fallback_illustration_anchor`（只在 `<content>` 正文评分，忽略 think/控制块，物体放置等可见动作优先）+ `illustration_anchor_offset`（高潮锚点逐字/破甲还原优先，轻微改写按段落相似度映射；指定锚点完全无效则失败关闭，禁止回退消息末尾）+ renderer 注册表(纯 dict) | 触发是规则不是导演 Agent；吃标量快照，**不 import `character_state`/`agent_graph`/`workflow_submission`/`image_gen`**（scene-illustration-purity 合同强制）；本模块不拥有出图管线 |
+| `scene_illustration` | ✅ | 剧情插画**纯逻辑（0 I/O 0 LLM 全单测）**：`decide_trigger`(优先级 显式>失控>**场景nsfw\|climax**>跨档>每N段，跨档复用 `agency.crossed_tier`) + `build_scene_request`(从「段落动作+core外观+state衣着/场景」拼 prompt，非空过滤，出图管线的裸拼接降级档) + `fallback_illustration_anchor`（只在 `<content>` 正文评分，忽略 think/控制块，物体放置等可见动作优先；`_anchor_score` 对写下/对折/化作/飞出等状态变化动作单独加权，靠回/嘴角/浅笑/余韵等静态收束词降权）+ `resolve_illustration_anchor`（只在模型锚定静态收束且正文另有状态变化动作链时纠正锚点；写回接缝同步废弃同源错误内联 Profile，由前端按纠正后动作段重新生成，禁止肖像提示词继续提交）+ `illustration_anchor_offset`（高潮锚点逐字/破甲还原优先，轻微改写按段落相似度映射；指定锚点完全无效则失败关闭，禁止回退消息末尾）+ renderer 注册表(纯 dict) | 触发是规则不是导演 Agent；吃标量快照，**不 import `character_state`/`agent_graph`/`workflow_submission`/`image_gen`**（scene-illustration-purity 合同强制）；本模块不拥有出图管线 |
 | `scene_classify` | ✅ | 场景分类**纯逻辑（0 I/O 0 LLM）**：`normalize_scene`(模型给的场景字段→合法标签，中文别名+子串匹配+兜底空串)。标签 `dialogue/action/emotion/conflict/nsfw/climax`。信号复用 supervisor 路由那次 LLM（零额外往返），此处只解析规整 | **不 import `llm`/`agent_graph`**（scene-classify-purity 合同强制）；只规整不调模型 |
-| `image_prompt_extract` | ✅ | 自动插画的纯逻辑接缝：主 Roleplay 同次生成在视觉高潮后附 `<illustration>` 计划；anchor 必须取提示词所描绘高潮段末句，禁止选余韵/收束/尾句；动态字段必须是英文 Danbooru tags。本模块剥块并校验 `anchor/camera/composition/subjects.weight/prompt/motion/aspect_ratio`；模型被截断导致缺 `</illustration>` 时，从最后一个开标签到 EOF 仍必须整体剥离并返回空计划。`visible_narrative_text` 是场景分类与降级提示词的唯一正文边界：只读取 `<content>`，排除完整或未闭合的 `<think>`、状态、表格及插画控制块，并兼容图片插槽持久化造成的未闭合 `<content>`；只有未闭合思考而无可见正文时失败关闭，本轮不得出图。比例只允许 `1:1/2:3/3:2/3:4/4:3/9:16/16:9`，非法值回退 `2:3`。ComfyUI 提示词固定为「质量 tags 一行 + 内容 tags 一行」；英文 tag 分号先规整为逗号，中文/自然语言提示词失败关闭，不再拿剧情正文降级提交。`restore_jailbreak`/`infer_motion` 保留锚点与动作判断 | **不 import `llm`/`agent_graph`/`roleplay_agency`/`character_state`**；隐藏思考中的敏感词绝不能改变 rating 或触发成人降级；高潮识别、镜头设计与画幅选择由主生成完成，不得新增独立提取模型调用；LoRA 触发词只按本次最终生效 LoRA 的完整文件名精确读取，空触发词不注入 |
+| `image_prompt_extract` | ✅ | 自动插画的纯逻辑接缝：主 Roleplay 同次生成在视觉高潮后附 `<illustration>` 计划；anchor 必须取提示词所描绘高潮段末句，禁止选余韵/收束/尾句；唯一视觉命题必须保留本轮造成剧情状态变化的动作链（动作主体、关键道具、动作结果的因果），静态肖像/表情特写/事后姿态只能作次级视觉信息，不得替代该动作链；动态字段必须是英文 Danbooru tags。本模块剥块并校验 `anchor/camera/composition/subjects.weight/prompt/motion/aspect_ratio`；模型被截断导致缺 `</illustration>` 时，从最后一个开标签到 EOF 仍必须整体剥离并返回空计划。`visible_narrative_text` 是场景分类与降级提示词的唯一正文边界：只读取 `<content>`，排除完整或未闭合的 `<think>`、状态、表格及插画控制块，并兼容图片插槽持久化造成的未闭合 `<content>`；只有未闭合思考而无可见正文时失败关闭，本轮不得出图。比例只允许 `1:1/2:3/3:2/3:4/4:3/9:16/16:9`，非法值回退 `2:3`。ComfyUI 提示词固定为「质量 tags 一行 + 内容 tags 一行」；英文 tag 分号先规整为逗号，中文/自然语言提示词失败关闭，不再拿剧情正文降级提交。`restore_jailbreak`/`infer_motion` 保留锚点与动作判断 | **不 import `llm`/`agent_graph`/`roleplay_agency`/`character_state`**；隐藏思考中的敏感词绝不能改变 rating 或触发成人降级；高潮识别、镜头设计与画幅选择由主生成完成，不得新增独立提取模型调用；LoRA 触发词只按本次最终生效 LoRA 的完整文件名精确读取，空触发词不注入 |
 | renderer 接口 | ✅ | 渲染器接口 `Renderer=Callable[[SceneRequest],str]` 在 `scene_illustration` 定义（register/get/available，纯 dict） | 新增图像格式=注册一个 renderer，不改 `scene_illustration` 触发逻辑 |
 | `scene_renderers` | ✅ | renderer concrete 适配器（有 I/O，8 测试）：`cloud_renderer`(云→按 `req.actors` 命中 `CloudConfig.character_base_images` 取底图,有则 `image_gen.generate_with_images` 图生图锁角色一致性,否则 `generate` 纯文生图；未命中回退 `style_base_image`) + `comfy_renderer`(本地→`submit_template` 提交 + `fetch_result` 轮询取图 → 拼 `/view` 直链，sleep/now 注入可测)。工厂绑定运行期 config 产出 Renderer 闭包 | import `scene_illustration`+既有出图管线；`scene_illustration` 不反向 import（纯度合同保证无环）；只返回图片地址，不回灌图像 token |
 | `narrative_memory` | ✅ | 纪要记忆**纯逻辑（0 I/O 0 LLM 全单测）**：默认每 3 个完整会话中的 assistant 回合新建一条独立 `overview/chronicle/dialogue/characters/keywords` 丰富纪要；召回把 FTS 命中与最近条目合并，优先当前出场人物，主 Roleplay 最多只注入 10 条短概览；旧分层压缩逻辑不得进入自动流程或删除频率索引 | **不 import `narrative_store`/`character_state`/`agent_graph`/`roleplay_agency`**（narrative-memory-purity 合同）；详细纪要与对白不回灌主上下文 |
@@ -300,7 +333,8 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
     ① 同步 renderer（云端默认）：scene_illustration 触发判定 → renderer 插件（gpt-image…）→ image_gen，出图后随 image_recs 回传
     ② 异步事件（前端已预设 ComfyUI 模板）：_build_renderer 返回 None 不同步付费，优先按主生成给出的原文锚点发 illustrate_request（稳定 slotId）
         → SSE 顺序：高潮段及前文 delta → media-slot → 后续正文 delta
-        → 前端 useChatSession.submitIllustration：用户预设 Latent 最长边，按 Agent 画幅比例换算宽高；再按模板 exposed 的 semantic 组 values → /comfyui/submit → 后台 pollResult
+        → 前端 useChatSession.submitIllustration：用户预设 Latent 最长边，按 Agent 画幅比例换算宽高；按模板 exposed 的隐藏 binding 组 values，提交 key 仍使用原字段名 → /comfyui/submit → workflowGenerationRuntime 后台守望
+        → ComfyUI 返回 prompt_id 后异步回报最终 prompt/Profile/LoRA/权重/Latent/注入键到 /image-agent/illustration-submission，后端记 `illustration.submitted` Trace（turn_id 关联本轮）；回报失败与 Trace 写失败均不影响生图，禁止携带密钥或图片内容
         → 完成后以 messageId+slotId 原位替换；目标消息已删除则丢弃结果，不新增消息
         → 复用 laf_pending_gen_* + SupportWidget 徽记（进度/离开继续/点击返回）；motion>=2 且预设视频模板+smartVideo → 改出视频
 ```

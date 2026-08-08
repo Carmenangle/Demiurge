@@ -8,6 +8,6 @@ export default defineConfig({
     port: 5173,
   },
   test: {
-    exclude: ["frontend/**", "node_modules/**"],
+    exclude: ["e2e/**", "node_modules/**"],
   },
 });

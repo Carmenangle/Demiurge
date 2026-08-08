@@ -12,9 +12,10 @@ import {
   WORKFLOW_BUILD_EXECUTE_TIMEOUT_MS,
   WORKFLOW_BUILD_PLAN_TIMEOUT_MS,
 } from "../lib/workflowBuildExecution";
+import type { AgentInvocationWire } from "../generated/wireContracts";
 
 // 嵌入模型配置（设置 → 嵌入模型），单一属主。
-type Embed = {
+export type Embed = {
   mode?: "remote" | "local";
   baseUrl: string;
   apiKey: string;
@@ -24,7 +25,7 @@ type Embed = {
   proxyUrl?: string;
 };
 // 对话模型三元组配置。
-type Chat = { baseUrl: string; apiKey: string; modelName: string; proxyUrl?: string };
+export type Chat = { baseUrl: string; apiKey: string; modelName: string; proxyUrl?: string };
 
 // wire 格式序列化器（收口三元组，各调用方不再逐字段手拆）：
 // - chatBody：对话端点用 base_url/api_key/model
@@ -211,76 +212,13 @@ export function fetchHistory(threadId: string) {  return apiGet<{ items: ChatTur
 
 // Supervisor 多 Agent：走 LangGraph 编排端点。onTrace 透出节点流转（主管分派→专家执行）供展示协作过程。
 export function multiAgent(
-  threadId: string,
-  message: string,
-  images: string[],
-  chat: { baseUrl: string; apiKey: string; modelName: string },
-  gen: { baseUrl: string; apiKey: string; modelName: string },
-  size: string,
+  request: AgentInvocation,
   cbs: {
     onEvent: (event: ChatStreamEvent) => void;
     onDone: (err?: string) => void;
   },
-  persist?: { outputDir: string; repoId: string; workspaceMode?: WorkMode; embed: { baseUrl: string; apiKey: string; modelName: string }; proxyUrl?: string; chatProxyUrl?: string; genProxyUrl?: string; videoProxyUrl?: string; embedProxyUrl?: string; routeModel?: string; messageId?: string; userMessageId?: string; styleTemplate?: string; agentId?: string; streamOutput?: boolean; contextMaxTokens?: number; historyPerRole?: number; history?: { role: "user" | "assistant"; content: string }[]; imageQuality?: import("../lib/viewRouting").ImageQuality; video?: { baseUrl: string; apiKey: string; modelName: string }; characterDir?: string; cardName?: string; cardNames?: string[]; openingCardName?: string; presetDir?: string; presetName?: string; userName?: string; userPersona?: string; personaBound?: boolean; worldbookDir?: string; worldbookName?: string; illustrate?: boolean; comfyIllustrate?: boolean; promptProfile?: string; appearanceSource?: "worldbook" | "character_card"; characterBaseImages?: Record<string, string>; illustrationActorNames?: string[]; styleBaseImage?: string },
-  approvalAction?: { approvalId: string; action: "submit" | "change" | "cancel"; editedPrompt?: string },
-  routeAction?: { route: import("../types/chat").AgentRoute; userMessageId: string },
-  imageMask?: { image: string; mask: string },
 ): () => void {
-  return openSSE("/ai/multi-agent", {
-    thread_id: threadId,
-    message,
-    images,
-    image_mask: imageMask || null,
-    ...chatBody(chat),
-    gen_base_url: gen.baseUrl,
-    gen_api_key: gen.apiKey,
-    gen_model: gen.modelName,
-    video_base_url: persist?.video?.baseUrl || "",
-    video_api_key: persist?.video?.apiKey || "",
-    video_model: persist?.video?.modelName || "",
-    size,
-    image_quality: persist?.imageQuality || "high",
-    output_dir: persist?.outputDir || "",
-    repo_id: persist?.repoId || "",
-    workspace_mode: workspaceModeForWire(persist?.workspaceMode || "story"),
-    ...sseEmbed(persist?.embed),
-    proxy_url: persist?.proxyUrl || "",
-    chat_proxy_url: persist?.chatProxyUrl || "",
-    gen_proxy_url: persist?.genProxyUrl || "",
-    video_proxy_url: persist?.videoProxyUrl || "",
-    embed_proxy_url: persist?.embedProxyUrl || "",
-    route_model: persist?.routeModel || "",
-    message_id: persist?.messageId || "",
-    style_template: persist?.styleTemplate || "",
-    agent_id: persist?.agentId || "",
-    stream_output: persist?.streamOutput || false,
-    context_max_tokens: persist?.contextMaxTokens ?? 20_000,  // 0=无限，须用 ?? 保 0 不被吞
-    history_per_role: persist?.historyPerRole || 6,
-    history: persist?.history ?? null,
-    approval_id: approvalAction?.approvalId || "",
-    approval_action: approvalAction?.action || "",
-    edited_prompt: approvalAction?.editedPrompt || "",
-    forced_route: routeAction?.route || "",
-    user_message_id: routeAction?.userMessageId || persist?.userMessageId || "",
-    character_dir: persist?.characterDir || "",
-    card_name: persist?.cardName || "",
-    card_names: persist?.cardNames || [],
-    opening_card_name: persist?.openingCardName || persist?.cardName || "",
-    preset_dir: persist?.presetDir || "",
-    preset_name: persist?.presetName || "",
-    user_name: persist?.userName || "",
-    user_persona: persist?.userPersona || "",
-    persona_bound: persist?.personaBound || false,
-    worldbook_dir: persist?.worldbookDir || "",
-    worldbook_name: persist?.worldbookName || "",
-    illustrate: persist?.illustrate || false,
-    comfy_illustrate: persist?.comfyIllustrate || false,
-    prompt_profile: persist?.promptProfile || "krea2",
-    appearance_source: persist?.appearanceSource || "worldbook",
-    character_base_images: persist?.characterBaseImages || {},
-    illustration_actor_names: persist?.illustrationActorNames || [],
-    style_base_image: persist?.styleBaseImage || "",
-  }, (obj) => {
+  return openSSE("/ai/multi-agent", agentInvocationBody(request), (obj) => {
     const event = decodeChatStreamEvent(obj);
     if (event.type === "error") throw new Error(event.message);
     cbs.onEvent(event);
@@ -361,6 +299,114 @@ export function saveSnapshot(threadId: string, messages: unknown[]) {
   });
 }
 
+export interface AgentInvocation {
+  threadId: string;
+  message: string;
+  images: string[];
+  imageMask?: { image: string; mask: string } | null;
+  workMode: WorkMode;
+  chat: Chat;
+  gen: Chat;
+  video?: Chat;
+  embed?: Embed;
+  size: string;
+  imageQuality: "auto" | "low" | "medium" | "high";
+  outputDir: string;
+  repoId: string;
+  proxyUrl: string;
+  chatProxyUrl: string;
+  genProxyUrl: string;
+  videoProxyUrl: string;
+  embedProxyUrl: string;
+  routeModel?: string;
+  messageId?: string;
+  userMessageId?: string;
+  styleTemplate: string;
+  agentId: string;
+  streamOutput: boolean;
+  contextMaxTokens: number;
+  historyPerRole: number;
+  history: { role: "user" | "assistant"; content: string }[];
+  characterDir: string;
+  cardName: string;
+  cardNames: string[];
+  openingCardName: string;
+  presetDir: string;
+  presetName: string;
+  userName: string;
+  userPersona: string;
+  personaBound: boolean;
+  worldbookDir: string;
+  worldbookName: string;
+  illustrate: boolean;
+  comfyIllustrate: boolean;
+  promptProfile: string;
+  appearanceSource: "worldbook" | "character_card";
+  characterBaseImages: Record<string, string>;
+  illustrationActorNames: string[];
+  styleBaseImage: string;
+  approvalAction?: { approvalId: string; action: "submit" | "change" | "cancel"; editedPrompt?: string };
+  routeAction?: { route: import("../types/chat").AgentRoute; userMessageId: string };
+}
+
+export function agentInvocationBody(request: AgentInvocation): AgentInvocationWire {
+  return {
+    thread_id: request.threadId,
+    workspace_mode: workspaceModeForWire(request.workMode),
+    message: request.message,
+    images: request.images,
+    image_mask: request.imageMask || null,
+    ...chatBody(request.chat),
+    gen_base_url: request.gen.baseUrl,
+    gen_api_key: request.gen.apiKey,
+    gen_model: request.gen.modelName,
+    video_base_url: request.video?.baseUrl || "",
+    video_api_key: request.video?.apiKey || "",
+    video_model: request.video?.modelName || "",
+    size: request.size,
+    image_quality: request.imageQuality,
+    output_dir: request.outputDir,
+    repo_id: request.repoId,
+    ...sseEmbed(request.embed),
+    proxy_url: request.proxyUrl,
+    chat_proxy_url: request.chatProxyUrl,
+    gen_proxy_url: request.genProxyUrl,
+    video_proxy_url: request.videoProxyUrl,
+    embed_proxy_url: request.embedProxyUrl,
+    route_model: request.routeModel || "",
+    message_id: request.messageId || "",
+    user_message_id: request.routeAction?.userMessageId || request.userMessageId || "",
+    style_template: request.styleTemplate,
+    agent_id: request.agentId,
+    stream_output: request.streamOutput,
+    context_max_tokens: request.contextMaxTokens,
+    history_per_role: request.historyPerRole,
+    history: request.history,
+    approval_id: request.approvalAction?.approvalId || "",
+    approval_action: request.approvalAction?.action || "",
+    edited_prompt: request.approvalAction?.editedPrompt || "",
+    forced_route: request.routeAction?.route || "",
+    character_dir: request.characterDir,
+    card_name: request.cardName,
+    card_names: request.cardNames,
+    opening_card_name: request.openingCardName || request.cardName,
+    preset_dir: request.presetDir,
+    preset_name: request.presetName,
+    user_name: request.userName,
+    user_persona: request.userPersona,
+    persona_bound: request.personaBound,
+    worldbook_dir: request.worldbookDir,
+    worldbook_name: request.worldbookName,
+    illustrate: request.illustrate,
+    comfy_illustrate: request.comfyIllustrate,
+    prompt_profile: request.promptProfile || "krea2",
+    appearance_source: request.appearanceSource,
+    character_base_images: request.characterBaseImages,
+    illustration_actor_names: request.illustrationActorNames,
+    style_base_image: request.styleBaseImage,
+  };
+}
+
 export function genProfilePrompt(
   profile: string,
   scene: IllustrationSceneSpec,
@@ -428,56 +474,11 @@ export interface ChatQueueTask {
   status: ChatQueueStatus; error?: string; created_at: number; updated_at: number;
 }
 // multiAgent 完整参数落后端队列；worker 在前一条结束后串行认领执行。
-export function enqueueChatQueueTask(payload: {
-  threadId: string; message: string; images: string[];
-  workMode: WorkMode;
-  imageMask?: { image: string; mask: string } | null;
-  chat: Chat; gen: Chat; video?: Chat; embed?: Embed;
-  size: string; imageQuality: string; outputDir: string; repoId: string;
-  proxyUrl: string; chatProxyUrl: string; genProxyUrl: string; videoProxyUrl: string; embedProxyUrl: string;
-  styleTemplate: string; agentId: string; contextMaxTokens: number;
-  streamOutput: boolean;
-  historyPerRole: number;
-  history: { role: "user" | "assistant"; content: string }[];
-  characterDir: string; cardName: string; cardNames: string[]; openingCardName: string; presetDir: string; presetName: string;
-  userName: string; userPersona: string; personaBound: boolean;
-  worldbookDir: string; worldbookName: string;
-  illustrate: boolean; comfyIllustrate: boolean; promptProfile: string;
-  appearanceSource: "worldbook" | "character_card";
-  characterBaseImages: Record<string, string>; illustrationActorNames: string[]; styleBaseImage: string;
-}) {
-  return apiPost<{ task: ChatQueueTask }>("/ai/chat-queue/enqueue", {
-    thread_id: payload.threadId,
-    workspace_mode: workspaceModeForWire(payload.workMode),
-    message: payload.message,
-    images: payload.images,
-    image_mask: payload.imageMask || null,
-    ...chatBody(payload.chat),
-    gen_base_url: payload.gen.baseUrl, gen_api_key: payload.gen.apiKey, gen_model: payload.gen.modelName,
-    video_base_url: payload.video?.baseUrl || "", video_api_key: payload.video?.apiKey || "",
-    video_model: payload.video?.modelName || "",
-    size: payload.size, image_quality: payload.imageQuality,
-    output_dir: payload.outputDir, repo_id: payload.repoId,
-    ...sseEmbed(payload.embed),
-    proxy_url: payload.proxyUrl, style_template: payload.styleTemplate,
-    chat_proxy_url: payload.chatProxyUrl, gen_proxy_url: payload.genProxyUrl,
-    video_proxy_url: payload.videoProxyUrl, embed_proxy_url: payload.embedProxyUrl,
-    agent_id: payload.agentId, context_max_tokens: payload.contextMaxTokens,
-    stream_output: payload.streamOutput,
-    history_per_role: payload.historyPerRole, history: payload.history,
-    character_dir: payload.characterDir, card_name: payload.cardName,
-    card_names: payload.cardNames, opening_card_name: payload.openingCardName,
-    preset_dir: payload.presetDir, preset_name: payload.presetName,
-    user_name: payload.userName, user_persona: payload.userPersona,
-    persona_bound: payload.personaBound,
-    worldbook_dir: payload.worldbookDir, worldbook_name: payload.worldbookName,
-    illustrate: payload.illustrate, comfy_illustrate: payload.comfyIllustrate,
-    prompt_profile: payload.promptProfile,
-    appearance_source: payload.appearanceSource,
-    character_base_images: payload.characterBaseImages,
-    illustration_actor_names: payload.illustrationActorNames,
-    style_base_image: payload.styleBaseImage,
-  });
+export function enqueueChatQueueTask(invocation: AgentInvocation) {
+  return apiPost<{ task: ChatQueueTask }>(
+    "/ai/chat-queue/enqueue",
+    agentInvocationBody(invocation),
+  );
 }
 
 export function reportIllustrationFailure(payload: {
@@ -492,6 +493,30 @@ export function reportIllustrationFailure(payload: {
     stage: payload.stage,
     error: payload.error,
     prompt_id: payload.promptId || "",
+  });
+}
+
+export function reportIllustrationSubmission(payload: {
+  threadId: string; repoId: string; turnId?: string; messageId: string; slotId: string;
+  templateId: string; promptId: string; prompt: string; promptProfile: string;
+  loraName?: string; loraWeight?: number; latentWidth: number; latentHeight: number;
+  valueKeys: string[];
+}) {
+  return apiPost<{ ok: boolean }>("/ai/image-agent/illustration-submission", {
+    thread_id: payload.threadId,
+    repo_id: payload.repoId,
+    turn_id: payload.turnId || "",
+    message_id: payload.messageId,
+    slot_id: payload.slotId,
+    template_id: payload.templateId,
+    prompt_id: payload.promptId,
+    prompt: payload.prompt,
+    prompt_profile: payload.promptProfile,
+    lora_name: payload.loraName || "",
+    lora_weight: payload.loraWeight,
+    latent_width: payload.latentWidth,
+    latent_height: payload.latentHeight,
+    value_keys: payload.valueKeys,
   });
 }
 export function listChatQueueTasks(threadId = "") {

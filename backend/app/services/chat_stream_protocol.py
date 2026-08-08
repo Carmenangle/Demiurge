@@ -67,6 +67,8 @@ def encode_event(event: Mapping[str, object]) -> ChatStreamEvent | None:
             data["scene_spec"] = dict(req["scene_spec"])
         if isinstance(req, Mapping) and isinstance(req.get("offset"), (int, float)):
             data["offset"] = max(0, int(req["offset"]))
+        if isinstance(req, Mapping) and req.get("turn_id"):
+            data["turn_id"] = str(req["turn_id"])
         if event.get("id"):
             data["id"] = str(event["id"])
         return _wire("illustrate_request", data)

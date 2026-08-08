@@ -77,6 +77,7 @@ export const SECTION_SUBNAV: Record<Exclude<NavSection, "home">, { id: string; l
   ],
   system: [
     { id: "models", label: "模型下载" },
+    { id: "lora-data", label: "LoRA 数据保存" },
     { id: "node-manager", label: "节点管理" },
     { id: "tools", label: "多功能工具" },
   ],

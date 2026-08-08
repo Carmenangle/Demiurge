@@ -36,12 +36,12 @@ describe("image prompt profiles", () => {
 
   it("正负提示词分别注入对应语义字段", () => {
     const values = illustrationTemplateValues([
-      { node_id: "39", field: "text", semantic: "prompt" },
-      { node_id: "22", field: "text", semantic: "negative_prompt" },
-      { node_id: "40", field: "lora_name", semantic: "lora_name" },
-      { node_id: "40", field: "strength_model", semantic: "lora_weight" },
-      { node_id: "12", field: "width", semantic: "latent_width" },
-      { node_id: "12", field: "height", semantic: "latent_height" },
+      { node_id: "39", field: "text", semantic: "text", binding: "prompt" },
+      { node_id: "22", field: "text", semantic: "text", binding: "negative_prompt" },
+      { node_id: "40", field: "lora_name", semantic: "lora_name", binding: "lora_name" },
+      { node_id: "40", field: "strength_model", semantic: "strength_model", binding: "lora_weight" },
+      { node_id: "12", field: "width", semantic: "width", binding: "latent_width" },
+      { node_id: "12", field: "height", semantic: "height", binding: "latent_height" },
     ], {
       prompt: "best quality, 8k, high resolution\n1girl, solo, red dress",
       negativePrompt: "low quality, bad anatomy",
@@ -60,6 +60,23 @@ describe("image prompt profiles", () => {
     });
   });
 
+  it("不按同名字段猜测自动注入用途", () => {
+    expect(illustrationTemplateValues([
+      { node_id: "90", field: "width", semantic: "width" },
+      { node_id: "91", field: "text", semantic: "text" },
+    ], {
+      prompt: "prompt",
+      latentSize: { width: 1024, height: 768 },
+    })).toEqual({});
+  });
+
+  it("兼容旧模板保存的语义别名", () => {
+    expect(illustrationTemplateValues([
+      { node_id: "40", field: "strength_model", semantic: "lora_weight" },
+    ], { prompt: "prompt", loraName: "style.safetensors", loraWeight: 0.65 }))
+      .toEqual({ "40.strength_model": 0.65 });
+  });
+
   it("按Agent比例和用户最长边档位换算64对齐的Latent尺寸", () => {
     expect(latentSizeFor("1:1", 1024)).toEqual({ width: 1024, height: 1024 });
     expect(latentSizeFor("2:3", 1024)).toEqual({ width: 704, height: 1024 });
@@ -76,7 +93,7 @@ describe("image prompt profiles", () => {
 
   it("模板未暴露负面语义时保留工作流自己的负面策略", () => {
     expect(illustrationTemplateValues([
-      { node_id: "39", field: "text", semantic: "prompt" },
+      { node_id: "39", field: "text", semantic: "text", binding: "prompt" },
     ], { prompt: "best quality\n1girl", negativePrompt: "low quality" }))
       .toEqual({ "39.text": "best quality\n1girl" });
   });

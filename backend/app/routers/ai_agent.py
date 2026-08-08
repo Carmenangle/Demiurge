@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 from typing import Literal
 
 from app.routers.ai_common import EmbedModelReq
+from app.generated.wire_contracts import AGENT_INVOCATION_WIRE_FIELDS
 from app.services.sse import sse_response
 
 router = APIRouter()
@@ -79,72 +80,22 @@ class MultiAgentRequest(ImageAgentRequest):
     history: list[dict] | None = None  # 前端当前可见历史；显式 [] 禁止回退旧 checkpoint
 
 
+_missing_wire_fields = AGENT_INVOCATION_WIRE_FIELDS.difference(MultiAgentRequest.model_fields)
+if _missing_wire_fields:
+    raise RuntimeError(f"MultiAgentRequest 缺少共享 wire 字段：{sorted(_missing_wire_fields)}")
+
+
 @router.post("/multi-agent")
 def multi_agent(req: MultiAgentRequest) -> StreamingResponse:
     """Supervisor 多 Agent（LangGraph）：默认普通对话，明确执行时分派图片/视频/工具专家。SSE 流式，
     透出节点流转({trace})供前端展示协作过程。生成同样跑在 agent_runner 后台线程里。"""
     from app.services import agent_runner
-    from app.services.agent_contracts import ModelConfig, RunContext
+    from app.services.agent_request_context import from_payload
 
     if not req.message.strip() and not req.images and not req.image_mask:
         raise HTTPException(status_code=400, detail="内容为空")
 
-    bound_cards = list(dict.fromkeys(
-        [name.strip() for name in req.card_names if name.strip()]
-        + ([req.card_name.strip()] if req.card_name.strip() else [])
-    ))
-    opening_card = req.opening_card_name.strip() or req.card_name.strip() or (bound_cards[0] if bound_cards else "")
-    context = RunContext(
-        thread_id=req.thread_id,
-        message=req.message,
-        images=req.images or [],
-        image_mask=req.image_mask.model_dump() if req.image_mask else None,
-        chat=ModelConfig(req.base_url, req.api_key, req.model),
-        generation=ModelConfig(req.gen_base_url, req.gen_api_key, req.gen_model),
-        video=ModelConfig(req.video_base_url, req.video_api_key, req.video_model),
-        embedding=ModelConfig(req.embed_base_url, req.embed_api_key, req.embed_model),
-        size=req.size,
-        image_quality=req.image_quality,
-        output_dir=req.output_dir,
-        repo_id=req.repo_id or req.thread_id,
-        message_id=req.message_id,
-        proxy_url=req.proxy_url,
-        chat_proxy_url=req.chat_proxy_url,
-        gen_proxy_url=req.gen_proxy_url,
-        video_proxy_url=req.video_proxy_url,
-        embed_proxy_url=req.embed_proxy_url,
-        route_model=req.route_model,
-        style_template=req.style_template,
-        agent_id=req.agent_id,
-        stream_output=req.stream_output,
-        approval_id=req.approval_id,
-        approval_action=req.approval_action,
-        edited_prompt=req.edited_prompt,
-        forced_route=req.forced_route,
-        user_message_id=req.user_message_id,
-        workspace_mode=req.workspace_mode,
-        context_max_tokens=req.context_max_tokens,
-        history_per_role=req.history_per_role,
-        history_override=req.history,
-        character_dir=req.character_dir,
-        card_name=opening_card,
-        card_names=bound_cards,
-        opening_card_name=opening_card,
-        preset_dir=req.preset_dir,
-        preset_name=req.preset_name,
-        user_name=req.user_name,
-        user_persona=req.user_persona,
-        persona_bound=req.persona_bound,
-        worldbook_dir=req.worldbook_dir,
-        worldbook_name=req.worldbook_name,
-        illustrate=req.illustrate,
-        comfy_illustrate=req.comfy_illustrate,
-        prompt_profile=req.prompt_profile,
-        appearance_source=req.appearance_source,
-        character_base_images=req.character_base_images or {},
-        illustration_actor_names=req.illustration_actor_names or [],
-        style_base_image=req.style_base_image,
-    )
+    context = from_payload(req.model_dump())
     try:
         q = agent_runner.run_multi_stream(context)
     except agent_runner.RunAlreadyActive as exc:
@@ -275,6 +226,50 @@ class IllustrationFailureRequest(BaseModel):
     stage: str
     error: str
     prompt_id: str = ""
+
+
+class IllustrationSubmissionRequest(BaseModel):
+    thread_id: str
+    repo_id: str = ""
+    turn_id: str = ""
+    message_id: str
+    slot_id: str
+    template_id: str
+    prompt_id: str
+    prompt: str
+    prompt_profile: str = ""
+    lora_name: str = ""
+    lora_weight: float | None = None
+    latent_width: int | None = Field(default=None, ge=1, le=16384)
+    latent_height: int | None = Field(default=None, ge=1, le=16384)
+    value_keys: list[str] = Field(default_factory=list)
+
+
+@router.post("/image-agent/illustration-submission")
+def illustration_submission(req: IllustrationSubmissionRequest) -> dict[str, bool]:
+    """记录前端最终提交给 ComfyUI 的实际参数；追踪失败不影响生图。"""
+    from app.services import run_trace
+    ctx = {
+        "thread_id": req.thread_id,
+        "repo_id": req.repo_id or req.thread_id,
+        "turn_id": req.turn_id,
+    }
+    run_trace.emit(
+        ctx,
+        "illustration.submitted",
+        message_id=req.message_id,
+        slot_id=req.slot_id,
+        template_id=req.template_id,
+        prompt_id=req.prompt_id,
+        prompt=req.prompt,
+        prompt_chars=len(req.prompt),
+        prompt_profile=req.prompt_profile,
+        lora_name=req.lora_name,
+        lora_weight=req.lora_weight,
+        latent={"width": req.latent_width, "height": req.latent_height},
+        value_keys=req.value_keys,
+    )
+    return {"ok": True}
 
 
 @router.post("/image-agent/illustration-failure")

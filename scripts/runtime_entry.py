@@ -95,6 +95,17 @@ def _port_open(port: int) -> bool:
         return False
 
 
+def runtime_port() -> int:
+    raw = os.environ.get("LAF_RUNTIME_PORT", "8010").strip()
+    try:
+        port = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"Invalid LAF_RUNTIME_PORT: {raw}") from exc
+    if not 1 <= port <= 65535:
+        raise ValueError(f"LAF_RUNTIME_PORT out of range: {port}")
+    return port
+
+
 def _open_browser_when_ready(port: int, *, attempts: int = 240) -> None:
     for _ in range(attempts):
         if _port_open(port):
@@ -110,13 +121,14 @@ def main() -> None:
         self_check()
         sys.stdout.flush()
         os._exit(0)
+    port = runtime_port()
     if os.environ.get("LAF_NO_BROWSER", "") != "1":
         threading.Thread(
-            target=_open_browser_when_ready, args=(8010,), daemon=True,
+            target=_open_browser_when_ready, args=(port,), daemon=True,
         ).start()
     import uvicorn
     uvicorn.run(
-        "app.main:app", host="127.0.0.1", port=8010,
+        "app.main:app", host="127.0.0.1", port=port,
         log_level="info", log_config=None,
     )
 

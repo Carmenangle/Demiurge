@@ -78,7 +78,7 @@ export interface UserPersona {
 }
 
 // 多元数据插入预设（按作品绑定）：剧情高潮点用哪个 ComfyUI 工作流模板出图 + 可选角色 LoRA。
-// 提示词由后端从高潮段生成所选 profile，运行时按模板 exposed 的 semantic 组装到对应节点字段。
+// 提示词由后端从高潮段生成所选 profile，运行时按 exposed 的隐藏 binding 注入原工作流字段。
 // ⑥ 单角色的出图绑定：LoRA（ComfyUI 标签系用）+ 底图（gpt-image 系锁一致性用；无 LoRA 时必填）。
 export interface CharacterLoraBinding {
   loraName?: string;    // 该角色的 LoRA 文件名（空=无角色 LoRA，回退风格 LoRA + 底图）

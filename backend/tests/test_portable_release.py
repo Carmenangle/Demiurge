@@ -109,6 +109,11 @@ def test_full_rag_portable_uses_single_7z_archive(monkeypatch, tmp_path):
         assert (source / "stop-dev.bat").is_file()
         assert (source / "scripts" / "start-portable.ps1").is_file()
         assert (source / "scripts" / "stop-portable.ps1").is_file()
+        start_script = (source / "scripts" / "start-portable.ps1").read_text(
+            encoding="utf-8"
+        )
+        assert "DEMIURGE_PORT" in start_script
+        assert "LAF_RUNTIME_PORT" in start_script
         assert not (source / "Demiurge.exe").exists()
         state = json.loads((source / "data" / "runtime" / "current.json").read_text())
         assert state["edition"] == "full-rag"
@@ -124,3 +129,16 @@ def test_full_rag_portable_uses_single_7z_archive(monkeypatch, tmp_path):
     assert [output.suffix for output in outputs] == [".7z"]
     assert not any(part.startswith("-v") for part in seen["command"])
     assert seen["command"][-1] == "Demiurge"
+
+
+def test_seven_zip_resolves_standard_windows_install(monkeypatch, tmp_path):
+    if portable_release.os.name != "nt":
+        pytest.skip("Windows path discovery")
+    executable = tmp_path / "7-Zip" / "7z.exe"
+    executable.parent.mkdir()
+    executable.write_bytes(b"7z")
+    monkeypatch.setenv("ProgramFiles", str(tmp_path))
+    monkeypatch.delenv("SEVEN_ZIP", raising=False)
+    monkeypatch.setattr(portable_release.shutil, "which", lambda _name: None)
+
+    assert portable_release.seven_zip_executable() == str(executable)

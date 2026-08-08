@@ -4,7 +4,15 @@ import { getTemplateRaw } from "../api/workflows";
 import type { ChatMessage } from "../types/chat";
 import { fmtOpResults } from "../lib/opResults";
 import { lockUrl, postToFrame, isLafMessageFromStrict } from "../lib/lafLock";
-import { mergeRequestedNodes } from "../lib/workflowDraft";
+import {
+  canonicalWorkflowDraft, mergeRequestedNodes, preservesWorkflowTopology,
+} from "../lib/workflowDraft";
+import { listLoras } from "../api/loras";
+import { ConfirmModal } from "./Modal";
+import {
+  buildWorkflowLoraProposal, workflowLoraNames, type WorkflowLoraProposal,
+} from "../lib/workflowLoraData";
+import { captureWorkflowApiPrompt, requestFrameMessage } from "../lib/workflowCapture";
 
 // 工作流卡：选中模板后把所选节点逐个嵌入锁定的真实 ComfyUI 画布调参，
 // 「选择完毕」经 ComfyUI 原生 graphToPrompt 抓取合法 API prompt；「AI 编排」触发上层规划。
@@ -36,12 +44,17 @@ export function WorkflowCard({
   const [nodeIds, setNodeIds] = useState<string[]>([]);        // 选中节点（按顺序）
   const [loadErr, setLoadErr] = useState("");
   const [busy, setBusy] = useState(false);
+  const [pendingLora, setPendingLora] = useState<{
+    draft: any;
+    graph: any;
+    proposal: WorkflowLoraProposal;
+  } | null>(null);
 
   // 取模板原始工作流 + 已选节点顺序
   useEffect(() => {
     getTemplateRaw(wf.templateId)
       .then((r) => {
-        setFullWorkflow(wf.draftGraph ?? r.workflow);
+        setFullWorkflow(canonicalWorkflowDraft(r.workflow, wf.draftGraph));
         setNodeIds(r.exposed_ids || []);
       })
       .catch((e) => setLoadErr((e as Error).message));
@@ -53,7 +66,7 @@ export function WorkflowCard({
     if (!fullWorkflow) return;
     setBusy(true);
     try {
-      const base = wf.draftGraph ?? fullWorkflow;
+      const base = fullWorkflow;
       const values = await Promise.all(nodeIds.map((id) => requestNodeValues(id)));
       const merged = mergeRequestedNodes(base, values) as any;
       setFullWorkflow(merged);
@@ -63,8 +76,14 @@ export function WorkflowCard({
       // 自写转换器无法还原自定义 JS 节点的 widget 映射（如 D站画廊的 selection_data），
       // 一旦回退会提交错误 prompt → 出图链断裂。所以原生转换失败就报错让用户重试，绝不静默回退。
       // ops 非空时：在全图 iframe 载入后先执行 AI 的输入口操作（含新建 LoadImage/连线），再抓取。
-      const { prompt: apiPrompt, workflow: capturedDraft, opResults } = await captureApiPrompt(merged, ops);
-      const finalDraft = capturedDraft || merged;
+      const { prompt: apiPrompt, workflow: capturedDraft, opResults } = await captureWorkflowApiPrompt({
+        workflow: merged, comfyUrl, ops,
+      });
+      if (!preservesWorkflowTopology(merged, capturedDraft)) {
+        onNotify("捕获到的是单节点编辑画布，已阻止其覆盖完整工作流。请重新点「选择完毕」。");
+        return;
+      }
+      const finalDraft = capturedDraft;
       setFullWorkflow(finalDraft);
       onDraft(finalDraft);
       if (!apiPrompt) {
@@ -75,9 +94,66 @@ export function WorkflowCard({
         const okN = (opResults || []).filter((r: any) => r.ok).length;
         onNotify(`AI 已写入 ${okN}/${ops.length} 个输入口：\n${fmtOpResults(opResults || [])}\n参数已确认，直接输入 /s 出图。`);
       }
+      const selectedLoras = workflowLoraNames(apiPrompt);
+      if (selectedLoras.length > 0) {
+        try {
+          const loraItems = (await listLoras()).items;
+          const proposal = buildWorkflowLoraProposal(apiPrompt, loraItems);
+          if (proposal) {
+            setPendingLora({ draft: finalDraft, graph: apiPrompt, proposal });
+            return;
+          }
+          onNotify(`检测到 LoRA：${selectedLoras.join("、")}，但没有对应的 LoRA 数据保存记录，已保留当前参数。`);
+        } catch (error) {
+          onNotify(`检测到 LoRA，但读取 LoRA 数据保存失败，已保留当前参数：${(error as Error).message}`);
+        }
+      }
       onDone(finalDraft, apiPrompt);
     } catch (e) {
       onNotify(`抓取参数失败：${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const keepCurrentLoraData = () => {
+    const pending = pendingLora;
+    setPendingLora(null);
+    if (pending) onDone(pending.draft, pending.graph);
+  };
+
+  const applySavedLoraData = async () => {
+    const pending = pendingLora;
+    if (!pending) return;
+    if (pending.proposal.ops.length === 0) {
+      setPendingLora(null);
+      onDone(pending.draft, pending.graph);
+      return;
+    }
+    setBusy(true);
+    try {
+      const captured = await captureWorkflowApiPrompt({
+        workflow: pending.draft, comfyUrl, ops: pending.proposal.ops,
+      });
+      if (!captured.prompt) {
+        onNotify("LoRA 数据写入工作流失败，请重试；当前参数尚未覆盖。");
+        return;
+      }
+      if (!preservesWorkflowTopology(pending.draft, captured.workflow)) {
+        onNotify("LoRA 写入返回了残缺画布，已保留完整工作流，请重试。");
+        return;
+      }
+      const finalDraft = captured.workflow || pending.draft;
+      setFullWorkflow(finalDraft);
+      onDraft(finalDraft);
+      setPendingLora(null);
+      onNotify(
+        `已应用 LoRA 数据：覆盖 ${pending.proposal.weightChanges} 个权重，`
+        + `更新 ${pending.proposal.promptChanges} 个正向提示词输入。`,
+      );
+      onDone(finalDraft, captured.prompt);
+    } catch (error) {
+      onNotify(`LoRA 数据写入失败：${(error as Error).message}`);
     } finally {
       setBusy(false);
     }
@@ -94,99 +170,13 @@ export function WorkflowCard({
     return () => window.removeEventListener("laf-finish-card", onFinish);
   }, [msg.id, wf.done, busy, fullWorkflow, nodeIds]);
 
-  // 用隐藏 iframe 加载完整工作流，调 ComfyUI 自带 graphToPrompt() 拿到合法 API prompt。
-  // ops 非空时：载入后先执行 AI 的输入口操作（apply_ops，含新建 LoadImage/连线），再抓取。
-  // 返回 { prompt, opResults }；prompt 为 null 表示转换失败。
-  const captureApiPrompt = (workflow: any, ops?: any[]) =>
-    new Promise<{ prompt: any | null; workflow: any | null; opResults: any[] }>((resolve) => {
-      const frame = document.createElement("iframe");
-      frame.style.cssText = "position:fixed;width:1200px;height:800px;left:-9999px;top:0;border:0;";
-      frame.src = lockUrl(comfyUrl);
-      let settled = false;
-      let loadSent = false;
-      let opResults: any[] = [];
-      const finish = (val: any | null) => {
-        if (settled) return;
-        settled = true;
-        window.removeEventListener("message", onMsg);
-        try { frame.remove(); } catch { /* ignore */ }
-        console.log("[laf capture] finish, got prompt:", !!val);
-        resolve({ prompt: val?.prompt ?? null, workflow: val?.workflow ?? workflow, opResults });
-      };
-      const sendLoad = () => {
-        if (loadSent) return;
-        loadSent = true;
-        console.log("[laf capture] -> send load");
-        postToFrame(frame.contentWindow, "load", { workflow, exposedIds: [] }, comfyUrl);
-      };
-      const requestPrompt = () => {
-        console.log("[laf capture] -> request_api_prompt");
-        postToFrame(frame.contentWindow, "request_api_prompt", undefined, comfyUrl);
-      };
-      let tries = 0;
-      const onMsg = (ev: MessageEvent) => {
-        if (!isLafMessageFromStrict(ev, frame.contentWindow, comfyUrl)) return; // 只认本隐藏 iframe 的消息
-        const d = ev.data;
-        console.log("[laf capture] <- recv", d.type, d.payload?.ok, d.payload?.error || "");
-        if (d.type === "ready") {
-          // 扩展初始化完成、消息监听已挂 → 此刻发 load 才不会丢
-          sendLoad();
-        } else if (d.type === "loaded") {
-          // 载入完成后：有 AI 操作则先执行 apply_ops，否则直接要 API prompt
-          // （自定义节点 JS 重建 widget 需一拍，延后再操作/抓取）
-          if (ops && ops.length) {
-            setTimeout(() => {
-              postToFrame(frame.contentWindow, "apply_ops", { ops }, comfyUrl);
-            }, 300);
-          } else {
-            setTimeout(requestPrompt, 300);
-          }
-        } else if (d.type === "ops_applied") {
-          opResults = d.payload?.results || [];
-          setTimeout(requestPrompt, 300); // 操作落图后再抓取
-        } else if (d.type === "api_prompt") {
-          if (d.payload?.ok && d.payload.output) {
-            finish({ prompt: d.payload.output, workflow: d.payload.workflow || workflow });
-          } else if (tries++ < 3) {
-            setTimeout(requestPrompt, 600); // 转换暂未就绪 → 重试
-          } else {
-            finish({ prompt: null, workflow: d.payload?.workflow || workflow });
-          }
-        }
-      };
-      window.addEventListener("message", onMsg);
-      document.body.appendChild(frame);
-      // 不要在 ready 之前抢跑发 load：那一刻扩展 setup() 还没运行、消息监听未挂，
-      // load 会被丢弃，而 loadSent 已置位导致真正的 ready 到来时 sendLoad 变空操作 → 死等超时。
-      // 兜底改为：iframe load 后若 8s 仍没收到 ready，主动向其要一次 ready 触发（扩展会回 ready）。
-      frame.addEventListener("load", () =>
-        setTimeout(() => {
-          if (!loadSent) postToFrame(frame.contentWindow, "ping_ready", undefined, comfyUrl);
-        }, 8000),
-      );
-      setTimeout(() => { console.warn("[laf capture] TIMEOUT 30s"); finish(null); }, 30000); // 总超时：冷启动 ComfyUI 较慢，给足时间
-    });
-
   // 用 postMessage 向指定 iframe 要节点参数，等其 node_values 回传
   const requestNodeValues = (nodeId: string) =>
-    new Promise<{ nodeId: string; node: any } | null>((resolve) => {
-      const frame = document.getElementById(`laf-node-${msg.id}-${nodeId}`) as HTMLIFrameElement | null;
-      if (!frame?.contentWindow) return resolve(null);
-      let done = false;
-      const onMsg = (ev: MessageEvent) => {
-        if (!isLafMessageFromStrict(ev, frame.contentWindow, comfyUrl, "node_values")) return;
-        const d = ev.data;
-        if (String(d.payload.nodeId) !== String(nodeId)) return;
-        done = true;
-        window.removeEventListener("message", onMsg);
-        resolve(d.payload);
-      };
-      window.addEventListener("message", onMsg);
-      postToFrame(frame.contentWindow, "request_node", { nodeId }, comfyUrl);
-      setTimeout(() => {
-        if (!done) { window.removeEventListener("message", onMsg); resolve(null); }
-      }, 3000);
-    });
+    requestFrameMessage<{ nodeId: string; node: any }>({
+      frameWindow: (document.getElementById(`laf-node-${msg.id}-${nodeId}`) as HTMLIFrameElement | null)?.contentWindow,
+      comfyUrl, requestType: "request_node", expectedType: "node_values",
+      payload: { nodeId }, timeoutMs: 3000,
+    }).then((value) => String(value?.nodeId) === String(nodeId) ? value : null);
 
   return (
     <div className="msg-bot">
@@ -275,6 +265,17 @@ export function WorkflowCard({
           </>
         )}
       </div>
+      {pendingLora && (
+        <ConfirmModal
+          title="应用 LoRA 数据保存内容"
+          message={`检测到已保存数据的 LoRA：${pendingLora.proposal.loraNames.join("、")}。使用后将覆盖 ${pendingLora.proposal.weightChanges} 个权重；${pendingLora.proposal.promptChanges > 0 ? `更新 ${pendingLora.proposal.promptChanges} 个正向 CLIP 文本，把触发词放在第一行、去重后的质量提示词放在第二行最前方` : "未定位到正向 CLIP 文本，因此不会修改提示词"}。`}
+          confirmText="使用保存数据"
+          cancelText="保留当前参数"
+          busy={busy}
+          onConfirm={applySavedLoraData}
+          onCancel={keepCurrentLoraData}
+        />
+      )}
     </div>
   );
 }

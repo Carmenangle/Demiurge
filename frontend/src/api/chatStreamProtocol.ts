@@ -32,7 +32,7 @@ export type ChatStreamEvent =
   | { type: "replace"; text: string }
   | { type: "image"; url: string; id?: string; regeneration?: RegenerationSnapshot }
   | { type: "video"; url: string; id?: string }
-  | { type: "illustrate_request"; prompt: string; motion: number; actors: string[]; sceneSpec?: IllustrationSceneSpec; id?: string; offset?: number }
+  | { type: "illustrate_request"; prompt: string; motion: number; actors: string[]; sceneSpec?: IllustrationSceneSpec; id?: string; offset?: number; turnId?: string }
   | { type: "rag_status"; state: string; kind: string; count?: number }
   | { type: "inspiration"; card: StreamInspirationCard }
   | { type: "approval"; approval: PromptApproval }
@@ -93,6 +93,7 @@ export function decodeChatStreamEvent(value: unknown): ChatStreamEvent {
           : {}),
         ...(typeof data.id === "string" ? { id: data.id } : {}),
         ...(typeof data.offset === "number" ? { offset: data.offset } : {}),
+        ...(typeof data.turn_id === "string" ? { turnId: data.turn_id } : {}),
       };
     case "rag_status":
       return {

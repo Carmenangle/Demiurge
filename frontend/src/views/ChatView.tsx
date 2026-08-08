@@ -37,23 +37,19 @@ import { StylePresetModal } from "../components/StylePresetModal";
 import { MediaInsertModal } from "../components/MediaInsertModal";
 import { UserMessage, AssistantMessage, InspirationCard, PortsPlanCard } from "../components/chat/ChatMessages";
 import { ModelSwitcher, SizeSwitcher } from "../components/chat/ChatControls";
-import { listRegex } from "../api/regex";
-import { avatarUrl, characterMedia, characterRegex, expressionUrl } from "../api/characters";
-import type { RegexScript } from "../lib/regexEngine";
 import { comfyStatus, startComfy, localViewUrl } from "../api/comfyui";
 import { listAgents, type Agent } from "../api/agents";
 import { listTemplates, type Template } from "../api/workflows";
-import { indexDocument, exportSnapshot, importSnapshot } from "../api/ai";
+import { indexDocument } from "../api/ai";
 import { resolveImageSize, supportsImageQuality } from "../lib/viewRouting";
 import { useGenerationPreferences } from "../lib/generationPreferences";
 import { useWorkflowTemplatePicker } from "../lib/workflowTemplatePicker";
 import { useResizableChatInput } from "../lib/useResizableChatInput";
 import { assistantAvatarState } from "../lib/assistantAvatar";
-import { resolveCharacterPortrait, type CharacterPortrait } from "../lib/characterPortrait";
-import {
-  appendUniqueMessageIds,
-  changedAssistantMessageIds,
-} from "../lib/chatUnread";
+import { resolveCharacterPortrait } from "../lib/characterPortrait";
+import { useChatPresentationAssets } from "../lib/useChatPresentationAssets";
+import { useChatUnreadTracker } from "../lib/useChatUnreadTracker";
+import { useChatTransfer } from "../lib/useChatTransfer";
 
 export function ChatView({
   repo,
@@ -82,18 +78,15 @@ export function ChatView({
 }) {
   const streamRef = useRef<HTMLDivElement | null>(null);   // 对话滚动容器
   const atBottomRef = useRef(true);                        // 用户当前是否贴在底部（决定是否自动跟随）
-  const agentVersionsRef = useRef(new Map<string, string>());
-  const agentTrackerThreadRef = useRef<string | null>(null);
-  const pendingAgentIdsRef = useRef<string[]>([]);
-  const [unreadAgentIds, setUnreadAgentIds] = useState<string[]>([]);
   const richRef = useRef<RichInputHandle | null>(null);
   const chatInput = useResizableChatInput();
   // 显示层正则（markdownOnly）：全局脚本 + 当前卡内嵌脚本里的显示档，渲染 AI 正文前隐藏/压缩 <think> 等区块
-  const [displayRegex, setDisplayRegex] = useState<RegexScript[]>([]);
   const cardNames = repo?.cardNames?.length ? repo.cardNames : (repo?.cardName ? [repo.cardName] : []);
   const cardName = repo?.openingCardName || repo?.cardName || cardNames[0] || "";
   const characterDir = settings.characterDir || "";
-  const [characterPortraits, setCharacterPortraits] = useState<Record<string, CharacterPortrait>>({});
+  const { displayRegex, characterPortraits } = useChatPresentationAssets(
+    cardNames, characterDir, settings.outputDir, repo?.id || "",
+  );
   // 三模式输入框提示各异
   const inputPlaceholder = {
     story: "推进剧情、描写行动或对话；剧情高潮点会自动生成插画内嵌。Enter 发送，图片用上方 + 添加或直接粘贴",
@@ -104,38 +97,6 @@ export function ChatView({
   // useMemo 稳定引用，避免每次渲染新建对象打破消息组件 memo。
   const personaName = activeUserPersona(settings).name || "";
   const chatMacros = useMemo(() => ({ char: cardName, user: personaName }), [cardName, personaName]);
-  useEffect(() => {
-    const onlyDisplay = (arr: RegexScript[]) => arr.filter((s) => s.markdownOnly && !s.disabled);
-    const global = listRegex().then((r) => r.items || []).catch(() => [] as RegexScript[]);
-    const cards = characterDir
-      ? Promise.all(cardNames.map((name) => characterRegex(characterDir, name)
-        .then((r) => (r.items || []) as unknown as RegexScript[]).catch(() => [])))
-        .then((groups) => groups.flat())
-      : Promise.resolve([] as RegexScript[]);
-    let alive = true;
-    // 卡内嵌脚本在前（更贴近该卡），全局在后
-    Promise.all([cards, global]).then(([c, g]) => {
-      if (alive) setDisplayRegex(onlyDisplay([...c, ...g]));
-    });
-    return () => { alive = false; };
-  }, [cardNames.join("\u0000"), characterDir]);
-  useEffect(() => {
-    let alive = true;
-    if (!characterDir || !cardNames.length) { setCharacterPortraits({}); return; }
-    Promise.all(cardNames.map(async (name) => {
-      const media = await characterMedia(characterDir, name, settings.outputDir, repo?.id || "");
-      return [name, {
-        name,
-        avatar: media.has_avatar ? avatarUrl(media.base || characterDir, media.folder) : undefined,
-        expressions: Object.fromEntries(media.expressions.map((item) => [
-          item.name, expressionUrl(media.base || characterDir, media.folder, item.file),
-        ])),
-      } satisfies CharacterPortrait] as const;
-    })).then((items) => { if (alive) setCharacterPortraits(Object.fromEntries(items)); })
-      .catch(() => { if (alive) setCharacterPortraits({}); });
-    return () => { alive = false; };
-  }, [cardNames.join("\u0000"), characterDir, settings.outputDir, repo?.id]);
-
   // 资产库带图进来：挂载后插入输入框一次
   useEffect(() => {
     if (initialImage) {
@@ -149,49 +110,6 @@ export function ChatView({
   const [maskEditorUrl, setMaskEditorUrl] = useState<string | null>(null);
   // 对话线 id = 仓库 id（首页用 "home"）：后端按此落盘多轮记忆与 RAG 知识库
   const threadId = repo?.id || "home";
-
-  const messageEndMarker = useCallback((id: string) => {
-    const stream = streamRef.current;
-    if (!stream) return null;
-    return stream.querySelector<HTMLElement>(`[data-message-end="${CSS.escape(id)}"]`);
-  }, []);
-
-  const syncUnreadAgentMessages = useCallback(() => {
-    const stream = streamRef.current;
-    if (!stream) return;
-    if (atBottomRef.current) {
-      pendingAgentIdsRef.current = [];
-      setUnreadAgentIds([]);
-      return;
-    }
-    const viewportBottom = stream.getBoundingClientRect().bottom;
-    const hidden = pendingAgentIdsRef.current.filter((id) => {
-      const marker = messageEndMarker(id);
-      return marker && marker.getBoundingClientRect().top > viewportBottom + 1;
-    });
-    setUnreadAgentIds((current) => (
-      current.length === hidden.length && current.every((id, index) => id === hidden[index])
-        ? current
-        : hidden
-    ));
-  }, [messageEndMarker]);
-
-  // 记录用户是否贴在底部，并在用户已看到消息末端后移除提示。
-  const onStreamScroll = () => {
-    const el = streamRef.current;
-    if (!el) return;
-    atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-    if (atBottomRef.current) {
-      pendingAgentIdsRef.current = [];
-    } else {
-      const viewportBottom = el.getBoundingClientRect().bottom;
-      pendingAgentIdsRef.current = pendingAgentIdsRef.current.filter((id) => {
-        const marker = messageEndMarker(id);
-        return marker && marker.getBoundingClientRect().top > viewportBottom + 1;
-      });
-    }
-    syncUnreadAgentMessages();
-  };
 
   const [modelId, setModelId] = useState(
     settings.activeImageModelId || settings.imageModels[0]?.id || "",
@@ -256,6 +174,12 @@ export function ChatView({
     size: resolvedImageSize.size,
     imageQuality: generationPreferences.quality, templates, setShowPicker, atBottomRef,
   });
+  const {
+    unreadAgentIds, onStreamScroll, syncUnreadAgentMessages, jumpToFirstUnreadAgentMessage,
+  } = useChatUnreadTracker(threadId, messages, streamRef, atBottomRef);
+  const {
+    snapshotFileRef, handleExportChat, handleImportChatFile,
+  } = useChatTransfer(threadId, repo?.name || "会话", reloadFromSnapshot, pushBot);
 
   const pickTemplateAndRemember = (t: Template) => {
     templatePicker.remember(t.id);
@@ -273,34 +197,6 @@ export function ChatView({
   setCoverRef.current = setCover;
   const repoIdRef = useRef(repo?.id);
   repoIdRef.current = repo?.id;
-
-  // 会话导出：拉取本作品完整会话记录 → 下载 JSON（剧情模式常用备份/搬运）
-  const snapshotFileRef = useRef<HTMLInputElement>(null);
-  const handleExportChat = async () => {
-    const tid = repo?.id || "home";
-    try {
-      const data = await exportSnapshot(tid);
-      const blob = new Blob([JSON.stringify(data.messages ?? [], null, 2)], { type: "application/json" });
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = `${repo?.name || "会话"}-${tid}.json`;
-      a.click();
-      URL.revokeObjectURL(a.href);
-    } catch { pushBot("导出会话失败，请重试。"); }
-  };
-  // 会话导入：选 JSON 文件 → 整体覆盖本作品会话记录 → 重载视图
-  const handleImportChatFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0];
-    e.target.value = "";
-    if (!f) return;
-    try {
-      const parsed = JSON.parse(await f.text());
-      const messages = Array.isArray(parsed) ? parsed : parsed?.messages;
-      if (!Array.isArray(messages)) { pushBot("导入失败：文件格式不是会话记录数组。"); return; }
-      await importSnapshot(repo?.id || "home", messages, true);
-      await reloadFromSnapshot();
-    } catch { pushBot("导入会话失败：文件无法解析或写入失败。"); }
-  };
 
   const handleAddToChat = useCallback((url: string) => richRef.current?.insertImage(url), []);
   const handleEditMessage = useCallback((content: RichContent) => {
@@ -374,47 +270,6 @@ export function ChatView({
   useEffect(() => {
     listTemplates().then((r) => setTemplates(r.items)).catch(() => {});
   }, []);
-
-  // 消息变化时智能跟随；离开底部后，按顺序记录末端尚未进入视口的 Agent 消息。
-  useEffect(() => {
-    const el = streamRef.current;
-    if (!el) return;
-
-    const activity = changedAssistantMessageIds(agentVersionsRef.current, messages);
-    const nextVersions = activity.versions;
-    if (agentTrackerThreadRef.current !== threadId) {
-      agentTrackerThreadRef.current = threadId;
-      agentVersionsRef.current = nextVersions;
-      atBottomRef.current = true;
-      pendingAgentIdsRef.current = [];
-      setUnreadAgentIds([]);
-      return;
-    }
-
-    const changedIds = activity.ids;
-    agentVersionsRef.current = nextVersions;
-
-    if (atBottomRef.current) {
-      el.scrollTop = el.scrollHeight;
-      pendingAgentIdsRef.current = [];
-      setUnreadAgentIds([]);
-      return;
-    }
-
-    pendingAgentIdsRef.current = appendUniqueMessageIds(pendingAgentIdsRef.current, changedIds);
-    requestAnimationFrame(syncUnreadAgentMessages);
-  }, [messages, syncUnreadAgentMessages, threadId]);
-
-  const jumpToFirstUnreadAgentMessage = useCallback(() => {
-    const stream = streamRef.current;
-    const id = unreadAgentIds[0];
-    if (!stream || !id) return;
-    const anchor = stream.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(id)}"]`);
-    if (!anchor) return;
-    pendingAgentIdsRef.current = pendingAgentIdsRef.current.filter((candidate) => candidate !== id);
-    setUnreadAgentIds((current) => current.filter((candidate) => candidate !== id));
-    stream.scrollTo({ top: Math.max(0, anchor.offsetTop - 12), behavior: "smooth" });
-  }, [unreadAgentIds]);
 
   // 面板打开时轮询 ComfyUI 状态
   useEffect(() => {

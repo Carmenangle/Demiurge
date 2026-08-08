@@ -11,7 +11,8 @@
       "field": "steps",
       "label": "采样步数",       # 展示用标签
       "control": "number",       # 控件类型 text/number/textarea/select/image/seed/boolean
-      "semantic": "steps",       # 语义标签，供 AI 自动填充
+      "semantic": "steps",       # 始终等于原工作流字段名
+      "binding": "",             # 内部自动用途，不要求用户映射
       "default": 20              # 默认值
     }
   ],
@@ -45,24 +46,84 @@ def _normalize_ids(values) -> list[str]:
     return out
 
 
-def _auto_latent_fields(record: dict, exposed: list[dict]) -> list[dict]:
-    """唯一 EmptyLatentImage 可无歧义绑定；多节点工作流必须由用户手动标注。"""
-    if any(field.get("semantic") in ("latent_width", "latent_height") for field in exposed):
-        return exposed
+def _workflow_nodes(record: dict) -> list[dict]:
     workflow = record.get("workflow_data")
     nodes = workflow.get("nodes") if isinstance(workflow, dict) else None
     if isinstance(nodes, list):
-        latent_nodes = [
-            node for node in nodes
-            if isinstance(node, dict) and node.get("type") == "EmptyLatentImage"
-        ]
-    elif isinstance(workflow, dict):
-        latent_nodes = [
+        return [node for node in nodes if isinstance(node, dict)]
+    if isinstance(workflow, dict):
+        return [
             {**node, "id": node_id} for node_id, node in workflow.items()
-            if isinstance(node, dict) and node.get("class_type") == "EmptyLatentImage"
+            if isinstance(node, dict) and "class_type" in node
         ]
-    else:
+    return []
+
+
+def _infer_binding(record: dict, node_id: str, field_name: str) -> str:
+    node = next(
+        (item for item in _workflow_nodes(record) if str(item.get("id")) == node_id),
+        {},
+    )
+    node_type = str(node.get("type") or node.get("class_type") or "").lower()
+    title = str(node.get("title") or "").lower()
+    name = field_name.lower()
+    if name == "lora_name" and "lora" in node_type:
+        return "lora_name"
+    if name in ("strength_model", "strength_clip") and "lora" in node_type:
+        return "lora_weight"
+    if node_type == "emptylatentimage" and name == "width":
+        return "latent_width"
+    if node_type == "emptylatentimage" and name == "height":
+        return "latent_height"
+    if "loadimage" in node_type and name in ("image", "images"):
+        return "base_image"
+    if "cliptextencode" in node_type and name == "text":
+        return "negative_prompt" if any(word in title for word in ("negative", "负面", "负向")) else "prompt"
+    return ""
+
+
+def _normalize_exposed(record: dict) -> list[dict]:
+    normalized: dict[tuple[str, str], dict] = {}
+    for raw in record.get("exposed") or []:
+        if not isinstance(raw, dict):
+            continue
+        node_id = str(raw.get("node_id") or "").strip()
+        field_name = str(raw.get("field") or "").strip()
+        if not node_id or not field_name:
+            continue
+        legacy_semantic = str(raw.get("semantic") or "").strip()
+        binding = str(raw.get("binding") or "").strip()
+        if not binding and legacy_semantic and legacy_semantic != field_name:
+            binding = legacy_semantic
+        binding = binding or _infer_binding(record, node_id, field_name)
+        item = {
+            **raw,
+            "node_id": node_id,
+            "field": field_name,
+            "label": field_name,
+            "semantic": field_name,
+        }
+        if binding:
+            item["binding"] = binding
+        else:
+            item.pop("binding", None)
+        key = (node_id, field_name)
+        if key not in normalized:
+            normalized[key] = item
+        elif binding and not normalized[key].get("binding"):
+            normalized[key]["binding"] = binding
+    return list(normalized.values())
+
+
+def _auto_latent_fields(record: dict, exposed: list[dict]) -> list[dict]:
+    """唯一 EmptyLatentImage 可无歧义绑定；多节点工作流必须由用户手动标注。"""
+    if all(any(field.get("binding") == binding for field in exposed)
+           for binding in ("latent_width", "latent_height")):
         return exposed
+    latent_nodes = [
+        node for node in _workflow_nodes(record)
+        if (node.get("type") or node.get("class_type")) == "EmptyLatentImage"
+    ]
     if len(latent_nodes) != 1:
         return exposed
     node = latent_nodes[0]
@@ -73,13 +134,21 @@ def _auto_latent_fields(record: dict, exposed: list[dict]) -> list[dict]:
     inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
     width = widgets[0] if isinstance(widgets, list) and len(widgets) > 0 else inputs.get("width", 1024)
     height = widgets[1] if isinstance(widgets, list) and len(widgets) > 1 else inputs.get("height", 1024)
-    return [
-        *exposed,
-        {"node_id": node_id, "field": "width", "label": "Latent 宽度",
-         "control": "number", "semantic": "latent_width", "default": width},
-        {"node_id": node_id, "field": "height", "label": "Latent 高度",
-         "control": "number", "semantic": "latent_height", "default": height},
-    ]
+    result = [*exposed]
+    for field_name, binding, default in (
+        ("width", "latent_width", width), ("height", "latent_height", height),
+    ):
+        existing = next((field for field in result
+                         if field["node_id"] == node_id and field["field"] == field_name), None)
+        if existing:
+            existing["binding"] = binding
+        else:
+            result.append({
+                "node_id": node_id, "field": field_name, "label": field_name,
+                "control": "number", "semantic": field_name,
+                "binding": binding, "default": default,
+            })
+    return result
 
 
 def _normalize(record: dict) -> dict:
@@ -90,13 +159,7 @@ def _normalize(record: dict) -> dict:
     inputs = _normalize_ids(record.get("input_node_ids"))
     for legacy in (record.get("prompt_node_id"), record.get("image_node_id")):
         inputs = _normalize_ids([*inputs, legacy])
-    exposed: list[dict] = []
-    for field in record.get("exposed") or []:
-        if not isinstance(field, dict):
-            continue
-        node_id = str(field.get("node_id") or "").strip()
-        if node_id:
-            exposed.append({**field, "node_id": node_id})
+    exposed = _normalize_exposed(record)
     exposed = _auto_latent_fields(record, exposed)
     normalized.update({
         "exposed": exposed,
@@ -113,7 +176,10 @@ def _normalize(record: dict) -> dict:
 def ordered_node_ids(record: dict) -> list[str]:
     """画布节点顺序：用户顺序、其余暴露节点、输入节点、输出节点。"""
     tpl = _normalize(record)
-    exposed = [field["node_id"] for field in tpl.get("exposed", [])]
+    exposed = _normalize_ids([
+        *[field["node_id"] for field in tpl.get("exposed", [])],
+        *[field.get("node_id") for field in record.get("exposed", []) if isinstance(field, dict)],
+    ])
     return _normalize_ids([
         *tpl.get("node_order", []), *exposed,
         *tpl.get("input_node_ids", []), *tpl.get("output_node_ids", []),

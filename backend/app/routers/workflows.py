@@ -72,6 +72,7 @@ class ExposedField(BaseModel):
     label: str = ""
     control: str = "text"
     semantic: str = ""
+    binding: str = ""
     default: object | None = None
 
 

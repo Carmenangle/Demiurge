@@ -66,8 +66,11 @@ jobs:
         working-directory: frontend
         run: |
           npm ci
+          npm run check:wire
           npm test
           npm run build
+          npx playwright install --with-deps chromium
+          npm run test:e2e
 
   vendor-closure:
     runs-on: windows-2025

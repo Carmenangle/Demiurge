@@ -77,6 +77,13 @@ interface SemanticField {
   node_id: string;
   field: string;
   semantic: string;
+  binding?: string;
+}
+
+export function workflowFieldBinding(field: SemanticField): string {
+  if (field.binding) return field.binding;
+  if (field.semantic && field.semantic !== field.field) return field.semantic; // 旧模板兼容
+  return "";
 }
 
 interface IllustrationValues {
@@ -117,18 +124,19 @@ export function illustrationTemplateValues(
   const values: Record<string, unknown> = {};
   for (const field of exposed) {
     const key = `${field.node_id}.${field.field}`;
-    if (field.semantic === "prompt") values[key] = input.prompt;
-    else if (field.semantic === "negative_prompt" && input.negativePrompt) {
+    const binding = workflowFieldBinding(field);
+    if (binding === "prompt") values[key] = input.prompt;
+    else if (binding === "negative_prompt" && input.negativePrompt) {
       values[key] = input.negativePrompt;
-    } else if (field.semantic === "lora_name" && input.loraName) {
+    } else if (binding === "lora_name" && input.loraName) {
       values[key] = input.loraName;
-    } else if (field.semantic === "lora_weight" && input.loraName) {
+    } else if (binding === "lora_weight" && input.loraName) {
       values[key] = input.loraWeight ?? 0.8;
-    } else if (field.semantic === "base_image" && input.baseImage) {
+    } else if (binding === "base_image" && input.baseImage) {
       values[key] = input.baseImage;
-    } else if (field.semantic === "latent_width" && input.latentSize) {
+    } else if (binding === "latent_width" && input.latentSize) {
       values[key] = input.latentSize.width;
-    } else if (field.semantic === "latent_height" && input.latentSize) {
+    } else if (binding === "latent_height" && input.latentSize) {
       values[key] = input.latentSize.height;
     }
   }

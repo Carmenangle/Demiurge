@@ -10,6 +10,14 @@ def _ready(monkeypatch):
     monkeypatch.setattr(workflow_submission.comfyui_client, "is_up", lambda url: True)
 
 
+def _output_info(monkeypatch):
+    monkeypatch.setattr(
+        workflow_submission.comfyui_client,
+        "fetch_object_info",
+        lambda _url: {"SaveImage": {"output_node": True}},
+    )
+
+
 def test_模板提交集中完成读取注入和上游提交(tmp_path, monkeypatch):
     source = tmp_path / "workflow.json"
     source.write_text(json.dumps({"1": {"class_type": "Node", "inputs": {}}}), encoding="utf-8")
@@ -58,6 +66,12 @@ def test_模板缺少必填输入返回422(tmp_path, monkeypatch):
 
 def test_图提交保留ComfyUI错误语义(monkeypatch):
     _ready(monkeypatch)
+    _output_info(monkeypatch)
+    monkeypatch.setattr(
+        workflow_submission,
+        "ui_to_api",
+        lambda graph, url: {"1": {"class_type": "SaveImage", "inputs": {}}},
+    )
     monkeypatch.setattr(
         workflow_submission.comfyui_client,
         "submit_prompt",
@@ -73,8 +87,13 @@ def test_图提交保留ComfyUI错误语义(monkeypatch):
 
 def test_图提交在ComfyUI执行前释放Reranker(monkeypatch):
     _ready(monkeypatch)
+    _output_info(monkeypatch)
     order = []
-    monkeypatch.setattr(workflow_submission, "ui_to_api", lambda graph, url: {})
+    monkeypatch.setattr(
+        workflow_submission,
+        "ui_to_api",
+        lambda graph, url: {"1": {"class_type": "SaveImage", "inputs": {}}},
+    )
     monkeypatch.setattr(
         workflow_submission.reranker,
         "release_accelerator_memory",
@@ -88,3 +107,26 @@ def test_图提交在ComfyUI执行前释放Reranker(monkeypatch):
 
     workflow_submission.submit_graph({}, "http://127.0.0.1:8188")
     assert order == ["release", "submit"]
+
+
+def test_图提交在请求ComfyUI前拒绝无输出的单节点残片(monkeypatch):
+    _ready(monkeypatch)
+    _output_info(monkeypatch)
+    monkeypatch.setattr(
+        workflow_submission,
+        "ui_to_api",
+        lambda graph, url: {"39": {"class_type": "CLIPTextEncode", "inputs": {}}},
+    )
+    submitted = []
+    monkeypatch.setattr(
+        workflow_submission.comfyui_client,
+        "submit_prompt",
+        lambda *args: submitted.append(args),
+    )
+
+    with pytest.raises(workflow_submission.WorkflowSubmissionError) as exc_info:
+        workflow_submission.submit_graph({}, "http://127.0.0.1:8188")
+
+    assert exc_info.value.status == 422
+    assert "没有可执行输出节点" in str(exc_info.value.detail)
+    assert submitted == []

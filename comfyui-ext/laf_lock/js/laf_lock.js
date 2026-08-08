@@ -741,12 +741,70 @@ function bindLongPress() {
   window.addEventListener("pointercancel", cancelPress, true);
 }
 
-// ===== 载入工作流 + 守护（防止 ComfyUI 会话恢复覆盖我们指定的工作流）=====
+// ===== 清除 ComfyUI 持久化会话，防止之前打开的大工作流在 iframe 加载时恢复 =====
+function clearComfyStorage() {
+  try {
+    // ① localStorage：清理工作流/画布状态的持久化缓存（不碰模型路径/设置/偏好）
+    for (const key of Object.keys(localStorage)) {
+      const lower = key.toLowerCase();
+      if (lower.includes("workflow") || lower.includes("workspace")
+        || key.startsWith("pinia-") || key.startsWith("localforage/")) {
+        localStorage.removeItem(key);
+      }
+    }
+    // ② sessionStorage：清理当前 tab 内的工作流快照
+    try {
+      const keys = [];
+      for (let i = 0; i < sessionStorage.length; i++) {
+        keys.push(sessionStorage.key(i));
+      }
+      for (const key of keys) {
+        if (key) {
+          const lower = key.toLowerCase();
+          if (lower.includes("workflow") || lower.includes("workspace")) {
+            sessionStorage.removeItem(key);
+          }
+        }
+      }
+    } catch (e) { /* sessionStorage 不可用 */ }
+    // ③ IndexedDB：ComfyUI 新前端（Lit + Pinia + localforage/idb-keyval）会把工作流状态写入
+    // IndexedDB，执行流程后（如用 Krea2 生图）写入更完整的运行态数据。必须清理掉，
+    // 否则 localStorage 清空后 ComfyUI 仍从 IndexedDB 恢复出完整工作流。
+    // 异步执行，不阻塞后续逻辑
+    _clearComfyIndexedDB();
+  } catch (e) { /* 清理失败不阻断 */ }
+}
+
+function _clearComfyIndexedDB() {
+  try {
+    const request = indexedDB.databases ? indexedDB.databases() : null;
+    if (request && typeof request.then === "function") {
+      request.then((dbs) => {
+        for (const db of dbs) {
+          if (!db.name) continue;
+          const lower = db.name.toLowerCase();
+          if (lower.includes("workflow") || lower.includes("workspace")
+            || lower.includes("comfy") || lower.includes("localforage")
+            || lower.includes("keyval")) {
+            try { indexedDB.deleteDatabase(db.name); } catch (e) {}
+          }
+        }
+      }).catch(() => {});
+    }
+  } catch (e) {}
+}
+
 let watchdog = null;
 let soloNode = null;       // 单节点模式下当前展示的节点
 let resizeHooked = false;  // 是否已挂 resize 重新贴合
+let loadedWorkflow = null; // 本 iframe 的拓扑真源；捕获前用于抵御会话恢复/其他画布污染
+let loadedExposedIds = [];
 
 async function applyLoad(workflow, exposedIds) {
+  loadedWorkflow = workflow;
+  loadedExposedIds = Array.isArray(exposedIds) ? [...exposedIds] : [];
+  // ② 载入目标工作流前再次清掉可能被恢复的残留——ComfyUI 部分插件在 graph.clear 后仍可能写回
+  clearComfyStorage();
   try { app.graph.clear(); } catch (e) {}
   selectedIds.clear();
   // 载图：某些扩展(reroute 等)可能在 loadGraphData 内部抛/挂起，加超时兜底，
@@ -908,6 +966,8 @@ if (LOCK) {
   app.registerExtension({
     name: "LocalAIFrontend.Lock",
     async setup() {
+      // ① 在 ComfyUI 初始化前先清掉上回会话残留的工作流，从源头消灭会话恢复覆盖
+      clearComfyStorage();
       hideChrome();
       installGlobalGuards();
       // 收父窗口消息
@@ -950,6 +1010,13 @@ if (LOCK) {
           // 用 ComfyUI 自带的 graphToPrompt() 生成 API 格式（与原生“运行”完全一致，
           // 正确处理 bypass/reroute/widget 顺序/seed 控件/自定义节点 JS 映射，避免自写转换器出错被 /prompt 拒绝）
           try {
+            const expected = sigFromWorkflow(loadedWorkflow, loadedExposedIds);
+            if (expected && sigFromGraph() !== expected) {
+              await applyLoad(loadedWorkflow, loadedExposedIds);
+            }
+            if (expected && sigFromGraph() !== expected) {
+              throw new Error("工作流画布拓扑不完整");
+            }
             // 等一拍让自定义节点 JS（如 D站画廊）重建隐藏 widget（selection_data）后再序列化。
             // 注意：隐藏 iframe 在屏幕外，requestAnimationFrame 会被浏览器冻结 → 不能用它等待，
             // 否则永远不返回、api_prompt 永不回传。用 setTimeout（后台 iframe 仍会触发）。
@@ -1087,6 +1154,8 @@ if (FULL) {
   app.registerExtension({
     name: "LocalAIFrontend.Full",
     async setup() {
+      // ① 在 ComfyUI 初始化前先清掉上回会话残留（含 IndexedDB 中的执行后工作流）
+      clearComfyStorage();
       window.addEventListener("message", async (ev) => {
         const d = ev.data;
         if (!d || d.target !== "laf_lock") return;
@@ -1094,6 +1163,8 @@ if (FULL) {
           toParent("ready", {});
         } else if (d.type === "load") {
           didLoad = true;  // 之后不再自动清空
+          // ② 载入前再清一次——ComfyUI 的初始清空序列可能在前几次 clear+close 后把旧会话重新保存
+          clearComfyStorage();
           // 载入整图（不裁剪、不锁定）；大图/扩展异常兜底，无论成败都回 loaded 防父页死等
           // 兼容 API prompt 格式（AI/骨架输出），用 loadAnyFormat 分流。
           try {
@@ -1104,6 +1175,10 @@ if (FULL) {
             ]);
           } catch (e) {
             console.error("[laf_full] load error:", e);
+          }
+          // 画布刚刚载入了新工作流但可能停在旧滚动位置 → 延迟居中
+          for (const ms of [100, 300, 700]) {
+            setTimeout(() => { try { fitAll(); } catch (e) {} }, ms);
           }
           try { await closeExtraWorkflows(); } catch (e) {}  // 只留一个工作流标签，别堆叠
           toParent("loaded", { ok: true });

@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   buildHash, calcSize, ASPECTS, IMAGE_QUALITIES, RES_TIERS, supportsImageQuality,
   normalizeCustomDimension, resolveHomeWorkspace, resolveImageSize,
-  resolveActivityChatTarget, WORK_MODES, workspaceModeForWire,
+  resolveActivityChatTarget, SECTION_SUBNAV, WORK_MODES, workspaceModeForWire,
 } from "./viewRouting";
 import type { Repo } from "../stores/repos";
 
@@ -20,6 +20,14 @@ describe("edit mode", () => {
     });
     expect(workspaceModeForWire("code")).toBe("edit");
     expect(workspaceModeForWire("story")).toBe("story");
+  });
+});
+
+describe("system navigation", () => {
+  it("places LoRA data beside tools and between model downloads and node management", () => {
+    expect(SECTION_SUBNAV.system.map((item) => item.id)).toEqual([
+      "models", "lora-data", "node-manager", "tools",
+    ]);
   });
 });
 

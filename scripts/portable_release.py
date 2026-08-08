@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import urllib.request
@@ -100,11 +101,25 @@ def _write_zip(tree: Path, output: Path, root_name: str) -> Path:
     return output
 
 
+def seven_zip_executable() -> str:
+    explicit = os.environ.get("SEVEN_ZIP", "").strip()
+    candidates = [explicit, shutil.which("7z") or ""]
+    if os.name == "nt":
+        candidates.extend([
+            str(Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "7-Zip" / "7z.exe"),
+            str(Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "7-Zip" / "7z.exe"),
+        ])
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file():
+            return candidate
+    raise FileNotFoundError("未找到 7-Zip；请安装 7-Zip 或设置 SEVEN_ZIP")
+
+
 def _write_7z(tree: Path, output: Path, root_name: str) -> Path:
     output = output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
-        ["7z", "a", "-t7z", "-mx=5", str(output), root_name],
+        [seven_zip_executable(), "a", "-t7z", "-mx=5", str(output), root_name],
         cwd=tree.parent,
         check=True,
     )

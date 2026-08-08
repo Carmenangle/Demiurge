@@ -1,7 +1,6 @@
 import { useState } from "react";
-import { ArrowLeftRight, Braces, CaseSensitive, Eraser, Film, Grid3x3, Palette, Scaling, Sparkles, Tags, TextQuote, Wrench } from "lucide-react";
+import { ArrowLeftRight, Braces, CaseSensitive, Eraser, Film, Grid3x3, Palette, Scaling, Sparkles, TextQuote, Wrench } from "lucide-react";
 import { PageShell, EmptyState } from "../components/layout/PageShell";
-import { LoraTriggersTab } from "./tools/LoraTriggersTab";
 import { GifToSpriteTab } from "./tools/GifToSpriteTab";
 import { SpriteToGifTab } from "./tools/SpriteToGifTab";
 import { PaletteTab } from "./tools/PaletteTab";
@@ -12,15 +11,9 @@ import {
 
 // 多功能工具：非核心但偶尔要用的小工具集中在此，避免各自占一个侧栏栏目。
 // 新增工具 = 往 TOOLS 里加一项 + 在下方 tab 渲染处加一行条件渲染。
-type Tool = "lora-triggers" | "gif-to-sprite" | "sprite-to-gif" | "palette" | "resize"
+type Tool = "gif-to-sprite" | "sprite-to-gif" | "palette" | "resize"
   | "text-clean" | "text-join" | "text-insert" | "text-stats" | "text-escape" | "chinese-convert";
 const TOOLS: { key: Tool; label: string; desc: string; icon: typeof Wrench }[] = [
-  {
-    key: "lora-triggers",
-    label: "LoRA 数据保存",
-    desc: "保存 LoRA 触发词与建议权重，自动生成时随模型切换",
-    icon: Tags,
-  },
   {
     key: "gif-to-sprite",
     label: "GIF 转精灵图",
@@ -59,7 +52,6 @@ export function ToolsView({ repoId }: { repoId: string }) {
   // 选中某个工具后进入该工具自己的页面（自带 PageShell 与返回）。
   // 加新工具时这里也要加一行，否则会渲染成别的工具。
   const back = () => setTool(null);
-  if (tool === "lora-triggers") return <LoraTriggersTab onBack={back} />;
   if (tool === "gif-to-sprite") return <GifToSpriteTab onBack={back} />;
   if (tool === "sprite-to-gif") return <SpriteToGifTab onBack={back} />;
   if (tool === "palette") return <PaletteTab onBack={back} repoId={repoId} />;

@@ -118,6 +118,10 @@ def test_rag_dependencies_and_pinned_torch_install_in_one_secure_transaction(
     command = commands[0]
     assert f"torch=={target.torch_version}" in command
     assert str(ROOT / "backend" / "requirements-reranker.txt") in command
+    assert str(ROOT / "release" / "requirements-rag.lock") in command
+    assert "tokenizers==0.22.2" in (
+        ROOT / "release" / "requirements-rag.lock"
+    ).read_text(encoding="utf-8")
     assert "--extra-index-url" in command
     assert command[command.index("--index-url") + 1].startswith("https://")
     assert "--no-compile" in command
@@ -250,6 +254,24 @@ def test_content_addressed_directory_promotion_retries_windows_lock(
     assert destination.is_dir()
 
 
+def test_content_addressed_directory_promotion_copies_after_persistent_windows_lock(
+    monkeypatch, tmp_path,
+):
+    source = tmp_path / "pending"
+    destination = tmp_path / "content-id"
+    source.mkdir()
+    (source / "manifest.json").write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(Path, "rename", lambda _path, _target: (_ for _ in ()).throw(
+        PermissionError("persistently locked")
+    ))
+    monkeypatch.setattr(runtime_release.time, "sleep", lambda _seconds: None)
+
+    runtime_release.promote_directory(source, destination, attempts=2)
+
+    assert (destination / "manifest.json").read_text(encoding="utf-8") == "{}"
+
+
 def test_npm_executable_resolves_windows_command_wrapper(monkeypatch):
     monkeypatch.setattr(
         runtime_release.shutil,
@@ -342,3 +364,33 @@ def test_application_layer_keeps_backend_source_visible(tmp_path):
 
     assert (tree / "backend" / "app" / "main.py").is_file()
     assert not (tree / "backend.zip").exists()
+
+
+def test_reusable_layers_require_matching_ids_and_verified_assets(tmp_path):
+    target = runtime_release.load_targets(
+        ROOT / "release" / "runtime-targets.json"
+    )["windows-x64-full-rag"]
+    base = tmp_path / "base.zip"
+    rag = tmp_path / "rag.zip.part01"
+    base.write_bytes(b"base")
+    rag.write_bytes(b"rag")
+    layers = {
+        "base": {"archive": "base.zip", "assets": [{
+            "name": base.name, "size": base.stat().st_size,
+            "sha256": runtime_release.sha256_file(base),
+        }]},
+        "rag": {"archive": "rag.zip", "definition_id": "rag-definition", "assets": [{
+            "name": rag.name, "size": rag.stat().st_size,
+            "sha256": runtime_release.sha256_file(rag),
+        }]},
+    }
+    runtime_release.write_json(tmp_path / f"Demiurge-update-old-{target.id}.json", {
+        "base_id": "base-id", "rag_id": "rag-content", "layers": layers,
+    })
+
+    assert runtime_release.reusable_layers(
+        tmp_path, target, "base-id", "rag-definition"
+    ) == layers
+    rag.write_bytes(b"changed")
+    with pytest.raises(RuntimeError, match="大小错误|校验失败"):
+        runtime_release.reusable_layers(tmp_path, target, "base-id", "rag-definition")

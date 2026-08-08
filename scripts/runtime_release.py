@@ -178,6 +178,7 @@ def rag_id(root: Path, target: RuntimeTarget) -> str:
         target.os, target.arch, target.python_version, target.accelerator,
         target.torch_version, target.torch_index_url,
         (root / "backend" / "requirements-reranker.txt").read_bytes(),
+        (root / "release" / "requirements-rag.lock").read_bytes(),
     ])
 
 
@@ -215,15 +216,21 @@ def write_json(path: Path, payload: dict) -> Path:
 
 
 def promote_directory(source: Path, destination: Path, *, attempts: int = 20) -> None:
-    """内容寻址目录晋升；Windows 索引器短暂占用时有限重试。"""
+    """内容寻址目录晋升；Windows 长时间锁目录时回退为确定性复制。"""
     for attempt in range(attempts):
         try:
             source.rename(destination)
             return
         except PermissionError:
             if attempt + 1 == attempts:
-                raise
+                break
             time.sleep(0.2)
+    shutil.copytree(source, destination)
+    try:
+        shutil.rmtree(source)
+    except PermissionError:
+        # staging 不参与归档；被索引器持续占用时留给 work-dir 下次整体清理。
+        pass
 
 
 def create_archive(tree: Path, archive: Path, root_name: str) -> Path:
@@ -374,6 +381,7 @@ def build_rag_tree(root: Path, target: RuntimeTarget, tree: Path) -> str:
         *pip_index_args(),
         "--target", str(packages),
         "-r", str(root / "backend" / "requirements-reranker.txt"),
+        "-c", str(root / "release" / "requirements-rag.lock"),
         f"torch=={target.torch_version}",
     ]
     if target.torch_index_url:
@@ -440,7 +448,40 @@ def run_runtime_self_check(
             )
 
 
-def build_runtime(root: Path, target: RuntimeTarget, version: str, output_dir: Path, work_dir: Path, *, install_deps: bool) -> list[Path]:
+def reusable_layers(
+    assets_dir: Path, target: RuntimeTarget, expected_base_id: str, expected_rag_definition_id: str,
+) -> dict[str, dict]:
+    """Load and verify content-addressed Base/RAG assets for an incremental build."""
+    candidates = []
+    for path in assets_dir.glob(f"{APP_NAME}-update-*-{target.id}.json"):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        layers = payload.get("layers", {})
+        rag_layer = layers.get("rag", {}) if isinstance(layers, dict) else {}
+        if (
+            payload.get("base_id") == expected_base_id
+            and rag_layer.get("definition_id") == expected_rag_definition_id
+        ):
+            candidates.append(payload)
+    if len(candidates) != 1:
+        raise RuntimeError(f"需要唯一匹配内容 ID 的复用清单，实际找到 {len(candidates)} 个")
+    layers = candidates[0].get("layers", {})
+    for name in ("base", "rag"):
+        layer = layers.get(name)
+        if not isinstance(layer, dict):
+            raise RuntimeError(f"复用清单缺少 {name} 层")
+        for asset in layer.get("assets", []):
+            source = assets_dir / str(asset["name"])
+            if not source.is_file() or source.stat().st_size != int(asset["size"]):
+                raise RuntimeError(f"复用资产缺失或大小错误：{source.name}")
+            if sha256_file(source) != asset["sha256"]:
+                raise RuntimeError(f"复用资产校验失败：{source.name}")
+    return {"base": layers["base"], "rag": layers["rag"]}
+
+
+def build_runtime(
+    root: Path, target: RuntimeTarget, version: str, output_dir: Path, work_dir: Path,
+    *, install_deps: bool, reuse_layers_from: Path | None = None,
+) -> list[Path]:
     if not _host_matches(target):
         raise RuntimeError(f"当前主机不能构建目标 {target.id}")
     if install_deps:
@@ -456,6 +497,39 @@ def build_runtime(root: Path, target: RuntimeTarget, version: str, output_dir: P
     app_layer_id = build_application_tree(root, frontend_dist, app_tree, version)
     final_app_tree = app_tree.with_name(app_layer_id)
     promote_directory(app_tree, final_app_tree)
+
+    if reuse_layers_from is not None:
+        base_layer_id = base_id(root, target)
+        rag_layer_id = rag_id(root, target) if target.full_rag else ""
+        reused = reusable_layers(reuse_layers_from.resolve(), target, base_layer_id, rag_layer_id)
+        state = {
+            "schema_version": 2, "app_version": version, "target": target.id,
+            "edition": target.edition, "base_id": base_layer_id,
+            "application_id": app_layer_id, "rag_id": rag_layer_id,
+        }
+        app_assets, app_layer = package_layer(
+            final_app_tree,
+            output_dir / f"{APP_NAME}-application-{version}-{target.id}.zip",
+            f"application-{app_layer_id}", app_layer_id,
+        )
+        outputs = list(app_assets)
+        for layer in reused.values():
+            for asset in layer["assets"]:
+                source = reuse_layers_from.resolve() / str(asset["name"])
+                destination = output_dir / source.name
+                shutil.copy2(source, destination)
+                outputs.append(destination)
+            parts_manifest = reuse_layers_from.resolve() / f"{layer['archive']}.parts.json"
+            if parts_manifest.is_file():
+                destination = output_dir / parts_manifest.name
+                shutil.copy2(parts_manifest, destination)
+                outputs.append(destination)
+        manifest = write_json(
+            output_dir / f"{APP_NAME}-update-{version}-{target.id}.json",
+            {**state, "layers": {"base": reused["base"], "application": app_layer, "rag": reused["rag"]}},
+        )
+        outputs.append(manifest)
+        return outputs
 
     _run(pyinstaller_command(target, root, work_dir), root, pyinstaller_environment(target, root, work_dir))
     built_base = work_dir / "dist" / RUNTIME_NAME
@@ -509,6 +583,7 @@ def build_runtime(root: Path, target: RuntimeTarget, version: str, output_dir: P
             output_dir / f"{APP_NAME}-rag-{rag_layer_id}-{target.id}{suffix}",
             f"rag-{rag_layer_id}", rag_layer_id,
         )
+        rag_layer["definition_id"] = rag_id(root, target)
         outputs.extend(rag_assets)
         layers["rag"] = rag_layer
 
@@ -531,6 +606,7 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--output-dir", type=Path, required=True)
     build.add_argument("--work-dir", type=Path, required=True)
     build.add_argument("--install-deps", action="store_true")
+    build.add_argument("--reuse-layers-from", type=Path)
     verify = sub.add_parser("verify")
     verify.add_argument("--target", required=True)
     verify.add_argument("--tree", type=Path, required=True)
@@ -555,7 +631,10 @@ def main() -> int:
             print("ERROR: " + error)
         return 1 if errors else 0
     root = Path(__file__).resolve().parents[1]
-    assets = build_runtime(root, target, args.version, args.output_dir, args.work_dir, install_deps=args.install_deps)
+    assets = build_runtime(
+        root, target, args.version, args.output_dir, args.work_dir,
+        install_deps=args.install_deps, reuse_layers_from=args.reuse_layers_from,
+    )
     for asset in assets:
         print(asset)
     return 0

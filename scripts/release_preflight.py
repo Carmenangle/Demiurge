@@ -30,6 +30,7 @@ REQUIRED_PATHS = (
     "backend/requirements-reranker.txt",
     "frontend/package.json",
     "frontend/package-lock.json",
+    "release/requirements-rag.lock",
     "release/runtime-targets.json",
     "release/runtime-layered.spec",
     "release/windows/start-dev.bat",

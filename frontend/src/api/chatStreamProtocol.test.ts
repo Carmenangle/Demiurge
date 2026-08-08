@@ -47,10 +47,10 @@ describe("chat stream protocol", () => {
     };
     expect(decodeChatStreamEvent(event("illustrate_request", {
       prompt: "legacy", motion: 1, actors: ["爱丽丝"], id: "slot-1",
-      scene_spec: sceneSpec,
+      scene_spec: sceneSpec, turn_id: "turn-1",
     }))).toEqual({
       type: "illustrate_request", prompt: "legacy", motion: 1,
-      actors: ["爱丽丝"], id: "slot-1", sceneSpec,
+      actors: ["爱丽丝"], id: "slot-1", sceneSpec, turnId: "turn-1",
     });
   });
 });

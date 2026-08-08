@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { mergeRequestedNodes } from "./workflowDraft";
+import {
+  canonicalWorkflowDraft, mergeRequestedNodes, preservesWorkflowTopology,
+} from "./workflowDraft";
 
 const base = {
   nodes: [
@@ -64,5 +66,22 @@ describe("mergeRequestedNodes", () => {
     expect(result.nodes[0].inputs[0]).toMatchObject({ name: "image", widget: { value: "x.png" } });
     expect(result.nodes[0].inputs[0].link).toBeUndefined();
     expect(result.nodes[0].outputs[0].links).toBeUndefined();
+  });
+});
+
+describe("workflow topology boundary", () => {
+  it("rejects a captured single-node editor graph", () => {
+    const fragment = { nodes: [{ id: 51, type: "DanbooruGalleryNode" }] };
+    expect(preservesWorkflowTopology(base, fragment)).toBe(false);
+    expect(canonicalWorkflowDraft(base, fragment)).toBe(base);
+  });
+
+  it("keeps a complete draft and permits appended orchestration nodes", () => {
+    const complete = {
+      ...base,
+      nodes: [...base.nodes, { id: 99, type: "LoadImage" }],
+    };
+    expect(preservesWorkflowTopology(base, complete)).toBe(true);
+    expect(canonicalWorkflowDraft(base, complete)).toBe(complete);
   });
 });

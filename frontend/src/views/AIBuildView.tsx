@@ -10,7 +10,8 @@ import {
 } from "../api/ai";
 import { comfyStatus } from "../api/comfyui";
 import { fullUrl, postToFrame, isLafMessageFromStrict } from "../lib/lafLock";
-import { useBuildSession } from "../lib/useBuildSession";
+import { requestFrameMessage } from "../lib/workflowCapture";
+import { BuildWorkspaceRuntime } from "../lib/buildWorkspaceRuntime";
 import { confirmedPlanExecution } from "../lib/workflowBuildExecution";
 import {
   cancelWorkflowBuild, enqueueWorkflowBuild, subscribeWorkflowBuildActivities,
@@ -20,15 +21,6 @@ import {
 // 一轮对话消息（左栏）。pendingNeed 非空=这是顾问模式的方案消息，带「同意执行/编辑/取消」按钮。
 // pendingNeed=点同意时真正搭建用的需求(原需求+方案)；planText=纯方案文本，供「编辑」填回输入框改。
 interface Msg { id: string; role: "user" | "assistant"; text: string; pendingNeed?: string; planText?: string; planOriginalNeed?: string; editing?: boolean; missingNodes?: string[]; alternatives?: Record<string, string[]>; retryNeed?: string; }
-
-const handledActivityKey = (sessionId: string) => `laf_workflow_handled_${sessionId}`;
-const readHandledActivityIds = (sessionId: string) => {
-  try { return JSON.parse(localStorage.getItem(handledActivityKey(sessionId)) || "[]") as string[]; } catch { return []; }
-};
-const rememberHandledActivity = (sessionId: string, id: string) => {
-  const ids = [...new Set([...readHandledActivityIds(sessionId), id])].slice(-100);
-  localStorage.setItem(handledActivityKey(sessionId), JSON.stringify(ids));
-};
 
 // AI 搭工作流（双栏）：左栏多轮对话与 AI 探讨，右栏完整功能 ComfyUI 画布。
 // AI 每轮读回右侧画布作上下文 → 输出完整 graph → 写入右侧；用户可在画布里手动接着改。
@@ -48,7 +40,6 @@ export function AIBuildView({ onInstallNode }: { onInstallNode?: (q: string) => 
   const [skeletons, setSkeletons] = useState<Skeleton[]>([]);
   const [loadingSkel, setLoadingSkel] = useState("");  // 正在载入的骨架 id
   // 搭建会话（进度保存 + 多开）
-  const LAST_KEY = "laf_build_last_session";
   const [sessionId, setSessionId] = useState<string>("");
   const sessionIdRef = useRef("");
   const sessionCreationRef = useRef<Promise<string> | null>(null);
@@ -59,10 +50,11 @@ export function AIBuildView({ onInstallNode }: { onInstallNode?: (q: string) => 
   const skeletonIdRef = useRef<string>("");   // 当前会话用的骨架 id（存进会话）
   const frameRef = useRef<HTMLIFrameElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const buildSession = useBuildSession();
+  const buildRuntimeRef = useRef<BuildWorkspaceRuntime | null>(null);
+  if (!buildRuntimeRef.current) buildRuntimeRef.current = new BuildWorkspaceRuntime(localStorage);
+  const buildRuntime = buildRuntimeRef.current;
   const abortRef = useRef<AbortController | null>(null);   // 正在跑的搭建请求，供“停止”按钮中止
   const [activities, setActivities] = useState<WorkflowBuildActivity[]>([]);
-  const handledActivities = useRef(new Set<string>(readHandledActivityIds("draft")));
 
   // 版本历史：每次成功写画布/载入底座都压一版，可撤销/重做（graph 存在前端，撤销即重载回画布）
   type GraphVer = { graph: Record<string, unknown>; label: string; at: number };
@@ -166,13 +158,10 @@ export function AIBuildView({ onInstallNode }: { onInstallNode?: (q: string) => 
   useEffect(() => {
     if (!ready) return;
     const key = sessionId || "draft";
-    for (const id of readHandledActivityIds(key)) handledActivities.current.add(id);
-    for (const activity of activities) {
-      if ((activity.sessionId !== key && activity.sessionId !== "draft") || !["done", "error"].includes(activity.status) || handledActivities.current.has(activity.id)) continue;
-      handledActivities.current.add(activity.id);
-      rememberHandledActivity(key, activity.id);
+    for (const activity of buildRuntime.claimTerminal(activities, key)) {
       if (activity.id.startsWith("pending-")) {
         setMsgs((current) => [...current, { id: crypto.randomUUID(), role: "assistant", text: `请求失败：${activity.error || "未知错误"}` }]);
+        buildRuntime.completeActivity(key, activity.id);
         continue;
       }
       void getBuildSession(activity.sessionId).then((saved) => {
@@ -181,15 +170,16 @@ export function AIBuildView({ onInstallNode }: { onInstallNode?: (q: string) => 
           postToFrame(frameRef.current?.contentWindow, "load", { workflow: saved.graph }, settings.comfyuiUrl);
           pushVersion(saved.graph, activity.need.slice(0, 20) || "AI 生成");
         }
+        buildRuntime.completeActivity(key, activity.id);
         refreshSessions();
-      }).catch(() => {});
+      }).catch(() => { buildRuntime.releaseActivity(activity.id); });
     }
   }, [activities, ready, sessionId, settings.comfyuiUrl]);
 
   // 自动保存进度：对话变化后防抖 1.5s 存一次（有内容且画布就绪才存），避免刷新/重启丢进度
   const autoSaveRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
-    if (!buildSession.canAutosave(ready, msgs.length > 0)) return;
+    if (!buildRuntime.canAutosave(ready, msgs.length > 0)) return;
     if (autoSaveRef.current) clearTimeout(autoSaveRef.current);
     autoSaveRef.current = setTimeout(() => { saveProgress(true); }, 1500);
     return () => { if (autoSaveRef.current) clearTimeout(autoSaveRef.current); };
@@ -211,7 +201,11 @@ export function AIBuildView({ onInstallNode }: { onInstallNode?: (q: string) => 
     try {
       const r = await skeletonGraph(s.id, settings.workflowDir);
       // 等 iframe 回 loaded（applyLoad/loadAnyFormat 完成，无论成败都会回）。丢弃/超时→null。
-      const ack = await ask<{ ok?: boolean }>("load", "loaded", 15000, { workflow: r.graph });
+      const ack = await requestFrameMessage<{ ok?: boolean }>({
+        frameWindow: frameRef.current?.contentWindow, comfyUrl: settings.comfyuiUrl,
+        requestType: "load", expectedType: "loaded", timeoutMs: 15000,
+        payload: { workflow: r.graph },
+      });
       if (!ack) { setNote("画布未响应载入（ComfyUI 可能仍在初始化），请稍候重试"); return; }
       resetVersions(r.graph, `骨架「${s.name}」`);
       skeletonIdRef.current = s.id;
@@ -243,9 +237,8 @@ export function AIBuildView({ onInstallNode }: { onInstallNode?: (q: string) => 
       localStorage.removeItem("laf_pending_build_graph");
       try {
         const graph = JSON.parse(pending);
-        buildSession.startNew();
+        buildRuntime.startNew();
         setSessionId("");
-        localStorage.removeItem(LAST_KEY);
         postToFrame(frameRef.current?.contentWindow, "load", { workflow: graph }, settings.comfyuiUrl);
         resetVersions(graph, "带入的工作流");
         push("assistant", "已把工作流写入右侧画布，你可以直接手动调整，或继续告诉我要改什么。");
@@ -254,22 +247,22 @@ export function AIBuildView({ onInstallNode }: { onInstallNode?: (q: string) => 
       } catch { /* 解析失败则走正常恢复 */ }
     }
     // 2) 否则恢复上次会话
-    const last = localStorage.getItem(LAST_KEY);
+    const last = buildRuntime.lastSessionId();
     if (last) restoreSession(last);
   }, [ready]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 保存当前进度：读回画布图 + 当前对话，存进会话（新建则生成 id）
   const saveProgress = async (silent = false) => {
-    const generation = buildSession.modelRef.current.generation;
+    const generation = buildRuntime.generation();
     const currentSessionId = sessionId;
     try {
       const graph = await readGraph();
-      if (!buildSession.owns(generation)) return;
+      if (!buildRuntime.owns(generation)) return;
       const r = await saveBuildSession({
         id: currentSessionId, name: sessionName, msgs, graph, skeletonId: skeletonIdRef.current,
       });
-      if (!buildSession.finishSave(generation, r.id)) return;
-      if (!currentSessionId) { setSessionId(r.id); localStorage.setItem(LAST_KEY, r.id); }
+      if (!buildRuntime.finishSave(generation, r.id)) return;
+      if (!currentSessionId) setSessionId(r.id);
       if (!currentSessionId) sessionIdRef.current = r.id;
       refreshSessions();
       if (!silent) setNote(`已保存进度到「${r.name}」`);
@@ -280,17 +273,16 @@ export function AIBuildView({ onInstallNode }: { onInstallNode?: (q: string) => 
 
   // 恢复某会话：拉完整内容 → 恢复对话 → load 画布图回右侧
   const restoreSession = async (id: string) => {
-    const generation = buildSession.startRestore();
+    const generation = buildRuntime.startRestore();
     if (autoSaveRef.current) clearTimeout(autoSaveRef.current);
     try {
       const s = await getBuildSession(id);
-      if (!buildSession.finishRestore(generation, s.id)) return;
+      if (!buildRuntime.finishRestore(generation, s.id)) return;
       setSessionId(s.id);
       sessionIdRef.current = s.id;
       setSessionName(s.name);
       skeletonIdRef.current = s.skeleton_id || "";
       setMsgs((s.msgs as Msg[]) || []);
-      localStorage.setItem(LAST_KEY, s.id);
       if (s.graph && Object.keys(s.graph).length) {
         postToFrame(frameRef.current?.contentWindow, "load", { workflow: s.graph }, settings.comfyuiUrl);
         resetVersions(s.graph, "恢复的会话");
@@ -306,7 +298,7 @@ export function AIBuildView({ onInstallNode }: { onInstallNode?: (q: string) => 
 
   // 新建会话：清空对话 + 清空画布 + 重置 id
   const newSession = () => {
-    buildSession.startNew();
+    buildRuntime.startNew();
     if (autoSaveRef.current) clearTimeout(autoSaveRef.current);
     setSessionId("");
     sessionIdRef.current = "";
@@ -315,7 +307,6 @@ export function AIBuildView({ onInstallNode }: { onInstallNode?: (q: string) => 
     skeletonIdRef.current = "";
     setMsgs([]);
     resetVersions();
-    localStorage.removeItem(LAST_KEY);
     postToFrame(frameRef.current?.contentWindow, "clear_graph", undefined, settings.comfyuiUrl);
     setShowSessions(false);
     setNote("已新建空白会话");
@@ -334,28 +325,12 @@ export function AIBuildView({ onInstallNode }: { onInstallNode?: (q: string) => 
     }
   };
 
-  // 向右侧画布发消息并等指定类型回复（payload 可选：如 load 需带 workflow）
-  const ask = <T,>(type: string, expect: string, ms = 6000, payload?: unknown) =>
-    new Promise<T | null>((resolve) => {
-      const win = frameRef.current?.contentWindow;
-      if (!win) return resolve(null);
-      let done = false;
-      const onMsg = (ev: MessageEvent) => {
-        if (!isLafMessageFromStrict(ev, win, settings.comfyuiUrl, expect)) return;
-        done = true;
-        window.removeEventListener("message", onMsg);
-        resolve(ev.data.payload as T);
-      };
-      window.addEventListener("message", onMsg);
-      postToFrame(win, type, payload, settings.comfyuiUrl);
-      setTimeout(() => { if (!done) { window.removeEventListener("message", onMsg); resolve(null); } }, ms);
-    });
-
   // 读回右侧画布当前 API 格式（作 AI 上下文；空画布返回 {}）
   const readGraph = async (): Promise<Record<string, unknown>> => {
-    const r = await ask<{ output?: Record<string, unknown>; ok?: boolean }>(
-      "request_api_prompt", "api_prompt", 8000,
-    );
+    const r = await requestFrameMessage<{ output?: Record<string, unknown>; ok?: boolean }>({
+      frameWindow: frameRef.current?.contentWindow, comfyUrl: settings.comfyuiUrl,
+      requestType: "request_api_prompt", expectedType: "api_prompt", timeoutMs: 8000,
+    });
     return r?.output || {};
   };
 
@@ -363,9 +338,10 @@ export function AIBuildView({ onInstallNode }: { onInstallNode?: (q: string) => 
   // 落盘保存必须用这个：ComfyUI 侧栏打开工作流走标准载入，只认 UI 格式；
   // 存 API 格式(无 nodes 数组)会被解析成空白画布。同一条 api_prompt 消息里已带回 workflow。
   const readGraphUI = async (): Promise<Record<string, unknown> | null> => {
-    const r = await ask<{ workflow?: Record<string, unknown>; ok?: boolean }>(
-      "request_api_prompt", "api_prompt", 8000,
-    );
+    const r = await requestFrameMessage<{ workflow?: Record<string, unknown>; ok?: boolean }>({
+      frameWindow: frameRef.current?.contentWindow, comfyUrl: settings.comfyuiUrl,
+      requestType: "request_api_prompt", expectedType: "api_prompt", timeoutMs: 8000,
+    });
     return r?.workflow || null;
   };
 
@@ -384,7 +360,7 @@ export function AIBuildView({ onInstallNode }: { onInstallNode?: (q: string) => 
       }).then((saved) => {
         sessionIdRef.current = saved.id;
         setSessionId(saved.id);
-        localStorage.setItem(LAST_KEY, saved.id);
+        buildRuntime.finishSave(buildRuntime.generation(), saved.id);
         refreshSessions();
         return saved.id;
       }).finally(() => { sessionCreationRef.current = null; });

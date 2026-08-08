@@ -1,11 +1,13 @@
 import { describe, it, expect } from "vitest";
 import {
-  needsImageInput, hasImageProvided, pickBestText, shouldFinalize, slimSnapshot,
-  registerPending, unregisterPending, pendingResumeAction, pollSchedule, promptHistory,
-  generationResultAction, notFoundPollAction,
+  needsImageInput, hasImageProvided, pickBestText, slimSnapshot, promptHistory,
   prependLoraTriggers, prepareConversationRegeneration, resolveGenerationPrompt,
   promptAdditionsForSelectedLora, triggersForSelectedLora,
 } from "./chatGeneration";
+import {
+  generationResultAction, notFoundPollAction, pendingResumeAction, pollSchedule,
+  registerPending, shouldFinalize, unregisterPending,
+} from "./workflowGenerationRuntime";
 import type { Template } from "../api/workflows";
 import type { ChatMessage } from "../types/chat";
 

@@ -12,6 +12,7 @@ interface ConfirmProps {
   title: string;
   message?: string;
   confirmText?: string;
+  cancelText?: string;
   danger?: boolean;
   busy?: boolean;
   onConfirm: () => void;
@@ -19,7 +20,7 @@ interface ConfirmProps {
 }
 
 export function ConfirmModal({
-  title, message, confirmText = "确认", danger, busy = false, onConfirm, onCancel,
+  title, message, confirmText = "确认", cancelText = "取消", danger, busy = false, onConfirm, onCancel,
 }: ConfirmProps) {
   useEsc(() => { if (!busy) onCancel(); });
   return (
@@ -29,7 +30,7 @@ export function ConfirmModal({
         {message && <p style={{ color: "#666", marginTop: 0 }}>{message}</p>}
         <div className="modal-actions">
           <button className="btn" disabled={busy} onClick={onCancel}>
-            取消
+            {cancelText}
           </button>
           <button
             className={`btn ${danger ? "danger" : "primary"}`}

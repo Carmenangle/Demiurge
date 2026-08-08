@@ -32,6 +32,7 @@ function hintFor(id: string): string {
     "ai-build": "AI 按需求搭工作流",
     "node-index": "节点知识库",
     models: "模型下载",
+    "lora-data": "保存 LoRA 触发词、作者建议提示词与建议权重",
     "node-manager": "节点管理",
     tools: "多功能工具",
   };

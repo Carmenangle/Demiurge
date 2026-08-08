@@ -2,9 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { X, Upload, Plus, Trash2, RefreshCw, TableProperties, Settings } from "lucide-react";
 import {
   listTables, importTableTemplate, addTableRow, updateTableRow, deleteTableRow,
-  createTable, dropTable, setTableMeta, getTableConfig, setTableConfig,
-  getTableStatus, manualFillTables,
-  type DataTable, type TableConfig, type TableStatus, type ChatModelInput,
+  createTable, dropTable, setTableMeta,
+  type DataTable, type TableConfig, type ChatModelInput,
 } from "../api/tables";
 import { getState, patchState, type CharacterStateDto } from "../api/state";
 import {
@@ -12,6 +11,7 @@ import {
   type ChronicleEntry,
 } from "../api/narrative";
 import { groupStateCards } from "../lib/stateCards";
+import { useManualTableFill, useTableConfig } from "../lib/useTableWorkflows";
 
 interface Props {
   outputDir: string;
@@ -499,45 +499,11 @@ function ManualFillPane({ outputDir, repoId, cardName, chat, busy, setBusy, setE
   setErr: (s: string) => void;
   reloadAll: () => void;
 }) {
-  const [status, setStatus] = useState<TableStatus | null>(null);
-  const [selected, setSelected] = useState<string[]>([]);
-  const [recentTurns, setRecentTurns] = useState(10);
-  const [batchTurns, setBatchTurns] = useState(3);
-  const [result, setResult] = useState("");
-
-  const loadStatus = () => getTableStatus(outputDir, repoId, cardName).then((next) => {
-    setStatus(next);
-    setSelected((current) => current.length ? current : next.items.filter((item) => item.selectable).map((item) => item.uid));
-  });
-  useEffect(() => {
-    loadStatus().catch((e) => setErr(String((e as Error).message)));
-  }, [outputDir, repoId, cardName]);
-
-  const run = async () => {
-    if (!selected.length) return;
-    setBusy(true); setErr(""); setResult("");
-    try {
-      let response = await manualFillTables(
-        outputDir, repoId, cardName, selected, recentTurns, batchTurns, null, chat,
-      );
-      if (response.needs_confirmation) {
-        const overwrite = window.confirm(
-          `最近 ${recentTurns} 层与已有记录重叠（选中表最少仅 ${response.minimum_unrecorded ?? 0} 层未记录）。\n` +
-          "点「确定」局部覆盖这些消息对应的已有记录；点「取消」跳过已有消息，只补未记录部分。",
-        );
-        response = await manualFillTables(
-          outputDir, repoId, cardName, selected, recentTurns, batchTurns, overwrite, chat,
-        );
-      }
-      setResult(`处理 ${response.processed ?? 0} 层；通用表写入 ${response.applied ?? 0} 项；新增纪要 ${response.chronicles ?? 0} 条。`);
-      await loadStatus();
-      reloadAll();
-    } catch (e) {
-      setErr(String((e as Error).message));
-    } finally {
-      setBusy(false);
-    }
-  };
+  const workflow = useManualTableFill(
+    outputDir, repoId, cardName, chat, { busy, setBusy, setError: setErr }, reloadAll,
+  );
+  const { status, selected, recentTurns, batchTurns, result, run, toggle,
+    setRecentTurns, setBatchTurns } = workflow;
 
   return (
     <div className="manual-fill-workbench">
@@ -552,9 +518,7 @@ function ManualFillPane({ outputDir, repoId, cardName, chat, busy, setBusy, setE
           {status?.items.map((item) => (
             <label className="manual-fill-status-item" key={item.uid}>
               <input type="checkbox" checked={selected.includes(item.uid)} disabled={busy || !item.selectable}
-                onChange={(event) => setSelected((current) => event.target.checked
-                  ? [...current, item.uid]
-                  : current.filter((uid) => uid !== item.uid))} />
+                onChange={(event) => toggle(item.uid, event.target.checked)} />
               <span>
                 <b>{item.name}</b>
                 <small>每 {item.frequency} 层 · 未记录 {item.unrecorded} 层 · 上次 T{item.last_turn || 0}</small>
@@ -604,20 +568,9 @@ function SettingsPane({ outputDir, repoId, busy, setBusy, setErr }: {
   setBusy: (b: boolean) => void;
   setErr: (s: string) => void;
 }) {
-  const [cfg, setCfg] = useState<TableConfig | null>(null);
-  useEffect(() => {
-    getTableConfig(outputDir, repoId).then((d) => setCfg(d.config)).catch((e) => setErr(String((e as Error).message)));
-  }, [outputDir, repoId, setErr]);
-
-  const commit = async (key: keyof TableConfig, val: number) => {
-    if (!cfg) return;
-    const next = { ...cfg, [key]: val };
-    setCfg(next);
-    setBusy(true); setErr("");
-    try { setCfg((await setTableConfig(outputDir, repoId, { [key]: val })).config); }
-    catch (e) { setErr(String((e as Error).message)); }
-    finally { setBusy(false); }
-  };
+  const { config: cfg, commit } = useTableConfig(
+    outputDir, repoId, { busy, setBusy, setError: setErr },
+  );
 
   if (!cfg) return <p style={{ color: "var(--text-muted)" }}>加载中…</p>;
   return (

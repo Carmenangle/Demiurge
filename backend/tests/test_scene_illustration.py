@@ -131,6 +131,19 @@ def test_首轮普通剧情兜底选择动作视觉段而不是结尾收束段()
     assert offset < len(text)
 
 
+def test_兜底锚点优先选择改变剧情状态的信笺动作而非静态收束肖像():
+    text = (
+        "她抬手，以暗影在信笺上写下三条命令。\n\n"
+        "她把信笺对折，信笺化作黑色流光穿出帷幔。\n\n"
+        "她靠回椅背，嘴角弯起极浅弧度。\n\n"
+        "不急。"
+    )
+
+    anchor = si.fallback_illustration_anchor(text)
+
+    assert anchor == "她把信笺对折，信笺化作黑色流光穿出帷幔。"
+
+
 def test_兜底锚点只在content正文中选择并忽略think与残缺控制块():
     text = (
         "<think>规划高潮、俯身、凝视、光影与构图。</think>\n"

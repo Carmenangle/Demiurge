@@ -75,3 +75,14 @@ def test_插画事件保留Profile生成所需场景源():
     })
 
     assert event["data"]["scene_spec"] == scene_spec
+
+
+def test_插画事件保留回合id供最终提交Trace关联():
+    event = protocol.encode_event({
+        "illustrate_request": {
+            "prompt": "p", "motion": 0, "actors": [], "turn_id": "turn-1",
+        },
+        "id": "slot-1",
+    })
+
+    assert event["data"]["turn_id"] == "turn-1"

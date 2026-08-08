@@ -1,4 +1,5 @@
 app/services/agent_contracts.py
+app/services/agent_request_context.py
 app/services/run_trace.py
 app/services/thread_admission.py
 app/services/view_urls.py
@@ -11,6 +12,7 @@ app/services/scene_renderers.py
 app/services/narrative_memory.py
 app/services/narrative_store.py
 app/services/roleplay_agency.py
+app/services/roleplay_turn.py
 app/services/scene_classify.py
 app/services/image_prompt_extract.py
 app/services/image_prompt_profiles.py

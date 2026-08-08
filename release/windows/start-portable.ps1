@@ -5,7 +5,14 @@ $runtimeRoot = Join-Path $packageRoot "data\runtime"
 $statePath = Join-Path $runtimeRoot "current.json"
 $dataDir = Join-Path $packageRoot "data\userdata"
 $pidPath = Join-Path $runtimeRoot "runtime.pid"
-$url = "http://127.0.0.1:8010"
+$port = 8010
+if ($env:DEMIURGE_PORT) {
+  $port = [int]$env:DEMIURGE_PORT
+}
+if ($port -lt 1 -or $port -gt 65535) {
+  throw "DEMIURGE_PORT must be between 1 and 65535."
+}
+$url = "http://127.0.0.1:$port"
 
 function Test-PortOpen([int]$Port) {
   $connection = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
@@ -47,8 +54,8 @@ if (Test-Path -LiteralPath $pidPath) {
   Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
 }
 
-if (Test-PortOpen 8010) {
-  throw "Port 8010 is already used by another process."
+if (Test-PortOpen $port) {
+  throw "Port $port is already used by another process."
 }
 
 New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
@@ -56,6 +63,7 @@ $env:LAF_RUNTIME_ROOT = $runtimeRoot
 $env:LAF_RUNTIME_STATE = $statePath
 $env:LAF_DATA_DIR = $dataDir
 $env:LAF_NO_BROWSER = "1"
+$env:LAF_RUNTIME_PORT = [string]$port
 $process = Start-Process -FilePath $runtimeExe -WorkingDirectory $runtimeRoot `
   -WindowStyle Hidden -PassThru
 Set-Content -LiteralPath $pidPath -Value $process.Id -Encoding ASCII
@@ -69,5 +77,7 @@ if (-not (Wait-HttpReady $url 120 $process)) {
   throw "Demiurge Runtime was not ready within 120 seconds."
 }
 
-Start-Process $url | Out-Null
+if ($env:DEMIURGE_NO_BROWSER -ne "1") {
+  Start-Process $url | Out-Null
+}
 Write-Host "Demiurge started." -ForegroundColor Green

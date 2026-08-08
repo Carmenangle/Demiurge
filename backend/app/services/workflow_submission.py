@@ -66,6 +66,20 @@ def submit_graph(workflow: dict[str, object], url: str, client_id: str = "") -> 
         api = ui_to_api(workflow, normalized_url)
     except Exception as exc:  # noqa: BLE001
         raise WorkflowSubmissionError(400, f"工作流转换失败：{exc}") from exc
+    try:
+        object_info = comfyui_client.fetch_object_info(normalized_url)
+    except ComfyError as exc:
+        raise WorkflowSubmissionError(exc.status, f"无法校验工作流输出节点：{exc.detail}") from exc
+    output_nodes = [
+        node_id for node_id, node in api.items()
+        if isinstance(node, dict)
+        and bool(object_info.get(str(node.get("class_type") or ""), {}).get("output_node"))
+    ]
+    if not output_nodes:
+        raise WorkflowSubmissionError(
+            422,
+            "工作流没有可执行输出节点；单节点参数画布不能作为完整工作流提交，请重新打开卡片并选择完毕",
+        )
     reranker.release_accelerator_memory()
     try:
         prompt_id = comfyui_client.submit_prompt(normalized_url, api, client_id)

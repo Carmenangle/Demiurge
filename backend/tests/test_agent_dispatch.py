@@ -1274,6 +1274,36 @@ def test_comfy优先采用主模型同轮生成的选中模式提示词(monkeypa
     }
 
 
+def test_主模型把动作峰值写成静态肖像时纠正锚点并废弃错误Profile(monkeypatch, tmp_path):
+    from app.services import character_state
+
+    deps = ra.AgencyDeps(chat_fn=lambda *a, **k: "[]", rng=random.Random(0), state_base=str(tmp_path))
+    monkeypatch.setattr(ra, "extract_status_snapshot", lambda reply: {})
+    monkeypatch.setattr(ra, "parse_state_block", lambda reply: (reply, []))
+    monkeypatch.setattr(ra, "writeback", lambda *a, **k: (10.0, 10.0))
+    monkeypatch.setattr(character_state, "load_state", lambda *a, **k: {})
+    monkeypatch.setattr(ra, "_narr", lambda *a, **k: "")
+    reply = (
+        "她抬手，以暗影在信笺上写下三条命令。\n\n"
+        "她把信笺对折，信笺化作黑色流光穿出帷幔。\n\n"
+        "她靠回椅背，嘴角弯起极浅弧度。\n\n不急。"
+        '<illustration>{"anchor":"她靠回椅背，嘴角弯起极浅弧度。","camera":"中近景",'
+        '"composition":"中心构图","subjects":[{"name":"塞西莉亚","description":"冷艳女性"}],'
+        '"prompt":"塞西莉亚靠在椅背上微笑","profile_prompt":"塞西莉亚靠在椅背上，嘴角带着浅笑的静态肖像。",'
+        '"motion":0}</illustration>'
+    )
+
+    _, _, request = ag._agency_writeback(
+        _ctx(repo_id="work", card_name="塞西莉亚", scene="dialogue", comfy_illustrate=True),
+        deps, reply, turn=2, affinity=10.0, lost=False,
+    )
+
+    assert request["anchor"] == "她把信笺对折，信笺化作黑色流光穿出帷幔。"
+    assert request["scene_spec"]["narrative"] == request["anchor"]
+    assert "profile_prompt" not in request["scene_spec"]
+    assert request["prompt"] != "塞西莉亚靠在椅背上，嘴角带着浅笑的静态肖像。"
+
+
 def test_RunContext含NPC目标增量时仍剥离控制块并发出插画请求(monkeypatch, tmp_path):
     from app.services import character_state
 

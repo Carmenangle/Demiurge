@@ -13,6 +13,7 @@ const WorldBook = lazy(() => import("./pages/WorldBook").then((m) => ({ default:
 const NodeIndexView = lazy(() => import("./views/NodeIndexView").then((m) => ({ default: m.NodeIndexView })));
 const AIBuildView = lazy(() => import("./views/AIBuildView").then((m) => ({ default: m.AIBuildView })));
 const NodeManagerView = lazy(() => import("./views/NodeManagerView").then((m) => ({ default: m.NodeManagerView })));
+const LoraTriggersTab = lazy(() => import("./views/tools/LoraTriggersTab").then((m) => ({ default: m.LoraTriggersTab })));
 const ToolsView = lazy(() => import("./views/ToolsView").then((m) => ({ default: m.ToolsView })));
 const ReposView = lazy(() => import("./views/repos/RepoViews").then((m) => ({ default: m.ReposView })));
 const RepoDetailView = lazy(() => import("./views/repos/RepoViews").then((m) => ({ default: m.RepoDetailView })));
@@ -114,6 +115,7 @@ export function AppBody(props: AppBodyProps) {
   }
   if (props.section === "system") {
     if (props.subView === "models") return <ModelDownload settings={settings} />;
+    if (props.subView === "lora-data") return <LoraTriggersTab />;
     if (props.subView === "node-manager") {
       return <NodeManagerView initialSearch={props.marketSearch}
         onSearchConsumed={() => props.setMarketSearch("")} />;

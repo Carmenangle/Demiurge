@@ -13,7 +13,7 @@ import logging
 import re
 from typing import TypedDict, Iterator
 
-from app.services import agent_context, builtin_agents, edit_agent, generation_approval, generation_store, run_trace, scene_classify, tool_agent_adapter
+from app.services import agent_context, builtin_agents, edit_agent, generation_approval, generation_store, roleplay_turn, run_trace, scene_classify, tool_agent_adapter
 from app.services import llm as _llm
 from app.services.agent_contracts import RunContext
 
@@ -638,47 +638,41 @@ def roleplay_node(state: AgentState) -> dict:
         run_trace.emit(ctx, "model.request", agent="roleplay", model=ctx["chat_model"],
                        messages=wire_messages, preset=ctx.get("preset_name") or "",
                        temperature=temp)
-        reply = _chat_with_optional_stream(
-            ctx, wire_messages, temperature=temp, **_builtin_sampling(ctx, "roleplay"),
+        def _generated(value: str) -> None:
+            run_trace.emit(ctx, "model.response", agent="roleplay", content=value)
+            think = _probe_think(value)
+            if think:
+                repo = ctx.get("repo_id") or ctx.get("thread_id") or "?"
+                _probe.info("🧠[AI思考] repo=%s:\n%s", repo, think)
+
+        finalization = roleplay_turn.TurnFinalizationHooks(
+            writeback=lambda item, events: _agency_writeback(
+                item.ctx, item.deps, item.reply, item.turn, item.affinity,
+                item.lost, events, item.text,
+            ),
+            apply_output=lambda value: _apply_regex(
+                ctx, value, Placement.AI_OUTPUT, is_prompt=False, depth=0,
+            ),
+            anchor_offset=_illustration_anchor_offset,
+            emit_ready=_emit_roleplay_ready,
+            maintain=lambda item, value, events: _agency_maintenance(
+                item.ctx, item.deps, value, item.turn, events,
+            ),
         )
-        reply = reply or "（无回复）"
-        run_trace.emit(ctx, "model.response", agent="roleplay", content=reply)
-        _think = _probe_think(reply)
-        if _think:
-            _probe.info("🧠[AI思考] repo=%s:\n%s", ctx.get("repo_id") or ctx.get("thread_id") or "?", _think)
-        image_recs: list = []
-        illustrate_req: dict = {}
-        rag_events: list = []
-        # 阶段 C+D：剥离 <状态更新> 写回 + 判插画（deps 为空则原样返回，无状态块也安全）
-        if deps is not None:
-            reply, image_recs, illustrate_req = _agency_writeback(
-                ctx, deps, reply, turn, affinity, lost, rag_events, text)
-        # AI 输出正则（placement 2）：改存储源（落库+显示都带；markdownOnly 显示档在前端另跑）
-        reply = _apply_regex(ctx, reply, Placement.AI_OUTPUT, is_prompt=False, depth=0)
-        out: dict = {"result_text": reply, "trace": trace, "_streamed_result": streamed}
-        if image_recs:
-            out["image_recs"] = image_recs
-        if illustrate_req:
-            anchor_offset = _illustration_anchor_offset(reply, illustrate_req)
-            if anchor_offset is not None:
-                out["illustrate_recs"] = [{
-                    "id": f"illo-req-{ctx.get('repo_id') or ctx.get('thread_id')}-{turn}",
-                    "prompt": illustrate_req.get("prompt", ""),
-                    "motion": illustrate_req.get("motion", 0),
-                    "actors": illustrate_req.get("actors", []),
-                    "scene_spec": illustrate_req.get("scene_spec", {}),
-                    "anchor_offset": anchor_offset,
-                }]
-        eager = _emit_roleplay_ready(ctx, out)
-        if eager:
-            out["_eager_result"] = True
-        # 纪要/Curator 在正文与插画请求发出后继续，不阻塞两者启动。
-        if deps is not None:
-            _agency_maintenance(ctx, deps, reply, turn, rag_events)
-        if rag_events:
-            _rid = ctx.get("repo_id") or ctx.get("thread_id") or "?"
-            out["rag_recs"] = [{"id": f"rag-{_rid}-{turn}-{i}", **ev} for i, ev in enumerate(rag_events)]
-        return out
+        return roleplay_turn.execute_turn(
+            roleplay_turn.TurnExecution(
+                ctx=ctx, text=text, trace=trace, streamed=streamed,
+                deps=deps, turn=turn, affinity=affinity, lost=lost,
+            ),
+            roleplay_turn.TurnExecutionHooks(
+                generate=lambda: _chat_with_optional_stream(
+                    ctx, wire_messages, temperature=temp,
+                    **_builtin_sampling(ctx, "roleplay"),
+                ),
+                generated=_generated,
+                finalization=finalization,
+            ),
+        )
     except Exception as e:  # noqa: BLE001
         return {"result_text": f"扮演失败：{e}", "trace": trace,
                 "_streamed_result": streamed}
@@ -996,7 +990,16 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
                 fallback_anchor = encounter_anchor
             elif visible_story and (local_scene_fallback or first_story_reply) and not illustration_plan:
                 fallback_anchor = scene_illustration.fallback_illustration_anchor(clean)
-            requested_anchor = illustration_plan.get("anchor", "") or fallback_anchor
+            planned_anchor = illustration_plan.get("anchor", "")
+            requested_anchor = planned_anchor or fallback_anchor
+            if illustration_plan:
+                requested_anchor = scene_illustration.resolve_illustration_anchor(
+                    clean, requested_anchor,
+                )
+                if requested_anchor != planned_anchor:
+                    # 主模型把动作峰值退化成静态收束时，废弃同源的错误 Profile；
+                    # 前端会用纠正后的 narrative 重新生成，不让肖像提示词继续提交。
+                    profile_prompt = ""
             scene_spec = {
                 "narrative": encounter_narrative if character_encounter else (
                     scene_illustration.illustration_scene_excerpt(

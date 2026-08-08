@@ -14,11 +14,11 @@ interface LoraTriggerRecord {
   suggested_prompt?: string;
 }
 
-const QUALITY_PROMPT_PATTERN = /(?:\b(?:best|high|amazing|masterpiece|masterwork|quality|aesthetic|absurdres|newest|score_\d+|contrast|detail(?:ed)?|resolution|anatomy|shading|focus|blurr?y|depth of field|rim light|lighting|chiaroscuro|coloring|sketch|style|realistic|[248]k|hd|uhd)\b|画质|高质量|杰作|光影|景深|虚化|画风|风格|细节|分辨率|色彩|上色|阴影|锐利|清晰)/i;
+const QUALITY_PROMPT_PATTERN = /(?:\b(?:best|high|amazing|masterpiece|masterwork|quality|aesthetic|absurdres|newest|score_\d+|contrast|detail(?:ed)?|resolution|anatomy|shading|focus|blurr?y|depth of field|rim light|lighting|chiaroscuro|coloring|sketch|style|realistic|material|texture|silk|satin|velvet|chiffon|lace|leather|metallic|glossy|matte|translucent|grain(?:y)?|[248]k|hd|uhd)\b|画质|高质量|杰作|光影|景深|虚化|画风|风格|细节|分辨率|色彩|上色|阴影|锐利|清晰|材质|纹理|丝绸|真丝|缎面|丝绒|雪纺|蕾丝|皮革|金属|哑光|高光|通透)/i;
 const SCENE_CONTROL_PATTERN = /(?:\b(?:close-up|wide angle|camera|shot|composition|perspective|portrait|full body|upper body|cowboy shot|dutch angle|low angle|high angle|from above|from below)\b|构图|镜头|特写|近景|中景|远景|全身|半身|俯拍|仰拍)/i;
 const CONTENT_PROMPT_PATTERN = /(?:\b(?:\d*(?:girl|boy)|woman|man|female|male|hair|eyes?|dress|skirt|shirt|pants|underwear|bra|panties|nude|naked|breasts?|nipples?|pussy|penis|standing|sitting|kneeling|lying|running|walking|holding|touching|kissing|sex|arms?|hands?|sword|forest|room|street|bedroom)\b|女孩|男孩|女人|男人|头发|眼睛|裙|衬衫|裤|内衣|裸体|乳房|乳头|阴部|阴茎|站立|坐着|跪|躺|奔跑|行走|手持|触摸|亲吻|性交|手臂|手部|剑|森林|房间|街道|卧室)/i;
 
-function splitPromptTags(value: string): string[] {
+export function splitPromptTags(value: string): string[] {
   const tags: string[] = [];
   let current = "";
   let depth = 0;
@@ -38,15 +38,18 @@ function splitPromptTags(value: string): string[] {
 
 function isArtistSignature(tag: string): boolean {
   const value = tag.trim().replace(/^\(+|\)+$/g, "");
-  return /^(?:artist\s*:|by\s+)/i.test(value)
+  return /^@\[[^\]]+\]$/i.test(value)
+    || /^(?:artist\s*:|by\s+)/i.test(value)
     || /^[a-z][\w]*(?:_\([^)]*\))?\s*:\s*\d+(?:\.\d+)?$/i.test(value);
 }
 
 function isQualityPromptTag(tag: string): boolean {
   if (SCENE_CONTROL_PATTERN.test(tag)) return false;
-  if (QUALITY_PROMPT_PATTERN.test(tag)) return true;
+  if (isArtistSignature(tag)) return true;
   if (CONTENT_PROMPT_PATTERN.test(tag)) return false;
-  return isArtistSignature(tag);
+  const words = tag.trim().split(/\s+/).filter(Boolean);
+  if (words.length > 8 || /[!?。！？]|[.!?](?:\s|$)/.test(tag)) return false;
+  return QUALITY_PROMPT_PATTERN.test(tag);
 }
 
 function uniquePromptTags(tags: readonly string[]): string[] {
@@ -278,91 +281,4 @@ export async function slimSnapshot(
     out.push(nm);
   }
   return out;
-}
-
-export interface PendingGeneration {
-  prompt_id: string;
-  createdAt: number;
-  outputNodeIds?: string[];   // 主输出节点过滤（切仓库/刷新后 resume 重挂轮询时复用）
-  regeneration?: RegenerationSnapshot;
-  target?: { messageId: string; slotId: string; background: true };
-  prompt?: string;
-}
-
-export function registerPending(
-  pending: readonly PendingGeneration[],
-  promptId: string,
-  createdAt: number,
-  outputNodeIds: string[] = [],
-  regeneration?: RegenerationSnapshot,
-  target?: PendingGeneration["target"],
-  prompt = "",
-): PendingGeneration[] {
-  return [
-    ...pending.filter((item) => item.prompt_id !== promptId),
-    {
-      prompt_id: promptId,
-      createdAt,
-      ...(outputNodeIds.length ? { outputNodeIds } : {}),
-      ...(regeneration ? { regeneration } : {}),
-      ...(target ? { target } : {}),
-      ...(prompt ? { prompt } : {}),
-    },
-  ];
-}
-
-export function unregisterPending(
-  pending: readonly PendingGeneration[],
-  promptId: string,
-): PendingGeneration[] {
-  return pending.filter((item) => item.prompt_id !== promptId);
-}
-
-export function pendingResumeAction(
-  item: PendingGeneration,
-  resumedIds: ReadonlySet<string>,
-  now: number,
-): "skip" | "expire" | "inspect" {
-  if (resumedIds.has(item.prompt_id)) return "skip";
-  return now - item.createdAt > 30 * 60 * 1000 ? "expire" : "inspect";
-}
-
-export function pollSchedule(tries: number): { releaseBusy: boolean; delayMs: number | null } {
-  return {
-    releaseBusy: tries === 150,
-    delayMs: tries < 150 ? 2000 : tries < 210 ? 15000 : null,
-  };
-}
-
-export function generationResultAction(status: string): "complete" | "fail" | "poll" {
-  if (status === "completed") return "complete";
-  if (status === "failed") return "fail";
-  return "poll";
-}
-
-export function notFoundPollAction(consecutiveNotFound: number): "retry" | "fail" {
-  return consecutiveNotFound >= 5 ? "fail" : "retry";
-}
-
-// ===== 生成收尾去重双闸（纯判定）=====
-// 一次 /s 工作流生成的收尾（finalize）可能被两条路径同时触发：pollResult 轮询到结果、
-// 以及切走再切回仓库后的 resume 补偿。两条都跑就会重复落盘=同一次生成出现多张重复图。
-// 这里只做「该不该 finalize」的判定，不含任何副作用（落盘/入库/DOM 由 hook 接线）。
-//
-// 双闸各治一种重入：
-//   ① persistedPending —— 已持久化的进行中任务列表（localStorage）。收尾时会 removePending，
-//      故「promptId 已不在 pending 里」= 这轮已被别的路径收尾过。这是跨「进出仓库/组件重挂」
-//      的可靠去重（内存标记重挂即丢，是三张重复的根因）。
-//   ② finalizedIds —— 同一 hook 实例内的内存已收尾集合，防 pollResult 与 resume 在
-//      removePending 之前的并发窗口里同时进入。
-// promptId 省略（未知任务 id）时不设闸，直接放行（老路径兼容）。
-export function shouldFinalize(
-  promptId: string | undefined,
-  persistedPending: readonly { prompt_id: string }[],
-  finalizedIds: ReadonlySet<string>,
-): boolean {
-  if (!promptId) return true;
-  if (!persistedPending.some((p) => p.prompt_id === promptId)) return false;
-  if (finalizedIds.has(promptId)) return false;
-  return true;
 }

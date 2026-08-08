@@ -16,8 +16,10 @@ import {
   type Template,
   type ExposedField,
   type ControlType,
-  MEDIA_INSERT_SEMANTICS,
 } from "../api/workflows";
+import {
+  inferWorkflowFieldBinding, inferWorkflowFieldControl, replaceWorkflowNodeExposure,
+} from "../lib/workflowTemplateExposure";
 
 const CONTROL_LABELS: Record<ControlType, string> = {
   text: "单行文本",
@@ -28,17 +30,6 @@ const CONTROL_LABELS: Record<ControlType, string> = {
   seed: "随机种子",
   boolean: "开关",
 };
-
-// 按字段名/值推断默认控件类型
-function inferControl(f: ParsedField): ControlType {
-  const n = f.name.toLowerCase();
-  if (n.includes("image") || n.includes("mask")) return "image";
-  if (n === "seed" || n === "noise_seed") return "seed";
-  if (typeof f.value === "boolean") return "boolean";
-  if (typeof f.value === "number") return "number";
-  if (n.includes("text") || n.includes("prompt")) return "textarea";
-  return "text";
-}
 
 // 截断超长默认值显示
 function shortVal(v: unknown): string {
@@ -254,9 +245,15 @@ function NodeEditor({
   // key -> 暴露配置
   const [exposed, setExposed] = useState<Map<string, ExposedField>>(() => {
     const m = new Map<string, ExposedField>();
-    // 仅在编辑已保存模板时回填；新建时全不勾，由用户手动选择
+    // 编辑旧模板时先回填，再按已选节点的原始定义重建，清除 lora_weight 等人工语义别名。
     if (template) {
       for (const ef of template.exposed) m.set(fieldKey(ef.node_id, ef.field), ef);
+      let fields = [...m.values()];
+      for (const id of template.node_order || []) {
+        const node = nodes.find((item) => item.id === id);
+        if (node) fields = replaceWorkflowNodeExposure(fields, node);
+      }
+      return new Map(fields.map((field) => [fieldKey(field.node_id, field.field), field]));
     }
     return m;
   });
@@ -266,15 +263,18 @@ function NodeEditor({
     setExposed((prev) => {
       const next = new Map(prev);
       if (next.has(key)) next.delete(key);
-      else
+      else {
+        const binding = inferWorkflowFieldBinding(n, f);
         next.set(key, {
           node_id: n.id,
           field: f.name,
           label: f.name,
-          control: inferControl(f),
+          control: inferWorkflowFieldControl(f),
           semantic: f.name,
+          binding: binding || undefined,
           default: f.value,
         });
+      }
       return next;
     });
   };
@@ -363,6 +363,15 @@ function NodeEditor({
           setComfyHint(`载入失败：${(e as Error).message}`);
         }
       } else if (d.type === "loaded") {
+        // 画布模式以原节点定义为准：旧模板里手工改过的 semantic/label/default 全部恢复默认。
+        setExposed((prev) => {
+          let fields = [...prev.values()];
+          for (const selected of picked) {
+            const node = nodes.find((item) => item.id === selected.id);
+            if (node) fields = replaceWorkflowNodeExposure(fields, node);
+          }
+          return new Map(fields.map((field) => [fieldKey(field.node_id, field.field), field]));
+        });
         // 载图后回填已选节点的高亮（重新进入画布时保持选择状态）
         for (const p of picked) post("reselect", { id: p.id });
         scheduleVerify(2200); // 载图后校验画布是否被别的标签抢占成别的工作流
@@ -389,6 +398,13 @@ function NodeEditor({
             ? prev
             : [...prev, { id, title: d.payload.title || `#${id}` }],
         );
+        const node = nodes.find((item) => item.id === id);
+        if (node) {
+          setExposed((prev) => {
+            const fields = replaceWorkflowNodeExposure([...prev.values()], node);
+            return new Map(fields.map((field) => [fieldKey(field.node_id, field.field), field]));
+          });
+        }
       } else if (d.type === "node_title") {
         // 重新进入画布时扩展回传真实标题，替换占位的 #id
         const id = String(d.payload.id);
@@ -414,6 +430,13 @@ function NodeEditor({
   // 从右侧列表删除一个选中节点（同步取消画布高亮）
   const removePicked = (id: string) => {
     setPicked((prev) => prev.filter((p) => p.id !== id));
+    setExposed((prev) => {
+      const next = new Map(prev);
+      for (const [key, field] of next) {
+        if (field.node_id === id) next.delete(key);
+      }
+      return next;
+    });
     postToFrame(iframeRef.current?.contentWindow, "deselect", { id }, comfyUrl);
   };
 
@@ -491,7 +514,7 @@ function NodeEditor({
             <div className="picked-head">
               已选节点 <span style={{ color: "var(--text-muted)" }}>({picked.length})</span>
             </div>
-            <p className="picked-tip">在画布上长按节点选择；列表顺序即 AI 对话提供节点的顺序。</p>
+            <p className="picked-tip">在画布上长按节点选择；会自动带入原节点全部可编辑参数，列表顺序即 AI 对话提供节点的顺序。</p>
             {picked.length === 0 ? (
               <div className="picked-empty">长按画布中的节点加入</div>
             ) : (
@@ -569,7 +592,7 @@ function NodeEditor({
                   <div
                     style={{
                       display: "grid",
-                      gridTemplateColumns: "1fr 1fr 1fr",
+                      gridTemplateColumns: "1fr 1fr",
                       gap: 8,
                       margin: "8px 0 4px 24px",
                     }}
@@ -594,20 +617,6 @@ function NodeEditor({
                           </option>
                         ))}
                       </select>
-                    </div>
-                    <div className="field" style={{ margin: 0 }}>
-                      <label>语义标签（供 AI / 多元数据插入）</label>
-                      <input
-                        list="media-insert-semantics"
-                        value={cfg.semantic}
-                        onChange={(e) => patch(key, { semantic: e.target.value })}
-                        placeholder="如 prompt / lora_name / lora_weight"
-                      />
-                      <datalist id="media-insert-semantics">
-                        {MEDIA_INSERT_SEMANTICS.map((s) => (
-                          <option key={s.value} value={s.value}>{s.label}</option>
-                        ))}
-                      </datalist>
                     </div>
                   </div>
                 )}

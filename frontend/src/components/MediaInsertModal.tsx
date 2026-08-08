@@ -10,7 +10,7 @@ import { uploadChatBg } from "../api/userState";
 import { localViewUrl } from "../api/comfyui";
 import type { MediaInsertPreset, CharacterLoraBinding } from "../stores/settings";
 import {
-  normalizePromptProfile, PROMPT_PROFILE_OPTIONS,
+  normalizePromptProfile, PROMPT_PROFILE_OPTIONS, workflowFieldBinding,
 } from "../lib/imagePromptProfiles";
 
 interface Props {
@@ -91,14 +91,14 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
   }, [promptProfile, qualityPrompt, negativePrompt]);
 
   const tpl = templates.find((t) => t.id === templateId);
-  const hasPrompt = !!tpl?.exposed.some((f) => f.semantic === SEMANTIC_PROMPT);
+  const hasPrompt = !!tpl?.exposed.some((f) => workflowFieldBinding(f) === SEMANTIC_PROMPT);
   const hasNegativePrompt = !!tpl?.exposed.some(
-    (f) => f.semantic === SEMANTIC_NEGATIVE_PROMPT,
+    (f) => workflowFieldBinding(f) === SEMANTIC_NEGATIVE_PROMPT,
   );
-  const hasLoraSlot = !!tpl?.exposed.some((f) => f.semantic === SEMANTIC_LORA_NAME);
-  const hasImageSlot = !!tpl?.exposed.some((f) => f.semantic === SEMANTIC_BASE_IMAGE);
-  const hasLatentWidth = !!tpl?.exposed.some((f) => f.semantic === SEMANTIC_LATENT_WIDTH);
-  const hasLatentHeight = !!tpl?.exposed.some((f) => f.semantic === SEMANTIC_LATENT_HEIGHT);
+  const hasLoraSlot = !!tpl?.exposed.some((f) => workflowFieldBinding(f) === SEMANTIC_LORA_NAME);
+  const hasImageSlot = !!tpl?.exposed.some((f) => workflowFieldBinding(f) === SEMANTIC_BASE_IMAGE);
+  const hasLatentWidth = !!tpl?.exposed.some((f) => workflowFieldBinding(f) === SEMANTIC_LATENT_WIDTH);
+  const hasLatentHeight = !!tpl?.exposed.some((f) => workflowFieldBinding(f) === SEMANTIC_LATENT_HEIGHT);
 
   const setRow = (i: number, patch: Partial<CharRow>) =>
     setRows((prev) => prev.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));

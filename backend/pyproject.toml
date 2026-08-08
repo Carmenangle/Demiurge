@@ -13,7 +13,7 @@ ignore = ["E741"]
 # 不全库开（业务模块历史无注解，全开会淹没门禁）；follow_imports=silent 让被 import 的
 # 非契约模块不冒错。跑：cd backend && .venv/Scripts/python -m mypy @mypy_files.txt
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.13"
 follow_imports = "silent"
 ignore_missing_imports = true
 warn_unused_ignores = true

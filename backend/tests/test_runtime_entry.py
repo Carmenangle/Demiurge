@@ -68,6 +68,34 @@ def test_packaged_main_uses_combined_frontend_backend_port_without_console_loggi
     assert seen["log_config"] is None
 
 
+def test_packaged_main_honors_runtime_port_override(monkeypatch, tmp_path):
+    seen = {}
+    monkeypatch.setenv("LAF_NO_BROWSER", "1")
+    monkeypatch.setenv("LAF_RUNTIME_PORT", "18111")
+    monkeypatch.setattr(runtime_entry, "runtime_root", lambda: tmp_path)
+    monkeypatch.setattr(runtime_entry, "configure_environment", lambda root: {})
+    monkeypatch.setitem(
+        sys.modules,
+        "uvicorn",
+        SimpleNamespace(run=lambda app, **kwargs: seen.update(app=app, **kwargs)),
+    )
+
+    runtime_entry.main()
+
+    assert seen["port"] == 18111
+
+
+def test_runtime_port_rejects_invalid_override(monkeypatch):
+    monkeypatch.setenv("LAF_RUNTIME_PORT", "70000")
+
+    try:
+        runtime_entry.runtime_port()
+    except ValueError as exc:
+        assert "out of range" in str(exc)
+    else:
+        raise AssertionError("invalid port should be rejected")
+
+
 def test_browser_waits_for_runtime_port(monkeypatch):
     checks = iter((False, False, True))
     opened = []

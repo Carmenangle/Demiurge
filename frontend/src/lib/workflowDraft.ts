@@ -39,3 +39,30 @@ export function mergeRequestedNodes(baseWorkflow: unknown, requestedNodes: reado
   });
   return draft;
 }
+
+function nodeSignature(workflow: unknown): Map<string, string> | null {
+  const nodes = (workflow as any)?.nodes;
+  if (!Array.isArray(nodes) || nodes.length === 0) return null;
+  const signatures = new Map<string, string>();
+  for (const node of nodes) {
+    if (node?.id == null) return null;
+    signatures.set(String(node.id), String(node.type || node.class_type || ""));
+  }
+  return signatures;
+}
+
+// 单节点编辑画布只能改参数；捕获结果必须仍包含模板完整图的全部节点。
+// 允许 AI 编排追加节点，但不允许裁剪图覆盖完整工作流草稿。
+export function preservesWorkflowTopology(requiredWorkflow: unknown, candidateWorkflow: unknown): boolean {
+  const required = nodeSignature(requiredWorkflow);
+  const candidate = nodeSignature(candidateWorkflow);
+  if (!required || !candidate) return false;
+  for (const [id, type] of required) {
+    if (candidate.get(id) !== type) return false;
+  }
+  return true;
+}
+
+export function canonicalWorkflowDraft(templateWorkflow: unknown, savedDraft: unknown): unknown {
+  return preservesWorkflowTopology(templateWorkflow, savedDraft) ? savedDraft : templateWorkflow;
+}

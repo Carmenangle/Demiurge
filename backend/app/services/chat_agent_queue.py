@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from app.db import get_connection
 from app.services import agent_runner
-from app.services.agent_contracts import ModelConfig, RunContext
+from app.services.agent_request_context import from_payload
 
 _WAKE = threading.Condition()
 _WORKER: threading.Thread | None = None
@@ -162,62 +162,7 @@ def _release_claim(task_id: str) -> None:
 
 def _execute(payload: dict) -> None:
     """构造 RunContext 交回 agent_runner headless 跑完（复用现有落盘/记忆/审批落盘）。"""
-    mask = payload.get("image_mask")
-    context = RunContext(
-        thread_id=payload.get("thread_id", "home"),
-        message=payload.get("message", ""),
-        images=payload.get("images") or [],
-        image_mask=mask if isinstance(mask, dict) else None,
-        chat=ModelConfig(payload.get("base_url", ""), payload.get("api_key", ""), payload.get("model", "")),
-        generation=ModelConfig(
-            payload.get("gen_base_url", ""), payload.get("gen_api_key", ""), payload.get("gen_model", "")),
-        video=ModelConfig(
-            payload.get("video_base_url", ""), payload.get("video_api_key", ""), payload.get("video_model", "")),
-        embedding=ModelConfig(
-            payload.get("embed_base_url", ""), payload.get("embed_api_key", ""),
-            payload.get("embed_model", "embedding-3")),
-        size=payload.get("size", "1024x1024"),
-        image_quality=payload.get("image_quality", "high"),
-        output_dir=payload.get("output_dir", ""),
-        repo_id=payload.get("repo_id", "") or payload.get("thread_id", "home"),
-        message_id=payload.get("message_id", ""),
-        proxy_url=payload.get("proxy_url", ""),
-        chat_proxy_url=payload.get("chat_proxy_url", ""),
-        gen_proxy_url=payload.get("gen_proxy_url", ""),
-        video_proxy_url=payload.get("video_proxy_url", ""),
-        embed_proxy_url=payload.get("embed_proxy_url", ""),
-        route_model=payload.get("route_model", ""),
-        style_template=payload.get("style_template", ""),
-        agent_id=payload.get("agent_id", ""),
-        stream_output=bool(payload.get("stream_output", False)),
-        approval_id=payload.get("approval_id", ""),
-        approval_action=payload.get("approval_action", ""),
-        edited_prompt=payload.get("edited_prompt", ""),
-        forced_route=payload.get("forced_route", ""),
-        user_message_id=payload.get("user_message_id", ""),
-        workspace_mode=payload.get("workspace_mode", "story"),
-        context_max_tokens=payload.get("context_max_tokens", 20_000),
-        history_per_role=payload.get("history_per_role", 6),
-        history_override=payload.get("history") if "history" in payload else None,
-        character_dir=payload.get("character_dir", ""),
-        card_name=payload.get("card_name", ""),
-        card_names=payload.get("card_names") or ([payload.get("card_name", "")] if payload.get("card_name") else []),
-        opening_card_name=payload.get("opening_card_name", "") or payload.get("card_name", ""),
-        preset_dir=payload.get("preset_dir", ""),
-        preset_name=payload.get("preset_name", ""),
-        user_name=payload.get("user_name", ""),
-        user_persona=payload.get("user_persona", ""),
-        persona_bound=bool(payload.get("persona_bound", False)),
-        worldbook_dir=payload.get("worldbook_dir", ""),
-        worldbook_name=payload.get("worldbook_name", ""),
-        illustrate=bool(payload.get("illustrate", False)),
-        comfy_illustrate=bool(payload.get("comfy_illustrate", False)),
-        prompt_profile=payload.get("prompt_profile", "krea2"),
-        appearance_source=payload.get("appearance_source", "worldbook"),
-        character_base_images=payload.get("character_base_images") or {},
-        illustration_actor_names=payload.get("illustration_actor_names") or [],
-        style_base_image=payload.get("style_base_image", ""),
-    )
+    context = from_payload(payload)
     q = agent_runner.run_multi_stream(context)
     for _ in agent_runner.drain(q):
         pass  # headless：事件丢弃，落盘由 agent_runner worker 内部完成

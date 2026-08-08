@@ -194,6 +194,14 @@ def test_主生成插画指令要求高潮锚点镜头构图与主体权重():
     assert "发现、开启、争夺或取得物件" in instruction
 
 
+def test_内联插画计划要求保留造成剧情状态变化的动作因果链():
+    instruction = ipe.build_inline_plan_instruction("krea2")
+
+    assert "造成剧情状态变化的动作" in instruction
+    assert "动作主体、关键道具和动作结果" in instruction
+    assert "静态肖像" in instruction
+
+
 def test_插画计划非法画幅比例回退竖图():
     reply = (
         "正文高潮。"

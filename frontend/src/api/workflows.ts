@@ -38,8 +38,8 @@ export function rawWorkflowByPath(path: string) {
   return apiGet<{ workflow: unknown }>(`/workflows/raw?path=${encodeURIComponent(path)}`);
 }
 
-// 多元数据插入语义约定：模板暴露字段标注为这些 semantic 时，剧情高潮点异步出图会按语义注入值。
-// prompt=写入后端提取的 booru 提示词；lora_name=写入角色 LoRA 文件名；lora_weight=写入 LoRA 权重。
+// 多元数据插入内部绑定：界面与提交仍使用原工作流字段名，剧情高潮异步出图按隐藏 binding 注入值。
+// prompt=后端提取的提示词；lora_name=角色 LoRA 文件名；lora_weight=LoRA 权重。
 export const SEMANTIC_PROMPT = "prompt";
 export const SEMANTIC_NEGATIVE_PROMPT = "negative_prompt";
 export const SEMANTIC_LORA_NAME = "lora_name";
@@ -66,6 +66,7 @@ export interface ExposedField {
   label: string;
   control: ControlType;
   semantic: string;
+  binding?: string; // 内部自动用途；界面字段名/semantic 始终保持原工作流定义
   default: string | number | boolean | null;
 }
 
