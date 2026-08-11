@@ -18,7 +18,7 @@ const EMBED_PRESETS = [
 
 // 一张「模型卡」：名称/Key/URL + 「读取模型列表」按钮（调 discover-models 拉列表供选）
 function ModelCard({ model, kind, onChange, onRemove, customSizeSupported, onCustomSizeSupport, globalProxyUrl, globalProxyEnabled }: {
-  model: { id?: string; displayName?: string; apiKey: string; baseUrl: string; modelName: string; proxyMode?: "on" | "off" | "inherit" };
+  model: { id?: string; displayName?: string; apiKey: string; baseUrl: string; modelName: string; proxyMode?: "on" | "off" | "inherit"; providerProfile?: "openai_compatible" | "claude_compatible" };
   kind: Exclude<ModelProbeKind, "embedding-local" | "reranker-local">;
   onChange: (patch: Partial<ChatModel>) => void;
   onRemove: () => void;
@@ -149,6 +149,15 @@ function ModelCard({ model, kind, onChange, onRemove, customSizeSupported, onCus
           </div>
         )}
       </div>
+      {kind === "chat" && <div className="field">
+        <label>Provider Profile</label>
+        <select value={model.providerProfile || "openai_compatible"}
+          onChange={(e) => onChange({ providerProfile: e.target.value as ChatModel["providerProfile"] })}>
+          <option value="openai_compatible">OpenAI 兼容</option>
+          <option value="claude_compatible">Claude 兼容</option>
+        </select>
+        <p className="field-hint">决定历史后 system 规则如何编译，不再按模型名运行时猜测。</p>
+      </div>}
       {onCustomSizeSupport && (
         <label className="model-capability-toggle">
           <input
@@ -199,7 +208,7 @@ export function ModelsPanel({ draft, setDraft }: PanelProps) {
     setDraft((d) => ({ ...d, embedModel: { ...d.embedModel, ...patch } }));
 
   const addChatModel = () =>
-    setDraft((d) => ({ ...d, chatModels: [...d.chatModels, { id: crypto.randomUUID(), apiKey: "", baseUrl: "", modelName: "新模型", proxyMode: "on" }] }));
+    setDraft((d) => ({ ...d, chatModels: [...d.chatModels, { id: crypto.randomUUID(), apiKey: "", baseUrl: "", modelName: "新模型", proxyMode: "on", providerProfile: "openai_compatible" }] }));
   const updateChatModel = (id: string, patch: Partial<ChatModel>) =>
     setDraft((d) => ({ ...d, chatModels: d.chatModels.map((m) => (m.id === id ? { ...m, ...patch } : m)) }));
   const removeChatModel = (id: string) =>

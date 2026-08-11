@@ -20,6 +20,7 @@ export interface AgentInvocationWire {
   api_key: string;
   model: string;
   proxy?: string;
+  provider_profile?: "openai_compatible" | "claude_compatible";
   gen_base_url?: string;
   gen_api_key?: string;
   gen_model?: string;
@@ -74,4 +75,4 @@ export interface AgentInvocationWire {
   style_base_image?: string;
 }
 
-export const AGENT_INVOCATION_WIRE_FIELDS = ["thread_id", "workspace_mode", "message", "images", "image_mask", "base_url", "api_key", "model", "proxy", "gen_base_url", "gen_api_key", "gen_model", "video_base_url", "video_api_key", "video_model", "embed_base_url", "embed_api_key", "embed_model", "embed_mode", "embed_model_dir", "reranker_model_dir", "size", "image_quality", "output_dir", "repo_id", "proxy_url", "chat_proxy_url", "gen_proxy_url", "video_proxy_url", "embed_proxy_url", "route_model", "message_id", "user_message_id", "style_template", "agent_id", "stream_output", "context_max_tokens", "history_per_role", "history", "approval_id", "approval_action", "edited_prompt", "forced_route", "character_dir", "card_name", "card_names", "opening_card_name", "preset_dir", "preset_name", "user_name", "user_persona", "persona_bound", "worldbook_dir", "worldbook_name", "illustrate", "comfy_illustrate", "prompt_profile", "appearance_source", "character_base_images", "illustration_actor_names", "style_base_image"] as const;
+export const AGENT_INVOCATION_WIRE_FIELDS = ["thread_id", "workspace_mode", "message", "images", "image_mask", "base_url", "api_key", "model", "proxy", "provider_profile", "gen_base_url", "gen_api_key", "gen_model", "video_base_url", "video_api_key", "video_model", "embed_base_url", "embed_api_key", "embed_model", "embed_mode", "embed_model_dir", "reranker_model_dir", "size", "image_quality", "output_dir", "repo_id", "proxy_url", "chat_proxy_url", "gen_proxy_url", "video_proxy_url", "embed_proxy_url", "route_model", "message_id", "user_message_id", "style_template", "agent_id", "stream_output", "context_max_tokens", "history_per_role", "history", "approval_id", "approval_action", "edited_prompt", "forced_route", "character_dir", "card_name", "card_names", "opening_card_name", "preset_dir", "preset_name", "user_name", "user_persona", "persona_bound", "worldbook_dir", "worldbook_name", "illustrate", "comfy_illustrate", "prompt_profile", "appearance_source", "character_base_images", "illustration_actor_names", "style_base_image"] as const;

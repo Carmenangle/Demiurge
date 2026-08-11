@@ -3,6 +3,7 @@ import { apiGet, apiPost } from "./client";
 // 一条事件纪要（AM 码大纲）。layer: 0 细 / 1 中 / 2 粗。
 export interface ChronicleEntry {
   rowid: number;
+  card_id: string;
   text: string;
   overview: string;
   dialogue: string;
@@ -34,7 +35,7 @@ export function rebuildChronicle(outputDir: string, repoId: string) {
 }
 
 // ⑤ 人工增删改 + 导入导出（可视化 CRUD）
-export type EntryDraft = Omit<ChronicleEntry, "rowid">;
+export type EntryDraft = Omit<ChronicleEntry, "rowid" | "card_id">;
 
 export function addChronicle(outputDir: string, repoId: string, entry: EntryDraft) {
   return apiPost<{ ok: boolean; rowid: number }>("/narrative/add", {

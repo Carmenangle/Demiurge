@@ -16,7 +16,7 @@ router = APIRouter()
 
 def _dump(e: ChronicleEntry) -> dict[str, object]:
     return {
-        "rowid": e.rowid, "text": e.text, "turn_start": e.turn_start,
+        "rowid": e.rowid, "card_id": e.card_id(), "text": e.text, "turn_start": e.turn_start,
         "turn_end": e.turn_end, "layer": e.layer, "keywords": e.keywords,
         "overview": e.short_overview(), "dialogue": e.dialogue,
         "characters": e.characters,

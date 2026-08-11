@@ -139,10 +139,25 @@ def test_人物按姓名更新_技能废除与任务完成保留_背包允许删
     assert inventory["rows"] == []
 
 
-def test_非填表轮只注入全局表():
+def test_读取与维护频率彻底分离():
     tables = ts.default_tables()
-    assert [table["name"] for table in ts.tables_for_turn(tables, False)] == ["全局数据表"]
-    assert ts.tables_for_turn(tables, True) == tables
+    assert ts.tables_for_read(tables) == tables
+    assert [table["name"] for table in ts.tables_for_maintenance(tables, False)] == ["全局数据表"]
+    assert ts.tables_for_maintenance(tables, True) == tables
+
+
+def test_检索表身份列精确优先且无嵌入也可召回():
+    tables = ts.default_tables()
+    chars = next(table for table in tables if table["name"] == "重要角色表")
+    chars["rows"] = [
+        ["冷倾雪", "女", "成年", "剑客", "黑发", "白衣", "山门", "在场", "同伴", "", "脱困"],
+        ["虞妙玥", "女", "成年", "医师", "银发", "青衣", "药房", "离场", "盟友", "", "配药"],
+    ]
+
+    rows = ts.recall_retrieval_rows(tables, "冷倾雪回到山门", k=1)
+
+    assert len(rows) == 1
+    assert "冷倾雪" in rows[0]
 
 
 def test_存量全局与选项结构迁移为单卡(tmp_path):

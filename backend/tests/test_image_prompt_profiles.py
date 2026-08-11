@@ -73,6 +73,48 @@ def test_krea2不按分级切换模板而直接转译高潮内容():
     assert "不得改变人物、动作、服装、关系、地点或剧情结果" in seen["system"]
 
 
+@pytest.mark.parametrize("profile,prompt", [
+    (
+        "krea2",
+        "A medium environmental composition keeps the primary adult woman's visible action as the single visual focus. "
+        "Directional side light shapes the subject while fabric layers and the background recede into shadow.",
+    ),
+    (
+        "anima_tags",
+        profiles.ANIMA_QUALITY_TAGS + "\nadult woman, medium shot, side light, layered background, fabric folds, visual focus. "
+        "The subject remains readable against controlled shadow.",
+    ),
+    (
+        "natural_language",
+        "A medium shot keeps an adult woman as the visual focus under directional light, with fabric texture and layered background depth.",
+    ),
+    (
+        "niji_sections",
+        "adult woman\nrefined illustration\nmedium shot, directional light, layered composition, fabric texture\n--ar 3:4 --niji 6",
+    ),
+])
+def test_字段账本为所有模板补齐真实外貌服装动作地点与质量(profile, prompt):
+    scene = {
+        "narrative": "冷倾雪在栏杆边转身，破损的法衣随动作绷紧。",
+        "appearance": (
+            "【外貌】漆黑墨发扎成发团，插紫玉金髻，朱唇，晶亮美目。"
+            "【身材】丰腴熟躯，纤腰，宽厚圆硕臀部，修长美腿。"
+        ),
+        "wardrobe": "破损的素紫薄纱法衣，蚕丝白袜",
+        "locale": "栏杆边",
+        "draft_prompt": "turning beside a railing",
+        "actors": ["冷倾雪"],
+    }
+
+    completed, ledger = profiles.complete_field_coverage(profile, prompt, scene)
+
+    assert completed.isascii()
+    assert "冷倾雪" not in completed
+    assert all(not item["required"] or item["covered"] for item in ledger.values())
+    for fact in ("jet-black hair", "purple jade", "torn clothing", "white silk", "turning", "railing"):
+        assert fact in completed
+
+
 @pytest.mark.parametrize("profile,raw,expected", [
     (
         "krea2",
@@ -510,7 +552,8 @@ def test_anima结构化艺术决策不泄漏进最终两行提示词():
     assert prompt.count("\n") == 1
     assert "visual_hook" not in prompt
     assert "primary_focus" not in prompt
-    assert prompt.splitlines()[1] == content
+    assert prompt.splitlines()[1].startswith(content)
+    assert "bedchamber" in prompt
 
 
 def test_anima系统提示要求可见装置并禁止普通剧情清单():
@@ -533,19 +576,21 @@ def test_niji把结构化结果组装为四段():
         "suffix": "--stylize 400 --chaos 8 --no text",
     })
     prompt = profiles.generate("niji_sections", {**_scene(), "wardrobe": ""}, lambda _s, _u: raw)
-    assert prompt.splitlines() == [
-        "A swordswoman standing in rain",
-        "refined anime illustration",
-        "cinematic rim light, dynamic framing",
-        "--stylize 400 --chaos 8 --no text",
-    ]
+    lines = prompt.splitlines()
+    assert len(lines) == 4
+    assert lines[0].startswith("A swordswoman standing in rain")
+    assert "bedchamber" in lines[0]
+    assert lines[1] == "refined anime illustration"
+    assert lines[3] == "--stylize 400 --chaos 8 --no text"
 
 
 def test_自然语言模式保持完整段落而非tags():
     raw = "A swordswoman stands on rain-darkened stone steps. Cool backlight defines her silhouette from a low angle."
-    assert profiles.generate(
+    prompt = profiles.generate(
         "natural_language", {**_scene(), "wardrobe": ""}, lambda _s, _u: raw,
-    ) == raw
+    )
+    assert prompt.startswith(raw)
+    assert "bedchamber" in prompt
 
 
 def test_主模型内联Anima提示词只做本地归一不再调用模型():
@@ -681,7 +726,10 @@ def test_krea2重写后仍不完全合规也返回非空结果而不阻断生图
         "krea2", {**_scene("sfw"), "wardrobe": ""}, lambda _s, _u: next(outputs),
     )
 
-    assert prompt == "The second draft preserves the decisive action but remains shorter than the preferred range."
+    assert prompt.startswith(
+        "The second draft preserves the decisive action but remains shorter than the preferred range."
+    )
+    assert "bedchamber" in prompt
 
 
 def test_krea2重写后仍含中文时不得提交而改用英文兜底():

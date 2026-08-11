@@ -12,6 +12,7 @@
     "images": { "type": "array", "items": { "type": "string" } },
     "image_mask": { "anyOf": [{ "$ref": "#/$defs/imageMask" }, { "type": "null" }] },
     "base_url": { "type": "string" }, "api_key": { "type": "string" }, "model": { "type": "string" }, "proxy": { "type": "string" },
+    "provider_profile": { "type": "string", "enum": ["openai_compatible", "claude_compatible"] },
     "gen_base_url": { "type": "string" }, "gen_api_key": { "type": "string" }, "gen_model": { "type": "string" },
     "video_base_url": { "type": "string" }, "video_api_key": { "type": "string" }, "video_model": { "type": "string" },
     "embed_base_url": { "type": "string" }, "embed_api_key": { "type": "string" }, "embed_model": { "type": "string" },

@@ -112,6 +112,12 @@ def test_相关人物纪要优先且最多十条():
     assert [entry.turn_end for entry in selected] == list(range(24, 4, -2))
 
 
+def test_纪要卡号与回合区间解耦():
+    entry = nm.ChronicleEntry(text="事件", rowid=2, layer=0, turn_start=4, turn_end=6)
+
+    assert entry.card_id() == "T1-2"
+
+
 def test_body_关键词并入正文():
     e = nm.ChronicleEntry(text="事件", keywords=["甲", "乙"])
     assert e.body() == "事件 甲 乙"

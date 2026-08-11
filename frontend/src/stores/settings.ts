@@ -22,8 +22,17 @@ export interface ChatModel {
   apiKey: string;
   baseUrl: string;
   modelName: string;
+  providerProfile?: "openai_compatible" | "claude_compatible";
   proxyMode?: ProxyMode;
   proxyUrl?: string; // 运行时解析值；不要求持久化
+}
+
+function normalizeProviderProfile(
+  value: ChatModel["providerProfile"], modelName: string,
+): NonNullable<ChatModel["providerProfile"]> {
+  if (value === "claude_compatible" || value === "openai_compatible") return value;
+  // 仅作旧设置一次迁移；运行时只读显式 Provider Profile。
+  return modelName.toLowerCase().includes("claude") ? "claude_compatible" : "openai_compatible";
 }
 
 // 嵌入模型（知识库 RAG 用）：OpenAI 兼容形式，可填智谱/OpenAI/Ollama 等
@@ -249,6 +258,7 @@ function migrate(s: Record<string, unknown>): Settings {
   // 给缺 id 的对话模型补 id
   merged.chatModels = (merged.chatModels || []).map((m) => ({
     ...m, id: m.id || crypto.randomUUID(), proxyMode: normalizeProxyMode(m.proxyMode),
+    providerProfile: normalizeProviderProfile(m.providerProfile, m.modelName),
   }));
   merged.imageModels = (merged.imageModels || []).map((m) => ({
     ...m, proxyMode: normalizeProxyMode(m.proxyMode),

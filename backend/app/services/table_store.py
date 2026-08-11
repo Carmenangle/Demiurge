@@ -218,9 +218,19 @@ def apply_ops(tables: list[dict[str, Any]], ops: Any) -> int:
     return done
 
 
-def tables_for_turn(tables: list[dict[str, Any]], scheduled: bool) -> list[dict[str, Any]]:
-    """每轮固定包含全局表；到用户设置的填表轮次时再包含其余表。"""
+def tables_for_maintenance(tables: list[dict[str, Any]], scheduled: bool) -> list[dict[str, Any]]:
+    """写侧门控：每轮维护全局表；到填表轮次再维护其余表。"""
     return list(tables) if scheduled else [table for table in tables if table.get("alwaysFill")]
+
+
+def tables_for_read(tables: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """读侧不受填表频率影响；full 表读现值，retrieval 表由渲染器只读 schema。"""
+    return list(tables)
+
+
+def tables_for_turn(tables: list[dict[str, Any]], scheduled: bool) -> list[dict[str, Any]]:
+    """兼容旧调用；新代码应显式选择 read 或 maintenance。"""
+    return tables_for_maintenance(tables, scheduled)
 
 
 def _locate(tbl: dict[str, Any], item: dict[str, Any]) -> int | None:
@@ -373,6 +383,44 @@ def row_text(t: dict[str, Any], row: list[str]) -> str:
     """把一行渲染成"表名｜列=值"的可嵌入文本（供 RAG 索引/召回）。"""
     pairs = " ｜ ".join(f"{c}={row[i]}" for i, c in enumerate(t["columns"]) if i < len(row))
     return f"[{t['name']}] {pairs}"
+
+
+def recall_retrieval_rows(tables: list[dict[str, Any]], query: str, *, k: int = 5,
+                          max_chars: int = 4800) -> list[str]:
+    """检索表独立候选池：身份列精确命中优先，其次确定性文本相关度。
+
+    不依赖嵌入配置，因此切换检索模式或本地嵌入暂不可用时也不会静默空召回。
+    """
+    normalized_query = re.sub(r"\s+", "", query or "").casefold()
+    if not normalized_query:
+        return []
+    ranked: list[tuple[int, int, int, str]] = []
+    order = 0
+    for table in retrieval_tables(tables):
+        key_col = str(table.get("keyCol") or "")
+        key_index = table.get("columns", []).index(key_col) if key_col in table.get("columns", []) else -1
+        for row in table.get("rows") or []:
+            rendered = row_text(table, row)
+            compact = re.sub(r"\s+", "", rendered).casefold()
+            key = str(row[key_index]).strip().casefold() if 0 <= key_index < len(row) else ""
+            exact = 1 if key and key in normalized_query else 0
+            terms = [term for term in re.split(r"[^\w\u4e00-\u9fff]+", normalized_query) if len(term) >= 2]
+            overlap = sum(1 for term in terms if term in compact)
+            if not exact and not overlap and not any(
+                normalized_query[i:i + 3] in compact for i in range(max(0, len(normalized_query) - 2))
+            ):
+                order += 1
+                continue
+            ranked.append((exact, overlap, -order, rendered))
+            order += 1
+    out: list[str] = []
+    used = 0
+    for _exact, _overlap, _order, rendered in sorted(ranked, reverse=True):
+        if len(out) >= max(0, k) or (out and used + len(rendered) > max_chars):
+            break
+        out.append(rendered)
+        used += len(rendered)
+    return out
 
 
 def retrieval_tables(tables: list[dict[str, Any]]) -> list[dict[str, Any]]:

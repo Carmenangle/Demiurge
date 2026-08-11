@@ -75,13 +75,20 @@ def _is_transient(err: Exception) -> bool:
 _ROLE_MAP = {"system": "system", "user": "human", "assistant": "ai", "human": "human", "ai": "ai"}
 
 
-def prepare_messages(model: str, messages: list[dict]) -> list[dict[str, str]]:
-    """返回实际发送结构；仅 Claude 合并 system、交替历史并去除末轮重复。"""
+def prepare_messages(model: str, messages: list[dict], *, provider_profile: str = "") -> list[dict[str, str]]:
+    """返回实际发送结构。
+
+    ``provider_profile`` 非空时是运行态真源；仅为兼容旧调用，缺省时才按模型名推断。
+    """
     cleaned = [
         {"role": (m.get("role") or "user"), "content": m.get("content") or ""}
         for m in messages if (m.get("content") or "").strip()
     ]
-    if "claude" not in (model or "").casefold():
+    profile = (provider_profile or "").strip().lower()
+    is_claude = profile == "claude_compatible" if profile else (
+        "claude" in (model or "").casefold()
+    )
+    if not is_claude:
         return cleaned
 
     # GrayWill 常在倒数 user 包装 {{lastUserMessage}}，调用方又追加真实末轮 user。
@@ -117,21 +124,22 @@ def prepare_messages(model: str, messages: list[dict]) -> list[dict[str, str]]:
     return prepared or [{"role": "user", "content": ""}]
 
 
-def _payload(model: str, messages: list[dict]) -> list[tuple[str, str]]:
+def _payload(model: str, messages: list[dict], *, provider_profile: str = "") -> list[tuple[str, str]]:
     return [
         (_ROLE_MAP.get(message["role"], "human"), message["content"])
-        for message in prepare_messages(model, messages)
+        for message in prepare_messages(model, messages, provider_profile=provider_profile)
     ]
 
 
 def chat_messages(base_url: str, api_key: str, model: str, messages: list[dict],
                   temperature: float = 0.7, proxy: str = "", retries: int = 2,
-                  top_p: float | None = None, max_tokens: int | None = None) -> str:
+                  top_p: float | None = None, max_tokens: int | None = None,
+                  provider_profile: str = "") -> str:
     """多消息单轮对话：messages=[{"role":"system|user|assistant","content":..}]，保留各条 role
     发给模型（不折叠成单 system 串），返回展平后的回复文本。空/无 content 的条目跳过。
     上游临时故障退避重试；调用失败抛 RuntimeError。`chat` 是它 system+user 两条的特例。"""
     import time
-    payload = _payload(model, messages)
+    payload = _payload(model, messages, provider_profile=provider_profile)
     llm = build_model(base_url, api_key, model, temperature=temperature, proxy=proxy,
                       top_p=top_p, max_tokens=max_tokens)
     last: Exception | None = None
@@ -151,13 +159,14 @@ def chat_messages(base_url: str, api_key: str, model: str, messages: list[dict],
 def chat_messages_stream(base_url: str, api_key: str, model: str, messages: list[dict],
                          on_delta: Callable[[str], None], temperature: float = 0.7,
                          proxy: str = "", retries: int = 2,
-                         top_p: float | None = None, max_tokens: int | None = None) -> str:
+                         top_p: float | None = None, max_tokens: int | None = None,
+                         provider_profile: str = "") -> str:
     """流式调用多消息对话，并把每个正文增量交给调用方；同时返回完整原文供后处理。
 
     仅在本次尝试尚未产生任何增量时重试，避免连接中断后把已显示的半段正文重复输出。
     """
     import time
-    payload = _payload(model, messages)
+    payload = _payload(model, messages, provider_profile=provider_profile)
     llm = build_model(
         base_url, api_key, model, temperature=temperature, streaming=True, proxy=proxy,
         top_p=top_p, max_tokens=max_tokens, sdk_retries=0,

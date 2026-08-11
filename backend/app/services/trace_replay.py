@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any
 
-from app.services import run_trace, structured_output
+from app.services import prompt_compliance, run_trace, structured_output
 from app.services.structured_contracts import SupervisorDecision
 
 
@@ -56,6 +56,7 @@ def _case(turn_id: str, records: list[dict[str, Any]]) -> dict[str, Any]:
         "repo_id": str(records[0].get("repo_id") or "") if records else "",
         "passed": all(checks.values()),
         "checks": checks,
+        "compliance": prompt_compliance.evaluate_turn(records),
         "event_count": len(records),
     }
 
@@ -68,9 +69,16 @@ def evaluate_records(records: list[dict[str, Any]]) -> dict[str, Any]:
             grouped[turn_id].append(record)
     cases = [_case(turn_id, items) for turn_id, items in grouped.items()]
     passed = sum(1 for case in cases if case["passed"])
+    outcomes: dict[str, int] = {}
+    for case in cases:
+        outcome = str(case["compliance"]["outcome"])
+        outcomes[outcome] = outcomes.get(outcome, 0) + 1
     return {
-        "version": 1,
-        "summary": {"cases": len(cases), "passed": passed, "failed": len(cases) - passed},
+        "version": 2,
+        "summary": {
+            "cases": len(cases), "passed": passed, "failed": len(cases) - passed,
+            "outcomes": outcomes,
+        },
         "cases": cases,
     }
 

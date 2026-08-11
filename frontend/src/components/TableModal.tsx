@@ -441,8 +441,10 @@ function ChroniclePane({ chron, outputDir, repoId, busy, setBusy, setErr, reload
           {chron.map((e) => (
             <div className="row-card" key={e.rowid}>
               <div className="row-card-head">
-                <span className="row-card-idx">T{e.turn_start}–{e.turn_end}</span>
-                <span className="row-card-title">{LAYER_LABEL[e.layer] || e.layer}</span>
+                <span className="row-card-idx">{e.card_id}</span>
+                <span className="row-card-title">
+                  {LAYER_LABEL[e.layer] || e.layer} · 回合 {e.turn_start}–{e.turn_end}
+                </span>
                 <button className="btn row-card-del" disabled={busy} onClick={() => onDel(e.rowid)} title="删除此纪要">
                   <Trash2 size={13} />
                 </button>

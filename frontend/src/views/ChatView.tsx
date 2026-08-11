@@ -128,6 +128,7 @@ export function ChatView({
     baseUrl: activeChat?.baseUrl || "",
     apiKey: activeChat?.apiKey || "",
     modelName: activeChat?.modelName || "",
+    providerProfile: activeChat?.providerProfile || "openai_compatible",
     proxyMode: activeChat?.proxyMode,
     proxyUrl: resolveModelProxy(activeChat?.proxyMode, settings.proxyUrl, settings.proxyEnabled),
   };

@@ -623,7 +623,7 @@ _VISUAL_FACT_RULES: tuple[tuple[str, str, str], ...] = (
     (r"碎花紫长裙|紫色?碎花长裙", "a floral purple long skirt", r"\b(?:floral purple|purple floral).{0,12}(?:long )?(?:skirt|dress)\b"),
     (r"红色?长裙|红裙", "a red long dress", r"\bred (?:long )?(?:dress|skirt)\b"),
     (r"高叉开衩|高开叉|高叉", "a high side slit", r"\bhigh (?:side )?slit\b"),
-    (r"衣.{0,4}(?:破碎|撕裂|扯破)|裙.{0,4}(?:破碎|撕裂|扯破)", "torn clothing with stressed folds", r"\btorn.{0,20}(?:clothing|robe|dress|skirt|fabric)\b"),
+    (r"(?:衣|裙|袍).{0,4}(?:破碎|破损|撕裂|扯破)|(?:破碎|破损|撕裂|扯破).{0,4}(?:衣|裙|袍)", "torn clothing with stressed folds", r"\btorn.{0,20}(?:clothing|robe|dress|skirt|fabric)\b"),
     (r"赤裸|全裸|一丝不挂", "a nude body with no remaining garments", r"\b(?:nude|naked).{0,18}(?:body|woman|character)?\b"),
 )
 
@@ -646,6 +646,13 @@ def _mapped_visual_facts(scene: Mapping[str, object]) -> list[str]:
     return list(dict.fromkeys(
         phrase for source_pattern, phrase, _ in _VISUAL_FACT_RULES
         if re.search(source_pattern, source)
+    ))
+
+
+def _mapped_facts_from(source: str) -> list[str]:
+    return list(dict.fromkeys(
+        phrase for source_pattern, phrase, _ in _VISUAL_FACT_RULES
+        if re.search(source_pattern, source or "")
     ))
 
 
@@ -1000,6 +1007,152 @@ def deterministic_fallback(profile: str, scene: Mapping[str, object]) -> str:
     return _anonymize_prompt_names(prompt, scene)
 
 
+_FIELD_PATTERNS = {
+    "appearance": re.compile(r"\b(?:hair|eyes?|gaze|face|lips?|cheeks?|figure|bust|waist|hips?|legs?)\b", re.I),
+    "wardrobe": re.compile(r"\b(?:dress|robe|skirt|shirt|jacket|coat|stockings?|socks?|fabric|garment|clothing)\b", re.I),
+    "location": re.compile(r"\b(?:bedchamber|chamber|room|cell|corridor|railing|gate|entrance|forest|street|hall|enclosure|village|outdoors?)\b", re.I),
+    "camera": re.compile(r"\b(?:shot|view|angle|lens|focal|perspective|depth of field|camera)\b", re.I),
+    "composition": re.compile(r"\b(?:composition|foreground|background|negative space|visual focus|frame|thirds?|diagonal)\b", re.I),
+    "lighting": re.compile(r"\b(?:light|lighting|shadow|highlight|backlit|rim light|color temperature)\b", re.I),
+    "material": re.compile(r"\b(?:material|texture|fabric|silk|gauze|folds?|skin|hair|wood|metal|wet|moisture)\b", re.I),
+    "quality": re.compile(r"\b(?:anatomy|contours?|clean edges?|fine detail|fidelity|polished|best quality|masterpiece)\b", re.I),
+}
+
+_LOCATION_RULES = (
+    (r"寝殿|卧室", "bedchamber"),
+    (r"牢房|囚室|禁闭室", "confinement cell"),
+    (r"长廊|走廊", "corridor"),
+    (r"栏杆", "railing"),
+    (r"山门", "mountain gate"),
+    (r"孤儿院.{0,8}门|门.{0,8}孤儿院", "orphanage entrance"),
+    (r"森林|树林", "forest"),
+)
+
+
+def _expected_present(prompt: str, phrase: str) -> bool:
+    for _source_pattern, known_phrase, output_pattern in _VISUAL_FACT_RULES:
+        if known_phrase == phrase:
+            return bool(re.search(output_pattern, prompt, re.I))
+    words = [word for word in re.findall(r"[a-z]{3,}", phrase.lower())
+             if word not in {"with", "into", "from", "that", "this", "very", "adult"}]
+    if not words:
+        return True
+    def matches(word: str) -> bool:
+        variants = [word]
+        if word.endswith("ing") and len(word) > 5:
+            stem = word[:-3]
+            if len(stem) > 2 and stem[-1] == stem[-2]:
+                stem = stem[:-1]
+            variants.append(stem)
+        return any(re.search(rf"\b{re.escape(value)}\w*\b", prompt, re.I) for value in variants)
+
+    present = sum(1 for word in dict.fromkeys(words) if matches(word))
+    return present >= max(1, (len(set(words)) + 1) // 2)
+
+
+def prompt_field_ledger(prompt: str, scene: Mapping[str, object]) -> dict[str, dict[str, object]]:
+    """逐字段验收最终成稿；只记录可由 SceneSpec 客观验证的事实。"""
+    fact_scene = _scene_for_facts(scene)
+    appearance_source = str(fact_scene.get("appearance") or "")
+    wardrobe_source = "\n".join((
+        str(fact_scene.get("wardrobe") or ""),
+        str(fact_scene.get("narrative") or "") if re.search(
+            r"衣|裙|袍|袜|dress|robe|skirt|stocking", str(fact_scene.get("narrative") or ""), re.I,
+        ) else "",
+    ))
+    appearance_expected = _mapped_facts_from(appearance_source)
+    wardrobe_expected = _mapped_facts_from(wardrobe_source)
+    actions = _scene_action_tags(fact_scene)
+    locale = str(fact_scene.get("locale") or "")
+    locations = [phrase for pattern, phrase in _LOCATION_RULES if re.search(pattern, locale)]
+    if locale.isascii() and re.search(r"[A-Za-z]{3}", locale):
+        locations.append(locale.strip(" ,.;"))
+    requirements = {
+        "appearance": bool(appearance_source.strip()),
+        "wardrobe": bool(str(fact_scene.get("wardrobe") or "").strip() or wardrobe_expected),
+        "action": bool(actions),
+        "location": bool(locale.strip()),
+        "camera": True,
+        "composition": True,
+        "lighting": True,
+        "material": True,
+        "quality": True,
+    }
+    expected = {
+        "appearance": appearance_expected,
+        "wardrobe": wardrobe_expected,
+        "action": actions,
+        "location": locations,
+    }
+    ledger: dict[str, dict[str, object]] = {}
+    for field, required in requirements.items():
+        phrases = expected.get(field, [])
+        if phrases:
+            covered = all(_expected_present(prompt, phrase) for phrase in phrases)
+            if field == "location" and not covered:
+                covered = bool(_FIELD_PATTERNS["location"].search(prompt))
+        elif field in _FIELD_PATTERNS:
+            covered = bool(_FIELD_PATTERNS[field].search(prompt))
+        else:
+            covered = not required
+        if field == "appearance" and _VAGUE_IDENTITY_RE.search(prompt):
+            covered = False
+        ledger[field] = {
+            "required": required,
+            "covered": bool(covered or not required),
+            "expected": phrases,
+        }
+    return ledger
+
+
+def complete_field_coverage(
+    profile: str, prompt: str, scene: Mapping[str, object],
+) -> tuple[str, dict[str, dict[str, object]]]:
+    """只补缺字段，不替换已经合格的高潮与艺术决策。"""
+    ledger = prompt_field_ledger(prompt, scene)
+    missing = [field for field, item in ledger.items() if item["required"] and not item["covered"]]
+    factual_missing = [field for field in missing if field in {"appearance", "wardrobe", "action", "location"}]
+    if not factual_missing:
+        return prompt, ledger
+    details: list[str] = []
+    for field in ("appearance", "wardrobe", "action", "location"):
+        if field in factual_missing:
+            expected = ledger[field]["expected"]
+            if isinstance(expected, list):
+                details.extend(str(value) for value in expected if str(value).strip())
+    defaults = {
+        "camera": "a scene-appropriate medium shot with coherent perspective and readable depth of field",
+        "composition": "a clear primary visual focus, foreground guidance, controlled negative space, and layered background depth",
+        "lighting": "one coherent directional light source with consistent highlights and cast shadows",
+        "material": "physically coherent skin, hair, fabric folds, surface texture, and material response",
+        "quality": "precise anatomy, stable contours, clean edges, controlled fine detail, and high image fidelity",
+    }
+    details.extend(defaults[field] for field in missing if field in defaults)
+    details = list(dict.fromkeys(detail for detail in details if detail and _expected_present(prompt, detail) is False))
+    if not details:
+        return prompt, ledger
+    sentence = "Required visible facts: " + "; ".join(details) + "."
+    if profile in {"krea2", "natural_language"}:
+        repaired = prompt.rstrip(" .") + ". " + sentence
+    elif profile == "anima_tags":
+        lines = prompt.splitlines()
+        if len(lines) != 2:
+            return prompt, ledger
+        repaired = lines[0] + "\n" + lines[1].rstrip(" .") + ". " + sentence
+    elif profile == "niji_sections":
+        lines = prompt.splitlines()
+        if len(lines) != 4:
+            return prompt, ledger
+        lines[0] = lines[0].rstrip(" ,.;") + ", " + ", ".join(details[:4])
+        if len(details) > 4:
+            lines[2] = lines[2].rstrip(" ,.;") + ", " + ", ".join(details[4:])
+        repaired = "\n".join(lines)
+    else:
+        return prompt, ledger
+    repaired = _anonymize_prompt_names(repaired, scene)
+    return repaired, prompt_field_ledger(repaired, scene)
+
+
 def generate(
     profile: str,
     scene: Mapping[str, object],
@@ -1026,7 +1179,9 @@ def generate(
         errors.extend(_anima_contract_errors(raw))
         errors.extend(_anima_scene_fact_errors(prompt, fact_scene))
     if not errors:
-        return prompt
+        completed, ledger = complete_field_coverage(profile, prompt, fact_scene)
+        report["field_ledger"] = ledger
+        return completed
     report["first_errors"] = list(dict.fromkeys(errors))
     repair = (
         f"{source}\n\n上次输出未通过：{'；'.join(errors)}。请严格按系统协议重写。"
@@ -1047,10 +1202,17 @@ def generate(
         report["strategy"] = "fallback"
         # Krea2 的长度只用于引导纠错；英文、段落、分级和禁词仍是硬合同。
         if profile == "krea2" and not _inline_krea_errors(prompt, fact_scene):
-            return prompt
-        return deterministic_fallback(profile, fact_scene)
+            completed, ledger = complete_field_coverage(profile, prompt, fact_scene)
+            report["field_ledger"] = ledger
+            return completed
+        fallback = deterministic_fallback(profile, fact_scene)
+        completed, ledger = complete_field_coverage(profile, fallback, fact_scene)
+        report["field_ledger"] = ledger
+        return completed
     report["strategy"] = "repaired"
-    return prompt
+    completed, ledger = complete_field_coverage(profile, prompt, fact_scene)
+    report["field_ledger"] = ledger
+    return completed
 
 
 def generate_result(
@@ -1072,5 +1234,6 @@ def generate_result(
             *[str(item) for item in first_items],
             *[str(item) for item in repair_items],
         ])),
+        "field_ledger": diagnostics.get("field_ledger") or {},
     }
     return result

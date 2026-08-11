@@ -165,14 +165,37 @@ def test_预设角色描述marker使用本轮已筛选内容(monkeypatch):
     ctx = _card_ctx(
         preset_dir="presets", preset_name="active", persona="【角色：米拉】\n黑发金眼",
         _selected_persona_names=["米拉"],
+        _selected_persona_personality="冷静果断",
+        _selected_persona_scenario="雨夜客栈",
+        _selected_persona_examples="米拉：别出声。",
     )
 
     ag._resolve_preset(ctx, "", turn=2)
 
     assert captured["char_name"] == "米拉"
     assert captured["char_description"] == "【角色：米拉】\n黑发金眼"
-    assert captured["char_personality"] == ""
-    assert captured["scenario"] == ""
+    assert captured["char_personality"] == "冷静果断"
+    assert captured["scenario"] == "雨夜客栈"
+    assert captured["dialogue_examples"] == "米拉：别出声。"
+
+
+def test_本轮筛选角色卡分别保留预设字段(monkeypatch):
+    from app.services import character_store
+
+    monkeypatch.setattr(character_store, "read_card", lambda _base, _name: {
+        "description": "黑发金眼",
+        "personality": "冷静果断",
+        "scenario": "雨夜客栈",
+        "mes_example": "米拉：别出声。",
+    })
+    ctx = _card_ctx(card_names=["米拉"], opening_card_name="米拉")
+
+    persona = ag._resolve_personas(ctx, "米拉推开门")
+
+    assert "黑发金眼" in persona
+    assert "冷静果断" in ctx["_selected_persona_personality"]
+    assert "雨夜客栈" in ctx["_selected_persona_scenario"]
+    assert "米拉：别出声。" in ctx["_selected_persona_examples"]
 
 
 def test_主剧情世界书选择范围贯通到curator读写与trace(monkeypatch, tmp_path):
@@ -336,6 +359,20 @@ def test_首次世界书索引立即发送非阻塞状态事件(monkeypatch):
     assert traces[-1] == (
         "worldbook.index", {"status": "started", "initial": True, "count": 1},
     )
+
+
+def test_世界书激活窗口不扫描已离场的旧历史角色():
+    ctx = _ctx(history=[
+        {"role": "user", "content": "很久以前冷倾雪出现"},
+        {"role": "assistant", "content": "冷倾雪随后离场"},
+        {"role": "user", "content": "现在只和虞妙玥说话"},
+        {"role": "assistant", "content": "虞妙玥正在配药"},
+    ])
+
+    scan = ag._worldbook_scan_text(ctx, "继续观察虞妙玥")
+
+    assert "虞妙玥" in scan
+    assert "冷倾雪" not in scan
 
 
 def _decision(route: str, confidence: str = "high", alternatives=None) -> str:

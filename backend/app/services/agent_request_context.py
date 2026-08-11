@@ -56,6 +56,7 @@ def from_payload(payload: Mapping[str, Any]) -> RunContext:
         video_proxy_url=str(payload.get("video_proxy_url") or ""),
         embed_proxy_url=str(payload.get("embed_proxy_url") or ""),
         route_model=str(payload.get("route_model") or ""),
+        provider_profile=str(payload.get("provider_profile") or "openai_compatible"),
         style_template=str(payload.get("style_template") or ""),
         agent_id=str(payload.get("agent_id") or ""),
         stream_output=bool(payload.get("stream_output", False)),

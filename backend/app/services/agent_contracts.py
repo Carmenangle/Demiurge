@@ -38,6 +38,7 @@ class RunContext:
     video_proxy_url: str = ""
     embed_proxy_url: str = ""
     route_model: str = ""
+    provider_profile: str = "openai_compatible"
     style_template: str = ""
     agent_id: str = ""
     stream_output: bool = False
@@ -104,6 +105,7 @@ class RunContext:
             "chat_proxy": self.chat_proxy_url, "gen_proxy": self.gen_proxy_url,
             "vid_proxy": self.video_proxy_url, "embed_proxy": self.embed_proxy_url,
             "route_model": self.route_model, "style_template": self.style_template,
+            "provider_profile": self.provider_profile,
             "agent_id": self.agent_id, "message_id": self.message_id,
             "stream_output": self.stream_output, "stream_sink": self.stream_sink,
             "approval_id": self.approval_id, "approval_action": self.approval_action,

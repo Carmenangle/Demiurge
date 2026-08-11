@@ -127,3 +127,21 @@ def test_claude流式复用相同规范化(monkeypatch):
                               ("assistant", "答一\n\n答二"), ("user", "继续"))
     ])
     assert _llm.prepare_messages("Claude-Sonnet-4", prepared) == prepared
+
+
+def test_显式provider_profile覆盖模型名推断(monkeypatch):
+    captured = _patch_model(monkeypatch)
+    messages = [
+        {"role": "system", "content": "甲"},
+        {"role": "user", "content": "问"},
+        {"role": "system", "content": "乙"},
+        {"role": "user", "content": "继续"},
+    ]
+    _llm.chat_messages(
+        "b", "k", "Claude-Sonnet-4", messages,
+        provider_profile="openai_compatible",
+    )
+    assert captured[0] == [
+        ("system", "甲"), ("human", "问"),
+        ("system", "乙"), ("human", "继续"),
+    ]

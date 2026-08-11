@@ -25,7 +25,7 @@ export type Embed = {
   proxyUrl?: string;
 };
 // 对话模型三元组配置。
-export type Chat = { baseUrl: string; apiKey: string; modelName: string; proxyUrl?: string };
+export type Chat = { baseUrl: string; apiKey: string; modelName: string; proxyUrl?: string; providerProfile?: "openai_compatible" | "claude_compatible" };
 
 // wire 格式序列化器（收口三元组，各调用方不再逐字段手拆）：
 // - chatBody：对话端点用 base_url/api_key/model
@@ -321,6 +321,7 @@ export interface AgentInvocation {
   videoProxyUrl: string;
   embedProxyUrl: string;
   routeModel?: string;
+  providerProfile?: "openai_compatible" | "claude_compatible";
   messageId?: string;
   userMessageId?: string;
   styleTemplate: string;
@@ -376,6 +377,7 @@ export function agentInvocationBody(request: AgentInvocation): AgentInvocationWi
     video_proxy_url: request.videoProxyUrl,
     embed_proxy_url: request.embedProxyUrl,
     route_model: request.routeModel || "",
+    provider_profile: request.providerProfile || "openai_compatible",
     message_id: request.messageId || "",
     user_message_id: request.routeAction?.userMessageId || request.userMessageId || "",
     style_template: request.styleTemplate,

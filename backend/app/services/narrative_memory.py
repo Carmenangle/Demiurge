@@ -48,6 +48,10 @@ class ChronicleEntry:
     characters: list[str] = field(default_factory=list)
     facts: list[dict[str, str]] = field(default_factory=list)
 
+    def card_id(self) -> str:
+        """稳定展示编号：T<层级>-<落盘序号>，不随回合区间或内容编辑变化。"""
+        return f"T{self.layer + 1}-{self.rowid}" if self.rowid > 0 else f"T{self.layer + 1}-new"
+
     def body(self) -> str:
         """trigram 索引正文 = 纪要正文 + 关键词（关键词重复进正文，加权召回）。"""
         extras = " ".join([self.overview, *self.characters, *self.keywords]).strip()

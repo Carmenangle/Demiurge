@@ -12,7 +12,7 @@ import logging
 import re
 from typing import TypedDict, Iterator
 
-from app.services import agent_context, builtin_agents, edit_agent, generation_approval, generation_store, roleplay_turn, run_trace, scene_classify, structured_output, tool_agent_adapter
+from app.services import agent_context, builtin_agents, edit_agent, generation_approval, generation_store, prompt_compiler, roleplay_turn, run_trace, scene_classify, structured_output, tool_agent_adapter
 from app.services.structured_contracts import SupervisorDecision
 from app.services import llm as _llm
 from app.services.agent_contracts import RunContext
@@ -517,6 +517,7 @@ def roleplay_node(state: AgentState) -> dict:
             selected_indices=ctx.get("_selected_worldbook_indices") or [],
             keyword_indices=ctx.get("_keyword_worldbook_indices") or [],
             character_names=ctx.get("_worldbook_character_names") or [],
+            scan_chars=int(ctx.get("_worldbook_scan_chars") or 0),
         )
         first_story_reply = not any(
             item.get("role") == "user" and str(item.get("content") or "").strip()
@@ -588,6 +589,7 @@ def roleplay_node(state: AgentState) -> dict:
             retrieval_query = (agent_context.history_text(ctx)[-600:] + text)
             # 表格+RAG 结合：先从 rag_store 召回知识库条目 + 检索表行（同库同通道）
             rag_text = _rag_recall_text(ctx, repo_id, retrieval_query)
+            table_recall = _table_recall_text(ctx, repo_id, retrieval_query)
             # Recall 只做检索，不独立调 LLM：往事纪要 + 知识库/检索表候选原样并入
             # GrayWill 主请求，由主模型结合世界书、历史与本轮输入一次判断并生成。
             recall = roleplay_agency.recall_chronicle(
@@ -648,6 +650,8 @@ def roleplay_node(state: AgentState) -> dict:
             ], token_budget=900)
             if compiled.text:
                 base += "\n\n" + compiled.text
+            if table_recall:
+                base += "\n\n【相关数据表行（独立配额）】\n" + table_recall
             run_trace.emit(
                 ctx, "continuity.compiled", tokens=compiled.tokens,
                 sources=list(compiled.included), fact_count=len(active_facts),
@@ -676,8 +680,7 @@ def roleplay_node(state: AgentState) -> dict:
             try:
                 from app.services import table_store, table_update
                 _tables = table_store.load(ctx.get("output_dir") or "", repo_id)
-                should_fill = bool(_tables) and _should_fill(ctx, repo_id, turn)
-                turn_tables = table_store.tables_for_turn(_tables, should_fill)
+                turn_tables = table_store.tables_for_read(_tables)
                 if turn_tables:
                     base += table_update.table_context(turn_tables)
                     run_trace.emit(
@@ -687,7 +690,7 @@ def roleplay_node(state: AgentState) -> dict:
                 else:
                     run_trace.emit(
                         ctx, "table.prompt", status="skipped", turn=turn,
-                        reason="no_tables" if not _tables else "cadence_not_reached",
+                        reason="no_tables",
                     )
             except Exception as exc:  # noqa: BLE001
                 run_trace.emit(ctx, "table.prompt", status="error", turn=turn, error=str(exc))
@@ -704,10 +707,15 @@ def roleplay_node(state: AgentState) -> dict:
         tail_msgs = [{"role": "system", "content": c} for c in chains_tail]
         messages = [{"role": "system", "content": system}, *dialogue, *tail_msgs,
                     {"role": "user", "content": text}]
-        wire_messages = _llm.prepare_messages(ctx["chat_model"], messages)
+        compiled_prompt = prompt_compiler.compile_messages(
+            messages,
+            provider_profile=ctx.get("provider_profile") or "openai_compatible",
+        )
+        wire_messages = compiled_prompt.messages
         run_trace.emit(ctx, "model.request", agent="roleplay", model=ctx["chat_model"],
                        messages=wire_messages, preset=ctx.get("preset_name") or "",
-                       temperature=temp)
+                       temperature=temp, provider_profile=compiled_prompt.provider_profile,
+                       prompt_manifest=compiled_prompt.manifest)
         def _generated(value: str) -> None:
             run_trace.emit(ctx, "model.response", agent="roleplay", content=value)
             think = _probe_think(value)
@@ -889,7 +897,7 @@ def _apply_table_ops(ctx: dict, repo_id: str, clean: str, ops: list,
     if not ops:
         if mark_empty and tables and turn > 0:
             from app.services import manual_table_fill
-            processed = table_store.tables_for_turn(tables, _should_fill(ctx, repo_id, turn))
+            processed = table_store.tables_for_maintenance(tables, _should_fill(ctx, repo_id, turn))
             manual_table_fill.mark_processed(
                 output_dir, repo_id,
                 [str(table.get("uid") or "") for table in processed], turn,
@@ -908,7 +916,7 @@ def _apply_table_ops(ctx: dict, repo_id: str, clean: str, ops: list,
         _reindex_retrieval_tables(ctx, repo_id, tables)
     if tables and turn > 0:
         from app.services import manual_table_fill
-        processed = table_store.tables_for_turn(
+        processed = table_store.tables_for_maintenance(
             tables, False if short_reply else _should_fill(ctx, repo_id, turn),
         )
         manual_table_fill.mark_processed(
@@ -1239,11 +1247,24 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
                     scene_spec["profile"], local_profile, scene_spec,
                 ) or local_profile
                 profile_strategy = "local_fallback"
+            compiled_profile, field_ledger = image_prompt_profiles.complete_field_coverage(
+                scene_spec["profile"], compiled_profile, scene_spec,
+            )
+            missing_fields = [
+                name for name, item in field_ledger.items()
+                if item.get("required") and not item.get("covered")
+            ]
+            if profile_strategy == "same_turn" and any(
+                item.get("expected") for item in field_ledger.values()
+            ) and "Required visible facts:" in compiled_profile:
+                profile_strategy = "same_turn+field_repair"
             scene_spec["profile_prompt"] = compiled_profile
+            scene_spec["field_ledger"] = field_ledger
             run_trace.emit(
                 ctx, "illustration.profile", profile=scene_spec["profile"],
                 strategy=profile_strategy, inline_chars=len(inline_profile),
                 output_chars=len(compiled_profile), plan_retargeted=plan_retargeted,
+                field_ledger=field_ledger, missing_fields=missing_fields,
             )
             profile_negative = image_prompt_profiles.negative_prompt(
                 ctx.get("prompt_profile") or "krea2", scene_spec,
@@ -1374,7 +1395,7 @@ def _table_maintenance(ctx: dict, repo_id: str, clean: str, turn: int) -> None:
         scheduled = _should_fill(ctx, repo_id, turn)
         if len(clean) < int(cfg.get("minReplyLen", 0)):
             scheduled = False
-        selected = table_store.tables_for_turn(tables, scheduled)
+        selected = table_store.tables_for_maintenance(tables, scheduled)
         system = table_update.maintenance_instruction(selected)
         if not system:
             run_trace.emit(ctx, "agent.skipped", agent="table_maintenance", reason="cadence_not_reached")
@@ -1456,8 +1477,9 @@ def _rag_recall_text(ctx: dict, repo_id: str, query: str, k: int = 6) -> str:
         return ""
     try:
         from app.services import rag_store
-        hits = rag_store.retrieve_with_trace(
-            repo_id, cfg, query, k=k, include_system=False)
+        candidates = rag_store.retrieve_with_trace(
+            repo_id, cfg, query, k=max(k * 2, 12), include_system=False)
+        hits = [hit for hit in candidates if hit.get("kind") != "table_row"][:k]
     except Exception as exc:  # noqa: BLE001  召回失败不阻断叙述
         run_trace.emit(ctx, "rag.retrieve", status="error", query=query, error=str(exc))
         return ""
@@ -1465,6 +1487,19 @@ def _rag_recall_text(ctx: dict, repo_id: str, query: str, k: int = 6) -> str:
     return "\n".join(
         f"- {hit.get('content', '')}" for hit in hits if (hit.get("content") or "").strip()
     )
+
+
+def _table_recall_text(ctx: dict, repo_id: str, query: str, k: int = 5) -> str:
+    """检索表专属读通道；与普通知识 RAG 分池、分配额。"""
+    try:
+        from app.services import table_store
+        tables = table_store.load(ctx.get("output_dir") or "", repo_id)
+        rows = table_store.recall_retrieval_rows(tables, query, k=k)
+    except Exception as exc:  # noqa: BLE001
+        run_trace.emit(ctx, "table.retrieve", status="error", query=query, error=str(exc))
+        return ""
+    run_trace.emit(ctx, "table.retrieve", status="ok", query=query, hit_count=len(rows), hits=rows)
+    return "\n".join(f"- {row}" for row in rows)
 
 
 def _reindex_retrieval_tables(ctx: dict, repo_id: str, tables: list) -> None:
@@ -1741,6 +1776,9 @@ def _resolve_personas(
             selected = _active_fallback_names(names, fallback_query)
 
     profiles: list[str] = []
+    personalities: list[str] = []
+    scenarios: list[str] = []
+    dialogue_examples: list[str] = []
     injected_names: list[str] = []
     try:
         from app.services import character_store, instruction_provenance
@@ -1754,11 +1792,28 @@ def _resolve_personas(
                 f"角色卡：{card_name}",
                 f"【角色：{card_name}】\n{description}",
             ))
+            for key, target in (
+                ("personality", personalities),
+                ("scenario", scenarios),
+                ("mes_example", dialogue_examples),
+            ):
+                value = str((card or {}).get(key) or "").strip()
+                if value:
+                    target.append(instruction_provenance.wrap(
+                        f"角色卡：{card_name}:{key}",
+                        f"【角色：{card_name}】\n{value}",
+                    ))
             injected_names.append(card_name)
     except Exception:  # noqa: BLE001
         profiles = []
+        personalities = []
+        scenarios = []
+        dialogue_examples = []
         injected_names = []
     ctx["_selected_persona_names"] = injected_names
+    ctx["_selected_persona_personality"] = "\n\n".join(personalities)
+    ctx["_selected_persona_scenario"] = "\n\n".join(scenarios)
+    ctx["_selected_persona_examples"] = "\n\n".join(dialogue_examples)
     if not profiles:
         return ""
     selection = (
@@ -1830,7 +1885,8 @@ def _resolve_worldbook(ctx: dict, query: str) -> str:
         worldbook.schedule_index(
             ctx.get("repo_id", ""), entries, cfg, on_initial=notify_initial_index,
         )
-        scan = (agent_context.history_text(ctx) + "\n" + query).strip()
+        scan = _worldbook_scan_text(ctx, query)
+        ctx["_worldbook_scan_chars"] = len(scan)
         selection = worldbook.assemble_selection(ctx.get("repo_id", ""), entries, scan, cfg)
         ctx["_selected_worldbook_indices"] = selection.indices
         current_keyword_indices = set(worldbook.keyword_match_indices(entries, query))
@@ -1849,6 +1905,20 @@ def _resolve_worldbook(ctx: dict, query: str) -> str:
         return selection.text
     except Exception:  # noqa: BLE001
         return ""
+
+
+def _worldbook_scan_text(ctx: dict, query: str, *, history_chars: int = 1800) -> str:
+    """世界书激活窗口：本轮输入 + 最近一组对话，不扫描整段旧历史。"""
+    recent: list[str] = []
+    for message in reversed(ctx.get("history") or []):
+        content = str(message.get("content") or "").strip()
+        if not content:
+            continue
+        recent.append(content)
+        if len(recent) >= 2:
+            break
+    history = "\n".join(reversed(recent))[-max(0, history_chars):]
+    return "\n".join(part for part in (history, (query or "").strip()) if part).strip()
 
 
 def _worldbook_sources(ctx: dict) -> list[dict]:
@@ -2044,9 +2114,9 @@ def _resolve_preset(
         markers = {
             "char_name": "、".join(selected_names),
             "char_description": (ctx.get("persona") or "").strip(),
-            "char_personality": "",
-            "scenario": "",
-            "dialogue_examples": "",
+            "char_personality": str(ctx.get("_selected_persona_personality") or "").strip(),
+            "scenario": str(ctx.get("_selected_persona_scenario") or "").strip(),
+            "dialogue_examples": str(ctx.get("_selected_persona_examples") or "").strip(),
             "worldbook": worldbook_text or "",
             "persona": (ctx.get("user_persona") or "").strip(),
             "user_name": (ctx.get("user_name") or "").strip(),
@@ -2126,6 +2196,7 @@ def _chat_with_optional_stream(ctx: dict, messages: list[dict], *, temperature: 
         return _llm.chat_messages(
             ctx["chat_base"], ctx["chat_key"], ctx["chat_model"], messages,
             temperature=temperature, **_proxy_kw(ctx), top_p=top_p, max_tokens=max_tokens,
+            provider_profile=ctx.get("provider_profile") or "openai_compatible",
         )
 
     from app.services.stream_text import VisibleTextStream
@@ -2143,6 +2214,7 @@ def _chat_with_optional_stream(ctx: dict, messages: list[dict], *, temperature: 
             ctx["chat_base"], ctx["chat_key"], ctx["chat_model"], messages,
             on_delta=on_delta, temperature=temperature, **_proxy_kw(ctx),
             top_p=top_p, max_tokens=max_tokens,
+            provider_profile=ctx.get("provider_profile") or "openai_compatible",
         )
     finally:
         tail = visible.finish()

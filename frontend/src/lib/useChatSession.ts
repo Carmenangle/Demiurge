@@ -69,7 +69,7 @@ import {
 } from "./conversationHistoryRuntime";
 import { useChatAgentQueue } from "./useChatAgentQueue";
 
-type Model = { baseUrl: string; apiKey: string; modelName: string; proxyMode?: ProxyMode };
+type Model = { baseUrl: string; apiKey: string; modelName: string; proxyMode?: ProxyMode; providerProfile?: "openai_compatible" | "claude_compatible" };
 
 export type Checkpoint = ConversationCheckpoint;
 
@@ -206,6 +206,7 @@ export function useChatSession(deps: ChatSessionDeps) {
     streamOutput: settings.streamOutput,
     contextMaxTokens: settings.contextMaxTokens,
     historyPerRole: settings.historyPerRole,
+    providerProfile: chat.providerProfile || "openai_compatible",
     history,
     characterDir: settings.characterDir,
     cardName: openingCardName,

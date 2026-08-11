@@ -49,6 +49,7 @@ class ImageAgentRequest(EmbedModelReq):
     user_message_id: str = ""            # 选择卡关联的原用户消息 id
     context_max_tokens: int = Field(default=20_000, ge=0)  # 0=无上限（历史全量不裁剪），去掉 le 上限
     history_per_role: int = Field(default=6, ge=1, le=50)  # 每角色最近历史条数
+    provider_profile: Literal["openai_compatible", "claude_compatible"] = "openai_compatible"
 
 
 # 单 agent 生成入口（POST /ai/image-agent → agent_runner.run_stream）已下线。
