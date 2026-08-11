@@ -303,18 +303,27 @@ def read_preset(base: str, name: str) -> dict[str, Any] | None:
 
 
 def read_regex(base: str, name: str) -> list[dict[str, Any]]:
-    """读某预设内嵌的正则脚本（regexScripts 键）。无预设/无键 → 空列表。"""
+    """读某预设内嵌的正则脚本。
+
+    Demiurge 早期写在根键 ``regexScripts``；SillyTavern OpenAI 预设原生导出为
+    ``extensions.regex_scripts``。根键只要存在就是显式值（包括空列表），否则兼容读 ST 位置。
+    """
     preset = read_preset(base, name)
     if not isinstance(preset, dict):
         return []
-    scripts = preset.get("regexScripts")
+    if "regexScripts" in preset:
+        scripts = preset.get("regexScripts")
+    else:
+        extensions = preset.get("extensions")
+        scripts = extensions.get("regex_scripts") if isinstance(extensions, dict) else None
     return [s for s in scripts if isinstance(s, dict)] if isinstance(scripts, list) else []
 
 
 def write_regex(base: str, name: str, scripts: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
-    """把正则脚本写入某预设的 regexScripts 键（覆盖整份预设落盘）。预设不存在 → None。
+    """把正则脚本写回某预设原有存储位置。预设不存在 → None。
 
-    仅动 regexScripts 键，其余片段/顺序原样保留。给缺 id 的脚本补 uuid（与全局库一致）。
+    已有根键时写 ``regexScripts``；仅有 ST ``extensions.regex_scripts`` 时写回 ST
+    位置，避免同一预设出现两个正则真源。给缺 id 的脚本补 uuid。
     """
     from uuid import uuid4
     preset = read_preset(base, name)
@@ -328,7 +337,12 @@ def write_regex(base: str, name: str, scripts: list[dict[str, Any]]) -> list[dic
         if not s.get("id"):
             s["id"] = uuid4().hex
         clean.append(s)
-    preset["regexScripts"] = clean
+    extensions = preset.get("extensions")
+    if "regexScripts" not in preset and isinstance(extensions, dict) \
+            and "regex_scripts" in extensions:
+        extensions["regex_scripts"] = clean
+    else:
+        preset["regexScripts"] = clean
     p = _path(base, name)
     p.write_text(json.dumps(preset, ensure_ascii=False, indent=2), encoding="utf-8")
     return clean

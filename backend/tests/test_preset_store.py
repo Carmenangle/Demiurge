@@ -261,3 +261,23 @@ def test_预设级正则读写(tmp_path):
     assert p and p["prompts"][0]["content"] == "hi"
     # 预设不存在 → None
     assert preset_store.write_regex(base, "nope", []) is None
+
+
+def test_预设正则兼容SillyTavern_extensions位置(tmp_path):
+    base = str(tmp_path)
+    preset = _preset([("main", True)], [{"identifier": "main", "content": "hi"}])
+    preset["extensions"] = {
+        "regex_scripts": [{"findRegex": "/<content>/g", "replaceString": ""}],
+    }
+    preset_store.save(base, "st", preset)
+
+    assert preset_store.read_regex(base, "st") == preset["extensions"]["regex_scripts"]
+
+    saved = preset_store.write_regex(
+        base, "st", [{"findRegex": "/<status>/g", "replaceString": "<div>"}],
+    )
+    assert saved is not None and saved[0]["id"]
+    updated = preset_store.read_preset(base, "st")
+    assert updated is not None
+    assert "regexScripts" not in updated
+    assert updated["extensions"]["regex_scripts"] == saved

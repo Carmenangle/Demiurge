@@ -1,30 +1,62 @@
 import { useEffect, useState } from "react";
 import { avatarUrl, characterMedia, characterRegex, expressionUrl } from "../api/characters";
+import { getPresetRegex } from "../api/preset";
 import { listRegex } from "../api/regex";
 import type { CharacterPortrait } from "./characterPortrait";
 import type { RegexScript } from "./regexEngine";
 
+export function mergeDisplayRegexSources(
+  cardItems: RegexScript[], presetItems: RegexScript[], globalItems: RegexScript[],
+) {
+  return [...globalItems, ...presetItems, ...cardItems]
+    .filter((item) => item.markdownOnly && !item.disabled);
+}
+
+type RegexSourceLoaders = {
+  global: () => Promise<RegexScript[]>;
+  preset: (base: string, name: string) => Promise<RegexScript[]>;
+  card: (base: string, name: string) => Promise<RegexScript[]>;
+};
+
+const regexSourceLoaders: RegexSourceLoaders = {
+  global: () => listRegex().then((result) => result.items || []),
+  preset: (base, name) => getPresetRegex(base, name)
+    .then((result) => (result.items || []) as RegexScript[]),
+  card: (base, name) => characterRegex(base, name)
+    .then((result) => (result.items || []) as unknown as RegexScript[]),
+};
+
+export async function loadDisplayRegexSources(
+  cardNames: string[], characterDir: string, presetDir: string, presetName: string,
+  loaders: RegexSourceLoaders = regexSourceLoaders,
+) {
+  const global = loaders.global().catch(() => [] as RegexScript[]);
+  const preset = presetDir && presetName
+    ? loaders.preset(presetDir, presetName).catch(() => [] as RegexScript[])
+    : Promise.resolve([] as RegexScript[]);
+  const cards = characterDir
+    ? Promise.all(cardNames.map((name) => loaders.card(characterDir, name).catch(() => [])))
+      .then((groups) => groups.flat())
+    : Promise.resolve([] as RegexScript[]);
+  const [cardItems, presetItems, globalItems] = await Promise.all([cards, preset, global]);
+  return mergeDisplayRegexSources(cardItems, presetItems, globalItems);
+}
+
 export function useChatPresentationAssets(
   cardNames: string[], characterDir: string, outputDir: string, repoId: string,
+  presetDir: string, presetName: string,
 ) {
   const [displayRegex, setDisplayRegex] = useState<RegexScript[]>([]);
   const [characterPortraits, setCharacterPortraits] = useState<Record<string, CharacterPortrait>>({});
   const cardKey = cardNames.join("\u0000");
 
   useEffect(() => {
-    const onlyDisplay = (items: RegexScript[]) => items.filter((item) => item.markdownOnly && !item.disabled);
-    const global = listRegex().then((result) => result.items || []).catch(() => [] as RegexScript[]);
-    const cards = characterDir
-      ? Promise.all(cardNames.map((name) => characterRegex(characterDir, name)
-        .then((result) => (result.items || []) as unknown as RegexScript[]).catch(() => [])))
-        .then((groups) => groups.flat())
-      : Promise.resolve([] as RegexScript[]);
     let alive = true;
-    Promise.all([cards, global]).then(([cardItems, globalItems]) => {
-      if (alive) setDisplayRegex(onlyDisplay([...cardItems, ...globalItems]));
-    });
+    loadDisplayRegexSources(cardNames, characterDir, presetDir, presetName)
+      .then((items) => { if (alive) setDisplayRegex(items); })
+      .catch(() => { if (alive) setDisplayRegex([]); });
     return () => { alive = false; };
-  }, [cardKey, characterDir]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [cardKey, characterDir, presetDir, presetName]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     let alive = true;

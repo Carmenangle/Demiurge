@@ -86,6 +86,7 @@ export function ChatView({
   const characterDir = settings.characterDir || "";
   const { displayRegex, characterPortraits } = useChatPresentationAssets(
     cardNames, characterDir, settings.outputDir, repo?.id || "",
+    settings.presetDir, settings.activePresetName,
   );
   // 三模式输入框提示各异
   const inputPlaceholder = {
