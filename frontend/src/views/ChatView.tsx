@@ -754,10 +754,10 @@ export function ChatView({
                   {wfNode && <span className="wf-progress-node" title="当前执行节点，若长时间不变可能卡住">{wfNode}</span>}
                 </div>
               )}
-              {/* 生成中仍可发送：Enter 或点此 = 打断并合并（生图/工作流流程会先确认） */}
+              {/* Agent 生成中会进入消息队列；只有 ComfyUI 运行时则直接开始下一轮对话。 */}
               <button
                 className="btn primary chat-send-btn"
-                title="打断当前生成并发送，AI 会带上下文续写；若在生图/工作流会先确认"
+                title={streamingId ? "加入消息队列，当前 Agent 完成后按序处理" : "发送下一轮对话；ComfyUI 继续在后台运行"}
                 onClick={() => richRef.current?.submit()}
                 disabled={!hasText}
               >

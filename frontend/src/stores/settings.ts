@@ -28,11 +28,14 @@ export interface ChatModel {
 }
 
 function normalizeProviderProfile(
-  value: ChatModel["providerProfile"], modelName: string,
+  value: ChatModel["providerProfile"], preserveExplicitValue: boolean,
 ): NonNullable<ChatModel["providerProfile"]> {
-  if (value === "claude_compatible" || value === "openai_compatible") return value;
-  // 仅作旧设置一次迁移；运行时只读显式 Provider Profile。
-  return modelName.toLowerCase().includes("claude") ? "claude_compatible" : "openai_compatible";
+  if (preserveExplicitValue && (
+    value === "claude_compatible" || value === "openai_compatible"
+  )) return value;
+  // Provider Profile 描述接口 wire，不描述模型家族。旧版按模型名推断会把
+  // OpenAI-compatible 代理上的 Claude 错编译成 Claude wire，故一次性迁回默认档。
+  return "openai_compatible";
 }
 
 // 嵌入模型（知识库 RAG 用）：OpenAI 兼容形式，可填智谱/OpenAI/Ollama 等
@@ -97,7 +100,7 @@ export interface CharacterLoraBinding {
 
 export interface MediaInsertPreset {
   templateId: string;       // 图片工作流模板 id（空=未预设，不异步出图）
-  loraMode?: "none" | "single" | "multi"; // 无 LoRA / 单角色或风格兜底 / 默认风格+全部在场角色
+  loraMode?: "none" | "single" | "multi"; // 无 LoRA / 高潮角色栈或风格兜底 / 默认风格+高潮角色栈
   appearanceSource?: "worldbook" | "character_card"; // 稳定外貌取世界书角色条目或绑定角色卡
   promptProfile?: import("../lib/imagePromptProfiles").PromptProfileId;
   qualityPrompt?: string;   // Anima 固定质量行；空则使用后端 profile 默认值
@@ -117,6 +120,7 @@ export interface Settings {
   theme: Theme;
   chatModels: ChatModel[];          // 对话模型（可多个供应商）
   activeChatModelId?: string;       // 当前选中的对话模型 id
+  providerProfileSemanticsVersion?: number; // v2 起只保留用户明确选择，禁止按模型名猜 wire
   embedModel: EmbedModel;  // 知识库 RAG 嵌入模型
   imageModels: ImageModel[];
   activeImageModelId?: string;
@@ -255,11 +259,13 @@ function migrate(s: Record<string, unknown>): Settings {
       merged.activeChatModelId = id;
     }
   }
-  // 给缺 id 的对话模型补 id
+  const preserveProviderProfile = Number(s.providerProfileSemanticsVersion) >= 2;
+  // 给缺 id 的对话模型补 id；旧版曾按模型名自动写 profile，v2 一次性迁回 OpenAI wire。
   merged.chatModels = (merged.chatModels || []).map((m) => ({
     ...m, id: m.id || crypto.randomUUID(), proxyMode: normalizeProxyMode(m.proxyMode),
-    providerProfile: normalizeProviderProfile(m.providerProfile, m.modelName),
+    providerProfile: normalizeProviderProfile(m.providerProfile, preserveProviderProfile),
   }));
+  merged.providerProfileSemanticsVersion = 2;
   merged.imageModels = (merged.imageModels || []).map((m) => ({
     ...m, proxyMode: normalizeProxyMode(m.proxyMode),
   }));

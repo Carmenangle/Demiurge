@@ -156,7 +156,9 @@ function ModelCard({ model, kind, onChange, onRemove, customSizeSupported, onCus
           <option value="openai_compatible">OpenAI 兼容</option>
           <option value="claude_compatible">Claude 兼容</option>
         </select>
-        <p className="field-hint">决定历史后 system 规则如何编译，不再按模型名运行时猜测。</p>
+        <p className="field-hint">
+          按接口协议选择，不按模型名称选择；OpenAI 兼容代理即使运行 Claude 模型也选 OpenAI 兼容。
+        </p>
       </div>}
       {onCustomSizeSupport && (
         <label className="model-capability-toggle">

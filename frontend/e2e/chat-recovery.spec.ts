@@ -26,6 +26,20 @@ test("recovers the conversation snapshot after a browser refresh", async ({ page
   await expect(page.getByText("这是图片之后的收束段落。")).toBeVisible();
 });
 
+test("keeps the PC chat toolbar controls readable and easy to click", async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await selectWork(page);
+
+  for (const button of [page.getByTitle(/^压缩上下文：/), page.getByTitle(/^知识库：/)]) {
+    const buttonBox = await button.boundingBox();
+    const iconBox = await button.locator("svg").boundingBox();
+    expect(buttonBox?.width).toBeGreaterThanOrEqual(44);
+    expect(buttonBox?.height).toBeGreaterThanOrEqual(44);
+    expect(iconBox?.width).toBeGreaterThanOrEqual(20);
+    expect(iconBox?.height).toBeGreaterThanOrEqual(20);
+  }
+});
+
 test("keeps background generation visible across refresh", async ({ page }) => {
   const support = page.getByTitle("后台活动（拖动可移动，长按隐藏）");
   const quickTools = page.getByTitle("快捷工具（拖动可移动，长按隐藏）");

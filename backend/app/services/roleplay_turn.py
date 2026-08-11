@@ -1,7 +1,7 @@
 """Roleplay turn finalization transaction.
 
-Visible text is finalized and published before maintenance. This module owns that ordering;
-agent_graph owns routing and prompt assembly.
+Visible text and its illustration request are published before maintenance. The Agent turn only
+finishes after maintenance, while ComfyUI continues independently.
 """
 from __future__ import annotations
 
@@ -104,16 +104,9 @@ def finalize_turn(draft: TurnFinalization, hooks: TurnFinalizationHooks) -> dict
         result["_eager_result"] = True
 
     if draft.deps is not None:
-        if published:
-            from app.services import post_turn_maintenance
-
-            owner = draft.ctx.get("repo_id") or draft.ctx.get("thread_id") or ""
-            post_turn_maintenance.submit(
-                owner,
-                lambda: hooks.maintain(draft, reply, []),
-            )
-        else:
-            hooks.maintain(draft, reply, rag_events)
+        # 正文和插画请求已先发给前端；维护属于本轮 Agent 完成边界，避免下一轮读取旧表格/纪要。
+        # ComfyUI 由独立通道执行，不等待这里返回。
+        hooks.maintain(draft, reply, rag_events)
     if rag_events:
         repo_id = draft.ctx.get("repo_id") or draft.ctx.get("thread_id") or "?"
         result["rag_recs"] = [

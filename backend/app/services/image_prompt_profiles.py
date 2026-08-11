@@ -32,6 +32,9 @@ def inline_generation_instruction(profile: str) -> str:
         "高潮动作、地点、镜头、构图、光影和材质关系翻译为实际可见内容，禁止使用 preserve identity、"
         "stable appearance、current clothing condition 等空泛占位语。当前剧情服装状态优先于基础穿着。"
         "不得写 LoRA 名称、权重或触发词；LoRA 元数据在本轮输出完成后由后端查询、去重并注入。"
+        "画面有两名角色时，必须先写双人构图与背景，再分别以 primary adult character 和 "
+        "second adult character 写各自具体外貌、服装、位置与动作，最后写两人的可见关系和整体画面；"
+        "禁止把两人的属性混成一份通用人物描述。"
         "只填写 JSON 字符串字段 profile_prompt，不输出分析、Markdown、道歉或额外说明。"
     )
     formats = {
@@ -649,6 +652,67 @@ def _mapped_visual_facts(scene: Mapping[str, object]) -> list[str]:
     ))
 
 
+def _actor_visual_details(scene: Mapping[str, object]) -> list[tuple[str, list[str], list[str]]]:
+    """按高潮人物拆开外貌与动作，供所有 Profile 的多人确定性编译。"""
+    actor_values = scene.get("actors")
+    actors = [
+        str(name).strip() for name in actor_values
+        if str(name).strip()
+    ] if isinstance(actor_values, list) else []
+    if len(actors) < 2:
+        return []
+    sources: dict[str, list[str]] = {name: [] for name in actors}
+    appearance = str(scene.get("appearance") or "")
+    marker = re.compile(
+        rf"^\s*({'|'.join(re.escape(name) for name in sorted(actors, key=len, reverse=True))})\s*[：:]",
+    )
+    current = ""
+    for line in appearance.splitlines():
+        match = marker.match(line)
+        if match:
+            current = match.group(1)
+        if current:
+            sources[current].append(line)
+    narrative = image_prompt_extract.restore_jailbreak(str(scene.get("narrative") or ""))
+    clauses = [part.strip() for part in re.split(r"[。！？!?；;\n]", narrative) if part.strip()]
+    for actor in actors:
+        sources[actor].extend(clause for clause in clauses if actor in clause)
+    subjects = scene.get("subjects")
+    if isinstance(subjects, list):
+        for subject in subjects:
+            if not isinstance(subject, Mapping):
+                continue
+            name = str(subject.get("name") or "").strip()
+            description = str(subject.get("description") or "").strip()
+            if name in sources and description:
+                sources[name].append(description)
+    details: list[tuple[str, list[str], list[str]]] = []
+    for actor in actors:
+        source = "\n".join(sources[actor])
+        facts = _mapped_facts_from(source)
+        english = source.encode("ascii", "ignore").decode("ascii")
+        english = " ".join(english.split()).strip(" :,.;-")
+        if english and re.search(r"[A-Za-z]{3}", english):
+            facts.append(english)
+        actions = _scene_action_tags({"narrative": source})
+        details.append((actor, list(dict.fromkeys(facts)), actions))
+    return details
+
+
+def _multi_actor_sentences(scene: Mapping[str, object]) -> list[str]:
+    labels = ("The primary adult character", "The second adult character")
+    sentences: list[str] = []
+    for label, (_actor, facts, actions) in zip(labels, _actor_visual_details(scene), strict=False):
+        parts: list[str] = []
+        if facts:
+            parts.append("is visibly defined by " + ", ".join(facts))
+        if actions:
+            parts.append("performs " + ", then ".join(actions))
+        if parts:
+            sentences.append(label + " " + " and ".join(parts) + ".")
+    return sentences
+
+
 def _mapped_facts_from(source: str) -> list[str]:
     return list(dict.fromkeys(
         phrase for source_pattern, phrase, _ in _VISUAL_FACT_RULES
@@ -704,6 +768,7 @@ def _krea_contract_errors(
         words = re.findall(r"\b[A-Za-z][A-Za-z'-]*\b", prompt)
         if not 80 <= len(words) <= 500:
             errors.append("英文单词数必须为80到500")
+    errors.extend(_multi_actor_contract_errors("krea2", prompt, scene))
     errors.extend(_visual_fact_errors(prompt, scene))
     return errors
 
@@ -752,6 +817,24 @@ def normalize_inline(profile: str, raw: str, scene: Mapping[str, object] | None 
     return "" if _errors(profile, prompt, scene or {}) else prompt
 
 
+def _multi_actor_contract_errors(
+    profile: str, prompt: str, scene: Mapping[str, object],
+) -> list[str]:
+    actors = scene.get("actors")
+    if not isinstance(actors, list) or len(list(dict.fromkeys(
+        str(name).strip() for name in actors if str(name).strip()
+    ))) < 2:
+        return []
+    errors: list[str] = []
+    if not re.search(r"\bprimary adult (?:character|woman)\b", prompt, re.I):
+        errors.append("多人提示词必须单独描述第一角色")
+    if not re.search(r"\bsecond adult (?:character|woman)\b", prompt, re.I):
+        errors.append("多人提示词必须单独描述第二角色")
+    if profile == "anima_tags" and not re.search(r"\b(?:2girls|two girls)\b", prompt, re.I):
+        errors.append("Anima 双人提示词必须包含2girls")
+    return errors
+
+
 def _errors(profile: str, prompt: str, scene: Mapping[str, object]) -> list[str]:
     errors: list[str] = []
     if profile != "krea2" and _REFUSAL_RE.search(prompt):
@@ -784,6 +867,8 @@ def _errors(profile: str, prompt: str, scene: Mapping[str, object]) -> list[str]
             errors.append("第四段必须只包含后缀指令")
         if _CJK_RE.search(prompt):
             errors.append("Niji 最终提示词必须为纯英文")
+    if profile != "krea2":
+        errors.extend(_multi_actor_contract_errors(profile, prompt, scene))
     if profile != "krea2":
         errors.extend(_visual_fact_errors(prompt, scene))
     return errors
@@ -845,10 +930,11 @@ def _english_scene_details(scene: Mapping[str, object]) -> list[str]:
 
 def _krea_scene_fallback(scene: Mapping[str, object]) -> str:
     """连续硬失败时给出单段纯英文剧情插画描述。"""
+    multi_sentences = _multi_actor_sentences(scene)
     concrete_facts = _mapped_visual_facts(scene)
     fact_sentence = (
         " The primary adult woman is visibly defined by " + ", ".join(concrete_facts) + "."
-        if concrete_facts else ""
+        if concrete_facts and not multi_sentences else ""
     )
     english_details = [
         detail for detail in _english_scene_details(scene)
@@ -861,10 +947,23 @@ def _krea_scene_fallback(scene: Mapping[str, object]) -> str:
     action_tags = _scene_action_tags(scene)
     action_sentence = (
         " Her visible action is " + ", then ".join(action_tags) + "."
-        if action_tags else ""
+        if action_tags and not multi_sentences else ""
+    )
+    subject_opening = (
+        "A balanced two-character environmental composition gives two adult women distinct silhouettes, "
+        "readable positions, and one shared visual focus against a layered background."
+        if multi_sentences else
+        "A medium environmental composition keeps the primary adult woman's visible action as the single visual focus."
+    )
+    character_sentences = (" " + " ".join(multi_sentences)) if multi_sentences else ""
+    relationship_sentence = (
+        " Their visible actions, spacing, gaze directions, and contact relationship remain readable as one coherent scene."
+        if multi_sentences else ""
     )
     return (
-        "A medium environmental composition keeps the primary adult woman's visible action as the single visual focus."
+        subject_opening
+        + character_sentences
+        + relationship_sentence
         + fact_sentence
         + action_sentence
         + detail_sentence
@@ -948,6 +1047,15 @@ def _anima_scene_fallback(scene: Mapping[str, object]) -> str:
     if action_tags and not _ANIMA_ACTION_RE.search(content):
         head, dot, tail = content.partition(".")
         content = f"{head.rstrip(',. ')}, {', '.join(action_tags)}{dot}{tail}"
+    multi_sentences = _multi_actor_sentences(scene)
+    if multi_sentences:
+        content = (
+            "2girls, two-shot, balanced composition, clear spatial separation, environmental composition, "
+            "layered background, directional light. "
+            + " ".join(multi_sentences)
+            + " The two adult characters' distinct appearances and actions form one readable relationship, "
+              "while the background, light direction, material response, and depth remain coherent."
+        )
     if not re.search(r"(?:^|\.\s+)[A-Z][^.?!]{24,}[.?!](?:\s|$)", content):
         if "herb merchant" in facts and "unloading a wooden medicine crate" in facts:
             description = (
@@ -967,6 +1075,14 @@ def _anima_scene_fallback(scene: Mapping[str, object]) -> str:
 
 
 def _natural_scene_fallback(scene: Mapping[str, object]) -> str:
+    multi_sentences = _multi_actor_sentences(scene)
+    if multi_sentences:
+        return (
+            "A balanced two-character composition places two adult women in clearly separated positions against a "
+            "layered environmental background. " + " ".join(multi_sentences) + " Their visible relationship, "
+            "spacing, gaze directions, and contact point remain the overall visual focus. Directional light, material "
+            "response, cast shadows, controlled color hierarchy, and a clean high-fidelity finish preserve one coherent scene."
+        )
     details = "; ".join(_english_scene_details(scene))
     facts = details or "the visible adult characters performing the supplied decisive action"
     return (
@@ -979,8 +1095,11 @@ def _natural_scene_fallback(scene: Mapping[str, object]) -> str:
 
 
 def _niji_scene_fallback(scene: Mapping[str, object]) -> str:
+    multi_sentences = _multi_actor_sentences(scene)
     details = "; ".join(_english_scene_details(scene))
-    subject = details or "visible adult characters performing the supplied decisive story action"
+    subject = " ".join(multi_sentences) if multi_sentences else (
+        details or "visible adult characters performing the supplied decisive story action"
+    )
     ratio = str(scene.get("aspect_ratio") or "2:3")
     if ratio not in ("1:1", "2:3", "3:2", "3:4", "4:3", "9:16", "16:9"):
         ratio = "2:3"

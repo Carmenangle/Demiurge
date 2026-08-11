@@ -22,6 +22,7 @@ export interface IllustrationSceneSpec {
   wardrobe: string;
   locale: string;
   actors: string[];
+  subjects?: Array<{ name: string; description?: string; weight?: number }>;
   rating: "sfw" | "nsfw";
   character_lora?: boolean;
   profile?: string;

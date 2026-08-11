@@ -30,7 +30,7 @@ import { substituteMacros } from "./chatMacros";
 import type { ChatStreamEvent, IllustrationSceneSpec } from "../api/chatStreamProtocol";
 import {
   reduce as reduceGen, initialGenState,
-  streamingBotId, needsConfirm, runningPromptId,
+  blocksDialogueSubmission, streamingBotId, needsConfirm, runningPromptId,
 } from "./generationLifecycle";
 import { useWorkflowOrchestration } from "./workflowOrchestration";
 import { subscribeProgress } from "./comfyProgress";
@@ -47,7 +47,10 @@ import {
   applyProfileLoraTriggers, ensureAnimaIllustrationStyle, illustrationTemplateValues, normalizePromptProfile,
   replacePromptQualityLine, latentSizeFor, workflowFieldBinding,
 } from "./imagePromptProfiles";
-import { illustrationRequestMedia, illustrationWorkflowMedia } from "./illustrationMedia";
+import {
+  illustrationLoraConfigurationError, illustrationRequestMedia, illustrationWorkflowMedia,
+  resolveIllustrationActors,
+} from "./illustrationMedia";
 import {
   agentImageMessage, applyRouteChoice, bindMediaSlotPrompt, dropMediaSlot,
   pruneUnsubmittedMediaSlots, reduceChatStreamEvent, resolveMediaSlot,
@@ -138,7 +141,7 @@ export function useChatSession(deps: ChatSessionDeps) {
   const [gen, dispatch] = useReducer(reduceGen, initialGenState);
   // 只读派生别名
   const streamingId = streamingBotId(gen);             // 正在流式的 bot 气泡 id（渲染转圈用）
-  const wfRunning = gen.status.kind === "workflow";    // /s 工作流进行中
+  const wfRunning = runningPromptId(gen) !== null;      // /s 工作流进行中；与 Agent 通道正交
   // 多元数据插入：插画开 且 本作品已预设图片/视频 ComfyUI 模板 → 高潮点走异步 ComfyUI 闭环（后端发 illustrate_request）
   const mediaPreset = settings.mediaInsert?.[repo?.id || ""];
   const comfyIllustrate = !!(settings.illustrate && (mediaPreset?.templateId || mediaPreset?.videoTemplateId));
@@ -759,10 +762,20 @@ export function useChatSession(deps: ChatSessionDeps) {
       failSlot("configuration", "已保存的工作流模板不存在，请重新选择模板");
       return;
     }
-    // ⑥ 按真实在场角色挑 LoRA/底图。single 命中角色时仅用角色 LoRA，无命中才回退风格；
+    // ⑥ 按高潮真实角色挑 LoRA/底图。single 命中时串联角色 LoRA，无命中才回退风格；
     // multi 固定加载默认风格并叠加全部在场角色 LoRA。旧 preset.loraName 只作风格兼容值。
-    const { loras, loraName, loraWeight, baseImage, characterLora } =
-      illustrationWorkflowMedia(preset, actors, cardNames);
+    const knownActorNames = preset.appearanceSource === "character_card"
+      ? cardNames : Object.keys(preset.characterLoras || {});
+    const resolvedActors = resolveIllustrationActors(
+      actors, sceneSpec?.subjects, knownActorNames,
+    );
+    const workflowMedia = illustrationWorkflowMedia(preset, resolvedActors, cardNames);
+    const { loras, loraName, loraWeight, baseImage, characterLora } = workflowMedia;
+    const loraConfigurationError = illustrationLoraConfigurationError(preset, workflowMedia);
+    if (loraConfigurationError) {
+      failSlot("configuration", loraConfigurationError);
+      return;
+    }
     let negativePrompt = preset.negativePrompt?.trim() || sceneSpec?.negative_prompt || "";
     if (sceneSpec?.profile_prompt && sceneSpec.profile === promptProfile) {
       prompt = sceneSpec.profile_prompt;
@@ -771,7 +784,7 @@ export function useChatSession(deps: ChatSessionDeps) {
         const rendered = await genProfilePrompt(
           promptProfile,
           {
-            ...sceneSpec, actors, character_lora: characterLora,
+            ...sceneSpec, actors: resolvedActors, character_lora: characterLora,
             repo_id: repo?.id || "", thread_id: repo?.id || "", turn_id: turnId,
           },
           { ...chat, proxyUrl: modelProxies.chatProxyUrl },
@@ -959,12 +972,12 @@ export function useChatSession(deps: ChatSessionDeps) {
   }, [threadId]);
   // APPEND4_HERE
 
-  // 发送入口：生成进行中默认进队列，否则直接执行
+  // 发送入口：只在 Agent 正生成正文时排队；ComfyUI 运行不占用对话通道。
   const send = (content: RichContent) => {
     const text = content.text.trim();
     if (!text && content.images.length === 0 && !content.maskedImage) return;
     atBottomRef.current = true;  // 用户主动发送时强制跟随到底
-    if (streamingId || wfRunning) { enqueue(content); return; }
+    if (blocksDialogueSubmission(gen)) { enqueue(content); return; }
     dispatchSend(content);
   };
 

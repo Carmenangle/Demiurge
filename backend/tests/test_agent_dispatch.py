@@ -1067,7 +1067,8 @@ def test_comfy高潮提取失败时把中文正文作为Profile场景源而非�
     assert request["scene_spec"]["profile"] == "krea2"
     assert request["scene_spec"]["profile_prompt"].isascii()
     assert "白给谷站在窗边，回头看向镜头" in request["scene_spec"]["narrative"]
-    assert request["scene_spec"]["draft_prompt"] == "白给谷站在窗边，回头看向镜头。，银发、蓝眼"
+    assert request["scene_spec"]["draft_prompt"].isascii()
+    assert "白给谷" not in request["scene_spec"]["draft_prompt"]
     assert trace[-1][0] == "illustration.request"
     assert trace[-1][1]["status"] == "emitted"
 
@@ -1491,6 +1492,161 @@ def test_多人高潮已有一名合法角色时仍从正文补齐其余在场�
     assert request["actors"] == ["冷倾雪", "虞妙玥"]
 
 
+@pytest.mark.parametrize(
+    ("target", "other", "configured"),
+    [
+        ("虞妙玥", "冷倾雪", ["冷倾雪", "虞妙玥"]),
+        ("冷倾雪", "虞妙玥", ["虞妙玥", "冷倾雪"]),
+    ],
+)
+def test_主模型漏插画计划时外貌资料不得污染当前目标角色(
+    target, other, configured, monkeypatch, tmp_path,
+):
+    """复现：配置顺序靠前的旧角色曾夺走当前目标的 single LoRA。"""
+    from app.services import character_state
+
+    deps = ra.AgencyDeps(
+        chat_fn=lambda *a, **k: "[]", rng=random.Random(0), state_base=str(tmp_path),
+    )
+    monkeypatch.setattr(ra, "extract_status_snapshot", lambda reply: {})
+    monkeypatch.setattr(ra, "parse_state_block", lambda reply: (reply, []))
+    monkeypatch.setattr(ra, "writeback", lambda *a, **k: (10.0, 10.0))
+    monkeypatch.setattr(character_state, "load_state", lambda *a, **k: {})
+    monkeypatch.setattr(ra, "_narr", lambda *a, **k: "")
+    ctx = _ctx(
+        repo_id="work", card_name="作品名", scene="climax", comfy_illustrate=True,
+        appearance_source="worldbook", illustration_actor_names=configured,
+        prompt_profile="krea2",
+    )
+    ctx["_illustration_visual_profiles"] = (
+        f"{other}：【外貌】{other}专属外貌锚点\n"
+        f"{target}：【外貌】{target}专属外貌锚点"
+    )
+
+    _, _, request = ag._agency_writeback(
+        ctx, deps, "<content>我不能协助这项请求。</content>",
+        turn=2, affinity=10.0, lost=False, user_text=f"本轮只描写{target}",
+    )
+
+    assert request["actors"] == [target]
+    assert f"{target}专属外貌锚点" in request["scene_spec"]["appearance"]
+    assert f"{other}专属外貌锚点" not in request["scene_spec"]["appearance"]
+
+
+def test_高潮正文单人优先于用户旧角色并只保留该角色外貌(monkeypatch, tmp_path):
+    from app.services import character_state
+
+    deps = ra.AgencyDeps(
+        chat_fn=lambda *a, **k: "[]", rng=random.Random(0), state_base=str(tmp_path),
+    )
+    monkeypatch.setattr(ra, "extract_status_snapshot", lambda reply: {})
+    monkeypatch.setattr(ra, "parse_state_block", lambda reply: (reply, []))
+    monkeypatch.setattr(ra, "writeback", lambda *a, **k: (10.0, 10.0))
+    monkeypatch.setattr(character_state, "load_state", lambda *a, **k: {})
+    monkeypatch.setattr(ra, "_narr", lambda *a, **k: "")
+    ctx = _ctx(
+        repo_id="work", card_name="作品名", scene="climax", comfy_illustrate=True,
+        appearance_source="worldbook", illustration_actor_names=["冷倾雪", "虞妙玥"],
+        prompt_profile="krea2",
+    )
+    ctx["_illustration_visual_profiles"] = (
+        "冷倾雪：【外貌】冷倾雪专属外貌锚点\n"
+        "虞妙玥：【外貌】虞妙玥专属外貌锚点"
+    )
+
+    _, _, request = ag._agency_writeback(
+        ctx, deps, "<content>高潮画面里，虞妙玥独自跪倒在石阶前。</content>",
+        turn=2, affinity=10.0, lost=False, user_text="冷倾雪刚才已经离开",
+    )
+
+    assert request["actors"] == ["虞妙玥"]
+    assert request["scene_spec"]["appearance"] == (
+        "虞妙玥：【外貌】虞妙玥专属外貌锚点"
+    )
+
+
+def test_高潮正文双人保留两份外貌供多角色LoRA串联(monkeypatch, tmp_path):
+    from app.services import character_state
+
+    deps = ra.AgencyDeps(
+        chat_fn=lambda *a, **k: "[]", rng=random.Random(0), state_base=str(tmp_path),
+    )
+    monkeypatch.setattr(ra, "extract_status_snapshot", lambda reply: {})
+    monkeypatch.setattr(ra, "parse_state_block", lambda reply: (reply, []))
+    monkeypatch.setattr(ra, "writeback", lambda *a, **k: (10.0, 10.0))
+    monkeypatch.setattr(character_state, "load_state", lambda *a, **k: {})
+    monkeypatch.setattr(ra, "_narr", lambda *a, **k: "")
+    ctx = _ctx(
+        repo_id="work", card_name="作品名", scene="climax", comfy_illustrate=True,
+        appearance_source="worldbook", illustration_actor_names=["虞妙玥", "冷倾雪"],
+        prompt_profile="krea2",
+    )
+    ctx["_illustration_visual_profiles"] = (
+        "虞妙玥：【外貌】虞妙玥专属外貌锚点\n"
+        "冷倾雪：【外貌】冷倾雪专属外貌锚点"
+    )
+
+    _, _, request = ag._agency_writeback(
+        ctx, deps,
+        "<content>高潮画面里，冷倾雪扶住虞妙玥，两人一同跌坐在石阶前。</content>",
+        turn=2, affinity=10.0, lost=False, user_text="继续",
+    )
+
+    assert request["actors"] == ["冷倾雪", "虞妙玥"]
+    assert "冷倾雪专属外貌锚点" in request["scene_spec"]["appearance"]
+    assert "虞妙玥专属外貌锚点" in request["scene_spec"]["appearance"]
+
+
+def test_高潮正文明确人物覆盖错误插画主体并保持画面顺序():
+    assert ag._resolve_illustration_request_actors(
+        ["冷倾雪", "虞妙玥"],
+        planned=["冷倾雪"],
+        user_text="继续",
+        narrative="虞妙玥扶住冷倾雪，两人同时转身。",
+        present="冷倾雪、虞妙玥",
+        encounter=[],
+    ) == ["虞妙玥", "冷倾雪"]
+
+
+def test_高潮人物只取最终锚点片段而不带入前文离场角色(monkeypatch, tmp_path):
+    from app.services import character_state
+
+    deps = ra.AgencyDeps(
+        chat_fn=lambda *a, **k: "[]", rng=random.Random(0), state_base=str(tmp_path),
+    )
+    monkeypatch.setattr(ra, "extract_status_snapshot", lambda reply: {})
+    monkeypatch.setattr(ra, "parse_state_block", lambda reply: (reply, []))
+    monkeypatch.setattr(ra, "writeback", lambda *a, **k: (10.0, 10.0))
+    monkeypatch.setattr(character_state, "load_state", lambda *a, **k: {})
+    monkeypatch.setattr(ra, "_narr", lambda *a, **k: "")
+    ctx = _ctx(
+        repo_id="work", card_name="作品名", scene="climax", comfy_illustrate=True,
+        appearance_source="worldbook", illustration_actor_names=["冷倾雪", "虞妙玥"],
+        prompt_profile="krea2",
+    )
+    ctx["_illustration_visual_profiles"] = (
+        "冷倾雪：【外貌】冷倾雪专属外貌锚点\n"
+        "虞妙玥：【外貌】虞妙玥专属外貌锚点"
+    )
+    reply = (
+        "<content>冷倾雪转身离开石室。\n\n"
+        "虞妙玥在石阶前骤然失去平衡，独自跪倒。</content>"
+        '<illustration>{"anchor":"虞妙玥在石阶前骤然失去平衡，独自跪倒。",'
+        '"subjects":[{"name":"虞妙玥","description":"adult woman"}],'
+        '"prompt":"adult woman, kneeling on stone steps","motion":1}</illustration>'
+    )
+
+    _, _, request = ag._agency_writeback(
+        ctx, deps, reply, turn=2, affinity=10.0, lost=False, user_text="继续",
+    )
+
+    assert request["actors"] == ["虞妙玥"]
+    assert "冷倾雪专属外貌锚点" not in request["scene_spec"]["appearance"]
+    assert request["scene_spec"]["subjects"] == [{
+        "name": "虞妙玥", "description": "adult woman", "weight": 1.0,
+    }]
+
+
 def test_comfy拒绝无效中文内联提示词并从场景本地兜底(monkeypatch, tmp_path):
     from app.services import character_state
 
@@ -1593,6 +1749,49 @@ def test_主模型误把结尾外部钩子当高潮时从真实状态快照恢�
     assert "她在湿布擦过锁骨" in request["scene_spec"]["narrative"]
     assert "walking" not in request["prompt"]
     assert "walking" not in request["scene_spec"].get("profile_prompt", "")
+
+
+@pytest.mark.parametrize("actor", ["冷倾雪", "虞妙玥", "任意角色"])
+def test_高潮重定向保留主计划已验证角色而不依赖正文重复姓名(
+    actor, monkeypatch, tmp_path,
+):
+    from app.services import character_state, scene_illustration
+
+    deps = ra.AgencyDeps(
+        chat_fn=lambda *a, **k: "[]", rng=random.Random(0), state_base=str(tmp_path),
+    )
+    monkeypatch.setattr(ra, "extract_status_snapshot", lambda reply: {})
+    monkeypatch.setattr(ra, "parse_state_block", lambda reply: (reply, []))
+    monkeypatch.setattr(ra, "writeback", lambda *a, **k: (10.0, 10.0))
+    monkeypatch.setattr(character_state, "load_state", lambda *a, **k: {})
+    monkeypatch.setattr(ra, "_narr", lambda *a, **k: "")
+    monkeypatch.setattr(
+        scene_illustration, "resolve_illustration_anchor",
+        lambda _story, _anchor: "她跌坐在石板上。",
+    )
+    monkeypatch.setattr(
+        scene_illustration, "illustration_scene_excerpt",
+        lambda _story, _anchor: "她跌坐在石板上。",
+    )
+    reply = (
+        "<content>她跌坐在石板上。\n\n远处的风铃响了。</content>"
+        f'<illustration>{{"anchor":"远处的风铃响了。","camera":"medium shot",'
+        f'"composition":"rule of thirds","subjects":[{{"name":"{actor}",'
+        '"description":"adult woman with black hair"}],'
+        '"prompt":"adult woman, black hair, sitting on stone","motion":0}</illustration>'
+    )
+
+    _, _, request = ag._agency_writeback(
+        _ctx(
+            repo_id="work", thread_id="work", card_name="作品名", scene="climax",
+            comfy_illustrate=True, appearance_source="worldbook",
+            illustration_actor_names=[actor, "另一角色"], prompt_profile="krea2",
+        ),
+        deps, reply, turn=2, affinity=10.0, lost=False,
+    )
+
+    assert request["actors"] == [actor]
+    assert request["scene_spec"]["subjects"][0]["name"] == actor
 
 
 def test_RunContext含NPC目标增量时仍剥离控制块并发出插画请求(monkeypatch, tmp_path):
@@ -1905,7 +2104,7 @@ def test_流式插画只发槽位和最终正文偏移():
     }]
 
 
-def test_正文最终化后立即发插画请求且不等待记忆维护():
+def test_正文最终化后在记忆维护前立即发插画请求():
     emitted = []
     out = {
         "result_text": "最终正文",
@@ -1959,7 +2158,7 @@ def test_独立表格维护只写数据库且不把维护响应放进对话(monk
                for event, data in traces)
 
 
-def test_roleplay记忆维护阻塞时正文与插画已交付且前台回合已结束(monkeypatch):
+def test_roleplay先交付正文与插画但维护完成后才结束Agent回合(monkeypatch):
     maintenance_started = threading.Event()
     release_maintenance = threading.Event()
     foreground_done = threading.Event()
@@ -2008,12 +2207,13 @@ def test_roleplay记忆维护阻塞时正文与插画已交付且前台回合已
         assert [event.keys() & {"replace", "illustrate_request"} for event in emitted] == [
             {"replace"}, {"illustrate_request"},
         ]
-        assert foreground_done.wait(0.2)
-        assert not worker.is_alive()
-        assert result["result_text"] == "最终正文"
+        assert not foreground_done.wait(0.2)
+        assert worker.is_alive()
     finally:
         release_maintenance.set()
         worker.join(2)
 
     assert not worker.is_alive()
+    assert foreground_done.is_set()
+    assert result["result_text"] == "最终正文"
     assert result["_eager_result"] is True

@@ -39,6 +39,25 @@ describe("workflow generation runtime", () => {
     expect(runtime.list()).toEqual([]);
   });
 
+  it("tracks multiple ComfyUI queue entries without one replacing another", async () => {
+    const scheduled: Array<() => Promise<void> | void> = [];
+    const watch = observer();
+    const runtime = new WorkflowGenerationRuntime("work", {
+      storage: memoryStorage(), now: () => 10, fetchResult: vi.fn(async () => completed),
+      schedule: (callback) => scheduled.push(callback),
+    });
+
+    runtime.start({ promptId: "p1", comfyuiUrl: "http://comfy" }, watch);
+    runtime.start({ promptId: "p2", comfyuiUrl: "http://comfy" }, watch);
+    expect(runtime.list().map((item) => item.prompt_id)).toEqual(["p1", "p2"]);
+
+    await scheduled.shift()!();
+    expect(runtime.list().map((item) => item.prompt_id)).toEqual(["p2"]);
+    await scheduled.shift()!();
+    expect(runtime.list()).toEqual([]);
+    expect(watch.completed).toHaveBeenCalledTimes(2);
+  });
+
   it("does not finalize the same prompt through poll and recovery twice", async () => {
     const storage = memoryStorage();
     const watch = observer();

@@ -82,7 +82,8 @@ def test_execute_turn_owns_generation_through_maintenance_order():
     assert result["result_text"] == "visible"
 
 
-def test_visible_turn_does_not_wait_for_blocked_maintenance():
+def test_agent_turn_finishes_only_after_published_maintenance():
+    published = threading.Event()
     maintenance_started = threading.Event()
     release_maintenance = threading.Event()
     finalized = threading.Event()
@@ -101,7 +102,7 @@ def test_visible_turn_does_not_wait_for_blocked_maintenance():
         writeback=lambda item, events: (item.reply, [], {}),
         apply_output=lambda reply: reply,
         anchor_offset=lambda _reply, _request: None,
-        emit_ready=lambda _ctx, _result: True,
+        emit_ready=lambda _ctx, _result: published.set() or True,
         maintain=maintain,
     )
 
@@ -111,10 +112,12 @@ def test_visible_turn_does_not_wait_for_blocked_maintenance():
 
     thread = threading.Thread(target=finalize)
     thread.start()
+    assert published.wait(timeout=1)
     assert maintenance_started.wait(timeout=1)
     try:
-        assert finalized.wait(timeout=0.1), "可见正文已发布，却仍被维护任务阻塞"
-        assert result["result_text"] == "visible"
+        assert not finalized.wait(timeout=0.1), "维护未完成时 Agent 不应提前释放下一轮"
     finally:
         release_maintenance.set()
         thread.join(timeout=1)
+    assert finalized.is_set()
+    assert result["result_text"] == "visible"

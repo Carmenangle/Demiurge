@@ -1166,6 +1166,46 @@ def test_四种Profile提供主剧情同轮隐藏成稿合同(profile, required)
     assert "当前服装" in instruction
     assert "高潮动作" in instruction
     assert "LoRA" in instruction
+    assert "primary adult character" in instruction
+    assert "second adult character" in instruction
+
+
+@pytest.mark.parametrize("profile", profiles.PROFILE_IDS)
+def test_双角色Profile分别编译两人的外貌动作再描述整体关系(profile):
+    scene = {
+        "narrative": "冷倾雪抬头看向门外。虞妙玥跪在石阶前。",
+        "draft_prompt": "two-shot, stone chamber, layered background, directional light",
+        "appearance": (
+            "冷倾雪：【外貌】漆黑墨发扎成发团，插紫玉金髻，朱唇娇艳\n"
+            "虞妙玥：【外貌】乌黑长发，脸颊红润；【穿着】红色长裙"
+        ),
+        "wardrobe": "",
+        "locale": "stone chamber",
+        "actors": ["冷倾雪", "虞妙玥"],
+        "subjects": [
+            {"name": "冷倾雪", "description": "black-haired adult woman raising her head"},
+            {"name": "虞妙玥", "description": "long-haired adult woman kneeling on stone steps"},
+        ],
+        "rating": "sfw",
+        "aspect_ratio": "4:3",
+    }
+
+    raw = profiles.deterministic_fallback(profile, scene)
+    prompt = profiles.normalize_inline(profile, raw, scene)
+
+    assert prompt
+    assert "primary adult character" in prompt.lower()
+    assert "second adult character" in prompt.lower()
+    assert "冷倾雪" not in prompt and "虞妙玥" not in prompt
+    assert prompt.lower().index("primary adult character") < prompt.lower().index(
+        "second adult character",
+    )
+    if profile == "anima_tags":
+        assert len(prompt.splitlines()) == 2
+        assert "2girls" in prompt.splitlines()[1]
+    if profile == "krea2":
+        assert "masterpiece" not in prompt.lower()
+        assert "\n\n" not in prompt
 
 
 @pytest.mark.parametrize("profile", profiles.PROFILE_IDS)

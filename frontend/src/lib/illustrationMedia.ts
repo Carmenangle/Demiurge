@@ -6,6 +6,32 @@ export interface IllustrationLora {
   character: boolean;
 }
 
+export function resolveIllustrationActors(
+  eventActors: readonly string[],
+  subjects: readonly { name?: string; description?: string; weight?: number }[] | undefined,
+  knownNames: readonly string[],
+): string[] {
+  const known = new Set(knownNames.map((name) => name.trim()).filter(Boolean));
+  return [...new Set([
+    ...eventActors,
+    ...(subjects || []).map((subject) => subject.name || ""),
+  ].map((name) => name.trim()).filter((name) => name && known.has(name)))];
+}
+
+export function illustrationLoraConfigurationError(
+  preset: MediaInsertPreset,
+  media: { loras: IllustrationLora[]; characterLora: boolean },
+): string {
+  if (preset.appearanceSource === "character_card" || preset.loraMode === "none") return "";
+  const mode = preset.loraMode || "single";
+  const styleName = preset.styleLora || preset.loraName || "";
+  if (mode === "multi" && !styleName) return "多 LoRA 模式尚未配置默认风格 LoRA";
+  if (mode === "single" && !media.characterLora && media.loras.length === 0) {
+    return "当前场景未命中角色 LoRA，且尚未配置兜底风格 LoRA";
+  }
+  return "";
+}
+
 export function illustrationRequestMedia(preset: MediaInsertPreset | undefined, cardNames: string[]) {
   const useCharacterCards = preset?.appearanceSource === "character_card";
   const characterLoras = useCharacterCards ? {} : preset?.characterLoras || {};
@@ -53,7 +79,6 @@ export function illustrationWorkflowMedia(
         weight: binding.loraWeight ?? 0.8,
         character: true,
       });
-      if (mode === "single") break;
     }
     if (mode === "single" && loras.length === 0 && styleName) {
       addLora({ name: styleName, weight: styleWeight, character: false });

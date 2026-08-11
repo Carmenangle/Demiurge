@@ -978,6 +978,60 @@ def _illustration_visual_query(ctx: dict, current_text: str) -> str:
     )))
 
 
+def _ordered_illustration_names(names: list[str], text: str) -> list[str]:
+    """按本轮文本中的实际出现顺序返回精确角色名。"""
+    matched = _mentioned_bound_names(names, text or "")
+    return sorted(matched, key=lambda name: (text.find(name), names.index(name)))
+
+
+def _resolve_illustration_request_actors(
+    known: list[str], *, planned: list[str], user_text: str, narrative: str,
+    present: str, encounter: list[str],
+) -> list[str]:
+    """外貌资料不能充当出场证据；只从本轮事实确定插画角色。"""
+    planned = [str(name).strip() for name in planned if str(name).strip()]
+    if not known:
+        return list(dict.fromkeys(planned + encounter))
+    valid_planned = [name for name in planned if name in known]
+    story_names = _ordered_illustration_names(known, narrative)
+    evidence_groups = (
+        [name for name in encounter if name in known],
+        story_names,
+        valid_planned,
+        _ordered_illustration_names(known, user_text),
+        _ordered_illustration_names(known, present),
+    )
+    for group in evidence_groups:
+        if group:
+            return list(dict.fromkeys(group))
+    return []
+
+
+def _filter_illustration_appearance(
+    appearance: str, actors: list[str], known: list[str],
+) -> str:
+    """视觉资料只描述已选角色，禁止旧角色外貌进入最终 Profile。"""
+    source = (appearance or "").strip()
+    selected = set(actors)
+    if not source or not selected or not known:
+        return source
+    ordered_names = sorted(set(known), key=len, reverse=True)
+    marker = re.compile(
+        rf"^\s*({'|'.join(re.escape(name) for name in ordered_names)})\s*[：:]",
+    )
+    if not any(marker.match(line) for line in source.splitlines()):
+        return source
+    kept: list[str] = []
+    include = False
+    for line in source.splitlines():
+        match = marker.match(line)
+        if match:
+            include = match.group(1) in selected
+        if include:
+            kept.append(line)
+    return "\n".join(kept).strip()
+
+
 def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
                       lost: bool, rag_events: list | None = None,
                       user_text: str = "") -> tuple[str, list, dict]:
@@ -1118,21 +1172,16 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
                 # 混进候选全集，导致本地降级把作品名精确命中并回退风格 LoRA。
                 _known = [name for name in _known if name != card_name]
                 _actor_values = [name for name in _actor_values if name != card_name]
-            _scene_text = "\n".join(filter(None, (
-                encounter_narrative if character_encounter else visible_story,
-                user_text,
-                _illustration_appearance(ctx),
-                present,
-            )))
-            _exact = (
-                [name for name in _actor_values if name in _known]
-                if _known else _actor_values
+            scene_actor_text = encounter_narrative if character_encounter else visible_story
+            _scene_text = "\n".join(filter(None, (scene_actor_text, user_text, present)))
+            request_actors = _resolve_illustration_request_actors(
+                _known,
+                planned=_actor_values if illustration_plan else [],
+                user_text=user_text,
+                narrative=scene_actor_text,
+                present=present,
+                encounter=encounter_actors if character_encounter else [],
             )
-            _mentioned = [
-                name for name in _known
-                if name not in _exact and name in (_scene_text or "")
-            ]
-            request_actors = list(dict.fromkeys(_exact + _mentioned))
             if not request_actors:
                 request_actors = list(dict.fromkeys(
                     _actor_values + (
@@ -1140,12 +1189,15 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
                         if card_name and ctx.get("appearance_source") != "worldbook" else []
                     ),
                 ))
+            request_appearance = _filter_illustration_appearance(
+                _illustration_appearance(ctx), request_actors, _known,
+            )
             request_prompt = prompt_override.strip()
             prompt_source = "extracted"
             if at_climax and not request_prompt:
                 request_prompt = scene_illustration.build_scene_request(
                     paragraph=encounter_narrative if character_encounter else visible_story,
-                    appearance=_illustration_appearance(ctx),
+                    appearance=request_appearance,
                     wardrobe=wardrobe,
                     locale=locale,
                     actors=request_actors,
@@ -1177,16 +1229,41 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
                 # 否则独立 Profile 一旦拒答，只能退回没有角色和剧情事实的通用模板。
                 request_prompt = image_prompt_extract.build_fallback_content_tags(corrected_scene)
                 motion = image_prompt_extract.infer_motion(corrected_scene)
-                request_actors = [
+                # 高潮重定向只纠正动作与锚点；主计划 subjects 已通过配置角色全集
+                # 精确校验，是角色身份真源。代词化正文不应把这些角色覆盖为空。
+                retarget_actors = [
                     name for name in _known
                     if name in corrected_scene or name in present
                 ]
-                request_actors = list(dict.fromkeys(request_actors))
+                request_actors = list(dict.fromkeys(request_actors + retarget_actors))
             scene_narrative = encounter_narrative if character_encounter else (
                     scene_illustration.illustration_scene_excerpt(
                         visible_story, requested_anchor,
                     )
                 )
+            final_actors = _resolve_illustration_request_actors(
+                _known,
+                planned=_actor_values if illustration_plan else [],
+                user_text=user_text,
+                narrative=scene_narrative,
+                present=present,
+                encounter=encounter_actors if character_encounter else [],
+            )
+            if final_actors:
+                request_actors = final_actors
+            request_appearance = _filter_illustration_appearance(
+                _illustration_appearance(ctx), request_actors, _known,
+            )
+            profile_draft_prompt = request_prompt
+            if not illustration_plan:
+                # 漏计划时 draft 也只能来自最终高潮片段；整轮正文会把前段离场人物、
+                # 动作和外貌重新带回本地 Profile。
+                profile_draft_prompt = _apply_regex(
+                    ctx,
+                    image_prompt_extract.build_fallback_content_tags(scene_narrative),
+                    Placement.IMAGE_PROMPT,
+                    is_prompt=True,
+                ).strip()
             protected_narrative = (
                 encounter_narrative if character_encounter else
                 scene_illustration.protected_illustration_scene_excerpt(
@@ -1196,8 +1273,8 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
             scene_spec = {
                 "narrative": image_prompt_extract.restore_jailbreak(scene_narrative),
                 "protected_narrative": protected_narrative,
-                "draft_prompt": request_prompt,
-                "appearance": _illustration_appearance(ctx),
+                "draft_prompt": profile_draft_prompt,
+                "appearance": request_appearance,
                 "wardrobe": wardrobe,
                 "locale": locale,
                 "actors": request_actors,
@@ -1216,7 +1293,12 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
             if illustration_plan.get("subjects"):
                 # 主计划的英文主体描述是拒答降级时仍可用的身份真源；即使高潮锚点
                 # 被纠正，稳定外貌不会随动作重定向而失效。
-                scene_spec["subjects"] = illustration_plan["subjects"]
+                selected_subjects = [
+                    subject for subject in illustration_plan["subjects"]
+                    if str(subject.get("name") or "").strip() in request_actors
+                ]
+                if selected_subjects:
+                    scene_spec["subjects"] = selected_subjects
             if character_encounter:
                 scene_spec["encounter"] = encounter_facts
             if not plan_retargeted and illustration_plan.get("art_direction"):

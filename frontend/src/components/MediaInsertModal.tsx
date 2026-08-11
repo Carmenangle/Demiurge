@@ -233,7 +233,7 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
           </div>
           <p className="bind-hint" style={{ margin: "5px 0 0" }}>
             {loraMode === "none" && "只使用角色底图，不加载角色或风格 LoRA。"}
-            {loraMode === "single" && "在场角色有 LoRA 时使用角色 LoRA，否则回退风格 LoRA。"}
+            {loraMode === "single" && "串联高潮画面中已绑定的角色 LoRA；均未命中时才回退风格 LoRA。"}
             {loraMode === "multi" && "固定加载默认风格 LoRA，并叠加全部在场角色 LoRA。"}
           </p>
         </div>

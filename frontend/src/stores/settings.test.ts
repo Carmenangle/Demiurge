@@ -118,3 +118,39 @@ describe("model proxy migration", () => {
     expect(resolvedEmbedModel(settings).proxyUrl).toBe("");
   });
 });
+
+describe("provider profile migration", () => {
+  it("旧 Claude 模型名不得被猜成 Claude wire", () => {
+    const settings = importSettings(JSON.stringify({
+      chatModels: [{
+        id: "c", baseUrl: "https://proxy.example/v1", apiKey: "",
+        modelName: "claude-opus-4-6",
+      }],
+    }));
+
+    expect(settings.chatModels[0].providerProfile).toBe("openai_compatible");
+  });
+
+  it("清理旧版按模型名自动写入的 Claude profile", () => {
+    const settings = importSettings(JSON.stringify({
+      chatModels: [{
+        id: "c", baseUrl: "https://proxy.example/v1", apiKey: "",
+        modelName: "claude-opus-4-6", providerProfile: "claude_compatible",
+      }],
+    }));
+
+    expect(settings.chatModels[0].providerProfile).toBe("openai_compatible");
+  });
+
+  it("新语义版本保留用户明确选择的 Claude wire", () => {
+    const settings = importSettings(JSON.stringify({
+      providerProfileSemanticsVersion: 2,
+      chatModels: [{
+        id: "c", baseUrl: "https://proxy.example/v1", apiKey: "",
+        modelName: "claude-opus-4-6", providerProfile: "claude_compatible",
+      }],
+    }));
+
+    expect(settings.chatModels[0].providerProfile).toBe("claude_compatible");
+  });
+});

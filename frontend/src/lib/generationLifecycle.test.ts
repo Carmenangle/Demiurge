@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   initialGenState, reduce, canInterruptFreely, needsConfirm,
-  runningPromptId, streamingBotId,
+  blocksDialogueSubmission, runningPromptId, streamingBotId,
 } from "./generationLifecycle";
 
 const item = { id: "q1", text: "x", content: { text: "x", images: [], parts: [] } };
@@ -13,7 +13,7 @@ describe("generation lifecycle", () => {
     expect(canInterruptFreely(state)).toBe(true);
     state = reduce(state, { t: "agentImage", botId: "b1" });
     expect(needsConfirm(state)).toBe(true);
-    expect(reduce(state, { t: "agentDone", botId: "b1" }).status.kind).toBe("idle");
+    expect(reduce(state, { t: "agentDone", botId: "b1" }).agent).toBeNull();
   });
 
   it("ignores stale agent callbacks", () => {
@@ -21,9 +21,27 @@ describe("generation lifecycle", () => {
     const current = reduce(old, { t: "agentStart", botId: "new" });
     expect(reduce(current, { t: "agentImage", botId: "old" })).toBe(current);
     expect(reduce(current, { t: "agentDone", botId: "old" })).toBe(current);
-    expect(reduce(current, { t: "agentImage", botId: "new" }).status).toEqual({
-      kind: "agent", botId: "new", imageStarted: true,
+    expect(reduce(current, { t: "agentImage", botId: "new" }).agent).toEqual({
+      botId: "new", imageStarted: true,
     });
+  });
+
+  it("keeps Agent and ComfyUI as independent generation channels", () => {
+    const workflow = reduce(initialGenState, { t: "workflowStart", promptId: "p1" });
+    expect(blocksDialogueSubmission(workflow)).toBe(false);
+
+    const concurrent = reduce(workflow, { t: "agentStart", botId: "b1" });
+    expect(runningPromptId(concurrent)).toBe("p1");
+    expect(streamingBotId(concurrent)).toBe("b1");
+    expect(blocksDialogueSubmission(concurrent)).toBe(true);
+
+    const agentDone = reduce(concurrent, { t: "agentDone", botId: "b1" });
+    expect(runningPromptId(agentDone)).toBe("p1");
+    expect(streamingBotId(agentDone)).toBeNull();
+
+    const workflowDone = reduce(concurrent, { t: "workflowDone", promptId: "p1" });
+    expect(streamingBotId(workflowDone)).toBe("b1");
+    expect(runningPromptId(workflowDone)).toBeNull();
   });
 
   it("ignores stale workflow completion", () => {

@@ -55,7 +55,9 @@ def submit_template(template_id: str, values: dict[str, object], prompt: str,
     )
     if missing:
         raise WorkflowSubmissionError(422, {"missing": missing})
-    if lora_mode == "none":
+    # 模板会保存编辑时的 LoRA 节点值。自动插画未选中任何 LoRA 时必须清零，
+    # 否则空角色栈会静默执行模板里遗留的任意风格/真人 LoRA。
+    if lora_mode == "none" or not loras:
         workflow_injector.disable_all_loras(api)
     elif loras:
         lora_node_id = next((
