@@ -99,11 +99,21 @@ def finalize_turn(draft: TurnFinalization, hooks: TurnFinalizationHooks) -> dict
                 "turn_id": draft.ctx.get("turn_id", ""),
             }]
 
-    if hooks.emit_ready(draft.ctx, result):
+    published = hooks.emit_ready(draft.ctx, result)
+    if published:
         result["_eager_result"] = True
 
     if draft.deps is not None:
-        hooks.maintain(draft, reply, rag_events)
+        if published:
+            from app.services import post_turn_maintenance
+
+            owner = draft.ctx.get("repo_id") or draft.ctx.get("thread_id") or ""
+            post_turn_maintenance.submit(
+                owner,
+                lambda: hooks.maintain(draft, reply, []),
+            )
+        else:
+            hooks.maintain(draft, reply, rag_events)
     if rag_events:
         repo_id = draft.ctx.get("repo_id") or draft.ctx.get("thread_id") or "?"
         result["rag_recs"] = [

@@ -13,6 +13,7 @@ app/services/narrative_memory.py
 app/services/narrative_store.py
 app/services/roleplay_agency.py
 app/services/roleplay_turn.py
+app/services/post_turn_maintenance.py
 app/services/scene_classify.py
 app/services/image_prompt_extract.py
 app/services/image_prompt_profiles.py

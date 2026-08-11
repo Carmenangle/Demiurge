@@ -1922,9 +1922,10 @@ def test_独立表格维护只写数据库且不把维护响应放进对话(monk
                for event, data in traces)
 
 
-def test_roleplay记忆维护阻塞时正文与插画已同时启动(monkeypatch):
+def test_roleplay记忆维护阻塞时正文与插画已交付且前台回合已结束(monkeypatch):
     maintenance_started = threading.Event()
     release_maintenance = threading.Event()
+    foreground_done = threading.Event()
     emitted = []
 
     class _Deps:
@@ -1955,10 +1956,14 @@ def test_roleplay记忆维护阻塞时正文与插画已同时启动(monkeypatch
         stream_sink=emitted.append,
     )
     result = {}
-    worker = threading.Thread(
-        target=lambda: result.update(ag.roleplay_node({
+    def run_roleplay():
+        result.update(ag.roleplay_node({
             "user_text": "继续剧情", "images": [], "_ctx": ctx,
-        })),
+        }))
+        foreground_done.set()
+
+    worker = threading.Thread(
+        target=run_roleplay,
     )
     worker.start()
     try:
@@ -1966,7 +1971,9 @@ def test_roleplay记忆维护阻塞时正文与插画已同时启动(monkeypatch
         assert [event.keys() & {"replace", "illustrate_request"} for event in emitted] == [
             {"replace"}, {"illustrate_request"},
         ]
-        assert worker.is_alive()
+        assert foreground_done.wait(0.2)
+        assert not worker.is_alive()
+        assert result["result_text"] == "最终正文"
     finally:
         release_maintenance.set()
         worker.join(2)

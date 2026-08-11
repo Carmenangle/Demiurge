@@ -19,7 +19,7 @@
 
 1. **工作流抓取事务（已完成）**：`workflowCapture` 统一拥有完整画布载入、单次帧请求、可选 ops、原生 `graphToPrompt` 抓取、来源校验、重试、超时与清理。`WorkflowCard`、`AIBuildView` 共用同一 Interface；卡片不再实现隐藏 iframe 事务。模板工作流是拓扑真源，单节点 iframe 只回传参数；捕获结果必须保留真源全部节点，残缺旧草稿自动回退模板，禁止单节点画布覆盖完整图。
 2. **会话生成生命周期（已完成）**：`workflowGenerationRuntime` 统一拥有 pending 持久化、提交时仓库归属快照、轮询节奏、连续 `not_found`、恢复检查、超时保留和并发 finalize 双闸。`useChatSession` 只提供媒体落盘与界面反馈 Adapter；前台轮询和刷新恢复不再各写一套收尾顺序。后台活动面板只读 pending，不得删除生成真源；原图或会话槽未持久化时必须保留任务重试。
-3. **剧情回合事务（第一阶段完成）**：`roleplay_turn` 统一拥有主生成 → 状态/插画写回 → 输出正则 → 正文提前发布 → Curator/纪要/表格维护的顺序，并通过公开 Interface 测试。`agent_graph` 保留路由及世界书、角色卡、预设、RAG、表格只读上下文装配；这部分合同复杂且当前稳定，不做机械拆分。后续只有出现跨入口复用或真实顺序故障时再继续深化。
+3. **剧情回合事务（已完成）**：`roleplay_turn` 统一拥有主生成 → 状态/插画写回 → 输出正则 → 正文提前发布 → Curator/纪要/表格维护的顺序；正文与插画槽发布后，`post_turn_maintenance` 按作品串行执行维护，前台 Agent 立即结束并释放同仓库下一轮准入。`agent_graph` 保留路由及世界书、角色卡、预设、RAG、表格只读上下文装配。
 4. **Agent 调用事务（已完成）**：前端 `AgentInvocation` + `agentInvocationBody` 统一编码即时 SSE 与后台队列的完整上下文；后端 `agent_request_context.from_payload` 统一把 HTTP 请求和队列 payload 转为 `RunContext`。角色卡、世界书、历史、代理、插画和模型字段只映射一次。
 5. **工作流端口编排（已完成）**：`workflow_port_planner` 统一拥有编排提示词、模型调用、JSON 容错、强制编排、模型名校验、LoRA 和色板增强顺序；`ai_text` router 只做请求适配和错误映射。
 6. **会话历史事务（已完成）**：`ConversationHistoryRuntime` 统一拥有编辑、删除、重生成裁剪、检查点恢复、导入重载的状态发布与持久化顺序，保证 React 状态、同步 ref、本地缓存和后端快照不分叉。
@@ -53,7 +53,8 @@ services/  深模块层。业务逻辑全在这。彼此可依赖，但不 impor
 | `task_progress_store` | 后台任务进度的 UTF-8 JSON 原子快照、容量限制和重启中断归一 | 只存可恢复的状态，不存密钥和线程对象；高频调用方必须节流写盘，测试必须隔离真实 `DATA_DIR` |
 | `llm` | 建模型 + `normalize_base_url`（/v1 规则）+ `flatten_content`（分段展平）+ `chat_messages_stream`（流式增量与完整原文双输出） | 需要 base_url 归一、展平或流式调用 → 调这里，别内联；流式已由项目层控制重试，SDK 内层重试关闭，避免重试乘法 |
 | `agent_graph` | 多 Agent 主编排。编辑模式按 `workspace_mode=edit` 零模型直达 `edit_node`；无卡对话、带附件请求仍由 Supervisor 语义分派；**有卡纯文本直达 Roleplay** | 编辑模式不得进入 Roleplay/生图/MCP 分派；模糊任务理解仍改 Supervisor；强执行规则必须保守、可单测 |
-| `roleplay_turn` | 剧情回合执行事务：主生成后依次做状态/插画写回、输出正则、原位锚点、正文提前发布，再做 Curator/纪要/表格维护；无 Agent 路由知识 | 改正文发布与维护顺序只动这里并测公开 Interface；上下文装配仍归 `agent_graph`，不得让维护重新阻塞正文或把控制内容写入对话 |
+| `roleplay_turn` | 剧情回合执行事务：主生成后依次做状态/插画写回、输出正则、原位锚点和正文提前发布；已即时发布的回合把非关键维护交给 `post_turn_maintenance`，未即时发布的离线路径仍同步完成维护 | 改正文发布与维护顺序只动这里并测公开 Interface；上下文装配仍归 `agent_graph`，不得让维护重新阻塞正文或把控制内容写入对话 |
+| `post_turn_maintenance` | 正文交付后的表格、纪要、Curator/世界书维护调度；同一作品串行、不同作品独立，不占用前台对话准入 | 这里只拥有调度与异常隔离，不拥有维护规则；维护失败只记 Trace/日志，禁止回写或复活已删除的对话消息 |
 | `edit_agent` / `edit_agent_profiles` / `edit_session` / `edit_publication` | 编辑主管确定性选择六类专家；`edit_session` 在工具层强制只读/写入意图、先列后写、先读后覆盖和写前+完成前机械校验；`edit_publication` 把小仓库产物受控发布到后端设置中的 characterDir/presetDir，并支持 PNG 附件保存为头像/表情；排错可按当前 repo/turn 读取脱敏 Trace | 普通文件工具只操作当前小仓库；源库根只读后端 user_state，不信任请求路径；角色卡内部必须扁平且 worldbook/regex 只走侧车；PNG 卡元数据迁移仍走导入 UI |
 | `edit_import_adapter` | 外部 JSON 资源到 Demiurge 的确定性转换：纯角色卡只生成扁平 card，内嵌内容拆为 worldbook/regex 侧车；独立世界书统一 entries/key/enabled；预设剥离连接鉴权并补项目扩展；正则补 ID 和运行字段后编译校验 | 只读当前小仓库内源 JSON，默认拒绝覆盖目标且不删除源文件；PNG 卡必须走现有角色卡导入入口保留头像与元数据 |
 | `edit_artifacts` | 编辑产物机械校验：Demiurge 归一化角色卡、世界书侧车、预设 identifier/order、注入字段、`thinking_chains`、三层正则字段与编译、Python 语法及基础 JSON | 自动推断必须先按项目文件名和归一化卡字段识别，禁止因 `card.json.regex_scripts` 把整卡误判为正则；格式失败写 Trace，禁止把模型自述当验证结果 |

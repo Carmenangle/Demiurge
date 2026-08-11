@@ -1,8 +1,11 @@
+import threading
+
 from app.services import roleplay_turn
 
 
 def test_finalize_turn_publishes_visible_text_before_maintenance():
     order: list[str] = []
+    maintained = threading.Event()
     draft = roleplay_turn.TurnFinalization(
         ctx={"repo_id": "work"}, text="继续", trace=["roleplay"], streamed=True,
         reply="raw", deps=object(), turn=3, affinity=0, lost=False,
@@ -18,12 +21,14 @@ def test_finalize_turn_publishes_visible_text_before_maintenance():
         apply_output=lambda reply: order.append("regex") or f"{reply}!",
         anchor_offset=lambda _reply, _request: 7,
         emit_ready=lambda _ctx, _result: order.append("publish") or True,
-        maintain=lambda _draft, _reply, _events: order.append("maintain"),
+        maintain=lambda _draft, _reply, _events: (order.append("maintain"), maintained.set()),
     )
 
     result = roleplay_turn.finalize_turn(draft, hooks)
 
-    assert order == ["writeback", "regex", "publish", "maintain"]
+    assert order[:3] == ["writeback", "regex", "publish"]
+    assert maintained.wait(timeout=1)
+    assert order[-1] == "maintain"
     assert result["result_text"] == "visible!"
     assert result["_eager_result"] is True
     assert result["illustrate_recs"][0]["anchor_offset"] == 7
@@ -52,6 +57,7 @@ def test_finalize_turn_without_agency_still_applies_output_and_publishes():
 
 def test_execute_turn_owns_generation_through_maintenance_order():
     order: list[str] = []
+    maintained = threading.Event()
     turn = roleplay_turn.TurnExecution(
         ctx={"repo_id": "work"}, text="继续", trace=[], streamed=False,
         deps=object(), turn=2, affinity=0, lost=False,
@@ -61,7 +67,7 @@ def test_execute_turn_owns_generation_through_maintenance_order():
         apply_output=lambda reply: order.append("regex") or reply,
         anchor_offset=lambda _reply, _request: None,
         emit_ready=lambda _ctx, _result: order.append("publish") or True,
-        maintain=lambda _draft, _reply, _events: order.append("maintain"),
+        maintain=lambda _draft, _reply, _events: (order.append("maintain"), maintained.set()),
     )
 
     result = roleplay_turn.execute_turn(turn, roleplay_turn.TurnExecutionHooks(
@@ -70,5 +76,45 @@ def test_execute_turn_owns_generation_through_maintenance_order():
         finalization=finalization,
     ))
 
-    assert order == ["generate", "generated", "writeback", "regex", "publish", "maintain"]
+    assert order[:5] == ["generate", "generated", "writeback", "regex", "publish"]
+    assert maintained.wait(timeout=1)
+    assert order[-1] == "maintain"
     assert result["result_text"] == "visible"
+
+
+def test_visible_turn_does_not_wait_for_blocked_maintenance():
+    maintenance_started = threading.Event()
+    release_maintenance = threading.Event()
+    finalized = threading.Event()
+    result: dict = {}
+
+    draft = roleplay_turn.TurnFinalization(
+        ctx={"repo_id": "work"}, text="继续", trace=[], streamed=True,
+        reply="visible", deps=object(), turn=4, affinity=0, lost=False,
+    )
+
+    def maintain(_draft, _reply, _events):
+        maintenance_started.set()
+        release_maintenance.wait(timeout=2)
+
+    hooks = roleplay_turn.TurnFinalizationHooks(
+        writeback=lambda item, events: (item.reply, [], {}),
+        apply_output=lambda reply: reply,
+        anchor_offset=lambda _reply, _request: None,
+        emit_ready=lambda _ctx, _result: True,
+        maintain=maintain,
+    )
+
+    def finalize():
+        result.update(roleplay_turn.finalize_turn(draft, hooks))
+        finalized.set()
+
+    thread = threading.Thread(target=finalize)
+    thread.start()
+    assert maintenance_started.wait(timeout=1)
+    try:
+        assert finalized.wait(timeout=0.1), "可见正文已发布，却仍被维护任务阻塞"
+        assert result["result_text"] == "visible"
+    finally:
+        release_maintenance.set()
+        thread.join(timeout=1)

@@ -45,6 +45,7 @@
 - 当前真实边界：Qwen3-VL 未建索引时仍只走文本资产搜索；能力租约不是操作系统容器；角色认知写入、CI 处置、反事实候选选择与 Procedure 审核仍是显式操作。2026-08-11 门禁为后端 1202、前端 335、Playwright 3、Ruff/13 条 import-linter/mypy 39 文件/硬编码/wire/生产构建全通过。
 - 2026-08-11 架构性能深化：Structured Runtime 的统一调用已接入 Supervisor；Scenario v2 使用 staging 原子发布、增量哈希和失败回滚；RAG/纪要写事务下沉；前端分支编排进入独立 Runtime；依赖合同增至 17 条。最新门禁为后端 1212、前端 338、Playwright 3，全绿；综合架构 9.1。详见 `architecture-performance-2026-08-11.md`。
 - 2026-08-11 自动插画提交耐久性：自动路径调用 ComfyUI 前必须原子认领 `messageId + slotId`；重复、迟到、已完成或已删除槽失败关闭，旧前端快照不得清掉同槽认领/promptId/完成结果，也不得复活用户删除。后台活动逐项显示真实任务和父仓库路径，两个浮标保持 56px。详见 `automatic-illustration-submission-and-pc-ux-2026-08-11.md`。
+- 2026-08-11 剧情正文与插画槽即时交付后，表格、纪要、Curator/世界书维护必须转入 `post_turn_maintenance` 按作品串行执行；维护模型再慢也不得继续占用前台 Agent 准入，否则“正文和图片已完成却仍提示任务在跑”，并阻止对话重新生成。
 
 ## Agent 工作约束（AGENTS.md）
 - 只做用户明确要求；先读 ARCHITECTURE.md 与 docs/memory 相关部分再开工。
