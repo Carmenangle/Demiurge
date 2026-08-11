@@ -34,6 +34,9 @@ def gen_prompt(req: PromptRequest) -> dict[str, object]:
 class ProfilePromptRequest(ChatModelReq):
     profile: str
     scene: dict[str, object]
+    preset_dir: str = ""
+    preset_name: str = ""
+    user_name: str = ""
 
 
 @router.get("/prompt/profile/defaults")
@@ -57,12 +60,35 @@ def gen_profile_prompt(req: ProfilePromptRequest) -> dict[str, object]:
             req.profile,
             req.scene,
             lambda system, user: chat(
-                req.base_url, req.api_key, req.model, system, user,
+                req.base_url, req.api_key, req.model,
+                image_prompt_profiles.system_with_preset(
+                    system, req.scene,
+                    preset_dir=req.preset_dir,
+                    preset_name=req.preset_name,
+                    user_name=req.user_name,
+                ),
+                user,
                 temperature=0.3, proxy=req.proxy,
             ),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        from app.services import run_trace
+
+        run_trace.emit(
+            {
+                "turn_id": str(req.scene.get("turn_id") or ""),
+                "thread_id": str(req.scene.get("thread_id") or req.scene.get("repo_id") or ""),
+                "repo_id": str(req.scene.get("repo_id") or ""),
+            },
+            "illustration.profile",
+            profile=req.profile,
+            strategy=result.get("strategy", "direct"),
+            validation_errors=result.get("validation_errors", []),
+        )
+    except Exception:  # noqa: BLE001 Trace 不得阻断提示词生成
+        pass
     return {**result, "profile": req.profile}
 
 

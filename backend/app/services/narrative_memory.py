@@ -12,9 +12,11 @@
 """
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass, field
+
+from app.services import structured_output
+from app.services.structured_contracts import RichChronicle
 
 CADENCE = 3              # 每 N 个 assistant 回合抽一次纪要（默认对齐剧情表每三条一统计）
 LAYER0_CAP = 8          # layer0（细）条数上限，超出把最旧 COMPACT_BATCH 条压成一条 layer1
@@ -44,6 +46,7 @@ class ChronicleEntry:
     overview: str = ""     # 给主 Roleplay 注入的短概览
     dialogue: str = ""     # 本段关键对白（资产表展示，不进主上下文）
     characters: list[str] = field(default_factory=list)
+    facts: list[dict[str, str]] = field(default_factory=list)
 
     def body(self) -> str:
         """trigram 索引正文 = 纪要正文 + 关键词（关键词重复进正文，加权召回）。"""
@@ -73,7 +76,11 @@ SUMMARY_SYSTEM = (
     "{\"overview\":\"一句到三句概览，不超过120字\","
     "\"chronicle\":\"详细纪要，完整说明这三轮发生的事情与变化\","
     "\"dialogue\":\"重要对白原文，没有则空串\","
-    "\"characters\":[\"实际出场人物\"],\"keywords\":[\"人物\",\"地点\",\"事件\"]}。"
+    "\"characters\":[\"实际出场人物\"],\"keywords\":[\"人物\",\"地点\",\"事件\"],"
+    "\"facts\":[{\"subject\":\"实体\",\"predicate\":\"关系/世界属性\","
+    "\"object\":\"值\",\"evidence\":\"剧情中的直接证据\"}]}。"
+    "facts 只写可长期查询的世界/实体事实，不写好感、态度、心情、所在、身体或衣着状态；"
+    "没有则空数组。"
     "只输出 JSON。"
 )
 
@@ -88,19 +95,14 @@ def parse_summary(raw: str) -> tuple[str, list[str]]:
 
     坏 JSON / 空 summary → ("", [])（上层据此跳过落盘，旧纪要不动，对治痛点2）。
     """
-    m = re.search(r"\{[\s\S]*\}", raw or "")
-    if not m:
-        return "", []
     try:
-        data = json.loads(m.group(0))
-    except (json.JSONDecodeError, ValueError):
+        payload = structured_output.parse_model(raw, RichChronicle)
+    except structured_output.StructuredOutputError:
         return "", []
-    if not isinstance(data, dict):
-        return "", []
-    text = str(data.get("summary") or "").strip()[:_SUMMARY_MAX]
+    text = payload.summary.strip()[:_SUMMARY_MAX]
     if not text:
         return "", []
-    kws_raw = data.get("keywords")
+    kws_raw = payload.keywords
     keywords: list[str] = []
     if isinstance(kws_raw, list):
         for k in kws_raw:
@@ -113,34 +115,28 @@ def parse_summary(raw: str) -> tuple[str, list[str]]:
 def parse_rich_summary(raw: str, *, turn_start: int = 0,
                        turn_end: int = 0) -> ChronicleEntry | None:
     """解析丰富纪要；兼容旧 summary 结构。"""
-    m = re.search(r"\{[\s\S]*\}", raw or "")
-    if not m:
-        return None
     try:
-        data = json.loads(m.group(0))
-    except (json.JSONDecodeError, ValueError):
+        payload = structured_output.parse_model(raw, RichChronicle)
+    except structured_output.StructuredOutputError:
         return None
-    if not isinstance(data, dict):
-        return None
-    overview = str(data.get("overview") or data.get("summary") or "").strip()[:_OVERVIEW_MAX]
-    detail = str(data.get("chronicle") or data.get("summary") or overview).strip()[:_SUMMARY_MAX]
+    overview = (payload.overview or payload.summary).strip()[:_OVERVIEW_MAX]
+    detail = (payload.chronicle or payload.summary or overview).strip()[:_SUMMARY_MAX]
     if not (overview and detail):
         return None
 
-    def unique_list(key: str, limit: int) -> list[str]:
-        raw_items = data.get(key)
+    def unique_list(raw_items: list[str], limit: int) -> list[str]:
         result: list[str] = []
-        if isinstance(raw_items, list):
-            for item in raw_items:
-                value = str(item).strip()
-                if value and value not in result:
-                    result.append(value)
+        for item in raw_items:
+            value = str(item).strip()
+            if value and value not in result:
+                result.append(value)
         return result[:limit]
 
     return ChronicleEntry(
         text=detail, overview=overview,
-        dialogue=str(data.get("dialogue") or "").strip()[:_DIALOGUE_MAX],
-        characters=unique_list("characters", 12), keywords=unique_list("keywords", 16),
+        dialogue=payload.dialogue.strip()[:_DIALOGUE_MAX],
+        characters=unique_list(payload.characters, 12), keywords=unique_list(payload.keywords, 16),
+        facts=[fact.model_dump() for fact in payload.facts[:12]],
         turn_start=turn_start, turn_end=turn_end,
     )
 

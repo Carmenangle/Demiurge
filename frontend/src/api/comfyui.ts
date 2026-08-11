@@ -51,6 +51,8 @@ export function submitWorkflow(
   values: Record<string, unknown>,
   url: string,
   prompt = "",
+  loras: { name: string; weight: number }[] = [],
+  loraMode: "none" | "single" | "multi" = "single",
 ) {
   return apiPost<SubmitResult>("/comfyui/submit", {
     template_id: templateId,
@@ -58,6 +60,8 @@ export function submitWorkflow(
     prompt,
     url,
     client_id: comfyClientId(),
+    loras,
+    lora_mode: loraMode,
   });
 }
 

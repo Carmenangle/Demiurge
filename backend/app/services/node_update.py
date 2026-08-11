@@ -18,6 +18,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -60,6 +61,7 @@ def _blank(note: str = "") -> dict:
         "error": "", "message": "",
         "pending_sensitive": [],
         "task_kind": "", "subject": "", "target_path": "",
+        "repository": "", "commit": "", "requirements_sha256": "",
     }
 
 
@@ -95,6 +97,38 @@ def _git(cwd: str, args: list[str], timeout: float = 120) -> subprocess.Complete
 def head(cwd: str) -> str:
     r = _git(cwd, ["rev-parse", "--short", "HEAD"], 15)
     return (r.stdout or "").strip()
+
+
+def repository_provenance(path: Path) -> dict[str, str]:
+    """读取已检出节点包的可审计来源、完整 commit 与依赖清单哈希。"""
+    root = path.resolve()
+    commit = (_git(str(root), ["rev-parse", "HEAD"], 15).stdout or "").strip()
+    repository = (_git(str(root), ["remote", "get-url", "origin"], 15).stdout or "").strip()
+    req = root / "requirements.txt"
+    req_hash = hashlib.sha256(req.read_bytes()).hexdigest() if req.is_file() else ""
+    return {
+        "repository": repository,
+        "commit": commit,
+        "requirements_sha256": req_hash,
+    }
+
+
+def validate_requirements_sources(path: Path) -> None:
+    """拒绝 requirements 通过 URL/VCS/editable/索引选项执行未审查来源。"""
+    if not path.is_file():
+        return
+    unsafe = []
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        lowered = line.lower()
+        if not line or line.startswith("#"):
+            continue
+        if (lowered.startswith(("-e ", "--editable", "--index-url", "--extra-index-url", "--find-links"))
+                or "git+" in lowered or " @ http://" in lowered or " @ https://" in lowered
+                or lowered.startswith(("http://", "https://"))):
+            unsafe.append(line)
+    if unsafe:
+        raise ValueError("requirements.txt 含未审查的外部来源或 pip 选项：" + "; ".join(unsafe[:3]))
 
 
 def has_upstream(cwd: str) -> bool:
@@ -246,7 +280,7 @@ def start(pack_dir: str, python_exe: str = "", proxy: str = "",
                 raise RuntimeError(f"git pull 失败：{out[-400:]}")
             new = head(str(d))
             changed = bool(old and new and old != new)
-            _set(new=new, changed=changed)
+            _set(new=new, changed=changed, **repository_provenance(d))
 
             # 代码没变就不折腾依赖 —— 这是「假更新」的另一半：明确告诉用户没变
             if not changed and not allow_sensitive:
@@ -376,7 +410,7 @@ def start_install(comfy_path: str, repository: str, python_exe: str = "", proxy:
         _PROGRESS.clear()
         _PROGRESS.update(_blank("准备安装节点包…"))
         _PROGRESS.update(running=True, task_kind="node-install", subject=target.name,
-                         target_path=str(target))
+                         target_path=str(target), repository=repository)
         _persist_locked(force=True)
 
     def run() -> None:
@@ -392,6 +426,7 @@ def start_install(comfy_path: str, repository: str, python_exe: str = "", proxy:
                 raise RuntimeError(f"目标目录已存在：{target}")
 
             req = target / "requirements.txt"
+            _set(**repository_provenance(target))
             if skip_deps or not req.is_file():
                 _set(running=False, finished=True, phase="done", changed=True,
                      message=f"「{target.name}」安装完成。"
@@ -402,6 +437,7 @@ def start_install(comfy_path: str, repository: str, python_exe: str = "", proxy:
                 _set(running=False, finished=True, phase="done", changed=True,
                      message=f"「{target.name}」代码已安装，但没找到 ComfyUI 的 Python，依赖未处理。")
                 return
+            validate_requirements_sources(req)
             _set(phase="preflight", note="正在预检依赖改动（不会改动环境）…")
             planned, sensitive = plan_requirements(python_exe, req, proxy)
             if sensitive and not allow_sensitive:

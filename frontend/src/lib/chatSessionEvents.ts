@@ -87,7 +87,7 @@ function appendDelta(message: ChatMessage, text: string): ChatMessage {
 
 function appendMediaSlot(message: ChatMessage, slotId: string, offset?: number): ChatMessage {
   const existing = message.parts || (message.text ? [{ type: "text" as const, text: message.text }] : []);
-  if (existing.some((part) => part.type === "media-slot" && part.slotId === slotId)) return message;
+  if (existing.some((part) => part.slotId === slotId)) return message;
   if (typeof offset === "number" && !message.parts) {
     const index = Math.max(0, Math.min(message.text.length, Math.round(offset)));
     return {
@@ -148,6 +148,34 @@ export function dropMediaSlot(
     }
     return { ...message, parts: parts.length ? parts : undefined };
   });
+}
+
+export function pruneUnsubmittedMediaSlots(current: ChatMessage[]): {
+  messages: ChatMessage[];
+  removed: { messageId: string; slotId: string }[];
+} {
+  const removed = current.flatMap((message) => (message.parts || [])
+    .filter((part) => part.type === "media-slot" && part.status === "pending"
+      && !part.promptId && !!part.slotId)
+    .map((part) => ({ messageId: message.id, slotId: part.slotId! })));
+  const messages = removed.reduce(
+    (items, item) => dropMediaSlot(items, item.messageId, item.slotId), current,
+  );
+  return { messages, removed };
+}
+
+export function restoreSubmittedMediaSlots(
+  current: ChatMessage[], pending: readonly {
+    prompt_id: string;
+    createdAt?: number;
+    target?: { messageId: string; slotId: string; background?: true };
+  }[],
+): ChatMessage[] {
+  return pending.reduce((messages, item) => item.target
+    ? bindMediaSlotPrompt(
+      messages, item.target.messageId, item.target.slotId, item.prompt_id,
+    )
+    : messages, current);
 }
 
 export function reduceChatStreamEvent(

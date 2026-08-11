@@ -12,6 +12,8 @@ import gc
 from pathlib import Path
 from threading import Condition, Lock, Thread
 
+from app.services import model_lease
+
 _LOG = logging.getLogger(__name__)
 _CACHE: dict[str, object] = {}
 _LOADING: set[str] = set()
@@ -204,9 +206,17 @@ def rerank(query: str, candidates: list[dict], model_dir: str, k: int,
     """对候选节点包精排；模型不可用时返回空，调用方应使用召回顺序。"""
     if not candidates:
         return []
+    from app.services import model_lease
+
+    lease = model_lease.acquire(
+        "rag-reranker", "reranker", priority=40, estimated_mib=1400, ttl_seconds=120,
+    )
+    if lease is None:
+        return []
     model = _cached_model(model_dir)
     if model is None:
         preload(model_dir)
+        model_lease.release(lease.token)
         return []
     try:
         if not _interactive_device_supported(model):
@@ -232,6 +242,7 @@ def rerank(query: str, candidates: list[dict], model_dir: str, k: int,
         return []
     finally:
         _release_inference()
+        model_lease.release(lease.token)
 
 
 def probe_model(model_dir: str) -> tuple[bool, str]:
@@ -266,3 +277,6 @@ def probe_model(model_dir: str) -> tuple[bool, str]:
         return False, f"模型已加载，但最小推理失败：{exc}"
     finally:
         _release_inference()
+
+
+model_lease.register_releaser("reranker", release_accelerator_memory)

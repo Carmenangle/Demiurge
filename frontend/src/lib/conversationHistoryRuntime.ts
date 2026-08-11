@@ -1,5 +1,12 @@
 import type { ChatMessage } from "../types/chat";
 
+export function resolveInitialHistory(
+  remoteSnapshot: ChatMessage[] | null,
+  cachedMessages: ChatMessage[],
+): ChatMessage[] {
+  return remoteSnapshot === null ? cachedMessages : remoteSnapshot;
+}
+
 export interface ConversationCheckpoint {
   id: string;
   label: string;

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  applyProfileLoraTriggers, illustrationTemplateValues, normalizePromptProfile,
+  applyProfileLoraTriggers, ensureAnimaIllustrationStyle, illustrationTemplateValues, normalizePromptProfile,
   PROMPT_PROFILE_OPTIONS, replacePromptQualityLine, latentSizeFor,
 } from "./imagePromptProfiles";
 
@@ -19,6 +19,18 @@ describe("image prompt profiles", () => {
     expect(applyProfileLoraTriggers(
       "masterpiece, best quality\n1girl, red dress", "anima_tags", ["current_trigger"],
     )).toBe("current_trigger, masterpiece, best quality\n1girl, red dress");
+  });
+
+  it("Anima使用风格LoRA时机械锁定手绘二次元媒介", () => {
+    expect(ensureAnimaIllustrationStyle(
+      "masterpiece, anime coloring\nadult woman, walking. Directional light preserves the scene.",
+      true,
+    )).toBe(
+      "masterpiece, anime coloring\n"
+      + "anime illustration, hand-drawn anime style, 2d cel shading, non-photorealistic, "
+      + "adult woman, walking. Directional light preserves the scene.",
+    );
+    expect(ensureAnimaIllustrationStyle("quality\ncontent", false)).toBe("quality\ncontent");
   });
 
   it("Krea、自然语言与Niji都只前置当前LoRA触发词且不重复", () => {

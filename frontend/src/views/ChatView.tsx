@@ -73,7 +73,7 @@ export function ChatView({
   onBack?: () => void;
   initialImage?: string | null;              // 从资产库「发送至对话」带来的图，挂载后插入输入框
   onImageConsumed?: () => void;
-  onBranch?: (binding: Partial<RepoBinding>, msgs: unknown[]) => void;
+  onBranch?: (binding: Partial<RepoBinding>, msgs: unknown[], isLatest: boolean) => void;
   workMode?: WorkMode;   // 决定输入框提示文案（三模式各异）
 }) {
   const streamRef = useRef<HTMLDivElement | null>(null);   // 对话滚动容器
@@ -224,6 +224,8 @@ export function ChatView({
   createCheckpointRef.current = createCheckpoint;
   const messagesUpToRef = useRef(messagesUpTo);
   messagesUpToRef.current = messagesUpTo;
+  const messageCountRef = useRef(messages.length);
+  messageCountRef.current = messages.length;
   const onBranchRef = useRef(onBranch);
   onBranchRef.current = onBranch;
   const repoBindingRef = useRef<Partial<RepoBinding>>({});
@@ -246,7 +248,8 @@ export function ChatView({
   const handleCreateCheckpoint = useCallback((id: string) => createCheckpointRef.current(id), []);
   const handleBranch = useCallback((id: string) => {
     if (!onBranchRef.current) return;
-    onBranchRef.current(repoBindingRef.current, messagesUpToRef.current(id));
+    const selected = messagesUpToRef.current(id);
+    onBranchRef.current(repoBindingRef.current, selected, selected.length === messageCountRef.current);
   }, []);
   const [showTables, setShowTables] = useState(false);
   const [showMediaInsert, setShowMediaInsert] = useState(false);

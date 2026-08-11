@@ -19,6 +19,15 @@ def test_破甲还原_空串():
     assert ipe.restore_jailbreak("正常文字") == "正常文字"
 
 
+def test_保护正文清洗控制块但保留防拦截标记():
+    source = (
+        "<think>隐藏</think><content>她@(抓)@住手腕。\n\n随后松开。</content>"
+        "<状态更新>[]</状态更新>"
+    )
+    assert ipe.protected_narrative_text(source) == "她@(抓)@住手腕。\n\n随后松开。"
+    assert ipe.visible_narrative_text(source) == "她抓住手腕。\n\n随后松开。"
+
+
 def test_解析分析json():
     reply = ('随便前言{"composition":"close-up, pov","characters":["Lyra"],'
              '"action":"lying on bed, blush","lighting":"candlelight","nsfw_level":2}后语')
@@ -101,6 +110,8 @@ def test_主生成插画计划可解析并从正文剥离():
     assert plan["actors"] == ["白绮谷"]
     assert plan["motion"] == 2
     assert plan["aspect_ratio"] == "2:3"
+    assert plan["camera"] == "35mm medium shot"
+    assert plan["composition"] == "low angle, triangular composition"
     assert plan["prompt"] == (
         "35mm medium shot, low angle, triangular composition, "
         "(silver-haired swordswoman:1.35), lightning, ruined hall"
@@ -184,7 +195,9 @@ def test_主生成插画指令要求高潮锚点镜头构图与主体权重():
     ):
         assert required in instruction
     assert "<illustration>" in instruction
-    assert "无适合画面的高潮" in instruction
+    assert "每轮必须选择" in instruction
+    assert "不得省略" in instruction
+    assert "无适合画面的高潮" not in instruction
     assert "结构化画面草稿" in instruction
     assert "基础识别特征" in instruction
     assert "事后余韵" in instruction
@@ -233,35 +246,42 @@ def test_解析艺术决策并置于结构化画面草稿前部():
 
     assert plan["art_direction"]["visual_thesis"] == "blade reflection divides the two rivals"
     assert plan["art_direction"]["hierarchy"].startswith("crossed blades first")
+    assert plan["subjects"] == [{
+        "name": "甲", "description": "armored swordswoman", "weight": 1.4,
+    }]
     assert plan["prompt"].startswith("blade reflection divides the two rivals")
     assert plan["prompt"].endswith("low angle, diagonal composition, (armored swordswoman:1.4), ruined arena")
 
 
-def test_主生成插画指令合并选中的提示词模式():
-    instruction = ipe.build_inline_plan_instruction("krea2")
+def test_主生成插画指令同轮生成隐藏完整提示词且不占正文配额():
+    instruction = ipe.build_inline_plan_instruction(
+        "krea2", profile_instruction="Krea2完整成稿合同",
+    )
 
     assert '"profile_prompt"' in instruction
-    assert "Krea2" in instruction
-    assert "camera、composition、subjects、prompt" in instruction
+    assert "Krea2完整成稿合同" in instruction
+    assert "不向用户展示" in instruction
+    assert "不计入正文" in instruction
+    assert "<content>" in instruction
+    assert "camera 写服务视觉命题" in instruction
+    assert "除 anchor 和 subjects.name 必须保留" in instruction
+    assert "必须使用简洁英文视觉描述" in instruction
 
 
-def test_插画指令要求基础外貌与当前情况合并并遵守krea语言边界():
+def test_插画指令要求基础外貌与当前情况合并并承担当前Profile格式():
     instruction = ipe.build_inline_plan_instruction(
         "krea2", "冷倾雪：漆黑墨发扎成发团、紫玉金髻、朱唇、成熟美目",
+        profile_instruction="只输出Krea2英文自然段",
     )
 
     assert "基础外貌" in instruction
     assert "当前情况" in instruction
     assert "冷倾雪：漆黑墨发扎成发团、紫玉金髻" in instruction
-    assert "NSFW" in instruction
-    assert "仅服装与姿态" in instruction
-    for quota in ("拍摄角度≤55", "光影≤85", "人物≤45", "发型≤25", "妆容≤30",
-                  "表情≤30", "服装≤130", "姿态≤40", "背景≤45", "构图≤45"):
-        assert quota in instruction
-    assert "非常规视角" in instruction
-    assert "光源方向" in instruction
-    assert "材质与光线互动" in instruction
-    assert "二次元" in instruction
+    assert "NSFW" not in instruction
+    assert "profile_prompt" in instruction
+    assert "lighting_logic 写光源" in instruction
+    assert "只输出Krea2英文自然段" in instruction
+    assert "正文要求的篇幅" in instruction
 
 
 def test_解析保留主模型同轮生成的模式提示词():
@@ -276,3 +296,21 @@ def test_解析保留主模型同轮生成的模式提示词():
     _, plan = ipe.extract_illustration_plan(reply)
 
     assert plan["profile_prompt"] == "主模型生成的 Krea2 最终提示词。"
+
+
+def test_插画块在JSON解析前复用正文正则以还原预设结构():
+    reply = (
+        "正文高潮。"
+        "<illustration>{§anchor§:§正文高潮。§,§camera§:§low angle§,"
+        "§composition§:§center composition§,§subjects§:[{§name§:§甲§,"
+        "§description§:§adult woman§}],§prompt§:§turning§,"
+        "§profile_prompt§:§A detailed English scene.§,§motion§:1}</illustration>"
+    )
+
+    clean, plan = ipe.extract_illustration_plan(
+        reply, block_filter=lambda value: value.replace("§", '"'),
+    )
+
+    assert clean == "正文高潮。"
+    assert plan["anchor"] == "正文高潮。"
+    assert plan["profile_prompt"] == "A detailed English scene."

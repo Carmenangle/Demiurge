@@ -7,6 +7,7 @@ import random
 from app.services import narrative_memory as nm
 from app.services import narrative_store as ns
 from app.services import roleplay_agency as ra
+from app.services import temporal_fact_store
 
 
 def _deps(tmp_path, chat_fn=None):
@@ -57,6 +58,24 @@ def test_抽取_到cadence落一条纪要并推进进度(tmp_path):
     items = ns.recent(str(tmp_path), "r1", k=10)
     assert len(items) == 1 and "雪山救援" in items[0].text
     assert ns.get_last_turn(str(tmp_path), "r1", "卡A") == 6
+
+
+def test_纪要同一次结构化输出顺带写世界事实账本(tmp_path):
+    payload = (
+        '{"overview":"政变结束","chronicle":"新王接管王城",'
+        '"facts":[{"subject":"王城","predicate":"统治者","object":"新王",'
+        '"evidence":"新王在大殿接过王冠"}]}'
+    )
+    deps = _deps(tmp_path, lambda *a, **k: payload)
+
+    assert ra.maybe_summarize(
+        deps, repo_id="r1", card_name="卡A", window_text="三轮剧情", turn=3,
+        chat_base="b", chat_key="k", chat_model="m",
+    ) is True
+
+    facts = temporal_fact_store.as_of(str(tmp_path), "r1", 3)
+    assert [(fact["subject"], fact["predicate"], fact["object"])
+            for fact in facts] == [("王城", "统治者", "新王")]
 
 
 def test_每个纪要频率区间都新建独立卡且不自动压缩(tmp_path):

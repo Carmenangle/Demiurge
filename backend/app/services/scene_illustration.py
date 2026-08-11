@@ -193,6 +193,25 @@ def build_scene_request(
     )
 
 
+def infer_aspect_ratio(text: str, actors: list[str] | None = None) -> str:
+    """主计划缺失时按可见空间关系选择画幅，避免所有降级插画固定为 2:3。"""
+    source = image_prompt_extract.restore_jailbreak(text or "")
+    actor_count = len(list(dict.fromkeys(actors or [])))
+    if any(word in source for word in ("全景", "远景", "战场", "群山", "天际线", "辽阔", "横跨")):
+        return "16:9"
+    if actor_count >= 2 or any(word in source for word in ("两人", "多人", "对峙", "隔着", "并肩", "围坐")):
+        return "4:3"
+    if any(word in source for word in ("躺", "横卧", "长榻", "床上", "横向", "铺开")):
+        return "3:2"
+    if any(word in source for word in ("面部特写", "脸部特写", "眼睛特写", "紧凑特写", "头像")):
+        return "1:1"
+    if any(word in source for word in ("高塔", "坠落", "俯冲", "向上延伸", "垂直", "纵深高耸")):
+        return "9:16"
+    if any(word in source for word in ("全身", "站立", "站在", "跪", "跃起", "向上扬起", "纵向")):
+        return "2:3"
+    return "3:4"
+
+
 def fallback_illustration_anchor(text: str) -> str:
     """插画计划缺失时选出视觉高潮段，返回原文锚点。"""
     source = text or ""
@@ -213,7 +232,7 @@ def fallback_illustration_anchor(text: str) -> str:
 
 
 def resolve_illustration_anchor(text: str, requested_anchor: str = "") -> str:
-    """只在模型选中静态收束、正文另有状态变化动作时纠正锚点。"""
+    """纠正模型误选的静态收束或低强度结尾钩子，保证插画仍落在视觉高潮。"""
     requested = image_prompt_extract.restore_jailbreak(requested_anchor or "").strip()
     fallback = image_prompt_extract.restore_jailbreak(
         fallback_illustration_anchor(text),
@@ -221,6 +240,10 @@ def resolve_illustration_anchor(text: str, requested_anchor: str = "") -> str:
     if not requested or not fallback:
         return requested or fallback
     requested_excerpt = illustration_scene_excerpt(text, requested)
+    fallback_score = _anchor_score(fallback)
+    requested_score = _anchor_score(requested_excerpt)
+    if fallback != requested_excerpt and fallback_score >= requested_score + 3:
+        return fallback
     fallback_has_action = any(word in fallback for word in _STATE_CHANGE_ACTION_TERMS)
     requested_has_action = any(word in requested_excerpt for word in _STATE_CHANGE_ACTION_TERMS)
     requested_is_static = any(word in requested_excerpt for word in _STATIC_RESOLUTION_TERMS)
@@ -259,6 +282,31 @@ def illustration_scene_excerpt(text: str, requested_anchor: str = "") -> str:
         fallback_illustration_anchor(source),
     ).strip()
     return (fallback or paragraphs[-1])[-2500:]
+
+
+def protected_illustration_scene_excerpt(text: str, visible_excerpt: str) -> str:
+    """找回与可见高潮段对应的原始防拦截正文，供独立 Profile 沿用当前预设。"""
+    body = image_prompt_extract.protected_narrative_text(text)
+    paragraphs = [
+        part.strip() for part in re.split(r"(?:\r?\n){2,}", body)
+        if part.strip() and not part.lstrip().startswith("<")
+    ]
+    if not paragraphs:
+        return body[-2500:]
+    target = re.sub(r"\s+", "", visible_excerpt or "")
+    for paragraph in paragraphs:
+        if target and target in re.sub(
+            r"\s+", "", image_prompt_extract.restore_jailbreak(paragraph),
+        ):
+            return paragraph[-2500:]
+    best = max(
+        paragraphs,
+        key=lambda paragraph: SequenceMatcher(
+            None, target,
+            re.sub(r"\s+", "", image_prompt_extract.restore_jailbreak(paragraph)),
+        ).ratio(),
+    )
+    return best[-2500:]
 
 
 def illustration_anchor_offset(text: str, requested_anchor: str = "") -> int | None:

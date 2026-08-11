@@ -1,9 +1,11 @@
 import { lazy } from "react";
-import { resolveHomeWorkspace, type NavSection, type WorkMode } from "./lib/viewRouting";
+import { type NavSection, type WorkMode } from "./lib/viewRouting";
 import { activeUserPersona, type useSettings } from "./stores/settings";
 import { type Repo, type RepoBinding, type useRepos } from "./stores/repos";
 import { SectionPlaceholder } from "./modes/SectionPlaceholder";
 import { saveSnapshot } from "./api/ai";
+import { createScenarioSnapshot, forkScenarioSnapshot, listScenarioSnapshots } from "./api/scenario";
+import { createScenarioBranch } from "./lib/scenarioBranchRuntime";
 
 const SettingsView = lazy(() => import("./views/settings/SettingsView").then((m) => ({ default: m.SettingsView })));
 const WorkflowTemplates = lazy(() => import("./pages/WorkflowTemplates").then((m) => ({ default: m.WorkflowTemplates })));
@@ -17,6 +19,7 @@ const LoraTriggersTab = lazy(() => import("./views/tools/LoraTriggersTab").then(
 const ToolsView = lazy(() => import("./views/ToolsView").then((m) => ({ default: m.ToolsView })));
 const ReposView = lazy(() => import("./views/repos/RepoViews").then((m) => ({ default: m.ReposView })));
 const RepoDetailView = lazy(() => import("./views/repos/RepoViews").then((m) => ({ default: m.RepoDetailView })));
+const HomeRecentWorks = lazy(() => import("./views/repos/RepoViews").then((m) => ({ default: m.HomeRecentWorks })));
 const AssetsView = lazy(() => import("./views/PlaceholderViews").then((m) => ({ default: m.AssetsView })));
 const ChatView = lazy(() => import("./views/ChatView").then((m) => ({ default: m.ChatView })));
 
@@ -26,6 +29,9 @@ export interface AppBodyProps {
   subView: string | null;
   workMode: WorkMode;
   activeWork: Repo | null;
+  selectedRepo: Repo | null;
+  recentWorks: Repo[];
+  topRepos: Repo[];
   settingsStore: ReturnType<typeof useSettings>;
   settings: ReturnType<typeof useSettings>["settings"];
   relocateOutputPath: ReturnType<typeof useRepos>["relocateOutputPath"];
@@ -41,8 +47,9 @@ export interface AppBodyProps {
   onBind: (repo: Repo) => void;
   onDelete: (repo: Repo) => void;
   onOpenWork: (repoId: string, workId: string) => void;
+  onClearRepo: () => void;
   addCardWork: (cardName: string) => { parentId: string; childId: string };
-  addBranch: (parentId: string, binding?: Partial<RepoBinding>) => string;
+  addBranch: (parentId: string, binding?: Partial<RepoBinding>, branchId?: string) => string;
   marketSearch: string;
   setMarketSearch: (query: string) => void;
 }
@@ -55,22 +62,50 @@ export function AppBody(props: AppBodyProps) {
   }
 
   if (props.section === "home") {
-    if (resolveHomeWorkspace(props.workMode, !!props.activeWork) === "need-work") {
-      return <div className="need-work"><p>先在上方选择仓库与作品</p>
-        <small>会话在某一部作品里进行，对话记录按作品保存</small></div>;
-    }
-    const activeWork = props.activeWork!;
-    return <ChatView key={activeWork.id} repo={activeWork} workMode={props.workMode}
+    if (props.activeWork) {
+      const activeWork = props.activeWork;
+      return <ChatView key={activeWork.id} repo={activeWork} workMode={props.workMode}
       settings={settings} update={settingsStore.update} presets={settingsStore}
       setCover={props.setCover} setGeneratedCover={props.setGeneratedCover}
-      onBranch={(binding, messages) => {
+      onBranch={async (binding, messages, isLatest) => {
         const parentId = activeWork.parentId;
         if (!parentId) return;
-        const childId = props.addBranch(parentId, binding);
-        try { localStorage.setItem(`laf_chat_${childId}`, JSON.stringify(messages)); } catch { /* 超额忽略 */ }
-        saveSnapshot(childId, messages).catch(() => { /* 后端未起：本地已存 */ });
-        props.onOpenWork(parentId, childId);
+        try {
+          const result = await createScenarioBranch({
+            outputDir: settings.outputDir, sourceRepoId: activeWork.id, parentId,
+            binding, messages, isLatest,
+          }, {
+            saveMessages: saveSnapshot,
+            listSnapshots: listScenarioSnapshots,
+            createSnapshot: createScenarioSnapshot,
+            forkSnapshot: forkScenarioSnapshot,
+            addBranch: props.addBranch,
+            persistMessages: (repoId, value) => {
+              try { localStorage.setItem(`laf_chat_${repoId}`, JSON.stringify(value)); } catch { /* 超额忽略 */ }
+            },
+            openWork: props.onOpenWork,
+            newId: () => crypto.randomUUID(),
+          });
+          if (result.status === "missing_snapshot") {
+            window.alert("该历史回合没有完整世界状态快照，已拒绝创建状态错位的分支。");
+          }
+        } catch (error) {
+          window.alert(`完整分支创建失败：${error instanceof Error ? error.message : String(error)}`);
+        }
       }} />;
+    }
+    if (props.selectedRepo) {
+      const selectedRepo = props.selectedRepo;
+      return <RepoDetailView repo={selectedRepo} children={props.childrenOf(selectedRepo.id)}
+        coverOf={props.coverOf} settings={settings} onBack={props.onClearRepo}
+        onOpen={(work) => props.onOpenWork(selectedRepo.id, work.id)}
+        onRename={props.onRename} onBind={props.onBind} onDelete={props.onDelete}
+        onNewSub={() => props.onNewSub(selectedRepo.id)} />;
+    }
+    return <HomeRecentWorks works={props.recentWorks} parents={props.topRepos}
+      coverOf={props.coverOf} settings={settings} childrenOf={props.childrenOf}
+      onOpen={(work) => work.parentId && props.onOpenWork(work.parentId, work.id)}
+      onRename={props.onRename} onBind={props.onBind} onDelete={props.onDelete} />;
   }
 
   if (props.section === "assets") {
@@ -90,7 +125,7 @@ export function AppBody(props: AppBodyProps) {
       return <ReposView repos={props.childrenOf(undefined)} title="作品仓库"
         coverOf={props.coverOf} onOpen={(repo) => props.setBrowseRepoId(repo.id)}
         onRename={props.onRename} onBind={props.onBind} onDelete={props.onDelete}
-        onNew={props.onNewRepo} />;
+        onNew={props.onNewRepo} childrenOf={props.childrenOf} settings={settings} />;
     }
     if (props.subView === "generations") return <AssetsView onSendToChat={() => {}} />;
     if (props.subView === "character-cards") {

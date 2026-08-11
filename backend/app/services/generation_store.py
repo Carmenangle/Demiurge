@@ -415,6 +415,31 @@ def persist_media_slot(thread_id: str, message_id: str, slot_id: str,
                      thread_id, message_id, slot_id, exc)
 
 
+def persist_illustration_submission(*, thread_id: str, message_id: str,
+                                    slot_id: str, prompt_id: str) -> bool:
+    """持久化自动插画的 ComfyUI 任务身份；失败不影响已提交的任务。"""
+    try:
+        return chat_snapshot.bind_media_slot_prompt(
+            thread_id, message_id, slot_id, prompt_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _LOG.warning("插画 prompt_id 落盘失败 thread=%s mid=%s slot=%s: %s",
+                     thread_id, message_id, slot_id, exc)
+        return False
+
+
+def claim_illustration_submission(*, thread_id: str, message_id: str, slot_id: str) -> bool:
+    """在调用 ComfyUI 前认领权威媒体槽，阻止重复/过期事件产生额外任务。"""
+    try:
+        return chat_snapshot.claim_media_slot_submission(
+            thread_id, message_id, slot_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _LOG.warning("插画提交认领失败 thread=%s mid=%s slot=%s: %s",
+                     thread_id, message_id, slot_id, exc)
+        return False
+
+
 def persist_illustration_failure(
     *, thread_id: str, repo_id: str, message_id: str, slot_id: str,
     stage: str, error: str, prompt_id: str = "",

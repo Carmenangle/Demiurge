@@ -101,20 +101,11 @@ def plan(
 
 
 def parse_plan_json(raw: str) -> dict[str, object] | None:
-    text = (raw or "").strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-        newline = text.find("\n")
-        if newline != -1:
-            text = text[newline + 1:]
-    start, end = text.find("{"), text.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        return None
     try:
-        parsed = json.loads(text[start:end + 1])
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(parsed, dict):
+        from app.services import structured_output
+
+        parsed = structured_output.parse_object(raw)
+    except structured_output.StructuredOutputError:
         return None
     parsed.setdefault("summary", "")
     parsed.setdefault("ops", [])

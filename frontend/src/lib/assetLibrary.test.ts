@@ -15,4 +15,11 @@ describe("资产库删除与恢复合同", () => {
     expect(assetsView).not.toContain("syncExistingGenerations");
     expect(assetsView).not.toContain("sync-generations");
   });
+
+  it("视觉描述只更新资产索引，语义搜索走 generation 专用端点", () => {
+    expect(gallery).toContain("setGenerationDescription");
+    expect(gallery).toContain("searchGenerations");
+    expect(gallery).toContain("indexVisualGenerations");
+    expect(gallery).not.toContain("appendMessage");
+  });
 });

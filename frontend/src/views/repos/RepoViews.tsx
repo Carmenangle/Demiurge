@@ -1,16 +1,44 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Boxes, Link2, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import { type Repo } from "../../stores/repos";
 import { useSettings } from "../../stores/settings";
 import { Pager } from "../../components/Pager";
 import { PageShell } from "../../components/layout/PageShell";
+import { listGenerations } from "../../api/ai";
+import { formatLastUsed, repoLastUsedAt } from "../../lib/repoPresentation";
+import { resolvedEmbedModel, type Settings } from "../../stores/settings";
+
+type ChildrenOf = (parentId?: string) => Repo[];
+
+function useAssetCounts(repos: Repo[], childrenOf: ChildrenOf, settings: Settings): Map<string, number> {
+  const [direct, setDirect] = useState<Record<string, number>>({});
+  const ids = useMemo(() => [...new Set(repos.flatMap((repo) => [
+    repo.id, ...(!repo.parentId ? childrenOf(repo.id).map((child) => child.id) : []),
+  ]))], [repos, childrenOf]);
+  const signature = ids.join("|");
+  useEffect(() => {
+    let alive = true;
+    const load = () => Promise.all(ids.map(async (id) => {
+      try { return [id, (await listGenerations(id, resolvedEmbedModel(settings))).items.length] as const; }
+      catch { return [id, 0] as const; }
+    })).then((items) => { if (alive) setDirect(Object.fromEntries(items)); });
+    void load();
+    const refresh = () => { void load(); };
+    window.addEventListener("laf-generation-saved", refresh);
+    return () => { alive = false; window.removeEventListener("laf-generation-saved", refresh); };
+  }, [signature, settings.embedModel]);
+  return useMemo(() => new Map(repos.map((repo) => {
+    const idsForRepo = repo.parentId ? [repo.id] : [repo.id, ...childrenOf(repo.id).map((child) => child.id)];
+    return [repo.id, idsForRepo.reduce((sum, id) => sum + (direct[id] || 0), 0)];
+  })), [repos, childrenOf, direct]);
+}
 
 // 仓库封面：图片加载失败（本地文件被删/ComfyUI 离线/地址失效）时回退占位，不显示破图
 export function RepoCover({ src, name }: { src?: string; name: string }) {
   const [failed, setFailed] = useState(false);
   useEffect(() => { setFailed(false); }, [src]);  // 换封面地址后重置
   if (!src || failed) return <>暂无图片</>;
-  return <img src={src} alt={name} loading="lazy" onError={() => setFailed(true)} />;
+  return <img src={src} alt="" aria-label={`${name}封面`} loading="lazy" onError={() => setFailed(true)} />;
 }
 
 export function RepoGrid({
@@ -21,6 +49,9 @@ export function RepoGrid({
   onBind,
   onRename,
   onDelete,
+  childrenOf,
+  assetCounts,
+  displayNameOf,
 }: {
   repos: Repo[];
   emptyText: string;
@@ -29,6 +60,9 @@ export function RepoGrid({
   onBind: (r: Repo) => void;
   onRename: (r: Repo) => void;
   onDelete: (r: Repo) => void;
+  childrenOf: ChildrenOf;
+  assetCounts: ReadonlyMap<string, number>;
+  displayNameOf?: (repo: Repo) => string;
 }) {
   if (repos.length === 0) {
     return (
@@ -42,12 +76,15 @@ export function RepoGrid({
     <div className="repo-grid">
       {repos.map((r) => {
         const cover = coverOf(r);
+        const children = r.parentId ? [] : childrenOf(r.id);
+        const cardNames = r.cardNames?.length ? r.cardNames : (r.cardName ? [r.cardName] : []);
         return (
         <div className="repo-card" key={r.id}>
-          <div className="repo-cover" onDoubleClick={() => onOpen(r)} title="双击打开">
-            <RepoCover src={cover} name={r.name} />
-          </div>
-          <div className="repo-tools">
+          <div className="repo-cover-wrap">
+            <div className="repo-cover" onDoubleClick={() => onOpen(r)} title="双击打开">
+              <RepoCover src={cover} name={r.name} />
+            </div>
+            <div className="repo-tools">
             <button
               className={`icon-btn ${r.cardName || r.worldbookName || r.personaId ? "is-bound" : ""}`}
               title={r.cardName || r.worldbookName || r.personaId
@@ -63,8 +100,15 @@ export function RepoGrid({
             <button className="icon-btn" title="删除" onClick={() => onDelete(r)}>
               <Trash2 size={15} />
             </button>
+            </div>
           </div>
-          <div className="repo-name">{r.name}</div>
+          <div className="repo-name">{displayNameOf?.(r) || r.name}</div>
+          <div className="repo-card-meta">
+            <span title={cardNames.join("、")}>角色：{cardNames.length ? cardNames.join("、") : "未绑定"}</span>
+            {!r.parentId && <span>作品：{children.length}</span>}
+            <span>资产：{assetCounts.get(r.id) || 0}</span>
+            <span>最近使用：{formatLastUsed(repoLastUsedAt(r, children))}</span>
+          </div>
         </div>
         );
       })}
@@ -81,6 +125,8 @@ export function ReposView({
   onRename,
   onDelete,
   onNew,
+  childrenOf,
+  settings,
 }: {
   repos: Repo[];
   title: string;
@@ -90,6 +136,8 @@ export function ReposView({
   onRename: (r: Repo) => void;
   onDelete: (r: Repo) => void;
   onNew: () => void;
+  childrenOf: ChildrenOf;
+  settings: Settings;
 }) {
   const [q, setQ] = useState("");
   const [page, setPage] = useState(1);
@@ -99,6 +147,7 @@ export function ReposView({
   const repoPageCount = Math.max(1, Math.ceil(shownRepos.length / REPO_PAGE_SIZE));
   const curPage = Math.min(page, repoPageCount);
   const pagedRepos = shownRepos.slice((curPage - 1) * REPO_PAGE_SIZE, curPage * REPO_PAGE_SIZE);
+  const assetCounts = useAssetCounts(pagedRepos, childrenOf, settings);
   return (
     <PageShell
       title={title}
@@ -124,6 +173,8 @@ export function ReposView({
         onBind={onBind}
         onRename={onRename}
         onDelete={onDelete}
+        childrenOf={childrenOf}
+        assetCounts={assetCounts}
       />
       <Pager page={curPage} pageCount={repoPageCount} onPage={setPage} />
     </PageShell>
@@ -161,6 +212,7 @@ export function RepoDetailView({
   const subPageCount = Math.max(1, Math.ceil(matched.length / SUB_PAGE_SIZE));
   const subCur = Math.min(subPage, subPageCount);
   const shownChildren = matched.slice((subCur - 1) * SUB_PAGE_SIZE, subCur * SUB_PAGE_SIZE);
+  const assetCounts = useAssetCounts(shownChildren, () => [], settings);
   return (
     <PageShell
       title={repo.name}
@@ -188,8 +240,37 @@ export function RepoDetailView({
         onBind={onBind}
         onRename={onRename}
         onDelete={onDelete}
+        childrenOf={() => []}
+        assetCounts={assetCounts}
       />
       <Pager page={subCur} pageCount={subPageCount} onPage={setSubPage} />
     </PageShell>
   );
+}
+
+export function HomeRecentWorks({
+  works, parents, coverOf, settings, childrenOf, onOpen, onBind, onRename, onDelete,
+}: {
+  works: Repo[];
+  parents: Repo[];
+  coverOf: (repo: Repo) => string | undefined;
+  settings: Settings;
+  childrenOf: ChildrenOf;
+  onOpen: (repo: Repo) => void;
+  onBind: (repo: Repo) => void;
+  onRename: (repo: Repo) => void;
+  onDelete: (repo: Repo) => void;
+}) {
+  const assetCounts = useAssetCounts(works, () => [], settings);
+  if (!works.length) {
+    return <div className="need-work"><p>在上方选择仓库与作品</p>
+      <small>使用过的作品会在这里显示，最多保留最近 5 个</small></div>;
+  }
+  return <PageShell title="最近使用的作品">
+    <p className="field-hint home-recent-hint">双击作品进入对话；仓库、作品与我的设定仍可在顶部直接切换。</p>
+    <RepoGrid repos={works} emptyText="暂无最近作品" coverOf={coverOf} onOpen={onOpen}
+      onBind={onBind} onRename={onRename} onDelete={onDelete}
+      childrenOf={childrenOf} assetCounts={assetCounts}
+      displayNameOf={(work) => `${parents.find((parent) => parent.id === work.parentId)?.name || "仓库"} · ${work.name}`} />
+  </PageShell>;
 }

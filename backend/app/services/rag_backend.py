@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from threading import RLock
 from typing import Literal
 from urllib.parse import urlparse
 
@@ -12,6 +13,9 @@ from langchain_chroma import Chroma
 from langchain_core.embeddings import Embeddings
 
 from app.config import CHROMA_DIR
+from app.services import model_lease
+
+_LOCAL_MODEL_LOCK = RLock()
 
 
 _MAX_REMOTE_TEXT_CHARS = 2_000
@@ -122,10 +126,22 @@ class _LocalEmbeddings(Embeddings):
             raise RuntimeError(f"加载本地嵌入模型失败：{exc}") from exc
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        vectors = self._model().encode(
-            texts, normalize_embeddings=False, convert_to_numpy=True,
+        from app.services import model_lease
+
+        lease = model_lease.acquire(
+            "text-embedding", "text_embedding", priority=30,
+            estimated_mib=1200, ttl_seconds=120,
         )
-        return vectors.tolist()
+        if lease is None:
+            raise RuntimeError("ComfyUI 正在占用本地推理资源，文本嵌入暂时降级")
+        try:
+            with _LOCAL_MODEL_LOCK:
+                vectors = self._model().encode(
+                    texts, normalize_embeddings=False, convert_to_numpy=True,
+                )
+                return vectors.tolist()
+        finally:
+            model_lease.release(lease.token)
 
     def embed_query(self, text: str) -> list[float]:
         return self.embed_documents([text])[0]
@@ -134,6 +150,30 @@ class _LocalEmbeddings(Embeddings):
 EmbeddingKey = tuple[str, ...]
 _EMBEDDING_CACHE: dict[EmbeddingKey, Embeddings] = {}
 _STORE_CACHE: dict[tuple[str, EmbeddingKey], Chroma] = {}
+
+
+def release_local_accelerator_memory() -> bool:
+    """ComfyUI 提交前释放进程内本地文本嵌入 Adapter。"""
+    import gc
+
+    with _LOCAL_MODEL_LOCK:
+        released = False
+        for adapter in _EMBEDDING_CACHE.values():
+            if isinstance(adapter, _LocalEmbeddings) and adapter._local is not None:
+                adapter._local = None
+                released = True
+        if released:
+            gc.collect()
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except (ImportError, RuntimeError):
+                pass
+        return released
+
+
+model_lease.register_releaser("text_embedding", release_local_accelerator_memory)
 
 
 def embedding_key(cfg: EmbedConfig) -> EmbeddingKey:

@@ -6,6 +6,7 @@ import {
   type ChatQueueTask,
 } from "../api/ai";
 import type { Repo } from "../stores/repos";
+import { repoActivityLabel } from "./repoPresentation";
 
 export type ChatActivityKind = "running" | "queued";
 export interface ChatBackgroundActivity {
@@ -26,9 +27,7 @@ function loadRepos(): Repo[] {
 }
 
 function repoLabel(threadId: string): string {
-  if (threadId === "home") return "首页";
-  const repo = loadRepos().find((item) => item.id === threadId);
-  return repo?.name || threadId;
+  return repoActivityLabel(loadRepos(), threadId);
 }
 
 function publish() { listeners.forEach((listener) => listener(snapshot)); }

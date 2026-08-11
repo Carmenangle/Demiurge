@@ -106,17 +106,22 @@ def comfy_renderer(
         prompt_id = str(res.get("prompt_id") or "")
         if not prompt_id:
             raise RuntimeError("ComfyUI 未返回 prompt_id，无法取图")
-        deadline = now() + cfg.poll_timeout
-        while now() < deadline:
-            r = comfyui_client.fetch_result(cfg.url, prompt_id)
-            status = r.get("status")
-            if status == "completed":
-                images = r.get("images") or []
-                if not images:
-                    raise RuntimeError("ComfyUI 工作流完成但无图片产物")
-                return _view_url(cfg.url, images[0])
-            if status == "not_found":
-                raise RuntimeError("ComfyUI 任务丢失（可能已重启）")
-            sleep(cfg.poll_interval)
-        raise TimeoutError(f"ComfyUI 取图超时（prompt_id={prompt_id}）")
+        try:
+            deadline = now() + cfg.poll_timeout
+            while now() < deadline:
+                r = comfyui_client.fetch_result(cfg.url, prompt_id)
+                status = r.get("status")
+                if status == "completed":
+                    images = r.get("images") or []
+                    if not images:
+                        raise RuntimeError("ComfyUI 工作流完成但无图片产物")
+                    return _view_url(cfg.url, images[0])
+                if status == "not_found":
+                    raise RuntimeError("ComfyUI 任务丢失（可能已重启）")
+                sleep(cfg.poll_interval)
+            raise TimeoutError(f"ComfyUI 取图超时（prompt_id={prompt_id}）")
+        finally:
+            from app.services import model_lease
+
+            model_lease.release_owner(f"comfyui:{prompt_id}")
     return render

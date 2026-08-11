@@ -7,7 +7,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from app.config import BUILD_TIME_BUDGET_SEC
-from app.services import node_index, workflow_build_turn, workflow_graph_rules, workflow_merge
+from app.services import node_index, structured_output, workflow_build_turn, workflow_graph_rules, workflow_merge
 from app.services.pathnames import safe_seg
 
 
@@ -71,15 +71,10 @@ def _missing_hint(missing: list[str], alts: dict | None = None) -> list[str]:
 
 def _extract_json(text: str) -> dict:
     """从模型输出里抠出 JSON（容错去 ```json 围栏）。失败抛 ValueError。"""
-    t = (text or "").strip()
-    if t.startswith("```"):
-        t = t.split("```", 2)[1] if "```" in t[3:] else t
-        t = t[4:] if t.lower().startswith("json") else t
-        t = t.strip("`").strip()
-    s, e = t.find("{"), t.rfind("}")
-    if s < 0 or e < 0:
-        raise ValueError("模型未返回 JSON")
-    return json.loads(t[s:e + 1])
+    try:
+        return structured_output.parse_object(text)
+    except structured_output.StructuredOutputError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 def _slim_graph_for_prompt(base: dict) -> dict:

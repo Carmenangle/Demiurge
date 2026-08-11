@@ -3,10 +3,11 @@ import {
   needsImageInput, hasImageProvided, pickBestText, slimSnapshot, promptHistory,
   prependLoraTriggers, prepareConversationRegeneration, resolveGenerationPrompt,
   promptAdditionsForSelectedLora, triggersForSelectedLora,
+  resolveLoraPromptMetadata,
 } from "./chatGeneration";
 import {
   generationResultAction, notFoundPollAction, pendingResumeAction, pollSchedule,
-  registerPending, shouldFinalize, unregisterPending,
+  durableFinalizeSucceeded, registerPending, shouldFinalize, unregisterPending,
 } from "./workflowGenerationRuntime";
 import type { Template } from "../api/workflows";
 import type { ChatMessage } from "../types/chat";
@@ -165,6 +166,37 @@ describe("LoRA 触发词精确绑定", () => {
     expect(promptAdditionsForSelectedLora(data, "missing.safetensors")).toEqual([]);
   });
 
+  it("区分无需触发词的已记录LoRA与完全缺失的元数据", () => {
+    expect(resolveLoraPromptMetadata(items, "empty.safetensors")).toEqual({
+      found: true, additions: [],
+    });
+    expect(resolveLoraPromptMetadata(items, "missing.safetensors")).toEqual({
+      found: false, additions: [],
+    });
+  });
+
+  it("无需触发词的通用LoRA仍可注入中性质量建议", () => {
+    const data = [{
+      lora_name: "anime-character.safetensors", triggers: [], missing: false,
+      suggested_prompt: "高质量, 清晰细节",
+    }];
+
+    expect(promptAdditionsForSelectedLora(data, "anime-character.safetensors")).toEqual([
+      "高质量", "清晰细节",
+    ]);
+  });
+
+  it("LoRA建议排除真人与二次元媒介锁定词", () => {
+    const data = [{
+      lora_name: "character.safetensors", triggers: [], missing: false,
+      suggested_prompt: "high quality, sharp focus, photorealistic, realistic skin, anime style, donghua style",
+    }];
+
+    expect(promptAdditionsForSelectedLora(data, "character.safetensors")).toEqual([
+      "high quality", "sharp focus",
+    ]);
+  });
+
   it("作者双段提示词只提取质量内容且已有触发词不重复", () => {
     const data = [{
       lora_name: "selected.safetensors", triggers: ["NJSW33T"], missing: false,
@@ -180,7 +212,7 @@ describe("LoRA 触发词精确绑定", () => {
     expect(additions).toContain("blurry background");
     expect(additions).toContain("(artist:pigeon666:0.67)");
     expect(additions).toContain("masterpiece");
-    expect(additions).toContain("((donghua style))");
+    expect(additions).not.toContain("((donghua style))");
     expect(additions).not.toContain("close-up");
   });
 
@@ -191,7 +223,7 @@ describe("LoRA 触发词精确绑定", () => {
     }];
 
     expect(promptAdditionsForSelectedLora(data, "selected.safetensors")).toEqual([
-      "style_trigger", "masterpiece", "cinematic lighting", "anime style",
+      "style_trigger", "masterpiece", "cinematic lighting",
     ]);
   });
 
@@ -205,7 +237,7 @@ describe("LoRA 触发词精确绑定", () => {
     }];
 
     expect(promptAdditionsForSelectedLora(data, "selected.safetensors")).toEqual([
-      "NJSW33T", "masterpiece", "anime coloring",
+      "NJSW33T", "masterpiece",
     ]);
   });
 
@@ -216,6 +248,35 @@ describe("LoRA 触发词精确绑定", () => {
       { lora_name: "selected.safetensors", triggers: ["stale"], missing: true },
       ...items.slice(0, 1),
     ], "selected.safetensors")).toEqual([]);
+  });
+
+  it("Krea成稿后才注入实际LoRA触发词和质量建议并全局去重", () => {
+    const data = [
+      {
+        lora_name: "style.safetensors", triggers: ["style_token"], missing: false,
+        suggested_prompt: "sharp focus, high quality",
+      },
+      {
+        lora_name: "character.safetensors", triggers: ["character_token"], missing: false,
+        suggested_prompt: "high quality, refined details",
+      },
+      {
+        lora_name: "unused.safetensors", triggers: ["unused_token"], missing: false,
+        suggested_prompt: "masterpiece",
+      },
+    ];
+    let prompt = "A coherent English Krea2 scene with sharp focus.";
+    for (const name of ["style.safetensors", "character.safetensors"]) {
+      prompt = prependLoraTriggers(prompt, promptAdditionsForSelectedLora(data, name));
+    }
+
+    expect(prompt).toContain("style_token");
+    expect(prompt).toContain("character_token");
+    expect(prompt).toContain("high quality");
+    expect(prompt).toContain("refined details");
+    expect(prompt).not.toContain("unused_token");
+    expect(prompt.toLowerCase().match(/sharp focus/g)).toHaveLength(1);
+    expect(prompt.toLowerCase().match(/high quality/g)).toHaveLength(1);
   });
 });
 
@@ -419,16 +480,33 @@ describe("shouldFinalize", () => {
   it("promptId 在 pending 且未收尾 → 放行", () => {
     expect(shouldFinalize("p1", pend("p1"), new Set())).toBe(true);
   });
-  it("promptId 已不在 pending（别的路径已收尾）→ 拦（治重挂后重复出图）", () => {
-    expect(shouldFinalize("p1", pend("p2"), new Set())).toBe(false);
+  it("展示层误清 pending 时仍允许实时守望归档", () => {
+    expect(shouldFinalize("p1", pend("p2"), new Set())).toBe(true);
   });
   it("promptId 在内存已收尾集合（并发窗口）→ 拦", () => {
     expect(shouldFinalize("p1", pend("p1"), new Set(["p1"]))).toBe(false);
   });
-  it("pending 为空 → 拦", () => {
-    expect(shouldFinalize("p1", [], new Set())).toBe(false);
+  it("pending 为空不代表用户取消", () => {
+    expect(shouldFinalize("p1", [], new Set())).toBe(true);
   });
-  it("两闸都触发 → 拦", () => {
+  it("并发收尾集合仍优先拦截", () => {
     expect(shouldFinalize("p1", pend("p2"), new Set(["p1"]))).toBe(false);
+  });
+  it("用户显式取消的任务不得归档", () => {
+    expect(shouldFinalize("p1", pend("p1"), new Set(), new Set(["p1"]))).toBe(false);
+  });
+});
+
+describe("durableFinalizeSucceeded", () => {
+  it("原图或快照未持久化时要保留 pending 重试", () => {
+    expect(durableFinalizeSucceeded({
+      durable: true, images: [{ persisted: false, snapshotted: true }],
+    })).toBe(false);
+    expect(durableFinalizeSucceeded({
+      durable: true, images: [{ persisted: true, snapshotted: false }],
+    })).toBe(false);
+    expect(durableFinalizeSucceeded({
+      durable: true, images: [{ persisted: true, snapshotted: true }],
+    })).toBe(true);
   });
 });

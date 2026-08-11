@@ -31,6 +31,13 @@ def status(url: str = COMFYUI_BASE_URL) -> dict[str, object]:
     return {"running": _is_up(url), "managed": comfy_launcher.is_managed()}
 
 
+@router.get("/resources")
+def resource_status() -> dict[str, object]:
+    from app.services import model_lease
+
+    return model_lease.status()
+
+
 class ComfyConfig(BaseModel):
     path: str = ""
     url: str = COMFYUI_BASE_URL
@@ -78,6 +85,8 @@ class SubmitRequest(BaseModel):
     prompt: str = ""                 # 可选：自动注入到模板 prompt_node_id 的文本字段（/g 用）
     url: str = COMFYUI_BASE_URL
     client_id: str = ""              # 前端 WebSocket clientId，回传给 ComfyUI 定向推进度
+    loras: list[dict[str, object]] = []  # 自动插画 LoRA 链；首项复用模板节点，其余动态追加
+    lora_mode: str = "single"
 
 
 @router.post("/submit")
@@ -86,6 +95,7 @@ def submit(req: SubmitRequest) -> dict[str, object]:
     try:
         return workflow_submission.submit_template(
             req.template_id, req.values, req.prompt, req.url, req.client_id,
+            req.loras, req.lora_mode,
         )
     except workflow_submission.WorkflowSubmissionError as exc:
         raise HTTPException(status_code=exc.status, detail=exc.detail)
@@ -134,7 +144,12 @@ def result(prompt_id: str, url: str = COMFYUI_BASE_URL, node_ids: str = "") -> d
     filter_ids = [n.strip() for n in node_ids.split(",") if n.strip()] if node_ids else None
     try:
         url = validate_comfyui_url(url)
-        return comfyui_client.fetch_result(url, prompt_id, filter_ids)
+        result = comfyui_client.fetch_result(url, prompt_id, filter_ids)
+        if result.get("status") in {"completed", "failed", "not_found"}:
+            from app.services import model_lease
+
+            model_lease.release_owner(f"comfyui:{prompt_id}")
+        return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except ComfyError as e:
@@ -212,6 +227,10 @@ def interrupt(req: InterruptRequest) -> dict[str, object]:
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     res = comfyui_client.interrupt(req.url, req.prompt_id)
+    if req.prompt_id:
+        from app.services import model_lease
+
+        model_lease.release_owner(f"comfyui:{req.prompt_id}")
     return {"ok": True, **res}
 
 

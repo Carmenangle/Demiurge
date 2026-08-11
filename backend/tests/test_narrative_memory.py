@@ -30,7 +30,8 @@ def test_解析_正常JSON():
 def test_解析_丰富纪要保留概览详情对话与出场人物():
     raw = ('{"overview":"雪山救援后关系转暖","chronicle":"两人协力脱险并约定同行。",'
            '"dialogue":"她说：我欠你一次。","characters":["林月","主角"],'
-           '"keywords":["雪山","救援"]}')
+           '"keywords":["雪山","救援"],"facts":[{"subject":"雪山关隘",'
+           '"predicate":"守将","object":"林月","evidence":"林月接过守将令牌"}]}')
 
     entry = nm.parse_rich_summary(raw, turn_start=1, turn_end=3)
 
@@ -39,6 +40,7 @@ def test_解析_丰富纪要保留概览详情对话与出场人物():
     assert entry.text == "两人协力脱险并约定同行。"
     assert entry.dialogue == "她说：我欠你一次。"
     assert entry.characters == ["林月", "主角"]
+    assert entry.facts[0]["predicate"] == "守将"
 
 
 def test_解析_坏JSON返回空():

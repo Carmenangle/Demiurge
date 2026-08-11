@@ -3,12 +3,13 @@
 ComfyUI 原生扫描 models/<type>/，下载到对应子目录即可被识别，无需额外配置。
 安全：仅允许 huggingface.co / civitai.com；文件名清洗防路径穿越；token 仅后端使用。
 """
+import hashlib
 import re
 import threading
 import time
 import uuid
 from pathlib import Path
-from urllib.parse import urlparse, unquote
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse, unquote
 
 import httpx
 
@@ -42,6 +43,9 @@ TYPE_DIRS = {
 }
 
 ALLOWED_HOSTS = {"huggingface.co", "civitai.com"}
+
+_HIGH_RISK_EXTENSIONS = {".ckpt", ".pt", ".pth", ".bin", ".pkl", ".pickle"}
+_LOW_RISK_EXTENSIONS = {".safetensors", ".gguf"}
 
 # 下载任务进度表：task_id -> {status, downloaded, total, filename, error}
 _TASKS: dict[str, dict] = task_progress_store.load("downloads")
@@ -104,6 +108,27 @@ def _safe_name(name: str) -> str:
     return safe_seg(name, f"model_{uuid.uuid4().hex[:8]}")
 
 
+def public_source_url(url: str) -> str:
+    """返回可持久化的来源地址，删除 token/key 等认证查询参数。"""
+    parsed = urlparse(url or "")
+    clean_query = urlencode([
+        (key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if key.casefold() not in {"token", "api_key", "apikey", "key", "authorization"}
+    ])
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", clean_query, ""))
+
+
+def artifact_trust(filename: str) -> dict[str, object]:
+    """按格式给出本地加载风险；未知格式不阻断，但不得伪装成低风险。"""
+    suffix = Path(filename or "").suffix.casefold()
+    fmt = suffix.removeprefix(".") or "unknown"
+    if suffix in _LOW_RISK_EXTENSIONS:
+        return {"format": fmt, "risk": "low", "preferred": suffix == ".safetensors"}
+    if suffix in _HIGH_RISK_EXTENSIONS:
+        return {"format": fmt, "risk": "high", "preferred": False}
+    return {"format": fmt, "risk": "medium", "preferred": False}
+
+
 def parse_url(url: str, civitai_token: str = "") -> tuple[str, str]:
     """归一成直链 + 推断文件名。仅放行白名单域名。
 
@@ -147,6 +172,7 @@ def _filename_from_headers(resp: httpx.Response, fallback: str) -> str:
 def _download(task_id: str, url: str, comfy_models_dir: str, model_type: str,
               hf_token: str, civitai_token: str, proxy: str = "") -> None:
     """实际下载（在后台线程跑）。流式写 .part，完成原子重命名。"""
+    part: Path | None = None
     try:
         direct, fname_hint = parse_url(url, civitai_token)
         target_dir = _resolve_dir(comfy_models_dir, model_type)
@@ -167,21 +193,31 @@ def _download(task_id: str, url: str, comfy_models_dir: str, model_type: str,
                     raise RuntimeError(f"HTTP {r.status_code}（可能需要 token 或链接失效）")
                 fname = _filename_from_headers(r, fname_hint)
                 total = int(r.headers.get("content-length", 0) or 0)
-                _set(task_id, filename=fname, total=total, phase="downloading")
-                part = target_dir / (fname + ".part")
+                trust = artifact_trust(fname)
+                _set(task_id, filename=fname, total=total, phase="downloading",
+                     source_url=public_source_url(url), **trust)
+                dest = target_dir / fname
+                if dest.exists():
+                    raise RuntimeError(f"目标文件已存在，拒绝覆盖：{fname}")
+                part = target_dir / f"{fname}.{task_id}.part"
                 done = 0
+                digest = hashlib.sha256()
                 sample = (time.monotonic(), 0)
                 with open(part, "wb") as f:
                     for chunk in r.iter_bytes(1024 * 256):
                         f.write(chunk)
+                        digest.update(chunk)
                         done += len(chunk)
                         sample = _record_transfer(task_id, done, sample)
-                dest = target_dir / fname
+                if total and done != total:
+                    raise RuntimeError(f"下载大小校验失败：期望 {total} 字节，实际 {done} 字节")
                 _set(task_id, phase="saving", downloaded=done)
                 part.replace(dest)  # 原子重命名，避免半截文件被 ComfyUI 读到
         _set(task_id, status="done", phase="done", speed_bps=0,
-             saved_files=[str(dest)], updated_at=time.time())
+             sha256=digest.hexdigest(), saved_files=[str(dest)], updated_at=time.time())
     except Exception as e:
+        if part is not None:
+            part.unlink(missing_ok=True)
         _set(task_id, status="error", phase="failed", speed_bps=0,
              error=str(e), updated_at=time.time())
 
@@ -202,7 +238,9 @@ def start_download(url: str, comfy_models_dir: str, model_type: str,
     created = time.time()
     _set(task_id, status="pending", phase="queued", downloaded=0, total=0,
          speed_bps=0, filename="", error="", name=disp, model_type=model_type,
-         kind="model", target_dir="", saved_files=[], created=created,
+         kind="model", target_dir="", saved_files=[], sha256="",
+         source_url=public_source_url(url), format="", risk="", preferred=False,
+         created=created,
          started_at=created, updated_at=created)
     t = threading.Thread(
         target=_download,

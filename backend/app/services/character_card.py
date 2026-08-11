@@ -16,6 +16,8 @@ import struct
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.services import instruction_provenance
+
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
@@ -204,7 +206,7 @@ def build_persona_system(card: dict[str, Any]) -> str:
     parts: list[str] = []
     sp = (card.get("system_prompt") or "").strip()
     if sp:
-        parts.append(sp)
+        parts.append(instruction_provenance.wrap("外部角色卡指令", sp))
     name = (card.get("name") or "").strip()
     if name:
         parts.append(f"你现在扮演「{name}」，始终以第一人称沉浸式出演，不得跳出角色。")

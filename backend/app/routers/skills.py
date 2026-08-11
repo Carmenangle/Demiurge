@@ -14,6 +14,8 @@ class Skill(BaseModel):
     name: str
     enabled: bool = True
     prompt_fragment: str = ""
+    source: str = "local"
+    trust: str = "user_managed"
 
 
 @router.get("")
@@ -68,7 +70,13 @@ def smithery_add(req: AddSkillRequest) -> dict:
     if not prompt:
         return {"ok": False, "skills": [], "dependsServers": [], "error": "该技能无提示词内容"}
     skills = skills_store.load_skills()
-    skills.append({"name": name, "enabled": True, "prompt_fragment": prompt})
+    skills.append({
+        "name": name,
+        "enabled": False,
+        "prompt_fragment": prompt,
+        "source": f"smithery:{req.namespace}/{req.slug}",
+        "trust": "external_unreviewed",
+    })
     saved = skills_store.save_skills(skills)
     # 依赖的 MCP 服务器：字符串或对象列表都兼容，抽出 qualifiedName
     depends = []

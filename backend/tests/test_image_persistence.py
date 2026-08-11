@@ -1,7 +1,7 @@
 import base64
 from pathlib import Path
 
-from app.services import image_store
+from app.services import image_store, repo_meta
 from app.services.message_images import extract_image_url
 
 
@@ -26,3 +26,24 @@ def test_idempotent_image_store_reuses_path(tmp_path, monkeypatch):
     assert first == second
     assert Path(first).read_bytes() == b"png"
     assert len(calls) == 1
+
+
+def test_generation_archives_by_marker_when_repo_state_is_temporarily_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(repo_meta, "_load_state", lambda: {"repos": []})
+    owned = tmp_path / "白给谷" / "SAVE01"
+    owned.mkdir(parents=True)
+    (owned / "_repo.json").write_text(
+        '{"id":"old-repo-id","name":"SAVE01"}', encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        image_store.comfyui_client, "fetch_view",
+        lambda *args, **kwargs: (b"generated-png", "image/png"),
+    )
+
+    saved = Path(image_store.save_local(
+        str(tmp_path), "old-repo-id", filename="done.png", idempotency_key="prompt-1",
+    ))
+
+    assert saved.parent == owned
+    assert saved.name.startswith("workflow_")
+    assert saved.read_bytes() == b"generated-png"

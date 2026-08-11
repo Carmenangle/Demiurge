@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import json
+import uuid
 from pathlib import Path
 
-from app.services import comfyui_client, reranker, template_store, workflow_injector
+from app.services import comfyui_client, model_lease, reranker, template_store, workflow_injector
 from app.services.comfyui_client import ComfyError
 from app.services.url_guard import validate_comfyui_url
 from app.services.workflow_convert import ui_to_api
@@ -28,7 +29,9 @@ def _ready_url(url: str) -> str:
 
 
 def submit_template(template_id: str, values: dict[str, object], prompt: str,
-                    url: str, client_id: str = "") -> dict[str, object]:
+                    url: str, client_id: str = "",
+                    loras: list[dict[str, object]] | None = None,
+                    lora_mode: str = "single") -> dict[str, object]:
     template = template_store.get_template(template_id)
     if template is None:
         raise WorkflowSubmissionError(400, "模板不存在")
@@ -52,11 +55,34 @@ def submit_template(template_id: str, values: dict[str, object], prompt: str,
     )
     if missing:
         raise WorkflowSubmissionError(422, {"missing": missing})
+    if lora_mode == "none":
+        workflow_injector.disable_all_loras(api)
+    elif loras:
+        lora_node_id = next((
+            str(field.get("node_id") or "") for field in template.get("exposed", [])
+            if str(field.get("binding") or "") == "lora_name"
+            or (str(field.get("semantic") or "") == "lora_name"
+                and str(field.get("field") or "") != "lora_name")
+        ), "")
+        if not workflow_injector.inject_lora_stack(api, lora_node_id, loras):
+            raise WorkflowSubmissionError(
+                422, "模板没有已标注且受支持的 LoRA 加载器，无法应用所选 LoRA 模式",
+            )
     reranker.release_accelerator_memory()
+    lease = model_lease.acquire(
+        f"comfy-submit:{uuid.uuid4().hex}", "comfyui", priority=100, ttl_seconds=1800,
+    )
+    if lease is None:
+        raise WorkflowSubmissionError(503, "本地模型资源正被更高优先级任务占用，请稍后重试")
     try:
         prompt_id = comfyui_client.submit_prompt(normalized_url, api, client_id)
     except ComfyError as exc:
+        model_lease.release(lease.token)
         raise WorkflowSubmissionError(exc.status, f"提交失败：{exc.detail}") from exc
+    if prompt_id:
+        model_lease.rebind(lease.token, f"comfyui:{prompt_id}")
+    else:
+        model_lease.release(lease.token)
     return {"ok": True, "prompt_id": prompt_id, "node_count": len(api)}
 
 
@@ -81,8 +107,18 @@ def submit_graph(workflow: dict[str, object], url: str, client_id: str = "") -> 
             "工作流没有可执行输出节点；单节点参数画布不能作为完整工作流提交，请重新打开卡片并选择完毕",
         )
     reranker.release_accelerator_memory()
+    lease = model_lease.acquire(
+        f"comfy-submit:{uuid.uuid4().hex}", "comfyui", priority=100, ttl_seconds=1800,
+    )
+    if lease is None:
+        raise WorkflowSubmissionError(503, "本地模型资源正被更高优先级任务占用，请稍后重试")
     try:
         prompt_id = comfyui_client.submit_prompt(normalized_url, api, client_id)
     except ComfyError as exc:
+        model_lease.release(lease.token)
         raise WorkflowSubmissionError(exc.status, f"ComfyUI 拒绝：{exc.detail[:800]}") from exc
+    if prompt_id:
+        model_lease.rebind(lease.token, f"comfyui:{prompt_id}")
+    else:
+        model_lease.release(lease.token)
     return {"ok": True, "prompt_id": prompt_id, "node_count": len(api)}

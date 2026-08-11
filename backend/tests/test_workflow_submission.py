@@ -64,6 +64,68 @@ def test_模板缺少必填输入返回422(tmp_path, monkeypatch):
     assert exc_info.value.detail == {"missing": ["steps"]}
 
 
+def test_自动插画选择lora但模板没有有效加载器时明确失败(tmp_path, monkeypatch):
+    source = tmp_path / "workflow.json"
+    source.write_text(json.dumps({"1": {"class_type": "Node", "inputs": {}}}), encoding="utf-8")
+    monkeypatch.setattr(workflow_submission.template_store, "get_template", lambda _id: {
+        "source_path": str(source), "exposed": [], "prompt_node_id": "",
+    })
+    _ready(monkeypatch)
+
+    with pytest.raises(workflow_submission.WorkflowSubmissionError) as exc_info:
+        workflow_submission.submit_template(
+            "template-1", {}, "", "http://127.0.0.1:8188", loras=[
+                {"name": "role.safetensors", "weight": 0.8},
+            ],
+        )
+
+    assert exc_info.value.status == 422
+    assert "LoRA 加载器" in str(exc_info.value.detail)
+
+
+def test_多LoRA模板提交主动插入全部角色并重接所有采样器(tmp_path, monkeypatch):
+    source = tmp_path / "workflow.json"
+    source.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(workflow_submission.template_store, "get_template", lambda _id: {
+        "source_path": str(source),
+        "exposed": [{
+            "node_id": "20", "field": "lora_name", "binding": "lora_name",
+        }],
+        "prompt_node_id": "",
+    })
+    _ready(monkeypatch)
+    monkeypatch.setattr(workflow_submission, "ui_to_api", lambda _graph, _url: {
+        "10": {"class_type": "UNETLoader", "inputs": {}},
+        "20": {"class_type": "LoraLoaderModelOnly", "inputs": {
+            "model": ["10", 0], "lora_name": "old", "strength_model": 0.8,
+        }},
+        "30": {"class_type": "KSampler", "inputs": {"model": ["20", 0]}},
+        "31": {"class_type": "KSamplerAdvanced", "inputs": {"model": ["20", 0]}},
+    })
+    captured = {}
+    monkeypatch.setattr(workflow_submission.reranker, "release_accelerator_memory", lambda: None)
+    monkeypatch.setattr(
+        workflow_submission.comfyui_client,
+        "submit_prompt",
+        lambda _url, api, _client_id: captured.setdefault("api", api) or "prompt-1",
+    )
+
+    workflow_submission.submit_template(
+        "template-1", {}, "", "http://127.0.0.1:8188",
+        lora_mode="multi",
+        loras=[
+            {"name": "role-a.safetensors", "weight": 0.9},
+            {"name": "role-b.safetensors", "weight": 1.0},
+        ],
+    )
+
+    api = captured["api"]
+    assert api["20"]["inputs"]["lora_name"] == "role-a.safetensors"
+    assert api["32"]["inputs"]["lora_name"] == "role-b.safetensors"
+    assert api["30"]["inputs"]["model"] == ["32", 0]
+    assert api["31"]["inputs"]["model"] == ["32", 0]
+
+
 def test_图提交保留ComfyUI错误语义(monkeypatch):
     _ready(monkeypatch)
     _output_info(monkeypatch)

@@ -5,6 +5,8 @@ import json
 import re
 from collections.abc import Callable, Mapping
 
+from app.services import image_prompt_extract
+
 
 ANIMA_QUALITY_TAGS = (
     "masterpiece, best quality, score_7, score_9, very aesthetic, ultra detailed, "
@@ -20,6 +22,45 @@ ANIMA_NEGATIVE_TAGS = (
 )
 
 PROFILE_IDS = ("anima_tags", "krea2", "natural_language", "niji_sections")
+
+
+def inline_generation_instruction(profile: str) -> str:
+    """返回主剧情同轮生成隐藏成稿时使用的 Profile 格式合同。"""
+    common = (
+        "profile_prompt 必须在正文完成后，根据本轮真实高潮画面直接写成可提交的纯英文正向提示词。"
+        "角色姓名只用于关联角色条目，禁止写入最终提示词；必须把角色条目的具体外貌、当前服装状态、"
+        "高潮动作、地点、镜头、构图、光影和材质关系翻译为实际可见内容，禁止使用 preserve identity、"
+        "stable appearance、current clothing condition 等空泛占位语。当前剧情服装状态优先于基础穿着。"
+        "不得写 LoRA 名称、权重或触发词；LoRA 元数据在本轮输出完成后由后端查询、去重并注入。"
+        "只填写 JSON 字符串字段 profile_prompt，不输出分析、Markdown、道歉或额外说明。"
+    )
+    formats = {
+        "krea2": (
+            "Krea2 格式：输出一个纯英文自然语言段落，依次落实构图与留白占比、角色具体外貌与当前服装、"
+            "镜头视角与透视、材质与画面质感、光影层次与色彩、最终画质；禁止 tags 列表、质量标签、"
+            "权重语法、媒介锁定和 JSON 内嵌对象。"
+        ),
+        "anima_tags": (
+            "Anima 格式：输出英文 tags + 英文关系描述，先用逗号分隔的具体 tags 锁定人物、外貌、服装、"
+            "动作、场景和构图，再紧接一至三句英文文段说明空间关系、光影因果与视觉中心；"
+            "不要加入固定质量行，后端会统一补齐并去重。"
+        ),
+        "natural_language": (
+            "自然语言格式：输出一个纯英文自然语言段落，完整写出人物具体外貌、当前服装、高潮动作、"
+            "环境关系、构图、镜头、光影、材质和画面质量，不得输出标题、列表或 JSON。"
+        ),
+        "niji_sections": (
+            "Niji 格式：输出四段内容并在 JSON 字符串中用 \\n 表示换行，顺序固定为 subject、style、"
+            "additions、suffix；前三段为纯英文，第四段只含 --ar 等参数。"
+        ),
+    }
+    return common + formats.get(profile, formats["krea2"])
+
+
+def inline_output_token_reserve(profile: str) -> int:
+    """在显式正文上限之外，为同轮隐藏 Profile 成稿预留输出预算。"""
+    return 1000 if profile in {"krea2", "natural_language"} else 800
+
 
 _ART_DIRECTION = (
     "所有模式都必须先在内部完成同一套艺术决策，再转换成目标格式，但不要输出分析过程："
@@ -52,6 +93,13 @@ _VISUAL_BLUEPRINT = (
 _COMMON = (
     "输入是当前剧情高潮画面的 JSON。只能描写输入中已经出现或可以直接推出的事实，"
     "不得借用其他会话、历史图片或固定成人模板，不得创造未出场人物。"
+    "角色姓名只用于把剧情人物关联到对应外貌条目，不是生图语义；转换时必须按人物的空间角色改写为"
+    "primary adult character、second adult character 等中性指代，最终提示词禁止出现原姓名、音译姓名或"
+    "用姓名充当外貌。多角色必须用各自具体外貌、服装、动作和位置区分。"
+    "角色 LoRA 只能辅助视觉身份，不能代替文字外貌；所有模式都必须把条目中与当前画面有关的发色、"
+    "发型、发饰、五官、体型、当前服装和鞋袜翻译成具体英文，禁止用 preserve identity、"
+    "established appearance、stable appearance 或 current clothing condition 等空泛身份锁代替。"
+    "角色条目的基础穿着只作默认值，剧情正文或 wardrobe 中的脱下、破损、凌乱、沾污等当前状态优先。"
     "人物、服装、动作、镜头、光影、背景和构图必须彼此一致。"
     + _VISUAL_BLUEPRINT
 )
@@ -73,40 +121,38 @@ _ANIMA_SYSTEM = _COMMON + (
     "content 中不要输出质量词、LoRA 触发词、LoRA 权重、参数、标题、Markdown 或负面提示词；质量行由程序添加。"
 )
 
-_KREA_BASE = _COMMON + (
-    "你在为 Krea2 Unlimited 生成人像提示词。最终提示词必须是一个300到600字的自然语言单段，"
-    "按拍摄角度、光影色调氛围、人物、发型、妆容、表情、服装、姿态、背景、构图的十段顺序自然衔接。"
-    "软配额为拍摄角度≤55字、光影≤85字、人物≤45字、发型≤25字、妆容≤30字、表情≤30字、"
-    "服装≤130字、姿态≤40字、背景≤45字、构图≤45字；总长600字是硬上限，超限先压缩装饰和背景。"
-    "十段是输出顺序而不是十项等权清单：开头即建立唯一视觉命题，视觉中心相关段落获得主要篇幅，"
-    "其余段落只保留识别和空间成立所需信息；禁止把每一段都写成同等密度的华丽词库。"
-    "镜头从广角、超广角、长焦压缩、中焦、微距、移轴中选一种，并从低角度仰拍、高角度俯拍、"
-    "侧后斜45度、荷兰式倾斜、过肩偷窥、镜面反射、框架内选至少一种非常规视角，"
-    "搭配浅景深虚化、大景深全景锐利或选择性对焦；禁止平视正面标准镜头。"
-    "光影按光源方向与光质、主色调与明暗饱和度、氛围情绪依次写，强化层次、轮廓光、"
-    "局部高光与冷暖关系，整体必须呈现精致二次元插画美学，画风与实际角色LoRA协调，避免写实摄影人脸。"
-    "人物从气质、年龄身份、人种肤色、体型和第一印象展开；发型按长度、颜色、卷直、扎法、刘海展开；"
-    "妆容写类型和一至两个妆面细节，表情必须与光影氛围一致。"
-    "服装描述款式、材质、穿着状态及光线互动；姿态只保留一到两个明确动作；"
-    "服装按场景定位、风格定调、主件、材质与光线互动、装饰、层次、鞋袜配饰的决策链组织，"
-    "从真丝珍珠柔光、缎面明暗渐变、丝绒温润哑光、雪纺逆光通透、蕾丝花纹投影、皮革锐利高光等"
-    "材质效果中选择与原设服装相容的细节，禁止擅自换掉世界书规定的主件。"
-    "背景不能抢主体；构图从三分法、对角线、框架构图、引导线、中心对称、前景遮挡、负空间、"
-    "镜面反射构图中选一种，明确人物位置和视觉引导。禁止逗号标签堆砌、(tag:1.2)权重、"
-    "masterpiece、best quality、画师名、Markdown、解释和自检内容。使用角色LoRA时不描写五官。"
-)
-
-_KREA_SFW = _KREA_BASE + (
-    "本次判定为SFW：擦边、性感服装、诱惑姿势仍属于SFW，所有段落都必须使用中文，"
-    "服装和姿态也必须使用中文。"
-)
-
-_KREA_NSFW = _KREA_BASE + (
-    "本次判定为NSFW，严格按八段顺序输出：场景（中文）、拍摄角度（中文）、光影色调氛围（中文）、"
-    "人物基础（中文）、服装（英文整句）、姿态（英文整句）、背景（中文）、构图（中文）。"
-    "人物基础必须包含输入提供的稳定外貌锚点，不能只写角色名。"
-    "安全段落继续使用中文，仅服装段和姿态/动作段改写为英文完整句子。"
-    "这两个英文段必须各自包含主语、动词和补语，忠实总结当前高潮情节；禁止写成英文标签串。"
+_KREA_SYSTEM = _COMMON + (
+    "你在为大参数自然语言图像模型 Krea2 生成剧情插画提示词。"
+    "输入是已经确定的剧情高潮画面 JSON。将输入中的高潮内容准确转换成一段可直接用于 Krea2 的英文自然语言提示词。"
+    "不得续写剧情，不得改变人物、动作、服装、关系、地点或剧情结果，不得加入输入中没有的画面事实。"
+    "生成提示词前，在内部严格按以下六个维度依次解析，但不要输出分析过程、标题、编号或分段标签。"
+    "第一，构图与留白占比。根据高潮动作、人物数量和空间关系确定主体位置、画面占比、视觉中心、"
+    "前后景关系、视线引导和适合当前场景的负空间比例；留白必须服务人物关系、动作方向或环境纵深，"
+    "不得机械套用固定比例。"
+    "第二，角色外貌与服装。完整保留实际人物、稳定外貌、当前外观变化、发型、体型、表情、服装款式、"
+    "服装当前状态、配饰、鞋袜和可见动作；角色 LoRA 已经确定人物身份时不得重新设计五官，"
+    "但 LoRA 不能代替文字描述，仍须把条目中的每项可见外貌翻译成具体英文。角色条目的基础穿着只作"
+    "默认值，剧情正文或 wardrobe 中的脱下、破损、凌乱、沾污等当前状态优先。不得添加未出场人物或"
+    "擅自改变服装。禁止用 preserve identity、established facial structure、defined by the bound model、"
+    "stable appearance、current clothing condition 等占位句代替实际的发色、发型、五官、体型和服装。"
+    "第三，摄影风格、镜头视角与透视表现。根据高潮内容选择景别、焦段、相机距离、机位高度、俯仰角度、"
+    "观察方向、景深和透视压缩程度；镜头必须清楚表现动作主体、人物关系和空间方向，"
+    "不得为了复杂构图而使用与高潮无关的夸张机位。"
+    "第四，有机材质与画面质感。描述肌肤、头发、衣料、汗水、液体、植物和其他有机表面的纹理、湿度、"
+    "柔软度、透明度、褶皱、拉伸、压力与受光反应；材质表现必须服从实际动作、服装状态和环境条件，"
+    "不得凭空增加身体变化或不存在的物质。"
+    "第五，光影、层次与色彩设定。明确主光源的位置、方向、软硬、色温和强度，说明受光主体、材质高光或透光、"
+    "阴影落向与空气透视；使用受控的主色、辅色和少量强调色形成前景、人物与背景层次，"
+    "把最高对比和清晰度集中在高潮动作或人物关系上。"
+    "第六，画质质量与完成度。保证人体结构、肢体承重、接触关系、服装受力、物体遮挡、透视、光照和材质反应"
+    "彼此一致；强调精确解剖、清晰主体、稳定轮廓、细腻材质、受控细节、干净边缘、高图像保真度和完整完成度，"
+    "不得使用 photorealistic、live-action photography 或 realistic human skin 等真人媒介描述。"
+    "优先使用输入已有的 visual_thesis、hierarchy、palette_material、lighting_logic、camera 和 composition；"
+    "只有这些信息缺失时，才补足使空间、透视、解剖、承重、遮挡、光照和材质成立的必要内容。"
+    "实际加载的角色 LoRA 和风格 LoRA 决定人物与媒介风格；不得添加 LoRA 触发词、LoRA 权重，也不得使用"
+    "anime、manga、3D render 等词擅自锁定媒介。"
+    "最终只输出一个连贯、具体的纯英文自然语言段落，并严格按照六个维度的顺序组织内容。"
+    "不得夹杂中文，不得输出标签堆砌、JSON、Markdown、解释、自检、拒答、参数、LoRA 名称、LoRA 权重或负面提示词。"
 )
 
 _NATURAL_SYSTEM = _COMMON + (
@@ -114,7 +160,7 @@ _NATURAL_SYSTEM = _COMMON + (
     "以唯一视觉命题开场，而不是从人物属性清单开场；用自然语言清楚说明主体稳定外貌与当前变化、"
     "气质、发型、妆容、表情、服装款式和材质受光、动作、镜头视角与景深、构图、光影、背景和画风。"
     "必须明确第一视觉中心、次级引导、受控色彩与材质母题，以及光从何处照到何物并产生何种材质和阴影效果；"
-    "不服务视觉命题的细节应省略。"
+    "不服务视觉命题的细节应省略。最终结果必须全部使用英文。"
     "不要使用标签堆砌、质量咒语、权重语法、参数后缀、标题、解释或Markdown。"
 )
 
@@ -126,7 +172,7 @@ _NIJI_SYSTEM = _COMMON + (
     "四段必须围绕同一个视觉命题：subject 给出第一视觉中心和关键关系，style 只保留统一色材母题，"
     "additions 用镜头与光影因果建立层级，禁止三段各写一套互不相干的审美。"
     "suffix 只放参数指令，可用 --ar、--chaos、--iw、--stylize、--seed、--no、--sref、--sw、--weird、--niji。"
-    "不得输出 JSON 之外的内容，不得把参数混入前三段。"
+    "subject、style、additions 必须全部使用英文。不得输出 JSON 之外的内容，不得把参数混入前三段。"
 )
 
 _SYSTEMS = {
@@ -135,63 +181,6 @@ _SYSTEMS = {
     "niji_sections": _NIJI_SYSTEM,
 }
 
-_INLINE_ART_DIRECTION = (
-    "先从高潮事实选出唯一而具体的视觉命题，并用反射、框架、遮挡、尺度反差、前景引导、重复色彩、"
-    "材质呼应或负空间等手法把剧情关系转化为具体可见的视觉装置；不要照搬任何示例物件。"
-    "人物互动高潮必须以人物的面部、目光、动作、接触点或人物关系为第一视觉中心；"
-    "物件只能作为辅助视觉装置并把视线导回人物。只有发现、开启、争夺或取得物件本身就是剧情高潮时，"
-    "物件才允许成为第一视觉中心，且仍须保留人物反应或动作。"
-    "再确定一个第一视觉中心和最多两个直接服务它的辅助元素，统一主辅色和一至两种关键材质，"
-    "并写清光源→受光对象→材质反应/阴影→视觉中心的因果；最后才按目标格式表达。"
-    "最高细节和对比只给剧情关键主体或关键部位，无关细节简写或省略，禁止把字段等密度填满。"
-    "禁止把所有出场人物、道具、车辆和建筑并列成普通剧情清单或标准中景群像。"
-)
-
-_INLINE_RULES = {
-    "krea2": (
-        _INLINE_ART_DIRECTION
-        +
-        "profile_prompt 直接写 Krea2 最终提示词：基于同一对象中的 camera、composition、subjects、prompt，"
-        "按场景、拍摄角度、光影色调氛围、人物基础、服装、姿态、背景、构图顺序合并成自然语言单段；"
-        "人物基础必须写稳定外貌锚点并合并当前变化，不能只写姓名。"
-        "十段软配额：拍摄角度≤55、光影≤85、人物≤45、发型≤25、妆容≤30、表情≤30、服装≤130、姿态≤40、背景≤45、构图≤45，总长300到600字。"
-        "镜头必须选镜头类型、非常规视角和景深；光影必须写光源方向、光质、冷暖明暗层次并形成精致二次元美学；"
-        "服装遵循场景→风格→主件→材质与光线互动→装饰→层次→鞋袜配饰，不得擅改角色基础主件；"
-        "构图必须选明确策略并写视觉引导。SFW 全中文；NSFW 仅服装与姿态为两句英文完整句，其他段严禁英文。"
-    ),
-    "anima_tags": (
-        _INLINE_ART_DIRECTION
-        +
-        "profile_prompt 只写 Anima 的英文内容段，不写质量词；先写英文 Danbooru tags，再写一至三句英文自然语言画面描述。"
-        "必须合并 camera、composition、subjects、prompt，"
-        "把稳定外貌与当前变化、气质、发型、妆容、表情、服装款式和材质、姿态、镜头视角与景深、"
-        "光影、背景、构图和画风先转换为逗号分隔的英文 tags；随后用自然语言补充视觉中心、空间关系、"
-        "材质反射、光影层次、细节主次与叙事情绪，不能只重复 tags。"
-        "剧情事实含明确动作时，动作 tag 和人物之间的作用关系不得省略或退化为静态特写。"
-    ),
-    "natural_language": (
-        _INLINE_ART_DIRECTION
-        +
-        "profile_prompt 写 GPT Image/Banana 可直接使用的完整自然语言画面描述，必须合并 camera、composition、"
-        "subjects、prompt，并完整展开稳定外貌与当前变化、气质、发型、妆容、表情、服装款式、"
-        "材质与光线互动、姿态、镜头视角与景深、光影、背景、构图、视觉引导和画风，不写标签堆砌或参数。"
-    ),
-    "niji_sections": (
-        _INLINE_ART_DIRECTION
-        +
-        "profile_prompt 写四行字符串，依次为主体与动作、风格、构图镜头光影环境、只含 -- 参数的后缀；"
-        "必须合并 camera、composition、subjects、prompt。第一行承载稳定外貌与当前变化、气质、发型、妆容、"
-        "表情、服装材质和姿态；第二行承载画风、媒介和材质审美；第三行承载镜头视角与景深、光影、"
-        "背景、构图、人物位置和视觉引导；换行须按 JSON 字符串转义。"
-    ),
-}
-
-
-def inline_instruction(profile: str) -> str:
-    """供主 Roleplay 同轮生成最终模式提示词，避免二次模型重新理解剧情。"""
-    return _INLINE_RULES.get(profile, _INLINE_RULES["krea2"])
-
-
 def _strip_wrapping(value: str) -> str:
     text = (value or "").strip()
     text = re.sub(r"^```(?:json|text)?\s*", "", text, flags=re.I)
@@ -199,9 +188,36 @@ def _strip_wrapping(value: str) -> str:
     return text.strip()
 
 
-def _krea_prompt(raw: str) -> str:
+def _krea_prompt(raw: str, scene: Mapping[str, object] | None = None) -> str:
+    _ = scene
     text = _strip_wrapping(raw).split("——自检——", 1)[0].strip()
-    return re.sub(r"\s*\r?\n\s*", "", text)
+    text = " ".join(text.splitlines()).strip()
+    return _normalize_krea_style(text)
+
+
+def _normalize_krea_style(prompt: str) -> str:
+    """清除会锁死真人材质的皮肤微观词，不代替 LoRA 决定画风。"""
+    text = prompt
+    replacements: tuple[tuple[str, str], ...] = (
+        (r"(?:整体)?(?:必须)?(?:采用|呈现|为)?(?:精致)?(?:超写实)?"
+         r"(?:真人摄影|真实照片|写实摄影|二次元插画|动漫插画)(?:风格|美学)?[，,]?", ""),
+        (r"皮肤呈(?:现)?半透明(?:的)?质感", "肌肤受光自然"),
+        (r"隐约透出(?:底层)?微血管", "以细腻明暗表现暖色反光"),
+        (r"(?:脸上|面部|皮肤)?毛孔(?:清晰)?(?:可见)?", "面部明暗过渡柔和"),
+    )
+    replacements += (
+        (r"\b(?:photorealistic\s+live-action|live-action\s+photorealistic|"
+             r"realistic\s+photography|detailed\s+anime\s+illustration|anime\s+illustration|"
+             r"manga\s+illustration|3D\s+render(?:ing)?)\s*(?:imagery|style|aesthetic)?[.,;:]?\s*", ""),
+        (r"\bphotorealistic\b[.,;:]?\s*", ""),
+        (r"\b(?:live-action photography|anime(?: style)?|manga(?: style)?|3D render(?:ing)?)\b[.,;:]?\s*", ""),
+        (r"\brealistic human skin\b", "physically coherent skin tones and material response"),
+        (r"\btranslucent skin\b", "natural tonal transitions across the skin"),
+        (r"\b(?:microscopic|visible)\s+(?:facial\s+)?(?:veins?|pores?)\b", "subtle tonal detail"),
+    )
+    for pattern, replacement in replacements:
+        text = re.sub(pattern, replacement, text, flags=re.I)
+    return " ".join(text.split())
 
 
 def _json_object(raw: str) -> dict[str, object]:
@@ -237,31 +253,203 @@ def profile_defaults(profile: str, rating: str = "nsfw") -> dict[str, str]:
     }
 
 
+def system_with_preset(
+    system: str,
+    scene: Mapping[str, object],
+    *,
+    preset_dir: str = "",
+    preset_name: str = "",
+    user_name: str = "",
+) -> str:
+    """把当前偏置/防拦截预设用于独立提示词调用，不携带剧情历史。"""
+    if not (preset_dir.strip() and preset_name.strip()):
+        return system
+    try:
+        from app.services import preset_store
+
+        preset = preset_store.read_preset(preset_dir, preset_name)
+        if not preset:
+            return system
+        model_scene = _scene_for_model(scene)
+        actors = model_scene.get("actors")
+        names = [str(name).strip() for name in actors] if isinstance(actors, list) else []
+        source = json.dumps(model_scene, ensure_ascii=False, separators=(",", ":"))
+        markers = {
+            "char_name": "、".join(name for name in names if name),
+            "char_description": str(model_scene.get("appearance") or ""),
+            "char_personality": "",
+            "scenario": str(model_scene.get("narrative") or ""),
+            "dialogue_examples": "",
+            "worldbook": str(model_scene.get("appearance") or ""),
+            "worldbook_after": "",
+            "persona": "",
+            "user_name": user_name.strip(),
+            "last_user_message": source,
+            "last_char_message": "",
+        }
+        guard = preset_store.assemble_system(preset, markers).strip()
+        if not guard:
+            return system
+        return (
+            guard
+            + "\n\n【内部生图提示词任务】以下任务独立于剧情正文，只输出目标协议要求的提示词，"
+              "不得续写剧情、解释、道歉或附加拒答说明。\n"
+            + system
+        )
+    except Exception:  # noqa: BLE001 预设读取失败时仍允许按 Profile 自身协议生成
+        return system
+
+
 def _normalize(
     profile: str, raw: str, scene: Mapping[str, object] | None = None,
 ) -> str:
     if profile == "krea2":
-        return _krea_prompt(raw)
+        return _anonymize_prompt_names(_krea_prompt(raw, scene), scene or {})
     if profile == "anima_tags":
         value = _json_object(raw)
-        source = str(value.get("content") or "") if value else raw
+        if value:
+            source = str(value.get("content") or "")
+        else:
+            lines = [line.strip() for line in _strip_wrapping(raw).splitlines() if line.strip()]
+            if len(lines) >= 2 and re.search(
+                r"\b(?:masterpiece|best quality|score_[1-9]|anime coloring)\b", lines[0], re.I,
+            ):
+                lines = lines[1:]
+            source = " ".join(lines)
         content = " ".join(_strip_wrapping(source).splitlines()).strip()
         rating = str((scene or {}).get("rating") or "sfw")
-        return f"{anima_quality_tags(rating)}\n{content}"
+        return _anonymize_prompt_names(
+            f"{anima_quality_tags(rating)}\n{content}", scene or {},
+        )
     if profile == "natural_language":
-        return _strip_wrapping(raw)
+        return _anonymize_prompt_names(_strip_wrapping(raw), scene or {})
     if profile == "niji_sections":
         value = _json_object(raw)
-        return "\n".join(str(value.get(key) or "").strip()
-                         for key in ("subject", "style", "additions", "suffix"))
+        return _anonymize_prompt_names(
+            "\n".join(str(value.get(key) or "").strip()
+                       for key in ("subject", "style", "additions", "suffix")),
+            scene or {},
+        )
     raise ValueError(f"未知提示词模式：{profile}")
 
 
+def _restore_scene_value(value: object) -> object:
+    if isinstance(value, str):
+        return image_prompt_extract.restore_jailbreak(value)
+    if isinstance(value, list):
+        return [_restore_scene_value(item) for item in value]
+    if isinstance(value, Mapping):
+        return {str(key): _restore_scene_value(item) for key, item in value.items()}
+    return value
+
+
+def _scene_for_facts(scene: Mapping[str, object]) -> dict[str, object]:
+    """本地校验使用还原后的事实；防拦截标记不得污染格式和事实检查。"""
+    restored = _restore_scene_value(scene)
+    assert isinstance(restored, dict)
+    protected = scene.get("protected_narrative")
+    if isinstance(protected, str) and protected.strip():
+        restored["narrative"] = image_prompt_extract.restore_jailbreak(protected)
+    restored.pop("protected_narrative", None)
+    return restored
+
+
+def _scene_for_model(scene: Mapping[str, object]) -> dict[str, object]:
+    """模型输入保留防拦截正文并匿名化角色名；姓名只用于本地关联外貌。"""
+    result = dict(scene)
+    protected = result.pop("protected_narrative", None)
+    if isinstance(protected, str) and protected.strip():
+        result["narrative"] = protected
+    return _anonymize_scene_characters(result)
+
+
+def _character_names(scene: Mapping[str, object]) -> list[str]:
+    names: list[str] = []
+    actors = scene.get("actors")
+    if isinstance(actors, list):
+        names.extend(str(name).strip() for name in actors if str(name).strip())
+    subjects = scene.get("subjects")
+    if isinstance(subjects, list):
+        names.extend(
+            str(item.get("name") or "").strip() for item in subjects
+            if isinstance(item, Mapping) and str(item.get("name") or "").strip()
+        )
+    return list(dict.fromkeys(names))
+
+
+def _replace_character_name(text: str, name: str, label: str) -> str:
+    if not name:
+        return text
+    pattern = (
+        rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])"
+        if name.isascii() else re.escape(name)
+    )
+
+    def replacement(match: re.Match[str]) -> str:
+        prefix = text[:match.start()]
+        if not prefix.strip() or re.search(r"[.!?]\s*$", prefix):
+            return label[:1].upper() + label[1:]
+        return label
+
+    return re.sub(pattern, replacement, text, flags=re.I if name.isascii() else 0)
+
+
+def _anonymize_prompt_names(prompt: str, scene: Mapping[str, object]) -> str:
+    labels = [
+        "the primary adult character",
+        "the second adult character",
+        *[f"adult character {index}" for index in range(3, len(_character_names(scene)) + 1)],
+    ]
+    for name, label in zip(_character_names(scene), labels, strict=False):
+        prompt = _replace_character_name(prompt, name, label)
+    return prompt
+
+
+def _anonymize_scene_characters(scene: Mapping[str, object]) -> dict[str, object]:
+    names = _character_names(scene)
+    labels = [
+        "the primary adult character",
+        "the second adult character",
+        *[f"adult character {index}" for index in range(3, len(names) + 1)],
+    ]
+    mapping = dict(zip(names, labels, strict=False))
+
+    def rewrite(value: object) -> object:
+        if isinstance(value, str):
+            for name, label in mapping.items():
+                value = _replace_character_name(value, name, label)
+            return value
+        if isinstance(value, list):
+            return [rewrite(item) for item in value]
+        if isinstance(value, Mapping):
+            return {str(key): rewrite(item) for key, item in value.items()}
+        return value
+
+    result = rewrite(scene)
+    assert isinstance(result, dict)
+    return result
+
+
 _REFUSAL_RE = re.compile(
-    r"\bI\s+(?:can't|cannot|can not|won't|will not)\s+(?:help|assist|comply)\b|"
+    r"\bI\s+(?:can't|cannot|can not|won't|will not)\s+"
+    r"(?:help|assist|comply|generate|create|produce|write|transform|provide|fulfill)\b|"
     r"无法(?:协助|帮助|满足)|不能(?:协助|帮助|满足)",
     re.I,
 )
+
+
+def _strip_refusal_suffix(raw: str) -> str:
+    """保留拒答前已经合规的提示词，只裁掉模型追加的拒答说明。"""
+    text = image_prompt_extract.restore_jailbreak(raw or "")
+    match = _REFUSAL_RE.search(text)
+    if not match:
+        return text
+    line_start = text.rfind("\n", 0, match.start()) + 1
+    prefix = text[line_start:match.start()]
+    cut = line_start if re.search(
+        r"此请求|该请求|抱歉|sorry|I(?:'m| am) Claude Code", prefix, re.I,
+    ) else match.start()
+    return text[:cut].rstrip(" ,，;；\r\n")
 
 _ANIMA_VISUAL_DEVICE_RE = re.compile(
     r"\b(?:reflection|mirror|frame|framing|occlusion|silhouette|negative space|foreground|"
@@ -403,60 +591,166 @@ def _anima_scene_fact_errors(prompt: str, scene: Mapping[str, object]) -> list[s
     return errors
 
 
-def _inline_krea_errors(prompt: str, scene: Mapping[str, object]) -> list[str]:
-    if _REFUSAL_RE.search(prompt):
-        return ["模型返回拒答"]
-    rating = str(scene.get("rating") or "sfw")
-    if rating == "sfw":
-        return ["SFW必须全中文"] if re.search(r"[A-Za-z]{2,}", prompt) else []
-    spans = list(re.finditer(r"\b(?:She|He|They|The (?:adult )?character)\b[^.!?]*[.!?]", prompt))
-    if len(spans) != 2:
-        return ["NSFW服装与姿态必须分别是英文完整句子"]
-    clothing, pose = (match.group(0) for match in spans)
-    if not re.search(r"\b(?:wears?|is dressed|has .*clothing)\b", clothing, re.I):
-        return ["第一句英文必须是服装"]
-    if not re.search(r"\b(?:rests?|leans?|stands?|sits?|lies?|kneels?|raises?|holds?|poses?|bends?|arches?)\b", pose, re.I):
-        return ["第二句英文必须是姿态"]
-    chinese_regions = "".join(
-        prompt[cursor:(spans[index].start() if index < len(spans) else len(prompt))]
-        for index, cursor in enumerate([0, spans[0].end(), spans[1].end()])
+_CJK_RE = re.compile(r"[\u3400-\u9fff]")
+
+_VAGUE_IDENTITY_RE = re.compile(
+    r"\b(?:identified character|bound character|stable appearance|current clothing condition|"
+    r"illustrated identity|replacement face|redesign (?:her|his|their) identity|"
+    r"defined by the (?:bound )?(?:character )?model|established (?:facial structure|eye shape|"
+    r"hairstyle silhouette|body proportions|appearance|identity))\b",
+    re.I,
+)
+
+# 中文角色条目的高频可视事实：同时用于语义门禁和无模型兜底。规则只翻译视觉属性，
+# 不含角色专名；当前 wardrobe/正文中的服装变化会覆盖条目里的基础【穿着】段。
+_VISUAL_FACT_RULES: tuple[tuple[str, str, str], ...] = (
+    (r"漆黑墨发|乌黑(?:长)?发|黑发", "glossy jet-black hair", r"\b(?:jet-black|raven|ebony|black) hair\b"),
+    (r"发团|发髻|盘发", "hair gathered into a rounded bun", r"\b(?:hair )?(?:bun|updo|chignon)\b"),
+    (r"紫玉金髻|紫玉.{0,4}(?:簪|髻|钗)", "a purple jade and gold hair ornament", r"purple jade.{0,35}(?:hair|ornament|pin)|(?:hair|ornament|pin).{0,35}purple jade"),
+    (r"朱唇|红唇", "full crimson lips", r"\b(?:crimson|red|scarlet|vermilion) lips\b"),
+    (r"脸颊红润|红润.{0,3}脸颊", "rosy cheeks", r"\b(?:rosy|flushed|warm) cheeks\b"),
+    (r"晶亮.{0,8}美目|美目.{0,8}晶亮", "luminous rounded eyes", r"\b(?:luminous|bright|clear|glossy|shining).{0,12}eyes\b"),
+    (r"成熟风韵|成熟.{0,4}(?:干练|韵味)|久经历练", "a mature and composed gaze", r"\b(?:mature|seasoned|composed|experienced).{0,18}(?:gaze|eyes|expression)\b"),
+    (r"前凸后翘|曲线优美|丰腴熟躯|丰腴.{0,4}(?:身材|曲线)", "a voluptuous curvy figure", r"\b(?:voluptuous|curvy|full-figured)\b"),
+    (r"爆硕巨乳|丰满胸部|巨乳", "a very full bust", r"\b(?:very |large |ample |full )?(?:bust|breasts)\b"),
+    (r"媚软纤腰|纤腰", "a narrow waist", r"\b(?:narrow|slender|slim).{0,10}waist\b"),
+    (r"宽厚圆硕.{0,5}(?:臀|屁股)|圆硕.{0,3}(?:臀|屁股)|肥臀", "broad rounded hips", r"\b(?:broad|wide|full|rounded).{0,12}(?:hips|buttocks)\b"),
+    (r"蚕丝白袜|白丝|白袜", "white silk stockings", r"\bwhite (?:silk )?(?:stockings|socks)\b"),
+    (r"修长.{0,6}(?:美腿|双腿)|厚嫩美腿", "long legs", r"\blong.{0,12}(?:legs|thighs)\b"),
+    (r"素紫色?薄纱法衣|紫色?薄纱法衣", "a light purple gauze robe", r"\b(?:light |pale )?purple.{0,15}gauze robe\b"),
+    (r"道门徽记|灵符", "Taoist emblems and talisman motifs", r"\b(?:Taoist|Daoist).{0,18}(?:emblem|talisman)|talisman motif"),
+    (r"胸口半敞|领口半敞", "a partly open neckline", r"\bpartly open (?:neckline|front|chest)\b"),
+    (r"碎花紫长裙|紫色?碎花长裙", "a floral purple long skirt", r"\b(?:floral purple|purple floral).{0,12}(?:long )?(?:skirt|dress)\b"),
+    (r"红色?长裙|红裙", "a red long dress", r"\bred (?:long )?(?:dress|skirt)\b"),
+    (r"高叉开衩|高开叉|高叉", "a high side slit", r"\bhigh (?:side )?slit\b"),
+    (r"衣.{0,4}(?:破碎|撕裂|扯破)|裙.{0,4}(?:破碎|撕裂|扯破)", "torn clothing with stressed folds", r"\btorn.{0,20}(?:clothing|robe|dress|skirt|fabric)\b"),
+    (r"赤裸|全裸|一丝不挂", "a nude body with no remaining garments", r"\b(?:nude|naked).{0,18}(?:body|woman|character)?\b"),
+)
+
+
+def _current_visual_source(scene: Mapping[str, object]) -> str:
+    appearance = str(scene.get("appearance") or "")
+    wardrobe = str(scene.get("wardrobe") or "")
+    narrative = str(scene.get("narrative") or "")
+    clothing_changed = bool(wardrobe.strip() or re.search(
+        r"赤裸|全裸|一丝不挂|衣.{0,6}(?:破|裂|脱|褪)|裙.{0,6}(?:破|裂|脱|褪)|袜.{0,6}(?:破|裂|脱|扯)",
+        narrative,
+    ))
+    if clothing_changed:
+        appearance = appearance.split("【穿着】", 1)[0]
+    return "\n".join(filter(None, (appearance, wardrobe, narrative if clothing_changed else "")))
+
+
+def _mapped_visual_facts(scene: Mapping[str, object]) -> list[str]:
+    source = _current_visual_source(scene)
+    return list(dict.fromkeys(
+        phrase for source_pattern, phrase, _ in _VISUAL_FACT_RULES
+        if re.search(source_pattern, source)
+    ))
+
+
+def _missing_visual_facts(prompt: str, scene: Mapping[str, object]) -> list[str]:
+    source = _current_visual_source(scene)
+    lowered = prompt.lower()
+    return list(dict.fromkeys(
+        phrase for source_pattern, phrase, output_pattern in _VISUAL_FACT_RULES
+        if re.search(source_pattern, source) and not re.search(output_pattern, lowered, re.I)
+    ))
+
+
+def _visual_fact_errors(prompt: str, scene: Mapping[str, object]) -> list[str]:
+    source = _current_visual_source(scene)
+    if not source.strip():
+        return []
+    errors: list[str] = []
+    if _VAGUE_IDENTITY_RE.search(prompt):
+        errors.append("角色段落使用了空泛身份锁，必须改写为条目中的具体可视外貌与当前服装")
+    errors.extend(
+        f"角色条目中的可视事实未落实：{phrase}"
+        for phrase in _missing_visual_facts(prompt, scene)
     )
-    return ["NSFW其他六段严禁英文"] if re.search(r"[A-Za-z]{2,}", chinese_regions) else []
+    for name in _character_names(scene):
+        if name.isascii() and _replace_character_name(prompt, name, "") != prompt:
+            errors.append("最终提示词包含角色姓名；姓名只能用于关联外貌条目")
+            break
+    return errors
+
+
+def _krea_contract_errors(
+    prompt: str, scene: Mapping[str, object], *, check_length: bool,
+) -> list[str]:
+    errors: list[str] = []
+    if not prompt.strip():
+        return ["提示词为空"]
+    if _REFUSAL_RE.search(prompt):
+        errors.append("模型返回拒答")
+    if _CJK_RE.search(prompt):
+        errors.append("最终提示词必须为纯英文，禁止夹杂中文")
+    if re.search(r"\([^)]*:\s*\d+(?:\.\d+)?\)", prompt):
+        errors.append("禁止权重语法")
+    if re.search(r"\b(?:masterpiece|best quality)\b", prompt, re.I):
+        errors.append("禁止质量标签")
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", prompt) if part.strip()]
+    if len(paragraphs) != 1:
+        errors.append("Krea2必须输出一个英文自然段")
+    if check_length:
+        words = re.findall(r"\b[A-Za-z][A-Za-z'-]*\b", prompt)
+        if not 80 <= len(words) <= 500:
+            errors.append("英文单词数必须为80到500")
+    errors.extend(_visual_fact_errors(prompt, scene))
+    return errors
+
+
+def _inline_krea_errors(prompt: str, scene: Mapping[str, object]) -> list[str]:
+    return _krea_contract_errors(prompt, scene, check_length=False)
+
+
+def _complete_inline_krea_facts(prompt: str, scene: Mapping[str, object]) -> str:
+    """只补同轮成稿遗漏的可视事实，保留模型已经完成的高潮与艺术决策。"""
+    errors = _inline_krea_errors(prompt, scene)
+    fact_errors = _visual_fact_errors(prompt, scene)
+    missing = _missing_visual_facts(prompt, scene)
+    recoverable = bool(missing) and set(errors) == set(fact_errors) and all(
+        error.startswith("角色条目中的可视事实未落实：") for error in fact_errors
+    )
+    if not recoverable:
+        return ""
+    subject = "The visible adult characters are specifically distinguished by "
+    if len(_character_names(scene)) <= 1:
+        subject = "The primary adult character is specifically defined by "
+    addition = subject + ", ".join(missing) + "."
+    first_sentence = re.search(r"[.!?](?:\s|$)", prompt)
+    if first_sentence:
+        end = first_sentence.end()
+        repaired = prompt[:end].rstrip() + " " + addition + " " + prompt[end:].lstrip()
+    else:
+        repaired = prompt.rstrip(" .") + ". " + addition
+    return "" if _inline_krea_errors(repaired, scene) else repaired
 
 
 def normalize_inline(profile: str, raw: str, scene: Mapping[str, object] | None = None) -> str:
-    """归一主模型随剧情生成的 profile_prompt；不调用第二个模型。"""
+    """归一已有提示词或本地编译结果；不调用第二个模型。"""
     if profile not in PROFILE_IDS:
         profile = "krea2"
+    raw = _strip_refusal_suffix(raw)
     if profile == "niji_sections":
         text = _strip_wrapping(raw)
         prompt = _normalize(profile, text, scene) if text.lstrip().startswith("{") else text
     else:
         prompt = _normalize(profile, raw, scene)
     if profile == "krea2":
-        return "" if _inline_krea_errors(prompt, scene or {}) else prompt
+        if not _inline_krea_errors(prompt, scene or {}):
+            return prompt
+        return _complete_inline_krea_facts(prompt, scene or {})
     return "" if _errors(profile, prompt, scene or {}) else prompt
 
 
 def _errors(profile: str, prompt: str, scene: Mapping[str, object]) -> list[str]:
     errors: list[str] = []
-    if _REFUSAL_RE.search(prompt):
+    if profile != "krea2" and _REFUSAL_RE.search(prompt):
         errors.append("模型返回拒答")
     if profile == "krea2":
-        if not 300 <= len(prompt) <= 600:
-            errors.append("总长度必须为300到600字")
-        if "\n" in prompt:
-            errors.append("必须是单个自然段")
-        if re.search(r"\([^)]*:\s*\d+(?:\.\d+)?\)", prompt):
-            errors.append("禁止权重语法")
-        if re.search(r"masterpiece|best quality", prompt, re.I):
-            errors.append("禁止质量标签")
-        if str(scene.get("rating") or "sfw") == "sfw" and re.search(r"[A-Za-z]{2,}", prompt):
-            errors.append("SFW必须全中文")
-        if str(scene.get("rating") or "sfw") == "nsfw":
-            english_sentences = re.findall(r"\b(?:She|He|They|The character)\b[^.!?]*[.!?]", prompt)
-            if len(english_sentences) < 2:
-                errors.append("NSFW服装与姿态必须分别是英文完整句子")
+        errors.extend(_krea_contract_errors(prompt, scene, check_length=True))
     elif profile == "anima_tags":
         lines = prompt.splitlines()
         content = lines[1] if len(lines) == 2 else ""
@@ -471,6 +765,8 @@ def _errors(profile: str, prompt: str, scene: Mapping[str, object]) -> list[str]
     elif profile == "natural_language":
         if len(prompt) < 20:
             errors.append("自然语言描述过短")
+        if _CJK_RE.search(prompt):
+            errors.append("自然语言最终提示词必须为纯英文")
         if prompt.startswith("```") or not re.search(r"[。.!?]", prompt):
             errors.append("必须是完整自然语言段落")
     elif profile == "niji_sections":
@@ -479,50 +775,100 @@ def _errors(profile: str, prompt: str, scene: Mapping[str, object]) -> list[str]
             errors.append("必须包含主体、风格、附加提示词、后缀指令四段")
         elif not lines[3].startswith("--"):
             errors.append("第四段必须只包含后缀指令")
+        if _CJK_RE.search(prompt):
+            errors.append("Niji 最终提示词必须为纯英文")
+    if profile != "krea2":
+        errors.extend(_visual_fact_errors(prompt, scene))
     return errors
 
 
 def _system(profile: str, scene: Mapping[str, object]) -> str:
     if profile == "krea2":
-        return _KREA_NSFW if str(scene.get("rating") or "sfw") == "nsfw" else _KREA_SFW
+        if scene.get("character_lora"):
+            return _KREA_SYSTEM + (
+                "当前画面已绑定角色 LoRA，但 LoRA 只是视觉辅助，不能替代角色条目。仍须逐项把条目中的"
+                "发色、发型、发饰、五官、体型和当前服装写成具体英文；不得输出角色姓名、模型名称、权重、"
+                "触发词或任何‘由模型保持身份’的空泛句。"
+            )
+        return _KREA_SYSTEM
     try:
         return _SYSTEMS[profile]
     except KeyError as exc:
         raise ValueError(f"未知提示词模式：{profile}") from exc
 
 
-def _krea_scene_fallback(scene: Mapping[str, object]) -> str:
-    """模型无输出时直接用高潮场景事实兜底，不回退英文 tags。"""
-    parts: list[str] = []
-    narrative = str(scene.get("narrative") or "").strip()
-    if narrative:
-        parts.append(narrative)
+def _english_scene_details(scene: Mapping[str, object]) -> list[str]:
+    """从混合语言 SceneSpec 中保留可直接使用的英文高潮、外貌与艺术事实。"""
+    english_details: list[str] = []
+    art_direction = scene.get("art_direction")
+    candidates = [
+        _current_visual_source(scene), scene.get("locale"),
+        scene.get("camera"), scene.get("composition"), scene.get("draft_prompt"),
+    ]
+    subjects = scene.get("subjects")
     actors = scene.get("actors")
-    actor_values = actors if isinstance(actors, list) else []
-    if isinstance(actors, list):
-        names = "、".join(str(name).strip() for name in actors if str(name).strip())
-        if names:
-            parts.append(f"画面人物为{names}")
-    wardrobe = str(scene.get("wardrobe") or "").strip()
-    if wardrobe:
-        parts.append(f"服装状态为{wardrobe}")
-    locale = str(scene.get("locale") or "").strip()
-    if locale:
-        parts.append(f"场景位于{locale}")
-    if str(scene.get("rating") or "sfw") == "nsfw":
-        narrative = narrative or "当前高潮场景"
-        names = "、".join(str(name).strip() for name in actor_values if str(name).strip()) or "成年角色"
-        locale = locale or "当前剧情地点"
-        return (
-            f"{narrative.rstrip('。')}。中景低机位拍摄，使用适中的景深。"
-            f"侧向柔光塑造主体轮廓并保持环境氛围。人物基础为{names}，保留世界书提供的稳定外貌识别特征。"
-            "The adult character wears clothing in the exact current condition established by the scene. "
-            "The adult character holds the exact pose and action established by the climax. "
-            f"背景位于{locale.rstrip('。')}。主体置于视觉中心，前后景层次清楚。"
+    actor_names = {
+        str(name).strip() for name in actors if str(name).strip()
+    } if isinstance(actors, list) else set()
+    if isinstance(subjects, list):
+        candidates.extend(
+            item.get("description") for item in subjects
+            if isinstance(item, Mapping)
+            and (
+                not actor_names
+                or not str(item.get("name") or "").strip()
+                or str(item.get("name") or "").strip() in actor_names
+            )
         )
-    if parts:
-        return "。".join(part.rstrip("。") for part in parts) + "。"
-    return "当前高潮场景采用中景构图，人物外貌、服装、动作、光影与背景均严格遵循剧情。"
+    if isinstance(art_direction, Mapping):
+        candidates.extend(art_direction.values())
+    encounter = scene.get("encounter")
+    if isinstance(encounter, Mapping):
+        candidates.extend(encounter.values())
+    for value in candidates:
+        detail = " ".join(str(value or "").split()).strip(" ,.;")
+        # 角色外貌常是“中文名: English tags”；兜底不能因中文身份前缀丢掉后面的精确英文特征。
+        if _CJK_RE.search(detail):
+            detail = detail.encode("ascii", "ignore").decode("ascii")
+            detail = " ".join(detail.split()).strip(" :,.;-")
+        if detail and re.search(r"[A-Za-z]{3}", detail) and not _REFUSAL_RE.search(detail):
+            english_details.append(detail)
+    return list(dict.fromkeys([*english_details, *_mapped_visual_facts(scene)]))
+
+
+def _krea_scene_fallback(scene: Mapping[str, object]) -> str:
+    """连续硬失败时给出单段纯英文剧情插画描述。"""
+    concrete_facts = _mapped_visual_facts(scene)
+    fact_sentence = (
+        " The primary adult woman is visibly defined by " + ", ".join(concrete_facts) + "."
+        if concrete_facts else ""
+    )
+    english_details = [
+        detail for detail in _english_scene_details(scene)
+        if detail not in concrete_facts
+    ]
+    detail_sentence = (
+        " The scene also follows these supplied visual facts: " + "; ".join(english_details) + "."
+        if english_details else ""
+    )
+    action_tags = _scene_action_tags(scene)
+    action_sentence = (
+        " Her visible action is " + ", then ".join(action_tags) + "."
+        if action_tags else ""
+    )
+    return (
+        "A medium environmental composition keeps the primary adult woman's visible action as the single visual focus."
+        + fact_sentence
+        + action_sentence
+        + detail_sentence
+        + " Directional side light defines the face, hands, fabric layers, and decisive action point before falling into "
+        "controlled shadow. A foreground edge guides the eye toward the subject, restrained "
+        "negative space prevents crowding, and the background recedes through softer contrast and atmospheric depth. "
+        "Material highlights follow the light source, cast shadows follow the same direction, and secondary objects remain "
+        "subordinate to the character relationship. "
+        + "Maintain precise anatomy, stable contours, clean edges, controlled fine detail, high image fidelity, and "
+          "smooth noise-free tonal transitions across the finished illustration."
+    )
 
 
 def _anima_scene_fallback(scene: Mapping[str, object]) -> str:
@@ -570,17 +916,26 @@ def _anima_scene_fallback(scene: Mapping[str, object]) -> str:
     facts = [tag for pattern, tag in fact_rules if re.search(pattern, source)]
     if not valid or len([tag for tag in content.split(",") if tag.strip()]) < 6:
         base = facts or [
-            "dramatic scene", "environmental composition", "medium shot",
-            "directional light", "layered background", "detailed anime illustration",
+            "visible decisive action", "environmental narrative composition",
         ]
         content = ", ".join(dict.fromkeys([
-            *base, "medium wide shot", "three-quarter view", "environmental composition",
-            "late afternoon sunlight", "dust backlighting", "warm ochre and muted green palette",
+            *base, "three-quarter view", "environmental composition",
+            "directional light", "layered background", "detailed anime illustration",
         ]))
     elif facts:
         head, dot, tail = content.partition(".")
         existing = head.lower()
         additions = [fact for fact in facts if fact.lower() not in existing]
+        content = f"{head.rstrip(',. ')}, {', '.join(additions)}{dot}{tail}" if additions else content
+    stable_details = _english_scene_details(scene)
+    stable_tags = [
+        tag.strip(" :;.-") for detail in stable_details
+        for tag in re.split(r"[,;]", detail) if tag.strip(" :;.-")
+    ]
+    if stable_tags:
+        head, dot, tail = content.partition(".")
+        existing = head.lower()
+        additions = [tag for tag in stable_tags if tag.lower() not in existing]
         content = f"{head.rstrip(',. ')}, {', '.join(additions)}{dot}{tail}" if additions else content
     action_tags = _scene_action_tags(scene)
     if action_tags and not _ANIMA_ACTION_RE.search(content):
@@ -596,80 +951,105 @@ def _anima_scene_fallback(scene: Mapping[str, object]) -> str:
             )
         else:
             description = (
-                "The stated action and character identity remain the sharp visual focus while "
-                "directional light, material texture, and background depth preserve the scene facts."
+                "The visible action remains the sharp visual focus while the face, hands, current clothing, "
+                "and decisive contact point receive the highest detail; directional light, material texture, "
+                "and background depth keep every supplied scene fact readable."
             )
         content = f"{content.rstrip(',. ')}. {description}"
     return _normalize("anima_tags", content, scene)
 
 
 def _natural_scene_fallback(scene: Mapping[str, object]) -> str:
-    narrative = str(scene.get("narrative") or "").strip()
-    appearance = str(scene.get("appearance") or "").strip()
-    locale = str(scene.get("locale") or "").strip()
-    facts = "。".join(part.rstrip("。") for part in (narrative, appearance, locale) if part)
+    details = "; ".join(_english_scene_details(scene))
+    facts = details or "the visible adult characters performing the supplied decisive action"
     return (
-        f"{facts}。以剧情实际动作作为第一视觉中心，使用环境叙事构图；"
-        "最高细节集中在人物面部、双手和接触物，其余人物与背景依次弱化。"
-        "光源方向、材质反应和阴影必须服务当前人物关系。"
+        f"The image preserves {facts}. The decisive story action is the single visual focus within an "
+        "environmental narrative composition. The highest detail remains on the characters' faces, hands, "
+        "clothing state, and visible contact point while secondary figures and the background recede in clarity. "
+        "A coherent directional light source, material response, cast shadows, controlled color hierarchy, and "
+        "clean high-fidelity finish reinforce the visible character relationship without changing any scene fact."
     )
 
 
 def _niji_scene_fallback(scene: Mapping[str, object]) -> str:
-    narrative = str(scene.get("narrative") or "").strip() or "当前剧情场景"
-    appearance = str(scene.get("appearance") or "").strip()
-    subject = "，".join(part for part in (narrative, appearance) if part).replace("\n", " ")
+    details = "; ".join(_english_scene_details(scene))
+    subject = details or "visible adult characters performing the supplied decisive story action"
     ratio = str(scene.get("aspect_ratio") or "2:3")
     if ratio not in ("1:1", "2:3", "3:2", "3:4", "4:3", "9:16", "16:9"):
         ratio = "2:3"
     return "\n".join((
         subject,
-        "精致二次元叙事插画，统一色彩与材质母题，人物身份和动作忠于剧情",
-        "环境叙事构图，方向性光源，主体面部与双手最高细节，背景分层弱化",
+        "refined two-dimensional narrative illustration, cohesive linework, controlled color and material motif",
+        "environmental composition, directional light, highest detail on faces hands and contact point, layered soft background",
         f"--ar {ratio} --niji 6",
     ))
+
+
+def deterministic_fallback(profile: str, scene: Mapping[str, object]) -> str:
+    """仅用主生成已给出的场景事实组装提示词，不再调用文本模型。"""
+    if profile == "krea2":
+        prompt = _krea_scene_fallback(scene)
+    elif profile == "anima_tags":
+        prompt = _anima_scene_fallback(scene)
+    elif profile == "natural_language":
+        prompt = _natural_scene_fallback(scene)
+    elif profile == "niji_sections":
+        prompt = _niji_scene_fallback(scene)
+    else:
+        raise ValueError(f"未知提示词模式：{profile}")
+    return _anonymize_prompt_names(prompt, scene)
 
 
 def generate(
     profile: str,
     scene: Mapping[str, object],
     generate_text: Callable[[str, str], str],
+    diagnostics: dict[str, object] | None = None,
 ) -> str:
     """调用文本模型并验证目标协议；语义格式错误时携带原因重写一次。"""
     if profile not in PROFILE_IDS:
         raise ValueError(f"未知提示词模式：{profile}")
-    system = _system(profile, scene)
-    source = json.dumps(dict(scene), ensure_ascii=False, separators=(",", ":"))
-    raw = generate_text(system, source)
-    prompt = _normalize(profile, raw, scene)
-    errors = _errors(profile, prompt, scene)
+    report = diagnostics if diagnostics is not None else {}
+    report.clear()
+    report.update({"strategy": "direct", "first_errors": [], "repair_errors": []})
+    fact_scene = _scene_for_facts(scene)
+    model_scene = _scene_for_model(scene)
+    system = _system(profile, fact_scene)
+    source = json.dumps(model_scene, ensure_ascii=False, separators=(",", ":"))
+    first_raw = generate_text(system, source)
+    raw = _strip_refusal_suffix(first_raw)
+    prompt = _normalize(profile, raw, fact_scene)
+    errors = _errors(profile, prompt, fact_scene)
+    if not raw.strip() and _REFUSAL_RE.search(image_prompt_extract.restore_jailbreak(first_raw)):
+        errors.insert(0, "模型返回拒答")
     if profile == "anima_tags":
         errors.extend(_anima_contract_errors(raw))
-        errors.extend(_anima_scene_fact_errors(prompt, scene))
+        errors.extend(_anima_scene_fact_errors(prompt, fact_scene))
     if not errors:
         return prompt
+    report["first_errors"] = list(dict.fromkeys(errors))
     repair = (
         f"{source}\n\n上次输出未通过：{'；'.join(errors)}。请严格按系统协议重写。"
         f"\n上次输出：{raw}"
     )
-    repaired_raw = generate_text(system, repair)
-    prompt = _normalize(profile, repaired_raw, scene)
-    errors = _errors(profile, prompt, scene)
+    second_raw = generate_text(system, repair)
+    repaired_raw = _strip_refusal_suffix(second_raw)
+    prompt = _normalize(profile, repaired_raw, fact_scene)
+    errors = _errors(profile, prompt, fact_scene)
+    if (not repaired_raw.strip()
+            and _REFUSAL_RE.search(image_prompt_extract.restore_jailbreak(second_raw))):
+        errors.insert(0, "模型返回拒答")
     if profile == "anima_tags":
         errors.extend(_anima_contract_errors(repaired_raw))
-        errors.extend(_anima_scene_fact_errors(prompt, scene))
+        errors.extend(_anima_scene_fact_errors(prompt, fact_scene))
     if errors:
-        # Krea2 是自然语言模型，长度与句式只用于引导纠错，不能阻断已有高潮画面出图。
-        # 第二次有内容就直接采用；连续空输出才从高潮场景事实组装兜底。
-        if profile == "krea2":
-            return prompt if prompt and not _REFUSAL_RE.search(prompt) else _krea_scene_fallback(scene)
-        if profile == "anima_tags":
-            return _anima_scene_fallback(scene)
-        if profile == "natural_language":
-            return _natural_scene_fallback(scene)
-        if profile == "niji_sections":
-            return _niji_scene_fallback(scene)
-        raise ValueError("提示词格式校验失败：" + "；".join(errors))
+        report["repair_errors"] = list(dict.fromkeys(errors))
+        report["strategy"] = "fallback"
+        # Krea2 的长度只用于引导纠错；英文、段落、分级和禁词仍是硬合同。
+        if profile == "krea2" and not _inline_krea_errors(prompt, fact_scene):
+            return prompt
+        return deterministic_fallback(profile, fact_scene)
+    report["strategy"] = "repaired"
     return prompt
 
 
@@ -677,8 +1057,20 @@ def generate_result(
     profile: str,
     scene: Mapping[str, object],
     generate_text: Callable[[str, str], str],
-) -> dict[str, str]:
-    return {
-        "prompt": generate(profile, scene, generate_text),
+) -> dict[str, object]:
+    diagnostics: dict[str, object] = {}
+    prompt = generate(profile, scene, generate_text, diagnostics)
+    first_errors = diagnostics.get("first_errors")
+    repair_errors = diagnostics.get("repair_errors")
+    first_items = first_errors if isinstance(first_errors, list) else []
+    repair_items = repair_errors if isinstance(repair_errors, list) else []
+    result: dict[str, object] = {
+        "prompt": prompt,
         "negative_prompt": negative_prompt(profile, scene),
+        "strategy": str(diagnostics.get("strategy") or "direct"),
+        "validation_errors": list(dict.fromkeys([
+            *[str(item) for item in first_items],
+            *[str(item) for item in repair_items],
+        ])),
     }
+    return result

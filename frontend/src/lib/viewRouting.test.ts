@@ -2,7 +2,8 @@ import { describe, it, expect } from "vitest";
 import {
   buildHash, calcSize, ASPECTS, IMAGE_QUALITIES, RES_TIERS, supportsImageQuality,
   normalizeCustomDimension, resolveHomeWorkspace, resolveImageSize,
-  resolveActivityChatTarget, SECTION_SUBNAV, WORK_MODES, workspaceModeForWire,
+  resolveActivityChatTarget, resolveOpenedWorkRoute,
+  SECTION_SUBNAV, WORK_MODES, workspaceModeForWire,
 } from "./viewRouting";
 import type { Repo } from "../stores/repos";
 
@@ -10,6 +11,12 @@ describe("home workspace", () => {
   it.each(["story", "generate", "code"] as const)("%s mode binds to the selected work chat", (mode) => {
     expect(resolveHomeWorkspace(mode, true)).toBe("chat");
     expect(resolveHomeWorkspace(mode, false)).toBe("need-work");
+  });
+});
+
+describe("opening a work from assets", () => {
+  it.each(["story", "generate", "code"] as const)("keeps %s mode", (mode) => {
+    expect(resolveOpenedWorkRoute(mode)).toEqual({ workMode: mode, hash: `#/${mode}` });
   });
 });
 

@@ -13,6 +13,10 @@ export interface StreamInspirationCard {
 
 export interface IllustrationSceneSpec {
   narrative: string;
+  protected_narrative?: string;
+  repo_id?: string;
+  thread_id?: string;
+  turn_id?: string;
   draft_prompt: string;
   appearance?: string;
   wardrobe: string;
@@ -24,6 +28,8 @@ export interface IllustrationSceneSpec {
   profile_prompt?: string;
   negative_prompt?: string;
   aspect_ratio?: "1:1" | "2:3" | "3:2" | "3:4" | "4:3" | "9:16" | "16:9";
+  camera?: string;
+  composition?: string;
 }
 
 export type ChatStreamEvent =

@@ -80,6 +80,12 @@ class MultiAgentRequest(ImageAgentRequest):
     history: list[dict] | None = None  # 前端当前可见历史；显式 [] 禁止回退旧 checkpoint
 
 
+class TraceReplayRequest(BaseModel):
+    repo_id: str
+    turn_id: str = ""
+    limit: int = Field(default=200, ge=1, le=200)
+
+
 _missing_wire_fields = AGENT_INVOCATION_WIRE_FIELDS.difference(MultiAgentRequest.model_fields)
 if _missing_wire_fields:
     raise RuntimeError(f"MultiAgentRequest 缺少共享 wire 字段：{sorted(_missing_wire_fields)}")
@@ -101,6 +107,18 @@ def multi_agent(req: MultiAgentRequest) -> StreamingResponse:
     except agent_runner.RunAlreadyActive as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     return sse_response(lambda: agent_runner.drain(q))
+
+
+@router.post("/trace/replay")
+def replay_trace(req: TraceReplayRequest) -> dict[str, object]:
+    """离线校验既有 Trace；不调用模型，不写会话、资产或数据库。"""
+    from app.services import trace_replay
+
+    if not req.repo_id.strip():
+        raise HTTPException(status_code=400, detail="repo_id 不能为空")
+    return trace_replay.replay_recent(
+        req.repo_id.strip(), turn_id=req.turn_id.strip(), limit=req.limit,
+    )
 
 
 class RegenerateImageRequest(BaseModel):
@@ -240,15 +258,40 @@ class IllustrationSubmissionRequest(BaseModel):
     prompt_profile: str = ""
     lora_name: str = ""
     lora_weight: float | None = None
+    lora_mode: str = "single"
+    lora_names: list[str] = Field(default_factory=list)
     latent_width: int | None = Field(default=None, ge=1, le=16384)
     latent_height: int | None = Field(default=None, ge=1, le=16384)
     value_keys: list[str] = Field(default_factory=list)
+    source: Literal["automatic", "manual"] = "automatic"
+
+
+class IllustrationClaimRequest(BaseModel):
+    thread_id: str
+    message_id: str
+    slot_id: str
+
+
+@router.post("/image-agent/illustration-claim")
+def illustration_claim(req: IllustrationClaimRequest) -> dict[str, bool]:
+    """ComfyUI 提交前认领权威插画槽；重复事件不得产生第二个任务。"""
+    from app.services import generation_store
+    claimed = generation_store.claim_illustration_submission(
+        thread_id=req.thread_id, message_id=req.message_id, slot_id=req.slot_id,
+    )
+    return {"ok": True, "claimed": claimed}
 
 
 @router.post("/image-agent/illustration-submission")
 def illustration_submission(req: IllustrationSubmissionRequest) -> dict[str, bool]:
     """记录前端最终提交给 ComfyUI 的实际参数；追踪失败不影响生图。"""
-    from app.services import run_trace
+    from app.services import generation_store, run_trace
+    slot_bound = generation_store.persist_illustration_submission(
+        thread_id=req.thread_id,
+        message_id=req.message_id,
+        slot_id=req.slot_id,
+        prompt_id=req.prompt_id,
+    )
     ctx = {
         "thread_id": req.thread_id,
         "repo_id": req.repo_id or req.thread_id,
@@ -266,8 +309,12 @@ def illustration_submission(req: IllustrationSubmissionRequest) -> dict[str, boo
         prompt_profile=req.prompt_profile,
         lora_name=req.lora_name,
         lora_weight=req.lora_weight,
+        lora_mode=req.lora_mode,
+        lora_names=req.lora_names,
         latent={"width": req.latent_width, "height": req.latent_height},
         value_keys=req.value_keys,
+        source=req.source,
+        slot_bound=slot_bound,
     )
     return {"ok": True}
 

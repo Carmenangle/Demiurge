@@ -173,8 +173,8 @@ export function WorldBook({ characterDir, worldbookDir }: { characterDir: string
         <p style={{ color: "var(--text-muted)" }}>还没有世界书。导入独立世界书，或导入含 character_book 的角色卡后会在这里显示。</p>
       )}
       {hasList && (
-        <div style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>
-          <div style={{ width: 220, flexShrink: 0, position: "sticky", top: 0, maxHeight: "calc(100vh - 160px)", overflowY: "auto" }}>
+        <div className="worldbook-layout">
+          <div className="worldbook-library">
             {books.length > 0 && (
               <div style={{ fontSize: 11, color: "var(--text-muted)", margin: "0 0 4px 4px" }}>独立世界书</div>
             )}
@@ -207,7 +207,7 @@ export function WorldBook({ characterDir, worldbookDir }: { characterDir: string
               </button>
             ))}
           </div>
-          <div style={{ flex: 1, minWidth: 0 }}>
+          <div className="worldbook-content">
             {!selected && <p style={{ color: "var(--text-muted)" }}>选择左侧世界书查看条目。</p>}
             {selected && (
               <div style={{ marginBottom: 10 }}>
@@ -282,8 +282,9 @@ export function WorldBook({ characterDir, worldbookDir }: { characterDir: string
               </div>
             ))}
           </div>
+          <div className={`worldbook-index ${selected && entries.length > 0 ? "" : "is-empty"}`} aria-hidden={!selected || entries.length === 0}>
           {selected && entries.length > 0 && (
-            <div style={{ width: 200, flexShrink: 0, position: "sticky", top: 0, maxHeight: "calc(100vh - 160px)", overflowY: "auto" }}>
+            <>
               <div style={{ fontSize: 11, color: "var(--text-muted)", margin: "0 0 4px 4px" }}>条目导航（{entries.length}）</div>
               {entries.map((e) => (
                 <button
@@ -299,8 +300,9 @@ export function WorldBook({ characterDir, worldbookDir }: { characterDir: string
                   </span>
                 </button>
               ))}
-            </div>
+            </>
           )}
+          </div>
         </div>
       )}
       {pending && (

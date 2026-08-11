@@ -17,6 +17,8 @@ class McpServer(BaseModel):
     args: list[str] = []         # stdio 用
     url: str = ""                # sse 用
     enabled: bool = True
+    source: str = "local"
+    trust: str = "user_managed"
 
 
 @router.get("")
@@ -73,7 +75,9 @@ def smithery_add(req: AddSmitheryRequest) -> list[McpServer]:
         "name": req.display_name or req.qualified_name,
         "type": "http",          # streamable http
         "url": url,
-        "enabled": True,
+        "enabled": False,
+        "source": f"smithery:{req.qualified_name}",
+        "trust": "external_unreviewed",
     })
     saved = mcp_store.save_servers(servers)
     mcp_client.invalidate_cache()

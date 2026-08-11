@@ -64,6 +64,8 @@ export interface TemplateRegeneration {
   comfyuiUrl: string;
   outputNodeIds: string[];
   prompt: string;
+  loras?: { name: string; weight: number }[];
+  loraMode?: "none" | "single" | "multi";
 }
 
 export type RegenerationSnapshot = AiImageRegeneration | WorkflowRegeneration | TemplateRegeneration;

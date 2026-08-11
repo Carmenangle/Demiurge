@@ -45,6 +45,57 @@ def test_repo_folder_path_嵌套建到父下(monkeypatch, tmp_path):
     assert p == tmp_path / "九天神女传" / "SAVE01"
 
 
+def test_新同名仓库不复用旧仓库的会话目录(monkeypatch, tmp_path):
+    monkeypatch.setattr(repo_meta, "_load_state", lambda: _state(
+        {"id": "p1", "name": "Anima"},
+        {"id": "old-repo-id", "name": "安智妍", "parentId": "p1"},
+        {"id": "new-repo-id", "name": "韩曜怡", "parentId": "p1"},
+    ))
+    stale = tmp_path / "Anima" / "韩曜怡"
+    stale.mkdir(parents=True)
+    (stale / "_repo.json").write_text(
+        '{"id":"old-repo-id","name":"韩曜怡"}', encoding="utf-8",
+    )
+    (stale / "chat.json").write_text('[{"text":"安智妍的旧对话"}]', encoding="utf-8")
+
+    resolved = repo_meta.migrate_legacy_folder(str(tmp_path), "new-repo-id")
+
+    assert resolved != stale
+    assert not (resolved / "chat.json").exists()
+
+
+def test_改名后按marker找回旧目录并迁移(monkeypatch, tmp_path):
+    monkeypatch.setattr(repo_meta, "_load_state", lambda: _state(
+        {"id": "p1", "name": "Anima"},
+        {"id": "old-repo-id", "name": "安智妍", "parentId": "p1"},
+    ))
+    stale = tmp_path / "Anima" / "韩曜怡"
+    stale.mkdir(parents=True)
+    (stale / "_repo.json").write_text(
+        '{"id":"old-repo-id","name":"韩曜怡"}', encoding="utf-8",
+    )
+    (stale / "chat.json").write_text('[{"text":"保留的旧对话"}]', encoding="utf-8")
+
+    resolved = repo_meta.migrate_legacy_folder(str(tmp_path), "old-repo-id")
+
+    assert resolved == tmp_path / "Anima" / "安智妍"
+    assert (resolved / "chat.json").is_file()
+    assert not stale.exists()
+
+
+def test_仓库暂时不在状态列表时仍按marker归档到原目录(monkeypatch, tmp_path):
+    monkeypatch.setattr(repo_meta, "_load_state", lambda: _state())
+    owned = tmp_path / "白给谷" / "SAVE01"
+    owned.mkdir(parents=True)
+    (owned / "_repo.json").write_text(
+        '{"id":"old-repo-id","name":"SAVE01"}', encoding="utf-8",
+    )
+
+    resolved = repo_meta.repo_folder_path(str(tmp_path), "old-repo-id")
+
+    assert resolved == owned
+
+
 def test_惰性迁移_UUID旧文件夹搬到嵌套位置(monkeypatch, tmp_path):
     monkeypatch.setattr(repo_meta, "_load_state", lambda: _state(
         {"id": "p1", "name": "九天神女传"},

@@ -8,6 +8,7 @@ export interface PendingGeneration {
   regeneration?: RegenerationSnapshot;
   target?: { messageId: string; slotId: string; background: true };
   prompt?: string;
+  owner?: { threadId: string; repoId: string; outputDir: string };
 }
 
 export interface WorkflowWatchInput {
@@ -17,6 +18,7 @@ export interface WorkflowWatchInput {
   regeneration?: RegenerationSnapshot;
   target?: PendingGeneration["target"];
   prompt?: string;
+  owner?: PendingGeneration["owner"];
 }
 
 export interface WorkflowWatchObserver {
@@ -37,7 +39,7 @@ type RuntimeOptions = {
 export function registerPending(
   pending: readonly PendingGeneration[], promptId: string, createdAt: number,
   outputNodeIds: string[] = [], regeneration?: RegenerationSnapshot,
-  target?: PendingGeneration["target"], prompt = "",
+  target?: PendingGeneration["target"], prompt = "", owner?: PendingGeneration["owner"],
 ): PendingGeneration[] {
   return [
     ...pending.filter((item) => item.prompt_id !== promptId),
@@ -47,6 +49,7 @@ export function registerPending(
       ...(regeneration ? { regeneration } : {}),
       ...(target ? { target } : {}),
       ...(prompt ? { prompt } : {}),
+      ...(owner ? { owner } : {}),
     },
   ];
 }
@@ -76,11 +79,19 @@ export const notFoundPollAction = (count: number): "retry" | "fail" => count >= 
 
 export function shouldFinalize(
   promptId: string | undefined,
-  persistedPending: readonly { prompt_id: string }[],
+  _persistedPending: readonly { prompt_id: string }[],
   finalizedIds: ReadonlySet<string>,
+  cancelledIds: ReadonlySet<string> = new Set(),
 ): boolean {
   if (!promptId) return true;
-  return persistedPending.some((item) => item.prompt_id === promptId) && !finalizedIds.has(promptId);
+  return !finalizedIds.has(promptId) && !cancelledIds.has(promptId);
+}
+
+export function durableFinalizeSucceeded(result: {
+  durable: boolean;
+  images: readonly { persisted: boolean; snapshotted: boolean }[];
+}): boolean {
+  return !result.durable || result.images.every((item) => item.persisted && item.snapshotted);
 }
 
 export class WorkflowGenerationRuntime {
@@ -90,6 +101,7 @@ export class WorkflowGenerationRuntime {
   private readonly fetchResult: typeof getResult;
   private readonly schedule: (callback: () => void, delayMs: number) => unknown;
   private readonly finalized = new Set<string>();
+  private readonly cancelled = new Set<string>();
 
   constructor(threadId: string, options: RuntimeOptions = {}) {
     this.key = `laf_pending_gen_${threadId}`;
@@ -111,7 +123,7 @@ export class WorkflowGenerationRuntime {
   track(input: WorkflowWatchInput): PendingGeneration {
     const next = registerPending(
       this.list(), input.promptId, this.now(), input.outputNodeIds,
-      input.regeneration, input.target, input.prompt,
+      input.regeneration, input.target, input.prompt, input.owner,
     );
     this.write(next);
     return next.find((item) => item.prompt_id === input.promptId)!;
@@ -119,6 +131,11 @@ export class WorkflowGenerationRuntime {
 
   remove(promptId: string): void {
     this.write(unregisterPending(this.list(), promptId));
+  }
+
+  cancel(promptId: string): void {
+    this.cancelled.add(promptId);
+    this.remove(promptId);
   }
 
   recoveryAction(item: PendingGeneration, resumedIds: ReadonlySet<string>): "skip" | "expire" | "inspect" {
@@ -194,6 +211,7 @@ export class WorkflowGenerationRuntime {
     this.start({
       promptId: item.prompt_id, comfyuiUrl, outputNodeIds: item.outputNodeIds,
       regeneration: item.regeneration, target: item.target, prompt: item.prompt,
+      owner: item.owner,
     }, observer);
     return "watching";
   }
@@ -201,7 +219,7 @@ export class WorkflowGenerationRuntime {
   private async finalize(
     result: GenResult, pending: PendingGeneration, observer: WorkflowWatchObserver,
   ): Promise<boolean> {
-    if (!shouldFinalize(pending.prompt_id, this.list(), this.finalized)) return false;
+    if (!shouldFinalize(pending.prompt_id, this.list(), this.finalized, this.cancelled)) return false;
     this.finalized.add(pending.prompt_id);
     try {
       return await observer.finalize(result, pending);

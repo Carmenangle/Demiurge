@@ -144,6 +144,20 @@ def test_兜底锚点优先选择改变剧情状态的信笺动作而非静态�
     assert anchor == "她把信笺对折，信笺化作黑色流光穿出帷幔。"
 
 
+def test_主计划误选结尾钩子时纠正为正文视觉高潮():
+    text = (
+        "冷倾雪在湿布擦过锁骨时骤然绷紧，汗水沿肩颈滑落，随后全身剧烈颤抖。\n\n"
+        "我背着包裹沿山道离开。\n\n"
+        "台下两个值夜弟子正在交班，远处红衣在雾中鲜艳。"
+    )
+
+    anchor = si.resolve_illustration_anchor(
+        text, "台下两个值夜弟子正在交班，远处红衣在雾中鲜艳。",
+    )
+
+    assert anchor.startswith("冷倾雪在湿布擦过锁骨")
+
+
 def test_兜底锚点只在content正文中选择并忽略think与残缺控制块():
     text = (
         "<think>规划高潮、俯身、凝视、光影与构图。</think>\n"
@@ -165,6 +179,15 @@ def test_提示词场景源只截取锚点所在高潮段并还原破甲():
     excerpt = si.illustration_scene_excerpt(text, "披风在雷光里扬起")
 
     assert excerpt == "她猛然转身，披风在雷光里扬起。"
+
+
+def test_独立profile场景源取同一高潮段但保留防拦截标记():
+    text = "铺垫段。\n\n她猛然@(转)@身，披风在雷光里扬起。\n\n事后收束段。"
+    visible = si.illustration_scene_excerpt(text, "披风在雷光里扬起")
+
+    protected = si.protected_illustration_scene_excerpt(text, visible)
+
+    assert protected == "她猛然@(转)@身，披风在雷光里扬起。"
 
 
 def test_无指定锚点时按高潮词选段而非整篇正文():
@@ -206,6 +229,14 @@ def test_残缺或无角色名的encounter不触发生图():
     assert si.encounter_illustration_context(
         "<content>庭院里风声渐紧。\n\n<encounter>[WHO] 方葛"
     ) == ("", "", [], {})
+
+
+def test_降级画幅按单人特写多人关系与横向动作变化():
+    assert si.infer_aspect_ratio("她的面部特写占据画面中心。", ["甲"]) == "1:1"
+    assert si.infer_aspect_ratio("甲与乙隔着长桌对峙。", ["甲", "乙"]) == "4:3"
+    assert si.infer_aspect_ratio("她躺在长榻上，衣摆横向铺开。", ["甲"]) == "3:2"
+    assert si.infer_aspect_ratio("她站在高台上，披风向上扬起。", ["甲"]) == "2:3"
+    assert si.infer_aspect_ratio("她安静地坐在栏杆旁。", ["甲"]) == "3:4"
     assert si.encounter_illustration_context(
         "<content>庭院里风声渐紧。\n\n<encounter>[WHAT] 有人来访</encounter></content>"
     ) == ("", "", [], {})

@@ -1404,6 +1404,8 @@ body {
   position: relative;
 }
 
+.repo-cover-wrap { position: relative; }
+
 .repo-cover {
   aspect-ratio: 1 / 1;
   width: 100%;
@@ -1437,10 +1439,25 @@ body {
   font-size: 14px;
 }
 
+.repo-card-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 3px 8px;
+  margin: 6px 2px 0;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.repo-card-meta span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.repo-card-meta span:last-child { grid-column: 1 / -1; }
+
 .repo-tools {
   position: absolute;
   right: 8px;
-  bottom: 42px;
+  bottom: 8px;
   display: flex;
   gap: 6px;
 }
@@ -1607,7 +1624,7 @@ body {
 .modal-mask {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.25);
+  background: rgba(0, 0, 0, 0.08);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -6157,7 +6174,7 @@ html:is([data-theme="bright"], [data-theme="night"], [data-theme="green"], [data
 .mode-menu .check { grid-column: 2; grid-row: 1 / span 2; align-self: center; color: var(--accent); }
 
 /* 主导航 / 钻入子导航 */
-.nav-sections { display: flex; flex-direction: column; gap: 3px; flex: 1; }
+.nav-sections { display: flex; flex-direction: column; gap: 14px; flex: 1; }
 .nav-sections button {
   border: none; background: transparent; text-align: left;
   padding: 10px 12px; border-radius: 8px; cursor: pointer;
@@ -6306,4 +6323,146 @@ html[data-theme="eye-care"] .app-topbar {
     margin-right: 0;
     padding-bottom: 72px;
   }
+}
+/* PC 工作区：保留对话主区宽度，只降低工具与装饰的视觉竞争。 */
+.chat-view-head .btn.icon-only {
+  width: 34px;
+  min-width: 34px;
+  min-height: 34px !important;
+  padding: 0 !important;
+  border: 1px solid transparent !important;
+  border-image: none !important;
+  background: transparent !important;
+  color: var(--text-muted) !important;
+  box-shadow: none !important;
+  opacity: .78;
+}
+.chat-view-head .btn.icon-only:hover,
+.chat-view-head .btn.icon-only:focus-visible {
+  background: var(--surface-2) !important;
+  color: var(--text) !important;
+  opacity: 1;
+}
+.chat-view-head .btn.icon-only.primary {
+  color: var(--accent) !important;
+  background: color-mix(in srgb, var(--accent) 10%, transparent) !important;
+}
+html:is([data-theme="bright"], [data-theme="night"], [data-theme="green"], [data-theme="eye-care"], [data-theme="gray"]) .chat-input-bar {
+  padding-top: 12px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .08);
+}
+html:is([data-theme="bright"], [data-theme="night"], [data-theme="green"], [data-theme="eye-care"], [data-theme="gray"]) .chat-input-bar::before {
+  display: none;
+}
+html:is([data-theme="bright"], [data-theme="night"], [data-theme="green"], [data-theme="eye-care"], [data-theme="gray"]) .chat-input-resize-handle {
+  width: 72px;
+  height: 10px;
+  margin: -7px auto 4px;
+  color: var(--text-muted);
+  background: none !important;
+  opacity: .55;
+}
+html:is([data-theme="bright"], [data-theme="night"], [data-theme="green"], [data-theme="eye-care"], [data-theme="gray"]) .chat-input-resize-handle > svg {
+  display: block;
+  width: 16px;
+  height: 16px;
+}
+html:is([data-theme="bright"], [data-theme="night"], [data-theme="green"], [data-theme="eye-care"], [data-theme="gray"]) .chat-actions {
+  padding-top: 6px;
+}
+html:is([data-theme="bright"], [data-theme="night"], [data-theme="green"], [data-theme="eye-care"], [data-theme="gray"]) .chat-actions::before {
+  height: 1px;
+  background: color-mix(in srgb, var(--border) 55%, transparent) !important;
+  opacity: .55;
+}
+.support-fab {
+  width: 56px !important;
+  height: 56px !important;
+  opacity: .84;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, .16) !important;
+}
+.support-fab:hover { opacity: 1; }
+.support-fab-emblem { width: 44px !important; height: 44px !important; flex-basis: 44px !important; }
+
+/* 世界书三栏在 PC 主区内对称落位，中栏始终位于视觉中心。 */
+.worldbook-layout {
+  display: grid;
+  grid-template-columns: 220px minmax(360px, 1fr) 220px;
+  gap: 20px;
+  width: min(100%, 1520px);
+  margin-inline: auto;
+  align-items: start;
+}
+.worldbook-library,
+.worldbook-index {
+  position: sticky;
+  top: 0;
+  max-height: calc(100vh - 160px);
+  overflow-y: auto;
+}
+.worldbook-content { min-width: 0; }
+.worldbook-index.is-empty { visibility: hidden; }
+
+/* 设置 → 模型：四类能力以状态卡呈现，模型的高级字段默认折叠。 */
+.model-capability-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(460px, 100%), 1fr));
+  gap: 18px;
+}
+.model-capability-grid > .model-probe-notice { grid-column: 1 / -1; margin: 0; }
+.settings-section.model-capability-card {
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .05);
+}
+.model-capability-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.model-capability-title {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+}
+.model-capability-icon {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.model-capability-title strong,
+.model-capability-title small { display: block; }
+.model-capability-title small { margin-top: 2px; color: var(--text-muted); font-size: 11px; font-weight: 400; }
+.model-capability-status { padding: 3px 8px; border-radius: 999px; font-size: 11px; }
+.model-capability-status.ready { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.model-capability-status.idle { color: var(--text-muted); background: var(--surface-2); }
+.model-card-summary { display: flex; justify-content: space-between; gap: 8px; margin: 4px 0 10px; color: var(--text-muted); font-size: 11px; }
+.model-card-summary span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-advanced { border-top: 1px solid var(--border); }
+.model-advanced > summary { padding: 9px 0; color: var(--text-muted); font-size: 12px; cursor: pointer; }
+.model-advanced-body { padding-top: 4px; }
+
+@media (max-width: 1400px) and (min-width: 721px) {
+  .app-nav { width: 200px; padding-inline: 12px; }
+  .app-topbar { gap: 12px; padding-inline: 20px; }
+  .repo-picker { gap: 5px; }
+  .repo-picker select { min-width: 104px; max-width: 150px; }
+  .chat-view { padding: 18px 20px; }
+  .worldbook-layout { grid-template-columns: 190px minmax(320px, 1fr) 190px; gap: 14px; }
+}
+
+.lora-mode-switch {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
 }

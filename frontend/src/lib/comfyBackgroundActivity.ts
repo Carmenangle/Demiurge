@@ -2,6 +2,7 @@
 // 把进行中的出图任务暴露给后台活动面板(SupportWidget)。
 // pending 项由 useChatSession 在完成/失败时删除，还在的即为进行中。
 import type { Repo } from "../stores/repos";
+import { repoActivityLabel } from "./repoPresentation";
 
 export interface ComfyBackgroundActivity {
   promptId: string;
@@ -9,7 +10,7 @@ export interface ComfyBackgroundActivity {
   label: string;  // 仓库显示名
 }
 
-const STALE_MS = 10 * 60 * 1000;  // 10 分钟以上视为过期残留（绝大多数生成在此内完成）
+const STALE_MS = 30 * 60 * 1000;  // 只影响面板展示；任务生命周期归 WorkflowGenerationRuntime 所有
 
 const listeners = new Set<(items: ComfyBackgroundActivity[]) => void>();
 let snapshot: ComfyBackgroundActivity[] = [];
@@ -21,14 +22,13 @@ function loadRepos(): Repo[] {
 }
 
 function repoLabel(threadId: string): string {
-  const repo = loadRepos().find((r) => r.id === threadId);
-  return repo?.name || threadId;
+  return repoActivityLabel(loadRepos(), threadId);
 }
 
 function publish() { listeners.forEach((fn) => fn(snapshot)); }
 
 // 扫描所有仓库进行中的出图任务（纯函数，便于单测；storage 默认为 globalThis.localStorage）
-// 同时清理过期条目，避免重启后残留项持续显示。
+// 展示层必须只读：不得删除 pending，否则慢工作流完成时会跳过 finalize。
 export function scanComfyActivities(
   now: number,
   label: (threadId: string) => string,
@@ -43,18 +43,24 @@ export function scanComfyActivities(
     let pending: { prompt_id: string; createdAt: number }[] = [];
     try { pending = JSON.parse(storage.getItem(key) || "[]"); } catch { continue; }
     const fresh = pending.filter((item) => now - item.createdAt <= STALE_MS);
-    // 有过期条目：写回清理后的列表（或直接删 key）
-    if (fresh.length !== pending.length) {
-      try {
-        if (fresh.length === 0) storage.removeItem(key);
-        else storage.setItem(key, JSON.stringify(fresh));
-      } catch { /* ignore */ }
-    }
     for (const item of fresh) {
       items.push({ promptId: item.prompt_id, threadId, label: label(threadId) });
     }
   }
   return items;
+}
+
+export function hasPendingComfyGeneration(
+  threadIds: readonly string[], storage: Pick<Storage, "getItem"> = localStorage,
+): boolean {
+  return threadIds.some((threadId) => {
+    try {
+      const items = JSON.parse(storage.getItem(`laf_pending_gen_${threadId}`) || "[]");
+      return Array.isArray(items) && items.length > 0;
+    } catch {
+      return false;
+    }
+  });
 }
 
 function refresh() {

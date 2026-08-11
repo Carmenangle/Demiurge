@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { AlertTriangle, CheckCircle2, ListChecks, Plus, Search, Trash2, X, XCircle } from "lucide-react";
+import { useState, type ReactNode } from "react";
+import { AlertTriangle, CheckCircle2, Database, Image, ListChecks, MessageSquare, Plus, Search, Trash2, Video, X, XCircle } from "lucide-react";
 import type { PanelProps } from "./GeneralPanel";
 import {
   modelDisplayName,
@@ -75,6 +75,13 @@ function ModelCard({ model, kind, onChange, onRemove, customSizeSupported, onCus
           <Trash2 size={14} />
         </button>
       </div>
+      <div className="model-card-summary">
+        <span>{model.modelName || "未填写模型名称"}</span>
+        <span>{model.baseUrl ? "接口已填写" : "接口未填写"}</span>
+      </div>
+      <details className="model-advanced">
+        <summary>高级配置</summary>
+        <div className="model-advanced-body">
       <div className="field">
         <label>显示名称</label>
         <input
@@ -152,6 +159,8 @@ function ModelCard({ model, kind, onChange, onRemove, customSizeSupported, onCus
           <span>上游支持任意图片尺寸</span>
         </label>
       )}
+        </div>
+      </details>
       <div className="model-test-row">
         <button className="btn" type="button" onClick={test} disabled={probe.testing}>
           {probe.testing ? "测试中…" : "测试模型"}
@@ -169,6 +178,18 @@ function ProbeResultView({ result }: { result: ModelProbeResult }) {
       <Icon size={14} /> {result.message}
     </span>
   );
+}
+
+function CapabilityTitle({ icon, title, count, configured }: {
+  icon: ReactNode; title: string; count: number; configured: boolean;
+}) {
+  return <div className="model-capability-title">
+    <span className="model-capability-icon">{icon}</span>
+    <span><strong>{title}</strong><small>{count ? `${count} 个配置` : "尚未配置"}</small></span>
+    <span className={`model-capability-status ${configured ? "ready" : "idle"}`}>
+      {configured ? "已配置" : "待配置"}
+    </span>
+  </div>;
 }
 
 export function ModelsPanel({ draft, setDraft }: PanelProps) {
@@ -236,14 +257,15 @@ export function ModelsPanel({ draft, setDraft }: PanelProps) {
   })();
 
   return (
-    <>
+    <div className="model-capability-grid">
       <p className="field-hint model-probe-notice">
         模型测试只做无计费连接/模型目录探测；不会调用聊天、Embedding、图片或视频生成。填写本地目录时会执行一次本地最小推理。
       </p>
       {/* 对话模型 */}
-      <div className="settings-section">
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <h4 style={{ margin: 0 }}>对话模型</h4>
+      <div className="settings-section model-capability-card">
+        <div className="model-capability-head">
+          <CapabilityTitle icon={<MessageSquare size={18} />} title="对话" count={draft.chatModels.length}
+            configured={draft.chatModels.some((model) => Boolean(model.baseUrl && model.modelName))} />
           <button className="btn" onClick={addChatModel}><Plus size={15} style={{ verticalAlign: "-2px", marginRight: 4 }} />添加</button>
         </div>
         <p className="field-hint" style={{ marginTop: 8 }}>智能体的大脑（也用于反推图片）。可配多个供应商，在对话框左下角图标处切换。</p>
@@ -256,9 +278,10 @@ export function ModelsPanel({ draft, setDraft }: PanelProps) {
       </div>
 
       {/* 生图模型 */}
-      <div className="settings-section">
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <h4 style={{ margin: 0 }}>生图模型</h4>
+      <div className="settings-section model-capability-card">
+        <div className="model-capability-head">
+          <CapabilityTitle icon={<Image size={18} />} title="生图" count={draft.imageModels.length}
+            configured={draft.imageModels.some((model) => Boolean(model.baseUrl && model.modelName))} />
           <button className="btn" onClick={addImageModel}><Plus size={15} style={{ verticalAlign: "-2px", marginRight: 4 }} />添加</button>
         </div>
         <div style={{ marginTop: 12 }}>
@@ -280,9 +303,10 @@ export function ModelsPanel({ draft, setDraft }: PanelProps) {
       </div>
 
       {/* 视频模型 */}
-      <div className="settings-section">
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <h4 style={{ margin: 0 }}>视频模型</h4>
+      <div className="settings-section model-capability-card">
+        <div className="model-capability-head">
+          <CapabilityTitle icon={<Video size={18} />} title="视频" count={(draft.videoModels || []).length}
+            configured={(draft.videoModels || []).some((model) => Boolean(model.baseUrl && model.modelName))} />
           <button className="btn" onClick={addVideoModel}><Plus size={15} style={{ verticalAlign: "-2px", marginRight: 4 }} />添加</button>
         </div>
         <p className="field-hint" style={{ marginTop: 8 }}>文生视频（OpenAI 兼容 video/generations，多为异步任务）。可配多个供应商，对话里说"生成视频"即调用。</p>
@@ -295,8 +319,11 @@ export function ModelsPanel({ draft, setDraft }: PanelProps) {
       </div>
 
       {/* 嵌入模型 */}
-      <div className="settings-section">
-        <h4>嵌入模型（知识库 RAG）</h4>
+      <div className="settings-section model-capability-card">
+        <div className="model-capability-head">
+          <CapabilityTitle icon={<Database size={18} />} title="Embedding" count={1}
+            configured={draft.embedModel.mode === "local" ? Boolean(draft.embedModel.modelDir) : Boolean(draft.embedModel.baseUrl && draft.embedModel.modelName)} />
+        </div>
         <p className="field-hint" style={{ margin: "0 0 10px" }}>用于把仓库资料/生成历史向量化检索。需支持 embeddings 接口，如智谱 embedding-3、OpenAI text-embedding-3、Ollama 本地向量模型。模型文件不随项目发布包提供。</p>
         <div className="embedding-mode-tabs" role="group" aria-label="嵌入模型来源">
           <button
@@ -312,6 +339,9 @@ export function ModelsPanel({ draft, setDraft }: PanelProps) {
             onClick={() => setEmbed({ mode: "local" })}
           >本地模型文件</button>
         </div>
+        <details className="model-advanced embedding-advanced">
+          <summary>连接、模型目录与 Reranker 高级配置</summary>
+          <div className="model-advanced-body">
         {draft.embedModel.mode === "remote" && <>
         <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
           {EMBED_PRESETS.map((p) => (
@@ -363,7 +393,9 @@ export function ModelsPanel({ draft, setDraft }: PanelProps) {
           </button>
           {rerankerProbe.result && <ProbeResultView result={rerankerProbe.result} />}
         </div>
+          </div>
+        </details>
       </div>
-    </>
+    </div>
   );
 }

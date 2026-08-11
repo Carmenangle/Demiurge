@@ -97,6 +97,65 @@ def test_后台正文先落盘并创建稳定媒体槽(monkeypatch, tmp_path):
     }]
 
 
+def test_Comfy提交后把prompt_id写回持久化媒体槽(monkeypatch, tmp_path):
+    from app.services import repo_meta
+    monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
+    monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+    chat_snapshot.save("thread", [{
+        "id": "bot", "role": "assistant", "text": "正文",
+        "parts": [{"type": "media-slot", "slotId": "slot-1", "status": "pending"}],
+    }])
+
+    assert chat_snapshot.bind_media_slot_prompt("thread", "bot", "slot-1", "prompt-1")
+    assert chat_snapshot.load("thread")[0]["parts"] == [{
+        "type": "media-slot", "slotId": "slot-1", "status": "pending",
+        "promptId": "prompt-1",
+    }]
+
+
+def test_自动插画提交前只能原子认领一次pending槽(monkeypatch, tmp_path):
+    from app.services import repo_meta
+    monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
+    monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+    chat_snapshot.save("thread", [{
+        "id": "bot", "role": "assistant", "text": "正文",
+        "parts": [{"type": "media-slot", "slotId": "slot-1", "status": "pending"}],
+    }])
+
+    assert chat_snapshot.claim_media_slot_submission("thread", "bot", "slot-1")
+    assert not chat_snapshot.claim_media_slot_submission("thread", "bot", "slot-1")
+    assert chat_snapshot.bind_media_slot_prompt("thread", "bot", "slot-1", "prompt-1")
+    assert not chat_snapshot.claim_media_slot_submission("thread", "bot", "slot-1")
+
+
+def test_前端旧快照不能清掉服务端插画认领或完成结果(monkeypatch, tmp_path):
+    from app.services import repo_meta
+    monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
+    monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+    chat_snapshot._REVISIONS.clear()
+    pending = [{
+        "id": "bot", "role": "assistant", "text": "正文",
+        "parts": [{"type": "media-slot", "slotId": "slot-1", "status": "pending"}],
+    }]
+    chat_snapshot.save("thread", pending)
+    assert chat_snapshot.claim_media_slot_submission("thread", "bot", "slot-1")
+
+    assert chat_snapshot.save_if_newer("thread", pending, revision=1)
+    assert chat_snapshot.load("thread")[0]["parts"][0]["submissionClaim"] is True
+    assert not chat_snapshot.claim_media_slot_submission("thread", "bot", "slot-1")
+
+    assert chat_snapshot.bind_media_slot_prompt("thread", "bot", "slot-1", "prompt-1")
+    assert chat_snapshot.resolve_media_slot(
+        "thread", "bot", "slot-1", "ready.png", regeneration={"kind": "template"},
+    )
+    assert chat_snapshot.save_if_newer("thread", pending, revision=2)
+    assert chat_snapshot.load("thread")[0]["parts"][0]["url"] == "ready.png"
+
+    deleted = [{"id": "bot", "role": "assistant", "text": "正文", "parts": []}]
+    assert chat_snapshot.save_if_newer("thread", deleted, revision=3)
+    assert chat_snapshot.load("thread")[0]["parts"] == []
+
+
 def test_重新生图按相同slot替换已有图片而不追加消息(monkeypatch, tmp_path):
     from app.services import repo_meta
     monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)

@@ -24,3 +24,16 @@ app/services/task_progress_store.py
 app/services/update_progress.py
 app/services/model_downloader.py
 app/services/node_update.py
+app/services/instruction_provenance.py
+app/services/structured_contracts.py
+app/services/structured_output.py
+app/services/trace_replay.py
+app/services/temporal_fact_store.py
+app/services/continuity_compiler.py
+app/services/character_belief.py
+app/services/narrative_ci.py
+app/services/model_lease.py
+app/services/visual_preference.py
+app/services/capability_sandbox.py
+app/services/procedure_skills.py
+app/services/scenario_lab.py

@@ -158,11 +158,139 @@ def import_chronicle(req: ImportRequest) -> dict[str, object]:
     """导入往事纪要（追加或替换）。返回导入条数。"""
     if not (req.output_dir and req.repo_id):
         raise HTTPException(status_code=400, detail="缺少 output_dir 或 repo_id")
-    if req.replace:
-        existing = narrative_store.all_entries(req.output_dir, req.repo_id)
-        narrative_store.delete_rows(req.output_dir, req.repo_id, [e.rowid for e in existing])
-    n = 0
-    for p in req.items:
-        if p.text.strip() and narrative_store.append(req.output_dir, req.repo_id, _entry(p)):
-            n += 1
+    n = narrative_store.import_entries(
+        req.output_dir, req.repo_id, [_entry(item) for item in req.items], replace=req.replace,
+    )
     return {"ok": True, "imported": n}
+
+
+class TemporalFactRequest(BaseModel):
+    output_dir: str
+    repo_id: str
+    subject: str
+    predicate: str
+    object: str
+    valid_from_turn: int
+    evidence: str
+    source: str = "user"
+    supersedes_id: str | None = None
+
+
+@router.post("/facts")
+def add_temporal_fact(req: TemporalFactRequest) -> dict[str, object]:
+    """写入有证据的世界事实；替代旧事实必须显式给 supersedes_id。"""
+    from app.services import temporal_fact_store
+
+    try:
+        fact = temporal_fact_store.record(
+            req.output_dir, req.repo_id, subject=req.subject, predicate=req.predicate,
+            object_=req.object, valid_from_turn=req.valid_from_turn,
+            evidence=req.evidence, source=req.source, supersedes_id=req.supersedes_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "fact": fact}
+
+
+@router.get("/facts")
+def temporal_facts(output_dir: str, repo_id: str, turn: int,
+                   subject: str = "") -> dict[str, object]:
+    from app.services import temporal_fact_store
+
+    return {"items": temporal_fact_store.as_of(
+        output_dir, repo_id, turn, subject=subject,
+    )}
+
+
+@router.get("/facts/conflicts")
+def temporal_fact_conflicts(output_dir: str, repo_id: str, turn: int) -> dict[str, object]:
+    from app.services import temporal_fact_store
+
+    return {"items": temporal_fact_store.conflicts(output_dir, repo_id, turn)}
+
+
+class NarrativeCIRequest(BaseModel):
+    output_dir: str
+    repo_id: str
+    text: str
+    turn: int
+
+
+@router.post("/ci/check")
+def check_narrative(req: NarrativeCIRequest) -> dict[str, object]:
+    """手动运行内容中立的 Narrative CI；只保存诊断，不修改正文。"""
+    from app.services import narrative_ci, temporal_fact_store
+
+    facts = temporal_fact_store.as_of(req.output_dir, req.repo_id, req.turn)
+    items = narrative_ci.evaluate(req.text, turn=req.turn, facts=facts)
+    narrative_ci.save(req.output_dir, req.repo_id, items)
+    return {"items": items}
+
+
+@router.get("/ci")
+def narrative_diagnostics(output_dir: str, repo_id: str, status: str = "") -> dict[str, object]:
+    from app.services import narrative_ci
+
+    return {"items": narrative_ci.list_diagnostics(output_dir, repo_id, status=status)}
+
+
+class NarrativeCIResolveRequest(BaseModel):
+    output_dir: str
+    repo_id: str
+    diagnostic_id: str
+    status: str
+
+
+@router.post("/ci/resolve")
+def resolve_narrative_diagnostic(req: NarrativeCIResolveRequest) -> dict[str, object]:
+    from app.services import narrative_ci
+
+    try:
+        ok = narrative_ci.resolve(
+            req.output_dir, req.repo_id, req.diagnostic_id, req.status,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not ok:
+        raise HTTPException(status_code=404, detail="未找到 Narrative CI 诊断")
+    return {"ok": True}
+
+
+class CharacterBeliefRequest(BaseModel):
+    output_dir: str
+    repo_id: str
+    character: str
+    fact_id: str
+    claim: str
+    stance: str
+    confidence: float = 1.0
+    witnessed_at: int
+    evidence: str
+    source: str = "user"
+    supersedes_id: str | None = None
+
+
+@router.post("/beliefs")
+def add_character_belief(req: CharacterBeliefRequest) -> dict[str, object]:
+    from app.services import character_belief
+
+    try:
+        item = character_belief.record(
+            req.output_dir, req.repo_id, character=req.character, fact_id=req.fact_id,
+            claim=req.claim, stance=req.stance, confidence=req.confidence,
+            witnessed_at=req.witnessed_at, evidence=req.evidence, source=req.source,
+            supersedes_id=req.supersedes_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "item": item}
+
+
+@router.get("/beliefs")
+def character_beliefs(output_dir: str, repo_id: str, turn: int,
+                      character: str = "") -> dict[str, object]:
+    from app.services import character_belief
+
+    return {"items": character_belief.active(
+        output_dir, repo_id, turn, characters=[character] if character else None,
+    )}

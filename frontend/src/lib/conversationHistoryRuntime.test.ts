@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ChatMessage } from "../types/chat";
-import { ConversationHistoryRuntime } from "./conversationHistoryRuntime";
+import { ConversationHistoryRuntime, resolveInitialHistory } from "./conversationHistoryRuntime";
 
 function setup(initial: ChatMessage[]) {
   const values = new Map<string, string>();
@@ -22,6 +22,11 @@ const messages: ChatMessage[] = [
 ];
 
 describe("conversation history transaction", () => {
+  it("treats a successful empty backend snapshot as authoritative", () => {
+    expect(resolveInitialHistory([], messages)).toEqual([]);
+    expect(resolveInitialHistory(null, messages)).toEqual(messages);
+  });
+
   it("publishes and persists deletion in one operation", () => {
     const { runtime, persist, current } = setup(messages);
     runtime.deleteMessage("a1");

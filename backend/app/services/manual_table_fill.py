@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from app.services import chat_snapshot, narrative_memory, narrative_store, table_store
+from app.services import chat_snapshot, narrative_memory, narrative_store, structured_output, table_store
+from app.services.structured_contracts import ManualFillResult
 from app.services.pathnames import safe_seg
 
 CHRONICLE_UID = "__chronicle__"
@@ -152,13 +152,10 @@ def _manual_system(tables: list[dict[str, Any]], include_chronicle: bool) -> str
 
 
 def _parse_result(raw: str) -> dict[str, Any]:
-    match = re.search(r"\{[\s\S]*\}", raw or "")
-    if not match:
-        raise ValueError("填表 Agent 未返回 JSON")
-    data = json.loads(match.group(0))
-    if not isinstance(data, dict):
-        raise ValueError("填表 Agent 返回结构无效")
-    return data
+    try:
+        return structured_output.parse_model(raw, ManualFillResult).model_dump()
+    except structured_output.StructuredOutputError as exc:
+        raise ValueError(f"填表 Agent 返回结构无效：{exc}") from exc
 
 
 def run_manual_fill(*, base: str, repo_id: str, card_name: str,

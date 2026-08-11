@@ -10,6 +10,7 @@
 嵌入模型走「设置 → 嵌入模型」配置的 OpenAI 兼容接口（Ollama / OpenAI / 中转通用）。
 """
 import hashlib
+import logging
 import re
 import time
 import uuid
@@ -22,6 +23,13 @@ from app.services.rag_backend import EmbedConfig
 
 
 SYSTEM_COLLECTION = "global"  # 系统指令独占库，全局共享
+_log = logging.getLogger("uvicorn.error")
+
+
+class DocumentImportError(RuntimeError):
+    def __init__(self, imported: int, cause: Exception):
+        self.imported = imported
+        super().__init__(f"导入失败（已入 {imported} 篇）：{cause}")
 
 
 def _repo_collection(repo_id: str) -> str:
@@ -83,14 +91,14 @@ def _auto_tags(prompt: str, tags: str) -> list[str]:
 
 def index_generation(repo_id: str, cfg: EmbedConfig,
                      prompt: str, tags: str = "", image_url: str = "",
-                     created_at: int | None = None) -> None:
+                     created_at: int | None = None, description: str = "") -> None:
     """生图完成后入库：提示词 + 标签合为一条文档，附图片URL元数据。写入本仓库库。
 
     只要有图片就入库——智能体出图常无提示词文本，此时用占位文本嵌入，
     避免因文本为空而整张图被丢弃（资产库会漏图）。
     标签同时结构化存入 metadata.tags（逗号串），供资产库标签展示/搜索/增删。
     """
-    text = "\n".join(t for t in [prompt, tags] if t and t.strip())
+    text = "\n".join(t for t in [prompt, tags, description] if t and t.strip())
     if not text.strip() and not (image_url or "").strip():
         return  # 既无文本也无图，无意义
     embed_text = text if text.strip() else "生成图片"  # 无提示词时用占位文本嵌入
@@ -107,11 +115,36 @@ def index_generation(repo_id: str, cfg: EmbedConfig,
         Document(page_content=embed_text,
                  metadata={"kind": "generation", "image_url": image_url or "",
                            "repo_id": repo_id or "", "tags": ",".join(tag_list),
+                           "prompt": prompt or "", "description": description or "",
                            # 权威排序键：入库毫秒时间戳。前端据此从新到旧，不再依赖文件名编号
                            # （文件改名/删图都不影响排序）。历史记录无此字段时前端回退到文件名。
                            "created_at": (created_at if created_at is not None
                                           else int(time.time() * 1000))})
     ], ids=[doc_id])
+
+
+def index_generation_reliable(
+    repo_id: str,
+    cfg: EmbedConfig,
+    prompt: str,
+    tags: str = "",
+    image_url: str = "",
+    *,
+    attempts: int = 3,
+    sleep_fn=time.sleep,
+) -> int:
+    """可靠入库事务；重试策略由 RAG Module 统一拥有，路由不参与编排。"""
+    last: Exception | None = None
+    for attempt in range(max(1, attempts)):
+        try:
+            index_generation(repo_id, cfg, prompt, tags, image_url)
+            return attempt + 1
+        except Exception as exc:  # noqa: BLE001 - 嵌入后端错误类型不统一
+            last = exc
+            _log.warning("index-generation 失败(第%d次) repo=%s: %s", attempt + 1, repo_id, exc)
+            if attempt + 1 < max(1, attempts):
+                sleep_fn(0.8 * (attempt + 1))
+    raise RuntimeError(f"入库失败(重试{max(1, attempts)}次)：{last}") from last
 
 
 def index_document(repo_id: str, cfg: EmbedConfig,
@@ -129,6 +162,27 @@ def index_document(repo_id: str, cfg: EmbedConfig,
         for c in chunks
     ], ids=[str(uuid.uuid4()) for _ in chunks])
     return len(chunks)
+
+
+def import_documents(
+    repo_id: str,
+    cfg: EmbedConfig,
+    documents: list[tuple[str, str]],
+) -> dict[str, int]:
+    """批量导入并保持既有的“报告已成功篇数”语义。"""
+    imported = 0
+    chunks = 0
+    for text, title in documents:
+        if not text.strip():
+            continue
+        try:
+            count = index_document(repo_id, cfg, text, title)
+        except Exception as exc:  # noqa: BLE001
+            raise DocumentImportError(imported, exc) from exc
+        if count:
+            imported += 1
+            chunks += count
+    return {"documents": imported, "chunks": chunks}
 
 
 def index_table_rows(repo_id: str, cfg: EmbedConfig,
@@ -273,6 +327,9 @@ def _dump(collection: str, cfg: EmbedConfig) -> list[dict]:
             "locked": bool(meta.get("locked", False)),
             "image_url": meta.get("image_url", ""),
             "tags": meta.get("tags", ""),
+            "prompt": meta.get("prompt", ""),
+            "description": meta.get("description", ""),
+            "repo_id": meta.get("repo_id", ""),
             "created_at": int(meta.get("created_at", 0) or 0),
         })
     return out
@@ -296,11 +353,77 @@ def list_generations(repo_id: str, cfg: EmbedConfig) -> list[dict]:
     for d in _dump(_repo_collection(repo_id), cfg):
         if d["kind"] != "generation" or not d["image_url"]:
             continue
-        prompt = d["content"] if d["content"] != "生成图片" else ""  # 还原占位为空
+        legacy = d["content"] if d["content"] != "生成图片" else ""
+        prompt = d.get("prompt", "") or legacy
         tags = [t for t in (d.get("tags", "") or "").split(",") if t.strip()]
-        out.append({"id": d["id"], "prompt": prompt, "image_url": d["image_url"],
-                    "tags": tags, "created_at": d.get("created_at", 0)})
+        out.append({"id": d["id"], "repo_id": repo_id, "prompt": prompt,
+                    "description": d.get("description", ""),
+                    "image_url": d["image_url"], "tags": tags,
+                    "created_at": d.get("created_at", 0)})
     return out
+
+
+def _generation_search_item(item: dict) -> dict:
+    content = "\n".join(value for value in [
+        item.get("prompt", ""), " ".join(item.get("tags", [])),
+        item.get("description", ""),
+    ] if value)
+    return {**item, "content": content, "title": item.get("description", "")}
+
+
+def search_generations(repo_ids: list[str], cfg: EmbedConfig,
+                       query: str, k: int = 32) -> list[dict]:
+    """generation 专用 Hybrid 检索；与剧情 retrieve 隔离。"""
+    if not query.strip():
+        return []
+    cap = max(1, min(int(k), 100))
+    candidate_k = max(cap * 4, 24)
+    documents = [
+        _generation_search_item(item)
+        for repo_id in dict.fromkeys(repo_ids)
+        for item in list_generations(repo_id, cfg)
+    ]
+    by_image = {
+        (str(item.get("repo_id") or ""), str(item.get("image_url") or "")): item
+        for item in documents
+    }
+    rankings: list[tuple[str, list[dict]]] = []
+    try:
+        vector = rag_backend.embed_query(cfg, query)
+    except Exception:
+        vector = None
+    if vector is not None:
+        for repo_id in dict.fromkeys(repo_ids):
+            try:
+                dense_docs = _store(_repo_collection(repo_id), cfg).similarity_search_by_vector(
+                    vector, k=candidate_k, filter={"kind": "generation"},
+                )
+            except Exception:
+                dense_docs = []
+            dense = []
+            for doc in dense_docs:
+                item = by_image.get((repo_id, str((doc.metadata or {}).get("image_url") or "")))
+                if item is not None:
+                    dense.append(item)
+            rankings.append((f"dense:repo:{repo_id}", dense))
+    rankings.append(("bm25", rag_retrieval.sparse_rank(query, documents, candidate_k)))
+    try:
+        from app.services import visual_asset_index
+
+        visual_ids = visual_asset_index.search(repo_ids, query, candidate_k)
+        by_id = {str(item.get("id") or ""): item for item in documents}
+        rankings.append(("visual", [by_id[item_id] for item_id in visual_ids if item_id in by_id]))
+    except Exception:
+        pass  # 视觉模型未安装/未建索引时维持文本语义搜索
+    fused = rag_retrieval.rrf_fuse(rankings, candidate_k)
+    if rag_retrieval.needs_rerank(fused):
+        reranked = reranker.rerank(
+            query, fused, cfg.reranker_dir, cap,
+            instruction="Rank generated images by how well their prompt, tags and description match the query.",
+        )
+        fused = reranked or fused
+    return [{key: value for key, value in item.items() if key not in {"content", "title"}}
+            for item in fused[:cap]]
 
 
 def tag_stats(repo_ids: list[str], cfg: EmbedConfig) -> list[dict]:
@@ -332,7 +455,33 @@ def set_doc_tags(doc_id: str, repo_id: str, cfg: EmbedConfig,
     clean = [t.strip() for t in tags if t and t.strip()]
     meta["tags"] = ",".join(dict.fromkeys(clean))  # 去重保序
     got = store.get(ids=[doc_id])
-    content = (got.get("documents") or [""])[0] or ""  # 保持原文档内容不变
+    content = (got.get("documents") or [""])[0] or ""
+    if meta.get("kind") == "generation":
+        content = "\n".join(value for value in [
+            str(meta.get("prompt") or ""), meta["tags"],
+            str(meta.get("description") or ""),
+        ] if value) or "生成图片"
+    store.update_document(doc_id, Document(page_content=content, metadata=meta))
+    return True
+
+
+def set_generation_description(doc_id: str, repo_id: str, cfg: EmbedConfig,
+                               description: str) -> bool:
+    """保存 VLM 描述并重建该 generation 的文本向量；不写聊天历史。"""
+    value = (description or "").strip()
+    if not value:
+        return False
+    store, meta = _find_store(doc_id, repo_id, cfg)
+    if store is None or meta.get("kind") != "generation":
+        return False
+    got = store.get(ids=[doc_id])
+    legacy = (got.get("documents") or [""])[0] or ""
+    prompt = str(meta.get("prompt") or "")
+    if not prompt and legacy != "生成图片":
+        prompt = legacy
+    meta["prompt"] = prompt
+    meta["description"] = value
+    content = "\n".join(part for part in [prompt, str(meta.get("tags") or ""), value] if part)
     store.update_document(doc_id, Document(page_content=content, metadata=meta))
     return True
 

@@ -41,17 +41,17 @@ export function suggestedWeightForLora(loras: readonly AvailableLora[], loraName
 function initialRows(preset?: MediaInsertPreset, cardName?: string, cardNames: string[] = []): CharRow[] {
   const map = preset?.characterLoras || {};
   const rows: CharRow[] = Object.entries(map).map(([name, b]) => ({ name, ...b }));
-  const bound = [...new Set([...cardNames, ...(cardName ? [cardName] : [])].filter(Boolean))];
-  for (const name of [...bound].reverse()) {
-    if (!rows.some((r) => r.name === name)) rows.unshift({ name });
-  }
-  return rows.length ? rows : [{ name: cardName || "" }];
+  // 不再自动预填未配置 LoRA 的绑定卡——避免用户删除后下次又被自动加回
+  return rows.length ? rows : [{ name: "" }];
 }
 
 // 多元数据插入：为本作品预设剧情高潮点异步出图用的 ComfyUI 工作流模板 + 按角色 LoRA/底图。
 // 提示词由后端高潮点提取，运行时按在场角色取该角色 LoRA/底图，无则回退风格 LoRA + 风格底图。
 export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDir, preset, onSave, onClose }: Props) {
   const [templateId, setTemplateId] = useState(preset?.templateId || "");
+  const [loraMode, setLoraMode] = useState<"none" | "single" | "multi">(
+    preset?.loraMode || "single",
+  );
   const [appearanceSource, setAppearanceSource] = useState<"worldbook" | "character_card">(
     preset?.appearanceSource === "character_card" ? "character_card" : "worldbook",
   );
@@ -69,6 +69,11 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
   const [videoTemplateId, setVideoTemplateId] = useState(preset?.videoTemplateId || "");
   const [smartVideo, setSmartVideo] = useState(preset?.smartVideo ?? false);
   const [loras, setLoras] = useState<AvailableLora[]>([]);
+  const [loraLoadState, setLoraLoadState] = useState<"idle" | "loading" | "ready" | "error">(
+    modelsDir ? "loading" : "idle",
+  );
+  const [loraLoadError, setLoraLoadError] = useState("");
+  const [loraReloadKey, setLoraReloadKey] = useState(0);
   const [uploading, setUploading] = useState("");  // 正在上传底图的行 key（""=无）
 
   useEffect(() => {
@@ -78,9 +83,39 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
   }, [onClose]);
 
   useEffect(() => {
-    if (!modelsDir) { setLoras([]); return; }
-    availableLoras(modelsDir).then((r) => setLoras(r.items || [])).catch(() => setLoras([]));
-  }, [modelsDir]);
+    let active = true;
+    let retryTimer: number | undefined;
+    if (!modelsDir) {
+      setLoras([]);
+      setLoraLoadState("idle");
+      setLoraLoadError("");
+      return () => { active = false; };
+    }
+    setLoras([]);
+    setLoraLoadState("loading");
+    setLoraLoadError("");
+    const load = async (attempt: number) => {
+      try {
+        const response = await availableLoras(modelsDir);
+        if (!active) return;
+        setLoras(response.items || []);
+        setLoraLoadState("ready");
+      } catch (error) {
+        if (!active) return;
+        if (attempt < 2) {
+          retryTimer = window.setTimeout(() => { void load(attempt + 1); }, 500 * (attempt + 1));
+          return;
+        }
+        setLoraLoadState("error");
+        setLoraLoadError(error instanceof Error ? error.message : "未知错误");
+      }
+    };
+    void load(0);
+    return () => {
+      active = false;
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+    };
+  }, [modelsDir, loraReloadKey]);
 
   useEffect(() => {
     if (promptProfile !== "anima_tags" || (qualityPrompt && negativePrompt)) return;
@@ -126,7 +161,11 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
   };
 
   // 校验：角色无 LoRA 时必须给底图（设定要求）。有名字的行才校验。
-  const missingBase = rows.some((r) => r.name.trim() && !r.loraName && !r.baseImage && !styleLora && !styleBaseImage);
+  const missingBase = rows.some((r) => r.name.trim()
+    && (loraMode === "none" || !r.loraName)
+    && !r.baseImage
+    && (loraMode === "none" || !styleLora)
+    && !styleBaseImage);
 
   const save = () => {
     const characterLoras: Record<string, CharacterLoraBinding> = {};
@@ -134,21 +173,22 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
       const name = r.name.trim();
       if (!name) continue;
       characterLoras[name] = {
-        loraName: r.loraName || undefined,
-        loraWeight: r.loraName ? r.loraWeight ?? 0.8 : undefined,
+        loraName: loraMode === "none" ? undefined : r.loraName || undefined,
+        loraWeight: loraMode !== "none" && r.loraName ? r.loraWeight ?? 0.8 : undefined,
         baseImage: r.baseImage || undefined,
       };
     }
     onSave({
       templateId,
+      loraMode,
       appearanceSource,
       promptProfile,
       qualityPrompt: promptProfile === "anima_tags" ? qualityPrompt.trim() : undefined,
       negativePrompt: promptProfile === "anima_tags" ? negativePrompt.trim() : undefined,
       latentLongEdge,
       characterLoras: Object.keys(characterLoras).length ? characterLoras : undefined,
-      styleLora: styleLora || undefined,
-      styleLoraWeight: styleLora ? styleLoraWeight : undefined,
+      styleLora: loraMode === "none" ? undefined : styleLora || undefined,
+      styleLoraWeight: loraMode !== "none" && styleLora ? styleLoraWeight : undefined,
       styleBaseImage: styleBaseImage || undefined,
       videoTemplateId: videoTemplateId || undefined,
       smartVideo,
@@ -176,6 +216,27 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
         <p style={{ color: "#666", marginTop: 0, fontSize: 13 }}>
           预设本作品剧情高潮点自动出图用的工作流模板。保存后会自动开启「剧情插画」；提示词由剧情自动提取，LoRA 无触发词记录也不会阻断出图。
         </p>
+        <div style={{ marginBottom: 12 }}>
+          <span style={{ display: "block", marginBottom: 4, fontSize: 13 }}>LoRA 模式</span>
+          <div className="lora-mode-switch" role="group" aria-label="LoRA 模式">
+            {([
+              ["none", "无 LoRA"], ["single", "单 LoRA"], ["multi", "多 LoRA"],
+            ] as const).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                className={`btn${loraMode === value ? " primary" : ""}`}
+                aria-pressed={loraMode === value}
+                onClick={() => setLoraMode(value)}
+              >{label}</button>
+            ))}
+          </div>
+          <p className="bind-hint" style={{ margin: "5px 0 0" }}>
+            {loraMode === "none" && "只使用角色底图，不加载角色或风格 LoRA。"}
+            {loraMode === "single" && "在场角色有 LoRA 时使用角色 LoRA，否则回退风格 LoRA。"}
+            {loraMode === "multi" && "固定加载默认风格 LoRA，并叠加全部在场角色 LoRA。"}
+          </p>
+        </div>
         <label style={{ display: "block", marginBottom: 12 }}>
           <span style={{ display: "block", marginBottom: 4, fontSize: 13 }}>提示词模式</span>
           <select
@@ -253,17 +314,30 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
             <strong style={{ fontSize: 13 }}>按角色配置（LoRA + 底图）</strong>
             <button className="btn" onClick={addRow}>+ 添加角色</button>
           </div>
-        {templateId && !hasLoraSlot && (
+        {loraMode !== "none" && templateId && !hasLoraSlot && (
           <p style={{ color: "#c0392b", fontSize: 12, marginTop: -2 }}>该模板未标注 LoRA 字段，角色 LoRA 选了也不生效。</p>
         )}
         {templateId && !hasImageSlot && (
           <p style={{ color: "#c98a1a", fontSize: 12, marginTop: -2 }}>该模板是纯文生图配置，没有「角色底图」槽位；不选底图时可正常出图，只有需要图生图锁定角色时才要更换模板或补充该语义字段。</p>
         )}
-        {loras.length === 0 && (
+        {loraMode !== "none" && loraLoadState === "loading" && (
+          <p style={{ color: "#777", fontSize: 12, marginTop: -2 }}>正在读取 LoRA 目录…</p>
+        )}
+        {loraMode !== "none" && loraLoadState === "error" && (
           <p style={{ color: "#c98a1a", fontSize: 12, marginTop: -2 }}>
-            {modelsDir
-              ? `在 ${modelsDir}/loras 下没扫到模型文件，请确认设置里的 ComfyUI 路径。`
-              : "未设置 ComfyUI 路径，无法列出 LoRA。请先到设置里填 ComfyUI 路径或 models 目录。"}
+            LoRA 列表读取失败，当前绑定仍会保留：{loraLoadError}
+            <button type="button" className="btn" style={{ marginLeft: 8 }}
+              onClick={() => setLoraReloadKey((value) => value + 1)}>重试</button>
+          </p>
+        )}
+        {loraMode !== "none" && loraLoadState === "ready" && loras.length === 0 && (
+          <p style={{ color: "#c98a1a", fontSize: 12, marginTop: -2 }}>
+            在 {modelsDir}/loras 下没扫到模型文件，请确认设置里的 ComfyUI 路径。
+          </p>
+        )}
+        {loraMode !== "none" && loraLoadState === "idle" && (
+          <p style={{ color: "#c98a1a", fontSize: 12, marginTop: -2 }}>
+            未设置 ComfyUI 路径，无法列出 LoRA。请先到设置里填 ComfyUI 路径或 models 目录。
           </p>
         )}
         {rows.map((r, i) => (
@@ -276,7 +350,7 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
               />
               <button className="btn" onClick={() => delRow(i)} title="删除该角色">✕</button>
             </div>
-            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6 }}>
+            {loraMode !== "none" && <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6 }}>
               <select value={r.loraName || ""} onChange={(e) => {
                 const loraName = e.target.value;
                 setRow(i, {
@@ -285,6 +359,9 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
                 });
               }} style={{ flex: 1 }}>
                 <option value="">无角色 LoRA（用风格 LoRA + 底图）</option>
+                {r.loraName && !loras.some((lora) => lora.lora_name === r.loraName) && (
+                  <option value={r.loraName}>{r.loraName}（当前绑定，目录列表未包含）</option>
+                )}
                 {loras.map((l) => (
                   <option key={l.lora_name} value={l.lora_name}>
                     {l.lora_name}{loraStatusSuffix(l)}
@@ -298,7 +375,7 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
                   style={{ width: 80 }} title="建议权重已自动填入，可手动调整"
                 />
               )}
-            </div>
+            </div>}
             <div style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
               {r.baseImage
                 ? <img src={localViewUrl(r.baseImage)} alt="" style={{ width: 40, height: 40, objectFit: "cover", borderRadius: 4 }} />
@@ -313,17 +390,23 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
         ))}
         </>)}
 
-        <hr style={{ border: "none", borderTop: "1px solid #eee", margin: "16px 0" }} />
-        <strong style={{ fontSize: 13, display: "block", marginBottom: 8 }}>
-          {appearanceSource === "character_card" ? "全局风格 LoRA（可选）" : "兜底风格（角色未单配时用）"}
-        </strong>
-        <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
+        {loraMode !== "none" && <>
+          <hr style={{ border: "none", borderTop: "1px solid #eee", margin: "16px 0" }} />
+          <strong style={{ fontSize: 13, display: "block", marginBottom: 8 }}>
+            {appearanceSource === "character_card"
+              ? "全局风格 LoRA（可选）"
+              : "兜底风格 LoRA"}
+          </strong>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
           <select value={styleLora} onChange={(e) => {
             const loraName = e.target.value;
             setStyleLora(loraName);
             if (loraName) setStyleLoraWeight(suggestedWeightForLora(loras, loraName));
           }} style={{ flex: 1 }}>
             <option value="">无风格 LoRA</option>
+            {styleLora && !loras.some((lora) => lora.lora_name === styleLora) && (
+              <option value={styleLora}>{styleLora}（当前绑定，目录列表未包含）</option>
+            )}
             {loras.map((l) => (
               <option key={l.lora_name} value={l.lora_name}>
                 {l.lora_name}{loraStatusSuffix(l)}
@@ -337,7 +420,8 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
               style={{ width: 80 }} title="建议权重已自动填入，可手动调整"
             />
           )}
-        </div>
+          </div>
+        </>}
         {appearanceSource === "worldbook" && <div style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, marginBottom: 8 }}>
           {styleBaseImage
             ? <img src={localViewUrl(styleBaseImage)} alt="" style={{ width: 40, height: 40, objectFit: "cover", borderRadius: 4 }} />

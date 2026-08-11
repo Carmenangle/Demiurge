@@ -67,6 +67,54 @@ def _save_unlocked(thread_id: str, messages: list) -> None:
     tmp.replace(p)
 
 
+def _preserve_server_media_state(current: list, incoming: list) -> list:
+    """合并同槽的服务端提交状态，防止前端旧快照把认领/结果回滚成 pending。
+
+    只处理传入快照仍保留的同一消息与同一槽；用户已经删除的消息或槽不会复活。
+    """
+    current_messages = {
+        item.get("id"): item for item in current
+        if isinstance(item, dict) and item.get("id")
+    }
+    merged: list = []
+    for item in incoming:
+        if not isinstance(item, dict):
+            merged.append(item)
+            continue
+        current_item = current_messages.get(item.get("id"))
+        if not isinstance(current_item, dict) or not isinstance(item.get("parts"), list):
+            merged.append(item)
+            continue
+        current_parts = {
+            part.get("slotId"): part for part in (current_item.get("parts") or [])
+            if isinstance(part, dict) and part.get("slotId")
+        }
+        next_parts: list = []
+        changed = False
+        for part in item["parts"]:
+            server_part = current_parts.get(part.get("slotId")) if isinstance(part, dict) else None
+            if not isinstance(server_part, dict) or not isinstance(part, dict):
+                next_parts.append(part)
+                continue
+            if (server_part.get("type") in ("image", "video")
+                    and server_part.get("status") == "ready"):
+                next_parts.append(server_part)
+                changed = True
+                continue
+            if part.get("type") == "media-slot" and server_part.get("type") == "media-slot":
+                protected = {
+                    key: server_part[key] for key in ("submissionClaim", "promptId")
+                    if server_part.get(key)
+                }
+                if protected:
+                    next_parts.append({**part, **protected})
+                    changed = True
+                    continue
+            next_parts.append(part)
+        merged.append({**item, "parts": next_parts} if changed else item)
+    return merged
+
+
 def save(thread_id: str, messages: list) -> None:
     """覆盖写入该 thread 的完整消息流，并与增量写串行化。"""
     with _thread_lock(thread_id):
@@ -80,7 +128,7 @@ def save_if_newer(thread_id: str, messages: list, revision: int) -> bool:
         previous = _REVISIONS.get(key)
         if previous is not None and revision <= previous:
             return False
-        _save_unlocked(thread_id, messages)
+        _save_unlocked(thread_id, _preserve_server_media_state(load(thread_id), messages))
         _REVISIONS[key] = revision
         return True
 
@@ -212,6 +260,56 @@ def resolve_media_slot(thread_id: str, message_id: str, slot_id: str, url: str,
                     items[item_index] = {**item, "parts": next_parts}
                     _save_unlocked(thread_id, items)
                     return True
+            return False
+    return False
+
+
+def bind_media_slot_prompt(thread_id: str, message_id: str, slot_id: str,
+                           prompt_id: str) -> bool:
+    """ComfyUI 接受任务后立刻把 prompt_id 写入快照，供刷新恢复继续轮询。"""
+    if not message_id or not slot_id or not prompt_id:
+        return False
+    with _thread_lock(thread_id):
+        items = load(thread_id)
+        for item_index, item in enumerate(items):
+            if not isinstance(item, dict) or item.get("id") != message_id:
+                continue
+            parts = item.get("parts") or []
+            for part_index, part in enumerate(parts):
+                if (isinstance(part, dict) and part.get("type") == "media-slot"
+                        and part.get("slotId") == slot_id):
+                    next_parts = list(parts)
+                    submitted = {**part, "promptId": prompt_id}
+                    submitted.pop("submissionClaim", None)
+                    next_parts[part_index] = submitted
+                    items[item_index] = {**item, "parts": next_parts}
+                    _save_unlocked(thread_id, items)
+                    return True
+            return False
+    return False
+
+
+def claim_media_slot_submission(thread_id: str, message_id: str, slot_id: str) -> bool:
+    """ComfyUI 提交前原子认领 pending 槽；已认领/已提交/已完成目标拒绝。"""
+    if not message_id or not slot_id:
+        return False
+    with _thread_lock(thread_id):
+        items = load(thread_id)
+        for item_index, item in enumerate(items):
+            if not isinstance(item, dict) or item.get("id") != message_id:
+                continue
+            parts = item.get("parts") or []
+            for part_index, part in enumerate(parts):
+                if not (isinstance(part, dict) and part.get("type") == "media-slot"
+                        and part.get("slotId") == slot_id):
+                    continue
+                if part.get("promptId") or part.get("submissionClaim"):
+                    return False
+                next_parts = list(parts)
+                next_parts[part_index] = {**part, "submissionClaim": True}
+                items[item_index] = {**item, "parts": next_parts}
+                _save_unlocked(thread_id, items)
+                return True
             return False
     return False
 

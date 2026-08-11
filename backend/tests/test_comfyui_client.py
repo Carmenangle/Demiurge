@@ -140,3 +140,16 @@ def test_force_refresh_bypasses_object_info_cache(monkeypatch):
 
     assert refreshed == {"Node2": {}}
     assert len(calls) == 2
+
+
+def test_submit_prompt_允许复杂工作流校验超过十秒(monkeypatch):
+    captured = {}
+
+    def open_prompt(_request, *, timeout):
+        captured["timeout"] = timeout
+        return _FakeResp({"prompt_id": "prompt-1"})
+
+    monkeypatch.setattr(comfyui_client, "urlopen", open_prompt)
+
+    assert comfyui_client.submit_prompt("http://127.0.0.1:8188", {"1": {}}) == "prompt-1"
+    assert captured["timeout"] >= 30

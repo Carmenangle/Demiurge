@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import type { ChatMessage } from "../types/chat";
-import { dropMediaSlot, reduceChatStreamEvent, resolveMediaSlot } from "./chatSessionEvents";
+import {
+  dropMediaSlot, pruneUnsubmittedMediaSlots, reduceChatStreamEvent, resolveMediaSlot,
+  restoreSubmittedMediaSlots,
+} from "./chatSessionEvents";
 
 const base = (): ChatMessage[] => [
   { id: "bot", role: "assistant", text: "" },
@@ -83,6 +86,19 @@ describe("reduceChatStreamEvent", () => {
     ]);
   });
 
+  it("重复插画事件遇到同slot已完成图片时不得追加第二个pending槽", () => {
+    const current: ChatMessage[] = [{
+      id: "bot", role: "assistant", text: "正文", parts: [
+        { type: "text", text: "正文" },
+        { type: "image", url: "local://done", slotId: "slot-1", status: "ready" },
+      ],
+    }];
+    const next = reduceChatStreamEvent(current, "bot", {
+      type: "illustrate_request", prompt: "p", motion: 0, actors: [], id: "slot-1",
+    });
+    expect(next).toEqual(current);
+  });
+
   it("图片完成后原位替换，失败时删除slot并保留正文", () => {
     const current: ChatMessage[] = [{
       id: "bot", role: "assistant", text: "前文后文", parts: [
@@ -124,5 +140,30 @@ describe("reduceChatStreamEvent", () => {
     }];
 
     expect(dropMediaSlot(current, "bot", "slot-1")[0].parts).toBeUndefined();
+  });
+
+  it("刷新恢复时先用本地任务补回prompt_id，再删除真正的预提交孤儿槽", () => {
+    const current: ChatMessage[] = [{
+      id: "bot", role: "assistant", text: "前文后文", parts: [
+        { type: "text", text: "前文" },
+        { type: "media-slot", slotId: "orphan", status: "pending" },
+        { type: "text", text: "后文" },
+        { type: "media-slot", slotId: "submitted", status: "pending", promptId: "prompt-1" },
+      ],
+    }];
+
+    const restored = restoreSubmittedMediaSlots(current, [{
+      prompt_id: "prompt-local", createdAt: 1,
+      target: { messageId: "bot", slotId: "orphan", background: true },
+    }]);
+    const result = pruneUnsubmittedMediaSlots(restored);
+
+    expect(result.removed).toEqual([]);
+    expect(result.messages[0].parts).toEqual([
+      { type: "text", text: "前文" },
+      { type: "media-slot", slotId: "orphan", status: "pending", promptId: "prompt-local" },
+      { type: "text", text: "后文" },
+      { type: "media-slot", slotId: "submitted", status: "pending", promptId: "prompt-1" },
+    ]);
   });
 });

@@ -23,6 +23,8 @@ export function templateRegenerationSnapshot(
   comfyuiUrl: string,
   outputNodeIds: string[],
   prompt: string,
+  loras: { name: string; weight: number }[] = [],
+  loraMode: "none" | "single" | "multi" = "single",
 ): TemplateRegeneration {
   return {
     kind: "template",
@@ -31,6 +33,8 @@ export function templateRegenerationSnapshot(
     comfyuiUrl,
     outputNodeIds: [...outputNodeIds],
     prompt,
+    ...(loras.length ? { loras: JSON.parse(JSON.stringify(loras)) } : {}),
+    ...(loraMode !== "single" ? { loraMode } : {}),
   };
 }
 

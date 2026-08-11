@@ -123,3 +123,39 @@ source_modules =
     app.services.roleplay_agency
 forbidden_modules =
     app.services.agent_graph
+
+[importlinter:contract:structured-replay-stack]
+name = 结构化评测方向：Trace Replay 依赖结构化 Runtime 与 Trace，底座不得反向依赖评测
+type = layers
+layers =
+    app.services.trace_replay
+    app.services.structured_output | app.services.run_trace
+    app.services.structured_contracts
+
+[importlinter:contract:scenario-procedure-stack]
+name = 过程技能方向：技能编排依赖快照与能力租约，底座不得反向依赖技能
+type = layers
+layers =
+    app.services.procedure_skills
+    app.services.scenario_lab | app.services.capability_sandbox | app.services.run_trace
+    app.services.repo_meta
+    app.services.pathnames
+
+[importlinter:contract:visual-resource-stack]
+name = 视觉索引方向：视觉 Adapter 依赖模型租约，租约不得依赖视觉业务
+type = layers
+layers =
+    app.services.visual_asset_index
+    app.services.model_lease
+
+[importlinter:contract:continuity-modules-not-depend-on-graph]
+name = 连续性 Module 不得依赖 Agent 图编排或路由
+type = forbidden
+source_modules =
+    app.services.continuity_compiler
+    app.services.narrative_ci
+    app.services.temporal_fact_store
+    app.services.character_belief
+forbidden_modules =
+    app.services.agent_graph
+    app.routers

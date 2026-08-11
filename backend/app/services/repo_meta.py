@@ -98,7 +98,40 @@ def folder_name(repo_id: str) -> str:
 
 def repo_folder_path(output_dir: str, repo_id: str) -> Path:
     """只计算仓库输出路径，不创建目录或写 marker。清理/探测场景使用。"""
-    return Path(output_dir) / folder_name(repo_id)
+    out = Path(output_dir)
+    candidate = out / folder_name(repo_id)
+    if not candidate.is_dir() and _repo_record(repo_id) is None:
+        marked = _find_marked_folder(out, repo_id)
+        if marked is not None:
+            return marked
+    return _collision_safe_path(candidate, repo_id)
+
+
+def _collision_safe_path(candidate: Path, repo_id: str) -> Path:
+    """目标目录已由另一 UUID 占用时，返回带 UUID 后缀的隔离目录。"""
+    owner = _marker_repo_id(candidate) if candidate.is_dir() else ""
+    if not owner or owner == repo_id:
+        return candidate
+    suffix = safe_seg(repo_id, "repo", strip=False)[:8]
+    isolated = candidate.with_name(f"{candidate.name} [{suffix}]")
+    isolated_owner = _marker_repo_id(isolated) if isolated.is_dir() else ""
+    if not isolated_owner or isolated_owner == repo_id:
+        return isolated
+    return candidate.with_name(f"{candidate.name} [{safe_seg(repo_id, 'repo', strip=False)}]")
+
+
+def _find_marked_folder(output_dir: Path, repo_id: str) -> Path | None:
+    """按不可变 UUID 找回改名前遗留的目录；目录名只用于展示，不再充当身份。"""
+    if not output_dir.is_dir():
+        return None
+    try:
+        matches = [
+            marker.parent for marker in output_dir.rglob("_repo.json")
+            if _marker_repo_id(marker.parent) == repo_id
+        ]
+    except OSError:
+        return None
+    return min(matches, key=lambda path: len(path.parts)) if matches else None
 
 
 def migrate_legacy_folder(output_dir: str, repo_id: str) -> Path:
@@ -116,9 +149,9 @@ def migrate_legacy_folder(output_dir: str, repo_id: str) -> Path:
     if not output_dir:
         return repo_folder_path(output_dir, repo_id)
     out = Path(output_dir)
-    new_path = out / folder_name(repo_id)
+    new_path = repo_folder_path(output_dir, repo_id)
     parent_seg = parent_folder_seg(repo_id)
-    if not parent_seg or new_path.exists():
+    if not parent_seg or (new_path.exists() and _marker_repo_id(new_path) in ("", repo_id)):
         return new_path  # 非子仓库，或已在新位置：无需迁移
     own = folder_name(repo_id).rsplit("/", 1)[-1]
     # 候选旧位置，按可信度排序：UUID 文件夹（唯一，最可信）> 带本 repo 标记的扁平文件夹
@@ -129,6 +162,9 @@ def migrate_legacy_folder(output_dir: str, repo_id: str) -> Path:
     flat_dir = out / own
     if flat_dir.is_dir() and _marker_repo_id(flat_dir) == repo_id:
         candidates.append(flat_dir)
+    marked = _find_marked_folder(out, repo_id)
+    if marked is not None and marked not in candidates and marked != new_path:
+        candidates.append(marked)
     for src in candidates:
         try:
             new_path.parent.mkdir(parents=True, exist_ok=True)

@@ -131,3 +131,37 @@ def test_物理隔离_不同repo(tmp_path):
     assert len(ns.recent(base, "r1", k=10)) == 1
     assert len(ns.recent(base, "r2", k=10)) == 1
     assert ns.recent(base, "r1", k=10)[0].text == "r1的事"
+
+
+def test_替换导入在单个事务内完成(tmp_path):
+    base = str(tmp_path)
+    ns.append(base, "r1", _e("旧纪要"))
+
+    imported = ns.import_entries(base, "r1", [_e("新纪要一"), _e("新纪要二")], replace=True)
+
+    assert imported == 2
+    assert [entry.text for entry in ns.all_entries(base, "r1")] == ["新纪要一", "新纪要二"]
+
+
+def test_替换导入中途失败会保留旧纪要(monkeypatch, tmp_path):
+    base = str(tmp_path)
+    ns.append(base, "r1", _e("旧纪要"))
+    original = ns._insert_entry
+    calls = 0
+
+    def fail_second(conn, entry):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("bad row")
+        return original(conn, entry)
+
+    monkeypatch.setattr(ns, "_insert_entry", fail_second)
+
+    try:
+        ns.import_entries(base, "r1", [_e("新纪要一"), _e("新纪要二")], replace=True)
+    except RuntimeError as exc:
+        assert str(exc) == "bad row"
+    else:
+        raise AssertionError("应回滚失败导入")
+    assert [entry.text for entry in ns.all_entries(base, "r1")] == ["旧纪要"]

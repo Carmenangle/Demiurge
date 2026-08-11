@@ -14,6 +14,7 @@ export interface Repo {
   parentId?: string; // 为空=顶层仓库；有值=某仓库下的小仓库
   cover?: string; // 该仓库最新生成图片
   coverAt?: number; // 封面更新时间戳（用于父仓库取子仓库里最新的一张）
+  lastUsedAt?: number; // 最近进入该作品的时间；首页最近作品与卡片展示的唯一来源
   createdAt: number;
   cardName?: string; // 绑定的角色卡名（=character_store 文件夹名）；有值=剧情扮演作品
   cardNames?: string[]; // 绑定的全部角色卡；cardName 保留为开场卡兼容别名
@@ -203,8 +204,8 @@ export function useRepos() {
 
   // 分支：在 parentId 下建一个新兄弟子仓库，返回新子仓库 id。名称按当前最大 SAVE 索引递推（SAVE02…）。
   // 复制父仓库当前绑定（卡/世界书/人设）到新子仓库自身字段（快照式，之后可单独改）。传入 cardName 优先。
-  const addBranch = (parentId: string, binding?: Partial<RepoBinding>): string => {
-    const id = crypto.randomUUID();
+  const addBranch = (parentId: string, binding?: Partial<RepoBinding>, branchId?: string): string => {
+    const id = branchId || crypto.randomUUID();
     const name = nextSaveName(parentId);
     const parent = repos.find((r) => r.id === parentId);
     const parentCards = parent ? normalizedCards(parent) : { cardNames: [], openingCardName: "" };
@@ -285,6 +286,16 @@ export function useRepos() {
     setRepos((prev) => recordGeneratedRepoCover(prev, id, cover, Date.now()));
   };
 
+  const touchRepo = (id: string) => {
+    const now = Date.now();
+    setRepos((prev) => {
+      const target = prev.find((repo) => repo.id === id);
+      return prev.map((repo) => repo.id === id || (target?.parentId && repo.id === target.parentId)
+        ? { ...repo, lastUsedAt: now }
+        : repo);
+    });
+  };
+
   const relocateOutputPath = (oldDir: string, newDir: string) => {
     setRepos((prev) => prev.map((repo) => ({
       ...repo,
@@ -313,7 +324,7 @@ export function useRepos() {
 
   return {
     repos, addRepo, addCardWork, addBranch, renameRepo, bindRepo, resolveBinding,
-    setCover, setGeneratedCover, relocateOutputPath,
+    setCover, setGeneratedCover, touchRepo, relocateOutputPath,
     coverOf, deleteRepo, childrenOf,
   };
 }

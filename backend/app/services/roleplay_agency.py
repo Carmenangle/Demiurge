@@ -492,6 +492,25 @@ def maybe_summarize(
                    reason="empty_summary")
             return False
         narrative_store.append(deps.state_base, repo_id, entry)
+        if entry.facts:
+            from app.services import temporal_fact_store
+
+            fact_count = 0
+            for fact in entry.facts:
+                try:
+                    temporal_fact_store.record(
+                        deps.state_base, repo_id,
+                        subject=str(fact.get("subject") or ""),
+                        predicate=str(fact.get("predicate") or ""),
+                        object_=str(fact.get("object") or ""),
+                        valid_from_turn=turn,
+                        evidence=str(fact.get("evidence") or ""),
+                        source="chronicle",
+                    )
+                    fact_count += 1
+                except ValueError:
+                    continue
+            _trace(deps, "temporal.write", source="chronicle", count=fact_count)
         narrative_store.set_last_turn(deps.state_base, repo_id, card_name, turn)
         if events is not None:
             events.append({"kind": "chronicle", "state": "ok", "count": 1})

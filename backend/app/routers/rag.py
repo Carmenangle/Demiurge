@@ -47,23 +47,13 @@ def index_generation(req: IndexGenRequest) -> dict[str, object]:
     """生图完成后调用，把这次生成的提示词/标签/图片入仓库知识库。
     重试 3 次：embedding 偶发瞬时失败(ollama 并发/超时)会让「图落盘了但提示词/生成历史没进知识库」
     →资产库内容丢失。工作流批量出图时几张挤一起调 embedding 最易触发，故退避重试兜底。"""
-    import time as _t
-    last = None
-    for attempt in range(3):
-        try:
-            rag_store.index_generation(
-                req.thread_id, req.embed_cfg(),
-                req.prompt, req.tags, req.image_url,
-            )
-            return {"ok": True}
-        except Exception as e:  # noqa: BLE001
-            last = e
-            import logging
-            logging.getLogger("uvicorn.error").warning(
-                "index-generation 失败(第%d次) repo=%s: %s", attempt + 1, req.thread_id, e)
-            if attempt < 2:
-                _t.sleep(0.8 * (attempt + 1))
-    raise HTTPException(status_code=502, detail=f"入库失败(重试3次)：{last}")
+    try:
+        rag_store.index_generation_reliable(
+            req.thread_id, req.embed_cfg(), req.prompt, req.tags, req.image_url,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"ok": True}
 
 
 class IndexDocRequest(_EmbedFields):
@@ -100,19 +90,13 @@ class ImportDocsRequest(_EmbedFields):
 @router.post("/import-documents")
 def import_documents(req: ImportDocsRequest) -> dict[str, object]:
     """批量导入参考资料（从导出的 JSON 恢复 / 迁移到其它仓库）。返回导入的文档数与入库分块数。"""
-    docs = 0
-    chunks = 0
-    for d in req.docs:
-        if not d.text.strip():
-            continue
-        try:
-            n = rag_store.index_document(req.thread_id, req.embed_cfg(), d.text, d.title)
-        except Exception as e:  # noqa: BLE001
-            raise HTTPException(status_code=502, detail=f"导入失败（已入 {docs} 篇）：{e}")
-        if n:
-            docs += 1
-            chunks += n
-    return {"ok": True, "documents": docs, "chunks": chunks}
+    try:
+        result = rag_store.import_documents(
+            req.thread_id, req.embed_cfg(), [(item.text, item.title) for item in req.docs],
+        )
+    except rag_store.DocumentImportError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"ok": True, **result}
 
 
 class RetrieveRequest(_EmbedFields):
@@ -194,6 +178,93 @@ class GenerationsRequest(EmbedAuth):
 def list_generations(req: GenerationsRequest) -> dict[str, object]:
     """列出某仓库的生成记录（图片+提示词+标签），供仓库详情页图片网格。"""
     return {"items": rag_store.list_generations(req.repo_id, req.embed_cfg())}
+
+
+class SearchGenerationsRequest(EmbedAuth):
+    repo_ids: list[str] = ["home"]
+    query: str = ""
+    k: int = 32
+    output_dir: str = ""
+
+
+@router.post("/search-generations")
+def search_generations(req: SearchGenerationsRequest) -> dict[str, object]:
+    """仅搜索资产 generation，不进入剧情知识检索。"""
+    items = rag_store.search_generations(req.repo_ids, req.embed_cfg(), req.query, req.k)
+    if req.output_dir:
+        from app.services import visual_preference
+
+        items = visual_preference.rank(req.output_dir, items)
+    return {"items": items}
+
+
+class VisualPreferenceRequest(BaseModel):
+    output_dir: str
+    repo_id: str
+    winner_id: str
+    loser_id: str
+    reason: str = "other"
+
+
+@router.post("/visual-preference")
+def record_visual_preference(req: VisualPreferenceRequest) -> dict[str, object]:
+    from app.services import visual_preference
+
+    try:
+        return {"ok": True, **visual_preference.record(
+            req.output_dir, req.repo_id, winner_id=req.winner_id,
+            loser_id=req.loser_id, reason=req.reason,
+        )}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/visual-preference")
+def visual_preference_summary(output_dir: str, repo_id: str) -> dict[str, object]:
+    from app.services import visual_preference
+
+    return visual_preference.summary(output_dir, repo_id)
+
+
+class ClearVisualPreferenceRequest(BaseModel):
+    output_dir: str
+    repo_id: str
+
+
+@router.post("/visual-preference/clear")
+def clear_visual_preference(req: ClearVisualPreferenceRequest) -> dict[str, object]:
+    from app.services import visual_preference
+
+    visual_preference.clear(req.output_dir, req.repo_id)
+    return {"ok": True}
+
+
+class SetGenerationDescriptionRequest(EmbedAuth):
+    id: str
+    repo_id: str = "home"
+    description: str = ""
+
+
+@router.post("/set-generation-description")
+def set_generation_description(req: SetGenerationDescriptionRequest) -> dict[str, object]:
+    ok = rag_store.set_generation_description(
+        req.id, req.repo_id, req.embed_cfg(), req.description,
+    )
+    if not ok:
+        raise HTTPException(status_code=404, detail="资产不存在或描述为空")
+    return {"ok": True}
+
+
+@router.post("/index-visual-generations")
+def index_visual_generations(req: GenerationsRequest) -> dict[str, object]:
+    """用已安装的视觉嵌入模型为本仓库图片建立独立向量索引。"""
+    from app.services import visual_asset_index
+
+    try:
+        items = rag_store.list_generations(req.repo_id, req.embed_cfg())
+        return {"ok": True, **visual_asset_index.index_items(req.repo_id, items)}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"视觉索引不可用：{exc}") from exc
 
 
 @router.post("/dedup-generations")

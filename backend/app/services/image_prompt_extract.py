@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 
 # 破甲标记还原：对齐用户给的正则 /@\(([^()]*)\)(?=@)|@\(([^()]*)\)|\(([^()]*)\)@|@/g → $1$2$3
 # 覆盖 @(x)@ 包裹式；剩余裸 @ 直接删。i/<i> 等分隔符另由用户在 IMAGE_PROMPT 正则里配（此处只兜底 @ 系）。
@@ -35,8 +36,12 @@ COMFY_QUALITY_TAGS = (
 )
 
 _INLINE_PLAN_INSTRUCTION = (
-    "\n\n【自动插画计划】正文仍按剧情自然推进。仅当本轮正文实际出现值得配图的视觉高潮时，"
-    "在全部正文与状态块之后追加一个内部块；无适合画面的高潮则不要输出该块。"
+    "\n\n【自动插画计划】正文仍按剧情自然推进，并把完整可见正文放在 <content>...</content> 中。"
+    "正文要求的篇幅只统计 <content> 内实际向用户展示的剧情文字；think、状态块、表格块、"
+    "illustration 块及 profile_prompt 都不计入正文，必须先让 <content> 独立达到预设或用户要求的篇幅，"
+    "不得因为同轮还要生成提示词而缩短剧情。每轮必须选择本轮正文中视觉张力最强、"
+    "最能代表剧情变化的高潮画面，在全部正文与状态块之后追加一个内部块，不得省略。"
+    "安静对话也必须选择人物关系、目光、动作或关键物件发生变化的最强瞬间，不得改画成无关静态肖像。"
     "anchor 必须逐字摘录提示词所描绘的高潮动作所在段落的最后一句，供图片插回原位；"
     "禁止选择事后余韵、收束段、对话尾句、状态块或全文最后一句作为 anchor；"
     "先根据高潮事实完成艺术决策：visual_thesis 写唯一、具体、可见的视觉命题；hierarchy 写第一视觉中心、"
@@ -49,27 +54,38 @@ _INLINE_PLAN_INSTRUCTION = (
     "camera 写服务视觉命题的景别/机位/焦段，composition 写构图、空间层次和视线引导；"
     "aspect_ratio 必须根据唯一视觉命题、主体层级与空间关系，从 1:1、2:3、3:2、3:4、4:3、9:16、16:9 中只选一个；"
     "单人全身与纵向动势优先竖幅，多角色横向关系与环境叙事优先横幅，中心对称或紧凑特写可用方幅，不得输出像素尺寸；"
-    "subjects 列出画面主体并用 weight 表示视觉权重（0.5~2.0）；"
+    "subjects 必须列出高潮画面中每一名实际可见的角色，name 必须逐字使用角色基础外貌清单中的角色名；"
+    "不得漏掉互动中的次要角色，不得加入未出场角色，并用 weight 表示视觉权重（0.5~2.0）；"
     "上述字段与 subjects.description、prompt 是结构化画面草稿；prompt 只补充未覆盖的动作和环境事实。"
     "禁止所有字段等密度堆词，禁止为填字段创造剧情不存在的物体、衣着或动作。"
     "唯一高潮视觉命题必须保留本轮造成剧情状态变化的动作；必须保留动作主体、关键道具和动作结果的因果链，"
     "静态肖像、表情特写或事后姿态只能作为次级视觉信息，不得替代该动作链。"
     "subjects.description 必须先写世界书中的稳定基础外貌身份锚点，再合并本轮当前情况；"
     "披头散发、饰品松脱、服装变化只能覆盖对应当前状态，禁止因此丢掉发色、原发型/饰品、面容、体型等基础识别特征；"
-    "motion 为0~3。profile_prompt 必须把上述 camera、composition、subjects、prompt 全部合并为当前所选模式的最终提示词。"
+    "除 anchor 和 subjects.name 必须保留正文原文或角色原名外，camera、visual_thesis、hierarchy、"
+    "palette_material、lighting_logic、composition、subjects.description 与 prompt 必须使用简洁英文视觉描述；"
+    "这样独立提示词模型拒答时仍可直接保留角色身份、动作与画面事实，不得使用中文空话代替；"
+    "motion 为0~3。完成全部正文后，必须在同一个内部 illustration 块的 profile_prompt 中生成当前 Profile"
+    "可直接提交的完整英文正向提示词；它只供后端出图，不向用户展示。"
     "只允许以下格式：\n"
     '<illustration>{"anchor":"正文原句","camera":"镜头",'
     '"visual_thesis":"唯一视觉命题","hierarchy":"主体层级","palette_material":"色彩材质母题",'
     '"lighting_logic":"光影因果","composition":"构图","aspect_ratio":"2:3","subjects":[{"name":"角色名","description":"视觉描述",'
-    '"weight":1.2}],"prompt":"动作, 环境, 光影, 氛围",'
-    '"profile_prompt":"所选模式最终提示词","motion":0}</illustration>'
+    '"weight":1.2}],"prompt":"动作, 环境, 光影, 氛围","profile_prompt":"完整英文成稿","motion":0}</illustration>'
 )
 
 
-def build_inline_plan_instruction(profile: str = "krea2", visual_profiles: str = "") -> str:
-    """返回主 Roleplay 同次生成使用的插画计划契约。"""
-    from app.services import image_prompt_profiles
-    instruction = _INLINE_PLAN_INSTRUCTION + "\n【当前提示词模式】" + image_prompt_profiles.inline_instruction(profile)
+def build_inline_plan_instruction(
+    profile: str = "krea2",
+    visual_profiles: str = "",
+    *,
+    profile_instruction: str = "",
+) -> str:
+    """返回主 Roleplay 同次生成使用的画面计划与隐藏成稿契约。"""
+    _ = profile
+    instruction = _INLINE_PLAN_INSTRUCTION
+    if profile_instruction.strip():
+        instruction += "\n【当前 Profile 成稿格式】\n" + profile_instruction.strip()
     if visual_profiles.strip():
         instruction += (
             "\n【本轮角色基础外貌（稳定底座）】\n" + visual_profiles.strip()
@@ -110,8 +126,8 @@ def restore_jailbreak(text: str) -> str:
     return restore_jailbreak_with_offsets(text)[0]
 
 
-def visible_narrative_text(text: str) -> str:
-    """只返回用户可见剧情，供场景分类与降级提示词使用。"""
+def protected_narrative_text(text: str) -> str:
+    """清除隐藏/控制块，但保留正文中的防拦截标记供同预设 Profile 使用。"""
     source = _ILLUSTRATION_RE.sub("", text or "")
     source = _ILLUSTRATION_OPEN_TAIL_RE.sub("", source)
     content = _CONTENT_RE.search(source)
@@ -125,7 +141,12 @@ def visible_narrative_text(text: str) -> str:
         body = _THINK_OPEN_TAIL_RE.sub("", body)
     body = _CONTROL_RE.sub("", body)
     body = _CONTROL_OPEN_TAIL_RE.sub("", body)
-    return restore_jailbreak(body).strip()
+    return body.strip()
+
+
+def visible_narrative_text(text: str) -> str:
+    """只返回用户可见剧情，供场景分类与本地事实识别使用。"""
+    return restore_jailbreak(protected_narrative_text(text)).strip()
 
 
 def infer_motion(text: str) -> int:
@@ -183,8 +204,11 @@ def build_fallback_content_tags(text: str) -> str:
     return ", ".join(dict.fromkeys(tags))
 
 
-def extract_illustration_plan(reply: str) -> tuple[str, dict]:
-    """从主生成回复剥离并校验插画计划；坏块只剥离，不触发生图。"""
+def extract_illustration_plan(
+    reply: str,
+    block_filter: Callable[[str], str] | None = None,
+) -> tuple[str, dict]:
+    """从主生成回复剥离并校验插画计划；可在 JSON 解析前复用正文正则。"""
     source = reply or ""
     matches = list(_ILLUSTRATION_RE.finditer(source))
     clean = _ILLUSTRATION_RE.sub("", source)
@@ -196,7 +220,10 @@ def extract_illustration_plan(reply: str) -> tuple[str, dict]:
     if not matches:
         return clean, {}
     try:
-        raw = json.loads(matches[-1].group(1))
+        payload = matches[-1].group(1)
+        if block_filter is not None:
+            payload = block_filter(payload)
+        raw = json.loads(payload)
     except (json.JSONDecodeError, TypeError, ValueError):
         return clean, {}
     if not isinstance(raw, dict):
@@ -217,6 +244,7 @@ def extract_illustration_plan(reply: str) -> tuple[str, dict]:
     }
     actors: list[str] = []
     weighted: list[str] = []
+    normalized_subjects: list[dict[str, object]] = []
     subjects = raw.get("subjects")
     if isinstance(subjects, list):
         for item in subjects:
@@ -232,6 +260,11 @@ def extract_illustration_plan(reply: str) -> tuple[str, dict]:
                 weight = max(0.5, min(2.0, float(item.get("weight", 1.0))))
             except (TypeError, ValueError):
                 weight = 1.0
+            normalized_subjects.append({
+                "name": name,
+                "description": description,
+                "weight": weight,
+            })
             weighted.append(f"({description}:{weight:g})")
     motion_raw = raw.get("motion", 0)
     motion = max(0, min(3, int(motion_raw))) if isinstance(motion_raw, (int, float)) else 0
@@ -246,9 +279,12 @@ def extract_illustration_plan(reply: str) -> tuple[str, dict]:
         return clean, {}
     return clean, {
         "anchor": anchor,
+        "camera": camera,
+        "composition": composition,
         "prompt": assembled,
         "profile_prompt": profile_prompt,
         "art_direction": art_direction,
+        "subjects": normalized_subjects,
         "aspect_ratio": aspect_ratio,
         "actors": actors,
         "motion": motion,

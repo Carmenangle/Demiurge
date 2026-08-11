@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, ExternalLink, Images, Plus, Search, Send, Sparkles, Trash2, X } from "lucide-react";
 import { activeChatModel, useSettings } from "../stores/settings";
-import { listGenerations, deleteDoc, setTags, describeImage, tagStats, pruneGenerations, type Generation } from "../api/ai";
+import {
+  listGenerations, deleteDoc, setTags, describeImage, tagStats, pruneGenerations,
+  searchGenerations, setGenerationDescription, type Generation,
+  indexVisualGenerations, recordVisualPreference, type VisualPreferenceReason,
+} from "../api/ai";
 import { ConfirmModal, AlertModal } from "./Modal";
 import { CopyButton } from "./CopyButton";
 import { Pager } from "./Pager";
@@ -98,7 +102,7 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
   const { settings } = useSettings();
   const [items, setItems] = useState<GenWithRepo[]>([]);
   const [loading, setLoading] = useState(true);
-  const [active, setActive] = useState<Generation | null>(null);
+  const [active, setActive] = useState<GenWithRepo | null>(null);
   const [page, setPage] = useState(1);
   const [deleting, setDeleting] = useState<Generation | null>(null);
   const [tagQuery, setTagQuery] = useState("");      // 标签/提示词搜索
@@ -109,6 +113,13 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
   const [batchDel, setBatchDel] = useState(false);   // 批量删除确认
   const [showTagCloud, setShowTagCloud] = useState(false);  // 标签统计面板
   const [allTags, setAllTags] = useState<{ tag: string; count: number }[]>([]);  // 后端全量标签统计
+  const [semanticMode, setSemanticMode] = useState(false);
+  const [semanticItems, setSemanticItems] = useState<GenWithRepo[]>([]);
+  const [describing, setDescribing] = useState(false);
+  const [visualIndexing, setVisualIndexing] = useState(false);
+  const [preferenceBase, setPreferenceBase] = useState<GenWithRepo | null>(null);
+  const [preferenceReason, setPreferenceReason] = useState<VisualPreferenceReason>("character");
+  const [savingPreference, setSavingPreference] = useState(false);
   const PAGE_SIZE = 32; // 一行 8 个 × 四行
 
   // AI 打标专用对话模型（与生图主流程用的是同一处配置）
@@ -242,21 +253,23 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
   };
   const removeTag = (g: Generation, t: string) => saveTags(g, g.tags.filter((x) => x !== t));
 
+  const imageDataUri = async (url: string) => {
+    if (/^data:/i.test(url)) return url;
+    const blob = await (await fetch(url)).blob();
+    return new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ""));
+      reader.onerror = () => reject(new Error("读图失败"));
+      reader.readAsDataURL(blob);
+    });
+  };
+
   // AI 打标：分析图片本身提取标签（始终反推图片），结果追加到现有标签。人工点才触发。
   // 注意：g.image_url 是后端本地代理地址(127.0.0.1)，外部视觉模型访问不到，必须先取回转 dataURI 再喂模型。
   const aiTag = async (g: Generation) => {
     setTagging(g.id);
     try {
-      let imgForModel = g.image_url;
-      if (!/^data:/i.test(imgForModel)) {
-        const blob = await (await fetch(g.image_url)).blob();
-        imgForModel = await new Promise<string>((res, rej) => {
-          const fr = new FileReader();
-          fr.onload = () => res(String(fr.result || ""));
-          fr.onerror = () => rej(new Error("读图失败"));
-          fr.readAsDataURL(blob);
-        });
-      }
+      const imgForModel = await imageDataUri(g.image_url);
       const r = await describeImage([imgForModel], chat, "只输出 4-8 个描述画面内容的简短标签（主体/风格/场景/动作等），英文逗号分隔，不要解释、不要句子");
       const got = (r.prompt || "").split(/[,，;；\n]+/).map((s) => s.trim()).filter(Boolean);
       if (got.length === 0) { setAlertMsg("AI 打标没返回有效标签，可能模型不支持视觉，请换支持视觉的对话模型。"); return; }
@@ -268,20 +281,108 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
     finally { setTagging(null); }
   };
 
+  const describeMissing = async () => {
+    const targets = items.filter((g) => !g.description?.trim());
+    if (targets.length === 0) { setAlertMsg("所有资产已有视觉描述。"); return; }
+    setDescribing(true);
+    let completed = 0;
+    try {
+      for (const g of targets) {
+        const image = await imageDataUri(g.image_url);
+        const result = await describeImage(
+          [image], chat,
+          "用一段简洁中文客观描述图片中的人物外观、服装、动作、场景、构图和画风；不要写提示词，不要解释。",
+        );
+        const description = (result.prompt || "").trim();
+        if (!description) continue;
+        const repoId = (g as GenWithRepo).repoId || g.repo_id || repoIds[0];
+        await setGenerationDescription(g.id, repoId, description, embed);
+        setItems((current) => current.map((item) => item.id === g.id
+          ? { ...item, description } : item));
+        completed += 1;
+      }
+      setAlertMsg(`已为 ${completed} 张资产补充视觉描述并更新语义索引。`);
+    } catch (error) {
+      setAlertMsg(`自动描述中断：已完成 ${completed} 张；${(error as Error).message}`);
+    } finally {
+      setDescribing(false);
+    }
+  };
+
+  const buildVisualIndex = async () => {
+    setVisualIndexing(true);
+    let indexed = 0;
+    let skipped = 0;
+    try {
+      for (const repoId of repoIds) {
+        const result = await indexVisualGenerations(repoId, embed);
+        indexed += result.indexed;
+        skipped += result.skipped;
+      }
+      setAlertMsg(`视觉索引完成：${indexed} 张，跳过 ${skipped} 张远程或缺失图片。`);
+    } catch (error) {
+      setAlertMsg(`视觉索引失败：${(error as Error).message}`);
+    } finally {
+      setVisualIndexing(false);
+    }
+  };
+
+  const preferActive = async () => {
+    if (!active || !preferenceBase || active.id === preferenceBase.id) return;
+    const repoId = active.repoId || active.repo_id || repoIds[0];
+    const baseRepoId = preferenceBase.repoId || preferenceBase.repo_id || repoIds[0];
+    if (repoId !== baseRepoId) {
+      setAlertMsg("偏好比较必须来自同一个作品，避免不同仓库审美串线。");
+      return;
+    }
+    setSavingPreference(true);
+    try {
+      await recordVisualPreference(
+        settings.outputDir || "", repoId, active.id, preferenceBase.id, preferenceReason,
+      );
+      setPreferenceBase(active);
+      setAlertMsg("偏好已记录；语义搜索结果会按本作品的选择历史重排，不会自动修改 LoRA。 ");
+    } catch (error) {
+      setAlertMsg(`记录偏好失败：${(error as Error).message}`);
+    } finally {
+      setSavingPreference(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!semanticMode || !tagQuery.trim()) { setSemanticItems([]); return; }
+    let alive = true;
+    const timer = setTimeout(() => {
+      searchGenerations(repoIds, tagQuery.trim(), embed, 64, settings.outputDir || "")
+        .then((result) => {
+          if (!alive) return;
+          setSemanticItems((result.items || []).map((g) => ({
+            ...g, repoId: g.repo_id || repoIds[0],
+          })));
+        })
+        .catch((error) => { if (alive) setAlertMsg(`语义搜索失败：${(error as Error).message}`); });
+    }, 250);
+    return () => { alive = false; clearTimeout(timer); };
+  }, [semanticMode, tagQuery, key, embed]);
+
   // 标签/提示词搜索：多关键词（空格/逗号/分号分隔），全部命中才显示（AND）。纯前端过滤。
   // 资产库模式额外支持按仓库名搜索：命中仓库名则显示该仓库全部图。
   const terms = tagQuery.toLowerCase().split(/[\s,，;；]+/).filter(Boolean);
-  const filtered = terms.length === 0
-    ? items
-    : items.filter((g) => {
+  const sourceItems = semanticMode && terms.length > 0 ? semanticItems : items;
+  const filtered = semanticMode && terms.length > 0
+    ? sourceItems
+    : terms.length === 0 ? sourceItems : sourceItems.filter((g) => {
         const repoName = (repoNames?.[(g as GenWithRepo).repoId || ""] || "").toLowerCase();
-        const hay = [g.prompt.toLowerCase(), ...g.tags.map((t) => t.toLowerCase()), repoName];
+        const hay = [g.prompt.toLowerCase(), (g.description || "").toLowerCase(),
+          ...g.tags.map((t) => t.toLowerCase()), repoName];
         return terms.every((term) => hay.some((h) => h.includes(term)));
       });
   // 从新到旧：优先按后端权威时间戳 created_at 倒序（不受文件改名/删图影响）；
   // 历史记录无 created_at(=0) 时回退到 image_url 文件名编号（时间戳/旧顺序命名都能取到）。
   const orderKey = (g: Generation) => g.created_at || seqOf(g.image_url);
-  const sorted = [...filtered].sort((a, b) => orderKey(b) - orderKey(a));
+  const sorted = semanticMode && terms.length > 0
+    ? filtered
+    : [...filtered].sort((a, b) => orderKey(b) - orderKey(a));
   const pageCount = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
   const curPage = Math.min(page, pageCount);  // filtered 变短后自愈，避免越界空页
   const shown = sorted.slice((curPage - 1) * PAGE_SIZE, curPage * PAGE_SIZE);
@@ -306,12 +407,13 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
           <Search size={14} style={{ position: "absolute", left: 9, top: 9, color: "var(--text-muted)" }} />
           <input
             style={{ width: "100%", paddingLeft: 28, boxSizing: "border-box" }}
-            placeholder={repoNames ? "按标签或仓库名搜索…" : "按标签搜索（回车确认一个标签后自动补「，」接着输下一个）…"}
+            placeholder={semanticMode ? "按画面语义搜索，例如：雨夜里穿红裙的角色…"
+              : repoNames ? "按标签或仓库名搜索…" : "按标签搜索（回车确认一个标签后自动补「，」接着输下一个）…"}
             value={tagQuery}
             onChange={(e) => { setTagQuery(e.target.value); setPage(1); }}
             onKeyDown={(e) => {
               // 回车确认当前标签：末尾补「，」分隔，方便接着输下一个（已是分隔符结尾则不重复补）
-              if (e.key === "Enter") {
+              if (e.key === "Enter" && !semanticMode) {
                 e.preventDefault();
                 setTagQuery((q) => (q.trim() && !/[,，;；]\s*$/.test(q) ? q.trimEnd() + "，" : q));
               }
@@ -345,6 +447,18 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
           )}
           <button className="btn" onClick={() => setShowTagCloud((v) => !v)}>
             标签统计（{tagCounts.length}）
+          </button>
+          <button className={`btn ${semanticMode ? "active" : ""}`}
+            onClick={() => { setSemanticMode((value) => !value); setPage(1); }}>
+            {semanticMode ? "语义搜索：开" : "语义搜索"}
+          </button>
+          <button className="btn" onClick={describeMissing} disabled={describing}
+            title="调用当前视觉模型描述缺少描述的图片，并更新资产语义索引">
+            {describing ? "自动描述中…" : "自动描述缺失资产"}
+          </button>
+          <button className="btn" onClick={buildVisualIndex} disabled={visualIndexing}
+            title="使用本机 Qwen3-VL-Embedding 建立图片向量索引">
+            {visualIndexing ? "视觉索引中…" : "构建视觉索引"}
           </button>
           <button className="btn" onClick={doPrune} disabled={pruning}
             title="删除指向本机图但磁盘文件已不存在的裂图记录（多因手动删文件留下）">
@@ -448,6 +562,12 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
                 {active.prompt && <CopyButton text={active.prompt} className="img-tool" />}
               </div>
               <div style={{ fontSize: 13, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{active.prompt || "（无提示词记录）"}</div>
+              {active.description && (
+                <>
+                  <div style={{ fontSize: 12, color: "var(--text-muted)", margin: "12px 0 4px" }}>视觉描述</div>
+                  <div style={{ fontSize: 13, lineHeight: 1.5 }}>{active.description}</div>
+                </>
+              )}
               <div style={{ fontSize: 12, color: "var(--text-muted)", margin: "12px 0 4px" }}>标签</div>
               <GalleryTags
                 g={active}
@@ -469,6 +589,33 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
                   <ExternalLink size={14} /> 查看原图
                 </a>
               </div>
+              {enhanced && (
+                <div style={{ marginTop: 14, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                  {!preferenceBase || preferenceBase.id === active.id ? (
+                    <button className="btn" onClick={() => setPreferenceBase(
+                      preferenceBase?.id === active.id ? null : active,
+                    )}>
+                      {preferenceBase?.id === active.id ? "取消比较基准" : "作为偏好比较基准"}
+                    </button>
+                  ) : (
+                    <>
+                      <select value={preferenceReason}
+                        onChange={(event) => setPreferenceReason(event.target.value as VisualPreferenceReason)}>
+                        <option value="character">人物更像</option>
+                        <option value="action">动作更准确</option>
+                        <option value="composition">构图更好</option>
+                        <option value="lighting">光影更好</option>
+                        <option value="color">色彩更符合</option>
+                        <option value="quality">画质更好</option>
+                        <option value="other">其他</option>
+                      </select>
+                      <button className="btn" disabled={savingPreference} onClick={preferActive}>
+                        {savingPreference ? "记录中…" : "比基准图更喜欢这张"}
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         </div>

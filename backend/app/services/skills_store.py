@@ -12,6 +12,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from app.config import DATA_DIR
+from app.services import instruction_provenance
 
 
 def _path() -> Path:
@@ -51,7 +52,10 @@ def enabled_prompt_fragments() -> list[str]:
     out = []
     for s in load_skills():
         if s.get("enabled") and (s.get("prompt_fragment") or "").strip():
-            out.append(s["prompt_fragment"].strip())
+            out.append(instruction_provenance.wrap(
+                f"技能：{str(s.get('name') or s.get('id') or '未命名')}",
+                s["prompt_fragment"],
+            ))
     return out
 
 
@@ -63,5 +67,8 @@ def fragments_by_ids(skill_ids: list[str]) -> list[str]:
     out = []
     for s in load_skills():
         if s.get("id") in idset and s.get("enabled") and (s.get("prompt_fragment") or "").strip():
-            out.append(s["prompt_fragment"].strip())
+            out.append(instruction_provenance.wrap(
+                f"技能：{str(s.get('name') or s.get('id') or '未命名')}",
+                s["prompt_fragment"],
+            ))
     return out

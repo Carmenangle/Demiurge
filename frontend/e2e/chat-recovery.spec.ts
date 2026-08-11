@@ -27,7 +27,11 @@ test("recovers the conversation snapshot after a browser refresh", async ({ page
 });
 
 test("keeps background generation visible across refresh", async ({ page }) => {
-  await page.getByTitle("后台活动（拖动可移动，长按隐藏）").click();
+  const support = page.getByTitle("后台活动（拖动可移动，长按隐藏）");
+  const quickTools = page.getByTitle("快捷工具（拖动可移动，长按隐藏）");
+  await expect.poll(async () => (await support.boundingBox())?.width).toBeGreaterThanOrEqual(56);
+  await expect.poll(async () => (await quickTools.boundingBox())?.width).toBeGreaterThanOrEqual(56);
+  await support.click();
   await expect(page.getByText("出图中")).toBeVisible();
   await page.reload();
   await page.getByTitle("后台活动（拖动可移动，长按隐藏）").click();

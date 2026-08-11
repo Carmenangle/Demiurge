@@ -8,7 +8,8 @@
   border-radius: 50%;
   background: var(--surface);
   color: var(--accent);
-  box-shadow: 0 6px 20px color-mix(in srgb, var(--accent) 28%, transparent);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, .14);
+  opacity: .84;
   display: grid;
   place-items: center;
   cursor: pointer;
@@ -17,6 +18,7 @@
   transition: transform 0.15s, box-shadow 0.15s;
 }
 .quick-tools-fab:hover {
+  opacity: 1;
   transform: translateY(-2px) scale(1.04);
   box-shadow: 0 10px 26px color-mix(in srgb, var(--accent) 38%, transparent);
 }

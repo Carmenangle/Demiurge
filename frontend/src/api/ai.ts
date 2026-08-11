@@ -67,6 +67,8 @@ function sseEmbed(embed?: Embed) {
 export interface GenPromptResult {
   prompt: string;
   negative_prompt?: string;
+  strategy?: "direct" | "repaired" | "fallback";
+  validation_errors?: string[];
 }
 
 // 根据场景描述生成出图提示词（用设置里的对话模型）
@@ -411,12 +413,16 @@ export function genProfilePrompt(
   profile: string,
   scene: IllustrationSceneSpec,
   chat: Chat,
+  preset: { presetDir?: string; presetName?: string; userName?: string } = {},
 ) {
   return apiPost<GenPromptResult & { profile: string }>("/ai/prompt/profile", {
     profile,
     scene,
+    preset_dir: preset.presetDir || "",
+    preset_name: preset.presetName || "",
+    user_name: preset.userName || "",
     ...chatBody(chat),
-  });
+  }, 120_000);
 }
 
 export function getProfilePromptDefaults(profile: string, rating = "nsfw") {
@@ -496,11 +502,23 @@ export function reportIllustrationFailure(payload: {
   });
 }
 
+export function claimIllustrationSubmission(payload: {
+  threadId: string; messageId: string; slotId: string;
+}) {
+  return apiPost<{ ok: boolean; claimed: boolean }>("/ai/image-agent/illustration-claim", {
+    thread_id: payload.threadId,
+    message_id: payload.messageId,
+    slot_id: payload.slotId,
+  });
+}
+
 export function reportIllustrationSubmission(payload: {
   threadId: string; repoId: string; turnId?: string; messageId: string; slotId: string;
   templateId: string; promptId: string; prompt: string; promptProfile: string;
   loraName?: string; loraWeight?: number; latentWidth: number; latentHeight: number;
+  loraMode?: "none" | "single" | "multi"; loraNames?: string[];
   valueKeys: string[];
+  source?: "automatic" | "manual";
 }) {
   return apiPost<{ ok: boolean }>("/ai/image-agent/illustration-submission", {
     thread_id: payload.threadId,
@@ -514,9 +532,12 @@ export function reportIllustrationSubmission(payload: {
     prompt_profile: payload.promptProfile,
     lora_name: payload.loraName || "",
     lora_weight: payload.loraWeight,
+    lora_mode: payload.loraMode || "single",
+    lora_names: payload.loraNames || [],
     latent_width: payload.latentWidth,
     latent_height: payload.latentHeight,
     value_keys: payload.valueKeys,
+    source: payload.source || "automatic",
   });
 }
 export function listChatQueueTasks(threadId = "") {
@@ -764,7 +785,9 @@ export function listDocs(repoId: string, embed: Embed) {
 
 export interface Generation {
   id: string;
+  repo_id?: string;
   prompt: string;
+  description?: string;
   image_url: string;
   tags: string[];
   created_at?: number;   // 入库毫秒时间戳（权威排序键；历史记录可能为 0/缺失）
@@ -776,6 +799,41 @@ export function listGenerations(repoId: string, embed: Embed) {
     repo_id: repoId,
     ...ragEmbed(embed),
   });
+}
+
+export function searchGenerations(
+  repoIds: string[], query: string, embed: Embed, k = 64, outputDir = "",
+) {
+  return apiPost<{ items: Generation[] }>("/rag/search-generations", {
+    repo_ids: repoIds, query, k, output_dir: outputDir, ...ragEmbed(embed),
+  });
+}
+
+export type VisualPreferenceReason =
+  "character" | "action" | "composition" | "lighting" | "color" | "quality" | "other";
+
+export function recordVisualPreference(
+  outputDir: string, repoId: string, winnerId: string, loserId: string,
+  reason: VisualPreferenceReason,
+) {
+  return apiPost<{ ok: boolean; winner_score: number; loser_score: number }>(
+    "/rag/visual-preference",
+    { output_dir: outputDir, repo_id: repoId, winner_id: winnerId, loser_id: loserId, reason },
+  );
+}
+
+export function setGenerationDescription(
+  id: string, repoId: string, description: string, embed: Embed,
+) {
+  return apiPost<{ ok: boolean }>("/rag/set-generation-description", {
+    id, repo_id: repoId, description, ...ragEmbed(embed),
+  });
+}
+
+export function indexVisualGenerations(repoId: string, embed: Embed) {
+  return apiPost<{ ok: boolean; indexed: number; skipped: number }>(
+    "/rag/index-visual-generations", { repo_id: repoId, ...ragEmbed(embed) },
+  );
 }
 
 // 清理僵尸记录：指向本机留存图但磁盘文件已不存在的条目（手动删文件留下的裂图）。返回删除条数。

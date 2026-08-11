@@ -8,12 +8,12 @@ Supervisor 可使用独立快模型，专家使用主模型；单专家任务直
 """
 from __future__ import annotations
 
-import json
 import logging
 import re
 from typing import TypedDict, Iterator
 
-from app.services import agent_context, builtin_agents, edit_agent, generation_approval, generation_store, roleplay_turn, run_trace, scene_classify, tool_agent_adapter
+from app.services import agent_context, builtin_agents, edit_agent, generation_approval, generation_store, roleplay_turn, run_trace, scene_classify, structured_output, tool_agent_adapter
+from app.services.structured_contracts import SupervisorDecision
 from app.services import llm as _llm
 from app.services.agent_contracts import RunContext
 
@@ -74,6 +74,17 @@ def _builtin_sampling(ctx: dict, agent_id: str) -> dict:
     return out
 
 
+def _roleplay_sampling(ctx: dict) -> dict:
+    """同轮隐藏插画成稿使用额外预算，不占用户配置的可见正文额度。"""
+    sampling = _builtin_sampling(ctx, "roleplay")
+    if ctx.get("comfy_illustrate") and "max_tokens" in sampling:
+        from app.services import image_prompt_profiles
+
+        profile = str(ctx.get("prompt_profile") or "krea2")
+        sampling["max_tokens"] += image_prompt_profiles.inline_output_token_reserve(profile)
+    return sampling
+
+
 def _proxy_kw(ctx: dict, key: str = "chat_proxy") -> dict:
     value = (ctx.get(key, "") or "").strip()
     return {"proxy": value} if value else {}
@@ -99,21 +110,30 @@ def _supervisor_route(text: str, image_count: int, ctx: dict) -> tuple[str, bool
         run_trace.emit(ctx, "model.request", agent="supervisor", model=model,
                        messages=[{"role": "system", "content": system},
                                  {"role": "user", "content": user}])
-        reply = chat_fn(ctx["chat_base"], ctx["chat_key"], model,
-                        system, user, temperature=sup_temp,
-                        **_proxy_kw(ctx),
-                        **_builtin_sampling(ctx, "supervisor"))
-        raw = (reply or "").strip()
+        call_args = (
+            ctx["chat_base"], ctx["chat_key"], model, system, user,
+        )
+        call_kwargs = {
+            "temperature": sup_temp,
+            **_proxy_kw(ctx),
+            **_builtin_sampling(ctx, "supervisor"),
+        }
+        structured_fn = ctx.get("structured_chat_fn")
+        result = structured_output.invoke(
+            SupervisorDecision,
+            native=(lambda: structured_fn(*call_args, schema=SupervisorDecision, **call_kwargs))
+            if callable(structured_fn) else None,
+            legacy=lambda: chat_fn(*call_args, **call_kwargs),
+            trace=lambda event, **data: run_trace.emit(ctx, event, agent="supervisor", **data),
+        )
+        raw = result.raw.strip() if result.raw else result.value.model_dump_json()
         run_trace.emit(ctx, "model.response", agent="supervisor", content=raw)
         try:
-            json_block = re.search(r"\{[\s\S]*\}", raw)
-            payload = json.loads(json_block.group(0) if json_block else raw)
-            route = str(payload.get("route") or "").strip().lower()
-            confidence = str(payload.get("confidence") or "high").strip().lower()
-            raw_alternatives = payload.get("alternatives") or []
-            alternatives = [str(item).strip().lower() for item in raw_alternatives] \
-                if isinstance(raw_alternatives, list) else []
-            scene = scene_classify.normalize_scene(str(payload.get("scene") or ""))
+            payload = result.value
+            route = payload.route.strip().lower()
+            confidence = payload.confidence.strip().lower()
+            alternatives = [str(item).strip().lower() for item in payload.alternatives]
+            scene = scene_classify.normalize_scene(payload.scene)
             if route in available:
                 return route, confidence != "low", alternatives, scene
         except (TypeError, ValueError):
@@ -578,17 +598,64 @@ def roleplay_node(state: AgentState) -> dict:
                 ] or ([ctx.get("card_name")] if ctx.get("card_name") else []),
             )
             if recall:
-                base += "\n\n" + recall
                 _probe.info("🔎[RAG召回] repo=%s 注入%d字:\n%s", repo_id, len(recall), recall[:800])
                 run_trace.emit(ctx, "rag.injected", status="ok", content=recall,
                                char_count=len(recall))
             else:
                 _probe.info("🔎[RAG召回] repo=%s 无命中（本轮未注入记忆）", repo_id)
                 run_trace.emit(ctx, "rag.injected", status="empty", content="", char_count=0)
-            base += st_block + directive + roleplay_agency.state_instruction()
+            from app.services import character_belief, continuity_compiler, temporal_fact_store
+            active_facts: list[dict] = []
+            active_beliefs: list[dict] = []
+            try:
+                if ctx.get("output_dir") and repo_id:
+                    active_facts = temporal_fact_store.as_of(
+                        ctx.get("output_dir") or "", repo_id, turn,
+                    )
+            except Exception as exc:  # noqa: BLE001 账本损坏不能阻断正文
+                run_trace.emit(ctx, "temporal.recall", status="error", error=str(exc))
+            else:
+                run_trace.emit(
+                    ctx, "temporal.recall", status="ok", fact_count=len(active_facts),
+                )
+            ctx["_continuity_facts"] = active_facts
+            belief_characters = [
+                str(name) for name in (ctx.get("_selected_persona_names") or []) if str(name)
+            ]
+            try:
+                if ctx.get("output_dir") and repo_id and belief_characters:
+                    active_beliefs = character_belief.active(
+                        ctx.get("output_dir") or "", repo_id, turn,
+                        characters=belief_characters,
+                    )
+            except Exception as exc:  # noqa: BLE001 认知库损坏不能阻断正文
+                run_trace.emit(ctx, "belief.recall", status="error", error=str(exc))
+            else:
+                run_trace.emit(
+                    ctx, "belief.recall", status="ok", count=len(active_beliefs),
+                    characters=belief_characters,
+                )
+            ctx["_continuity_beliefs"] = active_beliefs
+            compiled = continuity_compiler.compile_context([
+                continuity_compiler.ContextSource("CURRENT_STATE", st_block, True, 100),
+                continuity_compiler.ContextSource(
+                    "ACTIVE_FACTS", continuity_compiler.temporal_fact_text(active_facts), True, 90,
+                ),
+                continuity_compiler.ContextSource(
+                    "CHARACTER_BELIEFS", character_belief.render_context(active_beliefs), True, 80,
+                ),
+                continuity_compiler.ContextSource("RAG_MEMORY", recall, False, 20),
+            ], token_budget=900)
+            if compiled.text:
+                base += "\n\n" + compiled.text
+            run_trace.emit(
+                ctx, "continuity.compiled", tokens=compiled.tokens,
+                sources=list(compiled.included), fact_count=len(active_facts),
+            )
+            base += directive + roleplay_agency.state_instruction()
             if getattr(deps, "renderer", None) is not None or ctx.get("comfy_illustrate"):
-                from app.services import image_prompt_extract, worldbook_store
-                visual_query = (agent_context.history_text(ctx)[-2000:] + "\n" + text).strip()
+                from app.services import image_prompt_extract, image_prompt_profiles, worldbook_store
+                visual_query = _illustration_visual_query(ctx, text)
                 visual_profiles = (
                     _card_visual_profiles(ctx, visual_query)
                     if ctx.get("appearance_source") == "character_card"
@@ -600,6 +667,9 @@ def roleplay_node(state: AgentState) -> dict:
                 base += image_prompt_extract.build_inline_plan_instruction(
                     ctx.get("prompt_profile") or "krea2",
                     visual_profiles,
+                    profile_instruction=image_prompt_profiles.inline_generation_instruction(
+                        ctx.get("prompt_profile") or "krea2",
+                    ),
                 )
             # 通用数据表只作只读剧情上下文；更新由正文发出后的独立维护调用完成，
             # 禁止再让主 Roleplay 在正文尾部生成 <表格更新>。
@@ -667,7 +737,7 @@ def roleplay_node(state: AgentState) -> dict:
             roleplay_turn.TurnExecutionHooks(
                 generate=lambda: _chat_with_optional_stream(
                     ctx, wire_messages, temperature=temp,
-                    **_builtin_sampling(ctx, "roleplay"),
+                    **_roleplay_sampling(ctx),
                 ),
                 generated=_generated,
                 finalization=finalization,
@@ -872,6 +942,34 @@ def _visible_roleplay_text(reply: str) -> str:
     return clean.strip()
 
 
+def _status_snapshot_value(snapshot: str, label: str) -> str:
+    """只在需要确定性恢复时读取状态栏单行；其余快照内容仍保持不透明。"""
+    matches = re.findall(
+        rf"(?m)^\s*\[{re.escape(label)}\]\s*(.*?)\s*$",
+        snapshot or "",
+    )
+    return matches[-1].strip() if matches else ""
+
+
+def _illustration_visual_query(ctx: dict, current_text: str) -> str:
+    """为角色外貌匹配保留短上下文，并机械补回最新状态栏的在场角色。"""
+    from app.services import roleplay_agency
+
+    present = ""
+    for item in reversed(ctx.get("history") or []):
+        if item.get("role") != "assistant":
+            continue
+        snapshot = roleplay_agency.extract_status_snapshot(str(item.get("content") or ""))
+        if snapshot:
+            present = _status_snapshot_value(snapshot, "在场")
+            break
+    return "\n".join(filter(None, (
+        agent_context.history_text(ctx)[-2000:].strip(),
+        (current_text or "").strip(),
+        present,
+    )))
+
+
 def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
                       lost: bool, rag_events: list | None = None,
                       user_text: str = "") -> tuple[str, list, dict]:
@@ -885,7 +983,12 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
         from app.services.regex_engine import Placement
         repo_id = ctx.get("repo_id") or ctx.get("thread_id") or ""
         card_name = ctx.get("card_name") or ""
-        clean, illustration_plan = image_prompt_extract.extract_illustration_plan(reply)
+        clean, illustration_plan = image_prompt_extract.extract_illustration_plan(
+            reply,
+            block_filter=lambda value: _apply_regex(
+                ctx, value, Placement.AI_OUTPUT, is_prompt=False, depth=0,
+            ),
+        )
         # 抽 <status> 快照（不剥，留正文供前端正则渲染）+ 剥 <状态更新> 小数值 JSON
         snapshot = roleplay_agency.extract_status_snapshot(clean)
         clean, raw = roleplay_agency.parse_state_block(clean)
@@ -905,10 +1008,35 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
         clean, _legacy_ops = table_update.parse_table_block(clean)
         if had_legacy_table_block:
             run_trace.emit(ctx, "table.writeback", status="legacy_ignored")
+        try:
+            from app.services import narrative_ci
+
+            diagnostics = narrative_ci.evaluate(
+                clean, turn=turn, facts=ctx.get("_continuity_facts") or (), raw_deltas=raw,
+                beliefs=ctx.get("_continuity_beliefs") or (),
+            )
+            saved = narrative_ci.save(
+                ctx.get("output_dir") or "", repo_id, diagnostics,
+            )
+            run_trace.emit(
+                ctx, "narrative.ci", status="evaluated", count=len(diagnostics), saved=saved,
+                codes=[item.get("code", "") for item in diagnostics],
+            )
+        except Exception as exc:  # noqa: BLE001 CI 永不阻断或改写正文
+            run_trace.emit(ctx, "narrative.ci", status="unavailable", error=str(exc))
         # 阶段 D：插画（renderer=None 时 maybe_illustrate 直接返回 None）；用去块正文当段落
         scene = ctx.get("scene") or ""
         wardrobe = roleplay_agency._narr(st, "衣着")
         locale = roleplay_agency._narr(st, "所在")
+        snapshot_text = snapshot or str(
+            getattr(getattr(st, "快照", None), "text", "") or "",
+        )
+        # `<status>` 是显示快照，正常不解析；但它经常是唯一的在场人物真源。
+        # LoRA 选择只读取其中精确的 `[在场]` 单行，避免要求模型额外写一份叙事 delta。
+        present = (
+            _status_snapshot_value(snapshot_text, "在场")
+            or roleplay_agency._narr(st, "在场")
+        )
         # 插画提示词直接由正文 + 已有视觉锚组装，不再额外调用一次聊天模型。
         visible_story = image_prompt_extract.visible_narrative_text(clean)
         local_scene = scene_classify.infer_scene(
@@ -917,6 +1045,12 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
         from app.services import scene_illustration
         local_scene_fallback = (
             not illustration_plan and local_scene in ("nsfw", "climax")
+        )
+        # ComfyUI 自动插画开启后，主模型即使违约漏掉计划，也不能让整条请求静默消失。
+        # 普通 dialogue/action 直接复用本轮正文最强视觉段落；完整 Profile 由本轮隐藏成稿
+        # 或本地事实编译提供，前端无需再补调文本模型。
+        missing_plan_fallback = bool(
+            ctx.get("comfy_illustrate") and not illustration_plan and visible_story
         )
         (encounter_anchor, encounter_narrative, encounter_actors,
          encounter_facts) = scene_illustration.encounter_illustration_context(clean)
@@ -931,10 +1065,11 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
         at_climax = bool(illustration_plan) or (
             bool(visible_story) and (
                 lost or scene in ("nsfw", "climax")
-                or local_scene_fallback or first_story_reply or character_encounter
+                or local_scene_fallback or missing_plan_fallback
+                or first_story_reply or character_encounter
             )
         )
-        prompt_override, profile_prompt, motion, actors = "", "", 0, []
+        prompt_override, motion, actors = "", 0, []
         image_rating = (
             "nsfw" if scene in ("nsfw", "climax")
             or local_scene in ("nsfw", "climax") else "sfw"
@@ -942,16 +1077,6 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
         if illustration_plan:
             prompt_override = _apply_regex(
                 ctx, illustration_plan["prompt"], Placement.IMAGE_PROMPT, is_prompt=True).strip()
-            from app.services import image_prompt_profiles
-            profile_prompt = image_prompt_profiles.normalize_inline(
-                ctx.get("prompt_profile") or "krea2",
-                illustration_plan.get("profile_prompt", ""),
-                {
-                    "rating": image_rating,
-                    "narrative": visible_story,
-                    "draft_prompt": illustration_plan.get("prompt", ""),
-                },
-            )
             motion = illustration_plan["motion"]
             actors = illustration_plan["actors"]
         elif ctx.get("comfy_illustrate") and local_scene_fallback:
@@ -959,7 +1084,7 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
                 "\n".join((user_text, visible_story)),
             )
             motion = image_prompt_extract.infer_motion(visible_story)
-            actors = [card_name] if card_name else []
+            actors = []
         elif (deps.renderer is not None or ctx.get("comfy_illustrate")) and at_climax:
             prompt_override, motion, actors = _build_image_prompt(
                 ctx, paragraph=encounter_narrative if character_encounter else visible_story,
@@ -973,7 +1098,40 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
             # 提取模型失败/拒答/返回坏 JSON 时仍要发请求：用既有纯逻辑组装器把正文、
             # 外观和动态状态拼成降级提示词。旧代码只在 prompt_override 非空时发事件，
             # 与上方“失败回退中文裸拼接”的设计相反，会让整条 ComfyUI 链静默消失。
-            request_actors = actors or ([card_name] if card_name else [])
+            # actors 只表示画面真实在场角色；配置全集仅用于正文精确补漏，不能整体塞入，
+            # 否则前端会给未出场角色加载 LoRA。
+            _known = [
+                str(name).strip() for name in (ctx.get("illustration_actor_names") or [])
+                if str(name).strip()
+            ]
+            _actor_values = list(actors)
+            if ctx.get("appearance_source") == "worldbook" and card_name:
+                # 世界书作品的 card_name 是作品/父仓库名，不是角色名。旧前端曾把它
+                # 混进候选全集，导致本地降级把作品名精确命中并回退风格 LoRA。
+                _known = [name for name in _known if name != card_name]
+                _actor_values = [name for name in _actor_values if name != card_name]
+            _scene_text = "\n".join(filter(None, (
+                encounter_narrative if character_encounter else visible_story,
+                user_text,
+                _illustration_appearance(ctx),
+                present,
+            )))
+            _exact = (
+                [name for name in _actor_values if name in _known]
+                if _known else _actor_values
+            )
+            _mentioned = [
+                name for name in _known
+                if name not in _exact and name in (_scene_text or "")
+            ]
+            request_actors = list(dict.fromkeys(_exact + _mentioned))
+            if not request_actors:
+                request_actors = list(dict.fromkeys(
+                    _actor_values + (
+                        [card_name]
+                        if card_name and ctx.get("appearance_source") != "worldbook" else []
+                    ),
+                ))
             request_prompt = prompt_override.strip()
             prompt_source = "extracted"
             if at_climax and not request_prompt:
@@ -988,7 +1146,9 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
             fallback_anchor = ""
             if character_encounter:
                 fallback_anchor = encounter_anchor
-            elif visible_story and (local_scene_fallback or first_story_reply) and not illustration_plan:
+            elif visible_story and (
+                local_scene_fallback or missing_plan_fallback or first_story_reply
+            ) and not illustration_plan:
                 fallback_anchor = scene_illustration.fallback_illustration_anchor(clean)
             planned_anchor = illustration_plan.get("anchor", "")
             requested_anchor = planned_anchor or fallback_anchor
@@ -996,50 +1156,109 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
                 requested_anchor = scene_illustration.resolve_illustration_anchor(
                     clean, requested_anchor,
                 )
-                if requested_anchor != planned_anchor:
-                    # 主模型把动作峰值退化成静态收束时，废弃同源的错误 Profile；
-                    # 前端会用纠正后的 narrative 重新生成，不让肖像提示词继续提交。
-                    profile_prompt = ""
-            scene_spec = {
-                "narrative": encounter_narrative if character_encounter else (
+            plan_retargeted = bool(
+                illustration_plan and planned_anchor
+                and image_prompt_extract.restore_jailbreak(planned_anchor).strip()
+                != image_prompt_extract.restore_jailbreak(requested_anchor).strip()
+            )
+            if plan_retargeted:
+                corrected_scene = scene_illustration.illustration_scene_excerpt(
+                    visible_story, requested_anchor,
+                )
+                # 重定向只替换错误高潮动作，不能把 Krea2 的英文动作底座也清空；
+                # 否则独立 Profile 一旦拒答，只能退回没有角色和剧情事实的通用模板。
+                request_prompt = image_prompt_extract.build_fallback_content_tags(corrected_scene)
+                motion = image_prompt_extract.infer_motion(corrected_scene)
+                request_actors = [
+                    name for name in _known
+                    if name in corrected_scene or name in present
+                ]
+                request_actors = list(dict.fromkeys(request_actors))
+            scene_narrative = encounter_narrative if character_encounter else (
                     scene_illustration.illustration_scene_excerpt(
                         visible_story, requested_anchor,
                     )
-                ),
+                )
+            protected_narrative = (
+                encounter_narrative if character_encounter else
+                scene_illustration.protected_illustration_scene_excerpt(
+                    clean, scene_narrative,
+                )
+            )
+            scene_spec = {
+                "narrative": image_prompt_extract.restore_jailbreak(scene_narrative),
+                "protected_narrative": protected_narrative,
                 "draft_prompt": request_prompt,
                 "appearance": _illustration_appearance(ctx),
                 "wardrobe": wardrobe,
                 "locale": locale,
                 "actors": request_actors,
                 "rating": image_rating,
-                "aspect_ratio": illustration_plan.get("aspect_ratio") or (
-                    "4:3" if character_encounter else "2:3"
+                "aspect_ratio": (
+                    "" if plan_retargeted else illustration_plan.get("aspect_ratio")
+                ) or (
+                    "4:3" if character_encounter else scene_illustration.infer_aspect_ratio(
+                        _scene_text, request_actors,
+                    )
                 ),
+                "profile": ctx.get("prompt_profile") or "krea2",
             }
             if ctx.get("appearance_source") in {"worldbook", "character_card"}:
                 scene_spec["appearance_source"] = ctx.get("appearance_source")
+            if illustration_plan.get("subjects"):
+                # 主计划的英文主体描述是拒答降级时仍可用的身份真源；即使高潮锚点
+                # 被纠正，稳定外貌不会随动作重定向而失效。
+                scene_spec["subjects"] = illustration_plan["subjects"]
             if character_encounter:
                 scene_spec["encounter"] = encounter_facts
-            if illustration_plan.get("art_direction"):
+            if not plan_retargeted and illustration_plan.get("art_direction"):
                 scene_spec["art_direction"] = illustration_plan["art_direction"]
+            if not plan_retargeted and illustration_plan.get("camera"):
+                scene_spec["camera"] = illustration_plan["camera"]
+            if not plan_retargeted and illustration_plan.get("composition"):
+                scene_spec["composition"] = illustration_plan["composition"]
             from app.services import image_prompt_profiles
+            # illustration JSON 已在解析前复用正文的 AI_OUTPUT 正则；成稿再叠加
+            # IMAGE_PROMPT 专用清洗。
+            # 高潮锚点被纠正时，旧成稿描述的是错误桥段，必须丢弃并从纠正后的事实本地编译。
+            inline_profile = ""
+            if illustration_plan and not plan_retargeted:
+                inline_profile = str(illustration_plan.get("profile_prompt") or "")
+                inline_profile = _apply_regex(
+                    ctx, inline_profile, Placement.IMAGE_PROMPT, is_prompt=True, depth=0,
+                )
+            compiled_profile = image_prompt_profiles.normalize_inline(
+                scene_spec["profile"], inline_profile, scene_spec,
+            )
+            profile_strategy = "same_turn"
+            if not compiled_profile:
+                local_profile = image_prompt_profiles.deterministic_fallback(
+                    scene_spec["profile"], scene_spec,
+                )
+                compiled_profile = image_prompt_profiles.normalize_inline(
+                    scene_spec["profile"], local_profile, scene_spec,
+                ) or local_profile
+                profile_strategy = "local_fallback"
+            scene_spec["profile_prompt"] = compiled_profile
+            run_trace.emit(
+                ctx, "illustration.profile", profile=scene_spec["profile"],
+                strategy=profile_strategy, inline_chars=len(inline_profile),
+                output_chars=len(compiled_profile), plan_retargeted=plan_retargeted,
+            )
             profile_negative = image_prompt_profiles.negative_prompt(
                 ctx.get("prompt_profile") or "krea2", scene_spec,
             )
             if profile_negative:
                 scene_spec["negative_prompt"] = profile_negative
-            if profile_prompt:
-                scene_spec.update({
-                    "profile": ctx.get("prompt_profile") or "krea2",
-                    "profile_prompt": profile_prompt,
-                })
-            request_prompt = profile_prompt or image_prompt_extract.format_comfy_prompt(request_prompt)
+            # 所有 Profile 正常路径都由主剧情同轮成稿；失败只走本地事实兜底，不再补调文本模型。
+            request_prompt = image_prompt_extract.format_comfy_prompt(request_prompt)
             illustrate_req = (
                 {"prompt": request_prompt, "motion": motion, "actors": request_actors,
                  "anchor": requested_anchor, "scene_spec": scene_spec,
                  "allow_anchor_fallback": (
                      bool(visible_story) and (
-                         local_scene_fallback or first_story_reply or character_encounter
+                         local_scene_fallback or missing_plan_fallback
+                         or first_story_reply or character_encounter
                      )
                  ) and not illustration_plan}
                 if at_climax and (request_prompt or scene_spec["narrative"]) else {}
@@ -1048,16 +1267,21 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
                 ctx,
                 "illustration.request",
                 status="emitted" if illustrate_req else "skipped",
-                reason=("main_profile" if profile_prompt and illustrate_req else
+                reason=("main_plan_retargeted" if plan_retargeted and illustrate_req else
                         "main_plan" if illustration_plan and illustrate_req else
                         "character_encounter" if character_encounter and illustrate_req else
                         "local_scene_fallback" if local_scene_fallback and illustrate_req else
                         "first_story_reply" if first_story_reply and illustrate_req else
+                        "missing_plan_fallback" if missing_plan_fallback and illustrate_req else
                         prompt_source if illustrate_req else
                         "scene_not_triggered" if not at_climax else "empty_prompt"),
                 scene=scene,
                 inferred_scene=local_scene,
                 actor_count=len(request_actors),
+                actors=request_actors,
+                actor_candidates=_known,
+                status_actors=[name for name in _known if name in present],
+                plan_retargeted=plan_retargeted,
                 prompt_chars=len(request_prompt),
             )
             return clean, [], illustrate_req
@@ -1519,14 +1743,17 @@ def _resolve_personas(
     profiles: list[str] = []
     injected_names: list[str] = []
     try:
-        from app.services import character_store
+        from app.services import character_store, instruction_provenance
         for name in selected:
             base, card_name = _card_source(ctx, name)
             card = character_store.read_card(base, card_name) if base and card_name else None
             description = str((card or {}).get("description") or "").strip()
             if not description:
                 continue
-            profiles.append(f"【角色：{card_name}】\n{description}")
+            profiles.append(instruction_provenance.wrap(
+                f"角色卡：{card_name}",
+                f"【角色：{card_name}】\n{description}",
+            ))
             injected_names.append(card_name)
     except Exception:  # noqa: BLE001
         profiles = []

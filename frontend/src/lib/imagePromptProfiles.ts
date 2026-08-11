@@ -1,7 +1,7 @@
 export type PromptProfileId = "krea2" | "anima_tags" | "natural_language" | "niji_sections";
 
 export const PROMPT_PROFILE_OPTIONS: readonly { id: PromptProfileId; label: string }[] = [
-  { id: "krea2", label: "Krea2（自动判断 SFW / NSFW）" },
+  { id: "krea2", label: "Krea2（剧情高潮英文描述）" },
   { id: "anima_tags", label: "Anima（质量行 + 内容 tags / 英文描述）" },
   { id: "natural_language", label: "自然语言（GPT Image / Banana）" },
   { id: "niji_sections", label: "Niji（主体 / 风格 / 附加 / 后缀）" },
@@ -34,6 +34,21 @@ export function applyProfileLoraTriggers(
   triggers: readonly string[],
 ): string {
   return prependLoraTriggers(prompt, triggers);
+}
+
+const ANIMA_ILLUSTRATION_STYLE = [
+  "anime illustration", "hand-drawn anime style", "2d cel shading", "non-photorealistic",
+] as const;
+
+export function ensureAnimaIllustrationStyle(prompt: string, enabled: boolean): string {
+  if (!enabled) return prompt;
+  const newline = prompt.indexOf("\n");
+  if (newline < 0) return prompt;
+  const quality = prompt.slice(0, newline);
+  const content = prompt.slice(newline + 1).trim();
+  const lower = content.toLowerCase();
+  const missing = ANIMA_ILLUSTRATION_STYLE.filter((tag) => !lower.includes(tag));
+  return `${quality}\n${[...missing, content].filter(Boolean).join(", ")}`;
 }
 
 function splitQualityTags(value: string): string[] {

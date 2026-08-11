@@ -4,6 +4,7 @@ import {
   NAV_SECTIONS, type NavSection, isNavSection,
   SECTION_SUBNAV,
   resolveActivityChatTarget,
+  resolveOpenedWorkRoute,
 } from "./lib/viewRouting";
 import { useSettings, activeChatModel, resolvedEmbedModel } from "./stores/settings";
 import { useRepos, type Repo } from "./stores/repos";
@@ -13,9 +14,11 @@ import { ConfirmModal, PromptModal } from "./components/Modal";
 import { RegexModal } from "./components/RegexModal";
 import { PresetModal } from "./components/PresetModal";
 import { BindRepoModal } from "./components/BindRepoModal";
-import { listGenerations } from "./api/ai";
+import { fetchAgentRunning, listGenerations } from "./api/ai";
 import { deleteRepoFolder } from "./api/userState";
 import { AppBody } from "./AppBody";
+import { recentWorks as selectRecentWorks } from "./lib/repoPresentation";
+import { hasPendingComfyGeneration } from "./lib/comfyBackgroundActivity";
 
 // 页面边界按需加载；应用壳、后台活动和快捷工具保持常驻。
 const SupportWidget = lazy(() => import("./components/SupportWidget").then((m) => ({ default: m.SupportWidget })));
@@ -29,17 +32,25 @@ export function App() {
   const { settings } = settingsStore;
   const {
     repos, addRepo, addCardWork, addBranch, renameRepo, bindRepo, resolveBinding,
-    setCover, setGeneratedCover,
+    setCover, setGeneratedCover, touchRepo,
     relocateOutputPath, coverOf, deleteRepo, childrenOf,
   } = useRepos();
 
   const [workMode, setWorkMode] = useState<WorkMode>("story");
   const [section, setSection] = useState<NavSection>("home");
   const [subView, setSubView] = useState<string | null>(null);
-  const [repoId, setRepoId] = useState<string | null>(null); // 大仓库（顶部选择器）
-  const [workId, setWorkId] = useState<string | null>(null); // 小仓库/作品（顶部选择器）
+  const [repoId, setRepoId] = useState<string | null>(() => {
+    try { return localStorage.getItem("laf_current_repo") || null; } catch { return null; }
+  }); // 大仓库（顶部选择器）—— localStorage 持久化防 Vite HMR 刷新丢失
+  const [workId, setWorkId] = useState<string | null>(() => {
+    try { return localStorage.getItem("laf_current_work") || null; } catch { return null; }
+  }); // 小仓库/作品——同上
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
+
+  // 仓库/作品切换时同步写入 localStorage；null 时清空
+  useEffect(() => { try { if (repoId) localStorage.setItem("laf_current_repo", repoId); else localStorage.removeItem("laf_current_repo"); } catch {} }, [repoId]);
+  useEffect(() => { try { if (workId) localStorage.setItem("laf_current_work", workId); else localStorage.removeItem("laf_current_work"); } catch {} }, [workId]);
 
   // 资产·作品 钻入时的浏览态（大仓库→小仓库两级），与顶部选择器解耦
   const [browseRepoId, setBrowseRepoId] = useState<string | null>(null);
@@ -60,6 +71,24 @@ export function App() {
   const activeWorkRaw = workId ? repos.find((r) => r.id === workId) ?? null : null;
   // 把有效绑定（自身缺则继承父仓库）合并进传给对话的 repo，下游读 repo.cardName 等即拿解析值；id 不变不影响 threadId。
   const activeWork = activeWorkRaw ? { ...activeWorkRaw, ...resolveBinding(activeWorkRaw) } : null;
+  const selectedRepo = repoId ? topRepos.find((repo) => repo.id === repoId) ?? null : null;
+  const recentWorks = selectRecentWorks(repos, 5);
+
+  const selectRepo = (id: string | null) => {
+    setRepoId(id);
+    setWorkId(null);
+    if (!id) return;
+    const children = childrenOf(id);
+    if (children.length === 1) {
+      setWorkId(children[0].id);
+      touchRepo(children[0].id);
+    }
+  };
+
+  const selectWork = (id: string | null) => {
+    setWorkId(id);
+    if (id) touchRepo(id);
+  };
 
   // 刷新后停留：hash = #/section 或 #/section/sub 或 #/workMode
   useEffect(() => {
@@ -161,8 +190,8 @@ export function App() {
           works={works}
           repoId={repoId}
           workId={workId}
-          onRepo={(id) => { setRepoId(id); setWorkId(null); }}
-          onWork={setWorkId}
+          onRepo={selectRepo}
+          onWork={selectWork}
           onOpenRegex={() => setRegexOpen(true)}
           onOpenPreset={() => setPresetOpen(true)}
           personas={(settings.userPersonas || []).map((p) => ({ id: p.id, name: p.name }))}
@@ -177,6 +206,9 @@ export function App() {
             subView={subView}
             workMode={workMode}
             activeWork={activeWork}
+            selectedRepo={selectedRepo}
+            recentWorks={recentWorks}
+            topRepos={topRepos}
             settingsStore={settingsStore}
             settings={settings}
             relocateOutputPath={relocateOutputPath}
@@ -192,14 +224,17 @@ export function App() {
             onBind={setBinding}
             onDelete={setDeleting}
             onOpenWork={(rid, wid) => {
+              const target = resolveOpenedWorkRoute(workMode);
               setRepoId(rid);
               setWorkId(wid);
-              setWorkMode("story");
+              touchRepo(wid);
+              setWorkMode(target.workMode);
               setSection("home");
               setSettingsOpen(false);
               setSubView(null);
-              window.location.hash = "#/story";
+              window.location.hash = target.hash;
             }}
+            onClearRepo={() => { setRepoId(null); setWorkId(null); }}
             addCardWork={addCardWork}
             addBranch={addBranch}
             marketSearch={marketSearch}
@@ -279,6 +314,18 @@ export function App() {
             const target = deleting;
             setDeleting(null);
             const ids = [target.id, ...childrenOf(target.id).map((c) => c.id)];
+            if (hasPendingComfyGeneration(ids)) {
+              setDelBlocked(`「${target.name}」还有生图任务未完成，已阻止删除。请等待归档完成或先显式停止任务。`);
+              return;
+            }
+            for (const id of ids) {
+              try {
+                if ((await fetchAgentRunning(id)).running) {
+                  setDelBlocked(`「${target.name}」还有剧情或插画任务在运行，已阻止删除。`);
+                  return;
+                }
+              } catch { /* 后台状态不可用时仍继续检查本地资产 */ }
+            }
             let hasAssets = false;
             for (const id of ids) {
               try {

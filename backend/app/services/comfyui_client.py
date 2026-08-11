@@ -106,7 +106,9 @@ def submit_prompt(url: str, api: dict, client_id: str = "") -> str | None:
     rq = Request(_base(url) + "/prompt", data=body,
                  headers={"Content-Type": "application/json"})
     try:
-        with urlopen(rq, timeout=10) as r:
+        # 大型工作流在 /prompt 入口会同步完成节点校验；冷启动时 10 秒不足，
+        # 请求可能已到 ComfyUI 却在返回 prompt_id 前被客户端掐断。
+        with urlopen(rq, timeout=30) as r:
             res = json.loads(r.read())
         return res.get("prompt_id")
     except HTTPError as e:

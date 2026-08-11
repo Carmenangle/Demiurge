@@ -14,9 +14,10 @@ interface LoraTriggerRecord {
   suggested_prompt?: string;
 }
 
-const QUALITY_PROMPT_PATTERN = /(?:\b(?:best|high|amazing|masterpiece|masterwork|quality|aesthetic|absurdres|newest|score_\d+|contrast|detail(?:ed)?|resolution|anatomy|shading|focus|blurr?y|depth of field|rim light|lighting|chiaroscuro|coloring|sketch|style|realistic|material|texture|silk|satin|velvet|chiffon|lace|leather|metallic|glossy|matte|translucent|grain(?:y)?|[248]k|hd|uhd)\b|画质|高质量|杰作|光影|景深|虚化|画风|风格|细节|分辨率|色彩|上色|阴影|锐利|清晰|材质|纹理|丝绸|真丝|缎面|丝绒|雪纺|蕾丝|皮革|金属|哑光|高光|通透)/i;
+const QUALITY_PROMPT_PATTERN = /(?:\b(?:best|high|amazing|masterpiece|masterwork|quality|aesthetic|absurdres|newest|score_\d+|contrast|detail(?:ed|s)?|resolution|anatomy|shading|focus|blurr?y|depth of field|rim light|lighting|chiaroscuro|coloring|sketch|style|realistic|material|texture|silk|satin|velvet|chiffon|lace|leather|metallic|glossy|matte|translucent|grain(?:y)?|[248]k|hd|uhd)\b|画质|高质量|杰作|光影|景深|虚化|画风|风格|细节|分辨率|色彩|上色|阴影|锐利|清晰|材质|纹理|丝绸|真丝|缎面|丝绒|雪纺|蕾丝|皮革|金属|哑光|高光|通透)/i;
 const SCENE_CONTROL_PATTERN = /(?:\b(?:close-up|wide angle|camera|shot|composition|perspective|portrait|full body|upper body|cowboy shot|dutch angle|low angle|high angle|from above|from below)\b|构图|镜头|特写|近景|中景|远景|全身|半身|俯拍|仰拍)/i;
 const CONTENT_PROMPT_PATTERN = /(?:\b(?:\d*(?:girl|boy)|woman|man|female|male|hair|eyes?|dress|skirt|shirt|pants|underwear|bra|panties|nude|naked|breasts?|nipples?|pussy|penis|standing|sitting|kneeling|lying|running|walking|holding|touching|kissing|sex|arms?|hands?|sword|forest|room|street|bedroom)\b|女孩|男孩|女人|男人|头发|眼睛|裙|衬衫|裤|内衣|裸体|乳房|乳头|阴部|阴茎|站立|坐着|跪|躺|奔跑|行走|手持|触摸|亲吻|性交|手臂|手部|剑|森林|房间|街道|卧室)/i;
+const MEDIA_STYLE_PATTERN = /(?:\b(?:photo-?real(?:istic)?|realistic(?:\s+(?:skin|face|photo(?:graphy)?))?|live[ -]?action|anime|donghua|cartoon)\b|真人|写实|照片|摄影|二次元|动漫|卡通)/i;
 
 export function splitPromptTags(value: string): string[] {
   const tags: string[] = [];
@@ -45,6 +46,7 @@ function isArtistSignature(tag: string): boolean {
 
 function isQualityPromptTag(tag: string): boolean {
   if (SCENE_CONTROL_PATTERN.test(tag)) return false;
+  if (MEDIA_STYLE_PATTERN.test(tag)) return false;
   if (isArtistSignature(tag)) return true;
   if (CONTENT_PROMPT_PATTERN.test(tag)) return false;
   const words = tag.trim().split(/\s+/).filter(Boolean);
@@ -162,6 +164,19 @@ export function promptAdditionsForSelectedLora(
   if (!suggestion) return [...selected.triggers];
   const qualityTags = qualityPromptTagsFromSuggestion(suggestion, selected.triggers);
   return uniquePromptTags([...selected.triggers, ...qualityTags]);
+}
+
+export function resolveLoraPromptMetadata(
+  items: readonly LoraTriggerRecord[], selectedLoraName: string,
+): { found: boolean; additions: string[] } {
+  if (!selectedLoraName) return { found: false, additions: [] };
+  const found = items.some(
+    (item) => item.lora_name === selectedLoraName && !item.missing,
+  );
+  return {
+    found,
+    additions: found ? promptAdditionsForSelectedLora(items, selectedLoraName) : [],
+  };
 }
 
 export function resolveGenerationPrompt(

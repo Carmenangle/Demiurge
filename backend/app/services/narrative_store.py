@@ -90,15 +90,46 @@ def append(base: str, repo_id: str, entry: ChronicleEntry) -> int:
         return 0
     conn = _connect(base, repo_id)
     try:
-        cur = conn.execute(
-            "INSERT INTO chronicle(body, overview, text, dialogue, characters, "
-            "turn_start, turn_end, layer, keywords) VALUES (?,?,?,?,?,?,?,?,?)",
-            (entry.body(), entry.short_overview(), entry.text, entry.dialogue,
-             "\n".join(entry.characters), entry.turn_start, entry.turn_end,
-             entry.layer, "\n".join(entry.keywords)),
-        )
+        rowid = _insert_entry(conn, entry)
         conn.commit()
-        return int(cur.lastrowid or 0)
+        return rowid
+    finally:
+        conn.close()
+
+
+def _insert_entry(conn: sqlite3.Connection, entry: ChronicleEntry) -> int:
+    cur = conn.execute(
+        "INSERT INTO chronicle(body, overview, text, dialogue, characters, "
+        "turn_start, turn_end, layer, keywords) VALUES (?,?,?,?,?,?,?,?,?)",
+        (entry.body(), entry.short_overview(), entry.text, entry.dialogue,
+         "\n".join(entry.characters), entry.turn_start, entry.turn_end,
+         entry.layer, "\n".join(entry.keywords)),
+    )
+    return int(cur.lastrowid or 0)
+
+
+def import_entries(
+    base: str,
+    repo_id: str,
+    entries: list[ChronicleEntry],
+    *,
+    replace: bool = False,
+) -> int:
+    """在单个 SQLite 事务内追加或替换纪要；任一条失败则完整回滚。"""
+    valid = [entry for entry in entries if entry.text.strip()]
+    if not (base and repo_id):
+        return 0
+    conn = _connect(base, repo_id)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if replace:
+            conn.execute("DELETE FROM chronicle")
+        imported = sum(1 for entry in valid if _insert_entry(conn, entry))
+        conn.commit()
+        return imported
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 

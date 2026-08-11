@@ -49,6 +49,10 @@ export function resolveHomeWorkspace(workMode: WorkMode, hasActiveWork: boolean)
   }
 }
 
+export function resolveOpenedWorkRoute(workMode: WorkMode): { workMode: WorkMode; hash: string } {
+  return { workMode, hash: `#/${workMode}` };
+}
+
 export type NavSection = "home" | "assets" | "workflows" | "system";
 
 export const NAV_SECTIONS: { id: NavSection; label: string }[] = [

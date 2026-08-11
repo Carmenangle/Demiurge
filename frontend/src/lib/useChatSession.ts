@@ -20,9 +20,11 @@ import {
   fetchHistory, multiAgent,
   saveSnapshot, fetchSnapshot, fetchAgentRunning, cancelAgent,
   fetchInspiration, regenerateImage as replayImageGeneration,
-  reportIllustrationFailure, reportIllustrationSubmission, genProfilePrompt, listGenerations,
+  claimIllustrationSubmission, reportIllustrationFailure, reportIllustrationSubmission,
+  genProfilePrompt, listGenerations,
   type AgentInvocation,
 } from "../api/ai";
+import { createScenarioSnapshot } from "../api/scenario";
 import { refreshChatBackgroundActivities } from "./chatBackgroundActivity";
 import { substituteMacros } from "./chatMacros";
 import type { ChatStreamEvent, IllustrationSceneSpec } from "../api/chatStreamProtocol";
@@ -35,19 +37,21 @@ import { subscribeProgress } from "./comfyProgress";
 import {
   needsImageInput, hasImageProvided, pickBestText,
   slimSnapshot as slimSnapshotPure, promptHistory,
-  prepareConversationRegeneration, promptAdditionsForSelectedLora, resolveGenerationPrompt,
+  prepareConversationRegeneration, resolveLoraPromptMetadata, resolveGenerationPrompt,
 } from "./chatGeneration";
 import {
-  WorkflowGenerationRuntime, type PendingGeneration, type WorkflowWatchObserver,
+  durableFinalizeSucceeded, WorkflowGenerationRuntime,
+  type PendingGeneration, type WorkflowWatchObserver,
 } from "./workflowGenerationRuntime";
 import {
-  applyProfileLoraTriggers, illustrationTemplateValues, normalizePromptProfile,
+  applyProfileLoraTriggers, ensureAnimaIllustrationStyle, illustrationTemplateValues, normalizePromptProfile,
   replacePromptQualityLine, latentSizeFor, workflowFieldBinding,
 } from "./imagePromptProfiles";
 import { illustrationRequestMedia, illustrationWorkflowMedia } from "./illustrationMedia";
 import {
   agentImageMessage, applyRouteChoice, bindMediaSlotPrompt, dropMediaSlot,
-  reduceChatStreamEvent, resolveMediaSlot, upsertMessages, workflowMessages,
+  pruneUnsubmittedMediaSlots, reduceChatStreamEvent, resolveMediaSlot,
+  restoreSubmittedMediaSlots, upsertMessages, workflowMessages,
 } from "./chatSessionEvents";
 import { recoverCompactedSummaryImage } from "./contextManagement";
 import { characterDetail } from "../api/characters";
@@ -61,7 +65,7 @@ import {
 } from "./regeneration";
 import { resolveEndpointProxy, resolveModelProxy, type ProxyMode } from "./modelProxy";
 import {
-  ConversationHistoryRuntime, type ConversationCheckpoint,
+  ConversationHistoryRuntime, resolveInitialHistory, type ConversationCheckpoint,
 } from "./conversationHistoryRuntime";
 import { useChatAgentQueue } from "./useChatAgentQueue";
 
@@ -119,6 +123,7 @@ export function useChatSession(deps: ChatSessionDeps) {
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const messagesRef = useRef<ChatMessage[]>(messages);
+  const scenarioSnapshotTurnRef = useRef(-1);
   messagesRef.current = messages;
   // 破坏性操作确认弹窗：由 UI 渲染 ConfirmModal，用户选择后 resolve 这个 promise
   const [confirmReq, setConfirmReq] = useState<{ message: string; resolve: (ok: boolean) => void } | null>(null);
@@ -363,8 +368,18 @@ export function useChatSession(deps: ChatSessionDeps) {
         const snap = await fetchSnapshot(threadId);
         if (!alive) return;
         if (snap.items && snap.items.length > 0) {
-          const snapshotMessages = snap.items as ChatMessage[];
-          let restoredMessages = snapshotMessages;
+          const snapshotMessages = restoreSubmittedMediaSlots(
+            snap.items as ChatMessage[], workflowRuntime.list(),
+          );
+          const pruned = pruneUnsubmittedMediaSlots(snapshotMessages);
+          let restoredMessages = pruned.messages;
+          for (const item of pruned.removed) {
+            void reportIllustrationFailure({
+              threadId, repoId: repo?.id || threadId,
+              messageId: item.messageId, slotId: item.slotId,
+              stage: "resume_unsubmitted", error: "页面恢复时发现未提交到 ComfyUI 的孤儿插画槽",
+            }).catch(() => undefined);
+          }
           const needsSummaryImage = snapshotMessages.length === 1
             && snapshotMessages[0].text.startsWith("【历史摘要】")
             && !snapshotMessages[0].image
@@ -383,6 +398,15 @@ export function useChatSession(deps: ChatSessionDeps) {
           loadedRef.current = true;
           await maybeStartBgPoll();
           return;
+        }
+        // 成功返回的空快照是当前 UUID 的历史真源；仅请求失败时才允许本地缓存兜底。
+        const initialHistory = resolveInitialHistory(
+          snap.items as ChatMessage[], shownLocal ? messagesRef.current : [],
+        );
+        if (initialHistory.length === 0) {
+          shownLocal = false;
+          setMessages([]);
+          try { localStorage.removeItem(chatKey); } catch { /* ignore */ }
         }
       } catch { /* 快照接口失败，继续兜底 */ }
       if (shownLocal) { loadedRef.current = true; await maybeStartBgPoll(); return; }  // 本地已渲染、后端无快照
@@ -419,6 +443,7 @@ export function useChatSession(deps: ChatSessionDeps) {
       await maybeStartBgPoll();
     })();
     return () => {
+      scenarioSnapshotTurnRef.current = -1;
       alive = false;
       activeThreadRef.current = "";
       recoveryTokenRef.current += 1;
@@ -454,7 +479,8 @@ export function useChatSession(deps: ChatSessionDeps) {
     const tid = threadId;
     const original = messages;
     snapTimer.current = setTimeout(async () => {
-      if (bgRunningRef.current) return;  // 后台任务在写快照，前端不抢写以免覆盖后端落盘
+      if (bgRunningRef.current || streamingId || regeneratingIds.size > 0) return;
+      // 流式正文或重生成尚未终态时不能创建世界状态快照，否则会把半截正文与未完成写回固化。
       const full = await slimSnapshot(original);
       // localStorage 只存轻量快取：去掉 capturedGraph，parts / portsPlan 里的 dataURI 已被 slimSnapshot 转成本地 URL。
       const slim = full.map((m) =>
@@ -463,12 +489,22 @@ export function useChatSession(deps: ChatSessionDeps) {
       try {
         localStorage.setItem(chatKey, JSON.stringify(slim));
       } catch { /* 超额等忽略 */ }
-      saveSnapshot(tid, full).catch(() => {});  // 后端未起则忽略，本地仍在
+      saveSnapshot(tid, full).then(() => {
+        const turn = full.filter((message) => message.role === "assistant"
+          && Boolean((message.text || "").trim())).length;
+        if (settings.outputDir && repo?.id && turn > scenarioSnapshotTurnRef.current) {
+          scenarioSnapshotTurnRef.current = turn;
+          void createScenarioSnapshot({
+            output_dir: settings.outputDir, repo_id: repo.id, turn,
+            label: "自动回合快照", dedupe_key: `turn:${turn}`,
+          }).catch(() => { scenarioSnapshotTurnRef.current = turn - 1; });
+        }
+      }).catch(() => {});  // 后端未起则忽略本地仍在
       if (tid === threadId && JSON.stringify(full) !== JSON.stringify(original)) {
         setMessages(full);
       }
     }, 600);
-  }, [messages, chatKey, threadId]);
+  }, [messages, chatKey, threadId, settings.outputDir, repo?.id, streamingId, regeneratingIds.size]);
 
   // 选中模板 → 在对话流插入工作流节点卡（卡内嵌锁定画布）
   const pickTemplate = (t: Template) => {
@@ -530,6 +566,9 @@ export function useChatSession(deps: ChatSessionDeps) {
     const best = pickBestText(r.texts);
     if ((r.images?.length || 0) === 0 && (r.videos?.length || 0) === 0 && !best) return false;
     const promptId = pendingItem.prompt_id;
+      const owner = pendingItem.owner || {
+        threadId, repoId: repo?.id || "home", outputDir: settings.outputDir,
+      };
       const savedRegeneration = pendingItem?.regeneration;
       const target = pendingItem?.target;
       const generationPrompt = resolveGenerationPrompt(pendingItem?.prompt, savedRegeneration, best);
@@ -538,38 +577,41 @@ export function useChatSession(deps: ChatSessionDeps) {
         : savedRegeneration;
       const comfyuiUrl = comfyRegenerationUrl(regeneration) || settings.comfyuiUrl;
       const result = await persistWorkflowGeneration({
-        threadId,
-        repoId: repo?.id || "home",
+        threadId: owner.threadId,
+        repoId: owner.repoId,
         promptId,
         prompt: generationPrompt,
         images: r.images || [],
         videos: r.videos || [],
-        outputDir: settings.outputDir,
+        outputDir: owner.outputDir,
         comfyuiUrl,
         embed: embedModel,
         chat,
         regeneration,
         target,
       });
+      if (!durableFinalizeSucceeded(result)) {
+        throw new Error("生成已完成，但原图或会话槽尚未持久化，将自动重试归档");
+      }
       if (target && result.target?.url) {
         setMessages((current) => resolveMediaSlot(
           current, target.messageId, target.slotId, result.target!.url,
           result.target!.media_type, regeneration,
         ));
-        if (result.target.media_type === "image" && repo?.id) {
-          setGeneratedCover(repo.id, result.target.url);
+        if (result.target.media_type === "image" && owner.repoId !== "home") {
+          setGeneratedCover(owner.repoId, result.target.url);
         }
         if (result.durable && result.images.some((image) => image.indexed)) {
-          window.dispatchEvent(new CustomEvent("laf-generation-saved", { detail: threadId }));
+          window.dispatchEvent(new CustomEvent("laf-generation-saved", { detail: owner.threadId }));
         }
         return true;
       }
       const blocks = workflowMessages(result.messages);
       setMessages((current) => upsertMessages(current, blocks));
       const firstImage = blocks.find((message) => message.image)?.image;
-      if (firstImage && repo?.id) setGeneratedCover(repo.id, firstImage);
+      if (firstImage && owner.repoId !== "home") setGeneratedCover(owner.repoId, firstImage);
       if (result.durable && result.images.some((image) => image.indexed)) {
-        window.dispatchEvent(new CustomEvent("laf-generation-saved", { detail: threadId }));
+        window.dispatchEvent(new CustomEvent("laf-generation-saved", { detail: owner.threadId }));
       }
       return blocks.length > 0;
   };
@@ -675,6 +717,7 @@ export function useChatSession(deps: ChatSessionDeps) {
     }
     workflowRuntime.start({
       promptId, comfyuiUrl, outputNodeIds, regeneration, target, prompt,
+      owner: { threadId, repoId: repo?.id || "home", outputDir: settings.outputDir },
     }, workflowObserver);
   };
 
@@ -685,12 +728,21 @@ export function useChatSession(deps: ChatSessionDeps) {
   // 智能模态：smartVideo 开 且 motion>=2 且 预设了视频模板 → 用视频模板，否则用图片模板。
   const submitIllustration = async (
     prompt: string, motion = 0, actors: string[] = [], messageId: string, slotId: string,
-    sceneSpec?: IllustrationSceneSpec, turnId = "",
+    sceneSpec?: IllustrationSceneSpec, turnId = "", source: "automatic" | "manual" = "automatic",
   ) => {
     const failSlot = (stage: string, error: string) =>
       discardFailedIllustration(messageId, slotId, stage, error);
     const preset = settings.mediaInsert?.[repo?.id || ""];
     if (!preset) { failSlot("configuration", "当前作品没有配置自动插画模板"); return; }
+    if (source === "automatic") {
+      try {
+        const claim = await claimIllustrationSubmission({ threadId, messageId, slotId });
+        if (!claim.claimed) return;
+      } catch (error) {
+        failSlot("submission_claim", error instanceof Error ? error.message : "自动插画提交认领失败");
+        return;
+      }
+    }
     if (!prompt.trim() && !sceneSpec?.narrative.trim()) {
       failSlot("prompt", "剧情出图提示词为空");
       return;
@@ -706,10 +758,9 @@ export function useChatSession(deps: ChatSessionDeps) {
       failSlot("configuration", "已保存的工作流模板不存在，请重新选择模板");
       return;
     }
-    // ⑥ 按在场角色挑 LoRA/底图：候选 = 分析出的在场角色 + 本作品主角色卡名兜底。
-    // 命中任一角色的配置：有其 LoRA → 用角色 LoRA；无 LoRA → 用风格 LoRA + 该角色底图。
-    // 都无角色配置 → 回退风格 LoRA/风格底图 或旧的单 preset.loraName（兼容旧数据）。
-    const { loraName, loraWeight, baseImage, characterLora } =
+    // ⑥ 按真实在场角色挑 LoRA/底图。single 命中角色时仅用角色 LoRA，无命中才回退风格；
+    // multi 固定加载默认风格并叠加全部在场角色 LoRA。旧 preset.loraName 只作风格兼容值。
+    const { loras, loraName, loraWeight, baseImage, characterLora } =
       illustrationWorkflowMedia(preset, actors, cardNames);
     let negativePrompt = preset.negativePrompt?.trim() || sceneSpec?.negative_prompt || "";
     if (sceneSpec?.profile_prompt && sceneSpec.profile === promptProfile) {
@@ -718,8 +769,16 @@ export function useChatSession(deps: ChatSessionDeps) {
       try {
         const rendered = await genProfilePrompt(
           promptProfile,
-          { ...sceneSpec, actors, character_lora: characterLora },
+          {
+            ...sceneSpec, actors, character_lora: characterLora,
+            repo_id: repo?.id || "", thread_id: repo?.id || "", turn_id: turnId,
+          },
           { ...chat, proxyUrl: modelProxies.chatProxyUrl },
+          {
+            presetDir: settings.presetDir,
+            presetName: settings.activePresetName,
+            userName: effectivePersona.name,
+          },
         );
         prompt = rendered.prompt;
         negativePrompt = preset.negativePrompt?.trim() || rendered.negative_prompt || negativePrompt;
@@ -739,17 +798,30 @@ export function useChatSession(deps: ChatSessionDeps) {
       prompt = replacePromptQualityLine(
         prompt, preset.qualityPrompt || "", sceneSpec?.rating || "sfw",
       );
+      prompt = ensureAnimaIllustrationStyle(
+        prompt, loras.some((lora) => !lora.character),
+      );
     }
     // 触发词自动前置：生效 LoRA 的触发词必须逐字精确（大脑会漏写/改写 → LoRA 不生效却看不出），
     // 故按文件名查触发词表机械前置到正向提示词。对齐 /a 编排的 lora_inject 思路。
     // 已在提示词里出现的词不重复注入（大小写不敏感）。查表失败/无触发词不阻断出图。
-    if (loraName) {
+    if (loras.length) {
       try {
         const items = (await listLoras()).items || [];
-        prompt = applyProfileLoraTriggers(
-          prompt, promptProfile, promptAdditionsForSelectedLora(items, loraName),
+        for (const lora of loras) {
+          const metadata = resolveLoraPromptMetadata(items, lora.name);
+          if (!metadata.found) {
+            throw new Error(`实际加载的 LoRA 没有精确元数据记录：${lora.name}`);
+          }
+          prompt = applyProfileLoraTriggers(prompt, promptProfile, metadata.additions);
+        }
+      } catch (error) {
+        failSlot(
+          "lora_metadata",
+          error instanceof Error ? error.message : "LoRA触发词与建议提示词读取失败",
         );
-      } catch { /* 触发词查表失败 → 用原提示词，不阻断剧情出图 */ }
+        return;
+      }
     }
     // 底图需先上传到 ComfyUI input 目录，取回可供 LoadImage 引用的文件名
     let uploadedImage = "";
@@ -777,18 +849,24 @@ export function useChatSession(deps: ChatSessionDeps) {
         failSlot("comfyui_status", "ComfyUI 尚未启动");
         return;
       }
-      const r = await submitWorkflow(chosenId, values, settings.comfyuiUrl, prompt);
+      const loraStack = loras.map(({ name, weight }) => ({ name, weight }));
+      const loraMode = preset.loraMode || "single";
+      const r = await submitWorkflow(
+        chosenId, values, settings.comfyuiUrl, prompt, loraStack, loraMode,
+      );
       if (r.prompt_id) {
         void reportIllustrationSubmission({
           threadId, repoId: repo?.id || threadId, turnId, messageId, slotId,
           templateId: chosenId, promptId: r.prompt_id, prompt, promptProfile,
           loraName, loraWeight, latentWidth: latentSize.width, latentHeight: latentSize.height,
+          loraMode, loraNames: loraStack.map((item) => item.name),
           valueKeys: Object.keys(values).sort(),
+          source,
         }).catch(() => undefined);
         const outputNodeIds = tpl.primary_output_node_id ? [tpl.primary_output_node_id] : [];
         const target = { messageId, slotId, background: true as const };
         const regeneration = templateRegenerationSnapshot(
-          chosenId, values, settings.comfyuiUrl, outputNodeIds, prompt,
+          chosenId, values, settings.comfyuiUrl, outputNodeIds, prompt, loraStack, loraMode,
         );
         setMessages((current) => bindMediaSlotPrompt(current, messageId, slotId, r.prompt_id!));
         pollResult(r.prompt_id, outputNodeIds, regeneration, target, prompt);
@@ -866,7 +944,7 @@ export function useChatSession(deps: ChatSessionDeps) {
             p.target.messageId, p.target.slotId, "resume_expired",
             "后台出图任务已过期", p.prompt_id,
           );
-          workflowRuntime.remove(p.prompt_id);
+          workflowRuntime.cancel(p.prompt_id);
           continue;
         }
         const comfyuiUrl = comfyRegenerationUrl(p.regeneration) || settings.comfyuiUrl;
@@ -1207,7 +1285,7 @@ export function useChatSession(deps: ChatSessionDeps) {
     dispatch({ t: "stop" });
     stopProgress();
     setSlowWatchPromptId(null);  // 清慢守望状态，停止键消失
-    if (pid) workflowRuntime.remove(pid);
+    if (pid) workflowRuntime.cancel(pid);
     refreshChatBackgroundActivities();
     await hardCancel(pid);
     if (sid) {
@@ -1265,7 +1343,7 @@ export function useChatSession(deps: ChatSessionDeps) {
         const generations = await listGenerations(repo?.id || "home", embedModel);
         const prompt = legacyGenerationPrompt(part?.url || "", generations.items || []);
         if (!prompt) throw new Error("资产库中未找到这张旧图的原提示词");
-        await submitIllustration(prompt, 0, [], messageId, slotId!);
+        await submitIllustration(prompt, 0, [], messageId, slotId!, undefined, "", "manual");
         return;
       }
       if (snapshot.kind === "ai-image") {
@@ -1298,6 +1376,7 @@ export function useChatSession(deps: ChatSessionDeps) {
       const submitted = snapshot.kind === "template"
         ? await submitWorkflow(
           snapshot.templateId, snapshot.values, snapshot.comfyuiUrl, snapshot.prompt,
+          snapshot.loras || [], snapshot.loraMode || "single",
         )
         : await submitGraph(snapshot.graph, snapshot.comfyuiUrl);
       if (!submitted.prompt_id) throw new Error("ComfyUI 未返回 prompt_id");

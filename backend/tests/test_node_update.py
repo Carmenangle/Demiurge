@@ -165,6 +165,37 @@ def test_install_target_is_confined_to_custom_nodes(tmp_path):
     assert target == (tmp_path / "custom_nodes" / "example-node").resolve()
 
 
+def test_repository_provenance_records_commit_remote_and_requirements_hash(tmp_path):
+    repo = tmp_path / "node"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test")
+    _git(repo, "remote", "add", "origin", "https://github.com/acme/node.git")
+    (repo / "requirements.txt").write_text("safetensors==0.5.3\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "initial")
+
+    provenance = node_update.repository_provenance(repo)
+
+    assert provenance["repository"] == "https://github.com/acme/node.git"
+    assert len(provenance["commit"]) == 40
+    assert len(provenance["requirements_sha256"]) == 64
+
+
+@pytest.mark.parametrize("line", [
+    "-e git+https://github.com/acme/pkg.git",
+    "pkg @ https://example.com/pkg.whl",
+    "--extra-index-url https://example.com/simple",
+])
+def test_requirements_reject_unreviewed_external_sources(tmp_path, line):
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text(line + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="未审查"):
+        node_update.validate_requirements_sources(requirements)
+
+
 @pytest.mark.parametrize("url", [
     "http://github.com/acme/node.git",
     "https://example.com/acme/node.git",
