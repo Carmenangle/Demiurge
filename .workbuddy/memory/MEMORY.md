@@ -49,6 +49,7 @@
 - 2026-08-14 Anima 第二行禁止 `Her body:`、`Bound:`、`Position:` 等标题式冒号小段；同轮合同要求一至三句连续英文描述，最终归一器即使收到标签式小段也会机械改写为完整句子。第一行仍为质量 tags＋内容 tags 的单一逗号序列并以逗号收尾。
 - 2026-08-11 剧情正文与插画槽即时交付后，表格、纪要、Curator/世界书维护必须转入 `post_turn_maintenance` 按作品串行执行；维护模型再慢也不得继续占用前台 Agent 准入，否则“正文和图片已完成却仍提示任务在跑”，并阻止对话重新生成。
 - 2026-08-11 最终 Prompt 编译深化：显式 Provider Profile 决定历史后规则位置，Trace Replay 可区分本地漏注入/模型不遵从/上游拒答；世界书限最近窗口，表格读写与检索预算分离；纪要用稳定 `T1-1/T1-2` 多卡编号并召回最多 10 条角色相关概览；四 Profile 用字段账本局部补齐事实。详见 `prompt-compiler-retrieval-ledger-2026-08-11.md`。
+- 2026-08-14 Full RAG 分层 Runtime 的外置 Torch 曾被 PyInstaller 冻结 Finder 混合解析，Linux/macOS 自检均在 `torch.autograd` 部分初始化失败；现由专用 MetaPath Finder 统一拥有 Torch/Transformers/SentenceTransformers/Scipy/Sklearn 的外置子模块解析，并保持真实冻结 Torch 自检。详见 `docs/memory/runtime-portable-release.md`。
 
 ## Agent 工作约束（AGENTS.md）
 - 只做用户明确要求；先读 ARCHITECTURE.md 与 docs/memory 相关部分再开工。

@@ -26,6 +26,38 @@ def test_full_rag_runtime_configures_dependencies_without_bundled_model(
     assert "LAF_BUNDLED_RERANKER_DIR" not in runtime_entry.os.environ
 
 
+def test_rag_layer_installs_owner_finder_before_frozen_importers(
+    monkeypatch, tmp_path: Path,
+):
+    packages = tmp_path / "rag" / "layer-1" / "site-packages"
+    packages.mkdir(parents=True)
+    (tmp_path / "current.json").write_text(
+        json.dumps({"edition": "full-rag", "rag_id": "layer-1"}),
+        encoding="utf-8",
+    )
+    original_meta_path = list(runtime_entry.sys.meta_path)
+    monkeypatch.setattr(runtime_entry.sys, "meta_path", original_meta_path.copy())
+
+    runtime_entry.configure_environment(tmp_path)
+
+    finder = runtime_entry.sys.meta_path[0]
+    assert isinstance(finder, runtime_entry._ExternalRagFinder)
+    assert finder.packages == packages.resolve()
+
+
+def test_external_rag_finder_only_claims_owned_package(monkeypatch, tmp_path: Path):
+    finder = runtime_entry._ExternalRagFinder(tmp_path)
+    calls = []
+    monkeypatch.setattr(
+        runtime_entry.PathFinder, "find_spec",
+        lambda fullname, path, target=None: calls.append((fullname, path)) or "spec",
+    )
+
+    assert finder.find_spec("torch.autograd", ["torch-path"]) == "spec"
+    assert finder.find_spec("app.main", ["app-path"]) is None
+    assert calls == [("torch.autograd", ["torch-path"])]
+
+
 def test_full_rag_self_check_reports_torch_build(monkeypatch, capsys):
     class TorchVersion:
         cuda = "13.0"
@@ -35,9 +67,10 @@ def test_full_rag_self_check_reports_torch_build(monkeypatch, capsys):
         version = TorchVersion()
 
     monkeypatch.setenv("LAF_RUNTIME_EDITION", "full-rag")
+    imported = []
     monkeypatch.setattr(
         runtime_entry.importlib, "import_module",
-        lambda name: Torch() if name == "torch" else object(),
+        lambda name: imported.append(name) or (Torch() if name == "torch" else object()),
     )
 
     runtime_entry.self_check()
@@ -45,6 +78,7 @@ def test_full_rag_self_check_reports_torch_build(monkeypatch, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["torch_version"] == "2.13.0+cu130"
     assert payload["torch_cuda"] == "13.0"
+    assert imported[:3] == ["torch", "transformers", "sentence_transformers"]
 
 
 def test_packaged_main_uses_combined_frontend_backend_port_without_console_logging(

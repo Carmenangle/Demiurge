@@ -272,7 +272,7 @@ cd backend
 
 `scripts/runtime_release.py` 是固定 Runtime 的单一构建 Implementation，`release/runtime-targets.json` 是平台、架构、Python 与 Torch 的唯一矩阵。终端用户仅发布 Full RAG，包含 Python、基础后端依赖、已构建前端、Chroma/BM25，以及平台对应的 Torch、Transformers 与 SentenceTransformers 依赖层；不包含 Embedding/Reranker 权重、Hugging Face 缓存、ComfyUI、密钥、用户数据或 RAG 索引。
 
-Runtime 采用 Base/Application/RAG 分层清单，每层逐文件归档并记录 SHA256，超过 GitHub 单资产限制时按 1.9 GB 分片。`runtime_entry.py` 只负责组装层路径、设置可写数据目录、执行模块自检并在 8010 同源服务已构建前端；ComfyUI 必须使用独立 Python，禁止回退应用 Runtime。Windows `portable_release.py` 组装 `start-dev.bat`/`stop-dev.bat`、分层 Runtime 与 MinGit；启动脚本用 PID 文件绑定当前包的 Runtime，停止脚本必须核验进程路径，禁止仅按端口误杀。macOS/Linux `unix_portable_release.py` 生成可执行启动脚本。终端用户包必须做到解压即用，不运行 pip、npm，也不依赖系统 Python/Node。
+Runtime 采用 Base/Application/RAG 分层清单，每层逐文件归档并记录 SHA256，超过 GitHub 单资产限制时按 1.9 GB 分片。`runtime_entry.py` 只负责组装层路径、设置可写数据目录、执行模块自检并在 8010 同源服务已构建前端；PyInstaller 明确排除的 Torch/Transformers/SentenceTransformers/Scipy/Sklearn 由 RAG 层拥有，专用 MetaPath Finder 必须先于冻结 Finder 从外置层解析其全部子模块，禁止冻结包与外置包混合导入。ComfyUI 必须使用独立 Python，禁止回退应用 Runtime。Windows `portable_release.py` 组装 `start-dev.bat`/`stop-dev.bat`、分层 Runtime 与 MinGit；启动脚本用 PID 文件绑定当前包的 Runtime，停止脚本必须核验进程路径，禁止仅按端口误杀。macOS/Linux `unix_portable_release.py` 生成可执行启动脚本。终端用户包必须做到解压即用，不运行 pip、npm，也不依赖系统 Python/Node。
 
 RAG 构建使用 `backend/requirements-reranker.txt` 声明直接能力、`release/requirements-rag.lock` 固定跨平台传递依赖、`release/runtime-targets.json` 固定各平台 Torch。三者共同进入 RAG definition ID；禁止只写 `>=` 后让新构建静默漂移。CUDA 驱动和 ComfyUI Python 不属于 Demiurge 依赖层，构建可以复用已校验层或 pip wheel 缓存，但发布包必须自带隔离文件。Windows 便携启动可用 `DEMIURGE_PORT` 覆盖默认 8010；Runtime 接收对应 `LAF_RUNTIME_PORT`，默认用户行为不变。
 

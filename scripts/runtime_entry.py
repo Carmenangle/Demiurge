@@ -1,18 +1,46 @@
 """固定 Runtime 的单一启动入口。"""
 from __future__ import annotations
 
-import os
 import importlib
 import json
+import os
 import socket
 import sys
 import threading
 import time
 import webbrowser
+from importlib.machinery import PathFinder
 from pathlib import Path
 
 
 _DLL_DIRECTORY_HANDLES: list[object] = []
+_RAG_PACKAGE_PREFIXES = frozenset({
+    "scipy", "sentence_transformers", "sklearn", "torch", "transformers",
+})
+
+
+class _ExternalRagFinder:
+    """Keep excluded RAG packages wholly outside PyInstaller's PYZ archive."""
+
+    def __init__(self, packages: Path):
+        self.packages = packages.resolve()
+
+    def find_spec(self, fullname: str, path=None, target=None):
+        root = fullname.partition(".")[0]
+        if root not in _RAG_PACKAGE_PREFIXES:
+            return None
+        search_path = [str(self.packages)] if path is None else path
+        return PathFinder.find_spec(fullname, search_path, target)
+
+
+def _install_external_rag_finder(packages: Path) -> None:
+    sys.meta_path[:] = [
+        finder for finder in sys.meta_path
+        if not isinstance(finder, _ExternalRagFinder)
+    ]
+    # PyInstaller's frozen finder precedes PathFinder. An explicit owner finder
+    # prevents a package such as torch from mixing frozen and external submodules.
+    sys.meta_path.insert(0, _ExternalRagFinder(packages))
 
 
 def runtime_root() -> Path:
@@ -49,6 +77,7 @@ def configure_environment(root: Path) -> dict:
         rag_packages = root / "rag" / rag_id / "site-packages"
         if rag_packages.is_dir():
             sys.path.insert(0, str(rag_packages))
+            _install_external_rag_finder(rag_packages)
             if os.name == "nt":
                 for dll_dir in (rag_packages, rag_packages / "torch" / "lib"):
                     if dll_dir.is_dir():
@@ -70,12 +99,13 @@ def configure_environment(root: Path) -> dict:
 
 
 def self_check() -> None:
-    modules = [
-        "app.main", "chromadb", "langchain_chroma", "langgraph",
-        "langchain_mcp_adapters",
-    ]
+    modules = []
     if os.environ.get("LAF_RUNTIME_EDITION") == "full-rag":
         modules.extend(("torch", "transformers", "sentence_transformers"))
+    modules.extend((
+        "app.main", "chromadb", "langchain_chroma", "langgraph",
+        "langchain_mcp_adapters",
+    ))
     loaded = {module: importlib.import_module(module) for module in modules}
     payload = {"status": "ok", "modules": modules}
     torch = loaded.get("torch")
