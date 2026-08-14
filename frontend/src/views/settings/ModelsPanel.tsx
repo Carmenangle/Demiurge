@@ -1,9 +1,9 @@
 import { useState, type ReactNode } from "react";
-import { AlertTriangle, CheckCircle2, Database, Image, ListChecks, MessageSquare, Plus, Search, Trash2, Video, X, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Database, Eye, Image, ListChecks, MessageSquare, Plus, Search, Trash2, Video, X, XCircle } from "lucide-react";
 import type { PanelProps } from "./GeneralPanel";
 import {
   modelDisplayName,
-  type ChatModel, type ImageModel, type VideoModel, type EmbedModel,
+  type ChatModel, type ImageModel, type VideoModel, type EmbedModel, type VlmModel,
 } from "../../stores/settings";
 import { discoverProviderModels } from "../../api/aiProviders";
 import { filterModelNames } from "../../lib/modelSearch";
@@ -14,6 +14,13 @@ import { resolveEndpointProxy, resolveModelProxy } from "../../lib/modelProxy";
 const EMBED_PRESETS = [
   { name: "Ollama 本地", baseUrl: "http://localhost:11434/v1", modelName: "qwen3-embedding:latest", apiKey: "ollama" },
   { name: "智谱 云端", baseUrl: "https://open.bigmodel.cn/api/paas/v4", modelName: "embedding-3", apiKey: "" },
+];
+
+// 视觉大模型快捷预设（Visual CI 验收用）
+const VLM_PRESETS = [
+  { name: "Ollama 本地", baseUrl: "http://localhost:11434/v1", modelName: "qwen3vl:8b", apiKey: "ollama" },
+  { name: "Ollama gemma4", baseUrl: "http://localhost:11434/v1", modelName: "gemma4:latest", apiKey: "ollama" },
+  { name: "智谱 GLM-4V", baseUrl: "https://open.bigmodel.cn/api/paas/v4", modelName: "glm-4v-flash", apiKey: "" },
 ];
 
 // 一张「模型卡」：名称/Key/URL + 「读取模型列表」按钮（调 discover-models 拉列表供选）
@@ -267,6 +274,104 @@ export function ModelsPanel({ draft, setDraft }: PanelProps) {
     return "自定义 / 中转";
   })();
 
+  const setVlm = (patch: Partial<VlmModel>) =>
+    setDraft((d) => ({ ...d, vlmModel: { ...d.vlmModel, ...patch } }));
+
+  const [vlmProbe, setVlmProbe] = useState<{ testing?: boolean; result?: ModelProbeResult }>({});
+
+  const testVlm = async () => {
+    setVlmProbe({ testing: true });
+    try {
+      const result = await probeModel(draft.vlmModel.mode === "local"
+        ? { kind: "vlm-local", ggufPath: draft.vlmModel.ggufPath }
+        : {
+            kind: "vlm",
+            baseUrl: draft.vlmModel.baseUrl,
+            apiKey: draft.vlmModel.apiKey,
+            modelName: draft.vlmModel.modelName,
+            proxyUrl: resolveEndpointProxy(
+              draft.vlmModel.baseUrl, draft.vlmModel.proxyMode,
+              draft.proxyUrl, draft.proxyEnabled,
+            ),
+          });
+      setVlmProbe({ result });
+    } catch (error) {
+      setVlmProbe({ result: { status: "error", message: (error as Error).message, billable: false } });
+    }
+  };
+
+  const vlmProvider = (() => {
+    if (draft.vlmModel.mode === "local") return "本地模型（GGUF，导入 Ollama）";
+    const u = (draft.vlmModel.baseUrl || "").toLowerCase();
+    if (u.includes("11434") || u.includes("ollama")) return "本地 Ollama";
+    if (u.includes("bigmodel.cn")) return "云端智谱";
+    if (u.includes("openai.com")) return "云端 OpenAI";
+    if (!u.trim()) return "未配置";
+    return "自定义 / 中转";
+  })();
+
+  const [vlmImporting, setVlmImporting] = useState(false);
+  const [vlmImportResult, setVlmImportResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [vlmScanDir, setVlmScanDir] = useState("");
+  const [vlmScanning, setVlmScanning] = useState(false);
+  const [vlmScanResult, setVlmScanResult] = useState<{ models: { path: string; filename: string; size_bytes: number; is_vision: boolean }[] } | null>(null);
+  const [vlmScanError, setVlmScanError] = useState("");
+
+  // 扫描目录中的 GGUF 主模型（视觉能力优先展示）
+  const scanVlmDir = async () => {
+    const dir = vlmScanDir.trim();
+    if (!dir) { setVlmScanError("请先填写 GGUF 目录"); return; }
+    setVlmScanning(true);
+    setVlmScanError("");
+    setVlmScanResult(null);
+    try {
+      const { ggufScan } = await import("../../api/ggufImporter");
+      const r = await ggufScan(dir, 30000);
+      if (r.error) { setVlmScanError(r.error); return; }
+      setVlmScanResult({
+        models: r.models.map((m) => ({
+          path: m.path, filename: m.filename,
+          size_bytes: m.size_bytes, is_vision: m.is_vision,
+        })),
+      });
+    } catch (error) {
+      setVlmScanError(`扫描失败：${(error as Error).message}`);
+    } finally {
+      setVlmScanning(false);
+    }
+  };
+
+  // 本地 GGUF → 导入 Ollama → 自动切回 remote 模式并填入模型名
+  const importLocalVlm = async () => {
+    const path = (draft.vlmModel.ggufPath || "").trim();
+    if (!path) { setVlmImportResult({ ok: false, message: "请先填写 GGUF 文件路径" }); return; }
+    setVlmImporting(true);
+    setVlmImportResult(null);
+    try {
+      const { ggufImport } = await import("../../api/ggufImporter");
+      const r = await ggufImport({
+        ggufPath: path,
+        modelName: (draft.vlmModel.ollamaName || "").trim(),
+        mmprojPath: (draft.vlmModel.mmprojPath || "").trim(),
+        registerProvider: true,
+      }, 900_000);
+      if (r.ok) {
+        setVlmImportResult({ ok: true, message: r.message });
+        // 导入成功：切回 remote 模式并填入 Ollama 模型名
+        const name = (draft.vlmModel.ollamaName || "").trim() || r.model_name || "";
+        if (name) {
+          setVlm({ mode: "remote", baseUrl: "http://localhost:11434/v1", apiKey: "ollama", modelName: name });
+        }
+      } else {
+        setVlmImportResult({ ok: false, message: r.message });
+      }
+    } catch (error) {
+      setVlmImportResult({ ok: false, message: `导入异常：${(error as Error).message}` });
+    } finally {
+      setVlmImporting(false);
+    }
+  };
+
   return (
     <div className="model-capability-grid">
       <p className="field-hint model-probe-notice">
@@ -327,6 +432,143 @@ export function ModelsPanel({ draft, setDraft }: PanelProps) {
             <ModelCard key={m.id} model={m} kind="video" onChange={(p) => updateVideoModel(m.id, p as Partial<VideoModel>)} onRemove={() => removeVideoModel(m.id)} globalProxyUrl={draft.proxyUrl} globalProxyEnabled={draft.proxyEnabled} />
           ))}
         </div>
+      </div>
+
+      {/* 视觉大模型（Visual CI 验收） */}
+      <div className="settings-section model-capability-card">
+        <div className="model-capability-head">
+          <CapabilityTitle icon={<Eye size={18} />} title="视觉大模型" count={1}
+            configured={draft.vlmModel.mode === "local"
+              ? Boolean(draft.vlmModel.ggufPath)
+              : Boolean(draft.vlmModel.baseUrl && draft.vlmModel.modelName)} />
+        </div>
+        <p className="field-hint" style={{ margin: "0 0 10px" }}>用于 Visual CI 自动验收插画（检查人物/动作/场景/噪点）。需支持图片输入的多模态模型：API / Ollama（如 qwen3vl、gemma4、GLM-4V）或本地 GGUF 模型导入 Ollama。模型文件不随项目发布包提供。</p>
+        <div className="embedding-mode-tabs" role="group" aria-label="视觉大模型来源">
+          <button
+            type="button"
+            className={`btn${draft.vlmModel.mode === "remote" ? " primary is-selected" : ""}`}
+            aria-pressed={draft.vlmModel.mode === "remote"}
+            onClick={() => setVlm({ mode: "remote" })}
+          >API / Ollama</button>
+          <button
+            type="button"
+            className={`btn${draft.vlmModel.mode === "local" ? " primary is-selected" : ""}`}
+            aria-pressed={draft.vlmModel.mode === "local"}
+            onClick={() => setVlm({ mode: "local" })}
+          >本地模型</button>
+        </div>
+        <details className="model-advanced embedding-advanced">
+          <summary>连接与本地模型配置</summary>
+          <div className="model-advanced-body">
+        {draft.vlmModel.mode === "remote" && <>
+        <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+          {VLM_PRESETS.map((p) => (
+            <button key={p.name} className="btn" onClick={() => setVlm({ mode: "remote", baseUrl: p.baseUrl, modelName: p.modelName, apiKey: p.apiKey })}>{p.name}</button>
+          ))}
+        </div>
+        <p style={{ fontSize: 12, margin: "0 0 10px" }}>当前使用：<strong>{vlmProvider}</strong></p>
+        <div className="field"><label>API URL</label><input value={draft.vlmModel.baseUrl} onChange={(e) => setVlm({ baseUrl: e.target.value })} placeholder="http://localhost:11434/v1" /></div>
+        <div className="field"><label>API Key</label><input type="password" value={draft.vlmModel.apiKey} onChange={(e) => setVlm({ apiKey: e.target.value })} /></div>
+        <div className="field">
+          <label>连接代理</label>
+          <select value={draft.vlmModel.proxyMode || "on"} onChange={(e) => setVlm({ proxyMode: e.target.value as "on" | "off" | "inherit" })}>
+            <option value="on">使用代理</option>
+            <option value="off">直连</option>
+            <option value="inherit">继承全局</option>
+          </select>
+        </div>
+        <div className="field"><label>模型名称</label><input value={draft.vlmModel.modelName} onChange={(e) => setVlm({ modelName: e.target.value })} placeholder="qwen3vl:8b / gemma4:latest / glm-4v-flash" /></div>
+        </>}
+        {draft.vlmModel.mode === "local" && <>
+        <div className="field">
+          <label>本地模型文件路径</label>
+          <input
+            value={draft.vlmModel.ggufPath || ""}
+            onChange={(e) => setVlm({ ggufPath: e.target.value })}
+            placeholder="D:\tool\ComfyUI\models\LLM\Qwen3VL-8B-...-Q6_K.gguf"
+          />
+          <p className="field-hint">支持加载 GGUF 量化模型（Q4_K_M / Q6_K / Q8_0 / F16 等）。本地 VLM 一般用 GGUF 格式（区别于 ComfyUI 常用的 .safetensors）；检测到视觉能力后可一键导入 Ollama 使用。</p>
+        </div>
+        <div className="field">
+          <label>扫描目录发现 GGUF（可选）</label>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input
+              value={vlmScanDir}
+              onChange={(e) => setVlmScanDir(e.target.value)}
+              placeholder="D:\tool\ComfyUI\models\LLM"
+              style={{ flex: 1 }}
+            />
+            <button className="btn" type="button" onClick={scanVlmDir} disabled={vlmScanning}>
+              {vlmScanning ? "扫描中…" : "扫描"}
+            </button>
+          </div>
+          {vlmScanError && <p className="field-hint" style={{ color: "#c0392b" }}>{vlmScanError}</p>}
+          {vlmScanResult && vlmScanResult.models.length > 0 && (
+            <div style={{ marginTop: 6, maxHeight: 160, overflowY: "auto", border: "1px solid var(--border, #e5e5e5)", borderRadius: 8 }}>
+              {vlmScanResult.models.map((m) => (
+                <button
+                  key={m.path}
+                  type="button"
+                  className="model-preset-row"
+                  style={{ display: "flex", width: "100%", padding: "6px 8px", background: "none", border: "none", borderBottom: "1px solid var(--border, #eee)", cursor: "pointer", textAlign: "left", fontSize: 12 }}
+                  onClick={() => setVlm({ ggufPath: m.path })}
+                  title={m.path}
+                >
+                  <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {m.is_vision ? "🖼️ " : "📦 "}{m.filename}
+                  </span>
+                  <span style={{ marginLeft: 8, opacity: 0.7 }}>{m.is_vision ? "视觉" : "非视觉"} · {(m.size_bytes / 1073741824).toFixed(1)}GB</span>
+                </button>
+              ))}
+            </div>
+          )}
+          {vlmScanResult && vlmScanResult.models.length === 0 && (
+            <p className="field-hint">该目录未发现 GGUF 主模型（mmproj 投影文件会单独列出）。</p>
+          )}
+        </div>
+        <div className="field">
+          <label>视觉投影 mmproj（可选，自动配对）</label>
+          <input
+            value={draft.vlmModel.mmprojPath || ""}
+            onChange={(e) => setVlm({ mmprojPath: e.target.value })}
+            placeholder="与主模型同目录的 *mmproj*.gguf；留空自动查找"
+          />
+        </div>
+        <div className="field">
+          <label>导入 Ollama 后的模型名</label>
+          <input
+            value={draft.vlmModel.ollamaName || ""}
+            onChange={(e) => setVlm({ ollamaName: e.target.value })}
+            placeholder="qwen3vl:8b（留空自动按文件名生成）"
+          />
+          <p className="field-hint">导入成功后自动切换到「API / Ollama」模式并填入该模型名。</p>
+        </div>
+        <div className="model-test-row">
+          <button className="btn" type="button" onClick={importLocalVlm} disabled={vlmImporting}>
+            {vlmImporting ? "导入中…" : "导入到 Ollama"}
+          </button>
+          {vlmImportResult && (
+            <span className={`model-probe-result ${vlmImportResult.ok ? "success" : "error"}`}>
+              {vlmImportResult.ok ? "✅ 导入成功" : vlmImportResult.message}
+            </span>
+          )}
+        </div>
+        </>}
+        <div className="model-test-row">
+          <button className="btn" type="button" onClick={testVlm} disabled={vlmProbe.testing}>
+            {vlmProbe.testing
+              ? "检测中…"
+              : draft.vlmModel.mode === "local" ? "检测本地模型" : "测试视觉模型"}
+          </button>
+          {vlmProbe.result && <ProbeResultView result={vlmProbe.result} />}
+        </div>
+        {vlmProbe.result && draft.vlmModel.mode === "local" && (
+          <p className="field-hint" style={{ marginTop: 6 }}>
+            检测包含：文件完整性 → 元数据解析 → 视觉能力 → 当前硬件适配（显存估算）。
+          </p>
+        )}
+          </div>
+        </details>
       </div>
 
       {/* 嵌入模型 */}

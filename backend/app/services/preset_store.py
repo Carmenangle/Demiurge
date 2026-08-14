@@ -256,6 +256,9 @@ def sampling_params(preset: dict[str, Any]) -> dict[str, Any]:
         v = preset.get(key)
         if isinstance(v, (int, float)):
             out[key] = v
+    max_tokens = preset.get("openai_max_tokens")
+    if isinstance(max_tokens, int) and not isinstance(max_tokens, bool) and max_tokens > 0:
+        out["max_tokens"] = max_tokens
     return out
 
 

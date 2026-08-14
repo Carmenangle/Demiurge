@@ -8,6 +8,7 @@ export interface MsgPart {
   image?: string; // type=masked-image 的原图
   mask?: string;  // type=masked-image 的独立 Alpha 蒙版
   slotId?: string; // type=media-slot，异步图片/视频完成后据此原位替换
+  generationId?: string; // 落库后的 generation 记录 ID（Visual CI 诊断用）
   status?: "pending" | "ready" | "failed";
   promptId?: string;
   error?: string;

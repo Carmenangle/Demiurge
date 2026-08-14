@@ -25,6 +25,7 @@ import {
   type AgentInvocation,
 } from "../api/ai";
 import { createScenarioSnapshot } from "../api/scenario";
+import { runVisualCiDiagnostic } from "../api/visualCi";
 import { refreshChatBackgroundActivities } from "./chatBackgroundActivity";
 import { substituteMacros } from "./chatMacros";
 import type { ChatStreamEvent, IllustrationSceneSpec } from "../api/chatStreamProtocol";
@@ -38,6 +39,7 @@ import {
   needsImageInput, hasImageProvided, pickBestText,
   slimSnapshot as slimSnapshotPure, promptHistory,
   prepareConversationRegeneration, resolveLoraPromptMetadata, resolveGenerationPrompt,
+  acceptSlimmedMessages, canCommitSnapshot,
 } from "./chatGeneration";
 import {
   durableFinalizeSucceeded, WorkflowGenerationRuntime,
@@ -176,6 +178,8 @@ export function useChatSession(deps: ChatSessionDeps) {
   const [regeneratingIds, setRegeneratingIds] = useState<Set<string>>(new Set());
   const wsUnsubRef = useRef<(() => void) | null>(null);  // 当前进度 WS 退订
   const abortRef = useRef<ActiveAgentStream | null>(null);  // 仅显式停止才中断；导航离开保持后台运行
+  // React reducer 要到下一次渲染才可见；同步 ref 封住连续点击/回车的同一帧竞态。
+  const agentBusyRef = useRef(false);
   const bgRunningRef = useRef(false);  // 后台任务进行中：此时后端拥有快照写权，前端不抢写以免覆盖
   // 慢守望阶段（releaseBusy 后仍在轮询）：wfRunning 已 false，但仍需显示停止键
   const [slowWatchPromptId, setSlowWatchPromptId] = useState<string | null>(null);
@@ -280,6 +284,7 @@ export function useChatSession(deps: ChatSessionDeps) {
     if (activeThreadRef.current !== targetThread || recoveryActiveRef.current) return;
     const token = ++recoveryTokenRef.current;
     recoveryActiveRef.current = true;
+    agentBusyRef.current = true;
     bgRunningRef.current = true;
     const knownMedia = new Set(messages.flatMap((message) => [message.image, message.video].filter(Boolean)));
     let recoveredMedia = "";
@@ -304,6 +309,7 @@ export function useChatSession(deps: ChatSessionDeps) {
     }).finally(() => {
       if (recoveryTokenRef.current !== token) return;
       recoveryActiveRef.current = false;
+      agentBusyRef.current = false;
       bgRunningRef.current = false;
     });
   };
@@ -452,6 +458,7 @@ export function useChatSession(deps: ChatSessionDeps) {
       activeThreadRef.current = "";
       recoveryTokenRef.current += 1;
       recoveryActiveRef.current = false;
+      agentBusyRef.current = false;
       bgRunningRef.current = false;
       abortRef.current = releaseAgentStream(abortRef.current, "navigation");
       if (snapTimer.current) { clearTimeout(snapTimer.current); snapTimer.current = null; }
@@ -484,8 +491,16 @@ export function useChatSession(deps: ChatSessionDeps) {
     const original = messages;
     snapTimer.current = setTimeout(async () => {
       if (bgRunningRef.current || streamingId || regeneratingIds.size > 0) return;
+      if (!canCommitSnapshot(
+        messagesRef.current, original, activeThreadRef.current, tid,
+      )) return;
       // 流式正文或重生成尚未终态时不能创建世界状态快照，否则会把半截正文与未完成写回固化。
       const full = await slimSnapshot(original);
+      // 图片落盘可能耗时；期间若追加了用户消息、开始新 Agent 或切换仓库，
+      // 旧任务连 localStorage/后端都不得写，不能只保护 React 内存。
+      if (agentBusyRef.current || bgRunningRef.current || !canCommitSnapshot(
+        messagesRef.current, original, activeThreadRef.current, tid,
+      )) return;
       // localStorage 只存轻量快取：去掉 capturedGraph，parts / portsPlan 里的 dataURI 已被 slimSnapshot 转成本地 URL。
       const slim = full.map((m) =>
         m.workflow ? { ...m, workflow: { ...m.workflow, capturedGraph: null } } : m,
@@ -505,7 +520,7 @@ export function useChatSession(deps: ChatSessionDeps) {
         }
       }).catch(() => {});  // 后端未起则忽略本地仍在
       if (tid === threadId && JSON.stringify(full) !== JSON.stringify(original)) {
-        setMessages(full);
+        setMessages((current) => acceptSlimmedMessages(current, original, full));
       }
     }, 600);
   }, [messages, chatKey, threadId, settings.outputDir, repo?.id, streamingId, regeneratingIds.size]);
@@ -598,12 +613,51 @@ export function useChatSession(deps: ChatSessionDeps) {
         throw new Error("生成已完成，但原图或会话槽尚未持久化，将自动重试归档");
       }
       if (target && result.target?.url) {
+        const firstGen = result.images?.[0]?.message_id || "";
         setMessages((current) => resolveMediaSlot(
           current, target.messageId, target.slotId, result.target!.url,
-          result.target!.media_type, regeneration,
+          result.target!.media_type, regeneration, firstGen,
         ));
         if (result.target.media_type === "image" && owner.repoId !== "home") {
           setGeneratedCover(owner.repoId, result.target.url);
+        }
+        // 自动插画落库后触发 Visual CI 验收诊断（非阻断，fire-and-forget）
+        if (firstGen && result.target.media_type === "image" && owner.repoId !== "home") {
+          // 角色回归参考图：取当前作品角色底图的第一张作为相似度基准（冷倾雪/虞妙玥等）
+          const referenceImageForCi =
+            (Object.values(characterBaseImages || {}).find((url) => !!url) as string) || "";
+          // VLM 用设置中的「视觉大模型」配置；未配置时跳过 VLM 检测（仅机械检查）
+          const vlm = settings.vlmModel;
+          const vlmConfig = vlm && (
+            vlm.mode === "local"
+              ? (vlm.ollamaName ? {
+                  base_url: "http://localhost:11434/v1",
+                  api_key: "ollama",
+                  model: vlm.ollamaName,
+                  proxy: "",
+                } : null)
+              : (vlm.baseUrl && vlm.modelName ? {
+                  base_url: vlm.baseUrl,
+                  api_key: vlm.apiKey || "",
+                  model: vlm.modelName,
+                  proxy: resolveModelProxy(vlm.proxyMode, settings.proxyUrl, settings.proxyEnabled),
+                } : null)
+          );
+          void runVisualCiDiagnostic({
+            generationId: firstGen,
+            repoId: owner.repoId,
+            outputDir: owner.outputDir,
+            turnId: "",
+            // 关键：必须带图片 URL，VLM 才能读取生成图做语义审计
+            generationRecord: {
+              prompt: generationPrompt,
+              url: result.target!.url,
+              display_url: result.target!.url,
+            },
+            referenceImageUrl: referenceImageForCi,
+            // 未配置视觉大模型时不传 chat → 后端跳过 VLM，仅机械 Trace 检查
+            chat: vlmConfig || undefined,
+          }).catch(() => undefined);
         }
         if (result.durable && result.images.some((image) => image.indexed)) {
           window.dispatchEvent(new CustomEvent("laf-generation-saved", { detail: owner.threadId }));
@@ -977,7 +1031,10 @@ export function useChatSession(deps: ChatSessionDeps) {
     const text = content.text.trim();
     if (!text && content.images.length === 0 && !content.maskedImage) return;
     atBottomRef.current = true;  // 用户主动发送时强制跟随到底
-    if (blocksDialogueSubmission(gen)) { enqueue(content); return; }
+    if (agentBusyRef.current || blocksDialogueSubmission(gen) || queued.length > 0) {
+      enqueue(content);
+      return;
+    }
     dispatchSend(content);
   };
 
@@ -1119,6 +1176,7 @@ export function useChatSession(deps: ChatSessionDeps) {
       ] : undefined),
     };
     const botId = crypto.randomUUID();
+    agentBusyRef.current = true;
     setMessages((m) => [
       ...m,
       ...(skipUserMsg ? [] : [userMsg]),
@@ -1126,6 +1184,7 @@ export function useChatSession(deps: ChatSessionDeps) {
     ]);
     dispatch({ t: "agentStart", botId });  // 进入 agent 态（未出图）
     const onDone = (err?: string) => {
+      agentBusyRef.current = false;
       dispatch({ t: "agentDone", botId });
       if (abortRef.current?.botId === botId) abortRef.current = null;
       if (err) {
@@ -1297,6 +1356,7 @@ export function useChatSession(deps: ChatSessionDeps) {
     const sid = streamingId;
     const pid = runningPromptId(gen) ?? slowWatchPromptId;  // 慢守望阶段 gen 里已无 promptId
     dispatch({ t: "stop" });
+    agentBusyRef.current = false;
     stopProgress();
     setSlowWatchPromptId(null);  // 清慢守望状态，停止键消失
     if (pid) workflowRuntime.cancel(pid);

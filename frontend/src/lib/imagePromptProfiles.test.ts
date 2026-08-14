@@ -23,12 +23,12 @@ describe("image prompt profiles", () => {
 
   it("Anima使用风格LoRA时机械锁定手绘二次元媒介", () => {
     expect(ensureAnimaIllustrationStyle(
-      "masterpiece, anime coloring\nadult woman, walking. Directional light preserves the scene.",
+      "masterpiece, anime coloring, adult woman, walking,\nAn adult woman walks through the street.",
       true,
     )).toBe(
-      "masterpiece, anime coloring\n"
-      + "anime illustration, hand-drawn anime style, 2d cel shading, non-photorealistic, "
-      + "adult woman, walking. Directional light preserves the scene.",
+      "masterpiece, anime coloring, adult woman, walking, anime illustration, "
+      + "hand-drawn anime style, 2d cel shading, non-photorealistic,\n"
+      + "An adult woman walks through the street.",
     );
     expect(ensureAnimaIllustrationStyle("quality\ncontent", false)).toBe("quality\ncontent");
   });
@@ -110,21 +110,22 @@ describe("image prompt profiles", () => {
       .toEqual({ "39.text": "best quality\n1girl" });
   });
 
-  it("固定质量词替换质量行后仍保留剧情内容行", () => {
+  it("固定质量词只替换质量tags并保留同一行的内容tags与第二行文段", () => {
     const prompt = replacePromptQualityLine(
-      "old quality, score_8\n1girl, solo, white hair, looking at viewer. The reflected light defines her eyes.",
+      "old quality, score_8, 1girl, solo, white hair, looking at viewer,\n"
+      + "An adult woman with white hair looks directly at the viewer.",
       "masterpiece, best quality, score_7, score_9",
     );
 
     expect(prompt).toBe(
-      "masterpiece, best quality, score_7, score_9\n"
-      + "1girl, solo, white hair, looking at viewer. The reflected light defines her eyes.",
+      "masterpiece, best quality, score_7, score_9, 1girl, solo, white hair, looking at viewer,\n"
+      + "An adult woman with white hair looks directly at the viewer.",
     );
     expect(applyProfileLoraTriggers(prompt, "anima_tags", [
       "NJSW33T", "best quality", "rim light",
     ])).toBe(
-      "NJSW33T, rim light, masterpiece, best quality, score_7, score_9\n"
-      + "1girl, solo, white hair, looking at viewer. The reflected light defines her eyes.",
+      "NJSW33T, rim light, masterpiece, best quality, score_7, score_9, 1girl, solo, white hair, looking at viewer,\n"
+      + "An adult woman with white hair looks directly at the viewer.",
     );
   });
 

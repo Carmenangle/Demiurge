@@ -11,6 +11,7 @@ import type { PortOp } from "../../api/ai";
 import type { RichContent } from "../RichInput";
 import { CopyButton } from "../CopyButton";
 import { openLightbox } from "../Lightbox";
+import { VisualCiBadgeSlot } from "./VisualCiBadgeSlot";
 
 export { userMessagePlainText, userMessageRichContent } from "../../lib/chatGeneration";
 
@@ -315,7 +316,7 @@ export function RouteChoiceCard({
   );
 }
 
-function AssistantMessageBase({ msg, streaming, avatarState = "default", portrait, displayRegex, depth, macros, onSendImage, onMaskImage, onRunCommand, onSetCover, onPromptApproval, onRouteChoice, onRegenerate, regenerating = false, onEdit, onDelete, onCreateCheckpoint, onBranch }: { msg: ChatMessage; streaming?: boolean; avatarState?: AssistantAvatarState; portrait?: { name: string; url: string } | null; displayRegex?: RegexScript[]; depth?: number; macros?: { char: string; user: string }; onSendImage: (url: string) => void; onMaskImage?: (url: string) => void; onRunCommand?: (cmd: string) => void; onSetCover?: (url: string) => void; onPromptApproval?: (approval: PromptApproval, action: "submit" | "change" | "cancel", editedPrompt?: string) => Promise<void>; onRouteChoice?: (choice: RouteChoice, route: AgentRoute) => Promise<void>; onRegenerate?: (messageId: string, slotId?: string) => void; regenerating?: boolean; onEdit?: (id: string, text: string) => void; onDelete?: (id: string) => void; onCreateCheckpoint?: (id: string) => void; onBranch?: (id: string) => void }) {
+function AssistantMessageBase({ msg, streaming, avatarState = "default", portrait, displayRegex, depth, macros, onSendImage, onMaskImage, onRunCommand, onSetCover, onPromptApproval, onRouteChoice, onRegenerate, regenerating = false, onEdit, onDelete, onCreateCheckpoint, onBranch, visualCiRepoId, visualCiOutputDir }: { msg: ChatMessage; streaming?: boolean; avatarState?: AssistantAvatarState; portrait?: { name: string; url: string } | null; displayRegex?: RegexScript[]; depth?: number; macros?: { char: string; user: string }; onSendImage: (url: string) => void; onMaskImage?: (url: string) => void; onRunCommand?: (cmd: string) => void; onSetCover?: (url: string) => void; onPromptApproval?: (approval: PromptApproval, action: "submit" | "change" | "cancel", editedPrompt?: string) => Promise<void>; onRouteChoice?: (choice: RouteChoice, route: AgentRoute) => Promise<void>; onRegenerate?: (messageId: string, slotId?: string) => void; regenerating?: boolean; onEdit?: (id: string, text: string) => void; onDelete?: (id: string) => void; onCreateCheckpoint?: (id: string) => void; onBranch?: (id: string) => void; visualCiRepoId?: string; visualCiOutputDir?: string }) {
   const [showThinking, setShowThinking] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
@@ -402,6 +403,11 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
             <button className="img-tool" onClick={() => onSendImage(part.url!)}><Send size={14} /> 发送至对话</button>
             {onSetCover && <button className="img-tool" onClick={() => onSetCover(part.url!)}><ImageIcon size={14} /> 设为封面</button>}
           </div>
+          <VisualCiBadgeSlot
+            generationId={part.generationId}
+            repoId={visualCiRepoId}
+            outputDir={visualCiOutputDir}
+          />
         </div>
       );
     }
@@ -577,9 +583,24 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
   );
 }
 
+type AssistantMessageProps = Parameters<typeof AssistantMessageBase>[0];
+
+// 角色头像解析会按消息返回等值的新对象。只比较其可见值，避免后台 2 秒轮询时
+// 无意义地重写 Markdown innerHTML，从而破坏用户正在复制的浏览器选区。
+export function assistantMessagePropsEqual(previous: AssistantMessageProps, next: AssistantMessageProps): boolean {
+  const previousPortrait = previous.portrait;
+  const nextPortrait = next.portrait;
+  if (previousPortrait?.name !== nextPortrait?.name || previousPortrait?.url !== nextPortrait?.url) return false;
+  const keys = new Set([
+    ...Object.keys(previous) as (keyof AssistantMessageProps)[],
+    ...Object.keys(next) as (keyof AssistantMessageProps)[],
+  ]);
+  return [...keys].every((key) => key === "portrait" || previous[key] === next[key]);
+}
+
 // memo 导出：props 未变（同一 msg 引用、稳定回调）则跳过重渲染。
 export const UserMessage = memo(UserMessageBase);
-export const AssistantMessage = memo(AssistantMessageBase);
+export const AssistantMessage = memo(AssistantMessageBase, assistantMessagePropsEqual);
 
 // 灵感卡：联网搜到并提炼的提示词。代码块风格（深色等宽），右下角「插入对话」把提示词填进输入框。
 export function InspirationCard({

@@ -6,7 +6,19 @@ finishes after maintenance, while ComfyUI continues independently.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any, Callable
+
+
+class TruncatedRoleplayOutput(RuntimeError):
+    """The provider ended a response after opening, but before closing, visible content."""
+
+
+def ensure_complete_visible_content(reply: str) -> None:
+    opened = len(re.findall(r"<content\b[^>]*>", reply or "", flags=re.I))
+    closed = len(re.findall(r"</content\s*>", reply or "", flags=re.I))
+    if opened > closed:
+        raise TruncatedRoleplayOutput("模型输出在正文结束前被截断，请重新生成")
 
 
 @dataclass
@@ -54,6 +66,7 @@ def execute_turn(turn: TurnExecution, hooks: TurnExecutionHooks) -> dict:
     """Generate and finalize one roleplay turn through the public transaction interface."""
     reply = hooks.generate() or "（无回复）"
     hooks.generated(reply)
+    ensure_complete_visible_content(reply)
     return finalize_turn(TurnFinalization(
         ctx=turn.ctx,
         text=turn.text,

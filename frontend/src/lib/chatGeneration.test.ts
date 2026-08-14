@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   needsImageInput, hasImageProvided, pickBestText, slimSnapshot, promptHistory,
   prependLoraTriggers, prepareConversationRegeneration, resolveGenerationPrompt,
+  acceptSlimmedMessages, canCommitSnapshot,
   promptAdditionsForSelectedLora, triggersForSelectedLora,
   resolveLoraPromptMetadata,
 } from "./chatGeneration";
@@ -86,6 +87,32 @@ describe("promptHistory", () => {
       { role: "user", content: "保留的用户消息" },
       { role: "assistant", content: "保留的助手消息" },
     ]);
+  });
+});
+
+describe("acceptSlimmedMessages", () => {
+  it("异步瘦身完成前出现新消息时不得用旧数组覆盖", () => {
+    const original: ChatMessage[] = [{ id: "a", role: "assistant", text: "完成" }];
+    const current: ChatMessage[] = [
+      ...original, { id: "u", role: "user", text: "下一条" },
+    ];
+    const slimmed: ChatMessage[] = [{ id: "a", role: "assistant", text: "完成" }];
+
+    expect(acceptSlimmedMessages(current, original, slimmed)).toBe(current);
+    expect(acceptSlimmedMessages(original, original, slimmed)).toBe(slimmed);
+  });
+});
+
+describe("canCommitSnapshot", () => {
+  it("异步瘦身期间追加用户消息后旧任务不得写本地或后端快照", () => {
+    const original: ChatMessage[] = [{ id: "a", role: "assistant", text: "完成" }];
+    const current: ChatMessage[] = [
+      ...original, { id: "u", role: "user", text: "不能丢失的新消息" },
+    ];
+
+    expect(canCommitSnapshot(current, original, "repo-1", "repo-1")).toBe(false);
+    expect(canCommitSnapshot(original, original, "repo-2", "repo-1")).toBe(false);
+    expect(canCommitSnapshot(original, original, "repo-1", "repo-1")).toBe(true);
   });
 });
 

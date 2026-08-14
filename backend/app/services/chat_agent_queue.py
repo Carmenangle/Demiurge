@@ -14,7 +14,7 @@ import time
 from uuid import uuid4
 
 from app.db import get_connection
-from app.services import agent_runner
+from app.services import agent_runner, chat_snapshot
 from app.services.agent_request_context import from_payload
 
 _WAKE = threading.Condition()
@@ -162,7 +162,13 @@ def _release_claim(task_id: str) -> None:
 
 def _execute(payload: dict) -> None:
     """构造 RunContext 交回 agent_runner headless 跑完（复用现有落盘/记忆/审批落盘）。"""
-    context = from_payload(payload)
+    live_payload = dict(payload)
+    # 排队时捕获的 history 可能早于上一轮最终正文。认领执行时必须重新读取
+    # 用户当前可见快照，否则后续轮会在缺失上一轮结果的上下文中生成。
+    latest_history = chat_snapshot.load_prompt_history(str(payload.get("thread_id") or "home"))
+    if latest_history is not None:
+        live_payload["history"] = latest_history
+    context = from_payload(live_payload)
     q = agent_runner.run_multi_stream(context)
     for _ in agent_runner.drain(q):
         pass  # headless：事件丢弃，落盘由 agent_runner worker 内部完成

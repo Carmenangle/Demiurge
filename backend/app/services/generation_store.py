@@ -403,6 +403,19 @@ def persist_text(thread_id: str, message_id: str, text: str,
         _LOG.warning("persist_text 落盘失败 thread=%s mid=%s: %s", thread_id, message_id, exc)
 
 
+def persist_user_message(
+    thread_id: str, message_id: str, text: str, images: list[str] | None = None,
+) -> None:
+    """在 Agent 开始前持久化用户气泡，断线或前端快照竞态也不能只剩助手回复。"""
+    try:
+        chat_snapshot.ensure_user_message(thread_id, message_id, text, images)
+    except Exception as exc:  # noqa: BLE001 用户输入持久化失败由 Trace 记录，调用仍可返回错误
+        _LOG.warning(
+            "persist_user_message 落盘失败 thread=%s mid=%s: %s",
+            thread_id, message_id, exc,
+        )
+
+
 def persist_media_slot(thread_id: str, message_id: str, slot_id: str,
                        offset: int | None = None) -> None:
     """即时持久化自动插画槽，保证前端离页后异步产物仍有原位回填目标。"""

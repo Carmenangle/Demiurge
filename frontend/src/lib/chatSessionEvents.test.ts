@@ -80,9 +80,24 @@ describe("reduceChatStreamEvent", () => {
     });
 
     expect(messages[0].parts).toEqual([
-      { type: "text", text: "高潮段落。" },
+      { type: "text", text: "高潮段落。\n" },
       { type: "media-slot", slotId: "slot-1", status: "pending" },
-      { type: "text", text: "后续段落。" },
+      { type: "text", text: "\n后续段落。" },
+    ]);
+  });
+
+  it("插画槽位总在高潮画面文段的下一行", () => {
+    let messages = reduceChatStreamEvent(base(), "bot", {
+      type: "replace", text: "高潮画面。\n\n后续段落。",
+    });
+    messages = reduceChatStreamEvent(messages, "bot", {
+      type: "illustrate_request", prompt: "p", motion: 0, actors: [], id: "slot-1", offset: 5,
+    });
+
+    expect(messages[0].parts).toEqual([
+      { type: "text", text: "高潮画面。\n" },
+      { type: "media-slot", slotId: "slot-1", status: "pending" },
+      { type: "text", text: "\n\n后续段落。" },
     ]);
   });
 

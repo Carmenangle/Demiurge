@@ -27,11 +27,15 @@ def run_multi_stream(context: RunContext) -> "queue.Queue":
     approval_updates: list[dict] = []
     route_choice_updates: list[dict] = []
     admission = thread_admission.admit(context.thread_id, context.cancel_event)
+    generation_store.persist_user_message(
+        context.thread_id, context.user_message_id, context.message, context.input_images(),
+    )
     run_trace.emit(
         context, "turn.started",
         raw_input=context.message,
         image_count=len(context.input_images()),
         message_id=context.message_id,
+        user_message_id=context.user_message_id,
         model=context.chat.model,
         route_model=context.route_model or context.chat.model,
         illustrate=context.illustrate,
@@ -76,30 +80,37 @@ def run_multi_stream(context: RunContext) -> "queue.Queue":
             run_trace.emit(context, "turn.error", error=str(exc))
             q.put({"error": str(exc)})
         finally:
-            text = "".join(final_text).strip()
-            generation_store.persist_text(
-                context.thread_id, context.message_id, text, interrupted=interrupted,
-            )
-            for approval in approval_updates:
-                generation_store.persist_prompt_approval(context.thread_id, approval)
-            for route_choice in route_choice_updates:
-                generation_store.persist_route_choice(context.thread_id, route_choice)
             try:
-                chat_memory.append_turn(
-                    context.thread_id, context.message, context.input_images(),
-                    text, interrupted=interrupted,
+                text = "".join(final_text).strip()
+                generation_store.persist_text(
+                    context.thread_id, context.message_id, text, interrupted=interrupted,
                 )
-            except Exception:
-                pass
-            run_trace.emit(
-                context, "turn.completed",
-                interrupted=interrupted,
-                assistant_output=text,
-                approval_count=len(approval_updates),
-                route_choice_count=len(route_choice_updates),
-            )
-            thread_admission.release(admission)
-            q.put(None)
+                for approval in approval_updates:
+                    generation_store.persist_prompt_approval(context.thread_id, approval)
+                for route_choice in route_choice_updates:
+                    generation_store.persist_route_choice(context.thread_id, route_choice)
+                try:
+                    chat_memory.append_turn(
+                        context.thread_id, context.message, context.input_images(),
+                        text, interrupted=interrupted,
+                    )
+                except Exception:
+                    pass
+                run_trace.emit(
+                    context, "turn.completed",
+                    interrupted=interrupted,
+                    assistant_output=text,
+                    approval_count=len(approval_updates),
+                    route_choice_count=len(route_choice_updates),
+                )
+            except Exception as exc:  # noqa: BLE001 - 收尾失败也必须释放 thread/SSE
+                try:
+                    run_trace.emit(context, "turn.finalize_error", error=str(exc))
+                except Exception:
+                    pass
+            finally:
+                thread_admission.release(admission)
+                q.put(None)
 
     threading.Thread(target=worker, daemon=True).start()
     return q

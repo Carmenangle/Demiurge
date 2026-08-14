@@ -97,9 +97,13 @@ def test_marker值也做宏替换():
 
 
 def test_采样参数提取():
-    preset = _preset([], [], temperature=0.9, top_p=0.95, wrap_in_quotes=False)
+    preset = _preset(
+        [], [], temperature=0.9, top_p=0.95,
+        openai_max_tokens=600000, wrap_in_quotes=False,
+    )
     params = preset_store.sampling_params(preset)
     assert params["temperature"] == 0.9 and params["top_p"] == 0.95
+    assert params["max_tokens"] == 600000
     assert "wrap_in_quotes" not in params
 
 

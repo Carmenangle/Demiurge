@@ -27,12 +27,23 @@ def test_同轮隐藏成稿预算追加在正文显式上限之外():
         builtin={"roleplay": {"maxTokens": 4000}},
     )
 
-    assert ag._roleplay_sampling(ctx)["max_tokens"] == 5000
+    assert ag._roleplay_sampling(ctx)["max_tokens"] == 9000
     assert ag._roleplay_sampling(_ctx(
         comfy_illustrate=False,
         builtin={"roleplay": {"maxTokens": 4000}},
-    ))["max_tokens"] == 4000
+    ))["max_tokens"] == 8000
     assert "max_tokens" not in ag._roleplay_sampling(_ctx(comfy_illustrate=True))
+
+
+def test_预设正文额度优先并在外追加全部隐藏输出预算():
+    ctx = _ctx(
+        comfy_illustrate=True,
+        prompt_profile="anima_tags",
+        builtin={"roleplay": {"maxTokens": 4000}},
+        _preset_sampling={"max_tokens": 600000},
+    )
+
+    assert ag._roleplay_sampling(ctx)["max_tokens"] == 604800
 
 
 def test_多角色persona只发送本轮出场角色描述并按剧情选择生图外貌(monkeypatch):
@@ -161,7 +172,10 @@ def test_预设角色描述marker使用本轮已筛选内容(monkeypatch):
     )
     monkeypatch.setattr(preset_store, "has_history_marker", lambda _preset: False)
     monkeypatch.setattr(preset_store, "select_chains", lambda *args, **kwargs: ([], []))
-    monkeypatch.setattr(preset_store, "sampling_params", lambda _preset: {})
+    monkeypatch.setattr(
+        preset_store, "sampling_params",
+        lambda _preset: {"temperature": 0.8, "max_tokens": 600000},
+    )
     ctx = _card_ctx(
         preset_dir="presets", preset_name="active", persona="【角色：米拉】\n黑发金眼",
         _selected_persona_names=["米拉"],
@@ -173,6 +187,7 @@ def test_预设角色描述marker使用本轮已筛选内容(monkeypatch):
     ag._resolve_preset(ctx, "", turn=2)
 
     assert captured["char_name"] == "米拉"
+    assert ctx["_preset_sampling"]["max_tokens"] == 600000
     assert captured["char_description"] == "【角色：米拉】\n黑发金眼"
     assert captured["char_personality"] == "冷静果断"
     assert captured["scenario"] == "雨夜客栈"
@@ -969,6 +984,9 @@ def test_roleplay把机械召回候选与预设上下文合并后只调一次主
         assert "<illustration>" in system
         assert "composition" in system and "weight" in system
         assert "<表格更新>" not in system
+        assert messages[-2]["role"] == "system"
+        assert "【本轮插画执行合同】" in messages[-2]["content"]
+        assert "当前 Profile：krea2" in messages[-2]["content"]
         assert messages[-1] == {"role": "user", "content": "继续剧情"}
         calls.append("roleplay")
         return "剧情正文"
@@ -1071,6 +1089,49 @@ def test_comfy高潮提取失败时把中文正文作为Profile场景源而非�
     assert "白给谷" not in request["scene_spec"]["draft_prompt"]
     assert trace[-1][0] == "illustration.request"
     assert trace[-1][1]["status"] == "emitted"
+
+
+def test_画面主体是用户时不得从状态栏借用在场角色LoRA(monkeypatch, tmp_path):
+    from app.services import character_state
+
+    deps = ra.AgencyDeps(
+        chat_fn=lambda *a, **k: "[]", rng=random.Random(0), state_base=str(tmp_path),
+    )
+    monkeypatch.setattr(ra, "extract_status_snapshot", lambda reply: "[在场] 虞妙玥")
+    monkeypatch.setattr(ra, "parse_state_block", lambda reply: (reply, []))
+    monkeypatch.setattr(ra, "writeback", lambda *a, **k: (10.0, 10.0))
+    monkeypatch.setattr(character_state, "load_state", lambda *a, **k: {})
+    monkeypatch.setattr(ra, "_narr", lambda *a, **k: "")
+    trace = []
+    monkeypatch.setattr(
+        ag.run_trace, "emit", lambda ctx, event, **data: trace.append((event, data)),
+    )
+    reply = (
+        '<content>机关天牢入口的门铁木厚实。\n\n'
+        '他把宗主令贴上门侧机括，门锁开始转动。</content>\n'
+        '<illustration>{"anchor":"他把宗主令贴上门侧机括，门锁开始转动。",'
+        '"camera":"medium shot","composition":"hand and lock in focus",'
+        '"subjects":[{"name":"你","description":"adult man in dark robes pressing a jade token against the lock","weight":1.5}],'
+        '"prompt":"iron-wood prison door, jade token, mechanical lock",'
+        '"profile_prompt":"An adult man in dark robes presses a jade token against the mechanical lock of an iron-wood prison door in a medium shot with directional corridor light and clear material detail.",'
+        '"motion":1}</illustration>'
+    )
+    ctx = _ctx(
+        repo_id="work", thread_id="work", card_name="作品名", scene="climax",
+        comfy_illustrate=True, appearance_source="worldbook",
+        illustration_actor_names=["虞妙玥"], prompt_profile="krea2",
+        history=[],
+    )
+    ctx["_illustration_visual_profiles"] = "虞妙玥：【外貌】墨发，暗红美眸。"
+
+    _, _, request = ag._agency_writeback(
+        ctx, deps, reply, turn=8, affinity=10.0, lost=False,
+        user_text="去打开牢门",
+    )
+
+    assert request, trace
+    assert request["actors"] == []
+    assert request["scene_spec"]["appearance"] == ""
 
 
 def test_comfy首个用户回合即使已有开场白也兜底生成插画(monkeypatch, tmp_path):
@@ -1458,7 +1519,10 @@ def test_anima缺少同轮成稿时本地编译且不再请求独立Profile(monk
     compiled = request["scene_spec"]["profile_prompt"]
     assert compiled.splitlines()[0].startswith("masterpiece, best quality")
     assert "silver hair, jumping, flowing cape, lightning" in compiled
-    assert "The visible action remains the sharp visual focus" in compiled
+    assert "jumping" in compiled.splitlines()[1].lower()
+    assert "visible action remains" not in compiled.lower()
+    assert "stated action" not in compiled.lower()
+    assert "current clothing" not in compiled.lower()
     assert "character identity" not in compiled
     assert "无法协助" not in compiled and "I can't help" not in compiled
 
@@ -1751,6 +1815,42 @@ def test_主模型误把结尾外部钩子当高潮时从真实状态快照恢�
     assert "walking" not in request["scene_spec"].get("profile_prompt", "")
 
 
+def test_高潮重定向后最终profile保留体位破损服装与状态地点(tmp_path):
+    deps = ra.AgencyDeps(chat_fn=lambda *a, **k: "[]", rng=random.Random(0), state_base=str(tmp_path))
+    reply = (
+        "<status>\n[所在] 缠蛇山·机关天牢内层牢房\n[在场] 虞妙玥\n</status>\n"
+        "<content>他把她翻成仰卧姿势。\n\n"
+        "他把她的双腿压上肩膀，两人面对面。\n\n"
+        "高潮袭来，她的大腿绷直，手腕扯动锁链。\n\n"
+        "那旗还在那儿。</content>"
+        '<illustration>{"anchor":"那旗还在那儿。","camera":"close-up",'
+        '"composition":"centered","subjects":[{"name":"虞妙玥",'
+        '"description":"ink-black hair, dark-red eyes; red lotus robe torn into remnants at her waist"}],'
+        '"prompt":"static portrait","profile_prompt":"A generic portrait.","motion":0}</illustration>'
+    )
+    ctx = _ctx(
+        repo_id="work", thread_id="work", card_name="作品名", scene="climax",
+        comfy_illustrate=True, appearance_source="worldbook",
+        illustration_actor_names=["虞妙玥"], prompt_profile="krea2",
+    )
+    ctx["_illustration_visual_profiles"] = (
+        "虞妙玥：【外貌】华贵墨发，狭长暗红美眸，丰腴熟躯；"
+        "【穿着】红莲纹饰华袍。"
+    )
+
+    _, _, request = ag._agency_writeback(
+        ctx, deps, reply, turn=6, affinity=10.0, lost=False, user_text="继续",
+    )
+
+    profile = request["scene_spec"]["profile_prompt"]
+    assert request["anchor"].startswith("高潮袭来")
+    assert "legs raised over the partner's shoulders" in profile
+    assert "face-to-face missionary position" in profile
+    assert "torn remnants of a red lotus patterned robe" in profile
+    assert "confinement cell" in profile
+    assert request["scene_spec"]["field_ledger"]["action"]["covered"] is True
+
+
 @pytest.mark.parametrize("actor", ["冷倾雪", "虞妙玥", "任意角色"])
 def test_高潮重定向保留主计划已验证角色而不依赖正文重复姓名(
     actor, monkeypatch, tmp_path,
@@ -1966,6 +2066,41 @@ def test_主剧情同轮Krea完整提示词隐藏并直接进入scene_spec(monke
     assert clean == "<content>铺垫。\n\n她在破木栏旁猛然转身。</content>"
     assert "profile_prompt" not in clean
     assert request["scene_spec"]["profile_prompt"] == profile
+
+
+def test_anima锚点纠正后保留带正文证据的Agent动作成稿(monkeypatch, tmp_path):
+    from app.services import character_state
+
+    deps = ra.AgencyDeps(chat_fn=lambda *a, **k: "[]", rng=random.Random(0), state_base=str(tmp_path))
+    monkeypatch.setattr(ra, "extract_status_snapshot", lambda reply: {})
+    monkeypatch.setattr(ra, "parse_state_block", lambda reply: (reply, []))
+    monkeypatch.setattr(ra, "writeback", lambda *a, **k: (10.0, 10.0))
+    monkeypatch.setattr(character_state, "load_state", lambda *a, **k: {})
+    monkeypatch.setattr(ra, "_narr", lambda *a, **k: "")
+    reply = (
+        "<content>她拔剑跃起，披风在雷光中扬起。\n\n"
+        "战斗结束，她靠回墙边沉默。\n\n那道雷光仍留在空气里。</content>"
+        '<illustration>{"anchor":"那道雷光仍留在空气里。","camera":"low angle",'
+        '"composition":"diagonal composition","subjects":[{"name":"冷倾雪",'
+        '"description":"silver-haired swordswoman pulling a broken sword free"}],'
+        '"visual_facts":[{"kind":"action","fact":"her hand pulling the broken sword free",'
+        '"evidence":"她拔剑跃起，披风在雷光中扬起。"}],'
+        '"prompt":"jumping, flowing cape, lightning",'
+        '"profile_prompt":"ruined hall, lightning, low angle, silver-haired swordswoman, jumping,\n'
+        'The silver-haired swordswoman jumps while pulling the broken sword free.","motion":2}</illustration>'
+    )
+
+    _, _, request = ag._agency_writeback(
+        _ctx(repo_id="work", card_name="白给谷", scene="climax", comfy_illustrate=True,
+             prompt_profile="anima_tags", illustration_actor_names=["冷倾雪"]),
+        deps, reply, turn=2, affinity=10.0, lost=False,
+    )
+
+    prompt = request["scene_spec"]["profile_prompt"]
+    assert request["scene_spec"]["field_ledger"]["visual_facts"]["covered"] is True
+    assert "pulling the broken sword free" in prompt.splitlines()[0]
+    assert "pulling the broken sword free" in prompt.splitlines()[1]
+    assert "visible action remains" not in prompt.lower()
 
 
 def test_主剧情同轮Profile拒答时本地兜底且不把拒答交给前端(monkeypatch, tmp_path):

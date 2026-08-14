@@ -195,6 +195,10 @@ export function ChatView({
   runCommandRef.current = runCommand;
   const regenerateResultRef = useRef(regenerateResult);
   regenerateResultRef.current = regenerateResult;
+  const promptApprovalRef = useRef(actOnPromptApproval);
+  promptApprovalRef.current = actOnPromptApproval;
+  const routeChoiceRef = useRef(actOnRouteChoice);
+  routeChoiceRef.current = actOnRouteChoice;
   const setCoverRef = useRef(setCover);
   setCoverRef.current = setCover;
   const repoIdRef = useRef(repo?.id);
@@ -217,6 +221,14 @@ export function ChatView({
   const handleRunCommand = useCallback((cmd: string) => runCommandRef.current(cmd), []);
   const handleRegenerate = useCallback(
     (messageId: string, slotId?: string) => regenerateResultRef.current(messageId, slotId),
+    [],
+  );
+  const handlePromptApproval = useCallback(
+    (...args: Parameters<typeof actOnPromptApproval>) => promptApprovalRef.current(...args),
+    [],
+  );
+  const handleRouteChoice = useCallback(
+    (...args: Parameters<typeof actOnRouteChoice>) => routeChoiceRef.current(...args),
     [],
   );
   // ④ AI 消息：编辑 / 检查点 / 分支（回调用 latest-ref 兜住，保持 memo 稳定）
@@ -490,14 +502,16 @@ export function ChatView({
                   onSendImage={handleSendImage}
                   onMaskImage={handleMaskImage}
                   onSetCover={hasRepo ? handleSetCover : undefined}
-                  onPromptApproval={actOnPromptApproval}
-                  onRouteChoice={actOnRouteChoice}
+                  onPromptApproval={handlePromptApproval}
+                  onRouteChoice={handleRouteChoice}
                   onRegenerate={handleRegenerate}
                   regenerating={regeneratingIds.has(m.id)}
                   onEdit={handleEditAssistant}
                   onDelete={handleDeleteMessage}
                   onCreateCheckpoint={hasRepo ? handleCreateCheckpoint : undefined}
                   onBranch={hasRepo && repo?.parentId && onBranch ? handleBranch : undefined}
+                  visualCiRepoId={repo?.id}
+                  visualCiOutputDir={settings.outputDir}
                 />
               )}
               <span className="chat-message-end" data-message-end={m.id} aria-hidden="true" />

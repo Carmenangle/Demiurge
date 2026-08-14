@@ -55,6 +55,31 @@ def test_runner_commits_turn_once(monkeypatch):
     assert agent_runner.is_running("t2") is False
 
 
+def test_runner在模型启动前把用户消息写入权威快照(monkeypatch):
+    persisted = []
+
+    def stream(context):
+        assert persisted == [(
+            "turn", "user-1", "不能丢失的用户消息", ["reference.png"],
+        )]
+        yield {"done": True}
+
+    monkeypatch.setattr(agent_runner.agent_graph, "stream_multi_agent", stream)
+    monkeypatch.setattr(
+        agent_runner.generation_store, "persist_user_message",
+        lambda *args: persisted.append(args), raising=False,
+    )
+    monkeypatch.setattr(agent_runner.generation_store, "persist_text", lambda *a, **k: None)
+    monkeypatch.setattr(agent_runner.chat_memory, "append_turn", lambda *a, **k: None)
+
+    list(agent_runner.drain(agent_runner.run_multi_stream(RunContext(
+        thread_id="turn", message="不能丢失的用户消息", images=["reference.png"],
+        user_message_id="user-1", message_id="assistant-1",
+    ))))
+
+    assert persisted == [("turn", "user-1", "不能丢失的用户消息", ["reference.png"])]
+
+
 def test_runner接收节点实时增量并以最终文本替换落盘(monkeypatch):
     def stream(context):
         context.stream_sink({"delta": "生成"})
@@ -151,6 +176,7 @@ def test_runner用同一turn_id记录首尾事件(monkeypatch):
     assert [item[1] for item in captured] == ["turn.started", "turn.completed"]
     assert {item[0] for item in captured} == {context.turn_id}
     assert captured[0][2]["raw_input"] == "中文输入"
+    assert captured[0][2]["user_message_id"] == ""
     assert captured[0][2]["illustrate"] is True
     assert captured[0][2]["comfy_illustrate"] is True
     assert captured[1][2]["assistant_output"] == "答复"
@@ -232,3 +258,22 @@ def test_worker_error_still_finalizes(monkeypatch):
     assert events == [{"error": "stream exploded"}]
     assert len(persisted) == 1          # 异常路径仍收尾
     assert _wait_idle("err")            # 仍释放所有权
+
+
+def test_finalize_persistence_error_still_releases_thread_and_ends_stream(monkeypatch):
+    monkeypatch.setattr(
+        agent_runner.agent_graph, "stream_multi_agent",
+        lambda context: iter([{"delta": "已生成"}, {"done": True}]),
+    )
+    monkeypatch.setattr(
+        agent_runner.generation_store, "persist_text",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("disk failure")),
+    )
+    monkeypatch.setattr(agent_runner.run_trace, "emit", lambda *a, **k: None)
+
+    events = list(agent_runner.drain(agent_runner.run_multi_stream(
+        RunContext(thread_id="finalize-error", message="q", message_id="m"),
+    )))
+
+    assert events == [{"delta": "已生成"}, {"done": True}]
+    assert _wait_idle("finalize-error")

@@ -92,6 +92,28 @@ def test_build_extract_system_含还原指令():
     assert "还原" in s and "JSON" in s
 
 
+def test_同轮插画计划允许合理联想但必须服从硬事实():
+    instruction = ipe.build_inline_plan_instruction("krea2")
+
+    assert "硬事实锁" in instruction
+    assert "开放视觉槽" in instruction
+    assert "微动作" in instruction
+    assert "时间、地点、天气、情绪" in instruction
+    assert "重要新人物" in instruction
+    assert "关键道具" in instruction
+
+
+def test_同轮插画计划强制补全缺失的画面硬事实():
+    instruction = ipe.build_inline_plan_instruction("krea2")
+
+    assert "缺失硬事实补全" in instruction
+    assert "必须补出一个具体答案" in instruction
+    assert "不得留空" in instruction
+    assert "当前服装" in instruction
+    assert "具体动作或姿态" in instruction
+    assert "地点环境" in instruction
+
+
 def test_主生成插画计划可解析并从正文剥离():
     reply = (
         "铺垫。\n\n她跃上高台，披风在雷光中扬起。"
@@ -130,6 +152,48 @@ def test_模型截断未闭合插画块时仍从正文剥离():
     assert clean == "<content>铺垫。\n\n她把乌木匣子放在长凳上。\n\n院长走出门来。</content>"
     assert plan == {}
     assert "anchor" not in clean and "visual_thesis" not in clean
+
+
+def test_插画JSON被模型续写think打断时可恢复():
+    reply = (
+        "<content>正文高潮。</content>"
+        '<illustration>{"anchor":"正文高潮。","camera":"low-angle medium close-up",'
+        '"composition":"diagonal composition","aspect_ratio":"2:3",'
+        '"subjects":[{"name":"虞妙玥","description":"voluptuous mature woman, '
+        'ink-black hair, narrow dark-red eyes","weight":2.0}],'
+        '"prompt":"lying on cold stone, amber side light",'
+        '"profile_prompt":"The stone floor shows moisture'
+        '<think>上一段输出被截断，需要继续完成 illustration JSON。</think>'
+        ' and fluid stains.","motion":1}</illustration>'
+    )
+
+    clean, plan = ipe.extract_illustration_plan(reply)
+
+    assert clean == "<content>正文高潮。</content>"
+    assert plan["actors"] == ["虞妙玥"]
+    assert plan["profile_prompt"] == "The stone floor shows moisture and fluid stains."
+    assert "dark-red eyes" in plan["prompt"]
+
+
+def test_插画JSON字符串含未转义换行时只修复字符串控制符并保留计划():
+    reply = (
+        "<content>她跃上高台，披风在雷光中扬起。</content>"
+        '<illustration>{"anchor":"她跃上高台，披风在雷光中扬起。",'
+        '"camera":"low angle","composition":"diagonal composition",'
+        '"subjects":[{"name":"白绮谷","description":"silver-haired swordswoman jumping"}],'
+        '"prompt":"jumping, flowing cape, lightning",'
+        '"profile_prompt":"silver-haired swordswoman, jumping, flowing cape,\n'
+        'A silver-haired swordswoman jumps through the lightning.","motion":2}</illustration>'
+    )
+
+    clean, plan = ipe.extract_illustration_plan(reply)
+
+    assert clean == "<content>她跃上高台，披风在雷光中扬起。</content>"
+    assert plan["anchor"] == "她跃上高台，披风在雷光中扬起。"
+    assert plan["profile_prompt"].splitlines() == [
+        "silver-haired swordswoman, jumping, flowing cape,",
+        "A silver-haired swordswoman jumps through the lightning.",
+    ]
 
 
 def test_Comfy提示词固定为质量行加英文内容行():
@@ -253,6 +317,28 @@ def test_解析艺术决策并置于结构化画面草稿前部():
     assert plan["prompt"].endswith("low angle, diagonal composition, (armored swordswoman:1.4), ruined arena")
 
 
+def test_解析通用可视事实时只接受带正文逐字证据的条目():
+    reply = (
+        "<content>牢门开了。她侧卧石板，双腕锁在腰前，陌生玉器仍留在腿间。</content>"
+        '<illustration>{"anchor":"陌生玉器仍留在腿间。","camera":"medium shot",'
+        '"composition":"threshold frame","subjects":[{"name":"甲","description":"adult woman"}],'
+        '"visual_facts":['
+        '{"kind":"restraint","fact":"both wrists locked at her waist","evidence":"双腕锁在腰前"},'
+        '{"kind":"prop","fact":"an unfamiliar jade object remains between her thighs","evidence":"陌生玉器仍留在腿间"},'
+        '{"kind":"invented","fact":"a crown lies nearby","evidence":"王冠在旁边"}],'
+        '"prompt":"doorway light","motion":1}</illustration>'
+    )
+
+    clean, plan = ipe.extract_illustration_plan(reply)
+
+    assert plan["visual_facts"] == [
+        {"kind": "restraint", "fact": "both wrists locked at her waist", "evidence": "双腕锁在腰前"},
+        {"kind": "prop", "fact": "an unfamiliar jade object remains between her thighs", "evidence": "陌生玉器仍留在腿间"},
+    ]
+    assert "crown" not in plan["prompt"]
+    assert "王冠" not in clean
+
+
 def test_主生成插画指令同轮生成隐藏完整提示词且不占正文配额():
     instruction = ipe.build_inline_plan_instruction(
         "krea2", profile_instruction="Krea2完整成稿合同",
@@ -266,6 +352,21 @@ def test_主生成插画指令同轮生成隐藏完整提示词且不占正文�
     assert "camera 写服务视觉命题" in instruction
     assert "除 anchor 和 subjects.name 必须保留" in instruction
     assert "必须使用简洁英文视觉描述" in instruction
+    assert "写正文前" in instruction
+    assert "本轮冲突" in instruction
+    assert "唯一高潮画面时刻" in instruction
+    assert "visual_facts" in instruction
+    assert "正文逐字 evidence" in instruction
+
+
+def test_未知物件要求按可画身份通用释义而非单物件词典特判():
+    instruction = ipe.build_inline_plan_instruction("krea2")
+
+    for requirement in ("任何关键物件", "材质", "几何外形与尺寸尺度", "可见结构或运动方式",
+                        "功能", "实际交互", "器具、机关、法器、刑具、容器、载具、建筑构件"):
+        assert requirement in instruction
+    assert "不是任何单个物件的特例" in instruction
+    assert "玉制振动棒" not in instruction
 
 
 def test_插画指令要求基础外貌与当前情况合并并承担当前Profile格式():

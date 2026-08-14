@@ -31,6 +31,12 @@ def inline_generation_instruction(profile: str) -> str:
         "角色姓名只用于关联角色条目，禁止写入最终提示词；必须把角色条目的具体外貌、当前服装状态、"
         "高潮动作、地点、镜头、构图、光影和材质关系翻译为实际可见内容，禁止使用 preserve identity、"
         "stable appearance、current clothing condition 等空泛占位语。当前剧情服装状态优先于基础穿着。"
+        "高潮中同时发生的动作、身体接触和人物相对位置必须合成一个可见复合动作，明确谁对谁做什么；"
+        "禁止只留下俯身、躺卧、脸红或高潮等局部结果。"
+        "末尾揭示场景必须保留该时刻仍有效的束缚、关键道具、双手位置和双腿姿态，不能只写面部与目光。"
+        "输入若含 visual_facts，必须逐项转入成稿；它们带有本轮正文逐字证据，类型开放，"
+        "不得因本地没有对应类别或术语而省略。没有可靠英文专业名词的物件不得音译、照抄专名或写成"
+        "unknown object；必须采用 visual_facts 已给出的材质、外形尺度、可见结构/运动、当前功能和交互描述。"
         "不得写 LoRA 名称、权重或触发词；LoRA 元数据在本轮输出完成后由后端查询、去重并注入。"
         "画面有两名角色时，必须先写双人构图与背景，再分别以 primary adult character 和 "
         "second adult character 写各自具体外貌、服装、位置与动作，最后写两人的可见关系和整体画面；"
@@ -45,7 +51,8 @@ def inline_generation_instruction(profile: str) -> str:
         ),
         "anima_tags": (
             "Anima 格式：输出英文 tags + 英文关系描述，先用逗号分隔的具体 tags 锁定人物、外貌、服装、"
-            "动作、场景和构图，再紧接一至三句英文文段说明空间关系、光影因果与视觉中心；"
+            "动作、场景和构图，再换行写一至三句连续英文文段说明同一画面；第二行必须直接写完整句子，"
+            "禁止 Her body:、Bound:、Position: 等标题式小段或任何冒号标签，句内属性只用英文逗号连接；"
             "不要加入固定质量行，后端会统一补齐并去重。"
         ),
         "natural_language": (
@@ -58,6 +65,29 @@ def inline_generation_instruction(profile: str) -> str:
         ),
     }
     return common + formats.get(profile, formats["krea2"])
+
+
+def near_generation_contract(profile: str) -> str:
+    """生成点附近的短合同；防止头部完整合同被长预设与历史稀释。"""
+    formats = {
+        "krea2": "profile_prompt 只能是一个纯英文自然语言段落，不得写 tags 列表或质量词。",
+        "anima_tags": (
+            "profile_prompt 的 JSON 字符串必须且只能含一个 \\n：第一行是逗号分隔的具体英文内容 tags，"
+            "第一行结尾保留英文逗号；第二行是解释同一画面的连续英文句子，禁止标题式小段和冒号；"
+            "不要写固定质量行。"
+        ),
+        "natural_language": "profile_prompt 只能是一个纯英文自然语言段落。",
+        "niji_sections": "profile_prompt 必须用 \\n 分隔 subject、style、additions、suffix 四段。",
+    }
+    selected = profile if profile in PROFILE_IDS else "krea2"
+    return (
+        "【本轮插画执行合同】当前 Profile：" + selected + "。"
+        "完成 <content> 后必须输出一个合法 <illustration> JSON。"
+        "先选本轮真正发生动作与剧情变化的连续画面，不得选事后静态表情或结尾对白代替动作。"
+        "visual_facts 必须逐项覆盖该画面的主体、具体动作链、姿态/接触关系、当前服装、关键物件、地点和空间关系；"
+        "每项 fact 使用具体英文，evidence 逐字来自同一高潮窗口。profile_prompt 必须落实全部 visual_facts 与稳定外貌，"
+        "不得写角色姓名、空泛身份锁或 LoRA 信息。" + formats[selected]
+    )
 
 
 def inline_output_token_reserve(profile: str) -> int:
@@ -85,16 +115,22 @@ _ART_DIRECTION = (
 
 _VISUAL_BLUEPRINT = (
     _ART_DIRECTION
-    + "格式化时先锁定不可改变的剧情事实：在场人物、世界书稳定外貌、当前外观变化、服装状态、"
-    "实际动作和地点；不得因艺术化而改写事实。只展开服务唯一视觉命题的发型、妆容、服装、背景和装饰细节，"
-    "无关项简写或省略，不得为了填满栏目凭空创造。若输入确实没有稳定外貌，可根据明确的年龄、性别、职业、"
+    + "采用‘硬事实锁＋开放视觉槽’。硬事实锁包括在场人物、世界书稳定外貌、当前外观变化、正文明确的"
+    "服装状态、实际动作、人物关系、地点和剧情结果；不得因艺术化而改写事实。开放视觉槽包括正文未明确规定的"
+    "微动作、姿态、视线、镜头、构图、光影、天气表现、背景活动和材质细节；必须根据当前时间、地点、天气、"
+    "情绪、人物处境与视觉因果进行合理联想，使画面成为具体瞬间，而不是用通用模板填空。执行‘缺失硬事实补全’："
+    "生成完整画面所需的当前服装、具体动作或姿态、地点环境、人物位置、镜头、构图、光影与背景中，任何未明确项"
+    "都必须补出一个具体答案，不得留空、不得使用占位语或通用模板。开放视觉槽不得"
+    "引入重要新人物、关键道具或新事件，不得改变硬事实与剧情结果。只展开服务唯一视觉命题的发型、妆容、"
+    "服装、背景和装饰细节，无关项简写或省略。若输入确实没有稳定外貌，可根据明确的年龄、性别、职业、"
     "身份、阵营和名称调性，保守补足不改变剧情事实的典型外貌与服装；不得据此改写年龄、关系、动作或阵营设定。"
     "人物视觉事实不足时，可改以当前环境为第一视觉中心，让人物退居次级叙事位置。"
     "人物、动作、镜头、光影、背景和构图必须形成同一视觉系统。"
 )
 
 _COMMON = (
-    "输入是当前剧情高潮画面的 JSON。只能描写输入中已经出现或可以直接推出的事实，"
+    "输入是当前剧情高潮画面的 JSON。先锁定输入明确给出的剧情事实，再主动设计输入未规定的开放视觉槽；"
+    "开放设计必须能由当前时间、地点、天气、情绪、人物处境或视觉因果解释，"
     "不得借用其他会话、历史图片或固定成人模板，不得创造未出场人物。"
     "角色姓名只用于把剧情人物关联到对应外貌条目，不是生图语义；转换时必须按人物的空间角色改写为"
     "primary adult character、second adult character 等中性指代，最终提示词禁止出现原姓名、音译姓名或"
@@ -103,6 +139,8 @@ _COMMON = (
     "发型、发饰、五官、体型、当前服装和鞋袜翻译成具体英文，禁止用 preserve identity、"
     "established appearance、stable appearance 或 current clothing condition 等空泛身份锁代替。"
     "角色条目的基础穿着只作默认值，剧情正文或 wardrobe 中的脱下、破损、凌乱、沾污等当前状态优先。"
+    "任何剧情关键物件若没有可靠英文通用名，必须用材质、几何外形与尺度、可见结构或运动方式、当前功能及"
+    "与人物/环境的交互来建立可画身份；只采用输入证据支持的维度，不猜内部原理，也不得因缺少术语而省略。"
     "人物、服装、动作、镜头、光影、背景和构图必须彼此一致。"
     + _VISUAL_BLUEPRINT
 )
@@ -121,13 +159,16 @@ _ANIMA_SYSTEM = _COMMON + (
     "发型、妆容、表情、服装、姿态、镜头、视角、景深、构图、背景、光影和风格等硬约束。"
     "自然语言不得机械复述 tags，而要落实已经选定的唯一视觉命题，补足主体与环境的空间关系、材质与反射、"
     "光线传播、细节主次和叙事情绪；最高细节留给剧情关键主体或关键部位，其余内容按层级逐渐概括。"
+    "自然语言必须写成一至三句连续英文描述，不得写 Her body:、Bound:、Position:、Appearance:、Action:"
+    "等标题式小段或任何冒号标签；同一句内的可见属性只用英文逗号连接。"
     "content 中不要输出质量词、LoRA 触发词、LoRA 权重、参数、标题、Markdown 或负面提示词；质量行由程序添加。"
 )
 
 _KREA_SYSTEM = _COMMON + (
     "你在为大参数自然语言图像模型 Krea2 生成剧情插画提示词。"
     "输入是已经确定的剧情高潮画面 JSON。将输入中的高潮内容准确转换成一段可直接用于 Krea2 的英文自然语言提示词。"
-    "不得续写剧情，不得改变人物、动作、服装、关系、地点或剧情结果，不得加入输入中没有的画面事实。"
+    "不得续写剧情，不得改变人物、动作、服装、关系、地点或剧情结果等硬事实锁；"
+    "允许为开放视觉槽补足与时间、地点、天气、情绪和人物处境一致的微动作、镜头、构图、光影与背景细节。"
     "生成提示词前，在内部严格按以下六个维度依次解析，但不要输出分析过程、标题、编号或分段标签。"
     "第一，构图与留白占比。根据高潮动作、人物数量和空间关系确定主体位置、画面占比、视觉中心、"
     "前后景关系、视线引导和适合当前场景的负空间比例；留白必须服务人物关系、动作方向或环境纵深，"
@@ -235,6 +276,48 @@ def _json_object(raw: str) -> dict[str, object]:
     return value if isinstance(value, dict) else {}
 
 
+_ANIMA_PROSE_LABELS: tuple[tuple[str, str], ...] = (
+    (r"her body|body", "Her body is shown with "),
+    (r"bound|restraints?", "She is bound with "),
+    (r"position|pose", "She is positioned "),
+    (r"appearance", "She appears with "),
+    (r"clothing|wardrobe|costume", "She wears "),
+    (r"action", "She is shown "),
+    (r"expression", "Her expression shows "),
+    (r"setting|location|background", "The scene takes place in "),
+    (r"camera|composition", "The composition uses "),
+    (r"lighting", "The lighting uses "),
+)
+
+
+def _anima_naturalize_prose(value: str) -> str:
+    """把模型偶发的 `Label: fragment` 改成连续英文画面句。"""
+    text = " ".join((value or "").splitlines()).strip()
+    for label, replacement in _ANIMA_PROSE_LABELS:
+        text = re.sub(
+            rf"(^|[.!?]\s+)(?:{label})\s*:\s*",
+            rf"\1{replacement}",
+            text,
+            flags=re.I,
+        )
+    text = re.sub(r"\b(\d+)\s*:\s*(\d+)\b", r"\1 by \2 aspect ratio", text)
+    text = re.sub(r"\s*:\s*", ", ", text)
+    text = re.sub(r"\s*,\s*", ", ", text)
+    text = re.sub(r"\s+", " ", text).strip(" ,")
+    if text and text[-1] not in ".!?":
+        text += "."
+    return text
+
+
+def _anima_clean_tag_head(value: str) -> str:
+    """Anima 首行只能是逗号序列，不能携带标题式冒号。"""
+    text = re.sub(r"\s*;\s*", ", ", value or "")
+    labels = "|".join(label for label, _replacement in _ANIMA_PROSE_LABELS)
+    text = re.sub(rf"\b(?:{labels})\s*:\s*", "", text, flags=re.I)
+    text = re.sub(r"\b(\d+)\s*:\s*(\d+)\b", r"\1 by \2 aspect ratio", text)
+    return re.sub(r"\s*:\s*", ", ", text)
+
+
 def anima_quality_tags(rating: str = "sfw") -> str:
     if rating == "nsfw":
         return ANIMA_QUALITY_TAGS.replace(
@@ -310,19 +393,74 @@ def _normalize(
         return _anonymize_prompt_names(_krea_prompt(raw, scene), scene or {})
     if profile == "anima_tags":
         value = _json_object(raw)
+        explicit_tags = ""
+        explicit_prose = ""
         if value:
             source = str(value.get("content") or "")
         else:
             lines = [line.strip() for line in _strip_wrapping(raw).splitlines() if line.strip()]
-            if len(lines) >= 2 and re.search(
-                r"\b(?:masterpiece|best quality|score_[1-9]|anime coloring)\b", lines[0], re.I,
-            ):
-                lines = lines[1:]
-            source = " ".join(lines)
+            if len(lines) >= 2:
+                body = " ".join(lines[1:])
+                if re.search(
+                    r"\b(?:masterpiece|best quality|score_[1-9]|anime coloring)\b",
+                    lines[0], re.I,
+                ):
+                    # 已编译结果再次经过 normalize_inline 时，只剥掉质量前缀，保留同一行内容 tags。
+                    explicit_tags = re.sub(
+                        r"^[\s\S]*?\banime coloring\b\s*,?", "", lines[0],
+                        count=1, flags=re.I,
+                    ).strip(" ,")
+                    if not explicit_tags:
+                        legacy_tags, dot, legacy_prose = body.partition(".")
+                        explicit_tags = legacy_tags.strip(" ,")
+                        if dot and legacy_prose.strip():
+                            body = legacy_prose.strip()
+                else:
+                    # 主模型偶尔把环境 tags 放首行、人物和动作写成第二行分号描述；
+                    # 确定性复制具体描述到 tags 行，不能把 Agent 已提取的画面事实丢掉。
+                    explicit_tags = ", ".join((lines[0].rstrip(" ,"), body))
+                    explicit_tags = re.sub(
+                        r"\b(?:(?:primary|second) adult character|the visual center)\s*:\s*",
+                        "", explicit_tags, flags=re.I,
+                    )
+                    explicit_tags = re.sub(r"\s*[.;]\s*", ", ", explicit_tags)
+                    explicit_tags = explicit_tags.encode("ascii", "ignore").decode("ascii")
+                explicit_prose = re.sub(
+                    r"\bprimary adult character\s*:\s*",
+                    "The primary adult character is ", body, flags=re.I,
+                )
+                explicit_prose = re.sub(
+                    r"\bsecond adult character\s*:\s*",
+                    "The second adult character is ", explicit_prose, flags=re.I,
+                )
+                explicit_prose = re.sub(r"\s*;\s*", ". ", explicit_prose)
+                explicit_prose = explicit_prose.encode("ascii", "ignore").decode("ascii").strip()
+                if explicit_prose and explicit_prose[-1] not in ".!?”":
+                    explicit_prose += "."
+                source = ""
+            else:
+                source = " ".join(lines)
         content = " ".join(_strip_wrapping(source).splitlines()).strip()
+        # 第一行是质量+内容 tags；第二行才是解释文段。
+        if explicit_tags or explicit_prose:
+            tag_head = explicit_tags
+            prose = explicit_prose
+        else:
+            tag_head, dot, prose_tail = content.partition(".")
+            prose = prose_tail.strip() if dot else ""
+        tag_head = _anima_clean_tag_head(tag_head)
+        tag_head = re.sub(
+            r"(?:^|,\s*)(?:dramatic scene|climactic moment|dynamic composition|action pose|"
+            r"cinematic lighting)(?=,|\.|$)\s*,?\s*", "", tag_head, flags=re.I,
+        ).strip(" ,")
+        tag_head = ", ".join(
+            tag.strip() for tag in tag_head.split(",")
+            if tag.strip() and not re.fullmatch(r"[*_#`~\s]+", tag.strip())
+        )
+        prose = _anima_naturalize_prose(prose)
         rating = str((scene or {}).get("rating") or "sfw")
         return _anonymize_prompt_names(
-            f"{anima_quality_tags(rating)}\n{content}", scene or {},
+            f"{anima_quality_tags(rating)}, {tag_head},\n{prose}", scene or {},
         )
     if profile == "natural_language":
         return _anonymize_prompt_names(_strip_wrapping(raw), scene or {})
@@ -472,7 +610,23 @@ _ANIMA_ACTION_RE = re.compile(
     r"carrying|lifting|unloading)\b",
     re.I,
 )
+_THROAT_GRIP_SOURCE = r"(?:掐|扣|卡)(?:着|住|紧)?.{0,8}(?:脖子|颈部?|喉咙)|(?:脖子|颈部?|喉咙).{0,8}(?:掐|扣|卡)(?:着|住|紧)?"
+_PENETRATION_SOURCE = r"(?:重新.{0,6}(?:推进|进入)|推进去|推入|插入|抽插|交媾|做爱|性交)"
+_COMPOUND_THROAT_INTERCOURSE = (
+    "penetrative intercourse while the secondary adult partner grips the primary woman's throat"
+)
 _SCENE_ACTION_RULES = (
+    (
+        rf"(?:{_THROAT_GRIP_SOURCE})[\s\S]{{0,800}}(?:{_PENETRATION_SOURCE})|"
+        rf"(?:{_PENETRATION_SOURCE})[\s\S]{{0,800}}(?:{_THROAT_GRIP_SOURCE})",
+        _COMPOUND_THROAT_INTERCOURSE,
+    ),
+    (_THROAT_GRIP_SOURCE, "one hand gripping the partner's throat"),
+    (_PENETRATION_SOURCE, "penetrative intercourse"),
+    (r"传教士|(?:仰卧|躺)[\s\S]{0,80}面对面|面对面[\s\S]{0,80}(?:仰卧|躺)", "face-to-face missionary position"),
+    (r"(?:双腿|大腿|腿).{0,8}(?:压|架|搭).{0,10}(?:对方|他的|她的)?肩", "legs raised over the partner's shoulders"),
+    (r"火车便当|抱离地面.{0,12}(?:悬空|贴住)|悬空.{0,12}(?:抱|贴住)", "standing suspended carry position"),
+    (r"(?:^|[^0-9])69(?:式|姿势|体位)|六九式|上下交叠", "mutual oral 69 position"),
     (r"伸手", "reaching out"),
     (r"抓住.{0,4}手腕|握住.{0,4}手腕", "gripping wrist"),
     (r"拉向|拽向|拖向", "pulling another person"),
@@ -497,6 +651,12 @@ _SCENE_ACTION_RULES = (
     (r"拔剑|拔刀", "drawing a weapon"),
     (r"打开|开启", "opening"),
     (r"递给|交给", "handing over"),
+    (r"取出|拔出|抽出|移除", "removing the visible object"),
+    (r"摩擦|磨着|磨动|揉动", "rubbing the contact point"),
+    (r"撤开|撤掉|抽回|收回", "withdrawing just before completion"),
+    (r"(?:腰|身体).{0,12}(?:追|拱|顶)(?:向|过去|上去)?", "her body following the withdrawn contact"),
+    (r"(?:膝盖|双腿|大腿).{0,8}(?:分开|打开)", "knees spread apart"),
+    (r"压住|按住", "pressing down"),
     (r"(?:搬|卸).{0,12}木箱|木箱.{0,12}(?:搬|卸)|搬下|搬到|卸下|卸货",
      "unloading a wooden medicine crate"),
     (r"扛着|背着|搬着", "carrying"),
@@ -510,6 +670,10 @@ def _scene_action_tags(scene: Mapping[str, object]) -> list[str]:
         str(scene.get("draft_prompt") or ""),
     ))
     tags = [tag for pattern, tag in _SCENE_ACTION_RULES if re.search(pattern, source)]
+    if _COMPOUND_THROAT_INTERCOURSE in tags:
+        tags = [tag for tag in tags if tag not in {
+            "one hand gripping the partner's throat", "penetrative intercourse", "bending forward",
+        }]
     if source.isascii() and _ANIMA_ACTION_RE.search(source):
         tags.extend(match.group(0).lower() for match in _ANIMA_ACTION_RE.finditer(source))
     return list(dict.fromkeys(tags))
@@ -549,7 +713,7 @@ def _anima_scene_fact_errors(prompt: str, scene: Mapping[str, object]) -> list[s
         str(scene.get("locale") or ""),
         " ".join(str(value) for value in encounter_values),
     ))
-    content = prompt.splitlines()[-1].lower()
+    content = prompt.lower()
     requirements = (
         (
             r"(?:搬|卸).{0,16}(?:木箱|药箱)|(?:木箱|药箱).{0,16}(?:搬|卸)",
@@ -607,14 +771,16 @@ _VAGUE_IDENTITY_RE = re.compile(
 # 中文角色条目的高频可视事实：同时用于语义门禁和无模型兜底。规则只翻译视觉属性，
 # 不含角色专名；当前 wardrobe/正文中的服装变化会覆盖条目里的基础【穿着】段。
 _VISUAL_FACT_RULES: tuple[tuple[str, str, str], ...] = (
-    (r"漆黑墨发|乌黑(?:长)?发|黑发", "glossy jet-black hair", r"\b(?:jet-black|raven|ebony|black) hair\b"),
+    (r"漆黑墨发|华贵墨发|墨发|乌黑(?:长)?发|黑发", "glossy jet-black hair", r"\b(?:jet-black|raven|ebony|black) hair\b"),
     (r"发团|发髻|盘发", "hair gathered into a rounded bun", r"\b(?:hair )?(?:bun|updo|chignon)\b"),
     (r"紫玉金髻|紫玉.{0,4}(?:簪|髻|钗)", "a purple jade and gold hair ornament", r"purple jade.{0,35}(?:hair|ornament|pin)|(?:hair|ornament|pin).{0,35}purple jade"),
     (r"朱唇|红唇", "full crimson lips", r"\b(?:crimson|red|scarlet|vermilion) lips\b"),
     (r"脸颊红润|红润.{0,3}脸颊", "rosy cheeks", r"\b(?:rosy|flushed|warm) cheeks\b"),
     (r"晶亮.{0,8}美目|美目.{0,8}晶亮", "luminous rounded eyes", r"\b(?:luminous|bright|clear|glossy|shining).{0,12}eyes\b"),
+    (r"暗红.{0,5}(?:美眸|眼|眸)|(?:美眸|眼|眸).{0,5}暗红", "narrow dark-red eyes", r"\b(?:narrow )?dark-red eyes\b"),
+    (r"熟厚双唇|丰厚.{0,3}(?:双唇|嘴唇)", "full mature lips", r"\bfull mature lips\b"),
     (r"成熟风韵|成熟.{0,4}(?:干练|韵味)|久经历练", "a mature and composed gaze", r"\b(?:mature|seasoned|composed|experienced).{0,18}(?:gaze|eyes|expression)\b"),
-    (r"前凸后翘|曲线优美|丰腴熟躯|丰腴.{0,4}(?:身材|曲线)", "a voluptuous curvy figure", r"\b(?:voluptuous|curvy|full-figured)\b"),
+    (r"前凸后翘|曲线优美|丰腴熟躯|丰腴肥熟|丰腴.{0,4}(?:身材|曲线)", "a voluptuous curvy figure", r"\b(?:voluptuous|curvy|full-figured)\b"),
     (r"爆硕巨乳|丰满胸部|巨乳", "a very full bust", r"\b(?:very |large |ample |full )?(?:bust|breasts)\b"),
     (r"媚软纤腰|纤腰", "a narrow waist", r"\b(?:narrow|slender|slim).{0,10}waist\b"),
     (r"宽厚圆硕.{0,5}(?:臀|屁股)|圆硕.{0,3}(?:臀|屁股)|肥臀", "broad rounded hips", r"\b(?:broad|wide|full|rounded).{0,12}(?:hips|buttocks)\b"),
@@ -625,9 +791,15 @@ _VISUAL_FACT_RULES: tuple[tuple[str, str, str], ...] = (
     (r"胸口半敞|领口半敞", "a partly open neckline", r"\bpartly open (?:neckline|front|chest)\b"),
     (r"碎花紫长裙|紫色?碎花长裙", "a floral purple long skirt", r"\b(?:floral purple|purple floral).{0,12}(?:long )?(?:skirt|dress)\b"),
     (r"红色?长裙|红裙", "a red long dress", r"\bred (?:long )?(?:dress|skirt)\b"),
+    (r"红莲.{0,8}(?:华袍|长袍|袍)[\s\S]{0,400}(?:华袍|衣袍|袍服)?残片|红莲.{0,8}(?:华袍|长袍|袍).{0,12}(?:撕开|毁损|残片)|(?:撕开|毁损|残片).{0,12}红莲.{0,8}(?:华袍|长袍|袍)|red lotus robe.{0,20}(?:torn|remnants)|(?:torn|remnants).{0,20}red lotus robe", "torn remnants of a red lotus patterned robe", r"\btorn remnants of a red lotus patterned robe\b"),
+    (r"红莲纹饰华袍|红莲.{0,5}(?:华袍|长袍|袍)", "a red lotus patterned robe", r"\bred lotus.{0,20}(?:patterned )?robe\b"),
     (r"高叉开衩|高开叉|高叉", "a high side slit", r"\bhigh (?:side )?slit\b"),
     (r"(?:衣|裙|袍).{0,4}(?:破碎|破损|撕裂|扯破)|(?:破碎|破损|撕裂|扯破).{0,4}(?:衣|裙|袍)", "torn clothing with stressed folds", r"\btorn.{0,20}(?:clothing|robe|dress|skirt|fabric)\b"),
     (r"赤裸|全裸|一丝不挂", "a nude body with no remaining garments", r"\b(?:nude|naked).{0,18}(?:body|woman|character)?\b"),
+    (r"媚药.{0,8}(?:香薰|盘香|香)|(?:香薰|盘香).{0,8}媚药", "aphrodisiac incense releasing sweet dense smoke", r"\baphrodisiac incense\b|\bincense.{0,35}(?:aphrodisiac|sweet dense smoke)"),
+    (r"锁链|镣铐", "iron chains restraining the wrists", r"\b(?:iron )?(?:chains?|shackles?).{0,30}(?:wrists?|arms?)|\b(?:wrists?|arms?).{0,30}(?:chains?|shackles?)"),
+    (r"石板|石台|石床", "a cold stone slab", r"\bcold stone (?:slab|platform)\b"),
+    (r"囚衣", "a pale prisoner's robe", r"\bpale prisoner's robe\b|\bprison (?:robe|garment)\b"),
 )
 
 
@@ -641,15 +813,33 @@ def _current_visual_source(scene: Mapping[str, object]) -> str:
     ))
     if clothing_changed:
         appearance = appearance.split("【穿着】", 1)[0]
-    return "\n".join(filter(None, (appearance, wardrobe, narrative if clothing_changed else "")))
+    subjects = scene.get("subjects")
+    actors = scene.get("actors")
+    actor_names = {
+        str(name).strip() for name in actors if str(name).strip()
+    } if isinstance(actors, list) else set()
+    subject_details = "\n".join(
+        str(item.get("description") or "") for item in subjects
+        if isinstance(item, Mapping) and (
+            not actor_names
+            or not str(item.get("name") or "").strip()
+            or str(item.get("name") or "").strip() in actor_names
+        )
+    ) if isinstance(subjects, list) else ""
+    return "\n".join(filter(None, (
+        appearance, wardrobe, narrative if clothing_changed else "", subject_details,
+    )))
 
 
 def _mapped_visual_facts(scene: Mapping[str, object]) -> list[str]:
     source = _current_visual_source(scene)
-    return list(dict.fromkeys(
+    facts = list(dict.fromkeys(
         phrase for source_pattern, phrase, _ in _VISUAL_FACT_RULES
         if re.search(source_pattern, source)
     ))
+    if "torn remnants of a red lotus patterned robe" in facts:
+        facts = [fact for fact in facts if fact != "a red lotus patterned robe"]
+    return facts
 
 
 def _actor_visual_details(scene: Mapping[str, object]) -> list[tuple[str, list[str], list[str]]]:
@@ -714,10 +904,21 @@ def _multi_actor_sentences(scene: Mapping[str, object]) -> list[str]:
 
 
 def _mapped_facts_from(source: str) -> list[str]:
-    return list(dict.fromkeys(
+    facts = list(dict.fromkeys(
         phrase for source_pattern, phrase, _ in _VISUAL_FACT_RULES
         if re.search(source_pattern, source or "")
     ))
+    if "torn remnants of a red lotus patterned robe" in facts:
+        facts = [fact for fact in facts if fact != "a red lotus patterned robe"]
+    return facts
+
+
+def _mapped_wardrobe_facts_from(source: str) -> list[str]:
+    wardrobe_words = re.compile(
+        r"\b(?:robe|dress|skirt|stockings?|socks?|clothing|garments?|neckline|slit|nude|naked|emblems?|talisman)\b",
+        re.I,
+    )
+    return [fact for fact in _mapped_facts_from(source) if wardrobe_words.search(fact)]
 
 
 def _missing_visual_facts(prompt: str, scene: Mapping[str, object]) -> list[str]:
@@ -814,7 +1015,13 @@ def normalize_inline(profile: str, raw: str, scene: Mapping[str, object] | None 
         if not _inline_krea_errors(prompt, scene or {}):
             return prompt
         return _complete_inline_krea_facts(prompt, scene or {})
-    return "" if _errors(profile, prompt, scene or {}) else prompt
+    errors = _errors(profile, prompt, scene or {})
+    if profile == "anima_tags" and errors and all(
+        error.startswith("角色条目中的可视事实未落实：") for error in errors
+    ):
+        # 同义表述不应让整份 Agent 画面退化；字段账本会把精确稳定外貌补进两行。
+        return prompt
+    return "" if errors else prompt
 
 
 def _multi_actor_contract_errors(
@@ -843,15 +1050,16 @@ def _errors(profile: str, prompt: str, scene: Mapping[str, object]) -> list[str]
         errors.extend(_krea_contract_errors(prompt, scene, check_length=True))
     elif profile == "anima_tags":
         lines = prompt.splitlines()
-        content = lines[1] if len(lines) == 2 else ""
+        tags = lines[0] if len(lines) == 2 else ""
+        prose = lines[1] if len(lines) == 2 else ""
         if len(lines) != 2:
             errors.append("必须正好两行")
-        if not content.isascii() or len([tag for tag in content.split(",") if tag.strip()]) < 6:
-            errors.append("内容行必须以至少六个英文tags开头")
-        if not re.search(r"(?:^|\.\s+)[A-Z][^.?!]{24,}[.?!](?:\s|$)", content):
-            errors.append("内容行必须包含英文自然语言画面描述")
-        if _scene_action_tags(scene) and not _ANIMA_ACTION_RE.search(content):
-            errors.append("剧情存在明确动作，content必须保留具体动作或姿态")
+        if not tags.isascii() or len([tag for tag in tags.split(",") if tag.strip()]) < 6:
+            errors.append("第一行必须包含质量词与至少六个英文内容tags")
+        if not re.search(r"^[A-Za-z][^.?!]{24,}[.?!](?:\s|$)", prose):
+            errors.append("第二行必须包含英文自然语言画面描述")
+        if _scene_action_tags(scene) and not _ANIMA_ACTION_RE.search(prompt):
+            errors.append("剧情存在明确动作，提示词必须保留具体动作或姿态")
     elif profile == "natural_language":
         if len(prompt) < 20:
             errors.append("自然语言描述过短")
@@ -925,35 +1133,128 @@ def _english_scene_details(scene: Mapping[str, object]) -> list[str]:
             detail = " ".join(detail.split()).strip(" :,.;-")
         if detail and re.search(r"[A-Za-z]{3}", detail) and not _REFUSAL_RE.search(detail):
             english_details.append(detail)
-    return list(dict.fromkeys([*english_details, *_mapped_visual_facts(scene)]))
+    return list(dict.fromkeys([
+        *english_details, *_mapped_visual_facts(scene), *_evidenced_visual_facts(scene),
+    ]))
+
+
+def _concrete_scene_facts(
+    scene: Mapping[str, object], *, include_draft_prompt: bool = True,
+) -> list[str]:
+    """统一事实底座：只收人物、当前服装、动作、道具、地点与空间关系。"""
+    direct_facts: list[str] = []
+    for key in ("appearance", "wardrobe"):
+        detail = " ".join(str(scene.get(key) or "").split()).strip(" ,.;")
+        if detail and detail.isascii() and re.search(r"[A-Za-z]{3}", detail):
+            direct_facts.append(detail)
+    facts = [*direct_facts, *_mapped_visual_facts(scene), *_scene_action_tags(scene),
+             *_evidenced_visual_facts(scene)]
+    locations = [
+        phrase for pattern, phrase in _LOCATION_RULES
+        if re.search(pattern, str(scene.get("locale") or ""))
+    ]
+    facts.extend(locations)
+    subjects = scene.get("subjects")
+    actors = set(_character_names({"actors": scene.get("actors", [])}))
+    if isinstance(subjects, list):
+        for item in subjects:
+            if not isinstance(item, Mapping):
+                continue
+            name = str(item.get("name") or "").strip()
+            if actors and name and name not in actors:
+                continue
+            detail = " ".join(str(item.get("description") or "").split()).strip(" ,.;")
+            if detail and detail.isascii() and detail not in facts:
+                facts.append(detail)
+    keys = ["appearance", "camera", "composition"]
+    if include_draft_prompt:
+        keys.insert(1, "draft_prompt")
+    for key in keys:
+        raw_detail = str(scene.get(key) or "")
+        if key == "draft_prompt":
+            # 同轮草稿常包含独立质量行；事实底座只取内容行，不能把质量词重复塞进正文。
+            detail_lines = [line.strip() for line in raw_detail.splitlines() if line.strip()]
+            raw_detail = detail_lines[-1] if detail_lines else ""
+        detail = " ".join(raw_detail.split()).strip(" ,.;")
+        if _CJK_RE.search(detail):
+            detail = " ".join(detail.encode("ascii", "ignore").decode("ascii").split()).strip(" ,.;:-")
+        if detail and re.search(r"[A-Za-z]{3}", detail) and detail not in facts:
+            facts.append(detail)
+    return list(dict.fromkeys(fact for fact in facts if fact.strip()))
+
+
+def _scene_camera_tag(scene: Mapping[str, object]) -> str:
+    """景别服从要展示的内容，不固定套 medium shot。"""
+    source = image_prompt_extract.restore_jailbreak(str(scene.get("narrative") or ""))
+    explicit = str(scene.get("camera") or "").strip()
+    if explicit and explicit.isascii():
+        match = re.search(
+            r"\b(?:extreme close-up|close-up|close shot|medium close-up|medium shot|"
+            r"medium wide shot|wide shot|long shot|full shot)\b", explicit, re.I,
+        )
+        if match:
+            return match.group(0).lower()
+    if re.search(r"亲吻|眼睛|瞳|嘴唇|内裤|局部|特写|脸部", source):
+        return "close-up"
+    if re.search(r"远景|全景|城市全貌|群山|天际线|辽阔|远处风景", source):
+        return "wide shot"
+    return "medium shot"
+
+
+def _anima_content_description(scene: Mapping[str, object], facts: list[str]) -> str:
+    """把同一批具体 tags 复述为画面文段，不输出给下游的元指令。"""
+    concrete = list(dict.fromkeys(fact.strip(" ,.;") for fact in facts if fact.strip(" ,.;")))
+    actions = _scene_action_tags(scene)
+    subject = (
+        "The primary adult woman" if len(_character_names(scene)) <= 1
+        else "The two adult characters"
+    )
+    sentences: list[str] = []
+    if concrete:
+        sentences.append(f"{subject} is depicted with {', '.join(concrete)}.")
+    if actions:
+        sentences.append(f"In this instant, the concrete action is {', '.join(actions)}.")
+    return " ".join(sentences) or f"{subject} occupies the depicted scene."
+
+
+def _safe_anima_draft_tags(value: object) -> list[str]:
+    """只接纳短英文内容草稿；拒绝艺术分析、权重主体和完整规划串。"""
+    lines = [line.strip() for line in str(value or "").splitlines() if line.strip()]
+    candidates = [
+        line for line in lines
+        if not re.search(r"\b(?:masterpiece|best quality|score_\d+)\b", line, re.I)
+    ]
+    content = candidates[-1] if candidates else ""
+    if (
+        not content or not content.isascii() or _REFUSAL_RE.search(content)
+        or ";" in content
+        or re.search(r"\b(?:visual thesis|primary|secondary|tertiary|hierarchy)\s*:", content, re.I)
+    ):
+        return []
+    content = re.sub(r"\([^()]*:\s*\d+(?:\.\d+)?\)", "", content)
+    tags = [tag.strip(" ,.;") for tag in content.split(",") if tag.strip(" ,.;")]
+    return list(dict.fromkeys(
+        tag for tag in tags
+        if len(tag) <= 120 and not re.search(r"\b(?:masterpiece|best quality|score_\d+)\b", tag, re.I)
+    ))
 
 
 def _krea_scene_fallback(scene: Mapping[str, object]) -> str:
     """连续硬失败时给出单段纯英文剧情插画描述。"""
     multi_sentences = _multi_actor_sentences(scene)
-    concrete_facts = _mapped_visual_facts(scene)
+    concrete_facts = _concrete_scene_facts(scene)
     fact_sentence = (
-        " The primary adult woman is visibly defined by " + ", ".join(concrete_facts) + "."
+        " The visible subjects and scene are concretely defined by "
+        + ", ".join(concrete_facts) + "."
         if concrete_facts and not multi_sentences else ""
     )
-    english_details = [
-        detail for detail in _english_scene_details(scene)
-        if detail not in concrete_facts
-    ]
-    detail_sentence = (
-        " The scene also follows these supplied visual facts: " + "; ".join(english_details) + "."
-        if english_details else ""
-    )
-    action_tags = _scene_action_tags(scene)
-    action_sentence = (
-        " Her visible action is " + ", then ".join(action_tags) + "."
-        if action_tags and not multi_sentences else ""
-    )
+    camera = _scene_camera_tag(scene)
     subject_opening = (
         "A balanced two-character environmental composition gives two adult women distinct silhouettes, "
         "readable positions, and one shared visual focus against a layered background."
         if multi_sentences else
-        "A medium environmental composition keeps the primary adult woman's visible action as the single visual focus."
+        f"A {camera} depicts the primary adult woman in one continuous narrative moment, with her visible action "
+        "as the decisive action and visual focus."
     )
     character_sentences = (" " + " ".join(multi_sentences)) if multi_sentences else ""
     relationship_sentence = (
@@ -965,25 +1266,15 @@ def _krea_scene_fallback(scene: Mapping[str, object]) -> str:
         + character_sentences
         + relationship_sentence
         + fact_sentence
-        + action_sentence
-        + detail_sentence
-        + " Directional side light defines the face, hands, fabric layers, and decisive action point before falling into "
-        "controlled shadow. A foreground edge guides the eye toward the subject, restrained "
-        "negative space prevents crowding, and the background recedes through softer contrast and atmospheric depth. "
-        "Material highlights follow the light source, cast shadows follow the same direction, and secondary objects remain "
-        "subordinate to the character relationship. "
-        + "Maintain precise anatomy, stable contours, clean edges, controlled fine detail, high image fidelity, and "
-          "smooth noise-free tonal transitions across the finished illustration."
+        + " The composition makes every stated body position, contact point, current garment, prop, and location "
+          "simultaneously readable, using coherent perspective, directional light, material response, and controlled "
+          "background depth. Maintain precise anatomy, stable contours, clean edges, controlled fine detail, high image "
+          "fidelity, and smooth noise-free tonal transitions."
     )
 
 
 def _anima_scene_fallback(scene: Mapping[str, object]) -> str:
     """独立 Profile 拒答时复用主剧情链已生成的英文高潮内容。"""
-    draft = str(scene.get("draft_prompt") or "").strip()
-    lines = [line.strip() for line in draft.splitlines() if line.strip()]
-    content = lines[-1] if lines else ""
-    content = re.sub(r"\s*;\s*", ", ", content)
-    valid = content.isascii() and not _REFUSAL_RE.search(content)
     encounter = scene.get("encounter")
     encounter_values = encounter.values() if isinstance(encounter, Mapping) else ()
     source = "\n".join((
@@ -1019,30 +1310,33 @@ def _anima_scene_fallback(scene: Mapping[str, object]) -> str:
         (r"跳下", "jumping down from the cart"),
         (r"尘土|扬尘", "dust in the air"),
     )
-    facts = [tag for pattern, tag in fact_rules if re.search(pattern, source)]
-    if not valid or len([tag for tag in content.split(",") if tag.strip()]) < 6:
-        base = facts or [
-            "visible decisive action", "environmental narrative composition",
-        ]
-        content = ", ".join(dict.fromkeys([
-            *base, "three-quarter view", "environmental composition",
-            "directional light", "layered background", "detailed anime illustration",
-        ]))
-    elif facts:
-        head, dot, tail = content.partition(".")
-        existing = head.lower()
-        additions = [fact for fact in facts if fact.lower() not in existing]
-        content = f"{head.rstrip(',. ')}, {', '.join(additions)}{dot}{tail}" if additions else content
-    stable_details = _english_scene_details(scene)
-    stable_tags = [
-        tag.strip(" :;.-") for detail in stable_details
-        for tag in re.split(r"[,;]", detail) if tag.strip(" :;.-")
+    facts = list(dict.fromkeys([
+        *(tag for pattern, tag in fact_rules if re.search(pattern, source)),
+        *_safe_anima_draft_tags(scene.get("draft_prompt")),
+        *_concrete_scene_facts(scene, include_draft_prompt=False),
+    ]))
+    # 具体角色/动作/场景 tags 必须先于抽象镜头词；有具体外貌时去掉无信息量的 adult woman。
+    direct_appearance = " ".join(str(scene.get("appearance") or "").split()).strip(" ,.;")
+    has_specific_english_appearance = bool(
+        direct_appearance and direct_appearance.isascii()
+        and re.search(r"[A-Za-z]{3}", direct_appearance)
+    )
+    concrete_role_facts = [
+        fact for fact in facts
+        if (not has_specific_english_appearance or fact.lower() != "adult woman")
+        and fact.lower() not in {"dramatic scene", "dramatic composition", "climactic moment",
+                                "dynamic composition", "action pose", "cinematic lighting"}
     ]
-    if stable_tags:
-        head, dot, tail = content.partition(".")
-        existing = head.lower()
-        additions = [tag for tag in stable_tags if tag.lower() not in existing]
-        content = f"{head.rstrip(',. ')}, {', '.join(additions)}{dot}{tail}" if additions else content
+    if concrete_role_facts:
+        facts = concrete_role_facts
+    if has_specific_english_appearance:
+        facts = [direct_appearance, *[fact for fact in facts if fact != direct_appearance]]
+    base = facts or ["visible decisive action", "environmental narrative composition"]
+    content_tags = list(dict.fromkeys([
+        *base, _scene_camera_tag(scene), "three-quarter view", "environmental composition",
+        "directional light", "layered background", "detailed anime illustration",
+    ]))
+    content = ", ".join(content_tags)
     action_tags = _scene_action_tags(scene)
     if action_tags and not _ANIMA_ACTION_RE.search(content):
         head, dot, tail = content.partition(".")
@@ -1065,11 +1359,7 @@ def _anima_scene_fallback(scene: Mapping[str, object]) -> str:
                 "herbs while the anxious matron and mule cart recede into softer layers."
             )
         else:
-            description = (
-                "The visible action remains the sharp visual focus while the face, hands, current clothing, "
-                "and decisive contact point receive the highest detail; directional light, material texture, "
-                "and background depth keep every supplied scene fact readable."
-            )
+            description = _anima_content_description(scene, content_tags)
         content = f"{content.rstrip(',. ')}. {description}"
     return _normalize("anima_tags", content, scene)
 
@@ -1139,13 +1429,31 @@ _FIELD_PATTERNS = {
 
 _LOCATION_RULES = (
     (r"寝殿|卧室", "bedchamber"),
-    (r"牢房|囚室|禁闭室", "confinement cell"),
+    (r"天牢|牢房|囚室|禁闭室", "confinement cell"),
     (r"长廊|走廊", "corridor"),
     (r"栏杆", "railing"),
     (r"山门", "mountain gate"),
     (r"孤儿院.{0,8}门|门.{0,8}孤儿院", "orphanage entrance"),
     (r"森林|树林", "forest"),
 )
+
+def _evidenced_visual_facts(scene: Mapping[str, object]) -> list[str]:
+    """开放类型视觉事实：只信任带本轮正文证据且为英文成稿的条目。"""
+    narrative = image_prompt_extract.restore_jailbreak(str(scene.get("narrative") or ""))
+    values = scene.get("visual_facts")
+    if not isinstance(values, list):
+        return []
+    facts: list[str] = []
+    for item in values[:12]:
+        if not isinstance(item, Mapping):
+            continue
+        fact = str(item.get("fact") or "").strip()
+        evidence = image_prompt_extract.restore_jailbreak(
+            str(item.get("evidence") or ""),
+        ).strip()
+        if fact and fact.isascii() and evidence and evidence in narrative:
+            facts.append(fact)
+    return list(dict.fromkeys(facts))
 
 
 def _expected_present(prompt: str, phrase: str) -> bool:
@@ -1173,15 +1481,40 @@ def prompt_field_ledger(prompt: str, scene: Mapping[str, object]) -> dict[str, d
     """逐字段验收最终成稿；只记录可由 SceneSpec 客观验证的事实。"""
     fact_scene = _scene_for_facts(scene)
     appearance_source = str(fact_scene.get("appearance") or "")
+    subjects = fact_scene.get("subjects")
+    subject_visuals = "\n".join(
+        str(item.get("description") or "") for item in subjects
+        if isinstance(item, Mapping)
+    ) if isinstance(subjects, list) else ""
     wardrobe_source = "\n".join((
+        appearance_source,
         str(fact_scene.get("wardrobe") or ""),
         str(fact_scene.get("narrative") or "") if re.search(
             r"衣|裙|袍|袜|dress|robe|skirt|stocking", str(fact_scene.get("narrative") or ""), re.I,
         ) else "",
+        subject_visuals,
     ))
-    appearance_expected = _mapped_facts_from(appearance_source)
-    wardrobe_expected = _mapped_facts_from(wardrobe_source)
+    appearance_expected = [
+        fact for fact in _mapped_facts_from(appearance_source)
+        if fact not in _mapped_wardrobe_facts_from(appearance_source)
+    ]
+    wardrobe_expected = _mapped_wardrobe_facts_from(wardrobe_source)
+    if appearance_source.isascii():
+        appearance_expected.extend(
+            part.strip(" ,.;") for part in appearance_source.split(",")
+            if _FIELD_PATTERNS["appearance"].search(part)
+            and not _FIELD_PATTERNS["wardrobe"].search(part)
+        )
+    direct_wardrobe = str(fact_scene.get("wardrobe") or "")
+    if direct_wardrobe.isascii():
+        wardrobe_expected.extend(
+            part.strip(" ,.;") for part in direct_wardrobe.split(",")
+            if part.strip(" ,.;") and _FIELD_PATTERNS["wardrobe"].search(part)
+        )
+    appearance_expected = list(dict.fromkeys(filter(None, appearance_expected)))
+    wardrobe_expected = list(dict.fromkeys(filter(None, wardrobe_expected)))
     actions = _scene_action_tags(fact_scene)
+    visual_facts = _evidenced_visual_facts(fact_scene)
     locale = str(fact_scene.get("locale") or "")
     locations = [phrase for pattern, phrase in _LOCATION_RULES if re.search(pattern, locale)]
     if locale.isascii() and re.search(r"[A-Za-z]{3}", locale):
@@ -1190,6 +1523,7 @@ def prompt_field_ledger(prompt: str, scene: Mapping[str, object]) -> dict[str, d
         "appearance": bool(appearance_source.strip()),
         "wardrobe": bool(str(fact_scene.get("wardrobe") or "").strip() or wardrobe_expected),
         "action": bool(actions),
+        "visual_facts": bool(visual_facts),
         "location": bool(locale.strip()),
         "camera": True,
         "composition": True,
@@ -1201,6 +1535,7 @@ def prompt_field_ledger(prompt: str, scene: Mapping[str, object]) -> dict[str, d
         "appearance": appearance_expected,
         "wardrobe": wardrobe_expected,
         "action": actions,
+        "visual_facts": visual_facts,
         "location": locations,
     }
     ledger: dict[str, dict[str, object]] = {}
@@ -1210,6 +1545,12 @@ def prompt_field_ledger(prompt: str, scene: Mapping[str, object]) -> dict[str, d
             covered = all(_expected_present(prompt, phrase) for phrase in phrases)
             if field == "location" and not covered:
                 covered = bool(_FIELD_PATTERNS["location"].search(prompt))
+        elif required and field in {
+            "appearance", "wardrobe", "action", "location", "visual_facts",
+        }:
+            # 有事实来源却没有可验证的英文期望时，通用 hair/room/action 等词不能
+            # 冒充已覆盖；否则本地词典漏项会把空泛模板放行到 ComfyUI。
+            covered = False
         elif field in _FIELD_PATTERNS:
             covered = bool(_FIELD_PATTERNS[field].search(prompt))
         else:
@@ -1230,11 +1571,15 @@ def complete_field_coverage(
     """只补缺字段，不替换已经合格的高潮与艺术决策。"""
     ledger = prompt_field_ledger(prompt, scene)
     missing = [field for field, item in ledger.items() if item["required"] and not item["covered"]]
-    factual_missing = [field for field in missing if field in {"appearance", "wardrobe", "action", "location"}]
+    factual_missing = [field for field in missing if field in {
+        "appearance", "wardrobe", "action", "location", "visual_facts",
+    }]
     if not factual_missing:
         return prompt, ledger
     details: list[str] = []
-    for field in ("appearance", "wardrobe", "action", "location"):
+    for field in (
+        "appearance", "wardrobe", "action", "visual_facts", "location",
+    ):
         if field in factual_missing:
             expected = ledger[field]["expected"]
             if isinstance(expected, list):
@@ -1250,14 +1595,19 @@ def complete_field_coverage(
     details = list(dict.fromkeys(detail for detail in details if detail and _expected_present(prompt, detail) is False))
     if not details:
         return prompt, ledger
-    sentence = "Required visible facts: " + "; ".join(details) + "."
+    separator = ", " if profile == "anima_tags" else "; "
+    sentence = "Required visible facts: " + separator.join(details) + "."
     if profile in {"krea2", "natural_language"}:
         repaired = prompt.rstrip(" .") + ". " + sentence
     elif profile == "anima_tags":
         lines = prompt.splitlines()
         if len(lines) != 2:
             return prompt, ledger
-        repaired = lines[0] + "\n" + lines[1].rstrip(" .") + ". " + sentence
+        # 可见事实属于 tags 行；解释文段保持纯自然语言，不追加第三种混合结构。
+        repaired = (
+            lines[0].rstrip(" ,") + ", " + ", ".join(details) + ",\n"
+            + lines[1].rstrip() + " " + _anima_content_description(scene, details)
+        )
     elif profile == "niji_sections":
         lines = prompt.splitlines()
         if len(lines) != 4:

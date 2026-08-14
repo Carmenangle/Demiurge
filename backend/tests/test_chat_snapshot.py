@@ -21,6 +21,48 @@ def test_private_alias_points_to_public_message():
     assert chat_snapshot._assistant_message is chat_snapshot.assistant_message
 
 
+def test_用户消息在助手生成前落盘且重复确保不覆盖前端富内容(monkeypatch, tmp_path):
+    from app.services import repo_meta
+    monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
+    monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+
+    assert chat_snapshot.ensure_user_message(
+        "thread", "user-1", "继续剧情", ["reference.png"],
+    )
+    assert chat_snapshot.load("thread") == [{
+        "id": "user-1", "role": "user", "text": "继续剧情",
+        "parts": [
+            {"type": "text", "text": "继续剧情"},
+            {"type": "image", "url": "reference.png"},
+        ],
+    }]
+
+    rich = [{
+        "id": "user-1", "role": "user", "text": "继续剧情",
+        "parts": [{"type": "masked-image", "url": "preview.png"}],
+    }]
+    chat_snapshot.save("thread", rich)
+    assert chat_snapshot.ensure_user_message("thread", "user-1", "继续剧情")
+    assert chat_snapshot.load("thread") == rich
+
+
+def test_可从Trace把遗失用户消息恢复到对应助手消息之前(monkeypatch, tmp_path):
+    from app.services import repo_meta
+    monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
+    monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+    chat_snapshot.save("thread", [
+        {"id": "before", "role": "assistant", "text": "前一轮"},
+        {"id": "answer", "role": "assistant", "text": "本轮回答"},
+    ])
+
+    assert chat_snapshot.ensure_user_message(
+        "thread", "recovered-user", "从Trace恢复的输入", before_id="answer",
+    )
+    assert [item["id"] for item in chat_snapshot.load("thread")] == [
+        "before", "recovered-user", "answer",
+    ]
+
+
 def test_prompt_history只转换快照中仍存在的对话文本():
     snapshot = [
         {"id": "u1", "role": "user", "text": "保留的用户消息"},

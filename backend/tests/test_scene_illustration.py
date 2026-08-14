@@ -190,10 +190,129 @@ def test_独立profile场景源取同一高潮段但保留防拦截标记():
     assert protected == "她猛然@(转)@身，披风在雷光里扬起。"
 
 
+def test_独立profile把连续高潮窗口完整映射回防拦截原文():
+    text = (
+        "<content>他的手@(扣)@住她的脖子。\n\n"
+        "墙后的机关发出闷响。\n\n"
+        "他重新@(推)@进去了。\n\n"
+        "他@(掐)@着她的脖子继续动作，高潮袭来。</content>"
+    )
+    visible = si.illustration_scene_excerpt(text, "高潮袭来")
+
+    protected = si.protected_illustration_scene_excerpt(text, visible)
+
+    assert "@(扣)@住她的脖子" in protected
+    assert "机关发出闷响" in protected
+    assert "重新@(推)@进去了" in protected
+    assert "@(掐)@着她的脖子" in protected
+
+
 def test_无指定锚点时按高潮词选段而非整篇正文():
     text = "日常铺垫。\n\n她在决战关头拔剑冲向高台。\n\n众人返回营地。"
 
     assert si.illustration_scene_excerpt(text) == "她在决战关头拔剑冲向高台。"
+
+
+def test_高潮重定向保留体位动作链而不是只取单个结果段():
+    text = (
+        "<content>她仰卧在冰冷石板上。\n\n"
+        "他把她的双腿压上肩膀，两人保持面对面的姿势。\n\n"
+        "他俯身继续动作，她的腰与臀部随着冲击抬起。\n\n"
+        "高潮袭来，她的大腿绷直，手腕扯动锁链。\n\n"
+        "那面虚构的旗仍然没有倒下。</content>"
+    )
+
+    resolved = si.resolve_illustration_anchor(text, "那面虚构的旗仍然没有倒下。")
+    context = si.illustration_scene_excerpt(text, resolved)
+
+    assert "高潮袭来" in resolved
+    assert "仰卧在冰冷石板" in context
+    assert "双腿压上肩膀" in context
+    assert "面对面" in context
+    assert "腰与臀部随着冲击抬起" in context
+    assert "高潮袭来" in context
+
+
+def test_高潮重定向保留被叙述桥段隔开的连续复合动作链():
+    text = (
+        "<content>他的手扣住她的脖子，把她压向石台。\n\n"
+        "她的呼吸被迫变得短促，散乱的华袍残片垂在腰侧。\n\n"
+        "墙后的机关发出一声闷响。\n\n"
+        "他俯身贴近她。\n\n"
+        "他在这个时候，重新推进去了。\n\n"
+        "他一下一下掐着她的脖子继续动作，喉咙被卡住时高潮骤然袭来。\n\n"
+        "她最后只剩下平稳的呼吸。</content>"
+    )
+
+    resolved = si.resolve_illustration_anchor(text, "她最后只剩下平稳的呼吸。")
+    context = si.illustration_scene_excerpt(text, resolved)
+
+    assert "扣住她的脖子" in context
+    assert "华袍残片" in context
+    assert "重新推进去了" in context
+    assert "掐着她的脖子继续动作" in context
+
+
+def test_结果句锚点保留本场景从姿态到反复动作再到开口的完整因果链():
+    text = (
+        "<content>他让她从侧卧换成仰卧，把她的膝盖分开。\n\n"
+        "他取出原先放置的物件，改用手在接触点摩擦。\n\n"
+        "每次她的身体追过去，他都在临界点撤开。\n\n"
+        "这组动作反复多次，她的手腕扯动锁链。\n\n"
+        "「上来。」\n\n"
+        "说出来之后她立刻移开视线，嘴唇抿住。</content>"
+    )
+    requested = "说出来之后她立刻移开视线，嘴唇抿住。"
+
+    resolved = si.resolve_illustration_anchor(text, requested)
+    context = si.illustration_scene_excerpt(text, resolved)
+
+    assert resolved == requested
+    for fact in ("仰卧", "膝盖分开", "取出", "摩擦", "临界点撤开", "锁链", "上来"):
+        assert fact in context
+
+
+def test_时间跳转后的末尾揭示锚点不得被前一时段高潮覆盖():
+    text = (
+        "<content>他将玉碾安置妥当，锁上牢门离开。\n\n"
+        "---\n\n"
+        "第三天，她在黑暗里经历又一次高潮。\n\n"
+        "---\n\n"
+        "牢门开了。光从走廊透进来。\n\n"
+        "她侧卧在石板上，双手仍被锁链拷在腰前，双腿弯曲分开，玉碾尚在。\n\n"
+        "她缓慢转向门口，用暗红眼眸看向来人。</content>"
+    )
+    requested = "她缓慢转向门口，用暗红眼眸看向来人。"
+
+    resolved = si.resolve_illustration_anchor(text, requested)
+    context = si.illustration_scene_excerpt(text, resolved)
+
+    assert resolved == requested
+    assert "牢门开了" in context
+    assert "双手仍被锁链拷在腰前" in context
+    assert "双腿弯曲分开" in context
+    assert "玉碾尚在" in context
+    assert "第三天" not in context
+
+
+def test_中文长横线时间切换同样保护末尾揭示锚点():
+    text = (
+        "<content>高潮始终没来。\n\n——\n\n第三天，他推开门。\n\n"
+        "她侧卧在石板上，锁链限制着抬起的双手。\n\n"
+        "她的手停在半空。</content>"
+    )
+    requested = "她的手停在半空。"
+
+    assert si.resolve_illustration_anchor(text, requested) == requested
+
+
+def test_插画槽位精确落在画面句末而不是下一段之后():
+    text = "<content>画面发生在这里。\n\n后续段落。</content>"
+    offset = si.illustration_anchor_offset(text, "画面发生在这里。")
+
+    assert offset is not None
+    assert text[:offset].endswith("画面发生在这里。")
+    assert text[offset:].startswith("\n\n后续段落。")
 
 
 def test_新角色登场提取前一段外貌锚点与角色名():

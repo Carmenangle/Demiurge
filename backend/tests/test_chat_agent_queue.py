@@ -147,6 +147,30 @@ def test_execute_headless_reuses_agent_runner(tmp_path, monkeypatch):
     assert captured == {"thread_id": "repo-1", "message": "画只猫"}
 
 
+def test_execute_queued_turn_refreshes_history_from_current_snapshot(tmp_path, monkeypatch):
+    _prepare(tmp_path, monkeypatch)
+    captured = {}
+    monkeypatch.setattr(
+        queue.chat_snapshot, "load_prompt_history",
+        lambda _thread_id: [
+            {"role": "user", "content": "上一轮问题"},
+            {"role": "assistant", "content": "上一轮最终正文"},
+        ],
+    )
+    monkeypatch.setattr(
+        queue.agent_runner, "run_multi_stream",
+        lambda context: captured.setdefault("context", context) or "Q",
+    )
+    monkeypatch.setattr(queue.agent_runner, "drain", lambda _q: iter([]))
+
+    queue._execute({
+        "thread_id": "repo-1", "message": "继续",
+        "history": [{"role": "user", "content": "排队时的旧历史"}],
+    })
+
+    assert captured["context"].history_override[-1]["content"] == "上一轮最终正文"
+
+
 def test_execute_headless保留直连剧情上下文参数(tmp_path, monkeypatch):
     _prepare(tmp_path, monkeypatch)
     captured = {}

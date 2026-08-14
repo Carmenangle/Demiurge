@@ -54,6 +54,24 @@ export interface EmbedModel {
   rerankerDir?: string;
 }
 
+// 视觉大模型（Visual CI 用）：OpenAI 兼容形式，可填智谱/OpenAI/Ollama 等；本地模式支持 GGUF 导入 Ollama
+export type VlmMode = "remote" | "local";
+
+export interface VlmModel {
+  mode: VlmMode;
+  apiKey: string;
+  baseUrl: string;
+  modelName: string;
+  proxyMode?: ProxyMode;
+  proxyUrl?: string; // 运行时解析值；不要求持久化
+  /** 本地 GGUF 模式：主模型文件路径（可导入 Ollama 后自动转 remote）。 */
+  ggufPath?: string;
+  /** 本地 GGUF 模式：视觉投影文件路径（mmproj，可自动配对）。 */
+  mmprojPath?: string;
+  /** 导入 Ollama 时使用的模型名。 */
+  ollamaName?: string;
+}
+
 export interface ImageModel {
   id: string;
   displayName?: string;
@@ -122,6 +140,7 @@ export interface Settings {
   activeChatModelId?: string;       // 当前选中的对话模型 id
   providerProfileSemanticsVersion?: number; // v2 起只保留用户明确选择，禁止按模型名猜 wire
   embedModel: EmbedModel;  // 知识库 RAG 嵌入模型
+  vlmModel: VlmModel;      // 视觉大模型（Visual CI 验收用）
   imageModels: ImageModel[];
   activeImageModelId?: string;
   videoModels: VideoModel[];
@@ -191,6 +210,7 @@ const DEFAULT: Settings = {
   theme: "system",
   chatModels: [],
   embedModel: { mode: "remote", apiKey: "ollama", baseUrl: "http://localhost:11434/v1", modelName: "qwen3-embedding:latest", proxyMode: "on" },
+  vlmModel: { mode: "remote", apiKey: "ollama", baseUrl: "http://localhost:11434/v1", modelName: "gemma4:latest", proxyMode: "on" },
   imageModels: [],
   videoModels: [],
   imageStyle: "",
@@ -240,6 +260,15 @@ function migrate(s: Record<string, unknown>): Settings {
       ? savedEmbed.mode
       : savedEmbed.modelDir?.trim() ? "local" : "remote",
     proxyMode: normalizeProxyMode(savedEmbed.proxyMode),
+  };
+  const savedVlm = (s.vlmModel || {}) as Partial<VlmModel>;
+  merged.vlmModel = {
+    ...DEFAULT.vlmModel,
+    ...savedVlm,
+    mode: savedVlm.mode === "local" || savedVlm.mode === "remote"
+      ? savedVlm.mode
+      : (savedVlm.ggufPath?.trim() || savedVlm.mmprojPath?.trim()) ? "local" : "remote",
+    proxyMode: normalizeProxyMode(savedVlm.proxyMode),
   };
   const contextBudgets = normalizeContextBudgets(
     s.contextReminderTokens,
@@ -433,6 +462,7 @@ export function exportSettings(s: Settings, keepKeys: boolean): string {
     out.imageModels = out.imageModels.map((m) => ({ ...m, apiKey: "" }));
     out.videoModels = out.videoModels.map((m) => ({ ...m, apiKey: "" }));
     out.embedModel = { ...out.embedModel, apiKey: "" };
+    out.vlmModel = { ...out.vlmModel, apiKey: "" };
     out.hfToken = "";
     out.civitaiToken = "";
     out.smitheryKey = "";

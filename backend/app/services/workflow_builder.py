@@ -384,8 +384,21 @@ def build_direct(chat_fn, *, base_url: str, api_key: str, model: str, proxy: str
 
     alts = node_index.suggest_alternatives(cfg, missing, object_info) if missing else {}
     warnings = workflow_graph_rules.audit_graph(graph, object_info) + _missing_hint(missing, alts)
+    # Typed Compiler 增强：模型族一致性 + 显存估算（非阻断诊断，供前端展示具体缺口）
+    compiler_notes: dict = {"vram_mib": 0, "model_gaps": []}
+    try:
+        from app.services import workflow_compiler as _wc
+
+        compiler_notes["vram_mib"] = _wc.estimate_vram(graph, object_info)
+        model_gaps = _wc.check_model_family_consistency(graph, object_info)
+        compiler_notes["model_gaps"] = [
+            {"kind": g.kind, "message": g.message, "suggestion": g.suggestion}
+            for g in model_gaps
+        ]
+    except Exception:  # noqa: BLE001 编译器增强失败不阻断主流程
+        pass
     return {"ok": True, "graph": graph, "errors": [], "warnings": warnings, "missing_nodes": missing,
-            "alternatives": alts}
+            "alternatives": alts, "compiler": compiler_notes}
 
 
 def build_plan(chat_fn, *, base_url: str, api_key: str, model: str, proxy: str,

@@ -1631,6 +1631,11 @@ body {
   z-index: 100;
 }
 
+/* 工作流 LoRA 决策属于阻塞式确认：传送到 body 后覆盖对话及悬浮控件。 */
+.workflow-lora-modal-mask {
+  z-index: 1200;
+}
+
 .modal {
   width: min(480px, 92vw);
   max-height: 86vh;
@@ -3370,6 +3375,86 @@ textarea.state-value { min-height: 58px; }
 .img-tool:hover {
   color: var(--text);
 }
+
+/* ── Visual CI 诊断徽章与面板 ── */
+.vc-badge-row {
+  margin: 2px 0 8px;
+  max-width: 360px;
+}
+
+.vc-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 1.7;
+  background: color-mix(in srgb, var(--surface-2) 70%, transparent);
+  color: var(--text-muted);
+}
+.vc-badge-green { color: #22c55e; background: color-mix(in srgb, #22c55e 12%, transparent); }
+.vc-badge-amber { color: #f59e0b; background: color-mix(in srgb, #f59e0b 12%, transparent); }
+.vc-badge-red   { color: #ef4444; background: color-mix(in srgb, #ef4444 12%, transparent); }
+.vc-badge-unknown { color: #94a3b8; background: color-mix(in srgb, #94a3b8 10%, transparent); }
+.vc-badge-loading { color: #94a3b8; }
+.vc-badge-error { color: #ef4444; }
+
+.vc-spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: vc-spin .8s linear infinite;
+}
+@keyframes vc-spin { to { transform: rotate(360deg); } }
+
+.vc-expand-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.vc-panel {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface-2) 60%, transparent);
+  padding: 10px 12px;
+  margin-top: 8px;
+}
+.vc-panel-expanded {
+  margin-top: 6px;
+}
+.vc-section-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+.vc-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.vc-action-btn {
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+.vc-action-btn:hover { color: var(--text); border-color: var(--text-muted); }
+.vc-action-btn:disabled { opacity: .5; cursor: not-allowed; }
+.vc-action-retry {
+  color: #f59e0b;
+  border-color: color-mix(in srgb, #f59e0b 45%, transparent);
+}
+.vc-action-retry:hover { color: #fbbf24; border-color: #f59e0b; }
 
 /* 底部输入栏（毛玻璃悬浮感，参考图的大圆角输入框） */
 .chat-input-bar {

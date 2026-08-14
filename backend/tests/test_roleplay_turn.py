@@ -1,5 +1,7 @@
 import threading
 
+import pytest
+
 from app.services import roleplay_turn
 
 
@@ -80,6 +82,30 @@ def test_execute_turn_owns_generation_through_maintenance_order():
     assert maintained.wait(timeout=1)
     assert order[-1] == "maintain"
     assert result["result_text"] == "visible"
+
+
+def test_execute_turn_rejects_unclosed_visible_content_before_writeback():
+    order: list[str] = []
+    turn = roleplay_turn.TurnExecution(
+        ctx={"repo_id": "work"}, text="继续", trace=[], streamed=True,
+        deps=object(), turn=2, affinity=0, lost=False,
+    )
+    finalization = roleplay_turn.TurnFinalizationHooks(
+        writeback=lambda _draft, _events: order.append("writeback") or ("visible", [], {}),
+        apply_output=lambda reply: reply,
+        anchor_offset=lambda _reply, _request: None,
+        emit_ready=lambda _ctx, _result: order.append("publish") or True,
+        maintain=lambda _draft, _reply, _events: order.append("maintain"),
+    )
+
+    with pytest.raises(roleplay_turn.TruncatedRoleplayOutput):
+        roleplay_turn.execute_turn(turn, roleplay_turn.TurnExecutionHooks(
+            generate=lambda: "<think>分析</think><content>第一段。\n\n第二段中途",
+            generated=lambda _reply: order.append("generated"),
+            finalization=finalization,
+        ))
+
+    assert order == ["generated"]
 
 
 def test_agent_turn_finishes_only_after_published_maintenance():

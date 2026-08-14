@@ -75,8 +75,15 @@ def _builtin_sampling(ctx: dict, agent_id: str) -> dict:
 
 
 def _roleplay_sampling(ctx: dict) -> dict:
-    """同轮隐藏插画成稿使用额外预算，不占用户配置的可见正文额度。"""
+    """正文额度优先取当前预设；分析/状态/骰点/插画均在正文额度之外。"""
     sampling = _builtin_sampling(ctx, "roleplay")
+    preset_sampling = ctx.get("_preset_sampling") or {}
+    preset_max = preset_sampling.get("max_tokens") if isinstance(preset_sampling, dict) else None
+    if isinstance(preset_max, int) and not isinstance(preset_max, bool) and preset_max > 0:
+        sampling["max_tokens"] = preset_max
+    if "max_tokens" in sampling:
+        # GrayWill 的 think、状态和骰点先于正文输出，必须在正文上限之外独立预留。
+        sampling["max_tokens"] += 4000
     if ctx.get("comfy_illustrate") and "max_tokens" in sampling:
         from app.services import image_prompt_profiles
 
@@ -705,6 +712,14 @@ def roleplay_node(state: AgentState) -> dict:
         system = _agent_system(ctx, base)
         # 尾部思维链作独立 system 消息落在历史之后、本轮 user 之前 → 离生成点最近，遵守最严
         tail_msgs = [{"role": "system", "content": c} for c in chains_tail]
+        if getattr(deps, "renderer", None) is not None or ctx.get("comfy_illustrate"):
+            from app.services import image_prompt_profiles as _ipp
+            tail_msgs.append({
+                "role": "system",
+                "content": _ipp.near_generation_contract(
+                    ctx.get("prompt_profile") or "krea2",
+                ),
+            })
         messages = [{"role": "system", "content": system}, *dialogue, *tail_msgs,
                     {"role": "user", "content": text}]
         compiled_prompt = prompt_compiler.compile_messages(
@@ -712,10 +727,11 @@ def roleplay_node(state: AgentState) -> dict:
             provider_profile=ctx.get("provider_profile") or "openai_compatible",
         )
         wire_messages = compiled_prompt.messages
+        roleplay_sampling = _roleplay_sampling(ctx)
         run_trace.emit(ctx, "model.request", agent="roleplay", model=ctx["chat_model"],
                        messages=wire_messages, preset=ctx.get("preset_name") or "",
                        temperature=temp, provider_profile=compiled_prompt.provider_profile,
-                       prompt_manifest=compiled_prompt.manifest)
+                       prompt_manifest=compiled_prompt.manifest, **roleplay_sampling)
         def _generated(value: str) -> None:
             run_trace.emit(ctx, "model.response", agent="roleplay", content=value)
             think = _probe_think(value)
@@ -745,13 +761,14 @@ def roleplay_node(state: AgentState) -> dict:
             roleplay_turn.TurnExecutionHooks(
                 generate=lambda: _chat_with_optional_stream(
                     ctx, wire_messages, temperature=temp,
-                    **_roleplay_sampling(ctx),
+                    **roleplay_sampling,
                 ),
                 generated=_generated,
                 finalization=finalization,
             ),
         )
     except Exception as e:  # noqa: BLE001
+        run_trace.emit(ctx, "agent.error", agent="roleplay", error=str(e))
         return {"result_text": f"扮演失败：{e}", "trace": trace,
                 "_streamed_result": streamed}
 
@@ -994,14 +1011,19 @@ def _resolve_illustration_request_actors(
         return list(dict.fromkeys(planned + encounter))
     valid_planned = [name for name in planned if name in known]
     story_names = _ordered_illustration_names(known, narrative)
-    evidence_groups = (
-        [name for name in encounter if name in known],
-        story_names,
-        valid_planned,
+    for group in (
+        [name for name in encounter if name in known], story_names, valid_planned,
+    ):
+        if group:
+            return list(dict.fromkeys(group))
+    # 模型已经明确声明画面主体，但主体不是任何绑定角色（典型为“我/你”）时，
+    # 不得再从用户输入或状态栏借一个仅被提及的角色来加载其 LoRA。
+    if planned:
+        return []
+    for group in (
         _ordered_illustration_names(known, user_text),
         _ordered_illustration_names(known, present),
-    )
-    for group in evidence_groups:
+    ):
         if group:
             return list(dict.fromkeys(group))
     return []
@@ -1013,8 +1035,10 @@ def _filter_illustration_appearance(
     """视觉资料只描述已选角色，禁止旧角色外貌进入最终 Profile。"""
     source = (appearance or "").strip()
     selected = set(actors)
-    if not source or not selected or not known:
+    if not source or not known:
         return source
+    if not selected:
+        return ""
     ordered_names = sorted(set(known), key=len, reverse=True)
     marker = re.compile(
         rf"^\s*({'|'.join(re.escape(name) for name in ordered_names)})\s*[：:]",
@@ -1076,6 +1100,7 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
             diagnostics = narrative_ci.evaluate(
                 clean, turn=turn, facts=ctx.get("_continuity_facts") or (), raw_deltas=raw,
                 beliefs=ctx.get("_continuity_beliefs") or (),
+                world_rules=ctx.get("_world_rules") or (),
             )
             saved = narrative_ci.save(
                 ctx.get("output_dir") or "", repo_id, diagnostics,
@@ -1099,6 +1124,7 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
             _status_snapshot_value(snapshot_text, "在场")
             or roleplay_agency._narr(st, "在场")
         )
+        locale = _status_snapshot_value(snapshot_text, "所在") or locale
         # 插画提示词直接由正文 + 已有视觉锚组装，不再额外调用一次聊天模型。
         visible_story = image_prompt_extract.visible_narrative_text(clean)
         local_scene = scene_classify.infer_scene(
@@ -1184,7 +1210,7 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
             )
             if not request_actors:
                 request_actors = list(dict.fromkeys(
-                    _actor_values + (
+                    [name for name in _actor_values if not _known or name in _known] + (
                         [card_name]
                         if card_name and ctx.get("appearance_source") != "worldbook" else []
                     ),
@@ -1299,6 +1325,22 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
                 ]
                 if selected_subjects:
                     scene_spec["subjects"] = selected_subjects
+            if illustration_plan.get("visual_facts"):
+                visual_facts = illustration_plan["visual_facts"]
+                if plan_retargeted:
+                    # 真正需要纠正锚点时，只淘汰不属于纠正后动作窗口的事实；
+                    # 不能因为一个锚点变化就把该窗口内已有逐字证据全部清空。
+                    visible_narrative = image_prompt_extract.restore_jailbreak(
+                        scene_narrative,
+                    )
+                    visual_facts = [
+                        item for item in visual_facts
+                        if image_prompt_extract.restore_jailbreak(
+                            str(item.get("evidence") or ""),
+                        ).strip() in visible_narrative
+                    ]
+                if visual_facts:
+                    scene_spec["visual_facts"] = visual_facts
             if character_encounter:
                 scene_spec["encounter"] = encounter_facts
             if not plan_retargeted and illustration_plan.get("art_direction"):
@@ -1312,7 +1354,11 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
             # IMAGE_PROMPT 专用清洗。
             # 高潮锚点被纠正时，旧成稿描述的是错误桥段，必须丢弃并从纠正后的事实本地编译。
             inline_profile = ""
-            if illustration_plan and not plan_retargeted:
+            if illustration_plan and (
+                not plan_retargeted or bool(scene_spec.get("visual_facts"))
+            ):
+                # 锚点被纠正但计划中仍有逐字证据落在纠正后窗口时，保留 Agent 已完成的
+                # 具体英文画面；normalize/字段账本仍会淘汰格式错误或事实不覆盖的成稿。
                 inline_profile = str(illustration_plan.get("profile_prompt") or "")
                 inline_profile = _apply_regex(
                     ctx, inline_profile, Placement.IMAGE_PROMPT, is_prompt=True, depth=0,
@@ -1441,6 +1487,7 @@ def _agency_maintenance(ctx: dict, deps, clean: str, turn: int,
         repo_id = ctx.get("repo_id") or ctx.get("thread_id") or ""
         card_name = ctx.get("card_name") or ""
         _table_maintenance(ctx, repo_id, clean, turn)
+        _belief_maintenance(ctx, repo_id, clean, turn)
         from app.services import narrative_memory, table_store
         cadence = max(1, int(table_store.load_config(
             ctx.get("output_dir") or "", repo_id,
@@ -1461,6 +1508,39 @@ def _agency_maintenance(ctx: dict, deps, clean: str, turn: int,
             events=rag_events, proxy=ctx.get("chat_proxy", ""))
     except Exception as exc:  # noqa: BLE001
         run_trace.emit(ctx, "memory.maintenance", status="error", error=str(exc))
+
+
+def _belief_maintenance(ctx: dict, repo_id: str, clean: str, turn: int) -> None:
+    """正文维护：抽取角色认知变化（知道/相信/怀疑/误解/隐瞒/未知）。
+
+    纯规则启发式，零额外 LLM 调用；失败只记 Trace，绝不阻断正文或维护流程。
+    """
+    try:
+        from app.services import belief_extractor
+        known_names = [
+            str(name).strip()
+            for name in (
+                (ctx.get("illustration_actor_names") or [])
+                + [ctx.get("card_name") or ""]
+            )
+            if str(name).strip()
+        ]
+        output_dir = ctx.get("output_dir") or ""
+        if not (output_dir and repo_id):
+            run_trace.emit(ctx, "belief.extract", status="skipped", reason="no_output_dir")
+            return
+        result = belief_extractor.ingest(
+            output_dir, repo_id, text=clean, turn=turn,
+            known_names=known_names, source="auto",
+        )
+        run_trace.emit(
+            ctx, "belief.extract", status="ok",
+            extracted=result.get("extracted", 0), recorded=result.get("recorded", 0),
+            skipped=result.get("skipped", 0),
+            errors=result.get("errors") or [],
+        )
+    except Exception as exc:  # noqa: BLE001 认知抽取失败不阻断维护
+        run_trace.emit(ctx, "belief.extract", status="error", error=str(exc))
 
 
 def _table_maintenance(ctx: dict, repo_id: str, clean: str, turn: int) -> None:
@@ -1984,6 +2064,15 @@ def _resolve_worldbook(ctx: dict, query: str) -> str:
             in selected_current_indices
         )
         ctx["_worldbook_character_names"] = _mentioned_bound_names(bound_names, activated_text)
+        # 提取世界规则条目（含约束词的 entry）供 Narrative CI 的世界规则诊断
+        _RULE_HINT_RE = re.compile(
+            r"(?:不可|禁止|不得|必须|应当|务必|严禁|绝不|永远不要|只有|唯一)", re.IGNORECASE
+        )
+        ctx["_world_rules"] = [
+            entry.content.strip()
+            for entry in entries
+            if _RULE_HINT_RE.search(entry.content or "")
+        ][:20]
         return selection.text
     except Exception:  # noqa: BLE001
         return ""
@@ -2172,6 +2261,7 @@ def _resolve_preset(
     插入历史（ST 深度注入语义）。marker 填充：卡字段 + 世界书 + 用户人设。
     思维链按 scene/affinity/turn 真状态条件选（select_chains），尾部注入遵守最严、头部随 system。
     """
+    ctx["_preset_sampling"] = {}
     preset_dir = ctx.get("preset_dir") or ""
     preset_name = ctx.get("preset_name") or ""
     if not (preset_dir and preset_name):
@@ -2213,6 +2303,7 @@ def _resolve_preset(
         chains_tail = [preset_store.substitute_macros(c, markers) for c in chains_tail]
         chains_head = [preset_store.substitute_macros(c, markers) for c in chains_head]
         params = preset_store.sampling_params(preset)
+        ctx["_preset_sampling"] = params
         temp = params.get("temperature")
         return (messages, (float(temp) if isinstance(temp, (int, float)) else None),
                 has_hist, chains_tail, chains_head)
@@ -2273,12 +2364,28 @@ def _stream_enabled(ctx: dict) -> bool:
 def _chat_with_optional_stream(ctx: dict, messages: list[dict], *, temperature: float,
                                top_p: float | None = None,
                                max_tokens: int | None = None) -> str:
-    """按本轮设置选择整段或流式调用；流式增量直接送入 runner 队列。"""
+    """按本轮设置选择整段或流式调用；流式增量直接送入 runner 队列。
+
+    成功后把模型 usage（prompt/completion/cached token 等）以 model.usage trace 事件
+    落盘，供 Provider 缓存命中率与成本观测。
+    """
+    agent_name = str(ctx.get("current_agent") or "roleplay")
+    model_name = str(ctx.get("chat_model") or "")
+
+    def _emit_usage(stats: dict) -> None:
+        try:
+            run_trace.emit(
+                ctx, "model.usage", agent=agent_name, model=model_name, usage=stats,
+            )
+        except Exception:
+            pass
+
     if not _stream_enabled(ctx):
         return _llm.chat_messages(
             ctx["chat_base"], ctx["chat_key"], ctx["chat_model"], messages,
             temperature=temperature, **_proxy_kw(ctx), top_p=top_p, max_tokens=max_tokens,
             provider_profile=ctx.get("provider_profile") or "openai_compatible",
+            on_usage=_emit_usage,
         )
 
     from app.services.stream_text import VisibleTextStream
@@ -2297,6 +2404,7 @@ def _chat_with_optional_stream(ctx: dict, messages: list[dict], *, temperature: 
             on_delta=on_delta, temperature=temperature, **_proxy_kw(ctx),
             top_p=top_p, max_tokens=max_tokens,
             provider_profile=ctx.get("provider_profile") or "openai_compatible",
+            on_usage=_emit_usage,
         )
     finally:
         tail = visible.finish()

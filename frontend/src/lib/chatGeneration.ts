@@ -77,6 +77,23 @@ export interface PromptHistoryItem {
   content: string;
 }
 
+/**
+ * 异步瘦身只能回写它开始处理的同一版消息。
+ * 期间若流事件或用户发送产生了新数组，旧结果不得覆盖新消息。
+ */
+export function acceptSlimmedMessages(
+  current: readonly ChatMessage[], original: readonly ChatMessage[], slimmed: ChatMessage[],
+): ChatMessage[] {
+  return current === original ? slimmed : current as ChatMessage[];
+}
+
+export function canCommitSnapshot(
+  current: readonly ChatMessage[], original: readonly ChatMessage[],
+  activeThreadId: string, targetThreadId: string,
+): boolean {
+  return current === original && activeThreadId === targetThreadId;
+}
+
 export function promptHistory(msgs: readonly ChatMessage[]): PromptHistoryItem[] {
   return msgs.flatMap((message) => {
     const text = (message.text || "").trim() || (message.parts || [])

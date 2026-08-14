@@ -44,11 +44,13 @@ export function ensureAnimaIllustrationStyle(prompt: string, enabled: boolean): 
   if (!enabled) return prompt;
   const newline = prompt.indexOf("\n");
   if (newline < 0) return prompt;
-  const quality = prompt.slice(0, newline);
-  const content = prompt.slice(newline + 1).trim();
-  const lower = content.toLowerCase();
+  const tags = prompt.slice(0, newline).trim();
+  const prose = prompt.slice(newline + 1).trim();
+  const lower = tags.toLowerCase();
   const missing = ANIMA_ILLUSTRATION_STYLE.filter((tag) => !lower.includes(tag));
-  return `${quality}\n${[...missing, content].filter(Boolean).join(", ")}`;
+  const trailingComma = tags.endsWith(",");
+  const merged = [tags.replace(/,\s*$/, ""), ...missing].filter(Boolean).join(", ");
+  return `${merged}${trailingComma ? "," : ""}\n${prose}`;
 }
 
 function splitQualityTags(value: string): string[] {
@@ -75,17 +77,34 @@ export function replacePromptQualityLine(
   rating: "sfw" | "nsfw" = "sfw",
 ): string {
   const lines = prompt.replace(/\r\n?/g, "\n").split("\n");
-  const qualitySource = fixedQuality.trim() || lines[0] || "";
-  const quality = splitQualityTags(qualitySource)
+  const originalTags = splitQualityTags(lines[0] || "");
+  const configuredQuality = splitQualityTags(fixedQuality.trim());
+  const qualityLike = (tag: string) => {
+    const value = tag.trim().toLowerCase();
+    return /^(?:score_[1-9]|old quality)$/.test(value) || [
+      "masterpiece", "best quality", "sensitive", "explicit", "very aesthetic",
+      "ultra detailed", "fair skin", "high contrast", "amazing quality", "newest",
+      "absurdres", "8k", "high resolution", "refined details", "good anatomy",
+      "good shading", "sharp focus", "anime coloring",
+    ].includes(value);
+  };
+  const qualitySource = configuredQuality.length ? configuredQuality : originalTags;
+  const quality = qualitySource
     .filter((tag) => rating === "nsfw" || !/^(?:sensitive|explicit)$/i.test(tag.trim()))
-    .join(", ");
-  const contentLines = lines.length > 1 ? lines.slice(1) : lines;
-  const content = contentLines
+  const contentTags = configuredQuality.length
+    ? originalTags.filter((tag) => !qualityLike(tag))
+    : [];
+  const tags = [...quality, ...contentTags].filter((tag, index, all) => all.findIndex(
+    (candidate) => candidate.toLowerCase() === tag.toLowerCase(),
+  ) === index).join(", ");
+  const prose = lines.slice(1)
     .map((line) => line.trim())
     .filter((line) => line && /^[\x20-\x7E\t]+$/.test(line))
     .join(" ");
-  if (quality && content) return `${quality}\n${content}`;
-  return quality || content;
+  const trailingComma = (lines[0] || "").trimEnd().endsWith(",");
+  const tagLine = tags ? `${tags}${trailingComma ? "," : ""}` : "";
+  if (tagLine && prose) return `${tagLine}\n${prose}`;
+  return tagLine || prose;
 }
 
 interface SemanticField {

@@ -13,7 +13,7 @@ from app.db import init_db
 from app.services import comfy_launcher
 from app.services.workflow_build_tasks import start_worker as start_workflow_build_worker
 from app.services.chat_agent_queue import start_worker as start_chat_agent_queue_worker
-from app.routers import ai, ai_providers, agents, assets, characters, comfyui, gif_sprite, image_resize, loras, mcp, models, narrative, node_manager, palette, preset, procedures, rag, regex, runs, scenario, skills, state, table, user_state, workflows, worldbook
+from app.routers import ai, ai_providers, agents, assets, characters, comfyui, gif_sprite, gguf_importer, image_resize, loras, mcp, models, narrative, node_manager, palette, preset, procedures, rag, regex, runs, scenario, skills, state, table, user_state, visual_ci, workflows, worldbook
 
 app = FastAPI(title="Local AI ComfyUI Frontend API")
 init_db()
@@ -78,6 +78,8 @@ app.include_router(comfyui.router, prefix="/api/comfyui", tags=["comfyui"])
 app.include_router(models.router, prefix="/api/models", tags=["models"])
 app.include_router(node_manager.router, prefix="/api/node-manager", tags=["node-manager"])
 app.include_router(user_state.router, prefix="/api/user-state", tags=["user-state"])
+app.include_router(gguf_importer.router, prefix="/api/gguf", tags=["gguf-importer"])
+app.include_router(visual_ci.router, prefix="/api/visual-ci", tags=["visual-ci"])
 app.include_router(mcp.router, prefix="/api/mcp", tags=["mcp"])
 app.include_router(skills.router, prefix="/api/skills", tags=["skills"])
 app.include_router(agents.router, prefix="/api/agents", tags=["agents"])

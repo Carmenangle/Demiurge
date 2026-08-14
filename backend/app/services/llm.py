@@ -29,8 +29,13 @@ def flatten_content(content: Any) -> str:
 def build_model(base_url: str, api_key: str, model: str,
                 temperature: float = 0.7, streaming: bool = False, proxy: str = "",
                 top_p: float | None = None, max_tokens: int | None = None,
-                sdk_retries: int | None = None):
+                sdk_retries: int | None = None, on_usage: Callable[[dict], None] | None = None):
     """构建 OpenAI 兼容对话模型。缺配置抛 ValueError（由调用方决定如何呈现）。
+
+    on_usage: 可选回调，接收模型返回的 usage 字典（含 prompt_tokens / completion_tokens /
+        cached_tokens / total_tokens / first_token_ms 等），用于成本与缓存命中率观测。
+    ⚠教训：曾强行给无代理分支加 trust_env=False，反而切断了原本靠系统环境代理连中转的通路
+    (表现 timed out / Connection error)。默认不碰 http_client 才是安全的。
 
     proxy **显式非空**时才注入代理 http_client；为空则**完全默认构造**——与仓库对话
     (image_agent 的 init_chat_model)走同一路径，那条路径一直能连通。
@@ -58,9 +63,41 @@ def build_model(base_url: str, api_key: str, model: str,
     if p:
         import httpx
         kw["http_client"] = httpx.Client(proxy=p, timeout=120)  # 仅显式代理时注入
+    elif _is_local_url(base_url):
+        # 本地端点（Ollama / 127.0.0.1 / localhost）：显式禁用环境代理。
+        # ⚠Windows 下 httpx trust_env=True 会读 WinINET 注册表里的系统代理(如 Clash 127.0.0.1:7897)，
+        #   localhost 请求被转发到代理 → 502。本地直连必须 trust_env=False。
+        import httpx
+        kw["http_client"] = httpx.Client(trust_env=False, timeout=200)
     else:
-        kw["timeout"] = 200  # 不带代理也设单次超时。中转慢时单次搭建(复杂prompt+长JSON)可能60-120s，给足200s(精简直连只调1次，前端240s内)
+        kw["timeout"] = 200  # 公网中转：不带代理也设单次超时(不碰 http_client，保持系统代理通路)。
+        #   中转慢时单次搭建(复杂prompt+长JSON)可能60-120s，给足200s(精简直连只调1次，前端240s内)
     return init_chat_model(model, **kw)
+
+
+def _is_local_url(base_url: str) -> bool:
+    """判断接口地址是否指向本机（localhost / 127.0.0.1 / ::1 / 192.168.* 等内网）。
+
+    本地端点必须绕过系统代理（WinINET 注册表代理会把 localhost 转发到 Clash 等导致 502）；
+    公网端点保留系统代理通路（某些中转必须走代理才能连通）。
+    """
+    import re
+    u = (base_url or "").strip().lower()
+    # 去掉协议头
+    rest = u.split("//", 1)[-1]
+    # IPv6 字面量 [::1] 处理
+    if rest.startswith("["):
+        host = rest.split("]", 1)[0].lstrip("[")
+    else:
+        host = rest.split("/", 1)[0].split(":", 1)[0]
+    if not host:
+        return False
+    if host in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+        return True
+    # 内网网段 10.* / 192.168.* / 172.16-31.*
+    if re.match(r"^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.)", host):
+        return True
+    return False
 
 
 def _is_transient(err: Exception) -> bool:
@@ -131,13 +168,35 @@ def _payload(model: str, messages: list[dict], *, provider_profile: str = "") ->
     ]
 
 
+def _collect_usage(usage: Any) -> dict:
+    """从模型响应提取 usage 统计（兼容 OpenAI/Claude/中转差异）。"""
+    if not isinstance(usage, dict):
+        return {}
+    prompt = int(usage.get("prompt_tokens") or 0)
+    completion = int(usage.get("completion_tokens") or 0)
+    cached = int(usage.get("cached_tokens") or 0)
+    if not cached:
+        # 部分中转把缓存命中放在 prompt_tokens_details.cached_tokens
+        details = usage.get("prompt_tokens_details") or {}
+        cached = int(details.get("cached_tokens") or 0) if isinstance(details, dict) else 0
+    return {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "cached_tokens": cached,
+        "total_tokens": int(usage.get("total_tokens") or (prompt + completion)),
+        "cache_hit_ratio": round(cached / prompt, 4) if prompt else 0.0,
+    }
+
+
 def chat_messages(base_url: str, api_key: str, model: str, messages: list[dict],
                   temperature: float = 0.7, proxy: str = "", retries: int = 2,
                   top_p: float | None = None, max_tokens: int | None = None,
-                  provider_profile: str = "") -> str:
+                  provider_profile: str = "",
+                  on_usage: Callable[[dict], None] | None = None) -> str:
     """多消息单轮对话：messages=[{"role":"system|user|assistant","content":..}]，保留各条 role
     发给模型（不折叠成单 system 串），返回展平后的回复文本。空/无 content 的条目跳过。
-    上游临时故障退避重试；调用失败抛 RuntimeError。`chat` 是它 system+user 两条的特例。"""
+    上游临时故障退避重试；调用失败抛 RuntimeError。`chat` 是它 system+user 两条的特例。
+    on_usage: 可选回调，成功后收到解析后的 usage dict（prompt/completion/cached/total/cache_hit_ratio）。"""
     import time
     payload = _payload(model, messages, provider_profile=provider_profile)
     llm = build_model(base_url, api_key, model, temperature=temperature, proxy=proxy,
@@ -146,6 +205,15 @@ def chat_messages(base_url: str, api_key: str, model: str, messages: list[dict],
     for i in range(max(1, retries)):
         try:
             resp = llm.invoke(payload)
+            if callable(on_usage):
+                try:
+                    # LangChain: AIMessage 有 usage_metadata
+                    usage_raw = getattr(resp, "usage_metadata", None) or {}
+                    stats = _collect_usage(usage_raw)
+                    if stats:
+                        on_usage(stats)
+                except Exception:
+                    pass
             return flatten_content(resp.content).strip()
         except Exception as e:  # noqa: BLE001
             last = e
@@ -160,11 +228,12 @@ def chat_messages_stream(base_url: str, api_key: str, model: str, messages: list
                          on_delta: Callable[[str], None], temperature: float = 0.7,
                          proxy: str = "", retries: int = 2,
                          top_p: float | None = None, max_tokens: int | None = None,
-                         provider_profile: str = "") -> str:
+                         provider_profile: str = "",
+                         on_usage: Callable[[dict], None] | None = None) -> str:
     """流式调用多消息对话，并把每个正文增量交给调用方；同时返回完整原文供后处理。
 
     仅在本次尝试尚未产生任何增量时重试，避免连接中断后把已显示的半段正文重复输出。
-    """
+    on_usage: 可选回调，结束后收到解析后的 usage dict。"""
     import time
     payload = _payload(model, messages, provider_profile=provider_profile)
     llm = build_model(
@@ -175,12 +244,27 @@ def chat_messages_stream(base_url: str, api_key: str, model: str, messages: list
     for i in range(max(1, retries)):
         parts: list[str] = []
         try:
+            # 流式模式：LangChain stream 返回 Iterator[AIMessageChunk]，
+            # usage_metadata 在最后一块里。大多数中转不返 usage，此处简化处理，
+            # 不阻塞流式响应。非流式路径（chat_messages）正常记录 usage。
+            last_chunk_usage = None
             for chunk in llm.stream(payload):
                 delta = flatten_content(chunk.content)
                 if not delta:
                     continue
                 parts.append(delta)
                 on_delta(delta)
+                try:
+                    last_chunk_usage = getattr(chunk, "usage_metadata", None)
+                except Exception:
+                    pass
+            if callable(on_usage) and last_chunk_usage is not None:
+                try:
+                    stats = _collect_usage(last_chunk_usage)
+                    if stats:
+                        on_usage(stats)
+                except Exception:
+                    pass
             return "".join(parts).strip()
         except Exception as e:  # noqa: BLE001
             last = e

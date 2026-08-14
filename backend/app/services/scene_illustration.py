@@ -36,6 +36,7 @@ _ANCHOR_TRAILING_PUNCTUATION = frozenset("。！？!?…」』”’")
 _FALLBACK_ANCHOR_TERMS = (
     (8, ("高潮", "绝顶", "射精", "决战", "最终战", "生死关头", "关键转折")),
     (5, ("剧烈", "颤抖", "痉挛", "抽插", "插入")),
+    (6, ("仰卧", "压上肩", "腿架", "面对面", "火车便当", "69式", "骑乘位")),
     (5, ("失去平衡", "跪倒", "跌倒", "倒下")),
     (5, ("放下", "放在", "搁在", "递出", "取出", "留下")),
     (4, ("俯身", "抬手", "抬起", "平视", "对视", "凝视", "注视", "转身", "回眸")),
@@ -50,6 +51,11 @@ _STATE_CHANGE_ACTION_TERMS = (
 )
 _STATIC_RESOLUTION_TERMS = (
     "靠回", "靠着", "静坐", "沉默", "目光", "凝视", "嘴角", "浅笑", "微笑", "余韵",
+    "那旗", "旗仍然", "旗还在", "没倒", "没有倒下",
+)
+_OUTCOME_TERMS = (
+    "开口", "说出", "答应", "承认", "拒绝", "交出", "取出", "打开", "开启", "碎裂",
+    "停下", "求饶", "妥协", "命令", "回应", "结果", "终于",
 )
 
 
@@ -62,6 +68,8 @@ def _anchor_score(paragraph: str) -> int:
     score += 5 * sum(word in visible for word in _STATE_CHANGE_ACTION_TERMS)
     if any(word in visible for word in _STATIC_RESOLUTION_TERMS):
         score -= 3
+    if any(word in visible for word in ("前两次", "之前", "回想", "曾经")):
+        score -= 4
     return score
 
 
@@ -242,15 +250,37 @@ def resolve_illustration_anchor(text: str, requested_anchor: str = "") -> str:
         return requested or fallback
     requested_excerpt = illustration_scene_excerpt(text, requested)
     fallback_score = _anchor_score(fallback)
-    requested_score = _anchor_score(requested_excerpt)
-    if fallback != requested_excerpt and fallback_score >= requested_score + 3:
+    requested_score = _anchor_score(requested)
+    crosses_scene_boundary = _anchors_cross_scene_boundary(text, fallback, requested)
+    requested_is_action_outcome = (
+        any(word in requested for word in _OUTCOME_TERMS)
+        and sum(word in requested_excerpt for word in _ACTION_CONTEXT_TERMS) >= 2
+    )
+    if (not crosses_scene_boundary and not requested_is_action_outcome
+            and fallback != requested_excerpt
+            and fallback_score >= requested_score + 3):
         return fallback
-    fallback_has_action = any(word in fallback for word in _STATE_CHANGE_ACTION_TERMS)
-    requested_has_action = any(word in requested_excerpt for word in _STATE_CHANGE_ACTION_TERMS)
-    requested_is_static = any(word in requested_excerpt for word in _STATIC_RESOLUTION_TERMS)
-    if fallback_has_action and requested_is_static and not requested_has_action:
+    visual_action_terms = (*_STATE_CHANGE_ACTION_TERMS, *_POSE_CONTEXT_TERMS, "高潮", "痉挛", "抽插", "插入")
+    fallback_has_action = any(word in fallback for word in visual_action_terms)
+    requested_has_action = any(word in requested for word in visual_action_terms)
+    requested_is_static = any(word in requested for word in _STATIC_RESOLUTION_TERMS)
+    if (not crosses_scene_boundary and not requested_is_action_outcome and fallback_has_action
+            and requested_is_static and not requested_has_action):
         return fallback
     return requested
+
+
+def _anchors_cross_scene_boundary(text: str, first: str, second: str) -> bool:
+    """显式计划位于时间跳转后的新场景时，禁止拿旧时段高潮覆盖。"""
+    visible = image_prompt_extract.restore_jailbreak(text or "")
+    left = visible.find(first)
+    right = visible.find(second)
+    if left < 0 or right < 0 or left == right:
+        return False
+    between = visible[min(left, right):max(left, right)]
+    return bool(re.search(
+        r"(?:^|\n)\s*(?:---+|——+|\*\s*\*\s*\*)\s*(?:\n|$)", between,
+    ))
 
 
 def illustration_scene_excerpt(text: str, requested_anchor: str = "") -> str:
@@ -268,9 +298,9 @@ def illustration_scene_excerpt(text: str, requested_anchor: str = "") -> str:
         return visible.strip()[-2500:]
     needle = image_prompt_extract.restore_jailbreak(requested_anchor or "").strip()
     if needle:
-        for paragraph in paragraphs:
+        for index, paragraph in enumerate(paragraphs):
             if needle in paragraph:
-                return paragraph[-2500:]
+                return _visual_action_context(paragraphs, index)
         normalized_needle = re.sub(r"\s+", "", needle)
         best = max(
             paragraphs,
@@ -278,11 +308,79 @@ def illustration_scene_excerpt(text: str, requested_anchor: str = "") -> str:
                 None, normalized_needle, re.sub(r"\s+", "", paragraph),
             ).ratio(),
         )
-        return best[-2500:]
+        return _visual_action_context(paragraphs, paragraphs.index(best))
     fallback = image_prompt_extract.restore_jailbreak(
         fallback_illustration_anchor(source),
     ).strip()
     return (fallback or paragraphs[-1])[-2500:]
+
+
+_POSE_CONTEXT_TERMS = (
+    "仰卧", "躺", "趴", "跪", "俯身", "弯腰", "转向", "看向", "骑乘", "面对面", "背对",
+    "侧卧", "双腿", "大腿", "腿压", "腿架", "弯曲", "蜷着", "分开", "打开",
+    "肩膀", "抱离地面", "悬空", "锁链", "镣铐", "手腕", "玉碾", "牢门开",
+    "火车便当", "69式",
+)
+
+_ACTION_CONTEXT_TERMS = (
+    *_POSE_CONTEXT_TERMS,
+    "抓", "握", "扣", "掐", "卡住", "压向", "推入", "推进", "进入",
+    "插入", "抽插", "交媾", "做爱", "性交", "高潮", "痉挛", "颤抖",
+    "取出", "放在", "磨", "摩擦", "撤", "抽回", "收回", "追过去", "往上顶",
+)
+def _is_action_context_boundary(paragraph: str) -> bool:
+    if re.fullmatch(r"\s*(?:---+|\*\s*\*\s*\*)\s*", paragraph):
+        return True
+    if len(paragraph) <= 60 and re.match(
+        r"^\s*[^，。！？!?]{1,24}(?:转身)?(?:离开|离场|退场|走出|退出)", paragraph,
+    ):
+        return True
+    return bool(re.match(
+        r"^\s*(?:与此同时|另一边|另一处|镜头转到|场景转到|"
+        r"(?:随后|然后|最终|这时)?\s*(?:他|她|他们|她们|众人|两人)"
+        r"\s*(?:转身)?(?:离开|离场|退场|走出|退出))",
+        paragraph,
+    ))
+
+
+def _visual_action_context(paragraphs: list[str], index: int) -> str:
+    """保留高潮前连续动作链；允许两段环境/反应桥接，禁止稀疏抽样丢动作。"""
+    selected = paragraphs[index]
+    if any(term in selected for term in ("高潮", "绝顶", "痉挛", "颤抖", "临界")):
+        # 高潮结果通常位于动作链末端；向前取到真实场景边界，而不是只保留最后两段反应。
+        start = max(0, index - 40)
+        for previous_index in range(index - 1, start - 1, -1):
+            if _is_action_context_boundary(paragraphs[previous_index]):
+                start = previous_index + 1
+                break
+        return "\n\n".join(paragraphs[start:index + 1])[-5000:]
+    if not any(term in selected for term in _ACTION_CONTEXT_TERMS):
+        if any(term in selected for term in _OUTCOME_TERMS):
+            # 结果句是前方动作链的结局；从当前场景边界连续取到结果句，
+            # 保留中间反应与关键物件，不做会丢事实的稀疏抽样。
+            start = max(0, index - 40)
+            for previous_index in range(index - 1, start - 1, -1):
+                previous = paragraphs[previous_index]
+                if _is_action_context_boundary(previous):
+                    start = previous_index + 1
+                    break
+            return "\n\n".join(paragraphs[start:index + 1])[-5000:]
+        return selected[-2500:]
+    start = index
+    neutral_gap = 0
+    for previous_index in range(index - 1, max(-1, index - 13), -1):
+        previous = paragraphs[previous_index]
+        if _is_action_context_boundary(previous):
+            break
+        if any(term in previous for term in _ACTION_CONTEXT_TERMS):
+            start = previous_index
+            neutral_gap = 0
+            continue
+        neutral_gap += 1
+        if neutral_gap > 2:
+            break
+        start = previous_index
+    return "\n\n".join(paragraphs[start:index + 1])[-2500:]
 
 
 def protected_illustration_scene_excerpt(text: str, visible_excerpt: str) -> str:
@@ -294,6 +392,24 @@ def protected_illustration_scene_excerpt(text: str, visible_excerpt: str) -> str
     ]
     if not paragraphs:
         return body[-2500:]
+    visible_parts = [
+        part.strip() for part in re.split(r"(?:\r?\n){2,}", visible_excerpt or "")
+        if part.strip()
+    ]
+    matched_indices: list[int] = []
+    search_from = 0
+    for visible_part in visible_parts:
+        target_part = re.sub(r"\s+", "", visible_part)
+        for index in range(search_from, len(paragraphs)):
+            restored = re.sub(
+                r"\s+", "", image_prompt_extract.restore_jailbreak(paragraphs[index]),
+            )
+            if target_part == restored or target_part in restored or restored in target_part:
+                matched_indices.append(index)
+                search_from = index + 1
+                break
+    if matched_indices:
+        return "\n\n".join(paragraphs[matched_indices[0]:matched_indices[-1] + 1])[-2500:]
     target = re.sub(r"\s+", "", visible_excerpt or "")
     for paragraph in paragraphs:
         if target and target in re.sub(

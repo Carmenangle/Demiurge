@@ -8,6 +8,56 @@ from app.services import prompt_compliance, run_trace, structured_output
 from app.services.structured_contracts import SupervisorDecision
 
 
+def _model_quality(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """模型调用质量统计：usage 缓存命中率、失败重试率、请求-响应配对完整性。
+
+    依据 model.request / model.response / model.usage / agent.error 事件。
+    """
+    requests = [r for r in records if r.get("event") == "model.request"]
+    responses = [r for r in records if r.get("event") == "model.response"]
+    usage_events = [r for r in records if r.get("event") == "model.usage"]
+    errors = [r for r in records if r.get("event") == "agent.error"]
+
+    stats: dict[str, Any] = {
+        "requests": len(requests),
+        "responses": len(responses),
+        "usage_events": len(usage_events),
+        "errors": len(errors),
+        "request_response_ratio": round(len(responses) / len(requests), 4) if requests else 1.0,
+        "cached_tokens": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "cache_hit_ratio": 0.0,
+        "by_agent": {},
+    }
+
+    for rec in usage_events:
+        data = rec.get("data")
+        data = data if isinstance(data, dict) else {}
+        usage = data.get("usage")
+        usage = usage if isinstance(usage, dict) else {}
+        stats["cached_tokens"] += int(usage.get("cached_tokens") or 0)
+        stats["prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
+        stats["completion_tokens"] += int(usage.get("completion_tokens") or 0)
+        stats["total_tokens"] += int(usage.get("total_tokens") or 0)
+        agent = str(data.get("agent") or "?")
+        bucket = stats["by_agent"].setdefault(agent, {
+            "prompt_tokens": 0, "cached_tokens": 0, "completion_tokens": 0,
+        })
+        bucket["prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
+        bucket["cached_tokens"] += int(usage.get("cached_tokens") or 0)
+        bucket["completion_tokens"] += int(usage.get("completion_tokens") or 0)
+
+    if stats["prompt_tokens"]:
+        stats["cache_hit_ratio"] = round(stats["cached_tokens"] / stats["prompt_tokens"], 4)
+
+    # 错误率（含 model.error 与 agent.error 中的模型失败）
+    model_errors = sum(1 for e in errors if "model" in str(e.get("data") or {}).lower())
+    stats["error_rate"] = round(model_errors / len(requests), 4) if requests else 0.0
+    return stats
+
+
 def _case(turn_id: str, records: list[dict[str, Any]]) -> dict[str, Any]:
     events = [str(record.get("event") or "") for record in records]
     supervisor_raw = ""
@@ -57,6 +107,7 @@ def _case(turn_id: str, records: list[dict[str, Any]]) -> dict[str, Any]:
         "passed": all(checks.values()),
         "checks": checks,
         "compliance": prompt_compliance.evaluate_turn(records),
+        "model_quality": _model_quality(records),
         "event_count": len(records),
     }
 
@@ -73,12 +124,16 @@ def evaluate_records(records: list[dict[str, Any]]) -> dict[str, Any]:
     for case in cases:
         outcome = str(case["compliance"]["outcome"])
         outcomes[outcome] = outcomes.get(outcome, 0) + 1
+
+    # 全局模型调用质量聚合（跨回合）
+    global_quality = _model_quality(records)
     return {
         "version": 2,
         "summary": {
             "cases": len(cases), "passed": passed, "failed": len(cases) - passed,
             "outcomes": outcomes,
         },
+        "model_quality": global_quality,
         "cases": cases,
     }
 

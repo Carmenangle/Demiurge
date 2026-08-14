@@ -199,6 +199,42 @@ def assistant_message(mid: str, text: str, **fields) -> dict:
     return {"id": mid, "role": "assistant", "text": text, **fields}
 
 
+def user_message(mid: str, text: str, images: list[str] | None = None) -> dict:
+    """构造可由前端直接恢复的用户消息；图片仍走 ChatMessage.parts。"""
+    parts: list[dict] = []
+    if text:
+        parts.append({"type": "text", "text": text})
+    parts.extend({"type": "image", "url": url} for url in (images or []) if url)
+    message = {"id": mid, "role": "user", "text": text}
+    if parts:
+        message["parts"] = parts
+    return message
+
+
+def ensure_user_message(
+    thread_id: str, mid: str, text: str, images: list[str] | None = None,
+    *, before_id: str = "",
+) -> bool:
+    """模型启动前确保用户输入已进入权威快照；已有前端富消息时保持原样。"""
+    if not mid or (not text and not images):
+        return False
+    with _thread_lock(thread_id):
+        items = load(thread_id)
+        if any(isinstance(item, dict) and item.get("id") == mid for item in items):
+            return True
+        message = user_message(mid, text, images)
+        before_index = next((
+            index for index, item in enumerate(items)
+            if isinstance(item, dict) and item.get("id") == before_id
+        ), -1)
+        if before_index >= 0:
+            items.insert(before_index, message)
+        else:
+            items.append(message)
+        _save_unlocked(thread_id, items)
+        return True
+
+
 _assistant_message = assistant_message  # 兼容内部旧调用名
 
 

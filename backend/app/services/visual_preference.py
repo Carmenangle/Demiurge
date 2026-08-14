@@ -12,6 +12,28 @@ from app.services.pathnames import safe_seg
 DB_NAME = "visual_preferences.db"
 REASONS = {"character", "action", "composition", "lighting", "color", "quality", "other"}
 
+# Visual CI 的 red verdict 资产不进偏好排序（默认开启）。
+# 通过直接读取 visual_ci.db 避免循环依赖（visual_ci 不 import visual_preference）。
+VISUAL_CI_DB = "visual_ci.db"
+
+
+def _red_asset_ids(base: str, repo_id: str) -> set[str]:
+    """读取该作品 visual_ci.db 中 verdict='red' 的 generation_id 集合。"""
+    db = Path(base) / safe_seg(repo_id, strip=False) / VISUAL_CI_DB
+    if not db.exists():
+        return set()
+    try:
+        con = sqlite3.connect(str(db))
+        try:
+            rows = con.execute(
+                "SELECT generation_id FROM diagnostics WHERE verdict='red'"
+            ).fetchall()
+        finally:
+            con.close()
+        return {str(r[0]) for r in rows}
+    except sqlite3.Error:
+        return set()
+
 
 def _connect(base: str, repo_id: str) -> sqlite3.Connection:
     path = Path(base) / safe_seg(repo_id, strip=False) / DB_NAME
@@ -70,7 +92,22 @@ def score_map(base: str, repo_id: str) -> dict[str, float]:
                 for row in conn.execute("SELECT asset_id,score FROM scores")}
 
 
-def rank(base: str, items: list[dict]) -> list[dict]:
+def rank(base: str, items: list[dict], *, exclude_red: bool = True) -> list[dict]:
+    """
+    Elo 重排：仅排序不删除；默认剔除 Visual CI 红色诊断资产。
+    exclude_red=False 时保留全部（例如偏好面板需要看到红色资产以便用户处理）。
+    """
+    if exclude_red:
+        red_by_repo: dict[str, set[str]] = {}
+        kept: list[dict] = []
+        for item in items:
+            rid = str(item.get("repo_id") or "")
+            if rid not in red_by_repo:
+                red_by_repo[rid] = _red_asset_ids(base, rid)
+            if str(item.get("id") or "") in red_by_repo[rid]:
+                continue
+            kept.append(item)
+        items = kept
     maps: dict[str, dict[str, float]] = {}
     indexed = list(enumerate(items))
     def key(pair: tuple[int, dict]) -> tuple[float, int]:

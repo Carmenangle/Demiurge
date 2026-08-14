@@ -272,6 +272,9 @@ export function WorkflowCard({
           confirmText="使用保存数据"
           cancelText="保留当前参数"
           busy={busy}
+          closeOnBackdrop={false}
+          portal
+          overlayClassName="workflow-lora-modal-mask"
           onConfirm={applySavedLoraData}
           onCancel={keepCurrentLoraData}
         />

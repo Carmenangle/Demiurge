@@ -115,6 +115,71 @@ def test_字段账本为所有模板补齐真实外貌服装动作地点与质�
         assert fact in completed
 
 
+@pytest.mark.parametrize("profile", ["krea2", "anima_tags", "natural_language", "niji_sections"])
+def test_所有模板把连续高潮编译为复合动作并让动态破损服装覆盖基础服装(profile):
+    scene = {
+        "narrative": (
+            "他的手扣住她的脖子，把她压向石台。墙后的机关发出闷响。"
+            "他俯身贴近，在这个时候重新推进去了。"
+            "他一下一下掐着她的脖子继续动作，高潮骤然袭来。"
+        ),
+        "appearance": "漆黑墨发，暗红美眸，红莲纹饰华袍，丰腴身材。",
+        "wardrobe": "",
+        "locale": "天牢囚室",
+        "actors": ["虞妙玥"],
+        "subjects": [{
+            "name": "虞妙玥",
+            "description": "华袍残片散落在腰侧，颈部留有清晰指痕。",
+        }],
+    }
+    if profile == "anima_tags":
+        seed = profiles.ANIMA_QUALITY_TAGS + "\nadult woman, medium shot, side light, layered background."
+    elif profile == "niji_sections":
+        seed = "adult woman\nrefined illustration\nmedium shot, side light, layered background\n--ar 2:3 --niji 6"
+    else:
+        seed = (
+            "A medium shot places an adult woman in a confinement cell under directional side light, "
+            "with layered background depth, controlled fabric texture, clean anatomy, and polished detail."
+        )
+
+    completed, ledger = profiles.complete_field_coverage(profile, seed, scene)
+
+    assert (
+        "penetrative intercourse while the secondary adult partner grips the primary woman's throat"
+        in completed
+    )
+    assert "torn remnants of a red lotus patterned robe" in completed
+    assert "a red lotus patterned robe" not in completed.replace(
+        "torn remnants of a red lotus patterned robe", "",
+    )
+    assert ledger["action"]["covered"] is True
+    assert ledger["wardrobe"]["covered"] is True
+
+
+@pytest.mark.parametrize("profile", ["krea2", "anima_tags", "natural_language", "niji_sections"])
+def test_所有模板逐条验收开放类型的证据化可视事实(profile):
+    scene = {
+        "narrative": "她停在门边，左手托着发光的陌生螺旋物，右肩抵住裂开的铜镜。",
+        "actors": ["甲"],
+        "visual_facts": [
+            {"kind": "invented_prop", "fact": "a glowing spiral object rests on her left palm", "evidence": "左手托着发光的陌生螺旋物"},
+            {"kind": "body_contact", "fact": "her right shoulder braces against a cracked bronze mirror", "evidence": "右肩抵住裂开的铜镜"},
+        ],
+    }
+    if profile == "anima_tags":
+        seed = profiles.ANIMA_QUALITY_TAGS + "\nadult woman, medium shot, side light, layered room."
+    elif profile == "niji_sections":
+        seed = "adult woman\nrefined illustration\nmedium shot, side light, layered room\n--ar 3:4 --niji 6"
+    else:
+        seed = "A medium shot shows an adult woman under directional light in a layered room."
+
+    completed, ledger = profiles.complete_field_coverage(profile, seed, scene)
+
+    assert "a glowing spiral object rests on her left palm" in completed
+    assert "her right shoulder braces against a cracked bronze mirror" in completed
+    assert ledger["visual_facts"]["covered"] is True
+
+
 @pytest.mark.parametrize("profile,raw,expected", [
     (
         "krea2",
@@ -182,10 +247,10 @@ def test_anima输出固定质量行加英文tags与关系描述():
     prompt = profiles.generate(
         "anima_tags", _scene(), lambda _system, _user: _anima_json(content),
     )
-    quality, content = prompt.splitlines()
-    assert quality == profiles.ANIMA_QUALITY_TAGS
-    assert content.startswith("1girl, solo, red dress")
-    assert "Warm rim light separates" in content
+    tags, prose = prompt.splitlines()
+    assert tags.startswith(profiles.ANIMA_QUALITY_TAGS + ", 1girl, solo, red dress")
+    assert tags.endswith(",")
+    assert prose.startswith("Warm rim light separates")
 
 
 def test_anima按场景合并基础质量词与成人质量词():
@@ -212,10 +277,12 @@ def test_anima连续拒答时回退已有高潮tags而不阻断出图():
         "anima_tags", scene, lambda _system, _user: "I can't help with this request.",
     )
 
-    quality, content = prompt.splitlines()
-    assert "explicit" in quality
-    assert content.startswith("1girl, solo, dramatic composition, rim lighting")
-    assert "visual focus" in content
+    tags, prose = prompt.splitlines()
+    assert "explicit" in tags
+    assert "1girl, solo, rim lighting" in tags
+    assert "dramatic composition" not in tags
+    assert "1girl, solo, rim lighting" in prose
+    assert "visible action remains" not in prose.lower()
     assert "I can't help" not in prompt
 
 
@@ -264,7 +331,7 @@ def test_anima保留有效英文提示词并裁掉中文拒答尾缀():
 
     prompt = profiles.normalize_inline("anima_tags", raw, {**_scene("nsfw"), "wardrobe": ""})
 
-    assert prompt.splitlines()[1].startswith("adult woman, black hair, red eyes")
+    assert "adult woman, black hair, red eyes" in prompt.splitlines()[0]
     assert "无法协助" not in prompt
     assert "欢迎提供" not in prompt
 
@@ -311,7 +378,7 @@ def test_anima连续失败时仍从剧情保留具体动作而非退化为特写
         "anima_tags", scene, lambda _system, _user: "I can't help with this request.",
     )
 
-    content = prompt.splitlines()[1]
+    content = prompt
     assert "reaching out" in content
     assert "gripping wrist" in content
     assert "pulling another person" in content
@@ -339,7 +406,7 @@ def test_anima新角色Profile连续失败时从中文场景保留身份外貌�
         "anima_tags", scene, lambda _system, _user: "I can't help with this request.",
     )
 
-    content = prompt.splitlines()[1]
+    content = prompt
     for fact in (
         "adult woman", "early thirties", "broad shoulders", "square face",
         "thick eyebrows", "prominent canine tooth", "calloused hands", "brown work jacket",
@@ -533,7 +600,9 @@ def test_anima独立Profile缺少具体视觉装置时触发重写():
 
     prompt = profiles.generate("anima_tags", {**_scene(), "wardrobe": ""}, generate)
 
-    assert prompt.splitlines()[1] == designed_content
+    tags, prose = prompt.splitlines()
+    assert designed_content.partition(".")[0] in tags
+    assert prose == designed_content.partition(".")[2].strip()
     assert len(users) == 2
     assert "上次输出未通过" in users[1]
     assert "辅助元素最多两个" in users[1]
@@ -552,7 +621,9 @@ def test_anima结构化艺术决策不泄漏进最终两行提示词():
     assert prompt.count("\n") == 1
     assert "visual_hook" not in prompt
     assert "primary_focus" not in prompt
-    assert prompt.splitlines()[1].startswith(content)
+    tags, prose = prompt.splitlines()
+    assert content.partition(".")[0] in tags
+    assert prose.startswith(content.partition(".")[2].strip())
     assert "bedchamber" in prompt
 
 
@@ -601,8 +672,8 @@ def test_主模型内联Anima提示词只做本地归一不再调用模型():
     )
 
     assert prompt.splitlines() == [
-        profiles.ANIMA_QUALITY_TAGS,
-        "1girl, solo, red dress, low angle, rim lighting, shallow depth of field. "
+        profiles.ANIMA_QUALITY_TAGS
+        + ", 1girl, solo, red dress, low angle, rim lighting, shallow depth of field,",
         "The face and eyes receive the finest detail while the background falls into soft focus.",
     ]
 
@@ -913,6 +984,72 @@ def test_krea2当前剧情服装覆盖角色条目的基础穿着():
     assert "floral purple long skirt" not in prompt
 
 
+def test_虞妙玥条目在本地兜底中生成具体外貌而非通用女人():
+    scene = {
+        **_scene("sfw"),
+        "actors": ["虞妙玥"],
+        "appearance": (
+            "虞妙玥：【外貌】丰腴肥熟的美艳熟妇，一头华贵墨发，狭长暗红美眸，"
+            "雪嫩脸蛋、熟厚双唇；【身材】丰腴肥熟的极致熟躯，宽厚丰臀，"
+            "一身红莲纹饰华袍。"
+        ),
+        "narrative": "虞妙玥躺在机关天牢的冰冷石地上，偏过脸去。",
+        "locale": "机关天牢",
+    }
+
+    prompt = profiles.deterministic_fallback("krea2", scene)
+    ledger = profiles.prompt_field_ledger(prompt, scene)
+
+    for fact in ("jet-black hair", "dark-red eyes", "full mature lips", "voluptuous", "red lotus patterned robe"):
+        assert fact in prompt
+    assert ledger["appearance"]["covered"] is True
+
+
+def test_字段账本不把无可验证期望的通用外貌词判为覆盖():
+    scene = {
+        **_scene("sfw"),
+        "appearance": "【外貌】无法由当前视觉词典识别的独特容貌。",
+    }
+
+    ledger = profiles.prompt_field_ledger(
+        "An adult woman with hair and eyes stands in a composed medium shot.", scene,
+    )
+
+    assert ledger["appearance"] == {
+        "required": True,
+        "covered": False,
+        "expected": [],
+    }
+
+
+@pytest.mark.parametrize("profile", profiles.PROFILE_IDS)
+@pytest.mark.parametrize(("narrative", "expected"), [
+    ("她仰卧在床上，双腿压上对方肩膀，面对面保持传教士体位。", "legs raised over the partner's shoulders"),
+    ("她被抱离地面，以火车便当式悬空贴住对方。", "standing suspended carry position"),
+    ("两名成年角色以69式上下交叠。", "mutual oral 69 position"),
+])
+def test_所有profile从高潮正文保留具体体位(profile, narrative, expected):
+    scene = {
+        **_scene("nsfw"),
+        "narrative": narrative,
+        "protected_narrative": narrative,
+        "appearance": "【外貌】漆黑墨发，暗红美眸，丰腴熟躯。",
+        "wardrobe": "红莲纹饰华袍已经撕开，仅剩残片挂在腰侧。",
+        "locale": "机关天牢的冰冷石板上",
+        "actors": ["虞妙玥"],
+    }
+
+    raw = profiles.deterministic_fallback(profile, scene)
+    prompt, ledger = profiles.complete_field_coverage(profile, raw, scene)
+
+    assert expected in prompt
+    assert "torn remnants of a red lotus patterned robe" in prompt
+    assert "confinement cell" in prompt
+    assert ledger["action"]["covered"] is True
+    assert ledger["wardrobe"]["covered"] is True
+    assert ledger["location"]["covered"] is True
+
+
 def _cold_qingxue_scene():
     return {
         **_scene("sfw"),
@@ -1135,7 +1272,7 @@ def test_其他模式复用事实底座与艺术决策而非逐项填满(profile
     ):
         assert detail in system
     assert "无关项简写或省略" in system
-    assert "不得为了填满栏目凭空创造" in system
+    assert "开放视觉槽" in system
 
 
 @pytest.mark.parametrize("profile", profiles.PROFILE_IDS)
@@ -1149,6 +1286,38 @@ def test_所有模式先做统一艺术决策再格式化(profile):
     assert "人物互动高潮" in system
     assert "发现、开启、争夺或取得物件" in system
     assert "色彩材质母题、光影因果、镜头构图" in system
+
+
+@pytest.mark.parametrize("profile", profiles.PROFILE_IDS)
+def test_四种profile区分硬事实锁与允许联想的开放视觉槽(profile):
+    system = profiles._system(profile, {"rating": "sfw"})
+
+    assert "硬事实锁" in system
+    assert "开放视觉槽" in system
+    assert "微动作" in system
+    assert "时间、地点、天气、情绪" in system
+    assert "重要新人物" in system
+    assert "关键道具" in system
+    assert "新事件" in system
+
+
+@pytest.mark.parametrize("profile", profiles.PROFILE_IDS)
+def test_四种profile把缺失画面硬事实的具体补全设为必执行(profile):
+    system = profiles._system(profile, {"rating": "sfw"})
+
+    assert "缺失硬事实补全" in system
+    assert "必须补出一个具体答案" in system
+    assert "不得留空" in system
+    assert "不得使用占位语" in system
+    for field in ("当前服装", "具体动作或姿态", "地点环境", "镜头", "构图", "光影"):
+        assert field in system
+
+
+def test_krea2不再禁止为空缺视觉槽合理补全():
+    system = profiles._system("krea2", {"rating": "sfw"})
+
+    assert "不得加入输入中没有的画面事实" not in system
+    assert "允许为开放视觉槽补足" in system
 
 
 @pytest.mark.parametrize("profile,required", [
@@ -1168,6 +1337,59 @@ def test_四种Profile提供主剧情同轮隐藏成稿合同(profile, required)
     assert "LoRA" in instruction
     assert "primary adult character" in instruction
     assert "second adult character" in instruction
+
+
+def test_anima同轮成稿格式错误时从完整动作窗口紧凑重建而非拼接整份草稿():
+    scene = {
+        "narrative": (
+            "她仰卧在冰冷石板上，双手被锁链束缚。他把她的膝盖慢慢分开，"
+            "取出玉制器具放在一旁，用指腹在接触点反复摩擦；每当她接近高潮就撤开。"
+            "她的腰追着撤开的手往上顶，呼吸急促，最后哑声开口。"
+        ),
+        "draft_prompt": (
+            "The moment after she speaks is the visual thesis; Primary: her face; Secondary: damp fabric; "
+            "single low torch source; (voluptuous mature woman lying on stone:1.8), "
+            "post-confession moment, averted gaze"
+        ),
+        "appearance": (
+            "虞妙玥：【外貌】华贵墨发，狭长暗红美眸，熟厚双唇，丰腴肥熟的极致熟躯；"
+            "【穿着】红莲纹饰华袍。"
+        ),
+        "wardrobe": "囚衣已经湿透",
+        "locale": "机关天牢内层牢房",
+        "actors": ["虞妙玥"],
+        "subjects": [{
+            "name": "虞妙玥",
+            "description": (
+                "voluptuous mature woman with long black hair, narrow dark-red eyes, "
+                "a damp pale prisoner's robe, lying supine on cold stone"
+            ),
+        }],
+        "rating": "nsfw",
+        "aspect_ratio": "2:3",
+    }
+
+    prompt = profiles.deterministic_fallback("anima_tags", scene)
+    prompt = profiles.normalize_inline("anima_tags", prompt, scene)
+    ledger = profiles.prompt_field_ledger(prompt, scene)
+
+    assert len(prompt.splitlines()) == 2
+    assert ledger["action"]["required"] is True
+    assert ledger["action"]["covered"] is True
+    assert "rubbing the contact point" in prompt
+    assert "withdrawing just before completion" in prompt
+    assert "her body following the withdrawn contact" in prompt
+    tags, prose = prompt.splitlines()
+    assert "rubbing the contact point" in tags
+    assert "rubbing the contact point" in prose
+    assert "visible action remains" not in prose.lower()
+    assert "stated action" not in prose.lower()
+    assert "current clothing" not in prose.lower()
+    assert "one continuous moment" not in prose.lower()
+    assert "visual thesis" not in prompt.lower()
+    assert "Primary:" not in prompt
+    assert ":1.8" not in prompt
+    assert len(prompt) < 2500
 
 
 @pytest.mark.parametrize("profile", profiles.PROFILE_IDS)
@@ -1202,7 +1424,7 @@ def test_双角色Profile分别编译两人的外貌动作再描述整体关系(
     )
     if profile == "anima_tags":
         assert len(prompt.splitlines()) == 2
-        assert "2girls" in prompt.splitlines()[1]
+        assert "2girls" in prompt.splitlines()[0]
     if profile == "krea2":
         assert "masterpiece" not in prompt.lower()
         assert "\n\n" not in prompt
@@ -1211,6 +1433,131 @@ def test_双角色Profile分别编译两人的外貌动作再描述整体关系(
 @pytest.mark.parametrize("profile", profiles.PROFILE_IDS)
 def test_同轮隐藏Profile预留输出预算(profile):
     assert profiles.inline_output_token_reserve(profile) >= 700
+
+
+def _unknown_object_scene():
+    evidence = "她把玄枢按上门锁，青铜圆盘沿放射槽旋转，铁木门随即开启"
+    return {
+        "narrative": evidence + "。",
+        "appearance": "voluptuous mature beauty, glossy ink-black hair, narrow dark-red eyes",
+        "wardrobe": "torn pale prisoner's robe with red lotus embroidery",
+        "locale": "confinement cell and corridor",
+        "camera": "medium shot",
+        "visual_facts": [{
+            "kind": "prop",
+            "fact": "a palm-sized bronze disk with radial slots, rotating against the ironwood door lock as a mechanical key",
+            "evidence": evidence,
+        }],
+        "actors": ["角色甲"],
+        "rating": "nsfw",
+    }
+
+
+def test_krea2把角色动作未知道具地点作为主体内容而非只剩质量套话():
+    scene = _unknown_object_scene()
+
+    prompt = profiles.deterministic_fallback("krea2", scene)
+
+    lowered = prompt.lower()
+    for fact in ("glossy ink-black hair", "narrow dark-red eyes", "torn pale prisoner's robe",
+                 "palm-sized bronze disk", "radial slots", "mechanical key"):
+        assert fact in lowered
+    assert "visible subjects and scene are concretely defined" in lowered
+
+
+def test_anima严格两行且内容行先写具体事实只用逗号分隔tags():
+    scene = _unknown_object_scene()
+
+    prompt = profiles.deterministic_fallback("anima_tags", scene)
+    tags, prose = prompt.splitlines()
+
+    assert tags.startswith(profiles.anima_quality_tags("nsfw") + ", voluptuous mature beauty")
+    assert ";" not in tags
+    assert tags.endswith(",")
+    assert "palm-sized bronze disk with radial slots" in tags
+    assert prose
+    for generic in ("dramatic scene", "climactic moment", "dynamic composition",
+                    "action pose", "cinematic lighting"):
+        assert generic not in tags.lower()
+
+
+def test_anima把第二行标签式小段归一为连续英文句子且禁止冒号():
+    scene = {"rating": "nsfw", "actors": ["角色甲"]}
+    raw = (
+        profiles.anima_quality_tags("nsfw")
+        + ", adult woman, glossy jet-black hair, confinement cell,\n"
+        "Her body: lush mature figure, large exposed breasts heaving with labored breath. "
+        "Bound: iron chains slack at her wrists above her head. "
+        "Position: collapsed on the dungeon floor, limbs slack, head tilted back."
+    )
+
+    prompt = profiles.normalize_inline("anima_tags", raw, scene)
+    tags, prose = prompt.splitlines()
+
+    assert tags.endswith(",")
+    assert ":" not in tags
+    assert ":" not in prose
+    assert "Her body is shown with lush mature figure" in prose
+    assert "She is bound with iron chains slack at her wrists above her head" in prose
+    assert "She is positioned collapsed on the dungeon floor" in prose
+
+
+def test_anima修复Agent环境tags加分号人物文段且把具体动作复制到首行():
+    raw = (
+        "2girls, ancient stone chamber, low amber side light, cold air atmosphere\n"
+        "primary adult character: silver-haired swordswoman lying on stone, both wrists bound, "
+        "one hand gripping a broken sword; second adult character: dark-robed opponent kneeling; "
+        "the visual center: her hand pulling the sword free"
+    )
+    scene = {
+        "narrative": "她躺在石地上，双腕被缚，伸手拔出断剑。",
+        "actors": ["甲", "乙"],
+        "visual_facts": [{
+            "kind": "action",
+            "fact": "her hand pulling the broken sword free",
+            "evidence": "伸手拔出断剑",
+        }],
+        "rating": "sfw",
+    }
+
+    prompt = profiles.normalize_inline("anima_tags", raw, scene)
+    tags, prose = prompt.splitlines()
+
+    assert "silver-haired swordswoman lying on stone" in tags
+    assert "her hand pulling the sword free" in tags
+    assert "The primary adult character is" in prose
+    assert ";" not in tags
+
+
+def test_anima同义外貌不丢弃Agent动作成稿而由字段账本精确补齐():
+    scene = {
+        "narrative": "她躺在石地上，双腕被锁链束缚，伸手拔出断剑。",
+        "appearance": "narrow dark-red eyes, full mature lips",
+        "wardrobe": "a pale prisoner's robe",
+        "actors": ["甲"],
+        "rating": "sfw",
+    }
+    raw = (
+        "stone chamber, narrow dark-crimson eyes, full lips, torn prisoner robe, lying down, "
+        "both wrists bound, pulling a broken sword free\n"
+        "The adult woman lies on stone with both wrists bound while pulling a broken sword free."
+    )
+
+    normalized = profiles.normalize_inline("anima_tags", raw, scene)
+    completed, ledger = profiles.complete_field_coverage("anima_tags", normalized, scene)
+
+    assert "pulling a broken sword free" in completed
+    assert "narrow dark-red eyes" in completed.splitlines()[0]
+    assert "narrow dark-red eyes" in completed.splitlines()[1]
+    assert ledger["appearance"]["covered"] is True
+
+
+@pytest.mark.parametrize("profile", profiles.PROFILE_IDS)
+def test_四种profile都保留未知专名物件的材质形态运动功能释义(profile):
+    prompt = profiles.deterministic_fallback(profile, _unknown_object_scene()).lower()
+
+    for component in ("bronze disk", "radial slots", "rotating", "mechanical key"):
+        assert component in prompt
 
 
 def test_未知profile拒绝():

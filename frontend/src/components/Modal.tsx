@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 
 function useEsc(onCancel: () => void) {
   useEffect(() => {
@@ -15,16 +16,27 @@ interface ConfirmProps {
   cancelText?: string;
   danger?: boolean;
   busy?: boolean;
+  closeOnBackdrop?: boolean;
+  portal?: boolean;
+  overlayClassName?: string;
   onConfirm: () => void;
   onCancel: () => void;
 }
 
+export function shouldCancelConfirmFromBackdrop(closeOnBackdrop: boolean, busy: boolean): boolean {
+  return closeOnBackdrop && !busy;
+}
+
 export function ConfirmModal({
-  title, message, confirmText = "确认", cancelText = "取消", danger, busy = false, onConfirm, onCancel,
+  title, message, confirmText = "确认", cancelText = "取消", danger, busy = false,
+  closeOnBackdrop = true, portal = false, overlayClassName = "", onConfirm, onCancel,
 }: ConfirmProps) {
   useEsc(() => { if (!busy) onCancel(); });
-  return (
-    <div className="modal-mask" onClick={() => !busy && onCancel()}>
+  const content = (
+    <div
+      className={`modal-mask ${overlayClassName}`.trim()}
+      onClick={() => { if (shouldCancelConfirmFromBackdrop(closeOnBackdrop, busy)) onCancel(); }}
+    >
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <h3>{title}</h3>
         {message && <p style={{ color: "#666", marginTop: 0 }}>{message}</p>}
@@ -43,6 +55,7 @@ export function ConfirmModal({
       </div>
     </div>
   );
+  return portal && typeof document !== "undefined" ? createPortal(content, document.body) : content;
 }
 
 interface AlertProps {

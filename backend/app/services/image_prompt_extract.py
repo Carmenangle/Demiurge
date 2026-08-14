@@ -39,7 +39,9 @@ _INLINE_PLAN_INSTRUCTION = (
     "\n\n【自动插画计划】正文仍按剧情自然推进，并把完整可见正文放在 <content>...</content> 中。"
     "正文要求的篇幅只统计 <content> 内实际向用户展示的剧情文字；think、状态块、表格块、"
     "illustration 块及 profile_prompt 都不计入正文，必须先让 <content> 独立达到预设或用户要求的篇幅，"
-    "不得因为同轮还要生成提示词而缩短剧情。每轮必须选择本轮正文中视觉张力最强、"
+    "不得因为同轮还要生成提示词而缩短剧情。写正文前，先在内部推演中确定本轮冲突、转折结果、"
+    "唯一高潮画面时刻及该时刻必须可见的人物关系；正文围绕这个已规划高潮自然推进，但不得为迁就画面篡改剧情。"
+    "每轮必须选择本轮正文中视觉张力最强、"
     "最能代表剧情变化的高潮画面，在全部正文与状态块之后追加一个内部块，不得省略。"
     "安静对话也必须选择人物关系、目光、动作或关键物件发生变化的最强瞬间，不得改画成无关静态肖像。"
     "anchor 必须逐字摘录提示词所描绘的高潮动作所在段落的最后一句，供图片插回原位；"
@@ -57,8 +59,28 @@ _INLINE_PLAN_INSTRUCTION = (
     "subjects 必须列出高潮画面中每一名实际可见的角色，name 必须逐字使用角色基础外貌清单中的角色名；"
     "不得漏掉互动中的次要角色，不得加入未出场角色，并用 weight 表示视觉权重（0.5~2.0）；"
     "上述字段与 subjects.description、prompt 是结构化画面草稿；prompt 只补充未覆盖的动作和环境事实。"
-    "禁止所有字段等密度堆词，禁止为填字段创造剧情不存在的物体、衣着或动作。"
+    "禁止所有字段等密度堆词。采用‘硬事实锁＋开放视觉槽’：在场人物、稳定外貌、正文明确的当前服装、"
+    "动作、关系、地点和剧情结果是硬事实锁，必须逐项保留且禁止改写；正文没有明确规定的微动作、姿态、"
+    "视线、镜头、构图、光影、天气表现、背景活动与材质细节是开放视觉槽，必须根据当前时间、地点、天气、"
+    "情绪、人物处境和视觉因果进行合理联想。执行‘缺失硬事实补全’：生成完整画面所需的当前服装、具体动作或姿态、"
+    "地点环境、人物位置等任一项若正文没有给出，必须补出一个具体答案，并以现有上下文作为依据；不得留空、不得使用占位语、"
+    "不得退回通用模板。例如正午初到城市且正文未规定姿势时，可联想到人物抬手遮阳，"
+    "并用俯视视角展示城市纵深。开放视觉槽不得引入重要新人物、关键道具、新事件，不得改变硬事实或剧情结果。"
     "唯一高潮视觉命题必须保留本轮造成剧情状态变化的动作；必须保留动作主体、关键道具和动作结果的因果链，"
+    "同一时刻并行发生的身体动作、接触关系和人物相对位置必须作为一个复合画面同时写出，"
+    "禁止只保留其中最容易翻译的俯身、躺卧或表情；必须明确谁对谁做什么、另一人处于什么位置和状态。"
+    "若画面是时间跳转后的末尾揭示场景，必须以末尾场景为锚点，并把该时刻仍然持续有效的束缚方式、"
+    "关键道具及四肢姿态逐项写入 subjects.description 和 profile_prompt；禁止回跳到前一时段的高潮。"
+    "visual_facts 是通用画面事实清单，必须覆盖高潮窗口里能直接画出的主体、动作、姿态、接触关系、"
+    "当前服装、关键道具、地点环境和空间关系，最多12项；每项包含 kind、英文 fact、正文逐字 evidence。"
+    "kind 可按本轮内容自由命名，不限人物、动作、姿态、束缚、服装、道具、环境、损伤或空间关系；"
+    "fact 必须是能直接画出的具体英文事实，evidence 必须逐字摘自同一高潮画面附近正文。"
+    "所有 visual_facts 必须逐项进入 profile_prompt；不得加入没有正文证据的事实。正文明确出现的任何关键物件"
+    "都不得因词典缺词、专名难译或没有可靠英文专业名词而丢弃。已有可靠通用英文名时直接使用；没有时禁止音译、"
+    "照抄专名或写成 unknown object，而要按可见身份展开为具体英文描述：先写材质，再写几何外形与尺寸尺度，"
+    "再写可见结构或运动方式，最后写它在当前画面中的功能及与人物/环境的实际交互。只写正文能够支持的维度；"
+    "不可见的内部原理不得猜测。该规则适用于器具、机关、法器、刑具、容器、载具、建筑构件及其他所有物件，"
+    "不是任何单个物件的特例。"
     "静态肖像、表情特写或事后姿态只能作为次级视觉信息，不得替代该动作链。"
     "subjects.description 必须先写世界书中的稳定基础外貌身份锚点，再合并本轮当前情况；"
     "披头散发、饰品松脱、服装变化只能覆盖对应当前状态，禁止因此丢掉发色、原发型/饰品、面容、体型等基础识别特征；"
@@ -71,7 +93,8 @@ _INLINE_PLAN_INSTRUCTION = (
     '<illustration>{"anchor":"正文原句","camera":"镜头",'
     '"visual_thesis":"唯一视觉命题","hierarchy":"主体层级","palette_material":"色彩材质母题",'
     '"lighting_logic":"光影因果","composition":"构图","aspect_ratio":"2:3","subjects":[{"name":"角色名","description":"视觉描述",'
-    '"weight":1.2}],"prompt":"动作, 环境, 光影, 氛围","profile_prompt":"完整英文成稿","motion":0}</illustration>'
+    '"weight":1.2}],"visual_facts":[{"kind":"action_or_prop","fact":"concrete visible fact in English",'
+    '"evidence":"正文逐字证据"}],"prompt":"动作, 环境, 光影, 氛围","profile_prompt":"完整英文成稿","motion":0}</illustration>'
 )
 
 
@@ -204,6 +227,37 @@ def build_fallback_content_tags(text: str) -> str:
     return ", ".join(dict.fromkeys(tags))
 
 
+def _repair_json_string_controls(payload: str) -> str:
+    """仅转义 JSON 字符串内部的裸控制符；结构错误仍交给 json.loads 拒绝。"""
+    output: list[str] = []
+    in_string = False
+    escaped = False
+    for char in payload:
+        if not in_string:
+            output.append(char)
+            if char == '"':
+                in_string = True
+            continue
+        if escaped:
+            output.append(char)
+            escaped = False
+        elif char == "\\":
+            output.append(char)
+            escaped = True
+        elif char == '"':
+            output.append(char)
+            in_string = False
+        elif char == "\n":
+            output.append("\\n")
+        elif char == "\r":
+            output.append("\\r")
+        elif char == "\t":
+            output.append("\\t")
+        else:
+            output.append(char)
+    return "".join(output)
+
+
 def extract_illustration_plan(
     reply: str,
     block_filter: Callable[[str], str] | None = None,
@@ -221,9 +275,16 @@ def extract_illustration_plan(
         return clean, {}
     try:
         payload = matches[-1].group(1)
+        # Claude 等模型可能在同一个 illustration JSON 字符串中插入一次新的
+        # <think>...</think> 后再续写。该段是续写控制文本，不是画面事实；先剥离，
+        # 可恢复前后本来连续的 JSON，而不是把整份同轮高潮计划降级为空。
+        payload = _THINK_RE.sub(" ", payload)
         if block_filter is not None:
             payload = block_filter(payload)
-        raw = json.loads(payload)
+        try:
+            raw = json.loads(payload)
+        except json.JSONDecodeError:
+            raw = json.loads(_repair_json_string_controls(payload))
     except (json.JSONDecodeError, TypeError, ValueError):
         return clean, {}
     if not isinstance(raw, dict):
@@ -266,6 +327,21 @@ def extract_illustration_plan(
                 "weight": weight,
             })
             weighted.append(f"({description}:{weight:g})")
+    visible_story = restore_jailbreak(visible_narrative_text(clean))
+    normalized_visual_facts: list[dict[str, str]] = []
+    visual_facts = raw.get("visual_facts")
+    if isinstance(visual_facts, list):
+        for item in visual_facts[:12]:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("kind") or "visual").strip()[:48]
+            fact = str(item.get("fact") or "").strip()
+            evidence = restore_jailbreak(str(item.get("evidence") or "")).strip()
+            if not fact or not evidence or not fact.isascii() or evidence not in visible_story:
+                continue
+            normalized_visual_facts.append({
+                "kind": kind or "visual", "fact": fact, "evidence": evidence,
+            })
     motion_raw = raw.get("motion", 0)
     motion = max(0, min(3, int(motion_raw))) if isinstance(motion_raw, (int, float)) else 0
     assembled = ", ".join(part for part in (
@@ -273,7 +349,8 @@ def extract_illustration_plan(
         art_direction.get("hierarchy", ""),
         art_direction.get("palette_material", ""),
         art_direction.get("lighting_logic", ""),
-        camera, composition, *weighted, prompt,
+        camera, composition, *weighted,
+        *(item["fact"] for item in normalized_visual_facts), prompt,
     ) if part)
     if not (anchor and assembled):
         return clean, {}
@@ -285,6 +362,7 @@ def extract_illustration_plan(
         "profile_prompt": profile_prompt,
         "art_direction": art_direction,
         "subjects": normalized_subjects,
+        "visual_facts": normalized_visual_facts,
         "aspect_ratio": aspect_ratio,
         "actors": actors,
         "motion": motion,

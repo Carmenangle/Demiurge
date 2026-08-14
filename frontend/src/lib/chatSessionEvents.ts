@@ -90,13 +90,18 @@ function appendMediaSlot(message: ChatMessage, slotId: string, offset?: number):
   if (existing.some((part) => part.slotId === slotId)) return message;
   if (typeof offset === "number" && !message.parts) {
     const index = Math.max(0, Math.min(message.text.length, Math.round(offset)));
+    const before = message.text.slice(0, index);
+    const after = message.text.slice(index);
+    // 图片块固定从高潮画面句后的新行开始；保留原正文换行数量，不改变文本内容。
+    const slotPrefix = before && !before.endsWith("\n") ? "\n" : "";
+    const slotSuffix = after && !after.startsWith("\n") ? "\n" : "";
     return {
       ...message,
       parts: [
-        ...(index ? [{ type: "text" as const, text: message.text.slice(0, index) }] : []),
+        ...(index ? [{ type: "text" as const, text: before + slotPrefix }] : []),
         { type: "media-slot", slotId, status: "pending" },
         ...(index < message.text.length
-          ? [{ type: "text" as const, text: message.text.slice(index) }]
+          ? [{ type: "text" as const, text: slotSuffix + after }]
           : []),
       ],
     };
@@ -110,13 +115,18 @@ function appendMediaSlot(message: ChatMessage, slotId: string, offset?: number):
 export function resolveMediaSlot(
   current: ChatMessage[], messageId: string, slotId: string, url: string,
   mediaType: "image" | "video" = "image", regeneration?: RegenerationSnapshot,
+  generationId?: string,
 ): ChatMessage[] {
   return current.map((message) => message.id !== messageId ? message : {
     ...message,
     parts: (message.parts || []).map((part) =>
       (part.type === "media-slot" || part.type === "image" || part.type === "video")
         && part.slotId === slotId
-        ? { type: mediaType, url, slotId, status: "ready", ...(regeneration ? { regeneration } : {}) }
+        ? {
+          type: mediaType, url, slotId, status: "ready" as const,
+          ...(regeneration ? { regeneration } : {}),
+          ...(generationId ? { generationId } : {}),
+        }
         : part),
   });
 }
