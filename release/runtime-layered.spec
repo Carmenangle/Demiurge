@@ -13,7 +13,9 @@ icon = os.environ.get("LAF_BUILD_ICON") or None
 
 datas = []
 binaries = []
-hiddenimports = ["app.main", *sorted(sys.stdlib_module_names)]
+# External RAG packages are deliberately excluded from Analysis, so their
+# standard-library-only imports are not discovered from bytecode.
+hiddenimports = ["app.main", "unittest.mock", *sorted(sys.stdlib_module_names)]
 for module in ("chromadb", "langchain_chroma", "langgraph", "langchain_mcp_adapters"):
     module_datas, module_binaries, module_hidden = collect_all(module)
     datas += module_datas

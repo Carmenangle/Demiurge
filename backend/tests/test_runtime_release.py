@@ -38,6 +38,7 @@ def test_full_rag_keeps_application_outside_frozen_base(tmp_path):
     spec = (ROOT / "release" / "runtime-layered.spec").read_text(encoding="utf-8")
     assert 'entry[0].startswith("app.")' in spec
     assert "sys.stdlib_module_names" in spec
+    assert '"unittest.mock"' in spec
     assert '"sentence_transformers", "transformers", "torch"' in spec
 
 
