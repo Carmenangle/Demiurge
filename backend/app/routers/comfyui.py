@@ -314,6 +314,25 @@ def local_view(path: str, request: Request):
     )
 
 
+class MergeAudioRequest(BaseModel):
+    thread_id: str
+    message_id: str
+
+
+@router.post("/merge-audio")
+def merge_audio(req: MergeAudioRequest) -> dict[str, object]:
+    """把一条消息的音频分条按顺序拼接成完整版，落盘并回写快照（刷新后仍在）。
+
+    幂等：已合并过（快照含 merged- 槽）时直接返回既有 URL。失败返回 400。
+    """
+    from app.services import audio_merge
+    try:
+        url = audio_merge.merge_audio_for_message(req.thread_id, req.message_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "url": url}
+
+
 # ===== 上网素材：联网搜索下载的图片存到 outputDir/_web_materials/ =====
 
 class WebMaterialSaveRequest(BaseModel):

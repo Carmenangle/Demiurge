@@ -305,6 +305,7 @@ export function ChatView({
     confirmReq, compact, compacting, contextReminder, dismissContextReminder,
     clearHome, clearCache, reloadFromSnapshot,
     editMessage, deleteMessage, regenerateMessage, createCheckpoint, messagesUpTo,
+    mergeAudioTracks,
   } = useChatSession({
     repo, settings, setGeneratedCover, chat, genModel, videoModel, workMode,
     size: resolvedImageSize.size,
@@ -680,6 +681,7 @@ export function ChatView({
                   onDelete={handleDeleteMessage}
                   onCreateCheckpoint={hasRepo ? handleCreateCheckpoint : undefined}
                   onBranch={hasRepo && repo?.parentId && onBranch ? handleBranch : undefined}
+                  onMergeAudio={mergeAudioTracks}
                   visualCiRepoId={repo?.id}
                   visualCiOutputDir={settings.outputDir}
                 />

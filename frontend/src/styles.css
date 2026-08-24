@@ -3738,6 +3738,36 @@ textarea.state-value { min-height: 58px; }
   margin-top: -6px;
 }
 
+/* 音频分条拼接完整版按钮 */
+.audio-merge-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 2px;
+}
+
+.audio-merge-bar .btn-sm {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 12px;
+  border-radius: 999px;
+  background: rgba(139, 92, 246, 0.12);
+  border: 1px solid rgba(139, 92, 246, 0.35);
+  color: #a78bfa;
+  cursor: pointer;
+}
+
+.audio-merge-bar .btn-sm:hover:not(:disabled) {
+  background: rgba(139, 92, 246, 0.22);
+}
+
+.audio-merge-bar .btn-sm:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
 .img-tool {
   display: flex;
   align-items: center;

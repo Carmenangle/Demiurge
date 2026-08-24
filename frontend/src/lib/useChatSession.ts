@@ -13,6 +13,7 @@ import type { Template } from "../api/workflows";
 import {
   comfyStatus, startComfy, submitGraph, submitWorkflow, interruptComfy,
   saveLocalSrc, localViewUrl, uploadImage, finalizeGeneration as persistWorkflowGeneration,
+  mergeAudio,
   type GenResult,
 } from "../api/comfyui";
 import { listLoras } from "../api/loras";
@@ -1151,6 +1152,38 @@ export function useChatSession(deps: ChatSessionDeps) {
       }
     }
   };
+
+  // 音频分条按顺序拼接完整版：后端 ffmpeg concat + 落盘回写快照，
+  // 成功后把 merged part 追加进当前消息（刷新后从快照恢复，仍显示完整版）。
+  const mergeAudioTracks = async (messageId: string) => {
+    const msg = messagesRef.current.find((m) => m.id === messageId);
+    const tracks = (msg?.parts || []).filter(
+      (p) => p.type === "audio" && p.url && !(p.slotId || "").startsWith("merged-"),
+    );
+    if (tracks.length < 2) {
+      console.warn("[merge-audio] 分条音频不足，跳过", { messageId, count: tracks.length });
+      return;
+    }
+    try {
+      const r = await mergeAudio({ threadId, messageId });
+      if (r.ok && r.url) {
+        setMessages((current) => current.map((m) => m.id === messageId ? {
+          ...m,
+          parts: [...(m.parts || []), {
+            type: "audio" as const, url: r.url, slotId: `merged-${messageId}`,
+            status: "ready" as const, kind: "audio" as const, speaker: "完整版",
+          }],
+        } : m));
+        onNotify?.("完整版音频已生成", "success");
+      } else {
+        console.error("[merge-audio] 后端返回异常", { threadId, messageId, r });
+        onNotify?.("音频拼接失败", "error");
+      }
+    } catch (error) {
+      console.error("[merge-audio]", { threadId, messageId, error });
+      onNotify?.("音频拼接失败", "error");
+    }
+  };
   // APPEND3_HERE
 
   // /s 启动：取最近一张已确认的工作流卡，用抓取到的画布工作流提交生成
@@ -1752,5 +1785,6 @@ export function useChatSession(deps: ChatSessionDeps) {
     clearHome, clearCache: clearCacheAction, reloadFromSnapshot,
     editMessage, deleteMessage, regenerateMessage,
     checkpoints, createCheckpoint, restoreCheckpoint, deleteCheckpoint, messagesUpTo,
+    mergeAudioTracks,
   };
 }

@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
-import { Bot, Brush, Check, ChevronDown, CopyPlus, CornerDownRight, Download, ExternalLink, Flag, GitBranch, Image as ImageIcon, Images, MessageCircle, MoreHorizontal, Pause, Pencil, Play, Plus, RotateCw, ScanText, Search, Send, Sparkles, Trash2, Video, Workflow, Wrench, X } from "lucide-react";
+import { Bot, Brush, Check, ChevronDown, CopyPlus, CornerDownRight, Download, ExternalLink, Flag, GitBranch, Image as ImageIcon, Images, Merge, MessageCircle, MoreHorizontal, Pause, Pencil, Play, Plus, RotateCw, ScanText, Search, Send, Sparkles, Trash2, Video, Workflow, Wrench, X } from "lucide-react";
 import type { AgentRoute, ChatMessage, MsgPart, PromptApproval, RouteChoice } from "../../types/chat";
 import type { AssistantAvatarState } from "../../lib/assistantAvatar";
 import { runScripts, Placement, type RegexScript } from "../../lib/regexEngine";
@@ -311,11 +311,12 @@ export function RouteChoiceCard({
   );
 }
 
-function AssistantMessageBase({ msg, streaming, avatarState = "default", portrait, displayRegex, depth, macros, onSendImage, onMaskImage, onRunCommand, onSetCover, onPromptApproval, onRouteChoice, onRegenerate, regenerating = false, onEdit, onDelete, onCreateCheckpoint, onBranch, visualCiRepoId, visualCiOutputDir }: { msg: ChatMessage; streaming?: boolean; avatarState?: AssistantAvatarState; portrait?: { name: string; url: string } | null; displayRegex?: RegexScript[]; depth?: number; macros?: { char: string; user: string }; onSendImage: (url: string) => void; onMaskImage?: (url: string) => void; onRunCommand?: (cmd: string) => void; onSetCover?: (url: string) => void; onPromptApproval?: (approval: PromptApproval, action: "submit" | "change" | "cancel", editedPrompt?: string) => Promise<void>; onRouteChoice?: (choice: RouteChoice, route: AgentRoute) => Promise<void>; onRegenerate?: (messageId: string, slotId?: string) => void; regenerating?: boolean; onEdit?: (id: string, text: string) => void; onDelete?: (id: string) => void; onCreateCheckpoint?: (id: string) => void; onBranch?: (id: string) => void; visualCiRepoId?: string; visualCiOutputDir?: string }) {
+function AssistantMessageBase({ msg, streaming, avatarState = "default", portrait, displayRegex, depth, macros, onSendImage, onMaskImage, onRunCommand, onSetCover, onPromptApproval, onRouteChoice, onRegenerate, regenerating = false, onEdit, onDelete, onCreateCheckpoint, onBranch, onMergeAudio, visualCiRepoId, visualCiOutputDir }: { msg: ChatMessage; streaming?: boolean; avatarState?: AssistantAvatarState; portrait?: { name: string; url: string } | null; displayRegex?: RegexScript[]; depth?: number; macros?: { char: string; user: string }; onSendImage: (url: string) => void; onMaskImage?: (url: string) => void; onRunCommand?: (cmd: string) => void; onSetCover?: (url: string) => void; onPromptApproval?: (approval: PromptApproval, action: "submit" | "change" | "cancel", editedPrompt?: string) => Promise<void>; onRouteChoice?: (choice: RouteChoice, route: AgentRoute) => Promise<void>; onRegenerate?: (messageId: string, slotId?: string) => void; regenerating?: boolean; onEdit?: (id: string, text: string) => void; onDelete?: (id: string) => void; onCreateCheckpoint?: (id: string) => void; onBranch?: (id: string) => void; onMergeAudio?: (messageId: string) => Promise<void>; visualCiRepoId?: string; visualCiOutputDir?: string }) {
   const [showThinking, setShowThinking] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
+  const [mergingAudio, setMergingAudio] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     if (!menuOpen) return;
@@ -425,6 +426,13 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
     }
     return null;
   };
+  // 音频分条拼接完整版：≥2 段 ready 分条且尚无 merged 结果时显示按钮
+  const audioTracks = (msg.parts || []).filter(
+    (p) => p.type === "audio" && p.url && !(p.slotId || "").startsWith("merged-"),
+  );
+  const hasMergedTrack = (msg.parts || []).some(
+    (p) => p.type === "audio" && (p.slotId || "").startsWith("merged-"),
+  );
   return (
     <div className="msg-bot">
       <div className={`bot-avatar bot-avatar-${avatarState}`}>
@@ -582,6 +590,22 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
         ) : cleanText ? (
           <div className="bot-text bot-html" dangerouslySetInnerHTML={{ __html: renderMarkdown(cleanText) }} />
         ) : null}
+        {audioTracks.length >= 2 && !hasMergedTrack && onMergeAudio && (
+          <div className="audio-merge-bar">
+            <button
+              className="btn btn-sm"
+              disabled={mergingAudio}
+              onClick={async () => {
+                setMergingAudio(true);
+                try { await onMergeAudio(msg.id); } finally { setMergingAudio(false); }
+              }}
+            >
+              {mergingAudio
+                ? <><span className="bot-spinner" /> 拼接中…</>
+                : <><Merge size={14} /> 拼接完整版（{audioTracks.length} 段按顺序）</>}
+            </button>
+          </div>
+        )}
         {msg.promptApproval && (
           <PromptApprovalCard approval={msg.promptApproval} onAction={onPromptApproval} />
         )}

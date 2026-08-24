@@ -575,3 +575,29 @@ def append_media_slot(thread_id: str, message_id: str, slot_id: str, *,
             _save_unlocked(thread_id, items)
             return True
     return False
+
+
+def append_ready_part(thread_id: str, message_id: str, part: dict) -> bool:
+    """向指定消息末尾追加一个 ready 媒体 part（如合并音频结果），保留已有 parts。
+
+    幂等：同 slotId 的 part 已存在时直接返回 True（合并结果落盘不重复追加）。
+    """
+    if not message_id or not isinstance(part, dict) or not part.get("slotId"):
+        return False
+    slot_id = str(part["slotId"])
+    with _thread_lock(thread_id):
+        items = load(thread_id)
+        for index, item in enumerate(items):
+            if not isinstance(item, dict) or item.get("id") != message_id:
+                continue
+            parts = list(item.get("parts") or [])
+            if any(isinstance(p, dict) and p.get("slotId") == slot_id for p in parts):
+                return True
+            # 纯文本消息还没有 parts：先补一条完整正文 text part，避免媒体 part 顶掉正文
+            if not parts and item.get("text"):
+                parts = [{"type": "text", "text": item["text"]}]
+            parts.append(part)
+            items[index] = {**item, "parts": parts}
+            _save_unlocked(thread_id, items)
+            return True
+    return False
