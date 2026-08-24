@@ -1062,19 +1062,34 @@ export function useChatSession(deps: ChatSessionDeps) {
   const submitAudio = async (lines: AudioDialogueLine[], messageId: string) => {
     const preset = settings.mediaInsert?.[repo?.id || ""];
     const audioTemplateId = preset?.audioTemplateId;
-    if (!audioTemplateId) return;
+    if (!audioTemplateId) {
+      console.warn("[auto-audio] 跳过：未配置音频模板", { repoId: repo?.id, mediaInsert: settings.mediaInsert });
+      return;
+    }
     const tpl = templates.find((t) => t.id === audioTemplateId);
-    if (!tpl) return;
+    if (!tpl) {
+      console.warn("[auto-audio] 跳过：模板不存在", { audioTemplateId, templates: templates.map((t) => t.id) });
+      return;
+    }
     // 未配置参考音轨的角色台词会静默跳过——明确提示一次，避免用户以为配音漏了
     const skipped = skippedAudioSpeakers(preset, lines);
     if (skipped.length > 0) {
+      const configured = Object.keys(preset?.characterVoices || {});
+      console.warn("[auto-audio] 跳过未配置音轨的角色", {
+        skipped, configuredVoices: configured, lines: lines.map((l) => `${l.speaker}:${l.text}`),
+      });
       onNotify?.(
-        `未配置音轨，已跳过配音：${skipped.join("、")}（在「媒体插入」设置里为角色配置音色）`,
+        `未配置音轨，已跳过配音：${skipped.join("、")}（已配置：${configured.join("、") || "无"}，在「媒体插入」设置里为角色配置音色）`,
         "info",
       );
     }
     const resolvable = resolvableAudioLines(preset, lines);
-    if (!resolvable.length) return;
+    if (!resolvable.length) {
+      console.warn("[auto-audio] 无可配音台词行", {
+        lines: lines.map((l) => ({ speaker: l.speaker, text: l.text })),
+      });
+      return;
+    }
     const outputNodeIds = tpl.primary_output_node_id ? [tpl.primary_output_node_id] : [];
 
     let index = 0;

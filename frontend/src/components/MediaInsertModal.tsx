@@ -53,14 +53,10 @@ function initialRows(preset?: MediaInsertPreset, cardName?: string, cardNames: s
   return rows.length ? rows : [{ name: "" }];
 }
 
-function initialVoiceRows(preset?: MediaInsertPreset, cardNames: string[] = []): VoiceRow[] {
+function initialVoiceRows(preset?: MediaInsertPreset, _cardNames: string[] = []): VoiceRow[] {
   const map = preset?.characterVoices || {};
   const rows: VoiceRow[] = Object.entries(map).map(([name, v]) => ({ name, ...v }));
-  // 绑定卡角色自动预填一行（音轨是每个在场角色都要准备的，预填减少录入）
-  const existing = new Set(rows.map((r) => r.name));
-  for (const n of cardNames) {
-    if (n && !existing.has(n)) rows.push({ name: n });
-  }
+  // 不再自动预填绑定卡角色——与 LoRA 区一致：用户删除后保存，下次打开不应又被加回。
   return rows.length ? rows : [{ name: "" }];
 }
 

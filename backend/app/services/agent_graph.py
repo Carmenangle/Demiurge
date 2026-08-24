@@ -1510,6 +1510,10 @@ def _emit_roleplay_ready(ctx: dict, out: dict) -> bool:
     for rec in out.get("image_recs") or []:
         sink({"image": rec.get("url"), "id": rec.get("id"),
               "regeneration": rec.get("regeneration")})
+    # 音频对白配音与插画同属即时通道：漏发会导致 eager 分支跳过 audio_request，
+    # 前端永远收不到台词（日志有 emit、SSE 无事件）。格式对齐 agent_graph 的 yield。
+    for rec in out.get("audio_recs") or []:
+        sink({"audio_request": {"lines": rec.get("lines") or []}, "id": rec.get("id")})
     return True
 
 

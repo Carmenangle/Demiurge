@@ -2257,6 +2257,26 @@ def test_正文最终化后在记忆维护前立即发插画请求():
     ]
 
 
+def test_正文最终化即时通道补发音频对白请求():
+    # 回归：audio_recs 漏发会导致 eager 分支跳过 audio_request，前端永远收不到台词。
+    emitted = []
+    out = {
+        "result_text": "最终正文",
+        "audio_recs": [{
+            "id": "audio-req-work-3",
+            "lines": [{"speaker": "虞妙玥", "text": "我认输。",
+                       "emotion": {"neutral": 1}}],
+        }],
+    }
+    assert ag._emit_roleplay_ready(_ctx(stream_sink=emitted.append), out) is True
+    assert emitted == [
+        {"replace": "最终正文"},
+        {"audio_request": {
+            "lines": [{"speaker": "虞妙玥", "text": "我认输。", "emotion": {"neutral": 1}}],
+        }, "id": "audio-req-work-3"},
+    ]
+
+
 def test_独立表格维护只写数据库且不把维护响应放进对话(monkeypatch, tmp_path):
     from app.services import table_store
 
