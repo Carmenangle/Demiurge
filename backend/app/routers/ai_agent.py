@@ -290,6 +290,27 @@ class IllustrationClaimRequest(BaseModel):
     slot_id: str
 
 
+class EnsureAudioSlotRequest(BaseModel):
+    thread_id: str
+    message_id: str
+    slot_id: str
+    speaker: str = ""
+    seq: int | None = None
+    total: int | None = None
+
+
+@router.post("/image-agent/ensure-audio-slot")
+def ensure_audio_slot(req: EnsureAudioSlotRequest) -> dict[str, bool]:
+    """音频对白槽补写快照（追加式，保留已有图片/视频槽）。前端提交配音前调用，
+    保证 finalize 时 resolve_media_slot 能找到槽位并原位回填音频 URL。"""
+    from app.services import generation_store
+    generation_store.persist_audio_slot(
+        thread_id=req.thread_id, message_id=req.message_id, slot_id=req.slot_id,
+        speaker=req.speaker or None, seq=req.seq, total=req.total,
+    )
+    return {"ok": True}
+
+
 @router.post("/image-agent/illustration-claim")
 def illustration_claim(req: IllustrationClaimRequest) -> dict[str, bool]:
     """ComfyUI 提交前认领权威插画槽；重复事件不得产生第二个任务。"""

@@ -595,6 +595,20 @@ export function reportAudioSubmission(payload: {
     source: payload.source || "automatic",
   });
 }
+
+export function ensureAudioSlot(payload: {
+  threadId: string; messageId: string; slotId: string;
+  speaker?: string; seq?: number; total?: number;
+}) {
+  return apiPost<{ ok: boolean }>("/ai/image-agent/ensure-audio-slot", {
+    thread_id: payload.threadId,
+    message_id: payload.messageId,
+    slot_id: payload.slotId,
+    speaker: payload.speaker || "",
+    seq: payload.seq,
+    total: payload.total,
+  });
+}
 export function listChatQueueTasks(threadId = "") {
   return apiGet<{ tasks: ChatQueueTask[] }>(`/ai/chat-queue?thread_id=${encodeURIComponent(threadId)}`);
 }

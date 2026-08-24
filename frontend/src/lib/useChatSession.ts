@@ -21,7 +21,7 @@ import {
   saveSnapshot, fetchSnapshot, fetchAgentRunning, cancelAgent,
   fetchInspiration, regenerateImage as replayImageGeneration,
   claimIllustrationSubmission, reportIllustrationFailure, reportIllustrationSubmission,
-  reportAudioSubmission,
+  reportAudioSubmission, ensureAudioSlot,
   genProfilePrompt, listGenerations,
   type AgentInvocation,
 } from "../api/ai";
@@ -1124,6 +1124,13 @@ export function useChatSession(deps: ChatSessionDeps) {
           kind: "audio" as const, speaker: line.speaker, seq, total: resolvable.length,
         }],
       } : m));
+      // 槽位补写后端快照：finalize 时 resolve_media_slot 需在快照里命中该 slot，
+      // 否则 snapshotted=false → durableFinalizeSucceeded=false → 前端不填充 → 音频不在对话。
+      if (threadId && threadId !== "home") {
+        void ensureAudioSlot({
+          threadId, messageId, slotId, speaker: line.speaker, seq, total: resolvable.length,
+        }).catch(() => undefined);
+      }
       try {
         const r = await submitWorkflow(audioTemplateId, values, settings.comfyuiUrl, line.text, [], "none");
         if (r.prompt_id) {

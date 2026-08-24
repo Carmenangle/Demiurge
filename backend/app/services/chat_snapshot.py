@@ -536,3 +536,42 @@ def ensure_media_slot(thread_id: str, message_id: str, slot_id: str,
             _save_unlocked(thread_id, items)
             return True
     return False
+
+
+def append_media_slot(thread_id: str, message_id: str, slot_id: str, *,
+                      kind: str = "audio", speaker: str | None = None,
+                      seq: int | None = None, total: int | None = None) -> bool:
+    """向指定消息末尾追加一个 pending 媒体槽，保留已有 parts（不覆盖图片/视频槽）。
+
+    与 ensure_media_slot 的差异：音频对白槽在正文最终化之后才由前端逐角色补写，
+    消息可能已含图片槽（同轮先出图），必须幂等追加而非按 offset 重建 parts。
+    kind/speaker/seq/total 随槽位落盘，供刷新恢复后气泡与画布楼层按角色分条展示。
+    """
+    if not message_id or not slot_id:
+        return False
+    with _thread_lock(thread_id):
+        items = load(thread_id)
+        for index, item in enumerate(items):
+            if not isinstance(item, dict) or item.get("id") != message_id:
+                continue
+            parts = list(item.get("parts") or [])
+            if any(isinstance(part, dict) and part.get("type") == "media-slot"
+                   and part.get("slotId") == slot_id for part in parts):
+                return True
+            # 纯文本消息还没有 parts：先补一条完整正文 text part，避免只渲染音频槽丢失正文
+            if not parts and item.get("text"):
+                parts = [{"type": "text", "text": item["text"]}]
+            slot: dict = {"type": "media-slot", "slotId": slot_id, "status": "pending"}
+            if kind:
+                slot["kind"] = kind
+            if speaker is not None:
+                slot["speaker"] = speaker
+            if seq is not None:
+                slot["seq"] = seq
+            if total is not None:
+                slot["total"] = total
+            parts.append(slot)
+            items[index] = {**item, "parts": parts}
+            _save_unlocked(thread_id, items)
+            return True
+    return False

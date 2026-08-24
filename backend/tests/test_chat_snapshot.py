@@ -520,3 +520,46 @@ def test_select_inspiration_过滤非http协议(monkeypatch, tmp_path):
     assert result == {"ok": True, "selected": ["http://a.com/1.png"]}
     loaded = chat_snapshot.load("thread")
     assert loaded[0]["inspiration"]["selected"] == ["http://a.com/1.png"]
+
+
+def test_音频槽追加保留已有图片槽并写入分条元数据(monkeypatch, tmp_path):
+    from app.services import repo_meta
+    monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
+    monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+    # 同轮先出图：消息已有图片槽
+    chat_snapshot.save("thread", [{
+        "id": "bot", "role": "assistant", "text": "正文",
+        "parts": [
+            {"type": "image", "url": "local://img", "slotId": "img-1", "status": "ready"},
+        ],
+    }])
+
+    assert chat_snapshot.append_media_slot(
+        "thread", "bot", "audio-0", speaker="虞妙玥", seq=1, total=2,
+    )
+    parts = chat_snapshot.load("thread")[0]["parts"]
+    # 图片槽保留，音频槽追加在末尾且带分条元数据
+    assert parts == [
+        {"type": "image", "url": "local://img", "slotId": "img-1", "status": "ready"},
+        {"type": "media-slot", "slotId": "audio-0", "status": "pending",
+         "kind": "audio", "speaker": "虞妙玥", "seq": 1, "total": 2},
+    ]
+
+
+def test_音频槽纯文本消息补正文且幂等(monkeypatch, tmp_path):
+    from app.services import repo_meta
+    monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
+    monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+    chat_snapshot.save("thread", [{
+        "id": "bot", "role": "assistant", "text": "她低声道：「我认输。」",
+    }])
+
+    assert chat_snapshot.append_media_slot("thread", "bot", "audio-0")
+    # 幂等：重复追加不产生第二个槽
+    assert chat_snapshot.append_media_slot("thread", "bot", "audio-0")
+    parts = chat_snapshot.load("thread")[0]["parts"]
+    assert parts == [
+        {"type": "text", "text": "她低声道：「我认输。」"},
+        {"type": "media-slot", "slotId": "audio-0", "status": "pending", "kind": "audio"},
+    ]
+

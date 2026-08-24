@@ -506,6 +506,20 @@ def persist_media_slot(thread_id: str, message_id: str, slot_id: str,
                      thread_id, message_id, slot_id, exc)
 
 
+def persist_audio_slot(thread_id: str, message_id: str, slot_id: str, *,
+                       speaker: str | None = None,
+                       seq: int | None = None, total: int | None = None) -> None:
+    """持久化音频对白槽（追加式，保留已有图片/视频槽）；失败不阻断配音任务。"""
+    try:
+        chat_snapshot.append_media_slot(
+            thread_id, message_id, slot_id,
+            kind="audio", speaker=speaker, seq=seq, total=total,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _LOG.warning("persist_audio_slot 落盘失败 thread=%s mid=%s slot=%s: %s",
+                     thread_id, message_id, slot_id, exc)
+
+
 def persist_illustration_submission(*, thread_id: str, message_id: str,
                                     slot_id: str, prompt_id: str) -> bool:
     """持久化自动插画的 ComfyUI 任务身份；失败不影响已提交的任务。"""
