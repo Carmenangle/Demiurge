@@ -1,5 +1,6 @@
-import type {
-  ControlType, ExposedField, ParsedField, ParsedNode,
+import {
+  VOICE_EMOTION_KEYS,
+  type ControlType, type ExposedField, type ParsedField, type ParsedNode,
 } from "../api/workflows";
 
 export function inferWorkflowFieldControl(field: ParsedField): ControlType {
@@ -33,6 +34,13 @@ export function inferWorkflowFieldBinding(node: ParsedNode, field: ParsedField):
   if (type.includes("loadimage") && (name === "image" || name === "images")) return "base_image";
   if (type.includes("cliptextencode") && name === "text") {
     return /negative|负面|负向/.test(title) ? "negative_prompt" : "prompt";
+  }
+  // 音频（IndexTTS 系）：LoadAudio 参考音轨 / IndexTTS 台词与情感向量。
+  // 情感字段名大小写归一（节点 widget 名 Happy/Angry…，与语义绑定 voice_emotion_<key> 解耦）。
+  if (type.includes("loadaudio") && name === "audio") return "voice_reference";
+  if (type.includes("indextts")) {
+    if (name === "text") return "voice_text";
+    if ((VOICE_EMOTION_KEYS as readonly string[]).includes(name)) return `voice_emotion_${name}`;
   }
   return "";
 }

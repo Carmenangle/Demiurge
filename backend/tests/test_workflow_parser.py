@@ -86,3 +86,47 @@ def test_distinct_field_names_untouched():
     }
     names = [f["name"] for f in parse_workflow(wf)[0]["fields"]]
     assert names == ["width", "height", "batch_size"]
+
+
+def test_loadaudio_and_indextts_widget_names():
+    # 音频节点 widgets_values 应映射成真实字段名（audio / text / Happy…），而非 widget_N，
+    # 否则用户无从标注音频语义（参考音轨 / 台词 / 情感向量）。
+    wf = {
+        "nodes": [
+            {
+                "id": 1,
+                "type": "LoadAudio",
+                "inputs": [
+                    {"name": "audio", "link": None},
+                    {"name": "audioUI", "link": None},
+                    {"name": "upload", "link": None},
+                ],
+                "widgets_values": ["", None, None],
+            },
+            {
+                "id": 3,
+                "type": "IndexTTS25EmotionVectorNode",
+                "inputs": [
+                    {"name": "reference_audio", "link": 1},
+                    {"name": "text", "link": None},
+                    {"name": "Happy", "link": None},
+                    {"name": "Neutral", "link": None},
+                ],
+                "widgets_values": [
+                    "你好。", "ZH", 1, "on", 0.8, 0.8, 30, 3, 10, 0, 1500, 120, 200,
+                    True, 0, 0, 0, 0, 0, 0, 0, 0, 1, False, False,
+                ],
+            },
+        ]
+    }
+    nodes = parse_workflow(wf)
+    loadaudio = {f["name"]: f for f in nodes[0]["fields"]}
+    indextts = {f["name"]: f for f in nodes[1]["fields"]}
+    # LoadAudio：audio 字段正确映射，而非 widget_0
+    assert "audio" in loadaudio
+    assert "widget_0" not in loadaudio
+    # IndexTTS：text / Happy / Neutral 映射正确，带真实值
+    assert indextts["text"]["value"] == "你好。"
+    assert indextts["Happy"]["value"] == 0
+    assert indextts["Neutral"]["value"] == 1
+    assert "widget_0" not in indextts

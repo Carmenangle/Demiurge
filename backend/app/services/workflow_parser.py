@@ -23,6 +23,17 @@ WIDGET_NAMES: dict[str, list[str]] = {
     "LoraLoaderModelOnly": ["lora_name", "strength_model"],
     "LoadImage": ["image", "upload"],
     "SaveImage": ["filename_prefix"],
+    "LoadAudio": ["audio", "audioUI", "upload"],
+    "SaveAudio": ["filename_prefix"],
+    "IndexTTS25CacheControlNode": ["keep_models_cached"],
+    # 情感向量节点 widget 顺序（对照 IndexTTS-2.5 实际模板 JSON，情感字段首字母大写）。
+    # 语义绑定与节点字段名解耦：前端 inferWorkflowFieldBinding 靠 class_type + 字段名识别。
+    "IndexTTS25EmotionVectorNode": [
+        "text", "lang", "duration_factor", "do_sample_mode", "temperature", "top_p",
+        "top_k", "num_beams", "repetition_penalty", "length_penalty", "max_mel_tokens",
+        "max_tokens_per_sentence", "interval_silence_ms", "text_normalization", "seed",
+        "Happy", "Angry", "Sad", "Fear", "Hate", "Low", "Surprise", "Neutral", "use_random",
+    ],
     "ImageScale": ["upscale_method", "width", "height", "crop"],
     "PrimitiveNode": ["value"],
 }
