@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ChatMessage } from "../types/chat";
 import {
-  dropMediaSlot, pruneUnsubmittedMediaSlots, reduceChatStreamEvent, resolveMediaSlot,
+  appendAudioSlot, dropMediaSlot, pruneUnsubmittedMediaSlots, reduceChatStreamEvent, resolveMediaSlot,
   restoreSubmittedMediaSlots,
 } from "./chatSessionEvents";
 
@@ -149,6 +149,30 @@ describe("reduceChatStreamEvent", () => {
     }], "bot", "slot-1", "local://a.png", "image");
     expect(img[0].parts?.[0]).toEqual({
       type: "image", url: "local://a.png", slotId: "slot-1", status: "ready",
+    });
+  });
+
+  it("音频槽追加时保留正文（纯文本消息先转 text part）", () => {
+    const current: ChatMessage[] = [{
+      id: "bot", role: "assistant", text: "她低声道：「我认输。」",
+    }];
+    const next = appendAudioSlot(current, "bot", "audio-0", "虞妙玥", 1, 2);
+    expect(next[0].parts).toEqual([
+      { type: "text", text: "她低声道：「我认输。」" },
+      { type: "media-slot", slotId: "audio-0", status: "pending",
+        kind: "audio", speaker: "虞妙玥", seq: 1, total: 2 },
+    ]);
+    // 幂等：同 slot 不重复追加
+    const again = appendAudioSlot(next, "bot", "audio-0", "虞妙玥", 1, 2);
+    expect(again[0].parts).toHaveLength(2);
+    // 已有 parts 的消息（如同轮已插画）在末尾追加，不动已有内容
+    const withParts = appendAudioSlot([{
+      id: "bot", role: "assistant", text: "正文",
+      parts: [{ type: "image", url: "local://img", slotId: "img-1", status: "ready" }],
+    }], "bot", "audio-0", "虞妙玥", 1, 2);
+    expect(withParts[0].parts).toHaveLength(2);
+    expect(withParts[0].parts?.[0]).toEqual({
+      type: "image", url: "local://img", slotId: "img-1", status: "ready",
     });
   });
 

@@ -216,7 +216,10 @@ def finalize_workflow_batch(
 
     durable = repo_id != "home"
     cfg = EmbedConfig(embed_base, embed_key, embed_model)
-    tags = _extract_tags(prompt, chat_base, chat_key, chat_model) if durable else ""
+    # 标签提取仅服务图片/纯文字批次的入库检索；纯音频批次（自动配音）无图可索引，
+    # 跳过以免同步 LLM 调用（超时可达 200s）阻塞 finalize，让音频槽位迟迟不填充。
+    needs_tags = bool(images) or (not images and not videos and not audios and bool(prompt.strip()))
+    tags = _extract_tags(prompt, chat_base, chat_key, chat_model) if durable and needs_tags else ""
     messages: list[dict] = []
     results: list[dict] = []
     inline_target = bool(target_message_id and target_slot_id)

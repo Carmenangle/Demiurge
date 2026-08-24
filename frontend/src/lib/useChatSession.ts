@@ -59,7 +59,7 @@ import {
   audioTemplateValues, resolvableAudioLines, skippedAudioSpeakers, voiceReferenceFor,
 } from "./audioGeneration";
 import {
-  agentImageMessage, applyRouteChoice, bindMediaSlotPrompt, dropMediaSlot,
+  agentImageMessage, applyRouteChoice, bindMediaSlotPrompt, dropMediaSlot, appendAudioSlot,
   pruneUnsubmittedMediaSlots, reduceChatStreamEvent, resolveMediaSlot,
   restoreSubmittedMediaSlots, upsertMessages, workflowMessages,
 } from "./chatSessionEvents";
@@ -1116,14 +1116,9 @@ export function useChatSession(deps: ChatSessionDeps) {
         reference: uploadedRef,
         emotion: line.emotion,
       });
-      // 追加按角色分条的 audio 槽（生成中占位：角色名 + 第几条/总数），完成后由 pollResult 填充音频 URL
-      setMessages((current) => current.map((m) => m.id === messageId ? {
-        ...m,
-        parts: [...(m.parts || []), {
-          type: "media-slot" as const, slotId, status: "pending" as const,
-          kind: "audio" as const, speaker: line.speaker, seq, total: resolvable.length,
-        }],
-      } : m));
+      // 追加按角色分条的 audio 槽（生成中占位：角色名 + 第几条/总数），完成后由 pollResult 填充音频 URL。
+      // appendAudioSlot 会把纯文本消息先转成 text part，避免正文被槽位顶掉（图片插槽同款处理）。
+      setMessages((current) => appendAudioSlot(current, messageId, slotId, line.speaker, seq, resolvable.length));
       // 槽位补写后端快照：finalize 时 resolve_media_slot 需在快照里命中该 slot，
       // 否则 snapshotted=false → durableFinalizeSucceeded=false → 前端不填充 → 音频不在对话。
       if (threadId && threadId !== "home") {

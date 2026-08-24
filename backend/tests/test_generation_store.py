@@ -72,6 +72,39 @@ def test_workflow_batch_audio_empty_raises(monkeypatch):
         ))
 
 
+def test_workflow_batch_pure_audio_skips_tag_extraction(monkeypatch):
+    """纯音频批次不调 _extract_tags：标签只服务图片/文字入库，避免 LLM 慢调用阻塞 finalize。"""
+    generation_store._MEMORY_DONE.clear()
+    monkeypatch.setattr(generation_store.image_store, "save_local", lambda *a, **k: "C:/out/voice.wav")
+    monkeypatch.setattr(generation_store.chat_snapshot, "upsert", lambda *a, **k: None)
+    monkeypatch.setattr(generation_store.chat_memory, "append_message", lambda *a, **k: None)
+    calls = []
+    monkeypatch.setattr(generation_store, "_extract_tags", lambda *a, **k: calls.append(1) or "tag")
+    monkeypatch.setattr(generation_store, "_index_with_retry", lambda *a, **k: True)
+
+    generation_store.finalize_workflow_batch(**_args(
+        images=[],
+        audios=[{"filename": "voice.wav", "subfolder": "", "type": "output"}],
+    ))
+
+    assert calls == []
+
+
+def test_workflow_batch_images_still_extract_tags(monkeypatch):
+    """图片批次保留标签提取（资产库检索需要 tags）。"""
+    generation_store._MEMORY_DONE.clear()
+    monkeypatch.setattr(generation_store.image_store, "save_local", lambda *a, **k: "C:/out/a.png")
+    monkeypatch.setattr(generation_store.chat_snapshot, "upsert", lambda *a, **k: None)
+    monkeypatch.setattr(generation_store.chat_memory, "append_message", lambda *a, **k: None)
+    calls = []
+    monkeypatch.setattr(generation_store, "_extract_tags", lambda *a, **k: calls.append(1) or "tag")
+    monkeypatch.setattr(generation_store, "_index_with_retry", lambda *a, **k: True)
+
+    generation_store.finalize_workflow_batch(**_args())
+
+    assert calls == [1]
+
+
 def test_workflow_batch_keeps_online_image_when_save_fails(monkeypatch):
     generation_store._MEMORY_DONE.clear()
     monkeypatch.setattr(generation_store.image_store, "save_local", lambda *a, **k: (_ for _ in ()).throw(RuntimeError()))
