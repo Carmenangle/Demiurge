@@ -113,6 +113,17 @@ def read_repo_snapshot(base: str, repo_id: str) -> dict[str, Any] | None:
         return None
 
 
+def save_repo_snapshot(base: str, repo_id: str, book: dict[str, Any]) -> bool:
+    """把 worldbook dict 写回小仓库快照文件。快照不存在 → False。"""
+    if not (base and repo_id):
+        return False
+    p = repo_snapshot_path(base, repo_id)
+    if not p.parent.exists():
+        return False
+    p.write_text(json.dumps(book, ensure_ascii=False, indent=2), encoding="utf-8")
+    return True
+
+
 def _raw_entries(book: dict[str, Any]) -> list[dict[str, Any]]:
     raw = book.get("entries")
     values = raw.values() if isinstance(raw, dict) else raw

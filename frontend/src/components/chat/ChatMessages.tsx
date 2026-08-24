@@ -1,16 +1,17 @@
-import { memo, useEffect, useRef, useState } from "react";
-import { Bot, Brush, Check, ChevronDown, CopyPlus, CornerDownRight, Download, ExternalLink, Flag, GitBranch, Image as ImageIcon, Images, MessageCircle, MoreHorizontal, Pencil, Play, Plus, RotateCw, ScanText, Search, Send, Sparkles, Trash2, Video, Workflow, Wrench, X } from "lucide-react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { Bot, Brush, Check, ChevronDown, CopyPlus, CornerDownRight, Download, ExternalLink, Flag, GitBranch, Image as ImageIcon, Images, MessageCircle, MoreHorizontal, Pause, Pencil, Play, Plus, RotateCw, ScanText, Search, Send, Sparkles, Trash2, Video, Workflow, Wrench, X } from "lucide-react";
 import type { AgentRoute, ChatMessage, MsgPart, PromptApproval, RouteChoice } from "../../types/chat";
 import type { AssistantAvatarState } from "../../lib/assistantAvatar";
-import DOMPurify from "dompurify";
-import { marked } from "marked";
 import { runScripts, Placement, type RegexScript } from "../../lib/regexEngine";
+import { renderMarkdown } from "../../lib/renderMarkdown";
 import { substituteMacros } from "../../lib/chatMacros";
 import { userMessagePlainText, userMessageRichContent } from "../../lib/chatGeneration";
 import type { PortOp } from "../../api/ai";
+import { proxyImageUrl, selectInspiration as selectInspirationPost } from "../../api/ai";
 import type { RichContent } from "../RichInput";
 import { CopyButton } from "../CopyButton";
 import { openLightbox } from "../Lightbox";
+import { AudioPlayer } from "../AudioPlayer";
 import { VisualCiBadgeSlot } from "./VisualCiBadgeSlot";
 
 export { userMessagePlainText, userMessageRichContent } from "../../lib/chatGeneration";
@@ -48,19 +49,13 @@ function mediaFilename(url: string): string {
   return `download_${Date.now()}`;
 }
 
+// 秒 → mm:ss（时长/当前位置显示）
+// （实现见 components/AudioPlayer.tsx，聊天与画布共用）
+
 // AI 正文按 Markdown 渲染（**粗体**、# 标题、代码块、列表、表格等），同时保留卡内正则产出的
 // HTML（<status> 等带样式 <div>）：marked 把 Markdown 转 HTML 且原样透传已有 HTML，再统一消毒。
 // breaks:true → 单换行也成 <br>（扮演正文的分行有语义，对齐旧 pre-wrap 观感）。
-marked.setOptions({ breaks: true, gfm: true });
-function renderMarkdown(text: string): string {
-  // 允许内联 style（卡的状态栏全靠它）；禁脚本/事件/iframe 等由 DOMPurify 默认拦。
-  const html = marked.parse(text, { async: false }) as string;
-  return DOMPurify.sanitize(html, {
-    ADD_ATTR: ["style", "target"],
-    FORBID_TAGS: ["script", "style", "iframe", "form", "input", "button"],
-    FORBID_ATTR: ["onerror", "onload", "onclick"],
-  });
-}
+// 实现见 lib/renderMarkdown.ts（画布剧情节点同款渲染）。
 
 // 动图判定：GIF/WebP 用 <img> 渲染（原生循环、可放大），其余（mp4/webm/mov…）用 <video>。
 // ComfyUI 的动图/视频产物都进 msg.video，这里按扩展名/类型分流。
@@ -364,9 +359,14 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
   const renderMediaPart = (part: MsgPart | undefined, index: number) => {
     if (!part) return null;
     if (part.type === "media-slot") {
+      const isAudio = part.kind === "audio";
       return (
-        <div className={`media-slot media-slot-${part.status || "pending"}`} key={part.slotId || `slot-${index}`}>
-          {part.status === "failed" ? (part.error || "插画生成失败") : (
+        <div className={`media-slot media-slot-${part.status || "pending"}${isAudio ? " media-slot-audio" : ""}`} key={part.slotId || `slot-${index}`}>
+          {part.status === "failed" ? (
+            isAudio ? (part.error || `「${part.speaker || ""}」配音生成失败`) : (part.error || "插画生成失败")
+          ) : isAudio ? (
+            <><span className="bot-spinner" /><span>正在生成 {part.speaker || ""}（{part.seq ?? "?"}/{part.total ?? "?"}）…</span></>
+          ) : (
             <><span className="bot-spinner" /><span>插画生成中…</span></>
           )}
         </div>
@@ -378,6 +378,18 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
           {isAnimatedImage(part.url)
             ? <img src={part.url} alt="剧情插画" loading="lazy" onClick={() => openLightbox(part.url!)} />
             : <video src={part.url} controls loop playsInline />}
+          <div className="img-tools">
+            <a className="img-tool" href={part.url} target="_blank" rel="noreferrer"><ExternalLink size={14} /> 查看原文件</a>
+            <button className="img-tool" onClick={() => downloadMedia(part.url!)}><Download size={14} /> 下载</button>
+          </div>
+        </div>
+      );
+    }
+    if (part.type === "audio" && part.url) {
+      return (
+        <div className="img-card audio-bubble" key={part.slotId || part.url}>
+          {part.speaker && <div className="audio-speaker-label">{part.speaker}</div>}
+          <AudioPlayer src={part.url} />
           <div className="img-tools">
             <a className="img-tool" href={part.url} target="_blank" rel="noreferrer"><ExternalLink size={14} /> 查看原文件</a>
             <button className="img-tool" onClick={() => downloadMedia(part.url!)}><Download size={14} /> 下载</button>
@@ -533,6 +545,20 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
             </div>
           </div>
         )}
+        {msg.audio && (
+          <div className="img-card">
+            <AudioPlayer src={msg.audio} />
+            <div className="img-tools">
+              <a className="img-tool" href={msg.audio} target="_blank" rel="noreferrer">
+                <ExternalLink size={14} /> 查看原文件
+              </a>
+              <button className="img-tool" onClick={() => downloadMedia(msg.audio!)}><Download size={14} /> 下载</button>
+              <button className="img-tool" onClick={() => onSendImage(msg.audio!)}>
+                <Send size={14} /> 发送至对话
+              </button>
+            </div>
+          </div>
+        )}
         {editing ? (
           <div className="bot-edit">
             <textarea
@@ -602,14 +628,37 @@ export function assistantMessagePropsEqual(previous: AssistantMessageProps, next
 export const UserMessage = memo(UserMessageBase);
 export const AssistantMessage = memo(AssistantMessageBase, assistantMessagePropsEqual);
 
-// 灵感卡：联网搜到并提炼的提示词。代码块风格（深色等宽），右下角「插入对话」把提示词填进输入框。
+// 灵感卡：联网搜到并整理的「标题+内容」中文总结。代码块风格，右侧「插入对话」把内容作为文本填进输入框。
+// M1.2：图片搜索结果显示为缩略图网格，用户点选后持久化选中项。
 export function InspirationCard({
   data,
+  threadId,
+  messageId,
+  proxyUrl,
   onInsert,
 }: {
-  data: { query: string; prompt: string; tags: string[]; sources: { title: string; url: string }[] };
+  data: ChatMessage["inspiration"] & { images?: any[]; selected?: string[] };
+  threadId?: string;
+  messageId?: string;
+  proxyUrl?: string;
   onInsert: (text: string) => void;
 }) {
+  const images = data?.images || [];
+  const [selected, setSelected] = useState<string[]>(data?.selected || []);
+  useEffect(() => { setSelected(data?.selected || []); }, [data?.selected]);
+
+  const toggle = useCallback(async (url: string) => {
+    const next = selected.includes(url)
+      ? selected.filter((u) => u !== url)
+      : [...selected, url];
+    setSelected(next);
+    if (threadId && messageId) {
+      try {
+        await selectInspirationPost(threadId, messageId, next);
+      } catch { /* 后端更新失败不阻断本地状态 */ }
+    }
+  }, [selected, threadId, messageId]);
+
   return (
     <div className="msg-bot">
       <div className="bot-avatar"><Bot size={18} /></div>
@@ -617,12 +666,35 @@ export function InspirationCard({
         <div className="insp-card">
           <div className="insp-head">
             <Sparkles size={14} />
-            <span>灵感 · {data.query}</span>
+            <span>灵感 · {data?.title || ""}</span>
           </div>
-          <pre className="insp-prompt">{data.prompt}</pre>
-          {data.sources.length > 0 && (
+          <pre className="insp-prompt">{data?.content || ""}</pre>
+          {images.length > 0 && (
+            <div className="insp-images">
+              {images.map((img, i) => {
+                const src = proxyUrl ? proxyImageUrl(img.thumb_url || img.full_url, proxyUrl) : (img.thumb_url || img.full_url);
+                const sel = selected.includes(img.full_url);
+                return (
+                  <div
+                    key={img.full_url || i}
+                    className={`insp-thumb ${sel ? "sel" : ""}`}
+                    onClick={() => img.full_url && toggle(img.full_url)}
+                    title={img.title || img.source_url || ""}
+                  >
+                    <img src={src} alt={img.title || ""} loading="lazy"
+                      onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }} />
+                    {sel && <div className="insp-thumb-check">✓</div>}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          {selected.length > 0 && (
+            <div className="insp-selected">已选 {selected.length} 张图片</div>
+          )}
+          {(data?.sources || []).length > 0 && (
             <div className="insp-sources">
-              {data.sources.map((s) => (
+              {data!.sources.map((s) => (
                 <a key={s.url} href={s.url} target="_blank" rel="noreferrer" title={s.url}>
                   <ExternalLink size={11} /> {s.title || s.url}
                 </a>
@@ -630,11 +702,11 @@ export function InspirationCard({
             </div>
           )}
           <div className="insp-actions">
-            <CopyButton text={data.prompt} className="insp-insert" />
+            <CopyButton text={data?.content || ""} className="insp-insert" />
             <button
               className="insp-insert"
-              title="把这段提示词插入到输入框"
-              onClick={() => onInsert(data.prompt)}
+              title="把这段总结插入到输入框"
+              onClick={() => onInsert(data?.content || "")}
             >
               <CornerDownRight size={13} /> 插入对话
             </button>

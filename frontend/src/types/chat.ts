@@ -2,7 +2,7 @@ import type { PortOp } from "../api/ai";
 
 // 图文混排片段：文本/图片穿插渲染
 export interface MsgPart {
-  type: "text" | "image" | "video" | "masked-image" | "media-slot";
+  type: "text" | "image" | "video" | "audio" | "masked-image" | "media-slot";
   text?: string;  // type=text
   url?: string;   // type=image（dataURI 或 http URL）
   image?: string; // type=masked-image 的原图
@@ -13,6 +13,14 @@ export interface MsgPart {
   promptId?: string;
   error?: string;
   regeneration?: RegenerationSnapshot;
+  /** media-slot 的媒体类型提示（占位文案/进度用；音频槽 = "audio"） */
+  kind?: "image" | "video" | "audio";
+  /** 音频分条：角色名（对话气泡与画布剧情楼层的分条标签） */
+  speaker?: string;
+  /** 音频分条：第几条（1-based，占位进度 x/y） */
+  seq?: number;
+  /** 音频分条：总条数 */
+  total?: number;
 }
 
 export interface PromptApproval {
@@ -27,6 +35,12 @@ export interface PromptApproval {
 }
 
 export type AgentRoute = "answer" | "generate" | "img2img" | "analyze" | "video" | "inspire" | "tool_agent";
+
+/** 消息实际走到的 Agent 路由（调度主管分派结果）。
+ *  - 剧情节点 = roleplay / answer（roleplay 内部再串 world/recall/curator/judge）
+ *  - 生成节点 = generate / img2img / video / analyze
+ *  - 其余 = inspire / tool_agent / edit / clarify */
+export type MessageRoute = AgentRoute | "roleplay" | "edit" | "clarify";
 
 export interface RouteChoice {
   id: string;
@@ -56,6 +70,10 @@ export interface WorkflowRegeneration {
   comfyuiUrl: string;
   outputNodeIds: string[];
   prompt: string;
+  /** 生成元数据：模板名 / 主模型 / LoRA（卡片展示用） */
+  templateName?: string;
+  modelName?: string;
+  loraNames?: string[];
 }
 
 export interface TemplateRegeneration {
@@ -79,6 +97,7 @@ export interface ChatMessage {
   thinking?: string;
   image?: string;
   video?: string;   // 生成的视频地址（mp4/webm/gif，用 <video> 渲染）
+  audio?: string;   // 生成的音频地址（wav/mp3/flac…，用 <audio> 播放器渲染）
   regeneration?: RegenerationSnapshot; // 绑定该结果的不可变重生成参数，不含 API Key
   // 工作流节点卡：选中模板后把所选节点逐个提取，各自嵌入锁定的真实 ComfyUI 画布，纵向排列
   workflow?: {
@@ -96,15 +115,20 @@ export interface ChatMessage {
     images: string[];          // 本轮随文图片（dataURI/URL），set_image 按 image_index 取用
     status: "pending" | "applied" | "ignored";
   };
-  // 灵感卡：联网搜服装/发型/画风等 → 提炼的提示词（代码块样式，右下角可插入对话）
+  // 灵感卡：联网搜主题 → 整理成「标题+内容」中文总结（代码块样式，右下角可插入对话）
   inspiration?: {
-    query: string;
-    prompt: string;
-    tags: string[];
+    title: string;
+    content: string;
     sources: { title: string; url: string }[];
+    images?: Array<{ thumb_url: string; full_url: string; source_url: string; width?: number; height?: number; title?: string }>;
+    selected?: string[];
   };
   // 风格模板/艺术化修饰后的独立提示词审批卡，可在历史中继续操作。
   promptApproval?: PromptApproval;
   // Supervisor 无法高置信分派时显示的最小候选选择卡。
   routeChoice?: RouteChoice;
+  // 该条消息实际走到的 Agent 路由（调度主管分派结果，决定画布节点归属）。
+  route?: MessageRoute;
+  // 纯状态/Toast 提示（如「已提交到 ComfyUI…」），非剧情/生成正文，不投影为任何节点。
+  system?: boolean;
 }

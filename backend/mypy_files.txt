@@ -16,6 +16,7 @@ app/services/roleplay_turn.py
 app/services/scene_classify.py
 app/services/image_prompt_extract.py
 app/services/image_prompt_profiles.py
+app/services/audio_dialogue_extract.py
 app/services/builtin_agents.py
 app/services/worldbook_edit.py
 app/services/table_store.py

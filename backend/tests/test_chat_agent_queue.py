@@ -81,7 +81,7 @@ def test_release_claim_returns_to_queue(tmp_path, monkeypatch):
     assert row["worker_id"] == ""
 
 
-def test_cancel_only_removes_queued_not_running(tmp_path, monkeypatch):
+def test_cancel_handles_queued_and_running(tmp_path, monkeypatch):
     path = _prepare(tmp_path, monkeypatch)
     with _connection_factory(path)() as connection:
         connection.executemany(
@@ -92,9 +92,39 @@ def test_cancel_only_removes_queued_not_running(tmp_path, monkeypatch):
             ],
         )
     assert queue.cancel("queued")["status"] == "cancelled"
-    # running 已交给 agent_runner，队列 cancel 不动它
-    assert queue.cancel("running")["status"] == "running"
+    # running 也允许取消：发协作取消信号 + 标记 cancelled（此前只能取消 queued，
+    # 导致 worker 认领后前端永远删不掉——用户反馈的“无法删除”根因）。
+    assert queue.cancel("running")["status"] == "cancelled"
     assert queue.cancel("missing") is None
+
+
+def test_cancel_finished_task_keeps_real_terminal_state(tmp_path, monkeypatch):
+    """worker 已落终态后取消：返回真实终态，不得覆盖为 cancelled。"""
+    path = _prepare(tmp_path, monkeypatch)
+    with _connection_factory(path)() as connection:
+        connection.executemany(
+            "insert into chat_agent_queue values(?,?,?,?,?,?,?,?,?,?)",
+            [
+                ("done", "r", "d", "{}", "done", "", 1, 1, "", 0),
+                ("failed", "r", "f", "{}", "error", "boom", 2, 2, "", 0),
+            ],
+        )
+    assert queue.cancel("done")["status"] == "done"
+    assert queue.cancel("failed")["status"] == "error"
+    assert queue.get("failed")["error"] == "boom"
+
+
+def test_late_worker_finish_does_not_resurrect_cancelled(tmp_path, monkeypatch):
+    """取消标记先落库后 worker 才收尾：_finish 的 status='running' 守卫使其不复活任务。"""
+    path = _prepare(tmp_path, monkeypatch)
+    with _connection_factory(path)() as connection:
+        connection.execute(
+            "insert into chat_agent_queue values(?,?,?,?,?,?,?,?,?,?)",
+            ("t", "r", "n", "{}", "running", "", 1, 1, "test-worker", 999),
+        )
+    assert queue.cancel("t")["status"] == "cancelled"
+    queue._finish("t", "done")  # worker 迟到的成功收尾
+    assert queue.get("t")["status"] == "cancelled"
 
 
 def test_cleanup_keeps_active_and_only_recent_terminal_rows(tmp_path, monkeypatch):
@@ -263,3 +293,56 @@ def test_active_threads_lists_running_repos():
     finally:
         thread_admission.release(admission)
     assert "repo-active" not in thread_admission.active_threads()
+
+
+def test_claim_next_skips_thread_with_active_admission(tmp_path, monkeypatch):
+    """活跃 thread 的任务不被认领（保持 queued 可删除），避免 worker 认领-退回抖动。"""
+    path = _prepare(tmp_path, monkeypatch)
+    with _connection_factory(path)() as connection:
+        connection.executemany(
+            "insert into chat_agent_queue values(?,?,?,?,?,?,?,?,?,?)",
+            [
+                ("busy", "active-repo", "a", "{}", "queued", "", 1, 1, "", 0),
+                ("free", "free-repo", "b", "{}", "queued", "", 2, 2, "", 0),
+            ],
+        )
+    # 模拟 active-repo 正被前端流式占用
+    monkeypatch.setattr(queue.thread_admission, "active_threads", lambda: ["active-repo"])
+    claimed = queue._claim_next()
+    assert claimed["id"] == "free"          # 跳过活跃 thread 的任务
+    assert queue.get("busy")["status"] == "queued"   # 活跃任务保持 queued（可删除）
+    assert queue._claim_next() is None
+    # 活跃 thread 释放后任务可被认领
+    monkeypatch.setattr(queue.thread_admission, "active_threads", lambda: [])
+    claimed2 = queue._claim_next()
+    assert claimed2["id"] == "busy"
+
+
+def test_public_includes_images_and_message(tmp_path, monkeypatch):
+    """_public 返回 payload 里的 images/message，供前端编辑回填恢复图片。"""
+    _prepare(tmp_path, monkeypatch)
+    import json as _json
+    with _connection_factory(tmp_path / "queue.db")() as connection:
+        connection.execute(
+            "insert into chat_agent_queue values(?,?,?,?,?,?,?,?,?,?)",
+            ("t1", "r", "预览文本", _json.dumps({
+                "message": "真实正文", "images": ["http://x/1.png", "http://x/2.png"],
+            }, ensure_ascii=False), "queued", "", 1, 1, "", 0),
+        )
+    public = queue.get("t1")
+    assert public["images"] == ["http://x/1.png", "http://x/2.png"]
+    assert public["message"] == "真实正文"
+    assert public["need"] == "预览文本"
+
+
+def test_public_tolerates_bad_payload(tmp_path, monkeypatch):
+    """payload 损坏时 _public 仍返回，不抛异常。"""
+    _prepare(tmp_path, monkeypatch)
+    with _connection_factory(tmp_path / "queue.db")() as connection:
+        connection.execute(
+            "insert into chat_agent_queue values(?,?,?,?,?,?,?,?,?,?)",
+            ("bad", "r", "n", "{not-json", "queued", "", 1, 1, "", 0),
+        )
+    public = queue.get("bad")
+    assert public["images"] == []
+    assert public["message"] == "n"

@@ -8,9 +8,14 @@ import {
 import type { Repo } from "../stores/repos";
 
 describe("home workspace", () => {
-  it.each(["story", "generate", "code"] as const)("%s mode binds to the selected work chat", (mode) => {
+  it.each(["story", "code"] as const)("%s mode binds to the selected work chat", (mode) => {
     expect(resolveHomeWorkspace(mode, true)).toBe("chat");
     expect(resolveHomeWorkspace(mode, false)).toBe("need-work");
+  });
+
+  it("generate mode binds to the canvas (画布接管生成)", () => {
+    expect(resolveHomeWorkspace("generate", true)).toBe("canvas");
+    expect(resolveHomeWorkspace("generate", false)).toBe("need-work");
   });
 });
 

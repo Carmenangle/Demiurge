@@ -162,3 +162,22 @@ describe("image prompt profiles", () => {
     );
   });
 });
+
+// ===== V1.2 视频最小事实：时长/镜头 binding =====
+describe("illustrationTemplateValues · 视频字段", () => {
+  it("video_duration / video_camera binding 注入预设值（V1.2 不从模型输出读）", () => {
+    const exposed = [
+      { node_id: "9", field: "duration", semantic: "duration", binding: "video_duration" },
+      { node_id: "12", field: "camera", semantic: "camera", binding: "video_camera" },
+    ];
+    const values = illustrationTemplateValues(exposed, {
+      prompt: "p", videoDuration: 5, videoCamera: "pan",
+    });
+    expect(values["9.duration"]).toBe(5);
+    expect(values["12.camera"]).toBe("pan");
+  });
+  it("视频字段未配置 → 不进 values（模板原值生效，旧预设兼容）", () => {
+    const exposed = [{ node_id: "9", field: "duration", semantic: "duration", binding: "video_duration" }];
+    expect(illustrationTemplateValues(exposed, { prompt: "p" })).toEqual({});
+  });
+});

@@ -36,7 +36,7 @@ class TurnFinalization:
 
 @dataclass
 class TurnFinalizationHooks:
-    writeback: Callable[[TurnFinalization, list], tuple[str, list, dict]]
+    writeback: Callable[[TurnFinalization, list], tuple[str, list, dict, dict]]
     apply_output: Callable[[str], str]
     anchor_offset: Callable[[str, dict], int | None]
     emit_ready: Callable[[dict, dict], bool]
@@ -85,10 +85,11 @@ def finalize_turn(draft: TurnFinalization, hooks: TurnFinalizationHooks) -> dict
     reply = draft.reply
     image_recs: list = []
     illustrate_request: dict = {}
+    audio_request: dict = {}
     rag_events: list = []
 
     if draft.deps is not None:
-        reply, image_recs, illustrate_request = hooks.writeback(draft, rag_events)
+        reply, image_recs, illustrate_request, audio_request = hooks.writeback(draft, rag_events)
 
     reply = hooks.apply_output(reply)
     result: dict = {
@@ -111,6 +112,13 @@ def finalize_turn(draft: TurnFinalization, hooks: TurnFinalizationHooks) -> dict
                 "anchor_offset": anchor_offset,
                 "turn_id": draft.ctx.get("turn_id", ""),
             }]
+    if audio_request:
+        repo_id = draft.ctx.get("repo_id") or draft.ctx.get("thread_id")
+        result["audio_recs"] = [{
+            "id": f"audio-req-{repo_id}-{draft.turn}",
+            "lines": audio_request.get("lines", []),
+            "turn_id": draft.ctx.get("turn_id", ""),
+        }]
 
     published = hooks.emit_ready(draft.ctx, result)
     if published:

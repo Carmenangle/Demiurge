@@ -14,7 +14,7 @@ import time
 from uuid import uuid4
 
 from app.db import get_connection
-from app.services import agent_runner, chat_snapshot
+from app.services import agent_runner, chat_snapshot, thread_admission
 from app.services.agent_request_context import from_payload
 
 _WAKE = threading.Condition()
@@ -79,19 +79,30 @@ def _worker_loop() -> None:
 
 
 def _claim_next():
-    """在 SQLite 写事务中认领一个排队消息，避免多 worker 重复执行。"""
+    """在 SQLite 写事务中认领一个排队消息，避免多 worker 重复执行。
+
+    跳过 thread_admission 已占用 thread 的任务：
+    - 活跃 thread 的前端首条流式还在跑，此时认领只会 RunAlreadyActive → 退回抖动；
+    - 不认领则任务保持 queued，前端可以正常取消/删除（running 无法取消）。
+    """
     now = _now()
+    active_threads = set(thread_admission.active_threads())
     with get_connection() as connection:
         connection.execute("begin immediate")
-        row = connection.execute(
+        rows = connection.execute(
             """
-            select id from chat_agent_queue
+            select id, thread_id from chat_agent_queue
             where status='queued' or (status='running' and lease_expires_at<=?)
-            order by created_at asc limit 1
+            order by created_at asc
             """,
             (now,),
-        ).fetchone()
-        if row is None:
+        ).fetchall()
+        target = None
+        for row in rows:
+            if str(row["thread_id"]) not in active_threads:
+                target = row
+                break
+        if target is None:
             connection.commit()
             return None
         changed = connection.execute(
@@ -100,13 +111,13 @@ def _claim_next():
             set status='running', worker_id=?, lease_expires_at=?, updated_at=?
             where id=? and (status='queued' or (status='running' and lease_expires_at<=?))
             """,
-            (_WORKER_ID, now + LEASE_MS, now, row["id"], now),
+            (_WORKER_ID, now + LEASE_MS, now, target["id"], now),
         ).rowcount
         if changed != 1:
             connection.rollback()
             return None
         claimed = connection.execute(
-            "select * from chat_agent_queue where id=?", (row["id"],)
+            "select * from chat_agent_queue where id=?", (target["id"],)
         ).fetchone()
         connection.commit()
         return claimed
@@ -232,8 +243,9 @@ def get(task_id: str) -> dict | None:
 
 
 def cancel(task_id: str) -> dict | None:
-    """取消排队消息：只能取消尚未发出的 queued（running 已交给 agent_runner，用其自身 cancel）。"""
+    """取消排队消息：queued 直接取消；running 发协作取消信号后标记取消（agent_runner 收尾）。"""
     with get_connection() as connection:
+        # 1) queued：直接取消
         changed = connection.execute(
             """
             update chat_agent_queue
@@ -242,10 +254,31 @@ def cancel(task_id: str) -> dict | None:
             """,
             (_now(), task_id),
         ).rowcount
-        if changed == 0 and connection.execute(
-            "select 1 from chat_agent_queue where id=?", (task_id,)
-        ).fetchone() is None:
-            return None
+        if changed == 0:
+            row = connection.execute(
+                "select * from chat_agent_queue where id=?", (task_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            if row["status"] == "running":
+                # 2) running：请求协作取消（agent_runner 在收尾时把终态落盘）；
+                #    同时抢占标记为 cancelled，前端不再显示为发送中。
+                try:
+                    thread_admission.request_cancel(str(row["thread_id"]))
+                except Exception:  # noqa: BLE001 - 取消信号失败不阻断标记
+                    pass
+                # 若 worker 恰在标记前完成（status 已变为 done/error），该 UPDATE 匹配 0 行；
+                # 下方 get() 返回落盘的真实终态——取消竞态时以事实为准，不覆盖为 cancelled。
+                # 注意 SQLite 写锁保证 worker 的 _finish 与本 UPDATE 串行，_finish 的
+                # status='running' 守卫使其在取消后匹配 0 行，不会复活任务。
+                connection.execute(
+                    """
+                    update chat_agent_queue
+                    set status='cancelled', error='已取消', updated_at=?, worker_id='', lease_expires_at=0
+                    where id=? and status='running'
+                    """,
+                    (_now(), task_id),
+                )
     cleanup_finished()
     with _WAKE:
         _WAKE.notify_all()
@@ -253,8 +286,24 @@ def cancel(task_id: str) -> dict | None:
 
 
 def _public(row) -> dict:
+    """对外视图：任务元信息 + 原始 RichContent 摘要（供前端编辑/引导回填）。
+
+    payload 只存 message 文本与图片 URL 列表（不含完整 invocation，避免体积膨胀）。
+    """
+    images: list[str] = []
+    message = str(row["need"])
+    try:
+        payload = json.loads(row["payload"] or "{}")
+        if isinstance(payload, dict):
+            images = [str(u) for u in (payload.get("images") or []) if u]
+            msg = payload.get("message")
+            if isinstance(msg, str) and msg:
+                message = msg
+    except (TypeError, ValueError):
+        pass
     return {
         "id": row["id"], "thread_id": row["thread_id"], "need": row["need"],
         "status": row["status"], "error": row["error"],
         "created_at": row["created_at"], "updated_at": row["updated_at"],
+        "images": images, "message": message,
     }

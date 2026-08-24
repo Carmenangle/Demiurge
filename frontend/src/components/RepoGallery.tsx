@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useCallback, useRef, useState } from "react";
 import { Check, ExternalLink, Images, Plus, Search, Send, Sparkles, Trash2, X } from "lucide-react";
 import { activeChatModel, useSettings } from "../stores/settings";
 import {
@@ -6,12 +6,14 @@ import {
   searchGenerations, setGenerationDescription, type Generation,
   indexVisualGenerations, recordVisualPreference, type VisualPreferenceReason,
 } from "../api/ai";
-import { ConfirmModal, AlertModal } from "./Modal";
+import { ConfirmModal } from "./Modal";
 import { CopyButton } from "./CopyButton";
 import { Pager } from "./Pager";
+import { ToastLayer } from "./canvas/ToastLayer";
+import type { ToastItem } from "./canvas/CanvasTypes";
 
 // 合并展示时给每张图附带来源仓库 id（资产库按仓库名搜索用）
-type GenWithRepo = Generation & { repoId?: string };
+export type GenWithRepo = Generation & { repoId?: string };
 
 // 从 image_url 里解析顺序编号做时间序：每仓库顺序命名 000001.png…（越大越新）；
 // 旧图 anima1_00073_.png 取尾部数字兜底；都取不到返回 0。
@@ -91,13 +93,15 @@ function GalleryTags({
 // 仓库图片网格：拉取一组仓库的生成记录（图+提示词），点击看大图与生成参数。
 // repoIds 传多个时合并展示（顶层仓库聚合自身 + 所有子仓库的图）。
 // 支持：出图后自动刷新、超量折叠、删除资产索引（保留本机文件）。
-export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, onSendToChat }: {
+export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, onSendToChat, onSendAsRecipe, onBatchSendToCanvas }: {
   repoIds: string[];
   embed: ReturnType<typeof useSettings>["settings"]["embedModel"];
   repoNames?: Record<string, string>;
   hideTitle?: boolean;
   enhanced?: boolean;                          // 资产库页开：批量删除/标签统计排序/发送至对话
-  onSendToChat?: (g: GenWithRepo) => void;     // 发送至对话（弹框选仓库由上层处理）
+  onSendToChat?: (g: GenWithRepo) => void;     // 发送至对话框（仅图片，弹框选仓库由上层处理）
+  onSendAsRecipe?: (g: GenWithRepo) => void;   // 发送至对话（完整配方：提示词+图片/参考图）
+  onBatchSendToCanvas?: (items: GenWithRepo[]) => void;  // 批量发送至画布（选目标小仓库）
 }) {
   const { settings } = useSettings();
   const [items, setItems] = useState<GenWithRepo[]>([]);
@@ -107,7 +111,14 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
   const [deleting, setDeleting] = useState<Generation | null>(null);
   const [tagQuery, setTagQuery] = useState("");      // 标签/提示词搜索
   const [tagging, setTagging] = useState<string | null>(null);  // 正在 AI 打标的图 id
-  const [alertMsg, setAlertMsg] = useState<string | null>(null); // 打标失败等提示
+  // Toast 队列：非阻断状态提示（打标/删除/描述/索引等）用 2s 自动渐隐弹窗替代模态框
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const toastIdRef = useRef(0);
+  const showToast = useCallback((msg: string, kind: "info" | "error" | "success" = "info") => {
+    const id = ++toastIdRef.current;
+    setToasts((prev) => [...prev, { id, msg, kind }]);
+    setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 2200);
+  }, []);
   const [selMode, setSelMode] = useState(false);     // 批量选择模式（增强页开）
   const [selected, setSelected] = useState<Set<string>>(new Set());  // 选中的图 id
   const [batchDel, setBatchDel] = useState(false);   // 批量删除确认
@@ -185,17 +196,20 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
   // 哪个仓库的库要删这条：repoIds 里逐个尝试（删错库会 no-op）。这里用第一个，
   // 因 image_url 全局唯一，delete_doc 会在系统库+该仓库库定位 id；多仓库时用所属仓库。
   // 删一条：优先用图自带 repoId，回退遍历各仓库库
-  const deleteOne = async (g: GenWithRepo) => {
+  const deleteOne = async (g: GenWithRepo, removeFile = false) => {
     const tryIds = g.repoId ? [g.repoId, ...repoIds] : repoIds;
     for (const rid of tryIds) {
-      try { await deleteDoc(g.id, rid, embed, false); return; }
+      try { await deleteDoc(g.id, rid, embed, removeFile); return; }
       catch { /* 该库没有则试下一个 */ }
     }
   };
   const doDelete = async (g: GenWithRepo) => {
-    await deleteOne(g);
+    const removeFile = settings.galleryRemoveFile === true;
+    await deleteOne(g, removeFile);
     setDeleting(null);
     setItems((prev) => prev.filter((x) => x.id !== g.id));
+    if (removeFile) showToast("已删除资产记录及本机图片文件", "success");
+    else showToast("已删除资产记录（本机文件保留）", "success");
   };
 
   // 批量删除选中项
@@ -203,10 +217,13 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
     setBatchDel(false);
     const ids = new Set(selected);
     const targets = items.filter((x) => ids.has(x.id));
-    for (const g of targets) await deleteOne(g);
+    const removeFile = settings.galleryRemoveFile === true;
+    for (const g of targets) await deleteOne(g, removeFile);
     setItems((prev) => prev.filter((x) => !ids.has(x.id)));
     setSelected(new Set());
     setSelMode(false);
+    if (removeFile) showToast(`已删除 ${targets.length} 条资产记录及本机图片文件`, "success");
+    else showToast(`已删除 ${targets.length} 条资产记录（本机文件保留）`, "success");
   };
   const toggleSel = (id: string) =>
     setSelected((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
@@ -220,7 +237,7 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
       for (const id of repoIds) {
         try { total += (await pruneGenerations(id, embed)).removed; } catch { /* 单库失败不阻断 */ }
       }
-      setAlertMsg(total > 0 ? `已清理 ${total} 条裂图记录（磁盘文件已不存在）。` : "没有发现裂图记录。");
+      showToast(total > 0 ? `已清理 ${total} 条裂图记录（磁盘文件已不存在）。` : "没有发现裂图记录。", total > 0 ? "success" : "info");
       refresh();
     } finally { setPruning(false); }
   };
@@ -272,18 +289,18 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
       const imgForModel = await imageDataUri(g.image_url);
       const r = await describeImage([imgForModel], chat, "只输出 4-8 个描述画面内容的简短标签（主体/风格/场景/动作等），英文逗号分隔，不要解释、不要句子");
       const got = (r.prompt || "").split(/[,，;；\n]+/).map((s) => s.trim()).filter(Boolean);
-      if (got.length === 0) { setAlertMsg("AI 打标没返回有效标签，可能模型不支持视觉，请换支持视觉的对话模型。"); return; }
+      if (got.length === 0) { showToast("AI 打标没返回有效标签，可能模型不支持视觉，请换支持视觉的对话模型。", "error"); return; }
       const merged = Array.from(new Set([...g.tags, ...got])).slice(0, 16);
       await saveTags(g, merged);
     } catch (e) {
-      setAlertMsg(`AI 打标失败：${(e as Error).message}（需支持视觉的对话模型）`);
+      showToast(`AI 打标失败：${(e as Error).message}（需支持视觉的对话模型）`, "error");
     }
     finally { setTagging(null); }
   };
 
   const describeMissing = async () => {
     const targets = items.filter((g) => !g.description?.trim());
-    if (targets.length === 0) { setAlertMsg("所有资产已有视觉描述。"); return; }
+    if (targets.length === 0) { showToast("所有资产已有视觉描述。"); return; }
     setDescribing(true);
     let completed = 0;
     try {
@@ -301,9 +318,9 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
           ? { ...item, description } : item));
         completed += 1;
       }
-      setAlertMsg(`已为 ${completed} 张资产补充视觉描述并更新语义索引。`);
+      showToast(`已为 ${completed} 张资产补充视觉描述并更新语义索引。`, "success");
     } catch (error) {
-      setAlertMsg(`自动描述中断：已完成 ${completed} 张；${(error as Error).message}`);
+      showToast(`自动描述中断：已完成 ${completed} 张；${(error as Error).message}`, "error");
     } finally {
       setDescribing(false);
     }
@@ -319,9 +336,9 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
         indexed += result.indexed;
         skipped += result.skipped;
       }
-      setAlertMsg(`视觉索引完成：${indexed} 张，跳过 ${skipped} 张远程或缺失图片。`);
+      showToast(`视觉索引完成：${indexed} 张，跳过 ${skipped} 张远程或缺失图片。`, "success");
     } catch (error) {
-      setAlertMsg(`视觉索引失败：${(error as Error).message}`);
+      showToast(`视觉索引失败：${(error as Error).message}`, "error");
     } finally {
       setVisualIndexing(false);
     }
@@ -332,7 +349,7 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
     const repoId = active.repoId || active.repo_id || repoIds[0];
     const baseRepoId = preferenceBase.repoId || preferenceBase.repo_id || repoIds[0];
     if (repoId !== baseRepoId) {
-      setAlertMsg("偏好比较必须来自同一个作品，避免不同仓库审美串线。");
+      showToast("偏好比较必须来自同一个作品，避免不同仓库审美串线。", "error");
       return;
     }
     setSavingPreference(true);
@@ -341,9 +358,9 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
         settings.outputDir || "", repoId, active.id, preferenceBase.id, preferenceReason,
       );
       setPreferenceBase(active);
-      setAlertMsg("偏好已记录；语义搜索结果会按本作品的选择历史重排，不会自动修改 LoRA。 ");
+      showToast("偏好已记录；语义搜索结果会按本作品的选择历史重排，不会自动修改 LoRA。 ", "success");
     } catch (error) {
-      setAlertMsg(`记录偏好失败：${(error as Error).message}`);
+      showToast(`记录偏好失败：${(error as Error).message}`, "error");
     } finally {
       setSavingPreference(false);
     }
@@ -360,7 +377,7 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
             ...g, repoId: g.repo_id || repoIds[0],
           })));
         })
-        .catch((error) => { if (alive) setAlertMsg(`语义搜索失败：${(error as Error).message}`); });
+        .catch((error) => { if (alive) showToast(`语义搜索失败：${(error as Error).message}`, "error"); });
     }, 250);
     return () => { alive = false; clearTimeout(timer); };
   }, [semanticMode, tagQuery, key, embed]);
@@ -441,6 +458,15 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
               <button className="btn danger" disabled={selected.size === 0} onClick={() => setBatchDel(true)}>
                 <Trash2 size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />删除所选（{selected.size}）
               </button>
+              {onBatchSendToCanvas && (
+                <button className="btn" disabled={selected.size === 0}
+                  onClick={() => {
+                    const ids = new Set(selected);
+                    onBatchSendToCanvas(items.filter((g) => ids.has(g.id)));
+                  }}>
+                  <Send size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />发送至画布（{selected.size}）
+                </button>
+              )}
               <button className="btn" onClick={() => setSelected(new Set(shown.map((g) => g.id)))}>选本页</button>
               <button className="btn" disabled={selected.size === 0} onClick={() => setSelected(new Set())}>清除</button>
             </>
@@ -508,8 +534,14 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
                   </span>
                 ) : (
                   <>
+                    {enhanced && onSendAsRecipe && (
+                      <button className="gallery-send-recipe" title="发送至对话（完整配方：提示词+图片/参考图）"
+                        onClick={(e) => { e.stopPropagation(); onSendAsRecipe(g); }}>
+                        <Send size={13} />
+                      </button>
+                    )}
                     {enhanced && onSendToChat && (
-                      <button className="gallery-send" title="发送至对话（选仓库）"
+                      <button className="gallery-send" title="发送至对话框（仅图片）"
                         onClick={(e) => { e.stopPropagation(); onSendToChat(g); }}>
                         <Send size={13} />
                       </button>
@@ -529,7 +561,10 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
       {deleting && (
         <ConfirmModal
           title="删除生成图"
-          message="确认从资产库删除这条记录？本机图片文件会保留。"
+          message={settings.galleryRemoveFile
+            ? "确认从资产库删除这条记录？本机图片文件也将一并删除。"
+            : "确认从资产库删除这条记录？本机图片文件会保留。"
+          }
           confirmText="删除"
           danger
           onConfirm={() => doDelete(deleting)}
@@ -539,7 +574,10 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
       {batchDel && (
         <ConfirmModal
           title="批量删除"
-          message={`确认从资产库删除选中的 ${selected.size} 条记录？本机图片文件会保留。`}
+          message={settings.galleryRemoveFile
+            ? `确认从资产库删除选中的 ${selected.size} 条记录？本机图片文件也将一并删除。`
+            : `确认从资产库删除选中的 ${selected.size} 条记录？本机图片文件会保留。`
+          }
           confirmText="删除"
           danger
           onConfirm={doBatchDelete}
@@ -620,7 +658,7 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
           </div>
         </div>
       )}
-      {alertMsg && <AlertModal title="提示" message={alertMsg} onClose={() => setAlertMsg(null)} />}
+      <ToastLayer toasts={toasts} position="fixed" />
     </div>
   );
 }

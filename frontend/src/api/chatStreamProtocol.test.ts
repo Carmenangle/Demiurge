@@ -20,6 +20,7 @@ describe("chat stream protocol", () => {
       type: "image", url: "local://image", id: "i1", regeneration: { prompt: "p" },
     });
     expect(decodeChatStreamEvent(event("interrupted", {}))).toEqual({ type: "interrupted" });
+    expect(decodeChatStreamEvent(event("route", { route: "roleplay" }))).toEqual({ type: "route", route: "roleplay" });
     expect(decodeChatStreamEvent(event("rag_status", {
       state: "start", kind: "worldbook", count: 53,
     }))).toEqual({ type: "rag_status", state: "start", kind: "worldbook", count: 53 });

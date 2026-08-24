@@ -294,3 +294,97 @@ def character_beliefs(output_dir: str, repo_id: str, turn: int,
     return {"items": character_belief.active(
         output_dir, repo_id, turn, characters=[character] if character else None,
     )}
+
+
+# ── 仓库快照世界书 CRUD（画布模式编辑：读写 <repo>/worldbook.json，与源库隔离）──
+
+
+class RepoWorldbookLocation(BaseModel):
+    output_dir: str
+    repo_id: str
+
+
+class RepoWorldbookEntryPayload(BaseModel):
+    content: str = ""
+    comment: str = ""
+    keys: list[str] = []
+    constant: bool = False
+    enabled: bool = True
+
+
+@router.post("/repo-worldbook/entries")
+def repo_worldbook_entries(loc: RepoWorldbookLocation) -> dict[str, object]:
+    """列出小仓库快照的世界书条目（画布灵感卡导入+弹窗导航）。"""
+    from app.services import worldbook_edit, worldbook_store
+
+    book = worldbook_store.read_repo_snapshot(loc.output_dir, loc.repo_id)
+    if not book:
+        return {"entries": [], "not_found": True}
+    return {"entries": worldbook_edit.list_entries(book)}
+
+
+class RepoWorldbookEntryAdd(BaseModel):
+    output_dir: str
+    repo_id: str
+    entry: RepoWorldbookEntryPayload
+
+
+@router.post("/repo-worldbook/entry/add")
+def repo_worldbook_entry_add(req: RepoWorldbookEntryAdd) -> dict[str, object]:
+    """向小仓库快照世界书新增一条条目。"""
+    from app.services import worldbook_edit, worldbook_store
+
+    book = worldbook_store.read_repo_snapshot(req.output_dir, req.repo_id)
+    if not book:
+        raise HTTPException(status_code=404, detail="快照不存在，请先绑定世界书并运行至少一次剧情")
+    patch = {"content": req.entry.content, "comment": req.entry.comment,
+             "keys": req.entry.keys, "constant": req.entry.constant,
+             "enabled": req.entry.enabled}
+    index = worldbook_edit.add_entry(book, patch)
+    worldbook_store.save_repo_snapshot(req.output_dir, req.repo_id, book)
+    return {"ok": True, "index": index}
+
+
+class RepoWorldbookEntryUpdate(BaseModel):
+    output_dir: str
+    repo_id: str
+    index: int
+    entry: RepoWorldbookEntryPayload
+
+
+@router.post("/repo-worldbook/entry/update")
+def repo_worldbook_entry_update(req: RepoWorldbookEntryUpdate) -> dict[str, object]:
+    """更新小仓库快照世界书的指定条目。"""
+    from app.services import worldbook_edit, worldbook_store
+
+    book = worldbook_store.read_repo_snapshot(req.output_dir, req.repo_id)
+    if not book:
+        raise HTTPException(status_code=404, detail="快照不存在")
+    if not worldbook_edit.update_entry(book, req.index, {
+        "content": req.entry.content, "comment": req.entry.comment,
+        "keys": req.entry.keys, "constant": req.entry.constant,
+        "enabled": req.entry.enabled,
+    }):
+        raise HTTPException(status_code=404, detail="条目索引越界")
+    worldbook_store.save_repo_snapshot(req.output_dir, req.repo_id, book)
+    return {"ok": True}
+
+
+class RepoWorldbookEntryDelete(BaseModel):
+    output_dir: str
+    repo_id: str
+    index: int
+
+
+@router.post("/repo-worldbook/entry/delete")
+def repo_worldbook_entry_delete(req: RepoWorldbookEntryDelete) -> dict[str, object]:
+    """删除小仓库快照世界书的指定条目。"""
+    from app.services import worldbook_edit, worldbook_store
+
+    book = worldbook_store.read_repo_snapshot(req.output_dir, req.repo_id)
+    if not book:
+        raise HTTPException(status_code=404, detail="快照不存在")
+    if not worldbook_edit.delete_entry(book, req.index):
+        raise HTTPException(status_code=404, detail="条目索引越界")
+    worldbook_store.save_repo_snapshot(req.output_dir, req.repo_id, book)
+    return {"ok": True}

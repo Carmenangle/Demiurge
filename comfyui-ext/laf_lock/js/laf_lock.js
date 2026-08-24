@@ -1034,6 +1034,47 @@ if (LOCK) {
             node = g.nodes.find((n) => String(n.id) === String(d.payload.nodeId)) || null;
           }
           toParent("node_values", { nodeId: d.payload.nodeId, node });
+        } else if (d.type === "request_focus") {
+          // payload: { nodeId } —— 多节点共享单页面：把视口对准指定节点（每张 NodeCard 取景），
+          // 并回传真实尺寸（node_size）供父页面把该卡片框自适应成节点比例。
+          const n = app.graph.getNodeById(Number(d.payload.nodeId));
+          if (n) {
+            soloNode = n; // 后续 resize 也保持对准该节点（切卡后由新 request_focus 更新）
+            // 取消所有节点选中态——fitNode 后默认选中会显示蓝框干扰截图视觉
+            try {
+              if (app.canvas && typeof app.canvas.deselectNode === "function") {
+                for (const nn of (app.graph._nodes || [])) app.canvas.deselectNode(nn);
+              }
+            } catch (e) {}
+            try { fitNode(n); } catch (e) {}
+            try { measureAndReport(n); } catch (e) {}
+            // DOM widget（如画廊图片网格）异步渲染撑高节点 → 延迟重测贴合
+            for (const ms of [150, 400, 800]) {
+              setTimeout(() => { if (soloNode === n) { try { fitNode(n); } catch (e) {} } }, ms);
+            }
+          } else {
+            toParent("node_size", { id: d.payload.nodeId, w: 200, h: 120 });
+          }
+        } else if (d.type === "request_thumb") {
+          // payload: { nodeId } —— 在 ComfyUI 内部对当前画布截图并回传 dataURL
+          // （父页面跨域时无法直接访问 iframe.contentWindow.app.canvas —— 让同源的 ComfyUI 自己做）
+          try {
+            // 截图前再 deselect 一次（fitNode 触发后可能又被高亮）
+            try {
+              if (app.canvas && typeof app.canvas.deselectNode === "function") {
+                for (const nn of (app.graph._nodes || [])) app.canvas.deselectNode(nn);
+              }
+            } catch (e) {}
+            const c = app && app.canvas && app.canvas.canvas;
+            if (c && c.width > 0 && c.height > 0) {
+              const dataUrl = c.toDataURL("image/png");
+              toParent("thumb", { nodeId: d.payload.nodeId, dataUrl });
+            } else {
+              toParent("thumb", { nodeId: d.payload.nodeId, dataUrl: "" });
+            }
+          } catch (e) {
+            toParent("thumb", { nodeId: d.payload.nodeId, dataUrl: "" });
+          }
         } else if (d.type === "set_widget") {
           // payload: { nodeId, widgetName, value } —— AI 生成提示词注入
           const n = app.graph.getNodeById(Number(d.payload.nodeId));

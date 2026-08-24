@@ -83,6 +83,60 @@ def test_prompt_history只转换快照中仍存在的对话文本():
     ]
 
 
+def test_prompt_history与前端标签过滤对齐():
+    snapshot = [
+        # 状态/Toast 不进上下文
+        {"id": "toast", "role": "assistant", "text": "已提交到 ComfyUI 生成（prompt_id: x，20 个节点）…", "system": True},
+        # 顶层媒体气泡（工作流产物带提示词）不进上下文
+        {"id": "gen", "role": "assistant", "text": "1girl, portrait", "image": "/local-view?path=a.png"},
+        # 非剧情路由（生图/视频专家）不进上下文
+        {"id": "vid", "role": "assistant", "text": "girl dancing", "route": "video"},
+        {"id": "gen2", "role": "assistant", "text": "提示词", "route": "generate"},
+        # 剧情专家产出进上下文
+        {"id": "story", "role": "assistant", "text": "剧情正文", "route": "roleplay"},
+        {"id": "ans", "role": "assistant", "text": "对话正文", "route": "answer"},
+        {"id": "u1", "role": "user", "text": "用户消息"},
+    ]
+
+    assert chat_snapshot.to_prompt_history(snapshot) == [
+        {"role": "assistant", "content": "剧情正文"},
+        {"role": "assistant", "content": "对话正文"},
+        {"role": "user", "content": "用户消息"},
+    ]
+
+
+def test_backfill_story_tags回填剧情与状态标签():
+    snapshot = [
+        {"id": "s1", "role": "assistant", "text": "夜风穿过巷口，她停下脚步。"},
+        {"id": "toast", "role": "assistant", "text": "已提交到 ComfyUI 生成（prompt_id: abc，20 个节点），正在运转工作流…"},
+        {"id": "gen", "role": "assistant", "text": "1girl, portrait", "image": "/local-view?path=a.png"},
+        {"id": "prompt", "role": "assistant", "text": "QRQ, masterpiece, very aesthetic, best quality, score_9, nsfw, 1girl, solo, ultra detailed, absurdres, 8k, high resolution"},
+        {"id": "tagged", "role": "assistant", "text": "已有标签", "route": "generate"},
+        {"id": "u1", "role": "user", "text": "继续"},
+        {"id": "empty", "role": "assistant", "text": ""},
+        {"id": "card", "role": "assistant", "text": "模板卡", "workflow": {"templateName": "A"}},
+    ]
+
+    out, stats = chat_snapshot.backfill_story_tags(snapshot)
+    by_id = {item["id"]: item for item in out}
+    assert by_id["s1"]["route"] == "roleplay"
+    assert by_id["toast"]["system"] is True and "route" not in by_id["toast"]
+    assert by_id["prompt"]["route"] == "generate"
+    assert "route" not in by_id["gen"] and "system" not in by_id["gen"]
+    assert by_id["tagged"]["route"] == "generate"
+    assert "route" not in by_id["u1"]
+    assert "route" not in by_id["empty"]
+    assert "route" not in by_id["card"]
+    assert stats == {"changed": 3, "story": 1, "status": 1, "generate": 1}
+
+
+def test_backfill_story_tags幂等已标签消息不动():
+    snapshot = [{"id": "x", "role": "assistant", "text": "正文", "route": "roleplay"}]
+    out, stats = chat_snapshot.backfill_story_tags(snapshot)
+    assert out == snapshot
+    assert stats["changed"] == 0
+
+
 def test_较旧的异步快照不得覆盖删除后的新快照(monkeypatch, tmp_path):
     from app.services import repo_meta
     monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
@@ -334,3 +388,135 @@ def test_存量会话读时惰性迁移到仓库文件夹(monkeypatch, tmp_path)
     assert resolved.is_file()
     assert not (legacy / "r1.json").exists()
     assert chat_snapshot.load("r1") == [{"id": "old"}]
+
+
+def test_视频槽原位回填与目标删除后不追加(monkeypatch, tmp_path):
+    """V1.3：视频 media_type 原位替换 media-slot，且目标消息删除后 resolve 不追加新消息。"""
+    from app.services import repo_meta
+    monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
+    monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+    chat_snapshot.save("thread-v", [{
+        "id": "bot", "role": "assistant", "text": "正文",
+        "parts": [{"type": "media-slot", "slotId": "slot-1", "status": "pending"}],
+    }])
+
+    # 视频原位回填：type 变 video + status ready
+    assert chat_snapshot.resolve_media_slot(
+        "thread-v", "bot", "slot-1", "local://movie.mp4", media_type="video",
+    )
+    part = chat_snapshot.load("thread-v")[0]["parts"][0]
+    assert part["type"] == "video" and part["status"] == "ready"
+    assert part["url"] == "local://movie.mp4"
+
+    # 目标消息已删除（无 parts 槽）→ resolve 返回 False，不追加新消息
+    chat_snapshot.save("thread-v", [{"id": "bot", "role": "assistant", "text": "正文", "parts": []}])
+    assert chat_snapshot.resolve_media_slot(
+        "thread-v", "bot", "slot-1", "local://orphan.mp4", media_type="video",
+    ) is False
+    assert len(chat_snapshot.load("thread-v")) == 1
+
+
+def test_resolve_media_slot_音频槽保留角色名分条元数据(monkeypatch, tmp_path):
+    """A1.6：音频槽回填后保留 kind/speaker/seq/total，刷新恢复仍能按角色分条展示。"""
+    from app.services import repo_meta
+    monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
+    monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+    chat_snapshot.save("thread-a", [{
+        "id": "bot", "role": "assistant", "text": "正文",
+        "parts": [{
+            "type": "media-slot", "slotId": "audio-1", "status": "pending",
+            "kind": "audio", "speaker": "阿尼玛", "seq": 2, "total": 3,
+        }],
+    }])
+
+    assert chat_snapshot.resolve_media_slot(
+        "thread-a", "bot", "audio-1", "local://a.wav", media_type="audio",
+    )
+    part = chat_snapshot.load("thread-a")[0]["parts"][0]
+    assert part["type"] == "audio" and part["status"] == "ready"
+    assert part["url"] == "local://a.wav"
+    assert part["speaker"] == "阿尼玛"
+    assert part["seq"] == 2 and part["total"] == 3 and part["kind"] == "audio"
+
+    # 非音频槽（图片）不注入音频元数据
+    chat_snapshot.save("thread-a", [{
+        "id": "bot", "role": "assistant", "text": "正文",
+        "parts": [{"type": "media-slot", "slotId": "slot-1", "status": "pending"}],
+    }])
+    assert chat_snapshot.resolve_media_slot(
+        "thread-a", "bot", "slot-1", "local://img.png", media_type="image",
+    )
+    part = chat_snapshot.load("thread-a")[0]["parts"][0]
+    assert part["type"] == "image" and part["status"] == "ready"
+    assert "speaker" not in part and "kind" not in part
+
+
+def test_merge_fields_对未知message_id静默返回不追加幽灵消息(monkeypatch, tmp_path):
+    """N1 修复：未知 message_id 的 merge_fields 不应追加幽灵消息。"""
+    from app.services import repo_meta
+    monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
+    monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+    chat_snapshot.save("thread", [
+        {"id": "existing", "role": "assistant", "text": "已知消息"},
+    ])
+
+    # merge_fields 对未知 id 静默返回，不追加
+    chat_snapshot.merge_fields("thread", "unknown-id", inspiration={"selected": ["url1"]})
+    assert len(chat_snapshot.load("thread")) == 1
+    assert chat_snapshot.load("thread")[0]["id"] == "existing"
+
+    # merge_fields 对已知 id 正常更新
+    chat_snapshot.merge_fields("thread", "existing", inspiration={"selected": ["url2"]})
+    assert len(chat_snapshot.load("thread")) == 1
+    assert chat_snapshot.load("thread")[0]["inspiration"] == {"selected": ["url2"]}
+
+
+def test_select_inspiration_正常选中并更新(monkeypatch, tmp_path):
+    """N3 测试：正常选中灵感卡图片并持久化到快照。"""
+    from app.services import repo_meta
+    monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
+    monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+    chat_snapshot.save("thread", [
+        {"id": "msg-1", "role": "assistant", "text": "搜索结果",
+         "inspiration": {"query": "猫", "results": [{"url": "http://img.com/cat.png"}]}},
+    ])
+
+    result = chat_snapshot.select_inspiration("thread", "msg-1",
+                                               ["http://img.com/cat.png", "http://img.com/dog.png"])
+    assert result == {"ok": True, "selected": ["http://img.com/cat.png", "http://img.com/dog.png"]}
+    loaded = chat_snapshot.load("thread")
+    assert loaded[0]["inspiration"]["selected"] == ["http://img.com/cat.png", "http://img.com/dog.png"]
+
+
+def test_select_inspiration_未知message_id不追加幽灵消息(monkeypatch, tmp_path):
+    """N3 测试：未知 message_id 应静默返回，不追加幽灵消息。"""
+    from app.services import repo_meta
+    monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
+    monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+    chat_snapshot.save("thread", [
+        {"id": "existing", "role": "assistant", "text": "已知消息"},
+    ])
+
+    result = chat_snapshot.select_inspiration("thread", "unknown-id",
+                                               ["http://img.com/test.png"])
+    assert result == {"ok": True, "selected": ["http://img.com/test.png"]}
+    # 不应追加幽灵消息
+    assert len(chat_snapshot.load("thread")) == 1
+    assert chat_snapshot.load("thread")[0]["id"] == "existing"
+
+
+def test_select_inspiration_过滤非http协议(monkeypatch, tmp_path):
+    """N3 测试：仅接受 http(s) URL，过滤 file:// 等非法协议。"""
+    from app.services import repo_meta
+    monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
+    monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+    chat_snapshot.save("thread", [
+        {"id": "msg-1", "role": "assistant", "text": "搜索结果",
+         "inspiration": {"query": "test", "results": []}},
+    ])
+
+    result = chat_snapshot.select_inspiration("thread", "msg-1",
+                                               ["http://a.com/1.png", "file:///etc/passwd", "   "])
+    assert result == {"ok": True, "selected": ["http://a.com/1.png"]}
+    loaded = chat_snapshot.load("thread")
+    assert loaded[0]["inspiration"]["selected"] == ["http://a.com/1.png"]

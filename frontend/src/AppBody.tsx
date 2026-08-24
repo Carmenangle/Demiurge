@@ -1,12 +1,12 @@
-import { lazy } from "react";
+import { lazy, useState } from "react";
 import { type NavSection, type WorkMode } from "./lib/viewRouting";
 import { activeUserPersona, type useSettings } from "./stores/settings";
 import { type Repo, type RepoBinding, type useRepos } from "./stores/repos";
 import { SectionPlaceholder } from "./modes/SectionPlaceholder";
-import { saveSnapshot } from "./api/ai";
+import { saveSnapshot, chatAppend } from "./api/ai";
 import { createScenarioSnapshot, forkScenarioSnapshot, listScenarioSnapshots } from "./api/scenario";
 import { createScenarioBranch } from "./lib/scenarioBranchRuntime";
-
+import { SendToChatModal, type SendPayload } from "./components/SendToChatModal";
 const SettingsView = lazy(() => import("./views/settings/SettingsView").then((m) => ({ default: m.SettingsView })));
 const WorkflowTemplates = lazy(() => import("./pages/WorkflowTemplates").then((m) => ({ default: m.WorkflowTemplates })));
 const ModelDownload = lazy(() => import("./pages/ModelDownload").then((m) => ({ default: m.ModelDownload })));
@@ -19,8 +19,9 @@ const LoraTriggersTab = lazy(() => import("./views/tools/LoraTriggersTab").then(
 const ToolsView = lazy(() => import("./views/ToolsView").then((m) => ({ default: m.ToolsView })));
 const ReposView = lazy(() => import("./views/repos/RepoViews").then((m) => ({ default: m.ReposView })));
 const RepoDetailView = lazy(() => import("./views/repos/RepoViews").then((m) => ({ default: m.RepoDetailView })));
-const HomeRecentWorks = lazy(() => import("./views/repos/RepoViews").then((m) => ({ default: m.HomeRecentWorks })));
+const HomeLauncher = lazy(() => import("./components/HomeLauncher").then((m) => ({ default: m.HomeLauncher })));
 const AssetsView = lazy(() => import("./views/PlaceholderViews").then((m) => ({ default: m.AssetsView })));
+const WebMaterialsView = lazy(() => import("./views/WebMaterialsView").then((m) => ({ default: m.WebMaterialsView })));
 const ChatView = lazy(() => import("./views/ChatView").then((m) => ({ default: m.ChatView })));
 
 export interface AppBodyProps {
@@ -48,6 +49,10 @@ export interface AppBodyProps {
   onDelete: (repo: Repo) => void;
   onOpenWork: (repoId: string, workId: string) => void;
   onClearRepo: () => void;
+  /** 首页入口卡跳转：切到指定管理区子页（如 assets/character-cards） */
+  onGoSection: (section: NavSection, subView: string) => void;
+  /** 首页入口卡「预设」：打开偏置预设弹窗 */
+  onOpenPreset: () => void;
   addCardWork: (cardName: string) => { parentId: string; childId: string };
   addBranch: (parentId: string, binding?: Partial<RepoBinding>, branchId?: string) => string;
   marketSearch: string;
@@ -56,6 +61,12 @@ export interface AppBodyProps {
 
 export function AppBody(props: AppBodyProps) {
   const { settingsStore, settings } = props;
+  // 发送至对话框/对话：弹仓库选框 → chatAppend 落盘到目标作品对话
+  const [sendTarget, setSendTarget] = useState<{
+    title: string;
+    payload: SendPayload;
+  } | null>(null);
+  const handleSendDone = () => setSendTarget(null);
   if (props.settingsOpen) {
     return <SettingsView settings={settings} update={settingsStore.update}
       onOutputPathMigrated={props.relocateOutputPath} />;
@@ -64,35 +75,38 @@ export function AppBody(props: AppBodyProps) {
   if (props.section === "home") {
     if (props.activeWork) {
       const activeWork = props.activeWork;
-      return <ChatView key={activeWork.id} repo={activeWork} workMode={props.workMode}
-      settings={settings} update={settingsStore.update} presets={settingsStore}
-      setCover={props.setCover} setGeneratedCover={props.setGeneratedCover}
-      onBranch={async (binding, messages, isLatest) => {
-        const parentId = activeWork.parentId;
-        if (!parentId) return;
-        try {
-          const result = await createScenarioBranch({
-            outputDir: settings.outputDir, sourceRepoId: activeWork.id, parentId,
-            binding, messages, isLatest,
-          }, {
-            saveMessages: saveSnapshot,
-            listSnapshots: listScenarioSnapshots,
-            createSnapshot: createScenarioSnapshot,
-            forkSnapshot: forkScenarioSnapshot,
-            addBranch: props.addBranch,
-            persistMessages: (repoId, value) => {
-              try { localStorage.setItem(`laf_chat_${repoId}`, JSON.stringify(value)); } catch { /* 超额忽略 */ }
-            },
-            openWork: props.onOpenWork,
-            newId: () => crypto.randomUUID(),
-          });
-          if (result.status === "missing_snapshot") {
-            window.alert("该历史回合没有完整世界状态快照，已拒绝创建状态错位的分支。");
+      // 画布/对话切换在 ChatView 内部管理（内容区切换，功能栏恒定）；所有模式统一渲染 ChatView
+      return (
+        <ChatView key={activeWork.id} repo={activeWork} workMode={props.workMode}
+        settings={settings} update={settingsStore.update} presets={settingsStore}
+        setCover={props.setCover} setGeneratedCover={props.setGeneratedCover}
+        onBranch={async (binding, messages, isLatest) => {
+          const parentId = activeWork.parentId;
+          if (!parentId) return;
+          try {
+            const result = await createScenarioBranch({
+              outputDir: settings.outputDir, sourceRepoId: activeWork.id, parentId,
+              binding, messages, isLatest,
+            }, {
+              saveMessages: saveSnapshot,
+              listSnapshots: listScenarioSnapshots,
+              createSnapshot: createScenarioSnapshot,
+              forkSnapshot: forkScenarioSnapshot,
+              addBranch: props.addBranch,
+              persistMessages: (repoId, value) => {
+                try { localStorage.setItem(`laf_chat_${repoId}`, JSON.stringify(value)); } catch { /* 超额忽略 */ }
+              },
+              openWork: props.onOpenWork,
+              newId: () => crypto.randomUUID(),
+            });
+            if (result.status === "missing_snapshot") {
+              window.alert("该历史回合没有完整世界状态快照，已拒绝创建状态错位的分支。");
+            }
+          } catch (error) {
+            window.alert(`完整分支创建失败：${error instanceof Error ? error.message : String(error)}`);
           }
-        } catch (error) {
-          window.alert(`完整分支创建失败：${error instanceof Error ? error.message : String(error)}`);
-        }
-      }} />;
+        }} />
+      );
     }
     if (props.selectedRepo) {
       const selectedRepo = props.selectedRepo;
@@ -102,10 +116,10 @@ export function AppBody(props: AppBodyProps) {
         onRename={props.onRename} onBind={props.onBind} onDelete={props.onDelete}
         onNewSub={() => props.onNewSub(selectedRepo.id)} />;
     }
-    return <HomeRecentWorks works={props.recentWorks} parents={props.topRepos}
-      coverOf={props.coverOf} settings={settings} childrenOf={props.childrenOf}
-      onOpen={(work) => work.parentId && props.onOpenWork(work.parentId, work.id)}
-      onRename={props.onRename} onBind={props.onBind} onDelete={props.onDelete} />;
+    return <HomeLauncher
+      onCharacterCards={() => props.onGoSection("assets", "character-cards")}
+      onWorldbook={() => props.onGoSection("assets", "worldbook")}
+      onPreset={props.onOpenPreset} />;
   }
 
   if (props.section === "assets") {
@@ -127,7 +141,45 @@ export function AppBody(props: AppBodyProps) {
         onRename={props.onRename} onBind={props.onBind} onDelete={props.onDelete}
         onNew={props.onNewRepo} childrenOf={props.childrenOf} settings={settings} />;
     }
-    if (props.subView === "generations") return <AssetsView onSendToChat={() => {}} />;
+    if (props.subView === "generations") return (
+      <>
+        <AssetsView
+          onSendToChat={(url) => setSendTarget({ title: "发送至对话框", payload: { text: "", images: [url] } })}
+          onSendAsRecipe={(g) => {
+            const recipe = [
+              g.prompt ? `提示词：${g.prompt}` : "",
+              g.description ? `描述：${g.description}` : "",
+            ].filter(Boolean).join("\n");
+            setSendTarget({ title: "发送至对话", payload: { text: recipe, images: [g.image_url], prompt: g.prompt || "" } });
+          }}
+          onBatchSendToCanvas={(items) => setSendTarget({ title: "发送至画布", payload: { text: "", images: items.map((g) => g.image_url) } })}
+        />
+        {sendTarget && (
+          <SendToChatModal
+            title={sendTarget.title}
+            payload={sendTarget.payload}
+            onDone={handleSendDone}
+            onCancel={handleSendDone}
+          />
+        )}
+      </>
+    );
+    if (props.subView === "web-materials") return (
+      <>
+        <WebMaterialsView
+          outputDir={settings.outputDir}
+          onSendToCanvas={(items) => setSendTarget({ title: "发送至画布", payload: { text: "", images: items.map((m) => m.url) } })}
+        />
+        {sendTarget && (
+          <SendToChatModal
+            title={sendTarget.title}
+            payload={sendTarget.payload}
+            onDone={handleSendDone}
+            onCancel={handleSendDone}
+          />
+        )}
+      </>
+    );
     if (props.subView === "character-cards") {
       const persona = activeUserPersona(settings);
       return <CharacterCards characterDir={settings.characterDir} outputDir={settings.outputDir}

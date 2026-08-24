@@ -47,6 +47,14 @@ export const SEMANTIC_LORA_WEIGHT = "lora_weight";
 export const SEMANTIC_BASE_IMAGE = "base_image";
 export const SEMANTIC_LATENT_WIDTH = "latent_width";
 export const SEMANTIC_LATENT_HEIGHT = "latent_height";
+// 音频（IndexTTS 系）：voice_text=该角色台词（写 TTS 节点 text）；voice_reference=参考音轨（音色，写 LoadAudio）；
+// voice_emotion_<key>=8 维情感向量（happy/angry/sad/fear/hate/low/surprise/neutral，0~1 混合权重）。
+export const SEMANTIC_VOICE_TEXT = "voice_text";
+export const SEMANTIC_VOICE_REFERENCE = "voice_reference";
+export const VOICE_EMOTION_KEYS = ["happy", "angry", "sad", "fear", "hate", "low", "surprise", "neutral"] as const;
+export type VoiceEmotionKey = (typeof VOICE_EMOTION_KEYS)[number];
+export const VOICE_EMOTION_PREFIX = "voice_emotion_";
+export const voiceEmotionSemantic = (key: VoiceEmotionKey) => `${VOICE_EMOTION_PREFIX}${key}` as const;
 export const MEDIA_INSERT_SEMANTICS = [
   { value: SEMANTIC_PROMPT, label: "提示词（必选，写入 booru 提示词）" },
   { value: SEMANTIC_NEGATIVE_PROMPT, label: "负面提示词（独立写入负向条件）" },
@@ -55,6 +63,12 @@ export const MEDIA_INSERT_SEMANTICS = [
   { value: SEMANTIC_BASE_IMAGE, label: "角色底图（图生图输入图节点）" },
   { value: SEMANTIC_LATENT_WIDTH, label: "Latent 宽度（按 Agent 画幅比例换算）" },
   { value: SEMANTIC_LATENT_HEIGHT, label: "Latent 高度（按 Agent 画幅比例换算）" },
+  { value: SEMANTIC_VOICE_TEXT, label: "角色台词（写 TTS 节点 text）" },
+  { value: SEMANTIC_VOICE_REFERENCE, label: "参考音轨（音色，写 LoadAudio）" },
+  ...VOICE_EMOTION_KEYS.map((key) => ({
+    value: voiceEmotionSemantic(key),
+    label: `情感向量·${key}（写 EmotionVector 节点）`,
+  })),
 ];
 
 // 控件类型

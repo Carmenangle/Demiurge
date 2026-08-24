@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, lazy, Suspense } from "react";
 import {
   ArrowDown,
   Boxes,
   Bot,
   Clapperboard,
   CornerDownRight,
+  GitCompareArrows,
   Image as ImageIcon,
   Table,
   MessagesSquare,
@@ -21,15 +22,20 @@ import {
   Download,
   Upload,
   X,
+  Minimize2,
+  MessageSquarePlus,
 } from "lucide-react";
 import { type Repo, type RepoBinding } from "../stores/repos";
 import { type WorkMode } from "../lib/viewRouting";
 import { modelDisplayName, resolvedEmbedModel, useSettings, activeUserPersona } from "../stores/settings";
 import { resolveModelProxy } from "../lib/modelProxy";
 import { KnowledgeModal } from "../components/KnowledgeModal";
+import { NarrativeCiPanel } from "../components/chat/NarrativeCiPanel";
 import { TableModal } from "../components/TableModal";
 import { RichInput, type RichContent, type RichInputHandle } from "../components/RichInput";
 import { WorkflowCard } from "../components/WorkflowCard";
+const CanvasStageFlow = lazy(() => import("./CanvasStageFlow").then((m) => ({ default: m.CanvasStageFlow })));
+import { globalPendingToolCreates, canvasBridge } from "../components/canvas/shared";
 import { useChatSession } from "../lib/useChatSession";
 import { ConfirmModal } from "../components/Modal";
 import { MaskEditorModal, type MaskEditorResult } from "../components/MaskEditorModal";
@@ -84,9 +90,11 @@ export function ChatView({
   const cardNames = repo?.cardNames?.length ? repo.cardNames : (repo?.cardName ? [repo.cardName] : []);
   const cardName = repo?.openingCardName || repo?.cardName || cardNames[0] || "";
   const characterDir = settings.characterDir || "";
+  // 仓库绑定预设优先于全局设置
+  const resolvedPresetName = repo?.presetName || settings.activePresetName;
   const { displayRegex, characterPortraits } = useChatPresentationAssets(
     cardNames, characterDir, settings.outputDir, repo?.id || "",
-    settings.presetDir, settings.activePresetName,
+    settings.presetDir, resolvedPresetName,
   );
   // 三模式输入框提示各异
   const inputPlaceholder = {
@@ -97,6 +105,7 @@ export function ChatView({
   // 显示层宏：{{char}}→角色卡名、{{user}}→选中人设名(缺省「我」)。传给消息组件在渲染处统一替换。
   // useMemo 稳定引用，避免每次渲染新建对象打破消息组件 memo。
   const personaName = activeUserPersona(settings).name || "";
+  const embed = resolvedEmbedModel(settings);
   const chatMacros = useMemo(() => ({ char: cardName, user: personaName }), [cardName, personaName]);
   // 资产库带图进来：挂载后插入输入框一次
   useEffect(() => {
@@ -150,6 +159,131 @@ export function ChatView({
   const [showComfy, setShowComfy] = useState(false);
   const [comfyRunning, setComfyRunning] = useState(false);
   const [comfyMsg, setComfyMsg] = useState("");
+  // Toast 队列：系统消息（LoRA 应用、ComfyUI 提交、报错等）用 2s 自动消失悬浮窗
+  const [toasts, setToasts] = useState<Array<{ id: number; msg: string; kind: "info" | "error" | "success" }>>([]);
+  const toastIdRef = useRef(0);
+  const showToast = useCallback((msg: string, kind: "info" | "error" | "success" = "info") => {
+    const id = ++toastIdRef.current;
+    setToasts((prev) => [...prev, { id, msg, kind }]);
+    setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 2200);
+  }, []);
+  // 工作流工具卡：ChatView 始终挂载，兜底监听 laf-canvas-workflow-tool，
+  // 避免 Canvas 未挂载时事件丢失（Canvas 是 lazy 加载的）。
+  // ★ 仅在画布未挂载时写入 globalPendingToolCreates：画布挂载时事件由画布自身监听消费，
+  //   若这里也写入会在「切走再切回画布」时 splice 消费残留 → 出现重复工具卡。
+  useEffect(() => {
+    const onTool = (e: Event) => {
+      const detail = (e as CustomEvent).detail as {
+        templateId?: string; templateName?: string; estimatedNodeCount?: number;
+      } | undefined;
+      const templateId = (detail?.templateId || "").trim();
+      const templateName = (detail?.templateName || "").trim() || "工作流模板";
+      if (!templateId) return;
+      if (canvasBridge.canvasMounted) return;
+      const cnt = Number(detail?.estimatedNodeCount) || 0;
+      // 5a 唯一性：兜底队列里同模板不重复 push（画布挂载后由画布侧再做完整去重）
+      if (globalPendingToolCreates.some((p) => p.templateId === templateId)) return;
+      globalPendingToolCreates.push({
+        id: `wftool-${templateId}`, // 与画布投影同稳定 id：消费后不重复建卡
+        templateId, templateName, estimatedNodeCount: cnt,
+      });
+    };
+    window.addEventListener("laf-canvas-workflow-tool", onTool);
+    return () => window.removeEventListener("laf-canvas-workflow-tool", onTool);
+  }, []);
+  // 内容视图切换（对话/画布）：画布=生成内容节点化浏览；功能栏/输入栏恒定（所有模式可用）。
+  // 默认对话视图，手动切画布后按作品记忆（laf_view_<workId>）。
+  const [contentView, setContentView] = useState<"chat" | "canvas">(() => {
+    try {
+      const saved = localStorage.getItem(`laf_view_${repo?.id || ""}`);
+      if (saved === "canvas" || saved === "chat") return saved;
+    } catch { /* ignore */ }
+    return "chat";
+  });
+  const switchContentView = (v: "chat" | "canvas") => {
+    setContentView(v);
+    try { if (repo?.id) localStorage.setItem(`laf_view_${repo.id}`, v); } catch { /* ignore */ }
+  };
+  // 画布模式下输入栏折叠为悬浮小球（默认折叠最大化画布空间；点小球展开，左下角按钮收起）
+  const [canvasInputFolded, setCanvasInputFolded] = useState(true);
+  // 小球可上下拖动（对标快捷工具/后台活动浮标）：top 持久化，pointer capture 区分点击/拖动
+  const FAB_TOP_KEY = "laf_canvas_input_fab_top";
+  const [canvasFabTop, setCanvasFabTop] = useState(() => {
+    try {
+      const value = Number(localStorage.getItem(FAB_TOP_KEY));
+      return Number.isFinite(value) && value > 0 ? value : window.innerHeight - 80;
+    } catch { return window.innerHeight - 80; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(FAB_TOP_KEY, String(canvasFabTop)); } catch { /* ignore */ }
+  }, [canvasFabTop]);
+  const canvasFabDragRef = useRef<{ moved: boolean; startY: number; startTop: number } | null>(null);
+  const onCanvasFabPointerDown = (event: React.PointerEvent) => {
+    (event.target as HTMLElement).setPointerCapture(event.pointerId);
+    canvasFabDragRef.current = { moved: false, startY: event.clientY, startTop: canvasFabTop };
+  };
+  const onCanvasFabPointerMove = (event: React.PointerEvent) => {
+    const drag = canvasFabDragRef.current;
+    if (!drag) return;
+    const delta = event.clientY - drag.startY;
+    if (Math.abs(delta) > 4) drag.moved = true;
+    setCanvasFabTop(Math.min(window.innerHeight - 64, Math.max(8, drag.startTop + delta)));
+  };
+  const onCanvasFabPointerUp = () => {
+    const drag = canvasFabDragRef.current;
+    canvasFabDragRef.current = null;
+    if (drag && !drag.moved) setCanvasInputFolded(false);  // 未拖动 → 点击展开输入栏
+  };
+  // 画布工作流运转任务：对话框下方进度条（与画布「生成中」占位节点同源事件驱动）
+  const [canvasWfRuns, setCanvasWfRuns] = useState<Array<{
+    id: string; templateName: string; progress: number | null; node?: string;
+  }>>([]);
+  useEffect(() => {
+    const onRun = (e: Event) => {
+      const d = (e as CustomEvent).detail as { runId?: string; templateName?: string } | undefined;
+      if (!d?.runId) return;
+      setCanvasWfRuns((prev) => (prev.some((r) => r.id === d.runId)
+        ? prev
+        : [...prev, { id: d.runId!, templateName: d.templateName || "工作流", progress: null }]));
+    };
+    const onProg = (e: Event) => {
+      const d = (e as CustomEvent).detail as { taskId?: string; progress?: number | null; node?: string; nodeLabel?: string; templateName?: string } | undefined;
+      if (!d?.taskId) return;
+      const nodeLabel = d.nodeLabel || d.node;   // 优先 class_type 标签（对齐对话模式），裸 id 兜底
+      // upsert：编辑器弹窗路径只发 progress 事件（不发 run），进度条同样要出现
+      setCanvasWfRuns((prev) => (prev.some((r) => r.id === d.taskId)
+        ? prev.map((r) => (r.id === d.taskId ? {
+          ...r,
+          progress: d.progress !== undefined ? d.progress : r.progress,
+          node: nodeLabel !== undefined ? nodeLabel : r.node,
+          templateName: d.templateName || r.templateName,
+        } : r))
+        : [...prev, {
+          id: d.taskId!,
+          templateName: d.templateName || "工作流",
+          progress: d.progress !== undefined ? d.progress : null,
+          node: nodeLabel || undefined,
+        }]));
+    };
+    const onDone = (e: Event) => {
+      const d = (e as CustomEvent).detail as { taskId?: string } | undefined;
+      if (!d?.taskId) return;
+      setCanvasWfRuns((prev) => (prev.some((r) => r.id === d.taskId) ? prev.filter((r) => r.id !== d.taskId) : prev));
+    };
+    window.addEventListener("laf-canvas-wf-run", onRun);
+    window.addEventListener("laf-canvas-wf-progress", onProg);
+    window.addEventListener("laf-canvas-wf-done", onDone);
+    return () => {
+      window.removeEventListener("laf-canvas-wf-run", onRun);
+      window.removeEventListener("laf-canvas-wf-progress", onProg);
+      window.removeEventListener("laf-canvas-wf-done", onDone);
+    };
+  }, []);
+  // 画布视图的输入栏提交：直接复用对话模式的完整发送链路（useChatSession.send）。
+  // 画布视图输入栏与对话模式对话框完全同源（均走 useChatSession.send）：
+  // 用户消息、调度主管委派、专家执行、产出全部进入同一会话（对话模式可见）。
+  // 画布上的「生成中」占位节点由 CanvasStageFlow 依据 streamingId + messages 投影，
+  // 表面同步显示委派过程行；生命周期跟随对话流，切走再切回不丢失。
   // 工作流模板与 /w 选择浮层
   const [templates, setTemplates] = useState<Template[]>([]);
   const [showPicker, setShowPicker] = useState(false);
@@ -162,7 +296,7 @@ export function ChatView({
 
   // 聊天会话引擎：messages/生成生命周期/持久化/编排全部集中在 useChatSession（见 lib/useChatSession）。
   const {
-    messages, streamingId, wfRunning, slowWatchPromptId, wfProgress, wfNode, queued, regeneratingIds,
+    messages, streamingId, wfRunning, uploadingWf, slowWatchPromptId, wfProgress, wfNode, queued, regeneratingIds,
     send, runCommand, pushBot,
     actOnPromptApproval, actOnRouteChoice, regenerateResult,
     pickTemplate, runWorkflow, updateCardDraft, markCardDone, markCardReopen,
@@ -175,6 +309,7 @@ export function ChatView({
     repo, settings, setGeneratedCover, chat, genModel, videoModel, workMode,
     size: resolvedImageSize.size,
     imageQuality: generationPreferences.quality, templates, setShowPicker, atBottomRef,
+    onNotify: showToast,
   });
   const {
     unreadAgentIds, onStreamScroll, syncUnreadAgentMessages, jumpToFirstUnreadAgentMessage,
@@ -186,6 +321,8 @@ export function ChatView({
   const pickTemplateAndRemember = (t: Template) => {
     templatePicker.remember(t.id);
     templatePicker.setQuery("");
+    // 画布工具卡事件统一由 useChatSession.pickTemplate 派发（/w 命令与选择器共用），
+    // 这里不再重复派发——否则两路径同时触发时画布侧 5a 去重会弹「已在画布上」toast 干扰。
     pickTemplate(t);
   };
 
@@ -352,6 +489,18 @@ export function ChatView({
             >
               <Archive size={15} />
             </button>
+            {/* Narrative CI：剧情一致性诊断（非阻断，图标 + 待处置徽标，点击展开浮层） */}
+            {repo && <NarrativeCiPanel outputDir={settings.outputDir} repoId={repo.id} />}
+            {/* 对话/画布视图切换（功能栏同款 icon-only，-><- 图标） */}
+            <button
+              className={`btn icon-only ${contentView === "canvas" ? "primary" : ""}`}
+              onClick={() => switchContentView(contentView === "canvas" ? "chat" : "canvas")}
+              title={contentView === "canvas"
+                ? "当前为画布视图，点击切回对话"
+                : "当前为对话视图，点击切换画布（节点化浏览生成记录）"}
+            >
+              <GitCompareArrows size={15} />
+            </button>
             {cardName && (
               <button
                 className="btn icon-only"
@@ -366,7 +515,7 @@ export function ChatView({
                 className={`btn icon-only ${settings.illustrate ? "primary" : ""}`}
                 aria-pressed={settings.illustrate}
                 onClick={() => update({ illustrate: !settings.illustrate })}
-                title={`剧情插画${settings.illustrate ? "（开）" : "（关）"}：开启后在剧情高潮点（好感度跨档/失控/每段兜底）自动配图，复用生图模型。只存图片地址不回灌对话，按需付费`}
+                title={`剧情自动生成${settings.illustrate ? "（开）" : "（关）"}：开启后在剧情高潮点（好感度跨档/失控/每段兜底）按多元数据插入勾选的类型自动生成图片/视频/音频。异步后台进行，可在右侧徽记查看进度`}
               >
                 <ImageIcon size={15} />
               </button>
@@ -375,7 +524,7 @@ export function ChatView({
               <button
                 className={`btn icon-only ${settings.mediaInsert?.[repo?.id || ""]?.templateId ? "primary" : ""}`}
                 onClick={() => setShowMediaInsert(true)}
-                title="多元数据插入：预设本作品剧情高潮点自动出图用的 ComfyUI 工作流模板 + 可选角色 LoRA。保存预设会自动开启剧情插画，出图异步后台进行，可在右侧徽记查看进度"
+                title="多元数据插入：勾选随剧情自动生成的内容类型（图片/视频/音频），并分别预设 ComfyUI 工作流模板 + 按角色参数（LoRA/底图/参考音轨）。保存预设会自动开启剧情自动生成"
               >
                 <Clapperboard size={15} />
               </button>
@@ -428,6 +577,23 @@ export function ChatView({
 
       <div className="chat-layout">
         <div className="chat-col">
+          {contentView === "canvas" ? (
+            <Suspense fallback={<div className="chat-stream" style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: "var(--text-muted)" }}>加载画布…</div>}>
+              <CanvasStageFlow
+                repo={repo}
+                settings={settings}
+                messages={messages}
+                displayRegex={displayRegex}
+                onGenerated={() => void reloadFromSnapshot()}
+                onDeleteMessage={(id) => deleteMessage(id)}
+                onSelectActivePreset={(name) => update({ activePresetName: name })}
+                streamingId={streamingId}
+                onDraftSubmit={(prompt) => send(
+                  { parts: [{ type: "text", text: prompt }], text: prompt, images: [] },
+                )}
+              />
+            </Suspense>
+          ) : (
           <div
             className="chat-stream"
             ref={streamRef}
@@ -462,12 +628,13 @@ export function ChatView({
                   msg={m}
                   comfyUrl={settings.comfyuiUrl}
                   chatModel={chat}
-                  isBusy={!!streamingId || wfRunning}
+                  isBusy={!!streamingId || wfRunning || uploadingWf}
+                  uploading={!!uploadingWf}
                   onDraft={(draft) => updateCardDraft(m.id, draft)}
                   onDone={(draft, captured) => markCardDone(m.id, draft, captured)}
                   onReopen={() => markCardReopen(m.id)}
                   onRun={() => runWorkflow(m.id)}
-                  onNotify={pushBot}
+                  onNotify={showToast}
                   onOrchestrate={() => {
                     // 「AI 编排」：往输入框填入 /a 模板名 ，用户补充需求后发送即走编排
                     richRef.current?.insertText(`/a ${m.workflow!.templateName} `);
@@ -483,6 +650,9 @@ export function ChatView({
               ) : m.inspiration ? (
                 <InspirationCard
                   data={m.inspiration}
+                  threadId={threadId}
+                  messageId={m.id}
+                  proxyUrl={settings.proxyEnabled ? settings.proxyUrl : ""}
                   onInsert={(text) => richRef.current?.insertText(text)}
                 />
               ) : (
@@ -517,7 +687,16 @@ export function ChatView({
               <span className="chat-message-end" data-message-end={m.id} aria-hidden="true" />
               </div>
             ))}
+          {/* Toast 悬浮层 */}
+          {toasts.length > 0 && (
+            <div className="canvas-toast-container">
+              {toasts.map((t) => (
+                <div key={t.id} className={`canvas-toast ${t.kind === "info" ? "" : t.kind}`}>{t.msg}</div>
+              ))}
+            </div>
+          )}
           </div>
+          )}
 
           {maskEditorUrl && (
             <MaskEditorModal
@@ -527,7 +706,19 @@ export function ChatView({
             />
           )}
 
-          <div className="chat-input-wrap">
+          <div className={`chat-input-wrap${contentView === "canvas" && canvasInputFolded ? " is-canvas-folded" : ""}`}>
+            {/* 画布模式：输入栏左下角「收起为悬浮小球」 */}
+            {contentView === "canvas" && !canvasInputFolded && (
+              <button
+                className="chat-input-collapse"
+                type="button"
+                title="收起为悬浮小球（点击右下角小球恢复）"
+                onClick={() => setCanvasInputFolded(true)}
+              >
+                <Minimize2 size={13} />
+                收为小球
+              </button>
+            )}
             {contextReminder && (
               <div className="context-reminder" role="status">
                 <Archive size={16} />
@@ -690,9 +881,29 @@ export function ChatView({
           onSubmit={send}
           onCanSubmitChange={setHasText}
           templateNames={templates.map((t) => t.name)}
-          placeholder={inputPlaceholder}
+          placeholder={contentView === "canvas"
+            ? (streamingId ? "生成中…" : "输入提示词，为图生图 / 文生图 / 加参考图…")
+            : inputPlaceholder}
         />
         <div className="chat-actions">
+          {/* 画布工作流运转进度条（展开态）：与对话模式一致，嵌入工具栏行、
+              位于模型切换器等功能按钮左侧（margin-right:auto 占满左侧空余）。
+              折叠为小球时由 wrap 外的 .canvas-wf-runs 浮条兜底显示。 */}
+          {contentView === "canvas" && !canvasInputFolded && canvasWfRuns.length > 0 && (
+            <div className="canvas-wf-runs canvas-wf-runs-inline">
+              {canvasWfRuns.map((r) => (
+                <div key={r.id} className="wf-progress-wrap" style={{ maxWidth: "none", width: "100%" }}>
+                  <div className="wf-progress" title={r.progress != null ? `工作流进度 ${r.progress}%` : "工作流运转中（排队/初始化）"}>
+                    <div className="wf-progress-bar" style={{ width: `${r.progress ?? 0}%` }} />
+                    <span className="wf-progress-txt">{r.progress != null ? `${r.progress}%` : "运转中…"}</span>
+                  </div>
+                  <span className="wf-progress-node" title="当前执行节点，若长时间不变可能卡住">
+                    {r.node ? `节点 ${r.node} · ` : ""}{r.templateName}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
           <ModelSwitcher
             icon={<MessagesSquare size={18} />}
             label="对话模型"
@@ -791,7 +1002,41 @@ export function ChatView({
           )}
         </div>
       </div>
-          </div>
+      {/* 画布工作流运转进度条（折叠为小球兜底）：独立于 chat-input-wrap（wrap display:none 会吞掉内部元素）。
+          展开态进度条已嵌入 chat-actions 工具栏行（功能按钮左侧），与对话模式一致；
+          仅当输入栏折叠为小球时才在底部显示独立浮条，任务结束自动消失。 */}
+      {contentView === "canvas" && canvasInputFolded && canvasWfRuns.length > 0 && (
+        <div className="canvas-wf-runs">
+          {canvasWfRuns.map((r) => (
+            <div key={r.id} className="wf-progress-wrap" style={{ maxWidth: "none", width: "100%" }}>
+              <div className="wf-progress" title={r.progress != null ? `工作流进度 ${r.progress}%` : "工作流运转中（排队/初始化）"}>
+                <div className="wf-progress-bar" style={{ width: `${r.progress ?? 0}%` }} />
+                <span className="wf-progress-txt">{r.progress != null ? `${r.progress}%` : "运转中…"}</span>
+              </div>
+              <span className="wf-progress-node" title="当前执行节点，若长时间不变可能卡住">
+                {r.node ? `节点 ${r.node} · ` : ""}{r.templateName}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      </div>
+      {/* 画布模式悬浮小球：输入栏折叠为圆球的入口（点击恢复输入栏原位）。
+          注意必须放在 chat-input-wrap 之外——wrap 折叠时 display:none 会连小球一起隐藏。
+          对标快捷工具/后台活动：可上下拖动（pointer capture），拖动位置持久化。 */}
+      {contentView === "canvas" && canvasInputFolded && (
+        <button
+          className="canvas-input-fab"
+          type="button"
+          title="展开对话框（画布输入，拖动可移动）"
+          style={{ top: canvasFabTop, bottom: "auto" }}
+          onPointerDown={onCanvasFabPointerDown}
+          onPointerMove={onCanvasFabPointerMove}
+          onPointerUp={onCanvasFabPointerUp}
+        >
+          <MessageSquarePlus size={22} />
+        </button>
+      )}
         </div>
 
         {showComfy && (
@@ -867,6 +1112,8 @@ export function ChatView({
           cardName={repo?.cardName || ""}
           cardNames={cardNames}
           modelsDir={settings.modelsDir || (settings.comfyuiPath ? `${settings.comfyuiPath}/models` : "")}
+          repoId={repo?.id || ""}
+          outputDir={settings.outputDir || ""}
           preset={settings.mediaInsert?.[repo?.id || ""]}
           onSave={(preset) => {
             const key = repo?.id || "";

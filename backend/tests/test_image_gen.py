@@ -238,3 +238,89 @@ def test_非法自定义尺寸在请求上游前拒绝(size, monkeypatch):
 
     with pytest.raises(ValueError, match="图片"):
         image_gen.generate("https://img.test/v1", "key", "model", "prompt", size=size)
+
+
+def test_load_image_bytes_local_view_bypasses_explicit_proxy(monkeypatch):
+    """local-view 指向本机后端，即使配置了显式代理也必须绕过（Clash 无法转发 localhost → 502）。"""
+    captured = {}
+
+    class _StreamResp:
+        headers = {"content-type": "image/png"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def raise_for_status(self):
+            pass
+
+        def iter_bytes(self):
+            return iter([b"pngdata"])
+
+    class _StreamClient:
+        def __init__(self, *args, **kwargs):
+            captured["client_kwargs"] = kwargs
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def stream(self, *args, **kwargs):
+            return _StreamResp()
+
+    monkeypatch.setattr(image_gen.httpx, "Client", _StreamClient)
+
+    data, fn, mime = image_gen._load_image_bytes(
+        "http://127.0.0.1:8010/api/comfyui/local-view?path=C%3A%5Ctest.png",
+        proxy="http://127.0.0.1:7897",
+    )
+
+    assert data == b"pngdata"
+    assert "proxy" not in captured["client_kwargs"]  # 显式代理被剥离
+
+
+def test_load_image_bytes_external_url_keeps_explicit_proxy(monkeypatch):
+    """外部图片 URL 仍走显式代理（中转通路依赖它）。"""
+    captured = {}
+
+    class _StreamResp:
+        headers = {"content-type": "image/jpeg"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def raise_for_status(self):
+            pass
+
+        def iter_bytes(self):
+            return iter([b"jpgdata"])
+
+    class _StreamClient:
+        def __init__(self, *args, **kwargs):
+            captured["client_kwargs"] = kwargs
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def stream(self, *args, **kwargs):
+            return _StreamResp()
+
+    monkeypatch.setattr(image_gen.httpx, "Client", _StreamClient)
+
+    data, fn, mime = image_gen._load_image_bytes(
+        "https://img.test/ref.png",
+        proxy="http://127.0.0.1:7897",
+    )
+
+    assert data == b"jpgdata"
+    assert captured["client_kwargs"]["proxy"] == "http://127.0.0.1:7897"

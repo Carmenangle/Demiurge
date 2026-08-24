@@ -80,6 +80,12 @@ class TestMediaFile:
         assert is_media_file("x.JPEG")
         assert is_media_file("clip.mp4")
 
+    def test_audio_ext_allowed(self):
+        assert is_media_file("voice.wav")
+        assert is_media_file("music.mp3")
+        assert is_media_file("tts.flac")
+        assert is_media_file("narr.ogg")
+
     def test_non_media_rejected(self):
         assert not is_media_file(r"C:\Users\me\.env")
         assert not is_media_file("app.db")

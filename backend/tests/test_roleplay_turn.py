@@ -16,7 +16,7 @@ def test_finalize_turn_publishes_visible_text_before_maintenance():
     def writeback(_draft, rag_events):
         order.append("writeback")
         rag_events.append({"state": "saved", "kind": "worldbook"})
-        return "visible", [], {"prompt": "tags", "motion": 1, "actors": ["A"]}
+        return "visible", [], {"prompt": "tags", "motion": 1, "actors": ["A"]}, {}
 
     hooks = roleplay_turn.TurnFinalizationHooks(
         writeback=writeback,
@@ -65,7 +65,7 @@ def test_execute_turn_owns_generation_through_maintenance_order():
         deps=object(), turn=2, affinity=0, lost=False,
     )
     finalization = roleplay_turn.TurnFinalizationHooks(
-        writeback=lambda _draft, _events: order.append("writeback") or ("visible", [], {}),
+        writeback=lambda _draft, _events: order.append("writeback") or ("visible", [], {}, {}),
         apply_output=lambda reply: order.append("regex") or reply,
         anchor_offset=lambda _reply, _request: None,
         emit_ready=lambda _ctx, _result: order.append("publish") or True,
@@ -91,7 +91,7 @@ def test_execute_turn_rejects_unclosed_visible_content_before_writeback():
         deps=object(), turn=2, affinity=0, lost=False,
     )
     finalization = roleplay_turn.TurnFinalizationHooks(
-        writeback=lambda _draft, _events: order.append("writeback") or ("visible", [], {}),
+        writeback=lambda _draft, _events: order.append("writeback") or ("visible", [], {}, {}),
         apply_output=lambda reply: reply,
         anchor_offset=lambda _reply, _request: None,
         emit_ready=lambda _ctx, _result: order.append("publish") or True,
@@ -125,7 +125,7 @@ def test_agent_turn_finishes_only_after_published_maintenance():
         release_maintenance.wait(timeout=2)
 
     hooks = roleplay_turn.TurnFinalizationHooks(
-        writeback=lambda item, events: (item.reply, [], {}),
+        writeback=lambda item, events: (item.reply, [], {}, {}),
         apply_output=lambda reply: reply,
         anchor_offset=lambda _reply, _request: None,
         emit_ready=lambda _ctx, _result: published.set() or True,

@@ -102,6 +102,13 @@ export function characterDetail(base: string, name: string) {
   );
 }
 
+/** 画布模式：优先读仓库快照角色卡，不存在回退源库 */
+export function characterRepoDetail(outputDir: string, repoId: string, name: string) {
+  return apiGet<Record<string, unknown>>(
+    `/characters/repo-detail?output_dir=${encodeURIComponent(outputDir)}&repo_id=${encodeURIComponent(repoId)}&name=${encodeURIComponent(name)}`,
+  );
+}
+
 export interface CharacterEditableFields {
   description: string;
   first_mes: string;

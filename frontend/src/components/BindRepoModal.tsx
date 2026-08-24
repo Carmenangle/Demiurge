@@ -2,24 +2,27 @@ import { useEffect, useState } from "react";
 import { Link2 } from "lucide-react";
 import { listCharacters, snapshotCardsToRepo, type CardSummary } from "../api/characters";
 import { listWorldbooks, type WorldbookSummary } from "../api/worldbook";
+import { listPresets, type PresetSummary } from "../api/preset";
 import { type Repo, type RepoBinding } from "../stores/repos";
 import { type UserPersona } from "../stores/settings";
 
 // 仓库绑定弹窗：角色卡 / 独立世界书 / 用户设定三样独立可选，各带「不绑定」。
 // 大小仓库都能绑；子仓库留空则运行时继承父仓库（resolveBinding 处理，这里只编辑自身字段）。
 export function BindRepoModal({
-  repo, characterDir, outputDir, worldbookDir, personas, onSave, onClose,
+  repo, characterDir, outputDir, worldbookDir, presetDir, personas, onSave, onClose,
 }: {
   repo: Repo;
   characterDir: string;
   outputDir: string;
   worldbookDir: string;
+  presetDir: string;
   personas: UserPersona[];
   onSave: (patch: Partial<RepoBinding>) => void;
   onClose: () => void;
 }) {
   const [cards, setCards] = useState<CardSummary[]>([]);
   const [books, setBooks] = useState<WorldbookSummary[]>([]);
+  const [presets, setPresets] = useState<PresetSummary[]>([]);
   const initialCards = repo.cardNames?.length ? repo.cardNames : (repo.cardName ? [repo.cardName] : []);
   const [cardNames, setCardNames] = useState<string[]>(initialCards);
   const [openingCardName, setOpeningCardName] = useState(
@@ -27,6 +30,7 @@ export function BindRepoModal({
   );
   const [worldbookName, setWorldbookName] = useState(repo.worldbookName || "");
   const [personaId, setPersonaId] = useState(repo.personaId || "");
+  const [presetName, setPresetName] = useState(repo.presetName || "");
   const [err, setErr] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -37,7 +41,10 @@ export function BindRepoModal({
     if (worldbookDir) {
       listWorldbooks(worldbookDir).then((r) => setBooks(r.items)).catch(() => { /* 无独立世界书目录则空 */ });
     }
-  }, [characterDir, worldbookDir]);
+    if (presetDir) {
+      listPresets(presetDir).then((r) => setPresets(r.items)).catch(() => { /* 无预设目录则空 */ });
+    }
+  }, [characterDir, worldbookDir, presetDir]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -52,7 +59,7 @@ export function BindRepoModal({
       if (cardNames.length && characterDir && outputDir) {
         await snapshotCardsToRepo(characterDir, cardNames, outputDir, repo.id);
       }
-      onSave({ cardNames, openingCardName, cardName: openingCardName, worldbookName, personaId });
+      onSave({ cardNames, openingCardName, cardName: openingCardName, worldbookName, personaId, presetName });
       onClose();
     } catch (error) {
       setErr(String((error as Error).message));
@@ -119,6 +126,18 @@ export function BindRepoModal({
             <option value="">用全局选中档</option>
             {personas.map((p) => <option key={p.id} value={p.id}>{p.name || "（未命名人设）"}</option>)}
           </select>
+        </label>
+
+        <label className="bind-field">
+          <span className="bind-label">偏置预设</span>
+          <select value={presetName} onChange={(e) => setPresetName(e.target.value)} disabled={!presetDir}>
+            <option value="">用全局选中档</option>
+            {presets.map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}
+          </select>
+          {!presetDir && <span className="bind-hint">未设置预设文件夹（设置→路径），无法绑预设。</span>}
+          {presetDir && (
+            <span className="bind-hint">选择该仓库专属的偏置预设；留空则使用全局设置中的激活预设。</span>
+          )}
         </label>
 
         <div className="modal-actions">

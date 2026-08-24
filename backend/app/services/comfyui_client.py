@@ -123,10 +123,11 @@ def submit_prompt(url: str, api: dict, client_id: str = "") -> str | None:
 
 def fetch_result(url: str, prompt_id: str,
                  filter_node_ids: list[str] | None = None) -> dict:
-    """轮询 /history/{id}，归一为 {status, images, videos, texts}。
+    """轮询 /history/{id}，归一为 {status, images, videos, audios, texts}。
 
     视频节点（VHS_VideoCombine 等）的产物落在 outputs 的 gifs 键（含 mp4/webm/gif），
-    与图片同结构({filename,subfolder,type})但单列 videos，供前端用 <video> 渲染。
+    音频节点（SaveAudio / VHS_AudioCombine 等）落在 outputs 的 audio 键（wav/mp3/flac…），
+    与图片同结构({filename,subfolder,type})但单列 videos/audios，供前端用 <video>/<audio> 渲染。
     filter_node_ids 非空时只保留指定节点的产物（多输出工作流主输出节点过滤）。
     """
     try:
@@ -145,9 +146,9 @@ def fetch_result(url: str, prompt_id: str,
             running = [item[1] for item in q.get("queue_running", [])]
             pending_q = [item[1] for item in q.get("queue_pending", [])]
             if prompt_id in running or prompt_id in pending_q:
-                return {"status": "pending", "images": [], "videos": [], "texts": []}
+                return {"status": "pending", "images": [], "videos": [], "audios": [], "texts": []}
             # 不在历史也不在队列：任务已丢失（ComfyUI 重启等原因）
-            return {"status": "not_found", "images": [], "videos": [], "texts": []}
+            return {"status": "not_found", "images": [], "videos": [], "audios": [], "texts": []}
         except Exception:
             # 队列查询失败时保守返回 pending，避免误判
             return {"status": "pending", "images": [], "videos": [], "texts": []}
@@ -171,10 +172,12 @@ def fetch_result(url: str, prompt_id: str,
             "error": error,
             "images": [],
             "videos": [],
+            "audios": [],
             "texts": [],
         }
     images: list[dict[str, str]] = []
     videos: list[dict[str, str]] = []
+    audios: list[dict[str, str]] = []
     texts: list[str] = []
 
     def _as_ref(item: dict) -> dict[str, str]:
@@ -185,45 +188,69 @@ def fetch_result(url: str, prompt_id: str,
         }
 
     _video_ext = (".mp4", ".webm", ".gif", ".mov", ".mkv", ".webp")
+    _audio_ext = (".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".opus", ".wma")
     allowed = set(filter_node_ids) if filter_node_ids else None
 
     def _collect(node_filter: set[str] | None) -> tuple[list[dict[str, str]],
-                                                          list[dict[str, str]], list[str]]:
+                                                          list[dict[str, str]],
+                                                          list[dict[str, str]],
+                                                          list[str]]:
         found_images: list[dict[str, str]] = []
         found_videos: list[dict[str, str]] = []
+        found_audios: list[dict[str, str]] = []
         found_texts: list[str] = []
         for node_id, node_out in entry.get("outputs", {}).items():
             if node_filter and node_id not in node_filter:
                 continue
             for img in node_out.get("images", []):
-                if str(img.get("filename", "")).lower().endswith(_video_ext[:-1]):
+                ext = str(img.get("filename", "")).lower()
+                if ext.endswith(_audio_ext):
+                    found_audios.append(_as_ref(img))
+                elif ext.endswith(_video_ext[:-1]):
                     found_videos.append(_as_ref(img))
                 else:
                     found_images.append(_as_ref(img))
             for vid in node_out.get("gifs", []) or []:
                 found_videos.append(_as_ref(vid))
+            for aud in node_out.get("audio", []) or []:
+                found_audios.append(_as_ref(aud))
             for output_text in node_out.get("text", []) or []:
                 if isinstance(output_text, str) and output_text.strip():
                     found_texts.append(output_text)
-        return found_images, found_videos, found_texts
+        return found_images, found_videos, found_audios, found_texts
 
-    images, videos, texts = _collect(allowed)
+    images, videos, audios, texts = _collect(allowed)
     saved_images = [image for image in images if image.get("type") != "temp"]
     saved_videos = [video for video in videos if video.get("type") != "temp"]
+    saved_audios = [audio for audio in audios if audio.get("type") != "temp"]
     if allowed and (not saved_images and images):
-        all_images, _, _ = _collect(None)
+        all_images, _, _, _ = _collect(None)
         saved_images = [image for image in all_images if image.get("type") != "temp"]
     if allowed and (not saved_videos and videos):
-        _, all_videos, _ = _collect(None)
+        _, all_videos, _, _ = _collect(None)
         saved_videos = [video for video in all_videos if video.get("type") != "temp"]
+    if allowed and (not saved_audios and audios):
+        _, _, all_audios, _ = _collect(None)
+        saved_audios = [audio for audio in all_audios if audio.get("type") != "temp"]
+    # 过滤节点完全匹配不到任何产物（模板 primary_output_node_id 与实际 SaveImage 节点 id 不一致等）
+    # → 兜底全量收集，否则任务 completed 却拿空结果，结果不进对话/资产库（卡 SaveImage 表象）。
+    # 兜底后须重算 saved（过滤 temp 预览图），否则全量 images 直接透传 temp。
+    if allowed and not images and not videos and not audios and not texts:
+        images, videos, audios, texts = _collect(None)
+        saved_images = [image for image in images if image.get("type") != "temp"]
+        saved_videos = [video for video in videos if video.get("type") != "temp"]
+        saved_audios = [audio for audio in audios if audio.get("type") != "temp"]
     if saved_images:
         images = saved_images
     if saved_videos:
         videos = saved_videos
+    if saved_audios:
+        audios = saved_audios
     return {
         "status": "completed" if completed else "running",
         "images": images,
         "videos": videos,
+        "audios": audios,
         "texts": texts,
     }
 

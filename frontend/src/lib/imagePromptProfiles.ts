@@ -127,6 +127,9 @@ interface IllustrationValues {
   loraWeight?: number;
   baseImage?: string;
   latentSize?: { width: number; height: number };
+  /** V1.2 视频最小事实：时长（秒）与镜头运动（static/pan/zoom），来自用户预设，不从模型输出读 */
+  videoDuration?: number;
+  videoCamera?: "static" | "pan" | "zoom";
 }
 
 export type IllustrationAspectRatio = "1:1" | "2:3" | "3:2" | "3:4" | "4:3" | "9:16" | "16:9";
@@ -168,6 +171,10 @@ export function illustrationTemplateValues(
       values[key] = input.loraWeight ?? 0.8;
     } else if (binding === "base_image" && input.baseImage) {
       values[key] = input.baseImage;
+    } else if (binding === "video_duration" && input.videoDuration) {
+      values[key] = input.videoDuration;
+    } else if (binding === "video_camera" && input.videoCamera) {
+      values[key] = input.videoCamera;
     } else if (binding === "latent_width" && input.latentSize) {
       values[key] = input.latentSize.width;
     } else if (binding === "latent_height" && input.latentSize) {

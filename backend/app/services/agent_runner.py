@@ -40,6 +40,7 @@ def run_multi_stream(context: RunContext) -> "queue.Queue":
         route_model=context.route_model or context.chat.model,
         illustrate=context.illustrate,
         comfy_illustrate=context.comfy_illustrate,
+        comfy_audio=context.comfy_audio,
         stream_output=context.stream_output,
     )
 

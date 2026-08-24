@@ -15,7 +15,10 @@ describe("user message decoration", () => {
   });
 
   it("keeps text and actions outside the fixed decoration area", () => {
-    expect(css).toContain(".user-message-text {\n  padding-right: 112px;");
-    expect(css).toContain(".user-message-actions {\n  padding-right: 112px;");
+    // padding 已主题化（bright/night/green/gray 统一 112px，eye-care 用 76/58px）；
+    // 工作副本为 CRLF，先归一化换行再断言，避免平台差异误报。
+    const normalized = css.replace(/\r\n/g, "\n");
+    expect(normalized).toContain('.user-message-text {\n  padding-right: 112px;');
+    expect(normalized).toContain('.user-message-actions {\n  padding-right: 112px;');
   });
 });

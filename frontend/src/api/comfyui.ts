@@ -91,6 +91,7 @@ export interface GenResult {
   error?: string;
   images: ResultImage[];
   videos: ResultImage[];
+  audios: ResultImage[];
   texts: string[];
 }
 
@@ -107,6 +108,7 @@ export interface FinalizedMessage {
   text: string;
   image?: string;
   video?: string;
+  audio?: string;
   regeneration?: RegenerationSnapshot;
 }
 
@@ -116,24 +118,28 @@ export interface FinalizeGenerationResponse {
   complete: boolean;
   messages: FinalizedMessage[];
   images: { message_id: string; display_url: string; persisted: boolean; indexed: boolean; snapshotted: boolean; errors: string[] }[];
-  target?: { message_id: string; slot_id: string; media_type: "image" | "video"; url: string } | null;
+  target?: { message_id: string; slot_id: string; media_type: "image" | "video" | "audio"; url: string } | null;
 }
 
 export function finalizeGeneration(args: {
   threadId: string; repoId: string; promptId: string; prompt: string;
-  images: ResultImage[]; videos?: ResultImage[]; outputDir: string; comfyuiUrl: string;
+  images: ResultImage[]; videos?: ResultImage[]; audios?: ResultImage[]; outputDir: string; comfyuiUrl: string;
   embed: { baseUrl: string; apiKey: string; modelName: string };
   chat: { baseUrl: string; apiKey: string; modelName: string };
   regeneration?: RegenerationSnapshot;
+  templateName?: string; modelName?: string; loraNames?: string[];
   target?: { messageId: string; slotId: string };
 }) {
   return apiPost<FinalizeGenerationResponse>("/comfyui/finalize-generation", {
     thread_id: args.threadId, repo_id: args.repoId, prompt_id: args.promptId,
-    prompt: args.prompt, images: args.images, videos: args.videos || [], output_dir: args.outputDir,
+    prompt: args.prompt, images: args.images, videos: args.videos || [], audios: args.audios || [], output_dir: args.outputDir,
     comfyui_url: args.comfyuiUrl, embed_base: args.embed.baseUrl,
     embed_key: args.embed.apiKey, embed_model: args.embed.modelName,
     chat_base: args.chat.baseUrl, chat_key: args.chat.apiKey, chat_model: args.chat.modelName,
     regeneration: args.regeneration,
+    template_name: args.templateName || "",
+    model_name: args.modelName || "",
+    lora_names: args.loraNames ? args.loraNames.join(",") : "",
     target_message_id: args.target?.messageId || "",
     target_slot_id: args.target?.slotId || "",
   });

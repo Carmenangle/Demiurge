@@ -83,6 +83,34 @@ def test_gif_in_images_reclassified_as_video(monkeypatch):
     assert [v["filename"] for v in r["videos"]] == ["clip.gif"]
 
 
+def test_fetch_result_audio_output_reclassified(monkeypatch):
+    """音频节点产物：outputs.audio 键（wav/mp3/flac…）→ audios；images 里的音频扩展名也归 audio。"""
+    hist = {"pid": {"status": {"completed": True}, "outputs": {
+        "5": {"audio": [{"filename": "voice.wav", "subfolder": "", "type": "output"}]},
+        "6": {"images": [{"filename": "music.mp3", "subfolder": "", "type": "output"}]},
+        "7": {"images": [{"filename": "cover.png", "subfolder": "", "type": "output"}]},
+    }}}
+    monkeypatch.setattr(comfyui_client, "urlopen", lambda *a, **k: _FakeResp(hist))
+
+    r = comfyui_client.fetch_result("http://127.0.0.1:8188", "pid")
+
+    assert [audio["filename"] for audio in r["audios"]] == ["voice.wav", "music.mp3"]
+    assert [image["filename"] for image in r["images"]] == ["cover.png"]
+
+
+def test_fetch_result_audio_filter_mismatch_falls_back(monkeypatch):
+    """音频节点同理：filter 匹配不到 → 全量收集 audios。"""
+    hist = {"pid": {"status": {"completed": True}, "outputs": {
+        "24": {"audio": [{"filename": "narr.wav", "subfolder": "", "type": "output"}]},
+    }}}
+    monkeypatch.setattr(comfyui_client, "urlopen", lambda *a, **k: _FakeResp(hist))
+
+    r = comfyui_client.fetch_result("http://127.0.0.1:8188", "pid", ["42"])
+
+    assert r["status"] == "completed"
+    assert [audio["filename"] for audio in r["audios"]] == ["narr.wav"]
+
+
 def test_fetch_result_exposes_execution_error_as_failed(monkeypatch):
     hist = {"pid": {
         "status": {
@@ -153,3 +181,43 @@ def test_submit_prompt_允许复杂工作流校验超过十秒(monkeypatch):
 
     assert comfyui_client.submit_prompt("http://127.0.0.1:8188", {"1": {}}) == "prompt-1"
     assert captured["timeout"] >= 30
+
+
+def test_fetch_result_filter_node_mismatch_falls_back_to_all_outputs(monkeypatch):
+    """模板 primary_output_node_id 与实际 SaveImage 节点不一致（filter 匹配不到任何产物）
+    → 兜底全量收集，避免 completed 却拿空结果（结果不进对话/资产库）。"""
+    hist = {"pid": {"status": {"completed": True}, "outputs": {
+        "24": {"images": [{"filename": "saved.png", "subfolder": "", "type": "output"}]},
+    }}}
+    monkeypatch.setattr(comfyui_client, "urlopen", lambda *a, **k: _FakeResp(hist))
+
+    r = comfyui_client.fetch_result("http://127.0.0.1:8188", "pid", ["999"])
+
+    assert r["status"] == "completed"
+    assert [image["filename"] for image in r["images"]] == ["saved.png"]
+
+
+def test_fetch_result_filter_mismatch_video_falls_back(monkeypatch):
+    """视频节点同理：filter 匹配不到 → 全量收集 videos。"""
+    hist = {"pid": {"status": {"completed": True}, "outputs": {
+        "24": {"gifs": [{"filename": "movie.mp4", "subfolder": "", "type": "output"}]},
+    }}}
+    monkeypatch.setattr(comfyui_client, "urlopen", lambda *a, **k: _FakeResp(hist))
+
+    r = comfyui_client.fetch_result("http://127.0.0.1:8188", "pid", ["42"])
+
+    assert r["status"] == "completed"
+    assert [video["filename"] for video in r["videos"]] == ["movie.mp4"]
+
+
+def test_fetch_result_filter_mismatch_skips_temp_preview(monkeypatch):
+    """兜底全量收集时必须过滤 temp 预览图（只返回 SaveImage 的 output 产物）。"""
+    hist = {"pid": {"status": {"completed": True}, "outputs": {
+        "3": {"images": [{"filename": "preview.png", "subfolder": "", "type": "temp"}]},
+        "24": {"images": [{"filename": "saved.png", "subfolder": "", "type": "output"}]},
+    }}}
+    monkeypatch.setattr(comfyui_client, "urlopen", lambda *a, **k: _FakeResp(hist))
+
+    r = comfyui_client.fetch_result("http://127.0.0.1:8188", "pid", ["999"])
+
+    assert [image["filename"] for image in r["images"]] == ["saved.png"]

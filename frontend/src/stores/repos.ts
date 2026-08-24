@@ -21,6 +21,7 @@ export interface Repo {
   openingCardName?: string; // 首次空会话使用哪张卡的 first_mes
   worldbookName?: string; // 绑定的独立世界书名（worldbookDir 下的 .json 名，不含扩展名）；空=不绑独立书
   personaId?: string; // 绑定的用户人设档 id（settings.userPersonas）；空=用全局选中档
+  presetName?: string; // 绑定的偏置预设名（presetDir 下的 .json 名，不含扩展名）；空=用全局选中档
 }
 
 // 一个仓库的有效绑定：自身字段优先，缺则继承父仓库，皆空则回退全局（由调用方处理全局回退）。
@@ -30,6 +31,7 @@ export interface RepoBinding {
   openingCardName: string;
   worldbookName: string;
   personaId: string;
+  presetName: string;
 }
 
 const KEY = "laf_repos";
@@ -93,6 +95,7 @@ function normalizeBindings(repos: Repo[]): Repo[] | null {
     }
     if (!r.worldbookName && parent.worldbookName) patch.worldbookName = parent.worldbookName;
     if (!r.personaId && parent.personaId) patch.personaId = parent.personaId;
+    if (!r.presetName && parent.presetName) patch.presetName = parent.presetName;
     if (Object.keys(patch).length) { changed = true; return { ...r, ...patch }; }
     return r;
   });
@@ -186,7 +189,8 @@ export function useRepos() {
         {
           id: childId, name: saveName, parentId: parent.id, cardName,
           cardNames: [cardName], openingCardName: cardName,
-          worldbookName: parent.worldbookName, personaId: parent.personaId, createdAt: Date.now(),
+          worldbookName: parent.worldbookName, personaId: parent.personaId,
+          presetName: parent.presetName, createdAt: Date.now(),
         },
       ]);
       return { parentId: parent.id, childId };
@@ -219,6 +223,7 @@ export function useRepos() {
       openingCardName: openingCardName || undefined,
       worldbookName: binding?.worldbookName || parent?.worldbookName,
       personaId: binding?.personaId || parent?.personaId,
+      presetName: binding?.presetName || parent?.presetName,
     }]);
     return id;
   };
@@ -258,6 +263,7 @@ export function useRepos() {
       }
       if ("worldbookName" in patch) next.worldbookName = patch.worldbookName || undefined;
       if ("personaId" in patch) next.personaId = patch.personaId || undefined;
+      if ("presetName" in patch) next.presetName = patch.presetName || undefined;
       return next;
     }));
   };
@@ -273,6 +279,7 @@ export function useRepos() {
       openingCardName: inheritedCards.openingCardName,
       worldbookName: repo.worldbookName || parent?.worldbookName || "",
       personaId: repo.personaId || parent?.personaId || "",
+      presetName: repo.presetName || parent?.presetName || "",
     };
   };
 

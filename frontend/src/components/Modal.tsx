@@ -9,9 +9,11 @@ function useEsc(onCancel: () => void) {
   }, [onCancel]);
 }
 
+import type { ReactNode } from "react";
+
 interface ConfirmProps {
   title: string;
-  message?: string;
+  message?: ReactNode;
   confirmText?: string;
   cancelText?: string;
   danger?: boolean;

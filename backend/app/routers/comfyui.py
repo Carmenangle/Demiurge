@@ -169,6 +169,7 @@ class FinalizeGenerationRequest(BaseModel):
     prompt: str = ""
     images: list[FinalizeGenerationImage] = []
     videos: list[FinalizeGenerationImage] = []
+    audios: list[FinalizeGenerationImage] = []
     output_dir: str = ""
     comfyui_url: str = COMFYUI_BASE_URL
     embed_base: str = ""
@@ -180,6 +181,9 @@ class FinalizeGenerationRequest(BaseModel):
     regeneration: dict | None = None
     target_message_id: str = ""
     target_slot_id: str = ""
+    template_name: str = ""
+    model_name: str = ""
+    lora_names: str = ""
 
 
 @router.post("/finalize-generation")
@@ -193,6 +197,7 @@ def finalize_generation(req: FinalizeGenerationRequest) -> dict[str, object]:
             prompt=req.prompt,
             images=[image.model_dump() for image in req.images],
             videos=[video.model_dump() for video in req.videos],
+            audios=[audio.model_dump() for audio in req.audios],
             output_dir=req.output_dir,
             comfyui_url=req.comfyui_url,
             embed_base=req.embed_base,
@@ -202,6 +207,9 @@ def finalize_generation(req: FinalizeGenerationRequest) -> dict[str, object]:
             chat_key=req.chat_key,
             chat_model=req.chat_model,
             regeneration=req.regeneration,
+            template_name=req.template_name,
+            model_name=req.model_name,
+            lora_names=req.lora_names,
             target_message_id=req.target_message_id,
             target_slot_id=req.target_slot_id,
         )
@@ -304,3 +312,56 @@ def local_view(path: str, request: Request):
     return StreamingResponse(
         media.iter_bytes(), status_code=206, media_type=media.media_type, headers=media.headers,
     )
+
+
+# ===== 上网素材：联网搜索下载的图片存到 outputDir/_web_materials/ =====
+
+class WebMaterialSaveRequest(BaseModel):
+    output_dir: str = ""
+    src: str = ""               # 图片 URL 或 data URI
+    source_url: str = ""        # 来源网页 URL
+    title: str = ""             # 图片标题
+
+
+class WebMaterialListRequest(BaseModel):
+    output_dir: str = ""
+
+
+class WebMaterialDeleteRequest(BaseModel):
+    output_dir: str = ""
+    filename: str = ""
+
+
+@router.post("/web-materials/save")
+def web_material_save(req: WebMaterialSaveRequest) -> dict[str, object]:
+    """把联网搜索到的图片下载到 _web_materials/，返回 {path, url, source_url, title, filename}。"""
+    try:
+        return image_store.save_web_material(req.output_dir, req.src, req.source_url, req.title)
+    except ComfyError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)
+
+
+@router.post("/web-materials/list")
+def web_material_list(req: WebMaterialListRequest) -> dict[str, object]:
+    """列出 _web_materials/ 下所有图片。"""
+    return {"items": image_store.list_web_materials(req.output_dir)}
+
+
+@router.post("/web-materials/delete")
+def web_material_delete(req: WebMaterialDeleteRequest) -> dict[str, object]:
+    """删除 _web_materials/ 下的指定文件。"""
+    ok = image_store.delete_web_material(req.output_dir, req.filename)
+    return {"ok": ok}
+
+
+# ===== 参考图：聊天上传到 <repo>/reference/ 的图片，供画布自动导入 =====
+
+class ReferenceImageListRequest(BaseModel):
+    output_dir: str = ""
+    repo_id: str = ""
+
+
+@router.post("/reference-images/list")
+def reference_image_list(req: ReferenceImageListRequest) -> dict[str, object]:
+    """列出 <repo_id>/reference/ 下所有图片，供画布自动导入参考图节点。"""
+    return {"items": image_store.list_reference_images(req.output_dir, req.repo_id)}

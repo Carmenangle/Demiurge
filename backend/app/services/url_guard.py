@@ -134,12 +134,13 @@ def is_local_view_url(url: str) -> bool:
     return is_loopback and bool(re.search(r"/comfyui/local-view\b", parsed.path or ""))
 
 
-# local-view 只服务图片/视频文件。用扩展名白名单作边界：
+# local-view 只服务媒体文件（图片/视频/音频）。用扩展名白名单作边界：
 # 该端点会读任意本地路径（对话背景图允许用户填任意图片完整路径，故不能按目录 jail），
 # 但严格限制只回媒体文件——挡住读 .env/.db/.py/密钥/源码等敏感文件的 LFI 攻击面。
 _MEDIA_EXTS = {
     "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "ico", "avif", "tiff",
     "mp4", "webm", "mov", "mkv", "m4v", "avi",
+    "wav", "mp3", "flac", "ogg", "oga", "opus", "m4a", "aac", "wma",
 }
 
 

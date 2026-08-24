@@ -1,11 +1,15 @@
 import { PageShell, EmptyState } from "../components/layout/PageShell";
 import { useRepos } from "../stores/repos";
 import { resolvedEmbedModel, useSettings } from "../stores/settings";
-import { RepoGallery } from "../components/RepoGallery";
+import { RepoGallery, type GenWithRepo } from "../components/RepoGallery";
 
 // 资产库：全站聚合。列出所有仓库(含小仓库)的生成图，支持按标签/仓库名搜索、从新到旧、
 // 批量删除、标签统计排序、发送至对话(选仓库)。
-export function AssetsView({ onSendToChat }: { onSendToChat: (url: string) => void }) {
+export function AssetsView({ onSendToChat, onSendAsRecipe, onBatchSendToCanvas }: {
+  onSendToChat: (url: string) => void;
+  onSendAsRecipe?: (g: GenWithRepo) => void;
+  onBatchSendToCanvas?: (items: GenWithRepo[]) => void;
+}) {
   const { repos } = useRepos();
   const { settings } = useSettings();
   const repoIds = repos.map((r) => r.id);
@@ -16,7 +20,9 @@ export function AssetsView({ onSendToChat }: { onSendToChat: (url: string) => vo
         <EmptyState>还没有任何仓库，生成的图片会自动出现在这里。</EmptyState>
       ) : (
         <RepoGallery repoIds={repoIds} embed={resolvedEmbedModel(settings)} repoNames={repoNames} hideTitle
-          enhanced onSendToChat={(g) => onSendToChat(g.image_url)} />
+          enhanced onSendToChat={(g) => onSendToChat(g.image_url)}
+          onSendAsRecipe={onSendAsRecipe}
+          onBatchSendToCanvas={onBatchSendToCanvas} />
       )}
     </PageShell>
   );

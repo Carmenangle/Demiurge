@@ -116,7 +116,16 @@ export interface CharacterLoraBinding {
   baseImage?: string;   // 该角色底图（本地文件路径，走 local-view）；可选的一致性参考
 }
 
+// ⑦ 单角色的音色绑定：参考音轨（IndexTTS 系语音克隆，作品专属）
+export interface CharacterVoiceBinding {
+  voiceRef?: string;    // 参考音轨本地文件路径（<repo>/voices/<角色名>.wav，走 local-view）
+}
+
 export interface MediaInsertPreset {
+  // ⑦ 三开关：剧情自动生成时按勾选类型分发（图片/视频/音频，多选）；旧预设视为 enableImage=true
+  enableImage?: boolean;   // 生成图片
+  enableVideo?: boolean;   // 生成视频
+  enableAudio?: boolean;   // 生成音频
   templateId: string;       // 图片工作流模板 id（空=未预设，不异步出图）
   loraMode?: "none" | "single" | "multi"; // 无 LoRA / 高潮角色栈或风格兜底 / 默认风格+高潮角色栈
   appearanceSource?: "worldbook" | "character_card"; // 稳定外貌取世界书角色条目或绑定角色卡
@@ -132,7 +141,15 @@ export interface MediaInsertPreset {
   styleBaseImage?: string;  // ⑥ 兜底风格底图（在场角色都无底图时，gpt-image 系用）
   videoTemplateId?: string; // 视频工作流模板 id（空=不出视频，恒用图片模板）
   smartVideo?: boolean;     // 智能模态：开=剧情动态强时(motion>=2)自动改用视频模板，否则用图片
+  // V1.2 视频最小事实：时长与镜头运动是用户预设（不从模型输出读），映射视频模板 exposed 隐藏 binding；
+  // 空值 = 模板原值（旧预设兼容，不迁移不报错）。
+  videoDurationHint?: number;   // 视频时长（秒）；0/空=模板原值
+  videoCamera?: "static" | "pan" | "zoom"; // 镜头运动；空=模板原值
+  // ⑦ 音频（IndexTTS 系）：模板 + 按角色参考音轨（每个作品专属、每角色一个）
+  audioTemplateId?: string;  // 音频工作流模板 id（空=不配音）
+  characterVoices?: Record<string, CharacterVoiceBinding>; // 角色名→参考音轨（音色）
 }
+
 
 export interface Settings {
   theme: Theme;
@@ -179,6 +196,8 @@ export interface Settings {
   contextReminderTokens: number; // 累计上下文达到该估算 token 数时提醒压缩
   contextMaxTokens: number; // 每轮传给 Agent 的历史上下文估算 token 硬上限
   historyPerRole: number; // 每角色（用户/AI）读取的最近历史条数，再在 token 上限内裁剪
+  // 通用：不知道该放哪个分区的设置项
+  galleryRemoveFile: boolean; // 资产库删除时默认同时删除本机图片文件
 }
 
 export const DEFAULT_CONTEXT_REMINDER_TOKENS = 12_000;
@@ -245,6 +264,7 @@ const DEFAULT: Settings = {
   contextReminderTokens: DEFAULT_CONTEXT_REMINDER_TOKENS,
   contextMaxTokens: DEFAULT_CONTEXT_MAX_TOKENS,
   historyPerRole: DEFAULT_HISTORY_PER_ROLE,
+  galleryRemoveFile: false,
 };
 
 // 旧数据迁移：单 chatModel 字段 → chatModels 列表（向后兼容）

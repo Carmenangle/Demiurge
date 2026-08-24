@@ -73,6 +73,7 @@ class MultiAgentRequest(ImageAgentRequest):
     worldbook_name: str = "" # 仓库绑定的独立世界书名（空=不绑独立书；与卡内嵌世界书合并）
     illustrate: bool = False  # 剧情插画开关（开=能动性 D 阶段自动配图）
     comfy_illustrate: bool = False  # 前端已预设 ComfyUI 工作流模板：高潮点改发 illustrate_request 事件走异步闭环
+    comfy_audio: bool = False  # 前端已预设音频模板（IndexTTS）：剧情产出后发 audio_request 事件逐角色配音
     prompt_profile: str = "krea2"
     appearance_source: Literal["worldbook", "character_card"] = "worldbook"
     character_base_images: dict[str, str] = {}  # ⑥ 角色名→底图（gpt-image 系按在场角色取底图锁一致性）
@@ -267,6 +268,22 @@ class IllustrationSubmissionRequest(BaseModel):
     source: Literal["automatic", "manual"] = "automatic"
 
 
+class AudioSubmissionRequest(BaseModel):
+    thread_id: str
+    repo_id: str = ""
+    turn_id: str = ""
+    message_id: str
+    slot_id: str
+    speaker: str
+    text: str
+    voice_ref: str = ""          # 参考音轨本地路径（排查音色来源）
+    template_id: str
+    prompt_id: str
+    emotion: dict[str, float] = Field(default_factory=dict)  # 8 维情感向量
+    value_keys: list[str] = Field(default_factory=list)
+    source: Literal["automatic", "manual"] = "automatic"
+
+
 class IllustrationClaimRequest(BaseModel):
     thread_id: str
     message_id: str
@@ -316,6 +333,33 @@ def illustration_submission(req: IllustrationSubmissionRequest) -> dict[str, boo
         value_keys=req.value_keys,
         source=req.source,
         slot_bound=slot_bound,
+    )
+    return {"ok": True}
+
+
+@router.post("/image-agent/audio-submission")
+def audio_submission(req: AudioSubmissionRequest) -> dict[str, bool]:
+    """记录前端最终提交给 ComfyUI 的音频配音参数（台词/音色/情感），追踪失败不影响配音。"""
+    from app.services import run_trace
+    ctx = {
+        "thread_id": req.thread_id,
+        "repo_id": req.repo_id or req.thread_id,
+        "turn_id": req.turn_id,
+    }
+    run_trace.emit(
+        ctx,
+        "audio.submitted",
+        message_id=req.message_id,
+        slot_id=req.slot_id,
+        speaker=req.speaker,
+        text=req.text,
+        text_chars=len(req.text),
+        voice_ref=req.voice_ref,
+        template_id=req.template_id,
+        prompt_id=req.prompt_id,
+        emotion=req.emotion,
+        value_keys=req.value_keys,
+        source=req.source,
     )
     return {"ok": True}
 

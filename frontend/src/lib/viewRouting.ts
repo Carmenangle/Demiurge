@@ -37,15 +37,14 @@ export function isWorkMode(value: string): value is WorkMode {
   return WORK_MODES.some((m) => m.id === value);
 }
 
-export type HomeWorkspace = "need-work" | "chat";
+export type HomeWorkspace = "need-work" | "chat" | "canvas";
 
 export function resolveHomeWorkspace(workMode: WorkMode, hasActiveWork: boolean): HomeWorkspace {
   if (!hasActiveWork) return "need-work";
   switch (workMode) {
+    case "generate": return "canvas";   // ← 画布接管多元数据生成模式
     case "story":
-    case "generate":
-    case "code":
-      return "chat";
+    case "code":    return "chat";
   }
 }
 
@@ -73,6 +72,7 @@ export const SECTION_SUBNAV: Record<Exclude<NavSection, "home">, { id: string; l
     { id: "character-cards", label: "角色卡" },
     { id: "worldbook", label: "世界书" },
     { id: "generations", label: "生成内容" },
+    { id: "web-materials", label: "上网素材" },
   ],
   workflows: [
     { id: "templates", label: "工作流模板库" },

@@ -63,11 +63,12 @@ services/  深模块层。业务逻辑全在这。彼此可依赖，但不 impor
 | `prompt_compiler` | 最终消息编译接缝：OpenAI 兼容档保留历史后 system 原位；Claude 兼容档把历史后约束编译为贴近末轮 user 的本轮执行合同，不得全部前移到 system 头。Roleplay 启用自动插画时，完整插画说明仍在头部事实上下文，但还必须把短 `near_generation_contract` 作为最后一条生成近端 system 放在当前 user 前，避免长预设、世界书及“全部中文”等宽泛规则稀释当前 Profile 格式与事实覆盖要求。输出最终 messages、provider profile 与逐段位置 manifest | `provider_profile` 描述接口 wire，不描述模型家族；OpenAI Chat Completions 代理即使承载 Claude 模型仍选 OpenAI 兼容。旧设置统一迁到 OpenAI 档，只有 v2 后用户明确选择才保留 Claude 档；Roleplay 禁止按模型名猜供应商。Compiler 只拥有消息位置，不拥有预设、世界书或表格内容 |
 | `agent_contracts` | 编排契约单一属主：`RunContext`(dataclass) + `ModelConfig` + `AgentEvent`。多卡固定字段为 `card_names/opening_card_name`，`card_name` 是兼容别名；生图外貌来源为 `appearance_source=worldbook|character_card`。`history_override` 保存本次请求显式上传的可见历史；`stream_output/stream_sink` 控制节点实时增量出口。**RunContext 既是 dataclass 又当 dict 用**，由 `extras` 与 `_legacy()` 支撑 | 新固定字段必须同时加入 dataclass、`_legacy()`、实时请求、后台队列和双端测试；图节点新增跨节点标记还必须声明进 `AgentState`；**动了这些方法必须重启后端** |
 | `agent_request_context` | 即时请求与持久队列共用的 `RunContext` 构造真源；统一默认值、多卡去重、开场卡兼容、显式空历史和全部模型/代理/插画字段 | 新请求字段只在请求模型、前端 `AgentInvocation` 编码和这里各声明一次；禁止 router 或 worker 再手写第二套转换 |
-| `chat_agent_queue` | 忙时消息持久队列；headless worker 必须把 `MultiAgentRequest` 的工作区模式、历史、卡、预设、人设、世界书、插画、流式选择和模型参数完整还原成 `RunContext`。排队 payload 的历史只是入队时快照；任务认领执行时重新读取当前可见 `chat_snapshot`，保证看到前一轮最终正文 | 新增直连参数时同步补队列映射与回归测试；编辑任务排队后仍必须走编辑 Agent；禁止用入队时旧 history 覆盖执行时快照 |
+| `chat_agent_queue` | 忙时消息持久队列；headless worker 必须把 `MultiAgentRequest` 的工作区模式、历史、卡、预设、人设、世界书、插画、流式选择和模型参数完整还原成 `RunContext`。排队 payload 的历史只是入队时快照；任务认领执行时重新读取当前可见 `chat_snapshot`，保证看到前一轮最终正文。认领跳过 `thread_admission` 活跃 thread 的任务（保持 queued 可取消，消除认领→RunAlreadyActive→退回抖动）；cancel 支持 queued 直接取消与 running 协作取消（发取消信号后抢占标记 cancelled，worker 迟到的 `_finish` 被 `status='running'` 守卫拒绝、终态不复活；已落终态的任务取消时 `get()` 以事实为准不覆盖）；`_public` 只暴露 payload 的 `images/message` 摘要，不泄露含密钥的完整 payload | 新增直连参数时同步补队列映射与回归测试；编辑任务排队后仍必须走编辑 Agent；禁止用入队时旧 history 覆盖执行时快照 |
+| `thread_admission` | 线程准入单一真源：同一 thread 只允许一个活动运行（抢占登记，重复抛 `RunAlreadyActive`）、带所有权校验的 release（旧运行不得误删新登记）、协作取消信号；30 分钟泄漏看门狗在 `is_active/active_threads/admit` 前自动清理崩溃未 release 的登记并记日志，防止单次崩溃永久阻塞该 thread | 零重依赖（threading/dataclass）。「谁在跑/能不能再开/如何取消」只在这里改，agent_runner 与队列 worker 复用 |
 | `run_trace` | Agent 单轮结构化追踪：每次请求由 `RunContext.turn_id` 贯穿，按 UTF-8 JSONL 写 `backend/data/logs/agent-trace.jsonl`；记录原始/处理后输入、Supervisor 与各 Agent、完整模型消息与输出、世界书/RAG 注入、纪要/知识写入、状态写回、独立表格维护及首尾错误。按大小轮转并递归脱敏密钥，追踪失败不阻断主流程 | 新增运行阶段先复用 `run_trace.emit(ctx, event, **data)`；不得把 API key/token 放入自由文本。环境变量：`LAF_AGENT_TRACE`、`LAF_AGENT_TRACE_MAX_BYTES`、`LAF_AGENT_TRACE_BACKUPS` |
 | `tool_agent_adapter` | 把遗留 `image_agent` ReAct 流适配成专家节点结果 | `agent_graph` 不直接依赖其长参数和事件细节；替换旧实现只改 Adapter 后面 |
 | `generation_approval` | 提示词审批状态机 + 已批准的图像/视频执行 + 失败语义 | 改确认/更改/取消/重提流程 → 这里；`agent_graph` 只调用其 Interface |
-| `image_gen` | 云端文生图 `/images/generations` 与带参考图 `/images/edits`，统一超时、质量参数和 64–3840px 尺寸边界；`_load_image_bytes` 支持 data-uri/http(s)/**本地文件路径**(角色底图,桌面单机后端直读同机文件) | 新增图像供应商请求规则 → 这里，调用方不拼 payload |
+| `image_gen` | 云端文生图 `/images/generations` 与带参考图 `/images/edits`，统一超时、质量参数和 64–3840px 尺寸边界；`_load_image_bytes` 支持 data-uri/http(s)/**本地文件路径**(角色底图,桌面单机后端直读同机文件)，并对 `/comfyui/local-view` 回环 URL 剥离显式代理（系统代理无法转发 localhost → 502），外部 URL 代理行为不变 | 新增图像供应商请求规则 → 这里，调用方不拼 payload |
 | `image_prompt_profiles` | 多元数据插入提示词协议单一属主，三层顺序固定：①剧情事实底座 ②跨模型艺术决策 ③转换为 Krea2、Anima、GPT Image/Banana 或 Niji。视觉编译采用三层合同：已明确画面事实直接采用且禁止改写；生成完整画面所需的当前服装、动作/姿态、地点环境、人物位置、镜头、构图、光影和背景任一缺失时，同轮 Agent 必须依据上下文补出具体答案，禁止留空、占位语或通用模板；补全必须可由时间、地点、天气、情绪、人物处境和视觉因果解释，且不得引入重要新人物、关键道具、新事件或改变剧情结果。角色姓名只作“高潮人物→外貌条目→LoRA 配置”的本地关联键，四 Profile 最终正文移除原姓名；多角色分别落实外貌、服装、位置与动作。正常路径以同轮 Agent 输出的开放 `visual_facts[{kind,fact,evidence}]` 为通用视觉事实合同：kind 不限枚举，fact 是英文可画事实，evidence 必须逐字存在于本轮高潮正文；四 Profile 逐条验收 fact。Krea2 的具体人物、当前服装、动作、道具、地点和空间关系必须构成段落主体，质量描述只作收尾；Anima 固定两行：首行把作品固定质量 tags 与全部具体内容 tags 连成同一逗号序列并以逗号收尾，次行只写解释同一事实的一至三句连续英文自然语言；不得把 tags 与文段混在第二行，也不得输出 `Her body:`、`Bound:`、`Position:` 等标题式冒号小段。归一器必须幂等，重复编译不得丢内容 tags；若 Agent 误写成“首行环境 tags＋次行分号人物/动作描述”，只把其中具体英文画面事实确定性复制到首行并把次行改成句子，抽象艺术分析、权重主体和拒答仍不得进入成稿。字段账本对英文稳定外貌与当前服装逐项验收，同义描述可保留 Agent 动作方案，但精确条目事实必须补入两行。前端最终提交只能替换已知识别的质量 tags，不能整行覆盖内容 tags；二次元媒介 tags 也只能追加在首行，第二行文段保持不变。任何没有可靠英文专业名词的剧情物件均由同轮 `visual_facts` 按“材质→几何外形与尺度→可见结构/运动→当前功能→实际交互”建立可画身份，只填写正文证据支持的维度；禁止音译、照抄专名、写 `unknown object`，也禁止为某个物件建立固定场景 fallback。后续缺陷必须修正高潮规划、证据提取、通用事实协议或模板编译整体合同。坏 JSON、拒答或漏项时只能保留通用规则已经确认的事实，宁可明确缺失也不得猜测或注入特定内容。`inline_generation_instruction` 是头部完整合同，`near_generation_contract` 是生成近端短合同；两者仍属于同一次主模型调用，不触发第二次模型调用。Profile 完成后 LoRA 元数据阶段才机械注入精确触发词和作者质量建议 | 新增模型提示词协议或格式约束 → 只改这里和对应测试；开放事实必须有正文证据；负面词禁止混入正向文本 |
 | `lora_index` | LoRA 数据保存单一属主：按完整文件名保存触发词、作者建议提示词和建议权重；建议权重归一到 0–2，自动元数据同步不得覆盖手填值 | LoRA 选择器只采用当前选中模型的建议权重；编辑弹窗可把作者示例提炼并回填为质量/风格/光影/材质/作者标签。自动插画与工作流卡只读取当前实际生效 LoRA，排除分级词、人物外貌、服装、动作、关系、场景事实及 `close-up/wide angle/shot/composition/perspective` 等镜头控制。工作流“选择完毕”检测最终 API 图，有精确记录时先询问是否覆盖；同意后才覆盖权重，把触发词放正向 CLIP 第一行、去重质量词放第二行开头，负向 CLIP 不改。`/s` 只提交已确认图，不得再次覆盖用户值；禁止回退旧记录 |
 | `rag_backend` | RAG 基础设施 Adapter；`EmbedConfig`、OpenAI/Ollama/本地嵌入兼容、嵌入模型缓存与 Chroma 单例缓存；localhost/127.0.0.1/::1 回环端点强制直连，显式代理也不得介入 | 新增嵌入后端或修改缓存键 → 只改这里；上层不直接创建 Chroma/Embedding |
@@ -431,6 +432,84 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
 - **renderer**（图像格式）：ComfyUI workflow / gpt-image / 其它。ComfyUI 工作流就是一种 renderer = 你要的「节点管理」。
 - **skills**（可下载 SKILLS 库）：`skills_store` 已在，提炼提示词/风格/角色行为片段做成可下载包。
 - **MCP**（外部工具）：`mcp_store` / `tool_agent_node` 已在。
+
+## 画布创作模式（Canvas Mode · 2026-08-20 落地记录）
+
+> `generate` WorkMode 已由画布接管。画布是**内容区切换**（非独立模式），所有 WorkMode 均可画布/对话切换。画布节点实时投影 `generation_store`，布局/连线/视口持久化到每作品 `canvas.json`。
+
+### 形态与接管
+
+- `resolveHomeWorkspace("generate") → "canvas"`（`viewRouting.ts`）；`story`/`code` 保持 `chat`。
+- 画布/对话是内容区切换：`ChatView` 内部 `contentView` 状态按作品记忆 `laf_view_<workId>`（默认 chat），功能栏只随 WorkMode 变。
+- 画布输入复用对话 `RichInput`，提交走 `multiAgent()` → `POST /ai/multi-agent`（SSE，Supervisor 编排），**不是**已下线的 `POST /ai/image-agent/generate-image`。
+- 模式合并：左上角模式下拉已移除，固定单一「创作」模式（`workMode` 恒 `story`）；`#/generate`、`#/code` 旧 hash 保留兼容。
+
+### 节点类型（`CanvasNodeType`）
+
+| 类型 | 说明 |
+|------|------|
+| `image-group` | 同 prompt 多次生成结果聚合（按 generation 索引聚合） |
+| `video` | generation + 进度（视频槽原位回填，独立超时 450/630 tries） |
+| `audio` | generation + 波形 |
+| `input` | 新生成输入占位卡（`laf-canvas-input` 事件创建） |
+| `workflow-tool` | `/w` 选模板生成的工作流工具卡；双击进 `WorkflowToolModal`（左=节点参数选择图+运转，右=AI 编排对话框） |
+| `group` | ReactFlow v12 `parentId + extent=parent` 组容器（虚线框），子节点坐标转相对，持久化到 canvas.json |
+| `inspiration-card` | 灵感卡（角色卡/世界书条目/预设/表格行四类），双击编辑、右键插入对话；自动从素材库导入（`importInspirationFromLibrary`），去重键 `kind+sourceRef` |
+
+### 持久化与交互
+
+- **canvas.json**：后端 `canvas_store.py` 原子写 `<output_dir>/<repo_id>/canvas.json`，只存布局/连线/视口/灵感卡；路由 `GET/POST /user-state/canvas-layout`。
+- **@xyflow/react v12**：`CanvasStageFlow.tsx`——自定义 `CardNode` + `NodeResizer` + 连线手柄 + `MiniMap` + `Controls` + 框选多选 + 右键菜单 + 吸附辅助线。
+- **右键菜单**：节点[编辑/删除/插入对话]；多节点[建组/批量删除]；空白[取消选择/建组/新建灵感卡]。点弹窗外自动关闭。
+- **吸附辅助线**：`GuidesOverlay`（ReactFlow 内部子组件，合法 `useViewport`），拖动中心点对齐 ±10px snap + 滞回释放。
+- **画布输入折叠**：`canvasInputFolded` 状态，折叠时右下角悬浮小球，展开时左下角收起按钮；折叠时 `RichInput` 保持挂载（`display:none`），输入内容不丢。
+- **背景点阵**：ReactFlow `<Background variant=Dots>` 按画布坐标渲染（放大变疏/缩小变密），颜色用主题 `--dot` CSS 变量。
+
+### 架构契约
+
+- 画布不修改 generation 真源；节点是 `generation_store` 的只读投影 + 布局覆盖层。
+- 组件管渲染、lib 管逻辑：`canvasRuntime.ts`（纯逻辑投影/排版/详情，可单测）、`canvasLayout.ts`（布局持久化）。
+- `@xyflow/react` 的 `useViewport`/`useReactFlow` hook 只能在 `ReactFlowProvider`/`ReactFlow` 子组件内调用；外部视口需求用 `onMove` 回调或内部子组件。
+- 闪烁治理：`setRfNodes` 用 updater 保留 `selected` 状态；位置差 <0.5px 返回原引用；edges `animated:false`；`CardNodeComponent` 包 `React.memo`；`fitView` 仅 mount 时一次性调用（`InitFitView` 子组件）。
+
+## 多模态创作路线（剧情×图×视频×联网灵感 · 2026-08-19 方向指引 · 2026-08-20 进度同步）
+
+> V1.1–V1.3（视频首帧底图注入、最小事实合同、视频槽全链路）与 M1.1–M1.2（搜索源 Adapter 注册表、图片素材搜索与预览）已落地；M1.3 受控下载基础链路部分落地（安全校验待补）。产品理想：剧情、图片、视频都是同一作品的一等创作数据，彼此按剧情事实联动；缺素材时联网检索并制成灵感卡回流创作。加功能沿此接缝走，别另起炉灶。逐步施工图（每步的改动位置、实现要点、验收与预排问题）见 `docs/ROADMAP-MULTIMODAL.md`。
+
+### 现状真源（先读这个，防止重复建设）
+
+- **剧情→图**：自动插画全链路已落地（能动性引擎支柱 3：高潮锚点 → 四 Profile → LoRA → ComfyUI/云端 → `messageId+slotId` 原位槽）。
+- **剧情→视频**：V1.1–V1.3 已落地——smartVideo 切视频模板时已完成插画作为首帧底图注入（`resolveVideoBaseImage` 优先级：本槽已完成插画 > 最近一次已完成插画 > 用户手动指定 > 模板无图像口=文生视频；pending 不等待=时序红线）；视频 scene_spec 最小事实合同（motion/时长/镜头运动来自预设，零新增 LLM，禁止从模型输出读 camera）；视频槽独立超时（图片 150/210 tries，视频 450 tries/15min 释放 busy / 630/40min 上限）、SSE/快照/恢复/瘦身全链路验证（`durableFinalizeSucceeded` 合并 images+videos 校验）。云端 `video_gen` 仍仅文生视频无参考图（V1.4 等 Provider）。
+- **联网灵感**：`web_search` 已收编为搜索源 Adapter 注册表（M1.1 ✅：`SearchAdapter` 协议 + DDG 默认实现，可插 Bing/SearXNG/商业 API）；`image_search`（M1.2 ✅：`BingImageSearchAdapter`，返回 `{thumb_url, full_url, source_url, title}`）；`inspiration.search_and_refine` 搜索摘要 → 对话模型整理成「标题+内容」中文总结 + 图片结果（失败降级 `images=[]`）；`/ai/image-proxy` 后端图片代理（`image_proxy.py`：限 http(s) + 5MB + image/* Content-Type）；`/comfyui/web-materials/*` 上网素材基础 CRUD（`image_store` 下载到 `_web_materials/`，M1.3 🔶 部分落地：基础链路就位，魔数/SSRF/域名策略/大小上限/原子落盘待补）；持久化由 `generation_store.persist_inspiration` 写会话快照（thread 级，M1.4 资产库化未开始）。
+- **可复用底座已就位**：`visual_asset_index`（图向量+RRF）、`visual_preference`（二选一 Elo）、`model_lease`（GPU 租约）、`instruction_provenance`（外部内容低权限标记）、`model_downloader` 的受控下载事务（临时文件+校验+落盘）。
+
+### 三阶段规划
+
+**V1 视频联动深化（剧情→图→视频链路）**
+- 图生视频走本地优先：已完成的插画作为视频模板首帧底图提交（角色一致性由底图锁定），复用 `workflow_submission` 提交事务与 `workflowGenerationRuntime` 后台守望；云端 `video_gen` 待 Provider 提供参考图能力再对齐，不自行猜接口。
+- 视频 scene_spec 最小合同：复用主 Roleplay 同轮 `subjects/motion` 与 `scene_illustration` 纯规则，补镜头运动与时长字段；**不另调 LLM、不建四 Profile 级字段账本**。
+- 视频仍走独立 media-slot 原位回填，SSE/快照/恢复/瘦身全部复用现有媒体槽合同，不加第二套视频通道。
+
+**M1 灵感素材化（文字卡→素材卡）**
+- `web_search` 收编为搜索源 Adapter 注册表（DDG 先行，接口可插 Bing/SearXNG/商业 API）；搜索逻辑只此一处，路由与 Agent 只适配，别各写抓取解析。
+- 搜图链路：图片搜索 → 预览选择 → 受控下载入资产库（类型/大小/魔数校验 + 来源 provenance，复用 `model_downloader` 的临时文件+校验事务形态）→ 可设为角色底图（`CloudConfig.character_base_images`）、参考图或工作流底图。
+- 灵感卡从会话快照升级为资产库可管理成员（generation RAG 合同：资产删除保留本地文件、禁止磁盘自动补录），保留「一键插对话」现有行为。
+
+**M2 派生关系编排（多模态资产连续性）**
+- 派生只存元数据：`derived_from`（本视频派生自哪张图/哪个 turn 的事实），禁止槽间强依赖图与级联自动重建。
+- 资产库多模态化：按媒体类型（文/图/视频/灵感卡）与来源（生成/检索下载）筛选；视觉索引与偏好对视频封面帧生效。
+
+### 排雷合同（红线，逐条对应真实教训）
+
+1. **自动视频永不默认**：视频时延与成本是图片数量级倍数；保持「用户预设视频模板 + smartVideo + motion 门限」显式触发，禁止对齐自动插画的每回合节奏。
+2. **视频事实合同保持最小**：只锁首帧底图、动作意图、时长；字段账本过严会在视频模型能力不足时大量重试失败（对照四 Profile 的事实账本是图片域奢侈品）。
+3. **回合快照不复制视频**：视频文件留在资产库，`scenario_lab` 快照存引用（同盘硬链接/路径），防每回合快照与多分支复制的体积爆炸。
+4. **搜索源单一属主**：搜索 Adapter 只在 `web_search` 接缝注册；禁止路由、Agent、前端各写一套抓取与解析。
+5. **素材下载受控**：限 jpg/png/webp、限大小、魔数校验、可配域名策略、来源 provenance 标记；禁止任意 URL 直接落盘或进发布包。
+6. **检索文本视为不可信输入**：搜索摘要/网页内容喂模型前截断并带来源标记（复用 `instruction_provenance` 低权限概念）；灵感卡不得自动改设置、自动下载或自动执行技能。
+7. **密钥边界不变**：商业搜索/视频 API 密钥只进被忽略的 user_state.json，禁入源码、日志、Trace 与发布包。
+8. **生成通道隔离维持**：本地视频走 ComfyUI FIFO 不占 Agent 通道；云端视频轮询在后台完成，禁止阻塞队列 worker 或前台对话。
+9. **Token 边界维持**：图/视频只以 url+caption 进会话，绝不回灌图像 token 进历史；灵感卡在对话内一句话说明，禁止整卡标签刷屏（现有合同，对视频同样生效）。
 
 ## 明确不做的（别反复提议）
 

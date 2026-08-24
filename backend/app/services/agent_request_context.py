@@ -82,6 +82,7 @@ def from_payload(payload: Mapping[str, Any]) -> RunContext:
         worldbook_name=str(payload.get("worldbook_name") or ""),
         illustrate=bool(payload.get("illustrate", False)),
         comfy_illustrate=bool(payload.get("comfy_illustrate", False)),
+        comfy_audio=bool(payload.get("comfy_audio", False)),
         prompt_profile=str(payload.get("prompt_profile") or "krea2"),
         appearance_source=str(payload.get("appearance_source") or "worldbook"),
         character_base_images=dict(payload.get("character_base_images") or {}),

@@ -74,3 +74,5 @@ rag_evaluation_report.json
 # === IDE ===
 .idea/
 .vscode/
+.workbuddy/
+.opensquilla/

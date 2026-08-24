@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Palette, FolderCog, BrainCircuit, Sparkles, Blocks, Puzzle, KeyRound, Bot } from "lucide-react";
+import { Palette, FolderCog, BrainCircuit, Sparkles, Blocks, Puzzle, KeyRound, Bot, Settings2 } from "lucide-react";
 import { useRef } from "react";
 import { applyTheme, exportSettings, importSettings, type Settings } from "../../stores/settings";
 import { saveComfyConfig } from "../../api/comfyui";
@@ -15,6 +15,7 @@ import { McpPanel } from "./McpPanel";
 import { SkillsPanel } from "./SkillsPanel";
 import { TokensPanel } from "./TokensPanel";
 import { AgentPanel } from "./AgentPanel";
+import { MiscPanel } from "./MiscPanel";
 
 interface Props {
   settings: Settings;
@@ -23,12 +24,13 @@ interface Props {
 }
 
 // 左侧导航项：分组 + 图标。id 对应右侧渲染的面板。
-type NavId = "general" | "agent" | "paths" | "models" | "style" | "mcp" | "skills" | "tokens";
+type NavId = "general" | "agent" | "paths" | "models" | "style" | "mcp" | "skills" | "tokens" | "misc";
 const NAV: { group: string; items: { id: NavId; label: string; icon: typeof Palette }[] }[] = [
   { group: "常规", items: [
     { id: "general", label: "外观", icon: Palette },
     { id: "agent", label: "智能体", icon: Bot },
     { id: "paths", label: "路径与代理", icon: FolderCog },
+    { id: "misc", label: "通用", icon: Settings2 },
   ] },
   { group: "模型与服务", items: [
     { id: "models", label: "模型", icon: BrainCircuit },
@@ -193,6 +195,7 @@ export function SettingsView({ settings, update, onOutputPathMigrated }: Props) 
           {active === "mcp" && <McpPanel />}
           {active === "skills" && <SkillsPanel />}
           {active === "tokens" && <TokensPanel draft={draft} setDraft={setDraft} />}
+          {active === "misc" && <MiscPanel draft={draft} setDraft={setDraft} />}
         </div>
         <div className="settings-footer">
           <label className="settings-export-opt" title="勾选后导出文件包含 API 密钥与下载令牌明文，请仅在可信环境保存">

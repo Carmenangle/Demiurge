@@ -1,4 +1,4 @@
-import { apiGet, apiPost } from "./client";
+import { apiGet, apiPost, apiUrl } from "./client";
 import {
   decodeChatStreamEvent,
   type ChatStreamEvent,
@@ -186,10 +186,10 @@ export interface ChatTurn {
   images?: string[];   // 该条消息附带的图片（dataURI 或 URL）
 }
 
-// 灵感卡：联网搜服装/发型/画风等 → 提炼成提示词
+// 灵感卡：联网搜主题 → 整理成「标题+内容」中文总结
 export type Inspiration = StreamInspirationCard;
 
-// 联网找灵感：DuckDuckGo 搜索 + 对话模型提炼英文提示词。/find 指令用。
+// 联网找灵感：搜索源抓取 + 对话模型整理成「标题+内容」中文总结。/find 指令用。
 export function fetchInspiration(
   query: string,
   chat: Chat,
@@ -200,6 +200,20 @@ export function fetchInspiration(
     ...chatBody(chat),
     proxy_url: proxyUrl,
   });
+}
+
+// 记录用户勾选的图片 URL 到灵感卡消息（M1.2 选中持久化）
+export function selectInspiration(threadId: string, messageId: string, urls: string[]) {
+  return apiPost<{ ok: boolean; selected: string[] }>("/ai/inspiration/select", {
+    thread_id: threadId,
+    message_id: messageId,
+    urls,
+  });
+}
+
+// 外网图片代理 URL（M1.2：缩略图走后端中转，防浏览器直连外网图床被墙/防盗链）
+export function proxyImageUrl(url: string, proxy = "") {
+  return apiUrl(`/ai/image-proxy?url=${encodeURIComponent(url)}&proxy=${encodeURIComponent(proxy)}`);
 }
 
 // 单 agent 对外入口（imageAgentStream / POST /ai/image-agent）已下线：其大脑降级为多 Agent 的
@@ -343,6 +357,7 @@ export interface AgentInvocation {
   worldbookName: string;
   illustrate: boolean;
   comfyIllustrate: boolean;
+  comfyAudio: boolean;
   promptProfile: string;
   appearanceSource: "worldbook" | "character_card";
   characterBaseImages: Record<string, string>;
@@ -403,6 +418,7 @@ export function agentInvocationBody(request: AgentInvocation): AgentInvocationWi
     worldbook_name: request.worldbookName,
     illustrate: request.illustrate,
     comfy_illustrate: request.comfyIllustrate,
+    comfy_audio: request.comfyAudio,
     prompt_profile: request.promptProfile || "krea2",
     appearance_source: request.appearanceSource,
     character_base_images: request.characterBaseImages,
@@ -438,6 +454,19 @@ export function fetchSnapshot(threadId: string) {
   return apiGet<{ items: unknown[] }>(
     `/ai/chat/snapshot?thread_id=${encodeURIComponent(threadId)}`,
   );
+}
+
+// 把一条已生成的消息（提示词/图片/配方文本）直接落盘到目标 thread，不调模型。
+// 用于「发送至对话框 / 发送至对话」：从资产库或画布把内容送到指定作品对话，刷新后保留。
+export function chatAppend(
+  threadId: string, role: "user" | "assistant", text: string, images?: string[],
+) {
+  return apiPost<{ ok: boolean }>("/ai/chat/append", {
+    thread_id: threadId,
+    role,
+    text,
+    images: images || [],
+  });
 }
 
 // 导出某作品的完整会话记录（剧情模式常用：备份/搬到别处）
@@ -480,6 +509,7 @@ export type ChatQueueStatus = "queued" | "running" | "done" | "error" | "cancell
 export interface ChatQueueTask {
   id: string; thread_id: string; need: string;
   status: ChatQueueStatus; error?: string; created_at: number; updated_at: number;
+  images?: string[]; message?: string;
 }
 // multiAgent 完整参数落后端队列；worker 在前一条结束后串行认领执行。
 export function enqueueChatQueueTask(invocation: AgentInvocation) {
@@ -538,6 +568,29 @@ export function reportIllustrationSubmission(payload: {
     lora_names: payload.loraNames || [],
     latent_width: payload.latentWidth,
     latent_height: payload.latentHeight,
+    value_keys: payload.valueKeys,
+    source: payload.source || "automatic",
+  });
+}
+
+export function reportAudioSubmission(payload: {
+  threadId: string; repoId: string; turnId?: string; messageId: string; slotId: string;
+  speaker: string; text: string; voiceRef: string; templateId: string; promptId: string;
+  emotion?: Record<string, number>; valueKeys: string[];
+  source?: "automatic" | "manual";
+}) {
+  return apiPost<{ ok: boolean }>("/ai/image-agent/audio-submission", {
+    thread_id: payload.threadId,
+    repo_id: payload.repoId,
+    turn_id: payload.turnId || "",
+    message_id: payload.messageId,
+    slot_id: payload.slotId,
+    speaker: payload.speaker,
+    text: payload.text,
+    voice_ref: payload.voiceRef,
+    template_id: payload.templateId,
+    prompt_id: payload.promptId,
+    emotion: payload.emotion || {},
     value_keys: payload.valueKeys,
     source: payload.source || "automatic",
   });
@@ -792,6 +845,10 @@ export interface Generation {
   description?: string;
   image_url: string;
   tags: string[];
+  /** 工作流生成元数据：模板名、主模型、LoRA（逗号分隔） */
+  template_name?: string;
+  model_name?: string;
+  lora_names?: string;
   created_at?: number;   // 入库毫秒时间戳（权威排序键；历史记录可能为 0/缺失）
 }
 
@@ -843,6 +900,54 @@ export function pruneGenerations(repoId: string, embed: Embed) {
   return apiPost<{ ok: boolean; removed: number }>("/rag/prune-generations", {
     repo_id: repoId,
     ...ragEmbed(embed),
+  });
+}
+
+// ===== 上网素材：联网搜索下载的图片 =====
+
+export interface WebMaterial {
+  path: string;
+  url: string;         // local-view URL
+  source_url: string;  // 来源网页
+  title: string;
+  filename: string;
+}
+
+export function listWebMaterials(outputDir: string) {
+  return apiPost<{ items: WebMaterial[] }>("/comfyui/web-materials/list", {
+    output_dir: outputDir,
+  });
+}
+
+export function saveWebMaterial(outputDir: string, src: string, sourceUrl = "", title = "") {
+  return apiPost<WebMaterial>("/comfyui/web-materials/save", {
+    output_dir: outputDir,
+    src,
+    source_url: sourceUrl,
+    title,
+  });
+}
+
+export function deleteWebMaterial(outputDir: string, filename: string) {
+  return apiPost<{ ok: boolean }>("/comfyui/web-materials/delete", {
+    output_dir: outputDir,
+    filename,
+  });
+}
+
+// ===== 参考图：聊天上传到 <repo>/reference/ 的图片，供画布自动导入 =====
+
+export interface ReferenceImage {
+  path: string;
+  url: string;
+  title: string;
+  filename: string;
+}
+
+export function listReferenceImages(outputDir: string, repoId: string) {
+  return apiPost<{ items: ReferenceImage[] }>("/comfyui/reference-images/list", {
+    output_dir: outputDir,
+    repo_id: repoId,
   });
 }
 

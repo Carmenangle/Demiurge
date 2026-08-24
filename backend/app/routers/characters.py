@@ -147,6 +147,18 @@ def get_character(base: str, name: str) -> dict[str, object]:
     return card
 
 
+@router.get("/repo-detail")
+def get_character_repo_detail(output_dir: str, repo_id: str, name: str) -> dict[str, object]:
+    """画布模式：优先读仓库快照角色卡，不存在回退源库。"""
+    base = character_store.repo_card_base(output_dir, repo_id, name)
+    if not base:
+        raise HTTPException(status_code=404, detail="角色卡不存在")
+    card = character_store.read_card(base, name)
+    if card is None:
+        raise HTTPException(status_code=404, detail="角色卡不存在")
+    return card
+
+
 class CardUpdateRequest(BaseModel):
     base: str
     name: str

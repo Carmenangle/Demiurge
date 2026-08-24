@@ -36,20 +36,22 @@ export function agentVideoMessage(url: string, id?: string): ChatMessage {
 
 export function inspirationMessage(card: {
   id?: string;
-  query: string;
-  prompt: string;
-  tags: string[];
+  title: string;
+  content: string;
   sources: { title: string; url: string }[];
+  images?: Array<{ thumb_url: string; full_url: string; source_url: string; width?: number; height?: number; title?: string }>;
+  selected?: string[];
 }): ChatMessage {
   return {
     id: card.id || crypto.randomUUID(),
     role: "assistant",
     text: "",
     inspiration: {
-      query: card.query,
-      prompt: card.prompt,
-      tags: card.tags || [],
+      title: card.title,
+      content: card.content,
       sources: card.sources || [],
+      images: card.images || [],
+      selected: card.selected || [],
     },
   };
 }
@@ -114,16 +116,23 @@ function appendMediaSlot(message: ChatMessage, slotId: string, offset?: number):
 
 export function resolveMediaSlot(
   current: ChatMessage[], messageId: string, slotId: string, url: string,
-  mediaType: "image" | "video" = "image", regeneration?: RegenerationSnapshot,
+  mediaType: "image" | "video" | "audio" = "image", regeneration?: RegenerationSnapshot,
   generationId?: string,
 ): ChatMessage[] {
   return current.map((message) => message.id !== messageId ? message : {
     ...message,
     parts: (message.parts || []).map((part) =>
-      (part.type === "media-slot" || part.type === "image" || part.type === "video")
+      (part.type === "media-slot" || part.type === "image" || part.type === "video" || part.type === "audio")
         && part.slotId === slotId
         ? {
           type: mediaType, url, slotId, status: "ready" as const,
+          // 音频分条元数据（角色名/序号/媒体类型提示）随槽位保留，供气泡与画布楼层按角色分条展示
+          ...(part.type === "media-slot" && part.kind === "audio" ? {
+            kind: part.kind,
+            ...(part.speaker ? { speaker: part.speaker } : {}),
+            ...(part.seq !== undefined ? { seq: part.seq } : {}),
+            ...(part.total !== undefined ? { total: part.total } : {}),
+          } : {}),
           ...(regeneration ? { regeneration } : {}),
           ...(generationId ? { generationId } : {}),
         }
@@ -206,6 +215,10 @@ export function reduceChatStreamEvent(
       return current.map((message) => message.id === botId
         ? { ...message, text: event.text, parts: undefined }
         : message);
+    case "route":
+      return current.map((message) => message.id === botId
+        ? { ...message, route: event.route }
+        : message);
     case "image":
       return upsertMessages(current, [agentImageMessage(event.url, event.id, event.regeneration)]);
     case "video":
@@ -224,6 +237,9 @@ export function reduceChatStreamEvent(
       return current.map((message) => message.id === botId
         ? appendMediaSlot(message, event.id || crypto.randomUUID(), event.offset)
         : message);
+    case "audio_request":
+      // 音频对白配音不入气泡流：由 useChatSession 逐角色提交 IndexTTS，完成后聚合到剧情楼层。
+      return current;
     case "rag_status":
       // RAG 创建状态不入气泡流：由 useChatSession 派发右下角轻提示。
       return current;

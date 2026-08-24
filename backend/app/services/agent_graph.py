@@ -435,10 +435,10 @@ def inspire_node(state: AgentState) -> dict:
             query, ctx["chat_base"], ctx["chat_key"], ctx["chat_model"],
             proxy=ctx.get("proxy", ""), chat_proxy=ctx.get("chat_proxy", ""),
         )
-        if not data.get("prompt"):
-            return {"result_text": "未能从搜索结果提炼出提示词。", "trace": trace}
-        card = generation_store.persist_inspiration(ctx["thread_id"], data["query"], data["prompt"], data["tags"], data["sources"])
-        return {"result_text": f"已生成灵感卡：{data['prompt'][:80]}…", "insp_cards": [card], "trace": trace}
+        if not data.get("content"):
+            return {"result_text": "未能从搜索结果整理出内容。", "trace": trace}
+        card = generation_store.persist_inspiration(ctx["thread_id"], data["title"], data["content"], data["sources"], data.get("images"))
+        return {"result_text": f"已生成灵感卡「{data['title']}」：{data['content'][:80]}…", "insp_cards": [card], "trace": trace}
     except Exception as e:  # noqa: BLE001
         return {"result_text": f"找灵感失败：{e}", "trace": trace}
 
@@ -719,6 +719,12 @@ def roleplay_node(state: AgentState) -> dict:
                 "content": _ipp.near_generation_contract(
                     ctx.get("prompt_profile") or "krea2",
                 ),
+            })
+        if ctx.get("comfy_audio"):
+            from app.services import audio_dialogue_extract
+            tail_msgs.append({
+                "role": "system",
+                "content": audio_dialogue_extract.build_inline_audio_instruction(),
             })
         messages = [{"role": "system", "content": system}, *dialogue, *tail_msgs,
                     {"role": "user", "content": text}]
@@ -1058,10 +1064,11 @@ def _filter_illustration_appearance(
 
 def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
                       lost: bool, rag_events: list | None = None,
-                      user_text: str = "") -> tuple[str, list, dict]:
-    """阶段 C+D：剥离 <状态更新> 写回 → 判插画。返回（去块正文, image_recs, illustrate_req）。
+                      user_text: str = "") -> tuple[str, list, dict, dict]:
+    """阶段 C+D：剥离 <状态更新> 写回 → 判插画 → 提取对白配音。返回（去块正文, image_recs, illustrate_req, audio_req）。
 
     illustrate_req：comfy_illustrate 时高潮点产出的出图请求 {prompt}；前端据本地预设模板走异步 ComfyUI 闭环。
+    audio_req：comfy_audio 时产出的对白配音请求 {lines:[{speaker,text,emotion}]}；前端逐角色提交 IndexTTS。
     非 comfy 路径为空 dict。rag_events：可选，收集 RAG 创建（纪要/知识库）状态供前端弹窗。"""
     try:
         from app.services import character_state, roleplay_agency
@@ -1075,6 +1082,17 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
                 ctx, value, Placement.AI_OUTPUT, is_prompt=False, depth=0,
             ),
         )
+        # 音频对白配音：comfy_audio 时剥离 <audio> 块并解析台词 + 8 维情感向量。
+        # 与 illustration 块正交（用户可只开配音不开图）；失败只走降级，不阻断正文。
+        audio_plan: dict = {}
+        if ctx.get("comfy_audio"):
+            from app.services import audio_dialogue_extract
+            clean, audio_plan = audio_dialogue_extract.extract_audio_dialogue(
+                clean,
+                block_filter=lambda value: _apply_regex(
+                    ctx, value, Placement.AI_OUTPUT, is_prompt=False, depth=0,
+                ),
+            )
         # 抽 <status> 快照（不剥，留正文供前端正则渲染）+ 剥 <状态更新> 小数值 JSON
         snapshot = roleplay_agency.extract_status_snapshot(clean)
         clean, raw = roleplay_agency.parse_state_block(clean)
@@ -1127,6 +1145,22 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
         locale = _status_snapshot_value(snapshot_text, "所在") or locale
         # 插画提示词直接由正文 + 已有视觉锚组装，不再额外调用一次聊天模型。
         visible_story = image_prompt_extract.visible_narrative_text(clean)
+        # 音频对白配音请求：comfy_audio 时组装（含机械降级兜底），随 writeback 返回给前端逐角色提交。
+        audio_req: dict = {}
+        if ctx.get("comfy_audio"):
+            from app.services import audio_dialogue_extract
+            audio_lines = audio_plan.get("lines") or audio_dialogue_extract.build_fallback_dialogue(
+                visible_story, [str(n).strip() for n in (ctx.get("card_names") or []) if str(n).strip()],
+            )
+            if audio_lines:
+                audio_req = {"lines": audio_lines}
+                run_trace.emit(
+                    ctx, "audio.request", status="emitted", line_count=len(audio_lines),
+                    speakers=[ln.get("speaker", "") for ln in audio_lines],
+                    text_chars=[len(ln.get("text", "")) for ln in audio_lines],
+                )
+            else:
+                run_trace.emit(ctx, "audio.request", status="skipped", reason="no_dialogue")
         local_scene = scene_classify.infer_scene(
             "\n".join((user_text, visible_story)),
         )
@@ -1433,7 +1467,7 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
                 plan_retargeted=plan_retargeted,
                 prompt_chars=len(request_prompt),
             )
-            return clean, [], illustrate_req
+            return clean, [], illustrate_req, audio_req
         illo = roleplay_agency.maybe_illustrate(
             deps, paragraph=clean, appearance=_illustration_appearance(ctx),
             wardrobe=wardrobe, locale=locale,
@@ -1443,11 +1477,11 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
             character_encounter=character_encounter)
         if illo:
             rec = {"id": f"illo-{repo_id}-{turn}", "url": illo["url"], "caption": illo["caption"]}
-            return clean, [rec], {}
-        return clean, [], {}
+            return clean, [rec], {}, audio_req
+        return clean, [], {}, audio_req
     except Exception as exc:  # noqa: BLE001
         run_trace.emit(ctx, "illustration.pipeline", status="error", error=str(exc))
-        return _visible_roleplay_text(reply), [], {}
+        return _visible_roleplay_text(reply), [], {}, {}
 
 
 def _illustration_anchor_offset(reply: str, request: dict) -> int | None:
@@ -2506,6 +2540,8 @@ def stream_multi_agent(context: RunContext) -> Iterator[dict]:
                 run_trace.emit(context, "agent.node_completed", agent=_node,
                                output_keys=sorted(str(k) for k in upd.keys() if k != "_ctx"),
                                result_text=upd.get("result_text") or "")
+                if upd.get("route"):
+                    yield {"route": upd["route"]}
                 if upd.get("_interrupted"):
                     interrupted = True  # noqa: F841  语义标记，保留可读性
                     yield {"interrupted": True}
@@ -2530,6 +2566,13 @@ def stream_multi_agent(context: RunContext) -> Iterator[dict]:
                 ]
                 for rec in illustrate_recs:
                     emitted_imgs.add(rec.get("id"))
+                # 音频对白配音：独立于插画锚点（配音覆盖整段楼层，不插回正文）。
+                for rec in [] if eager_result else (upd.get("audio_recs") or []):
+                    if rec.get("id") in emitted_imgs:
+                        continue
+                    emitted_imgs.add(rec.get("id"))
+                    yield {"audio_request": {"lines": rec.get("lines") or []},
+                           "id": rec.get("id")}
                 for rec in upd.get("rag_recs") or []:
                     if rec.get("id") not in emitted_cards:
                         emitted_cards.add(rec.get("id"))

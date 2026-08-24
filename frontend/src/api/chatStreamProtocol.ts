@@ -1,14 +1,24 @@
-import type { PromptApproval, RegenerationSnapshot, RouteChoice } from "../types/chat";
+import type { MessageRoute, PromptApproval, RegenerationSnapshot, RouteChoice } from "../types/chat";
 
 export const CHAT_STREAM_PROTOCOL = "laf-chat-stream" as const;
 export const CHAT_STREAM_VERSION = 1 as const;
 
+export interface InspirationImage {
+  thumb_url: string;
+  full_url: string;
+  source_url: string;
+  width?: number;
+  height?: number;
+  title?: string;
+}
+
 export interface StreamInspirationCard {
   id?: string;
-  query: string;
-  prompt: string;
-  tags: string[];
+  title: string;
+  content: string;
   sources: { title: string; url: string }[];
+  images?: InspirationImage[];
+  selected?: string[];
 }
 
 export interface IllustrationSceneSpec {
@@ -33,13 +43,21 @@ export interface IllustrationSceneSpec {
   composition?: string;
 }
 
+export interface AudioDialogueLine {
+  speaker: string;
+  text: string;
+  emotion?: Record<string, number>;
+}
+
 export type ChatStreamEvent =
   | { type: "trace"; text: string }
   | { type: "delta"; text: string }
   | { type: "replace"; text: string }
+  | { type: "route"; route: MessageRoute }
   | { type: "image"; url: string; id?: string; regeneration?: RegenerationSnapshot }
   | { type: "video"; url: string; id?: string }
   | { type: "illustrate_request"; prompt: string; motion: number; actors: string[]; sceneSpec?: IllustrationSceneSpec; id?: string; offset?: number; turnId?: string }
+  | { type: "audio_request"; lines: AudioDialogueLine[]; id?: string }
   | { type: "rag_status"; state: string; kind: string; count?: number }
   | { type: "inspiration"; card: StreamInspirationCard }
   | { type: "approval"; approval: PromptApproval }
@@ -61,6 +79,26 @@ function requiredString(data: Record<string, unknown>, key: string): string {
   return data[key];
 }
 
+// 灵感卡字段归一化：新结构 {title, content, sources, images?, selected?} 为准；兼容旧结构 {query, prompt, tags, sources}。
+export function normalizeInspirationCard(card: Record<string, unknown>): StreamInspirationCard {
+  const title = typeof card.title === "string" && card.title
+    ? card.title
+    : typeof card.query === "string" ? card.query : "";
+  const content = typeof card.content === "string" && card.content
+    ? card.content
+    : typeof card.prompt === "string" ? card.prompt : "";
+  const sources = Array.isArray(card.sources)
+    ? card.sources as { title: string; url: string }[]
+    : [];
+  const images = Array.isArray(card.images)
+    ? card.images as StreamInspirationCard["images"]
+    : [];
+  const selected = Array.isArray(card.selected)
+    ? card.selected.map((u) => String(u))
+    : [];
+  return { ...(typeof card.id === "string" ? { id: card.id } : {}), title, content, sources, images, selected };
+}
+
 export function decodeChatStreamEvent(value: unknown): ChatStreamEvent {
   const envelope = record(value, "事件");
   if (envelope.protocol !== CHAT_STREAM_PROTOCOL || envelope.version !== CHAT_STREAM_VERSION) {
@@ -76,6 +114,8 @@ export function decodeChatStreamEvent(value: unknown): ChatStreamEvent {
       return { type: "delta", text: requiredString(data, "text") };
     case "replace":
       return { type: "replace", text: requiredString(data, "text") };
+    case "route":
+      return { type: "route", route: requiredString(data, "route") as MessageRoute };
     case "image":
       return {
         type: "image",
@@ -102,6 +142,29 @@ export function decodeChatStreamEvent(value: unknown): ChatStreamEvent {
         ...(typeof data.offset === "number" ? { offset: data.offset } : {}),
         ...(typeof data.turn_id === "string" ? { turnId: data.turn_id } : {}),
       };
+    case "audio_request":
+      return {
+        type: "audio_request",
+        lines: Array.isArray(data.lines)
+          ? data.lines
+              .map((item) => {
+                if (!item || typeof item !== "object") return null;
+                const line = item as Record<string, unknown>;
+                const speaker = typeof line.speaker === "string" ? line.speaker : "";
+                const text = typeof line.text === "string" ? line.text : "";
+                if (!speaker || !text) return null;
+                return {
+                  speaker,
+                  text,
+                  ...(line.emotion && typeof line.emotion === "object"
+                    ? { emotion: line.emotion as Record<string, number> }
+                    : {}),
+                };
+              })
+              .filter((line): line is AudioDialogueLine => line !== null)
+          : [],
+        ...(typeof data.id === "string" ? { id: data.id } : {}),
+      };
     case "rag_status":
       return {
         type: "rag_status",
@@ -110,7 +173,7 @@ export function decodeChatStreamEvent(value: unknown): ChatStreamEvent {
         ...(typeof data.count === "number" ? { count: data.count } : {}),
       };
     case "inspiration":
-      return { type: "inspiration", card: record(data.card, "data.card") as unknown as StreamInspirationCard };
+      return { type: "inspiration", card: normalizeInspirationCard(record(data.card, "data.card")) };
     case "approval":
       return { type: "approval", approval: record(data.approval, "data.approval") as unknown as PromptApproval };
     case "route_choice":

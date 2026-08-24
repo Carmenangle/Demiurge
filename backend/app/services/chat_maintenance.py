@@ -84,7 +84,7 @@ def _snapshot_history(snapshot: list[dict]) -> list[dict]:
             fragments.append(f"[工作流卡] {workflow.get('templateName', '未命名')}（{status}）")
         inspiration = message.get("inspiration") or {}
         if inspiration:
-            fragments.append("[灵感卡] " + (inspiration.get("prompt") or inspiration.get("query") or ""))
+            fragments.append("[灵感卡] " + (inspiration.get("content") or inspiration.get("title") or ""))
         ports_plan = message.get("portsPlan") or {}
         if ports_plan:
             fragments.append("[工作流编排] " + (ports_plan.get("summary") or ""))

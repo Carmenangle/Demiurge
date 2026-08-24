@@ -43,3 +43,57 @@ export async function uploadChatBg(file: File): Promise<{ ok: boolean; path: str
   if (!resp.ok) throw new Error(`上传失败: ${resp.status}`);
   return resp.json();
 }
+
+// 上传参考音轨到 <repo>/voices/，返回本地路径（填进 characterVoices[角色].voiceRef）
+export async function uploadVoice(
+  file: File, repoId: string, outputDir: string,
+): Promise<{ ok: boolean; path: string }> {
+  const fd = new FormData();
+  fd.append("file", file);
+  fd.append("repo_id", repoId);
+  fd.append("output_dir", outputDir);
+  const resp = await fetch("http://127.0.0.1:8010/api/user-state/upload-voice", { method: "POST", body: fd });
+  if (!resp.ok) throw new Error(`上传失败: ${resp.status}`);
+  return resp.json();
+}
+
+// 画布布局：每作品 canvas.json（布局/连线/视口），替换 localStorage 持久化
+export interface CanvasLayoutWire {
+  nodes: Record<string, { x: number; y: number; w: number; h: number; custom?: boolean; label?: string; parentId?: string }>;
+  edges: { source: string; target: string }[];
+  viewport: { x: number; y: number; scale: number };
+  /** 灵感卡（角色卡 / 世界书条目 / 预设 / 表格行 各自一张；可被剧情对话引用） */
+  inspiration_cards?: Array<{
+    id: string; title: string; content: string;
+    kind: "character" | "worldbook-entry" | "preset" | "table-row";
+    sourceRef?: string;
+    x: number; y: number; w: number; h: number; groupId?: string;
+  }>;
+  /** 参考图（文件夹拖入画布的图片节点，独立于灵感卡） */
+  reference_images?: Array<{
+    id: string; title: string; imageUrl: string;
+    x: number; y: number; w: number; h: number; groupId?: string;
+  }>;
+  /** 已删除投影节点黑名单（id = 类型前缀 + generationId）；投影时过滤防止复活 */
+  deleted_ids?: string[];
+}
+
+export function getCanvasLayout(repoId: string, outputDir: string) {
+  const q = new URLSearchParams({ repo_id: repoId });
+  if (outputDir) q.set("output_dir", outputDir);
+  return apiGet<CanvasLayoutWire>(`/user-state/canvas-layout?${q.toString()}`);
+}
+
+export function saveCanvasLayout(repoId: string, outputDir: string, layout: CanvasLayoutWire) {
+  return apiPost<{ ok: boolean }>("/user-state/canvas-layout", {
+    repo_id: repoId,
+    output_dir: outputDir,
+    nodes: layout.nodes,
+    edges: layout.edges,
+    viewport: layout.viewport,
+    // 灵感卡此前漏传 → 保存后刷新即丢；与删除黑名单一并随布局落盘
+    inspiration_cards: layout.inspiration_cards || [],
+    reference_images: layout.reference_images || [],
+    deleted_ids: layout.deleted_ids || [],
+  });
+}

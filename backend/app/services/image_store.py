@@ -55,8 +55,17 @@ def _from_src(src: str) -> tuple[bytes, str]:
         except ValueError as e:
             raise ComfyError(str(e), 400)
     try:
-        with urlopen(src, timeout=30) as r:
-            data = r.read(20 * 1024 * 1024)  # 最大 20 MB，防超大文件撑爆内存
+        # local-view 指向本机后端（127.0.0.1:8010），必须绕过系统代理——
+        # Windows 系统代理（如 Clash 127.0.0.1:7897）会把 localhost 请求转发出去导致 502。
+        # 外部 URL 保留默认 opener（走系统代理，中转通路依赖它）。
+        if is_local_view_url(src):
+            import urllib.request
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(src, timeout=30) as r:
+                data = r.read(20 * 1024 * 1024)  # 最大 20 MB，防超大文件撑爆内存
+        else:
+            with urlopen(src, timeout=30) as r:
+                data = r.read(20 * 1024 * 1024)  # 最大 20 MB，防超大文件撑爆内存
     except ComfyError:
         raise
     except Exception as e:
@@ -129,3 +138,121 @@ def save_local(
         dest = base / _next_seq_name(base, ext)
         dest.write_bytes(data)
     return str(dest)
+
+
+# ===== 上网素材：联网搜索下载的图片，存到 outputDir/_web_materials/ =====
+
+
+def web_materials_dir(output_dir: str) -> Path:
+    """上网素材目录：outputDir/_web_materials/。"""
+    return Path(output_dir) / "_web_materials"
+
+
+def save_web_material(output_dir: str, src: str, source_url: str = "", title: str = "") -> dict:
+    """把联网搜索到的图片下载到 _web_materials/，返回 {path, url, source_url, title, filename}。
+
+    安全链（M1.3）：
+    - SSRF 防护：由 _from_src → validate_media_url 保证（拒绝私网/metadata/localhost）
+    - 大小限制：_from_src 硬上限 20MB
+    - 魔数校验：验证字节流确实是声明格式的图片，防文件伪装
+    - 原子写：先写临时文件再 rename，防并发/中断导致残缺文件
+    - 扩展名矫正：data URI 声明的扩展名若与魔数不匹配，以魔数为准
+    """
+    if not output_dir:
+        raise ComfyError("未配置输出图片路径", 400)
+    d = web_materials_dir(output_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    data, ext = _from_src(src)
+
+    # 魔数校验：字节流必须是合法图片格式
+    from app.services.image_magic import validate_image_bytes
+    try:
+        detected = validate_image_bytes(data)
+        # 扩展名矫正：若声明扩展名与魔数不一致，以魔数为准
+        ext = detected
+    except ValueError as e:
+        raise ComfyError(f"图片格式校验失败：{e}", 400)
+
+    # 原子写：先写临时文件，再 rename（防并发/中断导致残缺文件）
+    temp_path = d / (_next_seq_name(d, ext) + ".tmp")
+    try:
+        temp_path.write_bytes(data)
+        temp_path.chmod(0o644)
+        final_name = temp_path.stem  # 去掉 .tmp 后缀
+        dest = d / final_name
+        # 若同名文件已存在（极小概率），追加随机后缀
+        if dest.exists():
+            dest = d / _next_seq_name(d, ext)
+        temp_path.rename(dest)
+    except Exception:
+        if temp_path.exists():
+            temp_path.unlink(missing_ok=True)
+        raise
+
+    from app.services import view_urls
+    return {
+        "path": str(dest),
+        "url": view_urls.local_view(str(dest)),
+        "source_url": source_url,
+        "title": title or dest.name,
+        "filename": dest.name,
+    }
+
+
+def list_web_materials(output_dir: str) -> list[dict]:
+    """列出 _web_materials/ 下所有图片。"""
+    if not output_dir:
+        return []
+    d = web_materials_dir(output_dir)
+    if not d.exists():
+        return []
+    from app.services import view_urls
+    items = []
+    for f in sorted(d.iterdir(), key=lambda x: x.name, reverse=True):
+        if f.is_file() and f.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"):
+            items.append({
+                "path": str(f),
+                "url": view_urls.local_view(str(f)),
+                "source_url": "",
+                "title": f.name,
+                "filename": f.name,
+            })
+    return items
+
+
+def delete_web_material(output_dir: str, filename: str) -> bool:
+    """删除 _web_materials/ 下的指定文件。"""
+    if not output_dir:
+        return False
+    d = web_materials_dir(output_dir)
+    safe_name = Path(filename).name
+
+
+# ===== 参考图：聊天上传到 <repo>/reference/ 的图片，供画布自动导入 =====
+
+
+def list_reference_images(output_dir: str, repo_id: str) -> list[dict]:
+    """列出 <repo_id>/reference/ 下所有图片文件。"""
+    if not output_dir or not repo_id:
+        return []
+    from app.services import repo_meta
+    base = repo_meta.repo_folder(output_dir, repo_id)
+    d = base / "reference"
+    if not d.exists():
+        return []
+    from app.services import view_urls
+    items = []
+    for f in sorted(d.iterdir(), key=lambda x: x.name, reverse=True):
+        if f.is_file() and f.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".avif"):
+            items.append({
+                "path": str(f),
+                "url": view_urls.local_view(str(f)),
+                "title": f.name,
+                "filename": f.name,
+            })
+    return items
+    target = d / safe_name
+    if target.exists() and target.is_file():
+        target.unlink()
+        return True
+    return False

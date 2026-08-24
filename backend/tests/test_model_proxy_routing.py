@@ -108,7 +108,7 @@ def test流式聊天路由透传聊天代理(monkeypatch):
 def test灵感搜索与聊天模型使用独立代理(monkeypatch):
     captured = {}
 
-    def fake_search(query, *, max_results, proxy):
+    def fake_search(query, *, max_results, proxy, provider=None):
         captured["search_proxy"] = proxy
         return [{"title": "title", "snippet": "snippet", "url": "https://example.test"}]
 

@@ -96,6 +96,15 @@ export function canCommitSnapshot(
 
 export function promptHistory(msgs: readonly ChatMessage[]): PromptHistoryItem[] {
   return msgs.flatMap((message) => {
+    // 状态/Toast 提示（如「已提交到 ComfyUI…」）不进对话上下文
+    if (message.system) return [];
+    // 顶层媒体气泡（工作流/Agent 产出的图/视频/音频，带提示词文本）不进剧情上下文
+    if (message.image || message.video || message.audio) return [];
+    // 生成/灵感/工具等非剧情路由的消息（生图/视频/反推提示词）不进剧情上下文
+    if (message.role === "assistant" && message.route
+      && message.route !== "roleplay" && message.route !== "answer") {
+      return [];
+    }
     const text = (message.text || "").trim() || (message.parts || [])
       .filter((part) => part.type === "text" && part.text?.trim())
       .map((part) => part.text!.trim())
@@ -248,6 +257,43 @@ export function hasImageProvided(graph: unknown, tpl: Template): boolean {
   return true; // 拿不准就放行
 }
 
+// ===== 视频首帧底图来源解析（V1.1）=====
+// 图生视频：把「已完成插画」作为首帧底图注入视频模板的图像输入口。
+// 来源优先级：本回合同槽已完成插画 > 最近一次已完成插画 > 用户手动指定 > 模板无图像口则纯文生视频。
+// 纯函数（无 React/无 I/O），可在单测覆盖；「已完成」= media-slot 已 resolve 为 image + status=ready + 有 url。
+interface VideoBaseImageMessages {
+  id: string;
+  parts?: Array<{ type?: string; slotId?: string; status?: string; url?: string }>;
+}
+
+export function resolveVideoBaseImage(opts: {
+  tpl: Template;
+  messageId: string;
+  slotId: string;
+  messages: VideoBaseImageMessages[];
+  manualBaseImage?: string;
+}): string | undefined {
+  // 模板没有图像输入口 → 纯文生视频，无需底图
+  if (!needsImageInput(opts.tpl)) return undefined;
+  const isReadyImage = (p: { type?: string; status?: string; url?: string } | undefined) =>
+    !!p && p.type === "image" && p.status === "ready" && !!p.url;
+  // 1) 本回合同槽：当前消息里 slotId 匹配的已完成插画
+  const sameSlot = opts.messages
+    .find((m) => m.id === opts.messageId)
+    ?.parts?.find((p) => p.slotId === opts.slotId && isReadyImage(p));
+  if (sameSlot?.url) return sameSlot.url;
+  // 2) 最近一次已完成插画：消息倒序（含本条，若本条其它槽已完成也可用）
+  for (let i = opts.messages.length - 1; i >= 0; i--) {
+    const parts = opts.messages[i].parts || [];
+    for (let j = parts.length - 1; j >= 0; j--) {
+      const p = parts[j];
+      if (p.type === "image" && p.status === "ready" && p.url) return p.url;
+    }
+  }
+  // 3) 用户手动指定（preset 角色底图 / 外貌参考图等）
+  return opts.manualBaseImage;
+}
+
 // ===== 文本打分：从生成结果的多段文本里挑最优 =====
 // 过滤掉「有效字符占比过低」的噪声段（如纯符号/乱码），再按长度取最长的一段。
 // 有效字符 = 字母数字 + 中文。占比阈值 0.3。
@@ -268,11 +314,11 @@ export async function slimSnapshot(
   const out: ChatMessage[] = [];
   for (const m of msgs) {
     let nm = m;
-    // 1) 用户消息 parts 里的上传图 → 落盘转小地址
-    if (nm.parts?.some((p) => p.type === "image" && p.url?.startsWith("data:"))) {
+    // 1) 用户消息 parts 里的上传图/视频 → 落盘转小地址（V1.3：image 与 video 同路径，不留 image 硬编码）
+    if (nm.parts?.some((p) => (p.type === "image" || p.type === "video") && p.url?.startsWith("data:"))) {
       const parts = await Promise.all(
         nm.parts.map(async (p) =>
-          p.type === "image" && p.url ? { ...p, url: await persist(p.url) } : p,
+          (p.type === "image" || p.type === "video") && p.url ? { ...p, url: await persist(p.url) } : p,
         ),
       );
       nm = { ...nm, parts };

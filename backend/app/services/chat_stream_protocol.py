@@ -31,8 +31,8 @@ def error_event(message: str) -> ChatStreamEvent:
 def encode_event(event: Mapping[str, object]) -> ChatStreamEvent | None:
     """编码一个内部事件；完成信号由 SSE 传输层收尾，不重复进入 payload。"""
     signals: list[str] = []
-    for key in ("trace", "delta", "replace", "image", "video", "illustrate_request", "insp",
-                "rag_status", "approval", "route_choice", "error"):
+    for key in ("trace", "delta", "replace", "route", "image", "video", "illustrate_request", "audio_request",
+                "insp", "rag_status", "approval", "route_choice", "error"):
         if key in event and event[key] is not None:
             signals.append(key)
     if event.get("interrupted") is True:
@@ -48,6 +48,8 @@ def encode_event(event: Mapping[str, object]) -> ChatStreamEvent | None:
     kind = signals[0]
     if kind in ("trace", "delta", "replace"):
         return _wire(kind, {"text": str(event[kind])})
+    if kind == "route":
+        return _wire("route", {"route": str(event["route"])})
     if kind in ("image", "video"):
         data = {"url": str(event[kind])}
         event_id = event.get("id") or event.get("image_id")
@@ -72,6 +74,30 @@ def encode_event(event: Mapping[str, object]) -> ChatStreamEvent | None:
         if event.get("id"):
             data["id"] = str(event["id"])
         return _wire("illustrate_request", data)
+    if kind == "audio_request":
+        req = event["audio_request"]
+        lines: list[dict] = []
+        if isinstance(req, Mapping) and isinstance(req.get("lines"), list):
+            for item in req["lines"]:
+                if not isinstance(item, Mapping):
+                    continue
+                speaker = str(item.get("speaker") or "").strip()
+                text = str(item.get("text") or "").strip()
+                if not speaker or not text:
+                    continue
+                emotion = item.get("emotion")
+                line: dict = {"speaker": speaker, "text": text}
+                if isinstance(emotion, Mapping):
+                    line["emotion"] = {
+                        key: max(0.0, min(1.0, float(emotion[key])))
+                        for key in ("happy", "angry", "sad", "fear", "hate", "low", "surprise", "neutral")
+                        if isinstance(emotion.get(key), (int, float))
+                    }
+                lines.append(line)
+        data: dict = {"lines": lines}
+        if event.get("id"):
+            data["id"] = str(event["id"])
+        return _wire("audio_request", data)
     if kind == "insp":
         return _wire("inspiration", {"card": event["insp"]})
     if kind == "rag_status":

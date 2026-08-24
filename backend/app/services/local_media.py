@@ -69,6 +69,19 @@ def _media_type(path: Path) -> str:
     }
     if ext in videos:
         return videos[ext]
+    audios = {
+        "wav": "audio/wav",
+        "mp3": "audio/mpeg",
+        "flac": "audio/flac",
+        "ogg": "audio/ogg",
+        "oga": "audio/ogg",
+        "opus": "audio/ogg",
+        "m4a": "audio/mp4",
+        "aac": "audio/aac",
+        "wma": "audio/x-ms-wma",
+    }
+    if ext in audios:
+        return audios[ext]
     return f"image/{'jpeg' if ext in ('jpg', 'jpeg') else ext or 'png'}"
 
 

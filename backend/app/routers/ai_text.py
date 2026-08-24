@@ -2,6 +2,7 @@
 无状态、单轮，均委托 ai_common 的 chat/build_chat_model。
 """
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
 from app.routers.ai_common import ChatModelReq, build_chat_model, chat
 
@@ -118,23 +119,54 @@ def extract_keywords(req: KeywordsRequest) -> dict[str, object]:
 class InspirationRequest(ChatModelReq):
     query: str                     # 用户想找的灵感（服装/发型/画风等）
     proxy_url: str = ""            # 联网搜索代理（访问外网）
+    search_provider: str = ""      # 搜索源名称，空=注册表默认源
 
 
 @router.post("/inspiration")
 def inspiration(req: InspirationRequest) -> dict[str, object]:
-    """联网找灵感 → 提炼成英文提示词。返回 {query, prompt, tags[], sources[]}，前端渲染成灵感卡。"""
+    """联网找灵感 → 整理成「标题+内容」中文总结。返回 {title, content, sources[], images[]}，前端渲染成灵感卡。"""
     if not req.query.strip():
         raise HTTPException(status_code=400, detail="灵感主题为空")
     from app.services import inspiration as insp
     try:
         return insp.search_and_refine(req.query, req.base_url, req.api_key,
-                                      req.model, proxy=req.proxy_url, chat_proxy=req.proxy)
+                                      req.model, proxy=req.proxy_url, chat_proxy=req.proxy,
+                                      search_provider=req.search_provider or None)
     except insp.NoResults as e:
         raise HTTPException(status_code=502, detail=f"{e}，请重试或换关键词")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=502, detail=str(e))
+
+
+class InspirationSelectRequest(BaseModel):
+    thread_id: str
+    message_id: str
+    urls: list[str] = []           # 用户勾选的图片 full_url 列表
+
+
+@router.post("/inspiration/select")
+def inspiration_select(req: InspirationSelectRequest) -> dict[str, object]:
+    """记录用户勾选的图片 URL 到灵感卡消息。
+
+    会话快照只记选中项的 URL（全量搜索结果不落盘，防膨胀）。
+    校验下沉到 chat_snapshot.select_inspiration。
+    """
+    from app.services import chat_snapshot
+    return chat_snapshot.select_inspiration(req.thread_id, req.message_id, req.urls or [])
+
+
+@router.get("/image-proxy")
+def image_proxy(url: str, proxy: str = ""):
+    """外网图片代理：中转灵感卡缩略图/原图。限 http(s) 与 5MB，防被当开放代理滥用。"""
+    from app.services.image_proxy import ImageProxyError, fetch_remote_image
+    try:
+        data, ctype = fetch_remote_image(url, proxy=proxy)
+    except ImageProxyError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)
+    from fastapi.responses import Response
+    return Response(content=data, media_type=ctype)
 
 
 class DescribeImageRequest(ChatModelReq):

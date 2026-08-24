@@ -42,6 +42,36 @@ def test_workflow_batch_home_has_no_durable_side_effects(monkeypatch):
     assert result["messages"][0]["image"].startswith("http://127.0.0.1:8010/api/comfyui/view?")
 
 
+def test_workflow_batch_persists_audio_messages(monkeypatch):
+    """音频产物：与图/视频同结构，消息以 audio 字段承载（不索引、可快照）。"""
+    generation_store._MEMORY_DONE.clear()
+    monkeypatch.setattr(generation_store.image_store, "save_local", lambda *a, **k: "C:/out/voice.wav")
+    monkeypatch.setattr(generation_store, "_index_with_retry", lambda *a, **k: True)
+    saved = []
+    monkeypatch.setattr(generation_store.chat_snapshot, "upsert", lambda thread, msg: saved.append(msg))
+    monkeypatch.setattr(generation_store.chat_memory, "append_message", lambda *a, **k: None)
+
+    result = generation_store.finalize_workflow_batch(**_args(
+        images=[],
+        audios=[{"filename": "voice.wav", "subfolder": "", "type": "output"}],
+    ))
+
+    assert result["messages"][0]["audio"].startswith("http://127.0.0.1:8010/api/comfyui/local-view?path=")
+    assert saved[0]["audio"].startswith("http://127.0.0.1:8010/api/comfyui/local-view?path=")
+    assert saved[0]["text"] == "text"  # 首个产物承载提示词
+    assert result["images"][0]["persisted"] is True
+    assert result["images"][0]["snapshotted"] is True
+
+
+def test_workflow_batch_audio_empty_raises(monkeypatch):
+    """全空批次（含 audios 空）才报错，纯音频批次不再误报。"""
+    import pytest
+    with pytest.raises(ValueError):
+        generation_store.finalize_workflow_batch(**_args(
+            images=[], videos=[], audios=[], prompt="",
+        ))
+
+
 def test_workflow_batch_keeps_online_image_when_save_fails(monkeypatch):
     generation_store._MEMORY_DONE.clear()
     monkeypatch.setattr(generation_store.image_store, "save_local", lambda *a, **k: (_ for _ in ()).throw(RuntimeError()))

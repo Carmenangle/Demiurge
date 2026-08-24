@@ -86,10 +86,10 @@ export function RepoGrid({
             </div>
             <div className="repo-tools">
             <button
-              className={`icon-btn ${r.cardName || r.worldbookName || r.personaId ? "is-bound" : ""}`}
-              title={r.cardName || r.worldbookName || r.personaId
-                ? `绑定：${[r.cardName && `卡「${r.cardName}」`, r.worldbookName && `世界书「${r.worldbookName}」`, r.personaId && "已设人设"].filter(Boolean).join("，")}`
-                : "绑定角色卡 / 世界书 / 用户设定"}
+              className={`icon-btn ${r.cardName || r.worldbookName || r.personaId || r.presetName ? "is-bound" : ""}`}
+              title={r.cardName || r.worldbookName || r.personaId || r.presetName
+                ? `绑定：${[r.cardName && `卡「${r.cardName}」`, r.worldbookName && `世界书「${r.worldbookName}」`, r.personaId && "已设人设", r.presetName && `预设「${r.presetName}」`].filter(Boolean).join("，")}`
+                : "绑定角色卡 / 世界书 / 用户设定 / 预设"}
               onClick={() => onBind(r)}
             >
               <Link2 size={15} />
@@ -107,6 +107,7 @@ export function RepoGrid({
             <span title={cardNames.join("、")}>角色：{cardNames.length ? cardNames.join("、") : "未绑定"}</span>
             {!r.parentId && <span>作品：{children.length}</span>}
             <span>资产：{assetCounts.get(r.id) || 0}</span>
+            {r.presetName && <span>预设：{r.presetName}</span>}
             <span>最近使用：{formatLastUsed(repoLastUsedAt(r, children))}</span>
           </div>
         </div>

@@ -130,6 +130,28 @@ describe("reduceChatStreamEvent", () => {
     expect(failed[0].parts).toEqual([{ type: "text", text: "前文后文" }]);
   });
 
+  it("音频槽完成后保留角色名/序号/总数（分条气泡标签不丢）", () => {
+    const current: ChatMessage[] = [{
+      id: "bot", role: "assistant", text: "正文", parts: [
+        { type: "media-slot", slotId: "audio-1", status: "pending", kind: "audio", speaker: "阿尼玛", seq: 2, total: 3 },
+      ],
+    }];
+    const ready = resolveMediaSlot(current, "bot", "audio-1", "local://a.wav", "audio");
+    expect(ready[0].parts?.[0]).toEqual({
+      type: "audio", url: "local://a.wav", slotId: "audio-1", status: "ready",
+      kind: "audio", speaker: "阿尼玛", seq: 2, total: 3,
+    });
+    // 普通图片/视频槽不受影响：不注入音频元数据
+    const img = resolveMediaSlot([{
+      id: "bot", role: "assistant", text: "正文", parts: [
+        { type: "media-slot", slotId: "slot-1", status: "pending" },
+      ],
+    }], "bot", "slot-1", "local://a.png", "image");
+    expect(img[0].parts?.[0]).toEqual({
+      type: "image", url: "local://a.png", slotId: "slot-1", status: "ready",
+    });
+  });
+
   it("重新生图按相同slot替换已有图片且不追加消息", () => {
     const current: ChatMessage[] = [{
       id: "bot", role: "assistant", text: "前文后文", parts: [

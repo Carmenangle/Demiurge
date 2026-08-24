@@ -1,10 +1,9 @@
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import {
   WORK_MODES, type WorkMode, isWorkMode,
   NAV_SECTIONS, type NavSection, isNavSection,
   SECTION_SUBNAV,
   resolveActivityChatTarget,
-  resolveOpenedWorkRoute,
 } from "./lib/viewRouting";
 import { useSettings, activeChatModel, resolvedEmbedModel } from "./stores/settings";
 import { useRepos, type Repo } from "./stores/repos";
@@ -108,8 +107,26 @@ export function App() {
     setSection("home");
     setSettingsOpen(false);
     setModeMenuOpen(false);
+    // 模式按作品记忆：每个作品记住自己的功能栏（剧情/多元生成/编辑）
+    if (workId) { try { localStorage.setItem(`laf_mode_${workId}`, m); } catch {} }
     window.location.hash = `#/${m}`;
   };
+
+  // 打开/切换作品时恢复该作品记忆的模式（无记录保持当前；新作品默认 story）。
+  // 顶部 Demiurge 下拉主动切模式走 goMode，不受此影响。
+  const lastModeWorkRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!workId || workId === lastModeWorkRef.current) return;
+    lastModeWorkRef.current = workId;
+    let saved = "";
+    try { saved = localStorage.getItem(`laf_mode_${workId}`) || ""; } catch {}
+    const mode = isWorkMode(saved) ? saved : "story";
+    setWorkMode(mode);
+    setSection("home");
+    setSettingsOpen(false);
+    setSubView(null);
+    window.location.hash = `#/${mode}`;
+  }, [workId]);
 
   const goSection = (s: NavSection) => {
     setSection(s);
@@ -130,11 +147,10 @@ export function App() {
     if (!target) return;
     setRepoId(target.repoId);
     setWorkId(target.workId);
-    setWorkMode("story");
     setSection("home");
     setSettingsOpen(false);
     setSubView(null);
-    window.location.hash = "#/story";
+    // 模式由 workId effect 恢复该作品记忆值（含 hash）
   };
 
   const drilledIn = section !== "home" && !settingsOpen;
@@ -145,13 +161,10 @@ export function App() {
       <Lightbox />
       <RagToast />
       <aside className="app-nav sidebar">
-        {/* Demiurge▾ 常驻顶部 */}
-        <ModeDropdown
-          workMode={workMode}
-          open={modeMenuOpen}
-          setOpen={setModeMenuOpen}
-          onMode={goMode}
-        />
+        {/* 固定品牌（模式下拉已合并：顶栏功能栏即全部功能；#/generate、#/code 旧 hash 仍兼容解析） */}
+        <div className="mode-dropdown brand-only">
+          <span className="mode-trigger" style={{ cursor: "default" }}>Demiurge</span>
+        </div>
         {drilledIn ? (
           <DrillNav
             section={section as Exclude<NavSection, "home">}
@@ -224,17 +237,23 @@ export function App() {
             onBind={setBinding}
             onDelete={setDeleting}
             onOpenWork={(rid, wid) => {
-              const target = resolveOpenedWorkRoute(workMode);
               setRepoId(rid);
               setWorkId(wid);
               touchRepo(wid);
-              setWorkMode(target.workMode);
               setSection("home");
               setSettingsOpen(false);
               setSubView(null);
-              window.location.hash = target.hash;
+              // 模式由 workId effect 恢复该作品记忆值（含 hash）
             }}
             onClearRepo={() => { setRepoId(null); setWorkId(null); }}
+            onGoSection={(section, subView) => {
+              setSection(section);
+              setSettingsOpen(false);
+              setSubView(subView);
+              setBrowseRepoId(null);
+              window.location.hash = `#/${section}/${subView}`;
+            }}
+            onOpenPreset={() => setPresetOpen(true)}
             addCardWork={addCardWork}
             addBranch={addBranch}
             marketSearch={marketSearch}
@@ -299,6 +318,7 @@ export function App() {
           characterDir={settings.characterDir}
           outputDir={settings.outputDir}
           worldbookDir={settings.worldbookDir}
+          presetDir={settings.presetDir}
           personas={settings.userPersonas || []}
           onSave={(patch) => bindRepo(binding.id, patch)}
           onClose={() => setBinding(null)}
@@ -424,7 +444,7 @@ function SectionNav(props: {
           className={`nav-item ${s.id === props.section ? "active" : ""}`}
           onClick={() => props.onSection(s.id)}
         >
-          {s.id === "home" ? props.currentModeLabel : s.label}
+          {s.id === "home" ? "创作平台" : s.label}
         </button>
       ))}
     </nav>
@@ -476,7 +496,7 @@ function Topbar(props: {
   if (props.section === "home") {
     return (
       <header className="app-topbar">
-        <span className="topbar-title">{props.currentModeLabel}</span>
+        <span className="topbar-title">创作</span>
         <label className="repo-picker">
           仓库
           <select value={props.repoId ?? ""} onChange={(e) => props.onRepo(e.target.value || null)}>

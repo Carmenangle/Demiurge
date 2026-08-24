@@ -1,6 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GenResult } from "../api/comfyui";
-import { WorkflowGenerationRuntime } from "./workflowGenerationRuntime";
+import { WorkflowGenerationRuntime, pollSchedule, pollWorkflowResult, durableFinalizeSucceeded } from "./workflowGenerationRuntime";
 
 function memoryStorage() {
   const values = new Map<string, string>();
@@ -12,7 +12,7 @@ function memoryStorage() {
 
 const completed: GenResult = {
   status: "completed", images: [{ filename: "done.png", subfolder: "", type: "output" }],
-  videos: [], texts: [],
+  videos: [], audios: [], texts: [],
 };
 
 function observer() {
@@ -79,7 +79,7 @@ describe("workflow generation runtime", () => {
     const runtime = new WorkflowGenerationRuntime("work", {
       storage: memoryStorage(), now: () => 10,
       fetchResult: vi.fn(async (): Promise<GenResult> => ({
-        status: "not_found", images: [], videos: [], texts: [],
+        status: "not_found", images: [], videos: [], audios: [], texts: [],
       })),
       schedule: (callback) => scheduled.push(callback),
     });
@@ -134,5 +134,127 @@ describe("workflow generation runtime", () => {
     await scheduled.shift()!();
 
     expect(watch.finalize).not.toHaveBeenCalled();
+  });
+});
+
+// ===== V1.3 视频超时独立于图片 =====
+describe("pollSchedule · 媒体类型超时合同", () => {
+  it("图片：5 分钟（150×2s）释放忙碌，20 分钟（210 tries）硬上限", () => {
+    expect(pollSchedule(149)).toEqual({ releaseBusy: false, delayMs: 2000 });
+    expect(pollSchedule(150)).toEqual({ releaseBusy: true, delayMs: 15000 });
+    expect(pollSchedule(209)).toEqual({ releaseBusy: false, delayMs: 15000 });
+    expect(pollSchedule(210)).toEqual({ releaseBusy: false, delayMs: null });
+  });
+  it("视频：15 分钟（450×2s）释放忙碌，60 分钟（630 tries）硬上限——禁止 5 分钟掐掉 10 分钟任务", () => {
+    expect(pollSchedule(150, "video")).toEqual({ releaseBusy: false, delayMs: 2000 });
+    expect(pollSchedule(449, "video")).toEqual({ releaseBusy: false, delayMs: 2000 });
+    expect(pollSchedule(450, "video")).toEqual({ releaseBusy: true, delayMs: 15000 });
+    expect(pollSchedule(629, "video")).toEqual({ releaseBusy: false, delayMs: 15000 });
+    expect(pollSchedule(630, "video")).toEqual({ releaseBusy: false, delayMs: null });
+  });
+  it("默认 image（未标媒体类型的旧 pending 保持原行为）", () => {
+    expect(pollSchedule(150)).toEqual({ releaseBusy: true, delayMs: 15000 });
+  });
+});
+
+// ===== M3 空媒体语义 =====
+describe("durableFinalizeSucceeded · 空媒体防御", () => {
+  it("durable 且所有媒体持久化并快照 → 成功", () => {
+    expect(durableFinalizeSucceeded({
+      durable: true,
+      images: [{ persisted: true, snapshotted: true }],
+    })).toBe(true);
+  });
+
+  it("durable 且部分媒体未持久化 → 失败", () => {
+    expect(durableFinalizeSucceeded({
+      durable: true,
+      images: [{ persisted: true, snapshotted: false }],
+    })).toBe(false);
+  });
+
+  it("durable 且 media 为空数组 → 失败（空真防御）", () => {
+    // 旧代码 [].every() 空真→成功；修复后空 media 应返回 false
+    expect(durableFinalizeSucceeded({
+      durable: true,
+      images: [],
+    })).toBe(false);
+  });
+
+  it("durable 且 images 和 videos 均为空 → 失败", () => {
+    expect(durableFinalizeSucceeded({
+      durable: true,
+      images: [],
+      videos: [],
+      audios: [],
+    })).toBe(false);
+  });
+
+  it("非 durable 直接成功（无需持久化）", () => {
+    expect(durableFinalizeSucceeded({
+      durable: false,
+      images: [],
+    })).toBe(true);
+  });
+
+  it("视频 + 图片混合：全部持久化 → 成功", () => {
+    expect(durableFinalizeSucceeded({
+      durable: true,
+      images: [{ persisted: true, snapshotted: true }],
+      videos: [{ persisted: true, snapshotted: true }],
+    })).toBe(true);
+  });
+
+  it("音频 + 图片混合：全部持久化 → 成功", () => {
+    expect(durableFinalizeSucceeded({
+      durable: true,
+      images: [{ persisted: true, snapshotted: true }],
+      audios: [{ persisted: true, snapshotted: true }],
+    })).toBe(true);
+  });
+});
+
+// ===== 2026-08-23 画布运转超时合同：复用 pollSchedule，禁止 4 分钟掐掉长任务 =====
+describe("pollWorkflowResult · 画布/弹窗运转轮询", () => {
+  const running: GenResult = { status: "running", images: [], videos: [], audios: [], texts: [] };
+  afterEach(() => { vi.useRealTimers(); });
+
+  it("completed 带图 → complete", async () => {
+    const fetchResult = vi.fn(async () => completed);
+    const outcome = await pollWorkflowResult("p1", "http://comfy", "image", { fetchResult });
+    expect(outcome.kind).toBe("complete");
+    if (outcome.kind === "complete") expect(outcome.result.images[0].filename).toBe("done.png");
+    expect(fetchResult).toHaveBeenCalledWith("p1", "http://comfy", []);
+  });
+
+  it("failed → 立即失败", async () => {
+    const fetchResult = vi.fn(async (): Promise<GenResult> => ({
+      status: "failed", error: "采样失败", images: [], videos: [], audios: [], texts: [],
+    }));
+    const outcome = await pollWorkflowResult("p1", "http://comfy", "image", { fetchResult });
+    expect(outcome).toEqual({ kind: "failed", error: "采样失败" });
+  });
+
+  it("连续 5 次 not_found → 失败（任务已丢失）", async () => {
+    vi.useFakeTimers();
+    const fetchResult = vi.fn(async (): Promise<GenResult> => ({
+      status: "not_found", images: [], videos: [], audios: [], texts: [],
+    }));
+    const outcomePromise = pollWorkflowResult("p1", "http://comfy", "image", { fetchResult });
+    await vi.advanceTimersByTimeAsync(2_000 * 5);   // 每次轮询 2s；第 5 次 fetch 判定失败
+    const outcome = await outcomePromise;
+    expect(outcome).toEqual({ kind: "failed", error: "出图任务已丢失（ComfyUI 可能已重启）" });
+    expect(fetchResult).toHaveBeenCalledTimes(5);
+  });
+
+  it("running 撑到 pollSchedule 硬上限（210 tries）→ still_running，不谎报失败", async () => {
+    vi.useFakeTimers();
+    const fetchResult = vi.fn(async (): Promise<GenResult> => running);
+    const outcomePromise = pollWorkflowResult("p1", "http://comfy", "image", { fetchResult });
+    // 图片合同：149×2s + 60×15s ≈ 20 分钟硬上限；第 210 次 fetch 后 pollSchedule(210)=null
+    await vi.advanceTimersByTimeAsync(2_000 * 150 + 15_000 * 61);
+    const outcome = await outcomePromise;
+    expect(outcome).toEqual({ kind: "still_running" });
+    expect(fetchResult).toHaveBeenCalledTimes(210);
   });
 });

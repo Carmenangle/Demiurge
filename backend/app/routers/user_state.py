@@ -8,10 +8,11 @@
 import json
 from pathlib import Path
 
-from fastapi import APIRouter, File, UploadFile
+from fastapi import APIRouter, File, Form, UploadFile
 from pydantic import BaseModel
 
 from app.config import DATA_DIR
+from app.services import repo_meta
 
 router = APIRouter()
 
@@ -81,6 +82,42 @@ class SyncMarkersRequest(BaseModel):
     output_dir: str
 
 
+class CanvasLayoutRequest(BaseModel):
+    repo_id: str
+    output_dir: str = ""
+    nodes: dict | None = None
+    edges: list | None = None
+    viewport: dict | None = None
+    # 灵感卡（角色卡 / 世界书条目 / 预设 / 表格行 各自一张；可被剧情对话引用）
+    inspiration_cards: list | None = None
+    # 参考图（文件夹拖入画布的图片节点，独立于灵感卡）
+    reference_images: list | None = None
+    # 已删除节点黑名单：删除的投影节点 id（gen-<generationId>），投影时过滤防止复活
+    deleted_ids: list | None = None
+
+
+@router.get("/canvas-layout")
+def canvas_layout_get(repo_id: str, output_dir: str = "") -> dict:
+    """读取作品画布布局（canvas.json：布局/连线/视口/灵感卡/参考图/删除黑名单）。缺失返回空结构。"""
+    from app.services import canvas_store
+    return canvas_store.load_layout(output_dir, repo_id)
+
+
+@router.post("/canvas-layout")
+def canvas_layout_save(req: CanvasLayoutRequest) -> dict[str, bool]:
+    """保存作品画布布局到 canvas.json。只写布局/连线/视口/灵感卡/参考图/删除黑名单，不碰 generation/快照/角色卡。"""
+    from app.services import canvas_store
+    canvas_store.save_layout(req.output_dir, req.repo_id, {
+        "nodes": req.nodes or {},
+        "edges": req.edges or [],
+        "viewport": req.viewport or {"x": 0, "y": 0, "scale": 1},
+        "inspiration_cards": req.inspiration_cards or [],
+        "reference_images": req.reference_images or [],
+        "deleted_ids": req.deleted_ids or [],
+    })
+    return {"ok": True}
+
+
 @router.post("/sync-markers")
 def sync_markers(req: SyncMarkersRequest) -> dict[str, int]:
     """扫描 output_dir 下的 UUID 子文件夹，按当前仓库列表补/更新 _repo.json。
@@ -108,6 +145,30 @@ async def upload_bg(file: UploadFile = File(...)) -> dict:
     if ext not in ("png", "jpg", "jpeg", "webp", "gif", "bmp"):
         ext = "png"
     dest = bg_dir / f"{uuid4().hex}.{ext}"
+    data = await file.read()
+    dest.write_bytes(data)
+    return {"ok": True, "path": str(dest)}
+
+
+@router.post("/upload-voice")
+async def upload_voice(
+    file: UploadFile = File(...),
+    repo_id: str = Form("home"),
+    output_dir: str = Form(""),
+) -> dict:
+    """上传参考音轨到 <repo>/voices/，返回本地绝对路径（填进 characterVoices[角色].voiceRef，走 local-view 读）。
+
+    音轨是作品专属资产（每作品每角色一个），物理落仓库 voices 子夹，与 reference/ 对齐。
+    """
+    from uuid import uuid4
+    folder = repo_meta.repo_folder(output_dir, repo_id)
+    voices_dir = folder / "voices"
+    voices_dir.mkdir(parents=True, exist_ok=True)
+    name = file.filename or "voice.wav"
+    ext = name.rsplit(".", 1)[-1].lower() if "." in name else "wav"
+    if ext not in ("wav", "mp3", "flac", "ogg", "m4a", "aac", "opus"):
+        ext = "wav"
+    dest = voices_dir / f"{uuid4().hex}.{ext}"
     data = await file.read()
     dest.write_bytes(data)
     return {"ok": True, "path": str(dest)}

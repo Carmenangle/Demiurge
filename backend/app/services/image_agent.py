@@ -37,8 +37,8 @@ _AGENT_SYSTEM_BASE = (
     "着装、露出程度完全不变的前提下，仅优化措辞（换更中性/更专业/更艺术化的表达、调整语序、"
     "用美术术语替代直白词），再次调用同一个生图工具。可连续润色重试至多 3 次直到成功；"
     "绝不删改、弱化或替换用户要的任何画面元素。\n"
-    "- 用户明确要求联网寻找服装/发型/画风等【参考、灵感、流行款式】时，调用 search_inspiration 工具联网搜索并提炼提示词；"
-    "该工具会自动生成一张「灵感卡」展示给用户，你只需用一句话说明即可，不要重复罗列提示词。\n"
+    "- 用户明确要求联网寻找服装/发型/画风等【参考、灵感、流行款式】时，调用 search_inspiration 工具联网搜索并整理成总结；"
+    "该工具会自动生成一张「灵感卡」（标题+内容）展示给用户，你只需用一句话说明即可，不要重复罗列总结内容。\n"
     "- 普通问答直接回答，不必调用工具。\n"
     "- 回复简洁中文；生图成功后用一句话说明即可，图片会自动展示。"
 )
@@ -163,20 +163,20 @@ def _build(chat_base: str, chat_key: str, chat_model: str,
 
     @tool
     def search_inspiration(query: str) -> str:
-        """联网搜索服装/发型/画风等参考灵感，提炼成英文生图提示词。用户想找参考/流行款式/灵感时调用。query 用简短英文或中文描述主题。"""
+        """联网搜索服装/发型/画风等参考灵感，整理成「标题+内容」的中文总结。用户想找参考/流行款式/灵感时调用。query 用简短英文或中文描述主题。"""
         try:
             from app.services import inspiration as _insp
             data = _insp.search_and_refine(
                 query, chat_base, chat_key, chat_model,
                 proxy=proxy_url, chat_proxy=chat_proxy_url,
             )
-            if not data["prompt"]:
-                return "ERROR: 未能从搜索结果提炼出提示词。"
+            if not data["content"]:
+                return "ERROR: 未能从搜索结果整理出内容。"
             card = generation_store.persist_inspiration(
-                thread_id, data["query"], data["prompt"], data["tags"], data["sources"])
+                thread_id, data["title"], data["content"], data["sources"], data.get("images"))
             if insp_sink is not None:
                 insp_sink.append(card)
-            return f"SUCCESS: 已生成灵感卡（提示词：{data['prompt'][:80]}…）。"
+            return f"SUCCESS: 已生成灵感卡「{data['title']}」：{data['content'][:80]}…"
         except _insp.NoResults:
             return "ERROR: 联网搜索无结果（网络或搜索源不可用）。"
         except Exception as e:
@@ -280,7 +280,7 @@ def stream_agent(thread_id: str, message: str, images: list[str] | None,
     cancel_event（threading.Event）置位时协作式停止：停止 yield，末尾发 {"interrupted": True}。
     """
     sink: list[dict] = []  # 每项 {"id", "url"}，id 随事件回传前端用于去重
-    insp: list[dict] = []  # 灵感卡，每项 {id,query,prompt,tags,sources}
+    insp: list[dict] = []  # 灵感卡，每项 {id,title,content,sources}
     agent = _build(chat_base, chat_key, chat_model,
                    gen_base, gen_key, gen_model, sink, size,
                    thread_id=thread_id, output_dir=output_dir, repo_id=repo_id or thread_id,

@@ -74,3 +74,31 @@ export function updateWorldbookEntry(loc: WBLocation, index: number, entry: WBEn
 export function deleteWorldbookEntry(loc: WBLocation, index: number) {
   return apiPost<{ ok: boolean }>("/worldbook/entry/delete", { ...loc, index });
 }
+
+// ── 仓库快照世界书 CRUD（画布模式编辑：读写 <repo>/worldbook.json）──
+
+export interface RepoWorldbookLoc {
+  output_dir: string;
+  repo_id: string;
+}
+
+export function repoWorldbookEntries(loc: RepoWorldbookLoc) {
+  return apiPost<{ entries: WBEntryItem[]; not_found?: boolean }>(
+    "/narrative/repo-worldbook/entries", loc,
+  );
+}
+export function repoWorldbookEntryAdd(loc: RepoWorldbookLoc, entry: WBEntryFields) {
+  return apiPost<{ ok: boolean; index: number }>(
+    "/narrative/repo-worldbook/entry/add", { ...loc, entry },
+  );
+}
+export function repoWorldbookEntryUpdate(loc: RepoWorldbookLoc, index: number, entry: WBEntryFields) {
+  return apiPost<{ ok: boolean }>(
+    "/narrative/repo-worldbook/entry/update", { ...loc, index, entry },
+  );
+}
+export function repoWorldbookEntryDelete(loc: RepoWorldbookLoc, index: number) {
+  return apiPost<{ ok: boolean }>(
+    "/narrative/repo-worldbook/entry/delete", { ...loc, index },
+  );
+}

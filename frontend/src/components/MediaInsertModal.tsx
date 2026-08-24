@@ -3,12 +3,13 @@ import type { Template } from "../api/workflows";
 import {
   SEMANTIC_PROMPT, SEMANTIC_NEGATIVE_PROMPT, SEMANTIC_LORA_NAME, SEMANTIC_BASE_IMAGE,
   SEMANTIC_LATENT_WIDTH, SEMANTIC_LATENT_HEIGHT,
+  SEMANTIC_VOICE_TEXT, SEMANTIC_VOICE_REFERENCE,
 } from "../api/workflows";
 import { availableLoras, type AvailableLora } from "../api/loras";
 import { getProfilePromptDefaults } from "../api/ai";
-import { uploadChatBg } from "../api/userState";
+import { uploadChatBg, uploadVoice } from "../api/userState";
 import { localViewUrl } from "../api/comfyui";
-import type { MediaInsertPreset, CharacterLoraBinding } from "../stores/settings";
+import type { MediaInsertPreset, CharacterLoraBinding, CharacterVoiceBinding } from "../stores/settings";
 import {
   normalizePromptProfile, PROMPT_PROFILE_OPTIONS, workflowFieldBinding,
 } from "../lib/imagePromptProfiles";
@@ -18,6 +19,8 @@ interface Props {
   cardName?: string;   // 本作品主角色卡名，用于预填首行角色
   cardNames?: string[]; // 本作品绑定的全部角色卡
   modelsDir: string;   // ComfyUI models 目录，用于直接扫 loras 子目录列出可选模型
+  repoId?: string;     // 本作品 id，音轨落 <repo>/voices/
+  outputDir?: string;  // 仓库文件夹根，音轨落 <outputDir>/<作品>/voices/
   preset?: MediaInsertPreset;
   onSave: (preset: MediaInsertPreset) => void;
   onClose: () => void;
@@ -25,6 +28,11 @@ interface Props {
 
 // 一行「角色名 + LoRA + 权重 + 底图」的可编辑结构（内部态，保存时回填 characterLoras）。
 interface CharRow extends CharacterLoraBinding {
+  name: string;
+}
+
+// 一行「角色名 + 参考音轨」的可编辑结构（内部态，保存时回填 characterVoices）。
+interface VoiceRow extends CharacterVoiceBinding {
   name: string;
 }
 
@@ -45,9 +53,24 @@ function initialRows(preset?: MediaInsertPreset, cardName?: string, cardNames: s
   return rows.length ? rows : [{ name: "" }];
 }
 
+function initialVoiceRows(preset?: MediaInsertPreset, cardNames: string[] = []): VoiceRow[] {
+  const map = preset?.characterVoices || {};
+  const rows: VoiceRow[] = Object.entries(map).map(([name, v]) => ({ name, ...v }));
+  // 绑定卡角色自动预填一行（音轨是每个在场角色都要准备的，预填减少录入）
+  const existing = new Set(rows.map((r) => r.name));
+  for (const n of cardNames) {
+    if (n && !existing.has(n)) rows.push({ name: n });
+  }
+  return rows.length ? rows : [{ name: "" }];
+}
+
 // 多元数据插入：为本作品预设剧情高潮点异步出图用的 ComfyUI 工作流模板 + 按角色 LoRA/底图。
 // 提示词由后端高潮点提取，运行时按在场角色取该角色 LoRA/底图，无则回退风格 LoRA + 风格底图。
-export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDir, preset, onSave, onClose }: Props) {
+export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDir, repoId = "", outputDir = "", preset, onSave, onClose }: Props) {
+  // 三开关：剧情自动生成时按勾选类型分发。旧预设无 enable 字段 → 默认按已有配置回填。
+  const [enableImage, setEnableImage] = useState(preset?.enableImage ?? true);
+  const [enableVideo, setEnableVideo] = useState(preset?.enableVideo ?? !!preset?.videoTemplateId);
+  const [enableAudio, setEnableAudio] = useState(preset?.enableAudio ?? !!preset?.audioTemplateId);
   const [templateId, setTemplateId] = useState(preset?.templateId || "");
   const [loraMode, setLoraMode] = useState<"none" | "single" | "multi">(
     preset?.loraMode || "single",
@@ -68,6 +91,9 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
   const [styleBaseImage, setStyleBaseImage] = useState(preset?.styleBaseImage || "");
   const [videoTemplateId, setVideoTemplateId] = useState(preset?.videoTemplateId || "");
   const [smartVideo, setSmartVideo] = useState(preset?.smartVideo ?? false);
+  const [audioTemplateId, setAudioTemplateId] = useState(preset?.audioTemplateId || "");
+  const [voiceRows, setVoiceRows] = useState<VoiceRow[]>(() => initialVoiceRows(preset, cardNames));
+  const [uploadingVoice, setUploadingVoice] = useState("");  // 正在上传音轨的行 key（""=无）
   const [loras, setLoras] = useState<AvailableLora[]>([]);
   const [loraLoadState, setLoraLoadState] = useState<"idle" | "loading" | "ready" | "error">(
     modelsDir ? "loading" : "idle",
@@ -135,10 +161,29 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
   const hasLatentWidth = !!tpl?.exposed.some((f) => workflowFieldBinding(f) === SEMANTIC_LATENT_WIDTH);
   const hasLatentHeight = !!tpl?.exposed.some((f) => workflowFieldBinding(f) === SEMANTIC_LATENT_HEIGHT);
 
+  const audioTpl = templates.find((t) => t.id === audioTemplateId);
+  const hasVoiceText = !!audioTpl?.exposed.some((f) => workflowFieldBinding(f) === SEMANTIC_VOICE_TEXT);
+  const hasVoiceRef = !!audioTpl?.exposed.some((f) => workflowFieldBinding(f) === SEMANTIC_VOICE_REFERENCE);
+
   const setRow = (i: number, patch: Partial<CharRow>) =>
     setRows((prev) => prev.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
   const addRow = () => setRows((prev) => [...prev, { name: "" }]);
   const delRow = (i: number) => setRows((prev) => prev.filter((_, idx) => idx !== i));
+
+  const setVoiceRow = (i: number, patch: Partial<VoiceRow>) =>
+    setVoiceRows((prev) => prev.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
+  const addVoiceRow = () => setVoiceRows((prev) => [...prev, { name: "" }]);
+  const delVoiceRow = (i: number) => setVoiceRows((prev) => prev.filter((_, idx) => idx !== i));
+
+  const pickVoice = async (i: number, f: File | null | undefined) => {
+    if (!f) return;
+    setUploadingVoice(String(i));
+    try {
+      const r = await uploadVoice(f, repoId, outputDir);
+      if (r.ok) setVoiceRow(i, { voiceRef: r.path });
+    } catch { /* 忽略：用户可重试 */ }
+    finally { setUploadingVoice(""); }
+  };
 
   const pickBase = async (i: number, f: File | null | undefined) => {
     if (!f) return;
@@ -167,6 +212,13 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
     && (loraMode === "none" || !styleLora)
     && !styleBaseImage);
 
+  // 三开关分区各自的有效性：未勾选即视为满足；勾选则需模板齐全（图片还需提示词槽）。
+  const anyEnabled = enableImage || enableVideo || enableAudio;
+  const imageValid = !enableImage || (!!templateId && hasPrompt);
+  const videoValid = !enableVideo || !!videoTemplateId;
+  const audioValid = !enableAudio || (!!audioTemplateId && hasVoiceText);
+  const saveDisabled = !anyEnabled || !imageValid || !videoValid || !audioValid;
+
   const save = () => {
     const characterLoras: Record<string, CharacterLoraBinding> = {};
     for (const r of rows) {
@@ -178,20 +230,32 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
         baseImage: r.baseImage || undefined,
       };
     }
+    const characterVoices: Record<string, CharacterVoiceBinding> = {};
+    for (const r of voiceRows) {
+      const name = r.name.trim();
+      if (!name || !r.voiceRef) continue;  // 音轨必须已选文件才算有效绑定
+      characterVoices[name] = { voiceRef: r.voiceRef };
+    }
     onSave({
-      templateId,
-      loraMode,
-      appearanceSource,
-      promptProfile,
-      qualityPrompt: promptProfile === "anima_tags" ? qualityPrompt.trim() : undefined,
-      negativePrompt: promptProfile === "anima_tags" ? negativePrompt.trim() : undefined,
-      latentLongEdge,
-      characterLoras: Object.keys(characterLoras).length ? characterLoras : undefined,
-      styleLora: loraMode === "none" ? undefined : styleLora || undefined,
-      styleLoraWeight: loraMode !== "none" && styleLora ? styleLoraWeight : undefined,
-      styleBaseImage: styleBaseImage || undefined,
-      videoTemplateId: videoTemplateId || undefined,
-      smartVideo,
+      enableImage, enableVideo, enableAudio,
+      // 图片分区（未勾选则不保留，运行时按 enable 位分发）
+      templateId: enableImage ? templateId : "",
+      loraMode: enableImage ? loraMode : undefined,
+      appearanceSource: enableImage ? appearanceSource : undefined,
+      promptProfile: enableImage ? promptProfile : undefined,
+      qualityPrompt: enableImage && promptProfile === "anima_tags" ? qualityPrompt.trim() : undefined,
+      negativePrompt: enableImage && promptProfile === "anima_tags" ? negativePrompt.trim() : undefined,
+      latentLongEdge: enableImage ? latentLongEdge : undefined,
+      characterLoras: enableImage && Object.keys(characterLoras).length ? characterLoras : undefined,
+      styleLora: enableImage && loraMode !== "none" ? styleLora || undefined : undefined,
+      styleLoraWeight: enableImage && loraMode !== "none" && styleLora ? styleLoraWeight : undefined,
+      styleBaseImage: enableImage ? styleBaseImage || undefined : undefined,
+      // 视频分区
+      videoTemplateId: enableVideo ? videoTemplateId : undefined,
+      smartVideo: enableVideo ? smartVideo : undefined,
+      // 音频分区
+      audioTemplateId: enableAudio ? audioTemplateId : undefined,
+      characterVoices: enableAudio && Object.keys(characterVoices).length ? characterVoices : undefined,
     });
   };
 
@@ -199,6 +263,35 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
     <div className="modal-mask" onClick={onClose}>
       <div className="modal" style={{ width: 560, maxWidth: "94vw", maxHeight: "86vh", overflowY: "auto" }} onClick={(e) => e.stopPropagation()}>
         <h3>多元数据插入</h3>
+        <p style={{ color: "#666", marginTop: 0, fontSize: 13 }}>
+          勾选要随剧情自动生成的内容类型（可多选）。保存后会自动开启「剧情自动生成」，剧情高潮点按勾选类型分别生成对应内容。
+        </p>
+        <div className="lora-mode-switch" role="group" aria-label="生成内容类型" style={{ marginBottom: 14 }}>
+          {([
+            ["image", "生成图片"], ["video", "生成视频"], ["audio", "生成音频"],
+          ] as const).map(([key, label]) => {
+            const on = key === "image" ? enableImage : key === "video" ? enableVideo : enableAudio;
+            const toggle = key === "image" ? () => setEnableImage(!enableImage)
+              : key === "video" ? () => setEnableVideo(!enableVideo)
+              : () => setEnableAudio(!enableAudio);
+            return (
+              <button
+                key={key}
+                type="button"
+                className={`btn${on ? " primary" : ""}`}
+                aria-pressed={on}
+                onClick={toggle}
+              >{label}</button>
+            );
+          })}
+        </div>
+        {!anyEnabled && (
+          <p style={{ color: "#c0392b", fontSize: 12, marginTop: -8 }}>至少勾选一项生成内容。</p>
+        )}
+
+        {enableImage && (<>
+        <hr style={{ border: "none", borderTop: "1px solid #eee", margin: "16px 0" }} />
+        <strong style={{ fontSize: 14, display: "block", marginBottom: 10 }}>生成图片</strong>
         <label style={{ display: "block", marginBottom: 12 }}>
           <span style={{ display: "block", marginBottom: 4, fontSize: 13 }}>角色外貌来源</span>
           <select value={appearanceSource}
@@ -212,9 +305,6 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
           {appearanceSource === "worldbook"
             ? "从当前小仓库世界书中命中的角色视觉条目读取外貌。"
             : "从本作品绑定角色卡的描述读取外貌，适合纯机制世界书。"}
-        </p>
-        <p style={{ color: "#666", marginTop: 0, fontSize: 13 }}>
-          预设本作品剧情高潮点自动出图用的工作流模板。保存后会自动开启「剧情插画」；提示词由剧情自动提取，LoRA 无触发词记录也不会阻断出图。
         </p>
         <div style={{ marginBottom: 12 }}>
           <span style={{ display: "block", marginBottom: 4, fontSize: 13 }}>LoRA 模式</span>
@@ -432,29 +522,90 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
           </label>
           {styleBaseImage && <button className="btn" onClick={() => setStyleBaseImage("")}>清除</button>}
         </div>}
-
-        <hr style={{ border: "none", borderTop: "1px solid #eee", margin: "16px 0" }} />
-        <label style={{ display: "block", marginBottom: 12 }}>
-          <span style={{ display: "block", marginBottom: 4, fontSize: 13 }}>视频工作流模板（可选）</span>
-          <select value={videoTemplateId} onChange={(e) => setVideoTemplateId(e.target.value)} style={{ width: "100%" }}>
-            <option value="">不出视频（仅出图）</option>
-            {templates.map((t) => (
-              <option key={t.id} value={t.id}>{t.name}</option>
-            ))}
-          </select>
-        </label>
-        {videoTemplateId && (
-          <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, fontSize: 13 }}>
-            <input type="checkbox" checked={smartVideo} onChange={(e) => setSmartVideo(e.target.checked)} />
-            智能模态：剧情动作剧烈时（如奔跑/律动）自动改用视频模板，静态画面仍出图
-          </label>
-        )}
         {appearanceSource === "worldbook" && missingBase && (
           <p style={{ color: "#c0392b", fontSize: 12 }}>有角色既无 LoRA 也无底图，且无兜底风格——该角色出图将缺少一致性锚点。</p>
         )}
+        </>)}
+
+        {enableVideo && (<>
+          <hr style={{ border: "none", borderTop: "1px solid #eee", margin: "16px 0" }} />
+          <strong style={{ fontSize: 14, display: "block", marginBottom: 10 }}>生成视频</strong>
+          <label style={{ display: "block", marginBottom: 12 }}>
+            <span style={{ display: "block", marginBottom: 4, fontSize: 13 }}>视频工作流模板</span>
+            <select value={videoTemplateId} onChange={(e) => setVideoTemplateId(e.target.value)} style={{ width: "100%" }}>
+              <option value="">不启用（不生成视频）</option>
+              {templates.map((t) => (
+                <option key={t.id} value={t.id}>{t.name}</option>
+              ))}
+            </select>
+          </label>
+          <p className="bind-hint" style={{ marginTop: -8, marginBottom: 12 }}>
+            每名角色的参考图 = 生成图片分区中该角色的「底图」，作为视频首帧锁定角色一致性。
+          </p>
+          {videoTemplateId && (
+            <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, fontSize: 13 }}>
+              <input type="checkbox" checked={smartVideo} onChange={(e) => setSmartVideo(e.target.checked)} />
+              智能模态：剧情动作剧烈时（如奔跑/律动）自动改用视频模板，静态画面仍出图
+            </label>
+          )}
+        </>)}
+
+        {enableAudio && (<>
+          <hr style={{ border: "none", borderTop: "1px solid #eee", margin: "16px 0" }} />
+          <strong style={{ fontSize: 14, display: "block", marginBottom: 10 }}>生成音频</strong>
+          <label style={{ display: "block", marginBottom: 12 }}>
+            <span style={{ display: "block", marginBottom: 4, fontSize: 13 }}>音频工作流模板（IndexTTS 系语音合成）</span>
+            <select value={audioTemplateId} onChange={(e) => setAudioTemplateId(e.target.value)} style={{ width: "100%" }}>
+              <option value="">不启用（不配音）</option>
+              {templates.map((t) => (
+                <option key={t.id} value={t.id}>{t.name}</option>
+              ))}
+            </select>
+          </label>
+          {audioTemplateId && !hasVoiceText && (
+            <p style={{ color: "#c0392b", fontSize: 12, marginTop: -6 }}>
+              该模板未标注「角色台词」字段，无法注入台词。请先到「工作流模板」编辑并标注 voice_text。
+            </p>
+          )}
+          {audioTemplateId && !hasVoiceRef && (
+            <p style={{ color: "#c98a1a", fontSize: 12, marginTop: -6 }}>
+              该模板未标注「参考音轨」字段，音色克隆不会生效。请补充标注 voice_reference。
+            </p>
+          )}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+            <strong style={{ fontSize: 13 }}>按角色配置（参考音轨）</strong>
+            <button className="btn" onClick={addVoiceRow}>+ 添加角色</button>
+          </div>
+          <p className="bind-hint" style={{ marginTop: -4, marginBottom: 8 }}>
+            每个作品专属、每个角色准备一条参考音轨（音色）。台词按角色筛分后逐角色合成，旁白/叙述句不配音。
+          </p>
+          {voiceRows.map((r, i) => (
+            <div key={i} style={{ border: "1px solid #eee", borderRadius: 8, padding: 10, marginBottom: 8 }}>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6 }}>
+                <input
+                  placeholder="角色名（与剧情中一致）" value={r.name}
+                  onChange={(e) => setVoiceRow(i, { name: e.target.value })}
+                  style={{ flex: 1 }}
+                />
+                <button className="btn" onClick={() => delVoiceRow(i)} title="删除该角色">✕</button>
+              </div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
+                <span style={{ color: r.voiceRef ? "#333" : "#999", flex: 1, wordBreak: "break-all" }}>
+                  {r.voiceRef ? r.voiceRef.split(/[\\/]/).pop() : "参考音轨（未选择）"}
+                </span>
+                <label className="btn" style={{ cursor: "pointer" }}>
+                  {uploadingVoice === String(i) ? "上传中…" : (r.voiceRef ? "更换音轨" : "选择音轨")}
+                  <input type="file" accept="audio/*" hidden onChange={(e) => { pickVoice(i, e.target.files?.[0]); e.target.value = ""; }} />
+                </label>
+                {r.voiceRef && <button className="btn" onClick={() => setVoiceRow(i, { voiceRef: undefined })}>清除</button>}
+              </div>
+            </div>
+          ))}
+        </>)}
+
         <div className="modal-actions">
           <button className="btn" onClick={onClose}>取消</button>
-          <button className="btn primary" disabled={!templateId || !hasPrompt} onClick={save}>保存</button>
+          <button className="btn primary" disabled={saveDisabled} onClick={save}>保存</button>
         </div>
       </div>
     </div>

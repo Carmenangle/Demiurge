@@ -1,6 +1,7 @@
 """线程准入测试：抢占登记、所有权校验、协作取消、活动状态生命周期。
 零重依赖，独立于 langgraph/langchain，可单独收集。"""
 import threading
+import time
 
 import pytest
 
@@ -61,6 +62,27 @@ def test_request_cancel_hits_active_run():
 def test_request_cancel_misses_when_idle():
     _fresh()
     assert ta.request_cancel("missing") is False
+
+
+def test_prune_stale_evicts_leaked_and_keeps_fresh():
+    """崩溃泄漏的登记超过阈值被自动清理；未超时登记不受影响，清理后可重新准入。"""
+    _fresh()
+    # 直接注入一条超时“泄漏”登记（真实场景：运行异常崩溃未 release）
+    leak = ta.Admission(
+        "leak", threading.Event(),
+        admitted_at=time.monotonic() - ta.ADMISSION_STALE_MS / 1000 - 1,
+    )
+    with ta._lock:
+        ta._active["leak"] = leak
+    fresh = ta.admit("fresh", threading.Event())
+    try:
+        assert "leak" not in ta.active_threads()  # 泄漏登记被读取接口自动清理
+        assert ta.is_active("fresh")              # 未超时登记保留
+        readmit = ta.admit("leak", threading.Event())  # 清理后同 thread 可重新准入
+        ta.release(readmit)
+        assert not ta.is_active("leak")
+    finally:
+        ta.release(fresh)
 
 
 def test_is_active_lifecycle():

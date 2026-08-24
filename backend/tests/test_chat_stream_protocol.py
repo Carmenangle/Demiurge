@@ -7,6 +7,7 @@ from app.services import chat_stream_protocol as protocol
     ({"trace": "主管选择 image"}, "trace", {"text": "主管选择 image"}),
     ({"delta": "回答"}, "delta", {"text": "回答"}),
     ({"replace": "最终回答"}, "replace", {"text": "最终回答"}),
+    ({"route": "roleplay"}, "route", {"route": "roleplay"}),
     ({"image": "local://image", "id": "i1", "regeneration": {"prompt": "p"}},
      "image", {"url": "local://image", "id": "i1", "regeneration": {"prompt": "p"}}),
     ({"video": "local://video", "id": "v1"}, "video",
@@ -15,7 +16,8 @@ from app.services import chat_stream_protocol as protocol
      "illustrate_request", {"prompt": "1girl, smile", "motion": 2, "actors": ["爱丽丝"], "id": "illo-req-1"}),
     ({"illustrate_request": {"prompt": "p", "motion": 0}, "id": "r2"},
      "illustrate_request", {"prompt": "p", "motion": 0, "actors": [], "id": "r2"}),
-    ({"insp": {"query": "服装"}}, "inspiration", {"card": {"query": "服装"}}),
+    ({"insp": {"title": "女仆装", "content": "总结内容", "sources": []}},
+     "inspiration", {"card": {"title": "女仆装", "content": "总结内容", "sources": []}}),
     ({"approval": {"id": "a1"}}, "approval", {"approval": {"id": "a1"}}),
     ({"route_choice": {"id": "r1"}}, "route_choice", {"choice": {"id": "r1"}}),
     ({"rag_status": {"state": "start", "kind": "worldbook", "count": 53}},
@@ -86,3 +88,31 @@ def test_插画事件保留回合id供最终提交Trace关联():
     })
 
     assert event["data"]["turn_id"] == "turn-1"
+
+
+def test_音频事件编码台词与情感向量():
+    event = protocol.encode_event({
+        "audio_request": {
+            "lines": [
+                {"speaker": "阿尼玛", "text": "你走开。",
+                 "emotion": {"angry": 0.9, "neutral": 0.1}},
+                {"speaker": "李四", "text": "我不走。", "emotion": {"happy": 1}},
+            ],
+        },
+        "id": "audio-req-1",
+    })
+    assert event["type"] == "audio_request"
+    assert event["data"]["id"] == "audio-req-1"
+    assert event["data"]["lines"][0]["speaker"] == "阿尼玛"
+    assert event["data"]["lines"][0]["emotion"]["angry"] == 0.9
+
+
+def test_音频事件丢弃空台词行():
+    event = protocol.encode_event({
+        "audio_request": {
+            "lines": [{"speaker": "", "text": "x"}, {"speaker": "阿尼玛", "text": "嗨"}],
+        },
+        "id": "a1",
+    })
+    assert len(event["data"]["lines"]) == 1
+    assert event["data"]["lines"][0]["speaker"] == "阿尼玛"

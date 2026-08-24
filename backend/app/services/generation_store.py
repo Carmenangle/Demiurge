@@ -87,10 +87,15 @@ def _save_remote_image(url: str, output_dir: str, repo_id: str = "home") -> str:
 
 
 def _index_with_retry(repo_id: str, cfg: EmbedConfig, prompt: str,
-                      tags: str = "", image_url: str = "") -> bool:
+                      tags: str = "", image_url: str = "",
+                      template_name: str = "", model_name: str = "",
+                      lora_names: str = "") -> bool:
     for attempt in range(3):
         try:
-            rag_store.index_generation(repo_id, cfg, prompt, tags, image_url)
+            rag_store.index_generation(repo_id, cfg, prompt, tags, image_url,
+                                       template_name=template_name,
+                                       model_name=model_name,
+                                       lora_names=lora_names)
             return True
         except Exception as exc:  # noqa: BLE001
             _LOG.warning("index_generation 失败(第%d次) repo=%s img=%s: %s",
@@ -192,17 +197,22 @@ def finalize_workflow_batch(
     embed_base: str, embed_key: str, embed_model: str,
     chat_base: str = "", chat_key: str = "", chat_model: str = "",
     videos: list[dict] | None = None,
+    audios: list[dict] | None = None,
     regeneration: dict | None = None,
+    template_name: str = "",
+    model_name: str = "",
+    lora_names: str = "",
     target_message_id: str = "",
     target_slot_id: str = "",
 ) -> dict:
-    """持久化一批已完成的 ComfyUI 产出；单图/单视频阶段失败不会阻断其他产出。
-    videos 与 images 同结构({filename,subfolder,type})，消息以 video 字段承载。"""
+    """持久化一批已完成的 ComfyUI 产出；单图/单视频/单音频阶段失败不会阻断其他产出。
+    videos/audios 与 images 同结构({filename,subfolder,type})，消息以 video/audio 字段承载。"""
     videos = videos or []
+    audios = audios or []
     if not thread_id or not repo_id or not prompt_id:
         raise ValueError("thread_id、repo_id 和 prompt_id 不能为空")
-    if not images and not videos and not prompt.strip():
-        raise ValueError("生成结果没有图片、视频或文字")
+    if not images and not videos and not audios and not prompt.strip():
+        raise ValueError("生成结果没有图片、视频、音频或文字")
 
     durable = repo_id != "home"
     cfg = EmbedConfig(embed_base, embed_key, embed_model)
@@ -247,7 +257,10 @@ def finalize_workflow_batch(
         if not inline_target:
             messages.append(message)
         if durable:
-            indexed = _index_with_retry(repo_id, cfg, prompt, tags, shown)
+            indexed = _index_with_retry(repo_id, cfg, prompt, tags, shown,
+                                       template_name=template_name,
+                                       model_name=model_name,
+                                       lora_names=lora_names)
             if not indexed:
                 errors.append("index")
             if inline_target and target is None:
@@ -333,14 +346,75 @@ def finalize_workflow_batch(
             "snapshotted": snapshotted, "errors": errors,
         })
 
-    if not images and not videos and prompt.strip():
+    for index, audio in enumerate(audios):
+        key = _workflow_key(thread_id, prompt_id, audio)
+        mid = _message_id(key)
+        persisted = snapshotted = False
+        errors: list[str] = []
+        shown = ""
+        if durable:
+            try:
+                path = image_store.save_local(
+                    output_dir, repo_id,
+                    filename=str(audio.get("filename", "")),
+                    subfolder=str(audio.get("subfolder", "")),
+                    type=str(audio.get("type", "output")),
+                    url=comfyui_url,
+                    idempotency_key=key,
+                )
+                shown = view_urls.local_view(path)
+                persisted = True
+            except Exception:
+                errors.append("persist")
+        if not shown:
+            shown = view_urls.remote_view(
+                filename=str(audio.get("filename", "")),
+                type=str(audio.get("type", "output")),
+                subfolder=str(audio.get("subfolder", "")),
+                comfyui_url=comfyui_url,
+            )
+        # 首个产物（无图/无视频时）承载提示词文本
+        head_text = prompt if (index == 0 and not images and not videos) else ""
+        message = chat_snapshot.assistant_message(mid, head_text, audio=shown)
+        if not inline_target:
+            messages.append(message)
+        if durable:
+            if inline_target and target is None:
+                try:
+                    snapshotted = chat_snapshot.resolve_media_slot(
+                        thread_id, target_message_id, target_slot_id, shown,
+                        media_type="audio", regeneration=regeneration,
+                    )
+                    if not snapshotted:
+                        errors.append("snapshot")
+                except Exception:
+                    errors.append("snapshot")
+            elif not inline_target:
+                try:
+                    chat_snapshot.upsert(thread_id, message)
+                    snapshotted = True
+                except Exception:
+                    errors.append("snapshot")
+        if inline_target and target is None:
+            target = {"message_id": target_message_id, "slot_id": target_slot_id,
+                      "media_type": "audio", "url": shown}
+        results.append({
+            "key": key, "message_id": mid, "display_url": shown,
+            "persisted": persisted, "indexed": False,
+            "snapshotted": snapshotted, "errors": errors,
+        })
+
+    if not images and not videos and not audios and prompt.strip():
         mid = _message_id(_workflow_key(thread_id, prompt_id))
         message = chat_snapshot.assistant_message(mid, prompt)
         messages.append(message)
         indexed = snapshotted = False
         errors: list[str] = []
         if durable:
-            indexed = _index_with_retry(repo_id, cfg, prompt, tags)
+            indexed = _index_with_retry(repo_id, cfg, prompt, tags,
+                                       template_name=template_name,
+                                       model_name=model_name,
+                                       lora_names=lora_names)
             if not indexed:
                 errors.append("index")
             try:
@@ -372,15 +446,19 @@ def finalize_workflow_batch(
             "images": results, "complete": complete, "target": target}
 
 
-def persist_inspiration(thread_id: str, query: str, prompt: str,
-                        tags: list[str], sources: list[dict]) -> dict:
-    card = {"id": str(uuid.uuid4()), "query": query, "prompt": prompt,
-            "tags": tags, "sources": sources}
+def persist_inspiration(thread_id: str, title: str, content: str,
+                        sources: list[dict], images: list[dict] | None = None) -> dict:
+    """落一张灵感卡。返回含全量 images 的 card（供 wire 传前端预览），
+    但会话快照只记 {title, content, sources, selected}——全量图片结果不落盘（防快照膨胀），
+    用户选中项由 /inspiration/select 端点写回 selected（M1.2 合同）。
+    """
+    card = {"id": str(uuid.uuid4()), "title": title, "content": content,
+            "sources": sources, "images": images or []}
     try:
         chat_snapshot.upsert(thread_id, chat_snapshot.assistant_message(
             card["id"], "",
-            inspiration={"query": query, "prompt": prompt,
-                         "tags": tags, "sources": sources},
+            inspiration={"title": title, "content": content,
+                         "sources": sources, "selected": []},
         ))
     except Exception as exc:  # noqa: BLE001  灵感卡写快照失败不阻断返回，但要留痕
         _LOG.warning("persist_inspiration 写快照失败 thread=%s: %s", thread_id, exc)

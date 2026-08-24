@@ -7,6 +7,7 @@
 """
 import json
 import os
+import re
 import threading
 
 from app.config import DATA_DIR
@@ -96,7 +97,7 @@ def _preserve_server_media_state(current: list, incoming: list) -> list:
             if not isinstance(server_part, dict) or not isinstance(part, dict):
                 next_parts.append(part)
                 continue
-            if (server_part.get("type") in ("image", "video")
+            if (server_part.get("type") in ("image", "video", "audio")
                     and server_part.get("status") == "ready"):
                 next_parts.append(server_part)
                 changed = True
@@ -154,6 +155,8 @@ def to_prompt_history(messages: list) -> list[dict]:
 
     快照是用户当前所见对话的真源；被删除的消息已不在列表中，不得从 checkpoint 复活。
     工作流卡、空流式占位等非对话结构不进 prompt；parts 仅抽文本块。
+    与前端 promptHistory 对齐：状态/Toast（system）、顶层媒体气泡（工作流/Agent 产出
+    的图/视频/音频）、非剧情路由（generate/video/…）的助手消息都不进剧情上下文。
     """
     history: list[dict] = []
     for message in messages or []:
@@ -162,6 +165,8 @@ def to_prompt_history(messages: list) -> list[dict]:
         role = message.get("role")
         if role not in ("user", "assistant"):
             continue
+        if message.get("system"):
+            continue  # 状态/Toast（如「已提交到 ComfyUI…」）不进上下文
         text = (message.get("text") or "").strip()
         if not text:
             text = "\n".join(
@@ -170,8 +175,16 @@ def to_prompt_history(messages: list) -> list[dict]:
                 if isinstance(part, dict) and part.get("type") == "text"
                 and (part.get("text") or "").strip()
             ).strip()
-        if text:
-            history.append({"role": role, "content": text})
+        if not text:
+            continue
+        if role == "assistant":
+            # 顶层媒体气泡（工作流/Agent 产出的图/视频/音频，带提示词文本）不进剧情上下文
+            if message.get("image") or message.get("video") or message.get("audio"):
+                continue
+            route = message.get("route")
+            if route and route not in ("roleplay", "answer"):
+                continue  # 生图/视频/反推/灵感/工具等非剧情路由
+        history.append({"role": role, "content": text})
     return history
 
 
@@ -188,6 +201,62 @@ def load_prompt_history(thread_id: str) -> list[dict] | None:
         return to_prompt_history(json.loads(path.read_text(encoding="utf-8")))
     except Exception:
         return []
+
+
+# 一次性迁移：旧快照（route/system 字段引入前）里没有标签的助手消息，
+# 无法再靠运行时启发式判断是否剧情——按「剧情专家标签」原则回填标签：
+#   - 文本像状态/Toast（含 ComfyUI/prompt_id/命令/运行状态词）→ system:true（非剧情）
+#   - 文本像生成提示词（danbooru 质量标签词汇，叙事正文不会出现）→ route:"generate"（非剧情）
+#   - 其余纯正文 → route:"roleplay"（剧情专家产出）
+# 有媒体/卡字段或已有 route 的消息不动（天然排除或已标签化）。
+# 仅对历史数据跑一次（backend/scripts/backfill_story_route_0824.py），
+# 之后新消息全部走标签判定，不再依赖任何文本猜测。
+_STATUS_HINTS = re.compile(
+    r"ComfyUI|prompt_id|重新生图|生成完成，但没有输出|生成失败|生成较复杂|已提交到 ComfyUI|"
+    r"启动失败|扮演失败|ComfyUI 未启动|正在尝试自动拉起|请先启动|请稍候 20|请等待完成|"
+    r"无法保证准确重生成|选择完毕|没有已确认|没抓到画布内容|没找到名为|当前已有生成任务|"
+    r"原始消息已不存在|已应用 LoRA|已生成图片|/w |/s |/find "
+)
+# 生成提示词强特征：danbooru 质量标签/画面词汇（剧情叙事不会用这些词）
+_PROMPT_HINTS = re.compile(
+    r"masterpiece|best quality|score_9|score_8|absurdres|high resolution|refined details|"
+    r"nsfw|1girl|1boy|solo|ultra detailed|high contrast|amazing quality|"
+    r"anime coloring|sharp focus|good anatomy|good shading|@\w+ \w+"
+)
+
+
+def backfill_story_tags(messages: list) -> tuple[list, dict]:
+    """给无标签的旧助手文本消息回填剧情/状态/生成标签；返回 (新列表, 统计)。纯函数无 IO。"""
+    changed = story = status = generate = 0
+    out: list = []
+    for item in messages:
+        if not isinstance(item, dict):
+            out.append(item)
+            continue
+        if item.get("route"):
+            out.append(item)  # 已标签化，跳过
+            continue
+        role = item.get("role")
+        text = str(item.get("text") or "").strip()
+        if role != "assistant" or not text:
+            out.append(item)
+            continue
+        if (item.get("system") or item.get("workflow") or item.get("inspiration")
+                or item.get("portsPlan") or item.get("promptApproval") or item.get("routeChoice")
+                or item.get("image") or item.get("video") or item.get("audio")):
+            out.append(item)  # 有显式非剧情标记，不动
+            continue
+        if _STATUS_HINTS.search(text):
+            out.append({**item, "system": True})
+            status += 1
+        elif _PROMPT_HINTS.search(text):
+            out.append({**item, "route": "generate"})
+            generate += 1
+        else:
+            out.append({**item, "route": "roleplay"})
+            story += 1
+        changed += 1
+    return out, {"changed": changed, "story": story, "status": status, "generate": generate}
 
 
 def assistant_message(mid: str, text: str, **fields) -> dict:
@@ -258,7 +327,10 @@ def upsert(thread_id: str, msg: dict) -> None:
 
 
 def merge_fields(thread_id: str, mid: str, **fields) -> None:
-    """合并更新一条消息的结构化字段，不覆盖已有正文和媒体。"""
+    """合并更新一条消息的结构化字段，不覆盖已有正文和媒体。
+
+    若 message_id 在快照中不存在则静默返回（不追加幽灵消息）。
+    """
     if not mid:
         return
     with _thread_lock(thread_id):
@@ -268,8 +340,29 @@ def merge_fields(thread_id: str, mid: str, **fields) -> None:
                 items[i] = {**item, **fields}
                 _save_unlocked(thread_id, items)
                 return
-        items.append(assistant_message(mid, "", **fields))
-        _save_unlocked(thread_id, items)
+        # 未知 message_id → 静默返回，不追加不可见消息
+
+
+def select_inspiration(thread_id: str, message_id: str, urls: list[str]) -> dict[str, object]:
+    """在快照中更新灵感卡选中项：只记录选中 URL 列表，不存全量搜索结果。
+
+    校验：只接受 http(s) URL；过滤非法协议。
+    若 message_id 在快照中不存在则静默返回（不追加幽灵消息）。
+    返回 {"ok": True, "selected": urls}。
+    """
+    safe = [u.strip() for u in urls if (u or "").strip().startswith(("http://", "https://"))]
+    inspiration: dict = {}
+    for item in load(thread_id):
+        if isinstance(item, dict) and item.get("id") == message_id \
+                and isinstance(item.get("inspiration"), dict):
+            inspiration = dict(item["inspiration"])
+            break
+    else:
+        # 未找到目标消息 → 不追加幽灵消息，静默返回
+        return {"ok": True, "selected": safe}
+    inspiration["selected"] = safe
+    merge_fields(thread_id, message_id, inspiration=inspiration)
+    return {"ok": True, "selected": safe}
 
 
 def resolve_media_slot(thread_id: str, message_id: str, slot_id: str, url: str,
@@ -278,7 +371,7 @@ def resolve_media_slot(thread_id: str, message_id: str, slot_id: str, url: str,
     """把指定消息的异步媒体槽原位替换为图片/视频；目标不存在时绝不追加新消息。"""
     if not message_id or not slot_id or not url:
         return False
-    kind = "video" if media_type == "video" else "image"
+    kind = "video" if media_type == "video" else ("audio" if media_type == "audio" else "image")
     with _thread_lock(thread_id):
         items = load(thread_id)
         for item_index, item in enumerate(items):
@@ -286,9 +379,15 @@ def resolve_media_slot(thread_id: str, message_id: str, slot_id: str, url: str,
                 continue
             parts = item.get("parts") or []
             for part_index, part in enumerate(parts):
-                if (isinstance(part, dict) and part.get("type") in ("media-slot", "image", "video")
+                if (isinstance(part, dict) and part.get("type") in ("media-slot", "image", "video", "audio")
                         and part.get("slotId") == slot_id):
                     ready = {"type": kind, "url": url, "slotId": slot_id, "status": "ready"}
+                    # 音频分条元数据（角色名/序号/媒体类型提示）随槽位保留：刷新恢复后
+                    # 气泡与画布楼层仍能按角色分条展示，不因服务端回填而丢失标签。
+                    if isinstance(part, dict) and part.get("kind") == "audio":
+                        for key in ("kind", "speaker", "seq", "total"):
+                            if part.get(key) is not None:
+                                ready[key] = part[key]
                     if regeneration:
                         ready["regeneration"] = regeneration
                     next_parts = list(parts)

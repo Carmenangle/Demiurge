@@ -5,6 +5,7 @@ import {
   acceptSlimmedMessages, canCommitSnapshot,
   promptAdditionsForSelectedLora, triggersForSelectedLora,
   resolveLoraPromptMetadata,
+  resolveVideoBaseImage,
 } from "./chatGeneration";
 import {
   generationResultAction, notFoundPollAction, pendingResumeAction, pollSchedule,
@@ -86,6 +87,31 @@ describe("promptHistory", () => {
     expect(promptHistory(visible)).toEqual([
       { role: "user", content: "保留的用户消息" },
       { role: "assistant", content: "保留的助手消息" },
+    ]);
+  });
+  it("状态/Toast 与非剧情路由消息不进上下文", () => {
+    const visible: ChatMessage[] = [
+      { id: "u1", role: "user", text: "用户请求" },
+      { id: "toast", role: "assistant", text: "已提交到 ComfyUI 生成…", system: true },
+      { id: "gen", role: "assistant", text: "已生成图片", route: "generate" },
+      { id: "story", role: "assistant", text: "剧情正文", route: "roleplay" },
+      { id: "legacy", role: "assistant", text: "旧正文（无 route）" },
+    ];
+    expect(promptHistory(visible)).toEqual([
+      { role: "user", content: "用户请求" },
+      { role: "assistant", content: "剧情正文" },
+      { role: "assistant", content: "旧正文（无 route）" },
+    ]);
+  });
+  it("工作流媒体气泡（图/视频/音频提示词）不进上下文", () => {
+    const visible: ChatMessage[] = [
+      { id: "img", role: "assistant", text: "1girl, portrait", image: "/local-view?path=a.png" },
+      { id: "vid", role: "assistant", text: "girl dancing", video: "/local-view?path=b.mp4" },
+      { id: "aud", role: "assistant", text: "voiceover script", audio: "/local-view?path=c.wav" },
+      { id: "story", role: "assistant", text: "剧情正文" },
+    ];
+    expect(promptHistory(visible)).toEqual([
+      { role: "assistant", content: "剧情正文" },
     ]);
   });
 });
@@ -535,5 +561,54 @@ describe("durableFinalizeSucceeded", () => {
     expect(durableFinalizeSucceeded({
       durable: true, images: [{ persisted: true, snapshotted: true }],
     })).toBe(true);
+  });
+});
+
+// ===== V1.1 视频首帧底图来源解析 =====
+describe("resolveVideoBaseImage", () => {
+  const tplWithImage = { id: "v1", image_node_id: "9", exposed: [] } as any;
+  const tplNoImage = { id: "v2", exposed: [] } as any;
+  const msg = (id: string, parts: any[] = []) => ({ id, parts });
+  const readyImg = (slotId: string, url: string) => ({ type: "image", slotId, status: "ready", url });
+  const pendingSlot = (slotId: string) => ({ type: "media-slot", slotId, status: "pending" });
+
+  it("模板无图像口 → 纯文生视频（返回 undefined，不拦截）", () => {
+    expect(resolveVideoBaseImage({
+      tpl: tplNoImage, messageId: "m1", slotId: "s1", messages: [],
+    })).toBeUndefined();
+  });
+
+  it("本回合同槽已完成插画优先", () => {
+    const messages = [
+      msg("m1", [pendingSlot("s1"), readyImg("s1", "local://same-slot")]),
+      msg("m0", [readyImg("s0", "local://older")]),
+    ];
+    expect(resolveVideoBaseImage({
+      tpl: tplWithImage, messageId: "m1", slotId: "s1", messages,
+    })).toBe("local://same-slot");
+  });
+
+  it("同槽 pending 不等待（时序红线：不阻塞）→ 回退最近一次已完成插画", () => {
+    const messages = [
+      msg("m1", [pendingSlot("s1")]),
+      msg("m0", [readyImg("s0", "local://recent")]),
+    ];
+    expect(resolveVideoBaseImage({
+      tpl: tplWithImage, messageId: "m1", slotId: "s1", messages,
+    })).toBe("local://recent");
+  });
+
+  it("无已完成插画 → 用户手动指定底图", () => {
+    const messages = [msg("m1", [pendingSlot("s1")])];
+    expect(resolveVideoBaseImage({
+      tpl: tplWithImage, messageId: "m1", slotId: "s1", messages,
+      manualBaseImage: "local://manual",
+    })).toBe("local://manual");
+  });
+
+  it("全无 → undefined（视频分支据此拦截 image_required）", () => {
+    expect(resolveVideoBaseImage({
+      tpl: tplWithImage, messageId: "m1", slotId: "s1", messages: [msg("m1")],
+    })).toBeUndefined();
   });
 });

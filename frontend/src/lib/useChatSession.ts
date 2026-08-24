@@ -3,7 +3,7 @@
 // 对外只暴露渲染所需的状态与动作句柄；UI 局部态（模型选择/面板开关/尺寸）留在 ChatView。
 // 接口即测试面：整台生成引擎集中一处，不必渲染千行组件即可推演其行为。
 import { type MutableRefObject, useEffect, useReducer, useRef, useState } from "react";
-import type { AgentRoute, ChatMessage, MsgPart, PromptApproval, RegenerationSnapshot, RouteChoice } from "../types/chat";
+import type { AgentRoute, ChatMessage, MsgPart, PromptApproval, RegenerationSnapshot, RouteChoice, WorkflowRegeneration } from "../types/chat";
 import type { Repo } from "../stores/repos";
 import type { useSettings } from "../stores/settings";
 import { activeStyleTemplate, activeUserPersona } from "../stores/settings";
@@ -21,6 +21,7 @@ import {
   saveSnapshot, fetchSnapshot, fetchAgentRunning, cancelAgent,
   fetchInspiration, regenerateImage as replayImageGeneration,
   claimIllustrationSubmission, reportIllustrationFailure, reportIllustrationSubmission,
+  reportAudioSubmission,
   genProfilePrompt, listGenerations,
   type AgentInvocation,
 } from "../api/ai";
@@ -28,7 +29,8 @@ import { createScenarioSnapshot } from "../api/scenario";
 import { runVisualCiDiagnostic } from "../api/visualCi";
 import { refreshChatBackgroundActivities } from "./chatBackgroundActivity";
 import { substituteMacros } from "./chatMacros";
-import type { ChatStreamEvent, IllustrationSceneSpec } from "../api/chatStreamProtocol";
+import type { ChatStreamEvent, IllustrationSceneSpec, AudioDialogueLine } from "../api/chatStreamProtocol";
+import { normalizeInspirationCard } from "../api/chatStreamProtocol";
 import {
   reduce as reduceGen, initialGenState,
   blocksDialogueSubmission, streamingBotId, needsConfirm, runningPromptId,
@@ -39,7 +41,7 @@ import {
   needsImageInput, hasImageProvided, pickBestText,
   slimSnapshot as slimSnapshotPure, promptHistory,
   prepareConversationRegeneration, resolveLoraPromptMetadata, resolveGenerationPrompt,
-  acceptSlimmedMessages, canCommitSnapshot,
+  acceptSlimmedMessages, canCommitSnapshot, resolveVideoBaseImage,
 } from "./chatGeneration";
 import {
   durableFinalizeSucceeded, WorkflowGenerationRuntime,
@@ -54,6 +56,9 @@ import {
   resolveIllustrationActors,
 } from "./illustrationMedia";
 import {
+  audioTemplateValues, resolvableAudioLines, skippedAudioSpeakers, voiceReferenceFor,
+} from "./audioGeneration";
+import {
   agentImageMessage, applyRouteChoice, bindMediaSlotPrompt, dropMediaSlot,
   pruneUnsubmittedMediaSlots, reduceChatStreamEvent, resolveMediaSlot,
   restoreSubmittedMediaSlots, upsertMessages, workflowMessages,
@@ -66,7 +71,7 @@ import type { ImageQuality, WorkMode } from "./viewRouting";
 import { useChatMaintenance } from "./useChatMaintenance";
 import {
   comfyRegenerationUrl, legacyGenerationPrompt, resolveImageRegenerationModel,
-  templateRegenerationSnapshot, workflowRegenerationSnapshot,
+  templateRegenerationSnapshot, workflowRegenerationSnapshot, workflowGenMetadata,
 } from "./regeneration";
 import { resolveEndpointProxy, resolveModelProxy, type ProxyMode } from "./modelProxy";
 import {
@@ -116,14 +121,20 @@ export interface ChatSessionDeps {
   templates: Template[];
   setShowPicker: (v: boolean) => void;           // 与 /w 选择浮层共享
   atBottomRef: MutableRefObject<boolean>;        // 与滚动跟随 UI 共享
+  onNotify?: (msg: string, kind?: "info" | "error" | "success") => void; // 轻提示（对齐 WorkflowCard onNotify）
 }
 
 // PLACEHOLDER_BODY
 
+// 跨导航持久化：切换页面时进度条和提示词参数不丢失
+const persistedWfProgress: { current: number | null } = { current: null };
+const persistedWfNode: { current: string } = { current: "" };
+const persistedWfPromptParams: { current: Record<string, unknown> } = { current: {} };
+
 export function useChatSession(deps: ChatSessionDeps) {
   const {
     repo, settings, setGeneratedCover, chat, genModel, videoModel, workMode, size, imageQuality,
-    templates, setShowPicker, atBottomRef,
+    templates, setShowPicker, atBottomRef, onNotify,
   } = deps;
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -147,6 +158,8 @@ export function useChatSession(deps: ChatSessionDeps) {
   // 多元数据插入：插画开 且 本作品已预设图片/视频 ComfyUI 模板 → 高潮点走异步 ComfyUI 闭环（后端发 illustrate_request）
   const mediaPreset = settings.mediaInsert?.[repo?.id || ""];
   const comfyIllustrate = !!(settings.illustrate && (mediaPreset?.templateId || mediaPreset?.videoTemplateId));
+  // 音频对白配音：剧情自动生成开 且 预设了音频模板（IndexTTS）→ 后端发 audio_request，前端逐角色配音
+  const comfyAudio = !!(settings.illustrate && mediaPreset?.enableAudio && mediaPreset?.audioTemplateId);
   const promptProfile = normalizePromptProfile(mediaPreset?.promptProfile);
   const cardNames = repo?.cardNames?.length ? repo.cardNames : (repo?.cardName ? [repo.cardName] : []);
   const openingCardName = repo?.openingCardName || repo?.cardName || cardNames[0] || "";
@@ -173,21 +186,32 @@ export function useChatSession(deps: ChatSessionDeps) {
   // 绑定的独立世界书（worldbookDir 下的 .json 名）：与卡内嵌世界书合并注入（后端处理）。
   const worldbookDir = settings.worldbookDir || "";
   const worldbookName = repo?.worldbookName || "";
-  const [wfProgress, setWfProgress] = useState<number | null>(null);  // 工作流实时进度%（WS，null=无）
-  const [wfNode, setWfNode] = useState<string>("");  // 当前执行的节点显示名（WS executing 消息）
+  const [wfProgress, setWfProgress] = useState<number | null>(persistedWfProgress.current);  // 工作流实时进度%（WS，null=无），跨导航持久化
+  const [wfNode, setWfNode] = useState<string>(persistedWfNode.current);  // 当前执行的节点显示名（WS executing 消息），跨导航持久化
+  // 包装 setter：同时更新持久化 ref，确保切换页面回来后进度不丢失
+  const updateWfProgress = (v: number | null) => { persistedWfProgress.current = v; setWfProgress(v); };
+  const updateWfNode = (v: string) => { persistedWfNode.current = v; setWfNode(v); };
   const [regeneratingIds, setRegeneratingIds] = useState<Set<string>>(new Set());
   const wsUnsubRef = useRef<(() => void) | null>(null);  // 当前进度 WS 退订
+  const activePromptQueue = useRef<string[]>([]);  // FIFO 队列：首个 = 当前显示进度条；多个 = 排队中
   const abortRef = useRef<ActiveAgentStream | null>(null);  // 仅显式停止才中断；导航离开保持后台运行
   // React reducer 要到下一次渲染才可见；同步 ref 封住连续点击/回车的同一帧竞态。
   const agentBusyRef = useRef(false);
   const bgRunningRef = useRef(false);  // 后台任务进行中：此时后端拥有快照写权，前端不抢写以免覆盖
   // 慢守望阶段（releaseBusy 后仍在轮询）：wfRunning 已 false，但仍需显示停止键
   const [slowWatchPromptId, setSlowWatchPromptId] = useState<string | null>(null);
+  // 工作流上传/提交阶段（点击「运转工作流」→ submitGraph 返回前）：按钮显示「上传中…」
+  const [uploadingWf, setUploadingWf] = useState(false);
   // 对话线 id = 仓库 id（首页用 "home"）：后端按此落盘多轮记忆与 RAG 知识库
   const threadId = repo?.id || "home";
+  // 切换仓库/线程时重置上传状态（submitGraph 挂起后切线程不会残留 true）
+  useEffect(() => { setUploadingWf(false); }, [threadId]);
+  // 队列任务完成回调：headless 执行的回复落盘后，用它刷新对话区（定义在下方 reloadFromSnapshot，
+  // 用 ref 转发避免 hook 顺序问题）。
+  const reloadFromSnapshotRef = useRef<(() => void) | undefined>(undefined);
   const {
     queued, enqueue: enqueueQueued, remove: removeQueued,
-  } = useChatAgentQueue(threadId);
+  } = useChatAgentQueue(threadId, reloadFromSnapshotRef);
   const createAgentInvocation = (
     message: string,
     images: string[],
@@ -228,6 +252,7 @@ export function useChatSession(deps: ChatSessionDeps) {
     worldbookName,
     illustrate: settings.illustrate,
     comfyIllustrate,
+    comfyAudio,
     promptProfile,
     appearanceSource,
     characterBaseImages,
@@ -274,7 +299,7 @@ export function useChatSession(deps: ChatSessionDeps) {
   const loadedRef = useRef(false);  // 标记本仓库消息已加载，避免初始空数组覆盖已存记录
   const snapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);  // 后端快照防抖
   const pushBot = (text: string) =>
-    setMessages((m) => [...m, { id: crypto.randomUUID(), role: "assistant", text }]);
+    setMessages((m) => [...m, { id: crypto.randomUUID(), role: "assistant", text, system: true }]);
   // 通用：追加一条任意消息（多 Agent 模式用，可带 user 角色 / 图片）
   const pushMsg = (msg: Partial<ChatMessage>) =>
     setMessages((m) => [...m, { id: crypto.randomUUID(), role: "assistant", text: "", ...msg } as ChatMessage]);
@@ -379,7 +404,10 @@ export function useChatSession(deps: ChatSessionDeps) {
         if (!alive) return;
         if (snap.items && snap.items.length > 0) {
           const snapshotMessages = restoreSubmittedMediaSlots(
-            snap.items as ChatMessage[], workflowRuntime.list(),
+            (snap.items as ChatMessage[]).map((m) => m.inspiration
+              ? { ...m, inspiration: normalizeInspirationCard(m.inspiration as unknown as Record<string, unknown>) }
+              : m),
+            workflowRuntime.list(),
           );
           const pruned = pruneUnsubmittedMediaSlots(snapshotMessages);
           let restoredMessages = pruned.messages;
@@ -541,6 +569,18 @@ export function useChatSession(deps: ChatSessionDeps) {
     };
     setMessages((m) => [...m, card]);
     setShowPicker(false);
+    // ★ 无论 /w 命令还是模板选择器都派发：画布（挂载时由 CanvasStageFlow 消费，未挂载由 ChatView 兜底
+    //   写 globalPendingToolCreates，切画布时消费）同步创建 workflow-tool 工具卡——否则对话模式 /w
+    //   建的卡在画布模式永远看不到（根因：事件只在选择器路径派发过）。
+    try {
+      window.dispatchEvent(new CustomEvent("laf-canvas-workflow-tool", {
+        detail: {
+          templateId: t.id,
+          templateName: t.name,
+          estimatedNodeCount: (t.node_order || []).length,
+        },
+      }));
+    } catch { /* 非关键事件，失败不影响对话流 */ }
   };
 
   const updateCardDraft = (msgId: string, draftGraph: unknown) =>
@@ -583,7 +623,8 @@ export function useChatSession(deps: ChatSessionDeps) {
     r: GenResult, pendingItem: PendingGeneration,
   ): Promise<boolean> => {
     const best = pickBestText(r.texts);
-    if ((r.images?.length || 0) === 0 && (r.videos?.length || 0) === 0 && !best) return false;
+    if ((r.images?.length || 0) === 0 && (r.videos?.length || 0) === 0
+        && (r.audios?.length || 0) === 0 && !best) return false;
     const promptId = pendingItem.prompt_id;
       const owner = pendingItem.owner || {
         threadId, repoId: repo?.id || "home", outputDir: settings.outputDir,
@@ -602,11 +643,15 @@ export function useChatSession(deps: ChatSessionDeps) {
         prompt: generationPrompt,
         images: r.images || [],
         videos: r.videos || [],
+        audios: r.audios || [],
         outputDir: owner.outputDir,
         comfyuiUrl,
         embed: embedModel,
         chat,
         regeneration,
+        templateName: savedRegeneration?.kind === "workflow" ? savedRegeneration.templateName : undefined,
+        modelName: savedRegeneration?.kind === "workflow" ? savedRegeneration.modelName : undefined,
+        loraNames: savedRegeneration?.kind === "workflow" ? savedRegeneration.loraNames : undefined,
         target,
       });
       if (!durableFinalizeSucceeded(result)) {
@@ -679,8 +724,8 @@ export function useChatSession(deps: ChatSessionDeps) {
   const stopProgress = () => {
     wsUnsubRef.current?.();
     wsUnsubRef.current = null;
-    setWfProgress(null);
-    setWfNode("");
+    updateWfProgress(null);
+    updateWfNode("");
   };
 
   const discardFailedIllustration = (
@@ -703,7 +748,8 @@ export function useChatSession(deps: ChatSessionDeps) {
     finalize: finalizeGeneration,
     completed: (result, pending, produced) => {
       if (!produced && (result.images?.length || 0) === 0
-          && (result.videos?.length || 0) === 0 && !pickBestText(result.texts)) {
+          && (result.videos?.length || 0) === 0 && (result.audios?.length || 0) === 0
+          && !pickBestText(result.texts)) {
         if (pending.target) discardFailedIllustration(
           pending.target.messageId, pending.target.slotId, "completed_without_media",
           "生成完成但没有媒体输出", pending.prompt_id,
@@ -711,9 +757,33 @@ export function useChatSession(deps: ChatSessionDeps) {
         else pushBot("生成完成，但没有输出（工作流未含 SaveImage / 视频合成 / 文字输出节点）。");
       }
       if (!pending.target?.background) {
-        stopProgress();
-        setSlowWatchPromptId(null);
-        dispatch({ t: "workflowDone", promptId: pending.prompt_id });
+        // 出队
+        activePromptQueue.current = activePromptQueue.current.filter(id => id !== pending.prompt_id);
+        if (activePromptQueue.current.length === 0) {
+          stopProgress();
+          setSlowWatchPromptId(null);
+          dispatch({ t: "workflowDone", promptId: pending.prompt_id });
+        } else {
+          // 切换到下一个排队的任务
+          const nextId = activePromptQueue.current[0];
+          const nextPending = workflowRuntime.list().find(p => p.prompt_id === nextId);
+          if (nextPending) {
+            const nextUrl = comfyRegenerationUrl(nextPending.regeneration) || settings.comfyuiUrl;
+            const nextGraph = nextPending.regeneration?.kind === "workflow"
+              ? (nextPending.regeneration as WorkflowRegeneration).graph : null;
+            const nextLabel = (nid: string): string => {
+              try {
+                const node = (nextGraph as Record<string, { class_type?: string }>)?.[nid];
+                return node?.class_type ? `${node.class_type} (#${nid})` : `节点 #${nid}`;
+              } catch { return `节点 #${nid}`; }
+            };
+            wsUnsubRef.current?.();
+            wsUnsubRef.current = subscribeProgress(nextUrl, nextId, {
+              onProgress: (pct) => updateWfProgress(pct),
+              onNode: (nid) => updateWfNode(nextLabel(nid)),
+            });
+          }
+        }
       }
     },
     failed: (pending, stage, error) => {
@@ -721,9 +791,12 @@ export function useChatSession(deps: ChatSessionDeps) {
         pending.target.messageId, pending.target.slotId, stage, error, pending.prompt_id,
       );
       if (!pending.target?.background) {
-        stopProgress();
-        setSlowWatchPromptId(null);
-        dispatch({ t: "workflowDone", promptId: pending.prompt_id });
+        activePromptQueue.current = activePromptQueue.current.filter(id => id !== pending.prompt_id);
+        if (activePromptQueue.current.length === 0) {
+          stopProgress();
+          setSlowWatchPromptId(null);
+          dispatch({ t: "workflowDone", promptId: pending.prompt_id });
+        }
         pushBot(stage === "task_not_found"
           ? "⚠️ 出图任务已丢失（ComfyUI 可能已重启或队列被清空）。如需重新生图，请点工作流卡片的「运转工作流」。"
           : `生成失败：${error}`);
@@ -732,8 +805,11 @@ export function useChatSession(deps: ChatSessionDeps) {
     },
     released: (pending) => {
       if (pending.target?.background) return;
-      stopProgress();
-      dispatch({ t: "workflowDone", promptId: pending.prompt_id });
+      activePromptQueue.current = activePromptQueue.current.filter(id => id !== pending.prompt_id);
+      if (activePromptQueue.current.length === 0) {
+        stopProgress();
+        dispatch({ t: "workflowDone", promptId: pending.prompt_id });
+      }
       setSlowWatchPromptId(pending.prompt_id);
       pushBot("生成较复杂、仍在后台进行，出图后会自动载入（也可在 ComfyUI 面板看进度）。");
     },
@@ -742,7 +818,10 @@ export function useChatSession(deps: ChatSessionDeps) {
         pending.target.messageId, pending.target.slotId, "poll_timeout",
         "后台出图等待超时，可刷新后继续恢复", pending.prompt_id,
       );
-      else setSlowWatchPromptId(null);
+      else {
+        activePromptQueue.current = activePromptQueue.current.filter(id => id !== pending.prompt_id);
+        if (activePromptQueue.current.length === 0) setSlowWatchPromptId(null);
+      }
     },
   };
 
@@ -752,6 +831,7 @@ export function useChatSession(deps: ChatSessionDeps) {
     regeneration?: RegenerationSnapshot,
     target?: PendingGeneration["target"],
     prompt = "",
+    mediaType: "image" | "video" | "audio" = "image",
   ) => {
     const comfyuiUrl = comfyRegenerationUrl(regeneration) || settings.comfyuiUrl;
     if (!target?.background) dispatch({ t: "workflowStart", promptId });
@@ -764,18 +844,25 @@ export function useChatSession(deps: ChatSessionDeps) {
       } catch { return `节点 #${id}`; }
     };
     // 实时进度：直连 ComfyUI /ws（完成判定仍以下方轮询为准，WS 只驱动进度条）
+    // 队列：仅首个任务驱动进度条，后续任务排队（等前一个完成后再切换）
     if (!target?.background) {
-      stopProgress();
-      setWfProgress(0);
-      setWfNode("");
-      wsUnsubRef.current = subscribeProgress(comfyuiUrl, promptId, {
-        onProgress: (pct) => setWfProgress(pct),
-        onNode: (id) => setWfNode(nodeLabel(id)),
-      });
+      activePromptQueue.current.push(promptId);
+      if (activePromptQueue.current.length === 1) {
+        // 第一个任务：订阅 WS 驱动进度条
+        stopProgress();
+        updateWfProgress(0);
+        updateWfNode("");
+        wsUnsubRef.current = subscribeProgress(comfyuiUrl, promptId, {
+          onProgress: (pct) => updateWfProgress(pct),
+          onNode: (id) => updateWfNode(nodeLabel(id)),
+        });
+      }
+      // 非首个任务：不抢进度条，仅加入队列
     }
     workflowRuntime.start({
       promptId, comfyuiUrl, outputNodeIds, regeneration, target, prompt,
       owner: { threadId, repoId: repo?.id || "home", outputDir: settings.outputDir },
+      mediaType,
     }, workflowObserver);
   };
 
@@ -830,6 +917,15 @@ export function useChatSession(deps: ChatSessionDeps) {
       failSlot("configuration", loraConfigurationError);
       return;
     }
+    // V1.1 视频首帧底图：优先取「已完成插画」（本槽 > 最近一次），否则回退用户手动指定；
+    // 模板无图像口 → 纯文生视频（resolveVideoBaseImage 返回 undefined 且不拦截）。
+    const baseImageForUse = useVideo
+      ? resolveVideoBaseImage({
+          tpl, messageId, slotId,
+          messages: messagesRef.current,
+          manualBaseImage: baseImage || undefined,
+        })
+      : baseImage;
     let negativePrompt = preset.negativePrompt?.trim() || sceneSpec?.negative_prompt || "";
     if (sceneSpec?.profile_prompt && sceneSpec.profile === promptProfile) {
       prompt = sceneSpec.profile_prompt;
@@ -894,12 +990,23 @@ export function useChatSession(deps: ChatSessionDeps) {
     // 底图需先上传到 ComfyUI input 目录，取回可供 LoadImage 引用的文件名
     let uploadedImage = "";
     const needsImage = tpl.exposed.some((f) => workflowFieldBinding(f) === "base_image");
-    if (needsImage && baseImage) {
+    // V1.1 视频分支：模板声明图像口但拿不到底图 → 拦截（不空图提交图生视频工作流）
+    if (useVideo && needsImage && !baseImageForUse) {
+      failSlot("image_required", "视频模板需要首帧底图，但当前没有可用的已完成插画，请先出图或用预设指定底图");
+      return;
+    }
+    if (needsImage && baseImageForUse) {
       try {
-        const blob = await (await fetch(localViewUrl(baseImage))).blob();
-        const file = new File([blob], baseImage.split(/[\\/]/).pop() || "base.png", { type: blob.type || "image/png" });
+        const blob = await (await fetch(localViewUrl(baseImageForUse))).blob();
+        const file = new File([blob], baseImageForUse.split(/[\\/]/).pop() || "base.png", { type: blob.type || "image/png" });
         uploadedImage = (await uploadImage(file, settings.comfyuiUrl)).name;
-      } catch { /* 底图上传失败 → 退化为纯文生图，不阻断 */ }
+      } catch {
+        // 底图上传失败：图片分支退化为纯文生图；视频分支按文档终态失败（不重试乘法）
+        if (useVideo) {
+          failSlot("upload", "首帧底图上传 ComfyUI 失败");
+          return;
+        }
+      }
     }
     // 按 exposed 的隐藏 binding 组 values；提交 key 始终是“节点id.原字段名”。
     const latentSize = latentSizeFor(
@@ -910,6 +1017,9 @@ export function useChatSession(deps: ChatSessionDeps) {
     const values = illustrationTemplateValues(tpl.exposed, {
       prompt, negativePrompt, loraName, loraWeight, baseImage: uploadedImage,
       latentSize,
+      // V1.2 视频最小事实：时长/镜头 = 用户预设值（模板无 exposed binding 时自然忽略）；motion 已由后端透传
+      videoDuration: useVideo && preset.videoDurationHint ? preset.videoDurationHint : undefined,
+      videoCamera: useVideo ? preset.videoCamera : undefined,
     });
     try {
       const st = await comfyStatus(settings.comfyuiUrl);
@@ -917,8 +1027,10 @@ export function useChatSession(deps: ChatSessionDeps) {
         failSlot("comfyui_status", "ComfyUI 尚未启动");
         return;
       }
-      const loraStack = loras.map(({ name, weight }) => ({ name, weight }));
-      const loraMode = preset.loraMode || "single";
+      // V1.1 红线：视频模板 LoRA 不自动接线（loader 结构各异），只认模板自身暴露字段；
+      // 图片分支维持既有 loraStack 注入合同。
+      const loraStack = useVideo ? [] : loras.map(({ name, weight }) => ({ name, weight }));
+      const loraMode = useVideo ? "none" : (preset.loraMode || "single");
       const r = await submitWorkflow(
         chosenId, values, settings.comfyuiUrl, prompt, loraStack, loraMode,
       );
@@ -937,7 +1049,7 @@ export function useChatSession(deps: ChatSessionDeps) {
           chosenId, values, settings.comfyuiUrl, outputNodeIds, prompt, loraStack, loraMode,
         );
         setMessages((current) => bindMediaSlotPrompt(current, messageId, slotId, r.prompt_id!));
-        pollResult(r.prompt_id, outputNodeIds, regeneration, target, prompt);
+        pollResult(r.prompt_id, outputNodeIds, regeneration, target, prompt, useVideo ? "video" : "image");
       } else {
         failSlot("submit", "ComfyUI 没有返回任务 ID");
       }
@@ -945,11 +1057,88 @@ export function useChatSession(deps: ChatSessionDeps) {
       failSlot("submit", error instanceof Error ? error.message : "自动插画提交失败");
     }
   };
+  // 剧情对白音频化：后端发来台词分段（含 8 维情感向量），逐角色提交 IndexTTS 工作流。
+  // 每段台词独立一次运转（模型一次只认一个音色），完成后按角色分条聚合到楼层气泡。
+  const submitAudio = async (lines: AudioDialogueLine[], messageId: string) => {
+    const preset = settings.mediaInsert?.[repo?.id || ""];
+    const audioTemplateId = preset?.audioTemplateId;
+    if (!audioTemplateId) return;
+    const tpl = templates.find((t) => t.id === audioTemplateId);
+    if (!tpl) return;
+    // 未配置参考音轨的角色台词会静默跳过——明确提示一次，避免用户以为配音漏了
+    const skipped = skippedAudioSpeakers(preset, lines);
+    if (skipped.length > 0) {
+      onNotify?.(
+        `未配置音轨，已跳过配音：${skipped.join("、")}（在「媒体插入」设置里为角色配置音色）`,
+        "info",
+      );
+    }
+    const resolvable = resolvableAudioLines(preset, lines);
+    if (!resolvable.length) return;
+    const outputNodeIds = tpl.primary_output_node_id ? [tpl.primary_output_node_id] : [];
+
+    let index = 0;
+    for (const line of resolvable) {
+      const seq = index + 1;
+      const slotId = `audio-${messageId}-${index}`;
+      index += 1;
+      const voiceRef = voiceReferenceFor(preset, line.speaker)!;
+      // 音轨先上传 ComfyUI input，取回 LoadAudio 引用的文件名
+      let uploadedRef = "";
+      try {
+        const blob = await (await fetch(localViewUrl(voiceRef))).blob();
+        const file = new File(
+          [blob], voiceRef.split(/[\\/]/).pop() || "voice.wav",
+          { type: blob.type || "audio/wav" },
+        );
+        uploadedRef = (await uploadImage(file, settings.comfyuiUrl)).name;
+      } catch {
+        console.error("[auto-audio]", { threadId, messageId, stage: "upload_voice", speaker: line.speaker, voiceRef });
+        continue; // 单角色音轨上传失败不阻断其它角色
+      }
+      const values = audioTemplateValues(tpl.exposed, {
+        text: line.text,
+        reference: uploadedRef,
+        emotion: line.emotion,
+      });
+      // 追加按角色分条的 audio 槽（生成中占位：角色名 + 第几条/总数），完成后由 pollResult 填充音频 URL
+      setMessages((current) => current.map((m) => m.id === messageId ? {
+        ...m,
+        parts: [...(m.parts || []), {
+          type: "media-slot" as const, slotId, status: "pending" as const,
+          kind: "audio" as const, speaker: line.speaker, seq, total: resolvable.length,
+        }],
+      } : m));
+      try {
+        const r = await submitWorkflow(audioTemplateId, values, settings.comfyuiUrl, line.text, [], "none");
+        if (r.prompt_id) {
+          console.info("[auto-audio]", {
+            threadId, messageId, slotId, speaker: line.speaker,
+            promptId: r.prompt_id, valueKeys: Object.keys(values).sort(),
+          });
+          // 持久化音频生成日志（对齐插画 submitted trace），便于排查音色/情感/台词
+          void reportAudioSubmission({
+            threadId, repoId: repo?.id || threadId, messageId, slotId,
+            speaker: line.speaker, text: line.text, voiceRef,
+            templateId: audioTemplateId, promptId: r.prompt_id,
+            emotion: line.emotion, valueKeys: Object.keys(values).sort(),
+          }).catch(() => undefined);
+          pollResult(r.prompt_id, outputNodeIds, undefined, { messageId, slotId, background: true }, line.text, "audio");
+        } else {
+          console.error("[auto-audio]", { threadId, messageId, stage: "submit", speaker: line.speaker, error: "ComfyUI 没有返回任务 ID" });
+          setMessages((current) => dropMediaSlot(current, messageId, slotId));
+        }
+      } catch (error) {
+        console.error("[auto-audio]", { threadId, messageId, stage: "submit", speaker: line.speaker, error });
+        setMessages((current) => dropMediaSlot(current, messageId, slotId));
+      }
+    }
+  };
   // APPEND3_HERE
 
   // /s 启动：取最近一张已确认的工作流卡，用抓取到的画布工作流提交生成
+  // 支持队列：不锁运转按钮，多个任务依次提交到 ComfyUI 队列排队执行
   const runWorkflow = async (cardId?: string) => {
-    if (wfRunning || !!streamingId) return;  // 防重复提交：已有任务在跑时忽略
     const card = cardId
       ? messages.find((m) => m.id === cardId && m.workflow?.done)
       : [...messages].reverse().find((m) => m.workflow?.done);
@@ -984,14 +1173,24 @@ export function useChatSession(deps: ChatSessionDeps) {
       return;
     }
     try {
+      setUploadingWf(true);  // 点击后立即反馈：上传/提交阶段
       const r = await submitGraph(wf.capturedGraph, settings.comfyuiUrl);
-      pushBot(`已提交到 ComfyUI 生成（prompt_id: ${r.prompt_id}，${r.node_count} 个节点），正在运转工作流…`);
+      // 用 Toast 提示，不阻塞对话
+      const queueHint = wfRunning ? "（已加入 ComfyUI 队列，前序任务完成后自动执行）" : "";
+      pushBot(`已提交到 ComfyUI 生成（prompt_id: ${r.prompt_id}，${r.node_count} 个节点），正在运转工作流…${queueHint}`);
       const outputNodeIds = tpl?.primary_output_node_id ? [tpl.primary_output_node_id] : [];
+      // 真实提示词从画布工作流图提取（采样器 positive 链上的 CLIPTextEncode 文本），
+      // 不再用模板名当提示词——模板名/主模型/LoRA 是元数据，不塞进 prompt 字段。
+      const wfMeta = workflowGenMetadata(wf.templateName || "", wf.capturedGraph);
+      const wfPrompt = wfMeta.prompt || card.text || "";
       const regeneration = workflowRegenerationSnapshot(
-        wf.capturedGraph, settings.comfyuiUrl, outputNodeIds);
-      if (r.prompt_id) pollResult(r.prompt_id, outputNodeIds, regeneration);
+        wf.capturedGraph, settings.comfyuiUrl, outputNodeIds, wfPrompt,
+        wfMeta.templateName, wfMeta.modelName, wfMeta.loraNames);
+      if (r.prompt_id) pollResult(r.prompt_id, outputNodeIds, regeneration, undefined, wfPrompt);
     } catch (e) {
       pushBot(`启动失败：${(e as Error).message}`);
+    } finally {
+      setUploadingWf(false);  // 上传/提交结束（无论成败）；pollResult 已置 wfRunning
     }
   };
 
@@ -1145,6 +1344,11 @@ export function useChatSession(deps: ChatSessionDeps) {
       );
       return;
     }
+    // 剧情对白配音请求：逐角色提交 IndexTTS（不入气泡流，音频完成后按角色分条聚合）
+    if (event.type === "audio_request") {
+      void submitAudio(event.lines, botId);
+      return;
+    }
     // RAG 记忆库创建状态：右下角轻提示（创建中/成功/失败），不入气泡流
     if (event.type === "rag_status") {
       emitRagStatus({ state: event.state, kind: event.kind, count: event.count });
@@ -1280,7 +1484,7 @@ export function useChatSession(deps: ChatSessionDeps) {
     setMessages((current) => applyRouteChoice(current, selected));
 
     const botId = crypto.randomUUID();
-    setMessages((current) => [...current, { id: botId, role: "assistant", text: "" }]);
+    setMessages((current) => [...current, { id: botId, role: "assistant", text: "", route }]);
     dispatch({ t: "agentStart", botId });
     const onDone = (err?: string) => {
       dispatch({ t: "agentDone", botId });
@@ -1328,7 +1532,8 @@ export function useChatSession(deps: ChatSessionDeps) {
       const card = await fetchInspiration(query, chat, settings.proxyEnabled ? settings.proxyUrl : "");
       setMessages((ms) => ms.map((m) => m.id === loadId
         ? { id: m.id, role: "assistant", text: "",
-            inspiration: { query: card.query, prompt: card.prompt, tags: card.tags || [], sources: card.sources || [] } }
+            inspiration: { title: card.title, content: card.content, sources: card.sources || [],
+                           images: card.images || [], selected: card.selected || [] } }
         : m));
     } catch (e) {
       setMessages((ms) => ms.map((m) => m.id === loadId
@@ -1516,9 +1721,10 @@ export function useChatSession(deps: ChatSessionDeps) {
       historyRuntime.replace((snap.items || []) as ChatMessage[], false);
     } catch { /* 拉取失败保持当前视图，用户可刷新 */ }
   };
+  reloadFromSnapshotRef.current = reloadFromSnapshot;
 
   return {
-    messages, streamingId, wfRunning, slowWatchPromptId, wfProgress, wfNode, queued, regeneratingIds,
+    messages, streamingId, wfRunning, uploadingWf, slowWatchPromptId, wfProgress, wfNode, queued, regeneratingIds,
     send, runCommand, pushBot, pushMsg,
     actOnPromptApproval, actOnRouteChoice, regenerateResult,
     pickTemplate, runWorkflow, updateCardDraft, markCardDone, markCardReopen,

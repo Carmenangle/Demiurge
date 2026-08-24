@@ -91,12 +91,16 @@ def _auto_tags(prompt: str, tags: str) -> list[str]:
 
 def index_generation(repo_id: str, cfg: EmbedConfig,
                      prompt: str, tags: str = "", image_url: str = "",
-                     created_at: int | None = None, description: str = "") -> None:
+                     created_at: int | None = None, description: str = "",
+                     template_name: str = "", model_name: str = "",
+                     lora_names: str = "") -> None:
     """生图完成后入库：提示词 + 标签合为一条文档，附图片URL元数据。写入本仓库库。
 
     只要有图片就入库——智能体出图常无提示词文本，此时用占位文本嵌入，
     避免因文本为空而整张图被丢弃（资产库会漏图）。
     标签同时结构化存入 metadata.tags（逗号串），供资产库标签展示/搜索/增删。
+    template_name / model_name / lora_names 为工作流生成元数据（逗号分隔），
+    供画布卡片展示「用哪个模板/主模型/LoRA 生成的」。
     """
     text = "\n".join(t for t in [prompt, tags, description] if t and t.strip())
     if not text.strip() and not (image_url or "").strip():
@@ -104,10 +108,6 @@ def index_generation(repo_id: str, cfg: EmbedConfig,
     embed_text = text if text.strip() else "生成图片"  # 无提示词时用占位文本嵌入
     tag_list = _auto_tags(prompt, tags)
     store = _store(_repo_collection(repo_id), cfg)
-    # 幂等 id：同一仓库同一张图用确定性 id，Chroma 相同 id 覆盖而非新增。
-    # 这是防重复的最后一道闸——前端/后端/后台线程任何一条路径重复入库都不会产生多条
-    # （前端去重只在内存 ref，切仓库/刷新后失效，故必须在入库层兜底）。
-    # 无 image_url（纯文本记录）才回退随机 id。
     img = (image_url or "").strip()
     doc_id = ("gen-" + hashlib.sha1(f"{repo_id}|{img}".encode("utf-8")).hexdigest()
               if img else str(uuid.uuid4()))
@@ -116,8 +116,9 @@ def index_generation(repo_id: str, cfg: EmbedConfig,
                  metadata={"kind": "generation", "image_url": image_url or "",
                            "repo_id": repo_id or "", "tags": ",".join(tag_list),
                            "prompt": prompt or "", "description": description or "",
-                           # 权威排序键：入库毫秒时间戳。前端据此从新到旧，不再依赖文件名编号
-                           # （文件改名/删图都不影响排序）。历史记录无此字段时前端回退到文件名。
+                           "template_name": template_name or "",
+                           "model_name": model_name or "",
+                           "lora_names": lora_names or "",
                            "created_at": (created_at if created_at is not None
                                           else int(time.time() * 1000))})
     ], ids=[doc_id])
@@ -330,6 +331,9 @@ def _dump(collection: str, cfg: EmbedConfig) -> list[dict]:
             "prompt": meta.get("prompt", ""),
             "description": meta.get("description", ""),
             "repo_id": meta.get("repo_id", ""),
+            "template_name": meta.get("template_name", ""),
+            "model_name": meta.get("model_name", ""),
+            "lora_names": meta.get("lora_names", ""),
             "created_at": int(meta.get("created_at", 0) or 0),
         })
     return out
@@ -347,7 +351,9 @@ def list_docs(repo_id: str, cfg: EmbedConfig) -> list[dict]:
 def list_generations(repo_id: str, cfg: EmbedConfig) -> list[dict]:
     """列出某仓库的生成记录（kind=generation）。
 
-    返回 [{id, prompt, image_url, tags}]，供仓库详情页图片网格展示。tags 为字符串列表。
+    返回 [{id, prompt, image_url, tags, templateName, modelName, loraNames, ...}]，
+    供仓库详情页图片网格展示。字段用 camelCase，与前端 GenLike 契约一致，
+    否则画布详情面板的「模板/模型/LoRA」取不到值。
     """
     out: list[dict] = []
     for d in _dump(_repo_collection(repo_id), cfg):
@@ -359,6 +365,10 @@ def list_generations(repo_id: str, cfg: EmbedConfig) -> list[dict]:
         out.append({"id": d["id"], "repo_id": repo_id, "prompt": prompt,
                     "description": d.get("description", ""),
                     "image_url": d["image_url"], "tags": tags,
+                    "templateName": d.get("template_name", ""),
+                    "modelName": d.get("model_name", ""),
+                    # lora_names 在 metadata 存为逗号分隔字符串，读时拆为数组与前端 GenLike 类型一致
+                    "loraNames": [s for s in (d.get("lora_names", "") or "").split(",") if s.strip()],
                     "created_at": d.get("created_at", 0)})
     return out
 

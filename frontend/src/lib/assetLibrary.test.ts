@@ -7,7 +7,7 @@ const assetsView = readFileSync(new URL("../views/PlaceholderViews.tsx", import.
 
 describe("资产库删除与恢复合同", () => {
   it("删除资产记录时保留本机图片", () => {
-    expect(gallery).toContain("deleteDoc(g.id, rid, embed, false)");
+    expect(gallery).toContain("deleteDoc(g.id, rid, embed, removeFile)");
     expect(gallery).toContain("本机图片文件会保留");
   });
 
@@ -21,5 +21,22 @@ describe("资产库删除与恢复合同", () => {
     expect(gallery).toContain("searchGenerations");
     expect(gallery).toContain("indexVisualGenerations");
     expect(gallery).not.toContain("appendMessage");
+  });
+
+  it("发送至对话框（仅图片）与发送至对话（完整配方）两个按钮并存且走 chatAppend", () => {
+    // 修复后的 AppBody 不再传空函数：AssetsView 接收两个动作
+    expect(assetsView).toContain("onSendToChat");
+    expect(assetsView).toContain("onSendAsRecipe");
+    // RepoGallery 两个按钮：gallery-send（对话框）+ gallery-send-recipe（对话）
+    expect(gallery).toContain("gallery-send-recipe");
+    expect(gallery).toContain("发送至对话框");
+    expect(gallery).toContain("发送至对话");
+    // 发送动作由上层（AppBody）通过 chatAppend 落盘，RepoGallery 本身不直接调用
+    expect(gallery).not.toContain("chatAppend");
+  });
+
+  it("发送至对话按钮仅在提供 onSendAsRecipe 时显示（向后兼容）", () => {
+    expect(gallery).toContain("enhanced && onSendAsRecipe &&");
+    expect(gallery).toContain("enhanced && onSendToChat &&");
   });
 });

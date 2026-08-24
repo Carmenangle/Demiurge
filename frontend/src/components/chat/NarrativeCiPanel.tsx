@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { ShieldCheck } from "lucide-react";
 import {
   listNarrativeCi,
   NARRATIVE_CI_CODES,
@@ -73,12 +74,11 @@ export function NarrativeCiPanel({ outputDir, repoId }: NarrativeCiPanelProps) {
     <div className="nci-panel">
       <button
         type="button"
-        className="nci-toggle"
+        className={`btn icon-only nci-toggle ${open ? "nci-active" : ""}`}
         onClick={() => setOpen((v) => !v)}
-        title="剧情一致性诊断（非阻断）"
+        title="剧情一致性诊断（非阻断）：每回合检查正文矛盾/伏笔断裂/设定漂移，可标记已修复/伏笔/设定变更/接受"
       >
-        <span className="nci-dot" aria-hidden="true" />
-        <span>Narrative CI</span>
+        <ShieldCheck size={15} />
         {openCount > 0 && <span className="nci-count">{openCount}</span>}
       </button>
 

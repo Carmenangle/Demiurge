@@ -14,7 +14,7 @@ describe("generated wire contract", () => {
       historyPerRole: 6, history: [], characterDir: "", cardName: "", cardNames: [],
       openingCardName: "", presetDir: "", presetName: "", userName: "", userPersona: "",
       personaBound: false, worldbookDir: "", worldbookName: "", illustrate: false,
-      comfyIllustrate: false, promptProfile: "anima", appearanceSource: "worldbook",
+      comfyIllustrate: false, comfyAudio: false, promptProfile: "anima", appearanceSource: "worldbook",
       characterBaseImages: {}, illustrationActorNames: [], styleBaseImage: "",
     } satisfies AgentInvocation;
     const body = agentInvocationBody(request);

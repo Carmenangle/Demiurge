@@ -9,6 +9,8 @@ export interface PendingGeneration {
   target?: { messageId: string; slotId: string; background: true };
   prompt?: string;
   owner?: { threadId: string; repoId: string; outputDir: string };
+  /** V1.3：媒体类型驱动超时合同（视频数分钟~十分钟级，独立于图片放宽） */
+  mediaType?: "image" | "video" | "audio";
 }
 
 export interface WorkflowWatchInput {
@@ -19,6 +21,7 @@ export interface WorkflowWatchInput {
   target?: PendingGeneration["target"];
   prompt?: string;
   owner?: PendingGeneration["owner"];
+  mediaType?: PendingGeneration["mediaType"];
 }
 
 export interface WorkflowWatchObserver {
@@ -40,6 +43,7 @@ export function registerPending(
   pending: readonly PendingGeneration[], promptId: string, createdAt: number,
   outputNodeIds: string[] = [], regeneration?: RegenerationSnapshot,
   target?: PendingGeneration["target"], prompt = "", owner?: PendingGeneration["owner"],
+  mediaType?: PendingGeneration["mediaType"],
 ): PendingGeneration[] {
   return [
     ...pending.filter((item) => item.prompt_id !== promptId),
@@ -50,6 +54,7 @@ export function registerPending(
       ...(target ? { target } : {}),
       ...(prompt ? { prompt } : {}),
       ...(owner ? { owner } : {}),
+      ...(mediaType ? { mediaType } : {}),
     },
   ];
 }
@@ -65,14 +70,72 @@ export function pendingResumeAction(
   return now - item.createdAt > 30 * 60 * 1000 ? "expire" : "inspect";
 }
 
-export function pollSchedule(tries: number): { releaseBusy: boolean; delayMs: number | null } {
-  return { releaseBusy: tries === 150, delayMs: tries < 150 ? 2000 : tries < 210 ? 15000 : null };
+export function pollSchedule(
+  tries: number, mediaType: "image" | "video" | "audio" = "image",
+): { releaseBusy: boolean; delayMs: number | null } {
+  // V1.3：视频/音频超时合同独立于图片——图片 5min 释放忙碌 / 20min 上限；
+  // 视频/音频放宽为 15min 释放忙碌 / 60min 上限（450×2s + 180×15s = 15min + 45min = 60min）。
+  const releaseTries = mediaType === "video" || mediaType === "audio" ? 450 : 150;   // 2s 间隔：15min / 5min
+  const hardTries = mediaType === "video" ? 630 : 210;      // 之后 15s：上限 60min / 20min
+  return {
+    releaseBusy: tries === releaseTries,
+    delayMs: tries < releaseTries ? 2000 : tries < hardTries ? 15000 : null,
+  };
 }
 
 export function generationResultAction(status: string): "complete" | "fail" | "poll" {
   if (status === "completed") return "complete";
   if (status === "failed") return "fail";
   return "poll";
+}
+
+export type WorkflowPollOutcome =
+  | { kind: "complete"; result: GenResult }
+  | { kind: "failed"; error: string }
+  | { kind: "still_running" };
+
+/**
+ * 轮询 ComfyUI 出图结果直到完成/失败/硬超时。
+ * 超时合同复用 pollSchedule：图片 20 分钟（150×2s + 60×15s）、视频 60 分钟（450×2s + 180×15s）。
+ * 完成判定只看 /history status；WS 实时进度另有 subscribeProgress 驱动，不在此处。
+ * still_running：到达硬超时仍 running/pending（ComfyUI 后台仍在跑，调用方不得擅自删除占位节点）。
+ */
+export async function pollWorkflowResult(
+  promptId: string,
+  comfyuiUrl: string,
+  mediaType: "image" | "video" = "image",
+  opts: {
+    fetchResult?: typeof getResult;
+    schedule?: (callback: () => void, delayMs: number) => unknown;
+  } = {},
+): Promise<WorkflowPollOutcome> {
+  const fetchResult = opts.fetchResult || getResult;
+  const schedule = opts.schedule || ((callback, delayMs) => setTimeout(callback, delayMs));
+  let tries = 0;
+  let consecutiveNotFound = 0;
+  for (;;) {
+    tries += 1;
+    try {
+      const result = await fetchResult(promptId, comfyuiUrl, []);
+      if (result.status === "completed") return { kind: "complete", result };
+      if (result.status === "failed") {
+        return { kind: "failed", error: result.error || "ComfyUI 工作流执行失败" };
+      }
+      if (result.status === "not_found") {
+        consecutiveNotFound += 1;
+        if (consecutiveNotFound >= 5) {
+          return { kind: "failed", error: "出图任务已丢失（ComfyUI 可能已重启）" };
+        }
+      } else {
+        consecutiveNotFound = 0;
+      }
+    } catch {
+      // ComfyUI 暂不可达（重启中/忙）：继续轮询，硬超时兑底
+    }
+    const sched = pollSchedule(tries, mediaType);
+    if (sched.delayMs === null) return { kind: "still_running" };
+    await new Promise<void>((resolve) => schedule(resolve, sched.delayMs!));
+  }
 }
 
 export const notFoundPollAction = (count: number): "retry" | "fail" => count >= 5 ? "fail" : "retry";
@@ -90,8 +153,14 @@ export function shouldFinalize(
 export function durableFinalizeSucceeded(result: {
   durable: boolean;
   images: readonly { persisted: boolean; snapshotted: boolean }[];
+  videos?: readonly { persisted: boolean; snapshotted: boolean }[];
+  audios?: readonly { persisted: boolean; snapshotted: boolean }[];
 }): boolean {
-  return !result.durable || result.images.every((item) => item.persisted && item.snapshotted);
+  // V1.3：视频结果的 media 在 videos（images 为空数组）——合并后统一校验，杜绝 undefined.every 抛错。
+  // 注意：durable 且 media 为空时（如产物全在 temp 尚未持久化）应返回 false，
+  // 而非旧代码 [].every() 的空真→成功。caller 可据此决定等待或重试。
+  const media = [...(result.images || []), ...(result.videos || []), ...(result.audios || [])];
+  return !result.durable || (media.length > 0 && media.every((item) => item.persisted && item.snapshotted));
 }
 
 export class WorkflowGenerationRuntime {
@@ -123,7 +192,7 @@ export class WorkflowGenerationRuntime {
   track(input: WorkflowWatchInput): PendingGeneration {
     const next = registerPending(
       this.list(), input.promptId, this.now(), input.outputNodeIds,
-      input.regeneration, input.target, input.prompt, input.owner,
+      input.regeneration, input.target, input.prompt, input.owner, input.mediaType,
     );
     this.write(next);
     return next.find((item) => item.prompt_id === input.promptId)!;
@@ -178,7 +247,7 @@ export class WorkflowGenerationRuntime {
       } catch {
         // ComfyUI may be temporarily unavailable; retain the task and keep watching.
       }
-      const next = pollSchedule(tries);
+      const next = pollSchedule(tries, pending.mediaType);
       if (next.releaseBusy) observer.released(pending);
       if (next.delayMs === null) observer.timedOut(pending);
       else this.schedule(tick, next.delayMs);

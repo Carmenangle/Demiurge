@@ -927,7 +927,7 @@ def test_roleplay状态块里的user宏未设人设时回退我(monkeypatch):
                         lambda ctx, text: (_Deps(), 1, 0.0, "\n\n【当前状态】\nLyra·对{{user}}态度: 好奇"))
     monkeypatch.setattr(ag, "_agency_propose", lambda ctx, deps, aff, wb, text="": ("", False))
     monkeypatch.setattr(ag, "_agency_writeback",
-                        lambda ctx, deps, reply, turn, aff, lost: (reply, [], {}))
+                        lambda ctx, deps, reply, turn, aff, lost: (reply, [], {}, {}))
     monkeypatch.setattr(ag, "_resolve_preset",
                         lambda ctx, wb, **k: ([], None, False, [], []))
     monkeypatch.setattr(ag, "_resolve_worldbook", lambda ctx, q: "")
@@ -1067,7 +1067,7 @@ def test_comfy高潮提取失败时把中文正文作为Profile场景源而非�
     monkeypatch.setattr(ra, "maybe_summarize", lambda *a, **k: None)
     monkeypatch.setattr(ra, "maybe_curate", lambda *a, **k: 0)
 
-    clean, images, request = ag._agency_writeback(
+    clean, images, request, _audio = ag._agency_writeback(
         _ctx(
             repo_id="work", thread_id="work", card_name="白给谷", scene="nsfw",
             comfy_illustrate=True, persona="银发、蓝眼", history=[], proxy="",
@@ -1124,7 +1124,7 @@ def test_画面主体是用户时不得从状态栏借用在场角色LoRA(monkey
     )
     ctx["_illustration_visual_profiles"] = "虞妙玥：【外貌】墨发，暗红美眸。"
 
-    _, _, request = ag._agency_writeback(
+    _, _, request, _audio = ag._agency_writeback(
         ctx, deps, reply, turn=8, affinity=10.0, lost=False,
         user_text="去打开牢门",
     )
@@ -1151,7 +1151,7 @@ def test_comfy首个用户回合即使已有开场白也兜底生成插画(monke
     monkeypatch.setattr(character_state, "load_state", lambda *a, **k: {})
     monkeypatch.setattr(ra, "_narr", lambda *a, **k: "")
 
-    clean, images, request = ag._agency_writeback(
+    clean, images, request, _audio = ag._agency_writeback(
         _ctx(
             repo_id="work", thread_id="work", card_name="塞西莉亚",
             scene="conflict", comfy_illustrate=True,
@@ -1205,7 +1205,7 @@ def test_首轮隐藏思考中的成人词不会污染收养开局插画(monkeyp
         "<content>塞西莉亚接受了拒绝，俯身将幽影徽章留在长凳上。</content>"
     )
 
-    clean, images, request = ag._agency_writeback(
+    clean, images, request, _audio = ag._agency_writeback(
         _ctx(
             repo_id="work", thread_id="work", card_name="塞西莉亚",
             scene="conflict", comfy_illustrate=True,
@@ -1259,7 +1259,7 @@ def test_非首轮新角色登场以外貌段为锚点触发插画(monkeypatch, 
         + appearance + "\n\n" + action + "\n</content>"
     )
 
-    _, images, request = ag._agency_writeback(
+    _, images, request, _audio = ag._agency_writeback(
         _ctx(
             repo_id="work", thread_id="work", card_name="神权大陆",
             scene="conflict", comfy_illustrate=True, persona="",
@@ -1303,7 +1303,7 @@ def test_首轮只有未闭合隐藏思考时不提交插画(monkeypatch, tmp_pa
     monkeypatch.setattr(character_state, "load_state", lambda *a, **k: {})
     monkeypatch.setattr(ra, "_narr", lambda *a, **k: "")
 
-    _, images, request = ag._agency_writeback(
+    _, images, request, _audio = ag._agency_writeback(
         _ctx(
             repo_id="work", thread_id="work", card_name="塞西莉亚",
             scene="conflict", comfy_illustrate=True,
@@ -1339,7 +1339,7 @@ def test_supervisor误判且主模型漏计划时明确成人剧情仍触发生�
     monkeypatch.setattr(character_state, "load_state", lambda *a, **k: {})
     monkeypatch.setattr(ra, "_narr", lambda *a, **k: "")
 
-    clean, images, request = ag._agency_writeback(
+    clean, images, request, _audio = ag._agency_writeback(
         _ctx(
             repo_id="work", thread_id="work", card_name="白给谷", scene="dialogue",
             comfy_illustrate=True, persona="black hair, red eyes", history=[], proxy="",
@@ -1385,7 +1385,7 @@ def test_普通剧情漏画面计划时自动插画仍发出高潮请求(monkeyp
         ra, "_narr", lambda _state, key: "冷倾雪" if key == "在场" else "",
     )
 
-    clean, images, request = ag._agency_writeback(
+    clean, images, request, _audio = ag._agency_writeback(
         _ctx(
             repo_id="work", thread_id="work", card_name="白给谷", scene="dialogue",
             comfy_illustrate=True, history=[{"role": "user", "content": "上一轮"}],
@@ -1427,7 +1427,7 @@ def test_本地高潮降级从状态栏在场恢复角色并选择角色画幅(m
         ra, "_narr", lambda _state, key: "冷倾雪" if key == "在场" else "",
     )
 
-    _, _, request = ag._agency_writeback(
+    _, _, request, _audio = ag._agency_writeback(
         _ctx(
             repo_id="work", thread_id="work", card_name="白给谷", scene="dialogue",
             comfy_illustrate=True, history=[], proxy="", appearance_source="worldbook",
@@ -1470,7 +1470,7 @@ def test_comfy采用主生成高潮计划并保留指定锚点(monkeypatch, tmp_
         '"prompt":"lightning, ruined hall","motion":2}</illustration>'
     )
 
-    clean, images, request = ag._agency_writeback(
+    clean, images, request, _audio = ag._agency_writeback(
         _ctx(repo_id="work", card_name="白给谷", scene="dialogue", comfy_illustrate=True),
         deps, reply, turn=2, affinity=10.0, lost=False,
     )
@@ -1507,7 +1507,7 @@ def test_anima缺少同轮成稿时本地编译且不再请求独立Profile(monk
         '"motion":2}</illustration>'
     )
 
-    _, _, request = ag._agency_writeback(
+    _, _, request, _audio = ag._agency_writeback(
         _ctx(
             repo_id="work", card_name="白给谷", scene="climax", comfy_illustrate=True,
             prompt_profile="anima_tags", appearance_source="worldbook",
@@ -1544,7 +1544,7 @@ def test_多人高潮已有一名合法角色时仍从正文补齐其余在场�
         '"prompt":"2women, gripping wrist, walking through doorway","motion":1}</illustration>'
     )
 
-    _, _, request = ag._agency_writeback(
+    _, _, request, _audio = ag._agency_writeback(
         _ctx(
             repo_id="work", card_name="白给谷", scene="climax", comfy_illustrate=True,
             appearance_source="worldbook",
@@ -1587,7 +1587,7 @@ def test_主模型漏插画计划时外貌资料不得污染当前目标角色(
         f"{target}：【外貌】{target}专属外貌锚点"
     )
 
-    _, _, request = ag._agency_writeback(
+    _, _, request, _audio = ag._agency_writeback(
         ctx, deps, "<content>我不能协助这项请求。</content>",
         turn=2, affinity=10.0, lost=False, user_text=f"本轮只描写{target}",
     )
@@ -1618,7 +1618,7 @@ def test_高潮正文单人优先于用户旧角色并只保留该角色外貌(m
         "虞妙玥：【外貌】虞妙玥专属外貌锚点"
     )
 
-    _, _, request = ag._agency_writeback(
+    _, _, request, _audio = ag._agency_writeback(
         ctx, deps, "<content>高潮画面里，虞妙玥独自跪倒在石阶前。</content>",
         turn=2, affinity=10.0, lost=False, user_text="冷倾雪刚才已经离开",
     )
@@ -1650,7 +1650,7 @@ def test_高潮正文双人保留两份外貌供多角色LoRA串联(monkeypatch,
         "冷倾雪：【外貌】冷倾雪专属外貌锚点"
     )
 
-    _, _, request = ag._agency_writeback(
+    _, _, request, _audio = ag._agency_writeback(
         ctx, deps,
         "<content>高潮画面里，冷倾雪扶住虞妙玥，两人一同跌坐在石阶前。</content>",
         turn=2, affinity=10.0, lost=False, user_text="继续",
@@ -1700,7 +1700,7 @@ def test_高潮人物只取最终锚点片段而不带入前文离场角色(monk
         '"prompt":"adult woman, kneeling on stone steps","motion":1}</illustration>'
     )
 
-    _, _, request = ag._agency_writeback(
+    _, _, request, _audio = ag._agency_writeback(
         ctx, deps, reply, turn=2, affinity=10.0, lost=False, user_text="继续",
     )
 
@@ -1731,7 +1731,7 @@ def test_comfy拒绝无效中文内联提示词并从场景本地兜底(monkeypa
         '"prompt":"rim light","profile_prompt":"主模型直接生成的完整画面描述。","motion":0}</illustration>'
     )
 
-    _, _, request = ag._agency_writeback(
+    _, _, request, _audio = ag._agency_writeback(
         _ctx(repo_id="work", card_name="白给谷", scene="dialogue", comfy_illustrate=True,
              prompt_profile="krea2"),
         deps, reply, turn=2, affinity=10.0, lost=False,
@@ -1769,7 +1769,7 @@ def test_主模型把动作峰值写成静态肖像时纠正锚点并本地重�
         '"motion":0}</illustration>'
     )
 
-    _, _, request = ag._agency_writeback(
+    _, _, request, _audio = ag._agency_writeback(
         _ctx(repo_id="work", card_name="塞西莉亚", scene="dialogue", comfy_illustrate=True),
         deps, reply, turn=2, affinity=10.0, lost=False,
     )
@@ -1799,7 +1799,7 @@ def test_主模型误把结尾外部钩子当高潮时从真实状态快照恢�
         '"prompt":"adult man, walking, mountain path, distant watchtower","motion":1}</illustration>'
     )
 
-    _, _, request = ag._agency_writeback(
+    _, _, request, _audio = ag._agency_writeback(
         _ctx(
             repo_id="work", thread_id="work", card_name="白给谷", scene="dialogue",
             comfy_illustrate=True, appearance_source="worldbook",
@@ -1838,7 +1838,7 @@ def test_高潮重定向后最终profile保留体位破损服装与状态地点(
         "【穿着】红莲纹饰华袍。"
     )
 
-    _, _, request = ag._agency_writeback(
+    _, _, request, _audio = ag._agency_writeback(
         ctx, deps, reply, turn=6, affinity=10.0, lost=False, user_text="继续",
     )
 
@@ -1881,7 +1881,7 @@ def test_高潮重定向保留主计划已验证角色而不依赖正文重复�
         '"prompt":"adult woman, black hair, sitting on stone","motion":0}</illustration>'
     )
 
-    _, _, request = ag._agency_writeback(
+    _, _, request, _audio = ag._agency_writeback(
         _ctx(
             repo_id="work", thread_id="work", card_name="作品名", scene="climax",
             comfy_illustrate=True, appearance_source="worldbook",
@@ -1924,7 +1924,7 @@ def test_RunContext含NPC目标增量时仍剥离控制块并发出插画请求(
         '"prompt":"black box, stone bench","profile_prompt":"完整画面提示词。","motion":0}</illustration>'
     )
 
-    clean, images, request = ag._agency_writeback(
+    clean, images, request, _audio = ag._agency_writeback(
         ctx, deps, reply, turn=2, affinity=0.0, lost=False,
     )
 
@@ -1953,7 +1953,7 @@ def test_插画后处理异常时不把内部控制块和提示词回退到正�
         '"prompt":"secret image prompt","motion":0}</illustration>'
     )
 
-    clean, images, request = ag._agency_writeback(
+    clean, images, request, _audio = ag._agency_writeback(
         _ctx(repo_id="work", card_name="角色", comfy_illustrate=True),
         deps, reply, turn=2, affinity=0.0, lost=False,
     )
@@ -1985,7 +1985,7 @@ def test_插画JSON被模型截断时清除提示词并把降级图片锚定高�
     ctx = _ctx(repo_id="work", card_name="神权大陆", comfy_illustrate=True)
     ctx["history"] = []
 
-    clean, images, request = ag._agency_writeback(
+    clean, images, request, _audio = ag._agency_writeback(
         ctx, deps, reply, turn=1, affinity=0.0, lost=False,
     )
 
@@ -2021,7 +2021,7 @@ def test_krea2高潮按nsfw语言边界校验(monkeypatch, tmp_path):
         f'"prompt":"rim light","profile_prompt":"{valid}","motion":0}}</illustration>'
     )
 
-    _, _, request = ag._agency_writeback(
+    _, _, request, _audio = ag._agency_writeback(
         _ctx(repo_id="work", card_name="白给谷", scene="climax", comfy_illustrate=True,
              prompt_profile="krea2"),
         deps, reply, turn=2, affinity=10.0, lost=False,
@@ -2057,7 +2057,7 @@ def test_主剧情同轮Krea完整提示词隐藏并直接进入scene_spec(monke
         f'"prompt":"turning, broken rail, dawn light","profile_prompt":"{profile}","motion":2}}</illustration>'
     )
 
-    clean, _, request = ag._agency_writeback(
+    clean, _, request, _audio = ag._agency_writeback(
         _ctx(repo_id="work", card_name="白给谷", scene="climax", comfy_illustrate=True,
              prompt_profile="krea2", illustration_actor_names=["冷倾雪"]),
         deps, reply, turn=2, affinity=10.0, lost=False,
@@ -2090,7 +2090,7 @@ def test_anima锚点纠正后保留带正文证据的Agent动作成稿(monkeypat
         'The silver-haired swordswoman jumps while pulling the broken sword free.","motion":2}</illustration>'
     )
 
-    _, _, request = ag._agency_writeback(
+    _, _, request, _audio = ag._agency_writeback(
         _ctx(repo_id="work", card_name="白给谷", scene="climax", comfy_illustrate=True,
              prompt_profile="anima_tags", illustration_actor_names=["冷倾雪"]),
         deps, reply, turn=2, affinity=10.0, lost=False,
@@ -2121,7 +2121,7 @@ def test_主剧情同轮Profile拒答时本地兜底且不把拒答交给前端(
         f'"prompt":"turning, broken rail, dawn light","profile_prompt":"{refusal}","motion":2}}</illustration>'
     )
 
-    clean, _, request = ag._agency_writeback(
+    clean, _, request, _audio = ag._agency_writeback(
         _ctx(repo_id="work", card_name="白给谷", scene="climax", comfy_illustrate=True,
              prompt_profile="krea2", illustration_actor_names=["冷倾雪"]),
         deps, reply, turn=2, affinity=10.0, lost=False,
@@ -2162,7 +2162,7 @@ def test_同轮Profile先经过与正文相同的AI输出正则(monkeypatch, tmp
         placement=[regex_engine.Placement.AI_OUTPUT],
     )]
 
-    _, _, request = ag._agency_writeback(
+    _, _, request, _audio = ag._agency_writeback(
         ctx, deps, reply, turn=2, affinity=10.0, lost=False,
     )
 
@@ -2314,7 +2314,7 @@ def test_roleplay先交付正文与插画但维护完成后才结束Agent回合(
         "_agency_writeback",
         lambda *args: ("最终正文", [], {
             "prompt": "完整提示词", "motion": 1, "actors": ["Lyra"], "anchor": "",
-        }),
+        }, {}),
     )
 
     def blocked_maintenance(*args):
