@@ -117,7 +117,7 @@ def extract_keywords(req: KeywordsRequest) -> dict[str, object]:
 
 
 class InspirationRequest(ChatModelReq):
-    query: str                     # 用户想找的灵感（服装/发型/画风等）
+    query: str                     # 用户想找的灵感（服装/发型/画风/角色设定/世界观等，主题不限）
     proxy_url: str = ""            # 联网搜索代理（访问外网）
     search_provider: str = ""      # 搜索源名称，空=注册表默认源
 

@@ -14,6 +14,24 @@ describe("inspiration insert text (M1.5 Agent 理解格式)", () => {
     expect(text).toContain("主流款式包括…");
   });
 
+  it("模板主题无关：不预设视觉/风格方向", () => {
+    const text = inspirationInsertText({ title: "三幕式结构", content: "开端发展高潮…" });
+    expect(text).toContain("【灵感参考 · 三幕式结构】");
+    expect(text).toContain("该主题的检索参考资料");
+    expect(text).not.toContain("风格/视觉/妆造/场景");
+  });
+
+  it("无图（纯文本卡）不声称「消息附带图片」", () => {
+    const text = inspirationInsertText({ title: "T", content: "C" });
+    expect(text).not.toContain("消息附带图片");
+  });
+
+  it("有封面图时附带「消息附带图片」说明", () => {
+    const text = inspirationInsertText({ title: "T", content: "C", imageUrl: "https://x/1.png" });
+    expect(text).toContain("消息附带图片");
+    expect(text).toContain("可结合图片理解主题");
+  });
+
   it("无标题时仍有「灵感参考」头与身份标记", () => {
     const text = inspirationInsertText({ content: "内容" });
     expect(text).toContain("【灵感参考】");
