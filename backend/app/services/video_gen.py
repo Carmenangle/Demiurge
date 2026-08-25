@@ -15,33 +15,19 @@ _POLL_MAX_TRIES = 60
 
 
 def _norm_url(base_url: str) -> str:
-    """归一视频生成端点。适用于所有 OpenAI 兼容形态：
-    填完整端点（含 /v1/video/generations、/v2/videos/generations 等）→ 原样使用；
-    填带版本前缀（…/v1、…/v2）→ 拼对应端点；
-    填纯站点根 → 默认 v1 布局（向后兼容），报错时提示填完整端点最稳。"""
-    url = (base_url or "").strip().rstrip("/")
-    low = url.lower()
-    if "/video/generations" in low or "/videos/generations" in low:
-        return url
-    if low.endswith("/v1"):
-        return url + "/video/generations"
-    if low.endswith("/v2"):
-        return url + "/videos/generations"
-    return url + "/v1/video/generations"
+    """视频生成端点：URL 由用户决定，代码不猜版本/单复数——原样使用。
+
+    不同 Provider 布局各异（/v1/video/generations、/v2/videos/generations、
+    自定义路径、seedance 这类 /v1 根形态等），代码不做拼接猜测；
+    用户填什么就是最终提交地址。空串返回空串，由 generate 统一报「未配置」。
+    """
+    return (base_url or "").strip().rstrip("/")
 
 
 def _norm_task_url(base_url: str, task_id: str) -> str:
-    """轮询任务状态地址：<完整端点>/<id>；填根/版本前缀时按 _norm_url 同规则拼。"""
+    """轮询任务状态地址：用户填的端点 + /<id>（OpenAI 兼容异步任务约定）。"""
     url = (base_url or "").strip().rstrip("/")
-    low = url.lower()
-    for tail in ("/video/generations", "/videos/generations"):
-        if low.endswith(tail):
-            return f"{url}/{task_id}"
-    if low.endswith("/v1"):
-        return url + "/video/generations/" + task_id
-    if low.endswith("/v2"):
-        return url + "/videos/generations/" + task_id
-    return url + "/v1/video/generations/" + task_id
+    return f"{url}/{task_id}"
 
 
 def _pick_video_url(payload: dict) -> str:

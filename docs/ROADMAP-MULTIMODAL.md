@@ -109,12 +109,12 @@ V1 与 M1 前半（M1.1–M1.3）互不依赖，可并行推进。
 **目标**：`video_gen.py` 支持参考图参数——**仅当 Provider 明确提供该能力**。
 
 > **进度（2026-08-25）**：已落地。真实接口形态 `<站点根>/v2/videos/generations`（v2 + 复数）确认后：
-> - **端点通用化**：`_norm_url`/`_norm_task_url` 支持填完整端点（任意版本/单复数原样用）、
->   带版本前缀（…/v1 → /v1/video/generations、…/v2 → /v2/videos/generations）、纯站点根（默认 v1，向后兼容）；
->   适用于任意 OpenAI 兼容站，不硬编码任何 Provider。
+> - **URL 由用户决定，代码不猜**：`_norm_url`/`_norm_task_url` 原样使用用户填的地址（不拼版本/单复数），
+>   适用于任意 OpenAI 兼容站（t8star 的 /v2/videos/generations、seedance 的 /v1 根形态等）；报错时提示填完整接口地址。
 > - **首帧图生视频**：`video_gen.generate(image=...)` 加参考图参数（data URI/URL/本地路径 → 内联 base64，
 >   local-view 地址绕过代理直读）；Agent 视频工具接入用户消息图片（`video_node` 取 `state["images"]`），
->   有图 → 图生视频，无图 → 文生视频。字段名按 OpenAI 兼容最常见形态用 `image`（Provider 不同改一处键名）。
+>   有图 → 图生视频，无图 → 文生视频。图片、文字参数如实提交，不做语义改写。字段名按 OpenAI 兼容
+>   最常见形态用 `image`（Provider 不同改一处键名）。
 > - **首尾帧未做**：尾帧来源（插画/用户指定/剧情目标帧）与字段名未定，并入 V1.5 一并设计。
 
 **预排问题**：

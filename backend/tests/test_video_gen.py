@@ -1,43 +1,34 @@
-"""video_gen 单测：URL 端点通用化（v1/v2、单复数、完整端点）+ V1.4 首帧参考图注入。"""
+"""video_gen 单测：URL 由用户决定（原样使用，不猜版本/单复数）+ V1.4 首帧参考图注入。"""
 
 import pytest
 
 from app.services import video_gen
 
 
-# ===== _norm_url：适用于所有 OpenAI 兼容形态 =====
+# ===== _norm_url：URL 靠用户决定，代码原样使用 =====
 
-def test_norm_url_complete_endpoints_used_as_is():
-    # 用户填完整端点（v1 单数 / v2 复数 / v1 复数）→ 原样使用，不猜版本
+def test_norm_url_used_as_is_no_guessing():
+    # 无论 v1/v2、单数/复数、自定义路径——用户填什么就是最终提交地址
     assert video_gen._norm_url("https://ai.t8star.org/v2/videos/generations") \
         == "https://ai.t8star.org/v2/videos/generations"
     assert video_gen._norm_url("https://x.com/v1/video/generations") \
         == "https://x.com/v1/video/generations"
+    assert video_gen._norm_url("https://api.seedance.tv/v1") \
+        == "https://api.seedance.tv/v1"
     assert video_gen._norm_url("https://x.com/v1/videos/generations") \
         == "https://x.com/v1/videos/generations"
+    assert video_gen._norm_url("https://x.com/custom/path") \
+        == "https://x.com/custom/path"
+    assert video_gen._norm_url("") == ""
 
 
-def test_norm_url_version_prefix_maps_to_endpoint():
-    # 填带版本前缀 → 拼对应端点（v2 → 复数 videos，v1 → 单数 video，向后兼容）
-    assert video_gen._norm_url("https://ai.t8star.org/v2") \
-        == "https://ai.t8star.org/v2/videos/generations"
-    assert video_gen._norm_url("https://x.com/v1") \
-        == "https://x.com/v1/video/generations"
-
-
-def test_norm_url_bare_root_defaults_to_v1():
-    # 纯站点根 → 默认 v1 布局（向后兼容；报错信息会提示填完整端点最稳）
-    assert video_gen._norm_url("https://ai.t8star.org") \
-        == "https://ai.t8star.org/v1/video/generations"
-
-
-def test_norm_task_url_follows_same_rules():
+def test_norm_task_url_appends_task_id_to_user_url():
     assert video_gen._norm_task_url("https://ai.t8star.org/v2/videos/generations", "t1") \
         == "https://ai.t8star.org/v2/videos/generations/t1"
-    assert video_gen._norm_task_url("https://ai.t8star.org/v2", "t1") \
-        == "https://ai.t8star.org/v2/videos/generations/t1"
-    assert video_gen._norm_task_url("https://x.com", "t1") \
-        == "https://x.com/v1/video/generations/t1"
+    assert video_gen._norm_task_url("https://api.seedance.tv/v1", "t1") \
+        == "https://api.seedance.tv/v1/t1"
+    assert video_gen._norm_task_url("https://x.com/v1/videos/generations", "t1") \
+        == "https://x.com/v1/videos/generations/t1"
 
 
 # ===== _to_data_uri：参考图归一 =====

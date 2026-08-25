@@ -89,3 +89,21 @@ constraints that are safe to include in private agent context.
 原「设为底图/参考图」若后续需要，作为独立能力另立项。
 
 提交：`648cca7`（M2.1+M2.2）；门禁 vitest 525 passed / tsc ✅；后端 13 passed（asset_search/rag_backend）。
+
+## V1.4 云端视频端点通用化 + 首帧图生视频（2026-08-25）
+
+用户确认真实 Provider 形态：`<站点根>/v2/videos/generations`（v2 + 复数），文生视频/图生视频/首尾帧
+都走这一个端点，「这只是个例子，要适用于所有情况」→ 不硬编码任何 Provider。
+
+- **端点通用化**（`video_gen._norm_url`/`_norm_task_url`）：**URL 由用户决定，代码原样使用**——
+  不猜版本（v1/v2）与单复数（video/videos）；t8star 填 /v2/videos/generations、seedance 填 /v1 根
+  都按用户填的原样提交。报错提示填完整接口地址。
+- **首帧图生视频**：`video_gen.generate(image=...)` 加参考图参数——data URI/URL/本地路径归一为
+  data URI 内联 base64 提交（local-view 地址绕过代理直读，Clash 无法转发 localhost）；payload 条件注入
+  `image` 字段（OpenAI 兼容最常见形态，Provider 字段名不同改一处键名）。
+- **Agent 视频工具接入用户消息图片**：`agent_graph.video_node` 取 `state["images"]`（原为 []），
+  有图 → 图生视频、无图 → 文生视频；`execute_generation` 结果文本区分两种模式。
+- **首尾帧未做**：尾帧来源（插画/用户指定/剧情目标帧）与字段名未定 → 并入 V1.5 设计。
+
+关键文件：`services/video_gen.py`、`services/agent_graph.py`、`services/generation_approval.py`；
+测试 `tests/test_video_gen.py`（7 passed）。提交：`9eb96ce`；ROADMAP V1.4 标 ✅。
