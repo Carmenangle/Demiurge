@@ -16,7 +16,7 @@ from uuid import uuid4
 from app.config import COMFYUI_BASE_URL
 from app.services import comfyui_client
 from app.services.comfyui_client import ComfyError
-from app.services.pathnames import safe_seg
+from app.services.pathnames import safe_dir, safe_seg
 
 
 def _next_seq_name(base: Path, ext: str) -> str:
@@ -140,6 +140,38 @@ def save_local(
     return str(dest)
 
 
+def save_audio_local(output_dir: str, repo_id: str, *,
+                     filename: str, subfolder: str = "", type: str = "output",
+                     url: str = COMFYUI_BASE_URL, dest_stem: str = "") -> str:
+    """把生成的配音分条存到 <repo>/voices/，文件名用 dest_stem（角色_轮次_句号）。
+
+    配音是作品语音资产，物理落 voices 子夹，与用户上传的参考音轨同目录；文件名保留
+    中文角色名（safe_dir 只挡 Windows 非法字符），便于按角色/轮次检索。
+    幂等：同名已存在直接返回旧路径（同一槽位重跑不重复落盘）。
+    """
+    if not output_dir:
+        raise ComfyError("未配置输出路径", 400)
+    from app.services import repo_meta
+    base = repo_meta.repo_folder(output_dir, repo_id) / "voices"
+    base.mkdir(parents=True, exist_ok=True)
+    fn = Path(filename).name
+    ext = fn.rsplit(".", 1)[1] if "." in fn else "flac"
+    ext = safe_dir(ext) or "flac"
+    stem = safe_dir(dest_stem) or "voice"
+    dest = base / f"{stem}.{ext}"
+    if dest.exists():
+        return str(dest)
+    data, _ctype = comfyui_client.fetch_view(url, filename, type, subfolder, timeout=30)
+    tmp = base / f".{dest.name}.{uuid4().hex}.tmp"
+    tmp.write_bytes(data)
+    try:
+        os.replace(tmp, dest)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+    return str(dest)
+
+
 # ===== 上网素材：联网搜索下载的图片，存到 outputDir/_web_materials/ =====
 
 
@@ -226,6 +258,11 @@ def delete_web_material(output_dir: str, filename: str) -> bool:
         return False
     d = web_materials_dir(output_dir)
     safe_name = Path(filename).name
+    target = d / safe_name
+    if target.exists() and target.is_file():
+        target.unlink()
+        return True
+    return False
 
 
 # ===== 参考图：聊天上传到 <repo>/reference/ 的图片，供画布自动导入 =====
@@ -251,8 +288,3 @@ def list_reference_images(output_dir: str, repo_id: str) -> list[dict]:
                 "filename": f.name,
             })
     return items
-    target = d / safe_name
-    if target.exists() and target.is_file():
-        target.unlink()
-        return True
-    return False

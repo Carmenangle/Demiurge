@@ -264,3 +264,84 @@ def test_自动插画失败写trace并删除快照slot(monkeypatch):
                            "stage": "submit", "error": "ComfyUI 未启动",
                            "prompt_id": "prompt-1", "slot_removed": True,
                        })]
+
+def test_audio_slot_meta_读取槽位角色与序号(monkeypatch, tmp_path):
+    """配音分条命名元数据：从快照槽位读 speaker/seq。"""
+    monkeypatch.setattr(generation_store.chat_snapshot, "SNAP_DIR", tmp_path)
+    generation_store.chat_snapshot.save("thread", [{
+        "id": "bot1", "role": "assistant", "text": "t", "parts": [
+            {"type": "media-slot", "slotId": "audio-bot1-0", "kind": "audio",
+             "speaker": "虞妙玥", "seq": 2, "total": 3},
+        ],
+    }])
+    meta = generation_store._audio_slot_meta("thread", "bot1", "audio-bot1-0")
+    assert meta["speaker"] == "虞妙玥"
+    assert meta["seq"] == 2
+    # 槽位不存在 → 空元数据
+    assert generation_store._audio_slot_meta("thread", "bot1", "nope") == {"speaker": "", "seq": 0}
+
+
+def test_audio_turn_按含配音消息计数轮次(monkeypatch, tmp_path):
+    """第几次对话 = 快照中该消息之前（含）含配音槽的 assistant 消息数。"""
+    monkeypatch.setattr(generation_store.chat_snapshot, "SNAP_DIR", tmp_path)
+    generation_store.chat_snapshot.save("thread", [
+        {"id": "m1", "role": "assistant", "text": "a",
+         "parts": [{"type": "audio", "slotId": "x", "url": "u"}]},
+        {"id": "m2", "role": "assistant", "text": "b"},          # 无配音 → 不计数
+        {"id": "m3", "role": "assistant", "text": "c",
+         "parts": [{"type": "media-slot", "slotId": "y", "kind": "audio"}]},
+    ])
+    assert generation_store._audio_turn("thread", "m3") == 2
+    assert generation_store._audio_turn("thread", "m2") == 1
+    # 消息不存在：遍历到底，返回总含配音消息数（调用方总传真实 message_id）
+    assert generation_store._audio_turn("thread", "unknown") == 2
+
+
+def test_save_audio_local_存voices并自定义命名(monkeypatch, tmp_path):
+    """配音分条落 <repo>/voices/，文件名用 dest_stem（保留中文角色名），幂等。"""
+    from pathlib import Path
+    monkeypatch.setattr(generation_store.image_store.comfyui_client, "fetch_view",
+                        lambda *a, **k: (b"audio-bytes", "audio/flac"))
+    out = tmp_path / "out"
+    p1 = generation_store.image_store.save_audio_local(
+        str(out), "repo",
+        filename="workflow_abc.flac", subfolder="", type="output",
+        url="http://comfy", dest_stem="虞妙玥_3_2",
+    )
+    assert Path(p1).name == "虞妙玥_3_2.flac"
+    assert str(Path(p1).parent).endswith("voices")
+    # 幂等：同名已存在直接返回旧路径，不重复取字节
+    p2 = generation_store.image_store.save_audio_local(
+        str(out), "repo",
+        filename="workflow_abc.flac", subfolder="", type="output",
+        url="http://comfy", dest_stem="虞妙玥_3_2",
+    )
+    assert p2 == p1
+
+
+def test_audio_finalize_按角色轮次句号命名落voices(monkeypatch, tmp_path):
+    """inline 配音槽：finalize 时走 save_audio_local，dest_stem=角色_轮次_句号。"""
+    monkeypatch.setattr(generation_store.chat_snapshot, "SNAP_DIR", tmp_path)
+    generation_store.chat_snapshot.save("thread", [
+        {"id": "m1", "role": "assistant", "text": "a",
+         "parts": [{"type": "audio", "slotId": "x", "url": "u"}]},
+        {"id": "bot", "role": "assistant", "text": "b",
+         "parts": [{"type": "media-slot", "slotId": "audio-bot-0", "kind": "audio",
+                    "speaker": "冷倾雪", "seq": 2, "total": 3}]},
+    ])
+    calls = []
+    monkeypatch.setattr(generation_store.image_store, "save_audio_local",
+                        lambda *a, **k: calls.append(k) or "C:/out/voices/冷倾雪_2_2.flac")
+    monkeypatch.setattr(generation_store.chat_snapshot, "resolve_media_slot", lambda *a, **k: True)
+    monkeypatch.setattr(generation_store.chat_memory, "append_message", lambda *a, **k: None)
+    generation_store._MEMORY_DONE.clear()
+
+    generation_store.finalize_workflow_batch(**_args(
+        images=[], audios=[{"filename": "workflow_x.flac", "subfolder": "", "type": "output"}],
+        target_message_id="bot", target_slot_id="audio-bot-0",
+    ))
+
+    assert calls, "应走 save_audio_local"
+    # 第 2 轮（m1 含配音 + bot 自身）里的第 2 句
+    assert calls[0]["dest_stem"] == "冷倾雪_2_2"
+    assert calls[0]["subfolder"] == ""

@@ -191,6 +191,50 @@ def _extract_tags(prompt: str, base_url: str, api_key: str, model: str) -> str:
         return ""
 
 
+def _audio_slot_meta(thread_id: str, message_id: str, slot_id: str) -> dict:
+    """从快照读音频槽的角色名/本轮序号（用于生成可读文件名）。"""
+    try:
+        items = chat_snapshot.load(thread_id)
+    except Exception:  # noqa: BLE001
+        return {"speaker": "", "seq": 0}
+    for item in items:
+        if not isinstance(item, dict) or item.get("id") != message_id:
+            continue
+        for part in item.get("parts") or []:
+            if isinstance(part, dict) and part.get("slotId") == slot_id:
+                return {
+                    "speaker": str(part.get("speaker") or ""),
+                    "seq": part.get("seq") or 0,
+                }
+    return {"speaker": "", "seq": 0}
+
+
+def _audio_turn(thread_id: str, message_id: str) -> int:
+    """第几次「带配音的对话」：快照中该消息之前（含）含音频槽的 assistant 消息数。
+
+    audio 槽在 finalize 前仍是 media-slot（kind=audio），已完成的则是 type=audio part，
+    两者都算「带配音」，故用 kind/type 双匹配。
+    """
+    try:
+        items = chat_snapshot.load(thread_id)
+    except Exception:  # noqa: BLE001
+        return 0
+    turn = 0
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        has_audio = any(
+            isinstance(p, dict)
+            and (p.get("type") == "audio" or p.get("kind") == "audio")
+            for p in (item.get("parts") or [])
+        )
+        if has_audio:
+            turn += 1
+        if item.get("id") == message_id:
+            break
+    return turn
+
+
 def finalize_workflow_batch(
     *, thread_id: str, repo_id: str, prompt_id: str, prompt: str,
     images: list[dict], output_dir: str, comfyui_url: str,
@@ -356,15 +400,30 @@ def finalize_workflow_batch(
         errors: list[str] = []
         shown = ""
         if durable:
+            # 配音分条：存 voices/ 并按「角色_轮次_句号」命名；无槽位元数据时回退旧逻辑
+            meta = _audio_slot_meta(thread_id, target_message_id, target_slot_id) if inline_target else {}
+            speaker = str(meta.get("speaker") or "")
+            seq_num = meta.get("seq") or 0
+            turn = _audio_turn(thread_id, target_message_id) if inline_target else 0
             try:
-                path = image_store.save_local(
-                    output_dir, repo_id,
-                    filename=str(audio.get("filename", "")),
-                    subfolder=str(audio.get("subfolder", "")),
-                    type=str(audio.get("type", "output")),
-                    url=comfyui_url,
-                    idempotency_key=key,
-                )
+                if speaker:
+                    path = image_store.save_audio_local(
+                        output_dir, repo_id,
+                        filename=str(audio.get("filename", "")),
+                        subfolder=str(audio.get("subfolder", "")),
+                        type=str(audio.get("type", "output")),
+                        url=comfyui_url,
+                        dest_stem=f"{speaker}_{turn}_{seq_num}",
+                    )
+                else:
+                    path = image_store.save_local(
+                        output_dir, repo_id,
+                        filename=str(audio.get("filename", "")),
+                        subfolder=str(audio.get("subfolder", "")),
+                        type=str(audio.get("type", "output")),
+                        url=comfyui_url,
+                        idempotency_key=key,
+                    )
                 shown = view_urls.local_view(path)
                 persisted = True
             except Exception:
