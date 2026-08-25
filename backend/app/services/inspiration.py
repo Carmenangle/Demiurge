@@ -99,4 +99,7 @@ def search_and_refine(query: str, base_url: str, api_key: str, model: str,
             images = ws.image_search(query, max_results=8, proxy=proxy)
         except Exception:  # noqa: BLE001  图片搜索失败不阻断文字卡
             images = []
+    # M1.3 受控下载：搜索到的 full_url 登记为可下载候选（save 时校验命中）
+    from app.services import web_material_candidates
+    web_material_candidates.register_candidates(images, query=query, provider=search_provider or "")
     return {"title": title, "content": content, "sources": sources, "images": images}

@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import os
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 from urllib.request import urlopen
 from uuid import uuid4
 
@@ -41,6 +43,8 @@ def _from_src(src: str) -> tuple[bytes, str]:
             data = base64.b64decode(b64)
         except Exception as e:
             raise ComfyError(f"解析 data URI 失败：{e}", 400)
+        if len(data) > 20 * 1024 * 1024:
+            raise ComfyError("data URI 图片超过 20MB 上限", 400)
         ext = "png"
         if "image/" in header:
             ext = header.split("image/")[1].split(";")[0] or "png"
@@ -210,20 +214,101 @@ def web_materials_dir(output_dir: str) -> Path:
     return Path(output_dir) / "_web_materials"
 
 
-def save_web_material(output_dir: str, src: str, source_url: str = "", title: str = "") -> dict:
+def _web_material_provenance_path(d: Path) -> Path:
+    """provenance 记录文件：_web_materials/.provenance.json（filename → 元数据）。"""
+    return d / ".provenance.json"
+
+
+def _load_provenance(d: Path) -> dict:
+    try:
+        return json.loads(_web_material_provenance_path(d).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_provenance(d: Path, provenance: dict) -> None:
+    """原子写 provenance（临时文件 + rename），失败静默（追溯缺失不阻断下载）。"""
+    try:
+        p = _web_material_provenance_path(d)
+        tmp = p.with_name(f".{p.name}.{uuid4().hex}.tmp")
+        tmp.write_text(json.dumps(provenance, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, p)
+    except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _check_domain_allowlist(url: str) -> None:
+    """域名策略（M1.3）：默认仅 https 可配白名单。
+
+    - 默认只允许 https 公网图片（http 明文图床/不可信源拒绝）。
+    - 环境变量 WEB_MATERIAL_ALLOWED_DOMAINS（逗号分隔）可放行额外域名，
+      支持子域（allow 填 example.com 放行 img.example.com）。
+    """
+    parsed = urlparse(url)
+    scheme = (parsed.scheme or "").lower()
+    host = (parsed.hostname or "").lower()
+    if scheme == "https":
+        return
+    if scheme != "http":
+        raise ComfyError(f"图片 URL 只支持 https（当前 {scheme!r}）", 400)
+    allowed = [h.strip().lower() for h in
+               os.environ.get("WEB_MATERIAL_ALLOWED_DOMAINS", "").split(",") if h.strip()]
+    if not allowed:
+        raise ComfyError("图片 URL 使用 http 明文协议，已拒绝（可在 WEB_MATERIAL_ALLOWED_DOMAINS 放行指定域名）", 400)
+    if host and any(host == a or host.endswith("." + a) for a in allowed):
+        return
+    raise ComfyError(f"图片 URL 域名 {host!r} 不在白名单内", 400)
+
+
+def _is_thread_inspiration_image(thread_id: str, url: str) -> bool:
+    """该会话快照里灵感卡是否含此 full_url（重启后候选列表丢失，仍可保存旧卡图片）。"""
+    if not thread_id or not url:
+        return False
+    try:
+        from app.services import chat_snapshot
+        items = chat_snapshot.load(thread_id)
+    except Exception:  # noqa: BLE001
+        return False
+    url = url.strip()
+    for item in items:
+        insp = item.get("inspiration") if isinstance(item, dict) else None
+        if not isinstance(insp, dict):
+            continue
+        for image in insp.get("images") or []:
+            if isinstance(image, dict) and str(image.get("full_url") or "").strip() == url:
+                return True
+    return False
+
+
+def save_web_material(output_dir: str, src: str, source_url: str = "", title: str = "",
+                      thread_id: str = "") -> dict:
     """把联网搜索到的图片下载到 _web_materials/，返回 {path, url, source_url, title, filename}。
 
-    安全链（M1.3）：
-    - SSRF 防护：由 _from_src → validate_media_url 保证（拒绝私网/metadata/localhost）
-    - 大小限制：_from_src 硬上限 20MB
-    - 魔数校验：验证字节流确实是声明格式的图片，防文件伪装
-    - 原子写：先写临时文件再 rename，防并发/中断导致残缺文件
-    - 扩展名矫正：data URI 声明的扩展名若与魔数不匹配，以魔数为准
+    受控语义（M1.3）：
+    - src 必须是**本会话搜索结果登记过的 URL**（灵感搜索返回的 full_url 已由
+      inspiration 登记进候选列表），data URI / local-view（本地可信来源）豁免。
+    - 域名策略：默认仅 https，可配白名单放行 http 域名。
+    - SSRF 防护：_from_src → validate_media_url（拒绝私网/metadata/localhost）。
+    - 大小限制 20MB、魔数校验、原子写、扩展名矫正。
+    - provenance 落盘：source_url / 搜索词 / 搜索源 / 下载时间 / 大小 / 检测格式。
     """
     if not output_dir:
         raise ComfyError("未配置输出图片路径", 400)
     d = web_materials_dir(output_dir)
     d.mkdir(parents=True, exist_ok=True)
+
+    # 候选校验：外部 http(s) URL 必须命中搜索结果候选列表（或本会话快照内灵感卡
+    # 图片，重启后候选列表丢失仍可保存旧卡）；本地可信来源豁免
+    from app.services.url_guard import is_local_view_url
+    from app.services import web_material_candidates
+    if not src.startswith("data:") and not is_local_view_url(src):
+        if not web_material_candidates.is_candidate(src) and not _is_thread_inspiration_image(thread_id, src):
+            raise ComfyError("图片不在搜索结果候选列表中，禁止直接下载（请通过灵感搜索获取图片后保存）", 400)
+        _check_domain_allowlist(src)
+
     data, ext = _from_src(src)
 
     # 魔数校验：字节流必须是合法图片格式
@@ -251,39 +336,59 @@ def save_web_material(output_dir: str, src: str, source_url: str = "", title: st
             temp_path.unlink(missing_ok=True)
         raise
 
+    # provenance 落盘：来源追溯链（source_url/搜索词/搜索源/时间/大小/格式）
+    candidate = web_material_candidates.candidate_meta(src) if not src.startswith("data:") and not is_local_view_url(src) else {}
+    provenance = _load_provenance(d)
+    provenance[dest.name] = {
+        "source_url": source_url or candidate.get("source_url") or "",
+        "query": candidate.get("query") or "",
+        "provider": candidate.get("provider") or "",
+        "downloaded_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "size": len(data),
+        "detected_ext": ext,
+    }
+    _save_provenance(d, provenance)
+
     from app.services import view_urls
     return {
         "path": str(dest),
         "url": view_urls.local_view(str(dest)),
-        "source_url": source_url,
+        "source_url": provenance[dest.name]["source_url"],
         "title": title or dest.name,
         "filename": dest.name,
+        "query": candidate.get("query") or "",
+        "downloaded_at": provenance[dest.name]["downloaded_at"],
     }
 
 
 def list_web_materials(output_dir: str) -> list[dict]:
-    """列出 _web_materials/ 下所有图片。"""
+    """列出 _web_materials/ 下所有图片（带 provenance 来源信息）。"""
     if not output_dir:
         return []
     d = web_materials_dir(output_dir)
     if not d.exists():
         return []
     from app.services import view_urls
+    provenance = _load_provenance(d)
     items = []
     for f in sorted(d.iterdir(), key=lambda x: x.name, reverse=True):
         if f.is_file() and f.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"):
+            meta = provenance.get(f.name, {})
             items.append({
                 "path": str(f),
                 "url": view_urls.local_view(str(f)),
-                "source_url": "",
+                "source_url": meta.get("source_url") or "",
                 "title": f.name,
                 "filename": f.name,
+                "query": meta.get("query") or "",
+                "provider": meta.get("provider") or "",
+                "downloaded_at": meta.get("downloaded_at") or "",
             })
     return items
 
 
 def delete_web_material(output_dir: str, filename: str) -> bool:
-    """删除 _web_materials/ 下的指定文件。"""
+    """删除 _web_materials/ 下的指定文件（同步清理 provenance 记录）。"""
     if not output_dir:
         return False
     d = web_materials_dir(output_dir)
@@ -291,6 +396,10 @@ def delete_web_material(output_dir: str, filename: str) -> bool:
     target = d / safe_name
     if target.exists() and target.is_file():
         target.unlink()
+        # 清理 provenance 条目，保留其余
+        provenance = _load_provenance(d)
+        if provenance.pop(safe_name, None) is not None:
+            _save_provenance(d, provenance)
         return True
     return False
 

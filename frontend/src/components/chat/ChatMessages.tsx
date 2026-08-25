@@ -7,7 +7,7 @@ import { renderMarkdown } from "../../lib/renderMarkdown";
 import { substituteMacros } from "../../lib/chatMacros";
 import { userMessagePlainText, userMessageRichContent } from "../../lib/chatGeneration";
 import type { PortOp } from "../../api/ai";
-import { proxyImageUrl, selectInspiration as selectInspirationPost } from "../../api/ai";
+import { proxyImageUrl, selectInspiration as selectInspirationPost, saveWebMaterial } from "../../api/ai";
 import type { RichContent } from "../RichInput";
 import { CopyButton } from "../CopyButton";
 import { openLightbox } from "../Lightbox";
@@ -659,16 +659,21 @@ export function InspirationCard({
   threadId,
   messageId,
   proxyUrl,
+  outputDir = "",
+  onNotify,
   onInsert,
 }: {
   data: ChatMessage["inspiration"] & { images?: any[]; selected?: string[] };
   threadId?: string;
   messageId?: string;
   proxyUrl?: string;
+  outputDir?: string;
+  onNotify?: (msg: string, kind: "success" | "error" | "info") => void;
   onInsert: (text: string) => void;
 }) {
   const images = data?.images || [];
   const [selected, setSelected] = useState<string[]>(data?.selected || []);
+  const [saving, setSaving] = useState(false);
   useEffect(() => { setSelected(data?.selected || []); }, [data?.selected]);
 
   const toggle = useCallback(async (url: string) => {
@@ -682,6 +687,34 @@ export function InspirationCard({
       } catch { /* 后端更新失败不阻断本地状态 */ }
     }
   }, [selected, threadId, messageId]);
+
+  // M1.3 受控下载：把选中的搜索图片保存到素材库（后端校验候选 + 安全链）
+  const saveSelected = useCallback(async () => {
+    if (!outputDir || selected.length === 0 || saving) return;
+    setSaving(true);
+    const urlSet = new Set(selected);
+    const picked = images.filter((img) => img && urlSet.has(img.full_url));
+    try {
+      const results: string[] = [];
+      for (const img of picked) {
+        try {
+          const res = await saveWebMaterial(
+            outputDir, img.full_url, img.source_url || "", img.title || "", threadId || "",
+          );
+          results.push(res.title || res.filename);
+        } catch (err) {
+          console.error("[inspiration-save]", err);
+        }
+      }
+      const failed = picked.length - results.length;
+      const msg = failed === 0
+        ? `已保存 ${results.length} 张素材到本地`
+        : `已保存 ${results.length} 张，${failed} 张失败（可在「上网素材」查看）`;
+      onNotify?.(msg, failed === 0 ? "success" : "error");
+    } finally {
+      setSaving(false);
+    }
+  }, [outputDir, selected, saving, images, threadId]);
 
   return (
     <div className="msg-bot">
@@ -727,6 +760,16 @@ export function InspirationCard({
           )}
           <div className="insp-actions">
             <CopyButton text={data?.content || ""} className="insp-insert" />
+            {selected.length > 0 && (
+              <button
+                className="insp-insert"
+                disabled={saving || !outputDir}
+                title={outputDir ? "把选中的图片保存到本地素材库" : "未配置输出路径，无法保存"}
+                onClick={() => void saveSelected()}
+              >
+                <Download size={13} /> {saving ? "保存中…" : `保存到素材库（${selected.length}）`}
+              </button>
+            )}
             <button
               className="insp-insert"
               title="把这段总结插入到输入框"

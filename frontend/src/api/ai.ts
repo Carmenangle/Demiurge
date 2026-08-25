@@ -933,12 +933,13 @@ export function listWebMaterials(outputDir: string) {
   });
 }
 
-export function saveWebMaterial(outputDir: string, src: string, sourceUrl = "", title = "") {
+export function saveWebMaterial(outputDir: string, src: string, sourceUrl = "", title = "", threadId = "") {
   return apiPost<WebMaterial>("/comfyui/web-materials/save", {
     output_dir: outputDir,
     src,
     source_url: sourceUrl,
     title,
+    thread_id: threadId,
   });
 }
 

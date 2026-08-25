@@ -654,6 +654,8 @@ export function ChatView({
                   threadId={threadId}
                   messageId={m.id}
                   proxyUrl={settings.proxyEnabled ? settings.proxyUrl : ""}
+                  outputDir={settings.outputDir}
+                  onNotify={showToast}
                   onInsert={(text) => richRef.current?.insertText(text)}
                 />
               ) : (

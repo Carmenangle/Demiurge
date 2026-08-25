@@ -344,6 +344,7 @@ class WebMaterialSaveRequest(BaseModel):
     src: str = ""               # 图片 URL 或 data URI
     source_url: str = ""        # 来源网页 URL
     title: str = ""             # 图片标题
+    thread_id: str = ""         # 灵感卡所属会话（重启后候选列表丢失时，允许保存快照内灵感卡图片）
 
 
 class WebMaterialListRequest(BaseModel):
@@ -359,7 +360,9 @@ class WebMaterialDeleteRequest(BaseModel):
 def web_material_save(req: WebMaterialSaveRequest) -> dict[str, object]:
     """把联网搜索到的图片下载到 _web_materials/，返回 {path, url, source_url, title, filename}。"""
     try:
-        return image_store.save_web_material(req.output_dir, req.src, req.source_url, req.title)
+        return image_store.save_web_material(
+            req.output_dir, req.src, req.source_url, req.title, req.thread_id,
+        )
     except ComfyError as e:
         raise HTTPException(status_code=e.status, detail=e.detail)
 

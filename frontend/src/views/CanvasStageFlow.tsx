@@ -2164,9 +2164,15 @@ export function CanvasStageFlow({
     pushUndo();
     setReferenceImages((prev) => [...prev, card]);
     try {
-      const blobUrl = URL.createObjectURL(file);
-      const res = await saveWebMaterial(settings.outputDir, blobUrl, "", file.name);
-      URL.revokeObjectURL(blobUrl);
+      // 本地文件拖放：转 data URI 上传（后端 data: 分支豁免搜索结果候选校验，
+      // 且 blob: 对象 URL 后端 urlopen 无法访问）
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(new Error("读取文件失败"));
+        reader.readAsDataURL(file);
+      });
+      const res = await saveWebMaterial(settings.outputDir, dataUrl, "", file.name);
       setReferenceImages((prev) => prev.map((c) => c.id === id ? { ...c, imageUrl: res.url, title: res.title || file.name } : c));
       showToast(`已添加参考图「${res.title || file.name}」到画布`, "success");
       const next = referenceImagesRef.current.map((c) => c.id === id ? { ...c, imageUrl: res.url, title: res.title || file.name } : c);
