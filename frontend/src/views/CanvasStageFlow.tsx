@@ -19,7 +19,7 @@ import {
   type OnConnect, type NodeChange, type NodeMouseHandler,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { Edit3, FolderPlus, GitBranch, ListOrdered, MessageSquarePlus, Send, Sparkles, Trash2, Upload, X } from "lucide-react";
+import { Edit3, FolderPlus, GitBranch, Image as ImageIcon, ListOrdered, MessageSquarePlus, Send, Sparkles, Trash2, Upload, X } from "lucide-react";
 import { chatAppend, fetchHistory, listGenerations, listReferenceImages, proxyImageUrl, type Generation, type ReferenceImage } from "../api/ai";
 import { resolvedEmbedModel, useSettings } from "../stores/settings";
 import type { Repo } from "../stores/repos";
@@ -47,7 +47,7 @@ import { pollWorkflowResult } from "../lib/workflowGenerationRuntime";
 import { workflowGenMetadata } from "../lib/regeneration";
 import {
   CARD_W, SNAP_PX, SNAP_RELEASE_PX, HINT_PX,
-  INSPIRATION_CARD_W, INSPIRATION_CARD_H, INSPIRATION_META,
+  INSPIRATION_CARD_W, INSPIRATION_CARD_H,
   type CardNodeData, type Guide, type SnapAxisState, type ToastItem,
 } from "../components/canvas/CanvasTypes";
 import { canvasNodeTypes } from "../components/canvas/CardNodeComponent";
@@ -273,6 +273,10 @@ export function CanvasStageFlow({
   const referenceImagesRef = useRef(referenceImages);
   referenceImagesRef.current = referenceImages;
 
+  // ★ 布局加载完成标志：loadLayout 恢复 inspirationCards 前，自动投影 effect 不得运行
+  //   （否则会用 findFreeSpot 位置覆盖用户已保存的卡位置并写盘 → 重进画布位置回弹）
+  const [layoutLoaded, setLayoutLoaded] = useState(false);
+
   useEffect(() => {
     if (!repoId) return;
     let cancelled = false;
@@ -313,6 +317,8 @@ export function CanvasStageFlow({
       }
       setInspirationCards(pruned);
       inspirationCardsRef.current = pruned;
+      // 布局恢复完成：放行自动投影（对话灵感卡 → 画布）等派生 effect
+      setLayoutLoaded(true);
       // 素材库 → 灵感卡：只导入当前仓库绑定的角色卡/世界书/预设（未绑定则不导入）
       if (!cancelled) void importInspirationFromLibrary(true, layout.nodes);
     });
@@ -2274,6 +2280,8 @@ export function CanvasStageFlow({
   //   - 删除黑名单：用户显式删除的对话灵感卡不会因消息历史还在而复现
   useEffect(() => {
     if (!repoId) return;
+    // 布局未恢复完成前不投影：避免覆盖用户已保存的卡位置（竞态修复）
+    if (!layoutLoaded) return;
     const deleted = new Set(deletedIdsRef.current || []);
     const existing = new Set(inspirationCardsRef.current.map((c) => c.id));
     const proxy = settings.proxyEnabled ? settings.proxyUrl : "";
@@ -2302,7 +2310,7 @@ export function CanvasStageFlow({
     setInspirationCards(next);
     inspirationCardsRef.current = next;
     persistNow({ cards: next });
-  }, [messages, repoId, settings.proxyEnabled, settings.proxyUrl, findFreeSpot, persistNow]);
+  }, [messages, repoId, settings.proxyEnabled, settings.proxyUrl, findFreeSpot, persistNow, layoutLoaded]);
 
   // M1.4/M1.5：灵感卡发送画布——对话灵感卡/素材库统一走「缓存 + 通知」通道
   // （画布未挂载时事件不丢；挂载时先消费积压，之后通知增量消费）
@@ -2799,31 +2807,38 @@ export function CanvasStageFlow({
         </div>
       )}
 
-      {/* 编辑灵感卡（左图右文：左侧图片 + 左下角删除/替换；右侧文本编辑） */}
+      {/* 编辑灵感卡（对标工作流模板节点弹窗尺寸：92vw/1200/86vh）
+          左：9:16 图片区（无图也保留 9:16 框架）+ 左下角替换/删除图片
+          右：标题 + 内容；底部通栏：取消/保存（恒同一行） */}
       {inspirationEditId && (() => {
         const editCard = inspirationCardsRef.current.find((c) => c.id === inspirationEditId) || null;
         const editImage = editCard?.imageUrl || "";
         return (
           <div className="modal-mask" onClick={() => setInspirationEditId(null)}>
-            <div className="modal" style={{ maxWidth: 760 }} onClick={(e) => e.stopPropagation()}>
-              <h3>编辑灵感卡</h3>
-              <div style={{ display: "flex", gap: 16 }}>
-                {/* 左：图片 + 左下角按钮 */}
-                <div style={{ flex: "0 0 220px", display: "flex", flexDirection: "column", gap: 8 }}>
+            <div className="modal" style={{
+              width: "92vw", maxWidth: 1200, height: "86vh",
+              display: "flex", flexDirection: "column",
+            }} onClick={(e) => e.stopPropagation()}>
+              <h3 style={{ margin: "0 0 10px" }}>编辑灵感卡</h3>
+              <div style={{ flex: 1, minHeight: 0, display: "flex", gap: 16, overflow: "hidden" }}>
+                {/* 左：9:16 图片 + 左下角按钮 */}
+                <div style={{ flex: "0 0 auto", width: 300, display: "flex", flexDirection: "column", gap: 8, overflowY: "auto" }}>
                   <div style={{
-                    width: 220, height: 220, borderRadius: 10, overflow: "hidden",
+                    width: "100%", aspectRatio: "9/16", borderRadius: 10, overflow: "hidden", flexShrink: 0,
                     background: "rgba(255,255,255,0.03)", border: "1px solid var(--border, #333)",
                     display: "flex", alignItems: "center", justifyContent: "center",
                   }}>
                     {editImage ? (
                       <img src={editImage} alt={inspirationEditTitle || "灵感卡"} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
                     ) : (
-                      <span style={{ fontSize: 12, color: "var(--text-muted)", textAlign: "center", padding: 8 }}>
-                        无图片（纯文本卡）
-                      </span>
+                      <div style={{ fontSize: 12, color: "var(--text-muted)", textAlign: "center", padding: 8, display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
+                        <ImageIcon size={22} />
+                        <span>无图片（纯文本卡）</span>
+                        <span style={{ fontSize: 11, opacity: 0.7 }}>9:16 框架</span>
+                      </div>
                     )}
                   </div>
-                  <div style={{ display: "flex", gap: 6, flexWrap: "nowrap" }}>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "nowrap", flexShrink: 0 }}>
                     <button
                       className="btn"
                       style={{ flex: 1, minWidth: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 4, whiteSpace: "nowrap", padding: "6px 8px" }}
@@ -2849,23 +2864,8 @@ export function CanvasStageFlow({
                     }}
                   />
                 </div>
-                {/* 右：类型/标题/内容 */}
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-                    {(["character", "worldbook-entry", "preset", "table-row"] as InspirationKind[]).map((k) => {
-                      const meta = INSPIRATION_META[k];
-                      return (
-                        <button
-                          key={k}
-                          className={`btn ${inspirationEditKind === k ? "primary" : ""}`}
-                          onClick={() => setInspirationEditKind(k)}
-                          style={{ flex: 1, borderLeft: `3px solid ${meta.color}` }}
-                        >
-                          {meta.icon} {meta.label}
-                        </button>
-                      );
-                    })}
-                  </div>
+                {/* 右：标题 + 内容 */}
+                <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 8 }}>
                   <input
                     value={inspirationEditTitle}
                     onChange={(e) => setInspirationEditTitle(e.target.value)}
@@ -2873,7 +2873,7 @@ export function CanvasStageFlow({
                     placeholder="标题（显示在卡片头部）"
                     style={{
                       width: "100%", padding: 8, borderRadius: 6, boxSizing: "border-box",
-                      border: "1px solid var(--border, #333)", marginBottom: 8,
+                      border: "1px solid var(--border, #333)",
                       background: "var(--input-bg, rgba(0,0,0,0.2))", color: "var(--text)",
                       fontSize: 13, fontFamily: "inherit",
                     }}
@@ -2882,57 +2882,42 @@ export function CanvasStageFlow({
                     value={inspirationEditContent}
                     onChange={(e) => setInspirationEditContent(e.target.value)}
                     placeholder="内容（双击卡片 → 插入对话即把这段内容推送到对话流）"
-                    rows={10}
                     style={{
-                      width: "100%", padding: 8, borderRadius: 6, boxSizing: "border-box",
-                      border: "1px solid var(--border, #333)", resize: "vertical",
+                      flex: 1, minHeight: 0, resize: "none", width: "100%", padding: 8, borderRadius: 6, boxSizing: "border-box",
+                      border: "1px solid var(--border, #333)",
                       background: "var(--input-bg, rgba(0,0,0,0.2))", color: "var(--text)",
                       fontSize: 13, fontFamily: "inherit", lineHeight: 1.5,
                     }}
                   />
-                  <div className="modal-actions">
-                    <button
-                      className="btn"
-                      style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 4, whiteSpace: "nowrap", padding: "6px 8px" }}
-                      onClick={() => setInspirationEditId(null)}
-                    >
-                      取消
-                    </button>
-                    <button
-                      className="btn primary"
-                      style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 4, whiteSpace: "nowrap", padding: "6px 8px" }}
-                      onClick={saveInspirationEdit}
-                    >
-                      保存
-                    </button>
-                  </div>
                 </div>
+              </div>
+              {/* 底部通栏：取消/保存（恒同一行，不被左侧列挤压） */}
+              <div className="modal-actions" style={{ marginTop: 12 }}>
+                <button
+                  className="btn"
+                  style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 4, whiteSpace: "nowrap", padding: "6px 12px" }}
+                  onClick={() => setInspirationEditId(null)}
+                >
+                  取消
+                </button>
+                <button
+                  className="btn primary"
+                  style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 4, whiteSpace: "nowrap", padding: "6px 12px" }}
+                  onClick={saveInspirationEdit}
+                >
+                  保存
+                </button>
               </div>
             </div>
           </div>
         );
       })()}
 
-      {/* 新建灵感卡（右键空白 → 新建灵感卡） */}
+      {/* 新建灵感卡（右键空白 → 新建灵感卡；类型固定 preset，早期角色卡/世界书/预设/表格选择已废弃） */}
       {newInspiration && (
         <div className="modal-mask" onClick={() => setNewInspiration(null)}>
           <div className="modal" style={{ maxWidth: 560 }} onClick={(e) => e.stopPropagation()}>
             <h3>新建灵感卡</h3>
-            <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-              {(["character", "worldbook-entry", "preset", "table-row"] as InspirationKind[]).map((k) => {
-                const meta = INSPIRATION_META[k];
-                return (
-                  <button
-                    key={k}
-                    className={`btn ${newInspiration.kind === k ? "primary" : ""}`}
-                    onClick={() => setNewInspiration({ ...newInspiration, kind: k })}
-                    style={{ flex: 1, borderLeft: `3px solid ${meta.color}` }}
-                  >
-                    {meta.icon} {meta.label}
-                  </button>
-                );
-              })}
-            </div>
             <input
               value={newInspiration.title}
               onChange={(e) => setNewInspiration({ ...newInspiration, title: e.target.value })}
