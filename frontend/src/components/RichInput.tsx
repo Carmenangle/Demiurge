@@ -9,6 +9,7 @@ import {
 import { Plus, X } from "lucide-react";
 import { clampSelectionScroll } from "../lib/contextManagement";
 import { classifyClipboardPaste } from "../lib/richPaste";
+import { inspirationInsertText, type InspirationAttachment } from "../lib/inspirationInsert";
 
 // 序列化结果：图片在上、文本在下两层。parts 保留兼容（图片在前、文本在后）。
 export interface MaskedImageInput {
@@ -33,6 +34,7 @@ export interface RichContent {
 export interface RichInputHandle {
   insertImage: (url: string) => void;  // 追加一张图片到上方图片栏末尾
   insertMaskedImage: (value: MaskedImageInput) => void; // 插入原图+独立蒙版绑定附件
+  insertInspirationCard: (card: InspirationAttachment) => void; // 插入灵感卡附件（9:16 卡片，发送时图文拆分）
   insertText: (text: string) => void;  // 在文本框光标处插入文本
   replaceContent: (content: RichContent) => void;  // 用一份完整图文内容替换当前草稿
   submit: () => void;                  // 触发提交（外部发送按钮用）
@@ -73,6 +75,7 @@ export const RichInput = forwardRef<RichInputHandle, Props>(
     const taRef = useRef<HTMLTextAreaElement | null>(null);
     const fileRef = useRef<HTMLInputElement | null>(null);  // 上方 + 按钮的隐藏 file input
     const [images, setImages] = useState<string[]>([]);     // 图片栏：dataURI/URL，左到右
+    const [inspCards, setInspCards] = useState<InspirationAttachment[]>([]); // 灵感卡附件（9:16 卡片）
     const [maskedImage, setMaskedImage] = useState<MaskedImageInput | null>(null);
     const [active, setActive] = useState(0);
     const [closed, setClosed] = useState(false);
@@ -137,6 +140,7 @@ export const RichInput = forwardRef<RichInputHandle, Props>(
       setImages((arr) => (arr.includes(url) ? arr : [...arr, url]));
     };
     const removeImage = (url: string) => setImages((arr) => arr.filter((u) => u !== url));
+    const removeInspCard = (id: string) => setInspCards((arr) => arr.filter((c) => c.id !== id));
 
     // 上方 + 按钮选图
     const onPickFiles = (files: FileList | null) => {
@@ -151,14 +155,18 @@ export const RichInput = forwardRef<RichInputHandle, Props>(
 
     const doSubmitRef = useRef<() => void>(() => {});
 
-    // 可提交 = 文本非空 或 有图片。文本或图片任一变化都上报，驱动外部发送按钮启用/禁用。
+    // 可提交 = 文本非空 或 有图片 或 有灵感卡。文本或图片任一变化都上报，驱动外部发送按钮启用/禁用。
     useEffect(() => {
-      onCanSubmitChange?.(curText.trim().length > 0 || images.length > 0 || !!maskedImage);
-    }, [curText, images, maskedImage, onCanSubmitChange]);
+      onCanSubmitChange?.(curText.trim().length > 0 || images.length > 0 || !!maskedImage || inspCards.length > 0);
+    }, [curText, images, maskedImage, inspCards, onCanSubmitChange]);
 
     useImperativeHandle(ref, () => ({
       insertImage: (url: string) => addImage(url),
       insertMaskedImage: (value: MaskedImageInput) => setMaskedImage(value),
+      insertInspirationCard: (card: InspirationAttachment) => {
+        if (!card) return;
+        setInspCards((arr) => (arr.some((c) => c.id === card.id) ? arr : [...arr, card]));
+      },
       insertText: (text: string) => {
         const ta = taRef.current;
         if (!ta) return;
@@ -229,24 +237,31 @@ export const RichInput = forwardRef<RichInputHandle, Props>(
 
     const doSubmit = () => {
       const text = curText.trim();
-      if (!text && images.length === 0 && !maskedImage) return;
+      // ★ 灵感卡附件：图文拆分发送——封面图作为图片参数上传，title/content 转成
+      //   Agent 语义文本（「灵感参考」身份标记），追加在用户文本之后。
+      const inspText = inspCards.map((c) => inspirationInsertText(c)).filter(Boolean).join("\n\n");
+      const inspImages = inspCards.map((c) => c.sourceUrl || c.imageUrl).filter(Boolean);
+      const finalText = [text, inspText].filter(Boolean).join("\n\n");
+      const finalImages = [...images, ...inspImages];
+      if (!finalText && finalImages.length === 0 && !maskedImage) return;
       const parts: RichContent["parts"] = [
-        ...images.map((url) => ({ type: "image" as const, url })),
+        ...finalImages.map((url) => ({ type: "image" as const, url })),
         ...(maskedImage ? [{
           type: "masked-image" as const,
           url: maskedImage.preview,
           image: maskedImage.image,
           mask: maskedImage.mask,
         }] : []),
-        ...(text ? [{ type: "text" as const, text }] : []),
+        ...(finalText ? [{ type: "text" as const, text: finalText }] : []),
       ];
       onSubmit({
         parts,
-        text,
-        images: [...images],
+        text: finalText,
+        images: finalImages,
         ...(maskedImage ? { maskedImage } : {}),
       });
       setImages([]);
+      setInspCards([]);
       setMaskedImage(null);
       setCurText("");
       onTextChange?.("");
@@ -350,6 +365,33 @@ export const RichInput = forwardRef<RichInputHandle, Props>(
                 className="rich-imgbar-del"
                 title="移除"
                 onClick={() => { setPreview(null); removeImage(url); }}
+              >
+                <X size={12} />
+              </button>
+            </span>
+          ))}
+          {/* 灵感卡附件：9:16 卡片（封面图 / 纯文本占位），发送时图文拆分 */}
+          {inspCards.map((card) => (
+            <span
+              key={card.id}
+              className="rich-imgbar-item rich-imgbar-insp"
+              title={card.content || card.title || "灵感卡"}
+              onMouseEnter={() => card.imageUrl && setPreview(card.imageUrl)}
+              onMouseLeave={() => setPreview(null)}
+            >
+              <div className="rich-imgbar-insp-body">
+                {card.imageUrl ? (
+                  <img src={card.imageUrl} alt={card.title || "灵感卡封面"} draggable={false} />
+                ) : (
+                  <div className="rich-imgbar-insp-empty">9:16</div>
+                )}
+                <div className="rich-imgbar-insp-label">{card.title || "灵感卡"}</div>
+              </div>
+              <button
+                type="button"
+                className="rich-imgbar-del"
+                title="移除灵感卡"
+                onClick={() => { setPreview(null); removeInspCard(card.id); }}
               >
                 <X size={12} />
               </button>

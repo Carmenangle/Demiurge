@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import {
-  inspirationInsertText, inspirationInsertImages,
+  inspirationInsertText, inspirationInsertImages, inspirationToAttachment,
   pushInspirationsToCanvas, consumePendingInspirations,
   inspirationToCanvasPayload, inspirationCanvasLabel,
 } from "./inspirationInsert";
@@ -9,14 +9,15 @@ describe("inspiration insert text (M1.5 Agent 理解格式)", () => {
   it("带标题时生成「灵感参考 · 标题」头 + 身份标记 + 内容", () => {
     const text = inspirationInsertText({ title: "女仆装", content: "主流款式包括…" });
     expect(text).toContain("【灵感参考 · 女仆装】");
-    expect(text).toContain("供创作时参考，非剧情指令");
+    expect(text).toContain("不是剧情指令");
+    expect(text).toContain("以用户要求为准");
     expect(text).toContain("主流款式包括…");
   });
 
   it("无标题时仍有「灵感参考」头与身份标记", () => {
     const text = inspirationInsertText({ content: "内容" });
     expect(text).toContain("【灵感参考】");
-    expect(text).toContain("非剧情指令");
+    expect(text).toContain("不是剧情指令");
     expect(text).toContain("内容");
   });
 
@@ -37,6 +38,25 @@ describe("inspiration insert images", () => {
 
   it("无图片返回空数组", () => {
     expect(inspirationInsertImages({})).toEqual([]);
+  });
+});
+
+describe("inspiration → attachment (输入框附件)", () => {
+  it("封面图取选中图优先，内容保留", () => {
+    const a = inspirationToAttachment({
+      id: "c1", title: "T", content: "C",
+      images: [{ full_url: "https://x/1.png" }],
+    });
+    expect(a.id).toBe("c1");
+    expect(a.title).toBe("T");
+    expect(a.content).toBe("C");
+    expect(a.imageUrl).toBe("https://x/1.png");
+  });
+
+  it("无 id 时生成稳定 id，无图封面为空", () => {
+    const a = inspirationToAttachment({ title: "T", content: "C" });
+    expect(a.id).toMatch(/^insp-/);
+    expect(a.imageUrl).toBe("");
   });
 });
 

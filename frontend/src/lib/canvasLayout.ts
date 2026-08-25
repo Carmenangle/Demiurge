@@ -68,6 +68,8 @@ export interface InspirationCardStored {
   groupId?: string;
   /** 拖放/下载素材图片的本地 URL（可选，有值时卡片渲染该图片） */
   imageUrl?: string;
+  /** 原始源 URL（对话灵感卡自动投影时保留；插入对话时作为图片参数上传用，避免代理地址后端无法访问） */
+  sourceUrl?: string;
 }
 
 /** 参考图持久化记录（文件夹拖入画布的图片，独立于灵感卡） */

@@ -20,7 +20,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { Edit3, FolderPlus, GitBranch, Image as ImageIcon, ListOrdered, MessageSquarePlus, Send, Sparkles, Trash2, Upload, X } from "lucide-react";
-import { chatAppend, fetchHistory, listGenerations, listReferenceImages, proxyImageUrl, type Generation, type ReferenceImage } from "../api/ai";
+import { fetchHistory, listGenerations, listReferenceImages, proxyImageUrl, type Generation, type ReferenceImage } from "../api/ai";
 import { resolvedEmbedModel, useSettings } from "../stores/settings";
 import type { Repo } from "../stores/repos";
 import {
@@ -30,7 +30,7 @@ import {
 import {
   loadLayout, saveLayout, clampScale, type NodeLayout, type InspirationCardStored, type ReferenceImageStored, type Viewport,
 } from "../lib/canvasLayout";
-import { inspirationInsertText, consumePendingInspirations, CANVAS_INSPIRATION_EVENT } from "../lib/inspirationInsert";
+import { consumePendingInspirations, CANVAS_INSPIRATION_EVENT } from "../lib/inspirationInsert";
 import { SendToChatModal, type SendPayload } from "../components/SendToChatModal";
 import { ConfirmModal } from "../components/Modal";
 import { WorkflowToolModal } from "../components/WorkflowToolModal";
@@ -68,7 +68,7 @@ const nodeTypes = canvasNodeTypes;
 
 // ===== ReactFlow 画布 =====
 export function CanvasStageFlow({
-  repo, settings, messages, streamingId, onGenerated, onSelectActivePreset, onDraftSubmit, displayRegex, onDeleteMessage,
+  repo, settings, messages, streamingId, onGenerated, onSelectActivePreset, onDraftSubmit, displayRegex, onDeleteMessage, onInsertInspiration,
 }: {
   repo?: Repo;
   settings: ReturnType<typeof useSettings>["settings"];
@@ -86,6 +86,8 @@ export function CanvasStageFlow({
   onDraftSubmit?: (prompt: string) => Promise<void> | void;
   /** 删除剧情楼层节点时回调（等效删除对话中的对应消息，由上层 deleteMessage 执行） */
   onDeleteMessage?: (messageId: string) => void;
+  /** 灵感卡「插入对话」：由上层插入到输入框（图片栏 9:16 卡片 + 文本），而非直接落对话流 */
+  onInsertInspiration?: (card: { id: string; title: string; content: string; imageUrl: string; sourceUrl?: string }) => void;
 }) {
   const [gens, setGens] = useState<Generation[]>([]);
   // gens 的稳定引用：latestContentAnchor 等稳定回调（[] deps）读取最新生成记录用
@@ -1851,19 +1853,19 @@ export function CanvasStageFlow({
   const [groupRenameTitle, setGroupRenameTitle] = useState("");
   const [newInspiration, setNewInspiration] = useState<{ kind: InspirationKind; title: string; content: string } | null>(null);
 
-  // 灵感卡 → 插入对话：调 chatAppend 把「带参考标记」的文本 + 图片作为 user 消息追加到当前作品对话流。
-  // 不动剧情模式代码——剧情模式会基于 RAG/编排自动处理这条消息。
+  // 灵感卡 → 插入对话：由上层插入到输入框（图片栏 9:16 卡片 + 文本），用户确认后发送，
+  // 发送时图文拆分（封面图走图片参数，文本带「灵感参考」语义）。不再直接 chatAppend 落对话流。
   const insertInspirationToChat = useCallback(async (card: InspirationCardStored) => {
-    if (!repoId) { showToast("无当前作品，无法插入", "error"); return; }
-    try {
-      const text = inspirationInsertText(card);
-      const images = card.imageUrl ? [card.imageUrl] : [];
-      await chatAppend(repoId, "user", text, images);
-      showToast(`已插入「${card.title}」到对话流`, "success");
-    } catch (e) {
-      showToast(`插入失败：${(e as Error).message}`, "error");
-    }
-  }, [repoId]);
+    if (!onInsertInspiration) { showToast("当前无输入框，无法插入", "error"); return; }
+    onInsertInspiration({
+      id: card.id,
+      title: card.title || "",
+      content: card.content || "",
+      imageUrl: card.imageUrl || "",
+      sourceUrl: card.sourceUrl || "",
+    });
+    showToast(`已插入「${card.title || "灵感卡"}」到输入框`, "success");
+  }, [onInsertInspiration]);
 
   // ===== 从素材库导入灵感卡（世界书/预设各为一张卡片，不再拆成组） =====
   const [importBusy, setImportBusy] = useState(false);
@@ -2300,7 +2302,7 @@ export function CanvasStageFlow({
       const pos = findFreeSpot(INSPIRATION_CARD_W, INSPIRATION_CARD_H);
       fresh.push({
         id, kind: "preset", title: insp.title || "灵感卡", content: insp.content || "",
-        sourceRef: "conv", imageUrl: cover,
+        sourceRef: "conv", imageUrl: cover, sourceUrl: raw || "",
         x: pos.x, y: pos.y, w: INSPIRATION_CARD_W, h: INSPIRATION_CARD_H,
       });
       existing.add(id);

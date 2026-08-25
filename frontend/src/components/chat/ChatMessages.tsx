@@ -797,7 +797,7 @@ export function InspirationCard({
             </button>
             <button
               className="insp-insert"
-              title="把这段总结插入到输入框"
+              title="插入到输入框：封面图进图片栏，发送时图文拆分（图片作参考图、文本带灵感卡语义）"
               onClick={() => onInsert(data?.content || "", data)}
             >
               <CornerDownRight size={13} /> 插入对话

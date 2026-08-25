@@ -37,7 +37,7 @@ import { WorkflowCard } from "../components/WorkflowCard";
 const CanvasStageFlow = lazy(() => import("./CanvasStageFlow").then((m) => ({ default: m.CanvasStageFlow })));
 import { globalPendingToolCreates, canvasBridge } from "../components/canvas/shared";
 import { useChatSession } from "../lib/useChatSession";
-import { inspirationInsertText } from "../lib/inspirationInsert";
+import { inspirationToAttachment } from "../lib/inspirationInsert";
 import { ConfirmModal } from "../components/Modal";
 import { MaskEditorModal, type MaskEditorResult } from "../components/MaskEditorModal";
 import { StylePresetModal } from "../components/StylePresetModal";
@@ -47,7 +47,7 @@ import { ModelSwitcher, SizeSwitcher } from "../components/chat/ChatControls";
 import { comfyStatus, startComfy, localViewUrl } from "../api/comfyui";
 import { listAgents, type Agent } from "../api/agents";
 import { listTemplates, type Template } from "../api/workflows";
-import { indexDocument } from "../api/ai";
+import { indexDocument, proxyImageUrl } from "../api/ai";
 import { resolveImageSize, supportsImageQuality } from "../lib/viewRouting";
 import { useGenerationPreferences } from "../lib/generationPreferences";
 import { useWorkflowTemplatePicker } from "../lib/workflowTemplatePicker";
@@ -593,6 +593,14 @@ export function ChatView({
                 onDraftSubmit={(prompt) => send(
                   { parts: [{ type: "text", text: prompt }], text: prompt, images: [] },
                 )}
+                onInsertInspiration={(card) => {
+                  // 右键灵感卡「插入对话」→ 输入框图片栏 9:16 卡片；发送时封面图走原始 URL、文本带灵感卡语义
+                  richRef.current?.insertInspirationCard({
+                    id: card.id, title: card.title, content: card.content,
+                    imageUrl: card.imageUrl, sourceUrl: card.sourceUrl || card.imageUrl,
+                  });
+                  setCanvasInputFolded(false); // 展开输入栏，让用户看到插入的灵感卡
+                }}
               />
             </Suspense>
           ) : (
@@ -657,9 +665,18 @@ export function ChatView({
                   proxyUrl={settings.proxyEnabled ? settings.proxyUrl : ""}
                   outputDir={settings.outputDir}
                   onNotify={showToast}
-                  onInsert={(text, card) => richRef.current?.insertText(
-                    card ? inspirationInsertText(card) : text,
-                  )}
+                  onInsert={(text, card) => {
+                    if (card) {
+                      // 灵感卡 → 插入输入框：封面图显示走 proxy（防盗链）、发送走原始 URL（后端 VLM 可访问）
+                      const att = inspirationToAttachment(card);
+                      if (att.sourceUrl && settings.proxyEnabled && settings.proxyUrl) {
+                        att.imageUrl = proxyImageUrl(att.sourceUrl, settings.proxyUrl);
+                      }
+                      richRef.current?.insertInspirationCard(att);
+                    } else {
+                      richRef.current?.insertText(text);
+                    }
+                  }}
                   onSentToCanvas={() => switchContentView("canvas")}
                 />
               ) : (
