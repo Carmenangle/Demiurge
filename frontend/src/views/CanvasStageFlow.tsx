@@ -20,7 +20,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { Edit3, FolderPlus, GitBranch, ListOrdered, MessageSquarePlus, Send, Sparkles, Trash2, Upload, X } from "lucide-react";
-import { chatAppend, fetchHistory, listGenerations, listReferenceImages, type Generation, type ReferenceImage } from "../api/ai";
+import { chatAppend, fetchHistory, listGenerations, listReferenceImages, proxyImageUrl, type Generation, type ReferenceImage } from "../api/ai";
 import { resolvedEmbedModel, useSettings } from "../stores/settings";
 import type { Repo } from "../stores/repos";
 import {
@@ -1261,8 +1261,9 @@ export function CanvasStageFlow({
           // 双击灵感卡：世界书→弹窗；角色卡→角色卡弹窗；预设→偏置预设弹窗；其余→本地编辑
           const c = inspirationCardsRef.current.find((x) => x.id === n.id);
           if (!c) return;
-          // ★ 资产库发送来的灵感卡（带图）→ 打开「左图右文」编辑弹窗（可删图/替换图），不误入偏置预设
-          if (c.imageUrl) {
+          // ★ 资产库发送来的灵感卡（带图）/ 对话自动投影的灵感卡（sourceRef="conv"）
+          //   → 打开「左图右文」编辑弹窗（可删图/替换图），不误入偏置预设
+          if (c.imageUrl || c.sourceRef === "conv") {
             setInspirationEditId(c.id);
             setInspirationEditKind(c.kind);
             setInspirationEditTitle(c.title);
@@ -2096,7 +2097,14 @@ export function CanvasStageFlow({
     // 投影节点进删除黑名单（gen 派生 id，稳定锚定 generationId；工具卡投影节点同语义——
     // 删除是显式操作，对话消息投影不得复活已删节点）。story 除外：消息已删，投影自然消失，
     // 进黑名单反而会让撤销/未来同 id 语义混乱。
-    const projectedDeleted = [...all].filter((i) => /^(img|video|audio|wftool)-/.test(i));
+    // 对话灵感卡（sourceRef="conv"）同语义：消息历史还在，删卡后不得自动复活。
+    const convCards = inspirationCardsRef.current
+      .filter((c) => all.has(c.id) && c.sourceRef === "conv")
+      .map((c) => c.id);
+    const projectedDeleted = [
+      ...[...all].filter((i) => /^(img|video|audio|wftool)-/.test(i)),
+      ...convCards,
+    ];
     const nextDeleted = projectedDeleted.length > 0
       ? [...deletedIdsRef.current, ...projectedDeleted.filter((i) => !deletedIdsRef.current.includes(i))]
       : deletedIdsRef.current;
@@ -2257,6 +2265,44 @@ export function CanvasStageFlow({
     const next = [...inspirationCardsRef.current, card];
     persistNow({ cards: next });
   }, [newInspiration, findFreeSpot, persistNow]);
+
+  // ★ 对话灵感卡消息 → 画布自动投影（对话↔画布连通：对话/画布模式里生成的灵感卡
+  //   自动成为画布节点，无需手动发送；与剧情楼层同机制——消息在则节点在）。
+  //   - id = insp-<消息id>（稳定，重启后布局可对上；与「发送画布」按钮同 id 规则 → 不重复）
+  //   - 封面图：选中图优先，其次首图；远程 URL 走代理中转（画布 <img> 防盗链）
+  //   - sourceRef="conv" 标记来源：双击开「左图右文」编辑；删除进黑名单不复活
+  //   - 删除黑名单：用户显式删除的对话灵感卡不会因消息历史还在而复现
+  useEffect(() => {
+    if (!repoId) return;
+    const deleted = new Set(deletedIdsRef.current || []);
+    const existing = new Set(inspirationCardsRef.current.map((c) => c.id));
+    const proxy = settings.proxyEnabled ? settings.proxyUrl : "";
+    const fresh: InspirationCardStored[] = [];
+    for (const m of messages) {
+      const insp = m.inspiration;
+      if (!insp || !(insp.title || insp.content)) continue;
+      const id = `insp-${m.id}`;
+      if (existing.has(id) || deleted.has(id)) continue;
+      const candidates = [
+        ...(insp.selected || []),
+        ...(insp.images || []).map((i) => i.full_url || i.thumb_url || ""),
+      ].filter(Boolean);
+      const raw = candidates[0] || "";
+      const cover = raw && proxy ? proxyImageUrl(raw, proxy) : raw;
+      const pos = findFreeSpot(INSPIRATION_CARD_W, INSPIRATION_CARD_H);
+      fresh.push({
+        id, kind: "preset", title: insp.title || "灵感卡", content: insp.content || "",
+        sourceRef: "conv", imageUrl: cover,
+        x: pos.x, y: pos.y, w: INSPIRATION_CARD_W, h: INSPIRATION_CARD_H,
+      });
+      existing.add(id);
+    }
+    if (fresh.length === 0) return;
+    const next = [...inspirationCardsRef.current, ...fresh];
+    setInspirationCards(next);
+    inspirationCardsRef.current = next;
+    persistNow({ cards: next });
+  }, [messages, repoId, settings.proxyEnabled, settings.proxyUrl, findFreeSpot, persistNow]);
 
   // M1.4/M1.5：灵感卡发送画布——对话灵感卡/素材库统一走「缓存 + 通知」通道
   // （画布未挂载时事件不丢；挂载时先消费积压，之后通知增量消费）
