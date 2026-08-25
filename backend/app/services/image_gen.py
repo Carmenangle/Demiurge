@@ -147,6 +147,10 @@ def _load_image_bytes(img: str, proxy: str = "") -> tuple[bytes, str, str]:
     return data, f"image.{ext}", mime
 
 
+# 公开别名：video_gen 等复用图片读取（data URI / URL / 本地路径 → 字节）
+load_image_bytes = _load_image_bytes
+
+
 def generate(base_url: str, api_key: str, model: str, prompt: str,
              size: str = "1024x1024", quality: str = "high", proxy: str = "") -> str:
     """纯文生图，返回可展示地址（http URL 或 data:image/...;base64,...）。

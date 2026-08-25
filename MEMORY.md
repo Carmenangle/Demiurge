@@ -98,6 +98,9 @@ constraints that are safe to include in private agent context.
 - **端点通用化**（`video_gen._norm_url`/`_norm_task_url`）：**URL 由用户决定，代码原样使用**——
   不猜版本（v1/v2）与单复数（video/videos）；t8star 填 /v2/videos/generations、seedance 填 /v1 根
   都按用户填的原样提交。报错提示填完整接口地址。
+- **发送参数参照图像模型**（用户拍板）：文生视频 `generate` → JSON（{model,prompt,size}）；
+  图生视频 `generate_with_images` → **multipart/form-data，image[] 同名多图**，复用
+  `image_gen.load_image_bytes`（公开别名）读图上传——与 `image_gen.generate_with_images` 完全一致，不猜字段名。
 - **首帧图生视频**：`video_gen.generate(image=...)` 加参考图参数——data URI/URL/本地路径归一为
   data URI 内联 base64 提交（local-view 地址绕过代理直读，Clash 无法转发 localhost）；payload 条件注入
   `image` 字段（OpenAI 兼容最常见形态，Provider 字段名不同改一处键名）。

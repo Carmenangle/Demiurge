@@ -138,10 +138,17 @@ def execute_generation(ctx: Any, kind: str, original: str, prompt: str,
                        image_mask: dict[str, str] | None = None) -> dict:
     try:
         if kind == "video":
-            url = video_gen.generate(ctx["vid_base"], ctx["vid_key"], ctx["vid_model"],
-                                     prompt, size=ctx.get("size", "1024x1024"),
-                                     proxy=ctx.get("vid_proxy", ""),
-                                     image=images[0] if images else None)
+            # V1.4：有图 → 图生视频（multipart image[]，参照图像模型），无图 → 文生视频
+            if images:
+                url = video_gen.generate_with_images(
+                    ctx["vid_base"], ctx["vid_key"], ctx["vid_model"], prompt, images,
+                    size=ctx.get("size", "1024x1024"), proxy=ctx.get("vid_proxy", ""),
+                )
+            else:
+                url = video_gen.generate(
+                    ctx["vid_base"], ctx["vid_key"], ctx["vid_model"], prompt,
+                    size=ctx.get("size", "1024x1024"), proxy=ctx.get("vid_proxy", ""),
+                )
             rec = generation_store.persist_video(ctx["thread_id"], ctx["repo_id"], prompt,
                                                  url, ctx["output_dir"])
             approved = prompt_approval_store.get(ctx["thread_id"], approval_id) if approval_id else None
