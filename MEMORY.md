@@ -116,15 +116,19 @@ constraints that are safe to include in private agent context.
 
 用户敲定三个决策（写入 `docs/ROADMAP-MULTIMODAL.md` V1.5/V1.6 定稿）：
 1. **视频模式 preset 二选一**：`videoMode: "climax" | "firstlast"`（默认 climax=现有高潮点，兼容旧预设）。
-   firstlast = 剧情楼层（roleplay 路由，参考前端 `isStoryNode` 标签判定思路）→ 生首帧图+尾帧图 → 双图生视频
-   （`generate_with_images` image[0]=首帧 image[1]=尾帧，V1.4 已支持多图）。
+   **两模式语义本质不同、提示词截然不同**：
+   - climax = 高潮「动作瞬间」单图生视频，目的加代入感（动作图动态化，微运镜/特效/节拍），
+     **不是**整个桥段叙事，不做完整时间轴。
+   - firstlast = 剧情楼层（roleplay 路由）→ 首帧图+尾帧图 → 双图生视频，才是「剧情对话对应的完整影片」，
+     覆盖整个桥段起承转合，走完整七段式时间轴。
 2. **转场判断不单独做**：首帧提示词生成时带「上楼层尾帧描述 + 本楼层开头」上下文，生成模型自然判断是否转场；
    接不上 → 转场素材开局兜底。不引入独立「能否衔接」判定。
 3. **利用上传表格素材**：通用数据表 `table.py`（重要角色表外貌/穿着/所在地点、全局表地点/世界状态、任务表地点）
    作为首尾帧场景/角色素材；首尾帧双锚点提取复用 `scene_illustration` 段落打分/锚点纠正思路（取首尾两处而非单一高潮段）。
 
 视频提示词方法（V1.6）：参照 H3 七段式骨架（`D:\video\寻味电台\H3视频生成\H3-提示词模版规律.md`），
-原料 `scene_spec` 已含大部分字段，本地编译不重调模型；核心新增第⑤块「时间分镜」（视觉事实+camera+motion
-按时间轴切 3-5 段）。产出 `video_prompt` 随 illustrate_request 下发。
+原料 `scene_spec` 已含大部分字段，本地编译不重调模型；**七段式只用于 firstlast**（核心新增第⑤块「时间分镜」
+= 视觉事实+camera+motion 按时间轴切 3-5 段）；**climax 走精简版**（元信息+风格+单图绑定+主体+动作微动态+负面约束），
+禁止套时间分镜。产出 `video_prompt` 随 illustrate_request 下发。
 
 关键约束：preset 二选一；旧预设不迁移不报错（videoMode 缺省=climax）。
