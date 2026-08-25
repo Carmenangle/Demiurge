@@ -27,9 +27,9 @@ A1.1 三开关重构 ──→ A1.2 音轨配置 ──→ A1.3 音频语义绑�
 | M1.2 | ✅ 已完成 | 图片素材搜索与预览 |
 | M1.3 | ✅ 已完成 | 受控下载入资产库（候选校验/域名白名单/provenance/魔数/SSRF/原子写全链；后台任务化列后续） |
 | M1.4 | ✅ 已完成 | 灵感卡资产库化（归入上网素材：封面=图1:1或文本预览，双击看文本内容，批量+发送对话框/画布，删图留文本） |
-| M1.5 | 未开始 | 素材卡→底图/参考图/工作流绑定 |
-| M2.1 | 未开始 | derived_from 派生元数据 |
-| M2.2 | 未开始 | 资产库多模态筛选与视频封面 |
+| M1.5 | ✅ 已完成 | 灵感卡→输入框联动创作（插对话/画布，图文拆分 + 编辑回填还原） |
+| M2.1 | ✅ 已完成 | derived_from 派生元数据（视频入库记首帧底图槽弱引用，资产库只读展示） |
+| M2.2 | ✅ 已完成 | 资产库多模态筛选（图/视频）与视频资产展示（占位封面 + 详情播放） |
 | A1.1 | ✅ 已完成 | 多元数据插入三开关重构（图片/视频/音频分区显隐） |
 | A1.2 | ✅ 已完成 | 按角色参考音轨配置（characterVoices） |
 | A1.3 | ✅ 已完成 | 音频语义绑定（voice_text/voice_reference/voice_emotion_<key>） |
@@ -227,23 +227,31 @@ V1 与 M1 前半（M1.1–M1.3）互不依赖，可并行推进。
 > - 对话框灵感卡「保存到素材库」改为存**整卡**（标题+内容+选中图片）。
 > - 测试：后端 9 例（保存/幂等/本地引用/受控下载/未登记拒绝/删图留文本/删卡留图/非法 id）；前端 tsc 0 错 + chat 组件测试通过。
 
-### M1.5 素材卡→创作联动
+### M1.5 灵感卡→输入框联动创作
 
-**目标**：素材图片一键设为角色底图、外貌参考图或工作流底图，闭环「找参考→用参考」。
+> **定调（2026-08-25）**：原设想「素材图一键设为角色底图/参考图/工作流底图」被更贴合创作流的方案取代——**灵感卡「插入对话」改为插到输入框图片栏的 9:16 卡片，发送时图文拆分**，闭环「找参考 → 带进对话 → 编辑 → 再发」。原「设为底图/参考图」若后续需要，作为独立能力另立项（不并入 M1.5）。
+
+**目标**：灵感卡（联网搜 + 提炼的「标题+内容」知识总结，**主题不限**）作为可编辑的卡片附件进输入框，发送时图文拆分，编辑已发送消息时能还原回卡片形态。
 
 **改哪里**：
-- 前端资产库 UI——素材卡操作菜单（设为…）。
-- 既有配置点：`CloudConfig.character_base_images`（角色底图）、多元数据插入外貌来源条目（参考图）、模板 exposed image 字段（工作流底图）。
+- `frontend/src/lib/inspirationInsert.ts`——序列化/逆序列化（`serializeInspirationSend`/`deserializeInspirationSend`）+ 全局缓存通道（`pushInspirationsToChat`/`consumePendingInspirationAttachments`/`CHAT_INSPIRATION_EVENT`）。
+- `frontend/src/components/RichInput.tsx`——输入框图片栏 9:16 灵感卡附件（`inspCards`）+ `insertInspirationCard`。
+- `frontend/src/views/ChatView.tsx`——通道消费（挂载 + 收事件时插入）；画布/对话共用同一 RichInput。
+- `frontend/src/lib/chatGeneration.ts` + `types/chat.ts`——`inspirationAttachments` 持久化 + 编辑回填逆解析。
 
 **实现要点**：
-1. 三个绑定全部**复用既有配置机制**，只是新增写入入口；不建新的绑定存储。
-2. 资产 metadata 记 `used_as` 弱标记（哪个角色/哪个模板用过），便于反查，不做反向索引服务。
+1. **三条不变量**（再改不破）：
+   - 主题无关：插入对话的「灵感参考」身份标记不预设视觉/风格方向；身份语义三点通用（参考素材、非指令、冲突以用户要求为准）。
+   - 「插入对话」= 插到输入框图片栏卡片，**非直接发送**；发送时 `serializeInspirationSend` 图文拆分（封面图进图片参数、title/content 转语义文本追加在用户文本后）。
+   - 编辑回填还原卡片：用户消息持久化 `inspirationAttachments` 字段，`userMessageRichContent` 用 `deserializeInspirationSend` 逆序列化拆回「纯用户文本/图 + 卡片附件」。
+2. 素材库「发送对话框」改为「插入输入框」（`SendToChatModal` 增 `insertInput` 模式：选作品、不落盘、push 到输入框）。
+3. 图片说明按有无封面图条件输出（纯文本卡不声称「消息附带图片」）。
 
-**验收**：从素材卡设置角色底图后，下一次自动插画图生图实际使用该底图（真实提交核对）。
+**验收**：对话模式 /find → 插入 → 9:16 卡片 → 发送图文拆分 → 编辑还原卡片；素材库「插入输入框」选作品后画布/对话模式均插卡；vitest 522 passed。
 
 **预排问题**：
-- **绑定漂移**：资产被移动/重命名后绑定失效 → 绑定存资产库稳定 id/路径，UI 显示失效时提示重选，不静默发错图。
-- **越权扩大**：素材卡只能设图，不得借机改模型配置、代理或密钥（红线 6 的具体化）。
+- **通道未挂载**：素材库 push 时 ChatView 未挂载 → 走全局缓存，挂载/收事件时消费（`CHAT_INSPIRATION_EVENT`），不丢卡。
+- **快照瘦身**：`inspirationAttachments` 含远程封面 URL，随消息 JSON 落盘，非 dataURI 大图，无体积隐患。
 
 ---
 
@@ -252,6 +260,11 @@ V1 与 M1 前半（M1.1–M1.3）互不依赖，可并行推进。
 ### M2.1 derived_from 派生元数据
 
 **目标**：视频（及未来的图→图衍生）资产记录派生来源，派生链可读不可自动执行。
+
+> **进度（2026-08-25）**：已落地。视频产出经 ComfyUI 工作流 finalize 时入库资产库（此前 `indexed: False` 不进库），
+> metadata 记 `media_type=video` + `derived_from=[{media_slot_ref:{message_id,slot_id}, kind:"video_base_image"}]`——
+> 来源 = V1.1 视频首帧底图（前端 `resolveVideoBaseImageRef` 取底图时同时取来源槽引用，随 `base_slot_ref` 传后端）。
+> 资产库 UI（RepoGallery）视频条目展示「派生来源」只读行（弱引用：来源删除不报错、不级联）。
 
 **改哪里**：
 - `generation_store`——资产 metadata 加 `derived_from: [{asset_id|media_slot_ref, turn_id, kind}]`。
@@ -271,6 +284,11 @@ V1 与 M1 前半（M1.1–M1.3）互不依赖，可并行推进。
 ### M2.2 资产库多模态筛选与视频封面
 
 **目标**：资产库按媒体类型（文/图/视频/灵感卡）与来源（生成/检索下载）筛选；视频有封面可浏览。
+
+> **进度（2026-08-25）**：已落地。资产库（generation）新增媒体类型筛选（全部/图片/视频，`mediaType` 识别）；
+> 视频条目在网格中显示占位封面（🎬 图标 + 「视频」标签），点击进详情用 `<video controls>` 播放；
+> 无封面用占位图标不阻塞列表（ComfyUI 侧未返回 thumbnail，按 ROADMAP 红线不为封面引 ffmpeg）。
+> 「文/灵感卡」筛选维持原样：灵感卡在「上网素材」域已有 tab（WebMaterialsView），知识文档在知识库页——不强行并入 generation 资产库。
 
 **改哪里**：
 - 前端资产库——筛选器与视频卡片形态。

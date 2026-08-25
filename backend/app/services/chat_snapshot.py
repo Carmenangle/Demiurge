@@ -367,8 +367,10 @@ def select_inspiration(thread_id: str, message_id: str, urls: list[str]) -> dict
 
 def resolve_media_slot(thread_id: str, message_id: str, slot_id: str, url: str,
                        *, media_type: str = "image",
-                       regeneration: dict | None = None) -> bool:
-    """把指定消息的异步媒体槽原位替换为图片/视频；目标不存在时绝不追加新消息。"""
+                       regeneration: dict | None = None,
+                       derived_from: list | None = None) -> bool:
+    """把指定消息的异步媒体槽原位替换为图片/视频；目标不存在时绝不追加新消息。
+    derived_from 为派生链弱引用（M2.1 视频槽记首帧底图槽），随 ready part 落盘。"""
     if not message_id or not slot_id or not url:
         return False
     kind = "video" if media_type == "video" else ("audio" if media_type == "audio" else "image")
@@ -390,6 +392,8 @@ def resolve_media_slot(thread_id: str, message_id: str, slot_id: str, url: str,
                                 ready[key] = part[key]
                     if regeneration:
                         ready["regeneration"] = regeneration
+                    if derived_from:
+                        ready["derivedFrom"] = derived_from
                     next_parts = list(parts)
                     next_parts[part_index] = ready
                     items[item_index] = {**item, "parts": next_parts}

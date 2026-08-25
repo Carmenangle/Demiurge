@@ -6,6 +6,7 @@ import {
   promptAdditionsForSelectedLora, triggersForSelectedLora,
   resolveLoraPromptMetadata,
   resolveVideoBaseImage,
+  resolveVideoBaseImageRef,
   userMessageRichContent,
 } from "./chatGeneration";
 import {
@@ -612,6 +613,38 @@ describe("resolveVideoBaseImage", () => {
     expect(resolveVideoBaseImage({
       tpl: tplWithImage, messageId: "m1", slotId: "s1", messages: [msg("m1")],
     })).toBeUndefined();
+  });
+});
+
+describe("resolveVideoBaseImageRef（M2.1 底图来源槽引用）", () => {
+  const tplWithImage = { id: "v1", image_node_id: "9", exposed: [] } as any;
+  const msg = (id: string, parts: any[] = []) => ({ id, parts });
+
+  it("本槽来源：返回 url + 当前消息/槽引用", () => {
+    const r = resolveVideoBaseImageRef({
+      tpl: tplWithImage, messageId: "m1", slotId: "s1",
+      messages: [msg("m1", [{ type: "image", slotId: "s1", status: "ready", url: "local://img" }])],
+    });
+    expect(r).toEqual({ url: "local://img", sourceMessageId: "m1", sourceSlotId: "s1" });
+  });
+
+  it("历史槽来源：返回 url + 来源消息/槽引用（不误报为本槽）", () => {
+    const r = resolveVideoBaseImageRef({
+      tpl: tplWithImage, messageId: "m2", slotId: "s9",
+      messages: [
+        msg("m1", [{ type: "image", slotId: "s3", status: "ready", url: "local://older" }]),
+        msg("m2", []),
+      ],
+    });
+    expect(r).toEqual({ url: "local://older", sourceMessageId: "m1", sourceSlotId: "s3" });
+  });
+
+  it("手动底图：无槽引用（derived_from 不记录）", () => {
+    const r = resolveVideoBaseImageRef({
+      tpl: tplWithImage, messageId: "m1", slotId: "s1", messages: [],
+      manualBaseImage: "local://manual",
+    });
+    expect(r).toEqual({ url: "local://manual" });
   });
 });
 

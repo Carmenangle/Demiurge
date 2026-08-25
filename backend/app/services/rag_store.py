@@ -14,6 +14,7 @@ import logging
 import re
 import time
 import uuid
+import json
 from pathlib import Path
 
 from langchain_core.documents import Document
@@ -36,8 +37,7 @@ def _repo_collection(repo_id: str) -> str:
     """仓库内容库名：repo_<规范化id>。
 
     Chroma collection 名限制：3-63 字符、首尾为字母数字、仅 [a-zA-Z0-9._-]。
-    repo_id 多为 UUID（含连字符，合法），但 home/空 等需兜底。非法字符替换为下划线。
-    """
+    repo_id 多为 UUID（含连字符，合法），但 home/空 等需兜底。非法字符替换为下划线。    """
     rid = re.sub(r"[^a-zA-Z0-9_-]", "_", (repo_id or "home").strip()) or "home"
     return f"repo_{rid}"
 
@@ -93,7 +93,8 @@ def index_generation(repo_id: str, cfg: EmbedConfig,
                      prompt: str, tags: str = "", image_url: str = "",
                      created_at: int | None = None, description: str = "",
                      template_name: str = "", model_name: str = "",
-                     lora_names: str = "") -> None:
+                     lora_names: str = "", media_type: str = "image",
+                     derived_from: list | None = None) -> None:
     """生图完成后入库：提示词 + 标签合为一条文档，附图片URL元数据。写入本仓库库。
 
     只要有图片就入库——智能体出图常无提示词文本，此时用占位文本嵌入，
@@ -101,11 +102,13 @@ def index_generation(repo_id: str, cfg: EmbedConfig,
     标签同时结构化存入 metadata.tags（逗号串），供资产库标签展示/搜索/增删。
     template_name / model_name / lora_names 为工作流生成元数据（逗号分隔），
     供画布卡片展示「用哪个模板/主模型/LoRA 生成的」。
+    media_type = image|video（默认 image）；derived_from 为派生链弱引用
+    （[{asset_id|media_slot_ref, turn_id, kind}]，M2.1 只读展示不级联重建）。
     """
     text = "\n".join(t for t in [prompt, tags, description] if t and t.strip())
     if not text.strip() and not (image_url or "").strip():
         return  # 既无文本也无图，无意义
-    embed_text = text if text.strip() else "生成图片"  # 无提示词时用占位文本嵌入
+    embed_text = text if text.strip() else ("生成视频" if media_type == "video" else "生成图片")
     tag_list = _auto_tags(prompt, tags)
     store = _store(_repo_collection(repo_id), cfg)
     img = (image_url or "").strip()
@@ -119,6 +122,9 @@ def index_generation(repo_id: str, cfg: EmbedConfig,
                            "template_name": template_name or "",
                            "model_name": model_name or "",
                            "lora_names": lora_names or "",
+                           "media_type": media_type,
+                           "derived_from": json.dumps(derived_from or [],
+                                                      ensure_ascii=False),
                            "created_at": (created_at if created_at is not None
                                           else int(time.time() * 1000))})
     ], ids=[doc_id])
@@ -307,6 +313,17 @@ def retrieve(repo_id: str, cfg: EmbedConfig,
     ]
 
 
+def _parse_derived_from(raw: str) -> list[dict]:
+    """解析 metadata 里 JSON 序列化的 derived_from；损坏/空返回 []。"""
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, list) else []
+    except (ValueError, TypeError):
+        return []
+
+
 def _dump(collection: str, cfg: EmbedConfig) -> list[dict]:
     """导出单个 collection 的全部条目为统一 dict 列表。"""
     try:
@@ -334,6 +351,8 @@ def _dump(collection: str, cfg: EmbedConfig) -> list[dict]:
             "template_name": meta.get("template_name", ""),
             "model_name": meta.get("model_name", ""),
             "lora_names": meta.get("lora_names", ""),
+            "media_type": meta.get("media_type", "image"),
+            "derived_from": meta.get("derived_from", ""),
             "created_at": int(meta.get("created_at", 0) or 0),
         })
     return out
@@ -369,6 +388,8 @@ def list_generations(repo_id: str, cfg: EmbedConfig) -> list[dict]:
                     "modelName": d.get("model_name", ""),
                     # lora_names 在 metadata 存为逗号分隔字符串，读时拆为数组与前端 GenLike 类型一致
                     "loraNames": [s for s in (d.get("lora_names", "") or "").split(",") if s.strip()],
+                    "mediaType": d.get("media_type", "image"),
+                    "derivedFrom": _parse_derived_from(d.get("derived_from", "")),
                     "created_at": d.get("created_at", 0)})
     return out
 

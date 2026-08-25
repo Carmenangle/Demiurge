@@ -284,13 +284,14 @@ interface VideoBaseImageMessages {
   parts?: Array<{ type?: string; slotId?: string; status?: string; url?: string }>;
 }
 
-export function resolveVideoBaseImage(opts: {
+/** M2.1：视频底图来源解析 + 来源槽引用（供 derived_from 记录「视频来自哪张插画」）。 */
+export function resolveVideoBaseImageRef(opts: {
   tpl: Template;
   messageId: string;
   slotId: string;
   messages: VideoBaseImageMessages[];
   manualBaseImage?: string;
-}): string | undefined {
+}): { url: string; sourceMessageId?: string; sourceSlotId?: string } | undefined {
   // 模板没有图像输入口 → 纯文生视频，无需底图
   if (!needsImageInput(opts.tpl)) return undefined;
   const isReadyImage = (p: { type?: string; status?: string; url?: string } | undefined) =>
@@ -299,17 +300,29 @@ export function resolveVideoBaseImage(opts: {
   const sameSlot = opts.messages
     .find((m) => m.id === opts.messageId)
     ?.parts?.find((p) => p.slotId === opts.slotId && isReadyImage(p));
-  if (sameSlot?.url) return sameSlot.url;
+  if (sameSlot?.url) return { url: sameSlot.url, sourceMessageId: opts.messageId, sourceSlotId: opts.slotId };
   // 2) 最近一次已完成插画：消息倒序（含本条，若本条其它槽已完成也可用）
   for (let i = opts.messages.length - 1; i >= 0; i--) {
     const parts = opts.messages[i].parts || [];
     for (let j = parts.length - 1; j >= 0; j--) {
       const p = parts[j];
-      if (p.type === "image" && p.status === "ready" && p.url) return p.url;
+      if (p.type === "image" && p.status === "ready" && p.url) {
+        return { url: p.url, sourceMessageId: opts.messages[i].id, sourceSlotId: p.slotId };
+      }
     }
   }
   // 3) 用户手动指定（preset 角色底图 / 外貌参考图等）
-  return opts.manualBaseImage;
+  return opts.manualBaseImage ? { url: opts.manualBaseImage } : undefined;
+}
+
+export function resolveVideoBaseImage(opts: {
+  tpl: Template;
+  messageId: string;
+  slotId: string;
+  messages: VideoBaseImageMessages[];
+  manualBaseImage?: string;
+}): string | undefined {
+  return resolveVideoBaseImageRef(opts)?.url;
 }
 
 // ===== 文本打分：从生成结果的多段文本里挑最优 =====

@@ -42,7 +42,7 @@ import {
   needsImageInput, hasImageProvided, pickBestText,
   slimSnapshot as slimSnapshotPure, promptHistory,
   prepareConversationRegeneration, resolveLoraPromptMetadata, resolveGenerationPrompt,
-  acceptSlimmedMessages, canCommitSnapshot, resolveVideoBaseImage,
+  acceptSlimmedMessages, canCommitSnapshot, resolveVideoBaseImageRef,
 } from "./chatGeneration";
 import {
   durableFinalizeSucceeded, WorkflowGenerationRuntime,
@@ -654,6 +654,7 @@ export function useChatSession(deps: ChatSessionDeps) {
         modelName: savedRegeneration?.kind === "workflow" ? savedRegeneration.modelName : undefined,
         loraNames: savedRegeneration?.kind === "workflow" ? savedRegeneration.loraNames : undefined,
         target,
+        baseSlotRef: pendingItem.baseSlotRef,
       });
       if (!durableFinalizeSucceeded(result)) {
         throw new Error("生成已完成，但原图或会话槽尚未持久化，将自动重试归档");
@@ -833,6 +834,7 @@ export function useChatSession(deps: ChatSessionDeps) {
     target?: PendingGeneration["target"],
     prompt = "",
     mediaType: "image" | "video" | "audio" = "image",
+    baseSlotRef?: PendingGeneration["baseSlotRef"],
   ) => {
     const comfyuiUrl = comfyRegenerationUrl(regeneration) || settings.comfyuiUrl;
     if (!target?.background) dispatch({ t: "workflowStart", promptId });
@@ -863,7 +865,7 @@ export function useChatSession(deps: ChatSessionDeps) {
     workflowRuntime.start({
       promptId, comfyuiUrl, outputNodeIds, regeneration, target, prompt,
       owner: { threadId, repoId: repo?.id || "home", outputDir: settings.outputDir },
-      mediaType,
+      mediaType, baseSlotRef,
     }, workflowObserver);
   };
 
@@ -925,13 +927,15 @@ export function useChatSession(deps: ChatSessionDeps) {
     }
     // V1.1 视频首帧底图：优先取「已完成插画」（本槽 > 最近一次），否则回退用户手动指定；
     // 模板无图像口 → 纯文生视频（resolveVideoBaseImage 返回 undefined 且不拦截）。
-    const baseImageForUse = useVideo
-      ? resolveVideoBaseImage({
+    // M2.1：ref 版本同时返回底图来源槽引用，视频入库时记录 derived_from。
+    const videoBaseRef = useVideo
+      ? resolveVideoBaseImageRef({
           tpl, messageId, slotId,
           messages: messagesRef.current,
           manualBaseImage: baseImage || undefined,
         })
-      : baseImage;
+      : undefined;
+    const baseImageForUse = videoBaseRef?.url ?? baseImage;
     let negativePrompt = preset.negativePrompt?.trim() || sceneSpec?.negative_prompt || "";
     if (sceneSpec?.profile_prompt && sceneSpec.profile === promptProfile) {
       prompt = sceneSpec.profile_prompt;
@@ -1056,7 +1060,10 @@ export function useChatSession(deps: ChatSessionDeps) {
           characterLoraActor,
         );
         setMessages((current) => bindMediaSlotPrompt(current, messageId, slotId, r.prompt_id!));
-        pollResult(r.prompt_id, outputNodeIds, regeneration, target, prompt, useVideo ? "video" : "image");
+        const baseSlotRef = useVideo && videoBaseRef?.sourceMessageId && videoBaseRef?.sourceSlotId
+          ? { messageId: videoBaseRef.sourceMessageId, slotId: videoBaseRef.sourceSlotId }
+          : undefined;
+        pollResult(r.prompt_id, outputNodeIds, regeneration, target, prompt, useVideo ? "video" : "image", baseSlotRef);
       } else {
         failSlot("submit", "ComfyUI 没有返回任务 ID");
       }

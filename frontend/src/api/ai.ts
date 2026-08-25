@@ -864,6 +864,15 @@ export interface Generation {
   model_name?: string;
   lora_names?: string;
   created_at?: number;   // 入库毫秒时间戳（权威排序键；历史记录可能为 0/缺失）
+  /** M2.1/M2.2：媒体类型（image|video），视频资产按 video 渲染/播放 */
+  mediaType?: "image" | "video";
+  /** M2.1：派生链弱引用（视频→首帧底图槽），只读展示不级联 */
+  derivedFrom?: Array<{
+    media_slot_ref?: { message_id: string; slot_id: string };
+    asset_id?: string;
+    turn_id?: string;
+    kind?: string;
+  }>;
 }
 
 // 列出某仓库的生成记录（图片+提示词+标签），供仓库详情页图片网格

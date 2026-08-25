@@ -50,6 +50,52 @@ def test_vlm_description_is_indexed_without_replacing_display_prompt(monkeypatch
     assert "雨夜" in indexed.page_content
 
 
+def test_video_generation_keeps_media_type_and_derived_from(monkeypatch):
+    """M2.1：视频入库带 media_type=video + derived_from 弱引用，列表透出。"""
+    store = MemoryStore()
+    monkeypatch.setattr(rag_store, "_store", lambda *_args: store)
+
+    derived = [{
+        "media_slot_ref": {"message_id": "m1", "slot_id": "s2"},
+        "kind": "video_base_image",
+    }]
+    rag_store.index_generation(
+        "repo", rag_backend.EmbedConfig(), "舞蹈动作",
+        image_url="video://clip1", media_type="video", derived_from=derived,
+    )
+
+    item = rag_store.list_generations("repo", rag_backend.EmbedConfig())[0]
+    assert item["mediaType"] == "video"
+    assert item["derivedFrom"] == derived
+
+
+def test_derived_from_parse_tolerates_bad_json(monkeypatch):
+    """M2.1：derived_from metadata 损坏时回落空列表，不抛错。"""
+    store = MemoryStore()
+    monkeypatch.setattr(rag_store, "_store", lambda *_args: store)
+
+    rag_store.index_generation("repo", rag_backend.EmbedConfig(), "p", image_url="image://x")
+    # 模拟旧/脏数据：metadata.derived_from 不是合法 JSON
+    doc = next(iter(store.rows.values()))
+    doc.metadata["derived_from"] = "{broken"
+    doc.metadata["media_type"] = "video"
+
+    item = rag_store.list_generations("repo", rag_backend.EmbedConfig())[0]
+    assert item["derivedFrom"] == []
+    assert item["mediaType"] == "video"
+
+
+def test_legacy_generation_defaults_to_image(monkeypatch):
+    """M2.1：旧记录无 media_type 时按 image 处理，derivedFrom 为空。"""
+    store = MemoryStore()
+    monkeypatch.setattr(rag_store, "_store", lambda *_args: store)
+
+    rag_store.index_generation("repo", rag_backend.EmbedConfig(), "p", image_url="image://x")
+    item = rag_store.list_generations("repo", rag_backend.EmbedConfig())[0]
+    assert item["mediaType"] == "image"
+    assert item["derivedFrom"] == []
+
+
 def test_generation_semantic_search_is_separate_and_description_update_reembeds(monkeypatch):
     store = MemoryStore()
     monkeypatch.setattr(rag_store, "_store", lambda *_args: store)

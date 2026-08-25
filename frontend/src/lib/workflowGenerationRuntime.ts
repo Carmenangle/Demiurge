@@ -11,6 +11,8 @@ export interface PendingGeneration {
   owner?: { threadId: string; repoId: string; outputDir: string };
   /** V1.3：媒体类型驱动超时合同（视频数分钟~十分钟级，独立于图片放宽） */
   mediaType?: "image" | "video" | "audio";
+  /** M2.1：视频首帧底图来源槽引用（供 derived_from 记录） */
+  baseSlotRef?: { messageId: string; slotId: string };
 }
 
 export interface WorkflowWatchInput {
@@ -22,6 +24,7 @@ export interface WorkflowWatchInput {
   prompt?: string;
   owner?: PendingGeneration["owner"];
   mediaType?: PendingGeneration["mediaType"];
+  baseSlotRef?: PendingGeneration["baseSlotRef"];
 }
 
 export interface WorkflowWatchObserver {
@@ -43,7 +46,7 @@ export function registerPending(
   pending: readonly PendingGeneration[], promptId: string, createdAt: number,
   outputNodeIds: string[] = [], regeneration?: RegenerationSnapshot,
   target?: PendingGeneration["target"], prompt = "", owner?: PendingGeneration["owner"],
-  mediaType?: PendingGeneration["mediaType"],
+  mediaType?: PendingGeneration["mediaType"], baseSlotRef?: PendingGeneration["baseSlotRef"],
 ): PendingGeneration[] {
   return [
     ...pending.filter((item) => item.prompt_id !== promptId),
@@ -55,6 +58,7 @@ export function registerPending(
       ...(prompt ? { prompt } : {}),
       ...(owner ? { owner } : {}),
       ...(mediaType ? { mediaType } : {}),
+      ...(baseSlotRef ? { baseSlotRef } : {}),
     },
   ];
 }
@@ -193,6 +197,7 @@ export class WorkflowGenerationRuntime {
     const next = registerPending(
       this.list(), input.promptId, this.now(), input.outputNodeIds,
       input.regeneration, input.target, input.prompt, input.owner, input.mediaType,
+      input.baseSlotRef,
     );
     this.write(next);
     return next.find((item) => item.prompt_id === input.promptId)!;

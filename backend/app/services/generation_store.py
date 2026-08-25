@@ -89,13 +89,16 @@ def _save_remote_image(url: str, output_dir: str, repo_id: str = "home") -> str:
 def _index_with_retry(repo_id: str, cfg: EmbedConfig, prompt: str,
                       tags: str = "", image_url: str = "",
                       template_name: str = "", model_name: str = "",
-                      lora_names: str = "") -> bool:
+                      lora_names: str = "", media_type: str = "image",
+                      derived_from: list | None = None) -> bool:
     for attempt in range(3):
         try:
             rag_store.index_generation(repo_id, cfg, prompt, tags, image_url,
                                        template_name=template_name,
                                        model_name=model_name,
-                                       lora_names=lora_names)
+                                       lora_names=lora_names,
+                                       media_type=media_type,
+                                       derived_from=derived_from)
             return True
         except Exception as exc:  # noqa: BLE001
             _LOG.warning("index_generation 失败(第%d次) repo=%s img=%s: %s",
@@ -273,9 +276,11 @@ def finalize_workflow_batch(
     lora_names: str = "",
     target_message_id: str = "",
     target_slot_id: str = "",
+    base_slot_ref: dict | None = None,  # M2.1 视频首帧底图槽引用 {message_id, slot_id}
 ) -> dict:
     """持久化一批已完成的 ComfyUI 产出；单图/单视频/单音频阶段失败不会阻断其他产出。
-    videos/audios 与 images 同结构({filename,subfolder,type})，消息以 video/audio 字段承载。"""
+    videos/audios 与 images 同结构({filename,subfolder,type})，消息以 video/audio 字段承载。
+    base_slot_ref 供视频入库记录 derived_from（底图槽弱引用，来源删除不级联）。"""
     videos = videos or []
     audios = audios or []
     if not thread_id or not repo_id or not prompt_id:
@@ -380,7 +385,7 @@ def finalize_workflow_batch(
     for index, video in enumerate(videos):
         key = _workflow_key(thread_id, prompt_id, video)
         mid = _message_id(key)
-        persisted = snapshotted = False
+        persisted = indexed = snapshotted = False
         errors: list[str] = []
         shown = ""
         if durable:
@@ -410,11 +415,25 @@ def finalize_workflow_batch(
         if not inline_target:
             messages.append(message)
         if durable:
+            # M2.1：视频入库资产库（media_type=video），derived_from 记首帧底图槽弱引用
+            derived = [{
+                "media_slot_ref": {"message_id": str(base_slot_ref.get("message_id", "")),
+                                   "slot_id": str(base_slot_ref.get("slot_id", ""))},
+                "kind": "video_base_image",
+            }] if base_slot_ref else None
+            indexed = _index_with_retry(repo_id, cfg, prompt, "", shown,
+                                        template_name=template_name,
+                                        model_name=model_name,
+                                        lora_names=lora_names,
+                                        media_type="video", derived_from=derived)
+            if not indexed:
+                errors.append("index")
             if inline_target and target is None:
                 try:
                     snapshotted = chat_snapshot.resolve_media_slot(
                         thread_id, target_message_id, target_slot_id, shown,
                         media_type="video", regeneration=regeneration,
+                        derived_from=derived,
                     )
                     if not snapshotted:
                         errors.append("snapshot")
@@ -431,7 +450,7 @@ def finalize_workflow_batch(
                       "media_type": "video", "url": shown}
         results.append({
             "key": key, "message_id": mid, "display_url": shown,
-            "persisted": persisted, "indexed": False,
+            "persisted": persisted, "indexed": indexed,
             "snapshotted": snapshotted, "errors": errors,
         })
 

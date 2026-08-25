@@ -184,6 +184,7 @@ class FinalizeGenerationRequest(BaseModel):
     template_name: str = ""
     model_name: str = ""
     lora_names: str = ""
+    base_slot_ref: dict | None = None  # M2.1 视频首帧底图槽引用 {message_id, slot_id}
 
 
 @router.post("/finalize-generation")
@@ -212,6 +213,7 @@ def finalize_generation(req: FinalizeGenerationRequest) -> dict[str, object]:
             lora_names=req.lora_names,
             target_message_id=req.target_message_id,
             target_slot_id=req.target_slot_id,
+            base_slot_ref=req.base_slot_ref,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

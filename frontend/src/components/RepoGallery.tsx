@@ -1,5 +1,5 @@
 import { useEffect, useCallback, useRef, useState } from "react";
-import { Check, ExternalLink, Images, Plus, Search, Send, Sparkles, Trash2, X } from "lucide-react";
+import { Check, ExternalLink, Images, Play, Plus, Search, Send, Sparkles, Trash2, X } from "lucide-react";
 import { activeChatModel, useSettings } from "../stores/settings";
 import {
   listGenerations, deleteDoc, setTags, describeImage, tagStats, pruneGenerations,
@@ -131,6 +131,7 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
   const [preferenceBase, setPreferenceBase] = useState<GenWithRepo | null>(null);
   const [preferenceReason, setPreferenceReason] = useState<VisualPreferenceReason>("character");
   const [savingPreference, setSavingPreference] = useState(false);
+  const [mediaFilter, setMediaFilter] = useState<"all" | "image" | "video">("all");  // M2.2 媒体类型筛选
   const PAGE_SIZE = 32; // 一行 8 个 × 四行
 
   // AI 打标专用对话模型（与生图主流程用的是同一处配置）
@@ -386,7 +387,7 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
   // 资产库模式额外支持按仓库名搜索：命中仓库名则显示该仓库全部图。
   const terms = tagQuery.toLowerCase().split(/[\s,，;；]+/).filter(Boolean);
   const sourceItems = semanticMode && terms.length > 0 ? semanticItems : items;
-  const filtered = semanticMode && terms.length > 0
+  const filteredBase = semanticMode && terms.length > 0
     ? sourceItems
     : terms.length === 0 ? sourceItems : sourceItems.filter((g) => {
         const repoName = (repoNames?.[(g as GenWithRepo).repoId || ""] || "").toLowerCase();
@@ -394,6 +395,9 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
           ...g.tags.map((t) => t.toLowerCase()), repoName];
         return terms.every((term) => hay.some((h) => h.includes(term)));
       });
+  // M2.2：媒体类型筛选（全部/图片/视频），视频资产按 mediaType 识别
+  const filtered = mediaFilter === "all" ? filteredBase
+    : filteredBase.filter((g) => (g.mediaType || "image") === mediaFilter);
   // 从新到旧：优先按后端权威时间戳 created_at 倒序（不受文件改名/删图影响）；
   // 历史记录无 created_at(=0) 时回退到 image_url 文件名编号（时间戳/旧顺序命名都能取到）。
   const orderKey = (g: Generation) => g.created_at || seqOf(g.image_url);
@@ -474,6 +478,17 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
           <button className="btn" onClick={() => setShowTagCloud((v) => !v)}>
             标签统计（{tagCounts.length}）
           </button>
+          <div className="lora-mode-switch" role="group" aria-label="媒体类型" style={{ display: "inline-flex", gap: 4 }}>
+            {(["all", "image", "video"] as const).map((m) => (
+              <button
+                key={m}
+                className={`btn ${mediaFilter === m ? "primary" : ""}`}
+                onClick={() => { setMediaFilter(m); setPage(1); }}
+              >
+                {m === "all" ? "全部" : m === "image" ? "图片" : "视频"}
+              </button>
+            ))}
+          </div>
           <button className={`btn ${semanticMode ? "active" : ""}`}
             onClick={() => { setSemanticMode((value) => !value); setPage(1); }}>
             {semanticMode ? "语义搜索：开" : "语义搜索"}
@@ -526,8 +541,20 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
           <div className="gallery-grid">
             {shown.map((g) => (
               <div key={g.id} className={`gallery-cell ${selMode && selected.has(g.id) ? "sel" : ""}`} title={g.prompt}>
-                <img src={g.image_url} alt="生成图" loading="lazy"
-                  onClick={() => selMode ? toggleSel(g.id) : setActive(g)} />
+                {g.mediaType === "video" ? (
+                  <div className="gallery-video-cell" onClick={() => selMode ? toggleSel(g.id) : setActive(g)}>
+                    <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", gap: 6 }}>
+                      <Play size={22} /> 视频
+                    </div>
+                    <span className="gallery-media-badge">🎬</span>
+                  </div>
+                ) : (
+                  <img src={g.image_url} alt="生成图" loading="lazy"
+                    onClick={() => selMode ? toggleSel(g.id) : setActive(g)} />
+                )}
+                {g.mediaType === "video" && !selMode && (
+                  <span className="gallery-media-tag" title="视频资产（点击播放）">视频</span>
+                )}
                 {selMode ? (
                   <span className={`gallery-check ${selected.has(g.id) ? "on" : ""}`}>
                     {selected.has(g.id) && <Check size={14} />}
@@ -594,7 +621,31 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
               </button>
             </div>
             <div style={{ overflowY: "auto" }}>
-              <img src={active.image_url} alt="大图" style={{ width: "100%", borderRadius: 10, marginBottom: 12 }} />
+              {active.mediaType === "video" ? (
+                <video src={active.image_url} controls style={{ width: "100%", borderRadius: 10, marginBottom: 12, maxHeight: 420, background: "#000" }} />
+              ) : (
+                <img src={active.image_url} alt="大图" style={{ width: "100%", borderRadius: 10, marginBottom: 12 }} />
+              )}
+              {active.mediaType === "video" && (
+                <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 8 }}>🎬 视频资产（首帧底图派生链见下）</div>
+              )}
+              {active.derivedFrom?.length ? (
+                <div style={{ fontSize: 12, color: "var(--text-muted)", margin: "0 0 10px", lineHeight: 1.6 }}>
+                  <div style={{ marginBottom: 2 }}>派生来源（只读展示，删除来源不影响本条）</div>
+                  {active.derivedFrom.map((d, i) => {
+                    const slot = d.media_slot_ref;
+                    const label = slot
+                      ? `本作品对话中的插画槽（消息 ${slot.message_id.slice(0, 8)}… · 槽 ${slot.slot_id}）`
+                      : (d.asset_id ? `资产 ${d.asset_id}` : "来源已删除");
+                    return (
+                      <div key={i} style={{ background: "rgba(127,127,127,0.1)", borderRadius: 6, padding: "4px 8px", marginBottom: 4 }}>
+                        <span style={{ color: "var(--text)" }}>首帧底图</span> ← {label}
+                        {d.kind ? <span style={{ opacity: 0.7 }}> · {d.kind}</span> : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : null}
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
                 <div style={{ fontSize: 12, color: "var(--text-muted)" }}>生成参数 / 提示词</div>
                 {active.prompt && <CopyButton text={active.prompt} className="img-tool" />}

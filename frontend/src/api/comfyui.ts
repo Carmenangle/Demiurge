@@ -129,6 +129,7 @@ export function finalizeGeneration(args: {
   regeneration?: RegenerationSnapshot;
   templateName?: string; modelName?: string; loraNames?: string[];
   target?: { messageId: string; slotId: string };
+  baseSlotRef?: { messageId: string; slotId: string };
 }) {
   return apiPost<FinalizeGenerationResponse>("/comfyui/finalize-generation", {
     thread_id: args.threadId, repo_id: args.repoId, prompt_id: args.promptId,
@@ -142,6 +143,7 @@ export function finalizeGeneration(args: {
     lora_names: args.loraNames ? args.loraNames.join(",") : "",
     target_message_id: args.target?.messageId || "",
     target_slot_id: args.target?.slotId || "",
+    base_slot_ref: args.baseSlotRef || null,
   });
 }
 

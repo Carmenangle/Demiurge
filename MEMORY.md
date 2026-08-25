@@ -42,3 +42,28 @@ constraints that are safe to include in private agent context.
 - **后续项**：缺音轨角色弹 Toast（`skippedAudioSpeakers` + `onNotify`）；`AudioPlayer` 波形可视化
   （Web Audio 解码 96 桶静态波形替代 range 滑块，失败静默回退；纯逻辑 `audioWaveform.ts` 可单测）。
 - 决策记录：`docs/memory/audio-floor-aggregation-2026-08-24.md`；门禁前端 vitest 500 passed / tsc ✅。
+
+## 灵感卡链路收尾加固（2026-08-25）
+
+灵感卡 = 联网搜 + 提炼的「标题+内容」中文知识总结，**主题不限**（视觉/设定/剧情都适用），
+不是视觉专用。曾犯过的错：把「插入对话」的 Agent 提示词模板写成「风格/视觉/妆造/场景等方向」，
+窄化成视觉参考——已改为主题无关的通用语义。
+
+**三条不变量（以后再改不要破）**：
+1. **主题无关**：插入对话的「灵感参考」身份标记不预设视觉/风格方向；身份语义三点通用——
+   参考素材、非指令、冲突以用户要求为准。图片说明按有无封面图条件输出（纯文本卡不声称「消息附带图片」）。
+2. **「插入对话」= 插到输入框图片栏 9:16 卡片，不是直接发送**：发送时 `serializeInspirationSend`
+   图文拆分（封面图进图片参数、title/content 转语义文本追加在用户文本后）。
+3. **编辑回填还原卡片**：用户消息持久化 `inspirationAttachments` 字段（ChatMessage + runFreeText 落盘，
+   快照/slim 自动保留），`userMessageRichContent` 用 `deserializeInspirationSend` 逆序列化拆回
+   「纯用户文本/图 + 卡片附件」——编辑已发送消息不退化。
+
+**素材库入口**：「发送对话框」已改为「插入输入框」：`SendToChatModal` 增 `insertInput` 模式
+（选作品、不落盘），`pushInspirationsToChat` 写全局缓存 + `CHAT_INSPIRATION_EVENT` 事件，
+`ChatView` 挂载/收事件时消费。画布/对话模式共用同一 `RichInput`，两种模式都能插卡。
+
+**关键文件**：`lib/inspirationInsert.ts`（serialize/deserialize/push/consume/事件）、
+`lib/chatGeneration.ts`（userMessageRichContent 逆解析）、`components/RichInput.tsx`、
+`views/ChatView.tsx`（通道消费）、`AppBody.tsx`（素材库插入入口）、`components/SendToChatModal.tsx`。
+
+提交：`3a148ad`（模板主题无关）、`1cb6b11`（编辑回填 + 插入输入框闭环）；门禁 vitest 522 passed / tsc ✅。
