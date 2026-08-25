@@ -23,7 +23,12 @@ _MERGED_SLOT_PREFIX = "merged-"
 
 
 def find_ffmpeg() -> str | None:
-    """定位 ffmpeg：PATH → ComfyUI 自带 imageio_ffmpeg 二进制。"""
+    """定位 ffmpeg：PATH → ComfyUI 自带 imageio_ffmpeg 二进制。
+
+    注意：便携版 ComfyUI 的 ffmpeg 装在 python 虚拟环境
+    （<根>/python/Lib/site-packages/imageio_ffmpeg/binaries/），与 ComfyUI 主目录
+    （<根>/ComfyUI，即 config.path）平级，故需同时搜索 config.path 与其父目录。
+    """
     exe = shutil.which("ffmpeg")
     if exe:
         return exe
@@ -32,8 +37,13 @@ def find_ffmpeg() -> str | None:
         root = Path(str(cfg.get("path") or ""))
     except Exception:  # noqa: BLE001  配置缺失时按无 ComfyUI 路径处理
         root = Path("")
-    if root.is_dir():
-        hits = sorted(root.glob("**/imageio_ffmpeg/binaries/ffmpeg*.exe"))
+    # 去重候选根：ComfyUI 主目录 + 其父目录（python 虚拟环境所在层）
+    candidates: list[Path] = []
+    for base in (root, root.parent):
+        if base.is_dir() and base not in candidates:
+            candidates.append(base)
+    for base in candidates:
+        hits = sorted(base.glob("**/imageio_ffmpeg/binaries/ffmpeg*.exe"))
         if hits:
             return str(hits[0])
     return None

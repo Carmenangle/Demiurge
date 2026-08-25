@@ -101,3 +101,29 @@ def test_merge_audio_for_message_段数不足报错(monkeypatch, tmp_path):
     import pytest
     with pytest.raises(ValueError):
         audio_merge.merge_audio_for_message("thread", "bot")
+
+
+def test_find_ffmpeg_在父目录python环境命中(monkeypatch, tmp_path):
+    """便携版 ffmpeg 装在 <根>/python/... 而 config.path 指向 <根>/ComfyUI，
+    必须搜父目录才能命中（回归：ffmpeg 定位层级错误导致拼接失败）。"""
+    monkeypatch.setattr(audio_merge.shutil, "which", lambda name: None)
+    # 构造 <root>/ComfyUI 主目录 + <root>/python/.../ffmpeg.exe
+    root = tmp_path / "ComfyUI_aaaki"
+    comfy_dir = root / "ComfyUI"
+    ffmpeg_bin = root / "python" / "Lib" / "site-packages" / "imageio_ffmpeg" / "binaries" / "ffmpeg.exe"
+    comfy_dir.mkdir(parents=True)
+    ffmpeg_bin.parent.mkdir(parents=True)
+    ffmpeg_bin.write_bytes(b"x")
+    monkeypatch.setattr(
+        audio_merge.comfy_launcher, "load_config",
+        lambda: {"path": str(comfy_dir), "url": "", "python_path": ""},
+    )
+
+    exe = audio_merge.find_ffmpeg()
+    assert exe and exe.lower().endswith("ffmpeg.exe")
+
+
+def test_find_ffmpeg_无配置返回None(monkeypatch):
+    monkeypatch.setattr(audio_merge.shutil, "which", lambda name: None)
+    monkeypatch.setattr(audio_merge.comfy_launcher, "load_config", lambda: {"path": "", "url": ""})
+    assert audio_merge.find_ffmpeg() is None
