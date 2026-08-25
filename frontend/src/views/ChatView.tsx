@@ -37,6 +37,7 @@ import { WorkflowCard } from "../components/WorkflowCard";
 const CanvasStageFlow = lazy(() => import("./CanvasStageFlow").then((m) => ({ default: m.CanvasStageFlow })));
 import { globalPendingToolCreates, canvasBridge } from "../components/canvas/shared";
 import { useChatSession } from "../lib/useChatSession";
+import { inspirationInsertText } from "../lib/inspirationInsert";
 import { ConfirmModal } from "../components/Modal";
 import { MaskEditorModal, type MaskEditorResult } from "../components/MaskEditorModal";
 import { StylePresetModal } from "../components/StylePresetModal";
@@ -656,7 +657,9 @@ export function ChatView({
                   proxyUrl={settings.proxyEnabled ? settings.proxyUrl : ""}
                   outputDir={settings.outputDir}
                   onNotify={showToast}
-                  onInsert={(text) => richRef.current?.insertText(text)}
+                  onInsert={(text, card) => richRef.current?.insertText(
+                    card ? inspirationInsertText(card) : text,
+                  )}
                 />
               ) : (
                 <AssistantMessage

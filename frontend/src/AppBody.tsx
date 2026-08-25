@@ -7,6 +7,7 @@ import { saveSnapshot, chatAppend } from "./api/ai";
 import { createScenarioSnapshot, forkScenarioSnapshot, listScenarioSnapshots } from "./api/scenario";
 import { createScenarioBranch } from "./lib/scenarioBranchRuntime";
 import { SendToChatModal, type SendPayload } from "./components/SendToChatModal";
+import { inspirationInsertText, inspirationInsertImages } from "./lib/inspirationInsert";
 const SettingsView = lazy(() => import("./views/settings/SettingsView").then((m) => ({ default: m.SettingsView })));
 const WorkflowTemplates = lazy(() => import("./pages/WorkflowTemplates").then((m) => ({ default: m.WorkflowTemplates })));
 const ModelDownload = lazy(() => import("./pages/ModelDownload").then((m) => ({ default: m.ModelDownload })));
@@ -170,12 +171,12 @@ export function AppBody(props: AppBodyProps) {
           outputDir={settings.outputDir}
           onSendToCanvas={(items) => setSendTarget({ title: "发送至画布", payload: { text: "", images: items.map((m) => m.url) } })}
           onSendInspirationToChat={(cards) => {
-            // 灵感卡发送对话框：有图=图片+文本；无图=纯文本
+            // 灵感卡发送对话框：带「灵感参考」身份标记 + 图片多模态（Agent 可理解风格/服装参考）
             setSendTarget({
               title: "发送至对话框",
               payload: {
-                text: cards.map((c) => c.content).filter(Boolean).join("\n\n"),
-                images: cards.flatMap((c) => c.images.map((i) => i.url)),
+                text: cards.map((c) => inspirationInsertText(c)).join("\n\n"),
+                images: cards.flatMap((c) => inspirationInsertImages(c)),
               },
             });
           }}

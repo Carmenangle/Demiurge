@@ -669,7 +669,7 @@ export function InspirationCard({
   proxyUrl?: string;
   outputDir?: string;
   onNotify?: (msg: string, kind: "success" | "error" | "info") => void;
-  onInsert: (text: string) => void;
+  onInsert: (text: string, card?: ChatMessage["inspiration"]) => void;
 }) {
   const images = data?.images || [];
   const [selected, setSelected] = useState<string[]>(data?.selected || []);
@@ -775,7 +775,7 @@ export function InspirationCard({
             <button
               className="insp-insert"
               title="把这段总结插入到输入框"
-              onClick={() => onInsert(data?.content || "")}
+              onClick={() => onInsert(data?.content || "", data)}
             >
               <CornerDownRight size={13} /> 插入对话
             </button>

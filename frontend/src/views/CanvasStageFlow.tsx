@@ -30,6 +30,7 @@ import {
 import {
   loadLayout, saveLayout, clampScale, type NodeLayout, type InspirationCardStored, type ReferenceImageStored, type Viewport,
 } from "../lib/canvasLayout";
+import { inspirationInsertText } from "../lib/inspirationInsert";
 import { SendToChatModal, type SendPayload } from "../components/SendToChatModal";
 import { ConfirmModal } from "../components/Modal";
 import { WorkflowToolModal } from "../components/WorkflowToolModal";
@@ -1843,12 +1844,14 @@ export function CanvasStageFlow({
   const [groupRenameTitle, setGroupRenameTitle] = useState("");
   const [newInspiration, setNewInspiration] = useState<{ kind: InspirationKind; title: string; content: string } | null>(null);
 
-  // 灵感卡 → 插入对话：调 chatAppend 把 content 作为 user 消息追加到当前作品对话流
-  // 不动剧情模式代码——剧情模式会基于 RAG/编排自动处理这条消息
+  // 灵感卡 → 插入对话：调 chatAppend 把「带参考标记」的文本 + 图片作为 user 消息追加到当前作品对话流。
+  // 不动剧情模式代码——剧情模式会基于 RAG/编排自动处理这条消息。
   const insertInspirationToChat = useCallback(async (card: InspirationCardStored) => {
     if (!repoId) { showToast("无当前作品，无法插入", "error"); return; }
     try {
-      await chatAppend(repoId, "user", card.content || "(空内容)");
+      const text = inspirationInsertText(card);
+      const images = card.imageUrl ? [card.imageUrl] : [];
+      await chatAppend(repoId, "user", text, images);
       showToast(`已插入「${card.title}」到对话流`, "success");
     } catch (e) {
       showToast(`插入失败：${(e as Error).message}`, "error");
