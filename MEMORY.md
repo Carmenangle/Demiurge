@@ -67,3 +67,25 @@ constraints that are safe to include in private agent context.
 `views/ChatView.tsx`（通道消费）、`AppBody.tsx`（素材库插入入口）、`components/SendToChatModal.tsx`。
 
 提交：`3a148ad`（模板主题无关）、`1cb6b11`（编辑回填 + 插入输入框闭环）；门禁 vitest 522 passed / tsc ✅。
+
+## M2.1/M2.2 派生关系与多模态资产（2026-08-25）
+
+**M2.1 derived_from 派生元数据**（ROADMAP 已完成）：
+- 视频产出经 ComfyUI finalize 时**入库资产库**（此前 `indexed: False` 不进库），metadata 记
+  `media_type=video` + `derived_from=[{media_slot_ref:{message_id,slot_id}, kind:"video_base_image"}]`。
+- 来源 = V1.1 视频首帧底图：前端 `resolveVideoBaseImageRef` 取底图时同时取来源槽引用 →
+  `PendingGeneration.baseSlotRef` → `finalize-generation` API `base_slot_ref` → 后端
+  `FinalizeGenerationRequest` → `finalize_workflow_batch`。
+- `chat_snapshot.resolve_media_slot` 视频槽落盘 `derivedFrom`。
+- 资产库 UI：视频条目「派生来源」只读行；弱引用（来源删除不报错不级联）。
+
+**M2.2 资产库多模态筛选**（ROADMAP 已完成）：
+- 资产库（RepoGallery）媒体类型筛选（全部/图片/视频，`mediaType` 识别）。
+- 视频条目网格占位封面（🎬 图标 + 标签），详情 `<video controls>` 播放；**不为封面引 ffmpeg**（红线克制）。
+- 灵感卡/知识文档筛选维持原样（上网素材 tab / 知识库页），不强行并入 generation 资产库。
+
+**M1.5 定调**（2026-08-25）：ROADMAP 原设想「素材图一键设为角色底图/参考图/工作流底图」被更贴合创作流的
+方案取代——**灵感卡「插入对话」= 插到输入框图片栏 9:16 卡片，发送时图文拆分**（见上节三条不变量）。
+原「设为底图/参考图」若后续需要，作为独立能力另立项。
+
+提交：`648cca7`（M2.1+M2.2）；门禁 vitest 525 passed / tsc ✅；后端 13 passed（asset_search/rag_backend）。

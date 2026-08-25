@@ -140,12 +140,14 @@ def execute_generation(ctx: Any, kind: str, original: str, prompt: str,
         if kind == "video":
             url = video_gen.generate(ctx["vid_base"], ctx["vid_key"], ctx["vid_model"],
                                      prompt, size=ctx.get("size", "1024x1024"),
-                                     proxy=ctx.get("vid_proxy", ""))
+                                     proxy=ctx.get("vid_proxy", ""),
+                                     image=images[0] if images else None)
             rec = generation_store.persist_video(ctx["thread_id"], ctx["repo_id"], prompt,
                                                  url, ctx["output_dir"])
             approved = prompt_approval_store.get(ctx["thread_id"], approval_id) if approval_id else None
             _clear_after_success(ctx["thread_id"], approval_id)
-            return {"result_text": f"已生成视频。提示词：{prompt}",
+            mode = "图生视频（首帧参考图）" if images else "文生视频"
+            return {"result_text": f"已生成{mode}。提示词：{prompt}",
                     "video_recs": [rec], "trace": trace,
                     **({"approval": _approval_payload(approved or {}, "submitted")} if approved else {})}
         if kind == "img2img":

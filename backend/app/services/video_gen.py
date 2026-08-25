@@ -15,24 +15,33 @@ _POLL_MAX_TRIES = 60
 
 
 def _norm_url(base_url: str) -> str:
-    url = (base_url or "").rstrip("/")
-    if "/video/generations" in url or "/videos/generations" in url:
+    """归一视频生成端点。适用于所有 OpenAI 兼容形态：
+    填完整端点（含 /v1/video/generations、/v2/videos/generations 等）→ 原样使用；
+    填带版本前缀（…/v1、…/v2）→ 拼对应端点；
+    填纯站点根 → 默认 v1 布局（向后兼容），报错时提示填完整端点最稳。"""
+    url = (base_url or "").strip().rstrip("/")
+    low = url.lower()
+    if "/video/generations" in low or "/videos/generations" in low:
         return url
-    if not url.endswith("/v1"):
-        url += "/v1"
-    return url + "/video/generations"
+    if low.endswith("/v1"):
+        return url + "/video/generations"
+    if low.endswith("/v2"):
+        return url + "/videos/generations"
+    return url + "/v1/video/generations"
 
 
 def _norm_task_url(base_url: str, task_id: str) -> str:
-    """轮询任务状态地址：<base>/v1/video/generations/<id>。"""
-    url = (base_url or "").rstrip("/")
-    # 若填的是提交地址，取其目录作为任务基址
+    """轮询任务状态地址：<完整端点>/<id>；填根/版本前缀时按 _norm_url 同规则拼。"""
+    url = (base_url or "").strip().rstrip("/")
+    low = url.lower()
     for tail in ("/video/generations", "/videos/generations"):
-        if url.endswith(tail):
+        if low.endswith(tail):
             return f"{url}/{task_id}"
-    if not url.endswith("/v1"):
-        url += "/v1"
-    return f"{url}/video/generations/{task_id}"
+    if low.endswith("/v1"):
+        return url + "/video/generations/" + task_id
+    if low.endswith("/v2"):
+        return url + "/videos/generations/" + task_id
+    return url + "/v1/video/generations/" + task_id
 
 
 def _pick_video_url(payload: dict) -> str:
@@ -77,10 +86,43 @@ def _status_of(payload: dict) -> str:
     return "running"
 
 
-def generate(base_url: str, api_key: str, model: str, prompt: str,
-             size: str = "1024x1024", proxy: str = "") -> str:
-    """文生视频，返回可展示地址（http URL 或 data:video/...;base64,...）。
+def _to_data_uri(image: str, proxy: str = "") -> str:
+    """把参考图（data URI / http(s) URL / 本地文件路径）归一为 data URI，供 JSON payload 提交。
 
+    参考图走 JSON 提交（非 multipart），远端服务访问不到本机 127.0.0.1 的 local-view 地址，
+    必须内联成 base64。本地回环地址直读不走代理（Clash 等无法转发 localhost，会打成 502）。
+    """
+    import base64
+    import mimetypes
+    import os
+    import re
+    if image.startswith("data:"):
+        return image
+    if re.match(r"^https?://", image):
+        from app.services.url_guard import is_local_view_url
+        use_proxy = proxy if not is_local_view_url(image) else ""
+        client_kwargs = {"trust_env": False, "timeout": 120}
+        if use_proxy:
+            client_kwargs["proxy"] = use_proxy
+        with httpx.Client(**client_kwargs) as c:
+            r = c.get(image)
+            r.raise_for_status()
+            mime = r.headers.get("content-type", "image/png").split(";")[0]
+            return f"data:{mime};base64,{base64.b64encode(r.content).decode()}"
+    if os.path.isfile(image):
+        mime = mimetypes.guess_type(image)[0] or "image/png"
+        with open(image, "rb") as f:
+            return f"data:{mime};base64,{base64.b64encode(f.read()).decode()}"
+    raise RuntimeError("参考图无法读取（须为 data URI / http(s) URL / 本地文件路径）")
+
+
+def generate(base_url: str, api_key: str, model: str, prompt: str,
+             size: str = "1024x1024", proxy: str = "", image: str | None = None) -> str:
+    """生视频，返回可展示地址（http URL 或 data:video/...;base64,...）。
+
+    image 传首帧参考图（data URI / URL / 本地路径）→ 图生视频；不传 → 文生视频。
+    参考图字段名按 OpenAI 兼容最常见形态用 `image`；若 Provider 字段名不同，
+    改本函数 payload 里的一处键名即可（不同中转站字段差异通常仅此一处）。
     异步接口：提交拿 task_id，轮询状态直到成功取视频 URL；
     同步接口：提交直接回视频 URL。失败抛异常，由调用方（工具/路由）捕获转错误文本。
     """
@@ -89,7 +131,9 @@ def generate(base_url: str, api_key: str, model: str, prompt: str,
     url = _norm_url(base_url)
     headers = {"Authorization": f"Bearer {api_key or 'not-needed'}",
                "Content-Type": "application/json"}
-    payload = {"model": model, "prompt": prompt, "size": size}
+    payload: dict = {"model": model, "prompt": prompt, "size": size}
+    if image:
+        payload["image"] = _to_data_uri(image, proxy)
     client_kwargs = {"trust_env": False, "timeout": 300}
     if proxy:
         client_kwargs["proxy"] = proxy

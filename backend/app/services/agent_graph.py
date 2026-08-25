@@ -365,13 +365,14 @@ def video_node(state: AgentState) -> dict:
     run_trace.emit(ctx, "agent.started", agent="video")
     original = state.get("user_text", "")
     execution_prompt = agent_context.standalone_execution_prompt(ctx, original)
+    imgs = state.get("images", [])  # V1.4：用户消息带图 → 首帧图生视频
     trace = state.get("trace", []) + ["🎬 视频专家执行中…"]
     if (ctx.get("style_template") or "").strip():
         candidate = _styled_prompt(ctx, execution_prompt)
-        result = generation_approval.save_prompt_review(ctx, "video", original, candidate, [], "style")
+        result = generation_approval.save_prompt_review(ctx, "video", original, candidate, imgs, "style")
         result["trace"] = trace + result["trace"]
         return result
-    return generation_approval.execute_generation(ctx, "video", original, execution_prompt, [], trace)
+    return generation_approval.execute_generation(ctx, "video", original, execution_prompt, imgs, trace)
 
 
 def img2img_node(state: AgentState) -> dict:
