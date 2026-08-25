@@ -1,3 +1,4 @@
+import tempfile
 from pathlib import Path
 
 from app.services import audio_merge, chat_snapshot
@@ -40,7 +41,9 @@ def test_concat_audio_调用ffmpeg_concat(monkeypatch, tmp_path):
     assert calls, "应调用 subprocess.run"
     cmd = calls[0]["cmd"]
     assert cmd[0] == "ffmpeg"
-    assert "-c" in cmd and "copy" in cmd
+    # 关键：必须重编码为 flac（修正 STREAMINFO 时长），不能 -c copy
+    assert "-c:a" in cmd and cmd[cmd.index("-c:a") + 1] == "flac"
+    assert "-c" not in cmd or "copy" not in cmd
     list_content = calls[0]["list"]
     assert "a.flac" in list_content and "b.flac" in list_content
     assert list_content.index("a.flac") < list_content.index("b.flac")
@@ -127,3 +130,33 @@ def test_find_ffmpeg_无配置返回None(monkeypatch):
     monkeypatch.setattr(audio_merge.shutil, "which", lambda name: None)
     monkeypatch.setattr(audio_merge.comfy_launcher, "load_config", lambda: {"path": "", "url": ""})
     assert audio_merge.find_ffmpeg() is None
+
+
+def test_concat_audio_重编码后时长正确_真实ffmpeg():
+    """回归：flac -c copy 会导致 STREAMINFO 时长只记第一段（2s 播放就停）。
+    重编码后时长应等于各段之和。无 ffmpeg 时跳过。"""
+    import pytest
+    exe = audio_merge.find_ffmpeg()
+    if not exe:
+        pytest.skip("无 ffmpeg，跳过真实时长验证")
+    import subprocess
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        a = tmp / "a.wav"
+        b = tmp / "b.wav"
+        out = tmp / "merged.flac"
+        for f, dur in ((a, 1.0), (b, 2.5)):
+            subprocess.run(
+                [exe, "-y", "-f", "lavfi", "-i", f"sine=frequency=440:duration={dur}",
+                 "-ar", "44100", "-ac", "1", str(f)],
+                capture_output=True, text=True, check=True,
+            )
+        audio_merge.concat_audio([str(a), str(b)], out, ffmpeg=exe)
+        probe = subprocess.run([exe, "-i", str(out)], capture_output=True, text=True)
+        dur_line = next((l for l in probe.stderr.splitlines() if "Duration:" in l), "")
+        assert dur_line, "应能读取合并产物时长"
+        # "Duration: 00:00:03.50" → 3.5
+        token = dur_line.split("Duration:")[1].split(",")[0].strip()
+        h, m, s = token.split(":")
+        total = int(h) * 3600 + int(m) * 60 + float(s)
+        assert 3.0 <= total <= 4.0, f"合并时长应为 ~3.5s，实际 {total}s"

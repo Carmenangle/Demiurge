@@ -146,10 +146,11 @@ export function finalizeGeneration(args: {
 }
 
 // 音频分条按顺序拼接成完整版（后端 ffmpeg concat + 落盘回写快照）
-export function mergeAudio(args: { threadId: string; messageId: string }) {
+export function mergeAudio(args: { threadId: string; messageId: string; force?: boolean }) {
   return apiPost<{ ok: boolean; url: string }>("/comfyui/merge-audio", {
     thread_id: args.threadId,
     message_id: args.messageId,
+    force: !!args.force,
   });
 }
 

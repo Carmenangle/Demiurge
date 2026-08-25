@@ -601,3 +601,32 @@ def append_ready_part(thread_id: str, message_id: str, part: dict) -> bool:
             _save_unlocked(thread_id, items)
             return True
     return False
+
+
+def remove_parts_matching(thread_id: str, message_id: str,
+                          predicate) -> bool:
+    """删除消息中满足条件的 part（如合并后移除分条音频），保留其余 part 与正文。
+
+    predicate 只作用于 dict part；返回是否实际删除过。删除后若 parts 为空则清空字段。
+    """
+    if not message_id:
+        return False
+    with _thread_lock(thread_id):
+        items = load(thread_id)
+        for index, item in enumerate(items):
+            if not isinstance(item, dict) or item.get("id") != message_id:
+                continue
+            original = item.get("parts") or []
+            next_parts = [p for p in original
+                          if not (isinstance(p, dict) and predicate(p))]
+            if len(next_parts) == len(original):
+                return False
+            updated = {**item}
+            if next_parts:
+                updated["parts"] = next_parts
+            else:
+                updated.pop("parts", None)
+            items[index] = updated
+            _save_unlocked(thread_id, items)
+            return True
+    return False

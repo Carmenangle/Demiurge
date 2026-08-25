@@ -1154,7 +1154,7 @@ export function useChatSession(deps: ChatSessionDeps) {
   };
 
   // 音频分条按顺序拼接完整版：后端 ffmpeg concat + 落盘回写快照，
-  // 成功后把 merged part 追加进当前消息（刷新后从快照恢复，仍显示完整版）。
+  // 成功后移除分条音频、只保留 merged（刷新后从快照恢复，仍只显示完整版）。
   const mergeAudioTracks = async (messageId: string) => {
     const msg = messagesRef.current.find((m) => m.id === messageId);
     const tracks = (msg?.parts || []).filter(
@@ -1164,15 +1164,25 @@ export function useChatSession(deps: ChatSessionDeps) {
       console.warn("[merge-audio] 分条音频不足，跳过", { messageId, count: tracks.length });
       return;
     }
+    // 已有旧完整版（如早前 -c copy 时长错误产物）时强制覆盖重拼
+    const hasMerged = (msg?.parts || []).some(
+      (p) => p.type === "audio" && (p.slotId || "").startsWith("merged-"),
+    );
     try {
-      const r = await mergeAudio({ threadId, messageId });
+      const r = await mergeAudio({ threadId, messageId, force: hasMerged });
       if (r.ok && r.url) {
         setMessages((current) => current.map((m) => m.id === messageId ? {
           ...m,
-          parts: [...(m.parts || []), {
-            type: "audio" as const, url: r.url, slotId: `merged-${messageId}`,
-            status: "ready" as const, kind: "audio" as const, speaker: "完整版",
-          }],
+          // 移除所有分条音频（type=audio 且非 merged-），只保留完整版一个
+          parts: [
+            ...(m.parts || []).filter(
+              (p) => !(p.type === "audio" && !(p.slotId || "").startsWith("merged-")),
+            ),
+            {
+              type: "audio" as const, url: r.url, slotId: `merged-${messageId}`,
+              status: "ready" as const, kind: "audio" as const, speaker: "完整版",
+            },
+          ],
         } : m));
         onNotify?.("完整版音频已生成", "success");
       } else {

@@ -68,7 +68,12 @@ def local_path_from_url(url: str) -> str | None:
 
 
 def concat_audio(paths: list[str], output: Path, ffmpeg: str | None = None) -> None:
-    """无损拼接音频文件（同编码 flac 用 -c copy，不重编码）。"""
+    """按顺序拼接音频文件并重编码为 flac。
+
+    为什么不能 -c copy：flac 文件头的 STREAMINFO 记录总采样数，无损 copy 拼接时
+    输出只会保留第一段的采样数 → 播放器播完第一段时长（如 2s）就停，虽然后续
+    数据仍在。重编码（flac→flac 无损）会重新计算 STREAMINFO，时长才正确。
+    """
     exe = ffmpeg or find_ffmpeg()
     if not exe:
         raise RuntimeError("未找到 ffmpeg：请安装 ffmpeg 或配置 ComfyUI 路径")
@@ -82,7 +87,7 @@ def concat_audio(paths: list[str], output: Path, ffmpeg: str | None = None) -> N
         list_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
         output.parent.mkdir(parents=True, exist_ok=True)
         cmd = [exe, "-y", "-f", "concat", "-safe", "0",
-               "-i", str(list_file), "-c", "copy", str(output)]
+               "-i", str(list_file), "-c:a", "flac", str(output)]
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         if proc.returncode != 0:
             raise RuntimeError(
@@ -92,10 +97,11 @@ def concat_audio(paths: list[str], output: Path, ffmpeg: str | None = None) -> N
         raise RuntimeError("ffmpeg 拼接后产物为空")
 
 
-def merge_audio_for_message(thread_id: str, message_id: str) -> str:
+def merge_audio_for_message(thread_id: str, message_id: str, *, force: bool = False) -> str:
     """把一条消息的音频分条（按 seq）拼接成完整版，落盘并返回 local-view URL。
 
-    幂等：快照里已有 merged- 开头的 ready part 时直接返回其 URL。
+    幂等：快照里已有 merged- 开头的 ready part 时直接返回其 URL；force=True
+    时跳过幂等、覆盖旧结果（用于修复早前 -c copy 导致的时长错误产物）。
     """
     if not thread_id or not message_id:
         raise ValueError("thread_id 与 message_id 不能为空")
@@ -107,7 +113,7 @@ def merge_audio_for_message(thread_id: str, message_id: str) -> str:
              if isinstance(p, dict) and p.get("type") == "audio" and p.get("url")]
     existing = next((p for p in parts
                      if str(p.get("slotId") or "").startswith(_MERGED_SLOT_PREFIX)), None)
-    if existing and existing.get("url"):
+    if existing and existing.get("url") and not force:
         return str(existing["url"])
 
     def _seq(part: dict) -> int:
@@ -136,8 +142,27 @@ def merge_audio_for_message(thread_id: str, message_id: str) -> str:
         "slotId": f"{_MERGED_SLOT_PREFIX}{message_id}",
         "status": "ready", "kind": "audio", "speaker": "完整版",
     }
+    if force:
+        # 覆盖旧结果：先移除旧的 merged part，再写入新的
+        try:
+            chat_snapshot.remove_parts_matching(
+                thread_id, message_id,
+                lambda p: str(p.get("slotId") or "").startswith(_MERGED_SLOT_PREFIX),
+            )
+        except Exception as exc:  # noqa: BLE001
+            _LOG.warning("移除旧完整版失败 thread=%s mid=%s: %s", thread_id, message_id, exc)
     try:
         chat_snapshot.append_ready_part(thread_id, message_id, merged_part)
     except Exception as exc:  # noqa: BLE001
         _LOG.warning("合并音频回写快照失败 thread=%s mid=%s: %s", thread_id, message_id, exc)
+    # 合并成功后移除分条音频，只保留完整版（文本/图片/视频等其余 part 不动），
+    # 避免对话里既留一堆分条播放器又占空间。
+    try:
+        chat_snapshot.remove_parts_matching(
+            thread_id, message_id,
+            lambda p: p.get("type") == "audio"
+            and not str(p.get("slotId") or "").startswith(_MERGED_SLOT_PREFIX),
+        )
+    except Exception as exc:  # noqa: BLE001
+        _LOG.warning("移除分条音频失败 thread=%s mid=%s: %s", thread_id, message_id, exc)
     return url

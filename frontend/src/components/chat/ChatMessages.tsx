@@ -426,7 +426,7 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
     }
     return null;
   };
-  // 音频分条拼接完整版：≥2 段 ready 分条且尚无 merged 结果时显示按钮
+  // 音频分条拼接完整版：≥2 段 ready 分条时显示按钮（已有旧完整版则显示「重新拼接」）
   const audioTracks = (msg.parts || []).filter(
     (p) => p.type === "audio" && p.url && !(p.slotId || "").startsWith("merged-"),
   );
@@ -590,7 +590,7 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
         ) : cleanText ? (
           <div className="bot-text bot-html" dangerouslySetInnerHTML={{ __html: renderMarkdown(cleanText) }} />
         ) : null}
-        {audioTracks.length >= 2 && !hasMergedTrack && onMergeAudio && (
+        {audioTracks.length >= 2 && onMergeAudio && (
           <div className="audio-merge-bar">
             <button
               className="btn btn-sm"
@@ -602,7 +602,7 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
             >
               {mergingAudio
                 ? <><span className="bot-spinner" /> 拼接中…</>
-                : <><Merge size={14} /> 拼接完整版（{audioTracks.length} 段按顺序）</>}
+                : <><Merge size={14} /> {hasMergedTrack ? "重新拼接" : "拼接"}完整版（{audioTracks.length} 段按顺序）</>}
             </button>
           </div>
         )}
