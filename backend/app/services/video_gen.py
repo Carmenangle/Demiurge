@@ -4,7 +4,7 @@
 发送参数形态参照 image_gen：
 - 文生视频 generate：JSON payload（{model, prompt, size}）。
 - 图生视频 generate_with_images：multipart/form-data，image[] 同名多图
-  （图片用 image_gen.load_image_bytes 读字节上传，与图生图完全一致）。
+  （复用 image_gen.multipart_image_files 组装，与图生图完全一致，不猜字段名）。
 视频接口多为异步：提交返回 task/job id，再轮询状态直到拿到视频 URL；
 若接口同步直接返回 url（或 b64）也兼容。返回可展示的视频地址。
 trust_env=False 规避本地系统代理劫持 127.0.0.1 的坑（与 image_gen 一致）。
@@ -13,7 +13,7 @@ import time
 
 import httpx
 
-from app.services.image_gen import load_image_bytes
+from app.services.image_gen import multipart_image_files
 
 # 轮询上限：视频生成普遍较慢，最长约 5 分钟（60 次 * 5 秒）。
 _POLL_INTERVAL = 5.0
@@ -149,10 +149,7 @@ def generate_with_images(base_url: str, api_key: str, model: str, prompt: str,
         raise ValueError("图生视频需要至少一张参考图")
     url = _norm_url(base_url)
     headers = {"Authorization": f"Bearer {api_key or 'not-needed'}"}  # multipart 不设 Content-Type
-    files = []
-    for img in images:
-        data, name, mime = load_image_bytes(img, proxy) if proxy else load_image_bytes(img)
-        files.append(("image[]", (name, data, mime)))
+    files = multipart_image_files(images, proxy)
     payload = {"model": model, "prompt": prompt, "size": size}
     client_kwargs = {"trust_env": False, "timeout": 300}
     if proxy:

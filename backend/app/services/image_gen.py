@@ -151,6 +151,19 @@ def _load_image_bytes(img: str, proxy: str = "") -> tuple[bytes, str, str]:
 load_image_bytes = _load_image_bytes
 
 
+def multipart_image_files(images: list[str], proxy: str = "") -> list[tuple[str, tuple[str, bytes, str]]]:
+    """参考图列表 → multipart files（image[] 同名多图）。
+
+    图像模型图生图（generate_with_images）与视频模型图生视频共用这一套：
+    每张图读字节后以同名 image[] 字段上传（OpenAI 兼容形态），不猜字段名。
+    """
+    files: list[tuple[str, tuple[str, bytes, str]]] = []
+    for img in images:
+        data, name, mime = _load_image_bytes(img, proxy) if proxy else _load_image_bytes(img)
+        files.append(("image[]", (name, data, mime)))
+    return files
+
+
 def generate(base_url: str, api_key: str, model: str, prompt: str,
              size: str = "1024x1024", quality: str = "high", proxy: str = "") -> str:
     """纯文生图，返回可展示地址（http URL 或 data:image/...;base64,...）。
@@ -221,12 +234,8 @@ def generate_with_images(base_url: str, api_key: str, model: str, prompt: str,
     request_id = uuid.uuid4().hex
     headers = {"Authorization": f"Bearer {api_key or 'not-needed'}",
                "X-Request-ID": request_id}  # multipart 不设 Content-Type
-    files = []
-    upload_bytes = 0
-    for img in images:
-        data, name, mime = _load_image_bytes(img, proxy) if proxy else _load_image_bytes(img)
-        upload_bytes += len(data)
-        files.append(("image[]", (name, data, mime)))
+    files = multipart_image_files(images, proxy)
+    upload_bytes = sum(len(item[1][1]) for item in files)
     if mask:
         mask_data, mask_name, mask_mime = (
             _load_image_bytes(mask, proxy) if proxy else _load_image_bytes(mask)
