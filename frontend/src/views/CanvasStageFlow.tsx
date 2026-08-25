@@ -30,7 +30,7 @@ import {
 import {
   loadLayout, saveLayout, clampScale, type NodeLayout, type InspirationCardStored, type ReferenceImageStored, type Viewport,
 } from "../lib/canvasLayout";
-import { inspirationInsertText } from "../lib/inspirationInsert";
+import { inspirationInsertText, consumePendingInspirations, CANVAS_INSPIRATION_EVENT } from "../lib/inspirationInsert";
 import { SendToChatModal, type SendPayload } from "../components/SendToChatModal";
 import { ConfirmModal } from "../components/Modal";
 import { WorkflowToolModal } from "../components/WorkflowToolModal";
@@ -2258,15 +2258,15 @@ export function CanvasStageFlow({
     persistNow({ cards: next });
   }, [newInspiration, findFreeSpot, persistNow]);
 
-  // M1.4：灵感卡发送画布——资产库派发 laf-inspiration-to-canvas，画布创建灵感卡节点
+  // M1.4/M1.5：灵感卡发送画布——对话灵感卡/素材库统一走「缓存 + 通知」通道
+  // （画布未挂载时事件不丢；挂载时先消费积压，之后通知增量消费）
   useEffect(() => {
-    const onInsp = (e: Event) => {
-      const detail = (e as CustomEvent).detail as Array<{
-        id?: string; title?: string; content?: string; imageUrl?: string;
-      }> | undefined;
-      if (!Array.isArray(detail) || detail.length === 0) return;
+    const createFromPayloads = (items: Array<{
+      id?: string; title?: string; content?: string; imageUrl?: string;
+    }>) => {
+      if (!items || items.length === 0) return;
       const fresh: InspirationCardStored[] = [];
-      for (const d of detail) {
+      for (const d of items) {
         const title = (d.title || "").trim() || "灵感卡";
         const content = d.content || "";
         // 去重：同 id（资产库卡 id 稳定）已存在则跳过
@@ -2288,8 +2288,11 @@ export function CanvasStageFlow({
       persistNow({ cards: next });
       showToast(`已发送 ${fresh.length} 张灵感卡到画布`, "success");
     };
-    window.addEventListener("laf-inspiration-to-canvas", onInsp);
-    return () => window.removeEventListener("laf-inspiration-to-canvas", onInsp);
+    // 挂载时先消费积压（发送时画布未挂载的场景）
+    createFromPayloads(consumePendingInspirations());
+    const onInsp = () => createFromPayloads(consumePendingInspirations());
+    window.addEventListener(CANVAS_INSPIRATION_EVENT, onInsp);
+    return () => window.removeEventListener(CANVAS_INSPIRATION_EVENT, onInsp);
   }, [findFreeSpot, persistNow]);
 
   // 组节点：编辑标题（双击组节点触发）→ 写回 layoutNodes[id].label（卡片渲染走 customLabel 优先）

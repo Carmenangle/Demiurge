@@ -660,6 +660,7 @@ export function ChatView({
                   onInsert={(text, card) => richRef.current?.insertText(
                     card ? inspirationInsertText(card) : text,
                   )}
+                  onSentToCanvas={() => switchContentView("canvas")}
                 />
               ) : (
                 <AssistantMessage

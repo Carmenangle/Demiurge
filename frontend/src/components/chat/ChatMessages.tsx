@@ -8,6 +8,7 @@ import { substituteMacros } from "../../lib/chatMacros";
 import { userMessagePlainText, userMessageRichContent } from "../../lib/chatGeneration";
 import type { PortOp } from "../../api/ai";
 import { proxyImageUrl, selectInspiration as selectInspirationPost, saveInspirationCard } from "../../api/ai";
+import { pushInspirationsToCanvas, inspirationToCanvasPayload, inspirationCanvasLabel } from "../../lib/inspirationInsert";
 import type { RichContent } from "../RichInput";
 import { CopyButton } from "../CopyButton";
 import { openLightbox } from "../Lightbox";
@@ -662,6 +663,7 @@ export function InspirationCard({
   outputDir = "",
   onNotify,
   onInsert,
+  onSentToCanvas,
 }: {
   data: ChatMessage["inspiration"] & { images?: any[]; selected?: string[] };
   threadId?: string;
@@ -670,6 +672,8 @@ export function InspirationCard({
   outputDir?: string;
   onNotify?: (msg: string, kind: "success" | "error" | "info") => void;
   onInsert: (text: string, card?: ChatMessage["inspiration"]) => void;
+  /** 发送画布成功后回调（父级可切到画布模式让节点可见）。 */
+  onSentToCanvas?: () => void;
 }) {
   const images = data?.images || [];
   const [selected, setSelected] = useState<string[]>(data?.selected || []);
@@ -712,6 +716,18 @@ export function InspirationCard({
       setSaving(false);
     }
   }, [outputDir, selected, saving, images, threadId, data]);
+
+  // M1.5：直接发送画布（不经过素材库）——走「缓存 + 通知」通道，画布未挂载也不丢。
+  const sendToCanvas = useCallback(() => {
+    const payload = inspirationToCanvasPayload({ ...data, messageId });
+    // 对话灵感卡图片是远程 URL（full_url），画布节点直接加载会防盗链失败 → 走代理中转
+    if (payload.imageUrl && proxyUrl) {
+      payload.imageUrl = proxyImageUrl(payload.imageUrl, proxyUrl);
+    }
+    pushInspirationsToCanvas([payload]);
+    onSentToCanvas?.();
+    onNotify?.(`已发送「${data?.title || "灵感卡"}」到画布`, "success");
+  }, [data, messageId, proxyUrl, onSentToCanvas, onNotify]);
 
   return (
     <div className="msg-bot">
@@ -772,6 +788,13 @@ export function InspirationCard({
                 <Download size={13} /> 保存中…
               </span>
             )}
+            <button
+              className="insp-insert"
+              title="直接发送到画布（无需先保存素材库）"
+              onClick={() => sendToCanvas()}
+            >
+              <GitBranch size={13} /> {inspirationCanvasLabel(data)}
+            </button>
             <button
               className="insp-insert"
               title="把这段总结插入到输入框"

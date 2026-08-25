@@ -7,7 +7,7 @@ import { saveSnapshot, chatAppend } from "./api/ai";
 import { createScenarioSnapshot, forkScenarioSnapshot, listScenarioSnapshots } from "./api/scenario";
 import { createScenarioBranch } from "./lib/scenarioBranchRuntime";
 import { SendToChatModal, type SendPayload } from "./components/SendToChatModal";
-import { inspirationInsertText, inspirationInsertImages } from "./lib/inspirationInsert";
+import { inspirationInsertText, inspirationInsertImages, pushInspirationsToCanvas } from "./lib/inspirationInsert";
 const SettingsView = lazy(() => import("./views/settings/SettingsView").then((m) => ({ default: m.SettingsView })));
 const WorkflowTemplates = lazy(() => import("./pages/WorkflowTemplates").then((m) => ({ default: m.WorkflowTemplates })));
 const ModelDownload = lazy(() => import("./pages/ModelDownload").then((m) => ({ default: m.ModelDownload })));
@@ -181,13 +181,11 @@ export function AppBody(props: AppBodyProps) {
             });
           }}
           onSendInspirationToCanvas={(cards) => {
-            // 灵感卡发送画布：派发事件，ChatView 内画布消费并创建灵感卡节点
-            window.dispatchEvent(new CustomEvent("laf-inspiration-to-canvas", {
-              detail: cards.map((c) => ({
-                id: c.id, title: c.title, content: c.content,
-                imageUrl: c.cover_url || "",
-              })),
-            }));
+            // 灵感卡发送画布：走「缓存 + 通知」通道（画布未挂载也不丢，切到画布自动出现）
+            pushInspirationsToCanvas(cards.map((c) => ({
+              id: c.id, title: c.title, content: c.content,
+              imageUrl: c.cover_url || "",
+            })));
           }}
         />
         {sendTarget && (
