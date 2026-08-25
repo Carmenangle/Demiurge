@@ -19,7 +19,7 @@ import {
   type OnConnect, type NodeChange, type NodeMouseHandler,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { Edit3, FolderPlus, GitBranch, ListOrdered, MessageSquarePlus, Send, Sparkles, Trash2, X } from "lucide-react";
+import { Edit3, FolderPlus, GitBranch, ListOrdered, MessageSquarePlus, Send, Sparkles, Trash2, Upload, X } from "lucide-react";
 import { chatAppend, fetchHistory, listGenerations, listReferenceImages, type Generation, type ReferenceImage } from "../api/ai";
 import { resolvedEmbedModel, useSettings } from "../stores/settings";
 import type { Repo } from "../stores/repos";
@@ -1253,13 +1253,21 @@ export function CanvasStageFlow({
           inspirationSourceRef: card.sourceRef,
           groupKey: card.id,
         },
-        gens: [], imageUrls: [], prompt: card.title, customLabel: card.title,
+        gens: [], imageUrls: card.imageUrl ? [card.imageUrl] : [], prompt: card.title, customLabel: card.title,
         isSel: false, naturalSize: undefined,
         onSelect: () => {},
         onOpen: (n: CanvasNode) => {
           // 双击灵感卡：世界书→弹窗；角色卡→角色卡弹窗；预设→偏置预设弹窗；其余→本地编辑
           const c = inspirationCardsRef.current.find((x) => x.id === n.id);
           if (!c) return;
+          // ★ 资产库发送来的灵感卡（带图）→ 打开「左图右文」编辑弹窗（可删图/替换图），不误入偏置预设
+          if (c.imageUrl) {
+            setInspirationEditId(c.id);
+            setInspirationEditKind(c.kind);
+            setInspirationEditTitle(c.title);
+            setInspirationEditContent(c.content);
+            return;
+          }
           if (c.kind === "worldbook-entry" && c.sourceRef) {
             // 画布模式：双击打开仓库快照世界书（编辑即改快照，与源库隔离）
             if (settings.outputDir && repoId) {
@@ -1828,6 +1836,7 @@ export function CanvasStageFlow({
   // ===== 灵感卡 / 组标题 编辑态 =====
   const [inspirationEditId, setInspirationEditId] = useState<string | null>(null);
   const [inspirationEditKind, setInspirationEditKind] = useState<InspirationKind>("preset");
+  const inspImageFileRef = useRef<HTMLInputElement>(null);
   const [inspirationEditTitle, setInspirationEditTitle] = useState("");
   const [inspirationEditContent, setInspirationEditContent] = useState("");
   const [groupRenameId, setGroupRenameId] = useState<string | null>(null);
@@ -2001,6 +2010,46 @@ export function CanvasStageFlow({
     setInspirationEditId(null);
     persistNow({ cards: next });
   }, [inspirationEditId, inspirationEditKind, inspirationEditTitle, inspirationEditContent, persistNow]);
+
+  // M1.4：画布灵感卡编辑弹窗「左图右文」——删除图片（只留文本）/ 替换图片（本地文件上传）
+  const removeInspirationImage = useCallback(() => {
+    if (!inspirationEditId) return;
+    const next = inspirationCardsRef.current.map((c) => c.id === inspirationEditId
+      ? { ...c, imageUrl: "" }
+      : c);
+    setInspirationCards(next);
+    inspirationCardsRef.current = next;
+    persistNow({ cards: next });
+    showToast("已删除图片，保留文本", "success");
+  }, [inspirationEditId, persistNow]);
+
+  const replaceInspirationImage = useCallback(async (file: File) => {
+    if (!inspirationEditId) return;
+    const ext = file.name.slice(file.name.lastIndexOf(".")).toLowerCase();
+    if (!IMAGE_EXTENSIONS.has(ext)) {
+      showToast("仅支持图片文件（png/jpg/webp/gif/bmp/avif）", "error");
+      return;
+    }
+    try {
+      // 本地文件 → data URI 上传（后端 data: 分支豁免候选校验，blob: 后端无法访问）
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(new Error("读取文件失败"));
+        reader.readAsDataURL(file);
+      });
+      const res = await saveWebMaterial(settings.outputDir, dataUrl, "", file.name);
+      const next = inspirationCardsRef.current.map((c) => c.id === inspirationEditId
+        ? { ...c, imageUrl: res.url }
+        : c);
+      setInspirationCards(next);
+      inspirationCardsRef.current = next;
+      persistNow({ cards: next });
+      showToast(`已替换图片「${res.title || file.name}」`, "success");
+    } catch (err) {
+      showToast(`替换图片失败：${(err as Error).message}`, "error");
+    }
+  }, [inspirationEditId, settings.outputDir, persistNow]);
 
   const removeInspiration = useCallback((id: string) => {
     const next = inspirationCardsRef.current.filter((c) => c.id !== id);
@@ -2218,7 +2267,9 @@ export function CanvasStageFlow({
         const title = (d.title || "").trim() || "灵感卡";
         const content = d.content || "";
         // 去重：同 id（资产库卡 id 稳定）已存在则跳过
-        const sid = `insp-${d.id || crypto.randomUUID().slice(0, 8)}`;
+        const sid = d.id && d.id.startsWith("insp-")
+          ? d.id
+          : `insp-${d.id || crypto.randomUUID().slice(0, 8)}`;
         const exists = inspirationCardsRef.current.some((c) => c.id === sid);
         if (exists) continue;
         const pos = findFreeSpot(INSPIRATION_CARD_W, INSPIRATION_CARD_H);
@@ -2696,57 +2747,100 @@ export function CanvasStageFlow({
         </div>
       )}
 
-      {/* 编辑灵感卡（标题/内容/类型） */}
-      {inspirationEditId && (
-        <div className="modal-mask" onClick={() => setInspirationEditId(null)}>
-          <div className="modal" style={{ maxWidth: 560 }} onClick={(e) => e.stopPropagation()}>
-            <h3>编辑灵感卡</h3>
-            <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-              {(["character", "worldbook-entry", "preset", "table-row"] as InspirationKind[]).map((k) => {
-                const meta = INSPIRATION_META[k];
-                return (
-                  <button
-                    key={k}
-                    className={`btn ${inspirationEditKind === k ? "primary" : ""}`}
-                    onClick={() => setInspirationEditKind(k)}
-                    style={{ flex: 1, borderLeft: `3px solid ${meta.color}` }}
-                  >
-                    {meta.icon} {meta.label}
-                  </button>
-                );
-              })}
-            </div>
-            <input
-              value={inspirationEditTitle}
-              onChange={(e) => setInspirationEditTitle(e.target.value)}
-              autoFocus
-              placeholder="标题（显示在卡片头部）"
-              style={{
-                width: "100%", padding: 8, borderRadius: 6, boxSizing: "border-box",
-                border: "1px solid var(--border, #333)", marginBottom: 8,
-                background: "var(--input-bg, rgba(0,0,0,0.2))", color: "var(--text)",
-                fontSize: 13, fontFamily: "inherit",
-              }}
-            />
-            <textarea
-              value={inspirationEditContent}
-              onChange={(e) => setInspirationEditContent(e.target.value)}
-              placeholder="内容（双击卡片 → 插入对话即把这段内容推送到对话流）"
-              rows={10}
-              style={{
-                width: "100%", padding: 8, borderRadius: 6, boxSizing: "border-box",
-                border: "1px solid var(--border, #333)", resize: "vertical",
-                background: "var(--input-bg, rgba(0,0,0,0.2))", color: "var(--text)",
-                fontSize: 13, fontFamily: "inherit", lineHeight: 1.5,
-              }}
-            />
-            <div className="modal-actions">
-              <button className="btn" onClick={() => setInspirationEditId(null)}>取消</button>
-              <button className="btn primary" onClick={saveInspirationEdit}>保存</button>
+      {/* 编辑灵感卡（左图右文：左侧图片 + 左下角删除/替换；右侧文本编辑） */}
+      {inspirationEditId && (() => {
+        const editCard = inspirationCardsRef.current.find((c) => c.id === inspirationEditId) || null;
+        const editImage = editCard?.imageUrl || "";
+        return (
+          <div className="modal-mask" onClick={() => setInspirationEditId(null)}>
+            <div className="modal" style={{ maxWidth: 760 }} onClick={(e) => e.stopPropagation()}>
+              <h3>编辑灵感卡</h3>
+              <div style={{ display: "flex", gap: 16 }}>
+                {/* 左：图片 + 左下角按钮 */}
+                <div style={{ flex: "0 0 220px", display: "flex", flexDirection: "column", gap: 8 }}>
+                  <div style={{
+                    width: 220, height: 220, borderRadius: 10, overflow: "hidden",
+                    background: "rgba(255,255,255,0.03)", border: "1px solid var(--border, #333)",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                  }}>
+                    {editImage ? (
+                      <img src={editImage} alt={inspirationEditTitle || "灵感卡"} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+                    ) : (
+                      <span style={{ fontSize: 12, color: "var(--text-muted)", textAlign: "center", padding: 8 }}>
+                        无图片（纯文本卡）
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button className="btn" style={{ flex: 1 }} onClick={() => inspImageFileRef.current?.click()}>
+                      <Upload size={13} style={{ verticalAlign: "-2px", marginRight: 4 }} />替换图片
+                    </button>
+                    {editImage && (
+                      <button className="btn danger" style={{ flex: 1 }} onClick={removeInspirationImage}>
+                        <Trash2 size={13} style={{ verticalAlign: "-2px", marginRight: 4 }} />删除图片
+                      </button>
+                    )}
+                  </div>
+                  <input
+                    ref={inspImageFileRef} type="file" accept="image/*" style={{ display: "none" }}
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) void replaceInspirationImage(f);
+                      e.target.value = "";
+                    }}
+                  />
+                </div>
+                {/* 右：类型/标题/内容 */}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                    {(["character", "worldbook-entry", "preset", "table-row"] as InspirationKind[]).map((k) => {
+                      const meta = INSPIRATION_META[k];
+                      return (
+                        <button
+                          key={k}
+                          className={`btn ${inspirationEditKind === k ? "primary" : ""}`}
+                          onClick={() => setInspirationEditKind(k)}
+                          style={{ flex: 1, borderLeft: `3px solid ${meta.color}` }}
+                        >
+                          {meta.icon} {meta.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <input
+                    value={inspirationEditTitle}
+                    onChange={(e) => setInspirationEditTitle(e.target.value)}
+                    autoFocus
+                    placeholder="标题（显示在卡片头部）"
+                    style={{
+                      width: "100%", padding: 8, borderRadius: 6, boxSizing: "border-box",
+                      border: "1px solid var(--border, #333)", marginBottom: 8,
+                      background: "var(--input-bg, rgba(0,0,0,0.2))", color: "var(--text)",
+                      fontSize: 13, fontFamily: "inherit",
+                    }}
+                  />
+                  <textarea
+                    value={inspirationEditContent}
+                    onChange={(e) => setInspirationEditContent(e.target.value)}
+                    placeholder="内容（双击卡片 → 插入对话即把这段内容推送到对话流）"
+                    rows={10}
+                    style={{
+                      width: "100%", padding: 8, borderRadius: 6, boxSizing: "border-box",
+                      border: "1px solid var(--border, #333)", resize: "vertical",
+                      background: "var(--input-bg, rgba(0,0,0,0.2))", color: "var(--text)",
+                      fontSize: 13, fontFamily: "inherit", lineHeight: 1.5,
+                    }}
+                  />
+                  <div className="modal-actions">
+                    <button className="btn" onClick={() => setInspirationEditId(null)}>取消</button>
+                    <button className="btn primary" onClick={saveInspirationEdit}>保存</button>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* 新建灵感卡（右键空白 → 新建灵感卡） */}
       {newInspiration && (
