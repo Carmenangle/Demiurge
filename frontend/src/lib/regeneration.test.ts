@@ -52,6 +52,14 @@ describe("regeneration snapshots", () => {
     });
   });
 
+  it("角色 LoRA 生图时透传主角名，非角色 LoRA 不携带", () => {
+    const args = (actor = "") => templateRegenerationSnapshot(
+      "tpl", {}, "http://127.0.0.1:8188", ["45"], "prompt", [], "single", actor,
+    );
+    expect(args("虞妙玥").characterLoraActor).toBe("虞妙玥");
+    expect(args().characterLoraActor).toBeUndefined();
+  });
+
   it("旧自动插画按图片地址取资产库原提示词", () => {
     expect(legacyGenerationPrompt("local://b", [
       { image_url: "local://a", prompt: "prompt a" },

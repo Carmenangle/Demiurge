@@ -85,6 +85,8 @@ export interface TemplateRegeneration {
   prompt: string;
   loras?: { name: string; weight: number }[];
   loraMode?: "none" | "single" | "multi";
+  /** 角色 LoRA 生图时的主角名（用于后端可读命名 角色_轮次_序号）；非角色 LoRA 为空。 */
+  characterLoraActor?: string;
 }
 
 export type RegenerationSnapshot = AiImageRegeneration | WorkflowRegeneration | TemplateRegeneration;

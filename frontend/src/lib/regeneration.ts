@@ -32,6 +32,7 @@ export function templateRegenerationSnapshot(
   prompt: string,
   loras: { name: string; weight: number }[] = [],
   loraMode: "none" | "single" | "multi" = "single",
+  characterLoraActor = "",
 ): TemplateRegeneration {
   return {
     kind: "template",
@@ -42,6 +43,7 @@ export function templateRegenerationSnapshot(
     prompt,
     ...(loras.length ? { loras: JSON.parse(JSON.stringify(loras)) } : {}),
     ...(loraMode !== "single" ? { loraMode } : {}),
+    ...(characterLoraActor ? { characterLoraActor } : {}),
   };
 }
 

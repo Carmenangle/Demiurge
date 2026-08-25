@@ -345,3 +345,81 @@ def test_audio_finalize_按角色轮次句号命名落voices(monkeypatch, tmp_pa
     # 第 2 轮（m1 含配音 + bot 自身）里的第 2 句
     assert calls[0]["dest_stem"] == "冷倾雪_2_2"
     assert calls[0]["subfolder"] == ""
+
+def test_image_turn_按含图片消息计数轮次(monkeypatch, tmp_path):
+    """第几次带插画的对话 = 快照中该消息之前（含）含图片/插画槽的 assistant 消息数。"""
+    monkeypatch.setattr(generation_store.chat_snapshot, "SNAP_DIR", tmp_path)
+    generation_store.chat_snapshot.save("thread", [
+        {"id": "m1", "role": "assistant", "text": "a",
+         "parts": [{"type": "image", "slotId": "x", "url": "u"}]},
+        {"id": "m2", "role": "assistant", "text": "b"},          # 无图 → 不计数
+        {"id": "m3", "role": "assistant", "text": "c",
+         "parts": [{"type": "media-slot", "slotId": "y", "kind": "image"}]},
+    ])
+    assert generation_store._image_turn("thread", "m3") == 2
+    assert generation_store._image_turn("thread", "m2") == 1
+    assert generation_store._image_turn("thread", "unknown") == 2
+
+
+def test_save_image_named_角色lora命名并覆盖(monkeypatch, tmp_path):
+    """角色 LoRA 生图：<repo>/ 根目录 + 角色_轮次_序号.png + 同名覆盖写。"""
+    from pathlib import Path
+    calls = {"n": 0}
+    def fake_fetch(*a, **k):
+        calls["n"] += 1
+        return (f"bytes-{calls['n']}".encode(), "image/png")
+    monkeypatch.setattr(generation_store.image_store.comfyui_client, "fetch_view", fake_fetch)
+    out = tmp_path / "out"
+    p1 = generation_store.image_store.save_image_named(
+        str(out), "repo", filename="workflow_a.png", url="http://comfy",
+        dest_stem="虞妙玥_2_1",
+    )
+    assert Path(p1).name == "虞妙玥_2_1.png"
+    assert str(Path(p1).parent).endswith("repo")  # 根目录，非 voices
+    # 同名覆盖：内容更新，路径不变
+    p2 = generation_store.image_store.save_image_named(
+        str(out), "repo", filename="workflow_b.png", url="http://comfy",
+        dest_stem="虞妙玥_2_1",
+    )
+    assert p2 == p1
+    assert Path(p1).read_bytes() == b"bytes-2"
+
+
+def test_image_finalize_角色lora命名_非角色lora时间戳(monkeypatch, tmp_path):
+    """regeneration.characterLoraActor 非空 → save_image_named；空 → save_local 时间戳。"""
+    monkeypatch.setattr(generation_store.chat_snapshot, "SNAP_DIR", tmp_path)
+    generation_store.chat_snapshot.save("thread", [
+        {"id": "m1", "role": "assistant", "text": "a",
+         "parts": [{"type": "image", "slotId": "x", "url": "u"}]},
+        {"id": "bot", "role": "assistant", "text": "b",
+         "parts": [{"type": "media-slot", "slotId": "img-bot-0", "kind": "image"}]},
+    ])
+    named = []
+    monkeypatch.setattr(generation_store.image_store, "save_image_named",
+                        lambda *a, **k: named.append(k) or "C:/out/虞妙玥_2_1.png")
+    monkeypatch.setattr(generation_store, "_index_with_retry", lambda *a, **k: True)
+    monkeypatch.setattr(generation_store.chat_memory, "append_message", lambda *a, **k: None)
+    monkeypatch.setattr(generation_store.chat_snapshot, "upsert", lambda *a, **k: None)
+
+    generation_store.finalize_workflow_batch(**_args(
+        images=[{"filename": "a.png", "subfolder": "", "type": "output"}],
+        regeneration={"kind": "template", "templateId": "t", "values": {},
+                      "comfyuiUrl": "http://comfy", "outputNodeIds": [], "prompt": "",
+                      "characterLoraActor": "虞妙玥"},
+        target_message_id="bot", target_slot_id="img-bot-0",
+    ))
+    assert named, "角色 LoRA 生图应走 save_image_named"
+    assert named[0]["dest_stem"] == "虞妙玥_2_1"  # 第 2 次带插画对话第 1 张
+
+    # 非角色 lora（兜底）：回退 save_local
+    called = []
+    monkeypatch.setattr(generation_store.image_store, "save_local",
+                        lambda *a, **k: called.append(True) or "C:/out/x.png")
+    named.clear()
+    generation_store.finalize_workflow_batch(**_args(
+        images=[{"filename": "a.png", "subfolder": "", "type": "output"}],
+        regeneration={"kind": "template", "templateId": "t", "values": {},
+                      "comfyuiUrl": "http://comfy", "outputNodeIds": [], "prompt": ""},
+        target_message_id="bot", target_slot_id="img-bot-0",
+    ))
+    assert not named and called, "非角色 LoRA 应走 save_local 时间戳命名"

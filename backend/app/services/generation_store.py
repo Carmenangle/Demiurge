@@ -235,6 +235,31 @@ def _audio_turn(thread_id: str, message_id: str) -> int:
     return turn
 
 
+def _image_turn(thread_id: str, message_id: str) -> int:
+    """第几次「带插画的对话」：快照中该消息之前（含）含图片/插画槽的 assistant 消息数。
+
+    与 _audio_turn 同语义，只是媒体类型换图片（type=image 或 kind=image）。
+    """
+    try:
+        items = chat_snapshot.load(thread_id)
+    except Exception:  # noqa: BLE001
+        return 0
+    turn = 0
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        has_image = any(
+            isinstance(p, dict)
+            and (p.get("type") == "image" or p.get("kind") == "image")
+            for p in (item.get("parts") or [])
+        )
+        if has_image:
+            turn += 1
+        if item.get("id") == message_id:
+            break
+    return turn
+
+
 def finalize_workflow_batch(
     *, thread_id: str, repo_id: str, prompt_id: str, prompt: str,
     images: list[dict], output_dir: str, comfyui_url: str,
@@ -269,6 +294,12 @@ def finalize_workflow_batch(
     inline_target = bool(target_message_id and target_slot_id)
     target: dict | None = None
 
+    # 角色 LoRA 生图：用可读名（角色_轮次_序号）落盘；非角色 LoRA（兜底风格/无）沿用时间戳命名。
+    # 前端在 regeneration 里带 characterLoraActor（首个命中角色 LoRA 的角色名），空串=非角色 LoRA。
+    character_actor = ""
+    if regeneration and isinstance(regeneration, dict):
+        character_actor = str(regeneration.get("characterLoraActor") or "")
+
     for index, image in enumerate(images):
         key = _workflow_key(thread_id, prompt_id, image)
         mid = _message_id(key)
@@ -277,14 +308,25 @@ def finalize_workflow_batch(
         shown = ""
         if durable:
             try:
-                path = image_store.save_local(
-                    output_dir, repo_id,
-                    filename=str(image.get("filename", "")),
-                    subfolder=str(image.get("subfolder", "")),
-                    type=str(image.get("type", "output")),
-                    url=comfyui_url,
-                    idempotency_key=key,
-                )
+                if character_actor:
+                    turn = _image_turn(thread_id, target_message_id) if inline_target else 0
+                    path = image_store.save_image_named(
+                        output_dir, repo_id,
+                        filename=str(image.get("filename", "")),
+                        subfolder=str(image.get("subfolder", "")),
+                        type=str(image.get("type", "output")),
+                        url=comfyui_url,
+                        dest_stem=f"{character_actor}_{turn}_{index + 1}",
+                    )
+                else:
+                    path = image_store.save_local(
+                        output_dir, repo_id,
+                        filename=str(image.get("filename", "")),
+                        subfolder=str(image.get("subfolder", "")),
+                        type=str(image.get("type", "output")),
+                        url=comfyui_url,
+                        idempotency_key=key,
+                    )
                 shown = view_urls.local_view(path)
                 persisted = True
             except Exception:  # 保留在线图，不影响本批其他产出

@@ -913,6 +913,11 @@ export function useChatSession(deps: ChatSessionDeps) {
     );
     const workflowMedia = illustrationWorkflowMedia(preset, resolvedActors, cardNames);
     const { loras, loraName, loraWeight, baseImage, characterLora } = workflowMedia;
+    // 角色 LoRA 生图：主角名 = 首个配置了角色 LoRA 的在场角色（后端据此做
+    // 「角色_轮次_序号」可读命名；非角色 LoRA/兜底风格留空 → 时间戳命名）
+    const characterLoraActor = characterLora
+      ? (resolvedActors.find((name) => preset.characterLoras?.[name]?.loraName) || "")
+      : "";
     const loraConfigurationError = illustrationLoraConfigurationError(preset, workflowMedia);
     if (loraConfigurationError) {
       failSlot("configuration", loraConfigurationError);
@@ -1048,6 +1053,7 @@ export function useChatSession(deps: ChatSessionDeps) {
         const target = { messageId, slotId, background: true as const };
         const regeneration = templateRegenerationSnapshot(
           chosenId, values, settings.comfyuiUrl, outputNodeIds, prompt, loraStack, loraMode,
+          characterLoraActor,
         );
         setMessages((current) => bindMediaSlotPrompt(current, messageId, slotId, r.prompt_id!));
         pollResult(r.prompt_id, outputNodeIds, regeneration, target, prompt, useVideo ? "video" : "image");

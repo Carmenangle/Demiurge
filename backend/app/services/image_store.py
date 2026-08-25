@@ -140,6 +140,36 @@ def save_local(
     return str(dest)
 
 
+def save_image_named(output_dir: str, repo_id: str, *,
+                     filename: str, subfolder: str = "", type: str = "output",
+                     url: str = COMFYUI_BASE_URL, dest_stem: str = "") -> str:
+    """角色 LoRA 生图落盘：用可读名（角色_轮次_序号）存到 <repo>/ 根目录，同名覆盖。
+
+    与 save_local 的差异：文件名由 dest_stem 决定（保留中文角色名），同一槽位
+    重新生成时覆盖同名文件 → URL 不变、内容更新。取图失败抛 ComfyError。
+    """
+    if not output_dir:
+        raise ComfyError("未配置输出图片路径", 400)
+    from app.services import repo_meta
+    base = repo_meta.repo_folder(output_dir, repo_id)
+    fn = Path(filename).name
+    ext = fn.rsplit(".", 1)[1] if "." in fn else "png"
+    stem = safe_dir(dest_stem) or "image"
+    dest = base / f"{stem}.{safe_dir(ext) or 'png'}"
+    try:
+        data, _ctype = comfyui_client.fetch_view(url, filename, type, subfolder, timeout=30)
+    except ComfyError:
+        raise ComfyError("取原图失败", 502)
+    tmp = base / f".{dest.name}.{uuid4().hex}.tmp"
+    tmp.write_bytes(data)
+    try:
+        os.replace(tmp, dest)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+    return str(dest)
+
+
 def save_audio_local(output_dir: str, repo_id: str, *,
                      filename: str, subfolder: str = "", type: str = "output",
                      url: str = COMFYUI_BASE_URL, dest_stem: str = "") -> str:
