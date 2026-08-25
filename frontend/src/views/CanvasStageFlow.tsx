@@ -2206,6 +2206,38 @@ export function CanvasStageFlow({
     persistNow({ cards: next });
   }, [newInspiration, findFreeSpot, persistNow]);
 
+  // M1.4：灵感卡发送画布——资产库派发 laf-inspiration-to-canvas，画布创建灵感卡节点
+  useEffect(() => {
+    const onInsp = (e: Event) => {
+      const detail = (e as CustomEvent).detail as Array<{
+        id?: string; title?: string; content?: string; imageUrl?: string;
+      }> | undefined;
+      if (!Array.isArray(detail) || detail.length === 0) return;
+      const fresh: InspirationCardStored[] = [];
+      for (const d of detail) {
+        const title = (d.title || "").trim() || "灵感卡";
+        const content = d.content || "";
+        // 去重：同 id（资产库卡 id 稳定）已存在则跳过
+        const sid = `insp-${d.id || crypto.randomUUID().slice(0, 8)}`;
+        const exists = inspirationCardsRef.current.some((c) => c.id === sid);
+        if (exists) continue;
+        const pos = findFreeSpot(INSPIRATION_CARD_W, INSPIRATION_CARD_H);
+        fresh.push({
+          id: sid, kind: "preset", title, content,
+          imageUrl: d.imageUrl || "",
+          x: pos.x, y: pos.y, w: INSPIRATION_CARD_W, h: INSPIRATION_CARD_H,
+        });
+      }
+      if (fresh.length === 0) return;
+      setInspirationCards((prev) => [...prev, ...fresh]);
+      const next = [...inspirationCardsRef.current, ...fresh];
+      persistNow({ cards: next });
+      showToast(`已发送 ${fresh.length} 张灵感卡到画布`, "success");
+    };
+    window.addEventListener("laf-inspiration-to-canvas", onInsp);
+    return () => window.removeEventListener("laf-inspiration-to-canvas", onInsp);
+  }, [findFreeSpot, persistNow]);
+
   // 组节点：编辑标题（双击组节点触发）→ 写回 layoutNodes[id].label（卡片渲染走 customLabel 优先）
   const saveGroupRename = useCallback(() => {
     if (!groupRenameId) return;

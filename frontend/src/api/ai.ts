@@ -925,6 +925,7 @@ export interface WebMaterial {
   source_url: string;  // 来源网页
   title: string;
   filename: string;
+  content?: string;    // 灵感卡内容（M1.4 统一展示用；图片素材为空）
 }
 
 export function listWebMaterials(outputDir: string) {
@@ -947,6 +948,88 @@ export function deleteWebMaterial(outputDir: string, filename: string) {
   return apiPost<{ ok: boolean }>("/comfyui/web-materials/delete", {
     output_dir: outputDir,
     filename,
+  });
+}
+
+// ===== 灵感卡资产库（M1.4）：会话灵感卡升级为资产库可管理成员 =====
+
+export interface InspirationCardImage {
+  full_url: string;
+  source_url: string;
+  title?: string;
+}
+
+export interface InspirationCardAsset {
+  id: string;
+  title: string;
+  content: string;
+  sources: { title: string; url: string }[];
+  images: { url: string; source_url: string; title: string }[];
+  cover_url: string;
+  created_at: string;
+}
+
+export function saveInspirationCard(
+  outputDir: string,
+  data: {
+    cardId?: string;
+    title: string;
+    content: string;
+    sources?: { title: string; url: string }[];
+    images?: InspirationCardImage[];
+    threadId?: string;
+  },
+) {
+  return apiPost<InspirationCardAsset>("/comfyui/web-materials/inspiration/save", {
+    output_dir: outputDir,
+    card_id: data.cardId || "",
+    title: data.title,
+    content: data.content,
+    sources: data.sources || [],
+    images: (data.images || []).map((img) => ({
+      full_url: img.full_url,
+      source_url: img.source_url,
+      title: img.title || "",
+    })),
+    thread_id: data.threadId || "",
+  });
+}
+
+export function listInspirationCards(outputDir: string) {
+  return apiPost<{ items: InspirationCardAsset[] }>("/comfyui/web-materials/inspiration/list", {
+    output_dir: outputDir,
+  });
+}
+
+export function getInspirationCard(outputDir: string, cardId: string) {
+  return apiPost<InspirationCardAsset>("/comfyui/web-materials/inspiration/get", {
+    output_dir: outputDir,
+    card_id: cardId,
+  });
+}
+
+export function updateInspirationCard(
+  outputDir: string,
+  data: {
+    cardId: string;
+    title?: string;
+    content?: string;
+    removeImageUrls?: string[];
+  },
+) {
+  return apiPost<InspirationCardAsset>("/comfyui/web-materials/inspiration/update", {
+    output_dir: outputDir,
+    card_id: data.cardId,
+    title: data.title,
+    content: data.content,
+    remove_image_urls: data.removeImageUrls || [],
+  });
+}
+
+export function deleteInspirationCard(outputDir: string, cardId: string) {
+  return apiPost<{ ok: boolean }>("/comfyui/web-materials/inspiration/delete", {
+    output_dir: outputDir,
+    card_id: cardId,
   });
 }
 

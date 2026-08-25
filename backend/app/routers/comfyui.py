@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from app.config import COMFYUI_BASE_URL
 from app.services import (
     comfyui_client, comfy_launcher, generation_store, image_store,
-    local_media, workflow_submission,
+    inspiration_store, local_media, workflow_submission,
 )
 from app.services.url_guard import validate_comfyui_url
 from app.services.comfyui_client import ComfyError
@@ -377,6 +377,100 @@ def web_material_list(req: WebMaterialListRequest) -> dict[str, object]:
 def web_material_delete(req: WebMaterialDeleteRequest) -> dict[str, object]:
     """删除 _web_materials/ 下的指定文件。"""
     ok = image_store.delete_web_material(req.output_dir, req.filename)
+    return {"ok": ok}
+
+
+# ===== 灵感卡资产库（M1.4）：会话灵感卡升级为资产库可管理成员 =====
+
+class InspirationCardImage(BaseModel):
+    full_url: str = ""
+    source_url: str = ""
+    title: str = ""
+
+
+class InspirationCardSaveRequest(BaseModel):
+    output_dir: str = ""
+    card_id: str = ""                    # 空=新建；非空=覆盖更新（同卡重复保存）
+    title: str = ""
+    content: str = ""
+    sources: list[dict] = []
+    images: list[InspirationCardImage] = []
+    thread_id: str = ""                  # 候选校验豁免（重启后保存旧卡图片）
+
+
+class InspirationCardListRequest(BaseModel):
+    output_dir: str = ""
+
+
+class InspirationCardGetRequest(BaseModel):
+    output_dir: str = ""
+    card_id: str = ""
+
+
+class InspirationCardUpdateRequest(BaseModel):
+    output_dir: str = ""
+    card_id: str = ""
+    title: str | None = None
+    content: str | None = None
+    remove_image_urls: list[str] = []    # 删图只留文本（图文件保留在素材库）
+
+
+class InspirationCardDeleteRequest(BaseModel):
+    output_dir: str = ""
+    card_id: str = ""
+
+
+@router.post("/web-materials/inspiration/save")
+def inspiration_card_save(req: InspirationCardSaveRequest) -> dict[str, object]:
+    """把灵感卡登记为资产库成员（显式入库）。"""
+    try:
+        return inspiration_store.save_inspiration_card(
+            req.output_dir,
+            card_id=req.card_id,
+            title=req.title,
+            content=req.content,
+            sources=req.sources,
+            images=[img.model_dump() for img in req.images],
+            thread_id=req.thread_id,
+        )
+    except ComfyError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)
+
+
+@router.post("/web-materials/inspiration/list")
+def inspiration_card_list(req: InspirationCardListRequest) -> dict[str, object]:
+    """列出资产库灵感卡（新→旧）。"""
+    return {"items": inspiration_store.list_inspiration_cards(req.output_dir)}
+
+
+@router.post("/web-materials/inspiration/get")
+def inspiration_card_get(req: InspirationCardGetRequest) -> dict[str, object]:
+    """读取单张灵感卡详情。"""
+    try:
+        return inspiration_store.get_inspiration_card(req.output_dir, req.card_id)
+    except ComfyError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)
+
+
+@router.post("/web-materials/inspiration/update")
+def inspiration_card_update(req: InspirationCardUpdateRequest) -> dict[str, object]:
+    """编辑灵感卡（改文本 / 删图只留文本）。"""
+    try:
+        return inspiration_store.update_inspiration_card(
+            req.output_dir,
+            card_id=req.card_id,
+            title=req.title,
+            content=req.content,
+            remove_image_urls=req.remove_image_urls,
+        )
+    except ComfyError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)
+
+
+@router.post("/web-materials/inspiration/delete")
+def inspiration_card_delete(req: InspirationCardDeleteRequest) -> dict[str, object]:
+    """删除灵感卡资产（只删 JSON，图片保留）。"""
+    ok = inspiration_store.delete_inspiration_card(req.output_dir, req.card_id)
     return {"ok": ok}
 
 

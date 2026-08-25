@@ -169,6 +169,25 @@ export function AppBody(props: AppBodyProps) {
         <WebMaterialsView
           outputDir={settings.outputDir}
           onSendToCanvas={(items) => setSendTarget({ title: "发送至画布", payload: { text: "", images: items.map((m) => m.url) } })}
+          onSendInspirationToChat={(cards) => {
+            // 灵感卡发送对话框：有图=图片+文本；无图=纯文本
+            setSendTarget({
+              title: "发送至对话框",
+              payload: {
+                text: cards.map((c) => c.content).filter(Boolean).join("\n\n"),
+                images: cards.flatMap((c) => c.images.map((i) => i.url)),
+              },
+            });
+          }}
+          onSendInspirationToCanvas={(cards) => {
+            // 灵感卡发送画布：派发事件，ChatView 内画布消费并创建灵感卡节点
+            window.dispatchEvent(new CustomEvent("laf-inspiration-to-canvas", {
+              detail: cards.map((c) => ({
+                id: c.id, title: c.title, content: c.content,
+                imageUrl: c.cover_url || "",
+              })),
+            }));
+          }}
         />
         {sendTarget && (
           <SendToChatModal

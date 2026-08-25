@@ -7,7 +7,7 @@ import { renderMarkdown } from "../../lib/renderMarkdown";
 import { substituteMacros } from "../../lib/chatMacros";
 import { userMessagePlainText, userMessageRichContent } from "../../lib/chatGeneration";
 import type { PortOp } from "../../api/ai";
-import { proxyImageUrl, selectInspiration as selectInspirationPost, saveWebMaterial } from "../../api/ai";
+import { proxyImageUrl, selectInspiration as selectInspirationPost, saveInspirationCard } from "../../api/ai";
 import type { RichContent } from "../RichInput";
 import { CopyButton } from "../CopyButton";
 import { openLightbox } from "../Lightbox";
@@ -688,33 +688,30 @@ export function InspirationCard({
     }
   }, [selected, threadId, messageId]);
 
-  // M1.3 受控下载：把选中的搜索图片保存到素材库（后端校验候选 + 安全链）
+  // M1.4 灵感卡资产库化：把整张灵感卡（标题+内容+选中图片）保存为资产库成员。
+  // 图片走受控下载（候选校验 + 安全链），后端存 _web_materials/inspiration/。
   const saveSelected = useCallback(async () => {
-    if (!outputDir || selected.length === 0 || saving) return;
+    if (!outputDir || saving) return;
     setSaving(true);
     const urlSet = new Set(selected);
     const picked = images.filter((img) => img && urlSet.has(img.full_url));
     try {
-      const results: string[] = [];
-      for (const img of picked) {
-        try {
-          const res = await saveWebMaterial(
-            outputDir, img.full_url, img.source_url || "", img.title || "", threadId || "",
-          );
-          results.push(res.title || res.filename);
-        } catch (err) {
-          console.error("[inspiration-save]", err);
-        }
-      }
-      const failed = picked.length - results.length;
-      const msg = failed === 0
-        ? `已保存 ${results.length} 张素材到本地`
-        : `已保存 ${results.length} 张，${failed} 张失败（可在「上网素材」查看）`;
-      onNotify?.(msg, failed === 0 ? "success" : "error");
+      await saveInspirationCard(outputDir, {
+        title: data?.title || "",
+        content: data?.content || "",
+        sources: data?.sources || [],
+        images: picked.map((img) => ({
+          full_url: img.full_url, source_url: img.source_url || "", title: img.title || "",
+        })),
+        threadId: threadId || "",
+      });
+      onNotify?.("已保存灵感卡到素材库（可在「上网素材 → 灵感卡」查看）", "success");
+    } catch (err) {
+      onNotify?.(`保存灵感卡失败：${(err as Error).message}`, "error");
     } finally {
       setSaving(false);
     }
-  }, [outputDir, selected, saving, images, threadId]);
+  }, [outputDir, selected, saving, images, threadId, data]);
 
   return (
     <div className="msg-bot">
@@ -760,15 +757,20 @@ export function InspirationCard({
           )}
           <div className="insp-actions">
             <CopyButton text={data?.content || ""} className="insp-insert" />
-            {selected.length > 0 && (
+            {((data?.title || data?.content) && !saving ? (
               <button
                 className="insp-insert"
-                disabled={saving || !outputDir}
-                title={outputDir ? "把选中的图片保存到本地素材库" : "未配置输出路径，无法保存"}
+                disabled={!outputDir}
+                title={outputDir ? "把这张灵感卡保存到素材库（含文本与选中图片）" : "未配置输出路径，无法保存"}
                 onClick={() => void saveSelected()}
               >
-                <Download size={13} /> {saving ? "保存中…" : `保存到素材库（${selected.length}）`}
+                <Download size={13} /> 保存到素材库{selected.length > 0 ? `（${selected.length} 图）` : ""}
               </button>
+            ) : null)}
+            {saving && (
+              <span className="insp-insert" style={{ opacity: 0.7 }}>
+                <Download size={13} /> 保存中…
+              </span>
             )}
             <button
               className="insp-insert"
