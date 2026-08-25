@@ -2839,8 +2839,20 @@ export function CanvasStageFlow({
                     }}
                   />
                   <div className="modal-actions">
-                    <button className="btn" onClick={() => setInspirationEditId(null)}>取消</button>
-                    <button className="btn primary" onClick={saveInspirationEdit}>保存</button>
+                    <button
+                      className="btn"
+                      style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 4, whiteSpace: "nowrap", padding: "6px 8px" }}
+                      onClick={() => setInspirationEditId(null)}
+                    >
+                      取消
+                    </button>
+                    <button
+                      className="btn primary"
+                      style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 4, whiteSpace: "nowrap", padding: "6px 8px" }}
+                      onClick={saveInspirationEdit}
+                    >
+                      保存
+                    </button>
                   </div>
                 </div>
               </div>
