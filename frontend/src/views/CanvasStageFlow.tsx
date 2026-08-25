@@ -2771,15 +2771,22 @@ export function CanvasStageFlow({
                       </span>
                     )}
                   </div>
-                  <div style={{ display: "flex", gap: 6 }}>
-                    <button className="btn" style={{ flex: 1 }} onClick={() => inspImageFileRef.current?.click()}>
-                      <Upload size={13} style={{ verticalAlign: "-2px", marginRight: 4 }} />替换图片
+                  <div style={{ display: "flex", gap: 6, flexWrap: "nowrap" }}>
+                    <button
+                      className="btn"
+                      style={{ flex: 1, minWidth: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 4, whiteSpace: "nowrap", padding: "6px 8px" }}
+                      onClick={() => inspImageFileRef.current?.click()}
+                    >
+                      <Upload size={13} />替换图片
                     </button>
-                    {editImage && (
-                      <button className="btn danger" style={{ flex: 1 }} onClick={removeInspirationImage}>
-                        <Trash2 size={13} style={{ verticalAlign: "-2px", marginRight: 4 }} />删除图片
-                      </button>
-                    )}
+                    <button
+                      className="btn danger"
+                      style={{ flex: 1, minWidth: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 4, whiteSpace: "nowrap", padding: "6px 8px" }}
+                      onClick={removeInspirationImage}
+                      disabled={!editImage}
+                    >
+                      <Trash2 size={13} />删除图片
+                    </button>
                   </div>
                   <input
                     ref={inspImageFileRef} type="file" accept="image/*" style={{ display: "none" }}
