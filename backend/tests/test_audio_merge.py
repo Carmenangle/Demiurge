@@ -71,6 +71,8 @@ def test_merge_audio_for_message_按seq排序并幂等(monkeypatch, tmp_path):
         merged_paths.append(list(paths))
         output.write_bytes(b"merged")
     monkeypatch.setattr(audio_merge, "concat_audio", fake_concat)
+    # 本测试聚焦排序与幂等，跳过真实时长校验
+    monkeypatch.setattr(audio_merge, "_validate_merged_duration", lambda *a, **k: None)
 
     url1 = audio_merge.merge_audio_for_message("thread", "bot")
     assert merged_paths and merged_paths[0][0].endswith("seg1.flac")
@@ -160,3 +162,85 @@ def test_concat_audio_重编码后时长正确_真实ffmpeg():
         h, m, s = token.split(":")
         total = int(h) * 3600 + int(m) * 60 + float(s)
         assert 3.0 <= total <= 4.0, f"合并时长应为 ~3.5s，实际 {total}s"
+
+
+def test_probe_duration_真实ffmpeg():
+    import subprocess
+    import pytest
+    exe = audio_merge.find_ffmpeg()
+    if not exe:
+        pytest.skip("无 ffmpeg，跳过")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        wav = Path(tmpdir) / "a.wav"
+        subprocess.run([exe, "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=1.5",
+                        "-ar", "44100", "-ac", "1", str(wav)],
+                       capture_output=True, text=True, check=True)
+        d = audio_merge.probe_duration(wav, exe)
+        assert d is not None and 1.0 <= d <= 2.0
+
+
+def test_validate_merged_duration_过短判失败_真实ffmpeg():
+    import subprocess
+    import pytest
+    exe = audio_merge.find_ffmpeg()
+    if not exe:
+        pytest.skip("无 ffmpeg，跳过")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        a = tmp / "a.wav"
+        b = tmp / "b.wav"
+        for f, dur in ((a, 1.0), (b, 2.0)):
+            subprocess.run([exe, "-y", "-f", "lavfi", "-i",
+                            f"sine=frequency=440:duration={dur}",
+                            "-ar", "44100", "-ac", "1", str(f)],
+                           capture_output=True, text=True, check=True)
+        # 坏产物：只有第一段（1s），期望 3s → 判失败
+        with pytest.raises(ValueError, match="时长异常"):
+            audio_merge._validate_merged_duration([str(a), str(b)], a, ffmpeg=exe)
+        # 正常产物（拼接后约 3s）→ 不抛异常
+        out = tmp / "merged.flac"
+        audio_merge.concat_audio([str(a), str(b)], out, ffmpeg=exe)
+        audio_merge._validate_merged_duration([str(a), str(b)], out, ffmpeg=exe)
+
+
+def test_merge_audio_for_message_时长不合格丢弃产物保留分条(monkeypatch, tmp_path):
+    """保护机制：校验失败时删除产物、清掉 merged part，但保留分条 → 按钮仍在。"""
+    monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
+    from app.services import repo_meta
+    monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+
+    for name in ("seg1.flac", "seg2.flac"):
+        (tmp_path / name).write_bytes(b"x" * 10)
+
+    chat_snapshot.save("thread", [{
+        "id": "bot", "role": "assistant", "text": "正文", "parts": [
+            {"type": "audio", "url": f"http://127.0.0.1:8010/api/comfyui/local-view?path={tmp_path.as_posix()}/seg1.flac",
+             "slotId": "audio-bot-0", "status": "ready", "kind": "audio", "seq": 1, "total": 2},
+            {"type": "audio", "url": f"http://127.0.0.1:8010/api/comfyui/local-view?path={tmp_path.as_posix()}/seg2.flac",
+             "slotId": "audio-bot-1", "status": "ready", "kind": "audio", "seq": 2, "total": 2},
+        ],
+    }])
+
+    created_outputs = []
+    def fake_concat(paths, output, ffmpeg=None):
+        output.write_bytes(b"merged")
+        created_outputs.append(output)
+    monkeypatch.setattr(audio_merge, "concat_audio", fake_concat)
+    def fake_validate(paths, output, ffmpeg=None):
+        raise ValueError("拼接产物时长异常：期望约 3.0s，实际 1.0s，已丢弃")
+    monkeypatch.setattr(audio_merge, "_validate_merged_duration", fake_validate)
+
+    import pytest
+    with pytest.raises(ValueError, match="时长异常"):
+        audio_merge.merge_audio_for_message("thread", "bot")
+
+    # 产物文件已删除
+    assert created_outputs and not created_outputs[0].exists()
+
+    # 快照：分条仍在（按钮依赖 ≥2 段），且无 merged part
+    parts = chat_snapshot.load("thread")[0]["parts"]
+    segs = [p for p in parts
+            if p.get("type") == "audio" and not str(p.get("slotId", "")).startswith("merged-")]
+    merged = [p for p in parts if str(p.get("slotId", "")).startswith("merged-")]
+    assert len(segs) == 2
+    assert merged == []

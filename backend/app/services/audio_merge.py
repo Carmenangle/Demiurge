@@ -20,6 +20,77 @@ _LOG = logging.getLogger(__name__)
 
 _AUDIO_EXTS = {".flac", ".wav", ".mp3", ".ogg", ".m4a", ".opus", ".aac"}
 _MERGED_SLOT_PREFIX = "merged-"
+# 时长保护阈值：拼接产物时长低于「各分条时长之和」的该比例时判定为不合格
+_DURATION_MIN_RATIO = 0.9
+
+
+def probe_duration(path: str | Path, ffmpeg: str | None = None) -> float | None:
+    """读取音频时长（秒）。用 ffmpeg -i 解析 stderr 的 Duration 行；失败返回 None。"""
+    exe = ffmpeg or find_ffmpeg()
+    if not exe:
+        return None
+    try:
+        proc = subprocess.run([exe, "-i", str(path)],
+                              capture_output=True, text=True, timeout=60)
+    except Exception:  # noqa: BLE001
+        return None
+    for line in (proc.stderr or "").splitlines():
+        if "Duration:" not in line:
+            continue
+        token = line.split("Duration:", 1)[1].split(",", 1)[0].strip()
+        try:
+            h, m, s = token.split(":")
+            return int(h) * 3600 + int(m) * 60 + float(s)
+        except (ValueError, IndexError):
+            return None
+    return None
+
+
+def _validate_merged_duration(paths: list[str], output: Path,
+                              ffmpeg: str | None = None) -> None:
+    """时长保护：拼接产物时长应 ≈ 各分条时长之和，过短判定失败。
+
+    防御历史 bug：flac -c copy 拼接时 STREAMINFO 只记第一段采样数，产物播完
+    第一段（如 2.31s）就停，而期望是各段之和（如 24.46s）。重编码已修复根因，
+    这里再兜底校验，避免异常产物进入对话。
+    """
+    exe = ffmpeg or find_ffmpeg()
+    if not exe:
+        return  # 无 ffmpeg 无法校验（concat 本身就需要 ffmpeg，能到这说明存在）
+    expected = 0.0
+    probed_any = False
+    for p in paths:
+        d = probe_duration(p, exe)
+        if d and d > 0:
+            expected += d
+            probed_any = True
+    actual = probe_duration(output, exe)
+    if actual is None or actual <= 0:
+        raise ValueError("拼接产物时长读取失败（可能损坏），已丢弃")
+    if probed_any and expected > 0 and actual < expected * _DURATION_MIN_RATIO:
+        raise ValueError(
+            f"拼接产物时长异常：期望约 {expected:.1f}s，实际 {actual:.1f}s，已丢弃"
+        )
+
+
+def _discard_failed_merge(thread_id: str, message_id: str, output: Path) -> None:
+    """丢弃不合格/失败的拼接产物：删除音频文件并清掉快照里的 merged part。
+
+    保留分条音频不动，前端「拼接完整版」按钮依赖分条数量（≥2），因此按钮仍在。
+    """
+    try:
+        output.unlink(missing_ok=True)
+    except OSError:
+        pass
+    try:
+        chat_snapshot.remove_parts_matching(
+            thread_id, message_id,
+            lambda p: str(p.get("slotId") or "").startswith(_MERGED_SLOT_PREFIX),
+        )
+    except Exception as exc:  # noqa: BLE001
+        _LOG.warning("清理不合格完整版失败 thread=%s mid=%s: %s",
+                     thread_id, message_id, exc)
+
 
 
 def find_ffmpeg() -> str | None:
@@ -133,8 +204,16 @@ def merge_audio_for_message(thread_id: str, message_id: str, *, force: bool = Fa
     try:
         concat_audio(paths, output)
     except Exception as exc:  # noqa: BLE001
+        _discard_failed_merge(thread_id, message_id, output)
         _LOG.warning("音频拼接失败 thread=%s mid=%s: %s", thread_id, message_id, exc)
         raise ValueError(f"音频拼接失败：{exc}") from exc
+
+    # 时长保护：不合格则丢弃产物、清掉 merged part，保留分条 → 按钮仍在，可重试
+    try:
+        _validate_merged_duration(paths, output)
+    except ValueError:
+        _discard_failed_merge(thread_id, message_id, output)
+        raise
 
     url = view_urls.local_view(str(output))
     merged_part = {

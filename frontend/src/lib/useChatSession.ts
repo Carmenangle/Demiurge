@@ -1191,7 +1191,9 @@ export function useChatSession(deps: ChatSessionDeps) {
       }
     } catch (error) {
       console.error("[merge-audio]", { threadId, messageId, error });
-      onNotify?.("音频拼接失败", "error");
+      // 透出后端原因（如「拼接产物时长异常…已丢弃」）；分条未动 → 按钮仍在，可重试
+      const reason = error instanceof Error && error.message ? error.message : "音频拼接失败";
+      onNotify?.(reason, "error");
     }
   };
   // APPEND3_HERE
