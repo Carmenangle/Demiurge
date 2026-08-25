@@ -2,6 +2,14 @@ import { useCallback, useEffect, useRef, useState, type MutableRefObject } from 
 import type { ChatMessage } from "../types/chat";
 import { appendUniqueMessageIds, changedAssistantMessageIds } from "./chatUnread";
 
+// 稳定滚到底：立即 + 双 rAF（吸收懒加载图片/异步布局导致的高度变化）。
+// 懒加载图片在滚到底后进入视口才触发加载，加载完成高度变大 → 靠 load 监听再跟一次。
+function scrollStreamToBottom(stream: HTMLElement) {
+  const setBottom = () => { stream.scrollTop = stream.scrollHeight; };
+  setBottom();
+  requestAnimationFrame(() => requestAnimationFrame(setBottom));
+}
+
 export function useChatUnreadTracker(
   threadId: string,
   messages: ChatMessage[],
@@ -48,6 +56,18 @@ export function useChatUnreadTracker(
     sync();
   }, [atBottomRef, messageEndMarker, streamRef, sync]);
 
+  // 贴底时监听容器内媒体加载完成（img/video load 不冒泡，用捕获阶段），
+  // 加载完成高度变大后自动跟随到底——解决进入会话时懒加载图片未加载导致停在中间。
+  useEffect(() => {
+    const stream = streamRef.current;
+    if (!stream) return;
+    const onMediaLoad = () => {
+      if (atBottomRef.current) stream.scrollTop = stream.scrollHeight;
+    };
+    stream.addEventListener("load", onMediaLoad, true);
+    return () => stream.removeEventListener("load", onMediaLoad, true);
+  }, [streamRef, atBottomRef]);
+
   useEffect(() => {
     const stream = streamRef.current;
     if (!stream) return;
@@ -58,11 +78,13 @@ export function useChatUnreadTracker(
       atBottomRef.current = true;
       pendingIdsRef.current = [];
       setUnreadIds([]);
+      // 进入会话：稳定滚到底（历史消息异步加载完成后高度仍在变，靠 load 监听继续跟随）
+      scrollStreamToBottom(stream);
       return;
     }
     versionsRef.current = activity.versions;
     if (atBottomRef.current) {
-      stream.scrollTop = stream.scrollHeight;
+      scrollStreamToBottom(stream);
       pendingIdsRef.current = [];
       setUnreadIds([]);
       return;
