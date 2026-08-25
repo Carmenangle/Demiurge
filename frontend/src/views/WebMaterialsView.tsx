@@ -2,7 +2,7 @@
 // 图片：存 outputDir/_web_materials/；灵感卡：存 outputDir/_web_materials/inspiration/<id>.json。
 // 灵感卡封面：有图 → 图片（1:1）；无图 → 文本预览（放部分内容）。
 // 双击灵感卡 → 详情弹窗（文本内容，不是生成参数；可删图只留文本）。
-// 批量选择：图片 / 灵感卡各自支持 删除 / 发送至画布 / 发送对话框。
+// 批量选择：图片 / 灵感卡各自支持 删除 / 发送至画布 / 插入输入框。
 import { useEffect, useState } from "react";
 import { Check, FileText, Images, Search, Send, Trash2 } from "lucide-react";
 import { PageShell, EmptyState } from "../components/layout/PageShell";
@@ -202,7 +202,7 @@ export function WebMaterialsView({
                   <>
                     {onSendInspirationToChat && (
                       <button className="btn" disabled={selected.size === 0} onClick={() => sendSelection(false)}>
-                        <Send size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />发送对话框（{selected.size}）
+                        <Send size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />插入输入框（{selected.size}）
                       </button>
                     )}
                     {onSendInspirationToCanvas && (

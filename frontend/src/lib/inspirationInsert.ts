@@ -73,6 +73,46 @@ export function inspirationInsertText(card: InspirationInsertCard | InspirationA
   return `${head}\n${note}\n${body}`;
 }
 
+/** 拼接一批灵感卡的 Agent 语义文本（每卡一段，空卡跳过）。 */
+export function inspirationAttachmentsText(cards: readonly InspirationAttachment[]): string {
+  return (cards || []).map((c) => inspirationInsertText(c)).filter(Boolean).join("\n\n");
+}
+
+/** 序列化（发送前）：用户文本/图 + 灵感卡附件 → 最终 message 的 text 与 images。
+ *  封面图追加在用户图之后（图片参数）、灵感卡语义文本追加在用户文本之后。 */
+export function serializeInspirationSend(
+  cards: readonly InspirationAttachment[],
+  userText: string,
+  userImages: readonly string[],
+): { text: string; images: string[] } {
+  const inspText = inspirationAttachmentsText(cards);
+  const inspImages = (cards || []).map((c) => c.sourceUrl || c.imageUrl).filter(Boolean);
+  return {
+    text: [userText, inspText].filter(Boolean).join("\n\n"),
+    images: [...userImages, ...inspImages],
+  };
+}
+
+/** 逆序列化（编辑回填）：最终 text/images + 附件 → 还原「纯用户文本 + 纯用户图」。
+ *  灵感卡文本由附件重新生成（重发时再序列化），封面图按 sourceUrl/imageUrl 从 images 里剔除。 */
+export function deserializeInspirationSend(
+  text: string,
+  images: readonly string[],
+  attachments: readonly InspirationAttachment[],
+): { userText: string; userImages: string[] } {
+  const cards = attachments || [];
+  const inspText = inspirationAttachmentsText(cards);
+  let userText = text || "";
+  if (inspText) {
+    if (userText === inspText) userText = "";
+    else if (userText.endsWith("\n\n" + inspText)) userText = userText.slice(0, -("\n\n" + inspText).length);
+    else if (userText.endsWith(inspText)) userText = userText.slice(0, -inspText.length);
+  }
+  const inspUrls = new Set(cards.flatMap((c) => [c.sourceUrl, c.imageUrl].filter(Boolean)));
+  const userImages = (images || []).filter((u) => !inspUrls.has(u));
+  return { userText, userImages };
+}
+
 /** 灵感卡 → 输入框附件（封面图 = 选中图优先 / 卡内图 / 显式传入；sourceUrl 默认 = 原始封面）。 */
 export function inspirationToAttachment(
   card: InspirationInsertCard,
@@ -133,4 +173,28 @@ export function inspirationCanvasLabel(card: InspirationInsertCard): string {
   const imgs = inspirationInsertImages(card);
   return imgs.length > 0 ? `发送画布（${imgs.length} 图）` : "发送画布";
 }
+
+// 输入框送达缓存（灵感卡「插入输入框」跨 section 通道）。
+// 素材库（assets section）没有输入框，点「发送至对话框」需先切回对话视图（home section），
+// 而 ChatView 可能未挂载 → 直接调用输入框 ref 会失效。方案同画布缓存：发送方写模块级缓存
+// + 派发空通知；ChatView 挂载时先消费缓存，之后每收到通知增量消费，消费即清空 → 不重不漏。
+// 注意：画布/对话模式共用同一个输入框（ChatView 内 contentView 切换不换 RichInput），
+// 因此该通道对两种模式都生效——切回后无论停在画布还是对话，灵感卡都会进同一个输入框。
+
+const pendingInspAttachments: InspirationAttachment[] = [];
+export const CHAT_INSPIRATION_EVENT = "laf-inspiration-to-chat";
+
+/** 素材库等无输入框上下文：写入待插入缓存 + 派发通知（detail 不带数据，消费方从缓存取）。 */
+export function pushInspirationsToChat(items: InspirationAttachment[]): void {
+  if (!items || items.length === 0) return;
+  pendingInspAttachments.push(...items);
+  window.dispatchEvent(new CustomEvent(CHAT_INSPIRATION_EVENT));
+}
+
+/** 取走并清空待插入缓存（ChatView 挂载/收到通知时消费）。 */
+export function consumePendingInspirationAttachments(): InspirationAttachment[] {
+  if (pendingInspAttachments.length === 0) return [];
+  return pendingInspAttachments.splice(0, pendingInspAttachments.length);
+}
+
 

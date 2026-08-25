@@ -9,7 +9,7 @@ import {
 import { Plus, X } from "lucide-react";
 import { clampSelectionScroll } from "../lib/contextManagement";
 import { classifyClipboardPaste } from "../lib/richPaste";
-import { inspirationInsertText, type InspirationAttachment } from "../lib/inspirationInsert";
+import { serializeInspirationSend, type InspirationAttachment } from "../lib/inspirationInsert";
 
 // 序列化结果：图片在上、文本在下两层。parts 保留兼容（图片在前、文本在后）。
 export interface MaskedImageInput {
@@ -29,6 +29,8 @@ export interface RichContent {
   text: string;       // 纯文本（用于指令解析与回显）
   images: string[];   // 所有图片 URL（dataURI/http），按上方栏从左到右顺序
   maskedImage?: MaskedImageInput;
+  /** 灵感卡附件（9:16 卡片）：发送时图文拆分，编辑回填时据此还原卡片形态 */
+  inspirationAttachments?: InspirationAttachment[];
 }
 
 export interface RichInputHandle {
@@ -181,6 +183,7 @@ export const RichInput = forwardRef<RichInputHandle, Props>(
         const text = content.text || "";
         setImages([...new Set(content.images.filter(Boolean))]);
         setMaskedImage(content.maskedImage || null);
+        setInspCards(content.inspirationAttachments ? [...content.inspirationAttachments] : []);
         setCurText(text);
         setClosed(false);
         setActive(0);
@@ -239,10 +242,7 @@ export const RichInput = forwardRef<RichInputHandle, Props>(
       const text = curText.trim();
       // ★ 灵感卡附件：图文拆分发送——封面图作为图片参数上传，title/content 转成
       //   Agent 语义文本（「灵感参考」身份标记），追加在用户文本之后。
-      const inspText = inspCards.map((c) => inspirationInsertText(c)).filter(Boolean).join("\n\n");
-      const inspImages = inspCards.map((c) => c.sourceUrl || c.imageUrl).filter(Boolean);
-      const finalText = [text, inspText].filter(Boolean).join("\n\n");
-      const finalImages = [...images, ...inspImages];
+      const { text: finalText, images: finalImages } = serializeInspirationSend(inspCards, text, images);
       if (!finalText && finalImages.length === 0 && !maskedImage) return;
       const parts: RichContent["parts"] = [
         ...finalImages.map((url) => ({ type: "image" as const, url })),
@@ -259,6 +259,7 @@ export const RichInput = forwardRef<RichInputHandle, Props>(
         text: finalText,
         images: finalImages,
         ...(maskedImage ? { maskedImage } : {}),
+        ...(inspCards.length > 0 ? { inspirationAttachments: [...inspCards] } : {}),
       });
       setImages([]);
       setInspCards([]);

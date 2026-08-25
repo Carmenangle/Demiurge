@@ -2883,7 +2883,7 @@ export function CanvasStageFlow({
                   <textarea
                     value={inspirationEditContent}
                     onChange={(e) => setInspirationEditContent(e.target.value)}
-                    placeholder="内容（双击卡片 → 插入对话即把这段内容推送到对话流）"
+                    placeholder="内容（右键卡片 → 插入对话：把灵感卡插到输入框图片栏，发送时图文拆分）"
                     style={{
                       flex: 1, minHeight: 0, resize: "none", width: "100%", padding: 8, borderRadius: 6, boxSizing: "border-box",
                       border: "1px solid var(--border, #333)",
@@ -2935,7 +2935,7 @@ export function CanvasStageFlow({
             <textarea
               value={newInspiration.content}
               onChange={(e) => setNewInspiration({ ...newInspiration, content: e.target.value })}
-              placeholder="内容（双击卡片 → 插入对话即把这段内容推送到对话流）"
+              placeholder="内容（右键卡片 → 插入对话：把灵感卡插到输入框图片栏，发送时图文拆分）"
               rows={10}
               style={{
                 width: "100%", padding: 8, borderRadius: 6, boxSizing: "border-box",

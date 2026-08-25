@@ -3,6 +3,8 @@ import {
   inspirationInsertText, inspirationInsertImages, inspirationToAttachment,
   pushInspirationsToCanvas, consumePendingInspirations,
   inspirationToCanvasPayload, inspirationCanvasLabel,
+  serializeInspirationSend, deserializeInspirationSend,
+  type InspirationAttachment,
 } from "./inspirationInsert";
 
 describe("inspiration insert text (M1.5 Agent 理解格式)", () => {
@@ -107,5 +109,34 @@ describe("inspiration → canvas bridge (M1.5)", () => {
   it("canvasLabel 反映图片数量", () => {
     expect(inspirationCanvasLabel({ images: [{ url: "a.png" }] })).toBe("发送画布（1 图）");
     expect(inspirationCanvasLabel({})).toBe("发送画布");
+  });
+});
+
+describe("serialize / deserialize inspiration send (发送图文拆分)", () => {
+  const card: InspirationAttachment = {
+    id: "c1", title: "女仆装", content: "主流款式…",
+    imageUrl: "https://x/cover.png", sourceUrl: "https://x/cover.png",
+  };
+
+  it("serialize：卡片文本追加到用户文本后，封面图追加到用户图后", () => {
+    const r = serializeInspirationSend([card], "你好", ["https://x/u1.png"]);
+    expect(r.images).toEqual(["https://x/u1.png", "https://x/cover.png"]);
+    expect(r.text).toContain("你好");
+    expect(r.text).toContain("【灵感参考 · 女仆装】");
+    expect(r.text.indexOf("你好")).toBeLessThan(r.text.indexOf("【灵感参考"));
+  });
+
+  it("deserialize：拆回纯用户文本 + 纯用户图（剔除封面图与卡片文本）", () => {
+    const s = serializeInspirationSend([card], "你好", ["https://x/u1.png"]);
+    const d = deserializeInspirationSend(s.text, s.images, [card]);
+    expect(d.userText).toBe("你好");
+    expect(d.userImages).toEqual(["https://x/u1.png"]);
+  });
+
+  it("仅卡片无用户内容：往返还原为空文本 + 空图", () => {
+    const s = serializeInspirationSend([card], "", []);
+    const d = deserializeInspirationSend(s.text, s.images, [card]);
+    expect(d.userText).toBe("");
+    expect(d.userImages).toEqual([]);
   });
 });

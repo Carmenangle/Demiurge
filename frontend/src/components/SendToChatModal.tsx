@@ -3,7 +3,7 @@
 // 「同时创建画布节点」默认开启：把图片作为 generation 入库目标作品（index-generation 幂等），
 // 目标作品的画布随即出现对应节点；对话消息与画布节点同步创建。
 import { useEffect, useState } from "react";
-import { useRepos } from "../stores/repos";
+import { useRepos, type Repo } from "../stores/repos";
 import { chatAppend, indexGeneration } from "../api/ai";
 import { resolvedEmbedModel, useSettings } from "../stores/settings";
 
@@ -14,12 +14,14 @@ export interface SendPayload {
 }
 
 export function SendToChatModal({
-  title = "发送至对话框", payload, onDone, onCancel,
+  title = "发送至对话框", payload, onDone, onCancel, insertInput = false,
 }: {
   title?: string;
   payload: SendPayload;
-  onDone: (repoId: string) => void;
+  onDone: (repo: Repo) => void;
   onCancel: () => void;
+  /** 插入输入框模式：选作品后不落盘，回调由父级 push 到输入框并跳转（灵感卡「发送对话框」→「插入输入框」）。 */
+  insertInput?: boolean;
 }) {
   const { repos } = useRepos();
   const { settings } = useSettings();
@@ -29,6 +31,9 @@ export function SendToChatModal({
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // 插入输入框模式只列「作品」（有 parentId），目录不能作为输入框归属。
+  const options = insertInput ? repos.filter((r) => r.parentId) : repos;
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onCancel();
     window.addEventListener("keydown", onKey);
@@ -37,6 +42,12 @@ export function SendToChatModal({
 
   const confirm = async () => {
     if (!repoId || sending) return;
+    const selectedRepo = repos.find((r) => r.id === repoId);
+    if (!selectedRepo) return;
+    if (insertInput) {
+      onDone(selectedRepo);
+      return;
+    }
     setSending(true);
     setError(null);
     try {
@@ -58,7 +69,7 @@ export function SendToChatModal({
           }
         }
       }
-      onDone(repoId);
+      onDone(selectedRepo);
     } catch (e) {
       setError(`发送失败：${e instanceof Error ? e.message : String(e)}`);
       setSending(false);
@@ -70,7 +81,9 @@ export function SendToChatModal({
       <div className="modal" style={{ maxWidth: 420 }} onClick={(e) => e.stopPropagation()}>
         <h3>{title}</h3>
         <p style={{ fontSize: 13, color: "var(--text-muted)", margin: "4px 0 10px" }}>
-          选择目标作品，内容会以 user 消息写入该作品的对话（刷新后保留）。
+          {insertInput
+            ? "选择目标作品，灵感卡会插入该作品对话的输入框（可继续编辑后再发送）。"
+            : "选择目标作品，内容会以 user 消息写入该作品的对话（刷新后保留）。"}
         </p>
         <select
           value={repoId}
@@ -79,13 +92,13 @@ export function SendToChatModal({
           autoFocus
         >
           <option value="">选择作品…</option>
-          {repos.map((r) => (
+          {options.map((r) => (
             <option key={r.id} value={r.id}>
               {r.parentId ? `↳ ${r.name}` : r.name}
             </option>
           ))}
         </select>
-        {payload.images?.length ? (
+        {!insertInput && payload.images?.length ? (
           <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, marginBottom: 10 }}>
             <input type="checkbox" checked={createNode} onChange={(e) => setCreateNode(e.target.checked)} />
             同时在目标作品画布创建节点（图片入库为 generation）
@@ -95,7 +108,7 @@ export function SendToChatModal({
         <div className="modal-actions">
           <button className="btn" onClick={onCancel}>取消</button>
           <button className="btn primary" disabled={!repoId || sending} onClick={confirm}>
-            {sending ? "发送中…" : "发送"}
+            {sending ? "发送中…" : insertInput ? "插入输入框" : "发送"}
           </button>
         </div>
       </div>

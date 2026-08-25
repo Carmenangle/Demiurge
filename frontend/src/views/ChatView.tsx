@@ -37,7 +37,7 @@ import { WorkflowCard } from "../components/WorkflowCard";
 const CanvasStageFlow = lazy(() => import("./CanvasStageFlow").then((m) => ({ default: m.CanvasStageFlow })));
 import { globalPendingToolCreates, canvasBridge } from "../components/canvas/shared";
 import { useChatSession } from "../lib/useChatSession";
-import { inspirationToAttachment } from "../lib/inspirationInsert";
+import { inspirationToAttachment, consumePendingInspirationAttachments, CHAT_INSPIRATION_EVENT } from "../lib/inspirationInsert";
 import { ConfirmModal } from "../components/Modal";
 import { MaskEditorModal, type MaskEditorResult } from "../components/MaskEditorModal";
 import { StylePresetModal } from "../components/StylePresetModal";
@@ -207,6 +207,19 @@ export function ChatView({
   };
   // 画布模式下输入栏折叠为悬浮小球（默认折叠最大化画布空间；点小球展开，左下角按钮收起）
   const [canvasInputFolded, setCanvasInputFolded] = useState(true);
+  // 素材库「插入输入框」跨大区通道消费：ChatView 挂载时先取走缓存，之后每次收到通知增量消费。
+  // 画布/对话模式共用同一个 RichInput，因此切回后无论停在画布还是对话，灵感卡都进同一输入框。
+  useEffect(() => {
+    const drain = () => {
+      const cards = consumePendingInspirationAttachments();
+      if (cards.length === 0) return;
+      for (const card of cards) richRef.current?.insertInspirationCard(card);
+      setCanvasInputFolded(false);  // 画布模式展开输入栏，让用户看到插入的灵感卡
+    };
+    drain();  // 挂载时消费（可能素材库推送时本组件未挂载）
+    window.addEventListener(CHAT_INSPIRATION_EVENT, drain);
+    return () => window.removeEventListener(CHAT_INSPIRATION_EVENT, drain);
+  }, []);
   // 小球可上下拖动（对标快捷工具/后台活动浮标）：top 持久化，pointer capture 区分点击/拖动
   const FAB_TOP_KEY = "laf_canvas_input_fab_top";
   const [canvasFabTop, setCanvasFabTop] = useState(() => {

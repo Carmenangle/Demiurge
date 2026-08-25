@@ -1,4 +1,5 @@
 import type { PortOp } from "../api/ai";
+import type { InspirationAttachment } from "../lib/inspirationInsert";
 
 // 图文混排片段：文本/图片穿插渲染
 export interface MsgPart {
@@ -125,6 +126,8 @@ export interface ChatMessage {
     images?: Array<{ thumb_url: string; full_url: string; source_url: string; width?: number; height?: number; title?: string }>;
     selected?: string[];
   };
+  // 灵感卡附件（输入框 9:16 卡片）：发送时图文拆分进 text/images，编辑回填据此还原卡片形态
+  inspirationAttachments?: InspirationAttachment[];
   // 风格模板/艺术化修饰后的独立提示词审批卡，可在历史中继续操作。
   promptApproval?: PromptApproval;
   // Supervisor 无法高置信分派时显示的最小候选选择卡。

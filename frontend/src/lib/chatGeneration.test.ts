@@ -6,11 +6,13 @@ import {
   promptAdditionsForSelectedLora, triggersForSelectedLora,
   resolveLoraPromptMetadata,
   resolveVideoBaseImage,
+  userMessageRichContent,
 } from "./chatGeneration";
 import {
   generationResultAction, notFoundPollAction, pendingResumeAction, pollSchedule,
   durableFinalizeSucceeded, registerPending, shouldFinalize, unregisterPending,
 } from "./workflowGenerationRuntime";
+import { serializeInspirationSend, type InspirationAttachment } from "./inspirationInsert";
 import type { Template } from "../api/workflows";
 import type { ChatMessage } from "../types/chat";
 
@@ -610,5 +612,42 @@ describe("resolveVideoBaseImage", () => {
     expect(resolveVideoBaseImage({
       tpl: tplWithImage, messageId: "m1", slotId: "s1", messages: [msg("m1")],
     })).toBeUndefined();
+  });
+});
+
+describe("userMessageRichContent（灵感卡编辑回填还原）", () => {
+  const card: InspirationAttachment = {
+    id: "c1", title: "女仆装", content: "主流款式…",
+    imageUrl: "https://x/cover.png", sourceUrl: "https://x/cover.png",
+  };
+
+  it("有灵感卡附件时：还原卡片 + 拆回纯用户文本/图（不重复）", () => {
+    const s = serializeInspirationSend([card], "你好", ["https://x/u1.png"]);
+    const msg: ChatMessage = {
+      id: "m1", role: "user", text: s.text,
+      parts: [
+        ...s.images.map((url) => ({ type: "image" as const, url })),
+        { type: "text" as const, text: s.text },
+      ],
+      inspirationAttachments: [card],
+    };
+    const c = userMessageRichContent(msg);
+    expect(c.text).toBe("你好");
+    expect(c.images).toEqual(["https://x/u1.png"]);
+    expect(c.inspirationAttachments).toEqual([card]);
+    // parts 里不得残留灵感卡封面图或卡片文本
+    expect(c.parts).not.toContainEqual({ type: "image", url: "https://x/cover.png" });
+    expect(JSON.stringify(c.parts)).not.toContain("【灵感参考");
+  });
+
+  it("无灵感卡附件时：文本/图片原样返回，不生成附件", () => {
+    const msg: ChatMessage = {
+      id: "m2", role: "user", text: "你好",
+      parts: [{ type: "text", text: "你好" }, { type: "image", url: "https://x/a.png" }],
+    };
+    const c = userMessageRichContent(msg);
+    expect(c.text).toBe("你好");
+    expect(c.images).toEqual(["https://x/a.png"]);
+    expect(c.inspirationAttachments).toBeUndefined();
   });
 });

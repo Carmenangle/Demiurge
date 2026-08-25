@@ -3,6 +3,7 @@
 // 依赖注入原则：涉及落盘的部分（persist）由调用方传入函数，本模块只管遍历与决策。
 import type { ChatMessage, RegenerationSnapshot } from "../types/chat";
 import { regenerationPrompt } from "./regeneration";
+import { deserializeInspirationSend } from "./inspirationInsert";
 import type { Template } from "../api/workflows";
 import type { RichContent } from "../components/RichInput";
 export { prependLoraTriggers } from "./imagePromptProfiles";
@@ -122,11 +123,11 @@ export function userMessagePlainText(msg: ChatMessage): string {
 }
 
 export function userMessageRichContent(msg: ChatMessage): RichContent {
-  const text = userMessagePlainText(msg);
-  const images = (msg.parts || [])
+  const rawText = userMessagePlainText(msg);
+  const rawImages = (msg.parts || [])
     .filter((part) => part.type === "image" && part.url)
     .map((part) => part.url!);
-  if (msg.image && !images.includes(msg.image)) images.push(msg.image);
+  if (msg.image && !rawImages.includes(msg.image)) rawImages.push(msg.image);
   const maskedPart = (msg.parts || []).find(
     (part) => part.type === "masked-image" && part.image && part.mask && part.url,
   );
@@ -135,14 +136,30 @@ export function userMessageRichContent(msg: ChatMessage): RichContent {
     mask: maskedPart.mask!,
     preview: maskedPart.url!,
   } : undefined;
+
+  // 灵感卡附件：编辑回填时还原卡片形态——文本/图拆回纯用户部分，卡片由附件重建。
+  const attachments = msg.inspirationAttachments?.length ? msg.inspirationAttachments : undefined;
+  const des = attachments
+    ? deserializeInspirationSend(rawText, rawImages, attachments)
+    : null;
+  const text = des ? des.userText : rawText;
+  const images = des ? des.userImages : rawImages;
+
   const inputParts: RichContent["parts"] = [];
-  for (const part of msg.parts || []) {
-    if (part.type === "text") inputParts.push({ type: "text", text: part.text || "" });
-    if (part.type === "image" && part.url) inputParts.push({ type: "image", url: part.url });
-    if (part.type === "masked-image" && part.url && part.image && part.mask) {
-      inputParts.push({
-        type: "masked-image", url: part.url, image: part.image, mask: part.mask,
-      });
+  if (attachments) {
+    // 有灵感卡：parts 用拆回后的纯用户内容重建（卡片文本/封面图不再重复进文本/图片）
+    for (const url of images) inputParts.push({ type: "image", url });
+    if (maskedImage) inputParts.push({ type: "masked-image", url: maskedImage.preview, image: maskedImage.image, mask: maskedImage.mask });
+    if (text) inputParts.push({ type: "text", text });
+  } else {
+    for (const part of msg.parts || []) {
+      if (part.type === "text") inputParts.push({ type: "text", text: part.text || "" });
+      if (part.type === "image" && part.url) inputParts.push({ type: "image", url: part.url });
+      if (part.type === "masked-image" && part.url && part.image && part.mask) {
+        inputParts.push({
+          type: "masked-image", url: part.url, image: part.image, mask: part.mask,
+        });
+      }
     }
   }
   return {
@@ -153,6 +170,7 @@ export function userMessageRichContent(msg: ChatMessage): RichContent {
       ...(text ? [{ type: "text" as const, text }] : []),
     ],
     ...(maskedImage ? { maskedImage } : {}),
+    ...(attachments ? { inspirationAttachments: attachments } : {}),
   };
 }
 

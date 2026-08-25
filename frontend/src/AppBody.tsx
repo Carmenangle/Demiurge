@@ -3,11 +3,11 @@ import { type NavSection, type WorkMode } from "./lib/viewRouting";
 import { activeUserPersona, type useSettings } from "./stores/settings";
 import { type Repo, type RepoBinding, type useRepos } from "./stores/repos";
 import { SectionPlaceholder } from "./modes/SectionPlaceholder";
-import { saveSnapshot, chatAppend } from "./api/ai";
+import { saveSnapshot, chatAppend, type InspirationCardAsset } from "./api/ai";
 import { createScenarioSnapshot, forkScenarioSnapshot, listScenarioSnapshots } from "./api/scenario";
 import { createScenarioBranch } from "./lib/scenarioBranchRuntime";
 import { SendToChatModal, type SendPayload } from "./components/SendToChatModal";
-import { inspirationInsertText, inspirationInsertImages, pushInspirationsToCanvas } from "./lib/inspirationInsert";
+import { pushInspirationsToCanvas, pushInspirationsToChat } from "./lib/inspirationInsert";
 const SettingsView = lazy(() => import("./views/settings/SettingsView").then((m) => ({ default: m.SettingsView })));
 const WorkflowTemplates = lazy(() => import("./pages/WorkflowTemplates").then((m) => ({ default: m.WorkflowTemplates })));
 const ModelDownload = lazy(() => import("./pages/ModelDownload").then((m) => ({ default: m.ModelDownload })));
@@ -66,8 +66,25 @@ export function AppBody(props: AppBodyProps) {
   const [sendTarget, setSendTarget] = useState<{
     title: string;
     payload: SendPayload;
+    insertInput?: boolean;                     // 灵感卡「插入输入框」模式（不落盘，push 到输入框）
+    insertCards?: InspirationCardAsset[];      // 待插入输入框的灵感卡
   } | null>(null);
-  const handleSendDone = () => setSendTarget(null);
+  const handleSendDone = (repo?: Repo) => {
+    const target = sendTarget;
+    setSendTarget(null);
+    // 插入输入框模式：push 到全局缓存 + 跳转到目标作品（画布/对话共用输入框，挂载后消费）
+    if (target?.insertInput && repo && target.insertCards) {
+      const attachments = target.insertCards.map((c) => ({
+        id: c.id,
+        title: c.title,
+        content: c.content,
+        imageUrl: c.cover_url || "",
+        sourceUrl: c.images?.[0]?.source_url || c.cover_url || "",
+      }));
+      pushInspirationsToChat(attachments);
+      if (repo.parentId) props.onOpenWork(repo.parentId, repo.id);
+    }
+  };
   if (props.settingsOpen) {
     return <SettingsView settings={settings} update={settingsStore.update}
       onOutputPathMigrated={props.relocateOutputPath} />;
@@ -171,13 +188,12 @@ export function AppBody(props: AppBodyProps) {
           outputDir={settings.outputDir}
           onSendToCanvas={(items) => setSendTarget({ title: "发送至画布", payload: { text: "", images: items.map((m) => m.url) } })}
           onSendInspirationToChat={(cards) => {
-            // 灵感卡发送对话框：带「灵感参考」身份标记 + 图片多模态（Agent 可理解风格/服装参考）
+            // 灵感卡「插入输入框」：选作品后 push 到该作品输入框（画布/对话共用），可继续编辑后发送
             setSendTarget({
-              title: "发送至对话框",
-              payload: {
-                text: cards.map((c) => inspirationInsertText(c)).join("\n\n"),
-                images: cards.flatMap((c) => inspirationInsertImages(c)),
-              },
+              title: "插入输入框",
+              payload: { text: "", images: [] },
+              insertInput: true,
+              insertCards: cards,
             });
           }}
           onSendInspirationToCanvas={(cards) => {
@@ -193,7 +209,8 @@ export function AppBody(props: AppBodyProps) {
             title={sendTarget.title}
             payload={sendTarget.payload}
             onDone={handleSendDone}
-            onCancel={handleSendDone}
+            onCancel={() => setSendTarget(null)}
+            insertInput={sendTarget.insertInput}
           />
         )}
       </>

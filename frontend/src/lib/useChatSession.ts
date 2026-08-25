@@ -1446,6 +1446,9 @@ export function useChatSession(deps: ChatSessionDeps) {
         ...(t ? [{ type: "text" as const, text: t }] : []),
         ...images.map((url) => ({ type: "image" as const, url })),
       ] : undefined),
+      ...(content?.inspirationAttachments?.length
+        ? { inspirationAttachments: content.inspirationAttachments }
+        : {}),
     };
     const botId = crypto.randomUUID();
     agentBusyRef.current = true;
