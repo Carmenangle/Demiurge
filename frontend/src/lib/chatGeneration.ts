@@ -333,11 +333,12 @@ export function resolveVideoBaseImage(opts: {
 // 不跳过它去取更早楼层（避免跨楼层拿到过时尾帧）。
 interface VideoTailMessages {
   id: string;
-  parts?: Array<{ type?: string; slotId?: string; status?: string; url?: string; lastFrameDesc?: string }>;
+  parts?: Array<{ type?: string; slotId?: string; status?: string; url?: string; lastFrameDesc?: string; lastFrameUrl?: string }>;
 }
 
 export interface PrevTailRef {
   lastFrameDesc: string;
+  lastFrameUrl?: string;
   messageId: string;
   slotId: string;
 }
@@ -353,6 +354,7 @@ export function resolvePrevTailDesc(
         return p.lastFrameDesc
           ? {
             lastFrameDesc: p.lastFrameDesc,
+            ...(p.lastFrameUrl ? { lastFrameUrl: p.lastFrameUrl } : {}),
             messageId: messages[i].id,
             slotId: p.slotId || "",
           }

@@ -268,3 +268,48 @@ def test_climax_camera_prefers_model_camera_over_motion():
     p = video_prompt.compile_climax_video_prompt(_spec(camera="摇臂俯拍", motion=3))
     assert "摇臂俯拍" in p
     assert "低机位快速丝滑运镜" not in p
+
+
+def test_climax_prefers_action_sequence_over_visual_facts():
+    # 高潮动作延伸优先用 action_sequence（定格动作 → 剧情完整动作），
+    # 覆盖画面级要素（subjects/visual_facts/composition）的动态化旧行为
+    spec = _spec(
+        subjects=[{"name": "冷倾雪", "description": "scooping cream with spoon", "weight": 1.2}],
+        visual_facts=[{"kind": "action", "fact": "spoon lifts a dollop of cream", "evidence": "挖出一勺奶油"}],
+        composition="close-up",
+        action_sequence=[
+            {"beat": "定格起点", "desc": "勺子挖出一勺奶油"},
+            {"beat": "延伸", "desc": "勺子送向嘴边，吃下"},
+        ],
+    )
+    p = video_prompt.compile_climax_video_prompt(spec)
+    assert "定格起点: 勺子挖出一勺奶油" in p
+    assert "延伸: 勺子送向嘴边，吃下" in p
+
+
+def test_climax_action_sequence_skips_empty_entries():
+    # action_sequence 里 desc 为空的条目被跳过，不产出空 beat 片段
+    spec = _spec(
+        action_sequence=[
+            {"beat": "定格起点", "desc": "勺子挖出一勺奶油"},
+            {"beat": "", "desc": ""},
+            {"beat": "延伸", "desc": "喂向镜头"},
+        ],
+    )
+    p = video_prompt.compile_climax_video_prompt(spec)
+    assert "定格起点: 勺子挖出一勺奶油" in p
+    assert "延伸: 喂向镜头" in p
+    assert "::" not in p
+
+
+def test_climax_falls_back_to_visual_facts_without_action_sequence():
+    # 无 action_sequence 时回退画面级要素（旧行为不变）
+    spec = _spec(
+        subjects=[{"name": "冷倾雪", "description": "drawing sword, crimson cloak", "weight": 1.2}],
+        visual_facts=[{"kind": "action", "fact": "leaps upward with blade raised", "evidence": "拔剑跃起"}],
+        composition="low-angle dynamic shot",
+        action_sequence=[],
+    )
+    p = video_prompt.compile_climax_video_prompt(spec)
+    assert "drawing sword, crimson cloak" in p
+    assert "leaps upward with blade raised" in p

@@ -90,11 +90,13 @@ function appendDelta(message: ChatMessage, text: string): ChatMessage {
 function appendMediaSlot(
   message: ChatMessage, slotId: string, offset?: number,
   lastFrameDesc?: string, videoPrompt?: string, videoParams?: VideoParams,
+  lastFrameUrl?: string,
 ): ChatMessage {
   const existing = message.parts || (message.text ? [{ type: "text" as const, text: message.text }] : []);
   if (existing.some((part) => part.slotId === slotId)) return message;
   const slot = { type: "media-slot" as const, slotId, status: "pending" as const,
     ...(lastFrameDesc ? { lastFrameDesc } : {}),
+    ...(lastFrameUrl ? { lastFrameUrl } : {}),
     ...(videoPrompt ? { videoPrompt } : {}),
     ...(videoParams ? { videoParams } : {}) };
   if (typeof offset === "number" && !message.parts) {
@@ -165,6 +167,8 @@ export function resolveMediaSlot(
           } : {}),
           // V1.5/B1：视频槽尾帧描述保留，供下一楼层 resolvePrevTailDesc 反查衔接
           ...(part.lastFrameDesc ? { lastFrameDesc: part.lastFrameDesc } : {}),
+          // V1.5/F3：尾帧图地址保留，供转场视频 image 输入反查（坑F）
+          ...(part.lastFrameUrl ? { lastFrameUrl: part.lastFrameUrl } : {}),
           // V1.5 默认开放：climax 视频提示词随槽位保留（无视频模板/模型也展示，供测试核对）
           ...(part.videoPrompt ? { videoPrompt: part.videoPrompt } : {}),
           // V1.5 默认开放：结构化视频参数随槽位保留（供测试核对参数是否上传）
@@ -271,7 +275,7 @@ export function reduceChatStreamEvent(
         : message);
     case "illustrate_request":
       return current.map((message) => message.id === botId
-        ? appendMediaSlot(message, event.id || crypto.randomUUID(), event.offset, event.lastFrameDesc, event.videoPrompt, event.videoParams)
+        ? appendMediaSlot(message, event.id || crypto.randomUUID(), event.offset, event.lastFrameDesc, event.videoPrompt, event.videoParams, event.lastFrameUrl)
         : message);
     case "audio_request":
       // 音频对白配音不入气泡流：由 useChatSession 逐角色提交 IndexTTS，完成后聚合到剧情楼层。

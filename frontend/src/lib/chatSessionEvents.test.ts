@@ -92,6 +92,27 @@ describe("reduceChatStreamEvent", () => {
     });
   });
 
+  it("illustrate_request 携带 lastFrameUrl → 槽位存储并随完成保留（V1.5/F3 尾帧图地址反查数据源）", () => {
+    let messages = reduceChatStreamEvent(base(), "bot", {
+      type: "illustrate_request", prompt: "p", motion: 3, actors: [], id: "slot-1",
+      videoMode: "firstlast", lastFrameDesc: "三人举杯同框", lastFrameUrl: "local://last-frame.png",
+    });
+    const slot = messages[0].parts?.[0];
+    expect(slot).toMatchObject({
+      type: "media-slot", slotId: "slot-1", status: "pending",
+      lastFrameDesc: "三人举杯同框",
+      lastFrameUrl: "local://last-frame.png",
+    });
+
+    // 视频完成后 lastFrameUrl 保留（供下一楼层转场视频 image 输入反查）
+    const ready = resolveMediaSlot(messages, "bot", "slot-1", "local://v.mp4", "video");
+    expect(ready[0].parts?.[0]).toEqual({
+      type: "video", url: "local://v.mp4", slotId: "slot-1", status: "ready",
+      lastFrameDesc: "三人举杯同框",
+      lastFrameUrl: "local://last-frame.png",
+    });
+  });
+
   it("illustrate_request 携带 videoPrompt → 槽位存储并随完成保留（V1.5 默认开放测试点）", () => {
     let messages = reduceChatStreamEvent(base(), "bot", {
       type: "illustrate_request", prompt: "p", motion: 3, actors: [], id: "slot-1",

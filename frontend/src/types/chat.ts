@@ -25,6 +25,8 @@ export interface MsgPart {
   total?: number;
   /** V1.5/B1 视频槽：本段视频的尾帧描述（下一楼层反查作 prevTailDesc 衔接） */
   lastFrameDesc?: string;
+  /** V1.5/F3 视频槽：本段视频的尾帧图地址（下一楼层转场视频 image 输入反查） */
+  lastFrameUrl?: string;
   /** V1.5 默认开放：climax 视频提示词随槽位存储（无视频模板/模型也展示，供测试核对） */
   videoPrompt?: string;
   /** V1.5 默认开放：结构化视频参数（dry-run 组装结果，供测试核对参数是否上传） */

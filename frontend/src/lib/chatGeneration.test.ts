@@ -651,9 +651,10 @@ describe("resolveVideoBaseImageRef（M2.1 底图来源槽引用）", () => {
 
 describe("resolvePrevTailDesc（V1.5/B2 尾帧链式反查）", () => {
   const msg = (id: string, parts: any[] = []) => ({ id, parts });
-  const video = (slotId: string, url: string, lastFrameDesc?: string) => ({
+  const video = (slotId: string, url: string, lastFrameDesc?: string, lastFrameUrl?: string) => ({
     type: "video", slotId, status: "ready" as const, url,
     ...(lastFrameDesc ? { lastFrameDesc } : {}),
+    ...(lastFrameUrl ? { lastFrameUrl } : {}),
   });
   const image = (slotId: string, url: string) =>
     ({ type: "image", slotId, status: "ready" as const, url });
@@ -664,6 +665,26 @@ describe("resolvePrevTailDesc（V1.5/B2 尾帧链式反查）", () => {
       msg("m2", []),
     ])).toEqual({
       lastFrameDesc: "上楼层尾帧：收伞进门",
+      messageId: "m1", slotId: "s1",
+    });
+  });
+
+  it("取最近一条已完成视频槽的尾帧描述 + 尾帧图地址（V1.5/F3）", () => {
+    expect(resolvePrevTailDesc([
+      msg("m1", [video("s1", "local://v1", "上楼层尾帧：收伞进门", "local://tail.png")]),
+      msg("m2", []),
+    ])).toEqual({
+      lastFrameDesc: "上楼层尾帧：收伞进门",
+      lastFrameUrl: "local://tail.png",
+      messageId: "m1", slotId: "s1",
+    });
+  });
+
+  it("尾帧图地址缺失时不带 lastFrameUrl 字段（向后兼容）", () => {
+    expect(resolvePrevTailDesc([
+      msg("m1", [video("s1", "local://v1", "尾帧描述")]),
+    ])).toEqual({
+      lastFrameDesc: "尾帧描述",
       messageId: "m1", slotId: "s1",
     });
   });

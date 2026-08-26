@@ -13,7 +13,11 @@ import json
 import re
 from collections.abc import Callable
 
-from app.services.prompt_clean import restore_jailbreak, restore_jailbreak_with_offsets
+from app.services.prompt_clean import (
+    restore_jailbreak,
+    # 重导出：scene_illustration 经本模块引用（F401 误报，noqa 只写代码）
+    restore_jailbreak_with_offsets,  # noqa: F401
+)
 
 # 破甲标记还原：由共享模块 prompt_clean 提供（规则文档 docs/PROMPT-CLEANING-RULES.md）。
 # 对齐用户给的正则 /@\(([^()]*)\)(?=@)|@\(([^()]*)\)|\(([^()]*)\)@|@/g → $1$2$3
@@ -89,14 +93,20 @@ _INLINE_PLAN_INSTRUCTION = (
     "除 anchor 和 subjects.name 必须保留正文原文或角色原名外，camera、visual_thesis、hierarchy、"
     "palette_material、lighting_logic、composition、subjects.description 与 prompt 必须使用简洁英文视觉描述；"
     "这样独立提示词模型拒答时仍可直接保留角色身份、动作与画面事实，不得使用中文空话代替；"
-    "motion 为0~3。完成全部正文后，必须在同一个内部 illustration 块的 profile_prompt 中生成当前 Profile"
+    "motion 为0~3。action_sequence 是本轮高潮画面的动作延伸序列，描述从高潮图定格动作到剧情完整动作的流程，"
+    "最多8步；每项含 beat（节奏名：定格起点/延伸/收尾）与 desc（动作描述，可用中文）。"
+    "desc[0] 必须对应当前高潮图的定格动作，desc[1..] 必须基于本轮剧情描述后续动作，"
+    "剧情没写的动作不得补（剧情写了「吃下去」才可写吃下，写了「喂给主角」才可写喂向镜头）。"
+    "纯静态/纯对话无动作延伸时，action_sequence 只含一条定格动作，或省略该字段。"
+    "完成全部正文后，必须在同一个内部 illustration 块的 profile_prompt 中生成当前 Profile"
     "可直接提交的完整英文正向提示词；它只供后端出图，不向用户展示。"
     "只允许以下格式：\n"
     '<illustration>{"anchor":"正文原句","camera":"镜头",'
     '"visual_thesis":"唯一视觉命题","hierarchy":"主体层级","palette_material":"色彩材质母题",'
     '"lighting_logic":"光影因果","composition":"构图","aspect_ratio":"2:3","subjects":[{"name":"角色名","description":"视觉描述",'
     '"weight":1.2}],"visual_facts":[{"kind":"action_or_prop","fact":"concrete visible fact in English",'
-    '"evidence":"正文逐字证据"}],"prompt":"动作, 环境, 光影, 氛围","profile_prompt":"完整英文成稿","motion":0}</illustration>'
+    '"evidence":"正文逐字证据"}],"prompt":"动作, 环境, 光影, 氛围","profile_prompt":"完整英文成稿","motion":0,'
+    '"action_sequence":[{"beat":"定格起点","desc":"动作描述"},{"beat":"延伸","desc":"动作描述"}]}</illustration>'
 )
 
 
@@ -314,6 +324,17 @@ def extract_illustration_plan(
             })
     motion_raw = raw.get("motion", 0)
     motion = max(0, min(3, int(motion_raw))) if isinstance(motion_raw, (int, float)) else 0
+    normalized_action_sequence: list[dict[str, str]] = []
+    action_sequence = raw.get("action_sequence")
+    if isinstance(action_sequence, list):
+        for item in action_sequence[:8]:
+            if not isinstance(item, dict):
+                continue
+            beat = str(item.get("beat") or "").strip()
+            desc = restore_jailbreak(str(item.get("desc") or "")).strip()
+            if not desc:
+                continue
+            normalized_action_sequence.append({"beat": beat or "延伸", "desc": desc})
     assembled = ", ".join(part for part in (
         art_direction.get("visual_thesis", ""),
         art_direction.get("hierarchy", ""),
@@ -336,6 +357,7 @@ def extract_illustration_plan(
         "aspect_ratio": aspect_ratio,
         "actors": actors,
         "motion": motion,
+        "action_sequence": normalized_action_sequence,
     }
 
 

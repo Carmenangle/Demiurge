@@ -12,8 +12,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
 
 from app.services import image_prompt_extract
 
@@ -121,4 +120,75 @@ def frames_to_desc(frames: StoryFrames) -> dict[str, str]:
     }
 
 
-__all__ = ["StoryFrames", "extract_story_frames", "frames_to_desc"]
+# ===== 首帧复用判断（F1，L0 纯启发式，见 docs/PLAN-VIDEO-FIRSTLAST.md 10.4/10.9）=====
+
+# 时间跳跃词：N+1 首段出现即视为「日期已跳」，首帧画面无法复用（强 regenerate 信号）。
+# 只收明确的跨日期词；单纯时段词（黄昏/深夜/傍晚）不在此列，避免误判。
+_TIME_JUMP_TERMS = (
+    "次日", "翌日", "第二天", "隔日", "次日清晨", "翌日清晨", "第二天一早",
+    "后来", "转眼", "不久后", "几日后", "数日后", "数月后", "几年后", "多年后",
+    "三天后", "一周后", "过了一段", "又过了",
+)
+
+# 场景移动/切换词：N+1 首段出现即视为「地点已变」（跨场景，强 regenerate 信号）。
+# 只收「跨场景移动」（来到/走进/离开/前往/回到/镜头转到…），不收「场景内微移动」
+# （走到/转身/站起/坐下…），避免把同一房间内的位移误判为换场景。
+_SCENE_CHANGE_TERMS = (
+    "来到", "走进", "踏入", "迈入", "离开", "走出", "退出", "前往", "回到",
+    "返回", "赶到", "抵达", "镜头转到", "场景转到", "画面一转", "另一边", "另一处",
+)
+
+# 具体地点锚点词（≥2 字）：两段共享则视为「同场景」（reuse 信号）。
+# 不用单字（门/窗/灯）避免宽泛误判。
+_LOCALE_ANCHOR_TERMS = (
+    "面馆", "客栈", "酒馆", "酒吧", "餐厅", "饭店", "咖啡馆", "咖啡店", "茶馆",
+    "教室", "卧室", "客厅", "书房", "厨房", "阳台", "天台", "走廊", "楼梯间",
+    "医院", "学校", "商场", "公园", "车站", "机场", "码头", "广场", "街角",
+    "房间", "屋子", "大殿", "庭院", "花园", "湖畔", "河边", "山脚", "山顶",
+    "门口", "街头", "巷口", "楼顶", "楼下", "楼上",
+)
+
+
+@dataclass
+class FrameReuseDecision:
+    """首帧复用判断结果（L0 三态，见 docs/PLAN-VIDEO-FIRSTLAST.md 10.9）。"""
+    decision: str  # "reuse" | "regenerate" | "ambiguous"
+    evidence: str  # 判定依据（供 trace）
+
+
+def judge_frame_reuse(prev_closing: str, curr_opening: str) -> FrameReuseDecision:
+    """首帧复用判断（L0 纯启发式）：判断「N+1 首段」与「N 尾端」是否一张图可涵盖。
+
+    返回三态：
+    - regenerate：场景/日期明显变化（curr 含时间跳跃或跨场景移动词）→ 独立生成首帧；
+    - reuse：两段共享具体地点词且无切换信号 → 首帧复用 N 尾帧图；
+    - ambiguous：无强信号 → 交给 L1（<transition> 搭车结果，见 10.2/10.9）。
+
+    保守原则：只在强信号时给确定结论，宁可 ambiguous 不误判。
+    """
+    prev = (prev_closing or "").strip()
+    curr = (curr_opening or "").strip()
+    if not prev or not curr:
+        return FrameReuseDecision("ambiguous", "empty_input")
+
+    # 1. 场景切换信号（切换优先于共享地点：curr 既有「离开」又有「面馆」时仍应 regenerate）
+    for term in _TIME_JUMP_TERMS:
+        if term in curr:
+            return FrameReuseDecision("regenerate", f"time_jump:{term}")
+    for term in _SCENE_CHANGE_TERMS:
+        if term in curr:
+            return FrameReuseDecision("regenerate", f"scene_change:{term}")
+
+    # 2. 同场景信号：两段共享具体地点词
+    for term in _LOCALE_ANCHOR_TERMS:
+        if term in prev and term in curr:
+            return FrameReuseDecision("reuse", f"shared_locale:{term}")
+
+    # 3. 均不明显 → 交 L1
+    return FrameReuseDecision("ambiguous", "no_strong_signal")
+
+
+__all__ = [
+    "StoryFrames", "extract_story_frames", "frames_to_desc",
+    "FrameReuseDecision", "judge_frame_reuse",
+]

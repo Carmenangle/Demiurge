@@ -1384,6 +1384,8 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
                 scene_spec["camera"] = illustration_plan["camera"]
             if not plan_retargeted and illustration_plan.get("composition"):
                 scene_spec["composition"] = illustration_plan["composition"]
+            if not plan_retargeted and illustration_plan.get("action_sequence"):
+                scene_spec["action_sequence"] = illustration_plan["action_sequence"]
             from app.services import image_prompt_profiles
             # illustration JSON 已在解析前复用正文的 AI_OUTPUT 正则；成稿再叠加
             # IMAGE_PROMPT 专用清洗。

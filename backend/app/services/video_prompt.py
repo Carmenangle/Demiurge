@@ -160,7 +160,6 @@ def _time_segments(spec: dict[str, Any], duration_hint: int,
 
     # 三段均分时长
     a, b = dur // 3, dur // 3
-    c = dur - a - b
     bounds = [(0, a), (a, a + b), (a + b, dur)]
 
     # 运镜描述：camera 优先，其次 composition；缺省按 motion 给保守运镜。
@@ -221,10 +220,11 @@ def _audio_hint(spec: dict[str, Any], audio_lines: list | None = None) -> str:
 
 
 def _climax_action(spec: dict[str, Any]) -> tuple[str, str, str]:
-    """高潮动作化延伸：优先用主模型同轮提炼的**画面级要素**（subjects/visual_facts/
-    composition/camera）组成「单一动作瞬间 + 运镜 + 特效」，与图片提示词同源，
+    """高潮动作化延伸：优先用主模型同轮输出的**动作延伸序列**（action_sequence，
+    定格动作 → 剧情描述的完整动作），缺失回退画面级要素（subjects/visual_facts/
+    composition/camera）组成「单一动作瞬间 + 运镜 + 特效」；两者都与图片提示词同源，
     保证剧情一致（避免把围绕锚点截取的整段中文叙事直接塞给视频模型导致对不上剧情）；
-    缺失时回退中文 narrative 与 motion 强度兜底。"""
+    再缺失回退中文 narrative 与 motion 强度兜底。"""
     motion = int(spec.get("motion") or 0)
     return (
         _climax_action_beat(spec),
@@ -234,9 +234,22 @@ def _climax_action(spec: dict[str, Any]) -> tuple[str, str, str]:
 
 
 def _climax_action_beat(spec: dict[str, Any]) -> str:
-    """单一动作瞬间（画面级）：subjects(英文主体描述) + visual_facts(英文视觉事实) +
-    composition(构图)。这些是主模型同轮提炼、与图片提示词同源的画面要素，直接对应当前
-    高潮场景；缺失时回退中文 narrative 原文。"""
+    """高潮动作延伸：优先用 action_sequence（主模型同轮输出的「定格动作 → 剧情描述的
+    完整动作」时序，与图片提示词同源），缺失回退画面级要素
+    （subjects/visual_facts/composition），再回退中文 narrative 原文。"""
+    seq = spec.get("action_sequence")
+    if isinstance(seq, list) and seq:
+        beats: list[str] = []
+        for item in seq:
+            if not isinstance(item, dict):
+                continue
+            beat = str(item.get("beat") or "").strip()
+            desc = str(item.get("desc") or "").strip()
+            if not desc:
+                continue
+            beats.append(f"{beat}: {desc}" if beat else desc)
+        if beats:
+            return "；".join(beats)
     parts: list[str] = []
     for subject in spec.get("subjects") or []:
         if isinstance(subject, dict):

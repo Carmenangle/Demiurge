@@ -415,3 +415,46 @@ def test_插画块在JSON解析前复用正文正则以还原预设结构():
     assert clean == "正文高潮。"
     assert plan["anchor"] == "正文高潮。"
     assert plan["profile_prompt"] == "A detailed English scene."
+
+
+def test_解析动作延伸序列_归一化并还原防拦截():
+    reply = (
+        "铺垫。\n\n她舀起一勺奶油，缓缓送入口中。"
+        '<illustration>{"anchor":"缓缓送入口中。",'
+        '"composition":"close-up","aspect_ratio":"2:3",'
+        '"subjects":[{"name":"白绮谷","weight":1.2,"description":"girl with spoon"}],'
+        '"prompt":"dessert, warm light","motion":2,'
+        '"action_sequence":[{"beat":"定格起点","desc":"勺子@(挖)@出一勺奶油"},'
+        '{"beat":"延伸","desc":"送向嘴边，吃下"}]}</illustration>'
+    )
+    _, plan = ipe.extract_illustration_plan(reply)
+    assert plan["action_sequence"] == [
+        {"beat": "定格起点", "desc": "勺子挖出一勺奶油"},
+        {"beat": "延伸", "desc": "送向嘴边，吃下"},
+    ]
+
+
+def test_解析动作延伸序列_空项丢弃_缺beat兜底():
+    reply = (
+        "铺垫。"
+        '<illustration>{"anchor":"铺垫。","composition":"close-up","aspect_ratio":"2:3",'
+        '"subjects":[{"name":"白绮谷","weight":1.2,"description":"girl"}],'
+        '"prompt":"dessert","action_sequence":[{"beat":"","desc":"只挖不喂"},'
+        '{"beat":"延伸","desc":""},{"desc":"喂向镜头"}]}</illustration>'
+    )
+    _, plan = ipe.extract_illustration_plan(reply)
+    assert plan["action_sequence"] == [
+        {"beat": "延伸", "desc": "只挖不喂"},
+        {"beat": "延伸", "desc": "喂向镜头"},
+    ]
+
+
+def test_解析无动作序列_返回空列表():
+    reply = (
+        "铺垫。"
+        '<illustration>{"anchor":"铺垫。","composition":"close-up","aspect_ratio":"2:3",'
+        '"subjects":[{"name":"白绮谷","weight":1.2,"description":"girl"}],'
+        '"prompt":"dessert","motion":1}</illustration>'
+    )
+    _, plan = ipe.extract_illustration_plan(reply)
+    assert plan["action_sequence"] == []
