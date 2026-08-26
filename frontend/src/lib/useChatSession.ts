@@ -13,7 +13,7 @@ import type { Template } from "../api/workflows";
 import {
   comfyStatus, startComfy, submitGraph, submitWorkflow, interruptComfy,
   saveLocalSrc, localViewUrl, uploadImage, finalizeGeneration as persistWorkflowGeneration,
-  mergeAudio,
+  mergeAudio, moveComfyOutputToInput,
   type GenResult,
 } from "../api/comfyui";
 import { listLoras } from "../api/loras";
@@ -46,7 +46,7 @@ import {
   resolveTransitionBaseImage,
 } from "./chatGeneration";
 import {
-  durableFinalizeSucceeded, WorkflowGenerationRuntime,
+  durableFinalizeSucceeded, WorkflowGenerationRuntime, pollWorkflowResult,
   type PendingGeneration, type WorkflowWatchObserver,
 } from "./workflowGenerationRuntime";
 import {
@@ -56,6 +56,7 @@ import {
 import {
   illustrationLoraConfigurationError, illustrationRequestMedia, illustrationWorkflowMedia,
   resolveIllustrationActors, resolveVideoMode, resolveVideoTemplateChoice,
+  planFirstlastFrameTasks, firstlastFrameValues,
 } from "./illustrationMedia";
 import {
   audioTemplateValues, resolvableAudioLines, skippedAudioSpeakers, voiceReferenceFor,
@@ -1051,6 +1052,62 @@ export function useChatSession(deps: ChatSessionDeps) {
     // V1.5/B2：prevTailDesc 兜底——事件没带时反查最近一条已完成视频槽的尾帧描述
     const prevTailDescForUse = prevTailDesc
       || resolvePrevTailDesc(messagesRef.current)?.lastFrameDesc || "";
+    // V1.6/P5 首尾帧顺序链：先出首尾帧图（图片模板生图），双图 ready 再提视频。
+    // 决策 A（2026-08-26 拍板）：首尾帧生图复用 preset.templateId，prompt=事件
+    // firstFrameDesc/lastFrameDesc；reuse 免首帧生图（W2 已把上尾帧图复用为底图）；
+    // 尾帧有事件图直接用。首帧生图失败 → 明确失败（视频必有首帧）；尾帧生图失败 →
+    // 降级首帧单图（不挂死，后端 firstlast 缺尾帧有 warning）。
+    let frameFirstImage = uploadedImage;
+    let frameLastImage = uploadedLastFrameImage;
+    if (useVideo && videoMode === "firstlast") {
+      const frameTpl = templates.find((t) => t.id === preset.templateId);
+      if (!frameTpl) {
+        failSlot("configuration", "firstlast 首尾帧生图需要配置图片工作流模板");
+        return;
+      }
+      const plan = planFirstlastFrameTasks({
+        transition,
+        prevTailUrl: resolvePrevTailDesc(messagesRef.current)?.lastFrameUrl,
+        firstFrameDesc, lastFrameDesc, lastFrameUrl,
+      });
+      if (!plan.canGenerateVideo) {
+        failSlot("image_required", "firstlast 视频需要首帧图：既无上尾帧图可复用，也无首帧画面描述可生成");
+        return;
+      }
+      const frameLoras = loras.map(({ name, weight }) => ({ name, weight }));
+      const buildFrameValues = (desc: string) => firstlastFrameValues(
+        frameTpl.exposed, desc,
+        {
+          negativePrompt: preset.negativePrompt,
+          loraName: workflowMedia.loraName,
+          loraWeight: workflowMedia.loraWeight,
+          baseImage: workflowMedia.baseImage,
+        },
+        latentSize,
+      );
+      for (const task of plan.tasks) {
+        if (task.kind === "reuse" || task.kind === "existing") continue; // 现成图已在上传段处理
+        const isFirst = task.frame === "first";
+        try {
+          const r = await submitWorkflow(
+            preset.templateId, buildFrameValues(task.desc), settings.comfyuiUrl,
+            task.desc, frameLoras, preset.loraMode || "single",
+          );
+          if (!r.prompt_id) throw new Error("ComfyUI 没有返回任务 ID");
+          const outcome = await pollWorkflowResult(r.prompt_id, settings.comfyuiUrl, "image");
+          if (outcome.kind !== "complete" || !outcome.result.images[0]) {
+            throw new Error(outcome.kind === "failed" ? outcome.error : "生图未产出图像");
+          }
+          const inputName = await moveComfyOutputToInput(outcome.result.images[0], settings.comfyuiUrl);
+          if (isFirst) frameFirstImage = inputName; else frameLastImage = inputName;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "首尾帧生图失败";
+          if (isFirst) { failSlot("frame_gen", `首帧生图失败：${message}`); return; }
+          // 尾帧生图失败 → 降级首帧单图（不挂死）
+          console.warn("[auto-video] 尾帧生图失败，降级首帧单图", { message });
+        }
+      }
+    }
     const values = illustrationTemplateValues(tpl.exposed, {
       prompt, negativePrompt, loraName, loraWeight, baseImage: uploadedImage,
       latentSize,
@@ -1063,9 +1120,9 @@ export function useChatSession(deps: ChatSessionDeps) {
       lastFrameDesc: useVideo && lastFrameDesc ? lastFrameDesc : undefined,
       prevTailDesc: useVideo && prevTailDescForUse ? prevTailDescForUse : undefined,
       lastFrameUrl: useVideo && lastFrameUrl ? lastFrameUrl : undefined,
-      // V1.5/B3 双帧图：首帧=底图，尾帧=事件 lastFrameUrl 上传结果（有值才传）
-      firstFrameImage: useVideo && uploadedImage ? uploadedImage : undefined,
-      lastFrameImage: useVideo && uploadedLastFrameImage ? uploadedLastFrameImage : undefined,
+      // V1.5/B3 双帧图：V1.6/P5 首尾帧顺序链后，首帧=生成的图（兜底底图），尾帧=生成的图（兜底事件图）
+      firstFrameImage: useVideo && frameFirstImage ? frameFirstImage : undefined,
+      lastFrameImage: useVideo && frameLastImage ? frameLastImage : undefined,
       // V1.5 默认开放：后端编译的 climax 视频提示词（仅视频分支注入；无模板时仍留在槽位供测试核对）
       videoPrompt: useVideo && videoPrompt ? videoPrompt : undefined,
     });

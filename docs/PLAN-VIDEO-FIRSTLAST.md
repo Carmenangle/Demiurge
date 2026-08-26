@@ -83,15 +83,26 @@
   - 双帧图 binding：`illustrationTemplateValues` 新增 `first_frame_image`/`last_frame_image`。
   - `submitIllustration` firstlast 路由：事件 lastFrameUrl → 上传为 last_frame_image（失败降级
    首帧单图，不挂死槽）；首帧底图 → first_frame_image。尾帧图缺省不进 values（无悬空引用，R2）。
-- ⏸ 未落地（阻塞，需 P6）：**「先异步出首帧图+尾帧图（两次 ComfyUI），双图 ready 后再提视频」**
-  的顺序链。原因：当前 `pollResult` 是 fire-and-forget（后台轮询 resolve 槽位），无
-  「等待工作流完成」Promise 桥；且无真实双图视频模板/API 可验证（红线 R1：不猜接口字段名、
-  不做无法验证的接线）。待 P6 提供可实测端点/双图模板后，补「等待桥 + 双帧顺序提交」。
+- ✅ 已落地（接线核心，2026-08-26）：**「先异步出首帧图+尾帧图（两次 ComfyUI），双图
+  ready 后再提视频」**顺序链：
+  - 等待桥复用现有 `pollWorkflowResult`（Promise 化，complete/failed/still_running，已有测试）。
+  - 决策 A（用户拍板）：首尾帧生图复用现有图片模板（`preset.templateId`），prompt=事件
+    `firstFrameDesc`/`lastFrameDesc`；reuse 免首帧生图（W2 已把上尾帧图复用为底图）；
+    尾帧有事件图直接用。纯函数 `planFirstlastFrameTasks`/`firstlastFrameValues`
+    （illustrationMedia.ts）+ `moveComfyOutputToInput`（产出图转 input，comfyui.ts）。
+  - 接线：`submitIllustration` firstlast 路由——按计划逐帧 `submitWorkflow(图片模板)` →
+    `pollWorkflowResult` → `moveComfyOutputToInput` → 双图就绪后再提视频任务。
+    首帧生图失败 → 明确失败（视频必有首帧）；尾帧生图失败 → 降级首帧单图（不挂死，R2）。
+  - 验证：前端 illustrationMedia +7、comfyui +2 单测，全量 570 passed；真实 ComfyUI
+    双图视频模板验证顺延 P6（R1：不猜接口、不做无法验证的接线）。
 - 复用 `claimIllustrationSubmission` 幂等认领不变（已有）。
 
 ### P6 真实 API 对齐（最后做，需用户提供可实测端点）
-- 实测 `image[]` 双图：确认是否「首帧/尾帧」语义；不是 → 只在 prompt 层职责绑定，回填文档。
-- 视频 `size` 白名单与默认（见 R9）。
+- ⏸ 实测顺延（2026-08-26 用户拍板）：真实双图视频端点未提供（`ai.t8star.org/v2/videos/
+  generations` 不可用已拍板）→ 待用户提供可实测端点后：实测 `image[]` 是否「首帧/尾帧」
+  语义；不是 → 只在 prompt 层职责绑定，回填文档。
+- ✅ 已落地的代码契约（不依赖端点）：`build_video_request` 双图职责绑定（图片1=首帧/图片2=尾帧）；
+  视频 size 默认 1280x720（R9）；`transition` 三态 wire；首尾帧顺序链（P5）。
 
 ---
 

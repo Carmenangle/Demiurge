@@ -8,7 +8,10 @@ export interface ComfyStatus {
 }
 
 export function comfyStatus(url: string) {
-  return apiGet<ComfyStatus>(`/comfyui/status?url=${encodeURIComponent(url)}`);
+  // 6s 超时：NodeCard 等组件用它做 5s 轮询探活。后端 is_up 最坏可达 ~10s（HTTP 5s + TCP 5s），
+  // 且 8010 繁忙时响应更慢——若无超时，单次请求挂起会让调用方的轮询链永久中断（表现为
+  // 「ComfyUI 未启动，等待中…」后不再加载）。
+  return apiGet<ComfyStatus>(`/comfyui/status?url=${encodeURIComponent(url)}`, 6000);
 }
 
 export function startComfy(path: string, url: string, pythonPath = "") {
@@ -165,6 +168,15 @@ export function viewUrl(img: ResultImage, url: string): string {
     url,
   });
   return apiUrl(`/comfyui/view?${qs.toString()}`);
+}
+
+// P5 首尾帧顺序链：把 ComfyUI 生成的产物图（output 目录）转成视频模板可引用的
+// input 文件名（fetch 取回 → 上传回 input 目录）。视频模板的 first_frame_image/
+// last_frame_image 期望 LoadImage 可引用的 input 文件名（B3 同套路）。
+export async function moveComfyOutputToInput(img: ResultImage, url: string): Promise<string> {
+  const blob = await (await fetch(viewUrl(img, url))).blob();
+  const file = new File([blob], img.filename, { type: blob.type || "image/png" });
+  return (await uploadImage(file, url)).name;
 }
 
 // 把原图留存到设置的 outputDir，返回本地文件路径

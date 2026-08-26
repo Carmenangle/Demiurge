@@ -109,7 +109,7 @@ export function replacePromptQualityLine(
   return tagLine || prose;
 }
 
-interface SemanticField {
+export interface SemanticField {
   node_id: string;
   field: string;
   semantic: string;

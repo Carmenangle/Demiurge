@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   illustrationLoraConfigurationError, illustrationRequestMedia, illustrationWorkflowMedia,
   resolveIllustrationActors, resolveVideoMode, resolveVideoTemplateChoice,
+  planFirstlastFrameTasks, firstlastFrameValues,
 } from "./illustrationMedia";
 
 const legacyBindings = {
@@ -211,5 +212,110 @@ describe("resolveVideoTemplateChoice（V1.5/B3 R4 触发闸门）", () => {
   it("没配视频模板 → 永不触发视频（firstlast 也不例外）", () => {
     expect(resolveVideoTemplateChoice(preset({ videoTemplateId: undefined }), "firstlast", 5)).toBe(false);
     expect(resolveVideoTemplateChoice(preset({ videoTemplateId: undefined }), "climax", 5)).toBe(false);
+  });
+});
+
+describe("planFirstlastFrameTasks（V1.6/P5 首尾帧顺序链·图来源计划）", () => {
+  it("reuse + 有上尾帧图 → 首帧复用（零生图），尾帧用 lastFrameDesc 生成", () => {
+    const plan = planFirstlastFrameTasks({
+      transition: "reuse",
+      prevTailUrl: "local://tail.png",
+      firstFrameDesc: "面馆暖光",
+      lastFrameDesc: "她抿了口汤",
+    });
+    expect(plan.tasks).toEqual([
+      { frame: "first", kind: "reuse", imageUrl: "local://tail.png" },
+      { frame: "last", kind: "generate", desc: "她抿了口汤" },
+    ]);
+    expect(plan.canGenerateVideo).toBe(true);
+  });
+
+  it("regenerate → 首帧用 firstFrameDesc 生成，尾帧生成（两帧都生图）", () => {
+    const plan = planFirstlastFrameTasks({
+      transition: "regenerate",
+      prevTailUrl: "local://tail.png",
+      firstFrameDesc: "雨夜面馆门口",
+      lastFrameDesc: "灯笼摇晃",
+    });
+    expect(plan.tasks).toEqual([
+      { frame: "first", kind: "generate", desc: "雨夜面馆门口" },
+      { frame: "last", kind: "generate", desc: "灯笼摇晃" },
+    ]);
+    expect(plan.canGenerateVideo).toBe(true);
+  });
+
+  it("ambiguous → 视为独立生成（与 regenerate 同路径）", () => {
+    const plan = planFirstlastFrameTasks({
+      transition: "ambiguous",
+      firstFrameDesc: "清晨车站",
+      lastFrameDesc: "列车远去",
+    });
+    expect(plan.tasks[0]).toEqual({ frame: "first", kind: "generate", desc: "清晨车站" });
+    expect(plan.canGenerateVideo).toBe(true);
+  });
+
+  it("事件 lastFrameUrl 有值 → 尾帧直接复用现成图（不浪费生图）", () => {
+    const plan = planFirstlastFrameTasks({
+      transition: "regenerate",
+      firstFrameDesc: "船头",
+      lastFrameUrl: "local://event-last.png",
+    });
+    expect(plan.tasks).toEqual([
+      { frame: "first", kind: "generate", desc: "船头" },
+      { frame: "last", kind: "existing", imageUrl: "local://event-last.png" },
+    ]);
+  });
+
+  it("首帧无来源（无 reuse 图且无描述）→ canGenerateVideo=false（视频不可成片）", () => {
+    expect(planFirstlastFrameTasks({ transition: "regenerate", lastFrameDesc: "只有尾帧" }).canGenerateVideo).toBe(false);
+    expect(planFirstlastFrameTasks({ transition: "reuse" }).canGenerateVideo).toBe(false);
+  });
+
+  it("尾帧无来源（无 lastFrameUrl 且无描述）→ 尾帧缺图但首帧在仍可成片（降级首帧单图）", () => {
+    const plan = planFirstlastFrameTasks({ transition: "regenerate", firstFrameDesc: "首帧" });
+    expect(plan.tasks).toEqual([{ frame: "first", kind: "generate", desc: "首帧" }]);
+    expect(plan.canGenerateVideo).toBe(true);
+  });
+
+  it("空白描述不产生 generate 任务（避免提交空 prompt 生图）", () => {
+    const plan = planFirstlastFrameTasks({ transition: "regenerate", firstFrameDesc: "  " });
+    expect(plan.tasks).toEqual([]);
+    expect(plan.canGenerateVideo).toBe(false);
+  });
+});
+
+describe("firstlastFrameValues（V1.6/P5 首尾帧生图模板 values）", () => {
+  const exposed = [
+    { node_id: "3", field: "text", semantic: "prompt", binding: "prompt" },
+    { node_id: "4", field: "name", semantic: "lora", binding: "lora_name" },
+    { node_id: "5", field: "weight", semantic: "lora_weight", binding: "lora_weight" },
+    { node_id: "6", field: "image", semantic: "base_image", binding: "base_image" },
+    { node_id: "7", field: "neg", semantic: "negative", binding: "negative_prompt" },
+    { node_id: "8", field: "w", semantic: "latent_width", binding: "latent_width" },
+    { node_id: "9", field: "h", semantic: "latent_height", binding: "latent_height" },
+  ];
+
+  it("prompt=帧画面描述，LoRA/底图/负面/latent 复用插画模板媒体", () => {
+    expect(firstlastFrameValues(
+      exposed, "雨夜面馆门口，灯笼摇晃",
+      { negativePrompt: "nsfw", loraName: "role.safetensors", loraWeight: 1.1, baseImage: "role.png" },
+      { width: 704, height: 1024 },
+    )).toEqual({
+      "3.text": "雨夜面馆门口，灯笼摇晃",
+      "4.name": "role.safetensors",
+      "5.weight": 1.1,
+      "6.image": "role.png",
+      "7.neg": "nsfw",
+      "8.w": 704,
+      "9.h": 1024,
+    });
+  });
+
+  it("空媒体值不注入对应 binding（不覆盖模板原值）", () => {
+    expect(firstlastFrameValues(exposed, "船头", {}, { width: 704, height: 1024 })).toEqual({
+      "3.text": "船头",
+      "8.w": 704,
+      "9.h": 1024,
+    });
   });
 });
