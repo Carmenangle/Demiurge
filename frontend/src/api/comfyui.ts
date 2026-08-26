@@ -179,6 +179,17 @@ export async function moveComfyOutputToInput(img: ResultImage, url: string): Pro
   return (await uploadImage(file, url)).name;
 }
 
+// W3 转场视频：把「上尾帧图」（任意可 fetch 的 URL，如 localViewUrl 包装后的本地留存路径）
+// 取回并上传回 ComfyUI input 目录，供转场视频模板的 first_frame_image（图片1=起点）引用。
+export async function uploadRemoteImageToInput(srcUrl: string, comfyuiUrl: string): Promise<string> {
+  const resp = await fetch(srcUrl);
+  if (!resp.ok) throw new Error(`获取转场参考图失败：HTTP ${resp.status}`);
+  const blob = await resp.blob();
+  const name = srcUrl.split(/[\\/]/).pop() || "ref.png";
+  const file = new File([blob], name, { type: blob.type || "image/png" });
+  return (await uploadImage(file, comfyuiUrl)).name;
+}
+
 // 把原图留存到设置的 outputDir，返回本地文件路径
 export function saveLocal(args: {
   img: ResultImage; repoId: string; outputDir: string; url: string;

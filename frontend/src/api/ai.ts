@@ -358,6 +358,7 @@ export interface AgentInvocation {
   illustrate: boolean;
   comfyIllustrate: boolean;
   comfyAudio: boolean;
+  videoMode?: "climax" | "firstlast";
   promptProfile: string;
   appearanceSource: "worldbook" | "character_card";
   characterBaseImages: Record<string, string>;
@@ -419,6 +420,7 @@ export function agentInvocationBody(request: AgentInvocation): AgentInvocationWi
     illustrate: request.illustrate,
     comfy_illustrate: request.comfyIllustrate,
     comfy_audio: request.comfyAudio,
+    video_mode: request.videoMode || "",
     prompt_profile: request.promptProfile || "krea2",
     appearance_source: request.appearanceSource,
     character_base_images: request.characterBaseImages,

@@ -492,12 +492,19 @@ videoMode 协议透传 + 尾帧反查 + 双帧路由）。P5 剩余的「先双�
   W1 <transition> 结果并入 writeback + illustrate_request 事件透传（坑A/H）✅
   W2 首帧复用决策合并逻辑（坑B/C/I）── L0/L1 合并 + 有图前提 ✅
   W3 转场视频任务编排（坑F/G）── 2 任务排队 + 转场时长前端决定
-     ✅ 已落地（后端可验证部分，2026-08-26）：build_video_request 新增 mode="transition"
-        短桥段编译（图片1=上尾帧/起点、图片2=当前首帧/终点）+ 坑G 不硬控时长
-        （preset.transitionDurationHint，缺省交视频模型默认，绝不兑底正片 5s）+
-        缺图降级（坑F：缺上尾帧 → 文字转场）。单测 7 个全绿。
-     ⏸ 未落地（阻塞，需 P5/P6）：前端 firstlast 提交链「2 任务排队」（转场视频 +
-        正片顺序提交）依赖 P5 的「先出首尾帧图再提视频」顺序链（⏸ 阻塞，需 P6）与
-        真实双图视频模板实测；尾帧图地址（last_frame_url）后端仍未赋值（同 prev_tail_desc
-        前期状态）。待 P6 后与 P5 一并接线。
+    ✅ 后端（2026-08-26）：build_video_request 新增 mode="transition" 短桥段编译
+       （图片1=上尾帧/起点、图片2=当前首帧/终点）+ 坑G 不硬控时长
+       （preset.transitionDurationHint，缺省交视频模型默认，绝不兑底正片 5s）+
+       缺图降级（坑F：缺上尾帧 → 文字转场）。
+    ✅ 前端「2 任务排队」（2026-08-26，随 P5 顺序链解除阻塞一并落地）：
+       - produce 层按 video_mode 编译正片 video_request；firstlast 且 transition≠reuse
+         额外编译 transition_video_request，随事件下发 transition_video_prompt/params。
+       - `uploadRemoteImageToInput` 取上尾帧图（localViewUrl）回传 ComfyUI input；
+         缺图降级文字转场（不拦截正片）。
+       - `appendTransitionSlot` 追加独立 transition 槽（slotId=`<id>:transition`），
+         `transitionVideoValues` 图片1=上尾帧、图片2=当前首帧；先提转场视频、正片随后
+         进 ComfyUI 队列顺序执行；转场失败仅槽位标失败，不挂死正片。
+       - 尾帧图地址走前端 `resolvePrevTailDesc` 反查（lastFrameUrl，R8），后端不赋值。
+    ⏸ 剩余（P6，需用户提供可实测端点）：真实双图视频模板字段名实测 + 真实 API 对齐；
+       此前转场/正片提交仍为 dry-run 可核对形态（不真正执行 submit）。
 ```

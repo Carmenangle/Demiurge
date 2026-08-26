@@ -74,6 +74,7 @@ class MultiAgentRequest(ImageAgentRequest):
     illustrate: bool = False  # 剧情插画开关（开=能动性 D 阶段自动配图）
     comfy_illustrate: bool = False  # 前端已预设 ComfyUI 工作流模板：高潮点改发 illustrate_request 事件走异步闭环
     comfy_audio: bool = False  # 前端已预设音频模板（IndexTTS）：剧情产出后发 audio_request 事件逐角色配音
+    video_mode: Literal["", "climax", "firstlast"] = ""  # 视频模式（缺省 climax），前端 preset.videoMode 透传；produce 层据此编译正片/转场 video_request
     prompt_profile: str = "krea2"
     appearance_source: Literal["worldbook", "character_card"] = "worldbook"
     character_base_images: dict[str, str] = {}  # ⑥ 角色名→底图（gpt-image 系按在场角色取底图锁一致性）

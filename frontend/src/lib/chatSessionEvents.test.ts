@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ChatMessage } from "../types/chat";
 import {
-  appendAudioSlot, dropMediaSlot, pruneUnsubmittedMediaSlots, reduceChatStreamEvent, resolveMediaSlot,
+  appendAudioSlot, appendTransitionSlot, dropMediaSlot, pruneUnsubmittedMediaSlots, reduceChatStreamEvent, resolveMediaSlot,
   restoreSubmittedMediaSlots,
 } from "./chatSessionEvents";
 
@@ -18,7 +18,6 @@ describe("reduceChatStreamEvent", () => {
 
     expect(messages[0].text).toBe("主管选择 image\n完成");
   });
-
   it("用最终清洗正文替换流式预览", () => {
     let messages = reduceChatStreamEvent(base(), "bot", { type: "delta", text: "原始流" });
     messages = reduceChatStreamEvent(messages, "bot", { type: "replace", text: "最终正文" });
@@ -305,5 +304,36 @@ describe("reduceChatStreamEvent", () => {
       { type: "text", text: "后文" },
       { type: "media-slot", slotId: "submitted", status: "pending", promptId: "prompt-1" },
     ]);
+  });
+});
+
+describe("appendTransitionSlot（W3 转场视频槽）", () => {
+  it("在同消息末尾追加 kind=video 的 pending 槽，保留正片槽独立 slotId", () => {
+    const current: ChatMessage[] = [{
+      id: "bot", role: "assistant", text: "", parts: [
+        { type: "media-slot", slotId: "main", status: "pending" },
+      ],
+    }];
+
+    const transitionParams = {
+      mode: "transition" as const, model: "", size: "1280x720", endpoint: "",
+      images: [], reference_binding: {}, warnings: [],
+    };
+    const withTransition = appendTransitionSlot(
+      current, "bot", "main:transition", "转场分镜提示词", transitionParams,
+    );
+
+    expect(withTransition[0].parts).toHaveLength(2);
+    expect(withTransition[0].parts?.[1]).toEqual({
+      type: "media-slot", slotId: "main:transition", status: "pending",
+      kind: "video", videoPrompt: "转场分镜提示词", videoParams: transitionParams,
+    });
+  });
+
+  it("同 slotId 重复追加幂等（不去重外不重复插入）", () => {
+    const current: ChatMessage[] = [{ id: "bot", role: "assistant", text: "" }];
+    const once = appendTransitionSlot(current, "bot", "main:transition", "转场");
+    const twice = appendTransitionSlot(once, "bot", "main:transition", "转场");
+    expect(twice[0].parts).toHaveLength(1);
   });
 });

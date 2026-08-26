@@ -51,7 +51,7 @@ export interface AudioDialogueLine {
 
 /** V1.5 默认开放：结构化视频参数（后端 dry-run 组装结果，供测试核对参数是否上传） */
 export interface VideoParams {
-  mode: "climax" | "firstlast";
+  mode: "climax" | "firstlast" | "transition";
   model: string;
   size: string;
   endpoint: string;
@@ -67,7 +67,7 @@ export type ChatStreamEvent =
   | { type: "route"; route: MessageRoute }
   | { type: "image"; url: string; id?: string; regeneration?: RegenerationSnapshot }
   | { type: "video"; url: string; id?: string }
-  | { type: "illustrate_request"; prompt: string; motion: number; actors: string[]; sceneSpec?: IllustrationSceneSpec; id?: string; offset?: number; turnId?: string; videoMode?: "climax" | "firstlast"; firstFrameDesc?: string; lastFrameDesc?: string; prevTailDesc?: string; lastFrameUrl?: string; transition?: "reuse" | "regenerate" | "ambiguous"; videoPrompt?: string; videoParams?: VideoParams }
+  | { type: "illustrate_request"; prompt: string; motion: number; actors: string[]; sceneSpec?: IllustrationSceneSpec; id?: string; offset?: number; turnId?: string; videoMode?: "climax" | "firstlast"; firstFrameDesc?: string; lastFrameDesc?: string; prevTailDesc?: string; lastFrameUrl?: string; transition?: "reuse" | "regenerate" | "ambiguous"; videoPrompt?: string; videoParams?: VideoParams; transitionVideoPrompt?: string; transitionVideoParams?: VideoParams }
   | { type: "audio_request"; lines: AudioDialogueLine[]; id?: string }
   | { type: "rag_status"; state: string; kind: string; count?: number }
   | { type: "inspiration"; card: StreamInspirationCard }
@@ -169,6 +169,13 @@ export function decodeChatStreamEvent(value: unknown): ChatStreamEvent {
         // V1.5 默认开放：结构化视频参数（dry-run 组装结果，供测试核对参数是否上传）
         ...(data.video_params && typeof data.video_params === "object"
           ? { videoParams: data.video_params as VideoParams }
+          : {}),
+        // W3 转场视频：转场提示词 + 参数（firstlast + transition≠reuse 时后端下发）
+        ...(typeof data.transition_video_prompt === "string"
+          ? { transitionVideoPrompt: data.transition_video_prompt }
+          : {}),
+        ...(data.transition_video_params && typeof data.transition_video_params === "object"
+          ? { transitionVideoParams: data.transition_video_params as VideoParams }
           : {}),
       };
     case "audio_request":

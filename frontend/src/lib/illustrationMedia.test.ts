@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   illustrationLoraConfigurationError, illustrationRequestMedia, illustrationWorkflowMedia,
   resolveIllustrationActors, resolveVideoMode, resolveVideoTemplateChoice,
-  planFirstlastFrameTasks, firstlastFrameValues,
+  planFirstlastFrameTasks, firstlastFrameValues, transitionVideoValues,
 } from "./illustrationMedia";
 
 const legacyBindings = {
@@ -212,6 +212,41 @@ describe("resolveVideoTemplateChoice（V1.5/B3 R4 触发闸门）", () => {
   it("没配视频模板 → 永不触发视频（firstlast 也不例外）", () => {
     expect(resolveVideoTemplateChoice(preset({ videoTemplateId: undefined }), "firstlast", 5)).toBe(false);
     expect(resolveVideoTemplateChoice(preset({ videoTemplateId: undefined }), "climax", 5)).toBe(false);
+  });
+});
+
+describe("transitionVideoValues（W3 转场视频 2 任务排队）", () => {
+  const exposed = [
+    { node_id: "3", field: "first", semantic: "first", binding: "first_frame_image" },
+    { node_id: "7", field: "last", semantic: "last", binding: "last_frame_image" },
+    { node_id: "9", field: "duration", semantic: "duration", binding: "video_duration" },
+    { node_id: "10", field: "mode", semantic: "mode", binding: "video_mode" },
+  ];
+  const media = { negativePrompt: "bad", loraName: "style.safetensors", loraWeight: 0.7 };
+  const latentSize = { width: 1024, height: 576 };
+
+  it("图片1=上尾帧、图片2=当前首帧（转场起终点），videoMode 走 firstlast", () => {
+    const values = transitionVideoValues(exposed, "转场提示词", media, latentSize, {
+      prevTailDesc: "上一楼层尾帧", firstFrameDesc: "当前首帧",
+      prevTailImage: "prev-tail.png", firstFrameImage: "curr-first.png",
+    });
+    expect(values["3.first"]).toBe("prev-tail.png");
+    expect(values["7.last"]).toBe("curr-first.png");
+    expect(values["10.mode"]).toBe("firstlast");
+  });
+
+  it("坑G：转场时长缺省 → 不注入 video_duration（交视频模型默认，不兑底正片时长）", () => {
+    const values = transitionVideoValues(exposed, "转场", media, latentSize, {
+      prevTailImage: "prev.png", firstFrameImage: "first.png",
+    });
+    expect("9.duration" in values).toBe(false);
+  });
+
+  it("坑G：transitionDurationHint 有值才写秒数", () => {
+    const values = transitionVideoValues(exposed, "转场", media, latentSize, {
+      transitionDurationHint: 3, prevTailImage: "prev.png", firstFrameImage: "first.png",
+    });
+    expect(values["9.duration"]).toBe(3);
   });
 });
 

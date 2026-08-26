@@ -75,13 +75,16 @@ def encode_event(event: Mapping[str, object]) -> ChatStreamEvent | None:
         if isinstance(req, Mapping):
             for _field in ("video_mode", "first_frame_desc", "last_frame_desc",
                            "prev_tail_desc", "last_frame_url", "video_prompt",
-                           "transition"):
+                           "transition", "transition_video_prompt"):
                 _value = req.get(_field)
                 if isinstance(_value, str) and _value:
                     data[_field] = _value
         # V1.5 默认开放：透传结构化视频参数（dry-run 组装结果，供测试核对参数是否上传）
         if isinstance(req, Mapping) and isinstance(req.get("video_params"), Mapping):
             data["video_params"] = dict(req["video_params"])
+        # W3 转场视频参数随事件透传（结构同 video_params，供前端转场任务提交）
+        if isinstance(req, Mapping) and isinstance(req.get("transition_video_params"), Mapping):
+            data["transition_video_params"] = dict(req["transition_video_params"])
         if event.get("id"):
             data["id"] = str(event["id"])
         return _wire("illustrate_request", data)

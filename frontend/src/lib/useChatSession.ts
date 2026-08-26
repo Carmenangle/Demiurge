@@ -13,7 +13,7 @@ import type { Template } from "../api/workflows";
 import {
   comfyStatus, startComfy, submitGraph, submitWorkflow, interruptComfy,
   saveLocalSrc, localViewUrl, uploadImage, finalizeGeneration as persistWorkflowGeneration,
-  mergeAudio, moveComfyOutputToInput,
+  mergeAudio, moveComfyOutputToInput, uploadRemoteImageToInput,
   type GenResult,
 } from "../api/comfyui";
 import { listLoras } from "../api/loras";
@@ -30,7 +30,7 @@ import { createScenarioSnapshot } from "../api/scenario";
 import { runVisualCiDiagnostic } from "../api/visualCi";
 import { refreshChatBackgroundActivities } from "./chatBackgroundActivity";
 import { substituteMacros } from "./chatMacros";
-import type { ChatStreamEvent, IllustrationSceneSpec, AudioDialogueLine } from "../api/chatStreamProtocol";
+import type { ChatStreamEvent, IllustrationSceneSpec, AudioDialogueLine, VideoParams } from "../api/chatStreamProtocol";
 import { normalizeInspirationCard } from "../api/chatStreamProtocol";
 import {
   reduce as reduceGen, initialGenState,
@@ -56,13 +56,13 @@ import {
 import {
   illustrationLoraConfigurationError, illustrationRequestMedia, illustrationWorkflowMedia,
   resolveIllustrationActors, resolveVideoMode, resolveVideoTemplateChoice,
-  planFirstlastFrameTasks, firstlastFrameValues,
+  planFirstlastFrameTasks, firstlastFrameValues, transitionVideoValues,
 } from "./illustrationMedia";
 import {
   audioTemplateValues, resolvableAudioLines, skippedAudioSpeakers, voiceReferenceFor,
 } from "./audioGeneration";
 import {
-  agentImageMessage, applyRouteChoice, bindMediaSlotPrompt, dropMediaSlot, appendAudioSlot,
+  agentImageMessage, applyRouteChoice, bindMediaSlotPrompt, dropMediaSlot, appendAudioSlot, appendTransitionSlot,
   pruneUnsubmittedMediaSlots, reduceChatStreamEvent, resolveMediaSlot,
   restoreSubmittedMediaSlots, upsertMessages, workflowMessages,
 } from "./chatSessionEvents";
@@ -256,6 +256,7 @@ export function useChatSession(deps: ChatSessionDeps) {
     illustrate: settings.illustrate,
     comfyIllustrate,
     comfyAudio,
+    videoMode: mediaPreset?.videoMode,
     promptProfile,
     appearanceSource,
     characterBaseImages,
@@ -881,6 +882,7 @@ export function useChatSession(deps: ChatSessionDeps) {
     sceneSpec?: IllustrationSceneSpec, turnId = "", source: "automatic" | "manual" = "automatic",
     eventVideoMode?: string, firstFrameDesc = "", lastFrameDesc = "",
     prevTailDesc = "", lastFrameUrl = "", videoPrompt = "", transition = "",
+    transitionVideoPrompt = "", transitionVideoParams?: VideoParams,
   ) => {
     const failSlot = (stage: string, error: string) =>
       discardFailedIllustration(messageId, slotId, stage, error);
@@ -1059,6 +1061,7 @@ export function useChatSession(deps: ChatSessionDeps) {
     // 降级首帧单图（不挂死，后端 firstlast 缺尾帧有 warning）。
     let frameFirstImage = uploadedImage;
     let frameLastImage = uploadedLastFrameImage;
+    let firstFrameGenerated = false; // W3：首帧是否独立生图成功（决定要不要发转场任务）
     if (useVideo && videoMode === "firstlast") {
       const frameTpl = templates.find((t) => t.id === preset.templateId);
       if (!frameTpl) {
@@ -1099,13 +1102,69 @@ export function useChatSession(deps: ChatSessionDeps) {
             throw new Error(outcome.kind === "failed" ? outcome.error : "生图未产出图像");
           }
           const inputName = await moveComfyOutputToInput(outcome.result.images[0], settings.comfyuiUrl);
-          if (isFirst) frameFirstImage = inputName; else frameLastImage = inputName;
+          if (isFirst) { frameFirstImage = inputName; firstFrameGenerated = true; }
+          else frameLastImage = inputName;
         } catch (error) {
           const message = error instanceof Error ? error.message : "首尾帧生图失败";
           if (isFirst) { failSlot("frame_gen", `首帧生图失败：${message}`); return; }
           // 尾帧生图失败 → 降级首帧单图（不挂死）
           console.warn("[auto-video] 尾帧生图失败，降级首帧单图", { message });
         }
+      }
+    }
+    // W3 转场任务（2 任务排队）：firstlast + 首帧独立生成（非 reuse）+ 后端下发转场提示词 →
+    // 先提交转场视频（图片1=上尾帧、图片2=当前首帧），正片随后提交（ComfyUI 队列顺序执行）。
+    // 坑F：无上尾帧图 → 降级文字转场（不拦截）；转场失败/提交失败 → 不挂死正片（仅槽位标失败）。
+    if (useVideo && videoMode === "firstlast" && transition !== "reuse"
+        && transitionVideoPrompt && firstFrameGenerated) {
+      const transitionSlotId = `${slotId}:transition`;
+      const prevTailRef = resolvePrevTailDesc(messagesRef.current);
+      let prevTailInput = "";
+      if (prevTailRef?.lastFrameUrl) {
+        try {
+          prevTailInput = await uploadRemoteImageToInput(
+            localViewUrl(prevTailRef.lastFrameUrl), settings.comfyuiUrl,
+          );
+        } catch (error) {
+          console.warn("[auto-video] 上尾帧图上传失败，转场降级文字转场", error);
+        }
+      }
+      setMessages((current) => appendTransitionSlot(
+        current, messageId, transitionSlotId, transitionVideoPrompt, transitionVideoParams,
+      ));
+      const transitionValues = transitionVideoValues(
+        tpl.exposed, transitionVideoPrompt,
+        { negativePrompt: preset.negativePrompt, loraName, loraWeight },
+        latentSize,
+        {
+          transitionDurationHint: preset.transitionDurationHint,
+          camera: preset.videoCamera,
+          prevTailDesc: prevTailDescForUse,
+          firstFrameDesc,
+          prevTailImage: prevTailInput || undefined,
+          firstFrameImage: frameFirstImage,
+        },
+      );
+      try {
+        const rt = await submitWorkflow(
+          preset.videoTemplateId!, transitionValues, settings.comfyuiUrl,
+          transitionVideoPrompt, loras.map(({ name, weight }) => ({ name, weight })),
+          preset.loraMode || "single",
+        );
+        if (rt.prompt_id) {
+          setMessages((current) => bindMediaSlotPrompt(
+            current, messageId, transitionSlotId, rt.prompt_id!,
+          ));
+          const transitionOutputNodeIds = tpl.primary_output_node_id
+            ? [tpl.primary_output_node_id] : [];
+          pollResult(rt.prompt_id, transitionOutputNodeIds, undefined,
+            { messageId, slotId: transitionSlotId, background: true as const },
+            transitionVideoPrompt, "video");
+        }
+      } catch (error) {
+        discardFailedIllustration(messageId, transitionSlotId, "transition",
+          error instanceof Error ? error.message : "转场视频提交失败");
+        console.warn("[auto-video] 转场视频提交失败，正片照常", error);
       }
     }
     const values = illustrationTemplateValues(tpl.exposed, {
@@ -1513,6 +1572,7 @@ export function useChatSession(deps: ChatSessionDeps) {
         event.prompt, event.motion, event.actors, botId, slotId, event.sceneSpec, event.turnId,
         "automatic", event.videoMode, event.firstFrameDesc, event.lastFrameDesc,
         event.prevTailDesc, event.lastFrameUrl, event.videoPrompt, event.transition,
+        event.transitionVideoPrompt, event.transitionVideoParams,
       );
       return;
     }

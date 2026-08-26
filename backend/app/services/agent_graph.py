@@ -1483,11 +1483,16 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
             # 三态（reuse/regenerate/ambiguous）随出图请求透传，前端叠加坑C「有图前提」裁决。
             if illustrate_req:
                 _prev_tail_desc = _resolve_prev_tail_desc(ctx)
-                _curr_opening = story_frames.extract_story_frames(clean).opening
+                _frames = story_frames.extract_story_frames(clean)
                 _merged = story_frames.merge_frame_reuse(
-                    _prev_tail_desc, _curr_opening, transition_decision,
+                    _prev_tail_desc, _frames.opening, transition_decision,
                 )
                 illustrate_req["transition"] = _merged.decision
+                # V1.6/W3：首尾帧描述 + 上尾帧描述随事件下发（firstlast 生图 + 转场编译的素材源）。
+                # climax 也带（无害冗余，前端非 firstlast 忽略）；首帧复用决策用 opening 同源，不重复提取。
+                illustrate_req["first_frame_desc"] = _frames.opening[:500].strip()
+                illustrate_req["last_frame_desc"] = _frames.closing[:500].strip()
+                illustrate_req["prev_tail_desc"] = (_prev_tail_desc or "")[:500].strip()
             # V1.5 默认开放：produce 时即 dry-run 组装视频参数（提示词 + 参数），
             # 供 trace 日志核对「视频生成提示词」+「参数有没有上传」。失败静默降级 None。
             _video_prompt_text = ""
@@ -1497,16 +1502,39 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
                     _merged_spec = dict(scene_spec)
                     if "motion" not in _merged_spec:
                         _merged_spec["motion"] = int(motion or 0)
-                    illustrate_req["video_request"] = _vp_mod.build_video_request(
-                        mode="climax", spec=_merged_spec,
-                        video_config=illustrate_req.get("video_config") or {},
-                        # first_frame_desc 留空：图职责描述由 video_prompt 用画面级
-                        # 动作瞬间（subjects/visual_facts/composition）兜底，与 [动作]
-                        # 同源，避免把围绕锚点截取的可能陈旧 narrative 写进 [参考绑定]。
-                    )
+                    # V1.6/W3：按视频模式编译（前端 preset.videoMode 透传；缺省 climax 兼容旧预设）。
+                    _video_mode = str(ctx.get("video_mode") or "climax")
+                    if _video_mode not in ("climax", "firstlast"):
+                        _video_mode = "climax"
+                    illustrate_req["video_mode"] = _video_mode
+                    _vcfg = illustrate_req.get("video_config") or {}
+                    if _video_mode == "firstlast":
+                        illustrate_req["video_request"] = _vp_mod.build_video_request(
+                            mode="firstlast", spec=_merged_spec, video_config=_vcfg,
+                            first_frame_desc=illustrate_req.get("first_frame_desc") or "",
+                            last_frame_desc=illustrate_req.get("last_frame_desc") or "",
+                            prev_tail_desc=illustrate_req.get("prev_tail_desc") or "",
+                        )
+                    else:
+                        illustrate_req["video_request"] = _vp_mod.build_video_request(
+                            mode="climax", spec=_merged_spec, video_config=_vcfg,
+                            # first_frame_desc 留空：图职责描述由 video_prompt 用画面级
+                            # 动作瞬间（subjects/visual_facts/composition）兜底，与 [动作]
+                            # 同源，避免把围绕锚点截取的可能陈旧 narrative 写进 [参考绑定]。
+                        )
                     _video_prompt_text = str(
                         (illustrate_req["video_request"].get("submit") or {}).get("prompt") or ""
                     )
+                    # W3 转场任务（坑F/坑G）：firstlast 且首帧需独立生成（transition≠reuse）→
+                    # 额外编译转场 video_request（图片1=上尾帧、图片2=当前首帧），随事件下发。
+                    _decision = str(illustrate_req.get("transition") or "")
+                    if _video_mode == "firstlast" and _decision not in ("reuse", ""):
+                        illustrate_req["transition_video_request"] = _vp_mod.build_video_request(
+                            mode="transition", spec=_merged_spec, video_config=_vcfg,
+                            first_frame_desc=illustrate_req.get("prev_tail_desc") or "",
+                            last_frame_desc=illustrate_req.get("first_frame_desc") or "",
+                            prev_tail_desc=illustrate_req.get("prev_tail_desc") or "",
+                        )
                 except Exception:
                     illustrate_req["video_request"] = None
             run_trace.emit(
@@ -2594,6 +2622,13 @@ def _ordered_illustration_events(result_text: str, recs: list[dict]) -> list[dic
             if _prompt:
                 request["video_prompt"] = _prompt
             request["video_params"] = _video_params_payload(_video_request)
+        # W3 转场视频（坑F/坑G）：produce 层已编译 transition_video_request，随事件下发转场提示词+参数
+        _transition_vr = rec.get("transition_video_request")
+        if isinstance(_transition_vr, dict):
+            _tprompt = (_transition_vr.get("submit") or {}).get("prompt") or ""
+            if _tprompt:
+                request["transition_video_prompt"] = _tprompt
+            request["transition_video_params"] = _video_params_payload(_transition_vr)
         if isinstance(rec.get("scene_spec"), dict) and rec["scene_spec"]:
             request["scene_spec"] = rec["scene_spec"]
         events.append({"illustrate_request": request, "id": rec.get("id")})
@@ -2626,6 +2661,13 @@ def _streamed_illustration_events(recs: list[dict]) -> list[dict]:
             if _prompt:
                 request["video_prompt"] = _prompt
             request["video_params"] = _video_params_payload(_video_request)
+        # W3 转场视频（坑F/坑G）：produce 层已编译 transition_video_request，随事件下发转场提示词+参数
+        _transition_vr = rec.get("transition_video_request")
+        if isinstance(_transition_vr, dict):
+            _tprompt = (_transition_vr.get("submit") or {}).get("prompt") or ""
+            if _tprompt:
+                request["transition_video_prompt"] = _tprompt
+            request["transition_video_params"] = _video_params_payload(_transition_vr)
         if isinstance(rec.get("scene_spec"), dict) and rec["scene_spec"]:
             request["scene_spec"] = rec["scene_spec"]
         events.append({"illustrate_request": request, "id": rec.get("id")})

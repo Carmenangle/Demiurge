@@ -123,6 +123,25 @@ function appendMediaSlot(
   };
 }
 
+export function appendTransitionSlot(
+  current: ChatMessage[], messageId: string, slotId: string,
+  videoPrompt?: string, videoParams?: VideoParams,
+): ChatMessage[] {
+  return current.map((message) => {
+    if (message.id !== messageId) return message;
+    const existing = message.parts || (message.text ? [{ type: "text" as const, text: message.text }] : []);
+    if (existing.some((part) => part.slotId === slotId)) return message;
+    return {
+      ...message,
+      parts: [...existing, {
+        type: "media-slot" as const, slotId, status: "pending" as const, kind: "video" as const,
+        ...(videoPrompt ? { videoPrompt } : {}),
+        ...(videoParams ? { videoParams } : {}),
+      }],
+    };
+  });
+}
+
 /** 音频对白槽：末尾追加 pending 槽并保留正文（纯文本消息先转成 text part，避免正文被槽位顶掉）。 */
 export function appendAudioSlot(
   current: ChatMessage[],

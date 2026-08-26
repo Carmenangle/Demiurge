@@ -223,6 +223,27 @@ constraints that are safe to include in private agent context.
    1656 / 前端契约 14。注意：角色不对（问题1）根因在插画角色识别层（`_mentioned_bound_names`
    纯子串匹配 + `illustration_actor_names` 可能混入作品名/道具），非视频提示词桥段，本轮未改。
 
-下一步：用探针输出人工核对 climx 提示词质量 + 视频参数（model 空=未配视频模型、
+下一步：用探针输出人工核对 climax 提示词质量 + 视频参数（model 空=未配视频模型、
 images 空=参考图待上游补、warnings 缺图守卫）；之后按反馈逐步排查内容编写。P6 真实
 API 对齐待用户提供可实测端点；配好视频工作流后改回真正执行 submit。
+
+## W3 转场视频任务编排（已完成，2026-08-26，deepseek-v4-pro-0813 编码）
+
+P5 首尾帧顺序链解除阻塞后，W3「2 任务排队」前端接线落地：
+
+- **前端→后端 video_mode**：`AgentInvocation.videoMode`（`climax|firstlast`）新增 wire 字段
+  （`agent-invocation.schema.json` → `agentInvocationBody` → `RunContext.video_mode`），
+  produce 层据此编译正片 video_request（缺省 climax，旧预设兼容）。
+- **后端转场编译**：firstlast 且 `transition≠reuse` 时额外 `build_video_request(mode="transition")`
+  → `transition_video_request` 随事件下发 `transition_video_prompt` + `transition_video_params`
+  （图片1=上尾帧/起点、图片2=当前首帧/终点；坑G 转场时长走 `preset.transitionDurationHint`，
+  缺省交模型默认，绝不兑底正片时长）。
+- **前端 2 任务排队**：`uploadRemoteImageToInput` 取上尾帧图（localViewUrl）回传 ComfyUI input
+  （坑F 缺图 → 降级文字转场不拦截）；`appendTransitionSlot` 追加独立槽（slotId=`<id>:transition`）；
+  `transitionVideoValues` 图片1/2 绑定；先提转场视频、正片随后进队列顺序执行，转场失败仅标
+  槽位失败不挂死正片。`VideoParams.mode` 类型扩为 `climax|firstlast|transition`。
+- 尾帧图地址走前端 `resolvePrevTailDesc` 反查（lastFrameUrl，R8），后端不赋值 `last_frame_url`。
+
+验证：后端 1699 passed / ruff ✅ / mypy ✅；前端 vitest 578 passed / tsc ✅ / 生产构建 ✅；
+`check:wire` 同步 ✅。文档同步：`PLAN-VIDEO-FIRSTLAST.md` W3 标 ✅、`STORYGEN-FLOW.md` 视频四形态。
+剩余（P6）：真实双图视频模板字段名 + 真实 API 对齐，待用户提供可实测端点。

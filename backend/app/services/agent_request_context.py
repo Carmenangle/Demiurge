@@ -83,6 +83,7 @@ def from_payload(payload: Mapping[str, Any]) -> RunContext:
         illustrate=bool(payload.get("illustrate", False)),
         comfy_illustrate=bool(payload.get("comfy_illustrate", False)),
         comfy_audio=bool(payload.get("comfy_audio", False)),
+        video_mode=str(payload.get("video_mode") or ""),
         prompt_profile=str(payload.get("prompt_profile") or "krea2"),
         appearance_source=str(payload.get("appearance_source") or "worldbook"),
         character_base_images=dict(payload.get("character_base_images") or {}),

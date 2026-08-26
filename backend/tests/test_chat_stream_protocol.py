@@ -137,6 +137,32 @@ def test_插画事件透传transition三态_v1_5_w2():
         assert event["data"]["transition"] == value
 
 
+def test_插画事件透传转场视频提示词与参数_v1_6_w3():
+    event = protocol.encode_event({
+        "illustrate_request": {
+            "prompt": "p", "motion": 0, "actors": [],
+            "video_mode": "firstlast", "transition": "regenerate",
+            "transition_video_prompt": "转场分镜提示词",
+            "transition_video_params": {"mode": "transition", "size": "1280x720"},
+        },
+        "id": "slot-1",
+    })
+    data = event["data"]
+    assert data["transition_video_prompt"] == "转场分镜提示词"
+    assert data["transition_video_params"] == {"mode": "transition", "size": "1280x720"}
+
+
+def test_插画事件无转场视频字段时不携带_v1_6_w3():
+    event = protocol.encode_event({
+        "illustrate_request": {
+            "prompt": "p", "motion": 0, "actors": [],
+        },
+        "id": "slot-1",
+    })
+    assert "transition_video_prompt" not in event["data"]
+    assert "transition_video_params" not in event["data"]
+
+
 def test_插画事件无视频字段时透传为空不携带_v1_5():
     event = protocol.encode_event({
         "illustrate_request": {"prompt": "p", "motion": 0, "actors": []},

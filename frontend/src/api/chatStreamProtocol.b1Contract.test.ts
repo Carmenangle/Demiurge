@@ -68,6 +68,25 @@ describe("B1 协议透传 · 跨语言端到端契约", () => {
     expect(values["4.prev"]).toBe("上一楼层：林屿在门口抽烟回望");
     expect(values["5.url"]).toBe("data:image/png;base64,ZmFrZS10YWlsLWZyYW1l");
   });
+
+  it("W3 转场视频：transition_video_prompt / params 随事件解码（snake→camel 无丢失）", () => {
+    const wire = {
+      protocol: "laf-chat-stream", version: 1, type: "illustrate_request",
+      data: {
+        prompt: "p", motion: 3, actors: ["甲"],
+        video_mode: "firstlast",
+        transition: "regenerate",
+        transition_video_prompt: "转场分镜提示词",
+        transition_video_params: { mode: "transition", size: "1280x720" },
+      },
+    };
+    const event = decodeChatStreamEvent(wire);
+    if (event.type !== "illustrate_request") throw new Error("unreachable");
+
+    expect(event.transition).toBe("regenerate");
+    expect(event.transitionVideoPrompt).toBe("转场分镜提示词");
+    expect(event.transitionVideoParams).toEqual({ mode: "transition", size: "1280x720" });
+  });
 });
 
 describe("B2 默认开放 climax 视频提示词 · 端到端契约（无视频模板/模型也生成）", () => {

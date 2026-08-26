@@ -186,3 +186,41 @@ export function firstlastFrameValues(
     latentSize,
   });
 }
+
+/** W3 转场视频 values：图片1=上尾帧图（转场起点）、图片2=当前首帧图（终点）。
+ *  复用正片视频模板（不猜模板有 transition 分支），videoMode 仍走 firstlast；
+ *  时长走 preset.transitionDurationHint（坑G：有值才写，缺省交视频模型默认，绝不兑底正片时长）。 */
+export function transitionVideoValues(
+  exposed: readonly SemanticField[],
+  prompt: string,
+  media: {
+    negativePrompt?: string;
+    loraName?: string;
+    loraWeight?: number;
+  },
+  latentSize: { width: number; height: number },
+  opts: {
+    transitionDurationHint?: number;
+    camera?: "static" | "pan" | "zoom";
+    prevTailDesc?: string;
+    firstFrameDesc?: string;
+    prevTailImage?: string;   // 图片1=上尾帧图（已上传 ComfyUI input）
+    firstFrameImage?: string; // 图片2=当前首帧图（P5 生成的 input 文件名）
+  },
+): Record<string, unknown> {
+  return illustrationTemplateValues(exposed, {
+    prompt,
+    negativePrompt: media.negativePrompt?.trim() || undefined,
+    loraName: media.loraName?.trim() || undefined,
+    loraWeight: media.loraWeight,
+    latentSize,
+    videoMode: "firstlast",
+    videoDuration: opts.transitionDurationHint || undefined, // 坑G：有值才写，缺省交模型默认
+    videoCamera: opts.camera,
+    firstFrameDesc: opts.prevTailDesc?.trim() || undefined,   // 转场起点描述
+    lastFrameDesc: opts.firstFrameDesc?.trim() || undefined,  // 转场终点描述
+    prevTailDesc: opts.prevTailDesc?.trim() || undefined,
+    firstFrameImage: opts.prevTailImage?.trim() || undefined,
+    lastFrameImage: opts.firstFrameImage?.trim() || undefined,
+  });
+}
