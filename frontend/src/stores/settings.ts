@@ -145,6 +145,9 @@ export interface MediaInsertPreset {
   // 空值 = 模板原值（旧预设兼容，不迁移不报错）。
   videoDurationHint?: number;   // 视频时长（秒）；0/空=模板原值
   videoCamera?: "static" | "pan" | "zoom"; // 镜头运动；空=模板原值
+  // V1.5/B1 视频模式：climax=高潮点动作代入（精简版）；firstlast=首尾帧剧情影片（七段式）。
+  // 缺省 climax（旧预设兼容，不迁移不报错）；事件 videoMode 可临时覆盖。
+  videoMode?: "climax" | "firstlast";
   // ⑦ 音频（IndexTTS 系）：模板 + 按角色参考音轨（每个作品专属、每角色一个）
   audioTemplateId?: string;  // 音频工作流模板 id（空=不配音）
   characterVoices?: Record<string, CharacterVoiceBinding>; // 角色名→参考音轨（音色）

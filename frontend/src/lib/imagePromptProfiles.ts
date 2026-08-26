@@ -1,3 +1,5 @@
+import type { VideoMode } from "./illustrationMedia";
+
 export type PromptProfileId = "krea2" | "anima_tags" | "natural_language" | "niji_sections";
 
 export const PROMPT_PROFILE_OPTIONS: readonly { id: PromptProfileId; label: string }[] = [
@@ -130,6 +132,12 @@ interface IllustrationValues {
   /** V1.2 视频最小事实：时长（秒）与镜头运动（static/pan/zoom），来自用户预设，不从模型输出读 */
   videoDuration?: number;
   videoCamera?: "static" | "pan" | "zoom";
+  /** V1.5/B1 视频模式 + 首尾帧描述：来自 preset.videoMode 与 illustrate_request 事件可选字段 */
+  videoMode?: VideoMode;
+  firstFrameDesc?: string;
+  lastFrameDesc?: string;
+  prevTailDesc?: string;
+  lastFrameUrl?: string;
 }
 
 export type IllustrationAspectRatio = "1:1" | "2:3" | "3:2" | "3:4" | "4:3" | "9:16" | "16:9";
@@ -175,6 +183,16 @@ export function illustrationTemplateValues(
       values[key] = input.videoDuration;
     } else if (binding === "video_camera" && input.videoCamera) {
       values[key] = input.videoCamera;
+    } else if (binding === "video_mode" && input.videoMode) {
+      values[key] = input.videoMode;
+    } else if (binding === "first_frame_desc" && input.firstFrameDesc) {
+      values[key] = input.firstFrameDesc;
+    } else if (binding === "last_frame_desc" && input.lastFrameDesc) {
+      values[key] = input.lastFrameDesc;
+    } else if (binding === "prev_tail_desc" && input.prevTailDesc) {
+      values[key] = input.prevTailDesc;
+    } else if (binding === "last_frame_url" && input.lastFrameUrl) {
+      values[key] = input.lastFrameUrl;
     } else if (binding === "latent_width" && input.latentSize) {
       values[key] = input.latentSize.width;
     } else if (binding === "latent_height" && input.latentSize) {

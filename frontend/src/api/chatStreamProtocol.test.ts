@@ -54,4 +54,38 @@ describe("chat stream protocol", () => {
       actors: ["爱丽丝"], id: "slot-1", sceneSpec, turnId: "turn-1",
     });
   });
+
+  it("decodes optional video protocol fields (V1.5/B1)", () => {
+    expect(decodeChatStreamEvent(event("illustrate_request", {
+      prompt: "p", motion: 3, actors: ["甲"],
+      video_mode: "firstlast",
+      first_frame_desc: "雨夜门口的暖黄灯笼",
+      last_frame_desc: "三人举杯同框",
+      prev_tail_desc: "上一楼层：收伞",
+      last_frame_url: "data:image/png;base64,xx",
+    }))).toEqual({
+      type: "illustrate_request", prompt: "p", motion: 3, actors: ["甲"],
+      videoMode: "firstlast",
+      firstFrameDesc: "雨夜门口的暖黄灯笼",
+      lastFrameDesc: "三人举杯同框",
+      prevTailDesc: "上一楼层：收伞",
+      lastFrameUrl: "data:image/png;base64,xx",
+    });
+  });
+
+  it("keeps old backend compatibility: video fields absent → no new keys (宽松解码)", () => {
+    expect(decodeChatStreamEvent(event("illustrate_request", {
+      prompt: "legacy", motion: 1, actors: [],
+    }))).toEqual({
+      type: "illustrate_request", prompt: "legacy", motion: 1, actors: [],
+    });
+  });
+
+  it("ignores invalid video_mode value (宽松解码)", () => {
+    expect(decodeChatStreamEvent(event("illustrate_request", {
+      prompt: "p", motion: 0, actors: [], video_mode: "bogus",
+    }))).toEqual({
+      type: "illustrate_request", prompt: "p", motion: 0, actors: [],
+    });
+  });
 });

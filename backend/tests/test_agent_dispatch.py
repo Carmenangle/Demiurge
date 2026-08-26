@@ -2239,6 +2239,61 @@ def test_流式插画只发槽位和最终正文偏移():
     }]
 
 
+def test_插画事件透传视频协议可选字段_v1_5():
+    # V1.5/B1：rec 带 video 字段 → 事件 request 透传（有值才带）
+    events = ag._ordered_illustration_events("正文", [{
+        "id": "slot-1", "prompt": "p", "motion": 1, "actors": [],
+        "video_mode": "firstlast",
+        "first_frame_desc": "雨夜门口的暖黄灯笼",
+        "last_frame_desc": "三人举杯同框",
+        "prev_tail_desc": "上一楼层收伞",
+        "last_frame_url": "data:image/png;base64,xx",
+    }])
+    assert events == [
+        {"delta": "正文"},
+        {
+            "illustrate_request": {
+                "prompt": "p", "motion": 1, "actors": [],
+                "video_mode": "firstlast",
+                "first_frame_desc": "雨夜门口的暖黄灯笼",
+                "last_frame_desc": "三人举杯同框",
+                "prev_tail_desc": "上一楼层收伞",
+                "last_frame_url": "data:image/png;base64,xx",
+            },
+            "id": "slot-1",
+        },
+    ]
+
+
+def test_流式插画透传视频协议可选字段_v1_5():
+    events = ag._streamed_illustration_events([{
+        "id": "slot-1", "prompt": "p", "motion": 3, "actors": ["Lyra"],
+        "anchor_offset": 5, "video_mode": "climax",
+        "first_frame_desc": "高潮动作瞬间",
+    }])
+    assert events == [{
+        "illustrate_request": {
+            "prompt": "p", "motion": 3, "actors": ["Lyra"], "offset": 5,
+            "video_mode": "climax",
+            "first_frame_desc": "高潮动作瞬间",
+        },
+        "id": "slot-1",
+    }]
+
+
+def test_插画事件无视频字段时保持原状_旧数据兼容():
+    events = ag._ordered_illustration_events("正文", [{
+        "id": "slot-1", "prompt": "p", "motion": 0, "actors": [],
+    }])
+    assert events == [
+        {"delta": "正文"},
+        {
+            "illustrate_request": {"prompt": "p", "motion": 0, "actors": []},
+            "id": "slot-1",
+        },
+    ]
+
+
 def test_正文最终化后在记忆维护前立即发插画请求():
     emitted = []
     out = {

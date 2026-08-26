@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   illustrationLoraConfigurationError, illustrationRequestMedia, illustrationWorkflowMedia,
-  resolveIllustrationActors,
+  resolveIllustrationActors, resolveVideoMode,
 } from "./illustrationMedia";
 
 const legacyBindings = {
@@ -170,5 +170,24 @@ describe("illustration LoRA modes", () => {
     const config = { ...preset, loraMode: "multi" as const, styleLora: "" };
     const media = illustrationWorkflowMedia(config, ["甲"], ["白给谷"]);
     expect(illustrationLoraConfigurationError(config, media)).toContain("默认风格 LoRA");
+  });
+});
+
+describe("resolveVideoMode（V1.5/B1 视频模式决策）", () => {
+  it("事件 videoMode 优先于 preset", () => {
+    expect(resolveVideoMode({ videoMode: "climax" }, "firstlast")).toBe("firstlast");
+  });
+
+  it("无事件字段时回退 preset.videoMode", () => {
+    expect(resolveVideoMode({ videoMode: "firstlast" }, undefined)).toBe("firstlast");
+  });
+
+  it("两者都缺省 → climax（旧预设兼容）", () => {
+    expect(resolveVideoMode(undefined, undefined)).toBe("climax");
+    expect(resolveVideoMode({}, undefined)).toBe("climax");
+  });
+
+  it("非法事件值忽略，走 preset 回退", () => {
+    expect(resolveVideoMode({ videoMode: "climax" }, "bogus")).toBe("climax");
   });
 });

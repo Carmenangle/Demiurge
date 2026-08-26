@@ -50,10 +50,20 @@
   全局表（地点/世界状态）、任务表（地点）。
 - **按列名存在才读**，缺列/表空 → 静默跳过，回退 `scene_spec` 现有字段，不阻塞主链。
 
-### P3 `videoMode` + 事件协议（向后兼容）
+### P3 `videoMode` + 事件协议（向后兼容）✅ 已完成（B1 提交）
 - `MediaInsertPreset.videoMode?: "climax" | "firstlast"`，缺省 `climax`。
 - `illustrate_request` 扩展**可选**字段：`videoMode`、`firstFrameDesc`、`lastFrameDesc`、
   `prevTailDesc`、`lastFrameUrl`（若有）。TS `chatStreamProtocol` 解码保持宽松（未知字段忽略）。
+- 落地：
+  - 后端 `agent_graph._ordered/_streamed_illustration_events` 透传 rec 里这 5 个字段（有值才带）。
+  - 前端 `chatStreamProtocol` 解码 `video_mode/first_frame_desc/last_frame_desc/prev_tail_desc/
+    last_frame_url` → 驼峰字段，宽松忽略未知值。
+  - 前端 `resolveVideoMode`（illustrationMedia.ts）：事件 videoMode 优先 → preset.videoMode →
+    缺省 climax。
+  - `illustrationTemplateValues` 新增 binding：`video_mode/first_frame_desc/last_frame_desc/
+    prev_tail_desc/last_frame_url`（模板 exposed 有对应语义才注入）。
+  - `useChatSession.submitIllustration` 收 5 个可选参数，仅 `useVideo` 时透传。
+- 验证：后端 3 个透传用例 + 前端 7 个（协议解码 4 + resolveVideoMode 3/4）全绿。
 
 ### P4 尾帧链式状态（推荐「反查」，零新增持久化）
 - 不做 thread 级新 kv。新增纯函数 `resolvePrevTailDesc(messages)`：倒序扫描最近一条
@@ -152,12 +162,16 @@
   A3 表格素材读取      ❌ 取消（表格在剧情推进时已自动发送，场景信息 scene_spec 已含）
 
 第二批（接线，需前端协议）：
-  B1 videoMode + 事件协议（P3）  B2 尾帧反查（P4，零持久化）
-  B3 前端双图提交链（P5）+ 防拦截第二层（_apply_regex，复用共享清洗规则文档，不新增 placement）
+  B1 videoMode + 事件协议（P3）✅ 完成——
+                        · MediaInsertPreset.videoMode（缺省 climax，旧预设兼容）
+                        · 后端事件透传 video_mode/first_frame_desc/last_frame_desc/prev_tail_desc/last_frame_url
+                        · 前端宽松解码 + resolveVideoMode 决策 + 模板 binding 注入
+  B2 尾帧反查（P4，零持久化）  B3 前端双图提交链（P5）+ 防拦截第二层（_apply_regex）
 
 第三批（延后）：
   C1 真实 API 对齐（P6，待用户提供可实测端点）  C2 转场素材（延后）
 ```
 
-A1+A2 已完成并验证（端到端 dry-run 串通 + 防拦截第一层对齐）。下一步 B1（videoMode +
-事件协议）是接线起点，需前端 `MediaInsertPreset` 与 `illustrate_request` 事件字段。
+A1+A2+B1 已完成并验证（端到端 dry-run 串通 + 防拦截共享清洗 + videoMode 协议透传）。
+下一步 B2（尾帧反查）或 B3（前端双图提交链）；视频提示词内容编写（镜头语言 + 动态提取）
+按用户指示留到后续测试环节逐步排查。

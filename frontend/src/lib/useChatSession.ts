@@ -55,6 +55,7 @@ import {
 import {
   illustrationLoraConfigurationError, illustrationRequestMedia, illustrationWorkflowMedia,
   resolveIllustrationActors,
+  resolveVideoMode,
 } from "./illustrationMedia";
 import {
   audioTemplateValues, resolvableAudioLines, skippedAudioSpeakers, voiceReferenceFor,
@@ -877,6 +878,8 @@ export function useChatSession(deps: ChatSessionDeps) {
   const submitIllustration = async (
     prompt: string, motion = 0, actors: string[] = [], messageId: string, slotId: string,
     sceneSpec?: IllustrationSceneSpec, turnId = "", source: "automatic" | "manual" = "automatic",
+    eventVideoMode?: string, firstFrameDesc = "", lastFrameDesc = "",
+    prevTailDesc = "", lastFrameUrl = "",
   ) => {
     const failSlot = (stage: string, error: string) =>
       discardFailedIllustration(messageId, slotId, stage, error);
@@ -897,6 +900,8 @@ export function useChatSession(deps: ChatSessionDeps) {
     }
     const useVideo = !!(preset.smartVideo && preset.videoTemplateId && motion >= 2);
     const chosenId = useVideo ? preset.videoTemplateId! : preset.templateId;
+    // V1.5/B1：事件 videoMode 优先，其次 preset.videoMode，缺省 climax
+    const videoMode = resolveVideoMode(preset, eventVideoMode);
     if (!chosenId) {
       failSlot("configuration", "当前图/视频模式没有配置工作流模板");
       return;
@@ -1030,6 +1035,12 @@ export function useChatSession(deps: ChatSessionDeps) {
       // V1.2 视频最小事实：时长/镜头 = 用户预设值（模板无 exposed binding 时自然忽略）；motion 已由后端透传
       videoDuration: useVideo && preset.videoDurationHint ? preset.videoDurationHint : undefined,
       videoCamera: useVideo ? preset.videoCamera : undefined,
+      // V1.5/B1 视频模式 + 首尾帧描述：有值才传（模板无 exposed binding 时自然忽略）
+      videoMode: useVideo ? videoMode : undefined,
+      firstFrameDesc: useVideo && firstFrameDesc ? firstFrameDesc : undefined,
+      lastFrameDesc: useVideo && lastFrameDesc ? lastFrameDesc : undefined,
+      prevTailDesc: useVideo && prevTailDesc ? prevTailDesc : undefined,
+      lastFrameUrl: useVideo && lastFrameUrl ? lastFrameUrl : undefined,
     });
     try {
       const st = await comfyStatus(settings.comfyuiUrl);
@@ -1416,6 +1427,8 @@ export function useChatSession(deps: ChatSessionDeps) {
       ));
       void submitIllustration(
         event.prompt, event.motion, event.actors, botId, slotId, event.sceneSpec, event.turnId,
+        "automatic", event.videoMode, event.firstFrameDesc, event.lastFrameDesc,
+        event.prevTailDesc, event.lastFrameUrl,
       );
       return;
     }

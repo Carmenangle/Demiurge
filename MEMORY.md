@@ -161,12 +161,21 @@ constraints that are safe to include in private agent context.
 - **防拦截第一层对齐**：`video_prompt.build_video_request` 入口 `_clean_spec` 对 spec 文本字段
   统一 `restore_jailbreak` 兜底。端到端 dry-run 验证：带 `@(色)@` 破甲标记的 appearance
   不再残留进 prompt（修复前会残留）。
-- **共享清洗规则落地（本轮）**：新建 `services/prompt_clean.py`（纯函数：restore_jailbreak/
+- **共享清洗规则落地**：新建 `services/prompt_clean.py`（纯函数：restore_jailbreak/
   restore_jailbreak_with_offsets/clean_spec_text_fields）+ `docs/PROMPT-CLEANING-RULES.md`
   （按用途命名「通用提示词清洗规则」，单一事实来源）。`image_prompt_extract` 与 `video_prompt`
   均改为复用共享模块（image_prompt_extract 内 _MARKER_RE 与 restore_jailbreak* 实现已删除，
   改为 re-export）。独立性保障：删掉 IMAGE_PROMPT 清洗规则，图像生成仍受共享规则庇护
   （test_prompt_clean.py 回归保证）。全量 1640 passed。
+- **B1 videoMode + 事件协议（本轮，P3）**：
+  - 前端 `MediaInsertPreset.videoMode?: "climax" | "firstlast"`（缺省 climax，旧预设兼容）。
+  - 后端 `agent_graph._ordered/_streamed_illustration_events` 透传 rec 里 5 个可选字段
+    （video_mode/first_frame_desc/last_frame_desc/prev_tail_desc/last_frame_url，有值才带）。
+  - 前端 `chatStreamProtocol` 宽松解码（未知字段忽略）+ `resolveVideoMode` 决策纯函数
+    （事件优先→preset→climax）+ `illustrationTemplateValues` 新增 binding
+    （video_mode/first_frame_desc/last_frame_desc/prev_tail_desc/last_frame_url）。
+  - `useChatSession.submitIllustration` 收 5 个可选参数，仅 useVideo 时透传。
+  - 验证：后端 3 透传用例 + 前端 7 用例；全量 后端 1643 / 前端 532 + tsc 0 错。
 
 关键结论（用户拍板）：
 1. **防拦截两层机制**（与图像生成一致）：① 破甲还原 @()@→正常文字（纯函数，已落地）；
@@ -185,4 +194,5 @@ constraints that are safe to include in private agent context.
 2. **A3 表格读取取消**：表格在剧情推进时已自动发送/自动填表，场景角色信息 scene_spec
    已含（appearance/wardrobe/locale），无需单独读 table_store。P2 移除。
 
-下一步：B1 videoMode + 事件协议（前端 MediaInsertPreset + illustrate_request 字段），接线起点。
+下一步：B2 尾帧反查（P4）或 B3 前端双图提交链（P5）。视频提示词内容编写（镜头语言 + A/B
+动态提取）按用户指示留到后续测试环节逐步排查，不靠模板敲定。

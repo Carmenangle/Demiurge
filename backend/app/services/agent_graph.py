@@ -2467,6 +2467,12 @@ def _ordered_illustration_events(result_text: str, recs: list[dict]) -> list[dic
             "motion": rec.get("motion") or 0,
             "actors": rec.get("actors") or [],
         }
+        # V1.5/B1：视频协议可选字段透传（有值才带；旧前端/旧数据宽松忽略）
+        for _key in ("video_mode", "first_frame_desc", "last_frame_desc",
+                     "prev_tail_desc", "last_frame_url"):
+            _value = rec.get(_key)
+            if isinstance(_value, str) and _value:
+                request[_key] = _value
         if isinstance(rec.get("scene_spec"), dict) and rec["scene_spec"]:
             request["scene_spec"] = rec["scene_spec"]
         events.append({"illustrate_request": request, "id": rec.get("id")})
@@ -2486,6 +2492,12 @@ def _streamed_illustration_events(recs: list[dict]) -> list[dict]:
             "actors": rec.get("actors") or [],
             "offset": max(0, int(rec.get("anchor_offset") or 0)),
         }
+        # V1.5/B1：视频协议可选字段透传（有值才带；旧前端/旧数据宽松忽略）
+        for _key in ("video_mode", "first_frame_desc", "last_frame_desc",
+                     "prev_tail_desc", "last_frame_url"):
+            _value = rec.get(_key)
+            if isinstance(_value, str) and _value:
+                request[_key] = _value
         if isinstance(rec.get("scene_spec"), dict) and rec["scene_spec"]:
             request["scene_spec"] = rec["scene_spec"]
         events.append({"illustrate_request": request, "id": rec.get("id")})

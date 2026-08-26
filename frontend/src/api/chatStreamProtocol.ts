@@ -56,7 +56,7 @@ export type ChatStreamEvent =
   | { type: "route"; route: MessageRoute }
   | { type: "image"; url: string; id?: string; regeneration?: RegenerationSnapshot }
   | { type: "video"; url: string; id?: string }
-  | { type: "illustrate_request"; prompt: string; motion: number; actors: string[]; sceneSpec?: IllustrationSceneSpec; id?: string; offset?: number; turnId?: string }
+  | { type: "illustrate_request"; prompt: string; motion: number; actors: string[]; sceneSpec?: IllustrationSceneSpec; id?: string; offset?: number; turnId?: string; videoMode?: "climax" | "firstlast"; firstFrameDesc?: string; lastFrameDesc?: string; prevTailDesc?: string; lastFrameUrl?: string }
   | { type: "audio_request"; lines: AudioDialogueLine[]; id?: string }
   | { type: "rag_status"; state: string; kind: string; count?: number }
   | { type: "inspiration"; card: StreamInspirationCard }
@@ -141,6 +141,14 @@ export function decodeChatStreamEvent(value: unknown): ChatStreamEvent {
         ...(typeof data.id === "string" ? { id: data.id } : {}),
         ...(typeof data.offset === "number" ? { offset: data.offset } : {}),
         ...(typeof data.turn_id === "string" ? { turnId: data.turn_id } : {}),
+        // V1.5/B1 视频协议可选字段：宽松透传（旧后端不带 → 无这些字段）
+        ...(data.video_mode === "climax" || data.video_mode === "firstlast"
+          ? { videoMode: data.video_mode }
+          : {}),
+        ...(typeof data.first_frame_desc === "string" ? { firstFrameDesc: data.first_frame_desc } : {}),
+        ...(typeof data.last_frame_desc === "string" ? { lastFrameDesc: data.last_frame_desc } : {}),
+        ...(typeof data.prev_tail_desc === "string" ? { prevTailDesc: data.prev_tail_desc } : {}),
+        ...(typeof data.last_frame_url === "string" ? { lastFrameUrl: data.last_frame_url } : {}),
       };
     case "audio_request":
       return {

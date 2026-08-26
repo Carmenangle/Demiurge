@@ -94,3 +94,17 @@ export function illustrationWorkflowMedia(
     characterLora: loras.some((lora) => lora.character),
   };
 }
+
+export type VideoMode = "climax" | "firstlast";
+
+/** V1.5/B1 视频模式决策：事件 videoMode 优先，其次 preset.videoMode，缺省 climax（旧预设兼容）。 */
+export function resolveVideoMode(
+  preset: { videoMode?: VideoMode } | undefined,
+  eventVideoMode?: string,
+): VideoMode {
+  if (eventVideoMode === "climax" || eventVideoMode === "firstlast") return eventVideoMode;
+  if (preset?.videoMode === "climax" || preset?.videoMode === "firstlast") {
+    return preset.videoMode;
+  }
+  return "climax";
+}
