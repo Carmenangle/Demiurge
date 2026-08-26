@@ -203,14 +203,21 @@ videoMode 协议透传 + 尾帧反查 + 双帧路由）。P5 剩余的「先双�
 
 - 背景：视频模型和工作流现在都不需要准备。剧情推进时**默认开放视频提示词生成环节**，
   先测试高潮模式（climax）生成的视频提示词是否符合要求，再逐步排查内容编写。
-- 后端：`agent_graph._climax_video_prompt_for(rec)` —— 有 scene_spec 即用
-  `video_prompt.compile_climax_video_prompt` 编译 climax 提示词（motion 从 rec 补齐，
-  first_frame_desc 用已还原 narrative），随事件下发为可选字段 `video_prompt`；
-  失败静默降级空串，不阻断出图/出视频。线编码器透传该字段。
-- 前端：`chatStreamProtocol` 宽松解码 `video_prompt` → 槽位存储（appendMediaSlot /
-  resolveMediaSlot 保留），**无视频模板/模型也展示**（测试核对）；`illustrationTemplateValues`
-  新增 `video_prompt` binding（仅视频分支注入）。
-- 验证：dry-run 探针 `backend/scripts/b2_video_prompt_probe.py`（三档 motion 输出 +
-  wire 导出到前端 fixture）；后端 4 用例（默认携带/区块完整/motion 运镜/无 scene_spec 不生成）
-  + 前端契约（wire→解码→binding）。全量 后端 1649 / 前端 549 + tsc 0 错。
+- 后端：`agent_graph._video_request_for(rec)` —— 有 scene_spec 即用
+  `video_prompt.build_video_request` 完整组装「上交给视频模型的参数」（dry-run）：
+  spec+motion 喂 compile_climax_video_prompt（first_frame_desc 用已还原 narrative），
+  video_config 从 rec 透传（组装 illustrate_req 时带 ctx 的 vid_base/vid_model/vid_proxy
+  + 视频默认 1280x720，roleplay_turn 白名单透传进 rec）。随事件下发 `video_prompt`
+  （提示词）+ `video_params`（结构化参数：model/size/endpoint/images/reference_binding/
+  warnings）；失败静默降级，不阻断出图/出视频。线编码器透传两字段。
+- 前端：`chatStreamProtocol` 宽松解码 `video_prompt` + `videoParams` → 槽位存储
+  （appendMediaSlot / resolveMediaSlot 保留），**无视频模板/模型也展示**（测试核对）；
+  `illustrationTemplateValues` 新增 `video_prompt` binding（仅视频分支注入）。
+- 验证：dry-run 探针 `backend/scripts/b2_video_prompt_probe.py`（三档 motion 输出
+  提示词 + 视频参数 + wire 导出到前端 fixture）；后端 7 用例（默认携带/区块完整/motion
+  运镜/无 scene_spec 不生成/video_config 透传/video_params 线编码/roleplay 白名单）
+  + 前端契约（wire→解码→binding/槽位）。全量 后端 1652 / 前端 551 + tsc 0 错。
+- 测试点：**视频参数有没有上传** → video_params 里可直接核对 model（空=未配视频模型）、
+  size（1280x720）、endpoint（空=未配视频工作流）、images（空=参考图待上游补）、
+  warnings（缺图守卫）。后续配好视频工作流后，改回真正执行 submit。
 - 下一步：用探针输出人工核对提示词质量；之后按反馈逐步排查内容编写（对白逐字/动作序列/情绪）。

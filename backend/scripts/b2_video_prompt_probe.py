@@ -1,9 +1,11 @@
-"""V1.5 高潮模式视频提示词探针：用真实后端链路生成 climax 视频提示词供人工核对。
+"""V1.5 高潮模式视频提示词 + 视频参数探针：用真实后端链路 dry-run 供人工核对。
 
-不依赖视频模型/工作流：直接构造一个剧情高潮 rec（scene_spec + motion），
-走 agent_graph._streamed_illustration_events → 事件里附带 video_prompt。
-用途：测试「高潮模式生成视频提示词是否符合要求」——区块完整性 / 无破甲残留 /
-动作·运镜·特效随 motion 强度。
+不依赖视频模型/工作流：直接构造一个剧情高潮 rec（scene_spec + motion + video_config），
+走 agent_graph._streamed_illustration_events → 事件里附带 video_prompt（提示词）
++ video_params（结构化视频参数）。
+
+用途：测试「高潮模式生成视频提示词是否符合要求」+「视频参数有没有正确上传」——
+区块完整性 / 无破甲残留 / 动作·运镜·特效随 motion 强度 / 模型名·画幅·时长·参考图·缺图警告。
 """
 import json
 import sys
@@ -11,6 +13,14 @@ import sys
 sys.path.insert(0, r"D:\tool\Demiurge\backend")
 
 from app.services import agent_graph as ag
+
+# 模拟真实请求里的视频配置：未配置视频模型/工作流时 model/base_url 为空，画幅默认 16:9
+VIDEO_CONFIG = {
+    "base_url": "",          # 没配视频工作流 → 空
+    "model": "",             # 没配视频模型 → 空
+    "size": "1280x720",      # 视频默认 16:9（R9）
+    "proxy": "",
+}
 
 # 三档 motion 各跑一遍，核对运镜/特效是否随强度变化
 SPECS = [
@@ -64,6 +74,7 @@ for i, spec in enumerate(SPECS):
         "actors": spec["scene_spec"]["actors"],
         "anchor_offset": 0,
         "scene_spec": spec["scene_spec"],
+        "video_config": dict(VIDEO_CONFIG),
     }
     events = ag._streamed_illustration_events([rec])
     request = events[0]["illustrate_request"]
@@ -72,8 +83,11 @@ for i, spec in enumerate(SPECS):
     print("-" * 70)
     print(request.get("video_prompt", "<无 video_prompt>"))
     print()
+    print("[视频参数]（dry-run，测试「参数有没有上传」）")
+    print(json.dumps(request.get("video_params", {}), ensure_ascii=False, indent=2))
+    print()
 
-# 同时导出完整 wire（含 video_prompt）供前端契约测试复用
+# 同时导出完整 wire（含 video_prompt + video_params）供前端契约测试复用
 from app.services import chat_stream_protocol as protocol
 
 wire = [protocol.encode_event(ev) for ev in ag._streamed_illustration_events([
@@ -83,6 +97,7 @@ wire = [protocol.encode_event(ev) for ev in ag._streamed_illustration_events([
         "motion": 3,
         "actors": ["温知夏", "林屿"],
         "anchor_offset": 0,
+        "video_config": dict(VIDEO_CONFIG),
         "scene_spec": {
             "narrative": "温知夏猛地起身，攥住林屿手腕",
             "appearance": "温知夏米色针织开衫",
@@ -90,6 +105,7 @@ wire = [protocol.encode_event(ev) for ev in ag._streamed_illustration_events([
             "locale": "面馆内景",
             "actors": ["温知夏", "林屿"],
             "rating": "sfw",
+            "negative_prompt": "低质量；畸形手",
             "aspect_ratio": "16:9",
         },
     },

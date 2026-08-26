@@ -83,6 +83,24 @@ describe("chat stream protocol", () => {
     });
   });
 
+  it("decodes structured video params (V1.5 dry-run 参数上传核对)", () => {
+    expect(decodeChatStreamEvent(event("illustrate_request", {
+      prompt: "p", motion: 3, actors: ["甲"],
+      video_params: {
+        mode: "climax", model: "h3-mini", size: "1280x720", endpoint: "",
+        images: [], reference_binding: { 图片1: "甲挥拳 → （未提供图地址）" },
+        warnings: ["缺高潮参考图：将以文字描述生成动作画面"],
+      },
+    }))).toEqual({
+      type: "illustrate_request", prompt: "p", motion: 3, actors: ["甲"],
+      videoParams: {
+        mode: "climax", model: "h3-mini", size: "1280x720", endpoint: "",
+        images: [], reference_binding: { 图片1: "甲挥拳 → （未提供图地址）" },
+        warnings: ["缺高潮参考图：将以文字描述生成动作画面"],
+      },
+    });
+  });
+
   it("keeps old backend compatibility: video fields absent → no new keys (宽松解码)", () => {
     expect(decodeChatStreamEvent(event("illustrate_request", {
       prompt: "legacy", motion: 1, actors: [],

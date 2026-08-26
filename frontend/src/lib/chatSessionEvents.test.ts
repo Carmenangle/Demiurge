@@ -109,6 +109,28 @@ describe("reduceChatStreamEvent", () => {
     });
   });
 
+  it("illustrate_request 携带 videoParams → 槽位存储并随完成保留（V1.5 参数上传核对）", () => {
+    let messages = reduceChatStreamEvent(base(), "bot", {
+      type: "illustrate_request", prompt: "p", motion: 3, actors: [], id: "slot-1",
+      videoParams: {
+        mode: "climax", model: "", size: "1280x720", endpoint: "",
+        images: [], reference_binding: {}, warnings: ["缺高潮参考图"],
+      },
+    });
+    expect(messages[0].parts?.[0]).toMatchObject({
+      type: "media-slot", slotId: "slot-1", status: "pending",
+      videoParams: { mode: "climax", size: "1280x720", warnings: ["缺高潮参考图"] },
+    });
+    const ready = resolveMediaSlot(messages, "bot", "slot-1", "local://v.mp4", "video");
+    expect(ready[0].parts?.[0]).toEqual({
+      type: "video", url: "local://v.mp4", slotId: "slot-1", status: "ready",
+      videoParams: {
+        mode: "climax", model: "", size: "1280x720", endpoint: "",
+        images: [], reference_binding: {}, warnings: ["缺高潮参考图"],
+      },
+    });
+  });
+
   it("按最终正文偏移插入流式插画槽", () => {
     let messages = reduceChatStreamEvent(base(), "bot", { type: "replace", text: "高潮段落。后续段落。" });
     messages = reduceChatStreamEvent(messages, "bot", {

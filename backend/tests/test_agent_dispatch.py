@@ -2322,6 +2322,31 @@ def test_插画事件默认附带climax视频提示词_v1_5():
     # 主体/场景含外貌与场景
     assert "米色针织开衫" in vp
     assert "面馆内景" in vp
+    # 视频参数随事件下发（dry-run，供测试「参数有没有上传」）
+    vparams = request.get("video_params", {})
+    assert vparams["mode"] == "climax"
+    assert vparams["size"] == "1280x720"  # 视频默认 16:9（R9）
+    assert any("缺高潮参考图" in w for w in vparams["warnings"])  # 无参考图 → 诚实降级警告
+
+
+def test_视频参数dryrun透传视频配置_v1_5():
+    # 视频配置（模型名/端点）从 rec.video_config 透传进 video_params，供核对参数是否上传
+    events = ag._streamed_illustration_events([{
+        "id": "slot-1", "prompt": "p", "motion": 3, "actors": ["甲"],
+        "anchor_offset": 0,
+        "video_config": {"base_url": "https://vid.example", "model": "h3-mini",
+                         "size": "1280x720", "proxy": ""},
+        "scene_spec": {
+            "narrative": "甲挥拳", "appearance": "甲黑衣", "wardrobe": "日常",
+            "locale": "街角", "actors": ["甲"], "rating": "sfw",
+        },
+    }])
+    vparams = events[0]["illustrate_request"]["video_params"]
+    assert vparams["model"] == "h3-mini"
+    assert vparams["endpoint"] == "https://vid.example"
+    assert vparams["size"] == "1280x720"
+    # 提示词元信息带上模型名（模型名透传不硬编码）
+    assert "h3-mini" in events[0]["illustrate_request"]["video_prompt"]
 
 
 def test_插画事件无scene_spec则不生成视频提示词_v1_5():
@@ -2330,6 +2355,7 @@ def test_插画事件无scene_spec则不生成视频提示词_v1_5():
         "anchor_offset": 0,
     }])
     assert "video_prompt" not in events[0]["illustrate_request"]
+    assert "video_params" not in events[0]["illustrate_request"]
 
 
 def test_视频提示词motion强度影响运镜_v1_5():

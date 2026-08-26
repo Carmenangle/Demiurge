@@ -1,5 +1,5 @@
 import type { FinalizedMessage } from "../api/comfyui";
-import type { ChatStreamEvent } from "../api/chatStreamProtocol";
+import type { ChatStreamEvent, VideoParams } from "../api/chatStreamProtocol";
 import type { ChatMessage, MsgPart, PromptApproval, RegenerationSnapshot, RouteChoice } from "../types/chat";
 
 export function upsertMessages(current: ChatMessage[], incoming: ChatMessage[]): ChatMessage[] {
@@ -89,13 +89,14 @@ function appendDelta(message: ChatMessage, text: string): ChatMessage {
 
 function appendMediaSlot(
   message: ChatMessage, slotId: string, offset?: number,
-  lastFrameDesc?: string, videoPrompt?: string,
+  lastFrameDesc?: string, videoPrompt?: string, videoParams?: VideoParams,
 ): ChatMessage {
   const existing = message.parts || (message.text ? [{ type: "text" as const, text: message.text }] : []);
   if (existing.some((part) => part.slotId === slotId)) return message;
   const slot = { type: "media-slot" as const, slotId, status: "pending" as const,
     ...(lastFrameDesc ? { lastFrameDesc } : {}),
-    ...(videoPrompt ? { videoPrompt } : {}) };
+    ...(videoPrompt ? { videoPrompt } : {}),
+    ...(videoParams ? { videoParams } : {}) };
   if (typeof offset === "number" && !message.parts) {
     const index = Math.max(0, Math.min(message.text.length, Math.round(offset)));
     const before = message.text.slice(0, index);
@@ -166,6 +167,8 @@ export function resolveMediaSlot(
           ...(part.lastFrameDesc ? { lastFrameDesc: part.lastFrameDesc } : {}),
           // V1.5 默认开放：climax 视频提示词随槽位保留（无视频模板/模型也展示，供测试核对）
           ...(part.videoPrompt ? { videoPrompt: part.videoPrompt } : {}),
+          // V1.5 默认开放：结构化视频参数随槽位保留（供测试核对参数是否上传）
+          ...(part.videoParams ? { videoParams: part.videoParams } : {}),
           ...(regeneration ? { regeneration } : {}),
           ...(generationId ? { generationId } : {}),
         }
@@ -268,7 +271,7 @@ export function reduceChatStreamEvent(
         : message);
     case "illustrate_request":
       return current.map((message) => message.id === botId
-        ? appendMediaSlot(message, event.id || crypto.randomUUID(), event.offset, event.lastFrameDesc, event.videoPrompt)
+        ? appendMediaSlot(message, event.id || crypto.randomUUID(), event.offset, event.lastFrameDesc, event.videoPrompt, event.videoParams)
         : message);
     case "audio_request":
       // 音频对白配音不入气泡流：由 useChatSession 逐角色提交 IndexTTS，完成后聚合到剧情楼层。

@@ -84,6 +84,10 @@ describe("B2 默认开放 climax 视频提示词 · 端到端契约（无视频�
     expect(event.videoPrompt).not.toContain("@(");
     // fixture 是 motion=3 → 强动态运镜
     expect(event.videoPrompt).toContain("低机位快速丝滑运镜");
+    // 视频参数随事件下发（dry-run 参数上传核对）
+    expect(event.videoParams?.mode).toBe("climax");
+    expect(event.videoParams?.size).toBe("1280x720");
+    expect(event.videoParams?.warnings?.some((w) => w.includes("缺高潮参考图"))).toBe(true);
   });
 
   it("video_prompt 经 illustrationTemplateValues 注入模板 exposed binding", () => {

@@ -120,6 +120,7 @@ def test_插画事件无视频字段时透传为空不携带_v1_5():
     assert "first_frame_desc" not in data
     assert "last_frame_url" not in data
     assert "video_prompt" not in data
+    assert "video_params" not in data
 
 
 def test_插画事件透传climax视频提示词_v1_5():
@@ -132,6 +133,23 @@ def test_插画事件透传climax视频提示词_v1_5():
     })
     assert event["data"]["video_prompt"].startswith("使用视频模型生成")
     assert "[动作]" in event["data"]["video_prompt"]
+
+
+def test_插画事件透传结构化视频参数_v1_5():
+    event = protocol.encode_event({
+        "illustrate_request": {
+            "prompt": "p", "motion": 3, "actors": ["甲"],
+            "video_params": {
+                "mode": "climax", "model": "h3-mini", "size": "1280x720",
+                "endpoint": "", "images": [], "reference_binding": {}, "warnings": ["缺高潮参考图"],
+            },
+        },
+        "id": "slot-1",
+    })
+    vp = event["data"]["video_params"]
+    assert vp["mode"] == "climax"
+    assert vp["model"] == "h3-mini"
+    assert vp["warnings"] == ["缺高潮参考图"]
 
 
 def test_音频事件编码台词与情感向量():

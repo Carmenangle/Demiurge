@@ -109,6 +109,7 @@ def finalize_turn(draft: TurnFinalization, hooks: TurnFinalizationHooks) -> dict
                 "motion": illustrate_request.get("motion", 0),
                 "actors": illustrate_request.get("actors", []),
                 "scene_spec": illustrate_request.get("scene_spec", {}),
+                "video_config": illustrate_request.get("video_config", {}),
                 "anchor_offset": anchor_offset,
                 "turn_id": draft.ctx.get("turn_id", ""),
             }]

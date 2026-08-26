@@ -1,4 +1,5 @@
 import type { PortOp } from "../api/ai";
+import type { VideoParams } from "../api/chatStreamProtocol";
 import type { InspirationAttachment } from "../lib/inspirationInsert";
 
 // 图文混排片段：文本/图片穿插渲染
@@ -26,6 +27,8 @@ export interface MsgPart {
   lastFrameDesc?: string;
   /** V1.5 默认开放：climax 视频提示词随槽位存储（无视频模板/模型也展示，供测试核对） */
   videoPrompt?: string;
+  /** V1.5 默认开放：结构化视频参数（dry-run 组装结果，供测试核对参数是否上传） */
+  videoParams?: VideoParams;
 }
 
 export interface PromptApproval {

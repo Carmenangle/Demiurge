@@ -37,6 +37,31 @@ def test_finalize_turn_publishes_visible_text_before_maintenance():
     assert result["rag_recs"][0]["kind"] == "worldbook"
 
 
+def test_finalize_turn透传video_config进illustrate_recs():
+    # V1.5 默认开放：video_config 白名单透传进 rec，供后端 dry-run 组装视频参数
+    draft = roleplay_turn.TurnFinalization(
+        ctx={"repo_id": "work", "turn_id": "t1"}, text="继续", trace=[], streamed=True,
+        reply="raw", deps=object(), turn=3, affinity=0, lost=False,
+    )
+    vcfg = {"base_url": "", "model": "h3-mini", "size": "1280x720", "proxy": ""}
+
+    def writeback(_draft, rag_events):
+        return "visible", [], {"prompt": "tags", "motion": 2, "actors": ["A"],
+                               "scene_spec": {"narrative": "动作"}, "video_config": vcfg}, {}
+
+    hooks = roleplay_turn.TurnFinalizationHooks(
+        writeback=writeback,
+        apply_output=lambda reply: reply,
+        anchor_offset=lambda _reply, _request: 7,
+        emit_ready=lambda _ctx, _result: False,
+        maintain=lambda _draft, _reply, _events: None,
+    )
+    result = roleplay_turn.finalize_turn(draft, hooks)
+    rec = result["illustrate_recs"][0]
+    assert rec["video_config"]["model"] == "h3-mini"
+    assert rec["scene_spec"]["narrative"] == "动作"
+
+
 def test_finalize_turn_without_agency_still_applies_output_and_publishes():
     order: list[str] = []
     draft = roleplay_turn.TurnFinalization(

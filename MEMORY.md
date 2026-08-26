@@ -201,13 +201,16 @@ constraints that are safe to include in private agent context.
    （first_frame_image/last_frame_image）+ lastFrameUrl 上传路由 + 尾帧缺省降级首帧单图。
    ⏸「先出双图再提视频」顺序链阻塞：无等待桥（pollResult 是 fire-and-forget）+ 无真实双图
    模板（红线：不猜接口字段名）→ 延 P6。
-5. **默认开放 climax 视频提示词生成（用户指示测试点 ✅）**：视频模型/工作流都不用准备，
-   剧情推进高湖点即产出 climax 视频提示词（`agent_graph._climax_video_prompt_for`，
-   scene_spec+motion 喂 compile_climax_video_prompt），随事件 `video_prompt` 字段下发；
-   前端槽位存储（无模板也展示）+ `video_prompt` binding。探针脚本
+5. **默认开放 climax 视频提示词 + 视频参数 dry-run（用户指示测试点 ✅）**：视频模型/工作流
+   都不用准备，剧情推进高湖点即用 `video_prompt.build_video_request` 完整组装
+   「上交视频模型的参数」（`agent_graph._video_request_for`；scene_spec+motion 喂
+   compile_climax_video_prompt；video_config 随 illustrate_req → rec 白名单透传）。
+   随事件下发 `video_prompt`（提示词）+ `video_params`（model/size/endpoint/images/
+   reference_binding/warnings，可核对「参数有没有上传」）；前端解码存槽位。探针
    `backend/scripts/b2_video_prompt_probe.py` 三档 motion 输出供人工核对。
-   验证：后端 4 用例（默认携带/区块完整/motion 运镜/无 scene_spec 不生成）+ 前端契约
-   （wire→解码→binding）。全量 后端 1649 / 前端 549 + tsc 0 错。
+   验证：后端 1652 / 前端 551 + tsc 0 错（+ video_config 透传 / video_params 线编码 /
+   roleplay 白名单用例）。
 
-下一步：用探针输出人工核对 climax 提示词质量；之后按反馈逐步排查内容编写（镜头语言 +
-对白逐字/动作序列/情绪）。P6 真实 API 对齐待用户提供可实测端点。
+下一步：用探针输出人工核对 climx 提示词质量 + 视频参数（model 空=未配视频模型、
+images 空=参考图待上游补、warnings 缺图守卫）；之后按反馈逐步排查内容编写。P6 真实
+API 对齐待用户提供可实测端点；配好视频工作流后改回真正执行 submit。

@@ -1439,6 +1439,14 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
             illustrate_req = (
                 {"prompt": request_prompt, "motion": motion, "actors": request_actors,
                  "anchor": requested_anchor, "scene_spec": scene_spec,
+                 # V1.5 默认开放：视频配置随事件透传，供 dry-run 组装「上交视频模型的参数」
+                 # （测试视频参数有没有正确上传；无视频工作流/节点也不影响出图）
+                 "video_config": {
+                     "base_url": str(ctx.get("vid_base") or ""),
+                     "model": str(ctx.get("vid_model") or ""),
+                     "size": "1280x720",
+                     "proxy": str(ctx.get("vid_proxy") or ""),
+                 },
                  "allow_anchor_fallback": (
                      bool(visible_story) and (
                          local_scene_fallback or missing_plan_fallback
@@ -2451,28 +2459,48 @@ def _chat_with_optional_stream(ctx: dict, messages: list[dict], *, temperature: 
             sink({"delta": tail})
 
 
-def _climax_video_prompt_for(rec: dict) -> str:
-    """V1.5 默认开放视频提示词生成（climax 模式，不依赖视频模型/工作流）。
+def _video_request_for(rec: dict) -> dict | None:
+    """V1.5 默认开放视频参数组装（dry-run，不提交，不依赖视频工作流/节点）。
 
-    剧情推进高潮点即产出 climax 视频提示词，供测试核对内容是否符合要求
-    （区块完整性 / 无破甲残留 / 动作·运镜·特效随 motion 强度）。
-    scene_spec 不含 motion，从 rec 顶层补齐；first_frame_desc 用已还原的
-    narrative 作高潮参考画面描述。失败静默降级为空串，不阻断出图/出视频。
+    剧情推进高潮点即用 video_prompt.build_video_request 把「上交给视频模型的参数」
+    完整组装出来，供测试核对两件事：
+    ① 提示词内容是否符合要求（区块完整 / 无破甲残留 / 动作·运镜随 motion）；
+    ② 视频参数有没有正确上传（模型名 / 画幅 / 时长 / 镜头 / 参考图 / 缺图警告）。
+    scene_spec 不含 motion，从 rec 顶层补齐；first_frame_desc 用已还原 narrative。
+    失败静默降级为 None，不阻断出图/出视频。后续配好视频工作流后改回真正执行 submit。
     """
     spec = rec.get("scene_spec")
     if not isinstance(spec, dict) or not spec:
-        return ""
+        return None
     try:
         from app.services import video_prompt
         merged = dict(spec)
         if "motion" not in merged:
             merged["motion"] = int(rec.get("motion") or 0)
+        vcfg = rec.get("video_config") if isinstance(rec.get("video_config"), dict) else {}
         first_frame_desc = str(spec.get("narrative") or "").strip() or "高潮动作画面"
-        return video_prompt.compile_climax_video_prompt(
-            merged, first_frame_desc=first_frame_desc,
+        return video_prompt.build_video_request(
+            mode="climax",
+            spec=merged,
+            video_config=vcfg,
+            first_frame_desc=first_frame_desc,
         )
     except Exception:
-        return ""
+        return None
+
+
+def _video_params_payload(vr: dict) -> dict:
+    """从 build_video_request 结果抽「视频参数」结构（供人核对参数是否正确上传）。"""
+    submit = vr.get("submit") if isinstance(vr.get("submit"), dict) else {}
+    return {
+        "mode": vr.get("mode") or "climax",
+        "model": str(submit.get("model") or ""),
+        "size": str(submit.get("size") or ""),
+        "endpoint": str(submit.get("endpoint") or ""),
+        "images": list(submit.get("images") or []),
+        "reference_binding": vr.get("reference_binding") or {},
+        "warnings": list(vr.get("warnings") or []),
+    }
 
 
 def _ordered_illustration_events(result_text: str, recs: list[dict]) -> list[dict]:
@@ -2497,10 +2525,13 @@ def _ordered_illustration_events(result_text: str, recs: list[dict]) -> list[dic
             _value = rec.get(_key)
             if isinstance(_value, str) and _value:
                 request[_key] = _value
-        # V1.5 默认开放：climax 视频提示词随事件下发（无视频模板/模型也生成，供测试核对）
-        _video_prompt = _climax_video_prompt_for(rec)
-        if _video_prompt:
-            request["video_prompt"] = _video_prompt
+        # V1.5 默认开放：climax 视频提示词 + 视频参数随事件下发（无视频模板/模型也生成，供测试核对）
+        _video_request = _video_request_for(rec)
+        if _video_request:
+            _prompt = (_video_request.get("submit") or {}).get("prompt") or ""
+            if _prompt:
+                request["video_prompt"] = _prompt
+            request["video_params"] = _video_params_payload(_video_request)
         if isinstance(rec.get("scene_spec"), dict) and rec["scene_spec"]:
             request["scene_spec"] = rec["scene_spec"]
         events.append({"illustrate_request": request, "id": rec.get("id")})
@@ -2526,10 +2557,13 @@ def _streamed_illustration_events(recs: list[dict]) -> list[dict]:
             _value = rec.get(_key)
             if isinstance(_value, str) and _value:
                 request[_key] = _value
-        # V1.5 默认开放：climax 视频提示词随事件下发（无视频模板/模型也生成，供测试核对）
-        _video_prompt = _climax_video_prompt_for(rec)
-        if _video_prompt:
-            request["video_prompt"] = _video_prompt
+        # V1.5 默认开放：climax 视频提示词 + 视频参数随事件下发（无视频模板/模型也生成，供测试核对）
+        _video_request = _video_request_for(rec)
+        if _video_request:
+            _prompt = (_video_request.get("submit") or {}).get("prompt") or ""
+            if _prompt:
+                request["video_prompt"] = _prompt
+            request["video_params"] = _video_params_payload(_video_request)
         if isinstance(rec.get("scene_spec"), dict) and rec["scene_spec"]:
             request["scene_spec"] = rec["scene_spec"]
         events.append({"illustrate_request": request, "id": rec.get("id")})

@@ -78,6 +78,9 @@ def encode_event(event: Mapping[str, object]) -> ChatStreamEvent | None:
                 _value = req.get(_field)
                 if isinstance(_value, str) and _value:
                     data[_field] = _value
+        # V1.5 默认开放：透传结构化视频参数（dry-run 组装结果，供测试核对参数是否上传）
+        if isinstance(req, Mapping) and isinstance(req.get("video_params"), Mapping):
+            data["video_params"] = dict(req["video_params"])
         if event.get("id"):
             data["id"] = str(event["id"])
         return _wire("illustrate_request", data)
