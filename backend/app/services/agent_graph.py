@@ -1531,8 +1531,9 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
                     if _video_mode == "firstlast" and _decision not in ("reuse", ""):
                         illustrate_req["transition_video_request"] = _vp_mod.build_video_request(
                             mode="transition", spec=_merged_spec, video_config=_vcfg,
-                            first_frame_desc=illustrate_req.get("prev_tail_desc") or "",
-                            last_frame_desc=illustrate_req.get("first_frame_desc") or "",
+                            # transition 分支：first_frame_desc=当前首帧描述（终点），
+                            # prev_tail_desc=上尾帧描述（起点）；last_frame_desc 该分支不使用。
+                            first_frame_desc=illustrate_req.get("first_frame_desc") or "",
                             prev_tail_desc=illustrate_req.get("prev_tail_desc") or "",
                         )
                 except Exception:

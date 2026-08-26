@@ -64,6 +64,73 @@ def test_finalize_turn透传video_config进illustrate_recs():
     assert rec["video_request"]["submit"]["prompt"] == "vp"
 
 
+def test_finalize_turn透传视频协议字段进illustrate_recs():
+    # B1/P5/W3：video_mode/首尾帧描述/上尾帧描述/尾帧图地址/转场视频请求必须透传进 rec，
+    # 否则 _ordered_illustration_events 读 rec 时拿不到，首尾帧生图/首帧复用/转场视频
+    # 在真实链路上静默失效。空值字段不携带（有值才带契约）。
+    draft = roleplay_turn.TurnFinalization(
+        ctx={"repo_id": "work", "turn_id": "t1"}, text="继续", trace=[], streamed=True,
+        reply="raw", deps=object(), turn=3, affinity=0, lost=False,
+    )
+
+    def writeback(_draft, rag_events):
+        return "visible", [], {
+            "prompt": "tags", "motion": 2, "actors": ["A"],
+            "video_mode": "firstlast",
+            "first_frame_desc": "当前首帧：暖光下一人",
+            "last_frame_desc": "当前尾帧：举杯同框",
+            "prev_tail_desc": "上尾帧：雨夜收伞",
+            "last_frame_url": "local://prev-tail.png",
+            "transition": "regenerate",
+            "transition_video_request": {"mode": "transition",
+                                         "submit": {"prompt": "转场分镜"}},
+        }, {}
+
+    hooks = roleplay_turn.TurnFinalizationHooks(
+        writeback=writeback,
+        apply_output=lambda reply: reply,
+        anchor_offset=lambda _reply, _request: 7,
+        emit_ready=lambda _ctx, _result: False,
+        maintain=lambda _draft, _reply, _events: None,
+    )
+    rec = roleplay_turn.finalize_turn(draft, hooks)["illustrate_recs"][0]
+    assert rec["video_mode"] == "firstlast"
+    assert rec["first_frame_desc"] == "当前首帧：暖光下一人"
+    assert rec["last_frame_desc"] == "当前尾帧：举杯同框"
+    assert rec["prev_tail_desc"] == "上尾帧：雨夜收伞"
+    assert rec["last_frame_url"] == "local://prev-tail.png"
+    assert rec["transition"] == "regenerate"
+    assert rec["transition_video_request"]["submit"]["prompt"] == "转场分镜"
+
+
+def test_finalize_turn视频空值字段不携带进rec():
+    # 有值才带：全空/缺失的视频字段不污染 rec（旧前端/旧数据宽松忽略）
+    draft = roleplay_turn.TurnFinalization(
+        ctx={"repo_id": "work", "turn_id": "t1"}, text="继续", trace=[], streamed=True,
+        reply="raw", deps=object(), turn=3, affinity=0, lost=False,
+    )
+
+    def writeback(_draft, rag_events):
+        return "visible", [], {
+            "prompt": "tags", "motion": 1, "actors": [],
+            "video_mode": "", "first_frame_desc": "", "last_frame_desc": "",
+            "prev_tail_desc": "", "last_frame_url": "", "transition": "",
+        }, {}
+
+    hooks = roleplay_turn.TurnFinalizationHooks(
+        writeback=writeback,
+        apply_output=lambda reply: reply,
+        anchor_offset=lambda _reply, _request: 7,
+        emit_ready=lambda _ctx, _result: False,
+        maintain=lambda _draft, _reply, _events: None,
+    )
+    rec = roleplay_turn.finalize_turn(draft, hooks)["illustrate_recs"][0]
+    for _key in ("video_mode", "first_frame_desc", "last_frame_desc",
+                 "prev_tail_desc", "last_frame_url", "transition",
+                 "transition_video_request"):
+        assert _key not in rec
+
+
 def test_finalize_turn_without_agency_still_applies_output_and_publishes():
     order: list[str] = []
     draft = roleplay_turn.TurnFinalization(

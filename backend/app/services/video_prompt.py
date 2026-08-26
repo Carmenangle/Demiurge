@@ -522,7 +522,9 @@ def build_video_request(
     mode="transition"（W3 转场视频，短桥段）参数映射：
     - first_frame = 上一楼层尾帧图地址（图片1，转场起点），
       last_frame = 当前楼层首帧图地址（图片2，转场终点）；
-    - first_frame_desc = 上尾帧描述，last_frame_desc = 当前首帧描述；
+    - first_frame_desc = 当前首帧描述（终点），prev_tail_desc = 上尾帧描述（起点）；
+      last_frame_desc 在 transition 分支不使用；图地址 first_frame/last_frame 分别映射
+      「图片1=上尾帧、图片2=当前首帧」；
     - 转场时长走 preset.transitionDurationHint（坑G：不预设死值，缺省交模型默认），
       正片（climax/firstlast）仍走 videoDurationHint。
     """

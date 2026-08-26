@@ -118,6 +118,17 @@ def finalize_turn(draft: TurnFinalization, hooks: TurnFinalizationHooks) -> dict
             transition_value = illustrate_request.get("transition")
             if isinstance(transition_value, str) and transition_value:
                 rec["transition"] = transition_value
+            # V1.5/B1/P5/W3：视频协议字段透传（有值才带，旧前端/旧数据宽松忽略）。
+            # 这些字段由 produce 层编译进 illustrate_request，若在此漏透传，
+            # _ordered_illustration_events/_streamed_illustration_events 读 rec 时永远拿不到，
+            # 首尾帧生图/首帧复用/转场视频在真实链路上全部静默失效。
+            for _key in ("video_mode", "first_frame_desc", "last_frame_desc",
+                         "prev_tail_desc", "last_frame_url"):
+                _value = illustrate_request.get(_key)
+                if isinstance(_value, str) and _value:
+                    rec[_key] = _value
+            if isinstance(illustrate_request.get("transition_video_request"), dict):
+                rec["transition_video_request"] = illustrate_request["transition_video_request"]
             result["illustrate_recs"] = [rec]
     if audio_request:
         repo_id = draft.ctx.get("repo_id") or draft.ctx.get("thread_id")

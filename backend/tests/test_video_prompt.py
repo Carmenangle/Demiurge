@@ -212,8 +212,8 @@ def test_build_request_transition_maps_frames_and_duration():
         },
         first_frame="local://prev-tail.png",
         last_frame="local://curr-first.png",
-        first_frame_desc="上尾帧：三人围坐举杯",
-        last_frame_desc="当前首帧：暖光下一人",
+        first_frame_desc="当前首帧：暖光下一人",
+        prev_tail_desc="上尾帧：三人围坐举杯",
     )
     sub = req["submit"]
     assert req["mode"] == "transition"
@@ -223,6 +223,11 @@ def test_build_request_transition_maps_frames_and_duration():
     assert sub["content_type"] == "multipart/form-data"
     # 参考绑定里是职责描述 + 地址（两层分离），不是把地址写进提示词
     assert "图片1" in req["reference_binding"] and "图片2" in req["reference_binding"]
+    # 语义边界（坑I/坑G 补测）：图片1=上尾帧（起点）、图片2=当前首帧（终点），
+    # 不得把上尾帧描述错填进「当前首帧/终点」。
+    assert "上尾帧：三人围坐举杯" in req["reference_binding"]["图片1"]
+    assert "当前首帧：暖光下一人" in req["reference_binding"]["图片2"]
+    assert "当前首帧：暖光下一人" in sub["prompt"]
 
 
 def test_build_request_transition_missing_prev_tail_warns_and_degrades():
@@ -230,7 +235,7 @@ def test_build_request_transition_missing_prev_tail_warns_and_degrades():
         mode="transition", spec=_spec(),
         video_config={"base_url": "https://x.com/videos", "model": "h3"},
         last_frame="local://curr-first.png",
-        last_frame_desc="当前首帧：暖光下一人",
+        first_frame_desc="当前首帧：暖光下一人",
     )
     assert req["submit"]["images"] == ["local://curr-first.png"]
     assert any("缺上尾帧图" in w for w in req["warnings"])
