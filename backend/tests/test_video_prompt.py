@@ -159,6 +159,90 @@ def test_build_request_missing_frames_warns():
     assert any("纯文生" in w for w in req["warnings"])
 
 
+# ===== W3 转场视频：短桥段编译 + 坑G 不硬控时长 =====
+
+def test_transition_has_seven_sections():
+    p = video_prompt.compile_transition_video_prompt(_spec(), style_prefix="二次元日常美食 CGDCT")
+    assert "[转场分镜]" in p
+    assert "[参考绑定]" in p
+    assert "[风格]" in p
+    assert "[主体/场景]" in p
+    assert "[音频]" in p
+
+
+def test_transition_binds_prev_tail_and_first_frame():
+    p = video_prompt.compile_transition_video_prompt(
+        _spec(), prev_tail_desc="三人围坐面馆举杯", first_frame_desc="面馆暖光沈糯抿汤",
+    )
+    assert "图片1=三人围坐面馆举杯（上一楼层尾帧/转场起点）" in p
+    assert "图片2=面馆暖光沈糯抿汤（当前楼层首帧/转场终点）" in p
+    assert "转场起点" in p and "转场终点" in p
+
+
+def test_transition_honest_degredation_when_missing_images():
+    p = video_prompt.compile_transition_video_prompt(
+        _spec(), has_prev_tail=False, has_first=False,
+    )
+    assert "图片1=" not in p and "图片2=" not in p
+    assert "上一楼层尾帧（无参考图，以文字为准）" in p
+    assert "当前楼层首帧（无参考图，以文字为准）" in p
+
+
+def test_transition_meta_no_hardcoded_duration_when_zero():
+    # 坑G：duration=0 时不写死秒数（交模型默认），绝不兑底 5s
+    p = video_prompt.compile_transition_video_prompt(_spec())
+    assert "5 seconds" not in p
+    assert "时长=视频模型默认（短桥段）" in p
+
+
+def test_transition_meta_writes_duration_when_hint_given():
+    # 前端提交侧有转场时长（transitionDurationHint）时才写具体秒数
+    p = video_prompt.compile_transition_video_prompt(_spec(), duration_hint=4)
+    assert "4 seconds" in p
+    assert "时长=视频模型默认" not in p
+
+
+def test_build_request_transition_maps_frames_and_duration():
+    req = video_prompt.build_video_request(
+        mode="transition", spec=_spec(),
+        video_config={"base_url": "https://x.com/videos", "model": "h3"},
+        preset={
+            "transitionDurationHint": 4,
+            "videoDurationHint": 15,   # 正片时长不得泄漏进转场
+        },
+        first_frame="local://prev-tail.png",
+        last_frame="local://curr-first.png",
+        first_frame_desc="上尾帧：三人围坐举杯",
+        last_frame_desc="当前首帧：暖光下一人",
+    )
+    sub = req["submit"]
+    assert req["mode"] == "transition"
+    assert sub["images"] == ["local://prev-tail.png", "local://curr-first.png"]
+    assert "4 seconds" in sub["prompt"]
+    assert "15 seconds" not in sub["prompt"]
+    assert sub["content_type"] == "multipart/form-data"
+    # 参考绑定里是职责描述 + 地址（两层分离），不是把地址写进提示词
+    assert "图片1" in req["reference_binding"] and "图片2" in req["reference_binding"]
+
+
+def test_build_request_transition_missing_prev_tail_warns_and_degrades():
+    req = video_prompt.build_video_request(
+        mode="transition", spec=_spec(),
+        video_config={"base_url": "https://x.com/videos", "model": "h3"},
+        last_frame="local://curr-first.png",
+        last_frame_desc="当前首帧：暖光下一人",
+    )
+    assert req["submit"]["images"] == ["local://curr-first.png"]
+    assert any("缺上尾帧图" in w for w in req["warnings"])
+    assert "无参考图，以文字为准" in req["submit"]["prompt"]
+
+
+def test_build_request_transition_section_names():
+    assert video_prompt._section_names("transition") == [
+        "①元信息", "②风格", "③参考绑定", "④主体/场景", "⑤转场分镜", "⑥音频", "⑦负面约束",
+    ]
+
+
 # ===== R3 元信息三件套（模型名透传 + 画幅派生）=====
 
 def test_meta_passthrough_model_name_not_hardcoded():

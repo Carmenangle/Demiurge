@@ -478,7 +478,15 @@ videoMode 协议透传 + 尾帧反查 + 双帧路由）。P5 剩余的「先双�
   F4 climax 动作延伸字段契约（坑E）── 先定契约，再改 _climax_action_beat
 
 第二批（接线，需 wire）：
-  W1 <transition> 结果并入 writeback + illustrate_request 事件透传（坑A/H）
-  W2 首帧复用决策合并逻辑（坑B/C/I）── L0/L1 合并 + 有图前提
+  W1 <transition> 结果并入 writeback + illustrate_request 事件透传（坑A/H）✅
+  W2 首帧复用决策合并逻辑（坑B/C/I）── L0/L1 合并 + 有图前提 ✅
   W3 转场视频任务编排（坑F/G）── 2 任务排队 + 转场时长前端决定
+     ✅ 已落地（后端可验证部分，2026-08-26）：build_video_request 新增 mode="transition"
+        短桥段编译（图片1=上尾帧/起点、图片2=当前首帧/终点）+ 坑G 不硬控时长
+        （preset.transitionDurationHint，缺省交视频模型默认，绝不兑底正片 5s）+
+        缺图降级（坑F：缺上尾帧 → 文字转场）。单测 7 个全绿。
+     ⏸ 未落地（阻塞，需 P5/P6）：前端 firstlast 提交链「2 任务排队」（转场视频 +
+        正片顺序提交）依赖 P5 的「先出首尾帧图再提视频」顺序链（⏸ 阻塞，需 P6）与
+        真实双图视频模板实测；尾帧图地址（last_frame_url）后端仍未赋值（同 prev_tail_desc
+        前期状态）。待 P6 后与 P5 一并接线。
 ```

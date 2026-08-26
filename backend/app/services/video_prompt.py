@@ -128,6 +128,28 @@ def _reference_binding_firstlast(first_frame_desc: str, last_frame_desc: str,
     return "；".join(lines)
 
 
+def _reference_binding_transition(prev_tail_desc: str, first_frame_desc: str,
+                                  actors: list[str],
+                                  has_prev_tail: bool = True, has_first: bool = True) -> str:
+    """③ 参考绑定（转场双图）：图片1=上一楼层尾帧（转场起点）、图片2=当前楼层首帧（转场终点）。
+
+    缺图时诚实标注「无参考图，以文字为准」（R2 同套路），不假装有图。
+    """
+    pt = (prev_tail_desc or "").strip() or "上一楼层尾帧画面"
+    ff = (first_frame_desc or "").strip() or "当前楼层首帧画面"
+    if has_prev_tail:
+        lines = [f"图片1={pt}（上一楼层尾帧/转场起点）"]
+    else:
+        lines = [f"上一楼层尾帧（无参考图，以文字为准）：{pt}"]
+    if has_first:
+        lines.append(f"图片2={ff}（当前楼层首帧/转场终点）")
+    else:
+        lines.append(f"当前楼层首帧（无参考图，以文字为准）：{ff}")
+    if actors:
+        lines.append(f"保持 {('、'.join(actors))} 的身份、脸部、服装、发型、造型完全一致")
+    return "；".join(lines)
+
+
 def _meta(duration_hint: int, camera: str, model_name: str = "", size: str = "") -> str:
     """① 元信息：模型名（透传不硬编码）+ 时长 + 画幅 + 运镜（R3 补三件套）。"""
     dur = int(duration_hint) if duration_hint else _DEFAULT_DURATION
@@ -135,6 +157,29 @@ def _meta(duration_hint: int, camera: str, model_name: str = "", size: str = "")
     if model_name and str(model_name).strip():
         parts.append(str(model_name).strip())
     parts.append(f"{dur} seconds")
+    aspect = _aspect_from_size(size)
+    if aspect:
+        parts.append(aspect)
+    if camera and str(camera).strip():
+        parts.append(f"镜头运动={str(camera).strip()}")
+    return "，".join(parts)
+
+
+def _meta_transition(duration_hint: int, camera: str,
+                     model_name: str = "", size: str = "") -> str:
+    """① 元信息（转场形态，坑G）：不硬控时长。
+
+    转场时长不预设死值（用户定调）：duration_hint=0 → 不写秒数（交视频模型/模板
+    默认），绝不兑底 _DEFAULT_DURATION；前端提交侧有转场时长（transitionDurationHint）
+    才写具体秒数。正片（climax/firstlast）仍走 _meta 的 videoDurationHint。
+    """
+    parts: list[str] = []
+    if model_name and str(model_name).strip():
+        parts.append(str(model_name).strip())
+    if int(duration_hint or 0) > 0:
+        parts.append(f"{int(duration_hint)} seconds")
+    else:
+        parts.append("时长=视频模型默认（短桥段）")
     aspect = _aspect_from_size(size)
     if aspect:
         parts.append(aspect)
@@ -195,6 +240,25 @@ def _time_segments(spec: dict[str, Any], duration_hint: int,
     for idx, ((content, extra), (start, end)) in enumerate(zip(segments, bounds)):
         tail = f"（{extra}）" if extra else ""
         lines.append(f"[{start}s–{end}s｜{beats[idx]}]：{content}{tail}{identity}")
+    return "\n".join(lines)
+
+
+def _transition_segments(spec: dict[str, Any],
+                         prev_tail_desc: str, first_frame_desc: str,
+                         has_prev_tail: bool = True, has_first: bool = True) -> str:
+    """⑤ 转场分镜（短桥段）：上一楼层尾帧定格 → 自然过渡 → 当前楼层首帧定格。
+
+    短桥段不套正片时长分段（9.5 时长分档）：无时间轴，交模型按短桥段默认节奏。
+    缺图时诚实标注「以文字为准」（R2 同套路），不假装有图。
+    """
+    pt = (prev_tail_desc or "").strip() or "上一楼层尾帧画面"
+    ff = (first_frame_desc or "").strip() or "当前楼层首帧画面"
+    cam_hint = str(spec.get("camera") or "").strip() or "极缓推进"
+    lines = [
+        f"[转场起点]：{('定格于上一楼层尾帧画面：' + pt) if has_prev_tail else ('以文字重现上一楼层尾帧：' + pt + '（无参考图，以文字为准）')}",
+        f"[过渡]：{cam_hint}自然过渡到当前楼层首帧，机位运动连贯、光影衔接、人物状态延续，无突兀跳切",
+        f"[转场终点]：{('收束定格于当前楼层首帧画面：' + ff) if has_first else ('以文字收束到当前楼层首帧：' + ff + '（无参考图，以文字为准）')}",
+    ]
     return "\n".join(lines)
 
 
@@ -369,6 +433,55 @@ def compile_firstlast_video_prompt(
     return "\n\n".join(blocks)
 
 
+def compile_transition_video_prompt(
+    spec: dict[str, Any],
+    *,
+    style_prefix: str = "",
+    negative: str = "",
+    duration_hint: int = 0,
+    camera: str = "",
+    model_name: str = "",
+    size: str = "",
+    prev_tail_desc: str = "",
+    first_frame_desc: str = "",
+    has_prev_tail: bool = True,
+    has_first: bool = True,
+) -> str:
+    """转场视频·短桥段：上一楼层尾帧 → 当前楼层首帧 的自然过渡。
+
+    七段式骨架（对齐 firstlast）：① 元信息 ② 风格 ③ 参考绑定（图片1=上尾帧、
+    图片2=当前首帧）④ 主体/场景 ⑤ 转场分镜 ⑥ 音频 ⑦ 负面约束。
+
+    坑G：时长不预设死值——duration_hint=0 时不写秒数（_meta_transition 交视频模型
+    默认），不兑底 _DEFAULT_DURATION；前端提交侧有转场时长才写。
+
+    has_prev_tail/has_first 标识是否真的提供了上尾帧图/当前首帧图（R2 缺图守卫）。
+    """
+    blocks: list[str] = []
+    blocks.append(
+        f"使用视频模型生成，{_meta_transition(duration_hint, camera, model_name, size)}。"
+    )
+    style = _style_declaration(style_prefix, str(spec.get("rating") or ""))
+    if style:
+        blocks.append(f"[风格]：{style}")
+    blocks.append(
+        f"[参考绑定]：{_reference_binding_transition(prev_tail_desc, first_frame_desc, spec.get('actors') or [], has_prev_tail, has_first)}"
+    )
+    subject = _subject_scene(spec)
+    if subject:
+        blocks.append(f"[主体/场景]：{subject}")
+    blocks.append(
+        "[转场分镜]：\n"
+        + _transition_segments(spec, prev_tail_desc, first_frame_desc,
+                               has_prev_tail, has_first)
+    )
+    blocks.append(f"[音频]：{_audio_hint(spec, None)}")
+    neg = _negative(spec, negative)
+    if neg:
+        blocks.append(f"[负面约束]：{neg}")
+    return "\n\n".join(blocks)
+
+
 def _clean_spec(spec: dict[str, Any]) -> dict[str, Any]:
     """对 scene_spec 文本字段做破甲标记还原（复用共享清洗规则 prompt_clean）。
 
@@ -405,12 +518,20 @@ def build_video_request(
     - 图职责描述（first_frame_desc / last_frame_desc）→ 进 prompt 的参考绑定文字
       （H3 要求写「图片1=首帧」这类职责，不是地址）。
     - 缺图时产出 warnings + 诚实降级措辞（R2）。
+
+    mode="transition"（W3 转场视频，短桥段）参数映射：
+    - first_frame = 上一楼层尾帧图地址（图片1，转场起点），
+      last_frame = 当前楼层首帧图地址（图片2，转场终点）；
+    - first_frame_desc = 上尾帧描述，last_frame_desc = 当前首帧描述；
+    - 转场时长走 preset.transitionDurationHint（坑G：不预设死值，缺省交模型默认），
+      正片（climax/firstlast）仍走 videoDurationHint。
     """
     preset = preset or {}
     spec = _clean_spec(spec or {})
     style_prefix = str(preset.get("stylePrefix") or preset.get("style_template") or "")
     negative = str(preset.get("negativePrompt") or "")
     duration_hint = int(preset.get("videoDurationHint") or 0)
+    transition_duration_hint = int(preset.get("transitionDurationHint") or 0)
     camera = str(preset.get("videoCamera") or "")
 
     base_url = str(video_config.get("base_url") or "").strip().rstrip("/")
@@ -434,6 +555,23 @@ def build_video_request(
         binding = {
             "图片1": _binding_entry(first_frame_desc or "首帧/楼层开头画面", first_frame),
             "图片2": _binding_entry(last_frame_desc or "尾帧/楼层结尾画面", last_frame),
+        }
+    elif mode == "transition":
+        # W3 转场视频：图片1=上尾帧（起点），图片2=当前首帧（终点），短桥段
+        has_prev_tail = bool(first_frame)
+        has_first = bool(last_frame)
+        prompt = compile_transition_video_prompt(
+            spec, style_prefix=style_prefix, negative=negative,
+            duration_hint=transition_duration_hint, camera=camera,
+            model_name=model, size=size,
+            prev_tail_desc=prev_tail_desc or "上一楼层尾帧画面",
+            first_frame_desc=first_frame_desc or "当前楼层首帧画面",
+            has_prev_tail=has_prev_tail, has_first=has_first,
+        )
+        images = [img for img in (first_frame, last_frame) if img]
+        binding = {
+            "图片1": _binding_entry(prev_tail_desc or "上一楼层尾帧画面", first_frame),
+            "图片2": _binding_entry(first_frame_desc or "当前楼层首帧画面", last_frame),
         }
     else:
         # 图职责描述：外部 first_frame_desc 优先，否则用画面级动作瞬间（与 [动作] 同源，
@@ -478,6 +616,14 @@ def _missing_frame_warnings(mode: str, first_frame: str, last_frame: str) -> lis
             warnings.append("缺尾帧图：尾帧将以文字描述收尾")
         if not first_frame and not last_frame:
             warnings.append("首尾帧图均缺：将退化为纯文生视频（无参考图）")
+    elif mode == "transition":
+        # 坑F：转场起点（上尾帧图）缺省 → 降级文字转场；终点（当前首帧图）缺省 → 文字收束
+        if not first_frame:
+            warnings.append("缺上尾帧图：转场降级为文字转场（以文字重现上一楼层尾帧）")
+        if not last_frame:
+            warnings.append("缺当前首帧图：转场终点以文字描述")
+        if not first_frame and not last_frame:
+            warnings.append("转场双图均缺：将退化为纯文生短桥段（无参考图）")
     else:
         if not first_frame:
             warnings.append("缺高潮参考图：将以文字描述生成动作画面")
@@ -495,4 +641,6 @@ def _section_names(mode: str) -> list[str]:
     """提示词含哪些区块（供人核对完整性）。"""
     if mode == "firstlast":
         return ["①元信息", "②风格", "③参考绑定", "④主体/场景", "⑤时间分镜", "⑥音频", "⑦负面约束"]
+    if mode == "transition":
+        return ["①元信息", "②风格", "③参考绑定", "④主体/场景", "⑤转场分镜", "⑥音频", "⑦负面约束"]
     return ["①元信息", "②风格", "③参考绑定", "④主体/场景", "动作瞬间", "⑦负面约束"]
