@@ -210,6 +210,10 @@ constraints that are safe to include in private agent context.
    `backend/scripts/b2_video_prompt_probe.py` 三档 motion 输出供人工核对。
    验证：后端 1652 / 前端 551 + tsc 0 错（+ video_config 透传 / video_params 线编码 /
    roleplay 白名单用例）。
+   🆕 trace 可核对：produce 层编译 video_request 存进 illustrate_req → rec 白名单透传，
+   事件层直接复用；`illustration.request` trace 新增 video_prompt 全文，agent-trace.jsonl
+   可核对视频提示词（后端 1653）。注意：非高潮轮（如 <status> 状态轮）不触发插画 → 无
+   illustration.request → 无 video_prompt，属预期。
 
 下一步：用探针输出人工核对 climx 提示词质量 + 视频参数（model 空=未配视频模型、
 images 空=参考图待上游补、warnings 缺图守卫）；之后按反馈逐步排查内容编写。P6 真实

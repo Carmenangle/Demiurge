@@ -217,6 +217,11 @@ videoMode 协议透传 + 尾帧反查 + 双帧路由）。P5 剩余的「先双�
   提示词 + 视频参数 + wire 导出到前端 fixture）；后端 7 用例（默认携带/区块完整/motion
   运镜/无 scene_spec 不生成/video_config 透传/video_params 线编码/roleplay 白名单）
   + 前端契约（wire→解码→binding/槽位）。全量 后端 1652 / 前端 551 + tsc 0 错。
+- 🆕 日志可核对（2026-08-26 补充）：produce 层（agent_graph）即用 build_video_request
+  编译 video_request 存进 illustrate_req → rec 白名单透传（roleplay_turn），事件层直接复用
+  （不重复编译）；`illustration.request` 的 trace 记录新增 `video_prompt` 全文 +
+  `video_prompt_chars`——推进剧情到高潮点后，`backend/data/logs/agent-trace.jsonl`
+  里可直接核对视频生成提示词（测试模式关键能力）。全量 后端 1653。
 - 测试点：**视频参数有没有上传** → video_params 里可直接核对 model（空=未配视频模型）、
   size（1280x720）、endpoint（空=未配视频工作流）、images（空=参考图待上游补）、
   warnings（缺图守卫）。后续配好视频工作流后，改回真正执行 submit。

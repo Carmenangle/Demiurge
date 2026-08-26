@@ -1171,6 +1171,8 @@ def test_comfy首个用户回合即使已有开场白也兜底生成插画(monke
     assert request["actors"] == ["塞西莉亚"]
     assert request["scene_spec"]["rating"] == "sfw"
     assert request["anchor"] == "塞西莉亚站在孤儿院门前，猩红眼眸安静地注视着他。"
+    # V1.5 默认开放：produce 时即 dry-run 组装视频参数，trace 记录视频提示词全文
+    expected_video_prompt = request["video_request"]["submit"]["prompt"]
     assert trace[-1] == (
         "illustration.request",
         {
@@ -1180,6 +1182,8 @@ def test_comfy首个用户回合即使已有开场白也兜底生成插画(monke
                 "actor_candidates": [], "status_actors": [],
                 "plan_retargeted": False,
                 "prompt_chars": len(request["prompt"]),
+                "video_prompt_chars": len(expected_video_prompt),
+                "video_prompt": expected_video_prompt,
             },
         )
 
@@ -2347,6 +2351,24 @@ def test_视频参数dryrun透传视频配置_v1_5():
     assert vparams["size"] == "1280x720"
     # 提示词元信息带上模型名（模型名透传不硬编码）
     assert "h3-mini" in events[0]["illustrate_request"]["video_prompt"]
+
+
+def test_事件层复用produce编译的video_request_v1_5():
+    # produce 层已编译并透传（rec.video_request）→ 事件层直接复用，不重复编译、内容一致
+    vrequest = {
+        "mode": "climax",
+        "submit": {"prompt": "使用视频模型生成，15 seconds，16:9。\n\n[动作]：甲挥拳。"},
+        "reference_binding": {}, "warnings": [],
+    }
+    events = ag._streamed_illustration_events([{
+        "id": "slot-1", "prompt": "p", "motion": 3, "actors": ["甲"],
+        "anchor_offset": 0, "video_request": vrequest,
+        "scene_spec": {"narrative": "甲挥拳", "actors": ["甲"], "rating": "sfw"},
+    }])
+    req = events[0]["illustrate_request"]
+    assert req["video_prompt"] == vrequest["submit"]["prompt"]
+    assert req["video_params"]["mode"] == "climax"
+    assert req["video_params"]["warnings"] == []
 
 
 def test_插画事件无scene_spec则不生成视频提示词_v1_5():

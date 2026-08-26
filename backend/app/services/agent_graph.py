@@ -1455,6 +1455,27 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
                  ) and not illustration_plan}
                 if at_climax and (request_prompt or scene_spec["narrative"]) else {}
             )
+            # V1.5 默认开放：produce 时即 dry-run 组装视频参数（提示词 + 参数），
+            # 供 trace 日志核对「视频生成提示词」+「参数有没有上传」。失败静默降级 None。
+            _video_prompt_text = ""
+            if illustrate_req:
+                try:
+                    from app.services import video_prompt as _vp_mod
+                    _merged_spec = dict(scene_spec)
+                    if "motion" not in _merged_spec:
+                        _merged_spec["motion"] = int(motion or 0)
+                    illustrate_req["video_request"] = _vp_mod.build_video_request(
+                        mode="climax", spec=_merged_spec,
+                        video_config=illustrate_req.get("video_config") or {},
+                        first_frame_desc=str(
+                            scene_spec.get("narrative") or ""
+                        ).strip() or "高潮动作画面",
+                    )
+                    _video_prompt_text = str(
+                        (illustrate_req["video_request"].get("submit") or {}).get("prompt") or ""
+                    )
+                except Exception:
+                    illustrate_req["video_request"] = None
             run_trace.emit(
                 ctx,
                 "illustration.request",
@@ -1475,6 +1496,9 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
                 status_actors=[name for name in _known if name in present],
                 plan_retargeted=plan_retargeted,
                 prompt_chars=len(request_prompt),
+                # V1.5 默认开放：视频生成提示词记入 trace（测试模式核对提示词质量）
+                video_prompt_chars=len(_video_prompt_text),
+                video_prompt=_video_prompt_text,
             )
             return clean, [], illustrate_req, audio_req
         illo = roleplay_agency.maybe_illustrate(
@@ -2472,6 +2496,10 @@ def _video_request_for(rec: dict) -> dict | None:
     spec = rec.get("scene_spec")
     if not isinstance(spec, dict) or not spec:
         return None
+    # V1.5 默认开放：produce 层已编译并透传（rec.video_request），直接复用；
+    # 旧数据/直接构造的 rec 未带时回退现场编译（纯函数，可测）
+    if isinstance(rec.get("video_request"), dict):
+        return rec["video_request"]
     try:
         from app.services import video_prompt
         merged = dict(spec)

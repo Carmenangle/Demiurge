@@ -47,7 +47,8 @@ def test_finalize_turn透传video_config进illustrate_recs():
 
     def writeback(_draft, rag_events):
         return "visible", [], {"prompt": "tags", "motion": 2, "actors": ["A"],
-                               "scene_spec": {"narrative": "动作"}, "video_config": vcfg}, {}
+                               "scene_spec": {"narrative": "动作"}, "video_config": vcfg,
+                               "video_request": {"mode": "climax", "submit": {"prompt": "vp"}}}, {}
 
     hooks = roleplay_turn.TurnFinalizationHooks(
         writeback=writeback,
@@ -60,6 +61,7 @@ def test_finalize_turn透传video_config进illustrate_recs():
     rec = result["illustrate_recs"][0]
     assert rec["video_config"]["model"] == "h3-mini"
     assert rec["scene_spec"]["narrative"] == "动作"
+    assert rec["video_request"]["submit"]["prompt"] == "vp"
 
 
 def test_finalize_turn_without_agency_still_applies_output_and_publishes():
