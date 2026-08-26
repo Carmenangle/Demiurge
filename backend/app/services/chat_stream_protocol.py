@@ -71,6 +71,13 @@ def encode_event(event: Mapping[str, object]) -> ChatStreamEvent | None:
             data["offset"] = max(0, int(req["offset"]))
         if isinstance(req, Mapping) and req.get("turn_id"):
             data["turn_id"] = str(req["turn_id"])
+        # V1.5/B1：透传视频协议可选字段（字符串且非空才带，旧数据/旧前端宽松忽略）
+        if isinstance(req, Mapping):
+            for _field in ("video_mode", "first_frame_desc", "last_frame_desc",
+                           "prev_tail_desc", "last_frame_url"):
+                _value = req.get(_field)
+                if isinstance(_value, str) and _value:
+                    data[_field] = _value
         if event.get("id"):
             data["id"] = str(event["id"])
         return _wire("illustrate_request", data)

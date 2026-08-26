@@ -90,6 +90,37 @@ def test_插画事件保留回合id供最终提交Trace关联():
     assert event["data"]["turn_id"] == "turn-1"
 
 
+def test_插画事件透传视频协议字段_v1_5():
+    event = protocol.encode_event({
+        "illustrate_request": {
+            "prompt": "p", "motion": 3, "actors": ["Lyra"],
+            "video_mode": "firstlast",
+            "first_frame_desc": "雨夜门口的暖黄灯笼",
+            "last_frame_desc": "三人举杯同框",
+            "prev_tail_desc": "上一楼层收伞",
+            "last_frame_url": "data:image/png;base64,xx",
+        },
+        "id": "slot-1",
+    })
+    data = event["data"]
+    assert data["video_mode"] == "firstlast"
+    assert data["first_frame_desc"] == "雨夜门口的暖黄灯笼"
+    assert data["last_frame_desc"] == "三人举杯同框"
+    assert data["prev_tail_desc"] == "上一楼层收伞"
+    assert data["last_frame_url"] == "data:image/png;base64,xx"
+
+
+def test_插画事件无视频字段时透传为空不携带_v1_5():
+    event = protocol.encode_event({
+        "illustrate_request": {"prompt": "p", "motion": 0, "actors": []},
+        "id": "slot-1",
+    })
+    data = event["data"]
+    assert "video_mode" not in data
+    assert "first_frame_desc" not in data
+    assert "last_frame_url" not in data
+
+
 def test_音频事件编码台词与情感向量():
     event = protocol.encode_event({
         "audio_request": {
