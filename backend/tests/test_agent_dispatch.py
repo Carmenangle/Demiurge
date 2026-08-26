@@ -2294,6 +2294,61 @@ def test_插画事件无视频字段时保持原状_旧数据兼容():
     ]
 
 
+def test_插画事件默认附带climax视频提示词_v1_5():
+    # V1.5 默认开放：有 scene_spec 即编译 climax 视频提示词，不依赖视频模板/模型
+    events = ag._streamed_illustration_events([{
+        "id": "slot-1", "prompt": "p", "motion": 3, "actors": ["温知夏", "林屿"],
+        "anchor_offset": 0,
+        "scene_spec": {
+            "narrative": "温知夏猛地起身撞桌",
+            "appearance": "温知夏米色针织开衫",
+            "wardrobe": "全员日常私服",
+            "locale": "面馆内景",
+            "actors": ["温知夏", "林屿"],
+            "rating": "sfw",
+            "negative_prompt": "低质量；畸形手",
+        },
+    }])
+    request = events[0]["illustrate_request"]
+    vp = request.get("video_prompt", "")
+    assert vp
+    # 区块完整：元信息 / 参考绑定 / 主体场景 / 动作 / 负面约束
+    assert "[参考绑定]" in vp
+    assert "[主体/场景]" in vp
+    assert "[动作]" in vp
+    assert "[负面约束]" in vp
+    # 动作块带 motion 强度对应的运镜（motion=3 → 快速丝滑运镜）
+    assert "低机位快速丝滑运镜" in vp
+    # 主体/场景含外貌与场景
+    assert "米色针织开衫" in vp
+    assert "面馆内景" in vp
+
+
+def test_插画事件无scene_spec则不生成视频提示词_v1_5():
+    events = ag._streamed_illustration_events([{
+        "id": "slot-1", "prompt": "p", "motion": 2, "actors": [],
+        "anchor_offset": 0,
+    }])
+    assert "video_prompt" not in events[0]["illustrate_request"]
+
+
+def test_视频提示词motion强度影响运镜_v1_5():
+    base_spec = {
+        "narrative": "角色动作", "appearance": "外貌", "wardrobe": "服装",
+        "locale": "场景", "actors": ["角色"], "rating": "sfw",
+    }
+    def compile_for(motion):
+        events = ag._streamed_illustration_events([{
+            "id": "s", "prompt": "p", "motion": motion, "actors": ["角色"],
+            "anchor_offset": 0, "scene_spec": dict(base_spec),
+        }])
+        return events[0]["illustrate_request"]["video_prompt"]
+
+    assert "低机位快速丝滑运镜" in compile_for(3)
+    assert "绕主体快速运镜" in compile_for(2)
+    assert "极缓推进" in compile_for(0)
+
+
 def test_正文最终化后在记忆维护前立即发插画请求():
     emitted = []
     out = {

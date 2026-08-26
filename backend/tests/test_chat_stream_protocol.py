@@ -119,6 +119,19 @@ def test_插画事件无视频字段时透传为空不携带_v1_5():
     assert "video_mode" not in data
     assert "first_frame_desc" not in data
     assert "last_frame_url" not in data
+    assert "video_prompt" not in data
+
+
+def test_插画事件透传climax视频提示词_v1_5():
+    event = protocol.encode_event({
+        "illustrate_request": {
+            "prompt": "p", "motion": 3, "actors": ["甲"],
+            "video_prompt": "使用视频模型生成，15 seconds。\n\n[动作]：甲挥拳；低机位快速丝滑运镜。",
+        },
+        "id": "slot-1",
+    })
+    assert event["data"]["video_prompt"].startswith("使用视频模型生成")
+    assert "[动作]" in event["data"]["video_prompt"]
 
 
 def test_音频事件编码台词与情感向量():

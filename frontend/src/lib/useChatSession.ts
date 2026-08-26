@@ -878,7 +878,7 @@ export function useChatSession(deps: ChatSessionDeps) {
     prompt: string, motion = 0, actors: string[] = [], messageId: string, slotId: string,
     sceneSpec?: IllustrationSceneSpec, turnId = "", source: "automatic" | "manual" = "automatic",
     eventVideoMode?: string, firstFrameDesc = "", lastFrameDesc = "",
-    prevTailDesc = "", lastFrameUrl = "",
+    prevTailDesc = "", lastFrameUrl = "", videoPrompt = "",
   ) => {
     const failSlot = (stage: string, error: string) =>
       discardFailedIllustration(messageId, slotId, stage, error);
@@ -1059,6 +1059,8 @@ export function useChatSession(deps: ChatSessionDeps) {
       // V1.5/B3 双帧图：首帧=底图，尾帧=事件 lastFrameUrl 上传结果（有值才传）
       firstFrameImage: useVideo && uploadedImage ? uploadedImage : undefined,
       lastFrameImage: useVideo && uploadedLastFrameImage ? uploadedLastFrameImage : undefined,
+      // V1.5 默认开放：后端编译的 climax 视频提示词（仅视频分支注入；无模板时仍留在槽位供测试核对）
+      videoPrompt: useVideo && videoPrompt ? videoPrompt : undefined,
     });
     try {
       const st = await comfyStatus(settings.comfyuiUrl);
@@ -1446,7 +1448,7 @@ export function useChatSession(deps: ChatSessionDeps) {
       void submitIllustration(
         event.prompt, event.motion, event.actors, botId, slotId, event.sceneSpec, event.turnId,
         "automatic", event.videoMode, event.firstFrameDesc, event.lastFrameDesc,
-        event.prevTailDesc, event.lastFrameUrl,
+        event.prevTailDesc, event.lastFrameUrl, event.videoPrompt,
       );
       return;
     }

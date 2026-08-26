@@ -1,0 +1,30 @@
+[
+  {
+    "protocol": "laf-chat-stream",
+    "version": 1,
+    "type": "illustrate_request",
+    "data": {
+      "prompt": "booru prompt",
+      "motion": 3,
+      "actors": [
+        "温知夏",
+        "林屿"
+      ],
+      "scene_spec": {
+        "narrative": "温知夏猛地起身，攥住林屿手腕",
+        "appearance": "温知夏米色针织开衫",
+        "wardrobe": "全员日常私服",
+        "locale": "面馆内景",
+        "actors": [
+          "温知夏",
+          "林屿"
+        ],
+        "rating": "sfw",
+        "aspect_ratio": "16:9"
+      },
+      "offset": 0,
+      "video_prompt": "使用视频模型生成，15 seconds。\n\n[参考绑定]：图片1=温知夏猛地起身，攥住林屿手腕（唯一参考画面，作为准确起始帧）；保持 温知夏、林屿 的身份、脸部、服装、发型、造型完全一致\n\n[主体/场景]：温知夏米色针织开衫，全员日常私服，面馆内景\n\n[动作]：温知夏猛地起身，攥住林屿手腕；低机位快速丝滑运镜+高速推近骤停；能量爆发式特效，画面错位与鼓点精准同步。",
+      "id": "slot-1"
+    }
+  }
+]

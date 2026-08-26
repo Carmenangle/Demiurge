@@ -87,11 +87,15 @@ function appendDelta(message: ChatMessage, text: string): ChatMessage {
   return { ...message, text: message.text + text, parts };
 }
 
-function appendMediaSlot(message: ChatMessage, slotId: string, offset?: number, lastFrameDesc?: string): ChatMessage {
+function appendMediaSlot(
+  message: ChatMessage, slotId: string, offset?: number,
+  lastFrameDesc?: string, videoPrompt?: string,
+): ChatMessage {
   const existing = message.parts || (message.text ? [{ type: "text" as const, text: message.text }] : []);
   if (existing.some((part) => part.slotId === slotId)) return message;
   const slot = { type: "media-slot" as const, slotId, status: "pending" as const,
-    ...(lastFrameDesc ? { lastFrameDesc } : {}) };
+    ...(lastFrameDesc ? { lastFrameDesc } : {}),
+    ...(videoPrompt ? { videoPrompt } : {}) };
   if (typeof offset === "number" && !message.parts) {
     const index = Math.max(0, Math.min(message.text.length, Math.round(offset)));
     const before = message.text.slice(0, index);
@@ -160,6 +164,8 @@ export function resolveMediaSlot(
           } : {}),
           // V1.5/B1：视频槽尾帧描述保留，供下一楼层 resolvePrevTailDesc 反查衔接
           ...(part.lastFrameDesc ? { lastFrameDesc: part.lastFrameDesc } : {}),
+          // V1.5 默认开放：climax 视频提示词随槽位保留（无视频模板/模型也展示，供测试核对）
+          ...(part.videoPrompt ? { videoPrompt: part.videoPrompt } : {}),
           ...(regeneration ? { regeneration } : {}),
           ...(generationId ? { generationId } : {}),
         }
@@ -262,7 +268,7 @@ export function reduceChatStreamEvent(
         : message);
     case "illustrate_request":
       return current.map((message) => message.id === botId
-        ? appendMediaSlot(message, event.id || crypto.randomUUID(), event.offset, event.lastFrameDesc)
+        ? appendMediaSlot(message, event.id || crypto.randomUUID(), event.offset, event.lastFrameDesc, event.videoPrompt)
         : message);
     case "audio_request":
       // 音频对白配音不入气泡流：由 useChatSession 逐角色提交 IndexTTS，完成后聚合到剧情楼层。

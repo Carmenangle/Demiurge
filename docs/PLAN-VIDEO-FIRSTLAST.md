@@ -198,3 +198,19 @@ A1+A2+B1+B2+B3（可验证核心）已完成并验证（端到端 dry-run 串通
 videoMode 协议透传 + 尾帧反查 + 双帧路由）。P5 剩余的「先双图后视频」顺序提交流程
 受限于无等待桥与无真实双图视频模板，按红线原则延到 P6（真实 API 对齐）一并落地。
 视频提示词内容编写（镜头语言 + 动态提取）按用户指示留到后续测试环节逐步排查。
+
+## 7. 补充测试点：默认开放 climax 视频提示词生成（2026-08-26 用户指示）✅ 完成
+
+- 背景：视频模型和工作流现在都不需要准备。剧情推进时**默认开放视频提示词生成环节**，
+  先测试高潮模式（climax）生成的视频提示词是否符合要求，再逐步排查内容编写。
+- 后端：`agent_graph._climax_video_prompt_for(rec)` —— 有 scene_spec 即用
+  `video_prompt.compile_climax_video_prompt` 编译 climax 提示词（motion 从 rec 补齐，
+  first_frame_desc 用已还原 narrative），随事件下发为可选字段 `video_prompt`；
+  失败静默降级空串，不阻断出图/出视频。线编码器透传该字段。
+- 前端：`chatStreamProtocol` 宽松解码 `video_prompt` → 槽位存储（appendMediaSlot /
+  resolveMediaSlot 保留），**无视频模板/模型也展示**（测试核对）；`illustrationTemplateValues`
+  新增 `video_prompt` binding（仅视频分支注入）。
+- 验证：dry-run 探针 `backend/scripts/b2_video_prompt_probe.py`（三档 motion 输出 +
+  wire 导出到前端 fixture）；后端 4 用例（默认携带/区块完整/motion 运镜/无 scene_spec 不生成）
+  + 前端契约（wire→解码→binding）。全量 后端 1649 / 前端 549 + tsc 0 错。
+- 下一步：用探针输出人工核对提示词质量；之后按反馈逐步排查内容编写（对白逐字/动作序列/情绪）。

@@ -2451,6 +2451,30 @@ def _chat_with_optional_stream(ctx: dict, messages: list[dict], *, temperature: 
             sink({"delta": tail})
 
 
+def _climax_video_prompt_for(rec: dict) -> str:
+    """V1.5 默认开放视频提示词生成（climax 模式，不依赖视频模型/工作流）。
+
+    剧情推进高潮点即产出 climax 视频提示词，供测试核对内容是否符合要求
+    （区块完整性 / 无破甲残留 / 动作·运镜·特效随 motion 强度）。
+    scene_spec 不含 motion，从 rec 顶层补齐；first_frame_desc 用已还原的
+    narrative 作高潮参考画面描述。失败静默降级为空串，不阻断出图/出视频。
+    """
+    spec = rec.get("scene_spec")
+    if not isinstance(spec, dict) or not spec:
+        return ""
+    try:
+        from app.services import video_prompt
+        merged = dict(spec)
+        if "motion" not in merged:
+            merged["motion"] = int(rec.get("motion") or 0)
+        first_frame_desc = str(spec.get("narrative") or "").strip() or "高潮动作画面"
+        return video_prompt.compile_climax_video_prompt(
+            merged, first_frame_desc=first_frame_desc,
+        )
+    except Exception:
+        return ""
+
+
 def _ordered_illustration_events(result_text: str, recs: list[dict]) -> list[dict]:
     """把完整正文拆成有序 SSE 事件：文本前缀 → 插画槽 → 文本后缀。"""
     if not recs:
@@ -2473,6 +2497,10 @@ def _ordered_illustration_events(result_text: str, recs: list[dict]) -> list[dic
             _value = rec.get(_key)
             if isinstance(_value, str) and _value:
                 request[_key] = _value
+        # V1.5 默认开放：climax 视频提示词随事件下发（无视频模板/模型也生成，供测试核对）
+        _video_prompt = _climax_video_prompt_for(rec)
+        if _video_prompt:
+            request["video_prompt"] = _video_prompt
         if isinstance(rec.get("scene_spec"), dict) and rec["scene_spec"]:
             request["scene_spec"] = rec["scene_spec"]
         events.append({"illustrate_request": request, "id": rec.get("id")})
@@ -2498,6 +2526,10 @@ def _streamed_illustration_events(recs: list[dict]) -> list[dict]:
             _value = rec.get(_key)
             if isinstance(_value, str) and _value:
                 request[_key] = _value
+        # V1.5 默认开放：climax 视频提示词随事件下发（无视频模板/模型也生成，供测试核对）
+        _video_prompt = _climax_video_prompt_for(rec)
+        if _video_prompt:
+            request["video_prompt"] = _video_prompt
         if isinstance(rec.get("scene_spec"), dict) and rec["scene_spec"]:
             request["scene_spec"] = rec["scene_spec"]
         events.append({"illustrate_request": request, "id": rec.get("id")})

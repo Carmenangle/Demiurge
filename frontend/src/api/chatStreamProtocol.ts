@@ -56,7 +56,7 @@ export type ChatStreamEvent =
   | { type: "route"; route: MessageRoute }
   | { type: "image"; url: string; id?: string; regeneration?: RegenerationSnapshot }
   | { type: "video"; url: string; id?: string }
-  | { type: "illustrate_request"; prompt: string; motion: number; actors: string[]; sceneSpec?: IllustrationSceneSpec; id?: string; offset?: number; turnId?: string; videoMode?: "climax" | "firstlast"; firstFrameDesc?: string; lastFrameDesc?: string; prevTailDesc?: string; lastFrameUrl?: string }
+  | { type: "illustrate_request"; prompt: string; motion: number; actors: string[]; sceneSpec?: IllustrationSceneSpec; id?: string; offset?: number; turnId?: string; videoMode?: "climax" | "firstlast"; firstFrameDesc?: string; lastFrameDesc?: string; prevTailDesc?: string; lastFrameUrl?: string; videoPrompt?: string }
   | { type: "audio_request"; lines: AudioDialogueLine[]; id?: string }
   | { type: "rag_status"; state: string; kind: string; count?: number }
   | { type: "inspiration"; card: StreamInspirationCard }
@@ -149,6 +149,8 @@ export function decodeChatStreamEvent(value: unknown): ChatStreamEvent {
         ...(typeof data.last_frame_desc === "string" ? { lastFrameDesc: data.last_frame_desc } : {}),
         ...(typeof data.prev_tail_desc === "string" ? { prevTailDesc: data.prev_tail_desc } : {}),
         ...(typeof data.last_frame_url === "string" ? { lastFrameUrl: data.last_frame_url } : {}),
+        // V1.5 默认开放：climax 视频提示词随事件下发（无视频模板也生成，供测试核对）
+        ...(typeof data.video_prompt === "string" ? { videoPrompt: data.video_prompt } : {}),
       };
     case "audio_request":
       return {

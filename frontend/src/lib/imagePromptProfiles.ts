@@ -141,6 +141,8 @@ interface IllustrationValues {
   /** V1.5/B3 双帧图：首帧图（已上传 ComfyUI）与尾帧图（事件 lastFrameUrl 上传后） */
   firstFrameImage?: string;
   lastFrameImage?: string;
+  /** V1.5 默认开放：后端编译的 climax 视频提示词（无视频模板/模型也生成） */
+  videoPrompt?: string;
 }
 
 export type IllustrationAspectRatio = "1:1" | "2:3" | "3:2" | "3:4" | "4:3" | "9:16" | "16:9";
@@ -200,6 +202,8 @@ export function illustrationTemplateValues(
       values[key] = input.firstFrameImage;
     } else if (binding === "last_frame_image" && input.lastFrameImage) {
       values[key] = input.lastFrameImage;
+    } else if (binding === "video_prompt" && input.videoPrompt) {
+      values[key] = input.videoPrompt;
     } else if (binding === "latent_width" && input.latentSize) {
       values[key] = input.latentSize.width;
     } else if (binding === "latent_height" && input.latentSize) {

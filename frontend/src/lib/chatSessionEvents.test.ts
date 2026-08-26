@@ -92,6 +92,23 @@ describe("reduceChatStreamEvent", () => {
     });
   });
 
+  it("illustrate_request 携带 videoPrompt → 槽位存储并随完成保留（V1.5 默认开放测试点）", () => {
+    let messages = reduceChatStreamEvent(base(), "bot", {
+      type: "illustrate_request", prompt: "p", motion: 3, actors: [], id: "slot-1",
+      videoPrompt: "使用视频模型生成，15 seconds。\n\n[动作]：挥拳；丝滑运镜。",
+    });
+    expect(messages[0].parts?.[0]).toMatchObject({
+      type: "media-slot", slotId: "slot-1", status: "pending",
+      videoPrompt: "使用视频模型生成，15 seconds。\n\n[动作]：挥拳；丝滑运镜。",
+    });
+    // 完成后保留（无视频模板/模型也能在槽上看到提示词，供测试核对）
+    const ready = resolveMediaSlot(messages, "bot", "slot-1", "local://v.mp4", "video");
+    expect(ready[0].parts?.[0]).toEqual({
+      type: "video", url: "local://v.mp4", slotId: "slot-1", status: "ready",
+      videoPrompt: "使用视频模型生成，15 seconds。\n\n[动作]：挥拳；丝滑运镜。",
+    });
+  });
+
   it("按最终正文偏移插入流式插画槽", () => {
     let messages = reduceChatStreamEvent(base(), "bot", { type: "replace", text: "高潮段落。后续段落。" });
     messages = reduceChatStreamEvent(messages, "bot", {

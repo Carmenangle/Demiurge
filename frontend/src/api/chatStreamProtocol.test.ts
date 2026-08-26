@@ -73,6 +73,16 @@ describe("chat stream protocol", () => {
     });
   });
 
+  it("decodes the default-open climax video prompt (V1.5 无模板也生成)", () => {
+    expect(decodeChatStreamEvent(event("illustrate_request", {
+      prompt: "p", motion: 3, actors: ["甲"],
+      video_prompt: "使用视频模型生成，15 seconds。\n\n[动作]：甲挥拳；低机位快速丝滑运镜。",
+    }))).toEqual({
+      type: "illustrate_request", prompt: "p", motion: 3, actors: ["甲"],
+      videoPrompt: "使用视频模型生成，15 seconds。\n\n[动作]：甲挥拳；低机位快速丝滑运镜。",
+    });
+  });
+
   it("keeps old backend compatibility: video fields absent → no new keys (宽松解码)", () => {
     expect(decodeChatStreamEvent(event("illustrate_request", {
       prompt: "legacy", motion: 1, actors: [],

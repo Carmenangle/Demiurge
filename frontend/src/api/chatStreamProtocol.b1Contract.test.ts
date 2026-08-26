@@ -4,11 +4,15 @@ import { decodeChatStreamEvent } from "./chatStreamProtocol";
 import { resolveVideoMode } from "../lib/illustrationMedia";
 import { illustrationTemplateValues } from "../lib/imagePromptProfiles";
 import rawFixture from "./__fixtures__/b1_illustrate_request.json";
+import rawB2Fixture from "./__fixtures__/b2_climax_video_prompt.json";
 
 // B1 跨语言端到端契约：真实后端 `agent_graph._streamed_illustration_events`
 // + `chat_stream_protocol.encode_event` 产出的 wire JSON，经前端真实解码链路
 // 走到模板 values。fixture 由 backend/scripts/b1_emit_wire.py 生成。
 const fixture = rawFixture as Array<{
+  protocol: string; version: number; type: string; data: Record<string, unknown>;
+}>;
+const b2Fixture = rawB2Fixture as Array<{
   protocol: string; version: number; type: string; data: Record<string, unknown>;
 }>;
 
@@ -63,5 +67,38 @@ describe("B1 协议透传 · 跨语言端到端契约", () => {
     expect(values["3.last"]).toBe("三人举杯同框，温情对视");
     expect(values["4.prev"]).toBe("上一楼层：林屿在门口抽烟回望");
     expect(values["5.url"]).toBe("data:image/png;base64,ZmFrZS10YWlsLWZyYW1l");
+  });
+});
+
+describe("B2 默认开放 climax 视频提示词 · 端到端契约（无视频模板/模型也生成）", () => {
+  it("后端 wire 事件默认带 video_prompt，前端解码为完整提示词", () => {
+    const wire = b2Fixture[0];
+    const event = decodeChatStreamEvent(wire);
+    if (event.type !== "illustrate_request") throw new Error("unreachable");
+
+    expect(event.videoPrompt).toBeTruthy();
+    // 内容要求机械检查：区块完整 + 无破甲残留 + 运镜随 motion 强度
+    expect(event.videoPrompt).toContain("[参考绑定]");
+    expect(event.videoPrompt).toContain("[主体/场景]");
+    expect(event.videoPrompt).toContain("[动作]");
+    expect(event.videoPrompt).not.toContain("@(");
+    // fixture 是 motion=3 → 强动态运镜
+    expect(event.videoPrompt).toContain("低机位快速丝滑运镜");
+  });
+
+  it("video_prompt 经 illustrationTemplateValues 注入模板 exposed binding", () => {
+    const wire = b2Fixture[0];
+    const event = decodeChatStreamEvent(wire);
+    if (event.type !== "illustrate_request") throw new Error("unreachable");
+
+    const exposed = [
+      { node_id: "9", field: "prompt", semantic: "prompt", binding: "video_prompt" },
+    ];
+    const values = illustrationTemplateValues(exposed, {
+      prompt: event.prompt,
+      videoPrompt: event.videoPrompt,
+    });
+    expect(values["9.prompt"]).toContain("[参考绑定]");
+    expect(values["9.prompt"]).toContain("[动作]");
   });
 });
