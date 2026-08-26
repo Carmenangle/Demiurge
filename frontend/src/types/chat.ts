@@ -22,6 +22,8 @@ export interface MsgPart {
   seq?: number;
   /** 音频分条：总条数 */
   total?: number;
+  /** V1.5/B1 视频槽：本段视频的尾帧描述（下一楼层反查作 prevTailDesc 衔接） */
+  lastFrameDesc?: string;
 }
 
 export interface PromptApproval {

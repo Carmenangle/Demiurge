@@ -108,3 +108,16 @@ export function resolveVideoMode(
   }
   return "climax";
 }
+
+/** V1.5/B3（R4）视频模板触发闸门：firstlast 是楼层触发不看 motion；climax 维持 smartVideo+motion。
+ * 返回是否用视频模板（模板已配置为前提）。 */
+export function resolveVideoTemplateChoice(
+  preset: { videoTemplateId?: string; smartVideo?: boolean } | undefined,
+  videoMode: VideoMode,
+  motion: number,
+): boolean {
+  if (videoMode === "firstlast") {
+    return !!preset?.videoTemplateId;
+  }
+  return !!(preset?.smartVideo && preset.videoTemplateId && motion >= 2);
+}

@@ -325,6 +325,44 @@ export function resolveVideoBaseImage(opts: {
   return resolveVideoBaseImageRef(opts)?.url;
 }
 
+// ===== V1.5/B2 尾帧链式状态（反查，零新增持久化）=====
+// 取「最近一条已完成视频槽」的尾帧描述，供下一楼层 firstlast 首帧做衔接上下文（prevTailDesc）。
+// 与 resolveVideoBaseImageRef 同思路：倒序扫描消息 + 槽位，天然随 chat_snapshot 走，
+// 快照恢复 / scenario 分叉 / 重生成都不会指向错链（不新增 thread 级状态，R8）。
+// 停在最近一条已完成视频槽：若它没有尾帧描述（如 climax 模式）→ 返回 undefined，
+// 不跳过它去取更早楼层（避免跨楼层拿到过时尾帧）。
+interface VideoTailMessages {
+  id: string;
+  parts?: Array<{ type?: string; slotId?: string; status?: string; url?: string; lastFrameDesc?: string }>;
+}
+
+export interface PrevTailRef {
+  lastFrameDesc: string;
+  messageId: string;
+  slotId: string;
+}
+
+export function resolvePrevTailDesc(
+  messages: readonly VideoTailMessages[],
+): PrevTailRef | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const parts = messages[i].parts || [];
+    for (let j = parts.length - 1; j >= 0; j--) {
+      const p = parts[j];
+      if (p.type === "video" && p.status === "ready" && p.url) {
+        return p.lastFrameDesc
+          ? {
+            lastFrameDesc: p.lastFrameDesc,
+            messageId: messages[i].id,
+            slotId: p.slotId || "",
+          }
+          : undefined;
+      }
+    }
+  }
+  return undefined;
+}
+
 // ===== 文本打分：从生成结果的多段文本里挑最优 =====
 // 过滤掉「有效字符占比过低」的噪声段（如纯符号/乱码），再按长度取最长的一段。
 // 有效字符 = 字母数字 + 中文。占比阈值 0.3。

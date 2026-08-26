@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   illustrationLoraConfigurationError, illustrationRequestMedia, illustrationWorkflowMedia,
-  resolveIllustrationActors, resolveVideoMode,
+  resolveIllustrationActors, resolveVideoMode, resolveVideoTemplateChoice,
 } from "./illustrationMedia";
 
 const legacyBindings = {
@@ -189,5 +189,27 @@ describe("resolveVideoMode（V1.5/B1 视频模式决策）", () => {
 
   it("非法事件值忽略，走 preset 回退", () => {
     expect(resolveVideoMode({ videoMode: "climax" }, "bogus")).toBe("climax");
+  });
+});
+
+describe("resolveVideoTemplateChoice（V1.5/B3 R4 触发闸门）", () => {
+  const preset = (over: Record<string, unknown> = {}) => ({
+    templateId: "img", videoTemplateId: "vid", smartVideo: true, ...over,
+  });
+
+  it("firstlast：配置了视频模板即触发，不看 motion/smartVideo（楼层触发）", () => {
+    expect(resolveVideoTemplateChoice(preset(), "firstlast", 0)).toBe(true);
+    expect(resolveVideoTemplateChoice(preset({ smartVideo: false }), "firstlast", 0)).toBe(true);
+  });
+
+  it("climax：维持 smartVideo && motion>=2", () => {
+    expect(resolveVideoTemplateChoice(preset(), "climax", 1)).toBe(false);
+    expect(resolveVideoTemplateChoice(preset(), "climax", 2)).toBe(true);
+    expect(resolveVideoTemplateChoice(preset({ smartVideo: false }), "climax", 5)).toBe(false);
+  });
+
+  it("没配视频模板 → 永不触发视频（firstlast 也不例外）", () => {
+    expect(resolveVideoTemplateChoice(preset({ videoTemplateId: undefined }), "firstlast", 5)).toBe(false);
+    expect(resolveVideoTemplateChoice(preset({ videoTemplateId: undefined }), "climax", 5)).toBe(false);
   });
 });

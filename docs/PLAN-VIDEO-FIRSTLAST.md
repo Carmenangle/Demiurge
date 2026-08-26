@@ -65,16 +65,29 @@
   - `useChatSession.submitIllustration` 收 5 个可选参数，仅 `useVideo` 时透传。
 - 验证：后端 3 个透传用例 + 前端 7 个（协议解码 4 + resolveVideoMode 3/4）全绿。
 
-### P4 尾帧链式状态（推荐「反查」，零新增持久化）
-- 不做 thread 级新 kv。新增纯函数 `resolvePrevTailDesc(messages)`：倒序扫描最近一条
-  已完成 video 槽（`type==="video" && status==="ready"`）取其 `derivedFrom` / 尾帧描述。
+### P4 尾帧链式状态（推荐「反查」，零新增持久化）✅ 已完成（B2）
+- 不做 thread 级新 kv。前端已落地：
+  - `MsgPart.lastFrameDesc`：illustrate_request 事件携带 lastFrameDesc → 槽位创建时存储，
+    视频完成 resolve 为 video 时保留（chatSessionEvents.appendMediaSlot/resolveMediaSlot）。
+  - `resolvePrevTailDesc(messages)`（chatGeneration.ts）：倒序扫描最近一条已完成 video 槽
+    （type==="video" && status==="ready"），取尾帧描述；该槽无描述 → undefined 不跳过
+    （避免跨楼层取到过时尾帧，R8）。
+  - `submitIllustration` 兜底：事件 prevTailDesc 为空时用 `resolvePrevTailDesc` 反查结果。
 - 与前端 `resolveVideoBaseImageRef` 同思路，天然随 `chat_snapshot` 走，**分叉/重生成不污染**。
-- 转场素材兜底：`preset.transitionImage`，仅当反查不到可衔接尾帧时作为首帧来源。
+- 转场素材兜底：`preset.transitionImage` 延后（用户决策 #2），不在本批。
 
 ### P5 前端提交链（异步闭环复用）
-- firstlast：先异步出「首帧图 + 尾帧图」（两次 ComfyUI），双图 ready 后再提视频模板/视频模型。
-- 半失败降级：首帧成尾帧败 → 只出首帧图、不出视频、不挂死槽（`failSlot` 已有）。
-- 复用 `claimIllustrationSubmission` 幂等认领，防重复提交。
+- ✅ 已落地（可验证核心，B3）：
+  - R4 闸门：`resolveVideoTemplateChoice`（illustrationMedia.ts）——firstlast 楼层触发不看
+    motion/smartVideo；climax 维持 smartVideo && motion>=2（旧预设缺省 climax 行为不变）。
+  - 双帧图 binding：`illustrationTemplateValues` 新增 `first_frame_image`/`last_frame_image`。
+  - `submitIllustration` firstlast 路由：事件 lastFrameUrl → 上传为 last_frame_image（失败降级
+   首帧单图，不挂死槽）；首帧底图 → first_frame_image。尾帧图缺省不进 values（无悬空引用，R2）。
+- ⏸ 未落地（阻塞，需 P6）：**「先异步出首帧图+尾帧图（两次 ComfyUI），双图 ready 后再提视频」**
+  的顺序链。原因：当前 `pollResult` 是 fire-and-forget（后台轮询 resolve 槽位），无
+  「等待工作流完成」Promise 桥；且无真实双图视频模板/API 可验证（红线 R1：不猜接口字段名、
+  不做无法验证的接线）。待 P6 提供可实测端点/双图模板后，补「等待桥 + 双帧顺序提交」。
+- 复用 `claimIllustrationSubmission` 幂等认领不变（已有）。
 
 ### P6 真实 API 对齐（最后做，需用户提供可实测端点）
 - 实测 `image[]` 双图：确认是否「首帧/尾帧」语义；不是 → 只在 prompt 层职责绑定，回填文档。
@@ -166,12 +179,22 @@
                         · MediaInsertPreset.videoMode（缺省 climax，旧预设兼容）
                         · 后端事件透传 video_mode/first_frame_desc/last_frame_desc/prev_tail_desc/last_frame_url
                         · 前端宽松解码 + resolveVideoMode 决策 + 模板 binding 注入
-  B2 尾帧反查（P4，零持久化）  B3 前端双图提交链（P5）+ 防拦截第二层（_apply_regex）
+                        · 线编码器 encode_event 透传修复 + 跨语言契约测试（b1_emit_wire.py + b1Contract.test.ts）
+  B2 尾帧反查（P4）✅ 完成——
+                        · MsgPart.lastFrameDesc + 槽位创建/完成保留
+                        · resolvePrevTailDesc 纯函数（零持久化，随 chat_snapshot 走）
+                        · submitIllustration prevTailDesc 兜底
+  B3 前端双图提交链（P5）✅ 可验证核心完成（顺序链待 P6）——
+                        · R4 闸门：firstlast 楼层触发不看 motion（resolveVideoTemplateChoice）
+                        · 双帧图 binding：first_frame_image/last_frame_image + lastFrameUrl 上传路由
+                        · 尾帧图缺省降级首帧单图（无悬空引用，R2）
+                        · ⏸「先出双图再提视频」顺序链：阻塞于无等待桥 + 无真实双图模板（P6）
 
 第三批（延后）：
   C1 真实 API 对齐（P6，待用户提供可实测端点）  C2 转场素材（延后）
 ```
 
-A1+A2+B1 已完成并验证（端到端 dry-run 串通 + 防拦截共享清洗 + videoMode 协议透传）。
-下一步 B2（尾帧反查）或 B3（前端双图提交链）；视频提示词内容编写（镜头语言 + 动态提取）
-按用户指示留到后续测试环节逐步排查。
+A1+A2+B1+B2+B3（可验证核心）已完成并验证（端到端 dry-run 串通 + 防拦截共享清洗 +
+videoMode 协议透传 + 尾帧反查 + 双帧路由）。P5 剩余的「先双图后视频」顺序提交流程
+受限于无等待桥与无真实双图视频模板，按红线原则延到 P6（真实 API 对齐）一并落地。
+视频提示词内容编写（镜头语言 + 动态提取）按用户指示留到后续测试环节逐步排查。

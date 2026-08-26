@@ -138,6 +138,9 @@ interface IllustrationValues {
   lastFrameDesc?: string;
   prevTailDesc?: string;
   lastFrameUrl?: string;
+  /** V1.5/B3 双帧图：首帧图（已上传 ComfyUI）与尾帧图（事件 lastFrameUrl 上传后） */
+  firstFrameImage?: string;
+  lastFrameImage?: string;
 }
 
 export type IllustrationAspectRatio = "1:1" | "2:3" | "3:2" | "3:4" | "4:3" | "9:16" | "16:9";
@@ -193,6 +196,10 @@ export function illustrationTemplateValues(
       values[key] = input.prevTailDesc;
     } else if (binding === "last_frame_url" && input.lastFrameUrl) {
       values[key] = input.lastFrameUrl;
+    } else if (binding === "first_frame_image" && input.firstFrameImage) {
+      values[key] = input.firstFrameImage;
+    } else if (binding === "last_frame_image" && input.lastFrameImage) {
+      values[key] = input.lastFrameImage;
     } else if (binding === "latent_width" && input.latentSize) {
       values[key] = input.latentSize.width;
     } else if (binding === "latent_height" && input.latentSize) {

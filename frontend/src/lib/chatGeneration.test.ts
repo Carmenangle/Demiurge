@@ -7,6 +7,7 @@ import {
   resolveLoraPromptMetadata,
   resolveVideoBaseImage,
   resolveVideoBaseImageRef,
+  resolvePrevTailDesc,
   userMessageRichContent,
 } from "./chatGeneration";
 import {
@@ -645,6 +646,50 @@ describe("resolveVideoBaseImageRef（M2.1 底图来源槽引用）", () => {
       manualBaseImage: "local://manual",
     });
     expect(r).toEqual({ url: "local://manual" });
+  });
+});
+
+describe("resolvePrevTailDesc（V1.5/B2 尾帧链式反查）", () => {
+  const msg = (id: string, parts: any[] = []) => ({ id, parts });
+  const video = (slotId: string, url: string, lastFrameDesc?: string) => ({
+    type: "video", slotId, status: "ready" as const, url,
+    ...(lastFrameDesc ? { lastFrameDesc } : {}),
+  });
+  const image = (slotId: string, url: string) =>
+    ({ type: "image", slotId, status: "ready" as const, url });
+
+  it("取最近一条已完成视频槽的尾帧描述", () => {
+    expect(resolvePrevTailDesc([
+      msg("m1", [video("s1", "local://v1", "上楼层尾帧：收伞进门")]),
+      msg("m2", []),
+    ])).toEqual({
+      lastFrameDesc: "上楼层尾帧：收伞进门",
+      messageId: "m1", slotId: "s1",
+    });
+  });
+
+  it("最近已完成视频槽无尾帧描述 → undefined（不跳过取更早楼层，避免跨楼层过时尾帧）", () => {
+    expect(resolvePrevTailDesc([
+      msg("m0", [video("s0", "local://v0", "更早楼层尾帧")]),
+      msg("m1", [video("s1", "local://v1")]),
+    ])).toBeUndefined();
+  });
+
+  it("图片槽不参与反查，只认视频槽", () => {
+    expect(resolvePrevTailDesc([
+      msg("m1", [
+        image("s1", "local://img"),
+        video("s2", "local://v2", "尾帧描述"),
+      ]),
+    ])).toEqual({ lastFrameDesc: "尾帧描述", messageId: "m1", slotId: "s2" });
+  });
+
+  it("无任何已完成视频槽 → undefined", () => {
+    expect(resolvePrevTailDesc([
+      msg("m1", [{ type: "media-slot", slotId: "s1", status: "pending" }]),
+      msg("m2", []),
+    ])).toBeUndefined();
+    expect(resolvePrevTailDesc([])).toBeUndefined();
   });
 });
 

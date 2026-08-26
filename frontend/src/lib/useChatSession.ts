@@ -42,7 +42,7 @@ import {
   needsImageInput, hasImageProvided, pickBestText,
   slimSnapshot as slimSnapshotPure, promptHistory,
   prepareConversationRegeneration, resolveLoraPromptMetadata, resolveGenerationPrompt,
-  acceptSlimmedMessages, canCommitSnapshot, resolveVideoBaseImageRef,
+  acceptSlimmedMessages, canCommitSnapshot, resolveVideoBaseImageRef, resolvePrevTailDesc,
 } from "./chatGeneration";
 import {
   durableFinalizeSucceeded, WorkflowGenerationRuntime,
@@ -54,8 +54,7 @@ import {
 } from "./imagePromptProfiles";
 import {
   illustrationLoraConfigurationError, illustrationRequestMedia, illustrationWorkflowMedia,
-  resolveIllustrationActors,
-  resolveVideoMode,
+  resolveIllustrationActors, resolveVideoMode, resolveVideoTemplateChoice,
 } from "./illustrationMedia";
 import {
   audioTemplateValues, resolvableAudioLines, skippedAudioSpeakers, voiceReferenceFor,
@@ -898,10 +897,11 @@ export function useChatSession(deps: ChatSessionDeps) {
       failSlot("prompt", "剧情出图提示词为空");
       return;
     }
-    const useVideo = !!(preset.smartVideo && preset.videoTemplateId && motion >= 2);
-    const chosenId = useVideo ? preset.videoTemplateId! : preset.templateId;
     // V1.5/B1：事件 videoMode 优先，其次 preset.videoMode，缺省 climax
     const videoMode = resolveVideoMode(preset, eventVideoMode);
+    // V1.5/B3（R4）：firstlast 楼层触发不看 motion；climax 维持 smartVideo && motion>=2
+    const useVideo = resolveVideoTemplateChoice(preset, videoMode, motion);
+    const chosenId = useVideo ? preset.videoTemplateId! : preset.templateId;
     if (!chosenId) {
       failSlot("configuration", "当前图/视频模式没有配置工作流模板");
       return;
@@ -1023,12 +1023,27 @@ export function useChatSession(deps: ChatSessionDeps) {
         }
       }
     }
+    // V1.5/B3 firstlast 双帧：事件携带尾帧图（lastFrameUrl）→ 上传为 last_frame_image；
+    // 上传失败/无尾帧图 → 降级为首帧单图提交（后端 firstlast 缺尾帧有 warning，不挂死槽）。
+    let uploadedLastFrameImage = "";
+    if (useVideo && videoMode === "firstlast" && lastFrameUrl) {
+      try {
+        const blob = await (await fetch(localViewUrl(lastFrameUrl))).blob();
+        const file = new File([blob], lastFrameUrl.split(/[\\/]/).pop() || "last.png", { type: blob.type || "image/png" });
+        uploadedLastFrameImage = (await uploadImage(file, settings.comfyuiUrl)).name;
+      } catch {
+        uploadedLastFrameImage = "";
+      }
+    }
     // 按 exposed 的隐藏 binding 组 values；提交 key 始终是“节点id.原字段名”。
     const latentSize = latentSizeFor(
       sceneSpec?.aspect_ratio || "2:3",
       preset.latentLongEdge === 2048 || preset.latentLongEdge === 4096
         ? preset.latentLongEdge : 1024,
     );
+    // V1.5/B2：prevTailDesc 兜底——事件没带时反查最近一条已完成视频槽的尾帧描述
+    const prevTailDescForUse = prevTailDesc
+      || resolvePrevTailDesc(messagesRef.current)?.lastFrameDesc || "";
     const values = illustrationTemplateValues(tpl.exposed, {
       prompt, negativePrompt, loraName, loraWeight, baseImage: uploadedImage,
       latentSize,
@@ -1039,8 +1054,11 @@ export function useChatSession(deps: ChatSessionDeps) {
       videoMode: useVideo ? videoMode : undefined,
       firstFrameDesc: useVideo && firstFrameDesc ? firstFrameDesc : undefined,
       lastFrameDesc: useVideo && lastFrameDesc ? lastFrameDesc : undefined,
-      prevTailDesc: useVideo && prevTailDesc ? prevTailDesc : undefined,
+      prevTailDesc: useVideo && prevTailDescForUse ? prevTailDescForUse : undefined,
       lastFrameUrl: useVideo && lastFrameUrl ? lastFrameUrl : undefined,
+      // V1.5/B3 双帧图：首帧=底图，尾帧=事件 lastFrameUrl 上传结果（有值才传）
+      firstFrameImage: useVideo && uploadedImage ? uploadedImage : undefined,
+      lastFrameImage: useVideo && uploadedLastFrameImage ? uploadedLastFrameImage : undefined,
     });
     try {
       const st = await comfyStatus(settings.comfyuiUrl);

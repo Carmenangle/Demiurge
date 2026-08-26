@@ -1,16 +1,16 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import { decodeChatStreamEvent } from "./chatStreamProtocol";
 import { resolveVideoMode } from "../lib/illustrationMedia";
 import { illustrationTemplateValues } from "../lib/imagePromptProfiles";
+import rawFixture from "./__fixtures__/b1_illustrate_request.json";
 
 // B1 跨语言端到端契约：真实后端 `agent_graph._streamed_illustration_events`
 // + `chat_stream_protocol.encode_event` 产出的 wire JSON，经前端真实解码链路
 // 走到模板 values。fixture 由 backend/scripts/b1_emit_wire.py 生成。
-const fixture = JSON.parse(
-  readFileSync(new URL("./__fixtures__/b1_illustrate_request.json", import.meta.url), "utf-8"),
-) as Array<{ protocol: string; version: number; type: string; data: Record<string, unknown> }>;
+const fixture = rawFixture as Array<{
+  protocol: string; version: number; type: string; data: Record<string, unknown>;
+}>;
 
 describe("B1 协议透传 · 跨语言端到端契约", () => {
   it("后端 wire 事件能被前端解码为带视频字段的 illustrate_request", () => {

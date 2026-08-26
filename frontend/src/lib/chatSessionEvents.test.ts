@@ -73,6 +73,25 @@ describe("reduceChatStreamEvent", () => {
     ]);
   });
 
+  it("illustrate_request 携带 lastFrameDesc → 槽位存储并随视频完成保留（V1.5/B2 尾帧反查数据源）", () => {
+    let messages = reduceChatStreamEvent(base(), "bot", {
+      type: "illustrate_request", prompt: "p", motion: 3, actors: [], id: "slot-1",
+      videoMode: "firstlast", lastFrameDesc: "三人举杯同框，温情对视",
+    });
+    const slot = messages[0].parts?.[0];
+    expect(slot).toMatchObject({
+      type: "media-slot", slotId: "slot-1", status: "pending",
+      lastFrameDesc: "三人举杯同框，温情对视",
+    });
+
+    // 视频完成后槽位升级为 video，lastFrameDesc 保留（供下一楼层 resolvePrevTailDesc 反查）
+    const ready = resolveMediaSlot(messages, "bot", "slot-1", "local://v.mp4", "video");
+    expect(ready[0].parts?.[0]).toEqual({
+      type: "video", url: "local://v.mp4", slotId: "slot-1", status: "ready",
+      lastFrameDesc: "三人举杯同框，温情对视",
+    });
+  });
+
   it("按最终正文偏移插入流式插画槽", () => {
     let messages = reduceChatStreamEvent(base(), "bot", { type: "replace", text: "高潮段落。后续段落。" });
     messages = reduceChatStreamEvent(messages, "bot", {

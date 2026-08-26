@@ -193,6 +193,14 @@ constraints that are safe to include in private agent context.
      扩展（精简版动作瞬间），各自独立 compile_*。
 2. **A3 表格读取取消**：表格在剧情推进时已自动发送/自动填表，场景角色信息 scene_spec
    已含（appearance/wardrobe/locale），无需单独读 table_store。P2 移除。
+3. **B2 尾帧反查（P4）✅**：MsgPart.lastFrameDesc（槽位创建/完成保留）+
+   `resolvePrevTailDesc` 纯函数（零持久化，随 chat_snapshot 走，分叉/重生成不污染，R8）；
+   submitIllustration 事件无 prevTailDesc 时反查兜底。
+4. **B3 前端提交链（P5）可验证核心 ✅**：R4 闸门 `resolveVideoTemplateChoice`（firstlast
+   楼层触发不看 motion；climax 维持 smartVideo+motion≥2）+ 双帧图 binding
+   （first_frame_image/last_frame_image）+ lastFrameUrl 上传路由 + 尾帧缺省降级首帧单图。
+   ⏸「先出双图再提视频」顺序链阻塞：无等待桥（pollResult 是 fire-and-forget）+ 无真实双图
+   模板（红线：不猜接口字段名）→ 延 P6。
 
-下一步：B2 尾帧反查（P4）或 B3 前端双图提交链（P5）。视频提示词内容编写（镜头语言 + A/B
-动态提取）按用户指示留到后续测试环节逐步排查，不靠模板敲定。
+下一步：P6 真实 API 对齐（需用户提供可实测端点）——落地后可补 P5 顺序链。视频提示词内容
+编写（镜头语言 + A/B 动态提取）按用户指示留到后续测试环节逐步排查，不靠模板敲定。

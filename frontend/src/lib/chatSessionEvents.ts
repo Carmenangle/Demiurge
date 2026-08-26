@@ -87,9 +87,11 @@ function appendDelta(message: ChatMessage, text: string): ChatMessage {
   return { ...message, text: message.text + text, parts };
 }
 
-function appendMediaSlot(message: ChatMessage, slotId: string, offset?: number): ChatMessage {
+function appendMediaSlot(message: ChatMessage, slotId: string, offset?: number, lastFrameDesc?: string): ChatMessage {
   const existing = message.parts || (message.text ? [{ type: "text" as const, text: message.text }] : []);
   if (existing.some((part) => part.slotId === slotId)) return message;
+  const slot = { type: "media-slot" as const, slotId, status: "pending" as const,
+    ...(lastFrameDesc ? { lastFrameDesc } : {}) };
   if (typeof offset === "number" && !message.parts) {
     const index = Math.max(0, Math.min(message.text.length, Math.round(offset)));
     const before = message.text.slice(0, index);
@@ -101,7 +103,7 @@ function appendMediaSlot(message: ChatMessage, slotId: string, offset?: number):
       ...message,
       parts: [
         ...(index ? [{ type: "text" as const, text: before + slotPrefix }] : []),
-        { type: "media-slot", slotId, status: "pending" },
+        slot,
         ...(index < message.text.length
           ? [{ type: "text" as const, text: slotSuffix + after }]
           : []),
@@ -110,7 +112,7 @@ function appendMediaSlot(message: ChatMessage, slotId: string, offset?: number):
   }
   return {
     ...message,
-    parts: [...existing, { type: "media-slot", slotId, status: "pending" }],
+    parts: [...existing, slot],
   };
 }
 
@@ -156,6 +158,8 @@ export function resolveMediaSlot(
             ...(part.seq !== undefined ? { seq: part.seq } : {}),
             ...(part.total !== undefined ? { total: part.total } : {}),
           } : {}),
+          // V1.5/B1：视频槽尾帧描述保留，供下一楼层 resolvePrevTailDesc 反查衔接
+          ...(part.lastFrameDesc ? { lastFrameDesc: part.lastFrameDesc } : {}),
           ...(regeneration ? { regeneration } : {}),
           ...(generationId ? { generationId } : {}),
         }
@@ -258,7 +262,7 @@ export function reduceChatStreamEvent(
         : message);
     case "illustrate_request":
       return current.map((message) => message.id === botId
-        ? appendMediaSlot(message, event.id || crypto.randomUUID(), event.offset)
+        ? appendMediaSlot(message, event.id || crypto.randomUUID(), event.offset, event.lastFrameDesc)
         : message);
     case "audio_request":
       // 音频对白配音不入气泡流：由 useChatSession 逐角色提交 IndexTTS，完成后聚合到剧情楼层。

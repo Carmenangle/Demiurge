@@ -180,4 +180,26 @@ describe("illustrationTemplateValues · 视频字段", () => {
     const exposed = [{ node_id: "9", field: "duration", semantic: "duration", binding: "video_duration" }];
     expect(illustrationTemplateValues(exposed, { prompt: "p" })).toEqual({});
   });
+  it("B3 双帧图 binding：first_frame_image / last_frame_image 注入上传后的 ComfyUI 文件名", () => {
+    const exposed = [
+      { node_id: "3", field: "first", semantic: "first", binding: "first_frame_image" },
+      { node_id: "7", field: "last", semantic: "last", binding: "last_frame_image" },
+    ];
+    const values = illustrationTemplateValues(exposed, {
+      prompt: "p",
+      firstFrameImage: "first.png",
+      lastFrameImage: "last.png",
+    });
+    expect(values["3.first"]).toBe("first.png");
+    expect(values["7.last"]).toBe("last.png");
+  });
+  it("B3 尾帧图缺省 → 只注入首帧（降级为首帧单图，不产生悬空引用）", () => {
+    const exposed = [
+      { node_id: "3", field: "first", semantic: "first", binding: "first_frame_image" },
+      { node_id: "7", field: "last", semantic: "last", binding: "last_frame_image" },
+    ];
+    const values = illustrationTemplateValues(exposed, { prompt: "p", firstFrameImage: "first.png" });
+    expect(values["3.first"]).toBe("first.png");
+    expect("7.last" in values).toBe(false);
+  });
 });
