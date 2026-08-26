@@ -212,3 +212,25 @@ def test_build_request_default_size_is_16_9():
         video_config={"base_url": "https://x.com/v", "model": "m"},
     )
     assert req["submit"]["size"] == "1280x720"  # 不再沿用图片的 1024x1024
+
+
+# ===== 防拦截对齐：spec 破甲标记在编译前还原（对齐图像生成第一层）=====
+
+def test_build_request_restores_jailbreak_markers_in_spec():
+    req = video_prompt.build_video_request(
+        mode="climax", spec=_spec(appearance="温知夏(米@(色)@针织开衫)"),
+        video_config={"base_url": "https://x.com/videos", "model": "h3"},
+    )
+    prompt = req["submit"]["prompt"]
+    assert "@(" not in prompt and ")@" not in prompt  # 无残留破甲标记
+    assert "米色" in prompt and "米@(色)@" not in prompt  # 已还原成正常文字
+
+
+def test_build_request_restores_markers_in_firstlast():
+    req = video_prompt.build_video_request(
+        mode="firstlast", spec=_spec(narrative="三@(人)@举杯同框", locale="面@(馆)@内景"),
+        video_config={"base_url": "https://x.com/videos", "model": "h3"},
+    )
+    prompt = req["submit"]["prompt"]
+    assert "@(" not in prompt and ")@" not in prompt
+    assert "三人举杯同框" in prompt and "面馆内景" in prompt

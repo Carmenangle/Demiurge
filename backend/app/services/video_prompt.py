@@ -26,6 +26,8 @@ import math
 import re
 from typing import Any
 
+from app.services import image_prompt_extract
+
 # 元信息：默认时长（秒）。preset videoDurationHint 可覆盖。
 _DEFAULT_DURATION = 15
 
@@ -308,6 +310,25 @@ def compile_firstlast_video_prompt(
     return "\n\n".join(blocks)
 
 
+def _clean_spec(spec: dict[str, Any]) -> dict[str, Any]:
+    """对 scene_spec 文本字段做破甲标记还原（对齐图像生成的第一层防拦截）。
+
+    图像生成的防拦截是两层：① restore_jailbreak 还原 @()@ 破甲标记（纯函数，本层）；
+    ② _apply_regex(IMAGE_PROMPT) 用户正则清洗（接线层，需 ctx，不在纯函数边界内）。
+
+    本模块只做第①层兜底：无论上游（agent_graph / 前端）是否已还原，编译前统一
+    还原 spec 里所有可能带破甲标记的文本字段，避免 @(x)@ 残留进视频提示词。
+    """
+    cleaned = dict(spec)
+    for key in ("narrative", "appearance", "wardrobe", "locale", "camera",
+                "composition", "art_direction", "negative_prompt", "protected_narrative",
+                "draft_prompt", "profile_prompt"):
+        val = cleaned.get(key)
+        if isinstance(val, str) and val:
+            cleaned[key] = image_prompt_extract.restore_jailbreak(val)
+    return cleaned
+
+
 def build_video_request(
     *,
     mode: str,
@@ -334,6 +355,7 @@ def build_video_request(
     - 缺图时产出 warnings + 诚实降级措辞（R2）。
     """
     preset = preset or {}
+    spec = _clean_spec(spec or {})
     style_prefix = str(preset.get("stylePrefix") or preset.get("style_template") or "")
     negative = str(preset.get("negativePrompt") or "")
     duration_hint = int(preset.get("videoDurationHint") or 0)

@@ -146,3 +146,25 @@ constraints that are safe to include in private agent context.
 - 已落地：`services/video_prompt.py`（两套编译 + build_video_request dry-run，纯函数），
   `tests/test_video_prompt.py` 11 passed。提交 `2f276c7`。
 - 建议下一步：P3（videoMode/协议/守卫，含 R2/R3/R6/R7 修正）——它是 P1/P2 产出的出口契约。
+
+## V1.5/V1.6 实现进度（deepseek-v4-pro-0813 编码）
+
+**模型分工（用户指定）**：glm-5.3（tier:c3）= 整体文档构筑 + 代码审计；deepseek-v4-pro-0813
+（tier:c2）= 实际编码 + 审计后修复。
+
+已完成：
+- A1 首尾帧双锚点提取 `services/story_frames.py`（纯函数，提交 407fac7）：楼层文本 → 段首+段尾
+  双锚点 opening/closing（非单一高潮段）；纯对白段就近借画面段；单段退化静止；空正文降级。
+- A2 视频提示词打磨（提交 50e810e）：R2/R3/R6/R7/R9 + 衔接感 + 高潮动作化。
+- **防拦截第一层对齐（本轮）**：`video_prompt.build_video_request` 入口 `_clean_spec` 对 spec
+  文本字段统一 `restore_jailbreak` 兜底。端到端 dry-run 验证：带 `@(色)@` 破甲标记的 appearance
+  不再残留进 prompt（修复前会残留）。
+
+关键结论（用户拍板）：
+1. **防拦截两层机制**（与图像生成一致）：① restore_jailbreak 破甲还原（纯函数，已落地）；
+   ② _apply_regex(IMAGE_PROMPT) 用户正则清洗（接线层，待 B1/B3 定：复用 IMAGE_PROMPT 还是
+   新增 VIDEO_PROMPT placement——视频提示词是中文 H3 叙事非英文 booru，可能需独立 placement）。
+2. **A3 表格读取取消**：表格在剧情推进时已自动发送/自动填表，场景角色信息 scene_spec
+   已含（appearance/wardrobe/locale），无需单独读 table_store。P2 移除。
+
+下一步：B1 videoMode + 事件协议（前端 MediaInsertPreset + illustrate_request 字段），接线起点。

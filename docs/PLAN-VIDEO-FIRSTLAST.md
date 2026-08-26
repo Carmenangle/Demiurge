@@ -111,6 +111,18 @@
    - **高潮图片动作化延伸**（climax 精简版打磨）。
 3. **模型名不硬编码**：Minimax H3 只是视频模型之一，实际还有别的。元信息里的模型名
    从 `video_config.model` 透传，**不得**写死「Minimax H3」。
+4. **防拦截机制对齐图像生成（2026-08-26 新增）**：视频提示词与图像生成一样，采用
+   **两层防拦截**。已确认图像生成的两层是：① `restore_jailbreak` 还原 `@()@` 破甲标记
+   （纯函数，`image_prompt_extract`）；② `_apply_regex(IMAGE_PROMPT, is_prompt=True)`
+   用户正则清洗（接线层，需 ctx）。
+   - 第一层已落地：`video_prompt.build_video_request` 入口 `_clean_spec` 对 spec 文本字段
+     统一 `restore_jailbreak` 兜底（端到端 dry-run 已验证：带 `@(色)@` 的 appearance 不再
+     残留进 prompt）。
+   - 第二层待定（接线层）：视频提示词是中文 H3 叙事，非英文 booru tags，是否复用
+     `IMAGE_PROMPT` placement 还是新增 `VIDEO_PROMPT` placement，接线时（B1/B3）再定。
+5. **A3 表格读取取消（2026-08-26 新增）**：表格在剧情推进时已自动发送/自动填表，
+   生成视频提示词时场景、角色等信息**本就是已知内容**（已在 `scene_spec` 的
+   appearance/wardrobe/locale 里），无需单独读 `table_store`。P2 从实现计划移除。
 
 ---
 
@@ -118,20 +130,20 @@
 
 ```
 第一批（本轮核心目标，纯函数，不依赖前端协议）：
-  A1 首尾帧双锚点提取  story_frames.py（P1）——「准确提取首尾帧」
-  A2 提示词打磨         video_prompt.py 直接改——
+  A1 首尾帧双锚点提取  story_frames.py（P1）✅ 完成
+  A2 提示词打磨         video_prompt.py ✅ 完成——
                         · 衔接感：firstlast 首帧强化「上楼层尾帧→本楼层开场」衔接描述
                         · 高潮动作化延伸：climax 动作段加强运镜/特效/节拍
-                        · 同时修 R2(缺图守卫)/R3(模型名透传)/R6(无对白不写台词)/R7(去重)
-  A3 表格素材读取      story_frames 复用（P2，静默降级）——支撑首尾帧场景/角色细节
+                        · 修 R2/R3/R6/R7/R9 + 防拦截第一层（_clean_spec restore_jailbreak）
+  A3 表格素材读取      ❌ 取消（表格在剧情推进时已自动发送，场景信息 scene_spec 已含）
 
 第二批（接线，需前端协议）：
   B1 videoMode + 事件协议（P3）  B2 尾帧反查（P4，零持久化）
-  B3 前端双图提交链（P5）
+  B3 前端双图提交链（P5）+ 防拦截第二层（_apply_regex，IMAGE_PROMPT 复用 or VIDEO_PROMPT 新增）
 
 第三批（延后）：
   C1 真实 API 对齐（P6，待用户提供可实测端点）  C2 转场素材（延后）
 ```
 
-先做 **A1+A2**：A2 是对现有 `video_prompt.py` 的直接修正（含 R2/R3/R6/R7，无协议依赖），
-A1 提供 firstlast 的真实首尾帧描述来源。两者可合一批提交，单测全绿。
+A1+A2 已完成并验证（端到端 dry-run 串通 + 防拦截第一层对齐）。下一步 B1（videoMode +
+事件协议）是接线起点，需前端 `MediaInsertPreset` 与 `illustrate_request` 事件字段。
