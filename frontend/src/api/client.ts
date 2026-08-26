@@ -19,8 +19,27 @@ async function parseResponse<T>(response: Response): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-export async function apiGet<T>(path: string): Promise<T> {
-  return parseResponse<T>(await fetch(apiUrl(path)));
+export async function apiGet<T>(path: string, timeoutMs?: number): Promise<T> {
+  // 可选超时：传 timeoutMs 时用 AbortController 限时，超时抛可读错误。
+  // 轮询类接口（如 /comfyui/status）必须传超时——否则后端慢/挂起时 await 永不返回，
+  // 调用方的轮询链就断了（表现为「等待中…」后不再重试）。默认不传保持原有行为。
+  let signal: AbortSignal | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  if (timeoutMs && timeoutMs > 0) {
+    const ac = new AbortController();
+    signal = ac.signal;
+    timer = setTimeout(() => ac.abort(), timeoutMs);
+  }
+  try {
+    return await parseResponse<T>(await fetch(apiUrl(path), { signal }));
+  } catch (e) {
+    if ((e as Error)?.name === "AbortError") {
+      throw new Error(`请求超时（超过 ${Math.round((timeoutMs || 0) / 1000)} 秒）。`);
+    }
+    throw e;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 export async function apiPost<T>(

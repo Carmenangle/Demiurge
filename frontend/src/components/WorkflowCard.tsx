@@ -349,6 +349,11 @@ export function NodeCard({
   const retryRef = useRef(0);
   const MAX_RETRY = 6;
   const loadedRef = useRef(false);
+  // iframe 加载超时兜底：comfyReady 后 iframe 已创建但页面迟迟不就绪（ComfyUI 启动中/被并发拖垮）
+  // → 自动重挂 iframe（remount+1）重走 onLoad ping_ready；用尽显示手动重载，绝不无限「载入中…」。
+  const [loadTries, setLoadTries] = useState(0);
+  const MAX_LOAD_TRIES = 3;
+  const [failed, setFailed] = useState(false);
   const frameUrl = lockUrl(comfyUrl);
 
   useEffect(() => {
@@ -411,6 +416,22 @@ export function NodeCard({
     };
   }, [workflow, nodeId, comfyUrl, remount, comfyReady]);
 
+  // iframe 加载超时：comfyReady 后 30s 内未收到 loaded（页面加载慢/启动中被拖垮）→ 重挂一次；
+  // 用尽 MAX_LOAD_TRIES 显示手动重载（避免「载入中…」永久卡死、也不无限自动重挂烧性能）。
+  useEffect(() => {
+    if (!comfyReady || loaded || failed) return;
+    const t = setTimeout(() => {
+      if (loadedRef.current) return;
+      if (loadTries < MAX_LOAD_TRIES) {
+        setLoadTries((n) => n + 1);
+        setRemount((r) => r + 1);
+      } else {
+        setFailed(true);
+      }
+    }, 30000);
+    return () => clearTimeout(t);
+  }, [comfyReady, loaded, loadTries, failed]);
+
   const frameStyle: React.CSSProperties = ratio
     ? { aspectRatio: String(ratio) }
     : { height: 220 };
@@ -420,7 +441,17 @@ export function NodeCard({
       <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 4, display: "flex", alignItems: "center", gap: 8 }}>
         <span>节点 {index + 1} · #{nodeId}</span>
         {!comfyReady && <span>ComfyUI 未启动，等待中…</span>}
-        {comfyReady && !loaded && <span>载入中…</span>}
+        {comfyReady && !loaded && !failed && <span>载入中…</span>}
+        {failed && (
+          <button
+            className="icon-btn"
+            title="ComfyUI 页面加载超时，点此重新载入"
+            onClick={() => { setFailed(false); setLoadTries(0); setComfyReady(false); setRemount((r) => r + 1); }}
+            style={{ color: "#c98a1a", whiteSpace: "nowrap", fontSize: 12 }}
+          >
+            ↻ 加载超时，重新载入
+          </button>
+        )}
       </div>
       {comfyReady && (
         <div className="lock-canvas" style={frameStyle}>

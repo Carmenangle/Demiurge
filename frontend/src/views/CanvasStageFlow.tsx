@@ -1761,6 +1761,18 @@ export function CanvasStageFlow({
   }, []);
 
   const onNodesChangeRaw = useCallback((changes: NodeChange<Node<CardNodeData>>[]) => {
+    // 拖动「生成中」占位节点时同步 streamingPosRef：
+    // 生成结束的原位替换（pendingAnchorRef 转存）与剧情楼层接位都读 streamingPosRef，
+    // 若不更新，结果节点/剧情楼层会落在占位的【最初】位置，用户拖动占位位置后仍然无效。
+    // 用 streamingPosRef.current.id 匹配占位 id（gen-<streamingId>），不依赖闭包里的 streamingId。
+    const ph = streamingPosRef.current;
+    for (const c of changes) {
+      if (ph && c.type === "position" && c.position
+        && typeof c.position.x === "number" && typeof c.position.y === "number"
+        && c.id === `gen-${ph.id}`) {
+        streamingPosRef.current = { id: ph.id, x: c.position.x, y: c.position.y };
+      }
+    }
     // 仅接受 position/select 类变更（拖拽由 ReactFlow 管理）
     onNodesChange(changes);
   }, [onNodesChange]);

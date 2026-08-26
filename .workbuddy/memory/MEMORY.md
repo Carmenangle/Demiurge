@@ -18,6 +18,7 @@
 - 自动插画按 `messageId + slotId` 原位回填，不追加对话轮，不阻塞前台聊天队列。
 - 配置/协议/清洗规则/数据真源只有一个属主；新事件须同步更新后端协议、前端解码、reducer 与双端测试。
 - 密钥只进被 Git 忽略的 `backend/data/user_state.json`。
+- **轮询类 API 必须带超时**（`apiGet(path, timeoutMs)`，如 `comfyStatus` 6s）：禁止无超时 await 进轮询链，否则单次请求挂起 = 轮询永久中断（表现为“等待中…”后不再加载，2026-08-26 教训）。
 - **工作流卡片节点展示 = 早期机制（唯一正确，勿再被旧文档带偏）**：N 个选中节点 → N 个独立 ComfyUI iframe（`NodeCard`），各自 `keepOnly` 单节点 + `request_graph` 刷新校验到只剩自己 + `node_size` 自适应大小；禁止改成「单共享 iframe 截图切割」（`SharedNodePreview`/方案 B）。
 
 ## 目录速查
