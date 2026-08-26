@@ -149,29 +149,37 @@ constraints that are safe to include in private agent context.
 
 ## V1.5/V1.6 实现进度（deepseek-v4-pro-0813 编码）
 
-**模型分工（用户指定，三档路由）**：
-- glm-5.3（tier:c3）= 代码结构文档构筑 + 代码审计。
+**模型分工（用户指定，三档路由，2026-08-26 修正）**：
+- glm-5.3（tier:c3）= 极度困难的代码编程方向引导 + 架构文档编写 + 代码审计。
 - deepseek-v4-pro-0813（tier:c2）= 实际编码 + 审计后修复。
-- deepseek-v4-flash-0731（tier:c0/c1）= 普通对话 + 简单代码编程 + 读取文档。
+- deepseek-v4-flash-0731（tier:c0/c1）= 记入记忆 + 读取文档 + 普通对话 + 极其简单的代码编程。
 
 已完成：
 - A1 首尾帧双锚点提取 `services/story_frames.py`（纯函数，提交 407fac7）：楼层文本 → 段首+段尾
   双锚点 opening/closing（非单一高潮段）；纯对白段就近借画面段；单段退化静止；空正文降级。
 - A2 视频提示词打磨（提交 50e810e）：R2/R3/R6/R7/R9 + 衔接感 + 高潮动作化。
-- **防拦截第一层对齐（本轮）**：`video_prompt.build_video_request` 入口 `_clean_spec` 对 spec
-  文本字段统一 `restore_jailbreak` 兜底。端到端 dry-run 验证：带 `@(色)@` 破甲标记的 appearance
+- **防拦截第一层对齐**：`video_prompt.build_video_request` 入口 `_clean_spec` 对 spec 文本字段
+  统一 `restore_jailbreak` 兜底。端到端 dry-run 验证：带 `@(色)@` 破甲标记的 appearance
   不再残留进 prompt（修复前会残留）。
+- **共享清洗规则落地（本轮）**：新建 `services/prompt_clean.py`（纯函数：restore_jailbreak/
+  restore_jailbreak_with_offsets/clean_spec_text_fields）+ `docs/PROMPT-CLEANING-RULES.md`
+  （按用途命名「通用提示词清洗规则」，单一事实来源）。`image_prompt_extract` 与 `video_prompt`
+  均改为复用共享模块（image_prompt_extract 内 _MARKER_RE 与 restore_jailbreak* 实现已删除，
+  改为 re-export）。独立性保障：删掉 IMAGE_PROMPT 清洗规则，图像生成仍受共享规则庇护
+  （test_prompt_clean.py 回归保证）。全量 1640 passed。
 
 关键结论（用户拍板）：
-1. **防拦截两层机制**（与图像生成一致）：① restore_jailbreak 破甲还原（纯函数，已落地）；
+1. **防拦截两层机制**（与图像生成一致）：① 破甲还原 @()@→正常文字（纯函数，已落地）；
    ② _apply_regex(placement) 用户正则清洗（接线层）。
-   - **第②层决策（用户拍板 2026-08-26）**：新增独立 `VIDEO_PROMPT = 8` placement，
-     不复用 IMAGE_PROMPT——IMAGE_PROMPT 语义是「破甲还原 + 洗成干净 booru 串」，只适用图像
-     英文 tags；视频提示词是中文 H3 叙事，需用户为视频单独配正则清洗脚本。
-   - **机制真相（代码核实）**：@() 还原是 `restore_jailbreak`（硬编码 _MARKER_RE），不是
-     IMAGE_PROMPT 的能力；IMAGE_PROMPT placement 走 `regex_engine.run_scripts` 的**任意正则**
-     （findRegex/replaceString/trimStrings，全局库/预设/卡内嵌三层来源），能洗任意内容，
-     绝不只是 @()。
+   - **第②层决策（用户拍板 2026-08-26 修正）**：**不新增 VIDEO_PROMPT placement**。清洗规则
+     从 IMAGE_PROMPT 抽出为单一共享清洗规则文档 `docs/PROMPT-CLEANING-RULES.md`（「通用提示词
+     清洗规则」），图像/视频/未来一切提示词共用一份，节省上下文。
+   - **机制真相（代码核实）**：@() 还原是共享模块 `prompt_clean.restore_jailbreak`（硬编码
+     _MARKER_RE），不是 IMAGE_PROMPT 的能力；IMAGE_PROMPT placement 走 `regex_engine.run_scripts`
+     的**任意正则**（findRegex/replaceString/trimStrings，全局库/预设/卡内嵌三层来源），
+     能洗任意内容，绝不只是 @()。
+   - **独立性保障（落地）**：image_prompt_extract 破甲还原改为 re-export 共享模块，删掉
+     IMAGE_PROMPT 清洗规则图像生成仍受共享规则庇护（test_prompt_clean.py 回归）。
    - 视频两套提示词已分开建模：firstlast=剧情完整桥段（七段式时间分镜）、climax=高潮段落
      扩展（精简版动作瞬间），各自独立 compile_*。
 2. **A3 表格读取取消**：表格在剧情推进时已自动发送/自动填表，场景角色信息 scene_spec

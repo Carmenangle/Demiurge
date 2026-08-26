@@ -118,18 +118,25 @@
    - 第一层已落地：`video_prompt.build_video_request` 入口 `_clean_spec` 对 spec 文本字段
      统一 `restore_jailbreak` 兜底（端到端 dry-run 已验证：带 `@(色)@` 的 appearance 不再
      残留进 prompt）。
-   - 第二层已定（2026-08-26 用户拍板）：**新增独立 `VIDEO_PROMPT = 8` placement**，不复用
-     `IMAGE_PROMPT`。理由：IMAGE_PROMPT 语义是「破甲还原 + 洗成干净 booru 串」，只适用图像
-     英文 tags；视频提示词是中文 H3 叙事（firstlast 剧情完整桥段 / climax 高潮段落扩展两套），
-     需用户为视频单独配正则清洗脚本。接线（B1/B3）时在 regex_engine.Placement 加
-     `VIDEO_PROMPT = 8`，并在 build_video_request 的调用方跑 `_apply_regex(ctx, prompt,
-     Placement.VIDEO_PROMPT, is_prompt=True)`。
-   - 机制真相（代码核实）：@() 还原是 `restore_jailbreak`（硬编码 _MARKER_RE），不是 IMAGE_PROMPT
-     的能力；IMAGE_PROMPT placement 走 `regex_engine.run_scripts` 的**任意正则**（findRegex/
-     replaceString/trimStrings，全局库/预设/卡内嵌三层来源），能洗任意内容。
+   - **第二层已定（2026-08-26 用户拍板修正）**：**不新增 VIDEO_PROMPT placement**。清洗规则
+     从 IMAGE_PROMPT 抽出为**单一共享清洗规则文档**（`docs/PROMPT-CLEANING-RULES.md`，按用途
+     命名「通用提示词清洗规则」），图像、视频及未来一切提示词都用同一份规则
+     （破甲还原 → 客观提取 → 按目标语言拼装），节省上下文。视频提示词不单独配清洗 placement，
+     直接用 IMAGE_PROMPT 同套机制。
+   - 机制真相（代码核实）：@() 还原是共享模块 `prompt_clean.restore_jailbreak`（硬编码
+     _MARKER_RE），不是 IMAGE_PROMPT 的能力；IMAGE_PROMPT placement 走 `regex_engine.run_scripts`
+     的**任意正则**（findRegex/replaceString/trimStrings，全局库/预设/卡内嵌三层来源），
+     能洗任意内容。
+   - 独立性保障（2026-08-26 落地）：`image_prompt_extract` 的破甲还原已改为 re-export 共享
+     模块 `prompt_clean`（本模块内 `_MARKER_RE` 与 `restore_jailbreak*` 实现已删除），
+     即使删掉 IMAGE_PROMPT 清洗规则，图像生成仍由共享规则庇护防拦截
+     （回归测试 `test_prompt_clean.py` 保证）。
 5. **A3 表格读取取消（2026-08-26 新增）**：表格在剧情推进时已自动发送/自动填表，
    生成视频提示词时场景、角色等信息**本就是已知内容**（已在 `scene_spec` 的
    appearance/wardrobe/locale 里），无需单独读 `table_store`。P2 从实现计划移除。
+6. **视频提示词不靠模板敲定（2026-08-26 用户拍板）**：镜头语言映射（情境→角度+运动）
+   只是骨架，A（镜头编排）+ B（动态提取：对白逐字/动作序列/情绪）是提取方向，
+   但具体提示词必须结合剧情动态逐段编写，**尚未拍案实现细节**。
 
 ---
 
@@ -141,12 +148,12 @@
   A2 提示词打磨         video_prompt.py ✅ 完成——
                         · 衔接感：firstlast 首帧强化「上楼层尾帧→本楼层开场」衔接描述
                         · 高潮动作化延伸：climax 动作段加强运镜/特效/节拍
-                        · 修 R2/R3/R6/R7/R9 + 防拦截第一层（_clean_spec restore_jailbreak）
+                        · 修 R2/R3/R6/R7/R9 + 防拦截第一层（_clean_spec → 共享 prompt_clean）
   A3 表格素材读取      ❌ 取消（表格在剧情推进时已自动发送，场景信息 scene_spec 已含）
 
 第二批（接线，需前端协议）：
   B1 videoMode + 事件协议（P3）  B2 尾帧反查（P4，零持久化）
-  B3 前端双图提交链（P5）+ 防拦截第二层（_apply_regex，新增 VIDEO_PROMPT=8 placement）
+  B3 前端双图提交链（P5）+ 防拦截第二层（_apply_regex，复用共享清洗规则文档，不新增 placement）
 
 第三批（延后）：
   C1 真实 API 对齐（P6，待用户提供可实测端点）  C2 转场素材（延后）

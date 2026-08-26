@@ -13,9 +13,11 @@ import json
 import re
 from collections.abc import Callable
 
-# 破甲标记还原：对齐用户给的正则 /@\(([^()]*)\)(?=@)|@\(([^()]*)\)|\(([^()]*)\)@|@/g → $1$2$3
+from app.services.prompt_clean import restore_jailbreak, restore_jailbreak_with_offsets
+
+# 破甲标记还原：由共享模块 prompt_clean 提供（规则文档 docs/PROMPT-CLEANING-RULES.md）。
+# 对齐用户给的正则 /@\(([^()]*)\)(?=@)|@\(([^()]*)\)|\(([^()]*)\)@|@/g → $1$2$3
 # 覆盖 @(x)@ 包裹式；剩余裸 @ 直接删。i/<i> 等分隔符另由用户在 IMAGE_PROMPT 正则里配（此处只兜底 @ 系）。
-_MARKER_RE = re.compile(r"@\(([^()]*)\)(?=@)|@\(([^()]*)\)|\(([^()]*)\)@|@")
 _ILLUSTRATION_RE = re.compile(r"\s*<illustration>\s*([\s\S]*?)\s*</illustration>\s*", re.I)
 _ILLUSTRATION_OPEN_TAIL_RE = re.compile(r"\s*<illustration>\s*[\s\S]*\Z", re.I)
 _THINK_RE = re.compile(r"\s*<think\b[^>]*>[\s\S]*?</think>\s*", re.I)
@@ -115,38 +117,6 @@ def build_inline_plan_instruction(
             + "\n必须与最近的状态块和高潮正文所示当前情况合并，不得只写角色名。"
         )
     return instruction
-
-
-def restore_jailbreak_with_offsets(text: str) -> tuple[str, list[int]]:
-    """还原破甲标记，并返回每个可见字符在原文中的结束偏移。"""
-    if not text:
-        return text, []
-    visible: list[str] = []
-    offsets: list[int] = []
-    cursor = 0
-    for match in _MARKER_RE.finditer(text):
-        for index in range(cursor, match.start()):
-            visible.append(text[index])
-            offsets.append(index + 1)
-        group_index = next((i for i in (1, 2, 3) if match.group(i) is not None), None)
-        if group_index is not None:
-            value = match.group(group_index) or ""
-            group_start = match.start(group_index)
-            for index, char in enumerate(value):
-                visible.append(char)
-                offsets.append(group_start + index + 1)
-        elif offsets:
-            offsets[-1] = match.end()
-        cursor = match.end()
-    for index in range(cursor, len(text)):
-        visible.append(text[index])
-        offsets.append(index + 1)
-    return "".join(visible), offsets
-
-
-def restore_jailbreak(text: str) -> str:
-    """还原 @()@ 系破甲标记为正常文字（防拦截用的拆字/包裹去掉，保留原义）。"""
-    return restore_jailbreak_with_offsets(text)[0]
 
 
 def protected_narrative_text(text: str) -> str:
