@@ -132,3 +132,17 @@ constraints that are safe to include in private agent context.
 禁止套时间分镜。产出 `video_prompt` 随 illustrate_request 下发。
 
 关键约束：preset 二选一；旧预设不迁移不报错（videoMode 缺省=climax）。
+
+## V1.5/V1.6 实现计划 + 风险审计（glm-5.3 规划 2026-08-26）
+
+已产出 `docs/PLAN-VIDEO-FIRSTLAST.md`，将剩余实现拆成 P1-P6 分期并做隐患审计（R1-R10）。
+核心红线与隐患：
+- **R1（最大红线）**：双图 `image[]` 首尾帧语义未实测——OpenAI 兼容 `image[]` 只是「多参考图」，
+  不是「首帧/尾帧」。一期只在 prompt 层做「职责绑定」（图片1=首帧），不声明 API 语义；P6 实测后定字段名。
+- R2：firstlast 缺图时 prompt 仍写「图片1/图片2」→ 引用不存在的图，需守卫。
+- R3：`_meta` 缺 H3 三件套里的「模型名+画幅」；R6：`_audio_hint` 无对白时仍写「台词=逐字」会诱导幻觉。
+- R4：前端 firstlast 触发不能复用 climax 的 `motion>=2` 闸门，要按楼层单独闸门。
+- R8：尾帧跨楼层状态用「反查」（倒序找最近 ready video 槽）而非新增持久化，避免快照/分叉/重生成污染。
+- 已落地：`services/video_prompt.py`（两套编译 + build_video_request dry-run，纯函数），
+  `tests/test_video_prompt.py` 11 passed。提交 `2f276c7`。
+- 建议下一步：P3（videoMode/协议/守卫，含 R2/R3/R6/R7 修正）——它是 P1/P2 产出的出口契约。
