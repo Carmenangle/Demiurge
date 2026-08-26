@@ -66,7 +66,10 @@ def test_firstlast_carries_prev_tail_for_transition():
     p = video_prompt.compile_firstlast_video_prompt(
         _spec(), prev_tail_desc="上楼层：雨夜门口收伞",
     )
-    assert "上楼层尾帧衔接：上楼层：雨夜门口收伞" in p
+    assert "承接上一镜头尾帧" in p
+    assert "上楼层：雨夜门口收伞" in p
+    assert "自然延续" in p
+    assert "无突兀跳切" in p
 
 
 def test_firstlast_identity_reasserted_per_segment():
@@ -130,3 +133,82 @@ def test_build_request_separates_role_desc_from_image_address():
     # reference_binding 同时展示职责 + 来源，便于核对对应关系
     assert "三人围坐开场 → http://x/f.png" in req["reference_binding"]["图片1"]
     assert "举杯同框收尾 → http://x/l.png" in req["reference_binding"]["图片2"]
+
+
+# ===== R2 缺图守卫 =====
+
+def test_firstlast_missing_frames_honest_degredation():
+    p = video_prompt.compile_firstlast_video_prompt(
+        _spec(), has_first=False, has_last=False,
+    )
+    # 缺图时诚实标注「无参考图，以文字为准」，不写「图片1/图片2=」
+    assert "图片1=" not in p and "图片2=" not in p
+    assert "首帧（无参考图，以文字为准）" in p
+    assert "尾帧（无参考图，以文字为准）" in p
+
+
+def test_build_request_missing_frames_warns():
+    req = video_prompt.build_video_request(
+        mode="firstlast", spec=_spec(),
+        video_config={"base_url": "https://x.com/videos", "model": "h3"},
+    )
+    assert req["submit"]["images"] == []
+    assert req["submit"]["content_type"] == "application/json"
+    assert any("缺首帧图" in w for w in req["warnings"])
+    assert any("缺尾帧图" in w for w in req["warnings"])
+    assert any("纯文生" in w for w in req["warnings"])
+
+
+# ===== R3 元信息三件套（模型名透传 + 画幅派生）=====
+
+def test_meta_passthrough_model_name_not_hardcoded():
+    p = video_prompt.compile_climax_video_prompt(
+        _spec(), model_name="seedance-1.0", size="1280x720",
+    )
+    assert "seedance-1.0" in p          # 透传，非硬编码 Minimax H3
+    assert "Minimax" not in p
+    assert "16:9" in p                  # 画幅从 size 派生
+
+
+def test_aspect_from_size_variants():
+    assert video_prompt._aspect_from_size("1280x720") == "16:9"
+    assert video_prompt._aspect_from_size("1024x1024") == "1:1"
+    assert video_prompt._aspect_from_size("1080x1920") == "9:16"
+    assert video_prompt._aspect_from_size("16:9") == "16:9"
+
+
+# ===== R6 音频：无对白不写「台词=逐字」 =====
+
+def test_audio_no_dialogue_no_script_line():
+    p = video_prompt.compile_firstlast_video_prompt(_spec())
+    assert "音乐=" in p
+    assert "台词=" not in p            # 无逐字对白时不诱导幻觉
+
+
+def test_audio_with_dialogue_lists_script():
+    p = video_prompt.compile_firstlast_video_prompt(
+        _spec(), audio_lines=[{"speaker": "温知夏", "text": "开饭啦"}],
+    )
+    assert "台词=" in p
+    assert "温知夏：开饭啦" in p
+
+
+# ===== R7 负面约束去重 =====
+
+def test_negative_dedup_across_sources():
+    p = video_prompt.compile_climax_video_prompt(
+        _spec(negative_prompt="禁止五官漂移"),
+        negative="禁止五官漂移 / 变成其他画风",
+    )
+    assert p.count("禁止五官漂移") == 1  # preset 与 scene_spec 重复项去重
+    assert "变成其他画风" in p
+
+
+# ===== R9 视频默认 16:9 =====
+
+def test_build_request_default_size_is_16_9():
+    req = video_prompt.build_video_request(
+        mode="climax", spec=_spec(),
+        video_config={"base_url": "https://x.com/v", "model": "m"},
+    )
+    assert req["submit"]["size"] == "1280x720"  # 不再沿用图片的 1024x1024
