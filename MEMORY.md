@@ -214,6 +214,14 @@ constraints that are safe to include in private agent context.
    事件层直接复用；`illustration.request` trace 新增 video_prompt 全文，agent-trace.jsonl
    可核对视频提示词（后端 1653）。注意：非高潮轮（如 <status> 状态轮）不触发插画 → 无
    illustration.request → 无 video_prompt，属预期。
+   🆕 画面级要素优先（2026-08-26 用户反馈「角色不对/提示词对不上剧情」）：climax 的
+   [动作] 桥段原先直接用中文 narrative（围绕 anchor 截取，anchor 陈旧时会截取到错误桥段），
+   改为优先用主模型同轮提炼的画面级要素（subjects/visual_facts/composition，与图片提示词
+   同源），camera 优先、motion 兜底运镜；[参考绑定] 图职责描述与 build_video_request 的
+   desc 同样用画面级动作瞬间兜底（不再硬传 `first_frame_desc or "高潮动作画面"`）；produce
+   层/`_video_request_for` 的 first_frame_desc 留空。test_video_prompt +3 用例，全量 后端
+   1656 / 前端契约 14。注意：角色不对（问题1）根因在插画角色识别层（`_mentioned_bound_names`
+   纯子串匹配 + `illustration_actor_names` 可能混入作品名/道具），非视频提示词桥段，本轮未改。
 
 下一步：用探针输出人工核对 climx 提示词质量 + 视频参数（model 空=未配视频模型、
 images 空=参考图待上游补、warnings 缺图守卫）；之后按反馈逐步排查内容编写。P6 真实

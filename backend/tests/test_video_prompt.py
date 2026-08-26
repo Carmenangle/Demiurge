@@ -234,3 +234,37 @@ def test_build_request_restores_markers_in_firstlast():
     prompt = req["submit"]["prompt"]
     assert "@(" not in prompt and ")@" not in prompt
     assert "三人举杯同框" in prompt and "面馆内景" in prompt
+
+
+# ===== 高潮动作桥段：画面级要素优先（保证高潮场景用视频结构表现）=====
+
+def test_climax_prefers_visual_facts_over_raw_narrative():
+    # 高潮动作优先用主模型同轮提炼的画面级要素，而不是围绕锚点截取的中文叙事原文
+    spec = _spec(
+        narrative="陈旧叙事：她还在孤儿院门口。",  # 锚点陈旧时会截取到对不上剧情的原文
+        subjects=[{"name": "冷倾雪", "description": "drawing sword, crimson cloak in lightning", "weight": 1.2}],
+        visual_facts=[{"kind": "action", "fact": "leaps upward with blade raised", "evidence": "拔剑跃起"}],
+        composition="low-angle dynamic shot",
+        camera="fast tracking push-in",
+        motion=3,
+    )
+    p = video_prompt.compile_climax_video_prompt(spec)
+    assert "drawing sword, crimson cloak in lightning" in p
+    assert "leaps upward with blade raised" in p
+    assert "low-angle dynamic shot" in p
+    assert "fast tracking push-in" in p
+    assert "孤儿院门口" not in p  # 陈旧叙事不再进入高潮动作
+
+
+def test_climax_falls_back_to_narrative_without_visual_elements():
+    # 无画面级要素时回退中文 narrative（旧行为）
+    spec = _spec(composition="", camera="")
+    p = video_prompt.compile_climax_video_prompt(spec)
+    assert "温知夏抬眼笑说「开饭」，三人围坐面馆。" in p
+
+
+def test_climax_camera_prefers_model_camera_over_motion():
+    # 运镜优先主模型 camera，不按 motion 强度兜底
+    p = video_prompt.compile_climax_video_prompt(_spec(camera="摇臂俯拍", motion=3))
+    assert "摇臂俯拍" in p
+    assert "低机位快速丝滑运镜" not in p

@@ -1467,9 +1467,9 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
                     illustrate_req["video_request"] = _vp_mod.build_video_request(
                         mode="climax", spec=_merged_spec,
                         video_config=illustrate_req.get("video_config") or {},
-                        first_frame_desc=str(
-                            scene_spec.get("narrative") or ""
-                        ).strip() or "高潮动作画面",
+                        # first_frame_desc 留空：图职责描述由 video_prompt 用画面级
+                        # 动作瞬间（subjects/visual_facts/composition）兜底，与 [动作]
+                        # 同源，避免把围绕锚点截取的可能陈旧 narrative 写进 [参考绑定]。
                     )
                     _video_prompt_text = str(
                         (illustrate_req["video_request"].get("submit") or {}).get("prompt") or ""
@@ -2490,7 +2490,9 @@ def _video_request_for(rec: dict) -> dict | None:
     完整组装出来，供测试核对两件事：
     ① 提示词内容是否符合要求（区块完整 / 无破甲残留 / 动作·运镜随 motion）；
     ② 视频参数有没有正确上传（模型名 / 画幅 / 时长 / 镜头 / 参考图 / 缺图警告）。
-    scene_spec 不含 motion，从 rec 顶层补齐；first_frame_desc 用已还原 narrative。
+    scene_spec 不含 motion，从 rec 顶层补齐；first_frame_desc 留空，图职责描述由
+    video_prompt 用画面级动作瞬间（subjects/visual_facts/composition）兜底，与
+    [动作] 桥段同源，避免把围绕锚点截取的可能陈旧 narrative 写进提示词。
     失败静默降级为 None，不阻断出图/出视频。后续配好视频工作流后改回真正执行 submit。
     """
     spec = rec.get("scene_spec")
@@ -2506,12 +2508,11 @@ def _video_request_for(rec: dict) -> dict | None:
         if "motion" not in merged:
             merged["motion"] = int(rec.get("motion") or 0)
         vcfg = rec.get("video_config") if isinstance(rec.get("video_config"), dict) else {}
-        first_frame_desc = str(spec.get("narrative") or "").strip() or "高潮动作画面"
         return video_prompt.build_video_request(
             mode="climax",
             spec=merged,
             video_config=vcfg,
-            first_frame_desc=first_frame_desc,
+            # first_frame_desc 留空：图职责描述由 video_prompt 用画面级动作瞬间兜底
         )
     except Exception:
         return None

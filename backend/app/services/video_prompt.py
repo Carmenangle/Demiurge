@@ -94,9 +94,12 @@ def _negative(spec: dict[str, Any], preset_negative: str) -> str:
     return "；".join(items)
 
 
-def _reference_binding_climax(first_frame_desc: str, actors: list[str]) -> str:
-    """③ 参考绑定（climax 单图）：图片1 = 高潮动作画面，锁身份。"""
-    desc = (first_frame_desc or "").strip() or "高潮动作画面"
+def _reference_binding_climax(first_frame_desc: str, actors: list[str], action_beat: str = "") -> str:
+    """③ 参考绑定（climax 单图）：图片1 = 高潮动作画面，锁身份。
+
+    desc 优先外部职责描述（first_frame_desc），其次画面级动作瞬间（action_beat），
+    最后才是「高潮动作画面」占位——保证图职责描述与 [动作] 桥段同源、对得上剧情。"""
+    desc = (first_frame_desc or "").strip() or action_beat or "高潮动作画面"
     lines = [f"图片1={desc}（唯一参考画面，作为准确起始帧）"]
     if actors:
         lines.append(f"保持 {('、'.join(actors))} 的身份、脸部、服装、发型、造型完全一致")
@@ -218,19 +221,60 @@ def _audio_hint(spec: dict[str, Any], audio_lines: list | None = None) -> str:
 
 
 def _climax_action(spec: dict[str, Any]) -> tuple[str, str, str]:
-    """高潮动作化延伸：按 motion 强度给「运镜 + 特效 + 节拍」（H3 高潮段手法）。"""
-    narrative = str(spec.get("narrative") or "").strip() or "动作瞬间"
+    """高潮动作化延伸：优先用主模型同轮提炼的**画面级要素**（subjects/visual_facts/
+    composition/camera）组成「单一动作瞬间 + 运镜 + 特效」，与图片提示词同源，
+    保证剧情一致（避免把围绕锚点截取的整段中文叙事直接塞给视频模型导致对不上剧情）；
+    缺失时回退中文 narrative 与 motion 强度兜底。"""
     motion = int(spec.get("motion") or 0)
+    return (
+        _climax_action_beat(spec),
+        _climax_camera(spec, motion),
+        _climax_fx(motion),
+    )
+
+
+def _climax_action_beat(spec: dict[str, Any]) -> str:
+    """单一动作瞬间（画面级）：subjects(英文主体描述) + visual_facts(英文视觉事实) +
+    composition(构图)。这些是主模型同轮提炼、与图片提示词同源的画面要素，直接对应当前
+    高潮场景；缺失时回退中文 narrative 原文。"""
+    parts: list[str] = []
+    for subject in spec.get("subjects") or []:
+        if isinstance(subject, dict):
+            desc = str(subject.get("description") or "").strip()
+            if desc and desc not in parts:
+                parts.append(desc)
+    for fact in spec.get("visual_facts") or []:
+        if isinstance(fact, dict):
+            f = str(fact.get("fact") or "").strip()
+            if f and f not in parts:
+                parts.append(f)
+    composition = str(spec.get("composition") or "").strip()
+    if composition and composition not in parts:
+        parts.append(composition)
+    if parts:
+        return ", ".join(parts)
+    return str(spec.get("narrative") or "").strip() or "动作瞬间"
+
+
+def _climax_camera(spec: dict[str, Any], motion: int) -> str:
+    """运镜：主模型 camera 优先，其次 motion 强度兜底。"""
+    camera = str(spec.get("camera") or "").strip()
+    if camera:
+        return camera
     if motion >= 3:
-        cam = "低机位快速丝滑运镜+高速推近骤停"
-        fx = "能量爆发式特效，画面错位与鼓点精准同步"
-    elif motion >= 2:
-        cam = "绕主体快速运镜"
-        fx = "强化动作张力，与节拍/重音同步"
-    else:
-        cam = "极缓推进"
-        fx = "轻微运镜强化代入感"
-    return narrative, cam, fx
+        return "低机位快速丝滑运镜+高速推近骤停"
+    if motion >= 2:
+        return "绕主体快速运镜"
+    return "极缓推进"
+
+
+def _climax_fx(motion: int) -> str:
+    """特效/节拍：按 motion 强度给动态手法（H3 高潮段手法）。"""
+    if motion >= 3:
+        return "能量爆发式特效，画面错位与鼓点精准同步"
+    if motion >= 2:
+        return "强化动作张力，与节拍/重音同步"
+    return "轻微运镜强化代入感"
 
 
 def compile_climax_video_prompt(
@@ -254,12 +298,14 @@ def compile_climax_video_prompt(
     style = _style_declaration(style_prefix, str(spec.get("rating") or ""))
     if style:
         blocks.append(f"[风格]：{style}")
-    blocks.append(f"[参考绑定]：{_reference_binding_climax(first_frame_desc, spec.get('actors') or [])}")
+    action, cam, fx = _climax_action(spec)
+    blocks.append(
+        f"[参考绑定]：{_reference_binding_climax(first_frame_desc, spec.get('actors') or [], action)}"
+    )
     subject = _subject_scene(spec)
     if subject:
         blocks.append(f"[主体/场景]：{subject}")
-    narrative, cam, fx = _climax_action(spec)
-    blocks.append(f"[动作]：{narrative}；{cam}；{fx}。")
+    blocks.append(f"[动作]：{action}；{cam}；{fx}。")
     neg = _negative(spec, negative)
     if neg:
         blocks.append(f"[负面约束]：{neg}")
@@ -377,14 +423,17 @@ def build_video_request(
             "图片2": _binding_entry(last_frame_desc or "尾帧/楼层结尾画面", last_frame),
         }
     else:
+        # 图职责描述：外部 first_frame_desc 优先，否则用画面级动作瞬间（与 [动作] 同源，
+        # 避免把围绕锚点截取的可能陈旧 narrative 写进图职责描述），最后才是占位。
+        desc = (first_frame_desc or "").strip() or _climax_action_beat(spec) or "高潮动作画面"
         prompt = compile_climax_video_prompt(
             spec, style_prefix=style_prefix, negative=negative,
             duration_hint=duration_hint, camera=camera, model_name=model, size=size,
-            first_frame_desc=first_frame_desc or "高潮动作画面",
+            first_frame_desc=desc,
         )
         images = [first_frame] if first_frame else []
         binding = {
-            "图片1": _binding_entry(first_frame_desc or "高潮动作画面", first_frame),
+            "图片1": _binding_entry(desc, first_frame),
         }
 
     warnings = _missing_frame_warnings(mode, first_frame, last_frame)

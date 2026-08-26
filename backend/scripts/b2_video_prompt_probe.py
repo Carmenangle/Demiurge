@@ -64,6 +64,23 @@ SPECS = [
             "aspect_ratio": "16:9",
         },
     },
+    {
+        "label": "motion=3 + 画面级要素（优先用主模型提炼的英文画面，不用陈旧叙事）",
+        "motion": 3,
+        "scene_spec": {
+            "narrative": "陈旧叙事：孤儿院院长看向石凳上的黑色匣子。",
+            "appearance": "冷倾雪(白衣+长剑)",
+            "wardrobe": "战斗装束",
+            "locale": "雷雨中的山巅",
+            "actors": ["冷倾雪"],
+            "rating": "sfw",
+            "subjects": [{"name": "冷倾雪", "description": "drawing sword, crimson cloak in lightning", "weight": 1.2}],
+            "visual_facts": [{"kind": "action", "fact": "leaps upward with blade raised", "evidence": "拔剑跃起"}],
+            "composition": "low-angle dynamic shot",
+            "camera": "fast tracking push-in",
+            "aspect_ratio": "16:9",
+        },
+    },
 ]
 
 for i, spec in enumerate(SPECS):

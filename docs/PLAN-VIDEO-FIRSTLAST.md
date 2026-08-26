@@ -226,3 +226,24 @@ videoMode 协议透传 + 尾帧反查 + 双帧路由）。P5 剩余的「先双�
   size（1280x720）、endpoint（空=未配视频工作流）、images（空=参考图待上游补）、
   warnings（缺图守卫）。后续配好视频工作流后，改回真正执行 submit。
 - 下一步：用探针输出人工核对提示词质量；之后按反馈逐步排查内容编写（对白逐字/动作序列/情绪）。
+
+## 8. 高潮视频提示词桥段：画面级要素优先（2026-08-26 用户反馈「角色不对/提示词对不上剧情」）✅ 完成
+
+- 背景：用户测试发现高潮视频提示词两个问题——①角色不对；②提示词对不上剧情。定位根因：
+  climax 的 `[动作]` 桥段直接用中文 `narrative`（围绕 anchor 截取的一段叙事，anchor 陈旧
+  时会截取到错误桥段），而非图片提示词所用的、主模型同轮提炼的画面级要素。
+- 图片提示词的一致性机制：主模型同轮输出 `<illustration>` JSON，`extract_illustration_plan`
+  校验并保留 subjects（英文主体描述）/visual_facts（evidence 必须命中 visible_story 才保留）
+  /composition/camera/art_direction，图片 prompt = 这些画面要素拼装；scene_spec 全量透传。
+- 修改（`video_prompt.py`）：`_climax_action` 拆为 `_climax_action_beat`（subjects+
+  visual_facts+composition 优先，narrative 兜底）+ `_climax_camera`（camera 优先，motion
+  兜底）+ `_climax_fx`（motion 强度）；`_reference_binding_climax` 的图职责描述用 action_beat
+  兜底；`build_video_request` climax 分支的 desc 同样用 action_beat 兜底（原硬传
+  `first_frame_desc or "高潮动作画面"` 会覆盖留空值）。
+- 接线（`agent_graph.py`）：produce 层 / `_video_request_for` 的 first_frame_desc 留空，
+  图职责描述交给 video_prompt 用画面级动作瞬间兜底，与 [动作] 桥段同源。
+- 验证：后端 test_video_prompt 新增 3 用例（画面级要素优先/无要素回退 narrative/camera
+  优先）+ 全量 后端 1656 / 前端契约 14（fixture 无画面级要素场景行为不变，无需重新导出）。
+- 角色不对（问题1）根因在插画角色识别层（`_mentioned_bound_names` 纯子串匹配 +
+  `illustration_actor_names` 角色全集可能混入作品名/道具等非角色实体），非视频提示词桥段；
+  本次未改动，留待单独排查。
