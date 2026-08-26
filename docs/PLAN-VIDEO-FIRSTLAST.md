@@ -118,8 +118,15 @@
    - 第一层已落地：`video_prompt.build_video_request` 入口 `_clean_spec` 对 spec 文本字段
      统一 `restore_jailbreak` 兜底（端到端 dry-run 已验证：带 `@(色)@` 的 appearance 不再
      残留进 prompt）。
-   - 第二层待定（接线层）：视频提示词是中文 H3 叙事，非英文 booru tags，是否复用
-     `IMAGE_PROMPT` placement 还是新增 `VIDEO_PROMPT` placement，接线时（B1/B3）再定。
+   - 第二层已定（2026-08-26 用户拍板）：**新增独立 `VIDEO_PROMPT = 8` placement**，不复用
+     `IMAGE_PROMPT`。理由：IMAGE_PROMPT 语义是「破甲还原 + 洗成干净 booru 串」，只适用图像
+     英文 tags；视频提示词是中文 H3 叙事（firstlast 剧情完整桥段 / climax 高潮段落扩展两套），
+     需用户为视频单独配正则清洗脚本。接线（B1/B3）时在 regex_engine.Placement 加
+     `VIDEO_PROMPT = 8`，并在 build_video_request 的调用方跑 `_apply_regex(ctx, prompt,
+     Placement.VIDEO_PROMPT, is_prompt=True)`。
+   - 机制真相（代码核实）：@() 还原是 `restore_jailbreak`（硬编码 _MARKER_RE），不是 IMAGE_PROMPT
+     的能力；IMAGE_PROMPT placement 走 `regex_engine.run_scripts` 的**任意正则**（findRegex/
+     replaceString/trimStrings，全局库/预设/卡内嵌三层来源），能洗任意内容。
 5. **A3 表格读取取消（2026-08-26 新增）**：表格在剧情推进时已自动发送/自动填表，
    生成视频提示词时场景、角色等信息**本就是已知内容**（已在 `scene_spec` 的
    appearance/wardrobe/locale 里），无需单独读 `table_store`。P2 从实现计划移除。
@@ -139,7 +146,7 @@
 
 第二批（接线，需前端协议）：
   B1 videoMode + 事件协议（P3）  B2 尾帧反查（P4，零持久化）
-  B3 前端双图提交链（P5）+ 防拦截第二层（_apply_regex，IMAGE_PROMPT 复用 or VIDEO_PROMPT 新增）
+  B3 前端双图提交链（P5）+ 防拦截第二层（_apply_regex，新增 VIDEO_PROMPT=8 placement）
 
 第三批（延后）：
   C1 真实 API 对齐（P6，待用户提供可实测端点）  C2 转场素材（延后）
