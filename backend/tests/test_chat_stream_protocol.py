@@ -99,6 +99,7 @@ def test_插画事件透传视频协议字段_v1_5():
             "last_frame_desc": "三人举杯同框",
             "prev_tail_desc": "上一楼层收伞",
             "last_frame_url": "data:image/png;base64,xx",
+            "transition": "reuse",
         },
         "id": "slot-1",
     })
@@ -108,6 +109,32 @@ def test_插画事件透传视频协议字段_v1_5():
     assert data["last_frame_desc"] == "三人举杯同框"
     assert data["prev_tail_desc"] == "上一楼层收伞"
     assert data["last_frame_url"] == "data:image/png;base64,xx"
+    # V1.5/W1：首帧复用判定（L1 原值）随线编码器透传
+    assert data["transition"] == "reuse"
+
+
+def test_插画事件无transition字段时不携带_v1_5_w1():
+    event = protocol.encode_event({
+        "illustrate_request": {
+            "prompt": "p", "motion": 0, "actors": [],
+            "transition": "",
+        },
+        "id": "slot-1",
+    })
+    data = event["data"]
+    assert "transition" not in data
+
+
+def test_插画事件透传transition三态_v1_5_w2():
+    # V1.5/W2：合并结果三态（reuse/regenerate/ambiguous）随线编码器透传
+    for value in ("reuse", "regenerate", "ambiguous"):
+        event = protocol.encode_event({
+            "illustrate_request": {
+                "prompt": "p", "motion": 0, "actors": [], "transition": value,
+            },
+            "id": "slot-1",
+        })
+        assert event["data"]["transition"] == value
 
 
 def test_插画事件无视频字段时透传为空不携带_v1_5():

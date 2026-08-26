@@ -188,7 +188,28 @@ def judge_frame_reuse(prev_closing: str, curr_opening: str) -> FrameReuseDecisio
     return FrameReuseDecision("ambiguous", "no_strong_signal")
 
 
+def merge_frame_reuse(
+    prev_closing: str,
+    curr_opening: str,
+    transition: str | None,
+) -> FrameReuseDecision:
+    """首帧复用决策合并（W2，坑B/坑I）。
+
+    L0 三态是「内部决策态」，<transition> 二态（reuse|regenerate）是「LLM 搭车输出的
+    最终复用结论」。合并规则（10.2 用户定调）：
+    - L0 确定（reuse / regenerate）→ 用 L0，忽略 <transition>；
+    - L0 ambiguous → 消费 <transition>（二态）；
+    - L0 ambiguous 且 <transition> 缺失/非法 → ambiguous（L1 兜底失败，交前端坑C 前提裁决）。
+    """
+    l0 = judge_frame_reuse(prev_closing, curr_opening)
+    if l0.decision != "ambiguous":
+        return l0
+    if transition in ("reuse", "regenerate"):
+        return FrameReuseDecision(transition, f"l1_transition:{transition}")
+    return FrameReuseDecision("ambiguous", "l0_ambiguous_l1_missing")
+
+
 __all__ = [
     "StoryFrames", "extract_story_frames", "frames_to_desc",
-    "FrameReuseDecision", "judge_frame_reuse",
+    "FrameReuseDecision", "judge_frame_reuse", "merge_frame_reuse",
 ]

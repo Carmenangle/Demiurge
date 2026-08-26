@@ -1091,6 +1091,119 @@ def test_comfy高潮提取失败时把中文正文作为Profile场景源而非�
     assert trace[-1][1]["status"] == "emitted"
 
 
+def test_writeback剥离transition块并透传判定_v1_5_w1(monkeypatch, tmp_path):
+    """V1.5/W1：<transition> 块从正文剥离，判定值（L1 原值）随 illustrate_req 透传。"""
+    from app.services import character_state
+
+    deps = ra.AgencyDeps(
+        chat_fn=lambda *a, **k: "[]", rng=random.Random(0), state_base=str(tmp_path),
+    )
+    monkeypatch.setattr(ra, "extract_status_snapshot", lambda reply: "")
+    monkeypatch.setattr(ra, "parse_state_block", lambda reply: (reply, []))
+    monkeypatch.setattr(ra, "writeback", lambda *a, **k: (10.0, 10.0))
+    monkeypatch.setattr(character_state, "load_state", lambda *a, **k: {})
+    monkeypatch.setattr(ra, "_narr", lambda *a, **k: "")
+    reply = (
+        "<content>雨夜，面馆门口挂起暖黄的灯笼，水珠顺着门帘滴落。\n\n"
+        "温知夏推门而入，沈糯已经坐定，朝她招手。</content>\n"
+        "<transition>reuse</transition>"
+    )
+    clean, images, request, _audio = ag._agency_writeback(
+        _ctx(
+            repo_id="work", thread_id="work", card_name="白给谷", scene="climax",
+            comfy_illustrate=True, history=[],
+        ),
+        deps, reply, turn=3, affinity=10.0, lost=False,
+    )
+
+    # <transition> 块已剥离，正文（含 content 内的可见叙述）保留
+    assert "<transition>" not in clean
+    assert "面馆" in clean
+    # V1.5/W1：判定值随出图请求透传（有值才带）
+    assert request.get("transition") == "reuse"
+
+
+def test_writeback无transition块时回退ambiguous_v1_5_w1(monkeypatch, tmp_path):
+    """V1.5/W2：主模型漏输出 <transition> 块 + 无历史 → 合并结果 ambiguous（L0 兕底，不抛错）。"""
+    from app.services import character_state
+
+    deps = ra.AgencyDeps(
+        chat_fn=lambda *a, **k: "[]", rng=random.Random(0), state_base=str(tmp_path),
+    )
+    monkeypatch.setattr(ra, "extract_status_snapshot", lambda reply: "")
+    monkeypatch.setattr(ra, "parse_state_block", lambda reply: (reply, []))
+    monkeypatch.setattr(ra, "writeback", lambda *a, **k: (10.0, 10.0))
+    monkeypatch.setattr(character_state, "load_state", lambda *a, **k: {})
+    monkeypatch.setattr(ra, "_narr", lambda *a, **k: "")
+    clean, images, request, _audio = ag._agency_writeback(
+        _ctx(
+            repo_id="work", thread_id="work", card_name="白给谷", scene="climax",
+            comfy_illustrate=True, history=[],
+        ),
+        deps,
+        "<content>雨夜面馆门口，灯笼摇晃。</content>",
+        turn=3, affinity=10.0, lost=False,
+    )
+    assert "面馆" in clean
+    # W2：合并结果三态透传——无历史（empty_input→L0 ambiguous）+ 无 L1 → ambiguous
+    assert request.get("transition") == "ambiguous"
+
+
+def test_writeback首帧复用合并_l0胜出忽略l1_v1_5_w2(monkeypatch, tmp_path):
+    """V1.5/W2：L0 确定 reuse（上一楼尾帧与当前首段共享地点词）→ 忽略 <transition> regenerate。"""
+    from app.services import character_state
+
+    deps = ra.AgencyDeps(
+        chat_fn=lambda *a, **k: "[]", rng=random.Random(0), state_base=str(tmp_path),
+    )
+    monkeypatch.setattr(ra, "extract_status_snapshot", lambda reply: "")
+    monkeypatch.setattr(ra, "parse_state_block", lambda reply: (reply, []))
+    monkeypatch.setattr(ra, "writeback", lambda *a, **k: (10.0, 10.0))
+    monkeypatch.setattr(character_state, "load_state", lambda *a, **k: {})
+    monkeypatch.setattr(ra, "_narr", lambda *a, **k: "")
+    reply = (
+        "<content>面馆里的暖光依旧，沈糯抿了口汤。</content>\n"
+        "<transition>regenerate</transition>"
+    )
+    clean, images, request, _audio = ag._agency_writeback(
+        _ctx(
+            repo_id="work", thread_id="work", card_name="白给谷", scene="climax",
+            comfy_illustrate=True,
+            history=[{"role": "assistant", "content": "三人围坐面馆，举杯同框。"}],
+        ),
+        deps, reply, turn=4, affinity=10.0, lost=False,
+    )
+    # L0 共享「面馆」→ reuse 胜出（L1 regenerate 被忽略）
+    assert request.get("transition") == "reuse"
+
+
+def test_writeback首帧复用合并_第一楼消费l1_v1_5_w2(monkeypatch, tmp_path):
+    """V1.5/W2：第一楼（无上一楼尾帧）→ L0 ambiguous → 消费 <transition> regenerate。"""
+    from app.services import character_state
+
+    deps = ra.AgencyDeps(
+        chat_fn=lambda *a, **k: "[]", rng=random.Random(0), state_base=str(tmp_path),
+    )
+    monkeypatch.setattr(ra, "extract_status_snapshot", lambda reply: "")
+    monkeypatch.setattr(ra, "parse_state_block", lambda reply: (reply, []))
+    monkeypatch.setattr(ra, "writeback", lambda *a, **k: (10.0, 10.0))
+    monkeypatch.setattr(character_state, "load_state", lambda *a, **k: {})
+    monkeypatch.setattr(ra, "_narr", lambda *a, **k: "")
+    reply = (
+        "<content>面馆里的暖光依旧，沈糯抿了口汤。</content>\n"
+        "<transition>regenerate</transition>"
+    )
+    clean, images, request, _audio = ag._agency_writeback(
+        _ctx(
+            repo_id="work", thread_id="work", card_name="白给谷", scene="climax",
+            comfy_illustrate=True, history=[],
+        ),
+        deps, reply, turn=4, affinity=10.0, lost=False,
+    )
+    # 无历史 → prev_tail 空 → L0 empty_input ambiguous → 合并消费 L1 regenerate
+    assert request.get("transition") == "regenerate"
+
+
 def test_画面主体是用户时不得从状态栏借用在场角色LoRA(monkeypatch, tmp_path):
     from app.services import character_state
 
@@ -2252,6 +2365,7 @@ def test_插画事件透传视频协议可选字段_v1_5():
         "last_frame_desc": "三人举杯同框",
         "prev_tail_desc": "上一楼层收伞",
         "last_frame_url": "data:image/png;base64,xx",
+        "transition": "reuse",
     }])
     assert events == [
         {"delta": "正文"},
@@ -2263,10 +2377,25 @@ def test_插画事件透传视频协议可选字段_v1_5():
                 "last_frame_desc": "三人举杯同框",
                 "prev_tail_desc": "上一楼层收伞",
                 "last_frame_url": "data:image/png;base64,xx",
+                "transition": "reuse",
             },
             "id": "slot-1",
         },
     ]
+
+
+def test_插画事件transition空值不携带_v1_5_w1():
+    # V1.5/W1：rec 无 transition 或为空 → 事件 request 不带 transition 字段（旧数据兼容）
+    events = ag._streamed_illustration_events([{
+        "id": "slot-1", "prompt": "p", "motion": 3, "actors": [],
+        "anchor_offset": 0, "transition": "",
+    }])
+    assert events == [{
+        "illustrate_request": {
+            "prompt": "p", "motion": 3, "actors": [], "offset": 0,
+        },
+        "id": "slot-1",
+    }]
 
 
 def test_流式插画透传视频协议可选字段_v1_5():

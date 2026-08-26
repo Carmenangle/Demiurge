@@ -1063,6 +1063,23 @@ def _filter_illustration_appearance(
     return "\n".join(kept).strip()
 
 
+def _resolve_prev_tail_desc(ctx: dict) -> str:
+    """上楼层尾帧画面描述：历史里最后一条角色（assistant）回复正文 → 结尾画面。
+
+    与生成时透传的 lastFrameDesc 同源同逻辑（同一提取函数 extract_story_frames），
+    零新增持久化（P4 反查精神：历史正文即资产）。倒序找第一条非空 assistant 消息
+    （对齐预设 lastCharMessage 的取法）；无历史 / 上一楼纯对白 → 空串
+    （L0 输入缺失 → ambiguous，由前端坑C「有图前提」兜底）。
+    """
+    from app.services import story_frames
+    for h in reversed(ctx.get("history") or []):
+        if (h.get("role") or "") == "assistant" and (h.get("content") or "").strip():
+            return story_frames.extract_story_frames(
+                (h.get("content") or "").strip(),
+            ).closing
+    return ""
+
+
 def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
                       lost: bool, rag_events: list | None = None,
                       user_text: str = "") -> tuple[str, list, dict, dict]:
@@ -1074,11 +1091,15 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
     try:
         from app.services import character_state, roleplay_agency
         from app.services import image_prompt_extract, scene_classify
+        from app.services import story_frames, transition_extract
         from app.services.regex_engine import Placement
         repo_id = ctx.get("repo_id") or ctx.get("thread_id") or ""
         card_name = ctx.get("card_name") or ""
+        # V1.5/W1：<transition> 剥离放最前（与 <illustration>/<audio> 同为生成时搭车块，
+        # 先抽避免干扰插画解析；漏块/非法/只开不闭 → None，L0 永远兕底，不得抛错）
+        clean, transition_decision = transition_extract.extract_transition(reply)
         clean, illustration_plan = image_prompt_extract.extract_illustration_plan(
-            reply,
+            clean,
             block_filter=lambda value: _apply_regex(
                 ctx, value, Placement.AI_OUTPUT, is_prompt=False, depth=0,
             ),
@@ -1457,6 +1478,16 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
                  ) and not illustration_plan}
                 if at_climax and (request_prompt or scene_spec["narrative"]) else {}
             )
+            # V1.5/W2：首帧复用决策合并（坑B/坑I）——L0 确定 → L0；L0 ambiguous → 消费 L1 <transition>。
+            # N 尾帧从历史最近角色回复提取（方案 B，零 wire），N+1 首帧从当前正文提取；合并结果
+            # 三态（reuse/regenerate/ambiguous）随出图请求透传，前端叠加坑C「有图前提」裁决。
+            if illustrate_req:
+                _prev_tail_desc = _resolve_prev_tail_desc(ctx)
+                _curr_opening = story_frames.extract_story_frames(clean).opening
+                _merged = story_frames.merge_frame_reuse(
+                    _prev_tail_desc, _curr_opening, transition_decision,
+                )
+                illustrate_req["transition"] = _merged.decision
             # V1.5 默认开放：produce 时即 dry-run 组装视频参数（提示词 + 参数），
             # 供 trace 日志核对「视频生成提示词」+「参数有没有上传」。失败静默降级 None。
             _video_prompt_text = ""
@@ -2552,7 +2583,7 @@ def _ordered_illustration_events(result_text: str, recs: list[dict]) -> list[dic
         }
         # V1.5/B1：视频协议可选字段透传（有值才带；旧前端/旧数据宽松忽略）
         for _key in ("video_mode", "first_frame_desc", "last_frame_desc",
-                     "prev_tail_desc", "last_frame_url"):
+                     "prev_tail_desc", "last_frame_url", "transition"):
             _value = rec.get(_key)
             if isinstance(_value, str) and _value:
                 request[_key] = _value
@@ -2584,7 +2615,7 @@ def _streamed_illustration_events(recs: list[dict]) -> list[dict]:
         }
         # V1.5/B1：视频协议可选字段透传（有值才带；旧前端/旧数据宽松忽略）
         for _key in ("video_mode", "first_frame_desc", "last_frame_desc",
-                     "prev_tail_desc", "last_frame_url"):
+                     "prev_tail_desc", "last_frame_url", "transition"):
             _value = rec.get(_key)
             if isinstance(_value, str) and _value:
                 request[_key] = _value

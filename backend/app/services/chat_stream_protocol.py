@@ -74,7 +74,8 @@ def encode_event(event: Mapping[str, object]) -> ChatStreamEvent | None:
         # V1.5/B1：透传视频协议可选字段（字符串且非空才带，旧数据/旧前端宽松忽略）
         if isinstance(req, Mapping):
             for _field in ("video_mode", "first_frame_desc", "last_frame_desc",
-                           "prev_tail_desc", "last_frame_url", "video_prompt"):
+                           "prev_tail_desc", "last_frame_url", "video_prompt",
+                           "transition"):
                 _value = req.get(_field)
                 if isinstance(_value, str) and _value:
                     data[_field] = _value

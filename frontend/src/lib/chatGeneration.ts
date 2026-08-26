@@ -365,6 +365,19 @@ export function resolvePrevTailDesc(
   return undefined;
 }
 
+// V1.5/W2 首帧复用（坑C：有图前提）：transition=reuse 且反查到上尾帧图 → 首帧底图用上尾帧图
+// （视觉延续）。无尾帧图资产 → reuse 作废，维持 fallback（独立生成首帧）。
+// 仅 firstlast 消费（climax 无首帧复用）；reuse 之外（regenerate/ambiguous/空）不复用。
+export function resolveTransitionBaseImage(opts: {
+  videoMode?: string;
+  transition?: string;
+  messages: readonly VideoTailMessages[];
+  fallback?: string;
+}): string | undefined {
+  if (opts.videoMode !== "firstlast" || opts.transition !== "reuse") return opts.fallback;
+  return resolvePrevTailDesc(opts.messages)?.lastFrameUrl || opts.fallback;
+}
+
 // ===== 文本打分：从生成结果的多段文本里挑最优 =====
 // 过滤掉「有效字符占比过低」的噪声段（如纯符号/乱码），再按长度取最长的一段。
 // 有效字符 = 字母数字 + 中文。占比阈值 0.3。

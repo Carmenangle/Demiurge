@@ -43,6 +43,7 @@ import {
   slimSnapshot as slimSnapshotPure, promptHistory,
   prepareConversationRegeneration, resolveLoraPromptMetadata, resolveGenerationPrompt,
   acceptSlimmedMessages, canCommitSnapshot, resolveVideoBaseImageRef, resolvePrevTailDesc,
+  resolveTransitionBaseImage,
 } from "./chatGeneration";
 import {
   durableFinalizeSucceeded, WorkflowGenerationRuntime,
@@ -878,7 +879,7 @@ export function useChatSession(deps: ChatSessionDeps) {
     prompt: string, motion = 0, actors: string[] = [], messageId: string, slotId: string,
     sceneSpec?: IllustrationSceneSpec, turnId = "", source: "automatic" | "manual" = "automatic",
     eventVideoMode?: string, firstFrameDesc = "", lastFrameDesc = "",
-    prevTailDesc = "", lastFrameUrl = "", videoPrompt = "",
+    prevTailDesc = "", lastFrameUrl = "", videoPrompt = "", transition = "",
   ) => {
     const failSlot = (stage: string, error: string) =>
       discardFailedIllustration(messageId, slotId, stage, error);
@@ -940,7 +941,13 @@ export function useChatSession(deps: ChatSessionDeps) {
           manualBaseImage: baseImage || undefined,
         })
       : undefined;
-    const baseImageForUse = videoBaseRef?.url ?? baseImage;
+    // V1.5/W2 首帧复用（坑C：有图前提）：transition=reuse 且反查到上尾帧图 → 首帧底图用
+    // 上尾帧图（视觉延续）。无尾帧图资产 → reuse 作废，维持原路径（独立生成首帧）。
+    // 仅 firstlast 消费（climax 无首帧复用）；reuse 之外（regenerate/ambiguous/空）不复用。
+    const baseImageForUse = resolveTransitionBaseImage({
+      videoMode, transition, messages: messagesRef.current,
+      fallback: videoBaseRef?.url ?? baseImage,
+    }) || "";
     let negativePrompt = preset.negativePrompt?.trim() || sceneSpec?.negative_prompt || "";
     if (sceneSpec?.profile_prompt && sceneSpec.profile === promptProfile) {
       prompt = sceneSpec.profile_prompt;
@@ -1448,7 +1455,7 @@ export function useChatSession(deps: ChatSessionDeps) {
       void submitIllustration(
         event.prompt, event.motion, event.actors, botId, slotId, event.sceneSpec, event.turnId,
         "automatic", event.videoMode, event.firstFrameDesc, event.lastFrameDesc,
-        event.prevTailDesc, event.lastFrameUrl, event.videoPrompt,
+        event.prevTailDesc, event.lastFrameUrl, event.videoPrompt, event.transition,
       );
       return;
     }

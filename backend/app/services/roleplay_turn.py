@@ -103,7 +103,7 @@ def finalize_turn(draft: TurnFinalization, hooks: TurnFinalizationHooks) -> dict
         anchor_offset = hooks.anchor_offset(reply, illustrate_request)
         if anchor_offset is not None:
             repo_id = draft.ctx.get("repo_id") or draft.ctx.get("thread_id")
-            result["illustrate_recs"] = [{
+            rec = {
                 "id": f"illo-req-{repo_id}-{draft.turn}",
                 "prompt": illustrate_request.get("prompt", ""),
                 "motion": illustrate_request.get("motion", 0),
@@ -113,7 +113,12 @@ def finalize_turn(draft: TurnFinalization, hooks: TurnFinalizationHooks) -> dict
                 "video_request": illustrate_request.get("video_request") or {},
                 "anchor_offset": anchor_offset,
                 "turn_id": draft.ctx.get("turn_id", ""),
-            }]
+            }
+            # V1.5/W1：首帧复用判定（L1 原值）随 rec 透传（有值才带）
+            transition_value = illustrate_request.get("transition")
+            if isinstance(transition_value, str) and transition_value:
+                rec["transition"] = transition_value
+            result["illustrate_recs"] = [rec]
     if audio_request:
         repo_id = draft.ctx.get("repo_id") or draft.ctx.get("thread_id")
         result["audio_recs"] = [{

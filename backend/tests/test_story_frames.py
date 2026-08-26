@@ -117,3 +117,45 @@ def test_scene_internal_motion_not_regenerate():
     )
     assert d.decision == "ambiguous"  # 「走到」不是跨场景切换词，也不含共享地点词
 
+
+# ===== 首帧复用决策合并（W2，L0/L1 合并，坑B/坑I）=====
+
+
+def test_merge_l0_reuse_wins_over_l1():
+    # L0 确定 reuse（共享地点词）→ 忽略 <transition> regenerate
+    d = story_frames.merge_frame_reuse(
+        "三人围坐面馆，举杯同框。", "面馆里的暖光依旧，沈糯抿了口汤。", "regenerate",
+    )
+    assert d.decision == "reuse"
+    assert d.evidence.startswith("shared_locale:")
+
+
+def test_merge_l0_regenerate_wins_over_l1():
+    # L0 确定 regenerate（时间跳跃）→ 忽略 <transition> reuse
+    d = story_frames.merge_frame_reuse(
+        "三人围坐面馆，举杯同框。", "次日清晨，她在车站送别。", "reuse",
+    )
+    assert d.decision == "regenerate"
+    assert d.evidence.startswith("time_jump:")
+
+
+def test_merge_l0_ambiguous_consumes_l1_reuse():
+    d = story_frames.merge_frame_reuse("她抬眼笑了笑。", "他低头搅动什么。", "reuse")
+    assert d.decision == "reuse"
+    assert d.evidence == "l1_transition:reuse"
+
+
+def test_merge_l0_ambiguous_consumes_l1_regenerate():
+    d = story_frames.merge_frame_reuse("她抬眼笑了笑。", "他低头搅动什么。", "regenerate")
+    assert d.decision == "regenerate"
+    assert d.evidence == "l1_transition:regenerate"
+
+
+def test_merge_l0_ambiguous_l1_missing():
+    # L0 ambiguous + <transition> 缺失/非法 → ambiguous（交前端坑C 前提裁决）
+    d = story_frames.merge_frame_reuse("她抬眼笑了笑。", "他低头搅动什么。", None)
+    assert d.decision == "ambiguous"
+    assert d.evidence == "l0_ambiguous_l1_missing"
+    d = story_frames.merge_frame_reuse("她抬眼笑了笑。", "他低头搅动什么。", "maybe")
+    assert d.decision == "ambiguous"
+

@@ -8,6 +8,7 @@ import {
   resolveVideoBaseImage,
   resolveVideoBaseImageRef,
   resolvePrevTailDesc,
+  resolveTransitionBaseImage,
   userMessageRichContent,
 } from "./chatGeneration";
 import {
@@ -711,6 +712,47 @@ describe("resolvePrevTailDesc（V1.5/B2 尾帧链式反查）", () => {
       msg("m2", []),
     ])).toBeUndefined();
     expect(resolvePrevTailDesc([])).toBeUndefined();
+  });
+});
+
+describe("resolveTransitionBaseImage（V1.5/W2 首帧复用·坑C 有图前提）", () => {
+  const msg = (id: string, parts: any[] = []) => ({ id, parts });
+  const video = (slotId: string, url: string, lastFrameDesc?: string, lastFrameUrl?: string) => ({
+    type: "video", slotId, status: "ready" as const, url,
+    ...(lastFrameDesc ? { lastFrameDesc } : {}),
+    ...(lastFrameUrl ? { lastFrameUrl } : {}),
+  });
+  const msgs = [msg("m1", [video("s1", "local://v1", "上尾帧", "local://tail.png")])];
+
+  it("firstlast + reuse + 有上尾帧图 → 首帧底图用上尾帧图（视觉延续）", () => {
+    expect(resolveTransitionBaseImage({
+      videoMode: "firstlast", transition: "reuse",
+      messages: msgs, fallback: "local://base.png",
+    })).toBe("local://tail.png");
+  });
+
+  it("firstlast + reuse + 无上尾帧图 → reuse 作废，回退 fallback（坑C）", () => {
+    expect(resolveTransitionBaseImage({
+      videoMode: "firstlast", transition: "reuse",
+      messages: [msg("m1", [video("s1", "local://v1", "上尾帧")])],
+      fallback: "local://base.png",
+    })).toBe("local://base.png");
+  });
+
+  it("reuse 之外（regenerate/ambiguous/空）不复用，回退 fallback", () => {
+    for (const transition of ["regenerate", "ambiguous", ""]) {
+      expect(resolveTransitionBaseImage({
+        videoMode: "firstlast", transition,
+        messages: msgs, fallback: "local://base.png",
+      })).toBe("local://base.png");
+    }
+  });
+
+  it("仅 firstlast 消费；climax 即使 reuse 也不复用首帧", () => {
+    expect(resolveTransitionBaseImage({
+      videoMode: "climax", transition: "reuse",
+      messages: msgs, fallback: "local://base.png",
+    })).toBe("local://base.png");
   });
 });
 

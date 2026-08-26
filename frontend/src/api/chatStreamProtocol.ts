@@ -67,7 +67,7 @@ export type ChatStreamEvent =
   | { type: "route"; route: MessageRoute }
   | { type: "image"; url: string; id?: string; regeneration?: RegenerationSnapshot }
   | { type: "video"; url: string; id?: string }
-  | { type: "illustrate_request"; prompt: string; motion: number; actors: string[]; sceneSpec?: IllustrationSceneSpec; id?: string; offset?: number; turnId?: string; videoMode?: "climax" | "firstlast"; firstFrameDesc?: string; lastFrameDesc?: string; prevTailDesc?: string; lastFrameUrl?: string; videoPrompt?: string; videoParams?: VideoParams }
+  | { type: "illustrate_request"; prompt: string; motion: number; actors: string[]; sceneSpec?: IllustrationSceneSpec; id?: string; offset?: number; turnId?: string; videoMode?: "climax" | "firstlast"; firstFrameDesc?: string; lastFrameDesc?: string; prevTailDesc?: string; lastFrameUrl?: string; transition?: "reuse" | "regenerate" | "ambiguous"; videoPrompt?: string; videoParams?: VideoParams }
   | { type: "audio_request"; lines: AudioDialogueLine[]; id?: string }
   | { type: "rag_status"; state: string; kind: string; count?: number }
   | { type: "inspiration"; card: StreamInspirationCard }
@@ -160,6 +160,10 @@ export function decodeChatStreamEvent(value: unknown): ChatStreamEvent {
         ...(typeof data.last_frame_desc === "string" ? { lastFrameDesc: data.last_frame_desc } : {}),
         ...(typeof data.prev_tail_desc === "string" ? { prevTailDesc: data.prev_tail_desc } : {}),
         ...(typeof data.last_frame_url === "string" ? { lastFrameUrl: data.last_frame_url } : {}),
+        // V1.5/W2：首帧复用决策合并结果（三态）宽松解码（旧后端不带 → 无此字段）
+        ...(data.transition === "reuse" || data.transition === "regenerate" || data.transition === "ambiguous"
+          ? { transition: data.transition }
+          : {}),
         // V1.5 默认开放：climax 视频提示词随事件下发（无视频模板也生成，供测试核对）
         ...(typeof data.video_prompt === "string" ? { videoPrompt: data.video_prompt } : {}),
         // V1.5 默认开放：结构化视频参数（dry-run 组装结果，供测试核对参数是否上传）

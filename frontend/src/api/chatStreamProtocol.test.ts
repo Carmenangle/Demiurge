@@ -63,6 +63,7 @@ describe("chat stream protocol", () => {
       last_frame_desc: "三人举杯同框",
       prev_tail_desc: "上一楼层：收伞",
       last_frame_url: "data:image/png;base64,xx",
+      transition: "reuse",
     }))).toEqual({
       type: "illustrate_request", prompt: "p", motion: 3, actors: ["甲"],
       videoMode: "firstlast",
@@ -70,6 +71,31 @@ describe("chat stream protocol", () => {
       lastFrameDesc: "三人举杯同框",
       prevTailDesc: "上一楼层：收伞",
       lastFrameUrl: "data:image/png;base64,xx",
+      transition: "reuse",
+    });
+  });
+
+  it("decodes transition only for reuse/regenerate/ambiguous (V1.5/W2 宽松解码)", () => {
+    expect(decodeChatStreamEvent(event("illustrate_request", {
+      prompt: "p", motion: 3, actors: ["甲"],
+      transition: "regenerate",
+    }))).toMatchObject({
+      type: "illustrate_request", prompt: "p", motion: 3, actors: ["甲"],
+      transition: "regenerate",
+    });
+    expect(decodeChatStreamEvent(event("illustrate_request", {
+      prompt: "p", motion: 3, actors: ["甲"],
+      transition: "ambiguous",
+    }))).toMatchObject({
+      type: "illustrate_request", prompt: "p", motion: 3, actors: ["甲"],
+      transition: "ambiguous",
+    });
+    // 非法值（非三态枚举）→ 不带 transition 字段
+    expect(decodeChatStreamEvent(event("illustrate_request", {
+      prompt: "p", motion: 3, actors: ["甲"],
+      transition: "maybe",
+    }))).toEqual({
+      type: "illustrate_request", prompt: "p", motion: 3, actors: ["甲"],
     });
   });
 
