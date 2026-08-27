@@ -172,19 +172,34 @@ def _identity_gloss(spec: dict[str, Any], actors: list[str]) -> str:
     return "、".join(parts)
 
 
-def _reference_binding_climax(first_frame_desc: str, spec: dict[str, Any]) -> str:
-    """③ 参考绑定（climax 单图）：图片1 = 高潮动作画面，锁身份 + 角色样貌。
+def _climax_frame_role(spec: dict[str, Any], first_frame_desc: str = "") -> str:
+    """图片职责描述（图片↔角色绑定）：外部 first_frame_desc 优先；否则用
+    「{画面角色}的高潮动作画面」，让视频模型知道这张高潮图是谁的高潮图——
+    单角色、多角色都绑定，不只单角色一种情况。无在场角色才退「高潮动作画面」占位。
 
-    desc 只用外部职责描述（first_frame_desc），空则「高潮动作画面」占位。
+    视频模型拿到参考图时只看得见图，不知道图里的人对应剧情里的哪个名字；
+    把角色名写进图片职责描述，等于声明「这张图就是这些角色的画面」，名字才落得实。"""
+    desc = (first_frame_desc or "").strip()
+    if desc and desc != "高潮动作画面":
+        return desc
+    actors = [str(a).strip() for a in (spec.get("actors") or []) if str(a).strip()]
+    if actors:
+        return f"{'、'.join(actors)}的高潮动作画面"
+    return "高潮动作画面"
+
+
+def _reference_binding_climax(first_frame_desc: str, spec: dict[str, Any]) -> str:
+    """③ 参考绑定（climax 单图）：图片1 = 对应角色的高潮动作画面，锁身份 + 角色样貌。
+
+    desc 用「{画面角色}的高潮动作画面」（图片↔角色绑定），有外部职责描述时优先；
     画面级动作细节由 [动作] 桥段承载，不在此重复——避免同一段画面级描述
     在参考绑定与动作两处重复（此前用 action_beat 兜底导致整段重复）。
-    视频模型不认识角色名：除图片职责外，写清「画面角色」与「角色→样貌」绑定，
+    视频模型不认识角色名：除图片职责绑定角色外，写清「角色→样貌」绑定，
     否则「保持 xx 身份」是空绑定（模型不知道 xx 长什么样）。"""
-    desc = (first_frame_desc or "").strip() or "高潮动作画面"
+    desc = _climax_frame_role(spec, first_frame_desc)
     actors = [str(a).strip() for a in (spec.get("actors") or []) if str(a).strip()]
     lines = [f"图片1={desc}（唯一参考画面，作为准确起始帧）"]
     if actors:
-        lines.append(f"画面角色：{'、'.join(actors)}")
         lines.append(f"保持 {_identity_gloss(spec, actors)} 的身份、脸部、服装、发型、造型完全一致")
     return "；".join(lines)
 
@@ -660,10 +675,11 @@ def build_video_request(
             "图片2": _binding_entry(first_frame_desc or "当前楼层首帧画面", last_frame),
         }
     else:
-        # 图职责描述：外部 first_frame_desc 优先，否则「高潮动作画面」占位。
-        # 画面级动作细节由 compile 内 [动作] 桥段承载，不再用 _climax_action_beat
-        # 兜底当图职责描述——否则同一段画面描述会重复出现在参考绑定与动作两处。
-        desc = (first_frame_desc or "").strip() or "高潮动作画面"
+        # 图职责描述：外部 first_frame_desc 优先，否则「{画面角色}的高潮动作画面」
+        # （图片↔角色绑定）。画面级动作细节由 compile 内 [动作] 桥段承载，不再用
+        # _climax_action_beat 兜底当图职责描述——否则同一段画面描述会重复出现在
+        # 参考绑定与动作两处。
+        desc = _climax_frame_role(spec, first_frame_desc)
         prompt = compile_climax_video_prompt(
             spec, style_prefix=style_prefix, negative=negative,
             duration_hint=duration_hint, camera=camera, model_name=model, size=size,

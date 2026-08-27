@@ -32,16 +32,16 @@ def test_climax_has_no_time_segments():
 
 def test_climax_binds_single_frame_and_identity():
     p = video_prompt.compile_climax_video_prompt(_spec(), first_frame_desc="高潮动作画面")
-    assert "图片1=高潮动作画面" in p
+    assert "图片1=温知夏、沈糯、柏言的高潮动作画面" in p
     assert "温知夏" in p and "沈糯" in p and "柏言" in p
 
 
 def test_climax_reference_binding_does_not_duplicate_action():
     # 缺陷回归：first_frame_desc 留空时，画面级动作细节曾同时出现在
-    # [参考绑定] 与 [动作] 两段（整段重复）。修复后参考绑定用「高潮动作画面」占位，
-    # 画面细节（composition）只出现在 [动作] 段。
+    # [参考绑定] 与 [动作] 两段（整段重复）。修复后参考绑定用
+    # 「{画面角色}的高潮动作画面」占位，画面细节（composition）只出现在 [动作] 段。
     p = video_prompt.compile_climax_video_prompt(_spec())
-    assert "图片1=高潮动作画面" in p
+    assert "图片1=温知夏、沈糯、柏言的高潮动作画面" in p
     binding = p.split("[参考绑定]：", 1)[1].split("\n\n", 1)[0]
     action = p.split("[动作]：", 1)[1]
     assert "三人中景" in action
@@ -479,7 +479,7 @@ def test_reference_binding_binds_identity_gloss_from_subjects():
     )
     p = video_prompt.compile_climax_video_prompt(spec)
     binding = p.split("[参考绑定]：", 1)[1].split("\n\n", 1)[0]
-    assert "画面角色：温知夏、沈糯、柏言" in binding
+    assert "图片1=温知夏、沈糯、柏言的高潮动作画面" in binding
     assert "温知夏（beige cardigan, chestnut long hair）" in binding
     assert "沈糯（pink hoodie, lollipop）" in binding
     assert "柏言（wa-style robe, tea cup）" in binding
