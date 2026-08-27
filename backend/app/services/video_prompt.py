@@ -111,21 +111,86 @@ def _negative(spec: dict[str, Any], preset_negative: str) -> str:
     return "；".join(items)
 
 
-def _reference_binding_climax(first_frame_desc: str, actors: list[str]) -> str:
-    """③ 参考绑定（climax 单图）：图片1 = 高潮动作画面，锁身份。
+def _appearance_by_actor(appearance: str, actors: list[str]) -> dict[str, str]:
+    """从中文外貌文本拆「角色→外貌」映射。
+
+    支持三种格式：`名字(外貌)` 顿号/分号/逗号分隔、`名字：外貌` 多行段落头、
+    单角色纯文本（无分隔且只有一个在场角色）。拆不出返回空 dict（不硬猜）。
+    """
+    src = (appearance or "").strip()
+    if not src:
+        return {}
+    paren = re.findall(r"([^\s、;；，,]+?)\s*[\(（]([^\)）]+)[\)）]", src)
+    if paren:
+        out: dict[str, str] = {}
+        for name, desc in paren:
+            name, desc = name.strip(), desc.strip()
+            if name and desc:
+                out[name] = desc
+        return out
+    lines = [ln for ln in src.splitlines() if ln.strip()]
+    header = re.compile(r"^\s*([^\s：:]+)\s*[：:]\s*(.+)$")
+    if len(lines) >= 2 and all(header.match(ln) for ln in lines):
+        mapped: dict[str, str] = {}
+        for ln in lines:
+            m = header.match(ln)
+            if m:
+                mapped[m.group(1).strip()] = m.group(2).strip()
+        return mapped
+    # 纯文本（无括号/冒号/换行分隔）：用 actors 名字做前缀匹配，拆出「名字 + 外貌」。
+    for actor in sorted(actors, key=len, reverse=True):
+        if src.startswith(actor) and len(src) > len(actor):
+            rest = src[len(actor):].strip("，,、；;：: ")
+            if rest:
+                return {actor: rest}
+    if len(actors) == 1 and not re.search(r"[：:\(（]", src):
+        return {actors[0]: src}
+    return {}
+
+
+def _identity_gloss(spec: dict[str, Any], actors: list[str]) -> str:
+    """角色身份样貌绑定串：让视频模型把「角色名」对应到具体长相。
+
+    样貌来源：subjects(name→description 英文视觉) 优先，缺失回退 appearance
+    （中文纯外貌，见 _appearance_by_actor）。都缺的角色只写名字（诚实，不硬凑）。
+    当 agent 已产出简化外貌/场景（video_subject_scene）时，不再用原始中文
+    appearance 兜底——否则堆砌词（丰腴肥熟/酥雌醇媚）会经参考绑定回流，违背 P4。"""
+    gloss: dict[str, str] = {}
+    for subject in spec.get("subjects") or []:
+        if isinstance(subject, dict):
+            name = str(subject.get("name") or "").strip()
+            subj_desc = str(subject.get("description") or "").strip()
+            if name and subj_desc:
+                gloss[name] = subj_desc
+    app_gloss: dict[str, str] = {}
+    if not str(spec.get("video_subject_scene") or "").strip():
+        app_gloss = _appearance_by_actor(str(spec.get("appearance") or ""), actors)
+    parts: list[str] = []
+    for actor in actors:
+        desc: str | None = gloss.get(actor) or app_gloss.get(actor)
+        parts.append(f"{actor}（{desc}）" if desc else actor)
+    return "、".join(parts)
+
+
+def _reference_binding_climax(first_frame_desc: str, spec: dict[str, Any]) -> str:
+    """③ 参考绑定（climax 单图）：图片1 = 高潮动作画面，锁身份 + 角色样貌。
 
     desc 只用外部职责描述（first_frame_desc），空则「高潮动作画面」占位。
     画面级动作细节由 [动作] 桥段承载，不在此重复——避免同一段画面级描述
-    在参考绑定与动作两处重复（此前用 action_beat 兜底导致整段重复）。"""
+    在参考绑定与动作两处重复（此前用 action_beat 兜底导致整段重复）。
+    视频模型不认识角色名：除图片职责外，写清「画面角色」与「角色→样貌」绑定，
+    否则「保持 xx 身份」是空绑定（模型不知道 xx 长什么样）。"""
     desc = (first_frame_desc or "").strip() or "高潮动作画面"
+    actors = [str(a).strip() for a in (spec.get("actors") or []) if str(a).strip()]
     lines = [f"图片1={desc}（唯一参考画面，作为准确起始帧）"]
     if actors:
-        lines.append(f"保持 {('、'.join(actors))} 的身份、脸部、服装、发型、造型完全一致")
+        lines.append(f"画面角色：{'、'.join(actors)}")
+        lines.append(f"保持 {_identity_gloss(spec, actors)} 的身份、脸部、服装、发型、造型完全一致")
     return "；".join(lines)
 
 
 def _reference_binding_firstlast(first_frame_desc: str, last_frame_desc: str,
-                                 actors: list[str],
+                                 spec: dict[str, Any],
                                  has_first: bool = True, has_last: bool = True) -> str:
     """③ 参考绑定（firstlast 双图）：图片1=首帧、图片2=尾帧，职责钉死。
 
@@ -141,13 +206,15 @@ def _reference_binding_firstlast(first_frame_desc: str, last_frame_desc: str,
         lines.append(f"图片2={l}（尾帧/目标画面）")
     else:
         lines.append(f"尾帧（无参考图，以文字为准）：{l}")
+    actors = [str(a).strip() for a in (spec.get("actors") or []) if str(a).strip()]
     if actors:
-        lines.append(f"保持 {('、'.join(actors))} 的身份、脸部、服装、发型、造型完全一致")
+        lines.append(f"画面角色：{'、'.join(actors)}")
+        lines.append(f"保持 {_identity_gloss(spec, actors)} 的身份、脸部、服装、发型、造型完全一致")
     return "；".join(lines)
 
 
 def _reference_binding_transition(prev_tail_desc: str, first_frame_desc: str,
-                                  actors: list[str],
+                                  spec: dict[str, Any],
                                   has_prev_tail: bool = True, has_first: bool = True) -> str:
     """③ 参考绑定（转场双图）：图片1=上一楼层尾帧（转场起点）、图片2=当前楼层首帧（转场终点）。
 
@@ -163,8 +230,10 @@ def _reference_binding_transition(prev_tail_desc: str, first_frame_desc: str,
         lines.append(f"图片2={ff}（当前楼层首帧/转场终点）")
     else:
         lines.append(f"当前楼层首帧（无参考图，以文字为准）：{ff}")
+    actors = [str(a).strip() for a in (spec.get("actors") or []) if str(a).strip()]
     if actors:
-        lines.append(f"保持 {('、'.join(actors))} 的身份、脸部、服装、发型、造型完全一致")
+        lines.append(f"画面角色：{'、'.join(actors)}")
+        lines.append(f"保持 {_identity_gloss(spec, actors)} 的身份、脸部、服装、发型、造型完全一致")
     return "；".join(lines)
 
 
@@ -392,7 +461,7 @@ def compile_climax_video_prompt(
         blocks.append(f"[风格]：{style}")
     action, cam, fx = _climax_action(spec)
     blocks.append(
-        f"[参考绑定]：{_reference_binding_climax(first_frame_desc, spec.get('actors') or [])}"
+        f"[参考绑定]：{_reference_binding_climax(first_frame_desc, spec)}"
     )
     subject = _subject_scene(spec)
     if subject:
@@ -431,7 +500,7 @@ def compile_firstlast_video_prompt(
     if style:
         blocks.append(f"[风格]：{style}")
     blocks.append(
-        f"[参考绑定]：{_reference_binding_firstlast(first_frame_desc, last_frame_desc, spec.get('actors') or [], has_first, has_last)}"
+        f"[参考绑定]：{_reference_binding_firstlast(first_frame_desc, last_frame_desc, spec, has_first, has_last)}"
     )
     subject = _subject_scene(spec)
     if subject:
@@ -480,7 +549,7 @@ def compile_transition_video_prompt(
     if style:
         blocks.append(f"[风格]：{style}")
     blocks.append(
-        f"[参考绑定]：{_reference_binding_transition(prev_tail_desc, first_frame_desc, spec.get('actors') or [], has_prev_tail, has_first)}"
+        f"[参考绑定]：{_reference_binding_transition(prev_tail_desc, first_frame_desc, spec, has_prev_tail, has_first)}"
     )
     subject = _subject_scene(spec)
     if subject:

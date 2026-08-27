@@ -464,3 +464,70 @@ def test_parse_video_plan_skips_empty_and_returns_partial():
         '{"action_sequence":[{"beat":"","desc":""},{"beat":"延伸","desc":"吃下"}]}'
     )
     assert plan == {"action_sequence": [{"beat": "延伸", "desc": "吃下"}]}
+
+
+# ===== 参考绑定角色样貌绑定（角色名必须绑定样貌，否则视频模型不认识角色） =====
+
+def test_reference_binding_binds_identity_gloss_from_subjects():
+    # subjects 的 name→description 是「角色→样貌」真源，优先用它做身份绑定
+    spec = _spec(
+        subjects=[
+            {"name": "温知夏", "description": "beige cardigan, chestnut long hair", "weight": 1.2},
+            {"name": "沈糯", "description": "pink hoodie, lollipop", "weight": 1.0},
+            {"name": "柏言", "description": "wa-style robe, tea cup", "weight": 0.9},
+        ],
+    )
+    p = video_prompt.compile_climax_video_prompt(spec)
+    binding = p.split("[参考绑定]：", 1)[1].split("\n\n", 1)[0]
+    assert "画面角色：温知夏、沈糯、柏言" in binding
+    assert "温知夏（beige cardigan, chestnut long hair）" in binding
+    assert "沈糯（pink hoodie, lollipop）" in binding
+    assert "柏言（wa-style robe, tea cup）" in binding
+
+
+def test_reference_binding_binds_identity_gloss_from_appearance():
+    # 无 subjects 时回退 appearance 的「名字(外貌)」格式，拆出角色→样貌映射
+    spec = _spec(appearance="温知夏(米色针织开衫+陶杯)、沈糯(粉卫衣+棒棒糖)、柏言(和风长衫+茶盏)")
+    p = video_prompt.compile_climax_video_prompt(spec)
+    binding = p.split("[参考绑定]：", 1)[1].split("\n\n", 1)[0]
+    assert "温知夏（米色针织开衫+陶杯）" in binding
+    assert "沈糯（粉卫衣+棒棒糖）" in binding
+    assert "柏言（和风长衫+茶盏）" in binding
+
+
+def test_reference_binding_binds_identity_gloss_from_plain_appearance():
+    # 纯文本无分隔：用 actors 名字做前缀匹配，拆出单角色样貌（其余角色只写名字）
+    spec = _spec(appearance="温知夏米色针织开衫，栗色长发")
+    p = video_prompt.compile_climax_video_prompt(spec)
+    binding = p.split("[参考绑定]：", 1)[1].split("\n\n", 1)[0]
+    assert "温知夏（米色针织开衫，栗色长发）" in binding
+    assert "沈糯" in binding  # 无样貌数据，只写名字
+
+
+def test_reference_binding_does_not_reflow_appearance_when_subject_scene_exists():
+    # P4 续：agent 已产出简化 video_subject_scene 时，身份绑定不得再用原始中文
+    # appearance 兜底（堆砌词「丰腴肥熟」不得经参考绑定回流）
+    spec = _spec(
+        appearance="温知夏(丰腴肥熟、酥雌醇媚、女帝气场)",
+        video_subject_scene="hourglass figure, large breasts, wide hips, seductive eyes",
+    )
+    p = video_prompt.compile_climax_video_prompt(spec)
+    assert "丰腴肥熟" not in p
+    assert "hourglass figure" in p  # 简化外貌仍在 [主体/场景]
+
+
+def test_reference_binding_firstlast_and_transition_bind_identity():
+    # firstlast / transition 同样带「画面角色」+ 角色样貌绑定
+    p = video_prompt.compile_firstlast_video_prompt(
+        _spec(appearance="温知夏(米色针织开衫)、沈糯(粉卫衣)、柏言(和风长衫)"),
+        first_frame_desc="开场三人围坐", last_frame_desc="举杯同框",
+    )
+    binding = p.split("[参考绑定]：", 1)[1].split("\n\n", 1)[0]
+    assert "画面角色：温知夏、沈糯、柏言" in binding
+    assert "温知夏（米色针织开衫）" in binding
+    tp = video_prompt.compile_transition_video_prompt(
+        _spec(appearance="温知夏(米色针织开衫)、沈糯(粉卫衣)、柏言(和风长衫)"),
+        prev_tail_desc="三人围坐面馆举杯", first_frame_desc="面馆暖光沈糯抿汤",
+    )
+    tbinding = tp.split("[参考绑定]：", 1)[1].split("\n\n", 1)[0]
+    assert "画面角色：温知夏、沈糯、柏言" in tbinding

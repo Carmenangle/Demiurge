@@ -81,6 +81,30 @@ SPECS = [
             "aspect_ratio": "16:9",
         },
     },
+    {
+        "label": "motion=3 + LLM 提取路径（action_sequence + video_subject_scene，mock _extract_video_action_plan）",
+        "motion": 3,
+        "scene_spec": {
+            "narrative": "温知夏猛地起身，椅子向后倒去，一把攥住林屿的手腕",
+            "appearance": "温知夏(米色针织开衫+栗色长发)、林屿(深色夹克+短寸)",
+            "wardrobe": "全员日常私服",
+            "locale": "温暖小面馆内景，暖黄吊灯",
+            "actors": ["温知夏", "林屿"],
+            "rating": "sfw",
+            "subjects": [
+                {"name": "温知夏", "description": "beige cardigan, chestnut long hair", "weight": 1.2},
+                {"name": "林屿", "description": "dark jacket, short hair", "weight": 1.0},
+            ],
+            # 以下两字段模拟 _extract_video_action_plan 成功返回后被并入 _merged_spec：
+            "action_sequence": [
+                {"beat": "定格起点", "desc": "温知夏猛地起身，椅子向后倒去"},
+                {"beat": "延伸", "desc": "一把攥住林屿的手腕"},
+                {"beat": "收尾", "desc": "两人对视，气氛紧绷"},
+            ],
+            "video_subject_scene": "beige cardigan with chestnut long hair, dark jacket with short hair, warm noodle shop interior under amber pendant lamps",
+            "aspect_ratio": "16:9",
+        },
+    },
 ]
 
 for i, spec in enumerate(SPECS):
@@ -105,7 +129,7 @@ for i, spec in enumerate(SPECS):
     print()
 
 # 同时导出完整 wire（含 video_prompt + video_params）供前端契约测试复用
-from app.services import chat_stream_protocol as protocol
+from app.services import chat_stream_protocol as protocol  # noqa: E402
 
 wire = [protocol.encode_event(ev) for ev in ag._streamed_illustration_events([
     {
