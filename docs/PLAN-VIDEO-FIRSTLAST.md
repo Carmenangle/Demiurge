@@ -27,12 +27,12 @@
 |------|------|------|
 | 两套提示词编译（climax 精简 / firstlast 七段式） | ✅ 已做 | `video_prompt.compile_*` |
 | 参数组装 dry-run（职责描述 / 图地址两层分离） | ✅ 已做 | `video_prompt.build_video_request` |
-| 首尾帧双锚点提取（开头画面 + 结尾画面） | ❌ 待建 P1 | 楼层文本 → `{opening, closing}` |
-| 表格素材读取（重要角色表 / 全局表 / 任务表） | ❌ 待建 P2 | `table_store` 列名容错读取 |
-| `videoMode` preset 二选一 + 事件协议扩展 | ❌ 待建 P3 | `MediaInsertPreset` + `illustrate_request` |
-| 尾帧链式状态（上楼层尾帧） | ❌ 待建 P4 | 推荐「反查」而非新增持久化 |
-| 前端双图提交链（先首尾帧出图再提视频） | ❌ 待建 P5 | 复用 `claimIllustrationSubmission` 认领 |
-| 真实 API 对齐（双图语义 / size 白名单） | ❌ 待建 P6 | 实测后回填 |
+| 首尾帧双锚点提取（开头画面 + 结尾画面） | ✅ 已做 P1 | `story_frames.extract_story_frames` → `{opening, closing}` |
+| 表格素材读取（重要角色表 / 全局表 / 任务表） | ✅ 已取消 | 表格剧情推进时已自动发送，场景信息 scene_spec 已含 |
+| `videoMode` preset 二选一 + 事件协议扩展 | ✅ 已做 P3 | `MediaInsertPreset` + `illustrate_request` |
+| 尾帧链式状态（上楼层尾帧） | ✅ 已做 P4 | `resolvePrevTailDesc` 反查（零新增持久化） |
+| 前端双图提交链（先首尾帧出图再提视频） | ✅ 已做 P5 | 首尾帧顺序链 + W3 转场 2 任务排队 |
+| 真实 API 对齐（双图语义 / size 白名单） | ⏸ 顺延 P6 | 需用户提供可实测端点后回填 |
 
 ---
 

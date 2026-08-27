@@ -21,8 +21,8 @@ A1.1 三开关重构 ──→ A1.2 音轨配置 ──→ A1.3 音频语义绑�
 | V1.2 | ✅ 已完成 | 视频 scene_spec 最小事实合同（零新增 LLM） |
 | V1.3 | ✅ 已完成 | 视频槽 SSE/快照/恢复/瘦身全链路验证 |
 | V1.4 | ✅ 已完成 | 云端视频端点通用化 + 首帧图生视频（参考图参数） |
-| V1.5 | 未开始 | 视频首尾帧参考图（首帧=角色底图已达成，尾帧=后续目标） |
-| V1.6 | 未开始 | 视频独特提示词方法（高潮动作时段 + 视频专属生成法，待探讨） |
+| V1.5 | ✅ 已完成 | 首尾帧生图独立模式 + 首帧复用两级判断 + 转场视频任务编排（P6 真实 API 对齐顺延，待可实测端点） |
+| V1.6 | ✅ 已完成 | 视频独特提示词方法（climax 精简动作延伸 + firstlast 七段式 + action_sequence 动作序列） |
 | M1.1 | ✅ 已完成 | 搜索源 Adapter 注册表 |
 | M1.2 | ✅ 已完成 | 图片素材搜索与预览 |
 | M1.3 | ✅ 已完成 | 受控下载入资产库（候选校验/域名白名单/provenance/魔数/SSRF/原子写全链；后台任务化列后续） |
@@ -123,6 +123,13 @@ V1 与 M1 前半（M1.1–M1.3）互不依赖，可并行推进。
 
 ### V1.5 首尾帧生图 + 首尾帧视频（分层定调 2026-08-26 修正）
 
+> **进度（2026-08-26）**：已落地。首尾帧双锚点提取（`story_frames.extract_story_frames`）、
+> 首帧复用两级判断（L0 场景连续性 `judge_frame_reuse` + L1 `<transition>` 搭车，`merge_frame_reuse`
+> 合并）、转场视频任务编排（`build_video_request(mode="transition")` + 前端 2 任务排队）、
+> 尾帧链式反查（`resolvePrevTailDesc`，零新增持久化）、`videoMode` 二选一协议透传均已实现并测试覆盖。
+> 剩余：P6 真实 API 对齐（双图 `image[]` 语义实测）待用户提供可实测端点。详见
+> `docs/PLAN-VIDEO-FIRSTLAST.md`。
+
 **架构分层（图片层 / 视频层）**：
 - **图片层两个模式**：
   - **高潮片段生图**（已完善）——高潮锚点 → 1 张高潮动作图。
@@ -187,6 +194,14 @@ V1 与 M1 前半（M1.1–M1.3）互不依赖，可并行推进。
 - 视频提示词按 H3 七段式骨架本地编译（见 V1.6）。
 
 ### V1.6 视频独特提示词方法（方案定稿 2026-08-25）
+
+> **进度（2026-08-26）**：已落地。climax 精简版（动作延伸）与 firstlast 七段式两套提示词
+> 已分开建模（`video_prompt.compile_climax_video_prompt` / `compile_firstlast_video_prompt` /
+> `compile_transition_video_prompt`）；第⑤块时间分镜为 firstlast 专属；climax 动作延伸通过
+> `<illustration>` 块可选字段 `action_sequence` 落地（`_climax_action_beat` 优先消费，
+> 缺失回退 subjects/visual_facts/composition）；`video_prompt` 随 `illustrate_request` 下发。
+> 防拦截对齐图像两层机制（共享 `prompt_clean` 破甲还原 + IMAGE_PROMPT 清洗规则）。
+> 提示词内容编写（镜头语言 + 动态提取逐段打磨）按用户指示留到测试环节逐步排查。
 
 **目标**：视频提示词从「高潮动作概括」升级为「视频专属生成法」，不套用生图静态描述框架。
 两种模式（V1.5）的提示词**截然不同**，分别建模，不共用一套模板。
