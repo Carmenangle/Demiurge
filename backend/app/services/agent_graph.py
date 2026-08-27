@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import TypedDict, Iterator
+from typing import Any, Iterator, TypedDict
 
 from app.services import agent_context, builtin_agents, edit_agent, generation_approval, generation_store, prompt_compiler, roleplay_turn, run_trace, scene_classify, structured_output, tool_agent_adapter
 from app.services.structured_contracts import SupervisorDecision
@@ -1039,17 +1039,20 @@ def _resolve_illustration_request_actors(
 def _filter_illustration_appearance(
     appearance: str, actors: list[str], known: list[str],
 ) -> str:
-    """视觉资料只描述已选角色，禁止旧角色外貌进入最终 Profile。"""
+    """视觉资料只描述已选角色，禁止旧角色外貌进入最终 Profile。
+
+    段落头用通用「名字[：:]」识别（不限 known 白名单），这样 known 之外的角色段
+    （如世界书 NPC 未进入 illustration_actor_names）也能被正确识别并过滤，
+    否则会把非选中角色段当成选中角色的续行保留（虞莹纱混入缺陷）。
+    """
     source = (appearance or "").strip()
     selected = set(actors)
     if not source or not known:
         return source
     if not selected:
         return ""
-    ordered_names = sorted(set(known), key=len, reverse=True)
-    marker = re.compile(
-        rf"^\s*({'|'.join(re.escape(name) for name in ordered_names)})\s*[：:]",
-    )
+    # 通用段落头：行首「任意名字 + 冒号」，不再限定 known 白名单。
+    marker = re.compile(r"^\s*([^\s：:]+)\s*[：:]")
     if not any(marker.match(line) for line in source.splitlines()):
         return source
     kept: list[str] = []
@@ -1057,7 +1060,7 @@ def _filter_illustration_appearance(
     for line in source.splitlines():
         match = marker.match(line)
         if match:
-            include = match.group(1) in selected
+            include = match.group(1).strip() in selected
         if include:
             kept.append(line)
     return "\n".join(kept).strip()
@@ -1502,6 +1505,14 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
                     _merged_spec = dict(scene_spec)
                     if "motion" not in _merged_spec:
                         _merged_spec["motion"] = int(motion or 0)
+                    # 选 A：从剧情原文理解体态，补动作延伸 + 简化外貌/场景。
+                    # 失败静默回退（_vp_plan 为空），不阻断出图；非 retargeted 时主模型
+                    # 已给 action_sequence，本提取作为兜底优先补齐，避免动作段退化。
+                    _vp_plan = _extract_video_action_plan(ctx, _merged_spec)
+                    if _vp_plan.get("action_sequence"):
+                        _merged_spec["action_sequence"] = _vp_plan["action_sequence"]
+                    if _vp_plan.get("subject_scene"):
+                        _merged_spec["video_subject_scene"] = _vp_plan["subject_scene"]
                     # V1.6/W3：按视频模式编译（前端 preset.videoMode 透传；缺省 climax 兼容旧预设）。
                     _video_mode = str(ctx.get("video_mode") or "climax")
                     if _video_mode not in ("climax", "firstlast"):
@@ -2116,6 +2127,57 @@ def _resolve_personas(
         "不得把一名角色的外貌、经历或行为特征转移给另一名角色。"
     )
     return selection + "\n\n" + "\n\n".join(profiles)
+
+
+def _extract_video_action_plan(ctx: dict, spec: dict[str, Any]) -> dict[str, Any]:
+    """选 A：从剧情原文理解体态，提取视频提示词原料（动作延伸 + 简化外貌/场景）。
+
+    P1/P5 修复：climax [动作] 段曾退化成 subjects.description（外貌），因为
+    plan_retargeted 时 action_sequence/visual_facts/composition 被清空，动作链断掉。
+    这里直接从纠正后的高潮片段正文（scene_narrative）理解体态，产出：
+    - action_sequence：定格动作 → 剧情完整动作的延伸（只写剧情有证据的动作）；
+    - subject_scene：在场角色的简化外貌 + 场景视觉描述（去同义形容词堆砌、
+      专名视觉展开），只描述在场 actors。
+
+    失败静默返回 {}，调用方回退现有纯函数兜底，不阻断出图。
+    """
+    from app.services import video_prompt as _vp
+    narrative = str(spec.get("narrative") or "").strip()
+    if not narrative:
+        return {}
+    actors = [str(a).strip() for a in (spec.get("actors") or []) if str(a).strip()]
+    appearance = str(spec.get("appearance") or "").strip()
+    locale = str(spec.get("locale") or "").strip()
+    system = (
+        "你是视频提示词原料提取器。读下面这段剧情高潮正文（可能含防拦截标记，请还原其原义），"
+        "理解人物体态与动作，输出 JSON：\n"
+        "{\"action_sequence\":[{\"beat\":\"定格起点/延伸/收尾\",\"desc\":\"动作描述\"}],"
+        "\"subject_scene\":\"简化外貌+场景英文视觉描述\"}\n"
+        "规则：\n"
+        "1. action_sequence 是从高潮图定格动作到剧情完整动作的延伸流程，最多8步；"
+        "desc[0] 必须对应当前高潮图的定格动作，desc[1..] 必须基于剧情描述的后续动作，"
+        "剧情没写的动作不得补；desc 用简洁英文视觉描述（写清谁、什么体态、做什么）。\n"
+        "2. subject_scene 只描述在场角色的外貌与场景：把抽象评价与同义形容词堆砌简化为直白视觉词"
+        "（如「丰腴肥熟+酥雌醇媚」→「hourglass figure, large breasts, wide hips, seductive eyes」），"
+        "专有名词（地名/建筑/器物）必须展开成可还原的视觉描述，不得照抄原名。\n"
+        "3. 只输出 JSON，不要解释。"
+    )
+    user_lines = [f"剧情高潮正文：\n{narrative}"]
+    if actors:
+        user_lines.append(f"在场角色：{'、'.join(actors)}")
+    if appearance:
+        user_lines.append(f"外貌锚（需简化去堆砌）：\n{appearance}")
+    if locale:
+        user_lines.append(f"场景：{locale}")
+    user = "\n\n".join(user_lines)
+    try:
+        raw = _llm.chat(
+            ctx["chat_base"], ctx["chat_key"], ctx["chat_model"],
+            system, user, temperature=0.3, **_proxy_kw(ctx),
+        )
+        return _vp.parse_video_plan(raw)
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 def _card_visual_profiles(ctx: dict, query: str) -> str:

@@ -20,6 +20,17 @@ def test_agent_state保留流式完成标记():
     assert "_streamed_result" in ag.AgentState.__annotations__
 
 
+def test_过滤外貌已知名单之外的角色段不混入():
+    # P3 回归：appearance 里出现 illustration_actor_names（known）之外的角色段时，
+    # 旧实现只按 known 白名单匹配段落头，导致 unknown 角色段被当成选中角色的续行保留。
+    # 修复后通用段落头识别，只保留 actors 里的角色段。
+    src = "虞妙玥：【外貌】墨发，暗红美眸。\n虞莹纱：【外貌】红绸束发，娇俏。"
+    out = ag._filter_illustration_appearance(src, ["虞妙玥"], ["虞妙玥"])
+    assert "虞妙玥" in out
+    assert "虞莹纱" not in out
+    assert "红绸束发" not in out
+
+
 def test_同轮隐藏成稿预算追加在正文显式上限之外():
     ctx = _ctx(
         comfy_illustrate=True,

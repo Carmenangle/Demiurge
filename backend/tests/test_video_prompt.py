@@ -414,3 +414,53 @@ def test_climax_falls_back_to_visual_facts_without_action_sequence():
     p = video_prompt.compile_climax_video_prompt(spec)
     assert "drawing sword, crimson cloak" in p
     assert "leaps upward with blade raised" in p
+
+
+def test_climax_action_does_not_degrade_to_appearance():
+    # P1/P5 回归：无 action_sequence / visual_facts / composition 时，动作段不得用
+    # subjects.description（外貌）兜底——否则 [动作] 段退化成整段外貌描述。
+    # 外貌只应出现在 [主体/场景]，动作段回退到 narrative（剧情体态）。
+    spec = _spec(
+        narrative="温知夏猛地起身，椅子向后倒去，一把攥住林屿的手腕",
+        subjects=[{"name": "温知夏", "description": "luxuriant black hair, mature figure", "weight": 1.2}],
+        action_sequence=[],
+        composition=None,
+        camera=None,
+    )
+    p = video_prompt.compile_climax_video_prompt(spec)
+    action = p.split("[动作]：", 1)[1]
+    # 外貌描述（luxuriant）不得出现在动作段
+    assert "luxuriant" not in action
+    assert "攥住林屿的手腕" in action  # 动作回退到剧情原文
+
+
+def test_subject_scene_prefers_video_subject_scene_over_appearance():
+    # P4 回归：agent 已产出简化外貌/场景时，[主体/场景] 用它，不塞中文堆砌 appearance
+    spec = _spec(
+        appearance="温知夏(丰腴肥熟、酥雌醇媚、女帝气场)",
+        video_subject_scene="hourglass figure, large breasts, wide hips, seductive eyes",
+    )
+    p = video_prompt.compile_climax_video_prompt(spec)
+    assert "hourglass figure, large breasts, wide hips, seductive eyes" in p
+    assert "丰腴肥熟" not in p
+
+
+def test_parse_video_plan_extracts_action_sequence_and_subject_scene():
+    plan = video_prompt.parse_video_plan(
+        '```json\n{"action_sequence":[{"beat":"定格起点","desc":"俯卧在地"},'
+        '{"beat":"延伸","desc":"被从身后贯穿"}],'
+        '"subject_scene":"hourglass figure, stone prison corridor"}\n```'
+    )
+    assert plan["action_sequence"] == [
+        {"beat": "定格起点", "desc": "俯卧在地"},
+        {"beat": "延伸", "desc": "被从身后贯穿"},
+    ]
+    assert plan["subject_scene"] == "hourglass figure, stone prison corridor"
+
+
+def test_parse_video_plan_skips_empty_and_returns_partial():
+    # 空 desc 跳过；缺 subject_scene 时只回 action_sequence，不整体失败
+    plan = video_prompt.parse_video_plan(
+        '{"action_sequence":[{"beat":"","desc":""},{"beat":"延伸","desc":"吃下"}]}'
+    )
+    assert plan == {"action_sequence": [{"beat": "延伸", "desc": "吃下"}]}

@@ -22,6 +22,7 @@ H3 高服从字面执行，本质是「把成片逐秒、逐镜头、逐像素�
 """
 from __future__ import annotations
 
+import json
 import math
 import re
 from typing import Any
@@ -62,12 +63,28 @@ def _style_declaration(style_prefix: str, rating: str) -> str:
 
 
 def _subject_scene(spec: dict[str, Any]) -> str:
-    """④ 主体/场景：可还原的视觉细节（外貌/衣着/场景），不堆形容词。
+    """④ 主体/场景：可还原的视觉细节，禁止堆砌同义形容词。
 
-    来源 scene_spec 的 appearance / wardrobe / locale，顺序拼接。
+    优先 agent 提取的简化视觉描述（video_subject_scene，已去堆砌 + 专名视觉展开）；
+    否则拼接「外貌 + 衣着 + 场景」三块——外貌优先主模型英文视觉（subjects.description，
+    简洁可还原），缺失回退中文 appearance。
     """
+    video_scene = str(spec.get("video_subject_scene") or "").strip()
+    if video_scene:
+        return video_scene
     parts: list[str] = []
-    for key in ("appearance", "wardrobe", "locale"):
+    # 外貌：优先英文视觉（subjects.description），缺失回退中文 appearance
+    for subject in spec.get("subjects") or []:
+        if isinstance(subject, dict):
+            desc = str(subject.get("description") or "").strip()
+            if desc and desc not in parts:
+                parts.append(desc)
+    if not parts:
+        appearance = str(spec.get("appearance") or "").strip()
+        if appearance:
+            parts.append(appearance)
+    # 衣着 + 场景（独立维度，始终拼接）
+    for key in ("wardrobe", "locale"):
         val = str(spec.get(key) or "").strip()
         if val and val not in parts:
             parts.append(val)
@@ -315,12 +332,9 @@ def _climax_action_beat(spec: dict[str, Any]) -> str:
             beats.append(f"{beat}: {desc}" if beat else desc)
         if beats:
             return "；".join(beats)
+    # 动作段只承载「动作/姿态/接触关系」，不得用 subjects.description（外貌）
+    # 兜底——否则动作段会退化成整段外貌描述（P1/P5 缺陷）。外貌属于 [主体/场景]。
     parts: list[str] = []
-    for subject in spec.get("subjects") or []:
-        if isinstance(subject, dict):
-            desc = str(subject.get("description") or "").strip()
-            if desc and desc not in parts:
-                parts.append(desc)
     for fact in spec.get("visual_facts") or []:
         if isinstance(fact, dict):
             f = str(fact.get("fact") or "").strip()
@@ -648,3 +662,39 @@ def _section_names(mode: str) -> list[str]:
     if mode == "transition":
         return ["①元信息", "②风格", "③参考绑定", "④主体/场景", "⑤转场分镜", "⑥音频", "⑦负面约束"]
     return ["①元信息", "②风格", "③参考绑定", "④主体/场景", "动作瞬间", "⑦负面约束"]
+
+
+def parse_video_plan(reply: str) -> dict[str, Any]:
+    """解析视频提示词专用提取（动作延伸 + 简化外貌/场景）的 JSON 回复。
+
+    容忍 markdown 代码块包裹与破甲残留；字段不合法时只丢弃对应键，不整体失败。
+    产出 {action_sequence: [{beat, desc}], subject_scene: str}。
+    """
+    raw = (reply or "").strip()
+    m = re.search(r"\{[\s\S]*\}", raw)
+    if not m:
+        return {}
+    try:
+        data = json.loads(m.group(0))
+    except (json.JSONDecodeError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, Any] = {}
+    seq = data.get("action_sequence")
+    if isinstance(seq, list):
+        beats: list[dict[str, str]] = []
+        for item in seq[:8]:
+            if not isinstance(item, dict):
+                continue
+            beat = str(item.get("beat") or "").strip()
+            desc = prompt_clean.restore_jailbreak(str(item.get("desc") or "")).strip()
+            if not desc:
+                continue
+            beats.append({"beat": beat or "延伸", "desc": desc})
+        if beats:
+            out["action_sequence"] = beats
+    subject_scene = data.get("subject_scene")
+    if isinstance(subject_scene, str) and subject_scene.strip():
+        out["subject_scene"] = prompt_clean.restore_jailbreak(subject_scene).strip()
+    return out
