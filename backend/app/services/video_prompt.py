@@ -94,12 +94,13 @@ def _negative(spec: dict[str, Any], preset_negative: str) -> str:
     return "；".join(items)
 
 
-def _reference_binding_climax(first_frame_desc: str, actors: list[str], action_beat: str = "") -> str:
+def _reference_binding_climax(first_frame_desc: str, actors: list[str]) -> str:
     """③ 参考绑定（climax 单图）：图片1 = 高潮动作画面，锁身份。
 
-    desc 优先外部职责描述（first_frame_desc），其次画面级动作瞬间（action_beat），
-    最后才是「高潮动作画面」占位——保证图职责描述与 [动作] 桥段同源、对得上剧情。"""
-    desc = (first_frame_desc or "").strip() or action_beat or "高潮动作画面"
+    desc 只用外部职责描述（first_frame_desc），空则「高潮动作画面」占位。
+    画面级动作细节由 [动作] 桥段承载，不在此重复——避免同一段画面级描述
+    在参考绑定与动作两处重复（此前用 action_beat 兜底导致整段重复）。"""
+    desc = (first_frame_desc or "").strip() or "高潮动作画面"
     lines = [f"图片1={desc}（唯一参考画面，作为准确起始帧）"]
     if actors:
         lines.append(f"保持 {('、'.join(actors))} 的身份、脸部、服装、发型、造型完全一致")
@@ -377,7 +378,7 @@ def compile_climax_video_prompt(
         blocks.append(f"[风格]：{style}")
     action, cam, fx = _climax_action(spec)
     blocks.append(
-        f"[参考绑定]：{_reference_binding_climax(first_frame_desc, spec.get('actors') or [], action)}"
+        f"[参考绑定]：{_reference_binding_climax(first_frame_desc, spec.get('actors') or [])}"
     )
     subject = _subject_scene(spec)
     if subject:
@@ -576,9 +577,10 @@ def build_video_request(
             "图片2": _binding_entry(first_frame_desc or "当前楼层首帧画面", last_frame),
         }
     else:
-        # 图职责描述：外部 first_frame_desc 优先，否则用画面级动作瞬间（与 [动作] 同源，
-        # 避免把围绕锚点截取的可能陈旧 narrative 写进图职责描述），最后才是占位。
-        desc = (first_frame_desc or "").strip() or _climax_action_beat(spec) or "高潮动作画面"
+        # 图职责描述：外部 first_frame_desc 优先，否则「高潮动作画面」占位。
+        # 画面级动作细节由 compile 内 [动作] 桥段承载，不再用 _climax_action_beat
+        # 兜底当图职责描述——否则同一段画面描述会重复出现在参考绑定与动作两处。
+        desc = (first_frame_desc or "").strip() or "高潮动作画面"
         prompt = compile_climax_video_prompt(
             spec, style_prefix=style_prefix, negative=negative,
             duration_hint=duration_hint, camera=camera, model_name=model, size=size,

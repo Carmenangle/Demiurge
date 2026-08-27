@@ -36,6 +36,18 @@ def test_climax_binds_single_frame_and_identity():
     assert "温知夏" in p and "沈糯" in p and "柏言" in p
 
 
+def test_climax_reference_binding_does_not_duplicate_action():
+    # 缺陷回归：first_frame_desc 留空时，画面级动作细节曾同时出现在
+    # [参考绑定] 与 [动作] 两段（整段重复）。修复后参考绑定用「高潮动作画面」占位，
+    # 画面细节（composition）只出现在 [动作] 段。
+    p = video_prompt.compile_climax_video_prompt(_spec())
+    assert "图片1=高潮动作画面" in p
+    binding = p.split("[参考绑定]：", 1)[1].split("\n\n", 1)[0]
+    action = p.split("[动作]：", 1)[1]
+    assert "三人中景" in action
+    assert "三人中景" not in binding
+
+
 def test_climax_respects_negative_and_style():
     p = video_prompt.compile_climax_video_prompt(
         _spec(), style_prefix="二次元日常美食", negative="禁止柔化转场",
