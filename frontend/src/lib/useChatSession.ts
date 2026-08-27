@@ -655,7 +655,11 @@ export function useChatSession(deps: ChatSessionDeps) {
         regeneration,
         templateName: savedRegeneration?.kind === "workflow" ? savedRegeneration.templateName : undefined,
         modelName: savedRegeneration?.kind === "workflow" ? savedRegeneration.modelName : undefined,
-        loraNames: savedRegeneration?.kind === "workflow" ? savedRegeneration.loraNames : undefined,
+        loraNames: savedRegeneration?.kind === "workflow"
+          ? savedRegeneration.loraNames
+          : savedRegeneration?.kind === "template"
+            ? savedRegeneration.loras?.map((l) => l.name)
+            : undefined,
         target,
         baseSlotRef: pendingItem.baseSlotRef,
       });

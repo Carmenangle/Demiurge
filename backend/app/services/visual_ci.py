@@ -354,7 +354,17 @@ def _probe_visual_ci_trace(diag: VisualCIDiagnostic, repo_id: str, generation_id
 
     if submitted:
         diag.mechanical.checkpoint = submitted.get("checkpoint", "")
-        diag.mechanical.loras = submitted.get("loras", [])
+        # illustration.submitted 写的是 lora_name / lora_names（字符串），不是 loras（dict 列表）；
+        # 字段名不匹配曾导致 mechanical.loras 恒空、no_loras_loaded 警告恒触发。按实际字段名
+        # 重建 [{lora_name, weight}]；multi 模式共享 lora_weight（前端未上报各 LoRA 独立权重）。
+        lora_names = submitted.get("lora_names") or []
+        if not lora_names and submitted.get("lora_name"):
+            lora_names = [submitted["lora_name"]]
+        lora_weight = submitted.get("lora_weight") or 1.0
+        diag.mechanical.loras = [
+            {"lora_name": str(name), "weight": lora_weight}
+            for name in lora_names
+        ]
         diag.mechanical.seed = submitted.get("seed")
         diag.mechanical.width = submitted.get("width") or (submitted.get("latent") or {}).get("width", 0)
         diag.mechanical.height = submitted.get("height") or (submitted.get("latent") or {}).get("height", 0)

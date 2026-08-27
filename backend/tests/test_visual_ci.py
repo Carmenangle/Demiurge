@@ -89,6 +89,47 @@ def test_required_fields_flagged():
     assert required == {"character_identity", "action", "scene"}
 
 
+# ── Trace 机械账本（lora 字段名对齐）────────────────────────────────────────────
+
+def test_probe_trace_rebuilds_loras_from_lora_names(monkeypatch):
+    # 缺陷回归：illustration.submitted 写的是 lora_name/lora_names（字符串），
+    # 旧代码读 submitted["loras"]（dict 列表）导致 mechanical.loras 恒空。
+    import app.services.run_trace as run_trace
+    monkeypatch.setattr(run_trace, "read_recent", lambda repo_id, limit=50: [
+        {"event": "illustration.submitted", "data": {
+            "lora_name": "krea2_蔡秀晶.safetensors",
+            "lora_weight": 1.0,
+            "lora_mode": "single",
+            "lora_names": ["krea2_蔡秀晶.safetensors"],
+            "latent": {"width": 704, "height": 1024},
+            "prompt_chars": 226,
+        }},
+    ])
+    diag = VisualCIDiagnostic(id="d", generation_id="g")
+    visual_ci._probe_visual_ci_trace(diag, "repo", "g")
+    assert diag.mechanical.loras == [{"lora_name": "krea2_蔡秀晶.safetensors", "weight": 1.0}]
+    assert diag.mechanical.width == 704
+    assert diag.mechanical.height == 1024
+    assert diag.evidence["trace_source"] == "illustration.submitted"
+
+
+def test_probe_trace_multi_loras_share_weight(monkeypatch):
+    import app.services.run_trace as run_trace
+    monkeypatch.setattr(run_trace, "read_recent", lambda repo_id, limit=50: [
+        {"event": "illustration.submitted", "data": {
+            "lora_name": "style.safetensors",
+            "lora_weight": 1.0,
+            "lora_names": ["style.safetensors", "role.safetensors"],
+        }},
+    ])
+    diag = VisualCIDiagnostic(id="d", generation_id="g")
+    visual_ci._probe_visual_ci_trace(diag, "repo", "g")
+    assert diag.mechanical.loras == [
+        {"lora_name": "style.safetensors", "weight": 1.0},
+        {"lora_name": "role.safetensors", "weight": 1.0},
+    ]
+
+
 # ── Verdict 计算 ─────────────────────────────────────────────────────────────
 
 def test_verdict_green_when_all_pass():
