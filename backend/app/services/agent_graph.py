@@ -91,6 +91,11 @@ def _roleplay_sampling(ctx: dict) -> dict:
 
         profile = str(ctx.get("prompt_profile") or "krea2")
         sampling["max_tokens"] += image_prompt_profiles.inline_output_token_reserve(profile)
+    if "max_tokens" not in sampling:
+        # 2026-08-29 验收「正文内容极其少」实锤：未配置 max_tokens 时依赖供应商默认
+        # （常见仅 4k-8k），长思考模型在 <think> 阶段就烧光额度，正文 0 字截断。
+        # 正文轮的输出合同=思考+状态块+1000~8000 字正文+插画 JSON，必须给充裕显式上限。
+        sampling["max_tokens"] = 16000
     return sampling
 
 
@@ -1618,6 +1623,11 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
             # N 尾帧从历史最近角色回复提取（方案 B，零 wire），N+1 首帧从当前正文提取；合并结果
             # 三态（reuse/regenerate/ambiguous）随出图请求透传，前端叠加坑C「有图前提」裁决。
             if illustrate_req:
+                # 2026-08-29 验收「帧提示词编译失败」实锤：scene_spec 只随 climax 请求下发，
+                # first_story_reply 等非高潮路径的首尾帧请求拿不到 sceneSpec → 前端帧编译被
+                # 整段跳过 → 触发「禁止中文原文直提」守卫 → 首帧必失败。首尾帧编译以帧描述
+                # 为主输入、scene_spec 提供角色外貌等事实参照，必须恒定随请求下发。
+                illustrate_req.setdefault("scene_spec", scene_spec)
                 _prev_tail_desc = _resolve_prev_tail_desc(ctx)
                 _frames = story_frames.extract_story_frames(clean)
                 _merged = story_frames.merge_frame_reuse(

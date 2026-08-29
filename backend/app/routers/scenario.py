@@ -2,7 +2,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app.services import scenario_lab
+from app.services import repo_meta, scenario_lab
 
 router = APIRouter()
 
@@ -41,6 +41,8 @@ class SelectRequest(BaseModel):
 
 @router.post("/snapshots")
 def create_snapshot(req: SnapshotRequest):
+    if (err := repo_meta.works_root_violation(req.output_dir)):
+        raise HTTPException(status_code=400, detail=err)
     try:
         return scenario_lab.create_snapshot(
             req.output_dir, req.repo_id, turn=req.turn, label=req.label,
@@ -57,6 +59,8 @@ def list_snapshots(repo_id: str):
 
 @router.post("/fork")
 def fork_snapshot(req: ForkRequest):
+    if (err := repo_meta.works_root_violation(req.output_dir)):
+        raise HTTPException(status_code=400, detail=err)
     try:
         return scenario_lab.fork_snapshot(
             req.output_dir, req.source_repo_id, req.snapshot_id, req.target_repo_id,

@@ -9,7 +9,7 @@ from __future__ import annotations
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
-from app.services import character_card, character_store
+from app.services import character_card, character_store, repo_meta
 from app.services.character_card import CardParseError
 
 router = APIRouter()
@@ -54,6 +54,8 @@ def snapshot_to_work(req: SnapshotRequest) -> dict[str, object]:
     """
     if not (req.character_dir and req.card_name and req.output_dir):
         return {"ok": False, "created": False}
+    if (err := repo_meta.works_root_violation(req.output_dir)):
+        raise HTTPException(status_code=400, detail=err)
     # 父作品文件夹 = <output_dir>/<safe(卡名)>/（与 addCardWork 建父仓库 name=卡名 一致）
     work_folder = str(character_store.card_dir(req.output_dir, req.card_name))
     created = character_store.snapshot_to_work(req.character_dir, req.card_name, work_folder)
@@ -72,6 +74,8 @@ class RepoSnapshotRequest(BaseModel):
 
 @router.post("/snapshot-to-repo")
 def snapshot_to_repo(req: RepoSnapshotRequest) -> dict[str, object]:
+    if (err := repo_meta.works_root_violation(req.output_dir)):
+        raise HTTPException(status_code=400, detail=err)
     """绑定保存时把所选角色卡快照到当前仓库，供角色卡模式和头像表情读取。"""
     if not (req.character_dir and req.output_dir and req.repo_id):
         raise HTTPException(status_code=400, detail="缺少角色卡目录、仓库目录或仓库 ID")

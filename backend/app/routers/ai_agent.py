@@ -176,6 +176,9 @@ def regenerate_image(req: RegenerateImageRequest) -> dict[str, object]:
                 req.prompt, size=req.size, quality=req.image_quality, **proxy_kw,
             )
         persist_kw = {"embed_proxy": req.embed_proxy_url} if req.embed_proxy_url else {}
+        from app.services import repo_meta as _rm
+        if (err := _rm.works_root_violation(req.output_dir)):
+            raise HTTPException(status_code=400, detail=err)
         rec = generation_store.persist_image(
             req.thread_id, req.repo_id, req.prompt, url, req.output_dir,
             req.embed_base_url, req.embed_api_key, req.embed_model,

@@ -60,6 +60,18 @@ def parent_folder_seg(repo_id: str) -> str:
     return safe_dir(pname) if pname else ""
 
 
+def works_root_violation(output_dir: str) -> str | None:
+    """写/删类端点的作品根校验：必须等于配置的仓库文件夹根（防客户端指定任意目录）。
+
+    未配置仓库文件夹（truth 为空）时放行——功能未启用，各服务自行兜底。
+    返回 None=通过，否则返回中文错误信息供路由转 HTTPException。
+    """
+    truth = output_dir_from_state()
+    if truth and output_dir and output_dir != truth:
+        return "output_dir 必须是当前配置的仓库文件夹根路径"
+    return None
+
+
 def output_dir_from_state() -> str:
     """从 user_state.json 读"仓库文件夹"根路径(settings.outputDir)。未配置返回空串。
 

@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from app.config import COMFYUI_BASE_URL
 from app.services import (
     comfyui_client, comfy_launcher, generation_store, image_store,
-    inspiration_store, local_media, workflow_submission,
+    inspiration_store, local_media, repo_meta, workflow_submission,
 )
 from app.services.url_guard import validate_comfyui_url
 from app.services.comfyui_client import ComfyError
@@ -378,6 +378,8 @@ def web_material_list(req: WebMaterialListRequest) -> dict[str, object]:
 @router.post("/web-materials/delete")
 def web_material_delete(req: WebMaterialDeleteRequest) -> dict[str, object]:
     """删除 _web_materials/ 下的指定文件。"""
+    if (err := repo_meta.works_root_violation(req.output_dir)):
+        raise HTTPException(status_code=400, detail=err)
     ok = image_store.delete_web_material(req.output_dir, req.filename)
     return {"ok": ok}
 

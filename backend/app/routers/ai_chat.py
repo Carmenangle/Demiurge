@@ -87,7 +87,9 @@ class ClearCacheRequest(BaseModel):
 @router.post("/chat/clear-cache")
 def chat_clear_cache(req: ClearCacheRequest) -> dict[str, object]:
     """清对话、快照和 reference；RAG 与生成资产不属于该维护操作。"""
-    from app.services import chat_maintenance
+    from app.services import chat_maintenance, repo_meta
+    if (err := repo_meta.works_root_violation(req.output_dir)):
+        raise HTTPException(status_code=400, detail=err)
     try:
         result = chat_maintenance.clear_cache(req.thread_id, req.output_dir)
         return {"ok": True, "removed": result.removed}
