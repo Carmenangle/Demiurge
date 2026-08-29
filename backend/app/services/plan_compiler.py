@@ -51,7 +51,9 @@ class CompileOutcome:
 
 def read_user_file(path: str, *, max_chars: int = 60000) -> dict:
     """编译期预读用户消息里明示的本地文本文件（容量封顶；仅此用途，非执行面能力）。"""
+    import re as _re
     from pathlib import Path
+    path = _re.sub(r"[，。；、！？」』）\s]+$", "", path)  # 消息截取常带尾标点
     target = Path(path).expanduser()
     if not target.is_file():
         raise ValueError(f"文件不存在：{path}")

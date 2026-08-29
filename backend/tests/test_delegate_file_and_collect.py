@@ -6,7 +6,7 @@ import threading
 
 import pytest
 
-from app.services import capability_handlers, capability_sandbox, plan_tasks
+from app.services import capability_handlers, capability_registry, capability_sandbox, plan_tasks, repo_meta
 from app.services.structured_contracts import GenerationPlan, PlanBudgets, PlanStep
 
 
@@ -213,3 +213,24 @@ def test_lora模糊解析与提交归一(monkeypatch):
     ch._resolve_lora_in_values(values)
     assert values["lora_name"].endswith(".safetensors")
     assert values["strength_model"] == hit["suggested_weight"]
+
+
+def test_plans路由output_dir必须来自配置真源():
+    # F3 回归：客户端不能指定任意目录撑大路径域校验
+    from fastapi import HTTPException
+    from app.routers import plans
+    import pytest
+    with pytest.raises(HTTPException) as ei:
+        plans._trusted_output_dir(r"C:\Windows")
+    assert ei.value.status_code == 400
+    truth = repo_meta.output_dir_from_state()
+    if truth:  # 配置了仓库文件夹时应通过
+        assert plans._trusted_output_dir(truth) == truth
+
+
+def test_collect嵌入配置来自user_state不经模型参数():
+    # F1 回归：collect schema 不含 embed_* 参数（密钥不进计划文档）；配置从 user_state 读
+    cap = capability_registry.get("media.collect_comfy_outputs")
+    assert "embed_base" not in (cap.params_schema.get("properties") or {})
+    base, key, model = capability_handlers._embed_config_from_state()
+    assert isinstance(base, str) and isinstance(key, str) and isinstance(model, str)

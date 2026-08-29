@@ -4,10 +4,18 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app.services import plan_tasks
+from app.services import plan_tasks, repo_meta
 from app.services.structured_contracts import GenerationPlan
 
 router = APIRouter()
+
+
+def _trusted_output_dir(output_dir: str) -> str:
+    """作品根必须来自后端配置真源，禁止客户端指定任意目录（路径域校验的地基）。"""
+    truth = repo_meta.output_dir_from_state()
+    if not truth or output_dir != truth:
+        raise HTTPException(status_code=400, detail="output_dir 必须是当前配置的仓库文件夹根路径")
+    return output_dir
 
 
 class PlanSubmitRequest(BaseModel):
@@ -25,7 +33,7 @@ def submit_plan(req: PlanSubmitRequest) -> dict:
         raise HTTPException(status_code=400, detail=f"计划格式非法：{exc}") from exc
     try:
         return plan_tasks.submit_task(
-            plan, output_dir=req.output_dir, repo_id=req.repo_id,
+            plan, output_dir=_trusted_output_dir(req.output_dir), repo_id=req.repo_id,
             configured_models=set(req.configured_models))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -105,7 +113,7 @@ class RecipeInstantiateRequest(BaseModel):
 def instantiate_recipe(recipe_id: str, req: RecipeInstantiateRequest) -> dict:
     try:
         return plan_tasks.instantiate_recipe(
-            recipe_id, output_dir=req.output_dir, repo_id=req.repo_id,
+            recipe_id, output_dir=_trusted_output_dir(req.output_dir), repo_id=req.repo_id,
             param_overrides=req.param_overrides)
     except (LookupError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

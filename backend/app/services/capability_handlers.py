@@ -5,6 +5,7 @@ P2 plan_tasks 执行器未来逐 operation 分发到它们（真源见 docs/ROAD
 """
 from __future__ import annotations
 
+import json
 import uuid
 from typing import Any
 
@@ -70,14 +71,25 @@ def read_text_file(path: str, max_chars: int = 20000) -> dict[str, Any]:
     return {"path": str(target), "text": text, "truncated": len(text) >= max_chars}
 
 
+def _embed_config_from_state() -> tuple[str, str, str]:
+    """从 user_state（gitignored 运行态真源）读嵌入配置；密钥不经模型产出参数。"""
+    from app.config import DATA_DIR
+
+    try:
+        st = json.loads((DATA_DIR / "user_state.json").read_text(encoding="utf-8"))
+        embed = (st.get("settings") or {}).get("embedModel") or {}
+        return (str(embed.get("baseUrl") or ""), str(embed.get("apiKey") or ""),
+                str(embed.get("modelName") or ""))
+    except (OSError, json.JSONDecodeError):
+        return "", "", ""
+
+
 def collect_comfy_outputs(prompt_ids: list[str] | None = None, comfyui_url: str = "",
                           output_dir: str = "", repo_id: str = "",
                           submit_result: dict[str, Any] | None = None,
                           names: list[str] | None = None,
                           prompts: list[str] | None = None,
-                          timeout_seconds: int = 600,
-                          embed_base: str = "", embed_key: str = "",
-                          embed_model: str = "") -> dict[str, Any]:
+                          timeout_seconds: int = 600) -> dict[str, Any]:
     """委派产物采集：轮询 ComfyUI 历史取图 → 落作品文件夹 → 注册进资产库（generation RAG）。
 
     每个取到的图在资产库里挂 prompt（提交时的提示词）+ tags「委派计划」，
@@ -88,6 +100,8 @@ def collect_comfy_outputs(prompt_ids: list[str] | None = None, comfyui_url: str 
     from app.services import comfyui_client, repo_meta, view_urls
     from app.services.rag_backend import EmbedConfig
     from app.services import rag_store
+
+    embed_base, embed_key, embed_model = _embed_config_from_state()
 
     # prompt_ids 可由 inputs_from 链接的 submit 产出推导；submit_result 兼容
     # submit_batch（results 数组）/ submit_template（顶层 prompt_id）/ 其列表三种形态
@@ -190,7 +204,8 @@ def lora_resolve(query: str) -> dict[str, Any]:
     query_lower = query_clean.lower()
     installed: list[str] = []
     try:
-        info = comfyui_client.fetch_object_info("http://127.0.0.1:8188")
+        from app.services import comfy_launcher
+        info = comfyui_client.fetch_object_info(comfy_launcher.load_config()["url"])
         installed = list(info.get("LoraLoader", {}).get("input", {})
                          .get("required", {}).get("lora_name", [])[0])
     except Exception:  # noqa: BLE001 - ComfyUI 离线时退回 lora_index 元数据
@@ -249,7 +264,8 @@ def lora_list() -> dict[str, Any]:
 
     meta = {item["lora_name"]: item for item in lora_index.list_items()}
     try:
-        info = comfyui_client.fetch_object_info("http://127.0.0.1:8188")
+        from app.services import comfy_launcher
+        info = comfyui_client.fetch_object_info(comfy_launcher.load_config()["url"])
         installed = list(info.get("LoraLoader", {}).get("input", {})
                          .get("required", {}).get("lora_name", [])[0])
     except Exception:  # noqa: BLE001 - ComfyUI 离线退回元数据

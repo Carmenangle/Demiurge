@@ -1067,10 +1067,20 @@ export function useChatSession(deps: ChatSessionDeps) {
     // V1.6/P5+（2026-08-29 用户拍板）：首尾帧提示词与高潮点生图完全同构——后端
     // /ai/prompt/profile/frames 先做「时点提取」（首/尾各自时点的英文结构化 action/visual_facts，
     // 帧描述走 @(…)@ 防拦截保护），再逐帧走同一 Profile 编译器（同一校验/带因重写/兜底），
-    // 一次调用出两帧成品。编译失败降级帧描述原文不挂死；触发词由 withLoraTriggers 统一前置。
+    // 一次调用出两帧成品。触发词由 withLoraTriggers 统一前置。
+    // 2026-08-29 验收「生成垃圾图」实锤：编译失败时把中文帧描述原文当正向提示词提交
+    // （首帧正向只有 8 字符对白「儿子听娘的。」）——中文原文永远不是合法 Krea2 提示词，
+    // 这里禁止静默降级：编译失败必须显式失败（失败槽可见、可重新生成），绝不提交原文。
     const frameCompiled: Partial<Record<"first" | "last", string>> = {};
-    const compileFramePrompt = (frame: "first" | "last", frameDesc: string): string =>
-      withLoraTriggers(frameCompiled[frame] || frameDesc);
+    const compileFramePrompt = (frame: "first" | "last", frameDesc: string): string => {
+      const compiled = frameCompiled[frame];
+      if (!compiled || !compiled.trim()) {
+        throw new Error(
+          `帧提示词编译失败（${frame === "first" ? "首" : "尾"}帧），已阻止把中文原文直接提交给 ComfyUI`,
+        );
+      }
+      return withLoraTriggers(compiled);
+    };
     // 底图需先上传到 ComfyUI input 目录，取回可供 LoadImage 引用的文件名
     let uploadedImage = "";
     const needsImage = tpl.exposed.some((f) => workflowFieldBinding(f) === "base_image");
