@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
+import traceback
 from typing import Any, Iterator, TypedDict
 
 from app.services import agent_context, builtin_agents, edit_agent, generation_approval, generation_store, plan_compiler, prompt_compiler, roleplay_turn, run_trace, scene_classify, structured_output, tool_agent_adapter
@@ -510,6 +511,21 @@ def plan_compiler_node(state: AgentState) -> dict:
                            chars=len(read["text"]))
         if len(attachments) > 3:
             attachments = attachments[:3]
+        try:
+            from app.services import capability_handlers as _ch
+            catalog = _ch.lora_list()
+            if catalog.get("loras"):
+                lines = "\n".join(
+                    f"- {item['file']}" + (f"（触发词:{'/'.join(item['triggers'])}，建议权重:{item['suggested_weight']}）"
+                                           if item["triggers"] else "")
+                    for item in catalog["loras"])
+                attachments.append({"name": "本机 LoRA 目录", "text":
+                                    f"共 {catalog['count']} 个：\n{lines}\n"
+                                    "用户提到近似名称时优先用上面的真实文件名；"
+                                    "宽泛指向（如「用 krea2 的」）存在多个候选时，"
+                                    "在计划卡里列出候选让用户选择，禁止替用户猜。"})
+        except Exception:  # noqa: BLE001 - 目录不可用时跳过
+            pass
     except Exception as exc:  # noqa: BLE001
         run_trace.emit(ctx, "plan.attachments", status="error", error=str(exc))
     try:
@@ -1709,7 +1725,12 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
             return clean, [rec], {}, audio_req
         return clean, [], {}, audio_req
     except Exception as exc:  # noqa: BLE001
-        run_trace.emit(ctx, "illustration.pipeline", status="error", error=str(exc))
+        # 插桩（2026-08-29）：writeback failed 等异常文本在工作区源码搜不到，必须自曝来源。
+        run_trace.emit(
+            ctx, "illustration.pipeline", status="error", error=str(exc),
+            error_type=type(exc).__name__,
+            error_trace=traceback.format_exc()[-1200:],
+        )
         return _visible_roleplay_text(reply), [], {}, {}
 
 

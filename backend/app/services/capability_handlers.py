@@ -201,7 +201,12 @@ def lora_resolve(query: str) -> dict[str, Any]:
             scored.append((hits, len(stem), c))
     if scored:
         scored.sort(key=lambda x: (-x[0], -x[1]))
-        return _lora_hit(scored[0][2], "fuzzy_token", meta)
+        top_score = scored[0][0]
+        ties = [c for h, _l, c in scored if h == top_score]
+        if len(ties) > 1:  # 歧义：列出候选让用户/agent选择，不猜
+            return {"matched": False, "query": query_clean, "reason": "ambiguous",
+                    "candidates": [_lora_hit(c, "fuzzy_token", meta) for c in ties[:8]]}
+        return _lora_hit(ties[0], "fuzzy_token", meta)
     contains_hits = sorted(
         (c for c in catalog
          if query_lower in c.lower() or c.lower().rsplit(".", 1)[0] in query_lower),
@@ -217,3 +222,21 @@ def _lora_hit(file: str, matched_by: str, meta: dict) -> dict[str, Any]:
     return {"matched": True, "file": file, "matched_by": matched_by,
             "trigger_words": item.get("triggers", []),
             "suggested_weight": item.get("suggested_weight")}
+
+
+def lora_list() -> dict[str, Any]:
+    """本机 LoRA 全目录（文件名+触发词+建议权重+备注），供 agent 列给用户选择。"""
+    from app.services import comfyui_client, lora_index
+
+    meta = {item["lora_name"]: item for item in lora_index.list_items()}
+    try:
+        info = comfyui_client.fetch_object_info("http://127.0.0.1:8188")
+        installed = list(info.get("LoraLoader", {}).get("input", {})
+                         .get("required", {}).get("lora_name", [])[0])
+    except Exception:  # noqa: BLE001 - ComfyUI 离线退回元数据
+        installed = sorted(meta.keys())
+    return {"count": len(installed), "loras": [
+        {"file": name, "triggers": (meta.get(name) or {}).get("triggers", []),
+         "suggested_weight": (meta.get(name) or {}).get("suggested_weight"),
+         "note": (meta.get(name) or {}).get("note", "")}
+        for name in sorted(installed)]}

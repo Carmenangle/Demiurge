@@ -214,6 +214,18 @@ register(Capability(
 ))
 
 register(Capability(
+    operation="lora.list",
+    category="comfyui",
+    description="列出本机全部 LoRA（文件名+触发词+建议权重+备注）。用户说「用 krea2 的」"
+                "这类宽泛指向时，先列出候选让用户选择，禁止替用户猜。",
+    params_schema={"type": "object", "properties": {}, "additionalProperties": False},
+    needs_model=None,
+    side_effect_level=SIDE_EFFECT_READONLY,
+    channel=CHANNEL_SYNC,
+    handler="app.services.capability_handlers:lora_list",
+))
+
+register(Capability(
     operation="media.collect_comfy_outputs",
     category="media",
     description="轮询 ComfyUI 历史取回已提交任务的图片，落作品文件夹并注册进资产库"
