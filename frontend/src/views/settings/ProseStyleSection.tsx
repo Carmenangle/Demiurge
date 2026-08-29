@@ -39,7 +39,7 @@ export function ProseStyleSection() {
       setRemovedText(data.removed.join("\n"));
       setSaved(true);
       setTimeout(() => setSaved(false), 1800);
-    } finally { setSaving(false); }
+    } catch { /* 保存失败保持按钮可重试 */ } finally { setSaving(false); }
   };
 
   if (loading) return <p className="field-hint">加载文风配置…</p>;

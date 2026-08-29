@@ -37,7 +37,7 @@ def submit_batch(template_id: str, variants: list[dict[str, Any]], prompt: str =
             if hit.get("matched"):
                 weight = values.pop("strength_model", None) or hit.get("suggested_weight") or 0.9
                 var_loras = [{"name": hit["file"], "weight": float(weight)}]
-        _resolve_lora_in_values(values)
+        unresolved = _resolve_lora_in_values(values)
         # 变体级 prompt 覆盖：prompt/positive_prompt 优先于共享 prompt（逐套装不同提示词用）
         step_prompt = str(values.get("prompt") or values.get("positive_prompt")
                           or prompt or "").strip()
@@ -48,6 +48,8 @@ def submit_batch(template_id: str, variants: list[dict[str, Any]], prompt: str =
         try:
             outcome = submit_template(template_id, values, step_prompt, url, client_id,
                                       loras=var_loras, lora_mode=lora_mode)
+            if unresolved:
+                outcome["lora_unresolved"] = unresolved
             results.append({"index": index, "ok": True,
                             "prompt_id": outcome.get("prompt_id")})
         except WorkflowSubmissionError as exc:
@@ -190,16 +192,23 @@ def _resolve_template_id(template_id: str) -> str:
     return template_id
 
 
-def _resolve_lora_in_values(values: dict) -> None:
-    """values["lora_name"] 近似名归一为真实文件（精确名原样保留；strength 缺省补建议权重）。"""
+def _resolve_lora_in_values(values: dict) -> str | None:
+    """values["lora_name"] 近似名归一为真实文件（精确名原样保留；strength 缺省补建议权重）。
+
+    未匹配时返回上报提示（submit 结果附 lora_unresolved），不静默丢弃。
+    """
     name = values.get("lora_name")
     if not isinstance(name, str) or not name.strip():
-        return
+        return None
     hit = lora_resolve(name)
     if hit.get("matched") and hit["file"] != name:
         values["lora_name"] = hit["file"]
         if hit.get("suggested_weight") is not None and "strength_model" not in values:
             values["strength_model"] = hit["suggested_weight"]
+        return None
+    if not hit.get("matched"):
+        return f"LoRA「{name}」未能匹配本机文件，本次提交未挂该 LoRA"
+    return None
 
 
 def lora_resolve(query: str) -> dict[str, Any]:

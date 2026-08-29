@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import os
 import threading
 from datetime import datetime
@@ -20,6 +21,9 @@ _LOCK = threading.Lock()
 _SECRET_KEYS = {"api_key", "apikey", "authorization", "token", "secret", "chat_key", "gen_key", "vid_key", "embed_key"}
 
 
+_SK_RE = re.compile(r"sk-[A-Za-z0-9]{12,}")
+
+
 def _redact(value: Any, key: str = "") -> Any:
     if key.lower().replace("-", "_") in _SECRET_KEYS:
         return "***"
@@ -29,6 +33,8 @@ def _redact(value: Any, key: str = "") -> Any:
         return [_redact(v) for v in value]
     if isinstance(value, str) and value.startswith("data:image/"):
         return f"[image-data-uri {len(value)} chars]"
+    if isinstance(value, str) and _SK_RE.search(value):
+        return _SK_RE.sub("[sk-redacted]", value)
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return str(value)

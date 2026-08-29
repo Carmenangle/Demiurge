@@ -17,6 +17,27 @@ SNAP_DIR = DATA_DIR / "chat_snapshots"   # 旧位置/未配置仓库文件夹时
 _LOCKS: dict[str, threading.Lock] = {}
 _LOCKS_GUARD = threading.Lock()
 _REVISIONS: dict[str, int] = {}
+_REVISIONS_PATH = DATA_DIR / "chat_revisions.json"
+
+
+def _load_revisions() -> dict[str, int]:
+    try:
+        raw = json.loads(_REVISIONS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {str(k): int(v) for k, v in raw.items() if isinstance(v, (int, float))}
+
+
+_REVISIONS.update(_load_revisions())  # 重启后恢复各 thread 最新 revision（防旧保存覆盖压缩结果）
+
+
+def _persist_revisions(revisions: dict[str, int]) -> None:
+    try:
+        _REVISIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _REVISIONS_PATH.write_text(
+            json.dumps(revisions, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass  # 持久化失败不阻断保存，仅退回内存闸
 
 
 def _thread_lock(thread_id: str) -> threading.Lock:
@@ -131,6 +152,7 @@ def save_if_newer(thread_id: str, messages: list, revision: int) -> bool:
             return False
         _save_unlocked(thread_id, _preserve_server_media_state(load(thread_id), messages))
         _REVISIONS[key] = revision
+        _persist_revisions(_REVISIONS)
         return True
 
 

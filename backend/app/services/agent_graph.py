@@ -94,8 +94,16 @@ def _roleplay_sampling(ctx: dict) -> dict:
     if "max_tokens" not in sampling:
         # 2026-08-29 验收「正文内容极其少」实锤：未配置 max_tokens 时依赖供应商默认
         # （常见仅 4k-8k），长思考模型在 <think> 阶段就烧光额度，正文 0 字截断。
-        # 正文轮的输出合同=思考+状态块+1000~8000 字正文+插画 JSON，必须给充裕显式上限。
-        sampling["max_tokens"] = 16000
+        # 正文输出额度按用户设置「历史上下文上限 tokens」走（user 指定语义）：
+        #   >0 → 直接作为正文 max_tokens；0=无限 → 不传（额度交给供应商）；
+        #   字段缺失（防御）→ 32768 安全上限。不加 +4000 预留——用户设多少就是多少。
+        _ctx_limit = ctx.get("context_max_tokens")
+        if isinstance(_ctx_limit, int) and not isinstance(_ctx_limit, bool) and _ctx_limit > 0:
+            sampling["max_tokens"] = _ctx_limit
+        elif _ctx_limit == 0:
+            pass
+        else:
+            sampling["max_tokens"] = 32768
     return sampling
 
 
@@ -837,6 +845,18 @@ def roleplay_node(state: AgentState) -> dict:
         system = _agent_system(ctx, base)
         # 尾部思维链作独立 system 消息落在历史之后、本轮 user 之前 → 离生成点最近，遵守最严
         tail_msgs = [{"role": "system", "content": c} for c in chains_tail]
+        # 思考纪律（2026-08-29 验收「正文内容极其少」：模型反复推翻已定结论、多次宣称动笔又回退，
+        # think 烧光输出额度正文 0 字）。软引导而非硬限制——只禁「回退重确认」这类浪费模式，
+        # 不限制正常推演深度；正文预算永远优先（max_tokens 已放宽，见 _roleplay_sampling）。
+        tail_msgs.append({
+            "role": "system",
+            "content": (
+                "[输出纪律] 思考阶段一次性定稿：结论一旦确定不得推翻重来，禁止「不对，让我再想想」"
+                "式的回退重确认；一旦决定动笔，直接开始输出正文，不得回到分析阶段。"
+                "不复述设定、对话历史或用户输入；思考只保留不可省略的决策依据，长度自然收敛即可——"
+                "正文与结尾 JSON 块的输出额度永远优先于思考。"
+            ),
+        })
         if getattr(deps, "renderer", None) is not None or ctx.get("comfy_illustrate"):
             from app.services import image_prompt_profiles as _ipp
             tail_msgs.append({

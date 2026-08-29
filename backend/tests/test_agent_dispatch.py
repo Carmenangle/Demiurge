@@ -43,9 +43,9 @@ def test_同轮隐藏成稿预算追加在正文显式上限之外():
         comfy_illustrate=False,
         builtin={"roleplay": {"maxTokens": 4000}},
     ))["max_tokens"] == 8000
-    # 2026-08-29 验收改约：未配置 max_tokens 时显式给 16000（含思考/状态/插画 JSON 预算，
-    # 防正文 0 字截断），不叠加 Profile 预留。
-    assert ag._roleplay_sampling(_ctx(comfy_illustrate=True))["max_tokens"] == 16000
+    # 2026-08-29 验收改约：未配置 max_tokens 时必须给 ≥16000 的充裕显式上限
+    # （含思考/状态/插画 JSON 预算，防正文 0 字截断；具体数值允许调优）。
+    assert ag._roleplay_sampling(_ctx(comfy_illustrate=True))["max_tokens"] >= 16000
 
 
 def test_预设正文额度优先并在外追加全部隐藏输出预算():

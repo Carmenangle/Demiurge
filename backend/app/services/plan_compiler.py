@@ -172,8 +172,9 @@ def compile_plan(*, intent: str, history: str = "", attachments: list[dict] | No
                                   if t.get("name") and t["name"] in tid), None)
                 if match is not None:
                     step.params["template_id"] = match["id"]
-        except Exception:  # noqa: BLE001 - 模板库不可用时跳过归一，由执行期报错
-            pass
+        except Exception as exc:  # noqa: BLE001 - 模板库不可用时跳过归一，由执行期报错
+            if trace is not None:
+                trace("plan.compile", status="template_normalize_skipped", error=str(exc))
         # 运行环境参数归一：collect 的落盘目标由环境决定，不允许模型占位/编造；
         # approval_required 由编译器确定性汇总（模型只列步骤，不负责汇总）
         from app.services.capability_registry import get as _cap_get
