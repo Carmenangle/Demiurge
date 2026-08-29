@@ -116,3 +116,43 @@ def init_db() -> None:
             connection.execute(
                 "alter table lora_triggers add column suggested_prompt text not null default ''"
             )
+
+        connection.executescript(
+            """
+            create table if not exists plan_tasks (
+                id text primary key,
+                repo_id text not null default '',
+                output_dir text not null default '',
+                intent text not null default '',
+                plan_json text not null,
+                content_hash text not null,
+                status text not null,
+                lease_id text not null default '',
+                error text not null default '',
+                result_json text not null default '',
+                created_at integer not null,
+                updated_at integer not null,
+                worker_id text not null default '',
+                lease_expires_at integer not null default 0
+            );
+            create index if not exists idx_plan_tasks_queue
+                on plan_tasks(status, created_at);
+
+            create table if not exists plan_task_steps (
+                task_id text not null,
+                seq integer not null,
+                step_id text not null,
+                operation text not null,
+                params_json text not null default '{}',
+                inputs_from_json text not null default '[]',
+                outputs_json text not null default '{}',
+                status text not null default 'pending',
+                attempts integer not null default 0,
+                last_error text not null default '',
+                updated_at integer not null,
+                primary key (task_id, seq)
+            );
+            create index if not exists idx_plan_task_steps_seq
+                on plan_task_steps(task_id, seq);
+            """
+        )

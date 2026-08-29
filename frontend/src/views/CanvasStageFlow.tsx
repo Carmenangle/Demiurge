@@ -43,7 +43,7 @@ import { CanvasCharacterModal } from "../components/CanvasCharacterModal";
 import { presetDetail } from "../api/preset";
 import type { ChatMessage } from "../types/chat";
 import { conversationMediaUrls, conversationTurnUrls, filterGensByConversation, pruneUnboundInspirationCards, projectWorkflowTools, projectStoryNodes } from "../lib/canvasConversation";
-import { pollWorkflowResult } from "../lib/workflowGenerationRuntime";
+import { pollWorkflowResult, trackCanvasWorkflow, untrackCanvasWorkflow } from "../lib/workflowGenerationRuntime";
 import { workflowGenMetadata } from "../lib/regeneration";
 import {
   CARD_W, SNAP_PX, SNAP_RELEASE_PX, HINT_PX,
@@ -57,7 +57,7 @@ import { CenterCanvasButton } from "../components/canvas/CenterCanvasButton";
 import { IMAGE_EXTENSIONS } from "../components/canvas/CanvasTypes";
 import { saveWebMaterial } from "../api/ai";
 import { createUndoStack, pushSnapshot, undo, redo, handleCanvasKeyDown } from "../lib/canvasKeyboard";
-import { submitGraph, finalizeGeneration } from "../api/comfyui";
+import { submitGraph, finalizeGeneration, interruptComfy } from "../api/comfyui";
 import { subscribeProgress } from "../lib/comfyProgress";
 import { globalPendingToolCreates, canvasBridge } from "../components/canvas/shared";
 import { activeChatModel } from "../stores/settings";
@@ -650,9 +650,14 @@ export function CanvasStageFlow({
     (async () => {
       let stopProg: (() => void) | null = null;
       let keepPlaceholder = false;   // still_running 时保留「生成中」占位节点（ComfyUI 后台仍在跑）
+      let runPromptId = "";          // 提交成功的 prompt_id：后台活动标记用（finally 里移除）
       try {
         const r = await submitGraph(captured, settings.comfyuiUrl);
-        showToast(`已提交到 ComfyUI（prompt_id: ${r.prompt_id}，${r.node_count} 个节点），正在运转工作流…`);
+        runPromptId = r.prompt_id || "";
+        showToast(`已提交到 ComfyUI（prompt_id: ${runPromptId}，${r.node_count} 个节点），正在运转工作流…`);
+        // 记入后台活动（laf_pending_gen_<repoId>）：SupportWidget 面板显示「出图中」；
+        // 仍自持轮询，runtime 只做标记。结束（finally）时移除。
+        trackCanvasWorkflow(repoId, runPromptId, settings.comfyuiUrl, nn.templateName || "工作流生成");
         // 占位节点进入「已提交」态 + 对话框进度条出现（graph 随 run 事件带给画布，占位节点显示真实提示词）
         window.dispatchEvent(new CustomEvent("laf-canvas-wf-run-graph", {
           detail: { runId, graph: captured },
@@ -676,6 +681,12 @@ export function CanvasStageFlow({
         });
         // 轮询拿图：复用 pollSchedule 合同（图片 20 分钟 / 视频 60 分钟），不再硬编码 240 秒。
         const outcome = await pollWorkflowResult(r.prompt_id || "", settings.comfyuiUrl || "", "image");
+        if (outcome.kind === "stalled") {
+          // 队列卡死：清理坏死任务（清队列+中断）后按失败处理（2026-08-29 用户需求）。
+          await interruptComfy(settings.comfyuiUrl || "", r.prompt_id || "").catch(() => undefined);
+          showToast(`运转失败：${outcome.error}`, "error");
+          return;
+        }
         if (outcome.kind === "failed") {
           showToast(`运转失败：${outcome.error}`, "error");
           return;
@@ -732,6 +743,7 @@ export function CanvasStageFlow({
         stopProg?.();
         // 清除画布占位节点 + 对话框进度条（still_running 时保留占位，不派发 done）
         if (!keepPlaceholder) {
+          if (runPromptId) untrackCanvasWorkflow(repoId, runPromptId); // 结束移除后台活动标记
           try { window.dispatchEvent(new CustomEvent("laf-canvas-wf-done", { detail: { taskId: runId } })); } catch { /* ignore */ }
         }
       }
@@ -1761,16 +1773,22 @@ export function CanvasStageFlow({
   }, []);
 
   const onNodesChangeRaw = useCallback((changes: NodeChange<Node<CardNodeData>>[]) => {
-    // 拖动「生成中」占位节点时同步 streamingPosRef：
-    // 生成结束的原位替换（pendingAnchorRef 转存）与剧情楼层接位都读 streamingPosRef，
-    // 若不更新，结果节点/剧情楼层会落在占位的【最初】位置，用户拖动占位位置后仍然无效。
-    // 用 streamingPosRef.current.id 匹配占位 id（gen-<streamingId>），不依赖闭包里的 streamingId。
+    // 拖动「生成中」占位节点时同步位置缓存：
+    // ① 对话流占位（gen-<streamingId>）：生成结束原位替换（pendingAnchorRef 转存）与剧情楼层
+    //    接位都读 streamingPosRef，不更新则结果落在占位【最初】位置。
+    // ② 工作流运转占位（wfRuns）：onDone 用 run.x/run.y 做原位替换锚点，不更新同样落回最初位置。
+    // 用 ref/state 的 id 匹配，不依赖闭包里的 streamingId。
     const ph = streamingPosRef.current;
     for (const c of changes) {
-      if (ph && c.type === "position" && c.position
-        && typeof c.position.x === "number" && typeof c.position.y === "number"
-        && c.id === `gen-${ph.id}`) {
-        streamingPosRef.current = { id: ph.id, x: c.position.x, y: c.position.y };
+      if (c.type === "position" && c.position
+        && typeof c.position.x === "number" && typeof c.position.y === "number") {
+        if (ph && c.id === `gen-${ph.id}`) {
+          streamingPosRef.current = { id: ph.id, x: c.position.x, y: c.position.y };
+        } else if (wfRunsRef.current.some((r) => r.id === c.id)) {
+          // 同步 wfRuns 坐标：拖动后完成原位替换用移动后位置
+          setWfRuns((prev) => prev.map((r) => (r.id === c.id
+            ? { ...r, x: c.position!.x, y: c.position!.y } : r)));
+        }
       }
     }
     // 仅接受 position/select 类变更（拖拽由 ReactFlow 管理）

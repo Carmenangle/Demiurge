@@ -124,7 +124,7 @@ def _load_image_bytes(img: str, proxy: str = "") -> tuple[bytes, str, str]:
         mime = mimetypes.guess_type(img)[0] or "image/png"
     else:
         _max = 30 * 1024 * 1024  # 30MB 上限，防超大直链读爆内存
-        # local-view 指向本机后端（127.0.0.1:8010），即使配置了显式代理也必须绕过——
+        # local-view 指向本机后端（config 的 BACKEND_BASE_URL），即使配置了显式代理也必须绕过——
         # Clash 等代理无法转发 localhost 回环请求，会把取图打成 502 Bad Gateway。
         from app.services.url_guard import is_local_view_url
         _use_proxy = proxy if not is_local_view_url(img) else ""

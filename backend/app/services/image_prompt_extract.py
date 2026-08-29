@@ -13,7 +13,9 @@ import json
 import re
 from collections.abc import Callable
 
+from app.services import prompt_clean
 from app.services.prompt_clean import (
+    REFUSAL_RE,  # noqa: F401 重导出：拒答识别单源，调用方沿用旧引用名
     restore_jailbreak,
     # 重导出：scene_illustration 经本模块引用（F401 误报，noqa 只写代码）
     restore_jailbreak_with_offsets,  # noqa: F401
@@ -332,7 +334,7 @@ def extract_illustration_plan(
                 continue
             beat = str(item.get("beat") or "").strip()
             desc = restore_jailbreak(str(item.get("desc") or "")).strip()
-            if not desc:
+            if not desc or prompt_clean.REFUSAL_RE.search(desc):
                 continue
             normalized_action_sequence.append({"beat": beat or "延伸", "desc": desc})
     assembled = ", ".join(part for part in (

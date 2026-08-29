@@ -545,8 +545,22 @@ def _to_data_uri(image_url: str, max_bytes: int = 30 * 1024 * 1024) -> str:
     try:
         if image_url.startswith(("http://", "https://")):
             import httpx
+            from app.services.url_guard import is_local_view_url, validate_media_url
+            # local-view（本机落盘产物）豁免 SSRF 校验；其余 URL 必须过校验，
+            # 防止内网/metadata 地址的响应被拉回后分析（数据外泄面）。
+            if not is_local_view_url(image_url):
+                validate_media_url(image_url)
             # trust_env=False：避免系统代理劫持 127.0.0.1 的 local-view 取图
-            resp = httpx.get(image_url, timeout=60, trust_env=False)
+            resp = httpx.get(image_url, timeout=60, trust_env=False,
+                             follow_redirects=False)
+            if resp.status_code in (301, 302, 303, 307, 308):
+                location = (resp.headers.get("location") or "").strip()
+                target = str(httpx.URL(image_url).join(location))
+                # 重定向逐跳校验：校验通过才发下一跳（与 image_proxy 同一合同）
+                if not is_local_view_url(target):
+                    validate_media_url(target)
+                resp = httpx.get(target, timeout=60, trust_env=False,
+                                 follow_redirects=False)
             resp.raise_for_status()
             data = resp.content
         else:

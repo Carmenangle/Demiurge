@@ -3,9 +3,18 @@ import { Activity, X } from "lucide-react";
 import { subscribeWorkflowBuildActivities, type WorkflowBuildActivity } from "../lib/workflowBuildActivity";
 import { subscribeChatBackgroundActivities, type ChatBackgroundActivity } from "../lib/chatBackgroundActivity";
 import { subscribeComfyBackgroundActivities, type ComfyBackgroundActivity } from "../lib/comfyBackgroundActivity";
+import {
+  approvePlanTask, cancelPlanTask, subscribePlanTaskActivities,
+  type PlanTaskActivity,
+} from "../lib/planTaskActivity";
 import { announceFloatingPanel, subscribeFloatingPanels } from "../lib/floatingPanels";
 
 const FAB_TOP_KEY = "laf_support_fab_top";
+const STATUS_LABEL: Record<string, string> = {
+  queued: "计划排队中", running: "计划执行中", awaiting_approval: "计划待审批",
+  blocked: "计划受阻", done: "计划已完成", partial: "计划部分完成",
+  error: "计划失败", cancelled: "计划已取消",
+};
 const FAB_HIDDEN_KEY = "laf_support_hidden";
 
 export function SupportWidget(props: {
@@ -18,6 +27,7 @@ export function SupportWidget(props: {
   const [activities, setActivities] = useState<WorkflowBuildActivity[]>([]);
   const [chatActivities, setChatActivities] = useState<ChatBackgroundActivity[]>([]);
   const [comfyActivities, setComfyActivities] = useState<ComfyBackgroundActivity[]>([]);
+  const [planActivities, setPlanActivities] = useState<PlanTaskActivity[]>([]);
   const [fabTop, setFabTop] = useState<number>(() => {
     const value = Number(localStorage.getItem(FAB_TOP_KEY));
     return Number.isFinite(value) && value > 0 ? value : window.innerHeight - 80;
@@ -29,6 +39,7 @@ export function SupportWidget(props: {
   useEffect(() => subscribeWorkflowBuildActivities(setActivities), []);
   useEffect(() => subscribeChatBackgroundActivities(setChatActivities), []);
   useEffect(() => subscribeComfyBackgroundActivities(setComfyActivities), []);
+  useEffect(() => subscribePlanTaskActivities(setPlanActivities), []);
   useEffect(() => { localStorage.setItem(FAB_TOP_KEY, String(fabTop)); }, [fabTop]);
   useEffect(() => { localStorage.setItem(FAB_HIDDEN_KEY, hidden ? "1" : "0"); }, [hidden]);
   useEffect(() => subscribeFloatingPanels("support", () => setOpen(false)), []);
@@ -57,7 +68,7 @@ export function SupportWidget(props: {
   };
 
   const running = activities.filter((item) => item.status === "queued" || item.status === "running");
-  const total = running.length + chatActivities.length + comfyActivities.length;
+  const total = running.length + chatActivities.length + comfyActivities.length + planActivities.length;
   const openRepoChat = (threadId: string) => { props.onOpenChat(threadId); setOpen(false); };
   if (hidden) return <button className="support-handle" title="显示后台活动" onClick={() => setHidden(false)}>&lt;&lt;&lt;</button>;
   if (!open) return (
@@ -86,6 +97,20 @@ export function SupportWidget(props: {
             <strong>{item.kind === "running" ? "生成中" : "排队中"}</strong>
             <span>{item.label}{item.need ? `：${item.need}` : ""}</span>
           </button>
+        ))}
+        {planActivities.map((item) => (
+          <div key={`plan-${item.id}`} className="support-activity" style={{ display: "block", textAlign: "left", cursor: "default" }}>
+            <strong>{STATUS_LABEL[item.status] ?? item.status}</strong>
+            <span>{item.progress}：{item.intent}</span>
+            {(item.status === "awaiting_approval" || item.status === "blocked") && (
+              <span style={{ display: "flex", gap: 8, marginTop: 6 }}>
+                {item.status === "awaiting_approval" && (
+                  <button className="btn" onClick={() => { void approvePlanTask(item.id); }}>批准</button>
+                )}
+                <button className="btn" onClick={() => { void cancelPlanTask(item.id); }}>取消</button>
+              </span>
+            )}
+          </div>
         ))}
         {running.map((item) => (
           <button key={item.id} className="support-activity" onClick={() => { if (item.sessionId !== "draft") localStorage.setItem("laf_build_last_session", item.sessionId); window.location.hash = "#/ai-build"; setOpen(false); }}>

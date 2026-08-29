@@ -141,6 +141,9 @@ export interface MediaInsertPreset {
   styleBaseImage?: string;  // ⑥ 兜底风格底图（在场角色都无底图时，gpt-image 系用）
   videoTemplateId?: string; // 视频工作流模板 id（空=不出视频，恒用图片模板）
   smartVideo?: boolean;     // 智能模态：开=剧情动态强时(motion>=2)自动改用视频模板，否则用图片
+  // 首尾帧生成（用户定稿 2026-08-28）：图片按剧情首尾帧（首帧+尾帧）生成，视频模式随之
+  // 变为 firstlast 剧情影片；关闭时视频为 climax 高潮点动作代入。旧预设按 videoMode 回填。
+  firstlast?: boolean;
   // V1.2 视频最小事实：时长与镜头运动是用户预设（不从模型输出读），映射视频模板 exposed 隐藏 binding；
   // 空值 = 模板原值（旧预设兼容，不迁移不报错）。
   videoDurationHint?: number;   // 视频时长（秒）；0/空=模板原值
@@ -148,7 +151,7 @@ export interface MediaInsertPreset {
   // V1.6/W3 转场视频时长（坑G）：短桥段不预设死值，有值才写（缺省交视频模型默认，绝不兑底正片时长）
   transitionDurationHint?: number;
   // V1.5/B1 视频模式：climax=高潮点动作代入（精简版）；firstlast=首尾帧剧情影片（七段式）。
-  // 缺省 climax（旧预设兼容，不迁移不报错）；事件 videoMode 可临时覆盖。
+  // [兼容旧数据] 现由 firstlast 选项推导（见上），保留字段仅为旧预设兼容。
   videoMode?: "climax" | "firstlast";
   // ⑦ 音频（IndexTTS 系）：模板 + 按角色参考音轨（每个作品专属、每角色一个）
   audioTemplateId?: string;  // 音频工作流模板 id（空=不配音）

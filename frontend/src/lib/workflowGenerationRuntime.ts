@@ -1,6 +1,12 @@
 import { getResult, type GenResult } from "../api/comfyui";
 import type { RegenerationSnapshot } from "../types/chat";
 
+/** 停顿守卫默认窗口：任务一直未观察到节点运转（/queue 仍是 queue_pending）超过此时长就早停。
+ *  5 分钟早于图片 20 分钟 / 视频 60 分钟硬超时，避免 ComfyUI 队列拥堵时误导用户死等。 */
+export const DEFAULT_STALL_TIMEOUT_MS = 300_000;
+/** 同步轮询停顿守卫文案（对齐 workflowRuntime stalled 观察者）。 */
+export const STALLED_POLL_MESSAGE = "长时间未开始加载节点（ComfyUI 队列未运转），已停止";
+
 export interface PendingGeneration {
   prompt_id: string;
   createdAt: number;
@@ -25,6 +31,8 @@ export interface WorkflowWatchInput {
   owner?: PendingGeneration["owner"];
   mediaType?: PendingGeneration["mediaType"];
   baseSlotRef?: PendingGeneration["baseSlotRef"];
+  /** 停顿窗口（毫秒）：任务一直未观察到节点运转时的早停阈值。默认 5 分钟。 */
+  stallTimeoutMs?: number;
 }
 
 export interface WorkflowWatchObserver {
@@ -33,6 +41,8 @@ export interface WorkflowWatchObserver {
   failed: (pending: PendingGeneration, stage: "execution" | "task_not_found", error: string) => void;
   released: (pending: PendingGeneration) => void;
   timedOut: (pending: PendingGeneration) => void;
+  /** 停顿守卫：任务一直卡在排队（从未观察到节点开始运转）超过 stall 窗口 → 停止。 */
+  stalled?: (pending: PendingGeneration) => void;
 }
 
 type RuntimeOptions = {
@@ -96,6 +106,7 @@ export function generationResultAction(status: string): "complete" | "fail" | "p
 export type WorkflowPollOutcome =
   | { kind: "complete"; result: GenResult }
   | { kind: "failed"; error: string }
+  | { kind: "stalled"; error: string }
   | { kind: "still_running" };
 
 /**
@@ -111,12 +122,18 @@ export async function pollWorkflowResult(
   opts: {
     fetchResult?: typeof getResult;
     schedule?: (callback: () => void, delayMs: number) => unknown;
+    now?: () => number;
   } = {},
 ): Promise<WorkflowPollOutcome> {
   const fetchResult = opts.fetchResult || getResult;
   const schedule = opts.schedule || ((callback, delayMs) => setTimeout(callback, delayMs));
+  const now = opts.now || (() => Date.now());
   let tries = 0;
   let consecutiveNotFound = 0;
+  // 停顿守卫（对齐 workflowRuntime stall 窗口）：任务一直卡在排队（从未观察到节点运转）
+  // 超过窗口 → stalled 早停，调用方可据此清理坏死任务并自动重试（2026-08-29 用户需求）。
+  let firstPendingAt = -1;
+  let seenRunning = false;
   for (;;) {
     tries += 1;
     try {
@@ -125,7 +142,17 @@ export async function pollWorkflowResult(
       if (result.status === "failed") {
         return { kind: "failed", error: result.error || "ComfyUI 工作流执行失败" };
       }
-      if (result.status === "not_found") {
+      if (result.status === "running") {
+        seenRunning = true;
+        firstPendingAt = -1;
+        consecutiveNotFound = 0;
+      } else if (result.status === "pending") {
+        consecutiveNotFound = 0;
+        if (firstPendingAt < 0) firstPendingAt = now();
+        if (!seenRunning && now() - firstPendingAt >= DEFAULT_STALL_TIMEOUT_MS) {
+          return { kind: "stalled", error: STALLED_POLL_MESSAGE };
+        }
+      } else if (result.status === "not_found") {
         consecutiveNotFound += 1;
         if (consecutiveNotFound >= 5) {
           return { kind: "failed", error: "出图任务已丢失（ComfyUI 可能已重启）" };
@@ -218,14 +245,17 @@ export class WorkflowGenerationRuntime {
 
   start(input: WorkflowWatchInput, observer: WorkflowWatchObserver, initialDelayMs = 1500): void {
     const pending = this.track(input);
+    const stallTimeoutMs = input.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS;
     let tries = 0;
     let consecutiveNotFound = 0;
+    let seenRunning = false;   // 是否观察到节点开始运转（/queue queue_running）
     const tick = async () => {
       tries += 1;
       try {
         const result = await this.fetchResult(
           pending.prompt_id, input.comfyuiUrl, pending.outputNodeIds || [],
         );
+        if (result.status === "running") seenRunning = true;
         const action = generationResultAction(result.status);
         if (action === "complete") {
           const produced = await this.finalize(result, pending, observer);
@@ -251,6 +281,14 @@ export class WorkflowGenerationRuntime {
         }
       } catch {
         // ComfyUI may be temporarily unavailable; retain the task and keep watching.
+      }
+      // 停顿守卫：一直卡在排队（从未观察到节点加载/运转）超过 stall 窗口 → 早停，
+      // 而不是死等到 20/60 分钟硬超时。
+      if (!seenRunning && this.now() - pending.createdAt >= stallTimeoutMs) {
+        if (!this.list().some((item) => item.prompt_id === pending.prompt_id)) return;
+        this.remove(pending.prompt_id);
+        (observer.stalled ?? observer.timedOut)(pending);
+        return;
       }
       const next = pollSchedule(tries, pending.mediaType);
       if (next.releaseBusy) observer.released(pending);
@@ -306,4 +344,22 @@ export class WorkflowGenerationRuntime {
   private write(items: PendingGeneration[]): void {
     try { this.storage.setItem(this.key, JSON.stringify(items)); } catch { /* ignore */ }
   }
+}
+
+/** 画布工作流运转记入后台活动：提交成功即写入 laf_pending_gen_<threadId>，
+ *  SupportWidget/comfyBackgroundActivity 面板扫描该 key 显示「出图中」。
+ *  画布运转自持轮询（pollWorkflowResult），这里只做标记，不启动 runtime 的观察循环。 */
+export function trackCanvasWorkflow(
+  threadId: string, promptId: string, comfyuiUrl: string, prompt = "",
+): void {
+  try {
+    new WorkflowGenerationRuntime(threadId).track({ promptId, comfyuiUrl, outputNodeIds: [], prompt });
+  } catch { /* 后台活动标记失败不阻塞运转 */ }
+}
+
+/** 画布工作流运转结束（完成/失败/超时）后移除后台活动标记。 */
+export function untrackCanvasWorkflow(threadId: string, promptId: string): void {
+  try {
+    new WorkflowGenerationRuntime(threadId).remove(promptId);
+  } catch { /* ignore */ }
 }

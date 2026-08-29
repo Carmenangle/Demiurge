@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   illustrationLoraConfigurationError, illustrationRequestMedia, illustrationWorkflowMedia,
   resolveIllustrationActors, resolveVideoMode, resolveVideoTemplateChoice,
-  planFirstlastFrameTasks, firstlastFrameValues, transitionVideoValues,
+  planFirstlastFrameTasks, firstlastFrameValues, firstlastSlotLayout, transitionVideoValues,
 } from "./illustrationMedia";
 
 const legacyBindings = {
@@ -316,6 +316,42 @@ describe("planFirstlastFrameTasks（V1.6/P5 首尾帧顺序链·图来源计划�
     const plan = planFirstlastFrameTasks({ transition: "regenerate", firstFrameDesc: "  " });
     expect(plan.tasks).toEqual([]);
     expect(plan.canGenerateVideo).toBe(false);
+  });
+});
+
+describe("firstlastSlotLayout（V1.6/P5+ 独立图片模式槽位布局）", () => {
+  it("regenerate 双帧：主槽=首帧新图，尾帧新图进 :last 副槽", () => {
+    const plan = planFirstlastFrameTasks({ transition: "regenerate", firstFrameDesc: "首帧", lastFrameDesc: "尾帧" });
+    expect(firstlastSlotLayout(plan)).toEqual({ main: "first_prompt", lastSlot: true });
+  });
+
+  it("regenerate 仅首帧描述：主槽=首帧新图，无副槽", () => {
+    const plan = planFirstlastFrameTasks({ transition: "regenerate", firstFrameDesc: "首帧" });
+    expect(firstlastSlotLayout(plan)).toEqual({ main: "first_prompt", lastSlot: false });
+  });
+
+  it("reuse + 尾帧新图：主槽=尾帧新图（本楼层唯一新画面）", () => {
+    const plan = planFirstlastFrameTasks({ transition: "reuse", prevTailUrl: "local://prev.png", lastFrameDesc: "尾帧" });
+    expect(firstlastSlotLayout(plan)).toEqual({ main: "last_prompt", lastSlot: false });
+  });
+
+  it("reuse + 事件尾帧现成图：主槽直接显示事件图", () => {
+    const plan = planFirstlastFrameTasks({ transition: "reuse", prevTailUrl: "local://prev.png", lastFrameUrl: "local://last.png" });
+    expect(firstlastSlotLayout(plan)).toEqual({ main: "last_frame_url", lastSlot: false });
+  });
+
+  it("reuse 无尾帧素材：主槽显示上尾帧图（画面延续）", () => {
+    const plan = planFirstlastFrameTasks({ transition: "reuse", prevTailUrl: "local://prev.png" });
+    expect(firstlastSlotLayout(plan)).toEqual({ main: "prev_tail_url", lastSlot: false });
+  });
+
+  it("无首帧仅尾帧可生成（图片模式放宽）：主槽=尾帧新图", () => {
+    const plan = planFirstlastFrameTasks({ lastFrameDesc: "尾帧" });
+    expect(firstlastSlotLayout(plan)).toEqual({ main: "last_prompt", lastSlot: false });
+  });
+
+  it("无任何帧素材：null（调用方拦截）", () => {
+    expect(firstlastSlotLayout(planFirstlastFrameTasks({}))).toBeNull();
   });
 });
 

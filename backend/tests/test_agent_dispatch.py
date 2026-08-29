@@ -1102,6 +1102,160 @@ def test_comfy高潮提取失败时把中文正文作为Profile场景源而非�
     assert trace[-1][1]["status"] == "emitted"
 
 
+def test_profile_llm_fallback_carries_guard_preset(monkeypatch, tmp_path):
+    """同轮成稿被清空时，图像 Profile 的 LLM 兜底必须携带当前防拦截预设。
+
+    这是「防拦截生效」的关键：旧实现直接掉本地模板、完全没有 LLM 参与，
+    预设自然无从谈起。这里验证 system 已叠加 guard，且失败仍能回退非空模板。
+    """
+    from app.services import preset_store
+
+    preset = {
+        "prompts": [{"identifier": "guard", "role": "system", "content": "防拦截规则生效"}],
+        "prompt_order": [{"order": [{"identifier": "guard", "enabled": True}]}],
+    }
+    preset_store.save(str(tmp_path), "guard", preset)
+    captured = {}
+
+    def fake_chat(base, key, model, system, user, **_kw):
+        captured["system"] = system
+        captured["user"] = user
+        # 返回空→校验失败→内部走 deterministic，仍证明 guard 已随 system 透传
+        return ""
+
+    monkeypatch.setattr(ag._llm, "chat", fake_chat)
+    scene = {
+        "profile": "krea2",
+        "narrative": "她走进房间。",
+        "actors": ["她"],
+        "rating": "nsfw",
+    }
+    ctx = _ctx(
+        chat_base="b", chat_key="k", chat_model="m",
+        preset_dir=str(tmp_path), preset_name="guard",
+    )
+    out, strategy = ag._profile_llm_fallback(ctx, scene)
+
+    assert "防拦截规则生效" in captured["system"]
+    assert out  # 校验失败后仍回退本地模板，非空
+    assert strategy.startswith("llm_retargeted")
+
+
+def test_extract_video_action_plan_carries_guard_preset_and_refusal_retry(monkeypatch, tmp_path):
+    """视频提示词原料提取必须与生图链同级防拦截（输入层 + 输出层）。
+
+    - system 挂当前防拦截预设（system_with_preset），任务框定区分视频链；
+    - 模型输入用 protected_narrative（防拦截原文）而非还原后的 narrative；
+    - 首次回复拒答 → 丢弃并带原因重试一次；二次有效则返回有效计划；
+    - 台词原文不过滤（正常对白不得误伤）。
+    """
+    from app.services import preset_store
+
+    preset = {
+        "prompts": [{"identifier": "guard", "role": "system", "content": "防拦截规则生效"}],
+        "prompt_order": [{"order": [{"identifier": "guard", "enabled": True}]}],
+    }
+    preset_store.save(str(tmp_path), "guard", preset)
+    calls = []
+
+    def fake_chat(base, key, model, system, user, **_kw):
+        calls.append((system, user))
+        if len(calls) == 1:
+            return ("抱歉，我不能协助这项请求。")
+        return (
+            '{"action_sequence":[{"beat":"定格起点","desc":"she kneels on the stone floor"},'
+            '{"beat":"延伸","desc":"her wrists tug the chains"}],'
+            '"subject_scene":"adult woman, black hair, stone prison corridor",'
+            '"audio_design":{"music":"低沉鼓点","sfx":["铁链哗啦声"],'
+            '"lines":[{"speaker":"虞妙玥","text":"我不能满足你……"}],"sync":"卡重音"}}'
+        )
+
+    monkeypatch.setattr(ag._llm, "chat", fake_chat)
+    spec = {
+        "narrative": "她跪在石板上，手腕扯动锁链。",
+        "protected_narrative": "她@(跪)@在石板上，手@(腕)@扯动锁链。",
+        "actors": ["虞妙玥"],
+        "appearance": "虞妙玥(墨发，暗红美眸)",
+        "locale": "机关天牢内层牢房",
+    }
+    ctx = _ctx(
+        chat_base="b", chat_key="k", chat_model="m",
+        preset_dir=str(tmp_path), preset_name="guard",
+    )
+    plan = ag._extract_video_action_plan(ctx, spec)
+
+    assert len(calls) == 2  # 首次拒答 → 重试一次
+    assert "防拦截规则生效" in calls[0][0]
+    assert "内部视频提示词任务" in calls[0][0]
+    assert "她@(跪)@在石板上" in calls[0][1]  # 防拦截原文进模型
+    # 台词语义（用户定稿 2026-08-28）：climax 定格时刻对白通常已说完——lines 一律留空
+    assert "高潮片段当下" in calls[0][0]
+    assert "lines：一律留空数组" in calls[0][0]
+    assert "不得把剧情任何台词" in calls[0][0]
+    # JSON 模板仍含 at_s 字段（firstlast 分支按剧情位置推算时点用）
+    assert "at_s" in calls[0][0]
+    assert plan["action_sequence"][0]["desc"] == "she kneels on the stone floor"
+    assert plan["audio_design"]["sfx"] == ["铁链哗啦声"]
+    # 台词原文不过滤（防误伤正常对白）
+    assert plan["audio_design"]["lines"] == [
+        {"speaker": "虞妙玥", "text": "我不能满足你……"},
+    ]
+
+
+def test_extract_video_action_plan_firstlast_lists_all_dialogue(monkeypatch, tmp_path):
+    """firstlast 模式：首尾帧影片从头到尾覆盖剧情——提取协议要求列出全部对白并标 at_s。"""
+    from app.services import preset_store
+
+    preset = {
+        "prompts": [{"identifier": "guard", "role": "system", "content": "防拦截规则生效"}],
+        "prompt_order": [{"order": [{"identifier": "guard", "enabled": True}]}],
+    }
+    preset_store.save(str(tmp_path), "guard", preset)
+    calls = []
+
+    def fake_chat(base, key, model, system, user, **_kw):
+        calls.append((system, user))
+        return (
+            '{"action_sequence":[{"beat":"开场","desc":"she kneels on the stone floor"}],'
+            '"audio_design":{"music":"低沉鼓点","sfx":["铁链哗啦声"],'
+            '"lines":[{"speaker":"虞妙玥","text":"放开我。","at_s":2}],'
+            '"sync":"卡重音"}}'
+        )
+
+    monkeypatch.setattr(ag._llm, "chat", fake_chat)
+    spec = {
+        "narrative": "她跪在石板上，手腕扯动锁链。",
+        "protected_narrative": "她@(跪)@在石板上，手@(腕)@扯动锁链。",
+        "actors": ["虞妙玥"],
+    }
+    ctx = _ctx(
+        chat_base="b", chat_key="k", chat_model="m",
+        preset_dir=str(tmp_path), preset_name="guard",
+    )
+    plan = ag._extract_video_action_plan(ctx, spec, video_mode="firstlast")
+
+    # firstlast 分支：全部对白 + at_s 按剧情位置推算
+    assert "从头到尾所有角色亲口说出的台词" in calls[0][0]
+    assert "按剧情位置推算" in calls[0][0]
+    assert "lines：一律留空数组" not in calls[0][0]
+    assert plan["audio_design"]["lines"] == [
+        {"speaker": "虞妙玥", "text": "放开我。", "at_s": 2.0},
+    ]
+
+
+def test_extract_video_action_plan_重试仍拒答则回退空(monkeypatch, tmp_path):
+    """两次都拒答 → 返回 {}，调用方回退纯函数兜底，不把拒答文本漏进提示词。"""
+    def fake_chat(*_a, **_kw):
+        return "I cannot help with this request."
+
+    monkeypatch.setattr(ag._llm, "chat", fake_chat)
+    ctx = _ctx(chat_base="b", chat_key="k", chat_model="m")
+    plan = ag._extract_video_action_plan(
+        ctx, {"narrative": "她跪在石板上。", "actors": ["虞妙玥"]},
+    )
+    assert plan == {}
+
+
 def test_writeback剥离transition块并透传判定_v1_5_w1(monkeypatch, tmp_path):
     """V1.5/W1：<transition> 块从正文剥离，判定值（L1 原值）随 illustrate_req 透传。"""
     from app.services import character_state
@@ -1278,7 +1432,7 @@ def test_comfy首个用户回合即使已有开场白也兜底生成插画(monke
     clean, images, request, _audio = ag._agency_writeback(
         _ctx(
             repo_id="work", thread_id="work", card_name="塞西莉亚",
-            scene="conflict", comfy_illustrate=True,
+            scene="conflict", comfy_illustrate=True, comfy_video=True,
             persona="乌黑长发，猩红眼眸，成熟丰腴的幽影帝主",
             history=[{"role": "assistant", "content": "开场白"}], proxy="",
         ),
@@ -1310,6 +1464,91 @@ def test_comfy首个用户回合即使已有开场白也兜底生成插画(monke
                 "video_prompt": expected_video_prompt,
             },
         )
+
+
+def test_comfy_video关闭时不编译视频且不调提取LLM(monkeypatch, tmp_path):
+    """三模态独立开关（对齐图/音链）：comfy_video=False → 零 LLM 提取、零 video_request、零 video trace。
+
+    视频链此前寄生在图链上（illustrate_req 有就编译+调 _extract_video_action_plan），
+    每个高潮回合干烧一次聊天模型 token。关视频开关必须彻底关闭整条链。
+    """
+    trace = []
+    monkeypatch.setattr(
+        ag.run_trace, "emit",
+        lambda ctx, event, **data: trace.append((event, data)),
+    )
+    llm_calls = []
+    monkeypatch.setattr(
+        ag._llm, "chat",
+        lambda *a, **k: (llm_calls.append(1), '{"action_sequence":[{"beat":"定格起点","desc":"x"}]}')[1],
+    )
+    deps = ra.AgencyDeps(
+        chat_fn=lambda *a, **k: "[]", rng=random.Random(0), state_base=str(tmp_path),
+    )
+    monkeypatch.setattr(ra, "extract_status_snapshot", lambda reply: {})
+    monkeypatch.setattr(ra, "parse_state_block", lambda reply: (reply, []))
+    monkeypatch.setattr(ra, "writeback", lambda *a, **k: (10.0, 10.0))
+
+    clean, _images, request, _audio = ag._agency_writeback(
+        _ctx(
+            repo_id="work", thread_id="work", card_name="塞西莉亚",
+            scene="conflict", comfy_illustrate=True, comfy_video=False,
+            persona="乌黑长发，猩红眼眸，成熟丰腴的幽影帝主",
+            history=[{"role": "assistant", "content": "开场白"}], proxy="",
+        ),
+        deps,
+        "塞西莉亚站在孤儿院门前，猩红眼眸安静地注视着他。",
+        turn=2, affinity=10.0, lost=False, user_text="委婉拒绝收养。",
+    )
+    assert llm_calls == []  # 提取 LLM 一次都不调
+    assert not request.get("video_request")  # 不编译 video_request
+    assert request.get("actors") == ["塞西莉亚"]  # 图链正常：出图请求照发
+    req_trace = next(d for ev, d in trace if ev == "illustration.request")
+    assert req_trace["video_prompt_chars"] == 0 and req_trace["video_prompt"] == ""
+
+
+def test_comfy_video开启时编译视频并调提取LLM(monkeypatch, tmp_path):
+    """开关开启 = 现行为不变：_extract_video_action_plan 调用 + video_request 编译。"""
+    trace = []
+    monkeypatch.setattr(
+        ag.run_trace, "emit",
+        lambda ctx, event, **data: trace.append((event, data)),
+    )
+    llm_calls = []
+
+    def fake_chat(*_a, **_k):
+        llm_calls.append(1)
+        return (
+            '{"action_sequence":[{"beat":"定格起点","desc":"she stands before the gate"},'
+            '{"beat":"延伸","desc":"her crimson eyes narrow"}],'
+            '"subject_scene":"tall woman, black hair, orphanage gate",'
+            '"audio_design":{"music":"低沉","sfx":["风声"],"lines":[],"sync":""}}'
+        )
+
+    monkeypatch.setattr(ag._llm, "chat", fake_chat)
+    deps = ra.AgencyDeps(
+        chat_fn=lambda *a, **k: "[]", rng=random.Random(0), state_base=str(tmp_path),
+    )
+    monkeypatch.setattr(ra, "extract_status_snapshot", lambda reply: {})
+    monkeypatch.setattr(ra, "parse_state_block", lambda reply: (reply, []))
+    monkeypatch.setattr(ra, "writeback", lambda *a, **k: (10.0, 10.0))
+
+    _clean, _images, request, _audio = ag._agency_writeback(
+        _ctx(
+            repo_id="work", thread_id="work", card_name="塞西莉亚",
+            scene="conflict", comfy_illustrate=True, comfy_video=True,
+            persona="乌黑长发，猩红眼眸，成熟丰腴的幽影帝主",
+            history=[{"role": "assistant", "content": "开场白"}], proxy="",
+        ),
+        deps,
+        "塞西莉亚站在孤儿院门前，猩红眼眸安静地注视着他。",
+        turn=2, affinity=10.0, lost=False, user_text="委婉拒绝收养。",
+    )
+    assert llm_calls  # 提取 LLM 被调用
+    vr = request.get("video_request")
+    assert isinstance(vr, dict) and vr["submit"]["prompt"]
+    req_trace = next(d for ev, d in trace if ev == "illustration.request")
+    assert req_trace["video_prompt_chars"] > 0
 
 
 def test_首轮隐藏思考中的成人词不会污染收养开局插画(monkeypatch, tmp_path):
@@ -2456,13 +2695,17 @@ def test_插画事件默认附带climax视频提示词_v1_5():
     request = events[0]["illustrate_request"]
     vp = request.get("video_prompt", "")
     assert vp
-    # 区块完整：元信息 / 参考绑定 / 主体场景 / 动作 / 负面约束
+    # 区块完整：七段式（元信息 / 参考绑定 / 主体场景 / 时间分镜 / 音频 / 负面约束）
+    assert "[元信息]" in vp
     assert "[参考绑定]" in vp
+    assert "图片1中心的角色为" in vp
     assert "[主体/场景]" in vp
-    assert "[动作]" in vp
+    assert "[时间分镜]" in vp
+    assert "[音频]" in vp
     assert "[负面约束]" in vp
-    # 动作块带 motion 强度对应的运镜（motion=3 → 快速丝滑运镜）
-    assert "低机位快速丝滑运镜" in vp
+    assert "[动作]" not in vp
+    # 时间分镜带 motion 强度对应的运镜（motion=3 → 低角度快速弧线围绕）
+    assert "低角度仰拍，摄像机以快速弧线围绕主体运动" in vp
     # 主体/场景含外貌与场景
     assert "米色针织开衫" in vp
     assert "面馆内景" in vp
@@ -2532,9 +2775,9 @@ def test_视频提示词motion强度影响运镜_v1_5():
         }])
         return events[0]["illustrate_request"]["video_prompt"]
 
-    assert "低机位快速丝滑运镜" in compile_for(3)
-    assert "绕主体快速运镜" in compile_for(2)
-    assert "极缓推进" in compile_for(0)
+    assert "低角度仰拍，摄像机以快速弧线围绕主体运动" in compile_for(3)
+    assert "镜头绕主体旋转90度" in compile_for(2)
+    assert "摄像机缓缓向主体的面部移动，画面逐渐收窄" in compile_for(0)
 
 
 def test_正文最终化后在记忆维护前立即发插画请求():
@@ -2670,3 +2913,39 @@ def test_roleplay先交付正文与插画但维护完成后才结束Agent回合(
     assert foreground_done.is_set()
     assert result["result_text"] == "最终正文"
     assert result["_eager_result"] is True
+
+
+# ── 路由界限（Autopilot P1 前置）：委派强命令层 vs 剧情默认 ──────────────────
+
+def test_有卡批量出图进委派不走剧情():
+    # 路由界限核心用例：规模词+生成动作 = 高置信委派，不允许掉进 roleplay
+    out = _dispatch("帮我批量出 20 张变体图", ctx=_ctx(
+        card_name="角色卡", character_dir="cards"))
+    assert out["route"] == "plan"
+
+
+def test_剧情内画像请求仍走剧情():
+    out = _dispatch("她提笔画了一幅像", ctx=_ctx(
+        card_name="角色卡", character_dir="cards"))
+    assert out["route"] == "roleplay"
+
+
+def test_无卡委派意图也进委派():
+    out = _dispatch("整理全部世界书条目", ctx=_ctx(card_name="", character_dir=""))
+    assert out["route"] == "plan"
+
+
+def test_委派层不劫持带图附件的图生图反推():
+    out = _dispatch("批量处理这些图", images=["data:image/png;base64,x"], ctx=_ctx())
+    assert out["route"] != "plan"
+
+
+def test_委派疑问句不进委派():
+    out = _dispatch("为什么批量出图失败了？", ctx=_ctx(
+        card_name="角色卡", character_dir="cards"))
+    assert out["route"] == "roleplay"
+
+
+def test_plan路由在主管候选集中():
+    ctx = _ctx()
+    assert "plan" in ag._available_routes(False, ctx)

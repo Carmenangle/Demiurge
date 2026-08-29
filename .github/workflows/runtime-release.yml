@@ -67,6 +67,7 @@ jobs:
         run: |
           npm ci
           npm run check:wire
+          npm run check:manifest
           npm test
           npm run build
           npx playwright install --with-deps chromium

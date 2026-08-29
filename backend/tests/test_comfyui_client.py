@@ -134,6 +134,28 @@ def test_fetch_result_exposes_execution_error_as_failed(monkeypatch):
     )
 
 
+def _queue_fake(url, timeout=None):
+    # 历史为空、队列区分 running/pending，模拟「有没有动弹」的信号来源
+    if "/queue" in url:
+        return _FakeResp({
+            "queue_running": [[0, {"prompt_id": "run-pid"}]],
+            "queue_pending": [[0, "wait-pid"]],
+        })
+    return _FakeResp({})
+
+
+def test_fetch_result_running_when_in_running_queue(monkeypatch):
+    monkeypatch.setattr(comfyui_client, "urlopen", _queue_fake)
+    r = comfyui_client.fetch_result("http://127.0.0.1:8188", "run-pid")
+    assert r["status"] == "running"
+
+
+def test_fetch_result_pending_when_only_queued(monkeypatch):
+    monkeypatch.setattr(comfyui_client, "urlopen", _queue_fake)
+    r = comfyui_client.fetch_result("http://127.0.0.1:8188", "wait-pid")
+    assert r["status"] == "pending"
+
+
 def test_local_comfyui_http_adapters_ignore_environment_proxies():
     assert comfyui_client._NO_PROXY_HANDLER.proxies == {}
     assert comfyui_client._DIRECT_SESSION.trust_env is False

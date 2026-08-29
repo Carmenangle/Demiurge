@@ -120,6 +120,13 @@ def comfy_renderer(
                     raise RuntimeError("ComfyUI 任务丢失（可能已重启）")
                 sleep(cfg.poll_interval)
             raise TimeoutError(f"ComfyUI 取图超时（prompt_id={prompt_id}）")
+        except Exception:
+            # 超时/任务丢失/异常时取消 ComfyUI 侧任务，防止僵尸/已停任务霸占队列
+            try:
+                comfyui_client.interrupt(cfg.url, prompt_id)
+            except Exception:
+                pass
+            raise
         finally:
             from app.services import model_lease
 

@@ -17,6 +17,7 @@ def test_拒绝非图片内容类型(monkeypatch):
 
     class FakeResponse:
         def __init__(self):
+            self.status_code = 200
             self.headers = {"content-type": "text/html; charset=utf-8"}
             self.url = "https://example.com/not-an-image"
             self.history = ()
@@ -56,6 +57,7 @@ def test_拒绝超过大小限制(monkeypatch):
 
     class FakeResponse:
         def __init__(self):
+            self.status_code = 200
             self.headers = {"content-type": "image/png"}
             self.url = "https://example.com/big.png"
             self.history = ()
@@ -99,6 +101,7 @@ def test_成功拉取图片(monkeypatch):
 
     class FakeResponse:
         def __init__(self):
+            self.status_code = 200
             self.headers = {"content-type": "image/png"}
             self.url = "https://example.com/img.png"
             self.history = ()
@@ -176,14 +179,21 @@ def test_拒绝metadata_IP(monkeypatch):
 
 
 def test_拒绝重定向到内网(monkeypatch):
-    """SSRF 防护：跟随重定向时逐跳检查目标"""
+    """SSRF 防护（逐跳校验，TOCTOU 修复）：302 指向内网地址时拦截且不发第二跳请求。
+
+    旧实现 follow_redirects=True 先请求后审计 history，对内网的请求已经发出；
+    新实现 follow_redirects=False，校验通过才发下一跳——FakeClient 的 stream
+    被第二次调用时直接 fail 测试。
+    """
     import httpx
+
+    calls: list[str] = []
 
     class FakeRedirectResponse:
         def __init__(self):
-            self.headers = {"content-type": "image/png"}
-            self.url = "https://final-cdn.com/evil.png"
-            self.history = [type("Hist", (), {"url": "http://192.168.1.1/evil.png"})()]
+            self.status_code = 302
+            self.headers = {"location": "http://192.168.1.1/evil.png"}
+            self.url = "https://safe-cdn.com/redirect-to-internal"
 
         def raise_for_status(self):
             pass
@@ -194,12 +204,9 @@ def test_拒绝重定向到内网(monkeypatch):
         def __exit__(self, *args):
             pass
 
-        def iter_bytes(self):
-            yield b"bad"
-
     class FakeClient:
         def __init__(self, **kwargs):
-            pass
+            assert kwargs.get("follow_redirects") is False
 
         def __enter__(self):
             return self
@@ -208,8 +215,12 @@ def test_拒绝重定向到内网(monkeypatch):
             pass
 
         def stream(self, method, url, **kwargs):
+            calls.append(url)
+            if len(calls) > 1:
+                raise AssertionError("重定向目标未校验就被请求（TOCTOU）")
             return FakeRedirectResponse()
 
     monkeypatch.setattr(httpx, "Client", FakeClient)
-    with pytest.raises(ImageProxyError, match="重定向目标指向内网"):
+    with pytest.raises(ImageProxyError, match="重定向目标被拒"):
         fetch_remote_image("https://safe-cdn.com/redirect-to-internal")
+    assert calls == ["https://safe-cdn.com/redirect-to-internal"]

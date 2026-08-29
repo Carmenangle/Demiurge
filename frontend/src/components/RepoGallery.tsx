@@ -230,15 +230,19 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
     setSelected((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
 
   // 清理裂图：删除指向本机图但磁盘文件已不存在的僵尸记录（多因手动删文件留下）。逐仓库清后刷新。
+  // 请求失败的仓库单独计failed：不能把后端异常伪装成「没有发现裂图记录」。
   const [pruning, setPruning] = useState(false);
   const doPrune = async () => {
     setPruning(true);
     try {
       let total = 0;
+      let failed = 0;
       for (const id of repoIds) {
-        try { total += (await pruneGenerations(id, embed)).removed; } catch { /* 单库失败不阻断 */ }
+        try { total += (await pruneGenerations(id, embed)).removed; } catch { failed += 1; }
       }
-      showToast(total > 0 ? `已清理 ${total} 条裂图记录（磁盘文件已不存在）。` : "没有发现裂图记录。", total > 0 ? "success" : "info");
+      if (failed > 0 && total > 0) showToast(`已清理 ${total} 条裂图记录；另有 ${failed} 个仓库请求失败。`, "error");
+      else if (failed > 0) showToast(`清理失败：${failed} 个仓库请求出错，请确认后端已启动后重试。`, "error");
+      else showToast(total > 0 ? `已清理 ${total} 条裂图记录（磁盘文件已不存在）。` : "没有发现裂图记录。", total > 0 ? "success" : "info");
       refresh();
     } finally { setPruning(false); }
   };

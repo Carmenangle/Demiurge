@@ -6,6 +6,7 @@ import { listSkills, type Skill } from "../../api/skills";
 import type { PanelProps } from "./GeneralPanel";
 import { normalizeContextBudgets, DEFAULT_HISTORY_PER_ROLE } from "../../stores/settings";
 import { BuiltinAgentsSection } from "./BuiltinAgentsSection";
+import { ProseStyleSection } from "./ProseStyleSection";
 
 const TOOL_LABELS: { key: keyof AgentTools; label: string }[] = [
   { key: "generate_image", label: "文生图" },
@@ -151,6 +152,7 @@ export function AgentPanel({ draft, setDraft }: PanelProps) {
         </p>
       </div>
       <BuiltinAgentsSection />
+      <ProseStyleSection />
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 16 }}>
         <h4 style={{ margin: 0 }}>自定义智能体（Agent 预设）</h4>
         <div style={{ display: "flex", gap: 8 }}>

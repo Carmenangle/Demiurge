@@ -8,7 +8,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app.services import narrative_store
+from app.services import narrative_store, prose_style
 from app.services.narrative_memory import ChronicleEntry
 
 router = APIRouter()
@@ -388,3 +388,25 @@ def repo_worldbook_entry_delete(req: RepoWorldbookEntryDelete) -> dict[str, obje
         raise HTTPException(status_code=404, detail="条目索引越界")
     worldbook_store.save_repo_snapshot(req.output_dir, req.repo_id, book)
     return {"ok": True}
+
+
+# ── 文风（去 AI 味）用户态配置：词表增删 + 功能开关（S1，单一属主 prose_style）──
+
+
+@router.get("/prose-style")
+def get_prose_style() -> dict:
+    """返回当前生效配置（enabled/extra/removed）。"""
+    return prose_style.load_config()
+
+
+class ProseStyleConfig(BaseModel):
+    enabled: bool = True
+    extra: list[str] = []
+    removed: list[str] = []
+    review_every: int = 5  # S2 活人感通审采样频率（每 N 轮一次，0=关闭）
+
+
+@router.post("/prose-style")
+def save_prose_style(config: ProseStyleConfig) -> dict:
+    """保存文风配置；只保留合法字段，坏值按缺省处理（属主 prose_style）。"""
+    return prose_style.save_config(config.model_dump())

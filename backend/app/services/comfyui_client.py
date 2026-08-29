@@ -121,6 +121,24 @@ def submit_prompt(url: str, api: dict, client_id: str = "") -> str | None:
         raise ComfyError(str(e), 500)
 
 
+def _queue_prompt_ids(queue: dict, key: str) -> list[str]:
+    """从 /queue 的 queue_running / queue_pending 列表提取 prompt_id。
+
+    兼容两种队列项形态：`[index, "prompt-id"]`（字符串）与
+    `[index, {"prompt_id": "prompt-id", ...}]`（对象）。"""
+    ids: list[str] = []
+    for item in queue.get(key) or []:
+        if isinstance(item, (list, tuple)) and len(item) >= 2:
+            item = item[1]
+        if isinstance(item, dict):
+            pid = str(item.get("prompt_id") or "")
+        else:
+            pid = str(item or "")
+        if pid:
+            ids.append(pid)
+    return ids
+
+
 def fetch_result(url: str, prompt_id: str,
                  filter_node_ids: list[str] | None = None) -> dict:
     """轮询 /history/{id}，归一为 {status, images, videos, audios, texts}。
@@ -143,9 +161,13 @@ def fetch_result(url: str, prompt_id: str,
         try:
             with urlopen(_base(url) + "/queue", timeout=5) as qr:
                 q = json.loads(qr.read())
-            running = [item[1] for item in q.get("queue_running", [])]
-            pending_q = [item[1] for item in q.get("queue_pending", [])]
-            if prompt_id in running or prompt_id in pending_q:
+            running = _queue_prompt_ids(q, "queue_running")
+            pending_q = _queue_prompt_ids(q, "queue_pending")
+            if prompt_id in running:
+                # 已进入执行队列（节点开始加载/运转 = 有动弹）
+                return {"status": "running", "images": [], "videos": [], "audios": [], "texts": []}
+            if prompt_id in pending_q:
+                # 仍在排队，节点尚未开始加载（无动弹）
                 return {"status": "pending", "images": [], "videos": [], "audios": [], "texts": []}
             # 不在历史也不在队列：任务已丢失（ComfyUI 重启等原因）
             return {"status": "not_found", "images": [], "videos": [], "audios": [], "texts": []}
@@ -264,6 +286,29 @@ def fetch_view(url: str, filename: str, type: str = "output", subfolder: str = "
             return r.read(), r.headers.get("Content-Type", "image/png")
     except Exception as e:
         raise ComfyError(f"取图失败：{e}", 502)
+
+
+def probe_view(url: str, filename: str, type: str = "output", subfolder: str = "",
+               timeout: float = 8) -> str:
+    """轻探测 /view 某产物文件是否仍存在（不下载内容，裂图清理判定用）。
+
+    返回三态："ok"（200，文件在）/"missing"（404，文件确已不在）/
+    "unreachable"（其余任何状态或网络异常——无法判定，调用方必须按保留处理，
+    防止 ComfyUI 未起时误删仍存在的记录）。
+    """
+    try:
+        base = _base(url)
+    except ComfyError:
+        return "unreachable"
+    qs = urlencode({"filename": filename, "type": type, "subfolder": subfolder})
+    try:
+        resp = _DIRECT_SESSION.get(f"{base}/view?{qs}", timeout=timeout, stream=True)
+    except Exception:
+        return "unreachable"
+    with resp:
+        if resp.status_code == 200:
+            return "ok"
+        return "missing" if resp.status_code == 404 else "unreachable"
 
 
 def interrupt(url: str, prompt_id: str = "") -> dict:

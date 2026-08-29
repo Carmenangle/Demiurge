@@ -129,6 +129,49 @@ V1 与 M1 前半（M1.1–M1.3）互不依赖，可并行推进。
 > 尾帧链式反查（`resolvePrevTailDesc`，零新增持久化）、`videoMode` 二选一协议透传均已实现并测试覆盖。
 > 剩余：P6 真实 API 对齐（双图 `image[]` 语义实测）待用户提供可实测端点。详见
 > `docs/PLAN-VIDEO-FIRSTLAST.md`。
+>
+> **进度（2026-08-28 用户拍板 + 修复）**：用户报告选首尾帧模式实际仍出高潮格式——根因是首尾帧
+> 生图编排绑死 `useVideo`（未配视频模板时选项完全失效；trace 实证 383 条 illustration.request
+> 无一 firstlast、最新 video_prompt_chars=0）。拍板：**首尾帧是独立图片模式，视频模式跟随该选项
+> 推导**。修复（`useChatSession.submitIllustration` + `illustrationMedia.firstlastSlotLayout`
+> + `chatSessionEvents.appendImageSlot`）：只配图片模板即生效——`useFirstlastImages` 解耦
+> `useVideo`，双帧图经 pollResult 走既有回填+入库全链；楼层主槽=本楼层新画面（regenerate=首帧、
+> reuse=尾帧/画面延续），尾帧新图进 `:last` 副槽；视频开启时双帧图走 `:first`/`:last` 副槽
+> （主槽留正片，避免同槽双 pollResult 竞态）；独立图片模式跳过高潮 Profile 渲染与高潮主图提交。
+>
+> **进度（2026-08-28 验收反馈三修）**：①帧图 LoRA 未生效——帧提示词缺触发词前置，LoRA 查表/
+> 校验/前置重构为 `withLoraTriggers` 公共路径（主图与帧图共用，查表失败仍硬失败）；②取段位置
+> 无需改——`extract_story_frames` 本就取首段/末段（纯对白就近借位），「情节对不上图」是 ③ 的症状；
+> ③帧提示词「瞎写」——帧描述原文直喂生图模型，首版 `compileFramePrompt` 降级明显。
+>
+> **进度（2026-08-29 帧提示词同构重构，用户拍板「用高潮点那一套方案」）**：高潮点的 action/
+> visual_facts 等结构化画面事实是主生成同轮提取的产物；首尾帧没有同轮载体，帧描述只有叙事句、
+> 缺帧时点结构化字段 → 渲染校验（field_ledger/primary_focus/visual_hook）不过 → deterministic_fallback
+> 兜底垃圾。重构为与高潮点**完全同构**：新增后端 `/ai/prompt/profile/frames` 端点——
+> `generate_frame_prompts` 先做一次「时点提取」（LLM 从楼层首段/尾段分别提取该时点英文结构化
+> action/visual_facts，帧描述走 `@(…)@` 防拦截标记保护，解析失败带因重试一次），再逐帧走**同一
+> `generate` 编译器**（同一校验/带因重写/deterministic_fallback 兜底/field_ledger），一次调用出两帧
+> 成品。前端 `genFramePrompts` 一次取两帧缓存，`compileFramePrompt` 退化为缓存查询+触发词前置
+> （`withLoraTriggers`），编译失败降级帧描述原文不挂死。trace `illustration.profile` 带 frame 标记。
+> 回归测试：提取成功/提取失败重试降级/单帧三例。
+>
+> **进度（2026-08-29 验收三修：首帧位置 / think 污染 / LoRA 触发词复发）**：trace 实证三案——
+> ①首帧图落中央/末尾：firstlast 主槽沿用了主图的「高潮纠偏/末段兜底」锚点，新增
+> `scene_illustration.first_frame_anchor_offset`（正文第一段末），hook 对 video_mode=firstlast 特判不走高潮纠偏；
+> ②编译产物整段 `<think>` 提交 ComfyUI、提取 JSON 混 think 解析必败→尾帧降级中文原文：
+> `image_prompt_profiles.generate` 两轮输出与 `_parse_frame_extract` 入口统一剥 think（对齐
+> image_prompt_extract 正则）；③角色 LoRA「没生效」：触发词表空 manual 记录（登记页空保存=确认通用）
+> → 注入静默跳过——保留既有语义，改为绑定 UI 角色行醒目警告（未登记触发词·画面可能不像角色），
+> 新仓库绑定当场可见，不再等生图后发现。
+>
+> **进度（2026-08-29 队列卡死自愈 + 失败槽重新生成，用户需求）**：①同步轮询 `pollWorkflowResult`
+> 补停顿守卫（对齐 workflowRuntime 5 分钟 stall 窗口，`seenRunning` 后不误杀；哨兵用 -1——
+> 0 是合法时间值会让第二段 pending 守卫失效，测试抓出）→ 返回 `kind:"stalled"`；调用侧
+> （帧循环/画布工具卡/CanvasStageFlow）stalled 时 `interruptComfy`（清队列+中断+释放租约）
+> **自动重新提交一次**（上限 1 次防循环），再卡死才失败。②插画失败/手动停止**不再删槽**——
+> `markMediaSlotFailed` 保留槽为 failed 态（错误原因+`retryArgs` 参数快照），楼层显示
+> 「重新生成」按钮 → `retryIllustration` 从快照重调 `submitIllustration`（source 翻转为 manual
+> 跳过 claim，提交/入库/trace 三者同一编译后提示词源）。
 
 **架构分层（图片层 / 视频层）**：
 - **图片层两个模式**：

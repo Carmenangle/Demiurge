@@ -202,6 +202,38 @@ def test_execute_turn_rejects_unclosed_visible_content_before_writeback():
     assert order == ["generated"]
 
 
+def test_execute_turn_tolerates_protocol_literals_quoted_inside_think():
+    """think 段复述协议字面量（「检查 <content> 标签」）不得计入结构判定。
+
+    2026-08-29 trace 实证：模型思考里出现 2 次字面量 <content>，真实正文块
+    <content>正文</content> 完好闭合，却被判「正文结束前被截断」。
+    """
+    reply = (
+        "<think>先检查<content>标签中。再检查一下，我需要在正文之后输出：\n"
+        "1. 状态更新（<状态更新>块）\n2. <illustration>块\n"
+        "好的，开始写。<content></content>自检复述。</think>\n"
+        "<content>她踏前一步，指尖挑起他的下颌。</content>\n"
+        "<illustration>{\"prompt\": \"x\"}</illustration>"
+    )
+    roleplay_turn.ensure_complete_visible_content(reply)  # 不抛即通过
+
+
+def test_execute_turn_still_rejects_truncation_after_think_with_literals():
+    """剥离 think 后正文仍未闭合 → 依旧判截断（真实截断不被误放行）。"""
+    reply = (
+        "<think>提到<content>标签的复述</think>\n"
+        "<content>正文开始，写到一半被上游掐断"
+    )
+    with pytest.raises(roleplay_turn.TruncatedRoleplayOutput):
+        roleplay_turn.ensure_complete_visible_content(reply)
+
+
+def test_execute_turn_tolerates_unclosed_think_with_literals():
+    """截断发生在 think 内（think 未闭合、正文未开始）→ 不按 content 截断报错。"""
+    reply = "<think>推理到一半提到<content>标签就被上游掐断"
+    roleplay_turn.ensure_complete_visible_content(reply)  # 不抛即通过
+
+
 def test_agent_turn_finishes_only_after_published_maintenance():
     published = threading.Event()
     maintenance_started = threading.Event()

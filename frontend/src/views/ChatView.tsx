@@ -312,10 +312,11 @@ export function ChatView({
   const {
     messages, streamingId, wfRunning, uploadingWf, slowWatchPromptId, wfProgress, wfNode, queued, regeneratingIds,
     send, runCommand, pushBot,
+    retryIllustration,
     actOnPromptApproval, actOnRouteChoice, regenerateResult,
     pickTemplate, runWorkflow, updateCardDraft, markCardDone, markCardReopen,
     applyWorkflowOps, ignoreWorkflowOps, editWorkflowOp,
-    stopGenerating, guideQueued, cancelQueued,
+    stopGenerating, stopSlotGeneration, guideQueued, cancelQueued,
     confirmReq, compact, compacting, contextReminder, dismissContextReminder,
     clearHome, clearCache, reloadFromSnapshot,
     editMessage, deleteMessage, regenerateMessage, createCheckpoint, messagesUpTo,
@@ -345,6 +346,8 @@ export function ChatView({
   // 依赖 hook 返回的函数(runCommand)会每渲染变引用，用 latest-ref 兜住，回调本身保持稳定。
   const runCommandRef = useRef(runCommand);
   runCommandRef.current = runCommand;
+  const retryIllustrationRef = useRef(retryIllustration);
+  retryIllustrationRef.current = retryIllustration;
   const regenerateResultRef = useRef(regenerateResult);
   regenerateResultRef.current = regenerateResult;
   const promptApprovalRef = useRef(actOnPromptApproval);
@@ -373,6 +376,12 @@ export function ChatView({
   const handleRunCommand = useCallback((cmd: string) => runCommandRef.current(cmd), []);
   const handleRegenerate = useCallback(
     (messageId: string, slotId?: string) => regenerateResultRef.current(messageId, slotId),
+    [],
+  );
+  const stopSlotGenerationRef = useRef(stopSlotGeneration);
+  stopSlotGenerationRef.current = stopSlotGeneration;
+  const handleCancelGeneration = useCallback(
+    (messageId: string, slotId: string) => void stopSlotGenerationRef.current(messageId, slotId),
     [],
   );
   const handlePromptApproval = useCallback(
@@ -712,6 +721,8 @@ export function ChatView({
                   onPromptApproval={handlePromptApproval}
                   onRouteChoice={handleRouteChoice}
                   onRegenerate={handleRegenerate}
+                  onCancelGeneration={handleCancelGeneration}
+                  onRetryIllustration={retryIllustration}
                   regenerating={regeneratingIds.has(m.id)}
                   onEdit={handleEditAssistant}
                   onDelete={handleDeleteMessage}

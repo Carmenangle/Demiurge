@@ -67,6 +67,22 @@ def test_多角色状态指令要求显式角色归属():
 
 # ── 阶段 A：门控 + 仲裁 ──
 
+def test_世界缺core场景时不调LLM(tmp_path):
+    # 回归：consult_world 守卫只认 core/scene 非空（原「not scene_illustration」模块对象恒真为死条件，已摘除）
+    called = {"n": 0}
+
+    def spy(*a, **k):
+        called["n"] += 1
+        return "[]"
+
+    deps = ra.AgencyDeps(
+        chat_fn=spy, rng=random.Random(1), state_base=str(tmp_path), gate_base_rate=1.0,
+    )
+    out = ra.consult_world(deps, chat_base="", chat_key="", chat_model="",
+                           core="", scene="舞会", affinity=90)
+    assert out == [] and called["n"] == 0
+
+
 def test_门控关时塌回不调LLM(tmp_path):
     called = {"n": 0}
 
@@ -131,7 +147,7 @@ def test_世界提案保留目标与行动供主模型叙述(tmp_path):
         deps, chat_base="", chat_key="", chat_model="",
         core="塞西莉亚角色条目", scene="主角拒绝收养", affinity=0,
     )
-    directive = ra.narrative_directive(verdicts, {})
+    directive = ra.narrative_directive(verdicts)
 
     assert verdicts[0].goal == "把有价值的孩子纳入长期掌控"
     assert verdicts[0].intent == "留下可被幽影商会识别的徽章作为后手"
@@ -140,9 +156,10 @@ def test_世界提案保留目标与行动供主模型叙述(tmp_path):
 
 
 def test_仲裁转叙述指令与失控判定():
-    won = agency.Verdict("A", agency.OUTCOME_ACCEPT, agency.DEGREE_FULL, 5, 80, "得手")
+    # intent 由 judge 从 Proposal 复制到 Verdict，指令组装只认 Verdict 自带 intent
+    won = agency.Verdict("A", agency.OUTCOME_ACCEPT, agency.DEGREE_FULL, 5, 80, "得手", intent="下药")
     miss = agency.Verdict("B", agency.OUTCOME_REJECT, agency.DEGREE_NONE, 90, 80, "未遂")
-    directive = ra.narrative_directive([won, miss], {"A": "下药"})
+    directive = ra.narrative_directive([won, miss])
     assert "A：下药" in directive and "B" not in directive
     assert ra.agency_lost([won, miss]) is True
     assert ra.agency_lost([miss]) is False
@@ -150,7 +167,7 @@ def test_仲裁转叙述指令与失控判定():
 
 def test_无得手时指令为空():
     miss = agency.Verdict("B", agency.OUTCOME_REJECT, agency.DEGREE_NONE, 90, 80, "未遂")
-    assert ra.narrative_directive([miss], {}) == ""
+    assert ra.narrative_directive([miss]) == ""
 
 
 def test_已尝试但失败的自主行动也必须进入叙事():
@@ -159,7 +176,7 @@ def test_已尝试但失败的自主行动也必须进入叙事():
         intent="暗中留下追踪印记", goal="保持对主角的长期掌控",
     )
 
-    directive = ra.narrative_directive([miss], {})
+    directive = ra.narrative_directive([miss])
 
     assert "暗中留下追踪印记" in directive
     assert "失败" in directive

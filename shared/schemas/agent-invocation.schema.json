@@ -34,7 +34,7 @@
     "preset_dir": { "type": "string" }, "preset_name": { "type": "string" },
     "user_name": { "type": "string" }, "user_persona": { "type": "string" }, "persona_bound": { "type": "boolean" },
     "worldbook_dir": { "type": "string" }, "worldbook_name": { "type": "string" },
-    "illustrate": { "type": "boolean" }, "comfy_illustrate": { "type": "boolean" }, "comfy_audio": { "type": "boolean" }, "prompt_profile": { "type": "string" },
+    "illustrate": { "type": "boolean" }, "comfy_illustrate": { "type": "boolean" }, "comfy_audio": { "type": "boolean" }, "comfy_video": { "type": "boolean" }, "prompt_profile": { "type": "string" },
     "appearance_source": { "type": "string", "enum": ["worldbook", "character_card"] },
     "character_base_images": { "type": "object", "additionalProperties": { "type": "string" } },
     "illustration_actor_names": { "type": "array", "items": { "type": "string" } }, "style_base_image": { "type": "string" }

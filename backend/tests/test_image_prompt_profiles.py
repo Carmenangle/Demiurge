@@ -1563,3 +1563,130 @@ def test_四种profile都保留未知专名物件的材质形态运动功能释�
 def test_未知profile拒绝():
     with pytest.raises(ValueError, match="未知提示词模式"):
         profiles.generate("unknown", _scene(), lambda _s, _u: "x")
+
+
+_FRAME_OK = _anima_json(
+    "1girl, reaching out, gripping wrist, pulling another person, doorway, diagonal composition. "
+    "Her extended arm and locked grip form the sharp diagonal that pulls both figures toward the door.",
+)
+
+
+def _frame_scene(rating="nsfw"):
+    """wardrobe 清空（对齐 342 行先例）：帧成品不含服饰 tags，避免服饰事实校验干扰。"""
+    return {**_scene(rating), "wardrobe": ""}
+
+
+def test_首尾帧同构编译_提取成功后走同一编译器():
+    """时点提取成功 → 两帧各自走同一编译器，帧 scene 携带提取事实与防拦截标记。"""
+    calls: list[tuple[str, str]] = []
+
+    def generate(system: str, user: str) -> str:
+        calls.append((system, user))
+        if "首尾帧画面事实提取器" in system:
+            return json.dumps({
+                "first": {
+                    "action": "rising from the cold stone floor",
+                    "visual_facts": ["one hand braced against the wall", "chains slack at her wrists"],
+                },
+                "last": {
+                    "action": "kneeling with head bowed",
+                    "visual_facts": ["torn garment pooled around her knees"],
+                },
+            })
+        return _FRAME_OK
+
+    diagnostics: dict = {}
+    results = profiles.generate_frame_prompts(
+        "anima_tags", _frame_scene("nsfw"),
+        {"first": "她从冰冷的石地上撑起身。", "last": "她跪下低头，衣衫散落膝边。"},
+        generate, diagnostics=diagnostics,
+    )
+
+    assert set(results) == {"first", "last"}
+    assert diagnostics["frame_extract_ok"] is True
+    assert len(calls) == 3  # 1 次提取 + 2 次编译
+    assert all("首尾帧画面事实提取器" not in system for system, _ in calls[1:])
+    for frame, (system, user) in zip(("first", "last"), calls[1:]):
+        payload = json.loads(user)
+        # 模型输入侧：protected_narrative 转移为带防拦截标记的 narrative（_scene_for_model 语义）
+        assert payload["narrative"].startswith("@(")
+        assert payload["action"]
+        assert payload["visual_facts"]
+        assert frame in ("first", "last")
+    assert results["first"]["prompt"]
+    assert results["last"]["prompt"]
+    assert results["first"]["negative_prompt"]
+
+
+def test_首尾帧提取失败重试一次后走narrative降级():
+    """提取两次都不可解析 → 不携带提取事实仍编译出成品（narrative 降级），不抛错。"""
+    calls: list[str] = []
+
+    def generate(system: str, _user: str) -> str:
+        calls.append(system)
+        if "首尾帧画面事实提取器" in system:
+            return "not json at all"
+        return _FRAME_OK
+
+    diagnostics: dict = {}
+    results = profiles.generate_frame_prompts(
+        "anima_tags", _frame_scene(),
+        {"last": "她跪下低头。"},
+        generate, diagnostics=diagnostics,
+    )
+
+    assert diagnostics["frame_extract_ok"] is False
+    assert len([s for s in calls if "首尾帧画面事实提取器" in s]) == 2  # 带因重试一次
+    assert set(results) == {"last"}
+    assert results["last"]["prompt"]
+
+
+def test_首尾帧单帧只编译该帧():
+    results = profiles.generate_frame_prompts(
+        "anima_tags", _frame_scene(), {"last": "她跪下低头。"},
+        lambda system, _user: _FRAME_OK if "首尾帧画面事实提取器" not in system else "{}",
+    )
+    assert set(results) == {"last"}
+
+
+def test_编译输出剥离think段():
+    """渲染模型 CoT 混进产物必须剥离（2026-08-29 新仓库 trace：整段 think 提交 ComfyUI）。"""
+    result = profiles.generate(
+        "anima_tags", _frame_scene("nsfw"),
+        lambda _system, _user: "<think> The user wants me to write a prompt. </think>\n" + _FRAME_OK,
+    )
+    assert result
+    assert "<think>" not in result
+    assert "The user wants" not in result
+
+
+def test_帧提取解析容忍think与代码围栏():
+    """提取输出带 think/围栏仍可解析——否则两次重试全废、帧编译失去提取事实。"""
+    raw = (
+        "<think> let me structure the scene. </think>\n```json\n"
+        + json.dumps({
+            "first": {"action": "rising from the floor", "visual_facts": ["chains slack"]},
+        })
+        + "\n```"
+    )
+    parsed = profiles._parse_frame_extract(raw)
+    assert parsed is not None
+    assert parsed["first"]["action"] == "rising from the floor"
+
+
+def test_首尾帧提取输出带think仍提取成功():
+    def generate(system: str, _user: str) -> str:
+        if "首尾帧画面事实提取器" in system:
+            return "<think> reasoning about the frame </think>\n" + json.dumps({
+                "first": {"action": "rising", "visual_facts": ["chains slack"]},
+                "last": {"action": "kneeling", "visual_facts": []},
+            })
+        return _FRAME_OK
+
+    diagnostics: dict = {}
+    results = profiles.generate_frame_prompts(
+        "anima_tags", _frame_scene("nsfw"),
+        {"first": "她撑起身。", "last": "她跪下。"}, generate, diagnostics=diagnostics,
+    )
+    assert diagnostics["frame_extract_ok"] is True
+    assert set(results) == {"first", "last"}

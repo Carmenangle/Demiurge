@@ -57,6 +57,29 @@ def restore_jailbreak(text: str) -> str:
     return restore_jailbreak_with_offsets(text)[0]
 
 
+# 拒答句式：模型拒答文本泄漏进提示词时的识别规则（生图与视频提示词链共用）。
+REFUSAL_RE = re.compile(
+    r"\bI\s+(?:can't|cannot|can not|won't|will not)\s+"
+    r"(?:help|assist|comply|generate|create|produce|write|transform|provide|fulfill)\b|"
+    r"无法(?:协助|帮助|满足)|不能(?:协助|帮助|满足)",
+    re.I,
+)
+
+
+def strip_refusal_suffix(raw: str) -> str:
+    """保留拒答前已经合规的提示词，只裁掉模型追加的拒答说明。"""
+    text = restore_jailbreak(raw or "")
+    match = REFUSAL_RE.search(text)
+    if not match:
+        return text
+    line_start = text.rfind("\n", 0, match.start()) + 1
+    prefix = text[line_start:match.start()]
+    cut = line_start if re.search(
+        r"此请求|该请求|抱歉|sorry|I(?:'m| am) Claude Code", prefix, re.I,
+    ) else match.start()
+    return text[:cut].rstrip(" ,，;；\r\n")
+
+
 # scene_spec 中需要做破甲还原的文本字段（各模态 spec 共用的清洗面）。
 _SPEC_TEXT_FIELDS = (
     "narrative", "appearance", "wardrobe", "locale", "camera", "composition",

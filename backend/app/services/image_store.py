@@ -12,8 +12,9 @@ import os
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
-from urllib.request import urlopen
 from uuid import uuid4
+
+import httpx
 
 from app.config import COMFYUI_BASE_URL
 from app.services import comfyui_client
@@ -33,6 +34,41 @@ def _next_seq_name(base: Path, ext: str) -> str:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     return f"{ts}_{uuid4().hex[:8]}.{ext}"
 
+
+
+def _download_external_url(url: str, max_bytes: int = 20 * 1024 * 1024) -> bytes:
+    """下载公网 URL，重定向逐跳校验（防校验后重定向 SSRF 绕过）。
+
+    旧实现用 urllib.urlopen：默认自动跟随重定向，重定向目标完全不校验，
+    外部 URL 可 302 跳到私网/metadata 地址，把内网响应下载回作品目录。
+    改为 httpx follow_redirects=False + 每跳 validate_media_url 校验通过才发下一跳。
+    trust_env 保持默认 True，保留「外部 URL 走系统代理」的既有通路。
+    """
+    from app.services.url_guard import validate_media_url
+
+    current = validate_media_url(url)
+    with httpx.Client(follow_redirects=False, timeout=30) as client:
+        for _ in range(5):
+            resp = client.get(current)
+            if resp.status_code in (301, 302, 303, 307, 308):
+                location = (resp.headers.get("location") or "").strip()
+                if not location:
+                    raise ComfyError("重定向响应缺少 Location", 502)
+                try:
+                    current = validate_media_url(str(httpx.URL(current).join(location)))
+                except ValueError as exc:
+                    raise ComfyError(f"重定向目标被拒：{exc}", 400) from exc
+                continue
+            resp.raise_for_status()
+            chunks: list[bytes] = []
+            total = 0
+            for chunk in resp.iter_bytes():
+                total += len(chunk)
+                if total > max_bytes:
+                    raise ComfyError(f"下载超过 {max_bytes // (1024 * 1024)}MB 上限", 400)
+                chunks.append(chunk)
+            return b"".join(chunks)
+    raise ComfyError("重定向跳数过多（>5）", 502)
 
 
 def _from_src(src: str) -> tuple[bytes, str]:
@@ -59,17 +95,17 @@ def _from_src(src: str) -> tuple[bytes, str]:
         except ValueError as e:
             raise ComfyError(str(e), 400)
     try:
-        # local-view 指向本机后端（127.0.0.1:8010），必须绕过系统代理——
+        # local-view 指向本机后端（config 的 BACKEND_BASE_URL），必须绕过系统代理——
         # Windows 系统代理（如 Clash 127.0.0.1:7897）会把 localhost 请求转发出去导致 502。
-        # 外部 URL 保留默认 opener（走系统代理，中转通路依赖它）。
+        # 外部 URL 走 _download_external_url（httpx 默认读系统环境代理，中转通路依赖它），
+        # 且重定向逐跳校验，防校验后重定向绕过 SSRF 防护。
         if is_local_view_url(src):
             import urllib.request
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
             with opener.open(src, timeout=30) as r:
                 data = r.read(20 * 1024 * 1024)  # 最大 20 MB，防超大文件撑爆内存
         else:
-            with urlopen(src, timeout=30) as r:
-                data = r.read(20 * 1024 * 1024)  # 最大 20 MB，防超大文件撑爆内存
+            data = _download_external_url(src)
     except ComfyError:
         raise
     except Exception as e:

@@ -458,3 +458,20 @@ def test_解析无动作序列_返回空列表():
     )
     _, plan = ipe.extract_illustration_plan(reply)
     assert plan["action_sequence"] == []
+
+
+def test_动作延伸序列_拒答文本丢弃_不流入时间分镜():
+    # 防拦截回归：模型拒答句写进 desc 时必须丢弃，不得流入视频 [时间分镜]。
+    # 台词原文（audio lines）不过滤由 parse_video_plan 负责，此处只管内联计划。
+    reply = (
+        "铺垫。"
+        '<illustration>{"anchor":"铺垫。","composition":"close-up","aspect_ratio":"2:3",'
+        '"subjects":[{"name":"白绮谷","weight":1.2,"description":"girl"}],'
+        '"prompt":"dessert","action_sequence":[{"beat":"定格起点","desc":"我不能协助这项请求"},'
+        '{"beat":"延伸","desc":"I cannot help with this request"},'
+        '{"beat":"收尾","desc":"她吃下奶油"}]}</illustration>'
+    )
+    _, plan = ipe.extract_illustration_plan(reply)
+    assert plan["action_sequence"] == [
+        {"beat": "收尾", "desc": "她吃下奶油"},
+    ]

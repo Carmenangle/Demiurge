@@ -154,7 +154,7 @@ def consult_world(
 
     affinity 是兼容旧单角色状态的好感度快照；多角色优先用 deps.affinities。失败/空提案/门控关返回 []。
     """
-    if not scene_illustration or not core.strip() or not scene.strip():
+    if not core.strip() or not scene.strip():
         _trace(deps, "agent.skipped", agent="world", reason="missing_context")
         return []
     fallback_affinity = 0.0 if affinity is None else affinity
@@ -203,14 +203,17 @@ def consult_world(
     return verdicts
 
 
-def narrative_directive(verdicts: list[agency.Verdict], proposals_by_actor: dict[str, str]) -> str:
-    """把有效自主尝试转成主叙事指令；成功落实，失败也必须呈现为未遂。"""
-    attempted = [v for v in verdicts if v.roll > 0 and (v.intent or proposals_by_actor.get(v.actor))]
+def narrative_directive(verdicts: list[agency.Verdict]) -> str:
+    """把有效自主尝试转成主叙事指令；成功落实，失败也必须呈现为未遂。
+
+    intent 由 judge 从 Proposal 复制到 Verdict，此处直接取用；空 intent 落「自主行动」兜底。
+    """
+    attempted = [v for v in verdicts if v.roll > 0 and v.intent]
     if not attempted:
         return ""
     lines = []
     for verdict in attempted:
-        intent = verdict.intent or proposals_by_actor.get(verdict.actor, "自主行动")
+        intent = verdict.intent or "自主行动"
         goal = f"；持续目标：{verdict.goal}" if verdict.goal else ""
         if verdict.outcome == agency.OUTCOME_ACCEPT:
             result = f"按{agency.DEGREE_LABEL[verdict.degree]}落实"

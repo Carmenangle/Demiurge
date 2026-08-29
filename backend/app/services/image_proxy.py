@@ -30,46 +30,53 @@ def fetch_remote_image(url: str, proxy: str = "",
     proxy 为访问外网的代理地址（与灵感搜索一致）；空则直连。
     """
     url = (url or "").strip()
-    # SSRF 防护：url_guard 校验协议/私网/metadata/DNS rebinding
+    # SSRF 防护：首跳校验协议/私网/metadata/DNS rebinding
     try:
         url = validate_media_url(url)
     except ValueError as e:
         raise ImageProxyError(400, str(e))
 
     try:
-        client_kw: dict = {"timeout": 20, "follow_redirects": True, "trust_env": False}
+        client_kw: dict = {"timeout": 20, "follow_redirects": False, "trust_env": False}
         if proxy and proxy.strip():
             client_kw["proxy"] = proxy.strip()
         with httpx.Client(**client_kw) as c:
-            with c.stream("GET", url) as r:
-                r.raise_for_status()
-                # 逐跳重定向检查：每个中间跳转目标也须通过 SSRF 校验
-                for hist in getattr(r, "history", []) or []:
-                    redirect_url = str(hist.url)
+            current = url
+            ctype = ""
+            # 重定向逐跳校验：校验通过才发下一跳请求（TOCTOU 修复——旧实现
+            # follow_redirects=True 先请求后审计 history，对内网的请求已经发出）。
+            for _ in range(5):
+                with c.stream("GET", current) as r:
+                    if r.status_code in (301, 302, 303, 307, 308):
+                        location = (r.headers.get("location") or "").strip()
+                        if not location:
+                            raise ImageProxyError(502, "重定向响应缺少 Location")
+                        try:
+                            current = validate_media_url(
+                                str(httpx.URL(current).join(location)),
+                            )
+                        except ValueError as exc:
+                            raise ImageProxyError(400, f"重定向目标被拒：{exc}") from exc
+                        continue
+                    r.raise_for_status()
                     try:
-                        validate_media_url(redirect_url)
-                    except ValueError:
-                        raise ImageProxyError(
-                            400, f"重定向目标指向内网地址：{redirect_url}"
-                        )
-                # 最终 URL 校验：history 只含中间跳转，最终响应 URL 需单独检查
-                try:
-                    validate_media_url(str(r.url))
-                except ValueError:
-                    raise ImageProxyError(
-                        400, f"最终响应地址指向内网：{str(r.url)}"
-                    )
-                ctype = r.headers.get("content-type", "").split(";")[0].strip().lower()
-                if not ctype.startswith("image/"):
-                    raise ImageProxyError(400, f"非图片内容类型：{ctype or 'unknown'}")
-                chunks: list[bytes] = []
-                total = 0
-                for chunk in r.iter_bytes():
-                    total += len(chunk)
-                    if total > max_bytes:
-                        raise ImageProxyError(413, f"图片过大（超过 {max_bytes // (1024 * 1024)}MB）")
-                    chunks.append(chunk)
-        return b"".join(chunks), ctype
+                        validate_media_url(str(r.url))
+                    except ValueError as exc:
+                        raise ImageProxyError(400, f"最终响应地址指向内网：{r.url}") from exc
+                    ctype = r.headers.get("content-type", "").split(";")[0].strip().lower()
+                    if not ctype.startswith("image/"):
+                        raise ImageProxyError(400, f"非图片内容类型：{ctype or 'unknown'}")
+                    chunks: list[bytes] = []
+                    total = 0
+                    for chunk in r.iter_bytes():
+                        total += len(chunk)
+                        if total > max_bytes:
+                            raise ImageProxyError(
+                                413, f"图片过大（超过 {max_bytes // (1024 * 1024)}MB）",
+                            )
+                        chunks.append(chunk)
+                    return b"".join(chunks), ctype
+            raise ImageProxyError(502, "重定向跳数过多（>5）")
     except ImageProxyError:
         raise
     except Exception as exc:  # noqa: BLE001

@@ -74,6 +74,7 @@ class MultiAgentRequest(ImageAgentRequest):
     illustrate: bool = False  # 剧情插画开关（开=能动性 D 阶段自动配图）
     comfy_illustrate: bool = False  # 前端已预设 ComfyUI 工作流模板：高潮点改发 illustrate_request 事件走异步闭环
     comfy_audio: bool = False  # 前端已预设音频模板（IndexTTS）：剧情产出后发 audio_request 事件逐角色配音
+    comfy_video: bool = False  # 前端已预设视频模板：开=高潮点编译 video_request；关=零 token
     video_mode: Literal["", "climax", "firstlast"] = ""  # 视频模式（缺省 climax），前端 preset.videoMode 透传；produce 层据此编译正片/转场 video_request
     prompt_profile: str = "krea2"
     appearance_source: Literal["worldbook", "character_card"] = "worldbook"
@@ -247,6 +248,7 @@ class IllustrationFailureRequest(BaseModel):
     stage: str
     error: str
     prompt_id: str = ""
+    comfyui_url: str = ""
 
 
 class IllustrationSubmissionRequest(BaseModel):
@@ -388,7 +390,11 @@ def audio_submission(req: AudioSubmissionRequest) -> dict[str, bool]:
 
 @router.post("/image-agent/illustration-failure")
 def illustration_failure(req: IllustrationFailureRequest) -> dict[str, object]:
-    """记录自动插画失败并移除持久化槽，不向对话正文追加错误。"""
+    """记录自动插画失败并移除持久化槽，不向对话正文追加错误。
+
+    有 prompt_id 时同时取消 ComfyUI 侧任务（/interrupt + /queue delete），
+    防止僵尸/已停任务继续霸占队列导致后续任务排队死锁。
+    """
     from app.services import generation_store
     removed = generation_store.persist_illustration_failure(
         thread_id=req.thread_id,
@@ -399,7 +405,16 @@ def illustration_failure(req: IllustrationFailureRequest) -> dict[str, object]:
         error=req.error,
         prompt_id=req.prompt_id,
     )
-    return {"ok": True, "removed": removed}
+    cancelled: dict[str, bool] = {"deleted": False, "interrupted": False}
+    if req.prompt_id:
+        from app.services import comfyui_client
+        from app.config import COMFYUI_BASE_URL
+        comfy_url = req.comfyui_url or COMFYUI_BASE_URL
+        try:
+            cancelled = comfyui_client.interrupt(comfy_url, req.prompt_id)
+        except Exception:
+            pass
+    return {"ok": True, "removed": removed, "cancelled": cancelled}
 
 
 @router.post("/image-agent/cancel")

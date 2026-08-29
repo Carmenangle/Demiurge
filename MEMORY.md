@@ -149,10 +149,13 @@ constraints that are safe to include in private agent context.
 
 ## V1.5/V1.6 实现进度（deepseek-v4-pro-0813 编码）
 
-**模型分工（用户指定，三档路由，2026-08-26 修正）**：
-- glm-5.3（tier:c3）= 极度困难的代码编程方向引导 + 架构文档编写 + 代码审计。
-- deepseek-v4-pro-0813（tier:c2）= 实际编码 + 审计后修复。
-- deepseek-v4-flash-0731（tier:c0/c1）= 记入记忆 + 读取文档 + 普通对话 + 极其简单的代码编程。
+**模型分工（用户指定，2026-08-28 重新拍板，取代 2026-08-26 三档分工）**：
+- glm-5.3（tier:c3）= 代码审计 + 修复审计出的漏洞 bug + 整体方向引导 + 架构文档创建
+  + 正常对话 + 文档读取与创建 + 记忆更新。
+- deepseek-v4-pro（用户口述 0831；当前路由表实际为 deepseek-v4-pro-0813，tier:c2）=
+  代码编程（新功能/常规实际编码；审计发现的 bug 修复归 glm-5.3，不归 deepseek）。
+- glm-5.3-flash（tier:c0/c1）= 本轮未点名；原「记忆/文档/对话/简单编程」分工中对话、
+  文档、记忆已划归 glm-5.3，flash 仅余轻量兑底。
 
 已完成：
 - A1 首尾帧双锚点提取 `services/story_frames.py`（纯函数，提交 407fac7）：楼层文本 → 段首+段尾
@@ -247,3 +250,243 @@ P5 首尾帧顺序链解除阻塞后，W3「2 任务排队」前端接线落地�
 验证：后端 1699 passed / ruff ✅ / mypy ✅；前端 vitest 578 passed / tsc ✅ / 生产构建 ✅；
 `check:wire` 同步 ✅。文档同步：`PLAN-VIDEO-FIRSTLAST.md` W3 标 ✅、`STORYGEN-FLOW.md` 视频四形态。
 剩余（P6）：真实双图视频模板字段名 + 真实 API 对齐，待用户提供可实测端点。
+
+## 视频提示词绑定点 + 生图生命周期加固（2026-08-27，用户拍板）
+
+1. **climax 参考绑定只声明角色，不说「高潮动作画面」**：`video_prompt._reference_binding_climax`
+   由「图片1=X的高潮动作画面（唯一参考画面，作为准确起始帧）」改为「图片1角色为 A、B」——
+   「高潮动作画面」这类画面职责描述会作为干扰词回流，画面细节只在 [动作] 桥段承载；无在场角色
+   才退回 `_climax_frame_role` 职责占位描述。
+2. **角色提取漏人守卫**：新增 `_unbound_person_refs` / `_action_source_text`（纯函数）——动作/叙事
+   里出现未绑定人称（Man/He/the woman/他/她…）时，climax 绑定补「画面另含未绑定角色」提示，
+   `build_video_request` 同时落 `warnings`。根因是男方角色无角色卡/LoRA，不进 actors。
+3. **ComfyUI 轮询区分「有动弹/无动弹」**：后端 `comfyui_client.fetch_result` 队列查询时
+   `queue_running`→`status=running`（节点已开始运转）、`queue_pending`→`status=pending`（仍在排队）。
+   前端 `WorkflowGenerationRuntime` 加停顿守卫（`DEFAULT_STALL_TIMEOUT_MS=5min`）：一直 pending、
+   从未观察到 running 就早停（`observer.stalled`），不再死等到 20/60min 硬超时。
+4. **图片生成位置下方「停止」键**：`useChatSession.stopSlotGeneration`（中断 ComfyUI + cancel 守望 +
+   `failMediaSlot` 原位标 failed），`ChatMessages` media-slot pending 态渲染停止键。
+5. **重新生图原位替换**：`regenerateResult` 的 `ai-image` 分支由 `upsertMessages` 新发消息改为按
+   messageId 原位替换 `image/regeneration`，不再往剧情对话里插一条新消息。
+
+关键文件：`video_prompt.py`、`comfyui_client.py`、`workflowGenerationRuntime.ts`、
+`useChatSession.ts`、`chatSessionEvents.ts`、`ChatMessages.tsx`、`ChatView.tsx`。
+门禁：后端 1719 passed / ruff ✅；前端 vitest 580 passed / tsc ✅。
+
+## 视频提示词七段式 + 参考绑定措辞（2026-08-28，用户拍板，覆盖旧「climax 精简版」决策）
+
+用户对 climax 视频提示词做结构评审后拍板三条，全部落地 `video_prompt.py`：
+
+1. **climax 也走完整七段式**（推翻 2026-08-25 定稿「climax 精简版、禁止时间分镜」）：
+   ① 元信息 ② 风格声明 ③ 参考绑定 ④ 主体/场景 ⑤ 时间分镜 ⑥ 音频 ⑦ 负面约束。
+   顺带统一三模板段标签：首行 `[元信息]：…`、`[风格]→[风格声明]`；climax 补 `[音频]`。
+2. **`[动作]`（定格起点/延伸/收尾长句）→ `[时间分镜]`**：`0–Xs / X–Ys / …` 逐拍切段，
+   每段 = 节奏名 + 运镜 + 主体动作 + 特效 + 节拍同步 + 身份锁；按 `action_sequence` beat 数
+   均分，无序列则单段「主体动作」。新增 `_climax_time_segments`/`_climax_beat_sync`，
+   `_climax_fx` 改为纯特效。
+3. **参考绑定「图片1角色为 X」→「图片1中心的角色为 X」**；删除「画面另含未绑定角色…」
+   提示 + `_unbound_person_refs`/`_action_source_text` 漏人守卫与 `build_video_request` 的
+   unbound warning（推翻 2026-08-27 漏人守卫拍板）——只需声明「图片X中心的角色为 X」，
+   无名配角由模型按画面自行区分。
+
+另：climax 元信息在 `has_frame`（有参考图）时加「使用输入图片作为准确起始帧」（I2V 必加）。
+
+验证：`test_video_prompt.py` 48 passed；全量后端 1719 passed；前端契约 6 passed；
+`b2_climax_video_prompt.json` fixture 由 probe 脚本重生成（七段式）。
+
+## 代码审计：SSRF 重定向三处修复（2026-08-28，glm-5.3 审计+修复）
+
+审计范围：后端全部路由/服务（subprocess 均为列表参数无 shell 注入；无 eval/exec/pickle；
+project_files 路径围栏、node_update requirements 来源审查、install_target 域名+目录双重校验、
+能力租约 capability_sandbox 均完好）。确认并修复「后端主动 fetch 用户 URL」家族同一类漏洞：
+**首跳校验通过后下载器自动跟随重定向且重定向目标不校验 → 外部 URL 可 302 跳私网/metadata
+地址把内网响应拉回本地**。
+
+1. `image_store._from_src`（高危）：validate 后用默认 urlopen 下载（自动跟随重定向）。
+   新增 `_download_external_url`：httpx `follow_redirects=False` + 逐跳 `validate_media_url`
+   （校验通过才发下一跳，上限 5 跳），loopback local-view 豁免保留。
+2. `image_proxy.fetch_remote_image`（中危，TOCTOU）：`follow_redirects=True` 先请求后审计
+   history——对内网请求已发出。改为逐跳校验同款合同。
+3. `visual_ci._to_data_uri`（中危）：http(s) 直拉完全不校验。补 `validate_media_url`
+   （local-view 豁免）+ 单跳重定向校验。
+
+不变量（以后再改不要破）：**「校验通过才发下一跳请求」**——任何新的后端取外链代码必须
+`follow_redirects=False` + 每跳校验，禁止「先请求后审计 history」。
+
+残余风险（记录在案，未改）：`model_downloader`/`workflow_downloader` 的下载 URL 已白名单
+huggingface.co/civitai.com，但重定向未逐跳校验（需这两个域名存在 open redirect 才可利用，
+且响应仅落盘不回显，影响有限）；`local-view` 按设计可读任意媒体扩展名文件（loopback 门禁
++ 扩展名白名单是边界）；SVG 在 `_MEDIA_EXTS` 白名单内，直接导航可能执行内嵌脚本
+（单机 loopback 场景风险低）。
+
+回归：新建 `tests/test_ssrf_guard.py`（7 用例：私网/环回重定向拒第二跳、公网链放行、
+循环超限、visual_ci 直连拒绝）；`test_image_proxy.py` 重定向用例改为 TOCTOU 断言。
+门禁：后端全量 1730 passed / ruff ✅ / mypy ✅。
+
+## 视频提示词链四项修复 + 三模态独立开关（2026-08-28 晚，glm-5.3 审计+修复）
+
+本轮四连修（根因均在 video/agent_graph 链），全部有回归测试：
+
+1. **防拦截对齐生图链（两层）**：`_extract_video_action_plan`（agent_graph）此前裸调 LLM——
+   system 不挂预设、输入用还原正文、输出无过滤，拒答句「我不能协助这项请求」直接流进
+   [时间分镜]。修复：① 输入层用 `protected_narrative`（防拦截原文）+ `system_with_preset`
+   挂当前防拦截预设（task_label=内部视频提示词任务）；② 输出层 `video_prompt.parse_video_plan`
+   逐字段拒答过滤（desc/subject_scene/music/sfx/sync 丢弃，**lines 台词原文不过滤**——
+   「我不能满足你」这类正常对白必须保留）；③ 整体拒答带原因重试一次，仍败回 {} 纯函数兜底；
+   ④ `image_prompt_extract` 内联 <illustration> 的 action_sequence 同款过滤；
+   ⑤ `prompt_clean` 收口 REFUSAL_RE/strip_refusal_suffix 单一来源。
+   实测 19:00:33 新生成：8 拍分镜 + 7 条具体音效 + 3 句当下台词，strategy=same_turn。
+
+2. **镜头语言词汇表（用户文档驱动）**：`D:\Study\镜头语言学习\`（镜头运动.md 26 种 +
+   镜头角度.md 9 种，每种带标准「提示词：」句式）。video_prompt 自造词「极缓推进」「低机位
+   快速丝滑运镜」全删，改 `_CAMERA_ESTABLISH/_MIDDLE/_SOLO/_CLOSE` 常量（句式=文档原文），
+   `_beat_camera` 按拍位分配：开场定场（固定/缓推）→中段循环换镜→收尾拉远/骤停；
+   剧情句含场景切换 cues（另一边/来到/走进/片刻后/此时/镜头一转/回到/转场）自动改
+   遮挡揭示/甩镜头转场。**不变量：新增运镜必须来自该文档句式，不自造**。
+
+3. **身份锁去重**：「人物身份和五官不能发生变化」从每拍尾部移除，`_negative` 统一追加进
+   [负面约束] 仅一次（精确匹配 _IDENTITY_LOCK，勿用含「五官」的宽匹配——会撞上用户自定义
+   「禁止五官漂移」而漏加）。旧测试 test_firstlast_identity_reasserted_per_segment 已改语义。
+
+4. **firstlast 逐句成拍**：`_time_segments` 从「固定 3 段均分」改为剧情逐句切拍
+   （`_split_narrative_beats`：。！？；\n 切句 + 引号句合并归属；首帧衔接+尾帧收束；
+   引语拍标「台词随口型同步」；每拍独立 `_beat_camera` 运镜）。climax 侧 `_climax_time_segments`
+   每拍也改 `_beat_camera`（原单句 cam 全程复用）。
+
+5. **高潮台词时点约束**：用户发现 [音频]台词 是「已过去」的对白。根因：提取 prompt 无时点
+   约束，LLM 把高潮前文对白也摘进来。修复：`_extract_video_action_plan` system 规则 3 加
+   「只列高潮片段当下（0–15s 画面此刻）亲口说出的台词；此前对话/回忆/旁白转述一律不列」。
+   治本是事实先行管线（offset_s 取数），P1 待做。
+
+6. **三模态独立开关 comfy_video（用户要求「关=零 token」）**：查实图链 comfy_illustrate/
+   音链 comfy_audio 本就条件 gate 零成本；视频链寄生图链——illustrate_req 一存在就编译
+   video_request + 每次高潮调一次提取 LLM，干烧 token。修复：
+   - schema `comfy_video: boolean`（agent-invocation.schema.json，保留原紧凑格式！勿整文件
+     json.dumps 重写——会展开成 300 行 diff）→ `scripts/generate_wire_contracts.py` 再生成
+     前后端契约；
+   - 后端 agent_contracts（字段+legacy dict）/agent_request_context（payload 解析）/
+     agent_runner（trace）/ai_agent router/agent_graph（`if illustrate_req and ctx.get("comfy_video")`
+     gate 在视频编译整块外）；
+   - 前端 useChatSession：`comfyVideo = !!(settings.illustrate && mediaPreset?.videoTemplateId)`
+     （没配视频模板自动关）；ai.ts 接口+body；
+   - **事件层 `_video_request_for` 兜底编译保留**（rec 没带 video_request 时现场编译）——纯函数
+     零 LLM token，只影响 trace 观测；token 大头在 produce 层已被 gate。
+   门禁：后端 178（runner/dispatch/protocol/roleplay_turn）+ gate 2 用例 / ruff ✅ /
+   wire --check in sync；前端 tsc ✅ / vitest 契约 3 passed。
+
+**事实先行管线规划（用户思路，P1-P3 待做）**：正文前先出 story_facts JSON（scene/climax
+anchor/present[服装外貌]/beats[offset_s+action+camera+transition]/dialogue[offset_s]/
+audio[offset_s]），注入正文 system 当硬约束，下游从表编译而非从正文抽取。挂点：
+`_draft_story_facts`（复用 _extract_video_action_plan 的二段调用模式）；visual_facts 的
+fact+evidence 就是雏形；thinking_chains 可加「导演推演」head 链（预设层唯一值得改的）。
+_INLINE_PLAN_INSTRUCTION 4000 字合同四活一身（正文+艺术决策+导演决策+英文翻译）是
+local_fallback 占比高/正文缩水的结构性根因，P0 瘦身方向已与用户对齐。
+
+**遗留（下会话可直接接手）**：
+- 18:44–18:47 trace 批次是旧缓存字节级重放（28/28 identical 16:45–16:47），重放路径
+  直接重发修复前 video_prompt 缓存，未重走新链——是否强制重新生成未拍板。
+- [音频] 音效具体化依赖提取 LLM 成功；strategy 大量 local_fallback（25/31），生图链
+  LLM 兜底触发率待查。
+- 19:00 生成后 visual.ci warn + agent.error（manual_backfill_required）未排查。
+- 本轮全部改动（防拦截+镜头表+身份锁+firstlast+时点+comfy_video）**尚未 commit**，
+  工作区还混着 SSRF/前端协议等更早改动，整理 commit 时需分组。
+
+**交接验收（2026-08-28 晚续，glm-5.3）**：
+
+门禁复跑全绿：后端 pytest 全量 1740 passed / ruff 通过 / wire --check in sync；
+前端 tsc 通过 / 契约 vitest 9 passed。开关语义两路验证：① gate 2 用例
+（关=零提取调用+零 video_request+trace 空；开=恢复编译）；② trace 文件里同一测试
+19:36（gate 前，video_prompt 227 字符被编译）vs 20:24（gate 后，0）。
+镜头表/身份锁用 19:00:33 同款 spec 在当前代码下 in-process 编译核验：
+8 拍运镜 5 种轮换（定场→摇/拉焦/手持循环→拉远收束）、「极缓推进」绝迹、
+身份锁全文仅 1 次且在 [负面约束]。
+
+**19:00:33 trace 实为修复中段产物，验收结论需修正**：该生成里运镜仍是
+「极缓推进」全程复用、身份锁每拍重申——即镜头表/身份锁修复落地**之前**
+的代码所编译（提取 LLM 与音频时点已是新链，8 拍+7 音效+3 句当下台词属实）。
+19:00:33 之后至 20:24 的 trace 全是 pytest 批次（「继续剧情→最终正文」x3 +
+20:23:59 全量门禁），**没有任何修复后代码的真实生成**——#2/#3/#4 的
+运行时验收只能靠 in-process 编译 + 单测，真实生成待下次使用时自然覆盖。
+
+本轮验收发现并已修（各带回归测试）：
+1. **firstlast 引号句合并归属此前未实现**（本段原文写的 _split_narrative_beats
+   函数并不存在）：「她低声说「开饭了，都过来！」沈糯放下筷子。」被 ！ 切碎成
+   「…都过来；台词随口型同步」+ 孤儿「」沈糯放下筷子」两拍。现补
+   video_prompt._split_narrative_beats：引号内分隔符不切拍、闭引号后紧跟
+   正文（字母/汉字）即断拍、剔除整句裸拒答（引号内对白不动，守「台词不过滤」）。
+   _time_segments 与 _climax_fallback_beats 两处切分收口到该函数。
+2. **纯函数兜底路径拒答泄漏**：narrative 本身是拒答句（主模型拒答当正文，
+   提取 LLM 失败/关闭回退纯函数时）会原样编进 [时间分镜]
+   （trace 19:36 实证「我不能协助这项请求。」进 [时间分镜]）。现
+   _split_narrative_beats 剔除裸拒答句后回退「主体动作按剧情自然演变」。
+   注：19:36 批次本身是测试运行（合成数据），但泄漏路径真实可达。
+3. **台词时点（用户审查指出）**：[音频] 台词只有「谁说了什么」没有「什么时候说」——
+   提取协议 lines 增加 at_s（提取 LLM 按剧情位置推算该句在本段窗口内的说出时刻，秒；
+   推算不了才省略、禁止全标 0），parse_video_plan 数字/数字串透传（bool/乱串丢弃），
+   _audio_hint 渲染成「{t}s｜说话人：台词」；缺失诚实省略（comfy_audio 兜底台词不受影响）。
+   回归：test_parse_video_plan_at_s_only_numeric_passes + test_audio_design_lines_carry_plot_timing
+   + 提取 system 断言（at_s/按剧情位置推算）。
+
+**台词时点语义再定稿（用户审查，2026-08-28 深夜）**：at_s 只属于 firstlast——
+高潮定格时刻角色对白通常已说完，climax 视频动作窗口（0–15s）内**根本没有对白**；
+只有首尾帧影片从头到尾覆盖剧情，才需要含本段**全部**对白并按剧情位置标 at_s。
+落地：① 提取协议按 video_mode 分支（climax：lines 一律留空数组，声音只进 sfx；
+firstlast：列出从头到尾全部亲口台词 + at_s 按剧情位置推算）——_video_mode 判定
+提前到提取之前并传入 _extract_video_action_plan(ctx, spec, video_mode)；
+② compile_climax_video_prompt 强制丢台词（_audio_hint include_lines=False，
+audio_design.lines 与 comfy_audio 兜底双来源一律不列）；③ firstlast 渲染不变
+（{t}s｜说话人：台词，缺 at_s 诚实省略）。
+**多元数据插入 UI 同步定稿**：图片生成功能加「首尾帧生成」选项（mediaPreset.firstlast，
+旧预设按 videoMode==="firstlast" 回填）+ 既有「生成视频」开关，视频模式由选项推导：
+firstlast 开 → firstlast 剧情影片，否则 climax 高潮点动作代入。resolveVideoMode
+优先级：事件 > preset.firstlast > 旧 videoMode > climax；useChatSession 发送
+video_mode 按推导值。回归：climax 丢台词（双来源）、firstlast 全对白带时点、
+提取两分支规则断言、resolveVideoMode 推导 contract 测试；后端 193 定向 + 前端
+584 + tsc + build 绿（全量后端随门禁跑）。
+
+**仍未修（待拍板）**：镜头表里「镜头快速推近主体后骤停」是自造词
+（「推近」「骤停」均不见于两文档；_CAMERA_MIDDLE[3] 与 _CAMERA_CLOSE[3] 在用），
+违反「不自造」不变量；候选替换：文档「甩镜头」句式或「低弧绕行」快速档。
+「低角度仰拍，摄像机以快速弧线围绕主体运动」属文档组合（仰拍+低弧绕行快速档），算合规。
+
+**两个已知项排查结论（均非本轮回归）**：
+- visual.ci warn（amber）：19:03 与更早 16:18/16:42/16:44 共 10 条同形——
+  vlm_ok=null（未配 VLM，语义审计没跑）、similarity=0（无参考图）、
+  failed=[character_identity,action,scene] 是英文关键词启发式对中文 narrative
+  恒 miss + mechanical 里 checkpoint/sampler/steps 恒空（illustration.submitted
+  未带这些字段，loras 字段名曾因此修过一轮）。amber 是设计内非阻断诊断，
+  修复方向（英文启发式改中文/接 VLM）另立任务，不阻塞本轮。
+- agent.skipped(manual_backfill_required)：chronicle 纪要代理的门控跳过
+  （roleplay_agency.maybe_summarize：turn-last>cadence 即要求手动补纪要；
+  本仓 last_turn=0、turn=24），8/12 起每 cadence 必跳，属积压欠账非新故障。
+  19:06 的两条 agent.error 是 table_maintenance/curator 的 Connection error
+  （上游模型瞬断，与视频链无关）。
+
+## 资产库「清理裂图」失明修复（2026-08-28 深夜）
+
+**现象**：生成内容网格能看到裂图，点「清理裂图」却提示「没有发现裂图记录」。
+
+**根因**（直接查 chroma.sqlite3 逐条核对 198 条 generation 得证）：
+- 196 条 local-view 条目磁盘文件全部存在、无 0 字节坏文件，prune 判定本身没错；
+- 真裂图 = 2 条 **legacy remote-view 直链**（/api/comfyui/view?filename=...&url=<comfyui>，
+  早期未落盘留存的生成），文件已被 ComfyUI 输出清理，直连 8188 均 404；
+- rag_store._local_path_of 只认 local-view 形态，remote-view 被当「外链无法判定」永久跳过；
+- 另：doPrune 把每仓库请求异常静默吞掉（total=0）——后端故障也会伪装成「没有发现裂图记录」；
+  comfyui_client.fetch_view 把一切异常（含 404）映射成 502，代理状态码不可用于判定。
+
+**修复**（不变量：无法判定存在性一律保留，不误删真源）：
+- comfyui_client.probe_view：GET /view 三态探测——200=ok / 404=missing /
+  其余状态、网络异常、非法 url（不过 validate_comfyui_url 白名单）=unreachable；
+- rag_store.prune_missing_generations：local-view 仍按磁盘判定；remote-view 直链
+  仅在 probe 明确 404 时删，unreachable 一律保留；
+- 前端 RepoGallery.doPrune：请求失败的仓库单计 failed，报「N 个仓库请求失败」，
+  不再伪装成「没有发现裂图记录」。
+- 回归测试：test_prune_deletes_legacy_remote_view_only_when_comfyui_confirms_missing、
+  test_prune_keeps_legacy_remote_view_when_file_exists_or_cannot_judge、
+  test_probe_view_maps_status_and_never_raises（404 判定走 ComfyUI 本体真值，
+  与浏览器展示同源）。
+- 门禁：ruff / import-linter 17 kept / mypy 40 files / 硬编码门禁（顺手把
+  image_gen.py:127、image_store.py:98 两行注释里的 127.0.0.1:8010 字面量改指
+  config 的 BACKEND_BASE_URL，既有告警清零）/ 后端全量 **1751 passed**；
+  前端 tsc + vitest + build 绿。
+- ARCHITECTURE.md「裂图清理」约束句已同步更新语义。

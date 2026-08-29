@@ -19,6 +19,8 @@
 - 配置/协议/清洗规则/数据真源只有一个属主；新事件须同步更新后端协议、前端解码、reducer 与双端测试。
 - 密钥只进被 Git 忽略的 `backend/data/user_state.json`。
 - **轮询类 API 必须带超时**（`apiGet(path, timeoutMs)`，如 `comfyStatus` 6s）：禁止无超时 await 进轮询链，否则单次请求挂起 = 轮询永久中断（表现为“等待中…”后不再加载，2026-08-26 教训）。
+- **画布生成任务记入后台活动**：后台活动「出图中」= 扫描 `laf_pending_gen_<threadId>`（comfyBackgroundActivity.ts），key 只有 `WorkflowGenerationRuntime` 写。画布工作流运转必须 `trackCanvasWorkflow/untrackCanvasWorkflow`（提交 track、结束 untrack，still_running 保留），否则面板看不到（2026-08-28 教训）。
+- **画布占位节点拖动同步**：对话流占位（`gen-<streamingId>`）拖动手动同步 `streamingPosRef`；工作流运转占位（wfRuns）拖动同步 `wfRuns` x/y——生成结束原位替换锚点（`pendingAnchorRef`）读它们，不更新则结果落在占位最初位置（2026-08-28 教训）。
 - **工作流卡片节点展示 = 早期机制（唯一正确，勿再被旧文档带偏）**：N 个选中节点 → N 个独立 ComfyUI iframe（`NodeCard`），各自 `keepOnly` 单节点 + `request_graph` 刷新校验到只剩自己 + `node_size` 自适应大小；禁止改成「单共享 iframe 截图切割」（`SharedNodePreview`/方案 B）。
 - **produce 层编译进 `illustrate_request` 的新字段，必须同步加进 `roleplay_turn.py` 的 rec 透传白名单**：rec 是从 illustrate_request 手动挑字段构造的，漏透传 = 字段在真实链路静默丢失（单元测试直接构造 rec 会绕过此断点）。2026-08-26 教训：`video_mode`/首尾帧描述/`last_frame_url`/`transition_video_request` 曾漏透传，导致首尾帧生图·首帧复用·转场视频在前端全失效。
 - **转场编译 desc 语义对齐**：`build_video_request(mode="transition")` 里 `first_frame_desc`=当前首帧描述（终点）、`prev_tail_desc`=上尾帧描述（起点）、`last_frame_desc` 不使用；docstring 与调用处必须与此一致，否则转场提示词「图片2/终点」会错填上尾帧内容。

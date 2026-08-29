@@ -142,6 +142,49 @@ export function appendTransitionSlot(
   });
 }
 
+/** 首尾帧副槽（V1.6/P5+ 独立图片模式）：末尾追加 pending 图片槽并保留正文。 */
+export function appendImageSlot(
+  current: ChatMessage[], messageId: string, slotId: string, prompt?: string,
+): ChatMessage[] {
+  return current.map((message) => {
+    if (message.id !== messageId) return message;
+    const existing = message.parts || (message.text ? [{ type: "text" as const, text: message.text }] : []);
+    if (existing.some((part) => part.slotId === slotId)) return message;
+    return {
+      ...message,
+      parts: [...existing, {
+        type: "media-slot" as const, slotId, status: "pending" as const, kind: "image" as const,
+        ...(prompt ? { videoPrompt: prompt } : {}),
+      }],
+    };
+  });
+}
+
+/**
+ * 插画槽失败标记（2026-08-29 用户需求）：不再删除槽位，而是保留为 failed 态并附错误信息
+ * 与重试参数快照——楼层上显示失败原因与「重新生成」按钮。
+ */
+export function markMediaSlotFailed(
+  current: ChatMessage[], messageId: string, slotId: string,
+  stage: string, error: string, retryArgs?: unknown[],
+): ChatMessage[] {
+  return current.map((message) => {
+    if (message.id !== messageId) return message;
+    const parts = message.parts || (message.text ? [{ type: "text" as const, text: message.text }] : []);
+    const index = parts.findIndex((part) => part.slotId === slotId);
+    if (index === -1) return message;
+    const next = [...parts];
+    next[index] = {
+      ...next[index],
+      status: "failed" as const,
+      kind: (next[index].kind ?? "image") as "image" | "audio" | "video",
+      error: `[${stage}] ${error}`,
+      ...(retryArgs?.length ? { retryArgs } : {}),
+    };
+    return { ...message, parts: next };
+  });
+}
+
 /** 音频对白槽：末尾追加 pending 槽并保留正文（纯文本消息先转成 text part，避免正文被槽位顶掉）。 */
 export function appendAudioSlot(
   current: ChatMessage[],
@@ -225,6 +268,18 @@ export function dropMediaSlot(
       }
     }
     return { ...message, parts: parts.length ? parts : undefined };
+  });
+}
+
+export function failMediaSlot(
+  current: ChatMessage[], messageId: string, slotId: string, error: string,
+): ChatMessage[] {
+  return current.map((message) => message.id !== messageId ? message : {
+    ...message,
+    parts: (message.parts || []).map((part) =>
+      part.type === "media-slot" && part.slotId === slotId
+        ? { ...part, status: "failed" as const, error, promptId: undefined }
+        : part),
   });
 }
 

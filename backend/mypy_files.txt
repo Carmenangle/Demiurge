@@ -38,3 +38,6 @@ app/services/visual_preference.py
 app/services/capability_sandbox.py
 app/services/procedure_skills.py
 app/services/scenario_lab.py
+app/services/prose_style.py
+app/services/capability_registry.py
+app/services/capability_handlers.py

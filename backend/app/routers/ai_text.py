@@ -93,6 +93,63 @@ def gen_profile_prompt(req: ProfilePromptRequest) -> dict[str, object]:
     return {**result, "profile": req.profile}
 
 
+class FramePromptsRequest(ChatModelReq):
+    profile: str
+    scene: dict[str, object]
+    frames: dict[str, str]         # {"first": 楼层开头画面描述, "last": 楼层结尾画面描述}
+    preset_dir: str = ""
+    preset_name: str = ""
+    user_name: str = ""
+
+
+@router.post("/prompt/profile/frames")
+def gen_frame_prompts(req: FramePromptsRequest) -> dict[str, object]:
+    """首尾帧提示词：时点提取+同一 Profile 编译器，与高潮点生图同构。"""
+    from app.services import image_prompt_profiles
+
+    try:
+        diagnostics: dict[str, object] = {}
+        frames = image_prompt_profiles.generate_frame_prompts(
+            req.profile,
+            req.scene,
+            req.frames,
+            lambda system, user: chat(
+                req.base_url, req.api_key, req.model,
+                image_prompt_profiles.system_with_preset(
+                    system, req.scene,
+                    preset_dir=req.preset_dir,
+                    preset_name=req.preset_name,
+                    user_name=req.user_name,
+                ),
+                user,
+                temperature=0.3, proxy=req.proxy,
+            ),
+            diagnostics=diagnostics,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        from app.services import run_trace
+
+        for frame, item in frames.items():
+            run_trace.emit(
+                {
+                    "turn_id": str(req.scene.get("turn_id") or ""),
+                    "thread_id": str(req.scene.get("thread_id") or req.scene.get("repo_id") or ""),
+                    "repo_id": str(req.scene.get("repo_id") or ""),
+                },
+                "illustration.profile",
+                profile=req.profile,
+                frame=frame,
+                strategy=item.get("strategy", "direct"),
+                validation_errors=item.get("validation_errors", []),
+                frame_extract_ok=diagnostics.get("frame_extract_ok"),
+            )
+    except Exception:  # noqa: BLE001 Trace 不得阻断提示词生成
+        pass
+    return {"frames": frames, "profile": req.profile}
+
+
 class KeywordsRequest(ChatModelReq):
     text: str                      # 提示词原文（中/英、有无分隔符均可）
 

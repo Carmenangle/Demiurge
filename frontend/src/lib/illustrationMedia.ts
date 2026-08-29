@@ -99,12 +99,14 @@ export function illustrationWorkflowMedia(
 
 export type VideoMode = "climax" | "firstlast";
 
-/** V1.5/B1 视频模式决策：事件 videoMode 优先，其次 preset.videoMode，缺省 climax（旧预设兼容）。 */
+/** V1.5/B1 视频模式决策：事件 videoMode 优先，其次 preset.firstlast（首尾帧生成选项，
+ * 用户定稿 2026-08-28：视频模式由图片生成选项推导），再退 preset.videoMode（旧预设兼容），缺省 climax。 */
 export function resolveVideoMode(
-  preset: { videoMode?: VideoMode } | undefined,
+  preset: { videoMode?: VideoMode; firstlast?: boolean } | undefined,
   eventVideoMode?: string,
 ): VideoMode {
   if (eventVideoMode === "climax" || eventVideoMode === "firstlast") return eventVideoMode;
+  if (preset?.firstlast) return "firstlast";
   if (preset?.videoMode === "climax" || preset?.videoMode === "firstlast") {
     return preset.videoMode;
   }
@@ -163,6 +165,42 @@ export function planFirstlastFrameTasks(opts: {
     tasks.push({ frame: "last", kind: "generate", desc: opts.lastFrameDesc!.trim() });
   }
   return { tasks, canGenerateVideo: hasFirst };
+}
+
+/** V1.6/P5+ 独立图片模式（2026-08-28 用户拍板：首尾帧是独立图片模式，视频模式跟随该选项推导）的槽位布局。 */
+export type FirstlastMainSource = "first_prompt" | "last_prompt" | "last_frame_url" | "prev_tail_url";
+
+export interface FirstlastSlotLayout {
+  /** 楼层主槽显示的「本楼层新画面」来源：新生成首帧 / 新生成尾帧 / 事件尾帧现成图 / 上尾帧图（画面延续）。 */
+  main: FirstlastMainSource;
+  /** 尾帧是否需要 ":last" 副槽（主槽给了首帧且尾帧是新生成图时）。 */
+  lastSlot: boolean;
+}
+
+/**
+ * 首尾帧槽位布局（纯函数）：楼层主槽显示本楼层新画面——
+ * regenerate 时新画面起点=首帧（新生成），尾帧新图进 ":last" 副槽；
+ * reuse 时首帧复用上楼层尾帧图，本楼层唯一新画面=尾帧（新生成→主槽；事件现成图→直接显示；
+ * 连尾帧都没有→画面延续，主槽显示上尾帧图）。视频开启时调用方改用 ":first"/":last" 副槽（主槽留给视频正片，避免双 pollResult 同槽竞态）。
+ */
+export function firstlastSlotLayout(
+  plan: FirstlastFramePlan,
+): FirstlastSlotLayout | null {
+  const first = plan.tasks.find((t) => t.frame === "first");
+  const last = plan.tasks.find((t) => t.frame === "last");
+  const lastIsGenerate = last?.kind === "generate";
+  if (first?.kind === "generate") {
+    return { main: "first_prompt", lastSlot: lastIsGenerate };
+  }
+  if (first?.kind === "reuse") {
+    if (lastIsGenerate) return { main: "last_prompt", lastSlot: false };
+    if (last?.kind === "existing") return { main: "last_frame_url", lastSlot: false };
+    return { main: "prev_tail_url", lastSlot: false };
+  }
+  // 无首帧（视频模式不可成片；独立图片模式放宽：只有尾帧也能出）
+  if (lastIsGenerate) return { main: "last_prompt", lastSlot: false };
+  if (last?.kind === "existing") return { main: "last_frame_url", lastSlot: false };
+  return null;
 }
 
 /** P5 首尾帧生图的图片模板 values：prompt=帧画面描述（决策 A），复用插画模板的 LoRA/底图/负面/latent。 */

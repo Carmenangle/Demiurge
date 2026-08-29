@@ -14,9 +14,19 @@ class TruncatedRoleplayOutput(RuntimeError):
     """The provider ended a response after opening, but before closing, visible content."""
 
 
+# think 剥离：闭合块 + 未闭合直达结尾的尾部（截断发生在思考阶段时正文尚未开始）。
+_THINK_CLOSED = re.compile(r"<think\b.*?</think\s*>", re.IGNORECASE | re.DOTALL)
+_THINK_UNCLOSED = re.compile(r"<think\b.*\Z", re.IGNORECASE | re.DOTALL)
+
+
 def ensure_complete_visible_content(reply: str) -> None:
-    opened = len(re.findall(r"<content\b[^>]*>", reply or "", flags=re.I))
-    closed = len(re.findall(r"</content\s*>", reply or "", flags=re.I))
+    # 计数前剥离 think 段：模型推理常复述协议字面量（「检查 <content> 标签」），
+    # 这些引用不是输出结构——2026-08-29 trace 实证 think 内 2 次字面量 <content>
+    # 导致真实正文完好却被误判截断。未闭合 think 时正文尚未开始，剥离后自然放行。
+    visible = _THINK_CLOSED.sub("", reply or "")
+    visible = _THINK_UNCLOSED.sub("", visible)
+    opened = len(re.findall(r"<content\b[^>]*>", visible, flags=re.I))
+    closed = len(re.findall(r"</content\s*>", visible, flags=re.I))
     if opened > closed:
         raise TruncatedRoleplayOutput("模型输出在正文结束前被截断，请重新生成")
 

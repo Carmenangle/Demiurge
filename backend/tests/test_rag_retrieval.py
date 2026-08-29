@@ -183,3 +183,100 @@ def test_prune_removes_only_missing_local_generation(tmp_path, monkeypatch):
         "repo", rag_backend.EmbedConfig(),
     ) == 1
     assert deleted == ["missing"]
+
+
+def test_prune_deletes_legacy_remote_view_only_when_comfyui_confirms_missing(monkeypatch):
+    """legacy remote-view 直链（未落盘留存）只有 ComfyUI 明确 404 才算裂图。"""
+    deleted = []
+    probe_calls = []
+
+    class FakeStore:
+        def delete(self, ids):
+            deleted.extend(ids)
+
+    def fake_probe(url, filename, type, subfolder):
+        probe_calls.append((url, filename, type, subfolder))
+        return "missing"
+
+    rows = [
+        {"id": "legacy", "kind": "generation",
+         "image_url": ("http://127.0.0.1:8010/api/comfyui/view?filename=old.png"
+                       "&type=output&subfolder=&url=http%3A%2F%2F127.0.0.1%3A8188")},
+    ]
+    monkeypatch.setattr(rag_store, "_store", lambda *_args: FakeStore())
+    monkeypatch.setattr(rag_store, "_dump", lambda *_args: rows)
+    monkeypatch.setattr(rag_store.comfyui_client, "probe_view", fake_probe)
+
+    assert rag_store.prune_missing_generations("repo", rag_backend.EmbedConfig()) == 1
+    assert deleted == ["legacy"]
+    assert probe_calls == [("http://127.0.0.1:8188", "old.png", "output", "")]
+
+
+def test_prune_keeps_legacy_remote_view_when_file_exists_or_cannot_judge(monkeypatch):
+    """ComfyUI 仍能取到（200）或未起/异常（无法判定）都不得删，防误删真源。"""
+    deleted = []
+
+    class FakeStore:
+        def delete(self, ids):
+            deleted.extend(ids)
+
+    def make_rows(url_suffix):
+        return [{"id": "legacy", "kind": "generation",
+                 "image_url": ("http://127.0.0.1:8010/api/comfyui/view?filename=a.png"
+                               f"&type=output&subfolder=&url={url_suffix}")}]
+
+    monkeypatch.setattr(rag_store, "_store", lambda *_args: FakeStore())
+    monkeypatch.setattr(rag_store, "_dump", lambda *_args: make_rows("http%3A%2F%2F127.0.0.1%3A8188"))
+    for verdict in ("ok", "unreachable"):
+        monkeypatch.setattr(rag_store.comfyui_client, "probe_view", lambda *a, **k: verdict)
+        assert rag_store.prune_missing_generations("repo", rag_backend.EmbedConfig()) == 0
+        assert deleted == []
+
+
+def test_probe_view_maps_status_and_never_raises(monkeypatch):
+    """probe_view 三态映射：200→ok、404→missing、其余/网络异常/非法 url→unreachable。"""
+    from app.services import comfyui_client
+
+    class FakeResp:
+        def __init__(self, status):
+            self.status_code = status
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    class FakeSession:
+        def __init__(self, behavior):
+            self.behavior = behavior
+            self.calls = []
+
+        def get(self, url, timeout, stream):
+            self.calls.append(url)
+            if callable(self.behavior):
+                return self.behavior(url)
+            return FakeResp(self.behavior)
+
+    monkeypatch.setattr(comfyui_client, "_DIRECT_SESSION", FakeSession(200))
+    assert comfyui_client.probe_view(
+        "http://127.0.0.1:8188", "a.png") == "ok"
+    monkeypatch.setattr(comfyui_client, "_DIRECT_SESSION", FakeSession(404))
+    assert comfyui_client.probe_view(
+        "http://127.0.0.1:8188", "a.png") == "missing"
+    monkeypatch.setattr(comfyui_client, "_DIRECT_SESSION", FakeSession(500))
+    assert comfyui_client.probe_view(
+        "http://127.0.0.1:8188", "a.png") == "unreachable"
+
+    def explode(_url):
+        raise ConnectionError("ComfyUI 未起")
+
+    unreachable_session = FakeSession(explode)
+    monkeypatch.setattr(comfyui_client, "_DIRECT_SESSION", unreachable_session)
+    assert comfyui_client.probe_view(
+        "http://127.0.0.1:8188", "a.png") == "unreachable"
+
+    # 非法 url（不过 ComfyUI 白名单）在探测前拦截，不发起任何请求
+    calls_before = len(unreachable_session.calls)
+    assert comfyui_client.probe_view("http://evil.com", "a.png") == "unreachable"
+    assert len(unreachable_session.calls) == calls_before

@@ -367,3 +367,27 @@ def test_renderer注册与查询():
     assert fn is not None and fn(si.SceneRequest(prompt="x")) == "img://x"
     assert "_test_fmt" in si.available_formats()
     assert si.get_renderer("_不存在") is None
+
+
+def test_首帧锚点取正文第一段末():
+    """首尾帧模式首帧应落在正文第一段后，而非高潮/末段（2026-08-29 验收问题①）。"""
+    text = (
+        "<content>\n\n她踏前一步，指尖挑起他的下颌。\n\n"
+        "传功时真气如江河灌体，两人俱是动作激烈。\n\n"
+        "最终尘埃落定，一切归于平静。\n\n</content>"
+    )
+    offset = si.first_frame_anchor_offset(text)
+    before = text[:offset]
+    assert "她踏前一步" in before
+    assert "传功时真气" not in before  # 不越过第一段
+    # 与主图的末段/高潮兜底明确区分
+    assert offset < si.illustration_anchor_offset(text)
+
+
+def test_首帧锚点对无content与think形态():
+    text = "<think>复述<content>标签</think>\n\n第一段正文。\n\n<status>表格</status>"
+    offset = si.first_frame_anchor_offset(text)
+    assert text[:offset].find("第一段正文") != -1
+    assert "<status>" not in text[:offset]
+    # 单段正文：落句末
+    assert si.first_frame_anchor_offset("<content>只有一段。</content>") > 0

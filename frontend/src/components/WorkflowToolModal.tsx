@@ -14,10 +14,10 @@ import { Sparkles, X } from "lucide-react";
 import { WorkflowCard } from "./WorkflowCard";
 import { workflowPorts, type PortOp, type PortsPlan } from "../api/ai";
 import {
-  submitGraph, finalizeGeneration, comfyStatus,
+  submitGraph, finalizeGeneration, comfyStatus, interruptComfy,
 } from "../api/comfyui";
 import { subscribeProgress } from "../lib/comfyProgress";
-import { pollWorkflowResult } from "../lib/workflowGenerationRuntime";
+import { pollWorkflowResult, trackCanvasWorkflow, untrackCanvasWorkflow } from "../lib/workflowGenerationRuntime";
 import { workflowGenMetadata } from "../lib/regeneration";
 import { activeChatModel, resolvedEmbedModel, type Settings } from "../stores/settings";
 import type { CanvasNode } from "../lib/canvasRuntime";
@@ -109,6 +109,8 @@ export function WorkflowToolModal({ node: nodeProp, repoId, settings, onClose, o
     setWfProgress(null);
     setWfNode(undefined);
     let stopProg: (() => void) | null = null;
+    let runPromptId = "";      // 提交成功的 prompt_id：后台活动标记用（finally 里移除）
+    let keepActivity = false;  // still_running 时保留后台活动标记（任务仍在 ComfyUI 后台跑）
     try {
       const st = await comfyStatus(settings.comfyuiUrl);
       if (!st.running) {
@@ -119,7 +121,11 @@ export function WorkflowToolModal({ node: nodeProp, repoId, settings, onClose, o
         return;
       }
       const r = await submitGraph(captured, settings.comfyuiUrl);
-      onNotify(`已提交到 ComfyUI（prompt_id: ${r.prompt_id}，${r.node_count} 个节点），正在运转工作流…`);
+      runPromptId = r.prompt_id || "";
+      onNotify(`已提交到 ComfyUI（prompt_id: ${runPromptId}，${r.node_count} 个节点），正在运转工作流…`);
+      // 记入后台活动（laf_pending_gen_<repoId>）：SupportWidget 面板显示「出图中」；
+      // 本弹窗自持轮询，runtime 只做标记，结束（finally）时移除。
+      trackCanvasWorkflow(repoId, runPromptId, settings.comfyuiUrl, node.templateName || "工作流生成");
       // 把 graph 带给画布占位节点：节点名才能显示 class_type（如 KSamplerAdvanced (#15)）而非裸 id
       if (runTaskId) {
         try {
@@ -159,6 +165,15 @@ export function WorkflowToolModal({ node: nodeProp, repoId, settings, onClose, o
       }
       // 轮询拿图：复用 pollSchedule 合同（图片 20 分钟 / 视频 60 分钟），不再硬编码 240 秒。
       const outcome = await pollWorkflowResult(r.prompt_id || "", settings.comfyuiUrl || "", "image");
+      if (outcome.kind === "stalled") {
+        // 队列卡死：清理坏死任务（清队列+中断）后按失败处理（2026-08-29 用户需求）。
+        await interruptComfy(settings.comfyuiUrl || "", r.prompt_id || "").catch(() => undefined);
+        onNotify(`运转失败：${outcome.error}`);
+        if (runTaskId) {
+          try { window.dispatchEvent(new CustomEvent("laf-canvas-wf-done", { detail: { taskId: runTaskId } })); } catch { /* 忽略 */ }
+        }
+        return;
+      }
       if (outcome.kind === "failed") {
         onNotify(`运转失败：${outcome.error}`);
         if (runTaskId) {
@@ -168,6 +183,7 @@ export function WorkflowToolModal({ node: nodeProp, repoId, settings, onClose, o
       }
       if (outcome.kind === "still_running") {
         // ComfyUI 仍在后台运转：不擅自删除「生成中」节点，保留占位并告知用户。
+        keepActivity = true; // 任务还在跑，后台活动标记保留
         onNotify("运转仍在进行中（已超过预期时长）。画布会保留「生成中」节点，请稍后在 ComfyUI 控制台查看或重新运转。");
         return; // 不派发 done，保留占位节点
       }
@@ -230,6 +246,7 @@ export function WorkflowToolModal({ node: nodeProp, repoId, settings, onClose, o
         try { window.dispatchEvent(new CustomEvent("laf-canvas-wf-done", { detail: { taskId: runTaskId } })); } catch { /* ignore */ }
       }
     } finally {
+      if (!keepActivity && runPromptId) untrackCanvasWorkflow(repoId, runPromptId); // 结束移除后台活动标记
       setWfRunning(false);
       setWfProgress(null);
       setWfNode(undefined);

@@ -1,0 +1,116 @@
+{
+  "version": 1,
+  "capabilities": [
+    {
+      "operation": "workflow.list_templates",
+      "category": "comfyui",
+      "description": "列出全部工作流模板（只读，返回模板元数据与 exposed 字段，不提交任何任务）。",
+      "params_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "needs_model": null,
+      "side_effect_level": "readonly",
+      "channel": "sync",
+      "handler": "app.services.template_store:list_templates"
+    },
+    {
+      "operation": "workflow.read_exposed_fields",
+      "category": "comfyui",
+      "description": "读取单个模板的 exposed 字段定义（字段名/控件/默认值/绑定），是编排注入变体值前必查的只读步骤。",
+      "params_schema": {
+        "type": "object",
+        "properties": {
+          "template_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "template_id"
+        ],
+        "additionalProperties": false
+      },
+      "needs_model": null,
+      "side_effect_level": "readonly",
+      "channel": "sync",
+      "handler": "app.services.template_store:get_template"
+    },
+    {
+      "operation": "workflow.submit_batch",
+      "category": "comfyui",
+      "description": "对同一模板按变体值列表批量提交 ComfyUI 队列（每个变体一次任务，单条失败隔离不中断整批；烧 GPU，受每计划配额约束）。",
+      "params_schema": {
+        "type": "object",
+        "properties": {
+          "template_id": {
+            "type": "string"
+          },
+          "variants": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "minItems": 1
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "client_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "template_id",
+          "variants",
+          "prompt",
+          "url"
+        ],
+        "additionalProperties": false
+      },
+      "needs_model": "image",
+      "side_effect_level": "expensive",
+      "channel": "queue",
+      "handler": "app.services.capability_handlers:submit_batch"
+    },
+    {
+      "operation": "workflow.submit_template",
+      "category": "comfyui",
+      "description": "把注入值填进模板并提交一次 ComfyUI 队列任务（烧 GPU，受模型租约约束）。",
+      "params_schema": {
+        "type": "object",
+        "properties": {
+          "template_id": {
+            "type": "string"
+          },
+          "values": {
+            "type": "object"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "client_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "template_id",
+          "values",
+          "prompt",
+          "url"
+        ],
+        "additionalProperties": false
+      },
+      "needs_model": "image",
+      "side_effect_level": "expensive",
+      "channel": "queue",
+      "handler": "app.services.workflow_submission:submit_template"
+    }
+  ]
+}

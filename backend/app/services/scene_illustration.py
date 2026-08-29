@@ -240,6 +240,32 @@ def fallback_illustration_anchor(text: str) -> str:
     return max(scored)[2] if scored else (candidates[0] if candidates else "")
 
 
+def first_frame_anchor_offset(text: str) -> int:
+    """首尾帧模式的首帧锚点：正文第一段末尾。
+
+    首帧画面是楼层开篇时刻，位置应在正文开始的第一段后——「视觉高潮纠偏」
+    （resolve_illustration_anchor / illustration_anchor_offset 的末段兜底）是为主图
+    设计的，会把开篇静态铺垫改判到高潮段，导致首帧落到中央/末尾
+    （2026-08-29 用户验收问题①）。段落边界与 complete_sentence 语义对齐主函数。
+    """
+    source = text or ""
+    content = re.search(r"<content\b[^>]*>(.*?)</content>", source, re.I | re.S)
+    if content:
+        start, end = content.start(1), content.end(1)
+    else:
+        tail = re.search(r"(?:\r?\n){2,}\s*<(?:status|状态更新|表格更新)\b", source, re.I)
+        start, end = 0, tail.start() if tail else len(source)
+    body = source[start:end]
+    for match in re.finditer(r"\S(?:.*?\S)?(?=(?:\r?\n){2,}|\s*\Z)", body, re.S):
+        if match.group(0).lstrip().startswith("<"):
+            continue
+        offset = start + match.end()
+        while offset < end and source[offset] in _ANCHOR_TRAILING_PUNCTUATION:
+            offset += 1
+        return offset
+    return end
+
+
 def resolve_illustration_anchor(text: str, requested_anchor: str = "") -> str:
     """纠正模型误选的静态收束或低强度结尾钩子，保证插画仍落在视觉高潮。"""
     requested = image_prompt_extract.restore_jailbreak(requested_anchor or "").strip()

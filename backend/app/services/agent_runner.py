@@ -41,6 +41,7 @@ def run_multi_stream(context: RunContext) -> "queue.Queue":
         illustrate=context.illustrate,
         comfy_illustrate=context.comfy_illustrate,
         comfy_audio=context.comfy_audio,
+        comfy_video=context.comfy_video,
         stream_output=context.stream_output,
     )
 

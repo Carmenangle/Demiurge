@@ -107,7 +107,8 @@ LangGraph `StateGraph`：入口 `supervisor` → 条件边按 `route` 分派到�
 3. **角色卡 persona 解析** `_resolve_personas`（首轮只注开场卡，后续按命中角色）。
 4. **能动性子图准备** `_agency_prelude`：算 turn、读好感度、组装 state 注入块、
    构建出图 renderer（无卡或无 output_dir → `deps=None`，整条子图静默跳过）。
-5. **阶段 A 世界提案** `_agency_propose`（门控，通常关 → 塌回单次 LLM 零额外成本）。
+5. **阶段 A 世界提案** `_agency_propose`（默认每轮一次 LLM：judge.gateBaseRate=1.0 /
+   gateFloor=-100，设 0 才显式关闭；gate 未命中或失败时塌回单次 LLM 零额外成本）。
 6. **组装 system prompt**：preset（或内置扮演提示）+ 历史多轮 + state 块 + 记忆召回
    （`recall_chronicle` / RAG / 数据表）+ 裁定自主行动 + 搭车状态指令 `<状态更新>`；
    若开插画/音频，追加 inline 计划指令 + 近生成契约 + 音频指令（见 §4）。

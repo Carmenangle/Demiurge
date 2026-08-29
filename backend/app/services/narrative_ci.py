@@ -10,6 +10,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Iterable
 
+from app.services import prose_style
 from app.services.pathnames import safe_seg
 
 DB_NAME = "narrative_ci.db"
@@ -27,6 +28,13 @@ CODE_SPATIAL_INCONSIST   = "spatial_inconsistency"  # 空间位置矛盾
 CODE_RELATION_CHANGE     = "relationship_change"     # 关系单轮剧变
 CODE_WORLD_RULE_BREAK    = "world_rule_break"       # 违反世界规则/设定
 CODE_BELIEF_CONFLICT     = "character_belief_conflict"  # 角色认知与事实矛盾
+# 文风诊断码属主是 prose_style（词表单一属主），此处并流复用
+CODE_STYLE_BANNED_PHRASE = prose_style.CODE_STYLE_BANNED_PHRASE
+CODE_STYLE_PUNCT_DENSITY = prose_style.CODE_STYLE_PUNCT_DENSITY
+CODE_STYLE_RHYTHM_METRONOME = prose_style.CODE_STYLE_RHYTHM_METRONOME
+CODE_STYLE_SELF_QA = prose_style.CODE_STYLE_SELF_QA
+CODE_STYLE_PATTERN_REPEAT = prose_style.CODE_STYLE_PATTERN_REPEAT
+CODE_STYLE_OPENING_CUE = prose_style.CODE_STYLE_OPENING_CUE
 
 
 def _diagnostic(turn: int, code: str, message: str, evidence: str,
@@ -61,11 +69,16 @@ _RELATION_VERBS = re.compile(
 
 def evaluate(text: str, *, turn: int, facts: Iterable[dict] = (),
              raw_deltas: Iterable[dict] = (), beliefs: Iterable[dict] = (),
-             world_rules: Iterable[str] = ()) -> list[dict]:
+             world_rules: Iterable[str] = (),
+             recent_openings: Iterable[str] = (),
+             style_config: dict | None = None) -> list[dict]:
     """只返回带证据诊断；不分类内容、不阻断、不重写正文。
 
     新增参数：
         world_rules：迭代器，每项为一条世界设定/规则文本（如"药王谷的药材不可带出谷外"）。
+        recent_openings：最近数层 assistant 楼层的开头文本（供跨轮开场趋同检测）。
+        style_config：prose_style.load_config() 的结果；None=内置默认，
+            enabled=False 时跳过全部文风检测（文风功能总开关）。
     """
     body = text or ""
     diagnostics: list[dict] = []
@@ -201,6 +214,20 @@ def evaluate(text: str, *, turn: int, facts: Iterable[dict] = (),
                 f"正文可能违反世界设定：{rule_text}",
                 violated, "worldbook", "warning",
             ))
+
+    # ── 10. 文风 lint（去 AI 味，prose_style 属主并流；只检测不涂改）──────────
+    if style_config is None or style_config.get("enabled", True):
+        try:
+            phrases = (None if style_config is None
+                       else prose_style.effective_phrases(style_config))
+            for item in prose_style.lint(body, recent_openings=list(recent_openings),
+                                         banned_phrases=phrases):
+                diagnostics.append(_diagnostic(
+                    turn, item["code"], item["message"], item["evidence"],
+                    "prose_style", item.get("severity", "warning"),
+                ))
+        except Exception:  # noqa: BLE001 文风检测永不阻断诊断流
+            pass
 
     unique = {item["id"]: item for item in diagnostics}
     return list(unique.values())

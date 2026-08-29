@@ -14,7 +14,7 @@ const invocation = (): AgentInvocation => ({
   cardNames: ["Cecilia", "Nozomi"], openingCardName: "Cecilia", presetDir: "presets",
   presetName: "preset", userName: "User", userPersona: "persona", personaBound: true,
   worldbookDir: "worldbooks", worldbookName: "world", illustrate: true, comfyIllustrate: true,
-  comfyAudio: false,
+  comfyAudio: false, comfyVideo: true,
   promptProfile: "anima_tags", appearanceSource: "character_card",
   characterBaseImages: { Cecilia: "portrait.png" }, illustrationActorNames: ["Cecilia"],
   styleBaseImage: "style.png",

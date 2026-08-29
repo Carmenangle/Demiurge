@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ChatMessage } from "../types/chat";
 import {
-  appendAudioSlot, appendTransitionSlot, dropMediaSlot, pruneUnsubmittedMediaSlots, reduceChatStreamEvent, resolveMediaSlot,
+  appendAudioSlot, appendImageSlot, appendTransitionSlot, dropMediaSlot, markMediaSlotFailed, pruneUnsubmittedMediaSlots, reduceChatStreamEvent, resolveMediaSlot,
   restoreSubmittedMediaSlots,
 } from "./chatSessionEvents";
 
@@ -335,5 +335,59 @@ describe("appendTransitionSlot（W3 转场视频槽）", () => {
     const once = appendTransitionSlot(current, "bot", "main:transition", "转场");
     const twice = appendTransitionSlot(once, "bot", "main:transition", "转场");
     expect(twice[0].parts).toHaveLength(1);
+  });
+});
+
+describe("appendImageSlot（首尾帧副槽）", () => {
+  it("在同消息末尾追加 kind=image 的 pending 槽，提示词随槽保留", () => {
+    const current: ChatMessage[] = [{
+      id: "bot", role: "assistant", text: "", parts: [
+        { type: "media-slot", slotId: "main", status: "pending" },
+      ],
+    }];
+    const withLast = appendImageSlot(current, "bot", "main:last", "尾帧画面描述");
+    expect(withLast[0].parts).toHaveLength(2);
+    expect(withLast[0].parts?.[1]).toEqual({
+      type: "media-slot", slotId: "main:last", status: "pending",
+      kind: "image", videoPrompt: "尾帧画面描述",
+    });
+  });
+
+  it("同 slotId 重复追加幂等", () => {
+    const current: ChatMessage[] = [{ id: "bot", role: "assistant", text: "" }];
+    const once = appendImageSlot(current, "bot", "main:last", "尾帧");
+    const twice = appendImageSlot(once, "bot", "main:last", "尾帧");
+    expect(twice[0].parts).toHaveLength(1);
+  });
+
+  it("纯文本消息先转 text part 保留正文再追加槽", () => {
+    const current: ChatMessage[] = [{ id: "bot", role: "assistant", text: "正文" }];
+    const withSlot = appendImageSlot(current, "bot", "main:last");
+    expect(withSlot[0].parts).toEqual([
+      { type: "text", text: "正文" },
+      { type: "media-slot", slotId: "main:last", status: "pending", kind: "image" },
+    ]);
+  });
+});
+
+describe("markMediaSlotFailed（2026-08-29 失败槽保留+重新生成）", () => {
+  it("标记失败并保留重试快照与正文", () => {
+    const messages: ChatMessage[] = [{ id: "bot", role: "assistant", text: "", parts: [
+      { type: "text", text: "正文" },
+      { type: "media-slot", slotId: "s1", status: "pending", kind: "image" },
+    ] }];
+    const next = markMediaSlotFailed(messages, "bot", "s1", "frame_gen", "首帧生图失败：队列未运转", ["p", 0]);
+    const parts = next[0].parts!;
+    expect(parts[0].type).toBe("text");           // 正文保留
+    const slot = parts[1];
+    expect(slot.status).toBe("failed");
+    expect(slot.error).toBe("[frame_gen] 首帧生图失败：队列未运转");
+    expect((slot as { retryArgs?: unknown[] }).retryArgs).toEqual(["p", 0]);
+  });
+
+  it("槽不存在时原样返回", () => {
+    const messages: ChatMessage[] = [{ id: "bot", role: "assistant", text: "正文" }];
+    const next = markMediaSlotFailed(messages, "bot", "ghost", "stage", "err");
+    expect(next).toEqual(messages);
   });
 });

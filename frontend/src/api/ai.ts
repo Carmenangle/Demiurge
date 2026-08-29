@@ -358,6 +358,7 @@ export interface AgentInvocation {
   illustrate: boolean;
   comfyIllustrate: boolean;
   comfyAudio: boolean;
+  comfyVideo: boolean;
   videoMode?: "climax" | "firstlast";
   promptProfile: string;
   appearanceSource: "worldbook" | "character_card";
@@ -420,6 +421,7 @@ export function agentInvocationBody(request: AgentInvocation): AgentInvocationWi
     illustrate: request.illustrate,
     comfy_illustrate: request.comfyIllustrate,
     comfy_audio: request.comfyAudio,
+    comfy_video: request.comfyVideo,
     video_mode: request.videoMode || "",
     prompt_profile: request.promptProfile || "krea2",
     appearance_source: request.appearanceSource,
@@ -443,6 +445,38 @@ export function genProfilePrompt(
     user_name: preset.userName || "",
     ...chatBody(chat),
   }, 120_000);
+}
+
+export interface FramePromptItem {
+  prompt: string;
+  negative_prompt: string;
+  strategy: string;
+  validation_errors: string[];
+  field_ledger: Record<string, unknown>;
+}
+
+// 首尾帧提示词：与高潮点同构——后端先做时点提取（首/尾各自英文结构化 action/visual_facts），
+// 再逐帧走同一 Profile 编译器，一次调用出两帧成品。
+export function genFramePrompts(
+  profile: string,
+  scene: IllustrationSceneSpec,
+  frames: { first?: string; last?: string },
+  chat: Chat,
+  preset: { presetDir?: string; presetName?: string; userName?: string } = {},
+) {
+  return apiPost<{ frames: Partial<Record<"first" | "last", FramePromptItem>>; profile: string }>(
+    "/ai/prompt/profile/frames",
+    {
+      profile,
+      scene,
+      frames: { first: frames.first || "", last: frames.last || "" },
+      preset_dir: preset.presetDir || "",
+      preset_name: preset.presetName || "",
+      user_name: preset.userName || "",
+      ...chatBody(chat),
+    },
+    240_000,
+  );
 }
 
 export function getProfilePromptDefaults(profile: string, rating = "nsfw") {
@@ -523,9 +557,9 @@ export function enqueueChatQueueTask(invocation: AgentInvocation) {
 
 export function reportIllustrationFailure(payload: {
   threadId: string; repoId: string; messageId: string; slotId: string;
-  stage: string; error: string; promptId?: string;
+  stage: string; error: string; promptId?: string; comfyuiUrl?: string;
 }) {
-  return apiPost<{ ok: boolean; removed: boolean }>("/ai/image-agent/illustration-failure", {
+  return apiPost<{ ok: boolean; removed: boolean; cancelled?: { deleted: boolean; interrupted: boolean } }>("/ai/image-agent/illustration-failure", {
     thread_id: payload.threadId,
     repo_id: payload.repoId,
     message_id: payload.messageId,
@@ -533,6 +567,7 @@ export function reportIllustrationFailure(payload: {
     stage: payload.stage,
     error: payload.error,
     prompt_id: payload.promptId || "",
+    comfyui_url: payload.comfyuiUrl || "",
   });
 }
 

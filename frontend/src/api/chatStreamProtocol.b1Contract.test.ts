@@ -41,6 +41,17 @@ describe("B1 协议透传 · 跨语言端到端契约", () => {
     expect(resolveVideoMode({ videoMode: "climax" }, "firstlast")).toBe("firstlast");
   });
 
+  it("视频模式决策（用户定稿 2026-08-28）：firstlast 首尾帧生成选项推导视频模式", () => {
+    // 首尾帧生成开 → firstlast；关闭且无旧字段 → climax
+    expect(resolveVideoMode({ firstlast: true })).toBe("firstlast");
+    expect(resolveVideoMode({ firstlast: false, videoMode: "climax" })).toBe("climax");
+    // firstlast 选项优先于旧 videoMode 字段（迁移后不再独立设置）
+    expect(resolveVideoMode({ firstlast: true, videoMode: "climax" })).toBe("firstlast");
+    // 旧预设无 firstlast 字段 → 退 videoMode 兼容
+    expect(resolveVideoMode({ videoMode: "firstlast" })).toBe("firstlast");
+    expect(resolveVideoMode(undefined)).toBe("climax");
+  });
+
   it("视频字段经 illustrationTemplateValues 注入模板 exposed binding", () => {
     const wire = fixture[0];
     const event = decodeChatStreamEvent(wire);
@@ -97,9 +108,13 @@ describe("B2 默认开放 climax 视频提示词 · 端到端契约（无视频�
 
     expect(event.videoPrompt).toBeTruthy();
     // 内容要求机械检查：区块完整 + 无破甲残留 + 运镜随 motion 强度
+    expect(event.videoPrompt).toContain("[元信息]");
     expect(event.videoPrompt).toContain("[参考绑定]");
+    expect(event.videoPrompt).toContain("图片1中心的角色为");
     expect(event.videoPrompt).toContain("[主体/场景]");
-    expect(event.videoPrompt).toContain("[动作]");
+    expect(event.videoPrompt).toContain("[时间分镜]");
+    expect(event.videoPrompt).toContain("[音频]");
+    expect(event.videoPrompt).not.toContain("[动作]");
     expect(event.videoPrompt).not.toContain("@(");
     // fixture 是 motion=3 → 强动态运镜
     expect(event.videoPrompt).toContain("低机位快速丝滑运镜");
@@ -122,6 +137,6 @@ describe("B2 默认开放 climax 视频提示词 · 端到端契约（无视频�
       videoPrompt: event.videoPrompt,
     });
     expect(values["9.prompt"]).toContain("[参考绑定]");
-    expect(values["9.prompt"]).toContain("[动作]");
+    expect(values["9.prompt"]).toContain("[时间分镜]");
   });
 });

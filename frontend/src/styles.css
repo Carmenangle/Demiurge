@@ -3496,6 +3496,30 @@ textarea.state-value { min-height: 58px; }
   color: var(--danger, #c84b4b);
 }
 
+.media-slot-generating {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.media-slot-stop {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  padding: 4px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.media-slot-stop:hover {
+  color: var(--danger, #c84b4b);
+  border-color: var(--danger, #c84b4b);
+}
+
 /* 灵感卡：代码块风格（深色等宽），与对话文字区分 */
 .insp-card {
   border: 1px solid #2b2f3a;

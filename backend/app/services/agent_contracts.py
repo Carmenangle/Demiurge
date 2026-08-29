@@ -73,7 +73,8 @@ class RunContext:
     worldbook_name: str = ""      # 仓库绑定的独立世界书名（空=不绑；与卡内嵌世界书合并注入）
     illustrate: bool = False      # 剧情插画开关（开=构建 renderer 通能动性 D 阶段自动配图）
     comfy_illustrate: bool = False  # 前端已预设 ComfyUI 工作流模板：高潮点不同步 render，改发 illustrate_request 事件由前端走异步闭环
-    comfy_audio: bool = False    # 前端已预设音频模板（IndexTTS）：剧情产出后发 audio_request 事件，前端逐角色配音
+    comfy_audio: bool = False    # 前端已预设音频模板（IndexTTS）：剧情产出后发 audio_request 事件逐角色配音
+    comfy_video: bool = False    # 前端已预设视频模板：开=高潮点编译 video_request（含提取 LLM 调用）；关=不调 LLM 不编译，零 token
     video_mode: str = ""        # 视频模式（""=缺省 climax / climax / firstlast），前端 preset.videoMode 透传；
                                 # produce 层据此编译正片/转场 video_request（W3 前端 2 任务排队前置）
     prompt_profile: str = "krea2"  # 当前作品自动插画提示词模式，由主 Roleplay 同轮生成最终提示词
@@ -128,7 +129,7 @@ class RunContext:
             "persona_bound": self.persona_bound,
             "worldbook_dir": self.worldbook_dir, "worldbook_name": self.worldbook_name,
             "illustrate": self.illustrate, "comfy_illustrate": self.comfy_illustrate,
-            "comfy_audio": self.comfy_audio,
+            "comfy_audio": self.comfy_audio, "comfy_video": self.comfy_video,
             "video_mode": self.video_mode,
             "prompt_profile": self.prompt_profile,
             "appearance_source": self.appearance_source,

@@ -23,7 +23,7 @@ import {
   fetchInspiration, regenerateImage as replayImageGeneration,
   claimIllustrationSubmission, reportIllustrationFailure, reportIllustrationSubmission,
   reportAudioSubmission, ensureAudioSlot,
-  genProfilePrompt, listGenerations,
+  genFramePrompts, genProfilePrompt, listGenerations,
   type AgentInvocation,
 } from "../api/ai";
 import { createScenarioSnapshot } from "../api/scenario";
@@ -56,14 +56,14 @@ import {
 import {
   illustrationLoraConfigurationError, illustrationRequestMedia, illustrationWorkflowMedia,
   resolveIllustrationActors, resolveVideoMode, resolveVideoTemplateChoice,
-  planFirstlastFrameTasks, firstlastFrameValues, transitionVideoValues,
+  planFirstlastFrameTasks, firstlastFrameValues, firstlastSlotLayout, transitionVideoValues,
 } from "./illustrationMedia";
 import {
   audioTemplateValues, resolvableAudioLines, skippedAudioSpeakers, voiceReferenceFor,
 } from "./audioGeneration";
 import {
-  agentImageMessage, applyRouteChoice, bindMediaSlotPrompt, dropMediaSlot, appendAudioSlot, appendTransitionSlot,
-  pruneUnsubmittedMediaSlots, reduceChatStreamEvent, resolveMediaSlot,
+  applyRouteChoice, appendImageSlot, bindMediaSlotPrompt, dropMediaSlot, markMediaSlotFailed, appendAudioSlot, appendTransitionSlot,
+  failMediaSlot, pruneUnsubmittedMediaSlots, reduceChatStreamEvent, resolveMediaSlot,
   restoreSubmittedMediaSlots, upsertMessages, workflowMessages,
 } from "./chatSessionEvents";
 import { recoverCompactedSummaryImage } from "./contextManagement";
@@ -163,6 +163,9 @@ export function useChatSession(deps: ChatSessionDeps) {
   const comfyIllustrate = !!(settings.illustrate && (mediaPreset?.templateId || mediaPreset?.videoTemplateId));
   // 音频对白配音：剧情自动生成开 且 预设了音频模板（IndexTTS）→ 后端发 audio_request，前端逐角色配音
   const comfyAudio = !!(settings.illustrate && mediaPreset?.enableAudio && mediaPreset?.audioTemplateId);
+  // 视频链独立开关：预设了视频工作流模板 → 后端才编译 video_request（含动作提取 LLM 调用）；
+  // 未配模板（mediaPreset 无 videoTemplateId）→ 不发请求、不调 LLM，零 token（与图/音链同构）。
+  const comfyVideo = !!(settings.illustrate && mediaPreset?.videoTemplateId);
   const promptProfile = normalizePromptProfile(mediaPreset?.promptProfile);
   const cardNames = repo?.cardNames?.length ? repo.cardNames : (repo?.cardName ? [repo.cardName] : []);
   const openingCardName = repo?.openingCardName || repo?.cardName || cardNames[0] || "";
@@ -256,7 +259,9 @@ export function useChatSession(deps: ChatSessionDeps) {
     illustrate: settings.illustrate,
     comfyIllustrate,
     comfyAudio,
-    videoMode: mediaPreset?.videoMode,
+    comfyVideo,
+    // 视频模式由「首尾帧生成」选项推导（用户定稿 2026-08-28）；旧预设无该字段时退 videoMode
+    videoMode: mediaPreset?.firstlast ? "firstlast" : mediaPreset?.videoMode,
     promptProfile,
     appearanceSource,
     characterBaseImages,
@@ -739,15 +744,19 @@ export function useChatSession(deps: ChatSessionDeps) {
 
   const discardFailedIllustration = (
     messageId: string, slotId: string, stage: string, error: string, promptId = "",
+    retryArgs?: unknown[],
   ) => {
     console.error("[auto-illustration]", {
       threadId: repo?.id || "home", messageId, slotId, stage, error, promptId,
     });
-    setMessages((current) => dropMediaSlot(current, messageId, slotId));
+    // 失败槽不再删除：保留为 failed 态 + 错误原因 + 重试参数快照，楼层提供「重新生成」
+    // （2026-08-29 用户需求：停止/失败后应包含重新生图）。
+    setMessages((current) => markMediaSlotFailed(current, messageId, slotId, stage, error, retryArgs));
     void reportIllustrationFailure({
       threadId: repo?.id || "home",
       repoId: repo?.id || "home",
       messageId, slotId, stage, error, promptId,
+      comfyuiUrl: settings.comfyuiUrl,
     }).catch((reportError) => {
       console.error("[auto-illustration] failure log upload failed", reportError);
     });
@@ -832,6 +841,24 @@ export function useChatSession(deps: ChatSessionDeps) {
         if (activePromptQueue.current.length === 0) setSlowWatchPromptId(null);
       }
     },
+    stalled: (pending) => {
+      // 停顿守卫：任务一直卡在排队、从未观察到节点开始运转，早停而非死等到硬超时
+      if (pending.target) {
+        discardFailedIllustration(
+          pending.target.messageId, pending.target.slotId, "stalled",
+          "长时间未开始加载节点（ComfyUI 队列未运转），已停止", pending.prompt_id,
+        );
+        refreshChatBackgroundActivities();
+        return;
+      }
+      activePromptQueue.current = activePromptQueue.current.filter(id => id !== pending.prompt_id);
+      if (activePromptQueue.current.length === 0) {
+        stopProgress();
+        setSlowWatchPromptId(null);
+        dispatch({ t: "workflowDone", promptId: pending.prompt_id });
+      }
+      pushBot("⚠️ 出图任务长时间未开始运转（ComfyUI 队列未加载节点），已停止等待，可稍后重试。");
+    },
   };
 
   const pollResult = (
@@ -888,8 +915,14 @@ export function useChatSession(deps: ChatSessionDeps) {
     prevTailDesc = "", lastFrameUrl = "", videoPrompt = "", transition = "",
     transitionVideoPrompt = "", transitionVideoParams?: VideoParams,
   ) => {
+    // 重试参数快照（按签名顺序）：失败槽「重新生成」按钮直接展开重调（source 翻转为 manual 跳过 claim）。
+    const retrySnapshot: unknown[] = [
+      prompt, motion, actors, messageId, slotId, sceneSpec, turnId, source,
+      eventVideoMode, firstFrameDesc, lastFrameDesc, prevTailDesc, lastFrameUrl,
+      videoPrompt, transition, transitionVideoPrompt, transitionVideoParams,
+    ];
     const failSlot = (stage: string, error: string) =>
-      discardFailedIllustration(messageId, slotId, stage, error);
+      discardFailedIllustration(messageId, slotId, stage, error, "", retrySnapshot);
     const preset = settings.mediaInsert?.[repo?.id || ""];
     if (!preset) { failSlot("configuration", "当前作品没有配置自动插画模板"); return; }
     if (source === "automatic") {
@@ -909,6 +942,9 @@ export function useChatSession(deps: ChatSessionDeps) {
     const videoMode = resolveVideoMode(preset, eventVideoMode);
     // V1.5/B3（R4）：firstlast 楼层触发不看 motion；climax 维持 smartVideo && motion>=2
     const useVideo = resolveVideoTemplateChoice(preset, videoMode, motion);
+    // V1.6/P5+（2026-08-28 用户拍板）：首尾帧是独立图片模式——只配图片模板即生效；
+    // 视频模式跟随该选项推导，有视频模板才追加视频任务。
+    const useFirstlastImages = videoMode === "firstlast" && !!preset.templateId;
     const chosenId = useVideo ? preset.videoTemplateId! : preset.templateId;
     if (!chosenId) {
       failSlot("configuration", "当前图/视频模式没有配置工作流模板");
@@ -956,6 +992,37 @@ export function useChatSession(deps: ChatSessionDeps) {
       fallback: videoBaseRef?.url ?? baseImage,
     }) || "";
     let negativePrompt = preset.negativePrompt?.trim() || sceneSpec?.negative_prompt || "";
+    // LoRA 触发词查表与机械前置（对齐 /a 编排 lora_inject 思路）：主图与首尾帧图共用。
+    // 生效 LoRA 的触发词必须逐字精确（大脑会漏写/改写 → LoRA 不生效却看不出），按文件名查触发词表
+    // 前置到正向提示词；已在提示词里出现的词不重复注入（大小写不敏感）。查表失败硬失败（配置问题要暴露）。
+    let loraTriggerItems: Awaited<ReturnType<typeof listLoras>>["items"] = [];
+    if (loras.length) {
+      try {
+        loraTriggerItems = (await listLoras()).items || [];
+        for (const lora of loras) {
+          const metadata = resolveLoraPromptMetadata(loraTriggerItems, lora.name);
+          if (!metadata.found) {
+            throw new Error(`实际加载的 LoRA 没有精确元数据记录：${lora.name}`);
+          }
+        }
+      } catch (error) {
+        failSlot(
+          "lora_metadata",
+          error instanceof Error ? error.message : "LoRA触发词与建议提示词读取失败",
+        );
+        return;
+      }
+    }
+    const withLoraTriggers = (text: string): string => {
+      let out = text;
+      for (const lora of loras) {
+        const metadata = resolveLoraPromptMetadata(loraTriggerItems, lora.name);
+        out = applyProfileLoraTriggers(out, promptProfile, metadata.additions);
+      }
+      return out;
+    };
+    // V1.6/P5+：首尾帧独立图片模式跳过高潮 Profile 渲染（帧提示词在生成循环内走同一 Profile 编译链单独编译）。
+    if (!useFirstlastImages) {
     if (sceneSpec?.profile_prompt && sceneSpec.profile === promptProfile) {
       prompt = sceneSpec.profile_prompt;
     } else if (sceneSpec) {
@@ -995,27 +1062,15 @@ export function useChatSession(deps: ChatSessionDeps) {
         prompt, loras.some((lora) => !lora.character),
       );
     }
-    // 触发词自动前置：生效 LoRA 的触发词必须逐字精确（大脑会漏写/改写 → LoRA 不生效却看不出），
-    // 故按文件名查触发词表机械前置到正向提示词。对齐 /a 编排的 lora_inject 思路。
-    // 已在提示词里出现的词不重复注入（大小写不敏感）。查表失败/无触发词不阻断出图。
-    if (loras.length) {
-      try {
-        const items = (await listLoras()).items || [];
-        for (const lora of loras) {
-          const metadata = resolveLoraPromptMetadata(items, lora.name);
-          if (!metadata.found) {
-            throw new Error(`实际加载的 LoRA 没有精确元数据记录：${lora.name}`);
-          }
-          prompt = applyProfileLoraTriggers(prompt, promptProfile, metadata.additions);
-        }
-      } catch (error) {
-        failSlot(
-          "lora_metadata",
-          error instanceof Error ? error.message : "LoRA触发词与建议提示词读取失败",
-        );
-        return;
-      }
+    prompt = withLoraTriggers(prompt);
     }
+    // V1.6/P5+（2026-08-29 用户拍板）：首尾帧提示词与高潮点生图完全同构——后端
+    // /ai/prompt/profile/frames 先做「时点提取」（首/尾各自时点的英文结构化 action/visual_facts，
+    // 帧描述走 @(…)@ 防拦截保护），再逐帧走同一 Profile 编译器（同一校验/带因重写/兜底），
+    // 一次调用出两帧成品。编译失败降级帧描述原文不挂死；触发词由 withLoraTriggers 统一前置。
+    const frameCompiled: Partial<Record<"first" | "last", string>> = {};
+    const compileFramePrompt = (frame: "first" | "last", frameDesc: string): string =>
+      withLoraTriggers(frameCompiled[frame] || frameDesc);
     // 底图需先上传到 ComfyUI input 目录，取回可供 LoadImage 引用的文件名
     let uploadedImage = "";
     const needsImage = tpl.exposed.some((f) => workflowFieldBinding(f) === "base_image");
@@ -1066,7 +1121,15 @@ export function useChatSession(deps: ChatSessionDeps) {
     let frameFirstImage = uploadedImage;
     let frameLastImage = uploadedLastFrameImage;
     let firstFrameGenerated = false; // W3：首帧是否独立生图成功（决定要不要发转场任务）
-    if (useVideo && videoMode === "firstlast") {
+    let frameFirstPromptId = "";
+    let frameLastPromptId = "";
+    // 编译后帧提示词：提交 ComfyUI 用它，回填入库/上报 trace 必须同源（2026-08-29 验收：
+    // 资产库显示帧描述原文的根因=入库链传了 firstFrameDesc/lastFrameDesc 原文）。
+    let frameFirstPrompt = "";
+    let frameLastPrompt = "";
+    let frameFirstValueKeys: string[] = [];
+    let frameLastValueKeys: string[] = [];
+    if (useFirstlastImages) {
       const frameTpl = templates.find((t) => t.id === preset.templateId);
       if (!frameTpl) {
         failSlot("configuration", "firstlast 首尾帧生图需要配置图片工作流模板");
@@ -1077,8 +1140,12 @@ export function useChatSession(deps: ChatSessionDeps) {
         prevTailUrl: resolvePrevTailDesc(messagesRef.current)?.lastFrameUrl,
         firstFrameDesc, lastFrameDesc, lastFrameUrl,
       });
-      if (!plan.canGenerateVideo) {
+      if (useVideo && !plan.canGenerateVideo) {
         failSlot("image_required", "firstlast 视频需要首帧图：既无上尾帧图可复用，也无首帧画面描述可生成");
+        return;
+      }
+      if (!useVideo && !plan.tasks.length) {
+        failSlot("image_required", "首尾帧生图缺少画面：既无上尾帧图可复用，也无首帧/尾帧画面描述");
         return;
       }
       const frameLoras = loras.map(({ name, weight }) => ({ name, weight }));
@@ -1092,18 +1159,69 @@ export function useChatSession(deps: ChatSessionDeps) {
         },
         latentSize,
       );
+      // 帧提示词同构编译：一次调用出两帧成品（时点提取+同一 Profile 编译器）。
+      if (sceneSpec) {
+        const frameDescs: { first?: string; last?: string } = {};
+        for (const task of plan.tasks) {
+          if (task.kind === "generate") frameDescs[task.frame] = task.desc;
+        }
+        if (frameDescs.first || frameDescs.last) {
+          try {
+            const compiled = await genFramePrompts(
+              promptProfile,
+              {
+                ...sceneSpec, actors: resolvedActors, character_lora: characterLora,
+                repo_id: repo?.id || "", thread_id: repo?.id || "", turn_id: turnId,
+              },
+              frameDescs,
+              { ...chat, proxyUrl: modelProxies.chatProxyUrl },
+              {
+                presetDir: settings.presetDir,
+                presetName: settings.activePresetName,
+                userName: effectivePersona.name,
+              },
+            );
+            for (const frame of ["first", "last"] as const) {
+              const item = compiled.frames[frame];
+              if (item?.prompt?.trim()) frameCompiled[frame] = item.prompt;
+            }
+          } catch (error) {
+            console.warn("[auto-video] 帧提示词同构编译失败，降级帧描述原文", error);
+          }
+        }
+      }
       for (const task of plan.tasks) {
         if (task.kind === "reuse" || task.kind === "existing") continue; // 现成图已在上传段处理
         const isFirst = task.frame === "first";
         try {
-          const r = await submitWorkflow(
-            preset.templateId, buildFrameValues(task.desc), settings.comfyuiUrl,
-            task.desc, frameLoras, preset.loraMode || "single",
-          );
-          if (!r.prompt_id) throw new Error("ComfyUI 没有返回任务 ID");
-          const outcome = await pollWorkflowResult(r.prompt_id, settings.comfyuiUrl, "image");
+          const framePrompt = compileFramePrompt(task.frame, task.desc);
+          const frameValues = buildFrameValues(framePrompt);
+          const recordIds = (res: { prompt_id: string }) => {
+            if (isFirst) { frameFirstPromptId = res.prompt_id; frameFirstPrompt = framePrompt; frameFirstValueKeys = Object.keys(frameValues).sort(); }
+            else { frameLastPromptId = res.prompt_id; frameLastPrompt = framePrompt; frameLastValueKeys = Object.keys(frameValues).sort(); }
+          };
+          const runOnce = async (): Promise<{ prompt_id: string }> => {
+            const res = await submitWorkflow(
+              preset.templateId, frameValues, settings.comfyuiUrl,
+              framePrompt, frameLoras, preset.loraMode || "single",
+            );
+            const pid = res.prompt_id;
+            if (!pid) throw new Error("ComfyUI 没有返回任务 ID");
+            recordIds({ prompt_id: pid });
+            return { prompt_id: pid };
+          };
+          let r = await runOnce();
+          let outcome = await pollWorkflowResult(r.prompt_id, settings.comfyuiUrl, "image");
+          if (outcome.kind === "stalled") {
+            // 卡死自愈（2026-08-29 用户需求）：队列无节点运转 → 删除坏死任务（清队列+中断），
+            // 自动重新提交一次；再卡死才按失败处理。上限 1 次防循环。
+            await interruptComfy(settings.comfyuiUrl, r.prompt_id).catch(() => undefined);
+            r = await runOnce();
+            outcome = await pollWorkflowResult(r.prompt_id, settings.comfyuiUrl, "image");
+          }
           if (outcome.kind !== "complete" || !outcome.result.images[0]) {
-            throw new Error(outcome.kind === "failed" ? outcome.error : "生图未产出图像");
+            throw new Error(outcome.kind === "failed" || outcome.kind === "stalled"
+              ? outcome.error : "生图未产出图像");
           }
           const inputName = await moveComfyOutputToInput(outcome.result.images[0], settings.comfyuiUrl);
           if (isFirst) { frameFirstImage = inputName; firstFrameGenerated = true; }
@@ -1111,8 +1229,62 @@ export function useChatSession(deps: ChatSessionDeps) {
         } catch (error) {
           const message = error instanceof Error ? error.message : "首尾帧生图失败";
           if (isFirst) { failSlot("frame_gen", `首帧生图失败：${message}`); return; }
-          // 尾帧生图失败 → 降级首帧单图（不挂死）
+          // 尾帧生图失败：视频模式降级首帧单图（视频还能出，不挂死）；独立图片模式尾帧=楼层
+          // 唯一新画面，静默降级会让主槽 pending 悬挂（刷新后变孤儿槽被清理，用户完全无感
+          // ——2026-08-29 验收「什么图片都没有」实锤），必须显式失败。
+          if (!useVideo) { failSlot("frame_gen", `尾帧生图失败：${message}`); return; }
           console.warn("[auto-video] 尾帧生图失败，降级首帧单图", { message });
+        }
+      }
+      // V1.6/P5+ 独立图片模式回填（2026-08-28 拍板）：双帧图经 pollResult 走既有回填+入库全链。
+      // useVideo 时主槽留给视频正片（避免同槽双 pollResult 竞态），双帧图走 :first/:last 副槽；
+      // 仅图片模式时主槽=本楼层新画面（layout.main），尾帧新图进 :last。
+      const layout = firstlastSlotLayout(plan);
+      if (layout) {
+        const lastSlotId = `${slotId}:last`;
+        const frameTarget = (sid: string) => ({ messageId, slotId: sid, background: true as const });
+        const reportFrame = (promptId: string, sid: string, framePrompt: string, keys: string[]) => {
+          void reportIllustrationSubmission({
+            threadId, repoId: repo?.id || threadId, turnId, messageId, slotId: sid,
+            templateId: preset.templateId, promptId, prompt: framePrompt, promptProfile,
+            loraName, loraWeight, latentWidth: latentSize.width, latentHeight: latentSize.height,
+            loraMode: preset.loraMode || "single",
+            loraNames: loras.map(({ name }) => name),
+            valueKeys: keys,
+            source,
+          }).catch(() => undefined);
+        };
+        if (useVideo) {
+          // 视频模式：主槽=正片（C 段提交），双帧图入 :first/:last 副槽（reuse 首帧复用上楼图，无新图不建槽）
+          if (layout.main === "first_prompt" && frameFirstPromptId) {
+            setMessages((current) => appendImageSlot(current, messageId, `${slotId}:first`, frameFirstPrompt));
+            pollResult(frameFirstPromptId, [], undefined, frameTarget(`${slotId}:first`), frameFirstPrompt, "image");
+            reportFrame(frameFirstPromptId, `${slotId}:first`, frameFirstPrompt, frameFirstValueKeys);
+          }
+          if (frameLastPromptId) {
+            setMessages((current) => appendImageSlot(current, messageId, lastSlotId, frameLastPrompt));
+            pollResult(frameLastPromptId, [], undefined, frameTarget(lastSlotId), frameLastPrompt, "image");
+            reportFrame(frameLastPromptId, lastSlotId, frameLastPrompt, frameLastValueKeys);
+          }
+        } else {
+          // 独立图片模式：主槽=本楼层新画面，尾帧新图进 :last
+          if (layout.main === "first_prompt" && frameFirstPromptId) {
+            pollResult(frameFirstPromptId, [], undefined, frameTarget(slotId), frameFirstPrompt, "image");
+            reportFrame(frameFirstPromptId, slotId, frameFirstPrompt, frameFirstValueKeys);
+          } else if (layout.main === "last_prompt" && frameLastPromptId) {
+            pollResult(frameLastPromptId, [], undefined, frameTarget(slotId), frameLastPrompt, "image");
+            reportFrame(frameLastPromptId, slotId, frameLastPrompt, frameLastValueKeys);
+          } else if (layout.main === "last_frame_url" && lastFrameUrl) {
+            setMessages((current) => resolveMediaSlot(current, messageId, slotId, lastFrameUrl, "image"));
+          } else if (layout.main === "prev_tail_url") {
+            const url = resolvePrevTailDesc(messagesRef.current)?.lastFrameUrl;
+            if (url) setMessages((current) => resolveMediaSlot(current, messageId, slotId, url, "image"));
+          }
+          if (layout.lastSlot && frameLastPromptId) {
+            setMessages((current) => appendImageSlot(current, messageId, lastSlotId, lastFrameDesc));
+            pollResult(frameLastPromptId, [], undefined, frameTarget(lastSlotId), lastFrameDesc, "image");
+            reportFrame(frameLastPromptId, lastSlotId, lastFrameDesc, frameLastValueKeys);
+          }
         }
       }
     }
@@ -1171,6 +1343,8 @@ export function useChatSession(deps: ChatSessionDeps) {
         console.warn("[auto-video] 转场视频提交失败，正片照常", error);
       }
     }
+    // V1.6/P5+：首尾帧独立图片模式（无视频）不出高潮主图/正片——双帧图已回填，主槽语义已被占用。
+    if (!(useFirstlastImages && !useVideo)) {
     const values = illustrationTemplateValues(tpl.exposed, {
       prompt, negativePrompt, loraName, loraWeight, baseImage: uploadedImage,
       latentSize,
@@ -1227,6 +1401,7 @@ export function useChatSession(deps: ChatSessionDeps) {
       }
     } catch (error) {
       failSlot("submit", error instanceof Error ? error.message : "自动插画提交失败");
+    }
     }
   };
   // 剧情对白音频化：后端发来台词分段（含 8 维情感向量），逐角色提交 IndexTTS 工作流。
@@ -1813,6 +1988,19 @@ export function useChatSession(deps: ChatSessionDeps) {
     }
   };
 
+  // 停止单个媒体槽的生成（图片生成位置下方的「停止」键）：中断 ComfyUI + 取消守望 + 槽位标失败。
+  const stopSlotGeneration = async (messageId: string, slotId: string) => {
+    const msg = messagesRef.current.find((m) => m.id === messageId);
+    const part = msg?.parts?.find((p) => p.slotId === slotId);
+    const promptId = part?.promptId || "";
+    if (promptId) {
+      workflowRuntime.cancel(promptId);
+      try { await interruptComfy(settings.comfyuiUrl, promptId); } catch { /* 中断失败忽略，槽位照常标停 */ }
+    }
+    setMessages((current) => failMediaSlot(current, messageId, slotId, "已停止生成"));
+    refreshChatBackgroundActivities();
+  };
+
   // 队列条「引导」：把该排队消息以「打断+合并」方式立即执行。
   // 内容取自后端队列项（本地内容映射优先，缺失用文本兜底）；先从后端队列删除再本地即时发送。
   const guideQueued = async (id: string) => {
@@ -1881,9 +2069,11 @@ export function useChatSession(deps: ChatSessionDeps) {
           embed: embedModel,
           embedProxyUrl: modelProxies.embedProxyUrl,
         });
-        setMessages((current) => upsertMessages(current, [
-          agentImageMessage(rec.url, rec.id, rec.regeneration || snapshot),
-        ]));
+        // 原位替换（不新发消息）：把重新生成的图放回原剧情对话里那条消息，
+        // 而不是用 upsert 追加一条新消息（用户拍板 2026-08-27）。
+        setMessages((current) => current.map((m) => (m.id === messageId
+          ? { ...m, image: rec.url, regeneration: rec.regeneration || snapshot }
+          : m)));
         if (repo?.id) setGeneratedCover(repo.id, rec.url);
         window.dispatchEvent(new CustomEvent("laf-generation-saved", { detail: threadId }));
         return;
@@ -1962,13 +2152,27 @@ export function useChatSession(deps: ChatSessionDeps) {
   };
   reloadFromSnapshotRef.current = reloadFromSnapshot;
 
+  // 失败槽「重新生成」（2026-08-29 用户需求）：从槽位快照恢复参数重调 submitIllustration，
+  // source 翻转为 manual 跳过自动 claim（重试是用户显式动作，不存在同槽重复消费）。
+  const retryIllustration = (messageId: string, slotId: string) => {
+    const message = messagesRef.current.find((m) => m.id === messageId);
+    const part = message?.parts?.find((p) => p.slotId === slotId) as
+      | { retryArgs?: unknown[] }
+      | undefined;
+    const snapshot = part?.retryArgs;
+    if (!snapshot?.length) return;
+    const args = [...snapshot];
+    args[7] = "manual";
+    void submitIllustration(...(args as Parameters<typeof submitIllustration>));
+  };
   return {
     messages, streamingId, wfRunning, uploadingWf, slowWatchPromptId, wfProgress, wfNode, queued, regeneratingIds,
     send, runCommand, pushBot, pushMsg,
+    retryIllustration,
     actOnPromptApproval, actOnRouteChoice, regenerateResult,
     pickTemplate, runWorkflow, updateCardDraft, markCardDone, markCardReopen,
     applyWorkflowOps, ignoreWorkflowOps, editWorkflowOp,
-    stopGenerating, guideQueued, cancelQueued,
+    stopGenerating, stopSlotGeneration, guideQueued, cancelQueued,
     confirmReq, compact, compacting,
     contextReminder, dismissContextReminder,
     clearHome, clearCache: clearCacheAction, reloadFromSnapshot,

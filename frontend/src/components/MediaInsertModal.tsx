@@ -36,10 +36,19 @@ interface VoiceRow extends CharacterVoiceBinding {
   name: string;
 }
 
-function loraStatusSuffix(lora: AvailableLora): string {
-  if (lora.trigger_status === "not_required") return "（通用·无需触发词）";
+function loraStatusSuffix(lora: AvailableLora, characterRow = false): string {
+  if (lora.trigger_status === "not_required") {
+    // 角色行上「已确认无需触发词」多半是漏登记（登记页空保存即成此态）——
+    // 角色画面缺触发词会直接不像角色（2026-08-29 验收问题③），必须醒目提示，
+    // 不能像风格行那样显示成安心的「通用·无需触发词」。
+    return characterRow
+      ? "（未登记触发词·画面可能不像角色——请在 LoRA 触发词页登记或确认通用）"
+      : "（通用·无需触发词）";
+  }
   if (lora.has_triggers || lora.trigger_status === "configured") return "";
-  return "（触发词未确认·仍可使用）";
+  return characterRow
+    ? "（触发词未登记·画面可能不像角色——请在 LoRA 触发词页登记）"
+    : "（触发词未确认·仍可使用）";
 }
 
 export function suggestedWeightForLora(loras: readonly AvailableLora[], loraName: string): number {
@@ -87,6 +96,8 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
   const [styleBaseImage, setStyleBaseImage] = useState(preset?.styleBaseImage || "");
   const [videoTemplateId, setVideoTemplateId] = useState(preset?.videoTemplateId || "");
   const [smartVideo, setSmartVideo] = useState(preset?.smartVideo ?? false);
+  // 首尾帧生成（用户定稿 2026-08-28）：旧预设按 videoMode === "firstlast" 回填
+  const [firstlast, setFirstlast] = useState(preset?.firstlast ?? preset?.videoMode === "firstlast");
   const [audioTemplateId, setAudioTemplateId] = useState(preset?.audioTemplateId || "");
   const [voiceRows, setVoiceRows] = useState<VoiceRow[]>(() => initialVoiceRows(preset, cardNames));
   const [uploadingVoice, setUploadingVoice] = useState("");  // 正在上传音轨的行 key（""=无）
@@ -247,6 +258,8 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
       styleLoraWeight: enableImage && loraMode !== "none" && styleLora ? styleLoraWeight : undefined,
       styleBaseImage: enableImage ? styleBaseImage || undefined : undefined,
       // 视频分区
+      firstlast: enableImage ? firstlast : undefined,
+      videoMode: enableImage && firstlast ? "firstlast" : undefined,  // 新预设只存 firstlast 选项
       videoTemplateId: enableVideo ? videoTemplateId : undefined,
       smartVideo: enableVideo ? smartVideo : undefined,
       // 音频分区
@@ -321,6 +334,35 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
             {loraMode === "none" && "只使用角色底图，不加载角色或风格 LoRA。"}
             {loraMode === "single" && "串联高潮画面中已绑定的角色 LoRA；均未命中时才回退风格 LoRA。"}
             {loraMode === "multi" && "固定加载默认风格 LoRA，并叠加全部在场角色 LoRA。"}
+          </p>
+        </div>
+        <div style={{ marginBottom: 12 }}>
+          <span style={{ display: "block", marginBottom: 4, fontSize: 13 }}>生图时点</span>
+          <div
+            className="lora-mode-switch"
+            role="group"
+            aria-label="生图时点"
+            style={{ gridTemplateColumns: "repeat(2, minmax(0, 1fr))" }}
+          >
+            <button
+              type="button"
+              className={`btn${firstlast ? " primary" : ""}`}
+              aria-pressed={firstlast}
+              onClick={() => setFirstlast(true)}
+              title="图片按剧情首尾帧（首帧+尾帧）生成；视频为全程剧情影片，含本段全部对白"
+            >首尾帧模式</button>
+            <button
+              type="button"
+              className={`btn${!firstlast ? " primary" : ""}`}
+              aria-pressed={!firstlast}
+              onClick={() => setFirstlast(false)}
+              title="单张高潮点定格图；视频为高潮点动作代入，高潮定格对白已说完、不带台词"
+            >高潮点模式</button>
+          </div>
+          <p className="bind-hint" style={{ margin: "5px 0 0" }}>
+            {firstlast
+              ? "首尾帧模式：全程覆盖剧情与对白，视频模式自动为「首尾帧剧情影片」。"
+              : "高潮点模式：高潮点单图定格，视频模式自动为「高潮点动作代入」（不带台词）。"}
           </p>
         </div>
         <label style={{ display: "block", marginBottom: 12 }}>
@@ -450,7 +492,7 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
                 )}
                 {loras.map((l) => (
                   <option key={l.lora_name} value={l.lora_name}>
-                    {l.lora_name}{loraStatusSuffix(l)}
+                    {l.lora_name}{loraStatusSuffix(l, true)}
                   </option>
                 ))}
               </select>

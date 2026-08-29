@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GenResult } from "../api/comfyui";
-import { WorkflowGenerationRuntime, pollSchedule, pollWorkflowResult, durableFinalizeSucceeded } from "./workflowGenerationRuntime";
+import { WorkflowGenerationRuntime, pollSchedule, pollWorkflowResult, DEFAULT_STALL_TIMEOUT_MS, durableFinalizeSucceeded, trackCanvasWorkflow, untrackCanvasWorkflow } from "./workflowGenerationRuntime";
 
 function memoryStorage() {
   const values = new Map<string, string>();
@@ -18,7 +18,7 @@ const completed: GenResult = {
 function observer() {
   return {
     finalize: vi.fn(async () => true), completed: vi.fn(), failed: vi.fn(),
-    released: vi.fn(), timedOut: vi.fn(),
+    released: vi.fn(), timedOut: vi.fn(), stalled: vi.fn(),
   };
 }
 
@@ -134,6 +134,48 @@ describe("workflow generation runtime", () => {
     await scheduled.shift()!();
 
     expect(watch.finalize).not.toHaveBeenCalled();
+  });
+
+  it("停顿守卫：一直排队（无节点运转）超过 stall 窗口 → stalled 早停", async () => {
+    const scheduled: Array<() => Promise<void> | void> = [];
+    let current = 0;
+    const watch = observer();
+    const runtime = new WorkflowGenerationRuntime("work", {
+      storage: memoryStorage(), now: () => current,
+      fetchResult: vi.fn(async (): Promise<GenResult> => ({
+        status: "pending", images: [], videos: [], audios: [], texts: [],
+      })),
+      schedule: (callback) => scheduled.push(callback),
+    });
+    runtime.start({ promptId: "p1", comfyuiUrl: "http://comfy", stallTimeoutMs: 1000 }, watch);
+
+    await scheduled.shift()!();          // 第一次 tick：尚未越过窗口，继续轮询
+    expect(watch.stalled).not.toHaveBeenCalled();
+    expect(runtime.list()).toHaveLength(1);
+
+    current = 1000;                       // 越过 stall 窗口后仍未观察到节点运转
+    await scheduled.shift()!();
+    expect(watch.stalled).toHaveBeenCalledOnce();
+    expect(runtime.list()).toEqual([]);
+  });
+
+  it("节点已开始运转（/queue running）则不触发停顿守卫", async () => {
+    const scheduled: Array<() => Promise<void> | void> = [];
+    let current = 0;
+    const watch = observer();
+    const runtime = new WorkflowGenerationRuntime("work", {
+      storage: memoryStorage(), now: () => current,
+      fetchResult: vi.fn(async (): Promise<GenResult> => ({
+        status: "running", images: [], videos: [], audios: [], texts: [],
+      })),
+      schedule: (callback) => scheduled.push(callback),
+    });
+    runtime.start({ promptId: "p1", comfyuiUrl: "http://comfy", stallTimeoutMs: 1000 }, watch);
+
+    current = 1000;
+    await scheduled.shift()!();
+    expect(watch.stalled).not.toHaveBeenCalled();
+    expect(runtime.list()).toEqual([expect.objectContaining({ prompt_id: "p1" })]);
   });
 });
 
@@ -256,5 +298,99 @@ describe("pollWorkflowResult · 画布/弹窗运转轮询", () => {
     const outcome = await outcomePromise;
     expect(outcome).toEqual({ kind: "still_running" });
     expect(fetchResult).toHaveBeenCalledTimes(210);
+  });
+});
+
+describe("canvas workflow background activity (trackCanvasWorkflow/untrackCanvasWorkflow)", () => {
+  function stubLocalStorage() {
+    const values = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => values.get(key) || null,
+      setItem: (key: string, value: string) => { values.set(key, value); },
+    });
+    return values;
+  }
+
+  it("track writes laf_pending_gen_<threadId> so SupportWidget shows 出图中", () => {
+    const values = stubLocalStorage();
+    try {
+      trackCanvasWorkflow("repo-a", "p1", "http://comfy", "模板A");
+      const parsed = JSON.parse(values.get("laf_pending_gen_repo-a") || "[]");
+      expect(parsed).toHaveLength(1);
+      expect(parsed[0]).toMatchObject({ prompt_id: "p1", prompt: "模板A" });
+      expect(typeof parsed[0].createdAt).toBe("number");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("untrack removes only the matching prompt_id", () => {
+    const values = stubLocalStorage();
+    try {
+      trackCanvasWorkflow("repo-a", "p1", "http://comfy", "A");
+      trackCanvasWorkflow("repo-a", "p2", "http://comfy", "B");
+      untrackCanvasWorkflow("repo-a", "p1");
+      const parsed = JSON.parse(values.get("laf_pending_gen_repo-a") || "[]");
+      expect(parsed.map((x: { prompt_id: string }) => x.prompt_id)).toEqual(["p2"]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("untrack on empty id is a no-op (no throw)", () => {
+    const values = stubLocalStorage();
+    try {
+      expect(() => untrackCanvasWorkflow("repo-a", "")).not.toThrow();
+      expect(JSON.parse(values.get("laf_pending_gen_repo-a") || "[]")).toEqual([]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("pollWorkflowResult 停顿守卫（同步路径，2026-08-29 卡死自愈）", () => {
+  const waitUntil = async (cond: () => boolean) => {
+    for (let i = 0; i < 60 && !cond(); i++) await Promise.resolve();
+  };
+
+  it("一直排队（无节点运转）超过 stall 窗口 → stalled", async () => {
+    const scheduled: Array<() => void> = [];
+    let current = 0;
+    const fetchResult = vi.fn(async (): Promise<GenResult> => ({
+      status: "pending", images: [], videos: [], audios: [], texts: [],
+    }));
+    const promise = pollWorkflowResult("p1", "http://comfy", "image", {
+      fetchResult,
+      schedule: (cb: () => void) => { scheduled.push(cb); },
+      now: () => current,
+    });
+    await waitUntil(() => scheduled.length >= 1);
+    expect(fetchResult).toHaveBeenCalledTimes(1);
+    current = DEFAULT_STALL_TIMEOUT_MS + 1;
+    scheduled.shift()!();
+    const outcome = await promise;
+    expect(outcome.kind).toBe("stalled");
+  });
+
+  it("节点开始运转（completed 观察到）则不误杀", async () => {
+    const scheduled: Array<() => void> = [];
+    let current = 0;
+    const fetchResult = vi.fn(async (): Promise<GenResult> => ({
+      status: current > 0 ? "completed" : "pending",
+      images: [{ filename: "a.png", subfolder: "", type: "output" }],
+      videos: [], audios: [], texts: [],
+    }));
+    const promise = pollWorkflowResult("p1", "http://comfy", "image", {
+      fetchResult,
+      schedule: (cb: () => void) => { scheduled.push(cb); },
+      now: () => current,
+    });
+    await waitUntil(() => scheduled.length >= 1);
+    scheduled.shift()!();   // 第 2 次 fetch：仍 pending，停顿计时中但未越窗
+    await waitUntil(() => scheduled.length >= 2);
+    current = DEFAULT_STALL_TIMEOUT_MS + 1;
+    scheduled.shift()!();   // 第 3 次 fetch：completed → 不触发守卫
+    const outcome = await promise;
+    expect(outcome.kind).toBe("complete");
   });
 });

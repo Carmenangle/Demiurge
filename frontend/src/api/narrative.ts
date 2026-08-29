@@ -117,3 +117,20 @@ export function resolveNarrativeCi(outputDir: string, repoId: string, diagnostic
     output_dir: outputDir, repo_id: repoId, diagnostic_id: diagnosticId, status,
   });
 }
+
+// ── 文风（去 AI 味）配置：S0 lint + S1 生成侧注入共用词表（属主 prose_style）──
+
+export interface ProseStyleConfig {
+  enabled: boolean;
+  extra: string[];      // 用户增补的 AI 味词
+  removed: string[];    // 用户从内置词表移除的词（误报豁免）
+  review_every: number; // S2 活人感通审采样频率（每 N 轮一次，0=关闭）
+}
+
+export function getProseStyle() {
+  return apiGet<ProseStyleConfig>("/narrative/prose-style");
+}
+
+export function saveProseStyle(config: ProseStyleConfig) {
+  return apiPost<ProseStyleConfig>("/narrative/prose-style", config);
+}

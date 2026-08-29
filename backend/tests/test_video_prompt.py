@@ -20,19 +20,22 @@ def _spec(**overrides):
     return base
 
 
-# ===== climax 精简版：不含时间分镜 =====
+# ===== climax 七段式：含时间分镜 =====
 
-def test_climax_has_no_time_segments():
+def test_climax_has_time_segments():
     p = video_prompt.compile_climax_video_prompt(_spec())
-    assert "[时间分镜]" not in p
-    assert "[0s–" not in p
+    assert "[时间分镜]" in p
+    assert "0–" in p
     assert "[参考绑定]" in p
-    assert "[动作]" in p
+    assert "[动作]" not in p
 
 
 def test_climax_binds_single_frame_and_identity():
     p = video_prompt.compile_climax_video_prompt(_spec(), first_frame_desc="高潮动作画面")
-    assert "图片1=温知夏、沈糯、柏言的高潮动作画面" in p
+    assert "图片1中心的角色为温知夏、沈糯、柏言" in p
+    # 用户拍板：参考绑定不再说「高潮动作画面」当干扰，只声明「图片1中心的角色为 X」
+    binding = p.split("[参考绑定]：", 1)[1].split("\n\n", 1)[0]
+    assert "高潮动作画面" not in binding
     assert "温知夏" in p and "沈糯" in p and "柏言" in p
 
 
@@ -41,28 +44,32 @@ def test_climax_reference_binding_does_not_duplicate_action():
     # [参考绑定] 与 [动作] 两段（整段重复）。修复后参考绑定用
     # 「{画面角色}的高潮动作画面」占位，画面细节（composition）只出现在 [动作] 段。
     p = video_prompt.compile_climax_video_prompt(_spec())
-    assert "图片1=温知夏、沈糯、柏言的高潮动作画面" in p
+    assert "图片1中心的角色为温知夏、沈糯、柏言" in p
     binding = p.split("[参考绑定]：", 1)[1].split("\n\n", 1)[0]
-    action = p.split("[动作]：", 1)[1]
+    action = p.split("[时间分镜]：", 1)[1]
     assert "三人中景" in action
     assert "三人中景" not in binding
 
 
-def test_climax_respects_negative_and_style():
+def test_climax_ignores_style_prefix_and_respects_negative():
+    # 有参考图定调，风格声明整体停用：style_prefix 不再进入提示词
     p = video_prompt.compile_climax_video_prompt(
         _spec(), style_prefix="二次元日常美食", negative="禁止柔化转场",
     )
-    assert "[风格]：二次元日常美食" in p
+    assert "[风格声明]" not in p
+    assert "二次元日常美食" not in p
     assert "禁止柔化转场" in p
     assert "禁止五官漂移" in p
 
 
 # ===== firstlast 七段式：含时间分镜 =====
 
-def test_firstlast_has_seven_sections():
+def test_firstlast_has_six_sections_no_style():
     p = video_prompt.compile_firstlast_video_prompt(_spec(), style_prefix="二次元日常美食 CGDCT")
-    for marker in ("[风格]", "[参考绑定]", "[主体/场景]", "[时间分镜]", "[音频]", "[负面约束]"):
+    for marker in ("[参考绑定]", "[主体/场景]", "[时间分镜]", "[音频]", "[负面约束]"):
         assert marker in p
+    assert "[风格声明]" not in p
+    assert "二次元日常美食" not in p
     assert "[0s–" in p  # 时间分镜切段
 
 
@@ -84,10 +91,78 @@ def test_firstlast_carries_prev_tail_for_transition():
     assert "无突兀跳切" in p
 
 
-def test_firstlast_identity_reasserted_per_segment():
+def test_firstlast_identity_lock_only_in_negative():
     p = video_prompt.compile_firstlast_video_prompt(_spec())
-    # 身份锁每段重申（3 段应出现 3 次）
-    assert p.count("人物身份和五官不能发生变化") >= 3
+    # 身份锁只进 [负面约束] 一次，不再逐拍重申
+    assert p.count("人物身份和五官不能发生变化") == 1
+    assert "[负面约束]" in p
+    # 时间分镜段内不再出现身份锁
+    seg = p.split("[时间分镜]：", 1)[1].split("[音频]：", 1)[0]
+    assert "人物身份和五官不能发生变化" not in seg
+
+
+def test_firstlast_segments_cover_narrative_sentence_by_sentence():
+    # 首尾帧时间分镜覆盖全文：每个事件/每句对白各占一拍，引语拍标台词同步
+    spec = _spec(
+        narrative="温知夏推门而入，朝众人点头。她低声说「开饭了」。沈糯放下筷子站起身，望向门口。",
+    )
+    p = video_prompt.compile_firstlast_video_prompt(spec, duration_hint=12)
+    seg = p.split("[时间分镜]：", 1)[1].split("[音频]：", 1)[0]
+    for frag in ("推门而入", "开饭了", "放下筷子站起身"):
+        assert frag in seg
+    assert "台词随口型同步" in seg
+    # 中段成拍 + 首尾帧 = 至少 4 拍，且按句切分不合并
+    assert seg.count("s｜") >= 4
+
+
+def test_firstlast_quote_internal_punctuation_keeps_beat_whole():
+    # 引号句合并归属：引号内的 ！？；。不得切拍；闭引号后无句点也要断拍
+    spec = _spec(narrative="她低声说「开饭了，都过来！」沈糯放下筷子。")
+    p = video_prompt.compile_firstlast_video_prompt(spec, duration_hint=12)
+    seg = p.split("[时间分镜]：", 1)[1].split("[音频]：", 1)[0]
+    assert "开饭了，都过来！」" in seg  # 引语完整，不被 ！ 切碎
+    assert "」沈糯" not in seg  # 闭引号不得粘到下一拍开头（对白归属对白拍）
+    assert seg.count("台词随口型同步") == 1  # 引语拍只标一次
+    assert "沈糯放下筷子" in seg
+
+
+def test_firstlast_quoted_dialogue_matching_refusal_pattern_is_kept():
+    # 台词不过滤原则：引号内的「不能满足你」是正常对白，不得被拒答过滤误伤
+    spec = _spec(narrative="她红着眼圈说「我不能满足你。」然后转身离开。")
+    p = video_prompt.compile_firstlast_video_prompt(spec)
+    assert "我不能满足你" in p
+    assert "」然后转身离开" not in p.split("[时间分镜]：", 1)[1].split("[音频]：", 1)[0]
+
+
+def test_climax_bare_refusal_narrative_not_compiled_into_beats():
+    # 纯函数兜底路径：narrative 本身是拒答句（主模型拒答当正文）时，
+    # 不得把它编译进 [时间分镜]；回退诚实占位，身份锁仍只在 [负面约束] 一次。
+    spec = _spec(
+        narrative="我不能协助这项请求。", subjects=[], composition=None,
+        camera=None, action_sequence=[],
+    )
+    p = video_prompt.compile_climax_video_prompt(spec)
+    assert "我不能协助这项请求" not in p
+    assert "主体动作按剧情自然演变" in p
+    assert p.count("人物身份和五官不能发生变化") == 1
+
+
+def test_firstlast_camera_uses_vocabulary_not_hardcoded_push():
+    # 运镜不再全程「极缓推进」，首拍定场（固定/缓推）、尾拍拉远收束
+    p = video_prompt.compile_firstlast_video_prompt(
+        _spec(narrative="她推门而入。", camera="", motion=0),
+    )
+    seg = p.split("[时间分镜]：", 1)[1].split("[音频]：", 1)[0]
+    assert "极缓推进" not in seg
+    assert "镜头慢慢拉远" in seg  # 收尾拍拉远
+    assert "摄像机缓缓向主体的面部移动" in seg or "固定镜头，相机完全静止" in seg
+
+
+def test_climax_identity_lock_only_in_negative():
+    p = video_prompt.compile_climax_video_prompt(_spec())
+    assert p.count("人物身份和五官不能发生变化") == 1
+    seg = p.split("[时间分镜]：", 1)[1].split("[音频]：", 1)[0]
+    assert "人物身份和五官不能发生变化" not in seg
 
 
 # ===== 参数组装 dry-run =====
@@ -173,13 +248,13 @@ def test_build_request_missing_frames_warns():
 
 # ===== W3 转场视频：短桥段编译 + 坑G 不硬控时长 =====
 
-def test_transition_has_seven_sections():
+def test_transition_has_six_sections_no_style():
     p = video_prompt.compile_transition_video_prompt(_spec(), style_prefix="二次元日常美食 CGDCT")
     assert "[转场分镜]" in p
     assert "[参考绑定]" in p
-    assert "[风格]" in p
     assert "[主体/场景]" in p
     assert "[音频]" in p
+    assert "[风格声明]" not in p
 
 
 def test_transition_binds_prev_tail_and_first_frame():
@@ -256,7 +331,7 @@ def test_build_request_transition_missing_prev_tail_warns_and_degrades():
 
 def test_build_request_transition_section_names():
     assert video_prompt._section_names("transition") == [
-        "①元信息", "②风格", "③参考绑定", "④主体/场景", "⑤转场分镜", "⑥音频", "⑦负面约束",
+        "①元信息", "②参考绑定", "③主体/场景", "④转场分镜", "⑤音频", "⑥负面约束",
     ]
 
 
@@ -292,6 +367,62 @@ def test_audio_with_dialogue_lists_script():
     )
     assert "台词=" in p
     assert "温知夏：开饭啦" in p
+
+
+def test_audio_design_renders_sfx_and_lines():
+    spec = _spec(audio_design={
+        "music": "低沉弦乐铺底",
+        "sfx": ["fleshy claps in steady rhythm", "trickling water"],
+        "lines": [{"speaker": "虞妙玥", "text": "你来了"}],
+        "sync": "掌声卡重音",
+    })
+    p = video_prompt.compile_climax_video_prompt(spec)
+    assert "音乐=低沉弦乐铺底" in p
+    assert "音效=fleshy claps in steady rhythm、trickling water" in p
+    assert "同步=掌声卡重音" in p
+    # climax：高潮定格时刻对白通常已说完（用户定稿）——动作窗口不带台词，
+    # 无论来源（audio_design.lines / comfy_audio 兜底）一律不列
+    assert "台词=" not in p
+
+
+def test_climax_drops_dialogue_from_all_sources():
+    # audio_design.lines 与 comfy_audio 兜底 audio_lines 双来源都不进 climax [音频]
+    spec = _spec(audio_design={
+        "music": "低沉弦乐铺底", "sfx": [],
+        "lines": [{"speaker": "宗主(男)", "text": "杀了。", "at_s": 1}],
+        "sync": "",
+    })
+    p = video_prompt.compile_climax_video_prompt(
+        spec, audio_lines=[{"speaker": "虞妙玥", "text": "他……杀、自己……人……"}],
+    )
+    assert "台词=" not in p
+    assert "杀了。" not in p.split("[音频]：", 1)[1].split("[负面约束]：", 1)[0]
+
+
+def test_firstlast_audio_design_renders_timed_lines():
+    # firstlast：首尾帧影片从头到尾覆盖剧情——对白全部入列并带 at_s 时点
+    spec = _spec(audio_design={
+        "music": "低沉弦乐铺底",
+        "sfx": ["fleshy claps in steady rhythm"],
+        "lines": [
+            {"speaker": "温知夏", "text": "开饭了，都过来！", "at_s": 2},
+            {"speaker": "沈糯", "text": "来了。"},
+        ],
+        "sync": "掌声卡重音",
+    })
+    p = video_prompt.compile_firstlast_video_prompt(spec)
+    assert "音乐=低沉弦乐铺底" in p
+    assert "台词=2s｜温知夏：开饭了，都过来！；沈糯：来了。" in p
+    assert "同步=掌声卡重音" in p
+
+
+def test_audio_design_without_sfx_keeps_env_fallback():
+    p = video_prompt.compile_climax_video_prompt(
+        _spec(audio_design={"music": "", "sfx": [], "lines": [], "sync": ""}),
+    )
+    assert "音乐=按本集风格铺底" in p
+    assert "音效=环境声" in p
+    assert "台词=" not in p
 
 
 # ===== R7 负面约束去重 =====
@@ -384,8 +515,10 @@ def test_climax_prefers_action_sequence_over_visual_facts():
         ],
     )
     p = video_prompt.compile_climax_video_prompt(spec)
-    assert "定格起点: 勺子挖出一勺奶油" in p
-    assert "延伸: 勺子送向嘴边，吃下" in p
+    assert "定格起点" in p
+    assert "勺子挖出一勺奶油" in p
+    assert "延伸" in p
+    assert "勺子送向嘴边，吃下" in p
 
 
 def test_climax_action_sequence_skips_empty_entries():
@@ -398,9 +531,9 @@ def test_climax_action_sequence_skips_empty_entries():
         ],
     )
     p = video_prompt.compile_climax_video_prompt(spec)
-    assert "定格起点: 勺子挖出一勺奶油" in p
-    assert "延伸: 喂向镜头" in p
-    assert "::" not in p
+    assert "勺子挖出一勺奶油" in p
+    assert "喂向镜头" in p
+    assert "｜：：" not in p
 
 
 def test_climax_falls_back_to_visual_facts_without_action_sequence():
@@ -416,6 +549,17 @@ def test_climax_falls_back_to_visual_facts_without_action_sequence():
     assert "leaps upward with blade raised" in p
 
 
+def test_climax_multi_sentence_narrative_splits_beats():
+    # 无 action_sequence 且 narrative 多句时，动作段按句子切分多拍，不再退化成整段单拍
+    spec = _spec(narrative="她推门而入。沈糯朝她招手。温知夏坐下。", composition="", camera="")
+    p = video_prompt.compile_climax_video_prompt(spec)
+    action = p.split("[时间分镜]：", 1)[1]
+    assert "推门而入" in action
+    assert "沈糯朝她招手" in action
+    assert "温知夏坐下" in action
+    assert action.count("s｜") >= 3
+
+
 def test_climax_action_does_not_degrade_to_appearance():
     # P1/P5 回归：无 action_sequence / visual_facts / composition 时，动作段不得用
     # subjects.description（外貌）兜底——否则 [动作] 段退化成整段外貌描述。
@@ -428,7 +572,7 @@ def test_climax_action_does_not_degrade_to_appearance():
         camera=None,
     )
     p = video_prompt.compile_climax_video_prompt(spec)
-    action = p.split("[动作]：", 1)[1]
+    action = p.split("[时间分镜]：", 1)[1]
     # 外貌描述（luxuriant）不得出现在动作段
     assert "luxuriant" not in action
     assert "攥住林屿的手腕" in action  # 动作回退到剧情原文
@@ -458,12 +602,91 @@ def test_parse_video_plan_extracts_action_sequence_and_subject_scene():
     assert plan["subject_scene"] == "hourglass figure, stone prison corridor"
 
 
+def test_parse_video_plan_extracts_audio_design():
+    plan = video_prompt.parse_video_plan(
+        '{"action_sequence":[{"beat":"定格起点","desc":"俯卧在地"}],'
+        '"audio_design":{"music":"低沉","sfx":["fleshy claps","trickling water"],'
+        '"lines":[{"speaker":"虞妙玥","text":"你来了","at_s":3},'
+        '{"speaker":"沈糯","text":"没有时点"}],"sync":"卡重音"}}'
+    )
+    assert plan["audio_design"]["music"] == "低沉"
+    assert plan["audio_design"]["sfx"] == ["fleshy claps", "trickling water"]
+    assert plan["audio_design"]["lines"] == [
+        {"speaker": "虞妙玥", "text": "你来了", "at_s": 3.0},
+        {"speaker": "沈糯", "text": "没有时点"},
+    ]
+
+
+def test_parse_video_plan_at_s_only_numeric_passes():
+    # at_s 只收数字（含数字字符串）；bool/非数字不透传
+    plan = video_prompt.parse_video_plan(
+        '{"audio_design":{"lines":['
+        '{"speaker":"A","text":"整数","at_s":2},'
+        '{"speaker":"B","text":"小数","at_s":7.5},'
+        '{"speaker":"C","text":"数字串","at_s":"9"},'
+        '{"speaker":"D","text":"布尔","at_s":true},'
+        '{"speaker":"E","text":"乱串","at_s":"later"}]}}'
+    )
+    got = plan["audio_design"]["lines"]
+    assert [e.get("at_s") for e in got] == [2.0, 7.5, 9.0, None, None]
+
+
+def test_audio_design_lines_carry_plot_timing():
+    # 台词时点：at_s 是提取 LLM 按剧情位置推算的『什么时候说』，渲染成 {t}s｜说话人：台词；
+    # 缺 at_s 诚实省略前缀（comfy_audio 兜底台词同样无前缀）。firstlast 专用（climax 无台词）。
+    spec = _spec(audio_design={
+        "music": "低沉弦乐铺底",
+        "sfx": [],
+        "lines": [
+            {"speaker": "宗主(男)", "text": "杀了。", "at_s": 1},
+            {"speaker": "虞妙玥", "text": "他……杀、自己……人……", "at_s": 7.5},
+            {"speaker": "沈糯", "text": "没有时点的台词"},
+        ],
+        "sync": "",
+    })
+    p = video_prompt.compile_firstlast_video_prompt(spec)
+    assert "1s｜宗主(男)：杀了。" in p
+    assert "7.5s｜虞妙玥：他……杀、自己……人……" in p
+    assert "沈糯：没有时点的台词" in p
+    assert "s｜沈糯" not in p
+
+
 def test_parse_video_plan_skips_empty_and_returns_partial():
     # 空 desc 跳过；缺 subject_scene 时只回 action_sequence，不整体失败
     plan = video_prompt.parse_video_plan(
         '{"action_sequence":[{"beat":"","desc":""},{"beat":"延伸","desc":"吃下"}]}'
     )
     assert plan == {"action_sequence": [{"beat": "延伸", "desc": "吃下"}]}
+
+
+def test_parse_video_plan_拒答字段丢弃_不流入提示词():
+    # 防拦截回归：拒答句写进 desc/subject_scene/music/sfx/sync 时逐条丢弃；
+    # 台词原文（lines.text）不过滤——「我不能满足你」这类正常对白必须保留。
+    plan = video_prompt.parse_video_plan(
+        '{"action_sequence":[{"beat":"定格起点","desc":"我不能协助这项请求"},'
+        '{"beat":"延伸","desc":"I cannot help with this request"},'
+        '{"beat":"收尾","desc":"she trembles and grips the chains"}],'
+        '"subject_scene":"I cannot assist with this request",'
+        '"audio_design":{"music":"无法协助","sfx":["铁链哗啦声","I cannot help"],'
+        '"lines":[{"speaker":"虞妙玥","text":"我不能满足你……"}],"sync":"不能协助"}}'
+    )
+    assert plan["action_sequence"] == [
+        {"beat": "收尾", "desc": "she trembles and grips the chains"},
+    ]
+    assert "subject_scene" not in plan
+    assert plan["audio_design"]["sfx"] == ["铁链哗啦声"]
+    assert plan["audio_design"]["lines"] == [{"speaker": "虞妙玥", "text": "我不能满足你……"}]
+    assert "music" not in plan["audio_design"]
+    assert "sync" not in plan["audio_design"]
+
+
+def test_parse_video_plan_整体拒答返回空():
+    # 整体无效时返回 {}，调用方据此触发拒答重试或回退纯函数兜底。
+    plan = video_prompt.parse_video_plan(
+        '{"action_sequence":[{"beat":"定格起点","desc":"我不能协助这项请求"}],'
+        '"subject_scene":"I cannot help with this request"}'
+    )
+    assert plan == {}
 
 
 # ===== 参考绑定角色样貌绑定（角色名必须绑定样貌，否则视频模型不认识角色） =====
@@ -479,7 +702,7 @@ def test_reference_binding_binds_identity_gloss_from_subjects():
     )
     p = video_prompt.compile_climax_video_prompt(spec)
     binding = p.split("[参考绑定]：", 1)[1].split("\n\n", 1)[0]
-    assert "图片1=温知夏、沈糯、柏言的高潮动作画面" in binding
+    assert "图片1中心的角色为温知夏、沈糯、柏言" in binding
     assert "温知夏（beige cardigan, chestnut long hair）" in binding
     assert "沈糯（pink hoodie, lollipop）" in binding
     assert "柏言（wa-style robe, tea cup）" in binding
@@ -514,6 +737,43 @@ def test_reference_binding_does_not_reflow_appearance_when_subject_scene_exists(
     p = video_prompt.compile_climax_video_prompt(spec)
     assert "丰腴肥熟" not in p
     assert "hourglass figure" in p  # 简化外貌仍在 [主体/场景]
+
+
+# ===== 参考绑定不再写「画面另含未绑定角色」提示（用户拍板 2026-08-28） =====
+
+
+def test_climax_does_not_flag_unbound_person_in_action():
+    spec = _spec(
+        actors=["虞妙玥"],
+        action_sequence=[
+            {"beat": "定格起点", "desc": "Man presses a metal token against the woman's waist"},
+        ],
+    )
+    p = video_prompt.compile_climax_video_prompt(spec)
+    binding = p.split("[参考绑定]：", 1)[1].split("\n\n", 1)[0]
+    assert "图片1中心的角色为虞妙玥" in binding
+    assert "未绑定角色" not in binding
+
+
+def test_climax_no_unbound_warning_when_all_bound():
+    # 动作里只出现已被绑定的角色名，不产生「未绑定角色」提示
+    spec = _spec(action_sequence=[{"beat": "定格起点", "desc": "温知夏起身，沈糯拍照，柏言倒水"}])
+    p = video_prompt.compile_climax_video_prompt(spec)
+    assert "未绑定角色" not in p
+
+
+def test_build_request_no_unbound_person_warning():
+    spec = _spec(
+        actors=["虞妙玥"],
+        action_sequence=[{"beat": "定格起点", "desc": "Man presses a token against the woman"}],
+    )
+    req = video_prompt.build_video_request(
+        mode="climax", spec=spec,
+        video_config={"base_url": "https://x.com/videos", "model": "m"},
+        first_frame="http://x/c.png",
+    )
+    assert not any("未绑定角色" in w for w in req["warnings"])
+    assert "图片1中心的角色为虞妙玥" in req["reference_binding"]["图片1"]
 
 
 def test_reference_binding_firstlast_and_transition_bind_identity():

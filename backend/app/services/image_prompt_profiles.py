@@ -5,7 +5,7 @@ import json
 import re
 from collections.abc import Callable, Mapping
 
-from app.services import image_prompt_extract
+from app.services import image_prompt_extract, prompt_clean
 
 
 ANIMA_QUALITY_TAGS = (
@@ -22,6 +22,12 @@ ANIMA_NEGATIVE_TAGS = (
 )
 
 PROFILE_IDS = ("anima_tags", "krea2", "natural_language", "niji_sections")
+
+
+def _diag_list(diag: dict[str, object], key: str) -> list[object]:
+    """取诊断字典里的列表字段；缺失/类型不符回退空列表（mypy 可收窄）。"""
+    value = diag.get(key)
+    return value if isinstance(value, list) else []
 
 
 def inline_generation_instruction(profile: str) -> str:
@@ -346,6 +352,7 @@ def system_with_preset(
     preset_dir: str = "",
     preset_name: str = "",
     user_name: str = "",
+    task_label: str = "内部生图提示词任务",
 ) -> str:
     """把当前偏置/防拦截预设用于独立提示词调用，不携带剧情历史。"""
     if not (preset_dir.strip() and preset_name.strip()):
@@ -378,7 +385,7 @@ def system_with_preset(
             return system
         return (
             guard
-            + "\n\n【内部生图提示词任务】以下任务独立于剧情正文，只输出目标协议要求的提示词，"
+            + f"\n\n【{task_label}】以下任务独立于剧情正文，只输出目标协议要求的提示词，"
               "不得续写剧情、解释、道歉或附加拒答说明。\n"
             + system
         )
@@ -571,26 +578,20 @@ def _anonymize_scene_characters(scene: Mapping[str, object]) -> dict[str, object
     return result
 
 
-_REFUSAL_RE = re.compile(
-    r"\bI\s+(?:can't|cannot|can not|won't|will not)\s+"
-    r"(?:help|assist|comply|generate|create|produce|write|transform|provide|fulfill)\b|"
-    r"无法(?:协助|帮助|满足)|不能(?:协助|帮助|满足)",
-    re.I,
-)
+# 拒答句式识别/清洗收口到 prompt_clean（生图与视频提示词链共用同一套规则）。
+_REFUSAL_RE = prompt_clean.REFUSAL_RE
+_strip_refusal_suffix = prompt_clean.strip_refusal_suffix
+
+# 渲染模型可能输出 <think>…</think> 推理段（新仓库/新大脑模型 CoT 行为不稳定，
+# 2026-08-29 trace 实证：编译产物整段 think 混进提示词直接提交 ComfyUI）。
+# 正则对齐 image_prompt_extract._THINK_RE/_THINK_OPEN_TAIL_RE。
+_THINK_RE = re.compile(r"\s*<think\b[^>]*>[\s\S]*?</think>\s*", re.I)
+_THINK_OPEN_TAIL_RE = re.compile(r"\s*<think\b[^>]*>[\s\S]*\Z", re.I)
 
 
-def _strip_refusal_suffix(raw: str) -> str:
-    """保留拒答前已经合规的提示词，只裁掉模型追加的拒答说明。"""
-    text = image_prompt_extract.restore_jailbreak(raw or "")
-    match = _REFUSAL_RE.search(text)
-    if not match:
-        return text
-    line_start = text.rfind("\n", 0, match.start()) + 1
-    prefix = text[line_start:match.start()]
-    cut = line_start if re.search(
-        r"此请求|该请求|抱歉|sorry|I(?:'m| am) Claude Code", prefix, re.I,
-    ) else match.start()
-    return text[:cut].rstrip(" ,，;；\r\n")
+def _strip_think(text: str) -> str:
+    """剥掉 think 推理段（含未闭合直达结尾的尾部）；think 后的正文才是提示词。"""
+    return _THINK_OPEN_TAIL_RE.sub("", _THINK_RE.sub("", text or ""))
 
 _ANIMA_VISUAL_DEVICE_RE = re.compile(
     r"\b(?:reflection|mirror|frame|framing|occlusion|silhouette|negative space|foreground|"
@@ -1639,7 +1640,7 @@ def generate(
     system = _system(profile, fact_scene)
     source = json.dumps(model_scene, ensure_ascii=False, separators=(",", ":"))
     first_raw = generate_text(system, source)
-    raw = _strip_refusal_suffix(first_raw)
+    raw = _strip_refusal_suffix(_strip_think(first_raw))
     prompt = _normalize(profile, raw, fact_scene)
     errors = _errors(profile, prompt, fact_scene)
     if not raw.strip() and _REFUSAL_RE.search(image_prompt_extract.restore_jailbreak(first_raw)):
@@ -1657,7 +1658,7 @@ def generate(
         f"\n上次输出：{raw}"
     )
     second_raw = generate_text(system, repair)
-    repaired_raw = _strip_refusal_suffix(second_raw)
+    repaired_raw = _strip_refusal_suffix(_strip_think(second_raw))
     prompt = _normalize(profile, repaired_raw, fact_scene)
     errors = _errors(profile, prompt, fact_scene)
     if (not repaired_raw.strip()
@@ -1706,3 +1707,132 @@ def generate_result(
         "field_ledger": diagnostics.get("field_ledger") or {},
     }
     return result
+
+
+_FRAME_EXTRACT_SYSTEM = (
+    "你是首尾帧画面事实提取器。输入包含两段画面描述（first=楼层开头画面、last=楼层结尾画面）"
+    "与角色/场景结构化事实。分别针对每个时点提取英文结构化画面事实，只输出 JSON 对象："
+    '{"first": {"action": "...", "visual_facts": ["...", "..."]}, '
+    '"last": {"action": "...", "visual_facts": ["...", "..."]}}。'
+    "action：该时点人物的身体动作与姿态，一条具体可见的英文短语，不含心理与叙事总结。"
+    "visual_facts：该时点可见的视觉事实列表（3-6 条英文短语：肢体位置、衣物状态、道具、"
+    "环境互动），必须与该时点的画面描述一致，不得引入画面描述之外的事件。"
+)
+
+
+def _parse_frame_extract(raw: str) -> dict[str, dict[str, object]] | None:
+    """解析提取输出；剥 think 与代码围栏，字段非法视为整体失败。
+
+    提取模型带 CoT 时 JSON 常混在 think 之后，不剥离则解析必败 → 两次重试全废 →
+    帧编译失去提取事实（2026-08-29 新仓库 trace：尾帧降级为中文叙事原文）。
+    """
+    import json as _json
+
+    text = _strip_think(raw or "").strip()
+    if text.startswith("```"):
+        text = text.strip("`").lstrip("json").strip()
+    try:
+        value = _json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(value, dict):
+        return None
+    parsed: dict[str, dict[str, object]] = {}
+    for frame in ("first", "last"):
+        item = value.get(frame)
+        if not isinstance(item, dict):
+            continue
+        action = str(item.get("action") or "").strip()
+        facts = item.get("visual_facts")
+        visual_facts = [
+            str(entry).strip()
+            for entry in (facts if isinstance(facts, list) else [])
+            if str(entry).strip()
+        ]
+        if action or visual_facts:
+            parsed[frame] = {
+                "action": action,
+                "visual_facts": visual_facts,
+            }
+    return parsed or None
+
+
+def generate_frame_prompts(
+    profile: str,
+    scene: Mapping[str, object],
+    frame_descs: Mapping[str, str],
+    generate_text: Callable[[str, str], str],
+    diagnostics: dict[str, object] | None = None,
+) -> dict[str, dict[str, object]]:
+    """首尾帧提示词：与高潮点同构——先提取帧时点结构化事实，再走同一编译器。
+
+    高潮点的 action/visual_facts 是主生成同轮搭车提取的结构化产物；首尾帧没有同轮
+    载体，这里补一步「时点提取」：一次 LLM 从楼层首段/尾段分别提取该时点的
+    action/visual_facts（英文结构化，字段名与高潮链 scene 对齐），再逐帧
+    generate() 编译（同一校验、带因重写、deterministic_fallback 兜底）。
+    帧描述是剧情可见正文，模型侧以 @(...)@ 防拦截标记保护（对齐 protected_narrative）。
+    """
+    if profile not in PROFILE_IDS:
+        raise ValueError(f"未知提示词模式：{profile}")
+    report = diagnostics if diagnostics is not None else {}
+    report.clear()
+    wanted = {
+        frame: str(desc or "").strip()
+        for frame, desc in frame_descs.items()
+        if str(desc or "").strip()
+    }
+    if not wanted:
+        return {}
+    # 提取输入：事实字段子集（不含整段 narrative）+ 标记保护的帧描述。
+    fact_keys = (
+        "appearance", "wardrobe", "location", "visual_facts", "subjects",
+        "secondary_characters", "actors", "rating",
+    )
+    extract_scene = {
+        key: scene[key] for key in fact_keys if key in scene
+    }
+    extract_source = _scene_for_model({
+        **extract_scene,
+        "frames": {
+            frame: f"@({desc})@" for frame, desc in wanted.items()
+        },
+    })
+    extract_payload = json.dumps(
+        extract_source, ensure_ascii=False, separators=(",", ":"),
+    )
+    extracted: dict[str, dict[str, object]] | None = None
+    raw = generate_text(_FRAME_EXTRACT_SYSTEM, extract_payload)
+    extracted = _parse_frame_extract(raw)
+    if extracted is None:
+        retry = (
+            f"{extract_payload}\n\n上次输出无法解析为约定 JSON，请只输出约定 JSON 对象。\n"
+            f"上次输出：{raw}"
+        )
+        extracted = _parse_frame_extract(generate_text(_FRAME_EXTRACT_SYSTEM, retry))
+    report["frame_extract_ok"] = extracted is not None
+    results: dict[str, dict[str, object]] = {}
+    for frame, desc in wanted.items():
+        frame_scene: dict[str, object] = dict(scene)
+        facts = (extracted or {}).get(frame)
+        if facts:
+            if facts.get("action"):
+                frame_scene["action"] = facts["action"]
+            if facts.get("visual_facts"):
+                frame_scene["visual_facts"] = facts["visual_facts"]
+        else:
+            report[f"{frame}_extract_missing"] = True
+        # 帧描述以 protected_narrative 进链：模型侧带防拦截标记，本地校验用还原正文。
+        frame_scene["protected_narrative"] = f"@({desc})@"
+        frame_diag: dict[str, object] = {}
+        prompt = generate(profile, frame_scene, generate_text, frame_diag)
+        results[frame] = {
+            "prompt": prompt,
+            "negative_prompt": negative_prompt(profile, frame_scene),
+            "strategy": str(frame_diag.get("strategy") or "direct"),
+            "validation_errors": list(dict.fromkeys([
+                *[str(item) for item in _diag_list(frame_diag, "first_errors")],
+                *[str(item) for item in _diag_list(frame_diag, "repair_errors")],
+            ])),
+            "field_ledger": frame_diag.get("field_ledger") or {},
+        }
+    return results

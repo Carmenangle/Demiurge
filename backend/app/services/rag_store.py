@@ -19,7 +19,7 @@ from pathlib import Path
 
 from langchain_core.documents import Document
 
-from app.services import rag_backend, rag_retrieval, reranker
+from app.services import comfyui_client, rag_backend, rag_retrieval, reranker
 from app.services.rag_backend import EmbedConfig
 
 
@@ -606,18 +606,56 @@ def _local_path_of(image_url: str) -> Path | None:
         return None
 
 
+def _remote_view_target(image_url: str) -> dict | None:
+    """解析 legacy remote-view 直链（/api/comfyui/view?filename=...&url=<comfyui>）。
+
+    早期生成未落盘留存时，image_url 直接指向 ComfyUI output 代理；ComfyUI 清理输出后
+    这类条目就成裂图。返回 {filename, type, subfolder, url}；非该形态返回 None。
+    """
+    if not image_url or "/api/comfyui/view?" not in image_url:
+        return None
+    try:
+        from urllib.parse import urlparse, parse_qs
+
+        query = parse_qs(urlparse(image_url).query)
+        filename = (query.get("filename") or [""])[0]
+        if not filename:
+            return None
+        return {
+            "filename": filename,
+            "type": (query.get("type") or ["output"])[0],
+            "subfolder": (query.get("subfolder") or [""])[0],
+            "url": (query.get("url") or [""])[0],
+        }
+    except Exception:
+        return None
+
+
 def prune_missing_generations(repo_id: str, cfg: EmbedConfig) -> int:
     """清理「僵尸记录」：指向本机留存图、但磁盘文件已不存在的 generation 条目
     （多因用户手动删磁盘文件、未走应用删除按钮，留下裂图记录）。返回删除条数。
-    只删本机留存且确实缺失的；外部 URL 图(无 local-view)无法判定存在性，一律保留。"""
+    只删确实缺失的：local-view 条目按磁盘文件存在性判定；legacy remote-view 直链
+    向 ComfyUI 探测，仅在其明确 404 时删。外部 URL 图与 ComfyUI 未起/探测异常
+    （无法判定存在性）一律保留，防止误删真源。"""
     store = _store(_repo_collection(repo_id), cfg)
     removed = 0
     for d in _dump(_repo_collection(repo_id), cfg):
         if d.get("kind") != "generation":
             continue
-        p = _local_path_of((d.get("image_url") or "").strip())
-        if p is None or p.is_file():
-            continue  # 非本机图 或 文件仍在 → 保留
+        image_url = (d.get("image_url") or "").strip()
+        missing = False
+        p = _local_path_of(image_url)
+        if p is not None:
+            missing = not p.is_file()
+        else:
+            target = _remote_view_target(image_url)
+            if target is not None:
+                missing = comfyui_client.probe_view(
+                    target["url"], target["filename"],
+                    target["type"], target["subfolder"],
+                ) == "missing"
+        if not missing:
+            continue  # 文件仍在 / 无法判定（外链、ComfyUI 未起）→ 保留
         try:
             store.delete(ids=[d["id"]])
             removed += 1
