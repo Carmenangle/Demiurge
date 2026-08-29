@@ -28,8 +28,8 @@ def _ready_url(url: str) -> str:
     return normalized
 
 
-def submit_template(template_id: str, values: dict[str, object], prompt: str,
-                    url: str, client_id: str = "",
+def submit_template(template_id: str, values: dict[str, object], prompt: str = "",
+                    url: str = "", client_id: str = "",
                     loras: list[dict[str, object]] | None = None,
                     lora_mode: str = "single") -> dict[str, object]:
     template = template_store.get_template(template_id)

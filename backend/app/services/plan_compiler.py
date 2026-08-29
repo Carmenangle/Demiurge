@@ -94,6 +94,8 @@ _COMPILE_SYSTEM = (
     "media.collect_comfy_outputs 的 submit_result/prompt_ids/prompts 由前序 submit 步骤"
     "运行时填充：编译时省略这些键，只写 inputs_from 链接到 submit 步骤，names 可写各产物名。\n"
     "所有落盘/输出目录参数一律用运行环境的 output_dir，禁止使用用户文档所在目录。\n"
+    "用户指定了 LoRA 时，在 submit 参数里写 lora_name（用本机目录里的真实文件名）；"
+    "未指定则不写（模板自带 LoRA 配置生效）。\n"
     "【能力清单（manifest）】\n{manifest}"
 )
 
@@ -162,6 +164,10 @@ def compile_plan(*, intent: str, history: str = "", attachments: list[dict] | No
                 match = next((t for t in templates
                               if t.get("id") == tid or t.get("id", "").startswith(tid)
                               or t.get("name") == tid), None)
+                if match is None:
+                    # 模型可能写引用表达式/带修饰名：参数串里含已知模板名即归一
+                    match = next((t for t in templates
+                                  if t.get("name") and t["name"] in tid), None)
                 if match is not None:
                     step.params["template_id"] = match["id"]
         except Exception:  # noqa: BLE001 - 模板库不可用时跳过归一，由执行期报错

@@ -11,8 +11,8 @@ from typing import Any
 from app.services.workflow_submission import WorkflowSubmissionError, submit_template
 
 
-def submit_batch(template_id: str, variants: list[dict[str, Any]], prompt: str,
-                 url: str, client_id: str = "",
+def submit_batch(template_id: str, variants: list[dict[str, Any]], prompt: str = "",
+                 url: str = "", client_id: str = "",
                  loras: list[dict[str, Any]] | None = None,
                  lora_mode: str = "single") -> dict[str, Any]:
     """同模板多变体批量提交：每个变体一次 submit_template，单条失败隔离不中断整批。
@@ -24,9 +24,13 @@ def submit_batch(template_id: str, variants: list[dict[str, Any]], prompt: str,
         if not isinstance(values, dict):
             results.append({"index": index, "ok": False, "detail": "变体值必须是对象"})
             continue
+        values["__template_id_resolved__"] = True  # 占位防重复归一
+        values.pop("__template_id_resolved__")
+        values["template_id"] = _resolve_template_id(str(values.get("template_id") or ""))
         _resolve_lora_in_values(values)
-        # 变体级 prompt 覆盖：values["prompt"] 优先于共享 prompt（逐套装不同提示词用）
-        step_prompt = str(values.get("prompt") or prompt or "").strip()
+        # 变体级 prompt 覆盖：prompt/positive_prompt 优先于共享 prompt（逐套装不同提示词用）
+        step_prompt = str(values.get("prompt") or values.get("positive_prompt")
+                          or prompt or "").strip()
         if not step_prompt:
             results.append({"index": index, "ok": False,
                             "detail": "缺少 prompt（共享与变体级均未提供）"})
@@ -87,8 +91,9 @@ def collect_comfy_outputs(prompt_ids: list[str] | None = None, comfyui_url: str 
 
     # prompt_ids 可由 inputs_from 链接的 submit 产出推导；submit_result 兼容
     # submit_batch（results 数组）/ submit_template（顶层 prompt_id）/ 其列表三种形态
-    ids = list(prompt_ids or [])
-    if not ids and submit_result:
+    # submit_result 链接值优先（编译期写入的 prompt_ids 可能是占位符）
+    ids: list[str] = []
+    if submit_result:
         items = submit_result if isinstance(submit_result, list) else [submit_result]
         for item in items:
             if not isinstance(item, dict):
@@ -98,6 +103,8 @@ def collect_comfy_outputs(prompt_ids: list[str] | None = None, comfyui_url: str 
             for r in item.get("results") or []:
                 if r.get("ok") and r.get("prompt_id"):
                     ids.append(str(r["prompt_id"]))
+    if not ids:
+        ids = [str(x) for x in (prompt_ids or [])]
     if not ids:
         raise ValueError("collect 缺少 prompt_ids（或 inputs_from 提供的 submit_result）")
     deadline = _time.time() + max(30, timeout_seconds)
@@ -143,6 +150,18 @@ def collect_comfy_outputs(prompt_ids: list[str] | None = None, comfyui_url: str 
         results.append({"prompt_id": prompt_id, "label": label, "ok": True,
                         "file": str(dest), "url": shown, "rag_indexed": True})
     return {"collected": sum(1 for r in results if r.get("ok")), "results": results}
+
+
+def _resolve_template_id(template_id: str) -> str:
+    """template_id 查不到时按名称包含匹配归一（容忍「模板」后缀等修饰）。"""
+    from app.services import template_store
+    if template_store.get_template(template_id) is not None:
+        return template_id
+    cleaned = template_id.replace("模板", "").strip()
+    for t in template_store.list_templates():
+        if t["id"] == template_id or t.get("name") == cleaned or cleaned in t.get("name", ""):
+            return t["id"]
+    return template_id
 
 
 def _resolve_lora_in_values(values: dict) -> None:
