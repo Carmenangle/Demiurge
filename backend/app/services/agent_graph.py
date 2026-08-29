@@ -491,9 +491,32 @@ def plan_compiler_node(state: AgentState) -> dict:
                               ("video", ctx.get("vid_base")), ("embed", ctx.get("embed_base")))
         if flag
     }
+    # 编译期预读：用户消息里显式写出的本地文本文件（仅用户明示的路径，容量封顶）。
+    # 内容进编译上下文，使计划能带逐套装等运行时才能确定的精确参数；trace 留痕。
+    attachments: list[dict] = []
+    try:
+        from app.services import prose_style as _ps_restore
+        for raw_path in set(re.findall(
+                r"[A-Za-z]:\\[^\s<>|？?」』]*\.(?:md|txt|json|csv|log|ya?ml|xml|html)",
+                text)):
+            try:
+                read = plan_compiler.read_user_file(raw_path)
+            except Exception as exc:  # noqa: BLE001 - 预读失败如实留痕，不阻断编译
+                run_trace.emit(ctx, "plan.attachments", status="error",
+                               path=raw_path, error=str(exc))
+                continue
+            attachments.append({"name": raw_path.rsplit("\\", 1)[-1].rsplit("/", 1)[-1],
+                                "text": read["text"]})
+            run_trace.emit(ctx, "plan.attachments", status="ok", path=raw_path,
+                           chars=len(read["text"]))
+        if len(attachments) > 3:
+            attachments = attachments[:3]
+    except Exception as exc:  # noqa: BLE001
+        run_trace.emit(ctx, "plan.attachments", status="error", error=str(exc))
     try:
         outcome = plan_compiler.compile_plan(
             intent=text, history=agent_context.history_text(ctx)[-800:],
+            attachments=attachments,
             repo_id=str(ctx.get("repo_id") or ctx.get("thread_id") or ""),
             output_dir=output_dir, configured_models=configured,
             chat_base=ctx["chat_base"], chat_key=ctx["chat_key"],

@@ -38,6 +38,9 @@
               "type": "string"
             }
           },
+          "submit_result": {
+            "type": "object"
+          },
           "comfyui_url": {
             "type": "string"
           },
@@ -64,7 +67,6 @@
           }
         },
         "required": [
-          "prompt_ids",
           "comfyui_url",
           "output_dir",
           "repo_id"
@@ -141,7 +143,6 @@
         "required": [
           "template_id",
           "variants",
-          "prompt",
           "url"
         ],
         "additionalProperties": false

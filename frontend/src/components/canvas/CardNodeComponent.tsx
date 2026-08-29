@@ -8,6 +8,7 @@ import { NodeCard } from "../WorkflowCard";
 import { AudioPlayer } from "../AudioPlayer";
 import { runScripts, Placement } from "../../lib/regexEngine";
 import { renderMarkdown } from "../../lib/renderMarkdown";
+import { useStableDetailsOpen } from "../../lib/useStableDetailsOpen";
 
 function audioLinesKey(lines?: Array<{ speaker: string; url: string }>): string {
   return (lines || []).map((l) => `${l.speaker || ""}|${l.url}`).join("~");
@@ -73,6 +74,8 @@ export const CardNodeComponent = memo(function CardNodeComponent({ id, data, sel
       : (d.node.storyText || "");
     return renderMarkdown(raw || "（空楼层）");
   }, [d.displayRegex, d.node.storyText]);
+  // 楼层正文里预设正则折叠的 <details>（思考过程）在重渲染重写后保持展开状态（同对话模式）。
+  const stableDetailsRef = useStableDetailsOpen(storyHtml);
   // NodeResizer 的 onResize 引用必须稳定：其内部 effect 依赖 onResize，
   // 若投影合并触发本组件重渲染导致 onResize 引用变化，会 destroy+重建 d3 drag → 拖拽中途断掉。
   // 用 ref 保持最新回调，useCallback([id]) 让引用跨渲染稳定。
@@ -496,6 +499,7 @@ export const CardNodeComponent = memo(function CardNodeComponent({ id, data, sel
               </div>
               <div
                 className="bot-text bot-html story-node-text"
+                ref={stableDetailsRef}
                 style={{ flex: 1, minWidth: 0, overflow: "hidden", padding: "6px 4px", fontSize: 11, lineHeight: 1.5, color: "var(--text)" }}
                 dangerouslySetInnerHTML={{ __html: storyHtml }}
               />
@@ -504,6 +508,7 @@ export const CardNodeComponent = memo(function CardNodeComponent({ id, data, sel
             // 无封面：9:16 竖版卡，正文超长省略，双击看全文
             <div
               className="bot-text bot-html story-node-text"
+              ref={stableDetailsRef}
               style={{ flex: 1, minHeight: 0, overflow: "hidden", padding: "8px 10px", fontSize: 11, lineHeight: 1.6, color: "var(--text)" }}
               dangerouslySetInnerHTML={{ __html: storyHtml }}
             />

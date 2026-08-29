@@ -24,8 +24,14 @@ def submit_batch(template_id: str, variants: list[dict[str, Any]], prompt: str,
         if not isinstance(values, dict):
             results.append({"index": index, "ok": False, "detail": "变体值必须是对象"})
             continue
+        # 变体级 prompt 覆盖：values["prompt"] 优先于共享 prompt（逐套装不同提示词用）
+        step_prompt = str(values.get("prompt") or prompt or "").strip()
+        if not step_prompt:
+            results.append({"index": index, "ok": False,
+                            "detail": "缺少 prompt（共享与变体级均未提供）"})
+            continue
         try:
-            outcome = submit_template(template_id, values, prompt, url, client_id,
+            outcome = submit_template(template_id, values, step_prompt, url, client_id,
                                       loras=loras, lora_mode=lora_mode)
             results.append({"index": index, "ok": True,
                             "prompt_id": outcome.get("prompt_id")})
@@ -59,8 +65,10 @@ def read_text_file(path: str, max_chars: int = 20000) -> dict[str, Any]:
     return {"path": str(target), "text": text, "truncated": len(text) >= max_chars}
 
 
-def collect_comfy_outputs(prompt_ids: list[str], comfyui_url: str, output_dir: str,
-                          repo_id: str, names: list[str] | None = None,
+def collect_comfy_outputs(prompt_ids: list[str] | None = None, comfyui_url: str = "",
+                          output_dir: str = "", repo_id: str = "",
+                          submit_result: dict[str, Any] | None = None,
+                          names: list[str] | None = None,
                           prompts: list[str] | None = None,
                           timeout_seconds: int = 600,
                           embed_base: str = "", embed_key: str = "",
@@ -76,8 +84,24 @@ def collect_comfy_outputs(prompt_ids: list[str], comfyui_url: str, output_dir: s
     from app.services.rag_backend import EmbedConfig
     from app.services import rag_store
 
+    # prompt_ids 可由 inputs_from 链接的 submit 产出推导；submit_result 兼容
+    # submit_batch（results 数组）/ submit_template（顶层 prompt_id）/ 其列表三种形态
+    ids = list(prompt_ids or [])
+    if not ids and submit_result:
+        items = submit_result if isinstance(submit_result, list) else [submit_result]
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if item.get("prompt_id"):
+                ids.append(str(item["prompt_id"]))
+            for r in item.get("results") or []:
+                if r.get("ok") and r.get("prompt_id"):
+                    ids.append(str(r["prompt_id"]))
+    if not ids:
+        raise ValueError("collect 缺少 prompt_ids（或 inputs_from 提供的 submit_result）")
     deadline = _time.time() + max(30, timeout_seconds)
     results: list[dict[str, Any]] = []
+    prompt_ids = ids
     for index, prompt_id in enumerate(prompt_ids):
         label = (names[index] if names and index < len(names) and str(names[index]).strip()
                  else f"output-{index + 1}")
@@ -85,12 +109,12 @@ def collect_comfy_outputs(prompt_ids: list[str], comfyui_url: str, output_dir: s
         while _time.time() < deadline:
             result = comfyui_client.fetch_result(comfyui_url, prompt_id)
             status = str(result.get("status"))
-            if status == "done":
+            if status in ("done", "completed"):
                 break
             if status == "not_found":
                 raise RuntimeError(f"任务 {prompt_id[:8]} 在 ComfyUI 中丢失（可能已重启）")
             _time.sleep(2.0)
-        if status != "done":
+        if status not in ("done", "completed"):
             raise RuntimeError(f"等待任务 {prompt_id[:8]} 出图超时（{timeout_seconds}s）")
         images = result.get("images") or []
         if not images:

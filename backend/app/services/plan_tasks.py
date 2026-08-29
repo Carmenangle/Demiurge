@@ -508,20 +508,37 @@ def _run_task(task, cancel: threading.Event) -> None:
 
 def _resolve_params(step, outputs: dict[str, dict]) -> dict:
     params = dict(json.loads(step["params_json"] or "{}"))
+
+    def _assign(key: str, value: Any) -> None:
+        # 同键多来源（如两个 submit 步骤都产出 submit_result）自动累积为列表
+        if key not in params:
+            params[key] = value
+        elif isinstance(params[key], list) and not isinstance(value, dict):
+            params[key].append(value)
+        else:
+            params[key] = [params[key], value]
+
     for ref in json.loads(step["inputs_from_json"] or "[]"):
         if ref in outputs:
             value = outputs[ref]
         else:
             head, _, key = ref.partition(".")
-            value = outputs.get(head, {}).get(key)
+            source = outputs.get(head) or {}
+            value = source.get(key)
+            if value is None and head in outputs:
+                # 产出里没有同名键：回退为整包产出（handler 自行取所需字段）
+                value = source
         if value is None:
+            continue
+        if isinstance(value, dict) and ref not in outputs:
+            # 点引用命中整包回退时按「引用键=整包」处理，不摊开字段
+            _assign(key, value)
             continue
         if isinstance(value, dict):
             for name, item in value.items():
                 params.setdefault(name, item)
         else:
-            key = ref.partition(".")[2] or ref
-            params.setdefault(key, value)
+            _assign(ref.partition(".")[2] or ref, value)
     return params
 
 
@@ -533,6 +550,9 @@ def _dispatch(operation: str, params: dict) -> Any:
     func = getattr(importlib.import_module(module_name), func_name)
     accepted = set((cap.params_schema or {}).get("properties") or {})
     kwargs = {k: v for k, v in params.items() if k in accepted} if accepted else params
+    if "client_id" in accepted and not kwargs.get("client_id"):
+        # ComfyUI /prompt 要求合法 UUID 的 client_id；聊天链路由前端提供，执行器自行生成
+        kwargs["client_id"] = uuid.uuid4().hex
     return func(**kwargs)
 
 

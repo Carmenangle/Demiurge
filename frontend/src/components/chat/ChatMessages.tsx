@@ -1,8 +1,9 @@
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Bot, Brush, Check, ChevronDown, CopyPlus, CornerDownRight, Download, ExternalLink, Flag, GitBranch, Image as ImageIcon, Images, Merge, MessageCircle, MoreHorizontal, Pause, Pencil, Play, Plus, RotateCw, ScanText, Search, Send, Sparkles, Square, Trash2, Video, Workflow, Wrench, X } from "lucide-react";
 import type { AgentRoute, ChatMessage, MsgPart, PromptApproval, RouteChoice } from "../../types/chat";
 import type { AssistantAvatarState } from "../../lib/assistantAvatar";
 import { runScripts, Placement, type RegexScript } from "../../lib/regexEngine";
+import { restoreOpenDetails, trackDetailsToggle } from "../../lib/stableDetailsOpen";
 import { renderMarkdown } from "../../lib/renderMarkdown";
 import { substituteMacros } from "../../lib/chatMacros";
 import { userMessagePlainText, userMessageRichContent } from "../../lib/chatGeneration";
@@ -314,6 +315,21 @@ export function RouteChoiceCard({
 
 function AssistantMessageBase({ msg, streaming, avatarState = "default", portrait, displayRegex, depth, macros, onSendImage, onMaskImage, onRunCommand, onSetCover, onPromptApproval, onRouteChoice, onRegenerate, onCancelGeneration, onRetryIllustration, regenerating = false, onEdit, onDelete, onCreateCheckpoint, onBranch, onMergeAudio, visualCiRepoId, visualCiOutputDir }: { msg: ChatMessage; streaming?: boolean; avatarState?: AssistantAvatarState; portrait?: { name: string; url: string } | null; displayRegex?: RegexScript[]; depth?: number; macros?: { char: string; user: string }; onSendImage: (url: string) => void; onMaskImage?: (url: string) => void; onRunCommand?: (cmd: string) => void; onSetCover?: (url: string) => void; onPromptApproval?: (approval: PromptApproval, action: "submit" | "change" | "cancel", editedPrompt?: string) => Promise<void>; onRouteChoice?: (choice: RouteChoice, route: AgentRoute) => Promise<void>; onRegenerate?: (messageId: string, slotId?: string) => void; onCancelGeneration?: (messageId: string, slotId: string) => void; onRetryIllustration?: (messageId: string, slotId: string) => void; regenerating?: boolean; onEdit?: (id: string, text: string) => void; onDelete?: (id: string) => void; onCreateCheckpoint?: (id: string) => void; onBranch?: (id: string) => void; onMergeAudio?: (messageId: string) => Promise<void>; visualCiRepoId?: string; visualCiOutputDir?: string }) {
   const [showThinking, setShowThinking] = useState(false);
+  // 正文里预设正则折叠出的 <details>（思考过程等）在 innerHTML 重写后保持展开状态：
+  // 插画回填/流式/状态更新都会重写 bot-html，无保态时用户展开几秒就被收起（2026-08-29）。
+  const stableDetailsRefs = useRef<Record<number, HTMLDivElement | null>>({});
+  const openDetailsKeys = useRef<Set<string>>(new Set());
+  useLayoutEffect(() => {
+    for (const el of Object.values(stableDetailsRefs.current)) {
+      if (!el) continue;
+      restoreOpenDetails(el, openDetailsKeys.current);
+      // toggle 不冒泡，但 capture 阶段可达祖先：容器上委托记录展开状态。
+      if (!el.dataset.detailsBound) {
+        el.dataset.detailsBound = "1";
+        el.addEventListener("toggle", (e) => trackDetailsToggle(e.target, openDetailsKeys.current), true);
+      }
+    }
+  });
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
@@ -612,12 +628,13 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
         ) : orderedMediaParts.length > 0 ? (
           <div className="bot-rich-parts">
             {orderedChunks.map((chunk, index) => index % 2 === 0
-              ? (chunk ? <div className="bot-text bot-html" key={`text-${index}`}
+              ? (chunk ? <div className="bot-text bot-html" key={`text-${index}`} ref={(el) => { stableDetailsRefs.current[index] = el; }}
                 dangerouslySetInnerHTML={{ __html: renderMarkdown(chunk) }} /> : null)
               : renderMediaPart(orderedMediaParts[Number(chunk)], Number(chunk)))}
           </div>
         ) : cleanText ? (
-          <div className="bot-text bot-html" dangerouslySetInnerHTML={{ __html: renderMarkdown(cleanText) }} />
+          <div className="bot-text bot-html" ref={(el) => { stableDetailsRefs.current[-1] = el; }}
+            dangerouslySetInnerHTML={{ __html: renderMarkdown(cleanText) }} />
         ) : null}
         {audioTracks.length >= 2 && onMergeAudio && (
           <div className="audio-merge-bar">

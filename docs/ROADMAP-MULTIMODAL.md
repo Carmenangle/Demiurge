@@ -171,6 +171,14 @@ V1 与 M1 前半（M1.1–M1.3）互不依赖，可并行推进。
 > 帧循环提交失败自动中断残留任务并重提一次（对齐 stalled 自愈，上限 1 次）；再失败进失败槽
 > （可见+可重新生成）。卡死自愈从此覆盖「提交」与「轮询」两个阶段。
 >
+> **进度（2026-08-29 二轮验收：响应丢失救回 + 思考折叠保态）**：①重发对话后 ComfyUI 已出图
+> 但对话无回填——后端 submit_prompt 的 urlopen 超时抛错时**任务实际已被 ComfyUI 接收**（响应
+> 在返回 prompt_id 前被掐断），前端放弃了一个正在生成的任务。修复：客户端预生成 prompt_id
+> 随请求提交，超时后查 history+queue 确认任务已接收则**救回** prompt_id；②对话/画布正文里
+> 预设正则折叠出的 `<details>思考过程` 在任何消息更新（插画回填/流式/状态块）重写 innerHTML
+> 后都会回到默认收起——新增 lib/stableDetailsOpen（纯逻辑+stub DOM 回归测试）与
+> useStableDetailsOpen，details 的 toggle 经 capture 原生委托记录展开键，重渲染后恢复。
+>
 > **进度（2026-08-29 队列卡死自愈 + 失败槽重新生成，用户需求）**：①同步轮询 `pollWorkflowResult`
 > 补停顿守卫（对齐 workflowRuntime 5 分钟 stall 窗口，`seenRunning` 后不误杀；哨兵用 -1——
 > 0 是合法时间值会让第二段 pending 守卫失效，测试抓出）→ 返回 `kind:"stalled"`；调用侧

@@ -49,6 +49,16 @@ class CompileOutcome:
     strategy: str = ""
 
 
+def read_user_file(path: str, *, max_chars: int = 60000) -> dict:
+    """编译期预读用户消息里明示的本地文本文件（容量封顶；仅此用途，非执行面能力）。"""
+    from pathlib import Path
+    target = Path(path).expanduser()
+    if not target.is_file():
+        raise ValueError(f"文件不存在：{path}")
+    text = target.read_bytes().decode("utf-8", errors="replace")[:max_chars]
+    return {"path": str(target), "text": text}
+
+
 def _manifest_lines(capabilities: list[dict]) -> str:
     lines = []
     for item in capabilities:
@@ -81,13 +91,17 @@ _COMPILE_SYSTEM = (
     '  "approval_required": ["需要审批的 operation"]\n'
     "}\n"
     "steps[].id 是步骤标识（s1/s2…），inputs_from 引用此前步骤的 outputs 键。\n"
+    "media.collect_comfy_outputs 的 submit_result/prompt_ids/prompts 由前序 submit 步骤"
+    "运行时填充：编译时省略这些键，只写 inputs_from 链接到 submit 步骤，names 可写各产物名。\n"
+    "所有落盘/输出目录参数一律用运行环境的 output_dir，禁止使用用户文档所在目录。\n"
     "【能力清单（manifest）】\n{manifest}"
 )
 
 _COMPILE_USER = "{history}【用户意图】\n{intent}\n\n请输出计划 JSON。"
 
 
-def compile_plan(*, intent: str, history: str = "", repo_id: str = "",
+def compile_plan(*, intent: str, history: str = "", attachments: list[dict] | None = None,
+                 repo_id: str = "",
                  output_dir: str = "", configured_models: set[str] | frozenset[str] = frozenset(),
                  chat_base: str = "", chat_key: str = "", chat_model: str = "",
                  chat_fn: Callable | None = None, structured_chat_fn: Callable | None = None,
@@ -97,9 +111,16 @@ def compile_plan(*, intent: str, history: str = "", repo_id: str = "",
     capabilities = capability_registry.with_availability(configured_models)
     system = _COMPILE_SYSTEM.replace(
         "{manifest}", _manifest_lines(capabilities))
-    user = _COMPILE_USER.format(history=history, intent=intent)
+    if attachments:
+        blocks = "\n\n".join(
+            f"【附件文件：{item.get('name', 'file')}】\n{item.get('text', '')}"
+            for item in attachments)
+        system += "\n\n【用户消息引用的文件内容（编译时已读取，可据此填写精确参数）】\n" + blocks
+    user = _COMPILE_USER.format(history=history, intent=intent,
+                                repo_id=repo_id or "（未指定）", output_dir=output_dir or "（未指定）")
     call_args = (chat_base, chat_key, chat_model, system, user)
-    call_kwargs: dict[str, Any] = {"temperature": temperature, **(proxy_kwargs or {})}
+    call_kwargs: dict[str, Any] = {"temperature": temperature, "max_tokens": 8000,
+                                   **(proxy_kwargs or {})}
     outcome = CompileOutcome()
     validator_errors: list[str] = []
 
@@ -115,9 +136,14 @@ def compile_plan(*, intent: str, history: str = "", repo_id: str = "",
                 legacy=lambda u=attempt_user: chat_fn(*call_args[:4], u, **call_kwargs),
                 trace=trace,
             )
-        except Exception as exc:  # noqa: BLE001 - 统一结构化错误
-            outcome.errors = [f"计划编译失败：{exc}"]
-            return outcome
+        except Exception as exc:  # noqa: BLE001 - 解析/截断失败也重试一次
+            if attempt == 2:
+                outcome.errors = [f"计划编译失败：{exc}"]
+                return outcome
+            if trace is not None:
+                trace("plan.compiled", status="parse_error", attempt=attempt,
+                      error=str(exc)[:200])
+            continue
         plan = result.value
         outcome.raw = result.raw or plan.model_dump_json()
         outcome.strategy = result.strategy
@@ -125,6 +151,32 @@ def compile_plan(*, intent: str, history: str = "", repo_id: str = "",
         plan = plan.model_copy(update={
             "repo_id": plan.repo_id or repo_id,
         })
+        # 模板 ID 归一：模型抄写长 hex ID 易丢位——查不到时按名称/ID 前缀解析为真实 ID
+        try:
+            from app.services import template_store
+            templates = template_store.list_templates()
+            for step in plan.steps:
+                tid = str(step.params.get("template_id") or "")
+                if not tid or template_store.get_template(tid) is not None:
+                    continue
+                match = next((t for t in templates
+                              if t.get("id") == tid or t.get("id", "").startswith(tid)
+                              or t.get("name") == tid), None)
+                if match is not None:
+                    step.params["template_id"] = match["id"]
+        except Exception:  # noqa: BLE001 - 模板库不可用时跳过归一，由执行期报错
+            pass
+        # 运行环境参数归一：collect 的落盘目标由环境决定，不允许模型占位/编造；
+        # approval_required 由编译器确定性汇总（模型只列步骤，不负责汇总）
+        from app.services.capability_registry import get as _cap_get
+        approval = sorted({step.operation for step in plan.steps
+                           if (cap := _cap_get(step.operation)) is not None
+                           and cap.side_effect_level in ("durable", "expensive")})
+        plan = plan.model_copy(update={"approval_required": approval})
+        for step in plan.steps:
+            if step.operation == "media.collect_comfy_outputs":
+                step.params["output_dir"] = output_dir
+                step.params["repo_id"] = plan.repo_id
         validator_errors = plan_validator.validate(
             plan, capabilities=capabilities,
             configured_models=configured_models, allowed_prefix=output_dir,

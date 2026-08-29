@@ -161,6 +161,64 @@ def test_local_comfyui_http_adapters_ignore_environment_proxies():
     assert comfyui_client._DIRECT_SESSION.trust_env is False
 
 
+# ===== submit_prompt 响应丢失救回（2026-08-29「提交了任务也出了图却无回填」） =====
+
+
+def test_submit_prompt_rescues_task_when_response_lost_but_queued(monkeypatch):
+    """POST /prompt 超时但任务已入队（请求实际到达 ComfyUI）→ 救回 prompt_id 而非报错。"""
+    calls: list[str] = []
+
+    captured: dict = {}
+
+    def fake(url, timeout=None):
+        u = getattr(url, "full_url", url)
+        calls.append(u)
+        if "/prompt" in u:
+            # 响应在 ComfyUI 接收任务后被掐断；先记下提交时预生成的 prompt_id
+            captured["pid"] = json.loads(url.data.decode("utf-8"))["prompt_id"]
+            raise TimeoutError("timed out")
+        # 队列响应动态回显提交的 id（真实 ComfyUI 收到的就是这个 id）
+        return _FakeResp({"queue_running": [[0, {"prompt_id": captured.get("pid")}]], "queue_pending": []})
+
+    monkeypatch.setattr(comfyui_client, "urlopen", fake)
+    pid = comfyui_client.submit_prompt("http://127.0.0.1:8188", {"1": {}})
+    assert pid
+    assert calls[-1].endswith("/queue")  # 救回走了队列确认
+    assert any("/queue" in u for u in calls)  # 救回走了队列确认
+
+
+def test_submit_prompt_raises_when_response_lost_and_not_queued(monkeypatch):
+    """超时且队列/历史都没有该任务 → 照常报错（真实提交失败）。"""
+    def fake(url, timeout=None):
+        if "/prompt" in getattr(url, "full_url", url):
+            raise TimeoutError("timed out")
+        return _FakeResp({})
+
+    monkeypatch.setattr(comfyui_client, "urlopen", fake)
+    try:
+        comfyui_client.submit_prompt("http://127.0.0.1:8188", {"1": {}})
+        raise AssertionError("should raise")
+    except comfyui_client.ComfyError:
+        pass
+
+
+def test_submit_prompt_uses_client_generated_id(monkeypatch):
+    """请求体带客户端预生成的 prompt_id（救回判定的前提），正常响应优先用服务端 id。"""
+    seen: dict = {}
+
+    def fake(url, timeout=None):
+        if "/prompt" in getattr(url, "full_url", url):
+            req = url  # urlopen 收到 Request 对象
+            seen["body"] = json.loads(req.data.decode("utf-8"))
+            return _FakeResp({"prompt_id": "server-pid"})
+        return _FakeResp({})
+
+    monkeypatch.setattr(comfyui_client, "urlopen", fake)
+    pid = comfyui_client.submit_prompt("http://127.0.0.1:8188", {"1": {}})
+    assert pid == "server-pid"
+    assert isinstance(seen["body"].get("prompt_id"), str) and seen["body"]["prompt_id"]
+
+
 def test_full_object_info_uses_short_lived_cache(monkeypatch):
     calls = []
     comfyui_client._OBJECT_INFO_CACHE.clear()

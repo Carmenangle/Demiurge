@@ -11,7 +11,7 @@
 //   - 双击节点 → 详情面板
 //   - 拖动松开时中心点对齐吸附（±10px）
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ReactFlow, Controls, MiniMap, Background, BackgroundVariant,
   useNodesState, useEdgesState, addEdge, MarkerType,
@@ -62,6 +62,7 @@ import { subscribeProgress } from "../lib/comfyProgress";
 import { globalPendingToolCreates, canvasBridge } from "../components/canvas/shared";
 import { activeChatModel } from "../stores/settings";
 import { runScripts, Placement, type RegexScript } from "../lib/regexEngine";
+import { restoreOpenDetails, trackDetailsToggle } from "../lib/stableDetailsOpen";
 import { renderMarkdown } from "../lib/renderMarkdown";
 
 const nodeTypes = canvasNodeTypes;
@@ -95,6 +96,18 @@ export function CanvasStageFlow({
   gensRef.current = gens;
   const [loading, setLoading] = useState(true);
   const [detailNode, setDetailNode] = useState<CanvasNode | null>(null);
+  // 详情面板正文里预设正则折叠的 <details>（思考过程）在重渲染重写后保持展开状态（同对话模式）。
+  const detailHtmlRef = useRef<HTMLDivElement | null>(null);
+  const detailOpenKeys = useRef<Set<string>>(new Set());
+  useLayoutEffect(() => {
+    const el = detailHtmlRef.current;
+    if (!el) return;
+    restoreOpenDetails(el, detailOpenKeys.current);
+    if (!el.dataset.detailsBound) {
+      el.dataset.detailsBound = "1";
+      el.addEventListener("toggle", (e) => trackDetailsToggle(e.target, detailOpenKeys.current), true);
+    }
+  }, [detailNode?.storyText]);
   const [showStoryThinking, setShowStoryThinking] = useState(false);
   const [sendTarget, setSendTarget] = useState<{ title: string; payload: SendPayload } | null>(null);
   // Toast 队列：非实际产出（提交/失败/状态提示）用 2s 自动消失弹窗替代模态框
@@ -3096,7 +3109,7 @@ export function CanvasStageFlow({
                       {showStoryThinking && <div className="thinking-body">{detailNode.storyThinking}</div>}
                     </div>
                   ) : null}
-                  <div className="bot-text bot-html" style={{ fontSize: 14, lineHeight: 1.7, color: "var(--text)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}
+                  <div className="bot-text bot-html" ref={detailHtmlRef} style={{ fontSize: 14, lineHeight: 1.7, color: "var(--text)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}
                     dangerouslySetInnerHTML={{ __html: renderMarkdown(
                       (displayRegex && displayRegex.length > 0 && detailNode.storyText)
                         ? runScripts(detailNode.storyText, Placement.AI_OUTPUT, displayRegex, { isMarkdown: true, depth: 0 })

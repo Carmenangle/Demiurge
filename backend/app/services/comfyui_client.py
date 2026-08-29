@@ -5,6 +5,7 @@
 import json
 import socket
 import time
+import uuid
 from threading import Lock
 from urllib.error import HTTPError
 from urllib.parse import urlencode, urlparse
@@ -96,21 +97,43 @@ def fetch_object_info(
         return result
 
 
+def _prompt_accepted(url: str, prompt_id: str) -> bool:
+    """查 history 与 queue，确认任务是否已被 ComfyUI 接收（响应丢失后的救回判定）。"""
+    for path in (f"/history/{prompt_id}", "/queue"):
+        try:
+            with urlopen(_base(url) + path, timeout=8) as r:
+                data = json.loads(r.read())
+        except Exception:
+            continue
+        if path.startswith("/history"):
+            if data.get(prompt_id):
+                return True
+        else:
+            ids = _queue_prompt_ids(data, "queue_running") + _queue_prompt_ids(data, "queue_pending")
+            if prompt_id in ids:
+                return True
+    return False
+
+
 def submit_prompt(url: str, api: dict, client_id: str = "") -> str | None:
     """POST /prompt，返回 prompt_id。HTTPError 透出 ComfyUI 校验详情。
-    client_id 非空时随请求带上，ComfyUI 会把该任务进度只推给同 clientId 的 WebSocket。"""
-    payload: dict[str, object] = {"prompt": api}
+
+    客户端预生成 prompt_id 随请求带上：响应超时 ≠ 提交失败——大型工作流冷启动时
+    节点校验/模型加载可能慢于客户端超时，请求已到 ComfyUI 却在返回 prompt_id 前
+    被掐断。此时查队列与历史确认任务是否已接收，在则救回 prompt_id，避免前端放弃
+    一个实际正在生成的任务（2026-08-29 验收「提交了任务、ComfyUI 出了图、对话无回填」）。
+    """
+    prompt_id = str(uuid.uuid4())  # ComfyUI 校验 prompt_id 必须是标准带横线 UUID
+    payload: dict[str, object] = {"prompt": api, "prompt_id": prompt_id}
     if client_id:
         payload["client_id"] = client_id
     body = json.dumps(payload).encode("utf-8")
     rq = Request(_base(url) + "/prompt", data=body,
                  headers={"Content-Type": "application/json"})
     try:
-        # 大型工作流在 /prompt 入口会同步完成节点校验；冷启动时 10 秒不足，
-        # 请求可能已到 ComfyUI 却在返回 prompt_id 前被客户端掐断。
         with urlopen(rq, timeout=30) as r:
             res = json.loads(r.read())
-        return res.get("prompt_id")
+        return res.get("prompt_id") or prompt_id
     except HTTPError as e:
         try:
             detail = e.read().decode("utf-8", "replace")
@@ -118,6 +141,8 @@ def submit_prompt(url: str, api: dict, client_id: str = "") -> str | None:
             detail = str(e)
         raise ComfyError(detail, 500)
     except Exception as e:
+        if _prompt_accepted(url, prompt_id):
+            return prompt_id
         raise ComfyError(str(e), 500)
 
 
