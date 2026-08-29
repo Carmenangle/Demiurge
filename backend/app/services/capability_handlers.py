@@ -68,6 +68,8 @@ def read_text_file(path: str, max_chars: int = 20000) -> dict[str, Any]:
     from pathlib import Path as _Path
 
     target = _Path(path).expanduser()
+    if not _Path(path).is_absolute():
+        raise ValueError("仅接受绝对路径（相对路径不做隐式解析）")
     if not target.is_file():
         raise ValueError(f"文件不存在：{path}")
     data = target.read_bytes()
@@ -182,7 +184,8 @@ def _resolve_template_id(template_id: str) -> str:
         return template_id
     cleaned = template_id.replace("模板", "").strip()
     for t in template_store.list_templates():
-        if t["id"] == template_id or t.get("name") == cleaned or cleaned in t.get("name", ""):
+        if (t["id"] == template_id or t["id"].startswith(template_id)
+                or t.get("name") == cleaned or cleaned in t.get("name", "")):
             return t["id"]
     return template_id
 

@@ -42,6 +42,7 @@ export function SupportWidget(props: {
   useEffect(() => subscribePlanTaskActivities(setPlanActivities), []);
   useEffect(() => { localStorage.setItem(FAB_TOP_KEY, String(fabTop)); }, [fabTop]);
   useEffect(() => { localStorage.setItem(FAB_HIDDEN_KEY, hidden ? "1" : "0"); }, [hidden]);
+  useEffect(() => () => { if (longPressRef.current) clearTimeout(longPressRef.current); }, []);
   useEffect(() => subscribeFloatingPanels("support", () => setOpen(false)), []);
 
   const onFabPointerDown = (event: React.PointerEvent) => {
@@ -105,9 +106,9 @@ export function SupportWidget(props: {
             {(item.status === "awaiting_approval" || item.status === "blocked") && (
               <span style={{ display: "flex", gap: 8, marginTop: 6 }}>
                 {item.status === "awaiting_approval" && (
-                  <button className="btn" onClick={() => { void approvePlanTask(item.id); }}>批准</button>
+                  <button className="btn" onClick={() => { approvePlanTask(item.id).catch(() => undefined); }}>批准</button>
                 )}
-                <button className="btn" onClick={() => { void cancelPlanTask(item.id); }}>取消</button>
+                <button className="btn" onClick={() => { cancelPlanTask(item.id).catch(() => undefined); }}>取消</button>
               </span>
             )}
           </div>

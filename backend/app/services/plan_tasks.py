@@ -71,6 +71,11 @@ def canonical_hash(plan: GenerationPlan) -> str:
 def submit_task(plan: GenerationPlan, *, output_dir: str, repo_id: str = "",
                 configured_models: set[str] | frozenset[str] = frozenset()) -> dict:
     """校验 → 幂等去重 → 落库排队。返回 {task_id, deduped, duplicate_of?}。"""
+    # 运行环境归一与编译器同款：collect 落盘目标由环境决定（堵 reversible 绕过路径域）
+    for step in plan.steps:
+        if step.operation == "media.collect_comfy_outputs":
+            step.params["output_dir"] = output_dir
+            step.params["repo_id"] = repo_id or plan.repo_id
     errors = plan_validator.validate(
         plan, capabilities=capability_registry.all_capabilities(),
         configured_models=configured_models, allowed_prefix=output_dir)
@@ -78,6 +83,7 @@ def submit_task(plan: GenerationPlan, *, output_dir: str, repo_id: str = "",
         raise ValueError("计划未通过校验：\n- " + "\n- ".join(errors))
     content_hash = canonical_hash(plan)
     with get_connection() as connection:
+        connection.execute("begin immediate")
         row = connection.execute(
             f"select id from plan_tasks where content_hash=? and status in "
             f"({','.join('?' for _ in _DEDUP_BLOCKING)}) order by created_at desc limit 1",
@@ -99,6 +105,7 @@ def submit_task(plan: GenerationPlan, *, output_dir: str, repo_id: str = "",
                 (task_id, seq, step.id, step.operation,
                  json.dumps(step.params, ensure_ascii=False),
                  json.dumps(step.inputs_from, ensure_ascii=False), now))
+        connection.commit()
     _wake()
     return {"task_id": task_id, "deduped": False}
 
@@ -331,10 +338,12 @@ def _set_step_status(task_id: str, step_id: str, status: str,
 
 def _requeue(task_id: str) -> None:
     with get_connection() as connection:
-        connection.execute(
-            "update plan_tasks set status='queued', updated_at=? where id=?",
-            (_now(), task_id))
-    _wake()
+        changed = connection.execute(
+            "update plan_tasks set status='queued', updated_at=? where id=? "
+            "and status != 'running'",
+            (_now(), task_id)).rowcount
+    if changed:
+        _wake()
 
 
 # ── Worker（P2 执行器）───────────────────────────────────────────────────────
@@ -435,10 +444,10 @@ def _run_task(task, cancel: threading.Event) -> None:
             (task_id,)).fetchall()
     outputs: dict[str, dict] = {}
     # 配额计数：done 的 expensive 步 + 失败尝试（失败的 GPU 提交同样消耗配额）
-    gpu_done = sum(
-        (1 if (_step_level(str(st["operation"])) == "expensive" and str(st["status"]) == "done") else 0)
-        + (int(st["attempts"]) if _step_level(str(st["operation"])) == "expensive" else 0)
-        for st in steps)
+    gpu_done = 0
+    for st in steps:
+        if _step_level(str(st["operation"])) == "expensive":
+            gpu_done += 1 if str(st["status"]) == "done" else int(st["attempts"])
     ctx = {"thread_id": f"plan-{task_id[:8]}", "repo_id": str(task["repo_id"]),
            "output_dir": output_dir, "turn_id": f"plan-{task_id[:8]}"}
 
@@ -449,9 +458,7 @@ def _run_task(task, cancel: threading.Event) -> None:
         status = str(step["status"])
         if status in ("done", "skipped"):
             outputs[str(step["step_id"])] = json.loads(step["outputs_json"] or "{}")
-            if _step_level(str(step["operation"])) == "expensive":
-                gpu_done += 1
-            continue
+            continue  # 配额已在任务级初始汇总计入，循环不重复加
         operation = str(step["operation"])
         level = _step_level(operation)
 

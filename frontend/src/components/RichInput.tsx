@@ -227,7 +227,11 @@ ${buildFileAttachmentText(file.name, content)}
       const files = Array.from(e.dataTransfer?.files || []);
       if (!files.length) return;
       e.preventDefault();
-      void (async () => { for (const f of files) await applyFile(f); })();
+      void (async () => {
+        for (const f of files) {
+          try { await applyFile(f); } catch { /* 单个文件失败不中断其余 */ }
+        }
+      })();
     };
 
     const onTextInput = (v: string) => {
