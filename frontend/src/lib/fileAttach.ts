@@ -22,7 +22,12 @@ export function buildFileAttachmentText(name: string, raw: string): string {
   return `【文件参考：${name}】${note}\n${content}\n【文件参考结束：${name}】`;
 }
 
+export const FILE_ATTACH_MAX_BYTES = 5 * 1024 * 1024; // 5MB：超大文件不整体读入内存
+
 export function readFileAsText(file: File): Promise<string> {
+  if (file.size > FILE_ATTACH_MAX_BYTES) {
+    return Promise.reject(new Error(`文件过大（${Math.round(file.size / 1024 / 1024)}MB），上限 5MB`));
+  }
   return file.text();
 }
 
