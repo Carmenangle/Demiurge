@@ -197,6 +197,23 @@ register(Capability(
 ))
 
 register(Capability(
+    operation="lora.resolve",
+    category="comfyui",
+    description="按名称/触发词模糊解析本机 LoRA（对齐 ComfyUI 已安装枚举与已存触发词元数据），"
+                "返回真实文件名与建议权重。计划里 lora_name 可写近似名，由本能力归一。",
+    params_schema={
+        "type": "object",
+        "properties": {"query": {"type": "string"}},
+        "required": ["query"],
+        "additionalProperties": False,
+    },
+    needs_model=None,
+    side_effect_level=SIDE_EFFECT_READONLY,
+    channel=CHANNEL_SYNC,
+    handler="app.services.capability_handlers:lora_resolve",
+))
+
+register(Capability(
     operation="media.collect_comfy_outputs",
     category="media",
     description="轮询 ComfyUI 历史取回已提交任务的图片，落作品文件夹并注册进资产库"

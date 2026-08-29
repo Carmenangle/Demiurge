@@ -26,6 +26,27 @@
       "handler": "app.services.capability_handlers:read_text_file"
     },
     {
+      "operation": "lora.resolve",
+      "category": "comfyui",
+      "description": "按名称/触发词模糊解析本机 LoRA（对齐 ComfyUI 已安装枚举与已存触发词元数据），返回真实文件名与建议权重。计划里 lora_name 可写近似名，由本能力归一。",
+      "params_schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "additionalProperties": false
+      },
+      "needs_model": null,
+      "side_effect_level": "readonly",
+      "channel": "sync",
+      "handler": "app.services.capability_handlers:lora_resolve"
+    },
+    {
       "operation": "media.collect_comfy_outputs",
       "category": "media",
       "description": "轮询 ComfyUI 历史取回已提交任务的图片，落作品文件夹并注册进资产库（generation RAG，挂提示词与「委派计划」标签）。写在作品域内。",

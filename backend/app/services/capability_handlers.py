@@ -24,6 +24,7 @@ def submit_batch(template_id: str, variants: list[dict[str, Any]], prompt: str,
         if not isinstance(values, dict):
             results.append({"index": index, "ok": False, "detail": "变体值必须是对象"})
             continue
+        _resolve_lora_in_values(values)
         # 变体级 prompt 覆盖：values["prompt"] 优先于共享 prompt（逐套装不同提示词用）
         step_prompt = str(values.get("prompt") or prompt or "").strip()
         if not step_prompt:
@@ -142,3 +143,77 @@ def collect_comfy_outputs(prompt_ids: list[str] | None = None, comfyui_url: str 
         results.append({"prompt_id": prompt_id, "label": label, "ok": True,
                         "file": str(dest), "url": shown, "rag_indexed": True})
     return {"collected": sum(1 for r in results if r.get("ok")), "results": results}
+
+
+def _resolve_lora_in_values(values: dict) -> None:
+    """values["lora_name"] 近似名归一为真实文件（精确名原样保留；strength 缺省补建议权重）。"""
+    name = values.get("lora_name")
+    if not isinstance(name, str) or not name.strip():
+        return
+    hit = lora_resolve(name)
+    if hit.get("matched") and hit["file"] != name:
+        values["lora_name"] = hit["file"]
+        if hit.get("suggested_weight") is not None and "strength_model" not in values:
+            values["strength_model"] = hit["suggested_weight"]
+
+
+def lora_resolve(query: str) -> dict[str, Any]:
+    """模糊解析 LoRA：名称/触发词 → 真实文件（ComfyUI 本机枚举 + lora_index 元数据）。
+
+    匹配序：精确文件名 → 去扩展名精确 → 触发词命中 → 子串（双向，最长命中优先）。
+    返回 {file, matched_by, trigger_words, suggested_weight}；匹配不到返回 candidates 摘要。
+    """
+    from app.services import comfyui_client, lora_index
+
+    query_clean = (query or "").strip()
+    if not query_clean:
+        raise ValueError("缺少 LoRA 查询词")
+    query_lower = query_clean.lower()
+    installed: list[str] = []
+    try:
+        info = comfyui_client.fetch_object_info("http://127.0.0.1:8188")
+        installed = list(info.get("LoraLoader", {}).get("input", {})
+                         .get("required", {}).get("lora_name", [])[0])
+    except Exception:  # noqa: BLE001 - ComfyUI 离线时退回 lora_index 元数据
+        installed = []
+    meta = {item["lora_name"]: item for item in lora_index.list_items()}
+    catalog = sorted(set(installed) | set(meta.keys()))
+    if query_lower in {c.lower() for c in catalog}:
+        file = next(c for c in catalog if c.lower() == query_lower)
+        return _lora_hit(file, "exact", meta)
+    stems = {c.rsplit(".", 1)[0].lower(): c for c in catalog}
+    if query_lower in stems:
+        return _lora_hit(stems[query_lower], "exact_name", meta)
+    for c in catalog:
+        item = meta.get(c) or {}
+        if any(query_lower == t.lower() for t in item.get("triggers", [])):
+            return _lora_hit(c, "trigger", meta)
+    # token 级模糊：查询词与文件名/触发词按 token 交叉命中（「QRQ 风格」→ krea2_QRQ_韩漫风）
+    import re as _re
+    tokens = [t for t in _re.split(r"[\s_\-,.]+", query_lower) if len(t) >= 2]
+    scored: list[tuple[int, int, str]] = []
+    for c in catalog:
+        stem = c.lower().rsplit(".", 1)[0]
+        triggers = [t.lower() for t in (meta.get(c) or {}).get("triggers", [])]
+        hits = sum(1 for t in tokens
+                   if any(t in target for target in [stem, *triggers]))
+        if hits:
+            scored.append((hits, len(stem), c))
+    if scored:
+        scored.sort(key=lambda x: (-x[0], -x[1]))
+        return _lora_hit(scored[0][2], "fuzzy_token", meta)
+    contains_hits = sorted(
+        (c for c in catalog
+         if query_lower in c.lower() or c.lower().rsplit(".", 1)[0] in query_lower),
+        key=lambda c: -len(c))
+    if contains_hits:
+        return _lora_hit(contains_hits[0], "substring", meta)
+    return {"matched": False, "query": query_clean,
+            "candidates": catalog[:20]}
+
+
+def _lora_hit(file: str, matched_by: str, meta: dict) -> dict[str, Any]:
+    item = meta.get(file) or {}
+    return {"matched": True, "file": file, "matched_by": matched_by,
+            "trigger_words": item.get("triggers", []),
+            "suggested_weight": item.get("suggested_weight")}

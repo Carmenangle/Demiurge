@@ -194,3 +194,22 @@ def test_采集闭环_轮询取图落盘入库(store, tmp_path, monkeypatch):
     assert indexed[0]["prompt"] == "套装一提示词"
     assert "委派计划" in indexed[0]["tags"]
     assert indexed[0]["image_url"]
+
+
+def test_lora模糊解析与提交归一(monkeypatch):
+    from app.services import capability_handlers as ch
+
+    # 真实本机枚举（ComfyUI 在线）：「QRQ 风格」应命中 krea2_QRQ_韩漫风
+    hit = ch.lora_resolve("QRQ 风格")
+    assert hit["matched"] and "QRQ" in hit["file"].upper()
+    assert hit["suggested_weight"] is not None
+
+    # 未匹配 → 保留原值不猜
+    miss = ch.lora_resolve("完全不存在的lora-xyz")
+    assert miss["matched"] is False and miss["candidates"]
+
+    # submit 归一：近似名→真实文件 + 建议权重自动补 strength
+    values = {"lora_name": "QRQ 风格"}
+    ch._resolve_lora_in_values(values)
+    assert values["lora_name"].endswith(".safetensors")
+    assert values["strength_model"] == hit["suggested_weight"]
