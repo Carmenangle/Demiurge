@@ -495,7 +495,6 @@ def plan_compiler_node(state: AgentState) -> dict:
     # 内容进编译上下文，使计划能带逐套装等运行时才能确定的精确参数；trace 留痕。
     attachments: list[dict] = []
     try:
-        from app.services import prose_style as _ps_restore
         for raw_path in set(re.findall(
                 r"[A-Za-z]:\\[^\s<>|？?」』]*\.(?:md|txt|json|csv|log|ya?ml|xml|html)",
                 text)):

@@ -86,6 +86,13 @@ def inject_template_values(
     - prompt 非空且 prompt_node_id 命中 → 写首个常见文本字段，否则首个字符串字段。
 
     原地修改 api，返回 missing（缺失必填项的标签列表）。
+
+    values 键支持三种形态（按序匹配，先复合键后别名）：
+    - 复合键 "node_id.field"（前端 NodeCard 语义）；
+    - binding/semantic 别名（如 "prompt"/"lora_name"——Autopilot 计划编译产出的语义参数）；
+    - field 裸名（与复合键 field 相同时等效）。
+    prompt 参数在 prompt_node_id 未命中时兜底注入 exposed 里 binding=="prompt" 的字段
+    （模板保存编辑态时已标注提示词节点；未标注则不猜，交由 missing/原值）。
     """
     exposed_keys = {f"{f['node_id']}.{f['field']}" for f in exposed}
     missing: list[str] = []
@@ -93,6 +100,12 @@ def inject_template_values(
         key = f"{f['node_id']}.{f['field']}"
         node_id, field = f["node_id"], f["field"]
         val = values.get(key)
+        if val is None:
+            # 别名匹配：binding / semantic / field 裸名
+            for alias in (f.get("binding"), f.get("semantic"), field):
+                if alias and (alias in values):
+                    val = values[alias]
+                    break
         # 输入型（图片）为空 → 缺失，拒绝启动
         if f.get("control") == "image" and (val is None or val == ""):
             missing.append(f.get("label") or field)
@@ -103,6 +116,12 @@ def inject_template_values(
             api[node_id].setdefault("inputs", {})[field] = val
 
     pid = str(prompt_node_id or "")
+    if not (prompt and pid and pid in api):
+        # 兜底：模板未记录 prompt_node_id 时，用 exposed 里 binding=="prompt" 的字段
+        target_field = next((f for f in exposed
+                             if f.get("binding") == "prompt" or f.get("semantic") == "prompt"), None)
+        if prompt and target_field and str(target_field.get("node_id") or "") in api:
+            pid = str(target_field["node_id"])
     if prompt and pid and pid in api:
         inp = api[pid].setdefault("inputs", {})
         target = next((k for k in _TEXT_FIELDS if k in inp), None)
