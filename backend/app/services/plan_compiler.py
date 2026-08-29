@@ -153,7 +153,7 @@ def compile_plan(*, intent: str, history: str = "", attachments: list[dict] | No
         outcome.strategy = result.strategy
         # 计划声明的 repo/output 缺失时按调用方上下文补齐（编译器不知道运行环境）
         plan = plan.model_copy(update={
-            "repo_id": plan.repo_id or repo_id,
+            "repo_id": repo_id,  # 运行环境真源强制（模型编的 repo_id 可能非法当 Chroma 集合名）
         })
         # 模板 ID 归一：模型抄写长 hex ID 易丢位——查不到时按名称/ID 前缀解析为真实 ID
         try:

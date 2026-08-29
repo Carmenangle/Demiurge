@@ -13,7 +13,7 @@ from app.services.workflow_submission import WorkflowSubmissionError, submit_tem
 
 
 def submit_batch(template_id: str, variants: list[dict[str, Any]], prompt: str = "",
-                 url: str = "", client_id: str = "",
+                 url: str = "", client_id: str = "", lora_name: str = "",
                  loras: list[dict[str, Any]] | None = None,
                  lora_mode: str = "single") -> dict[str, Any]:
     """同模板多变体批量提交：每个变体一次 submit_template，单条失败隔离不中断整批。
@@ -25,9 +25,18 @@ def submit_batch(template_id: str, variants: list[dict[str, Any]], prompt: str =
         if not isinstance(values, dict):
             results.append({"index": index, "ok": False, "detail": "变体值必须是对象"})
             continue
-        values["__template_id_resolved__"] = True  # 占位防重复归一
-        values.pop("__template_id_resolved__")
-        values["template_id"] = _resolve_template_id(str(values.get("template_id") or ""))
+        values["template_id"] = _resolve_template_id(str(values.get("template_id") or template_id))
+        # 顶层 lora_name 下发到缺省变体（用户指定 LoRA 而模型只在顶层写时）
+        if lora_name and not values.get("lora_name"):
+            values["lora_name"] = lora_name
+        # 变体 LoRA 走 loras 参数链（values 注入会被 disable_all_loras 清除）
+        var_loras = loras
+        lora_ref = values.pop("lora_name", None)
+        if lora_ref and not var_loras:
+            hit = lora_resolve(str(lora_ref))
+            if hit.get("matched"):
+                weight = values.pop("strength_model", None) or hit.get("suggested_weight") or 0.9
+                var_loras = [{"name": hit["file"], "weight": float(weight)}]
         _resolve_lora_in_values(values)
         # 变体级 prompt 覆盖：prompt/positive_prompt 优先于共享 prompt（逐套装不同提示词用）
         step_prompt = str(values.get("prompt") or values.get("positive_prompt")
@@ -38,7 +47,7 @@ def submit_batch(template_id: str, variants: list[dict[str, Any]], prompt: str =
             continue
         try:
             outcome = submit_template(template_id, values, step_prompt, url, client_id,
-                                      loras=loras, lora_mode=lora_mode)
+                                      loras=var_loras, lora_mode=lora_mode)
             results.append({"index": index, "ok": True,
                             "prompt_id": outcome.get("prompt_id")})
         except WorkflowSubmissionError as exc:
