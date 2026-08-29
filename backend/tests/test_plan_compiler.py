@@ -153,7 +153,7 @@ def test_编译一次成功并落盘(tmp_path):
     assert md.is_file() and "需审批" in md.read_text(encoding="utf-8")
 
     card = plan_compiler.render_plan_card(outcome.plan, json_path)
-    assert "尚未执行" in card and "workflow.submit_batch" in card
+    assert "workflow.submit_batch" in card and "已投递执行队列" in card
 
 
 def test_编译两次仍非法如实返回错误(tmp_path):

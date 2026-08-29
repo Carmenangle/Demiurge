@@ -180,6 +180,48 @@ register(Capability(
 ))
 
 register(Capability(
+    operation="file.read_text",
+    category="repo",
+    description="读取一个本地 UTF-8 文本文件并返回内容（只读）。越出作品域的读取路径"
+                "会在审批卡上明示，需批准计划后才能执行。",
+    params_schema={
+        "type": "object",
+        "properties": {"path": {"type": "string"}, "max_chars": {"type": "integer"}},
+        "required": ["path"],
+        "additionalProperties": False,
+    },
+    needs_model=None,
+    side_effect_level=SIDE_EFFECT_READONLY,
+    channel=CHANNEL_SYNC,
+    handler="app.services.capability_handlers:read_text_file",
+))
+
+register(Capability(
+    operation="media.collect_comfy_outputs",
+    category="media",
+    description="轮询 ComfyUI 历史取回已提交任务的图片，落作品文件夹并注册进资产库"
+                "（generation RAG，挂提示词与「委派计划」标签）。写在作品域内。",
+    params_schema={
+        "type": "object",
+        "properties": {
+            "prompt_ids": {"type": "array", "items": {"type": "string"}},
+            "comfyui_url": {"type": "string"},
+            "output_dir": {"type": "string"},
+            "repo_id": {"type": "string"},
+            "names": {"type": "array", "items": {"type": "string"}},
+            "prompts": {"type": "array", "items": {"type": "string"}},
+            "timeout_seconds": {"type": "integer"},
+        },
+        "required": ["prompt_ids", "comfyui_url", "output_dir", "repo_id"],
+        "additionalProperties": False,
+    },
+    needs_model=None,
+    side_effect_level=SIDE_EFFECT_REVERSIBLE,
+    channel=CHANNEL_SYNC,
+    handler="app.services.capability_handlers:collect_comfy_outputs",
+))
+
+register(Capability(
     operation="workflow.submit_batch",
     category=CATEGORY_COMFYUI,
     description="对同一模板按变体值列表批量提交 ComfyUI 队列（每个变体一次任务，"

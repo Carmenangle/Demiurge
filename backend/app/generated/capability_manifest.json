@@ -2,6 +2,81 @@
   "version": 1,
   "capabilities": [
     {
+      "operation": "file.read_text",
+      "category": "repo",
+      "description": "读取一个本地 UTF-8 文本文件并返回内容（只读）。越出作品域的读取路径会在审批卡上明示，需批准计划后才能执行。",
+      "params_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "max_chars": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      },
+      "needs_model": null,
+      "side_effect_level": "readonly",
+      "channel": "sync",
+      "handler": "app.services.capability_handlers:read_text_file"
+    },
+    {
+      "operation": "media.collect_comfy_outputs",
+      "category": "media",
+      "description": "轮询 ComfyUI 历史取回已提交任务的图片，落作品文件夹并注册进资产库（generation RAG，挂提示词与「委派计划」标签）。写在作品域内。",
+      "params_schema": {
+        "type": "object",
+        "properties": {
+          "prompt_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "comfyui_url": {
+            "type": "string"
+          },
+          "output_dir": {
+            "type": "string"
+          },
+          "repo_id": {
+            "type": "string"
+          },
+          "names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "prompts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "timeout_seconds": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "prompt_ids",
+          "comfyui_url",
+          "output_dir",
+          "repo_id"
+        ],
+        "additionalProperties": false
+      },
+      "needs_model": null,
+      "side_effect_level": "reversible",
+      "channel": "sync",
+      "handler": "app.services.capability_handlers:collect_comfy_outputs"
+    },
+    {
       "operation": "workflow.list_templates",
       "category": "comfyui",
       "description": "列出全部工作流模板（只读，返回模板元数据与 exposed 字段，不提交任何任务）。",

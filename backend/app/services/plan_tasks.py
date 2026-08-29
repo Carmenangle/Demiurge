@@ -176,11 +176,25 @@ def approve_task(task_id: str, *, approved_by: str = "user") -> dict:
     if task["status"] in TASK_TERMINAL:
         raise ValueError("任务已终态，无需批准")
     plan = GenerationPlan.model_validate(json.loads(_plan_json(task_id)))
-    capabilities = [
-        {"operation": step.operation, "path": task["output_dir"]}
-        for step in plan.steps
-        if _step_level(step.operation) in ("durable", "expensive")
-    ]
+    seen: set[tuple[str, str]] = set()
+    capabilities: list[dict[str, str]] = []
+    for step in plan.steps:
+        level = _step_level(step.operation)
+        if level in ("durable", "expensive"):
+            entry = (step.operation, task["output_dir"])
+        elif _out_domain_paths(step, task["output_dir"]):
+            # readonly 越域读取：把声明的读取路径写进租约（审批卡已明示）
+            for read_path in _out_domain_paths(step, task["output_dir"]):
+                entry = (step.operation, read_path)
+                if entry not in seen:
+                    seen.add(entry)
+                    capabilities.append({"operation": step.operation, "path": read_path})
+            continue
+        else:
+            continue
+        if entry not in seen:
+            seen.add(entry)
+            capabilities.append({"operation": entry[0], "path": entry[1]})
     if not capabilities:
         capabilities = [{"operation": "*", "path": task["output_dir"]}]
     # ttl = 预算估算×2：expensive 步数 × 单步 15 分钟（批量出图可能跑数小时，安全优先留余量）
@@ -269,6 +283,28 @@ def _plan_json(task_id: str) -> str:
     with get_connection() as connection:
         row = connection.execute("select plan_json from plan_tasks where id=?", (task_id,)).fetchone()
     return str(row["plan_json"]) if row else "{}"
+
+
+
+
+def _step_paths(step) -> list[str]:
+    """步骤 params 里像绝对路径的值（复用 plan_validator 的路径识别，单一属主）。
+
+    兼容两种步骤形态：DB Row（params_json）与 Pydantic PlanStep（params）。
+    """
+    from app.services.plan_validator import _PATH_LIKE_RE
+    try:  # DB Row（键索引）
+        params = json.loads(step["params_json"] or "{}")
+    except (TypeError, IndexError, KeyError):  # Pydantic PlanStep
+        params = dict(getattr(step, "params", {}) or {})
+    return [v for v in params.values() if isinstance(v, str) and _PATH_LIKE_RE.match(v)]
+
+
+def _out_domain_paths(step, output_dir: str) -> list[str]:
+    """越出作品域的读取路径（readonly 越域读取需要审批授权）。"""
+    if not output_dir:
+        return _step_paths(step)
+    return [p for p in _step_paths(step) if not capability_sandbox._path_allowed(p, output_dir)]
 
 
 def _step_level(operation: str) -> str:
@@ -419,7 +455,9 @@ def _run_task(task, cancel: threading.Event) -> None:
         operation = str(step["operation"])
         level = _step_level(operation)
 
-        # ── P3 审批闸门 ──
+        # ── P3 审批闸门：写类步骤 + 越域 readonly 读取 ──
+        out_domain_reads = (_out_domain_paths(step, output_dir)
+                            if level == "readonly" else [])
         if level in ("durable", "expensive"):
             try:
                 capability_sandbox.authorize(lease_id, operation, path=output_dir)
@@ -437,6 +475,15 @@ def _run_task(task, cancel: threading.Event) -> None:
             _finalize(task_id, steps, seq + 1)
             return
 
+        for read_path in out_domain_reads:
+            # 越域读取：租约必须精确覆盖该路径（审批卡明示后授权）
+            try:
+                capability_sandbox.authorize(lease_id, operation, path=read_path)
+            except PermissionError as exc:
+                _block_step(task_id, step, str(exc), task_status="awaiting_approval",
+                            reason="needs_approval", ctx=ctx)
+                _publish_progress(task_id, "awaiting_approval")
+                return
         # ── 执行 ──
         params = _resolve_params(step, outputs)
         _trace(ctx, "plan.step_started", task_id=task_id, step=step["step_id"], operation=operation)

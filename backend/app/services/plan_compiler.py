@@ -171,6 +171,11 @@ def render_plan_md(plan: GenerationPlan) -> str:
     if plan.approval_required:
         lines.append(f"需审批能力：{', '.join(plan.approval_required)}")
         lines.append("")
+    read_paths = _declared_read_paths(plan)
+    if read_paths:
+        lines.append("将读取文件（批准计划即授权访问以下路径）：")
+        lines.extend(f"- {path}" for path in read_paths)
+        lines.append("")
     for index, step in enumerate(plan.steps, 1):
         lines.append(f"{index}. **{step.operation}**（id={step.id}）")
         if step.params:
@@ -181,17 +186,36 @@ def render_plan_md(plan: GenerationPlan) -> str:
     return "\n".join(lines)
 
 
+_PATH_LIKE_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|[/\\])")
+
+
+def _declared_read_paths(plan: GenerationPlan) -> list[str]:
+    """readonly 步骤 params 里声明的绝对路径（审批卡明示，批准即授权）。"""
+    from app.services.capability_registry import get as _get
+    out: list[str] = []
+    for step in plan.steps:
+        cap = _get(step.operation)
+        if cap is None or cap.side_effect_level != "readonly":
+            continue
+        for value in step.params.values():
+            if isinstance(value, str) and _PATH_LIKE_RE.match(value) and value not in out:
+                out.append(value)
+    return out
+
+
 def render_plan_card(plan: GenerationPlan, json_path: str) -> str:
-    """对话内计划卡：列步骤/预算/审批要求；执行器落地前如实说明未执行。"""
+    """对话内计划卡：列步骤/预算/审批要求/将读取的文件。"""
     steps = "\n".join(
         f"  {i}. {step.operation}" for i, step in enumerate(plan.steps, 1))
     approval = f"\n- 需审批：{', '.join(plan.approval_required)}" if plan.approval_required else ""
+    reads = _declared_read_paths(plan)
+    read_note = ("；将读取文件（批准即授权）：" + "；".join(reads)) if reads else ""
     return (
-        f"📋 已编译计划并落盘（尚未执行）：\n"
+        f"📋 已编译计划：\n"
         f"- 意图：{plan.intent}\n"
         f"- 步骤（{len(plan.steps)}）：\n{steps}\n"
         f"- 预算：步数≤{plan.budgets.max_steps} / GPU≤{plan.budgets.max_gpu_tasks} / "
-        f"LLM≤{plan.budgets.max_llm_calls}{approval}\n"
+        f"LLM≤{plan.budgets.max_llm_calls}{approval}{read_note}\n"
         f"- 文档：{json_path}\n"
-        f"执行器（P2）与审批闸门（P3）落地前，计划仅供人审与重放。"
+        f"已投递执行队列：只读步骤直跑，写/烧卡步骤与越域读取等你批准后执行。"
     )

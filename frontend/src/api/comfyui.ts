@@ -57,6 +57,9 @@ export function submitWorkflow(
   loras: { name: string; weight: number }[] = [],
   loraMode: "none" | "single" | "multi" = "single",
 ) {
+  // 60s 超时：后端 urlopen 30s 超时 + 模型卸载余量。无超时时后端挂起会让
+  // 前端 await 永不返回——槽位静默卡 pending，既不失败也不自愈（2026-08-29
+  // 验收「新对话没有触发生图」实锤：提交阶段挂起，2 分钟后只能靠刷新页面孤儿清理）。
   return apiPost<SubmitResult>("/comfyui/submit", {
     template_id: templateId,
     values,
@@ -65,7 +68,7 @@ export function submitWorkflow(
     client_id: comfyClientId(),
     loras,
     lora_mode: loraMode,
-  });
+  }, 60_000);
 }
 
 export interface UploadResult {
@@ -222,7 +225,8 @@ export function saveLocalSrc(args: { src: string; repoId: string; outputDir: str
 
 // 从锁定画布回传的完整工作流直接提交生成
 export function submitGraph(workflow: unknown, url: string) {
-  return apiPost<SubmitResult>("/comfyui/submit_graph", { workflow, url, client_id: comfyClientId() });
+  // 与 submitWorkflow 同理：提交阶段必须有超时，后端挂起时前端要能失败并走自愈/失败槽。
+  return apiPost<SubmitResult>("/comfyui/submit_graph", { workflow, url, client_id: comfyClientId() }, 60_000);
 }
 
 // 强行停止 ComfyUI 生图（人工打断工作流）：删排队项 + 中断执行。prompt_id 可空。

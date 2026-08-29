@@ -1210,7 +1210,16 @@ export function useChatSession(deps: ChatSessionDeps) {
             recordIds({ prompt_id: pid });
             return { prompt_id: pid };
           };
-          let r = await runOnce();
+          // 提交阶段自愈（对齐 stalled 自愈，2026-08-29 验收「新对话没有触发生图」）：
+          // 首次提交失败（后端挂起超时/ComfyUI 瞬断）→ 中断可能残留的任务后自动重提一次；
+          // 再失败才进外层 failSlot（失败槽可见+可重新生成）。上限 1 次防循环。
+          let r: { prompt_id: string };
+          try {
+            r = await runOnce();
+          } catch {
+            await interruptComfy(settings.comfyuiUrl).catch(() => undefined);
+            r = await runOnce();
+          }
           let outcome = await pollWorkflowResult(r.prompt_id, settings.comfyuiUrl, "image");
           if (outcome.kind === "stalled") {
             // 卡死自愈（2026-08-29 用户需求）：队列无节点运转 → 删除坏死任务（清队列+中断），

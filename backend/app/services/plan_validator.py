@@ -91,9 +91,10 @@ def validate(plan: GenerationPlan, *,
             "approval_required 与 durable/expensive 步骤汇总不一致，应为 "
             f"{sorted(set(expensive_or_durable))}。")
 
-    # ── 路径域：params 中像绝对路径的值必须落在作品域内 ─────────────────────
+    # ── 路径域：写类（durable/expensive）步骤的路径必须落在作品域内；
+    # readonly 的读取路径豁免（越域读取在审批卡明示并由 capability_sandbox 租约授权）──
     if allowed_prefix:
-        errors.extend(_check_paths(plan, allowed_prefix))
+        errors.extend(_check_paths(plan, allowed_prefix, by_op))
     return errors
 
 
@@ -152,10 +153,13 @@ def _check_cycles(plan: GenerationPlan) -> list[str]:
     return errors
 
 
-def _check_paths(plan: GenerationPlan, allowed_prefix: str) -> list[str]:
+def _check_paths(plan: GenerationPlan, allowed_prefix: str,
+                 by_op: dict[str, dict]) -> list[str]:
     errors: list[str] = []
     prefix = PureWindowsPath(allowed_prefix)
     for step in plan.steps:
+        if str((by_op.get(step.operation) or {}).get("side_effect_level")) == "readonly":
+            continue
         for key, value in step.params.items():
             if not isinstance(value, str) or not _PATH_LIKE_RE.match(value):
                 continue

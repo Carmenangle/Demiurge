@@ -164,6 +164,13 @@ V1 与 M1 前半（M1.1–M1.3）互不依赖，可并行推进。
 > → 注入静默跳过——保留既有语义，改为绑定 UI 角色行醒目警告（未登记触发词·画面可能不像角色），
 > 新仓库绑定当场可见，不再等生图后发现。
 >
+> **进度（2026-08-29 提交阶段卡死自愈，验收「新对话没有触发生图」）**：trace 实证——后端
+> illustration.request 已 emitted、前端帧编译已完成，但 ComfyUI history 无对应任务且无
+> illustration.submitted：提交请求静默挂起（submitWorkflow 无超时），直到用户刷新页面触发
+> 孤儿清理。修复：submitWorkflow/submitGraph 加 60s 超时（后端 urlopen 30s + 模型卸载余量）；
+> 帧循环提交失败自动中断残留任务并重提一次（对齐 stalled 自愈，上限 1 次）；再失败进失败槽
+> （可见+可重新生成）。卡死自愈从此覆盖「提交」与「轮询」两个阶段。
+>
 > **进度（2026-08-29 队列卡死自愈 + 失败槽重新生成，用户需求）**：①同步轮询 `pollWorkflowResult`
 > 补停顿守卫（对齐 workflowRuntime 5 分钟 stall 窗口，`seenRunning` 后不误杀；哨兵用 -1——
 > 0 是合法时间值会让第二段 pending 守卫失效，测试抓出）→ 返回 `kind:"stalled"`；调用侧
