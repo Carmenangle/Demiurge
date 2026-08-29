@@ -9,6 +9,10 @@ import {
 import { Plus, X } from "lucide-react";
 import { clampSelectionScroll } from "../lib/contextManagement";
 import { classifyClipboardPaste } from "../lib/richPaste";
+import {
+  buildFileAttachmentText, isTextFile,
+  readFileAsDataURL, readFileAsText,
+} from "../lib/fileAttach";
 import { serializeInspirationSend, type InspirationAttachment } from "../lib/inspirationInsert";
 
 // 序列化结果：图片在上、文本在下两层。parts 保留兼容（图片在前、文本在后）。
@@ -148,10 +152,14 @@ export const RichInput = forwardRef<RichInputHandle, Props>(
     const onPickFiles = (files: FileList | null) => {
       if (!files) return;
       Array.from(files).forEach((f) => {
-        if (!f.type.startsWith("image/")) return;
-        const reader = new FileReader();
-        reader.onload = () => addImage(String(reader.result || ""));
-        reader.readAsDataURL(f);
+        if (!f.type.startsWith("image/") && !isTextFile(f)) return;
+        if (f.type.startsWith("image/")) {
+          const reader = new FileReader();
+          reader.onload = () => addImage(String(reader.result || ""));
+          reader.readAsDataURL(f);
+        } else {
+          void applyFile(f);
+        }
       });
     };
 
@@ -169,16 +177,7 @@ export const RichInput = forwardRef<RichInputHandle, Props>(
         if (!card) return;
         setInspCards((arr) => (arr.some((c) => c.id === card.id) ? arr : [...arr, card]));
       },
-      insertText: (text: string) => {
-        const ta = taRef.current;
-        if (!ta) return;
-        const s = ta.selectionStart ?? ta.value.length;
-        const e = ta.selectionEnd ?? ta.value.length;
-        const next = ta.value.slice(0, s) + text + ta.value.slice(e);
-        setCurText(next);
-        onTextChange?.(next);
-        requestAnimationFrame(() => { ta.focus(); ta.selectionStart = ta.selectionEnd = s + text.length; });
-      },
+      insertText: (text: string) => insertAtCursor(text),
       replaceContent: (content: RichContent) => {
         const text = content.text || "";
         setImages([...new Set(content.images.filter(Boolean))]);
@@ -198,6 +197,38 @@ export const RichInput = forwardRef<RichInputHandle, Props>(
       submit: () => doSubmitRef.current(),
       focus: () => taRef.current?.focus(),
     }));
+
+    // 光标处插入文本（insertText handle 与文件附件共用）
+    const insertAtCursor = (text: string) => {
+      const ta = taRef.current;
+      if (!ta) return;
+      const s = ta.selectionStart ?? ta.value.length;
+      const e = ta.selectionEnd ?? ta.value.length;
+      const next = ta.value.slice(0, s) + text + ta.value.slice(e);
+      setCurText(next);
+      onTextChange?.(next);
+      requestAnimationFrame(() => { ta.focus(); ta.selectionStart = ta.selectionEnd = s + text.length; });
+    };
+
+    // 文件拖拽/选择：图片走图片栏，文本文件以「文件参考」块插入（agent 全链路可参考）
+    const applyFile = async (file: File) => {
+      if (file.type.startsWith("image/") && !isTextFile(file)) {
+        addImage(await readFileAsDataURL(file));
+        return;
+      }
+      if (isTextFile(file)) {
+        const content = await readFileAsText(file);
+        insertAtCursor(`
+${buildFileAttachmentText(file.name, content)}
+`);
+      }
+    };
+    const onDropFiles = (e: React.DragEvent) => {
+      const files = Array.from(e.dataTransfer?.files || []);
+      if (!files.length) return;
+      e.preventDefault();
+      void (async () => { for (const f of files) await applyFile(f); })();
+    };
 
     const onTextInput = (v: string) => {
       setClosed(false);
@@ -308,7 +339,10 @@ export const RichInput = forwardRef<RichInputHandle, Props>(
 
 
     return (
-      <div style={{ position: "relative" }}>
+      <div style={{ position: "relative" }}
+        onDragOver={(e) => { if (e.dataTransfer?.types?.includes("Files")) e.preventDefault(); }}
+        onDrop={onDropFiles}
+      >
         {open && (
           <div className="cmd-popup">
             {candidates.map((c, i) => (
@@ -329,7 +363,7 @@ export const RichInput = forwardRef<RichInputHandle, Props>(
           <input
             ref={fileRef}
             type="file"
-            accept="image/*"
+            accept="image/*,.md,.txt,.json,.csv,.log,.yaml,.yml,.xml,.html,.ts,.py,.srt,.ass"
             multiple
             style={{ display: "none" }}
             onChange={(e) => { onPickFiles(e.target.files); e.target.value = ""; }}
@@ -429,6 +463,7 @@ export const RichInput = forwardRef<RichInputHandle, Props>(
           onChange={(e) => onTextInput(e.target.value)}
           onKeyDown={onKeyDown}
           onPaste={onPaste}
+          onDrop={onDropFiles}
           onPointerDown={onSelectionStart}
           onScroll={onSelectionScroll}
         />
