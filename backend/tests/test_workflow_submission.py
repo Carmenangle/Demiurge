@@ -227,3 +227,32 @@ def test_图提交在请求ComfyUI前拒绝无输出的单节点残片(monkeypat
     assert exc_info.value.status == 422
     assert "没有可执行输出节点" in str(exc_info.value.detail)
     assert submitted == []
+
+
+def test_输出文件名逐次唯一化_同名前缀不再互相覆盖():
+    api = {
+        "24": {"class_type": "SaveImage",
+               "inputs": {"filename_prefix": "Krea2-2ST-%date:yyyyMMddhhmmss%", "images": ["26", 0]}},
+        "19": {"class_type": "LoraLoaderModelOnly", "inputs": {"lora_name": "a.safetensors"}},
+    }
+
+    workflow_submission._uniquify_output_filenames(api)
+    first = api["24"]["inputs"]["filename_prefix"]
+    assert first.startswith("Krea2-2ST-%date:yyyyMMddhhmmss%_")  # 保留原前缀
+    assert first != "Krea2-2ST-%date:yyyyMMddhhmmss%"
+
+    workflow_submission._uniquify_output_filenames(api)
+    assert api["24"]["inputs"]["filename_prefix"] != first  # 逐次不同：首尾帧两任务不再同名覆盖
+
+    assert api["19"]["inputs"] == {"lora_name": "a.safetensors"}  # 非输出节点不动
+
+
+def test_输出文件名唯一化跳过无前缀或空前缀节点():
+    api = {
+        "1": {"class_type": "SaveImage", "inputs": {"images": ["2", 0]}},
+        "2": {"class_type": "SaveImage", "inputs": {"filename_prefix": "  "}},
+        "3": "not-a-node",
+    }
+    workflow_submission._uniquify_output_filenames(api)
+    assert "filename_prefix" not in api["1"]["inputs"]
+    assert api["2"]["inputs"]["filename_prefix"] == "  "

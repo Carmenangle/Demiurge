@@ -217,6 +217,45 @@ def test_多status块取最后一个():
     assert ra.extract_status_snapshot(reply) == "新栏"
 
 
+def test_think内预写status草稿不顶替真身():
+    # 2026-08-30 trace 实锤：模型在 think 里预写 <status> 草稿（含未闭合），
+    # 快照必须取正文里的真栏，思考草稿不得顶替。
+    reply = (
+        "<think>推演：先列状态栏草稿\n<status>\n[时间] 草稿·被思考污染\n"
+        "<encounter>草稿锚点</encounter>\n"
+        "继续思考</think>\n正文。\n<status>\n[时间] 真栏\n</status>"
+    )
+    assert ra.extract_status_snapshot(reply) == "[时间] 真栏"
+
+
+def test_只有think内status时快照为空():
+    reply = "<think>草稿<status>只有草稿</status></think>正文没有状态栏。"
+    assert ra.extract_status_snapshot(reply) == ""
+
+
+def test_搭车解析忽略think内预写的状态更新草稿():
+    reply = (
+        "<think>推演草稿\n<状态更新>[{\"field\":\"数值/好感度\",\"op\":\"add\","
+        "\"value\":99,\"evidence\":\"草稿\"}]</状态更新>\n继续思考</think>\n"
+        "正文她别过脸。\n<状态更新>[{\"field\":\"数值/好感度\",\"op\":\"add\","
+        "\"value\":5,\"evidence\":\"真身\"}]</状态更新>"
+    )
+    clean, raw = ra.parse_state_block(reply)
+    assert raw == [{"field": "数值/好感度", "op": "add", "value": 5, "evidence": "真身"}]
+    assert "正文她别过脸。" in clean  # 正文真身不被误删
+    assert "<think>" in clean  # think 留在正文里，渲染属主仍是前端正则
+    assert raw[0]["value"] == 5  # 草稿的 99 不顶替真身
+
+
+def test_think内未闭合status开标签不影响快照():
+    # 未闭合 <status> 开在 think 内：不能吞掉 think 之后的正文真栏
+    reply = (
+        "<think>草稿开始\n<status>\n[时间] 未闭合草稿一直延伸\n"
+        "更多思考</think>\n正文。\n<status>\n[所在] 真栏\n</status>"
+    )
+    assert ra.extract_status_snapshot(reply) == "[所在] 真栏"
+
+
 def test_快照随写回落盘可重建(tmp_path):
     deps = _deps(tmp_path)
     ra.writeback(deps, repo_id="r1", card_name="卡", raw_deltas=[], turn=3,

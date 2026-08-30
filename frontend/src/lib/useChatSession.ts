@@ -63,7 +63,7 @@ import {
 } from "./audioGeneration";
 import {
   applyRouteChoice, appendImageSlot, bindMediaSlotPrompt, dropMediaSlot, markMediaSlotFailed, appendAudioSlot, appendTransitionSlot,
-  failMediaSlot, pruneUnsubmittedMediaSlots, reduceChatStreamEvent, resolveMediaSlot,
+  failMediaSlot, pruneUnsubmittedMediaSlots, reduceChatStreamEvent, resetMediaSlotForRetry, resolveMediaSlot,
   restoreSubmittedMediaSlots, upsertMessages, workflowMessages,
 } from "./chatSessionEvents";
 import { recoverCompactedSummaryImage } from "./contextManagement";
@@ -1139,6 +1139,8 @@ export function useChatSession(deps: ChatSessionDeps) {
     let frameLastPrompt = "";
     let frameFirstValueKeys: string[] = [];
     let frameLastValueKeys: string[] = [];
+    let frameFirstMedia: ReturnType<typeof illustrationWorkflowMedia> | undefined;
+    let frameLastMedia: ReturnType<typeof illustrationWorkflowMedia> | undefined;
     if (useFirstlastImages) {
       const frameTpl = templates.find((t) => t.id === preset.templateId);
       if (!frameTpl) {
@@ -1158,14 +1160,20 @@ export function useChatSession(deps: ChatSessionDeps) {
         failSlot("image_required", "首尾帧生图缺少画面：既无上尾帧图可复用，也无首帧/尾帧画面描述");
         return;
       }
-      const frameLoras = loras.map(({ name, weight }) => ({ name, weight }));
-      const buildFrameValues = (desc: string) => firstlastFrameValues(
+      // 逐帧 LoRA（2026-08-30 用户反馈实锤：首帧画面是凌若冰、尾帧是舞姬恋，
+      // 却整单都挂了状态栏在场角色的 LoRA）。一轮请求只解析一次 actors，但首/尾帧
+      // 画面可能各是不同角色——按帧描述原文逐帧命中已配置角色；未命中回退请求级 actors。
+      const frameMediaFor = (desc: string) => {
+        const hits = knownActorNames.filter((name) => name && desc.includes(name));
+        return illustrationWorkflowMedia(preset, hits.length ? hits : resolvedActors, cardNames);
+      };
+      const buildFrameValues = (desc: string, media = workflowMedia) => firstlastFrameValues(
         frameTpl.exposed, desc,
         {
           negativePrompt: preset.negativePrompt,
-          loraName: workflowMedia.loraName,
-          loraWeight: workflowMedia.loraWeight,
-          baseImage: workflowMedia.baseImage,
+          loraName: media.loraName,
+          loraWeight: media.loraWeight,
+          baseImage: media.baseImage,
         },
         latentSize,
       );
@@ -1205,10 +1213,12 @@ export function useChatSession(deps: ChatSessionDeps) {
         const isFirst = task.frame === "first";
         try {
           const framePrompt = compileFramePrompt(task.frame, task.desc);
-          const frameValues = buildFrameValues(framePrompt);
+          const frameMedia = frameMediaFor(task.desc);
+          const frameLoras = frameMedia.loras.map(({ name, weight }) => ({ name, weight }));
+          const frameValues = buildFrameValues(framePrompt, frameMedia);
           const recordIds = (res: { prompt_id: string }) => {
-            if (isFirst) { frameFirstPromptId = res.prompt_id; frameFirstPrompt = framePrompt; frameFirstValueKeys = Object.keys(frameValues).sort(); }
-            else { frameLastPromptId = res.prompt_id; frameLastPrompt = framePrompt; frameLastValueKeys = Object.keys(frameValues).sort(); }
+            if (isFirst) { frameFirstPromptId = res.prompt_id; frameFirstPrompt = framePrompt; frameFirstValueKeys = Object.keys(frameValues).sort(); frameFirstMedia = frameMedia; }
+            else { frameLastPromptId = res.prompt_id; frameLastPrompt = framePrompt; frameLastValueKeys = Object.keys(frameValues).sort(); frameLastMedia = frameMedia; }
           };
           const runOnce = async (): Promise<{ prompt_id: string }> => {
             const res = await submitWorkflow(
@@ -1262,13 +1272,17 @@ export function useChatSession(deps: ChatSessionDeps) {
       if (layout) {
         const lastSlotId = `${slotId}:last`;
         const frameTarget = (sid: string) => ({ messageId, slotId: sid, background: true as const });
-        const reportFrame = (promptId: string, sid: string, framePrompt: string, keys: string[]) => {
+        const reportFrame = (
+          promptId: string, sid: string, framePrompt: string, keys: string[],
+          media: ReturnType<typeof illustrationWorkflowMedia> = workflowMedia,
+        ) => {
           void reportIllustrationSubmission({
             threadId, repoId: repo?.id || threadId, turnId, messageId, slotId: sid,
             templateId: preset.templateId, promptId, prompt: framePrompt, promptProfile,
-            loraName, loraWeight, latentWidth: latentSize.width, latentHeight: latentSize.height,
+            loraName: media.loraName, loraWeight: media.loraWeight,
+            latentWidth: latentSize.width, latentHeight: latentSize.height,
             loraMode: preset.loraMode || "single",
-            loraNames: loras.map(({ name }) => name),
+            loraNames: media.loras.map(({ name }) => name),
             valueKeys: keys,
             source,
           }).catch(() => undefined);
@@ -1278,21 +1292,21 @@ export function useChatSession(deps: ChatSessionDeps) {
           if (layout.main === "first_prompt" && frameFirstPromptId) {
             setMessages((current) => appendImageSlot(current, messageId, `${slotId}:first`, frameFirstPrompt));
             pollResult(frameFirstPromptId, [], undefined, frameTarget(`${slotId}:first`), frameFirstPrompt, "image");
-            reportFrame(frameFirstPromptId, `${slotId}:first`, frameFirstPrompt, frameFirstValueKeys);
+            reportFrame(frameFirstPromptId, `${slotId}:first`, frameFirstPrompt, frameFirstValueKeys, frameFirstMedia);
           }
           if (frameLastPromptId) {
             setMessages((current) => appendImageSlot(current, messageId, lastSlotId, frameLastPrompt));
             pollResult(frameLastPromptId, [], undefined, frameTarget(lastSlotId), frameLastPrompt, "image");
-            reportFrame(frameLastPromptId, lastSlotId, frameLastPrompt, frameLastValueKeys);
+            reportFrame(frameLastPromptId, lastSlotId, frameLastPrompt, frameLastValueKeys, frameLastMedia);
           }
         } else {
           // 独立图片模式：主槽=本楼层新画面，尾帧新图进 :last
           if (layout.main === "first_prompt" && frameFirstPromptId) {
             pollResult(frameFirstPromptId, [], undefined, frameTarget(slotId), frameFirstPrompt, "image");
-            reportFrame(frameFirstPromptId, slotId, frameFirstPrompt, frameFirstValueKeys);
+            reportFrame(frameFirstPromptId, slotId, frameFirstPrompt, frameFirstValueKeys, frameFirstMedia);
           } else if (layout.main === "last_prompt" && frameLastPromptId) {
             pollResult(frameLastPromptId, [], undefined, frameTarget(slotId), frameLastPrompt, "image");
-            reportFrame(frameLastPromptId, slotId, frameLastPrompt, frameLastValueKeys);
+            reportFrame(frameLastPromptId, slotId, frameLastPrompt, frameLastValueKeys, frameLastMedia);
           } else if (layout.main === "last_frame_url" && lastFrameUrl) {
             setMessages((current) => resolveMediaSlot(current, messageId, slotId, lastFrameUrl, "image"));
           } else if (layout.main === "prev_tail_url") {
@@ -2182,6 +2196,9 @@ export function useChatSession(deps: ChatSessionDeps) {
     if (!snapshot?.length) return;
     const args = [...snapshot];
     args[7] = "manual";
+    // 重试即时反馈：槽位先回 pending（重试要走帧编译+提交，秒级无反馈会被当成「点了没反应」）；
+    // 再次失败时 failSlot 会带新错误与原快照，重新变回 failed+按钮。
+    setMessages((current) => resetMediaSlotForRetry(current, messageId, slotId));
     void submitIllustration(...(args as Parameters<typeof submitIllustration>));
   };
   return {

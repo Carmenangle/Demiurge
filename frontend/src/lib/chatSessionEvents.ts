@@ -185,6 +185,27 @@ export function markMediaSlotFailed(
   });
 }
 
+/**
+ * 失败槽「重新生成」即时反馈（2026-08-30 用户反馈「点了没反应」实锤）：
+ * 重试链路要走帧编译+提交（秒级），期间槽位必须先回到 pending 并清掉旧错误，
+ * 否则槽位停在 failed、错误文字逐字不变（如 ComfyUI 未启动时反复重试），用户无从感知重试已发生。
+ * retryArgs 保留在槽位上：重试再次失败时 markMediaSlotFailed 会带新错误+原快照，按钮仍在。
+ */
+export function resetMediaSlotForRetry(
+  current: ChatMessage[], messageId: string, slotId: string,
+): ChatMessage[] {
+  return current.map((message) => {
+    if (message.id !== messageId) return message;
+    return {
+      ...message,
+      parts: (message.parts || []).map((part) =>
+        part.type === "media-slot" && part.slotId === slotId && part.status === "failed"
+          ? { ...part, status: "pending" as const, error: undefined }
+          : part),
+    };
+  });
+}
+
 /** 音频对白槽：末尾追加 pending 槽并保留正文（纯文本消息先转成 text part，避免正文被槽位顶掉）。 */
 export function appendAudioSlot(
   current: ChatMessage[],

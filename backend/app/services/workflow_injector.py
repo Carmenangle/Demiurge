@@ -131,3 +131,21 @@ def inject_template_values(
             inp[target] = prompt
 
     return missing
+
+
+def set_unique_output_prefix(api: dict, prefix: str) -> int:
+    """覆写全部 SaveImage 节点的 filename_prefix 为唯一值。
+
+    模板自带的前缀常含秒级 %date%——两个任务同秒完成时后者覆盖前者，
+    导致「不同提示词、相同结果图」。prefix 需调用方保证唯一（如含 prompt_id）。
+    返回覆写的节点数。
+    """
+    count = 0
+    for node in api.values():
+        if not isinstance(node, dict):
+            continue
+        class_type = str(node.get("class_type") or "")
+        if class_type.startswith("SaveImage") and "filename_prefix" in (node.get("inputs") or {}):
+            node["inputs"]["filename_prefix"] = prefix
+            count += 1
+    return count

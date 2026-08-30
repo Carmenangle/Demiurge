@@ -44,14 +44,25 @@ _STATE_BLOCK_RE = re.compile(re.escape(_TAG_OPEN) + r"(.*?)" + re.escape(_TAG_CL
 # **不剥、不解析**（留正文供前端正则渲染），只抽出来存快照 + 下轮重注入。取最后一块。
 _STATUS_TAG_RE = re.compile(r"<status>([\s\S]*?)</status>", re.IGNORECASE)
 
+# think 剥离（闭合块 + 未闭合直达结尾）：模型会在思考里预写 status/encounter 草稿且
+# 常漏闭标签，快照/状态提取必须先剥 think，否则草稿会顶替真身（2026-08-30 trace 实锤）。
+_THINK_CLOSED_RE = re.compile(r"<think\b[^>]*>[\s\S]*?</think\s*>", re.IGNORECASE)
+_THINK_UNCLOSED_RE = re.compile(r"<think\b[^>]*>[\s\S]*\Z", re.IGNORECASE)
+
+
+def strip_think(reply: str) -> str:
+    """剥掉回复中的 think 块（含未闭合尾部），返回非思考文本。"""
+    return _THINK_UNCLOSED_RE.sub("", _THINK_CLOSED_RE.sub("", reply or ""))
+
 
 def extract_status_snapshot(reply: str) -> str:
     """抽取叙述里最后一个 <status> 块的**内部原文**（不含标签）。无则空串。
 
     只读不改：<status> 保留在正文（前端正则渲染绿框），这里仅取内容供落盘快照。
     多块取最后一个（叙述可能先复述旧栏再给新栏，末块为最新）。
+    think 内的预写草稿不参与提取（先剥 think，防草稿顶替真身）。
     """
-    matches = _STATUS_TAG_RE.findall(reply or "")
+    matches = _STATUS_TAG_RE.findall(strip_think(reply or ""))
     return matches[-1].strip() if matches else ""
 
 
@@ -116,23 +127,50 @@ def state_instruction() -> str:
     )
 
 
+def _think_spans(text: str) -> list[tuple[int, int]]:
+    """计算文本中 think 块（闭合 + 未闭合尾部）的字符区间。
+
+    未闭合 think 只在最后一个闭合块之后判定——`<think…\\Z` 贪婪匹配会盖住全文，
+    必须从闭合块末尾之后找，否则正文全被误判成思考。
+    """
+    spans = [(m.start(), m.end()) for m in _THINK_CLOSED_RE.finditer(text)]
+    search_from = max((end for _, end in spans), default=0)
+    m = _THINK_UNCLOSED_RE.search(text, search_from)
+    if m:
+        spans.append((m.start(), len(text)))
+    return spans
+
+
 def parse_state_block(reply: str) -> tuple[str, list[Any]]:
     """从叙述里剥离 <状态更新> 块，返回（去块后的正文, 原始 delta 列表）。
 
-    块内 JSON 解析失败或缺块 → 返回原文去块 + 空列表（叙述照常，不因解析失败丢内容）。
+    只认 think 之外的块：模型会在思考里预写该块草稿（2026-08-30 trace 实锤），
+    草稿不得顶替真身、也不得从正文里误删。块内 JSON 解析失败或缺块 →
+    返回原文去块 + 空列表（叙述照常，不因解析失败丢内容）。
     """
-    m = _STATE_BLOCK_RE.search(reply or "")
-    if m:
-        payload = m.group(1)
-        clean = _STATE_BLOCK_RE.sub("", reply).strip()
+    source = reply or ""
+    spans = _think_spans(source)
+
+    def outside(match: re.Match) -> bool:
+        return not any(s <= match.start() and match.end() <= e for s, e in spans)
+
+    matches = [m for m in _STATE_BLOCK_RE.finditer(source) if outside(m)]
+    if matches:
+        payload = matches[0].group(1)
+        clean = source
+        for m in matches:
+            clean = clean.replace(m.group(0), "", 1)
+        clean = clean.strip()
     else:
-        # Claude 偶尔在完整 JSON 后漏掉闭标签。仅把最后一个开标签到 EOF 当控制块，
-        # 防止它泄漏到正文；普通正文里的相似文字不受影响。
-        start = (reply or "").rfind(_TAG_OPEN)
-        if start < 0:
-            return reply, []
-        payload = reply[start + len(_TAG_OPEN):]
-        clean = reply[:start].strip()
+        opens = [
+            m.start() for m in re.finditer(re.escape(_TAG_OPEN), source)
+            if not any(s <= m.start() < e for s, e in spans)
+        ]
+        if not opens:
+            return source, []
+        start = opens[-1]
+        payload = source[start + len(_TAG_OPEN):]
+        clean = source[:start].strip()
     try:
         raw = json.loads(payload.strip())
     except (json.JSONDecodeError, ValueError):

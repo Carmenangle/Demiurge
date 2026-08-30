@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ChatMessage } from "../types/chat";
 import {
-  appendAudioSlot, appendImageSlot, appendTransitionSlot, dropMediaSlot, markMediaSlotFailed, pruneUnsubmittedMediaSlots, reduceChatStreamEvent, resolveMediaSlot,
+  appendAudioSlot, appendImageSlot, appendTransitionSlot, dropMediaSlot, markMediaSlotFailed, pruneUnsubmittedMediaSlots, reduceChatStreamEvent, resetMediaSlotForRetry, resolveMediaSlot,
   restoreSubmittedMediaSlots,
 } from "./chatSessionEvents";
 
@@ -389,5 +389,31 @@ describe("markMediaSlotFailed（2026-08-29 失败槽保留+重新生成）", () 
     const messages: ChatMessage[] = [{ id: "bot", role: "assistant", text: "正文" }];
     const next = markMediaSlotFailed(messages, "bot", "ghost", "stage", "err");
     expect(next).toEqual(messages);
+  });
+});
+
+describe("resetMediaSlotForRetry（2026-08-30 重试即时反馈）", () => {
+  it("失败槽重试时回 pending 并清错误、保留快照", () => {
+    const failed = markMediaSlotFailed(
+      [{ id: "bot", role: "assistant", text: "", parts: [
+        { type: "text", text: "正文" },
+        { type: "media-slot", slotId: "s1", status: "pending", kind: "image" },
+      ] }] as ChatMessage[],
+      "bot", "s1", "frame_gen", "首帧生图失败：ComfyUI 未运行，请先启动", ["p", 0],
+    );
+    const next = resetMediaSlotForRetry(failed, "bot", "s1");
+    const slot = next[0].parts![1];
+    expect(slot.status).toBe("pending");
+    expect(slot.error).toBeUndefined();
+    expect((slot as { retryArgs?: unknown[] }).retryArgs).toEqual(["p", 0]);  // 快照保留供再次失败
+  });
+
+  it("非 failed 槽与不存在槽不受影响", () => {
+    const messages: ChatMessage[] = [{ id: "bot", role: "assistant", text: "", parts: [
+      { type: "media-slot", slotId: "s1", status: "ready", kind: "image" },
+      { type: "media-slot", slotId: "s2", status: "pending", kind: "image" },
+    ] }];
+    expect(resetMediaSlotForRetry(messages, "bot", "s1")).toEqual(messages);
+    expect(resetMediaSlotForRetry(messages, "bot", "ghost")).toEqual(messages);
   });
 });

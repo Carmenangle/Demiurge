@@ -18,6 +18,23 @@ class WorkflowSubmissionError(ValueError):
         self.detail = detail
 
 
+def _uniquify_output_filenames(api: dict) -> None:
+    """输出文件名逐次唯一化（2026-08-30 用户实锤）：模板的 filename_prefix 若为固定
+    字面量（含 ComfyUI 不展开的 %date:… 伪日期模式），每次提交都写同一个文件——
+    首尾帧两任务几乎同时提交，后存者覆盖先存者，两个槽位/资产库记录指向同一文件。
+    每次提交给输出前缀追加提交级唯一后缀；模板文件不必改。"""
+    suffix = uuid.uuid4().hex[:8]
+    for node in api.values():
+        if not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+        prefix = inputs.get("filename_prefix")
+        if isinstance(prefix, str) and prefix.strip():
+            inputs["filename_prefix"] = f"{prefix.strip()}_{suffix}"
+
+
 def _ready_url(url: str) -> str:
     try:
         normalized = validate_comfyui_url(url)
@@ -46,6 +63,9 @@ def submit_template(template_id: str, values: dict[str, object], prompt: str = "
         raise WorkflowSubmissionError(400, f"工作流 JSON 解析失败：{exc}") from exc
 
     api = ui_to_api(workflow, normalized_url)
+    # 唯一输出前缀：模板自带 %date% 秒级前缀，同秒完成任务会互相覆盖输出文件
+    workflow_injector.set_unique_output_prefix(
+        api, f"Demiurge_{uuid.uuid4().hex[:12]}")
     missing = workflow_injector.inject_template_values(
         api,
         template.get("exposed", []),
@@ -70,6 +90,7 @@ def submit_template(template_id: str, values: dict[str, object], prompt: str = "
             raise WorkflowSubmissionError(
                 422, "模板没有已标注且受支持的 LoRA 加载器，无法应用所选 LoRA 模式",
             )
+    _uniquify_output_filenames(api)
     reranker.release_accelerator_memory()
     lease = model_lease.acquire(
         f"comfy-submit:{uuid.uuid4().hex}", "comfyui", priority=100, ttl_seconds=1800,
@@ -108,6 +129,7 @@ def submit_graph(workflow: dict[str, object], url: str, client_id: str = "") -> 
             422,
             "工作流没有可执行输出节点；单节点参数画布不能作为完整工作流提交，请重新打开卡片并选择完毕",
         )
+    _uniquify_output_filenames(api)
     reranker.release_accelerator_memory()
     lease = model_lease.acquire(
         f"comfy-submit:{uuid.uuid4().hex}", "comfyui", priority=100, ttl_seconds=1800,

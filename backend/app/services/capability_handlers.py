@@ -25,7 +25,8 @@ def submit_batch(template_id: str, variants: list[dict[str, Any]], prompt: str =
         if not isinstance(values, dict):
             results.append({"index": index, "ok": False, "detail": "变体值必须是对象"})
             continue
-        values["template_id"] = _resolve_template_id(str(values.get("template_id") or template_id))
+        template_id = _resolve_template_id(str(values.get("template_id") or template_id))
+        values["template_id"] = template_id
         # 顶层 lora_name 下发到缺省变体（用户指定 LoRA 而模型只在顶层写时）
         if lora_name and not values.get("lora_name"):
             values["lora_name"] = lora_name
