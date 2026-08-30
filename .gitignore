@@ -76,3 +76,5 @@ rag_evaluation_report.json
 .vscode/
 .workbuddy/
 .opensquilla/
+frontend/tsconfig.tsbuildinfo
+backend/scripts_tmp_*.py
