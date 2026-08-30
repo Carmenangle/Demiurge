@@ -147,7 +147,10 @@ def collect_comfy_outputs(prompt_ids: list[str] | None = None, comfyui_url: str 
             if status in ("done", "completed"):
                 break
             if status == "not_found":
-                raise RuntimeError(f"任务 {prompt_id[:8]} 在 ComfyUI 中丢失（可能已重启）")
+                # 单个任务丢失只隔离该条，不中止整批采集（其余图照常入库）
+                results.append({"prompt_id": prompt_id, "label": label, "ok": False,
+                                "detail": "任务在 ComfyUI 中丢失（可能已重启）"})
+                continue
             _time.sleep(2.0)
         if status not in ("done", "completed"):
             raise RuntimeError(f"等待任务 {prompt_id[:8]} 出图超时（{timeout_seconds}s）")

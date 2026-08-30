@@ -1,4 +1,4 @@
-"""世界书：条目解析、constant/可检索拆分、注入组装与预算封顶。"""
+"""世界书：条目解析、constant/可检索拆分、选择性注入组装（无预算截断）。"""
 import json
 
 from app.services import worldbook as wb
@@ -53,15 +53,15 @@ def test_assemble_merges_retrieved_and_dedups(monkeypatch):
     assert "检索命中A" in out
 
 
-def test_assemble_budget_caps(monkeypatch):
+def test_assemble_constant_never_truncated(monkeypatch):
+    # 上下文合同：constant（全局机制+系统判定机制）全程恒开、全文注入，无预算截断
     monkeypatch.setattr(wb, "_retrieve", lambda *a, **k: [])
     big = "字" * 500
     entries = [wb.Entry(content=big, constant=True),
                wb.Entry(content="第二条常驻", constant=True)]
-    out = wb.assemble("r1", entries, "q", None, budget=50)
-    # 预算很小：第一条保留，第二条被截断
+    out = wb.assemble("r1", entries, "q", None)
     assert big in out
-    assert "第二条常驻" not in out
+    assert "第二条常驻" in out
 
 
 def test_assemble_empty_returns_blank(monkeypatch):

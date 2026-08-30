@@ -72,10 +72,14 @@ def submit_task(plan: GenerationPlan, *, output_dir: str, repo_id: str = "",
                 configured_models: set[str] | frozenset[str] = frozenset()) -> dict:
     """校验 → 幂等去重 → 落库排队。返回 {task_id, deduped, duplicate_of?}。"""
     # 运行环境归一与编译器同款：collect 落盘目标由环境决定（堵 reversible 绕过路径域）
+    submit_ids = [st.id for st in plan.steps if st.operation.startswith("workflow.submit")]
     for step in plan.steps:
         if step.operation == "media.collect_comfy_outputs":
             step.params["output_dir"] = output_dir
             step.params["repo_id"] = repo_id or plan.repo_id
+            if not step.inputs_from and submit_ids:
+                # 采集自动链接 submit 产出（模型经常漏写 inputs_from）
+                step.inputs_from = [f"{sid}.submit_result" for sid in submit_ids]
     errors = plan_validator.validate(
         plan, capabilities=capability_registry.all_capabilities(),
         configured_models=configured_models, allowed_prefix=output_dir)

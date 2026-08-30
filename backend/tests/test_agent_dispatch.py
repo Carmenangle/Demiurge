@@ -31,24 +31,26 @@ def test_过滤外貌已知名单之外的角色段不混入():
     assert "红绸束发" not in out
 
 
-def test_同轮隐藏成稿预算追加在正文显式上限之外():
+def test_正文额度只保留思考预留不再为同轮成稿追加预算():
+    # 上下文合同·同轮成稿剥离：内联 profile_prompt 义务撤下后，
+    # 输出预算不再为同轮成稿追加预留；正文额度 = 显式上限 + 思考/状态预留 4000。
     ctx = _ctx(
         comfy_illustrate=True,
         prompt_profile="krea2",
         builtin={"roleplay": {"maxTokens": 4000}},
     )
 
-    assert ag._roleplay_sampling(ctx)["max_tokens"] == 9000
+    assert ag._roleplay_sampling(ctx)["max_tokens"] == 8000
     assert ag._roleplay_sampling(_ctx(
         comfy_illustrate=False,
         builtin={"roleplay": {"maxTokens": 4000}},
     ))["max_tokens"] == 8000
     # 2026-08-29 验收改约：未配置 max_tokens 时必须给 ≥16000 的充裕显式上限
-    # （含思考/状态/插画 JSON 预算，防正文 0 字截断；具体数值允许调优）。
+    # （含思考/状态预算，防正文 0 字截断；具体数值允许调优）。
     assert ag._roleplay_sampling(_ctx(comfy_illustrate=True))["max_tokens"] >= 16000
 
 
-def test_预设正文额度优先并在外追加全部隐藏输出预算():
+def test_预设正文额度优先并只在外追加思考预留():
     ctx = _ctx(
         comfy_illustrate=True,
         prompt_profile="anima_tags",
@@ -56,7 +58,7 @@ def test_预设正文额度优先并在外追加全部隐藏输出预算():
         _preset_sampling={"max_tokens": 600000},
     )
 
-    assert ag._roleplay_sampling(ctx)["max_tokens"] == 604800
+    assert ag._roleplay_sampling(ctx)["max_tokens"] == 604000
 
 
 def test_多角色persona只发送本轮出场角色描述并按剧情选择生图外貌(monkeypatch):
@@ -994,12 +996,12 @@ def test_roleplay把机械召回候选与预设上下文合并后只调一次主
         assert "GrayWill预设" in system
         assert "往事纪要候选" in system
         assert "作品记忆候选" in system
-        assert "<illustration>" in system
-        assert "composition" in system and "weight" in system
+        # 上下文合同·同轮成稿剥离：正文轮不再下发内联插画 JSON 义务与 near_generation_contract
+        assert "<illustration>" not in system
+        assert "【本轮插画执行合同】" not in system
         assert "<表格更新>" not in system
-        assert messages[-2]["role"] == "system"
-        assert "【本轮插画执行合同】" in messages[-2]["content"]
-        assert "当前 Profile：krea2" in messages[-2]["content"]
+        tail_systems = [m for m in messages if m["role"] == "system"][1:]
+        assert all("本轮插画执行合同" not in m["content"] for m in tail_systems)
         assert messages[-1] == {"role": "user", "content": "继续剧情"}
         calls.append("roleplay")
         return "剧情正文"
@@ -1479,6 +1481,12 @@ def test_comfy_video关闭时不编译视频且不调提取LLM(monkeypatch, tmp_
         ag.run_trace, "emit",
         lambda ctx, event, **data: trace.append((event, data)),
     )
+    video_calls = []
+    monkeypatch.setattr(
+        ag, "_extract_video_action_plan",
+        lambda *a, **k: video_calls.append(1) or {},
+        raising=False,
+    )
     llm_calls = []
     monkeypatch.setattr(
         ag._llm, "chat",
@@ -1502,7 +1510,8 @@ def test_comfy_video关闭时不编译视频且不调提取LLM(monkeypatch, tmp_
         "塞西莉亚站在孤儿院门前，猩红眼眸安静地注视着他。",
         turn=2, affinity=10.0, lost=False, user_text="委婉拒绝收养。",
     )
-    assert llm_calls == []  # 提取 LLM 一次都不调
+    # 上下文合同·同轮成稿剥离后：视频提取链零调用；Profile 由独立链编译（_llm.chat 允许被其调用）
+    assert video_calls == []
     assert not request.get("video_request")  # 不编译 video_request
     assert request.get("actors") == ["塞西莉亚"]  # 图链正常：出图请求照发
     req_trace = next(d for ev, d in trace if ev == "illustration.request")

@@ -333,16 +333,18 @@ def recall_chronicle(deps: AgencyDeps, *, repo_id: str, query: str, k: int = 10,
     本函数 0 LLM，不生成、精选或改写候选；候选与 GrayWill 预设、世界书、对话历史、
     本轮输入合并后，只由主模型一次生成。只读注入不回灌历史（token 护栏）。
     FTS5 trigram 旁路召回，与 Chroma 语义检索（含检索表行）互补。
+    actors：当前出场人物，召回排序先人物名相关、再按时间新→旧。
     rag_text：调用方预先从 rag_store 召回的相关条目（知识库 + 检索表行），拼在纪要之后一起注入。
     """
     if not (repo_id and query.strip()):
         return rag_text.strip()
     try:
+        # 上下文合同·记忆召回：召回源=纪要表，注入只取简要内容（render_recall 用 overview），
+        # 排序先人物名相关、再按时间新→旧，取 Top-k。
         hits = narrative_store.recall(deps.state_base, repo_id, query, k=max(k * 3, 30))
         recent = narrative_store.recent(deps.state_base, repo_id, k=50)
-        by_id = {entry.rowid: entry for entry in [*hits, *recent]}
-        hits = narrative_memory.select_relevant_recent(
-            list(by_id.values()), list(actors or []), k=k,
+        hits = narrative_memory.select_by_relevance(
+            hits, recent, actors=list(actors or []), k=k,
         )
     except Exception:  # noqa: BLE001  召回失败不阻断叙述
         hits = []
@@ -488,11 +490,29 @@ def maybe_summarize(
         entry = narrative_memory.parse_rich_summary(
             raw or "", turn_start=last + 1, turn_end=turn,
         )
-        if entry is None:
+        # 字数门槛（概览≤30字/正文≤300字）：填表 prompt 已写明前提，模型仍超写时
+        # 压缩改写一次（不机械截断）；仍超限视为抽取失败，旧纪要不动。
+        if entry is not None and not narrative_memory.chronicle_within_limits(
+                entry.overview, entry.text):
+            original_facts = list(entry.facts)
+            _trace(deps, "agent.compress", agent="chronicle",
+                   overview_chars=len(entry.overview), detail_chars=len(entry.text))
+            compressed = deps.chat_fn(
+                chat_base, chat_key, chat_model,
+                narrative_memory.COMPRESS_SYSTEM,
+                narrative_memory.build_compress_user(entry.overview, entry.text),
+                temperature=0.3, proxy=proxy)
+            entry = narrative_memory.parse_rich_summary(
+                compressed or "", turn_start=last + 1, turn_end=turn,
+            )
+            if entry is not None and not entry.facts and original_facts:
+                entry.facts = original_facts  # 事实账本素材不因压缩丢失
+        if entry is None or not narrative_memory.chronicle_within_limits(
+                entry.overview, entry.text):
             if events is not None:
                 events.append({"kind": "chronicle", "state": "fail"})
             _trace(deps, "agent.completed", agent="chronicle", written=False,
-                   reason="empty_summary")
+                   reason="empty_summary_or_over_limit")
             return False
         narrative_store.append(deps.state_base, repo_id, entry)
         if entry.facts:
@@ -557,18 +577,31 @@ def _compact_layers(
             compact_user,
             temperature=0.3, proxy=proxy)
         _trace(deps, "model.response", agent="chronicle_compact", content=raw or "")
-        text, keywords = narrative_memory.parse_summary(raw or "")
-        if not text:
+        entry = narrative_memory.parse_rich_summary(raw or "")
+        # 归并产出同样守字数门槛：超写压缩改写一次，仍超限则跳过本次压缩（旧条保留）
+        if entry is not None and not narrative_memory.chronicle_within_limits(
+                entry.overview, entry.text):
+            _trace(deps, "agent.compress", agent="chronicle_compact",
+                   overview_chars=len(entry.overview), detail_chars=len(entry.text))
+            compressed = deps.chat_fn(
+                chat_base, chat_key, chat_model,
+                narrative_memory.COMPRESS_SYSTEM,
+                narrative_memory.build_compress_user(entry.overview, entry.text),
+                temperature=0.3, proxy=proxy)
+            entry = narrative_memory.parse_rich_summary(compressed or "")
+        if entry is None or not narrative_memory.chronicle_within_limits(
+                entry.overview, entry.text):
             _trace(deps, "agent.completed", agent="chronicle_compact", written=False,
-                   reason="empty_summary", layer=layer)
+                   reason="empty_summary_or_over_limit", layer=layer)
             continue
         merged = narrative_memory.ChronicleEntry(
-            text=text, turn_start=olds[0].turn_start, turn_end=olds[-1].turn_end,
-            layer=layer + 1, keywords=keywords)
+            text=entry.text, overview=entry.overview, keywords=entry.keywords,
+            turn_start=olds[0].turn_start, turn_end=olds[-1].turn_end,
+            layer=layer + 1)
         narrative_store.append(deps.state_base, repo_id, merged)
         narrative_store.delete_rows(deps.state_base, repo_id, [e.rowid for e in olds])
-        _trace(deps, "rag.write", source="chronicle_compact", content=text,
-               keywords=keywords, turn_start=merged.turn_start, turn_end=merged.turn_end,
+        _trace(deps, "rag.write", source="chronicle_compact", content=merged.text,
+               keywords=merged.keywords, turn_start=merged.turn_start, turn_end=merged.turn_end,
                layer=layer + 1, replaced_rowids=[e.rowid for e in olds])
         _trace(deps, "agent.completed", agent="chronicle_compact", written=True,
-               layer=layer + 1, content=text, keywords=keywords)
+               layer=layer + 1, content=merged.text, keywords=merged.keywords)

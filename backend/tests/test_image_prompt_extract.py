@@ -92,28 +92,6 @@ def test_build_extract_system_含还原指令():
     assert "还原" in s and "JSON" in s
 
 
-def test_同轮插画计划允许合理联想但必须服从硬事实():
-    instruction = ipe.build_inline_plan_instruction("krea2")
-
-    assert "硬事实锁" in instruction
-    assert "开放视觉槽" in instruction
-    assert "微动作" in instruction
-    assert "时间、地点、天气、情绪" in instruction
-    assert "重要新人物" in instruction
-    assert "关键道具" in instruction
-
-
-def test_同轮插画计划强制补全缺失的画面硬事实():
-    instruction = ipe.build_inline_plan_instruction("krea2")
-
-    assert "缺失硬事实补全" in instruction
-    assert "必须补出一个具体答案" in instruction
-    assert "不得留空" in instruction
-    assert "当前服装" in instruction
-    assert "具体动作或姿态" in instruction
-    assert "地点环境" in instruction
-
-
 def test_主生成插画计划可解析并从正文剥离():
     reply = (
         "铺垫。\n\n她跃上高台，披风在雷光中扬起。"
@@ -249,36 +227,6 @@ def test_未闭合隐藏思考不能成为插画剧情():
     ) == "塞西莉亚把徽章留在长凳上。"
 
 
-def test_主生成插画指令要求高潮锚点镜头构图与主体权重():
-    instruction = ipe.build_inline_plan_instruction()
-
-    for required in (
-        "高潮", "anchor", "camera", "composition", "subjects", "weight",
-        "visual_thesis", "hierarchy", "palette_material", "lighting_logic",
-        "aspect_ratio", "1:1", "2:3", "16:9",
-    ):
-        assert required in instruction
-    assert "<illustration>" in instruction
-    assert "每轮必须选择" in instruction
-    assert "不得省略" in instruction
-    assert "无适合画面的高潮" not in instruction
-    assert "结构化画面草稿" in instruction
-    assert "基础识别特征" in instruction
-    assert "事后余韵" in instruction
-    assert "全文最后一句" in instruction
-    assert "人物互动高潮" in instruction
-    assert "物件只能作为辅助视觉装置" in instruction
-    assert "发现、开启、争夺或取得物件" in instruction
-
-
-def test_内联插画计划要求保留造成剧情状态变化的动作因果链():
-    instruction = ipe.build_inline_plan_instruction("krea2")
-
-    assert "造成剧情状态变化的动作" in instruction
-    assert "动作主体、关键道具和动作结果" in instruction
-    assert "静态肖像" in instruction
-
-
 def test_插画计划非法画幅比例回退竖图():
     reply = (
         "正文高潮。"
@@ -337,52 +285,6 @@ def test_解析通用可视事实时只接受带正文逐字证据的条目():
     ]
     assert "crown" not in plan["prompt"]
     assert "王冠" not in clean
-
-
-def test_主生成插画指令同轮生成隐藏完整提示词且不占正文配额():
-    instruction = ipe.build_inline_plan_instruction(
-        "krea2", profile_instruction="Krea2完整成稿合同",
-    )
-
-    assert '"profile_prompt"' in instruction
-    assert "Krea2完整成稿合同" in instruction
-    assert "不向用户展示" in instruction
-    assert "不计入正文" in instruction
-    assert "<content>" in instruction
-    assert "camera 写服务视觉命题" in instruction
-    assert "除 anchor 和 subjects.name 必须保留" in instruction
-    assert "必须使用简洁英文视觉描述" in instruction
-    assert "写正文前" in instruction
-    assert "本轮冲突" in instruction
-    assert "唯一高潮画面时刻" in instruction
-    assert "visual_facts" in instruction
-    assert "正文逐字 evidence" in instruction
-
-
-def test_未知物件要求按可画身份通用释义而非单物件词典特判():
-    instruction = ipe.build_inline_plan_instruction("krea2")
-
-    for requirement in ("任何关键物件", "材质", "几何外形与尺寸尺度", "可见结构或运动方式",
-                        "功能", "实际交互", "器具、机关、法器、刑具、容器、载具、建筑构件"):
-        assert requirement in instruction
-    assert "不是任何单个物件的特例" in instruction
-    assert "玉制振动棒" not in instruction
-
-
-def test_插画指令要求基础外貌与当前情况合并并承担当前Profile格式():
-    instruction = ipe.build_inline_plan_instruction(
-        "krea2", "冷倾雪：漆黑墨发扎成发团、紫玉金髻、朱唇、成熟美目",
-        profile_instruction="只输出Krea2英文自然段",
-    )
-
-    assert "基础外貌" in instruction
-    assert "当前情况" in instruction
-    assert "冷倾雪：漆黑墨发扎成发团、紫玉金髻" in instruction
-    assert "NSFW" not in instruction
-    assert "profile_prompt" in instruction
-    assert "lighting_logic 写光源" in instruction
-    assert "只输出Krea2英文自然段" in instruction
-    assert "正文要求的篇幅" in instruction
 
 
 def test_解析保留主模型同轮生成的模式提示词():

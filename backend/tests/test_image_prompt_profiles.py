@@ -1320,25 +1320,6 @@ def test_krea2不再禁止为空缺视觉槽合理补全():
     assert "允许为开放视觉槽补足" in system
 
 
-@pytest.mark.parametrize("profile,required", [
-    ("krea2", "一个纯英文自然语言段落"),
-    ("anima_tags", "英文 tags + 英文关系描述"),
-    ("natural_language", "一个纯英文自然语言段落"),
-    ("niji_sections", "四段内容"),
-])
-def test_四种Profile提供主剧情同轮隐藏成稿合同(profile, required):
-    instruction = profiles.inline_generation_instruction(profile)
-
-    assert required in instruction
-    assert "角色姓名" in instruction
-    assert "具体外貌" in instruction
-    assert "当前服装" in instruction
-    assert "高潮动作" in instruction
-    assert "LoRA" in instruction
-    assert "primary adult character" in instruction
-    assert "second adult character" in instruction
-
-
 def test_anima同轮成稿格式错误时从完整动作窗口紧凑重建而非拼接整份草稿():
     scene = {
         "narrative": (
@@ -1428,11 +1409,6 @@ def test_双角色Profile分别编译两人的外貌动作再描述整体关系(
     if profile == "krea2":
         assert "masterpiece" not in prompt.lower()
         assert "\n\n" not in prompt
-
-
-@pytest.mark.parametrize("profile", profiles.PROFILE_IDS)
-def test_同轮隐藏Profile预留输出预算(profile):
-    assert profiles.inline_output_token_reserve(profile) >= 700
 
 
 def _unknown_object_scene():

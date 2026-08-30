@@ -13,7 +13,7 @@ import re
 import traceback
 from typing import Any, Iterator, TypedDict
 
-from app.services import agent_context, builtin_agents, edit_agent, generation_approval, generation_store, plan_compiler, prompt_compiler, roleplay_turn, run_trace, scene_classify, structured_output, tool_agent_adapter
+from app.services import agent_context, builtin_agents, edit_agent, generation_approval, generation_store, plan_compiler, prompt_compiler, roleplay_turn, run_trace, scene_classify, story_history, structured_output, tool_agent_adapter
 from app.services.structured_contracts import SupervisorDecision
 from app.services import llm as _llm
 from app.services import prompt_clean
@@ -86,11 +86,8 @@ def _roleplay_sampling(ctx: dict) -> dict:
     if "max_tokens" in sampling:
         # GrayWill 的 think、状态和骰点先于正文输出，必须在正文上限之外独立预留。
         sampling["max_tokens"] += 4000
-    if ctx.get("comfy_illustrate") and "max_tokens" in sampling:
-        from app.services import image_prompt_profiles
-
-        profile = str(ctx.get("prompt_profile") or "krea2")
-        sampling["max_tokens"] += image_prompt_profiles.inline_output_token_reserve(profile)
+    # 同轮成稿已剥离（上下文合同）：不再为内联 profile_prompt 预留输出预算，
+    # 画像成稿改由插画链独立调用编译，正文额度全额归正文。
     if "max_tokens" not in sampling:
         # 2026-08-29 验收「正文内容极其少」实锤：未配置 max_tokens 时依赖供应商默认
         # （常见仅 4k-8k），长思考模型在 <think> 阶段就烧光额度，正文 0 字截断。
@@ -560,6 +557,14 @@ def plan_compiler_node(state: AgentState) -> dict:
     if outcome.plan is None:
         return {"result_text": "计划编译未通过校验：\n- " + "\n- ".join(outcome.errors),
                 "trace": trace}
+    # 段落引用回填：模型为省输出上限会把变体写成 prompt_section 引用，
+    # 编译期按预读附件机械抽取完整提示词（执行器无 LLM，必须在此回填）。
+    try:
+        filled = plan_compiler.fill_prompt_sections(outcome.plan, attachments)
+        if filled:
+            run_trace.emit(ctx, "plan.sections_filled", count=filled)
+    except Exception as exc:  # noqa: BLE001 - 回填失败如实留痕
+        run_trace.emit(ctx, "plan.sections_filled", status="error", error=str(exc))
     json_path = plan_compiler.save_plan(output_dir, outcome.plan.repo_id, outcome.plan)
     run_trace.emit(ctx, "plan.validated", status="ok", steps=len(outcome.plan.steps),
                    path=json_path)
@@ -647,6 +652,13 @@ def roleplay_node(state: AgentState) -> dict:
             item.get("role") == "user" and str(item.get("content") or "").strip()
             for item in (ctx.get("history") or [])
         )
+        # 上下文合同·历史：剧情模式只进上一次剧情轮，且过滤到只剩正文
+        # （剥 think/status/encounter/骰点/插画音频转场 JSON 块）；更早轮次不进上下文。
+        story_round = story_history.last_story_round(ctx.get("history") or [])
+        run_trace.emit(ctx, "history.slimmed",
+                       full_messages=len(ctx.get("history") or []),
+                       injected_messages=len(story_round),
+                       injected_chars=sum(len(m["content"]) for m in story_round))
         ctx["persona"] = _resolve_personas(
             ctx, text, opening_only=first_story_reply,
             worldbook_names=ctx.get("_worldbook_character_names") or [],
@@ -673,7 +685,8 @@ def roleplay_node(state: AgentState) -> dict:
         # chatHistory 处原位插历史）；否则内置扮演提示。dialogue = 少样本片段 + 历史（真实多轮，不折叠）
         # scene 由 supervisor 那次调用分类后写入 ctx（P2）→ 驱动 scene 条件链；无则空串（只命中无条件链）
         preset_msgs, preset_temp, has_hist, chains_tail, chains_head = _resolve_preset(
-            ctx, wb, scene=ctx.get("scene") or "", affinity=affinity, turn=turn)
+            ctx, wb, scene=ctx.get("scene") or "", affinity=affinity, turn=turn,
+            history=story_round)
         if preset_msgs:
             # 拆：起始连续 system 段 → 进 system 头（受 _agent_system 包裹/替换）；其余(user/assistant/
             # 历史/尾部 system=PHI)保持原位当对话轮。这样 role 不被抹平，PHI 仍在历史之后。
@@ -688,7 +701,7 @@ def roleplay_node(state: AgentState) -> dict:
             rp_temp = _builtin(ctx, "roleplay", "temperature", builtin_agents.ROLEPLAY_TEMPERATURE)
             temp = preset_temp if preset_temp is not None else _temperature(ctx, rp_temp)
             if not has_hist:  # 预设无 chatHistory marker → 历史补在对话末尾
-                dialogue += _history_messages(ctx)
+                dialogue += story_round
         else:
             persona = ctx.get("persona") or ""
             rp_base = _builtin(ctx, "roleplay", "systemPrompt", builtin_agents.ROLEPLAY_BASE)
@@ -705,7 +718,7 @@ def roleplay_node(state: AgentState) -> dict:
                 "user_name": (ctx.get("user_name") or "").strip(),
             })
             temp = _temperature(ctx, _builtin(ctx, "roleplay", "temperature", builtin_agents.ROLEPLAY_TEMPERATURE))
-            dialogue = _history_messages(ctx)  # 历史作真实多轮，不再折叠进 user 串
+            dialogue = story_round  # 历史作真实多轮，只进上一次剧情轮的纯正文（上下文合同）
         # 头部思维链随 system 头（框定推理框架）
         if chains_head:
             base += "\n\n" + "\n\n".join(chains_head)
@@ -721,8 +734,8 @@ def roleplay_node(state: AgentState) -> dict:
             # 表格+RAG 结合：先从 rag_store 召回知识库条目 + 检索表行（同库同通道）
             rag_text = _rag_recall_text(ctx, repo_id, retrieval_query)
             table_recall = _table_recall_text(ctx, repo_id, retrieval_query)
-            # Recall 只做检索，不独立调 LLM：往事纪要 + 知识库/检索表候选原样并入
-            # GrayWill 主请求，由主模型结合世界书、历史与本轮输入一次判断并生成。
+            # Recall 只做检索，不独立调 LLM：往事纪要（人物相关优先，简要 Top-10）
+            # + 知识库/检索表候选原样并入 GrayWill 主请求，由主模型结合世界书、历史与本轮输入一次判断并生成。
             recall = roleplay_agency.recall_chronicle(
                 deps, repo_id=repo_id, query=retrieval_query, rag_text=rag_text,
                 actors=[
@@ -798,7 +811,7 @@ def roleplay_node(state: AgentState) -> dict:
                     run_trace.emit(ctx, "prose_style.injected",
                                    words=len(_prose_style.effective_phrases(_style_cfg)))
             if getattr(deps, "renderer", None) is not None or ctx.get("comfy_illustrate"):
-                from app.services import image_prompt_extract, image_prompt_profiles, worldbook_store
+                from app.services import worldbook_store
                 visual_query = _illustration_visual_query(ctx, text)
                 visual_profiles = (
                     _card_visual_profiles(ctx, visual_query)
@@ -808,13 +821,9 @@ def roleplay_node(state: AgentState) -> dict:
                     )
                 )
                 ctx["_illustration_visual_profiles"] = visual_profiles
-                base += image_prompt_extract.build_inline_plan_instruction(
-                    ctx.get("prompt_profile") or "krea2",
-                    visual_profiles,
-                    profile_instruction=image_prompt_profiles.inline_generation_instruction(
-                        ctx.get("prompt_profile") or "krea2",
-                    ),
-                )
+                # 上下文合同·同轮成稿剥离：不再向正文轮下发内联 <illustration> JSON 义务
+                # （原 build_inline_plan_instruction+格式说明 ≈ 数千字符尾部合同）。
+                # 视觉锚与成稿全部交给画像链独立编译（produce 阶段 _profile_llm_fallback）。
             # 通用数据表只作只读剧情上下文；更新由正文发出后的独立维护调用完成，
             # 禁止再让主 Roleplay 在正文尾部生成 <表格更新>。
             try:
@@ -857,14 +866,8 @@ def roleplay_node(state: AgentState) -> dict:
                 "正文与结尾 JSON 块的输出额度永远优先于思考。"
             ),
         })
-        if getattr(deps, "renderer", None) is not None or ctx.get("comfy_illustrate"):
-            from app.services import image_prompt_profiles as _ipp
-            tail_msgs.append({
-                "role": "system",
-                "content": _ipp.near_generation_contract(
-                    ctx.get("prompt_profile") or "krea2",
-                ),
-            })
+        # 同轮成稿已剥离：不再向正文轮下发 <illustration> JSON 义务及其 near_generation_contract
+        # 尾部合同；视觉锚与画像成稿全部由插画链在 produce 阶段独立编译（_profile_llm_fallback）。
         if ctx.get("comfy_audio"):
             from app.services import audio_dialogue_extract
             tail_msgs.append({
@@ -1343,9 +1346,9 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
         local_scene_fallback = (
             not illustration_plan and local_scene in ("nsfw", "climax")
         )
-        # ComfyUI 自动插画开启后，主模型即使违约漏掉计划，也不能让整条请求静默消失。
-        # 普通 dialogue/action 直接复用本轮正文最强视觉段落；完整 Profile 由本轮隐藏成稿
-        # 或本地事实编译提供，前端无需再补调文本模型。
+        # ComfyUI 自动插画开启后，主模型即使没带内联计划，也不能让整条请求静默消失。
+        # 普通 dialogue/action 直接复用本轮正文最强视觉段落；完整 Profile 由独立 LLM 链
+        # （_profile_llm_fallback）或本地事实编译提供，前端无需再补调文本模型。
         missing_plan_fallback = bool(
             ctx.get("comfy_illustrate") and not illustration_plan and visible_story
         )
@@ -1577,14 +1580,12 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
             compiled_profile = image_prompt_profiles.normalize_inline(
                 scene_spec["profile"], inline_profile, scene_spec,
             )
-            profile_strategy = "same_turn"
+            profile_strategy = "same_turn" if illustration_plan else "independent_chain"
             if not compiled_profile:
-                # 锚点重定向/无存活视觉事实导致同轮成稿被清空时，旧实现直接掉本地模板
-                # （无 LLM，防拦截预设从未在图像 Profile 上生效）。改为补一次携带当前
-                # 防拦截预设的 LLM 调用，让模型在预设保护下按纠正后正文重写英文画面；
-                # 失败才回退本地事实兜底。只在该重定向路径生效，避免扰动其他降级路径。
-                if plan_retargeted:
-                    compiled_profile, profile_strategy = _profile_llm_fallback(ctx, scene_spec)
+                # 同轮成稿被清空，或同轮义务剥离后主模型本就没带 illustration 块：
+                # 全走一次携带当前防拦截预设的独立 LLM 调用（image_prompt_profiles.generate 链，
+                # 已实证 status=ok），让模型按当前正文重写英文画面；失败才回退本地事实兜底。
+                compiled_profile, profile_strategy = _profile_llm_fallback(ctx, scene_spec)
             if not compiled_profile:
                 local_profile = image_prompt_profiles.deterministic_fallback(
                     scene_spec["profile"], scene_spec,
@@ -1617,8 +1618,8 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
             )
             if profile_negative:
                 scene_spec["negative_prompt"] = profile_negative
-            # Profile 正常路径由主剧情同轮成稿；同轮成稿被清空时补一次携带防拦截预设的
-            # LLM 调用（_profile_llm_fallback），仍失败才走本地事实兜底。
+            # Profile：同轮成稿（模型仍自发带块时）优先；否则由携带防拦截预设的独立
+            # LLM 链（_profile_llm_fallback）编译，仍失败才走本地事实兜底。
             request_prompt = image_prompt_extract.format_comfy_prompt(request_prompt)
             illustrate_req = (
                 {"prompt": request_prompt, "motion": motion, "actors": request_actors,
@@ -2760,12 +2761,14 @@ def _history_messages(ctx: dict) -> list[dict]:
 
 def _resolve_preset(
     ctx: dict, worldbook_text: str, *, scene: str = "", affinity: float | None = None, turn: int = 0,
+    history: list[dict] | None = None,
 ) -> tuple[list[dict], float | None, bool, list[str], list[str]]:
     """有激活偏置预设 → 组装带 role 的多条消息 + 采样温度 + 是否含历史 marker + 命中的思维链(尾/头)。
     无预设/读不到 → ([], None, False, [], [])。
 
     保留每片段自身 role（system/user/assistant 少样本片段不再被折叠），chatHistory marker 处原位
     插入历史（ST 深度注入语义）。marker 填充：卡字段 + 世界书 + 用户人设。
+    history=None 读 ctx 全量历史；剧情模式传入瘦身后的上一次剧情轮（story_history.last_story_round）。
     思维链按 scene/affinity/turn 真状态条件选（select_chains），尾部注入遵守最严、头部随 system。
     """
     ctx["_preset_sampling"] = {}
@@ -2782,7 +2785,7 @@ def _resolve_preset(
             str(name).strip() for name in (ctx.get("_selected_persona_names") or [])
             if str(name).strip()
         ]
-        history = ctx.get("history") or []
+        history = (ctx.get("history") or []) if history is None else history
         # ST 深度重注入范式：{{lastUserMessage}}=本轮实时输入（未入历史），{{lastCharMessage}}=历史里
         # 最后一条 AI 消息。配套「擦除历史最后一条用户消息 + 在指定深度重注入 {{lastUserMessage}}」越甲。
         last_char = ""

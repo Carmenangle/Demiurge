@@ -52,7 +52,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             conn.execute("DROP TABLE chronicle")
             _create_chronicle(conn)
             for rowid, text, turn_start, turn_end, layer, keywords in rows:
-                overview = (text or "")[:120]
+                overview = (text or "")[:30]
                 conn.execute(
                     "INSERT INTO chronicle(rowid, body, overview, text, dialogue, characters, "
                     "turn_start, turn_end, layer, keywords) VALUES (?,?,?,?,?,?,?,?,?,?)",

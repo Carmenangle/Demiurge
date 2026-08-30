@@ -107,6 +107,91 @@ def test_抽取失败_不落盘不推进(tmp_path):
     assert ns.get_last_turn(str(tmp_path), "r1", "卡A") == 0
 
 
+def test_抽取超限时压缩改写后落盘(tmp_path):
+    calls = []
+
+    def fake(*a, **k):
+        calls.append(a[3] if len(a) > 3 else k.get("system", ""))
+        if len(calls) == 1:  # 第一次抽取：超写
+            return ('{"overview":"' + "概" * 40 + '","chronicle":"' + "详" * 400 + '"}')
+        assert a[3] == nm.COMPRESS_SYSTEM  # 第二次必须是压缩改写调用
+        return '{"overview":"雪山关系转暖","chronicle":"两人协力脱险并约定同行。"}'
+
+    deps = _deps(tmp_path, fake)
+    got = ra.maybe_summarize(deps, repo_id="r1", card_name="卡A",
+                             window_text="对话", turn=6,
+                             chat_base="b", chat_key="k", chat_model="m", cadence=6)
+    assert got is True
+    assert len(calls) == 2
+    items = ns.recent(str(tmp_path), "r1", k=10)
+    assert len(items) == 1
+    assert nm.chronicle_within_limits(items[0].overview, items[0].text)
+    assert "压缩改写" not in items[0].text  # 落盘的是改写后的纪要，不是被截断的原文
+
+
+def test_抽取压缩后仍超限则拒绝落盘(tmp_path):
+    calls = []
+
+    def fake(*a, **k):
+        calls.append(1)
+        return '{"overview":"' + "概" * 40 + '","chronicle":"' + "详" * 400 + '"}'
+
+    deps = _deps(tmp_path, fake)
+    got = ra.maybe_summarize(deps, repo_id="r1", card_name="卡A",
+                             window_text="对话", turn=6,
+                             chat_base="b", chat_key="k", chat_model="m", cadence=6)
+    assert got is False
+    assert len(calls) == 2  # 抽取 + 压缩改写一次，不无限重试
+    assert ns.recent(str(tmp_path), "r1", k=10) == []  # 未落盘
+    assert ns.get_last_turn(str(tmp_path), "r1", "卡A") == 0  # 进度不推进
+
+
+def test_抽取压缩不丢失事实账本素材(tmp_path):
+    payload = (
+        '{"overview":"' + "概" * 40 + '","chronicle":"' + "详" * 400 + '",'
+        '"facts":[{"subject":"王城","predicate":"统治者","object":"新王",'
+        '"evidence":"新王接过王冠"}]}'
+    )
+
+    def fake(*a, **k):
+        if a[3] == nm.COMPRESS_SYSTEM:
+            return '{"overview":"政变结束","chronicle":"新王接管王城"}'  # 压缩产出无 facts
+        return payload
+
+    deps = _deps(tmp_path, fake)
+    assert ra.maybe_summarize(
+        deps, repo_id="r1", card_name="卡A", window_text="三轮剧情", turn=3,
+        chat_base="b", chat_key="k", chat_model="m",
+    ) is True
+    facts = temporal_fact_store.as_of(str(tmp_path), "r1", 3)
+    assert [(fact["subject"], fact["predicate"], fact["object"])
+            for fact in facts] == [("王城", "统治者", "新王")]
+
+
+def test_分层压缩产出超限时压缩改写(tmp_path):
+    base = str(tmp_path)
+    for i in range(nm.LAYER0_CAP + 1):
+        ns.append(base, "r1", nm.ChronicleEntry(text=f"细节事件{i}", turn_start=i, turn_end=i, layer=0))
+    before0 = ns.count(base, "r1", layer=0)
+
+    calls = []
+
+    def fake(*a, **k):
+        calls.append(a[3])
+        if len(calls) == 1:
+            return '{"overview":"' + "概" * 40 + '","summary":"' + "详" * 400 + '","keywords":[]}'
+        assert a[3] == nm.COMPRESS_SYSTEM
+        return '{"overview":"归并概览","summary":"归并大纲"}'
+
+    deps = _deps(tmp_path, fake)
+    ra._compact_layers(deps, repo_id="r1", chat_base="b", chat_key="k", chat_model="m")
+    assert ns.count(base, "r1", layer=0) == before0 - nm.COMPACT_BATCH
+    assert ns.count(base, "r1", layer=1) == 1
+    merged = ns.recent(base, "r1", k=1, layer=1)[0]
+    assert nm.chronicle_within_limits(merged.overview, merged.text)
+    assert merged.overview == "归并概览"
+
+
 def test_纪要历史缺口不合并成跨频率大卡(tmp_path):
     calls = []
     deps = _deps(tmp_path, lambda *a, **k: calls.append(1) or '{"summary":"错误大卡"}')

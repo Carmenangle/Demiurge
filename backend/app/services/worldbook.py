@@ -18,12 +18,9 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from app.services import character_store, rag_backend, rag_retrieval
-from app.services.agent_context import estimate_tokens
 from app.services.rag_backend import EmbedConfig
 
 _WB_MARK = "worldbook_hash"          # 旧版全量索引哨兵；增量同步时自动清理
-_DEFAULT_BUDGET = 12000              # 世界书注入 token 预算上限（卡作者常把大量设定标 constant 常驻，
-                                     # 单常驻集就可能上万 token；预算须容下 constant + 关键词命中 + 语义补充）
 _DEFAULT_K = 8                       # 非常驻条目语义检索条数（关键词命中额外叠加，见 assemble）
 _INDEX_LOCK = threading.Lock()
 _INDEXING: set[tuple[str, tuple[str, ...]]] = set()
@@ -284,8 +281,14 @@ def keyword_match_indices(entries: list[Entry], query: str) -> list[int]:
 
 
 def assemble_selection(repo_id: str, entries: list[Entry], query: str, cfg: EmbedConfig,
-                       *, k: int = _DEFAULT_K, budget: int = _DEFAULT_BUDGET) -> Selection:
-    """组装注入文本，并返回本轮实际进入预算的原始快照条目 index。"""
+                       *, k: int = _DEFAULT_K) -> Selection:
+    """组装注入文本，并返回本轮实际进入注入的原始快照条目 index。
+
+    选择性注入，不做 token 预算截断（截断会腰斩机制条目与角色卡，破坏体验）：
+      - constant（全局机制 + 系统判定机制条目）：全程恒开，全文注入，永不截断；
+      - 关键词命中（key 出现在 query 的命名实体）：本轮直接相关，全量注入；
+      - 非常驻语义/BM25 检索：按相关性取 top-k，条数即闸门，不做字数截断。
+    """
     indexed = [
         (entry.source_index if entry.source_index >= 0 else position, entry)
         for position, entry in enumerate(entries)
@@ -319,21 +322,16 @@ def assemble_selection(repo_id: str, entries: list[Entry], query: str, cfg: Embe
     picked_indices: list[int] = []
     picked_keyword_indices: list[int] = []
     seen: set[str] = set()
-    used = 0
     for index, entry in candidates:
         text = entry.content
         h = _hid(text)
         if h in seen:
             continue
-        cost = estimate_tokens(text)
-        if used + cost > budget and picked:
-            break
         seen.add(h)
         picked.append(text)
         picked_indices.append(index)
         if index in keyword_indices:
             picked_keyword_indices.append(index)
-        used += cost
     if not picked:
         return Selection("", [])
     body = "\n\n".join(f"- {text}" for text in picked)
@@ -343,14 +341,13 @@ def assemble_selection(repo_id: str, entries: list[Entry], query: str, cfg: Embe
 
 
 def assemble(repo_id: str, entries: list[Entry], query: str, cfg: EmbedConfig,
-             *, k: int = _DEFAULT_K, budget: int = _DEFAULT_BUDGET) -> str:
-    """组装本轮世界书注入文本：constant 全带 + 关键词触发命中 + 非常驻语义检索 top-k，预算封顶。
+             *, k: int = _DEFAULT_K) -> str:
+    """组装本轮世界书注入文本：constant 全带（不截断）+ 关键词触发命中 + 非常驻语义检索 top-k。
 
-    注入优先级（高→低，去重后按序截断，前面的优先保留）：
-      1) 关键词触发命中（key 出现在 query，ST 核心机制；用户点名的命名实体是本轮最相关，须先于常驻
-         机制文，避免大量 constant 撑爆预算后把点名的角色/地点条目挤掉）
-      2) constant 常驻条目
-      3) 语义检索补充（dense+BM25 RRF）
+    注入优先级（高→低，去重后按序全收）：
+      1) 关键词触发命中（key 出现在 query，ST 核心机制；用户点名的命名实体是本轮最相关）
+      2) constant 常驻条目（全局机制 + 系统判定机制：全程恒开）
+      3) 语义检索补充（dense+BM25 RRF，按相关性取 top-k）
     返回可直接拼进 system 的文本；无内容返回空串。
     """
-    return assemble_selection(repo_id, entries, query, cfg, k=k, budget=budget).text
+    return assemble_selection(repo_id, entries, query, cfg, k=k).text

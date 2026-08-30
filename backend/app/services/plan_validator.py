@@ -48,6 +48,12 @@ def validate(plan: GenerationPlan, *,
 
     if not plan.steps:
         errors.append("计划没有任何步骤（steps 为空）。")
+    elif not any("submit" in str(st.operation) or "collect" in str(st.operation)
+                 for st in plan.steps):
+        import re as _re
+        if _re.search(r"出图|生图|生成图|生成图片|生成视频|提交", plan.intent):
+            errors.append("意图要求出图/提交，但计划没有任何 submit/collect 步骤——"
+                          "请按意图重新编排（这是意图与计划不一致，不是信息缺失）。")
 
     # ── 逐步校验 ────────────────────────────────────────────────────────────
     step_ids: set[str] = set()

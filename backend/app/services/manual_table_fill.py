@@ -142,7 +142,8 @@ def _manual_system(tables: list[dict[str, Any]], include_chronicle: bool) -> str
     return (
         "你是剧情数据库填表 Agent。只根据给定的有编号对话回合处理本次指定表。"
         "通用表严格遵守列名、身份列和更新规则；同一身份已有行时输出 update，不重复 insert。"
-        "纪要表每个批次输出一条丰富纪要，保留概览、完整因果、重要对白和实际出场人物。"
+        "纪要表每个批次输出一条丰富纪要，保留概览、完整因果、重要对白和实际出场人物；"
+        "概览 overview 不超过30字，详细纪要 chronicle 不超过300字。"
         "只输出 JSON：{\"ops\":[通用表 insert/update/delete 操作],"
         "\"chronicles\":[{\"overview\":\"短概览\",\"chronicle\":\"详细纪要\","
         "\"dialogue\":\"重要对白\",\"characters\":[\"人物\"],\"keywords\":[\"关键词\"]}]}。"
@@ -215,7 +216,20 @@ def run_manual_fill(*, base: str, repo_id: str, card_name: str,
                         json.dumps(raw_entry, ensure_ascii=False),
                         turn_start=max(batch_start, plan.starts[CHRONICLE_UID]), turn_end=batch_end,
                     )
-                    if entry is not None:
+                    # 字数门槛：填表 prompt 已写明前提，超写压缩改写一次，仍超限拒绝落盘
+                    if entry is not None and not narrative_memory.chronicle_within_limits(
+                            entry.overview, entry.text):
+                        compressed = chat_fn(
+                            base_url, api_key, model, narrative_memory.COMPRESS_SYSTEM,
+                            narrative_memory.build_compress_user(entry.overview, entry.text),
+                            temperature=0.2, proxy=proxy)
+                        entry = narrative_memory.parse_rich_summary(
+                            compressed or "",
+                            turn_start=max(batch_start, plan.starts[CHRONICLE_UID]),
+                            turn_end=batch_end,
+                        )
+                    if entry is not None and narrative_memory.chronicle_within_limits(
+                            entry.overview, entry.text):
                         generated_entries.append(entry)
 
     if overwrite and CHRONICLE_UID in selected:

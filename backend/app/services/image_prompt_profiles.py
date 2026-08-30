@@ -30,75 +30,9 @@ def _diag_list(diag: dict[str, object], key: str) -> list[object]:
     return value if isinstance(value, list) else []
 
 
-def inline_generation_instruction(profile: str) -> str:
-    """返回主剧情同轮生成隐藏成稿时使用的 Profile 格式合同。"""
-    common = (
-        "profile_prompt 必须在正文完成后，根据本轮真实高潮画面直接写成可提交的纯英文正向提示词。"
-        "角色姓名只用于关联角色条目，禁止写入最终提示词；必须把角色条目的具体外貌、当前服装状态、"
-        "高潮动作、地点、镜头、构图、光影和材质关系翻译为实际可见内容，禁止使用 preserve identity、"
-        "stable appearance、current clothing condition 等空泛占位语。当前剧情服装状态优先于基础穿着。"
-        "高潮中同时发生的动作、身体接触和人物相对位置必须合成一个可见复合动作，明确谁对谁做什么；"
-        "禁止只留下俯身、躺卧、脸红或高潮等局部结果。"
-        "末尾揭示场景必须保留该时刻仍有效的束缚、关键道具、双手位置和双腿姿态，不能只写面部与目光。"
-        "输入若含 visual_facts，必须逐项转入成稿；它们带有本轮正文逐字证据，类型开放，"
-        "不得因本地没有对应类别或术语而省略。没有可靠英文专业名词的物件不得音译、照抄专名或写成"
-        "unknown object；必须采用 visual_facts 已给出的材质、外形尺度、可见结构/运动、当前功能和交互描述。"
-        "不得写 LoRA 名称、权重或触发词；LoRA 元数据在本轮输出完成后由后端查询、去重并注入。"
-        "画面有两名角色时，必须先写双人构图与背景，再分别以 primary adult character 和 "
-        "second adult character 写各自具体外貌、服装、位置与动作，最后写两人的可见关系和整体画面；"
-        "禁止把两人的属性混成一份通用人物描述。"
-        "只填写 JSON 字符串字段 profile_prompt，不输出分析、Markdown、道歉或额外说明。"
-    )
-    formats = {
-        "krea2": (
-            "Krea2 格式：输出一个纯英文自然语言段落，依次落实构图与留白占比、角色具体外貌与当前服装、"
-            "镜头视角与透视、材质与画面质感、光影层次与色彩、最终画质；禁止 tags 列表、质量标签、"
-            "权重语法、媒介锁定和 JSON 内嵌对象。"
-        ),
-        "anima_tags": (
-            "Anima 格式：输出英文 tags + 英文关系描述，先用逗号分隔的具体 tags 锁定人物、外貌、服装、"
-            "动作、场景和构图，再换行写一至三句连续英文文段说明同一画面；第二行必须直接写完整句子，"
-            "禁止 Her body:、Bound:、Position: 等标题式小段或任何冒号标签，句内属性只用英文逗号连接；"
-            "不要加入固定质量行，后端会统一补齐并去重。"
-        ),
-        "natural_language": (
-            "自然语言格式：输出一个纯英文自然语言段落，完整写出人物具体外貌、当前服装、高潮动作、"
-            "环境关系、构图、镜头、光影、材质和画面质量，不得输出标题、列表或 JSON。"
-        ),
-        "niji_sections": (
-            "Niji 格式：输出四段内容并在 JSON 字符串中用 \\n 表示换行，顺序固定为 subject、style、"
-            "additions、suffix；前三段为纯英文，第四段只含 --ar 等参数。"
-        ),
-    }
-    return common + formats.get(profile, formats["krea2"])
-
-
-def near_generation_contract(profile: str) -> str:
-    """生成点附近的短合同；防止头部完整合同被长预设与历史稀释。"""
-    formats = {
-        "krea2": "profile_prompt 只能是一个纯英文自然语言段落，不得写 tags 列表或质量词。",
-        "anima_tags": (
-            "profile_prompt 的 JSON 字符串必须且只能含一个 \\n：第一行是逗号分隔的具体英文内容 tags，"
-            "第一行结尾保留英文逗号；第二行是解释同一画面的连续英文句子，禁止标题式小段和冒号；"
-            "不要写固定质量行。"
-        ),
-        "natural_language": "profile_prompt 只能是一个纯英文自然语言段落。",
-        "niji_sections": "profile_prompt 必须用 \\n 分隔 subject、style、additions、suffix 四段。",
-    }
-    selected = profile if profile in PROFILE_IDS else "krea2"
-    return (
-        "【本轮插画执行合同】当前 Profile：" + selected + "。"
-        "完成 <content> 后必须输出一个合法 <illustration> JSON。"
-        "先选本轮真正发生动作与剧情变化的连续画面，不得选事后静态表情或结尾对白代替动作。"
-        "visual_facts 必须逐项覆盖该画面的主体、具体动作链、姿态/接触关系、当前服装、关键物件、地点和空间关系；"
-        "每项 fact 使用具体英文，evidence 逐字来自同一高潮窗口。profile_prompt 必须落实全部 visual_facts 与稳定外貌，"
-        "不得写角色姓名、空泛身份锁或 LoRA 信息。" + formats[selected]
-    )
-
-
-def inline_output_token_reserve(profile: str) -> int:
-    """在显式正文上限之外，为同轮隐藏 Profile 成稿预留输出预算。"""
-    return 1000 if profile in {"krea2", "natural_language"} else 800
+# 同轮成稿剥离后，内联插画义务的提示词合同（inline_generation_instruction /
+# near_generation_contract）与输出预留（inline_output_token_reserve）一并移除；
+# 画像成稿由 generate() 独立链编译，格式合同在 _system() 内单一属主。
 
 
 _ART_DIRECTION = (

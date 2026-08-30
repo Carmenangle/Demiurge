@@ -23,8 +23,8 @@ LAYER0_CAP = 8          # layer0（细）条数上限，超出把最旧 COMPACT_
 LAYER1_CAP = 8          # layer1（中）条数上限，超出压成一条 layer2（世界观级大纲）
 COMPACT_BATCH = 4       # 每次压缩吃掉的旧条数
 MAX_LAYER = 2           # 分层封顶：0 细 / 1 中 / 2 粗，不再往上压
-_SUMMARY_MAX = 1200     # 详细纪要软上限；提交主 Agent 时只取短概览，不回灌详情
-_OVERVIEW_MAX = 120
+_SUMMARY_MAX = 300      # 详细纪要软上限（用户定稿：300 字内）；提交主 Agent 时只取短概览，不回灌详情
+_OVERVIEW_MAX = 30      # 简要概览软上限（用户定稿：30 字内）
 _DIALOGUE_MAX = 500
 _GRAM_CAP = 48          # trigram 召回查询最多取多少个 3-gram，防 MATCH 串过长
 
@@ -77,8 +77,8 @@ def should_summarize(last_summarized_turn: int, current_turn: int, *,
 SUMMARY_SYSTEM = (
     "你是剧情纪要员。把给定的最近三轮角色扮演整理成一条内容充实的事件纪要。"
     "保留关键事件、因果、人物行动、关系与局势变化，不写状态数值。输出 JSON："
-    "{\"overview\":\"一句到三句概览，不超过120字\","
-    "\"chronicle\":\"详细纪要，完整说明这三轮发生的事情与变化\","
+    "{\"overview\":\"一句概览，不超过30字\","
+    "\"chronicle\":\"详细纪要，完整说明这三轮发生的事情与变化，不超过300字\","
     "\"dialogue\":\"重要对白原文，没有则空串\","
     "\"characters\":[\"实际出场人物\"],\"keywords\":[\"人物\",\"地点\",\"事件\"],"
     "\"facts\":[{\"subject\":\"实体\",\"predicate\":\"关系/世界属性\","
@@ -94,37 +94,15 @@ def build_summary_user(window_text: str) -> str:
     return f"【近期剧情片段】\n{window_text}\n\n请压缩成一条事件纪要 JSON。"
 
 
-def parse_summary(raw: str) -> tuple[str, list[str]]:
-    """解析抽取 LLM 的 JSON 产出 → (纪要正文, 关键词列表)。
-
-    坏 JSON / 空 summary → ("", [])（上层据此跳过落盘，旧纪要不动，对治痛点2）。
-    """
-    try:
-        payload = structured_output.parse_model(raw, RichChronicle)
-    except structured_output.StructuredOutputError:
-        return "", []
-    text = payload.summary.strip()[:_SUMMARY_MAX]
-    if not text:
-        return "", []
-    kws_raw = payload.keywords
-    keywords: list[str] = []
-    if isinstance(kws_raw, list):
-        for k in kws_raw:
-            s = str(k).strip()
-            if s and s not in keywords:
-                keywords.append(s)
-    return text, keywords[:12]
-
-
 def parse_rich_summary(raw: str, *, turn_start: int = 0,
                        turn_end: int = 0) -> ChronicleEntry | None:
-    """解析丰富纪要；兼容旧 summary 结构。"""
+    """解析丰富纪要；兼容旧 summary 结构。如实解析，不机械截断（字数门槛见 chronicle_within_limits）。"""
     try:
         payload = structured_output.parse_model(raw, RichChronicle)
     except structured_output.StructuredOutputError:
         return None
-    overview = (payload.overview or payload.summary).strip()[:_OVERVIEW_MAX]
-    detail = (payload.chronicle or payload.summary or overview).strip()[:_SUMMARY_MAX]
+    overview = (payload.overview or payload.summary).strip()
+    detail = (payload.chronicle or payload.summary or overview).strip()
     if not (overview and detail):
         return None
 
@@ -145,6 +123,34 @@ def parse_rich_summary(raw: str, *, turn_start: int = 0,
     )
 
 
+# ── 字数门槛（用户定稿：概览≤30字、详细纪要≤300字）：prompt 写明前提，超写压缩改写，不机械截断 ──
+
+def chronicle_within_limits(overview: str, detail: str) -> bool:
+    """纪要落盘硬门槛：概览/正文必须落在字数上限内。
+
+    超限时调用方必须先走 LLM 压缩改写（COMPRESS_SYSTEM），仍超限则拒绝落盘；
+    任何环节都不得机械截断（截断会留下半句话，破坏纪要可读性）。
+    """
+    return len(overview.strip()) <= _OVERVIEW_MAX and len(detail.strip()) <= _SUMMARY_MAX
+
+
+COMPRESS_SYSTEM = (
+    "你是剧情纪要压缩员。把给定的超字数纪要改写到上限内："
+    "overview 一句概览不超过30字；chronicle 详细纪要不超过300字。"
+    "保留关键事件、因果、人物行动与局势变化，删细节不删脉络。输出 JSON："
+    "{\"overview\":\"…\",\"chronicle\":\"…\",\"dialogue\":\"重要对白原文，没有则空串\","
+    "\"characters\":[\"实际出场人物\"],\"keywords\":[\"人物\",\"地点\",\"事件\"],\"facts\":[]}。"
+    "只输出 JSON。"
+)
+
+
+def build_compress_user(overview: str, detail: str) -> str:
+    """压缩 prompt 的 user 部分：给出超限原文与当前字数。"""
+    return (f"【超限纪要】\noverview（现{len(overview.strip())}字）：{overview.strip()}\n"
+            f"chronicle（现{len(detail.strip())}字）：{detail.strip()}\n\n"
+            "请压缩到字数上限内，输出纪要 JSON。")
+
+
 # ── 分层压缩（把旧的细纪要压成粗纪要，防无限膨胀）──
 
 def should_compact(layer: int, count: int) -> bool:
@@ -158,7 +164,8 @@ def should_compact(layer: int, count: int) -> bool:
 COMPACT_SYSTEM = (
     "你是剧情纪要归并员。把给定的多条同层事件纪要归并成**一条**更粗的上层纪要："
     "保留主要事件脉络与关系变化，丢弃细节。输出 JSON："
-    "{\"summary\":\"归并后的梗概\",\"keywords\":[\"关键词\"]}。summary 不超过 120 字。只输出 JSON。"
+    "{\"overview\":\"一句话概览，不超过30字\","
+    "\"summary\":\"归并后的梗概，不超过300字\",\"keywords\":[\"关键词\"]}。只输出 JSON。"
 )
 
 
@@ -197,6 +204,7 @@ def render_recall(entries: list[ChronicleEntry]) -> str:
     """把召回到的纪要组装成注入块（供 roleplay 主控叙述参考往事）。空 → 空串。
 
     只读注入，不回灌进对话历史（token 护栏，同插画 url 处理）。按回合升序排，标时序。
+    只注入简要内容（overview ≤30 字，落盘时已由字数门槛保证），注入侧不再截断。
     """
     if not entries:
         return ""
@@ -205,14 +213,31 @@ def render_recall(entries: list[ChronicleEntry]) -> str:
     return "【前情提要（相关人物最近事件，仅供保持连贯，勿逐字复述）】\n" + "\n".join(lines)
 
 
-def select_relevant_recent(entries: list[ChronicleEntry], actors: list[str], *,
-                           k: int = 10) -> list[ChronicleEntry]:
-    """优先当前出场人物相关纪要，再按时间取最近 k 条。"""
-    names = {name.strip() for name in actors if name.strip()}
-    relevant = [
-        entry for entry in entries
-        if names.intersection(entry.characters)
-        or any(name in entry.body() for name in names)
-    ] if names else []
-    pool = relevant or entries
-    return sorted(pool, key=lambda entry: (entry.turn_end, entry.rowid), reverse=True)[:max(0, k)]
+def select_by_relevance(hits: list[ChronicleEntry], recent: list[ChronicleEntry], *,
+                        actors: list[str] | None = None, k: int = 10) -> list[ChronicleEntry]:
+    """按相关性取 Top-k 纪要：先人物名相关（当前出场人物出现在 characters 或正文），
+    再按时间排序（优先新的，rowid/turn_end 降序）；两组都不超过 k 条。
+
+    hits（FTS bm25 召回）与 recent（最近纪要）合并去重后作为候选池。
+    """
+    names = {name.strip() for name in (actors or []) if name.strip()}
+    pool: list[ChronicleEntry] = []
+    seen: set[int] = set()
+    for entry in [*hits, *recent]:
+        if entry.rowid in seen:
+            continue
+        seen.add(entry.rowid)
+        pool.append(entry)
+    ordered = sorted(
+        pool, key=lambda entry: (entry.turn_end, entry.rowid), reverse=True,
+    )
+    if names:
+        relevant_ids = set()
+        relevant = []
+        for entry in ordered:
+            if names.intersection(entry.characters) or any(
+                    name in entry.body() for name in names):
+                relevant.append(entry)
+                relevant_ids.add(entry.rowid)
+        ordered = relevant + [entry for entry in ordered if entry.rowid not in relevant_ids]
+    return ordered[:max(0, k)]

@@ -22,9 +22,11 @@ def test_门控_cadence非法返回False():
 
 def test_解析_正常JSON():
     raw = '前言{"summary":"雪山救援后态度转暖","keywords":["雪山","救援","态度"]}后语'
-    text, kws = nm.parse_summary(raw)
-    assert text == "雪山救援后态度转暖"
-    assert kws == ["雪山", "救援", "态度"]
+    entry = nm.parse_rich_summary(raw)
+    assert entry is not None
+    assert entry.overview == "雪山救援后态度转暖"  # 兼容旧 summary 结构
+    assert entry.text == "雪山救援后态度转暖"
+    assert entry.keywords == ["雪山", "救援", "态度"]
 
 
 def test_解析_丰富纪要保留概览详情对话与出场人物():
@@ -43,25 +45,36 @@ def test_解析_丰富纪要保留概览详情对话与出场人物():
     assert entry.facts[0]["predicate"] == "守将"
 
 
-def test_解析_坏JSON返回空():
-    assert nm.parse_summary("没有大括号") == ("", [])
-    assert nm.parse_summary('{坏json}') == ("", [])
+def test_解析_坏JSON返回None():
+    assert nm.parse_rich_summary("没有大括号") is None
+    assert nm.parse_rich_summary('{坏json}') is None
 
 
-def test_解析_空summary返回空():
-    assert nm.parse_summary('{"summary":"","keywords":["x"]}') == ("", [])
+def test_解析_空summary返回None():
+    assert nm.parse_rich_summary('{"summary":"","keywords":["x"]}') is None
 
 
-def test_解析_summary截断软上限():
+def test_解析_如实解析不机械截断且字数门槛可检出超限():
     long = "字" * (nm._SUMMARY_MAX + 100)
-    text, _ = nm.parse_summary('{"summary":"' + long + '"}')
-    assert len(text) == nm._SUMMARY_MAX
+    entry = nm.parse_rich_summary('{"overview":"概览","summary":"' + long + '"}')
+    assert entry is not None
+    assert len(entry.text) == len(long)  # 解析层不再截断
+    assert nm.chronicle_within_limits(entry.overview, entry.text) is False
+    assert nm.chronicle_within_limits("短概览", "正文") is True
+
+
+def test_压缩改写prompt给出上限与当前字数():
+    user = nm.build_compress_user("概" * 40, "详" * 400)
+    assert "现40字" in user and "现400字" in user
+    assert "不超过30字" in nm.COMPRESS_SYSTEM
+    assert "不超过300字" in nm.COMPRESS_SYSTEM
 
 
 def test_解析_关键词去重限量():
     kws_raw = ",".join(f'"k{i}"' for i in range(20))
-    text, kws = nm.parse_summary('{"summary":"x","keywords":[' + kws_raw + ']}')
-    assert len(kws) == 12
+    entry = nm.parse_rich_summary(
+        '{"overview":"概览","chronicle":"正文","keywords":[' + kws_raw + ']}')
+    assert entry is not None and len(entry.keywords) == 16
 
 
 def test_压缩判定_超上限才压且封顶层不压():
@@ -98,18 +111,40 @@ def test_渲染召回_按回合升序():
     assert "详情" not in out
 
 
-def test_相关人物纪要优先且最多十条():
+def test_人物名相关优先再按时间新到旧且最多十条():
+    # 上下文合同：召回排序先人物名相关、再按时间（新→旧），取 Top-k
     entries = [
-        nm.ChronicleEntry(text=f"详情{i}", overview=f"概览{i}", turn_end=i,
+        nm.ChronicleEntry(text=f"详情{i}", overview=f"概览{i}", turn_end=i, rowid=i,
                           characters=["林月"] if i % 2 == 0 else ["旁人"])
         for i in range(1, 25)
     ]
 
-    selected = nm.select_relevant_recent(entries, ["林月"], k=10)
+    selected = nm.select_by_relevance(entries, [], actors=["林月"], k=10)
 
     assert len(selected) == 10
-    assert all("林月" in entry.characters for entry in selected)
-    assert [entry.turn_end for entry in selected] == list(range(24, 4, -2))
+    assert all("林月" in entry.characters for entry in selected)  # 人物相关优先占满
+    assert [entry.turn_end for entry in selected] == list(range(24, 4, -2))  # 新→旧
+
+
+def test_无人物命中时按时间新到旧回填():
+    hits = [nm.ChronicleEntry(text="命中", overview="概览", rowid=7, turn_end=7)]
+    recent = [nm.ChronicleEntry(text=f"最近{i}", overview="概览", rowid=i, turn_end=i)
+              for i in (9, 7, 3)]
+
+    selected = nm.select_by_relevance(hits, recent, actors=["路人甲"], k=10)
+
+    assert [entry.rowid for entry in selected] == [9, 7, 3]  # 无人物命中 → 纯时间序，去重
+
+
+def test_字数门槛按用户定稿_超限不截断而是留给压缩改写():
+    payload = (
+        '{"overview":"' + "概" * 40 + '","chronicle":"' + "详" * 400 + '",'
+        '"dialogue":"","characters":["甲"],"keywords":["甲"],"facts":[]}'
+    )
+    entry = nm.parse_rich_summary(payload, turn_start=1, turn_end=3)
+    assert entry is not None
+    assert len(entry.overview) == 40 and len(entry.text) == 400  # 不截断
+    assert nm.chronicle_within_limits(entry.overview, entry.text) is False
 
 
 def test_纪要卡号与回合区间解耦():

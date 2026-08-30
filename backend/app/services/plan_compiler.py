@@ -123,7 +123,7 @@ def compile_plan(*, intent: str, history: str = "", attachments: list[dict] | No
     user = _COMPILE_USER.format(history=history, intent=intent,
                                 repo_id=repo_id or "（未指定）", output_dir=output_dir or "（未指定）")
     call_args = (chat_base, chat_key, chat_model, system, user)
-    call_kwargs: dict[str, Any] = {"temperature": temperature, "max_tokens": 8000,
+    call_kwargs: dict[str, Any] = {"temperature": temperature, "max_tokens": 32000,
                                    **(proxy_kwargs or {})}
     outcome = CompileOutcome()
     validator_errors: list[str] = []
@@ -248,6 +248,93 @@ def render_plan_md(plan: GenerationPlan) -> str:
 
 
 _PATH_LIKE_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|[/\\])")
+_SECTION_SEP_RE = re.compile(r"^={5,}\s*$")
+
+
+def extract_section(doc_text: str, marker: str) -> str:
+    """按标题标记机械抽取文档段落（无 LLM）：从含 marker 的行到分隔线/下一标题。"""
+    lines = (doc_text or "").splitlines()
+    start = next((i for i, ln in enumerate(lines) if marker in ln), None)
+    if start is None:
+        return ""
+    body: list[str] = []
+    for ln in lines[start + 1:]:
+        if _SECTION_SEP_RE.match(ln.strip()) or ln.strip().startswith("## ") or "【" in ln:
+            break
+        body.append(ln)
+    return "\n".join(ln.strip() for ln in body if ln.strip())
+
+
+def extract_all_sections(doc_text: str) -> list[tuple[str, str]]:
+    """抽取文档全部【标题】段落，返回 [(标题, 正文)]；正文为标题行后到分隔线/下一标题。"""
+    sections: list[tuple[str, str]] = []
+    lines = (doc_text or "").splitlines()
+    current: tuple[str, list[str]] | None = None
+    for ln in lines:
+        stripped = ln.strip()
+        if _SECTION_SEP_RE.match(stripped):
+            if current and current[1]:
+                sections.append((current[0], "\n".join(s for s in current[1] if s.strip())))
+            current = None
+            continue
+        has_heading = "【" in ln and "】" in ln
+        if has_heading:
+            if current and current[1]:
+                sections.append((current[0], "\n".join(s for s in current[1] if s.strip())))
+            name = ln.strip().lstrip("#").strip()
+            current = (name.strip(" #"), [])
+            continue
+        if current is not None and stripped and not stripped.startswith(">"):
+            current[1].append(stripped)
+    if current and current[1]:
+        sections.append((current[0], "\n".join(s for s in current[1] if s.strip())))
+    # 只保留真正的提示词段（含质量 tag 特征），过滤纯标题/清单/过短段
+    return [(n, b) for n, b in sections if len(b) > 200 and "masterpiece" in b]
+
+
+def fill_prompt_sections(plan, attachments: list[dict]) -> int:
+    """把变体里的 prompt_section 引用按预读附件机械回填为完整提示词（确定性，无 LLM）。
+
+    模型为避免爆输出上限会写段落引用；执行器无 LLM，必须在编译期回填。
+    返回回填的变体数。
+    """
+    docs = "\n".join(a.get("text", "") for a in attachments)
+    if not docs.strip():
+        return 0
+    filled = 0
+    for step in plan.steps:
+        if not step.operation.startswith("workflow.submit"):
+            continue
+        variants = step.params.get("variants")
+        if not isinstance(variants, list):
+            continue
+        # 字符串变体（段落名列表）→ 转对象，名称即抽取标记
+        variants = [
+            {"name": item, "prompt_section": item} if isinstance(item, str) else item
+            for item in variants
+        ]
+        # 全变体都无可用提示词 → 从文档按标题重建全部变体（终极确定性兜底）
+        if not any(isinstance(v, dict) and (v.get("prompt") or v.get("positive_prompt"))
+                   for v in variants):
+            sections = extract_all_sections(docs)
+            if sections:
+                step.params["variants"] = [
+                    {"name": name, "prompt": body} for name, body in sections
+                ]
+                filled += len(sections)
+                continue
+        step.params["variants"] = variants
+        for item in variants:
+            if not isinstance(item, dict):
+                continue
+            marker = str(item.get("prompt_section") or "").strip()
+            if not marker or item.get("prompt") or item.get("positive_prompt"):
+                continue
+            text = extract_section(docs, marker)
+            if text:
+                item["prompt"] = text
+                filled += 1
+    return filled
 
 
 def _declared_read_paths(plan: GenerationPlan) -> list[str]:
