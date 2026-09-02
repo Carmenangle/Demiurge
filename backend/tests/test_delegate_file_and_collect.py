@@ -196,13 +196,41 @@ def test_采集闭环_轮询取图落盘入库(store, tmp_path, monkeypatch):
     assert indexed[0]["image_url"]
 
 
-def test_lora模糊解析与提交归一(monkeypatch):
-    from app.services import capability_handlers as ch
+def test_lora模糊解析与提交归一(monkeypatch, tmp_path):
+    """LoRA 模糊匹配与 submit 归一，全部走临时触发词库，不依赖真机数据/网络。"""
+    from app.services import capability_handlers as ch, comfyui_client, lora_index
 
-    # 真实本机枚举（ComfyUI 在线）：「QRQ 风格」应命中 krea2_QRQ_韩漫风
+    # 临时 lora_triggers 库（沿用 test_lora_triggers 的封闭模式）
+    path = tmp_path / "lora.db"
+    with sqlite3.connect(path) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute(
+            "create table lora_triggers ("
+            " lora_name text primary key, triggers text not null default '',"
+            " note text not null default '', suggested_weight real not null default 0.8,"
+            " suggested_prompt text not null default '', source text not null default '',"
+            " missing integer not null default 0, updated_at integer not null)"
+        )
+        connection.execute(
+            "insert into lora_triggers (lora_name, triggers, suggested_weight, source,"
+            " updated_at) values (?, ?, ?, 'manual', 0)",
+            ("krea2_QRQ_韩漫风.safetensors", "QRQ,韩漫风", 0.7),
+        )
+
+    def _temp_connection():
+        c = sqlite3.connect(path)
+        c.row_factory = sqlite3.Row
+        return c
+
+    monkeypatch.setattr(lora_index, "get_connection", _temp_connection)
+    # ComfyUI 置离线：枚举只来自临时库，真机是否在线不影响结果
+    monkeypatch.setattr(comfyui_client, "fetch_object_info",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("offline")))
+
+    # 「QRQ 风格」应命中 krea2_QRQ_韩漫风（token 交叉 + 触发词）
     hit = ch.lora_resolve("QRQ 风格")
     assert hit["matched"] and "QRQ" in hit["file"].upper()
-    assert hit["suggested_weight"] is not None
+    assert hit["suggested_weight"] == 0.7
 
     # 未匹配 → 保留原值不猜
     miss = ch.lora_resolve("完全不存在的lora-xyz")

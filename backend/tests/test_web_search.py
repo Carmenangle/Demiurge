@@ -139,7 +139,7 @@ def test_ddg_http_error_returns_empty(monkeypatch):
 
 # ── 签名兼容 ─────────────────────────────────────────────────
 
-def test_web_search_compat_no_provider():
+def test_web_search_compat_no_provider(monkeypatch):
     """旧调用方不传 provider 时行为不变。"""
     import httpx
 
@@ -152,6 +152,9 @@ def test_web_search_compat_no_provider():
             pass
         def get(self, url, headers, params):
             raise httpx.ConnectError("no network")
+
+    # 必须注入 FakeClient：否则 CI（可直连 DDG）会发真实请求返回真结果
+    monkeypatch.setattr(httpx, "Client", FakeClient)
 
     # 验证 web_search 签名：旧调用方 web_search(q, n, proxy) 不报 TypeError
     result = ws.web_search("test", max_results=3, proxy="")

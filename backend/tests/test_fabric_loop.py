@@ -16,10 +16,11 @@ def _fake_chat(decisions):
     return fake
 
 
-def test_自由循环调用工具后完成():
+def test_自由循环调用工具后完成(tmp_path):
     # 模型第 1 步调 file.list_dir，看到结果后第 2 步宣布完成
+    # 路径用 tmp_path：CI 是 Linux runner，不能依赖 Windows 盘符存在
     chat = _fake_chat([
-        {"tool": "file.list_dir", "params": {"path": "D:/"}},
+        {"tool": "file.list_dir", "params": {"path": str(tmp_path)}},
         {"done": True, "reply": "目录已确认，任务完成"},
     ])
     outcome = fabric_loop.run_loop(
