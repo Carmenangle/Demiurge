@@ -78,3 +78,21 @@ rag_evaluation_report.json
 .opensquilla/
 frontend/tsconfig.tsbuildinfo
 backend/scripts_tmp_*.py
+
+# === Internal docs (repo is public since 2026-09-01: internal tech assets never go to remote) ===
+# tech-manual / resume / onboarding / handoff & plan docs / agent memory stay local only.
+# Public surface = README + official newcomer guide (provided separately).
+docs/tech-manual/
+docs/resume/
+docs/onboarding/
+docs/HANDOFF-*.md
+docs/PLAN-*.md
+docs/ROADMAP-*.md
+docs/STORYGEN-FLOW.md
+docs/PROMOTION_AND_README_PLAN.md
+docs/PROMPT-CLEANING-RULES.md
+docs/RELEASE.md
+MEMORY.md
+_tmp/
+.scratch/
+.dsh-meow/
