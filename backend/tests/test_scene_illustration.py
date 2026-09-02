@@ -61,14 +61,15 @@ def test_全空段落prompt为空():
     assert si.build_scene_request(paragraph="  ", appearance="").prompt == ""
 
 
-def test_插画锚点落在content最后一个正文段落末尾():
-    text = "<think>思考</think>\n<content>\n铺垫段落。\n\n高潮段落。\n</content>\n<status>状态</status>"
+def test_无锚点时按视觉高潮评分选段而非恒取末段():
+    """2026-09-01 用户实锤：无锚点时图插到末尾是巧合的必然（candidates[-1] 恒选末段，
+    收束段通常就在末尾）。改约：无锚点 → fallback_illustration_anchor 视觉高潮评分选段，
+    末尾收束段不得当选。"""
+    text = "<think>思考</think>\n<content>\n铺垫段落。\n\n高潮段落。\n\n收束与余韵段落。\n</content>"
     offset = si.illustration_anchor_offset(text)
 
     assert text[:offset].endswith("高潮段落。")
-    assert text[offset:].startswith("\n</content>")
-
-
+    assert text[offset:].startswith("\n\n收束")
 def test_没有content时锚点避开尾部状态块():
     text = "铺垫。\n\n高潮正文。\n\n<status>状态</status>"
     offset = si.illustration_anchor_offset(text)
@@ -76,6 +77,22 @@ def test_没有content时锚点避开尾部状态块():
     assert text[:offset].endswith("高潮正文。")
     assert text[offset:].startswith("\n\n<status>")
 
+
+def test_无锚点且全文无视觉高潮词时退回首段而非末尾():
+    text = "第一段闲谈。\n\n第二段闲谈。\n\n第三段闲谈。"
+    offset = si.illustration_anchor_offset(text)
+
+    assert offset < len(text)
+    assert text[:offset].endswith("第一段闲谈。")
+    assert text[offset:].startswith("\n\n第二段闲谈。")
+
+
+def test_评分平分时选靠后段落而非开头():
+    """2026-09-01 用户偏好：最高分段落落在末尾 20% 时优先选前置段落——评分平分
+    且只有两段时，选前段（视觉高潮不该总落在收尾段）。"""
+    anchor = si.fallback_illustration_anchor("她抬手。\n\n她回眸。")
+
+    assert anchor == "她抬手。"
 
 def test_插画锚点优先采用主生成指定原文():
     text = "第一段高潮。\n\n后续收束段。\n\n<status>状态</status>"
@@ -109,12 +126,19 @@ def test_插画锚点轻微改写时匹配高潮段而非末尾收束段():
     assert text[offset:].startswith("\n\n事后余韵")
 
 
-def test_指定锚点完全无效时失败关闭而非回退消息末尾():
-    text = "铺垫段。\n\n高潮动作。\n\n事后余韵与收束。"
+def test_指定锚点完全无效时按视觉高潮评分选段绝不返回None():
+    """2026-09-01 用户实锤：锚点失效直接落正文末尾=图插在收束段。改约：锚点失效 →
+    按视觉高潮评分选段（fallback_illustration_anchor），选不中也用首段，不再直接末尾。"""
+    text = (
+        "铺垫段。\n\n"
+        "高潮动作。\n\n"
+        "事后余韵与收束。"
+    )
 
-    assert si.illustration_anchor_offset(text, "模型虚构且正文不存在的句子") is None
+    offset = si.illustration_anchor_offset(text, "模型虚构且正文不存在的句子")
 
-
+    assert offset is not None
+    assert text[offset - 5:offset] == "高潮动作。"  # 评分选中的视觉高潮段，不是收束段
 def test_首轮普通剧情兜底选择动作视觉段而不是结尾收束段():
     text = (
         "塞西莉亚终于笑了。她俯下身，猩红竖瞳与少年平视，"
@@ -370,17 +394,22 @@ def test_renderer注册与查询():
 
 
 def test_首帧锚点取正文第一段末():
-    """首尾帧模式首帧应落在正文第一段后，而非高潮/末段（2026-08-29 验收问题①）。"""
+    """首尾帧模式首帧应落在正文第一段后，而非高潮/末段（2026-08-29 验收问题①）。
+
+    主图锚点（illustration_anchor_offset 无 needle 时按视觉高潮评分选段）选中
+    第二段「剧烈颤抖」；若主图退回首段（全文无视觉高潮词）则首帧与主图同位，
+    该断言不成立——故文本必须含可评分的高潮段（2026-09-01 起主图不再恒取末段）。
+    """
     text = (
         "<content>\n\n她踏前一步，指尖挑起他的下颌。\n\n"
-        "传功时真气如江河灌体，两人俱是动作激烈。\n\n"
+        "传功时真气如江河灌体，两人俱是剧烈颤抖。\n\n"
         "最终尘埃落定，一切归于平静。\n\n</content>"
     )
     offset = si.first_frame_anchor_offset(text)
     before = text[:offset]
     assert "她踏前一步" in before
     assert "传功时真气" not in before  # 不越过第一段
-    # 与主图的末段/高潮兜底明确区分
+    # 与主图的视觉高潮段兜底明确区分
     assert offset < si.illustration_anchor_offset(text)
 
 
@@ -391,3 +420,65 @@ def test_首帧锚点对无content与think形态():
     assert "<status>" not in text[:offset]
     # 单段正文：落句末
     assert si.first_frame_anchor_offset("<content>只有一段。</content>") > 0
+
+
+def test_首帧锚点偏移跳过前导think块():
+    """2026-08-30 实锤：同轮剥离后模型不带 <content>，锚点从 0 起算会落进 think，
+    前端按偏移切分消息时把 think 切开显示、图插进思考过程。"""
+    reply = (
+        "<think>思考草稿很长很长，包含各种推演内容</think>\n\n"
+        "第一段正文，开场画面。\n\n第二段高潮正文。\n\n<status>\n[时间] 深夜\n</status>"
+    )
+
+    offset = si.first_frame_anchor_offset(reply)
+
+    assert offset > reply.index("</think>")  # 不落在 think 内
+    assert "第一段正文" in reply[:offset]  # 首帧锚在正文第一段末
+
+
+def test_主图锚点偏移跳过前导think块():
+    reply = (
+        "<think>思考草稿</think>\n\n"
+        "第一段正文。\n\n她猛地拔剑斩向祭坛，石阶崩裂。\n\n<status>x</status>"
+    )
+
+    offset = si.illustration_anchor_offset(reply, "她猛地拔剑斩向祭坛，石阶崩裂。")
+
+    assert offset > reply.index("</think>")
+    assert "拔剑" in reply[:offset]
+
+
+def test_未闭合think吞全文时锚点无正文可落():
+    reply = "<think>只有思考没有正文"
+
+    assert si.first_frame_anchor_offset(reply) == len(reply)
+
+
+def test_世界书锚失配时从重要角色表补外貌与穿着():
+    tables = [{"name": "重要角色表", "columns": ["姓名", "外貌特征", "穿着打扮"],
+               "rows": [["舞姬恋", "丰腴雌艳的绝色美母", "藕荷色束腰长裙"]]}]
+    out = si.supplement_actor_table_appearance("", ["舞姬恋"], tables)
+    assert "舞姬恋：" in out
+    assert "【外貌】丰腴雌艳的绝色美母" in out
+    assert "【穿着】藕荷色束腰长裙" in out
+
+
+def test_已被世界书覆盖的角色不重复补():
+    tables = [{"name": "重要角色表", "columns": ["姓名", "外貌特征"], "rows": [["舞姬恋", "美母"]]}]
+    out = si.supplement_actor_table_appearance("凌若冰：冰肌玉骨", ["凌若冰", "舞姬恋"], tables)
+    assert out.startswith("凌若冰：")
+    assert "舞姬恋：" in out
+
+
+def test_表格查无此角色时原样返回():
+    assert si.supplement_actor_table_appearance("既有资料", ["路人甲"], []) == "既有资料"
+
+
+def test_支持tables包裹形状并跳过无姓名列表():
+    wrapped = {"tables": [
+        {"name": "杂项", "columns": ["条目", "内容"], "rows": [["x", "y"]]},
+        {"name": "重要角色表", "columns": ["姓名", "外貌特征"], "rows": [["舞姬恋", "美母"]]},
+    ]}
+    out = si.supplement_actor_table_appearance("", ["舞姬恋"], wrapped)
+    assert "【外貌】美母" in out
+    assert "【穿着】" not in out

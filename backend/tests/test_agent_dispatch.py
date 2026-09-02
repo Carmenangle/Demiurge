@@ -1004,7 +1004,7 @@ def test_roleplay把机械召回候选与预设上下文合并后只调一次主
         assert all("本轮插画执行合同" not in m["content"] for m in tail_systems)
         assert messages[-1] == {"role": "user", "content": "继续剧情"}
         calls.append("roleplay")
-        return "剧情正文"
+        return "<content>剧情正文</content>"
 
     monkeypatch.setattr(
         ag._llm, "chat_messages",
@@ -1023,9 +1023,55 @@ def test_roleplay把机械召回候选与预设上下文合并后只调一次主
         "_ctx": _card_ctx(output_dir=str(tmp_path), repo_id="work", comfy_illustrate=True),
     })
 
-    assert out["result_text"] == "剧情正文"
+    assert out["result_text"] == "<content>剧情正文</content>"
+    ag.join_maintenance_threads()  # 维护已转后台线程：等在途维护结束后再断言顺序
     assert calls == ["world", "rag", "recall_candidates", "roleplay", "table", "chronicle", "curator"]
     assert not any(event == "model.request" and data.get("agent") == "recall" for event, data in events)
+
+
+def test_输出纪律尾注包含实测浪费源逐条禁令(monkeypatch, tmp_path):
+    """2026-08-30 think 实证 75% 浪费（试写正文/复述设定/反复判定），禁令必须逐条在场。"""
+    calls = []
+    deps = ra.AgencyDeps(
+        chat_fn=lambda *a, **k: "[]", rng=random.Random(0), state_base=str(tmp_path),
+    )
+    monkeypatch.setattr(ag, "_agency_prelude", lambda ctx, text: (deps, 1, 10.0, ""))
+    monkeypatch.setattr(ag, "_agency_propose", lambda ctx, cur, aff, wb, text="": ("", False))
+    monkeypatch.setattr(ag, "_resolve_worldbook", lambda ctx, query: "")
+    monkeypatch.setattr(
+        ag, "_resolve_preset",
+        lambda ctx, wb, **kw: ([{"role": "system", "content": "预设"}], None, False, [], []),
+    )
+    monkeypatch.setattr(ag, "_rag_recall_text", lambda *a, **k: "")
+    monkeypatch.setattr(ag, "_table_recall_text", lambda *a, **k: "")
+    monkeypatch.setattr(ra, "recall_chronicle", lambda *a, **k: "")
+    monkeypatch.setattr(ag.run_trace, "emit", lambda ctx, event, **data: None)
+
+    def roleplay_once(*args, **kwargs):
+        calls.append(args[3])
+        return "<content>正文</content>"
+
+    monkeypatch.setattr(ag._llm, "chat_messages", roleplay_once)
+    monkeypatch.setattr(ra, "maybe_illustrate", lambda *a, **k: None)
+    monkeypatch.setattr(ra, "maybe_summarize", lambda *a, **k: None)
+    monkeypatch.setattr(ra, "maybe_curate", lambda *a, **k: 0)
+
+    out = ag.roleplay_node({
+        "user_text": "继续", "images": [],
+        "_ctx": _card_ctx(output_dir=str(tmp_path), repo_id="work"),
+    })
+    assert "扮演失败" not in (out.get("result_text") or ""), out.get("result_text")
+
+    # chat_messages 亦被表格维护等节点复用；取带输出纪律的那次（=roleplay 主调用）
+    roleplay_calls = [m for m in calls if any(
+        isinstance(x, dict) and "输出纪律" in str(x.get("content")) for x in m)]
+    assert roleplay_calls, f"roleplay 主调用未被捕获；共 {len(calls)} 次调用"
+    tails = [m["content"] for m in roleplay_calls[0]
+             if isinstance(m, dict) and m.get("role") == "system" and "输出纪律" in m["content"]]
+    assert tails, "输出纪律尾注缺失"
+    text = tails[0]
+    for marker in ("试写正文", "复述设定", "只许判定一轮", "假开场", "标签块"):
+        assert marker in text, f"输出纪律缺少禁令：{marker}"
 
 
 def test_世界agent收到本轮输入与召回后的npc条目(monkeypatch, tmp_path):
@@ -1097,7 +1143,7 @@ def test_comfy高潮提取失败时把中文正文作为Profile场景源而非�
     assert clean == "白给谷站在窗边，回头看向镜头。"
     assert images == []
     assert request["prompt"] == ""
-    assert request["scene_spec"]["profile"] == "krea2"
+    assert request["scene_spec"]["profile"] == "anima_tags"  # 2026-08-31 默认协议切 Anima
     assert request["scene_spec"]["profile_prompt"].isascii()
     assert "白给谷站在窗边，回头看向镜头" in request["scene_spec"]["narrative"]
     assert request["scene_spec"]["draft_prompt"].isascii()
@@ -1121,13 +1167,13 @@ def test_profile_llm_fallback_carries_guard_preset(monkeypatch, tmp_path):
     preset_store.save(str(tmp_path), "guard", preset)
     captured = {}
 
-    def fake_chat(base, key, model, system, user, **_kw):
-        captured["system"] = system
-        captured["user"] = user
+    def fake_stream(base, key, model, messages, on_delta, **_kw):
+        captured["system"] = str(messages[0]["content"])
+        captured["user"] = str(messages[1]["content"])
         # 返回空→校验失败→内部走 deterministic，仍证明 guard 已随 system 透传
         return ""
 
-    monkeypatch.setattr(ag._llm, "chat", fake_chat)
+    monkeypatch.setattr(ag._llm, "chat_messages_stream", fake_stream)
     scene = {
         "profile": "krea2",
         "narrative": "她走进房间。",
@@ -2039,15 +2085,55 @@ def test_高潮正文双人保留两份外貌供多角色LoRA串联(monkeypatch,
     assert "虞妙玥专属外貌锚点" in request["scene_spec"]["appearance"]
 
 
-def test_高潮正文明确人物覆盖错误插画主体并保持画面顺序():
+def test_中断续写把半成品正文作为预填而不是从头再来():
+    """2026-09-01 用户需求：被打断的半成品正文要接续写，不能从头再来。"""
+    wire = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "继续"},
+        {"role": "assistant", "content": "她转过身，披风扬起。" + "续" * 200 + "（已打断）"},
+    ]
+    out = ag._resume_interrupted_messages(wire)
+    # 半成品正文保留为最后一条 assistant（预填），后缀剥掉，并追加续写指令
+    assert out[-2] == {"role": "assistant", "content": "她转过身，披风扬起。" + "续" * 200}
+    assert out[-1]["role"] == "user"
+    assert "从断点直接继续" in str(out[-1]["content"])
+    assert "（已打断）" not in str(out[-2]["content"])
+
+
+def test_中断续写半成品过短时不续写():
+    wire = [{"role": "user", "content": "继续"}, {"role": "assistant", "content": "短" + "（已打断）"}]
+    assert ag._resume_interrupted_messages(wire) == wire
+
+
+
+def test_视觉高潮段优先决定角色顺序防止LoRA用错():
+    """2026-09-01 用户实锤：全文先提 A 后提 B，但画面主体是 B，single 模式加载了 A 的
+    LoRA。无插画计划时，priority_text（高潮段原文）内的出现顺序优先于全文首现顺序。"""
     assert ag._resolve_illustration_request_actors(
-        ["冷倾雪", "虞妙玥"],
-        planned=["冷倾雪"],
-        user_text="继续",
-        narrative="虞妙玥扶住冷倾雪，两人同时转身。",
-        present="冷倾雪、虞妙玥",
+        ["凌若冰", "舞姬恋"],
+        planned=[],
+        user_text="凌若冰与舞姬恋同框",
+        narrative="凌若冰先到泉边，舞姬恋随后入画。",
+        present="凌若冰、舞姬恋",
         encounter=[],
-    ) == ["虞妙玥", "冷倾雪"]
+        priority_text="舞姬恋的指尖挑开凌若冰的衣带，画面焦点锁在舞姬恋身上。",
+    ) == ["舞姬恋", "凌若冰"]
+
+
+def test_表格在场状态不在场的角色不进入插画演员():
+    """2026-09-01 用户实锤：高潮段只有凌若冰（封域内），舞姬恋在封域外被点名——
+    点名提及不等于画面在场。表格在场状态=不在场的角色必须从 request_actors 剔除，
+    否则提示词写成 2girls、实际只有一个。"""
+    assert ag._resolve_illustration_request_actors(
+        ["凌若冰", "舞姬恋"],
+        planned=[],
+        user_text="继续",
+        narrative="凌若冰在泉中施术，舞姬恋在封域外石廊打坐。",
+        present="凌若冰；舞姬恋",
+        encounter=[],
+        absent={"舞姬恋"},
+    ) == ["凌若冰"]
+
 
 
 def test_高潮人物只取最终锚点片段而不带入前文离场角色(monkeypatch, tmp_path):
@@ -2154,7 +2240,7 @@ def test_主模型把动作峰值写成静态肖像时纠正锚点并本地重�
 
     assert request["anchor"] == "她把信笺对折，信笺化作黑色流光穿出帷幔。"
     assert request["scene_spec"]["narrative"] == request["anchor"]
-    assert request["scene_spec"]["profile"] == "krea2"
+    assert request["scene_spec"]["profile"] == "anima_tags"  # 2026-08-31 默认协议切 Anima
     assert request["scene_spec"]["profile_prompt"].isascii()
     assert "smile" not in request["scene_spec"]["profile_prompt"].lower()
     assert request["prompt"]
@@ -2422,6 +2508,8 @@ def test_主剧情同轮Krea完整提示词隐藏并直接进入scene_spec(monke
     monkeypatch.setattr(character_state, "load_state", lambda *a, **k: {})
     monkeypatch.setattr(ra, "_narr", lambda *a, **k: "")
     profile = (
+        "1woman, black hair, torn purple robe, low-angle close medium view, broken rail, "
+        "dawn side light, foreground frame\n"
         "A low-angle close medium view places the adult woman beside the broken rail as she turns sharply. "
         "Cold dawn side light follows her black hair and torn purple robe while the ruined village recedes into mist. "
         "The foreground rail frames her face and reaching hand, with coherent anatomy, clean edges, controlled detail, "
@@ -2520,6 +2608,8 @@ def test_同轮Profile先经过与正文相同的AI输出正则(monkeypatch, tmp
     monkeypatch.setattr(character_state, "load_state", lambda *a, **k: {})
     monkeypatch.setattr(ra, "_narr", lambda *a, **k: "")
     profile = (
+        "1woman, black hair, purple robe, close medium view, broken rail, side light, "
+        "layered misty background\n"
         "A close medium view follows PRESET_TOKEN as the adult woman turns beside a broken rail. "
         "Cold side light defines her face, hands, purple robe, and layered misty background with clean detail."
     )
@@ -2688,8 +2778,8 @@ def test_插画事件无视频字段时保持原状_旧数据兼容():
     ]
 
 
-def test_插画事件默认附带climax视频提示词_v1_5():
-    # V1.5 默认开放：有 scene_spec 即编译 climax 视频提示词，不依赖视频模板/模型
+def test_插画事件未带video_request不下发视频提示词_正常链路():
+    # 正常链路：未配置视频工作流（produce 层未编译 video_request）→ 事件不带视频字段
     events = ag._streamed_illustration_events([{
         "id": "slot-1", "prompt": "p", "motion": 3, "actors": ["温知夏", "林屿"],
         "anchor_offset": 0,
@@ -2704,31 +2794,11 @@ def test_插画事件默认附带climax视频提示词_v1_5():
         },
     }])
     request = events[0]["illustrate_request"]
-    vp = request.get("video_prompt", "")
-    assert vp
-    # 区块完整：七段式（元信息 / 参考绑定 / 主体场景 / 时间分镜 / 音频 / 负面约束）
-    assert "[元信息]" in vp
-    assert "[参考绑定]" in vp
-    assert "图片1中心的角色为" in vp
-    assert "[主体/场景]" in vp
-    assert "[时间分镜]" in vp
-    assert "[音频]" in vp
-    assert "[负面约束]" in vp
-    assert "[动作]" not in vp
-    # 时间分镜带 motion 强度对应的运镜（motion=3 → 低角度快速弧线围绕）
-    assert "低角度仰拍，摄像机以快速弧线围绕主体运动" in vp
-    # 主体/场景含外貌与场景
-    assert "米色针织开衫" in vp
-    assert "面馆内景" in vp
-    # 视频参数随事件下发（dry-run，供测试「参数有没有上传」）
-    vparams = request.get("video_params", {})
-    assert vparams["mode"] == "climax"
-    assert vparams["size"] == "1280x720"  # 视频默认 16:9（R9）
-    assert any("缺高潮参考图" in w for w in vparams["warnings"])  # 无参考图 → 诚实降级警告
+    assert "video_prompt" not in request
+    assert "video_params" not in request
 
 
-def test_视频参数dryrun透传视频配置_v1_5():
-    # 视频配置（模型名/端点）从 rec.video_config 透传进 video_params，供核对参数是否上传
+def test_未带video_request时video_config不下发_正常链路():
     events = ag._streamed_illustration_events([{
         "id": "slot-1", "prompt": "p", "motion": 3, "actors": ["甲"],
         "anchor_offset": 0,
@@ -2739,12 +2809,9 @@ def test_视频参数dryrun透传视频配置_v1_5():
             "locale": "街角", "actors": ["甲"], "rating": "sfw",
         },
     }])
-    vparams = events[0]["illustrate_request"]["video_params"]
-    assert vparams["model"] == "h3-mini"
-    assert vparams["endpoint"] == "https://vid.example"
-    assert vparams["size"] == "1280x720"
-    # 提示词元信息带上模型名（模型名透传不硬编码）
-    assert "h3-mini" in events[0]["illustrate_request"]["video_prompt"]
+    request = events[0]["illustrate_request"]
+    assert "video_prompt" not in request
+    assert "video_params" not in request
 
 
 def test_事件层复用produce编译的video_request_v1_5():
@@ -2774,17 +2841,16 @@ def test_插画事件无scene_spec则不生成视频提示词_v1_5():
     assert "video_params" not in events[0]["illustrate_request"]
 
 
-def test_视频提示词motion强度影响运镜_v1_5():
+def test_视频提示词motion强度影响运镜_正常链路():
+    from app.services import video_prompt
     base_spec = {
         "narrative": "角色动作", "appearance": "外貌", "wardrobe": "服装",
         "locale": "场景", "actors": ["角色"], "rating": "sfw",
     }
     def compile_for(motion):
-        events = ag._streamed_illustration_events([{
-            "id": "s", "prompt": "p", "motion": motion, "actors": ["角色"],
-            "anchor_offset": 0, "scene_spec": dict(base_spec),
-        }])
-        return events[0]["illustrate_request"]["video_prompt"]
+        spec = dict(base_spec)
+        spec["motion"] = motion
+        return video_prompt.compile_climax_video_prompt(spec)
 
     assert "低角度仰拍，摄像机以快速弧线围绕主体运动" in compile_for(3)
     assert "镜头绕主体旋转90度" in compile_for(2)
@@ -2880,7 +2946,7 @@ def test_roleplay先交付正文与插画但维护完成后才结束Agent回合(
     monkeypatch.setattr(ag, "_resolve_preset", lambda *args, **kwargs: ([], None, False, [], []))
     monkeypatch.setattr(ra, "recall_chronicle", lambda *args, **kwargs: "")
     monkeypatch.setattr(ag, "_rag_recall_text", lambda *args: "")
-    monkeypatch.setattr(ag._llm, "chat_messages", lambda *args, **kwargs: "最终正文")
+    monkeypatch.setattr(ag._llm, "chat_messages", lambda *args, **kwargs: "<content>最终正文</content>")
     monkeypatch.setattr(
         ag,
         "_agency_writeback",
@@ -2889,11 +2955,11 @@ def test_roleplay先交付正文与插画但维护完成后才结束Agent回合(
         }, {}),
     )
 
-    def blocked_maintenance(*args):
+    def slow_maintenance(*args):
         maintenance_started.set()
         release_maintenance.wait(2)
 
-    monkeypatch.setattr(ag, "_agency_maintenance", blocked_maintenance)
+    monkeypatch.setattr(ag, "_agency_maintenance", slow_maintenance)
     ctx = _card_ctx(
         repo_id="work", thread_id="work", comfy_illustrate=True,
         stream_sink=emitted.append,
@@ -2910,20 +2976,20 @@ def test_roleplay先交付正文与插画但维护完成后才结束Agent回合(
     )
     worker.start()
     try:
+        # 2026-08-30 改约：维护转后台线程，正文/插画先发布，turn 立即完成——
+        # 慢维护不得挂住对话完成（旧契约「维护完成后才结束」反转）。
         assert maintenance_started.wait(1)
         assert [event.keys() & {"replace", "illustrate_request"} for event in emitted] == [
             {"replace"}, {"illustrate_request"},
         ]
-        assert not foreground_done.wait(0.2)
-        assert worker.is_alive()
+        assert foreground_done.wait(2), "维护慢时对话也必须完成"
+        assert result["result_text"] == "最终正文"
+        assert result["_eager_result"] is True
     finally:
         release_maintenance.set()
         worker.join(2)
-
+    ag.join_maintenance_threads()
     assert not worker.is_alive()
-    assert foreground_done.is_set()
-    assert result["result_text"] == "最终正文"
-    assert result["_eager_result"] is True
 
 
 # ── 路由界限（Autopilot P1 前置）：委派强命令层 vs 剧情默认 ──────────────────
@@ -2960,3 +3026,50 @@ def test_委派疑问句不进委派():
 def test_plan路由在主管候选集中():
     ctx = _ctx()
     assert "plan" in ag._available_routes(False, ctx)
+
+
+def test_自愈进度提示只在流式模式进通道():
+    """截断自愈重试提示走流式 trace 事件；非流式模式气泡走 trace 列表，不直接进通道。"""
+    events: list[dict] = []
+    ctx = _ctx(stream_sink=events.append, stream_output=False)
+    ag._notify_stream_trace(ctx, "⚠️ 提示")
+    assert events == []
+
+    ctx["stream_output"] = True
+    ag._notify_stream_trace(ctx, "⚠️ 提示")
+    assert events == [{"trace": "⚠️ 提示"}]
+
+
+def test_续写消息序列残缺输出回喂加断点指令():
+    """截断续写：残缺输出作为最后一条 assistant 回喂（保格式），指令要求从断点
+    直接续写、不重复不重开、不输出思考块；不破坏既有 system/对话顺序。"""
+    wire = [
+        {"role": "system", "content": "系统"},
+        {"role": "user", "content": "上一轮"},
+        {"role": "assistant", "content": "上轮回复"},
+        {"role": "user", "content": "本轮输入"},
+    ]
+    partial = "<think>决策。</think>\\n<content>正文前半段，写到一半"
+    out = ag._roleplay_continuation_messages(wire, partial)
+
+    assert out[:4] == wire  # 既有消息原样在前
+    assert out[4] == {"role": "assistant", "content": partial}  # 残缺输出全文回喂
+    instruction = out[5]
+    assert instruction["role"] == "user"
+    assert "从断点直接继续" in instruction["content"]
+    assert "禁止重复已有内容" in instruction["content"]
+    assert "不要输出 <think>" in instruction["content"]
+    assert "</content>" in instruction["content"]
+
+def test_可见文本兜底链拆think防跨界吞正文():
+    """_visible_roleplay_text 与主链同源：先拆 think 前缀再提取，幻影协议标签无法跨界吞正文。"""
+    reply = (
+        "<think>格式确认：- <content> 正文 - <状态更新> 块</think>\n"
+        "<content>正文核心段落。</content>\n"
+        '<状态更新>[{"k":1}]</状态更新>'
+    )
+    out = ag._visible_roleplay_text(reply)
+
+    assert "正文核心段落。" in out
+    assert "格式确认" in out  # think 前缀原样保留
+    assert "[{\"k\":1}]" not in out  # 真状态块照常剥除（think 内幻影引述按设计保留）

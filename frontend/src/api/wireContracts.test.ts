@@ -11,7 +11,7 @@ describe("generated wire contract", () => {
       size: "1024x1024", imageQuality: "high", outputDir: "", repoId: "repo",
       proxyUrl: "", chatProxyUrl: "", genProxyUrl: "", videoProxyUrl: "", embedProxyUrl: "",
       styleTemplate: "", agentId: "", streamOutput: true, contextMaxTokens: 20000,
-      historyPerRole: 6, history: [], characterDir: "", cardName: "", cardNames: [],
+      historyPerRole: 6, selfhealAttempts: 3, history: [], characterDir: "", cardName: "", cardNames: [],
       openingCardName: "", presetDir: "", presetName: "", userName: "", userPersona: "",
       personaBound: false, worldbookDir: "", worldbookName: "", illustrate: false,
       comfyIllustrate: false, comfyAudio: false, comfyVideo: false, promptProfile: "anima", appearanceSource: "worldbook",

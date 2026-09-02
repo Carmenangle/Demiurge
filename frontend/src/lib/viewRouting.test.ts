@@ -3,7 +3,7 @@ import {
   buildHash, calcSize, ASPECTS, IMAGE_QUALITIES, RES_TIERS, supportsImageQuality,
   normalizeCustomDimension, resolveHomeWorkspace, resolveImageSize,
   resolveActivityChatTarget, resolveOpenedWorkRoute,
-  SECTION_SUBNAV, WORK_MODES, workspaceModeForWire,
+  NAV_SECTIONS, SECTION_SUBNAV, WORK_MODES, workspaceModeForWire,
 } from "./viewRouting";
 import type { Repo } from "../stores/repos";
 
@@ -39,6 +39,18 @@ describe("system navigation", () => {
   it("places LoRA data beside tools and between model downloads and node management", () => {
     expect(SECTION_SUBNAV.system.map((item) => item.id)).toEqual([
       "models", "lora-data", "node-manager", "tools",
+    ]);
+  });
+});
+
+describe("guide navigation", () => {
+  it("is a top-level entry placed after system (新手指引在系统管理下方)", () => {
+    expect(NAV_SECTIONS.map((s) => s.id)).toEqual(["home", "assets", "workflows", "system", "guide"]);
+  });
+
+  it("drills into guide sections starting with quick-start", () => {
+    expect(SECTION_SUBNAV.guide.map((item) => item.id)).toEqual([
+      "quick-start", "story", "canvas", "workflow", "tools",
     ]);
   });
 });

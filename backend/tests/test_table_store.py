@@ -377,3 +377,32 @@ def test_round_trip_ai搭车(tmp_path):
     ts.save(base, rid, tables)
     reloaded = json.loads((tmp_path / rid / ts.TABLES_FILE).read_text(encoding="utf-8"))
     assert reloaded["tables"][0]["rows"][0][0] == "符纸"
+
+
+def test_角色状态表singleton插入不抹掉未提供列():
+    """2026-09-01 用户定案：角色状态表所有参数永久存在，agent 部分字段插入不得把
+    其余列抹成空串。"""
+    tables = ts.default_tables()
+    ts.apply_ops(tables, [
+        {"op": "insert", "table": "主角信息表", "values": {
+            "姓名": "凌渊", "性别": "男", "当前状态": "修炼中",
+        }},
+    ])
+    protagonist = next(table for table in tables if table["name"] == "主角信息表")
+    row = protagonist["rows"][0]
+    assert row[0] == "凌渊" and row[1] == "男" and row[7] == "修炼中"  # 当前状态在第 8 列
+    # 未提供的列保留旧值（默认空串）
+    assert row[2] == "" and row[3] == ""
+
+
+def test_自建角色类表也禁止agent删行():
+    """2026-09-01 用户定案：名字含「角色」的表一律视为角色状态表，agent 删行被拒。"""
+    tables = ts.default_tables()
+    tables.append({
+        "uid": "custom_roles", "name": "角色状态表", "columns": ["角色", "状态"],
+        "rows": [["阿尼玛", "在场"]], "rowPolicy": "keyed", "keyCol": "角色",
+        "deletePolicy": "delete",
+    })
+    assert ts.apply_ops(tables, [{"op": "delete", "table": "角色状态表", "key": "阿尼玛"}]) == 0
+    custom = next(table for table in tables if table["name"] == "角色状态表")
+    assert custom["rows"] == [["阿尼玛", "在场"]]

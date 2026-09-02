@@ -145,3 +145,49 @@ def test_显式provider_profile覆盖模型名推断(monkeypatch):
         ("system", "甲"), ("human", "问"),
         ("system", "乙"), ("human", "继续"),
     ]
+
+
+class _MetaResp:
+    def __init__(self, content, meta=None):
+        self.content = content
+        self.response_metadata = meta or {}
+
+
+class _MetaModel:
+    def __init__(self, chunks):
+        self._chunks = chunks
+
+    def stream(self, payload):
+        yield from self._chunks
+
+
+def test_chat_messages_stream结束原因经on_finish透传(monkeypatch):
+    """截断诊断：finish_reason=length → 输出上限被掐；中途中途掐断 → 空串。"""
+    monkeypatch.setattr(_llm, "build_model", lambda *a, **k: _MetaModel([
+        _MetaResp("流"),  # 无 response_metadata：防御性跳过
+        _MetaResp("式", {"finish_reason": None}),
+        _MetaResp("", {"finish_reason": "length"}),
+    ]))
+    finished = []
+    deltas: list[str] = []
+    out = _llm.chat_messages_stream(
+        "b", "k", "m", [{"role": "user", "content": "问"}], deltas.append,
+        on_finish=finished.append,
+    )
+    assert out == "流式"
+    assert finished == [{"finish_reason": "length"}]
+
+
+def test_chat_messages_stream中转掐流无结束原因时为空串(monkeypatch):
+    # 2026-08-31 正文截断实锤：中转在正文中间干净地结束流，不带 finish_reason。
+    monkeypatch.setattr(_llm, "build_model", lambda *a, **k: _MetaModel([
+        _MetaResp("正文写", {}),
+        _MetaResp("到一半", {}),
+    ]))
+    finished = []
+    out = _llm.chat_messages_stream(
+        "b", "k", "m", [{"role": "user", "content": "问"}], lambda _d: None,
+        on_finish=finished.append,
+    )
+    assert out == "正文写到一半"
+    assert finished == [{"finish_reason": ""}]

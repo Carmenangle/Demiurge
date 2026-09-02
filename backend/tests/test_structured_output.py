@@ -43,6 +43,20 @@ def test_invoke_prefers_native_json_schema_then_falls_back_to_text():
     assert events[-1][1]["strategy"] == "legacy_text"
 
 
+def test_parse_model_unwraps_tool_calls_payload():
+    # 模型误走工具调用模式：外层是 tool_calls，真正的 schema JSON 在 function.arguments
+    raw = (
+        '{"tool_calls":[{"id":"call_1","type":"function",'
+        '"function":{"name":"GenerationPlan","arguments":"{\\"intent\\":\\"批量出图\\",'
+        '\\"repo_id\\":\\"work\\",\\"budgets\\":{\\"max_steps\\":3,\\"max_gpu_tasks\\":14,'
+        '\\"max_llm_calls\\":0},\\"steps\\":[],\\"approval_required\\":[]}"}}]}'
+    )
+    from app.services.structured_contracts import GenerationPlan
+    plan = structured_output.parse_model(raw, GenerationPlan)
+    assert plan.intent == "批量出图"
+    assert plan.budgets.max_gpu_tasks == 14
+
+
 def test_parse_object_rejects_non_object_root():
     try:
         structured_output.parse_object("[1,2,3]")

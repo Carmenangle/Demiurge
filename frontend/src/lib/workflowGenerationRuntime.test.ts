@@ -324,6 +324,17 @@ describe("canvas workflow background activity (trackCanvasWorkflow/untrackCanvas
     }
   });
 
+  it("track with runId stores runId so the chat progress bar can restore after remount", () => {
+    const values = stubLocalStorage();
+    try {
+      trackCanvasWorkflow("repo-a", "p1", "http://comfy", "模板A", "wfrun-abc123");
+      const parsed = JSON.parse(values.get("laf_pending_gen_repo-a") || "[]");
+      expect(parsed[0]).toMatchObject({ prompt_id: "p1", prompt: "模板A", runId: "wfrun-abc123" });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("untrack removes only the matching prompt_id", () => {
     const values = stubLocalStorage();
     try {

@@ -122,21 +122,28 @@ _KREA_SYSTEM = _COMMON + (
     "第三，摄影风格、镜头视角与透视表现。根据高潮内容选择景别、焦段、相机距离、机位高度、俯仰角度、"
     "观察方向、景深和透视压缩程度；镜头必须清楚表现动作主体、人物关系和空间方向，"
     "不得为了复杂构图而使用与高潮无关的夸张机位。"
-    "第四，有机材质与画面质感。描述肌肤、头发、衣料、汗水、液体、植物和其他有机表面的纹理、湿度、"
-    "柔软度、透明度、褶皱、拉伸、压力与受光反应；材质表现必须服从实际动作、服装状态和环境条件，"
-    "不得凭空增加身体变化或不存在的物质。"
+    "第四，有机材质与画面质感。描述肌肤、头发、衣料、汗水、液体、植物和其他有机表面的质感、湿度、"
+    "柔软度、褶皱、拉伸、压力与受光反应；材质表现必须服从实际动作、服装状态和环境条件，"
+    "不得凭空增加身体变化或不存在的物质，也不得做皮肤纹理特写式的照片写实描述。"
     "第五，光影、层次与色彩设定。明确主光源的位置、方向、软硬、色温和强度，说明受光主体、材质高光或透光、"
     "阴影落向与空气透视；使用受控的主色、辅色和少量强调色形成前景、人物与背景层次，"
     "把最高对比和清晰度集中在高潮动作或人物关系上。"
     "第六，画质质量与完成度。保证人体结构、肢体承重、接触关系、服装受力、物体遮挡、透视、光照和材质反应"
-    "彼此一致；强调精确解剖、清晰主体、稳定轮廓、细腻材质、受控细节、干净边缘、高图像保真度和完整完成度，"
-    "不得使用 photorealistic、live-action photography 或 realistic human skin 等真人媒介描述。"
+    "彼此一致；强调结构一致、主体清晰、轮廓稳定、细节克制、边缘干净。"
+    "媒介与画风完全交给已加载的 LoRA 决定：禁止照片写实向描述——不得使用 photorealistic、photograph、"
+    "live-action photography、realistic skin、skin texture、visible veins/pores 等真人媒介与皮肤特写词汇，"
+    "有机材质只描述受光与柔软度等可见结果，不做照相机式的纹理写实。"
     "优先使用输入已有的 visual_thesis、hierarchy、palette_material、lighting_logic、camera 和 composition；"
     "只有这些信息缺失时，才补足使空间、透视、解剖、承重、遮挡、光照和材质成立的必要内容。"
     "实际加载的角色 LoRA 和风格 LoRA 决定人物与媒介风格；不得添加 LoRA 触发词、LoRA 权重，也不得使用"
     "anime、manga、3D render 等词擅自锁定媒介。"
-    "最终只输出一个连贯、具体的纯英文自然语言段落，并严格按照六个维度的顺序组织内容。"
-    "不得夹杂中文，不得输出标签堆砌、JSON、Markdown、解释、自检、拒答、参数、LoRA 名称、LoRA 权重或负面提示词。"
+    "最终输出且仅输出两行，用一个换行分隔，两行都不得夹杂中文。"
+    "第一行：英文内容 tags 与构图 tags，用英文逗号分隔——覆盖人数与角色、稳定外貌与当前变化、"
+    "发型、表情、服装与当前状态、姿态动作，以及镜头景别、视角、光影和构图要素；"
+    "不写质量词（质量 tags 由程序前置，重复会被去重）。"
+    "第二行：内容文段，一至三句连贯英文自然语言，按上述六维顺序落实唯一视觉命题、"
+    "人物关系与全部空间关系；不得输出 JSON、Markdown、解释、自检、拒答、参数、"
+    "LoRA 名称/权重或负面提示词。"
 )
 
 _NATURAL_SYSTEM = _COMMON + (
@@ -175,8 +182,16 @@ def _strip_wrapping(value: str) -> str:
 def _krea_prompt(raw: str, scene: Mapping[str, object] | None = None) -> str:
     _ = scene
     text = _strip_wrapping(raw).split("——自检——", 1)[0].strip()
-    text = " ".join(text.splitlines()).strip()
-    return _normalize_krea_style(text)
+    # 两段式（2026-08-30 用户定稿）：第一段内容/构图 tags、第二段内容文段。
+    # 旧行为把所有行合并成单行——那正是格式被破坏的源头。
+    lines = [" ".join(line.split()) for line in text.splitlines()]
+    lines = [line for line in lines if line]
+    if len(lines) >= 2:
+        return _normalize_krea_style(lines[0]) + "\n" + _normalize_krea_style(
+            " ".join(lines[1:]))
+    if lines:
+        return _normalize_krea_style(lines[0])
+    return ""
 
 
 def _normalize_krea_style(prompt: str) -> str:
@@ -195,13 +210,19 @@ def _normalize_krea_style(prompt: str) -> str:
              r"manga\s+illustration|3D\s+render(?:ing)?)\s*(?:imagery|style|aesthetic)?[.,;:]?\s*", ""),
         (r"\bphotorealistic\b[.,;:]?\s*", ""),
         (r"\b(?:live-action photography|anime(?: style)?|manga(?: style)?|3D render(?:ing)?)\b[.,;:]?\s*", ""),
-        (r"\brealistic human skin\b", "physically coherent skin tones and material response"),
+        (r"\brealistic human skin\b", "natural skin tones"),
         (r"\btranslucent skin\b", "natural tonal transitions across the skin"),
         (r"\b(?:microscopic|visible)\s+(?:facial\s+)?(?:veins?|pores?)\b", "subtle tonal detail"),
+        (r"\b(?:faint|visible)\s+veins?\s+visible\b", "subtle tonal detail"),
+        (r"\bfaint\s+vein\b", "subtle shading"),
+        (r"\bskin\s+texture\b", "skin shading"),
+        (r"\brealistic\s+(?:softness|skin|detail|rendering)\b", "clean shading"),
+        (r"\bhigh\s+image\s+fidelity\b", "clean presentation"),
     )
     for pattern, replacement in replacements:
         text = re.sub(pattern, replacement, text, flags=re.I)
-    return " ".join(text.split())
+    # 两段式：逐行清洗但保留换行（旧行为合并成单行会破坏第一段 tags/第二段文段结构）
+    return "\n".join(" ".join(line.split()) for line in text.splitlines())
 
 
 def _json_object(raw: str) -> dict[str, object]:
@@ -287,8 +308,12 @@ def system_with_preset(
     preset_name: str = "",
     user_name: str = "",
     task_label: str = "内部生图提示词任务",
+    head_only: bool = True,
 ) -> str:
-    """把当前偏置/防拦截预设用于独立提示词调用，不携带剧情历史。"""
+    """把当前偏置/防拦截预设用于独立提示词调用，不携带剧情历史。
+
+    head_only=False：携带完整预设（含 <Order> 剧情机制段）——token 更贵，但防拦截
+    强度与剧情主生成同级（2026-09-01 用户要求：生图提示词要像剧情一样稳定）。"""
     if not (preset_dir.strip() and preset_name.strip()):
         return system
     try:
@@ -314,7 +339,9 @@ def system_with_preset(
             "last_user_message": source,
             "last_char_message": "",
         }
-        guard = preset_store.assemble_system(preset, markers).strip()
+        # head_only=False 时携带完整预设（含 <Order> 剧情机制段），防拦截强度与
+        # 剧情主生成同级——2026-09-01 用户定案：生图提示词的稳定性优先于 ~8k token。
+        guard = preset_store.assemble_system(preset, markers, head_only=head_only).strip()
         if not guard:
             return system
         return (
@@ -592,6 +619,14 @@ _SCENE_ACTION_RULES = (
     (r"(?:腰|身体).{0,12}(?:追|拱|顶)(?:向|过去|上去)?", "her body following the withdrawn contact"),
     (r"(?:膝盖|双腿|大腿).{0,8}(?:分开|打开)", "knees spread apart"),
     (r"压住|按住", "pressing down"),
+    # 2026-09-01 用户实锤：高潮动作未映射，确定性兜底只剩通用 2girls 模板。
+    # 补齐本作高频 NSFW 动作词汇，至少让兜底提示词咬住高潮时间点的动作。
+    (r"(?:阳具|肉棒|肉柱|柱身).{0,12}(?:掐|握|攥|抓|按)|(?:掐|握|攥|抓|按).{0,12}(?:阳具|肉棒|肉柱|柱身)", "gripping the shaft"),
+    (r"(?:拇指|指尖).{0,12}(?:压|按|碾).{0,12}(?:系带|龟头|马眼)|(?:系带|龟头|马眼).{0,12}(?:被|遭).{0,12}(?:压|按|碾)", "thumb pressing the frenulum"),
+    (r"(?:顶弄|顶动|挺动|抽送|抽插)", "thrusting"),
+    (r"(?:口交|口含|含住|吞入|舔舐|舔净).{0,12}(?:阳具|肉棒|柱身|龟头)|(?:阳具|肉棒|柱身|龟头).{0,12}(?:含住|吞入|舔舐|舔净)", "fellatio with the shaft in the mouth"),
+    (r"(?:指尖|手指).{0,12}(?:挑开|挑逗|爱抚|抚摸)", "fingertips teasing"),
+    (r"(?:冰凤|灵力|阳元).{0,12}(?:灌入|灌顶|注入)", "channeling spiritual energy into the body"),
     (r"(?:搬|卸).{0,12}木箱|木箱.{0,12}(?:搬|卸)|搬下|搬到|卸下|卸货",
      "unloading a wooden medicine crate"),
     (r"扛着|背着|搬着", "carrying"),
@@ -891,17 +926,24 @@ def _krea_contract_errors(
         return ["提示词为空"]
     if _REFUSAL_RE.search(prompt):
         errors.append("模型返回拒答")
-    if _CJK_RE.search(prompt):
-        errors.append("最终提示词必须为纯英文，禁止夹杂中文")
-    if re.search(r"\([^)]*:\s*\d+(?:\.\d+)?\)", prompt):
-        errors.append("禁止权重语法")
-    if re.search(r"\b(?:masterpiece|best quality)\b", prompt, re.I):
-        errors.append("禁止质量标签")
-    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", prompt) if part.strip()]
-    if len(paragraphs) != 1:
-        errors.append("Krea2必须输出一个英文自然段")
+    # 两段式（2026-08-30 用户定稿）：第一段内容/构图 tags，第二段英文内容文段
+    lines = [ln.strip() for ln in prompt.splitlines() if ln.strip()]
+    if len(lines) != 2:
+        return errors + ["Krea2必须输出两段：第一段为内容与构图tags，第二段为英文内容文段"]
+    tags_line, prose = lines
+    if _CJK_RE.search(tags_line):
+        errors.append("第一段tags必须为纯英文")
+    tags = [t.strip() for t in tags_line.split(",") if t.strip()]
+    if len(tags) < 6:
+        errors.append("第一段必须包含至少六个英文内容/构图tags")
+    if _CJK_RE.search(prose):
+        errors.append("第二段内容文段必须为纯英文，禁止夹杂中文")
+    if re.search(r"\([^)]*:\s*\d+(?:\.\d+)?\)", prose):
+        errors.append("第二段禁止权重语法（构图权重只能写在第一段tags）")
+    if re.search(r"\b(?:masterpiece|best quality)\b", prose, re.I):
+        errors.append("质量词只能由程序前置，不得写进文段")
     if check_length:
-        words = re.findall(r"\b[A-Za-z][A-Za-z'-]*\b", prompt)
+        words = re.findall(r"\b[A-Za-z][A-Za-z'-]*\b", prose)
         if not 80 <= len(words) <= 500:
             errors.append("英文单词数必须为80到500")
     errors.extend(_multi_actor_contract_errors("krea2", prompt, scene))
@@ -939,7 +981,7 @@ def _complete_inline_krea_facts(prompt: str, scene: Mapping[str, object]) -> str
 def normalize_inline(profile: str, raw: str, scene: Mapping[str, object] | None = None) -> str:
     """归一已有提示词或本地编译结果；不调用第二个模型。"""
     if profile not in PROFILE_IDS:
-        profile = "krea2"
+        profile = "anima_tags"  # 2026-08-31 默认协议切 Anima（krea2 模版不再默认）
     raw = _strip_refusal_suffix(raw)
     if profile == "niji_sections":
         text = _strip_wrapping(raw)
@@ -975,6 +1017,17 @@ def _multi_actor_contract_errors(
     if profile == "anima_tags" and not re.search(r"\b(?:2girls|two girls)\b", prompt, re.I):
         errors.append("Anima 双人提示词必须包含2girls")
     return errors
+
+
+_LENGTH_WARNING = "英文单词数必须为80到500"
+
+
+def _split_length_warnings(errors: list[str]) -> tuple[list[str], list[str]]:
+    """把词数校验从「触发重写」降级为「警告放行」（2026-08-30 成本实锤：一次 repair
+    = 一次携带完整防拦截预设的调用 ≈$0.2-0.3；词数偏短不影响提示词合法性，
+    长度只用于引导，硬卡它只会多烧一次调用）。返回（需修复错误, 警告）。"""
+    warnings = [e for e in errors if e == _LENGTH_WARNING]
+    return [e for e in errors if e != _LENGTH_WARNING], warnings
 
 
 def _errors(profile: str, prompt: str, scene: Mapping[str, object]) -> list[str]:
@@ -1175,7 +1228,7 @@ def _safe_anima_draft_tags(value: object) -> list[str]:
 
 
 def _krea_scene_fallback(scene: Mapping[str, object]) -> str:
-    """连续硬失败时给出单段纯英文剧情插画描述。"""
+    """连续硬失败时给出两段式纯英文剧情插画描述（第一段 tags、第二段内容文段）。"""
     multi_sentences = _multi_actor_sentences(scene)
     concrete_facts = _concrete_scene_facts(scene)
     fact_sentence = (
@@ -1184,6 +1237,14 @@ def _krea_scene_fallback(scene: Mapping[str, object]) -> str:
         if concrete_facts and not multi_sentences else ""
     )
     camera = _scene_camera_tag(scene)
+    # 第一段：内容/构图 tags（质量 tags 由程序前置）
+    draft_tags = [
+        tag.strip(" ,.;") for tag in str(scene.get("draft_prompt") or "").split(",")
+        if tag.strip(" ,.;") and tag.isascii()  # 第一段 tags 必须纯英文
+    ]
+    tags_line = ", ".join(list(dict.fromkeys([
+        *draft_tags[:10], camera, "dramatic composition", "clear focal hierarchy",
+        "coherent perspective", "layered background depth"])))
     subject_opening = (
         "A balanced two-character environmental composition gives two adult women distinct silhouettes, "
         "readable positions, and one shared visual focus against a layered background."
@@ -1196,16 +1257,17 @@ def _krea_scene_fallback(scene: Mapping[str, object]) -> str:
         " Their visible actions, spacing, gaze directions, and contact relationship remain readable as one coherent scene."
         if multi_sentences else ""
     )
-    return (
+    prose = (
         subject_opening
         + character_sentences
         + relationship_sentence
         + fact_sentence
         + " The composition makes every stated body position, contact point, current garment, prop, and location "
-          "simultaneously readable, using coherent perspective, directional light, material response, and controlled "
-          "background depth. Maintain precise anatomy, stable contours, clean edges, controlled fine detail, high image "
-          "fidelity, and smooth noise-free tonal transitions."
+          "simultaneously readable, using coherent perspective, directional light, consistent material shading, and controlled "
+          "background depth. Maintain consistent anatomy, stable contours, clean edges, restrained detail, and even "
+          "tonal transitions."
     )
+    return tags_line + "\n" + prose
 
 
 def _anima_scene_fallback(scene: Mapping[str, object]) -> str:
@@ -1278,12 +1340,16 @@ def _anima_scene_fallback(scene: Mapping[str, object]) -> str:
         content = f"{head.rstrip(',. ')}, {', '.join(action_tags)}{dot}{tail}"
     multi_sentences = _multi_actor_sentences(scene)
     if multi_sentences:
+        # 2026-09-01 用户实锤：多角色分支把上面已组装的具体动作/事实 tags 整段
+        # 覆盖成 2girls 通用模板，高潮动作全丢。改为：首行保留具体 tags（含动作），
+        # 多角色分工句只作为正文补充。
         content = (
-            "2girls, two-shot, balanced composition, clear spatial separation, environmental composition, "
-            "layered background, directional light. "
+            "2girls, two-shot, balanced composition, clear spatial separation, "
+            + content
+            + ". "
             + " ".join(multi_sentences)
             + " The two adult characters' distinct appearances and actions form one readable relationship, "
-              "while the background, light direction, material response, and depth remain coherent."
+              "while the background, light direction, consistent material shading, and depth remain coherent."
         )
     if not re.search(r"(?:^|\.\s+)[A-Z][^.?!]{24,}[.?!](?:\s|$)", content):
         if "herb merchant" in facts and "unloading a wooden medicine crate" in facts:
@@ -1314,7 +1380,7 @@ def _natural_scene_fallback(scene: Mapping[str, object]) -> str:
         f"The image preserves {facts}. The decisive story action is the single visual focus within an "
         "environmental narrative composition. The highest detail remains on the characters' faces, hands, "
         "clothing state, and visible contact point while secondary figures and the background recede in clarity. "
-        "A coherent directional light source, material response, cast shadows, controlled color hierarchy, and "
+        "A coherent directional light source, consistent material shading, cast shadows, controlled color hierarchy, and "
         "clean high-fidelity finish reinforce the visible character relationship without changing any scene fact."
     )
 
@@ -1523,8 +1589,8 @@ def complete_field_coverage(
         "camera": "a scene-appropriate medium shot with coherent perspective and readable depth of field",
         "composition": "a clear primary visual focus, foreground guidance, controlled negative space, and layered background depth",
         "lighting": "one coherent directional light source with consistent highlights and cast shadows",
-        "material": "physically coherent skin, hair, fabric folds, surface texture, and material response",
-        "quality": "precise anatomy, stable contours, clean edges, controlled fine detail, and high image fidelity",
+        "material": "consistent hair, fabric and surface rendering with believable light response",
+        "quality": "consistent anatomy, stable contours, clean edges, and restrained detail",
     }
     details.extend(defaults[field] for field in missing if field in defaults)
     details = list(dict.fromkeys(detail for detail in details if detail and _expected_present(prompt, detail) is False))
@@ -1562,8 +1628,13 @@ def generate(
     scene: Mapping[str, object],
     generate_text: Callable[[str, str], str],
     diagnostics: dict[str, object] | None = None,
+    *,
+    allow_repair: bool = True,
 ) -> str:
-    """调用文本模型并验证目标协议；语义格式错误时携带原因重写一次。"""
+    """调用文本模型并验证目标协议；语义格式错误时携带原因重写一次。
+
+    allow_repair=False（插画链同轮兜底用）：第一次不通过直接本地确定性兜底，
+    不再花第二次 LLM 调用——正文已生成完，用户不该为提示词重写干等。"""
     if profile not in PROFILE_IDS:
         raise ValueError(f"未知提示词模式：{profile}")
     report = diagnostics if diagnostics is not None else {}
@@ -1576,7 +1647,9 @@ def generate(
     first_raw = generate_text(system, source)
     raw = _strip_refusal_suffix(_strip_think(first_raw))
     prompt = _normalize(profile, raw, fact_scene)
-    errors = _errors(profile, prompt, fact_scene)
+    errors, length_warnings = _split_length_warnings(_errors(profile, prompt, fact_scene))
+    if length_warnings:
+        report["warnings"] = length_warnings
     if not raw.strip() and _REFUSAL_RE.search(image_prompt_extract.restore_jailbreak(first_raw)):
         errors.insert(0, "模型返回拒答")
     if profile == "anima_tags":
@@ -1587,6 +1660,12 @@ def generate(
         report["field_ledger"] = ledger
         return completed
     report["first_errors"] = list(dict.fromkeys(errors))
+    if not allow_repair:
+        report["strategy"] = "fallback"
+        fallback = deterministic_fallback(profile, fact_scene)
+        completed, ledger = complete_field_coverage(profile, fallback, fact_scene)
+        report["field_ledger"] = ledger
+        return completed
     repair = (
         f"{source}\n\n上次输出未通过：{'；'.join(errors)}。请严格按系统协议重写。"
         f"\n上次输出：{raw}"
@@ -1594,7 +1673,10 @@ def generate(
     second_raw = generate_text(system, repair)
     repaired_raw = _strip_refusal_suffix(_strip_think(second_raw))
     prompt = _normalize(profile, repaired_raw, fact_scene)
-    errors = _errors(profile, prompt, fact_scene)
+    errors, _extra_warnings = _split_length_warnings(_errors(profile, prompt, fact_scene))
+    prior_warnings = report.get("warnings")
+    if _extra_warnings and isinstance(prior_warnings, list):
+        report["warnings"] = list(dict.fromkeys([*prior_warnings, *_extra_warnings]))
     if (not repaired_raw.strip()
             and _REFUSAL_RE.search(image_prompt_extract.restore_jailbreak(second_raw))):
         errors.insert(0, "模型返回拒答")

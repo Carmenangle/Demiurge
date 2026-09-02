@@ -241,6 +241,14 @@ function NodeEditor({
   const [picked, setPicked] = useState<{ id: string; title: string }[]>(
     () => (template?.node_order || []).map((id) => ({ id, title: `#${id}` })),
   );
+  // picked 不能作为画布 effect 的依赖：每次 load 后扩展回传 node_title 会 setPicked 新数组，
+  // 若依赖 picked，effect 会重跑 → 1.5s 后 ping_ready → 扩展回 ready → 再次 sendLoad →
+  // loaded → reselect → node_title → setPicked → effect 又重跑，形成无限重载循环
+  // （表现就是画布不停刷新、永远看不到节点）。用 ref 供 effect 读取最新 picked。
+  const pickedRef = useRef(picked);
+  useEffect(() => {
+    pickedRef.current = picked;
+  }, [picked]);
 
   // key -> 暴露配置
   const [exposed, setExposed] = useState<Map<string, ExposedField>>(() => {
@@ -366,14 +374,14 @@ function NodeEditor({
         // 画布模式以原节点定义为准：旧模板里手工改过的 semantic/label/default 全部恢复默认。
         setExposed((prev) => {
           let fields = [...prev.values()];
-          for (const selected of picked) {
+          for (const selected of pickedRef.current) {
             const node = nodes.find((item) => item.id === selected.id);
             if (node) fields = replaceWorkflowNodeExposure(fields, node);
           }
           return new Map(fields.map((field) => [fieldKey(field.node_id, field.field), field]));
         });
         // 载图后回填已选节点的高亮（重新进入画布时保持选择状态）
-        for (const p of picked) post("reselect", { id: p.id });
+        for (const p of pickedRef.current) post("reselect", { id: p.id });
         scheduleVerify(2200); // 载图后校验画布是否被别的标签抢占成别的工作流
       } else if (d.type === "graph") {
         // 校验：画布节点是否都属于本模板（id 子集）。出现本模板没有的 id=被别的工作流抢占，软重发重试。
@@ -425,7 +433,7 @@ function NodeEditor({
       if (verifyRef.current) clearTimeout(verifyRef.current);
       window.removeEventListener("message", onMsg);
     };
-  }, [viewMode, sourcePath, picked, comfyUrl, reloadKey]);
+  }, [viewMode, sourcePath, comfyUrl, reloadKey]);
 
   // 从右侧列表删除一个选中节点（同步取消画布高亮）
   const removePicked = (id: string) => {

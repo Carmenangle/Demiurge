@@ -29,7 +29,8 @@ def flatten_content(content: Any) -> str:
 def build_model(base_url: str, api_key: str, model: str,
                 temperature: float = 0.7, streaming: bool = False, proxy: str = "",
                 top_p: float | None = None, max_tokens: int | None = None,
-                sdk_retries: int | None = None, on_usage: Callable[[dict], None] | None = None):
+                sdk_retries: int | None = None, timeout_override: float | None = None,
+                on_usage: Callable[[dict], None] | None = None):
     """构建 OpenAI 兼容对话模型。缺配置抛 ValueError（由调用方决定如何呈现）。
 
     on_usage: 可选回调，接收模型返回的 usage 字典（含 prompt_tokens / completion_tokens /
@@ -60,18 +61,24 @@ def build_model(base_url: str, api_key: str, model: str,
     if isinstance(sdk_retries, int) and sdk_retries >= 0:
         kw["max_retries"] = sdk_retries
     p = (proxy or "").strip()
+    # 2026-08-31 深夜用户定案：流式读超时=30s。正常吐字 1 秒都不到，30s 一个 token
+    # 都不返回必然是上游卡死——立刻 ReadTimeout 走自愈，不误伤正常慢出字（只要还在
+    # 出 token 就永远不会触发）。
+    _read_timeout = timeout_override if timeout_override is not None else (
+        30 if streaming else (120 if p else 200))
     if p:
         import httpx
-        kw["http_client"] = httpx.Client(proxy=p, timeout=120)  # 仅显式代理时注入
+        kw["http_client"] = httpx.Client(proxy=p, timeout=_read_timeout)  # 仅显式代理时注入
     elif _is_local_url(base_url):
         # 本地端点（Ollama / 127.0.0.1 / localhost）：显式禁用环境代理。
         # ⚠Windows 下 httpx trust_env=True 会读 WinINET 注册表里的系统代理(如 Clash 127.0.0.1:7897)，
         #   localhost 请求被转发到代理 → 502。本地直连必须 trust_env=False。
         import httpx
-        kw["http_client"] = httpx.Client(trust_env=False, timeout=200)
+        kw["http_client"] = httpx.Client(trust_env=False, timeout=_read_timeout)
     else:
-        kw["timeout"] = 200  # 公网中转：不带代理也设单次超时(不碰 http_client，保持系统代理通路)。
-        #   中转慢时单次搭建(复杂prompt+长JSON)可能60-120s，给足200s(精简直连只调1次，前端240s内)
+        kw["timeout"] = _read_timeout  # 公网中转：不带代理也设单次超时(不碰 http_client，保持系统代理通路)。
+        #   非流式慢时单次搭建(复杂prompt+长JSON)可能60-120s，给足200s；
+        #   流式 60s 无 token 即断（见上）。
     return init_chat_model(model, **kw)
 
 
@@ -192,6 +199,7 @@ def chat_messages(base_url: str, api_key: str, model: str, messages: list[dict],
                   temperature: float = 0.7, proxy: str = "", retries: int = 2,
                   top_p: float | None = None, max_tokens: int | None = None,
                   provider_profile: str = "",
+                  timeout_override: float | None = None,
                   on_usage: Callable[[dict], None] | None = None) -> str:
     """多消息单轮对话：messages=[{"role":"system|user|assistant","content":..}]，保留各条 role
     发给模型（不折叠成单 system 串），返回展平后的回复文本。空/无 content 的条目跳过。
@@ -200,7 +208,8 @@ def chat_messages(base_url: str, api_key: str, model: str, messages: list[dict],
     import time
     payload = _payload(model, messages, provider_profile=provider_profile)
     llm = build_model(base_url, api_key, model, temperature=temperature, proxy=proxy,
-                      top_p=top_p, max_tokens=max_tokens)
+                      top_p=top_p, max_tokens=max_tokens,
+                      timeout_override=timeout_override)
     last: Exception | None = None
     for i in range(max(1, retries)):
         try:
@@ -224,16 +233,33 @@ def chat_messages(base_url: str, api_key: str, model: str, messages: list[dict],
     raise RuntimeError(f"调用对话模型失败：{last}")
 
 
+def _stop_reason(chunk: Any) -> str:
+    """从流 chunk 提取结束原因（OpenAI finish_reason / Anthropic stop_reason）。
+
+    中转在正文中间掐断流时连接直接结束、不携带结束原因 → 返回空串。这是「模型自己
+    结束但结构不完整（格式问题）」与「提供商中途掐断（连接/上限问题）」的关键区分证据。
+    """
+    meta = getattr(chunk, "response_metadata", None)
+    if isinstance(meta, dict):
+        for key in ("finish_reason", "stop_reason"):
+            value = meta.get(key)
+            if value:
+                return str(value)
+    return ""
+
+
 def chat_messages_stream(base_url: str, api_key: str, model: str, messages: list[dict],
                          on_delta: Callable[[str], None], temperature: float = 0.7,
                          proxy: str = "", retries: int = 2,
                          top_p: float | None = None, max_tokens: int | None = None,
                          provider_profile: str = "",
-                         on_usage: Callable[[dict], None] | None = None) -> str:
+                         on_usage: Callable[[dict], None] | None = None,
+                         on_finish: Callable[[dict], None] | None = None) -> str:
     """流式调用多消息对话，并把每个正文增量交给调用方；同时返回完整原文供后处理。
 
     仅在本次尝试尚未产生任何增量时重试，避免连接中断后把已显示的半段正文重复输出。
-    on_usage: 可选回调，结束后收到解析后的 usage dict。"""
+    on_usage: 可选回调，结束后收到解析后的 usage dict。
+    on_finish: 可选回调，成功结束后收到 {"finish_reason": …}；流被中途掐断时为空串。"""
     import time
     payload = _payload(model, messages, provider_profile=provider_profile)
     llm = build_model(
@@ -248,7 +274,11 @@ def chat_messages_stream(base_url: str, api_key: str, model: str, messages: list
             # usage_metadata 在最后一块里。大多数中转不返 usage，此处简化处理，
             # 不阻塞流式响应。非流式路径（chat_messages）正常记录 usage。
             last_chunk_usage = None
+            stop_reason = ""
             for chunk in llm.stream(payload):
+                # 结束原因先于空 delta 判定采集：OpenAI 常把 finish_reason 挂在
+                # 空 content 的收尾块上，先 continue 会漏采（测试实证）。
+                stop_reason = _stop_reason(chunk) or stop_reason
                 delta = flatten_content(chunk.content)
                 if not delta:
                     continue
@@ -265,6 +295,11 @@ def chat_messages_stream(base_url: str, api_key: str, model: str, messages: list
                         on_usage(stats)
                 except Exception:
                     pass
+            if callable(on_finish):
+                try:
+                    on_finish({"finish_reason": stop_reason})
+                except Exception:
+                    pass
             return "".join(parts).strip()
         except Exception as e:  # noqa: BLE001
             last = e
@@ -276,11 +311,12 @@ def chat_messages_stream(base_url: str, api_key: str, model: str, messages: list
 
 def chat(base_url: str, api_key: str, model: str, system: str, user: str,
          temperature: float = 0.7, proxy: str = "", retries: int = 2,
-         top_p: float | None = None, max_tokens: int | None = None) -> str:
+         top_p: float | None = None, max_tokens: int | None = None,
+         timeout: float | None = None) -> str:
     """非流式单轮对话（system+user 两条），返回展平后的回复文本。多角色片段用 chat_messages。"""
     return chat_messages(
         base_url, api_key, model,
         [{"role": "system", "content": system}, {"role": "user", "content": user}],
         temperature=temperature, proxy=proxy, retries=retries,
-        top_p=top_p, max_tokens=max_tokens,
+        top_p=top_p, max_tokens=max_tokens, timeout_override=timeout,
     )

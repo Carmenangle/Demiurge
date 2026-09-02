@@ -50,6 +50,7 @@ class RunContext:
     workspace_mode: str = "story"  # story/generate/edit；edit 直达受限作品文件 Agent
     context_max_tokens: int = 20_000
     history_per_role: int = 6     # 每角色（用户/AI）读取的最近历史条数，全局上下文预算的一部分
+    selfheal_attempts: int = 3    # 截断自愈次数上限（0=不自愈；设置→AI 模型可调）
     history_override: list[dict] | None = field(default=None, compare=False)  # 前端当前可见历史；显式 [] 表示已删空
     cancel_event: threading.Event = field(default_factory=threading.Event, compare=False)
     agent_cfg: dict | None = field(default=None, compare=False)
@@ -77,11 +78,12 @@ class RunContext:
     comfy_video: bool = False    # 前端已预设视频模板：开=高潮点编译 video_request（含提取 LLM 调用）；关=不调 LLM 不编译，零 token
     video_mode: str = ""        # 视频模式（""=缺省 climax / climax / firstlast），前端 preset.videoMode 透传；
                                 # produce 层据此编译正片/转场 video_request（W3 前端 2 任务排队前置）
-    prompt_profile: str = "krea2"  # 当前作品自动插画提示词模式，由主 Roleplay 同轮生成最终提示词
+    prompt_profile: str = "anima_tags"  # 当前作品自动插画提示词模式，由主 Roleplay 同轮生成最终提示词（2026-08-31 默认切换自 krea2）
     appearance_source: str = "worldbook"  # worldbook / character_card
     character_base_images: dict = field(default_factory=dict, compare=False)  # ⑥ 角色名→底图（gpt-image 系无 LoRA，按在场角色取底图锁一致性）
     illustration_actor_names: list[str] = field(default_factory=list, compare=False)  # 自动插画可识别的已配置角色名
     style_base_image: str = ""    # ⑥ 无角色底图时的兜底风格底图（gpt-image 系）
+    attachments: list[dict] = field(default_factory=list, compare=False)  # 对话附件元信息 [{file_id,name,mime,size}]；节点转「文件参考」段落进上下文
     # 运行期瞬态键槽：graph 节点把中途算出的键（scene/_regex_scripts 等）写回 ctx，供后续节点读。
     # 早期 ctx 是纯 dict 可随意塞键；改 dataclass 后固定字段外的瞬态键统一进这里，
     # 经 __setitem__/__getitem__/get 走 dict 语义。不参与相等比较（纯运行期状态）。
@@ -118,6 +120,7 @@ class RunContext:
             "workspace_mode": self.workspace_mode,
             "context_max_tokens": self.context_max_tokens,
             "history_per_role": self.history_per_role,
+            "selfheal_attempts": self.selfheal_attempts,
             "history_override": self.history_override,
             "agent_cfg": self.agent_cfg, "builtin": self.builtin, "history": self.history,
             "skill_frags": self.skill_frags, "has_mcp": self.has_mcp,
@@ -136,6 +139,7 @@ class RunContext:
             "character_base_images": self.character_base_images,
             "illustration_actor_names": self.illustration_actor_names,
             "style_base_image": self.style_base_image,
+            "attachments": self.attachments,
         }
 
     def __getitem__(self, key: str):

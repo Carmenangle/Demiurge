@@ -190,9 +190,9 @@ def test_采集闭环_轮询取图落盘入库(store, tmp_path, monkeypatch):
     from pathlib import Path
     files = list(Path(works).rglob("*.png"))
     assert files and files[0].stat().st_size > 0
-    # 资产库登记挂了套装名提示词与委派标签
+    # 资产库登记挂了套装名提示词与智能编造标签
     assert indexed[0]["prompt"] == "套装一提示词"
-    assert "委派计划" in indexed[0]["tags"]
+    assert "智能编造计划" in indexed[0]["tags"]
     assert indexed[0]["image_url"]
 
 

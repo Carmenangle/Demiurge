@@ -18,6 +18,9 @@ export interface StateCard {
 
 const SUFFIXES = ["好感度", "角色状态", "当前状态", "状态", "态度", "心情", "所在地点", "所在"];
 const LEGACY_STATE_QUALIFIERS = new Set(["身体", "精神", "生理", "心理", "外观", "伤势", "衣着"]);
+// 主角/第一人称代词不是剧情角色，不入角色状态表（2026-09-01 用户定案，与后端
+// character_state._PROTAGONIST_OWNERS 同源；存量脏数据在此显示层兜底过滤）。
+const PROTAGONIST_OWNERS = new Set(["主角", "我", "我们", "你", "您", "玩家", "宿主", "用户", "user", "player"]);
 
 function splitLeaf(leaf: string): { owner: string; label: string; explicit: boolean } | null {
   const separated = leaf.match(/^(.+?)[·/：:](.+)$/);
@@ -38,6 +41,8 @@ export function groupStateCards(state: CharacterStateDto): StateCard[] {
   const raw: { leaf: string; field: StateCardField; parsed: ReturnType<typeof splitLeaf> }[] = [];
   const add = (leaf: string, field: StateCardField) => {
     const parsed = splitLeaf(leaf);
+    // 主角字段（含「我·所在」等显式归属与「我状态」等旧拼接）整行丢弃
+    if (parsed?.owner && PROTAGONIST_OWNERS.has(parsed.owner)) return;
     raw.push({ leaf, field: { ...field, label: parsed?.label || field.label }, parsed });
   };
 

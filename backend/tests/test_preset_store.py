@@ -55,6 +55,21 @@ def test_marker展开卡字段与世界书():
     assert "冷酷帝主" in out and "女尊世界" in out and "孤儿院门前" in out
 
 
+def test_head_only_只取chatHistory之前的头部段():
+    """内部生图提示词任务只带人设/防拦截核心；<Order> 剧情机制段不带（2026-08-30 成本改约）。"""
+    preset = _preset(
+        [("main", True), ("chatHistory", True), ("order", True)],
+        [
+            {"identifier": "main", "content": "防拦截核心人设", "marker": False},
+            {"identifier": "chatHistory", "marker": True},
+            {"identifier": "order", "content": "剧情文风机制段", "marker": False},
+        ],
+    )
+
+    assert preset_store.assemble_system(preset, {}, head_only=True).strip() == "防拦截核心人设"
+    assert "剧情文风机制段" in preset_store.assemble_system(preset, {})
+
+
 def test_chatHistory_marker跳过():
     preset = _preset(
         [("chatHistory", True), ("x", True)],

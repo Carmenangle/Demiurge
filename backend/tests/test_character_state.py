@@ -90,7 +90,9 @@ def test_明确归属字段淘汰同名无归属旧副本():
 
     cs.consolidate_fields(st)
 
-    assert set(st.数值) == {"塞西莉亚·好感度"}
+    # 「好感度」例外：单主角全局好感度就是裸键，被多角色字段连带清理会让好感度
+    # 凭空消失/换新（2026-09-01 用户实锤），故保留；其余裸键照旧淘汰。
+    assert set(st.数值) == {"塞西莉亚·好感度", "好感度"}
     assert set(st.叙事) == {"塞西莉亚·态度", "院长·态度", "我·所在", "塞西莉亚·所在"}
 
 
@@ -261,3 +263,83 @@ def test_from_dict_重建并钳边界():
 def test_from_dict_非dict安全返回空():
     st = cs.from_dict("garbage", repo_id="r", card_name="c")
     assert st.数值 == {} and st.叙事 == {}
+
+
+def test_第一人称主角字段不入状态表():
+    """2026-09-01 用户定案：第一人称的「我/主角/你」不是剧情角色，不入状态表。
+    AI 常把主角当角色名写 field，parse_deltas 直接丢弃，只留真正的角色/全局字段。"""
+    st = cs.CharacterState(card_name="凌霄仙母录", repo_id="r")
+    deltas = cs.parse_deltas([
+        {"field": "叙事/我·所在", "op": "set", "value": "寝殿"},
+        {"field": "数值/主角·好感度", "op": "add", "value": 5},
+        {"field": "数值/你·信任", "op": "add", "value": 2},
+        {"field": "数值/好感度", "op": "add", "value": 3},
+    ], turn=1, card_name="凌霄仙母录", existing_state=st)
+
+    assert [d.field for d in deltas] == ["数值/好感度"]
+    cs.apply_deltas(st, deltas)
+    assert list(st.数值) == ["好感度"]
+    assert st.叙事 == {}
+
+
+def test_无归属状态无唯一角色时不再回退卡名():
+    """合集卡名（如「凌霄仙母录」）不是角色名：无归属裸字段在 owner_hints 给不出
+    唯一角色时保留裸键，禁止回退 card_name（2026-09-01 用户实锤：卡名被记成角色）。"""
+    st = cs.CharacterState(card_name="凌霄仙母录", repo_id="r")
+    deltas = cs.parse_deltas(
+        [{"field": "叙事/身体状态", "op": "set", "value": "平静"}],
+        turn=1,
+        card_name="凌霄仙母录",
+        existing_state=st,
+    )
+
+    cs.apply_deltas(st, deltas)
+
+    assert list(st.叙事) == ["身体状态"]
+    assert "凌霄仙母录" not in st.叙事
+
+
+def test_无归属状态有唯一显式角色时仍沿用该角色():
+    """owner_hints 命中时保持旧行为：无归属「身体状态」沿用到唯一显式角色「冷倾雪」，
+    不因卡名保护而退化。"""
+    st = cs.CharacterState(card_name="白给谷", repo_id="r")
+    st.叙事["冷倾雪·身体状态"] = cs.NarrativeField("旧值", turn=1)
+    deltas = cs.parse_deltas(
+        [{"field": "叙事/身体状态", "op": "set", "value": "新值"}],
+        turn=2,
+        card_name="白给谷",
+        existing_state=st,
+    )
+
+    cs.apply_deltas(st, deltas)
+
+    assert list(st.叙事) == ["冷倾雪·身体状态"]
+    assert st.叙事["冷倾雪·身体状态"].value == "新值"
+
+
+def test_render_state_block_跳过主角字段():
+    """存量主角字段不注入主控叙述：AI 看不到就不再继续更新它们。"""
+    st = cs.CharacterState(card_name="凌霄仙母录", repo_id="r")
+    st.叙事["我·所在"] = cs.NarrativeField("寝殿", turn=1)
+    st.叙事["主角·心情"] = cs.NarrativeField("焦急", turn=1)
+    st.叙事["凌若冰·心情"] = cs.NarrativeField("平静", turn=1)
+
+    block = cs.render_state_block(st)
+
+    assert "我·所在" not in block and "主角" not in block
+    assert "凌若冰·心情" in block
+
+
+def test_好感度裸键不被多角色字段清理():
+    """单主角全局好感度 = 裸键「好感度」；consolidate 的裸键清理必须跳过它，
+    否则多角色字段混入后单主角好感度被删（2026-09-01 用户实锤「好感度换新/消失」）。"""
+    st = cs.CharacterState(card_name="白给谷", repo_id="r")
+    st.数值["好感度"] = cs.NumericField(50, turn=5)
+    st.数值["冷倾雪·好感度"] = cs.NumericField(30, turn=6)
+    st.叙事["心情"] = cs.NarrativeField("平静", turn=5)
+    st.叙事["冷倾雪·心情"] = cs.NarrativeField("戒备", turn=6)
+
+    cs.consolidate_fields(st)
+
+    assert set(st.数值) == {"好感度", "冷倾雪·好感度"}
+    assert list(st.叙事) == ["冷倾雪·心情"]  # 裸「心情」仍有显式归属 → 照旧淘汰

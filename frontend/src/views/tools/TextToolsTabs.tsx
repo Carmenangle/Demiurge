@@ -3,7 +3,7 @@ import { ArrowRightLeft, Clipboard, Download, Eraser } from "lucide-react";
 import { PageShell } from "../../components/layout/PageShell";
 import { downloadText } from "../../lib/download";
 import {
-  cleanText, convertChinese, countText, escapeText, insertBetweenCharacters, joinText, unescapeText,
+  cleanText, convertChinese, countText, escapeText, insertBetweenCharacters, joinText, resolveSeparator, unescapeText,
   type EscapeFormat,
 } from "../../lib/textTools";
 
@@ -62,12 +62,21 @@ export function TextJoinTab({ onBack }: { onBack: () => void }) {
   const [input, setInput] = useState("");
   const [separator, setSeparator] = useState("\\n");
   const [skipBlank, setSkipBlank] = useState(true);
-  const actualSeparator = separator.replace(/\\n/g, "\n").replace(/\\t/g, "\t");
+  const actualSeparator = resolveSeparator(separator);
   const output = useMemo(() => joinText(input, actualSeparator, skipBlank), [input, actualSeparator, skipBlank]);
   return <PageShell title="文本拼接" back={onBack} actions={<ToolActions text={output} filename="拼接结果" />}>
     <Header>
-      <label>分隔符<input className="text-tool-short-input" value={separator} onChange={(e) => setSeparator(e.target.value)} /></label>
-      <span className="text-tool-help">支持 \n 换行、\t 制表符</span>
+      <label>分隔符<textarea
+        className="text-tool-short-input"
+        rows={1}
+        value={separator}
+        onChange={(e) => {
+          setSeparator(e.target.value);
+          e.target.style.height = "auto";
+          e.target.style.height = `${e.target.scrollHeight}px`;
+        }}
+      /></label>
+      <span className="text-tool-help">支持 \n 换行、\t 制表符；也可直接回车或粘贴换行</span>
       <label><input type="checkbox" checked={skipBlank} onChange={(e) => setSkipBlank(e.target.checked)} />跳过空行</label>
     </Header>
     <Workspace input={input} onInput={setInput} output={output} outputTitle="拼接预览" />

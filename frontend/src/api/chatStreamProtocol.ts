@@ -63,6 +63,7 @@ export interface VideoParams {
 export type ChatStreamEvent =
   | { type: "trace"; text: string }
   | { type: "delta"; text: string }
+  | { type: "thinking"; text: string }
   | { type: "replace"; text: string }
   | { type: "route"; route: MessageRoute }
   | { type: "image"; url: string; id?: string; regeneration?: RegenerationSnapshot }
@@ -123,6 +124,9 @@ export function decodeChatStreamEvent(value: unknown): ChatStreamEvent {
       return { type: "trace", text: requiredString(data, "text") };
     case "delta":
       return { type: "delta", text: requiredString(data, "text") };
+    case "thinking":
+      // 思考全公开（2026-08-31 晚）：think 流式增量进独立思考面板，不混入正文。
+      return { type: "thinking", text: requiredString(data, "text") };
     case "replace":
       return { type: "replace", text: requiredString(data, "text") };
     case "route":

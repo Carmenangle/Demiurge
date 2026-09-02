@@ -112,11 +112,17 @@ def _re_ci(macro_lower: str) -> "re.Pattern[str]":
     return pat
 
 
-def assemble_system(preset: dict[str, Any], markers: dict[str, str]) -> str:
+def assemble_system(
+    preset: dict[str, Any], markers: dict[str, str], *, head_only: bool = False,
+) -> str:
     """按 prompt_order+enabled 排序，marker 展开 + text 片段折叠 → 单 system 串。
 
     markers 键：persona/worldbook/worldbook_after/char_description/char_personality/
     scenario/dialogue_examples/char_name/user_name。缺省视为空（该 marker 跳过）。
+    head_only=True 只取 chatHistory 标记之前的头部段——ST 预设惯例里人设/防拦截核心
+    在头部，chatHistory 之后的 <Order> 机制段（文风/思维链/输出格式）是剧情扮演专用，
+    内部生图提示词调用等独立任务用不到（2026-08-30 成本实锤：整本预设 ≈9-10k token/次，
+    防拦截核心 ≈1.5k）。
     """
     prompts = {p.get("identifier"): p for p in (preset.get("prompts") or []) if isinstance(p, dict)}
     order_wrap = preset.get("prompt_order") or []
@@ -130,6 +136,8 @@ def assemble_system(preset: dict[str, Any], markers: dict[str, str]) -> str:
         if not p:
             continue
         if p.get("marker"):
+            if head_only and p.get("identifier") == "chatHistory":
+                break
             ident = p.get("identifier")
             if ident in _SKIP_MARKERS:
                 continue

@@ -45,23 +45,30 @@ def _base(url: str) -> str:
 
 
 def is_up(url: str, timeout: float = 5.0) -> bool:
-    """探测 ComfyUI 是否在响应；HTTP 失败则退化为 TCP 端口探测。"""
+    """探测 ComfyUI 是否已启动。
+
+    TCP 端口探测优先：ComfyUI 高负载时 HTTP 请求可能排队超时，但监听端口通常
+    立即可连。端口通即视为已启动，避免「节点/参数都能通、一提交却报未启动」
+    的误判；端口探测失败时再退化为 HTTP 探测（兼容端口非本机监听但 HTTP 可达
+    的罕见部署）。
+    """
     try:
         normalized = validate_comfyui_url(url)
     except ValueError:
         return False
+    parsed = urlparse(normalized)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or 8188
+    try:
+        with socket.create_connection((host, port), timeout=min(timeout, 3.0)):
+            return True
+    except Exception:
+        pass
     try:
         with urlopen(normalized, timeout=timeout) as r:
             return r.status < 500
     except Exception:
-        try:
-            p = urlparse(normalized)
-            host = p.hostname or "127.0.0.1"
-            port = p.port or 8188
-            with socket.create_connection((host, port), timeout=timeout):
-                return True
-        except Exception:
-            return False
+        return False
 
 
 def fetch_object_info(

@@ -4,7 +4,7 @@ import type { InspirationAttachment } from "../lib/inspirationInsert";
 
 // 图文混排片段：文本/图片穿插渲染
 export interface MsgPart {
-  type: "text" | "image" | "video" | "audio" | "masked-image" | "media-slot";
+  type: "text" | "image" | "video" | "audio" | "masked-image" | "media-slot" | "file";
   text?: string;  // type=text
   url?: string;   // type=image（dataURI 或 http URL）
   image?: string; // type=masked-image 的原图
@@ -23,6 +23,11 @@ export interface MsgPart {
   seq?: number;
   /** 音频分条：总条数 */
   total?: number;
+  /** 通用文件附件（type=file）：file_id 真源，历史回放只读卡片据此流式下载 */
+  fileId?: string;
+  name?: string;
+  mime?: string;
+  size?: number;
   /** V1.5/B1 视频槽：本段视频的尾帧描述（下一楼层反查作 prevTailDesc 衔接） */
   lastFrameDesc?: string;
   /** V1.5/F3 视频槽：本段视频的尾帧图地址（下一楼层转场视频 image 输入反查） */

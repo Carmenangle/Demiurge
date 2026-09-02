@@ -146,6 +146,7 @@ export function userMessageRichContent(msg: ChatMessage): RichContent {
   const images = des ? des.userImages : rawImages;
 
   const inputParts: RichContent["parts"] = [];
+  const fileMetas: RichContent["attachments"] = [];
   if (attachments) {
     // 有灵感卡：parts 用拆回后的纯用户内容重建（卡片文本/封面图不再重复进文本/图片）
     for (const url of images) inputParts.push({ type: "image", url });
@@ -160,6 +161,15 @@ export function userMessageRichContent(msg: ChatMessage): RichContent {
           type: "masked-image", url: part.url, image: part.image, mask: part.mask,
         });
       }
+      // D1 回放：file part 还原为通用文件附件（file_id 真源，编辑回填可重新提交）
+      if (part.type === "file" && part.fileId) {
+        fileMetas.push({
+          fileId: part.fileId,
+          name: part.name || "附件",
+          mime: part.mime || "application/octet-stream",
+          size: part.size || 0,
+        });
+      }
     }
   }
   return {
@@ -171,6 +181,7 @@ export function userMessageRichContent(msg: ChatMessage): RichContent {
     ],
     ...(maskedImage ? { maskedImage } : {}),
     ...(attachments ? { inspirationAttachments: attachments } : {}),
+    ...(fileMetas.length > 0 ? { attachments: fileMetas } : {}),
   };
 }
 
@@ -185,6 +196,20 @@ export function prepareConversationRegeneration(
     content: userMessageRichContent(messages[index]),
   };
 }
+
+// 「复制图文内容到输入框编辑」提交决策（2026-08-31 用户要求）：仅当来源消息仍是
+// 最后一条用户消息时删除原消息（编辑替换语义，避免编辑前后两条用户消息一起进剧情
+// 上下文）；编辑旧楼层不删——中段删除会砍断后续楼层对它的引用。
+export function shouldDeleteEditSource(
+  messages: readonly ChatMessage[], sourceId: string | null | undefined,
+): boolean {
+  if (!sourceId) return false;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i].role === "user") return messages[i].id === sourceId;
+  }
+  return false;
+}
+
 
 export function triggersForSelectedLora(
   items: readonly LoraTriggerRecord[], selectedLoraName: string,

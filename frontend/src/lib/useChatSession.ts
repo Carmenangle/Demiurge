@@ -69,6 +69,7 @@ import {
 import { recoverCompactedSummaryImage } from "./contextManagement";
 import { characterDetail } from "../api/characters";
 import { recoverAgentRun, shouldRecoverAgentRun } from "./agentRecovery";
+import { deletedMessageTombstones } from "./deletedMessageTombstones";
 import { releaseAgentStream, type ActiveAgentStream } from "./agentStreamLifecycle";
 import type { ImageQuality, WorkMode } from "./viewRouting";
 import { useChatMaintenance } from "./useChatMaintenance";
@@ -243,6 +244,7 @@ export function useChatSession(deps: ChatSessionDeps) {
     streamOutput: settings.streamOutput,
     contextMaxTokens: settings.contextMaxTokens,
     historyPerRole: settings.historyPerRole,
+    selfhealAttempts: settings.selfhealAttempts,
     providerProfile: chat.providerProfile || "openai_compatible",
     history,
     characterDir: settings.characterDir,
@@ -327,7 +329,10 @@ export function useChatSession(deps: ChatSessionDeps) {
       fetchSnapshot: () => fetchSnapshot(targetThread) as Promise<{ items: ChatMessage[] }>,
       fetchRunning: () => fetchAgentRunning(targetThread),
       isActive: () => activeThreadRef.current === targetThread && recoveryTokenRef.current === token,
-      onSnapshot: (items) => {
+      onSnapshot: (rawItems) => {
+        // ★ 墓碑过滤：恢复轮询与删除落库存在竞态，旧快照晚到会把刚删的消息 upsert 回
+        //   状态（画布楼层复活/对话消息删不掉）。已删消息不得复活（架构合同）。
+        const items = deletedMessageTombstones.filterDeleted(targetThread, rawItems);
         for (const message of items) {
           const media = message.image || message.video;
           if (media && !knownMedia.has(media)) recoveredMedia = media;
@@ -724,7 +729,8 @@ export function useChatSession(deps: ChatSessionDeps) {
         return true;
       }
       const blocks = workflowMessages(result.messages);
-      setMessages((current) => upsertMessages(current, blocks));
+      // ★ 墓碑过滤：工作流回灌消息若曾被用户删除（如删除后同一 generation 重 finalize），不得复活
+      setMessages((current) => upsertMessages(current, deletedMessageTombstones.filterDeleted(threadId, blocks)));
       const firstImage = blocks.find((message) => message.image)?.image;
       if (firstImage && owner.repoId !== "home") setGeneratedCover(owner.repoId, firstImage);
       if (result.durable && result.images.some((image) => image.indexed)) {
@@ -926,11 +932,27 @@ export function useChatSession(deps: ChatSessionDeps) {
     const preset = settings.mediaInsert?.[repo?.id || ""];
     if (!preset) { failSlot("configuration", "当前作品没有配置自动插画模板"); return; }
     if (source === "automatic") {
-      try {
-        const claim = await claimIllustrationSubmission({ threadId, messageId, slotId });
-        if (!claim.claimed) return;
-      } catch (error) {
-        failSlot("submission_claim", error instanceof Error ? error.message : "自动插画提交认领失败");
+      // 防抖快照可能尚未把 pending 槽落库，认领在快照里找不到槽会返回 False。
+      // 2026-08-31 晚实锤「新的任务请求没有生图」：认领失败曾静默 return → 槽永远
+      // pending、无 submitted/failed 可查。现在刷新快照后重试一次，仍失败就把槽
+      // 标记为失败（可见 + 可重新生成），绝不再静默。
+      await saveSnapshot(threadId, messagesRef.current).catch(() => undefined);
+      let claim = { claimed: false };
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          claim = await claimIllustrationSubmission({ threadId, messageId, slotId });
+          if (claim.claimed) break;
+        } catch (error) {
+          failSlot("submission_claim", error instanceof Error ? error.message : "自动插画提交认领失败");
+          return;
+        }
+        if (attempt === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 400));
+          await saveSnapshot(threadId, messagesRef.current).catch(() => undefined);
+        }
+      }
+      if (!claim.claimed) {
+        failSlot("submission_claim", "自动插画提交认领失败（槽位未就绪或已被认领）");
         return;
       }
     }
@@ -1023,8 +1045,15 @@ export function useChatSession(deps: ChatSessionDeps) {
     };
     // V1.6/P5+：首尾帧独立图片模式跳过高潮 Profile 渲染（帧提示词在生成循环内走同一 Profile 编译链单独编译）。
     if (!useFirstlastImages) {
-    if (sceneSpec?.profile_prompt && sceneSpec.profile === promptProfile) {
-      prompt = sceneSpec.profile_prompt;
+    // 重新生成（manual）必须重编译：重试快照里的 profile_prompt 是当初链路的产物——
+    // 编译链升级（措辞收敛/预设瘦身/LoRA 绑定修正）后旧成稿不会自愈，复用=永远提交污染提示词
+    //（2026-08-30 用户实锤：重试反复提交带旧措辞的成稿）。automatic 路径仍复用 produce 已编译结果。
+    const storedProfile = sceneSpec?.profile_prompt;
+    const storedProfileUsable = !!storedProfile
+      && sceneSpec.profile === promptProfile
+      && source !== "manual";
+    if (storedProfileUsable && sceneSpec) {
+      prompt = storedProfile;
     } else if (sceneSpec) {
       try {
         const rendered = await genProfilePrompt(
@@ -1647,7 +1676,15 @@ export function useChatSession(deps: ChatSessionDeps) {
         const action = workflowRuntime.recoveryAction(p, resumedRef.current);
         if (action === "skip") continue;  // 本会话已处理过，不重复
         resumedRef.current.add(p.prompt_id);
+        const comfyuiUrl = comfyRegenerationUrl(p.regeneration) || settings.comfyuiUrl;
         if (action === "expire") {
+          // 超过 30 分钟的遗留任务先查一次 ComfyUI history：任务其实已完成时
+          // 直接归档回填（2026-08-30 21:25 轮实锤：图 3 分钟就出完了，页面回来
+          // 时却按年龄判死丢弃）。只有 history 查不到（watching→not_found 终态）
+          // 才真正交给失败槽，不再凭年龄静默丢弃已完成的图。
+          const outcome = await workflowRuntime.inspect(p, comfyuiUrl, workflowObserver);
+          if (!alive) return;
+          if (outcome !== "watching") continue;
           if (p.target) discardFailedIllustration(
             p.target.messageId, p.target.slotId, "resume_expired",
             "后台出图任务已过期", p.prompt_id,
@@ -1655,7 +1692,6 @@ export function useChatSession(deps: ChatSessionDeps) {
           workflowRuntime.cancel(p.prompt_id);
           continue;
         }
-        const comfyuiUrl = comfyRegenerationUrl(p.regeneration) || settings.comfyuiUrl;
         await workflowRuntime.inspect(p, comfyuiUrl, workflowObserver);
         if (!alive) return;
       }
@@ -1669,7 +1705,7 @@ export function useChatSession(deps: ChatSessionDeps) {
   // 发送入口：只在 Agent 正生成正文时排队；ComfyUI 运行不占用对话通道。
   const send = (content: RichContent) => {
     const text = content.text.trim();
-    if (!text && content.images.length === 0 && !content.maskedImage) return;
+    if (!text && content.images.length === 0 && !content.maskedImage && !(content.attachments || []).length) return;
     atBottomRef.current = true;  // 用户主动发送时强制跟随到底
     if (agentBusyRef.current || blocksDialogueSubmission(gen) || queued.length > 0) {
       enqueue(content);
@@ -1699,7 +1735,7 @@ export function useChatSession(deps: ChatSessionDeps) {
   const dispatchSend = (content: RichContent) => {
     const raw = content.text.trim();
     const text = normCmd(raw);  // 指令词大小写归一，参数保持原样
-    if (!raw && content.images.length === 0 && !content.maskedImage) return;
+    if (!raw && content.images.length === 0 && !content.maskedImage && !(content.attachments || []).length) return;
     if (routeWorkflowCmd(raw)) return;
     // /压缩 或 /compact：压缩当前对话上下文（AI 触发也可在对话里说"压缩上下文"再点确认）
     if (text === "/压缩" || text === "/compact") { compact(); return; }
@@ -1749,6 +1785,7 @@ export function useChatSession(deps: ChatSessionDeps) {
     enqueueQueued(content, createAgentInvocation(text, images, visibleHistory, {
       imageMask: content.maskedImage
         ? { image: content.maskedImage.image, mask: content.maskedImage.mask } : null,
+      ...(content.attachments?.length ? { attachments: content.attachments } : {}),
     }));
   };
 
@@ -1766,6 +1803,16 @@ export function useChatSession(deps: ChatSessionDeps) {
   };
   // APPEND5_HERE
 
+  // 同步应用一个流事件到 ref + state：此前只用 setMessages 函数式更新，messagesRef 要等
+  // 下一次 render 才同步。illustrate_request 之后 submitIllustration 立即用 messagesRef
+  // 保存快照去认领，旧 ref 里没有刚插入的槽 → 覆盖服务端按 offset 建好的槽 → 兜底在
+  // 末尾重建（2026-09-01 用户实锤：图总在末尾）。这里强制同步，杜绝该竞态。
+  const applyStreamEvent = (botId: string, event: ChatStreamEvent) => {
+    const next = reduceChatStreamEvent(messagesRef.current, botId, event);
+    messagesRef.current = next;
+    setMessages(next);
+  };
+
   const handleAgentStreamEvent = (botId: string, event: ChatStreamEvent) => {
     if (event.type === "image" || event.type === "video") {
       dispatch({ t: "agentImage", botId });
@@ -1777,15 +1824,27 @@ export function useChatSession(deps: ChatSessionDeps) {
     // 剧情高潮点出图请求：按本作品预设提交 ComfyUI 异步出图（不产气泡，出图完成后由 pollResult 补入）
     if (event.type === "illustrate_request") {
       const slotId = event.id || crypto.randomUUID();
-      setMessages((current) => reduceChatStreamEvent(
-        current, botId, { ...event, id: slotId },
-      ));
+      applyStreamEvent(botId, { ...event, id: slotId });
+      const illustrationRetrySnapshot = [
+        event.prompt, event.motion, event.actors, botId, slotId, event.sceneSpec, event.turnId,
+        "automatic", event.videoMode, event.firstFrameDesc, event.lastFrameDesc,
+        event.prevTailDesc, event.lastFrameUrl, event.videoPrompt, event.transition,
+        event.transitionVideoPrompt, event.transitionVideoParams,
+      ];
       void submitIllustration(
         event.prompt, event.motion, event.actors, botId, slotId, event.sceneSpec, event.turnId,
         "automatic", event.videoMode, event.firstFrameDesc, event.lastFrameDesc,
         event.prevTailDesc, event.lastFrameUrl, event.videoPrompt, event.transition,
         event.transitionVideoPrompt, event.transitionVideoParams,
-      );
+      ).catch((error) => {
+        // 提交链上任何未被 failSlot 覆盖的异常都落到失败槽（可重新生成），
+        // 不再让 pending 槽静默（2026-08-31 晚实锤：槽 pending 却无图、无报错）。
+        discardFailedIllustration(
+          botId, slotId, "submission",
+          error instanceof Error ? error.message : "自动插画提交异常",
+          "", illustrationRetrySnapshot,
+        );
+      });
       return;
     }
     // 剧情对白配音请求：逐角色提交 IndexTTS（不入气泡流，音频完成后按角色分条聚合）
@@ -1798,7 +1857,7 @@ export function useChatSession(deps: ChatSessionDeps) {
       emitRagStatus({ state: event.state, kind: event.kind, count: event.count });
       return;
     }
-    setMessages((current) => reduceChatStreamEvent(current, botId, event));
+    applyStreamEvent(botId, event);
   };
 
   // 自由文本 → 多 Agent（Supervisor/LangGraph 编排，多轮上下文）：主管分派→生图/反推/灵感/工具专家。
@@ -1814,13 +1873,23 @@ export function useChatSession(deps: ChatSessionDeps) {
     const imageMask = content?.maskedImage
       ? { image: content.maskedImage.image, mask: content.maskedImage.mask }
       : undefined;
+    const attachments = content?.attachments || [];
+    // D1 历史回放：userMsg parts 持久化 file part（file_id 真源，base64 不落消息）
+    const fileParts: MsgPart[] = attachments.map((a) => ({
+      type: "file" as const,
+      fileId: a.fileId,
+      name: a.name,
+      mime: a.mime,
+      size: a.size,
+    }));
     const userMsg: ChatMessage = {
       id: userMsgId || crypto.randomUUID(),
       role: "user",
       text: t,
-      parts: content?.parts || (images.length > 0 ? [
+      parts: content?.parts || (images.length > 0 || fileParts.length > 0 ? [
         ...(t ? [{ type: "text" as const, text: t }] : []),
         ...images.map((url) => ({ type: "image" as const, url })),
+        ...fileParts,
       ] : undefined),
       ...(content?.inspirationAttachments?.length
         ? { inspirationAttachments: content.inspirationAttachments }
@@ -1850,6 +1919,7 @@ export function useChatSession(deps: ChatSessionDeps) {
         imageMask: imageMask || null,
         messageId: botId,
         userMessageId: userMsg.id,
+        ...(attachments.length > 0 ? { attachments } : {}),
       }),
       {
         onEvent: (event) => handleAgentStreamEvent(botId, event),
@@ -2174,13 +2244,19 @@ export function useChatSession(deps: ChatSessionDeps) {
   const messagesUpTo = (id: string): ChatMessage[] => historyRuntime.messagesThrough(id);
 
   // 删除单条消息（用户/AI 均可）。立即更新 ref + 后端快照；下次请求同时显式上传该可见历史。
-  const deleteMessage = (id: string) => { historyRuntime.deleteMessage(id); };
+  // ★ 记录墓碑：删除落库与 agent 恢复轮询/快照回灌存在竞态，回灌路径须过滤墓碑防复活。
+  const deleteMessage = (id: string) => {
+    deletedMessageTombstones.record(threadId, id);
+    historyRuntime.deleteMessage(id);
+  };
 
   // 会话导入后重载：从后端快照重新拉取消息流覆盖当前视图（导入端点已落盘为真源）。
   const reloadFromSnapshot = async () => {
     try {
       const snap = await fetchSnapshot(threadId);
-      historyRuntime.replace((snap.items || []) as ChatMessage[], false);
+      // ★ 墓碑过滤：onGenerated 回读与删除落库竞态时，旧快照不得复活刚删的消息。
+      //   导入会话路径由 ChatView 先 clear 墓碑（显式以后端为真源）。
+      historyRuntime.replace(deletedMessageTombstones.filterDeleted(threadId, (snap.items || []) as ChatMessage[]), false);
     } catch { /* 拉取失败保持当前视图，用户可刷新 */ }
   };
   reloadFromSnapshotRef.current = reloadFromSnapshot;

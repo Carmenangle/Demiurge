@@ -132,19 +132,19 @@ def with_availability(configured_models: set[str] | frozenset[str]) -> list[dict
 register(Capability(
     operation="workflow.list_templates",
     category=CATEGORY_COMFYUI,
-    description="列出全部工作流模板（只读，返回模板元数据与 exposed 字段，不提交任何任务）。",
+    description="列出全部工作流模板（只读，产出键 templates=模板列表，不提交任何任务）。",
     params_schema={"type": "object", "properties": {}, "additionalProperties": False},
     needs_model=None,
     side_effect_level=SIDE_EFFECT_READONLY,
     channel=CHANNEL_SYNC,
-    handler="app.services.template_store:list_templates",
+    handler="app.services.capability_handlers:list_templates",
 ))
 
 register(Capability(
     operation="workflow.read_exposed_fields",
     category=CATEGORY_COMFYUI,
     description="读取单个模板的 exposed 字段定义（字段名/控件/默认值/绑定），"
-                "是编排注入变体值前必查的只读步骤。",
+                "是编排注入变体值前必查的只读步骤；模板不存在会报错而不是返回空。",
     params_schema={
         "type": "object",
         "properties": {"template_id": {"type": "string"}},
@@ -154,7 +154,7 @@ register(Capability(
     needs_model=None,
     side_effect_level=SIDE_EFFECT_READONLY,
     channel=CHANNEL_SYNC,
-    handler="app.services.template_store:get_template",
+    handler="app.services.capability_handlers:read_exposed_fields",
 ))
 
 register(Capability(
@@ -230,7 +230,7 @@ register(Capability(
     operation="media.collect_comfy_outputs",
     category="media",
     description="轮询 ComfyUI 历史取回已提交任务的图片，落作品文件夹并注册进资产库"
-                "（generation RAG，挂提示词与「委派计划」标签）。写在作品域内。",
+                "（generation RAG，挂提示词与「智能编造计划」标签）。写在作品域内。",
     params_schema={
         "type": "object",
         "properties": {
@@ -274,4 +274,147 @@ register(Capability(
     side_effect_level=SIDE_EFFECT_EXPENSIVE,
     channel=CHANNEL_QUEUE,
     handler="app.services.capability_handlers:submit_batch",
+))
+
+
+# ── P3 通用创作能力（作品域内写，路径域由 plan_validator + 执行期租约兜底）────
+
+register(Capability(
+    operation="file.write_text",
+    category="repo",
+    description="在作品域内写一个 UTF-8 文本文件（绝对路径；已存在默认拒绝，"
+                "可声明 overwrite 覆盖）。不能写二进制，不能写目录。",
+    params_schema={
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "content": {"type": "string"},
+            "overwrite": {"type": "boolean"},
+        },
+        "required": ["path", "content"],
+        "additionalProperties": False,
+    },
+    needs_model=None,
+    side_effect_level=SIDE_EFFECT_DURABLE,
+    channel=CHANNEL_SYNC,
+    handler="app.services.capability_handlers:write_text_file",
+))
+
+register(Capability(
+    operation="file.list_dir",
+    category="repo",
+    description="列出一个本地目录的条目（名称/类型/大小），不返回文件内容。越域读取需审批。",
+    params_schema={
+        "type": "object",
+        "properties": {"path": {"type": "string"}, "max_entries": {"type": "integer"}},
+        "required": ["path"],
+        "additionalProperties": False,
+    },
+    needs_model=None,
+    side_effect_level=SIDE_EFFECT_READONLY,
+    channel=CHANNEL_SYNC,
+    handler="app.services.capability_handlers:list_dir",
+))
+
+register(Capability(
+    operation="worldbook.upsert_repo",
+    category="worldbook",
+    description="向当前作品的世界书快照 upsert 条目（同 key/comment 更新，新条目追加）。"
+                "写入路径由执行环境归一注入，模型不得填 base。",
+    params_schema={
+        "type": "object",
+        "properties": {
+            "entries": {"type": "array", "items": {"type": "object"}, "minItems": 1},
+            "repo_id": {"type": "string"},
+            "base": {"type": "string"},
+        },
+        "required": ["entries"],
+        "additionalProperties": False,
+    },
+    needs_model=None,
+    side_effect_level=SIDE_EFFECT_DURABLE,
+    channel=CHANNEL_SYNC,
+    handler="app.services.capability_handlers:upsert_repo_worldbook",
+))
+
+register(Capability(
+    operation="character.upsert_repo",
+    category="character",
+    description="把 JSON 角色卡归一后写入当前作品目录（<作品>/<卡名>/card.json，覆盖式）。"
+                "写入路径由执行环境归一注入，模型不得填 base。",
+    params_schema={
+        "type": "object",
+        "properties": {"card": {"type": "object"}, "base": {"type": "string"}},
+        "required": ["card"],
+        "additionalProperties": False,
+    },
+    needs_model=None,
+    side_effect_level=SIDE_EFFECT_DURABLE,
+    channel=CHANNEL_SYNC,
+    handler="app.services.capability_handlers:upsert_repo_character",
+))
+
+register(Capability(
+    operation="doc.create_repo",
+    category="repo",
+    description="在作品目录 docs/ 下创建 Markdown 文档（相对路径，拒绝 .. 穿越与越界）。",
+    params_schema={
+        "type": "object",
+        "properties": {
+            "rel_path": {"type": "string"},
+            "content": {"type": "string"},
+            "overwrite": {"type": "boolean"},
+            "base": {"type": "string"},
+        },
+        "required": ["rel_path", "content"],
+        "additionalProperties": False,
+    },
+    needs_model=None,
+    side_effect_level=SIDE_EFFECT_DURABLE,
+    channel=CHANNEL_SYNC,
+    handler="app.services.capability_handlers:create_repo_doc",
+))
+
+
+register(Capability(
+    operation="file.edit",
+    category="repo",
+    description="按 str_replace 语义修改 UTF-8 文本文件（old_str 唯一命中；replace_all 可全替换）。"
+                "用于修改代码/配置——本项目有问题时 Agent 可基于项目本身优化。",
+    params_schema={
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "old_str": {"type": "string"},
+            "new_str": {"type": "string"},
+            "replace_all": {"type": "boolean"},
+        },
+        "required": ["path", "old_str", "new_str"],
+        "additionalProperties": False,
+    },
+    needs_model=None,
+    side_effect_level=SIDE_EFFECT_DURABLE,
+    channel=CHANNEL_SYNC,
+    handler="app.services.capability_handlers:edit_text_file",
+))
+
+register(Capability(
+    operation="project.run_shell",
+    category="repo",
+    description="在工作目录执行一条命令行（cwd 必须显式绝对路径；默认超时 60s；stdout/stderr 截断回传）。"
+                "用于操作电脑/运行项目命令；durable，approval 模式需批准。",
+    params_schema={
+        "type": "object",
+        "properties": {
+            "command": {"type": "string"},
+            "cwd": {"type": "string"},
+            "timeout_seconds": {"type": "integer"},
+        },
+        "required": ["command", "cwd"],
+        "additionalProperties": False,
+    },
+    needs_model=None,
+    side_effect_level=SIDE_EFFECT_DURABLE,
+    channel=CHANNEL_SYNC,
+    handler="app.services.capability_handlers:run_shell",
 ))

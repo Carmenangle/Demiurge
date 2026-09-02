@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import json
 import re
 import time
 from dataclasses import dataclass, field
@@ -22,7 +23,7 @@ _EXPLICIT = (
     "做个执行计划", "自动完成", "帮我安排", "批处理",
 )
 # 规模词：批量/全部/... 或 ≥2 的数量词（一张/一个不算——那可能只是单次生成）
-_SCALE_RE = re.compile(r"批量|全部|所有|每个|每张|每条|每款|一批|[2-9\d二三四五六七八九十百千]+\s*(张|个|条|款)")
+_SCALE_RE = re.compile(r"批量|分批|逐批|全部|所有|每个|每张|每条|每款|各套|各个|各张|各条|各款|一批|[2-9\d二三四五六七八九十百千]+\s*(张|个|条|款)")
 # 资产/生成动作：与规模词共现才算委派（剧情内单次创作不抢）
 _ACTION_RE = re.compile(
     r"出\s*[0-9一二两三四五六七八九十百千]*\s*张|出图|生图|生成图片|生成视频|提交|导入|整理|建仓|"
@@ -78,11 +79,32 @@ def _manifest_lines(capabilities: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _attachment_brief(text: str, limit: int = 80_000) -> str:
+    """编译期给模型**全文**参考文档（P4：模型判断，代码保真）。
+
+    唐柚类文档（43KB）全文进上下文，模型才有语义判断「哪些是套装/哪些是规则」的依据；
+    只有极端超长文档才退化为骨架（标题清单），此时模型可写 prompt_section 引用由
+    fill_prompt_sections 机械回填兜底。
+    """
+    if len(text or "") <= limit:
+        return text or ""
+    lines = (text or "").splitlines()
+    headings = [ln for ln in lines if "【" in ln or ln.strip().startswith("#")]
+    if headings:
+        return "\n".join(headings[:120])
+    return text[:limit]
+
+
 _COMPILE_SYSTEM = (
     "你是 Demiurge 的计划编译器。把用户意图编译成可机械执行的计划文档 JSON。\n"
     "只能使用下方能力清单里的 operation，不得编造能力；每个计划必须带预算 budgets；"
     "步骤数尽量少，超预算请拆多计划。durable/expensive 能力会要求用户审批，不要回避。\n"
     "意图含糊或缺少关键信息时，steps 留空并在 intent 里写清缺什么，禁止猜测硬编。\n"
+    "如果用户意图包含出图/生图/提交，steps 必须是包含 workflow.submit_* 与 "
+    "media.collect_comfy_outputs 的完整执行计划；缺少关键信息就 steps 留空，禁止只排只读探查步骤。\n"
+    "运行环境 ComfyUI 地址：{comfyui_url}（submit/collect 的 url/comfyui_url 参数必须逐字使用这个值）。\n"
+    "所有 params 必须写具体值，禁止出现 {{...}}、TO_BE_RESOLVED、PLACEHOLDER 等占位符；"
+    "引用前序步骤产物只能写在 inputs_from 里。\n"
     "【输出 JSON 合同（字段名必须逐字一致）】\n"
     "{\n"
     '  "intent": "一句话意图",\n'
@@ -93,11 +115,19 @@ _COMPILE_SYSTEM = (
     '  "approval_required": ["需要审批的 operation"]\n'
     "}\n"
     "steps[].id 是步骤标识（s1/s2…），inputs_from 引用此前步骤的 outputs 键。\n"
+    "workflow.list_templates 的产出键是 templates；workflow.read_exposed_fields 的产出键是 template。\n"
     "media.collect_comfy_outputs 的 submit_result/prompt_ids/prompts 由前序 submit 步骤"
-    "运行时填充：编译时省略这些键，只写 inputs_from 链接到 submit 步骤，names 可写各产物名。\n"
+    "运行时填充：编译时省略这些键，inputs_from 写「submit步骤id.submit_result」"
+    "（每个 submit 步骤一条；submit_result 是虚拟键，执行器会取该步骤整个产出），names 写各产物名。\n"
     "所有落盘/输出目录参数一律用运行环境的 output_dir，禁止使用用户文档所在目录。\n"
+    "写文件/建卡/建文档等 durable 步骤后可加一条 file.list_dir 或 file.read_text 只读自检，"
+    "确认落盘成功（只读自检不烧 GPU 配额）。\n"
     "用户指定了 LoRA 时，在 submit 参数里写 lora_name（用本机目录里的真实文件名）；"
     "未指定则不写（模板自带 LoRA 配置生效）。\n"
+    "附件文档里若有分套装/分段提示词，可以直写完整 prompt 到变体；文档很长时"
+    "建议每个变体只写 {\"name\": \"套装名\", \"prompt_section\": \"标题关键词\"}（或只写 name），"
+    "编译期会机械回填完整提示词。直写时必须逐字忠于文档段落，禁止混入使用说明、"
+    "鞋履/袜子等规则段、本机 LoRA/模板目录内容。变体数量必须等于文档真实套装数。\n"
     "【能力清单（manifest）】\n{manifest}"
 )
 
@@ -105,7 +135,7 @@ _COMPILE_USER = "{history}【用户意图】\n{intent}\n\n请输出计划 JSON�
 
 
 def compile_plan(*, intent: str, history: str = "", attachments: list[dict] | None = None,
-                 repo_id: str = "",
+                 repo_id: str = "", comfyui_url: str = "",
                  output_dir: str = "", configured_models: set[str] | frozenset[str] = frozenset(),
                  chat_base: str = "", chat_key: str = "", chat_model: str = "",
                  chat_fn: Callable | None = None, structured_chat_fn: Callable | None = None,
@@ -114,10 +144,11 @@ def compile_plan(*, intent: str, history: str = "", attachments: list[dict] | No
     """意图 → 校验通过的计划；两次编译都失败时返回带 errors 的 outcome。"""
     capabilities = capability_registry.with_availability(configured_models)
     system = _COMPILE_SYSTEM.replace(
-        "{manifest}", _manifest_lines(capabilities))
+        "{manifest}", _manifest_lines(capabilities)).replace(
+        "{comfyui_url}", comfyui_url or "")
     if attachments:
         blocks = "\n\n".join(
-            f"【附件文件：{item.get('name', 'file')}】\n{item.get('text', '')}"
+            f"【附件文件：{item.get('name', 'file')}】\n{_attachment_brief(item.get('text', ''))}"
             for item in attachments)
         system += "\n\n【用户消息引用的文件内容（编译时已读取，可据此填写精确参数）】\n" + blocks
     user = _COMPILE_USER.format(history=history, intent=intent,
@@ -129,8 +160,15 @@ def compile_plan(*, intent: str, history: str = "", attachments: list[dict] | No
     validator_errors: list[str] = []
 
     for attempt in (1, 2):  # 编译失败带校验错误重试一次（structured_output 现成模式）
+        retry_hint = ""
+        if any("没有任何 submit/collect" in e for e in validator_errors):
+            retry_hint = (
+                "\n\n注意：意图要求出图/提交时，steps 必须包含 workflow.submit_* 和 "
+                "media.collect_comfy_outputs 完整执行步骤；如果缺少关键信息，"
+                "steps 留空并在 intent 里写清缺什么，不要只排只读探查步骤。")
         attempt_user = user if attempt == 1 else (
-            user + "\n\n上一次编译未通过校验，请修正：\n" + "\n".join(validator_errors))
+            user + "\n\n上一次编译未通过校验，请修正：\n" + "\n".join(validator_errors)
+            + retry_hint)
         try:
             result = structured_output.invoke(
                 GenerationPlan,
@@ -175,13 +213,46 @@ def compile_plan(*, intent: str, history: str = "", attachments: list[dict] | No
         except Exception as exc:  # noqa: BLE001 - 模板库不可用时跳过归一，由执行期报错
             if trace is not None:
                 trace("plan.compile", status="template_normalize_skipped", error=str(exc))
+        # 编译期内回填 variants（P4 保真）：模型只要排出 submit_batch 步骤，空 variants
+        # 或 prompt_section 引用都会在**校验前**被文档机械回填/重建；随后 budgets 归一
+        # 才能拿到真实 GPU 数，避免「空 variants → max_gpu_tasks 归 0 → 重试被带偏」。
+        try:
+            filled_early = fill_prompt_sections(plan, attachments or [])
+            if filled_early and trace is not None:
+                trace("plan.sections_filled", count=filled_early, stage="pre_validate")
+        except Exception:  # noqa: BLE001 - 回填失败仍走校验，由 validator 报具体错误
+            pass
+        # 代码保真：同模板的多个 submit_batch 合并为一个（模型可能把「分批」误解为
+        # 拆多个提交步骤 → 重复烧 GPU）。合并后 inputs_from 引用自动重写到保留步骤。
+        _merge_duplicate_submits(plan)
         # 运行环境参数归一：collect 的落盘目标由环境决定，不允许模型占位/编造；
         # approval_required 由编译器确定性汇总（模型只列步骤，不负责汇总）
         from app.services.capability_registry import get as _cap_get
         approval = sorted({step.operation for step in plan.steps
                            if (cap := _cap_get(step.operation)) is not None
                            and cap.side_effect_level in ("durable", "expensive")})
-        plan = plan.model_copy(update={"approval_required": approval})
+        # budgets 由代码按计划实际内容确定性归一（模型乱填的 18/32/4 不生效）：
+        # 步数=实际步骤数；GPU=submit_batch 变体数 + submit_template 计数；
+        # LLM=0（执行器无 LLM）。计划卡与执行配额因此永远紧凑真实。
+        gpu_tasks = 0
+        for step in plan.steps:
+            if step.operation == "workflow.submit_batch":
+                variants = step.params.get("variants")
+                if isinstance(variants, list):
+                    gpu_tasks += len(variants)
+            elif step.operation == "workflow.submit_template":
+                gpu_tasks += 1
+        plan = plan.model_copy(update={
+            "approval_required": approval,
+            "budgets": plan.budgets.model_copy(update={
+                "max_steps": max(1, len(plan.steps)),
+                # 含 submit 步骤时至少给 1，避免「variants 为空 → GPU 预算 0」误导重试
+                "max_gpu_tasks": max(1, gpu_tasks) if gpu_tasks > 0 or any(
+                    step.operation.startswith("workflow.submit") for step in plan.steps
+                ) else 0,
+                "max_llm_calls": 0,
+            }),
+        })
         for step in plan.steps:
             if step.operation == "media.collect_comfy_outputs":
                 step.params["output_dir"] = output_dir
@@ -250,6 +321,22 @@ def render_plan_md(plan: GenerationPlan) -> str:
 _PATH_LIKE_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|[/\\])")
 _SECTION_SEP_RE = re.compile(r"^={5,}\s*$")
 
+# 编译期注入的机器目录附件名（agent_graph 铸造）：只供模型解析真实 id/文件名，
+# 绝不是提示词来源——fill_prompt_sections 抽取段落时必须排除，否则伪段落
+# 延伸进目录文本会把 LoRA 清单/红线说明灌进 variant prompt。
+LORA_CATALOG_NAME = "本机 LoRA 目录"
+TEMPLATE_CATALOG_NAME = "本机工作流模板目录"
+CATALOG_ATTACHMENT_NAMES = frozenset({LORA_CATALOG_NAME, TEMPLATE_CATALOG_NAME})
+
+
+def _is_section_heading(stripped: str) -> bool:
+    """套装标题行：行首（允许 # 前缀）出现【…】标题。正文行中引用【…】（如
+    「鞋履规则…【运动·套一/套二】…」）不是章节边界——判定必须锚定行首，
+    否则使用说明里的套名引用会被当成新段落开头，吞掉后续说明甚至拼接的目录附件。"""
+    if "【" not in stripped or "】" not in stripped:
+        return False
+    return stripped.startswith("【") or stripped.lstrip("#").lstrip().startswith("【")
+
 
 def extract_section(doc_text: str, marker: str) -> str:
     """按标题标记机械抽取文档段落（无 LLM）：从含 marker 的行到分隔线/下一标题。"""
@@ -259,7 +346,8 @@ def extract_section(doc_text: str, marker: str) -> str:
         return ""
     body: list[str] = []
     for ln in lines[start + 1:]:
-        if _SECTION_SEP_RE.match(ln.strip()) or ln.strip().startswith("## ") or "【" in ln:
+        stripped = ln.strip()
+        if _SECTION_SEP_RE.match(stripped) or stripped.startswith("## ") or _is_section_heading(stripped):
             break
         body.append(ln)
     return "\n".join(ln.strip() for ln in body if ln.strip())
@@ -277,7 +365,7 @@ def extract_all_sections(doc_text: str) -> list[tuple[str, str]]:
                 sections.append((current[0], "\n".join(s for s in current[1] if s.strip())))
             current = None
             continue
-        has_heading = "【" in ln and "】" in ln
+        has_heading = _is_section_heading(stripped)
         if has_heading:
             if current and current[1]:
                 sections.append((current[0], "\n".join(s for s in current[1] if s.strip())))
@@ -298,7 +386,8 @@ def fill_prompt_sections(plan, attachments: list[dict]) -> int:
     模型为避免爆输出上限会写段落引用；执行器无 LLM，必须在编译期回填。
     返回回填的变体数。
     """
-    docs = "\n".join(a.get("text", "") for a in attachments)
+    docs = "\n".join(a.get("text", "") for a in attachments
+                     if a.get("name") not in CATALOG_ATTACHMENT_NAMES)
     if not docs.strip():
         return 0
     filled = 0
@@ -334,7 +423,69 @@ def fill_prompt_sections(plan, attachments: list[dict]) -> int:
             if text:
                 item["prompt"] = text
                 filled += 1
+        # 文档驱动批量的卫生兜底：模型可能把「使用说明/目录清单」等非套装段落
+        # 也塞进 variants（表现为变体数多于文档真实段落数，或 prompt 里混入
+        # 本机 LoRA/模板目录说明）。此时以文档标题抽取结果为唯一真源重建变体。
+        sections = extract_all_sections(docs)
+        if sections:
+            junk_markers = ("本机 LoRA 目录", "本机工作流模板目录", "禁止写 TO_BE_RESOLVED",
+                            "用户指定模板时优先")
+            has_junk = any(
+                isinstance(v, dict) and any(m in str(v.get("prompt") or v.get("positive_prompt") or "")
+                                           for m in junk_markers)
+                for v in variants
+            )
+            if len(variants) != len(sections) or has_junk:
+                step.params["variants"] = [
+                    {"name": name, "prompt": body} for name, body in sections
+                ]
+                filled += len(sections)
     return filled
+
+
+def _merge_duplicate_submits(plan: GenerationPlan) -> None:
+    """代码保真：同模板的多个 submit_batch 合并为一个，防止重复烧 GPU。
+
+    模型可能把「分批」误解为拆多个提交步骤；这里按 template_id 分组，保留每组
+    第一个步骤，把其余步骤的 variants 去重合并进去，并把后续步骤的 inputs_from
+    引用重写到保留步骤（collect 引用重复时去重）。
+    """
+    groups: dict[str, list] = {}
+    for step in plan.steps:
+        if step.operation == "workflow.submit_batch":
+            groups.setdefault(str(step.params.get("template_id") or ""), []).append(step)
+    merged_groups = [g for g in groups.values() if len(g) > 1]
+    if not merged_groups:
+        return
+    remove_ids: set[str] = set()
+    replace: dict[str, str] = {}
+    for group in merged_groups:
+        keep = group[0]
+        seen = {json.dumps(v, ensure_ascii=False, sort_keys=True)
+                for v in keep.params.get("variants") or [] if isinstance(v, dict)}
+        for dup in group[1:]:
+            for v in dup.params.get("variants") or []:
+                if not isinstance(v, dict):
+                    continue
+                key = json.dumps(v, ensure_ascii=False, sort_keys=True)
+                if key not in seen:
+                    keep.params.setdefault("variants", []).append(v)
+                    seen.add(key)
+            remove_ids.add(dup.id)
+            replace[dup.id] = keep.id
+    plan.steps = [s for s in plan.steps if s.id not in remove_ids]
+    for step in plan.steps:
+        rewritten: list[str] = []
+        for ref in step.inputs_from or []:
+            head = ref.split(".", 1)[0]
+            if head in replace:
+                tail = ref[len(head):]
+                new_ref = replace[head] + tail
+                if new_ref not in rewritten:
+                    rewritten.append(new_ref)
+            elif ref not in rewritten:
+                rewritten.append(ref)
+        step.inputs_from = rewritten
 
 
 def _declared_read_paths(plan: GenerationPlan) -> list[str]:

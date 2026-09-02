@@ -191,3 +191,47 @@ def test_kill_by_port_用管道读取监听进程且不依赖run_stdout(monkeypa
 
     assert comfy_launcher._kill_by_port(8188) == 1
     assert commands == [["taskkill", "/F", "/T", "/PID", "4321"]]
+
+
+def test_启动输出重定向到日志文件(tmp_path, monkeypatch):
+    """2026-08-30 实锤：子进程继承后端失效控制台句柄 → 节点打印即 OSError [Errno 22]。
+    Popen 必须把 stdout/stderr 重定向到日志文件，句柄与子进程同生命周期。"""
+    opened = []
+    spawned = {}
+
+    class FakeProc:
+        pid = 12345
+
+        def poll(self):
+            return None
+
+    import builtins
+    real_open = builtins.open
+
+    def fake_open(path, mode="r", *a, **k):
+        if "comfyui-stdout" in str(path):
+            handle = real_open(tmp_path / "captured.log", "wb")
+            opened.append((str(path), mode, handle))
+            return handle
+        return real_open(path, mode, *a, **k)
+
+    monkeypatch.setattr(builtins, "open", fake_open)
+    monkeypatch.setattr(
+        comfy_launcher.comfyui_client, "is_up", lambda url: False)
+    monkeypatch.setattr(
+        comfy_launcher.subprocess, "Popen",
+        lambda *a, **k: spawned.update(args=a, kwargs=k) or FakeProc(),
+    )
+    base = tmp_path / "comfy"
+    (base / "main.py").parent.mkdir(parents=True, exist_ok=True)
+    (base / "main.py").write_text("#", encoding="utf-8")
+    py = base / "python.exe"
+    py.write_text("#", encoding="utf-8")
+
+    result = comfy_launcher.start(str(base), "http://127.0.0.1:8188", str(py))
+
+    assert result["managed"] is True
+    assert spawned["kwargs"].get("stdout") is not None, "stdout 必须重定向"
+    assert spawned["kwargs"].get("stderr") == comfy_launcher.subprocess.STDOUT
+    assert opened and "comfyui-stdout" in opened[0][0]
+    opened[0][2].close()

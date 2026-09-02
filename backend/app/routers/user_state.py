@@ -15,6 +15,35 @@ from app.config import DATA_DIR
 from app.services import repo_meta
 
 router = APIRouter()
+@router.get("/proxy-status")
+def proxy_status() -> dict:
+    """实时检测设置里的代理地址是否在本机监听（继承全局模式用）。"""
+    import socket
+    from urllib.parse import urlparse
+
+    proxy_url = ""
+    try:
+        data = json.loads(_state_path().read_text(encoding="utf-8"))
+        settings = data.get("settings") or {}
+        if isinstance(settings, dict):
+            proxy_url = str(settings.get("proxyUrl") or "").strip()
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return {"listening": False, "address": ""}
+    if not proxy_url:
+        return {"listening": False, "address": ""}
+    try:
+        parsed = urlparse(proxy_url if "//" in proxy_url else f"//{proxy_url}")
+        host = parsed.hostname or "127.0.0.1"
+        port = parsed.port or 0
+    except ValueError:
+        return {"listening": False, "address": proxy_url}
+    if port <= 0:
+        return {"listening": False, "address": proxy_url}
+    try:
+        with socket.create_connection((host, port), timeout=1.5):
+            return {"listening": True, "address": proxy_url}
+    except OSError:
+        return {"listening": False, "address": proxy_url}
 
 
 def _state_path() -> Path:

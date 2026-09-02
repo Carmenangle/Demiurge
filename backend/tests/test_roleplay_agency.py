@@ -349,6 +349,24 @@ def test_维护gate开只增写库(tmp_path):
     assert written == [("教会地下有密室", "新地点")]
 
 
+def test_curator每3轮跑一次未到轮次直接跳过(tmp_path):
+    """2026-08-30 成本改约：知识抽取按 curator_cadence=3 节流，未到轮次零调用。"""
+    calls = []
+    deps = ra.AgencyDeps(chat_fn=lambda *a, **k: calls.append(1) or "[]",
+                         rng=random.Random(0), state_base=str(tmp_path),
+                         curator_gate=1.0, index_fn=lambda t, ti: None)
+    # turn=2（未到节奏）→ 跳过；turn=4（(4-1)%3==0）→ 执行
+    assert ra.maybe_curate(deps, window_text="剧情", chat_base="b", chat_key="k",
+                           chat_model="m", turn=2) == 0
+    assert ra.maybe_curate(deps, window_text="剧情", chat_base="b", chat_key="k",
+                           chat_model="m", turn=4) == 0  # 空产出但调用了
+    assert len(calls) == 1
+    # turn 缺省（0）保持旧行为，兼容旧调用方
+    assert ra.maybe_curate(deps, window_text="剧情", chat_base="b", chat_key="k",
+                           chat_model="m") == 0
+    assert len(calls) == 2
+
+
 def test_维护无index_fn不写(tmp_path):
     deps = ra.AgencyDeps(chat_fn=lambda *a, **k: '[{"op":"add","text":"x"}]',
                          rng=random.Random(0), state_base=str(tmp_path),
@@ -371,3 +389,42 @@ def test_维护可在无RAG时受控修改当前仓库世界书(tmp_path):
     assert applied == [
         {"op": "worldbook_update", "index": 0, "text": "新设定", "evidence": "剧情已确认"},
     ]
+
+def test_思考内幻影协议标签跨界匹配不吞正文():
+    """2026-08-31 实锤复刻：think 里复述协议清单产生幻影 <状态更新>，懒匹配从 think 内
+    一路吃到真块闭合 (3390,11977)，旧「完全包含」判断放行跨界匹配，正文随整段被剥掉，
+    气泡「正文被思考过程覆盖」。交叠判断必须排除跨界匹配、保住正文与真块解析。"""
+    reply = (
+        "<think>灰魂吐槽：推演。格式确认：\n- <status> 块\n- <roll> 块\n"
+        "- <content> 正文\n- <状态更新> 块\n骰点信息：[PLAYER] 凌渊</think>\n"
+        "<content>她踏前一步，指尖挑起他的下颌。正文核心段落，必须完整保留。</content>\n"
+        '<状态更新>[{"field":"数值/好感度","op":"add","value":5,"evidence":"本轮"}]</状态更新>'
+    )
+    clean, raw = ra.parse_state_block(reply)
+
+    assert "正文核心段落，必须完整保留。" in clean
+    assert "格式确认" in clean  # think 前缀保留在正文前（前端正则折叠为思考过程）
+    assert raw == [{"field": "数值/好感度", "op": "add", "value": 5, "evidence": "本轮"}]
+
+
+def test_真状态块未闭合且有think幻影时保正文丢残块():
+    """真块只开不闭（模型常漏闭标签）+ think 幻影并存：正文保留、残块剥离、不抛错。"""
+    reply = (
+        "<think>推演。输出协议：- <content> 正文 - <状态更新> 块</think>\n"
+        "<content>正文段落，不能丢。</content>\n"
+        '<状态更新>[{"field":"数值/好感度","op":"add","value":3,"evidence":"本轮"}]'
+    )
+    clean, raw = ra.parse_state_block(reply)
+
+    assert "正文段落，不能丢。" in clean
+    assert "[{\"field\"" not in clean  # 未闭合残块 JSON 从正文剥掉（think 内幻影引述保留）
+    # 缺闭标签仍解析（对齐既有契约 test_状态更新缺闭标签仍解析并从正文剥离）
+    assert raw == [{"field": "数值/好感度", "op": "add", "value": 3, "evidence": "本轮"}]
+
+
+def test_split_think_prefix拆出前缀保留正文():
+    head, body = ra.split_think_prefix("<think>A</think>\n<content>B</content>")
+    assert head == "<think>A</think>"
+    assert body == "\n<content>B</content>"
+    assert ra.split_think_prefix("无think直接正文") == ("", "无think直接正文")
+    assert ra.split_think_prefix("") == ("", "")

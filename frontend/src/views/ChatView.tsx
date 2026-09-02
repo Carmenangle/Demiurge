@@ -33,10 +33,12 @@ import { KnowledgeModal } from "../components/KnowledgeModal";
 import { NarrativeCiPanel } from "../components/chat/NarrativeCiPanel";
 import { TableModal } from "../components/TableModal";
 import { RichInput, type RichContent, type RichInputHandle } from "../components/RichInput";
+import { shouldDeleteEditSource } from "../lib/chatGeneration";
 import { WorkflowCard } from "../components/WorkflowCard";
 const CanvasStageFlow = lazy(() => import("./CanvasStageFlow").then((m) => ({ default: m.CanvasStageFlow })));
 import { globalPendingToolCreates, canvasBridge } from "../components/canvas/shared";
 import { useChatSession } from "../lib/useChatSession";
+import { deletedMessageTombstones } from "../lib/deletedMessageTombstones";
 import { inspirationToAttachment, consumePendingInspirationAttachments, CHAT_INSPIRATION_EVENT } from "../lib/inspirationInsert";
 import { ConfirmModal } from "../components/Modal";
 import { MaskEditorModal, type MaskEditorResult } from "../components/MaskEditorModal";
@@ -57,6 +59,7 @@ import { resolveCharacterPortrait } from "../lib/characterPortrait";
 import { useChatPresentationAssets } from "../lib/useChatPresentationAssets";
 import { useChatUnreadTracker } from "../lib/useChatUnreadTracker";
 import { useChatTransfer } from "../lib/useChatTransfer";
+import { WorkflowGenerationRuntime } from "../lib/workflowGenerationRuntime";
 
 export function ChatView({
   repo,
@@ -251,7 +254,13 @@ export function ChatView({
   // 画布工作流运转任务：对话框下方进度条（与画布「生成中」占位节点同源事件驱动）
   const [canvasWfRuns, setCanvasWfRuns] = useState<Array<{
     id: string; templateName: string; progress: number | null; node?: string;
-  }>>([]);
+  }>>(() => new WorkflowGenerationRuntime(threadId).list()
+    .filter((item) => item.runId)
+    .map((item) => ({
+      id: item.runId!,
+      templateName: item.prompt || "工作流",
+      progress: null,
+    })));
   useEffect(() => {
     const onRun = (e: Event) => {
       const d = (e as CustomEvent).detail as { runId?: string; templateName?: string } | undefined;
@@ -330,9 +339,16 @@ export function ChatView({
   const {
     unreadAgentIds, onStreamScroll, syncUnreadAgentMessages, jumpToFirstUnreadAgentMessage,
   } = useChatUnreadTracker(threadId, messages, streamRef, atBottomRef);
+  // 导入会话 = 显式以后端为真源：回读前清墓碑，允许同 id 内容随导入回灌。
+  const reloadFromSnapshotRef = useRef(reloadFromSnapshot);
+  reloadFromSnapshotRef.current = reloadFromSnapshot;
+  const reloadAfterImport = useCallback(() => {
+    deletedMessageTombstones.clear(threadId);
+    return reloadFromSnapshotRef.current();
+  }, [threadId]);
   const {
     snapshotFileRef, handleExportChat, handleImportChatFile,
-  } = useChatTransfer(threadId, repo?.name || "会话", reloadFromSnapshot, pushBot);
+  } = useChatTransfer(threadId, repo?.name || "会话", reloadAfterImport, pushBot);
 
   const pickTemplateAndRemember = (t: Template) => {
     templatePicker.remember(t.id);
@@ -360,8 +376,24 @@ export function ChatView({
   repoIdRef.current = repo?.id;
 
   const handleAddToChat = useCallback((url: string) => richRef.current?.insertImage(url), []);
-  const handleEditMessage = useCallback((content: RichContent) => {
+  // 「复制图文内容到输入框编辑」的来源消息 id：提交该草稿时若来源仍是最后一条用户消息，
+  // 先删原消息再发送（编辑替换语义），避免编辑前后两条用户消息一起进剧情上下文。一次性消费。
+  const editSourceRef = useRef<string | null>(null);
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+  const handleEditMessage = useCallback((content: RichContent, sourceId?: string) => {
     richRef.current?.replaceContent(content);
+    editSourceRef.current = sourceId ?? null;
+  }, []);
+  // 编辑旧楼层不自动删（防止砍断中段剧情引用）；仅替换最后一楼时删除原消息。发送失败
+  // 时原消息已删：输入框内容仍在，重发即可（删除走快照契约，不可复活——与手动删除同域）。
+  const handleComposerSubmit = useCallback((content: RichContent) => {
+    const sourceId = editSourceRef.current;
+    editSourceRef.current = null;
+    if (sourceId && shouldDeleteEditSource(messagesRef.current, sourceId)) {
+      deleteMessageRef.current(sourceId);
+    }
+    sendRef.current(content);
   }, []);
   const handleSendImage = useCallback((url: string) => {
     richRef.current?.insertImage(url);
@@ -395,6 +427,8 @@ export function ChatView({
   // ④ AI 消息：编辑 / 检查点 / 分支（回调用 latest-ref 兜住，保持 memo 稳定）
   const editMessageRef = useRef(editMessage);
   editMessageRef.current = editMessage;
+  const sendRef = useRef(send);
+  sendRef.current = send;
   const createCheckpointRef = useRef(createCheckpoint);
   createCheckpointRef.current = createCheckpoint;
   const messagesUpToRef = useRef(messagesUpTo);
@@ -927,8 +961,10 @@ export function ChatView({
         <RichInput
           ref={richRef}
           height={chatInput.height}
-          onSubmit={send}
+          threadId={threadId}
+          onSubmit={handleComposerSubmit}
           onCanSubmitChange={setHasText}
+          onNotify={showToast}
           templateNames={templates.map((t) => t.name)}
           placeholder={contentView === "canvas"
             ? (streamingId ? "生成中…" : "输入提示词，为图生图 / 文生图 / 加参考图…")

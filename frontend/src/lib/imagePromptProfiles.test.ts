@@ -6,12 +6,13 @@ import {
 } from "./imagePromptProfiles";
 
 describe("image prompt profiles", () => {
-  it("提供四种可选模式，旧配置默认Krea2智能判定", () => {
+  it("提供三种可选模式，旧 krea2 配置与未知值回退 Anima（krea2 已下线）", () => {
     expect(PROMPT_PROFILE_OPTIONS.map((item) => item.id)).toEqual([
-      "krea2", "anima_tags", "natural_language", "niji_sections",
+      "anima_tags", "natural_language", "niji_sections",
     ]);
-    expect(normalizePromptProfile(undefined)).toBe("krea2");
-    expect(normalizePromptProfile("unknown")).toBe("krea2");
+    expect(normalizePromptProfile(undefined)).toBe("anima_tags");  // krea2 下线后回退 Anima
+    expect(normalizePromptProfile("unknown")).toBe("anima_tags");
+    expect(normalizePromptProfile("krea2")).toBe("anima_tags");  // 旧 krea2 预设降级
     expect(normalizePromptProfile("anima_tags")).toBe("anima_tags");
   });
 
@@ -33,8 +34,8 @@ describe("image prompt profiles", () => {
     expect(ensureAnimaIllustrationStyle("quality\ncontent", false)).toBe("quality\ncontent");
   });
 
-  it("Krea、自然语言与Niji都只前置当前LoRA触发词且不重复", () => {
-    expect(applyProfileLoraTriggers("中文自然语言段落。", "krea2", ["style_x"]))
+  it("Anima、自然语言与Niji都只前置当前LoRA触发词且不重复", () => {
+    expect(applyProfileLoraTriggers("中文自然语言段落。", "anima_tags", ["style_x"]))
       .toBe("style_x, 中文自然语言段落。");
     expect(applyProfileLoraTriggers("style_x, 中文自然语言段落。", "natural_language", ["style_x"]))
       .toBe("style_x, 中文自然语言段落。");
@@ -43,7 +44,7 @@ describe("image prompt profiles", () => {
   });
 
   it("LoRA没有触发词时保持提示词不变", () => {
-    expect(applyProfileLoraTriggers("prompt", "krea2", [])).toBe("prompt");
+    expect(applyProfileLoraTriggers("prompt", "anima_tags", [])).toBe("prompt");
   });
 
   it("正负提示词分别注入对应语义字段", () => {

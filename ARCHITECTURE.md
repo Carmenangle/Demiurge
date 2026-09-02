@@ -70,7 +70,7 @@ services/  深模块层。业务逻辑全在这。彼此可依赖，但不 impor
 | `generation_approval` | 提示词审批状态机 + 已批准的图像/视频执行 + 失败语义 | 改确认/更改/取消/重提流程 → 这里；`agent_graph` 只调用其 Interface |
 | `capability_registry` / `capability_handlers` | Autopilot 能力面单一属主（P0）：能力**显式注册**（不做 AST 扫描），注册期闸门校验 operation 唯一性与枚举字段；manifest 由 `scripts/generate_capability_manifest.py` 导出（`backend/app/generated/capability_manifest.json` 随源码发布），`--check` 进 npm/CI 门禁防漂移；`validate_handlers` 逐条 import 验证「模块：函数」；`with_availability` 运行时按已配置模型打 available 标记。handlers 只做薄适配（参数透传既有 services + 逐条失败隔离） | 注册新能力 → 这里加条目并重新生成 manifest；agent 内部协作用的中间服务不进清单；handler 不得藏业务，更不得退回任意 shell/MCP（未知动作拒绝不降级） |
 | `plan_compiler` / `plan_validator` | Autopilot P1 计划编译：`is_delegation_intent` 零 LLM 委派判定（路由界限强命令层）；`compile_plan` 经 `structured_output` 把意图编译成 `GenerationPlan`（校验失败带错误重试一次，仍败如实返回不编造）；`plan_validator` 纯函数校验能力存在/params 合 schema/inputs_from 无环/模型缺口/审批汇总一致性/budgets 防巨型计划/**params 路径必须落在作品域内（防越权写，执行期由 capability_sandbox path 租约兜底）**；`save_plan` 落 `<作品>/plans/*.plan.json`（执行真源）+ 单向渲染 `.plan.md`（手改不回灌）。编译节点只编译不执行，编译后自动投递 plan_tasks 队列 | 改编译 prompt/校验规则 → 这里；计划执行必须走 P2 plan_tasks，不得在编译节点偷偷执行；每计划必须带 budgets |
-| `plan_tasks` | Autopilot P2/P3/P4 执行器单一属主：SQLite `plan_tasks`+`plan_task_steps` 租约式 FIFO worker（心跳/唤醒/取消，`main.py` 常驻）；步骤按 capability_registry 的「模块:函数」分发（未注册能力拒绝执行，无 shell/MCP 兜底）；**审批闸门**（durable/expensive 与越域 readonly 读取执行前 capability_sandbox.authorize，无租约→awaiting_approval，批准=一次性租约 ttl=预算×2）+ **配额计数**（expensive done+失败尝试均耗配额）；失败隔离（单步 failed 其余 blocked→partial）、Doom Loop（同步骤连败≥2→blocked）、终态判定（全 done/skipped 才 done，部分产出→partial）；inputs_from 链式传参（点引用/整包回退/同键累积）；幂等（规范化 hash 去重）+ 配方固化/实例化 + 进度快照进 task_progress_store。submit/prompt_ids 等运行环境值由编译器/执行器归一，**模型产出的占位与编造值一律被确定性覆写** | 加新执行语义 → 这里与 capability_registry；改审批/配额阈值 → approve_task/`_run_task` 闸门段；计划链路不得旁路队列直调 handler |
+| `plan_tasks` | 智能编造计划 P2/P3/P4 执行器单一属主：SQLite `plan_tasks`+`plan_task_steps` 租约式 FIFO worker（心跳/唤醒/取消，`main.py` 常驻）；步骤按 capability_registry 的「模块:函数」分发（未注册能力拒绝执行，无 shell/MCP 兜底）；**两档访问标准（P1）**：`approval`（默认）走审批闸门（durable/expensive 与越域 readonly 读取执行前 capability_sandbox.authorize，无租约→awaiting_approval，批准=一次性租约 ttl=预算×2）；`full`（用户显式开启）提交时自动签通配租约（approved_by=full_mode，审计可查），免逐项审批、越域只读随通配租约放行，但**配额照扣**（expensive done+失败尝试均耗配额）、写入路径域照拦；失败隔离（单步 failed 其余 blocked→partial）、Doom Loop（同步骤连败≥2→blocked）、终态判定（全 done/skipped 才 done，部分产出→partial）；inputs_from 链式传参（点引用/整包回退/同键累积）；幂等（规范化 hash 去重）+ 配方固化/实例化 + 进度快照进 task_progress_store。submit/prompt_ids 等运行环境值由编译器/执行器归一，**模型产出的占位与编造值一律被确定性覆写**。full 不豁免路径域校验（plan_validator 提交期硬闸门） | 加新执行语义 → 这里与 capability_registry；改审批/配额阈值 → approve_task/`_run_task` 闸门段；计划链路不得旁路队列直调 handler |
 | `prose_style` | 剧情正文去 AI 味词表单一属主（**一份两用**）：`lint` 纯函数确定性检测（固定搭配/标点密度/句式模板/自问自答/句长节拍器/跨轮开场趋同），检测前 `restore_jailbreak` 只读还原拆字；`effective_phrases` 合成内置词表+用户增−删（`data/prose_style.json`）；`style_prompt_segment` 供 roleplay system 生成侧预防（enabled=False 时 system 逐字节不变）。文风诊断码属主在本模块，narrative_ci 并流复用 | 词表增删/新检测规则 → 这里，lint 与生成侧注入共用同一属主，两处各自维护即漂移；**检测不涂改**：只产出诊断，禁止自动改写正文真源 |
 | `style_review` | S2 LLM 活人感通审：采样闸门（`review_every` 每轮 N 一次，0=关，正文≥120 字）→ `structured_output` 结构化判定 → `style_living_review` 诊断入 Narrative CI 诊断流（info 级，处置走既有 RESOLUTIONS 生命周期）。走 `_agency_maintenance` 维护通道，不新开并行通道 | 调采样频率/判定维度 → 这里；失败静默降级只记 trace，永不阻断正文或维护 |
 | `image_gen` | 云端文生图 `/images/generations` 与带参考图 `/images/edits`，统一超时、质量参数和 64–3840px 尺寸边界；`_load_image_bytes` 支持 data-uri/http(s)/**本地文件路径**(角色底图,桌面单机后端直读同机文件)，并对 `/comfyui/local-view` 回环 URL 剥离显式代理（系统代理无法转发 localhost → 502），外部 URL 代理行为不变 | 新增图像供应商请求规则 → 这里，调用方不拼 payload |
@@ -134,7 +134,7 @@ types/       共享类型。
 | `generationLifecycle` | Agent/ComfyUI 正交双槽 reducer + 派生 selector；只由 Agent 槽阻塞新对话，工作流槽继续独立保留 prompt、进度和停止所有权。**新增生成状态改这里，别加影子 ref** |
 | `workflowGenerationRuntime` | ComfyUI 生成生命周期深模块：可同时持有 ComfyUI FIFO 中多个 `prompt_id`，负责 pending 存储、提交时 `threadId/repoId/outputDir` 归属快照、提交后守望、恢复检查、轮询节奏、连续丢失、超时保留和幂等 finalize 双闸 | Hook 通过 Observer 接收完成/失败/释放/超时；前台与恢复路径必须共用同一 Runtime 实例。新任务提交给 ComfyUI 原生队列，不在浏览器另造易丢失的预提交队列；仓库切换不得改变已提交任务的归属 |
 | `workflowOrchestration` | 工作流输入口编排 hook（读节点→AI 出计划→写画布） |
-| `workflowCapture` | laf_lock 帧事务：单次请求/回复及隐藏完整画布的 load→ops→原生 API 图抓取；统一来源校验、重试、超时和清理。NodeCard IFrame 载入前通过 `clearComfyStorage` 清理 localStorage/sessionStorage 中工作流残留，防止之前打开的大工作流被 ComfyUI 会话恢复覆盖导致只显示整图而非单个节点 | `WorkflowCard`、`AIBuildView` 不得自行监听同类 `api_prompt` 生命周期；节点局部画布的自愈时序仍归各自展示场景 |
+| `workflowCapture` | laf_lock 帧事务：单次请求/回复及隐藏完整画布的 load→ops→原生 API 图抓取；统一来源校验、重试、超时和清理。NodeCard IFrame 载入前通过 `clearComfyStorage` 清理 localStorage/sessionStorage 中工作流残留，防止之前打开的大工作流被 ComfyUI 会话恢复覆盖导致只显示整图而非单个节点。`clearComfyStorage` 是 async（localStorage/sessionStorage 同步清 + `await _clearComfyIndexedDB` 等 IndexedDB 删除完成）；`installLoadGraphLock` 在文件顶层 + LOCK/FULL setup 双点包装 `app.loadGraphData` 加互斥锁（任意时刻只跑一个载图），防止 ComfyUI 初始化恢复流程 `loadGraphData(旧图)` 与 laf_lock `loadGraphData(新图)` 交叉造成 `_nodes` 同 id 重复节点/丢节点；`applyLoad` 有 `applyLoadRunning` 防重入 | `WorkflowCard`、`AIBuildView` 不得自行监听同类 `api_prompt` 生命周期；节点局部画布的自愈时序仍归各自展示场景 |
 | `workflowTemplateExposure` | 参数清单与画布选择节点时，将未连线字段确定性转换为 `ExposedField`；字段名、label、semantic、默认值均保持原工作流定义，节点类型只生成不可见内部 binding | 旧人工别名迁移到 binding；禁止仅凭 `width/height/text/image` 猜用途；移除节点同步移除暴露字段 |
 | `workflowLoraData` | 多元数据生成的 LoRA 确定性补全：按最终 API 图精确识别 LoRA，提炼作者质量标签，生成建议权重与正向 CLIP 覆盖 ops；触发词固定第一行，去重质量词固定第二行开头，负向 CLIP 不得修改 |
 | `viewRouting` | `parseHash`/`buildHash`/`calcSize` 纯函数 |
@@ -219,6 +219,27 @@ Agent 内部领域事件
 
 新增事件必须沿该方向逐层显式实现并补双端测试。`useChatSession` 不得按原始字段猜事件类型，`api/ai.ts` 不得重新展开多类事件回调。
 
+## 对话附件契约（File Attachment · 2026-09-01 定案 A1+B1+C1增强+D1）
+
+用户拖放/粘贴/选择文件到输入框 → **附件卡片**（非文本化塞入输入框）。参照市场（Claude.ai 服务端文本提取、Codex CLI 非图片文件=路径引用/stdin 文本、Claude Code 按需读盘）与本地优先定位，定案：
+
+- **A1 三栏并存**：图片 → 既有图片栏（vision 多模态）；视频/音频 → 媒体栏（dataURI/URL 预览）；其余任意类型（md/txt/code/office/pdf/zip…）→ 通用文件栏，按 MIME 给图标 + 文件名卡片。
+- **B1 会话级存储**：文件落 `userdata/attachments/<thread_id>/<uuid>-<name>`（运行时 `DATA_DIR/attachments/`），file_id 即 uuid 前缀，删除会话/快照清理时连带删。
+- **C1 增强（agent 消化）**：`MultiAgentRequest.attachments` 随消息透传；后端 agent 链路把附件转「文件参考」段落进上下文——文本类读全文（100k 封顶），docx/xlsx 零依赖 zip+xml 提取，PDF 可选 pypdf 提取（失败降级），纯二进制只元信息（文件名+mime+size+ext）。**图片不重灌图像 token**（沿用插画红线），音视频不进 prompt。
+- **D1 历史回放**：消息 `parts` 持久化 `{type:"file", fileId, name, mime, size}`，file_id 是真源；`GET /api/attachments/{file_id}` 流式下载供回放只读卡片。base64 不落消息（防快照膨胀）。
+
+### 单一属主与真源
+- **文件字节属主**：`attachment_store`（后端服务）。前端只拿 file_id 元信息，不持有原始字节。
+- **wire 透传属主**：`shared/schemas/agent-invocation.schema.json` 增 `attachments` → 跑 `scripts/generate_wire_contracts.py` 生成双端契约；`MultiAgentRequest`、`RunContext`、`AgentInvocation`、`agentInvocationBody` 同步补字段（漏一处 = 附件在链路静默丢失）。
+- **前端 UI 属主**：`RichInput` 内附件栏；提交时 `RichContent.attachments` 进 `createAgentInvocation`。
+- **历史回放属主**：`chatSessionEvents` reducer 支持 `file` part + `ChatMessages` 渲染只读卡片。
+
+### 边界与红线
+- 禁止把附件全文当用户文本塞进输入框（旧 `buildFileAttachmentText` 伪文本化路径废弃；`isTextFile` 白名单只保留给「+」选择器的 accept 提示，不再做静默丢弃判定）。
+- 二进制/大文件不整体进 prompt（容量红线）；文本类封顶 100k 字，超限截断并注明。
+- 附件与消息快照同生命周期：删除会话/快照清理必须同步删 `attachments/<thread_id>/`（B1 连带）。
+- PDF/docx/xlsx 提取是**可选能力**：库缺失或解析失败 → 降级为元信息段落，不阻断对话，不新增硬依赖。
+
 ## 加功能决策树
 
 - **要调 ComfyUI？** → HTTP 原语进 `comfyui_client`；模板/画布提交事务进 `workflow_submission`；路由只映射领域异常。
@@ -264,7 +285,13 @@ cd backend
 
 ## 主题资产生成
 
-`scripts/theme_asset_pipeline.py` 是主题资产处理的唯一 Implementation，拥有透明清理、裁剪、缩放、WebP/PNG 编码、图集排版、引用顺序和目标路径安全。
+**决策已反转（2026-07-29，见 `docs/memory/theme-removal.md`）**：早先的「最小样式 + 自动主题资产管线」已放弃，恢复起源项目整套样式与 `frontend/public` 素材。当前树**没有** `scripts/theme_asset_pipeline.py`、`scripts/theme_assets/<theme>.json` 或 `process_<theme>_theme_assets.py`——ARCHITECTURE 旧描述已过时，不得再按旧文新增生成管线。
+
+现行主题体系：
+- `frontend/src/styles.css`（当前约 7285 行）是主题 Runtime 接口与主题变量的单一真源，`[data-theme="bright|night|eye-care|green|gray"]` 块提供视觉差异。
+- `frontend/public/` 下的 `backgrounds/controls/ornaments/support/textures` 五目录为主题素材，随源码与 Runtime 发布；缺素材从起源项目 `d:/tool/ComfyUI/ComfyUI-Wrapping-paper` 取。
+- 发布门禁：`scripts/release_preflight.py` 的 `missing_css_assets` 校验 `styles.css` 引用的主题资产存在且未被 Git 忽略；前端 `npm run build` 负责无 unresolved-asset warning。
+- 新增主题：在 `styles.css` 接入共享 Interface（把 `[data-theme="<theme>"]` 加进 `:is(...)` 结构选择器列表），并补 `frontend/public` 对应素材；不需要生成脚本。
 
 每个主题只在 `scripts/theme_assets/<theme>.json` 声明源文件、处理参数和前端目标槽位。`process_<theme>_theme_assets.py` 只能作为兼容命令入口选择清单，不得新增图像处理函数。新增主题优先复用已有 `op/preprocess/transform`；确需新变换时只扩展 pipeline 并给所有清单复用。
 
@@ -314,7 +341,7 @@ generation 资产检索与剧情 `retrieve` 物理隔离：展示 prompt 永远�
 
 `scenario_lab` 的完整快照同时包含作品文件、SQLite 数据库和仓库专属 Chroma collections。SQLite 使用 backup API 并显式关闭连接；不可变媒体优先硬链接；v2 manifest 记录版本、回合、文件 SHA-256、源 size/mtime 和向量集合。新快照先在同目录 staging 完成后原子发布；未变化非数据库文件复用上个 manifest 的哈希，避免每回合重新读取全部图片。恢复只允许空目标仓库，绝不覆盖正式时间线；文件或 Chroma 恢复失败必须清理本次写入，多候选实验后续分支失败必须回滚前面已完成候选。前端每个完成回合按 `turn:N` 去重创建快照；`scenarioBranchRuntime` 统一拥有保存消息、匹配/创建快照、fork、登记本地分支和导航顺序；从历史消息分支只能使用同回合快照，找不到时必须拒绝。反事实候选之间物理隔离，不自动合并，用户选择只记录正式候选 ID。
 
-`capability_sandbox` 提供短期、可撤销、精确到 operation/path/domain/tool 的能力租约；`procedure_skills` 从脱敏 Trace 提议流程，必须经用户审核、dry-run、受支持 Adapter 检查和能力授权后才执行。Prompt Skill 与 Procedure Skill 是两个 Module；外部 Smithery Skill/MCP 默认关闭并标记 `external_unreviewed`。当前 Procedure 执行面刻意只开放已注册安全 Adapter，未知动作不得退回任意 shell/MCP 执行。
+`capability_sandbox` 提供短期、可撤销、精确到 operation/path/domain/tool 的能力租约，并分两档访问标准：`approval`（默认，按 capability 逐条授权）与 `full`（通配放行，租约记录 `mode="full"` + `approved_by`，审计可查；仍受撤销/过期约束）。`plan_tasks` 在 full 模式提交任务时自动签 full 租约，approval 模式保持逐项审批。`procedure_skills` 从脱敏 Trace 提议流程，必须经用户审核、dry-run、受支持 Adapter 检查和能力授权后才执行。Prompt Skill 与 Procedure Skill 是两个 Module；外部 Smithery Skill/MCP 默认关闭并标记 `external_unreviewed`。当前 Procedure 执行面刻意只开放已注册安全 Adapter，未知动作不得退回任意 shell/MCP 执行。
 
 ### Supply Chain 与 Instruction Provenance
 
@@ -342,7 +369,7 @@ generation 资产检索与剧情 `retrieve` 物理隔离：展示 prompt 永远�
 
 ### Theme Runtime Seam
 
-`styles.css` 的 production theme runtime Interface 统一拥有按钮九宫格尺寸、输入区和拖动手柄几何、模态内容层级、装饰指针隔离、进度节点定位、头像尺寸和着陆页几何。bright/night/eye-care/green/gray 主题块只提供视觉差异和素材 URL；新增主题先接入共享 Interface（把 `[data-theme="<theme>"]` 加进这些 `:is(...)` 结构选择器列表），再补自己的 Asset Pack，不得复制整段结构选择器。`themeRuntime.test.ts` 与各主题资产测试共同验证该 Seam。
+`styles.css` 的 production theme runtime Interface 统一拥有按钮九宫格尺寸、输入区和拖动手柄几何、模态内容层级、装饰指针隔离、进度节点定位、头像尺寸和着陆页几何。bright/night/eye-care/green/gray 主题块只提供视觉差异和素材 URL；新增主题先接入共享 Interface（把 `[data-theme="<theme>"]` 加进这些 `:is(...)` 结构选择器列表），再补 `frontend/public` 对应素材，不得复制整段结构选择器。当前**没有** `themeRuntime.test.ts`（该测试随旧管线移除）；Seam 的回归由 `scripts/release_preflight.py` 的 `missing_css_assets` + 前端 `npm run build`（无 unresolved-asset warning）共同承担。
 
 ## 剧情能动性引擎（联动链上半截 · 已落地，全绿）
 
@@ -524,12 +551,14 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
 - 角色卡「一张卡=一个文件夹」的落盘格式（`character_store` 布局）是单一属主：卡本体、内嵌世界书、正则、原图、对话记录同处一个文件夹。Phase 2 世界书检索、Phase 3 正则/提示词都从这里读，别在别处另立卡的存储。
 - 偏置预设注入已升级为**多消息通道**：`preset_store.assemble_messages` 按各片段自身 role 组装多条消息（`_llm.chat_messages` 收消息数组发模型），`chatHistory` marker 处原位插历史（还原 ST 深度注入语义）。`assemble_system` 单串档保留作降级。**思维链**（`thinking_chains`）经 `select_chains` 按真状态 scene/affinity/turn 选，尾部链作独立 system 落历史后·本轮 user 前（离生成点最近，遵守最严）——这比 ST 的字符串宏变量更准（真状态判断，非文本插值）。改注入结构 → 这里，别退回单 system 串。
 - Claude 兼容中转的消息合同由 `llm.prepare_messages` 单独拥有：发送前把所有 system 按原顺序合并、连续 user/assistant 合并为严格交替，并仅对“倒数包装 user 已含末轮真实 user”的明确形态去重；非 Claude 消息结构不变。Roleplay Trace 记录该规范化后的实际发送结构。
-- 当前小仓库世界书快照落在 `<output_dir>/<repo_id>/worldbook.json`：首次从卡快照/绑定独立书复制并合并，之后读取和 Curator 写回都只作用于该文件，不回写源卡或独立世界书，也不串到兄弟小仓库。主 Roleplay 的本轮实际注入 index 会进入 Trace，并成为 Curator 唯一可见、可更新集合；未注入 index 即使模型提交也由服务端拒绝并追踪。角色长期进展写入唯一动态区，基础设定不被覆盖；机制类默认只读；即时外观状态仍归状态表。`worldbook_add` 不受允许集合影响，禁止自动删除。
+- 当前小仓库世界书快照落在 `<output_dir>/<repo_id>/worldbook.json`：首次从卡快照/绑定独立书复制并合并，之后读取和 Curator 写回都只作用于该文件，不回写源卡或独立世界书，也不串到兄弟小仓库。画布世界书灵感卡双击打开时，entries 接口支持携带 `seed_from`（源书 base+name）就地播种快照（ensure_repo_snapshot 语义：已有快照永不覆盖），无需先跑一次剧情。主 Roleplay 的本轮实际注入 index 会进入 Trace，并成为 Curator 唯一可见、可更新集合；未注入 index 即使模型提交也由服务端拒绝并追踪。角色长期进展写入唯一动态区，基础设定不被覆盖；机制类默认只读；即时外观状态仍归状态表。`worldbook_add` 不受允许集合影响，禁止自动删除。
 - 正则「后端跑存储/发送档 + 前端跑显示档」是两个 runtime 的同一逻辑（`regex_engine.py` / `lib/regexEngine.ts`）：显示层 markdownOnly 必须在前端渲染时跑（原生 JS 正则、不落库），改存储/发送在后端。别强行合并成一处。显示档来源按 GLOBAL→PRESET→CARD 合并：全局(`/regex/`)+当前激活预设(`/preset/regex`)+当前卡(`/characters/regex`)；编辑视图仍显示原始存储文本，不应应用 markdownOnly。
 - 卡即作品=「大仓库(卡名) + 子仓库(对话记录)」两层（`repos.addCardWork` 返回 `{parentId,childId}`）：对话线挂**子仓库**(`repo.parentId` 有值)，资产库下钻双击子仓库进对话、能返回。别把卡建成顶层单仓库(会导致下钻进空子列表无法回对话)。
 - 检查点/分支是**纯前端**：检查点=`localStorage laf_ckpt_<threadId>` 存到某条为止的消息切片、可回滚(不新建仓库)；分支=`repos.addBranch` 在同大仓库下建兄弟子仓库、拷贝消息切片进新线(localStorage+后端快照)后跳转。都不新增后端端点。
 - 仓库三样绑定(卡/独立世界书/人设)是**前端存字段 `cardName`/`worldbookName`/`personaId` + 后端解析**：`resolveBinding` 自身优先缺则继承父仓库（子继承父，非合并），`App.activeWork` 把解析结果合并进 repo(id 不变)。绑定只保证「该给的资料都喂进上下文」，不改模型行为——别把"绑定后剧情稳"理解成模型质量保证。**世界书/人设注入只在 `roleplay_node`(需 `_has_card`)内跑**：故独立世界书/人设绑定要「同时绑了卡(自身或继承父)」才生效，单绑世界书不绑卡不进扮演流程——别在通用对话节点另接世界书注入。显式绑人设标 `persona_bound`，`_apply_work_persona` 见之不用作品快照 `persona.json` 覆盖（别去掉这个门，会让绑定失效）。
 - ComfyUI 界面模式画布是**页级单例，靠 iframe `ready`→`post("load")` 一次性推工作流**：切模板必须让 iframe 重挂(key 含 `sourcePath`)才会重新 `ready` 载新图——换整张不同工作流用整帧重挂(语义=刷新重启)，别学起源项目单节点卡的"软重发 load"(那是换同图节点用的，见 [[../d--tool-ComfyUI-ComfyUI-Wrapping-paper/memory/orchestration-route-and-nodecard-race]])。画布空白另有跨标签共享 store 争用根因(看 `N:x [0]` + 关旁标签能好)，只提示不代码根治。
+- ComfyUI 界面模式载图后**必须手动居中**（2026-09 实测）：ComfyUI v0.31.1 的 `app.graph.getBounding` 不存在、`c.fitViewToContent` 不存在；`node.pos/size` 是 `{0,1}` 对象不是数组。laf_lock 用 `graphBounds()` 手动遍历 `app.graph._nodes`（`n.pos[0]/n.pos[1]/n.size[0]/n.size[1]` 属性访问）算包围盒，`fitGraphToView()` 按 `fitNode` 同款公式设 `ds.scale/offset`。别依赖 `c.ds.fitToBounds`（收 `[x,y,w,h]`，且内部有 300×150 默认视口 hack）。
+- ComfyUI 界面模式节点重复/丢失的根因（2026-09 修）：ComfyUI 初始化会异步 `loadPersistedWorkflow`（localStorage 的 `Comfy.Workflow.Draft.v2:*` / `workflow` / `workflow:<clientId>`）恢复旧工作流，其 `app.loadGraphData(旧图,true,true)` 与 laf_lock 的 `app.loadGraphData(新图,true,false)` 可能交叉——两个加载各自 `clear()` 再逐节点 `add`，交叉时 `graph._nodes` 出现同 id 两个节点对象（画布两个相同节点框），`getNodeById` 只映射一个（丢节点）。修法是 `installLoadGraphLock()` 串行化 `app.loadGraphData`（见 `workflowCapture` 合同），刷新后不再复现。前端侧：`WorkflowTemplates` 画布 effect 依赖 `picked` 会形成无限重载循环（load→node_title→setPicked→effect 重跑→ping_ready→ready→sendLoad），必须用 `pickedRef` + effect 依赖移除 `picked`。
 - 数据表渲染：通用表/纪要/角色状态统一用**卡片式**（每行或每角色一卡、字段带标签两列网格、长文本占整行、`.card-grid` 多列流式）。角色状态必须按人物聚合，把该人物的好感度、状态、来源、依据放在同卡；长状态用 textarea 完整换行，禁止退回固定列宽 HTML 表格。
 - AI 消息 HTML 渲染是**有意的、消毒后**：卡内正则把 `<status>`/`<roll>` 等标签换成带内联样式的 HTML 状态卡，`ChatMessages.looksLikeHtml` 检测块标签→`sanitizeHtml`(DOMPurify，留 style、禁 script/iframe/事件)→`dangerouslySetInnerHTML`。别改回纯文本(卡的状态栏设计就废了)，也别去掉消毒(XSS)。开场白 first_mes 的 HTML 同链路。
 - 删仓库连带删卡文件夹：卡即作品下删大仓库=对 `target+子仓库` 的 cardName 集合调 `deleteCharacter` 再 `deleteRepo`，否则卡残留磁盘。别只删 localStorage 记录。
@@ -541,6 +570,6 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
 - 多元数据插入（ComfyUI 异步出图/视频）**不新加同步 renderer 分支**：后端按高潮锚点发稳定槽事件，前端后台原位回填。多人 LoRA 的唯一图变换入口是 `workflow_injector.inject_lora_stack`，不得在前端或其他服务复制节点接线逻辑。`template_store` 仅在模板恰好有一个 `EmptyLatentImage` 且没有手动 Latent 语义时自动暴露宽高；多 Latent 工作流必须人工指定。智能模态使用主 Roleplay 同轮 `subjects/actors` 与本地 `infer_motion`，别另调 LLM 判断角色或图/视频。
 - 后台活动点击返回作品必须同时更新 App 的父仓库 `repoId` 与小仓库 `workId`；只写 `#/chat/<threadId>` 不会驱动当前 App 状态。导航离开不是取消，显式停止才允许 abort。
 - 从资产管理下钻打开小仓库时只切作品，不得把当前 `workMode` 强制改为剧情模式；hash 必须保持为当前模式。
-- 多角色状态字段用 `角色名·字段` 明确归属；无分隔符的旧字段只兼容识别“身体/精神”等类别，展示时归回同一角色卡，禁止把状态类别当作角色名。同一字段已有任一明确归属键时，无归属旧副本必须淘汰，禁止回退到作品卡名形成重复角色卡。
+- 多角色状态字段用 `角色名·字段` 明确归属；无分隔符的旧字段只兼容识别“身体/精神”等类别，展示时归回同一角色卡，禁止把状态类别当作角色名。同一字段已有任一明确归属键时，无归属旧副本必须淘汰，禁止回退到作品卡名形成重复角色卡；唯一例外是裸键 `好感度`——单主角模式的全局好感度就是它，被多角色字段连带淘汰会让好感度凭空消失，必须保留。第一人称主角（`主角/我/你/玩家` 等）不是剧情角色：AI 输出的主角字段直接丢弃、不注入主控叙述、前端不显示，主角自身状态只写 `<status>` 状态栏。
 - 裁判（`agency`）是**纯规则引擎不是 LLM**：好感度档位阈值 + 掷骰 + core 一致性驳回。别改成「导演/裁判 Agent 每回合判断」——那与省 token 初衷冲突，且不可复现。创造力只留给「世界 Agent 生成动作」这一处。
 - 角色 `core`（人设/外观/死穴/机制）**永不自动更**，只有用户能改；只有 `state`（好感度+态度/心情/所在）随剧情走 StateDelta。人为乱改若不带证据 → `source:user, 证据:空`，AI 据此识别为「设定注入」而非剧情，不强行自圆其说到卡死。别把 core 做成可自动生成（人设会崩）。

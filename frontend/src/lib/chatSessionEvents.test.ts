@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ChatMessage } from "../types/chat";
 import {
-  appendAudioSlot, appendImageSlot, appendTransitionSlot, dropMediaSlot, markMediaSlotFailed, pruneUnsubmittedMediaSlots, reduceChatStreamEvent, resetMediaSlotForRetry, resolveMediaSlot,
+  appendAudioSlot, appendImageSlot, appendTransitionSlot, bindMediaSlotPrompt, dropMediaSlot, markMediaSlotFailed, pruneUnsubmittedMediaSlots, reduceChatStreamEvent, resetMediaSlotForRetry, resolveMediaSlot,
   restoreSubmittedMediaSlots,
 } from "./chatSessionEvents";
 
@@ -17,6 +17,14 @@ describe("reduceChatStreamEvent", () => {
     messages = reduceChatStreamEvent(messages, "bot", { type: "delta", text: "完成" });
 
     expect(messages[0].text).toBe("主管选择 image\n完成");
+  });
+  it("thinking 增量进思考面板字段，正文不受影响", () => {
+    let messages = reduceChatStreamEvent(base(), "bot", { type: "delta", text: "正文开头" });
+    messages = reduceChatStreamEvent(messages, "bot", { type: "thinking", text: "先推演" });
+    messages = reduceChatStreamEvent(messages, "bot", { type: "thinking", text: "再落笔" });
+
+    expect(messages[0].thinking).toBe("先推演再落笔");
+    expect(messages[0].text).toBe("正文开头");
   });
   it("用最终清洗正文替换流式预览", () => {
     let messages = reduceChatStreamEvent(base(), "bot", { type: "delta", text: "原始流" });
@@ -176,6 +184,31 @@ describe("reduceChatStreamEvent", () => {
       { type: "text", text: "高潮画面。\n" },
       { type: "media-slot", slotId: "slot-1", status: "pending" },
       { type: "text", text: "\n\n后续段落。" },
+    ]);
+  });
+
+  it("已有 parts 时插画槽仍按 offset 定位插入而非 append 末尾（多插画）", () => {
+    // 2026-09-01：旧逻辑 `!message.parts` 时才对 text 切分，parts 已存在（第一个槽
+    // 已插入）时第二个槽恒 append 末尾 → 多插画时后续图全落到消息尾。改为按 text
+    // 对应 offset 位置插入，保留已有槽与顺序。
+    const current: ChatMessage[] = [{
+      id: "bot", role: "assistant", text: "开篇。高潮画面句。收束。", parts: [
+        { type: "text", text: "开篇。" },
+        { type: "media-slot", slotId: "slot-1", status: "pending" },
+        { type: "text", text: "高潮画面句。收束。" },
+      ],
+    }];
+    const next = reduceChatStreamEvent(current, "bot", {
+      type: "illustrate_request", prompt: "p", motion: 0, actors: [], id: "slot-2", offset: 9,
+    });
+
+    // offset 9 = 「开篇。」(3) + 「高潮画面句。」(6) → 槽2 插在高潮句后、收束句前
+    expect(next[0].parts).toEqual([
+      { type: "text", text: "开篇。" },
+      { type: "media-slot", slotId: "slot-1", status: "pending" },
+      { type: "text", text: "高潮画面句。\n" },
+      { type: "media-slot", slotId: "slot-2", status: "pending" },
+      { type: "text", text: "\n收束。" },
     ]);
   });
 
@@ -415,5 +448,21 @@ describe("resetMediaSlotForRetry（2026-08-30 重试即时反馈）", () => {
     ] }];
     expect(resetMediaSlotForRetry(messages, "bot", "s1")).toEqual(messages);
     expect(resetMediaSlotForRetry(messages, "bot", "ghost")).toEqual(messages);
+  });
+});
+
+
+describe("媒体槽自愈兜底（2026-08-31 深夜实锤：槽丢失导致生成图不插入）", () => {
+  it("bindMediaSlotPrompt 在槽丢失时补建 pending 占位槽", () => {
+    const messages = reduceChatStreamEvent(base(), "bot", { type: "replace", text: "正文" });
+    const bound = bindMediaSlotPrompt(messages, "bot", "slot-1", "prompt-1");
+    const parts = bound[0].parts || [];
+    expect(parts.some((p) => p.type === "media-slot" && p.slotId === "slot-1" && p.promptId === "prompt-1")).toBe(true);
+  });
+  it("resolveMediaSlot 在槽丢失时直接补插生成结果", () => {
+    const messages = reduceChatStreamEvent(base(), "bot", { type: "replace", text: "正文" });
+    const resolved = resolveMediaSlot(messages, "bot", "slot-1", "file:///x.png", "image");
+    const parts = resolved[0].parts || [];
+    expect(parts.some((p) => p.type === "image" && p.slotId === "slot-1" && p.url === "file:///x.png")).toBe(true);
   });
 });

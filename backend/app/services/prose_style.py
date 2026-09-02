@@ -29,6 +29,8 @@ CODE_STYLE_SELF_QA = "style_self_qa"                  # 自问自答（难道…
 CODE_STYLE_PATTERN_REPEAT = "style_pattern_repeat"    # 同一句式模板单轮重复
 CODE_STYLE_OPENING_CUE = "style_opening_cue"          # 跨轮开场趋同
 CODE_STYLE_LIVING_REVIEW = "style_living_review"      # S2 LLM 活人感通审综合判定
+CODE_STYLE_WORD_ECHO = "style_word_echo"              # 同词连用排比（没有，没有，没有）
+CODE_STYLE_MICRO_PARAGRAPH = "style_micro_paragraph"  # 两三字短语单独成段（左手。手松了。）
 
 # 单轮出现即报（warning）：空洞大词 / 套话 / 讨好腔 / 起手式。
 EXACT_PHRASES: tuple[str, ...] = (
@@ -48,8 +50,12 @@ _DASH = "——"
 _ELLIPSIS = "……"
 _DENSITY_PER_KILO = 2.5
 
-# 「不是A，而是B」模板：单轮 ≥2 次才报（单次在正常中文里合法）。
-_NOT_BUT_RE = re.compile(r"不是[^。！？；\n]{1,18}，?而是")
+# 「不是A，而是B／不是A，是B」模板族：单轮 ≥2 次才报（单次在正常中文里合法）。
+_NOT_BUT_RE = re.compile(r"不是[^。！？；\n]{1,18}，?(?:而是|是)")
+# 同词连用排比：「没有，没有，没有」——同一 1-6 字词紧邻重复 ≥3 次。
+_WORD_ECHO_RE = re.compile(r"([\u4e00-\u9fff]{1,6})(?:[，、,\s]+\1){2}")
+# 微段落：两三字短语单独成段（「左手。」「手松了。」）——单轮 ≥2 段即模板化。
+_MICRO_PARAGRAPH_MIN_REPEAT = 2
 
 # 自问自答：难道…？不/并非/未必…
 _SELF_QA_RE = re.compile(r"难道[^。！？\n]{1,30}[？?]\s*(?:不|并非|未必|当然不)")
@@ -89,6 +95,8 @@ def lint(text: str, *, recent_openings: list[str] | tuple[str, ...] = (),
             ))
     diagnostics.extend(_check_punct_density(body))
     diagnostics.extend(_check_pattern_repeat(body))
+    diagnostics.extend(_check_word_echo(body))
+    diagnostics.extend(_check_micro_paragraph(body))
     diagnostics.extend(_check_rhythm(body))
     diagnostics.extend(_check_opening_cue(body, recent_openings))
     return diagnostics
@@ -105,13 +113,17 @@ def _context(body: str, start: int, end: int, pad: int = 8) -> str:
 def _check_punct_density(body: str) -> list[dict]:
     out: list[dict] = []
     kilo = max(len(body), 1) / 1000.0
-    for mark, name in ((_DASH, "破折号"), (_ELLIPSIS, "省略号")):
+    for mark, name, min_count in ((_DASH, "破折号", 2), (_ELLIPSIS, "省略号", 2)):
         count = body.count(mark)
-        if count >= 2 and count / kilo > _DENSITY_PER_KILO:
+        # 破折号有棘轮效应：AI 用一次后续断句就越来越依赖（2026-08-30 用户实锤），
+        # ≥2 次即报，不再看密度；省略号维持密度阈值。
+        exceeded = (count >= min_count and name == "破折号") or (
+            count >= 2 and count / kilo > _DENSITY_PER_KILO)
+        if exceeded:
             first = body.find(mark)
             out.append(_diagnostic(
                 CODE_STYLE_PUNCT_DENSITY,
-                f"{name}密度超标（{count} 次 / 每千字 {count / kilo:.1f} 次，阈值 {_DENSITY_PER_KILO}）。",
+                f"{name}使用过度（{count} 次），正文应以逗号/句号断句。",
                 _context(body, first, first + len(mark)),
             ))
     return out
@@ -132,6 +144,48 @@ def _check_pattern_repeat(body: str) -> list[dict]:
             CODE_STYLE_SELF_QA,
             "自问自答句式（难道…？不/并非…）。",
             _context(body, qa.start(), qa.end()),
+        ))
+    # 对话回声变体：「知道了吗？」「我知道了。」「不，你不知道」——问句被复述再否定
+    echo = re.search(
+        r"(?:你知道了吗|你知道吗|明白了吗|懂了吗)[？?][\s\S]{0,80}?不[，,]\s*你不知道", body)
+    if echo:
+        out.append(_diagnostic(
+            CODE_STYLE_SELF_QA,
+            "对话回声句式（…吗？…了。不，你…）。",
+            _context(body, echo.start(), echo.end()),
+        ))
+    return out
+
+
+def _check_word_echo(body: str) -> list[dict]:
+    """同词连用排比：同一 1-6 字词紧邻重复 ≥3 次（没有，没有，没有）。"""
+    out: list[dict] = []
+    m = _WORD_ECHO_RE.search(body)
+    if m:
+        out.append(_diagnostic(
+            CODE_STYLE_WORD_ECHO,
+            f"同词连用排比：「{m.group(1)}」连续重复 3 次以上。",
+            _context(body, m.start(), m.end()),
+        ))
+    return out
+
+
+def _check_micro_paragraph(body: str) -> list[dict]:
+    """两三字短语单独成段：「左手。」「手松了。」——单轮 ≥2 段即模板化。"""
+    out: list[dict] = []
+    hits: list[str] = []
+    for para in re.split(r"(?:\r?\n){2,}", body):
+        seg = para.strip()
+        if not seg or seg.startswith(("<", "「", '"', "[", "＼")):
+            continue  # 标签块/对话/列表不是强调微段
+        core = _STRIP_PUNCT_RE.sub("", seg)
+        if 0 < len(core) <= 6:
+            hits.append(seg)
+    if len(hits) >= _MICRO_PARAGRAPH_MIN_REPEAT:
+        out.append(_diagnostic(
+            CODE_STYLE_MICRO_PARAGRAPH,
+            f"超短强调段单轮 {len(hits)} 处（如「{hits[0]}」「{hits[1]}」），观感碎裂。",
+            " / ".join(hits[:3]),
         ))
     return out
 
@@ -206,7 +260,13 @@ def style_prompt_segment(config: dict | None = None) -> str:
     return (
         "\n\n【文风要求】叙述用具体细节与动作，避免空洞概括与套路腔。"
         f"不得使用以下固定搭配：{listed}。"
-        "破折号与省略号节制使用；不用自问自答句式；"
+        "对比句式「不是A，而是B／不是A，是B／是不是…」一轮最多出现一次，禁止连用凑洞察感；"
+        "禁止同词连用排比（如「没有，没有，没有」），同一词紧邻重复最多两次；"
+        "禁止把两三个字的短语单独放一段（如「左手。」「手松了。」），强调必须融进完整句子里；"
+        "禁止对话回声（「知道了吗？」「我知道了。」「不，你不知道」这类一问一复述再否定）；"
+        "正文禁止使用破折号「——」断句；需要插入或转折时改用逗号、句号或冒号；"
+        "省略号「……」全文克制，每千字不超过两处；"
+        "不用自问自答句式（难道…？不，…）；不用「首先/其次/最后」式三段表态；"
         "句长长短交错，避免每句等长。"
     )
 

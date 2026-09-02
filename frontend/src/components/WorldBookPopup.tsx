@@ -12,10 +12,11 @@ import {
 const EMPTY_ENTRY: WBEntryFields = { content: "", comment: "", keys: [], constant: false, enabled: true };
 
 export function WorldBookPopup({
-  location, repoLoc, title, onClose,
+  location, repoLoc, seedFrom, title, onClose,
 }: {
   location: WBLocation;
   repoLoc?: RepoWorldbookLoc;
+  seedFrom?: { base: string; name: string };
   title?: string;
   onClose: () => void;
 }) {
@@ -29,7 +30,7 @@ export function WorldBookPopup({
 
   const reloadEntries = () => {
     const promise = repoLoc
-      ? repoWorldbookEntries(repoLoc).then((r) => r.entries)
+      ? repoWorldbookEntries(repoLoc, seedFrom).then((r) => r.entries)
       : listWorldbookEntries(location).then((r) => r.entries);
     promise.then(setEntries).catch((e) => setErr(String((e as Error).message || e)));
   };

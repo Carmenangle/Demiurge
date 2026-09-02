@@ -34,18 +34,36 @@ _NUM_UNBOUNDED = 1e9
 # 首次由 delta/set 创建且未显式带 min/max 时用此表；未登记字段仍无界（±1e9）。
 _FIELD_BOUNDS: dict[str, tuple[float, float]] = {AFFINITY_FIELD: (-100.0, 100.0)}
 _STATE_LABELS = ("身体状态", "精神状态", "生理状态", "心理状态", "外观状态", "伤势状态", "衣着状态")
+# 主角/第一人称代词不入角色状态表（2026-09-01 用户定案）：AI 常把「我/主角/你/玩家」
+# 当角色名写进状态表，但第一人称的「我」不是剧情角色，不应占一行。
+_PROTAGONIST_OWNERS = frozenset({
+    "主角", "我", "我们", "你", "您", "玩家", "宿主", "用户", "user", "player",
+})
+
+
+def _is_protagonist_leaf(leaf: str) -> bool:
+    """字段归属是否为主角（第一人称视角）——是则不入角色状态表（纯逻辑）。"""
+    if "·" not in (leaf or ""):
+        return False
+    return leaf.split("·", 1)[0].strip() in _PROTAGONIST_OWNERS
 
 
 def _canonical_leaf(
     leaf: str, card_name: str, owner_hints: dict[str, str] | None = None,
 ) -> str:
-    """把同一角色字段的中点、旧拼接和无归属单角色写法归为一个稳定键。"""
+    """把同一角色字段的中点、旧拼接和无归属单角色写法归为一个稳定键。
+
+    无归属裸字段只继承「同 label 唯一显式角色」（owner_hints）；没有唯一角色时
+    保留裸键，**不再回退 card_name**——合集卡名（如「凌霄仙母录」）不是角色名，
+    回退会把卡名误记成角色（2026-09-01 用户实锤）。裸键由 consolidate_fields
+    的 explicit_leaves 清理（有显式归属时）或前端 fallback 分组兜底。
+    """
     value = (leaf or "").strip()
     separated = re.match(r"^(.+?)[·：:](.+)$", value)
     if separated:
         return f"{separated.group(1).strip()}·{separated.group(2).strip()}"
     if value in _STATE_LABELS:
-        owner = (owner_hints or {}).get(value) or card_name
+        owner = (owner_hints or {}).get(value)
         return f"{owner}·{value}" if owner else value
     for label in _STATE_LABELS:
         if value.endswith(label) and len(value) > len(label):
@@ -64,7 +82,12 @@ def consolidate_fields(state: "CharacterState") -> "CharacterState":
             current = result.get(key)
             if current is None or int(value.turn) >= int(current.turn):
                 result[key] = value
-        explicit_leaves = {key.split("·", 1)[1] for key in result if "·" in key}
+        # 无归属裸键被显式归属键淘汰（旧拼接残留）；「好感度」例外——单主角模式的
+        # 全局好感度就是裸键「好感度」，删掉会让好感度字段凭空消失/换新
+        # （2026-09-01 用户实锤），故排除在清理集之外。
+        explicit_leaves = {
+            key.split("·", 1)[1] for key in result if "·" in key
+        } - {AFFINITY_FIELD}
         for leaf in explicit_leaves:
             result.pop(leaf, None)
         return result
@@ -200,7 +223,12 @@ def parse_deltas(
         if "/" not in fld:
             continue
         kind, leaf = fld.split("/", 1)
-        fld = f"{kind}/{_canonical_leaf(leaf, card_name, hints)}"
+        canonical = _canonical_leaf(leaf, card_name, hints)
+        # 主角/第一人称不入角色状态表（2026-09-01 用户定案）：AI 常把「我/主角/你」
+        # 当角色名写进状态表，这些字段应留在 <status> 状态栏，不占状态表一行。
+        if _is_protagonist_leaf(canonical):
+            continue
+        fld = f"{kind}/{canonical}"
         op = str(item.get("op") or "").strip().lower()
         evidence = str(item.get("evidence") or "").strip()
         if kind == _KIND_NUM:
@@ -239,6 +267,10 @@ def apply_deltas(state: CharacterState, deltas: list[StateDelta]) -> CharacterSt
             _log(state, d, before_s, str(d.value))
     if len(state.历史) > _HISTORY_CAP:
         state.历史 = state.历史[-_HISTORY_CAP:]
+    # 应用后再归一一次：delta 的 leaf 若在 parse 时无 owner_hints（如首轮、无
+    # existing_state），落到裸键后会与存量显式键并存（2026-09-01 回归实证），
+    # 末尾 consolidate 把裸键并回显式键（turn 新值覆盖旧值）。
+    consolidate_fields(state)
     return state
 
 
@@ -382,9 +414,13 @@ def render_state_block(state: CharacterState) -> str:
     """
     lines: list[str] = []
     for leaf, nf in state.数值.items():
+        if _is_protagonist_leaf(leaf):
+            continue
         prov = f" ({nf.evidence})" if nf.evidence else ""
         lines.append(f"{state.card_name}·{leaf}: {_fmt_num(nf.value)}{prov}")
     for leaf, sf in state.叙事.items():
+        if _is_protagonist_leaf(leaf):
+            continue
         prov = f" ({sf.evidence})" if sf.evidence else ""
         lines.append(f"{state.card_name}·{leaf}: {sf.value}{prov}")
     if not lines:

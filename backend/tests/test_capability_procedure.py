@@ -18,6 +18,45 @@ def test_capability_is_scoped_and_revocable(tmp_path):
         capability_sandbox.authorize(lease["id"], "scenario.snapshot", path=str(tmp_path))
 
 
+def test_full租约放行任意操作且可撤销(tmp_path):
+    capability_sandbox._reset_for_tests()
+    lease = capability_sandbox.grant(
+        "plan:full", [], ttl_seconds=600, approved_by="full_mode",
+        mode=capability_sandbox.ACCESS_FULL)
+    assert capability_sandbox.authorize(
+        lease["id"], "file.write", path=str(tmp_path / "anywhere"),
+    )["mode"] == capability_sandbox.ACCESS_FULL
+    assert capability_sandbox.authorize(
+        lease["id"], "workflow.submit_batch", path="D:\\elsewhere",
+    )["subject"] == "plan:full"
+    capability_sandbox.revoke(lease["id"])
+    with pytest.raises(PermissionError):
+        capability_sandbox.authorize(lease["id"], "file.write", path=str(tmp_path))
+
+
+def test_approval租约空capabilities拒绝而full放行():
+    capability_sandbox._reset_for_tests()
+    with pytest.raises(ValueError):
+        capability_sandbox.grant("plan:empty", [])
+    lease = capability_sandbox.grant(
+        "plan:full", [], mode=capability_sandbox.ACCESS_FULL)
+    assert lease["capabilities"] == [{"operation": "*", "path": "", "domain": "", "tool": ""}]
+    capability_sandbox.authorize(lease["id"], "any.op")
+
+
+def test_failure_summary从trace统计失败模式(monkeypatch):
+    monkeypatch.setattr(procedure_skills.run_trace, "read_recent", lambda *_a, **_k: [
+        {"event": "plan.step_failed", "data": {"operation": "test.batch", "error": "上游 502"}},
+        {"event": "plan.step_failed", "data": {"operation": "test.batch", "error": "上游 502"}},
+        {"event": "plan.step_blocked", "data": {"operation": "file.write_text", "reason": "write_loop"}},
+    ])
+    summary = procedure_skills.failure_summary("repo", turn_id="t1")
+    assert summary["total"] == 3
+    assert summary["failures"]["test.batch"]["count"] == 2
+    assert summary["failures"]["test.batch"]["reasons"] == ["上游 502"]
+    assert summary["failures"]["file.write_text"]["reasons"] == ["write_loop"]
+
+
 def test_procedure_requires_review_adapter_and_capability(monkeypatch, tmp_path):
     capability_sandbox._reset_for_tests()
     monkeypatch.setattr(procedure_skills, "STORE", tmp_path / "procedures.json")

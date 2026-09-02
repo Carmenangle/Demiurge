@@ -8,7 +8,7 @@ import threading
 import uuid
 from dataclasses import dataclass
 
-from app.services import agent_runner, chat_memory, chat_snapshot, rag_store, repo_meta
+from app.services import agent_runner, attachment_store, chat_memory, chat_snapshot, rag_store, repo_meta
 from app.services.pathnames import safe_seg
 from app.services.rag_backend import EmbedConfig
 
@@ -136,6 +136,11 @@ def clear(thread_id: str) -> dict:
             chat_memory.clear_history(thread_id)
         except Exception as exc:
             raise MaintenanceFailed(f"清空对话失败：{exc}") from exc
+        # B1 连带：对话线清空 = 该会话附件一起删（历史回放卡随之失效，属预期）
+        try:
+            attachment_store.delete_thread(thread_id)
+        except Exception as exc:  # noqa: BLE001 - 附件清理失败不阻断主流程
+            raise MaintenanceFailed(f"清理会话附件失败：{exc}") from exc
     return {"ok": True}
 
 
@@ -155,6 +160,11 @@ def clear_cache(thread_id: str, output_dir: str) -> ClearCacheResult:
             except Exception:
                 pass
             raise MaintenanceFailed(f"清空对话失败：{exc}") from exc
+        # B1 连带：快照清空 = 该会话附件一起删（历史回放卡随之失效，属预期）
+        try:
+            attachment_store.delete_thread(thread_id)
+        except Exception as exc:  # noqa: BLE001 - 附件清理失败不阻断主流程
+            raise MaintenanceFailed(f"清理会话附件失败：{exc}") from exc
 
         removed = 0
         if output_dir:

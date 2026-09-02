@@ -6,13 +6,11 @@ import {
   useRef,
   useState,
 } from "react";
-import { Plus, X } from "lucide-react";
+import { File as FileIcon, Film, Music, Plus, X } from "lucide-react";
 import { clampSelectionScroll } from "../lib/contextManagement";
 import { classifyClipboardPaste } from "../lib/richPaste";
-import {
-  buildFileAttachmentText, isTextFile,
-  readFileAsDataURL, readFileAsText,
-} from "../lib/fileAttach";
+import { uploadAttachment, type FileAttachmentMeta } from "../api/ai";
+import { readFileAsDataURL } from "../lib/fileAttach";
 import { serializeInspirationSend, type InspirationAttachment } from "../lib/inspirationInsert";
 
 // 序列化结果：图片在上、文本在下两层。parts 保留兼容（图片在前、文本在后）。
@@ -23,18 +21,22 @@ export interface MaskedImageInput {
 }
 
 export interface RichContent {
-  parts: {
-    type: "text" | "image" | "masked-image";
-    text?: string;
-    url?: string;
-    image?: string;
-    mask?: string;
-  }[];
+  parts: Array<
+    | { type: "text"; text?: string }
+    | { type: "image"; url?: string }
+    | { type: "masked-image"; url?: string; image?: string; mask?: string }
+    // 通用文件/媒体附件（type=file）：fileId 真源，D1 历史回放 ChatMessages.FileAttachmentChip
+    // 据此渲染文件名+大小+下载按钮。修复 2026-09-01 bug：原本 RichContent.parts 类型不含 file，
+    // attachments 仅放顶层 content.attachments 字段 → userMsg.parts 缺 file → 用户消息不显示附件。
+    | { type: "file"; fileId: string; name: string; mime: string; size: number }
+  >;
   text: string;       // 纯文本（用于指令解析与回显）
   images: string[];   // 所有图片 URL（dataURI/http），按上方栏从左到右顺序
   maskedImage?: MaskedImageInput;
   /** 灵感卡附件（9:16 卡片）：发送时图文拆分，编辑回填时据此还原卡片形态 */
   inspirationAttachments?: InspirationAttachment[];
+  /** 通用文件附件（A1 第三栏：任意类型文件，上传后持 file_id 元信息随消息透传 agent） */
+  attachments?: FileAttachmentMeta[];
 }
 
 export interface RichInputHandle {
@@ -51,9 +53,12 @@ interface Props {
   templateNames: string[];
   height?: number;
   placeholder?: string;
+  /** 当前会话 thread_id（附件上传目标会话，默认 "home"） */
+  threadId?: string;
   onSubmit: (content: RichContent) => void;
   onTextChange?: (text: string) => void;  // 文本变化（供外部感知，可选）
   onCanSubmitChange?: (can: boolean) => void;  // 可提交状态变化（文本或图片任一非空），驱动发送按钮
+  onNotify?: (msg: string, kind: "info" | "error" | "success") => void;  // 上传失败等轻提示
 }
 
 interface CmdCandidate {
@@ -68,6 +73,24 @@ function isVideoUrl(url: string): boolean {
   return /\.(mp4|webm|mov|mkv)$/.test(path);
 }
 
+// 文件大小人类可读：B/KB/MB/GB
+function formatFileSize(bytes: number): string {
+  if (!bytes || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  const idx = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / 1024 ** idx;
+  return `${value >= 100 || idx === 0 ? Math.round(value) : value.toFixed(1)} ${units[idx]}`;
+}
+
+// 附件占位卡唯一 id：优先 crypto.randomUUID（安全上下文），否则回退时间戳+随机数
+// （非 localhost/HTTPS 访问（如局域网 IP）时 randomUUID 不可用，直接调用会 TypeError）。
+function randomId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `id-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 // 当前光标所在文本的「活动段」：按 " + " 分隔取最后一段，解析 /cmd arg
 function parseActiveSeg(text: string): { cmd: string; arg: string } | null {
   const idx = text.lastIndexOf(" + ");
@@ -77,12 +100,14 @@ function parseActiveSeg(text: string): { cmd: string; arg: string } | null {
 }
 
 export const RichInput = forwardRef<RichInputHandle, Props>(
-  ({ templateNames, height, placeholder, onSubmit, onTextChange, onCanSubmitChange }, ref) => {
+  ({ templateNames, height, placeholder, threadId = "home", onSubmit, onTextChange, onCanSubmitChange, onNotify }, ref) => {
     const taRef = useRef<HTMLTextAreaElement | null>(null);
     const fileRef = useRef<HTMLInputElement | null>(null);  // 上方 + 按钮的隐藏 file input
     const [images, setImages] = useState<string[]>([]);     // 图片栏：dataURI/URL，左到右
     const [inspCards, setInspCards] = useState<InspirationAttachment[]>([]); // 灵感卡附件（9:16 卡片）
     const [maskedImage, setMaskedImage] = useState<MaskedImageInput | null>(null);
+    const [media, setMedia] = useState<FileAttachmentMeta[]>([]);       // 媒体栏：视频/音频（A1 第二栏）
+    const [attachments, setAttachments] = useState<FileAttachmentMeta[]>([]); // 通用文件栏（A1 第三栏）
     const [active, setActive] = useState(0);
     const [closed, setClosed] = useState(false);
     const [curText, setCurText] = useState("");  // 当前纯文本（驱动补全）
@@ -148,27 +173,20 @@ export const RichInput = forwardRef<RichInputHandle, Props>(
     const removeImage = (url: string) => setImages((arr) => arr.filter((u) => u !== url));
     const removeInspCard = (id: string) => setInspCards((arr) => arr.filter((c) => c.id !== id));
 
-    // 上方 + 按钮选图
+    // 上方 + 按钮选文件：图片/媒体/任意文件都收，accept 仅作系统选择器提示（不再白名单静默丢弃）
     const onPickFiles = (files: FileList | null) => {
       if (!files) return;
       Array.from(files).forEach((f) => {
-        if (!f.type.startsWith("image/") && !isTextFile(f)) return;
-        if (f.type.startsWith("image/")) {
-          const reader = new FileReader();
-          reader.onload = () => addImage(String(reader.result || ""));
-          reader.readAsDataURL(f);
-        } else {
-          void applyFile(f);
-        }
+        void applyFile(f);
       });
     };
 
     const doSubmitRef = useRef<() => void>(() => {});
 
-    // 可提交 = 文本非空 或 有图片 或 有灵感卡。文本或图片任一变化都上报，驱动外部发送按钮启用/禁用。
+    // 可提交 = 文本非空 或 有图片/灵感卡/蒙版 或 有附件。任一变化都上报，驱动外部发送按钮启用/禁用。
     useEffect(() => {
-      onCanSubmitChange?.(curText.trim().length > 0 || images.length > 0 || !!maskedImage || inspCards.length > 0);
-    }, [curText, images, maskedImage, inspCards, onCanSubmitChange]);
+      onCanSubmitChange?.(curText.trim().length > 0 || images.length > 0 || !!maskedImage || inspCards.length > 0 || media.length > 0 || attachments.length > 0);
+    }, [curText, images, maskedImage, inspCards, media, attachments, onCanSubmitChange]);
 
     useImperativeHandle(ref, () => ({
       insertImage: (url: string) => addImage(url),
@@ -183,6 +201,8 @@ export const RichInput = forwardRef<RichInputHandle, Props>(
         setImages([...new Set(content.images.filter(Boolean))]);
         setMaskedImage(content.maskedImage || null);
         setInspCards(content.inspirationAttachments ? [...content.inspirationAttachments] : []);
+        setMedia([]);
+        setAttachments(content.attachments ? [...content.attachments] : []);
         setCurText(text);
         setClosed(false);
         setActive(0);
@@ -210,18 +230,47 @@ export const RichInput = forwardRef<RichInputHandle, Props>(
       requestAnimationFrame(() => { ta.focus(); ta.selectionStart = ta.selectionEnd = s + text.length; });
     };
 
-    // 文件拖拽/选择：图片走图片栏，文本文件以「文件参考」块插入（agent 全链路可参考）
+    // 移除媒体/通用文件附件（按 file_id 定位，上传失败占位卡也用唯一 id 移除）
+    const removeMedia = (fileId: string) => setMedia((arr) => arr.filter((a) => a.fileId !== fileId));
+    const removeAttachment = (fileId: string) => setAttachments((arr) => arr.filter((a) => a.fileId !== fileId));
+
+    // 通用文件/媒体：上传到会话级附件存储，持 file_id 元信息（A1/B1）。失败移除占位并轻提示。
+    const uploadAsAttachment = async (file: File, kind: "media" | "file") => {
+      const pendingId = `pending-${randomId()}`;
+      const pending: FileAttachmentMeta = {
+        fileId: pendingId, name: file.name, mime: file.type || "application/octet-stream", size: file.size,
+      };
+      if (kind === "media") setMedia((arr) => [...arr, pending]);
+      else setAttachments((arr) => [...arr, pending]);
+      try {
+        const meta = await uploadAttachment(threadId, file);
+        // meta 已是完整 FileAttachmentMeta（uploadAttachment 负责 snake→camel 映射），整体替换占位卡。
+        const next = (arr: FileAttachmentMeta[]) =>
+          arr.map((a) => (a.fileId === pendingId ? meta : a));
+        if (kind === "media") setMedia((arr) => next(arr));
+        else setAttachments((arr) => next(arr));
+      } catch (error) {
+        if (kind === "media") removeMedia(pendingId);
+        else removeAttachment(pendingId);
+        onNotify?.(
+          `附件「${file.name}」上传失败：${error instanceof Error ? error.message : String(error)}`,
+          "error",
+        );
+      }
+    };
+
+    // 文件拖拽/粘贴/选择统一入口：图片 → 图片栏（vision 多模态），视频/音频 → 媒体栏，其余 → 通用文件栏。
+    // 图片不重灌 token 不随消息透传（沿用插画红线）；媒体/文件上传后仅持元信息，agent 按类型消化。
     const applyFile = async (file: File) => {
-      if (file.type.startsWith("image/") && !isTextFile(file)) {
+      if (file.type.startsWith("image/")) {
         addImage(await readFileAsDataURL(file));
         return;
       }
-      if (isTextFile(file)) {
-        const content = await readFileAsText(file);
-        insertAtCursor(`
-${buildFileAttachmentText(file.name, content)}
-`);
+      if (file.type.startsWith("video/") || file.type.startsWith("audio/")) {
+        void uploadAsAttachment(file, "media");
+        return;
       }
+      void uploadAsAttachment(file, "file");
     };
     const onDropFiles = (e: React.DragEvent) => {
       const files = Array.from(e.dataTransfer?.files || []);
@@ -278,27 +327,31 @@ ${buildFileAttachmentText(file.name, content)}
       // ★ 灵感卡附件：图文拆分发送——封面图作为图片参数上传，title/content 转成
       //   Agent 语义文本（「灵感参考」身份标记），追加在用户文本之后。
       const { text: finalText, images: finalImages } = serializeInspirationSend(inspCards, text, images);
-      if (!finalText && finalImages.length === 0 && !maskedImage) return;
-      const parts: RichContent["parts"] = [
-        ...finalImages.map((url) => ({ type: "image" as const, url })),
-        ...(maskedImage ? [{
-          type: "masked-image" as const,
-          url: maskedImage.preview,
-          image: maskedImage.image,
-          mask: maskedImage.mask,
-        }] : []),
-        ...(finalText ? [{ type: "text" as const, text: finalText }] : []),
-      ];
+      // D1 回放过滤 pending：未上传成功的占位卡（fileId="pending-..."）不入 parts 与顶层 attachments，
+      // 避免 FileAttachmentChip 显示「不可用」+ 后端 file_reference_blocks 收到无效 fileId。
+      const allAttachments = [...media, ...attachments].filter(
+        (a) => !String(a.fileId || "").startsWith("pending-") && a.fileId,
+      );
+      if (!finalText && finalImages.length === 0 && !maskedImage && allAttachments.length === 0) return;
+      const parts = buildSubmitParts({
+        text: finalText,
+        images: finalImages,
+        ...(maskedImage ? { maskedImage } : {}),
+        attachments: allAttachments,
+      });
       onSubmit({
         parts,
         text: finalText,
         images: finalImages,
         ...(maskedImage ? { maskedImage } : {}),
         ...(inspCards.length > 0 ? { inspirationAttachments: [...inspCards] } : {}),
+        ...(allAttachments.length > 0 ? { attachments: allAttachments } : {}),
       });
       setImages([]);
       setInspCards([]);
       setMaskedImage(null);
+      setMedia([]);
+      setAttachments([]);
       setCurText("");
       onTextChange?.("");
     };
@@ -315,27 +368,58 @@ ${buildFileAttachmentText(file.name, content)}
     };
 
 
-    // 粘贴：图片(文件/截图/直链/对话里复制的生成图) → 加入上方图片栏；纯文本放行 textarea 默认。
+    // 粘贴：文件（Ctrl+C/V 复制的文件、截图）→ 按类型入栏；纯文本放行 textarea 默认。
+    // 关键修复：遍历 clipboardData.files（含文件管理器复制的任意文件），不再只查 items 里的图片。
+    // 2026-09-01 修复：混合内容（文本+图片）现在**两者都保留**——图片进图片栏，文本插入输入框。
+    // ⚠ 分支顺序红线：text-with-image-file 判断必须在 pastedFiles 文件分支**之前**——混合粘贴时
+    // clipboardData.files 非空，若先走文件分支会 preventDefault + return，文本被静默丢弃
+    // （2026-09-01 e2e 实测捕获：textarea 为空）。
     const onPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
       const html = e.clipboardData.getData("text/html");
-      const imgItem = Array.from(e.clipboardData.items).find(
+      const imageItems = Array.from(e.clipboardData.items).filter(
         (it) => it.type.startsWith("image/"),
       );
-      const file = imgItem?.getAsFile() || null;
+      const firstFile = imageItems.length > 0 ? imageItems[0].getAsFile() : null;
       const text = e.clipboardData.getData("text/plain");
+      const pastedFiles = Array.from(e.clipboardData.files || []);
       const intent = classifyClipboardPaste({
         text,
         html,
-        hasImageFile: Boolean(file && file.size > 0),
+        hasImageFile: Boolean(firstFile && firstFile.size > 0),
       });
-      if (intent.kind === "text") return;
 
+      // 混合内容（有意义文本 + 图片文件）：两者都保留（必须在文件分支之前）。
+      if (intent.kind === "text-with-image-file") {
+        e.preventDefault();
+        // 混合：所有 image items 进图片栏（多张都加），文本插入光标处。
+        for (const item of imageItems) {
+          const f = item.getAsFile();
+          if (!f || f.size === 0) continue;
+          const reader = new FileReader();
+          reader.onload = () => addImage(String(reader.result || ""));
+          reader.readAsDataURL(f);
+        }
+        if (text) insertAtCursor(text);
+        return;
+      }
+      // 纯文件（无文本）：文件管理器复制/Ctrl+C 复制的文件 → 按类型入栏（图片→图片栏，媒体→媒体栏，其余→文件栏）。
+      if (pastedFiles.length > 0) {
+        e.preventDefault();
+        void (async () => {
+          for (const f of pastedFiles) {
+            try { await applyFile(f); } catch { /* 单个文件失败不中断其余 */ }
+          }
+        })();
+        return;
+      }
+      // 纯文本：放行 textarea 默认插入。
+      if (intent.kind === "text") return;
       e.preventDefault();
       if (intent.kind === "image-file") {
-        if (!file) return;
+        if (!firstFile) return;
         const reader = new FileReader();
         reader.onload = () => addImage(String(reader.result || ""));
-        reader.readAsDataURL(file);
+        reader.readAsDataURL(firstFile);
         return;
       }
       addImage(intent.url);
@@ -367,7 +451,7 @@ ${buildFileAttachmentText(file.name, content)}
           <input
             ref={fileRef}
             type="file"
-            accept="image/*,.md,.txt,.json,.csv,.log,.yaml,.yml,.xml,.html,.ts,.py,.srt,.ass"
+            accept="image/*,video/*,audio/*,.md,.txt,.json,.csv,.log,.yaml,.yml,.xml,.html,.ts,.py,.srt,.ass,.pdf,.docx,.xlsx,.zip,.safetensors,.bin,.ckpt"
             multiple
             style={{ display: "none" }}
             onChange={(e) => { onPickFiles(e.target.files); e.target.value = ""; }}
@@ -456,6 +540,56 @@ ${buildFileAttachmentText(file.name, content)}
             </span>
           )}
         </div>
+        {/* 媒体栏（A1 第二栏）：视频/音频附件卡。上传中显示占位，完成后持 file_id 元信息随消息透传 */}
+        {media.length > 0 && (
+          <div className="rich-filebar">
+            {media.map((m) => (
+              <span key={m.fileId} className="rich-filebar-item" title={m.name}>
+                {String(m.fileId).startsWith("pending-")
+                  ? <span className="bot-spinner" />
+                  : m.mime?.startsWith("video/")
+                    ? <Film size={18} className="rich-filebar-icon" />
+                    : <Music size={18} className="rich-filebar-icon" />}
+                <span className="rich-filebar-name">{m.name}</span>
+                <span className="rich-filebar-size">
+                  {String(m.fileId).startsWith("pending-") ? "上传中…" : formatFileSize(m.size)}
+                </span>
+                <button
+                  type="button"
+                  className="rich-imgbar-del"
+                  title="移除"
+                  onClick={() => removeMedia(m.fileId)}
+                >
+                  <X size={12} />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+        {/* 通用文件栏（A1 第三栏）：任意类型文件（md/code/office/pdf/zip/模型…），上传后持元信息 */}
+        {attachments.length > 0 && (
+          <div className="rich-filebar">
+            {attachments.map((a) => (
+              <span key={a.fileId} className="rich-filebar-item" title={a.name}>
+                {String(a.fileId).startsWith("pending-")
+                  ? <span className="bot-spinner" />
+                  : <FileIcon size={18} className="rich-filebar-icon" />}
+                <span className="rich-filebar-name">{a.name}</span>
+                <span className="rich-filebar-size">
+                  {String(a.fileId).startsWith("pending-") ? "上传中…" : formatFileSize(a.size)}
+                </span>
+                <button
+                  type="button"
+                  className="rich-imgbar-del"
+                  title="移除"
+                  onClick={() => removeAttachment(a.fileId)}
+                >
+                  <X size={12} />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
         {/* 下方纯文本输入 */}
         <textarea
           ref={taRef}
@@ -481,3 +615,37 @@ ${buildFileAttachmentText(file.name, content)}
     );
   },
 );
+
+// 纯函数：构造 doSubmit 的 RichContent.parts。
+// **D1 历史回放关键**——通用文件/媒体附件（attachments 数组）必须**转成 type="file" 的 part**，
+// 写入 userMsg.parts，ChatMessages.FileAttachmentChip 据此渲染文件名+大小+下载按钮。
+// 历史教训（2026-09-01 用户报告）：RichInput.doSubmit 早期只把 attachments 放顶层 `content.attachments`，
+// userMsg.parts 缺 file part → ChatMessages 走 else 分支只渲染 msg.text → 用户看到消息里"只有文本+图，
+// 没有附件元信息"。fix：file part 在此构造，由 useChatSession.runFreeText 的 `content?.parts || fallback`
+// 直接透传（不会重复拼接）。
+// pending-* 占位卡由调用方在传入前过滤——本函数不再二次过滤（保证单元测试可观测纯净入参）。
+export function buildSubmitParts(input: {
+  text: string;
+  images: string[];
+  maskedImage?: MaskedImageInput;
+  attachments: FileAttachmentMeta[];
+}): RichContent["parts"] {
+  const fileParts: RichContent["parts"] = input.attachments.map((a) => ({
+    type: "file" as const,
+    fileId: a.fileId,
+    name: a.name,
+    mime: a.mime,
+    size: a.size,
+  }));
+  return [
+    ...input.images.map((url) => ({ type: "image" as const, url })),
+    ...(input.maskedImage ? [{
+      type: "masked-image" as const,
+      url: input.maskedImage.preview,
+      image: input.maskedImage.image,
+      mask: input.maskedImage.mask,
+    }] : []),
+    ...fileParts,
+    ...(input.text ? [{ type: "text" as const, text: input.text }] : []),
+  ];
+}

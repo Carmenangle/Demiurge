@@ -5,11 +5,16 @@
 对外 API 不变。"""
 import queue
 import threading
+import time
 from typing import Iterator
 
-from app.services import agent_graph, chat_memory, generation_store, run_trace, thread_admission
+from app.services import agent_graph, chat_memory, chat_snapshot, generation_store, run_trace, thread_admission
 from app.services.agent_contracts import AgentEvent, RunContext
 from app.services.thread_admission import RunAlreadyActive  # noqa: F401  重导出，保调用方不变
+
+# 流式期间半成品落盘节流：刷新/换设备后能看到未完成正文（2026-08-31 用户实锤刷新丢正文）。
+PARTIAL_PERSIST_INTERVAL_SECONDS = 2.0
+PARTIAL_PERSIST_MIN_CHARS = 300
 
 
 def is_running(thread_id: str) -> bool:
@@ -24,11 +29,33 @@ def run_multi_stream(context: RunContext) -> "queue.Queue":
     """启动 supervisor 多 Agent；同一 thread 只允许一个活动运行。"""
     q: "queue.Queue" = queue.Queue()
     final_text: list[str] = []
+    partial_thinking: list[str] = []
     approval_updates: list[dict] = []
     route_choice_updates: list[dict] = []
+    last_partial_persist = 0.0
+    last_partial_len = 0
+
+    def persist_partial(now: float) -> None:
+        """把当前半成品正文（与思考）节流写入快照：刷新后可恢复，且不重复建气泡。"""
+        nonlocal last_partial_persist, last_partial_len
+        text = "".join(final_text).strip()
+        try:
+            # 半成品落盘是尽力而为：失败不得把生成流打成 error（刷新最多退回旧快照）。
+            if text:
+                generation_store.persist_text(context.thread_id, context.message_id, text)
+            if partial_thinking:
+                chat_snapshot.merge_fields(
+                    context.thread_id, context.message_id,
+                    thinking="".join(partial_thinking),
+                )
+        except Exception:  # noqa: BLE001 - 半成品落盘失败不阻断生成
+            pass
+        last_partial_persist = now
+        last_partial_len = len(text)
     admission = thread_admission.admit(context.thread_id, context.cancel_event)
     generation_store.persist_user_message(
         context.thread_id, context.user_message_id, context.message, context.input_images(),
+        context.attachments,
     )
     run_trace.emit(
         context, "turn.started",
@@ -53,6 +80,16 @@ def run_multi_stream(context: RunContext) -> "queue.Queue":
             )
         elif event.get("delta"):
             final_text.append(event["delta"])
+        if event.get("thinking"):
+            partial_thinking.append(event["thinking"])
+        if event.get("delta") or event.get("thinking"):
+            text_len = len("".join(final_text))
+            if text_len:
+                now = time.monotonic()
+                if (last_partial_persist == 0.0
+                        or now - last_partial_persist >= PARTIAL_PERSIST_INTERVAL_SECONDS
+                        or text_len - last_partial_len >= PARTIAL_PERSIST_MIN_CHARS):
+                    persist_partial(now)
         if event.get("illustrate_request"):
             request = event["illustrate_request"]
             generation_store.persist_media_slot(

@@ -143,3 +143,10 @@ describe("chat stream protocol", () => {
     });
   });
 });
+
+describe("thinking 事件", () => {
+  it("解码 thinking 增量（思考全公开）", () => {
+    const wire = { protocol: "laf-chat-stream", version: 1, type: "thinking", data: { text: "先推演" } };
+    expect(decodeChatStreamEvent(wire)).toEqual({ type: "thinking", text: "先推演" });
+  });
+});

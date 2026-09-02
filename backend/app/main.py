@@ -14,7 +14,7 @@ from app.services import comfy_launcher
 from app.services.workflow_build_tasks import start_worker as start_workflow_build_worker
 from app.services.chat_agent_queue import start_worker as start_chat_agent_queue_worker
 from app.services.plan_tasks import start_worker as start_plan_task_worker
-from app.routers import ai, ai_providers, agents, assets, characters, comfyui, gif_sprite, gguf_importer, image_resize, loras, mcp, models, narrative, node_manager, palette, plans, preset, procedures, rag, regex, runs, scenario, skills, state, table, user_state, visual_ci, workflows, worldbook
+from app.routers import ai, ai_providers, agents, assets, attachments, characters, comfyui, docs, gif_sprite, gguf_importer, image_resize, loras, mcp, models, narrative, node_manager, palette, plans, preset, procedures, rag, regex, runs, scenario, skills, state, table, user_state, visual_ci, workflows, worldbook
 
 app = FastAPI(title="Local AI ComfyUI Frontend API")
 init_db()
@@ -81,6 +81,7 @@ app.include_router(comfyui.router, prefix="/api/comfyui", tags=["comfyui"])
 app.include_router(models.router, prefix="/api/models", tags=["models"])
 app.include_router(node_manager.router, prefix="/api/node-manager", tags=["node-manager"])
 app.include_router(user_state.router, prefix="/api/user-state", tags=["user-state"])
+app.include_router(attachments.router, prefix="/api/attachments", tags=["attachments"])
 app.include_router(gguf_importer.router, prefix="/api/gguf", tags=["gguf-importer"])
 app.include_router(visual_ci.router, prefix="/api/visual-ci", tags=["visual-ci"])
 app.include_router(mcp.router, prefix="/api/mcp", tags=["mcp"])
@@ -88,12 +89,19 @@ app.include_router(skills.router, prefix="/api/skills", tags=["skills"])
 app.include_router(agents.router, prefix="/api/agents", tags=["agents"])
 app.include_router(scenario.router, prefix="/api/scenario", tags=["scenario"])
 app.include_router(procedures.router, prefix="/api/procedures", tags=["procedures"])
+app.include_router(docs.router, prefix="/api/docs", tags=["docs"])
 
 
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
 
+
+# 新人引导「独立文档页」正文里的相对图片（如 ../assets/guide/x.png）指向仓库 docs/assets，
+# 挂成静态目录供文档正文引用。必须在前端 dist 的 "/" 挂载之前注册，否则被它吞掉。
+_DOCS_ASSETS = Path(__file__).resolve().parents[2] / "docs" / "assets"
+if _DOCS_ASSETS.is_dir():
+    app.mount("/docs-assets", StaticFiles(directory=_DOCS_ASSETS), name="docs-assets")
 
 _FRONTEND_DIST = Path(os.environ.get("LAF_FRONTEND_DIST", "")).expanduser()
 if str(_FRONTEND_DIST) not in {"", "."} and (_FRONTEND_DIST / "index.html").is_file():

@@ -12,6 +12,21 @@ from typing import Any
 from app.services.workflow_submission import WorkflowSubmissionError, submit_template
 
 
+def list_templates() -> dict[str, Any]:
+    """列出全部工作流模板（dict 形态，产出键 templates，供 inputs_from 点引用）。"""
+    from app.services import template_store
+    return {"templates": template_store.list_templates()}
+
+
+def read_exposed_fields(template_id: str) -> dict[str, Any]:
+    """读取单个模板的 exposed 字段定义；模板不存在时抛错，不静默返回 null。"""
+    from app.services import template_store
+    template = template_store.get_template(template_id)
+    if template is None:
+        raise ValueError(f"模板不存在：{template_id}")
+    return {"template": template}
+
+
 def submit_batch(template_id: str, variants: list[dict[str, Any]], prompt: str = "",
                  url: str = "", client_id: str = "", lora_name: str = "",
                  loras: list[dict[str, Any]] | None = None,
@@ -52,7 +67,8 @@ def submit_batch(template_id: str, variants: list[dict[str, Any]], prompt: str =
             if unresolved:
                 outcome["lora_unresolved"] = unresolved
             results.append({"index": index, "ok": True,
-                            "prompt_id": outcome.get("prompt_id")})
+                            "prompt_id": outcome.get("prompt_id"),
+                            "prompt": step_prompt})
         except WorkflowSubmissionError as exc:
             results.append({"index": index, "ok": False, "detail": str(exc.detail)})
     return {
@@ -104,9 +120,9 @@ def collect_comfy_outputs(prompt_ids: list[str] | None = None, comfyui_url: str 
                           names: list[str] | None = None,
                           prompts: list[str] | None = None,
                           timeout_seconds: int = 600) -> dict[str, Any]:
-    """委派产物采集：轮询 ComfyUI 历史取图 → 落作品文件夹 → 注册进资产库（generation RAG）。
+    """智能编造产物采集：轮询 ComfyUI 历史取图 → 落作品文件夹 → 注册进资产库（generation RAG）。
 
-    每个取到的图在资产库里挂 prompt（提交时的提示词）+ tags「委派计划」，
+    每个取到的图在资产库里挂 prompt（提交时的提示词）+ tags「智能编造计划」，
     前端资产库/摘要卡按 local-view URL 展示。阻塞轮询在执行器心跳保护下安全。
     """
     import time as _time
@@ -135,7 +151,9 @@ def collect_comfy_outputs(prompt_ids: list[str] | None = None, comfyui_url: str 
         ids = [str(x) for x in (prompt_ids or [])]
     if not ids:
         raise ValueError("collect 缺少 prompt_ids（或 inputs_from 提供的 submit_result）")
-    deadline = _time.time() + max(30, timeout_seconds)
+    # 总超时 = max(调用方给的 timeout_seconds, 每张 300s × 张数)——ComfyUI 串行
+    # 出图每张可能 2-4 分钟，14 张共享 600s 必然超时（2026-09-02 实锤）。
+    deadline = _time.time() + max(30, timeout_seconds, len(ids) * 300)
     results: list[dict[str, Any]] = []
     prompt_ids = ids
     for index, prompt_id in enumerate(prompt_ids):
@@ -168,11 +186,29 @@ def collect_comfy_outputs(prompt_ids: list[str] | None = None, comfyui_url: str 
         dest = base / f"{len(results) + 1:02d}-{uuid.uuid4().hex[:8]}.png"
         dest.write_bytes(data)
         shown = view_urls.local_view(str(dest))
+        # 图片消息内容 = 套装名称 + 完整提示词（优先 prompts 参数，其次 submit_result
+        # 里该变体实际使用的 prompt，最后回退套装名）。
+        _prompt_text = str(prompts[index] if prompts and index < len(prompts) else "")
+        if not _prompt_text and submit_result:
+            _items = submit_result if isinstance(submit_result, list) else [submit_result]
+            _item = _items[index] if index < len(_items) and isinstance(_items[index], dict) else {}
+            _prompt_text = str(_item.get("prompt") or "")
+        if not _prompt_text:
+            _prompt_text = str(label)
+        _message_text = f"{label}\n\n{_prompt_text}" if _prompt_text != label else label
+        # 每张图作为独立消息写进对话快照（图片+名称+提示词，像 /w 工作流结果一样），
+        # 刷新对话即可逐张看到；thread_id = repo_id（计划所属会话）。
+        try:
+            from app.services import chat_snapshot as _cs
+            _cs.upsert(repo_id, _cs.assistant_message(
+                str(uuid.uuid4()), _message_text, image=shown))
+        except Exception:  # noqa: BLE001 - 快照追加失败不影响采集主流程
+            pass
         try:
             rag_store.index_generation(
                 repo_id, EmbedConfig(embed_base, embed_key, embed_model),
-                prompt=(prompts[index] if prompts and index < len(prompts) else label),
-                tags="委派计划", image_url=shown, media_type="image")
+                prompt=_prompt_text,
+                tags="智能编造计划", image_url=shown, media_type="image")
         except Exception as exc:  # noqa: BLE001 - 入库失败不丢文件
             results.append({"prompt_id": prompt_id, "label": label, "ok": True,
                             "file": str(dest), "url": shown,
@@ -300,3 +336,165 @@ def lora_list() -> dict[str, Any]:
          "suggested_weight": (meta.get(name) or {}).get("suggested_weight"),
          "note": (meta.get(name) or {}).get("note", "")}
         for name in sorted(installed)]}
+
+# ── 智能编造 Agent 通用创作能力（P3，全作品域内落盘）────────────────────────
+# 安全边界：写入一律用「base=作品目录」由 submit_task 环境归一注入，不接受模型给
+# 任意 base/绝对路径；路径域由 plan_validator（写类绝对路径）与执行期租约兜底。
+
+def write_text_file(path: str, content: str, overwrite: bool = False) -> dict[str, Any]:
+    """写 UTF-8 文本文件（写类 durable，路径域与租约由计划链路强制）。"""
+    from pathlib import Path as _Path
+
+    if not _Path(path).is_absolute():
+        raise ValueError("仅接受绝对路径（相对路径不做隐式解析）")
+    target = _Path(path).expanduser()
+    if target.is_dir():
+        raise ValueError("目标路径是目录，拒绝写入")
+    if target.is_file() and not overwrite:
+        raise ValueError(f"目标文件已存在，未授权覆盖：{target}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content or "", encoding="utf-8")
+    return {"path": str(target), "bytes": len((content or "").encode("utf-8"))}
+
+
+def list_dir(path: str, max_entries: int = 200) -> dict[str, Any]:
+    """列目录（readonly）：只返回名称/类型/大小，不返回文件内容。"""
+    from pathlib import Path as _Path
+
+    if not _Path(path).is_absolute():
+        raise ValueError("仅接受绝对路径（相对路径不做隐式解析）")
+    target = _Path(path).expanduser()
+    if not target.is_dir():
+        raise ValueError(f"目录不存在：{path}")
+    entries = []
+    for item in sorted(target.iterdir(), key=lambda p: p.name.lower()):
+        try:
+            st = item.stat()
+            entries.append({"name": item.name, "type": "dir" if item.is_dir() else "file",
+                            "size": st.st_size if item.is_file() else None})
+        except OSError:
+            continue
+        if len(entries) >= max(1, min(max_entries, 500)):
+            break
+    return {"path": str(target), "count": len(entries), "entries": entries}
+
+
+def upsert_repo_worldbook(base: str, repo_id: str,
+                          entries: list[dict[str, Any]]) -> dict[str, Any]:
+    """向作品世界书快照 upsert 条目（durable）。快照不存在则创建骨架。"""
+    from app.services import worldbook_edit, worldbook_store
+
+    if not (base and repo_id):
+        raise ValueError("作品目录与 repo_id 由执行环境归一注入，不接受空值")
+    book = worldbook_store.read_repo_snapshot(base, repo_id)
+    if book is None:
+        book = {"entries": []}
+        snap = worldbook_store.repo_snapshot_path(base, repo_id)
+        snap.parent.mkdir(parents=True, exist_ok=True)
+    applied = 0
+    indexed = {str(item.get("index")): item for item in worldbook_edit.list_entries(book)}
+    for patch in entries or []:
+        if not isinstance(patch, dict):
+            continue
+        keys = patch.get("keys") or patch.get("key") or []
+        if isinstance(keys, str):
+            keys = [keys]
+        comment = str(patch.get("comment") or "").strip()
+        hit = next((item for item in indexed.values()
+                    if ((comment and str(item.get("comment") or "").strip() == comment)
+                        or (keys and any(k in (item.get("keys") or item.get("key") or [])
+                                          for k in keys)))), None)
+        if hit is not None:
+            if worldbook_edit.update_entry(book, int(hit["index"]), patch):
+                applied += 1
+        else:
+            worldbook_edit.add_entry(book, patch)
+            applied += 1
+    if applied:
+        worldbook_store.save_repo_snapshot(base, repo_id, book)
+    return {"repo_id": repo_id, "applied": applied}
+
+
+def upsert_repo_character(base: str, card: dict[str, Any]) -> dict[str, Any]:
+    """把 JSON 角色卡归一后写入作品目录（<base>/<卡名>/card.json，durable）。"""
+    from app.services import character_card, character_store
+
+    if not base:
+        raise ValueError("作品目录由执行环境归一注入，不接受空值")
+    if not isinstance(card, dict):
+        raise ValueError("card 必须是角色卡 JSON 对象")
+    normalized = character_card.normalize_card(card)
+    summary = character_store.save_card(base, normalized, overwrite=True)
+    return dict(vars(summary))
+
+
+def create_repo_doc(base: str, rel_path: str, content: str,
+                    overwrite: bool = False) -> dict[str, Any]:
+    """在作品目录 docs/ 下创建 Markdown 文档（durable，拒绝越界路径）。"""
+    from pathlib import Path as _Path
+
+    if not base:
+        raise ValueError("作品目录由执行环境归一注入，不接受空值")
+    raw = (rel_path or "").strip().replace("\\", "/")
+    if not raw or raw.startswith("/") or (len(raw) > 1 and raw[1] == ":"):
+        raise ValueError("rel_path 必须是相对作品目录的路径")
+    parts = [p for p in raw.split("/") if p not in ("", ".")]
+    if not parts or any(p == ".." for p in parts):
+        raise ValueError("rel_path 不合法（拒绝 .. 穿越）")
+    if not raw.lower().endswith(".md"):
+        raise ValueError("仅支持创建 .md 文档")
+    root = _Path(base).expanduser().resolve() / "docs"
+    target = (root / _Path(*parts)).resolve()
+    if not target.is_relative_to(root):
+        raise ValueError("文档路径越出作品 docs/ 目录")
+    if target.exists() and not overwrite:
+        raise FileExistsError(target.name)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content or "", encoding="utf-8")
+    return {"path": str(target), "bytes": len((content or "").encode("utf-8"))}
+
+
+def edit_text_file(path: str, old_str: str, new_str: str,
+                   replace_all: bool = False) -> dict[str, Any]:
+    """按 str_replace 语义修改 UTF-8 文本文件（改代码/配置用）。"""
+    from pathlib import Path as _Path
+
+    if not _Path(path).is_absolute():
+        raise ValueError("仅接受绝对路径")
+    target = _Path(path).expanduser()
+    if target.is_dir():
+        raise ValueError("目标路径是目录，拒绝编辑")
+    if not target.is_file():
+        raise ValueError(f"文件不存在：{path}")
+    text = target.read_text(encoding="utf-8")
+    count = text.count(old_str)
+    if count == 0:
+        raise ValueError("old_str 在文件中不存在，请先读取文件确认内容")
+    if count > 1 and not replace_all:
+        raise ValueError(f"old_str 命中 {count} 处，请提供更长的上下文使其唯一，或 replace_all=true")
+    updated = text.replace(old_str, new_str) if replace_all else text.replace(old_str, new_str, 1)
+    target.write_text(updated, encoding="utf-8")
+    return {"path": str(target), "replaced": count if replace_all else 1,
+            "chars_before": len(text), "chars_after": len(updated)}
+
+
+def run_shell(command: str, cwd: str = "", timeout_seconds: int = 60) -> dict[str, Any]:
+    """在指定工作目录执行一条命令行（durable，审批/租约强制）。"""
+    import subprocess
+    from pathlib import Path as _Path
+
+    if not (cwd or "").strip():
+        raise ValueError("cwd 必须显式指定为绝对路径（工作区/作品目录）")
+    workdir = _Path(cwd).expanduser()
+    if not workdir.is_absolute() or not workdir.is_dir():
+        raise ValueError(f"cwd 不是有效目录：{cwd}")
+    try:
+        proc = subprocess.run(
+            command, shell=True, cwd=str(workdir), timeout=max(1, min(timeout_seconds, 300)),
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {"exit_code": -1, "timed_out": True,
+                "stdout": (exc.stdout or "")[:4000], "stderr": (exc.stderr or "")[:4000]}
+    return {"exit_code": proc.returncode, "timed_out": False,
+            "stdout": (proc.stdout or "")[:8000], "stderr": (proc.stderr or "")[:8000]}

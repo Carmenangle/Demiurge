@@ -232,8 +232,10 @@ def run_manual_fill(*, base: str, repo_id: str, card_name: str,
                             entry.overview, entry.text):
                         generated_entries.append(entry)
 
+    # 2026-09-01 用户定案：纪要表只新建、不更新、不删除（只有用户手动删才允许）。
+    # 手动填表补建纪要时只追加新存档，不再删除与消息范围重叠的旧纪要。
     if overwrite and CHRONICLE_UID in selected:
-        remove_overlapping_chronicles(base, repo_id, plan.requested_start, len(turns))
+        pass
     applied = table_store.apply_ops(tables, generated_ops)
     if selected_tables and (applied or generated_ops):
         table_store.save(base, repo_id, tables)

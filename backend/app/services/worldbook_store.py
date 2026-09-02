@@ -217,8 +217,16 @@ def _merge_character_dynamic(existing: str, update: str) -> str:
 
 
 def apply_repo_ops(base: str, repo_id: str, ops: list[dict[str, Any]], *,
-                   allowed_update_indices: set[int] | frozenset[int] | None = None) -> int:
-    """对当前小仓库快照执行 Curator 增改；更新需 evidence，自动删除一律拒绝。"""
+                   allowed_update_indices: set[int] | frozenset[int] | None = None,
+                   rejections: list[dict[str, Any]] | None = None) -> int:
+    """对当前小仓库快照执行 Curator 增改；更新需 evidence，删除类 op 一律拒绝。
+
+    角色卡条目（comment 含「角色卡·」或正文带【角色卡·】头）只允许按剧情进度改正文
+    动态段（_merge_character_dynamic）；身份键（comment/keys/constant/enabled）不随
+    ops 变更并上报 rejections——改名/改键会让 repo_visual_profiles 的「角色卡·」+
+    【外貌】锚识别失配断粮（2026-08-31 实锤：舞姬恋↔舞柔条目连不上 → 空泛提示词）。
+    拒绝明细写入 rejections（调用方负责 trace），不抛错不中断整批。
+    """
     book = read_repo_snapshot(base, repo_id)
     if not book:
         return 0
@@ -228,6 +236,13 @@ def apply_repo_ops(base: str, repo_id: str, ops: list[dict[str, Any]], *,
         if not isinstance(op, dict):
             continue
         kind = str(op.get("op") or "").strip()
+        if kind in {"worldbook_delete", "delete", "worldbook_remove", "remove"}:
+            if rejections is not None:
+                record: dict[str, Any] = {"op": kind, "reason": "delete_forbidden"}
+                if op.get("index") is not None:
+                    record["index"] = op.get("index")
+                rejections.append(record)
+            continue
         text = str(op.get("text") or "").strip()
         patch: dict[str, Any] = {"content": text}
         if "title" in op:
@@ -254,7 +269,15 @@ def apply_repo_ops(base: str, repo_id: str, ops: list[dict[str, Any]], *,
                 content = str(current.get("content") or "")
                 comment = str(current.get("comment") or "")
                 if "角色卡·" in comment or "【角色卡·" in content:
-                    patch["content"] = _merge_character_dynamic(content, text)
+                    merged = _merge_character_dynamic(content, text)
+                    stripped = sorted(key for key in patch if key != "content")
+                    patch = {"content": merged}
+                    if rejections is not None and stripped:
+                        rejections.append({
+                            "op": kind, "index": index,
+                            "reason": "character_identity_keys_forbidden",
+                            "fields": stripped,
+                        })
             if worldbook_edit.update_entry(book, index, patch):
                 applied += 1
     if applied:

@@ -55,6 +55,23 @@ def strip_think(reply: str) -> str:
     return _THINK_UNCLOSED_RE.sub("", _THINK_CLOSED_RE.sub("", reply or ""))
 
 
+def split_think_prefix(reply: str) -> tuple[str, str]:
+    """把回复拆成（think 前缀含闭合标签, 其余全部）。无 think → ("", 原文)。
+
+    2026-08-31 根因修复的基石：块提取链只应作用于 think 之后的正文——think 内复述
+    协议标签（「- <content> 正文 - <状态更新> 块」）的幻影开标签会让提取器的懒匹配
+    从 think 内一路吃到真块闭合，把 </think> 与全部正文整段当块剥掉。只认闭合块；
+    未闭合 think 由上游结构校验拦截，不会走到这里。发布文本仍保留 think 前缀
+    （前端正则折叠为思考过程），提取结果拼接回前缀。
+    """
+    text = reply or ""
+    matches = list(_THINK_CLOSED_RE.finditer(text))
+    if not matches:
+        return "", text
+    last = matches[-1]
+    return text[:last.end()], text[last.end():]
+
+
 def extract_status_snapshot(reply: str) -> str:
     """抽取叙述里最后一个 <status> 块的**内部原文**（不含标签）。无则空串。
 
@@ -92,6 +109,7 @@ class AgencyDeps:
     curator_system: str = builtin_agents.CURATOR_SYSTEM
     curator_temperature: float = builtin_agents.CURATOR_TEMPERATURE
     curator_gate: float = 1.0
+    curator_cadence: int = 3  # 每 N 轮跑一次（1=每轮）；知识增量按 3 轮窗口足够，逐轮跑纯烧钱
     index_fn: Callable[[str, str], object] | None = None  # (text, title)→写入 RAG 知识库；None=不写
     worldbook_context: str = ""  # 当前小仓库世界书条目（带 index），仅供受控增改
     worldbook_context_fn: Callable[[str], str] | None = None
@@ -113,7 +131,12 @@ def _trace(deps: AgencyDeps, event: str, **data: Any) -> None:
 # ── 阶段 B 辅助：搭车指令 + state 注入块 ──
 
 def state_instruction() -> str:
-    """附加到主控叙述 system 的搭车指令：要求正文后另起一行输出状态增量 JSON（0 额外 LLM）。"""
+    """附加到主控叙述 system 的搭车指令：要求正文后另起一行输出状态增量 JSON（0 额外 LLM）。
+
+    字段名稳定性是增量更新的前提：AI 每轮换说法（政治权威→权威状态→命令执行）
+    会让引擎建出近似语义重复字段，旧字段不再被更新，观感就是「整个表换新/删除」
+    （2026-09-01 用户实锤）。卡名与第一人称主角同样不得冒充角色名。
+    """
     return (
         "\n\n【状态更新规则】在正文之后另起一行，输出本轮剧情导致的角色状态变化，"
         f"格式：{_TAG_OPEN}[{{\"field\":\"数值/好感度\",\"op\":\"add\",\"value\":5,"
@@ -122,6 +145,11 @@ def state_instruction() -> str:
         "field=\"叙事/xxx\" op=\"set\"。同场有多名角色时，每个字段必须写成 "
         "field=\"数值/角色名·好感度\" 或 field=\"叙事/角色名·身体状态\"，"
         "用中点明确角色归属，禁止把身体、精神等状态类别拼进角色名。"
+        "字段名必须稳定复用：已有字段（好感度、心情、所在、身体状态等）直接沿用原字段名更新，"
+        "禁止换说法或另建同义字段，否则旧字段会被当成新字段并存、原值丢失。"
+        "角色名必须是剧情角色本人：禁止用角色卡名称/卡面标题代替角色名；"
+        "第一人称的「我/主角/你/玩家」不是剧情角色，禁止作为角色名写入状态表，"
+        "主角自身的伤势、情绪等状态只写进状态栏 <status>，不写状态表。"
         "每条必须带 evidence 引用本轮剧情依据；本轮无变化则输出空数组 []。"
         "这段仅供系统解析，不要在正文里复述。"
     )
@@ -152,7 +180,10 @@ def parse_state_block(reply: str) -> tuple[str, list[Any]]:
     spans = _think_spans(source)
 
     def outside(match: re.Match) -> bool:
-        return not any(s <= match.start() and match.end() <= e for s, e in spans)
+        # 状态块是原子块：与 think 区间有任何交叠即非正文块。只查「完全包含在 think 内」
+        # 会放过跨界匹配——think 里复述协议清单的幻影开标签，懒匹配终点是真块闭合
+        # （2026-08-31 实锤 (3390,11977) 被判 think 外，</think> 与全部正文随整段被吞）。
+        return not any(match.start() < e and s < match.end() for s, e in spans)
 
     matches = [m for m in _STATE_BLOCK_RE.finditer(source) if outside(m)]
     if matches:
@@ -169,7 +200,11 @@ def parse_state_block(reply: str) -> tuple[str, list[Any]]:
         if not opens:
             return source, []
         start = opens[-1]
-        payload = source[start + len(_TAG_OPEN):]
+        rest = source[start + len(_TAG_OPEN):]
+        # 真块闭合存在时（跨界匹配被排除后落到兜底），payload 截到闭合标签为止，
+        # 否则尾标签混进 JSON 导致解析失败、delta 无谓丢失（回归测试实证）。
+        close = re.search(re.escape(_TAG_CLOSE), rest)
+        payload = rest[:close.start()] if close else rest
         clean = source[:start].strip()
     try:
         raw = json.loads(payload.strip())
@@ -398,13 +433,19 @@ def recall_chronicle(deps: AgencyDeps, *, repo_id: str, query: str, k: int = 10,
 def maybe_curate(
     deps: AgencyDeps, *, window_text: str,
     chat_base: str, chat_key: str, chat_model: str, proxy: str = "",
-    events: list | None = None,
+    events: list | None = None, turn: int = 0,
 ) -> int:
     """gate 命中时从本轮剧情抽「值得长期留存的新知识」写入 RAG 知识库（经 index_fn）。返回写入条数。
 
     gate 关（curator_gate<=0）/无 index_fn/无内容/失败 → 0（不阻断叙述）。默认只增不改。
+    cadence：curator_cadence>1 且 turn>0 时按每 N 轮跑一次（turn=1,1+N,1+2N…），未到轮次直接跳过。
     events：可选事件收集器，真正触发写库时按 start/ok/fail 追加 RAG 创建状态（供前端弹窗）。
     """
+    cadence = max(1, int(deps.curator_cadence))
+    if cadence > 1 and turn > 0 and (turn - 1) % cadence != 0:
+        _trace(deps, "agent.skipped", agent="curator", reason="cadence_not_reached",
+               turn=turn, cadence=cadence)
+        return 0
     if deps.curator_gate <= 0 or (deps.index_fn is None and deps.worldbook_fn is None) or not window_text.strip():
         reason = "gate_disabled" if deps.curator_gate <= 0 else (
             "no_writer" if deps.index_fn is None and deps.worldbook_fn is None else "empty_window")
@@ -592,10 +633,11 @@ def _compact_layers(
     deps: AgencyDeps, *, repo_id: str,
     chat_base: str, chat_key: str, chat_model: str, proxy: str = "",
 ) -> None:
-    """把超上限的层压成上一层：吃掉最旧 COMPACT_BATCH 条 → LLM 归并成一条上层纪要 → 删旧插新。
-
-    归并失败（坏 JSON/空）则跳过本次压缩，旧条保留（宁可暂时超上限也不丢事件）。
+    """【已停用】2026-09-01 用户定案：纪要表是每 N 条消息的存档，只新建、不更新、
+    不删除——最早的剧情永远不丢。旧实现会「吃旧条 → LLM 归并成上层 → 删旧插新」，
+    违反该规则，故整体停用；保留函数壳防止未来误接回。
     """
+    return
     for layer in range(narrative_memory.MAX_LAYER):
         n = narrative_store.count(deps.state_base, repo_id, layer=layer)
         if not narrative_memory.should_compact(layer, n):

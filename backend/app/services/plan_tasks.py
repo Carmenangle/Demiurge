@@ -8,9 +8,11 @@
   禁止自动无限重试。
 - **终态判定防 premature completion**：全部步骤显式 done/skipped 才 done；
   有产出但存在 failed/blocked 步骤 → partial（非终态的 blocked 保持任务打开等用户指令）。
-- **审批闸门（P3）**：durable/expensive 步骤执行前必须 `capability_sandbox.authorize`
-  计划租约（subject=task_id）；无租约/过期 → 步骤 blocked、任务 awaiting_approval；
-  批准 = grant 一次性租约（ttl=预算估算×2），安全优先。
+- **两档访问标准（P1）**：approval（默认）走审批闸门——durable/expensive 步骤执行前必须
+  `capability_sandbox.authorize` 计划租约（subject=task_id）；无租约/过期 → 步骤 blocked、
+  任务 awaiting_approval；批准 = grant 一次性租约（ttl=预算估算×2），安全优先。
+  full（用户显式开启）在 submit_task 时自动签通配租约（approved_by=full_mode），
+  免逐项审批；配额/路径域/Doom Loop/终态判定等硬闸门照旧。
 - **配额**：expensive 步骤完成数达 budgets.max_gpu_tasks → 后续 expensive 步骤 blocked。
 - **幂等（P4）**：规范化计划内容 hash，同 hash 存在未取消任务时拒绝重复提交。
 - **配方（P4）**：终态任务可固化为配方（参数槽位化），可实例化重投。
@@ -30,6 +32,7 @@ import uuid
 from uuid import uuid4
 from typing import Any
 
+from app.config import DATA_DIR
 from app.db import get_connection
 from app.services import capability_registry, capability_sandbox, plan_validator, task_progress_store
 from app.services.structured_contracts import GenerationPlan
@@ -46,6 +49,7 @@ HEARTBEAT_SECONDS = 10
 TASK_RETENTION_MS = 14 * 24 * 60 * 60 * 1000
 TASK_RETENTION_LIMIT = 200
 DOOM_LOOP_LIMIT = 2
+WRITE_LOOP_LIMIT = 3  # 同一任务内对同一文件最多写 3 次（LoopDetection 中间件）
 PROGRESS_NAMESPACE = "plan_tasks"
 
 TASK_TERMINAL = ("done", "partial", "error", "cancelled")
@@ -57,6 +61,36 @@ _DEDUP_BLOCKING = ("queued", "running", "awaiting_approval", "blocked", "done")
 
 def _now() -> int:
     return int(time.time() * 1000)
+
+
+# 智能编造 Agent 两档访问标准（2026-09-02 定案，ARCHITECTURE.md 同步）：
+# approval = 默认，durable/expensive 与越域读走审批租约（现有 P3 闸门）；
+# full     = 用户显式开启的完全访问，提交时自动签通配租约（approved_by=full_mode），
+#            免逐项审批但配额/路径域等硬闸门照旧。设置真源：DATA_DIR/user_state.json
+#            的 settings.agentAccessMode（前端 Settings 面板写入）。
+def _agent_access_mode() -> str:
+    """读访问模式设置（真源 DATA_DIR/user_state.json，缺失/损坏一律回退 approval）。"""
+    try:
+        data = json.loads((DATA_DIR / "user_state.json").read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - 设置文件缺失/损坏不阻断提交，安全默认 approval
+        return capability_sandbox.ACCESS_APPROVAL
+    if not isinstance(data, dict):
+        return capability_sandbox.ACCESS_APPROVAL
+    settings = data.get("settings")
+    if not isinstance(settings, dict):
+        return capability_sandbox.ACCESS_APPROVAL
+    mode = str(settings.get("agentAccessMode") or "").strip()
+    return mode if mode in capability_sandbox.ACCESS_LEVELS else capability_sandbox.ACCESS_APPROVAL
+
+
+# full 租约不按 GPU 步数缩 TTL：完全访问的承诺是全程免中断，租约只作为可撤销的
+# 熔断器存在（内存态、随进程消失）；grant 内部 clamp 86400s。
+FULL_LEASE_TTL_SECONDS = 86_400
+
+
+def _full_lease_ttl(plan: GenerationPlan) -> int:
+    del plan  # 保留形参兼容将来按计划收紧；当前固定取熔断上限
+    return FULL_LEASE_TTL_SECONDS
 
 
 def canonical_hash(plan: GenerationPlan) -> str:
@@ -81,9 +115,23 @@ def submit_task(plan: GenerationPlan, *, output_dir: str, repo_id: str = "",
                 st.params["template_id"] = _resolve_template_id(tid_param)
             submit_ids.append(st.id)
     for step in plan.steps:
+        # 通用创作能力的落盘 base 一律环境归一为作品目录（模型不得决定写入外部）。
+        if step.operation in ("worldbook.upsert_repo", "character.upsert_repo",
+                              "doc.create_repo"):
+            step.params["base"] = output_dir
+        if step.operation == "worldbook.upsert_repo":
+            step.params["repo_id"] = repo_id or plan.repo_id
         if step.operation == "media.collect_comfy_outputs":
             step.params["output_dir"] = output_dir
             step.params["repo_id"] = repo_id or plan.repo_id
+            if step.inputs_from:
+                # 编译器可能把 collect 写成链接到 submit 步骤本身（如 ["s3"]）；
+                # 执行器语义里 collect 需要 submit_result/prompt_ids，这里归一为虚拟键
+                # sX.submit_result（_resolve_params 取不到该键时会回退为整个 submit 产出）。
+                normalized: list[str] = []
+                for ref in step.inputs_from:
+                    normalized.append(f"{ref}.submit_result" if ref in submit_ids else ref)
+                step.inputs_from = normalized
             if not step.inputs_from and submit_ids:
                 # 采集自动链接 submit 产出（模型经常漏写 inputs_from）
                 step.inputs_from = [f"{sid}.submit_result" for sid in submit_ids]
@@ -104,6 +152,12 @@ def submit_task(plan: GenerationPlan, *, output_dir: str, repo_id: str = "",
             return {"task_id": str(row["id"]), "deduped": True}
         task_id = uuid.uuid4().hex
         now = _now()
+        # 一个用户任务 = 一个后台活动：新计划提交时，自动取消同一作品旧的
+        # queued/awaiting_approval 任务（重试/重新生成的旧版本让位，不堆积）。
+        connection.execute(
+            "update plan_tasks set status='cancelled', updated_at=? "
+            "where output_dir=? and repo_id=? and status in ('queued','awaiting_approval')",
+            (now, output_dir, repo_id or plan.repo_id))
         connection.execute(
             "insert into plan_tasks (id, repo_id, output_dir, intent, plan_json, content_hash,"
             " status, created_at, updated_at) values (?,?,?,?,?,?,?,?,?)",
@@ -117,6 +171,14 @@ def submit_task(plan: GenerationPlan, *, output_dir: str, repo_id: str = "",
                  json.dumps(step.params, ensure_ascii=False),
                  json.dumps(step.inputs_from, ensure_ascii=False), now))
         connection.commit()
+    if _agent_access_mode() == capability_sandbox.ACCESS_FULL:
+        lease = capability_sandbox.grant(
+            subject=task_id, capabilities=[{"operation": "*", "path": ""}],
+            ttl_seconds=_full_lease_ttl(plan), approved_by="full_mode",
+            mode=capability_sandbox.ACCESS_FULL)
+        with get_connection() as connection:
+            connection.execute("update plan_tasks set lease_id=?, updated_at=? where id=?",
+                               (lease["id"], _now(), task_id))
     _wake()
     return {"task_id": task_id, "deduped": False}
 
@@ -156,10 +218,57 @@ def list_tasks(output_dir: str = "", repo_id: str = "", limit: int = 30) -> list
     grouped: dict[str, list] = {}
     for step in steps:
         grouped.setdefault(str(step["task_id"]), []).append(step)
-    return [_dump_task(row, grouped.get(str(row["id"]), [])) for row in rows]
+    dumped = [_dump_task(row, grouped.get(str(row["id"]), [])) for row in rows]
+    # 后台活动聚合：未终态任务全部显示；终态任务按 intent 合并为一条活动（同
+    # 意图的历史重复计划不再刷屏），组内保留最近更新者并携带 merged_count。
+    open_tasks = [t for t in dumped if t["status"] in TASK_OPEN]
+    terminal_groups: dict[str, list[dict]] = {}
+    import re as _re
+    for t in dumped:
+        if t["status"] in TASK_TERMINAL:
+            key = _re.sub(r"\[\d+\]\s*$", "", t["intent"].strip()).strip()
+            terminal_groups.setdefault(key, []).append(t)
+    terminal = []
+    for intent, group in terminal_groups.items():
+        latest = max(group, key=lambda t: t["updated_at"])
+        latest["merged_count"] = len(group)
+        latest["intent"] = intent or latest["intent"]
+        terminal.append(latest)
+    terminal.sort(key=lambda t: t["updated_at"], reverse=True)
+    # 后台活动只显示未终态任务（待审批/执行中/受阻/排队）；已终态不占活动面板，
+    # 结果在对话计划卡上查看。terminal 聚合留给「计划历史」视图（后续需要时用）。
+    return open_tasks
 
 
 def _dump_task(row, steps) -> dict:
+    step_dicts = [{
+        "seq": int(step["seq"]),
+        "step_id": str(step["step_id"]),
+        "operation": str(step["operation"]),
+        "status": str(step["status"]),
+        "attempts": int(step["attempts"]),
+        "last_error": str(step["last_error"]),
+        "params": json.loads(step["params_json"] or "{}"),
+        "outputs": json.loads(step["outputs_json"] or "{}"),
+    } for step in steps]
+    done_steps = sum(1 for s in step_dicts if s["status"] in ("done", "skipped"))
+    images_total = 0
+    for s in step_dicts:
+        if s["operation"] == "workflow.submit_batch":
+            variants = s["params"].get("variants")
+            if isinstance(variants, list):
+                images_total += len(variants)
+        elif s["operation"] == "workflow.submit_template":
+            images_total += 1
+    images_done = 0
+    for s in step_dicts:
+        if s["operation"] == "media.collect_comfy_outputs" and s["status"] == "done":
+            collected = s["outputs"].get("collected")
+            if isinstance(collected, int) and collected > 0:
+                images_done += collected
+    progress = f"{done_steps}/{len(step_dicts)} 步"
+    if images_total > 0:
+        progress += f" · 图 {min(images_done, images_total)}/{images_total}"
     return {
         "id": str(row["id"]),
         "repo_id": str(row["repo_id"]),
@@ -171,16 +280,11 @@ def _dump_task(row, steps) -> dict:
         "content_hash": str(row["content_hash"]),
         "created_at": int(row["created_at"]),
         "updated_at": int(row["updated_at"]),
-        "steps": [{
-            "seq": int(step["seq"]),
-            "step_id": str(step["step_id"]),
-            "operation": str(step["operation"]),
-            "status": str(step["status"]),
-            "attempts": int(step["attempts"]),
-            "last_error": str(step["last_error"]),
-            "params": json.loads(step["params_json"] or "{}"),
-            "outputs": json.loads(step["outputs_json"] or "{}"),
-        } for step in steps],
+        "progress": progress,
+        "images_total": images_total,
+        "images_done": images_done,
+        "merged_count": 1,
+        "steps": step_dicts,
     }
 
 
@@ -454,6 +558,8 @@ def _run_task(task, cancel: threading.Event) -> None:
             "select * from plan_task_steps where task_id=? order by seq asc",
             (task_id,)).fetchall()
     outputs: dict[str, dict] = {}
+    # LoopDetection（P5）：同一任务内对同一文件的写次数超限即阻断，防「反复写同一文件」循环
+    write_counts: dict[str, int] = {}
     # 配额计数：done 的 expensive 步 + 失败尝试（失败的 GPU 提交同样消耗配额）
     gpu_done = 0
     for st in steps:
@@ -504,6 +610,17 @@ def _run_task(task, cancel: threading.Event) -> None:
                 return
         # ── 执行 ──
         params = _resolve_params(step, outputs)
+        if operation == "file.write_text":
+            write_path = str(params.get("path") or "")
+            write_counts[write_path] = write_counts.get(write_path, 0) + 1
+            if write_counts[write_path] > WRITE_LOOP_LIMIT:
+                _block_step(task_id, step,
+                            f"同一文件 {write_path} 在本任务内已写入 "
+                            f"{WRITE_LOOP_LIMIT} 次，疑似循环编辑，已阻断",
+                            task_status="blocked", reason="write_loop", ctx=ctx)
+                _block_rest(task_id, steps, seq + 1)
+                _finalize(task_id, steps, seq + 1)
+                return
         _trace(ctx, "plan.step_started", task_id=task_id, step=step["step_id"], operation=operation)
         try:
             result = _dispatch(operation, params)
@@ -671,10 +788,11 @@ def _publish_progress(task_id: str, status: str) -> None:
         task = get_task(task_id)
         if task is None:
             return
-        done = sum(1 for s in task["steps"] if s["status"] in ("done", "skipped"))
         tasks[task_id] = {
             "kind": "plan", "intent": task["intent"], "status": status,
-            "progress": f"{done}/{len(task['steps'])} 步",
+            "progress": task.get("progress") or f"0/{len(task['steps'])} 步",
+            "images_total": task.get("images_total", 0),
+            "images_done": task.get("images_done", 0),
             "error": task["error"], "updated_at": _now(),
         }
         task_progress_store.save(PROGRESS_NAMESPACE, tasks)

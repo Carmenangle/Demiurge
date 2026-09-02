@@ -96,6 +96,37 @@ export async function apiPut<T>(path: string, body: unknown): Promise<T> {
   );
 }
 
+// multipart/form-data 上传（附件等）：不手动设 Content-Type，交给浏览器带 boundary。
+export async function apiUpload<T>(
+  path: string,
+  formData: FormData,
+  timeoutMs?: number,
+): Promise<T> {
+  let signal: AbortSignal | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  if (timeoutMs && timeoutMs > 0) {
+    const ac = new AbortController();
+    signal = ac.signal;
+    timer = setTimeout(() => ac.abort(), timeoutMs);
+  }
+  try {
+    return await parseResponse<T>(
+      await fetch(apiUrl(path), {
+        method: "POST",
+        body: formData,
+        signal,
+      }),
+    );
+  } catch (e) {
+    if ((e as Error)?.name === "AbortError") {
+      throw new Error(`上传超时（超过 ${Math.round((timeoutMs || 0) / 1000)} 秒）。`);
+    }
+    throw e;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export async function apiPatch<T>(path: string, body: unknown): Promise<T> {
   return parseResponse<T>(
     await fetch(apiUrl(path), {

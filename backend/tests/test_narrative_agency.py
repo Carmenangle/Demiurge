@@ -178,18 +178,14 @@ def test_分层压缩产出超限时压缩改写(tmp_path):
 
     def fake(*a, **k):
         calls.append(a[3])
-        if len(calls) == 1:
-            return '{"overview":"' + "概" * 40 + '","summary":"' + "详" * 400 + '","keywords":[]}'
-        assert a[3] == nm.COMPRESS_SYSTEM
-        return '{"overview":"归并概览","summary":"归并大纲"}'
+        return '{"summary":"不该被调用"}'
 
     deps = _deps(tmp_path, fake)
     ra._compact_layers(deps, repo_id="r1", chat_base="b", chat_key="k", chat_model="m")
-    assert ns.count(base, "r1", layer=0) == before0 - nm.COMPACT_BATCH
-    assert ns.count(base, "r1", layer=1) == 1
-    merged = ns.recent(base, "r1", k=1, layer=1)[0]
-    assert nm.chronicle_within_limits(merged.overview, merged.text)
-    assert merged.overview == "归并概览"
+    # 2026-09-01 用户定案：纪要=存档，只新建不归并、不删除——压缩层永久停用
+    assert calls == []
+    assert ns.count(base, "r1", layer=0) == before0
+    assert ns.count(base, "r1", layer=1) == 0
 
 
 def test_纪要历史缺口不合并成跨频率大卡(tmp_path):
@@ -209,8 +205,8 @@ def test_纪要历史缺口不合并成跨频率大卡(tmp_path):
 
 
 def test_分层压缩_超上限压成上层(tmp_path):
+    """2026-09-01 用户定案：纪要只新建不压缩——超上限也保留全部旧条，不删不并。"""
     base = str(tmp_path)
-    # 预置超过 layer0 上限的细纪要
     for i in range(nm.LAYER0_CAP + 1):
         ns.append(base, "r1", nm.ChronicleEntry(text=f"细节事件{i}", turn_start=i, turn_end=i, layer=0))
     before0 = ns.count(base, "r1", layer=0)
@@ -218,9 +214,8 @@ def test_分层压缩_超上限压成上层(tmp_path):
 
     deps = _deps(tmp_path, lambda *a, **k: '{"summary":"归并大纲","keywords":[]}')
     ra._compact_layers(deps, repo_id="r1", chat_base="b", chat_key="k", chat_model="m")
-    # 吃掉 COMPACT_BATCH 条 layer0，产出 1 条 layer1
-    assert ns.count(base, "r1", layer=0) == before0 - nm.COMPACT_BATCH
-    assert ns.count(base, "r1", layer=1) == 1
+    assert ns.count(base, "r1", layer=0) == before0  # 一条不删
+    assert ns.count(base, "r1", layer=1) == 0         # 也不产生归并层
 
 
 def test_分层压缩_归并失败不动旧条(tmp_path):

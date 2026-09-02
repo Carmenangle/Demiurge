@@ -89,6 +89,36 @@ def _save_unlocked(thread_id: str, messages: list) -> None:
     tmp.replace(p)
 
 
+def _preserve_server_text(current: list, incoming: list) -> list:
+    """防止前端旧快照用「流式 trace 占位」覆盖服务端已落盘的完整正文。
+
+    2026-09-01 用户实锤：发送后切到工作流/画布页再回来，前端消息状态停留在
+    「🧭 主管分派 → 剧情扮演」这类 trace 占位；随后前端全量快照保存把服务端
+    已写好的完整剧情正文覆盖掉。只保护明确占位（短 + 含 🧭 或空白），
+    不拦截用户主动编辑。
+    """
+    current_messages = {
+        item.get("id"): item for item in current
+        if isinstance(item, dict) and item.get("id")
+    }
+    merged: list = []
+    for item in incoming:
+        if not isinstance(item, dict):
+            merged.append(item)
+            continue
+        current_item = current_messages.get(item.get("id"))
+        if not isinstance(current_item, dict):
+            merged.append(item)
+            continue
+        current_text = str(current_item.get("text") or "")
+        incoming_text = str(item.get("text") or "")
+        if (len(current_text) > 200 and len(incoming_text) <= 60
+                and ("🧭" in incoming_text or not incoming_text.strip())):
+            item = {**item, "text": current_text}
+        merged.append(item)
+    return merged
+
+
 def _preserve_server_media_state(current: list, incoming: list) -> list:
     """合并同槽的服务端提交状态，防止前端旧快照把认领/结果回滚成 pending。
 
@@ -150,7 +180,11 @@ def save_if_newer(thread_id: str, messages: list, revision: int) -> bool:
         previous = _REVISIONS.get(key)
         if previous is not None and revision <= previous:
             return False
-        _save_unlocked(thread_id, _preserve_server_media_state(load(thread_id), messages))
+        _save_unlocked(
+            thread_id,
+            _preserve_server_media_state(
+                load(thread_id), _preserve_server_text(load(thread_id), messages)),
+        )
         _REVISIONS[key] = revision
         _persist_revisions(_REVISIONS)
         return True
@@ -290,12 +324,25 @@ def assistant_message(mid: str, text: str, **fields) -> dict:
     return {"id": mid, "role": "assistant", "text": text, **fields}
 
 
-def user_message(mid: str, text: str, images: list[str] | None = None) -> dict:
-    """构造可由前端直接恢复的用户消息；图片仍走 ChatMessage.parts。"""
+def user_message(mid: str, text: str, images: list[str] | None = None,
+                 attachments: list[dict] | None = None) -> dict:
+    """构造可由前端直接恢复的用户消息；图片仍走 ChatMessage.parts。
+
+    附件（A1/B1/D1）：只落 file_id 元信息，字节仍在 attachment_store。
+    """
     parts: list[dict] = []
     if text:
         parts.append({"type": "text", "text": text})
     parts.extend({"type": "image", "url": url} for url in (images or []) if url)
+    for item in (attachments or []):
+        if isinstance(item, dict) and item.get("file_id"):
+            parts.append({
+                "type": "file",
+                "fileId": item.get("file_id"),
+                "name": item.get("name", ""),
+                "mime": item.get("mime", ""),
+                "size": item.get("size", 0),
+            })
     message = {"id": mid, "role": "user", "text": text}
     if parts:
         message["parts"] = parts
@@ -304,16 +351,17 @@ def user_message(mid: str, text: str, images: list[str] | None = None) -> dict:
 
 def ensure_user_message(
     thread_id: str, mid: str, text: str, images: list[str] | None = None,
+    attachments: list[dict] | None = None,
     *, before_id: str = "",
 ) -> bool:
     """模型启动前确保用户输入已进入权威快照；已有前端富消息时保持原样。"""
-    if not mid or (not text and not images):
+    if not mid or (not text and not images and not attachments):
         return False
     with _thread_lock(thread_id):
         items = load(thread_id)
         if any(isinstance(item, dict) and item.get("id") == mid for item in items):
             return True
-        message = user_message(mid, text, images)
+        message = user_message(mid, text, images, attachments)
         before_index = next((
             index for index, item in enumerate(items)
             if isinstance(item, dict) and item.get("id") == before_id
@@ -421,7 +469,19 @@ def resolve_media_slot(thread_id: str, message_id: str, slot_id: str, url: str,
                     items[item_index] = {**item, "parts": next_parts}
                     _save_unlocked(thread_id, items)
                     return True
-            return False
+            # 槽丢失兜底（2026-09-01 用户实锤：ComfyUI 早已生成完，不刷新就永远不插入）：
+            # 消息存在但槽没了——与前端 resolveMediaSlot 兜底对齐，直接把媒体补进 parts。
+            base = list(parts)
+            if not base and str(item.get("text") or "").strip():
+                base.append({"type": "text", "text": str(item["text"])})
+            ready = {"type": kind, "url": url, "slotId": slot_id, "status": "ready"}
+            if regeneration:
+                ready["regeneration"] = regeneration
+            if derived_from:
+                ready["derivedFrom"] = derived_from
+            items[item_index] = {**item, "parts": [*base, ready]}
+            _save_unlocked(thread_id, items)
+            return True
     return False
 
 
@@ -446,7 +506,19 @@ def bind_media_slot_prompt(thread_id: str, message_id: str, slot_id: str,
                     items[item_index] = {**item, "parts": next_parts}
                     _save_unlocked(thread_id, items)
                     return True
-            return False
+            # 消息存在但没有该槽位：登记补齐并直接落 promptId（正文转 text part 保留）。
+            # 与 claim 的「认领即登记」同构——claim→bind 之间前端全量快照保存可能把
+            # 服务端单侧登记的槽覆盖掉（_preserve_server_media_state 只保护两端都有的槽），
+            # 2026-08-31 实锤：bind False → prompt_id 无处落 → 生成图孤身在 ComfyUI 输出目录。
+            text = str(item.get("text") or "")
+            base_parts = list(parts)
+            if not base_parts and text.strip():
+                base_parts.append({"type": "text", "text": text})
+            slot = {"type": "media-slot", "slotId": slot_id, "status": "pending",
+                    "kind": "image", "promptId": prompt_id}
+            items[item_index] = {**item, "parts": [*base_parts, slot]}
+            _save_unlocked(thread_id, items)
+            return True
     return False
 
 
@@ -471,7 +543,18 @@ def claim_media_slot_submission(thread_id: str, message_id: str, slot_id: str) -
                 items[item_index] = {**item, "parts": next_parts}
                 _save_unlocked(thread_id, items)
                 return True
-            return False
+            # 本消息存在但没有该槽位：认领即登记（与前端 appendMediaSlot 同构，正文转
+            # text part 保留）——前端防抖快照可能尚未写入 pending 槽，缺槽拒领会造成
+            # 「请求已发出却无人提交」（2026-08-30 实锤：Anima 轮无任务到 ComfyUI 且无报错）。
+            text = str(item.get("text") or "")
+            base_parts = list(parts)
+            if not base_parts and text.strip():
+                base_parts.append({"type": "text", "text": text})
+            slot = {"type": "media-slot", "slotId": slot_id, "status": "pending",
+                    "kind": "image", "submissionClaim": True}
+            items[item_index] = {**item, "parts": [*base_parts, slot]}
+            _save_unlocked(thread_id, items)
+            return True
     return False
 
 

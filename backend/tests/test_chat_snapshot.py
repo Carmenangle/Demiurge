@@ -2,6 +2,7 @@ import threading
 import time
 
 from app.services import chat_snapshot
+from app.services.chat_snapshot import claim_media_slot_submission, load, save
 
 
 def test_assistant_message_preserves_shape_and_key_order():
@@ -44,6 +45,19 @@ def test_用户消息在助手生成前落盘且重复确保不覆盖前端富�
     chat_snapshot.save("thread", rich)
     assert chat_snapshot.ensure_user_message("thread", "user-1", "继续剧情")
     assert chat_snapshot.load("thread") == rich
+
+def test_用户消息带附件时快照持久化file_part(monkeypatch, tmp_path):
+    from app.services import repo_meta
+    monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
+    monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+
+    attachments = [{"file_id": "a" * 32, "name": "形象提示词-唐柚.md", "mime": "text/markdown", "size": 45800}]
+    assert chat_snapshot.ensure_user_message("thread", "user-file", "帮我读取", attachments=attachments)
+    saved = chat_snapshot.load("thread")[0]
+    assert saved["parts"] == [
+        {"type": "text", "text": "帮我读取"},
+        {"type": "file", "fileId": "a" * 32, "name": "形象提示词-唐柚.md", "mime": "text/markdown", "size": 45800},
+    ]
 
 
 def test_可从Trace把遗失用户消息恢复到对应助手消息之前(monkeypatch, tmp_path):
@@ -390,29 +404,30 @@ def test_存量会话读时惰性迁移到仓库文件夹(monkeypatch, tmp_path)
     assert chat_snapshot.load("r1") == [{"id": "old"}]
 
 
-def test_视频槽原位回填与目标删除后不追加(monkeypatch, tmp_path):
-    """V1.3：视频 media_type 原位替换 media-slot，且目标消息删除后 resolve 不追加新消息。"""
+def test_视频槽原位回填与槽丢失时补插到既有消息(monkeypatch, tmp_path):
     from app.services import repo_meta
     monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
     monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
     chat_snapshot.save("thread-v", [{
         "id": "bot", "role": "assistant", "text": "正文",
-        "parts": [{"type": "media-slot", "slotId": "slot-1", "status": "pending"}],
+        "parts": [{"type": "text", "text": "正文"},
+                  {"type": "media-slot", "slotId": "slot-1", "status": "pending"}],
     }])
-
-    # 视频原位回填：type 变 video + status ready
     assert chat_snapshot.resolve_media_slot(
         "thread-v", "bot", "slot-1", "local://movie.mp4", media_type="video",
     )
-    part = chat_snapshot.load("thread-v")[0]["parts"][0]
+    part = chat_snapshot.load("thread-v")[0]["parts"][1]
     assert part["type"] == "video" and part["status"] == "ready"
     assert part["url"] == "local://movie.mp4"
 
-    # 目标消息已删除（无 parts 槽）→ resolve 返回 False，不追加新消息
+    # 2026-09-01 用户实锤：槽意外丢失时也要把已生成媒体补插进既有消息，绝不孤儿化
     chat_snapshot.save("thread-v", [{"id": "bot", "role": "assistant", "text": "正文", "parts": []}])
     assert chat_snapshot.resolve_media_slot(
         "thread-v", "bot", "slot-1", "local://orphan.mp4", media_type="video",
-    ) is False
+    ) is True
+    parts = chat_snapshot.load("thread-v")[0]["parts"]
+    assert len(parts) == 2 and parts[0]["type"] == "text"
+    assert parts[1]["type"] == "video" and parts[1]["slotId"] == "slot-1"
     assert len(chat_snapshot.load("thread-v")) == 1
 
 
@@ -563,3 +578,66 @@ def test_音频槽纯文本消息补正文且幂等(monkeypatch, tmp_path):
         {"type": "media-slot", "slotId": "audio-0", "status": "pending", "kind": "audio"},
     ]
 
+
+
+def test_认领缺槽时登记而非拒绝(tmp_path):
+    """2026-08-30 实锤：前端防抖快照未写入 pending 槽 → 认领 False → 静默丢任务。"""
+    thread = "t-claim"
+    msgs = [{"id": "m1", "role": "assistant", "text": "剧情正文。"}]
+    save(thread, msgs)
+
+    assert claim_media_slot_submission(thread_id=thread, message_id="m1", slot_id="s1") is True
+    # 已认领拒绝重复
+    assert claim_media_slot_submission(thread_id=thread, message_id="m1", slot_id="s1") is False
+    items = load(thread)
+    parts = items[0]["parts"]
+    slot = [p for p in parts if p.get("slotId") == "s1"][0]
+    assert slot.get("submissionClaim") is True
+    assert parts[0]["type"] == "text" and parts[0]["text"] == "剧情正文。"  # 正文转 part 保留
+
+
+def test_bind槽位缺失时登记补齐(monkeypatch, tmp_path):
+    from app.services import repo_meta
+    monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
+    monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+    save("thread", [{"id": "m1", "role": "assistant", "text": "正文"}])
+    assert chat_snapshot.bind_media_slot_prompt("thread", "m1", "slot-1", "prompt-9")
+    message = load("thread")[0]
+    assert message["parts"][0] == {"type": "text", "text": "正文"}
+    slot = message["parts"][-1]
+    assert slot["slotId"] == "slot-1" and slot["promptId"] == "prompt-9"
+    assert "submissionClaim" not in slot
+
+
+def test_bind已存在槽位时原地落promptId(monkeypatch, tmp_path):
+    from app.services import repo_meta
+    monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
+    monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+    save("thread", [{"id": "m1", "role": "assistant", "text": "",
+                     "parts": [{"type": "media-slot", "slotId": "s1", "status": "pending",
+                                "submissionClaim": True}]}])
+    assert chat_snapshot.bind_media_slot_prompt("thread", "m1", "s1", "p1")
+    message = load("thread")[0]
+    assert len(message["parts"]) == 1
+    assert message["parts"][0]["promptId"] == "p1"
+    assert "submissionClaim" not in message["parts"][0]
+
+
+def test_旧快照trace占位不覆盖服务端已落盘正文(monkeypatch, tmp_path):
+    """2026-09-01 用户实锤：切工作流/画布页后前端旧状态保存，把已生成正文覆盖成
+    「🧭 主管分派 → 剧情扮演」占位。save_if_newer 必须保留服务端完整正文。"""
+    from app.services import repo_meta
+    monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
+    monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+    full_body = "完整剧情正文" * 40
+    save("thread-trace-guard", [{"id": "m1", "role": "assistant", "text": full_body}])
+
+    accepted = chat_snapshot.save_if_newer(
+        "thread-trace-guard",
+        [{"id": "m1", "role": "assistant", "text": "🧭 主管分派 → 剧情扮演"}],
+        revision=1,
+    )
+
+    assert accepted is True
+    message = load("thread-trace-guard")[0]
+    assert message["text"] == full_body  # 服务端正文不被 trace 占位覆盖

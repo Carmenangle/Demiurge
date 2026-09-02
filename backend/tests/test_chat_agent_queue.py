@@ -214,7 +214,8 @@ def test_execute_headless保留直连剧情上下文参数(tmp_path, monkeypatch
     history = [{"role": "user", "content": "保留的历史"}]
     queue._execute({
         "thread_id": "repo-1", "message": "继续剧情", "history": history,
-        "history_per_role": 9, "character_dir": "cards", "card_name": "Lyra",
+        "history_per_role": 9, "selfheal_attempts": 2,
+        "character_dir": "cards", "card_name": "Lyra",
         "card_names": ["Lyra", "Nia"], "opening_card_name": "Lyra",
         "preset_dir": "presets", "preset_name": "GrayWill",
         "user_name": "测试用户", "user_persona": "用户设定", "persona_bound": True,
@@ -235,6 +236,7 @@ def test_execute_headless保留直连剧情上下文参数(tmp_path, monkeypatch
 
     context = captured["context"]
     assert context.history_override == history and context.history_per_role == 9
+    assert context.selfheal_attempts == 2  # 截断自愈次数随设置透传（2026-08-31 晚）
     assert (context.character_dir, context.card_name) == ("cards", "Lyra")
     assert context.card_names == ["Lyra", "Nia"]
     assert context.opening_card_name == "Lyra"

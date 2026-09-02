@@ -477,6 +477,7 @@ export function CanvasStageFlow({
   // 世界书弹窗：双击 worldbook-entry 灵感卡时打开（左侧内容+右侧导航）
   const [wbRepoLoc, setWbRepoLoc] = useState<RepoWorldbookLoc | null>(null);
   const [wbPopupTitle, setWbPopupTitle] = useState("");
+  const [wbSeedFrom, setWbSeedFrom] = useState<{ base: string; name: string } | null>(null);
   // 角色卡弹窗：双击 character 灵感卡（照搬资产库预览、去掉新建作品、只写画布本地）
   const [charModal, setCharModal] = useState<{ name: string; cardId: string; content: string } | null>(null);
   // 预设弹窗：双击 preset 灵感卡 → 打开偏置预设
@@ -670,7 +671,7 @@ export function CanvasStageFlow({
         showToast(`已提交到 ComfyUI（prompt_id: ${runPromptId}，${r.node_count} 个节点），正在运转工作流…`);
         // 记入后台活动（laf_pending_gen_<repoId>）：SupportWidget 面板显示「出图中」；
         // 仍自持轮询，runtime 只做标记。结束（finally）时移除。
-        trackCanvasWorkflow(repoId, runPromptId, settings.comfyuiUrl, nn.templateName || "工作流生成");
+        trackCanvasWorkflow(repoId, runPromptId, settings.comfyuiUrl, nn.templateName || "工作流生成", runId);
         // 占位节点进入「已提交」态 + 对话框进度条出现（graph 随 run 事件带给画布，占位节点显示真实提示词）
         window.dispatchEvent(new CustomEvent("laf-canvas-wf-run-graph", {
           detail: { runId, graph: captured },
@@ -1306,7 +1307,10 @@ export function CanvasStageFlow({
           if (c.kind === "worldbook-entry" && c.sourceRef) {
             // 画布模式：双击打开仓库快照世界书（编辑即改快照，与源库隔离）
             if (settings.outputDir && repoId) {
-              setWbRepoLoc({ output_dir: settings.outputDir, repo_id: repoId });
+                              const wbName = c.sourceRef?.startsWith("wb:") ? c.sourceRef.slice(3) : "";
+                const wbDir = settings.worldbookDir || settings.characterDir || "";
+                setWbSeedFrom(wbName && wbDir ? { base: wbDir, name: wbName } : null);
+                setWbRepoLoc({ output_dir: settings.outputDir, repo_id: repoId });
               setWbPopupTitle(c.title);
               return;
             }
@@ -3321,9 +3325,10 @@ export function CanvasStageFlow({
       {wbRepoLoc && (
         <WorldBookPopup
           location={{ base: "", name: "" }}
+            seedFrom={wbSeedFrom ?? undefined}
           repoLoc={wbRepoLoc}
           title={wbPopupTitle || "世界书条目"}
-          onClose={() => { setWbRepoLoc(null); setWbPopupTitle(""); }}
+          onClose={() => { setWbRepoLoc(null); setWbSeedFrom(null); setWbPopupTitle(""); }}
         />
       )}
 

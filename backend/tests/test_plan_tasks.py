@@ -2,6 +2,7 @@
 幂等 / 配方 / 进度发布。同步驱动（直接 _claim_next + _run_task），无线程竞态。"""
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 import time
@@ -222,6 +223,72 @@ def test_expensive无租约blocked批准后继续执行(store, fake_capabilities
     assert fake_capabilities[-1]["op"] == "batch"
 
 
+def test_full模式自动签通配租约免审批(store, fake_capabilities, monkeypatch):
+    monkeypatch.setattr(plan_tasks, "_agent_access_mode",
+                        lambda: capability_sandbox.ACCESS_FULL)
+    plan = _plan([PlanStep(id="s1", operation="test.batch", params={"template_id": "t1"})])
+    task_id = plan_tasks.submit_task(plan, output_dir=str(store["path"].parent),
+                                     configured_models={"chat", "image"})["task_id"]
+    task = plan_tasks.get_task(task_id)
+    assert task["lease_id"]  # 提交即租约，无需 approve_task
+    plan_tasks._run_task(plan_tasks._claim_next(), threading.Event())
+    assert _wait_done(store, task_id)["status"] == "done"
+    assert fake_capabilities[-1]["op"] == "batch"
+
+
+def test_full模式doc_create_repo端到端(store, monkeypatch):
+    monkeypatch.setattr(plan_tasks, "_agent_access_mode",
+                        lambda: capability_sandbox.ACCESS_FULL)
+    out_dir = str(store["path"].parent)
+    plan = _plan([PlanStep(id="s1", operation="doc.create_repo",
+                           params={"rel_path": "notes/里程碑.md",
+                                   "content": "# 里程碑\n\n已落地两档访问标准"})])
+    task_id = plan_tasks.submit_task(plan, output_dir=out_dir,
+                                     configured_models={"chat", "image"})["task_id"]
+    assert plan_tasks.get_task(task_id)["lease_id"]
+    plan_tasks._run_task(plan_tasks._claim_next(), threading.Event())
+    task = _wait_done(store, task_id)
+    assert task["status"] == "done"
+    from pathlib import Path
+    written = Path(out_dir).joinpath("docs", "notes", "里程碑.md")
+    assert written.read_text(encoding="utf-8") == "# 里程碑\n\n已落地两档访问标准"
+
+
+def test_write_loop同一文件写超限被阻断(store, monkeypatch):
+    monkeypatch.setattr(plan_tasks, "_agent_access_mode",
+                        lambda: capability_sandbox.ACCESS_FULL)
+    target = store["path"].parent / "loop.txt"
+    plan = _plan([
+        PlanStep(id="s1", operation="file.write_text",
+                 params={"path": str(target), "content": "一", "overwrite": True}),
+        PlanStep(id="s2", operation="file.write_text",
+                 params={"path": str(target), "content": "二", "overwrite": True}),
+        PlanStep(id="s3", operation="file.write_text",
+                 params={"path": str(target), "content": "三", "overwrite": True}),
+        PlanStep(id="s4", operation="file.write_text",
+                 params={"path": str(target), "content": "四", "overwrite": True}),
+    ])
+    task_id = plan_tasks.submit_task(plan, output_dir=str(store["path"].parent),
+                                     configured_models={"chat", "image"})["task_id"]
+    plan_tasks._run_task(plan_tasks._claim_next(), threading.Event())
+    task = plan_tasks.get_task(task_id)
+    assert task["status"] == "blocked"
+    assert task["steps"][0]["status"] == "done"
+    assert task["steps"][3]["status"] == "blocked"
+    assert "write_loop" in task["steps"][3]["last_error"]
+
+
+def test_approval模式默认仍需审批(store, fake_capabilities, monkeypatch):
+    monkeypatch.setattr(plan_tasks, "_agent_access_mode",
+                        lambda: capability_sandbox.ACCESS_APPROVAL)
+    plan = _plan([PlanStep(id="s1", operation="test.batch", params={"template_id": "t1"})])
+    task_id = plan_tasks.submit_task(plan, output_dir=str(store["path"].parent),
+                                     configured_models={"chat", "image"})["task_id"]
+    assert plan_tasks.get_task(task_id)["lease_id"] == ""
+    plan_tasks._run_task(plan_tasks._claim_next(), threading.Event())
+    assert plan_tasks.get_task(task_id)["status"] == "awaiting_approval"
+
+
 def test_租约撤销后expensive再次被拦(store, fake_capabilities):
     plan = _plan([PlanStep(id="s1", operation="test.batch", params={"template_id": "t1"})])
     task_id = plan_tasks.submit_task(plan, output_dir=str(store["path"].parent),
@@ -286,6 +353,50 @@ def test_配方固化与实例化(store, fake_capabilities):
     assert inst["deduped"] is False   # 参数不同 → hash 不同 → 允许重投
     task = plan_tasks.get_task(inst["task_id"])
     assert task["steps"][0]["params"]["a"] == "覆盖值"
+
+
+def test_list_tasks聚合终态任务_未终态全显示(store):
+    now = int(time.time() * 1000)
+    rows = [
+        ("open1", "待审批的批量计划", "awaiting_approval", now),
+        ("done1", "对比验收图 [1788073707]", "done", now - 1000),
+        ("done2", "对比验收图 [1788069937]", "done", now - 2000),
+        ("done3", "对比验收图", "done", now - 3000),
+        ("done4", "对比验收图", "done", now - 4000),
+    ]
+    with plan_tasks.get_connection() as connection:
+        for task_id, intent, status, created in rows:
+            connection.execute(
+                "insert into plan_tasks (id, repo_id, output_dir, intent, plan_json,"
+                " content_hash, status, created_at, updated_at) values (?,?,?,?,?,?,?,?,?)",
+                (task_id, "work", "", intent, "{}", task_id, status, created, created))
+    tasks = plan_tasks.list_tasks()
+    by_status = [t for t in tasks if t["status"] == "awaiting_approval"]
+    done_group = [t for t in tasks if t["status"] == "done"]
+    assert len(by_status) == 1 and by_status[0]["merged_count"] == 1
+    # 后台活动只显示未终态；已终态任务不占活动面板
+    assert done_group == []
+
+
+def test_dump_task带图片级进度():
+    row = {"id": "t1", "repo_id": "work", "output_dir": "", "intent": "批量生成 14 套图",
+           "status": "running", "error": "", "lease_id": "", "content_hash": "h",
+           "created_at": 0, "updated_at": 0}
+    steps = [
+        {"seq": 0, "step_id": "s1", "operation": "workflow.list_templates", "status": "done",
+         "attempts": 0, "last_error": "", "params_json": "{}", "outputs_json": "{}"},
+        {"seq": 1, "step_id": "s2", "operation": "workflow.submit_batch", "status": "done",
+         "attempts": 0, "last_error": "",
+         "params_json": json.dumps({"variants": [{"name": "套" + str(i)} for i in range(14)]},
+                                    ensure_ascii=False),
+         "outputs_json": "{}"},
+        {"seq": 2, "step_id": "s3", "operation": "media.collect_comfy_outputs", "status": "done",
+         "attempts": 0, "last_error": "", "params_json": "{}",
+         "outputs_json": json.dumps({"collected": 5}, ensure_ascii=False)},
+    ]
+    task = plan_tasks._dump_task(row, steps)
+    assert task["images_total"] == 14 and task["images_done"] == 5
+    assert task["progress"] == "3/3 步 · 图 5/14"
 
 
 def test_进度发布到task_progress_store(store, fake_capabilities):

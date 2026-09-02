@@ -9,7 +9,7 @@ const invocation = (): AgentInvocation => ({
   size: "832x1216", imageQuality: "high", outputDir: "out", repoId: "repo-1",
   proxyUrl: "", chatProxyUrl: "cp", genProxyUrl: "gp", videoProxyUrl: "vp", embedProxyUrl: "ep",
   messageId: "bot-1", userMessageId: "user-1", styleTemplate: "style", agentId: "agent",
-  streamOutput: true, contextMaxTokens: 0, historyPerRole: 9,
+  streamOutput: true, contextMaxTokens: 0, historyPerRole: 9, selfhealAttempts: 2,
   history: [{ role: "user", content: "前情" }], characterDir: "cards", cardName: "Cecilia",
   cardNames: ["Cecilia", "Nozomi"], openingCardName: "Cecilia", presetDir: "presets",
   presetName: "preset", userName: "User", userPersona: "persona", personaBound: true,
@@ -42,5 +42,24 @@ describe("agent invocation wire contract", () => {
       approval_id: "approval-1", approval_action: "change", edited_prompt: "new",
       forced_route: "generate", user_message_id: "route-user",
     });
+  });
+
+  it("透传附件元信息为 wire 字段（file_id 真源，C1 增强）", () => {
+    const body = agentInvocationBody({
+      ...invocation(),
+      attachments: [
+        { fileId: "a".repeat(32), name: "计划.md", mime: "text/markdown", size: 1234 },
+        { fileId: "b".repeat(32), name: "clip.mp4", mime: "video/mp4", size: 99 },
+      ],
+    });
+    expect(body.attachments).toEqual([
+      { file_id: "a".repeat(32), name: "计划.md", mime: "text/markdown", size: 1234 },
+      { file_id: "b".repeat(32), name: "clip.mp4", mime: "video/mp4", size: 99 },
+    ]);
+  });
+
+  it("无附件时 attachments 序列化为空数组（wire 字段始终存在）", () => {
+    const body = agentInvocationBody(invocation());
+    expect(body.attachments).toEqual([]);
   });
 });

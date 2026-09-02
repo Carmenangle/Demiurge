@@ -231,3 +231,10 @@ def test_音频事件丢弃空台词行():
     })
     assert len(event["data"]["lines"]) == 1
     assert event["data"]["lines"][0]["speaker"] == "阿尼玛"
+
+
+def test_思考事件编码():
+    """2026-08-31 晚「思考全公开」：thinking 增量作为独立事件类型上 wire。"""
+    event = protocol.encode_event({"thinking": "先推演再落笔"})
+    assert event == {"protocol": "laf-chat-stream", "version": 1,
+                     "type": "thinking", "data": {"text": "先推演再落笔"}}

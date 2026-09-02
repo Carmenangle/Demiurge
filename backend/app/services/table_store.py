@@ -49,6 +49,12 @@ QUESTS_TABLE = "任务与事件表"
 OPTIONS_TABLE = "选项表"
 _SINGLETON_TABLES = {GLOBAL_TABLE, PROTAGONIST_TABLE, OPTIONS_TABLE}
 _ALWAYS_FILL_TABLES = {GLOBAL_TABLE}
+
+
+def _is_character_table(table: dict[str, Any]) -> bool:
+    """角色状态表：一旦出现角色就永久保留，agent 只能更新不能删行/抹列。"""
+    name = str(table.get("name") or "")
+    return name in {PROTAGONIST_TABLE, CHARACTERS_TABLE} or "角色" in name
 _RETAIN_ON_DELETE_TABLES = {
     GLOBAL_TABLE, PROTAGONIST_TABLE, CHARACTERS_TABLE, SKILLS_TABLE, QUESTS_TABLE, OPTIONS_TABLE,
 }
@@ -178,7 +184,16 @@ def apply_ops(tables: list[dict[str, Any]], ops: Any) -> int:
             if not isinstance(vals, dict):
                 continue
             if tbl.get("rowPolicy") == "singleton":
-                rows[:] = [[str(vals.get(c, "")) for c in cols]]
+                # 2026-09-01 用户定案：角色状态表一旦出现就永久存在，所有参数也都存在，
+                # agent 只能按剧情更新，不得以部分字段的 insert 把未提供的列抹成空串。
+                if _is_character_table(tbl):
+                    old = rows[0] if rows else []
+                    rows[:] = [[
+                        str(vals.get(c, (old[i] if i < len(old) else "")))
+                        for i, c in enumerate(cols)
+                    ]]
+                else:
+                    rows[:] = [[str(vals.get(c, "")) for c in cols]]
             else:
                 existing = _locate(tbl, {"key": vals.get(tbl.get("keyCol") or ""), "values": vals})
                 if existing is not None and tbl.get("keyCol"):
@@ -206,6 +221,9 @@ def apply_ops(tables: list[dict[str, Any]], ops: Any) -> int:
         elif op == "delete":
             idx = _locate(tbl, item)
             if idx is None:
+                continue
+            # 2026-09-01 用户定案：除非用户删表，agent 无权删除角色状态表。
+            if _is_character_table(tbl):
                 continue
             if tbl.get("name") == SKILLS_TABLE and "状态" in cols:
                 rows[idx][cols.index("状态")] = "不可用"
@@ -492,7 +510,10 @@ def save(base: str, repo_id: str, tables: list[dict[str, Any]]) -> None:
         return
     p = tables_path(base, repo_id)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps({"tables": tables}, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 原子写：维护转后台后，生成期读取可能与写并发，tmp+replace 防止读到半截 JSON
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps({"tables": tables}, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(p)
 
 
 def config_path(base: str, repo_id: str) -> Path:

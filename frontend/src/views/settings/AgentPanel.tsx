@@ -4,7 +4,7 @@ import { listAgents, saveAgents, defaultPrompt, DEFAULT_TOOLS, type Agent, type 
 import { listMcpServers, type McpServer } from "../../api/mcp";
 import { listSkills, type Skill } from "../../api/skills";
 import type { PanelProps } from "./GeneralPanel";
-import { normalizeContextBudgets, DEFAULT_HISTORY_PER_ROLE } from "../../stores/settings";
+import { normalizeContextBudgets, DEFAULT_HISTORY_PER_ROLE, DEFAULT_SELFHEAL_ATTEMPTS } from "../../stores/settings";
 import { BuiltinAgentsSection } from "./BuiltinAgentsSection";
 import { ProseStyleSection } from "./ProseStyleSection";
 
@@ -89,6 +89,22 @@ export function AgentPanel({ draft, setDraft }: PanelProps) {
           开启后，模型生成的正文会实时显示；关闭时等待完整回复后一次显示。
         </p>
       </div>
+        <div className="settings-subsection">
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={draft.agentAccessMode === "full"}
+              onChange={(e) => setDraft((current) => ({
+                ...current,
+                agentAccessMode: e.target.checked ? "full" : "approval",
+              }))}
+            />
+            智能编造 Agent 完全访问（full）
+          </label>
+          <p className="field-hint" style={{ marginTop: 6 }}>
+            默认「允许后访问」：写文件、烧 GPU、越域读取需逐项审批。开启「完全访问」后免逐项审批自动执行，但 GPU/LLM 配额与路径域校验照旧，全程留审计日志。
+          </p>
+        </div>
       <div className="settings-subsection">
         <h4>全局上下文预算</h4>
         <div className="field-row">
@@ -140,6 +156,21 @@ export function AgentPanel({ draft, setDraft }: PanelProps) {
                 const n = Number(e.target.value);
                 const safe = Number.isFinite(n) ? Math.min(50, Math.max(1, Math.round(n))) : DEFAULT_HISTORY_PER_ROLE;
                 setDraft((current) => ({ ...current, historyPerRole: safe }));
+              }}
+            />
+          </div>
+          <div className="field">
+            <label>截断自愈次数（0=不自愈）</label>
+            <input
+              type="number"
+              min={0}
+              max={5}
+              step={1}
+              value={draft.selfhealAttempts}
+              onChange={(e) => {
+                const n = Number(e.target.value);
+                const safe = Number.isFinite(n) ? Math.min(5, Math.max(0, Math.round(n))) : DEFAULT_SELFHEAL_ATTEMPTS;
+                setDraft((current) => ({ ...current, selfhealAttempts: safe }));
               }}
             />
           </div>

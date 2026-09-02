@@ -34,6 +34,8 @@ def test_高置信委派命中():
     assert plan_compiler.is_delegation_intent("整理全部世界书条目")
     assert plan_compiler.is_delegation_intent("把这三张卡都导入并建仓")
     assert plan_compiler.is_delegation_intent("帮我做个计划自动完成出图")
+    assert plan_compiler.is_delegation_intent("提取文档各个套装的提示词，分批生成图片")
+    assert plan_compiler.is_delegation_intent("读取文档，调用模板，逐批生成图片")
 
 
 def test_单次创作与疑问不误判():
@@ -143,6 +145,10 @@ def test_编译一次成功并落盘(tmp_path):
         chat_base="", chat_key="", chat_model="", chat_fn=lambda *a, **k: "", structured_chat_fn=fake)
     assert outcome.plan is not None, outcome.errors
     assert outcome.plan.steps[1].inputs_from == ["s1"]
+    # budgets 由代码确定性归一：步数=实际步骤数，GPU=variants 数，LLM=0
+    assert outcome.plan.budgets.max_steps == 2
+    assert outcome.plan.budgets.max_gpu_tasks == 1
+    assert outcome.plan.budgets.max_llm_calls == 0
 
     json_path = plan_compiler.save_plan(str(tmp_path), "work", outcome.plan)
     assert Path(json_path).is_file()
@@ -156,6 +162,74 @@ def test_编译一次成功并落盘(tmp_path):
     assert "workflow.submit_batch" in card and "已投递执行队列" in card
 
 
+def test_编译期先回填variants再归一预算(tmp_path):
+    # 模型只排了 submit_batch 但 variants 为空：校验前 fill_prompt_sections 应
+    # 从附件文档重建变体，budgets.max_gpu_tasks 归一为文档真实段数
+    doc = "\n".join([
+        "## 【春·套一】测试套装",
+        "QRQ, masterpiece, " + "tag, " * 200,
+        "=" * 60,
+        "## 【春·套二】测试套装",
+        "QRQ, masterpiece, " + "tag, " * 200,
+        "=" * 60,
+    ])
+    payload = {
+        "intent": "批量出图", "repo_id": "work",
+        "budgets": {"max_steps": 6, "max_gpu_tasks": 32, "max_llm_calls": 4},
+        "steps": [
+            {"id": "s1", "operation": "workflow.read_exposed_fields",
+             "params": {"template_id": "a546d311"}},
+            {"id": "s2", "operation": "workflow.submit_batch",
+             "params": {"template_id": "a546d311", "url": "http://127.0.0.1:8188",
+                        "variants": []}},
+            {"id": "s3", "operation": "media.collect_comfy_outputs",
+             "params": {"comfyui_url": "http://127.0.0.1:8188"},
+             "inputs_from": ["s2.submit_result"]},
+        ],
+        "approval_required": ["workflow.submit_batch"],
+    }
+    fake = _FakeStructured(lambda _c: payload)
+    outcome = plan_compiler.compile_plan(
+        intent="批量出图", repo_id="work", output_dir=str(tmp_path),
+        attachments=[{"name": "形象提示词-唐柚.md", "text": doc}],
+        configured_models={"chat", "image"},
+        chat_base="", chat_key="", chat_model="", chat_fn=lambda *a, **k: "", structured_chat_fn=fake)
+    assert outcome.plan is not None, outcome.errors
+    variants = outcome.plan.steps[1].params["variants"]
+    assert len(variants) == 2
+    assert outcome.plan.budgets.max_gpu_tasks == 2
+    assert outcome.plan.budgets.max_steps == 3
+    assert outcome.plan.budgets.max_llm_calls == 0
+
+
+def test_同模板多个submit_batch自动合并():
+    plan = _plan(steps=[
+        PlanStep(id="s1", operation="workflow.submit_batch",
+                 params={"template_id": "t", "variants": [{"name": "A"}],
+                         "url": "http://127.0.0.1:8188"}),
+        PlanStep(id="s2", operation="workflow.submit_batch",
+                 params={"template_id": "t", "variants": [{"name": "A"}, {"name": "B"}],
+                         "url": "http://127.0.0.1:8188"}),
+        PlanStep(id="s3", operation="media.collect_comfy_outputs",
+                 params={"comfyui_url": "http://127.0.0.1:8188"},
+                 inputs_from=["s1.submit_result", "s2.submit_result"]),
+    ])
+    plan_compiler._merge_duplicate_submits(plan)
+    assert len(plan.steps) == 2
+    assert [v["name"] for v in plan.steps[0].params["variants"]] == ["A", "B"]
+    assert plan.steps[1].inputs_from == ["s1.submit_result"]
+
+
+def test_大文档附件全文投喂_超限才退化骨架(tmp_path):
+    doc = "\n".join(["# 文档", "## 【春·套一】银灰开衫", "正文" * 3000, "## 【春·套二】雾蓝马甲", "正文" * 3000])
+    view = plan_compiler._attachment_brief(doc)
+    assert view == doc  # P4：全文进上下文，模型才判断得了哪些是套装
+    assert "【春·套一】" in view and "【春·套二】" in view and "正文" in view
+    huge = "\n".join(["## 【套一】", "正文" * 90000])
+    brief = plan_compiler._attachment_brief(huge)
+    assert len(brief) < len(huge)
+    assert plan_compiler._attachment_brief("短文档") == "短文档"
+
 def test_编译两次仍非法如实返回错误(tmp_path):
     bad = {"intent": "x", "steps": [{"id": "s1", "operation": "ghost.action"}]}
     fake = _FakeStructured(lambda _c: bad)
@@ -166,3 +240,73 @@ def test_编译两次仍非法如实返回错误(tmp_path):
     assert outcome.plan is None
     assert outcome.errors and any("ghost.action" in e for e in outcome.errors)
     assert fake.calls == 2  # 带校验错误重试一次
+
+# ── 段落回填卫生：正文行中套名引用不是标题 / 目录附件不是提示词源 ─────────────
+# 真实失败（2026-09-02）：唐柚文档「使用说明」第 4 条含【运动·套一/套二】行中引用，
+# 旧判定「任何含【】的行都是标题」把该行当成段落开头，吞掉第 5-9 条并延伸进拼接的
+# LoRA/模板目录附件（文件名含 masterpiece 通过质量过滤）→ 伪第 15 变体；目录里
+# 「禁止写 TO_BE_RESOLVED」字样又触发占位符校验被拒，整批任务无法投递。
+
+def _套装文档() -> str:
+    def 套(名: str) -> str:
+        return "\n".join([
+            f"## 【{名}】测试套装",
+            "QRQ, masterpiece, " + "tag, " * 200,
+            "=" * 60,
+        ])
+    return "\n".join([
+        套("春·套一"), 套("春·套二"),
+        "## 使用说明",
+        "1. 每个代码块是一套完整 prompt，整块复制即可。",
+        "4. **鞋履**：签名鞋全 14 套统一；【运动·套一/套二】配同款白低帮运动鞋。",
+        "5. **袜子纪律**：裙装套分两类，长裤套一律及踝短袜。",
+    ])
+
+
+def test_extract_all_sections_正文行中套名引用不算标题():
+    joined = _套装文档() + "\n" + (
+        "共 2 个：\n- anima-base-1-masterpiece-v51.safetensors（触发词:masterpiece/very aesthetic，建议权重:0.8）\n"
+        "用户提到近似名称时优先用上面的真实文件名。\n" + "目录说明填充。 " * 120
+    )  # 模拟旧 join 行为：目录附件紧跟文档，伪段落延伸进去后被 masterpiece 过滤放行
+    sections = plan_compiler.extract_all_sections(joined)
+    assert [n for n, _ in sections] == ["【春·套一】测试套装", "【春·套二】测试套装"]
+
+def test_fill_prompt_sections_目录附件不参与抽取与回填():
+    plan = _plan(steps=[PlanStep(
+        id="s3", operation="workflow.submit_batch",
+        params={"template_id": "a546d311", "url": "http://127.0.0.1:8188",
+                "variants": ["【春·套一】测试套装", "【春·套二】测试套装"]})],
+        approval_required=["workflow.submit_batch"])
+    filled = plan_compiler.fill_prompt_sections(plan, [
+        {"name": "形象提示词-唐柚.md", "text": _套装文档()},
+        {"name": plan_compiler.LORA_CATALOG_NAME,
+         "text": "共 1 个：\n- anima-masterpiece.safetensors（触发词:masterpiece）\n"
+                 "禁止写 TO_BE_RESOLVED、{{...}} 或任何占位符。"},
+        {"name": plan_compiler.TEMPLATE_CATALOG_NAME,
+         "text": "共 1 个：\n- a546d311 Krea2-高清文生图优化流\n禁止写 TO_BE_RESOLVED。"},
+    ])
+    variants = plan.steps[0].params["variants"]
+    assert len(variants) == 2  # 恰好文档真实段落数，无伪变体
+    assert filled == 2
+    for v in variants:
+        assert "TO_BE_RESOLVED" not in v["prompt"]
+        assert "鞋履" not in v["prompt"] and "袜子纪律" not in v["prompt"]
+    # 回填后的计划必须过校验闸门（此前正是被 variants[14] 占位符误报拦截）
+    errors = plan_validator.validate(
+        plan, capabilities=all_capabilities(), configured_models={"chat", "image"})
+    assert not errors, errors
+
+def test_fill_prompt_sections_模型直写数量不符时以标题抽取重建():
+    # P4 保真：模型直写了 prompt，但变体数 != 文档真实套装数 → 代码以抽取结果为准重建
+    plan = _plan(steps=[PlanStep(
+        id="s3", operation="workflow.submit_batch",
+        params={"template_id": "a546d311", "url": "http://127.0.0.1:8188",
+                "variants": [{"name": "春·套一", "prompt": "模型只写了一套"}]})],
+        approval_required=["workflow.submit_batch"])
+    filled = plan_compiler.fill_prompt_sections(plan, [
+        {"name": "形象提示词-唐柚.md", "text": _套装文档()},
+    ])
+    variants = plan.steps[0].params["variants"]
+    assert len(variants) == 2  # 文档真实段数
+    assert filled == 2
+    assert all("模型只写了一套" not in v["prompt"] for v in variants)

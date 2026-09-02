@@ -10,6 +10,32 @@ const LOCK = params.get("laf_lock") === "1";
 // 与 LOCK 完全隔离：两个 URL 参数、两个扩展分支，锁定模式零改动，不影响生图链路。
 const FULL = params.get("laf_full") === "1";
 
+// ===== loadGraphData 互斥锁 =====
+// ComfyUI 前端初始化会异步恢复上次工作流（loadPersistedWorkflow → app.loadGraphData(旧图)），
+// 与 laf_lock 收到父页面 load 后的 app.loadGraphData(新图) 可能交叉：两个加载各自
+// graph.clear() 再逐节点 add，交叉时 _nodes 里出现同 id 的两个节点对象（画布画出两个
+// 相同的节点框），getNodeById 只映射一个（其余节点“丢失”）。包装 app.loadGraphData，
+// 让任意时刻只有一个载图在跑，后到的排队，从根上消除交叉。
+let loadGraphLock = Promise.resolve();
+function installLoadGraphLock() {
+  if (!app || app.__lafLoadGraphLocked) return;
+  app.__lafLoadGraphLocked = true;
+  const orig = app.loadGraphData.bind(app);
+  app.loadGraphData = async function (...args) {
+    const prev = loadGraphLock;
+    let release;
+    loadGraphLock = new Promise((r) => { release = r; });
+    await prev.catch(() => {}); // 前一个失败/超时也继续
+    try {
+      return await orig(...args);
+    } finally {
+      release();
+    }
+  };
+}
+// 文件加载时 app 已由 import 注入，尽早装锁（幂等；setup 里还会再兜底一次）。
+installLoadGraphLock();
+
 // 向父窗口发消息
 function toParent(type, payload) {
   if (window.parent && window.parent !== window) {
@@ -742,7 +768,7 @@ function bindLongPress() {
 }
 
 // ===== 清除 ComfyUI 持久化会话，防止之前打开的大工作流在 iframe 加载时恢复 =====
-function clearComfyStorage() {
+async function clearComfyStorage() {
   try {
     // ① localStorage：清理工作流/画布状态的持久化缓存（不碰模型路径/设置/偏好）
     for (const key of Object.keys(localStorage)) {
@@ -770,28 +796,39 @@ function clearComfyStorage() {
     // ③ IndexedDB：ComfyUI 新前端（Lit + Pinia + localforage/idb-keyval）会把工作流状态写入
     // IndexedDB，执行流程后（如用 Krea2 生图）写入更完整的运行态数据。必须清理掉，
     // 否则 localStorage 清空后 ComfyUI 仍从 IndexedDB 恢复出完整工作流。
-    // 异步执行，不阻塞后续逻辑
-    _clearComfyIndexedDB();
+    // 现在等删除完成再继续，避免 ComfyUI 初始化恢复流程与删除竞态。
+    await _clearComfyIndexedDB();
   } catch (e) { /* 清理失败不阻断 */ }
 }
 
 function _clearComfyIndexedDB() {
-  try {
-    const request = indexedDB.databases ? indexedDB.databases() : null;
-    if (request && typeof request.then === "function") {
-      request.then((dbs) => {
-        for (const db of dbs) {
-          if (!db.name) continue;
-          const lower = db.name.toLowerCase();
-          if (lower.includes("workflow") || lower.includes("workspace")
-            || lower.includes("comfy") || lower.includes("localforage")
-            || lower.includes("keyval")) {
-            try { indexedDB.deleteDatabase(db.name); } catch (e) {}
+  return new Promise((resolve) => {
+    try {
+      const request = indexedDB.databases ? indexedDB.databases() : null;
+      if (request && typeof request.then === "function") {
+        request.then((dbs) => {
+          const jobs = [];
+          for (const db of dbs) {
+            if (!db.name) continue;
+            const lower = db.name.toLowerCase();
+            if (lower.includes("workflow") || lower.includes("workspace")
+              || lower.includes("comfy") || lower.includes("localforage")
+              || lower.includes("keyval")) {
+              jobs.push(new Promise((res) => {
+                try {
+                  const del = indexedDB.deleteDatabase(db.name);
+                  del.onsuccess = del.onerror = del.onblocked = () => res();
+                } catch (e) { res(); }
+              }));
+            }
           }
-        }
-      }).catch(() => {});
-    }
-  } catch (e) {}
+          Promise.all(jobs).then(() => resolve());
+        }).catch(() => resolve());
+      } else {
+        resolve();
+      }
+    } catch (e) { resolve(); }
+  });
 }
 
 let watchdog = null;
@@ -800,11 +837,17 @@ let resizeHooked = false;  // 是否已挂 resize 重新贴合
 let loadedWorkflow = null; // 本 iframe 的拓扑真源；捕获前用于抵御会话恢复/其他画布污染
 let loadedExposedIds = [];
 
+let applyLoadRunning = false;
 async function applyLoad(workflow, exposedIds) {
+  // 防重入：watchdog 每 500ms 检查一次，若签名不一致会再次触发 applyLoad；而 loadGraphData
+  // 已被互斥锁串行，多个 applyLoad 并发只会排队堆积同一次载图。已有载入在跑时直接跳过本次。
+  if (applyLoadRunning) return;
+  applyLoadRunning = true;
+  try {
   loadedWorkflow = workflow;
   loadedExposedIds = Array.isArray(exposedIds) ? [...exposedIds] : [];
   // ② 载入目标工作流前再次清掉可能被恢复的残留——ComfyUI 部分插件在 graph.clear 后仍可能写回
-  clearComfyStorage();
+  await clearComfyStorage();
   try { app.graph.clear(); } catch (e) {}
   selectedIds.clear();
   // 载图：某些扩展(reroute 等)可能在 loadGraphData 内部抛/挂起，加超时兜底，
@@ -866,6 +909,9 @@ async function applyLoad(workflow, exposedIds) {
   // 关掉 loadGraphData 新建的多余 "Unsaved Workflow" 标签，只留当前；再隔离一次 chrome
   try { await closeExtraWorkflows(); } catch (e) {}
   try { isolateCanvas(); } catch (e) {}
+  } finally {
+    applyLoadRunning = false;
+  }
 }
 
 // 测量单节点真实尺寸（含 DOM widget 撑开后的高度），重新贴合并回传给父页面
@@ -901,6 +947,56 @@ function fitNode(n) {
   } catch (e) {}
 }
 
+// 计算全图节点包围盒（版本无关）：ComfyUI 新版 graph.getBounding 可能不存在，
+// 且 node.pos / node.size 可能是数组或 {0,1} 对象，统一用 [0]/[1] 属性访问。
+// 返回 [minX, minY, maxX, maxY]；无节点或数值非法返回 null。
+function graphBounds() {
+  const nodes = app.graph && app.graph._nodes ? app.graph._nodes : [];
+  if (nodes.length === 0) return null;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const n of nodes) {
+    const x = Number(n.pos ? n.pos[0] : 0);
+    const y = Number(n.pos ? n.pos[1] : 0);
+    const w = Number(n.size ? n.size[0] : 200) || 200;
+    const h = Number(n.size ? n.size[1] : 100) || 100;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    minX = Math.min(minX, x);
+    minY = Math.min(minY, y - 30); // 标题在 pos 上方，与 fitNode 对齐
+    maxX = Math.max(maxX, x + w);
+    maxY = Math.max(maxY, y + h);
+  }
+  if (!Number.isFinite(minX) || !Number.isFinite(maxX)) return null;
+  return [minX, minY, maxX, maxY];
+}
+
+// 手动把整图收进视野（版本无关）：按 fitNode 同款公式设置 ds.scale / ds.offset 居中。
+// 不依赖 c.fitViewToContent / graph.getBounding（ComfyUI v0.31 实测没有）。
+function fitGraphToView() {
+  const c = app.canvas;
+  if (!c || !c.ds || !c.canvas || !app.graph) return false;
+  const rect = c.canvas.getBoundingClientRect();
+  const cw = rect.width || c.canvas.clientWidth || c.canvas.width;
+  const ch = rect.height || c.canvas.clientHeight || c.canvas.height;
+  if ((cw || 0) < 50 || (ch || 0) < 50) return false; // 布局未稳定，下一轮延迟再 fit
+  const b = graphBounds();
+  if (!b || b.length < 4) return false;
+  const minX = b[0], minY = b[1], maxX = b[2], maxY = b[3];
+  const gw = Math.max(1, maxX - minX);
+  const gh = Math.max(1, maxY - minY);
+  const pad = 20;
+  const scale = Math.min((cw - pad * 2) / gw, (ch - pad * 2) / gh);
+  if (!Number.isFinite(scale) || scale <= 0) return false;
+  try {
+    c.ds.scale = scale;
+    c.ds.offset[0] = (cw / scale - gw) / 2 - minX;
+    c.ds.offset[1] = (ch / scale - gh) / 2 - minY;
+    c.setDirty(true, true);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
 // 缩放/平移使所有节点恰好可见
 function fitAll() {
   const c = app.canvas;
@@ -910,12 +1006,16 @@ function fitAll() {
     const rect = c.canvas.getBoundingClientRect();
     if ((rect.width || 0) < 50 || (rect.height || 0) < 50) return;
   }
+  // 手动居中优先（版本无关、可验证）；失败再尝试原生 fitToBounds，最后只重绘兜底。
+  if (fitGraphToView()) return;
   try {
-    if (typeof c.fitViewToContent === "function") { c.fitViewToContent(); return; }
-    if (c.ds && typeof c.ds.fitToBounds === "function" && app.graph) {
-      const b = app.graph.getBounding ? app.graph.getBounding() : null;
-      if (b) { c.ds.fitToBounds(b, { animate: false }); return; }
+    const b = graphBounds();
+    if (b && c.ds && typeof c.ds.fitToBounds === "function") {
+      // ds.fitToBounds 收 [x, y, width, height]
+      c.ds.fitToBounds([b[0], b[1], Math.max(1, b[2] - b[0]), Math.max(1, b[3] - b[1])], { animate: false });
+      return;
     }
+    if (typeof c.fitViewToContent === "function") { c.fitViewToContent(); return; }
   } catch (e) {}
   c.setDirty(true, true);
 }
@@ -967,7 +1067,8 @@ if (LOCK) {
     name: "LocalAIFrontend.Lock",
     async setup() {
       // ① 在 ComfyUI 初始化前先清掉上回会话残留的工作流，从源头消灭会话恢复覆盖
-      clearComfyStorage();
+      installLoadGraphLock();
+      await clearComfyStorage();
       hideChrome();
       installGlobalGuards();
       // 收父窗口消息
@@ -1196,7 +1297,8 @@ if (FULL) {
     name: "LocalAIFrontend.Full",
     async setup() {
       // ① 在 ComfyUI 初始化前先清掉上回会话残留（含 IndexedDB 中的执行后工作流）
-      clearComfyStorage();
+      installLoadGraphLock();
+      await clearComfyStorage();
       window.addEventListener("message", async (ev) => {
         const d = ev.data;
         if (!d || d.target !== "laf_lock") return;
@@ -1205,7 +1307,7 @@ if (FULL) {
         } else if (d.type === "load") {
           didLoad = true;  // 之后不再自动清空
           // ② 载入前再清一次——ComfyUI 的初始清空序列可能在前几次 clear+close 后把旧会话重新保存
-          clearComfyStorage();
+          await clearComfyStorage();
           // 载入整图（不裁剪、不锁定）；大图/扩展异常兜底，无论成败都回 loaded 防父页死等
           // 兼容 API prompt 格式（AI/骨架输出），用 loadAnyFormat 分流。
           try {

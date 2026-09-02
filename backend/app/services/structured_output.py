@@ -37,10 +37,40 @@ def _json_value(raw: str) -> Any:
     raise StructuredOutputError("模型未返回完整 JSON")
 
 
+def _unwrap_tool_calls(value: Any) -> dict[str, Any] | None:
+    """模型误走工具调用时，输出是 {"tool_calls":[{...,"function":{"arguments": {...}}}]}。
+
+    把最外层 tool_calls 解开：优先取第一个含 intent 键的 arguments，否则取第一个
+    可解析的 arguments dict。不是工具调用包装返回 None。
+    """
+    if not isinstance(value, dict) or "tool_calls" not in value:
+        return None
+    candidates: list[dict[str, Any]] = []
+    for call in value.get("tool_calls") or []:
+        if not isinstance(call, dict):
+            continue
+        fn = call.get("function") if isinstance(call.get("function"), dict) else {}
+        args = fn.get("arguments")
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError:
+                continue
+        if isinstance(args, dict):
+            candidates.append(args)
+    for candidate in candidates:
+        if "intent" in candidate:
+            return candidate
+    return candidates[0] if candidates else None
+
+
 def parse_object(raw: str) -> dict[str, Any]:
     value = _json_value(raw)
     if not isinstance(value, dict):
         raise StructuredOutputError("模型返回的 JSON 根必须是 JSON 对象")
+    unwrapped = _unwrap_tool_calls(value)
+    if unwrapped is not None:
+        return unwrapped
     return value
 
 
@@ -88,6 +118,9 @@ def invoke(
     if native is not None:
         try:
             parsed = native()
+            unwrapped = _unwrap_tool_calls(parsed) if isinstance(parsed, dict) else None
+            if unwrapped is not None:
+                parsed = unwrapped
             value = parsed if isinstance(parsed, schema) else schema.model_validate(parsed)
             _trace(trace, schema=schema, strategy="native_json_schema", status="ok")
             return StructuredResult(value=value, strategy="native_json_schema")

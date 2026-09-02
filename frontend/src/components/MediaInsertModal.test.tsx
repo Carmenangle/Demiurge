@@ -43,11 +43,25 @@ describe("MediaInsertModal prompt profiles", () => {
       />,
     );
 
-    expect(html).toContain("Krea2（剧情高潮英文描述）");
+    expect(html).not.toContain("Krea2（剧情高潮英文描述）");  // krea2 模版已下线（不如 Anima）
     expect(html).toContain("Anima（质量行 + 内容 tags / 英文描述）");
     expect(html).toContain("自然语言（GPT Image / Banana）");
     expect(html).toContain("Niji（主体 / 风格 / 附加 / 后缀）");
     expect(html).toContain('value="niji_sections" selected=""');
+  });
+
+  it("把旧 krea2 预设降级为 Anima", () => {
+    const html = renderToStaticMarkup(
+      <MediaInsertModal
+        templates={[]}
+        modelsDir=""
+        preset={{ templateId: "", promptProfile: "krea2" }}
+        onSave={() => {}}
+        onClose={() => {}}
+      />,
+    );
+
+    expect(html).toContain('value="anima_tags" selected=""');
   });
 
   it("shows saved fixed quality and negative prompts for Anima", () => {

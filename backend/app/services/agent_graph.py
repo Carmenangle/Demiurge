@@ -10,14 +10,20 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
+import time
 import traceback
 from typing import Any, Iterator, TypedDict
 
-from app.services import agent_context, builtin_agents, edit_agent, generation_approval, generation_store, plan_compiler, prompt_compiler, roleplay_turn, run_trace, scene_classify, story_history, structured_output, tool_agent_adapter
+from app.services import agent_context, agent_plugins as _agent_plugins, attachment_store, builtin_agents, edit_agent, generation_approval, generation_store, plan_compiler, prompt_compiler, roleplay_turn, run_trace, scene_classify, story_history, structured_output, tool_agent_adapter
 from app.services.structured_contracts import SupervisorDecision
 from app.services import llm as _llm
 from app.services import prompt_clean
 from app.services.agent_contracts import RunContext
+from app.config import COMFYUI_BASE_URL
+
+# 2026-09-01 用户定案：首发**不设总时长上限**——只要还在持续吐 token 就不允许截断；
+# 只有 30s 无 token 的流式读超时（llm.build_model streaming）才允许中断。
 
 # 探测日志：会话输入 / AI 思考(<think>) / RAG 召回，输出到 uvicorn 控制台（仅开发可见，不推前端）。
 _probe = logging.getLogger("uvicorn.error")
@@ -35,6 +41,7 @@ class AgentState(TypedDict, total=False):
     route: str                     # supervisor 分派结果：各专家/answer/clarify
     user_text: str                 # 本轮用户文本
     images: list                   # 本轮上传图片 url
+    attachments: list              # 本轮对话附件元信息 [{file_id,name,mime,size}]（已并入 user_text 参考段）
     result_text: str               # 专家产出的文本回复
     image_recs: list               # 生图产出 [{id,url}]
     video_recs: list               # 生视频产出 [{id,url}]
@@ -168,33 +175,10 @@ def _supervisor_route(text: str, image_count: int, ctx: dict) -> tuple[str, bool
 # ── supervisor 节点：判路由，写 state.route + trace ──
 
 # route → 对应工具开关键（自定义预设可关掉某能力，关掉则回退 answer）
-_ROUTE_TOOL = {"generate": "generate_image", "img2img": "image_to_image",
-               "analyze": "analyze_image", "inspire": "search_inspiration",
-               "video": "generate_video"}
-_ROUTE_LABELS = {
-    "answer": "继续对话",
-    "roleplay": "剧情扮演",
-    "generate": "生成图片",
-    "img2img": "参考图生图",
-    "analyze": "反推提示词",
-    "video": "生成视频",
-    "inspire": "查找灵感",
-    "tool_agent": "调用工具",
-    "edit": "编辑作品文件",
-    "plan": "委派计划",
-}
-_ROUTE_DESCRIPTIONS = {
-    "answer": "普通对话、问答，以及审查、解释、评价或优化已有内容",
-    "roleplay": "沉浸式角色扮演：推进剧情、以角色身份出演对白与叙事",
-    "generate": "根据文本生成新图片，或执行无参考图的完整成稿提示词",
-    "img2img": "基于本轮图片附件生成、修改或续接新图片",
-    "analyze": "从本轮图片附件反推并交付新的可复用提示词文本",
-    "video": "生成视频、动画或动图",
-    "inspire": "联网查找参考、灵感、流行款式或趋势",
-    "tool_agent": "调用已接入的外部工具、接口、文件或数据库能力",
-    "edit": "创建角色卡、编写作品脚本、读取和修改当前作品文件并排错",
-    "plan": "委派多步任务：批量出图、批量导入整理、跨能力编排等（编译计划经审批后台执行）",
-}
+# Agent 插件注册表（P6）：路由标签/描述/工具开关从 agent_plugins 生成，不再硬编码。
+_ROUTE_TOOL = {p.route: p.tool_key for p in _agent_plugins.all_plugins() if p.tool_key}
+_ROUTE_LABELS = {p.route: p.label for p in _agent_plugins.all_plugins()}
+_ROUTE_DESCRIPTIONS = {p.route: p.description for p in _agent_plugins.all_plugins()}
 
 
 def _has_card(ctx: dict) -> bool:
@@ -220,20 +204,10 @@ def _explicit_card_route(text: str, ctx: dict) -> str:
 
 
 def _route_available(route: str, has_images: bool, ctx: dict) -> bool:
-    if route not in _ROUTE_LABELS:
-        return False
-    if route == "answer":
-        return True
-    if route == "roleplay":
-        return _has_card(ctx)
-    if route == "generate" and has_images:
-        return False
-    if route in {"img2img", "analyze"} and not has_images:
-        return False
-    if route == "tool_agent" and not ctx.get("has_mcp"):
-        return False
-    tool_key = _ROUTE_TOOL.get(route)
-    return not tool_key or _tool_on(ctx.get("agent_cfg"), tool_key)
+    return _agent_plugins.route_available(
+        route, has_images=has_images, has_card=_has_card(ctx),
+        has_mcp=bool(ctx.get("has_mcp")), agent_cfg=ctx.get("agent_cfg"),
+        tool_on=_tool_on)
 
 
 def _available_routes(has_images: bool, ctx: dict) -> list[str]:
@@ -287,7 +261,7 @@ def supervisor_node(state: AgentState) -> dict:
         ctx["scene"] = scene_classify.infer_scene(text)
         run_trace.emit(ctx, "agent.completed", agent="supervisor", route="plan",
                        forced=False, scene=ctx.get("scene") or "")
-        trace = state.get("trace", []) + ["🧭 主管分派 → 委派计划"]
+        trace = state.get("trace", []) + ["🧭 主管分派 → 智能编造计划"]
         return {"route": "plan", "trace": trace}
     elif _has_card(ctx) and not has_images:
         # 作品剧情纯文本最终本就会并入 roleplay；无需先把历史再提交给 Supervisor。
@@ -319,7 +293,7 @@ def supervisor_node(state: AgentState) -> dict:
         route = "roleplay"
     label = {"generate": "生图专家", "img2img": "图生图专家", "analyze": "反推专家",
              "inspire": "灵感专家", "tool_agent": "工具专家", "video": "视频专家",
-             "roleplay": "剧情扮演", "answer": "对话", "plan": "委派计划"}.get(route, route)
+             "roleplay": "剧情扮演", "answer": "对话", "plan": "智能编造计划"}.get(route, route)
     run_trace.emit(ctx, "agent.completed", agent="supervisor", route=route,
                    forced=bool(forced_route), scene=ctx.get("scene") or "")
     trace = state.get("trace", []) + [f"🧭 主管分派 → {label}"]
@@ -489,10 +463,10 @@ def edit_node(state: AgentState) -> dict:
 
 
 def plan_compiler_node(state: AgentState) -> dict:
-    """委派计划专家（P1）：意图 → 计划文档 → 校验 → 落盘作品 plans/；只编译不执行。"""
+    """智能编造节点：full 模式跑自由循环（ReAct），approval 模式走计划编译+审批。"""
     ctx = state["_ctx"]
     text = state.get("user_text", "")
-    trace = state.get("trace", []) + ["📋 委派计划编译中…"]
+    trace = state.get("trace", []) + ["📋 智能编造计划编译中…"]
     run_trace.emit(ctx, "agent.started", agent="plan_compiler")
     output_dir = str(ctx.get("output_dir") or "").strip()
     if not output_dir:
@@ -502,6 +476,52 @@ def plan_compiler_node(state: AgentState) -> dict:
                               ("video", ctx.get("vid_base")), ("embed", ctx.get("embed_base")))
         if flag
     }
+    # 审批词直通车：对话里发「批准/同意/执行/取消」不再编译新计划，
+    # 直接审批/取消最近一个 awaiting_approval 计划（修复 2026-09-02 实锤：
+    # 用户发「批准」被当成新任务编译，上下文断档）。
+    _approve_word = re.match(r"^\s*(批准|同意|执行|确认|approve|ok|好|取消|cancel|撤销)\s*$",
+                             text, flags=re.IGNORECASE)
+    if _approve_word:
+        from app.services import plan_tasks as _pt
+        _word = _approve_word.group(1).lower()
+        _pending = [t for t in _pt.list_tasks(output_dir=output_dir, limit=10)
+                    if t["status"] == "awaiting_approval"]
+        if not _pending:
+            return {"result_text": "当前没有待审批的计划。", "trace": trace}
+        _task = _pending[0]
+        if _word in ("取消", "cancel", "撤销"):
+            _pt.cancel_task(_task["id"])
+            return {"result_text": f"已取消计划：{_task['intent'][:120]}", "trace": trace}
+        _pt.approve_task(_task["id"])
+        return {"result_text": f"已批准计划：{_task['intent'][:120]}\n执行器继续执行，"
+                               f"进度见后台活动面板。", "trace": trace}
+    # full 访问模式：走智能编造自由循环（ReAct），模型逐步决定调用哪个能力，
+    # 观察结果后自行修正，直到宣布完成。approval 模式继续走下方计划编译+审批。
+    from app.services import capability_registry, capability_sandbox, fabric_loop, plan_tasks
+    if plan_tasks._agent_access_mode() == capability_sandbox.ACCESS_FULL:
+        lease = capability_sandbox.grant(
+            subject=f"fabric:{ctx.get('thread_id') or ctx.get('message_id') or 'sess'}",
+            capabilities=[], ttl_seconds=86400, approved_by="full_mode",
+            mode=capability_sandbox.ACCESS_FULL)
+        outcome = fabric_loop.run_loop(
+            intent=text, history=agent_context.history_text(ctx),
+            capabilities=capability_registry.with_availability(configured),
+            access_mode=capability_sandbox.ACCESS_FULL,
+            lease_id=lease["id"], output_dir=output_dir,
+            configured_models=configured,
+            chat_base=ctx["chat_base"], chat_key=ctx["chat_key"],
+            chat_model=ctx.get("route_model") or ctx["chat_model"],
+            chat_fn=ctx.get("chat_fn") or _llm.chat,
+            structured_chat_fn=ctx.get("structured_chat_fn"),
+            proxy_kwargs=_proxy_kw(ctx),
+            trace=lambda event, **data: run_trace.emit(ctx, event, agent="fabric", **data),
+        )
+        if outcome.status == "done":
+            return {"result_text": outcome.reply,
+                    "trace": trace + ["🧵 智能编造自由循环完成"]}
+        return {"result_text": f"智能编造执行未完成（{outcome.status}）：{outcome.error}",
+                "trace": trace + [f"🧵 智能编造循环中断：{outcome.status}"]}
+
     # 编译期预读：用户消息里显式写出的本地文本文件（仅用户明示的路径，容量封顶）。
     # 内容进编译上下文，使计划能带逐套装等运行时才能确定的精确参数；trace 留痕。
     attachments: list[dict] = []
@@ -521,6 +541,11 @@ def plan_compiler_node(state: AgentState) -> dict:
                            chars=len(read["text"]))
         if len(attachments) > 3:
             attachments = attachments[:3]
+        # 用户把文档作为附件发送时，正文里带【文件参考：name】…【文件参考结束：name】块；
+        # 这些全文也必须进 attachments，fill_prompt_sections 才能机械回填 prompt_section 引用
+        # （路径预读只覆盖「消息里写绝对路径」的情况）。
+        for fm in re.finditer(r"【文件参考：([^】]+)】[^\n]*\n(.*?)\n【文件参考结束：\1】", text, re.S):
+            attachments.append({"name": fm.group(1).strip(), "text": fm.group(2)})
         try:
             from app.services import capability_handlers as _ch
             catalog = _ch.lora_list()
@@ -529,20 +554,37 @@ def plan_compiler_node(state: AgentState) -> dict:
                     f"- {item['file']}" + (f"（触发词:{'/'.join(item['triggers'])}，建议权重:{item['suggested_weight']}）"
                                            if item["triggers"] else "")
                     for item in catalog["loras"])
-                attachments.append({"name": "本机 LoRA 目录", "text":
+                attachments.append({"name": plan_compiler.LORA_CATALOG_NAME, "text":
                                     f"共 {catalog['count']} 个：\n{lines}\n"
                                     "用户提到近似名称时优先用上面的真实文件名；"
                                     "宽泛指向（如「用 krea2 的」）存在多个候选时，"
                                     "在计划卡里列出候选让用户选择，禁止替用户猜。"})
         except Exception:  # noqa: BLE001 - 目录不可用时跳过
             pass
+        try:
+            from app.services import template_store
+            templates = template_store.list_templates()
+            if templates:
+                lines = "\n".join(
+                    f"- {t.get('id')} {t.get('name') or ''}".rstrip()
+                    for t in templates)
+                attachments.append({"name": plan_compiler.TEMPLATE_CATALOG_NAME, "text":
+                                    f"共 {len(templates)} 个：\n{lines}\n"
+                                    "用户指定模板时优先用上面的真实 id（或完整 name）；"
+                                    "禁止写 TO_BE_RESOLVED、{{...}} 或任何占位符。"})
+        except Exception:  # noqa: BLE001 - 模板库不可用时跳过
+            pass
     except Exception as exc:  # noqa: BLE001
         run_trace.emit(ctx, "plan.attachments", status="error", error=str(exc))
+    # 编译用户消息时剥掉【文件参考】全文块：附件正文已进 attachments（骨架供模型看），
+    # 避免大文档全文在 user intent 里再送一遍拖慢编译。
+    compile_text = re.sub(r"【文件参考：.*?【文件参考结束：[^】]*】", "", text, flags=re.S).strip()
     try:
         outcome = plan_compiler.compile_plan(
-            intent=text, history=agent_context.history_text(ctx)[-800:],
+            intent=compile_text, history=agent_context.history_text(ctx),
             attachments=attachments,
             repo_id=str(ctx.get("repo_id") or ctx.get("thread_id") or ""),
+            comfyui_url=COMFYUI_BASE_URL,
             output_dir=output_dir, configured_models=configured,
             chat_base=ctx["chat_base"], chat_key=ctx["chat_key"],
             chat_model=ctx.get("route_model") or ctx["chat_model"],
@@ -581,7 +623,8 @@ def plan_compiler_node(state: AgentState) -> dict:
     except ValueError as exc:
         queue_note = f"投递被拒：{exc}"
     card = plan_compiler.render_plan_card(outcome.plan, json_path)
-    return {"result_text": card + "\n" + queue_note,
+    approval_marker = f"\n\n[[plan:{submitted['task_id']}]]" if submitted.get("task_id") else ""
+    return {"result_text": card + "\n" + queue_note + approval_marker,
             "trace": trace + ["📋 计划已落盘并投递执行队列（durable/expensive 需审批）"]}
 
 
@@ -860,13 +903,20 @@ def roleplay_node(state: AgentState) -> dict:
         tail_msgs.append({
             "role": "system",
             "content": (
-                "[输出纪律] 思考阶段一次性定稿：结论一旦确定不得推翻重来，禁止「不对，让我再想想」"
-                "式的回退重确认；一旦决定动笔，直接开始输出正文，不得回到分析阶段。"
-                "不复述设定、对话历史或用户输入；思考只保留不可省略的决策依据，长度自然收敛即可——"
-                "正文与结尾 JSON 块的输出额度永远优先于思考。"
-                "思考阶段用自然语言推演，禁止输出 <status>/<encounter>/<roll>/<content>/<状态更新> "
-                "等任何标签块的草稿或片段（包括只开未闭的标签）——这些块只允许在全部正文之后"
-                "正式输出一次；在思考里预写会让解析层错位配对，吞掉正文与状态栏。"
+                "[输出纪律] 思考是决策摘要，不是草稿纸。思考只允许包含三类内容：对用户输入的"
+                "一次性解读、本轮关键抉择（骰点/立场/结构）各定一次的结论、不可省略的因果依据。\n"
+                "硬性禁区（逐条对照，违反任意一条=白烧正文额度）：\n"
+                "一、禁止在思考里试写正文、台词或任何成段草稿——正文全文只写一遍，"
+                "直接写进最终输出，写进思考的那份纯属双倍付费；\n"
+                "二、禁止复述设定、人物档案、好感分阶、输出规则等上下文已有内容——"
+                "它们已经注入在场，思考里引用结论即可，不得朗读原文；\n"
+                "三、骰点/意图解读/叙事结构各只许判定一轮：禁止「不对，让我重新看看」式的推翻"
+                "重来，禁止规划两版结构再二选一，禁止「现在真的开始写了」式的假开场；\n"
+                "四、禁止输出 <status>/<encounter>/<roll>/<content>/<状态更新> 等任何标签块的"
+                "草稿或片段（包括只开未闭的标签）——这些块只允许在全部正文之后正式输出一次，"
+                "在思考里预写会让解析层错位配对，吞掉正文与状态栏；"
+                "五、思考总长度硬上限：**不得超过 300 字**。思考是决策摘要，不是草稿纸；"
+                "超长思考会烧光正文输出额度，导致正文为零——宁可少想，把篇幅全部留给正文。"
             ),
         })
         # 同轮成稿已剥离：不再向正文轮下发 <illustration> JSON 义务及其 near_generation_contract
@@ -884,6 +934,7 @@ def roleplay_node(state: AgentState) -> dict:
             provider_profile=ctx.get("provider_profile") or "openai_compatible",
         )
         wire_messages = compiled_prompt.messages
+        wire_messages = _resume_interrupted_messages(wire_messages)
         roleplay_sampling = _roleplay_sampling(ctx)
         run_trace.emit(ctx, "model.request", agent="roleplay", model=ctx["chat_model"],
                        messages=wire_messages, preset=ctx.get("preset_name") or "",
@@ -906,7 +957,7 @@ def roleplay_node(state: AgentState) -> dict:
             ),
             anchor_offset=_illustration_anchor_offset,
             emit_ready=_emit_roleplay_ready,
-            maintain=lambda item, value, events: _agency_maintenance(
+            maintain=lambda item, value, events: _agency_maintenance_async(
                 item.ctx, item.deps, value, item.turn, events,
             ),
         )
@@ -914,6 +965,7 @@ def roleplay_node(state: AgentState) -> dict:
             roleplay_turn.TurnExecution(
                 ctx=ctx, text=text, trace=trace, streamed=streamed,
                 deps=deps, turn=turn, affinity=affinity, lost=lost,
+                selfheal_attempts=ctx.get("selfheal_attempts", roleplay_turn.SELFHEAL_MAX_ATTEMPTS),
             ),
             roleplay_turn.TurnExecutionHooks(
                 generate=lambda: _chat_with_optional_stream(
@@ -921,6 +973,14 @@ def roleplay_node(state: AgentState) -> dict:
                     **roleplay_sampling,
                 ),
                 generated=_generated,
+                notify=lambda message: _notify_stream_trace(ctx, message),
+                continue_generate=lambda partial: _chat_with_optional_stream(
+                    ctx, _roleplay_continuation_messages(
+                        wire_messages, partial,
+                        think_truncated=roleplay_turn.think_truncated(partial),
+                    ),
+                    temperature=temp, **roleplay_sampling,
+                ),
                 finalization=finalization,
             ),
         )
@@ -1101,8 +1161,15 @@ def _apply_table_ops(ctx: dict, repo_id: str, clean: str, ops: list,
 
 
 def _visible_roleplay_text(reply: str) -> str:
-    """后处理失败时仍剥离内部控制块，禁止把状态、表格和生图提示词暴露给用户。"""
-    clean = reply
+    """后处理失败时仍剥离内部控制块，禁止把状态、表格和生图提示词暴露给用户。
+
+    与主链同源（2026-08-31 根因修复）：先拆 think 前缀，块提取只看正文，发布时拼回——
+    防止 think 内幻影协议标签的跨界匹配吞掉正文。
+    """
+    from app.services import roleplay_agency
+
+    think_head, body = roleplay_agency.split_think_prefix(reply)
+    clean = body
     try:
         from app.services import image_prompt_extract
 
@@ -1121,7 +1188,7 @@ def _visible_roleplay_text(reply: str) -> str:
         clean, _ = table_update.parse_table_block(clean)
     except Exception:  # noqa: BLE001
         pass
-    return clean.strip()
+    return (think_head + clean).strip()
 
 
 def _status_snapshot_value(snapshot: str, label: str) -> str:
@@ -1160,19 +1227,41 @@ def _ordered_illustration_names(names: list[str], text: str) -> list[str]:
 
 def _resolve_illustration_request_actors(
     known: list[str], *, planned: list[str], user_text: str, narrative: str,
-    present: str, encounter: list[str],
+    present: str, encounter: list[str], priority_text: str = "",
+    absent: set | None = None,
 ) -> list[str]:
-    """外貌资料不能充当出场证据；只从本轮事实确定插画角色。"""
+    """外貌资料不能充当出场证据；只从本轮事实确定插画角色。
+
+    priority_text（视觉高潮段原文）：无插画计划时，角色排序优先按高潮段内出现顺序，
+    而非全文首现顺序——2026-09-01 用户实锤「LoRA 用错」：全文先提 A 后提 B，
+    但画面主体是 B，single 模式会加载 A 的 LoRA。
+    absent（表格在场状态=不在场 的角色）：点名提及不等于画面在场（2026-09-01
+    用户实锤：2girls 实际只有 1 女）。显式计划 subjects / 登场角色除外。
+    """
     planned = [str(name).strip() for name in planned if str(name).strip()]
+    absent = absent or set()
     if not known:
         return list(dict.fromkeys(planned + encounter))
     valid_planned = [name for name in planned if name in known]
+    encounter_group = [name for name in encounter if name in known]
     story_names = _ordered_illustration_names(known, narrative)
-    for group in (
-        [name for name in encounter if name in known], story_names, valid_planned,
-    ):
-        if group:
-            return list(dict.fromkeys(group))
+    if priority_text and not planned:
+        priority_names = _ordered_illustration_names(known, priority_text)
+        story_names = list(dict.fromkeys([*priority_names, *story_names]))
+    planned_absent = set(valid_planned) & absent
+    for group in (encounter_group, story_names, valid_planned):
+        if not group:
+            continue
+        selected = list(dict.fromkeys(group))
+        if group is not valid_planned and group is not encounter_group:
+            selected = [name for name in selected if name not in absent]
+            # 全部被表格判为不在场时，宁可退回无绑定角色也不虚构同框
+            if not selected:
+                return []
+        elif group is valid_planned and planned_absent and len(valid_planned) == len(planned_absent):
+            # 模型计划的主体全部被表格判为不在场：视为计划不可用，继续走叙事组
+            continue
+        return selected
     # 模型已经明确声明画面主体，但主体不是任何绑定角色（典型为“我/你”）时，
     # 不得再从用户输入或状态栏借一个仅被提及的角色来加载其 LoRA。
     if planned:
@@ -1248,9 +1337,15 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
         from app.services.regex_engine import Placement
         repo_id = ctx.get("repo_id") or ctx.get("thread_id") or ""
         card_name = ctx.get("card_name") or ""
+        # 根因修复（2026-08-31 实锤 3389/11977：幻影协议标签跨界匹配吞正文）：think 是
+        # 输出协议的第一块，块提取链只应作用于其后的正文。think 内复述协议清单产生的
+        # 幻影开标签会让各提取器的懒匹配从 think 内一路吃到真块闭合，把 </think> 与
+        # 全部正文整段当块剥掉。拆出 think 前缀原样保留（前端正则折叠为思考过程），
+        # 提取链只看正文，发布时拼回前缀。
+        think_head, body = roleplay_agency.split_think_prefix(reply)
         # V1.5/W1：<transition> 剥离放最前（与 <illustration>/<audio> 同为生成时搭车块，
         # 先抽避免干扰插画解析；漏块/非法/只开不闭 → None，L0 永远兕底，不得抛错）
-        clean, transition_decision = transition_extract.extract_transition(reply)
+        clean, transition_decision = transition_extract.extract_transition(body)
         clean, illustration_plan = image_prompt_extract.extract_illustration_plan(
             clean,
             block_filter=lambda value: _apply_regex(
@@ -1415,6 +1510,11 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
                 _actor_values = [name for name in _actor_values if name != card_name]
             scene_actor_text = encounter_narrative if character_encounter else visible_story
             _scene_text = "\n".join(filter(None, (scene_actor_text, user_text, present)))
+            _climax_paragraph = (
+                "" if illustration_plan else scene_illustration.fallback_illustration_anchor(
+                    scene_actor_text)
+            )
+            _absent = _repo_table_absent_actors(ctx, repo_id, _known)
             request_actors = _resolve_illustration_request_actors(
                 _known,
                 planned=_actor_values if illustration_plan else [],
@@ -1422,10 +1522,13 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
                 narrative=scene_actor_text,
                 present=present,
                 encounter=encounter_actors if character_encounter else [],
+                priority_text=_climax_paragraph,
+                absent=_absent,
             )
             if not request_actors:
                 request_actors = list(dict.fromkeys(
-                    [name for name in _actor_values if not _known or name in _known] + (
+                    [name for name in _actor_values
+                     if (not _known or name in _known) and name not in _absent] + (
                         [card_name]
                         if card_name and ctx.get("appearance_source") != "worldbook" else []
                     ),
@@ -1489,11 +1592,16 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
                 narrative=scene_narrative,
                 present=present,
                 encounter=encounter_actors if character_encounter else [],
+                priority_text=_climax_paragraph,
+                absent=_absent,
             )
             if final_actors:
                 request_actors = final_actors
             request_appearance = _filter_illustration_appearance(
                 _illustration_appearance(ctx), request_actors, _known,
+            )
+            request_appearance = scene_illustration.supplement_actor_table_appearance(
+                request_appearance, request_actors, _repo_tables_for_facts(ctx, repo_id),
             )
             profile_draft_prompt = request_prompt
             if not illustration_plan:
@@ -1527,7 +1635,7 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
                         _scene_text, request_actors,
                     )
                 ),
-                "profile": ctx.get("prompt_profile") or "krea2",
+                "profile": ctx.get("prompt_profile") or "anima_tags",
             }
             if ctx.get("appearance_source") in {"worldbook", "character_card"}:
                 scene_spec["appearance_source"] = ctx.get("appearance_source")
@@ -1610,14 +1718,19 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
                 profile_strategy = "same_turn+field_repair"
             scene_spec["profile_prompt"] = compiled_profile
             scene_spec["field_ledger"] = field_ledger
+            appearance_missing_actors = [
+                name for name in (scene_spec.get("actors") or [])
+                if name and name not in str(scene_spec.get("appearance") or "")
+            ]
             run_trace.emit(
                 ctx, "illustration.profile", profile=scene_spec["profile"],
                 strategy=profile_strategy, inline_chars=len(inline_profile),
                 output_chars=len(compiled_profile), plan_retargeted=plan_retargeted,
                 field_ledger=field_ledger, missing_fields=missing_fields,
+                appearance_missing_actors=appearance_missing_actors,
             )
             profile_negative = image_prompt_profiles.negative_prompt(
-                ctx.get("prompt_profile") or "krea2", scene_spec,
+                ctx.get("prompt_profile") or "anima_tags", scene_spec,
             )
             if profile_negative:
                 scene_spec["negative_prompt"] = profile_negative
@@ -1663,8 +1776,8 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
                 illustrate_req["first_frame_desc"] = _frames.opening[:500].strip()
                 illustrate_req["last_frame_desc"] = _frames.closing[:500].strip()
                 illustrate_req["prev_tail_desc"] = (_prev_tail_desc or "")[:500].strip()
-            # V1.5 默认开放：produce 时即 dry-run 组装视频参数（提示词 + 参数），
-            # 供 trace 日志核对「视频生成提示词」+「参数有没有上传」。失败静默降级 None。
+            # 正常链路：comfy_video 开启时 produce 层编译视频提示词 + 参数，
+            # 随事件下发；失败静默降级 None，不阻断出图。
             # 三模态开关：comfy_video 关=不调 _extract_video_action_plan（省 LLM 调用）、
             # 不编译 video_request/transition_video_request（省 token 干烧），完全对齐图/音链的关=零成本。
             _video_prompt_text = ""
@@ -1746,7 +1859,7 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
                 video_prompt_chars=len(_video_prompt_text),
                 video_prompt=_video_prompt_text,
             )
-            return clean, [], illustrate_req, audio_req
+            return think_head + clean, [], illustrate_req, audio_req
         illo = roleplay_agency.maybe_illustrate(
             deps, paragraph=clean, appearance=_illustration_appearance(ctx),
             wardrobe=wardrobe, locale=locale,
@@ -1756,8 +1869,8 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
             character_encounter=character_encounter)
         if illo:
             rec = {"id": f"illo-{repo_id}-{turn}", "url": illo["url"], "caption": illo["caption"]}
-            return clean, [rec], {}, audio_req
-        return clean, [], {}, audio_req
+            return think_head + clean, [rec], {}, audio_req
+        return think_head + clean, [], {}, audio_req
     except Exception as exc:  # noqa: BLE001
         # 插桩（2026-08-29）：writeback failed 等异常文本在工作区源码搜不到，必须自曝来源。
         run_trace.emit(
@@ -1806,6 +1919,48 @@ def _emit_roleplay_ready(ctx: dict, out: dict) -> bool:
     return True
 
 
+_MAINTENANCE_THREADS: dict[str, list[threading.Thread]] = {}
+_MAINTENANCE_LOCKS: dict[str, threading.Lock] = {}
+_MAINTENANCE_THREADS_LOCK = threading.Lock()
+
+
+def _maintenance_lock(repo_key: str) -> threading.Lock:
+    """同一作品线的先后两轮维护串行化（写表格/纪要不互相踩）。"""
+    with _MAINTENANCE_THREADS_LOCK:
+        return _MAINTENANCE_LOCKS.setdefault(repo_key, threading.Lock())
+
+
+def join_maintenance_threads() -> None:
+    """测试/关停用：等待所有在途维护线程结束。"""
+    with _MAINTENANCE_THREADS_LOCK:
+        threads = [t for threads in _MAINTENANCE_THREADS.values() for t in threads]
+    for thread in threads:
+        thread.join(timeout=120)
+
+
+def _agency_maintenance_async(ctx: dict, deps, clean: str, turn: int,
+                              rag_events: list | None = None) -> None:
+    """维护与 turn 完成解耦（2026-08-30 用户实锤：表格维护 LLM 单次 4m52s 挂住对话完成，
+    生图早已完毕）。正文/插画发布后立即 turn.completed；维护转后台线程，
+    同作品线用锁串行化先后两轮的写入。代价：本轮 rag_events 弹窗不再随结果下发。"""
+    import threading
+
+    repo_key = str(ctx.get("repo_id") or ctx.get("thread_id") or "home")
+    lock = _maintenance_lock(repo_key)
+
+    def run() -> None:
+        with lock:
+            try:
+                _agency_maintenance(ctx, deps, clean, turn, rag_events)
+            except Exception as exc:  # noqa: BLE001 后台维护失败只留痕
+                run_trace.emit(ctx, "memory.maintenance", status="error", error=str(exc))
+
+    thread = threading.Thread(target=run, name=f"maintenance-{repo_key[:8]}", daemon=True)
+    with _MAINTENANCE_THREADS_LOCK:
+        _MAINTENANCE_THREADS.setdefault(repo_key, []).append(thread)
+    thread.start()
+
+
 def _agency_maintenance(ctx: dict, deps, clean: str, turn: int,
                         rag_events: list | None = None) -> None:
     """正文/插画已发出后的记忆维护；失败不得改写已完成正文。"""
@@ -1830,7 +1985,7 @@ def _agency_maintenance(ctx: dict, deps, clean: str, turn: int,
             chat_base=ctx["chat_base"], chat_key=ctx["chat_key"], chat_model=ctx["chat_model"],
             cadence=cadence, events=rag_events, proxy=ctx.get("chat_proxy", ""))
         roleplay_agency.maybe_curate(
-            deps, window_text=window,
+            deps, window_text=window, turn=turn,
             chat_base=ctx["chat_base"], chat_key=ctx["chat_key"], chat_model=ctx["chat_model"],
             events=rag_events, proxy=ctx.get("chat_proxy", ""))
         # S2 活人感通审：采样制走维护通道（review_every 控制，0=关），失败静默降级。
@@ -2003,6 +2158,56 @@ def _table_recall_text(ctx: dict, repo_id: str, query: str, k: int = 5) -> str:
         return ""
     run_trace.emit(ctx, "table.retrieve", status="ok", query=query, hit_count=len(rows), hits=rows)
     return "\n".join(f"- {row}" for row in rows)
+
+
+def _repo_tables_for_facts(ctx: dict, repo_id: str) -> list:
+    """插画视觉事实兜底读通道：整读 通用表（含 重要角色表），不检索、不分配额。
+
+    世界书视觉锚按条目名匹配，剧情常用名/道号可能连不上（舞姬恋↔角色卡·舞柔）；
+    表格按剧情进度维护、姓名与正文一致，作为未命中角色的【外貌】/【穿着】真源。
+    读失败静默空表——事实兜底缺失不阻断出图，由 illustration.profile 的
+    appearance_missing_actors 告警暴露。
+    """
+    if not repo_id:
+        return []
+    try:
+        from app.services import table_store
+        return table_store.load(ctx.get("output_dir") or "", repo_id)
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _repo_table_absent_actors(ctx: dict, repo_id: str, known: list[str]) -> set:
+    """表格在场状态里明确「不在场」的绑定角色——点名提及不等于画面在场。
+
+    2026-09-01 用户实锤：高潮段只有凌若冰（浮花泉封域内），舞姬恋在封域外石廊
+    （表格在场状态=不在场），但正文/状态栏都点名了她 → request_actors 把两人
+    都列入，提示词写成 2girls。姓名+在场状态列是剧情进度维护的真源，优先于点名。
+    """
+    if not repo_id or not known:
+        return set()
+    try:
+        tables = _repo_tables_for_facts(ctx, repo_id)
+        absent: set = set()
+        known_set = set(known)
+        for table in tables:
+            if not isinstance(table, dict):
+                continue
+            cols = table.get("columns") or []
+            if "姓名" not in cols or "在场状态" not in cols:
+                continue
+            name_idx = cols.index("姓名")
+            state_idx = cols.index("在场状态")
+            for row in (table.get("rows") or []):
+                if not isinstance(row, list) or len(row) <= max(name_idx, state_idx):
+                    continue
+                name = str(row[name_idx]).strip()
+                state = str(row[state_idx]).strip()
+                if name in known_set and state.startswith("不在场"):
+                    absent.add(name)
+        return absent
+    except Exception:  # noqa: BLE001 - 表格在场状态是兜底约束，读失败不阻断出图
+        return set()
 
 
 def _reindex_retrieval_tables(ctx: dict, repo_id: str, tables: list) -> None:
@@ -2338,7 +2543,7 @@ def _profile_llm_fallback(ctx: dict, scene_spec: dict[str, Any]) -> tuple[str, s
     本地校验则用 _scene_for_facts 的还原事实，两层各司其职。
     返回 (compiled_profile, strategy)；失败返回 ("", "")，调用方回退本地事实兜底。
     """
-    profile = str(scene_spec.get("profile") or "krea2")
+    profile = str(scene_spec.get("profile") or "anima_tags")
     if not (ctx.get("chat_base") and ctx.get("chat_key") and ctx.get("chat_model")):
         return "", ""
     if not str(scene_spec.get("narrative") or "").strip():
@@ -2346,15 +2551,41 @@ def _profile_llm_fallback(ctx: dict, scene_spec: dict[str, Any]) -> tuple[str, s
     from app.services import image_prompt_profiles
 
     def _generate(system: str, user: str) -> str:
+        # 2026-09-01 用户定案：插画兜底 LLM 也走流式，实时读 token 输入输出，
+        # 30s 无 token 即断（llm.build_model streaming 读超时），不再用 60s 总超时。
         guarded = image_prompt_profiles.system_with_preset(
             system, scene_spec,
             preset_dir=str(ctx.get("preset_dir") or ""),
             preset_name=str(ctx.get("preset_name") or ""),
             user_name=str(ctx.get("user_name") or ""),
+            # 2026-09-01 用户定案：生图提示词要像剧情一样稳定——带完整预设防拦截。
+            head_only=False,
         )
-        return _llm.chat(
+        started = time.monotonic()
+        chars = [0]
+        last_token = [started]
+        last_heartbeat = [started]
+
+        def _on_delta(delta: str) -> None:
+            now = time.monotonic()
+            last_token[0] = now
+            chars[0] += len(delta)
+            if now - last_heartbeat[0] >= 20:
+                last_heartbeat[0] = now
+                try:
+                    run_trace.emit(
+                        ctx, "model.stream_progress", agent="illustration_fallback",
+                        elapsed_seconds=round(now - started, 1),
+                        visible_chars=chars[0],
+                    )
+                except Exception:
+                    pass
+
+        return _llm.chat_messages_stream(
             ctx["chat_base"], ctx["chat_key"], ctx["chat_model"],
-            guarded, user, temperature=0.4, **_proxy_kw(ctx),
+            [{"role": "system", "content": guarded}, {"role": "user", "content": user}],
+            on_delta=_on_delta, temperature=0.4, retries=2, **_proxy_kw(ctx),
+            provider_profile=ctx.get("provider_profile") or "openai_compatible",
         )
 
     diagnostics: dict[str, object] = {}
@@ -2378,6 +2609,8 @@ def _profile_llm_fallback(ctx: dict, scene_spec: dict[str, Any]) -> tuple[str, s
         ctx, "illustration.profile_llm_fallback",
         status="ok", strategy=final_strategy, output_chars=len(compiled),
         field_ledger=diagnostics.get("field_ledger"),
+        first_errors=diagnostics.get("first_errors") or [],
+        repair_errors=diagnostics.get("repair_errors") or [],
     )
     return compiled, final_strategy
 
@@ -2658,9 +2891,17 @@ def _curator_worldbook_context_fn(ctx: dict, repo_id: str):
     if not (base and repo_id and _repo_worldbook(ctx)):
         return None
     allowed = frozenset(ctx.get("_selected_worldbook_indices") or [])
-    return lambda _window_text: worldbook_store.repo_snapshot_context(
-        base, repo_id, allowed_indices=allowed,
-    )
+
+    def context(window_text: str) -> str:
+        # 2026-08-30 成本实锤：整本世界书快照 ≈2万字符/轮（JSON 转义后实测 4.4 万字符）。
+        # curator 的世界书改写范围本就限定在本轮相关条目（allowed），视图只给这些条目、
+        # 按与正文的命中排序并截断到片段预算——改写能力保留，全书参照撤销。
+        return worldbook_store.repo_snapshot_context(
+            base, repo_id, query=window_text or "",
+            max_chars=6_000, allowed_indices=allowed,
+        )
+
+    return context
 
 
 def _curator_worldbook_fn(ctx: dict, repo_id: str):
@@ -2685,9 +2926,16 @@ def _curator_worldbook_fn(ctx: dict, repo_id: str):
             ctx, "worldbook.update_scope", allowed_indices=sorted(allowed),
             rejected_indices=rejected,
         )
-        return worldbook_store.apply_repo_ops(
+        rejections: list[dict[str, object]] = []
+        applied = worldbook_store.apply_repo_ops(
             base, repo_id, ops, allowed_update_indices=allowed,
+            rejections=rejections,
         )
+        if rejections:
+            run_trace.emit(
+                ctx, "worldbook.ops_rejected", repo_id=repo_id, rejections=rejections,
+            )
+        return applied
 
     return apply
 
@@ -2874,9 +3122,99 @@ def _stream_enabled(ctx: dict) -> bool:
     return bool(ctx.get("stream_output")) and callable(ctx.get("stream_sink"))
 
 
+def _notify_stream_trace(ctx: dict, message: str) -> None:
+    """把自愈进度提示推入流式通道（仅流式模式）。
+
+    截断自愈重试期间思考阶段不进流式通道，气泡会静默冻结数分钟（2026-08-31 用户
+    反馈「正文生成完毕一会儿报错」像卡死）。提示走 trace 事件追加进气泡，最终被
+    replace 覆盖不残留；非流式模式无此问题，走 trace 列表照常展示。
+    """
+    if not _stream_enabled(ctx):
+        return
+    sink = ctx.get("stream_sink")
+    try:
+        sink({"trace": message})
+    except Exception:  # noqa: BLE001 - 提示失败不阻断生成主流程
+        pass
+
+
+def _resume_interrupted_messages(wire_messages: list[dict]) -> list[dict]:
+    """中断续写（2026-09-01 用户需求）：上一轮被打断的半成品正文不要从头再来。
+
+    chat_memory.append_turn(interrupted=True) 会给半成品 assistant 正文追加
+    「（已打断）」后缀。这里把后缀剥掉、原样保留为最后一条 assistant（预填语义），
+    再追加续写指令：从断点继续、不输出 think、闭合 </content>。
+    """
+    for idx in range(len(wire_messages) - 1, -1, -1):
+        message = wire_messages[idx]
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        content = str(message.get("content") or "")
+        marker = "（已打断）"
+        if not content.endswith(marker):
+            return wire_messages
+        partial = content[:-len(marker)].rstrip()
+        if len(partial) < 200:
+            # 半成品太短没有续写价值，保留原样（新轮重写比续写更稳）
+            return wire_messages
+        resumed = [*wire_messages]
+        resumed[idx] = {**message, "content": partial}
+        resumed.append({
+            "role": "user",
+            "content": (
+                "你上一条消息在正文中间被打断，正文没有写完。现在从断点直接继续：\n"
+                "一、第一个字必须紧接已写出的最后半句，直接续写正文剩余部分——"
+                "禁止重复已有内容、禁止改写或重新开始；\n"
+                "二、本次不要输出 <think> 思考块，直接续写；\n"
+                "三、正文写完后闭合 </content>，再按协议正常输出后续块。"
+            ),
+        })
+        return resumed
+    return wire_messages
+
+
+def _roleplay_continuation_messages(wire_messages: list[dict], partial: str,
+                                    *, think_truncated: bool = False) -> list[dict]:
+    """截断续写的消息序列：残缺输出回喂为最后一条 assistant + 断点续写指令（2026-08-31）。
+
+    残缺输出全文回喂（含 think 与 @逐字@ 段落），保证续写的格式与文风接得上；
+    指令要求从断点直接续写、不重复不重开。残缺输出保持 assistant 身份追加，
+    不破坏 system/对话/尾部合同的既有顺序。
+
+    think_truncated=True（思考阶段截断，2026-08-31 晚定案）：残缺输出是**同一条
+    输出流的前缀**（think 开而未闭），指令改为从断点闭合 </think> 后再按协议
+    输出正文——角色层（roleplay_turn._try_think_continuation）用原文直连拼接，
+    不做 think 剥离。
+    """
+    if think_truncated:
+        instruction = (
+            "你上一条消息在思考阶段被截断，<think> 标签没有闭合，正文还没有开始。"
+            "现在从断点直接继续（你写的内容会与已有部分无缝拼接为一个完整回复）：\n"
+            "一、第一个字必须紧接已写出的思考内容的最后一个字，先把剩余思考写完，"
+            "并尽快收敛、闭合 </think>——禁止重复或改写已有思考内容、禁止重新开始；"
+            "**剩余思考最多再写 200 字，必须立即闭合 </think>**；\n"
+            "二、</think> 之后严格按既有协议继续输出：<content>正文</content> 与后续块，"
+            "格式与之前保持完全一致（包括逐字间隔标记等既有格式）；\n"
+            "三、把剩余篇幅全部留给正文，正文必须写完整；再超长思考等于白烧付费额度。"
+        )
+    else:
+        instruction = (
+            "你上一条消息在正文中间被截断，<content> 没有闭合。现在从断点直接继续：\n"
+            "一、第一个字必须紧接你已写出的最后半句，直接续写正文剩余部分——"
+            "禁止重复已有内容、禁止改写或重新开始；\n"
+            "二、格式与已写正文保持完全一致（包括逐字间隔标记等既有格式）；\n"
+            "三、正文写完后闭合 </content>，再按协议正常输出后续块；\n"
+            "四、本次不要输出 <think> 思考块，直接续写。"
+        )
+    return [*wire_messages,
+            {"role": "assistant", "content": partial},
+            {"role": "user", "content": instruction}]
+
+
 def _chat_with_optional_stream(ctx: dict, messages: list[dict], *, temperature: float,
                                top_p: float | None = None,
-                               max_tokens: int | None = None) -> str:
+                               max_tokens: int | None = None,
+                               max_duration_seconds: float | None = None) -> str:
     """按本轮设置选择整段或流式调用；流式增量直接送入 runner 队列。
 
     成功后把模型 usage（prompt/completion/cached token 等）以 model.usage trace 事件
@@ -2893,6 +3231,14 @@ def _chat_with_optional_stream(ctx: dict, messages: list[dict], *, temperature: 
         except Exception:
             pass
 
+    def _emit_finish(meta: dict) -> None:
+        # 结束原因观测：finish_reason=length → 输出上限被掐；空 → 流被中途中断
+        #（中转掐流不给结束原因）。2026-08-31 正文截断诊断用。
+        try:
+            run_trace.emit(ctx, "model.finish", agent=agent_name, model=model_name, **meta)
+        except Exception:
+            pass
+
     if not _stream_enabled(ctx):
         return _llm.chat_messages(
             ctx["chat_base"], ctx["chat_key"], ctx["chat_model"], messages,
@@ -2904,11 +3250,62 @@ def _chat_with_optional_stream(ctx: dict, messages: list[dict], *, temperature: 
     from app.services.stream_text import VisibleTextStream
 
     sink = ctx.get("stream_sink")
-    visible = VisibleTextStream()
+    deadline = ctx.get("_selfheal_deadline")
+    started = time.monotonic()
+    # 实时 token 流监测（2026-08-31 深夜用户要求）：正常吐字 1 秒都不到，30s 无任何
+    # token 由 llm 层读超时掐断；这里每 20s 发一次心跳 trace，结束发摘要（时长/字数/
+    # 最大静默间隔），trace 里一眼能看流是否还活着、卡了多久。
+    last_token_at = [started]
+    last_heartbeat = [started]
+    visible_chars = [0]
+    thinking_chars = [0]
+    max_gap = [0.0]
+
+    def _touch_stream(visible: int, thinking: int) -> None:
+        now = time.monotonic()
+        gap = now - last_token_at[0]
+        if gap > max_gap[0]:
+            max_gap[0] = gap
+        last_token_at[0] = now
+        visible_chars[0] += visible
+        thinking_chars[0] += thinking
+        if now - last_heartbeat[0] >= 20:
+            last_heartbeat[0] = now
+            try:
+                run_trace.emit(
+                    ctx, "model.stream_progress", agent=agent_name,
+                    elapsed_seconds=round(now - started, 1),
+                    visible_chars=visible_chars[0],
+                    thinking_chars=thinking_chars[0],
+                )
+            except Exception:
+                pass
+
+    def _check_deadline() -> None:
+        # 自愈调用限时（2026-08-31 晚实锤：续写流式 10 分钟不返回）。只在仍有增量时
+        # 检查；增量长时间不来由 httpx 超时兜底。
+        if deadline is not None and time.monotonic() > deadline:
+            raise TimeoutError("自愈调用超时，中止本次生成")
+        # 初始生成总时长上限（2026-08-31 深夜实锤：首发流式卡 4.5 分钟不结束；
+        # 思考面板折叠时用户看到的就是「卡住不继续」）。到点中止，交由自愈循环处理。
+        if max_duration_seconds is not None and time.monotonic() - started > max_duration_seconds:
+            raise TimeoutError("生成总时长超时，中止本次生成")
+
+    def on_hidden(name: str, text: str) -> None:
+        _check_deadline()
+        if name == "think" and text:
+            _touch_stream(0, len(text))
+            # 思考全公开（2026-08-31 晚用户定调）：think 块内容实时送前端思考面板，
+            # 正文 delta 仍只含可见文本，两不污染；其余隐藏块（状态更新等）不送。
+            sink({"thinking": text})
+
+    visible = VisibleTextStream(on_hidden=on_hidden)
 
     def on_delta(raw: str) -> None:
+        _check_deadline()
         text = visible.feed(raw)
         if text:
+            _touch_stream(len(text), 0)
             sink({"delta": text})
 
     try:
@@ -2917,47 +3314,32 @@ def _chat_with_optional_stream(ctx: dict, messages: list[dict], *, temperature: 
             on_delta=on_delta, temperature=temperature, **_proxy_kw(ctx),
             top_p=top_p, max_tokens=max_tokens,
             provider_profile=ctx.get("provider_profile") or "openai_compatible",
-            on_usage=_emit_usage,
+            on_usage=_emit_usage, on_finish=_emit_finish,
         )
     finally:
         tail = visible.finish()
         if tail:
             sink({"delta": tail})
+        try:
+            run_trace.emit(
+                ctx, "model.stream", agent=agent_name,
+                duration_seconds=round(time.monotonic() - started, 1),
+                visible_chars=visible_chars[0],
+                thinking_chars=thinking_chars[0],
+                max_gap_seconds=round(max_gap[0], 1),
+            )
+        except Exception:
+            pass
 
 
 def _video_request_for(rec: dict) -> dict | None:
-    """V1.5 默认开放视频参数组装（dry-run，不提交，不依赖视频工作流/节点）。
+    """正常链路：只复用 produce 层在 comfy_video 开启时编译的 video_request。
 
-    剧情推进高潮点即用 video_prompt.build_video_request 把「上交给视频模型的参数」
-    完整组装出来，供测试核对两件事：
-    ① 提示词内容是否符合要求（区块完整 / 无破甲残留 / 动作·运镜随 motion）；
-    ② 视频参数有没有正确上传（模型名 / 画幅 / 时长 / 镜头 / 参考图 / 缺图警告）。
-    scene_spec 不含 motion，从 rec 顶层补齐；first_frame_desc 留空，图职责描述由
-    video_prompt 用画面级动作瞬间（subjects/visual_facts/composition）兜底，与
-    [动作] 桥段同源，避免把围绕锚点截取的可能陈旧 narrative 写进提示词。
-    失败静默降级为 None，不阻断出图/出视频。后续配好视频工作流后改回真正执行 submit。
+    未配置视频工作流模板（comfy_video 关）时 produce 层不编译，事件不下发
+    video_prompt/video_params——视频链与图/音链一致，关=零成本（不再 dry-run 供测试）。
     """
-    spec = rec.get("scene_spec")
-    if not isinstance(spec, dict) or not spec:
-        return None
-    # V1.5 默认开放：produce 层已编译并透传（rec.video_request），直接复用；
-    # 旧数据/直接构造的 rec 未带时回退现场编译（纯函数，可测）
-    if isinstance(rec.get("video_request"), dict):
-        return rec["video_request"]
-    try:
-        from app.services import video_prompt
-        merged = dict(spec)
-        if "motion" not in merged:
-            merged["motion"] = int(rec.get("motion") or 0)
-        vcfg = rec.get("video_config") if isinstance(rec.get("video_config"), dict) else {}
-        return video_prompt.build_video_request(
-            mode="climax",
-            spec=merged,
-            video_config=vcfg,
-            # first_frame_desc 留空：图职责描述由 video_prompt 用画面级动作瞬间兜底
-        )
-    except Exception:
-        return None
+    vr = rec.get("video_request")
+    return vr if isinstance(vr, dict) and vr else None
 
 
 def _video_params_payload(vr: dict) -> dict:
@@ -2996,7 +3378,7 @@ def _ordered_illustration_events(result_text: str, recs: list[dict]) -> list[dic
             _value = rec.get(_key)
             if isinstance(_value, str) and _value:
                 request[_key] = _value
-        # V1.5 默认开放：climax 视频提示词 + 视频参数随事件下发（无视频模板/模型也生成，供测试核对）
+        # 正常链路：comfy_video 开启时 produce 层才编译 video_request，这里随事件下发
         _video_request = _video_request_for(rec)
         if _video_request:
             _prompt = (_video_request.get("submit") or {}).get("prompt") or ""
@@ -3035,7 +3417,7 @@ def _streamed_illustration_events(recs: list[dict]) -> list[dict]:
             _value = rec.get(_key)
             if isinstance(_value, str) and _value:
                 request[_key] = _value
-        # V1.5 默认开放：climax 视频提示词 + 视频参数随事件下发（无视频模板/模型也生成，供测试核对）
+        # 正常链路：comfy_video 开启时 produce 层才编译 video_request，这里随事件下发
         _video_request = _video_request_for(rec)
         if _video_request:
             _prompt = (_video_request.get("submit") or {}).get("prompt") or ""
@@ -3082,13 +3464,19 @@ def stream_multi_agent(context: RunContext) -> Iterator[dict]:
     ctx = context
     message = context.message
     images = context.input_images()
+    # 对话附件（file_id 元信息）→「文件参考」段落，追加进本轮 user_text：
+    # 文本类全文（100k 封顶）、docx/xlsx 零依赖提取、PDF 可选提取（失败降级）、二进制只元信息。
+    # 追加在用户文本之后、消息 content 之前，下游所有节点（supervisor/专家）天然可见。
+    attachment_blocks = attachment_store.file_reference_blocks(context.attachments)
+    if attachment_blocks:
+        message = message + "\n\n" + "\n\n".join(attachment_blocks)
     from langchain_core.messages import HumanMessage
     content: list = [{"type": "text", "text": message}]
     for u in (images or []):
         content.append({"type": "image_url", "image_url": {"url": u}})
     init: AgentState = {
         "messages": [HumanMessage(content=content)], "user_text": message,
-        "images": images or [], "trace": [], "_ctx": ctx,
+        "images": images or [], "attachments": context.attachments, "trace": [], "_ctx": ctx,
     }
     seen_trace = 0
     emitted_imgs: set = set()

@@ -24,6 +24,7 @@ const HomeLauncher = lazy(() => import("./components/HomeLauncher").then((m) => 
 const AssetsView = lazy(() => import("./views/PlaceholderViews").then((m) => ({ default: m.AssetsView })));
 const WebMaterialsView = lazy(() => import("./views/WebMaterialsView").then((m) => ({ default: m.WebMaterialsView })));
 const ChatView = lazy(() => import("./views/ChatView").then((m) => ({ default: m.ChatView })));
+const NewcomerGuideView = lazy(() => import("./views/NewcomerGuideView").then((m) => ({ default: m.NewcomerGuideView })));
 
 export interface AppBodyProps {
   settingsOpen: boolean;
@@ -243,6 +244,11 @@ export function AppBody(props: AppBodyProps) {
         onSearchConsumed={() => props.setMarketSearch("")} />;
     }
     if (props.subView === "tools") return <ToolsView repoId={props.activeWork?.id || "home"} />;
+  }
+  // 新手指引：独立一级区（系统管理下方）。左栏子项=引导章节，这里按子项渲染对应节
+  if (props.section === "guide") {
+    // 章节切换（正文里的 guide: 链接）也走 App 的 onGoSection：同步 subView + hash
+    return <NewcomerGuideView activeId={props.subView} onGoSection={props.onGoSection} />;
   }
   return <SectionPlaceholder section={props.section} subView={props.subView} />;
 }

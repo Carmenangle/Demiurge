@@ -10,6 +10,13 @@ export interface HistoryItemWire {
   content: string;
 }
 
+export interface AttachmentItemWire {
+  file_id: string;
+  name: string;
+  mime: string;
+  size: number;
+}
+
 export interface AgentInvocationWire {
   thread_id: string;
   workspace_mode: "story" | "generate" | "edit";
@@ -51,6 +58,7 @@ export interface AgentInvocationWire {
   stream_output?: boolean;
   context_max_tokens?: number;
   history_per_role?: number;
+  selfheal_attempts?: number;
   history: HistoryItemWire[];
   approval_id?: string;
   approval_action?: "" | "submit" | "change" | "cancel";
@@ -76,6 +84,7 @@ export interface AgentInvocationWire {
   character_base_images?: Record<string, string>;
   illustration_actor_names?: string[];
   style_base_image?: string;
+  attachments?: AttachmentItemWire[];
 }
 
-export const AGENT_INVOCATION_WIRE_FIELDS = ["thread_id", "workspace_mode", "message", "images", "image_mask", "base_url", "api_key", "model", "proxy", "provider_profile", "gen_base_url", "gen_api_key", "gen_model", "video_base_url", "video_api_key", "video_model", "video_mode", "embed_base_url", "embed_api_key", "embed_model", "embed_mode", "embed_model_dir", "reranker_model_dir", "size", "image_quality", "output_dir", "repo_id", "proxy_url", "chat_proxy_url", "gen_proxy_url", "video_proxy_url", "embed_proxy_url", "route_model", "message_id", "user_message_id", "style_template", "agent_id", "stream_output", "context_max_tokens", "history_per_role", "history", "approval_id", "approval_action", "edited_prompt", "forced_route", "character_dir", "card_name", "card_names", "opening_card_name", "preset_dir", "preset_name", "user_name", "user_persona", "persona_bound", "worldbook_dir", "worldbook_name", "illustrate", "comfy_illustrate", "comfy_audio", "comfy_video", "prompt_profile", "appearance_source", "character_base_images", "illustration_actor_names", "style_base_image"] as const;
+export const AGENT_INVOCATION_WIRE_FIELDS = ["thread_id", "workspace_mode", "message", "images", "image_mask", "base_url", "api_key", "model", "proxy", "provider_profile", "gen_base_url", "gen_api_key", "gen_model", "video_base_url", "video_api_key", "video_model", "video_mode", "embed_base_url", "embed_api_key", "embed_model", "embed_mode", "embed_model_dir", "reranker_model_dir", "size", "image_quality", "output_dir", "repo_id", "proxy_url", "chat_proxy_url", "gen_proxy_url", "video_proxy_url", "embed_proxy_url", "route_model", "message_id", "user_message_id", "style_template", "agent_id", "stream_output", "context_max_tokens", "history_per_role", "selfheal_attempts", "history", "approval_id", "approval_action", "edited_prompt", "forced_route", "character_dir", "card_name", "card_names", "opening_card_name", "preset_dir", "preset_name", "user_name", "user_persona", "persona_bound", "worldbook_dir", "worldbook_name", "illustrate", "comfy_illustrate", "comfy_audio", "comfy_video", "prompt_profile", "appearance_source", "character_base_images", "illustration_actor_names", "style_base_image", "attachments"] as const;

@@ -1,9 +1,8 @@
 import type { VideoMode } from "./illustrationMedia";
 
-export type PromptProfileId = "krea2" | "anima_tags" | "natural_language" | "niji_sections";
+export type PromptProfileId = "anima_tags" | "natural_language" | "niji_sections";
 
 export const PROMPT_PROFILE_OPTIONS: readonly { id: PromptProfileId; label: string }[] = [
-  { id: "krea2", label: "Krea2（剧情高潮英文描述）" },
   { id: "anima_tags", label: "Anima（质量行 + 内容 tags / 英文描述）" },
   { id: "natural_language", label: "自然语言（GPT Image / Banana）" },
   { id: "niji_sections", label: "Niji（主体 / 风格 / 附加 / 后缀）" },
@@ -12,9 +11,11 @@ export const PROMPT_PROFILE_OPTIONS: readonly { id: PromptProfileId; label: stri
 const IDS = new Set(PROMPT_PROFILE_OPTIONS.map((item) => item.id));
 
 export function normalizePromptProfile(value: unknown): PromptProfileId {
+  // krea2 模版已下线（2026-08-31 用户定案：不如 Anima）：旧多元插入预设里存的
+  // "krea2" 一律降级为 anima_tags，未知名值同样回退 Anima。
   return typeof value === "string" && IDS.has(value as PromptProfileId)
     ? value as PromptProfileId
-    : "krea2";
+    : "anima_tags";
 }
 
 export function prependLoraTriggers(prompt: string, triggers: readonly string[]): string {

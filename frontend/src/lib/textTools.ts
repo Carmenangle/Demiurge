@@ -22,6 +22,11 @@ export function joinText(text: string, separator: string, skipBlank = true): str
   return (skipBlank ? lines.filter((line) => line.trim().length > 0) : lines).join(separator);
 }
 
+/** 分隔符输入 → 真实分隔符：\n / \t 转义解码；textarea 直接回车 / 粘贴得到的真实换行原样保留。 */
+export function resolveSeparator(raw: string): string {
+  return raw.replace(/\\n/g, "\n").replace(/\\t/g, "\t");
+}
+
 export function insertBetweenCharacters(text: string, addition: string): string {
   return Array.from(text).join(addition);
 }

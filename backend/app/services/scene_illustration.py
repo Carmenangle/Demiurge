@@ -237,7 +237,22 @@ def fallback_illustration_anchor(text: str) -> str:
         score = _anchor_score(paragraph)
         if score:
             scored.append((score, -index, paragraph))
-    return max(scored)[2] if scored else (candidates[0] if candidates else "")
+    if not scored:
+        return candidates[0] if candidates else ""
+    # 2026-09-01 用户偏好：最高分段落落在正文末尾 20% 时，若存在分差 <=2 的前置段落，
+    # 优先选前置——视觉高潮不该总落在收尾段（用户实锤：图又回到底部）。
+    scored.sort(key=lambda item: (item[0], item[1]), reverse=True)  # 分高优先、同分取更早(-index)
+    best_score = scored[0][0]
+    best_index = -scored[0][1]
+    chosen = scored[0][2]
+    tail_threshold = max(1, int(len(candidates) * 0.8))
+    if best_index >= tail_threshold:
+        for score, neg_index, paragraph in scored:
+            idx = -neg_index
+            if idx < best_index and score >= best_score - 2:
+                chosen = paragraph
+                break
+    return chosen
 
 
 def first_frame_anchor_offset(text: str) -> int:
@@ -496,11 +511,24 @@ def illustration_anchor_offset(text: str, requested_anchor: str = "") -> int | N
         if best is not None:
             paragraph_end = best[1].end()
             return complete_sentence(start + offsets[paragraph_end - 1])
+        # 锚点模糊匹配也失败 → 视觉高潮评分选段，选不中才返回 None
+        fallback = fallback_illustration_anchor(source)
+        if fallback:
+            found = source.rfind(fallback, start, end)
+            if found >= start:
+                return complete_sentence(found + len(fallback))
         return None
     body = source[start:end]
     matches = list(re.finditer(r"\S(?:.*?\S)?(?=(?:\r?\n){2,}|\s*\Z)", body, re.S))
     candidates = [match for match in matches if not match.group(0).lstrip().startswith("<")]
-    chosen = candidates[-1] if candidates else (matches[-1] if matches else None)
+    # 2026-09-01 用户实锤：无锚点直接取末段 = 图插到底部。改评分选段，
+    # 评分选不中才退回首段（而非末尾收束段）。
+    fallback = fallback_illustration_anchor(source)
+    if fallback:
+        found = source.rfind(fallback, start, end)
+        if found >= start:
+            return complete_sentence(found + len(fallback))
+    chosen = candidates[0] if candidates else (matches[0] if matches else None)
     if chosen is None:
         return end
     anchor = start + chosen.end()
@@ -510,6 +538,58 @@ def illustration_anchor_offset(text: str, requested_anchor: str = "") -> int | N
 
 
 # ── renderer 注册表：纯 dict，注册/查询无 I/O；concrete 渲染器（有 I/O）在别处注册进来 ──
+
+def supplement_actor_table_appearance(
+    appearance: str, actors: list[str], tables,
+) -> str:
+    """世界书视觉锚失配时，从通用表的「姓名+外貌特征+穿着打扮」补角色外观事实。
+
+    2026-08-31 实锤：舞姬恋↔角色卡·舞柔 条目名失配，外貌断粮出真人图。
+    只补「未在既有资料中点名的角色」；表格无该角色则原样返回。
+    """
+    if not actors:
+        return appearance or ""
+    if isinstance(tables, dict):
+        tables = tables.get("tables") or []
+    rows_by_actor: dict[str, list[str]] = {}
+    for table in tables or []:
+        if not isinstance(table, dict):
+            continue
+        cols = table.get("columns") or []
+        if "姓名" not in cols:
+            continue
+        name_idx = cols.index("姓名")
+        appearance_idx = cols.index("外貌特征") if "外貌特征" in cols else None
+        wardrobe_idx = cols.index("穿着打扮") if "穿着打扮" in cols else None
+        for row in (table.get("rows") or []):
+            if not isinstance(row, list) or len(row) <= name_idx:
+                continue
+            name = str(row[name_idx]).strip()
+            if not name:
+                continue
+            facts: list[str] = []
+            if appearance_idx is not None and len(row) > appearance_idx:
+                value = str(row[appearance_idx]).strip()
+                if value:
+                    facts.append(f"【外貌】{value}")
+            if wardrobe_idx is not None and len(row) > wardrobe_idx:
+                value = str(row[wardrobe_idx]).strip()
+                if value:
+                    facts.append(f"【穿着】{value}")
+            if facts:
+                rows_by_actor[name] = facts
+    out = (appearance or "").strip()
+    for actor in actors:
+        name = str(actor).strip()
+        if not name or name in out:
+            continue
+        entry_facts = rows_by_actor.get(name)
+        if not entry_facts:
+            continue
+        out = (out + "\n" if out else "") + name + "：" + "；".join(entry_facts)
+    return out
+
+
 
 Renderer = Callable[[SceneRequest], str]  # 吃 SceneRequest，返回图片地址（url 或 data URI）
 _RENDERERS: dict[str, Renderer] = {}

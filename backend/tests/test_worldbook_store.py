@@ -184,3 +184,67 @@ def test_导入路由缺entries报400(tmp_path):
     with pytest.raises(HTTPException) as ei:
         _parse_book(json.dumps({"foo": 1}).encode("utf-8"))
     assert ei.value.status_code == 400
+
+
+def _repo_book() -> dict:
+    return {"entries": [
+        {"content": "普通条目", "comment": "设定", "keys": ["设定"], "uid": 1},
+        {"content": "【角色卡·舞柔·乳母恋娘】【外貌】绝色美母【剧情进展·动态】旧动态",
+         "comment": "角色卡·舞柔", "keys": ["舞柔"], "uid": 2},
+    ]}
+
+
+def test_删除类op一律拒绝并上报(tmp_path):
+    base = str(tmp_path)
+    worldbook_store.ensure_repo_snapshot(base, "repo", [_repo_book()])
+    rejections: list = []
+    applied = worldbook_store.apply_repo_ops(
+        base, "repo",
+        [{"op": "worldbook_delete", "index": 1}, {"op": "delete", "index": 0}],
+        rejections=rejections,
+    )
+    assert applied == 0
+    assert [item["reason"] for item in rejections] == ["delete_forbidden", "delete_forbidden"]
+    book = worldbook_store.read_repo_snapshot(base, "repo")
+    assert len(book["entries"]) == 2
+
+
+def test_角色卡条目只允许改正文动态段(tmp_path):
+    from app.services import worldbook_edit
+    base = str(tmp_path)
+    worldbook_store.ensure_repo_snapshot(base, "repo", [_repo_book()])
+    rejections: list = []
+    applied = worldbook_store.apply_repo_ops(
+        base, "repo",
+        [{"op": "worldbook_update", "index": 1, "text": "新动态", "evidence": "正文",
+          "title": "角色卡·舞姬恋", "keys": ["舞姬恋"]}],
+        rejections=rejections,
+    )
+    assert applied == 1
+    assert rejections == [{
+        "op": "worldbook_update", "index": 1,
+        "reason": "character_identity_keys_forbidden",
+        "fields": ["comment", "keys"],
+    }]
+    entry = worldbook_edit.list_entries(worldbook_store.read_repo_snapshot(base, "repo"))[1]
+    assert entry["comment"] == "角色卡·舞柔"
+    assert entry["keys"] == ["舞柔"]
+    assert "新动态" in entry["content"]
+    assert "【外貌】绝色美母" in entry["content"]
+
+
+def test_普通条目更新不受身份键保护影响(tmp_path):
+    from app.services import worldbook_edit
+    base = str(tmp_path)
+    worldbook_store.ensure_repo_snapshot(base, "repo", [_repo_book()])
+    rejections: list = []
+    applied = worldbook_store.apply_repo_ops(
+        base, "repo",
+        [{"op": "worldbook_update", "index": 0, "text": "更新后的设定", "evidence": "正文",
+          "title": "设定·新", "keys": ["新键"]}],
+        rejections=rejections,
+    )
+    assert applied == 1 and rejections == []
+    entry = worldbook_edit.list_entries(worldbook_store.read_repo_snapshot(base, "repo"))[0]
+    assert entry["comment"] == "设定·新" and entry["keys"] == ["新键"]
+    assert "更新后的设定" in entry["content"]

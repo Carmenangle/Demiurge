@@ -606,10 +606,11 @@ def persist_text(thread_id: str, message_id: str, text: str,
 
 def persist_user_message(
     thread_id: str, message_id: str, text: str, images: list[str] | None = None,
+    attachments: list[dict] | None = None,
 ) -> None:
     """在 Agent 开始前持久化用户气泡，断线或前端快照竞态也不能只剩助手回复。"""
     try:
-        chat_snapshot.ensure_user_message(thread_id, message_id, text, images)
+        chat_snapshot.ensure_user_message(thread_id, message_id, text, images, attachments)
     except Exception as exc:  # noqa: BLE001 用户输入持久化失败由 Trace 记录，调用仍可返回错误
         _LOG.warning(
             "persist_user_message 落盘失败 thread=%s mid=%s: %s",
@@ -657,14 +658,29 @@ def persist_illustration_submission(*, thread_id: str, message_id: str,
 
 
 def claim_illustration_submission(*, thread_id: str, message_id: str, slot_id: str) -> bool:
-    """在调用 ComfyUI 前认领权威媒体槽，阻止重复/过期事件产生额外任务。"""
+    """在调用 ComfyUI 前认领权威媒体槽，阻止重复/过期事件产生额外任务。
+
+    2026-08-31 晚实锤「新的任务请求没有生图」：前端收到 illustrate_request、槽已建，
+    却无 illustration.submitted / illustration.failed——失败静默。认领结果从此落
+    trace（illustration.claim），复现时一眼能分：槽未就绪 / 已认领 / 消息缺失 / 异常。
+    """
+    ctx = {"thread_id": thread_id, "repo_id": thread_id}
     try:
-        return chat_snapshot.claim_media_slot_submission(
+        claimed = chat_snapshot.claim_media_slot_submission(
             thread_id, message_id, slot_id,
         )
+        run_trace.emit(
+            ctx, "illustration.claim",
+            message_id=message_id, slot_id=slot_id, claimed=claimed,
+        )
+        return claimed
     except Exception as exc:  # noqa: BLE001
         _LOG.warning("插画提交认领失败 thread=%s mid=%s slot=%s: %s",
                      thread_id, message_id, slot_id, exc)
+        run_trace.emit(
+            ctx, "illustration.claim",
+            message_id=message_id, slot_id=slot_id, claimed=False, error=str(exc),
+        )
         return False
 
 

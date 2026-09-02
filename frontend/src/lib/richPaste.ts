@@ -2,7 +2,10 @@ export type ClipboardPasteIntent =
   | { kind: "text" }
   | { kind: "image-file" }
   | { kind: "media-url"; url: string }
-  | { kind: "html-image"; url: string };
+  | { kind: "html-image"; url: string }
+  // 2026-09-01 修复：粘贴混合内容时，图片进图片栏 + 文本进输入框，不再丢弃图片。
+  // 原「text 优先」决策已被翻转（richPaste.test.ts L14-20 用例更新同步）。
+  | { kind: "text-with-image-file" };
 
 interface ClipboardPastePayload {
   text: string;
@@ -38,6 +41,9 @@ export function classifyClipboardPaste(payload: ClipboardPastePayload): Clipboar
 
   const htmlImage = payload.html.match(/<img[^>]+src=["']([^"']+)["']/i)?.[1];
   const hasMeaningfulText = Boolean(text) && !GENERIC_IMAGE_TEXT.test(text);
+  // 2026-09-01 修复：文本+图片混合时**两者都保留**——图片进图片栏，文本插入输入框。
+  // 原逻辑直接返回 text（丢弃图片），用户在外部 AI 产品复制含图片引用的内容时常踩。
+  if (hasMeaningfulText && payload.hasImageFile) return { kind: "text-with-image-file" };
   if (hasMeaningfulText) return { kind: "text" };
   if (payload.hasImageFile) return { kind: "image-file" };
   if (htmlImage) return { kind: "html-image", url: htmlImage };

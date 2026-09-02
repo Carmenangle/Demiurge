@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  cleanText, convertChinese, countText, escapeText, insertBetweenCharacters, joinText, unescapeText,
+  cleanText, convertChinese, countText, escapeText, insertBetweenCharacters, joinText, resolveSeparator, unescapeText,
 } from "./textTools";
 
 describe("text tools", () => {
@@ -11,6 +11,18 @@ describe("text tools", () => {
 
   it("joins non-empty lines with decoded separators", () => {
     expect(joinText("甲\n\n乙", "\t")).toBe("甲\t乙");
+  });
+  it("resolveSeparator decodes separator escapes and keeps real newlines", () => {
+    expect(resolveSeparator("\\n")).toBe("\n");
+    expect(resolveSeparator("\\t")).toBe("\t");
+    expect(resolveSeparator("、")).toBe("、");
+    expect(resolveSeparator("回车\n粘贴")).toBe("回车\n粘贴");
+  });
+
+  it("joins keep real newline separators (回归：换行分隔符不再粘行)", () => {
+    expect(joinText("甲\n\n乙", resolveSeparator("\\n"))).toBe("甲\n乙");
+    expect(joinText("甲\n乙", "\n")).toBe("甲\n乙");
+    expect(joinText("甲\n乙", "")).toBe("甲乙");
   });
 
   it("inserts the exact addition between Unicode characters", () => {

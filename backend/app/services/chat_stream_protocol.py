@@ -31,7 +31,8 @@ def error_event(message: str) -> ChatStreamEvent:
 def encode_event(event: Mapping[str, object]) -> ChatStreamEvent | None:
     """编码一个内部事件；完成信号由 SSE 传输层收尾，不重复进入 payload。"""
     signals: list[str] = []
-    for key in ("trace", "delta", "replace", "route", "image", "video", "illustrate_request", "audio_request",
+    for key in ("trace", "delta", "thinking", "replace", "route", "image", "video",
+                "illustrate_request", "audio_request",
                 "insp", "rag_status", "approval", "route_choice", "error"):
         if key in event and event[key] is not None:
             signals.append(key)
@@ -46,7 +47,7 @@ def encode_event(event: Mapping[str, object]) -> ChatStreamEvent | None:
         raise ValueError(f"对话流内部事件必须且只能包含一种事件类型：{signals or list(event)}")
 
     kind = signals[0]
-    if kind in ("trace", "delta", "replace"):
+    if kind in ("trace", "delta", "thinking", "replace"):
         return _wire(kind, {"text": str(event[kind])})
     if kind == "route":
         return _wire("route", {"route": str(event["route"])})

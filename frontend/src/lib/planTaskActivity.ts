@@ -10,6 +10,7 @@ export interface PlanTaskStep {
   status: "pending" | "running" | "done" | "failed" | "blocked" | "skipped";
   attempts: number;
   last_error: string;
+  outputs?: Record<string, unknown>;
 }
 
 export interface PlanTask {
@@ -21,11 +22,16 @@ export interface PlanTask {
   error: string;
   created_at: number;
   updated_at: number;
+  progress?: string;        // 后端算好的活动进度（含图片级进度），如 "2/4 步 · 图 3/14"
+  images_total?: number;
+  images_done?: number;
+  merged_count?: number;     // 同意图终态任务聚合数（1=未聚合）
   steps: PlanTaskStep[];
 }
 
 export interface PlanTaskActivity {
   id: string;
+  repo_id: string;   // 计划所属会话（后台活动点击跳转用）
   intent: string;
   status: PlanTask["status"];
   progress: string;
@@ -49,11 +55,13 @@ const STATUS_LABEL: Record<PlanTask["status"], string> = {
 
 function fromTask(task: PlanTask): PlanTaskActivity {
   const done = task.steps.filter((s) => s.status === "done" || s.status === "skipped").length;
+  const merged = task.merged_count && task.merged_count > 1 ? `（共 ${task.merged_count} 次）` : "";
   return {
     id: task.id,
-    intent: task.intent,
+    repo_id: task.repo_id,
+    intent: `${task.intent}${merged}`,
     status: task.status,
-    progress: `${done}/${task.steps.length} 步`,
+    progress: task.progress || `${done}/${task.steps.length} 步`,
     needsApproval: task.status === "awaiting_approval",
   };
 }
@@ -85,6 +93,10 @@ export function subscribePlanTaskActivities(listener: (items: PlanTaskActivity[]
       timer = null;
     }
   };
+}
+
+export function getPlanTask(taskId: string) {
+  return apiGet<PlanTask>(`/plans/${taskId}`);
 }
 
 export function approvePlanTask(taskId: string) {

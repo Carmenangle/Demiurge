@@ -25,7 +25,7 @@
     "video_proxy_url": { "type": "string" }, "embed_proxy_url": { "type": "string" },
     "route_model": { "type": "string" }, "message_id": { "type": "string" }, "user_message_id": { "type": "string" },
     "style_template": { "type": "string" }, "agent_id": { "type": "string" }, "stream_output": { "type": "boolean" },
-    "context_max_tokens": { "type": "integer", "minimum": 0 }, "history_per_role": { "type": "integer", "minimum": 1, "maximum": 50 },
+    "context_max_tokens": { "type": "integer", "minimum": 0 }, "history_per_role": { "type": "integer", "minimum": 1, "maximum": 50 }, "selfheal_attempts": { "type": "integer", "minimum": 0, "maximum": 5 },
     "history": { "type": "array", "items": { "$ref": "#/$defs/historyItem" } },
     "approval_id": { "type": "string" }, "approval_action": { "type": "string", "enum": ["", "submit", "change", "cancel"] },
     "edited_prompt": { "type": "string" }, "forced_route": { "type": "string" },
@@ -37,10 +37,12 @@
     "illustrate": { "type": "boolean" }, "comfy_illustrate": { "type": "boolean" }, "comfy_audio": { "type": "boolean" }, "comfy_video": { "type": "boolean" }, "prompt_profile": { "type": "string" },
     "appearance_source": { "type": "string", "enum": ["worldbook", "character_card"] },
     "character_base_images": { "type": "object", "additionalProperties": { "type": "string" } },
-    "illustration_actor_names": { "type": "array", "items": { "type": "string" } }, "style_base_image": { "type": "string" }
+    "illustration_actor_names": { "type": "array", "items": { "type": "string" } }, "style_base_image": { "type": "string" },
+    "attachments": { "type": "array", "items": { "$ref": "#/$defs/attachmentItem" } }
   },
   "$defs": {
     "imageMask": { "type": "object", "additionalProperties": false, "required": ["image", "mask"], "properties": { "image": { "type": "string" }, "mask": { "type": "string" } } },
-    "historyItem": { "type": "object", "additionalProperties": false, "required": ["role", "content"], "properties": { "role": { "type": "string", "enum": ["user", "assistant"] }, "content": { "type": "string" } } }
+    "historyItem": { "type": "object", "additionalProperties": false, "required": ["role", "content"], "properties": { "role": { "type": "string", "enum": ["user", "assistant"] }, "content": { "type": "string" } } },
+    "attachmentItem": { "type": "object", "additionalProperties": false, "required": ["file_id", "name", "mime", "size"], "properties": { "file_id": { "type": "string" }, "name": { "type": "string" }, "mime": { "type": "string" }, "size": { "type": "integer" } } }
   }
 }

@@ -1,5 +1,5 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Bot, Brush, Check, ChevronDown, CopyPlus, CornerDownRight, Download, ExternalLink, Flag, GitBranch, Image as ImageIcon, Images, Merge, MessageCircle, MoreHorizontal, Pause, Pencil, Play, Plus, RotateCw, ScanText, Search, Send, Sparkles, Square, Trash2, Video, Workflow, Wrench, X } from "lucide-react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Bot, Brush, Check, ChevronDown, CopyPlus, CornerDownRight, Download, ExternalLink, File as FileIcon, Flag, GitBranch, Image as ImageIcon, Images, Merge, MessageCircle, MoreHorizontal, Pause, Pencil, Play, Plus, RotateCw, ScanText, Search, Send, Sparkles, Square, Trash2, Video, Workflow, Wrench, X } from "lucide-react";
 import type { AgentRoute, ChatMessage, MsgPart, PromptApproval, RouteChoice } from "../../types/chat";
 import type { AssistantAvatarState } from "../../lib/assistantAvatar";
 import { runScripts, Placement, type RegexScript } from "../../lib/regexEngine";
@@ -8,8 +8,9 @@ import { renderMarkdown } from "../../lib/renderMarkdown";
 import { substituteMacros } from "../../lib/chatMacros";
 import { userMessagePlainText, userMessageRichContent } from "../../lib/chatGeneration";
 import type { PortOp } from "../../api/ai";
-import { proxyImageUrl, selectInspiration as selectInspirationPost, saveInspirationCard } from "../../api/ai";
+import { attachmentUrl, proxyImageUrl, selectInspiration as selectInspirationPost, saveInspirationCard } from "../../api/ai";
 import { pushInspirationsToCanvas, inspirationToCanvasPayload, inspirationCanvasLabel } from "../../lib/inspirationInsert";
+import { approvePlanTask, cancelPlanTask, getPlanTask } from "../../lib/planTaskActivity";
 import type { RichContent } from "../RichInput";
 import { CopyButton } from "../CopyButton";
 import { openLightbox } from "../Lightbox";
@@ -93,6 +94,44 @@ export function ImageChip({ url, onAddToChat }: { url: string; onAddToChat?: (ur
   );
 }
 
+// 文件附件卡（D1 历史回放只读）：MIME 图标 + 文件名 + 大小，点击流式下载（GET /attachments/{file_id}）。
+// 上传失败/已删除的占位卡（file_id 非 32 位 hex）显示「不可用」但不报错。
+function FileAttachmentChip({ part }: { part: MsgPart }) {
+  const fileId = part.fileId || "";
+  const name = part.name || "附件";
+  const url = fileId ? attachmentUrl(fileId) : "";
+  const downloadable = fileId.length === 32;
+  return (
+    <span className="file-attach-chip" title={name}>
+      <FileIcon size={14} className="file-attach-chip-icon" />
+      <span className="file-attach-chip-name">{name}</span>
+      <span className="file-attach-chip-size">{formatFileSize(part.size || 0)}</span>
+      {downloadable ? (
+        <a
+          className="file-attach-chip-dl"
+          href={url}
+          download={name}
+          title="下载附件"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <Download size={12} />
+        </a>
+      ) : (
+        <span className="file-attach-chip-dead" title="附件已删除或不可用">×</span>
+      )}
+    </span>
+  );
+}
+
+// 文件大小人类可读（B/KB/MB/GB）
+function formatFileSize(bytes: number): string {
+  if (!bytes || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  const idx = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / 1024 ** idx;
+  return `${value >= 100 || idx === 0 ? Math.round(value) : value.toFixed(1)} ${units[idx]}`;
+}
+
 // 用户消息：支持图文混排（parts 按顺序渲染，图片为内联 chip+悬停预览），否则纯文本
 // memo：长列表里流式/进度刷新时，未变的历史消息跳过重渲染（回调需稳定，见 ChatView 的 useCallback）
 function UserMessageBase({
@@ -107,7 +146,7 @@ function UserMessageBase({
   msg: ChatMessage;
   macros?: { char: string; user: string };
   onAddToChat?: (url: string) => void;
-  onEdit?: (content: RichContent) => void;
+  onEdit?: (content: RichContent, sourceId?: string) => void;
   onDelete?: (id: string) => void;
   onRegenerate?: (id: string, slotId?: string) => void;
   regenerationDisabled?: boolean;
@@ -135,6 +174,8 @@ function UserMessageBase({
                   url={p.url}
                   onAddToChat={p.type === "image" ? onAddToChat : undefined}
                 />
+              ) : p.type === "file" ? (
+                <FileAttachmentChip key={`file-${p.fileId || i}`} part={p} />
               ) : (
                 <span key={`text-${i}-${(p.text || "").slice(0, 20)}`}>{sub(p.text || "")}</span>
               ),
@@ -158,7 +199,7 @@ function UserMessageBase({
               {onEdit && (
                 <button
                   type="button" className="user-msg-act" title="复制图文内容到输入框编辑" aria-label="编辑此消息"
-                  onClick={() => { onEdit(userMessageRichContent(msg)); setMenuOpen(false); }}
+                  onClick={() => { onEdit(userMessageRichContent(msg), msg.id); setMenuOpen(false); }}
                 >
                   <Pencil size={13} />
                 </button>
@@ -313,8 +354,15 @@ export function RouteChoiceCard({
   );
 }
 
+const MarkdownHtml = memo(function MarkdownHtml({ text, className, htmlRef }: {
+  text: string; className?: string; htmlRef?: (el: HTMLDivElement | null) => void;
+}) {
+  const html = useMemo(() => renderMarkdown(text), [text]);
+  return <div className={className} ref={htmlRef} dangerouslySetInnerHTML={{ __html: html }} />;
+}, (prev, next) => prev.text === next.text && prev.className === next.className);
+
 function AssistantMessageBase({ msg, streaming, avatarState = "default", portrait, displayRegex, depth, macros, onSendImage, onMaskImage, onRunCommand, onSetCover, onPromptApproval, onRouteChoice, onRegenerate, onCancelGeneration, onRetryIllustration, regenerating = false, onEdit, onDelete, onCreateCheckpoint, onBranch, onMergeAudio, visualCiRepoId, visualCiOutputDir }: { msg: ChatMessage; streaming?: boolean; avatarState?: AssistantAvatarState; portrait?: { name: string; url: string } | null; displayRegex?: RegexScript[]; depth?: number; macros?: { char: string; user: string }; onSendImage: (url: string) => void; onMaskImage?: (url: string) => void; onRunCommand?: (cmd: string) => void; onSetCover?: (url: string) => void; onPromptApproval?: (approval: PromptApproval, action: "submit" | "change" | "cancel", editedPrompt?: string) => Promise<void>; onRouteChoice?: (choice: RouteChoice, route: AgentRoute) => Promise<void>; onRegenerate?: (messageId: string, slotId?: string) => void; onCancelGeneration?: (messageId: string, slotId: string) => void; onRetryIllustration?: (messageId: string, slotId: string) => void; regenerating?: boolean; onEdit?: (id: string, text: string) => void; onDelete?: (id: string) => void; onCreateCheckpoint?: (id: string) => void; onBranch?: (id: string) => void; onMergeAudio?: (messageId: string) => Promise<void>; visualCiRepoId?: string; visualCiOutputDir?: string }) {
-  const [showThinking, setShowThinking] = useState(false);
+  const [showThinking, setShowThinking] = useState(false); // 思考默认折叠（2026-08-31 深夜用户反馈：28k 长思考自动展开吞掉正文区），可手动展开
   // 正文里预设正则折叠出的 <details>（思考过程等）在 innerHTML 重写后保持展开状态：
   // 插画回填/流式/状态更新都会重写 bot-html，无保态时用户展开几秒就被收起（2026-08-29）。
   const stableDetailsRefs = useRef<Record<number, HTMLDivElement | null>>({});
@@ -334,6 +382,8 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
   const [draft, setDraft] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
   const [mergingAudio, setMergingAudio] = useState(false);
+  const [planActions, setPlanActions] = useState<Record<string, string>>({});
+  const [planImages, setPlanImages] = useState<Record<string, string[]>>({});
   const menuRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     if (!menuOpen) return;
@@ -365,9 +415,16 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
     if (v) cmds.push(v);
     return "";
   }).trim();
+  // 计划审批标记：[[plan:<task_id>]] → 对话内直接批准/取消，不必去后台活动面板
+  const planTaskIds: string[] = [];
+  const withPlan = withCmds.replace(/\[\[plan:([^\]]+)\]\]/g, (_, t) => {
+    const v = String(t).trim();
+    if (v) planTaskIds.push(v);
+    return "";
+  }).trim();
   // 显示层宏替换：模型输出/历史里残留的字面 {{user}}/{{char}} 统一替成人设名/角色名（缺省 user→「我」），
   // 像全局宏一样在渲染处生效（不改存储，与开场白/提示词侧对齐）。
-  const cleanText = macros ? substituteMacros(withCmds, macros.char, macros.user) : withCmds;
+  const cleanText = macros ? substituteMacros(withPlan, macros.char, macros.user) : withPlan;
   const orderedChunks = orderedMediaParts.length > 0
     ? cleanText.split(/\uE000LAF_MEDIA_(\d+)\uE001/g)
     : [];
@@ -376,6 +433,9 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
   if (msg.image) imgs.push(msg.image);
   const renderMediaPart = (part: MsgPart | undefined, index: number) => {
     if (!part) return null;
+    if (part.type === "file") {
+      return <FileAttachmentChip key={part.fileId || `file-${index}`} part={part} />;
+    }
     if (part.type === "media-slot") {
       const isAudio = part.kind === "audio";
       return (
@@ -628,13 +688,11 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
         ) : orderedMediaParts.length > 0 ? (
           <div className="bot-rich-parts">
             {orderedChunks.map((chunk, index) => index % 2 === 0
-              ? (chunk ? <div className="bot-text bot-html" key={`text-${index}`} ref={(el) => { stableDetailsRefs.current[index] = el; }}
-                dangerouslySetInnerHTML={{ __html: renderMarkdown(chunk) }} /> : null)
+              ? (chunk ? <MarkdownHtml key={`text-${index}`} className="bot-text bot-html" text={chunk} htmlRef={(el) => { stableDetailsRefs.current[index] = el; }} /> : null)
               : renderMediaPart(orderedMediaParts[Number(chunk)], Number(chunk)))}
           </div>
         ) : cleanText ? (
-          <div className="bot-text bot-html" ref={(el) => { stableDetailsRefs.current[-1] = el; }}
-            dangerouslySetInnerHTML={{ __html: renderMarkdown(cleanText) }} />
+          <MarkdownHtml className="bot-text bot-html" text={cleanText} htmlRef={(el) => { stableDetailsRefs.current[-1] = el; }} />
         ) : null}
         {audioTracks.length >= 2 && onMergeAudio && (
           <div className="audio-merge-bar">
@@ -671,6 +729,90 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
                 <Play size={12} style={{ verticalAlign: "-1px", marginRight: 4 }} />
                 执行 {c}
               </button>
+            ))}
+          </div>
+        )}
+        {planTaskIds.length > 0 && (
+          <div className="cmd-suggest">
+            {planTaskIds.map((taskId) => planActions[taskId] ? (
+              <span key={taskId} className="cmd-chip" style={{ opacity: 0.8 }}>
+                {planActions[taskId] === "approved" ? "已批准，等待执行" : "已取消计划"}
+              </span>
+            ) : (
+              <span key={taskId} style={{ display: "inline-flex", gap: 8 }}>
+                <button
+                  className="cmd-chip"
+                  onClick={async () => {
+                    try {
+                      await approvePlanTask(taskId);
+                      setPlanActions((p) => ({ ...p, [taskId]: "执行中…" }));
+                      const timer = setInterval(async () => {
+                        try {
+                          const task = await getPlanTask(taskId);
+                          const imgs: string[] = [];
+                          for (const st of task.steps || []) {
+                            const outs = (st.outputs || {}) as Record<string, unknown>;
+                            const results = outs.results;
+                            if (Array.isArray(results)) {
+                              for (const r of results) {
+                                if (r && typeof r === "object") {
+                                  const u = (r as Record<string, unknown>).url;
+                                  if (typeof u === "string" && u) imgs.push(u);
+                                }
+                              }
+                            }
+                          }
+                          if (imgs.length) setPlanImages((prev) => ({ ...prev, [taskId]: imgs }));
+                          const label = task.progress || `${task.steps.length} 步`;
+                          if (["done", "partial", "error", "cancelled", "blocked"].includes(task.status)) {
+                            clearInterval(timer);
+                            const endLabel = task.status === "done" ? "已完成"
+                              : task.status === "cancelled" ? "已取消"
+                              : task.status === "error" ? "执行失败"
+                              : task.status === "blocked" ? "已受阻" : "部分完成";
+                            setPlanActions((p) => ({ ...p, [taskId]: `${endLabel}（${label}）` }));
+                          } else {
+                            setPlanActions((p) => ({ ...p, [taskId]: `${task.status === "awaiting_approval" ? "待审批" : "执行中"} ${label}` }));
+                          }
+                        } catch {
+                          clearInterval(timer);
+                        }
+                      }, 2500);
+                    } catch (e) {
+                      setPlanActions((p) => ({ ...p, [taskId]: `批准失败：${(e as Error).message}` }));
+                    }
+                  }}
+                  title="批准执行该计划（durable/expensive 步骤将获得一次性租约）"
+                >
+                  <Check size={12} style={{ verticalAlign: "-1px", marginRight: 4 }} />
+                  批准执行
+                </button>
+                <button
+                  className="cmd-chip"
+                  onClick={async () => {
+                    try {
+                      const res = await cancelPlanTask(taskId);
+                      setPlanActions((p) => ({
+                        ...p,
+                        [taskId]: res?.ok ? "cancelled" : "无法取消（任务已在执行）",
+                      }));
+                    } catch (e) {
+                      setPlanActions((p) => ({ ...p, [taskId]: `取消失败：${(e as Error).message}` }));
+                    }
+                  }}
+                  title="取消该计划"
+                >
+                  <X size={12} style={{ verticalAlign: "-1px", marginRight: 4 }} />
+                  取消计划
+                </button>
+              </span>
+            ))}
+            {planTaskIds.map((taskId) => planImages[taskId] && planImages[taskId].length > 0 && (
+              <div key={`imgs-${taskId}`} style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+                {planImages[taskId].map((u) => (
+                  <img key={u} src={u} alt="生成图" style={{ width: 72, height: 72, objectFit: "cover", borderRadius: 6, border: "1px solid #444" }} />
+                ))}
+              </div>
             ))}
           </div>
         )}

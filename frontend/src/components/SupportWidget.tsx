@@ -4,7 +4,7 @@ import { subscribeWorkflowBuildActivities, type WorkflowBuildActivity } from "..
 import { subscribeChatBackgroundActivities, type ChatBackgroundActivity } from "../lib/chatBackgroundActivity";
 import { subscribeComfyBackgroundActivities, type ComfyBackgroundActivity } from "../lib/comfyBackgroundActivity";
 import {
-  approvePlanTask, cancelPlanTask, subscribePlanTaskActivities,
+  subscribePlanTaskActivities,
   type PlanTaskActivity,
 } from "../lib/planTaskActivity";
 import { announceFloatingPanel, subscribeFloatingPanels } from "../lib/floatingPanels";
@@ -69,7 +69,16 @@ export function SupportWidget(props: {
   };
 
   const running = activities.filter((item) => item.status === "queued" || item.status === "running");
-  const total = running.length + chatActivities.length + comfyActivities.length + planActivities.length;
+  // 同一次对话的两个活动合并：对话生成中（编译计划）时，隐藏同会话的计划活动；
+  // 生成结束（chat 活动消失）后，计划活动自然显示为「待审批/执行中」。
+  const runningChatThreads = new Set(
+    chatActivities.filter((c) => c.kind === "running").map((c) => c.threadId),
+  );
+  const visiblePlanActivities = planActivities.filter(
+    (p) => !runningChatThreads.has(p.repo_id),
+  );
+  const total = running.length + chatActivities.length + comfyActivities.length
+    + visiblePlanActivities.length;
   const openRepoChat = (threadId: string) => { props.onOpenChat(threadId); setOpen(false); };
   if (hidden) return <button className="support-handle" title="显示后台活动" onClick={() => setHidden(false)}>&lt;&lt;&lt;</button>;
   if (!open) return (
@@ -99,16 +108,15 @@ export function SupportWidget(props: {
             <span>{item.label}{item.need ? `：${item.need}` : ""}</span>
           </button>
         ))}
-        {planActivities.map((item) => (
-          <div key={`plan-${item.id}`} className="support-activity" style={{ display: "block", textAlign: "left", cursor: "default" }}>
+        {visiblePlanActivities.map((item) => (
+          <div key={`plan-${item.id}`} className="support-activity"
+            style={{ display: "block", textAlign: "left", cursor: "pointer" }}
+            onClick={() => openRepoChat(item.repo_id)} title="点击回到对应会话">
             <strong>{STATUS_LABEL[item.status] ?? item.status}</strong>
             <span>{item.progress}：{item.intent}</span>
-            {(item.status === "awaiting_approval" || item.status === "blocked") && (
-              <span style={{ display: "flex", gap: 8, marginTop: 6 }}>
-                {item.status === "awaiting_approval" && (
-                  <button className="btn" onClick={() => { approvePlanTask(item.id).catch(() => undefined); }}>批准</button>
-                )}
-                <button className="btn" onClick={() => { cancelPlanTask(item.id).catch(() => undefined); }}>取消</button>
+            {item.status === "awaiting_approval" && (
+              <span style={{ display: "block", marginTop: 4, color: "#d23b3b", fontSize: 12 }}>
+                ● 待批准——点击回到对话，在计划卡上点「批准执行」
               </span>
             )}
           </div>

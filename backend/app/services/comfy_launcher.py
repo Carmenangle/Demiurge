@@ -16,6 +16,12 @@ from app.services import comfyui_client
 
 # 本进程拉起的 ComfyUI 子进程（None = 未由本工具启动）
 _proc: "subprocess.Popen | None" = None
+# ComfyUI 子进程的输出日志句柄：必须与子进程同生命周期持有，句柄关闭即失效
+_log_fp = None
+
+
+def _stdout_log_path() -> Path:
+    return DATA_DIR / "logs" / "comfyui-stdout.log"
 
 
 def _config_path() -> Path:
@@ -107,9 +113,19 @@ def start(path: str, url: str, python_path: str = "") -> dict:
         )
         raise LaunchError(400, detail)
     try:
+        # 输出必须重定向到文件（2026-08-30 实锤）：子进程继承后端控制台句柄，而后端以
+        # 隐藏窗口/reload 子进程方式运行时该句柄可能失效——任何节点往控制台打印一行
+        # （如 rgthree Seed 节点输出种子值）都会 OSError [Errno 22] 直接炸掉整个生图任务。
+        # 重定向到日志文件后句柄恒有效，顺带留下 ComfyUI 运行日志可查。
+        global _log_fp
+        log_path = _stdout_log_path()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        _log_fp = open(log_path, "ab")
         _proc = subprocess.Popen(
             [py, "main.py", "--extra-model-paths-config", write_ext_yaml(), "--enable-cors-header", "*"],
             cwd=str(base),
+            stdout=_log_fp,
+            stderr=subprocess.STDOUT,
             creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
         )
     except Exception as e:
@@ -175,7 +191,7 @@ def _kill_by_port(port: int = 8188) -> int:
 
 def stop(url: str = COMFYUI_BASE_URL) -> dict:
     """关闭 ComfyUI。本工具拉起的先 terminate 子进程树；否则按端口杀。"""
-    global _proc
+    global _proc, _log_fp
     port = urlparse(url).port or 8188
     if _proc is not None and _proc.poll() is None:
         pid = _proc.pid
@@ -184,6 +200,12 @@ def stop(url: str = COMFYUI_BASE_URL) -> dict:
         except Exception:
             _proc.terminate()
         _proc = None
+        if _log_fp is not None:
+            try:
+                _log_fp.close()
+            except Exception:
+                pass
+            _log_fp = None
         # 兜底：端口可能仍被子进程占，再按端口清一次
         _kill_by_port(port)
         return {"stopped": True, "message": "已关闭 ComfyUI（本工具启动的进程）"}

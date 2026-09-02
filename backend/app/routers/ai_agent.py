@@ -49,6 +49,7 @@ class ImageAgentRequest(EmbedModelReq):
     user_message_id: str = ""            # 选择卡关联的原用户消息 id
     context_max_tokens: int = Field(default=20_000, ge=0)  # 0=无上限（历史全量不裁剪），去掉 le 上限
     history_per_role: int = Field(default=6, ge=1, le=50)  # 每角色最近历史条数
+    selfheal_attempts: int = Field(default=3, ge=0, le=5)  # 截断自愈次数（0=不自愈）
     provider_profile: Literal["openai_compatible", "claude_compatible"] = "openai_compatible"
 
 
@@ -76,12 +77,13 @@ class MultiAgentRequest(ImageAgentRequest):
     comfy_audio: bool = False  # 前端已预设音频模板（IndexTTS）：剧情产出后发 audio_request 事件逐角色配音
     comfy_video: bool = False  # 前端已预设视频模板：开=高潮点编译 video_request；关=零 token
     video_mode: Literal["", "climax", "firstlast"] = ""  # 视频模式（缺省 climax），前端 preset.videoMode 透传；produce 层据此编译正片/转场 video_request
-    prompt_profile: str = "krea2"
+    prompt_profile: str = "anima_tags"
     appearance_source: Literal["worldbook", "character_card"] = "worldbook"
     character_base_images: dict[str, str] = {}  # ⑥ 角色名→底图（gpt-image 系按在场角色取底图锁一致性）
     illustration_actor_names: list[str] = []  # 自动插画可从正文机械识别的已配置角色名
     style_base_image: str = ""  # ⑥ 无角色底图时的兜底风格底图（gpt-image 系）
     history: list[dict] | None = None  # 前端当前可见历史；显式 [] 禁止回退旧 checkpoint
+    attachments: list[dict] = []  # 对话附件元信息 [{file_id,name,mime,size}]；agent 链路转「文件参考」段落
 
 
 class TraceReplayRequest(BaseModel):

@@ -71,6 +71,8 @@ def validate(plan: GenerationPlan, *,
             continue
         # params 合 schema
         errors.extend(_check_params(label, step.params, cap.get("params_schema") or {}))
+        # 禁止 {{...}} 占位符：计划参数必须写具体值（执行器无宏替换）
+        errors.extend(_check_placeholders(label, step.params))
         # inputs_from 引用存在：支持「步骤id」与「步骤id.产出键」两种点引用
         for ref in step.inputs_from:
             if not _ref_resolvable(ref, step_ids - {step.id}):
@@ -135,6 +137,35 @@ def _check_params(label: str, params: dict, schema: dict) -> list[str]:
             min_items = spec.get("minItems")
             if min_items and len(value) < int(min_items):
                 errors.append(f"{label}: 参数「{key}」至少需要 {min_items} 项。")
+    return errors
+
+
+def _check_placeholders(label: str, params: dict) -> list[str]:
+    """任何参数值里出现占位符（{{...}} / TO_BE_RESOLVED / PLACEHOLDER / 待解析 等）
+    都视为未解析占位符——执行器不会做宏替换或字符串引用解引用。"""
+    errors: list[str] = []
+
+    def _is_placeholder(value: str) -> bool:
+        if "{{" in value and "}}" in value:
+            return True
+        upper = value.upper()
+        return "TO_BE_RESOLVED" in upper or "PLACEHOLDER" in upper or "待解析" in value or "待定" in value
+
+    def walk(value, path: str) -> None:
+        if isinstance(value, str):
+            if _is_placeholder(value):
+                shown = value if len(value) <= 80 else value[:80] + "…"
+                errors.append(
+                    f"{label}: 参数{path or '（顶层）'}包含未解析占位符"
+                    f"「{shown}」——计划参数必须写具体值，不能用占位符或 {{...}} 引用前序步骤。")
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                walk(item, f"{path}.{key}")
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                walk(item, f"{path}[{index}]")
+
+    walk(params, "")
     return errors
 
 

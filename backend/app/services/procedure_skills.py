@@ -61,6 +61,31 @@ def propose(repo_id: str, turn_id: str, name: str) -> dict[str, Any]:
     return item
 
 
+def failure_summary(repo_id: str, *, turn_id: str = "", limit: int = 200) -> dict[str, Any]:
+    """从 Trace 提炼计划失败/阻断模式（P5，确定性，无 LLM）。
+
+    统计 plan.step_failed / plan.step_blocked 事件的 operation 失败次数与去重原因，
+    供 LoopDetection 复盘或后续并行 LLM 分析 Agent 使用。
+    """
+    records = run_trace.read_recent(repo_id, turn_id=turn_id, limit=limit)
+    failures: dict[str, dict[str, Any]] = {}
+    for record in records:
+        event = str(record.get("event") or "")
+        if event not in ("plan.step_failed", "plan.step_blocked"):
+            continue
+        data = record.get("data")
+        data = data if isinstance(data, dict) else {}
+        operation = str(data.get("operation") or "未知能力")
+        reason = str(data.get("reason") or data.get("error") or "").strip()
+        slot = failures.setdefault(operation, {"count": 0, "reasons": []})
+        slot["count"] += 1
+        if reason and reason not in slot["reasons"]:
+            slot["reasons"].append(reason)
+    return {"repo_id": repo_id, "turn_id": turn_id,
+            "total": sum(v["count"] for v in failures.values()),
+            "failures": failures}
+
+
 def review(skill_id: str, steps: list[dict[str, Any]], *, approved: bool) -> dict[str, Any]:
     items = _load()
     for index, item in enumerate(items):

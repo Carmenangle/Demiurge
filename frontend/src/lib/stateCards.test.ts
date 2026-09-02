@@ -66,4 +66,23 @@ describe("groupStateCards", () => {
       ["虞莹纱", ["好感度", "精神状态"]],
     ]);
   });
+
+  it("第一人称主角字段不入卡（我/主角/你，2026-09-01 用户定案）", () => {
+    const state = sample();
+    state.数值 = {
+      好感度: { value: 10, min: -100, max: 100, turn: 1, evidence: "a", source: "auto" },
+      "主角·好感度": { value: 99, min: -100, max: 100, turn: 1, evidence: "b", source: "auto" },
+    };
+    state.叙事 = {
+      冷倾雪状态: { value: "仍在抗拒", turn: 1, evidence: "c", source: "auto" },
+      "我·所在": { value: "寝殿", turn: 1, evidence: "d", source: "auto" },
+      "你·心情": { value: "焦急", turn: 1, evidence: "e", source: "auto" },
+    };
+
+    const cards = groupStateCards(state);
+
+    expect(cards).toHaveLength(1);
+    expect(cards[0].name).toBe("冷倾雪");
+    expect(cards[0].fields.map((f) => f.path)).toEqual(["数值/好感度", "叙事/冷倾雪状态"]);
+  });
 });

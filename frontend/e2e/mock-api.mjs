@@ -78,5 +78,25 @@ createServer((request, response) => {
   if (url.pathname === "/api/agents") return send(response, []);
   if (url.pathname === "/api/workflows/templates") return send(response, { items: [] });
   if (url.pathname === "/api/generations") return send(response, { items: [] });
+  // 附件上传/下载（与真实后端同构：snake_case 响应，正好验证前端 uploadAttachment 的 camelCase 映射）
+  if (url.pathname === "/api/attachments/upload" && request.method === "POST") {
+    const chunks = [];
+    request.on("data", (c) => chunks.push(c));
+    request.on("end", () => {
+      const buf = Buffer.concat(chunks);
+      const text = buf.toString("utf8");
+      const fm = text.match(/filename="([^"]*)"/);
+      const tm = text.match(/Content-Type: ([^\r\n]+)/);
+      const name = fm ? fm[1] : "mock.txt";
+      const mime = tm ? tm[1].trim() : "application/octet-stream";
+      const fileId = Array.from({ length: 32 }, () => "0123456789abcdef"[Math.floor(Math.random() * 16)]).join("");
+      console.log(`[mock] ${request.method} ${url.pathname} → name=${name} mime=${mime} size=${buf.length}`);
+      return send(response, { ok: true, file_id: fileId, name, mime, size: buf.length });
+    });
+    return;
+  }
+  if (url.pathname.startsWith("/api/attachments/") && request.method === "GET") {
+    return send(response, Buffer.from("mock attachment content for e2e"), 200, "text/plain");
+  }
   return send(response, {});
 }).listen(18110, "127.0.0.1");

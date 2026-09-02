@@ -11,6 +11,12 @@ class HistoryItemWire(TypedDict):
     role: Literal["user", "assistant"]
     content: str
 
+class AttachmentItemWire(TypedDict):
+    file_id: str
+    name: str
+    mime: str
+    size: int
+
 class AgentInvocationWire(TypedDict):
     thread_id: str
     workspace_mode: Literal["story", "generate", "edit"]
@@ -52,6 +58,7 @@ class AgentInvocationWire(TypedDict):
     stream_output: NotRequired[bool]
     context_max_tokens: NotRequired[int]
     history_per_role: NotRequired[int]
+    selfheal_attempts: NotRequired[int]
     history: list[HistoryItemWire]
     approval_id: NotRequired[str]
     approval_action: NotRequired[Literal["", "submit", "change", "cancel"]]
@@ -77,5 +84,6 @@ class AgentInvocationWire(TypedDict):
     character_base_images: NotRequired[dict[str, str]]
     illustration_actor_names: NotRequired[list[str]]
     style_base_image: NotRequired[str]
+    attachments: NotRequired[list[AttachmentItemWire]]
 
-AGENT_INVOCATION_WIRE_FIELDS = frozenset(['thread_id', 'workspace_mode', 'message', 'images', 'image_mask', 'base_url', 'api_key', 'model', 'proxy', 'provider_profile', 'gen_base_url', 'gen_api_key', 'gen_model', 'video_base_url', 'video_api_key', 'video_model', 'video_mode', 'embed_base_url', 'embed_api_key', 'embed_model', 'embed_mode', 'embed_model_dir', 'reranker_model_dir', 'size', 'image_quality', 'output_dir', 'repo_id', 'proxy_url', 'chat_proxy_url', 'gen_proxy_url', 'video_proxy_url', 'embed_proxy_url', 'route_model', 'message_id', 'user_message_id', 'style_template', 'agent_id', 'stream_output', 'context_max_tokens', 'history_per_role', 'history', 'approval_id', 'approval_action', 'edited_prompt', 'forced_route', 'character_dir', 'card_name', 'card_names', 'opening_card_name', 'preset_dir', 'preset_name', 'user_name', 'user_persona', 'persona_bound', 'worldbook_dir', 'worldbook_name', 'illustrate', 'comfy_illustrate', 'comfy_audio', 'comfy_video', 'prompt_profile', 'appearance_source', 'character_base_images', 'illustration_actor_names', 'style_base_image'])
+AGENT_INVOCATION_WIRE_FIELDS = frozenset(['thread_id', 'workspace_mode', 'message', 'images', 'image_mask', 'base_url', 'api_key', 'model', 'proxy', 'provider_profile', 'gen_base_url', 'gen_api_key', 'gen_model', 'video_base_url', 'video_api_key', 'video_model', 'video_mode', 'embed_base_url', 'embed_api_key', 'embed_model', 'embed_mode', 'embed_model_dir', 'reranker_model_dir', 'size', 'image_quality', 'output_dir', 'repo_id', 'proxy_url', 'chat_proxy_url', 'gen_proxy_url', 'video_proxy_url', 'embed_proxy_url', 'route_model', 'message_id', 'user_message_id', 'style_template', 'agent_id', 'stream_output', 'context_max_tokens', 'history_per_role', 'selfheal_attempts', 'history', 'approval_id', 'approval_action', 'edited_prompt', 'forced_route', 'character_dir', 'card_name', 'card_names', 'opening_card_name', 'preset_dir', 'preset_name', 'user_name', 'user_persona', 'persona_bound', 'worldbook_dir', 'worldbook_name', 'illustrate', 'comfy_illustrate', 'comfy_audio', 'comfy_video', 'prompt_profile', 'appearance_source', 'character_base_images', 'illustration_actor_names', 'style_base_image', 'attachments'])

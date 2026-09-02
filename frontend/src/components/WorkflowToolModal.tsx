@@ -12,6 +12,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Sparkles, X } from "lucide-react";
 import { WorkflowCard } from "./WorkflowCard";
+import { getTemplateRaw } from "../api/workflows";
 import { workflowPorts, type PortOp, type PortsPlan } from "../api/ai";
 import {
   submitGraph, finalizeGeneration, comfyStatus, interruptComfy,
@@ -59,6 +60,16 @@ export function WorkflowToolModal({ node: nodeProp, repoId, settings, onClose, o
   const [postConfirm, setPostConfirm] = useState(false);
   const postConfirmDraftRef = useRef<unknown>(null);
   const postConfirmGraphRef = useRef<unknown>(null);
+  // 模板已选节点（exposed_ids）：确认时随 onUpdate 写回画布，供封面徽标/节点预览用
+  // （修复：模板确认后封面徽标一直显示 0 —— 此前确认回写不含 wfExposedIds）
+  const [exposedIds, setExposedIds] = useState<string[]>([]);
+  useEffect(() => {
+    const tid = node.templateId || "";
+    if (!tid) { setExposedIds([]); return; }
+    let alive = true;
+    getTemplateRaw(tid).then((r) => { if (alive) setExposedIds(r.exposed_ids || []); }).catch(() => {});
+    return () => { alive = false; };
+  }, [node.templateId]);
 
   useEffect(() => { wfRunningRef.current = wfRunning; }, [wfRunning]);
 
@@ -125,7 +136,7 @@ export function WorkflowToolModal({ node: nodeProp, repoId, settings, onClose, o
       onNotify(`已提交到 ComfyUI（prompt_id: ${runPromptId}，${r.node_count} 个节点），正在运转工作流…`);
       // 记入后台活动（laf_pending_gen_<repoId>）：SupportWidget 面板显示「出图中」；
       // 本弹窗自持轮询，runtime 只做标记，结束（finally）时移除。
-      trackCanvasWorkflow(repoId, runPromptId, settings.comfyuiUrl, node.templateName || "工作流生成");
+      trackCanvasWorkflow(repoId, runPromptId, settings.comfyuiUrl, node.templateName || "工作流生成", runTaskId || "");
       // 把 graph 带给画布占位节点：节点名才能显示 class_type（如 KSamplerAdvanced (#15)）而非裸 id
       if (runTaskId) {
         try {
@@ -516,7 +527,7 @@ export function WorkflowToolModal({ node: nodeProp, repoId, settings, onClose, o
                   const d = postConfirmDraftRef.current;
                   const g = postConfirmGraphRef.current;
                   setPostConfirm(false);
-                  onUpdate({ wfDraft: d, wfCaptured: g, wfConfirmed: true });
+                  onUpdate({ wfDraft: d, wfCaptured: g, wfConfirmed: true, wfExposedIds: exposedIds });
                   // 运转工作流 → 跳转画布页面：画布创建「生成中」节点，运转完毕替换为生成内容节点；
                   // 对话框下方同步显示进度条。编辑器收工，任务在画布后台继续。
                   const runId = `wfrun-${crypto.randomUUID().slice(0, 8)}`;
@@ -538,7 +549,7 @@ export function WorkflowToolModal({ node: nodeProp, repoId, settings, onClose, o
                   const g = postConfirmGraphRef.current;
                   setPostConfirm(false);
                   // 「更改」→ 留在本节点页面、回到未选择状态（保留已填参数，恢复节点预览可继续调参）
-                  onUpdate({ wfDraft: d, wfCaptured: g, wfConfirmed: false });
+                  onUpdate({ wfDraft: d, wfCaptured: g, wfConfirmed: false, wfExposedIds: exposedIds });
                 }}
               >
                 更改

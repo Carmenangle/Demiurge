@@ -3,7 +3,7 @@ import {
   needsImageInput, hasImageProvided, pickBestText, slimSnapshot, promptHistory,
   prependLoraTriggers, prepareConversationRegeneration, resolveGenerationPrompt,
   acceptSlimmedMessages, canCommitSnapshot,
-  promptAdditionsForSelectedLora, triggersForSelectedLora,
+  promptAdditionsForSelectedLora, triggersForSelectedLora, shouldDeleteEditSource,
   resolveLoraPromptMetadata,
   resolveVideoBaseImage,
   resolveVideoBaseImageRef,
@@ -790,5 +790,58 @@ describe("userMessageRichContent（灵感卡编辑回填还原）", () => {
     expect(c.text).toBe("你好");
     expect(c.images).toEqual(["https://x/a.png"]);
     expect(c.inspirationAttachments).toBeUndefined();
+  });
+
+  it("file part 还原为通用文件附件（D1 回放编辑回填）", () => {
+    const msg: ChatMessage = {
+      id: "m3", role: "user", text: "看看这份计划",
+      parts: [
+        { type: "text", text: "看看这份计划" },
+        {
+          type: "file", fileId: "a".repeat(32), name: "计划.md",
+          mime: "text/markdown", size: 1234,
+        },
+      ],
+    };
+    const c = userMessageRichContent(msg);
+    expect(c.attachments).toEqual([{
+      fileId: "a".repeat(32), name: "计划.md", mime: "text/markdown", size: 1234,
+    }]);
+    expect(c.text).toBe("看看这份计划");
+  });
+
+  it("无 file part 时 attachments 不出现", () => {
+    const msg: ChatMessage = {
+      id: "m4", role: "user", text: "hi",
+      parts: [{ type: "text", text: "hi" }],
+    };
+    const c = userMessageRichContent(msg);
+    expect(c.attachments).toBeUndefined();
+  });
+});
+
+
+describe("shouldDeleteEditSource（复制编辑提交决策）", () => {
+  const mk = (id: string, role: "user" | "assistant") => ({ id, role, text: id });
+
+  it("来源仍是最后一条用户消息 → 删除（编辑替换语义）", () => {
+    const items = [mk("u1", "user"), mk("a1", "assistant"), mk("u2", "user")];
+    expect(shouldDeleteEditSource(items, "u2")).toBe(true);
+  });
+
+  it("来源是旧楼层（后面还有对话）→ 不删，防砍断中段剧情", () => {
+    const items = [mk("u1", "user"), mk("a1", "assistant"), mk("u2", "user"), mk("a2", "assistant")];
+    expect(shouldDeleteEditSource(items, "u1")).toBe(false);
+  });
+
+  it("最后一条用户消息不是来源 → 不删", () => {
+    const items = [mk("u1", "user"), mk("a1", "assistant"), mk("u2", "user")];
+    expect(shouldDeleteEditSource(items, "u1")).toBe(false);
+  });
+
+  it("无来源标记或空列表 → 不删", () => {
+    expect(shouldDeleteEditSource([mk("u1", "user")], null)).toBe(false);
+    expect(shouldDeleteEditSource([mk("u1", "user")], undefined)).toBe(false);
+    expect(shouldDeleteEditSource([], "u1")).toBe(false);
   });
 });

@@ -18,7 +18,8 @@ const SIMPLE_VIEWS: View[] = ["repos", "assets", "workflows", "ai-build", "node-
 // - WorkMode：三种创作模式，由左上 `Demiurge ▾` 下拉切换（像 ChatGPT 切模型）。
 //   三模式共用「首页」一个入口，首页内容随当前 WorkMode 变。
 //   剧情模式自带自动生成，调用提前备好的格式模版；多元生成是调模版的试验台。
-// - NavSection：左侧主导航目的地。home=首页(创作工作区)；三个管理类点进去钻入(左栏换子项+返回)。
+// - NavSection：左侧主导航目的地。home=首页(创作工作区)；管理类点进去钻入(左栏换子项+返回)。
+//   新手指引为独立一级项（系统管理下方），左栏钻入后子项=引导章节。
 export type WorkMode = "story" | "generate" | "code";
 
 export const WORK_MODES: { id: WorkMode; label: string; hint: string }[] = [
@@ -52,20 +53,22 @@ export function resolveOpenedWorkRoute(workMode: WorkMode): { workMode: WorkMode
   return { workMode, hash: `#/${workMode}` };
 }
 
-export type NavSection = "home" | "assets" | "workflows" | "system";
+export type NavSection = "home" | "assets" | "workflows" | "system" | "guide";
 
 export const NAV_SECTIONS: { id: NavSection; label: string }[] = [
   { id: "home", label: "首页" },
   { id: "assets", label: "资产管理" },
   { id: "workflows", label: "工作流管理" },
   { id: "system", label: "系统管理" },
+  { id: "guide", label: "新手指引" },
 ];
 
 export function isNavSection(value: string): value is NavSection {
   return NAV_SECTIONS.some((s) => s.id === value);
 }
 
-// 三个管理类点进去钻入：左栏整体换成「返回 + 子项」。子项 id 复用老 View 语义。
+// 管理类点进去钻入：左栏整体换成「返回 + 子项」。子项 id 复用老 View 语义；
+// guide 的子项与 lib/newcomerGuide.ts 章节一一对应（同步合同在 newcomerGuide.test.ts）。
 export const SECTION_SUBNAV: Record<Exclude<NavSection, "home">, { id: string; label: string }[]> = {
   assets: [
     { id: "works", label: "作品" },
@@ -83,6 +86,14 @@ export const SECTION_SUBNAV: Record<Exclude<NavSection, "home">, { id: string; l
     { id: "models", label: "模型下载" },
     { id: "lora-data", label: "LoRA 数据保存" },
     { id: "node-manager", label: "节点管理" },
+    { id: "tools", label: "多功能工具" },
+  ],
+  // 新手指引子项=引导章节（id 与 lib/newcomerGuide.ts 保持一致，label 可用短名）
+  guide: [
+    { id: "quick-start", label: "快速开始" },
+    { id: "story", label: "剧情扮演" },
+    { id: "canvas", label: "画布创作" },
+    { id: "workflow", label: "AI 搭工作流" },
     { id: "tools", label: "多功能工具" },
   ],
 };

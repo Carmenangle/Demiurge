@@ -5,6 +5,10 @@ import pytest
 
 from app.services import image_prompt_profiles as profiles
 
+K2_TAGS_LINE = (
+    "1girl, long black hair, crimson eyes, torn white robe, medium shot, dramatic side light, detailed background"
+)
+
 
 def _scene(rating="sfw"):
     return {
@@ -28,7 +32,11 @@ def _anima_json(content, *, visual_hook="red lacquer reflection frames the decis
     })
 
 
-def test_krea2输出纯英文自然语言并剥离自检():
+def test_krea2输出两段式tags与文段并剥离自检():
+    tags = (
+        "1woman, long red dress, medium shot, low angle, cool side light, "
+        "moving fabric folds, clean negative space"
+    )
     body = (
         "A low-angle medium shot follows an adult woman in a red dress as she crosses the quiet bedchamber. "
         "Cool side light catches the moving folds and guides the eye from her face to her leading hand, while "
@@ -38,21 +46,24 @@ def test_krea2输出纯英文自然语言并剥离自检():
 
     def generate(system, user):
         calls.append((system, json.loads(user)))
-        return body + "\n\n——自检——\n自检: 致命项 9/9"
+        return tags + "\n" + body + "\n\n——自检——\n自检: 致命项 9/9"
 
     prompt = profiles.generate("krea2", _scene("sfw"), generate)
 
-    assert prompt == body
-    assert "纯英文" in calls[0][0]
-    assert "英文自然语言" in calls[0][0]
+    assert prompt == tags + "\n" + body  # 两段结构保留
+    assert "仅输出两行" in calls[0][0]
+    assert "不得夹杂中文" in calls[0][0]
     assert "六个维度" in calls[0][0]
     assert "SFW" not in calls[0][0]
     assert "NSFW" not in calls[0][0]
     assert "——自检——" not in prompt
-    assert "\n" not in prompt
 
 
 def test_krea2不按分级切换模板而直接转译高潮内容():
+    tags = (
+        "1woman, red dress disordered, high angle medium shot, cool directional light, "
+        "explicit consensual action, readable anatomy"
+    )
     body = (
         "An adult woman occupies the left third of a high-angle medium shot inside the bedchamber. "
         "Her red dress remains in the exact disordered condition established by the scene as she bends forward "
@@ -64,10 +75,10 @@ def test_krea2不按分级切换模板而直接转译高潮内容():
 
     def generate(system, user):
         seen["system"] = system
-        return body
+        return tags + "\n" + body
 
-    assert profiles.generate("krea2", _scene("nsfw"), generate) == body
-    assert "纯英文" in seen["system"]
+    assert profiles.generate("krea2", _scene("nsfw"), generate) == tags + "\n" + body
+    assert "仅输出两行" in seen["system"]
     assert seen["system"] == profiles._system("krea2", _scene("sfw"))
     assert "不得续写剧情" in seen["system"]
     assert "不得改变人物、动作、服装、关系、地点或剧情结果" in seen["system"]
@@ -183,9 +194,13 @@ def test_所有模板逐条验收开放类型的证据化可视事实(profile):
 @pytest.mark.parametrize("profile,raw,expected", [
     (
         "krea2",
-        "A close medium shot keeps the woman's @(gripping)@ hand and torn red dress in the foreground. "
-        "Side light follows her black hair, narrow eyes, and the exact contact point while the chamber "
-        "recedes through controlled shadow and negative space. " * 2,
+        "1woman, torn red dress, black hair, narrow eyes, close medium shot, "
+        "directional side light, controlled shadow, negative space\n"
+        + (
+            "A close medium shot keeps the woman's @(gripping)@ hand and torn red dress in the foreground. "
+            "Side light follows her black hair, narrow eyes, and the exact contact point while the chamber "
+            "recedes through controlled shadow and negative space. " * 2
+        ),
         "gripping",
     ),
     (
@@ -224,6 +239,10 @@ def test_profile调用保留防拦截剧情而本地事实使用还原正文():
         "protected_narrative": "她@(抓)@住对方@(手)@@(腕)@，红裙已经@(撕)@@(裂)@。",
     }
     seen = {}
+    tags = (
+        "1woman, torn red dress, black hair, narrow eyes, close medium shot, "
+        "directional side light, receding chamber"
+    )
     body = (
         "A close medium shot places the gripping hand and torn red dress in the left foreground. "
         "Her established black hair and narrow eyes remain readable as directional side light follows "
@@ -232,9 +251,9 @@ def test_profile调用保留防拦截剧情而本地事实使用还原正文():
 
     def generate(_system, user):
         seen.update(json.loads(user))
-        return body
+        return tags + "\n" + body
 
-    assert profiles.generate("krea2", scene, generate) == body.strip()
+    assert profiles.generate("krea2", scene, generate) == tags + "\n" + body.strip()
     assert seen["narrative"] == scene["protected_narrative"]
     assert "protected_narrative" not in seen
 
@@ -699,6 +718,8 @@ def test_主模型内联Krea中文旧格式失效以触发英文Profile生成():
 
 def test_主模型内联Krea提示词中性化真人皮肤语义():
     raw = (
+        "1woman, purple dress, slightly elevated medium close-up, long lens, "
+        "shallow depth of field, controlled side light\n"
         "A slightly elevated medium close-up uses a long lens and shallow depth of field. "
         "Her photorealistic translucent skin exposes microscopic veins and visible facial pores. "
         "Side light creates a controlled gradient across the purple dress."
@@ -722,6 +743,9 @@ def test_同轮Krea只漏具体视觉事实时保留成稿并机械补齐():
         "rating": "sfw",
     }
     raw = (
+        # tags 首行只写构图/镜头，不得提前覆盖条目外貌事实（机械补齐依赖事实缺失）
+        "1girl, low angle, broken wooden door, cold dawn light, misty mountain path, "
+        "restrained negative space\n"
         "A low-angle environmental composition places the adult woman beside a broken wooden door. "
         "Cold dawn light defines her face and reaching hand while the mountain path recedes into mist. "
         "Restrained negative space, coherent anatomy, clean edges, controlled material detail, and stable perspective "
@@ -744,15 +768,18 @@ def test_主模型内联Krea只删除锁定媒介的画风词():
         "A low-angle view places the woman in a purple dress beside a wooden rail, "
         "with side light defining her silhouette in a diagonal composition."
     )
+    tags = (
+        "1woman, purple dress, low-angle view, wooden rail, side light, diagonal composition"
+    )
 
     realistic = profiles.normalize_inline(
-        "krea2", "Photorealistic live-action imagery. " + shared, {"rating": "sfw"},
+        "krea2", tags + "\nPhotorealistic live-action imagery. " + shared, {"rating": "sfw"},
     )
     anime = profiles.normalize_inline(
-        "krea2", "Detailed anime illustration. " + shared, {"rating": "sfw"},
+        "krea2", tags + "\nDetailed anime illustration. " + shared, {"rating": "sfw"},
     )
     locked = profiles.normalize_inline(
-        "krea2", "Live-action photography with realistic human skin and 3D rendering. " + shared,
+        "krea2", tags + "\nLive-action photography with realistic human skin and 3D rendering. " + shared,
         {"rating": "sfw"},
     )
 
@@ -763,13 +790,15 @@ def test_主模型内联Krea只删除锁定媒介的画风词():
         assert "realistic human skin" not in prompt
         assert "3D rendering" not in prompt
         assert shared in prompt
-    assert "physically coherent skin tones and material response" in locked
+    assert "natural skin tones" in locked  # 真人向措辞收敛后替换为媒介中性描述
 
 
 def test_格式不合格时带错误重写一次():
+    # 词数偏短已降级为警告放行（2026-08-30 成本改约）；触发重写的必须是真实合同错误（如中文混入）
     outputs = iter([
-        "too short",
+        "too short 好的",
         (
+            K2_TAGS_LINE + "\n"
             "A low-angle medium shot keeps the adult character's decisive movement as the primary focus. "
             "Soft directional light describes the clothing material, separates both hands from the body, "
             "and lets the layered chamber recede through controlled contrast and negative space. " * 3
@@ -782,14 +811,14 @@ def test_格式不合格时带错误重写一次():
         return next(outputs)
 
     prompt = profiles.generate("krea2", {**_scene(), "wardrobe": ""}, generate)
-    assert prompt.startswith("A low-angle medium shot")
+    assert prompt.splitlines()[1].startswith("A low-angle medium shot")  # 首行是 tags
     assert len(users) == 2
     assert "上次输出未通过" in users[1]
 
 
 def test_krea2重写后仍不完全合规也返回非空结果而不阻断生图():
     outputs = iter([
-        "First draft is too short.",
+        "初稿混入中文 First draft is too short.",
         "The second draft preserves the decisive action but remains shorter than the preferred range.",
     ])
 
@@ -797,10 +826,29 @@ def test_krea2重写后仍不完全合规也返回非空结果而不阻断生图
         "krea2", {**_scene("sfw"), "wardrobe": ""}, lambda _s, _u: next(outputs),
     )
 
-    assert prompt.startswith(
-        "The second draft preserves the decisive action but remains shorter than the preferred range."
-    )
+    # 两版输出都未过两段式合同 → 确定性兜底接管，仍为两段且不阻断生图
+    assert prompt.strip()
+    assert len(prompt.splitlines()) == 2
+    assert "The second draft preserves" not in prompt
+    assert not re.search(r"[\u3400-\u9fff]", prompt)
     assert "bedchamber" in prompt
+    assert "decisive action" in prompt
+
+
+def test_krea2词数偏短降级为警告放行不再触发重写():
+    """2026-08-30 成本改约：一次 repair = 一次携带防拦截预设的调用；词数偏短只警告。"""
+    calls = []
+
+    def generate(_system, _user):
+        calls.append(1)
+        return K2_TAGS_LINE + "\n" + "A short but valid English prompt describing the decisive action clearly."
+
+    diagnostics: dict = {}
+    prompt = profiles.generate("krea2", {**_scene("sfw"), "wardrobe": ""}, generate, diagnostics)
+
+    assert len(calls) == 1  # 不再触发重写调用
+    assert "bedchamber" in prompt  # 可视事实照常补齐
+    assert "英文单词数必须为80到500" in (diagnostics.get("warnings") or [])
 
 
 def test_krea2重写后仍含中文时不得提交而改用英文兜底():
@@ -863,7 +911,7 @@ def test_krea2角色lora连续拒答时兜底使用具体外貌而非身份占�
     assert "voluptuous" in prompt
     assert "white silk stockings" in prompt
     assert "purple" in prompt and "gauze robe" in prompt
-    assert "noise-free tonal transitions" in prompt
+    assert "even tonal transitions" in prompt  # 照片向措辞收敛后的新尾句
     assert "Leng Qingxue" not in prompt
     assert "established facial structure" not in prompt
     assert "identified character" not in prompt
@@ -883,6 +931,10 @@ def test_profile模型输入匿名化角色姓名但保留完整条目外貌():
         "narrative": "冷倾雪从破墙豁口望向外面。",
     }
     seen = {}
+    tags = (
+        "1woman, black hair bun, crimson lips, rosy cheeks, portrait composition, "
+        "broken wall opening, cold side light"
+    )
     valid = (
         "A portrait composition places the primary adult woman on the left third as she looks through the broken wall. "
         "Her glossy jet-black hair is gathered into a neat bun, with crimson lips and rosy cheeks under a composed mature gaze. "
@@ -893,9 +945,9 @@ def test_profile模型输入匿名化角色姓名但保留完整条目外貌():
 
     def generate(_system, user):
         seen.update(json.loads(user))
-        return valid
+        return tags + "\n" + valid
 
-    assert profiles.generate("krea2", scene, generate) == valid
+    assert profiles.generate("krea2", scene, generate) == tags + "\n" + valid
     serialized = json.dumps(seen, ensure_ascii=False)
     assert "冷倾雪" not in serialized
     assert "the primary adult character" in serialized.lower()
@@ -912,7 +964,11 @@ def test_krea2拒绝姓名和空泛身份锁并要求重写为具体视觉事实
             "【身材】丰腴曲线、纤腰、圆硕臀部；【穿着】素紫薄纱法衣、碎花紫长裙、蚕丝白袜。"
         ),
     }
-    vague = (
+    tags = (
+        "1woman, glossy black hair, purple jade hair ornament, crimson lips, "
+        "light purple gauze robe, white silk stockings, close medium three-quarter view, side light"
+    )
+    vague = tags + "\n" + (
         "Portrait composition centered on the adult woman Leng Qingxue, with directional negative space toward the exit. "
         "Preserve Leng Qingxue's established facial structure, eye shape, hairstyle silhouette, body proportions, costume, "
         "and illustrated identity exactly as defined by the bound character model, with no replacement face or altered clothing. "
@@ -920,7 +976,7 @@ def test_krea2拒绝姓名和空泛身份锁并要求重写为具体视觉事实
         "interior recedes behind her. Maintain precise anatomy, coherent fabric tension, stable perspective, clean edges, controlled "
         "fine detail, high image fidelity, and complete polished illustration quality across the finished image."
     )
-    concrete = (
+    concrete = tags + "\n" + (
         "A portrait composition places the adult woman across the left third, with open space leading toward the exit. "
         "Her glossy jet-black hair is gathered into a rounded bun beneath a purple jade and gold hair ornament; crimson lips, rosy "
         "cheeks, luminous mature eyes, and a voluptuous figure with a narrow waist and rounded hips define her visible appearance. "
@@ -935,7 +991,7 @@ def test_krea2拒绝姓名和空泛身份锁并要求重写为具体视觉事实
         calls.append(user)
         return next(outputs)
 
-    assert profiles.generate("krea2", scene, generate) == concrete
+    assert profiles.generate("krea2", scene, generate) == concrete  # concrete 已含 tags 首行
     assert len(calls) == 2
     assert "空泛" in calls[1]
 
@@ -943,6 +999,8 @@ def test_krea2拒绝姓名和空泛身份锁并要求重写为具体视觉事实
 @pytest.mark.parametrize("profile,raw", [
     (
         "krea2",
+        "1woman, close medium portrait, broken wall opening, dawn directional light, "
+        "fabric folds, softened background\n"
         "A close medium portrait places Alice beside a broken wall opening under directional dawn light, "
         "with stable perspective, clean fabric folds, coherent anatomy, restrained negative space, and a softened background.",
     ),
@@ -1234,12 +1292,18 @@ def test_krea2拒绝中文混入最终英文提示词():
 
 
 def test_krea2接受完整英文自然语言且不要求成年分级词():
+    tags = (
+        "1woman, torn purple gauze robe, low medium shot, shallow depth of field, "
+        "cool dawn backlight, wooden rail foreground"
+    )
     valid = (
         "A low medium shot uses shallow depth of field and cool dawn backlight. "
         "The identified woman wears a torn purple gauze robe and rests one arm on the wooden rail. "
         "The rail forms a foreground frame while the abandoned village dissolves into morning mist."
     )
-    assert profiles.normalize_inline("krea2", valid, {"rating": "nsfw"}) == valid
+    assert profiles.normalize_inline(
+        "krea2", tags + "\n" + valid, {"rating": "nsfw"},
+    ) == tags + "\n" + valid
 
 
 def test_krea2系统按六维顺序转译高潮并把写实改为画质质量():
@@ -1256,8 +1320,9 @@ def test_krea2系统按六维顺序转译高潮并把写实改为画质质量():
     positions = [system.index(dimension) for dimension in dimensions]
     assert positions == sorted(positions)
     assert "写实画质" not in system
-    assert "高图像保真度" in system
-    assert "精确解剖" in system
+    assert "禁止照片写实向描述" in system  # 媒介交给 LoRA，禁真人摄影词汇（2026-08-30 实测真人化倾向）
+    assert "skin texture" in system  # 禁词清单点名
+    assert "细节克制" in system
     assert "SFW" not in system and "NSFW" not in system
     assert "角色设定图" not in system and "超巨型" not in system
 

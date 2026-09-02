@@ -49,10 +49,33 @@ def test_runner_commits_turn_once(monkeypatch):
     )))
 
     assert events == [{"delta": "hello"}, {"done": True}]
-    assert len(persisted) == 1
+    # 2026-08-31 刷新丢正文修复：首个 delta 立即落盘半成品，收尾再落最终版。
+    assert persisted == [
+        (("t2", "m1", "hello"), {}),                       # 流式半成品
+        (("t2", "m1", "hello"), {"interrupted": False}),   # 收尾最终
+    ]
     assert len(turns) == 1
     assert turns[0][0][1:4] == ("question", [], "hello")
     assert agent_runner.is_running("t2") is False
+
+
+def test_runner流式中途节流落盘半成品正文(monkeypatch):
+    """刷新丢正文修复：delta 阶段按节流落盘半成品，收尾再落最终版；首个 delta
+    立即落盘（覆盖「刚生成一点就刷新」），随后按时间/增量节流。"""
+    monkeypatch.setattr(agent_runner.agent_graph, "stream_multi_agent", lambda context: iter([
+        {"delta": "第一段"}, {"delta": "第二段"}, {"done": True},
+    ]))
+    persisted = []
+    monkeypatch.setattr(agent_runner.generation_store, "persist_text", lambda *a, **k: persisted.append((a, k)))
+    monkeypatch.setattr(agent_runner.chat_memory, "append_turn", lambda *a, **k: None)
+
+    list(agent_runner.drain(agent_runner.run_multi_stream(RunContext(
+        thread_id="t3", message="问", message_id="m3",
+    ))))
+
+    assert persisted[0][0] == ("t3", "m3", "第一段")      # 流式中途的半成品
+    assert persisted[-1][0] == ("t3", "m3", "第一段第二段")  # 收尾最终
+    assert len(persisted) == 2  # 第二个 delta 增量小且间隔短，不额外落盘
 
 
 def test_runner在模型启动前把用户消息写入权威快照(monkeypatch):
@@ -60,7 +83,7 @@ def test_runner在模型启动前把用户消息写入权威快照(monkeypatch):
 
     def stream(context):
         assert persisted == [(
-            "turn", "user-1", "不能丢失的用户消息", ["reference.png"],
+            "turn", "user-1", "不能丢失的用户消息", ["reference.png"], [],
         )]
         yield {"done": True}
 
@@ -77,7 +100,7 @@ def test_runner在模型启动前把用户消息写入权威快照(monkeypatch):
         user_message_id="user-1", message_id="assistant-1",
     ))))
 
-    assert persisted == [("turn", "user-1", "不能丢失的用户消息", ["reference.png"])]
+    assert persisted == [("turn", "user-1", "不能丢失的用户消息", ["reference.png"], [])]
 
 
 def test_runner接收节点实时增量并以最终文本替换落盘(monkeypatch):
@@ -100,7 +123,9 @@ def test_runner接收节点实时增量并以最终文本替换落盘(monkeypatc
     assert events == [
         {"delta": "生成"}, {"delta": "中"}, {"replace": "最终正文"}, {"done": True},
     ]
-    assert persisted[0][0][2] == "最终正文"
+    assert persisted[0][0][2] == "生成"      # 首个 delta 的半成品
+    assert persisted[1][0][2] == "最终正文"  # replace 立即落最终
+    assert len(persisted) == 3               # + finally 收尾再落一次
 
 
 def test_runner非流式也提供即时媒体事件通道(monkeypatch):
@@ -221,7 +246,7 @@ def test_worker_finalizes_even_if_client_stops_draining(monkeypatch):
     agent_runner.run_multi_stream(RunContext(thread_id="drop", message="q", message_id="m"))
     # 不调用 drain（客户端已断）
     assert finished.wait(2)
-    assert len(persisted) == 1
+    assert len(persisted) == 2  # 流式半成品 + 收尾最终
     assert len(turns) == 1
     assert _wait_idle("drop")
 

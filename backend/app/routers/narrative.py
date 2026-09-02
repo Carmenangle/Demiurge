@@ -299,28 +299,43 @@ def character_beliefs(output_dir: str, repo_id: str, turn: int,
 # ── 仓库快照世界书 CRUD（画布模式编辑：读写 <repo>/worldbook.json，与源库隔离）──
 
 
-class RepoWorldbookLocation(BaseModel):
+class RepoWorldbookSeedSource(BaseModel):
+    base: str
+    name: str
+
+
+class RepoWorldbookEntriesRequest(BaseModel):
     output_dir: str
     repo_id: str
+    seed_from: RepoWorldbookSeedSource | None = None
+
+
+@router.post("/repo-worldbook/entries")
+def repo_worldbook_entries(req: RepoWorldbookEntriesRequest) -> dict[str, object]:
+    """列出小仓库快照的世界书条目（画布灵感卡导入+弹窗导航）。
+
+    快照不存在且带 seed_from 时：用源书播种快照（ensure_repo_snapshot 保证
+    已有快照永不被源库覆盖）——修复「绑定书有 53 条但画布弹窗显示 0 条」。
+    """
+    from app.services import worldbook_edit, worldbook_store
+
+    book = worldbook_store.read_repo_snapshot(req.output_dir, req.repo_id)
+    if not book and req.seed_from:
+        source = worldbook_store.read_book(req.seed_from.base, req.seed_from.name)
+        if source:
+            book = worldbook_store.ensure_repo_snapshot(req.output_dir, req.repo_id, [source])
+    if not book:
+        return {"entries": [], "not_found": True}
+    return {"entries": worldbook_edit.list_entries(book)}
 
 
 class RepoWorldbookEntryPayload(BaseModel):
-    content: str = ""
+    """小仓库快照世界书条目载荷（与 worldbook_edit 的 patch 字段对齐）。"""
+    content: str
     comment: str = ""
     keys: list[str] = []
     constant: bool = False
     enabled: bool = True
-
-
-@router.post("/repo-worldbook/entries")
-def repo_worldbook_entries(loc: RepoWorldbookLocation) -> dict[str, object]:
-    """列出小仓库快照的世界书条目（画布灵感卡导入+弹窗导航）。"""
-    from app.services import worldbook_edit, worldbook_store
-
-    book = worldbook_store.read_repo_snapshot(loc.output_dir, loc.repo_id)
-    if not book:
-        return {"entries": [], "not_found": True}
-    return {"entries": worldbook_edit.list_entries(book)}
 
 
 class RepoWorldbookEntryAdd(BaseModel):

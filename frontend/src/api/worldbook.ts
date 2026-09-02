@@ -82,9 +82,9 @@ export interface RepoWorldbookLoc {
   repo_id: string;
 }
 
-export function repoWorldbookEntries(loc: RepoWorldbookLoc) {
+export function repoWorldbookEntries(loc: RepoWorldbookLoc, seedFrom?: { base: string; name: string }) {
   return apiPost<{ entries: WBEntryItem[]; not_found?: boolean }>(
-    "/narrative/repo-worldbook/entries", loc,
+    "/narrative/repo-worldbook/entries", seedFrom ? { ...loc, seed_from: seedFrom } : loc,
   );
 }
 export function repoWorldbookEntryAdd(loc: RepoWorldbookLoc, entry: WBEntryFields) {

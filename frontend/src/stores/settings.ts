@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { getUserState } from "../api/userState";
+import { fetchProxyStatus, getUserState } from "../api/userState";
 import { pushSettings } from "../lib/userStateSync";
 import {
   normalizeProxyMode, resolveEndpointProxy, resolveModelProxy, type ProxyMode,
@@ -129,7 +129,7 @@ export interface MediaInsertPreset {
   templateId: string;       // 图片工作流模板 id（空=未预设，不异步出图）
   loraMode?: "none" | "single" | "multi"; // 无 LoRA / 高潮角色栈或风格兜底 / 默认风格+高潮角色栈
   appearanceSource?: "worldbook" | "character_card"; // 稳定外貌取世界书角色条目或绑定角色卡
-  promptProfile?: import("../lib/imagePromptProfiles").PromptProfileId;
+  promptProfile?: string; // 存储原样（旧数据可能是已下线的 krea2）；使用处经 normalizePromptProfile 归一
   qualityPrompt?: string;   // Anima 固定质量行；空则使用后端 profile 默认值
   negativePrompt?: string;  // 独立负面提示词；仅模板暴露 negative_prompt 时注入
   latentLongEdge?: 1024 | 2048 | 4096; // 用户只定最长边；Agent 决定画幅比例
@@ -200,10 +200,12 @@ export interface Settings {
   chatBgPosX?: number; // 水平位置 0~100（默认 50 居中）
   chatBgPosY?: number; // 垂直位置 0~100（默认 50 居中）
   activeAgentId?: string; // 当前对话选中的 Agent 预设 id（空=内置默认行为）
+  agentAccessMode?: "approval" | "full"; // 智能编造 Agent 访问标准：approval=允许后访问（默认）/ full=完全访问
   streamOutput: boolean; // 智能体回复是否按模型增量实时输出
   contextReminderTokens: number; // 累计上下文达到该估算 token 数时提醒压缩
   contextMaxTokens: number; // 每轮传给 Agent 的历史上下文估算 token 硬上限
   historyPerRole: number; // 每角色（用户/AI）读取的最近历史条数，再在 token 上限内裁剪
+  selfhealAttempts: number; // 截断自愈次数上限（0=不自愈，直接报错；默认 3）
   // 通用：不知道该放哪个分区的设置项
   galleryRemoveFile: boolean; // 资产库删除时默认同时删除本机图片文件
 }
@@ -211,6 +213,7 @@ export interface Settings {
 export const DEFAULT_CONTEXT_REMINDER_TOKENS = 12_000;
 export const DEFAULT_CONTEXT_MAX_TOKENS = 20_000;
 export const DEFAULT_HISTORY_PER_ROLE = 6;
+export const DEFAULT_SELFHEAL_ATTEMPTS = 3;
 
 export function normalizeContextBudgets(reminder: unknown, max: unknown) {
   const parsedMax = Number(max);
@@ -272,6 +275,8 @@ const DEFAULT: Settings = {
   contextReminderTokens: DEFAULT_CONTEXT_REMINDER_TOKENS,
   contextMaxTokens: DEFAULT_CONTEXT_MAX_TOKENS,
   historyPerRole: DEFAULT_HISTORY_PER_ROLE,
+  selfhealAttempts: DEFAULT_SELFHEAL_ATTEMPTS,
+  agentAccessMode: "approval",
   galleryRemoveFile: false,
 };
 
@@ -280,6 +285,7 @@ function migrate(s: Record<string, unknown>): Settings {
   const merged = { ...DEFAULT, ...s } as Settings & { chatModel?: ChatModel };
   merged.theme = normalizeTheme(s.theme);
   merged.streamOutput = s.streamOutput === true;
+  merged.agentAccessMode = s.agentAccessMode === "full" ? "full" : "approval";
   const savedEmbed = (s.embedModel || {}) as Partial<EmbedModel>;
   merged.embedModel = {
     ...DEFAULT.embedModel,
@@ -308,6 +314,10 @@ function migrate(s: Record<string, unknown>): Settings {
   merged.historyPerRole = Number.isFinite(parsedTurns)
     ? Math.min(50, Math.max(1, Math.round(parsedTurns)))
     : DEFAULT_HISTORY_PER_ROLE;
+  const parsedSelfheal = Number(s.selfhealAttempts);
+  merged.selfhealAttempts = Number.isFinite(parsedSelfheal)
+    ? Math.min(5, Math.max(0, Math.round(parsedSelfheal)))
+    : DEFAULT_SELFHEAL_ATTEMPTS;
   if ((!merged.chatModels || merged.chatModels.length === 0) && merged.chatModel) {
     const old = merged.chatModel;
     if (old.baseUrl || old.modelName || old.apiKey) {
@@ -413,7 +423,12 @@ export function useSettings() {
         }
       })
       .catch(() => { /* 后端离线：沿用 localStorage */ })
-      .finally(() => { if (alive) setHydrated(true); });
+      .finally(() => {
+        if (alive) setHydrated(true);
+        fetchProxyStatus().then((st) => {
+          if (alive) setSettings((p) => (p.proxyEnabled === st.listening ? p : { ...p, proxyEnabled: st.listening }));
+        }).catch(() => {});
+      });
     return () => { alive = false; };
   }, []);
 
@@ -433,6 +448,15 @@ export function useSettings() {
   }, [settings.theme]);
 
   const update = (patch: Partial<Settings>) => setSettings((p) => ({ ...p, ...patch }));
+
+  // 继承全局的实时检测：后端 TCP 探测 proxyUrl 是否在本机监听，结果直接驱动
+  // settings.proxyEnabled（原「全局代理开关」已移除，改为自动检测）。
+  const refreshProxyStatus = async () => {
+    try {
+      const st = await fetchProxyStatus();
+      setSettings((p) => (p.proxyEnabled === st.listening ? p : { ...p, proxyEnabled: st.listening }));
+    } catch { /* 后端离线保持现值 */ }
+  };
 
   const addImageModel = () =>
     setSettings((p) => ({
@@ -477,7 +501,7 @@ export function useSettings() {
 
   return {
     settings, update, addImageModel, updateImageModel, removeImageModel,
-    addStylePreset, updateStylePreset, removeStylePreset,
+    addStylePreset, updateStylePreset, removeStylePreset, refreshProxyStatus,
   };
 }
 

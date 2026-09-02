@@ -94,8 +94,11 @@ export function App() {
     const [seg, sub] = window.location.hash.replace(/^#\/?/, "").split("/");
     if (isNavSection(seg)) {
       setSection(seg);
-      if (seg !== "home" && sub) setSubView(sub);
-      else if (seg !== "home") setSubView(SECTION_SUBNAV[seg][0].id);
+      if (seg !== "home") {
+        // 子项有效性校验：无效/已迁移的旧子项（如 #/system/newcomer-guide）回退该区第一项
+        const items = SECTION_SUBNAV[seg];
+        setSubView(sub && items.some((item) => item.id === sub) ? sub : items[0].id);
+      }
     } else if (isWorkMode(seg)) {
       setWorkMode(seg);
       setSection("home");

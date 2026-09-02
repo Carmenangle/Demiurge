@@ -12,6 +12,11 @@ export function getUserState() {
   return apiGet<UserState>("/user-state");
 }
 
+// 实时检测全局代理地址是否在本机监听（继承全局模式：开则走代理，没开则直连）
+export function fetchProxyStatus() {
+  return apiGet<{ listening: boolean; address: string }>("/user-state/proxy-status");
+}
+
 // 整体覆盖写。repos 与 settings 分头变更，故这里合并当前两块一起 POST。
 export function saveUserState(state: { repos: Repo[]; settings: Settings }) {
   return apiPost<{ ok: boolean }>("/user-state", state);

@@ -9,6 +9,8 @@ export const STALLED_POLL_MESSAGE = "长时间未开始加载节点（ComfyUI �
 
 export interface PendingGeneration {
   prompt_id: string;
+  /** 画布/弹窗运转任务的 runId（对话框进度条按它关联；对话模式没有） */
+  runId?: string;
   createdAt: number;
   outputNodeIds?: string[];
   regeneration?: RegenerationSnapshot;
@@ -23,6 +25,8 @@ export interface PendingGeneration {
 
 export interface WorkflowWatchInput {
   promptId: string;
+  /** 画布/弹窗运转任务 id；对话框进度条按它恢复 */
+  runId?: string;
   comfyuiUrl: string;
   outputNodeIds?: string[];
   regeneration?: RegenerationSnapshot;
@@ -57,6 +61,7 @@ export function registerPending(
   outputNodeIds: string[] = [], regeneration?: RegenerationSnapshot,
   target?: PendingGeneration["target"], prompt = "", owner?: PendingGeneration["owner"],
   mediaType?: PendingGeneration["mediaType"], baseSlotRef?: PendingGeneration["baseSlotRef"],
+  runId?: string,
 ): PendingGeneration[] {
   return [
     ...pending.filter((item) => item.prompt_id !== promptId),
@@ -69,6 +74,7 @@ export function registerPending(
       ...(owner ? { owner } : {}),
       ...(mediaType ? { mediaType } : {}),
       ...(baseSlotRef ? { baseSlotRef } : {}),
+      ...(runId ? { runId } : {}),
     },
   ];
 }
@@ -224,7 +230,7 @@ export class WorkflowGenerationRuntime {
     const next = registerPending(
       this.list(), input.promptId, this.now(), input.outputNodeIds,
       input.regeneration, input.target, input.prompt, input.owner, input.mediaType,
-      input.baseSlotRef,
+      input.baseSlotRef, input.runId,
     );
     this.write(next);
     return next.find((item) => item.prompt_id === input.promptId)!;
@@ -350,10 +356,10 @@ export class WorkflowGenerationRuntime {
  *  SupportWidget/comfyBackgroundActivity 面板扫描该 key 显示「出图中」。
  *  画布运转自持轮询（pollWorkflowResult），这里只做标记，不启动 runtime 的观察循环。 */
 export function trackCanvasWorkflow(
-  threadId: string, promptId: string, comfyuiUrl: string, prompt = "",
+  threadId: string, promptId: string, comfyuiUrl: string, prompt = "", runId = "",
 ): void {
   try {
-    new WorkflowGenerationRuntime(threadId).track({ promptId, comfyuiUrl, outputNodeIds: [], prompt });
+    new WorkflowGenerationRuntime(threadId).track({ promptId, comfyuiUrl, outputNodeIds: [], prompt, runId });
   } catch { /* 后台活动标记失败不阻塞运转 */ }
 }
 

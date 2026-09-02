@@ -99,23 +99,38 @@ function appendMediaSlot(
     ...(lastFrameUrl ? { lastFrameUrl } : {}),
     ...(videoPrompt ? { videoPrompt } : {}),
     ...(videoParams ? { videoParams } : {}) };
-  if (typeof offset === "number" && !message.parts) {
+  if (typeof offset === "number") {
     const index = Math.max(0, Math.min(message.text.length, Math.round(offset)));
-    const before = message.text.slice(0, index);
-    const after = message.text.slice(index);
-    // 图片块固定从高潮画面句后的新行开始；保留原正文换行数量，不改变文本内容。
-    const slotPrefix = before && !before.endsWith("\n") ? "\n" : "";
-    const slotSuffix = after && !after.startsWith("\n") ? "\n" : "";
-    return {
-      ...message,
-      parts: [
-        ...(index ? [{ type: "text" as const, text: before + slotPrefix }] : []),
-        slot,
-        ...(index < message.text.length
-          ? [{ type: "text" as const, text: slotSuffix + after }]
-          : []),
-      ],
-    };
+    // parts 已存在（多插画/图文混排）时同样按 offset 定位插入，保留已有槽与顺序：
+    // 遍历文本段累计长度，把新槽切进 offset 落在的那一段；offset 超出文本才 append。
+    const parts: MsgPart[] = [];
+    let consumed = 0;
+    let inserted = false;
+    for (const part of existing) {
+      if (part.type === "text") {
+        const start = consumed;
+        const end = consumed + (part.text || "").length;
+        if (!inserted && index >= start && index <= end) {
+          const cut = index - start;
+          const before = (part.text || "").slice(0, cut);
+          const after = (part.text || "").slice(cut);
+          // 图片块固定从高潮画面句后的新行开始；保留原正文换行数量，不改变文本内容。
+          const slotPrefix = before && !before.endsWith("\n") ? "\n" : "";
+          const slotSuffix = after && !after.startsWith("\n") ? "\n" : "";
+          if (before) parts.push({ ...part, text: before + slotPrefix });
+          parts.push(slot);
+          if (after) parts.push({ ...part, text: slotSuffix + after });
+          inserted = true;
+        } else {
+          parts.push(part);
+        }
+        consumed = end;
+      } else {
+        parts.push(part);
+      }
+    }
+    if (!inserted) parts.push(slot);
+    return { ...message, parts };
   }
   return {
     ...message,
@@ -234,42 +249,55 @@ export function resolveMediaSlot(
   mediaType: "image" | "video" | "audio" = "image", regeneration?: RegenerationSnapshot,
   generationId?: string,
 ): ChatMessage[] {
-  return current.map((message) => message.id !== messageId ? message : {
-    ...message,
-    parts: (message.parts || []).map((part) =>
+  return current.map((message) => {
+    if (message.id !== messageId) return message;
+    const base = message.parts || (message.text ? [{ type: "text" as const, text: message.text }] : []);
+    const parts = [...base];
+    const index = parts.findIndex((part) =>
       (part.type === "media-slot" || part.type === "image" || part.type === "video" || part.type === "audio")
-        && part.slotId === slotId
-        ? {
-          type: mediaType, url, slotId, status: "ready" as const,
-          // 音频分条元数据（角色名/序号/媒体类型提示）随槽位保留，供气泡与画布楼层按角色分条展示
-          ...(part.type === "media-slot" && part.kind === "audio" ? {
-            kind: part.kind,
-            ...(part.speaker ? { speaker: part.speaker } : {}),
-            ...(part.seq !== undefined ? { seq: part.seq } : {}),
-            ...(part.total !== undefined ? { total: part.total } : {}),
-          } : {}),
-          // V1.5/B1：视频槽尾帧描述保留，供下一楼层 resolvePrevTailDesc 反查衔接
-          ...(part.lastFrameDesc ? { lastFrameDesc: part.lastFrameDesc } : {}),
-          // V1.5/F3：尾帧图地址保留，供转场视频 image 输入反查（坑F）
-          ...(part.lastFrameUrl ? { lastFrameUrl: part.lastFrameUrl } : {}),
-          // V1.5 默认开放：climax 视频提示词随槽位保留（无视频模板/模型也展示，供测试核对）
-          ...(part.videoPrompt ? { videoPrompt: part.videoPrompt } : {}),
-          // V1.5 默认开放：结构化视频参数随槽位保留（供测试核对参数是否上传）
-          ...(part.videoParams ? { videoParams: part.videoParams } : {}),
-          ...(regeneration ? { regeneration } : {}),
-          ...(generationId ? { generationId } : {}),
-        }
-        : part),
+        && part.slotId === slotId);
+    const part = index >= 0 ? parts[index] : undefined;
+    const resolved = {
+      type: mediaType, url, slotId, status: "ready" as const,
+      // 音频分条元数据（角色名/序号/媒体类型提示）随槽位保留，供气泡与画布楼层按角色分条展示
+      ...(part?.type === "media-slot" && part.kind === "audio" ? {
+        kind: part.kind,
+        ...(part.speaker ? { speaker: part.speaker } : {}),
+        ...(part.seq !== undefined ? { seq: part.seq } : {}),
+        ...(part.total !== undefined ? { total: part.total } : {}),
+      } : {}),
+      // V1.5/B1：视频槽尾帧描述保留，供下一楼层 resolvePrevTailDesc 反查衔接
+      ...(part?.lastFrameDesc ? { lastFrameDesc: part.lastFrameDesc } : {}),
+      // V1.5/F3：尾帧图地址保留，供转场视频 image 输入反查（坑F）
+      ...(part?.lastFrameUrl ? { lastFrameUrl: part.lastFrameUrl } : {}),
+      // V1.5 默认开放：climax 视频提示词随槽位保留（无视频模板/模型也展示，供测试核对）
+      ...(part?.videoPrompt ? { videoPrompt: part.videoPrompt } : {}),
+      // V1.5 默认开放：结构化视频参数随槽位保留（供测试核对参数是否上传）
+      ...(part?.videoParams ? { videoParams: part.videoParams } : {}),
+      ...(regeneration ? { regeneration } : {}),
+      ...(generationId ? { generationId } : {}),
+    };
+    if (index >= 0) parts[index] = resolved;
+    else parts.push(resolved);  // 槽意外丢失也补插，绝不让已生成的图成为孤儿
+    return { ...message, parts };
   });
 }
 
 export function bindMediaSlotPrompt(
   current: ChatMessage[], messageId: string, slotId: string, promptId: string,
 ): ChatMessage[] {
-  return current.map((message) => message.id !== messageId ? message : {
-    ...message,
-    parts: (message.parts || []).map((part) =>
-      part.type === "media-slot" && part.slotId === slotId ? { ...part, promptId } : part),
+  return current.map((message) => {
+    if (message.id !== messageId) return message;
+    const parts = [...(message.parts || (message.text ? [{ type: "text" as const, text: message.text }] : []))];
+    const index = parts.findIndex((part) => part.type === "media-slot" && part.slotId === slotId);
+    if (index >= 0) {
+      parts[index] = { ...parts[index], promptId };
+    } else {
+      // 槽意外丢失时补建 pending 槽（占位卡片），等 pollResult 完成后 resolveMediaSlot
+      // 补插结果——2026-08-31 深夜实锤：槽丢失导致生成图成孤儿不插入对话。
+      parts.push({ type: "media-slot", slotId, status: "pending", kind: "image", promptId });
+    }
+    return { ...message, parts };
   });
 }
 
@@ -346,9 +374,17 @@ export function reduceChatStreamEvent(
       return current.map((message) => message.id === botId
         ? appendDelta(message, event.text)
         : message);
-    case "replace":
+    case "thinking":
+      // 思考全公开（2026-08-31 晚）：think 增量进 thinking 字段（思考面板展示），
+      // 正文 text 不受影响；replace 时保留，供完成后回看。
       return current.map((message) => message.id === botId
-        ? { ...message, text: event.text, parts: undefined }
+        ? { ...message, thinking: `${message.thinking ?? ""}${event.text}` }
+        : message);
+    case "replace":
+      // 成功完整生成 → 清除流式思考面板（2026-08-31 深夜用户定案：成功就不留
+      // 思考过程，失败才保留供诊断）。最终正文里的 <think> 由渲染层隐藏。
+      return current.map((message) => message.id === botId
+        ? { ...message, text: event.text, parts: undefined, thinking: undefined }
         : message);
     case "route":
       return current.map((message) => message.id === botId

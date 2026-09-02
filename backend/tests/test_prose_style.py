@@ -119,3 +119,52 @@ def test_narrative_ci并流文风诊断带turn与id():
 def test_narrative_ci文风检测异常不阻断诊断流():
     # 正文为空/纯控制字符等边界输入不抛错、不产出 style 诊断
     assert narrative_ci.evaluate("", turn=1) == []
+
+
+def test_同词连用排比检出():
+    body = "他想拒绝。没有，没有，没有。他退了一步。"
+
+    assert "style_word_echo" in codes(prose_style.lint(body))
+
+
+def test_超短强调段单轮两次检出():
+    body = (
+        "他伸出了左手。\n\n手松了。\n\n指尖还残留着温度。\n\n乳根。\n\n"
+        "她别过脸去，耳根泛起一层薄红，指节在袖口里攥得发白，半天没有说话。"
+    )
+
+    assert "style_micro_paragraph" in codes(prose_style.lint(body))
+
+
+def test_对话回声句式检出():
+    body = "「你知道了吗？」他问。「我知道了。」她点头。「不，你不知道。」他摇头。"
+
+    result = prose_style.lint(body)
+
+    assert "style_self_qa" in codes(result)
+
+
+def test_正常单次不是而是与单个微段不误报():
+    body = (
+        "这不是逃避，而是选择。\n\n左手。她终于摊开了掌心，把那枚旧铜钥匙放在他手里，"
+        "指尖还残留着昨夜的凉意，掌心的纹路里嵌着洗不掉的药味，像是把整段路都攥了一遍。"
+    )
+
+    result = prose_style.lint(body)
+
+    assert "style_word_echo" not in codes(result)
+    assert "style_micro_paragraph" not in codes(result)
+
+
+def test_破折号两次即报不再看密度():
+    """2026-08-30 用户实锤：AI 用一次破折号，后续断句会越来越依赖——≥2 次即报。"""
+    body = "风停了——他回头——" + "夜色压下来，像一层湿透的布盖住远处的更声与灯火。" * 40
+
+    assert prose_style.CODE_STYLE_PUNCT_DENSITY in codes(prose_style.lint(body))
+
+
+def test_文风注入段禁用破折号且自身不带破折号():
+    segment = prose_style.style_prompt_segment({"enabled": True})
+
+    assert "禁止使用破折号" in segment
+    assert segment.count("——") == 1  # 仅在「——」引用符号本身处出现，禁令句不再示范用法

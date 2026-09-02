@@ -1,4 +1,4 @@
-import { apiGet, apiPost, apiUrl } from "./client";
+import { apiGet, apiPost, apiUpload, apiUrl } from "./client";
 import {
   decodeChatStreamEvent,
   type ChatStreamEvent,
@@ -26,6 +26,34 @@ export type Embed = {
 };
 // 对话模型三元组配置。
 export type Chat = { baseUrl: string; apiKey: string; modelName: string; proxyUrl?: string; providerProfile?: "openai_compatible" | "claude_compatible" };
+
+// 对话附件元信息（file_id 真源；文件字节在会话级附件存储，前端只持元信息）。
+export interface FileAttachmentMeta {
+  fileId: string;
+  name: string;
+  mime: string;
+  size: number;
+}
+
+// 上传文件为对话附件（会话级存储），返回元信息供渲染卡片与随消息透传。
+// 后端响应是 snake_case {file_id,...}，这里显式映射为前端 camelCase——apiUpload 原样透传，
+// 不映射会导致 meta.fileId === undefined，占位卡替换后渲染 `fileId.startsWith` 崩溃黑屏（2026-09-01 实锤）。
+export async function uploadAttachment(threadId: string, file: File): Promise<FileAttachmentMeta> {
+  const form = new FormData();
+  form.append("thread_id", threadId);
+  form.append("file", file);
+  const res = await apiUpload<{ ok: boolean; file_id: string; name: string; mime: string; size: number }>(
+    "/attachments/upload",
+    form,
+    120_000,
+  );
+  return { fileId: res.file_id, name: res.name, mime: res.mime, size: res.size };
+}
+
+// 附件下载 URL（历史回放只读卡片点击下载 / 媒体栏预览）。
+export function attachmentUrl(fileId: string): string {
+  return apiUrl(`/attachments/${encodeURIComponent(fileId)}`);
+}
 
 // wire 格式序列化器（收口三元组，各调用方不再逐字段手拆）：
 // - chatBody：对话端点用 base_url/api_key/model
@@ -343,6 +371,7 @@ export interface AgentInvocation {
   streamOutput: boolean;
   contextMaxTokens: number;
   historyPerRole: number;
+  selfhealAttempts: number;
   history: { role: "user" | "assistant"; content: string }[];
   characterDir: string;
   cardName: string;
@@ -365,6 +394,7 @@ export interface AgentInvocation {
   characterBaseImages: Record<string, string>;
   illustrationActorNames: string[];
   styleBaseImage: string;
+  attachments?: FileAttachmentMeta[];
   approvalAction?: { approvalId: string; action: "submit" | "change" | "cancel"; editedPrompt?: string };
   routeAction?: { route: import("../types/chat").AgentRoute; userMessageId: string };
 }
@@ -402,6 +432,7 @@ export function agentInvocationBody(request: AgentInvocation): AgentInvocationWi
     stream_output: request.streamOutput,
     context_max_tokens: request.contextMaxTokens,
     history_per_role: request.historyPerRole,
+    selfheal_attempts: request.selfhealAttempts,
     history: request.history,
     approval_id: request.approvalAction?.approvalId || "",
     approval_action: request.approvalAction?.action || "",
@@ -428,6 +459,12 @@ export function agentInvocationBody(request: AgentInvocation): AgentInvocationWi
     character_base_images: request.characterBaseImages,
     illustration_actor_names: request.illustrationActorNames,
     style_base_image: request.styleBaseImage,
+    attachments: (request.attachments || []).map((a) => ({
+      file_id: a.fileId,
+      name: a.name,
+      mime: a.mime,
+      size: a.size,
+    })),
   };
 }
 

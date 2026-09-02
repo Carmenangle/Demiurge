@@ -1,8 +1,24 @@
 import { Plus, Trash2 } from "lucide-react";
+import { useEffect, useState } from "react";
+import { fetchProxyStatus } from "../../api/userState";
 import type { UserPersona } from "../../stores/settings";
 import type { PanelProps } from "./GeneralPanel";
 
 export function PathsPanel({ draft, setDraft }: PanelProps) {
+  const [proxyProbe, setProxyProbe] = useState<{ listening: boolean; checking: boolean }>(
+    { listening: !!draft.proxyEnabled, checking: false },
+  );
+  const probeProxy = async () => {
+    setProxyProbe((p) => ({ ...p, checking: true }));
+    try {
+      const st = await fetchProxyStatus();
+      setProxyProbe({ listening: st.listening, checking: false });
+      setDraft((d) => ({ ...d, proxyEnabled: st.listening }));
+    } catch {
+      setProxyProbe((p) => ({ ...p, checking: false }));
+    }
+  };
+  useEffect(() => { void probeProxy(); /* eslint-disable-line react-hooks/exhaustive-deps */ }, []);
   const personas = draft.userPersonas || [];
   const addPersona = () => {
     const id = crypto.randomUUID();
@@ -157,22 +173,23 @@ export function PathsPanel({ draft, setDraft }: PanelProps) {
         </p>
       </div>
       <div className="field">
-        <label>
-          <input
-            type="checkbox"
-            checked={draft.proxyEnabled}
-            onChange={(e) => setDraft((d) => ({ ...d, proxyEnabled: e.target.checked }))}
-            style={{ marginRight: 6, verticalAlign: "-1px" }}
-          />
-          启用全局代理
-        </label>
+        <label>全局代理地址</label>
         <input
           value={draft.proxyUrl}
           onChange={(e) => setDraft((d) => ({ ...d, proxyUrl: e.target.value }))}
           placeholder="http://127.0.0.1:7897"
         />
         <p className="field-hint">
-          保存统一代理地址。联网功能跟随此开关；各模型可选择使用代理、直连或继承全局。
+          代理开关已移除：各模型选「直连 / 使用代理 / 继承全局」；继承全局会实时检测
+          本机该地址是否在听——在听走代理，没在听自动直连。
+        </p>
+        <p className="field-hint" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span>
+            当前检测：{proxyProbe.checking ? "检测中…" : proxyProbe.listening ? "代理已开启，继承全局走代理" : "代理未开启，继承全局走直连"}
+          </span>
+          <button className="btn" onClick={() => void probeProxy()} disabled={proxyProbe.checking}>
+            重新检测
+          </button>
         </p>
       </div>
       <div className="field">

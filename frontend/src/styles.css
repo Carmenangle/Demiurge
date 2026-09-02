@@ -910,6 +910,7 @@ body {
 .text-tool-options label { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; }
 .text-tool-options select { width: auto; min-width: 160px; }
 .text-tool-short-input { width: 150px !important; margin-left: 6px; }
+textarea.text-tool-short-input { height: auto; min-height: 0; resize: none; overflow: hidden; vertical-align: middle; }
 .text-tool-help, .text-tool-live { color: var(--text-muted); font-size: 12px; display: inline-flex; align-items: center; gap: 5px; }
 .text-tool-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; min-height: 430px; }
 .text-tool-pane { min-width: 0; display: flex; flex-direction: column; gap: 7px; }
@@ -4128,6 +4129,55 @@ textarea.state-value { min-height: 58px; }
   background: #d9534f;
 }
 
+/* 媒体栏 / 通用文件栏（A1 第二/三栏）：文件名卡片，上传中显示占位 */
+.rich-filebar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.rich-filebar-item {
+  position: relative;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 260px;
+  padding: 5px 24px 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  cursor: default;
+  overflow: hidden;
+}
+.rich-filebar-icon {
+  flex: 0 0 auto;
+  color: var(--accent, #4a90d9);
+}
+.rich-filebar-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rich-filebar-size {
+  flex: 0 0 auto;
+  font-size: 11px;
+  line-height: 18px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.rich-filebar-item .rich-imgbar-del {
+  top: 50%;
+  right: 3px;
+  transform: translateY(-50%);
+}
+
 /* 灵感卡附件：9:16 竖版卡片（封面图 / 纯文本占位），发送时图文拆分 */
 .rich-imgbar-insp-body {
   position: relative;
@@ -4193,6 +4243,64 @@ textarea.state-value { min-height: 58px; }
   display: inline-block;
   vertical-align: -8px;
   margin: 0 3px;
+}
+
+/* 历史回放文件附件卡（D1 只读）：图标 + 文件名 + 大小 + 下载，行内卡片 */
+.file-attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 240px;
+  margin: 1px 3px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  vertical-align: middle;
+  cursor: default;
+  overflow: hidden;
+}
+.file-attach-chip-icon {
+  flex: 0 0 auto;
+  color: var(--accent, #4a90d9);
+}
+.file-attach-chip-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-attach-chip-size {
+  flex: 0 0 auto;
+  font-size: 11px;
+  line-height: 18px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.file-attach-chip-dl {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  color: var(--text-muted);
+  text-decoration: none;
+}
+.file-attach-chip-dl:hover {
+  color: var(--accent, #4a90d9);
+  background: var(--border);
+}
+.file-attach-chip-dead {
+  flex: 0 0 auto;
+  color: #d9534f;
+  font-size: 13px;
+  line-height: 18px;
 }
 
 .img-chip-thumb {
@@ -7283,3 +7391,87 @@ html:is([data-theme="bright"], [data-theme="night"], [data-theme="green"], [data
   color: var(--accent, #647dcb);
   border-color: var(--accent, #647dcb);
 }
+
+/* ── 新人引导：正文跳转链接（guide: 切章 / doc: 开独立文档） ───────────────── */
+.guide-link {
+  display: inline;
+  margin: 0 1px;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: var(--accent, #647dcb);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.guide-link:hover {
+  opacity: 0.78;
+}
+
+/* ── 新人引导：独立文档阅读态（仓库 docs/*.md 经 renderMarkdown 渲染） ───── */
+.guide-doc-path {
+  margin: 0 0 10px;
+  color: var(--text-muted, #6d6876);
+  font-size: 12px;
+  font-family: ui-monospace, Consolas, "Courier New", monospace;
+  word-break: break-all;
+}
+.guide-doc {
+  max-width: 820px;
+  font-size: 16px;
+  line-height: 1.8;
+  color: var(--text);
+}
+.guide-doc h1,
+.guide-doc h2,
+.guide-doc h3,
+.guide-doc h4 {
+  margin: 20px 0 8px;
+  line-height: 1.35;
+  font-weight: 600;
+}
+.guide-doc h1 { font-size: 22px; }
+.guide-doc h2 { font-size: 19px; }
+.guide-doc h3 { font-size: 17px; }
+.guide-doc h4 { font-size: 16px; }
+.guide-doc p { margin: 8px 0; }
+.guide-doc ul,
+.guide-doc ol { margin: 8px 0; padding-left: 22px; }
+.guide-doc li { margin: 4px 0; }
+.guide-doc a { color: var(--accent, #647dcb); }
+.guide-doc code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--surface-2, #f1eef3);
+  font-family: ui-monospace, Consolas, "Courier New", monospace;
+  font-size: 0.9em;
+}
+.guide-doc pre {
+  margin: 10px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.25));
+  border-radius: 8px;
+  background: var(--surface-2, #f1eef3);
+  overflow-x: auto;
+}
+.guide-doc pre code { padding: 0; background: none; }
+.guide-doc blockquote {
+  margin: 10px 0;
+  padding: 2px 12px;
+  border-left: 3px solid var(--accent, #647dcb);
+  color: var(--text-muted, #6d6876);
+}
+.guide-doc table {
+  margin: 10px 0;
+  border-collapse: collapse;
+  font-size: 15px;
+}
+.guide-doc th,
+.guide-doc td {
+  padding: 6px 10px;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.25));
+  text-align: left;
+}
+.guide-doc img { max-width: 100%; border-radius: 6px; }
+.guide-doc hr { margin: 16px 0; border: none; border-top: 1px solid var(--border, rgba(128, 128, 128, 0.25)); }
