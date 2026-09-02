@@ -49,7 +49,9 @@ def _unwrap_tool_calls(value: Any) -> dict[str, Any] | None:
     for call in value.get("tool_calls") or []:
         if not isinstance(call, dict):
             continue
-        fn = call.get("function") if isinstance(call.get("function"), dict) else {}
+        fn = call.get("function")
+        if not isinstance(fn, dict):
+            continue
         args = fn.get("arguments")
         if isinstance(args, str):
             try:
