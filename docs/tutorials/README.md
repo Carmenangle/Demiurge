@@ -14,6 +14,18 @@
 | [02-roleplay-and-auto-illustration.md](02-roleplay-and-auto-illustration.md) | 第一条剧情与自动插画 | 绑定角色卡与世界书，让剧情高潮自动原位出图 |
 | [03-turn-full-pipeline.md](03-turn-full-pipeline.md) | 一次剧情回合的完整链路 | 看懂 RAG 记忆循环、状态/表格写回、提示词提取、图/视频/音频生成与原位回填每一步 |
 
+## 图解引导（应用内新手引导的 GitHub 阅读版）
+
+应用内新手引导共 5 个板块，本仓库 [docs/guide/](../guide/) 提供同内容图文版，图与步骤一一对应：
+
+| 板块 | GitHub 阅读版 | 覆盖 |
+|------|--------------|------|
+| 快速开始 | [quick-start.md](../guide/quick-start.md) | 10 步从启动、配模型/路径到运转第一个工作流模板 |
+| 剧情扮演 | [story.md](../guide/story.md) | 绑定角色卡与世界书、剧情对话、多元数据面板 |
+| 画布创作 | [canvas.md](../guide/canvas.md) | 画布编排、画布内对话、工作流模板节点 |
+| AI 搭工作流 | [workflow.md](../guide/workflow.md) | 嵌入模型、节点知识库、自然语言搭工作流 |
+| 多功能工具 | [tools.md](../guide/tools.md) | GIF/精灵图互转、调色盘、分辨率缩放、文本工具 |
+
 ## 规划中（依据真实界面与运行结果补齐，未完成前不开放链接）
 
 - 大仓库、小仓库与作品绑定（含分支与反事实实验）。

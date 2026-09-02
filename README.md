@@ -41,7 +41,7 @@ Demiurge 把剧情对话、角色卡、世界书、RAG 记忆、状态表、自�
 | macOS ARM64 | `Start-Demiurge.command` | 关闭启动终端或停止对应进程 |
 | Linux x64 | `start-demiurge.sh` | 关闭启动终端或停止对应进程 |
 
-**四步跑到第一张图**（完整图文步骤见[教程 01 · 快速开始](docs/tutorials/01-quick-start.md)）：
+**四步跑到第一张图**（完整图文步骤见 [图解快速开始](docs/guide/quick-start.md)（10 步配图）；详细文字说明见 [教程 01 · 快速开始](docs/tutorials/01-quick-start.md)）：
 
 1. 解压并启动，浏览器打开 `http://127.0.0.1:8010`。
 2. 「⚙ 设置 → 模型」添加对话模型（必配）；生图/视频/嵌入模型按需添加，点「测试模型」确认连通。
@@ -63,7 +63,9 @@ Demiurge 把剧情对话、角色卡、世界书、RAG 记忆、状态表、自�
 - **多功能工具**：GIF/精灵图、调色盘、文本工具等。
 
 引导正文支持跳到**教学文档**（应用内直接阅读，例如[工作流模板导入详解](docs/guide/workflow-template-import.md)），
-也支持跨章节跳转与锚点定位。
+也支持跨章节跳转与锚点定位。同一份引导的 GitHub 图文阅读版（不运行应用也能看）：
+
+- [快速开始（10 步图文）](docs/guide/quick-start.md) · [剧情扮演](docs/guide/story.md) · [画布创作](docs/guide/canvas.md) · [AI 搭工作流](docs/guide/workflow.md) · [多功能工具](docs/guide/tools.md)
 
 ## 核心能力
 
