@@ -200,8 +200,10 @@ def collect_comfy_outputs(prompt_ids: list[str] | None = None, comfyui_url: str 
         # 刷新对话即可逐张看到；thread_id = repo_id（计划所属会话）。
         try:
             from app.services import chat_snapshot as _cs
+            # meta.kind=plan_collect：批量采集副产品，不占每角色历史条数
             _cs.upsert(repo_id, _cs.assistant_message(
-                str(uuid.uuid4()), _message_text, image=shown))
+                str(uuid.uuid4()), _message_text, image=shown,
+                meta={"kind": "plan_collect"}))
         except Exception:  # noqa: BLE001 - 快照追加失败不影响采集主流程
             pass
         try:
@@ -498,3 +500,72 @@ def run_shell(command: str, cwd: str = "", timeout_seconds: int = 60) -> dict[st
                 "stdout": (exc.stdout or "")[:4000], "stderr": (exc.stderr or "")[:4000]}
     return {"exit_code": proc.returncode, "timed_out": False,
             "stdout": (proc.stdout or "")[:8000], "stderr": (proc.stderr or "")[:8000]}
+
+def instantiate_recipe(recipe_id: str, output_dir: str = "", repo_id: str = "",
+                       param_overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+    """固化流程预设重放（durable）：整条配方作为新计划投执行队列。
+
+    output_dir 必须等于配置真源（repo_meta），模型/客户端不得指定任意目录；
+    重放计划的 durable/expensive 步骤照常走 plan_tasks 审批/配额闸门。
+    """
+    from app.services import plan_tasks as _plan_tasks, repo_meta as _repo_meta
+
+    truth = _repo_meta.output_dir_from_state()
+    if not truth or output_dir != truth:
+        raise ValueError("output_dir 必须是当前配置的仓库根目录（环境归一注入，不接受外部指定）")
+    return _plan_tasks.instantiate_recipe(
+        recipe_id, output_dir=truth, repo_id=repo_id,
+        param_overrides=param_overrides if isinstance(param_overrides, dict) else None)
+
+
+def _dir_from_state(key: str) -> str:
+    """从 user_state settings 读目录配置（characterDir/worldbookDir 等运行态真源）。"""
+    from app.config import DATA_DIR
+
+    try:
+        st = json.loads((DATA_DIR / "user_state.json").read_text(encoding="utf-8"))
+        return str((st.get("settings") or {}).get(key) or "")
+    except (OSError, json.JSONDecodeError):
+        return ""
+
+
+def import_source_card(path: str, overwrite: bool = False,
+                       extract_worldbook: bool = False) -> dict[str, Any]:
+    """导入一张 ST/通用角色卡（PNG tEXt 内嵌或 JSON）到角色卡源库（durable）。
+
+    源库目录 = 后端配置 characterDir（运行态真源，不经模型参数）。ST 卡原生兼容
+    （TavernCard V1/V2/V3）；PNG 是二进制，file.read_text 读不了，由本 handler 读字节。
+    extract_worldbook=True 时把内嵌世界书外拆到配置的 worldbookDir 并从卡剥离。
+    """
+    from pathlib import Path as _Path
+
+    from app.services import character_card, character_store
+
+    raw_path = str(path or "").strip().strip('"')
+    if not raw_path:
+        raise ValueError("path 必须是卡文件（PNG/JSON）的绝对路径")
+    target = _Path(raw_path).expanduser()
+    if not target.is_file():
+        raise ValueError(f"卡文件不存在：{raw_path}")
+    base = _dir_from_state("characterDir")
+    if not base:
+        raise ValueError("请先在设置中配置角色卡文件夹（characterDir）")
+    raw = target.read_bytes()
+    try:
+        card = character_card.parse_card_bytes(raw, target.name)
+    except character_card.CardParseError as exc:
+        raise ValueError(f"卡解析失败：{exc}") from exc
+    is_png = raw.startswith(character_card.PNG_SIGNATURE) or target.suffix.lower() == ".png"
+    try:
+        character_store.save_card(base, card, avatar=raw if is_png else None,
+                                  overwrite=overwrite)
+    except FileExistsError as exc:
+        raise ValueError(f"源库已存在同名卡「{exc}」；确认后用 overwrite=true 重导") from exc
+    worldbook_extracted = False
+    if extract_worldbook:
+        wb_dir = _dir_from_state("worldbookDir")
+        if wb_dir:
+            character_store.extract_embedded_worldbook(base, card.name, wb_dir)
+            worldbook_extracted = True
+    return {"name": card.name, "card_dir": str(_Path(base) / card.name),
+            "avatar_saved": bool(is_png), "worldbook_extracted": worldbook_extracted}
