@@ -115,6 +115,17 @@ def multi_agent(req: MultiAgentRequest) -> StreamingResponse:
     return sse_response(lambda: agent_runner.drain(q))
 
 
+@router.get("/agent/trace")
+def agent_trace(repo_id: str, turn_id: str = "", limit: int = 20) -> dict[str, object]:
+    """实时过程可视化：前端轮询当前作品最近 trace 事件（思考/工具/重试/节点流转）。"""
+    from app.services import run_trace
+    if not repo_id.strip():
+        raise HTTPException(status_code=400, detail="repo_id 不能为空")
+    events = run_trace.read_recent(repo_id.strip(), turn_id=turn_id.strip(),
+                                   limit=max(1, min(limit, 100)))
+    return {"events": events}
+
+
 @router.post("/trace/replay")
 def replay_trace(req: TraceReplayRequest) -> dict[str, object]:
     """离线校验既有 Trace；不调用模型，不写会话、资产或数据库。"""

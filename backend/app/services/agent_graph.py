@@ -116,27 +116,23 @@ def _proxy_kw(ctx: dict, key: str = "chat_proxy") -> dict:
     return {"proxy": value} if value else {}
 
 
-# 固化知识库（DATA_DIR/agent_knowledge/*.md）：流程规范/映射表永远在线
-KNOWLEDGE_DIR_NAME = "agent_knowledge"
-KNOWLEDGE_MAX_FILES = 4
-KNOWLEDGE_PER_FILE_CHARS = 20000
+# 固化知识库（DATA_DIR/agent_knowledge/*.md）：流程规范/映射表永远在线。
+# 目录与上限常量、列举/读取统一走 agent_knowledge 服务（唯一属主）。
 
 
 def _knowledge_catalog_text() -> str:
     """扫描固化知识目录拼接注入文本（第三类目录附件，与配方清单同机制）。"""
-    from app.config import DATA_DIR
-    root = DATA_DIR / KNOWLEDGE_DIR_NAME
-    if not root.is_dir():
-        return ""
+    from app.services import agent_knowledge
     docs: list[str] = []
-    for path in sorted(root.glob("*.md")):
+    for meta in agent_knowledge.list_docs():  # 文件名升序，与历史注入顺序一致
         try:
-            text = path.read_text(encoding="utf-8", errors="replace")[:KNOWLEDGE_PER_FILE_CHARS]
-        except OSError:
+            doc = agent_knowledge.read_doc(meta["name"])
+        except (FileNotFoundError, ValueError, OSError):
             continue
-        if text.strip():
-            docs.append(f"【知识：{path.stem}】\n{text.strip()}")
-        if len(docs) >= KNOWLEDGE_MAX_FILES:
+        text = (doc.get("content") or "").strip()
+        if text:
+            docs.append(f"【知识：{meta['name']}】\n{text}")
+        if len(docs) >= agent_knowledge.KNOWLEDGE_MAX_FILES:
             break
     if not docs:
         return ""
@@ -164,6 +160,57 @@ def _recipe_catalog_text() -> str:
     return ("【固化流程预设】以下是用户已确认固化的可重放流程。用户目标与某条高度一致时，"
             "优先调用 plan.instantiate_recipe 整条重放（省 token，durable/expensive 步骤照常走审批）；"
             "不完全一致才逐步编排：\n" + "\n".join(lines))
+
+def _live_trace(ctx: dict, agent: str):
+    """把 run_trace 事件同时实时推给前端对话流（stream_sink.trace）。
+
+    非流式节点（计划编译/自由循环）内部阻塞时，SSE 也要能看到过程：
+    思考、重试、工具调用、步骤执行、失败——不再只有「生成中」黑盒。
+    """
+    def _line(event: str, data: dict) -> str:
+        op = str(data.get("operation") or data.get("tool") or "")
+        status = str(data.get("status") or "")
+        if event == "model.request":
+            return "🤔 模型正在思考…"
+        if event == "structured.output":
+            return "📐 解析模型输出…"
+        if event == "plan.compiled":
+            return f"✅ 计划编译完成（{data.get('steps', '?')} 步）" if status == "ok"                 else "⚠️ 计划校验未通过，正在重试…"
+        if event == "plan.sections_filled":
+            return f"🧩 回填 {data.get('count', '?')} 个套装提示词"
+        if event == "plan.validated":
+            return "✅ 计划校验通过，投递执行队列"
+        if event == "plan.attachments":
+            return f"📎 已预读文档：{data.get('path', '')}" if status == "ok"                 else f"⚠️ 文档预读失败：{data.get('path', '')}"
+        if event == "tool.call":
+            return f"🔧 调用工具：{op}"
+        if event == "tool.result":
+            return f"{'✅' if data.get('ok') else '❌'} 工具{'完成' if data.get('ok') else '失败'}：{op}"
+        if event == "plan.step_started":
+            return f"▶ 执行步骤：{op}"
+        if event == "plan.step_done":
+            return f"✅ 步骤完成：{op}"
+        if event == "plan.step_failed":
+            return f"❌ 步骤失败：{op}（{str(data.get('error') or '')[:60]}）"
+        if event == "plan.step_blocked":
+            return f"⛔ 步骤受阻：{op}（{str(data.get('reason') or '')}）"
+        if event == "plan.terminal":
+            return f"🏁 计划结束：{status}"
+        return f"🔄 {event}"
+
+    def emit(event: str, **data):
+        run_trace.emit(ctx, event, agent=agent, **data)
+        sink = ctx.get("stream_sink")
+        if not callable(sink):
+            return
+        text = _line(event, data or {})
+        if text:
+            try:
+                sink({"trace": text})
+            except Exception:
+                pass
+    return emit
+
 
 def _supervisor_route(text: str, image_count: int, ctx: dict) -> tuple[str, bool, list[str], str]:
     """每个普通用户轮次都由模型做唯一语义判断；代码只提供并复核能力清单。
@@ -575,7 +622,7 @@ def plan_compiler_node(state: AgentState) -> dict:
             structured_chat_fn=ctx.get("structured_chat_fn"),
             images=list(state.get("images") or []),
             proxy_kwargs=_proxy_kw(ctx),
-            trace=lambda event, **data: run_trace.emit(ctx, event, agent="fabric", **data),
+            trace=_live_trace(ctx, "fabric"),
         )
         if outcome.status == "done":
             # 固化询问（2026-09-03）：成功的 durable/expensive 轨迹自动存为草稿配方，
@@ -700,7 +747,7 @@ def plan_compiler_node(state: AgentState) -> dict:
             chat_fn=ctx.get("chat_fn") or _llm.chat,
             structured_chat_fn=ctx.get("structured_chat_fn"),
             proxy_kwargs=_proxy_kw(ctx),
-            trace=lambda event, **data: run_trace.emit(ctx, event, agent="plan_compiler", **data),
+            trace=_live_trace(ctx, "plan_compiler"),
         )
     except Exception as exc:  # noqa: BLE001 - 编译异常如实回复，不编造计划
         run_trace.emit(ctx, "agent.error", agent="plan_compiler", error=str(exc))
