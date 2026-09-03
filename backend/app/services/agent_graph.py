@@ -649,10 +649,28 @@ def plan_compiler_node(state: AgentState) -> dict:
                 lines = "\n".join(
                     f"- {t.get('id')} {t.get('name') or ''}".rstrip()
                     for t in templates)
-                attachments.append({"name": plan_compiler.TEMPLATE_CATALOG_NAME, "text":
-                                    f"共 {len(templates)} 个：\n{lines}\n"
-                                    "用户指定模板时优先用上面的真实 id（或完整 name）；"
-                                    "禁止写 TO_BE_RESOLVED、{{...}} 或任何占位符。"})
+                # 通用机制：把每个模板的暴露字段清单注入编译上下文，模型按 field
+                # 名自由往 variants 写值（width/height/seed/任意节点参数），执行层按
+                # binding 注入——换任何模板都适用，不硬编码特定参数名。
+                field_lines = []
+                for t in templates:
+                    exposed = t.get("exposed") or []
+                    if not isinstance(exposed, list):
+                        continue
+                    brief = "、".join(
+                        f"{f.get('field')}" + (f"/{f.get('binding')}" if f.get('binding') else "")
+                        for f in exposed[:24]
+                        if isinstance(f, dict) and f.get('field'))
+                    if brief:
+                        field_lines.append(f"- {t.get('id')} {t.get('name') or ''} 暴露字段：{brief}")
+                catalog_text = f"共 {len(templates)} 个：\n{lines}\n"
+                if field_lines:
+                    catalog_text += "暴露字段（variants 里按 field 名写值；宽高类字段常见 width/height）：\n" \
+                                    + "\n".join(field_lines) + "\n"
+                catalog_text += "用户指定模板时优先用上面的真实 id（或完整 name）；" \
+                                "禁止写 TO_BE_RESOLVED、{{...}} 或任何占位符。"
+                attachments.append({"name": plan_compiler.TEMPLATE_CATALOG_NAME,
+                                    "text": catalog_text})
         except Exception:  # noqa: BLE001 - 模板库不可用时跳过
             pass
         recipe_catalog = _recipe_catalog_text()
