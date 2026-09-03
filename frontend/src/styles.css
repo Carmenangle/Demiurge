@@ -3465,6 +3465,55 @@ textarea.state-value { min-height: 58px; }
   word-break: break-word;
 }
 
+/* 非流式 agent「执行过程」面板（计划编译/自由循环 SSE 过程行；完成后可折叠回看） */
+.agent-trace {
+  background: var(--surface-2);
+  border-radius: 10px;
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+.agent-trace-live {
+  outline: 1px solid var(--border, #d6d0da);
+  outline-offset: -1px;
+}
+
+.agent-trace-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  padding: 8px 12px;
+  cursor: pointer;
+  font: inherit;
+}
+
+.agent-trace-body {
+  padding: 0 12px 12px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.agent-trace-line {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Courier New", monospace;
+}
+
+.agent-trace-tail {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+  padding-top: 2px;
+}
+
 /* 生成图片卡 */
 .img-card {
   border-radius: 12px;

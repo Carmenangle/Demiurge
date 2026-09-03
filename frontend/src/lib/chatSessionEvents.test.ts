@@ -12,11 +12,22 @@ const base = (): ChatMessage[] => [
 ];
 
 describe("reduceChatStreamEvent", () => {
-  it("merges trace and delta into the active assistant message", () => {
+  it("trace 与 delta 分别落「执行过程」面板与正文（trace 不污染最终正文）", () => {
     let messages = reduceChatStreamEvent(base(), "bot", { type: "trace", text: "主管选择 image" });
     messages = reduceChatStreamEvent(messages, "bot", { type: "delta", text: "完成" });
 
-    expect(messages[0].text).toBe("主管选择 image\n完成");
+    expect(messages[0].agentTrace).toEqual(["主管选择 image"]);
+    expect(messages[0].text).toBe("完成");
+  });
+  it("trace 过程行在 replace 后保留，供完成后回看（2026-09-03 可视化改进）", () => {
+    let messages = reduceChatStreamEvent(base(), "bot", { type: "trace", text: "🤔 模型正在思考…" });
+    messages = reduceChatStreamEvent(messages, "bot", { type: "trace", text: "🧩 回填 14 个套装提示词" });
+    expect(messages[0].text).toBe(""); // 过程行不进入正文
+    messages = reduceChatStreamEvent(messages, "bot", { type: "replace", text: "📋 已编译计划…" });
+
+    expect(messages[0].text).toBe("📋 已编译计划…");
+    expect(messages[0].agentTrace).toEqual(["🤔 模型正在思考…", "🧩 回填 14 个套装提示词"]);
+    expect(messages[0].thinking).toBeUndefined();
   });
   it("thinking 增量进思考面板字段，正文不受影响", () => {
     let messages = reduceChatStreamEvent(base(), "bot", { type: "delta", text: "正文开头" });

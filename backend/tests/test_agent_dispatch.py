@@ -3186,3 +3186,38 @@ def test_固化清单注入full循环上下文(monkeypatch, tmp_path):
         for lease in capability_sandbox.active():
             capability_sandbox.revoke(lease["id"])
         capability_sandbox._reset_for_tests()
+
+
+def test_live_trace_过程事件映射为sink文本并同落盘(monkeypatch, tmp_path):
+    """555631d 可视化验收：非流式节点（计划编译/自由循环）内部阻塞时，思考/回填/
+    工具/步骤受阻等事件实时转成对话流 trace 文本（前端「执行过程」面板），
+    同事件仍落盘 run_trace（GET /agent/trace 离线回看数据源）。"""
+    from app.services import run_trace
+    trace_file = tmp_path / "agent-trace.jsonl"
+    monkeypatch.setattr(run_trace, "TRACE_FILE", trace_file)
+    emitted: list[dict] = []
+    emit = ag._live_trace(_ctx(
+        repo_id="work", turn_id="t1", thread_id="work",
+        stream_sink=emitted.append,
+    ), "plan_compiler")
+
+    emit("model.request")
+    emit("plan.sections_filled", count=14, stage="pre_validate")
+    emit("tool.call", operation="file.list_dir")
+    emit("plan.step_blocked", operation="workflow.submit_batch", reason="needs_approval")
+    emit("plan.compiled", status="ok", steps=3)
+    emit("llm.retry-started", attempt=2)  # 未特化事件走兜底行，仍可见而非黑盒
+
+    assert [e["trace"] for e in emitted] == [
+        "🤔 模型正在思考…",
+        "🧩 回填 14 个套装提示词",
+        "🔧 调用工具：file.list_dir",
+        "⛔ 步骤受阻：workflow.submit_batch（needs_approval）",
+        "✅ 计划编译完成（3 步）",
+        "🔄 llm.retry-started",
+    ]
+    events = run_trace.read_recent("work", turn_id="t1")
+    assert [item["event"] for item in events] == [
+        "model.request", "plan.sections_filled", "tool.call",
+        "plan.step_blocked", "plan.compiled", "llm.retry-started",
+    ]

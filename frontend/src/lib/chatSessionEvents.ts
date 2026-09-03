@@ -87,6 +87,15 @@ function appendDelta(message: ChatMessage, text: string): ChatMessage {
   return { ...message, text: message.text + text, parts };
 }
 
+/** 执行过程行上限：重试循环等极端场景下防内存膨胀（超出丢最旧）。 */
+const AGENT_TRACE_MAX = 400;
+
+function appendAgentTrace(message: ChatMessage, line: string): ChatMessage {
+  const lines = [...(message.agentTrace || []), line];
+  if (lines.length > AGENT_TRACE_MAX) lines.splice(0, lines.length - AGENT_TRACE_MAX);
+  return { ...message, agentTrace: lines };
+}
+
 function appendMediaSlot(
   message: ChatMessage, slotId: string, offset?: number,
   lastFrameDesc?: string, videoPrompt?: string, videoParams?: VideoParams,
@@ -367,8 +376,10 @@ export function reduceChatStreamEvent(
 ): ChatMessage[] {
   switch (event.type) {
     case "trace":
+      // 非流式 agent 过程行（智能编造/计划编译思考、工具、步骤、重试）进独立
+      // 「执行过程」面板，不污染最终正文；replace 后保留，供完成后回看（2026-09-03）。
       return current.map((message) => message.id === botId
-        ? appendDelta(message, `${event.text}\n`)
+        ? appendAgentTrace(message, event.text)
         : message);
     case "delta":
       return current.map((message) => message.id === botId
@@ -383,6 +394,7 @@ export function reduceChatStreamEvent(
     case "replace":
       // 成功完整生成 → 清除流式思考面板（2026-08-31 深夜用户定案：成功就不留
       // 思考过程，失败才保留供诊断）。最终正文里的 <think> 由渲染层隐藏。
+      // agentTrace（执行过程）刻意保留：非流式 agent 完成后仍可回看（2026-09-03）。
       return current.map((message) => message.id === botId
         ? { ...message, text: event.text, parts: undefined, thinking: undefined }
         : message);

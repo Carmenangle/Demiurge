@@ -112,6 +112,9 @@ export interface ChatMessage {
   text: string;
   parts?: MsgPart[];   // 图文混排：有则优先按顺序渲染，文本/图片穿插
   thinking?: string;
+  /** 非流式 agent 执行过程行（计划编译/自由循环经 SSE trace 事件累积）。
+   * 与 thinking 不同：replace 最终正文时保留，供「完成后回看」；仅进程内有效，快照恢复后为空。 */
+  agentTrace?: string[];
   image?: string;
   video?: string;   // 生成的视频地址（mp4/webm/gif，用 <video> 渲染）
   audio?: string;   // 生成的音频地址（wav/mp3/flac…，用 <audio> 播放器渲染）

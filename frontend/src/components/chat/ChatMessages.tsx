@@ -363,6 +363,8 @@ const MarkdownHtml = memo(function MarkdownHtml({ text, className, htmlRef }: {
 
 function AssistantMessageBase({ msg, streaming, avatarState = "default", portrait, displayRegex, depth, macros, onSendImage, onMaskImage, onRunCommand, onSetCover, onPromptApproval, onRouteChoice, onRegenerate, onCancelGeneration, onRetryIllustration, regenerating = false, onEdit, onDelete, onCreateCheckpoint, onBranch, onMergeAudio, visualCiRepoId, visualCiOutputDir }: { msg: ChatMessage; streaming?: boolean; avatarState?: AssistantAvatarState; portrait?: { name: string; url: string } | null; displayRegex?: RegexScript[]; depth?: number; macros?: { char: string; user: string }; onSendImage: (url: string) => void; onMaskImage?: (url: string) => void; onRunCommand?: (cmd: string) => void; onSetCover?: (url: string) => void; onPromptApproval?: (approval: PromptApproval, action: "submit" | "change" | "cancel", editedPrompt?: string) => Promise<void>; onRouteChoice?: (choice: RouteChoice, route: AgentRoute) => Promise<void>; onRegenerate?: (messageId: string, slotId?: string) => void; onCancelGeneration?: (messageId: string, slotId: string) => void; onRetryIllustration?: (messageId: string, slotId: string) => void; regenerating?: boolean; onEdit?: (id: string, text: string) => void; onDelete?: (id: string) => void; onCreateCheckpoint?: (id: string) => void; onBranch?: (id: string) => void; onMergeAudio?: (messageId: string) => Promise<void>; visualCiRepoId?: string; visualCiOutputDir?: string }) {
   const [showThinking, setShowThinking] = useState(false); // 思考默认折叠（2026-08-31 深夜用户反馈：28k 长思考自动展开吞掉正文区），可手动展开
+  // 非流式 agent「执行过程」面板：流式中自动展开实时可见；replace 后保留可折叠回看
+  const [showTrace, setShowTrace] = useState(false);
   // 正文里预设正则折叠出的 <details>（思考过程等）在 innerHTML 重写后保持展开状态：
   // 插画回填/流式/状态更新都会重写 bot-html，无保态时用户展开几秒就被收起（2026-08-29）。
   const stableDetailsRefs = useRef<Record<number, HTMLDivElement | null>>({});
@@ -622,6 +624,29 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
             {showThinking && <div className="thinking-body">{msg.thinking}</div>}
           </div>
         )}
+        {msg.agentTrace?.length ? (
+          <div className={`agent-trace${streaming ? " agent-trace-live" : ""}`}>
+            <button className="agent-trace-head" onClick={() => setShowTrace((s) => !s)}>
+              <span>
+                {streaming ? "执行过程 · 进行中" : `执行过程 · ${msg.agentTrace.length} 条`}
+              </span>
+              <ChevronDown
+                size={16}
+                style={{ transform: showTrace ? "none" : "rotate(-90deg)", transition: "transform .15s" }}
+              />
+            </button>
+            {(showTrace || streaming) && (
+              <div className="agent-trace-body">
+                {msg.agentTrace.map((line, index) => (
+                  <div className="agent-trace-line" key={`${index}:${line.slice(0, 16)}`}>{line}</div>
+                ))}
+                {streaming && (
+                  <div className="agent-trace-tail"><span className="bot-spinner" /> 执行中…</div>
+                )}
+              </div>
+            )}
+          </div>
+        ) : null}
         {imgs.map((url, i) => (
           <div className="img-card" key={url}>
             <img src={url} alt={`生成结果 ${i + 1}`} loading="lazy" onClick={() => openLightbox(url)} style={{ cursor: "zoom-in" }} />
