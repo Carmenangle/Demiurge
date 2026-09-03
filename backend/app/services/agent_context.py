@@ -64,6 +64,11 @@ def recent_history(thread_id: str, max_tokens: int = 20_000,
             role = item.get("role")
             if role not in counts or counts[role] >= per_role:
                 continue
+            # 批量生图等产物消息（assistant + 顶层 image）不占用每角色历史条数，
+            # 也不进入文本历史——否则 14 条图片消息会把计划卡/重要回复挤出 6 条额度
+            # （2026-09-02 实锤：微调重生成时模型看不到上轮计划卡）。
+            if role == "assistant" and item.get("image"):
+                continue
             content = (item.get("content") or "").strip()
             if not content:
                 continue
