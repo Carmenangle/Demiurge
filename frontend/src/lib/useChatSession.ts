@@ -400,9 +400,38 @@ export function useChatSession(deps: ChatSessionDeps) {
       try {
         if (!shouldRecoverAgentRun(threadId)) return;
         if (!alive || recoveryActiveRef.current) return;
-        const st = await fetchAgentRunning(threadId);
-        if (!alive || !st.running) return;
-        startAgentRecovery(threadId, repo?.id);
+        // 切回/刷新竞态修复（2026-09-03 实锤）：后端可能恰好在快照拉取前后
+        // 落盘计划卡。无论 running 与否都短轮询几轮快照——捡到新消息就渲染，
+        // 期间发现仍在 running 则转完整后台恢复。
+        for (let i = 0; i < 8; i++) {
+          if (!alive) return;
+          try {
+            const st = await fetchAgentRunning(threadId);
+            if (!alive) return;
+            if (st.running) {
+              startAgentRecovery(threadId, repo?.id);
+              return;
+            }
+            const snap = await fetchSnapshot(threadId);
+            if (!alive) return;
+            const items = (snap.items || []) as ChatMessage[];
+            if (items.length > messagesRef.current.length) {
+              try {
+                const restored = restoreSubmittedMediaSlots(
+                  items.map((m) => m.inspiration
+                    ? { ...m, inspiration: normalizeInspirationCard(m.inspiration as unknown as Record<string, unknown>) }
+                    : m),
+                  workflowRuntime.list(),
+                );
+                setMessages(pruneUnsubmittedMediaSlots(restored).messages);
+                try { localStorage.setItem(chatKey, JSON.stringify(items)); } catch { /* ignore */ }
+              } catch { setMessages(items); }
+              return;
+            }
+            if (items.length > 0) return; // 快照已有内容且未增长，视为稳定
+          } catch { /* 单轮失败继续 */ }
+          await new Promise((r) => setTimeout(r, 2500));
+        }
       } catch { /* 状态接口失败，忽略 */ }
     };
     (async () => {
