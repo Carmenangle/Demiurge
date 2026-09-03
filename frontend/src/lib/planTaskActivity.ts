@@ -1,4 +1,4 @@
-import { apiGet, apiPost } from "../api/client";
+import { apiDelete, apiGet, apiPost } from "../api/client";
 
 // Autopilot 计划任务（P2–P4）：后台活动面板的轮询源 + 审批/取消动作。
 // 后端真源是 /api/plans（plan_tasks），此处只做轮询订阅与动作转发。
@@ -105,4 +105,29 @@ export function approvePlanTask(taskId: string) {
 
 export function cancelPlanTask(taskId: string) {
   return apiPost<{ ok: boolean }>(`/plans/${taskId}/cancel`, {});
+}
+
+// ── 固化流程预设（计划配方，2026-09-03）：列表 / 保留草稿 / 删除 ──────────────
+
+export interface RecipeInfo {
+  id: string;
+  name: string;
+  intent?: string;
+  description?: string;
+  status?: "draft" | "saved";   // 缺省按 saved（旧配方无此字段）
+  origin?: "plan" | "fabric";
+  created_at?: number;
+  plan?: { steps?: { operation: string }[] };
+}
+
+export function listRecipes() {
+  return apiGet<Record<string, RecipeInfo>>("/plans/recipes/all");
+}
+
+export function keepRecipe(recipeId: string) {
+  return apiPost<RecipeInfo>(`/plans/recipes/${recipeId}/keep`, {});
+}
+
+export function deleteRecipe(recipeId: string) {
+  return apiDelete<{ ok: boolean }>(`/plans/recipes/${recipeId}`);
 }

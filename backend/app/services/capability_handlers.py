@@ -569,3 +569,19 @@ def import_source_card(path: str, overwrite: bool = False,
             worldbook_extracted = True
     return {"name": card.name, "card_dir": str(_Path(base) / card.name),
             "avatar_saved": bool(is_png), "worldbook_extracted": worldbook_extracted}
+
+
+def migrate_scan_source(path: str) -> dict[str, Any]:
+    """只读扫描一张 ST/通用卡或独立世界书/预设/正则，产出迁移体检报告（readonly）。
+
+    第二套固定流程（机械+LLM 转写）的机械前置：解析入料 → 剥离不可用字段的检测 →
+    逐条目标注待转写点（注入位语义/constant 越权/keys 质量/渲染层/运行时表格/
+    容器/首条非空/视觉锚点前缀），供 LLM 按规范 §4.5 判断转写。
+    不写任何文件、不改任何目录；落盘由转写产物经既有能力完成。
+    """
+    from app.services import st_migration
+
+    try:
+        return st_migration.analyze_source(str(path))
+    except st_migration.MigrationScanError as exc:
+        raise ValueError(str(exc)) from exc

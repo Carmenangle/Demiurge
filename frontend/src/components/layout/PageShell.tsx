@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { ReactNode, DragEvent as ReactDragEvent } from "react";
 
 // 统一页面外壳：所有一级页面复用，保证页头/工具栏/内容区结构一致。
 // - title：页面主标题
@@ -6,21 +6,34 @@ import type { ReactNode } from "react";
 // - actions：页头右侧操作区（按钮组等）
 // - toolbar：标题下方的工具栏（搜索/筛选/tab），可选
 // - children：内容区
+// - onDrop / onDragOver / onDragLeave：拖拽文件到页面时由调用方自行处理（角色卡/世界书导入）。
+//   拖拽文件只在 types 含 "Files" 时阻止默认；其它拖拽（节点/卡片排序等）放行。
 export function PageShell({
   title,
   back,
   actions,
   toolbar,
   children,
+  onDrop,
+  onDragOver,
+  onDragLeave,
 }: {
   title: ReactNode;
   back?: () => void;
   actions?: ReactNode;
   toolbar?: ReactNode;
   children: ReactNode;
+  onDrop?: (e: ReactDragEvent<HTMLDivElement>) => void;
+  onDragOver?: (e: ReactDragEvent<HTMLDivElement>) => void;
+  onDragLeave?: (e: ReactDragEvent<HTMLDivElement>) => void;
 }) {
   return (
-    <div className="page">
+    <div
+      className="page"
+      onDrop={onDrop}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+    >
       <div className="page-head">
         <div className="page-title-row">
           {back && <button className="back-btn" onClick={back}>← 返回</button>}

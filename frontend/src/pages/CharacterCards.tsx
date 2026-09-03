@@ -29,6 +29,7 @@ export function CharacterCards({ characterDir, outputDir, worldbookDir, persona,
   const [deleting, setDeleting] = useState<CardSummary | null>(null);
   const [pending, setPending] = useState<PendingOverwrite | null>(null);
   const [preview, setPreview] = useState<CardSummary | null>(null);
+  const [dragOver, setDragOver] = useState(false);  // 拖拽文件到页面：显示高亮反馈
   const fileRef = useRef<HTMLInputElement>(null);
 
   // 用此卡新建作品：先把源库卡快照进作品仓库文件夹（卡+世界书+正则+头像），再建作品进对话。
@@ -76,6 +77,36 @@ export function CharacterCards({ characterDir, outputDir, worldbookDir, persona,
     if (file) doImport(file, false);
   };
 
+  // 拖拽文件到页面（替代点「导入角色卡」选文件）。仅接 .json / .png，其它类型静默忽略。
+  // 多文件 → 逐个串行导入，首个同名冲突弹窗确认后再批量处理。
+  const ACCEPT_RE = /\.(json|png)$/i;
+  const onDropFiles = (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+    const files = Array.from(e.dataTransfer?.files || []).filter((f) => ACCEPT_RE.test(f.name));
+    if (files.length === 0) return;
+    void runQueue(files);
+  };
+
+  const runQueue = async (files: File[]) => {
+    for (const f of files) {
+      try { await doImport(f, false); }
+      catch { /* doImport 已通过 pending 弹窗暴露冲突；其它失败已在 setErr 兜底 */ }
+    }
+  };
+
+  const onDragOver = (e: React.DragEvent) => {
+    // 仅当 dataTransfer 含文件时阻止默认（让 drop 事件能正常触发），并显示高亮
+    if (e.dataTransfer?.types?.includes("Files")) {
+      e.preventDefault();
+      if (!dragOver) setDragOver(true);
+    }
+  };
+  const onDragLeave = (e: React.DragEvent) => {
+    // 仅当真正离开整个页面容器才关掉高亮（relatedTarget 为 null 或不在当前容器内）
+    if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragOver(false);
+  };
+
   // 覆盖前若有对话记录，先导出成 .json 让用户留存，再覆盖
   const exportThenOverwrite = async () => {
     if (!pending) return;
@@ -99,6 +130,9 @@ export function CharacterCards({ characterDir, outputDir, worldbookDir, persona,
   return (
     <PageShell
       title="角色卡"
+      onDrop={onDropFiles}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
       actions={
         <button className="btn" disabled={!characterDir || busy} onClick={() => fileRef.current?.click()}>
           <Plus size={15} style={{ verticalAlign: "-2px", marginRight: 4 }} />
@@ -106,6 +140,22 @@ export function CharacterCards({ characterDir, outputDir, worldbookDir, persona,
         </button>
       }
     >
+      {/* 拖拽文件到页面时的高亮遮罩（仅装饰，不拦截事件） */}
+      {dragOver && (
+        <div
+          aria-hidden
+          style={{
+            position: "fixed", inset: 0, zIndex: 50, pointerEvents: "none",
+            background: "rgba(60, 120, 240, 0.10)",
+            border: "2px dashed rgba(60, 120, 240, 0.55)",
+            borderRadius: 12,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            color: "rgba(60, 120, 240, 0.95)", fontSize: 18, fontWeight: 600,
+          }}
+        >
+          放开导入角色卡（.json / .png）
+        </div>
+      )}
       <input ref={fileRef} type="file" accept=".json,.png" style={{ display: "none" }} onChange={onPick} />
       {!characterDir && (
         <p style={{ color: "var(--text-muted)" }}>
@@ -116,7 +166,7 @@ export function CharacterCards({ characterDir, outputDir, worldbookDir, persona,
       {characterDir && cards.length === 0 && !err && (
         <p style={{ color: "var(--text-muted)" }}>
           还没有角色卡。这里是角色卡源库，供浏览与预览；点「导入角色卡」选 .json/.png，或直接把卡文件
-          放进角色卡文件夹后刷新本页——都会自动解出内嵌世界书与正则。双击卡片可预览，用「新建作品」进对话
+          拖到本页 / 放进角色卡文件夹后刷新——都会自动解出内嵌世界书与正则。双击卡片可预览，用「新建作品」进对话
           （作品会各自保存卡与世界书快照，改源卡不影响已建作品）。
         </p>
       )}

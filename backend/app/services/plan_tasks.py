@@ -35,7 +35,7 @@ from typing import Any
 from app.config import DATA_DIR
 from app.db import get_connection
 from app.services import capability_registry, capability_sandbox, plan_validator, task_progress_store
-from app.services.structured_contracts import GenerationPlan
+from app.services.structured_contracts import GenerationPlan, PlanBudgets, PlanStep
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +124,9 @@ def submit_task(plan: GenerationPlan, *, output_dir: str, repo_id: str = "",
         if step.operation == "media.collect_comfy_outputs":
             step.params["output_dir"] = output_dir
             step.params["repo_id"] = repo_id or plan.repo_id
+        if step.operation == "plan.instantiate_recipe":
+            # 配方重放的落盘域同样由环境决定（handler 内还会对配置真源做等值校验）
+            step.params["output_dir"] = output_dir
             if step.inputs_from:
                 # 编译器可能把 collect 写成链接到 submit 步骤本身（如 ["s3"]）；
                 # 执行器语义里 collect 需要 submit_result/prompt_ids，这里归一为虚拟键
@@ -370,11 +373,85 @@ def save_recipe(task_id: str, *, name: str = "") -> dict:
     recipe_id = uuid.uuid4().hex[:12]
     recipe = {
         "id": recipe_id, "name": name or plan.get("intent", "")[:40],
+        "intent": plan.get("intent", ""), "description": "",
+        "status": "saved", "origin": "plan",
         "source_task": task_id, "plan": plan, "created_at": _now(),
     }
     recipes[recipe_id] = recipe
     task_progress_store.save("plan_recipes", recipes)
     return recipe
+
+
+# 自由循环轨迹里的环境属主参数：重放时由 submit_task 重新归一注入，不得固化进配方
+_ENV_PARAM_KEYS = ("base", "repo_id", "output_dir", "client_id")
+
+
+def solidify_steps(*, intent: str, steps: list[dict], output_dir: str,
+                   name: str = "", description: str = "") -> dict:
+    """自由循环轨迹固化（2026-09-03）：成功步骤转为草稿配方，用户确认后可重放。
+
+    与 save_recipe（终态计划→配方）同源同存储，只是入口不同：这里没有落库任务，
+    直接把 fabric_loop 的 {tool, params} 轨迹转成 GenerationPlan。环境属主参数
+    （base/repo_id/output_dir/client_id）剥离，重放时由 submit_task 重新注入；
+    无 durable/expensive 步骤的纯探索轨迹不固化（无重放价值）。
+    """
+    solid: list[PlanStep] = []
+    for raw in steps:
+        if not raw.get("ok"):
+            continue
+        operation = str(raw.get("tool") or "")
+        if capability_registry.get(operation) is None:
+            continue
+        params = {k: v for k, v in (raw.get("params") or {}).items()
+                  if k not in _ENV_PARAM_KEYS}
+        solid.append(PlanStep(id=f"s{len(solid) + 1}", operation=operation, params=params))
+    levels = {_step_level(s.operation) for s in solid}
+    if not levels & {"durable", "expensive"}:
+        raise ValueError("没有 durable/expensive 步骤，纯探索轨迹不固化")
+    plan = GenerationPlan(
+        intent=(intent or "自由循环固化")[:200], repo_id="",
+        budgets=PlanBudgets(
+            max_steps=max(1, len(solid)),
+            max_gpu_tasks=sum(1 for s in solid if _step_level(s.operation) == "expensive"),
+            max_llm_calls=0),
+        steps=solid,
+        approval_required=sorted({s.operation for s in solid
+                                  if _step_level(s.operation) in ("durable", "expensive")}))
+    errors = plan_validator.validate(
+        plan, capabilities=capability_registry.all_capabilities(), allowed_prefix=output_dir)
+    if errors:
+        raise ValueError("固化计划未通过校验：\n- " + "\n- ".join(errors))
+    recipes = _load_recipes()
+    recipe_id = uuid.uuid4().hex[:12]
+    recipe = {
+        "id": recipe_id, "name": name or intent[:40], "intent": intent[:200],
+        "description": description, "status": "draft", "origin": "fabric",
+        "plan": plan.model_dump(), "created_at": _now(),
+    }
+    recipes[recipe_id] = recipe
+    task_progress_store.save("plan_recipes", recipes)
+    return recipe
+
+
+def keep_recipe(recipe_id: str) -> dict:
+    """用户确认草稿配方：保留后进入固化流程清单（可被重放与复用匹配）。"""
+    recipes = _load_recipes()
+    recipe = recipes.get(recipe_id)
+    if recipe is None:
+        raise LookupError("配方不存在")
+    recipe["status"] = "saved"
+    recipes[recipe_id] = recipe
+    task_progress_store.save("plan_recipes", recipes)
+    return recipe
+
+
+def delete_recipe(recipe_id: str) -> dict:
+    recipes = _load_recipes()
+    if recipe_id not in recipes:
+        raise LookupError("配方不存在")
+    recipes.pop(recipe_id)
+    task_progress_store.save("plan_recipes", recipes)
+    return {"ok": True}
 
 
 def list_recipes() -> dict[str, dict]:
@@ -387,6 +464,8 @@ def instantiate_recipe(recipe_id: str, *, output_dir: str, repo_id: str = "",
     recipe = _load_recipes().get(recipe_id)
     if recipe is None:
         raise LookupError("配方不存在")
+    if str(recipe.get("status") or "saved") != "saved":
+        raise ValueError("草稿配方需先保留（keep）才能重放")
     plan = GenerationPlan.model_validate(recipe["plan"])
     overrides = param_overrides or {}
     for step in plan.steps:

@@ -124,9 +124,14 @@ def prepare_messages(model: str, messages: list[dict], *, provider_profile: str 
 
     ``provider_profile`` 非空时是运行态真源；仅为兼容旧调用，缺省时才按模型名推断。
     """
+    def _has_content(content: Any) -> bool:
+        if isinstance(content, str):
+            return bool(content.strip())
+        return bool(content)  # 多模态内容块列表（text/image_url parts）
+
     cleaned = [
         {"role": (m.get("role") or "user"), "content": m.get("content") or ""}
-        for m in messages if (m.get("content") or "").strip()
+        for m in messages if _has_content(m.get("content"))
     ]
     profile = (provider_profile or "").strip().lower()
     is_claude = profile == "claude_compatible" if profile else (
@@ -134,6 +139,15 @@ def prepare_messages(model: str, messages: list[dict], *, provider_profile: str 
     )
     if not is_claude:
         return cleaned
+
+    # Claude-compatible 包装按纯文本字符串处理：多模态内容块展平为文本
+    # （image_url 块无 text 字段会丢弃——该 profile 不承载视觉输入，fabric_loop
+    # 带图任务走 openai 兼容通道不经此分支）。
+    cleaned = [
+        {**m, "content": m["content"] if isinstance(m["content"], str)
+         else flatten_content(m["content"])}
+        for m in cleaned
+    ]
 
     # GrayWill 常在倒数 user 包装 {{lastUserMessage}}，调用方又追加真实末轮 user。
     # 只处理末两条非 system 都是 user 的明确形态，避免删除更早历史里的相同短句。

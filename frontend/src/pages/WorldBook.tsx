@@ -22,6 +22,7 @@ export function WorldBook({ characterDir, worldbookDir }: { characterDir: string
   const [err, setErr] = useState<string | null>(null);
   const [pending, setPending] = useState<{ file: File; conflict: WorldbookConflict } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [dragOver, setDragOver] = useState(false);  // 拖拽文件到页面：显示高亮反馈
   const fileRef = useRef<HTMLInputElement>(null);
   const entryRefs = useRef<Record<number, HTMLDivElement | null>>({}); // 条目 index → DOM，供右栏导航滚动定位
   const scrollToEntry = (index: number) => {
@@ -121,6 +122,31 @@ export function WorldBook({ characterDir, worldbookDir }: { characterDir: string
     e.target.value = "";
   };
 
+  // 拖拽文件到页面（替代点「导入世界书」选文件）。仅接 .json，其它类型静默忽略。
+  // 多文件 → 逐个串行导入；首个同名冲突会停在 pending 弹窗，由用户确认/取消后再继续。
+  const ACCEPT_RE = /\.json$/i;
+  const onDropFiles = (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+    const files = Array.from(e.dataTransfer?.files || []).filter((f) => ACCEPT_RE.test(f.name));
+    if (files.length === 0) return;
+    void (async () => {
+      for (const f of files) {
+        try { await doImport(f, false); }
+        catch { /* doImport 已通过 pending 弹窗暴露冲突；其它失败已在 setErr 兜底 */ }
+      }
+    })();
+  };
+  const onDragOver = (e: React.DragEvent) => {
+    if (e.dataTransfer?.types?.includes("Files")) {
+      e.preventDefault();
+      if (!dragOver) setDragOver(true);
+    }
+  };
+  const onDragLeave = (e: React.DragEvent) => {
+    if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragOver(false);
+  };
+
   // 导出当前选中世界书：独立书导出整本，卡内嵌导出 character_book 部分（都是可再导入的 ST 格式）
   const exportSelected = async () => {
     if (!selected) return;
@@ -150,6 +176,9 @@ export function WorldBook({ characterDir, worldbookDir }: { characterDir: string
   return (
     <PageShell
       title="世界书"
+      onDrop={onDropFiles}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
       actions={
         <>
           <input ref={fileRef} type="file" accept=".json" style={{ display: "none" }} onChange={onPick} />
@@ -162,6 +191,22 @@ export function WorldBook({ characterDir, worldbookDir }: { characterDir: string
         </>
       }
     >
+      {/* 拖拽文件到页面时的高亮遮罩（仅装饰，不拦截事件） */}
+      {dragOver && (
+        <div
+          aria-hidden
+          style={{
+            position: "fixed", inset: 0, zIndex: 50, pointerEvents: "none",
+            background: "rgba(60, 120, 240, 0.10)",
+            border: "2px dashed rgba(60, 120, 240, 0.55)",
+            borderRadius: 12,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            color: "rgba(60, 120, 240, 0.95)", fontSize: 18, fontWeight: 600,
+          }}
+        >
+          放开导入世界书（.json）
+        </div>
+      )}
       {!characterDir && !worldbookDir && (
         <p style={{ color: "var(--text-muted)" }}>请先到「设置 → 路径」设置角色卡文件夹 / 世界书文件夹。</p>
       )}
@@ -170,7 +215,7 @@ export function WorldBook({ characterDir, worldbookDir }: { characterDir: string
       )}
       {err && <p style={{ color: "var(--danger, #c0392b)" }}>{err}</p>}
       {(characterDir || worldbookDir) && !hasList && !err && (
-        <p style={{ color: "var(--text-muted)" }}>还没有世界书。导入独立世界书，或导入含 character_book 的角色卡后会在这里显示。</p>
+        <p style={{ color: "var(--text-muted)" }}>还没有世界书。导入独立世界书，或导入含 character_book 的角色卡后会在这里显示；也可直接把世界书 .json 拖到本页导入。</p>
       )}
       {hasList && (
         <div className="worldbook-layout">

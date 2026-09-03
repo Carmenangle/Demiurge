@@ -46,6 +46,29 @@ def test_单次创作与疑问不误判():
     assert not plan_compiler.is_delegation_intent("")
 
 
+# ── 文档交付委派（允许带图附件；看图反推→生成套装文档场景）────────────────────
+
+def test_文档交付委派命中():
+    # 场景1：带参考图，看图反推外貌 + 阅读时尚文档 → 四季套装文档
+    assert plan_compiler.is_doc_delegation_intent(
+        "根据这张图反推角色外貌，阅读我提供的时尚穿搭文档，"
+        "生成春夏秋冬各两套套装加睡衣运动服，整理生成文档")
+    # 场景2：普通对话讨论角色外貌后，中途要求整理成综合文档
+    assert plan_compiler.is_doc_delegation_intent(
+        "把上面商讨的角色外貌结果整理成一份综合文档")
+    assert plan_compiler.is_doc_delegation_intent("汇总成文档")
+    assert plan_compiler.is_doc_delegation_intent("写成文档保存")
+
+
+def test_文档交付委派不误判():
+    # 无文档交付动作（纯指图）不抢图生图/反推
+    assert not plan_compiler.is_doc_delegation_intent("批量处理这些图")
+    assert not plan_compiler.is_doc_delegation_intent("看看这篇文档写了什么")
+    # 疑问句不委派
+    assert not plan_compiler.is_doc_delegation_intent("能帮我整理成文档吗？")
+    assert not plan_compiler.is_doc_delegation_intent("")
+
+
 # ── plan_validator ───────────────────────────────────────────────────────────
 
 def test_合法计划零错误():
@@ -284,13 +307,20 @@ def test_fill_prompt_sections_目录附件不参与抽取与回填():
                  "禁止写 TO_BE_RESOLVED、{{...}} 或任何占位符。"},
         {"name": plan_compiler.TEMPLATE_CATALOG_NAME,
          "text": "共 1 个：\n- a546d311 Krea2-高清文生图优化流\n禁止写 TO_BE_RESOLVED。"},
+        {"name": plan_compiler.RECIPE_CATALOG_NAME,
+         "text": "【固化流程预设】《套装文档流程》 id=r1（3 步）意图：看图反推外貌。"
+                 "\n禁止写 TO_BE_RESOLVED 占位符。"},
+        {"name": plan_compiler.KNOWLEDGE_CATALOG_NAME,
+         "text": "【固化知识库】条目命名/constant 判定规范。\n"
+                 "【春·套一】在正文说明文字中出现不等于套装标题。"},
     ])
     variants = plan.steps[0].params["variants"]
-    assert len(variants) == 2  # 恰好文档真实段落数，无伪变体
+    assert len(variants) == 2  # 恰好文档真实段落数，无伪变体（目录附件不参与抽取回填）
     assert filled == 2
     for v in variants:
         assert "TO_BE_RESOLVED" not in v["prompt"]
         assert "鞋履" not in v["prompt"] and "袜子纪律" not in v["prompt"]
+        assert "固化流程预设" not in v["prompt"] and "固化知识库" not in v["prompt"]
     # 回填后的计划必须过校验闸门（此前正是被 variants[14] 占位符误报拦截）
     errors = plan_validator.validate(
         plan, capabilities=all_capabilities(), configured_models={"chat", "image"})

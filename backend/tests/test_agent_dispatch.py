@@ -3023,6 +3023,21 @@ def test_委派疑问句不进委派():
     assert out["route"] == "roleplay"
 
 
+def test_带图文档任务进委派不被反推劫持():
+    # 看图反推外貌→生成套装文档：文档交付强命令允许带图附件进委派
+    out = _dispatch(
+        "根据这张图反推角色外貌，结合时尚穿搭文档整理生成四季套装文档",
+        images=["data:image/png;base64,x"], ctx=_ctx())
+    assert out["route"] == "plan"
+
+
+def test_有卡对话中途整理文档仍进委派():
+    # 普通对话商讨角色外貌后要求整理成综合文档：文档交付压过剧情默认
+    out = _dispatch("把上面商讨的角色外貌结果整理成一份综合文档",
+                    ctx=_card_ctx())
+    assert out["route"] == "plan"
+
+
 def test_plan路由在主管候选集中():
     ctx = _ctx()
     assert "plan" in ag._available_routes(False, ctx)
@@ -3073,3 +3088,101 @@ def test_可见文本兜底链拆think防跨界吞正文():
     assert "正文核心段落。" in out
     assert "格式确认" in out  # think 前缀原样保留
     assert "[{\"k\":1}]" not in out  # 真状态块照常剥除（think 内幻影引述按设计保留）
+
+
+
+# ── 固化流程预设：自由循环成功 → 草稿配方 + [[recipe:id|name]] 内联卡 ──────────
+
+def test_自由循环成功固化出内联配方卡(monkeypatch, tmp_path):
+    from app.services import capability_sandbox
+    from app.services import plan_tasks as _pt
+
+    progress: dict = {}
+
+    class _FakeProgress:
+        @staticmethod
+        def load(namespace):
+            return dict(progress)
+
+        @staticmethod
+        def save(namespace, tasks, limit=100):
+            progress.clear()
+            progress.update(tasks)
+
+    monkeypatch.setattr(_pt, "task_progress_store", _FakeProgress)
+    monkeypatch.setattr(_pt, "_agent_access_mode", lambda: "full")
+
+    decisions = [
+        {"tool": "doc.create_repo",
+         "params": {"base": str(tmp_path), "rel_path": "固化测试.md",
+                    "content": "# 四季套装"}},
+        {"done": True, "reply": "已生成套装文档"},
+    ]
+    calls = {"n": 0}
+
+    def fake_chat(base, key, model, system, user, **kw):
+        idx = min(calls["n"], len(decisions) - 1)
+        calls["n"] += 1
+        return json.dumps(decisions[idx], ensure_ascii=False)
+
+    capability_sandbox._reset_for_tests()
+    try:
+        out = ag.plan_compiler_node({
+            "user_text": "生成一份角色外貌综合文档", "images": [],
+            "_ctx": _ctx(output_dir=str(tmp_path), chat_fn=fake_chat),
+        })
+    finally:
+        for lease in capability_sandbox.active():
+            capability_sandbox.revoke(lease["id"])
+        capability_sandbox._reset_for_tests()
+
+    assert "已生成套装文档" in out["result_text"]
+    assert "[[recipe:" in out["result_text"] and out["result_text"].rstrip().endswith("]]")
+    # 文档真写进了作品 docs/（固化的是真实成功轨迹，不是嘴上说说）
+    assert (tmp_path / "docs" / "固化测试.md").is_file()
+    recipes = list(progress.values())
+    assert len(recipes) == 1
+    recipe = recipes[0]
+    assert recipe["status"] == "draft" and recipe["origin"] == "fabric"
+    assert [s["operation"] for s in recipe["plan"]["steps"]] == ["doc.create_repo"]
+
+
+def test_固化清单注入full循环上下文(monkeypatch, tmp_path):
+    from app.services import capability_sandbox
+    from app.services import plan_tasks as _pt
+
+    progress: dict = {}
+
+    class _FakeProgress:
+        @staticmethod
+        def load(namespace):
+            return dict(progress)
+
+        @staticmethod
+        def save(namespace, tasks, limit=100):
+            progress.clear()
+            progress.update(tasks)
+
+    monkeypatch.setattr(_pt, "task_progress_store", _FakeProgress)
+    monkeypatch.setattr(_pt, "_agent_access_mode", lambda: "full")
+    progress["r1"] = {
+        "id": "r1", "name": "套装文档流程", "intent": "生成套装文档",
+        "status": "saved", "origin": "fabric",
+        "plan": {"steps": [{"operation": "doc.create_repo"}]}, "created_at": 1,
+    }
+
+    def fake_chat(base, key, model, system, user, **kw):
+        assert "【固化流程预设】" in system or "【固化流程预设】" in user, \
+            "已保留配方清单必须注入自由循环上下文"
+        return json.dumps({"done": True, "reply": "ok"}, ensure_ascii=False)
+
+    capability_sandbox._reset_for_tests()
+    try:
+        ag.plan_compiler_node({
+            "user_text": "再来一次", "images": [],
+            "_ctx": _ctx(output_dir=str(tmp_path), chat_fn=fake_chat),
+        })
+    finally:
+        for lease in capability_sandbox.active():
+            capability_sandbox.revoke(lease["id"])
+        capability_sandbox._reset_for_tests()

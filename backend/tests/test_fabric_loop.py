@@ -96,3 +96,69 @@ def test_步数上限():
     )
     assert outcome.status == "step_limit"
     assert len(outcome.steps) == 3
+
+
+# ── 带图自由循环（看图反推→生成文档）────────────────────────────────────────
+
+def test_带图自由循环走多模态消息():
+    # 图片必须以 image_url 内容块进首条用户消息，不得走 JSON 字符串通道
+    captured = {}
+
+    def fake_multimodal(base, key, model, messages, **kw):
+        captured["messages"] = messages
+        return json.dumps({"done": True, "reply": "已结合图片完成"}, ensure_ascii=False)
+
+    def must_not_call(*_args, **_kwargs):
+        raise AssertionError("带图时不得走纯文本 chat_fn 通道")
+
+    outcome = fabric_loop.run_loop(
+        intent="反推外貌并生成套装文档", history="上文：讨论了角色发型。",
+        images=["data:image/png;base64,AAA"],
+        configured_models={"chat"},
+        chat_base="", chat_key="", chat_model="m",
+        chat_fn=must_not_call, chat_messages_fn=fake_multimodal,
+        max_steps=4,
+    )
+    assert outcome.status == "done"
+    system, first_user = captured["messages"][0], captured["messages"][1]
+    assert first_user["role"] == "user"
+    assert [part["type"] for part in first_user["content"]] == ["text", "image_url"]
+    assert "上文：讨论了角色发型。" in first_user["content"][0]["text"]
+    assert first_user["content"][1]["image_url"]["url"] == "data:image/png;base64,AAA"
+    assert "【附图】" in system["content"]
+
+
+def test_带图自由循环读穿搭文档落盘套装文档(tmp_path):
+    # 场景1端到端（模型决策 mock）：看图 → 读时尚文档 → 在作品 docs/ 落盘套装文档
+    fashion = tmp_path / "时尚穿搭.md"
+    fashion.write_text("## 春季\n风衣配长裙", encoding="utf-8")
+    lease = capability_sandbox.grant(
+        "fabric:img", [], mode=capability_sandbox.ACCESS_FULL)
+    decisions = [
+        {"tool": "file.read_text", "params": {"path": str(fashion)}},
+        {"tool": "doc.create_repo", "params": {
+            "base": str(tmp_path), "rel_path": "套装/唐柚-四季穿搭.md",
+            "content": "# 四季套装\n春·套一：风衣配长裙"}},
+        {"done": True, "reply": "套装文档已生成"},
+    ]
+    calls = {"n": 0}
+
+    def fake(base, key, model, messages, **kw):
+        idx = min(calls["n"], len(decisions) - 1)
+        calls["n"] += 1
+        return json.dumps(decisions[idx], ensure_ascii=False)
+
+    outcome = fabric_loop.run_loop(
+        intent="看图反推外貌，结合穿搭文档生成四季套装文档",
+        images=["data:image/png;base64,AAA"], output_dir=str(tmp_path),
+        configured_models={"chat"}, access_mode=capability_sandbox.ACCESS_FULL,
+        lease_id=lease["id"],
+        chat_base="", chat_key="", chat_model="m",
+        chat_messages_fn=fake, max_steps=8,
+    )
+    assert outcome.status == "done"
+    assert len(outcome.steps) == 2 and all(s["ok"] for s in outcome.steps)
+    written = tmp_path / "docs" / "套装" / "唐柚-四季穿搭.md"
+    assert written.is_file()
+    assert "风衣配长裙" in written.read_text(encoding="utf-8")
+    capability_sandbox.revoke(lease["id"])

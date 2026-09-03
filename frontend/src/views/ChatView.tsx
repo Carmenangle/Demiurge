@@ -462,6 +462,7 @@ export function ChatView({
   }, []);
   const [showTables, setShowTables] = useState(false);
   const [showMediaInsert, setShowMediaInsert] = useState(false);
+  const [chatDragOver, setChatDragOver] = useState(false);  // 拖拽文件到对话页面：显示高亮反馈（图片/媒体/任意文件都会进 RichInput）
   const handleSetCover = useCallback((url: string) => {
     const id = repoIdRef.current;
     if (id) setCoverRef.current(id, url);
@@ -519,8 +520,56 @@ export function ChatView({
     }
   };
 
+  // 对话页面拖拽文件→ RichInput.addFile（图片→图片栏、视频/音频→媒体栏、其他→通用文件栏）。
+  // 与 RichInput 内部 onDropFiles 二选一：RichInput 在自己的容器上 stopPropagation，这里只接管从消息列表等
+  // 空白区域冒上来的 drop；不会重复处理（拖到输入框区域走 RichInput 内部路径）。
+  const onChatDropFiles = (e: React.DragEvent) => {
+    const files = Array.from(e.dataTransfer?.files || []);
+    if (!files.length) return;
+    e.preventDefault();
+    setChatDragOver(false);
+    void (async () => {
+      for (const f of files) {
+        try { await richRef.current?.addFile(f); }
+        catch { /* addFile 内部失败时走 onNotify 提示（RichInput 通过 props 上抛） */
+          showToast(`「${f.name}」导入失败：未知错误`, "error");
+        }
+      }
+    })();
+  };
+  const onChatDragOver = (e: React.DragEvent) => {
+    if (e.dataTransfer?.types?.includes("Files")) {
+      e.preventDefault();
+      if (!chatDragOver) setChatDragOver(true);
+    }
+  };
+  const onChatDragLeave = (e: React.DragEvent) => {
+    if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setChatDragOver(false);
+  };
+
   return (
-    <div className="chat-view">
+    <div
+      className="chat-view"
+      onDrop={onChatDropFiles}
+      onDragOver={onChatDragOver}
+      onDragLeave={onChatDragLeave}
+    >
+      {/* 拖拽文件到对话页面（非输入框区）时显示的高亮遮罩 */}
+      {chatDragOver && (
+        <div
+          aria-hidden
+          style={{
+            position: "fixed", inset: 0, zIndex: 50, pointerEvents: "none",
+            background: "rgba(60, 120, 240, 0.10)",
+            border: "2px dashed rgba(60, 120, 240, 0.55)",
+            borderRadius: 12,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            color: "rgba(60, 120, 240, 0.95)", fontSize: 18, fontWeight: 600,
+          }}
+        >
+          放开把文件加到对话（图片 / 媒体 / 任意文档）
+        </div>
+      )}
       <div className="chat-view-head">
         {onBack && <button className="back-btn" onClick={onBack}>← 返回</button>}
         <h1>{repo?.name ?? "想生成什么？"}</h1>

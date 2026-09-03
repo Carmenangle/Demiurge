@@ -3,6 +3,7 @@ import { Plus, Trash2, Save, AlertTriangle } from "lucide-react";
 import { listAgents, saveAgents, defaultPrompt, DEFAULT_TOOLS, type Agent, type AgentTools } from "../../api/agents";
 import { listMcpServers, type McpServer } from "../../api/mcp";
 import { listSkills, type Skill } from "../../api/skills";
+import { deleteRecipe, keepRecipe, listRecipes, type RecipeInfo } from "../../lib/planTaskActivity";
 import type { PanelProps } from "./GeneralPanel";
 import { normalizeContextBudgets, DEFAULT_HISTORY_PER_ROLE, DEFAULT_SELFHEAL_ATTEMPTS } from "../../stores/settings";
 import { BuiltinAgentsSection } from "./BuiltinAgentsSection";
@@ -26,6 +27,7 @@ export function AgentPanel({ draft, setDraft }: PanelProps) {
   const [defPrompt, setDefPrompt] = useState("");
   const [mcpList, setMcpList] = useState<McpServer[]>([]);   // 可选的 MCP 服务器
   const [skillList, setSkillList] = useState<Skill[]>([]);   // 可选的技能
+  const [recipes, setRecipes] = useState<RecipeInfo[]>([]);  // 固化流程预设（计划配方）
 
   useEffect(() => {
     Promise.all([listAgents(), defaultPrompt()])
@@ -34,7 +36,23 @@ export function AgentPanel({ draft, setDraft }: PanelProps) {
       .finally(() => setLoading(false));
     listMcpServers().then((m) => setMcpList(m.filter((x) => x.enabled))).catch(() => {});
     listSkills().then((s) => setSkillList(s.filter((x) => x.enabled))).catch(() => {});
+    listRecipes()
+      .then((m) => setRecipes(Object.values(m || {}).sort((a, b) => (b.created_at || 0) - (a.created_at || 0))))
+      .catch(() => {});
   }, []);
+
+  const refreshRecipes = () =>
+    listRecipes()
+      .then((m) => setRecipes(Object.values(m || {}).sort((a, b) => (b.created_at || 0) - (a.created_at || 0))))
+      .catch(() => {});
+  const keepRecipePreset = async (id: string) => {
+    try { await keepRecipe(id); } catch { /* 保留失败：刷新回到真实状态 */ }
+    refreshRecipes();
+  };
+  const removeRecipePreset = async (id: string) => {
+    try { await deleteRecipe(id); } catch { /* 已不存在视为删除成功 */ }
+    refreshRecipes();
+  };
 
   // 新建 Agent 默认带普通对话优先、显式意图才调用工具的内置规则
   const add = () =>
@@ -105,6 +123,44 @@ export function AgentPanel({ draft, setDraft }: PanelProps) {
             默认「允许后访问」：写文件、烧 GPU、越域读取需逐项审批。开启「完全访问」后免逐项审批自动执行，但 GPU/LLM 配额与路径域校验照旧，全程留审计日志。
           </p>
         </div>
+      <div className="settings-subsection">
+        <h4>固化流程预设（智能编造）</h4>
+        <p className="field-hint" style={{ marginTop: 4 }}>
+          自由循环成功跑通的流程会先存为草稿，在对话里点「保留」（或在此处保留）后进入清单；
+          之后对话里出现同类目标时优先整条重放，省去逐步探索的 token（durable/expensive 步骤照常走审批与配额）。
+        </p>
+        {recipes.length === 0 ? (
+          <p className="field-hint" style={{ marginTop: 8 }}>
+            还没有固化流程。让智能编造完整跑通一次任务后，在对话里点「保留」即可固化为预设。
+          </p>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+            {recipes.map((r) => (
+              <div className="image-model-card" key={r.id} style={{ padding: "8px 10px" }}>
+                <div className="row-head">
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <strong>{r.name}</strong>
+                    <span className="field-hint" style={{ marginLeft: 8 }}>
+                      {(r.status || "saved") === "draft" ? "草稿" : "已保留"}
+                      {r.origin === "fabric" ? " · 自由循环固化" : " · 计划固化"}
+                      {(r.plan?.steps?.length || 0) > 0 ? ` · ${r.plan?.steps?.length} 步` : ""}
+                    </span>
+                  </div>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    {(r.status || "saved") === "draft" && (
+                      <button className="btn" onClick={() => void keepRecipePreset(r.id)}>保留</button>
+                    )}
+                    <button className="icon-btn" style={{ background: "#d23b3b" }} onClick={() => void removeRecipePreset(r.id)}>
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                </div>
+                {r.intent && <p className="field-hint" style={{ margin: "4px 0 0" }}>意图：{r.intent}</p>}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
       <div className="settings-subsection">
         <h4>全局上下文预算</h4>
         <div className="field-row">

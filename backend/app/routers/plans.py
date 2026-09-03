@@ -103,6 +103,23 @@ def list_recipes() -> dict:
     return plan_tasks.list_recipes()
 
 
+@router.post("/recipes/{recipe_id}/keep")
+def keep_recipe(recipe_id: str) -> dict:
+    """草稿配方 → 已保留：进入固化流程清单（可重放、可被复用匹配）。"""
+    try:
+        return plan_tasks.keep_recipe(recipe_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.delete("/recipes/{recipe_id}")
+def delete_recipe(recipe_id: str) -> dict:
+    try:
+        return plan_tasks.delete_recipe(recipe_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 class RecipeInstantiateRequest(BaseModel):
     output_dir: str
     repo_id: str = ""

@@ -2,6 +2,7 @@ import {
   forwardRef,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -45,6 +46,8 @@ export interface RichInputHandle {
   insertInspirationCard: (card: InspirationAttachment) => void; // 插入灵感卡附件（9:16 卡片，发送时图文拆分）
   insertText: (text: string) => void;  // 在文本框光标处插入文本
   replaceContent: (content: RichContent) => void;  // 用一份完整图文内容替换当前草稿
+  /** 由外部拖拽文件到对话页面时调用：图片→图片栏、视频/音频→媒体栏、其他→通用文件栏（与组件内 applyFile 同源） */
+  addFile: (file: File) => Promise<void>;
   submit: () => void;                  // 触发提交（外部发送按钮用）
   focus: () => void;
 }
@@ -182,6 +185,7 @@ export const RichInput = forwardRef<RichInputHandle, Props>(
     };
 
     const doSubmitRef = useRef<() => void>(() => {});
+    const applyFileRef = useRef<(file: File) => Promise<void>>(async () => {});  // applyFile 真源转发：供 handle.addFile 在 applyFile 定义后接管
 
     // 可提交 = 文本非空 或 有图片/灵感卡/蒙版 或 有附件。任一变化都上报，驱动外部发送按钮启用/禁用。
     useEffect(() => {
@@ -214,6 +218,7 @@ export const RichInput = forwardRef<RichInputHandle, Props>(
           ta.selectionStart = ta.selectionEnd = text.length;
         });
       },
+      addFile: (file: File) => applyFileRef.current(file),
       submit: () => doSubmitRef.current(),
       focus: () => taRef.current?.focus(),
     }));
@@ -272,10 +277,15 @@ export const RichInput = forwardRef<RichInputHandle, Props>(
       }
       void uploadAsAttachment(file, "file");
     };
+    // 把 applyFile 真源同步到 ref（供 handle.addFile 在闭包内访问）。
+    // useImperativeHandle 在 applyFile 定义之前已经声明，必须走 ref 解 TDZ。
+    useLayoutEffect(() => { applyFileRef.current = applyFile; });
     const onDropFiles = (e: React.DragEvent) => {
       const files = Array.from(e.dataTransfer?.files || []);
       if (!files.length) return;
       e.preventDefault();
+      // 阻止冒泡到 ChatView 等外部容器：避免外部容器再次把同一份文件喂进 addFile 导致重复处理。
+      e.stopPropagation();
       void (async () => {
         for (const f of files) {
           try { await applyFile(f); } catch { /* 单个文件失败不中断其余 */ }

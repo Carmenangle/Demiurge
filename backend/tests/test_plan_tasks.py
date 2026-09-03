@@ -406,3 +406,125 @@ def test_进度发布到task_progress_store(store, fake_capabilities):
     entry = store["progress"].get(task_id)
     assert entry is not None
     assert entry["status"] == "done" and entry["progress"] == "1/1 步"
+
+
+# ── 固化流程预设（fabric 轨迹 → 草稿配方 → 保留/重放，2026-09-03）──────────────
+
+def _fabric_steps(root) -> list[dict]:
+    """模拟一次成功的自由循环轨迹：读穿搭文档 → 写套装文档（含失败步与环境参数）。"""
+    from pathlib import Path as _Path
+
+    root = str(root)
+    return [
+        {"tool": "file.read_text", "params": {"path": str(_Path(root) / "时尚穿搭.md")}, "ok": True},
+        {"tool": "doc.create_repo",
+         "params": {"base": str(root), "repo_id": "work", "output_dir": str(root),
+                    "rel_path": "套装/固化.md", "content": "# 四季套装"},
+         "ok": True},
+        {"tool": "file.read_text", "params": {"path": "D:/不存在.md"}, "ok": False},
+    ]
+
+
+def test_自由循环轨迹固化为草稿配方(store):
+    root = str(store["path"].parent)
+    recipe = plan_tasks.solidify_steps(
+        intent="看图反推外貌生成套装文档", steps=_fabric_steps(root),
+        output_dir=root, name="套装文档流程")
+    assert recipe["status"] == "draft" and recipe["origin"] == "fabric"
+    assert recipe["name"] == "套装文档流程"
+    plan = recipe["plan"]
+    assert [s["operation"] for s in plan["steps"]] == ["file.read_text", "doc.create_repo"]
+    # 环境属主参数剥离：重放时由 submit_task 重新归一注入
+    doc_params = plan["steps"][1]["params"]
+    assert not ({"base", "repo_id", "output_dir"} & set(doc_params))
+    assert plan["approval_required"] == ["doc.create_repo"]
+    assert plan["budgets"]["max_gpu_tasks"] == 0
+    assert plan["repo_id"] == ""
+
+
+def test_纯只读轨迹不固化(store):
+    with pytest.raises(ValueError, match="不固化"):
+        plan_tasks.solidify_steps(
+            intent="随便看看", steps=[
+                {"tool": "file.read_text", "params": {"path": "D:/x.md"}, "ok": True}],
+            output_dir=str(store["path"].parent))
+
+
+def test_草稿配方不能直接重放_保留后可(store):
+    root = str(store["path"].parent)
+    recipe = plan_tasks.solidify_steps(
+        intent="固化重放链路", steps=_fabric_steps(root), output_dir=root)
+    with pytest.raises(ValueError, match="草稿"):
+        plan_tasks.instantiate_recipe(recipe["id"], output_dir=root, repo_id="work")
+    plan_tasks.keep_recipe(recipe["id"])
+    submitted = plan_tasks.instantiate_recipe(recipe["id"], output_dir=root, repo_id="work")
+    task = plan_tasks.get_task(submitted["task_id"])
+    assert task is not None and task["intent"].startswith("[配方:固化重放链路]")
+
+
+def test_配方keep与delete(store):
+    root = str(store["path"].parent)
+    recipe = plan_tasks.solidify_steps(
+        intent="保留删除链路", steps=_fabric_steps(root), output_dir=root)
+    kept = plan_tasks.keep_recipe(recipe["id"])
+    assert kept["status"] == "saved"
+    assert plan_tasks.delete_recipe(recipe["id"]) == {"ok": True}
+    with pytest.raises(LookupError):
+        plan_tasks.keep_recipe(recipe["id"])
+    with pytest.raises(LookupError):
+        plan_tasks.delete_recipe(recipe["id"])
+
+
+def test_重放计划内instantiate_recipe的output_dir由环境归一(store):
+    root = str(store["path"].parent)
+    recipe = plan_tasks.solidify_steps(
+        intent="嵌套重放", steps=_fabric_steps(root), output_dir=root)
+    plan_tasks.keep_recipe(recipe["id"])
+    plan = _plan([PlanStep(id="s1", operation="plan.instantiate_recipe",
+                           params={"recipe_id": recipe["id"]})], intent="编排里重放配方")
+    out = plan_tasks.submit_task(plan, output_dir=root)
+    task = plan_tasks.get_task(out["task_id"])
+    params = task["steps"][0]["params"]
+    assert params["output_dir"] == root and params["recipe_id"] == recipe["id"]
+
+
+def test_instantiate_recipe能力注册为durable():
+    cap = capability_registry.get("plan.instantiate_recipe")
+    assert cap is not None
+    assert cap.side_effect_level == "durable"
+    assert cap.handler == "app.services.capability_handlers:instantiate_recipe"
+    assert "recipe_id" in cap.params_schema["required"]
+
+
+def test_instantiate_recipe_handler拒绝非真源output_dir():
+    # handler 层等值校验：模型/客户端不得借能力指定任意目录（submit 归一之外的兜底）
+    with pytest.raises(ValueError, match="仓库根目录"):
+        capability_handlers.instantiate_recipe("whatever", output_dir=r"D:\别的目录")
+
+
+def test_配方keep与delete路由端点(monkeypatch):
+    from fastapi import HTTPException
+
+    from app.routers import plans as plans_router
+
+    progress: dict = {}
+
+    class _FakeProgress:
+        @staticmethod
+        def load(namespace):
+            return dict(progress)
+
+        @staticmethod
+        def save(namespace, tasks, limit=100):
+            progress.clear()
+            progress.update(tasks)
+
+    monkeypatch.setattr(plan_tasks, "task_progress_store", _FakeProgress)
+    root = "D:/tmp/固化路由"
+    recipe = plan_tasks.solidify_steps(intent="路由端点", steps=_fabric_steps(root),
+                                       output_dir=root)
+    assert plans_router.keep_recipe(recipe["id"])["status"] == "saved"
+    assert plans_router.delete_recipe(recipe["id"]) == {"ok": True}
+    with pytest.raises(HTTPException) as ei:
+        plans_router.delete_recipe(recipe["id"])
+    assert ei.value.status_code == 404

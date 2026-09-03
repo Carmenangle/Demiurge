@@ -8,6 +8,10 @@
 
 第一版边界：full 模式跑完整自由循环；approval 模式遇到 durable/expensive
 且无租约时暂停返回 awaiting_approval（批准后由调用方继续）。
+
+带图任务（如看图反推外貌→生成套装文档）：images 非空时首条 user 消息变为
+多模态内容块（text + image_url），模型调用走 chat_messages 多消息通道；
+structured 原生通道传输的是 JSON 字符串，载不动图片，带图时跳过。
 """
 from __future__ import annotations
 
@@ -67,6 +71,13 @@ _SYSTEM = (
 )
 
 
+def _chat_messages(base_url: str, api_key: str, model: str,
+                   messages: list[dict], **kwargs) -> str:
+    """带图自由循环的默认模型通道：多消息列表直发（content 允许多模态内容块）。"""
+    from app.services import llm
+    return llm.chat_messages(base_url, api_key, model, messages, **kwargs)
+
+
 def _dispatch(operation: str, params: dict) -> dict:
     cap = capability_registry.get(operation)
     if cap is None:
@@ -90,15 +101,29 @@ def run_loop(*, intent: str, history: str = "", capabilities: list[dict] | None 
              output_dir: str = "", configured_models: set[str] | frozenset[str] = frozenset(),
              chat_base: str = "", chat_key: str = "", chat_model: str = "",
              chat_fn: Callable | None = None, structured_chat_fn: Callable | None = None,
+             images: list[str] | None = None,
+             chat_messages_fn: Callable | None = None,
              temperature: float = 0.2, proxy_kwargs: dict | None = None,
              max_steps: int = 24, trace: Callable | None = None) -> FabricOutcome:
-    """自由循环。返回 FabricOutcome。"""
+    """自由循环。返回 FabricOutcome。images 非空时走多模态消息通道。"""
     caps = capabilities or capability_registry.with_availability(configured_models)
+    images = [u for u in (images or []) if str(u).strip()]
     system = (_SYSTEM.replace("__MANIFEST__", _manifest_lines(caps))
               .replace("__OUTPUT_DIR__", output_dir or "（未指定）")
               .replace("__INTENT__", intent))
+    if images:
+        system += (f"\n【附图】本轮随消息附带 {len(images)} 张图片（在首条用户消息里），"
+                   "需要看图的任务（如反推外貌特征）直接观察图片内容，不要声称看不到图。")
     messages: list[dict] = [{"role": "system", "content": system}]
-    if history:
+    if images:
+        # 多模态首条消息：图片必须以 image_url 内容块直达模型，不能进 JSON 字符串协议
+        content: list[dict[str, Any]] = [{
+            "type": "text",
+            "text": history or "（用户目标见系统提示，请结合所附图片完成。）",
+        }]
+        content += [{"type": "image_url", "image_url": {"url": u}} for u in images]
+        messages.append({"role": "user", "content": content})
+    elif history:
         messages.append({"role": "user", "content": history})
     outcome = FabricOutcome()
     call_kwargs: dict[str, Any] = {"temperature": temperature, "max_tokens": 16000,
@@ -109,15 +134,23 @@ def run_loop(*, intent: str, history: str = "", capabilities: list[dict] | None 
     for step_index in range(1, max_steps + 1):
         decision: FabricDecision | None = None
         try:
-            result = structured_output.invoke(
-                FabricDecision,
-                native=(lambda u=json.dumps(messages, ensure_ascii=False):
-                        structured_chat_fn(*call_args[:4], u, schema=FabricDecision, **call_kwargs))
-                if callable(structured_chat_fn) else None,
-                legacy=lambda u=json.dumps(messages, ensure_ascii=False):
+            if images:
+                # 带图：structured 原生通道传 JSON 字符串载不动图片，直接走多消息文本通道
+                sender = chat_messages_fn if callable(chat_messages_fn) else _chat_messages
+                result = structured_output.validate_text(
+                    sender(chat_base, chat_key, chat_model, messages, **call_kwargs),
+                    FabricDecision, trace=trace,
+                )
+            else:
+                result = structured_output.invoke(
+                    FabricDecision,
+                    native=(lambda u=json.dumps(messages, ensure_ascii=False):
+                            structured_chat_fn(*call_args[:4], u, schema=FabricDecision, **call_kwargs))
+                    if callable(structured_chat_fn) else None,
+                    legacy=lambda u=json.dumps(messages, ensure_ascii=False):
                         chat_fn(*call_args[:4], u, **call_kwargs),
-                trace=trace,
-            )
+                    trace=trace,
+                )
             decision = result.value
         except Exception as exc:  # noqa: BLE001 - 模型决策失败如实返回
             outcome.status = "error"
@@ -158,6 +191,9 @@ def run_loop(*, intent: str, history: str = "", capabilities: list[dict] | None 
         # 工作区归一：shell 的 cwd 默认锁定为当前作品目录（模型不得随意指定）
         if operation == "project.run_shell" and not str(params.get("cwd") or "").strip():
             params["cwd"] = output_dir or ""
+        # 配方重放的落盘域同样环境归一（handler 内还有配置真源等值校验兜底）
+        if operation == "plan.instantiate_recipe" and not str(params.get("output_dir") or "").strip():
+            params["output_dir"] = output_dir or ""
         if trace is not None:
             trace("tool.call", operation=operation, params=params)
         try:

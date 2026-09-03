@@ -10,7 +10,7 @@ import { userMessagePlainText, userMessageRichContent } from "../../lib/chatGene
 import type { PortOp } from "../../api/ai";
 import { attachmentUrl, proxyImageUrl, selectInspiration as selectInspirationPost, saveInspirationCard } from "../../api/ai";
 import { pushInspirationsToCanvas, inspirationToCanvasPayload, inspirationCanvasLabel } from "../../lib/inspirationInsert";
-import { approvePlanTask, cancelPlanTask, getPlanTask } from "../../lib/planTaskActivity";
+import { approvePlanTask, cancelPlanTask, deleteRecipe, getPlanTask, keepRecipe } from "../../lib/planTaskActivity";
 import type { RichContent } from "../RichInput";
 import { CopyButton } from "../CopyButton";
 import { openLightbox } from "../Lightbox";
@@ -384,6 +384,8 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
   const [mergingAudio, setMergingAudio] = useState(false);
   const [planActions, setPlanActions] = useState<Record<string, string>>({});
   const [planImages, setPlanImages] = useState<Record<string, string[]>>({});
+  // 固化询问卡动作状态：undefined=待选择，kept/removed=已处理
+  const [recipeActions, setRecipeActions] = useState<Record<string, "kept" | "removed">>({});
   const menuRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     if (!menuOpen) return;
@@ -422,9 +424,17 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
     if (v) planTaskIds.push(v);
     return "";
   }).trim();
+  // 固化询问标记：[[recipe:<id>|<name>]] → 自由循环成功后的「保留/不保留」内联卡
+  const recipeOffers: { id: string; name: string }[] = [];
+  const withRecipe = withPlan.replace(/\[\[recipe:([^|\]]+)\|([^\]]+)\]\]/g, (_, id, name) => {
+    const rid = String(id).trim();
+    const rname = String(name).trim();
+    if (rid && rname) recipeOffers.push({ id: rid, name: rname });
+    return "";
+  }).trim();
   // 显示层宏替换：模型输出/历史里残留的字面 {{user}}/{{char}} 统一替成人设名/角色名（缺省 user→「我」），
   // 像全局宏一样在渲染处生效（不改存储，与开场白/提示词侧对齐）。
-  const cleanText = macros ? substituteMacros(withPlan, macros.char, macros.user) : withPlan;
+  const cleanText = macros ? substituteMacros(withRecipe, macros.char, macros.user) : withRecipe;
   const orderedChunks = orderedMediaParts.length > 0
     ? cleanText.split(/\uE000LAF_MEDIA_(\d+)\uE001/g)
     : [];
@@ -732,7 +742,7 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
             ))}
           </div>
         )}
-        {planTaskIds.length > 0 && (
+        {(planTaskIds.length > 0 || recipeOffers.length > 0) && (
           <div className="cmd-suggest">
             {planTaskIds.map((taskId) => planActions[taskId] ? (
               <span key={taskId} className="cmd-chip" style={{ opacity: 0.8 }}>
@@ -813,6 +823,50 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
                   <img key={u} src={u} alt="生成图" style={{ width: 72, height: 72, objectFit: "cover", borderRadius: 6, border: "1px solid #444" }} />
                 ))}
               </div>
+            ))}
+            {recipeOffers.map((offer) => recipeActions[offer.id] ? (
+              <span key={offer.id} className="cmd-chip" style={{ opacity: 0.8 }}>
+                {recipeActions[offer.id] === "kept"
+                  ? `已保留固化流程《${offer.name}》（设置 → 智能体 → 固化流程预设可管理）`
+                  : `已不保留《${offer.name}》`}
+              </span>
+            ) : (
+              <span key={offer.id} style={{ display: "inline-flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                <span className="cmd-chip" style={{ opacity: 0.75 }}>
+                  把这次流程固化为预设《{offer.name}》？
+                </span>
+                <button
+                  className="cmd-chip"
+                  onClick={async () => {
+                    try {
+                      await keepRecipe(offer.id);
+                      setRecipeActions((p) => ({ ...p, [offer.id]: "kept" }));
+                    } catch (e) {
+                      // 保留失败不动状态：卡片保持可重试，不谎报已处理
+                      console.warn("keepRecipe failed", e);
+                    }
+                  }}
+                  title="保留后进入固化流程清单，后续同类目标可整条重放（省 token，durable/expensive 步骤照常审批）"
+                >
+                  <Check size={12} style={{ verticalAlign: "-1px", marginRight: 4 }} />
+                  保留
+                </button>
+                <button
+                  className="cmd-chip"
+                  onClick={async () => {
+                    try {
+                      await deleteRecipe(offer.id);
+                    } catch (e) {
+                      console.warn("deleteRecipe failed", e);
+                    }
+                    setRecipeActions((p) => ({ ...p, [offer.id]: "removed" }));
+                  }}
+                  title="删除本次固化的草稿配方"
+                >
+                  <X size={12} style={{ verticalAlign: "-1px", marginRight: 4 }} />
+                  不保留
+                </button>
+              </span>
             ))}
           </div>
         )}

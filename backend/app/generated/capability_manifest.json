@@ -2,6 +2,54 @@
   "version": 1,
   "capabilities": [
     {
+      "operation": "character.import_source",
+      "category": "character",
+      "description": "从本地文件导入一张 ST/通用角色卡（PNG 内嵌或 JSON）到角色卡源库（目录由后端配置真源决定）。TavernCard V1/V2/V3 原生兼容；可选把卡内嵌世界书外拆为独立世界书。",
+      "params_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "overwrite": {
+            "type": "boolean"
+          },
+          "extract_worldbook": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      },
+      "needs_model": null,
+      "side_effect_level": "durable",
+      "channel": "sync",
+      "handler": "app.services.capability_handlers:import_source_card"
+    },
+    {
+      "operation": "character.migrate_scan",
+      "category": "character",
+      "description": "只读扫描一张 ST/通用卡（PNG 内嵌或 JSON）或独立世界书/预设/正则文件，产出迁移体检报告：逐条目标注待转写点（注入位语义 order/depth/atDepth、constant 越权、keys 缺失/过长、渲染层 <status>/<roll>、运行时表格 <if cell=…>、dict 容器、first_mes 空、视觉画像前缀缺失）。第二套固定流程（机械+LLM 转写）的机械前置；不写任何文件，命中项交 LLM 判断转写后经 upsert/import 落盘。",
+      "params_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      },
+      "needs_model": null,
+      "side_effect_level": "readonly",
+      "channel": "sync",
+      "handler": "app.services.capability_handlers:migrate_scan_source"
+    },
+    {
       "operation": "character.upsert_repo",
       "category": "character",
       "description": "把 JSON 角色卡归一后写入当前作品目录（<作品>/<卡名>/card.json，覆盖式）。写入路径由执行环境归一注入，模型不得填 base。",
@@ -251,6 +299,36 @@
       "side_effect_level": "reversible",
       "channel": "sync",
       "handler": "app.services.capability_handlers:collect_comfy_outputs"
+    },
+    {
+      "operation": "plan.instantiate_recipe",
+      "category": "repo",
+      "description": "按固化流程预设（计划配方）整条重放：提交到执行队列，durable/expensive 步骤照常走审批与配额闸门。仅限已保留（saved）的配方。",
+      "params_schema": {
+        "type": "object",
+        "properties": {
+          "recipe_id": {
+            "type": "string"
+          },
+          "output_dir": {
+            "type": "string"
+          },
+          "repo_id": {
+            "type": "string"
+          },
+          "param_overrides": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "recipe_id"
+        ],
+        "additionalProperties": false
+      },
+      "needs_model": null,
+      "side_effect_level": "durable",
+      "channel": "sync",
+      "handler": "app.services.capability_handlers:instantiate_recipe"
     },
     {
       "operation": "project.run_shell",
