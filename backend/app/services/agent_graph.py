@@ -115,6 +115,56 @@ def _proxy_kw(ctx: dict, key: str = "chat_proxy") -> dict:
     value = (ctx.get(key, "") or "").strip()
     return {"proxy": value} if value else {}
 
+
+# 固化知识库（DATA_DIR/agent_knowledge/*.md）：流程规范/映射表永远在线
+KNOWLEDGE_DIR_NAME = "agent_knowledge"
+KNOWLEDGE_MAX_FILES = 4
+KNOWLEDGE_PER_FILE_CHARS = 20000
+
+
+def _knowledge_catalog_text() -> str:
+    """扫描固化知识目录拼接注入文本（第三类目录附件，与配方清单同机制）。"""
+    from app.config import DATA_DIR
+    root = DATA_DIR / KNOWLEDGE_DIR_NAME
+    if not root.is_dir():
+        return ""
+    docs: list[str] = []
+    for path in sorted(root.glob("*.md")):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")[:KNOWLEDGE_PER_FILE_CHARS]
+        except OSError:
+            continue
+        if text.strip():
+            docs.append(f"【知识：{path.stem}】\n{text.strip()}")
+        if len(docs) >= KNOWLEDGE_MAX_FILES:
+            break
+    if not docs:
+        return ""
+    return ("【固化知识库】以下是本项目沉淀的流程规范与映射表，执行相关任务时必须遵守"
+            "其中的结构与质量标准，禁止凭印象另搞一套：\n\n" + "\n\n".join(docs))
+
+
+def _recipe_catalog_text() -> str:
+    """已保留（saved）固化流程预设清单：注入编译/自由循环上下文供复用匹配（草稿不出现）。"""
+    try:
+        from app.services import plan_tasks as _pt
+        saved = [r for r in _pt.list_recipes().values()
+                 if str(r.get("status") or "saved") == "saved"]
+    except Exception:  # noqa: BLE001 - 清单不可用时不阻断对话
+        return ""
+    if not saved:
+        return ""
+    lines = []
+    for r in sorted(saved, key=lambda x: str(x.get("created_at") or 0), reverse=True):
+        plan = r.get("plan") or {}
+        steps = plan.get("steps") or []
+        ops = "、".join(str(s.get("operation") or "") for s in steps[:6])
+        lines.append(f"- 《{r.get('name')}》 id={r.get('id')}"
+                     f"（{len(steps)} 步：{ops}）意图：{r.get('intent') or ''}")
+    return ("【固化流程预设】以下是用户已确认固化的可重放流程。用户目标与某条高度一致时，"
+            "优先调用 plan.instantiate_recipe 整条重放（省 token，durable/expensive 步骤照常走审批）；"
+            "不完全一致才逐步编排：\n" + "\n".join(lines))
+
 def _supervisor_route(text: str, image_count: int, ctx: dict) -> tuple[str, bool, list[str], str]:
     """每个普通用户轮次都由模型做唯一语义判断；代码只提供并复核能力清单。
     返回 (route, confident, alternatives, scene)。scene 复用同一次调用产出，零额外往返。"""
@@ -253,10 +303,13 @@ def supervisor_node(state: AgentState) -> dict:
     forced_route = str(ctx.get("forced_route") or "").strip().lower()
     if forced_route:
         route = forced_route if _route_available(forced_route, has_images, ctx) else chat_default
-    elif not has_images and _route_available("plan", has_images, ctx) \
-            and plan_compiler.is_delegation_intent(text):
-        # 路由界限·委派强命令层：高置信规模词+资产动作 / 显式计划语言 → 委派（零 LLM）。
-        # 误判方向：模糊表达不改剧情默认；带图附件不走此层（避免劫持图生图/反推）。
+    elif _route_available("plan", has_images, ctx) and (
+            (not has_images and plan_compiler.is_delegation_intent(text))
+            or plan_compiler.is_doc_delegation_intent(text)):
+        # 路由界限·委派强命令层：高置信规模词+资产动作 / 显式计划语言 / 文档交付
+        # 强命令 → 委派（零 LLM）。文档交付允许带图附件：参考图在此是素材
+        # （看图反推→生成套装文档），不是图生图/反推的目标。
+        # 误判方向：模糊表达不改剧情默认。
         route = "plan"
         ctx["scene"] = scene_classify.infer_scene(text)
         run_trace.emit(ctx, "agent.completed", agent="supervisor", route="plan",
@@ -503,8 +556,15 @@ def plan_compiler_node(state: AgentState) -> dict:
             subject=f"fabric:{ctx.get('thread_id') or ctx.get('message_id') or 'sess'}",
             capabilities=[], ttl_seconds=86400, approved_by="full_mode",
             mode=capability_sandbox.ACCESS_FULL)
+        history_text = agent_context.history_text(ctx)
+        recipe_catalog = _recipe_catalog_text()
+        if recipe_catalog:
+            history_text = (history_text + "\n\n" + recipe_catalog).strip()
+        knowledge = _knowledge_catalog_text()
+        if knowledge:
+            history_text = (history_text + "\n\n" + knowledge).strip()
         outcome = fabric_loop.run_loop(
-            intent=text, history=agent_context.history_text(ctx),
+            intent=text, history=history_text,
             capabilities=capability_registry.with_availability(configured),
             access_mode=capability_sandbox.ACCESS_FULL,
             lease_id=lease["id"], output_dir=output_dir,
@@ -513,22 +573,43 @@ def plan_compiler_node(state: AgentState) -> dict:
             chat_model=ctx.get("route_model") or ctx["chat_model"],
             chat_fn=ctx.get("chat_fn") or _llm.chat,
             structured_chat_fn=ctx.get("structured_chat_fn"),
+            images=list(state.get("images") or []),
             proxy_kwargs=_proxy_kw(ctx),
             trace=lambda event, **data: run_trace.emit(ctx, event, agent="fabric", **data),
         )
         if outcome.status == "done":
-            return {"result_text": outcome.reply,
+            # 固化询问（2026-09-03）：成功的 durable/expensive 轨迹自动存为草稿配方，
+            # 回复带 [[recipe:id|name]] 标记由前端出「保留/不保留」内联卡——
+            # 保留后进入固化流程清单，下次同类目标可 plan.instantiate_recipe 零探索重放。
+            recipe_marker = ""
+            try:
+                recipe = plan_tasks.solidify_steps(
+                    intent=text, steps=outcome.steps, output_dir=output_dir, name=text[:40])
+                recipe_marker = f"\n\n[[recipe:{recipe['id']}|{recipe['name']}]]"
+                run_trace.emit(ctx, "fabric.solidified", status="draft",
+                               recipe_id=recipe["id"], steps=len(outcome.steps))
+            except ValueError as exc:
+                run_trace.emit(ctx, "fabric.solidified", status="skipped", reason=str(exc))
+            except Exception as exc:  # noqa: BLE001 - 固化失败不影响本轮结果
+                run_trace.emit(ctx, "fabric.solidified", status="error", error=str(exc))
+            return {"result_text": outcome.reply + recipe_marker,
                     "trace": trace + ["🧵 智能编造自由循环完成"]}
         return {"result_text": f"智能编造执行未完成（{outcome.status}）：{outcome.error}",
                 "trace": trace + [f"🧵 智能编造循环中断：{outcome.status}"]}
 
-    # 编译期预读：用户消息里显式写出的本地文本文件（仅用户明示的路径，容量封顶）。
-    # 内容进编译上下文，使计划能带逐套装等运行时才能确定的精确参数；trace 留痕。
+    # 编译期预读：本轮消息 + 历史用户消息里显式写出的本地文本文件（仅用户明示的
+    # 路径，容量封顶）。历史用户消息兜底「根据上一轮的批量生成进行修改」这类不带
+    # 路径的指代——预读必须在编译期完成，执行器无 LLM，file.read_text 读出的内容
+    # 填不进 variants（2026-09-03 实锤：模型编了「套装1..10」占位）。
     attachments: list[dict] = []
     try:
+        _scan_text = text
+        for _hitem in (ctx.get("history") or []):
+            if isinstance(_hitem, dict) and _hitem.get("role") == "user":
+                _scan_text += "\n" + str(_hitem.get("content") or "")
         for raw_path in set(re.findall(
                 r"[A-Za-z]:\\[^\s<>|？?」』]*\.(?:md|txt|json|csv|log|ya?ml|xml|html)",
-                text)):
+                _scan_text)):
             try:
                 read = plan_compiler.read_user_file(raw_path)
             except Exception as exc:  # noqa: BLE001 - 预读失败如实留痕，不阻断编译
@@ -574,6 +655,16 @@ def plan_compiler_node(state: AgentState) -> dict:
                                     "禁止写 TO_BE_RESOLVED、{{...}} 或任何占位符。"})
         except Exception:  # noqa: BLE001 - 模板库不可用时跳过
             pass
+        recipe_catalog = _recipe_catalog_text()
+        if recipe_catalog:
+            # 固化流程清单进编译上下文：意图高度一致时编译器可编排 plan.instantiate_recipe 整条重放
+            attachments.append({"name": plan_compiler.RECIPE_CATALOG_NAME,
+                                "text": recipe_catalog})
+        knowledge = _knowledge_catalog_text()
+        if knowledge:
+            # 固化知识库进编译上下文：流程规范/映射表对智能编造永远在线
+            attachments.append({"name": plan_compiler.KNOWLEDGE_CATALOG_NAME,
+                                "text": knowledge})
     except Exception as exc:  # noqa: BLE001
         run_trace.emit(ctx, "plan.attachments", status="error", error=str(exc))
     # 编译用户消息时剥掉【文件参考】全文块：附件正文已进 attachments（骨架供模型看），

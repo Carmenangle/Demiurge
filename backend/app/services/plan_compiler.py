@@ -42,6 +42,25 @@ def is_delegation_intent(text: str) -> bool:
     return bool(_SCALE_RE.search(source) and _ACTION_RE.search(source))
 
 
+# 文档交付动词与「文档」的近邻共现（生成文档/整理成文档/汇总成综合文档…）
+_DOC_DELIVERY_RE = re.compile(
+    r"(生成|整理|汇总|写成|输出|导出)[^。！!？?\n]{0,10}文档"
+    r"|文档[^。！!？?\n]{0,6}(汇总|归档)")
+
+
+def is_doc_delegation_intent(text: str) -> bool:
+    """文档交付强命令判定：明确要求产出文档即委派智能编造。
+
+    与 is_delegation_intent 的区别：允许带图片附件（看图反推→生成套装文档这类
+    任务带参考图，不能被「带图不走委派」的防劫持规则挡掉——图片在此是素材而非
+    图生图/反推的目标）。疑问句仍不委派。
+    """
+    source = (text or "").strip()
+    if not source or _QUESTION_RE.search(source):
+        return False
+    return bool(_DOC_DELIVERY_RE.search(source))
+
+
 @dataclass
 class CompileOutcome:
     plan: GenerationPlan | None = None
@@ -225,6 +244,7 @@ def compile_plan(*, intent: str, history: str = "", attachments: list[dict] | No
         # 代码保真：同模板的多个 submit_batch 合并为一个（模型可能把「分批」误解为
         # 拆多个提交步骤 → 重复烧 GPU）。合并后 inputs_from 引用自动重写到保留步骤。
         _merge_duplicate_submits(plan)
+        _merge_duplicate_collects(plan)
         # 运行环境参数归一：collect 的落盘目标由环境决定，不允许模型占位/编造；
         # approval_required 由编译器确定性汇总（模型只列步骤，不负责汇总）
         from app.services.capability_registry import get as _cap_get
@@ -326,7 +346,10 @@ _SECTION_SEP_RE = re.compile(r"^={5,}\s*$")
 # 延伸进目录文本会把 LoRA 清单/红线说明灌进 variant prompt。
 LORA_CATALOG_NAME = "本机 LoRA 目录"
 TEMPLATE_CATALOG_NAME = "本机工作流模板目录"
-CATALOG_ATTACHMENT_NAMES = frozenset({LORA_CATALOG_NAME, TEMPLATE_CATALOG_NAME})
+RECIPE_CATALOG_NAME = "固化流程预设清单"
+KNOWLEDGE_CATALOG_NAME = "智能编造知识库"
+CATALOG_ATTACHMENT_NAMES = frozenset(
+    {LORA_CATALOG_NAME, TEMPLATE_CATALOG_NAME, RECIPE_CATALOG_NAME, KNOWLEDGE_CATALOG_NAME})
 
 
 def _is_section_heading(stripped: str) -> bool:
@@ -441,6 +464,40 @@ def fill_prompt_sections(plan, attachments: list[dict]) -> int:
                 ]
                 filled += len(sections)
     return filled
+
+
+def _merge_duplicate_collects(plan: GenerationPlan) -> None:
+    """代码保真：多个 media.collect_comfy_outputs 合并为一个（模型偶发重复排采集）。
+
+    保留第一个 collect，把其余 collect 的 inputs_from 与 names 去重合并进去，
+    后续步骤引用被删除 collect 时重写到保留步骤。
+    """
+    collects = [s for s in plan.steps if s.operation == "media.collect_comfy_outputs"]
+    if len(collects) < 2:
+        return
+    keep = collects[0]
+    replace: dict[str, str] = {}
+    for dup in collects[1:]:
+        for ref in dup.inputs_from or []:
+            if ref not in (keep.inputs_from or []):
+                keep.inputs_from = (keep.inputs_from or []) + [ref]
+        _names = keep.params.setdefault("names", [])
+        for name in dup.params.get("names") or []:
+            if name not in _names:
+                _names.append(name)
+        replace[dup.id] = keep.id
+    plan.steps = [s for s in plan.steps if s.id not in replace]
+    for step in plan.steps:
+        rewritten: list[str] = []
+        for ref in step.inputs_from or []:
+            head = ref.split(".", 1)[0]
+            if head in replace:
+                new_ref = replace[head] + ref[len(head):]
+                if new_ref not in rewritten:
+                    rewritten.append(new_ref)
+            elif ref not in rewritten:
+                rewritten.append(ref)
+        step.inputs_from = rewritten
 
 
 def _merge_duplicate_submits(plan: GenerationPlan) -> None:
