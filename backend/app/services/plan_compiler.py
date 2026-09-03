@@ -403,6 +403,28 @@ def extract_all_sections(doc_text: str) -> list[tuple[str, str]]:
     return [(n, b) for n, b in sections if len(b) > 200 and "masterpiece" in b]
 
 
+def _common_variant_extra(variants: list) -> dict:
+    """提取所有变体共有且值相同的非内容字段（如 width/height/seed）。
+
+    fill_prompt_sections 重建变体时只写 name/prompt，会丢模型写入的模板注入参数；
+    这些参数通常是全批统一的（宽高/种子/批次），提取后合并回每个重建变体。
+    """
+    extra: dict[str, Any] = {}
+    first = True
+    for item in variants:
+        if not isinstance(item, dict):
+            continue
+        for key, value in item.items():
+            if key in ("name", "prompt", "prompt_section", "positive_prompt"):
+                continue
+            if first:
+                extra[key] = value
+            elif extra.get(key) != value:
+                extra.pop(key, None)
+        first = False
+    return extra
+
+
 def fill_prompt_sections(plan, attachments: list[dict]) -> int:
     """把变体里的 prompt_section 引用按预读附件机械回填为完整提示词（确定性，无 LLM）。
 
@@ -430,8 +452,9 @@ def fill_prompt_sections(plan, attachments: list[dict]) -> int:
                    for v in variants):
             sections = extract_all_sections(docs)
             if sections:
+                _common = _common_variant_extra(variants)
                 step.params["variants"] = [
-                    {"name": name, "prompt": body} for name, body in sections
+                    {"name": name, "prompt": body, **_common} for name, body in sections
                 ]
                 filled += len(sections)
                 continue
@@ -459,8 +482,9 @@ def fill_prompt_sections(plan, attachments: list[dict]) -> int:
                 for v in variants
             )
             if len(variants) != len(sections) or has_junk:
+                _common = _common_variant_extra(variants)
                 step.params["variants"] = [
-                    {"name": name, "prompt": body} for name, body in sections
+                    {"name": name, "prompt": body, **_common} for name, body in sections
                 ]
                 filled += len(sections)
     return filled
