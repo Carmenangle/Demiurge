@@ -48,18 +48,20 @@ export function ProseStyleSection() {
   return (
     <div className="settings-subsection" style={{ marginTop: 16 }}>
       <h4 style={{ margin: "0 0 8px" }}>剧情文风（去 AI 味）</h4>
-      <label className="field" style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
-        <input
-          type="checkbox"
-          checked={cfg.enabled}
-          onChange={(e) => setCfg({ ...cfg, enabled: e.target.checked })}
-        />
-        <span>
-          <strong>启用文风检查与预防</strong>
-          <br />
-          <small style={{ color: "var(--text-muted)" }}>
+      <label style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16, padding: "2px 0", cursor: "pointer" }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>启用文风检查与预防</div>
+          <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>
             关闭：不注入文风约束段，也不再产出文风诊断（固定搭配/密度/节拍/开场趋同）。
-          </small>
+          </div>
+        </div>
+        <span className="regex-toggle" style={{ marginTop: 4, flexShrink: 0 }} title={cfg.enabled ? "已启用" : "已禁用"}>
+          <input
+            type="checkbox"
+            checked={cfg.enabled}
+            onChange={(e) => setCfg({ ...cfg, enabled: e.target.checked })}
+          />
+          <span className="regex-toggle-track" />
         </span>
       </label>
       <div style={{ display: "flex", gap: 12, marginTop: 8, flexWrap: "wrap" }}>
