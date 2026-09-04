@@ -6,6 +6,8 @@ import json
 import re
 import sys
 
+import chromadb
+
 sys.path.insert(0, r"D:\tool\Demiurge\backend")
 
 from app.services import rag_store, generation_store
@@ -95,7 +97,6 @@ for created, img in records:
     print("repaired:", created)
 
 # 验证
-import chromadb
 client = chromadb.PersistentClient(path=r"D:\tool\Demiurge\backend\data\chroma")
 col = client.get_collection(f"repo_{REPO}")
 r2 = col.get(include=["metadatas"], limit=10000)
