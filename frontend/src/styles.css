@@ -2745,6 +2745,44 @@ textarea.text-tool-short-input { height: auto; min-height: 0; resize: none; over
   margin-bottom: 8px;
 }
 
+/* 智能编造知识库 smart/always 单选卡：圆角 + 边框 + 选中态边框高亮，与 image-model-card 同款视觉 */
+.knowledge-mode-cards {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+  align-items: stretch;
+}
+.knowledge-mode-card {
+  flex: 1 1 220px;
+  min-width: 200px;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.knowledge-mode-card:hover { border-color: var(--accent); }
+.knowledge-mode-card.is-active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.knowledge-mode-card input[type="radio"] {
+  margin: 3px 0 0;
+  flex-shrink: 0;
+}
+.knowledge-mode-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.knowledge-mode-card-title { font-weight: 600; font-size: 14px; }
+.knowledge-mode-card-sub { font-size: 12px; color: var(--text-muted); }
+
 .embedding-mode-tabs {
   display: flex;
   gap: 8px;

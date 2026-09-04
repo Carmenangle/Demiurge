@@ -271,3 +271,63 @@ def test_真实固化三份_本地DATA_DIR存在则契约校验():
     for name in ("固化01-批量生图规范", "固化02-小说转合集卡规范", "固化03-ST迁移规范"):
         assert name in catalog, f"smart 目录缺少 {name}"
         assert f"【知识：{name}】" not in catalog, f"{name} 不应整篇常驻（smart 默认）"
+
+
+# ── 技能写盘 create_doc（knowledge.create_skill 的服务层，2026-09-04）──────────
+
+
+def test_create_doc_落盘frontmatter并即时可见(know_dir):
+    doc = agent_knowledge.create_doc(
+        name="固化04-世界观书规范", skill="curing-04-worldbook",
+        whenToUse="用户要求把设定/世界观材料做成体系化世界书条目时",
+        tools=["knowledge.load_doc", "worldbook.upsert_repo"],
+        content="# 固化流程：世界观书规范\n\n## 适用\n设定集转体系条目。")
+    assert doc["name"] == "固化04-世界观书规范"
+    path = know_dir / "固化04-世界观书规范.md"
+    text = path.read_text(encoding="utf-8")
+    assert text.startswith("---\nskill: curing-04-worldbook\n")
+    assert "tools: [knowledge.load_doc, worldbook.upsert_repo]" in text
+    # list_docs/read_doc 即时可见（库随固化增长）
+    listed = {d["name"]: d for d in agent_knowledge.list_docs()}
+    assert listed["固化04-世界观书规范"]["skill"] == "curing-04-worldbook"
+    body = agent_knowledge.read_doc("固化04-世界观书规范")["content"]
+    assert body.startswith("# 固化流程") and not body.lstrip().startswith("---")
+
+
+def test_create_doc_覆盖既有拒绝(know_dir):
+    agent_knowledge.create_doc(
+        name="同款", skill="curing-x", whenToUse="t",
+        tools=["knowledge.load_doc"], content="# 一版")
+    import pytest as _p
+    with _p.raises(FileExistsError, match="禁止覆盖"):
+        agent_knowledge.create_doc(
+            name="同款", skill="curing-x2", whenToUse="t",
+            tools=["knowledge.load_doc"], content="# 二版")
+
+
+def test_create_doc_非法名与缺字段拒绝(know_dir):
+    import pytest as _p
+    for bad in ("../逃逸", "a/b", "c:\\win", "", "..", ".隐藏"):
+        with _p.raises(ValueError, match="非法知识文档名"):
+            agent_knowledge.create_doc(
+                name=bad, skill="curing-x", whenToUse="t",
+                tools=["knowledge.load_doc"], content="# x")
+    with _p.raises(ValueError, match="whenToUse"):
+        agent_knowledge.create_doc(
+            name="缺触发", skill="curing-x", whenToUse="  ",
+            tools=["knowledge.load_doc"], content="# x")
+    with _p.raises(ValueError, match="tools"):
+        agent_knowledge.create_doc(
+            name="缺工具", skill="curing-x", whenToUse="t",
+            tools=[], content="# x")
+
+
+def test_skill_catalog_text_含技能不含普通知识(know_dir):
+    _write(know_dir, "普通知识.md", "# 常驻说明")
+    agent_knowledge.create_doc(
+        name="固化A-示例", skill="curing-a",
+        whenToUse="用户要给某个示例跑通固化时",
+        tools=["knowledge.load_doc"], content="# 示例")
+    text = agent_knowledge.skill_catalog_text()
+    assert "固化A-示例" in text and "curing-a" in text
+    assert "普通知识" not in text  # 无 frontmatter 的普通知识不进技能库清单

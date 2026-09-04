@@ -211,17 +211,33 @@ export function AgentPanel({ draft, setDraft }: PanelProps) {
           按下方注入模式装载，无头的普通知识文档每次会话常驻注入。与上方「固化流程预设」是两套机制——配方需要
           完整跑通流程才会产生，知识文档放进来即生效。
         </p>
-        <div style={{ display: "flex", gap: 18, alignItems: "center", flexWrap: "wrap", marginTop: 10 }}>
-          <label style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 500, cursor: "pointer" }}>
-            <input type="radio" name="knowledge-mode" checked={kcfg.mode === "smart"} disabled={kcfgSaving} onChange={() => setMode("smart")} />
-            smart 按需装载（默认，推荐）
+        <div className="knowledge-mode-cards">
+          <label className={`knowledge-mode-card${kcfg.mode === "smart" ? " is-active" : ""}`}>
+            <input
+              type="radio" name="knowledge-mode"
+              checked={kcfg.mode === "smart"}
+              disabled={kcfgSaving}
+              onChange={() => setMode("smart")}
+            />
+            <div className="knowledge-mode-card-body">
+              <span className="knowledge-mode-card-title">smart</span>
+              <span className="knowledge-mode-card-sub">按需装载（默认 · 推荐）</span>
+            </div>
           </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 500, cursor: "pointer" }}>
-            <input type="radio" name="knowledge-mode" checked={kcfg.mode === "always"} disabled={kcfgSaving} onChange={() => setMode("always")} />
-            always 全量常驻（老行为）
+          <label className={`knowledge-mode-card${kcfg.mode === "always" ? " is-active" : ""}`}>
+            <input
+              type="radio" name="knowledge-mode"
+              checked={kcfg.mode === "always"}
+              disabled={kcfgSaving}
+              onChange={() => setMode("always")}
+            />
+            <div className="knowledge-mode-card-body">
+              <span className="knowledge-mode-card-title">always</span>
+              <span className="knowledge-mode-card-sub">全量常驻（老行为）</span>
+            </div>
           </label>
-          {kcfgSaving && <span className="field-hint">保存中…</span>}
-          {kcfgError && <span className="field-hint" style={{ color: "#d23b3b" }}>保存失败：{kcfgError}</span>}
+          {kcfgSaving && <span className="field-hint" style={{ alignSelf: "center" }}>保存中…</span>}
+          {kcfgError && <span className="field-hint" style={{ color: "#d23b3b", alignSelf: "center" }}>保存失败：{kcfgError}</span>}
         </div>
         <p className="field-hint" style={{ marginTop: 6 }}>
           {kcfg.mode === "smart"
