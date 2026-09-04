@@ -222,3 +222,52 @@ def test_knowledge_load_doc_handler(know_dir):
         _ch.knowledge_load_doc("不存在")
     with pytest.raises(ValueError, match="name"):
         _ch.knowledge_load_doc("")
+
+
+# ── 三固化 skills 契约：文档 tools 引用必须真实存在于能力注册表 ──────────────
+
+
+def _registered_ops() -> set[str]:
+    from app.services import capability_registry as _cr
+    return {cap.operation for cap in _cr.all_capabilities()}
+
+
+def _assert_doc_tools_covered(doc: dict) -> None:
+    """防文档-注册表漂移：skill 文档 frontmatter 里声明的 tools 必须都能在
+    capability 注册表里解析（LLM 照文档调用才不会拿到不存在的能力）。"""
+    assert doc.get("skill"), f"{doc['name']} 缺少 skill frontmatter"
+    assert doc.get("whenToUse"), f"{doc['name']} 缺少 whenToUse 触发描述"
+    ops = _registered_ops()
+    for tool in doc.get("tools") or []:
+        assert tool in ops, f"{doc['name']} 声明 tools 含未注册能力：{tool}"
+
+
+def test_夹具_技能文档tools引用都在注册表(know_dir):
+    _write(know_dir, "技能.md",
+           "---\nskill: curing-demo\nwhenToUse: 演示触发\n"
+           "tools: [knowledge.load_doc, novel.survey, worldbook.upsert_repo]\n"
+           "---\n# 正文")
+    _assert_doc_tools_covered(agent_knowledge.list_docs()[0])
+
+
+def test_真实固化三份_本地DATA_DIR存在则契约校验():
+    """真实固化01/02/03（backend/data/agent_knowledge/，gitignored 运行态）——
+    目录不存在（CI/干净环境）时跳过，存在时逐一校验三份技能文档完整可装载。"""
+    root = _DATA_DIR / agent_knowledge.KNOWLEDGE_DIR_NAME
+    if not root.is_dir():
+        pytest.skip("本地 DATA_DIR 无 agent_knowledge（干净环境跑单测，跳过真实固化校验）")
+    docs = {d["name"]: d for d in agent_knowledge.list_docs()}
+    curing = {name: d for name, d in docs.items() if d.get("skill", "").startswith("curing-")}
+    assert len(curing) == 3, f"期望三份固化技能文档，实际 {len(curing)}：" \
+        f"{sorted(curing)}"
+    for name, doc in sorted(curing.items()):
+        _assert_doc_tools_covered(doc)
+        # load_doc 每份都能取到正文（frontmatter 已去头，正文以 # 或文字开头）
+        body = agent_knowledge.read_doc(name)["content"]
+        assert body.strip(), f"{name} load_doc 取回空正文"
+        assert not body.lstrip().startswith("---"), f"{name} 正文未去 frontmatter"
+    # smart 目录注入：三份固化技能都在目录行、全文不常驻
+    catalog = agent_graph._knowledge_catalog_text()
+    for name in ("固化01-批量生图规范", "固化02-小说转合集卡规范", "固化03-ST迁移规范"):
+        assert name in catalog, f"smart 目录缺少 {name}"
+        assert f"【知识：{name}】" not in catalog, f"{name} 不应整篇常驻（smart 默认）"

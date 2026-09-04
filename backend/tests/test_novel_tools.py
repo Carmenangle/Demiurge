@@ -269,3 +269,78 @@ def test_集成_落盘读回_扫描收尾(tmp_path):
         (worldbook_store.read_repo_snapshot(base, "work2") or {}).get("entries"))
     gate2 = ch.novel_scan_anonymity(entries=clean_entries, protagonist_names=["沈栖", "栖栖"])
     assert gate2["passed"] is True
+
+
+# ── handler 作品域 base 泛化：work_dir 推导 _prep/ 路径（2026-09-04） ────────
+
+
+def test_handler_extract_给work_dir自动落_prep_书名缺省取epub名(fake_epub, tmp_path):
+    work = tmp_path / "作品"
+    res = ch.novel_extract_epub(src=str(fake_epub), work_dir=str(work))
+    expected = work / "_prep" / "book.full.txt"
+    assert res["path"] == str(expected)
+    assert expected.is_file()
+    text = expected.read_text(encoding="utf-8")
+    assert "===== OEBPS/ch2.xhtml =====" in text  # 内容与显式路径同构
+
+
+def test_handler_extract_book_name覆盖书名(tmp_path):
+    epub = _make_fake_epub(tmp_path / "源书.epub")
+    work = tmp_path / "作品"
+    res = ch.novel_extract_epub(src=str(epub), work_dir=str(work),
+                                book_name="沈栖传")
+    assert res["path"] == str(work / "_prep" / "沈栖传.full.txt")
+    assert (work / "_prep" / "沈栖传.full.txt").is_file()
+
+
+def test_handler_extract_显式out_txt优先于work_dir(fake_epub, tmp_path):
+    work = tmp_path / "作品"
+    out = tmp_path / "elsewhere" / "full.txt"
+    res = ch.novel_extract_epub(src=str(fake_epub), out_txt=str(out),
+                                work_dir=str(work))
+    assert res["path"] == str(out)
+    assert out.is_file()
+
+
+def test_handler_extract_两者都不给拒绝(fake_epub):
+    with pytest.raises(ValueError, match="out_txt 与 work_dir"):
+        ch.novel_extract_epub(src=str(fake_epub))
+
+
+def test_handler_charfacts_给work_dir自动落_prep_charfacts(tmp_path):
+    txt = tmp_path / "full.txt"
+    txt.write_text(
+        "===== 第1章 =====\n沈栖与陆沉在码头重逢，潮声淹没告白的后半句。\n\n"
+        "陆沉望着她，只说了一句「回来就好」。\n",
+        encoding="utf-8",
+    )
+    work = tmp_path / "作品"
+    res = ch.novel_charfacts(full_txt=str(txt), names=["陆沉"], work_dir=str(work))
+    assert res["out_dir"] == str(work / "_prep" / "charfacts")
+    assert (work / "_prep" / "charfacts" / "陆沉.txt").is_file()
+
+
+def test_handler_charfacts_显式out_dir优先(tmp_path):
+    txt = tmp_path / "full.txt"
+    txt.write_text("沈栖与陆沉在码头重逢。\n", encoding="utf-8")
+    out = tmp_path / "素材" / "facts"
+    work = tmp_path / "作品"
+    res = ch.novel_charfacts(full_txt=str(txt), names=["陆沉"],
+                             out_dir=str(out), work_dir=str(work))
+    assert res["out_dir"] == str(out)
+
+
+def test_handler_charfacts_两者都不给拒绝(tmp_path):
+    txt = tmp_path / "full.txt"
+    txt.write_text("沈栖与陆沉在码头重逢。\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="out_dir 与 work_dir"):
+        ch.novel_charfacts(full_txt=str(txt), names=["陆沉"])
+
+
+def test_registry_novel_schema_work_dir可选():
+    extract = cr.get("novel.extract_epub")
+    assert extract.params_schema["required"] == ["src"]
+    assert {"out_txt", "work_dir", "book_name"} <= set(extract.params_schema["properties"])
+    facts = cr.get("novel.charfacts")
+    assert facts.params_schema["required"] == ["full_txt", "names"]
+    assert "work_dir" in facts.params_schema["properties"]

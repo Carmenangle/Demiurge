@@ -497,16 +497,21 @@ register(Capability(
     operation="novel.extract_epub",
     category="novel",
     description="把 .epub 长篇小说按 OPF spine 顺序抽取为分章纯文本并落盘"
-                "（固化02 脚本辅助层 T1）。epub 源可在作品外（只读）；out_txt 必须落在"
-                "作品域/临时工作区。产出用「===== 章节 =====」标记，供 novel.survey / "
+                "（固化02 脚本辅助层 T1）。epub 源可在作品外（只读）；输出路径"
+                "out_txt 与 work_dir 二选一——out_txt 显式给全路径（须在作品域/"
+                "临时工作区）；或给 work_dir（作品根）+ 可选 book_name（缺省取 epub"
+                "文件名），自动落 <work_dir>/_prep/<书名>.full.txt，不用手拼 _prep/。"
+                "产出用「===== 章节 =====」标记，供 novel.survey / "
                 "novel.charfacts 复用；抽取后禁止再整本读全文（上下文防爆）。",
     params_schema={
         "type": "object",
         "properties": {
             "src": {"type": "string"},
             "out_txt": {"type": "string"},
+            "work_dir": {"type": "string"},
+            "book_name": {"type": "string"},
         },
-        "required": ["src", "out_txt"],
+        "required": ["src"],
         "additionalProperties": False,
     },
     needs_model=None,
@@ -541,18 +546,21 @@ register(Capability(
     category="novel",
     description="按候选名单从分章全文切素材段，逐名落 <out_dir>/<name>.txt"
                 "（固化02 脚本辅助层 T3，上下文防爆核心）。mode: top_n = 全书前 N 段完整"
-                "段落；anchor = 首·中·末 320 字锚点窗口。素材是中间产物不是条目：模型只读"
-                "素材文件后经 worldbook.upsert_repo 分批写条目；零命中名字会明确报告。",
+                "段落；anchor = 首·中·末 320 字锚点窗口。输出目录 out_dir 与 work_dir"
+                "二选一——out_dir 显式给；或给 work_dir（作品根）自动落 "
+                "<work_dir>/_prep/charfacts/，不用手拼 _prep/。素材是中间产物不是条目："
+                "模型只读素材文件后经 worldbook.upsert_repo 分批写条目；零命中名字会明确报告。",
     params_schema={
         "type": "object",
         "properties": {
             "full_txt": {"type": "string"},
             "names": {"type": "array", "items": {"type": "string"}},
             "out_dir": {"type": "string"},
+            "work_dir": {"type": "string"},
             "mode": {"type": "string"},
             "max_paras": {"type": "integer"},
         },
-        "required": ["full_txt", "names", "out_dir"],
+        "required": ["full_txt", "names"],
         "additionalProperties": False,
     },
     needs_model=None,

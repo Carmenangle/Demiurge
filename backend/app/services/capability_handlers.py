@@ -618,14 +618,28 @@ def migrate_scan_source(path: str) -> dict[str, Any]:
 # ── 固化02 脚本辅助层（novel.*）：小说预处理机械工具薄适配 ──────────────────
 # 逻辑真源 backend/app/services/novel_tools.py；本组只做参数归一与错误转换。
 
-def novel_extract_epub(src: str, out_txt: str) -> dict[str, Any]:
+def novel_extract_epub(src: str, out_txt: str | None = None,
+                       work_dir: str | None = None,
+                       book_name: str | None = None) -> dict[str, Any]:
     """抽取 epub 全文为分章文本落盘（固化02 脚本辅助层 T1，reversible）。
 
-    epub 源可在作品外（只读）；out_txt 必须落在作品域/临时工作区（由执行环境
-    归一注入）。产出用「===== <章节> =====」标记，供 novel.survey/charfacts 复用。
+    epub 源可在作品外（只读）；输出路径二选一：
+    - `out_txt` 显式给全路径（必须落在作品域/临时工作区内，由执行环境归一注入）；
+    - 或给 `work_dir`（作品根）：自动落 `<work_dir>/_prep/<书名>.full.txt`，
+      `<书名>` 缺省取 epub 文件名（去 .epub 扩展）。
+    两者都不给 → ValueError（不让 Agent 手拼 _prep/ 相对路径）。
+    产出用「===== <章节> =====」标记，供 novel.survey/charfacts 复用；抽取后
+    禁止再整本读全文。
     """
+    from pathlib import Path
+
     from app.services import novel_tools
 
+    if not out_txt:
+        if not work_dir:
+            raise ValueError("out_txt 与 work_dir 至少要给一个（给 work_dir 自动落 _prep/<书名>.full.txt）")
+        book = (book_name or Path(str(src)).stem).strip()
+        out_txt = str(Path(str(work_dir)) / "_prep" / f"{book}.full.txt")
     try:
         return novel_tools.extract_epub(str(src), str(out_txt))
     except novel_tools.NovelToolError as exc:
@@ -645,17 +659,27 @@ def novel_survey(full_txt: str, top_names: int = 60) -> dict[str, Any]:
         raise ValueError(str(exc)) from exc
 
 
-def novel_charfacts(full_txt: str, names: list[str], out_dir: str,
+def novel_charfacts(full_txt: str, names: list[str],
+                    out_dir: str | None = None,
+                    work_dir: str | None = None,
                     mode: str = "top_n", max_paras: int = 40) -> dict[str, Any]:
     """按名单从全文切素材段，逐名落 <out_dir>/<name>.txt（固化02 脚本辅助层 T3）。
 
     mode: top_n = 全书前 N 段完整段落；anchor = 首·中·末 320 字锚点窗口。
+    输出目录二选一：`out_dir` 显式给（须在作品域内）；或给 `work_dir`（作品根）
+    自动落 `<work_dir>/_prep/charfacts/`——两者都不给 → ValueError。
     素材是中间产物不是条目；模型只读素材文件后经 worldbook.upsert_repo 写条目。
     """
+    from pathlib import Path
+
     from app.services import novel_tools
 
     if not isinstance(names, list) or not names:
         raise ValueError("names 必须是候选名单（非空 list），先跑 novel.survey 拿词频再人工筛")
+    if not out_dir:
+        if not work_dir:
+            raise ValueError("out_dir 与 work_dir 至少要给一个（给 work_dir 自动落 _prep/charfacts/）")
+        out_dir = str(Path(str(work_dir)) / "_prep" / "charfacts")
     try:
         return novel_tools.charfacts(str(full_txt), names, str(out_dir),
                                      mode=str(mode or "top_n"),
