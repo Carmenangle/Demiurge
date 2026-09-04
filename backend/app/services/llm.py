@@ -214,7 +214,8 @@ def chat_messages(base_url: str, api_key: str, model: str, messages: list[dict],
                   top_p: float | None = None, max_tokens: int | None = None,
                   provider_profile: str = "",
                   timeout_override: float | None = None,
-                  on_usage: Callable[[dict], None] | None = None) -> str:
+                  on_usage: Callable[[dict], None] | None = None,
+                  on_retry: Callable[[int, Exception], None] | None = None) -> str:
     """多消息单轮对话：messages=[{"role":"system|user|assistant","content":..}]，保留各条 role
     发给模型（不折叠成单 system 串），返回展平后的回复文本。空/无 content 的条目跳过。
     上游临时故障退避重试；调用失败抛 RuntimeError。`chat` 是它 system+user 两条的特例。
@@ -241,6 +242,11 @@ def chat_messages(base_url: str, api_key: str, model: str, messages: list[dict],
         except Exception as e:  # noqa: BLE001
             last = e
             if i < retries - 1 and _is_transient(e):
+                if callable(on_retry):
+                    try:
+                        on_retry(i + 1, e)
+                    except Exception:
+                        pass
                 time.sleep(2 ** i)   # 1s、2s、4s 退避
                 continue
             break
@@ -326,11 +332,13 @@ def chat_messages_stream(base_url: str, api_key: str, model: str, messages: list
 def chat(base_url: str, api_key: str, model: str, system: str, user: str,
          temperature: float = 0.7, proxy: str = "", retries: int = 2,
          top_p: float | None = None, max_tokens: int | None = None,
-         timeout: float | None = None) -> str:
+         timeout: float | None = None,
+         on_retry: Callable[[int, Exception], None] | None = None) -> str:
     """非流式单轮对话（system+user 两条），返回展平后的回复文本。多角色片段用 chat_messages。"""
     return chat_messages(
         base_url, api_key, model,
         [{"role": "system", "content": system}, {"role": "user", "content": user}],
         temperature=temperature, proxy=proxy, retries=retries,
         top_p=top_p, max_tokens=max_tokens, timeout_override=timeout,
+        on_retry=on_retry,
     )
