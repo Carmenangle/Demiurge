@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { Plus, Trash2, Save, AlertTriangle } from "lucide-react";
-import { listAgents, saveAgents, defaultPrompt, DEFAULT_TOOLS, type Agent, type AgentTools } from "../../api/agents";
+import { Plus, Trash2, Save, AlertTriangle, FileText, X } from "lucide-react";
+import { listAgents, saveAgents, defaultPrompt, DEFAULT_TOOLS, listAgentKnowledge, readAgentKnowledge, getKnowledgeConfig, saveKnowledgeConfig, type Agent, type AgentTools, type KnowledgeDoc, type KnowledgeDocContent, type KnowledgeConfig } from "../../api/agents";
 import { listMcpServers, type McpServer } from "../../api/mcp";
 import { listSkills, type Skill } from "../../api/skills";
 import { deleteRecipe, keepRecipe, listRecipes, type RecipeInfo } from "../../lib/planTaskActivity";
+import { renderMarkdown } from "../../lib/renderMarkdown";
 import type { PanelProps } from "./GeneralPanel";
 import { normalizeContextBudgets, DEFAULT_HISTORY_PER_ROLE, DEFAULT_SELFHEAL_ATTEMPTS } from "../../stores/settings";
 import { BuiltinAgentsSection } from "./BuiltinAgentsSection";
@@ -17,6 +18,14 @@ const TOOL_LABELS: { key: keyof AgentTools; label: string }[] = [
   { key: "search_inspiration", label: "联网找灵感" },
 ];
 
+// 后端缺省/坏档返回 {} → 归一为 smart 缺省；保存也走同一条归一，避免非法值回写
+function normalizeKnowledgeConfig(c: Partial<KnowledgeConfig> | null | undefined): KnowledgeConfig {
+  return {
+    mode: c?.mode === "always" ? "always" : "smart",
+    always_docs: Array.isArray(c?.always_docs) ? [...(c as KnowledgeConfig).always_docs] : [],
+  };
+}
+
 // 多 Agent 预设管理：列表 + 编辑（人设/记忆/请求参数/工具开关）。
 // 独立于 settings 草稿（存后端 data/agents.json），点保存整体写回。
 export function AgentPanel({ draft, setDraft }: PanelProps) {
@@ -28,6 +37,12 @@ export function AgentPanel({ draft, setDraft }: PanelProps) {
   const [mcpList, setMcpList] = useState<McpServer[]>([]);   // 可选的 MCP 服务器
   const [skillList, setSkillList] = useState<Skill[]>([]);   // 可选的技能
   const [recipes, setRecipes] = useState<RecipeInfo[]>([]);  // 固化流程预设（计划配方）
+  const [knowledge, setKnowledge] = useState<KnowledgeDoc[]>([]);          // 固化知识库（规范文档）
+  const [knowledgeDoc, setKnowledgeDoc] = useState<KnowledgeDocContent | null>(null); // 预览弹窗
+  // 注入模式：smart=技能按需装载（默认）/ always=全量常驻（老行为）；always_docs=smart 下常驻名单
+  const [kcfg, setKcfg] = useState<KnowledgeConfig>({ mode: "smart", always_docs: [] });
+  const [kcfgSaving, setKcfgSaving] = useState(false);
+  const [kcfgError, setKcfgError] = useState("");
 
   useEffect(() => {
     Promise.all([listAgents(), defaultPrompt()])
@@ -39,7 +54,29 @@ export function AgentPanel({ draft, setDraft }: PanelProps) {
     listRecipes()
       .then((m) => setRecipes(Object.values(m || {}).sort((a, b) => (b.created_at || 0) - (a.created_at || 0))))
       .catch(() => {});
+    listAgentKnowledge()
+      .then((list) => setKnowledge([...list].sort((a, b) => b.mtime - a.mtime)))
+      .catch(() => {});
+    getKnowledgeConfig()
+      .then((c) => setKcfg(normalizeKnowledgeConfig(c)))
+      .catch(() => {});
   }, []);
+
+  // 后端缺省/坏档返回 {} → 归一为 smart 缺省；保存也走同一条归一，避免非法值回写
+  const applyKcfg = (next: KnowledgeConfig) => {
+    setKcfgSaving(true);
+    setKcfgError("");
+    saveKnowledgeConfig(next)
+      .then((r) => setKcfg(normalizeKnowledgeConfig(r)))
+      .catch((e: unknown) => setKcfgError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setKcfgSaving(false));
+  };
+  const setMode = (mode: "smart" | "always") => applyKcfg({ ...kcfg, mode });
+  const toggleAlwaysDoc = (name: string, pinned: boolean) => {
+    const set = new Set(kcfg.always_docs);
+    if (pinned) set.add(name); else set.delete(name);
+    applyKcfg({ ...kcfg, always_docs: [...set] });
+  };
 
   const refreshRecipes = () =>
     listRecipes()
@@ -52,6 +89,12 @@ export function AgentPanel({ draft, setDraft }: PanelProps) {
   const removeRecipePreset = async (id: string) => {
     try { await deleteRecipe(id); } catch { /* 已不存在视为删除成功 */ }
     refreshRecipes();
+  };
+  const openKnowledge = async (name: string) => {
+    try {
+      const doc = await readAgentKnowledge(name);
+      setKnowledgeDoc(doc);
+    } catch { /* 读取失败：保持关闭 */ }
   };
 
   // 新建 Agent 默认带普通对话优先、显式意图才调用工具的内置规则
@@ -131,7 +174,7 @@ export function AgentPanel({ draft, setDraft }: PanelProps) {
         </p>
         {recipes.length === 0 ? (
           <p className="field-hint" style={{ marginTop: 8 }}>
-            还没有固化流程。让智能编造完整跑通一次任务后，在对话里点「保留」即可固化为预设。
+            还没有固化流程预设。让智能编造完整跑通一次任务，会自动固化为草稿；需在对话或此处点「保留」才进入此清单（当前没有任何已保留记录，属正常空态）。
           </p>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
@@ -158,6 +201,91 @@ export function AgentPanel({ draft, setDraft }: PanelProps) {
                 {r.intent && <p className="field-hint" style={{ margin: "4px 0 0" }}>意图：{r.intent}</p>}
               </div>
             ))}
+          </div>
+        )}
+      </div>
+      <div className="settings-subsection">
+        <h4>固化知识库（智能编造流程规范）</h4>
+        <p className="field-hint" style={{ marginTop: 4 }}>
+          保存在 data/agent_knowledge/ 的流程规范与映射表：带 frontmatter（skill）的技能文档（如固化 01/02/03）
+          按下方注入模式装载，无头的普通知识文档每次会话常驻注入。与上方「固化流程预设」是两套机制——配方需要
+          完整跑通流程才会产生，知识文档放进来即生效。
+        </p>
+        <div style={{ display: "flex", gap: 18, alignItems: "center", flexWrap: "wrap", marginTop: 10 }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 500, cursor: "pointer" }}>
+            <input type="radio" name="knowledge-mode" checked={kcfg.mode === "smart"} disabled={kcfgSaving} onChange={() => setMode("smart")} />
+            smart 按需装载（默认，推荐）
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 500, cursor: "pointer" }}>
+            <input type="radio" name="knowledge-mode" checked={kcfg.mode === "always"} disabled={kcfgSaving} onChange={() => setMode("always")} />
+            always 全量常驻（老行为）
+          </label>
+          {kcfgSaving && <span className="field-hint">保存中…</span>}
+          {kcfgError && <span className="field-hint" style={{ color: "#d23b3b" }}>保存失败：{kcfgError}</span>}
+        </div>
+        <p className="field-hint" style={{ marginTop: 6 }}>
+          {kcfg.mode === "smart"
+            ? "smart：技能文档不再整篇常驻，会话只注入「技能名 → 触发描述」目录，模型命中对应场景时自动调用 knowledge.load_doc 按需拉全文执行——省上下文、多份规范互不干扰。勾选下方文档「常驻」可让个别关键技能回退为每次会话全量注入。"
+            : "always：所有文档每次会话全量注入并强制遵循（老行为；受单次最多 4 份、每份 2 万字符上限约束）。"}
+        </p>
+        {knowledge.length === 0 ? (
+          <p className="field-hint" style={{ marginTop: 8 }}>
+            还没有固化知识文档。把规范以 .md 放入 data/agent_knowledge/，重新打开设置即可看到。
+          </p>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+            {knowledge.map((k) => {
+              const isSkill = Boolean(k.skill);
+              const pinned = kcfg.always_docs.includes(k.name);
+              return (
+                <div className="image-model-card" key={k.file} style={{ padding: "8px 10px" }}>
+                  <div className="row-head">
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <strong>{k.name}</strong>
+                      <span className="field-hint" style={{ marginLeft: 8 }}>
+                        {k.file} · {(k.size / 1024).toFixed(1)} KB · {new Date(k.mtime).toLocaleString()}
+                        {k.truncated ? " · 超出预览上限" : ""}
+                      </span>
+                    </div>
+                    <div style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
+                      <span
+                        style={{
+                          fontSize: 11, padding: "1px 7px", borderRadius: 999,
+                          border: `1px solid ${isSkill ? "var(--accent)" : "var(--text-muted)"}`,
+                          color: isSkill ? "var(--accent)" : "var(--text-muted)",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {isSkill ? `技能 · ${k.skill}` : "普通知识"}
+                      </span>
+                      {isSkill && kcfg.mode === "smart" && (
+                        <label style={{ display: "flex", alignItems: "center", gap: 4, fontWeight: 400, cursor: "pointer", whiteSpace: "nowrap" }}>
+                          <input
+                            type="checkbox"
+                            checked={pinned}
+                            disabled={kcfgSaving}
+                            onChange={(e) => toggleAlwaysDoc(k.name, e.target.checked)}
+                            title="smart 模式下强制每次会话常驻注入全文"
+                          />
+                          常驻
+                        </label>
+                      )}
+                      <button className="btn" onClick={() => void openKnowledge(k.name)}>
+                        <FileText size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />查看
+                      </button>
+                    </div>
+                  </div>
+                  {isSkill && k.whenToUse && (
+                    <p className="field-hint" style={{ margin: "4px 0 0" }}>触发：{k.whenToUse}</p>
+                  )}
+                  {isSkill && (k.tools?.length || 0) > 0 && (
+                    <p className="field-hint" style={{ margin: "2px 0 0" }}>
+                      工具：{k.tools!.join("、")}
+                    </p>
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
@@ -333,6 +461,30 @@ export function AgentPanel({ draft, setDraft }: PanelProps) {
           </div>
         ))}
       </div>
+      {knowledgeDoc && (
+        <div className="modal-mask" onClick={() => setKnowledgeDoc(null)}>
+          <div className="modal" style={{ width: "min(780px, 94vw)" }} onClick={(e) => e.stopPropagation()}>
+            <h3 style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+              <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {knowledgeDoc.name}
+              </span>
+              <button className="icon-btn" title="关闭" onClick={() => setKnowledgeDoc(null)}>
+                <X size={16} />
+              </button>
+            </h3>
+            <div
+              className="guide-doc"
+              style={{ maxHeight: "58vh", overflowY: "auto", fontSize: 14, lineHeight: 1.7 }}
+              dangerouslySetInnerHTML={{ __html: renderMarkdown(knowledgeDoc.content) }}
+            />
+            {knowledgeDoc.truncated && (
+              <p className="field-hint" style={{ marginTop: 8 }}>
+                正文超过单文档注入/预览上限（2 万字符），仅展示前半部分。
+              </p>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
