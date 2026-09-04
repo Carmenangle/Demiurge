@@ -72,6 +72,20 @@ def inject_lora_stack(api: dict, anchor_node_id: str, loras: list[dict]) -> bool
     return True
 
 
+def _coerce_number(value: str):
+    """字符串数字 → int/float；解析失败返回 None（调用方保留原值）。
+
+    整数形态走 int（latent 宽高/steps），其余按 float（cfg/strength 等）。
+    """
+    text = value.strip()
+    try:
+        if text.lstrip("+-").isdigit():
+            return int(text)
+        return float(text)
+    except ValueError:
+        return None
+
+
 def inject_template_values(
     api: dict,
     exposed: list[dict],
@@ -112,6 +126,13 @@ def inject_template_values(
             continue
         if val is None or key not in exposed_keys:
             continue
+        # 数值型字段收窄：Autopilot 计划注入的宽高等参数可能是字符串数字
+        # （'720'/'0.5'），原样写入会以 str 进入 ComfyUI prompt，触发节点类型
+        # 校验失败/静默异常。control == "number" 一律按值形态转 int/float。
+        if f.get("control") == "number" and isinstance(val, str):
+            parsed = _coerce_number(val)
+            if parsed is not None:
+                val = parsed
         if node_id in api:
             api[node_id].setdefault("inputs", {})[field] = val
 

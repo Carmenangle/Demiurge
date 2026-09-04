@@ -86,3 +86,40 @@ def test_无lora模式把工作流内全部lora权重归零():
     assert api["1"]["inputs"]["strength_model"] == 0
     assert api["1"]["inputs"]["strength_clip"] == 0
     assert api["2"]["inputs"]["strength_model"] == 0
+
+
+def test_number字段的字符串数字自动收窄为数值():
+    # Autopilot 批量注入的宽高可能是字符串（'720'/'1080'），必须转数值再进
+    # ComfyUI prompt，否则节点类型校验失败（2026-09-04 唐柚批次实况）。
+    api = {"20": {"inputs": {"width": 1280, "height": 720}}}
+    exposed = [
+        {"node_id": "20", "field": "width", "control": "number", "semantic": "width", "binding": "latent_width"},
+        {"node_id": "20", "field": "height", "control": "number", "semantic": "height", "binding": "latent_height"},
+    ]
+    missing = workflow_injector.inject_template_values(api, exposed, {
+        "width": "720", "height": "1080",
+    })
+    assert missing == []
+    assert api["20"]["inputs"]["width"] == 720
+    assert type(api["20"]["inputs"]["width"]) is int
+    assert api["20"]["inputs"]["height"] == 1080
+
+
+def test_number字段小数与解析失败值():
+    api = {"6": {"inputs": {"cfg": 0.0}}}
+    exposed = [{"node_id": "6", "field": "cfg", "control": "number"}]
+    workflow_injector.inject_template_values(api, exposed, {"6.cfg": "0.5"})
+    assert api["6"]["inputs"]["cfg"] == 0.5
+    # 解析失败的非数字字符串保留原值（不吞异常、不改语义）
+    api2 = {"6": {"inputs": {"cfg": 0.0}}}
+    workflow_injector.inject_template_values(api2, exposed, {"6.cfg": "step="})
+    assert api2["6"]["inputs"]["cfg"] == "step="
+
+
+def test_非number字段不做数值收窄():
+    # 文本/prompt 字段即使值长得像数字也保持字符串原样
+    api = {"9": {"inputs": {"text": "old"}}}
+    exposed = [{"node_id": "9", "field": "text"}]
+    workflow_injector.inject_template_values(api, exposed, {"9.text": "123"})
+    assert api["9"]["inputs"]["text"] == "123"
+    assert type(api["9"]["inputs"]["text"]) is str
