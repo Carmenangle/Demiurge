@@ -1,4 +1,5 @@
-"""世界书：条目解析、constant/可检索拆分、选择性注入组装（无预算截断）。"""
+"""世界书：条目解析、constant/可检索拆分、选择性注入组装（整段注入预算 WORLDBOOK_INJECT_MAX_CHARS=8000，
+只裁末尾语义补充条目；传 max_chars=None 关闭）。"""
 import json
 
 from app.services import worldbook as wb
@@ -245,3 +246,29 @@ def test_schedule_index_only_notifies_for_initial_missing_entries(monkeypatch):
     assert wb.schedule_index("ready", [wb.Entry("已有条目", False)], cfg,
                              on_initial=lambda count: notices.append(count)) is False
     assert notices == [2]
+
+
+def test_assemble_注入预算cap裁尾部语义补充不裁机制(monkeypatch):
+    """2026-09-04 成本杠杆 L1-B/L3-B：整段注入 8k 硬上限，keyword/constant 锚点全收，
+    只让语义补充段衰减并标注省略数。"""
+    entries = [
+        wb.Entry(content="关键词命中的角色卡（优先级最高）", constant=True, keys=["命"]),
+        wb.Entry(content="常驻机制条目" * 40, constant=True),   # constant：永不裁
+        wb.Entry(content="非常驻大段条目甲" * 2000, constant=False),
+        wb.Entry(content="非常驻大段条目乙" * 2000, constant=False),
+    ]
+    # 语义检索命中既有非常驻条目（与其它测试同款手法：命中内容必须存在于快照才进入候选）
+    monkeypatch.setattr(wb, "_retrieve", lambda *a, **k: [entries[2].content])
+    out = wb.assemble("r1", entries, "命", None, k=8)
+    assert out.startswith("【世界设定（相关条目）】")
+    assert "关键词命中的角色卡" in out          # keyword 命中保留
+    assert "常驻机制条目" * 40 in out           # constant 全收
+    assert "省略" in out                        # 语义补充超预算被裁并标注
+    assert len(out) <= wb.WORLDBOOK_INJECT_MAX_CHARS + 200  # 预算 + 头标/标注余量
+
+
+def test_assemble_关闭cap恢复旧行为不截断(monkeypatch):
+    monkeypatch.setattr(wb, "_retrieve", lambda *a, **k: [])
+    entries = [wb.Entry("超长常驻条目" * 500, True)]
+    out = wb.assemble("r1", entries, "q", None, max_chars=None)
+    assert out == "【世界设定（相关条目）】\n- " + "超长常驻条目" * 500

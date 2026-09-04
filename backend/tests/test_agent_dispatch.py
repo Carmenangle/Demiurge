@@ -788,6 +788,7 @@ def test_上下文按角色分别截取而非简单取最后十二条():
 
 
 def test_最近历史受默认两万token预算限制():
+    # 2026-09-04 L2 保头保尾窗口：头部 2 条整条保留（前缀锚），中段让位给最近消息并标注压缩。
     source = [
         {"role": "user" if i % 2 == 0 else "assistant", "content": "设" * 3000}
         for i in range(12)
@@ -795,12 +796,17 @@ def test_最近历史受默认两万token预算限制():
 
     history = agent_context.recent_history("thread", history_override=source)
 
-    assert len(history) == 12
-    assert all(len(item["content"]) < 3000 for item in history)
-    assert sum(agent_context.estimate_tokens(item["content"]) + 4 for item in history) <= 20_000
+    # 12 条各 3000 token → 预算 2 万放不下：保头 2 + 最近 4 条整条，中段 6 条折叠标注
+    assert len(history) == 6
+    assert all(len(item["content"]) == 3000 for item in history[:2])   # 头部原文
+    assert history[-1]["content"] == "设" * 3000                        # 最新消息未丢
+    assert all(len(item["content"]) >= 3000 for item in history[-4:])  # 最近整条（首条带标注）
+    assert "已按预算压缩" in history[2]["content"]                       # 中段折叠标注
+    assert sum(agent_context.estimate_tokens(item["content"]) for item in history) <= 20_000
 
 
 def test_最近历史接受自定义token预算():
+    # L2 语义：预算极小放不下任何整条时，只裁剪保留「最近一条」，中段全部折叠标注。
     source = [
         {"role": "user" if i % 2 == 0 else "assistant", "content": "设" * 3000}
         for i in range(12)
@@ -808,7 +814,11 @@ def test_最近历史接受自定义token预算():
 
     history = agent_context.recent_history("thread", max_tokens=9_000, history_override=source)
 
-    assert sum(agent_context.estimate_tokens(item["content"]) + 4 for item in history) <= 9_000
+    assert len(history) == 3                     # 保头 2 + 最近 1（裁剪）
+    assert all(len(item["content"]) == 3000 for item in history[:2])
+    assert history[-1]["content"].startswith("…（中间 9 条历史已按预算压缩")
+    assert len(history[-1]["content"]) < 3000
+    assert sum(agent_context.estimate_tokens(item["content"]) for item in history) <= 9_000
 
 
 def test_最近历史token上限为0则不裁剪():

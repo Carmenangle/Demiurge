@@ -109,7 +109,8 @@ class AgencyDeps:
     curator_system: str = builtin_agents.CURATOR_SYSTEM
     curator_temperature: float = builtin_agents.CURATOR_TEMPERATURE
     curator_gate: float = 1.0
-    curator_cadence: int = 3  # 每 N 轮跑一次（1=每轮）；知识增量按 3 轮窗口足够，逐轮跑纯烧钱
+    curator_cadence: int = 4  # 每 N 轮跑一次（1=每轮）；2026-09-04 成本杠杆 L3-A：默认 3→4，
+    # 知识增量按 4 轮窗口足够，逐轮跑纯烧钱（实测 curator 平均 28.6k 字符/次，41% 轮次）
     index_fn: Callable[[str, str], object] | None = None  # (text, title)→写入 RAG 知识库；None=不写
     worldbook_context: str = ""  # 当前小仓库世界书条目（带 index），仅供受控增改
     worldbook_context_fn: Callable[[str], str] | None = None

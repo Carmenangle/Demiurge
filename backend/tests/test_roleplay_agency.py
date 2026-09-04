@@ -349,17 +349,17 @@ def test_维护gate开只增写库(tmp_path):
     assert written == [("教会地下有密室", "新地点")]
 
 
-def test_curator每3轮跑一次未到轮次直接跳过(tmp_path):
-    """2026-08-30 成本改约：知识抽取按 curator_cadence=3 节流，未到轮次零调用。"""
+def test_curator每4轮跑一次未到轮次直接跳过(tmp_path):
+    """2026-09-04 成本杠杆 L3-A：默认 curator_cadence 3→4，知识抽取按 4 轮节流。"""
     calls = []
     deps = ra.AgencyDeps(chat_fn=lambda *a, **k: calls.append(1) or "[]",
                          rng=random.Random(0), state_base=str(tmp_path),
                          curator_gate=1.0, index_fn=lambda t, ti: None)
-    # turn=2（未到节奏）→ 跳过；turn=4（(4-1)%3==0）→ 执行
+    # turn=2（未到节奏）→ 跳过；turn=5（(5-1)%4==0）→ 执行
     assert ra.maybe_curate(deps, window_text="剧情", chat_base="b", chat_key="k",
                            chat_model="m", turn=2) == 0
     assert ra.maybe_curate(deps, window_text="剧情", chat_base="b", chat_key="k",
-                           chat_model="m", turn=4) == 0  # 空产出但调用了
+                           chat_model="m", turn=5) == 0  # 空产出但调用了
     assert len(calls) == 1
     # turn 缺省（0）保持旧行为，兼容旧调用方
     assert ra.maybe_curate(deps, window_text="剧情", chat_base="b", chat_key="k",

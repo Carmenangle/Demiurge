@@ -22,6 +22,10 @@ from app.services.rag_backend import EmbedConfig
 
 _WB_MARK = "worldbook_hash"          # 旧版全量索引哨兵；增量同步时自动清理
 _DEFAULT_K = 8                       # 非常驻条目语义检索条数（关键词命中额外叠加，见 assemble）
+# 2026-09-04 成本杠杆（L1-B/L3-B 共用单点）：【世界设定（相关条目）】整段注入硬上限。
+# 审计实测：单条 roleplay 请求里该段可达 23.6k 字符（≈15k+ token/轮，恒超模型单轮回复量级）。
+# 上限 8000 后按优先级只裁末尾语义补充条目；配合 L1 灰魂栈瘦身把 roleplay 请求 43.7k→~28k。
+WORLDBOOK_INJECT_MAX_CHARS = 8000
 _INDEX_LOCK = threading.Lock()
 _INDEXING: set[tuple[str, tuple[str, ...]]] = set()
 
@@ -281,13 +285,18 @@ def keyword_match_indices(entries: list[Entry], query: str) -> list[int]:
 
 
 def assemble_selection(repo_id: str, entries: list[Entry], query: str, cfg: EmbedConfig,
-                       *, k: int = _DEFAULT_K) -> Selection:
+                       *, k: int = _DEFAULT_K,
+                       max_chars: int = WORLDBOOK_INJECT_MAX_CHARS) -> Selection:
     """组装注入文本，并返回本轮实际进入注入的原始快照条目 index。
 
     选择性注入，不做 token 预算截断（截断会腰斩机制条目与角色卡，破坏体验）：
       - constant（全局机制 + 系统判定机制条目）：全程恒开，全文注入，永不截断；
       - 关键词命中（key 出现在 query 的命名实体）：本轮直接相关，全量注入；
       - 非常驻语义/BM25 检索：按相关性取 top-k，条数即闸门，不做字数截断。
+    max_chars：整段注入硬上限（2026-09-04 成本杠杆 L1-B/L3-B）。条目按「关键词命中 →
+    constant → 语义补充」优先级就序，超预算时**只裁末尾最低优先级条目**，并标注省略数；
+    机制条目/角色卡永远在序列前部，不受影响。默认上限 WORLDBOOK_INJECT_MAX_CHARS=8000；
+    传 None/<=0 关闭上限（旧行为，测试/特殊入口用）。
     """
     indexed = [
         (entry.source_index if entry.source_index >= 0 else position, entry)
@@ -318,9 +327,9 @@ def assemble_selection(repo_id: str, entries: list[Entry], query: str, cfg: Embe
         if len(retrieved_hashes) >= k:
             break
 
-    picked: list[str] = []
-    picked_indices: list[int] = []
     picked_keyword_indices: list[int] = []
+    anchor_pairs: list[tuple[str, int]] = []   # keyword 命中 + constant（机制/角色卡）：永不裁
+    tail_pairs: list[tuple[str, int]] = []     # 非常驻语义/BM25 补充：预算内衰减
     seen: set[str] = set()
     for index, entry in candidates:
         text = entry.content
@@ -328,26 +337,51 @@ def assemble_selection(repo_id: str, entries: list[Entry], query: str, cfg: Embe
         if h in seen:
             continue
         seen.add(h)
-        picked.append(text)
-        picked_indices.append(index)
         if index in keyword_indices:
             picked_keyword_indices.append(index)
-    if not picked:
+        is_anchor = index in keyword_indices or entry.constant
+        (anchor_pairs if is_anchor else tail_pairs).append((text, index))
+    if not anchor_pairs and not tail_pairs:
         return Selection("", [])
-    body = "\n\n".join(f"- {text}" for text in picked)
+    # 整段注入预算（2026-09-04 成本杠杆 L1-B/L3-B）：keyword/constant 锚点段永远全收，
+    # 只让语义补充段在预算内衰减；被挤掉的语义条目折叠成标注（不含于 indices/keyword 追踪）。
+    kept_text = [text for text, _ in anchor_pairs]
+    kept_idx = [index for _, index in anchor_pairs]
+    if max_chars and max_chars > 0:
+        used = sum(len(text) + 2 for text in kept_text)
+        dropped = 0
+        for text, index in tail_pairs:
+            cost = len(text) + 2
+            if used + cost > max_chars:
+                dropped += 1
+                continue
+            kept_text.append(text)
+            kept_idx.append(index)
+            used += cost
+        if dropped:
+            kept_text.append(f"…（省略 {dropped} 条，注入预算 {max_chars} 字符内）")
+            picked_keyword_indices = [
+                i for i in picked_keyword_indices if i in kept_idx]
+    else:
+        for text, index in tail_pairs:
+            kept_text.append(text)
+            kept_idx.append(index)
+    body = "\n\n".join(f"- {text}" for text in kept_text)
     return Selection(
-        f"【世界设定（相关条目）】\n{body}", picked_indices, picked_keyword_indices,
+        f"【世界设定（相关条目）】\n{body}", kept_idx, picked_keyword_indices,
     )
 
 
 def assemble(repo_id: str, entries: list[Entry], query: str, cfg: EmbedConfig,
-             *, k: int = _DEFAULT_K) -> str:
+             *, k: int = _DEFAULT_K,
+             max_chars: int = WORLDBOOK_INJECT_MAX_CHARS) -> str:
     """组装本轮世界书注入文本：constant 全带（不截断）+ 关键词触发命中 + 非常驻语义检索 top-k。
 
     注入优先级（高→低，去重后按序全收）：
       1) 关键词触发命中（key 出现在 query，ST 核心机制；用户点名的命名实体是本轮最相关）
       2) constant 常驻条目（全局机制 + 系统判定机制：全程恒开）
       3) 语义检索补充（dense+BM25 RRF，按相关性取 top-k）
+    max_chars：整段硬上限（默认 8000，超预算裁末尾语义补充并标注，见 assemble_selection）。
     返回可直接拼进 system 的文本；无内容返回空串。
     """
-    return assemble_selection(repo_id, entries, query, cfg, k=k).text
+    return assemble_selection(repo_id, entries, query, cfg, k=k, max_chars=max_chars).text

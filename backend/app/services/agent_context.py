@@ -84,24 +84,49 @@ def recent_history(thread_id: str, max_tokens: int = 20_000,
         if max_tokens <= 0:
             return items
 
-        content_budget = max(1, max_tokens - len(items) * 4)
-        full_costs = [estimate_tokens(item["content"]) for item in items]
-        if sum(full_costs) <= content_budget:
+        budget = max(1, max_tokens - len(items) * 4)
+        costs = [estimate_tokens(item["content"]) for item in items]
+        if sum(costs) <= budget:
             return items
 
-        base = content_budget // len(items)
-        allocations = [min(cost, base) for cost in full_costs]
-        remaining = content_budget - sum(allocations)
-        for index in range(len(items) - 1, -1, -1):
-            extra = min(full_costs[index] - allocations[index], remaining)
-            allocations[index] += extra
-            remaining -= extra
-            if remaining <= 0:
-                break
-        return [
-            {**item, "content": _clip_to_token_budget(item["content"], allocations[index])}
-            for index, item in enumerate(items)
-        ]
+        # 2026-09-04 保头保尾窗口（成本杠杆 L2，设计 §2）：头部固定保留 keep_head 条原文
+        #（前缀稳定锚），中段整体让位给尾部近期消息；被挤掉的中段折叠成一行标注挂到保留
+        # 尾部最早一条（或头部末条）——不改 role/交替结构、纯机械、零 LLM 成本。
+        keep_head = min(2, len(items))
+        head = items[:keep_head]
+        head_cost = sum(costs[:keep_head])
+        rest = list(zip(items[keep_head:], costs[keep_head:]))
+        if not rest:  # 极端小预算下无中段可让位：退回逐条头尾裁剪
+            return [
+                {**item, "content": _clip_to_token_budget(
+                    item["content"], max(1, budget // len(items)))}
+                for item in items
+            ]
+        budget_left = max(0, budget - head_cost)
+        tail: list[dict] = []
+        used_tail = 0
+        skipped_mid = 0
+        for item, cost in reversed(rest):
+            if cost <= budget_left:
+                tail.append(item)
+                budget_left -= cost
+                used_tail += cost
+            elif not tail and budget_left > 0:
+                # 预算连一条整条都放不下时，只允许把「最近一条」裁剪进来
+                item["content"] = _clip_to_token_budget(item["content"], budget_left)
+                tail.append(item)
+                budget_left = 0
+                used_tail = 1
+            else:
+                skipped_mid += 1
+        tail.reverse()
+        if skipped_mid:
+            marker = f"\n\n…（中间 {skipped_mid} 条历史已按预算压缩，既有设定与人物关系不变）…"
+            if tail:
+                tail[0]["content"] = marker.lstrip("\n\n") + tail[0]["content"]
+            else:
+                head[-1]["content"] = head[-1]["content"] + marker
+        return head + tail
     except Exception:  # noqa: BLE001
         return []
 
