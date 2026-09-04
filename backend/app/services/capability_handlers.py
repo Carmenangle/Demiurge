@@ -510,8 +510,12 @@ def upsert_repo_character(base: str, card: dict[str, Any]) -> dict[str, Any]:
 
 
 def create_repo_doc(base: str, rel_path: str, content: str,
-                    overwrite: bool = False) -> dict[str, Any]:
-    """在作品目录 docs/ 下创建 Markdown 文档（durable，拒绝越界路径）。"""
+                    overwrite: bool = False, repo_id: str = "") -> dict[str, Any]:
+    """在作品目录 docs/ 下创建 Markdown 文档（durable，拒绝越界路径）。
+
+    repo_id 由执行环境归一注入（可选）：非空时登记 current_flow_doc 句柄
+    （flow_context.mark_doc），供「接着用这份文档跑固化01」这类延续语零成本续跑。
+    """
     from pathlib import Path as _Path
 
     if not base:
@@ -532,6 +536,15 @@ def create_repo_doc(base: str, rel_path: str, content: str,
         raise FileExistsError(target.name)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content or "", encoding="utf-8")
+    if str(repo_id or "").strip():
+        try:
+            from app.services import flow_context
+
+            flow_context.mark_doc(
+                str(repo_id).strip(), kind="doc_repo",
+                path=str(target), step="doc.create_repo")
+        except Exception:  # noqa: BLE001 - 句柄登记失败不影响文档写入
+            pass
     return {"path": str(target), "bytes": len((content or "").encode("utf-8"))}
 
 

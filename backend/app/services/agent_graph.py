@@ -629,6 +629,17 @@ def edit_node(state: AgentState) -> dict:
     return edit_agent.run(ctx, text, images, trace)
 
 
+def _flow_doc_hint(ctx: Any, user_text: str) -> str:
+    """current_flow_doc 续跑提示（固化链 §3 设计 A）：延续语 + 有句柄才注入，纯机械。"""
+    try:
+        from app.services import flow_context
+
+        repo_id = str(ctx.get("repo_id") or ctx.get("thread_id") or "")
+        return flow_context.resume_hint(repo_id, user_text)
+    except Exception:  # noqa: BLE001 - 句柄不可用不阻断编译/自由循环
+        return ""
+
+
 def plan_compiler_node(state: AgentState) -> dict:
     """智能编造节点：full 模式跑自由循环（ReAct），approval 模式走计划编译+审批。"""
     ctx = state["_ctx"]
@@ -677,6 +688,9 @@ def plan_compiler_node(state: AgentState) -> dict:
         knowledge = _knowledge_catalog_text()
         if knowledge:
             history_text = (history_text + "\n\n" + knowledge).strip()
+        flow_hint = _flow_doc_hint(ctx, text)
+        if flow_hint:
+            history_text = (history_text + "\n\n" + flow_hint).strip()
         outcome = fabric_loop.run_loop(
             intent=text, history=history_text,
             capabilities=capability_registry.with_availability(configured),
@@ -798,6 +812,11 @@ def plan_compiler_node(state: AgentState) -> dict:
             # 固化知识库进编译上下文：流程规范/映射表对智能编造永远在线
             attachments.append({"name": plan_compiler.KNOWLEDGE_CATALOG_NAME,
                                 "text": knowledge})
+        flow_hint = _flow_doc_hint(ctx, text)
+        if flow_hint:
+            # current_flow_doc（固化链 §3 设计 A）：延续语命中时把上次流程文档句柄
+            # 送进编译上下文，模型先读文档再编排，避免「接着做」断指代
+            attachments.append({"name": "doc.flow_resume", "text": flow_hint})
     except Exception as exc:  # noqa: BLE001
         run_trace.emit(ctx, "plan.attachments", status="error", error=str(exc))
     # 编译用户消息时剥掉【文件参考】全文块：附件正文已进 attachments（骨架供模型看），

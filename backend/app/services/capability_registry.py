@@ -384,6 +384,7 @@ register(Capability(
             "content": {"type": "string"},
             "overwrite": {"type": "boolean"},
             "base": {"type": "string"},
+            "repo_id": {"type": "string"},
         },
         "required": ["rel_path", "content"],
         "additionalProperties": False,

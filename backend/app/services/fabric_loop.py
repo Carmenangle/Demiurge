@@ -200,6 +200,12 @@ def run_loop(*, intent: str, history: str = "", capabilities: list[dict] | None 
                 and not str(params.get("base") or "").strip()):
             params["base"] = output_dir or ""
             params["repo_id"] = repo_id or ""
+        # 固化链续跑句柄（§3 设计 A）：doc.create_repo 的落盘域与 repo_id 同样环境归一
+        if operation == "doc.create_repo":
+            if not str(params.get("base") or "").strip():
+                params["base"] = output_dir or ""
+            if not str(params.get("repo_id") or "").strip():
+                params["repo_id"] = repo_id or ""
         if trace is not None:
             trace("tool.call", operation=operation, params=params)
         try:

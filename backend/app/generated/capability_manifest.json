@@ -91,6 +91,9 @@
           },
           "base": {
             "type": "string"
+          },
+          "repo_id": {
+            "type": "string"
           }
         },
         "required": [

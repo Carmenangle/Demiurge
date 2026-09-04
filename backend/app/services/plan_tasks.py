@@ -121,6 +121,10 @@ def submit_task(plan: GenerationPlan, *, output_dir: str, repo_id: str = "",
             step.params["base"] = output_dir
         if step.operation == "worldbook.upsert_repo":
             step.params["repo_id"] = repo_id or plan.repo_id
+        if step.operation == "doc.create_repo":
+            # current_flow_doc（固化链续跑 §3 设计 A）：登记句柄需要 repo_id，
+            # 由环境注入（base 已在上面注入），模型只需给 rel_path/content。
+            step.params["repo_id"] = repo_id or plan.repo_id
         if step.operation == "novel.scan_anonymity":
             # 收尾闸门（固化02 §3.6）：base/repo_id 由环境注入，模型只需给主角名名单；
             # 执行期 handler 机械读作品世界书快照取条目，approval 计划里编得进这一步。
