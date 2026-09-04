@@ -227,8 +227,6 @@ def create_doc(*, name: str, skill: str, whenToUse: str, tools: list[str],
         target_resolved.write_text(doc_text, encoding="utf-8")
     except OSError as exc:
         raise RuntimeError(f"技能文档写入失败：{exc}") from exc
-    meta = {"skill": skill_id, "whenToUse": trigger,
-            "tools": [t.strip() for t in tools]}
     return {"name": stem, "file": f"{stem}.md", "skill": skill_id,
             "whenToUse": trigger, "tools": [t.strip() for t in tools]}
 
