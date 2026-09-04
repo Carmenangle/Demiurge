@@ -12,6 +12,15 @@ export function upsertMessages(current: ChatMessage[], incoming: ChatMessage[]):
   return next;
 }
 
+// 计划采集产物实时上屏（2026-09-04）：只把服务端新增 id 的消息按服务端顺序追加，
+// 绝不覆盖本地已有消息——避免把流式中/已编辑的正文回退成服务端旧值。
+// 无新增时返回原数组引用（调用方可跳过 setState 重渲染）。
+export function appendUnknownMessages(current: ChatMessage[], incoming: ChatMessage[]): ChatMessage[] {
+  const known = new Set(current.map((m) => m.id));
+  const added = incoming.filter((m) => !known.has(m.id));
+  return added.length === 0 ? current : [...current, ...added];
+}
+
 export function workflowMessages(messages: FinalizedMessage[]): ChatMessage[] {
   return messages.map((message) => ({ ...message }));
 }

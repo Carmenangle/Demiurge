@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ChatMessage } from "../types/chat";
 import {
-  appendAudioSlot, appendImageSlot, appendTransitionSlot, bindMediaSlotPrompt, dropMediaSlot, markMediaSlotFailed, pruneUnsubmittedMediaSlots, reduceChatStreamEvent, resetMediaSlotForRetry, resolveMediaSlot,
+  appendAudioSlot, appendImageSlot, appendTransitionSlot, appendUnknownMessages, bindMediaSlotPrompt, dropMediaSlot, markMediaSlotFailed, pruneUnsubmittedMediaSlots, reduceChatStreamEvent, resetMediaSlotForRetry, resolveMediaSlot,
   restoreSubmittedMediaSlots,
 } from "./chatSessionEvents";
 
@@ -475,5 +475,41 @@ describe("媒体槽自愈兜底（2026-08-31 深夜实锤：槽丢失导致生�
     const resolved = resolveMediaSlot(messages, "bot", "slot-1", "file:///x.png", "image");
     const parts = resolved[0].parts || [];
     expect(parts.some((p) => p.type === "image" && p.slotId === "slot-1" && p.url === "file:///x.png")).toBe(true);
+  });
+});
+
+
+describe("计划采集产物逐张上屏增量追加（2026-09-04 唐柚 14 套画像）", () => {
+  it("只追加服务端新增 id 的消息，保持服务端顺序", () => {
+    const current: ChatMessage[] = [
+      { id: "plan-card", role: "assistant", text: "📋 已编译计划…" },
+    ];
+    const incoming: ChatMessage[] = [
+      { id: "plan-card", role: "assistant", text: "📋 已编译计划…" },
+      { id: "img-1", role: "assistant", text: "套装一\n\n1girl masterpiece", image: "local://1.png" },
+      { id: "img-2", role: "assistant", text: "套装二\n\n1girl best quality", image: "local://2.png" },
+    ];
+    const next = appendUnknownMessages(current, incoming);
+    expect(next.map((m) => m.id)).toEqual(["plan-card", "img-1", "img-2"]);
+    expect(next[0]).toBe(current[0]);          // 本地已有消息不被服务端覆盖
+    expect(next).not.toBe(current);
+  });
+  it("无新增时返回原数组引用（调用方跳过重渲染）", () => {
+    const current: ChatMessage[] = [{ id: "bot", role: "assistant", text: "" }];
+    expect(appendUnknownMessages(current, current)).toBe(current);
+    expect(appendUnknownMessages(current, [])).toBe(current);
+  });
+  it("本地多出（流式中/未落盘）的消息不受影响，只补尾部新图", () => {
+    const current: ChatMessage[] = [
+      { id: "plan-card", role: "assistant", text: "计划卡" },
+      { id: "local-streaming", role: "assistant", text: "流式半截" },
+    ];
+    const incoming: ChatMessage[] = [
+      { id: "plan-card", role: "assistant", text: "计划卡" },
+      { id: "img-1", role: "assistant", text: "套装一\n\nprompt", image: "local://1.png" },
+    ];
+    const next = appendUnknownMessages(current, incoming);
+    expect(next.map((m) => m.id)).toEqual(["plan-card", "local-streaming", "img-1"]);
+    expect(next.find((m) => m.id === "local-streaming")?.text).toBe("流式半截");
   });
 });

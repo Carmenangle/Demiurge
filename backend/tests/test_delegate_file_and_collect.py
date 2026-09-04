@@ -196,6 +196,62 @@ def test_采集闭环_轮询取图落盘入库(store, tmp_path, monkeypatch):
     assert indexed[0]["image_url"]
 
 
+def test_采集闭环_submit整包回退取回每张完整提示词(store, tmp_path, monkeypatch):
+    """回归（2026-09-04 唐柚 14 套画像实锤）：collect 收到的 submit_result 是 submit_batch
+    整包 {"submitted":…,"results":[{prompt_id, prompt}, …]}，提示词在 results[i] 而非顶层。
+    旧回退把整包当单条取 .get("prompt") → 恒空 → 消息只剩套装名、资产库也只挂套装名。
+    """
+    from app.services import chat_snapshot, comfyui_client
+
+    upserted: list[dict] = []
+    monkeypatch.setattr(chat_snapshot, "upsert", lambda _tid, msg: upserted.append(msg))
+
+    def fake_fetch_result(url, prompt_id, filter_node_ids=None):
+        return {"status": "done",
+                "images": [{"filename": "out.png", "subfolder": "", "type": "output"}],
+                "videos": [], "audios": [], "texts": []}
+
+    def fake_fetch_view(url, filename, type="output", subfolder="", timeout=15):
+        return b"\x89PNG fake image bytes", "image/png"
+
+    indexed: list[dict] = []
+
+    def fake_index_generation(repo_id, cfg, prompt, tags="", image_url="", **kwargs):
+        indexed.append({"repo_id": repo_id, "prompt": prompt, "tags": tags,
+                        "image_url": image_url})
+
+    monkeypatch.setattr(comfyui_client, "fetch_result", fake_fetch_result)
+    monkeypatch.setattr(comfyui_client, "fetch_view", fake_fetch_view)
+    import app.services.rag_store as rag_store
+    monkeypatch.setattr(rag_store, "index_generation", fake_index_generation)
+
+    works = store["works"]
+    full_prompt_1 = "1girl, 唐柚, 浅杏短款绗缝棉服, masterpiece, best quality"
+    full_prompt_2 = "1girl, 唐柚, 米白针织开衫, masterpiece, best quality"
+    out = capability_handlers.collect_comfy_outputs(
+        prompt_ids=None, comfyui_url="http://127.0.0.1:8188",
+        output_dir=str(works), repo_id="work",
+        names=["唐柚-棉袄套一", "唐柚-棉袄套二"],
+        prompts=None,
+        submit_result={
+            "submitted": 2, "failed": 0,
+            "results": [
+                {"index": 0, "ok": True, "prompt_id": "pid-1", "prompt": full_prompt_1},
+                {"index": 1, "ok": True, "prompt_id": "pid-2", "prompt": full_prompt_2},
+            ],
+        },
+        timeout_seconds=10)
+    assert out["collected"] == 2
+    # 消息 = 套装名 + 完整提示词（像 /w 工作流「图片+提示词」格式），而不是只有套装名
+    assert len(upserted) == 2
+    assert upserted[0]["text"] == f"唐柚-棉袄套一\n\n{full_prompt_1}"
+    assert upserted[1]["text"] == f"唐柚-棉袄套二\n\n{full_prompt_2}"
+    assert upserted[0]["image"] and upserted[0]["meta"]["kind"] == "plan_collect"
+    # 资产库登记同样挂完整提示词而非套装名
+    assert indexed[0]["prompt"] == full_prompt_1
+    assert indexed[1]["prompt"] == full_prompt_2
+
+
 def test_lora模糊解析与提交归一(monkeypatch, tmp_path):
     """LoRA 模糊匹配与 submit 归一，全部走临时触发词库，不依赖真机数据/网络。"""
     from app.services import capability_handlers as ch, comfyui_client, lora_index
