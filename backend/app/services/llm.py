@@ -7,6 +7,7 @@
 
 不含 HTTP 语义（不抛 HTTPException）——路由层按需把 ValueError 包成 4xx/5xx。
 """
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -116,6 +117,50 @@ def _is_transient(err: Exception) -> bool:
         "temporarily", "overload", "rate limit", "429", "connection error"))
 
 
+# ── 模型单轮输出上限（OpenAI 兼容网关按模型 max output 校验 max_tokens）──
+# 2026-09-04 trace 实锤：GrayWill 预设 openai_max_tokens=600000 → 正文 +4000=604000 直发，
+# tokenrhythm 网关对 deepseek-v4-flash-0731 报 400 LITELLM_ERROR「max_tokens should be
+# less or equal to 393216」→ 扮演失败且自愈整段重掷 3 次全白烧（opus@xtoken 网关无此校验
+# 故此前未炸）。用户定案语义（2026-09-04）：请求上限 > 模型上限 → 按模型上限（min）；
+# 模型上限更高/未登记 → 按请求原样正常走。登记键 = 模型名前缀（精确或带 -/_ 后缀变体均命中）。
+MODEL_OUTPUT_TOKEN_CAPS: dict[str, int] = {
+    "deepseek-v4-flash": 393216,  # tokenrhythm 网关实测输出上限（400 证据）
+}
+
+
+def cap_max_tokens(model: str, max_tokens: int | None) -> int | None:
+    """按模型输出上限收敛 max_tokens（用户定案：min 语义）。未登记模型原样返回。
+
+    供 transport 层（chat_messages/chat_messages_stream）与采样裁决点共用，保证
+    trace 记录的值与实际发出请求一致；对已收敛值再次调用是幂等的。
+    """
+    if max_tokens is None or not isinstance(max_tokens, int) or max_tokens <= 0:
+        return max_tokens
+    name = (model or "").strip()
+    for prefix, cap in MODEL_OUTPUT_TOKEN_CAPS.items():
+        if name == prefix or name.startswith(f"{prefix}-") or name.startswith(f"{prefix}_"):
+            return min(max_tokens, cap)
+    return max_tokens
+
+
+_CLIENT_CODE_RE = re.compile(
+    r"error code[:：]?\s*4\d\d|http\s+4\d\d|status[ _-]?code[=: ]+4\d\d",
+    re.IGNORECASE,
+)
+
+
+def is_client_rejected(err: Exception) -> bool:
+    """请求/配置类确定性错误（4xx，429 除外）——重试必然同错，调用方应判死不重试。
+
+    与 _is_transient 互补：429/5xx/timeout 走退避重试/截断自愈；400/401/403/404/422
+    是确定性错误（超限参数、坏 key、坏模型名、不支持字段），整段重掷只会重复计费。
+    2026-09-04 实锤：max_tokens=604000 触发网关 400，自愈 3 次整段重掷共 4 次调用全白烧。
+    """
+    if _is_transient(err):  # 429 属瞬时，先排除
+        return False
+    return bool(_CLIENT_CODE_RE.search(str(err)))
+
+
 _ROLE_MAP = {"system": "system", "user": "human", "assistant": "ai", "human": "human", "ai": "ai"}
 
 
@@ -221,6 +266,7 @@ def chat_messages(base_url: str, api_key: str, model: str, messages: list[dict],
     上游临时故障退避重试；调用失败抛 RuntimeError。`chat` 是它 system+user 两条的特例。
     on_usage: 可选回调，成功后收到解析后的 usage dict（prompt/completion/cached/total/cache_hit_ratio）。"""
     import time
+    max_tokens = cap_max_tokens(model, max_tokens)  # 模型输出上限收敛（min 语义，见 cap_max_tokens）
     payload = _payload(model, messages, provider_profile=provider_profile)
     llm = build_model(base_url, api_key, model, temperature=temperature, proxy=proxy,
                       top_p=top_p, max_tokens=max_tokens,
@@ -281,6 +327,7 @@ def chat_messages_stream(base_url: str, api_key: str, model: str, messages: list
     on_usage: 可选回调，结束后收到解析后的 usage dict。
     on_finish: 可选回调，成功结束后收到 {"finish_reason": …}；流被中途掐断时为空串。"""
     import time
+    max_tokens = cap_max_tokens(model, max_tokens)  # 模型输出上限收敛（min 语义，见 cap_max_tokens）
     payload = _payload(model, messages, provider_profile=provider_profile)
     llm = build_model(
         base_url, api_key, model, temperature=temperature, streaming=True, proxy=proxy,

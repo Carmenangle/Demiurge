@@ -1590,3 +1590,41 @@ def test_续写拼接_防拦截词结构不被切开():
     assert truncated.endswith("他闷哼一声，")  # 回退到最近的逗号
     assert "@阳@(具)@" in truncated
     assert "腰腹" not in truncated  # 只有逗号后的半句被裁掉
+
+
+def test_首次生成4xx确定性错误判死不重掷():
+    """2026-09-04 实锤：max_tokens 超限等 4xx 是确定性错误——直接判死不整段重掷，
+    不再白烧自愈预算（deepseek 604000→网关 400 曾白烧 4 次调用）。"""
+    calls: list = []
+
+    def generate():
+        calls.append("generate")
+        raise RuntimeError("调用对话模型失败：Error code: 400 - "
+                           "{'code': 'LITELLM_ERROR', 'message': "
+                           "'max_tokens should be less or equal to 393216'}")
+
+    with pytest.raises(roleplay_turn.TruncatedRoleplayOutput) as excinfo:
+        _run_turn(_Hooks(generate, lambda _reply: None, lambda partial: None))
+    message = str(excinfo.value)
+    assert "首次生成失败" in message
+    assert "请求/配置类错误（4xx）" in message
+    assert "本轮仅 1 次模型调用" in message
+    assert calls == ["generate"]  # 无任何自愈重掷
+
+
+def test_自愈重掷触发4xx确定性错误立即判死():
+    """首发截断入自愈后，重掷若遇 4xx 也应立即停止，不把剩余自愈预算烧完。"""
+    calls: list = []
+
+    def generate():
+        calls.append("generate")
+        if len([c for c in calls if c == "generate"]) == 1:
+            return "<content>正文截断到一半"  # 首发截断（过短不可续）→ 入自愈整段重掷
+        raise RuntimeError("调用对话模型失败：Error code: 400 - bad request")
+
+    with pytest.raises(roleplay_turn.TruncatedRoleplayOutput) as excinfo:
+        _run_turn(_Hooks(generate, lambda _reply: None, lambda partial: None))
+    message = str(excinfo.value)
+    assert "自愈重掷失败" in message
+    assert "请求/配置类错误（4xx）" in message
+    assert calls == ["generate", "generate"]  # 首发 + 1 次重掷即停，预算未烧完

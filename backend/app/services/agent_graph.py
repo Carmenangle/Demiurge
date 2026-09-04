@@ -108,6 +108,13 @@ def _roleplay_sampling(ctx: dict) -> dict:
             pass
         else:
             sampling["max_tokens"] = 32768
+    # 2026-09-04 模型输出上限收敛：GrayWill 预设 openai_max_tokens=600000 → +4000=604000
+    # 直发被网关 400 拒（deepseek-v4-flash 上限 393216，trace 实锤）。用户定案：min 语义——
+    # 请求上限 > 模型上限按模型来；未登记模型不钳。此处收敛让 trace 与 wire 一致，
+    # llm.transport 层仍有同款兜底（幂等）。
+    if "max_tokens" in sampling:
+        sampling["max_tokens"] = _llm.cap_max_tokens(
+            str(ctx.get("chat_model") or ""), sampling["max_tokens"])
     return sampling
 
 

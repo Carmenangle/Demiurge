@@ -10,6 +10,8 @@ import re
 import time
 from typing import Any, Callable
 
+from app.services import llm as _llm
+
 
 class TruncatedRoleplayOutput(RuntimeError):
     """The provider ended a response after opening, but before closing, visible content."""
@@ -370,6 +372,12 @@ def _selfheal_loop(turn: TurnExecution, hooks: TurnExecutionHooks, reply: str,
                 try:
                     candidate = _reroll_once(turn, hooks, str(final_exc))
                 except Exception as exc3:  # noqa: BLE001 - 单次重掷失败不判死，继续下一轮
+                    # 2026-09-04：重掷触发 4xx 确定性错误（如 max_tokens 超限）时继续
+                    # 烧自愈预算毫无意义——直接判死停止，避免重复计费。
+                    if _llm.is_client_rejected(exc3):
+                        raise TruncatedRoleplayOutput(
+                            f"自愈重掷失败：{exc3}；该错误为请求/配置类错误（4xx），"
+                            f"自动重试无法恢复，已停止（不再重复计费）。") from exc3
                     turn.trace.append(f"⚠️ 重掷调用失败（{exc3}），继续下一轮自愈")
                     candidate = ""
                 method = "整段重掷"
@@ -419,6 +427,12 @@ def execute_turn(turn: TurnExecution, hooks: TurnExecutionHooks) -> dict:
         hooks.generated(reply)
     except Exception as exc:  # noqa: BLE001 - 首发超时/连接失败转入自愈（重掷有预算）
         turn.trace.append(f"⚠️ 首次生成失败（{exc}），转入自愈循环")
+        # 2026-09-04 实锤：max_tokens 超限等 4xx 是确定性错误，整段重掷必然同错，
+        # 只会重复计费（deepseek 604000→网关 400 白烧 4 次调用）——直接判死不重试。
+        if _llm.is_client_rejected(exc):
+            raise TruncatedRoleplayOutput(
+                f"首次生成失败：{exc}；该错误为请求/配置类错误（4xx），"
+                f"自动重试无法恢复，已停止（本轮仅 1 次模型调用，未重复计费）。") from exc
         final_exc = TruncatedRoleplayOutput(f"首次生成失败：{exc}")
         return _selfheal_loop(
             turn, hooks, "", final_exc,

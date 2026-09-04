@@ -61,6 +61,30 @@ def test_预设正文额度优先并只在外追加思考预留():
     assert ag._roleplay_sampling(ctx)["max_tokens"] == 604000
 
 
+def test_正文额度按模型输出上限收敛min语义():
+    """2026-09-04 实锤回归：GrayWill 预设 600000+4000=604000 直发被网关 400 拒
+    （deepseek-v4-flash-0731 上限 393216）——正文额度按模型上限 min 收敛；
+    未登记模型名不钳（_ctx 默认 chat_model="m"）。"""
+    ctx = _ctx(
+        comfy_illustrate=True,
+        chat_model="deepseek-v4-flash-0731",
+        _preset_sampling={"max_tokens": 600000},
+    )
+    assert ag._roleplay_sampling(ctx)["max_tokens"] == 393216
+    # 请求上限 ≤ 模型上限 → 按请求原样（min 语义另一侧）
+    small = _ctx(
+        comfy_illustrate=True,
+        chat_model="deepseek-v4-flash-0731",
+        builtin={"roleplay": {"maxTokens": 4000}},
+    )
+    assert ag._roleplay_sampling(small)["max_tokens"] == 8000
+    # 未登记模型不钳（旧行为保持）
+    assert ag._roleplay_sampling(_ctx(
+        comfy_illustrate=True,
+        _preset_sampling={"max_tokens": 600000},
+    ))["max_tokens"] == 604000
+
+
 def test_多角色persona只发送本轮出场角色描述并按剧情选择生图外貌(monkeypatch):
     from app.services import character_store
 

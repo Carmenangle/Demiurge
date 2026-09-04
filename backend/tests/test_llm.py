@@ -191,3 +191,60 @@ def test_chat_messages_stream中转掐流无结束原因时为空串(monkeypatch
     )
     assert out == "正文写到一半"
     assert finished == [{"finish_reason": ""}]
+
+
+def test_cap_max_tokens_按模型上限min收敛():
+    """2026-09-04 用户定案：请求上限 > 模型上限 → 按模型来（min）；未登记不钳。"""
+    # 命中前缀（带日期/下划线后缀变体）
+    assert _llm.cap_max_tokens("deepseek-v4-flash-0731", 604000) == 393216
+    assert _llm.cap_max_tokens("deepseek-v4-flash", 604000) == 393216
+    assert _llm.cap_max_tokens("deepseek-v4-flash_0731", 604000) == 393216
+    # 请求上限更小 → 按请求原样
+    assert _llm.cap_max_tokens("deepseek-v4-flash-0731", 20000) == 20000
+    # 未登记模型 → 不钳
+    assert _llm.cap_max_tokens("gpt-5.6-terra", 604000) == 604000
+    # None / 空模型 防御
+    assert _llm.cap_max_tokens("deepseek-v4-flash-0731", None) is None
+    assert _llm.cap_max_tokens("", 500) == 500
+
+
+def test_chat_messages_超限max_tokens按模型收敛(monkeypatch):
+    captured: dict = {}
+
+    def fake_build(base_url, api_key, model, **kw):
+        captured.update(kw)
+        return _FakeModel([])
+
+    monkeypatch.setattr(_llm, "build_model", fake_build)
+    _llm.chat_messages(
+        "b", "k", "deepseek-v4-flash-0731",
+        [{"role": "user", "content": "问"}], max_tokens=604000,
+    )
+    assert captured["max_tokens"] == 393216
+
+
+def test_chat_messages_stream_超限max_tokens按模型收敛(monkeypatch):
+    captured: dict = {}
+
+    def fake_build(base_url, api_key, model, **kw):
+        captured.update(kw)
+        return _FakeModel([])
+
+    monkeypatch.setattr(_llm, "build_model", fake_build)
+    _llm.chat_messages_stream(
+        "b", "k", "deepseek-v4-flash-0731",
+        [{"role": "user", "content": "问"}], lambda _d: None, max_tokens=604000,
+    )
+    assert captured["max_tokens"] == 393216
+
+
+def test_is_client_rejected_4xx判死_瞬时仍可重试():
+    """2026-09-04：4xx（429 除外）是确定性错误判死；429/5xx/超时仍是瞬时可重试。"""
+    client = RuntimeError("Error code: 400 - {'code': 'LITELLM_ERROR', "
+                          "'message': 'max_tokens should be less or equal to 393216'}")
+    assert _llm.is_client_rejected(client)
+    assert _llm.is_client_rejected(RuntimeError("Error code: 401 - invalid api key"))
+    assert _llm.is_client_rejected(RuntimeError("Error code: 422 - unsupported field"))
+    assert not _llm.is_client_rejected(RuntimeError("Error code: 429 - rate limit"))
+    assert not _llm.is_client_rejected(RuntimeError("Error code: 502 - upstream_error"))
+    assert not _llm.is_client_rejected(RuntimeError("connection error"))
