@@ -116,28 +116,64 @@ def _proxy_kw(ctx: dict, key: str = "chat_proxy") -> dict:
     return {"proxy": value} if value else {}
 
 
-# 固化知识库（DATA_DIR/agent_knowledge/*.md）：流程规范/映射表永远在线。
+# 固化知识库（DATA_DIR/agent_knowledge/*.md）：流程规范/映射表。
 # 目录与上限常量、列举/读取统一走 agent_knowledge 服务（唯一属主）。
+# 2026-09-04：带 frontmatter「skill」的文档 = 固化技能（按触发装载，不常驻）；
+# 无头的普通知识文档仍全量常驻注入。目录注入文本是本策略的唯一裁决。
 
 
 def _knowledge_catalog_text() -> str:
-    """扫描固化知识目录拼接注入文本（第三类目录附件，与配方清单同机制）。"""
+    """拼接注入文本（第三类目录附件，与配方清单同机制）。
+
+    - 注入模式取 agent_knowledge.injection_config()：always（全量常驻=老行为）或
+      smart（默认）——技能文档（meta.skill 非空且不在 always_docs）只注入一行触发
+      描述 + 指令：命中场景先调 knowledge.load_doc(name=文件名主名) 拉全文照执行；
+    - 无头普通知识文档保持历史行为：全量注入（KNOWLEDGE_MAX_FILES 上限不变）。
+    """
     from app.services import agent_knowledge
-    docs: list[str] = []
-    for meta in agent_knowledge.list_docs():  # 文件名升序，与历史注入顺序一致
+    cfg = agent_knowledge.injection_config()  # 缺省 {} → smart
+    mode = str(cfg.get("mode") or agent_knowledge.MODE_SMART)
+    force_always = {str(n) for n in (cfg.get("always_docs") or []) if str(n).strip()}
+    skill_lines: list[str] = []
+    legacy: list[dict] = []
+    for meta in agent_knowledge.list_docs():
+        is_skill = bool(meta.get("skill")) and mode == agent_knowledge.MODE_SMART \
+            and meta.get("name") not in force_always
+        (skill_lines if is_skill else legacy).append(meta)
+
+    parts: list[str] = []
+    if skill_lines:
+        lines = []
+        for meta in skill_lines:
+            trigger = str(meta.get("whenToUse") or "").strip()
+            name = str(meta.get("name") or meta.get("file") or "?")
+            lines.append(f"- {meta.get('file', name)}（skill={meta['skill']}）"
+                         + (f"：{trigger}" if trigger else ""))
+        parts.append(
+            "【固化技能库】以下流程技能按触发场景按需装载、不常驻注入：\n"
+            + "\n".join(lines)
+            + "\n接到与某个技能触发场景相符的任务时，必须先调用 "
+              "knowledge.load_doc(name=文件名主名，如「固化02-小说转合集卡规范」) "
+              "拉取全文并照其结构与质量标准执行；拿不准是否相关也应先加载核对，"
+              "禁止凭目录一句话另搞一套。")
+
+    legacy_texts: list[str] = []
+    appended = 0
+    for meta in legacy:
+        if appended >= agent_knowledge.KNOWLEDGE_MAX_FILES:
+            break
         try:
             doc = agent_knowledge.read_doc(meta["name"])
         except (FileNotFoundError, ValueError, OSError):
             continue
         text = (doc.get("content") or "").strip()
         if text:
-            docs.append(f"【知识：{meta['name']}】\n{text}")
-        if len(docs) >= agent_knowledge.KNOWLEDGE_MAX_FILES:
-            break
-    if not docs:
-        return ""
-    return ("【固化知识库】以下是本项目沉淀的流程规范与映射表，执行相关任务时必须遵守"
-            "其中的结构与质量标准，禁止凭印象另搞一套：\n\n" + "\n\n".join(docs))
+            legacy_texts.append(f"【知识：{meta['name']}】\n{text}")
+            appended += 1
+    if legacy_texts:
+        parts.append("【固化知识库】以下是本项目沉淀的流程规范与映射表，执行相关任务时必须遵守"
+                     "其中的结构与质量标准，禁止凭印象另搞一套：\n\n" + "\n\n".join(legacy_texts))
+    return "\n\n".join(parts)
 
 
 def _recipe_catalog_text() -> str:
@@ -210,6 +246,37 @@ def _live_trace(ctx: dict, agent: str):
             except Exception:
                 pass
     return emit
+
+
+def _live_chat(ctx: dict):
+    """包装 chat_fn：调用前/成功/失败/重试都实时 sink 到对话流。
+
+    模型调用可能挂起数分钟——调用前先显示「思考中」，重试时逐次显示原因，
+    否则前端只有一动不动「生成中」。
+    """
+    base_fn = ctx.get("chat_fn") or _llm.chat
+
+    def _sink(text: str) -> None:
+        sink = ctx.get("stream_sink")
+        if callable(sink):
+            try:
+                sink({"trace": text})
+            except Exception:
+                pass
+
+    def wrapped(base, key, model, system, user, **kw):
+        _sink("🤔 模型思考中…")
+        try:
+            if base_fn is _llm.chat:
+                kw["on_retry"] = lambda n, e: _sink(
+                    f"🔄 第 {n} 次重试（{str(e)[:60]}）")
+            result = base_fn(base, key, model, system, user, **kw)
+            _sink("✅ 模型响应完成")
+            return result
+        except Exception as e:  # noqa: BLE001 - 原样抛出，只补可视化
+            _sink(f"❌ 模型调用失败：{str(e)[:80]}")
+            raise
+    return wrapped
 
 
 def _supervisor_route(text: str, image_count: int, ctx: dict) -> tuple[str, bool, list[str], str]:
@@ -618,7 +685,7 @@ def plan_compiler_node(state: AgentState) -> dict:
             configured_models=configured,
             chat_base=ctx["chat_base"], chat_key=ctx["chat_key"],
             chat_model=ctx.get("route_model") or ctx["chat_model"],
-            chat_fn=ctx.get("chat_fn") or _llm.chat,
+            chat_fn=_live_chat(ctx),
             structured_chat_fn=ctx.get("structured_chat_fn"),
             images=list(state.get("images") or []),
             proxy_kwargs=_proxy_kw(ctx),
@@ -744,7 +811,7 @@ def plan_compiler_node(state: AgentState) -> dict:
             output_dir=output_dir, configured_models=configured,
             chat_base=ctx["chat_base"], chat_key=ctx["chat_key"],
             chat_model=ctx.get("route_model") or ctx["chat_model"],
-            chat_fn=ctx.get("chat_fn") or _llm.chat,
+            chat_fn=_live_chat(ctx),
             structured_chat_fn=ctx.get("structured_chat_fn"),
             proxy_kwargs=_proxy_kw(ctx),
             trace=_live_trace(ctx, "plan_compiler"),
@@ -2152,7 +2219,7 @@ def _agency_maintenance(ctx: dict, deps, clean: str, turn: int,
                 output_dir=ctx.get("output_dir") or "", repo_id=repo_id,
                 chat_base=ctx["chat_base"], chat_key=ctx["chat_key"],
                 chat_model=ctx["chat_model"],
-                chat_fn=ctx.get("chat_fn") or _llm.chat,
+                chat_fn=_live_chat(ctx),
                 structured_chat_fn=ctx.get("structured_chat_fn"),
                 proxy_kwargs=_proxy_kw(ctx),
                 trace=lambda event, **data: run_trace.emit(ctx, event, **data))

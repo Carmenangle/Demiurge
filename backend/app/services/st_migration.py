@@ -8,7 +8,7 @@ keys 质量）必须由 LLM 判断转写。第二套固定流程 = 机械解析�
 
 本模块只读（analyze 不写任何文件、不改任何目录）；转写产物经既有能力落盘
 （worldbook.upsert_repo / character.upsert_repo / character.import_source），
-落盘形态与执行流程见 agent_knowledge《合集卡制作与ST迁移规范》§4.5。
+落盘形态与执行流程见 agent_knowledge《固化03-ST迁移规范》§3.5。
 """
 from __future__ import annotations
 

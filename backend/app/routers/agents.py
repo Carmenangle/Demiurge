@@ -1,10 +1,10 @@
 """多 Agent 预设端点：列表/保存 + 取内置默认提示词（供前端"默认规则"展示）。"""
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app.services import agent_store, builtin_agents
+from app.services import agent_knowledge, agent_store, builtin_agents
 
 router = APIRouter()
 
@@ -64,3 +64,43 @@ def save_builtin_overrides(overrides: dict) -> list[dict]:
     """保存内置 Agent 覆盖（{agent_id: {field: value}}），只接受注册表声明的可编辑字段。"""
     builtin_agents.save_overrides(overrides)
     return builtin_agents.registry_view()
+
+
+# ── ④ 固化知识库：设置页「固化知识库（智能编造流程规范）」只读展示 + 注入模式配置 ──
+
+
+@router.get("/knowledge")
+def list_knowledge_docs() -> list[dict]:
+    """列出 agent_knowledge/ 下的固化知识文档元数据（文件名升序）。"""
+    return agent_knowledge.list_docs()
+
+
+class KnowledgeConfig(BaseModel):
+    mode: str = "smart"            # smart=技能按需装载（默认）/ always=全量常驻注入
+    always_docs: list[str] = []    # smart 模式下强制常驻注入的技能文档主名
+
+
+@router.get("/knowledge/config")
+def read_knowledge_config() -> dict:
+    """读取固化知识注入模式配置（settings.agentKnowledge，缺省 smart）。"""
+    return agent_knowledge.injection_config()
+
+
+@router.put("/knowledge/config")
+def save_knowledge_config(cfg: KnowledgeConfig) -> dict:
+    """保存固化知识注入模式配置（读-改-写 user_state，保留其它 settings 键）。"""
+    if cfg.mode not in (agent_knowledge.MODE_SMART, agent_knowledge.MODE_ALWAYS):
+        raise HTTPException(status_code=400, detail="mode 仅支持 smart/always")
+    return agent_knowledge.save_injection_config(
+        {"mode": cfg.mode, "always_docs": cfg.always_docs})
+
+
+@router.get("/knowledge/{name}")
+def read_knowledge_doc(name: str) -> dict:
+    """按文件主名读取固化知识文档正文（只读，*.md 白名单 + 防路径穿越）。"""
+    try:
+        return agent_knowledge.read_doc(name)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="知识文档不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

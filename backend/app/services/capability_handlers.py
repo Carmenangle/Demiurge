@@ -114,6 +114,31 @@ def _embed_config_from_state() -> tuple[str, str, str]:
         return "", "", ""
 
 
+def _ordered_submit_items(submit_result: dict[str, Any] | list[Any] | None) -> list[dict[str, Any]]:
+    """把 submit 产物摊平成「与提交顺序一致」的逐条结果（供 collect 按位取回提示词）。
+
+    submit_batch 返回整包 {"submitted":…, "results":[{index, ok, prompt_id, prompt}, …]}：
+    每条实际使用的提示词在 results[i]，不在整包顶层；submit_template 单条/列表形态原样摊平。
+    """
+    if isinstance(submit_result, dict):
+        inner = submit_result.get("results")
+        if isinstance(inner, list):
+            return [item for item in inner if isinstance(item, dict)]
+        return [submit_result]
+    if isinstance(submit_result, list):
+        flat: list[dict[str, Any]] = []
+        for item in submit_result:
+            if not isinstance(item, dict):
+                continue
+            inner = item.get("results")
+            if isinstance(inner, list):
+                flat.extend(sub for sub in inner if isinstance(sub, dict))
+            else:
+                flat.append(item)
+        return flat
+    return []
+
+
 def collect_comfy_outputs(prompt_ids: list[str] | None = None, comfyui_url: str = "",
                           output_dir: str = "", repo_id: str = "",
                           submit_result: dict[str, Any] | None = None,
@@ -190,7 +215,10 @@ def collect_comfy_outputs(prompt_ids: list[str] | None = None, comfyui_url: str 
         # 里该变体实际使用的 prompt，最后回退套装名）。
         _prompt_text = str(prompts[index] if prompts and index < len(prompts) else "")
         if not _prompt_text and submit_result:
-            _items = submit_result if isinstance(submit_result, list) else [submit_result]
+            # submit_batch 整包形态：prompt 在 results[i]（顶层只有 submitted/failed），
+            # 直接 [submit_result][index].get("prompt") 会取到整包/空 dict → 提示词丢失，
+            # 消息只剩套装名（2026-09-04 唐柚 14 套画像实锤）。先摊平成逐条结果再按位取。
+            _items = _ordered_submit_items(submit_result)
             _item = _items[index] if index < len(_items) and isinstance(_items[index], dict) else {}
             _prompt_text = str(_item.get("prompt") or "")
         if not _prompt_text:
@@ -585,3 +613,90 @@ def migrate_scan_source(path: str) -> dict[str, Any]:
         return st_migration.analyze_source(str(path))
     except st_migration.MigrationScanError as exc:
         raise ValueError(str(exc)) from exc
+
+
+# ── 固化02 脚本辅助层（novel.*）：小说预处理机械工具薄适配 ──────────────────
+# 逻辑真源 backend/app/services/novel_tools.py；本组只做参数归一与错误转换。
+
+def novel_extract_epub(src: str, out_txt: str) -> dict[str, Any]:
+    """抽取 epub 全文为分章文本落盘（固化02 脚本辅助层 T1，reversible）。
+
+    epub 源可在作品外（只读）；out_txt 必须落在作品域/临时工作区（由执行环境
+    归一注入）。产出用「===== <章节> =====」标记，供 novel.survey/charfacts 复用。
+    """
+    from app.services import novel_tools
+
+    try:
+        return novel_tools.extract_epub(str(src), str(out_txt))
+    except novel_tools.NovelToolError as exc:
+        raise ValueError(str(exc)) from exc
+
+
+def novel_survey(full_txt: str, top_names: int = 60) -> dict[str, Any]:
+    """只读清点分章全文：章节标题 / 称呼后缀候选名词频 / 红线词计数（readonly）。
+
+    产物是候选名单与章节锚点，供 Agent 与用户确认转写范围；不写任何文件。
+    """
+    from app.services import novel_tools
+
+    try:
+        return novel_tools.survey_fulltext(str(full_txt), top_names=int(top_names or 60))
+    except novel_tools.NovelToolError as exc:
+        raise ValueError(str(exc)) from exc
+
+
+def novel_charfacts(full_txt: str, names: list[str], out_dir: str,
+                    mode: str = "top_n", max_paras: int = 40) -> dict[str, Any]:
+    """按名单从全文切素材段，逐名落 <out_dir>/<name>.txt（固化02 脚本辅助层 T3）。
+
+    mode: top_n = 全书前 N 段完整段落；anchor = 首·中·末 320 字锚点窗口。
+    素材是中间产物不是条目；模型只读素材文件后经 worldbook.upsert_repo 写条目。
+    """
+    from app.services import novel_tools
+
+    if not isinstance(names, list) or not names:
+        raise ValueError("names 必须是候选名单（非空 list），先跑 novel.survey 拿词频再人工筛")
+    try:
+        return novel_tools.charfacts(str(full_txt), names, str(out_dir),
+                                     mode=str(mode or "top_n"),
+                                     max_paras=int(max_paras or 40))
+    except novel_tools.NovelToolError as exc:
+        raise ValueError(str(exc)) from exc
+
+
+def novel_scan_anonymity(entries: list[dict[str, Any]],
+                         protagonist_names: list[str]) -> dict[str, Any]:
+    """落盘匿名/红线机械扫描（固化02 §3.6，readonly）：主角名/单花括号/硬禁词。
+
+    entries = 世界书快照条目或角色卡条目 list；protagonist_names 需含姓/名/爱称/
+    带后缀形式（如 ["沈栖","栖栖"]），由 LLM 从原作提取给出。passed=False 阻断交付，
+    语义判断（台词爱称第二遍）仍由 LLM 兜底。
+    """
+    from app.services import novel_tools
+
+    if not isinstance(entries, list):
+        raise ValueError("entries 必须是条目 list")
+    if not isinstance(protagonist_names, list) or not protagonist_names:
+        raise ValueError("protagonist_names 必须是主角名清单（含爱称粒度）")
+    try:
+        return novel_tools.scan_anonymity(entries, protagonist_names)
+    except novel_tools.NovelToolError as exc:
+        raise ValueError(str(exc)) from exc
+
+
+def knowledge_load_doc(name: str) -> dict[str, Any]:
+    """按名拉取固化技能/知识全文（readonly）。
+
+    固化技能（frontmatter 带 skill）按触发场景按需装载：命中 whenToUse 时调用本
+    能力拉全文照执行（目录注入只给一行触发描述）；无 frontmatter 的普通知识文档
+    由注入常驻，无需调用。
+    """
+    from app.services import agent_knowledge
+
+    raw = str(name or "").strip()
+    if not raw:
+        raise ValueError("name 必须是知识文档名（如「固化02-小说转合集卡规范」）")
+    try:
+        return agent_knowledge.read_doc(raw)
+    except FileNotFoundError as exc:
+        raise ValueError(f"知识文档不存在：{raw}") from exc

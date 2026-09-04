@@ -16,7 +16,8 @@ import importlib
 from dataclasses import dataclass, field
 
 CATEGORY_COMFYUI = "comfyui"
-CATEGORIES = (CATEGORY_COMFYUI, "worldbook", "character", "repo", "rag", "media", "asset")
+CATEGORIES = (CATEGORY_COMFYUI, "worldbook", "character", "repo", "rag", "media", "asset",
+              "novel", "knowledge")
 
 SIDE_EFFECT_READONLY = "readonly"
 SIDE_EFFECT_REVERSIBLE = "reversible"
@@ -487,4 +488,121 @@ register(Capability(
     side_effect_level=SIDE_EFFECT_READONLY,
     channel=CHANNEL_SYNC,
     handler="app.services.capability_handlers:migrate_scan_source",
+))
+
+
+# ── 固化02 脚本辅助层（novel.*）：小说预处理机械工具（长文上下文防爆）─────────
+
+register(Capability(
+    operation="novel.extract_epub",
+    category="novel",
+    description="把 .epub 长篇小说按 OPF spine 顺序抽取为分章纯文本并落盘"
+                "（固化02 脚本辅助层 T1）。epub 源可在作品外（只读）；out_txt 必须落在"
+                "作品域/临时工作区。产出用「===== 章节 =====」标记，供 novel.survey / "
+                "novel.charfacts 复用；抽取后禁止再整本读全文（上下文防爆）。",
+    params_schema={
+        "type": "object",
+        "properties": {
+            "src": {"type": "string"},
+            "out_txt": {"type": "string"},
+        },
+        "required": ["src", "out_txt"],
+        "additionalProperties": False,
+    },
+    needs_model=None,
+    side_effect_level=SIDE_EFFECT_REVERSIBLE,
+    channel=CHANNEL_SYNC,
+    handler="app.services.capability_handlers:novel_extract_epub",
+))
+
+register(Capability(
+    operation="novel.survey",
+    category="novel",
+    description="只读清点分章全文：章节标题清单、称呼后缀候选名词频、红线词计数"
+                "（固化02 脚本辅助层 T2）。产物是候选角色名单与章节锚点，先给用户确认"
+                "转写范围再进素材切段；不写任何文件。红线词只计数不代判（年龄口径交 LLM）。",
+    params_schema={
+        "type": "object",
+        "properties": {
+            "full_txt": {"type": "string"},
+            "top_names": {"type": "integer"},
+        },
+        "required": ["full_txt"],
+        "additionalProperties": False,
+    },
+    needs_model=None,
+    side_effect_level=SIDE_EFFECT_READONLY,
+    channel=CHANNEL_SYNC,
+    handler="app.services.capability_handlers:novel_survey",
+))
+
+register(Capability(
+    operation="novel.charfacts",
+    category="novel",
+    description="按候选名单从分章全文切素材段，逐名落 <out_dir>/<name>.txt"
+                "（固化02 脚本辅助层 T3，上下文防爆核心）。mode: top_n = 全书前 N 段完整"
+                "段落；anchor = 首·中·末 320 字锚点窗口。素材是中间产物不是条目：模型只读"
+                "素材文件后经 worldbook.upsert_repo 分批写条目；零命中名字会明确报告。",
+    params_schema={
+        "type": "object",
+        "properties": {
+            "full_txt": {"type": "string"},
+            "names": {"type": "array", "items": {"type": "string"}},
+            "out_dir": {"type": "string"},
+            "mode": {"type": "string"},
+            "max_paras": {"type": "integer"},
+        },
+        "required": ["full_txt", "names", "out_dir"],
+        "additionalProperties": False,
+    },
+    needs_model=None,
+    side_effect_level=SIDE_EFFECT_REVERSIBLE,
+    channel=CHANNEL_SYNC,
+    handler="app.services.capability_handlers:novel_charfacts",
+))
+
+register(Capability(
+    operation="novel.scan_anonymity",
+    category="novel",
+    description="落盘匿名/红线机械扫描（固化02 §3.6 收尾闸门，readonly）：在条目"
+                "content/keys/comment 三处查主角名（含姓/名/爱称/后缀粒度，名单由 LLM 从"
+                "原作提取）、单花括号 {user} f-string 陷阱、硬禁词零命中；{{user}} 占位计数"
+                "缺失给警告。passed=False 阻断交付；台词爱称第二遍语义扫描仍由 LLM 兜底。",
+    params_schema={
+        "type": "object",
+        "properties": {
+            "entries": {"type": "array", "items": {"type": "object"}},
+            "protagonist_names": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["entries", "protagonist_names"],
+        "additionalProperties": False,
+    },
+    needs_model=None,
+    side_effect_level=SIDE_EFFECT_READONLY,
+    channel=CHANNEL_SYNC,
+    handler="app.services.capability_handlers:novel_scan_anonymity",
+))
+
+
+# ── 固化技能按需装载（三固化 skill 化 A2）：命中触发场景才拉全文 ──────────────
+
+register(Capability(
+    operation="knowledge.load_doc",
+    category="knowledge",
+    description="按名拉取固化技能/知识全文（readonly）。固化技能（frontmatter 带 skill，"
+                "见目录注入的【固化技能库】清单）命中触发场景时，必须先调用本能力拉全文"
+                "照其结构与质量标准执行，禁止凭目录一句话另搞一套；无 frontmatter 的"
+                "普通知识文档由注入常驻，无需调用。",
+    params_schema={
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+        },
+        "required": ["name"],
+        "additionalProperties": False,
+    },
+    needs_model=None,
+    side_effect_level=SIDE_EFFECT_READONLY,
+    channel=CHANNEL_SYNC,
+    handler="app.services.capability_handlers:knowledge_load_doc",
 ))
