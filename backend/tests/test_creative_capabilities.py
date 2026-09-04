@@ -94,6 +94,57 @@ def test_worldbook_upsert建快照并按key更新追加(tmp_path, monkeypatch):
     assert lin["content"] == "新内容"
 
 
+# ── 世界书条目 5 字段契约（2026-09-04：模型曾写 {key,content} 落盘空 keys 条目）──
+
+def _upsert_plan(entries: list[dict]) -> GenerationPlan:
+    return GenerationPlan(
+        intent="写条目", repo_id="work",
+        budgets=PlanBudgets(max_steps=2, max_gpu_tasks=0, max_llm_calls=0),
+        steps=[PlanStep(id="s1", operation="worldbook.upsert_repo",
+                        params={"entries": entries})],
+        approval_required=["worldbook.upsert_repo"],
+    )
+
+
+def test_upsert_repo_旧式单数key条目被validator拒():
+    # 历史事故（2026-09-04 实测）：模型写 {"key":...,"content":...} 不被拒 →
+    # 落盘 keys=[]、comment 空，视觉画像锚点丢失。schema 细化后必须拦截。
+    plan = _upsert_plan([{"key": "加恩", "content": "正文"}])
+    errors = plan_validator.validate(
+        plan, capabilities=cr.all_capabilities(), allowed_prefix="C:/x")
+    assert any("缺少必填字段「keys」" in e for e in errors)
+    assert any("含未知字段「key」" in e for e in errors)
+
+
+def test_upsert_repo_合法五字段通过():
+    plan = _upsert_plan([{"content": "正文", "comment": "角色卡·加恩", "keys": ["加恩"]},
+                         {"content": "正文2", "comment": "角色卡·莱缇", "keys": ["莱缇", "莱提"],
+                          "constant": False, "enabled": True}])
+    assert plan_validator.validate(
+        plan, capabilities=cr.all_capabilities(), allowed_prefix="C:/x") == []
+
+
+def test_upsert_repo_handler把key归一并丢弃杂字段(tmp_path):
+    # full 模式 fabric 不经 plan_validator，handler 归一是第二道防线
+    out = ch.upsert_repo_worldbook(str(tmp_path), "work", [
+        {"key": "加恩", "content": "正文", "junk": 1},
+        {"name": "莱缇", "content": "正文2", "comment": "角色卡·莱缇"},
+    ])
+    assert out["applied"] == 2 and out["skipped"] == 0
+    from app.services import worldbook_store
+    entries = list(worldbook_store._raw_entries(worldbook_store.read_repo_snapshot(str(tmp_path), "work")))
+    by_keys = {tuple(e.get("keys") or []): e for e in entries}
+    assert by_keys[("加恩",)]["content"] == "正文"
+    assert "junk" not in by_keys[("加恩",)] and "key" not in by_keys[("加恩",)]
+    assert by_keys[("莱缇",)]["comment"] == "角色卡·莱缇"
+    assert any("缺 comment" in w for w in out["warnings"])
+
+
+def test_upsert_repo_handler跳过无内容条目(tmp_path):
+    out = ch.upsert_repo_worldbook(str(tmp_path), "work", [{"junk": 1}])
+    assert out["applied"] == 0 and out["skipped"] == 1
+
+
 # ── character.upsert_repo ─────────────────────────────────────────────────────
 
 def test_character_upsert写入作品域并读回(tmp_path):

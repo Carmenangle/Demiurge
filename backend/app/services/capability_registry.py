@@ -317,15 +317,33 @@ register(Capability(
     handler="app.services.capability_handlers:list_dir",
 ))
 
+# 世界书条目 5 字段契约（固化02 §1/§3.3）：只有这五个字段有效；keys 非空、
+# comment 以「角色卡·<名>」开头（视觉画像提取器锚点）。嵌套 schema 供 validator
+# 递归校验 + handler 归一容错（模型写 key 等杂字段会被归一/拒绝）。
+WORLDBOOK_ENTRY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "content": {"type": "string"},
+        "comment": {"type": "string"},
+        "keys": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+        "constant": {"type": "boolean"},
+        "enabled": {"type": "boolean"},
+    },
+    "required": ["content", "comment", "keys"],
+    "additionalProperties": False,
+}
+
 register(Capability(
     operation="worldbook.upsert_repo",
     category="worldbook",
-    description="向当前作品的世界书快照 upsert 条目（同 key/comment 更新，新条目追加）。"
+    description="向当前作品的世界书快照 upsert 条目（同 keys/comment 更新，新条目追加）。"
+                "条目只认 content/comment/keys/constant/enabled 五字段：keys 必须非空、"
+                "comment 按『角色卡·<名>』前缀写（视觉画像锚点）。"
                 "写入路径由执行环境归一注入，模型不得填 base。",
     params_schema={
         "type": "object",
         "properties": {
-            "entries": {"type": "array", "items": {"type": "object"}, "minItems": 1},
+            "entries": {"type": "array", "items": WORLDBOOK_ENTRY_SCHEMA, "minItems": 1},
             "repo_id": {"type": "string"},
             "base": {"type": "string"},
         },
@@ -575,14 +593,18 @@ register(Capability(
     description="落盘匿名/红线机械扫描（固化02 §3.6 收尾闸门，readonly）：在条目"
                 "content/keys/comment 三处查主角名（含姓/名/爱称/后缀粒度，名单由 LLM 从"
                 "原作提取）、单花括号 {user} f-string 陷阱、硬禁词零命中；{{user}} 占位计数"
-                "缺失给警告。passed=False 阻断交付；台词爱称第二遍语义扫描仍由 LLM 兜底。",
+                "缺失给警告。passed=False 阻断交付；台词爱称第二遍语义扫描仍由 LLM 兜底。"
+                "取数二选一：显式给 entries，或只给 repo_id（base 由执行环境注入作品根）"
+                "机械读作品世界书快照再扫——approval 计划里写后者即可编进闸门步骤。",
     params_schema={
         "type": "object",
         "properties": {
             "entries": {"type": "array", "items": {"type": "object"}},
             "protagonist_names": {"type": "array", "items": {"type": "string"}},
+            "repo_id": {"type": "string"},
+            "base": {"type": "string"},
         },
-        "required": ["entries", "protagonist_names"],
+        "required": ["protagonist_names"],
         "additionalProperties": False,
     },
     needs_model=None,

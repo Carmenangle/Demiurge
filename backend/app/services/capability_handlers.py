@@ -409,6 +409,51 @@ def list_dir(path: str, max_entries: int = 200) -> dict[str, Any]:
     return {"path": str(target), "count": len(entries), "entries": entries}
 
 
+def _normalize_worldbook_patch(patch: dict[str, Any],
+                               warnings: list[str]) -> dict[str, Any] | None:
+    """把模型给的条目归一成世界书 5 字段（content/comment/keys/constant/enabled）。
+
+    - `key`/`name` 等单数写法 → keys 单元素数组；keys 为 str → [str]；
+    - 白名单外的杂字段（key/name/title/index…）一律丢弃，避免脏字段进快照；
+    - 缺 comment/keys 记 warning（不阻断写入，但调用方可见待补）。
+    返回 None 表示没有任何有效内容字段，条目被跳过。
+    """
+    entry: dict[str, Any] = {}
+    for field in ("content", "comment", "constant", "enabled"):
+        if field in patch:
+            entry[field] = patch[field]
+    raw_keys = patch.get("keys")
+    if raw_keys is None:
+        alt = patch.get("key") if patch.get("key") not in (None, "") else patch.get("name")
+        raw_keys = [alt] if isinstance(alt, str) else (list(alt) if isinstance(alt, list) else None)
+    if isinstance(raw_keys, str):
+        raw_keys = [raw_keys]
+    if raw_keys:
+        entry["keys"] = [str(k) for k in raw_keys if str(k).strip()]
+    content = str(entry.get("content") or "").strip()
+    if not content and not entry.get("keys"):
+        return None
+    if not entry.get("keys"):
+        warnings.append("条目 content 缺 keys——模型写了不存在的单数字段？归一后仍为空")
+    if not str(entry.get("comment") or "").strip():
+        warnings.append(f"条目 {str(entry.get('keys') or ['?'])[:20]} 缺 comment"
+                        "（视觉画像需『角色卡·<名>』前缀，keys 决定命中）")
+    return entry
+
+
+def _entry_match_keys(item: dict[str, Any]) -> list[str]:
+    """存量条目匹配用 keys（兼容历史脏条目用单数 key/name 写入的情况）。"""
+    raw = item.get("keys")
+    if raw is None:
+        alt = item.get("key") if item.get("key") not in (None, "") else item.get("name")
+        raw = alt
+    if isinstance(raw, str):
+        return [raw]
+    if isinstance(raw, list):
+        return [str(k) for k in raw if str(k).strip()]
+    return []
+
+
 def upsert_repo_worldbook(base: str, repo_id: str,
                           entries: list[dict[str, Any]]) -> dict[str, Any]:
     """向作品世界书快照 upsert 条目（durable）。快照不存在则创建骨架。"""
@@ -422,27 +467,33 @@ def upsert_repo_worldbook(base: str, repo_id: str,
         snap = worldbook_store.repo_snapshot_path(base, repo_id)
         snap.parent.mkdir(parents=True, exist_ok=True)
     applied = 0
+    skipped = 0
+    warnings: list[str] = []
     indexed = {str(item.get("index")): item for item in worldbook_edit.list_entries(book)}
     for patch in entries or []:
         if not isinstance(patch, dict):
+            skipped += 1
             continue
-        keys = patch.get("keys") or patch.get("key") or []
-        if isinstance(keys, str):
-            keys = [keys]
-        comment = str(patch.get("comment") or "").strip()
+        norm = _normalize_worldbook_patch(patch, warnings)
+        if norm is None:
+            skipped += 1
+            continue
+        keys = norm.get("keys") or []
+        comment = str(norm.get("comment") or "").strip()
         hit = next((item for item in indexed.values()
                     if ((comment and str(item.get("comment") or "").strip() == comment)
-                        or (keys and any(k in (item.get("keys") or item.get("key") or [])
-                                          for k in keys)))), None)
+                        or (keys and any(
+                            k in _entry_match_keys(item) for k in keys)))), None)
         if hit is not None:
-            if worldbook_edit.update_entry(book, int(hit["index"]), patch):
+            if worldbook_edit.update_entry(book, int(hit["index"]), norm):
                 applied += 1
         else:
-            worldbook_edit.add_entry(book, patch)
+            worldbook_edit.add_entry(book, norm)
             applied += 1
     if applied:
         worldbook_store.save_repo_snapshot(base, repo_id, book)
-    return {"repo_id": repo_id, "applied": applied}
+    return {"repo_id": repo_id, "applied": applied, "skipped": skipped,
+            "warnings": warnings}
 
 
 def upsert_repo_character(base: str, card: dict[str, Any]) -> dict[str, Any]:
@@ -688,20 +739,37 @@ def novel_charfacts(full_txt: str, names: list[str],
         raise ValueError(str(exc)) from exc
 
 
-def novel_scan_anonymity(entries: list[dict[str, Any]],
-                         protagonist_names: list[str]) -> dict[str, Any]:
+def novel_scan_anonymity(entries: list[dict[str, Any]] | None = None,
+                         protagonist_names: list[str] | None = None,
+                         repo_id: str = "", base: str = "") -> dict[str, Any]:
     """落盘匿名/红线机械扫描（固化02 §3.6，readonly）：主角名/单花括号/硬禁词。
 
     entries = 世界书快照条目或角色卡条目 list；protagonist_names 需含姓/名/爱称/
     带后缀形式（如 ["沈栖","栖栖"]），由 LLM 从原作提取给出。passed=False 阻断交付，
     语义判断（台词爱称第二遍）仍由 LLM 兜底。
-    """
-    from app.services import novel_tools
 
-    if not isinstance(entries, list):
-        raise ValueError("entries 必须是条目 list")
+    取数约定（2026-09-04）：entries 给显式 list 优先；不给时若给了 repo_id/base
+    （base 由执行环境归一注入作品根），机械读作品世界书快照取 entries —— 这样
+    approval 计划里只需写 protagonist_names，执行期再读快照，闸门步骤编得进计划。
+    """
+    from app.services import novel_tools, worldbook_store
+
+    if protagonist_names is None:
+        protagonist_names = []
     if not isinstance(protagonist_names, list) or not protagonist_names:
         raise ValueError("protagonist_names 必须是主角名清单（含爱称粒度）")
+    if entries is None or not isinstance(entries, list):
+        entries = None
+    if entries is None:
+        if not (base and repo_id):
+            raise ValueError("未给 entries，且缺 repo_id/base 无法读作品世界书快照——"
+                             "显式传 entries，或给 repo_id（base 由环境注入）自动读快照")
+        snap = worldbook_store.read_repo_snapshot(str(base), str(repo_id)) or {}
+        entries = list(snap.get("entries") or [])
+        if not entries:
+            raise ValueError(f"作品世界书快照（{repo_id}）里没有条目可扫描")
+    if not isinstance(entries, list):
+        raise ValueError("entries 必须是条目 list")
     try:
         return novel_tools.scan_anonymity(entries, protagonist_names)
     except novel_tools.NovelToolError as exc:

@@ -271,6 +271,67 @@ def test_集成_落盘读回_扫描收尾(tmp_path):
     assert gate2["passed"] is True
 
 
+# ── scan_anonymity 快照取数（2026-09-04）：approval 计划只给 repo_id 即可编进闸门 ──
+
+
+def test_scan_anonymity_无entries时读作品世界书快照(tmp_path):
+    base = str(tmp_path)
+    ch.upsert_repo_worldbook(base=base, repo_id="work", entries=[
+        {"comment": "角色卡·陆沉", "keys": ["陆沉"], "constant": False,
+         "content": "沈栖在码头等的人；【外貌】高大剑眉"},
+    ])
+    # 不给 entries，给 repo_id/base → 机械读快照再扫（无 LLM 路径）
+    gate = ch.novel_scan_anonymity(entries=None, protagonist_names=["沈栖"],
+                                   repo_id="work", base=base)
+    assert gate["passed"] is False
+    assert any(leak["kind"] == "protagonist_leak" for leak in gate["leaks"])
+
+
+def test_scan_anonymity_显式entries优先于快照(tmp_path):
+    base = str(tmp_path)
+    ch.upsert_repo_worldbook(base=base, repo_id="work", entries=[
+        {"comment": "角色卡·陆沉", "keys": ["陆沉"], "content": "沈栖出现"},
+    ])
+    # 显式传的 entries 是干净的 → 不应读快照里的脏条目
+    gate = ch.novel_scan_anonymity(
+        entries=[{"comment": "角色卡·陆沉", "keys": ["陆沉"], "content": "与 {{user}} 重逢"}],
+        protagonist_names=["沈栖"], repo_id="work", base=base)
+    assert gate["passed"] is True
+
+
+def test_scan_anonymity_无entries又无repo时拒绝(tmp_path):
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match="世界书快照"):
+        ch.novel_scan_anonymity(entries=None, protagonist_names=["沈栖"], repo_id="", base="")
+
+
+def test_scan_anonymity_计划只给名单即过校验且环境注入(tmp_path):
+    """approval 闸门可编排性（2026-09-04）：entries 是执行期值编不进计划，
+    只给 protagonist_names 必须能过校验；submit_task 把 base/repo_id 注入。"""
+    from app.services import plan_tasks, plan_validator
+    from app.services.structured_contracts import GenerationPlan, PlanBudgets, PlanStep
+
+    plan = GenerationPlan(
+        intent="写完自查", repo_id="work",
+        budgets=PlanBudgets(max_steps=2, max_gpu_tasks=0, max_llm_calls=0),
+        steps=[PlanStep(id="s1", operation="novel.scan_anonymity",
+                        params={"protagonist_names": ["沈栖", "栖栖"]})],
+        approval_required=[],
+    )
+    errors = plan_validator.validate(
+        plan, capabilities=cr.all_capabilities(), allowed_prefix=str(tmp_path))
+    assert errors == [], errors
+    sub = plan_tasks.submit_task(plan, output_dir=str(tmp_path), repo_id="work")
+    assert not sub.get("deduped")
+    try:
+        stored = plan_tasks.get_task(sub["task_id"])
+        params = stored["steps"][0]["params"]
+        assert params["base"] == str(tmp_path)
+        assert params["repo_id"] == "work"
+    finally:
+        plan_tasks.cancel_task(sub["task_id"])
+
+
 # ── handler 作品域 base 泛化：work_dir 推导 _prep/ 路径（2026-09-04） ────────
 
 

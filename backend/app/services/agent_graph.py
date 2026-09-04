@@ -682,6 +682,7 @@ def plan_compiler_node(state: AgentState) -> dict:
             capabilities=capability_registry.with_availability(configured),
             access_mode=capability_sandbox.ACCESS_FULL,
             lease_id=lease["id"], output_dir=output_dir,
+            repo_id=str(ctx.get("repo_id") or ctx.get("thread_id") or ""),
             configured_models=configured,
             chat_base=ctx["chat_base"], chat_key=ctx["chat_key"],
             chat_model=ctx.get("route_model") or ctx["chat_model"],

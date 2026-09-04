@@ -98,7 +98,8 @@ def _dispatch(operation: str, params: dict) -> dict:
 def run_loop(*, intent: str, history: str = "", capabilities: list[dict] | None = None,
              access_mode: str = capability_sandbox.ACCESS_APPROVAL,
              lease_id: str = "", subject: str = "",
-             output_dir: str = "", configured_models: set[str] | frozenset[str] = frozenset(),
+             output_dir: str = "", repo_id: str = "",
+             configured_models: set[str] | frozenset[str] = frozenset(),
              chat_base: str = "", chat_key: str = "", chat_model: str = "",
              chat_fn: Callable | None = None, structured_chat_fn: Callable | None = None,
              images: list[str] | None = None,
@@ -194,6 +195,11 @@ def run_loop(*, intent: str, history: str = "", capabilities: list[dict] | None 
         # 配方重放的落盘域同样环境归一（handler 内还有配置真源等值校验兜底）
         if operation == "plan.instantiate_recipe" and not str(params.get("output_dir") or "").strip():
             params["output_dir"] = output_dir or ""
+        # 收尾闸门取数归一：scan_anonymity 不给 entries 时自动指向本作品世界书快照
+        if (operation == "novel.scan_anonymity" and not params.get("entries")
+                and not str(params.get("base") or "").strip()):
+            params["base"] = output_dir or ""
+            params["repo_id"] = repo_id or ""
         if trace is not None:
             trace("tool.call", operation=operation, params=params)
         try:

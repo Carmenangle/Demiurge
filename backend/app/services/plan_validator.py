@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from pathlib import PureWindowsPath
+from typing import Any
 
 from app.services.structured_contracts import GenerationPlan
 
@@ -114,6 +115,41 @@ def _ref_resolvable(ref: str, earlier_steps: set[str]) -> bool:
     return head in earlier_steps
 
 
+def _check_value(label: str, path: str, value: Any, spec: dict) -> list[str]:
+    """递归校验一层 JSON Schema（object/array 下钻到 items/嵌套 properties）。
+
+    path 用于报错定位（「{key}」顶层风格延续历史消息，嵌套用 .k / [i]）。
+    """
+    errors: list[str] = []
+    expected = str(spec.get("type"))
+    checks = _TYPE_CHECKS.get(expected)
+    if checks and not isinstance(value, checks):
+        return [f"{label}: 参数{path}应为 {expected}。"]
+    if expected == "array" and isinstance(value, list):
+        min_items = spec.get("minItems")
+        if min_items and len(value) < int(min_items):
+            errors.append(f"{label}: 参数{path}至少需要 {min_items} 项。")
+        item_spec = spec.get("items")
+        if isinstance(item_spec, dict) and item_spec.get("type") in ("object", "array"):
+            for index, item in enumerate(value):
+                errors.extend(_check_value(label, f"{path}[{index}]", item, item_spec))
+    elif expected == "object" and isinstance(value, dict):
+        props = spec.get("properties") or {}
+        for key in spec.get("required") or []:
+            if key not in value:
+                errors.append(f"{label}: 参数{path}缺少必填字段「{key}」。")
+        for key, item in value.items():
+            sub = props.get(key)
+            if sub is None:
+                if spec.get("additionalProperties") is False:
+                    errors.append(
+                        f"{label}: 参数{path}含未知字段「{key}」"
+                        "（不在能力参数定义里）。")
+                continue
+            errors.extend(_check_value(label, f"{path}.{key}", item, sub))
+    return errors
+
+
 def _check_params(label: str, params: dict, schema: dict) -> list[str]:
     errors: list[str] = []
     if not isinstance(params, dict):
@@ -129,14 +165,7 @@ def _check_params(label: str, params: dict, schema: dict) -> list[str]:
             if schema.get("additionalProperties") is False:
                 errors.append(f"{label}: 参数「{key}」不在能力参数定义里。")
             continue
-        expected = spec.get("type")
-        checks = _TYPE_CHECKS.get(str(expected))
-        if checks and not isinstance(value, checks):
-            errors.append(f"{label}: 参数「{key}」应为 {expected}。")
-        if expected == "array" and isinstance(value, list):
-            min_items = spec.get("minItems")
-            if min_items and len(value) < int(min_items):
-                errors.append(f"{label}: 参数「{key}」至少需要 {min_items} 项。")
+        errors.extend(_check_value(label, f"「{key}」", value, spec))
     return errors
 
 
