@@ -50,7 +50,9 @@ describe("guide navigation", () => {
 
   it("drills into guide sections starting with quick-start", () => {
     expect(SECTION_SUBNAV.guide.map((item) => item.id)).toEqual([
-      "quick-start", "story", "canvas", "workflow", "tools",
+      "quick-start", "story", "canvas", "workflow",
+      "curing-process", "novel-to-collection-card", "card-worldbook-convert",
+      "tools",
     ]);
   });
 });

@@ -94,6 +94,9 @@ export const SECTION_SUBNAV: Record<Exclude<NavSection, "home">, { id: string; l
     { id: "story", label: "剧情扮演" },
     { id: "canvas", label: "画布创作" },
     { id: "workflow", label: "AI 搭工作流" },
+    { id: "curing-process", label: "固化流程：批量生图" },
+    { id: "novel-to-collection-card", label: "固化流程：小说转合集卡" },
+    { id: "card-worldbook-convert", label: "固化流程：角色卡世界书转化" },
     { id: "tools", label: "多功能工具" },
   ],
 };
