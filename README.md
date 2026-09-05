@@ -121,19 +121,10 @@ Demiurge 把剧情对话、角色卡、世界书、RAG 记忆、状态表、自�
 一次剧情回合不是「问一句答一句」，而是 **正文生成、多模态生成、记忆维护三条通道并行**、
 并被一条 **RAG 记忆循环** 闭合的完整事务。全景如下：
 
-```mermaid
-flowchart TB
-    U[用户输入] --> P0[准入与预处理<br>输入正则 · 世界书解析 · 开场卡 · 历史瘦身]
-    P0 --> P1[回合上下文组装<br>状态块 · RAG 召回 · Chronicle 概览 · 时序事实与角色认知]
-    P1 --> P2[剧情 Agent 主生成<br>一次调用产出正文 + 状态战报 + 高潮插画计划]
-    P2 --> P3[写回与发布<br>角色状态写回 · Narrative CI · 高潮判定 · 提示词 Profile 编译]
-    P3 --> P4[SSE 提前发布<br>正文原位渲染 + 媒体槽占位]
-    P4 --> P5[维护 · 后台异步<br>表格写回 · 纪要 · Curator 沉淀 · 文风通审]
-    P5 --> P6[RAG 与知识库索引]
-    P6 -.->|下一轮检索命中 · 循环闭合| P1
-    P3 --> P7[媒体通道 · 独立运行<br>ComfyUI FIFO 队列 · 图片 / 视频 / 音频]
-    P7 --> P8[messageId + slotId 原位回填<br>不追加对话轮 · 不阻塞下一轮]
-```
+![一次剧情回合 · 完整链路（dynamic-archify 动态架构图，暗/亮主题自适应）](docs/tutorials/assets/turn-full-pipeline-archify.svg)
+
+> ▶ 交互演示: [动态架构版](docs/tutorials/assets/turn-full-pipeline-archify.html)（暗/亮切换 · 导出 PNG/SVG/GIF/WebM） ·
+> [讲解动画版](docs/tutorials/assets/turn-full-pipeline.html)（自动播放 / 步进）
 
 ### 分阶段看这条链路
 

@@ -1,0 +1,258 @@
+{
+  "schema_version": 1,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "一次剧情回合 · 完整链路",
+    "subtitle": "正文 / 多模态 / 记忆 三通道并行 · RAG 记忆循环闭合",
+    "viewBox": [720, 873]
+  },
+  "lanes": [
+    {
+      "id": "ui",
+      "label": "会话前端"
+    },
+    {
+      "id": "ingest",
+      "label": "准入与上下文"
+    },
+    {
+      "id": "agent",
+      "label": "剧情 Agent"
+    },
+    {
+      "id": "publish",
+      "label": "发布通道"
+    },
+    {
+      "id": "media",
+      "label": "媒体通道"
+    },
+    {
+      "id": "memory",
+      "label": "维护与记忆"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "user",
+      "lane": "ui",
+      "col": 0,
+      "type": "external",
+      "label": "用户输入",
+      "sublabel": "回合发起"
+    },
+    {
+      "id": "chat",
+      "lane": "ui",
+      "col": 5,
+      "type": "frontend",
+      "label": "对话渲染与回填",
+      "sublabel": "正文渲染+媒体槽回填"
+    },
+    {
+      "id": "pre",
+      "lane": "ingest",
+      "col": 0,
+      "type": "backend",
+      "label": "准入与预处理",
+      "sublabel": "正则·世界书·瘦身"
+    },
+    {
+      "id": "ctx",
+      "lane": "ingest",
+      "col": 1,
+      "type": "backend",
+      "label": "回合上下文组装",
+      "sublabel": "状态块·RAG·认知",
+      "tag": "记忆循环入口"
+    },
+    {
+      "id": "gen",
+      "lane": "agent",
+      "col": 2,
+      "type": "backend",
+      "label": "剧情主生成",
+      "sublabel": "正文+战报+插画计划",
+      "tag": "一次调用"
+    },
+    {
+      "id": "write",
+      "lane": "agent",
+      "col": 3,
+      "type": "backend",
+      "label": "写回与发布",
+      "sublabel": "高潮判定·Profile",
+      "tag": "状态写回"
+    },
+    {
+      "id": "sse",
+      "lane": "publish",
+      "col": 4,
+      "type": "messagebus",
+      "label": "SSE 提前发布",
+      "sublabel": "正文渲染+媒体槽占位"
+    },
+    {
+      "id": "comfy",
+      "lane": "media",
+      "col": 2,
+      "type": "messagebus",
+      "label": "ComfyUI FIFO",
+      "sublabel": "串行队列"
+    },
+    {
+      "id": "genm",
+      "lane": "media",
+      "col": 4,
+      "type": "backend",
+      "label": "媒体生成",
+      "sublabel": "LoRA·首帧·TTS"
+    },
+    {
+      "id": "maint",
+      "lane": "memory",
+      "col": 2,
+      "type": "backend",
+      "label": "后台维护",
+      "sublabel": "表格·纪要·Curator",
+      "tag": "异步"
+    },
+    {
+      "id": "rag",
+      "lane": "memory",
+      "col": 3,
+      "type": "database",
+      "label": "RAG 索引",
+      "sublabel": "Chroma + BM25"
+    }
+  ],
+  "edges": [
+    {
+      "from": "user",
+      "to": "pre",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "drop"
+    },
+    {
+      "from": "pre",
+      "to": "ctx"
+    },
+    {
+      "from": "ctx",
+      "to": "gen",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "drop"
+    },
+    {
+      "from": "gen",
+      "to": "write"
+    },
+    {
+      "from": "write",
+      "to": "sse",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "drop",
+      "label": "先发布·不等维护",
+      "labelAt": [
+        436,
+        427
+      ]
+    },
+    {
+      "from": "sse",
+      "to": "chat",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "bottom",
+      "route": "outside-right",
+      "label": "正文流式渲染",
+      "labelSegment": 1
+    },
+    {
+      "from": "write",
+      "to": "maint",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "drop",
+      "label": "后台异步",
+      "labelSegment": 1,
+      "labelDy": -14
+    },
+    {
+      "from": "write",
+      "to": "comfy",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "drop",
+      "label": "媒体请求",
+      "labelSegment": 1
+    },
+    {
+      "from": "comfy",
+      "to": "genm",
+      "variant": "emphasis",
+      "label": "FIFO 出队"
+    },
+    {
+      "from": "genm",
+      "to": "chat",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "right",
+      "route": "outside-right",
+      "label": "原位回填",
+      "labelSegment": 1,
+      "labelDx": -10
+    },
+    {
+      "from": "maint",
+      "to": "rag",
+      "variant": "emphasis"
+    },
+    {
+      "from": "rag",
+      "to": "ctx",
+      "variant": "dashed",
+      "fromSide": "left",
+      "toSide": "top",
+      "via": [[146, 739], [146, 120], [220, 120], [220, 209]],
+      "label": "下一轮检索命中·循环闭合",
+      "labelAt": [150, 500]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "三通道并行",
+      "items": [
+        "正文生成：一次 LLM 调用产出正文 + 隐藏控制块",
+        "多模态生成：媒体请求走 ComfyUI FIFO 独立通道",
+        "记忆维护：表格 / 纪要 / Curator 后台异步运行"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "RAG 记忆循环",
+      "items": [
+        "上下文组装 = 循环的「读」侧：状态块为权威约束，RAG / Chronicle 为证据",
+        "本轮沉淀的新知识入库索引，下一轮检索立刻命中",
+        "Curator 只增写 RAG，受控增改世界书快照，不删除"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "关键设计",
+      "items": [
+        "SSE 先发布正文与媒体槽，不等维护完成",
+        "原位回填按 messageId + slotId，不追加对话轮、不阻塞下一轮",
+        "媒体 FIFO 串行处理，不会作为下一轮模型输入"
+      ]
+    }
+  ]
+}

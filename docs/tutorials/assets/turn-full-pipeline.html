@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>一次剧情回合 · 完整链路</title>
+<style>
+  :root {
+    --bg0: #0a0a0a;
+    --bg1: #1a1a2e;
+    --blue: #4a9eff;
+    --orange: #ff6b35;
+    --purple: #7c3aed;
+    --cyan: #22d3ee;
+    --text: #f4f6fb;
+    --muted: #9aa3b8;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    background: radial-gradient(1200px 600px at 50% -10%, #232349 0%, var(--bg1) 45%, var(--bg0) 100%);
+    color: var(--text);
+    font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+    overflow: hidden;
+    user-select: none;
+  }
+  .grid {
+    position: fixed; inset: 0; pointer-events: none; z-index: 0;
+    background-image:
+      linear-gradient(rgba(74,158,255,.05) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(74,158,255,.05) 1px, transparent 1px);
+    background-size: 44px 44px;
+    mask-image: radial-gradient(ellipse 90% 80% at 50% 40%, #000 55%, transparent 100%);
+  }
+  .blob { position: fixed; border-radius: 50%; filter: blur(90px); opacity: .22; pointer-events: none; z-index: 0; }
+  .blob.b1 { width: 480px; height: 480px; left: -120px; top: -100px; background: var(--blue); animation: drift 14s ease-in-out infinite alternate; }
+  .blob.b2 { width: 420px; height: 420px; right: -100px; bottom: -120px; background: var(--purple); animation: drift 17s ease-in-out infinite alternate-reverse; }
+  @keyframes drift { from { transform: translate(0,0) scale(1); } to { transform: translate(60px, 40px) scale(1.15); } }
+
+  .wrap { position: relative; z-index: 1; height: 100vh; display: flex; flex-direction: column; }
+
+  header { padding: 16px 28px 4px; text-align: center; }
+  header h1 {
+    font-size: 28px; font-weight: 800; letter-spacing: 2px;
+    background: linear-gradient(90deg, var(--blue), var(--cyan), var(--purple), var(--blue));
+    background-size: 300% 100%;
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+    animation: hueflow 8s linear infinite;
+  }
+  @keyframes hueflow { to { background-position: 300% 0; } }
+  header p { margin-top: 5px; font-size: 12.5px; color: var(--muted); letter-spacing: 1px; }
+  header p b { color: var(--cyan); font-weight: 600; }
+  header p b.o { color: var(--orange); }
+  header p b.p { color: var(--purple); }
+
+  /* 舞台:统一坐标系画布,整体等比缩放 */
+  .stage { position: relative; flex: 1; min-height: 0; }
+  .canvas {
+    position: absolute; left: 50%; top: 50%;
+    width: 1240px; height: 700px;
+    transform-origin: center;
+  }
+  svg.lines { position: absolute; inset: 0; width: 1240px; height: 700px; pointer-events: none; }
+
+  path.link { fill: none; stroke: #33415c; stroke-width: 2.4; opacity: .35; transition: opacity .4s; }
+  path.link.on { opacity: 1; stroke: url(#gradMain); }
+  path.link.flow { stroke-dasharray: 9 7; animation: dashflow .7s linear infinite; }
+  path.link.media { stroke: url(#gradMedia); }
+  path.link.media.flow { stroke-dasharray: 8 6; animation: dashflow .55s linear infinite; }
+  path.link.cycle { stroke: url(#gradCycle); stroke-dasharray: 5 9; }
+  path.link.cycle.on { opacity: 1; animation: dashflow 1s linear infinite; }
+  @keyframes dashflow { to { stroke-dashoffset: -16; } }
+
+  .pgroup { display: none; }
+  .pgroup.on { display: block; }
+  .pdot { r: 4.2; filter: drop-shadow(0 0 6px currentColor); }
+
+  /* 节点(画布坐标,与 SVG 同一坐标系) */
+  .node {
+    position: absolute; width: 150px; height: 64px; z-index: 2;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    border-radius: 12px; padding: 6px 8px; text-align: center; cursor: pointer;
+    background: linear-gradient(135deg, rgba(74,158,255,.16), rgba(30,41,59,.85));
+    border: 1px solid rgba(74,158,255,.35);
+    opacity: 0;
+    transition: opacity .45s ease, box-shadow .3s, border-color .3s;
+    backdrop-filter: blur(4px);
+  }
+  .node.show { opacity: 1; animation: glowIn .6s ease both; }
+  @keyframes glowIn { from { filter: brightness(3); } to { filter: brightness(1); } }
+  .node.pulse { animation: nodepulse 2s ease-in-out infinite; }
+  @keyframes nodepulse {
+    0%,100% { box-shadow: 0 0 8px rgba(74,158,255,.35), inset 0 0 6px rgba(74,158,255,.08); }
+    50% { box-shadow: 0 0 26px rgba(74,158,255,.75), inset 0 0 14px rgba(74,158,255,.2); }
+  }
+  .node.media { background: linear-gradient(135deg, rgba(255,107,53,.16), rgba(30,41,59,.85)); border-color: rgba(255,107,53,.4); }
+  .node.media.pulse { animation-name: pulseOrange; }
+  @keyframes pulseOrange {
+    0%,100% { box-shadow: 0 0 8px rgba(255,107,53,.35), inset 0 0 6px rgba(255,107,53,.08); }
+    50% { box-shadow: 0 0 26px rgba(255,107,53,.7), inset 0 0 14px rgba(255,107,53,.2); }
+  }
+  .node.cycle { background: linear-gradient(135deg, rgba(124,58,237,.18), rgba(30,41,59,.85)); border-color: rgba(124,58,237,.45); }
+  .node.cycle.pulse { animation-name: pulsePurple; }
+  @keyframes pulsePurple {
+    0%,100% { box-shadow: 0 0 8px rgba(124,58,237,.4), inset 0 0 6px rgba(124,58,237,.1); }
+    50% { box-shadow: 0 0 26px rgba(124,58,237,.8), inset 0 0 14px rgba(124,58,237,.22); }
+  }
+  .node:hover { border-color: #fff; box-shadow: 0 0 30px rgba(255,255,255,.25); z-index: 4; }
+  .node .t { font-size: 13.5px; font-weight: 700; letter-spacing: .5px; white-space: nowrap; }
+  .node .s { font-size: 10px; color: var(--muted); margin-top: 3px; line-height: 1.35; white-space: nowrap; }
+  .node .step-badge {
+    position: absolute; top: -9px; right: -9px; width: 20px; height: 20px; border-radius: 50%;
+    background: linear-gradient(135deg, var(--blue), var(--purple)); font-size: 11px; font-weight: 800;
+    display: flex; align-items: center; justify-content: center; box-shadow: 0 0 8px rgba(74,158,255,.6);
+  }
+  .node.media .step-badge { background: linear-gradient(135deg, var(--orange), #f97316); }
+  .node.cycle .step-badge { background: linear-gradient(135deg, var(--purple), #a855f7); }
+
+  /* 循环角标(画布坐标) */
+  .loop-note {
+    position: absolute; z-index: 3; font-size: 11.5px; color: #c084fc;
+    background: rgba(124,58,237,.12); border: 1px solid rgba(124,58,237,.4);
+    padding: 4px 10px; border-radius: 999px; letter-spacing: 1px;
+    opacity: 0; transition: opacity .6s; pointer-events: none; white-space: nowrap;
+  }
+  .loop-note.on { opacity: 1; animation: looppulse 2s ease-in-out infinite; }
+  @keyframes looppulse { 0%,100% { box-shadow: 0 0 6px rgba(124,58,237,.25); } 50% { box-shadow: 0 0 18px rgba(124,58,237,.7); } }
+
+  /* 底部阶段面板 */
+  .panel {
+    margin: 10px 22px 14px; border-radius: 14px; min-height: 132px; padding: 12px 18px;
+    background: linear-gradient(135deg, rgba(20,24,40,.82), rgba(12,14,24,.88));
+    border: 1px solid rgba(74,158,255,.22);
+    display: grid; grid-template-columns: 148px 1fr 1fr; gap: 14px;
+    box-shadow: 0 8px 30px rgba(0,0,0,.45); backdrop-filter: blur(6px);
+    transition: border-color .4s;
+  }
+  .panel .ph { display: flex; flex-direction: column; justify-content: center; border-right: 1px solid rgba(255,255,255,.08); padding-right: 12px; }
+  .panel .ph .no { font-size: 12px; color: var(--cyan); letter-spacing: 2px; font-weight: 700; }
+  .panel .ph .nm { font-size: 17px; font-weight: 800; margin-top: 5px; line-height: 1.3; }
+  .panel .ph .tagline { font-size: 11px; color: var(--muted); margin-top: 7px; line-height: 1.5; }
+  .panel .col h4 { font-size: 11.5px; color: var(--muted); font-weight: 600; letter-spacing: 1.5px; margin-bottom: 6px; }
+  .panel .col .txt { font-size: 12.5px; line-height: 1.65; color: var(--text); }
+  .panel .col .txt b { color: var(--cyan); font-weight: 600; }
+  .panel .col .txt b.o { color: var(--orange); }
+  .panel .col .txt b.p { color: #c084fc; }
+  .panel .tags { grid-column: 1 / -1; display: flex; gap: 8px; flex-wrap: wrap; border-top: 1px solid rgba(255,255,255,.07); margin-top: 4px; padding-top: 8px; }
+  .tag { font-size: 11px; padding: 2px 10px; border-radius: 999px; border: 1px solid rgba(74,158,255,.35); color: #bcd8ff; background: rgba(74,158,255,.08); }
+  .tag.o { border-color: rgba(255,107,53,.4); color: #ffc9ad; background: rgba(255,107,53,.08); }
+  .tag.p { border-color: rgba(124,58,237,.45); color: #d9c2ff; background: rgba(124,58,237,.1); }
+
+  /* 控制条(舞台右上,不随画布缩放) */
+  .ctrl {
+    position: absolute; top: 10px; right: 20px; z-index: 5;
+    display: flex; align-items: center; gap: 8px;
+    background: rgba(14,17,30,.75); border: 1px solid rgba(74,158,255,.25);
+    border-radius: 999px; padding: 6px 10px; backdrop-filter: blur(8px);
+    box-shadow: 0 4px 18px rgba(0,0,0,.4);
+  }
+  .ctrl button {
+    border: 1px solid rgba(74,158,255,.4); background: rgba(74,158,255,.12); color: var(--text);
+    width: 32px; height: 32px; border-radius: 50%; font-size: 14px; cursor: pointer;
+    transition: all .2s; display: flex; align-items: center; justify-content: center;
+  }
+  .ctrl button:hover { background: rgba(74,158,255,.35); transform: scale(1.08); }
+  .ctrl button:active { transform: scale(.94); }
+  .ctrl .prog { font-size: 12px; color: var(--muted); min-width: 70px; text-align: center; letter-spacing: 1px; font-variant-numeric: tabular-nums; }
+  .ctrl .prog b { color: var(--cyan); font-size: 14px; }
+  .ctrl .hint { font-size: 10.5px; color: #5d6b86; padding: 0 6px; letter-spacing: .5px; }
+</style>
+</head>
+<body>
+<div class="grid"></div>
+<div class="blob b1"></div>
+<div class="blob b2"></div>
+
+<div class="wrap">
+  <header>
+    <h1>剧情如何运行 · 一次回合的完整链路</h1>
+    <p>正文 · 多模态 · 记忆维护 三通道并行 —— <b>RAG 记忆循环</b>闭合整条事务（<b class="o">橙</b>=媒体通道 <b class="p">紫</b>=记忆循环）</p>
+  </header>
+
+  <div class="stage" id="stage">
+    <div class="canvas" id="canvas">
+      <svg class="lines" width="1240" height="700" viewBox="0 0 1240 700">
+        <defs>
+          <linearGradient id="gradMain" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0" stop-color="#4a9eff"/><stop offset="1" stop-color="#22d3ee"/>
+          </linearGradient>
+          <linearGradient id="gradMedia" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0" stop-color="#ff6b35"/><stop offset="1" stop-color="#fb923c"/>
+          </linearGradient>
+          <linearGradient id="gradCycle" x1="0" y1="1" x2="1" y2="0">
+            <stop offset="0" stop-color="#7c3aed"/><stop offset="1" stop-color="#a855f7"/>
+          </linearGradient>
+          <marker id="arrowMain" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="#4a9eff"/>
+          </marker>
+          <marker id="arrowMedia" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="#ff6b35"/>
+          </marker>
+          <marker id="arrowCycle" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="#a855f7"/>
+          </marker>
+        </defs>
+
+        <!-- 主链 -->
+        <path id="L1" class="link" d="M 190,182 L 220,182" marker-end="url(#arrowMain)"/>
+        <path id="L2" class="link" d="M 380,182 L 410,182" marker-end="url(#arrowMain)"/>
+        <path id="L3" class="link" d="M 570,182 L 600,182" marker-end="url(#arrowMain)"/>
+        <path id="L4" class="link" d="M 760,182 L 790,182" marker-end="url(#arrowMain)"/>
+        <path id="L5" class="link" d="M 950,182 L 980,182" marker-end="url(#arrowMain)"/>
+        <!-- 媒体分支 -->
+        <path id="L6" class="link media" d="M 875,214 C 875,310 505,290 495,360" marker-end="url(#arrowMedia)"/>
+        <path id="L7" class="link media" d="M 570,392 L 600,392" marker-end="url(#arrowMedia)"/>
+        <!-- 维护链 -->
+        <path id="L8" class="link" d="M 1065,214 L 1065,360" marker-end="url(#arrowMain)"/>
+        <path id="L9" class="link" d="M 990,392 L 950,392" marker-end="url(#arrowMain)"/>
+        <!-- 记忆循环 -->
+        <path id="L10" class="link cycle" d="M 875,360 L 875,308 L 495,308 L 495,216" marker-end="url(#arrowCycle)"/>
+
+        <!-- 粒子: 主链 -->
+        <g id="pMain" class="pgroup" style="color:#4a9eff">
+          <circle class="pdot" cx="0" cy="0" fill="#4a9eff"><animateMotion dur="1.6s" repeatCount="indefinite" path="M 190,182 L 980,182"/></circle>
+          <circle class="pdot" cx="0" cy="0" fill="#22d3ee"><animateMotion dur="1.6s" repeatCount="indefinite" begin="0.4s" path="M 190,182 L 980,182"/></circle>
+        </g>
+        <g id="pDown" class="pgroup" style="color:#22d3ee">
+          <circle class="pdot" cx="0" cy="0" fill="#22d3ee"><animateMotion dur="1.3s" repeatCount="indefinite" path="M 1065,214 L 1065,356"/></circle>
+        </g>
+        <g id="pBack" class="pgroup" style="color:#4a9eff">
+          <circle class="pdot" cx="0" cy="0" fill="#4a9eff"><animateMotion dur="1.3s" repeatCount="indefinite" path="M 985,392 L 958,392"/></circle>
+        </g>
+        <!-- 粒子: 媒体 -->
+        <g id="pMedia1" class="pgroup" style="color:#ff6b35">
+          <circle class="pdot" cx="0" cy="0" fill="#ff6b35"><animateMotion dur="1.9s" repeatCount="indefinite" path="M 875,214 C 875,310 505,290 495,356"/></circle>
+        </g>
+        <g id="pMedia2" class="pgroup" style="color:#fb923c">
+          <circle class="pdot" cx="0" cy="0" fill="#fb923c"><animateMotion dur="1.1s" repeatCount="indefinite" path="M 570,392 L 600,392"/></circle>
+        </g>
+        <!-- 粒子: 循环 -->
+        <g id="pCycle" class="pgroup" style="color:#a855f7">
+          <circle class="pdot" cx="0" cy="0" fill="#a855f7"><animateMotion dur="2.4s" repeatCount="indefinite" path="M 875,360 L 875,308 L 495,308 L 495,216"/></circle>
+          <circle class="pdot" cx="0" cy="0" fill="#7c3aed"><animateMotion dur="2.4s" repeatCount="indefinite" begin="1.2s" path="M 875,360 L 875,308 L 495,308 L 495,216"/></circle>
+        </g>
+      </svg>
+
+      <div class="loop-note" id="loopNote" style="left:600px; top:248px;">下一轮检索命中 · 循环闭合</div>
+
+      <!-- 节点(画布坐标) -->
+      <div class="node" id="nU" style="left:40px; top:150px;">
+        <span class="step-badge">0</span><span class="t">用户输入</span><span class="s">发起回合 · 附件可选</span>
+      </div>
+      <div class="node" id="nP0" style="left:230px; top:150px;">
+        <span class="step-badge">1</span><span class="t">准入与预处理</span><span class="s">正则 · 世界书 · 开场卡 · 瘦身</span>
+      </div>
+      <div class="node" id="nP1" style="left:420px; top:150px;">
+        <span class="step-badge">2</span><span class="t">回合上下文组装</span><span class="s">状态块 · RAG · Chronicle · 认知</span>
+      </div>
+      <div class="node" id="nP2" style="left:610px; top:150px;">
+        <span class="step-badge">3</span><span class="t">剧情 Agent 主生成</span><span class="s">正文 + 战报 + 插画计划</span>
+      </div>
+      <div class="node" id="nP3" style="left:800px; top:150px;">
+        <span class="step-badge">4</span><span class="t">写回与发布</span><span class="s">状态写回 · 高潮判定 · Profile</span>
+      </div>
+      <div class="node" id="nP4" style="left:990px; top:150px;">
+        <span class="step-badge">5</span><span class="t">SSE 提前发布</span><span class="s">正文原位渲染 + 媒体槽占位</span>
+      </div>
+      <div class="node media" id="nP7" style="left:420px; top:360px;">
+        <span class="step-badge">5</span><span class="t">媒体通道 · ComfyUI FIFO</span><span class="s">图片 · 视频 · 音频</span>
+      </div>
+      <div class="node media" id="nP8" style="left:610px; top:360px;">
+        <span class="step-badge">⤵</span><span class="t">原位回填</span><span class="s">messageId + slotId 替换</span>
+      </div>
+      <div class="node" id="nP5" style="left:990px; top:360px;">
+        <span class="step-badge">6</span><span class="t">维护 · 后台异步</span><span class="s">表格 · 纪要 · Curator · 通审</span>
+      </div>
+      <div class="node cycle" id="nP6" style="left:800px; top:360px;">
+        <span class="step-badge">∞</span><span class="t">RAG 与知识库索引</span><span class="s">下一轮检索命中</span>
+      </div>
+    </div>
+
+    <div class="ctrl" id="ctrl">
+      <button id="btnPrev" title="上一步 (←)">◀</button>
+      <button id="btnPlay" title="播放/暂停 (空格)">▶</button>
+      <button id="btnNext" title="下一步 (→)">▶</button>
+      <button id="btnReset" title="重置">↺</button>
+      <div class="prog"><b id="stepNo">0</b> / <span id="stepMax">8</span></div>
+      <div class="hint">← → 步进 · 空格 播放 · 悬停节点看详情</div>
+    </div>
+  </div>
+
+  <div class="panel" id="panel">
+    <div class="ph">
+      <div class="no" id="phNo">READY</div>
+      <div class="nm" id="phName">就绪</div>
+      <div class="tagline" id="phTag">点击播放,或按 → 逐步走完一次剧情回合的完整链路。</div>
+    </div>
+    <div class="col">
+      <h4>发生了什么</h4>
+      <div class="txt" id="phDesc">一次剧情回合不是「问一句答一句」:正文生成、多模态生成、记忆维护三条通道并行,并被一条 RAG 记忆循环闭合为完整事务。</div>
+    </div>
+    <div class="col">
+      <h4>你能看到</h4>
+      <div class="txt" id="phSee">正文先出 → 媒体槽占位 → 生成完成原位替换;数据表与纪要卡自动更新,下一轮检索立刻命中本回合沉淀的新知识。</div>
+    </div>
+    <div class="tags" id="phTags"></div>
+  </div>
+</div>
+
+<script>
+const STEPS = [
+  { show: [] },
+  { show: ["nU","nP0"], link: ["L1"] },
+  { show: ["nU","nP0","nP1"], link: ["L2"] },
+  { show: ["nU","nP0","nP1","nP2"], link: ["L3"], p: ["pMain"] },
+  { show: ["nU","nP0","nP1","nP2","nP3"], link: ["L4"], p: ["pMain"] },
+  { show: ["nU","nP0","nP1","nP2","nP3","nP4","nP7"], link: ["L5","L6"], p: ["pMain","pMedia1"] },
+  { show: ["nU","nP0","nP1","nP2","nP3","nP4","nP7","nP5","nP8"], link: ["L8","L7"], p: ["pMain","pMedia1","pDown","pMedia2"] },
+  { show: ["nU","nP0","nP1","nP2","nP3","nP4","nP7","nP5","nP8","nP6"], link: ["L9"], p: ["pMain","pMedia1","pDown","pMedia2","pBack"] },
+  { show: ["nU","nP0","nP1","nP2","nP3","nP4","nP7","nP5","nP8","nP6"], link: ["L10"], p: ["pMain","pMedia1","pDown","pMedia2","pBack","pCycle"], loop: true }
+];
+
+const DATA = {
+  nU:  { no: "输入", name: "用户输入", desc: "回合从这里发起:可直接发送附件或文本文件供 Agent 参考,一次输入开启一回合剧情事务。", see: "输入框发送的消息进入回合流水线。", tags: ["输入正则", "错位深度门控"] },
+  nP0: { no: "阶段 1", name: "准入与预处理", desc: "输入先过正则;世界书按关键词命中并解析;多卡作品按「本轮输入直接角色名 / 世界书命中 key」判定出场角色;历史瘦身到只保留<b>上一次剧情轮的正文</b>。", see: "正文回复带上预设/角色卡风格;世界书条目被触发。", tags: ["输入正则", "世界书解析", "开场卡", "历史瘦身"] },
+  nP1: { no: "阶段 2 · RAG 循环入口", name: "回合上下文组装", desc: "拼入:角色状态块(紧凑 kv + 内联证据)、RAG 知识库与检索表行、Chronicle 纪要 Top-10 概览、时序事实与角色认知(900-token 预算内)、ST 预设 marker 与思维链、输出纪律。", see: "角色记得此前剧情细节;事实性矛盾减少。", tags: ["状态块", "RAG 召回", "Chronicle", "时序事实/认知", "输出纪律"] },
+  nP2: { no: "阶段 3", name: "剧情 Agent 主生成", desc: "<b>一次 LLM 调用</b>产出 <b>&lt;content&gt;</b> 正文,并搭车输出隐藏块:<b>&lt;status&gt;</b> 战报、<b>&lt;状态更新&gt;</b> JSON、<b>&lt;illustration&gt;</b> 高潮插画计划(锚点/主体/视觉事实/构图/画幅)、可选 <b>&lt;audio&gt;</b> 台词。正文额度=预设 max_tokens,另 +4000 隐藏预算。", see: "正文旁的绿框「在场/所在」战报;截断自动自愈续写。", tags: ["一次调用多路输出", "+4000 隐藏预算", "自愈续写"] },
+  nP3: { no: "阶段 4", name: "写回与发布", desc: "剥离控制块 → 角色状态写回 → Narrative CI 非阻断诊断 → 高潮判定(插画计划/剧情高潮/主角失手/新角色登场任一命中) → Profile 编译(同轮成稿→独立链→本地兜底) → 组装媒体请求 → <b>SSE 先发布正文与媒体槽</b>,不等维护。", see: "正文先出来;媒体槽在对话中占位并开始运转。", tags: ["状态写回", "Narrative CI", "高潮判定", "Profile 编译"] },
+  nP4: { no: "阶段 5 · 发布侧", name: "SSE 提前发布", desc: "正文经 SSE 流式原位渲染到对话,媒体槽同步占位。发布与媒体请求在维护完成前就已发出,Agent 随即释放对话槽。", see: "正文立刻可见,占位槽开始运转。", tags: ["SSE 流式", "正文原位渲染", "媒体槽占位"] },
+  nP7: { no: "阶段 5 · 媒体通道", name: "媒体通道 · ComfyUI FIFO", desc: "前端把媒体请求提交本地 ComfyUI FIFO,<b>与对话并行独立运行</b>:图片按 <b>actors</b> 选 LoRA 与底图、注入精确触发词(无/单/多 LoRA 三态);视频用图片分区底图作首帧、按高潮点/首尾帧模式带对白合成;音频按台词逐角色走 IndexTTS 音色克隆。", see: "生成中占位 → 完成后原位替换成图/视频/音频;切页面任务照跑。", tags: ["ComfyUI FIFO", "LoRA 三态", "首帧底图", "IndexTTS"] },
+  nP8: { no: "回填", name: "原位回填", desc: "媒体完成按 <b>messageId + slotId</b> 原位替换对话中的占位槽——不追加对话轮、不阻塞下一轮;未完成的媒体由 FIFO 队列串行处理,不会作为下一轮模型输入。", see: "对话里占位 → 原位变成图/视频/音频。", tags: ["messageId + slotId", "不追加轮", "不阻塞"] },
+  nP5: { no: "阶段 6 · 后台", name: "维护 · 后台异步", desc: "表格维护用独立 LLM 把本轮变化写回 <b>tables.json</b>;每 3 回合沉淀一条 Chronicle 纪要;Curator 把「值得长期留存的新知识」<b>只增</b>写进 RAG、并受控增改当前世界书快照(不删除);文风通审进入诊断流。", see: "数据表/状态表/纪要卡自动更新,不占正文字数、不拖慢下一轮。", tags: ["tables.json", "Chronicle 纪要", "Curator 只增", "文风通审"] },
+  nP6: { no: "记忆循环", name: "RAG 与知识库索引", desc: "本轮沉淀的新知识入库索引——下一轮第 2 步(上下文组装)检索<b>立刻命中</b>,记忆循环闭合。", see: "角色持续记得新设定;状态与事实越滚越准。", tags: ["Chroma + BM25", "Reranker 可选"] }
+};
+
+let step = 0;
+let timer = null;
+let playStart = 0;
+const STEP_MS = 1600;
+
+const $ = id => document.getElementById(id);
+
+/* 画布等比适配舞台 */
+function fit() {
+  const st = $("stage");
+  const s = Math.min(st.clientWidth / 1240, st.clientHeight / 700) * 0.98;
+  $("canvas").style.transform = "translate(-50%, -50%) scale(" + s + ")";
+}
+window.addEventListener("resize", fit);
+
+function setPanel(key) {
+  const d = DATA[key];
+  if (!d) return;
+  $("phNo").textContent = d.no;
+  $("phName").textContent = d.name;
+  $("phDesc").innerHTML = d.desc;
+  $("phSee").innerHTML = d.see;
+  $("phTags").innerHTML = "";
+  d.tags.forEach((t, i) => {
+    const el = document.createElement("span");
+    el.className = "tag" + (i % 3 === 1 ? " o" : i % 3 === 2 ? " p" : "");
+    el.textContent = t;
+    $("phTags").appendChild(el);
+  });
+}
+
+function setStep(n) {
+  step = Math.max(0, Math.min(STEPS.length - 1, n));
+  const s = STEPS[step];
+  Object.keys(DATA).forEach(k => {
+    const el = $(k);
+    const on = s.show.includes(k);
+    el.classList.toggle("show", on);
+    el.classList.toggle("pulse", on && k === s.show[s.show.length - 1]);
+  });
+  // 连线/粒子累积:已流过的保持流动
+  const accLink = new Set(), accP = new Set();
+  for (let i = 0; i <= step; i++) {
+    (STEPS[i].link || []).forEach(l => accLink.add(l));
+    (STEPS[i].p || []).forEach(g => accP.add(g));
+  }
+  document.querySelectorAll("path.link").forEach(p => {
+    const on = accLink.has(p.id);
+    p.classList.toggle("on", on);
+    p.classList.toggle("flow", on);
+  });
+  ["pMain","pDown","pBack","pMedia1","pMedia2","pCycle"].forEach(id => {
+    $(id).classList.toggle("on", accP.has(id));
+  });
+  $("loopNote").classList.toggle("on", !!s.loop);
+  const active = s.show[s.show.length - 1];
+  if (active) setPanel(active);
+  $("stepNo").textContent = step;
+}
+
+function tick() {
+  const elapsed = (performance.now() - playStart) / STEP_MS;
+  let target = Math.floor(elapsed) + 1;
+  if (target >= STEPS.length) {          // 一轮放完 → 回到第 1 步重放
+    playStart = performance.now();
+    target = 1;
+  }
+  if (target !== step) setStep(target);
+}
+function play() {
+  if (timer) { pause(); return; }
+  $("btnPlay").textContent = "⏸";
+  playStart = performance.now();
+  timer = setInterval(tick, 250);        // 时间驱动:后台节流恢复后自动追平
+}
+function pause() {
+  clearInterval(timer); timer = null;
+  $("btnPlay").textContent = "▶";
+}
+
+$("btnPlay").onclick = play;
+$("btnNext").onclick = () => { pause(); setStep(step + 1); };
+$("btnPrev").onclick = () => { pause(); setStep(step - 1); };
+$("btnReset").onclick = () => { pause(); setStep(0); };
+
+document.addEventListener("keydown", e => {
+  if (e.key === "ArrowRight") { pause(); setStep(step + 1); }
+  else if (e.key === "ArrowLeft") { pause(); setStep(step - 1); }
+  else if (e.key === " ") { e.preventDefault(); play(); }
+});
+
+Object.keys(DATA).forEach(k => {
+  $(k).addEventListener("mouseenter", () => setPanel(k));
+  $(k).addEventListener("mouseleave", () => {
+    const s = STEPS[step];
+    const active = s.show[s.show.length - 1];
+    if (active) setPanel(active);
+  });
+});
+
+fit();
+setStep(0);
+setTimeout(play, 500);
+</script>
+</body>
+</html>
