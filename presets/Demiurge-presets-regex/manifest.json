@@ -1,0 +1,28 @@
+{
+  "package": "Demiurge-presets-regex",
+  "preset": "GrayWill-0.46-demiurge",
+  "embedded_regex_count": 33,
+  "global_regex_count": 24,
+  "files": [
+    {
+      "path": "preset/GrayWill-0.46-demiurge.json",
+      "bytes": 375859,
+      "sha256": "ba1d25a1acbe8c1eb410a827ab596d612bc1ef9ebc7cbc4dc76a07ad1663542c"
+    },
+    {
+      "path": "regex/GrayWill-0.46-embedded-regex.json",
+      "bytes": 31067,
+      "sha256": "bed26e7e582667e35188075d3fede31b3d6e33ef4ae6cbb660969a5e55ca9449"
+    },
+    {
+      "path": "regex/Demiurge-global-regex.json",
+      "bytes": 10530,
+      "sha256": "ea231540795e8b855373e2f56258b7756d5b771629a36d84eed8f427dcc44d90"
+    },
+    {
+      "path": "README.md",
+      "bytes": 897,
+      "sha256": "84421a096902e7e3052a77c9a51d3f6f8242090744d2017054eb1296de3afa6d"
+    }
+  ]
+}

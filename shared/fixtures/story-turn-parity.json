@@ -1,0 +1,11 @@
+[
+  { "id": "u1", "role": "user", "text": "去雪山救援被困的商队" },
+  { "id": "a1", "role": "assistant", "text": "雪崩过后，你在断崖边找到了商队的残旗。", "route": "roleplay" },
+  { "id": "a2", "role": "assistant", "text": "已提交到 ComfyUI，请稍候 20 秒", "system": true },
+  { "id": "a3", "role": "assistant", "text": "1girl, snow, cinematic lighting, masterpiece", "image": "local://img1", "route": "generate" },
+  { "id": "a4", "role": "assistant", "text": "全新丹青妙笔，把这座城画出来", "route": "generate" },
+  { "id": "a5", "role": "assistant", "text": "" },
+  { "id": "a6", "role": "assistant", "text": "", "parts": [{ "type": "text", "text": "营火旁，她把披风递给了你。" }] },
+  { "id": "u2", "role": "user", "text": "", "parts": [{ "type": "text", "text": "问她商队的下落" }] },
+  { "id": "a7", "role": "assistant", "text": "她摇头：活下来的只有三个人。", "route": "answer" }
+]

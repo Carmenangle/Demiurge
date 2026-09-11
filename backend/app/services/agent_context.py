@@ -1,0 +1,164 @@
+"""Agent 上下文窗口：历史选取、token 预算与执行提示词整理。"""
+from __future__ import annotations
+
+import re
+from typing import Any
+
+from app.services import chat_memory, chat_snapshot, llm as _llm
+
+
+_TOKEN_CJK_RE = re.compile(r"[\u3400-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]")
+_CONTEXT_DEPENDENT_EXEC_RE = re.compile(
+    r"(?:按|沿用|保持|继续|接着|基于|根据|照).{0,12}"
+    r"(?:刚才|之前|前面|上面|上述|原来|已有|这个|设定|方案|版本)|"
+    r"(?:其他|其它|其余).{0,5}(?:不变|保持|沿用)|"
+    r"^(?:就这样|就这个|按这个来|继续生成|继续出图)"
+)
+
+
+def is_context_dependent(text: str) -> bool:
+    return _CONTEXT_DEPENDENT_EXEC_RE.search(text or "") is not None
+
+
+def estimate_tokens(text: str) -> int:
+    """跨模型近似：中日韩字符约 1 token，其它非空白字符约 4 字符/token。"""
+    cjk = len(_TOKEN_CJK_RE.findall(text or ""))
+    other = _TOKEN_CJK_RE.sub("", text or "")
+    other_chars = len(re.sub(r"\s", "", other))
+    return cjk + (other_chars + 3) // 4
+
+
+def _clip_to_token_budget(text: str, budget: int) -> str:
+    if estimate_tokens(text) <= budget:
+        return text
+    marker = "\n…（中间内容已按 token 预算截断）…\n"
+    low, high = 0, len(text)
+    best = marker
+    while low <= high:
+        keep = (low + high) // 2
+        left = keep // 2
+        right = keep - left
+        candidate = text[:left] + marker + (text[-right:] if right else "")
+        if estimate_tokens(candidate) <= budget:
+            best = candidate
+            low = keep + 1
+        else:
+            high = keep - 1
+    return best
+
+
+def recent_history(thread_id: str, max_tokens: int = 20_000,
+                   per_role: int = 6,
+                   history_override: list[dict] | None = None) -> list[dict]:
+    """分别取用户与 AI 各 per_role 条最近消息，再在 token 上限内均衡裁剪；max_tokens<=0 则不裁剪。"""
+    try:
+        if history_override is not None:
+            history = history_override
+        else:
+            snapshot_history = chat_snapshot.load_prompt_history(thread_id)
+            history = snapshot_history if snapshot_history is not None else chat_memory.get_history(thread_id)
+        selected: list[tuple[int, dict]] = []
+        counts = {"user": 0, "assistant": 0}
+        for index in range(len(history) - 1, -1, -1):
+            item = history[index]
+            role = item.get("role")
+            if role not in counts or counts[role] >= per_role:
+                continue
+            # 批量采集副产品（meta.kind=plan_collect）不占用每角色历史条数，
+            # 也不进入文本历史——否则 14 条图片消息会把计划卡/重要回复挤出 6 条额度。
+            # 正常主动生成（persist_image 等）不带此标记，照常计入上下文。
+            if role == "assistant" and (item.get("meta") or {}).get("kind") == "plan_collect":
+                continue
+            content = (item.get("content") or "").strip()
+            if not content:
+                continue
+            selected.append((index, {"role": role, "content": content}))
+            counts[role] += 1
+            if all(count >= per_role for count in counts.values()):
+                break
+        items = [item for _, item in sorted(selected, key=lambda pair: pair[0])]
+        if not items:
+            return []
+
+        # max_tokens<=0 表示无上限（剧情模式）：历史全量不裁剪，条数仍由 per_role 约束。
+        if max_tokens <= 0:
+            return items
+
+        budget = max(1, max_tokens - len(items) * 4)
+        costs = [estimate_tokens(item["content"]) for item in items]
+        if sum(costs) <= budget:
+            return items
+
+        # 2026-09-04 保头保尾窗口（成本杠杆 L2，设计 §2）：头部固定保留 keep_head 条原文
+        #（前缀稳定锚），中段整体让位给尾部近期消息；被挤掉的中段折叠成一行标注挂到保留
+        # 尾部最早一条（或头部末条）——不改 role/交替结构、纯机械、零 LLM 成本。
+        keep_head = min(2, len(items))
+        head = items[:keep_head]
+        head_cost = sum(costs[:keep_head])
+        rest = list(zip(items[keep_head:], costs[keep_head:]))
+        if not rest:  # 极端小预算下无中段可让位：退回逐条头尾裁剪
+            return [
+                {**item, "content": _clip_to_token_budget(
+                    item["content"], max(1, budget // len(items)))}
+                for item in items
+            ]
+        budget_left = max(0, budget - head_cost)
+        tail: list[dict] = []
+        used_tail = 0
+        skipped_mid = 0
+        for item, cost in reversed(rest):
+            if cost <= budget_left:
+                tail.append(item)
+                budget_left -= cost
+                used_tail += cost
+            elif not tail and budget_left > 0:
+                # 预算连一条整条都放不下时，只允许把「最近一条」裁剪进来
+                item["content"] = _clip_to_token_budget(item["content"], budget_left)
+                tail.append(item)
+                budget_left = 0
+                used_tail = 1
+            else:
+                skipped_mid += 1
+        tail.reverse()
+        if skipped_mid:
+            marker = f"\n\n…（中间 {skipped_mid} 条历史已按预算压缩，既有设定与人物关系不变）…"
+            if tail:
+                tail[0]["content"] = marker.lstrip("\n\n") + tail[0]["content"]
+            else:
+                head[-1]["content"] = head[-1]["content"] + marker
+        return head + tail
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def history_text(ctx: Any) -> str:
+    """把历史拼成供 Supervisor 和回答节点使用的单轮上下文。"""
+    history = ctx.get("history") or []
+    if not history:
+        return ""
+    lines = [("用户" if item["role"] == "user" else "助手") + "：" + item["content"]
+             for item in history]
+    return "【最近对话：用于衔接对象与约束，本轮最新要求优先】\n" + "\n".join(lines) + "\n\n"
+
+
+def standalone_execution_prompt(ctx: Any, text: str) -> str:
+    """仅在本轮依赖上文时，把最近约束整理为可独立执行的提示词。"""
+    original = (text or "").strip()
+    if not original or not (ctx.get("history") or []) or not is_context_dependent(original):
+        return original
+    chat_fn = ctx.get("chat_fn") or _llm.chat
+    system = (
+        "你是多轮请求整理器。根据最近对话，把本轮要求改写为一段可独立执行的完整提示词。"
+        "必须保留已确认的角色、构图、服装、颜色、材质、画风和负面约束；本轮最新修改覆盖旧要求；"
+        "已被用户否决的内容不得恢复；不要补充用户未要求的新设计。只输出完整提示词，不要解释。"
+    )
+    user = history_text(ctx) + "本轮执行要求：" + original
+    try:
+        proxy = (ctx.get("chat_proxy", "") or "").strip()
+        resolved = chat_fn(
+            ctx["chat_base"], ctx["chat_key"], ctx["chat_model"],
+            system, user, temperature=0.2, **({"proxy": proxy} if proxy else {}),
+        )
+        return (resolved or "").strip() or original
+    except Exception:  # noqa: BLE001
+        return original
