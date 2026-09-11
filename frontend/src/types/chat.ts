@@ -1,0 +1,170 @@
+import type { PortOp } from "../api/ai";
+import type { VideoParams } from "../api/chatStreamProtocol";
+import type { InspirationAttachment } from "../lib/inspirationInsert";
+
+// 图文混排片段：文本/图片穿插渲染
+export interface MsgPart {
+  type: "text" | "image" | "video" | "audio" | "masked-image" | "media-slot" | "file";
+  text?: string;  // type=text
+  url?: string;   // type=image（dataURI 或 http URL）
+  image?: string; // type=masked-image 的原图
+  mask?: string;  // type=masked-image 的独立 Alpha 蒙版
+  slotId?: string; // type=media-slot，异步图片/视频完成后据此原位替换
+  generationId?: string; // 落库后的 generation 记录 ID（Visual CI 诊断用）
+  status?: "pending" | "ready" | "failed";
+  promptId?: string;
+  error?: string;
+  regeneration?: RegenerationSnapshot;
+  /** media-slot 的媒体类型提示（占位文案/进度用；音频槽 = "audio"） */
+  kind?: "image" | "video" | "audio";
+  /** 音频分条：角色名（对话气泡与画布剧情楼层的分条标签） */
+  speaker?: string;
+  /** 音频分条：第几条（1-based，占位进度 x/y） */
+  seq?: number;
+  /** 音频分条：总条数 */
+  total?: number;
+  /** 通用文件附件（type=file）：file_id 真源，历史回放只读卡片据此流式下载 */
+  fileId?: string;
+  name?: string;
+  mime?: string;
+  size?: number;
+  /** V1.5/B1 视频槽：本段视频的尾帧描述（下一楼层反查作 prevTailDesc 衔接） */
+  lastFrameDesc?: string;
+  /** V1.5/F3 视频槽：本段视频的尾帧图地址（下一楼层转场视频 image 输入反查） */
+  lastFrameUrl?: string;
+  /** V1.5 默认开放：climax 视频提示词随槽位存储（无视频模板/模型也展示，供测试核对） */
+  videoPrompt?: string;
+  /** V1.5 默认开放：结构化视频参数（dry-run 组装结果，供测试核对参数是否上传） */
+  videoParams?: VideoParams;
+}
+
+/** 合集卡交付产物（fabric done 时后端扫描下发）：主卡/世界书等，供 Claude 式产物卡展示。
+ * path 是后端发来的绝对路径：预览/下载/打开位置都把它原样回传后端校验。 */
+export interface ArtifactMeta {
+  kind: "card" | "worldbook" | "doc" | "file";
+  name: string;    // 人类可读名，如「角色主卡 · 玫瑰与繁花」
+  path: string;    // 后端产物绝对路径（wire 真源；为空时不可操作）
+  size?: number;   // 字节数
+  mtime?: number;  // 修改时间 epoch 秒
+}
+
+export interface PromptApproval {
+  id: string;
+  messageId: string;
+  kind: "image" | "video" | "img2img";
+  originalPrompt: string;
+  prompt: string;
+  status: "pending" | "submitted" | "cancelled" | "failed";
+  stage?: "prompt_review" | "rewrite_consent" | "delivery_unknown" | "request_failed";
+  reason?: string;
+}
+
+export type AgentRoute = "answer" | "generate" | "img2img" | "analyze" | "video" | "inspire" | "tool_agent";
+
+/** 消息实际走到的 Agent 路由（调度主管分派结果）。
+ *  - 剧情节点 = roleplay / answer（roleplay 内部再串 world/recall/curator/judge）
+ *  - 生成节点 = generate / img2img / video / analyze
+ *  - 其余 = inspire / tool_agent / edit / clarify */
+export type MessageRoute = AgentRoute | "roleplay" | "edit" | "clarify";
+
+export interface RouteChoice {
+  id: string;
+  messageId: string;
+  userMessageId: string;
+  status: "pending" | "selected";
+  selectedRoute?: AgentRoute;
+  options: { route: AgentRoute; label: string }[];
+}
+
+export interface AiImageRegeneration {
+  kind: "ai-image";
+  prompt: string;
+  images: string[];
+  imageMask?: { image: string; mask: string };
+  size: string;
+  quality: "auto" | "low" | "medium" | "high";
+  model: {
+    baseUrl: string;
+    modelName: string;
+  };
+}
+
+export interface WorkflowRegeneration {
+  kind: "workflow";
+  graph: unknown;
+  comfyuiUrl: string;
+  outputNodeIds: string[];
+  prompt: string;
+  /** 生成元数据：模板名 / 主模型 / LoRA（卡片展示用） */
+  templateName?: string;
+  modelName?: string;
+  loraNames?: string[];
+}
+
+export interface TemplateRegeneration {
+  kind: "template";
+  templateId: string;
+  values: Record<string, unknown>;
+  comfyuiUrl: string;
+  outputNodeIds: string[];
+  prompt: string;
+  loras?: { name: string; weight: number }[];
+  loraMode?: "none" | "single" | "multi";
+  /** 角色 LoRA 生图时的主角名（用于后端可读命名 角色_轮次_序号）；非角色 LoRA 为空。 */
+  characterLoraActor?: string;
+}
+
+export type RegenerationSnapshot = AiImageRegeneration | WorkflowRegeneration | TemplateRegeneration;
+
+export interface ChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  parts?: MsgPart[];   // 图文混排：有则优先按顺序渲染，文本/图片穿插
+  thinking?: string;
+  /** 非流式 agent 执行过程行（计划编译/自由循环经 SSE trace 事件累积）。
+   * 与 thinking 不同：replace 最终正文时保留，供「完成后回看」；仅进程内有效，快照恢复后为空。
+   * detail：思考文本 / 工具参数 / 工具结果摘要（2026-09-06，执行过程面板点开查看）。 */
+  agentTrace?: { text: string; detail?: string }[];
+  image?: string;
+  video?: string;   // 生成的视频地址（mp4/webm/gif，用 <video> 渲染）
+  audio?: string;   // 生成的音频地址（wav/mp3/flac…，用 <audio> 播放器渲染）
+  /** 智能编造交付产物卡（Claude 式）：点击预览 + 打开文件位置 + 下载。 */
+  artifacts?: ArtifactMeta[];
+  regeneration?: RegenerationSnapshot; // 绑定该结果的不可变重生成参数，不含 API Key
+  turnNo?: number;   // M1（2026-09-06）：剧情回合号（持久化在快照里），删除/重生成按它级联封口记忆
+  // 工作流节点卡：选中模板后把所选节点逐个提取，各自嵌入锁定的真实 ComfyUI 画布，纵向排列
+  workflow?: {
+    templateId: string;
+    templateName: string;
+    draftGraph: unknown | null;    // 可继续编辑的完整 ComfyUI UI workflow
+    capturedGraph: unknown | null; // 原生 graphToPrompt 生成的 API prompt，仅供 /s
+    done: boolean;
+  };
+  // 工作流输入口编排计划：AI 规划「各输入口放什么」，用户确认后写入画布
+  portsPlan?: {
+    cardId: string;            // 目标工作流卡的消息 id
+    summary: string;
+    ops: PortOp[];
+    images: string[];          // 本轮随文图片（dataURI/URL），set_image 按 image_index 取用
+    status: "pending" | "applied" | "ignored";
+  };
+  // 灵感卡：联网搜主题 → 整理成「标题+内容」中文总结（代码块样式，右下角可插入对话）
+  inspiration?: {
+    title: string;
+    content: string;
+    sources: { title: string; url: string }[];
+    images?: Array<{ thumb_url: string; full_url: string; source_url: string; width?: number; height?: number; title?: string }>;
+    selected?: string[];
+  };
+  // 灵感卡附件（输入框 9:16 卡片）：发送时图文拆分进 text/images，编辑回填据此还原卡片形态
+  inspirationAttachments?: InspirationAttachment[];
+  // 风格模板/艺术化修饰后的独立提示词审批卡，可在历史中继续操作。
+  promptApproval?: PromptApproval;
+  // Supervisor 无法高置信分派时显示的最小候选选择卡。
+  routeChoice?: RouteChoice;
+  // 该条消息实际走到的 Agent 路由（调度主管分派结果，决定画布节点归属）。
+  route?: MessageRoute;
+  // 纯状态/Toast 提示（如「已提交到 ComfyUI…」），非剧情/生成正文，不投影为任何节点。
+  system?: boolean;
+}

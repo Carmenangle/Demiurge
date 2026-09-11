@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "python_version": "3.13.11",
+  "pyinstaller_version": "6.21.0",
+  "targets": [
+    {
+      "id": "windows-x64-full-rag",
+      "os": "windows",
+      "arch": "x64",
+      "edition": "full-rag",
+      "runner": "windows-2025",
+      "accelerator": "cuda",
+      "torch_version": "2.13.0+cu130",
+      "torch_index_url": "https://download.pytorch.org/whl/cu130"
+    },
+    {
+      "id": "macos-arm64-full-rag",
+      "os": "macos",
+      "arch": "arm64",
+      "edition": "full-rag",
+      "runner": "macos-15",
+      "accelerator": "mps",
+      "torch_version": "2.13.0"
+    },
+    {
+      "id": "linux-x64-full-rag",
+      "os": "linux",
+      "arch": "x64",
+      "edition": "full-rag",
+      "runner": "ubuntu-24.04",
+      "accelerator": "cuda",
+      "torch_version": "2.13.0+cu130",
+      "torch_index_url": "https://download.pytorch.org/whl/cu130"
+    }
+  ]
+}

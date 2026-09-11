@@ -1,0 +1,491 @@
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
+from pydantic import BaseModel
+
+from app.config import COMFYUI_BASE_URL
+from app.services import (
+    comfyui_client, comfy_launcher, generation_store, image_store,
+    inspiration_store, local_media, repo_meta, workflow_submission,
+)
+from app.services.url_guard import validate_comfyui_url
+from app.services.comfyui_client import ComfyError
+from app.services.comfy_launcher import LaunchError
+
+router = APIRouter()
+
+_is_up = comfyui_client.is_up
+
+
+@router.get("/")
+def list_comfyui() -> dict[str, object]:
+    return {"items": []}
+
+
+class StartRequest(BaseModel):
+    path: str          # ComfyUI 目录（含 main.py）
+    url: str = COMFYUI_BASE_URL
+    python_path: str = ""
+
+
+@router.get("/status")
+def status(url: str = COMFYUI_BASE_URL) -> dict[str, object]:
+    return {"running": _is_up(url), "managed": comfy_launcher.is_managed()}
+
+
+@router.get("/resources")
+def resource_status() -> dict[str, object]:
+    from app.services import model_lease
+
+    return model_lease.status()
+
+
+class ComfyConfig(BaseModel):
+    path: str = ""
+    url: str = COMFYUI_BASE_URL
+    python_path: str = ""
+
+
+@router.get("/config")
+def get_config() -> ComfyConfig:
+    """读 ComfyUI 路径/地址配置（供 start-dev 脚本等读取）。"""
+    return ComfyConfig(**comfy_launcher.load_config())
+
+
+@router.post("/config")
+def set_config(cfg: ComfyConfig) -> ComfyConfig:
+    """保存 ComfyUI 路径/地址，落盘到 data/comfy_config.json（ps1 脚本据此启动）。"""
+    return ComfyConfig(**comfy_launcher.save_config(cfg.path, cfg.url, cfg.python_path))
+
+
+@router.post("/start")
+def start(req: StartRequest) -> dict[str, object]:
+    try:
+        return comfy_launcher.start(req.path, req.url, req.python_path)
+    except LaunchError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)
+
+
+@router.post("/stop")
+def stop(req: StartRequest) -> dict[str, object]:
+    """关闭 ComfyUI（装插件/依赖后需先关）。"""
+    return comfy_launcher.stop(req.url)
+
+
+@router.post("/restart")
+def restart(req: StartRequest) -> dict[str, object]:
+    """重启 ComfyUI：先关再起（装完插件生效）。需提供 path 以重新拉起。"""
+    try:
+        return comfy_launcher.restart(req.path, req.url, req.python_path)
+    except LaunchError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)
+
+
+class SubmitRequest(BaseModel):
+    template_id: str
+    values: dict[str, object] = {}   # key = "node_id.field" -> 覆盖值
+    prompt: str = ""                 # 可选：自动注入到模板 prompt_node_id 的文本字段（/g 用）
+    url: str = COMFYUI_BASE_URL
+    client_id: str = ""              # 前端 WebSocket clientId，回传给 ComfyUI 定向推进度
+    loras: list[dict[str, object]] = []  # 自动插画 LoRA 链；首项复用模板节点，其余动态追加
+    lora_mode: str = "single"
+
+
+@router.post("/submit")
+def submit(req: SubmitRequest) -> dict[str, object]:
+    """/s 启动：读模板原始工作流 → 转 API 格式 → 套用用户填的值 → 提交 /prompt。"""
+    try:
+        return workflow_submission.submit_template(
+            req.template_id, req.values, req.prompt, req.url, req.client_id,
+            req.loras, req.lora_mode,
+        )
+    except workflow_submission.WorkflowSubmissionError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail)
+
+
+class SubmitGraphRequest(BaseModel):
+    workflow: dict[str, object]      # iframe 回传的完整工作流 JSON（含用户改过的 widget 值）
+    url: str = COMFYUI_BASE_URL
+    client_id: str = ""              # 前端 WebSocket clientId，回传给 ComfyUI 定向推进度
+
+
+@router.post("/submit_graph")
+def submit_graph(req: SubmitGraphRequest) -> dict[str, object]:
+    """从锁定画布回传的完整工作流直接转 API 并提交（用户在真实节点里改的值都在里面）。"""
+    try:
+        return workflow_submission.submit_graph(req.workflow, req.url, req.client_id)
+    except workflow_submission.WorkflowSubmissionError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail)
+
+
+@router.post("/upload")
+def upload_image(
+    file: UploadFile = File(...),
+    url: str = Form(COMFYUI_BASE_URL),
+) -> dict[str, object]:
+    """把图片转发上传到 ComfyUI 的 input 目录，返回其文件名（供 LoadImage 引用）。"""
+    try:
+        url = validate_comfyui_url(url)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not _is_up(url):
+        raise HTTPException(status_code=400, detail="ComfyUI 未运行，无法上传图片")
+    try:
+        data = file.file.read()
+        ref = comfyui_client.upload_image(url, file.filename, data, file.content_type or "image/png")
+    except ComfyError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)
+    return {"name": ref}
+
+
+@router.get("/result")
+def result(prompt_id: str, url: str = COMFYUI_BASE_URL, node_ids: str = "") -> dict[str, object]:
+    """轮询某次生成的状态与产出图片。
+    node_ids 逗号分隔时，只保留这些节点的产物（主输出节点过滤）。
+    """
+    filter_ids = [n.strip() for n in node_ids.split(",") if n.strip()] if node_ids else None
+    try:
+        url = validate_comfyui_url(url)
+        result = comfyui_client.fetch_result(url, prompt_id, filter_ids)
+        if result.get("status") in {"completed", "failed", "not_found"}:
+            from app.services import model_lease
+
+            model_lease.release_owner(f"comfyui:{prompt_id}")
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except ComfyError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)
+
+
+class FinalizeGenerationImage(BaseModel):
+    filename: str
+    subfolder: str = ""
+    type: str = "output"
+
+
+class FinalizeGenerationRequest(BaseModel):
+    thread_id: str
+    repo_id: str
+    prompt_id: str
+    prompt: str = ""
+    images: list[FinalizeGenerationImage] = []
+    videos: list[FinalizeGenerationImage] = []
+    audios: list[FinalizeGenerationImage] = []
+    output_dir: str = ""
+    comfyui_url: str = COMFYUI_BASE_URL
+    embed_base: str = ""
+    embed_key: str = ""
+    embed_model: str = "text-embedding-3-small"
+    chat_base: str = ""
+    chat_key: str = ""
+    chat_model: str = ""
+    regeneration: dict | None = None
+    target_message_id: str = ""
+    target_slot_id: str = ""
+    template_name: str = ""
+    model_name: str = ""
+    lora_names: str = ""
+    base_slot_ref: dict | None = None  # M2.1 视频首帧底图槽引用 {message_id, slot_id}
+
+
+@router.post("/finalize-generation")
+def finalize_generation(req: FinalizeGenerationRequest) -> dict[str, object]:
+    """持久化一批已完成的工作流产出；查询结果的 GET 路由保持无副作用。"""
+    try:
+        return generation_store.finalize_workflow_batch(
+            thread_id=req.thread_id,
+            repo_id=req.repo_id,
+            prompt_id=req.prompt_id,
+            prompt=req.prompt,
+            images=[image.model_dump() for image in req.images],
+            videos=[video.model_dump() for video in req.videos],
+            audios=[audio.model_dump() for audio in req.audios],
+            output_dir=req.output_dir,
+            comfyui_url=req.comfyui_url,
+            embed_base=req.embed_base,
+            embed_key=req.embed_key,
+            embed_model=req.embed_model,
+            chat_base=req.chat_base,
+            chat_key=req.chat_key,
+            chat_model=req.chat_model,
+            regeneration=req.regeneration,
+            template_name=req.template_name,
+            model_name=req.model_name,
+            lora_names=req.lora_names,
+            target_message_id=req.target_message_id,
+            target_slot_id=req.target_slot_id,
+            base_slot_ref=req.base_slot_ref,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+class InterruptRequest(BaseModel):
+    url: str = COMFYUI_BASE_URL
+    prompt_id: str = ""            # 有则先从队列删除未执行项，再中断正在执行的
+
+
+@router.post("/interrupt")
+def interrupt(req: InterruptRequest) -> dict[str, object]:
+    """强行停止 ComfyUI 生图（人工打断工作流用）。
+
+    prompt_id 有值：先 POST /queue {"delete":[id]} 删掉排队中未执行项，
+    再 POST /interrupt 中断正在执行的任务（覆盖排队/执行两种状态）。
+    容错：ComfyUI 未起/已完成都不报错，返回 ok。
+    """
+    try:
+        req.url = validate_comfyui_url(req.url)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    res = comfyui_client.interrupt(req.url, req.prompt_id)
+    if req.prompt_id:
+        from app.services import model_lease
+
+        model_lease.release_owner(f"comfyui:{req.prompt_id}")
+    return {"ok": True, **res}
+
+
+@router.get("/view")
+def view(filename: str, type: str = "output", subfolder: str = "", url: str = COMFYUI_BASE_URL):
+    """代理 ComfyUI 的 /view，返回图片二进制（避免前端跨域直连 8188）。"""
+    from fastapi.responses import Response
+
+    try:
+        url = validate_comfyui_url(url)
+        data, ctype = comfyui_client.fetch_view(url, filename, type, subfolder)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except ComfyError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)
+    return Response(content=data, media_type=ctype)
+
+
+class SaveLocalRequest(BaseModel):
+    filename: str = ""                   # ComfyUI 产物文件名（ComfyUI 模式）
+    subfolder: str = ""
+    type: str = "output"
+    repo_id: str = "home"
+    output_dir: str = ""                 # 设置里的输出图片路径
+    url: str = COMFYUI_BASE_URL
+    src: str = ""                        # 通用模式：完整图片 URL 或 data URI（云端生图用）
+    subdir: str = ""                     # 落到 <repo>/<subdir>/ 子夹（用户上传参考图 → reference）
+
+
+@router.post("/save-local")
+def save_local(req: SaveLocalRequest) -> dict[str, object]:
+    """把原图存到设置的 outputDir（全分辨率，不降质），返回本地访问 URL。
+
+    两种来源：
+    - ComfyUI 模式：给 filename，从 ComfyUI /view 取原图。
+    - 通用模式：给 src（http(s) URL 或 data:image/...;base64,...），直接下载/解码（云端生图）。
+    ComfyUI 未起/清理 output 后仍可显示与「再改进」，且不依赖在线。
+    """
+    try:
+        path = image_store.save_local(
+            req.output_dir,
+            req.repo_id,
+            src=req.src,
+            filename=req.filename,
+            subfolder=req.subfolder,
+            type=req.type,
+            url=validate_comfyui_url(req.url),
+            subdir=req.subdir,
+        )
+    except ComfyError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)
+    return {"ok": True, "path": path}
+
+
+@router.get("/local-view")
+def local_view(path: str, request: Request):
+    """读取已留存到 outputDir 的本地文件，支持 Range 请求（视频拖动进度需要）。
+
+    安全：只服务媒体文件（图片/视频）。该端点按设计要读任意本地路径（对话背景图允许
+    用户填任意图片完整路径），无法按目录 jail，故用扩展名白名单挡住读取 .env/.db/源码等
+    敏感文件的 LFI 攻击面。
+    """
+    try:
+        media = local_media.open_local_media(path, request.headers.get("Range"))
+    except local_media.LocalMediaError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail, headers=exc.headers)
+    if not media.partial:
+        from fastapi.responses import FileResponse
+        return FileResponse(media.path, media_type=media.media_type, headers=media.headers)
+    from fastapi.responses import StreamingResponse
+    return StreamingResponse(
+        media.iter_bytes(), status_code=206, media_type=media.media_type, headers=media.headers,
+    )
+
+
+class MergeAudioRequest(BaseModel):
+    thread_id: str
+    message_id: str
+    force: bool = False
+
+
+@router.post("/merge-audio")
+def merge_audio(req: MergeAudioRequest) -> dict[str, object]:
+    """把一条消息的音频分条按顺序拼接成完整版，落盘并回写快照（刷新后仍在）。
+
+    幂等：已合并过（快照含 merged- 槽）时直接返回既有 URL；force=True 覆盖重拼。
+    失败返回 400。
+    """
+    from app.services import audio_merge
+    try:
+        url = audio_merge.merge_audio_for_message(
+            req.thread_id, req.message_id, force=req.force,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "url": url}
+
+
+# ===== 上网素材：联网搜索下载的图片存到 outputDir/_web_materials/ =====
+
+class WebMaterialSaveRequest(BaseModel):
+    output_dir: str = ""
+    src: str = ""               # 图片 URL 或 data URI
+    source_url: str = ""        # 来源网页 URL
+    title: str = ""             # 图片标题
+    thread_id: str = ""         # 灵感卡所属会话（重启后候选列表丢失时，允许保存快照内灵感卡图片）
+
+
+class WebMaterialListRequest(BaseModel):
+    output_dir: str = ""
+
+
+class WebMaterialDeleteRequest(BaseModel):
+    output_dir: str = ""
+    filename: str = ""
+
+
+@router.post("/web-materials/save")
+def web_material_save(req: WebMaterialSaveRequest) -> dict[str, object]:
+    """把联网搜索到的图片下载到 _web_materials/，返回 {path, url, source_url, title, filename}。"""
+    try:
+        return image_store.save_web_material(
+            req.output_dir, req.src, req.source_url, req.title, req.thread_id,
+        )
+    except ComfyError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)
+
+
+@router.post("/web-materials/list")
+def web_material_list(req: WebMaterialListRequest) -> dict[str, object]:
+    """列出 _web_materials/ 下所有图片。"""
+    return {"items": image_store.list_web_materials(req.output_dir)}
+
+
+@router.post("/web-materials/delete")
+def web_material_delete(req: WebMaterialDeleteRequest) -> dict[str, object]:
+    """删除 _web_materials/ 下的指定文件。"""
+    if (err := repo_meta.works_root_violation(req.output_dir)):
+        raise HTTPException(status_code=400, detail=err)
+    ok = image_store.delete_web_material(req.output_dir, req.filename)
+    return {"ok": ok}
+
+
+# ===== 灵感卡资产库（M1.4）：会话灵感卡升级为资产库可管理成员 =====
+
+class InspirationCardImage(BaseModel):
+    full_url: str = ""
+    source_url: str = ""
+    title: str = ""
+
+
+class InspirationCardSaveRequest(BaseModel):
+    output_dir: str = ""
+    card_id: str = ""                    # 空=新建；非空=覆盖更新（同卡重复保存）
+    title: str = ""
+    content: str = ""
+    sources: list[dict] = []
+    images: list[InspirationCardImage] = []
+    thread_id: str = ""                  # 候选校验豁免（重启后保存旧卡图片）
+
+
+class InspirationCardListRequest(BaseModel):
+    output_dir: str = ""
+
+
+class InspirationCardGetRequest(BaseModel):
+    output_dir: str = ""
+    card_id: str = ""
+
+
+class InspirationCardUpdateRequest(BaseModel):
+    output_dir: str = ""
+    card_id: str = ""
+    title: str | None = None
+    content: str | None = None
+    remove_image_urls: list[str] = []    # 删图只留文本（图文件保留在素材库）
+
+
+class InspirationCardDeleteRequest(BaseModel):
+    output_dir: str = ""
+    card_id: str = ""
+
+
+@router.post("/web-materials/inspiration/save")
+def inspiration_card_save(req: InspirationCardSaveRequest) -> dict[str, object]:
+    """把灵感卡登记为资产库成员（显式入库）。"""
+    try:
+        return inspiration_store.save_inspiration_card(
+            req.output_dir,
+            card_id=req.card_id,
+            title=req.title,
+            content=req.content,
+            sources=req.sources,
+            images=[img.model_dump() for img in req.images],
+            thread_id=req.thread_id,
+        )
+    except ComfyError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)
+
+
+@router.post("/web-materials/inspiration/list")
+def inspiration_card_list(req: InspirationCardListRequest) -> dict[str, object]:
+    """列出资产库灵感卡（新→旧）。"""
+    return {"items": inspiration_store.list_inspiration_cards(req.output_dir)}
+
+
+@router.post("/web-materials/inspiration/get")
+def inspiration_card_get(req: InspirationCardGetRequest) -> dict[str, object]:
+    """读取单张灵感卡详情。"""
+    try:
+        return inspiration_store.get_inspiration_card(req.output_dir, req.card_id)
+    except ComfyError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)
+
+
+@router.post("/web-materials/inspiration/update")
+def inspiration_card_update(req: InspirationCardUpdateRequest) -> dict[str, object]:
+    """编辑灵感卡（改文本 / 删图只留文本）。"""
+    try:
+        return inspiration_store.update_inspiration_card(
+            req.output_dir,
+            card_id=req.card_id,
+            title=req.title,
+            content=req.content,
+            remove_image_urls=req.remove_image_urls,
+        )
+    except ComfyError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)
+
+
+@router.post("/web-materials/inspiration/delete")
+def inspiration_card_delete(req: InspirationCardDeleteRequest) -> dict[str, object]:
+    """删除灵感卡资产（只删 JSON，图片保留）。"""
+    ok = inspiration_store.delete_inspiration_card(req.output_dir, req.card_id)
+    return {"ok": ok}
+
+
+# ===== 参考图：聊天上传到 <repo>/reference/ 的图片，供画布自动导入 =====
+
+class ReferenceImageListRequest(BaseModel):
+    output_dir: str = ""
+    repo_id: str = ""
+
+
+@router.post("/reference-images/list")
+def reference_image_list(req: ReferenceImageListRequest) -> dict[str, object]:
+    """列出 <repo_id>/reference/ 下所有图片，供画布自动导入参考图节点。"""
+    return {"items": image_store.list_reference_images(req.output_dir, req.repo_id)}
