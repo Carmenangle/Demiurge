@@ -1246,7 +1246,9 @@ def test_roleplay动态块后置_静态头跨轮逐字节稳定(monkeypatch, tmp
 
 def test_输出纪律尾注包含实测浪费源逐条禁令(monkeypatch, tmp_path):
     """2026-09-12 定稿：逐条禁令已按用户裁定移除（冗余根因在预设思考框架，另行治理）；
-    尾注必须保留结构三步与思考预算原则（≤正文一半）。"""
+    尾注必须保留结构三步与思考预算原则（≤正文一半）。
+    2026-09-13 泄漏修订：实现细节（前端折叠/1000-8000 字数区间）混入模型可见文本，
+    被模型照抄进正文（神权大陆 msg[4] 实证）→ 断言不得再出现，且必须带元话语硬禁令。"""
     calls = []
     deps = ra.AgencyDeps(
         chat_fn=lambda *a, **k: "[]", rng=random.Random(0), state_base=str(tmp_path),
@@ -1288,6 +1290,12 @@ def test_输出纪律尾注包含实测浪费源逐条禁令(monkeypatch, tmp_pa
     text = tails[0]
     for marker in ("思考预算原则", "不超过正文的一半"):
         assert marker in text, f"输出纪律缺少思考预算条款：{marker}"
+    # 2026-09-13 泄漏回归锁：实现细节不进模型可见文本
+    for banned in ("1000-8000", "当前预设要求", "前端折叠", "推演内思考过程"):
+        assert banned not in text, f"输出纪律泄漏实现细节：{banned}"
+    # 元话语硬禁令必须在场
+    for marker in ("硬禁令", "质量检查", "系统提示"):
+        assert marker in text, f"输出纪律缺少元话语硬禁令：{marker}"
 
 
 def test_世界agent收到本轮输入与召回后的npc条目(monkeypatch, tmp_path):
