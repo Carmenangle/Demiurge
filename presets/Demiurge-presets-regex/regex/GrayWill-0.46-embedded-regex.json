@@ -1,0 +1,574 @@
+[
+  {
+    "id": "56f17dfc-ea0b-48a5-b3be-e924ab1607f2",
+    "scriptName": "$",
+    "disabled": false,
+    "runOnEdit": false,
+    "findRegex": "/\\$(.*?[^\\\\])\\$/gm",
+    "trimStrings": [],
+    "replaceString": "<code class=\"language-latex\">$1</code>",
+    "placement": [
+      1,
+      2,
+      3
+    ],
+    "substituteRegex": 0,
+    "minDepth": null,
+    "maxDepth": null,
+    "markdownOnly": true,
+    "promptOnly": false
+  },
+  {
+    "id": "6f8b437c-fa90-4a78-babf-8a396d23bb28",
+    "scriptName": "$ - Legacy AsciiMath",
+    "disabled": false,
+    "runOnEdit": false,
+    "findRegex": "/^(?:\\s*)\\$(.*)\\$(?:\\s*)$/gm",
+    "trimStrings": [],
+    "replaceString": "```asciimath\n$1\n```",
+    "placement": [
+      1,
+      2,
+      3
+    ],
+    "substituteRegex": 0,
+    "minDepth": null,
+    "maxDepth": null,
+    "markdownOnly": true,
+    "promptOnly": false
+  },
+  {
+    "id": "10b48834-2721-4f07-b87a-b57d52659e3a",
+    "scriptName": "$$",
+    "disabled": false,
+    "runOnEdit": false,
+    "findRegex": "/\\$\\$\\s*([\\s\\S]*?)\\s*\\$\\$/g",
+    "trimStrings": [],
+    "replaceString": "```latex\n$1\n```",
+    "placement": [
+      1,
+      2,
+      3
+    ],
+    "substituteRegex": 0,
+    "minDepth": null,
+    "maxDepth": null,
+    "markdownOnly": true,
+    "promptOnly": false
+  },
+  {
+    "id": "dc6661f8-5de7-49ec-96dd-5f5a94b0e607",
+    "scriptName": "$$ - Legacy LaTeX",
+    "disabled": false,
+    "runOnEdit": false,
+    "findRegex": "/^(?:\\s*)\\$\\$(.*)\\$\\$(?:\\s*)$/gm",
+    "trimStrings": [],
+    "replaceString": "```latex\n$1\n```",
+    "placement": [
+      1,
+      2,
+      3
+    ],
+    "substituteRegex": 0,
+    "minDepth": null,
+    "maxDepth": null,
+    "markdownOnly": true,
+    "promptOnly": false
+  },
+  {
+    "id": "773dae9f-6587-4ec5-9eb0-f56ec83420d0",
+    "scriptName": "小cot折叠",
+    "disabled": false,
+    "runOnEdit": true,
+    "findRegex": "/(<think>|<思考>|<thinking>)([\\s\\S]*?)(<\\/think>|<\\/思考>|<\\/thinking>)/g",
+    "trimStrings": [],
+    "replaceString": "<details><summary>推演内思考过程</summary>\n\n---\n$2\n\n---\n</details>\n",
+    "placement": [
+      2
+    ],
+    "substituteRegex": 0,
+    "minDepth": null,
+    "maxDepth": null,
+    "markdownOnly": true,
+    "promptOnly": false
+  },
+  {
+    "id": "e1f05272-2d0d-433e-96e4-e1bc0875624b",
+    "scriptName": "小cot对ai隐藏",
+    "disabled": false,
+    "runOnEdit": true,
+    "findRegex": "/(<think>|<思考>|<thinking>)([\\s\\S]*?)(<\\/think>|<\\/思考>|<\\/thinking>)/g",
+    "trimStrings": [],
+    "replaceString": "",
+    "placement": [
+      2
+    ],
+    "substituteRegex": 0,
+    "minDepth": 2,
+    "maxDepth": null,
+    "markdownOnly": false,
+    "promptOnly": true
+  },
+  {
+    "id": "86a721f3-6352-4cce-aed6-217d201ca5c0",
+    "scriptName": "隐藏攻击",
+    "disabled": false,
+    "runOnEdit": true,
+    "findRegex": "/<attack>.*?(?:<\\/attack>|$)/gs",
+    "trimStrings": [],
+    "replaceString": "",
+    "placement": [
+      2
+    ],
+    "substituteRegex": 0,
+    "minDepth": null,
+    "maxDepth": null,
+    "markdownOnly": true,
+    "promptOnly": false
+  },
+  {
+    "id": "dd348b49-2bbf-45b0-a5f2-f3817145f6fc",
+    "scriptName": "隐藏攻击2",
+    "disabled": false,
+    "runOnEdit": true,
+    "findRegex": "/<attack>.*?(?:<\\/attack>|$)/gs",
+    "trimStrings": [],
+    "replaceString": "",
+    "placement": [
+      2
+    ],
+    "substituteRegex": 0,
+    "minDepth": 2,
+    "maxDepth": null,
+    "markdownOnly": false,
+    "promptOnly": true
+  },
+  {
+    "id": "05722dae-0af9-4b03-9f5e-dcdc158095e8",
+    "scriptName": "去-",
+    "disabled": false,
+    "runOnEdit": true,
+    "findRegex": "/(?<=[\\u4e00-\\u9fa5\\u3400-\\u4DBF\\uF900-\\uFAFF])-(?=[\\u4e00-\\u9fa5\\u3400-\\u4DBF\\uF900-\\uFAFF])/gs",
+    "trimStrings": [],
+    "replaceString": "",
+    "placement": [
+      1,
+      2
+    ],
+    "substituteRegex": 0,
+    "minDepth": null,
+    "maxDepth": null,
+    "markdownOnly": false,
+    "promptOnly": false
+  },
+  {
+    "id": "7400be3f-15ac-461d-ba8c-6a95d942de6c",
+    "scriptName": "移除额外tag和标题",
+    "disabled": false,
+    "runOnEdit": true,
+    "findRegex": "/(?:### 正文|<\\/preparation>|<\\/?content>)|(<!--[\\s\\\\S]*?-->\\\\s*)/g",
+    "trimStrings": [],
+    "replaceString": "",
+    "placement": [
+      2
+    ],
+    "substituteRegex": 0,
+    "minDepth": null,
+    "maxDepth": null,
+    "markdownOnly": true,
+    "promptOnly": true
+  },
+  {
+    "id": "8e156286-e135-4acf-afce-5e2f931e823e",
+    "scriptName": "单独杀一丝",
+    "disabled": false,
+    "runOnEdit": true,
+    "findRegex": "/(一丝|生理性的)/g",
+    "trimStrings": [],
+    "replaceString": "",
+    "placement": [
+      2
+    ],
+    "substituteRegex": 0,
+    "minDepth": null,
+    "maxDepth": null,
+    "markdownOnly": true,
+    "promptOnly": true
+  },
+  {
+    "id": "040164fd-261d-4340-8596-48707065d944",
+    "scriptName": "[梁]-　否后肯八股",
+    "disabled": false,
+    "runOnEdit": false,
+    "findRegex": "/(不再|不像|不是|与其|并非)[^，。：；\\n]*，(?:是|而是|更是|就是|不如)/g",
+    "trimStrings": [],
+    "replaceString": "",
+    "placement": [
+      2
+    ],
+    "substituteRegex": 0,
+    "minDepth": 0,
+    "maxDepth": 1,
+    "markdownOnly": true,
+    "promptOnly": true
+  },
+  {
+    "id": "b742cc88-8d49-44b8-9f66-d8ea238909e8",
+    "scriptName": "美化选项列表",
+    "disabled": false,
+    "runOnEdit": true,
+    "findRegex": "/<xx>\\s*([^<]+?)\\s*[:：]((?:.|\\n)*?)(?:Tips\\s*[:：]\\s*([^<]+?))?\\s*<\\/xx>/si",
+    "trimStrings": [],
+    "replaceString": "```html\n<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\" />\n<style>\n@keyframes panel-dismiss { from { opacity: 1; transform: scale(1); } to { opacity: 0; transform: scale(0.96); } }\n.stellar-wrapper.dismissing { animation: panel-dismiss 0.26s ease-out forwards; }\n\n:root{\n  --deep-space: linear-gradient(180deg, #090e16 0%, #0a1220 100%);\n  --surface-layer: linear-gradient(180deg, rgba(16,28,48,0.28), rgba(9,16,30,0.35));\n  --edge-subtle: #162339;\n  --edge-visible: #223650;\n  --ink-primary: #d9e5ff;\n  --ink-muted: #8fa0bf;\n  --cell-base: #0e1a2d;\n  --cell-hover: #15263f;\n  --cell-pressed: #132745;\n  --glow-inner: rgba(42,168,255,0.14);\n  --edge-focus: #254569;\n  --edge-default: #223650;\n  --highlight: #2aa8ff;\n  --highlight-mid: rgba(42,168,255,0.35);\n  --highlight-dim: rgba(42,168,255,0.12);\n  --bevel: 10px;\n}\n\n/* 主容器 */\n.stellar-wrapper{\n  display:flex; justify-content:center; width:100%;\n  padding: 0 12px; margin: 12px auto;\n  font-family: -apple-system, 'SF Pro Display', BlinkMacSystemFont, 'Helvetica Neue', 'Segoe UI', Roboto, Arial, sans-serif;\n}\n\n/* 主面板 */\n.stellar-panel{\n  width: min(980px, 96vw);\n  background: var(--deep-space);\n  color: var(--ink-primary);\n  border: 1px solid var(--edge-subtle);\n  box-shadow: 0 14px 38px rgba(0,0,0,0.55), inset 0 0 0 1px rgba(255,255,255,0.03);\n  position: relative; overflow: hidden;\n  clip-path: polygon(\n    0 var(--bevel), var(--bevel) 0,\n    calc(100% - var(--bevel)) 0, 100% var(--bevel),\n    100% calc(100% - var(--bevel)), calc(100% - var(--bevel)) 100%,\n    var(--bevel) 100%, 0 calc(100% - var(--bevel))\n  );\n}\n.stellar-panel::before{\n  content:\"\"; position:absolute; inset:0; pointer-events:none;\n  box-shadow: inset 0 0 0 1px rgba(42,168,255,0.06);\n  clip-path: inherit;\n}\n/* 顶部柔和光晕 */\n.stellar-panel::after{\n  content:\"\"; position:absolute; inset:-1px -1px 60% -1px;\n  background: radial-gradient(80% 50% at 25% 0%, rgba(255,255,255,0.04), rgba(255,255,255,0));\n  pointer-events:none;\n  animation: ambient-pulse 12s ease-in-out infinite;\n}\n@keyframes ambient-pulse{\n  0%,100%{ opacity: .25; }\n  50%{ opacity: .38; }\n}\n\n.stellar-panel summary {\n  list-style: none; cursor: pointer; outline: none;\n  background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0));\n  border-bottom: 1px solid rgba(255,255,255,0.04);\n}\n.stellar-panel summary::-webkit-details-marker { display: none; }\n\n.panel-body {\n  padding: 0 14px 16px;\n  position: relative;\n}\n\n.collapse-hint {\n  font-size: 11px; color: var(--ink-muted); opacity: 0.7;\n  transition: color .2s ease, opacity .2s ease; margin-left: auto; padding-left: 16px;\n}\n.stellar-panel[open] > summary .collapse-hint { color: var(--highlight); opacity: 1; }\n.stellar-panel > summary:hover .collapse-hint { color: var(--ink-primary); opacity: 0.9; }\n\n.panel-header{\n  display:flex; align-items:center; justify-content:space-between;\n  padding: 14px;\n}\n.header-info { display: flex; flex-direction: column; }\n.panel-title{ font-size: 13px; font-weight: 600; letter-spacing: 0.3px; }\n.panel-subtitle{ font-size: 11px; color: var(--ink-muted); opacity: 0.85; margin-top: 2px; }\n\n.options-grid{\n  display:grid; grid-template-columns: 1fr; gap: 10px;\n  padding-top: 10px;\n  border-top: 1px dashed rgba(255,255,255,0.06);\n}\n@media (min-width: 880px){\n  .options-grid{ grid-template-columns: 1fr 1fr; }\n}\n\n/* 选项单元格 */\n.choice-cell{\n  position: relative;\n  text-align:left; width:100%;\n  padding: 12px 34px 12px 14px;\n  font-size: 12.5px; font-weight: 500; cursor:pointer;\n  background: var(--cell-base); color: var(--ink-primary);\n  border: 1px solid var(--edge-default);\n  transition: background-color .15s ease, border-color .15s ease, transform .15s ease, box-shadow .18s ease;\n  clip-path: polygon(\n    0 var(--bevel), var(--bevel) 0,\n    calc(100% - var(--bevel)) 0, 100% var(--bevel),\n    100% calc(100% - var(--bevel)), calc(100% - var(--bevel)) 100%,\n    var(--bevel) 100%, 0 calc(100% - var(--bevel))\n  );\n  box-shadow: 0 6px 16px rgba(0,0,0,0.28), inset 0 0 0 1px rgba(255,255,255,0.03);\n}\n/* 微光流动 */\n.choice-cell::before{\n  content:\"\"; position:absolute; inset:0;\n  background: linear-gradient(120deg, rgba(255,255,255,0), rgba(255,255,255,0.05), rgba(255,255,255,0));\n  background-size: 200% 100%;\n  opacity: .06; pointer-events: none; mix-blend-mode: overlay;\n  animation: shimmer-flow 9s linear infinite;\n}\n@keyframes shimmer-flow { 0%{ background-position: 0% 0; } 100%{ background-position: 200% 0; } }\n\n.choice-cell:hover{\n  background: var(--cell-hover);\n  border-color: var(--edge-visible);\n  transform: translateY(-1px);\n}\n.choice-cell:active{\n  background: var(--cell-pressed);\n  transform: translateY(0);\n}\n.choice-cell:focus-visible{\n  outline: none;\n  box-shadow: 0 0 0 1px var(--highlight-mid), 0 8px 18px rgba(0,0,0,0.32);\n}\n\n/* 选中状态 */\n@keyframes select-flash {\n  0% { box-shadow: inset 0 0 0 0 rgba(42,168,255,0), 0 6px 16px rgba(0,0,0,0.28); transform: translateY(0); }\n  60% { box-shadow: inset 0 0 18px var(--glow-inner), 0 6px 16px rgba(0,0,0,0.28); }\n  100% { box-shadow: inset 0 0 10px var(--glow-inner), 0 6px 16px rgba(0,0,0,0.28); }\n}\n.choice-cell.selected {\n  background: linear-gradient(180deg, #162d4a 0%, #132745 100%);\n  border-color: var(--edge-focus);\n  transform: translateY(0);\n  animation: select-flash .18s ease-out both;\n}\n/* 选中标记 */\n.choice-cell.selected::after{\n  content: \"\";\n  position: absolute;\n  right: 12px; top: 50%;\n  width: 10px; height: 10px; transform: translateY(-50%);\n  border-radius: 2px;\n  background: var(--highlight);\n  box-shadow: 0 0 0 2px rgba(42,168,255,0.16), 0 0 10px rgba(42,168,255,0.22);\n  opacity: 0.95;\n}\n\n/* 底部操作栏 */\n.action-footer{\n  position: sticky; bottom: 0; z-index: 2;\n  display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 12px;\n  margin-top: 12px; padding: 12px 14px;\n  background: linear-gradient(180deg, rgba(12,22,40,0.72), rgba(9,16,30,0.86));\n  border: 1px solid var(--edge-subtle);\n  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.03), 0 -6px 20px rgba(0,0,0,0.28);\n  clip-path: polygon(\n    0 var(--bevel), var(--bevel) 0,\n    calc(100% - var(--bevel)) 0, 100% var(--bevel),\n    100% calc(100% - var(--bevel)), calc(100% - var(--bevel)) 100%,\n    var(--bevel) 100%, 0 calc(100% - var(--bevel))\n  );\n  backdrop-filter: blur(6px);\n}\n/* 顶部流光线 */\n.action-footer::before{\n  content: \"\"; position: absolute; left: 10px; right: 10px; top: -1px; height: 1px;\n  background: linear-gradient(90deg, transparent, rgba(42,168,255,0.55), transparent);\n  background-size: 200% 100%;\n  animation: streak-slide 7.8s linear infinite;\n  opacity: .55; pointer-events:none;\n}\n@keyframes streak-slide { 0%{ background-position: 0% 0; } 100%{ background-position: 200% 0; } }\n\n.hint-label{\n  font-size: 10.5px; color: rgba(42,168,255,0.8);\n  letter-spacing: 0.45px; margin-bottom: 4px; text-transform: uppercase;\n}\n.hint-text{ font-size: 12px; color: var(--ink-muted); line-height: 1.6; }\n\n/* 提交按钮 */\n.submit-action{\n  display:inline-flex; align-items:center; justify-content:center; gap:8px;\n  padding: 10px 14px; font-size: 12.5px; font-weight: 600; letter-spacing: 0.2px;\n  background: linear-gradient(180deg, #10233c, #0d1e34);\n  color: var(--ink-primary);\n  border: 1px solid var(--edge-default);\n  border-color: var(--highlight-mid);\n  cursor: pointer; min-width: 112px;\n  clip-path: polygon(\n    0 var(--bevel), var(--bevel) 0,\n    calc(100% - var(--bevel)) 0, 100% var(--bevel),\n    100% calc(100% - var(--bevel)), calc(100% - var(--bevel)) 100%,\n    var(--bevel) 100%, 0 calc(100% - var(--bevel))\n  );\n  box-shadow: 0 8px 22px rgba(0,0,0,0.35), inset 0 0 0 1px rgba(255,255,255,0.03);\n  transition: transform .15s ease, background-color .2s ease, border-color .2s ease, box-shadow .2s ease, opacity .2s ease;\n}\n.submit-action:hover{\n  transform: translateY(-1px);\n  border-color: rgba(42,168,255,0.55);\n  background: linear-gradient(180deg, #132a44, #10233c);\n  box-shadow: 0 10px 26px rgba(0,0,0,0.42), 0 0 0 1px rgba(42,168,255,0.08) inset;\n}\n.submit-action:active{\n  transform: translateY(0);\n  background: linear-gradient(180deg, #0f2036, #0c1b2f);\n}\n.submit-action:disabled{\n  opacity: 0.5; cursor: not-allowed;\n  transform: none; box-shadow: 0 6px 18px rgba(0,0,0,0.25), inset 0 0 0 1px rgba(255,255,255,0.02);\n}\n\n/* 无障碍支持 */\n@media (prefers-reduced-motion: reduce){\n  * { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }\n}\n\n/* 宽屏环绕布局 */\n.action-footer.float-layout{\n  position: static;\n  display: block;\n}\n.action-footer.float-layout .submit-action{\n  float: right;\n  margin: 6px 0 0 14px;\n}\n.action-footer.float-layout::after{\n  content: \"\";\n  display: block;\n  clear: both;\n}\n\n/* 窄屏居中布局 */\n@media (max-width: 879px){\n  .action-footer{\n    display: grid;\n    grid-template-columns: 1fr;\n  }\n  .action-footer .submit-action{\n    justify-self: center;\n  }\n}\n</style>\n</head>\n<body>\n<div class=\"stellar-wrapper stellar-pending\">\n  <details class=\"stellar-panel\" open>\n    <summary class=\"panel-header\">\n      <div class=\"header-info\">\n        <div class=\"panel-title\">$1</div>\n        <div class=\"panel-subtitle\">GrayWill · Decision</div>\n      </div>\n      <div class=\"collapse-hint\">收起</div>\n    </summary>\n    <div class=\"panel-body\">\n      <div class=\"options-grid\"></div>\n\n      <div class=\"action-footer\" style=\"display: none;\">\n        <div>\n          <div class=\"hint-label\">TIPS</div>\n          <div class=\"hint-text\">$3</div>\n        </div>\n        <button class=\"submit-action\" type=\"button\" disabled>确认发送</button>\n      </div>\n    </div>\n    <div class=\"raw-choices\" style=\"display:none;\">$2</div>\n  </details>\n</div>\n\n<script>\n(function() {\n  const SELECTOR = {\n    wrapper: '.stellar-wrapper.stellar-pending',\n    panel: '.stellar-panel',\n    grid: '.options-grid',\n    footer: '.action-footer',\n    hint: '.hint-text',\n    toggle: '.collapse-hint',\n    submit: '.submit-action',\n    rawData: '.raw-choices'\n  };\n\n  function findTextarea() {\n    try {\n      const parentDoc = window.parent?.document;\n      return parentDoc?.querySelector('#send_textarea') ?? document.querySelector('#send_textarea');\n    } catch { return null; }\n  }\n\n  function collectSelections(grid) {\n    return [...grid.querySelectorAll('.choice-cell.selected')]\n      .map(el => el.dataset.value || '')\n      .filter(Boolean);\n  }\n\n  function readCurrentInput(grid) {\n    const textarea = findTextarea();\n    const inputVal = textarea?.value?.trim() ?? '';\n    return inputVal || collectSelections(grid).join(' ').trim();\n  }\n\n  function dispatchMessage(grid) {\n    const msg = readCurrentInput(grid);\n    if (!msg) return;\n\n    try {\n      const slash = window.triggerSlash ?? window.parent?.triggerSlash;\n      if (typeof slash === 'function') {\n        slash(`/send ${msg}|/trigger`);\n      } else {\n        const textarea = findTextarea();\n        if (textarea) {\n          textarea.value = msg;\n          textarea.dispatchEvent(new Event('input', { bubbles: true }));\n          textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));\n        }\n      }\n\n      const container = grid.closest('.stellar-wrapper');\n      if (container) {\n        container.classList.add('dismissing');\n        setTimeout(() => { container.style.display = 'none'; }, 260);\n      }\n    } catch (err) {\n      console.error('发送失败:', err);\n    }\n  }\n\n  function syncUI(grid, submitBtn) {\n    const textarea = findTextarea();\n    const selections = collectSelections(grid);\n    const combined = selections.join(' ');\n\n    if (textarea) {\n      textarea.value = combined;\n      textarea.focus();\n      textarea.dispatchEvent(new Event('input', { bubbles: true }));\n    }\n\n    if (submitBtn) {\n      const hasContent = (textarea?.value ?? combined).trim().length > 0;\n      submitBtn.disabled = !hasContent;\n    }\n  }\n\n  function setupResponsiveLayout(footer, hintText, submitBtn) {\n    if (!footer || !hintText || !submitBtn) return;\n\n    const adjust = () => {\n      if (window.innerWidth >= 880) {\n        footer.classList.add('float-layout');\n        if (!hintText.contains(submitBtn)) {\n          hintText.insertAdjacentElement('afterbegin', submitBtn);\n        }\n      } else {\n        footer.classList.remove('float-layout');\n        if (submitBtn.parentElement !== footer) {\n          footer.appendChild(submitBtn);\n        }\n      }\n    };\n\n    adjust();\n    let pending;\n    window.addEventListener('resize', () => {\n      cancelAnimationFrame(pending);\n      pending = requestAnimationFrame(adjust);\n    });\n  }\n\n  function bootstrap() {\n    document.querySelectorAll(SELECTOR.wrapper).forEach(wrapper => {\n      const panel = wrapper.querySelector(SELECTOR.panel);\n      const grid = wrapper.querySelector(SELECTOR.grid);\n      const footer = wrapper.querySelector(SELECTOR.footer);\n      const toggle = wrapper.querySelector(SELECTOR.toggle);\n      const rawData = wrapper.querySelector(SELECTOR.rawData);\n\n      // 折叠切换\n      if (panel && toggle) {\n        panel.addEventListener('toggle', () => {\n          toggle.textContent = panel.open ? '收起' : '展开';\n        });\n      }\n\n      // 解析选项\n      if (grid && rawData) {\n        const text = rawData.innerHTML.replace(/<br\\s*\\/?>/gi, '\\n');\n        const pattern = /\\d+[\\.。、]\\s*([^\\n\\r]+)/g;\n        let match, idx = 1;\n\n        while ((match = pattern.exec(text)) !== null) {\n          const content = (match[1] || '').trim();\n          if (!content) continue;\n\n          const cell = document.createElement('button');\n          cell.className = 'choice-cell';\n          cell.dataset.value = content;\n          cell.textContent = `${idx}. ${content}`;\n\n          cell.addEventListener('click', e => {\n            e.preventDefault();\n            cell.classList.toggle('selected');\n            const parentGrid = cell.closest('.options-grid');\n            if (parentGrid) syncUI(parentGrid, wrapper.querySelector(SELECTOR.submit));\n          });\n\n          grid.appendChild(cell);\n          idx++;\n        }\n        rawData.remove();\n      }\n\n      // 底部栏初始化\n      let submitBtn = footer?.querySelector(SELECTOR.submit);\n      const hintLabel = footer?.querySelector('.hint-label');\n      const hintText = footer?.querySelector(SELECTOR.hint);\n\n      if (!hintText?.textContent?.trim() && hintLabel) {\n        hintLabel.style.display = 'none';\n      }\n\n      if (footer) {\n        footer.style.display = 'grid';\n\n        if (!submitBtn) {\n          submitBtn = document.createElement('button');\n          submitBtn.className = 'submit-action';\n          submitBtn.type = 'button';\n          submitBtn.textContent = '确认发送';\n          submitBtn.disabled = true;\n          footer.appendChild(submitBtn);\n        }\n\n        submitBtn.addEventListener('click', () => {\n          const targetGrid = wrapper.querySelector(SELECTOR.grid);\n          if (targetGrid) dispatchMessage(targetGrid);\n        });\n\n        setupResponsiveLayout(footer, hintText, submitBtn);\n      }\n\n      syncUI(grid, submitBtn);\n      wrapper.classList.remove('stellar-pending');\n    });\n  }\n\n  if (typeof window.stellarOptionsInit === 'undefined') {\n    window.stellarOptionsInit = bootstrap;\n  }\n  bootstrap();\n})();\n</script>\n</body>\n</html>\n```",
+    "placement": [
+      2
+    ],
+    "substituteRegex": 0,
+    "minDepth": null,
+    "maxDepth": 2,
+    "markdownOnly": true,
+    "promptOnly": false
+  },
+  {
+    "id": "54d09c1b-24dd-4c68-8144-bd5f5eb87fa5",
+    "scriptName": "隐藏选项列表",
+    "disabled": false,
+    "runOnEdit": true,
+    "findRegex": "/<xx[\\s\\S]*?</xx>/si",
+    "trimStrings": [],
+    "replaceString": "",
+    "placement": [
+      2
+    ],
+    "substituteRegex": 0,
+    "minDepth": 1,
+    "maxDepth": null,
+    "markdownOnly": true,
+    "promptOnly": true
+  },
+  {
+    "id": "379293c5-dff6-4bc5-b60b-71434f3c3f69",
+    "scriptName": "删掉history中最后一条用户消息",
+    "disabled": false,
+    "runOnEdit": true,
+    "findRegex": "^([\\s\\S]*)$",
+    "trimStrings": [],
+    "replaceString": "",
+    "placement": [
+      1
+    ],
+    "substituteRegex": 0,
+    "minDepth": null,
+    "maxDepth": 1,
+    "markdownOnly": false,
+    "promptOnly": true
+  },
+  {
+    "id": "329b82cb-3c89-41da-800b-d12e14c74c49",
+    "scriptName": "伏笔对用户隐藏",
+    "disabled": false,
+    "runOnEdit": true,
+    "findRegex": "/(<记录>)([\\s\\S]*?)(<\\/记录>)/g",
+    "trimStrings": [],
+    "replaceString": "",
+    "placement": [
+      2
+    ],
+    "substituteRegex": 0,
+    "minDepth": null,
+    "maxDepth": null,
+    "markdownOnly": true,
+    "promptOnly": false
+  },
+  {
+    "id": "7ce6fc8a-0afc-40ac-bc32-4d53d4ba7c65",
+    "scriptName": "去彩字占用的上下文",
+    "disabled": false,
+    "runOnEdit": true,
+    "findRegex": "/<span\\s+style=\"color:[^\"]*\">([^<]*)</span>/g",
+    "trimStrings": [],
+    "replaceString": "$1",
+    "placement": [
+      2
+    ],
+    "substituteRegex": 0,
+    "minDepth": null,
+    "maxDepth": null,
+    "markdownOnly": false,
+    "promptOnly": true
+  },
+  {
+    "id": "5a0c76af-7e3c-495d-8aed-757612bdfc5e",
+    "scriptName": "杀描述天气",
+    "disabled": false,
+    "runOnEdit": true,
+    "findRegex": "/，(?:像|仿佛|好像|如同|似乎|宛如|一如)[^，。？：（\"」]*(?:天气|聊家常|陈述|闲聊|说今天|唠嗑|谈论|报菜名)[^，。？：（\"」]*/g",
+    "trimStrings": [],
+    "replaceString": "",
+    "placement": [
+      2
+    ],
+    "substituteRegex": 0,
+    "minDepth": null,
+    "maxDepth": null,
+    "markdownOnly": true,
+    "promptOnly": true
+  },
+  {
+    "id": "186e8740-b83f-489c-ac19-4397a402017c",
+    "scriptName": "杀就像在说",
+    "disabled": false,
+    "runOnEdit": true,
+    "findRegex": "/[。！？\\n][^。！？\\n]*?语气.{0,10}得(仿佛|像|好像|如同|似乎|宛如)[^。！？\\n]*?[。！？]/g",
+    "trimStrings": [],
+    "replaceString": "",
+    "placement": [
+      2
+    ],
+    "substituteRegex": 0,
+    "minDepth": null,
+    "maxDepth": null,
+    "markdownOnly": true,
+    "promptOnly": true
+  },
+  {
+    "id": "78f211c9-d7cd-497e-8c36-836b13c012eb",
+    "scriptName": "弹幕",
+    "disabled": false,
+    "runOnEdit": true,
+    "findRegex": "/·、/g",
+    "replaceString": " 　 ",
+    "trimStrings": [],
+    "placement": [
+      2
+    ],
+    "substituteRegex": 0,
+    "minDepth": null,
+    "maxDepth": null,
+    "markdownOnly": true,
+    "promptOnly": false
+  },
+  {
+    "id": "6e0b11a2-8720-4dfd-a3c9-7e4ef316c76c",
+    "scriptName": "ai输出@为留空",
+    "findRegex": "/@\\(([^()]*)\\)(?=@)|@\\(([^()]*)\\)|\\(([^()]*)\\)@|@/g",
+    "replaceString": "$1$2$3",
+    "trimStrings": [],
+    "placement": [
+      2,
+      6
+    ],
+    "disabled": false,
+    "markdownOnly": true,
+    "promptOnly": false,
+    "runOnEdit": true,
+    "substituteRegex": 0,
+    "minDepth": null,
+    "maxDepth": null
+  },
+  {
+    "id": "c20f133f-a91e-4cfd-b816-2c75cc181c3a",
+    "scriptName": "杀空行",
+    "disabled": true,
+    "runOnEdit": true,
+    "findRegex": "/(\\n)\\s*\\n/g",
+    "trimStrings": [],
+    "replaceString": "$1",
+    "placement": [
+      2
+    ],
+    "substituteRegex": 0,
+    "minDepth": null,
+    "maxDepth": null,
+    "markdownOnly": true,
+    "promptOnly": true
+  },
+  {
+    "id": "8bb59fbf-5df3-4de2-9121-42fb84d5fc09",
+    "scriptName": "ds思维链折叠",
+    "disabled": true,
+    "runOnEdit": true,
+    "findRegex": "^([\\s\\S]*?)(</think>|</thinking>)",
+    "trimStrings": [],
+    "replaceString": "<details><summary>思考过程</summary>\n\n$1\n\n---\n</details>\n",
+    "placement": [
+      2
+    ],
+    "substituteRegex": 0,
+    "minDepth": null,
+    "maxDepth": null,
+    "markdownOnly": true,
+    "promptOnly": false
+  },
+  {
+    "id": "d6a96003-0f05-4964-8fdd-4584e80c0bf4",
+    "scriptName": "ds思维链对ai隐藏",
+    "disabled": true,
+    "runOnEdit": true,
+    "findRegex": "^([\\s\\S]*?)(</think>|</thinking>)",
+    "trimStrings": [],
+    "replaceString": "",
+    "placement": [
+      2
+    ],
+    "substituteRegex": 0,
+    "minDepth": null,
+    "maxDepth": null,
+    "markdownOnly": false,
+    "promptOnly": true
+  },
+  {
+    "id": "19125c15-3e68-4ea7-92ca-13153d53b8be",
+    "scriptName": "【云瑾】八股抹除 - 7.8",
+    "disabled": true,
+    "runOnEdit": true,
+    "findRegex": "/一(丝+)|(、?)不容置疑([的地]?)|(、?)(不易|难以)(觉察|察觉)([的地]?)|(微|几)不可(查|察|闻)([的地]?)|，([^，]*?)指(关节|节|尖)(.*?)白|(?<=[\\s。，])(((?![\\s。，]).)*?)(睫毛|钩子|湖面|涟漪|石子|深潭|一小片阴影)(.*?)(?=[，。])/g",
+    "trimStrings": [],
+    "replaceString": "",
+    "placement": [
+      2
+    ],
+    "substituteRegex": 0,
+    "minDepth": null,
+    "maxDepth": null,
+    "markdownOnly": true,
+    "promptOnly": true
+  },
+  {
+    "id": "14d83979-ed19-4c7d-820a-d6bde56a0af3",
+    "scriptName": "删除前十楼总结",
+    "disabled": true,
+    "runOnEdit": true,
+    "findRegex": "<details>[\\s\\S]*?</details>",
+    "trimStrings": [],
+    "replaceString": "",
+    "placement": [
+      2
+    ],
+    "substituteRegex": 0,
+    "minDepth": null,
+    "maxDepth": 10,
+    "markdownOnly": true,
+    "promptOnly": true
+  },
+  {
+    "id": "eaa93ace-02c0-4ea1-be6b-fe316fd6a250",
+    "scriptName": "隐藏五楼前平行事件",
+    "disabled": true,
+    "runOnEdit": true,
+    "findRegex": "<DBE_Tracking_System>[\\s\\S]*?</DBE_Tracking_System>",
+    "trimStrings": [],
+    "replaceString": "",
+    "placement": [
+      2
+    ],
+    "substituteRegex": 0,
+    "minDepth": 5,
+    "maxDepth": null,
+    "markdownOnly": true,
+    "promptOnly": true
+  },
+  {
+    "id": "08a4aecd-67c3-4486-ada0-3d1742ff1a7a",
+    "scriptName": "隐藏三楼以上安科数据",
+    "disabled": true,
+    "runOnEdit": true,
+    "findRegex": "/<判定修正>([\\s\\S]*?)<\\/判定修正>/g",
+    "trimStrings": [],
+    "replaceString": "",
+    "placement": [
+      2
+    ],
+    "substituteRegex": 0,
+    "minDepth": 3,
+    "maxDepth": null,
+    "markdownOnly": true,
+    "promptOnly": true
+  },
+  {
+    "id": "f6098801-af5e-4b14-bc25-1da2044e701c",
+    "scriptName": "安科数据代码块包裹",
+    "disabled": true,
+    "runOnEdit": true,
+    "findRegex": "/<判定修正>([\\s\\S]*?)<\\/判定修正>/g",
+    "trimStrings": [],
+    "replaceString": "```\n<判定修正>$1</判定修正>\n```\n",
+    "placement": [
+      2
+    ],
+    "substituteRegex": 0,
+    "minDepth": null,
+    "maxDepth": null,
+    "markdownOnly": true,
+    "promptOnly": true
+  },
+  {
+    "id": "94772b16-12f0-441f-83c6-fb9ff8da2800",
+    "scriptName": "摘要其一",
+    "disabled": true,
+    "runOnEdit": true,
+    "findRegex": "/<details>\\s*<summary>\\s*摘要\\s*<\\/summary>[\\s\\S]*?<\\/details>/gsi",
+    "trimStrings": [],
+    "replaceString": "",
+    "placement": [
+      2
+    ],
+    "substituteRegex": 0,
+    "minDepth": null,
+    "maxDepth": 10,
+    "markdownOnly": false,
+    "promptOnly": true
+  },
+  {
+    "id": "8800481a-f250-4dc0-ab1d-a755b2a4e437",
+    "scriptName": "摘要其二",
+    "disabled": true,
+    "runOnEdit": true,
+    "findRegex": "/([\\s\\S]*?<details>\\s*<summary>\\s*摘要\\s*<\\/summary>|<\\/details>[\\s\\S]*?$)/gs",
+    "trimStrings": [],
+    "replaceString": "",
+    "placement": [
+      2
+    ],
+    "substituteRegex": 0,
+    "minDepth": 11,
+    "maxDepth": null,
+    "markdownOnly": false,
+    "promptOnly": true
+  },
+  {
+    "id": "f85eb689-0e64-4b92-9916-b5d93941b6ba",
+    "scriptName": "隐藏10楼前灰风锐评",
+    "disabled": true,
+    "runOnEdit": true,
+    "findRegex": "/<details>\\s*<summary>\\s*小灰锐评\\s*<\\/summary>[\\s\\S]*?<\\/details>/gsi",
+    "trimStrings": [],
+    "replaceString": "",
+    "placement": [
+      1
+    ],
+    "substituteRegex": 0,
+    "minDepth": 10,
+    "maxDepth": null,
+    "markdownOnly": false,
+    "promptOnly": true
+  },
+  {
+    "id": "2d91b6f3-035d-456c-85c2-104c52448785",
+    "scriptName": "移除标记括号",
+    "findRegex": "/@\\(([^()\\r\\n]*)\\)@?|\\(([^()\\r\\n]*)\\)@/g",
+    "replaceString": "$1$2",
+    "trimStrings": [],
+    "placement": [
+      2,
+      6
+    ],
+    "disabled": true,
+    "markdownOnly": true,
+    "promptOnly": false,
+    "runOnEdit": true,
+    "substituteRegex": 0,
+    "minDepth": null,
+    "maxDepth": null
+  }
+]

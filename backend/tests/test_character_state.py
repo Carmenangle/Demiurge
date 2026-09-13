@@ -1,0 +1,415 @@
+"""角色动态状态：parse/apply 纯逻辑 + 落盘往返 + provenance 语义。"""
+from __future__ import annotations
+
+from app.services import character_state as cs
+
+
+def _state() -> cs.CharacterState:
+    st = cs.CharacterState(card_name="埃斯托利亚", repo_id="repo1")
+    st.数值["好感度"] = cs.NumericField(-30.0, min=-50.0, max=120.0)
+    return st
+
+
+def test_parse_deltas_归一与非法跳过():
+    raw = [
+        {"field": "数值/好感度", "op": "add", "value": 25, "evidence": "调运食材做了一桌菜"},
+        {"field": "叙事/对{{user}}态度", "op": "set", "value": "戒备", "evidence": "第3章救援"},
+        {"field": "数值/好感度", "op": "set", "value": 99},   # 数值只认 add → 跳过
+        {"field": "叙事/心情", "op": "set", "value": ""},      # 空叙事 → 跳过
+        {"field": "没有斜杠", "op": "add", "value": 1},         # 缺 kind → 跳过
+        "not a dict",
+    ]
+    deltas = cs.parse_deltas(raw, turn=42)
+    assert len(deltas) == 2
+    assert deltas[0].kind() == "数值" and deltas[0].op == "add" and deltas[0].value == 25.0
+    assert deltas[1].kind() == "叙事" and deltas[1].leaf() == "对{{user}}态度"
+
+
+def test_apply_数值累加并clamp():
+    st = _state()
+    cs.apply_deltas(st, cs.parse_deltas(
+        [{"field": "数值/好感度", "op": "add", "value": 200, "evidence": "x"}], turn=1))
+    assert st.数值["好感度"].value == 120.0  # clamp 到 max
+    assert st.历史[-1]["from"] == -30.0 and st.历史[-1]["to"] == 120.0
+
+
+def test_好感度首次创建锁到正负100():
+    # 状态里无好感度字段时，首次 delta 应套用已知字段边界 -100..100，而非无界
+    st = cs.CharacterState(card_name="c", repo_id="r")
+    cs.apply_deltas(st, cs.parse_deltas(
+        [{"field": "数值/好感度", "op": "add", "value": 999}], turn=1))
+    assert st.数值["好感度"].value == 100.0
+    assert (st.数值["好感度"].min, st.数值["好感度"].max) == (-100.0, 100.0)
+    # 未登记字段仍无界
+    cs.apply_deltas(st, cs.parse_deltas(
+        [{"field": "数值/金币", "op": "add", "value": 5000}], turn=2))
+    assert st.数值["金币"].value == 5000.0
+
+
+def test_apply_叙事覆盖并记history():
+    st = _state()
+    cs.apply_deltas(st, cs.parse_deltas(
+        [{"field": "叙事/心情", "op": "set", "value": "疲惫", "evidence": "莫妮卡战败"}], turn=15))
+    assert st.叙事["心情"].value == "疲惫"
+    assert st.历史[-1]["from"] == "" and st.历史[-1]["evidence"] == "莫妮卡战败"
+
+
+def test_同角色状态字段别名归一并由最新值替换():
+    st = cs.CharacterState(card_name="冷倾雪", repo_id="r")
+    st.叙事["冷倾雪身体状态"] = cs.NarrativeField("旧值", turn=1)
+    st.叙事["身体状态"] = cs.NarrativeField("中间值", turn=2)
+    st.叙事["冷倾雪·身体状态"] = cs.NarrativeField("最新值", turn=3)
+
+    cs.consolidate_fields(st)
+
+    assert list(st.叙事) == ["冷倾雪·身体状态"]
+    assert st.叙事["冷倾雪·身体状态"].value == "最新值"
+
+
+def test_无归属状态沿用同字段唯一已有角色而非主卡名():
+    st = cs.CharacterState(card_name="白给谷", repo_id="r")
+    st.叙事["冷倾雪身体状态"] = cs.NarrativeField("旧值", turn=1)
+    st.叙事["身体状态"] = cs.NarrativeField("最新值", turn=2)
+
+    cs.consolidate_fields(st)
+
+    assert list(st.叙事) == ["冷倾雪·身体状态"]
+    assert st.叙事["冷倾雪·身体状态"].value == "最新值"
+
+
+def test_明确归属字段淘汰同名无归属旧副本():
+    st = cs.CharacterState(card_name="神权大陆", repo_id="r")
+    st.数值["塞西莉亚·好感度"] = cs.NumericField(10, turn=4)
+    st.数值["好感度"] = cs.NumericField(2, turn=3)
+    st.叙事["塞西莉亚·态度"] = cs.NarrativeField("玩味浓厚", turn=4)
+    st.叙事["院长·态度"] = cs.NarrativeField("压抑不安", turn=4)
+    st.叙事["态度"] = cs.NarrativeField("旧值", turn=3)
+    st.叙事["我·所在"] = cs.NarrativeField("自己房间", turn=4)
+    st.叙事["塞西莉亚·所在"] = cs.NarrativeField("马车内", turn=4)
+    st.叙事["所在"] = cs.NarrativeField("旧地点", turn=3)
+
+    cs.consolidate_fields(st)
+
+    # 「好感度」例外：单主角全局好感度就是裸键，被多角色字段连带清理会让好感度
+    # 凭空消失/换新（2026-09-01 用户实锤），故保留；其余裸键照旧淘汰。
+    assert set(st.数值) == {"塞西莉亚·好感度", "好感度"}
+    assert set(st.叙事) == {"塞西莉亚·态度", "院长·态度", "我·所在", "塞西莉亚·所在"}
+
+
+def test_写入同角色同字段时替换而非新增别名():
+    st = cs.CharacterState(card_name="冷倾雪", repo_id="r")
+    st.叙事["冷倾雪·精神状态"] = cs.NarrativeField("平静", turn=1)
+    deltas = cs.parse_deltas(
+        [{"field": "叙事/精神状态", "op": "set", "value": "崩溃"}],
+        turn=2,
+        card_name="冷倾雪",
+    )
+
+    cs.apply_deltas(st, deltas)
+
+    assert list(st.叙事) == ["冷倾雪·精神状态"]
+    assert st.叙事["冷倾雪·精神状态"].value == "崩溃"
+
+
+def test_自动写入无归属字段沿用状态中唯一角色():
+    st = cs.CharacterState(card_name="白给谷", repo_id="r")
+    st.叙事["冷倾雪·身体状态"] = cs.NarrativeField("旧值", turn=1)
+    deltas = cs.parse_deltas(
+        [{"field": "叙事/身体状态", "op": "set", "value": "新值"}],
+        turn=2,
+        card_name="白给谷",
+        existing_state=st,
+    )
+
+    cs.apply_deltas(st, deltas)
+
+    assert list(st.叙事) == ["冷倾雪·身体状态"]
+    assert st.叙事["冷倾雪·身体状态"].value == "新值"
+
+
+def test_人为改无证据保留供识别():
+    st = _state()
+    cs.apply_deltas(st, cs.parse_deltas(
+        [{"field": "叙事/态度", "op": "set", "value": "痴迷"}], turn=0, source=cs.SRC_USER))
+    f = st.叙事["态度"]
+    assert f.source == cs.SRC_USER and f.evidence == ""  # 无据 + user → 上层可识别为设定注入
+
+
+def test_render_state_block_带provenance():
+    st = _state()
+    cs.apply_deltas(st, cs.parse_deltas([
+        {"field": "数值/好感度", "op": "add", "value": 50, "evidence": "一桌菜"},
+        {"field": "叙事/所在", "op": "set", "value": "北境要塞"},
+    ], turn=3))
+    block = cs.render_state_block(st)
+    assert "【当前状态】" in block
+    assert "埃斯托利亚·好感度: 20 (一桌菜)" in block
+    assert "埃斯托利亚·所在: 北境要塞" in block  # 无证据不带括号
+
+
+def test_落盘往返(tmp_path):
+    base = str(tmp_path)
+    st = _state()
+    cs.apply_deltas(st, cs.parse_deltas(
+        [{"field": "叙事/所在", "op": "set", "value": "舞会", "evidence": "赴宴"}], turn=2))
+    cs.save_state(base, st)
+    got = cs.load_state(base, "repo1", "埃斯托利亚")
+    assert got.数值["好感度"].value == -30.0
+    assert got.叙事["所在"].value == "舞会" and got.叙事["所在"].evidence == "赴宴"
+    assert len(got.历史) == 1
+
+
+def test_空作品返回空状态(tmp_path):
+    got = cs.load_state(str(tmp_path), "nope", "卡")
+    assert got.数值 == {} and got.叙事 == {} and cs.render_state_block(got) == ""
+
+
+def test_快照落盘往返(tmp_path):
+    base = str(tmp_path)
+    st = _state()
+    st.快照 = cs.Snapshot("[所在] 沉梦峡谷\n[臣服] 叶燃眉=100", turn=7)
+    cs.save_state(base, st)
+    got = cs.load_state(base, "repo1", "埃斯托利亚")
+    assert got.快照.text == "[所在] 沉梦峡谷\n[臣服] 叶燃眉=100"
+    assert got.快照.turn == 7
+
+
+def test_render_snapshot_injection():
+    st = _state()
+    assert cs.render_snapshot_injection(st) == ""  # 空快照 → 空串
+    st.快照 = cs.Snapshot("[所在] 山洞", turn=3)
+    inj = cs.render_snapshot_injection(st)
+    assert "【上轮状态栏" in inj and "[所在] 山洞" in inj
+
+
+def test_current_turn_取最大():
+    st = _state()
+    st.数值["好感度"].turn = 2
+    st.叙事["态度"] = cs.NarrativeField("戒备", turn=5)
+    st.快照 = cs.Snapshot("x", turn=3)
+    assert cs.current_turn(st) == 5
+
+
+def test_set_fields_精确设值非累加():
+    st = _state()  # 好感度 = -30
+    n = cs.set_fields(st, [{"field": "数值/好感度", "value": 50}], turn=4)
+    assert n == 1
+    assert st.数值["好感度"].value == 50.0        # 设值,非 -30+50
+    assert st.数值["好感度"].source == cs.SRC_USER
+    assert st.历史[-1]["op"] == "set" and st.历史[-1]["from"] == -30.0
+
+
+def test_set_fields_数值clamp与叙事():
+    st = _state()  # min=-50 max=120
+    cs.set_fields(st, [{"field": "数值/好感度", "value": 999},
+                       {"field": "叙事/态度", "value": "臣服"}], turn=4)
+    assert st.数值["好感度"].value == 120.0       # clamp 到 max
+    assert st.叙事["态度"].value == "臣服"
+    assert st.叙事["态度"].source == cs.SRC_USER
+
+
+def test_set_fields_非法跳过():
+    st = _state()
+    n = cs.set_fields(st, [{"field": "没斜杠"}, {"field": "数值/好感度", "value": 3}], turn=1)
+    assert n == 1
+
+
+def test_rollback_last_还原并移除历史():
+    st = _state()
+    cs.apply_deltas(st, cs.parse_deltas(
+        [{"field": "数值/好感度", "op": "add", "value": 20}], turn=1))  # -30→-10
+    cs.apply_deltas(st, cs.parse_deltas(
+        [{"field": "数值/好感度", "op": "add", "value": 30}], turn=2))  # -10→20
+    hist_len = len(st.历史)
+    undone = cs.rollback_last(st, n=1)
+    assert undone == 1
+    assert st.数值["好感度"].value == -10.0       # 还原到第2次前
+    assert len(st.历史) == hist_len - 1
+    assert st.数值["好感度"].source == cs.SRC_USER
+
+
+def test_rollback_空历史不报错():
+    st = _state()
+    assert cs.rollback_last(st, n=3) == 0
+
+
+def test_delete_field_删数值与叙事():
+    st = _state()
+    st.叙事["心情"] = cs.NarrativeField("疲惫")
+    assert cs.delete_field(st, "数值/好感度") is True
+    assert "好感度" not in st.数值
+    assert st.历史[-1]["op"] == "delete" and st.历史[-1]["to"] is None
+    assert cs.delete_field(st, "叙事/心情") is True
+    assert "心情" not in st.叙事
+
+
+def test_delete_field_不存在返回False():
+    st = _state()
+    assert cs.delete_field(st, "数值/金币") is False
+    assert cs.delete_field(st, "没有斜杠") is False
+
+
+def test_from_dict_重建并钳边界():
+    src = _state()
+    src.叙事["态度"] = cs.NarrativeField("戒备")
+    dumped = src.to_dict()
+    dumped["数值"]["好感度"]["value"] = 9999    # 超界值应被 from_dict 钳回
+    rebuilt = cs.from_dict(dumped, repo_id="r2", card_name="c2")
+    assert rebuilt.repo_id == "r2" and rebuilt.card_name == "c2"
+    assert rebuilt.数值["好感度"].value == 120.0   # clamp 到该字段 max
+    assert rebuilt.叙事["态度"].value == "戒备"
+
+
+def test_from_dict_非dict安全返回空():
+    st = cs.from_dict("garbage", repo_id="r", card_name="c")
+    assert st.数值 == {} and st.叙事 == {}
+
+
+def test_第一人称主角字段不入状态表():
+    """2026-09-01 用户定案：第一人称的「我/主角/你」不是剧情角色，不入状态表。
+    AI 常把主角当角色名写 field，parse_deltas 直接丢弃，只留真正的角色/全局字段。"""
+    st = cs.CharacterState(card_name="凌霄仙母录", repo_id="r")
+    deltas = cs.parse_deltas([
+        {"field": "叙事/我·所在", "op": "set", "value": "寝殿"},
+        {"field": "数值/主角·好感度", "op": "add", "value": 5},
+        {"field": "数值/你·信任", "op": "add", "value": 2},
+        {"field": "数值/好感度", "op": "add", "value": 3},
+    ], turn=1, card_name="凌霄仙母录", existing_state=st)
+
+    assert [d.field for d in deltas] == ["数值/好感度"]
+    cs.apply_deltas(st, deltas)
+    assert list(st.数值) == ["好感度"]
+    assert st.叙事 == {}
+
+
+def test_无归属状态无唯一角色时不再回退卡名():
+    """合集卡名（如「凌霄仙母录」）不是角色名：无归属裸字段在 owner_hints 给不出
+    唯一角色时保留裸键，禁止回退 card_name（2026-09-01 用户实锤：卡名被记成角色）。"""
+    st = cs.CharacterState(card_name="凌霄仙母录", repo_id="r")
+    deltas = cs.parse_deltas(
+        [{"field": "叙事/身体状态", "op": "set", "value": "平静"}],
+        turn=1,
+        card_name="凌霄仙母录",
+        existing_state=st,
+    )
+
+    cs.apply_deltas(st, deltas)
+
+    assert list(st.叙事) == ["身体状态"]
+    assert "凌霄仙母录" not in st.叙事
+
+
+def test_无归属状态有唯一显式角色时仍沿用该角色():
+    """owner_hints 命中时保持旧行为：无归属「身体状态」沿用到唯一显式角色「冷倾雪」，
+    不因卡名保护而退化。"""
+    st = cs.CharacterState(card_name="白给谷", repo_id="r")
+    st.叙事["冷倾雪·身体状态"] = cs.NarrativeField("旧值", turn=1)
+    deltas = cs.parse_deltas(
+        [{"field": "叙事/身体状态", "op": "set", "value": "新值"}],
+        turn=2,
+        card_name="白给谷",
+        existing_state=st,
+    )
+
+    cs.apply_deltas(st, deltas)
+
+    assert list(st.叙事) == ["冷倾雪·身体状态"]
+    assert st.叙事["冷倾雪·身体状态"].value == "新值"
+
+
+def test_render_state_block_跳过主角字段():
+    """存量主角字段不注入主控叙述：AI 看不到就不再继续更新它们。"""
+    st = cs.CharacterState(card_name="凌霄仙母录", repo_id="r")
+    st.叙事["我·所在"] = cs.NarrativeField("寝殿", turn=1)
+    st.叙事["主角·心情"] = cs.NarrativeField("焦急", turn=1)
+    st.叙事["凌若冰·心情"] = cs.NarrativeField("平静", turn=1)
+
+    block = cs.render_state_block(st)
+
+    assert "我·所在" not in block and "主角" not in block
+    assert "凌若冰·心情" in block
+
+
+def test_好感度裸键不被多角色字段清理():
+    """单主角全局好感度 = 裸键「好感度」；consolidate 的裸键清理必须跳过它，
+    否则多角色字段混入后单主角好感度被删（2026-09-01 用户实锤「好感度换新/消失」）。"""
+    st = cs.CharacterState(card_name="白给谷", repo_id="r")
+    st.数值["好感度"] = cs.NumericField(50, turn=5)
+    st.数值["冷倾雪·好感度"] = cs.NumericField(30, turn=6)
+    st.叙事["心情"] = cs.NarrativeField("平静", turn=5)
+    st.叙事["冷倾雪·心情"] = cs.NarrativeField("戒备", turn=6)
+
+    cs.consolidate_fields(st)
+
+    assert set(st.数值) == {"好感度", "冷倾雪·好感度"}
+    assert list(st.叙事) == ["冷倾雪·心情"]  # 裸「心情」仍有显式归属 → 照旧淘汰
+
+
+# ── M1 记忆封口（2026-09-06 用户定案）：删除/重生成回合的状态变更整体撤销 ──
+
+
+def test_rollback_from_turn撤销该回合及之后的状态变更():
+    st = _state()
+    cs.apply_deltas(st, cs.parse_deltas(
+        [{"field": "数值/好感度", "op": "add", "value": 10, "evidence": "回合2事件"}], turn=2))
+    cs.apply_deltas(st, cs.parse_deltas(
+        [{"field": "数值/好感度", "op": "add", "value": 15, "evidence": "回合5事件"},
+         {"field": "叙事/态度", "op": "set", "value": "热络", "evidence": "回合5事件"}], turn=5))
+    assert st.数值["好感度"].value == -5.0
+
+    rolled = cs.rollback_from_turn(st, turn=5)
+
+    assert rolled == {"undone": 2, "incomplete": []}
+    assert st.数值["好感度"].value == -20.0  # 只剩回合 2 的加成
+    assert "态度" not in st.叙事
+    # 更早回合的审计与变更保留
+    assert all(int(entry.get("turn") or 0) < 5 for entry in st.历史)
+    assert cs.rollback_from_turn(st, turn=5) == {"undone": 0, "incomplete": []}  # 幂等
+
+
+def test_审计窗口被截断时封口显式上报不完整字段():
+    """M1 审计 #2：长剧情审计超 _HISTORY_CAP 后，封口老回合可能无法精确还原——
+    必须显式上报（state_incomplete），绝不静默错账。"""
+    st = _state()
+    cs.apply_deltas(st, cs.parse_deltas(
+        [{"field": "数值/好感度", "op": "add", "value": 5, "evidence": "回合1"}], turn=1))
+    cs.apply_deltas(st, cs.parse_deltas(
+        [{"field": "数值/好感度", "op": "add", "value": 5, "evidence": "回合2"}], turn=2))
+    for i in range(cs._HISTORY_CAP + 60):  # 灌爆审计窗口，回合1/2 的条目被丢最旧
+        cs.apply_deltas(st, cs.parse_deltas(
+            [{"field": "数值/好感度", "op": "add", "value": 0, "evidence": f"填充{i}"}],
+            turn=3 + i // 50))
+    assert len(st.历史) == cs._HISTORY_CAP
+
+    rolled = cs.rollback_from_turn(st, turn=2)
+
+    assert rolled["undone"] == cs._HISTORY_CAP
+    assert "数值/好感度" in rolled["incomplete"]  # 撤销链最老条目回合(3) > 封口回合(2) → 断层
+
+
+# ── 表格文本破甲还原（2026-09-13 用户实锤）──────────────────────────────
+
+
+def test_模型输出的证据与叙事值落库前还原拆字标记():
+    """模型按防拦截预设写正文，evidence / 叙事值引用正文时把 `@` 拆字标记带出；
+    表格文本不参与网关检测 ⇒ 落库前必须机械还原（状态表「依据」栏不再是 @为@争@…）。"""
+    deltas = cs.parse_deltas([
+        {"field": "数值/好感度", "op": "add", "value": 5,
+         "evidence": "@为@争@被@插@彻@底@撕@碎@体@面@，@不@顾@宗@主@尊@严@"},
+        {"field": "叙事/态度", "op": "set",
+         "value": "@完@全@臣@服@", "evidence": "@威@压@"},
+    ], turn=7)
+
+    assert deltas[0].evidence == "为争被插彻底撕碎体面，不顾宗主尊严"
+    assert deltas[1].value == "完全臣服"
+    assert deltas[1].evidence == "威压"
+
+
+def test_人为编辑的表格文本原样保留不清洗():
+    """用户在前端手改的状态字段（source=user）不经过破甲还原——不动用户输入。"""
+    deltas = cs.parse_deltas([
+        {"field": "叙事/态度", "op": "set", "value": "@保@留@", "evidence": "@原@样@"},
+    ], turn=3, source=cs.SRC_USER)
+
+    assert deltas[0].value == "@保@留@"
+    assert deltas[0].evidence == "@原@样@"

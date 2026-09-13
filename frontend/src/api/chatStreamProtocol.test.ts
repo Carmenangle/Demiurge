@@ -1,0 +1,184 @@
+import { describe, expect, it } from "vitest";
+
+import { decodeChatStreamEvent } from "./chatStreamProtocol";
+
+const event = (type: string, data: Record<string, unknown>) => ({
+  protocol: "laf-chat-stream",
+  version: 1,
+  type,
+  data,
+});
+
+describe("chat stream protocol", () => {
+  it("decodes every payload through the discriminant", () => {
+    expect(decodeChatStreamEvent(event("delta", { text: "回答" }))).toEqual({
+      type: "delta", text: "回答",
+    });
+    expect(decodeChatStreamEvent(event("image", {
+      url: "local://image", id: "i1", regeneration: { prompt: "p" },
+    }))).toEqual({
+      type: "image", url: "local://image", id: "i1", regeneration: { prompt: "p" },
+    });
+    expect(decodeChatStreamEvent(event("interrupted", {}))).toEqual({ type: "interrupted" });
+    expect(decodeChatStreamEvent(event("route", { route: "roleplay" }))).toEqual({ type: "route", route: "roleplay" });
+    expect(decodeChatStreamEvent(event("rag_status", {
+      state: "start", kind: "worldbook", count: 53,
+    }))).toEqual({ type: "rag_status", state: "start", kind: "worldbook", count: 53 });
+  });
+
+  it("decodes trace with optional execution detail (2026-09-06)", () => {
+    expect(decodeChatStreamEvent(event("trace", {
+      text: "🤔 模型正在思考…", detail: "先查候选名单，再切素材",
+    }))).toEqual({ type: "trace", text: "🤔 模型正在思考…", detail: "先查候选名单，再切素材" });
+    // 旧后端不带 detail → 无此字段
+    expect(decodeChatStreamEvent(event("trace", { text: "🧭 主管分派 → 智能编造计划" })))
+      .toEqual({ type: "trace", text: "🧭 主管分派 → 智能编造计划" });
+  });
+
+  it("rejects unknown versions and event types", () => {
+    expect(() => decodeChatStreamEvent({ ...event("delta", { text: "x" }), version: 2 }))
+      .toThrow("不支持的对话流协议");
+    expect(() => decodeChatStreamEvent(event("new_event", {})))
+      .toThrow("不支持的对话流事件");
+  });
+
+  it("decodes artifacts delivery payloads (2026-09-08)", () => {
+    expect(decodeChatStreamEvent(event("artifacts", {
+      items: [
+        { kind: "card", name: "角色主卡 · 玫瑰与繁花", path: "D:/w/玫瑰与繁花/card.json", size: 85764, mtime: 1234.5 },
+        { kind: "worldbook", name: "世界书 · 玫瑰与繁花", path: "D:/w/玫瑰与繁花/worldbook.json", size: 82474, mtime: 1234.6 },
+      ],
+    }))).toEqual({
+      type: "artifacts",
+      items: [
+        { kind: "card", name: "角色主卡 · 玫瑰与繁花", path: "D:/w/玫瑰与繁花/card.json", size: 85764, mtime: 1234.5 },
+        { kind: "worldbook", name: "世界书 · 玫瑰与繁花", path: "D:/w/玫瑰与繁花/worldbook.json", size: 82474, mtime: 1234.6 },
+      ],
+    });
+    // 无 path 的条目丢弃（后端规范外数据宽松兼容）
+    expect(decodeChatStreamEvent(event("artifacts", {
+      items: [{ kind: "card", name: "x", path: "" }],
+    }))).toEqual({ type: "artifacts", items: [] });
+    // 未知 kind 归一为 file
+    expect(decodeChatStreamEvent(event("artifacts", {
+      items: [{ kind: "mystery", name: "y", path: "P:/y.json", size: 7 }],
+    }))).toEqual({ type: "artifacts", items: [{ kind: "file", name: "y", path: "P:/y.json", size: 7 }] });
+  });
+
+  it("rejects malformed required fields", () => {
+    expect(() => decodeChatStreamEvent(event("image", { id: "i1" })))
+      .toThrow("data.url");
+    expect(() => decodeChatStreamEvent(event("error", {})))
+      .toThrow("data.message");
+  });
+
+  it("decodes illustration scene source for prompt profiles", () => {
+    const sceneSpec = {
+      narrative: "高潮段", draft_prompt: "close-up", appearance: "银发、蓝眼",
+      wardrobe: "红裙",
+      locale: "寝殿", actors: ["爱丽丝"], rating: "nsfw", aspect_ratio: "2:3",
+    };
+    expect(decodeChatStreamEvent(event("illustrate_request", {
+      prompt: "legacy", motion: 1, actors: ["爱丽丝"], id: "slot-1",
+      scene_spec: sceneSpec, turn_id: "turn-1",
+    }))).toEqual({
+      type: "illustrate_request", prompt: "legacy", motion: 1,
+      actors: ["爱丽丝"], id: "slot-1", sceneSpec, turnId: "turn-1",
+    });
+  });
+
+  it("decodes optional video protocol fields (V1.5/B1)", () => {
+    expect(decodeChatStreamEvent(event("illustrate_request", {
+      prompt: "p", motion: 3, actors: ["甲"],
+      video_mode: "firstlast",
+      first_frame_desc: "雨夜门口的暖黄灯笼",
+      last_frame_desc: "三人举杯同框",
+      prev_tail_desc: "上一楼层：收伞",
+      last_frame_url: "data:image/png;base64,xx",
+      transition: "reuse",
+    }))).toEqual({
+      type: "illustrate_request", prompt: "p", motion: 3, actors: ["甲"],
+      videoMode: "firstlast",
+      firstFrameDesc: "雨夜门口的暖黄灯笼",
+      lastFrameDesc: "三人举杯同框",
+      prevTailDesc: "上一楼层：收伞",
+      lastFrameUrl: "data:image/png;base64,xx",
+      transition: "reuse",
+    });
+  });
+
+  it("decodes transition only for reuse/regenerate/ambiguous (V1.5/W2 宽松解码)", () => {
+    expect(decodeChatStreamEvent(event("illustrate_request", {
+      prompt: "p", motion: 3, actors: ["甲"],
+      transition: "regenerate",
+    }))).toMatchObject({
+      type: "illustrate_request", prompt: "p", motion: 3, actors: ["甲"],
+      transition: "regenerate",
+    });
+    expect(decodeChatStreamEvent(event("illustrate_request", {
+      prompt: "p", motion: 3, actors: ["甲"],
+      transition: "ambiguous",
+    }))).toMatchObject({
+      type: "illustrate_request", prompt: "p", motion: 3, actors: ["甲"],
+      transition: "ambiguous",
+    });
+    // 非法值（非三态枚举）→ 不带 transition 字段
+    expect(decodeChatStreamEvent(event("illustrate_request", {
+      prompt: "p", motion: 3, actors: ["甲"],
+      transition: "maybe",
+    }))).toEqual({
+      type: "illustrate_request", prompt: "p", motion: 3, actors: ["甲"],
+    });
+  });
+
+  it("decodes the default-open climax video prompt (V1.5 无模板也生成)", () => {
+    expect(decodeChatStreamEvent(event("illustrate_request", {
+      prompt: "p", motion: 3, actors: ["甲"],
+      video_prompt: "使用视频模型生成，15 seconds。\n\n[动作]：甲挥拳；低机位快速丝滑运镜。",
+    }))).toEqual({
+      type: "illustrate_request", prompt: "p", motion: 3, actors: ["甲"],
+      videoPrompt: "使用视频模型生成，15 seconds。\n\n[动作]：甲挥拳；低机位快速丝滑运镜。",
+    });
+  });
+
+  it("decodes structured video params (V1.5 dry-run 参数上传核对)", () => {
+    expect(decodeChatStreamEvent(event("illustrate_request", {
+      prompt: "p", motion: 3, actors: ["甲"],
+      video_params: {
+        mode: "climax", model: "h3-mini", size: "1280x720", endpoint: "",
+        images: [], reference_binding: { 图片1: "甲挥拳 → （未提供图地址）" },
+        warnings: ["缺高潮参考图：将以文字描述生成动作画面"],
+      },
+    }))).toEqual({
+      type: "illustrate_request", prompt: "p", motion: 3, actors: ["甲"],
+      videoParams: {
+        mode: "climax", model: "h3-mini", size: "1280x720", endpoint: "",
+        images: [], reference_binding: { 图片1: "甲挥拳 → （未提供图地址）" },
+        warnings: ["缺高潮参考图：将以文字描述生成动作画面"],
+      },
+    });
+  });
+
+  it("keeps old backend compatibility: video fields absent → no new keys (宽松解码)", () => {
+    expect(decodeChatStreamEvent(event("illustrate_request", {
+      prompt: "legacy", motion: 1, actors: [],
+    }))).toEqual({
+      type: "illustrate_request", prompt: "legacy", motion: 1, actors: [],
+    });
+  });
+
+  it("ignores invalid video_mode value (宽松解码)", () => {
+    expect(decodeChatStreamEvent(event("illustrate_request", {
+      prompt: "p", motion: 0, actors: [], video_mode: "bogus",
+    }))).toEqual({
+      type: "illustrate_request", prompt: "p", motion: 0, actors: [],
+    });
+  });
+});
+
+describe("thinking 事件", () => {
+  it("解码 thinking 增量（思考全公开）", () => {
+    const wire = { protocol: "laf-chat-stream", version: 1, type: "thinking", data: { text: "先推演" } };
+    expect(decodeChatStreamEvent(wire)).toEqual({ type: "thinking", text: "先推演" });
+  });
+});

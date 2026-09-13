@@ -1,0 +1,783 @@
+"""剧情能动性子图编排：把 character_state / agency / scene_illustration / scene_renderers
+串成 `roleplay_node` 的内部四阶段循环。**唯一碰 LLM 的能动性代码**，故依赖全注入、可用假件单测。
+
+设计见 ARCHITECTURE.md「剧情能动性引擎」支柱 2。四阶段：
+- A 世界提案（默认每剧情回合判断一次，可显式关闭）：LLM 提案 → `judge` 纯规则仲裁。
+- B 主控叙述（既有那次 LLM，注入 state 块 + 已裁定自主行动 + 要求尾附 <状态更新> JSON）。
+- C 状态写回（**搭车解析，0 额外 LLM**）：抽 <status> 快照存文件（抗压缩、显示不剥）
+  + 从尾部剥 <状态更新> 小数值 JSON → apply → save。快照下轮由 render_snapshot_injection 重注入。
+- D 插画（门控，通常跳过）：好感度跨档/失控/每N段 → build_scene_request → renderer 出图。
+
+依赖方向（importlinter roleplay-agency-stack 合同将强制）：本模块 import 那四个模块 + llm，
+它们**不反向 import 本模块**。本模块不 import agent_graph（由 agent_graph 单向调用），故无环。
+"""
+from __future__ import annotations
+
+import json
+import random
+import re
+from dataclasses import dataclass, field
+from typing import Any, Callable
+
+from app.services import (
+    agency,
+    builtin_agents,
+    character_state,
+    narrative_memory,
+    narrative_store,
+    scene_illustration,
+)
+from app.services.scene_illustration import Renderer, SceneRequest
+
+# 好感度是 -100(厌恶)..100(喜爱) 连续标量（字段边界由 character_state 单一属主）。
+# 档位/门控默认由 builtin_agents 单一属主（③ 可被用户覆盖），此处仅做别名，保留旧引用不破坏。
+DEFAULT_TIERS: list[float] = builtin_agents.DEFAULT_TIERS
+AFFINITY_FIELD = character_state.AFFINITY_FIELD  # 复用单一属主，不另定义
+GATE_FLOOR = builtin_agents.GATE_FLOOR            # 默认 -100：敌对 NPC 也保留自主性
+GATE_BASE_RATE = builtin_agents.GATE_BASE_RATE    # 默认每回合判断；0 才显式关闭
+
+_TAG_OPEN = "<状态更新>"
+_TAG_CLOSE = "</状态更新>"
+_STATE_BLOCK_RE = re.compile(re.escape(_TAG_OPEN) + r"(.*?)" + re.escape(_TAG_CLOSE), re.DOTALL)
+
+# 显示层状态栏：预设定义字段、AI 每轮吐 <status>…</status>；引擎当不透明整块，
+# **不剥、不解析**（留正文供前端正则渲染），只抽出来存快照 + 下轮重注入。取最后一块。
+_STATUS_TAG_RE = re.compile(r"<status>([\s\S]*?)</status>", re.IGNORECASE)
+
+# think 剥离（闭合块 + 未闭合直达结尾）：模型会在思考里预写 status/encounter 草稿且
+# 常漏闭标签，快照/状态提取必须先剥 think，否则草稿会顶替真身（2026-08-30 trace 实锤）。
+_THINK_CLOSED_RE = re.compile(r"<think\b[^>]*>[\s\S]*?</think\s*>", re.IGNORECASE)
+_THINK_UNCLOSED_RE = re.compile(r"<think\b[^>]*>[\s\S]*\Z", re.IGNORECASE)
+
+
+def strip_think(reply: str) -> str:
+    """剥掉回复中的 think 块（含未闭合尾部），返回非思考文本。"""
+    return _THINK_UNCLOSED_RE.sub("", _THINK_CLOSED_RE.sub("", reply or ""))
+
+
+_THINK_OPEN_TAG_RE = re.compile(r"<think\b[^>]*>", re.IGNORECASE)
+_THINK_CLOSE_TAG_RE = re.compile(r"</think\s*>", re.IGNORECASE)
+# 孤立 </think> 前紧邻的全角括号规划注释（模型漏写 <think> 开标签时，闭标签前
+# 常挂着写给自己的元指令，如「（正文到此，继续往后续写一点：凌渊的应对，以及
+# 本轮的收束和下一轮的钩子）」）。须含至少一个规划动词才认，防误伤正文括注。
+_ORPHAN_NOTE_RE = re.compile(r"（[^（）\n]{2,200}）\Z")
+_ORPHAN_NOTE_KEYWORDS = ("续写", "接着写", "补写", "继续写", "正文到此", "收束", "钩子")
+
+
+def _orphan_think_close_span(text: str) -> tuple[int, int] | None:
+    """首个「无配对开标签的 </think>」字符区间；无则 None。
+
+    按开/闭标签位置排序后做深度配对扫描：成对块正常消解，多余的闭标签
+    （漏写开标签）即孤立闭标签。未闭合开标签与其后的闭标签视为配对，不动。
+    """
+    tokens = [((m.start(), m.end()), 1) for m in _THINK_OPEN_TAG_RE.finditer(text)]
+    tokens += [((m.start(), m.end()), 0) for m in _THINK_CLOSE_TAG_RE.finditer(text)]
+    tokens.sort(key=lambda item: item[0])
+    depth = 0
+    for (start, end), is_open in tokens:
+        if is_open:
+            depth += 1
+        elif depth > 0:
+            depth -= 1
+        else:
+            return start, end
+    return None
+
+
+def strip_orphan_think_close(text: str) -> str:
+    """删除孤立 </think> 闭标签（无配对开标签），其余内容原样保留。
+
+    2026-09-12 实锤（claude-opus-4-6）：模型偶发漏写 <think> 开标签、只吐孤立
+    </think>。全部既有剥离逻辑只识别成对块与未闭合开标签，孤立闭标签随裸正文
+    包装发布——其前的规划注释一并漏进正文区间。
+    """
+    t = text or ""
+    span = _orphan_think_close_span(t)
+    if span is None:
+        return t
+    start, end = span
+    return t[:start] + t[end:]
+
+
+def repair_orphan_think_close(text: str) -> tuple[str, str] | None:
+    """裸正文兜底用：删除孤立 </think>，并拆出其紧邻前方的全角括号规划注释。
+
+    返回（注释文本可空串, 删除后的全文拼接）；无孤立闭标签返回 None。
+    注释补包 <think>（前端正则折叠为「推演内思考过程」）由调用方负责。
+    """
+    t = text or ""
+    span = _orphan_think_close_span(t)
+    if span is None:
+        return None
+    start, end = span
+    pre, post = t[:start].rstrip(), t[end:]
+    note = ""
+    m = _ORPHAN_NOTE_RE.search(pre)
+    if m:
+        inner = m.group(0)[1:-1]
+        if any(k in inner for k in _ORPHAN_NOTE_KEYWORDS):
+            note = m.group(0)
+            pre = pre[:m.start()].rstrip()
+    return note, (pre + "\n\n" + post.lstrip()).strip()
+
+
+def split_think_prefix(reply: str) -> tuple[str, str]:
+    """把回复拆成（think 前缀含闭合标签, 其余全部）。无 think → ("", 原文)。
+
+    2026-08-31 根因修复的基石：块提取链只应作用于 think 之后的正文——think 内复述
+    协议标签（「- <content> 正文 - <状态更新> 块」）的幻影开标签会让提取器的懒匹配
+    从 think 内一路吃到真块闭合，把 </think> 与全部正文整段当块剥掉。只认闭合块；
+    未闭合 think 由上游结构校验拦截，不会走到这里。发布文本仍保留 think 前缀
+    （前端正则折叠为思考过程），提取结果拼接回前缀。
+    """
+    text = reply or ""
+    matches = list(_THINK_CLOSED_RE.finditer(text))
+    if not matches:
+        return "", text
+    last = matches[-1]
+    return text[:last.end()], text[last.end():]
+
+
+def extract_status_snapshot(reply: str) -> str:
+    """抽取叙述里最后一个 <status> 块的**内部原文**（不含标签）。无则空串。
+
+    只读不改：<status> 保留在正文（前端正则渲染绿框），这里仅取内容供落盘快照。
+    多块取最后一个（叙述可能先复述旧栏再给新栏，末块为最新）。
+    think 内的预写草稿不参与提取（先剥 think，防草稿顶替真身）。
+    """
+    matches = _STATUS_TAG_RE.findall(strip_think(reply or ""))
+    return matches[-1].strip() if matches else ""
+
+
+def ensure_status_snapshot(reply: str, previous_snapshot: str) -> str:
+    """模型漏掉本轮 <status> 时，把已持久化的上轮战报保留在正文开头。"""
+    if extract_status_snapshot(reply) or not (previous_snapshot or "").strip():
+        return reply
+    return f"<status>\n{previous_snapshot.strip()}\n</status>\n\n{reply.lstrip()}"
+
+
+@dataclass
+class AgencyDeps:
+    """子图运行期依赖（全注入 → 测试传假件；生产由 roleplay_node 从 ctx 组装）。"""
+    chat_fn: Callable[..., str]        # LLM 调用（世界提案/条目维护用；主控叙述仍由 roleplay_node 直调）
+    rng: random.Random                 # 掷骰/门控随机源（测试传固定种子可复现）
+    state_base: str                    # character_state 落盘根（<base>/<repo_id>/state.json）
+    renderer: Renderer | None = None   # 出图渲染器（None=不出图，插画阶段静默跳过）
+    thresholds: list[float] = field(default_factory=lambda: list(DEFAULT_TIERS))
+    # ③ 世界 Agent / 裁判可被用户覆盖的参数（默认取 builtin_agents，由 agent_graph 从 ctx.builtin 注入）
+    world_system: str = builtin_agents.WORLD_SYSTEM
+    world_temperature: float = builtin_agents.WORLD_TEMPERATURE
+    gate_floor: float = builtin_agents.GATE_FLOOR
+    gate_base_rate: float = builtin_agents.GATE_BASE_RATE
+    affinities: dict[str, float] = field(default_factory=dict)
+    state_context: str = ""
+    # ③ 条目维护 Agent（curator）：默认每轮启用；剧情后 LLM 抽新知识 → index_fn 写库（只增不改）。
+    curator_system: str = builtin_agents.CURATOR_SYSTEM
+    curator_temperature: float = builtin_agents.CURATOR_TEMPERATURE
+    curator_gate: float = 1.0
+    curator_cadence: int = 4  # 每 N 轮跑一次（1=每轮）；2026-09-04 成本杠杆 L3-A：默认 3→4，
+    # 知识增量按 4 轮窗口足够，逐轮跑纯烧钱（实测 curator 平均 28.6k 字符/次，41% 轮次）
+    index_fn: Callable[[str, str], object] | None = None  # (text, title)→写入 RAG 知识库；None=不写
+    worldbook_context: str = ""  # 当前小仓库世界书条目（带 index），仅供受控增改
+    worldbook_context_fn: Callable[[str], str] | None = None
+    worldbook_fn: Callable[[list[dict[str, Any]]], int] | None = None
+    # top_p/max_tokens 透传（None 不含则用模型默认；由 agent_graph 从各 agent 生效值组装）
+    world_sampling: dict = field(default_factory=dict)
+    curator_sampling: dict = field(default_factory=dict)
+    trace_fn: Callable[..., None] | None = None
+
+
+def _trace(deps: AgencyDeps, event: str, **data: Any) -> None:
+    if deps.trace_fn is not None:
+        try:
+            deps.trace_fn(event, **data)
+        except Exception:
+            pass
+
+
+# ── 阶段 B 辅助：搭车指令 + state 注入块 ──
+
+def state_instruction() -> str:
+    """附加到主控叙述 system 的搭车指令：要求正文后另起一行输出状态增量 JSON（0 额外 LLM）。
+
+    字段名稳定性是增量更新的前提：AI 每轮换说法（政治权威→权威状态→命令执行）
+    会让引擎建出近似语义重复字段，旧字段不再被更新，观感就是「整个表换新/删除」
+    （2026-09-01 用户实锤）。卡名与第一人称主角同样不得冒充角色名。
+    """
+    return (
+        "\n\n【状态更新规则】在正文之后另起一行，输出本轮剧情导致的角色状态变化，"
+        f"格式：{_TAG_OPEN}[{{\"field\":\"数值/好感度\",\"op\":\"add\",\"value\":5,"
+        "\"evidence\":\"本轮证据\"}]" + _TAG_CLOSE + "。"
+        "单主角时，好感度增减用 field=\"数值/好感度\" op=\"add\"；态度/心情/所在等用 "
+        "field=\"叙事/xxx\" op=\"set\"。同场有多名角色时，每个字段必须写成 "
+        "field=\"数值/角色名·好感度\" 或 field=\"叙事/角色名·身体状态\"，"
+        "用中点明确角色归属，禁止把身体、精神等状态类别拼进角色名。"
+        "字段名必须稳定复用：已有字段（好感度、心情、所在、身体状态等）直接沿用原字段名更新，"
+        "禁止换说法或另建同义字段，否则旧字段会被当成新字段并存、原值丢失。"
+        "角色名必须是剧情角色本人：禁止用角色卡名称/卡面标题代替角色名；"
+        "第一人称的「我/主角/你/玩家」不是剧情角色，禁止作为角色名写入状态表，"
+        "主角自身的伤势、情绪等状态只写进状态栏 <status>，不写状态表。"
+        "每条必须带 evidence 引用本轮剧情依据；本轮无变化则输出空数组 []。"
+        "这段仅供系统解析，不要在正文里复述。"
+    )
+
+
+def _think_spans(text: str) -> list[tuple[int, int]]:
+    """计算文本中 think 块（闭合 + 未闭合尾部）的字符区间。
+
+    未闭合 think 只在最后一个闭合块之后判定——`<think…\\Z` 贪婪匹配会盖住全文，
+    必须从闭合块末尾之后找，否则正文全被误判成思考。
+    """
+    spans = [(m.start(), m.end()) for m in _THINK_CLOSED_RE.finditer(text)]
+    search_from = max((end for _, end in spans), default=0)
+    m = _THINK_UNCLOSED_RE.search(text, search_from)
+    if m:
+        spans.append((m.start(), len(text)))
+    return spans
+
+
+def parse_state_block(reply: str) -> tuple[str, list[Any]]:
+    """从叙述里剥离 <状态更新> 块，返回（去块后的正文, 原始 delta 列表）。
+
+    只认 think 之外的块：模型会在思考里预写该块草稿（2026-08-30 trace 实锤），
+    草稿不得顶替真身、也不得从正文里误删。块内 JSON 解析失败或缺块 →
+    返回原文去块 + 空列表（叙述照常，不因解析失败丢内容）。
+    """
+    source = reply or ""
+    spans = _think_spans(source)
+
+    def outside(match: re.Match) -> bool:
+        # 状态块是原子块：与 think 区间有任何交叠即非正文块。只查「完全包含在 think 内」
+        # 会放过跨界匹配——think 里复述协议清单的幻影开标签，懒匹配终点是真块闭合
+        # （2026-08-31 实锤 (3390,11977) 被判 think 外，</think> 与全部正文随整段被吞）。
+        return not any(match.start() < e and s < match.end() for s, e in spans)
+
+    matches = [m for m in _STATE_BLOCK_RE.finditer(source) if outside(m)]
+    if matches:
+        payload = matches[0].group(1)
+        clean = source
+        for m in matches:
+            clean = clean.replace(m.group(0), "", 1)
+        clean = clean.strip()
+    else:
+        opens = [
+            m.start() for m in re.finditer(re.escape(_TAG_OPEN), source)
+            if not any(s <= m.start() < e for s, e in spans)
+        ]
+        if not opens:
+            return source, []
+        start = opens[-1]
+        rest = source[start + len(_TAG_OPEN):]
+        # 真块闭合存在时（跨界匹配被排除后落到兜底），payload 截到闭合标签为止，
+        # 否则尾标签混进 JSON 导致解析失败、delta 无谓丢失（回归测试实证）。
+        close = re.search(re.escape(_TAG_CLOSE), rest)
+        payload = rest[:close.start()] if close else rest
+        clean = source[:start].strip()
+    try:
+        raw = json.loads(payload.strip())
+    except (json.JSONDecodeError, ValueError):
+        return clean, []
+    return clean, raw if isinstance(raw, list) else []
+
+
+# ── 阶段 A：世界提案（门控 LLM）→ 裁判（纯规则）──
+
+# 世界 Agent 默认提示词由 builtin_agents 单一属主（③ 可覆盖）；此别名保留旧引用不破坏。
+_WORLD_SYSTEM = builtin_agents.WORLD_SYSTEM
+
+
+def consult_world(
+    deps: AgencyDeps, *, chat_base: str, chat_key: str, chat_model: str,
+    core: str, scene: str, affinity: float | None, proxy: str = "",
+) -> list[agency.Verdict]:
+    """门控通过时唤起世界 Agent 提案并逐条机械仲裁；否则返回空（塌回单次 LLM）。
+
+    affinity 是兼容旧单角色状态的好感度快照；多角色优先用 deps.affinities。失败/空提案/门控关返回 []。
+    """
+    if not core.strip() or not scene.strip():
+        _trace(deps, "agent.skipped", agent="world", reason="missing_context")
+        return []
+    fallback_affinity = 0.0 if affinity is None else affinity
+    gate_affinities = deps.affinities or {"_": fallback_affinity}
+    if not agency.should_consult_world(
+            gate_affinities, rng=deps.rng, floor=deps.gate_floor, base_rate=deps.gate_base_rate):
+        _trace(deps, "agent.skipped", agent="world", reason="gate_not_matched",
+               gate_floor=deps.gate_floor, gate_base_rate=deps.gate_base_rate,
+               affinities=gate_affinities)
+        return []
+    try:
+        state = f"\n\n【当前动态状态】\n{deps.state_context}" if deps.state_context.strip() else ""
+        user = (f"【在场角色 core】\n{core}{state}\n\n【当前场景】\n{scene}\n\n"
+                f"【角色好感度】{json.dumps(gate_affinities, ensure_ascii=False)}")
+        _trace(deps, "agent.started", agent="world")
+        _trace(deps, "model.request", agent="world", model=chat_model,
+               messages=[{"role": "system", "content": deps.world_system},
+                         {"role": "user", "content": user}])
+        raw = deps.chat_fn(chat_base, chat_key, chat_model, deps.world_system, user,
+                           temperature=deps.world_temperature, proxy=proxy, **deps.world_sampling)
+        _trace(deps, "model.response", agent="world", content=raw or "")
+        m = re.search(r"\[[\s\S]*\]", raw or "")
+        if not m:
+            _trace(deps, "agent.completed", agent="world", proposal_count=0, verdicts=[])
+            return []
+        data = json.loads(m.group(0))
+    except (json.JSONDecodeError, ValueError, TypeError) as exc:
+        _trace(deps, "agent.error", agent="world", error=str(exc))
+        return []
+    verdicts: list[agency.Verdict] = []
+    for item in data if isinstance(data, list) else []:
+        if not isinstance(item, dict):
+            continue
+        prop = agency.Proposal(
+            actor=str(item.get("actor") or "").strip(),
+            intent=str(item.get("intent") or "").strip(),
+            difficulty=int(item.get("difficulty") or 50),
+            min_affinity=float(item.get("min_affinity") or 0),
+            basis=str(item.get("basis") or "").strip(),
+            goal=str(item.get("goal") or "").strip(),
+        )
+        actor_affinity = deps.affinities.get(prop.actor, fallback_affinity)
+        verdicts.append(agency.judge(prop, actor_affinity, rng=deps.rng))
+    _trace(deps, "agent.completed", agent="world", proposal_count=len(verdicts),
+           verdicts=[vars(v) for v in verdicts])
+    return verdicts
+
+
+def narrative_directive(verdicts: list[agency.Verdict]) -> str:
+    """把有效自主尝试转成主叙事指令；成功落实，失败也必须呈现为未遂。
+
+    intent 由 judge 从 Proposal 复制到 Verdict，此处直接取用；空 intent 落「自主行动」兜底。
+    """
+    attempted = [v for v in verdicts if v.roll > 0 and v.intent]
+    if not attempted:
+        return ""
+    lines = []
+    for verdict in attempted:
+        intent = verdict.intent or "自主行动"
+        goal = f"；持续目标：{verdict.goal}" if verdict.goal else ""
+        if verdict.outcome == agency.OUTCOME_ACCEPT:
+            result = f"按{agency.DEGREE_LABEL[verdict.degree]}落实"
+        else:
+            result = f"已尝试但按{agency.DEGREE_LABEL[verdict.degree]}处理，必须写成未遂或受挫"
+        lines.append(f"- {verdict.actor}：{intent}{goal}；{result}")
+    return ("\n\n【本轮 NPC 自主目标与行动（不由用户驱动，必须在本轮叙事中体现）】\n"
+            + "\n".join(lines))
+
+
+def agency_lost(verdicts: list[agency.Verdict]) -> bool:
+    """是否有配角强得手（大成功/极难/困难成功）→ 用户短期失控，插画阶段当高潮点。
+    普通成功(partial)只算基本达成，不触发失控。"""
+    strong = {agency.DEGREE_CRIT, agency.DEGREE_HARD, agency.DEGREE_FULL}
+    return any(v.outcome == agency.OUTCOME_ACCEPT and v.degree in strong
+              for v in verdicts)
+
+
+# ── 阶段 C：状态写回（搭车解析，0 额外 LLM）──
+
+def writeback(
+    deps: AgencyDeps, *, repo_id: str, card_name: str, raw_deltas: list[Any], turn: int,
+    snapshot: str = "",
+) -> tuple[float | None, float | None]:
+    """把搭车解析出的 delta 应用并落盘，并存本轮 <status> 快照。返回（写回前好感度, 写回后好感度）。
+
+    无 repo_id/card_name → 直接读当前值返回（before==after，不触发跨档）。
+    snapshot 非空即刷新快照（抗压缩）；delta/快照有一个变化就落盘。
+    """
+    st = character_state.load_state(deps.state_base, repo_id, card_name)
+    before = _affinity(st)
+    deltas = character_state.parse_deltas(
+        raw_deltas, turn=turn, source=character_state.SRC_AUTO, card_name=card_name,
+        existing_state=st,
+    )
+    dirty = False
+    if deltas:
+        character_state.apply_deltas(st, deltas)
+        dirty = True
+    if snapshot.strip():
+        st.快照 = character_state.Snapshot(snapshot.strip(), turn)
+        dirty = True
+    if dirty:
+        character_state.save_state(deps.state_base, st)
+    after = _affinity(st)
+    return before, after
+
+
+def _affinity(st: character_state.CharacterState) -> float | None:
+    nf = st.数值.get(AFFINITY_FIELD)
+    return nf.value if nf else None
+
+
+def _affinities(st: character_state.CharacterState) -> dict[str, float]:
+    """读取多角色好感度；`角色名·好感度` 归属到对应 actor。"""
+    result: dict[str, float] = {}
+    suffix = f"·{AFFINITY_FIELD}"
+    for leaf, numeric in st.数值.items():
+        if leaf.endswith(suffix):
+            actor = leaf[:-len(suffix)].strip()
+            if actor:
+                result[actor] = numeric.value
+    return result
+
+
+def _narr(st: character_state.CharacterState, leaf: str) -> str:
+    """读某叙事字段当前值（供插画取 state 的衣着/所在）。无则空串。"""
+    sf = st.叙事.get(leaf)
+    return sf.value if sf else ""
+
+
+# ── 阶段 D：插画（门控，通常跳过）──
+
+def maybe_illustrate(
+    deps: AgencyDeps, *, paragraph: str, appearance: str, wardrobe: str, locale: str,
+    actors: list[str], before: float | None, after: float | None,
+    turn: int, cadence: int, explicit: bool, lost: bool,
+    scene: str = "", prompt_override: str = "", character_encounter: bool = False,
+) -> dict | None:
+    """按规则判该不该配图，命中则组装 SceneRequest 交 renderer 出图。返回 {url,caption,reason} 或 None。
+
+    无 renderer 或触发不命中 → None。出图失败吞掉返回 None（配图是增强，不该阻断叙述）。
+    只返回 url+caption，**绝不把图回灌进对话历史**（token 护栏）。
+    scene：场景标签（nsfw/climax 触发配图，P2 分类器产出）。
+    prompt_override：caller 用当前正文与视觉锚本地组装并清洗的提示词；非空则替代裸拼接。
+    """
+    if deps.renderer is None:
+        return None
+    trig = scene_illustration.decide_trigger(
+        explicit=explicit, agency_lost=lost,
+        tier_before=before, tier_after=after, thresholds=deps.thresholds,
+        turn=turn, cadence=cadence, scene=scene,
+        character_encounter=character_encounter)
+    if not trig.fire:
+        return None
+    if prompt_override.strip():
+        req = SceneRequest(prompt=prompt_override.strip(), actors=list(actors), reason=trig.reason)
+    else:
+        req = scene_illustration.build_scene_request(
+            paragraph=paragraph, appearance=appearance, wardrobe=wardrobe, locale=locale,
+            actors=actors, reason=trig.reason)
+    if not req.prompt.strip():
+        return None
+    try:
+        url = deps.renderer(req)
+    except Exception:  # noqa: BLE001  配图失败不阻断叙述
+        return None
+    return {"url": url, "caption": f"[{trig.reason}] {req.prompt[:60]}", "reason": trig.reason}
+
+
+# ── 纪要记忆（Phase C）：召回（0 LLM）+ 门控抽取&压缩（每 N 轮一次额外 LLM）──
+
+def recall_chronicle(deps: AgencyDeps, *, repo_id: str, query: str, k: int = 10,
+                     rag_text: str = "", actors: list[str] | None = None) -> str:
+    """按检索词召回往事纪要与 RAG 命中，组装为主 Roleplay 请求的候选记忆块。
+
+    本函数 0 LLM，不生成、精选或改写候选；候选与 GrayWill 预设、世界书、对话历史、
+    本轮输入合并后，只由主模型一次生成。只读注入不回灌历史（token 护栏）。
+    FTS5 trigram 旁路召回，与 Chroma 语义检索（含检索表行）互补。
+    actors：当前出场人物，召回排序先人物名相关、再按时间新→旧。
+    rag_text：调用方预先从 rag_store 召回的相关条目（知识库 + 检索表行），拼在纪要之后一起注入。
+    """
+    if not (repo_id and query.strip()):
+        return rag_text.strip()
+    try:
+        # 上下文合同·记忆召回：召回源=纪要表，注入只取简要内容（render_recall 用 overview），
+        # 排序先人物名相关、再按时间新→旧，取 Top-k。
+        hits = narrative_store.recall(deps.state_base, repo_id, query, k=max(k * 3, 30))
+        recent = narrative_store.recent(deps.state_base, repo_id, k=50)
+        hits = narrative_memory.select_by_relevance(
+            hits, recent, actors=list(actors or []), k=k,
+        )
+    except Exception:  # noqa: BLE001  召回失败不阻断叙述
+        hits = []
+    chronicle = narrative_memory.render_recall(hits)
+    if rag_text.strip():
+        block = "【相关知识/表格条目（按剧情召回，供参考勿逐字复述）】\n" + rag_text.strip()
+        return (chronicle + "\n\n" + block).strip() if chronicle else block
+    return chronicle
+
+
+# ── 条目维护 Agent（curator，门控 LLM，只增不改写 RAG 知识库）──
+
+def maybe_curate(
+    deps: AgencyDeps, *, window_text: str,
+    chat_base: str, chat_key: str, chat_model: str, proxy: str = "",
+    events: list | None = None, turn: int = 0,
+) -> int:
+    """gate 命中时从本轮剧情抽「值得长期留存的新知识」写入 RAG 知识库（经 index_fn）。返回写入条数。
+
+    gate 关（curator_gate<=0）/无 index_fn/无内容/失败 → 0（不阻断叙述）。默认只增不改。
+    cadence：curator_cadence>1 且 turn>0 时按每 N 轮跑一次（turn=1,1+N,1+2N…），未到轮次直接跳过。
+    events：可选事件收集器，真正触发写库时按 start/ok/fail 追加 RAG 创建状态（供前端弹窗）。
+    """
+    cadence = max(1, int(deps.curator_cadence))
+    if cadence > 1 and turn > 0 and (turn - 1) % cadence != 0:
+        _trace(deps, "agent.skipped", agent="curator", reason="cadence_not_reached",
+               turn=turn, cadence=cadence)
+        return 0
+    if deps.curator_gate <= 0 or (deps.index_fn is None and deps.worldbook_fn is None) or not window_text.strip():
+        reason = "gate_disabled" if deps.curator_gate <= 0 else (
+            "no_writer" if deps.index_fn is None and deps.worldbook_fn is None else "empty_window")
+        _trace(deps, "agent.skipped", agent="curator", reason=reason)
+        return 0
+    if deps.rng.random() >= deps.curator_gate:
+        _trace(deps, "agent.skipped", agent="curator", reason="gate_not_matched",
+               gate=deps.curator_gate)
+        return 0  # gate 未命中：本轮不创建，不打扰用户
+    if events is not None:
+        events.append({"kind": "curator", "state": "start"})  # 确实要抽取写库了
+    try:
+        _trace(deps, "agent.started", agent="curator")
+        curator_system = deps.curator_system
+        worldbook_context = (
+            deps.worldbook_context_fn(window_text)
+            if deps.worldbook_context_fn is not None else deps.worldbook_context
+        )
+        if worldbook_context:
+            curator_system += "\n\n【当前小仓库世界书条目（index 用于更新）】\n" + worldbook_context
+        _trace(deps, "model.request", agent="curator", model=chat_model,
+               messages=[{"role": "system", "content": curator_system},
+                          {"role": "user", "content": window_text}])
+        raw = deps.chat_fn(chat_base, chat_key, chat_model, curator_system,
+                           window_text, temperature=deps.curator_temperature, proxy=proxy,
+                           **deps.curator_sampling)
+        _trace(deps, "model.response", agent="curator", content=raw or "")
+        m = re.search(r"\[[\s\S]*\]", raw or "")
+        if not m:
+            if events is not None:
+                events.append({"kind": "curator", "state": "ok", "count": 0})
+            _trace(deps, "agent.completed", agent="curator", extracted=[], written=0)
+            return 0
+        items = json.loads(m.group(0))
+    except (json.JSONDecodeError, ValueError, TypeError) as exc:
+        _trace(deps, "agent.error", agent="curator", error=str(exc))
+        if events is not None:
+            events.append({"kind": "curator", "state": "fail"})
+        return 0
+    except Exception as exc:  # noqa: BLE001
+        _trace(deps, "agent.error", agent="curator", error=str(exc))
+        if events is not None:
+            events.append({"kind": "curator", "state": "fail"})
+        return 0
+    written = 0
+    for it in items if isinstance(items, list) else []:
+        if not isinstance(it, dict):
+            continue
+        op = str(it.get("op") or "add").strip()
+        if op in ("worldbook_add", "worldbook_update"):
+            continue
+        if op != "add" or deps.index_fn is None:
+            continue
+        text = str(it.get("text") or "").strip()
+        title = str(it.get("title") or "").strip()
+        if not text:
+            continue
+        try:
+            deps.index_fn(text, title)
+            written += 1
+        except Exception:  # noqa: BLE001  单条写入失败不阻断其余
+            continue
+    worldbook_written = 0
+    if deps.worldbook_fn is not None:
+        wb_ops = [it for it in items if isinstance(it, dict)
+                  and str(it.get("op") or "").strip() in ("worldbook_add", "worldbook_update")]
+        try:
+            worldbook_written = deps.worldbook_fn(wb_ops)
+            _trace(deps, "worldbook.writeback", ops=wb_ops, applied=worldbook_written)
+        except Exception:  # noqa: BLE001  世界书维护失败不阻断正文/RAG
+            worldbook_written = 0
+            _trace(deps, "worldbook.writeback", ops=wb_ops, applied=0, status="error")
+    written += worldbook_written
+    if events is not None:
+        events.append({"kind": "curator", "state": "ok", "count": written})
+    _trace(deps, "agent.completed", agent="curator", extracted=items, written=written,
+           worldbook_written=worldbook_written)
+    return written
+
+
+def maybe_summarize(
+    deps: AgencyDeps, *, repo_id: str, card_name: str, window_text: str, turn: int,
+    chat_base: str, chat_key: str, chat_model: str, proxy: str = "",
+    cadence: int = narrative_memory.CADENCE,
+    events: list | None = None,
+) -> bool:
+    """门控命中的回合抽一条独立纪要落盘（搭 1 次额外 LLM）。返回是否落了新纪要。
+
+    - 未到 cadence → 直接 False（多数回合零成本，对治痛点3 等待长）。
+    - 落后超 cadence → 窗口对齐放行：只抽最近 cadence 个回合（2026-09-13 根治死锁，
+      原 manual_backfill_required 会因 last=0 永久卡死；不回溯缺口=防大卡+防预知）。
+    - 抽取失败/空 → False，旧纪要不动（对治痛点2 填表失败丢上下文）。
+    - 落盘后推进 last_turn；每个频率区间永久保留一条独立 layer0 纪要。
+    events：可选事件收集器，到 cadence 真正抽纪要时按 start/ok/fail 追加状态（供前端弹窗）。
+    """
+    if not (repo_id and window_text.strip()):
+        _trace(deps, "agent.skipped", agent="chronicle", reason="missing_context")
+        return False
+    try:
+        last = narrative_store.get_last_turn(deps.state_base, repo_id, card_name)
+        if not narrative_memory.should_summarize(last, turn, cadence=cadence):
+            _trace(deps, "agent.skipped", agent="chronicle", reason="cadence_not_reached",
+                   last_turn=last, turn=turn, cadence=cadence)
+            return False  # 未到轮次：本轮不创建纪要，不打扰用户
+        # 2026-09-13 用户裁决（根治 manual_backfill_required 死锁）：落后超频不再永久拒抽。
+        # 窗口对齐——不回溯缺口（防合并跨频率大卡、防引用已删楼层=防预知），只抽最近
+        # cadence 个回合；缺口留空（召回按相关性+新近度，不假设连续覆盖，可随时手动补填）。
+        window_start = max(last + 1, turn - cadence + 1)
+        if window_start > last + 1:
+            _trace(deps, "agent.window_aligned", agent="chronicle",
+                   last_turn=last, turn=turn, cadence=cadence, window_start=window_start)
+        if events is not None:
+            events.append({"kind": "chronicle", "state": "start"})
+        # P3② 指认式替代（2026-09-06 用户裁决）：把当前有效事实喂给抽取模型，
+        # 使其发现「事实变了」时能引用 supersedes_id 让旧事实收口（时间线保留）。
+        from app.services import temporal_fact_store as _tfs
+        known_facts = _tfs.as_of(deps.state_base, repo_id, turn)[:40]
+        summary_user = narrative_memory.build_summary_user(window_text, known_facts)
+        _trace(deps, "agent.started", agent="chronicle")
+        _trace(deps, "model.request", agent="chronicle", model=chat_model,
+               messages=[{"role": "system", "content": narrative_memory.SUMMARY_SYSTEM},
+                         {"role": "user", "content": summary_user}])
+        raw = deps.chat_fn(
+            chat_base, chat_key, chat_model,
+            narrative_memory.SUMMARY_SYSTEM,
+            summary_user,
+            temperature=0.3, proxy=proxy)
+        _trace(deps, "model.response", agent="chronicle", content=raw or "")
+        entry = narrative_memory.parse_rich_summary(
+            raw or "", turn_start=window_start, turn_end=turn,
+        )
+        # 字数门槛（概览≤30字/正文≤300字）：填表 prompt 已写明前提，模型仍超写时
+        # 压缩改写一次（不机械截断）；仍超限视为抽取失败，旧纪要不动。
+        if entry is not None and not narrative_memory.chronicle_within_limits(
+                entry.overview, entry.text):
+            original_facts = list(entry.facts)
+            _trace(deps, "agent.compress", agent="chronicle",
+                   overview_chars=len(entry.overview), detail_chars=len(entry.text))
+            compressed = deps.chat_fn(
+                chat_base, chat_key, chat_model,
+                narrative_memory.COMPRESS_SYSTEM,
+                narrative_memory.build_compress_user(entry.overview, entry.text),
+                temperature=0.3, proxy=proxy)
+            entry = narrative_memory.parse_rich_summary(
+                compressed or "", turn_start=window_start, turn_end=turn,
+            )
+            if entry is not None and not entry.facts and original_facts:
+                entry.facts = original_facts  # 事实账本素材不因压缩丢失
+        if entry is None or not narrative_memory.chronicle_within_limits(
+                entry.overview, entry.text):
+            if events is not None:
+                events.append({"kind": "chronicle", "state": "fail"})
+            _trace(deps, "agent.completed", agent="chronicle", written=False,
+                   reason="empty_summary_or_over_limit")
+            return False
+        narrative_store.append(deps.state_base, repo_id, entry)
+        if entry.facts:
+            from app.services import temporal_fact_store
+
+            fact_count = 0
+            for fact in entry.facts:
+                try:
+                    ref = str(fact.get("supersedes_id") or "").strip()
+                    supersedes = _tfs.resolve_supersedes(deps.state_base, repo_id, ref) if ref else None
+                    if ref and supersedes is None:
+                        _trace(deps, "temporal.supersede_unresolved", reference=ref)
+                    try:
+                        temporal_fact_store.record(
+                            deps.state_base, repo_id,
+                            subject=str(fact.get("subject") or ""),
+                            predicate=str(fact.get("predicate") or ""),
+                            object_=str(fact.get("object") or ""),
+                            valid_from_turn=turn,
+                            evidence=str(fact.get("evidence") or ""),
+                            source="chronicle",
+                            supersedes_id=supersedes,
+                        )
+                    except ValueError as exc:
+                        # 指认失败（id 不存在/域不符/时序倒退）→ 降级普通 ADD：信息保留，
+                        # 矛盾交 conflicts 诊断，绝不静默丢弃（「指认是增强不是依赖」）
+                        if supersedes is None:
+                            raise
+                        _trace(deps, "temporal.supersede_downgraded", reference=ref, error=str(exc))
+                        temporal_fact_store.record(
+                            deps.state_base, repo_id,
+                            subject=str(fact.get("subject") or ""),
+                            predicate=str(fact.get("predicate") or ""),
+                            object_=str(fact.get("object") or ""),
+                            valid_from_turn=turn,
+                            evidence=str(fact.get("evidence") or ""),
+                            source="chronicle",
+                        )
+                    fact_count += 1
+                except ValueError:
+                    continue
+            _trace(deps, "temporal.write", source="chronicle", count=fact_count)
+        narrative_store.set_last_turn(deps.state_base, repo_id, card_name, turn)
+        if events is not None:
+            events.append({"kind": "chronicle", "state": "ok", "count": 1})
+        _trace(deps, "rag.write", source="chronicle", content=entry.text,
+               overview=entry.overview, keywords=entry.keywords,
+               turn_start=window_start, turn_end=turn, layer=0)
+        _trace(deps, "agent.completed", agent="chronicle", written=True,
+                content=entry.text, overview=entry.overview, keywords=entry.keywords)
+        return True
+    except Exception as exc:  # noqa: BLE001  抽取失败不阻断叙述
+        _trace(deps, "agent.error", agent="chronicle", error=str(exc))
+        if events is not None:
+            events.append({"kind": "chronicle", "state": "fail"})
+        return False
+
+
+def _compact_layers(
+    deps: AgencyDeps, *, repo_id: str,
+    chat_base: str, chat_key: str, chat_model: str, proxy: str = "",
+) -> None:
+    """【已停用】2026-09-01 用户定案：纪要表是每 N 条消息的存档，只新建、不更新、
+    不删除——最早的剧情永远不丢。旧实现会「吃旧条 → LLM 归并成上层 → 删旧插新」，
+    违反该规则，故整体停用；保留函数壳防止未来误接回。
+    """
+    return
+    for layer in range(narrative_memory.MAX_LAYER):
+        n = narrative_store.count(deps.state_base, repo_id, layer=layer)
+        if not narrative_memory.should_compact(layer, n):
+            continue
+        olds = narrative_store.oldest(
+            deps.state_base, repo_id, k=narrative_memory.COMPACT_BATCH, layer=layer)
+        if len(olds) < 2:
+            continue
+        compact_user = narrative_memory.build_compact_user(olds)
+        _trace(deps, "agent.started", agent="chronicle_compact", layer=layer)
+        _trace(deps, "model.request", agent="chronicle_compact", model=chat_model,
+               messages=[{"role": "system", "content": narrative_memory.COMPACT_SYSTEM},
+                         {"role": "user", "content": compact_user}])
+        raw = deps.chat_fn(
+            chat_base, chat_key, chat_model,
+            narrative_memory.COMPACT_SYSTEM,
+            compact_user,
+            temperature=0.3, proxy=proxy)
+        _trace(deps, "model.response", agent="chronicle_compact", content=raw or "")
+        entry = narrative_memory.parse_rich_summary(raw or "")
+        # 归并产出同样守字数门槛：超写压缩改写一次，仍超限则跳过本次压缩（旧条保留）
+        if entry is not None and not narrative_memory.chronicle_within_limits(
+                entry.overview, entry.text):
+            _trace(deps, "agent.compress", agent="chronicle_compact",
+                   overview_chars=len(entry.overview), detail_chars=len(entry.text))
+            compressed = deps.chat_fn(
+                chat_base, chat_key, chat_model,
+                narrative_memory.COMPRESS_SYSTEM,
+                narrative_memory.build_compress_user(entry.overview, entry.text),
+                temperature=0.3, proxy=proxy)
+            entry = narrative_memory.parse_rich_summary(compressed or "")
+        if entry is None or not narrative_memory.chronicle_within_limits(
+                entry.overview, entry.text):
+            _trace(deps, "agent.completed", agent="chronicle_compact", written=False,
+                   reason="empty_summary_or_over_limit", layer=layer)
+            continue
+        merged = narrative_memory.ChronicleEntry(
+            text=entry.text, overview=entry.overview, keywords=entry.keywords,
+            turn_start=olds[0].turn_start, turn_end=olds[-1].turn_end,
+            layer=layer + 1)
+        narrative_store.append(deps.state_base, repo_id, merged)
+        narrative_store.delete_rows(deps.state_base, repo_id, [e.rowid for e in olds])
+        _trace(deps, "rag.write", source="chronicle_compact", content=merged.text,
+               keywords=merged.keywords, turn_start=merged.turn_start, turn_end=merged.turn_end,
+               layer=layer + 1, replaced_rowids=[e.rowid for e in olds])
+        _trace(deps, "agent.completed", agent="chronicle_compact", written=True,
+               layer=layer + 1, content=merged.text, keywords=merged.keywords)

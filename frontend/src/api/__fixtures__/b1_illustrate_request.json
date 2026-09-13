@@ -1,0 +1,36 @@
+[
+  {
+    "protocol": "laf-chat-stream",
+    "version": 1,
+    "type": "illustrate_request",
+    "data": {
+      "prompt": "三人举杯同框，暖黄吊灯",
+      "motion": 3,
+      "actors": [
+        "温知夏",
+        "林屿",
+        "苏绾"
+      ],
+      "scene_spec": {
+        "narrative": "三人围坐举杯，气氛升温",
+        "appearance": "温知夏米色针织开衫",
+        "wardrobe": "全员日常私服",
+        "locale": "温暖小面馆内景",
+        "actors": [
+          "温知夏",
+          "林屿",
+          "苏绾"
+        ],
+        "rating": "sfw",
+        "aspect_ratio": "16:9"
+      },
+      "offset": 12,
+      "video_mode": "firstlast",
+      "first_frame_desc": "雨夜门口，温知夏收伞，暖黄灯笼倒影",
+      "last_frame_desc": "三人举杯同框，温情对视",
+      "prev_tail_desc": "上一楼层：林屿在门口抽烟回望",
+      "last_frame_url": "data:image/png;base64,ZmFrZS10YWlsLWZyYW1l",
+      "id": "slot-1"
+    }
+  }
+]

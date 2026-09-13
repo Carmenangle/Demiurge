@@ -1,0 +1,44 @@
+[
+  {
+    "protocol": "laf-chat-stream",
+    "version": 1,
+    "type": "illustrate_request",
+    "data": {
+      "prompt": "booru prompt",
+      "motion": 3,
+      "actors": [
+        "温知夏",
+        "林屿"
+      ],
+      "scene_spec": {
+        "narrative": "温知夏猛地起身，攥住林屿手腕",
+        "appearance": "温知夏米色针织开衫",
+        "wardrobe": "全员日常私服",
+        "locale": "面馆内景",
+        "actors": [
+          "温知夏",
+          "林屿"
+        ],
+        "rating": "sfw",
+        "negative_prompt": "低质量；畸形手",
+        "aspect_ratio": "16:9"
+      },
+      "offset": 0,
+      "video_prompt": "[元信息]：15 seconds，16:9\n\n[参考绑定]：图片1中心的角色为温知夏、林屿；保持 温知夏（米色针织开衫）、林屿 的身份、脸部、服装、发型、造型完全一致\n\n[主体/场景]：温知夏米色针织开衫，全员日常私服，面馆内景\n\n[时间分镜]：\n0–15s｜主体动作：低机位快速丝滑运镜+高速推近骤停；温知夏猛地起身，攥住林屿手腕；能量爆发式特效，画面错位；与节拍/重音同步；人物身份和五官不能发生变化\n\n[音频]：音乐=按本集风格铺底；音效=环境声；同步=视觉事件卡拍\n\n[负面约束]：低质量；畸形手",
+      "video_params": {
+        "mode": "climax",
+        "model": "",
+        "size": "1280x720",
+        "endpoint": "",
+        "images": [],
+        "reference_binding": {
+          "图片1": "图片1中心的角色为温知夏、林屿 → （未提供图地址，将退化为文生或由上游补图）"
+        },
+        "warnings": [
+          "缺高潮参考图：将以文字描述生成动作画面"
+        ]
+      },
+      "id": "slot-1"
+    }
+  }
+]

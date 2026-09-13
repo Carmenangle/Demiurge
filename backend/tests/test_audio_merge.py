@@ -1,0 +1,246 @@
+import tempfile
+from pathlib import Path
+
+from app.services import audio_merge, chat_snapshot
+
+
+def test_local_path_from_url_解析local_view路径():
+    url = "http://127.0.0.1:8010/api/comfyui/local-view?path=D%3A%5Ctool%5Ctest%5Ca.flac"
+    # 文件不存在时返回 None（仅 local-view 且文件存在才可用）
+    assert audio_merge.local_path_from_url(url) is None
+    # 非 local-view 一律拒绝
+    assert audio_merge.local_path_from_url("http://x/api/comfyui/view?filename=a.flac") is None
+    assert audio_merge.local_path_from_url("file:///etc/passwd") is None
+
+
+def test_local_path_from_url_非音频扩展名拒绝(monkeypatch, tmp_path):
+    png = tmp_path / "a.png"
+    png.write_bytes(b"x")
+    audio_merge.local_path_from_url.cache_clear() if hasattr(audio_merge.local_path_from_url, "cache_clear") else None
+    url = f"http://127.0.0.1:8010/api/comfyui/local-view?path={png.as_posix()}"
+    assert audio_merge.local_path_from_url(url) is None
+
+
+def test_concat_audio_调用ffmpeg_concat(monkeypatch, tmp_path):
+    calls = []
+    def fake_run(cmd, capture_output=True, text=True, timeout=300):
+        # 读取 concat list 内容（临时目录在返回后即清理）
+        list_path = cmd[cmd.index("-i") + 1]
+        calls.append({"cmd": cmd, "list": Path(list_path).read_text(encoding="utf-8")})
+        output = cmd[-1]
+        Path(output).write_bytes(b"merged")
+        class _Proc:
+            returncode = 0
+            stderr = ""
+        return _Proc()
+    monkeypatch.setattr(audio_merge.subprocess, "run", fake_run)
+    out = tmp_path / "merged.flac"
+    audio_merge.concat_audio(
+        ["D:/tool/a.flac", "D:/tool/b.flac"], out, ffmpeg="ffmpeg",
+    )
+    assert calls, "应调用 subprocess.run"
+    cmd = calls[0]["cmd"]
+    assert cmd[0] == "ffmpeg"
+    # 关键：必须重编码为 flac（修正 STREAMINFO 时长），不能 -c copy
+    assert "-c:a" in cmd and cmd[cmd.index("-c:a") + 1] == "flac"
+    assert "-c" not in cmd or "copy" not in cmd
+    list_content = calls[0]["list"]
+    assert "a.flac" in list_content and "b.flac" in list_content
+    assert list_content.index("a.flac") < list_content.index("b.flac")
+
+
+def test_merge_audio_for_message_按seq排序并幂等(monkeypatch, tmp_path):
+    monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
+    from app.services import repo_meta
+    monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+
+    for name in ("seg2.flac", "seg1.flac"):
+        (tmp_path / name).write_bytes(b"x" * 10)
+
+    chat_snapshot.save("thread", [{
+        "id": "bot", "role": "assistant", "text": "正文", "parts": [
+            {"type": "audio", "url": f"http://127.0.0.1:8010/api/comfyui/local-view?path={tmp_path.as_posix()}/seg2.flac",
+             "slotId": "audio-bot-1", "status": "ready", "kind": "audio", "speaker": "A", "seq": 2, "total": 2},
+            {"type": "audio", "url": f"http://127.0.0.1:8010/api/comfyui/local-view?path={tmp_path.as_posix()}/seg1.flac",
+             "slotId": "audio-bot-0", "status": "ready", "kind": "audio", "speaker": "A", "seq": 1, "total": 2},
+        ],
+    }])
+
+    merged_paths = []
+    def fake_concat(paths, output, ffmpeg=None):
+        merged_paths.append(list(paths))
+        output.write_bytes(b"merged")
+    monkeypatch.setattr(audio_merge, "concat_audio", fake_concat)
+    # 本测试聚焦排序与幂等，跳过真实时长校验
+    monkeypatch.setattr(audio_merge, "_validate_merged_duration", lambda *a, **k: None)
+
+    url1 = audio_merge.merge_audio_for_message("thread", "bot")
+    assert merged_paths and merged_paths[0][0].endswith("seg1.flac")
+    assert merged_paths[0][1].endswith("seg2.flac")
+
+    # 幂等：第二次直接返回同一 URL，不重复拼接
+    merged_paths.clear()
+    url2 = audio_merge.merge_audio_for_message("thread", "bot")
+    assert url1 == url2
+    assert merged_paths == []
+
+    # 快照已追加 merged part（完整版）
+    parts = chat_snapshot.load("thread")[0]["parts"]
+    merged = [p for p in parts if p.get("slotId", "").startswith("merged-")]
+    assert len(merged) == 1
+    assert merged[0]["type"] == "audio" and merged[0]["speaker"] == "完整版"
+
+
+def test_merge_audio_for_message_段数不足报错(monkeypatch, tmp_path):
+    monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
+    from app.services import repo_meta
+    monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+    seg = tmp_path / "seg.flac"
+    seg.write_bytes(b"x" * 10)
+    chat_snapshot.save("thread", [{
+        "id": "bot", "role": "assistant", "text": "正文", "parts": [
+            {"type": "audio", "url": f"http://127.0.0.1:8010/api/comfyui/local-view?path={seg.as_posix()}",
+             "slotId": "audio-bot-0", "status": "ready", "kind": "audio", "seq": 1, "total": 1},
+        ],
+    }])
+    import pytest
+    with pytest.raises(ValueError):
+        audio_merge.merge_audio_for_message("thread", "bot")
+
+
+def test_find_ffmpeg_在父目录python环境命中(monkeypatch, tmp_path):
+    """便携版 ffmpeg 装在 <根>/python/... 而 config.path 指向 <根>/ComfyUI，
+    必须搜父目录才能命中（回归：ffmpeg 定位层级错误导致拼接失败）。"""
+    monkeypatch.setattr(audio_merge.shutil, "which", lambda name: None)
+    # 构造 <root>/ComfyUI 主目录 + <root>/python/.../ffmpeg.exe
+    root = tmp_path / "ComfyUI_aaaki"
+    comfy_dir = root / "ComfyUI"
+    ffmpeg_bin = root / "python" / "Lib" / "site-packages" / "imageio_ffmpeg" / "binaries" / "ffmpeg.exe"
+    comfy_dir.mkdir(parents=True)
+    ffmpeg_bin.parent.mkdir(parents=True)
+    ffmpeg_bin.write_bytes(b"x")
+    monkeypatch.setattr(
+        audio_merge.comfy_launcher, "load_config",
+        lambda: {"path": str(comfy_dir), "url": "", "python_path": ""},
+    )
+
+    exe = audio_merge.find_ffmpeg()
+    assert exe and exe.lower().endswith("ffmpeg.exe")
+
+
+def test_find_ffmpeg_无配置返回None(monkeypatch):
+    monkeypatch.setattr(audio_merge.shutil, "which", lambda name: None)
+    monkeypatch.setattr(audio_merge.comfy_launcher, "load_config", lambda: {"path": "", "url": ""})
+    assert audio_merge.find_ffmpeg() is None
+
+
+def test_concat_audio_重编码后时长正确_真实ffmpeg():
+    """回归：flac -c copy 会导致 STREAMINFO 时长只记第一段（2s 播放就停）。
+    重编码后时长应等于各段之和。无 ffmpeg 时跳过。"""
+    import pytest
+    exe = audio_merge.find_ffmpeg()
+    if not exe:
+        pytest.skip("无 ffmpeg，跳过真实时长验证")
+    import subprocess
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        a = tmp / "a.wav"
+        b = tmp / "b.wav"
+        out = tmp / "merged.flac"
+        for f, dur in ((a, 1.0), (b, 2.5)):
+            subprocess.run(
+                [exe, "-y", "-f", "lavfi", "-i", f"sine=frequency=440:duration={dur}",
+                 "-ar", "44100", "-ac", "1", str(f)],
+                capture_output=True, text=True, check=True,
+            )
+        audio_merge.concat_audio([str(a), str(b)], out, ffmpeg=exe)
+        probe = subprocess.run([exe, "-i", str(out)], capture_output=True, text=True)
+        dur_line = next((l for l in probe.stderr.splitlines() if "Duration:" in l), "")
+        assert dur_line, "应能读取合并产物时长"
+        # "Duration: 00:00:03.50" → 3.5
+        token = dur_line.split("Duration:")[1].split(",")[0].strip()
+        h, m, s = token.split(":")
+        total = int(h) * 3600 + int(m) * 60 + float(s)
+        assert 3.0 <= total <= 4.0, f"合并时长应为 ~3.5s，实际 {total}s"
+
+
+def test_probe_duration_真实ffmpeg():
+    import subprocess
+    import pytest
+    exe = audio_merge.find_ffmpeg()
+    if not exe:
+        pytest.skip("无 ffmpeg，跳过")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        wav = Path(tmpdir) / "a.wav"
+        subprocess.run([exe, "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=1.5",
+                        "-ar", "44100", "-ac", "1", str(wav)],
+                       capture_output=True, text=True, check=True)
+        d = audio_merge.probe_duration(wav, exe)
+        assert d is not None and 1.0 <= d <= 2.0
+
+
+def test_validate_merged_duration_过短判失败_真实ffmpeg():
+    import subprocess
+    import pytest
+    exe = audio_merge.find_ffmpeg()
+    if not exe:
+        pytest.skip("无 ffmpeg，跳过")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        a = tmp / "a.wav"
+        b = tmp / "b.wav"
+        for f, dur in ((a, 1.0), (b, 2.0)):
+            subprocess.run([exe, "-y", "-f", "lavfi", "-i",
+                            f"sine=frequency=440:duration={dur}",
+                            "-ar", "44100", "-ac", "1", str(f)],
+                           capture_output=True, text=True, check=True)
+        # 坏产物：只有第一段（1s），期望 3s → 判失败
+        with pytest.raises(ValueError, match="时长异常"):
+            audio_merge._validate_merged_duration([str(a), str(b)], a, ffmpeg=exe)
+        # 正常产物（拼接后约 3s）→ 不抛异常
+        out = tmp / "merged.flac"
+        audio_merge.concat_audio([str(a), str(b)], out, ffmpeg=exe)
+        audio_merge._validate_merged_duration([str(a), str(b)], out, ffmpeg=exe)
+
+
+def test_merge_audio_for_message_时长不合格丢弃产物保留分条(monkeypatch, tmp_path):
+    """保护机制：校验失败时删除产物、清掉 merged part，但保留分条 → 按钮仍在。"""
+    monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
+    from app.services import repo_meta
+    monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+
+    for name in ("seg1.flac", "seg2.flac"):
+        (tmp_path / name).write_bytes(b"x" * 10)
+
+    chat_snapshot.save("thread", [{
+        "id": "bot", "role": "assistant", "text": "正文", "parts": [
+            {"type": "audio", "url": f"http://127.0.0.1:8010/api/comfyui/local-view?path={tmp_path.as_posix()}/seg1.flac",
+             "slotId": "audio-bot-0", "status": "ready", "kind": "audio", "seq": 1, "total": 2},
+            {"type": "audio", "url": f"http://127.0.0.1:8010/api/comfyui/local-view?path={tmp_path.as_posix()}/seg2.flac",
+             "slotId": "audio-bot-1", "status": "ready", "kind": "audio", "seq": 2, "total": 2},
+        ],
+    }])
+
+    created_outputs = []
+    def fake_concat(paths, output, ffmpeg=None):
+        output.write_bytes(b"merged")
+        created_outputs.append(output)
+    monkeypatch.setattr(audio_merge, "concat_audio", fake_concat)
+    def fake_validate(paths, output, ffmpeg=None):
+        raise ValueError("拼接产物时长异常：期望约 3.0s，实际 1.0s，已丢弃")
+    monkeypatch.setattr(audio_merge, "_validate_merged_duration", fake_validate)
+
+    import pytest
+    with pytest.raises(ValueError, match="时长异常"):
+        audio_merge.merge_audio_for_message("thread", "bot")
+
+    # 产物文件已删除
+    assert created_outputs and not created_outputs[0].exists()
+
+    # 快照：分条仍在（按钮依赖 ≥2 段），且无 merged part
+    parts = chat_snapshot.load("thread")[0]["parts"]
+    segs = [p for p in parts
+            if p.get("type") == "audio" and not str(p.get("slotId", "")).startswith("merged-")]
+    merged = [p for p in parts if str(p.get("slotId", "")).startswith("merged-")]
+    assert len(segs) == 2
+    assert merged == []

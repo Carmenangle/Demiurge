@@ -1,0 +1,291 @@
+"""独立世界书落盘 + 导入端点测试。"""
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from app.services import worldbook_store
+
+
+def _book(n: int = 2) -> dict:
+    return {"entries": {str(i): {"content": f"设定{i}", "uid": i} for i in range(n)}, "originalData": {}}
+
+
+def test_保存与读取世界书往返(tmp_path):
+    base = str(tmp_path)
+    summary = worldbook_store.save(base, "测试书", _book(3))
+    assert summary.name == "测试书"
+    assert summary.entries == 3
+    got = worldbook_store.read_book(base, "测试书")
+    assert got is not None and len(got["entries"]) == 3
+
+
+def test_同名不覆盖抛错(tmp_path):
+    base = str(tmp_path)
+    worldbook_store.save(base, "书", _book())
+    with pytest.raises(FileExistsError):
+        worldbook_store.save(base, "书", _book())
+    # overwrite=True 允许
+    summary = worldbook_store.save(base, "书", _book(5), overwrite=True)
+    assert summary.entries == 5
+
+
+def test_列表与删除(tmp_path):
+    base = str(tmp_path)
+    worldbook_store.save(base, "甲", _book())
+    worldbook_store.save(base, "乙", _book())
+    names = {s.name for s in worldbook_store.list_books(base)}
+    assert names == {"甲", "乙"}
+    assert worldbook_store.delete_book(base, "甲") is True
+    assert worldbook_store.exists(base, "甲") is False
+    assert {s.name for s in worldbook_store.list_books(base)} == {"乙"}
+
+
+def test_数组格式entries计数(tmp_path):
+    base = str(tmp_path)
+    summary = worldbook_store.save(base, "数组书", {"entries": [{"content": "a"}, {"content": "b"}]})
+    assert summary.entries == 2
+
+
+def test_读不存在返回None(tmp_path):
+    assert worldbook_store.read_book(str(tmp_path), "无") is None
+    assert worldbook_store.delete_book(str(tmp_path), "无") is False
+
+
+def test_小仓库世界书快照隔离且只受控增改(tmp_path):
+    source = {"entries": [{"keys": ["王都"], "content": "王都仍由旧王统治", "constant": True}]}
+    snap_a = worldbook_store.ensure_repo_snapshot(str(tmp_path), "repo-a", [source])
+    snap_b = worldbook_store.ensure_repo_snapshot(str(tmp_path), "repo-b", [source])
+
+    assert worldbook_store.apply_repo_ops(str(tmp_path), "repo-a", [
+        {"op": "worldbook_update", "index": 0, "text": "王都已由新王统治", "evidence": "加冕完成"},
+        {"op": "worldbook_add", "title": "北门", "text": "北门在宵禁后关闭", "keys": ["北门"]},
+        {"op": "worldbook_delete", "index": 0},
+    ]) == 2
+
+    changed = worldbook_store.read_repo_snapshot(str(tmp_path), "repo-a")
+    untouched = worldbook_store.read_repo_snapshot(str(tmp_path), "repo-b")
+    # 2026-09-12 起世界书更新对所有条目统一为「原文底座 + 末尾【剧情进展·动态】区」
+    # （此前非角色卡条目被整体覆盖，实测丢过机制条目 1,659 字符正文）
+    merged = changed["entries"][0]["content"]
+    assert merged.startswith("王都仍由旧王统治")
+    assert "【剧情进展·动态】" in merged
+    assert "王都已由新王统治" in merged
+    assert changed["entries"][0]["keys"] == ["王都"]
+    assert changed["entries"][0]["constant"] is True
+    assert changed["entries"][1]["content"] == "北门在宵禁后关闭"
+    assert untouched == snap_b
+    assert snap_a == snap_b == source
+
+
+def test_世界书更新必须有依据且索引有效(tmp_path):
+    worldbook_store.ensure_repo_snapshot(str(tmp_path), "repo", [{"entries": [{"content": "旧设定"}]}])
+    assert worldbook_store.apply_repo_ops(str(tmp_path), "repo", [
+        {"op": "worldbook_update", "index": 0, "text": "无依据更新"},
+        {"op": "worldbook_update", "index": 8, "text": "越界", "evidence": "剧情"},
+    ]) == 0
+    assert worldbook_store.read_repo_snapshot(str(tmp_path), "repo")["entries"][0]["content"] == "旧设定"
+
+
+def test_空世界书快照仍允许当前小仓库新增(tmp_path):
+    assert worldbook_store.ensure_repo_snapshot(str(tmp_path), "repo", [{"entries": []}]) == {"entries": []}
+    assert worldbook_store.apply_repo_ops(str(tmp_path), "repo", [
+        {"op": "worldbook_add", "title": "新规则", "text": "月蚀时城门关闭"},
+    ]) == 1
+    assert worldbook_store.read_repo_snapshot(str(tmp_path), "repo")["entries"][0]["content"] == "月蚀时城门关闭"
+
+
+def test_curator上下文优先包含本轮命中的角色条目(tmp_path):
+    repo_id = "work"
+    book = {"entries": [
+        {"comment": "超长机制", "content": "无关机制" * 500, "keys": ["机制"]},
+        {"comment": "角色卡·冷倾雪", "content": "【角色卡·冷倾雪】\n【外貌】漆黑墨发与紫玉金髻",
+         "keys": ["冷倾雪", "紫冷玄女"]},
+    ]}
+    worldbook_store.ensure_repo_snapshot(str(tmp_path), repo_id, [book])
+
+    context = worldbook_store.repo_snapshot_context(
+        str(tmp_path), repo_id, query="冷倾雪在第四日清晨醒来", max_chars=300,
+    )
+
+    assert "角色卡·冷倾雪" in context
+    assert '"index":1' in context
+
+
+def test_curator上下文只包含主剧情实际注入的条目(tmp_path):
+    repo_id = "work"
+    worldbook_store.ensure_repo_snapshot(str(tmp_path), repo_id, [{"entries": [
+        {"comment": "角色卡·冷倾雪", "content": "冷倾雪本轮出场"},
+        {"comment": "角色卡·旁人", "content": "旁人未出场"},
+        {"comment": "机制", "content": "未参与本轮的机制"},
+    ]}])
+
+    context = worldbook_store.repo_snapshot_context(
+        str(tmp_path), repo_id, allowed_indices={0},
+    )
+
+    assert '"index":0' in context
+    assert '"index":1' not in context
+    assert '"index":2' not in context
+    assert "旁人未出场" not in context
+
+
+def test_curator写回拒绝未注入索引但仍允许新增(tmp_path):
+    repo_id = "work"
+    worldbook_store.ensure_repo_snapshot(str(tmp_path), repo_id, [{"entries": [
+        {"content": "本轮注入"},
+        {"content": "本轮未注入"},
+    ]}])
+
+    applied = worldbook_store.apply_repo_ops(str(tmp_path), repo_id, [
+        {"op": "worldbook_update", "index": 1, "text": "越权修改", "evidence": "本轮正文"},
+        {"op": "worldbook_add", "title": "新事实", "text": "本轮新产生的事实"},
+    ], allowed_update_indices={0})
+
+    book = worldbook_store.read_repo_snapshot(str(tmp_path), repo_id)
+    assert applied == 1
+    assert book["entries"][1]["content"] == "本轮未注入"
+    assert book["entries"][2]["content"] == "本轮新产生的事实"
+
+
+def test_角色条目动态更新保留基础设定并替换旧动态(tmp_path):
+    repo_id = "work"
+    original = (
+        "【角色卡·冷倾雪】\n【外貌】漆黑墨发扎成发团、插紫玉金髻\n"
+        "【性格】清冷孤高\n\n【剧情进展·动态】\n第三日仍在昏睡"
+    )
+    worldbook_store.ensure_repo_snapshot(str(tmp_path), repo_id, [{"entries": [{
+        "comment": "角色卡·冷倾雪", "content": original, "keys": ["冷倾雪"],
+    }]}])
+
+    applied = worldbook_store.apply_repo_ops(str(tmp_path), repo_id, [{
+        "op": "worldbook_update", "index": 0,
+        "text": "第四日清晨醒来，理智回笼但身体状态仍延续。",
+        "evidence": "本轮正文明确发生",
+    }])
+
+    content = worldbook_store.read_repo_snapshot(str(tmp_path), repo_id)["entries"][0]["content"]
+    assert applied == 1
+    assert "【外貌】漆黑墨发扎成发团、插紫玉金髻" in content
+    assert "【性格】清冷孤高" in content
+    assert "第三日仍在昏睡" not in content
+    assert content.endswith("【剧情进展·动态】\n第四日清晨醒来，理智回笼但身体状态仍延续。")
+
+
+def test_导入路由解析非法json报400(tmp_path):
+    from app.routers.worldbook import _parse_book
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as ei:
+        _parse_book(b"not json")
+    assert ei.value.status_code == 400
+
+
+def test_导入路由缺entries报400(tmp_path):
+    from app.routers.worldbook import _parse_book
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as ei:
+        _parse_book(json.dumps({"foo": 1}).encode("utf-8"))
+    assert ei.value.status_code == 400
+
+
+def _repo_book() -> dict:
+    return {"entries": [
+        {"content": "普通条目", "comment": "设定", "keys": ["设定"], "uid": 1},
+        {"content": "【角色卡·舞柔·乳母恋娘】【外貌】绝色美母【剧情进展·动态】旧动态",
+         "comment": "角色卡·舞柔", "keys": ["舞柔"], "uid": 2},
+    ]}
+
+
+def test_删除类op一律拒绝并上报(tmp_path):
+    base = str(tmp_path)
+    worldbook_store.ensure_repo_snapshot(base, "repo", [_repo_book()])
+    rejections: list = []
+    applied = worldbook_store.apply_repo_ops(
+        base, "repo",
+        [{"op": "worldbook_delete", "index": 1}, {"op": "delete", "index": 0}],
+        rejections=rejections,
+    )
+    assert applied == 0
+    assert [item["reason"] for item in rejections] == ["delete_forbidden", "delete_forbidden"]
+    book = worldbook_store.read_repo_snapshot(base, "repo")
+    assert len(book["entries"]) == 2
+
+
+def test_角色卡条目只允许改正文动态段(tmp_path):
+    from app.services import worldbook_edit
+    base = str(tmp_path)
+    worldbook_store.ensure_repo_snapshot(base, "repo", [_repo_book()])
+    rejections: list = []
+    applied = worldbook_store.apply_repo_ops(
+        base, "repo",
+        [{"op": "worldbook_update", "index": 1, "text": "新动态", "evidence": "正文",
+          "title": "角色卡·舞姬恋", "keys": ["舞姬恋"]}],
+        rejections=rejections,
+    )
+    assert applied == 1
+    assert rejections == [{
+        "op": "worldbook_update", "index": 1,
+        "reason": "identity_keys_forbidden",
+        "fields": ["comment", "keys"],
+    }]
+    entry = worldbook_edit.list_entries(worldbook_store.read_repo_snapshot(base, "repo"))[1]
+    assert entry["comment"] == "角色卡·舞柔"
+    assert entry["keys"] == ["舞柔"]
+    assert "新动态" in entry["content"]
+    assert "【外貌】绝色美母" in entry["content"]
+
+
+def test_机制条目被curator改写时原文底座不丢失(tmp_path):
+    """回归（2026-09-12）：底座保护原先只对「comment 含『角色卡·』」的条目生效，
+    非角色卡条目走 `patch={"content": text}` 整体覆盖——真机实测「全局机制·世界自转与
+    事件登门」（constant，1,659 字符，自述「本卡最高级驱动机制」）被 curator 的剧情快照
+    顶掉，原文丢失，且因稳定序列按内容 hash 解析而整条塌陷、其后条目左移。
+    现所有条目统一为「原文底座 + 末尾【剧情进展·动态】区」。"""
+    from app.services import worldbook_edit
+    base = str(tmp_path)
+    mechanism = "【全局机制·世界自转】（本卡最高级驱动机制）\n■ 核心原则：世界不等人"
+    worldbook_store.ensure_repo_snapshot(base, "repo", [{"entries": [
+        {"content": mechanism, "comment": "全局机制·世界自转", "constant": True, "id": 7},
+    ]}])
+    rejections: list = []
+    applied = worldbook_store.apply_repo_ops(
+        base, "repo",
+        [{"op": "worldbook_update", "index": 0, "evidence": "正文",
+          "text": "【剧情进展·动态】当前场景为野外山谷，队伍继续前行"}],
+        rejections=rejections,
+    )
+    assert applied == 1 and rejections == []
+    entry = worldbook_edit.list_entries(worldbook_store.read_repo_snapshot(base, "repo"))[0]
+    assert "■ 核心原则：世界不等人" in entry["content"]          # 底座逐字保留
+    assert entry["content"].startswith("【全局机制·世界自转】")   # 底座仍在开头
+    assert "当前场景为野外山谷" in entry["content"]              # 新动态进末尾动态区
+    assert entry["comment"] == "全局机制·世界自转"
+
+
+def test_普通条目更新同样保留底座且身份键不可改(tmp_path):
+    """2026-09-12：底座保护与身份键保护对所有条目统一生效（此前普通条目会被整体覆盖、
+    且允许改 comment/keys）。"""
+    from app.services import worldbook_edit
+    base = str(tmp_path)
+    worldbook_store.ensure_repo_snapshot(base, "repo", [_repo_book()])
+    rejections: list = []
+    applied = worldbook_store.apply_repo_ops(
+        base, "repo",
+        [{"op": "worldbook_update", "index": 0, "text": "更新后的设定", "evidence": "正文",
+          "title": "设定·新", "keys": ["新键"]}],
+        rejections=rejections,
+    )
+    assert applied == 1
+    assert rejections == [{
+        "op": "worldbook_update", "index": 0,
+        "reason": "identity_keys_forbidden",
+        "fields": ["comment", "keys"],
+    }]
+    entry = worldbook_edit.list_entries(worldbook_store.read_repo_snapshot(base, "repo"))[0]
+    assert entry["comment"] == "设定" and entry["keys"] == ["设定"]   # 身份键不被改
+    assert "普通条目" in entry["content"]                            # 底座保留
+    assert "更新后的设定" in entry["content"]
+    assert "【剧情进展·动态】" in entry["content"]
