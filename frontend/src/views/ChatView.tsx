@@ -826,14 +826,9 @@ export function ChatView({
                       // 灵感卡 → 插入输入框：封面图显示走 proxy（防盗链）、发送走原始 URL（后端 VLM 可访问）
                       const selected = (card.selected || []).filter(Boolean);
                       if (selected.length > 0) {
-                        // 勾选图逐张进图片栏（一个个插入，可单独删/拖排序；2026-09-14 用户定案），
-                        // 卡片只带文本语义（不重复携带图片，防止卡内未勾选图混入）。
+                        // 勾选图逐张进图片栏（一个个插入，可单独删/拖排序；2026-09-14 用户定案）：
+                        // **只插图**——不带灵感卡文本语义（用户实锤「多插入了文段内容」）。
                         for (const u of selected) richRef.current?.insertImage(u);
-                        const att = inspirationToAttachment(card);
-                        att.imageUrl = "";
-                        att.sourceUrl = undefined;
-                        att.imageUrls = undefined;
-                        richRef.current?.insertInspirationCard(att);
                       } else {
                         const att = inspirationToAttachment(card);
                         const imgProxy = effectiveGlobalProxyUrl(settings);
