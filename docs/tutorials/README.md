@@ -24,7 +24,7 @@
 | 剧情扮演 | [story.md](../guide/story.md) | 绑定角色卡与世界书、剧情对话、多元数据面板 |
 | 画布创作 | [canvas.md](../guide/canvas.md) | 画布编排、画布内对话、工作流模板节点 |
 | AI 搭工作流 | [workflow.md](../guide/workflow.md) | 嵌入模型、节点知识库、自然语言搭工作流 |
-| 固化流程 | [curing-flows.md](../guide/curing-flows.md) | 三条固化链路合订：01 批量生图 / 02 小说转合集卡 / 03 ST 卡转合集卡 |
+| 固化流程 | [curing-flows.md](../guide/curing-flows.md) | 四条固化链路合订：01 批量生图 / 02 小说转合集卡 / 03 ST 卡转合集卡 / 04 自定义环节 |
 | 多功能工具 | [tools.md](../guide/tools.md) | GIF/精灵图互转、调色盘、分辨率缩放、文本工具 |
 
 ## 规划中（依据真实界面与运行结果补齐，未完成前不开放链接）

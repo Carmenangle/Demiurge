@@ -60,12 +60,13 @@ Demiurge 把剧情对话、角色卡、世界书、RAG 记忆、状态表、自�
 - **剧情扮演**：绑定角色卡与世界书、剧情对话、多元数据面板。
 - **画布创作**：在画布上把生成内容铺开编排。
 - **AI 搭工作流**：从自然语言目标到可运行模板。
+- **固化流程**：智能编造跑通真实任务后固化为可重放配方——四条链路：批量生图 / 小说转合集卡 / ST 卡转合集卡 / 自定义环节。
 - **多功能工具**：GIF/精灵图、调色盘、文本工具等。
 
 引导正文支持跳到**教学文档**（应用内直接阅读，例如[工作流模板导入详解](docs/guide/workflow-template-import.md)），
 也支持跨章节跳转与锚点定位。同一份引导的 GitHub 图文阅读版（不运行应用也能看）：
 
-- [快速开始（10 步图文）](docs/guide/quick-start.md) · [剧情扮演](docs/guide/story.md) · [画布创作](docs/guide/canvas.md) · [AI 搭工作流](docs/guide/workflow.md) · [多功能工具](docs/guide/tools.md)
+- [快速开始（10 步图文）](docs/guide/quick-start.md) · [剧情扮演](docs/guide/story.md) · [画布创作](docs/guide/canvas.md) · [AI 搭工作流](docs/guide/workflow.md) · [固化流程（四条链路）](docs/guide/curing-flows.md) · [多功能工具](docs/guide/tools.md)
 
 ## 核心能力
 
