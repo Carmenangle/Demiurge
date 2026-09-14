@@ -97,8 +97,9 @@ export const SECTION_SUBNAV: Record<Exclude<NavSection, "home">, { id: string; l
     { id: "story", label: "剧情扮演" },
     { id: "canvas", label: "画布创作" },
     { id: "workflow", label: "AI 搭工作流" },
-    // 固化流程合并为一项（2026-09-09）：页内按 01/02/03 分组（自定义流程 09-11 暂缓展示）
-    { id: "curing-flows", label: "固化流程（01 / 02 / 03）" },
+    // 固化流程合并为一项（2026-09-09）：页内按 01/02/03/自定义 分组；左栏只叫「固化流程」
+    // （2026-09-14 用户定案：label 不列子项，分组在页内看）
+    { id: "curing-flows", label: "固化流程" },
     { id: "tools", label: "多功能工具" },
   ],
 };

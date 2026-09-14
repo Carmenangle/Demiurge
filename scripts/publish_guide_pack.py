@@ -1,15 +1,17 @@
-"""固化流程 01/02/03 阅读版（合订单文档）：打包 + 可选上传到公开仓库（2026-09-11）。
+"""固化流程 01/02/03/04 阅读版（合订单文档）：打包 + 可选上传到公开仓库（2026-09-14）。
 
-把应用内新手指引「固化流程」三条链路的 GitHub 阅读版打包成可直接落入公开仓库的
+把应用内新手指引「固化流程」四条链路的 GitHub 阅读版打包成可直接落入公开仓库的
 目录结构；上传需要代理，联网动作由用户在有代理的环境自行执行。
 
 打包内容（来源 = 本仓库工作树，唯一真源）：
-  docs/guide/curing-flows.md                 （01 批量生图 / 02 小说转合集卡 / 03 ST 卡转合集卡 合订）
-  docs/assets/guide/curing-process-1..5.png  （配图，从 md 内引用关系自动收集）
+  docs/guide/curing-flows.md                 （01 批量生图 / 02 小说转合集卡 /
+                                                03 ST 卡转合集卡 / 04 自定义环节 合订）
+  docs/assets/guide/curing-process-1..9.png  （配图，从 md 内引用关系自动收集）
   docs/tutorials/README.md                   （图解引导表：含固化流程行）
 
-刻意不含 docs/guide/create-curing-process.md——「自定义流程」2026-09-11 定案
-暂缓展示，内容交后续版本（与前端 newcomerGuide.ts 的裁剪同步）。
+刻意不含 docs/guide/create-curing-process.md——「自定义环节」2026-09-14 已并入
+curing-flows.md 的 04 节（配图 curing-process-6..9.png），分篇不再单独对外，
+与前端 newcomerGuide.ts 的分组保持一致。
 
 用法：
   python scripts/publish_guide_pack.py                 # 打包到 _tmp/guide-pack/ 并校验
@@ -140,7 +142,7 @@ def push_to_repo(repo: str) -> None:
         print("公开仓库无变更，跳过 commit/push。")
         return
     _git("add", "docs")
-    _git("commit", "-m", "docs(guide): 固化流程 01/02/03 图解引导 + README 索引")
+    _git("commit", "-m", "docs(guide): 固化流程 01/02/03/04 图解引导 + README 索引")
     _git("push")
     print("已推送到公开仓库。")
 

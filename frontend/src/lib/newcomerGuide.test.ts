@@ -96,6 +96,25 @@ describe("newcomer guide content", () => {
     }
   });
 
+  it("固化流程四组齐全（01/02/03/04 自定义环节）且配图齐备", () => {
+    // 历史回归：自定义环节 2026-09-11 被整体裁掉时无测试兜底；这里锁结构
+    // （组标题 / 每组步数 / 自定义环节配图），正文文案改动不受影响。
+    const groups = NEWCOMER_GUIDE_SECTIONS.find((s) => s.id === "curing-flows")?.groups ?? [];
+    expect(groups.map((g) => g.title)).toEqual([
+      "01：批量生图",
+      "02：小说转合集卡",
+      "03：合集卡转化（ST 卡）",
+      "04：自定义环节",
+    ]);
+    expect(groups.map((g) => g.steps.length)).toEqual([2, 2, 1, 4]);
+    expect(groups[3]?.steps.map((s) => s.image)).toEqual([
+      "onboarding/curing-process-6.png",
+      "onboarding/curing-process-7.png",
+      "onboarding/curing-process-8.png",
+      "onboarding/curing-process-9.png",
+    ]);
+  });
+
   it("旧章节 id 仍能解析到合并后的章节（旧 hash 不失效）", () => {
     for (const legacy of ["curing-process", "novel-to-collection-card",
       "card-worldbook-convert", "create-curing-process"]) {
