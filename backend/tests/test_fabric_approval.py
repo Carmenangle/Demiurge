@@ -1,11 +1,14 @@
 """approval 自由循环断点续跑（2026-09-06）：内容生成型任务走自由循环 + 逐能力审批。
 
 覆盖：fabric_loop 审批暂停→批准→断点续跑不重复；plan_compiler_node approval 内容型
-分支落 checkpoint、对话审批词续跑、固化完成。
+分支落 checkpoint、对话审批词续跑、固化完成；过期租约批准自动续期（2026-09-14）。
 """
 from __future__ import annotations
 
 import json
+import time
+
+import pytest
 
 from app.services import (
     agent_graph as ag,
@@ -181,4 +184,114 @@ def test_approval_step_limit保留断点_继续可接续(tmp_path, monkeypatch):
     assert cp is not None and cp["status"] == "running"
     assert cp.get("steps"), "断点应带已执行步骤"
     fabric_checkpoint.delete(pend[0]["id"])
+    capability_sandbox._reset_for_tests()
+
+
+# ── 过期租约批准（2026-09-14 实盘 bug 修复）────────────────────────────────
+# 断点停在审批点超过租约 TTL（24h）时：grant_operation 此前只查存在+未撤销，
+# 追加「成功」→ 续跑 authorize 查过期再拦 → 批准死循环；若后端重启过租约不在
+# 内存，批准则删断点丢进度。修复=授权时拒绝过期租约 + 批准路径先续期救活。
+
+
+def test_grant_operation_过期租约拒绝追加授权():
+    lease = capability_sandbox.grant(
+        "fabric:expired-unit", [], mode=capability_sandbox.ACCESS_APPROVAL)
+    capability_sandbox._LEASES[lease["id"]]["expires_at"] = 1.0  # 置为远古 = 已过期
+    with pytest.raises(PermissionError, match="已过期"):
+        capability_sandbox.grant_operation(lease["id"], "file.write_text")
+
+
+def test_renew_救活过期租约_续期后可授权可执行():
+    lease = capability_sandbox.grant(
+        "fabric:expired-unit", [], mode=capability_sandbox.ACCESS_APPROVAL)
+    capability_sandbox._LEASES[lease["id"]]["expires_at"] = 1.0
+    with pytest.raises(PermissionError):
+        capability_sandbox.grant_operation(lease["id"], "file.write_text")
+    renewed = capability_sandbox.renew(lease["id"])
+    assert renewed["expires_at"] > time.time()
+    # 续期不扩大授权面：追加仍需逐条批准
+    capability_sandbox.grant_operation(lease["id"], "file.write_text", path="D:/w")
+    assert capability_sandbox.authorize(lease["id"], "file.write_text", path="D:/w")
+    with pytest.raises(PermissionError):
+        capability_sandbox.authorize(lease["id"], "doc.create_repo")
+    # 撤销后不可续期
+    capability_sandbox.revoke(lease["id"])
+    with pytest.raises(PermissionError):
+        capability_sandbox.renew(lease["id"])
+
+
+def test_批准过期租约自动续期续跑_断点不删进度保留(tmp_path, monkeypatch):
+    """实盘场景：断点停 43h > TTL 24h → 租约过期。批准必须续期救活租约并
+    接续完成，而不是续跑即再拦（死循环）或删断点丢已完成步骤。"""
+    monkeypatch.setattr(plan_tasks, "_agent_access_mode",
+                        lambda: capability_sandbox.ACCESS_APPROVAL)
+    store: dict = {}
+    monkeypatch.setattr(task_progress_store, "load", lambda ns: store.get(ns, {}))
+    monkeypatch.setattr(task_progress_store, "save",
+                        lambda ns, tasks, limit=100: store.update({ns: tasks}))
+
+    work = tmp_path / "作品"
+    work.mkdir()
+    target = tmp_path / "note.txt"
+    chat = _fake_chat([
+        {"tool": "file.write_text", "params": {"path": str(target), "content": "x"}},
+        {"tool": "file.write_text", "params": {"path": str(target), "content": "x"}},
+        {"done": True, "reply": "合集卡已整理完成"},
+    ])
+    ctx = {
+        "chat_base": "b", "chat_key": "k", "chat_model": "m",
+        "workspace_mode": "story", "has_mcp": False, "agent_cfg": None,
+        "message": "根据这本小说制作合集卡，把全局机制整理好",
+        "output_dir": str(work), "repo_id": "work", "thread_id": "work",
+        "chat_fn": chat,
+    }
+    _seed_already_asked(ctx)
+
+    res = ag.plan_compiler_node({"user_text": ctx["message"], "images": [], "_ctx": ctx})
+    assert "需要批准" in res["result_text"]
+    pend = fabric_checkpoint.pending(output_dir=str(work))
+    assert pend and pend[0]["pending_tool"] == "file.write_text"
+    # 模拟断点停留超过 TTL：租约已过期（未撤销，盘面仍登记）
+    capability_sandbox._LEASES[pend[0]["lease_id"]]["expires_at"] = 1.0
+
+    res2 = ag._fabric_approval_word("批准", ctx, str(work), [])
+    assert "合集卡已整理完成" in res2["result_text"], res2
+    assert target.is_file(), "续期后批准应真正执行写入"
+    assert not fabric_checkpoint.pending(output_dir=str(work)), "完成后 checkpoint 应删除"
+    capability_sandbox._reset_for_tests()
+
+
+def test_批准租约已撤销时删断点并明确提示重发(tmp_path, monkeypatch):
+    """租约不存在/已撤销确实无法接续：删断点是合理的，但必须明说原因与出路，
+    不能只回「审批失败」让用户反复批准。"""
+    monkeypatch.setattr(plan_tasks, "_agent_access_mode",
+                        lambda: capability_sandbox.ACCESS_APPROVAL)
+    store: dict = {}
+    monkeypatch.setattr(task_progress_store, "load", lambda ns: store.get(ns, {}))
+    monkeypatch.setattr(task_progress_store, "save",
+                        lambda ns, tasks, limit=100: store.update({ns: tasks}))
+
+    work = tmp_path / "作品"
+    work.mkdir()
+    chat = _fake_chat([
+        {"tool": "file.write_text",
+         "params": {"path": str(tmp_path / "note.txt"), "content": "x"}},
+    ])
+    ctx = {
+        "chat_base": "b", "chat_key": "k", "chat_model": "m",
+        "workspace_mode": "story", "has_mcp": False, "agent_cfg": None,
+        "message": "根据这本小说制作合集卡", "output_dir": str(work),
+        "repo_id": "work", "thread_id": "work", "chat_fn": chat,
+    }
+    _seed_already_asked(ctx)
+
+    res = ag.plan_compiler_node({"user_text": ctx["message"], "images": [], "_ctx": ctx})
+    assert "需要批准" in res["result_text"]
+    pend = fabric_checkpoint.pending(output_dir=str(work))
+    capability_sandbox.revoke(pend[0]["lease_id"])
+
+    res2 = ag._fabric_approval_word("批准", ctx, str(work), [])
+    assert "审批失败" in res2["result_text"]
+    assert "重新发起" in res2["result_text"], "必须告知出路：重发任务"
+    assert not fabric_checkpoint.pending(output_dir=str(work)), "无法接续的断点应清理"
     capability_sandbox._reset_for_tests()

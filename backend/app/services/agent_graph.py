@@ -1333,9 +1333,27 @@ def _fabric_approval_word(word: str, ctx: Any, output_dir: str,
     # running 断点（step_limit/error 后）无 pending_tool，跳过授权直接续跑。
     _pending_tool = str(cp.get("pending_tool") or "")
     if _pending_tool:
+        _lease_id = str(cp.get("lease_id") or "")
         try:
-            _sb.grant_operation(str(cp.get("lease_id") or ""), _pending_tool, path=output_dir)
-        except Exception as exc:  # noqa: BLE001 - 租约失效则中止
+            _sb.grant_operation(_lease_id, _pending_tool, path=output_dir)
+        except PermissionError as exc:
+            # 2026-09-14 修复：断点停在审批点超过租约 TTL（24h）时租约已过期。
+            # 用户此刻的批准=新的授权动作 → 先续期救活租约再追加授权，断点与
+            # 已完成步骤保留（此前 grant 不查过期"成功"、续跑 authorize 再拦 →
+            # 批准死循环；租约不在内存时则删断点丢进度）。
+            if "已过期" in str(exc) and _sb.lease_registered(_lease_id):
+                try:
+                    _sb.renew(_lease_id)
+                    _sb.grant_operation(_lease_id, _pending_tool, path=output_dir)
+                except Exception as exc2:  # noqa: BLE001 - 续期/追加仍失败则中止
+                    fabric_checkpoint.delete(cp["id"])
+                    return {"result_text": f"审批失败：{exc2}", "trace": trace}
+            else:
+                # 租约不存在/已撤销：确实无法接续，删断点但必须明说出路
+                fabric_checkpoint.delete(cp["id"])
+                return {"result_text": f"审批失败：{exc}（断点已清理，请重新发起任务）",
+                        "trace": trace}
+        except Exception as exc:  # noqa: BLE001 - 其他异常同样中止
             fabric_checkpoint.delete(cp["id"])
             return {"result_text": f"审批失败：{exc}", "trace": trace}
     configured = {key for key, flag in (("chat", True), ("image", ctx.get("gen_base")),

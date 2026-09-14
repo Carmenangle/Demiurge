@@ -106,6 +106,11 @@ def grant_operation(lease_id: str, operation: str, *, path: str = "", tool: str 
         lease = _LEASES.get(lease_id)
         if not lease or lease.get("revoked"):
             raise PermissionError("能力租约不存在或已撤销")
+        if float(lease.get("expires_at") or 0) <= time.time():
+            # 2026-09-14 修复：过期租约禁止追加授权。此前只查存在+未撤销即追加
+            # 「成功」，续跑时 authorize 才查过期再拦 → 「批准→续跑→再拦→再批准」
+            # 死循环（09-14 实盘复现：断点停 43h > TTL 24h）。
+            raise PermissionError("能力租约已过期")
         caps = lease.setdefault("capabilities", [])
         for item in caps:
             if item.get("operation") == operation and item.get("path", "") == str(path or ""):
@@ -127,6 +132,32 @@ def revoke(lease_id: str) -> bool:
         lease["revoked"] = True
     _save_persisted()
     return True
+
+
+def lease_registered(lease_id: str) -> bool:
+    """租约是否仍登记（未撤销；允许已过期——过期租约经 renew 可救活）。"""
+    with _LOCK:
+        lease = _LEASES.get(str(lease_id or ""))
+    if not lease or lease.get("revoked"):
+        return False
+    return True
+
+
+def renew(lease_id: str, *, ttl_seconds: int = 86400) -> dict[str, Any]:
+    """续期租约（approval 断点批准 = 用户此刻的新授权动作，可救活过期租约）。
+
+    2026-09-14：断点停在审批点超过 TTL 时，批准若不续期则续跑必再被拦。
+    续期只延长 expires_at，**不扩大授权清单**（追加授权仍走 grant_operation 逐条）；
+    撤销/不存在的租约不可续。
+    """
+    with _LOCK:
+        lease = _LEASES.get(str(lease_id or ""))
+        if not lease or lease.get("revoked"):
+            raise PermissionError("能力租约不存在或已撤销，无法续期")
+        lease["expires_at"] = time.time() + max(1, min(ttl_seconds, 86400))
+        result = dict(lease)
+    _save_persisted()
+    return result
 
 
 def _path_allowed(requested: str, root: str) -> bool:
