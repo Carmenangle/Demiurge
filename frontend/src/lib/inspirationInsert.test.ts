@@ -139,4 +139,33 @@ describe("serialize / deserialize inspiration send (发送图文拆分)", () => 
     expect(d.userText).toBe("");
     expect(d.userImages).toEqual([]);
   });
+
+  it("多图按序发送（2026-09-14）：勾选图顺序原样保留，追加在用户图后", () => {
+    const multi: InspirationAttachment = {
+      id: "c2", title: "多图卡", content: "x",
+      imageUrl: "https://x/s1.png", sourceUrl: "https://x/s1.png",
+      imageUrls: ["https://x/s1.png", "https://x/s2.png", "https://x/s3.png"],
+    };
+    const r = serializeInspirationSend([multi], "hi", ["https://x/u1.png"]);
+    expect(r.images).toEqual([
+      "https://x/u1.png", "https://x/s1.png", "https://x/s2.png", "https://x/s3.png",
+    ]);
+    const d = deserializeInspirationSend(r.text, r.images, [multi]);
+    expect(d.userImages).toEqual(["https://x/u1.png"]); // 多图全部剔除
+  });
+
+  it("toAttachment 携带全部可选图按序（勾选在前、卡内补后）", () => {
+    const att = inspirationToAttachment({
+      selected: ["https://x/p2.png", "https://x/p1.png"],
+      images: [{ url: "https://x/c0.png" }],
+    });
+    expect(att.imageUrls).toEqual(["https://x/p2.png", "https://x/p1.png", "https://x/c0.png"]);
+    expect(att.imageUrl).toBe("https://x/p2.png"); // 封面 = 首张勾选图
+    expect(att.sourceUrl).toBe("https://x/p2.png");
+  });
+
+  it("无 imageUrls 的旧附件回退单封面（兼容）", () => {
+    const r = serializeInspirationSend([card], "", []);
+    expect(r.images).toEqual(["https://x/cover.png"]);
+  });
 });

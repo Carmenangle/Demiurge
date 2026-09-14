@@ -35,6 +35,7 @@ export interface InspirationAttachment {
   content: string;
   imageUrl: string;   // 显示用封面图（可空 → 纯文本卡）
   sourceUrl?: string; // 发送用原始 URL（缺省回退 imageUrl）
+  imageUrls?: string[]; // 多图按序发送（2026-09-14）：勾选图在前、卡内图补后；缺省回退单封面
 }
 
 const hasImage = (u?: string) => Boolean(u && u.trim());
@@ -60,7 +61,8 @@ export function inspirationInsertText(card: InspirationInsertCard | InspirationA
   const content = (card?.content || "").trim();
   const body = content || "(空内容)";
   const head = title ? `【灵感参考 · ${title}】` : "【灵感参考】";
-  const hasImg = Boolean(card?.imageUrl) || inspirationInsertImages(card).length > 0;
+  const hasImg = Boolean(card?.imageUrl) || Boolean((card as InspirationAttachment)?.imageUrls?.length)
+    || inspirationInsertImages(card).length > 0;
   const cardName = title ? `「灵感参考卡 · ${title}」` : "「灵感参考卡」";
   const imgNote = hasImg
     ? "\n消息附带图片为这张灵感卡的封面参考图，可结合图片理解主题。"
@@ -78,15 +80,24 @@ export function inspirationAttachmentsText(cards: readonly InspirationAttachment
   return (cards || []).map((c) => inspirationInsertText(c)).filter(Boolean).join("\n\n");
 }
 
+/** 取这张附件随消息发送的图片 URL（按序）：多图列表优先，缺省回退单封面。 */
+export function inspirationAttachmentImages(card: InspirationAttachment): string[] {
+  if (!card) return [];
+  const multi = (card.imageUrls || []).filter(hasImage);
+  if (multi.length > 0) return multi;
+  return [card.sourceUrl || card.imageUrl].filter(hasImage) as string[];
+}
+
 /** 序列化（发送前）：用户文本/图 + 灵感卡附件 → 最终 message 的 text 与 images。
- *  封面图追加在用户图之后（图片参数）、灵感卡语义文本追加在用户文本之后。 */
+ *  每张卡的**全部图片按勾选顺序**追加在用户图之后（图片参数）、
+ *  灵感卡语义文本追加在用户文本之后。 */
 export function serializeInspirationSend(
   cards: readonly InspirationAttachment[],
   userText: string,
   userImages: readonly string[],
 ): { text: string; images: string[] } {
   const inspText = inspirationAttachmentsText(cards);
-  const inspImages = (cards || []).map((c) => c.sourceUrl || c.imageUrl).filter(Boolean);
+  const inspImages = (cards || []).flatMap((c) => inspirationAttachmentImages(c));
   return {
     text: [userText, inspText].filter(Boolean).join("\n\n"),
     images: [...userImages, ...inspImages],
@@ -108,12 +119,15 @@ export function deserializeInspirationSend(
     else if (userText.endsWith("\n\n" + inspText)) userText = userText.slice(0, -("\n\n" + inspText).length);
     else if (userText.endsWith(inspText)) userText = userText.slice(0, -inspText.length);
   }
-  const inspUrls = new Set(cards.flatMap((c) => [c.sourceUrl, c.imageUrl].filter(Boolean)));
+  const inspUrls = new Set(cards.flatMap((c) => [
+    c.sourceUrl, c.imageUrl, ...(c.imageUrls || []),
+  ].filter(Boolean)));
   const userImages = (images || []).filter((u) => !inspUrls.has(u));
   return { userText, userImages };
 }
 
-/** 灵感卡 → 输入框附件（封面图 = 选中图优先 / 卡内图 / 显式传入；sourceUrl 默认 = 原始封面）。 */
+/** 灵感卡 → 输入框附件（封面图 = 选中图优先 / 卡内图 / 显式传入；sourceUrl 默认 = 原始封面；
+ *  imageUrls = 全部可选图按序（勾选图在前、卡内图补后），发送时整批随消息下发）。 */
 export function inspirationToAttachment(
   card: InspirationInsertCard,
   imageUrl?: string,
@@ -126,6 +140,7 @@ export function inspirationToAttachment(
     content: card.content || "",
     imageUrl: imageUrl || raw,
     sourceUrl: raw || undefined,
+    imageUrls: imgs.length > 0 ? [...imgs] : undefined,
   };
 }
 
