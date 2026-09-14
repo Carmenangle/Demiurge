@@ -126,13 +126,15 @@ export function deserializeInspirationSend(
   return { userText, userImages };
 }
 
-/** 灵感卡 → 输入框附件（封面图 = 选中图优先 / 卡内图 / 显式传入；sourceUrl 默认 = 原始封面；
- *  imageUrls = 全部可选图按序（勾选图在前、卡内图补后），发送时整批随消息下发）。 */
+/** 灵感卡 → 输入框附件（封面图 = 选中图优先 / 卡内图 / 显式传入；sourceUrl 默认 = 原始封面）。
+ *  imageUrls = **勾选图才携带**（2026-09-14 实锤：勾选 3 张不许把卡内其余图补进来变 8 图）；
+ *  未勾选任何图时回退卡内全图；进图片栏逐张插入见 ChatView 的 onInsert 分支。 */
 export function inspirationToAttachment(
   card: InspirationInsertCard,
   imageUrl?: string,
 ): InspirationAttachment {
-  const imgs = inspirationInsertImages(card);
+  const selected = (card.selected || []).filter(hasImage);
+  const imgs = selected.length > 0 ? selected : inspirationInsertImages(card);
   const raw = imgs[0] || "";
   return {
     id: card.id || `insp-${Math.random().toString(36).slice(2, 10)}`,

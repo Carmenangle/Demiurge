@@ -154,14 +154,21 @@ describe("serialize / deserialize inspiration send (发送图文拆分)", () => 
     expect(d.userImages).toEqual(["https://x/u1.png"]); // 多图全部剔除
   });
 
-  it("toAttachment 携带全部可选图按序（勾选在前、卡内补后）", () => {
+  it("toAttachment 的 imageUrls 只装勾选图（2026-09-14 实锤：勾 3 不许混入卡内其余图变 8）", () => {
     const att = inspirationToAttachment({
       selected: ["https://x/p2.png", "https://x/p1.png"],
-      images: [{ url: "https://x/c0.png" }],
+      images: [{ url: "https://x/c0.png" }, { url: "https://x/c1.png" }],
     });
-    expect(att.imageUrls).toEqual(["https://x/p2.png", "https://x/p1.png", "https://x/c0.png"]);
+    expect(att.imageUrls).toEqual(["https://x/p2.png", "https://x/p1.png"]);
     expect(att.imageUrl).toBe("https://x/p2.png"); // 封面 = 首张勾选图
     expect(att.sourceUrl).toBe("https://x/p2.png");
+  });
+
+  it("toAttachment 未勾选时回退卡内全图", () => {
+    const att = inspirationToAttachment({
+      images: [{ url: "https://x/c0.png" }, { url: "https://x/c1.png" }],
+    });
+    expect(att.imageUrls).toEqual(["https://x/c0.png", "https://x/c1.png"]);
   });
 
   it("无 imageUrls 的旧附件回退单封面（兼容）", () => {
