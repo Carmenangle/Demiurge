@@ -1149,7 +1149,7 @@ export function InspirationCard({
   proxyUrl?: string;
   outputDir?: string;
   onNotify?: (msg: string, kind: "success" | "error" | "info") => void;
-  onInsert: (text: string, card?: ChatMessage["inspiration"]) => void;
+  onInsert: (text: string, card?: ChatMessage["inspiration"], manualSelected?: string[]) => void;
   /** 发送画布成功后回调（父级可切到画布模式让节点可见）。 */
   onSentToCanvas?: () => void;
 }) {
@@ -1309,10 +1309,15 @@ export function InspirationCard({
             </button>
             <button
               className="insp-insert"
-              title="插入到输入框：勾选的图片进图片栏随消息发送，发送时图文拆分（图片作参考图、文本带灵感卡语义）"
-              onClick={() => onInsert(data?.content || "", data)}
+              title="插入到输入框：只算你亲手点勾的图，逐张进图片栏随消息发送（自动预勾的竖图不算数；一张没手点则插整卡）"
+              onClick={() => {
+                // 2026-09-14 实锤：自动预勾（竖图）混进 selected → 手点 1 张插了 3 张。
+                // 插入对话只认手动勾选（userTouched ∩ selected）；自动预勾仍服务保存素材库/发送画布。
+                const manual = selected.filter((u) => userTouchedRef.current.has(u));
+                onInsert(data?.content || "", data, manual);
+              }}
             >
-              <CornerDownRight size={13} /> 插入对话{selected.length > 0 ? `（${selected.length} 图）` : ""}
+              <CornerDownRight size={13} /> 插入对话{selected.filter((u) => userTouchedRef.current.has(u)).length > 0 ? `（${selected.filter((u) => userTouchedRef.current.has(u)).length} 图）` : ""}
             </button>
           </div>
         </div>

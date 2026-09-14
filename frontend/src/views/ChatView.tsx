@@ -821,12 +821,13 @@ export function ChatView({
                   proxyUrl={effectiveGlobalProxyUrl(settings)}
                   outputDir={settings.outputDir}
                   onNotify={showToast}
-                  onInsert={(text, card) => {
+                  onInsert={(text, card, manualSelected) => {
                     if (card) {
-                      // 灵感卡 → 插入输入框：封面图显示走 proxy（防盗链）、发送走原始 URL（后端 VLM 可访问）
-                      const selected = (card.selected || []).filter(Boolean);
+                      // 手动勾选优先（2026-09-14 实锤：自动预勾竖图混入 → 手点 1 张插 3 张）；
+                      // 无手动勾选走原整卡路径（封面显示走 proxy 防盗链、发送走原始 URL）。
+                      const selected = (manualSelected || []).filter(Boolean);
                       if (selected.length > 0) {
-                        // 勾选图逐张进图片栏（一个个插入，可单独删/拖排序；2026-09-14 用户定案）：
+                        // 勾选图逐张进图片栏（一个个插入，可单独删/拖排序）：
                         // **只插图**——不带灵感卡文本语义（用户实锤「多插入了文段内容」）。
                         for (const u of selected) richRef.current?.insertImage(u);
                       } else {
