@@ -4399,6 +4399,19 @@ textarea.state-value { min-height: 58px; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* 灵感卡多图角标（2026-09-14）：标签被 52px 宽截断，图数改走右上角徽标 */
+.rich-imgbar-insp-count {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.72);
+  color: #fff;
+  font-size: 10px;
+  line-height: 16px;
+  pointer-events: none;
+}
 
 /* 悬停放大预览：独立元素，固定在左下角 */
 .rich-chip-preview {

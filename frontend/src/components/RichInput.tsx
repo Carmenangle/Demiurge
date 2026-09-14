@@ -518,9 +518,10 @@ export const RichInput = forwardRef<RichInputHandle, Props>(
                 ) : (
                   <div className="rich-imgbar-insp-empty">9:16</div>
                 )}
-                <div className="rich-imgbar-insp-label">
-                  {card.title || "灵感卡"}{(card.imageUrls?.length || 0) > 1 ? `（${card.imageUrls!.length} 图）` : ""}
-                </div>
+                {(card.imageUrls?.length || 0) > 1 && (
+                  <span className="rich-imgbar-insp-count">{card.imageUrls!.length} 图</span>
+                )}
+                <div className="rich-imgbar-insp-label">{card.title || "灵感卡"}</div>
               </div>
               <button
                 type="button"
