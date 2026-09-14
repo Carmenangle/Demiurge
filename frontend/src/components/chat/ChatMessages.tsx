@@ -1309,10 +1309,10 @@ export function InspirationCard({
             </button>
             <button
               className="insp-insert"
-              title="插入到输入框：封面图进图片栏，发送时图文拆分（图片作参考图、文本带灵感卡语义）"
+              title="插入到输入框：勾选的图片进图片栏随消息发送，发送时图文拆分（图片作参考图、文本带灵感卡语义）"
               onClick={() => onInsert(data?.content || "", data)}
             >
-              <CornerDownRight size={13} /> 插入对话
+              <CornerDownRight size={13} /> 插入对话{selected.length > 0 ? `（${selected.length} 图）` : ""}
             </button>
           </div>
         </div>

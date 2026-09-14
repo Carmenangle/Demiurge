@@ -686,3 +686,15 @@ def test_自由循环读多卷_日志append_only且投影生效(tmp_path):
     assert len(surface) < len(outcome.messages)
     assert sum(len(str(m.get("content") or "")) for m in surface) \
         < sum(len(str(m.get("content") or "")) for m in outcome.messages)
+
+
+def test_system提示词含交付前置自检纪律():
+    """2026-09-14 实锤：文档交付完成但参考图/场景等关键细节未确认——
+    _SYSTEM 必须含交付前置自检：关键缺口先列待确认清单引导补全，不擅自假定。"""
+    s = fabric_loop._SYSTEM
+    assert "交付前置自检" in s
+    assert "待确认清单" in s
+    assert "建议默认值" in s
+    # 用户口头带过 ≠ 细节已定（「都行」「不强求」仍须列入清单追认）
+    assert "口头带过" in s
+    assert "便于追认" in s
