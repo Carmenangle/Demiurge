@@ -24,6 +24,7 @@ def test_private_directories_are_ignored():
         "docs/memory/private.md",
         "docs/handoffs/private.md",
         "docs/合集卡分析.md",
+        "HANDOFF-2026-09-12-prompt-cache.md",
     ):
         result = subprocess.run(
             ["git", "check-ignore", "-q", "--", path], cwd=ROOT, check=False

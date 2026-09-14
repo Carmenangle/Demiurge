@@ -14,6 +14,7 @@ FORBIDDEN_PREFIXES = (
     "docs/memory/",
     "docs/handoffs/",
     "docs/合集卡",
+    "handoff-",
 )
 ALLOWED_PRESET_PREFIX = "presets/Demiurge-presets-regex/"
 FORBIDDEN_SUFFIXES = (
