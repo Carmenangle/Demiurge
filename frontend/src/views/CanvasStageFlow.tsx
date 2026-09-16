@@ -31,12 +31,15 @@ import {
 import {
   loadLayout, saveLayout, clampScale, type NodeLayout, type InspirationCardStored, type ReferenceImageStored, type Viewport,
 } from "../lib/canvasLayout";
-import { consumePendingInspirations, CANVAS_INSPIRATION_EVENT } from "../lib/inspirationInsert";
 import {
   buildDraftInputNodes, buildStreamingPlaceholderNodes, buildWfRunNodes,
   type PendingInput, type WfRun,
 } from "../lib/canvasPlaceholderNodes";
 import { useCanvasWfEvents } from "../lib/useCanvasWfEvents";
+import {
+  useCanvasGenerationSaved, useCanvasInspirationDrop, useCanvasWorkflowToolCreate,
+  useCtxMenuOutsideDismiss, useDetailToggleTracking, type CtxMenuState, type PendingToolCreate,
+} from "../lib/useCanvasEventBridge";
 import { SendToChatModal, type SendPayload } from "../components/SendToChatModal";
 import { ConfirmModal } from "../components/Modal";
 import { WorkflowToolModal } from "../components/WorkflowToolModal";
@@ -67,7 +70,6 @@ import type { GenResult } from "../api/comfyui";
 import { globalPendingToolCreates, canvasBridge } from "../components/canvas/shared";
 import { threadKey, type PendingGeneration } from "../lib/workflowGenerationRuntime";
 import { runScripts, Placement, type RegexScript } from "../lib/regexEngine";
-import { restoreOpenDetails, trackDetailsToggle } from "../lib/stableDetailsOpen";
 import { renderMarkdown } from "../lib/renderMarkdown";
 
 const nodeTypes = canvasNodeTypes;
@@ -110,15 +112,9 @@ export function CanvasStageFlow({
   // 详情面板正文里预设正则折叠的 <details>（思考过程）在重渲染重写后保持展开状态（同对话模式）。
   const detailHtmlRef = useRef<HTMLDivElement | null>(null);
   const detailOpenKeys = useRef<Set<string>>(new Set());
-  useLayoutEffect(() => {
-    const el = detailHtmlRef.current;
-    if (!el) return;
-    restoreOpenDetails(el, detailOpenKeys.current);
-    if (!el.dataset.detailsBound) {
-      el.dataset.detailsBound = "1";
-      el.addEventListener("toggle", (e) => trackDetailsToggle(e.target, detailOpenKeys.current), true);
-    }
-  }, [detailNode?.storyText]);
+  // 详情面板 <details> 展开态跟随：元素级 toggle 订阅归口 lib/useCanvasEventBridge（T2.1-B2），
+  //   依赖仍是 [detailStoryText]（改它会改变恢复时机）。
+  useDetailToggleTracking({ detailHtmlRef, detailOpenKeys, detailStoryText: detailNode?.storyText });
   const [showStoryThinking, setShowStoryThinking] = useState(false);
   const [sendTarget, setSendTarget] = useState<{ title: string; payload: SendPayload } | null>(null);
   // Toast 队列：非实际产出（提交/失败/状态提示）用 2s 自动消失弹窗替代模态框
@@ -254,25 +250,9 @@ export function CanvasStageFlow({
   }, [repoId, embed, conversationUrlSignature]);
 
   // 加载 gens + 布局
-  useEffect(() => {
-    let alive = true;
-    // ★ 首次进入先拉对话历史媒体 URL（持久化真源）再投影：
-    //   否则 conversationUrls 尚空，refresh() 的 filterGensByConversation 会把
-    //   生成内容节点全部过滤掉 → 首次进画布空白，要切走再切回（重挂载）才出现。
-    (async () => {
-      const urls = await loadHistoryUrls();
-      if (alive) await refresh(urls);
-    })();
-    const onSaved = () => {
-      void refresh();
-      // ★ 实时更新兜底（无需页面刷新）：laf-generation-saved 时重拉对话历史，
-      //   让 conversationUrls 实时包含新产出（workflow finalize 已 upsert 快照），
-      //   投影过滤放行后生成内容节点立即出现，不依赖上层回调与页面刷新。
-      void loadHistoryUrls();
-    };
-    window.addEventListener("laf-generation-saved", onSaved);
-    return () => { alive = false; window.removeEventListener("laf-generation-saved", onSaved); };
-  }, [refresh, loadHistoryUrls]);
+  //   ⇒ 订阅 laf-generation-saved 与「首次拉对话历史再投影」归口 lib/useCanvasEventBridge（T2.1-B2），
+  //   effect 依赖仍是 [refresh, loadHistoryUrls]。
+  useCanvasGenerationSaved({ refresh, loadHistoryUrls });
 
   // gens 变化时计算新增节点 ID（用于「回到画布中心」聚焦新生成节点）
   useEffect(() => {
@@ -409,9 +389,7 @@ export function CanvasStageFlow({
   // 第一次 splice 清空数组、第二次拿到空数组并覆盖 state → 节点永远不出现。
   // 改为挂载 useEffect 消费 + 函数式 set：StrictMode 双跑时第二次 splice 结果为空数组，
   // [...prev, ...[]] === prev，幂等无害。
-  const [pendingToolCreates, setPendingToolCreates] = useState<Array<{
-    id: string; templateId: string; templateName: string; estimatedNodeCount: number;
-  }>>([]);
+  const [pendingToolCreates, setPendingToolCreates] = useState<PendingToolCreate[]>([]);
   const pendingToolCreatesRef = useRef(pendingToolCreates);
   pendingToolCreatesRef.current = pendingToolCreates;
   useEffect(() => {
@@ -429,34 +407,6 @@ export function CanvasStageFlow({
       if (fresh.length > 0) setPendingToolCreates((prev) => [...prev, ...fresh]);
     }
     return () => { canvasBridge.canvasMounted = false; };
-  }, []);
-  useEffect(() => {
-    const onTool = (e: Event) => {
-      const detail = (e as CustomEvent).detail as {
-        templateId?: string; templateName?: string; estimatedNodeCount?: number;
-      } | undefined;
-      const templateId = (detail?.templateId || "").trim();
-      const templateName = (detail?.templateName || "").trim() || "工作流模板";
-      if (!templateId) return;
-      // 5a 唯一性：同模板卡已存在（画布节点或本地队列）→ 复用，不新建
-      const exists = rfNodesRef.current.some((n) =>
-        n.data?.node?.type === "workflow-tool" && n.data.node.templateId === templateId,
-      ) || pendingToolCreatesRef.current.some((p) => p.templateId === templateId);
-      if (exists) {
-        showToast(`工作流「${templateName}」已在画布上（同模板只保留一张卡片）`);
-        return;
-      }
-      const cnt = Number(detail?.estimatedNodeCount) || 0;
-      // 画布已挂载：ChatView 兜底监听已按 canvasMounted 跳过写入 global，这里直接进本地 state
-      // ★ id 用稳定派生 wftool-<templateId>（与对话消息投影同 id）：事件与投影去重后不会重复建卡，
-      //   且布局位置以稳定 id 持久化 → 重启后投影节点能对上旧位置。
-      setPendingToolCreates((prev) => [...prev, {
-        id: `wftool-${templateId}`,
-        templateId, templateName, estimatedNodeCount: cnt,
-      }]);
-    };
-    window.addEventListener("laf-canvas-workflow-tool", onTool);
-    return () => window.removeEventListener("laf-canvas-workflow-tool", onTool);
   }, []);
   // 新增工具卡时标记为"新节点"（画布中心按钮高亮 + 跳转）
   const prevToolCountRef = useRef(0);
@@ -518,6 +468,9 @@ export function CanvasStageFlow({
   const [rfEdges, setRfEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const rfNodesRef = useRef(rfNodes);
   rfNodesRef.current = rfNodes;
+  // 工作流工具卡：/w 选模板后由 ChatView 派发 laf-canvas-workflow-tool → 画布创建工具型节点
+  //   ⇒ 订阅与「同模板只留一张卡」去重归口 lib/useCanvasEventBridge（T2.1-B2）；effect 依赖仍是 []。
+  useCanvasWorkflowToolCreate({ rfNodesRef, pendingToolCreatesRef, setPendingToolCreates, showToast });
 
   // ===== 新节点统一锚点网格放置（用户拍板规则）=====
   // 1) 原位替换：生成内容节点落在「生成中」占位节点的位置（垂直居中对齐）。
@@ -1615,7 +1568,7 @@ export function CanvasStageFlow({
   // ===== 右键功能栏（右键卡片=编辑介绍/删除；框选多个=建组/一起删除） =====
   const stageWrapRef = useRef<HTMLDivElement | null>(null);
   const flowScreenRef = useRef<((p: { x: number; y: number }) => { x: number; y: number }) | null>(null);
-  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; nodeIds: string[] } | null>(null);
+  const [ctxMenu, setCtxMenu] = useState<CtxMenuState | null>(null);
   const [editLabelId, setEditLabelId] = useState<string | null>(null);
   const [editLabelVal, setEditLabelVal] = useState("");
 
@@ -1675,17 +1628,8 @@ export function CanvasStageFlow({
 
   // 点击菜单外部任意处 → 关闭菜单（标准 context menu 行为，无需点「关闭」）
   const ctxMenuRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    if (!ctxMenu) return;
-    const onDown = (e: MouseEvent) => {
-      const el = ctxMenuRef.current;
-      if (el && e.target instanceof Node && !el.contains(e.target)) {
-        setCtxMenu(null);
-      }
-    };
-    window.addEventListener("mousedown", onDown, true);
-    return () => window.removeEventListener("mousedown", onDown, true);
-  }, [ctxMenu]);
+  //   ⇒ mousedown 捕获订阅归口 lib/useCanvasEventBridge（T2.1-B2）；effect 依赖仍是 [ctxMenu]。
+  useCtxMenuOutsideDismiss({ ctxMenu, ctxMenuRef, setCtxMenu });
 
   // ===== 灵感卡 / 组标题 编辑态 =====
   const [inspirationEditId, setInspirationEditId] = useState<string | null>(null);
@@ -2160,40 +2104,8 @@ export function CanvasStageFlow({
 
   // M1.4/M1.5：灵感卡发送画布——对话灵感卡/素材库统一走「缓存 + 通知」通道
   // （画布未挂载时事件不丢；挂载时先消费积压，之后通知增量消费）
-  useEffect(() => {
-    const createFromPayloads = (items: Array<{
-      id?: string; title?: string; content?: string; imageUrl?: string;
-    }>) => {
-      if (!items || items.length === 0) return;
-      const fresh: InspirationCardStored[] = [];
-      for (const d of items) {
-        const title = (d.title || "").trim() || "灵感卡";
-        const content = d.content || "";
-        // 去重：同 id（资产库卡 id 稳定）已存在则跳过
-        const sid = d.id && d.id.startsWith("insp-")
-          ? d.id
-          : `insp-${d.id || crypto.randomUUID().slice(0, 8)}`;
-        const exists = inspirationCardsRef.current.some((c) => c.id === sid);
-        if (exists) continue;
-        const pos = findFreeSpot(INSPIRATION_CARD_W, INSPIRATION_CARD_H);
-        fresh.push({
-          id: sid, kind: "preset", title, content,
-          imageUrl: d.imageUrl || "",
-          x: pos.x, y: pos.y, w: INSPIRATION_CARD_W, h: INSPIRATION_CARD_H,
-        });
-      }
-      if (fresh.length === 0) return;
-      setInspirationCards((prev) => [...prev, ...fresh]);
-      const next = [...inspirationCardsRef.current, ...fresh];
-      persistNow({ cards: next });
-      showToast(`已发送 ${fresh.length} 张灵感卡到画布`, "success");
-    };
-    // 挂载时先消费积压（发送时画布未挂载的场景）
-    createFromPayloads(consumePendingInspirations());
-    const onInsp = () => createFromPayloads(consumePendingInspirations());
-    window.addEventListener(CANVAS_INSPIRATION_EVENT, onInsp);
-    return () => window.removeEventListener(CANVAS_INSPIRATION_EVENT, onInsp);
-  }, [findFreeSpot, persistNow]);
+  //   ⇒ 订阅 + 挂载消费归口 lib/useCanvasEventBridge（T2.1-B2）；effect 依赖仍是 [findFreeSpot, persistNow]。
+  useCanvasInspirationDrop({ inspirationCardsRef, setInspirationCards, findFreeSpot, persistNow, showToast });
 
   // 组节点：编辑标题（双击组节点触发）→ 写回 layoutNodes[id].label（卡片渲染走 customLabel 优先）
   const saveGroupRename = useCallback(() => {
