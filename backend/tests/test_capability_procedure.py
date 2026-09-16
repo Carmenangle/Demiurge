@@ -49,6 +49,29 @@ def test_approval租约空capabilities起步零授权而full放行():
     capability_sandbox.authorize(lease["id"], "any.op")
 
 
+def test_租约过期判定与active过滤走注入时钟():
+    """P21：grant/renew/authorize/active 的过期判定统一走 now= 注入 —— 不必 sleep 等 TTL。"""
+    capability_sandbox._reset_for_tests()
+    t0 = 1000.0
+    lease = capability_sandbox.grant(
+        "plan:ttl", [{"operation": "any.op"}], ttl_seconds=600, now=lambda: t0)
+    assert lease["expires_at"] == t0 + 600
+    # 未到期：authorize 放行、active 仍在列
+    assert capability_sandbox.authorize(lease["id"], "any.op", now=lambda: t0 + 599.0)
+    assert [it["id"] for it in capability_sandbox.active(now=lambda: t0 + 599.0)] == [lease["id"]]
+    # 已到期：authorize 拒绝、active 过滤掉
+    with pytest.raises(PermissionError):
+        capability_sandbox.authorize(lease["id"], "any.op", now=lambda: t0 + 601.0)
+    assert capability_sandbox.active(now=lambda: t0 + 601.0) == []
+    # renew 用同一假钟救活过期租约后可再追加授权并执行
+    renewed = capability_sandbox.renew(lease["id"], now=lambda: t0 + 601.0)
+    assert renewed["expires_at"] == t0 + 601.0 + 86400
+    capability_sandbox.grant_operation(
+        lease["id"], "file.write", path="", now=lambda: t0 + 601.0)
+    capability_sandbox.authorize(lease["id"], "file.write", path="", now=lambda: t0 + 601.0)
+    capability_sandbox._reset_for_tests()
+
+
 def test_failure_summary从trace统计失败模式(monkeypatch):
     monkeypatch.setattr(procedure_skills.run_trace, "read_recent", lambda *_a, **_k: [
         {"event": "plan.step_failed", "data": {"operation": "test.batch", "error": "上游 502"}},

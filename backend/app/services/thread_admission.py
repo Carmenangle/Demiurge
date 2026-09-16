@@ -14,6 +14,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
+from typing import Callable
 
 
 class RunAlreadyActive(RuntimeError):
@@ -47,25 +48,27 @@ def _prune_stale(now: float) -> None:
         _log.info("pruned stale admission for thread %s (>%.0f min)", tid, ADMISSION_STALE_MS / 60_000)
 
 
-def is_active(thread_id: str) -> bool:
+# now 可注入：单测用假钟驱动看门狗，不必后拨 admitted_at 或真 sleep。
+def is_active(thread_id: str, *, now: Callable[[], float] = time.monotonic) -> bool:
     """该 thread 是否有活动运行。"""
     with _lock:
-        _prune_stale(time.monotonic())
+        _prune_stale(now())
         return thread_id in _active
 
 
-def active_threads() -> list[str]:
+def active_threads(*, now: Callable[[], float] = time.monotonic) -> list[str]:
     """当前有活动运行的所有 thread（供后台面板列出正在跑的仓库对话）。"""
     with _lock:
-        _prune_stale(time.monotonic())
+        _prune_stale(now())
         return list(_active.keys())
 
 
-def admit(thread_id: str, cancel_event: threading.Event) -> Admission:
+def admit(thread_id: str, cancel_event: threading.Event,
+          *, now: Callable[[], float] = time.monotonic) -> Admission:
     """登记一次运行；同一 thread 已有活动运行时抛 RunAlreadyActive。"""
-    admission = Admission(thread_id, cancel_event, time.monotonic())
+    admission = Admission(thread_id, cancel_event, now())
     with _lock:
-        _prune_stale(time.monotonic())
+        _prune_stale(now())
         if thread_id in _active:
             raise RunAlreadyActive("该对话已有生成任务正在运行")
         _active[thread_id] = admission

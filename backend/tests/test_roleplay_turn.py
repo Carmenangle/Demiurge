@@ -1346,13 +1346,17 @@ def test_首次生成异常转入自愈重掷成功():
     assert calls == ["generate", "generate", "generated"]  # 首发失败 → 重掷成功
 
 
-def test_自愈总时长预算用尽即报错(monkeypatch):
-    """2026-08-31 晚 turn13 实锤：整轮自愈 15 分钟才报错——总时长预算到点立即停止。"""
+def test_自愈总时长预算用尽即报错():
+    """2026-08-31 晚 turn13 实锤：整轮自愈 15 分钟才报错——总时长预算到点立即停止。
+
+    P21：改用注入假钟（execute_turn(now=)），不再 monkeypatch 全局 time.monotonic。
+    """
     import pytest
     clock = [0.0, roleplay_turn.SELFHEAL_TOTAL_BUDGET_SECONDS + 9999.0]
-    monkeypatch.setattr(
-        roleplay_turn.time, "monotonic",
-        lambda: clock.pop(0) if len(clock) > 1 else clock[0])
+
+    def fake_now() -> float:
+        return clock.pop(0) if len(clock) > 1 else clock[0]
+
     calls: list = []
     generate, continue_generate, generated = _continuation_hooks(
         calls, "<think>思考只写了一半", "不该被调用",
@@ -1376,7 +1380,8 @@ def test_自愈总时长预算用尽即报错(monkeypatch):
     with pytest.raises(roleplay_turn.TruncatedRoleplayOutput) as excinfo:
         roleplay_turn.execute_turn(turn, roleplay_turn.TurnExecutionHooks(
             generate=monkey_generate, generated=generated,
-            continue_generate=continue_generate, finalization=finalization))
+            continue_generate=continue_generate, finalization=finalization),
+            now=fake_now)
     message = str(excinfo.value)
     assert "自愈总时长预算已用尽" in message
     assert "本轮共 1 次模型调用" in message  # 原始生成后直接到点，零自愈

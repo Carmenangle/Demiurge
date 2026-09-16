@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import re
 
-# 生成侧搭车块全集（与各提取器属主一一对应）：think=思考、illustration=插画计划、
-# audio=配音、transition=转场、roll=命运骰点、encounter=登场锚点、
-# status=状态栏快照、状态更新=数值增量、表格更新=旧版表格块。
-_TAGS = "think|illustration|audio|transition|roll|encounter|status|状态更新|表格更新"
+from app.services import prompt_clean
+
+# 生成侧搭车块全集（tag → 清洗侧清单的属主 = `prompt_clean.CONTEXT_SLIM_TAGS`，
+# 2026-09-15 P16 收口）：think=思考、illustration=插画计划、audio=配音、transition=转场、
+# roll=命运骰点、encounter=登场锚点、fate=命定预警、status=状态栏快照、状态更新=数值增量、
+# 表格更新=旧版表格块。**新增/删除块只改 prompt_clean**，此处与其余清洗侧一起自动跟上。
+_TAGS = prompt_clean.tags_alternation(prompt_clean.CONTEXT_SLIM_TAGS)
 _BLOCK_RE = re.compile(
     rf"\s*<(?P<tag>{_TAGS})\b[^>]*>[\s\S]*?</(?P=tag)>\s*", re.IGNORECASE)
 _BLOCK_OPEN_TAIL_RE = re.compile(

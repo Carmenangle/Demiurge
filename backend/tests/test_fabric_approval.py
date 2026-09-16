@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import json
-import time
 
 import pytest
 
@@ -193,31 +192,40 @@ def test_approval_step_limit保留断点_继续可接续(tmp_path, monkeypatch):
 # 内存，批准则删断点丢进度。修复=授权时拒绝过期租约 + 批准路径先续期救活。
 
 
+# P21：过期判定改用注入假钟（grant 在 t=1000 建租约、TTL 600 ⇒ 1600 到期；
+# 判定时刻取 t=1e9），不再写 _LEASES[...]["expires_at"] 改内部结构。
+_T_EXPIRED = 1e9
+
+
 def test_grant_operation_过期租约拒绝追加授权():
     lease = capability_sandbox.grant(
-        "fabric:expired-unit", [], mode=capability_sandbox.ACCESS_APPROVAL)
-    capability_sandbox._LEASES[lease["id"]]["expires_at"] = 1.0  # 置为远古 = 已过期
+        "fabric:expired-unit", [], mode=capability_sandbox.ACCESS_APPROVAL,
+        now=lambda: 1000.0)
     with pytest.raises(PermissionError, match="已过期"):
-        capability_sandbox.grant_operation(lease["id"], "file.write_text")
+        capability_sandbox.grant_operation(
+            lease["id"], "file.write_text", now=lambda: _T_EXPIRED)
 
 
 def test_renew_救活过期租约_续期后可授权可执行():
     lease = capability_sandbox.grant(
-        "fabric:expired-unit", [], mode=capability_sandbox.ACCESS_APPROVAL)
-    capability_sandbox._LEASES[lease["id"]]["expires_at"] = 1.0
+        "fabric:expired-unit", [], mode=capability_sandbox.ACCESS_APPROVAL,
+        now=lambda: 1000.0)
     with pytest.raises(PermissionError):
-        capability_sandbox.grant_operation(lease["id"], "file.write_text")
-    renewed = capability_sandbox.renew(lease["id"])
-    assert renewed["expires_at"] > time.time()
+        capability_sandbox.grant_operation(
+            lease["id"], "file.write_text", now=lambda: _T_EXPIRED)
+    renewed = capability_sandbox.renew(lease["id"], now=lambda: _T_EXPIRED)
+    assert renewed["expires_at"] > _T_EXPIRED
     # 续期不扩大授权面：追加仍需逐条批准
-    capability_sandbox.grant_operation(lease["id"], "file.write_text", path="D:/w")
-    assert capability_sandbox.authorize(lease["id"], "file.write_text", path="D:/w")
+    capability_sandbox.grant_operation(
+        lease["id"], "file.write_text", path="D:/w", now=lambda: _T_EXPIRED)
+    assert capability_sandbox.authorize(
+        lease["id"], "file.write_text", path="D:/w", now=lambda: _T_EXPIRED)
     with pytest.raises(PermissionError):
-        capability_sandbox.authorize(lease["id"], "doc.create_repo")
+        capability_sandbox.authorize(lease["id"], "doc.create_repo", now=lambda: _T_EXPIRED)
     # 撤销后不可续期
     capability_sandbox.revoke(lease["id"])
     with pytest.raises(PermissionError):
-        capability_sandbox.renew(lease["id"])
+        capability_sandbox.renew(lease["id"], now=lambda: _T_EXPIRED)
 
 
 def test_批准过期租约自动续期续跑_断点不删进度保留(tmp_path, monkeypatch):
@@ -251,7 +259,9 @@ def test_批准过期租约自动续期续跑_断点不删进度保留(tmp_path,
     assert "需要批准" in res["result_text"]
     pend = fabric_checkpoint.pending(output_dir=str(work))
     assert pend and pend[0]["pending_tool"] == "file.write_text"
-    # 模拟断点停留超过 TTL：租约已过期（未撤销，盘面仍登记）
+    # 模拟断点停留超过 TTL：租约已过期（未撤销，盘面仍登记）。
+    # P21 备注：此处仍后拨内部字段 —— 该租约由 plan_compiler_node 内部用真实时钟创建，
+    # 无法回填 now=；单测直接构造租约的路径（见上方两例）已改走注入时钟。
     capability_sandbox._LEASES[pend[0]["lease_id"]]["expires_at"] = 1.0
 
     res2 = ag._fabric_approval_word("批准", ctx, str(work), [])

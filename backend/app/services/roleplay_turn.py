@@ -28,7 +28,7 @@ class RoleplayInterrupted(RuntimeError):
     """
 
 
-def _user_interrupted(ctx: Any) -> bool:
+def user_interrupted(ctx: Any) -> bool:
     """用户停止信号（协作式取消事件置位）：RunContext 字段 / dict 键两种 ctx 都兼容。
 
     流式热路径每 token 调用，不走 ctx.get（RunContext.get 会重建 _legacy dict）。
@@ -124,14 +124,16 @@ _BARE_COT_PARA_RE = re.compile(
 )
 # 剥壳时清掉的独立事件块：**整块含内容**剥（09-12 21:11 实锤：<状态更新> 包裹的增量
 # JSON 只剥标签不剥内容时，JSON 原样漏进正文；这些块本就由解析层消费，发布文本不该有）。
+# 清单属主 = `prompt_clean.BARE_STRIP_TAGS`（2026-09-15 P16 收口：prompt 承诺的
+# roll/encounter/**fate** 三块必须都在这里，否则 <fate> 会漏进发布正文）。
 # 注意 <status> 状态栏不在此列：它是显示层要保留的真身（见 _wrap_bare_body）。
 _BARE_EVENT_BLOCK_RES = [
     re.compile(rf"<{tag}>[\s\S]*?(?:</{tag}\s*>|\Z)", re.IGNORECASE)
-    for tag in ("roll", "encounter", "illustration", "表格更新", "状态更新")
+    for tag in _prompt_clean.BARE_STRIP_TAGS
 ]
 # 残余单标签防御（整块剥之后的孤儿标签）
 _BARE_BLOCK_TAGS = re.compile(
-    r"</?\s*(?:roll|encounter|illustration|表格更新|状态更新)\b[^>]*>",
+    rf"</?\s*(?:{_prompt_clean.tags_alternation(_prompt_clean.BARE_STRIP_TAGS)})\b[^>]*>",
     re.IGNORECASE,
 )
 # 裸输出里的状态栏块：先抽出、包装后放回 <content> 之前（2026-09-12 19:27 trace 实锤：
@@ -506,7 +508,8 @@ def _reroll_once(turn: TurnExecution, hooks: TurnExecutionHooks, reason: str) ->
 
 def _selfheal_loop(turn: TurnExecution, hooks: TurnExecutionHooks, reply: str,
                    exc: Exception, *, attempts: int, methods: list[str],
-                   tried_continuations: set) -> dict:
+                   tried_continuations: set,
+                   now: Callable[[], float] = time.monotonic) -> dict:
     """截断自愈循环（2026-08-31 晚定案）：每轮只花一次模型调用，按残缺形态选动作——
     正文截断且断点前足量 → 正文续写；think 截断 → 预填续写（turn 12 实锤：两次全额
     重掷零产出，预填续写复用已付费思考篇幅）；否则 → 整段重掷。同一 partial 续写失败
@@ -517,17 +520,17 @@ def _selfheal_loop(turn: TurnExecution, hooks: TurnExecutionHooks, reply: str,
     """
     final_exc: Exception = exc
     budget = max(0, min(5, int(turn.selfheal_attempts)))
-    selfheal_started = time.monotonic()
+    selfheal_started = now()
     healed = False
     for _ in range(budget):
         # 用户停止（2026-09-04 事故实锤）：中断不是失败，不得继续自愈 reroll 烧 token。
-        if _user_interrupted(turn.ctx):
+        if user_interrupted(turn.ctx):
             raise RoleplayInterrupted("用户已停止生成") from final_exc
-        if time.monotonic() - selfheal_started > SELFHEAL_TOTAL_BUDGET_SECONDS:
+        if now() - selfheal_started > SELFHEAL_TOTAL_BUDGET_SECONDS:
             final_exc = TruncatedRoleplayOutput("自愈总时长预算已用尽")
             break
         _set_selfheal_deadline(
-            turn.ctx, time.monotonic() + SELFHEAL_CALL_TIMEOUT_SECONDS)
+            turn.ctx, now() + SELFHEAL_CALL_TIMEOUT_SECONDS)
         try:
             if (hooks.continue_generate is not None and _continuation_worthwhile(reply)
                     and reply not in tried_continuations):
@@ -547,7 +550,7 @@ def _selfheal_loop(turn: TurnExecution, hooks: TurnExecutionHooks, reply: str,
                 except Exception as exc3:  # noqa: BLE001 - 单次重掷失败不判死，继续下一轮
                     # 2026-09-04：重掷触发 4xx 确定性错误（如 max_tokens 超限）时继续
                     # 烧自愈预算毫无意义——直接判死停止，避免重复计费。
-                    if _user_interrupted(turn.ctx):
+                    if user_interrupted(turn.ctx):
                         # 用户已点停止：流异常/连接断开不再自愈，立即上抛中断
                         raise RoleplayInterrupted("用户已停止生成") from exc3
                     if _llm.is_client_rejected(exc3):
@@ -603,15 +606,19 @@ def _selfheal_loop(turn: TurnExecution, hooks: TurnExecutionHooks, reply: str,
     ), hooks.finalization)
 
 
-def execute_turn(turn: TurnExecution, hooks: TurnExecutionHooks) -> dict:
-    """Generate and finalize one roleplay turn through the public transaction interface."""
+def execute_turn(turn: TurnExecution, hooks: TurnExecutionHooks,
+                 *, now: Callable[[], float] = time.monotonic) -> dict:
+    """Generate and finalize one roleplay turn through the public transaction interface.
+
+    now 可注入：单测用假钟驱动自愈总时长预算判定，不必 monkeypatch time.monotonic。
+    """
     try:
         reply = hooks.generate() or "（无回复）"
         hooks.generated(reply)
     except Exception as exc:  # noqa: BLE001 - 首发超时/连接失败转入自愈（重掷有预算）
         # 用户停止（2026-09-04 事故实锤）：中断≠失败——不上自愈、不整段重掷。
         # 此前取消信号只到节点边界，selfheal 无视停止连续 reroll 从头生成白烧 token。
-        if _user_interrupted(turn.ctx):
+        if user_interrupted(turn.ctx):
             raise RoleplayInterrupted("用户已停止生成") from exc
         turn.trace.append(f"⚠️ 首次生成失败（{exc}），转入自愈循环")
         # 2026-09-04 实锤：max_tokens 超限等 4xx 是确定性错误，整段重掷必然同错，
@@ -623,12 +630,12 @@ def execute_turn(turn: TurnExecution, hooks: TurnExecutionHooks) -> dict:
         final_exc = TruncatedRoleplayOutput(f"首次生成失败：{exc}")
         return _selfheal_loop(
             turn, hooks, "", final_exc,
-            attempts=1, methods=[], tried_continuations=set())
+            attempts=1, methods=[], tried_continuations=set(), now=now)
     try:
         ensure_complete_visible_content(reply)
     except TruncatedRoleplayOutput as exc:
         # 用户停止：候选虽不完整也不再进自愈（自愈=又一次从头生成，违背停止意图）。
-        if _user_interrupted(turn.ctx):
+        if user_interrupted(turn.ctx):
             raise RoleplayInterrupted("用户已停止生成") from exc
         # 2026-09-04 事故修复：模型输出整段裸正文（无 <content> 标签）时一次包装即发布，
         # 不再进自愈循环（此前 3 次整段重掷全裸白烧 token 后整轮失败）。
@@ -639,7 +646,7 @@ def execute_turn(turn: TurnExecution, hooks: TurnExecutionHooks) -> dict:
         else:
             return _selfheal_loop(
                 turn, hooks, reply, exc,
-                attempts=1, methods=[], tried_continuations=set())
+                attempts=1, methods=[], tried_continuations=set(), now=now)
     # 正文元话语清洗（2026-09-13 用户实锤）：模型把「输出纪律」清单抄进 <content>
     # ⇒ 发布/落库前剥掉；否则它会作为历史被后台维护 agent 当内容吃进去（few-shot 污染，
     # 当日实锤 table_maintenance / chronicle 的 messages[1] 已带上这段文本）。

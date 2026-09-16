@@ -20,6 +20,42 @@ from __future__ import annotations
 
 import re
 
+# ── 生成侧搭车块登记（tag → 清洗侧清单的**单一属主**，2026-09-15 P16）─────────────
+#
+# 剧情模式 prompt 让模型在正文中间穿插搭车块（`agent_graph` 的【输出结构】与尾部输出纪律），
+# 各清洗/瘦身侧各自登记「我要剥哪些」。两份清单此前各写各的 ⇒ 2026-09-15 实锤 **承诺 ⊄ 登记**：
+# prompt 教模型打 `<roll>/<encounter>/<fate>`，而 `story_history` / `roleplay_turn` /
+# `image_prompt_extract` 三处清单**都没有 fate** ⇒ 模型真输出 `<fate>…</fate>` 时
+# ① 不被剥离，作为「上一轮正文」注入下一轮上下文（污染）；② 裸输出时留在发布正文里（展示泄漏）。
+#
+# 现把 tag 收到本文：**新增/删除块只改这里**，各侧按用途取子集；一致性由
+# `tests/test_output_blocks.py` 的「生成侧承诺 ⊆ 各清洗侧登记」断言守住（与 #17 环境注入同族）。
+#
+# ⚠ 改本文前先读 `docs/PROMPT-CLEANING-RULES.md`；`<status>` 是显示层真身——它进
+# `CONTEXT_SLIM_TAGS`（上下文只进正文）与 `NARRATIVE_STRIP_TAGS`（提取正文时清），
+# 但**不进** `BARE_STRIP_TAGS`（裸输出剥壳时状态栏要保留，见 `roleplay_turn._wrap_bare_body`）。
+
+# prompt 向模型点名的剧情事件块（生成侧承诺清单）
+EVENT_BLOCK_TAGS = ("roll", "encounter", "fate")
+
+# 上下文瘦身（`story_history.prose_only`）：历史只进上一次纯正文 ⇒ 全部搭车块都剥
+CONTEXT_SLIM_TAGS = (
+    "think", "illustration", "audio", "transition",
+    "roll", "encounter", "fate", "status", "状态更新", "表格更新",
+)
+
+# 裸输出剥壳（`roleplay_turn._strip_event_blocks`）：**不含 status**（状态栏是显示层真身，要保留）
+BARE_STRIP_TAGS = ("roll", "encounter", "fate", "illustration", "表格更新", "状态更新")
+
+# 正文提取（`image_prompt_extract.protected_narrative_text`）：状态/控制块 + 剧情事件块都要清
+NARRATIVE_STRIP_TAGS = ("status", "状态更新", "表格更新", "roll", "encounter", "fate")
+
+
+def tags_alternation(tags: tuple[str, ...]) -> str:
+    """把 tag 元组编成正则分支串（保持声明序，便于人工核对）。公开：各清洗侧都用它拼桶形正则。"""
+    return "|".join(tags)
+
+
 # 破甲标记还原：对齐用户给的正则 /@\(([^()]*)\)(?=@)|@\(([^()]*)\)|\(([^()]*)\)@|@/g → $1$2$3
 # 覆盖 @(x)@ 包裹式；剩余裸 @ 直接删。i/<i> 等分隔符另由用户在 IMAGE_PROMPT 正则里配（此处只兜底 @ 系）。
 _MARKER_RE = re.compile(r"@\(([^()]*)\)(?=@)|@\(([^()]*)\)|\(([^()]*)\)@|@")

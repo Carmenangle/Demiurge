@@ -88,11 +88,13 @@ def test_evict_candidates_sorts_by_saving():
         "small": ml.Lease("small", "rerank", "reranker", 40, 500, 0, 999),
     }
     dev = _device(free=4000, available=4000)
-    cands = ml.evict_candidates("visual_embedding", 5000, leases, dev)
+    # P21：age_seconds 走 now= 注入（lease.acquired_at=0）——不必真等时间流逝
+    cands = ml.evict_candidates("visual_embedding", 5000, leases, dev, now=lambda: 1005.0)
     # 只有 big（4600）释放后够 5000；small 释放后仍不够
     assert cands
     assert cands[0]["owner"] == "visual"
     assert cands[0]["saving_mib"] == 4600
+    assert cands[0]["age_seconds"] == 1005.0
     assert "释放" in cands[0]["eviction_reason"]
 
 

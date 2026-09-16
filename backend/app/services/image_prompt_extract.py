@@ -31,10 +31,14 @@ _THINK_OPEN_TAIL_RE = re.compile(r"\s*<think\b[^>]*>[\s\S]*\Z", re.I)
 _CONTENT_RE = re.compile(r"<content\b[^>]*>([\s\S]*?)</content>", re.I)
 _CONTENT_OPEN_RE = re.compile(r"<content\b[^>]*>\s*", re.I)
 _CONTROL_RE = re.compile(
-    r"\s*<(?P<tag>status|状态更新|表格更新)\b[^>]*>[\s\S]*?</(?P=tag)>\s*",
+    rf"\s*<(?P<tag>{prompt_clean.tags_alternation(prompt_clean.NARRATIVE_STRIP_TAGS)})\b[^>]*>"
+    r"[\s\S]*?</(?P=tag)>\s*",
     re.I,
 )
-_CONTROL_OPEN_TAIL_RE = re.compile(r"\s*<(?:status|状态更新|表格更新)\b[^>]*>[\s\S]*\Z", re.I)
+_CONTROL_OPEN_TAIL_RE = re.compile(
+    rf"\s*<(?:{prompt_clean.tags_alternation(prompt_clean.NARRATIVE_STRIP_TAGS)})\b[^>]*>[\s\S]*\Z",
+    re.I,
+)
 ASPECT_RATIOS = frozenset(("1:1", "2:3", "3:2", "3:4", "4:3", "9:16", "16:9"))
 DEFAULT_ASPECT_RATIO = "2:3"
 

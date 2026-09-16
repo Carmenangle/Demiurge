@@ -6,7 +6,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from app.config import DATA_DIR as _DATA_DIR
 
@@ -19,16 +19,16 @@ _LEASES: dict[str, dict[str, Any]] = {}
 LEASE_FILE = _DATA_DIR / "capability_leases.json"
 
 
-def _load_persisted() -> None:
+def _load_persisted(now: Callable[[], float] = time.time) -> None:
     try:
         if not LEASE_FILE.is_file():
             return
         items = _json.loads(LEASE_FILE.read_text(encoding="utf-8"))
-        now = time.time()
+        current = now()
         for item in items if isinstance(items, list) else []:
             if not isinstance(item, dict):
                 continue
-            if item.get("revoked") or float(item.get("expires_at") or 0) <= now:
+            if item.get("revoked") or float(item.get("expires_at") or 0) <= current:
                 continue
             _LEASES.setdefault(str(item.get("id") or ""), item)
     except (OSError, _json.JSONDecodeError):
@@ -56,7 +56,8 @@ ACCESS_LEVELS = (ACCESS_APPROVAL, ACCESS_FULL)
 
 
 def grant(subject: str, capabilities: list[dict[str, str]], *, ttl_seconds: int = 600,
-          approved_by: str = "user", mode: str = ACCESS_APPROVAL) -> dict[str, Any]:
+          approved_by: str = "user", mode: str = ACCESS_APPROVAL,
+          now: Callable[[], float] = time.time) -> dict[str, Any]:
     if mode not in ACCESS_LEVELS:
         raise ValueError(f"未知访问标准：{mode}")
     if not subject.strip():
@@ -78,12 +79,12 @@ def grant(subject: str, capabilities: list[dict[str, str]], *, ttl_seconds: int 
             "domain": str(item.get("domain") or "").strip().lower(),
             "tool": str(item.get("tool") or "").strip(),
         })
-    now = time.time()
+    current = now()
     lease_id = uuid.uuid4().hex
     lease: dict[str, Any] = {
         "id": lease_id, "subject": subject.strip(), "capabilities": normalized,
-        "mode": mode, "created_at": now,
-        "expires_at": now + max(1, min(ttl_seconds, 86400)),
+        "mode": mode, "created_at": current,
+        "expires_at": current + max(1, min(ttl_seconds, 86400)),
         "approved_by": approved_by or "user", "revoked": False,
     }
     with _LOCK:
@@ -93,7 +94,8 @@ def grant(subject: str, capabilities: list[dict[str, str]], *, ttl_seconds: int 
 
 
 def grant_operation(lease_id: str, operation: str, *, path: str = "", tool: str = "",
-                      domain: str = "") -> dict[str, Any]:
+                      domain: str = "",
+                      now: Callable[[], float] = time.time) -> dict[str, Any]:
     """往已有租约追加一条能力授权（approval 自由循环批准后调用）。
 
     与 grant 不同：不新建租约，只把用户刚批准的 operation/path 追加进现有租约，
@@ -106,7 +108,7 @@ def grant_operation(lease_id: str, operation: str, *, path: str = "", tool: str 
         lease = _LEASES.get(lease_id)
         if not lease or lease.get("revoked"):
             raise PermissionError("能力租约不存在或已撤销")
-        if float(lease.get("expires_at") or 0) <= time.time():
+        if float(lease.get("expires_at") or 0) <= now():
             # 2026-09-14 修复：过期租约禁止追加授权。此前只查存在+未撤销即追加
             # 「成功」，续跑时 authorize 才查过期再拦 → 「批准→续跑→再拦→再批准」
             # 死循环（09-14 实盘复现：断点停 43h > TTL 24h）。
@@ -143,7 +145,8 @@ def lease_registered(lease_id: str) -> bool:
     return True
 
 
-def renew(lease_id: str, *, ttl_seconds: int = 86400) -> dict[str, Any]:
+def renew(lease_id: str, *, ttl_seconds: int = 86400,
+          now: Callable[[], float] = time.time) -> dict[str, Any]:
     """续期租约（approval 断点批准 = 用户此刻的新授权动作，可救活过期租约）。
 
     2026-09-14：断点停在审批点超过 TTL 时，批准若不续期则续跑必再被拦。
@@ -154,7 +157,7 @@ def renew(lease_id: str, *, ttl_seconds: int = 86400) -> dict[str, Any]:
         lease = _LEASES.get(str(lease_id or ""))
         if not lease or lease.get("revoked"):
             raise PermissionError("能力租约不存在或已撤销，无法续期")
-        lease["expires_at"] = time.time() + max(1, min(ttl_seconds, 86400))
+        lease["expires_at"] = now() + max(1, min(ttl_seconds, 86400))
         result = dict(lease)
     _save_persisted()
     return result
@@ -174,10 +177,11 @@ def _path_allowed(requested: str, root: str) -> bool:
 
 
 def authorize(lease_id: str, operation: str, *, path: str = "", domain: str = "",
-              tool: str = "") -> dict[str, Any]:
+              tool: str = "",
+              now: Callable[[], float] = time.time) -> dict[str, Any]:
     with _LOCK:
         lease = dict(_LEASES.get(lease_id) or {})
-    if not lease or lease.get("revoked") or float(lease.get("expires_at") or 0) <= time.time():
+    if not lease or lease.get("revoked") or float(lease.get("expires_at") or 0) <= now():
         raise PermissionError("能力租约不存在、已撤销或已过期")
     if lease.get("mode") == ACCESS_FULL:
         return lease
@@ -194,11 +198,12 @@ def authorize(lease_id: str, operation: str, *, path: str = "", domain: str = ""
     raise PermissionError(f"租约未授权操作：{operation}")
 
 
-def active(subject: str = "") -> list[dict[str, Any]]:
-    now = time.time()
+def active(subject: str = "", *,
+           now: Callable[[], float] = time.time) -> list[dict[str, Any]]:
+    current = now()
     with _LOCK:
         return [dict(item) for item in _LEASES.values()
-                if not item.get("revoked") and item.get("expires_at", 0) > now
+                if not item.get("revoked") and item.get("expires_at", 0) > current
                 and (not subject or item.get("subject") == subject)]
 
 

@@ -273,6 +273,7 @@ def can_run(
 def evict_candidates(
     capability: str, estimated_mib: int,
     leases: dict[str, Lease], device: DeviceInfo,
+    *, now: Callable[[], float] = time.time,
 ) -> list[dict]:
     """返回可卸载的候选 lease 列表（按推荐顺序），含卸载理由和节省显存量。"""
     candidates = []
@@ -288,7 +289,7 @@ def evict_candidates(
                     "eviction_reason": (
                         f"释放 {le.owner}（{saving} MiB）后可用 {device.free_mib + saving} MiB"
                     ),
-                    "age_seconds": round(time.time() - le.acquired_at, 1),
+                    "age_seconds": round(now() - le.acquired_at, 1),
                 })
     # 按节省量降序（优先卸大块）
     from typing import cast
@@ -316,16 +317,20 @@ def _prune(now: float | None = None) -> None:
 
 
 def acquire(owner: str, capability: str, *, priority: int,
-            estimated_mib: int = 0, ttl_seconds: int = 1200) -> Lease | None:
-    """获取加速器租约；高优先级可调用低优先级 Adapter 的释放回调。"""
+            estimated_mib: int = 0, ttl_seconds: int = 1200,
+            now: Callable[[], float] = time.time) -> Lease | None:
+    """获取加速器租约；高优先级可调用低优先级 Adapter 的释放回调。
+
+    now 可注入：单测用假钟驱动租约到期判定与 age/expires_in 展示，不必真 sleep。
+    """
     owner, capability = owner.strip(), capability.strip()
     if not owner or not capability:
         raise ValueError("租约 owner 和 capability 不能为空")
     with _LOCK:
-        _prune()
+        _prune(now())
         existing = next((lease for lease in _LEASES.values() if lease.owner == owner), None)
         if existing:
-            existing.expires_at = time.time() + max(1, ttl_seconds)
+            existing.expires_at = now() + max(1, ttl_seconds)
             return existing
         conflicts = [
             lease for lease in _LEASES.values()
@@ -343,7 +348,7 @@ def acquire(owner: str, capability: str, *, priority: int,
             except Exception:
                 pass
     with _LOCK:
-        _prune()
+        _prune(now())
         remaining_conflicts = [
             lease for lease in _LEASES.values()
             if not (capability in _CAPABILITY_SHARED and lease.capability == capability)
@@ -352,10 +357,10 @@ def acquire(owner: str, capability: str, *, priority: int,
             return None
         for token in [lease.token for lease in remaining_conflicts if lease.priority < priority]:
             _LEASES.pop(token, None)
-        now = time.time()
+        current = now()
         lease = Lease(
             uuid.uuid4().hex, owner, capability, int(priority), max(0, int(estimated_mib)),
-            now, now + max(1, int(ttl_seconds)),
+            current, current + max(1, int(ttl_seconds)),
         )
         _LEASES[lease.token] = lease
         return lease
@@ -383,17 +388,20 @@ def release_owner(owner: str) -> int:
         return len(tokens)
 
 
-def status() -> dict[str, object]:
-    """完整状态含三块：leases（原有）、device（真实 GPU 探测）、queue（ComfyUI 队列）。"""
+def status(*, now: Callable[[], float] = time.time) -> dict[str, object]:
+    """完整状态含三块：leases（原有）、device（真实 GPU 探测）、queue（ComfyUI 队列）。
+
+    now 可注入：单测用假钟驱动租约到期剪枝与 age/expires_in 展示，不必真 sleep。
+    """
     with _LOCK:
-        _prune()
-        now = time.time()
+        _prune(now())
+        current = now()
         leases_out = [
             {
                 "owner": le.owner, "capability": le.capability,
                 "priority": le.priority, "estimated_mib": le.estimated_mib,
-                "age_seconds": round(now - le.acquired_at, 3),
-                "expires_in_seconds": round(max(0.0, le.expires_at - now), 3),
+                "age_seconds": round(current - le.acquired_at, 3),
+                "expires_in_seconds": round(max(0.0, le.expires_at - current), 3),
             }
             for le in sorted(_LEASES.values(), key=lambda x: -x.priority)
         ]

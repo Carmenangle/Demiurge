@@ -1,7 +1,6 @@
 """线程准入测试：抢占登记、所有权校验、协作取消、活动状态生命周期。
 零重依赖，独立于 langgraph/langchain，可单独收集。"""
 import threading
-import time
 
 import pytest
 
@@ -65,22 +64,25 @@ def test_request_cancel_misses_when_idle():
 
 
 def test_prune_stale_evicts_leaked_and_keeps_fresh():
-    """崩溃泄漏的登记超过阈值被自动清理；未超时登记不受影响，清理后可重新准入。"""
+    """崩溃泄漏的登记超过阈值被自动清理；未超时登记不受影响，清理后可重新准入。
+
+    P21：全程由注入假钟驱动（读接口与登记共用同一时钟），不再后拨 admitted_at。
+    """
     _fresh()
+    stale = ta.ADMISSION_STALE_MS / 1000
     # 直接注入一条超时“泄漏”登记（真实场景：运行异常崩溃未 release）
-    leak = ta.Admission(
-        "leak", threading.Event(),
-        admitted_at=time.monotonic() - ta.ADMISSION_STALE_MS / 1000 - 1,
-    )
+    leak = ta.Admission("leak", threading.Event(), admitted_at=1000.0)
     with ta._lock:
         ta._active["leak"] = leak
-    fresh = ta.admit("fresh", threading.Event())
+    # 假钟 t1：leak 已超阈值（1000 + stale + 1）；fresh 此刻登记 ⇒ 未超时
+    t1 = 1000.0 + stale + 1
+    fresh = ta.admit("fresh", threading.Event(), now=lambda: t1)
     try:
-        assert "leak" not in ta.active_threads()  # 泄漏登记被读取接口自动清理
-        assert ta.is_active("fresh")              # 未超时登记保留
-        readmit = ta.admit("leak", threading.Event())  # 清理后同 thread 可重新准入
+        assert "leak" not in ta.active_threads(now=lambda: t1)  # 泄漏登记被读取接口自动清理
+        assert ta.is_active("fresh", now=lambda: t1)            # 未超时登记保留
+        readmit = ta.admit("leak", threading.Event(), now=lambda: t1)  # 清理后可重新准入
         ta.release(readmit)
-        assert not ta.is_active("leak")
+        assert not ta.is_active("leak", now=lambda: t1)
     finally:
         ta.release(fresh)
 
