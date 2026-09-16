@@ -35,6 +35,10 @@ import {
   buildDraftInputNodes, buildStreamingPlaceholderNodes, buildWfRunNodes,
   type PendingInput, type WfRun,
 } from "../lib/canvasPlaceholderNodes";
+import {
+  buildCanvasEdges, buildContentNodes, buildInspirationNodes, buildReferenceImageNodes,
+  buildStoryNodes, buildToolCards, mergeProjectedNodes,
+} from "../lib/canvasProjection";
 import { useCanvasWfEvents } from "../lib/useCanvasWfEvents";
 import {
   useCanvasGenerationSaved, useCanvasInspirationDrop, useCanvasWorkflowToolCreate,
@@ -749,76 +753,13 @@ export function CanvasStageFlow({
   }, []);
 
   useEffect(() => {
-    const projected = rawNodes.map((n) => {
-      // 已持久化布局 → 用持久化坐标；新节点 → 用锚点网格计算出的坐标（contentPlacement）
-      const lyt = layoutNodes[n.id] || (contentPlacement && contentPlacement.map[n.id]
-        ? { x: contentPlacement.map[n.id].x, y: contentPlacement.map[n.id].y, w: n.w, h: n.h }
-        : null);
-      const gensFor = byGroup.get(n.id) || [];
-      return {
-        id: n.id,
-        type: "card" as const,
-        // 组内子节点：position 存相对组坐标 + parentId（刷新后还原组关系）
-        position: lyt ? { x: lyt.x, y: lyt.y } : { x: n.x, y: n.y },
-        ...(lyt?.parentId ? { parentId: lyt.parentId, extent: "parent" as const } : {}),
-        // 用户手动 resize 过（layout.custom）→ 显式尺寸跟随 w/h（锁定），否则高度自适应
-        ...(lyt?.custom && typeof lyt.w === "number" && typeof lyt.h === "number"
-          ? { style: { width: lyt.w, height: lyt.h } }
-          : {}),
-        selected: false,
-        data: {
-          node: n,
-          gens: gensFor,
-          imageUrls: gensFor.map((g) => g.image_url),
-          prompt: n.type === "input" ? (n.prompt || "") : (gensFor[0]?.prompt || ""),
-          customLabel: lyt?.label || "",
-          customSize: !!lyt?.custom,
-          isSel: false,
-          naturalSize: naturalSizesRef.current[gensFor[0]?.image_url || ""],
-          onSelect: () => {},
-          onOpen: (nn: CanvasNode) => {
-            // 输入节点 → 新建灵感卡（不是生成内容）
-            if (nn.type === "input") {
-              setInspirationEditId("new");
-              setInspirationEditKind("preset");
-              setInspirationEditTitle(nn.prompt || "");
-              setInspirationEditContent(nn.prompt || "");
-              return;
-            }
-            setDetailNode(nn);
-          },
-          onResize: (id: string, w: number, h: number) => {
-            // 拉伸中：实时更新该节点 style（ReactFlow 官方模式，让 wrapper 跟随尺寸）。
-            // 直接 setRfNodes 只改单个节点，不触发投影 useEffect 全量重建 → 无闪烁。
-            // onResizeEnd 才落 layoutNodes（customSize 持久化）。
-            setRfNodes((prev) => prev.map((n) => (n.id === id
-              ? { ...n, style: { ...n.style, width: w, height: h }, data: { ...n.data, customSize: true } }
-              : n)));
-          },
-          onResizeEnd: (id: string, w: number, h: number) => {
-            const base = layoutNodesRef.current[id] || { x: 0, y: 0, w: CARD_W, h: 100 };
-            const next = { ...layoutNodesRef.current, [id]: { ...base, w, h, custom: true } };
-            setLayoutNodes(next);
-            persistNow({ nodes: next });
-          },
-          onImgLoaded: (url: string, w: number, h: number) => {
-            const cur = naturalSizesRef.current[url];
-            if (cur && cur.w === w && cur.h === h) return;
-            naturalSizesRef.current = { ...naturalSizesRef.current, [url]: { w, h } };
-            // 直接更新目标节点的 naturalSize，不触发全量 useEffect 重建
-            setRfNodes((prev) => prev.map((n) => {
-              if (n.data.gens?.[0]?.image_url === url) {
-                return { ...n, data: { ...n.data, naturalSize: { w, h } } };
-              }
-              return n;
-            }));
-          },
-          onNodeCtx: (e: React.MouseEvent, nn: CanvasNode) => {
-            const rect = stageWrapRef.current?.getBoundingClientRect();
-            openCtxForNode(e.clientX - (rect?.left || 0), e.clientY - (rect?.top || 0), nn.id);
-          },
-        },
-      };
+    // ★ 投影 builder 全部归口 lib/canvasProjection.ts（T2.1-C）：
+    //   内容节点 / 工具卡 / 剧情楼层 / 灵感卡 / 参考图 构造 + 合并判定 + 连线派生。
+    const projected: Node<CardNodeData>[] = buildContentNodes({
+      rawNodes, layoutNodes, contentPlacement, byGroup, naturalSizesRef, layoutNodesRef,
+      stageWrapRef, openCtxForNode, persistNow, setDetailNode,
+      setInspirationEditId, setInspirationEditKind, setInspirationEditTitle, setInspirationEditContent,
+      setLayoutNodes, setRfNodes,
     });
     // ★ 生成中占位节点（对话流 streamingId 投影）：builder 见 lib/canvasPlaceholderNodes.ts
     const streamingPlaceholder: Node<CardNodeData>[] = buildStreamingPlaceholderNodes({
@@ -830,419 +771,45 @@ export function CanvasStageFlow({
       setInspirationEditTitle, setInspirationEditContent, stageWrapRef, openCtxForNode,
     });
     const inputs: Node<CardNodeData>[] = [...streamingPlaceholder, ...draftInputs];
-    // 工作流工具卡（/w 选模板后由对话消息实时投影，与生成内容节点同机制）
-    // ★ 主源 = 对话里的 workflow 消息投影（重启后对话历史恢复 → 节点自动出现，
-    //   不依赖一次性事件或 canvas.json 持久化；同模板只保留一张，用户拍板规则）。
-    //   辅助源 = 事件待创建 + layoutNodes 已持久化工具卡（去重后补充）。
-    const toolDefaultH = (cnt: number) => Math.max(180, 120 + (cnt || 0) * 70);
-    // 同批次新工具卡空位避让（在 toolCards map 内逐项累积）
-    const newToolExtrasRef: Array<{ x: number; y: number; w: number; h: number }> = [];
-    // 合并三来源，按 templateId 去重（投影优先，保证 id 稳定可恢复布局）
-    const toolSources: Array<{
-      id: string; templateId: string; templateName: string; estimatedNodeCount: number;
-      wfDraft?: unknown; wfCaptured?: unknown; wfConfirmed?: boolean;
-    }> = [];
-    const seenTemplate = new Set<string>();
-    // ① 对话消息投影（主源：重启可靠 + 同模板去重）
-    for (const p of projectWorkflowTools(messages)) {
-      if (seenTemplate.has(p.templateId)) continue;
-      if (deletedIdSet.has(p.id)) continue; // 已删除不复活
-      seenTemplate.add(p.templateId);
-      toolSources.push({
-        id: p.id,
-        templateId: p.templateId,
-        templateName: p.templateName || "工作流模板",
-        estimatedNodeCount: (layoutNodes[p.id]?.wfExposedIds?.length || 0),
-        wfDraft: p.wfDraft,
-        wfCaptured: p.wfCaptured,
-        wfConfirmed: p.wfConfirmed,
-      });
-    }
-    // ② 事件待创建（刚 /w 消息还没进 messages 时兜底）
-    for (const t of pendingToolCreates) {
-      if (seenTemplate.has(t.templateId)) continue;
-      seenTemplate.add(t.templateId);
-      toolSources.push(t);
-    }
-    // ③ layoutNodes 已持久化工具卡（旧数据/切画布再回补充）
-    for (const [pid, plyt] of Object.entries(layoutNodes)) {
-      if (!plyt.templateId) continue;
-      if (seenTemplate.has(plyt.templateId)) continue;
-      seenTemplate.add(plyt.templateId);
-      toolSources.push({
-        id: pid,
-        templateId: plyt.templateId,
-        templateName: plyt.templateName || "工作流模板",
-        estimatedNodeCount: (plyt.wfExposedIds?.length || 0),
-      });
-    }
-    const toolCards: Node<CardNodeData>[] = toolSources.map((t) => {
-      const tlyt = layoutNodes[t.id];
-      // 初始节点数：优先真实 exposed_ids（编辑器选择完毕回流），否则用 /w 派发的预估数
-      // （模板 node_order 长度）——避免卡片创建时显示「0 节点」（节点总是不存在表象）。
-      const exposedCount = tlyt?.wfExposedIds?.length ?? 0;
-      const estCount = t.estimatedNodeCount || 0;
-      const nodeCount = Math.max(exposedCount, estCount);
-      // 工具卡高度：默认 auto（随内容撑开——未选择时节点预览区/引导文字、已选择时收起态，
-      // 框与内容始终一致，不再按模板节点数估算出大空白）；手动 resize 过 → 跟随 tlyt。
-      // 新卡位置：无持久化布局时找空位（同批次多张卡用 extras 互相避让）
-      const position = tlyt
-        ? { x: tlyt.x, y: tlyt.y }
-        : (() => {
-          const pos = findFreeSpot(CARD_W, toolDefaultH(nodeCount), newToolExtrasRef);
-          newToolExtrasRef.push({ x: pos.x, y: pos.y, w: CARD_W, h: toolDefaultH(nodeCount) });
-          return pos;
-        })();
-      return {
-      id: t.id,
-      type: "card",
-      position,
-      // ★ ReactFlow 节点不读 data.node.h，必须显式 style.width。手动 resize 过 → 跟随 tlyt；否则 auto。
-      style: { width: tlyt?.custom && typeof tlyt.w === "number" ? tlyt.w : CARD_W,
-               height: tlyt?.custom && typeof tlyt.h === "number" ? tlyt.h : "auto" },
-      data: {
-        node: {
-          id: t.id, type: "workflow-tool", x: 0, y: 0,
-          w: CARD_W,
-          h: Math.max(180, 120 + nodeCount * 70),
-          generationIds: [],
-          templateId: t.templateId,
-          templateName: t.templateName,
-          wfConfirmed: tlyt?.wfConfirmed ?? t.wfConfirmed ?? false,
-          wfDraft: tlyt?.wfDraft ?? t.wfDraft,
-          wfCaptured: tlyt?.wfCaptured ?? t.wfCaptured,
-          wfExposedIds: tlyt?.wfExposedIds || [],
-          wfEstimatedNodeCount: nodeCount,
-        },
-        gens: [], imageUrls: [], prompt: t.templateName, isSel: false, naturalSize: undefined,
-        customSize: !!tlyt?.custom,
-        comfyUrl: settings.comfyuiUrl || "",
-        onSelect: () => {},
-        onOpen: (nn: CanvasNode) => { setToolModalNode({ node: nn, autoConfirm: false }); },
-        onResize: (id: string, w: number, h: number) => {
-          // 拉伸中：实时更新 style 跟随（同 projected 节点，不触发投影重建）
-          setRfNodes((prev) => prev.map((n) => (n.id === id
-          ? { ...n, style: { ...n.style, width: w, height: h }, data: { ...n.data, customSize: true } }
-          : n)));
-        },
-        // 拉伸结束写 layoutNodes + 持久化一次
-        onResizeEnd: (id: string, w: number, h: number) => {
-          const base = layoutNodesRef.current[id] || { x: 0, y: 0, w: CARD_W, h: 180 };
-          const next = { ...layoutNodesRef.current, [id]: { ...base, w, h, custom: true } };
-          setLayoutNodes(next);
-          persistNow({ nodes: next });
-        },
-        onImgLoaded: () => {},
-        onNodeCtx: (e: React.MouseEvent, nn: CanvasNode) => {
-          const rect = stageWrapRef.current?.getBoundingClientRect();
-          openCtxForNode(e.clientX - (rect?.left || 0), e.clientY - (rect?.top || 0), nn.id);
-        },
-        // 工作流工具卡按钮回调
-        onConfirmWorkflow: (nn: CanvasNode) => {
-          // 卡片「选择完毕」→ 打开双栏编辑器并自动执行抓取（与对话模式卡片直接抓取对齐）
-          setToolModalNode({ node: nn, autoConfirm: true });
-        },
-        onRunWorkflow: (nn: CanvasNode) => {
-          // 运转工作流 → 画布创建「生成中」节点 + 对话框下方进度条；
-          // 运转完毕占位节点被生成内容节点替换（laf-generation-saved 刷新 + laf-canvas-wf-done 清除）
-          const runId = `wfrun-${crypto.randomUUID().slice(0, 8)}`;
-          window.dispatchEvent(new CustomEvent("laf-canvas-wf-run", {
-            detail: { runId, toolNodeId: nn.id, templateName: nn.templateName || "工作流" },
-          }));
-          runWorkflowTask(nn, runId);
-        },
-        onChangeWorkflow: (nn: CanvasNode) => {
-          // 更改 → 回到未选择状态（保留节点参数和高度），并直接进入节点页面（编辑器）
-          const nodeCount = nn.wfExposedIds?.length || 0;
-          setRfNodes((ns) => ns.map((n) => (
-            n.id === nn.id ? { ...n, data: { ...n.data, node: { ...n.data.node, wfConfirmed: false } } } : n
-          )));
-          setLayoutNodes((prev) => {
-            const base = prev[nn.id] || { x: 0, y: 0, w: CARD_W, h: 180 };
-            return { ...prev, [nn.id]: { ...base, wfConfirmed: false, h: Math.max(180, 120 + nodeCount * 70) } };
-          });
-          setToolModalNode({ node: { ...nn, wfConfirmed: false }, autoConfirm: false });
-        },
-      },
-      };
+    // ★ 工作流工具卡：三源合并（对话投影 ① → 事件待创建 ② → 已持久化 ③）+ 同模板去重
+    const toolCards: Node<CardNodeData>[] = buildToolCards({
+      messages, deletedIdSet, layoutNodes, pendingToolCreates, findFreeSpot, settings,
+      layoutNodesRef, stageWrapRef, openCtxForNode, persistNow, runWorkflowTask,
+      setLayoutNodes, setRfNodes, setToolModalNode,
     });
-    // 剧情节点（对话楼层实时投影，与生成内容节点同机制）
-    // ★ 每个楼层一条剧情文本消息 → 一个节点；重启后对话历史恢复 → 节点自动出现。
-    //   封面 = 剧情自动插画；有图 → 左图右文（对齐图组节点）；无图 → 9:16 竖版卡。
-    //   正文渲染跑显示层正则（markdownOnly）——与对话模式同款管线（见 CardNodeComponent）。
-    const storyDefaultH = 240;
-    const storyExtrasRef: Array<{ x: number; y: number; w: number; h: number }> = [];
-    // ★ 正在生成的消息（streamingId）跳过剧情楼层投影：生成中只显示占位节点，
-    //   避免它因已带 route 标签 + 非空 trace 正文被误判为「已完成」的剧情楼层。
-    //   生成结束 streamingId 清空后，该消息才按标签正常落成剧情楼层。
-    const storySource = streamingId ? messages.filter((m) => m.id !== streamingId) : messages;
-    const storyNodes: Node<CardNodeData>[] = projectStoryNodes(storySource)
-      // 剧情楼层删除 = 删除对话消息（走 onDeleteMessage，不进 deletedIds 黑名单），
-      // 故这里不再按黑名单过滤：消息在则楼层在，消息删则投影自然消失。
-      .map((sp) => {
-      const hasCover = !!sp.image;
-      const baseW = hasCover ? CARD_W : INSPIRATION_CARD_W;
-      const baseH = hasCover ? storyDefaultH : INSPIRATION_CARD_H;
-      const tlyt = layoutNodes[sp.id];
-      const position = tlyt
-        ? { x: tlyt.x, y: tlyt.y }
-        : (() => {
-          // ★ 剧情楼层接替生成中占位节点的原位置（生成结束瞬间 streamingPosRef 仍持有位置，
-          //   无需等待 effect 转存，本次渲染直接读；若用户已生成过其它内容则仍走 findFreeSpot）。
-          const ph = streamingPosRef.current;
-          if (ph && ph.id === sp.messageId) {
-            const pos = { x: ph.x, y: ph.y };
-            // 标记占位已被剧情楼层接走：effect 不再转存 pendingAnchorRef（防陈旧锚点污染内容节点放置）
-            placeholderConsumedByStoryRef.current = true;
-            storyExtrasRef.push({ x: pos.x, y: pos.y, w: baseW, h: baseH });
-            // 记录待落盘位置：独立 effect 写进 layoutNodes + canvas.json（首次放置即持久化）
-            pendingStoryLayoutsRef.current[sp.id] = { x: pos.x, y: pos.y, w: baseW, h: baseH };
-            return pos;
-          }
-          const pos = findFreeSpot(baseW, baseH, storyExtrasRef);
-          storyExtrasRef.push({ x: pos.x, y: pos.y, w: baseW, h: baseH });
-          // 记录待落盘位置：独立 effect 写进 layoutNodes + canvas.json（首次放置即持久化）
-          pendingStoryLayoutsRef.current[sp.id] = { x: pos.x, y: pos.y, w: baseW, h: baseH };
-          return pos;
-        })();
-      return {
-        id: sp.id,
-        type: "card",
-        position,
-        style: { width: tlyt?.custom && typeof tlyt.w === "number" ? tlyt.w : baseW,
-                 height: tlyt?.custom && typeof tlyt.h === "number" ? tlyt.h : baseH },
-        data: {
-          node: {
-            id: sp.id, type: "story", x: 0, y: 0, w: baseW, h: baseH,
-            generationIds: [],
-            storyText: sp.text,
-            storyMessageId: sp.messageId,
-            storyIndex: sp.index + 1,
-            storyTotal: sp.total,
-            storyImage: sp.image,
-            storyVideo: sp.video,
-            storyAudio: sp.audio,
-            storyAudioLines: sp.audioLines,
-            storyThinking: sp.thinking,
-            groupKey: sp.id,
-          },
-          gens: [], imageUrls: sp.image ? [sp.image] : [], prompt: sp.text, isSel: false, naturalSize: undefined,
-          customSize: !!tlyt?.custom,
-          displayRegex,
-          onSelect: () => {},
-          onOpen: (nn: CanvasNode) => { setShowStoryThinking(false); setDetailNode(nn); },
-          onResize: (id: string, w: number, h: number) => {
-            setRfNodes((prev) => prev.map((n) => (n.id === id
-              ? { ...n, style: { ...n.style, width: w, height: h }, data: { ...n.data, customSize: true } }
-              : n)));
-          },
-          onResizeEnd: (id: string, w: number, h: number) => {
-            const base = layoutNodesRef.current[id] || { x: 0, y: 0, w: CARD_W, h: storyDefaultH };
-            const next = { ...layoutNodesRef.current, [id]: { ...base, w, h, custom: true } };
-            setLayoutNodes(next);
-            persistNow({ nodes: next });
-          },
-          onImgLoaded: () => {},
-          onNodeCtx: (e: React.MouseEvent, nn: CanvasNode) => {
-            const rect = stageWrapRef.current?.getBoundingClientRect();
-            openCtxForNode(e.clientX - (rect?.left || 0), e.clientY - (rect?.top || 0), nn.id);
-          },
-        },
-      };
+    const storyNodes: Node<CardNodeData>[] = buildStoryNodes({
+      streamingId, messages, layoutNodes, displayRegex, layoutNodesRef, stageWrapRef,
+      openCtxForNode, persistNow, setDetailNode, setLayoutNodes, setRfNodes,
+      setShowStoryThinking, findFreeSpot, streamingPosRef, placeholderConsumedByStoryRef,
+      pendingStoryLayoutsRef,
     });
     // 剧情节点投影列表同步给 ref（「整理剧情顺序」按钮 / 自动时序线用，顺序 = 剧情顺序）
     storyNodesRef.current = storyNodes;
-    // 灵感卡节点（独立持久化，位置直接来自 inspirationCards 列表，不走 layoutNodes）
-    const inspirationNodes: Node<CardNodeData>[] = inspirationCards.map((card) => ({
-      id: card.id,
-      type: "card",
-      position: { x: card.x, y: card.y },
-      style: { width: card.w, height: card.h },
-      data: {
-        node: {
-          id: card.id, type: "inspiration-card",
-          x: card.x, y: card.y, w: card.w, h: card.h,
-          generationIds: [],
-          inspirationKind: card.kind,
-          inspirationTitle: card.title,
-          inspirationContent: card.content,
-          inspirationSourceRef: card.sourceRef,
-          groupKey: card.id,
-        },
-        gens: [], imageUrls: card.imageUrl ? [card.imageUrl] : [], prompt: card.title, customLabel: card.title,
-        isSel: false, naturalSize: undefined,
-        onSelect: () => {},
-        onOpen: (n: CanvasNode) => {
-          // 双击灵感卡：世界书→弹窗；角色卡→角色卡弹窗；预设→偏置预设弹窗；其余→本地编辑
-          const c = inspirationCardsRef.current.find((x) => x.id === n.id);
-          if (!c) return;
-          // ★ 资产库发送来的灵感卡（带图）/ 对话自动投影的灵感卡（sourceRef="conv"）
-          //   → 打开「左图右文」编辑弹窗（可删图/替换图），不误入偏置预设
-          if (c.imageUrl || c.sourceRef === "conv") {
-            setInspirationEditId(c.id);
-            setInspirationEditKind(c.kind);
-            setInspirationEditTitle(c.title);
-            setInspirationEditContent(c.content);
-            return;
-          }
-          if (c.kind === "worldbook-entry" && c.sourceRef) {
-            // 画布模式：双击打开仓库快照世界书（编辑即改快照，与源库隔离）
-            if (settings.outputDir && repoId) {
-                              const wbName = c.sourceRef?.startsWith("wb:") ? c.sourceRef.slice(3) : "";
-                const wbDir = settings.worldbookDir || settings.characterDir || "";
-                setWbSeedFrom(wbName && wbDir ? { base: wbDir, name: wbName } : null);
-                setWbRepoLoc({ output_dir: settings.outputDir, repo_id: repoId });
-              setWbPopupTitle(c.title);
-              return;
-            }
-          }
-          if (c.kind === "character") {
-            const name = c.sourceRef?.startsWith("char:") ? c.sourceRef.slice("char:".length) : c.title;
-            setCharModal({ name, cardId: c.id, content: c.content });
-            return;
-          }
-          if (c.kind === "preset") {
-            setPresetModalOpen(true);
-            return;
-          }
-          setInspirationEditId(c.id);
-          setInspirationEditKind(c.kind);
-          setInspirationEditTitle(c.title);
-          setInspirationEditContent(c.content);
-        },
-        onResize: (id: string, w: number, h: number) => {
-          // 灵感卡拉伸中：实时更新 style 跟随；结束才写 inspirationCards（避免投影重建闪烁）
-          setRfNodes((prev) => prev.map((n) => (n.id === id
-          ? { ...n, style: { ...n.style, width: w, height: h }, data: { ...n.data, customSize: true } }
-          : n)));
-        },
-        onResizeEnd: (id: string, w: number, h: number) => {
-          const next = inspirationCardsRef.current.map((c) => c.id === id ? { ...c, w, h } : c);
-          setInspirationCards(next);
-          inspirationCardsRef.current = next;
-          persistNow({ cards: next });
-        },
-        onImgLoaded: () => {},
-        onNodeCtx: (e: React.MouseEvent, nn: CanvasNode) => {
-          const rect = stageWrapRef.current?.getBoundingClientRect();
-          openCtxForNode(e.clientX - (rect?.left || 0), e.clientY - (rect?.top || 0), nn.id);
-        },
-        onInspirationAction: (action: "insert" | "copy" | "edit", nn: CanvasNode) => {
-          const c = inspirationCardsRef.current.find((x) => x.id === nn.id);
-          if (!c) return;
-          if (action === "insert") insertInspirationToChat(c);
-          else if (action === "copy") {
-            try { void navigator.clipboard.writeText(c.content); showToast("内容已复制到剪贴板", "success"); } catch { showToast("复制失败，请手动选择", "error"); }
-          } else if (action === "edit") {
-            setInspirationEditId(c.id);
-            setInspirationEditKind(c.kind);
-            setInspirationEditTitle(c.title);
-            setInspirationEditContent(c.content);
-          }
-        },
-      },
-    }));
-    // 参考图节点（独立持久化，位置直接来自 referenceImages 列表，不走 layoutNodes）
-    const referenceImageNodes: Node<CardNodeData>[] = referenceImages.map((ref) => ({
-      id: ref.id,
-      type: "card",
-      position: { x: ref.x, y: ref.y },
-      style: { width: ref.w, height: ref.h },
-      data: {
-        node: {
-          id: ref.id, type: "reference-image",
-          x: ref.x, y: ref.y, w: ref.w, h: ref.h,
-          generationIds: [],
-          referenceImageUrl: ref.imageUrl,
-          referenceImageTitle: ref.title,
-          groupKey: ref.id,
-        },
-        gens: [], imageUrls: ref.imageUrl ? [ref.imageUrl] : [],
-        prompt: ref.title, customLabel: ref.title,
-        isSel: false, naturalSize: undefined,
-        onSelect: () => {},
-        onOpen: (n: CanvasNode) => { setDetailNode(n); },
-        onResize: (id: string, w: number, h: number) => {
-          setRfNodes((prev) => prev.map((n) => (n.id === id
-            ? { ...n, style: { ...n.style, width: w, height: h }, data: { ...n.data, customSize: true } }
-            : n)));
-        },
-        onResizeEnd: (id: string, w: number, h: number) => {
-          const next = referenceImagesRef.current.map((c) => c.id === id ? { ...c, w, h } : c);
-          setReferenceImages(next);
-          referenceImagesRef.current = next;
-          persistNow({ refs: next });
-        },
-        onImgLoaded: () => {},
-        onNodeCtx: (e: React.MouseEvent, nn: CanvasNode) => {
-          const rect = stageWrapRef.current?.getBoundingClientRect();
-          openCtxForNode(e.clientX - (rect?.left || 0), e.clientY - (rect?.top || 0), nn.id);
-        },
-      },
-    }));
+    const inspirationNodes: Node<CardNodeData>[] = buildInspirationNodes({
+      inspirationCards, inspirationCardsRef, settings, repoId, stageWrapRef, openCtxForNode,
+      persistNow, setRfNodes, setInspirationCards,
+      setInspirationEditId, setInspirationEditKind, setInspirationEditTitle, setInspirationEditContent,
+      setWbSeedFrom, setWbRepoLoc, setWbPopupTitle, setCharModal, setPresetModalOpen,
+      insertInspirationToChat, showToast,
+    });
+    const referenceImageNodes: Node<CardNodeData>[] = buildReferenceImageNodes({
+      referenceImages, referenceImagesRef, setReferenceImages, setRfNodes, setDetailNode,
+      persistNow, stageWrapRef, openCtxForNode,
+    });
     // ★ 工作流「生成中」占位节点：运转期间显示、完毕由生成内容节点替换
     //   （builder 见 lib/canvasPlaceholderNodes.ts，与生成中占位同属「临时节点」）
     const wfRunNodes: Node<CardNodeData>[] = buildWfRunNodes(wfRuns);
     const nextNodes: Node<CardNodeData>[] = [...inputs, ...toolCards, ...storyNodes, ...wfRunNodes, ...inspirationNodes, ...referenceImageNodes, ...projected];
     // 投影时保留用户选中状态（框选/单击），避免 useEffect 重跑强制 selected:false
     // 取消选中；且内容（id/position/selected）未变时返回原数组引用，React 不重渲染 → 不闪
-    setRfNodes((prevNodes) => {
-      const prevMap = new Map(prevNodes.map((n) => [n.id, n]));
-      const merged = nextNodes.map((n) => {
-        const prev = prevMap.get(n.id);
-        // 保留用户选中状态（框选/单击），避免 useEffect 重跑强制 selected:false 取消选中
-        let out = prev && prev.selected ? { ...n, selected: true } : n;
-        if (prev) {
-          // 保留 ReactFlow 实际坐标（含组内相对坐标）与父子关系（parentId/extent），
-          // 否则组内子节点会被投影回绝对坐标 → 组崩坏
-          out = {
-            ...out,
-            position: prev.position,
-            ...(prev.parentId ? { parentId: prev.parentId, extent: prev.extent } : {}),
-          };
-        }
-        return out;
-      });
-      if (
-        prevNodes.length === merged.length
-        && merged.every((n, i) => {
-          const o = prevNodes[i];
-          return o.id === n.id
-            && o.position.x === n.position.x && o.position.y === n.position.y
-            && !!o.selected === !!n.selected
-            && (o.parentId || undefined) === (n.parentId || undefined)
-            // 尺寸类变更必须进状态（resize 后 style/customSize 变更），否则被静默丢弃
-            && (o.style?.width ?? undefined) === (n.style?.width ?? undefined)
-            && (o.style?.height ?? undefined) === (n.style?.height ?? undefined)
-            && !!o.data?.customSize === !!n.data?.customSize
-            // ★ data 必须比较：编辑器写回 wfCaptured/wfConfirmed 后若仍返回旧数组，
-            //   卡片回调拿到的 nn 是旧数据 → 「运转工作流」首次点击因 wfCaptured 空而静默失败（要点两下）
-            && o.data === n.data;
-        })
-      ) {
-        return prevNodes;
-      }
-      return merged;
-    });
+    setRfNodes((prevNodes) => mergeProjectedNodes(prevNodes, nextNodes));
     // edges：手动引用线从持久化布局恢复（node 可能已不存在则过滤）；
     // 自动剧情顺序线为派生数据（按剧情顺序连接相邻楼层），不落盘、用户删不掉，
     // 与手动引用线用不同视觉区分（紫色虚线 + 箭头 vs 默认实线）。
-    const validIds = new Set([...inputs, ...toolCards, ...storyNodes, ...projected, ...referenceImageNodes].map((n) => n.id));
-    const manualEdges: Edge[] = layoutEdges
-      .filter((e) => validIds.has(e.source) && validIds.has(e.target))
-      .map((e) => ({ id: `${e.source}-${e.target}`, source: e.source, target: e.target, animated: false }));
-    const autoEdges: Edge[] = showStoryFlowRef.current
-      ? storyNodes.slice(0, -1).map((n, i) => ({
-          id: `storyflow-${i}`,
-          source: storyNodes[i].id,
-          target: storyNodes[i + 1].id,
-          type: "smoothstep",
-          style: { stroke: "#8b5cf6", strokeDasharray: "5 5", strokeWidth: 1.5, opacity: 0.75 },
-          markerEnd: { type: MarkerType.ArrowClosed, color: "#8b5cf6", width: 14, height: 14 },
-          data: { storyFrom: i + 1, storyTo: i + 2 },
-        }))
-      : [];
-    autoEdgeIdsRef.current = new Set(autoEdges.map((e) => e.id));
+    const { manualEdges, autoEdges, autoEdgeIds } = buildCanvasEdges({
+      inputs, toolCards, storyNodes, projected, referenceImageNodes, layoutEdges, showStoryFlowRef,
+    });
+    autoEdgeIdsRef.current = autoEdgeIds;
     setRfEdges([...manualEdges, ...autoEdges]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rawNodes, contentPlacement, layoutNodes, pendingInputs, pendingToolCreates, byGroup, layoutEdges, inspirationCards, referenceImages, wfRuns, runWorkflowTask, messages, displayRegex, showStoryFlow]);
