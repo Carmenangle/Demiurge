@@ -584,15 +584,15 @@ def _extract_json(text: str) -> Any:
     candidate = fenced.group(1) if fenced else stripped
     try:
         return json.loads(candidate)
-    except Exception:
-        pass
+    except (json.JSONDecodeError, TypeError, RecursionError):
+        pass  # 模型输出畸形（含超深嵌套）→ 走截取兜底；其它异常必须外抛（见形态测试）
     # 尝试截取首个 { 到末尾 }
     start = candidate.find("{")
     end = candidate.rfind("}")
     if start >= 0 and end > start:
         try:
             return json.loads(candidate[start:end + 1])
-        except Exception:
+        except (json.JSONDecodeError, TypeError, RecursionError):
             return None
     return None
 

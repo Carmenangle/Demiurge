@@ -43,8 +43,9 @@ def index_node_pack(cfg: EmbedConfig, pack_id: str, title: str, content: str,
         if store.get(ids=[pack_id]).get("ids"):
             store.update_document(pack_id, document)
             return
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - 探测失败转增量插入，但必须留痕（防索引漂移）
+        logging.getLogger("uvicorn.error").warning(
+            "节点包存在性探测失败，转增量插入 pack=%s: %s", pack_id, exc)
     store.add_documents([document], ids=[pack_id])
 
 
@@ -52,15 +53,17 @@ def delete_node_pack(cfg: EmbedConfig, pack_id: str) -> None:
     """删除已卸载插件的完整包和所有检索分块。"""
     try:
         _store(NODE_INDEX_COLLECTION, cfg).delete(ids=[pack_id])
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - 删除失败留痕：卸载插件的索引会残留
+        logging.getLogger("uvicorn.error").warning(
+            "节点包索引删除失败 pack=%s: %s", pack_id, exc)
     try:
         chunk_store = _store(NODE_CHUNK_COLLECTION, cfg)
         chunk_ids = chunk_store.get(where={"pack_id": pack_id}).get("ids", []) or []
         if chunk_ids:
             chunk_store.delete(ids=chunk_ids)
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - 删除失败留痕：卸载插件的分块会残留
+        logging.getLogger("uvicorn.error").warning(
+            "节点包分块删除失败 pack=%s: %s", pack_id, exc)
     _invalidate(cfg)
 
 
@@ -73,8 +76,9 @@ def index_node_chunks(cfg: EmbedConfig, pack_id: str, title: str,
         old_ids = store.get(where={"pack_id": pack_id}).get("ids", []) or []
         if old_ids:
             store.delete(ids=old_ids)
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - 清旧分块失败留痕：重索引可能残留旧条目
+        logging.getLogger("uvicorn.error").warning(
+            "节点包旧分块清理失败 pack=%s: %s", pack_id, exc)
     documents: list[Document] = []
     ids: list[str] = []
     for index, chunk in enumerate(chunks):

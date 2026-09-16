@@ -93,6 +93,6 @@ def _smithery_key() -> str:
         try:
             d = json.loads(p.read_text(encoding="utf-8"))
             return (d.get("settings") or {}).get("smitheryKey", "") or ""
-        except Exception:
+        except (OSError, ValueError, AttributeError):  # 读盘 / 坏JSON(含编码) / settings非dict
             pass
     return ""

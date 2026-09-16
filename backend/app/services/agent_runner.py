@@ -3,6 +3,7 @@
 线程准入(谁在跑/能否再开/如何取消)下沉到 thread_admission，本模块只负责
 把生成跑在后台线程里并统一收尾。RunAlreadyActive/is_running/cancel 重导出，
 对外 API 不变。"""
+import logging
 import queue
 import threading
 import time
@@ -11,6 +12,8 @@ from typing import Iterator
 from app.services import agent_graph, chat_memory, chat_snapshot, generation_store, run_trace, thread_admission
 from app.services.agent_contracts import AgentEvent, RunContext
 from app.services.thread_admission import RunAlreadyActive  # noqa: F401  重导出，保调用方不变
+
+_LOG = logging.getLogger("uvicorn.error")
 
 # 流式期间半成品落盘节流：刷新/换设备后能看到未完成正文（2026-08-31 用户实锤刷新丢正文）。
 PARTIAL_PERSIST_INTERVAL_SECONDS = 2.0
@@ -48,8 +51,9 @@ def run_multi_stream(context: RunContext) -> "queue.Queue":
                     context.thread_id, context.message_id,
                     thinking="".join(partial_thinking),
                 )
-        except Exception:  # noqa: BLE001 - 半成品落盘失败不阻断生成
-            pass
+        except Exception as exc:  # noqa: BLE001 - 半成品落盘失败不阻断生成，但必须留痕
+            _LOG.warning("半成品正文落盘失败 thread=%s mid=%s: %s",
+                         context.thread_id, context.message_id, exc)
         last_partial_persist = now
         last_partial_len = len(text)
     admission = thread_admission.admit(context.thread_id, context.cancel_event)
@@ -133,8 +137,8 @@ def run_multi_stream(context: RunContext) -> "queue.Queue":
                         context.thread_id, context.message, context.input_images(),
                         text, interrupted=interrupted,
                     )
-                except Exception:
-                    pass
+                except Exception as exc:  # noqa: BLE001 - 收尾不阻断，但记忆漏记必须留痕
+                    _LOG.warning("对话记忆落盘失败 thread=%s: %s", context.thread_id, exc)
                 run_trace.emit(
                     context, "turn.completed",
                     interrupted=interrupted,
@@ -145,8 +149,9 @@ def run_multi_stream(context: RunContext) -> "queue.Queue":
             except Exception as exc:  # noqa: BLE001 - 收尾失败也必须释放 thread/SSE
                 try:
                     run_trace.emit(context, "turn.finalize_error", error=str(exc))
-                except Exception:
-                    pass
+                except Exception as trace_exc:  # noqa: BLE001 - 遥测双失败只能落本地日志
+                    _LOG.warning("turn.finalize_error 遥测发送失败 thread=%s 原因=%s trace=%s",
+                                 context.thread_id, exc, trace_exc)
             finally:
                 thread_admission.release(admission)
                 q.put(None)

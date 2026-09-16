@@ -1,0 +1,73 @@
+"""P4 第一批形态锁：业务数据路径的「纯吞」必须留痕，禁止退化回 `pass`。
+
+审计正本：docs/memory/except-exception-audit-2026-09-16.md（2026-09-16 AST 全量 435 处，
+其中 91 处纯吞；本锁钉住 C1–C7 共 14 处业务数据路径）。这些路径吞掉异常会让
+快照/记忆/索引/审批状态**静默分叉**，因此处理体必须至少留一条日志/遥测痕迹。
+
+刻意不锁（A/B 档 best-effort，有意设计）：遥测包装器（`run_trace.emit`/`sink`）、
+清理路径（interrupt/租约 revoke/taskkill）、探活 `is_up`、`visual_ci._extract_json` 等。
+新增同模式收口时往 TARGETS 里加即可。
+"""
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+
+import pytest
+
+APP = Path(__file__).resolve().parents[1] / "app"
+
+# (相对 app 的路径, 函数名) —— 函数内所有 except Exception 处理体都不得是纯吞
+TARGETS: list[tuple[str, str]] = [
+    # C1 快照/记忆回滚：失败 = 快照与记忆静默分叉（违反「会话快照=历史真源」）
+    ("services/chat_maintenance.py", "clear_cache"),
+    ("services/chat_maintenance.py", "compact"),
+    # C2 部分回复/对话记忆落盘：失败 = 刷新丢正文、记忆漏记
+    ("services/agent_runner.py", "persist_partial"),
+    ("services/agent_runner.py", "worker"),
+    # C3 散卡入库时内嵌世界书外拆：失败 = 卡数据静默缺失
+    ("services/character_store.py", "scan_loose_cards"),
+    # C4 节点包/表格行索引增删：失败 = 索引与库漂移，检索质量无声退化
+    ("services/node_store.py", "index_node_pack"),
+    ("services/node_store.py", "delete_node_pack"),
+    ("services/node_store.py", "index_node_chunks"),
+    ("services/rag_store.py", "index_table_rows"),
+    ("services/rag_store.py", "dedup_generations"),
+    ("services/rag_store.py", "prune_missing_generations"),
+    # C5 审批记录清理：失败 = 残留审批可能被误再次审批
+    ("services/generation_approval.py", "_clear_after_success"),
+    # C6/C7 进度发布与取消信号：低危但失败无诊断
+    ("services/plan_tasks.py", "_publish_progress"),
+    ("services/chat_agent_queue.py", "cancel"),
+]
+
+
+def _is_bare_exc(t: ast.expr | None) -> bool:
+    if isinstance(t, ast.Name):
+        return t.id == "Exception"
+    return isinstance(t, ast.Attribute) and t.attr == "Exception"
+
+
+def _is_trivial(handler: ast.ExceptHandler) -> bool:
+    """处理体只由 pass / 常量表达式（docstring、Ellipsis）构成 = 纯吞。"""
+    return all(
+        isinstance(s, ast.Pass)
+        or (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant))
+        for s in handler.body
+    )
+
+
+@pytest.mark.parametrize("rel, fname", TARGETS)
+def test_no_silent_except_exception(rel: str, fname: str) -> None:
+    tree = ast.parse((APP / rel).read_text(encoding="utf-8"), filename=rel)
+    fns = [n for n in ast.walk(tree)
+           if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == fname]
+    assert fns, f"{rel} 里找不到函数 {fname}"
+    silent: list[str] = []
+    for fn in fns:
+        for node in ast.walk(fn):
+            if isinstance(node, ast.ExceptHandler) and _is_bare_exc(node.type) \
+                    and _is_trivial(node):
+                silent.append(f"{fn.name}:{node.lineno}")
+    assert not silent, \
+        f"{rel}:{fname} 出现纯吞 except Exception（业务数据路径必须留痕，见审计报告）: {silent}"

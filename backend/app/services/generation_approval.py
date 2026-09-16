@@ -1,11 +1,14 @@
 """生成审批生命周期：审核状态、已批准执行与结果事件转换。"""
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Callable
 from typing import Any
 
 from app.services import generation_store, image_gen, prompt_approval_store, video_gen
+
+_LOG = logging.getLogger("uvicorn.error")
 
 
 def _review_text(*, retry: bool = False) -> str:
@@ -31,8 +34,8 @@ def _clear_after_success(thread_id: str, approval_id: str) -> None:
         return
     try:
         prompt_approval_store.clear(thread_id, approval_id)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001 - 清理失败留痕：残留审批可能被误再次审批
+        _LOG.warning("审批记录清理失败 thread=%s approval=%s: %s", thread_id, approval_id, exc)
 
 
 def save_prompt_review(ctx: Any, kind: str, original: str, candidate: str,

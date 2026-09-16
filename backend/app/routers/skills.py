@@ -38,7 +38,7 @@ def _skey() -> str:
     if p.is_file():
         try:
             return (json.loads(p.read_text(encoding="utf-8")).get("settings") or {}).get("smitheryKey", "") or ""
-        except Exception:
+        except (OSError, ValueError, AttributeError):  # 读盘 / 坏JSON(含编码) / settings非dict
             pass
     return ""
 

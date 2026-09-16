@@ -212,6 +212,24 @@ def test_extract_json_fenced_and_plain():
     assert _extract_json("not json") is None
 
 
+def test_extract_json_deep_nesting_returns_none():
+    # RecursionError 也算「畸形模型输出」，应吞成 None 而不是打穿诊断管线（P4 第二批收窄保留项）
+    assert _extract_json("[" * 4000 + "]" * 4000) is None
+
+
+def test_extract_json_unexpected_error_propagates(monkeypatch):
+    # 收窄后的捕获面 = (json.JSONDecodeError, TypeError, RecursionError)；
+    # 其它异常（环境/代码 bug）必须外抛，不得被静默吞掉。
+    import pytest as _pytest
+
+    def _boom(*a, **k):
+        raise RuntimeError("非解析类故障")
+
+    monkeypatch.setattr(visual_ci.json, "loads", _boom)
+    with _pytest.raises(RuntimeError):
+        _extract_json('{"a": 1}')
+
+
 # ── 完整诊断（无 VLM）────────────────────────────────────────────────────────
 
 def test_run_diagnostic_no_vlm(tmp_path):

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import threading
@@ -16,6 +17,8 @@ from uuid import uuid4
 from app.db import get_connection
 from app.services import agent_runner, chat_snapshot, thread_admission
 from app.services.agent_request_context import from_payload
+
+_LOG = logging.getLogger("uvicorn.error")
 
 _WAKE = threading.Condition()
 _WORKER: threading.Thread | None = None
@@ -265,8 +268,9 @@ def cancel(task_id: str) -> dict | None:
                 #    同时抢占标记为 cancelled，前端不再显示为发送中。
                 try:
                     thread_admission.request_cancel(str(row["thread_id"]))
-                except Exception:  # noqa: BLE001 - 取消信号失败不阻断标记
-                    pass
+                except Exception as exc:  # noqa: BLE001 - 取消信号失败不阻断标记，但必须留痕
+                    _LOG.warning("排队任务取消信号发送失败 task=%s thread=%s: %s",
+                                 task_id, row["thread_id"], exc)
                 # 若 worker 恰在标记前完成（status 已变为 done/error），该 UPDATE 匹配 0 行；
                 # 下方 get() 返回落盘的真实终态——取消竞态时以事实为准，不覆盖为 cancelled。
                 # 注意 SQLite 写锁保证 worker 的 _finish 与本 UPDATE 串行，_finish 的
