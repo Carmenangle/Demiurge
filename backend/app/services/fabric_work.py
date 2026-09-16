@@ -84,21 +84,28 @@ def _scan_worldbook(root: Path, out: list[str]) -> None:
         f"已有标题：{titles[:1500]}")
 
 
-def _scan_main_card(root: Path, out: list[str]) -> None:
-    """B 态主卡：<root>/<卡名>/card.json（含内嵌 entries 才是 B 态）。"""
-    for f in sorted(root.glob("*/card.json")):
-        try:
-            size = f.stat().st_size
-            card = json.loads(f.read_text(encoding="utf-8"))
-            book = (card.get("data") or {}).get("character_book") or {}
-            entries = book.get("entries") or []
-            n = len(entries) if isinstance(entries, list) else len(entries or {})
-            first_mes = bool(str(card.get("first_mes") or "").strip())
-            state = (f"B 态：内嵌 {n} 条，first_mes={'有' if first_mes else '无'}"
-                     if n else "A 态骨架：未内嵌条目，不合格")
-            out.append(f"- 主卡 {f.parent.name}/card.json（{size}B）：{state}")
-        except (OSError, json.JSONDecodeError):
-            continue
+def _scan_one_card(folder: Path, out: list[str]) -> None:
+    """单张 B 态主卡：<卡目录>/card.json（含内嵌 entries 才是 B 态）。
+
+    2026-09-14 治本：入参由 `character_store.owned_card_dirs` 给出（本作品归属的卡目录），
+    不再对作品库根做 `*/card.json` 全扫——旧写法会把别的作品的卡当成「本作品前序产出」
+    写进档案，误导模型（同类红线见 ARCHITECTURE #17「禁止 glob 全库 */card.json」）。
+    """
+    f = folder / "card.json"
+    if not f.is_file():
+        return
+    try:
+        size = f.stat().st_size
+        card = json.loads(f.read_text(encoding="utf-8"))
+        book = (card.get("data") or {}).get("character_book") or {}
+        entries = book.get("entries") or []
+        n = len(entries) if isinstance(entries, list) else len(entries or {})
+        first_mes = bool(str(card.get("first_mes") or "").strip())
+        state = (f"B 态：内嵌 {n} 条，first_mes={'有' if first_mes else '无'}"
+                 if n else "A 态骨架：未内嵌条目，不合格")
+        out.append(f"- 主卡 {folder.name}/card.json（{size}B）：{state}")
+    except (OSError, json.JSONDecodeError):
+        return
 
 
 def scan_work_assets(output_dir: str, repo_id: str = "") -> dict[str, Any]:
@@ -112,14 +119,19 @@ def scan_work_assets(output_dir: str, repo_id: str = "") -> dict[str, Any]:
         _scan_docs(root, lines)
         _scan_charfacts(root, lines)
         _scan_worldbook(root, lines)
-        _scan_main_card(root, lines)
+        # 2026-09-14 治本：主卡只扫本作品**归属**的卡目录（单一属主 owned_card_dirs），
+        # 不扫作品库根下 `*/card.json`——作品库根多作品混放时，那会把别的作品的卡
+        # 写进「本作品前序产出档案」（误导模型按别人的卡继续产出）。
+        from app.services import character_store
+
+        for _card_dir in character_store.owned_card_dirs(output_dir, repo_id):
+            _scan_one_card(_card_dir, lines)
         folder = _repo_folder(output_dir, repo_id)
         if folder is not None and folder != root:
             has = len(lines)
             _scan_docs(folder, lines)
             _scan_charfacts(folder, lines)
             _scan_worldbook(folder, lines)
-            _scan_main_card(folder, lines)
             if len(lines) > has:
                 result["repo_folder"] = str(folder)
         result["items"] = lines

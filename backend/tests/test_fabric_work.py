@@ -44,6 +44,8 @@ def test_扫描世界书快照条目(tmp_path):
 
 
 def test_扫描B态主卡(tmp_path):
+    from app.services import character_store
+
     card_dir = tmp_path / "测试卡"
     card_dir.mkdir()
     card = {
@@ -56,9 +58,45 @@ def test_扫描B态主卡(tmp_path):
     }
     (card_dir / "card.json").write_text(
         json.dumps(card, ensure_ascii=False), encoding="utf-8")
+    # 2026-09-14 治本：主卡扫描改走 owned_card_dirs（单一属主），故卡目录须带归属标记
+    # （或卡目录名 == 仓库名）；无标记的散卡不再被当成「本作品前序产出」。
+    character_store.write_work_marker(str(tmp_path), "测试卡", "r1")
     brief = fabric_work.build_work_brief(str(tmp_path), "r1")
     assert "B 态" in brief
     assert "内嵌 3 条" in brief
+
+
+def test_别的作品的卡不进前序档案(tmp_path):
+    """2026-09-14 治本回归：作品库根下别的作品的卡不得进【本作品前序产出档案】。
+
+    实盘：`userdata/pictures/` 根下并列 妈妈娼馆 / 御仙 / 玫瑰与繁花 三张卡，
+    只有归属本作品的才该出现——旧实现对库根做 `*/card.json` 全扫，会把别的作品
+    的卡当成「本作品此前落盘的产出」写进 system 上下文（误导模型）。
+    """
+    from app.services import character_store
+
+    alien = tmp_path / "别人的卡"
+    alien.mkdir()
+    (alien / "card.json").write_text(json.dumps({
+        "spec": "chara_card_v2",
+        "data": {"name": "别人的卡", "first_mes": "x",
+                 "character_book": {"entries": [{"comment": "别人的条目"}] * 5}},
+    }, ensure_ascii=False), encoding="utf-8")
+    character_store.write_work_marker(str(tmp_path), "别人的卡", "other-repo")
+
+    mine = tmp_path / "御仙"
+    mine.mkdir()
+    (mine / "card.json").write_text(json.dumps({
+        "spec": "chara_card_v2",
+        "data": {"name": "御仙", "first_mes": "y",
+                 "character_book": {"entries": [{"comment": "我的条目"}] * 2}},
+    }, ensure_ascii=False), encoding="utf-8")
+    character_store.write_work_marker(str(tmp_path), "御仙", "r1")
+
+    brief = fabric_work.build_work_brief(str(tmp_path), "r1")
+    assert "御仙" in brief
+    assert "别人的卡" not in brief
+    assert "别人的条目" not in brief
 
 
 def test_brief超长截断(tmp_path):

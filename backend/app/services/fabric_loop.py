@@ -204,11 +204,18 @@ def _local_chat_config() -> dict | None:
 
     用户定案（2026-09-06 混合模式）：敏感内容交本地模型处理（无审核），
     主流程用云端模型；没有本地模型 → 返回 None（回退云端重写提示）。
+
+    2026-09-14 治本：真源是 `config.DATA_DIR`（`<backend>/data/`）。旧实现用
+    `Path(__file__).resolve().parents[1] / "data"`——本文件在 `app/services/` 下，
+    `parents[1]` 落到 `backend/app`，拼出 `backend/app/data/user_state.json`（**该文件不存在**），
+    `read_text` 恒抛 FileNotFoundError 被 `except` 吞掉 ⇒ 本函数恒返回 None ⇒
+    混合模式（本地改写 / 云端 400 降级本地决策）全链失效。改为 `DATA_DIR`，与
+    `capability_handlers._embed_config_from_state` 等同源；函数内 import 便于测试注入 DATA_DIR。
     """
     try:
-        from pathlib import Path
+        from app.config import DATA_DIR
 
-        p = Path(__file__).resolve().parents[1] / "data" / "user_state.json"
+        p = DATA_DIR / "user_state.json"
         st = json.loads(p.read_text(encoding="utf-8"))
         for m in (st.get("settings") or {}).get("chatModels") or []:
             base = str(m.get("baseUrl") or "")
@@ -758,9 +765,14 @@ def run_loop(*, intent: str, history: str = "", capabilities: list[dict] | None 
                     _wb_entries = list(_snap.get("entries") or [])
                     if _wb_entries:
                         import json as _json
-                        from pathlib import Path as _Path
-                        # 通用：扫描作品根下所有 card.json，把世界书条目内嵌进每个主卡
-                        _card_files = list(_Path(output_dir).glob("*/card.json"))
+                        # 2026-09-14 治本：只内嵌「本作品归属的卡」。归属判定走单一属主
+                        # character_store.owned_card_dirs（`_work.json` 标记优先 / 卡目录名
+                        # == 作品名回退，都不匹配则跳过）。旧实现 glob("*/card.json") 扫的是
+                        # **作品库根下每个作品的卡**（实盘 pictures/ 下 妈妈娼馆/御仙/玫瑰与繁花
+                        # 三卡并列），会把本作品世界书整体写进别的作品的卡——ARCHITECTURE #17
+                        # 红线「禁止 glob 全库 */card.json」。
+                        _card_files = [d / "card.json"
+                                       for d in character_store.owned_card_dirs(output_dir, repo_id)]
                         for _card_file in _card_files:
                             try:
                                 _existing = _json.loads(_card_file.read_text(encoding="utf-8"))

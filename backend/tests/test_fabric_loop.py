@@ -344,6 +344,32 @@ def test_写内容敏感词本地不可用回填重写(tmp_path, monkeypatch):
         _sb.revoke(lease["id"])
 
 
+def test_本地聊天模型配置读DATA_DIR真源(tmp_path, monkeypatch):
+    """2026-09-14 治本回归：`_local_chat_config` 必须从 `config.DATA_DIR` 读 user_state.json。
+
+    旧实现用 `Path(__file__).resolve().parents[1] / "data"`（=`backend/app/data/user_state.json`，
+    **该文件/目录都不存在**）⇒ `read_text` 恒抛 FileNotFoundError 被 `except` 吞掉 ⇒ 恒返回 None
+    ⇒ 混合模式（本地改写 / 云端 400 降级本地决策）全链失效，且此前零测试面覆盖。
+    本用例把 DATA_DIR 指到夹具目录：旧实现**无视 DATA_DIR** ⇒ 返回 None 必红；
+    新实现读到夹具里的本地模型 ⇒ 绿。
+    """
+    import app.config as _cfg
+
+    (tmp_path / "user_state.json").write_text(json.dumps({
+        "settings": {"chatModels": [
+            {"baseUrl": "https://cloud.example/v1", "modelName": "gpt-x", "apiKey": "k"},
+            {"baseUrl": "http://localhost:11434", "modelName": "qwen-local", "apiKey": ""},
+        ]},
+    }, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(_cfg, "DATA_DIR", tmp_path)
+
+    cfg = fabric_loop._local_chat_config()
+    assert cfg is not None                      # 旧实现此处恒为 None
+    assert cfg["model"] == "qwen-local"         # 只认本地模型（云端那条跳过）
+    assert cfg["baseUrl"] == "http://localhost:11434"
+    assert cfg["apiKey"] == "ollama"            # 空 key 回退 ollama
+
+
 def test_决策既没工具也没reply仍报错():
     """真正的无效决策(无 tool 无 done 无 reply)仍如实报 error，不吞。"""
     chat = _fake_chat([
@@ -519,6 +545,65 @@ def test_落盘域强制归一_模型传错base_repo_id被覆盖(tmp_path):
     assert upsert["params"]["base"] == str(tmp_path)
     assert upsert["params"]["repo_id"] == repo_id
     capability_sandbox.revoke(lease["id"])
+
+
+def test_done前auto_embed只内嵌本作品归属的卡(tmp_path):
+    """2026-09-14 治本回归：done 前的世界书内嵌兜底只处理**本作品归属的卡**。
+
+    实盘反例（`userdata/pictures/`）：作品库根下并列 妈妈娼馆 / 御仙 / 玫瑰与繁花 三张卡，
+    只有 `御仙` 属作品「原创」（`_work.json`）。旧实现 `glob("*/card.json")` 会把原创的
+    世界书整体写进另外两张卡（40 / 36 条 < 快照 59 条 ⇒ 真触发覆盖）——数据污染。
+    修后集合 = `character_store.owned_card_dirs`，归属不符的一律不动。
+    """
+    from app.services import character_store
+
+    repo_id = "repo-1"
+    # 别的作品的卡：自有 1 条条目 + 归属标记指向别的作品 → 必须一字未动
+    alien = tmp_path / "别人的卡"
+    alien.mkdir()
+    (alien / "card.json").write_text(json.dumps({
+        "name": "别人的卡", "description": "d", "first_mes": "hi",
+        "character_book": {"entries": [{"comment": "别人的条目", "content": "原样"}]},
+    }, ensure_ascii=False), encoding="utf-8")
+    character_store.write_work_marker(str(tmp_path), "别人的卡", "other-repo")
+    alien_before = (alien / "card.json").read_text(encoding="utf-8")
+
+    # 本作品的卡：A 态骨架（0 条）+ 归属标记 = repo_id
+    mine = tmp_path / "御仙"
+    mine.mkdir()
+    (mine / "card.json").write_text(json.dumps({
+        "name": "御仙", "description": "d", "first_mes": "hi",
+        "character_book": {"entries": []},
+    }, ensure_ascii=False), encoding="utf-8")
+    character_store.write_work_marker(str(tmp_path), "御仙", repo_id)
+
+    # 夹具自证：旧写法 `glob("*/card.json")` 会同时命中别人的卡（回归价值所在）
+    assert len(list(tmp_path.glob("*/card.json"))) == 2
+
+    lease = capability_sandbox.grant(
+        "fabric:embed", [], mode=capability_sandbox.ACCESS_FULL)
+    decisions = [
+        # 清单先行门禁要求先落一份「条目清单」文档，upsert 才会真正执行
+        {"tool": "doc.create_repo", "params": {
+            "rel_path": "条目清单-测试.md", "content": "测试条目清单"}},
+        {"tool": "worldbook.upsert_repo", "params": {"entries": [
+            {"comment": f"新条目{i}", "content": "x" * 120} for i in range(3)]}},
+        {"done": True, "reply": "写好了"},
+    ]
+    fabric_loop.run_loop(
+        intent="写条目", configured_models={"chat", "image"},
+        access_mode=capability_sandbox.ACCESS_FULL, lease_id=lease["id"],
+        output_dir=str(tmp_path), repo_id=repo_id,
+        chat_base="", chat_key="", chat_model="m", chat_fn=_fake_chat(decisions),
+        max_steps=6,
+    )
+    capability_sandbox.revoke(lease["id"])
+
+    embedded = json.loads((mine / "card.json").read_text(encoding="utf-8"))
+    assert [e["comment"] for e in embedded["character_book"]["entries"]] == \
+        ["新条目0", "新条目1", "新条目2"], "本作品的卡没有被内嵌"
+    assert (alien / "card.json").read_text(encoding="utf-8") == alien_before, \
+        "别的作品的卡被改写了（跨作品污染）"
 
 
 def test_自由循环每步usage落trace():
