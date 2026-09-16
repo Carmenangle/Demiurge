@@ -1273,6 +1273,457 @@ def answer_node(state: AgentState) -> dict:
 _ROLEPLAY_BASE = builtin_agents.ROLEPLAY_BASE
 
 
+def _rp_prepare_worldbook(ctx: dict, text: str) -> tuple[str, str]:
+    """世界书组装 + 三段世界信息正则（锚点段 / 召回段 / 动态段）。
+
+    召回段与动态段改完**写回 ctx**（`_worldbook_recall_text` / `_worldbook_dynamic_text`），
+    调用方后续仍从 ctx 读（与改造前同一份绑定语义）。返回 (锚点段 wb, 召回段 wb_recall)。
+    逐字自 `roleplay_node` 搬移（判定逻辑与文案字面值零改动）。
+    """
+    from app.services.regex_engine import Placement
+    wb = _resolve_worldbook(ctx, text)
+    if wb:
+        # 世界信息正则（placement 5）：作用于世界书组装后的注入文本
+        wb = _apply_regex(ctx, wb, Placement.WORLD_INFO, is_prompt=True, depth=0)
+    # 世界书召回段（每轮按相关度重排）：同一套世界信息正则，但**落尾部动态块**
+    # （history 之后，与数据表召回同位置）。若与锚点段拼在一起塞进世界书块（history 之前），
+    # 它每轮一变就把其后的历史与全部预设片段打掉——真机实测相邻轮字节 LCP 78% → 62%。
+    wb_recall = str(ctx.get("_worldbook_recall_text") or "")
+    if wb_recall:
+        wb_recall = _apply_regex(ctx, wb_recall, Placement.WORLD_INFO, is_prompt=True, depth=0)
+        ctx["_worldbook_recall_text"] = wb_recall
+    # 世界书动态段（2026-09-13 动态区外置）：锚点条目的【剧情进展·动态】区 + 会话中途
+    # 新激活的锚点条目。与召回段同一落点（尾部动态块）——留在锚点段会把分叉点拉回
+    # 世界书块内，真机三次 cached=0 的分叉点全在那里。
+    wb_dynamic = str(ctx.get("_worldbook_dynamic_text") or "")
+    if wb_dynamic:
+        wb_dynamic = _apply_regex(ctx, wb_dynamic, Placement.WORLD_INFO, is_prompt=True, depth=0)
+        ctx["_worldbook_dynamic_text"] = wb_dynamic
+    return wb, wb_recall
+
+
+def _rp_emit_worldbook_resolved(ctx: dict, wb: str, wb_recall: str) -> None:
+    """派发 `worldbook.resolved` 观测事件（纯留痕，不改任何状态）。
+
+    逐字自 `roleplay_node` 搬移。
+    """
+    run_trace.emit(
+        ctx, "worldbook.resolved", injected=bool(wb), content=wb or "",
+        selected_indices=ctx.get("_selected_worldbook_indices") or [],
+        keyword_indices=ctx.get("_keyword_worldbook_indices") or [],
+        character_names=ctx.get("_worldbook_character_names") or [],
+        scan_chars=int(ctx.get("_worldbook_scan_chars") or 0),
+        dropped=int(ctx.get("_worldbook_dropped") or 0),
+        recall_chars=len(wb_recall),
+    )
+
+
+def _rp_is_first_story_reply(ctx: dict) -> bool:
+    """**纯判定**：本会话是否还没有任何非空用户发言（= 开场首轮）。
+
+    逐字自 `roleplay_node` 搬移（唯一改动＝首行 `first_story_reply = ` → `return `）。
+    """
+    return not any(
+        item.get("role") == "user" and str(item.get("content") or "").strip()
+        for item in (ctx.get("history") or [])
+    )
+
+
+def _rp_last_story_round(ctx: dict) -> list:
+    """上下文合同·历史：取上一次剧情轮并**瘦到只剩正文**，再派发 `history.slimmed`。
+
+    逐字自 `roleplay_node` 搬移。
+    """
+    story_round = story_history.last_story_round(ctx.get("history") or [])
+    run_trace.emit(ctx, "history.slimmed",
+                   full_messages=len(ctx.get("history") or []),
+                   injected_messages=len(story_round),
+                   injected_chars=sum(len(m["content"]) for m in story_round))
+    return story_round
+
+
+def _rp_resolve_persona_block(ctx: dict, text: str, first_story_reply: bool) -> None:
+    """解析并写回 `ctx["persona"]`（角色卡 persona）+ 派发 `character_cards.resolved`。
+
+    ⚠ 就地覆写 ctx 键（清查项）：下游从 `ctx.get("persona")` 读 ⇒ 必须写回 ctx，不能只返回。
+    逐字自 `roleplay_node` 搬移。
+    """
+    ctx["persona"] = _resolve_personas(
+        ctx, text, opening_only=first_story_reply,
+        worldbook_names=ctx.get("_worldbook_character_names") or [],
+        fallback_query=_recent_character_context(ctx),
+    )
+    run_trace.emit(
+        ctx, "character_cards.resolved",
+        opening_only=first_story_reply,
+        selected=ctx.get("_selected_persona_names") or [],
+        injected=bool(ctx.get("persona")),
+    )
+
+
+def _rp_load_style_config(ctx: dict) -> None:
+    """每轮读一次文风（去 AI 味）用户态配置，写回 `ctx["_style_config"]`；
+
+    损坏不能阻断正文 ⇒ 只留痕。逐字自 `roleplay_node` 搬移。
+    """
+    try:
+        from app.services import prose_style
+        ctx["_style_config"] = prose_style.load_config()
+    except Exception as exc:  # noqa: BLE001 文风配置损坏不能阻断正文
+        run_trace.emit(ctx, "prose_style.config", status="error", error=str(exc))
+
+
+def _rp_build_prompt_base(ctx: dict, *, wb: str, preset_msgs: list, preset_temp,
+                         has_hist: bool, story_round: list) -> tuple[str, float, list]:
+    """两条分支（激活预设 / 内置扮演）各自的 system 头 base、temperature 与对话轮。
+
+    - 预设分支：起始连续 system 段 → head（进 system 头），其余保持原位当对话轮；
+      预设无 chatHistory marker 时把历史补在对话末尾。
+    - 内置分支：内置扮演提示 + persona + 用户人设 + 世界书 + 宏替换。
+    返回 (base, temp, dialogue)。逐字自 `roleplay_node` 搬移（判定逻辑与文案字面值零改动）。
+    """
+    if preset_msgs:
+        # 拆：起始连续 system 段 → 进 system 头（受 _agent_system 包裹/替换）；其余(user/assistant/
+        # 历史/尾部 system=PHI)保持原位当对话轮。这样 role 不被抹平，PHI 仍在历史之后。
+        head_parts: list[str] = []
+        dialogue: list[dict] = []
+        for m in preset_msgs:
+            if not dialogue and m["role"] == "system":
+                head_parts.append(m["content"])
+            else:
+                dialogue.append(m)
+        base = "\n\n".join(head_parts)
+        rp_temp = _builtin(ctx, "roleplay", "temperature", builtin_agents.ROLEPLAY_TEMPERATURE)
+        temp = preset_temp if preset_temp is not None else _temperature(ctx, rp_temp)
+        if not has_hist:  # 预设无 chatHistory marker → 历史补在对话末尾
+            dialogue += story_round
+    else:
+        persona = ctx.get("persona") or ""
+        rp_base = _builtin(ctx, "roleplay", "systemPrompt", builtin_agents.ROLEPLAY_BASE)
+        base = rp_base + (f"\n\n{persona}" if persona else "")
+        up = _render_user_persona(ctx)
+        if up:
+            base += f"\n\n{up}"
+        if wb:
+            base += f"\n\n{wb}"
+        # 卡字段/世界书可能含 {{char}}/{{user}} 宏 → 替换（缺省 user 回退「我」），避免字面漏进提示词
+        from app.services import preset_store as _ps
+        base = _ps.substitute_macros(base, {
+            "char_name": (ctx.get("card_name") or "").strip(),
+            "user_name": (ctx.get("user_name") or "").strip(),
+        })
+        temp = _temperature(ctx, _builtin(ctx, "roleplay", "temperature", builtin_agents.ROLEPLAY_TEMPERATURE))
+        dialogue = story_round  # 历史作真实多轮，只进上一次剧情轮的纯正文（上下文合同）
+    return base, temp, dialogue
+
+
+def _rp_seed_dynamic_parts(ctx: dict, wb_recall: str, dynamic_parts: list) -> None:
+    """把每轮变化的两个世界书段（召回段 / 动态段）推入**尾部动态块**。
+
+    ⚠ 就地 mutate 传入的 `dynamic_parts`（与改造前同一列表对象 ⇒ 调用方拿到同一份）。
+    逐字自 `roleplay_node` 搬移。
+    """
+    if wb_recall:
+        dynamic_parts.append(wb_recall)
+    # 世界书动态段（动态区+中途新锚点）：同样只落尾部动态块，理由同上。
+    wb_dynamic = str(ctx.get("_worldbook_dynamic_text") or "")
+    if wb_dynamic:
+        dynamic_parts.append(wb_dynamic)
+
+
+def _rp_append_static_blocks(ctx: dict, base: str, chains_head: list) -> str:
+    """把**跨轮逐字节稳定**的静态块追加进 system 头：头部思维链 + 命运骰点规则。
+
+    ⚠ 与 `state_instruction()`（同样静态）分处两支：本函数只做「随 system 头」的那两段。
+    逐字自 `roleplay_node` 搬移（骰点规则文案字面值零改动）。
+    """
+    if chains_head:
+        base += "\n\n" + "\n\n".join(chains_head)
+    # 命运骰点规则：注入剧情推进提示词，让主模型在关键博弈点打可审计 <roll>（用户可在编辑器改/清空）
+    roll_rule = _builtin(ctx, "roleplay", "rollInstruction", builtin_agents.ROLL_INSTRUCTION)
+    if roll_rule and roll_rule.strip():
+        base += roll_rule
+    return base
+
+
+def _rp_substitute_macros(ctx: dict, base: str, dynamic_parts: list) -> tuple[str, str]:
+    """对最终**两段**各替换一次 `{{char}}`/`{{user}}`（缺省 user 回退「我」）。
+
+    收口原因：状态块/纪要召回/裁定指令等在 substitute 之后才生成，且预设分支根本没替换 base。
+    返回 (base, dynamic_text)。逐字自 `roleplay_node` 搬移。
+    """
+    from app.services import preset_store as _ps2
+    _macros = {
+        "char_name": (ctx.get("card_name") or "").strip(),
+        "user_name": (ctx.get("user_name") or "").strip(),
+    }
+    base = _ps2.substitute_macros(base, _macros)
+    dynamic_text = _ps2.substitute_macros(
+        "\n\n".join(part for part in dynamic_parts if part.strip()), _macros,
+    )
+    return base, dynamic_text
+
+
+def _rp_prefix_output_structure(system: str) -> str:
+    """把【输出结构】模板前置到 system 最开头（首因位置守约率最高）。
+
+    ⚠ 模板文案字面值零改动（`<roll>/<encounter>/<fate>` 三块由 `test_output_blocks` 源码锁点名）。
+    逐字自 `roleplay_node` 搬移。
+    """
+    system = (
+        "【输出结构（每轮固定，顺序不可换）】\n"
+        "第一步 <think>完整推演思考</think>——按预设思考框架展开推演；\n"
+        "第二步 <status>状态栏</status>——延续上轮格式逐字段更新；\n"
+        "第三步 <content>正文</content>——按预设 <length> 字数要求足量输出；"
+        "<roll>/<encounter>/<fate> 等事件块按剧情需要穿插在正文中间。\n"
+        "所有标签必须成对完整闭合，各类块只输出一次，禁止在思考里预写任何标签草稿。\n\n"
+        + system
+    )
+    return system
+
+
+def _rp_build_tail_messages(ctx: dict, dynamic_text: str, chains_tail: list) -> list[dict]:
+    """组装 system **头之后**的尾部 system 消息，顺序＝[动态块][思维链 tail][输出纪律][可选音频指令]。
+
+    动态块是每轮变化的块 → 落在历史之后，静态头（system）才能逐字节跨轮稳定（P4-roleplay 前缀复用）。
+    逐字自 `roleplay_node` 搬移（输出纪律提示词文案字面值零改动）。
+    """
+    tail_msgs: list[dict] = []
+    if dynamic_text:
+        tail_msgs.append({"role": "system", "content": dynamic_text})
+    # 尾部思维链作独立 system 消息落在历史之后、本轮 user 之前 → 离生成点最近，遵守最严
+    tail_msgs.extend({"role": "system", "content": c} for c in chains_tail)
+    # 思考纪律（2026-09-12 用户拍板修订）：思考定位为**完整推演思考**——发布后由前端
+    # 「小cot折叠」正则折叠为「推演内思考过程」下拉（用户设计，思考本就该发布而非丢弃）。
+    # 旧版「三类内容 + 300 字硬上限」与预设「默认COT组装」框架直接矛盾，模型面对矛盾
+    # 指令干脆不写思考（09-12 20:32 trace 实证思考=0）。保留防烧钱核心禁令
+    # （试写正文/复述设定/推翻重来/标签草稿——2026-08-29/30 事故教训），删思考长度压制；
+    # 正文长度以预设 <length> 字数区间为准（预设已启用 1000-8000），不在后端另设硬指标。
+    # 思考纪律（2026-09-12 三次修订定稿）：思考定位为**完整推演思考**（发布后由前端
+    # 「小cot折叠」折叠为「推演内思考过程」下拉）。历次实验：300 字硬上限 → 模型干脆
+    # 不写思考（deepseek）；点名禁令清单 → 冗余根因其实在预设思考框架本身（用户裁定
+    # 禁令去掉，去预设里找）。定稿=只保留**思考预算原则**：思考总篇幅 ≤ 正文一半
+    # （软比例，用户认可），预算外的冗余治理落在预设思考框架的瘦身（另行处理）。
+    # 泄漏修订（2026-09-13）：09-12 版把「前端折叠」「1000-8000 字」等实现细节写进了
+    # 模型可见文本，模型照抄进正文（神权大陆 msg[4] 实证：质量检查/状态栏更新/
+    # 【系统提示…尾部标注】三处泄漏）。净提示词=删全部实现细节 + 追加元话语硬禁令；
+    # 出口兜底见 roleplay_turn.strip_meta_leak_in_content（只动 <content>）。
+    tail_msgs.append({
+        "role": "system",
+        "content": (
+            "[输出纪律] 严格按 system 开头的【输出结构】执行：①<think>完整推演思考</think>"
+            "——按预设思考框架展开推演，写成连贯的多段推演，禁止写成一句话摘要糊弄；\n"
+            "②<status>状态栏</status>——在思考之后、正文之前，延续上轮格式逐字段更新；\n"
+            "③正文——按预设 <length> 的字数区间足量交付，"
+            "不因思考延长而缩水正文；<roll>/<encounter>/<fate> 等事件块穿插正文中间。\n"
+            "思考预算原则：思考的每个字都按输出计费——总篇幅**不超过正文的一半**。"
+            "推演的价值在决策质量不在铺陈，把输出预算留给正文、状态栏与事件块。\n"
+            "硬禁令：只输出剧情本体。禁止在任何输出区写面向系统的说明文字——包括但不限于"
+            "质量检查、字数统计/字数要求、对状态栏的更新说明、【系统提示】/【系统说明】等"
+            "标注块。这类文字不是剧情，一个字都不许出现。"
+        ),
+    })
+    # 同轮成稿已剥离：不再向正文轮下发 <illustration> JSON 义务及其 near_generation_contract
+    # 尾部合同；视觉锚与画像成稿全部由插画链在 produce 阶段独立编译（_profile_llm_fallback）。
+    if ctx.get("comfy_audio"):
+        from app.services import audio_dialogue_extract
+        tail_msgs.append({
+            "role": "system",
+            "content": audio_dialogue_extract.build_inline_audio_instruction(),
+        })
+    return tail_msgs
+
+
+def _rp_recall_memory(ctx: dict, *, deps, text: str) -> tuple[str, str, str]:
+    """① RAG/检索表召回 + 往事纪要（`recall_chronicle`，只检索不独立调 LLM）。
+
+    返回 (repo_id, table_recall, recall)；`retrieval_query` / `rag_text` 只在本段内用，不外传。
+    逐字自 `_rp_inject_agency_context` 搬移。
+    """
+    from app.services import roleplay_agency
+    repo_id = ctx.get("repo_id") or ctx.get("thread_id") or ""
+    retrieval_query = (agent_context.history_text(ctx)[-600:] + text)
+    # 表格+RAG 结合：先从 rag_store 召回知识库条目 + 检索表行（同库同通道）
+    rag_text = _rag_recall_text(ctx, repo_id, retrieval_query)
+    table_recall = _table_recall_text(ctx, repo_id, retrieval_query)
+    # Recall 只做检索，不独立调 LLM：往事纪要（人物相关优先，简要 Top-10）
+    # + 知识库/检索表候选原样并入 GrayWill 主请求，由主模型结合世界书、历史与本轮输入一次判断并生成。
+    recall = roleplay_agency.recall_chronicle(
+        deps, repo_id=repo_id, query=retrieval_query, rag_text=rag_text,
+        actors=[
+            name for name in (ctx.get("illustration_actor_names") or [])
+            if name and name in retrieval_query
+        ] or ([ctx.get("card_name")] if ctx.get("card_name") else []),
+    )
+    if recall:
+        _probe.info("🔎[RAG召回] repo=%s 注入%d字:\n%s", repo_id, len(recall), recall[:800])
+        run_trace.emit(ctx, "rag.injected", status="ok", content=recall,
+                       char_count=len(recall))
+    else:
+        _probe.info("🔎[RAG召回] repo=%s 无命中（本轮未注入记忆）", repo_id)
+        run_trace.emit(ctx, "rag.injected", status="empty", content="", char_count=0)
+    return repo_id, table_recall, recall
+
+
+def _rp_compile_continuity(
+    ctx: dict, *, repo_id: str, turn: int, st_block: str, recall: str,
+    table_recall: str, dynamic_parts: list,
+) -> None:
+    """②③④ 时效事实账本 + 角色认知库 + 连续性编译（预算 900 token）。
+
+    ⚠ 就地 mutate 传入的 `dynamic_parts`；并写回 ctx 的 _continuity_facts 键 /
+    `ctx["_continuity_beliefs"]`（下游从 ctx 读）。逐字自 `_rp_inject_agency_context` 搬移。
+    """
+    from app.services import character_belief, continuity_compiler, temporal_fact_store
+    active_facts: list[dict] = []
+    active_beliefs: list[dict] = []
+    try:
+        if ctx.get("output_dir") and repo_id:
+            # M2（2026-09-06）：注入面时效优先——编译预算裁剪保留块内前几行，
+            # recency-first 让最新事实在压力下存活（旧行为是最老的存活，方向反了）
+            active_facts = temporal_fact_store.as_of(
+                ctx.get("output_dir") or "", repo_id, turn, recency_first=True,
+            )
+    except Exception as exc:  # noqa: BLE001 账本损坏不能阻断正文
+        run_trace.emit(ctx, "temporal.recall", status="error", error=str(exc))
+    else:
+        run_trace.emit(
+            ctx, "temporal.recall", status="ok", fact_count=len(active_facts),
+        )
+    ctx["_continuity_facts"] = active_facts
+    belief_characters = [
+        str(name) for name in (ctx.get("_selected_persona_names") or []) if str(name)
+    ]
+    try:
+        if ctx.get("output_dir") and repo_id and belief_characters:
+            active_beliefs = character_belief.active(
+                ctx.get("output_dir") or "", repo_id, turn,
+                characters=belief_characters,
+            )
+    except Exception as exc:  # noqa: BLE001 认知库损坏不能阻断正文
+        run_trace.emit(ctx, "belief.recall", status="error", error=str(exc))
+    else:
+        run_trace.emit(
+            ctx, "belief.recall", status="ok", count=len(active_beliefs),
+            characters=belief_characters,
+        )
+    ctx["_continuity_beliefs"] = active_beliefs
+    compiled = continuity_compiler.compile_context([
+        continuity_compiler.ContextSource("CURRENT_STATE", st_block, True, 100),
+        continuity_compiler.ContextSource(
+            "ACTIVE_FACTS", continuity_compiler.temporal_fact_text(active_facts), True, 90,
+        ),
+        continuity_compiler.ContextSource(
+            "CHARACTER_BELIEFS", character_belief.render_context(active_beliefs), True, 80,
+        ),
+        continuity_compiler.ContextSource("RAG_MEMORY", recall, False, 20),
+    ], token_budget=900)
+    if compiled.text:
+        dynamic_parts.append(compiled.text)
+    if table_recall:
+        dynamic_parts.append("【相关数据表行（独立配额）】\n" + table_recall)
+    run_trace.emit(
+        ctx, "continuity.compiled", tokens=compiled.tokens,
+        sources=list(compiled.included), fact_count=len(active_facts),
+    )
+
+
+def _rp_append_state_and_style(ctx: dict, base: str, directive: str, dynamic_parts: list) -> str:
+    """⑤⑥ 搭车状态指令（静态、随 system 头）+ directive（每轮变 → 后置）+ 文风约束段。
+
+    ⚠ 就地 mutate 传入的 `dynamic_parts`；`base` 片段内被重绑定 ⇒ 以返回值回传。
+    逐字自 `_rp_inject_agency_context` 搬移。
+    """
+    from app.services import roleplay_agency   # 原由 ① 段局部 import，拆开后本段自带（幂等）
+    # 搭车指令是固定文本（跨轮逐字节相同）→ 留静态头；本轮自主行动裁定 directive
+    # 每轮变 → 后置（P4-roleplay）。
+    base += roleplay_agency.state_instruction()
+    if directive:
+        dynamic_parts.append(directive)
+    # S1 生成侧预防：从同一词表编译文风约束段（enabled=False → 空串，system 逐字节不变）。
+    _style_cfg = ctx.get("_style_config") or {}
+    if _style_cfg.get("enabled", True):
+        from app.services import prose_style as _prose_style
+        _style_seg = _prose_style.style_prompt_segment(_style_cfg)
+        if _style_seg:
+            base += _style_seg
+            run_trace.emit(ctx, "prose_style.injected",
+                           words=len(_prose_style.effective_phrases(_style_cfg)))
+    return base
+
+
+def _rp_prepare_visual_and_tables(
+    ctx: dict, *, deps, repo_id: str, text: str, turn: int, dynamic_parts: list,
+) -> None:
+    """⑦ 插画视觉锚（写 `ctx["_illustration_visual_profiles"]`）+ 通用数据表只读上下文。
+
+    ⚠ 就地 mutate 传入的 `dynamic_parts`。逐字自 `_rp_inject_agency_context` 搬移。
+    """
+    if getattr(deps, "renderer", None) is not None or ctx.get("comfy_illustrate"):
+        from app.services import worldbook_store
+        visual_query = _illustration_visual_query(ctx, text)
+        visual_profiles = (
+            _card_visual_profiles(ctx, visual_query)
+            if ctx.get("appearance_source") == "character_card"
+            else worldbook_store.repo_visual_profiles(
+                ctx.get("output_dir") or "", repo_id, visual_query,
+            )
+        )
+        ctx["_illustration_visual_profiles"] = visual_profiles
+        # 上下文合同·同轮成稿剥离：不再向正文轮下发内联 <illustration> JSON 义务
+        # （原 build_inline_plan_instruction+格式说明 ≈ 数千字符尾部合同）。
+        # 视觉锚与成稿全部交给画像链独立编译（produce 阶段 _profile_llm_fallback）。
+    # 通用数据表只作只读剧情上下文；更新由正文发出后的独立维护调用完成，
+    # 禁止再让主 Roleplay 在正文尾部生成 <表格更新>。
+    try:
+        from app.services import table_store, table_update
+        _tables = table_store.load(ctx.get("output_dir") or "", repo_id)
+        turn_tables = table_store.tables_for_read(_tables)
+        if turn_tables:
+            dynamic_parts.append(table_update.table_context(turn_tables))
+            run_trace.emit(
+                ctx, "table.prompt", status="read_only", turn=turn,
+                tables=[t.get("name", "") for t in turn_tables],
+            )
+        else:
+            run_trace.emit(
+                ctx, "table.prompt", status="skipped", turn=turn,
+                reason="no_tables",
+            )
+    except Exception as exc:  # noqa: BLE001
+        run_trace.emit(ctx, "table.prompt", status="error", turn=turn, error=str(exc))
+
+
+def _rp_inject_agency_context(
+    ctx: dict, *, deps, turn: int, st_block: str, text: str, base: str,
+    directive: str, dynamic_parts: list,
+) -> str:
+    """阶段 B：`deps` 存在时注入 state 块 + 记忆召回 + 已裁定自主行动 + 搭车状态指令。
+
+    七段（顺序即落点）：
+    ① RAG/检索表召回 + 往事纪要（`recall_chronicle`）；
+    ② 时效事实账本（`temporal_fact_store.as_of`）→ `ctx["_continuity_facts"]`；
+    ③ 角色认知库（`character_belief.active`）→ `ctx["_continuity_beliefs"]`；
+    ④ 连续性编译（`continuity_compiler`，预算 900 token）→ 追加动态块；
+    ⑤ 搭车状态指令（静态、随 system 头）+ 本轮自主行动 directive（每轮变 → 后置）；
+    ⑥ 文风约束段（enabled=False → 空串，system 逐字节不变）；
+    ⑦ 插画视觉锚（写 `ctx["_illustration_visual_profiles"]`）+ 数据表只读上下文。
+
+    ⚠ 就地 mutate 传入的 `dynamic_parts`（保持同一列表对象）；`base` 片段内被重绑定 ⇒ 以返回值回传。
+    逐字自 `roleplay_node` 搬移（判定逻辑与文案字面值零改动）。
+    """
+    repo_id, table_recall, recall = _rp_recall_memory(ctx, deps=deps, text=text)
+    _rp_compile_continuity(
+        ctx, repo_id=repo_id, turn=turn, st_block=st_block, recall=recall,
+        table_recall=table_recall, dynamic_parts=dynamic_parts,
+    )
+    base = _rp_append_state_and_style(ctx, base, directive, dynamic_parts)
+    _rp_prepare_visual_and_tables(
+        ctx, deps=deps, repo_id=repo_id, text=text, turn=turn, dynamic_parts=dynamic_parts,
+    )
+    return base
+
+
 def roleplay_node(state: AgentState) -> dict:
     """剧情扮演节点：吃角色卡 persona（+后续世界书/表格记忆），沉浸式出演。"""
     ctx = state["_ctx"]
@@ -1289,63 +1740,17 @@ def roleplay_node(state: AgentState) -> dict:
         text = _apply_regex(ctx, text, Placement.USER_INPUT, is_prompt=True, depth=0,
                             skip_depth_gated=True)
         run_trace.emit(ctx, "input.processed", agent="roleplay", processed_input=text)
-        wb = _resolve_worldbook(ctx, text)
-        if wb:
-            # 世界信息正则（placement 5）：作用于世界书组装后的注入文本
-            wb = _apply_regex(ctx, wb, Placement.WORLD_INFO, is_prompt=True, depth=0)
-        # 世界书召回段（每轮按相关度重排）：同一套世界信息正则，但**落尾部动态块**
-        # （history 之后，与数据表召回同位置）。若与锚点段拼在一起塞进世界书块（history 之前），
-        # 它每轮一变就把其后的历史与全部预设片段打掉——真机实测相邻轮字节 LCP 78% → 62%。
-        wb_recall = str(ctx.get("_worldbook_recall_text") or "")
-        if wb_recall:
-            wb_recall = _apply_regex(ctx, wb_recall, Placement.WORLD_INFO, is_prompt=True, depth=0)
-            ctx["_worldbook_recall_text"] = wb_recall
-        # 世界书动态段（2026-09-13 动态区外置）：锚点条目的【剧情进展·动态】区 + 会话中途
-        # 新激活的锚点条目。与召回段同一落点（尾部动态块）——留在锚点段会把分叉点拉回
-        # 世界书块内，真机三次 cached=0 的分叉点全在那里。
-        wb_dynamic = str(ctx.get("_worldbook_dynamic_text") or "")
-        if wb_dynamic:
-            wb_dynamic = _apply_regex(ctx, wb_dynamic, Placement.WORLD_INFO, is_prompt=True, depth=0)
-            ctx["_worldbook_dynamic_text"] = wb_dynamic
-        run_trace.emit(
-            ctx, "worldbook.resolved", injected=bool(wb), content=wb or "",
-            selected_indices=ctx.get("_selected_worldbook_indices") or [],
-            keyword_indices=ctx.get("_keyword_worldbook_indices") or [],
-            character_names=ctx.get("_worldbook_character_names") or [],
-            scan_chars=int(ctx.get("_worldbook_scan_chars") or 0),
-            dropped=int(ctx.get("_worldbook_dropped") or 0),
-            recall_chars=len(wb_recall),
-        )
-        first_story_reply = not any(
-            item.get("role") == "user" and str(item.get("content") or "").strip()
-            for item in (ctx.get("history") or [])
-        )
+        wb, wb_recall = _rp_prepare_worldbook(ctx, text)
+        _rp_emit_worldbook_resolved(ctx, wb, wb_recall)
+        first_story_reply = _rp_is_first_story_reply(ctx)
         # 上下文合同·历史：剧情模式只进上一次剧情轮，且过滤到只剩正文
         # （剥 think/status/encounter/骰点/插画音频转场 JSON 块）；更早轮次不进上下文。
-        story_round = story_history.last_story_round(ctx.get("history") or [])
-        run_trace.emit(ctx, "history.slimmed",
-                       full_messages=len(ctx.get("history") or []),
-                       injected_messages=len(story_round),
-                       injected_chars=sum(len(m["content"]) for m in story_round))
-        ctx["persona"] = _resolve_personas(
-            ctx, text, opening_only=first_story_reply,
-            worldbook_names=ctx.get("_worldbook_character_names") or [],
-            fallback_query=_recent_character_context(ctx),
-        )
-        run_trace.emit(
-            ctx, "character_cards.resolved",
-            opening_only=first_story_reply,
-            selected=ctx.get("_selected_persona_names") or [],
-            injected=bool(ctx.get("persona")),
-        )
+        story_round = _rp_last_story_round(ctx)
+        _rp_resolve_persona_block(ctx, text, first_story_reply)
         # 能动性子图·准备：算 turn/读好感度/state 注入块（无卡或无 output_dir → deps=None 静默跳过）
         deps, turn, affinity, st_block = _agency_prelude(ctx, text)
         # 文风（去AI味）配置：每轮读一次用户态文件，失败回退内置默认（enabled+零增删）。
-        try:
-            from app.services import prose_style
-            ctx["_style_config"] = prose_style.load_config()
-        except Exception as exc:  # noqa: BLE001 文风配置损坏不能阻断正文
-            run_trace.emit(ctx, "prose_style.config", status="error", error=str(exc))
+        _rp_load_style_config(ctx)
         # 阶段 A：世界提案 + 裁判（默认每轮判断一次：judge.gateBaseRate=1.0 / gateFloor=-100，
         # 设 0 才显式关闭；gate 未命中/失败时 directive 空，塌回单次 LLM 零额外成本）
         directive, lost = _agency_propose(ctx, deps, affinity, wb, text)
@@ -1360,249 +1765,35 @@ def roleplay_node(state: AgentState) -> dict:
         # 逐字节稳定；动态块（连续性状态/NPC 目标/RAG 召回/表格/directive）后置。
         # 两分支（内置 / 预设）同步拆；内容一字不删，只换位置（红线：位置可动、内容不可动）。
         dynamic_parts: list[str] = []
-        if preset_msgs:
-            # 拆：起始连续 system 段 → 进 system 头（受 _agent_system 包裹/替换）；其余(user/assistant/
-            # 历史/尾部 system=PHI)保持原位当对话轮。这样 role 不被抹平，PHI 仍在历史之后。
-            head_parts: list[str] = []
-            dialogue: list[dict] = []
-            for m in preset_msgs:
-                if not dialogue and m["role"] == "system":
-                    head_parts.append(m["content"])
-                else:
-                    dialogue.append(m)
-            base = "\n\n".join(head_parts)
-            rp_temp = _builtin(ctx, "roleplay", "temperature", builtin_agents.ROLEPLAY_TEMPERATURE)
-            temp = preset_temp if preset_temp is not None else _temperature(ctx, rp_temp)
-            if not has_hist:  # 预设无 chatHistory marker → 历史补在对话末尾
-                dialogue += story_round
-        else:
-            persona = ctx.get("persona") or ""
-            rp_base = _builtin(ctx, "roleplay", "systemPrompt", builtin_agents.ROLEPLAY_BASE)
-            base = rp_base + (f"\n\n{persona}" if persona else "")
-            up = _render_user_persona(ctx)
-            if up:
-                base += f"\n\n{up}"
-            if wb:
-                base += f"\n\n{wb}"
-            # 卡字段/世界书可能含 {{char}}/{{user}} 宏 → 替换（缺省 user 回退「我」），避免字面漏进提示词
-            from app.services import preset_store as _ps
-            base = _ps.substitute_macros(base, {
-                "char_name": (ctx.get("card_name") or "").strip(),
-                "user_name": (ctx.get("user_name") or "").strip(),
-            })
-            temp = _temperature(ctx, _builtin(ctx, "roleplay", "temperature", builtin_agents.ROLEPLAY_TEMPERATURE))
-            dialogue = story_round  # 历史作真实多轮，只进上一次剧情轮的纯正文（上下文合同）
+        base, temp, dialogue = _rp_build_prompt_base(
+            ctx, wb=wb, preset_msgs=preset_msgs, preset_temp=preset_temp,
+            has_hist=has_hist, story_round=story_round)
         # 世界书**召回段**（每轮重排）落这里：与数据表召回/连续性状态同层，都在 history 之后。
         # 锚点段（constant/keyword）留在世界书块内（history 之前）跨轮稳定 ⇒ 前缀不被召回打断。
-        if wb_recall:
-            dynamic_parts.append(wb_recall)
-        # 世界书动态段（动态区+中途新锚点）：同样只落尾部动态块，理由同上。
-        wb_dynamic = str(ctx.get("_worldbook_dynamic_text") or "")
-        if wb_dynamic:
-            dynamic_parts.append(wb_dynamic)
+        _rp_seed_dynamic_parts(ctx, wb_recall, dynamic_parts)
         # 头部思维链随 system 头（框定推理框架）
-        if chains_head:
-            base += "\n\n" + "\n\n".join(chains_head)
-        # 命运骰点规则：注入剧情推进提示词，让主模型在关键博弈点打可审计 <roll>（用户可在编辑器改/清空）
-        roll_rule = _builtin(ctx, "roleplay", "rollInstruction", builtin_agents.ROLL_INSTRUCTION)
-        if roll_rule and roll_rule.strip():
-            base += roll_rule
+        base = _rp_append_static_blocks(ctx, base, chains_head)
         # 阶段 B：注入 state 块 + 记忆召回 + 已裁定自主行动 + 搭车状态指令（deps 存在才挂）
         if deps is not None:
-            from app.services import roleplay_agency
-            repo_id = ctx.get("repo_id") or ctx.get("thread_id") or ""
-            retrieval_query = (agent_context.history_text(ctx)[-600:] + text)
-            # 表格+RAG 结合：先从 rag_store 召回知识库条目 + 检索表行（同库同通道）
-            rag_text = _rag_recall_text(ctx, repo_id, retrieval_query)
-            table_recall = _table_recall_text(ctx, repo_id, retrieval_query)
-            # Recall 只做检索，不独立调 LLM：往事纪要（人物相关优先，简要 Top-10）
-            # + 知识库/检索表候选原样并入 GrayWill 主请求，由主模型结合世界书、历史与本轮输入一次判断并生成。
-            recall = roleplay_agency.recall_chronicle(
-                deps, repo_id=repo_id, query=retrieval_query, rag_text=rag_text,
-                actors=[
-                    name for name in (ctx.get("illustration_actor_names") or [])
-                    if name and name in retrieval_query
-                ] or ([ctx.get("card_name")] if ctx.get("card_name") else []),
+            base = _rp_inject_agency_context(
+                ctx, deps=deps, turn=turn, st_block=st_block, text=text, base=base,
+                directive=directive, dynamic_parts=dynamic_parts,
             )
-            if recall:
-                _probe.info("🔎[RAG召回] repo=%s 注入%d字:\n%s", repo_id, len(recall), recall[:800])
-                run_trace.emit(ctx, "rag.injected", status="ok", content=recall,
-                               char_count=len(recall))
-            else:
-                _probe.info("🔎[RAG召回] repo=%s 无命中（本轮未注入记忆）", repo_id)
-                run_trace.emit(ctx, "rag.injected", status="empty", content="", char_count=0)
-            from app.services import character_belief, continuity_compiler, temporal_fact_store
-            active_facts: list[dict] = []
-            active_beliefs: list[dict] = []
-            try:
-                if ctx.get("output_dir") and repo_id:
-                    # M2（2026-09-06）：注入面时效优先——编译预算裁剪保留块内前几行，
-                    # recency-first 让最新事实在压力下存活（旧行为是最老的存活，方向反了）
-                    active_facts = temporal_fact_store.as_of(
-                        ctx.get("output_dir") or "", repo_id, turn, recency_first=True,
-                    )
-            except Exception as exc:  # noqa: BLE001 账本损坏不能阻断正文
-                run_trace.emit(ctx, "temporal.recall", status="error", error=str(exc))
-            else:
-                run_trace.emit(
-                    ctx, "temporal.recall", status="ok", fact_count=len(active_facts),
-                )
-            ctx["_continuity_facts"] = active_facts
-            belief_characters = [
-                str(name) for name in (ctx.get("_selected_persona_names") or []) if str(name)
-            ]
-            try:
-                if ctx.get("output_dir") and repo_id and belief_characters:
-                    active_beliefs = character_belief.active(
-                        ctx.get("output_dir") or "", repo_id, turn,
-                        characters=belief_characters,
-                    )
-            except Exception as exc:  # noqa: BLE001 认知库损坏不能阻断正文
-                run_trace.emit(ctx, "belief.recall", status="error", error=str(exc))
-            else:
-                run_trace.emit(
-                    ctx, "belief.recall", status="ok", count=len(active_beliefs),
-                    characters=belief_characters,
-                )
-            ctx["_continuity_beliefs"] = active_beliefs
-            compiled = continuity_compiler.compile_context([
-                continuity_compiler.ContextSource("CURRENT_STATE", st_block, True, 100),
-                continuity_compiler.ContextSource(
-                    "ACTIVE_FACTS", continuity_compiler.temporal_fact_text(active_facts), True, 90,
-                ),
-                continuity_compiler.ContextSource(
-                    "CHARACTER_BELIEFS", character_belief.render_context(active_beliefs), True, 80,
-                ),
-                continuity_compiler.ContextSource("RAG_MEMORY", recall, False, 20),
-            ], token_budget=900)
-            if compiled.text:
-                dynamic_parts.append(compiled.text)
-            if table_recall:
-                dynamic_parts.append("【相关数据表行（独立配额）】\n" + table_recall)
-            run_trace.emit(
-                ctx, "continuity.compiled", tokens=compiled.tokens,
-                sources=list(compiled.included), fact_count=len(active_facts),
-            )
-            # 搭车指令是固定文本（跨轮逐字节相同）→ 留静态头；本轮自主行动裁定 directive
-            # 每轮变 → 后置（P4-roleplay）。
-            base += roleplay_agency.state_instruction()
-            if directive:
-                dynamic_parts.append(directive)
-            # S1 生成侧预防：从同一词表编译文风约束段（enabled=False → 空串，system 逐字节不变）。
-            _style_cfg = ctx.get("_style_config") or {}
-            if _style_cfg.get("enabled", True):
-                from app.services import prose_style as _prose_style
-                _style_seg = _prose_style.style_prompt_segment(_style_cfg)
-                if _style_seg:
-                    base += _style_seg
-                    run_trace.emit(ctx, "prose_style.injected",
-                                   words=len(_prose_style.effective_phrases(_style_cfg)))
-            if getattr(deps, "renderer", None) is not None or ctx.get("comfy_illustrate"):
-                from app.services import worldbook_store
-                visual_query = _illustration_visual_query(ctx, text)
-                visual_profiles = (
-                    _card_visual_profiles(ctx, visual_query)
-                    if ctx.get("appearance_source") == "character_card"
-                    else worldbook_store.repo_visual_profiles(
-                        ctx.get("output_dir") or "", repo_id, visual_query,
-                    )
-                )
-                ctx["_illustration_visual_profiles"] = visual_profiles
-                # 上下文合同·同轮成稿剥离：不再向正文轮下发内联 <illustration> JSON 义务
-                # （原 build_inline_plan_instruction+格式说明 ≈ 数千字符尾部合同）。
-                # 视觉锚与成稿全部交给画像链独立编译（produce 阶段 _profile_llm_fallback）。
-            # 通用数据表只作只读剧情上下文；更新由正文发出后的独立维护调用完成，
-            # 禁止再让主 Roleplay 在正文尾部生成 <表格更新>。
-            try:
-                from app.services import table_store, table_update
-                _tables = table_store.load(ctx.get("output_dir") or "", repo_id)
-                turn_tables = table_store.tables_for_read(_tables)
-                if turn_tables:
-                    dynamic_parts.append(table_update.table_context(turn_tables))
-                    run_trace.emit(
-                        ctx, "table.prompt", status="read_only", turn=turn,
-                        tables=[t.get("name", "") for t in turn_tables],
-                    )
-                else:
-                    run_trace.emit(
-                        ctx, "table.prompt", status="skipped", turn=turn,
-                        reason="no_tables",
-                    )
-            except Exception as exc:  # noqa: BLE001
-                run_trace.emit(ctx, "table.prompt", status="error", turn=turn, error=str(exc))
         # 收口：状态块/纪要召回/裁定指令等在 substitute 之后才生成（且预设分支根本没替换
         # base），可能含 {{user}}/{{char}}（如状态字段名「对{{user}}态度」、快照）。统一在此对
         # 最终**两段**各替换一次，缺省 user 回退「我」（用户没填人设时也不让字面 {{user}} 漏进
         # system→被模型照抄进正文）。P4-roleplay：静态头与动态尾段分别替换，两段都不得漏。
-        from app.services import preset_store as _ps2
-        _macros = {
-            "char_name": (ctx.get("card_name") or "").strip(),
-            "user_name": (ctx.get("user_name") or "").strip(),
-        }
-        base = _ps2.substitute_macros(base, _macros)
-        dynamic_text = _ps2.substitute_macros(
-            "\n\n".join(part for part in dynamic_parts if part.strip()), _macros,
-        )
+        base, dynamic_text = _rp_substitute_macros(ctx, base, dynamic_parts)
         system = _agent_system(ctx, base)
         # 输出结构模板前置（2026-09-12 用户拍板方案 A + 顺序定稿）：首因位置守约率最高——
         # 模型守约率波动（21:11 写 2726 字思考 / 21:26 零思考）靠尾部纪律压不住，模板放
         # system 最开头给最强 few-shot。顺序=思考 → 状态栏 → 正文（用户定稿）；
         # 命定/登场/检定事件块按剧情穿插正文中间。解析层全部位置无关
         # （extract_status_snapshot 取末块、事件块就地解析），模板是行为引导不是解析契约。
-        system = (
-            "【输出结构（每轮固定，顺序不可换）】\n"
-            "第一步 <think>完整推演思考</think>——按预设思考框架展开推演；\n"
-            "第二步 <status>状态栏</status>——延续上轮格式逐字段更新；\n"
-            "第三步 <content>正文</content>——按预设 <length> 字数要求足量输出；"
-            "<roll>/<encounter>/<fate> 等事件块按剧情需要穿插在正文中间。\n"
-            "所有标签必须成对完整闭合，各类块只输出一次，禁止在思考里预写任何标签草稿。\n\n"
-            + system
-        )
+        system = _rp_prefix_output_structure(system)
         # 尾部顺序（P4-roleplay）：[动态块][思维链 tail][输出纪律][…][本轮 user]。
         # 动态块是每轮变化的块，落在历史之后 → 静态头（system）逐字节跨轮稳定。
-        tail_msgs: list[dict] = []
-        if dynamic_text:
-            tail_msgs.append({"role": "system", "content": dynamic_text})
-        # 尾部思维链作独立 system 消息落在历史之后、本轮 user 之前 → 离生成点最近，遵守最严
-        tail_msgs.extend({"role": "system", "content": c} for c in chains_tail)
-        # 思考纪律（2026-09-12 用户拍板修订）：思考定位为**完整推演思考**——发布后由前端
-        # 「小cot折叠」正则折叠为「推演内思考过程」下拉（用户设计，思考本就该发布而非丢弃）。
-        # 旧版「三类内容 + 300 字硬上限」与预设「默认COT组装」框架直接矛盾，模型面对矛盾
-        # 指令干脆不写思考（09-12 20:32 trace 实证思考=0）。保留防烧钱核心禁令
-        # （试写正文/复述设定/推翻重来/标签草稿——2026-08-29/30 事故教训），删思考长度压制；
-        # 正文长度以预设 <length> 字数区间为准（预设已启用 1000-8000），不在后端另设硬指标。
-        # 思考纪律（2026-09-12 三次修订定稿）：思考定位为**完整推演思考**（发布后由前端
-        # 「小cot折叠」折叠为「推演内思考过程」下拉）。历次实验：300 字硬上限 → 模型干脆
-        # 不写思考（deepseek）；点名禁令清单 → 冗余根因其实在预设思考框架本身（用户裁定
-        # 禁令去掉，去预设里找）。定稿=只保留**思考预算原则**：思考总篇幅 ≤ 正文一半
-        # （软比例，用户认可），预算外的冗余治理落在预设思考框架的瘦身（另行处理）。
-        # 泄漏修订（2026-09-13）：09-12 版把「前端折叠」「1000-8000 字」等实现细节写进了
-        # 模型可见文本，模型照抄进正文（神权大陆 msg[4] 实证：质量检查/状态栏更新/
-        # 【系统提示…尾部标注】三处泄漏）。净提示词=删全部实现细节 + 追加元话语硬禁令；
-        # 出口兜底见 roleplay_turn.strip_meta_leak_in_content（只动 <content>）。
-        tail_msgs.append({
-            "role": "system",
-            "content": (
-                "[输出纪律] 严格按 system 开头的【输出结构】执行：①<think>完整推演思考</think>"
-                "——按预设思考框架展开推演，写成连贯的多段推演，禁止写成一句话摘要糊弄；\n"
-                "②<status>状态栏</status>——在思考之后、正文之前，延续上轮格式逐字段更新；\n"
-                "③正文——按预设 <length> 的字数区间足量交付，"
-                "不因思考延长而缩水正文；<roll>/<encounter>/<fate> 等事件块穿插正文中间。\n"
-                "思考预算原则：思考的每个字都按输出计费——总篇幅**不超过正文的一半**。"
-                "推演的价值在决策质量不在铺陈，把输出预算留给正文、状态栏与事件块。\n"
-                "硬禁令：只输出剧情本体。禁止在任何输出区写面向系统的说明文字——包括但不限于"
-                "质量检查、字数统计/字数要求、对状态栏的更新说明、【系统提示】/【系统说明】等"
-                "标注块。这类文字不是剧情，一个字都不许出现。"
-            ),
-        })
-        # 同轮成稿已剥离：不再向正文轮下发 <illustration> JSON 义务及其 near_generation_contract
-        # 尾部合同；视觉锚与画像成稿全部由插画链在 produce 阶段独立编译（_profile_llm_fallback）。
-        if ctx.get("comfy_audio"):
-            from app.services import audio_dialogue_extract
-            tail_msgs.append({
-                "role": "system",
-                "content": audio_dialogue_extract.build_inline_audio_instruction(),
-            })
+        tail_msgs = _rp_build_tail_messages(ctx, dynamic_text, chains_tail)
         messages = [{"role": "system", "content": system}, *dialogue, *tail_msgs,
                     {"role": "user", "content": text}]
         compiled_prompt = prompt_compiler.compile_messages(
