@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 from app.services import agent_graph as ag
+from app.services import agent_fabric
 from app.services import plan_compiler, plan_tasks
 from app.services import capability_sandbox
 
@@ -143,9 +144,10 @@ def test_full模式注入固化清单与知识库进history并自动固化(monke
     monkeypatch.setattr(plan_tasks, "solidify_steps",
                         lambda **kwargs: recipe, raising=False)
     monkeypatch.setattr("app.services.fabric_loop.run_loop", fake_run_loop)
-    monkeypatch.setattr(ag, "_recipe_catalog_text",
+    # 消费方 _fabric_knowledge_history 已迁 agent_fabric（方案 B 第二步之 C），patch 必须指新属主
+    monkeypatch.setattr(agent_fabric, "_recipe_catalog_text",
                         lambda: "《示例配方》 id=r0（2 步）意图：导入角色卡")
-    monkeypatch.setattr(ag, "_knowledge_catalog_text",
+    monkeypatch.setattr(agent_fabric, "_knowledge_catalog_text",
                         lambda: "【固化知识库】合集卡制作规范摘要")
 
     ctx = _make_ctx(output_dir=str(tmp_path), thread_id="t1", message_id="m1")

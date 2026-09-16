@@ -12,7 +12,7 @@
 """
 from __future__ import annotations
 
-from app.services import agent_graph, capability_registry as cr, plan_compiler
+from app.services import agent_graph, agent_fabric, capability_registry as cr, plan_compiler
 
 
 def test_交付能力面白名单每个操作都真实注册():
@@ -79,13 +79,14 @@ def test_判定文本决定能力面而非执行文本():
     """短指令「继续补写」+ 历史含交付意图：能力面按判定文本收窄（而不是全量）。
     反向验证 delivery_intent 解耦——intent 仍可用短文本，能力面不落空。"""
     calls: dict = {}
-    real = agent_graph._fabric_capabilities
+    # 消费方 _fabric_run_args 已迁 agent_fabric（方案 B 第二步之 C），spy 必须打在新属主上
+    real = agent_fabric._fabric_capabilities
 
     def spy(intent_text: str, configured: set[str]):
         calls["intent_text"] = intent_text
         return real(intent_text, configured)
 
-    agent_graph._fabric_capabilities = spy  # type: ignore[assignment]
+    agent_fabric._fabric_capabilities = spy  # type: ignore[assignment]
     try:
         args = agent_graph._fabric_run_args(
             {"chat_base": "http://x", "chat_key": "k", "chat_model": "m"},
@@ -95,7 +96,7 @@ def test_判定文本决定能力面而非执行文本():
             delivery_intent="把世界书条目整理合并为一个设定文档",
         )
     finally:
-        agent_graph._fabric_capabilities = real  # type: ignore[assignment]
+        agent_fabric._fabric_capabilities = real  # type: ignore[assignment]
     assert calls["intent_text"] == "把世界书条目整理合并为一个设定文档"
     assert args["intent"] == "继续补写"
     ops = {c["operation"] for c in args["capabilities"]}

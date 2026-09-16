@@ -6,6 +6,8 @@ import threading
 import pytest
 
 from app.services import agency, agent_context, agent_graph as ag, worldbook, worldbook_store
+from app.services import agent_context_assembly as aga  # A 簇新属主（方案 B 拆分）
+from app.services import agent_agency as aag  # B 簇新属主（方案 B 第二步之 B）
 from app.services import roleplay_agency as ra
 from app.services.agent_contracts import RunContext
 
@@ -259,7 +261,7 @@ def test_主剧情世界书选择范围贯通到curator读写与trace(monkeypatc
         {"content": "未参与本轮的机制条目"},
     ]}
     worldbook_store.ensure_repo_snapshot(str(tmp_path), repo_id, [book])
-    monkeypatch.setattr(ag, "_repo_worldbook", lambda ctx: book)
+    monkeypatch.setattr(aga, "_repo_worldbook", lambda ctx: book)
     monkeypatch.setattr(worldbook, "ensure_indexed", lambda *args, **kwargs: False)
     monkeypatch.setattr(worldbook, "_retrieve", lambda *args, **kwargs: [])
     events = []
@@ -291,7 +293,7 @@ def test_世界书模糊召回不激活角色卡且当前精确别名优先(monk
         {"content": "露娜负责王城路线与贵族礼仪。", "keys": ["露娜"]},
         {"content": "米拉负责边境诊疗与药材鉴定。", "keys": ["米拉", "医生"]},
     ]}
-    monkeypatch.setattr(ag, "_repo_worldbook", lambda ctx: book)
+    monkeypatch.setattr(aga, "_repo_worldbook", lambda ctx: book)
     monkeypatch.setattr(worldbook, "schedule_index", lambda *args, **kwargs: False)
     monkeypatch.setattr(worldbook, "_retrieve", lambda *args, **kwargs: [])
     ctx = _ctx(
@@ -388,7 +390,7 @@ def test_首次世界书索引立即发送非阻塞状态事件(monkeypatch):
     book = {"entries": [{"content": "塞西莉亚角色条目", "keys": ["塞西莉亚"]}]}
     emitted = []
     traces = []
-    monkeypatch.setattr(ag, "_repo_worldbook", lambda ctx: book)
+    monkeypatch.setattr(aga, "_repo_worldbook", lambda ctx: book)
     monkeypatch.setattr(
         worldbook,
         "schedule_index",
@@ -1175,7 +1177,7 @@ def test_roleplay把机械召回候选与预设上下文合并后只调一次主
         roleplay_once,
     )
     monkeypatch.setattr(
-        ag, "_table_maintenance",
+        aag, "_table_maintenance",  # 消费方 _agency_maintenance 已迁 agent_agency（方案 B 之 B）
         lambda ctx, repo_id, reply, turn: calls.append("table"), raising=False,
     )
     monkeypatch.setattr(ra, "maybe_illustrate", lambda *a, **k: None)
@@ -1216,7 +1218,7 @@ def test_roleplay动态块后置_静态头跨轮逐字节稳定(monkeypatch, tmp
     monkeypatch.setattr(ag, "_rag_recall_text", lambda *a, **k: "")
     monkeypatch.setattr(ag, "_table_recall_text", lambda *a, **k: "")
     monkeypatch.setattr(ra, "recall_chronicle", lambda *a, **k: next(recalls, ""))
-    monkeypatch.setattr(ag, "_table_maintenance", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(aag, "_table_maintenance", lambda *a, **k: None, raising=False)  # 消费方已迁 agent_agency
     monkeypatch.setattr(ra, "maybe_illustrate", lambda *a, **k: None)
     monkeypatch.setattr(ra, "maybe_summarize", lambda *a, **k: None)
     monkeypatch.setattr(ra, "maybe_curate", lambda *a, **k: 0)
@@ -1753,7 +1755,7 @@ def test_comfy_video关闭时不编译视频且不调提取LLM(monkeypatch, tmp_
     )
     video_calls = []
     monkeypatch.setattr(
-        ag, "_extract_video_action_plan",
+        aag, "_extract_video_action_plan",  # 消费方 _agency_writeback 已迁 agent_agency（方案 B 之 B）
         lambda *a, **k: video_calls.append(1) or {},
         raising=False,
     )
@@ -3208,7 +3210,7 @@ def test_roleplay先交付正文与插画但维护完成后才结束Agent回合(
         maintenance_started.set()
         release_maintenance.wait(2)
 
-    monkeypatch.setattr(ag, "_agency_maintenance", slow_maintenance)
+    monkeypatch.setattr(aag, "_agency_maintenance", slow_maintenance)  # 消费方 _agency_maintenance_async 已迁 agent_agency
     ctx = _card_ctx(
         repo_id="work", thread_id="work", comfy_illustrate=True,
         stream_sink=emitted.append,
