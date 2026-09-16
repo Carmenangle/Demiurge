@@ -2,6 +2,9 @@
 
 按 repo_id 隔离（<output_dir>/<repo_id>/tables.json）。好感度/纪要由 state/narrative 路由各自管，
 本路由只管其余通用表（背包/技能/任务/角色/选项…）。base 由前端传 output_dir。
+行级增删改统一走 `table_store.mutate`（唯一事务接缝：读 → apply_ops → 有变化才落盘，审计 C5）；
+建表/删表/改 meta 统一走 `table_store.mutate_structure`（同口径的结构接缝，审计 P6）。
+本路由只保留**校验与 no-op 响应口径**（`/create` 无变化 → 400；`/drop`、`/set-meta` 无变化 → 静默 200）。
 """
 from __future__ import annotations
 
@@ -50,10 +53,9 @@ def add_row(req: RowRequest) -> dict[str, object]:
     """给某表新增一行。返回更新后的表列表。"""
     if not (req.output_dir and req.repo_id):
         raise HTTPException(status_code=400, detail="缺少 output_dir 或 repo_id")
-    tables = table_store.load(req.output_dir, req.repo_id)
-    n = table_store.apply_ops(tables, [{"op": "insert", "table": req.table, "values": req.values}])
-    if n:
-        table_store.save(req.output_dir, req.repo_id, tables)
+    tables, _n = table_store.mutate(
+        req.output_dir, req.repo_id,
+        [{"op": "insert", "table": req.table, "values": req.values}])
     return {"ok": True, "tables": tables}
 
 
@@ -70,11 +72,9 @@ def update_row(req: UpdateRequest) -> dict[str, object]:
     """改某表某行的单元格（values 键为列名）。返回更新后的表列表。"""
     if not (req.output_dir and req.repo_id):
         raise HTTPException(status_code=400, detail="缺少 output_dir 或 repo_id")
-    tables = table_store.load(req.output_dir, req.repo_id)
-    n = table_store.apply_ops(
-        tables, [{"op": "update", "table": req.table, "row": req.row, "values": req.values}])
-    if n:
-        table_store.save(req.output_dir, req.repo_id, tables)
+    tables, _n = table_store.mutate(
+        req.output_dir, req.repo_id,
+        [{"op": "update", "table": req.table, "row": req.row, "values": req.values}])
     return {"ok": True, "tables": tables}
 
 
@@ -90,10 +90,9 @@ def delete_row(req: DeleteRequest) -> dict[str, object]:
     """删某表某行（0 基行号）。返回更新后的表列表。"""
     if not (req.output_dir and req.repo_id):
         raise HTTPException(status_code=400, detail="缺少 output_dir 或 repo_id")
-    tables = table_store.load(req.output_dir, req.repo_id)
-    n = table_store.apply_ops(tables, [{"op": "delete", "table": req.table, "row": req.row}])
-    if n:
-        table_store.save(req.output_dir, req.repo_id, tables)
+    tables, _n = table_store.mutate(
+        req.output_dir, req.repo_id,
+        [{"op": "delete", "table": req.table, "row": req.row}])
     return {"ok": True, "tables": tables}
 
 
@@ -119,13 +118,13 @@ def create_table(req: CreateRequest) -> dict[str, object]:
     """新建一张空通用表（引导式建表用）。表名重复/无列 → 400。返回更新后的表列表。"""
     if not (req.output_dir and req.repo_id):
         raise HTTPException(status_code=400, detail="缺少 output_dir 或 repo_id")
-    tables = table_store.load(req.output_dir, req.repo_id)
-    tbl = table_store.create_table(
-        tables, req.name, req.columns, note=req.note, rule=req.rule,
-        col_types=req.col_types, key_col=req.key_col)
-    if tbl is None:
+    tables, created = table_store.mutate_structure(
+        req.output_dir, req.repo_id,
+        lambda t: table_store.create_table(
+            t, req.name, req.columns, note=req.note, rule=req.rule,
+            col_types=req.col_types, key_col=req.key_col))
+    if not created:
         raise HTTPException(status_code=400, detail="表名重复或没有有效列")
-    table_store.save(req.output_dir, req.repo_id, tables)
     return {"ok": True, "tables": tables}
 
 
@@ -140,9 +139,9 @@ def drop_table(req: DropRequest) -> dict[str, object]:
     """按表名删整表。返回更新后的表列表。"""
     if not (req.output_dir and req.repo_id):
         raise HTTPException(status_code=400, detail="缺少 output_dir 或 repo_id")
-    tables = table_store.load(req.output_dir, req.repo_id)
-    if table_store.drop_table(tables, req.table):
-        table_store.save(req.output_dir, req.repo_id, tables)
+    tables, _changed = table_store.mutate_structure(
+        req.output_dir, req.repo_id,
+        lambda t: table_store.drop_table(t, req.table))
     return {"ok": True, "tables": tables}
 
 
@@ -161,10 +160,10 @@ def set_meta(req: MetaRequest) -> dict[str, object]:
     """改某表的说明/更新规则/身份列/注入模式（full 全量 / retrieval 检索）。返回更新后的表列表。"""
     if not (req.output_dir and req.repo_id):
         raise HTTPException(status_code=400, detail="缺少 output_dir 或 repo_id")
-    tables = table_store.load(req.output_dir, req.repo_id)
-    if table_store.set_meta(tables, req.table, note=req.note, rule=req.rule,
-                            key_col=req.key_col, mode=req.mode):
-        table_store.save(req.output_dir, req.repo_id, tables)
+    tables, _changed = table_store.mutate_structure(
+        req.output_dir, req.repo_id,
+        lambda t: table_store.set_meta(t, req.table, note=req.note, rule=req.rule,
+                                       key_col=req.key_col, mode=req.mode))
     return {"ok": True, "tables": tables}
 
 

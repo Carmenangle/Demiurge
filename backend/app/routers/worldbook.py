@@ -1,11 +1,15 @@
 """独立世界书端点：导入/列表/读取/删除。路由薄——落盘交给 worldbook_store。
 
+条目级增删改（⑤）走唯一事务接缝 `worldbook_store.mutate_entries(load, save, apply)`：
+接缝只收「无变化不落盘」这一条不变量，本路由负责定位（独立世界书 / 卡内嵌）与 400·404 文案。
+
 世界书文件夹路径来自前端设置（worldbookDir），随请求透传（与 characterDir 同模式）。
 同名冲突：overwrite=false 且已存在 → 409，前端弹覆盖确认（对标角色卡导入语义）。
 """
 from __future__ import annotations
 
 import json
+from typing import Callable
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
@@ -95,33 +99,42 @@ class EntryLocation(BaseModel):
     card_name: str = ""
 
 
-def _read_book(loc: EntryLocation) -> tuple[dict, str]:
-    """按定位读出 book dict，返回 (book, kind)。kind ∈ {standalone, card}。缺定位/不存在 → 400/404。"""
+def _locator(loc: EntryLocation) -> tuple[Callable[[], dict], Callable[[dict], None]]:
+    """按定位造一对 ``(load, save)`` 闭包，交给 `worldbook_store.mutate_entries`。
+
+    二选一：独立世界书 base+name / 卡内嵌 character_dir+card_name。
+    缺定位 → 400；目标不存在 → 404（文案与拆分前逐字一致，不随收口改动）。
+    """
     if loc.base and loc.name:
-        book = worldbook_store.read_book(loc.base, loc.name)
-        if book is None:
-            raise HTTPException(status_code=404, detail="世界书不存在")
-        return book, "standalone"
+        def load() -> dict:
+            book = worldbook_store.read_book(loc.base, loc.name)
+            if book is None:
+                raise HTTPException(status_code=404, detail="世界书不存在")
+            return book
+
+        def save(book: dict) -> None:
+            worldbook_store.save(loc.base, loc.name, book, overwrite=True)
+
+        return load, save
     if loc.character_dir and loc.card_name:
-        book = character_store.read_worldbook(loc.character_dir, loc.card_name)
-        if book is None:
-            raise HTTPException(status_code=404, detail="该卡没有内嵌世界书")
-        return book, "card"
+        def load() -> dict:
+            book = character_store.read_worldbook(loc.character_dir, loc.card_name)
+            if book is None:
+                raise HTTPException(status_code=404, detail="该卡没有内嵌世界书")
+            return book
+
+        def save(book: dict) -> None:
+            character_store.write_worldbook(loc.character_dir, loc.card_name, book)
+
+        return load, save
     raise HTTPException(status_code=400, detail="缺少世界书定位（base+name 或 character_dir+card_name）")
-
-
-def _write_book(loc: EntryLocation, kind: str, book: dict) -> None:
-    if kind == "standalone":
-        worldbook_store.save(loc.base, loc.name, book, overwrite=True)
-    else:
-        character_store.write_worldbook(loc.character_dir, loc.card_name, book)
 
 
 @router.post("/entries")
 def list_entries(loc: EntryLocation) -> dict[str, object]:
     """列出某世界书全部条目（含 index，供前端定位编辑）。"""
-    book, _ = _read_book(loc)
-    return {"entries": worldbook_edit.list_entries(book)}
+    load, _ = _locator(loc)
+    return {"entries": worldbook_edit.list_entries(load())}
 
 
 class EntryAddRequest(EntryLocation):
@@ -131,10 +144,12 @@ class EntryAddRequest(EntryLocation):
 @router.post("/entry/add")
 def add_entry(req: EntryAddRequest) -> dict[str, object]:
     """新增一条世界书条目，返回其 index。"""
-    book, kind = _read_book(req)
-    idx = worldbook_edit.add_entry(book, req.entry.model_dump())
-    _write_book(req, kind, book)
-    return {"ok": True, "index": idx}
+    load, save = _locator(req)
+    patch = req.entry.model_dump()
+    # 新增恒为「有变化」（即便 index==0）——显式 True，不用真值判定。
+    index, _ = worldbook_store.mutate_entries(
+        load, save, lambda book: (worldbook_edit.add_entry(book, patch), True))
+    return {"ok": True, "index": index}
 
 
 class EntryUpdateRequest(EntryLocation):
@@ -144,11 +159,13 @@ class EntryUpdateRequest(EntryLocation):
 
 @router.post("/entry/update")
 def update_entry(req: EntryUpdateRequest) -> dict[str, object]:
-    """更新第 index 条条目。越界 → 404。"""
-    book, kind = _read_book(req)
-    if not worldbook_edit.update_entry(book, req.index, req.entry.model_dump()):
+    """更新第 index 条条目。越界 → 404（且不落盘）。"""
+    load, save = _locator(req)
+    patch = req.entry.model_dump()
+    _, changed = worldbook_store.mutate_entries(
+        load, save, lambda book: (None, worldbook_edit.update_entry(book, req.index, patch)))
+    if not changed:
         raise HTTPException(status_code=404, detail="条目不存在")
-    _write_book(req, kind, book)
     return {"ok": True}
 
 
@@ -158,9 +175,10 @@ class EntryDeleteRequest(EntryLocation):
 
 @router.post("/entry/delete")
 def delete_entry(req: EntryDeleteRequest) -> dict[str, object]:
-    """删除第 index 条条目。越界 → 404。"""
-    book, kind = _read_book(req)
-    if not worldbook_edit.delete_entry(book, req.index):
+    """删除第 index 条条目。越界 → 404（且不落盘）。"""
+    load, save = _locator(req)
+    _, changed = worldbook_store.mutate_entries(
+        load, save, lambda book: (None, worldbook_edit.delete_entry(book, req.index)))
+    if not changed:
         raise HTTPException(status_code=404, detail="条目不存在")
-    _write_book(req, kind, book)
     return {"ok": True}

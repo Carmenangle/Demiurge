@@ -5,7 +5,7 @@
 维护一份（漂移即打回）。
 
 检测不涂改：只产出诊断 dict（code/message/evidence/severity），不返回改写文本；
-turn/id/status 由 narrative_ci._diagnostic 统一补齐。lint 前先还原防拦截拆字
+turn/id/status 由 narrative_ci.diagnostic_entry 统一补齐。lint 前先还原防拦截拆字
 （@()@ 只读还原，不落库）。
 
 误报控制两档：EXACT_PHRASES 单轮出现即报；密度类（破折号/省略号/「不是…而是…」）
@@ -13,12 +13,12 @@ turn/id/status 由 narrative_ci._diagnostic 统一补齐。lint 前先还原防�
 """
 from __future__ import annotations
 
-import json
 import re
 from difflib import SequenceMatcher
 from pathlib import Path
 
 from app.config import DATA_DIR
+from app.services import json_file_store
 from app.services.prompt_clean import restore_jailbreak
 
 # ── 诊断码（本模块是文风诊断码的属主，narrative_ci 并流时直接引用）────────────
@@ -311,20 +311,13 @@ def save_config(config: dict) -> dict:
     if isinstance(raw_removed, list):
         clean["removed"] = [str(w).strip() for w in raw_removed if str(w).strip()]
     path = _config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
+    json_file_store.write_json(path, clean)
     return clean
 
 
 def _read_config_file() -> dict:
-    path = _config_path()
-    if not path.is_file():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
-        return {}
-    return data if isinstance(data, dict) else {}
+    # 容错面刻意用 ERRORS_WITH_OS（含 OSError）：与 palette_pref 同档，与列表型仓库不同档。
+    return json_file_store.read_dict(_config_path(), errors=json_file_store.ERRORS_WITH_OS)
 
 
 def effective_phrases(config: dict | None = None) -> tuple[str, ...]:

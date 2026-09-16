@@ -431,3 +431,87 @@ def test_自建角色类表也禁止agent删行():
     assert ts.apply_ops(tables, [{"op": "delete", "table": "角色状态表", "key": "阿尼玛"}]) == 0
     custom = next(table for table in tables if table["name"] == "角色状态表")
     assert custom["rows"] == [["阿尼玛", "在场"]]
+
+
+# ── mutate：行级 op 的唯一事务接缝（2026-09-14 审计 C5）──
+
+def test_mutate_有变化才落盘并回吐最终表(tmp_path):
+    """`mutate` = load → apply_ops → 有变化才 save；返回最终表供路由直接回吐。"""
+    base, rid = str(tmp_path), "r"
+    ts.import_template(base, rid, _tpl(), replace=True)
+
+    tables, n = ts.mutate(
+        base, rid, [{"op": "insert", "table": "背包物品表", "values": {"物品名称": "符纸"}}])
+
+    assert n == 1
+    assert tables[0]["rows"][0][0] == "符纸"
+    on_disk = json.loads((tmp_path / rid / ts.TABLES_FILE).read_text(encoding="utf-8"))
+    assert on_disk["tables"][0]["rows"][0][0] == "符纸"
+
+
+def test_mutate_无变化不落盘(tmp_path):
+    """op 全部无效（未知表）→ 返回 0 且**不创建文件**：这条口径此前散在路由里。"""
+    base, rid = str(tmp_path), "r"
+    tables, n = ts.mutate(base, rid, [{"op": "insert", "table": "不存在的表", "values": {"x": "1"}}])
+    assert n == 0
+    assert not (tmp_path / rid / ts.TABLES_FILE).exists()
+    assert tables == ts.default_tables()  # 无库时读到的仍是默认分类
+
+
+def test_mutate_空base或repo静默返回不抛():
+    """base/repo 为空 → load 返 []、save 跳过；不抛异常（路由已另做 400 校验）。"""
+    assert ts.mutate("", "r", [{"op": "insert", "table": "背包物品表", "values": {}}]) == ([], 0)
+    assert ts.mutate("/tmp", "", [{"op": "insert", "table": "背包物品表", "values": {}}]) == ([], 0)
+
+
+def test_mutate_串行多op一次落盘(tmp_path):
+    base, rid = str(tmp_path), "r"
+    ts.import_template(base, rid, _tpl(), replace=True)
+    tables, n = ts.mutate(base, rid, [
+        {"op": "insert", "table": "背包物品表", "values": {"物品名称": "符纸", "数量": "10"}},
+        {"op": "insert", "table": "背包物品表", "values": {"物品名称": "丹药", "数量": "2"}},
+        {"op": "update", "table": "背包物品表", "row": 0, "values": {"数量": "9"}},
+    ])
+    assert n == 3
+    rows = tables[0]["rows"]
+    assert [r[0] for r in rows] == ["符纸", "丹药"] and rows[0][1] == "9"
+
+
+# ── mutate_structure：表结构 op 的唯一事务接缝（2026-09-15 审计 P6）──
+
+def test_mutate_structure_有变化才落盘(tmp_path):
+    """`mutate_structure` = load → apply → 有变化才 save；`apply` 原地改表，返回值真值即「有变化」。"""
+    base, rid = str(tmp_path), "r"
+    ts.import_template(base, rid, _tpl(), replace=True)
+
+    tables, changed = ts.mutate_structure(
+        base, rid, lambda t: ts.create_table(t, "自建表", ["甲", "乙"]))
+
+    assert changed is True
+    assert [t["name"] for t in tables][-1] == "自建表"
+    on_disk = json.loads((tmp_path / rid / ts.TABLES_FILE).read_text(encoding="utf-8"))
+    assert [t["name"] for t in on_disk["tables"]][-1] == "自建表"
+
+
+def test_mutate_structure_无变化不落盘(tmp_path):
+    """改不动（表不存在 / 重名 / 无列）→ changed 假、**不落盘**：
+    无库时连文件都不创建，有库时字节不变。"""
+    base, rid = str(tmp_path), "r"
+    tables, changed = ts.mutate_structure(base, rid, lambda t: ts.drop_table(t, "不存在的表"))
+    assert changed is False
+    assert not (tmp_path / rid / ts.TABLES_FILE).exists()
+    assert tables == ts.default_tables()          # 无库时读到的仍是默认分类
+
+    ts.import_template(base, rid, _tpl(), replace=True)
+    path = tmp_path / rid / ts.TABLES_FILE
+    before = path.read_text(encoding="utf-8")
+    _, dup = ts.mutate_structure(                  # 重名 → create_table 返 None
+        base, rid, lambda t: ts.create_table(t, "背包物品表", ["甲"]))
+    assert dup is False
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_mutate_structure_空base或repo静默返回不抛():
+    """base/repo 为空 → load 返 []、save 跳过；不抛（no-op 响应口径由路由决定）。"""
+    assert ts.mutate_structure("", "r", lambda t: ts.drop_table(t, "x")) == ([], False)
+    assert ts.mutate_structure("/tmp", "", lambda t: ts.drop_table(t, "x")) == ([], False)

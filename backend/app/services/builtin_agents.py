@@ -12,10 +12,10 @@
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from app.config import DATA_DIR
+from app.services import json_file_store
 from app.services.edit_agent_profiles import SPECIALISTS
 
 # ── 单一属主：内置角色的默认提示词 / 参数（原埋在 agent_graph / roleplay_agency，现集中于此）──
@@ -151,14 +151,7 @@ def _path() -> Path:
 
 def load_overrides() -> dict:
     """读用户覆盖（{agent_id: {field: value}}）。缺文件/坏 JSON → 空 dict（回退全默认）。"""
-    p = _path()
-    if not p.is_file():
-        return {}
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
-        return {}
+    return json_file_store.read_dict(_path(), errors=json_file_store.ERRORS_STANDARD)
 
 
 # ── 注册表：每个内置 Agent 的默认元数据（展示 + 可覆盖字段声明）──
@@ -300,8 +293,7 @@ def save_overrides(overrides: dict) -> dict:
         kept = {f: v for f, v in patch.items() if _valid_override(agent_id, f, v)}
         if kept:
             clean[agent_id] = kept
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    _path().write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
+    json_file_store.write_json(_path(), clean)
     return clean
 
 

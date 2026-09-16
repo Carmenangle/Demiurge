@@ -46,3 +46,4 @@ app/services/capability_registry.py
 app/services/capability_handlers.py
 app/services/collection_artifacts.py
 app/services/artifact_versions.py
+app/services/json_file_store.py

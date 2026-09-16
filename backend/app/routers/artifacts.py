@@ -27,7 +27,7 @@ from app.services.collection_artifacts import (
     resolve_artifact,
     reveal_in_folder,
 )
-from app.services import repo_meta
+from app.services import repo_meta, worldbook_store
 
 router = APIRouter()
 
@@ -35,8 +35,8 @@ router = APIRouter()
 def _validated_root(output_dir: str) -> str:
     """校验并归一**作品库根**（产物 scope 的第一层门禁）。
 
-    `works_root_violation`：output_dir 必须等于配置的仓库文件夹根（未配置时放行）——
-    防客户端把任意目录当 scope；与各写端点一致。
+    `works_root_violation`：output_dir 必须等于配置的仓库文件夹根（**未配置时拒绝**，
+    2026-09-15 用户定案；前端弹窗引导去设置页配置）——防客户端把任意目录当 scope；与各写端点一致。
     """
     err = repo_meta.works_root_violation(output_dir)
     if err:
@@ -301,41 +301,18 @@ def artifact_sync_worldbook(req: SyncWorldbookRequest) -> JSONResponse:
 
     2026-09-10 B3/A：卡目录由**所属域**解析（作品域或本作品拥有的卡目录——
     卡名可与作品名不同），`target` 与 `target.parent/worldbook.json` 都在同一卡目录内。
+
+    2026-09-15 审计 P8：事务（读设置走属主 → 校验 → 备份 → 覆盖）下沉
+    `worldbook_store.sync_card_worldbook`，本端点只剩「域解析 → 调用 → 转 HTTP」；
+    400/404/500 文案与 `{ok, dest, entries}` 响应体一字未改。
     """
     root = _validated_root(req.output_dir)
     target = _resolve_in(_domains(root, req.repo_id), req.path, allow_dir=True)
-    from pathlib import Path
-    from app.config import DATA_DIR
     try:
-        import json as _json0
-        _st = _json0.loads((DATA_DIR / "user_state.json").read_text(encoding="utf-8"))
-        wb_dir = str((_st.get("settings") or {}).get("worldbookDir") or "").strip()
-    except (OSError, ValueError):
-        wb_dir = ""
-    if not wb_dir:
-        raise HTTPException(status_code=400, detail="未配置世界书文件夹（worldbookDir），无法同步")
-    card_name = str(target.parent.name or "").strip()
-    if not card_name or card_name in (".", ".."):
-        raise HTTPException(status_code=400, detail="无法从产物路径解析卡目录名")
-    src = target.parent / "worldbook.json"
-    if not src.is_file():
-        raise HTTPException(status_code=404, detail=f"卡目录缺少 worldbook.json：{src}")
-    try:
-        import json as _json
-        import shutil as _shutil
-        import time as _time
-        book = _json.loads(src.read_text(encoding="utf-8"))
-        if not isinstance(book.get("entries"), (list, dict)):
-            raise ValueError("worldbook.json 缺少 entries")
-        dst = Path(wb_dir) / f"{card_name}.json"
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        if dst.is_file():
-            _shutil.copy2(dst, dst.with_name(f"{card_name}.json.bak-{int(_time.time())}"))
-        _shutil.copy2(str(src), str(dst))
-        count = len(book.get("entries") or [])
-        return JSONResponse({"ok": True, "dest": str(dst), "entries": count})
-    except Exception as exc:  # noqa: BLE001 - 统一转 HTTP 错误
-        raise HTTPException(status_code=500, detail=f"同步失败：{exc}") from exc
+        result = worldbook_store.sync_card_worldbook(target.parent)
+    except worldbook_store.WorldbookSyncError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
+    return JSONResponse({"ok": True, "dest": str(result.dest), "entries": result.entries})
 
 
 class OpenFolderRequest(BaseModel):

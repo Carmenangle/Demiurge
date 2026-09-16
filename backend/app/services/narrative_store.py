@@ -494,6 +494,31 @@ def with_sequence(base: str, repo_id: str, items: list[ChronicleEntry], *,
         entry.seq = index.get(entry.rowid, 0)
     return items
 
+
+def dump_entries(base: str, repo_id: str, items: list[ChronicleEntry], *,
+                 include_sealed: bool = False) -> list[dict[str, Any]]:
+    """条目的 HTTP 载荷——**唯一允许产出 `card_id` 的出口**。
+
+    2026-09-14 收口（架构审计 C6）：`card_id` 依赖 `with_sequence` 先填 `seq`，而「回填」
+    此前靠三个路由出口各自记得调用（09-13 `T1-13` 事故同源：`GET /narrative/` 漏调 ⇒
+    界面显示 rowid 而非回合位序）。现把「回填 + 序列化」合成一个函数：**新增出口只要走
+    本函数，就必然带正确位序**，不存在「忘了调」的形态。
+
+    为什么放在 store 而不是路由：位序必须用**全库**序号表（分页子集会让每页都从 `T1-1`
+    起），所以回填与序列化不能拆到两个模块、两条调用链上——同处一地才封得住这个不变量。
+    `include_sealed=True` 走全量序（导出用：封口条目可审计）。
+    """
+    with_sequence(base, repo_id, items, include_sealed=include_sealed)
+    return [
+        {
+            "rowid": e.rowid, "card_id": e.card_id(), "text": e.text,
+            "turn_start": e.turn_start, "turn_end": e.turn_end, "layer": e.layer,
+            "keywords": e.keywords, "overview": e.short_overview(),
+            "dialogue": e.dialogue, "characters": e.characters,
+        }
+        for e in items
+    ]
+
 def normalize_preview(base: str, repo_id: str, *, total_turns: int = 0) -> dict[str, Any]:
     """只读整理计划：重复组（同区间多条）/ 边界重分配（顺延保宽）/ 缺口区间。
 

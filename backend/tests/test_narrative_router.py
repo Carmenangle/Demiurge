@@ -71,6 +71,38 @@ def test_导出端点按全量序且保留封口条目(tmp_path):
     assert seqs == ["T1-1", "T1-2", "T1-3"]             # 全量集合 1..n 连续
 
 
+# ── 载荷单一出口（2026-09-14，架构审计 C6）────────────────────────────────
+
+
+def test_三个出口都走唯一载荷出口且路由不再自建DTO(tmp_path, monkeypatch):
+    """C6 收口回归：卡号载荷只能由 `narrative_store.dump_entries` 产出。
+
+    此前三个出口各自记得调 `with_sequence`（漏一个就退回 rowid，09-13 T1-13 事故）。
+    现在把「回填 + 序列化」收进单一函数——本用例同时在两个层面锁死：
+    ① 三个出口（列表/检索/导出）都必须调用它（导出走全量序 include_sealed=True）；
+    ② 路由模块内不得再出现自建 DTO 的 `_dump`（防收口被回退）。
+    """
+    base = str(tmp_path)
+    ns.append(base, "r1", _e("第1到3回合", 1, 3))
+
+    real = ns.dump_entries
+    calls: list[bool] = []
+
+    def spy(b, r, items, *, include_sealed=False):
+        calls.append(include_sealed)
+        return real(b, r, items, include_sealed=include_sealed)
+
+    monkeypatch.setattr(ns, "dump_entries", spy)
+
+    narrative_router.list_chronicle(output_dir=base, repo_id="r1", k=50)
+    narrative_router.search_chronicle(
+        narrative_router.SearchRequest(output_dir=base, repo_id="r1", query="第1到3回合", k=10))
+    narrative_router.export_chronicle(output_dir=base, repo_id="r1")
+
+    assert calls == [False, False, True]          # 列表/检索可见集合；导出全量序
+    assert not hasattr(narrative_router, "_dump")  # 路由内不得再自建 DTO
+
+
 # ── 缺口检测的层数来源（2026-09-13 用户实锤「看不到针对空缺建立索引的功能」）──
 
 

@@ -14,6 +14,7 @@ import threading
 from typing import Any
 
 from app.config import DATA_DIR
+from app.services import json_file_store
 
 _LOCK = threading.Lock()
 
@@ -49,14 +50,7 @@ def normalize_colors(colors: list[str]) -> list[str]:
 
 
 def _read_all() -> dict[str, Any]:
-    p = _path()
-    if not p.is_file():
-        return {}
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
-        return {}
+    return json_file_store.read_dict(_path(), errors=json_file_store.ERRORS_WITH_OS)
 
 
 def save(repo_id: str, colors: list[str], name: str = "") -> dict[str, Any]:

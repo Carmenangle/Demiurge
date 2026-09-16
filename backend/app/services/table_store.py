@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from app.services.pathnames import safe_seg
 
@@ -514,6 +514,41 @@ def save(base: str, repo_id: str, tables: list[dict[str, Any]]) -> None:
     tmp = p.with_suffix(".json.tmp")
     tmp.write_text(json.dumps({"tables": tables}, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(p)
+
+
+def mutate(base: str, repo_id: str, ops: Any) -> tuple[list[dict[str, Any]], int]:
+    """行级 op 的事务接缝：读 → apply_ops → **有变化才落盘**，返回（最终表列表, 成功条数）。
+
+    2026-09-14 审计 C5：此前 `routers/table.py` 的 rows/update/delete 三个端点各自手写一遍
+    「load → apply_ops → if n: save」，「无变化不落盘」这条口径散在路由里，服务层不深。
+    收到这里后：路由只剩「拼 op + 回吐表」；`base`/`repo_id` 为空时 `load` 返 `[]`、
+    `save` 直接跳过，故不需额外校验。**不抛**——未知表/越界行由 `apply_ops` 静默跳过。
+    """
+    tables = load(base, repo_id)
+    n = apply_ops(tables, ops)
+    if n:
+        save(base, repo_id, tables)
+    return tables, n
+
+
+def mutate_structure(base: str, repo_id: str, apply: Callable[[list[dict[str, Any]]], Any]
+                     ) -> tuple[list[dict[str, Any]], bool]:
+    """表结构 op（建表/删表/改 meta）的事务接缝：读 → apply → **有变化才落盘**。
+
+    2026-09-15 审计 P6：`routers/table.py` 的 create / drop / set-meta 三个结构端点此前各自手写
+    「load → 改 → (if 有变化) save」，与行级接缝 `mutate` 并存 ⇒「无变化不落盘」有两个属主。
+    收这里之后，路由只剩「拼 op + 回吐表」。
+
+    `apply(tables)` **原地**改 `tables`，返回值真值即「有变化」。**不抛**：改不动（表不存在/重名/无列）
+    返回假值，由调用方按各自的 no-op 口径处理 —— 三个端点的 no-op 响应**刻意不同**
+    （`/create` → 400「表名重复或没有有效列」；`/drop`、`/set-meta` → 静默 200），
+    那是产品策略，属主仍在路由层（2026-09-15 用户定案「保留现状」，不在本接缝内统一）。
+    """
+    tables = load(base, repo_id)
+    changed = bool(apply(tables))
+    if changed:
+        save(base, repo_id, tables)
+    return tables, changed
 
 
 def config_path(base: str, repo_id: str) -> Path:

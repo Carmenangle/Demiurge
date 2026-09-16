@@ -335,3 +335,41 @@ def test_导出序号含封口条目(tmp_path):
 
     assert len(items) == 3                              # 导出口径保留可审计条目
     assert sorted(e.seq for e in items) == [1, 2, 3]
+
+
+# ── 载荷出口收口（2026-09-14，架构审计 C6）────────────────────────────────
+# 卡号载荷只能由 `narrative_store.dump_entries` 产出：它把「位序回填 + 序列化」合成一步，
+# 出口不再有「忘了调 with_sequence」的形态（09-13 T1-13 事故同源）。
+
+
+def test_dump_entries内部回填位序且字段齐全(tmp_path):
+    base = str(tmp_path)
+    ns.append(base, "r1", _e("第10到12回合", ts=10, te=12))   # rowid=1 → 位序 3
+    ns.append(base, "r1", _e("第1到3回合", ts=1, te=3))       # rowid=2 → 位序 1
+    ns.append(base, "r1", _e("第4到6回合", ts=4, te=6))       # rowid=3 → 位序 2
+
+    payload = ns.dump_entries(base, "r1", ns.recent(base, "r1", k=10))
+
+    by_range = {(p["turn_start"], p["turn_end"]): p["card_id"] for p in payload}
+    assert by_range == {(1, 3): "T1-1", (4, 6): "T1-2", (10, 12): "T1-3"}  # 位序，非 rowid
+    assert set(payload[0]) == {
+        "rowid", "card_id", "text", "turn_start", "turn_end", "layer",
+        "keywords", "overview", "dialogue", "characters",
+    }
+
+
+def test_dump_entries导出走全量序并含封口条目(tmp_path):
+    base = str(tmp_path)
+    old = ns.append(base, "r1", _e("被让位的重复条", ts=1, te=3))
+    ns.append(base, "r1", _e("在位条", ts=1, te=3))
+    ns.append(base, "r1", _e("第4到6回合", ts=4, te=6))
+    ns.normalize_apply(base, "r1", seal_rowids=[old])
+
+    payload = ns.dump_entries(base, "r1", ns.all_entries(base, "r1"), include_sealed=True)
+
+    assert len(payload) == 3                                     # 封口仍导出（可审计）
+    assert sorted(p["card_id"] for p in payload) == ["T1-1", "T1-2", "T1-3"]
+
+
+def test_dump_entries空库不报错(tmp_path):
+    assert ns.dump_entries(str(tmp_path), "r1", []) == []

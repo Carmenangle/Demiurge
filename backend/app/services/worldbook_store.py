@@ -6,6 +6,8 @@
 - 名称取自上传文件名（ST 世界书 JSON 内部无 name 字段）。
 - 同名冲突：save 时目标已存在且 overwrite=False → 抛 FileExistsError（调用方决定覆盖）。
 - 卡内嵌世界书导入若与已存独立世界书同名，也复用同一冲突语义（见 routers）。
+- 同步：把**卡目录**的 worldbook.json 覆盖进独立库（`sync_card_worldbook`，旧版自动备份）——
+  事务（读设置 → 校验 → mkdir → 备份 → 覆盖）的唯一属主，路由只做 HTTP 翻译（2026-09-15 P8）。
 
 只做文件读写；条目解析/检索是 worldbook.py 的事，格式校验在导入路由。
 """
@@ -15,9 +17,12 @@ import json
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 import re
+import shutil
+import time
 
+from app.services import repo_meta
 from app.services.pathnames import safe_dir, safe_seg
 
 REPO_WORLDBOOK_FILE = "worldbook.json"
@@ -93,6 +98,99 @@ def delete_book(base: str, name: str) -> bool:
         return False
     p.unlink()
     return not p.is_file()
+
+
+class WorldbookSyncError(Exception):
+    """同步到独立世界书失败的**结果语义**（status + detail 供路由转 HTTPException）。
+
+    与 `collection_artifacts.ArtifactAccessError` 同口径：错误码与中文文案由 service 定、
+    路由只做 HTTP 翻译 —— 否则「事务」与「文案」又会裂成两个属主（2026-09-15 P8）。
+    """
+
+    def __init__(self, status: int, detail: str) -> None:
+        super().__init__(detail)
+        self.status = status
+        self.detail = detail
+
+
+@dataclass
+class WorldbookSyncResult:
+    """同步结果：落点、条目数、本次**真的写出**的备份（无旧版 → None）。"""
+
+    dest: Path
+    entries: int
+    backup: Path | None = None
+
+
+def sync_card_worldbook(card_dir: Path) -> WorldbookSyncResult:
+    """把**卡目录**的 `worldbook.json` 覆盖同步进独立世界书库（`worldbookDir/<卡名>.json`）。
+
+    2026-09-15 审计 P8：这段事务原先整个摆在 `routers/artifacts.py:294-338` —— 手写
+    `json.loads(DATA_DIR / "user_state.json")` 读 `worldbookDir`（**绕过属主**
+    `repo_meta.setting_dir_from_state`）、`mkdir`、`copy2` 备份、`copy2` 覆盖、条目计数、
+    错误映射，还夹带 `json`/`shutil`/`time`/`DATA_DIR` 四处函数内局部导入。收进本函数后
+    事务只有一个属主，路由只剩「域解析 → 调用 → 转 HTTP」。
+
+    **逐字保留**（用户可见，不得抹平）：备份名 `<卡名>.json.bak-<int(time.time())>`、
+    400「未配置世界书文件夹（worldbookDir），无法同步」、400「无法从产物路径解析卡目录名」、
+    404「卡目录缺少 worldbook.json：<绝对路径>」、500「同步失败：<原因>」
+    （含「worldbook.json 缺少 entries」这条业务校验）。
+
+    校验**顺序**同样是契约：配置 → 卡名 → 源文件存在 → 事务 ⇒ 前三级失败**绝不落盘**。
+    ⚠ 目标文件名用**卡目录名原文**、不经 `safe_dir` 清洗（与 `save()` 的 `<安全名>.json`
+    刻意不同口径）：存量文件名按原文存在，改清洗会让它们对不上。
+    """
+    wb_dir = repo_meta.setting_dir_from_state("worldbookDir")
+    if not wb_dir:
+        raise WorldbookSyncError(400, "未配置世界书文件夹（worldbookDir），无法同步")
+    card_name = str(card_dir.name or "").strip()
+    if not card_name or card_name in (".", ".."):
+        raise WorldbookSyncError(400, "无法从产物路径解析卡目录名")
+    src = card_dir / REPO_WORLDBOOK_FILE
+    if not src.is_file():
+        raise WorldbookSyncError(404, f"卡目录缺少 worldbook.json：{src}")
+    try:
+        book = json.loads(src.read_text(encoding="utf-8"))
+        if not isinstance(book.get("entries"), (list, dict)):
+            raise ValueError("worldbook.json 缺少 entries")
+        dst = Path(wb_dir) / f"{card_name}.json"
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        backup: Path | None = None
+        if dst.is_file():
+            backup = dst.with_name(f"{card_name}.json.bak-{int(time.time())}")
+            shutil.copy2(dst, backup)
+        shutil.copy2(str(src), str(dst))
+        return WorldbookSyncResult(dest=dst, entries=len(book.get("entries") or []), backup=backup)
+    except Exception as exc:  # noqa: BLE001 - 统一转「同步失败：<原因>」
+        raise WorldbookSyncError(500, f"同步失败：{exc}") from exc
+
+
+def mutate_entries(
+    load: Callable[[], dict[str, Any]],
+    save: Callable[[dict[str, Any]], Any],
+    apply: Callable[[dict[str, Any]], tuple[Any, bool]],
+) -> tuple[Any, bool]:
+    """条目级 CRUD 的**唯一事务接缝**：读 → 改一条 → **有变化才写回**。
+
+    2026-09-15 审计 P7：同一形状此前有两套写法——`routers/worldbook.py` 用
+    `_read_book`/`_write_book` helper，`routers/narrative.py` 三个 repo 快照端点**内联**
+    手写「读 → `worldbook_edit` 改 → 写回」。落盘判定因此有两个属主。收进本接缝后，
+    「无变化不落盘」（越界更新/删除因此天然不写盘）只有这一个属主。
+
+    **只收这一条共同不变量**；定位与失败语义留在调用方——独立世界书 / 卡内嵌 /
+    仓库快照三种定位的 400·404 文案本就各不相同（见两个 routers），刻意不统一。
+
+    - ``load()`` → book。失败自行 raise，接缝只透传。
+    - ``apply(book)`` → ``(result, changed)``。**显式布尔是刻意的**：新增条目返回的
+      index 可以是 ``0``，用真值判定会把「首条新增」误判成没变化而不落盘。
+    - ``changed`` 为真才 ``save(book)``；``(result, changed)`` 回给调用方复用
+      （add 的 index、update/delete 的越界 404）。
+    """
+    book = load()
+    result, changed = apply(book)
+    if changed:
+        save(book)
+    return result, changed
 
 
 def repo_snapshot_path(base: str, repo_id: str) -> Path:

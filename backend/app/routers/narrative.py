@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+from typing import Callable
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -14,25 +16,16 @@ from app.services.narrative_memory import ChronicleEntry
 router = APIRouter()
 
 
-def _dump(e: ChronicleEntry) -> dict[str, object]:
-    return {
-        "rowid": e.rowid, "card_id": e.card_id(), "text": e.text, "turn_start": e.turn_start,
-        "turn_end": e.turn_end, "layer": e.layer, "keywords": e.keywords,
-        "overview": e.short_overview(), "dialogue": e.dialogue,
-        "characters": e.characters,
-    }
-
-
 @router.get("/")
 def list_chronicle(output_dir: str, repo_id: str, k: int = 50) -> dict[str, object]:
     """列出某作品线最近 k 条纪要（时间倒序）。无库 → 空列表，不报错。
 
     2026-09-13：卡号按**回合序**编号（T<层>-1 起），需在全库范围内定序——按分页子集
-    编号会让每条都从 1 开始（每页都出现 T1-1），故先取全库序号表再回填本页。
+    编号会让每条都从 1 开始（每页都出现 T1-1）。位序回填已收进
+    `narrative_store.dump_entries`（2026-09-14，审计 C6）：出口不再各自记得调 `with_sequence`。
     """
     items = narrative_store.recent(output_dir, repo_id, k=max(1, min(k, 200)))
-    narrative_store.with_sequence(output_dir, repo_id, items)
-    return {"items": [_dump(e) for e in items]}
+    return {"items": narrative_store.dump_entries(output_dir, repo_id, items)}
 
 
 class SearchRequest(BaseModel):
@@ -49,8 +42,7 @@ def search_chronicle(req: SearchRequest) -> dict[str, object]:
         raise HTTPException(status_code=400, detail="缺少 output_dir 或 repo_id")
     items = narrative_store.recall(req.output_dir, req.repo_id, req.query,
                                    k=max(1, min(req.k, 50)))
-    narrative_store.with_sequence(req.output_dir, req.repo_id, items)
-    return {"items": [_dump(e) for e in items]}
+    return {"items": narrative_store.dump_entries(req.output_dir, req.repo_id, items)}
 
 
 class RebuildRequest(BaseModel):
@@ -195,8 +187,9 @@ def export_chronicle(output_dir: str, repo_id: str) -> dict[str, object]:
     含封口条目（可审计），故序号按**全量**集合定序，与界面可见列表口径一致。
     """
     items = narrative_store.all_entries(output_dir, repo_id)
-    narrative_store.with_sequence(output_dir, repo_id, items, include_sealed=True)
-    return {"version": 1, "repo_id": repo_id, "items": [_dump(e) for e in items]}
+    return {"version": 1, "repo_id": repo_id,
+            "items": narrative_store.dump_entries(output_dir, repo_id, items,
+                                                  include_sealed=True)}
 
 
 class ImportRequest(BaseModel):
@@ -397,19 +390,50 @@ class RepoWorldbookEntryAdd(BaseModel):
     entry: RepoWorldbookEntryPayload
 
 
+# ── 快照条目 CRUD：与 worldbook.py 共用唯一条目接缝（P7）────────────────────
+#
+# 三端点原各自内联「读快照 → `worldbook_edit` 改一条 → 写回」，落盘判定有两个属主。
+# 现统一走 `worldbook_store.mutate_entries(load, save, apply)`——「无变化不落盘」
+# （越界更新/删除天然不写盘）只有一个属主。
+# ⚠ 快照缺失文案与 worldbook.py **刻意不同**，且 add 与 update/delete 也不同，逐字保留。
+
+
+def _repo_snapshot_load(output_dir: str, repo_id: str, *, missing: str) -> Callable[[], dict]:
+    """造 repo 快照加载闭包；缺失时的文案由调用端点给（add 与 update/delete 不同）。"""
+    def load() -> dict:
+        from app.services import worldbook_store
+        book = worldbook_store.read_repo_snapshot(output_dir, repo_id)
+        if not book:
+            raise HTTPException(status_code=404, detail=missing)
+        return book
+    return load
+
+
+def _repo_snapshot_save(output_dir: str, repo_id: str) -> Callable[[dict], None]:
+    def save(book: dict) -> None:
+        from app.services import worldbook_store
+        worldbook_store.save_repo_snapshot(output_dir, repo_id, book)
+    return save
+
+
+def _repo_entry_patch(entry: RepoWorldbookEntryPayload) -> dict[str, object]:
+    """载荷 → `worldbook_edit` 的 patch（字段名与前端表单对齐）。"""
+    return {"content": entry.content, "comment": entry.comment,
+            "keys": entry.keys, "constant": entry.constant, "enabled": entry.enabled}
+
+
 @router.post("/repo-worldbook/entry/add")
 def repo_worldbook_entry_add(req: RepoWorldbookEntryAdd) -> dict[str, object]:
     """向小仓库快照世界书新增一条条目。"""
     from app.services import worldbook_edit, worldbook_store
 
-    book = worldbook_store.read_repo_snapshot(req.output_dir, req.repo_id)
-    if not book:
-        raise HTTPException(status_code=404, detail="快照不存在，请先绑定世界书并运行至少一次剧情")
-    patch = {"content": req.entry.content, "comment": req.entry.comment,
-             "keys": req.entry.keys, "constant": req.entry.constant,
-             "enabled": req.entry.enabled}
-    index = worldbook_edit.add_entry(book, patch)
-    worldbook_store.save_repo_snapshot(req.output_dir, req.repo_id, book)
+    patch = _repo_entry_patch(req.entry)
+    # 新增恒为「有变化」（即便 index==0）——显式 True，不用真值判定。
+    index, _ = worldbook_store.mutate_entries(
+        _repo_snapshot_load(req.output_dir, req.repo_id,
+                            missing="快照不存在，请先绑定世界书并运行至少一次剧情"),
+        _repo_snapshot_save(req.output_dir, req.repo_id),
+        lambda book: (worldbook_edit.add_entry(book, patch), True))
     return {"ok": True, "index": index}
 
 
@@ -422,19 +446,16 @@ class RepoWorldbookEntryUpdate(BaseModel):
 
 @router.post("/repo-worldbook/entry/update")
 def repo_worldbook_entry_update(req: RepoWorldbookEntryUpdate) -> dict[str, object]:
-    """更新小仓库快照世界书的指定条目。"""
+    """更新小仓库快照世界书的指定条目。越界 → 404（且不落盘）。"""
     from app.services import worldbook_edit, worldbook_store
 
-    book = worldbook_store.read_repo_snapshot(req.output_dir, req.repo_id)
-    if not book:
-        raise HTTPException(status_code=404, detail="快照不存在")
-    if not worldbook_edit.update_entry(book, req.index, {
-        "content": req.entry.content, "comment": req.entry.comment,
-        "keys": req.entry.keys, "constant": req.entry.constant,
-        "enabled": req.entry.enabled,
-    }):
+    patch = _repo_entry_patch(req.entry)
+    _, changed = worldbook_store.mutate_entries(
+        _repo_snapshot_load(req.output_dir, req.repo_id, missing="快照不存在"),
+        _repo_snapshot_save(req.output_dir, req.repo_id),
+        lambda book: (None, worldbook_edit.update_entry(book, req.index, patch)))
+    if not changed:
         raise HTTPException(status_code=404, detail="条目索引越界")
-    worldbook_store.save_repo_snapshot(req.output_dir, req.repo_id, book)
     return {"ok": True}
 
 
@@ -446,15 +467,15 @@ class RepoWorldbookEntryDelete(BaseModel):
 
 @router.post("/repo-worldbook/entry/delete")
 def repo_worldbook_entry_delete(req: RepoWorldbookEntryDelete) -> dict[str, object]:
-    """删除小仓库快照世界书的指定条目。"""
+    """删除小仓库快照世界书的指定条目。越界 → 404（且不落盘）。"""
     from app.services import worldbook_edit, worldbook_store
 
-    book = worldbook_store.read_repo_snapshot(req.output_dir, req.repo_id)
-    if not book:
-        raise HTTPException(status_code=404, detail="快照不存在")
-    if not worldbook_edit.delete_entry(book, req.index):
+    _, changed = worldbook_store.mutate_entries(
+        _repo_snapshot_load(req.output_dir, req.repo_id, missing="快照不存在"),
+        _repo_snapshot_save(req.output_dir, req.repo_id),
+        lambda book: (None, worldbook_edit.delete_entry(book, req.index)))
+    if not changed:
         raise HTTPException(status_code=404, detail="条目索引越界")
-    worldbook_store.save_repo_snapshot(req.output_dir, req.repo_id, book)
     return {"ok": True}
 
 

@@ -3,16 +3,14 @@
 技能 = 可开关的提示词注入片段，启用后拼进智能体 system_prompt，让用户自定义 AI 行为
 （如"生图时always加高质量负面词""回答用专业术语"）。比 MCP 更轻量，纯提示词层，无副作用。
 结构：[{id, name, enabled, prompt_fragment}]
-落盘模式仿 mcp_store / user_state。
+落盘模式交 `<json_file_store>` 统一。
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from uuid import uuid4
 
 from app.config import DATA_DIR
-from app.services import instruction_provenance
+from app.services import instruction_provenance, json_file_store
 
 
 def _path() -> Path:
@@ -20,31 +18,12 @@ def _path() -> Path:
 
 
 def load_skills() -> list[dict]:
-    p = _path()
-    if not p.is_file():
-        return []
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-        return data if isinstance(data, list) else []
-    except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
-        return []
+    return json_file_store.read_list(_path(), errors=json_file_store.ERRORS_STANDARD)
 
 
 def save_skills(skills: list[dict]) -> list[dict]:
-    """整体覆盖写，为缺 id 的项补 id。"""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    normalized = []
-    for s in skills or []:
-        if not isinstance(s, dict):
-            continue
-        s = dict(s)
-        if not s.get("id"):
-            s["id"] = uuid4().hex
-        normalized.append(s)
-    _path().write_text(
-        json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    return normalized
+    """整体覆盖写，为缺 id 的项补 id。返回落盘后的列表。"""
+    return json_file_store.write_list(_path(), skills)
 
 
 def enabled_prompt_fragments() -> list[str]:

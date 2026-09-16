@@ -7,7 +7,8 @@ worldbook.py 只读解析用于检索；本模块负责写回单条条目。两�
 entries 容器兼容两种格式（ST 对象 keyed-by-uid / V2 卡数组）；本模块**保留原容器类型**写回，
 避免再导入 SillyTavern 时格式漂移。条目按「有序序列里的下标」定位（dict 保持插入序，JSON 往返稳定）。
 
-I/O 交给调用方（路由读文件→改 dict→写文件），本模块不碰磁盘，可纯单测。
+I/O 交给调用方（本模块不碰磁盘，可纯单测）；调用方侧的「读 → 改 → 写回」编排统一走
+`worldbook_store.mutate_entries(load, save, apply)`（2026-09-15 审计 P7 收口），本模块保持纯逻辑。
 """
 from __future__ import annotations
 
