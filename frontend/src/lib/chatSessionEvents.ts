@@ -211,10 +211,14 @@ export function appendImageSlot(
 /**
  * 插画槽失败标记（2026-08-29 用户需求）：不再删除槽位，而是保留为 failed 态并附错误信息
  * 与重试参数快照——楼层上显示失败原因与「重新生成」按钮。
+ *
+ * retryArgs 是**不透明快照**（2026-09-14 架构审计 C7）：生产者决定形状、消费方按名取用。
+ * 此前约定为「按 submitIllustration 签名序的数组」，消费侧要用魔术下标（`args[7]`）翻字段——
+ * 这里不再对它做任何形状假设（只判有无）。
  */
 export function markMediaSlotFailed(
   current: ChatMessage[], messageId: string, slotId: string,
-  stage: string, error: string, retryArgs?: unknown[],
+  stage: string, error: string, retryArgs?: unknown,
 ): ChatMessage[] {
   return current.map((message) => {
     if (message.id !== messageId) return message;
@@ -227,7 +231,7 @@ export function markMediaSlotFailed(
       status: "failed" as const,
       kind: (next[index].kind ?? "image") as "image" | "audio" | "video",
       error: `[${stage}] ${error}`,
-      ...(retryArgs?.length ? { retryArgs } : {}),
+      ...(retryArgs != null ? { retryArgs } : {}),
     };
     return { ...message, parts: next };
   });

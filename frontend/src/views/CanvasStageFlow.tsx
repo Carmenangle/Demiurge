@@ -32,6 +32,7 @@ import {
   loadLayout, saveLayout, clampScale, type NodeLayout, type InspirationCardStored, type ReferenceImageStored, type Viewport,
 } from "../lib/canvasLayout";
 import { consumePendingInspirations, CANVAS_INSPIRATION_EVENT } from "../lib/inspirationInsert";
+import { addWfRun, dropWfRun, updateWfRun, upsertWfRun } from "../lib/wfRunList";
 import { SendToChatModal, type SendPayload } from "../components/SendToChatModal";
 import { ConfirmModal } from "../components/Modal";
 import { WorkflowToolModal } from "../components/WorkflowToolModal";
@@ -44,7 +45,7 @@ import { CanvasCharacterModal } from "../components/CanvasCharacterModal";
 import { presetDetail } from "../api/preset";
 import type { ChatMessage } from "../types/chat";
 import { conversationMediaUrls, conversationTurnUrls, filterGensByConversation, pruneUnboundInspirationCards, projectWorkflowTools, projectStoryNodes } from "../lib/canvasConversation";
-import { pollWorkflowResult, trackCanvasWorkflow, untrackCanvasWorkflow } from "../lib/workflowGenerationRuntime";
+import { runCanvasWorkflow } from "../lib/runCanvasWorkflow";
 import { workflowGenMetadata } from "../lib/regeneration";
 import {
   CARD_W, SNAP_PX, SNAP_RELEASE_PX, HINT_PX,
@@ -58,10 +59,9 @@ import { CenterCanvasButton } from "../components/canvas/CenterCanvasButton";
 import { IMAGE_EXTENSIONS } from "../components/canvas/CanvasTypes";
 import { saveWebMaterial } from "../api/ai";
 import { createUndoStack, pushSnapshot, undo, redo, handleCanvasKeyDown } from "../lib/canvasKeyboard";
-import { submitGraph, finalizeGeneration, interruptComfy } from "../api/comfyui";
-import { subscribeProgress } from "../lib/comfyProgress";
+import type { GenResult } from "../api/comfyui";
 import { globalPendingToolCreates, canvasBridge } from "../components/canvas/shared";
-import { activeChatModel } from "../stores/settings";
+import { threadKey, type PendingGeneration } from "../lib/workflowGenerationRuntime";
 import { runScripts, Placement, type RegexScript } from "../lib/regexEngine";
 import { restoreOpenDetails, trackDetailsToggle } from "../lib/stableDetailsOpen";
 import { renderMarkdown } from "../lib/renderMarkdown";
@@ -70,7 +70,7 @@ const nodeTypes = canvasNodeTypes;
 
 // ===== ReactFlow 画布 =====
 export function CanvasStageFlow({
-  repo, settings, messages, streamingId, onGenerated, onSelectActivePreset, onDraftSubmit, displayRegex, onDeleteMessage, onInsertInspiration,
+  repo, settings, messages, streamingId, onGenerated, onFinalizeWorkflow, onSelectActivePreset, onDraftSubmit, displayRegex, onDeleteMessage, onInsertInspiration,
 }: {
   repo?: Repo;
   settings: ReturnType<typeof useSettings>["settings"];
@@ -82,6 +82,12 @@ export function CanvasStageFlow({
   displayRegex?: RegexScript[];
   /** 画布内生成落库后回调（用于让上层刷新对话消息，使新产出进入对话→画布） */
   onGenerated?: () => void;
+  /**
+   * 归档回调：画布运转完成的产出**复用对话同一条 finalize 链**（`useChatSession.finalizeGeneration`）。
+   * 2026-09-15 C4-A 第 3 步 + R4：画布原先自己调 `api/comfyui.finalizeGeneration`（与对话链构成两个属主、
+   * 且绕开了对话链的判重与「归档未持久化→保留 pending 重试」语义）。改后画布不再自持归档。
+   */
+  onFinalizeWorkflow: (result: GenResult, pending: PendingGeneration) => Promise<boolean>;
   /** 预设弹窗里切换激活预设（写回 settings.activePresetName） */
   onSelectActivePreset?: (name: string) => void;
   /** 双击新建的 draft 输入卡提交生成（上层复用画布输入栏的生成链路） */
@@ -126,6 +132,12 @@ export function CanvasStageFlow({
   const embed = useMemo(() => resolvedEmbedModel(settings),
     [settings.embedModel, settings.systemProxyUrl, settings.proxyUrl, settings.proxyEnabled]);
   const repoId = repo?.id || "";
+  // P17（2026-09-15）：runtime / 任务恢复 / 后台活动面板的**线程键**统一走 `threadKey`。
+  // 首页（无仓库）时 `repoId` 是 `""`，而约定键是 `"home"`（`useChatSession`/`ChatView` 与后端落盘都用 `home`）——
+  // 两个字面量并存会让首页任务落在 `getRuntime("")` 这个孤立实例上：既不被恢复、成果也不归档。
+  // `repoId` 保留原义供 API/落盘路径（fetchHistory/listGenerations/loadLayout/saveLayout 等，「空」即「无仓库」）；
+  // 仅线程键与 `owner` 归一（`owner.repoId === "home"` 是 finalize 里「跳过作品封面 / VLM 诊断」的既有判据）。
+  const threadId = threadKey(repo?.id);
 
   // 画布视口持久化：onMoveEnd 更新 ref，persistNow 落盘
   const viewportRef = useRef<Viewport>({ x: 0, y: 0, scale: 1 });
@@ -651,119 +663,48 @@ export function CanvasStageFlow({
   // 避免 runWorkflowTask 因回调身份变化被频繁重建（重建会连带触发投影 useEffect 重跑）。
   const onGeneratedRef = useRef(onGenerated);
   onGeneratedRef.current = onGenerated;
+  // onFinalizeWorkflow 同样由上层经 useChatSession 暴露，身份可能每次渲染变化——ref 持有，
+  // 避免进 runWorkflowTask 依赖导致重建（R6 同款处置）。
+  const onFinalizeWorkflowRef = useRef(onFinalizeWorkflow);
+  onFinalizeWorkflowRef.current = onFinalizeWorkflow;
 
-  // 运转执行（提交 → 订阅进度 → 轮询拿图 → 入库 → 派发完成）：
+  // 运转执行（提交 → 订阅进度 → 交给 runtime 守望 → 终态翻成事件）：
   // runId 关联画布占位节点与对话框进度条；capturedOverride 供编辑器弹窗同拍抓取结果直传。
+  //
+  // 2026-09-15 C4-A 第 3 步 + **P10**：pending 生命周期与轮询归 runtime 独占之后，**编排链本身**
+  // 也收归单一属主 `lib/runCanvasWorkflow.ts` —— 本组件与 `WorkflowToolModal` 原先各持一份
+  // 逐句重复的副本（两个属主：一处改了另一处不跟）。现在本组件只剩两件事：**给 input + 提供 sink**。
+  // 归档仍走对话同一条 finalize 链（`onFinalizeWorkflow`），于是「入库失败」这一格不复存在：
+  // 归档未持久化时 runtime 会**保留 pending 自动重试**。
+  //
+  // ⚠ 下面四个开关是**两条路径的刻意差异**（源码锁 `runCanvasWorkflow.contract.test.ts` 钉住），
+  //   与弹窗那侧取值相反。「对齐」任意一个都是行为回归。
   const runWorkflowTask = useCallback((nn: CanvasNode, runId: string, capturedOverride?: unknown) => {
-    const captured = capturedOverride ?? nn.wfCaptured;
-    if (!captured || !settings.comfyuiUrl) {
-      showToast("还没抓到画布内容，请先双击打开编辑器点「选择完毕」", "error");
-      // 清除「生成中」占位节点 + 对话框进度条（run 事件已派发，失败也要收工）
-      try { window.dispatchEvent(new CustomEvent("laf-canvas-wf-done", { detail: { taskId: runId } })); } catch { /* ignore */ }
-      return;
-    }
-    (async () => {
-      let stopProg: (() => void) | null = null;
-      let keepPlaceholder = false;   // still_running 时保留「生成中」占位节点（ComfyUI 后台仍在跑）
-      let runPromptId = "";          // 提交成功的 prompt_id：后台活动标记用（finally 里移除）
-      try {
-        const r = await submitGraph(captured, settings.comfyuiUrl);
-        runPromptId = r.prompt_id || "";
-        showToast(`已提交到 ComfyUI（prompt_id: ${runPromptId}，${r.node_count} 个节点），正在运转工作流…`);
-        // 记入后台活动（laf_pending_gen_<repoId>）：SupportWidget 面板显示「出图中」；
-        // 仍自持轮询，runtime 只做标记。结束（finally）时移除。
-        trackCanvasWorkflow(repoId, runPromptId, settings.comfyuiUrl, nn.templateName || "工作流生成", runId);
-        // 占位节点进入「已提交」态 + 对话框进度条出现（graph 随 run 事件带给画布，占位节点显示真实提示词）
-        window.dispatchEvent(new CustomEvent("laf-canvas-wf-run-graph", {
-          detail: { runId, graph: captured },
-        }));
-        // 直连 ComfyUI /ws 订阅本 prompt 的步进进度（占位节点 + 对话框进度条共用）
-        // 节点名对齐对话模式：class_type (#id)，事件同时携带原始 id（node）与标签（nodeLabel）
-        const nodeLabel = (nid: string): string => {
-          try {
-            const g = captured as Record<string, { class_type?: string }>;
-            const c = g?.[nid]?.class_type;
-            return c ? `${c} (#${nid})` : `节点 #${nid}`;
-          } catch { return `节点 #${nid}`; }
-        };
-        stopProg = subscribeProgress(settings.comfyuiUrl || "", r.prompt_id || "", {
-          onProgress: (pct, pr) => window.dispatchEvent(new CustomEvent("laf-canvas-wf-progress", {
-            detail: { taskId: runId, promptId: r.prompt_id || "", progress: pct, node: pr.node || "", nodeLabel: pr.node ? nodeLabel(pr.node) : "", templateName: nn.templateName || "" },
-          })),
-          onNode: (nid) => window.dispatchEvent(new CustomEvent("laf-canvas-wf-progress", {
-            detail: { taskId: runId, promptId: r.prompt_id || "", node: nid, nodeLabel: nodeLabel(nid), templateName: nn.templateName || "" },
-          })),
-        });
-        // 轮询拿图：复用 pollSchedule 合同（图片 20 分钟 / 视频 60 分钟），不再硬编码 240 秒。
-        const outcome = await pollWorkflowResult(r.prompt_id || "", settings.comfyuiUrl || "", "image");
-        if (outcome.kind === "stalled") {
-          // 队列卡死：清理坏死任务（清队列+中断）后按失败处理（2026-08-29 用户需求）。
-          await interruptComfy(settings.comfyuiUrl || "", r.prompt_id || "").catch(() => undefined);
-          showToast(`运转失败：${outcome.error}`, "error");
-          return;
-        }
-        if (outcome.kind === "failed") {
-          showToast(`运转失败：${outcome.error}`, "error");
-          return;
-        }
-        if (outcome.kind === "still_running") {
-          // ComfyUI 仍在后台运转：不擅自删除「生成中」节点，保留占位并告知用户。
-          keepPlaceholder = true;
-          showToast("运转仍在进行中（已超过预期时长）。画布会保留「生成中」节点，请稍后在 ComfyUI 控制台查看或重新运转。");
-          return; // 不派发 done，保留占位节点
-        }
-        const result = outcome.result;
-        if ((!result.images || result.images.length === 0)
-            && (!result.videos || result.videos.length === 0)
-            && (!result.audios || result.audios.length === 0)) {
-          showToast("运转完成但未拿到图片/视频/音频（可能输出节点未正确配置），请到 ComfyUI 控制台查看。", "error");
-          return;
-        }
-        // 入库到 generation_store → 派发 laf-generation-saved 让画布用生成内容节点替换占位
-        // 元数据与对话模式同源：真实提示词 + 主模型 + LoRA（详情面板展示用）
-        const meta = workflowGenMetadata(nn.templateName || "", captured, nn.wfDraft);
-        const embed = resolvedEmbedModel(settings);
-        const chat = activeChatModel(settings);
-        try {
-          await finalizeGeneration({
-            threadId: repoId,
-            repoId,
-            promptId: r.prompt_id || "",
-            prompt: meta.prompt || nn.templateName || "工作流生成",
-            images: result.images,
-            videos: result.videos || [],
-            audios: result.audios || [],
-            outputDir: settings.outputDir,
-            comfyuiUrl: settings.comfyuiUrl,
-            embed: { baseUrl: embed.baseUrl || chat.baseUrl, apiKey: embed.apiKey || chat.apiKey, modelName: embed.modelName },
-            chat: { baseUrl: chat.baseUrl, apiKey: chat.apiKey, modelName: chat.modelName },
-            regeneration: undefined,
-            target: undefined,
-            templateName: meta.templateName,
-            modelName: meta.modelName,
-            loraNames: meta.loraNames,
-          });
-          showToast(`运转完成，${result.images.length} 张图${result.videos.length ? `、${result.videos.length} 个视频` : ""}${result.audios.length ? `、${result.audios.length} 个音频` : ""}已入库。`);
-        } catch (e) {
-          showToast(`运转完成（入库失败：${(e as Error).message}），稍后会自动入库。`);
-        }
-        try { window.dispatchEvent(new CustomEvent("laf-generation-saved")); } catch { /* ignore */ }
-        // ★ 运转完成即回读对话快照（与 WorkflowToolModal.handleRun / ChatView.sendCanvas 对齐）：
-        //   finalize 已把新产出作为助手消息落盘，刷新对话消息后 conversationUrls 实时
-        //   包含新图 → 画布投影无需手动刷新即可出现生成内容节点。
-        onGeneratedRef.current?.();
-      } catch (e) {
-        showToast(`运转失败：${(e as Error).message}`, "error");
-      } finally {
-        stopProg?.();
-        // 清除画布占位节点 + 对话框进度条（still_running 时保留占位，不派发 done）
-        if (!keepPlaceholder) {
-          if (runPromptId) untrackCanvasWorkflow(repoId, runPromptId); // 结束移除后台活动标记
-          try { window.dispatchEvent(new CustomEvent("laf-canvas-wf-done", { detail: { taskId: runId } })); } catch { /* ignore */ }
-        }
-      }
-    })();
-  }, [settings, repoId, showToast]);
+    runCanvasWorkflow({
+      captured: capturedOverride ?? nn.wfCaptured,
+      comfyuiUrl: settings.comfyuiUrl,
+      templateName: nn.templateName,
+      wfDraft: nn.wfDraft,
+      threadId,
+      outputDir: settings.outputDir,
+      runId,
+      finalizeWorkflow: onFinalizeWorkflowRef.current,
+      // 画布**不**在提交前预检 ComfyUI：让 submitGraph 自己抛错，走「运转失败：…」
+      precheckComfyStatus: false,
+      // 画布把「未抓到画布内容」与「未配置 ComfyUI 地址」合成同一早退
+      requireComfyUrl: true,
+      // 画布不补发「进度未知」（只有弹窗有进度条）
+      emitInitialProgress: false,
+      missingCapturedText: "还没抓到画布内容，请先双击打开编辑器点「选择完毕」",
+    }, {
+      notify: (text, kind) => showToast(text, kind),
+      dispatchDone: () => {
+        try { window.dispatchEvent(new CustomEvent("laf-canvas-wf-done", { detail: { taskId: runId } })); } catch { /* ignore */ }
+      },
+      // 回读对话快照：产出已入库，画布据此投影出生成内容节点
+      reloadFromSnapshot: () => { onGeneratedRef.current?.(); },
+    });
+  }, [settings, threadId, showToast]);
 
   // 运转任务事件：创建占位节点（空位放置）/ 进度更新 / 完成清除
   useEffect(() => {
@@ -772,33 +713,36 @@ export function CanvasStageFlow({
       if (!d?.runId) return;
       // 以最新内容节点为锚点展开（生成中占位也遵从此原则）
       const pos = placePlaceholder(CARD_W, 427, wfRunsRef.current.map((r) => ({ x: r.x, y: r.y, w: CARD_W, h: 427 })));
-      setWfRuns((prev) => (prev.some((r) => r.id === d.runId) ? prev : [...prev, {
+      // 列表增删收归单一属主 `lib/wfRunList`（P12）：本组件只管「新项长什么样」
+      setWfRuns((prev) => addWfRun(prev, d.runId!, () => ({
         id: d.runId!, toolNodeId: d.toolNodeId || "", templateName: d.templateName || "工作流",
         promptId: "", progress: null, x: pos.x, y: pos.y,
-      }]));
+      })));
     };
     const onProg = (e: Event) => {
       const d = (e as CustomEvent).detail as { taskId?: string; promptId?: string; progress?: number | null; node?: string; templateName?: string } | undefined;
       if (!d?.taskId) return;
       // upsert：编辑器弹窗路径只发 progress 事件（不发 run），占位节点同样要出现
-      setWfRuns((prev) => {
-        const exists = prev.some((r) => r.id === d.taskId);
-        if (exists) {
-          return prev.map((r) => (r.id === d.taskId ? {
-            ...r,
-            promptId: d.promptId || r.promptId,
-            progress: d.progress !== undefined ? d.progress : r.progress,
-            node: d.node !== undefined ? d.node : r.node,
-            templateName: d.templateName || r.templateName,
-          } : r));
-        }
-        const pos = placePlaceholder(CARD_W, 427, prev.map((r) => ({ x: r.x, y: r.y, w: CARD_W, h: 427 })));
-        return [...prev, {
-          id: d.taskId!, toolNodeId: "", templateName: d.templateName || "工作流",
-          promptId: d.promptId || "", progress: d.progress !== undefined ? d.progress : null,
-          node: d.node || undefined, x: pos.x, y: pos.y,
-        }];
-      });
+      setWfRuns((prev) => upsertWfRun(
+        prev, d.taskId!,
+        (r) => ({
+          ...r,
+          promptId: d.promptId || r.promptId,
+          progress: d.progress !== undefined ? d.progress : r.progress,
+          node: d.node !== undefined ? d.node : r.node,
+          templateName: d.templateName || r.templateName,
+        }),
+        () => {
+          // 新占位的落点在事务内算：占用矩形必须取自 `prev`（而非 `wfRunsRef`），
+          // 否则同一拍内连续两次事件会各自算到同一个「空位」。
+          const pos = placePlaceholder(CARD_W, 427, prev.map((r) => ({ x: r.x, y: r.y, w: CARD_W, h: 427 })));
+          return {
+            id: d.taskId!, toolNodeId: "", templateName: d.templateName || "工作流",
+            promptId: d.promptId || "", progress: d.progress !== undefined ? d.progress : null,
+            node: d.node || undefined, x: pos.x, y: pos.y,
+          };
+        },
+      ));
     };
     const onDone = (e: Event) => {
       const d = (e as CustomEvent).detail as { taskId?: string } | undefined;
@@ -808,13 +752,13 @@ export function CanvasStageFlow({
       if (run) {
         pendingAnchorRef.current = { x: run.x, y: run.y, w: CARD_W, h: 427 };
       }
-      setWfRuns((prev) => (prev.some((r) => r.id === d.taskId) ? prev.filter((r) => r.id !== d.taskId) : prev));
+      setWfRuns((prev) => dropWfRun(prev, d.taskId!));
     };
     // 提交后携带 API prompt 图：占位节点据此显示真实提示词/节点名（对齐对话模式）
     const onRunGraph = (e: Event) => {
       const d = (e as CustomEvent).detail as { runId?: string; graph?: unknown } | undefined;
       if (!d?.runId) return;
-      setWfRuns((prev) => prev.map((r) => (r.id === d.runId ? { ...r, graph: d.graph } : r)));
+      setWfRuns((prev) => updateWfRun(prev, d.runId!, (r) => ({ ...r, graph: d.graph })));
     };
     window.addEventListener("laf-canvas-wf-run", onRun);
     window.addEventListener("laf-canvas-wf-run-graph", onRunGraph);
@@ -3369,6 +3313,7 @@ export function CanvasStageFlow({
           settings={settings}
           onClose={() => setToolModalNode(null)}
           onGenerated={onGenerated}
+          onFinalizeWorkflow={onFinalizeWorkflow}
           onUpdate={(updates) => {
             const tn = toolModalNode.node;
             // ★ 同步更新 toolModalNode：弹窗 node prop 必须即时反映最新状态（wfConfirmed/wfDraft/wfCaptured），

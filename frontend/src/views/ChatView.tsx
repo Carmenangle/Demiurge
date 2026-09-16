@@ -38,6 +38,7 @@ import { WorkflowCard } from "../components/WorkflowCard";
 const CanvasStageFlow = lazy(() => import("./CanvasStageFlow").then((m) => ({ default: m.CanvasStageFlow })));
 import { globalPendingToolCreates, canvasBridge } from "../components/canvas/shared";
 import { useChatSession } from "../lib/useChatSession";
+import { addWfRun, dropWfRun, upsertWfRun } from "../lib/wfRunList";
 import { deletedMessageTombstones } from "../lib/deletedMessageTombstones";
 import { inspirationToAttachment, consumePendingInspirationAttachments, CHAT_INSPIRATION_EVENT } from "../lib/inspirationInsert";
 import { ConfirmModal } from "../components/Modal";
@@ -60,7 +61,8 @@ import { resolveCharacterPortrait } from "../lib/characterPortrait";
 import { useChatPresentationAssets } from "../lib/useChatPresentationAssets";
 import { useChatUnreadTracker } from "../lib/useChatUnreadTracker";
 import { useChatTransfer } from "../lib/useChatTransfer";
-import { WorkflowGenerationRuntime } from "../lib/workflowGenerationRuntime";
+import { getRuntime, threadKey } from "../lib/workflowGenerationRuntime";
+import { pendingRunLabel } from "../lib/canvasWorkflowRun";
 
 export function ChatView({
   repo,
@@ -135,8 +137,9 @@ export function ChatView({
     return unsub;
   }, [repo?.id]);
   const [maskEditorUrl, setMaskEditorUrl] = useState<string | null>(null);
-  // 对话线 id = 仓库 id（首页用 "home"）：后端按此落盘多轮记忆与 RAG 知识库
-  const threadId = repo?.id || "home";
+  // 对话线 id = 仓库 id（首页用 "home"）：后端按此落盘多轮记忆与 RAG 知识库。
+  // P17（2026-09-15）：改走 `threadKey` 单点推导（与 runtime/画布/弹窗共用同一键，禁止各自 `|| "home"`）。
+  const threadId = threadKey(repo?.id);
 
   const [modelId, setModelId] = useState(
     settings.activeImageModelId || settings.imageModels[0]?.id || "",
@@ -267,44 +270,49 @@ export function ChatView({
   // 画布工作流运转任务：对话框下方进度条（与画布「生成中」占位节点同源事件驱动）
   const [canvasWfRuns, setCanvasWfRuns] = useState<Array<{
     id: string; templateName: string; progress: number | null; node?: string;
-  }>>(() => new WorkflowGenerationRuntime(threadId).list()
+  }>>(() => getRuntime(threadId).list()
     .filter((item) => item.runId)
     .map((item) => ({
       id: item.runId!,
-      templateName: item.prompt || "工作流",
+      // 标签走 `pendingRunLabel`：`pending.prompt` 自 2026-09-15（C4-A Step 3/4）起存的是真实提示词
+      // （归档要用），直接当标签会显示一长串提示词 ⇒ 改从 regeneration 快照取模板名。
+      templateName: pendingRunLabel(item),
       progress: null,
     })));
   useEffect(() => {
     const onRun = (e: Event) => {
       const d = (e as CustomEvent).detail as { runId?: string; templateName?: string } | undefined;
       if (!d?.runId) return;
-      setCanvasWfRuns((prev) => (prev.some((r) => r.id === d.runId)
-        ? prev
-        : [...prev, { id: d.runId!, templateName: d.templateName || "工作流", progress: null }]));
+      // 列表增删收归单一属主 `lib/wfRunList`（P12）：本组件只管「新项长什么样」
+      setCanvasWfRuns((prev) => addWfRun(prev, d.runId!, () => ({
+        id: d.runId!, templateName: d.templateName || "工作流", progress: null,
+      })));
     };
     const onProg = (e: Event) => {
       const d = (e as CustomEvent).detail as { taskId?: string; progress?: number | null; node?: string; nodeLabel?: string; templateName?: string } | undefined;
       if (!d?.taskId) return;
       const nodeLabel = d.nodeLabel || d.node;   // 优先 class_type 标签（对齐对话模式），裸 id 兜底
       // upsert：编辑器弹窗路径只发 progress 事件（不发 run），进度条同样要出现
-      setCanvasWfRuns((prev) => (prev.some((r) => r.id === d.taskId)
-        ? prev.map((r) => (r.id === d.taskId ? {
+      setCanvasWfRuns((prev) => upsertWfRun(
+        prev, d.taskId!,
+        (r) => ({
           ...r,
           progress: d.progress !== undefined ? d.progress : r.progress,
           node: nodeLabel !== undefined ? nodeLabel : r.node,
           templateName: d.templateName || r.templateName,
-        } : r))
-        : [...prev, {
+        }),
+        () => ({
           id: d.taskId!,
           templateName: d.templateName || "工作流",
           progress: d.progress !== undefined ? d.progress : null,
           node: nodeLabel || undefined,
-        }]));
+        }),
+      ));
     };
     const onDone = (e: Event) => {
       const d = (e as CustomEvent).detail as { taskId?: string } | undefined;
       if (!d?.taskId) return;
-      setCanvasWfRuns((prev) => (prev.some((r) => r.id === d.taskId) ? prev.filter((r) => r.id !== d.taskId) : prev));
+      setCanvasWfRuns((prev) => dropWfRun(prev, d.taskId!));
     };
     window.addEventListener("laf-canvas-wf-run", onRun);
     window.addEventListener("laf-canvas-wf-progress", onProg);
@@ -342,7 +350,7 @@ export function ChatView({
     confirmReq, compact, compacting, contextReminder, dismissContextReminder,
     clearHome, clearCache, reloadFromSnapshot,
     editMessage, deleteMessage, regenerateMessage, createCheckpoint, messagesUpTo,
-    mergeAudioTracks,
+    mergeAudioTracks, finalizeWorkflowRun,
   } = useChatSession({
     repo, settings, setGeneratedCover, chat, genModel, videoModel, workMode,
     size: resolvedImageSize.size,
@@ -743,6 +751,7 @@ export function ChatView({
                 messages={messages}
                 displayRegex={displayRegex}
                 onGenerated={() => void reloadFromSnapshot()}
+                onFinalizeWorkflow={finalizeWorkflowRun}
                 onDeleteMessage={(id) => deleteMessage(id)}
                 onSelectActivePreset={(name) => update({ activePresetName: name })}
                 streamingId={streamingId}

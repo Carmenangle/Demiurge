@@ -11,10 +11,6 @@ import {
   resolveTransitionBaseImage,
   userMessageRichContent,
 } from "./chatGeneration";
-import {
-  generationResultAction, notFoundPollAction, pendingResumeAction, pollSchedule,
-  durableFinalizeSucceeded, registerPending, shouldFinalize, unregisterPending,
-} from "./workflowGenerationRuntime";
 import { serializeInspirationSend, type InspirationAttachment } from "./inspirationInsert";
 import type { Template } from "../api/workflows";
 import type { ChatMessage } from "../types/chat";
@@ -434,141 +430,15 @@ describe("slimSnapshot", () => {
   });
 });
 
-describe("pending generation", () => {
-  it("注册时去重后追加，且不修改输入", () => {
-    const input = [
-      { prompt_id: "p1", createdAt: 1 },
-      { prompt_id: "p2", createdAt: 2 },
-    ];
-    expect(registerPending(input, "p1", 3)).toEqual([
-      { prompt_id: "p2", createdAt: 2 },
-      { prompt_id: "p1", createdAt: 3 },
-    ]);
-    expect(input).toEqual([
-      { prompt_id: "p1", createdAt: 1 },
-      { prompt_id: "p2", createdAt: 2 },
-    ]);
-  });
-  it("工作流 pending 绑定自己的完整重生成快照", () => {
-    const regeneration = {
-      kind: "workflow" as const,
-      graph: { "1": { class_type: "KSampler", inputs: { seed: 7 } } },
-      comfyuiUrl: "http://127.0.0.1:8188",
-      outputNodeIds: ["9"],
-      prompt: "",
-    };
-    const out = registerPending([], "prompt-a", 1, ["9"], regeneration);
-    expect(out[0].regeneration).toEqual(regeneration);
-  });
-
-  it("带主输出过滤时记录 outputNodeIds，空数组则省略该键", () => {
-    expect(registerPending([], "p1", 1, ["47"])).toEqual([
-      { prompt_id: "p1", createdAt: 1, outputNodeIds: ["47"] },
-    ]);
-    expect(registerPending([], "p1", 1, [])).toEqual([
-      { prompt_id: "p1", createdAt: 1 },
-    ]);
-  });
-
-  it("自动插画 pending 持久化目标消息与slot", () => {
-    const regeneration = {
-      kind: "template" as const,
-      templateId: "tpl",
-      values: { "39.text": "masterpiece\n1girl" },
-      comfyuiUrl: "http://127.0.0.1:8188",
-      outputNodeIds: ["45"],
-      prompt: "masterpiece\n1girl",
-    };
-    expect(registerPending([], "p1", 1, ["45"], regeneration, {
-      messageId: "bot-1", slotId: "slot-1", background: true,
-    }, "masterpiece\n1girl, climax action")).toEqual([{
-      prompt_id: "p1", createdAt: 1,
-      outputNodeIds: ["45"],
-      regeneration,
-      target: { messageId: "bot-1", slotId: "slot-1", background: true },
-      prompt: "masterpiece\n1girl, climax action",
-    }]);
-  });
-
-  it("删除只移除指定任务并保持顺序", () => {
-    const input = [
-      { prompt_id: "p1", createdAt: 1 },
-      { prompt_id: "p2", createdAt: 2 },
-    ];
-    expect(unregisterPending(input, "p1")).toEqual([{ prompt_id: "p2", createdAt: 2 }]);
-    expect(unregisterPending(input, "missing")).toEqual(input);
-  });
-
-  it("恢复判定保持已处理和 30 分钟边界", () => {
-    const item = { prompt_id: "p1", createdAt: 1000 };
-    expect(pendingResumeAction(item, new Set(["p1"]), 1000)).toBe("skip");
-    expect(pendingResumeAction(item, new Set(), 1000 + 30 * 60 * 1000)).toBe("inspect");
-    expect(pendingResumeAction(item, new Set(), 1001 + 30 * 60 * 1000)).toBe("expire");
-  });
-
-  it.each([
-    [149, false, 2000],
-    [150, true, 15000],
-    [151, false, 15000],
-    [209, false, 15000],
-    [210, false, null],
-  ])("第 %i 次轮询维持原调度", (tries, releaseBusy, delayMs) => {
-    expect(pollSchedule(tries)).toEqual({ releaseBusy, delayMs });
-  });
-
-  it("ComfyUI execution_error 是失败终态，不能继续轮询", () => {
-    expect(generationResultAction("failed")).toBe("fail");
-    expect(generationResultAction("completed")).toBe("complete");
-    expect(generationResultAction("running")).toBe("poll");
-  });
-
-  it("完成瞬间短暂查不到 history 时继续轮询，连续五次才判丢失", () => {
-    expect(notFoundPollAction(1)).toBe("retry");
-    expect(notFoundPollAction(4)).toBe("retry");
-    expect(notFoundPollAction(5)).toBe("fail");
-  });
-});
-
-describe("shouldFinalize", () => {
-  const pend = (...ids: string[]) => ids.map((prompt_id) => ({ prompt_id }));
-
-  it("无 promptId → 直接放行（老路径兼容）", () => {
-    expect(shouldFinalize(undefined, [], new Set())).toBe(true);
-  });
-  it("promptId 在 pending 且未收尾 → 放行", () => {
-    expect(shouldFinalize("p1", pend("p1"), new Set())).toBe(true);
-  });
-  it("展示层误清 pending 时仍允许实时守望归档", () => {
-    expect(shouldFinalize("p1", pend("p2"), new Set())).toBe(true);
-  });
-  it("promptId 在内存已收尾集合（并发窗口）→ 拦", () => {
-    expect(shouldFinalize("p1", pend("p1"), new Set(["p1"]))).toBe(false);
-  });
-  it("pending 为空不代表用户取消", () => {
-    expect(shouldFinalize("p1", [], new Set())).toBe(true);
-  });
-  it("并发收尾集合仍优先拦截", () => {
-    expect(shouldFinalize("p1", pend("p2"), new Set(["p1"]))).toBe(false);
-  });
-  it("用户显式取消的任务不得归档", () => {
-    expect(shouldFinalize("p1", pend("p1"), new Set(), new Set(["p1"]))).toBe(false);
-  });
-});
-
-describe("durableFinalizeSucceeded", () => {
-  it("原图或快照未持久化时要保留 pending 重试", () => {
-    expect(durableFinalizeSucceeded({
-      durable: true, images: [{ persisted: false, snapshotted: true }],
-    })).toBe(false);
-    expect(durableFinalizeSucceeded({
-      durable: true, images: [{ persisted: true, snapshotted: false }],
-    })).toBe(false);
-    expect(durableFinalizeSucceeded({
-      durable: true, images: [{ persisted: true, snapshotted: true }],
-    })).toBe(true);
-  });
-});
-
+// ⚠ 2026-09-15（清单 P14）**测试归属纠偏**：以下原先挂在这里的断言，实际测的是
+// `./workflowGenerationRuntime` 的纯判定函数（`registerPending` / `unregisterPending` /
+// `pendingResumeAction` / `pollSchedule` / `generationResultAction` / `notFoundPollAction` /
+// `shouldFinalize` / `durableFinalizeSucceeded`）—— 那些函数早已搬去 runtime 模块、测试没跟着搬
+// （本文件是 `chatGeneration.ts` 的测试），于是「模块内实现细节」被当成公开 API 挂着。现已归位：
+//   · 前六个随导出面收窄改由 `workflowGenerationRuntime.test.ts` 的「P14 · 公开门面等价网」
+//     经公开门面（`track`/`remove`/`recoveryAction`/`inspect`）逐条覆盖，零覆盖损失；
+//   · `pollSchedule` / `durableFinalizeSucceeded` 属主侧本就有更全的用例（本次补 151 档），此处删重复。
+// ⇒ 本文件自此**不再 import runtime**，只测自己的生产模块。
 // ===== V1.1 视频首帧底图来源解析 =====
 describe("resolveVideoBaseImage", () => {
   const tplWithImage = { id: "v1", image_node_id: "9", exposed: [] } as any;

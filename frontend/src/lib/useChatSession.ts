@@ -38,6 +38,7 @@ import {
 } from "./generationLifecycle";
 import { useWorkflowOrchestration } from "./workflowOrchestration";
 import { subscribeProgress } from "./comfyProgress";
+import { joinForeground, leaveForeground } from "./foregroundRunQueue";
 import {
   needsImageInput, hasImageProvided, pickBestText,
   slimSnapshot as slimSnapshotPure, promptHistory,
@@ -46,7 +47,7 @@ import {
   resolveTransitionBaseImage,
 } from "./chatGeneration";
 import {
-  durableFinalizeSucceeded, WorkflowGenerationRuntime, pollWorkflowResult,
+  durableFinalizeSucceeded, getRuntime, threadKey, pollWorkflowResult,
   type PendingGeneration, type WorkflowWatchObserver,
 } from "./workflowGenerationRuntime";
 import {
@@ -68,6 +69,9 @@ import {
   pickFreshAssistantMedia,
 } from "./chatSessionEvents";
 import { recoverCompactedSummaryImage } from "./contextManagement";
+// C4-A Step 6：媒体种类推导（审计 R8）——工作流出图/出视频的超时合同由抓取图节点类名决定，
+// 硬编码 "image" 会让视频模板吃图片的 20 分钟硬上限。纯函数，无副作用、无循环依赖。
+import { deriveWorkflowMediaType } from "./canvasWorkflowRun";
 import { characterDetail } from "../api/characters";
 import { recoverAgentRun, shouldRecoverAgentRun } from "./agentRecovery";
 import { subscribePlanTaskActivities } from "./planTaskActivity";
@@ -133,12 +137,42 @@ export interface ChatSessionDeps {
   onNotify?: (msg: string, kind?: "info" | "error" | "success") => void; // 轻提示（对齐 WorkflowCard onNotify）
 }
 
+/**
+ * 自动插画提交参数（2026-09-14 收口，架构审计 C7）。
+ *
+ * 此前是 **17 个位置参数** + 失败槽快照按签名序存数组 + 重试用魔术下标 `args[7]="manual"`
+ * 翻 `source`——签名插一个参数就静默错位，且 TS 不会报错（数组按 `Parameters<...>` 展开）。
+ * 现收成一个对象：调用点自解释，重试快照就是本对象本身，`source` 按名覆盖。
+ */
+export interface IllustrationSubmit {
+  prompt: string;
+  motion?: number;
+  actors?: string[];
+  messageId: string;
+  slotId: string;
+  sceneSpec?: IllustrationSceneSpec;
+  turnId?: string;
+  source?: "automatic" | "manual";
+  eventVideoMode?: string;
+  firstFrameDesc?: string;
+  lastFrameDesc?: string;
+  prevTailDesc?: string;
+  lastFrameUrl?: string;
+  videoPrompt?: string;
+  transition?: string;
+  transitionVideoPrompt?: string;
+  transitionVideoParams?: VideoParams;
+}
+
 // PLACEHOLDER_BODY
 
-// 跨导航持久化：切换页面时进度条和提示词参数不丢失
-const persistedWfProgress: { current: number | null } = { current: null };
-const persistedWfNode: { current: string } = { current: "" };
-const persistedWfPromptParams: { current: Record<string, unknown> } = { current: {} };
+// 跨导航持久化：切换页面时进度条/节点名不丢失。
+// P18（2026-09-15）：改**按线程键分片**——此前是模块级单例（`{ current }`），跨仓库共享同一格，
+// 切进另一个仓库会读到上一个仓库的进度/节点名（渲染虽被 `wfRunning || slowWatchPromptId` 部分挡住，
+// 但「切进有在途任务的仓库、进入慢守望」的窗口里会短暂显示错仓库的进度与该仓库的节点名）。
+const persistedWfProgress = new Map<string, number | null>();
+const persistedWfNode = new Map<string, string>();
+// 注：原 `persistedWfPromptParams` 已删 —— 全仓零引用的死代码（架构审查 P18 硬约束#3）。
 
 export function useChatSession(deps: ChatSessionDeps) {
   const {
@@ -198,11 +232,20 @@ export function useChatSession(deps: ChatSessionDeps) {
   // 绑定的独立世界书（worldbookDir 下的 .json 名）：与卡内嵌世界书合并注入（后端处理）。
   const worldbookDir = settings.worldbookDir || "";
   const worldbookName = repo?.worldbookName || "";
-  const [wfProgress, setWfProgress] = useState<number | null>(persistedWfProgress.current);  // 工作流实时进度%（WS，null=无），跨导航持久化
-  const [wfNode, setWfNode] = useState<string>(persistedWfNode.current);  // 当前执行的节点显示名（WS executing 消息），跨导航持久化
-  // 包装 setter：同时更新持久化 ref，确保切换页面回来后进度不丢失
-  const updateWfProgress = (v: number | null) => { persistedWfProgress.current = v; setWfProgress(v); };
-  const updateWfNode = (v: string) => { persistedWfNode.current = v; setWfNode(v); };
+  // 对话线 id 单点推导（P17）：仓库 id；首页（无仓库）统一 "home"。
+  // 后端按此落盘多轮记忆与 RAG 知识库；runtime / 任务恢复 / 后台面板的线程键也是它。
+  // 必须在下面的 useState 之前声明——首次挂载就要按当前线程读分片（P18）。
+  const threadId = threadKey(repo?.id);
+  const [wfProgress, setWfProgress] = useState<number | null>(persistedWfProgress.get(threadId) ?? null);  // 工作流实时进度%（WS，null=无），跨导航持久化
+  const [wfNode, setWfNode] = useState<string>(persistedWfNode.get(threadId) ?? "");  // 当前执行的节点显示名（WS executing 消息），跨导航持久化
+  // 包装 setter：同时写入**当前线程的分片**，确保切换页面回来后进度不丢失
+  const updateWfProgress = (v: number | null) => { persistedWfProgress.set(threadId, v); setWfProgress(v); };
+  const updateWfNode = (v: string) => { persistedWfNode.set(threadId, v); setWfNode(v); };
+  // P18：切线程时把 state 重新对齐到目标线程的分片（否则沿用上一个仓库的进度/节点名）
+  useEffect(() => {
+    setWfProgress(persistedWfProgress.get(threadId) ?? null);
+    setWfNode(persistedWfNode.get(threadId) ?? "");
+  }, [threadId]);
   const [regeneratingIds, setRegeneratingIds] = useState<Set<string>>(new Set());
   const wsUnsubRef = useRef<(() => void) | null>(null);  // 当前进度 WS 退订
   const activePromptQueue = useRef<string[]>([]);  // FIFO 队列：首个 = 当前显示进度条；多个 = 排队中
@@ -214,8 +257,6 @@ export function useChatSession(deps: ChatSessionDeps) {
   const [slowWatchPromptId, setSlowWatchPromptId] = useState<string | null>(null);
   // 工作流上传/提交阶段（点击「运转工作流」→ submitGraph 返回前）：按钮显示「上传中…」
   const [uploadingWf, setUploadingWf] = useState(false);
-  // 对话线 id = 仓库 id（首页用 "home"）：后端按此落盘多轮记忆与 RAG 知识库
-  const threadId = repo?.id || "home";
   // 切换仓库/线程时重置上传状态（submitGraph 挂起后切线程不会残留 true）
   useEffect(() => { setUploadingWf(false); }, [threadId]);
   // 队列任务完成回调：headless 执行的回复落盘后，用它刷新对话区（定义在下方 reloadFromSnapshot，
@@ -279,11 +320,12 @@ export function useChatSession(deps: ChatSessionDeps) {
     styleBaseImage,
     ...overrides,
   });
-  const workflowRuntimeRef = useRef<{ threadId: string; runtime: WorkflowGenerationRuntime } | null>(null);
-  if (workflowRuntimeRef.current?.threadId !== threadId) {
-    workflowRuntimeRef.current = { threadId, runtime: new WorkflowGenerationRuntime(threadId) };
-  }
-  const workflowRuntime = workflowRuntimeRef.current.runtime;
+  // 每个 threadId 唯一实例（`getRuntime` 内部按 threadId 缓存）：画布运转标记与对话恢复
+  // 读写同一个 `laf_pending_gen_<threadId>`，必须共享同一份 finalized/cancelled 去重集合，
+  // 否则同一个任务会被归档两次（2026-09-15 C4-A Step 2）。
+  // P17（2026-09-15）：`threadId` 已由 `threadKey` 单点推导（见上方）——首页 = "home"，
+  // 与画布/弹窗的键一致，故首页在途任务也能被这里恢复、并进后台活动面板（面板只扫非 home 键，属既有约定）。
+  const workflowRuntime = getRuntime(threadId);
   const activeThreadRef = useRef(threadId);
   activeThreadRef.current = threadId;
   const recoveryTokenRef = useRef(0);
@@ -844,9 +886,28 @@ export function useChatSession(deps: ChatSessionDeps) {
     updateWfNode("");
   };
 
+  // 取消一个前台运转任务：标记 + 移除 pending，**并且出队**（2026-09-15 P22）。
+  //
+  // 为什么必须自己出队：`workflowRuntime.cancel` 只做 `cancelled.add` + `pending.remove`，
+  // **不派发任何终态回调** —— 被取消的任务随后在 runtime 里走 `notFound`（pending 已不在列表
+  // ⇒ 静默 `return`）或停顿守卫的同款静默 `return`，5 个终态回调一个都不跑。
+  // 而「出队」原本只挂在终态回调上 ⇒ 被取消的 pid 永远留在 `activePromptQueue`，
+  // 下一次前台任务 `joinForeground` 便得到 `first=false`、**不再订阅进度 WS**
+  // （实锤症状：停止一次之后，后续出图全程没有进度，直到完成才跳到结果）。
+  //
+  // `leaveForeground` 对「不在队列里的 id」是幂等的（filter 不变、`idle` 按队列现状返回）：
+  // 慢守望阶段 / 后台 / 恢复期任务的 pid 本就不在队列里，走这里安全。
+  // ⚠ 本函数只做「取消 + 出队」；`idle` 之后要不要停进度条、清慢守望、派发 `workflowDone`，
+  //   由调用方决定（三处调用点的收尾本就不同），不要在这里顺手统一。
+  const cancelForegroundRun = (promptId: string): void => {
+    workflowRuntime.cancel(promptId);
+    const left = leaveForeground(activePromptQueue.current, promptId);
+    activePromptQueue.current = left.queue;
+  };
+
   const discardFailedIllustration = (
     messageId: string, slotId: string, stage: string, error: string, promptId = "",
-    retryArgs?: unknown[],
+    retryArgs?: unknown,   // 不透明快照：生产者决定形状（插画为 IllustrationSubmit 对象）
   ) => {
     console.error("[auto-illustration]", {
       threadId: repo?.id || "home", messageId, slotId, stage, error, promptId,
@@ -877,15 +938,16 @@ export function useChatSession(deps: ChatSessionDeps) {
         else pushBot("生成完成，但没有输出（工作流未含 SaveImage / 视频合成 / 文字输出节点）。");
       }
       if (!pending.target?.background) {
-        // 出队
-        activePromptQueue.current = activePromptQueue.current.filter(id => id !== pending.prompt_id);
-        if (activePromptQueue.current.length === 0) {
+        // 出队（队列判定归 `lib/foregroundRunQueue` 单一属主，P12）
+        const left = leaveForeground(activePromptQueue.current, pending.prompt_id);
+        activePromptQueue.current = left.queue;
+        if (left.idle) {
           stopProgress();
           setSlowWatchPromptId(null);
           dispatch({ t: "workflowDone", promptId: pending.prompt_id });
         } else {
-          // 切换到下一个排队的任务
-          const nextId = activePromptQueue.current[0];
+          // 切换到下一个排队的任务（`!idle` ⇒ 队列非空 ⇒ 队首必存在）
+          const nextId = left.head!;
           const nextPending = workflowRuntime.list().find(p => p.prompt_id === nextId);
           if (nextPending) {
             const nextUrl = comfyRegenerationUrl(nextPending.regeneration) || settings.comfyuiUrl;
@@ -911,8 +973,9 @@ export function useChatSession(deps: ChatSessionDeps) {
         pending.target.messageId, pending.target.slotId, stage, error, pending.prompt_id,
       );
       if (!pending.target?.background) {
-        activePromptQueue.current = activePromptQueue.current.filter(id => id !== pending.prompt_id);
-        if (activePromptQueue.current.length === 0) {
+        const left = leaveForeground(activePromptQueue.current, pending.prompt_id);
+        activePromptQueue.current = left.queue;
+        if (left.idle) {
           stopProgress();
           setSlowWatchPromptId(null);
           dispatch({ t: "workflowDone", promptId: pending.prompt_id });
@@ -925,8 +988,9 @@ export function useChatSession(deps: ChatSessionDeps) {
     },
     released: (pending) => {
       if (pending.target?.background) return;
-      activePromptQueue.current = activePromptQueue.current.filter(id => id !== pending.prompt_id);
-      if (activePromptQueue.current.length === 0) {
+      const left = leaveForeground(activePromptQueue.current, pending.prompt_id);
+      activePromptQueue.current = left.queue;
+      if (left.idle) {
         stopProgress();
         dispatch({ t: "workflowDone", promptId: pending.prompt_id });
       }
@@ -939,22 +1003,24 @@ export function useChatSession(deps: ChatSessionDeps) {
         "后台出图等待超时，可刷新后继续恢复", pending.prompt_id,
       );
       else {
-        activePromptQueue.current = activePromptQueue.current.filter(id => id !== pending.prompt_id);
-        if (activePromptQueue.current.length === 0) setSlowWatchPromptId(null);
+        const left = leaveForeground(activePromptQueue.current, pending.prompt_id);
+        activePromptQueue.current = left.queue;
+        if (left.idle) setSlowWatchPromptId(null);
       }
     },
-    stalled: (pending) => {
+    stalled: (pending, error) => {
       // 停顿守卫：任务一直卡在排队、从未观察到节点开始运转，早停而非死等到硬超时
       if (pending.target) {
         discardFailedIllustration(
           pending.target.messageId, pending.target.slotId, "stalled",
-          "长时间未开始加载节点（ComfyUI 队列未运转），已停止", pending.prompt_id,
+          error, pending.prompt_id,   // P13：文案由 runtime 经第二参转发（原为同值硬编码，值不变）
         );
         refreshChatBackgroundActivities();
         return;
       }
-      activePromptQueue.current = activePromptQueue.current.filter(id => id !== pending.prompt_id);
-      if (activePromptQueue.current.length === 0) {
+      const left = leaveForeground(activePromptQueue.current, pending.prompt_id);
+      activePromptQueue.current = left.queue;
+      if (left.idle) {
         stopProgress();
         setSlowWatchPromptId(null);
         dispatch({ t: "workflowDone", promptId: pending.prompt_id });
@@ -985,8 +1051,10 @@ export function useChatSession(deps: ChatSessionDeps) {
     // 实时进度：直连 ComfyUI /ws（完成判定仍以下方轮询为准，WS 只驱动进度条）
     // 队列：仅首个任务驱动进度条，后续任务排队（等前一个完成后再切换）
     if (!target?.background) {
-      activePromptQueue.current.push(promptId);
-      if (activePromptQueue.current.length === 1) {
+      // 入队判定归 `lib/foregroundRunQueue` 单一属主（P12）
+      const joined = joinForeground(activePromptQueue.current, promptId);
+      activePromptQueue.current = joined.queue;
+      if (joined.first) {
         // 第一个任务：订阅 WS 驱动进度条
         stopProgress();
         updateWfProgress(0);
@@ -1010,19 +1078,23 @@ export function useChatSession(deps: ChatSessionDeps) {
   // 剧情高潮点异步出图/出视频：后端发来 booru 提示词 + motion 动态强度，按本作品预设组 values 提交 ComfyUI，
   // 走 pollResult 现成异步闭环（徽记显示进度 + 离开继续 + 点击返回）。未预设模板 → 静默跳过。
   // 智能模态：smartVideo 开 且 motion>=2 且 预设了视频模板 → 用视频模板，否则用图片模板。
-  const submitIllustration = async (
-    prompt: string, motion = 0, actors: string[] = [], messageId: string, slotId: string,
-    sceneSpec?: IllustrationSceneSpec, turnId = "", source: "automatic" | "manual" = "automatic",
-    eventVideoMode?: string, firstFrameDesc = "", lastFrameDesc = "",
-    prevTailDesc = "", lastFrameUrl = "", videoPrompt = "", transition = "",
-    transitionVideoPrompt = "", transitionVideoParams?: VideoParams,
-  ) => {
-    // 重试参数快照（按签名顺序）：失败槽「重新生成」按钮直接展开重调（source 翻转为 manual 跳过 claim）。
-    const retrySnapshot: unknown[] = [
-      prompt, motion, actors, messageId, slotId, sceneSpec, turnId, source,
+  const submitIllustration = async (input: IllustrationSubmit) => {
+    // 解构带默认值：函数体沿用局部名，签名收成对象后调用点不必再数位置（审计 C7）。
+    const {
+      prompt: promptIn, motion = 0, actors = [], messageId, slotId, sceneSpec, turnId = "",
+      source = "automatic", eventVideoMode, firstFrameDesc = "", lastFrameDesc = "",
+      prevTailDesc = "", lastFrameUrl = "", videoPrompt = "", transition = "",
+      transitionVideoPrompt = "", transitionVideoParams,
+    } = input;
+    // 入参 prompt 是原始请求值（不改）；编译链会在下文按 Profile 重写 → 另起可变局部承接。
+    let prompt = promptIn;
+    // 重试参数快照 = 本对象（默认值已落定、按名取用）：失败槽「重新生成」按钮按名重调，
+    // 不再按签名序存数组、更不用魔术下标翻 source。prompt 存**原始入参**（重证时重编译）。
+    const retrySnapshot: IllustrationSubmit = {
+      prompt: promptIn, motion, actors, messageId, slotId, sceneSpec, turnId, source,
       eventVideoMode, firstFrameDesc, lastFrameDesc, prevTailDesc, lastFrameUrl,
       videoPrompt, transition, transitionVideoPrompt, transitionVideoParams,
-    ];
+    };
     const failSlot = (stage: string, error: string) =>
       discardFailedIllustration(messageId, slotId, stage, error, "", retrySnapshot);
     const preset = settings.mediaInsert?.[repo?.id || ""];
@@ -1752,7 +1824,14 @@ export function useChatSession(deps: ChatSessionDeps) {
       const regeneration = workflowRegenerationSnapshot(
         wf.capturedGraph, settings.comfyuiUrl, outputNodeIds, wfPrompt,
         wfMeta.templateName, wfMeta.modelName, wfMeta.loraNames);
-      if (r.prompt_id) pollResult(r.prompt_id, outputNodeIds, regeneration, undefined, wfPrompt);
+      // R8（C4-A Step 6）：工作流出图的超时合同必须按抓取图的节点类名推导——
+      // 改前此处省略 mediaType ⇒ 默认 "image"，视频模板（VHS_VideoCombine 等）也吃图片的
+      // 20 分钟硬上限，长视频会在 still_running 前被提前判定超时。帧路径（:1398/:1404）保持
+      // "image" 不变：那里生成的确定是帧图。
+      if (r.prompt_id) pollResult(
+        r.prompt_id, outputNodeIds, regeneration, undefined, wfPrompt,
+        deriveWorkflowMediaType(wf.capturedGraph),
+      );
     } catch (e) {
       pushBot(`启动失败：${(e as Error).message}`);
     } finally {
@@ -1785,7 +1864,7 @@ export function useChatSession(deps: ChatSessionDeps) {
             p.target.messageId, p.target.slotId, "resume_expired",
             "后台出图任务已过期", p.prompt_id,
           );
-          workflowRuntime.cancel(p.prompt_id);
+          cancelForegroundRun(p.prompt_id);   // P22：统一入库路径（恢复期队列为空，出队为幂等空操作）
           continue;
         }
         await workflowRuntime.inspect(p, comfyuiUrl, workflowObserver);
@@ -1921,24 +2000,23 @@ export function useChatSession(deps: ChatSessionDeps) {
     if (event.type === "illustrate_request") {
       const slotId = event.id || crypto.randomUUID();
       applyStreamEvent(botId, { ...event, id: slotId });
-      const illustrationRetrySnapshot = [
-        event.prompt, event.motion, event.actors, botId, slotId, event.sceneSpec, event.turnId,
-        "automatic", event.videoMode, event.firstFrameDesc, event.lastFrameDesc,
-        event.prevTailDesc, event.lastFrameUrl, event.videoPrompt, event.transition,
-        event.transitionVideoPrompt, event.transitionVideoParams,
-      ];
-      void submitIllustration(
-        event.prompt, event.motion, event.actors, botId, slotId, event.sceneSpec, event.turnId,
-        "automatic", event.videoMode, event.firstFrameDesc, event.lastFrameDesc,
-        event.prevTailDesc, event.lastFrameUrl, event.videoPrompt, event.transition,
-        event.transitionVideoPrompt, event.transitionVideoParams,
-      ).catch((error) => {
+      const illustrationSubmit: IllustrationSubmit = {
+        prompt: event.prompt, motion: event.motion, actors: event.actors,
+        messageId: botId, slotId, sceneSpec: event.sceneSpec, turnId: event.turnId,
+        source: "automatic", eventVideoMode: event.videoMode,
+        firstFrameDesc: event.firstFrameDesc, lastFrameDesc: event.lastFrameDesc,
+        prevTailDesc: event.prevTailDesc, lastFrameUrl: event.lastFrameUrl,
+        videoPrompt: event.videoPrompt, transition: event.transition,
+        transitionVideoPrompt: event.transitionVideoPrompt,
+        transitionVideoParams: event.transitionVideoParams,
+      };
+      void submitIllustration(illustrationSubmit).catch((error) => {
         // 提交链上任何未被 failSlot 覆盖的异常都落到失败槽（可重新生成），
         // 不再让 pending 槽静默（2026-08-31 晚实锤：槽 pending 却无图、无报错）。
         discardFailedIllustration(
           botId, slotId, "submission",
           error instanceof Error ? error.message : "自动插画提交异常",
-          "", illustrationRetrySnapshot,
+          "", illustrationSubmit,
         );
       });
       return;
@@ -2214,7 +2292,9 @@ export function useChatSession(deps: ChatSessionDeps) {
     agentBusyRef.current = false;
     stopProgress();
     setSlowWatchPromptId(null);  // 清慢守望状态，停止键消失
-    if (pid) workflowRuntime.cancel(pid);
+    // P22：`cancel` 不派发终态 ⇒ 必须同时出队，否则残留 id 会让下一次前台任务
+    // 拿到 `first=false`、进度条不再订阅（见 `cancelForegroundRun`）。
+    if (pid) cancelForegroundRun(pid);
     refreshChatBackgroundActivities();
     await hardCancel(pid);
     if (sid) {
@@ -2230,7 +2310,8 @@ export function useChatSession(deps: ChatSessionDeps) {
     const part = msg?.parts?.find((p) => p.slotId === slotId);
     const promptId = part?.promptId || "";
     if (promptId) {
-      workflowRuntime.cancel(promptId);
+      // P22：同 `stopGenerating` —— 取消必须出队（该槽的 prompt 可能正是前台首任务）
+      cancelForegroundRun(promptId);
       try { await interruptComfy(settings.comfyuiUrl, promptId); } catch { /* 中断失败忽略，槽位照常标停 */ }
     }
     setMessages((current) => failMediaSlot(current, messageId, slotId, "已停止生成"));
@@ -2285,7 +2366,7 @@ export function useChatSession(deps: ChatSessionDeps) {
         const generations = await listGenerations(repo?.id || "home", embedModel);
         const prompt = legacyGenerationPrompt(part?.url || "", generations.items || []);
         if (!prompt) throw new Error("资产库中未找到这张旧图的原提示词");
-        await submitIllustration(prompt, 0, [], messageId, slotId!, undefined, "", "manual");
+        await submitIllustration({ prompt, motion: 0, actors: [], messageId, slotId: slotId!, source: "manual" });
         return;
       }
       if (snapshot.kind === "ai-image") {
@@ -2327,7 +2408,12 @@ export function useChatSession(deps: ChatSessionDeps) {
       const target = slotId
         ? { messageId, slotId, background: true as const }
         : undefined;
-      pollResult(submitted.prompt_id, snapshot.outputNodeIds, snapshot, target, snapshot.prompt);
+      // R8（C4-A Step 6）：重生成同样要按快照推导媒体种类。工作流快照（含视频模板正片）
+      // 能从 graph 判定；template / ai-image 快照结构里没有媒体种类字段，保持 image 现状。
+      pollResult(
+        submitted.prompt_id, snapshot.outputNodeIds, snapshot, target, snapshot.prompt,
+        snapshot.kind === "workflow" ? deriveWorkflowMediaType(snapshot.graph) : "image",
+      );
     } catch (error) {
       pushBot(`重新生图失败：${(error as Error).message}`);
     } finally {
@@ -2457,16 +2543,15 @@ export function useChatSession(deps: ChatSessionDeps) {
   const retryIllustration = (messageId: string, slotId: string) => {
     const message = messagesRef.current.find((m) => m.id === messageId);
     const part = message?.parts?.find((p) => p.slotId === slotId) as
-      | { retryArgs?: unknown[] }
+      | { retryArgs?: IllustrationSubmit }
       | undefined;
     const snapshot = part?.retryArgs;
-    if (!snapshot?.length) return;
-    const args = [...snapshot];
-    args[7] = "manual";
+    if (!snapshot) return;
     // 重试即时反馈：槽位先回 pending（重试要走帧编译+提交，秒级无反馈会被当成「点了没反应」）；
     // 再次失败时 failSlot 会带新错误与原快照，重新变回 failed+按钮。
     setMessages((current) => resetMediaSlotForRetry(current, messageId, slotId));
-    void submitIllustration(...(args as Parameters<typeof submitIllustration>));
+    // source 按名覆盖为 manual 跳过自动 claim——不再有 `args[7]` 这种位置耦合（审计 C7）。
+    void submitIllustration({ ...snapshot, source: "manual" });
   };
   return {
     messages, streamingId, wfRunning, uploadingWf, slowWatchPromptId, wfProgress, wfNode, queued, regeneratingIds,
@@ -2482,5 +2567,11 @@ export function useChatSession(deps: ChatSessionDeps) {
     editMessage, deleteMessage, regenerateMessage,
     checkpoints, createCheckpoint, restoreCheckpoint, deleteCheckpoint, messagesUpTo,
     mergeAudioTracks,
+    /** 对话侧的归档链（= `workflowObserver.finalize`），暴露给画布复用。
+     *  2026-09-15 C4-A 第 3 步：画布搬到 `runtime.start(observer)` 后必须**走同一条** finalize 链，
+     *  否则画布那条归档仍在 runtime 的判重域之外（`finalized`/`cancelled` 集合），
+     *  同一条 pending 会出现两条互不知情的归档路径（审计 R4）。
+     *  注意用 ref 持有：它每次渲染都是新函数，进画布投影 effect 的依赖会让整图重投影（R6）。 */
+    finalizeWorkflowRun: finalizeGeneration,
   };
 }
