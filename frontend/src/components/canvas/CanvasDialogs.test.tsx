@@ -2,11 +2,11 @@
 // @ts-expect-error The app intentionally does not ship Node typings; Vitest runs in Node.
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { act, type ReactElement } from "react";
+import { act, type ReactElement, type RefObject } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { Node } from "@xyflow/react";
 import {
-  DeletePendingDialog, EdgeInfoDialog, EditLabelDialog, GroupRenameDialog, NewInspirationDialog,
+  DeletePendingDialog, EdgeInfoDialog, EditLabelDialog, GroupRenameDialog, InspirationEditDialog, NewInspirationDialog,
   type CanvasEdgeInfo, type CanvasDeletePending, type CanvasNewInspiration,
 } from "./CanvasDialogs";
 import type { CardNodeData } from "./CanvasTypes";
@@ -406,7 +406,162 @@ describe("EdgeInfoDialog", () => {
   });
 });
 
+// ───────────────────────── ⑤½ InspirationEditDialog（T2.1-D2 随体迁入） ─────────────────────────
+describe("InspirationEditDialog", () => {
+  const render = (over: Partial<Record<string, unknown>> = {}) => {
+    const cards = (over.cards as { id: string; imageUrl?: string }[]) ?? [{ id: "c1", imageUrl: "img1.png" }];
+    const inspirationCardsRef = { current: cards } as unknown as RefObject<{ id: string; imageUrl?: string }[]>;
+    const setInspirationEditId = vi.fn();
+    const setInspirationEditTitle = vi.fn();
+    const setInspirationEditContent = vi.fn();
+    const replaceInspirationImage = vi.fn();
+    const removeInspirationImage = vi.fn();
+    const saveInspirationEdit = vi.fn();
+    const inspImageFileRef = { current: null } as RefObject<HTMLInputElement | null>;
+    return mount(
+      <InspirationEditDialog
+        inspirationEditId={(over.inspirationEditId as string) ?? "c1"}
+        inspirationCardsRef={inspirationCardsRef as never}
+        setInspirationEditId={setInspirationEditId}
+        inspirationEditTitle={(over.inspirationEditTitle as string) ?? "卡标题"}
+        setInspirationEditTitle={setInspirationEditTitle}
+        inspirationEditContent={(over.inspirationEditContent as string) ?? "卡内容"}
+        setInspirationEditContent={setInspirationEditContent}
+        inspImageFileRef={inspImageFileRef as never}
+        replaceInspirationImage={replaceInspirationImage}
+        removeInspirationImage={removeInspirationImage}
+        saveInspirationEdit={saveInspirationEdit}
+      />,
+    ).then(() => ({ setInspirationEditId, setInspirationEditTitle, setInspirationEditContent,
+      replaceInspirationImage, removeInspirationImage, saveInspirationEdit, inspImageFileRef }));
+  };
+
+  it("文案逐字：标题 + 两占位符 + 左列两按钮 + 底部取消/保存", async () => {
+    await render();
+    expect(container.querySelector("h3")?.textContent).toBe("编辑灵感卡");
+    expect(container.querySelector('input[placeholder^="标题"]')).toBeTruthy();
+    expect(container.querySelector('textarea[placeholder^="内容"]')).toBeTruthy();
+    expect(btn("替换图片")).toBeTruthy();
+    expect(btn("删除图片")).toBeTruthy();
+    expect(btn("取消")).toBeTruthy();
+    expect(btn("保存")).toBeTruthy();
+  });
+
+  it("editCard 取数：有图 → img src；alt = 标题兜底「灵感卡」", async () => {
+    await render();
+    const img = container.querySelector("img");
+    expect(img?.getAttribute("src")).toBe("img1.png");
+    expect(img?.getAttribute("alt")).toBe("卡标题");
+    await act(async () => { root.unmount(); });
+    container.remove();
+    await render({ inspirationEditTitle: "" });
+    expect(container.querySelector("img")?.getAttribute("alt")).toBe("灵感卡");
+  });
+
+  it("无图分支：「无图片（纯文本卡）」占位；「删除图片」disabled", async () => {
+    await render({ cards: [{ id: "c1" }] });
+    expect(container.textContent).toContain("无图片（纯文本卡）");
+    expect(container.querySelector("img")).toBeNull();
+    expect((btn("删除图片") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("卡不存在（id 不匹配）→ 同无图分支", async () => {
+    await render({ cards: [{ id: "other" }] });
+    expect(container.textContent).toContain("无图片（纯文本卡）");
+  });
+
+  it("「替换图片」→ ref 挂接的隐藏 file input 被原生 click 恰 1 次", async () => {
+    const { inspImageFileRef } = await render();
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
+    expect(fileInput).toBeTruthy();
+    expect(inspImageFileRef.current).toBe(fileInput); // React 对象 ref 挂载期赋值
+    const spy = vi.spyOn(fileInput, "click").mockImplementation(() => {});
+    await click(btn("替换图片"));
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it("「删除图片」→ removeInspirationImage 恰 1 次（有图时可点）", async () => {
+    const { removeInspirationImage } = await render();
+    await click(btn("删除图片"));
+    expect(removeInspirationImage).toHaveBeenCalledTimes(1);
+  });
+
+  it("输入 → setInspirationEditTitle / setInspirationEditContent 收到新值", async () => {
+    const { setInspirationEditTitle, setInspirationEditContent } = await render();
+    await typeInto(container.querySelector('input[placeholder^="标题"]'), "新标题X");
+    expect(setInspirationEditTitle).toHaveBeenCalledWith("新标题X");
+    await typeInto(container.querySelector("textarea"), "新内容Y");
+    expect(setInspirationEditContent).toHaveBeenCalledWith("新内容Y");
+  });
+
+  it("「保存」→ saveInspirationEdit 恰 1 次；「取消」/遮罩 → setInspirationEditId(null)；内层不冒泡", async () => {
+    const { saveInspirationEdit, setInspirationEditId } = await render();
+    await click(btn("保存"));
+    expect(saveInspirationEdit).toHaveBeenCalledTimes(1);
+    await click(modal());
+    expect(setInspirationEditId).not.toHaveBeenCalled();
+    await click(btn("取消"));
+    expect(setInspirationEditId).toHaveBeenCalledWith(null);
+    setInspirationEditId.mockClear();
+    await click(mask());
+    expect(setInspirationEditId).toHaveBeenCalledWith(null);
+  });
+});
+
 // ───────────────────────── ⑥ 逐字搬移锁 ─────────────────────────
+describe("逐字搬移锁（T2.1-D2 编辑灵感卡）", () => {
+  const MOVED: [string, number][] = [
+    ["const editCard = inspirationCardsRef.current.find((c) => c.id === inspirationEditId) || null;", 1],
+    ["const editImage = editCard?.imageUrl || \"\";", 1],
+    ["onClick={() => inspImageFileRef.current?.click()}", 1],
+    ["onClick={removeInspirationImage}", 1],
+    ["disabled={!editImage}", 1],
+    ["onClick={saveInspirationEdit}", 1],
+  ];
+
+  it("6 条渲染期取数/副作用语句在新属主按次数出现", () => {
+    const seam = stripComments(read(SEAM));
+    for (const [needle, n] of MOVED) {
+      expect([needle, count(seam, needle)]).toEqual([needle, n]);
+    }
+  });
+
+  it("同样的语句在视图缺席（确属搬移，而非复制）", () => {
+    const view = stripComments(read(VIEW));
+    for (const needle of [
+      "inspirationCardsRef.current.find((c) => c.id === inspirationEditId)",
+      "onClick={removeInspirationImage}",
+      "disabled={!editImage}",
+    ]) {
+      expect([needle, count(view, needle)]).toEqual([needle, 0]);
+    }
+  });
+});
+
+describe("源码形态锁（T2.1-D2 编辑灵感卡）", () => {
+  it("视图恰一次使用 + 调用块逐字（10 props 同名接线）", () => {
+    const view = read(VIEW);
+    const block = [
+      "      {inspirationEditId && (",
+      "        <InspirationEditDialog",
+      "          inspirationEditId={inspirationEditId}",
+      "          inspirationCardsRef={inspirationCardsRef}",
+      "          setInspirationEditId={setInspirationEditId}",
+      "          inspirationEditTitle={inspirationEditTitle}",
+      "          setInspirationEditTitle={setInspirationEditTitle}",
+      "          inspirationEditContent={inspirationEditContent}",
+      "          setInspirationEditContent={setInspirationEditContent}",
+      "          inspImageFileRef={inspImageFileRef}",
+      "          replaceInspirationImage={replaceInspirationImage}",
+      "          removeInspirationImage={removeInspirationImage}",
+      "          saveInspirationEdit={saveInspirationEdit}",
+      "        />",
+      "      )}",
+    ].join("\n");
+    expect(view.includes(block)).toBe(true);
+  });
+});
+
 describe("逐字搬移锁（T2.1-D1）", () => {
   const MOVED: [string, number][] = [
     ["deletePending.story > 0", 2],                 // message 分支 + onConfirm toast 分支
@@ -535,7 +690,7 @@ describe("源码形态锁（T2.1-D1）", () => {
   it("import 行逐字（5 个组件从新属主引入）", () => {
     const view = read(VIEW);
     expect(view.includes(
-      'import {\n  DeletePendingDialog, EdgeInfoDialog, EditLabelDialog, GroupRenameDialog, NewInspirationDialog,\n} from "../components/canvas/CanvasDialogs";',
+      'import {\n  DeletePendingDialog, EdgeInfoDialog, EditLabelDialog, GroupRenameDialog, InspirationEditDialog,\n  NewInspirationDialog,\n} from "../components/canvas/CanvasDialogs";',
     )).toBe(true);
   });
 
@@ -549,11 +704,11 @@ describe("源码形态锁（T2.1-D1）", () => {
     const seam = read(SEAM);
     for (const n of [
       "export function EditLabelDialog", "export function NewInspirationDialog", "export function GroupRenameDialog",
-      "export function DeletePendingDialog", "export function EdgeInfoDialog",
+      "export function DeletePendingDialog", "export function EdgeInfoDialog", "export function InspirationEditDialog",
       "export type CanvasEdgeInfo", "export type CanvasNewInspiration", "export type CanvasDeletePending",
     ]) {
       expect([n, count(seam, n)]).toEqual([n, 1]);
     }
-    expect(count(seam, "export function")).toBe(5);
+    expect(count(seam, "export function")).toBe(6);
   });
 });

@@ -15,10 +15,12 @@
 //   ④ `EdgeInfoDialog` 的 `promptOf` 取词顺序（`data.prompt` → `data.node.prompt` →
 //      「（无提示词）」）逐字保留。
 
-import type { Dispatch, SetStateAction } from "react";
+import type { Dispatch, RefObject, SetStateAction } from "react";
 import type { Node } from "@xyflow/react";
+import { Image as ImageIcon, Trash2, Upload } from "lucide-react";
 import { ConfirmModal } from "../Modal";
 import type { InspirationKind } from "../../lib/canvasRuntime";
+import type { InspirationCardStored } from "../../lib/canvasLayout";
 import type { CardNodeData } from "./CanvasTypes";
 
 /** 连线引用关系的数据面（结构同视图 `useState` 声明；可空态已由视图守卫收窄为非空）。 */
@@ -229,6 +231,126 @@ export function EdgeInfoDialog({ edgeInfo, setEdgeInfo, rfNodes }: EdgeInfoDialo
         )}
         <div className="modal-actions">
           <button className="btn primary" onClick={() => setEdgeInfo(null)}>知道了</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** 编辑灵感卡（视图守卫 `{inspirationEditId && ...}`；对标工作流模板节点弹窗尺寸 92vw/1200/86vh）。
+ *  `editCard`/`editImage` 两条渲染期取数语句随体迁入（与搬移前逐字一致）。 */
+export interface InspirationEditDialogProps {
+  inspirationEditId: string;
+  inspirationCardsRef: RefObject<InspirationCardStored[]>;
+  setInspirationEditId: Dispatch<SetStateAction<string | null>>;
+  inspirationEditTitle: string;
+  setInspirationEditTitle: Dispatch<SetStateAction<string>>;
+  inspirationEditContent: string;
+  setInspirationEditContent: Dispatch<SetStateAction<string>>;
+  inspImageFileRef: RefObject<HTMLInputElement | null>;
+  replaceInspirationImage: (file: File) => Promise<void>;
+  removeInspirationImage: () => void;
+  saveInspirationEdit: () => void;
+}
+export function InspirationEditDialog({ inspirationEditId, inspirationCardsRef, setInspirationEditId,
+  inspirationEditTitle, setInspirationEditTitle, inspirationEditContent, setInspirationEditContent,
+  inspImageFileRef, replaceInspirationImage, removeInspirationImage, saveInspirationEdit }: InspirationEditDialogProps) {
+  const editCard = inspirationCardsRef.current.find((c) => c.id === inspirationEditId) || null;
+  const editImage = editCard?.imageUrl || "";
+  return (
+    <div className="modal-mask" onClick={() => setInspirationEditId(null)}>
+      <div className="modal" style={{
+        width: "92vw", maxWidth: 1200, height: "86vh",
+        display: "flex", flexDirection: "column",
+      }} onClick={(e) => e.stopPropagation()}>
+        <h3 style={{ margin: "0 0 10px" }}>编辑灵感卡</h3>
+        <div style={{ flex: 1, minHeight: 0, display: "flex", gap: 16, overflow: "hidden" }}>
+          {/* 左：9:16 图片 + 左下角按钮 */}
+          <div style={{ flex: "0 0 auto", width: 300, display: "flex", flexDirection: "column", gap: 8, overflowY: "auto" }}>
+            <div style={{
+              width: "100%", aspectRatio: "9/16", borderRadius: 10, overflow: "hidden", flexShrink: 0,
+              background: "rgba(255,255,255,0.03)", border: "1px solid var(--border, #333)",
+              display: "flex", alignItems: "center", justifyContent: "center",
+            }}>
+              {editImage ? (
+                <img src={editImage} alt={inspirationEditTitle || "灵感卡"} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+              ) : (
+                <div style={{ fontSize: 12, color: "var(--text-muted)", textAlign: "center", padding: 8, display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
+                  <ImageIcon size={22} />
+                  <span>无图片（纯文本卡）</span>
+                  <span style={{ fontSize: 11, opacity: 0.7 }}>9:16 框架</span>
+                </div>
+              )}
+            </div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "nowrap", flexShrink: 0 }}>
+              <button
+                className="btn"
+                style={{ flex: 1, minWidth: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 4, whiteSpace: "nowrap", padding: "6px 8px" }}
+                onClick={() => inspImageFileRef.current?.click()}
+              >
+                <Upload size={13} />替换图片
+              </button>
+              <button
+                className="btn danger"
+                style={{ flex: 1, minWidth: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 4, whiteSpace: "nowrap", padding: "6px 8px" }}
+                onClick={removeInspirationImage}
+                disabled={!editImage}
+              >
+                <Trash2 size={13} />删除图片
+              </button>
+            </div>
+            <input
+              ref={inspImageFileRef} type="file" accept="image/*" style={{ display: "none" }}
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) void replaceInspirationImage(f);
+                e.target.value = "";
+              }}
+            />
+          </div>
+          {/* 右：标题 + 内容 */}
+          <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 8 }}>
+            <input
+              value={inspirationEditTitle}
+              onChange={(e) => setInspirationEditTitle(e.target.value)}
+              autoFocus
+              placeholder="标题（显示在卡片头部）"
+              style={{
+                width: "100%", padding: 8, borderRadius: 6, boxSizing: "border-box",
+                border: "1px solid var(--border, #333)",
+                background: "var(--input-bg, rgba(0,0,0,0.2))", color: "var(--text)",
+                fontSize: 13, fontFamily: "inherit",
+              }}
+            />
+            <textarea
+              value={inspirationEditContent}
+              onChange={(e) => setInspirationEditContent(e.target.value)}
+              placeholder="内容（右键卡片 → 插入对话：把灵感卡插到输入框图片栏，发送时图文拆分）"
+              style={{
+                flex: 1, minHeight: 0, resize: "none", width: "100%", padding: 8, borderRadius: 6, boxSizing: "border-box",
+                border: "1px solid var(--border, #333)",
+                background: "var(--input-bg, rgba(0,0,0,0.2))", color: "var(--text)",
+                fontSize: 13, fontFamily: "inherit", lineHeight: 1.5,
+              }}
+            />
+          </div>
+        </div>
+        {/* 底部通栏：取消/保存（恒同一行，不被左侧列挤压） */}
+        <div className="modal-actions" style={{ marginTop: 12 }}>
+          <button
+            className="btn"
+            style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 4, whiteSpace: "nowrap", padding: "6px 12px" }}
+            onClick={() => setInspirationEditId(null)}
+          >
+            取消
+          </button>
+          <button
+            className="btn primary"
+            style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 4, whiteSpace: "nowrap", padding: "6px 12px" }}
+            onClick={saveInspirationEdit}
+          >
+            保存
+          </button>
         </div>
       </div>
     </div>

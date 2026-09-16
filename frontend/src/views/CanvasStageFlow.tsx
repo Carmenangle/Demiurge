@@ -19,7 +19,7 @@ import {
   type OnConnect, type NodeChange, type NodeMouseHandler,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { Edit3, FolderPlus, GitBranch, Image as ImageIcon, ListOrdered, MessageSquarePlus, Send, Sparkles, Trash2, Upload, X } from "lucide-react";
+import { GitBranch, ListOrdered, Sparkles } from "lucide-react";
 import { fetchHistory, listGenerations, listReferenceImages, proxyImageUrl, type Generation, type ReferenceImage } from "../api/ai";
 import { resolvedEmbedModel, useSettings } from "../stores/settings";
 import { effectiveGlobalProxyUrl } from "../lib/modelProxy";
@@ -49,7 +49,6 @@ import { WorkflowToolModal } from "../components/WorkflowToolModal";
 import { listCharacters, characterDetail, characterRepoDetail } from "../api/characters";
 import { listWorldbookEntries, repoWorldbookEntries, type RepoWorldbookLoc } from "../api/worldbook";
 import { WorldBookPopup } from "../components/WorldBookPopup";
-import { AudioPlayer } from "../components/AudioPlayer";
 import { PresetModal } from "../components/PresetModal";
 import { CanvasCharacterModal } from "../components/CanvasCharacterModal";
 import { presetDetail } from "../api/preset";
@@ -68,15 +67,17 @@ import { ToastLayer } from "../components/canvas/ToastLayer";
 import { CenterCanvasButton } from "../components/canvas/CenterCanvasButton";
 import { IMAGE_EXTENSIONS } from "../components/canvas/CanvasTypes";
 import {
-  DeletePendingDialog, EdgeInfoDialog, EditLabelDialog, GroupRenameDialog, NewInspirationDialog,
+  DeletePendingDialog, EdgeInfoDialog, EditLabelDialog, GroupRenameDialog, InspirationEditDialog,
+  NewInspirationDialog,
 } from "../components/canvas/CanvasDialogs";
+import { CanvasContextMenu } from "../components/canvas/CanvasContextMenu";
+import { CanvasDetailPanel } from "../components/canvas/CanvasDetailPanel";
 import { saveWebMaterial } from "../api/ai";
 import { createUndoStack, pushSnapshot, undo, redo, handleCanvasKeyDown } from "../lib/canvasKeyboard";
 import type { GenResult } from "../api/comfyui";
 import { globalPendingToolCreates, canvasBridge } from "../components/canvas/shared";
 import { threadKey, type PendingGeneration } from "../lib/workflowGenerationRuntime";
-import { runScripts, Placement, type RegexScript } from "../lib/regexEngine";
-import { renderMarkdown } from "../lib/renderMarkdown";
+import { Placement, type RegexScript } from "../lib/regexEngine";
 
 const nodeTypes = canvasNodeTypes;
 
@@ -1898,212 +1899,34 @@ export function CanvasStageFlow({
 
       {/* 右键功能栏（卡片右键：编辑介绍/删除；多选右键：建组/一起删除） */}
       {ctxMenu && (
-        <div
-          ref={ctxMenuRef}
-          style={{
-            position: "absolute", left: ctxMenu.x, top: ctxMenu.y, zIndex: 40,
-            background: "var(--surface, #1e2126)", border: "1px solid var(--border, #333)",
-            borderRadius: 8, boxShadow: "0 8px 24px rgba(0,0,0,0.45)",
-            padding: 4, minWidth: 172,
-          }}
-          onClick={(e) => { e.stopPropagation(); setCtxMenu(null); }}
-          onContextMenu={(e) => e.preventDefault()}
-        >
-          {ctxMenu.nodeIds.length === 0 ? (
-            <>
-              <div
-                className="ctx-item"
-                onClick={() => {
-                  setRfNodes((ns) => ns.map((n) => (n.selected ? { ...n, selected: false } : n)));
-                }}
-              >
-                <X size={13} style={{ verticalAlign: "-2px", marginRight: 6 }} />
-                全部取消选择
-              </div>
-              <div className="ctx-item" onClick={() => createGroup(rfNodesRef.current.filter((n) => n.selected).map((n) => n.id))}>
-                <FolderPlus size={13} style={{ verticalAlign: "-2px", marginRight: 6 }} />
-                选中节点建立组
-              </div>
-              <div className="ctx-sep" />
-              <div
-                className="ctx-item"
-                onClick={() => setNewInspiration({ kind: "preset", title: "", content: "" })}
-              >
-                <MessageSquarePlus size={13} style={{ verticalAlign: "-2px", marginRight: 6 }} />
-                新建灵感卡
-              </div>
-              <div className="ctx-item" onClick={() => void importInspirationFromLibrary(false)}>
-                <Sparkles size={13} style={{ verticalAlign: "-2px", marginRight: 6 }} />
-                {importBusy ? "导入中…" : "从素材库导入灵感卡"}
-              </div>
-            </>
-          ) : ctxMenu.nodeIds.length === 1 ? (
-            (() => {
-              const n = rfNodesRef.current.find((x) => x.id === ctxMenu.nodeIds[0]);
-              if (n?.data.node.type === "inspiration-card") {
-                return (
-                  <>
-                    <div className="ctx-item" onClick={() => {
-                      const c = inspirationCardsRef.current.find((x) => x.id === ctxMenu.nodeIds[0]);
-                      if (c) void insertInspirationToChat(c);
-                      setCtxMenu(null);
-                    }}>
-                      <Send size={13} style={{ verticalAlign: "-2px", marginRight: 6 }} />
-                      插入到对话
-                    </div>
-                    <div className="ctx-item" onClick={() => {
-                      const c = inspirationCardsRef.current.find((x) => x.id === ctxMenu.nodeIds[0]);
-                      if (c) { try { void navigator.clipboard.writeText(c.content); showToast("内容已复制", "success"); } catch { showToast("复制失败", "error"); } }
-                      setCtxMenu(null);
-                    }}>
-                      <Edit3 size={13} style={{ verticalAlign: "-2px", marginRight: 6 }} />
-                      复制文本
-                    </div>
-                    <div className="ctx-item" onClick={() => {
-                      const c = inspirationCardsRef.current.find((x) => x.id === ctxMenu.nodeIds[0]);
-                      if (c) {
-                        setInspirationEditId(c.id);
-                        setInspirationEditKind(c.kind);
-                        setInspirationEditTitle(c.title);
-                        setInspirationEditContent(c.content);
-                      }
-                      setCtxMenu(null);
-                    }}>
-                      <Edit3 size={13} style={{ verticalAlign: "-2px", marginRight: 6 }} />
-                      编辑标题/内容
-                    </div>
-                    <div className="ctx-item danger" onClick={() => removeInspiration(ctxMenu.nodeIds[0])}>
-                      <Trash2 size={13} style={{ verticalAlign: "-2px", marginRight: 6 }} />
-                      删除灵感卡
-                    </div>
-                  </>
-                );
-              }
-              if (n?.data.node.type === "reference-image") {
-                return (
-                  <>
-                    <div className="ctx-item" onClick={() => {
-                      const ref = referenceImagesRef.current.find((x) => x.id === ctxMenu.nodeIds[0]);
-                      if (ref) {
-                        setInspirationEditId(ref.id);
-                        setInspirationEditKind("preset");
-                        setInspirationEditTitle(ref.title);
-                      }
-                      setCtxMenu(null);
-                    }}>
-                      <Edit3 size={13} style={{ verticalAlign: "-2px", marginRight: 6 }} />
-                      编辑标题
-                    </div>
-                    <div className="ctx-item danger" onClick={() => {
-                      const next = referenceImagesRef.current.filter((c) => c.id !== ctxMenu.nodeIds[0]);
-                      setReferenceImages(next);
-                      referenceImagesRef.current = next;
-                      persistNow({ refs: next });
-                      setCtxMenu(null);
-                    }}>
-                      <Trash2 size={13} style={{ verticalAlign: "-2px", marginRight: 6 }} />
-                      删除参考图
-                    </div>
-                  </>
-                );
-              }
-              if (n?.data.node.type === "group") {
-                return (
-                  <>
-                    <div className="ctx-item" onClick={() => {
-                      const lyt = layoutNodesRef.current[n.id];
-                      setGroupRenameId(n.id);
-                      setGroupRenameTitle(lyt?.label || "组");
-                      setCtxMenu(null);
-                    }}>
-                      <Edit3 size={13} style={{ verticalAlign: "-2px", marginRight: 6 }} />
-                      编辑组名
-                    </div>
-                    <div className="ctx-item" onClick={() => {
-                        setCtxMenu(null);
-                        // 删除组但保留子节点：父组链断开，子节点坐标转绝对
-                        const groupId = ctxMenu.nodeIds[0];
-                        const childIds = rfNodesRef.current
-                          .filter((n) => n.parentId === groupId)
-                          .map((n) => n.id);
-                        setRfNodes((ns) => ns.map((n) => {
-                          if (n.id === groupId) return n;
-                          if (childIds.includes(n.id)) {
-                            const parent = ns.find((pn) => pn.id === groupId);
-                            const px = parent?.position?.x ?? 0;
-                            const py = parent?.position?.y ?? 0;
-                            return { ...n, parentId: undefined, position: { x: n.position.x + px, y: n.position.y + py } };
-                          }
-                          return n;
-                        }));
-                        // 也从 layoutNodes 移除组容器，且子节点同步 parentId 置空 + 坐标转绝对
-                        // （否则刷新后投影按 layoutNodes 恢复会把子节点挂回已删的组 → 崩坏）
-                        setLayoutNodes((prev) => {
-                          const next = { ...prev };
-                          const group = prev[groupId];
-                          delete next[groupId];
-                          if (group) {
-                            for (const [id, lyt] of Object.entries(prev)) {
-                              if (lyt.parentId === groupId) {
-                                next[id] = {
-                                  ...lyt,
-                                  x: lyt.x + group.x,
-                                  y: lyt.y + group.y,
-                                  parentId: undefined,
-                                };
-                              }
-                            }
-                          }
-                          // ★ persist 必须在 updater 内拿 next：外层同步读 layoutNodesRef 是旧值
-                          //   （ref 仅在渲染时更新）→ 会把删除前的布局存回去，刷新后组复活。
-                          //   StrictMode 下 updater 双跑 → persist 幂等重复无害。
-                          persistNow({ nodes: next });
-                          return next;
-                        });
-                      }}>
-                        <Trash2 size={13} style={{ verticalAlign: "-2px", marginRight: 6 }} />
-                        删除组（保留内容）
-                      </div>
-                      <div className="ctx-item danger" onClick={() => { requestDelete(ctxMenu.nodeIds); }}>
-                        <Trash2 size={13} style={{ verticalAlign: "-2px", marginRight: 6 }} />
-                        删除组（连带子节点）
-                      </div>
-                  </>
-                );
-              }
-              return (
-                <>
-                  <div
-                    className="ctx-item"
-                    onClick={() => {
-                      if (n && n.data.node.type !== "group") {
-                        openEditLabel(n.id, n.data.customLabel || n.data.prompt || "");
-                      }
-                    }}
-                  >
-                    <Edit3 size={13} style={{ verticalAlign: "-2px", marginRight: 6 }} />
-                    编辑介绍文字
-                  </div>
-                  <div className="ctx-item danger" onClick={() => { requestDelete(ctxMenu.nodeIds); }}>
-                    <Trash2 size={13} style={{ verticalAlign: "-2px", marginRight: 6 }} />
-                    删除节点
-                  </div>
-                </>
-              );
-            })()
-          ) : (
-            <>
-              <div className="ctx-item" onClick={() => createGroup(ctxMenu.nodeIds)}>
-                <FolderPlus size={13} style={{ verticalAlign: "-2px", marginRight: 6 }} />
-                建立组（{ctxMenu.nodeIds.length} 个节点）
-              </div>
-              <div className="ctx-item danger" onClick={() => { requestDelete(ctxMenu.nodeIds); }}>
-                <Trash2 size={13} style={{ verticalAlign: "-2px", marginRight: 6 }} />
-                一起删除（{ctxMenu.nodeIds.length}）
-              </div>
-            </>
-          )}
-        </div>
+        <CanvasContextMenu
+          ctxMenu={ctxMenu}
+          ctxMenuRef={ctxMenuRef}
+          setCtxMenu={setCtxMenu}
+          setRfNodes={setRfNodes}
+          rfNodesRef={rfNodesRef}
+          createGroup={createGroup}
+          setNewInspiration={setNewInspiration}
+          importInspirationFromLibrary={importInspirationFromLibrary}
+          importBusy={importBusy}
+          inspirationCardsRef={inspirationCardsRef}
+          insertInspirationToChat={insertInspirationToChat}
+          showToast={showToast}
+          setInspirationEditId={setInspirationEditId}
+          setInspirationEditKind={setInspirationEditKind}
+          setInspirationEditTitle={setInspirationEditTitle}
+          setInspirationEditContent={setInspirationEditContent}
+          removeInspiration={removeInspiration}
+          referenceImagesRef={referenceImagesRef}
+          setReferenceImages={setReferenceImages}
+          persistNow={persistNow}
+          layoutNodesRef={layoutNodesRef}
+          setGroupRenameId={setGroupRenameId}
+          setGroupRenameTitle={setGroupRenameTitle}
+          setLayoutNodes={setLayoutNodes}
+          requestDelete={requestDelete}
+          openEditLabel={openEditLabel}
+        />
       )}
 
       {/* 编辑卡片介绍文字 */}
@@ -2119,108 +1942,21 @@ export function CanvasStageFlow({
       {/* 编辑灵感卡（对标工作流模板节点弹窗尺寸：92vw/1200/86vh）
           左：9:16 图片区（无图也保留 9:16 框架）+ 左下角替换/删除图片
           右：标题 + 内容；底部通栏：取消/保存（恒同一行） */}
-      {inspirationEditId && (() => {
-        const editCard = inspirationCardsRef.current.find((c) => c.id === inspirationEditId) || null;
-        const editImage = editCard?.imageUrl || "";
-        return (
-          <div className="modal-mask" onClick={() => setInspirationEditId(null)}>
-            <div className="modal" style={{
-              width: "92vw", maxWidth: 1200, height: "86vh",
-              display: "flex", flexDirection: "column",
-            }} onClick={(e) => e.stopPropagation()}>
-              <h3 style={{ margin: "0 0 10px" }}>编辑灵感卡</h3>
-              <div style={{ flex: 1, minHeight: 0, display: "flex", gap: 16, overflow: "hidden" }}>
-                {/* 左：9:16 图片 + 左下角按钮 */}
-                <div style={{ flex: "0 0 auto", width: 300, display: "flex", flexDirection: "column", gap: 8, overflowY: "auto" }}>
-                  <div style={{
-                    width: "100%", aspectRatio: "9/16", borderRadius: 10, overflow: "hidden", flexShrink: 0,
-                    background: "rgba(255,255,255,0.03)", border: "1px solid var(--border, #333)",
-                    display: "flex", alignItems: "center", justifyContent: "center",
-                  }}>
-                    {editImage ? (
-                      <img src={editImage} alt={inspirationEditTitle || "灵感卡"} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
-                    ) : (
-                      <div style={{ fontSize: 12, color: "var(--text-muted)", textAlign: "center", padding: 8, display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
-                        <ImageIcon size={22} />
-                        <span>无图片（纯文本卡）</span>
-                        <span style={{ fontSize: 11, opacity: 0.7 }}>9:16 框架</span>
-                      </div>
-                    )}
-                  </div>
-                  <div style={{ display: "flex", gap: 6, flexWrap: "nowrap", flexShrink: 0 }}>
-                    <button
-                      className="btn"
-                      style={{ flex: 1, minWidth: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 4, whiteSpace: "nowrap", padding: "6px 8px" }}
-                      onClick={() => inspImageFileRef.current?.click()}
-                    >
-                      <Upload size={13} />替换图片
-                    </button>
-                    <button
-                      className="btn danger"
-                      style={{ flex: 1, minWidth: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 4, whiteSpace: "nowrap", padding: "6px 8px" }}
-                      onClick={removeInspirationImage}
-                      disabled={!editImage}
-                    >
-                      <Trash2 size={13} />删除图片
-                    </button>
-                  </div>
-                  <input
-                    ref={inspImageFileRef} type="file" accept="image/*" style={{ display: "none" }}
-                    onChange={(e) => {
-                      const f = e.target.files?.[0];
-                      if (f) void replaceInspirationImage(f);
-                      e.target.value = "";
-                    }}
-                  />
-                </div>
-                {/* 右：标题 + 内容 */}
-                <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 8 }}>
-                  <input
-                    value={inspirationEditTitle}
-                    onChange={(e) => setInspirationEditTitle(e.target.value)}
-                    autoFocus
-                    placeholder="标题（显示在卡片头部）"
-                    style={{
-                      width: "100%", padding: 8, borderRadius: 6, boxSizing: "border-box",
-                      border: "1px solid var(--border, #333)",
-                      background: "var(--input-bg, rgba(0,0,0,0.2))", color: "var(--text)",
-                      fontSize: 13, fontFamily: "inherit",
-                    }}
-                  />
-                  <textarea
-                    value={inspirationEditContent}
-                    onChange={(e) => setInspirationEditContent(e.target.value)}
-                    placeholder="内容（右键卡片 → 插入对话：把灵感卡插到输入框图片栏，发送时图文拆分）"
-                    style={{
-                      flex: 1, minHeight: 0, resize: "none", width: "100%", padding: 8, borderRadius: 6, boxSizing: "border-box",
-                      border: "1px solid var(--border, #333)",
-                      background: "var(--input-bg, rgba(0,0,0,0.2))", color: "var(--text)",
-                      fontSize: 13, fontFamily: "inherit", lineHeight: 1.5,
-                    }}
-                  />
-                </div>
-              </div>
-              {/* 底部通栏：取消/保存（恒同一行，不被左侧列挤压） */}
-              <div className="modal-actions" style={{ marginTop: 12 }}>
-                <button
-                  className="btn"
-                  style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 4, whiteSpace: "nowrap", padding: "6px 12px" }}
-                  onClick={() => setInspirationEditId(null)}
-                >
-                  取消
-                </button>
-                <button
-                  className="btn primary"
-                  style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 4, whiteSpace: "nowrap", padding: "6px 12px" }}
-                  onClick={saveInspirationEdit}
-                >
-                  保存
-                </button>
-              </div>
-            </div>
-          </div>
-        );
-      })()}
+      {inspirationEditId && (
+        <InspirationEditDialog
+          inspirationEditId={inspirationEditId}
+          inspirationCardsRef={inspirationCardsRef}
+          setInspirationEditId={setInspirationEditId}
+          inspirationEditTitle={inspirationEditTitle}
+          setInspirationEditTitle={setInspirationEditTitle}
+          inspirationEditContent={inspirationEditContent}
+          setInspirationEditContent={setInspirationEditContent}
+          inspImageFileRef={inspImageFileRef}
+          replaceInspirationImage={replaceInspirationImage}
+          removeInspirationImage={removeInspirationImage}
+          saveInspirationEdit={saveInspirationEdit}
+        />
+      )}
 
       {/* 新建灵感卡（右键空白 → 新建灵感卡；类型固定 preset，早期角色卡/世界书/预设/表格选择已废弃） */}
       {newInspiration && (
@@ -2263,209 +1999,18 @@ export function CanvasStageFlow({
 
       {/* 详情面板（双击节点） */}
       {detail && detailNode && (
-        <div className="modal-mask" onClick={() => setDetailNode(null)}>
-          <div className="modal" style={{
-            width: detailNode.type === "story" ? "92vw" : 760,
-            maxWidth: detailNode.type === "story" ? 1200 : undefined,
-            height: detailNode.type === "story" ? "86vh" : undefined,
-            maxHeight: "88vh",
-            display: "flex", flexDirection: "column",
-          }} onClick={(e) => e.stopPropagation()}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-              <h3 style={{ margin: 0 }}>{detail.title}</h3>
-              <button className="icon-btn" style={{ background: "transparent", color: "var(--text)" }} onClick={() => setDetailNode(null)}>
-                <X size={18} />
-              </button>
-            </div>
-            {detailNode.type === "story" ? (
-              <div style={{ flex: 1, minHeight: 0, display: "flex", gap: 16, overflow: "hidden" }}>
-                {/* 左侧：媒体（视频 > 图片；无则空置提示，不占位） */}
-                <div style={{ flex: "0 0 40%", minWidth: 260, maxWidth: 540, display: "flex", flexDirection: "column", gap: 8, overflowY: "auto" }}>
-                  {detailNode.storyVideo && (
-                    <video src={detailNode.storyVideo} controls style={{ width: "100%", borderRadius: 10, background: "#000" }} />
-                  )}
-                  {detailNode.storyImage && (
-                    <img src={detailNode.storyImage} alt="剧情封面" style={{ width: "100%", borderRadius: 10, objectFit: "contain", background: "rgba(255,255,255,0.03)" }} />
-                  )}
-                  {(detailNode.storyAudioLines?.length ? detailNode.storyAudioLines : (detailNode.storyAudio ? [{ speaker: "", url: detailNode.storyAudio }] : [])).map((line, i) => (
-                    <div className="audio-bubble" key={`${line.url}-${i}`}>
-                      {line.speaker && <div className="audio-speaker-label">{line.speaker}</div>}
-                      <AudioPlayer src={line.url} />
-                    </div>
-                  ))}
-                  {!detailNode.storyVideo && !detailNode.storyImage && !detailNode.storyAudioLines?.length && !detailNode.storyAudio && (
-                    <div style={{ width: "100%", aspectRatio: "9/16", borderRadius: 10, background: "rgba(255,255,255,0.03)", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: 13, textAlign: "center", padding: 12 }}>
-                      本楼层无配图 / 视频 / 音频
-                    </div>
-                  )}
-                </div>
-                {/* 右侧：对话正文（think/status/roll 与对话模式同管线） */}
-                <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 8, overflowY: "auto", paddingRight: 4 }}>
-                  {detailNode.storyThinking ? (
-                    <div className="thinking">
-                      <button className="thinking-head" onClick={() => setShowStoryThinking((s) => !s)}>
-                        {showStoryThinking ? "收起思考" : "查看思考"}
-                      </button>
-                      {showStoryThinking && <div className="thinking-body">{detailNode.storyThinking}</div>}
-                    </div>
-                  ) : null}
-                  <div className="bot-text bot-html" ref={detailHtmlRef} style={{ fontSize: 14, lineHeight: 1.7, color: "var(--text)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}
-                    dangerouslySetInnerHTML={{ __html: renderMarkdown(
-                      (displayRegex && displayRegex.length > 0 && detailNode.storyText)
-                        ? runScripts(detailNode.storyText, Placement.AI_OUTPUT, displayRegex, { isMarkdown: true, depth: 0 })
-                        : (detailNode.storyText || "（空楼层）"),
-                    ) }} />
-                </div>
-              </div>
-            ) : (
-            <div style={{ overflowY: "auto", display: "flex", gap: 16, flexWrap: "wrap" }}>
-              {/* 左侧：主预览（图/视频/音频/输入按类型） */}
-              <div style={{ flex: "1 1 300px", minWidth: 240 }}>
-                {detailNode.type === "video" ? (
-                  <video src={(detail.gens[0] as { video_url?: string } | undefined)?.video_url || ""} controls
-                    style={{ width: "100%", borderRadius: 10, background: "#000" }} />
-                ) : detailNode.type === "audio" ? (
-                  <div style={{ width: "100%", aspectRatio: "16/9", borderRadius: 10, background: "rgba(255,255,255,0.03)",
-                    display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
-                    <span style={{ fontSize: 24 }}>🎵</span>
-                    <span style={{ fontSize: 13, color: "var(--text-muted)" }}>音频节点（波形预览未接入）</span>
-                  </div>
-                ) : detailNode.type === "input" ? (
-                  <div style={{ width: "100%", aspectRatio: "9/16", borderRadius: 10, background: "rgba(59,130,246,0.08)",
-                    border: "1px dashed var(--primary, #3b82f6)", display: "flex", alignItems: "center", justifyContent: "center",
-                    fontSize: 13, color: "var(--primary, #3b82f6)" }}>
-                    {detailNode.inputStatus === "draft" ? "输入节点（双击卡片输入提示词）" : "输入节点（生成中…）"}
-                  </div>
-                ) : detailNode.type === "reference-image" ? (
-                  detail.imageUrls.length > 0 ? (
-                    <img src={detail.imageUrls[0]} alt={detailNode.referenceImageTitle || "参考图"}
-                      style={{ width: "100%", borderRadius: 10, background: "rgba(255,255,255,0.03)", objectFit: "contain" }} />
-                  ) : (
-                    <div style={{ width: "100%", aspectRatio: "1/1", borderRadius: 10, background: "rgba(255,255,255,0.03)",
-                      display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, color: "var(--text-muted)" }}>
-                      🖼️ 参考图加载中…
-                    </div>
-                  )
-                ) : detail.imageUrls[0] ? (
-                  <>
-                    <img src={detail.imageUrls[0]} alt="大图" style={{ width: "100%", borderRadius: 10 }} />
-                    {(() => {
-                      const s = naturalSizesRef.current[detail.imageUrls[0]];
-                      return s ? (
-                        <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 6, textAlign: "center" }}>
-                          原图尺寸 {s.w} × {s.h}
-                        </div>
-                      ) : null;
-                    })()}
-                  </>
-                ) : null}
-              </div>
-              {/* 右侧：元数据 */}
-              <div style={{ flex: "1 1 260px", minWidth: 220 }}>
-                <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 4 }}>提示词</div>
-                <div style={{ fontSize: 13, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: 240, overflowY: "auto" }}>
-                  {detail.prompt || "（无提示词记录）"}
-                </div>
-                {(() => {
-                  const first = detail.gens[0] as (GenLike & { description?: string }) | undefined;
-                  if (!first) return null;
-                  const tags = (Array.isArray(first.tags) ? first.tags : []).filter(Boolean);
-                  const time = first.created_at ? new Date(first.created_at).toLocaleString() : "";
-                  const templateName = first.templateName || "";
-                  const modelName = first.modelName || "";
-                  // loraNames 后端存为逗号分隔字符串，拆成数组展示
-                  const loraNames: string[] = Array.isArray(first.loraNames) ? first.loraNames : [];
-                  return (
-                    <>
-                      {tags.length > 0 && (
-                        <>
-                          <div style={{ fontSize: 12, color: "var(--text-muted)", margin: "12px 0 4px" }}>标签</div>
-                          <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-                            {tags.slice(0, 24).map((t) => (
-                              <span key={t} style={{ fontSize: 11, padding: "2px 6px", borderRadius: 4, background: "rgba(59,130,246,0.12)", color: "var(--text)" }}>{t}</span>
-                            ))}
-                          </div>
-                        </>
-                      )}
-                      {templateName ? (
-                        <>
-                          <div style={{ fontSize: 12, color: "var(--text-muted)", margin: "12px 0 4px" }}>模板</div>
-                          <div style={{ fontSize: 13, color: "var(--text)" }}>{templateName}</div>
-                        </>
-                      ) : null}
-                      {modelName ? (
-                        <>
-                          <div style={{ fontSize: 12, color: "var(--text-muted)", margin: "12px 0 4px" }}>模型</div>
-                          <div style={{ fontSize: 12, color: "var(--text)", fontFamily: "monospace" }}>{modelName}</div>
-                        </>
-                      ) : null}
-                      {(detailNode.type === "video" || detailNode.type === "audio") && (
-                        <>
-                          {first.resolution ? (
-                            <>
-                              <div style={{ fontSize: 12, color: "var(--text-muted)", margin: "12px 0 4px" }}>清晰度</div>
-                              <div style={{ fontSize: 13, color: "var(--text)" }}>{first.resolution}</div>
-                            </>
-                          ) : null}
-                          {first.duration ? (
-                            <>
-                              <div style={{ fontSize: 12, color: "var(--text-muted)", margin: "12px 0 4px" }}>时长</div>
-                              <div style={{ fontSize: 13, color: "var(--text)" }}>{first.duration}</div>
-                            </>
-                          ) : null}
-                          {first.emotionVectors ? (
-                            <>
-                              <div style={{ fontSize: 12, color: "var(--text-muted)", margin: "12px 0 4px" }}>情感向量</div>
-                              <div style={{ fontSize: 13, color: "var(--text)" }}>{first.emotionVectors}</div>
-                            </>
-                          ) : null}
-                          {first.referenceContent ? (
-                            <>
-                              <div style={{ fontSize: 12, color: "var(--text-muted)", margin: "12px 0 4px" }}>参考内容</div>
-                              <div style={{ fontSize: 12, lineHeight: 1.5, color: "var(--text)" }}>{first.referenceContent}</div>
-                            </>
-                          ) : null}
-                        </>
-                      )}
-                      {loraNames.length > 0 ? (
-                        <>
-                          <div style={{ fontSize: 12, color: "var(--text-muted)", margin: "12px 0 4px" }}>LoRA</div>
-                          <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-                            {loraNames.map((name: string) => (
-                              <span key={name} style={{ fontSize: 11, padding: "2px 6px", borderRadius: 4, background: "rgba(168,85,247,0.14)", color: "var(--text)" }}>{name}</span>
-                            ))}
-                          </div>
-                        </>
-                      ) : null}
-                      {first.description ? (
-                        <>
-                          <div style={{ fontSize: 12, color: "var(--text-muted)", margin: "12px 0 4px" }}>描述</div>
-                          <div style={{ fontSize: 12, lineHeight: 1.5, color: "var(--text-muted)" }}>{first.description}</div>
-                        </>
-                      ) : null}
-                      {time && (
-                        <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 12 }}>生成时间：{time}</div>
-                      )}
-                    </>
-                  );
-                })()}
-                {/* 每条生成独立节点（8-21 拍板）→ 无变体聚合，详情面板不再展示「全部变体」 */}
-                <div style={{ marginTop: 14, display: "flex", gap: 8, flexWrap: "wrap" }}>
-                  <button className="btn" onClick={() => openSend("发送至对话框", { text: "", images: detail.imageUrls.slice(0, 1) })}>
-                    <Send size={13} style={{ verticalAlign: "-2px", marginRight: 4 }} />发送至对话框
-                  </button>
-                  <button className="btn" onClick={() => openSend("发送至对话", { text: `提示词：${detail.prompt || ""}`, images: detail.imageUrls.slice(0, 1), prompt: detail.prompt || "" })}>
-                    <Send size={13} style={{ verticalAlign: "-2px", marginRight: 4 }} />发送至对话
-                  </button>
-                  <button className="btn danger" onClick={() => { requestDelete([detailNode.id]); setDetailNode(null); }}>
-                    <Trash2 size={13} style={{ verticalAlign: "-2px", marginRight: 4 }} />删除
-                  </button>
-                </div>
-              </div>
-            </div>
-            )}
-          </div>
-        </div>
+        <CanvasDetailPanel
+          detailNode={detailNode}
+          detail={detail}
+          setDetailNode={setDetailNode}
+          showStoryThinking={showStoryThinking}
+          setShowStoryThinking={setShowStoryThinking}
+          detailHtmlRef={detailHtmlRef}
+          naturalSizesRef={naturalSizesRef}
+          displayRegex={displayRegex}
+          openSend={openSend}
+          requestDelete={requestDelete}
+        />
       )}
 
       {sendTarget && <SendToChatModal title={sendTarget.title} payload={sendTarget.payload} onDone={() => setSendTarget(null)} onCancel={() => setSendTarget(null)} />}
