@@ -574,6 +574,752 @@ def _resolve_prev_tail_desc(ctx: dict) -> str:
     return ""
 
 
+def _wb_split_media_blocks(ctx: dict, reply: str) -> tuple[str, str, object, dict, dict]:
+    """阶段 C 前段：think 前缀拆出 + <transition>/<illustration>/<audio> 搭车块抽取。
+
+    返回 `(think_head, clean, transition_decision, illustration_plan, audio_plan)`。
+    逐字自 `_agency_writeback` 搬移（T1.1 函数级拆解），判定逻辑与文案一字未改。
+    """
+    from app.services import roleplay_agency
+    from app.services import image_prompt_extract, transition_extract
+    from app.services.regex_engine import Placement
+
+    # 根因修复（2026-08-31 实锤 3389/11977：幻影协议标签跨界匹配吞正文）：think 是
+    # 输出协议的第一块，块提取链只应作用于其后的正文。think 内复述协议清单产生的
+    # 幻影开标签会让各提取器的懒匹配从 think 内一路吃到真块闭合，把 </think> 与
+    # 全部正文整段当块剥掉。拆出 think 前缀原样保留（前端正则折叠为思考过程），
+    # 提取链只看正文，发布时拼回前缀。
+    think_head, body = roleplay_agency.split_think_prefix(reply)
+    # 孤立 </think>（模型漏写 <think> 开标签，2026-09-12 实锤）会随正文发布，
+    # 发布链先剥；成对块与未闭合开标签不受影响。规划注释情形由裸正文兜底路径
+    # （_wrap_bare_body → repair_orphan_think_close）补包 think 处理。
+    body = roleplay_agency.strip_orphan_think_close(body)
+    # V1.5/W1：<transition> 剥离放最前（与 <illustration>/<audio> 同为生成时搭车块，
+    # 先抽避免干扰插画解析；漏块/非法/只开不闭 → None，L0 永远兕底，不得抛错）
+    clean, transition_decision = transition_extract.extract_transition(body)
+    clean, illustration_plan = image_prompt_extract.extract_illustration_plan(
+        clean,
+        block_filter=lambda value: _apply_regex(
+            ctx, value, Placement.AI_OUTPUT, is_prompt=False, depth=0,
+        ),
+    )
+    # 音频对白配音：comfy_audio 时剥离 <audio> 块并解析台词 + 8 维情感向量。
+    # 与 illustration 块正交（用户可只开配音不开图）；失败只走降级，不阻断正文。
+    audio_plan: dict = {}
+    if ctx.get("comfy_audio"):
+        from app.services import audio_dialogue_extract
+        clean, audio_plan = audio_dialogue_extract.extract_audio_dialogue(
+            clean,
+            block_filter=lambda value: _apply_regex(
+                ctx, value, Placement.AI_OUTPUT, is_prompt=False, depth=0,
+            ),
+        )
+    return think_head, clean, transition_decision, illustration_plan, audio_plan
+
+
+def _wb_apply_state(ctx: dict, deps, clean: str, *, turn: int, repo_id: str,
+                    card_name: str) -> tuple[str, list, float, float, dict, Any]:
+    """阶段 C 中段：<status> 快照抽取 + <状态更新> 写回 + 快照兜底 + 旧表格块清洗。
+
+    返回 `(clean, raw, before, after, snapshot, st)`。逐字自 `_agency_writeback` 搬移。
+    """
+    from app.services import character_state, roleplay_agency
+    from app.services import table_update
+
+    # 抽 <status> 快照（不剥，留正文供前端正则渲染）+ 剥 <状态更新> 小数值 JSON
+    snapshot = roleplay_agency.extract_status_snapshot(clean)
+    clean, raw = roleplay_agency.parse_state_block(clean)
+    raw = [*raw, *(ctx.pop("_agency_goal_deltas", []) or [])]
+    before, after = roleplay_agency.writeback(
+        deps, repo_id=repo_id, card_name=card_name, raw_deltas=raw, turn=turn,
+        snapshot=snapshot)
+    run_trace.emit(ctx, "state.writeback", raw_deltas=raw, snapshot=snapshot,
+                   affinity_before=before, affinity_after=after)
+    st = character_state.load_state(deps.state_base, repo_id, card_name)
+    if not snapshot:
+        previous_snapshot = getattr(getattr(st, "快照", None), "text", "")
+        clean = roleplay_agency.ensure_status_snapshot(clean, previous_snapshot)
+    # 旧版/异常模型仍可能输出表格块：这里只清洗，实际更新统一交给独立维护调用。
+    had_legacy_table_block = table_update.has_table_block(clean)
+    clean, _legacy_ops = table_update.parse_table_block(clean)
+    if had_legacy_table_block:
+        run_trace.emit(ctx, "table.writeback", status="legacy_ignored")
+    return clean, raw, before, after, snapshot, st
+
+
+def _wb_run_narrative_ci(ctx: dict, clean: str, *, turn: int, raw: list,
+                         repo_id: str) -> None:
+    """连续性 CI 评估 + 落盘（永不阻断/改写正文）。逐字自 `_agency_writeback` 搬移。"""
+    try:
+        from app.services import narrative_ci
+
+        diagnostics = narrative_ci.evaluate(
+            clean, turn=turn, facts=ctx.get("_continuity_facts") or (), raw_deltas=raw,
+            beliefs=ctx.get("_continuity_beliefs") or (),
+            world_rules=ctx.get("_world_rules") or (),
+            recent_openings=[
+                (m.get("content") or "").strip()[:15]
+                for m in reversed(_history_messages(ctx))
+                if m.get("role") == "assistant"
+            ][:3],
+            style_config=ctx.get("_style_config"),
+        )
+        saved = narrative_ci.save(
+            ctx.get("output_dir") or "", repo_id, diagnostics,
+        )
+        run_trace.emit(
+            ctx, "narrative.ci", status="evaluated", count=len(diagnostics), saved=saved,
+            codes=[item.get("code", "") for item in diagnostics],
+        )
+    except Exception as exc:  # noqa: BLE001 CI 永不阻断或改写正文
+        run_trace.emit(ctx, "narrative.ci", status="unavailable", error=str(exc))
+
+
+def _wb_at_climax(*, illustration_plan, visible_story, lost, scene,
+                  local_scene_fallback, missing_plan_fallback,
+                  first_story_reply, character_encounter) -> bool:
+    """是否进入插画高潮（纯判定，无副作用）。
+
+    逐字自 `_agency_writeback` 内联判定搬移；等价性由
+    `tests/test_agency_writeback_seams.py::test_at_climax等价矩阵` 在输入网格上钉住。
+    """
+    return bool(illustration_plan) or (
+        bool(visible_story) and (
+            lost or scene in ("nsfw", "climax")
+            or local_scene_fallback or missing_plan_fallback
+            or first_story_reply or character_encounter
+        )
+    )
+
+
+def _wb_scene_signals(ctx: dict, deps, st, clean: str, snapshot, scene: str,
+                      user_text: str, plan, lost: bool) -> dict:
+    """阶段 D 前置：可见正文 + 在场/衣着/所在 + 高潮触发信号（纯读取，无副作用）。
+
+    返回 dict，**键名即原内联局部名**（调用方按原样解包 ⇒ 下游正文零改动）。
+    逐字自 `_agency_writeback` 搬移。
+    """
+    from app.services import image_prompt_extract, roleplay_agency, scene_classify
+    from app.services import scene_illustration
+
+    # 阶段 D：插画（renderer=None 时 maybe_illustrate 直接返回 None）；用去块正文当段落
+    wardrobe = roleplay_agency._narr(st, "衣着")
+    locale = roleplay_agency._narr(st, "所在")
+    snapshot_text = snapshot or str(
+        getattr(getattr(st, "快照", None), "text", "") or "",
+    )
+    # `<status>` 是显示快照，正常不解析；但它经常是唯一的在场人物真源。
+    # LoRA 选择只读取其中精确的 `[在场]` 单行，避免要求模型额外写一份叙事 delta。
+    present = (
+        _status_snapshot_value(snapshot_text, "在场")
+        or roleplay_agency._narr(st, "在场")
+    )
+    locale = _status_snapshot_value(snapshot_text, "所在") or locale
+    # 插画提示词直接由正文 + 已有视觉锚组装，不再额外调用一次聊天模型。
+    visible_story = image_prompt_extract.visible_narrative_text(clean)
+    local_scene = scene_classify.infer_scene(
+        "\n".join((user_text, visible_story)),
+    )
+    local_scene_fallback = (
+        not plan and local_scene in ("nsfw", "climax")
+    )
+    # ComfyUI 自动插画开启后，主模型即使没带内联计划，也不能让整条请求静默消失。
+    # 普通 dialogue/action 直接复用本轮正文最强视觉段落；完整 Profile 由独立 LLM 链
+    # （_profile_llm_fallback）或本地事实编译提供，前端无需再补调文本模型。
+    missing_plan_fallback = bool(
+        ctx.get("comfy_illustrate") and not plan and visible_story
+    )
+    (encounter_anchor, encounter_narrative, encounter_actors,
+     encounter_facts) = scene_illustration.encounter_illustration_context(clean)
+    character_encounter = bool(
+        not plan and encounter_anchor
+        and (deps.renderer is not None or ctx.get("comfy_illustrate"))
+    )
+    first_story_reply = not any(
+        item.get("role") == "user" and str(item.get("content") or "").strip()
+        for item in (ctx.get("history") or [])
+    )
+    at_climax = _wb_at_climax(
+        illustration_plan=plan, visible_story=visible_story, lost=lost, scene=scene,
+        local_scene_fallback=local_scene_fallback,
+        missing_plan_fallback=missing_plan_fallback,
+        first_story_reply=first_story_reply,
+        character_encounter=character_encounter,
+    )
+    image_rating = (
+        "nsfw" if scene in ("nsfw", "climax")
+        or local_scene in ("nsfw", "climax") else "sfw"
+    )
+    return {
+        "wardrobe": wardrobe, "locale": locale, "snapshot_text": snapshot_text,
+        "present": present, "visible_story": visible_story, "local_scene": local_scene,
+        "local_scene_fallback": local_scene_fallback,
+        "missing_plan_fallback": missing_plan_fallback,
+        "encounter_anchor": encounter_anchor, "encounter_narrative": encounter_narrative,
+        "encounter_actors": encounter_actors, "encounter_facts": encounter_facts,
+        "character_encounter": character_encounter,
+        "first_story_reply": first_story_reply, "at_climax": at_climax,
+        "image_rating": image_rating,
+    }
+
+
+def _wb_build_audio_request(ctx: dict, audio_plan: dict, visible_story: str) -> dict:
+    """comfy_audio 时组装对白配音请求（含机械降级兜底）；关时返回空 dict。
+
+    逐字自 `_agency_writeback` 搬移（含两条 run_trace.emit）。
+    """
+    audio_req: dict = {}
+    if ctx.get("comfy_audio"):
+        from app.services import audio_dialogue_extract
+        audio_lines = audio_plan.get("lines") or audio_dialogue_extract.build_fallback_dialogue(
+            visible_story, [str(n).strip() for n in (ctx.get("card_names") or []) if str(n).strip()],
+        )
+        if audio_lines:
+            audio_req = {"lines": audio_lines}
+            run_trace.emit(
+                ctx, "audio.request", status="emitted", line_count=len(audio_lines),
+                speakers=[ln.get("speaker", "") for ln in audio_lines],
+                text_chars=[len(ln.get("text", "")) for ln in audio_lines],
+            )
+        else:
+            run_trace.emit(ctx, "audio.request", status="skipped", reason="no_dialogue")
+    return audio_req
+
+
+def _wb_initial_illustration_prompt(ctx: dict, deps, plan, sig: dict, *,
+                                    user_text: str) -> tuple[str, int, list]:
+    """初选出图提示词/动作/角色（comfy 与非 comfy 两条路径共用的第一轮选择）。
+
+    返回 `(prompt_override, motion, actors)`。逐字自 `_agency_writeback` 搬移。
+    """
+    from app.services import image_prompt_extract
+    from app.services.regex_engine import Placement
+
+    visible_story = sig["visible_story"]
+    prompt_override, motion, actors = "", 0, []
+    if plan:
+        prompt_override = _apply_regex(
+            ctx, plan["prompt"], Placement.IMAGE_PROMPT, is_prompt=True).strip()
+        motion = plan["motion"]
+        actors = plan["actors"]
+    elif ctx.get("comfy_illustrate") and sig["local_scene_fallback"]:
+        prompt_override = image_prompt_extract.build_fallback_content_tags(
+            "\n".join((user_text, visible_story)),
+        )
+        motion = image_prompt_extract.infer_motion(visible_story)
+        actors = []
+    elif (deps.renderer is not None or ctx.get("comfy_illustrate")) and sig["at_climax"]:
+        prompt_override, motion, actors = _build_image_prompt(
+            ctx,
+            paragraph=(sig["encounter_narrative"] if sig["character_encounter"]
+                       else visible_story),
+            appearance=_illustration_appearance(ctx),
+            wardrobe=sig["wardrobe"], locale=sig["locale"])
+        if sig["character_encounter"]:
+            actors = sig["encounter_actors"]
+    return prompt_override, motion, actors
+
+
+def _wb_illustration_reason(*, illustrate_req, plan_retargeted, illustration_plan,
+                            character_encounter, local_scene_fallback,
+                            first_story_reply, missing_plan_fallback,
+                            prompt_source, at_climax) -> str:
+    """`illustration.request` 事件的 reason（纯判定，判定次序即优先级）。
+
+    逐字自 `_agency_writeback` 内联嵌套条件搬移；等价性由
+    `tests/test_agency_writeback_seams.py::test_illustration_reason等价矩阵` 钉住。
+    """
+    return ("main_plan_retargeted" if plan_retargeted and illustrate_req else
+            "main_plan" if illustration_plan and illustrate_req else
+            "character_encounter" if character_encounter and illustrate_req else
+            "local_scene_fallback" if local_scene_fallback and illustrate_req else
+            "first_story_reply" if first_story_reply and illustrate_req else
+            "missing_plan_fallback" if missing_plan_fallback and illustrate_req else
+            prompt_source if illustrate_req else
+            "scene_not_triggered" if not at_climax else "empty_prompt")
+
+
+def _wb_comfy_actor_pool(ctx: dict, repo_id: str, card_name: str, plan, actors: list,
+                         sig: dict, *, user_text: str) -> dict:
+    """comfy 路径①：候选角色全集 → 首轮 request_actors + 外貌过滤。
+
+    返回 dict（**键为原内联局部名**）。逐字自 `_agency_writeback` 搬移。
+    """
+    from app.services import scene_illustration
+
+    visible_story = sig["visible_story"]
+    present = sig["present"]
+    character_encounter = sig["character_encounter"]
+    # 提取模型失败/拒答/返回坏 JSON 时仍要发请求：用既有纯逻辑组装器把正文、
+    # 外观和动态状态拼成降级提示词。旧代码只在 prompt_override 非空时发事件，
+    # 与上方“失败回退中文裸拼接”的设计相反，会让整条 ComfyUI 链静默消失。
+    # actors 只表示画面真实在场角色；配置全集仅用于正文精确补漏，不能整体塞入，
+    # 否则前端会给未出场角色加载 LoRA。
+    known = [
+        str(name).strip() for name in (ctx.get("illustration_actor_names") or [])
+        if str(name).strip()
+    ]
+    actor_values = list(actors)
+    if ctx.get("appearance_source") == "worldbook" and card_name:
+        # 世界书作品的 card_name 是作品/父仓库名，不是角色名。旧前端曾把它
+        # 混进候选全集，导致本地降级把作品名精确命中并回退风格 LoRA。
+        known = [name for name in known if name != card_name]
+        actor_values = [name for name in actor_values if name != card_name]
+    scene_actor_text = sig["encounter_narrative"] if character_encounter else visible_story
+    scene_text = "\n".join(filter(None, (scene_actor_text, user_text, present)))
+    climax_paragraph = (
+        "" if plan else scene_illustration.fallback_illustration_anchor(scene_actor_text)
+    )
+    absent = _repo_table_absent_actors(ctx, repo_id, known)
+    request_actors = _resolve_illustration_request_actors(
+        known,
+        planned=actor_values if plan else [],
+        user_text=user_text,
+        narrative=scene_actor_text,
+        present=present,
+        encounter=sig["encounter_actors"] if character_encounter else [],
+        priority_text=climax_paragraph,
+        absent=absent,
+    )
+    if not request_actors:
+        request_actors = list(dict.fromkeys(
+            [name for name in actor_values
+             if (not known or name in known) and name not in absent] + (
+                [card_name]
+                if card_name and ctx.get("appearance_source") != "worldbook" else []
+            ),
+        ))
+    request_appearance = _filter_illustration_appearance(
+        _illustration_appearance(ctx), request_actors, known,
+    )
+    return {
+        "known": known, "actor_values": actor_values,
+        "scene_actor_text": scene_actor_text, "scene_text": scene_text,
+        "climax_paragraph": climax_paragraph, "absent": absent,
+        "request_actors": request_actors, "request_appearance": request_appearance,
+    }
+
+
+def _wb_comfy_scene_target(ctx: dict, repo_id: str, plan, clean: str, sig: dict,
+                           pool: dict, *, prompt_override: str, motion: int,
+                           user_text: str) -> dict:
+    """comfy 路径②：提示词落定 + 锚点定位 + 高潮重定向 + 终选角色与外貌。
+
+    返回 dict（键为原内联局部名；`motion` 可能被重定向改写）。逐字搬移。
+    """
+    from app.services import image_prompt_extract, scene_illustration
+
+    visible_story = sig["visible_story"]
+    present = sig["present"]
+    character_encounter = sig["character_encounter"]
+    encounter_narrative = sig["encounter_narrative"]
+    encounter_actors = sig["encounter_actors"]
+    known = pool["known"]
+    actor_values = pool["actor_values"]
+    absent = pool["absent"]
+    climax_paragraph = pool["climax_paragraph"]
+    request_actors = pool["request_actors"]
+    request_appearance = pool["request_appearance"]
+
+    request_prompt = prompt_override.strip()
+    prompt_source = "extracted"
+    if sig["at_climax"] and not request_prompt:
+        request_prompt = scene_illustration.build_scene_request(
+            paragraph=encounter_narrative if character_encounter else visible_story,
+            appearance=request_appearance,
+            wardrobe=sig["wardrobe"],
+            locale=sig["locale"],
+            actors=request_actors,
+        ).prompt
+        prompt_source = "fallback"
+    fallback_anchor = ""
+    if character_encounter:
+        fallback_anchor = sig["encounter_anchor"]
+    elif visible_story and (
+        sig["local_scene_fallback"] or sig["missing_plan_fallback"]
+        or sig["first_story_reply"]
+    ) and not plan:
+        fallback_anchor = scene_illustration.fallback_illustration_anchor(clean)
+    planned_anchor = plan.get("anchor", "")
+    requested_anchor = planned_anchor or fallback_anchor
+    if plan:
+        requested_anchor = scene_illustration.resolve_illustration_anchor(
+            clean, requested_anchor,
+        )
+    plan_retargeted = bool(
+        plan and planned_anchor
+        and image_prompt_extract.restore_jailbreak(planned_anchor).strip()
+        != image_prompt_extract.restore_jailbreak(requested_anchor).strip()
+    )
+    if plan_retargeted:
+        corrected_scene = scene_illustration.illustration_scene_excerpt(
+            visible_story, requested_anchor,
+        )
+        # 重定向只替换错误高潮动作，不能把 Krea2 的英文动作底座也清空；
+        # 否则独立 Profile 一旦拒答，只能退回没有角色和剧情事实的通用模板。
+        request_prompt = image_prompt_extract.build_fallback_content_tags(corrected_scene)
+        motion = image_prompt_extract.infer_motion(corrected_scene)
+        # 高潮重定向只纠正动作与锚点；主计划 subjects 已通过配置角色全集
+        # 精确校验，是角色身份真源。代词化正文不应把这些角色覆盖为空。
+        retarget_actors = [
+            name for name in known
+            if name in corrected_scene or name in present
+        ]
+        request_actors = list(dict.fromkeys(request_actors + retarget_actors))
+    scene_narrative = encounter_narrative if character_encounter else (
+            scene_illustration.illustration_scene_excerpt(
+                visible_story, requested_anchor,
+            )
+        )
+    final_actors = _resolve_illustration_request_actors(
+        known,
+        planned=actor_values if plan else [],
+        user_text=user_text,
+        narrative=scene_narrative,
+        present=present,
+        encounter=encounter_actors if character_encounter else [],
+        priority_text=climax_paragraph,
+        absent=absent,
+    )
+    if final_actors:
+        request_actors = final_actors
+    request_appearance = _filter_illustration_appearance(
+        _illustration_appearance(ctx), request_actors, known,
+    )
+    request_appearance = scene_illustration.supplement_actor_table_appearance(
+        request_appearance, request_actors, _repo_tables_for_facts(ctx, repo_id),
+    )
+    return {
+        "request_prompt": request_prompt, "prompt_source": prompt_source,
+        "requested_anchor": requested_anchor, "plan_retargeted": plan_retargeted,
+        "scene_narrative": scene_narrative, "motion": motion,
+        "request_actors": request_actors, "request_appearance": request_appearance,
+    }
+
+
+def _wb_comfy_scene_spec(ctx: dict, repo_id: str, plan, clean: str, sig: dict,
+                         pool: dict, target: dict) -> dict:
+    """comfy 路径③：组装 scene_spec（叙事/外观/比例 + 计划侧字段按需透传）。
+
+    逐字自 `_agency_writeback` 搬移。
+    """
+    from app.services import image_prompt_extract, scene_illustration
+    from app.services.regex_engine import Placement
+
+    character_encounter = sig["character_encounter"]
+    encounter_narrative = sig["encounter_narrative"]
+    plan_retargeted = target["plan_retargeted"]
+    request_actors = target["request_actors"]
+    request_appearance = target["request_appearance"]
+    scene_narrative = target["scene_narrative"]
+
+    profile_draft_prompt = target["request_prompt"]
+    if not plan:
+        # 漏计划时 draft 也只能来自最终高潮片段；整轮正文会把前段离场人物、
+        # 动作和外貌重新带回本地 Profile。
+        profile_draft_prompt = _apply_regex(
+            ctx,
+            image_prompt_extract.build_fallback_content_tags(scene_narrative),
+            Placement.IMAGE_PROMPT,
+            is_prompt=True,
+        ).strip()
+    protected_narrative = (
+        encounter_narrative if character_encounter else
+        scene_illustration.protected_illustration_scene_excerpt(
+            clean, scene_narrative,
+        )
+    )
+    scene_spec = {
+        "narrative": image_prompt_extract.restore_jailbreak(scene_narrative),
+        "protected_narrative": protected_narrative,
+        "draft_prompt": profile_draft_prompt,
+        "appearance": request_appearance,
+        "wardrobe": sig["wardrobe"],
+        "locale": sig["locale"],
+        "actors": request_actors,
+        "rating": sig["image_rating"],
+        "aspect_ratio": (
+            "" if plan_retargeted else plan.get("aspect_ratio")
+        ) or (
+            "4:3" if character_encounter else scene_illustration.infer_aspect_ratio(
+                pool["scene_text"], request_actors,
+            )
+        ),
+        "profile": ctx.get("prompt_profile") or "anima_tags",
+    }
+    if ctx.get("appearance_source") in {"worldbook", "character_card"}:
+        scene_spec["appearance_source"] = ctx.get("appearance_source")
+    if plan.get("subjects"):
+        # 主计划的英文主体描述是拒答降级时仍可用的身份真源；即使高潮锚点
+        # 被纠正，稳定外貌不会随动作重定向而失效。
+        selected_subjects = [
+            subject for subject in plan["subjects"]
+            if str(subject.get("name") or "").strip() in request_actors
+        ]
+        if selected_subjects:
+            scene_spec["subjects"] = selected_subjects
+    if plan.get("visual_facts"):
+        visual_facts = plan["visual_facts"]
+        if plan_retargeted:
+            # 真正需要纠正锚点时，只淘汰不属于纠正后动作窗口的事实；
+            # 不能因为一个锚点变化就把该窗口内已有逐字证据全部清空。
+            visible_narrative = image_prompt_extract.restore_jailbreak(
+                scene_narrative,
+            )
+            visual_facts = [
+                item for item in visual_facts
+                if image_prompt_extract.restore_jailbreak(
+                    str(item.get("evidence") or ""),
+                ).strip() in visible_narrative
+            ]
+        if visual_facts:
+            scene_spec["visual_facts"] = visual_facts
+    if character_encounter:
+        scene_spec["encounter"] = sig["encounter_facts"]
+    if not plan_retargeted and plan.get("art_direction"):
+        scene_spec["art_direction"] = plan["art_direction"]
+    if not plan_retargeted and plan.get("camera"):
+        scene_spec["camera"] = plan["camera"]
+    if not plan_retargeted and plan.get("composition"):
+        scene_spec["composition"] = plan["composition"]
+    if not plan_retargeted and plan.get("action_sequence"):
+        scene_spec["action_sequence"] = plan["action_sequence"]
+    return scene_spec
+
+
+def _wb_comfy_profile(ctx: dict, plan, scene_spec: dict, plan_retargeted: bool) -> dict:
+    """comfy 路径④：Profile 成稿编译（同轮成稿 → 独立 LLM 链 → 本地事实兜底）+ 字段账本。
+
+    就地把 `profile_prompt` / `field_ledger` / `negative_prompt` 写进 scene_spec 并返回。
+    逐字自 `_agency_writeback` 搬移。
+    """
+    from app.services import image_prompt_profiles
+    from app.services.regex_engine import Placement
+
+    # illustration JSON 已在解析前复用正文的 AI_OUTPUT 正则；成稿再叠加
+    # IMAGE_PROMPT 专用清洗。
+    # 高潮锚点被纠正时，旧成稿描述的是错误桥段，必须丢弃并从纠正后的事实本地编译。
+    inline_profile = ""
+    if plan and (
+        not plan_retargeted or bool(scene_spec.get("visual_facts"))
+    ):
+        # 锚点被纠正但计划中仍有逐字证据落在纠正后窗口时，保留 Agent 已完成的
+        # 具体英文画面；normalize/字段账本仍会淘汰格式错误或事实不覆盖的成稿。
+        inline_profile = str(plan.get("profile_prompt") or "")
+        inline_profile = _apply_regex(
+            ctx, inline_profile, Placement.IMAGE_PROMPT, is_prompt=True, depth=0,
+        )
+    compiled_profile = image_prompt_profiles.normalize_inline(
+        scene_spec["profile"], inline_profile, scene_spec,
+    )
+    profile_strategy = "same_turn" if plan else "independent_chain"
+    if not compiled_profile:
+        # 同轮成稿被清空，或同轮义务剥离后主模型本就没带 illustration 块：
+        # 全走一次携带当前防拦截预设的独立 LLM 调用（image_prompt_profiles.generate 链，
+        # 已实证 status=ok），让模型按当前正文重写英文画面；失败才回退本地事实兜底。
+        compiled_profile, profile_strategy = _profile_llm_fallback(ctx, scene_spec)
+    if not compiled_profile:
+        local_profile = image_prompt_profiles.deterministic_fallback(
+            scene_spec["profile"], scene_spec,
+        )
+        compiled_profile = image_prompt_profiles.normalize_inline(
+            scene_spec["profile"], local_profile, scene_spec,
+        ) or local_profile
+        profile_strategy = "local_fallback"
+    compiled_profile, field_ledger = image_prompt_profiles.complete_field_coverage(
+        scene_spec["profile"], compiled_profile, scene_spec,
+    )
+    missing_fields = [
+        name for name, item in field_ledger.items()
+        if item.get("required") and not item.get("covered")
+    ]
+    if profile_strategy == "same_turn" and any(
+        item.get("expected") for item in field_ledger.values()
+    ) and "Required visible facts:" in compiled_profile:
+        profile_strategy = "same_turn+field_repair"
+    scene_spec["profile_prompt"] = compiled_profile
+    scene_spec["field_ledger"] = field_ledger
+    appearance_missing_actors = [
+        name for name in (scene_spec.get("actors") or [])
+        if name and name not in str(scene_spec.get("appearance") or "")
+    ]
+    run_trace.emit(
+        ctx, "illustration.profile", profile=scene_spec["profile"],
+        strategy=profile_strategy, inline_chars=len(inline_profile),
+        output_chars=len(compiled_profile), plan_retargeted=plan_retargeted,
+        field_ledger=field_ledger, missing_fields=missing_fields,
+        appearance_missing_actors=appearance_missing_actors,
+    )
+    profile_negative = image_prompt_profiles.negative_prompt(
+        ctx.get("prompt_profile") or "anima_tags", scene_spec,
+    )
+    if profile_negative:
+        scene_spec["negative_prompt"] = profile_negative
+    return scene_spec
+
+
+def _wb_comfy_illustrate_env(ctx: dict, plan, sig: dict, target: dict,
+                             scene_spec: dict, *, motion: int) -> dict:
+    """comfy 路径⑤：组装 illustrate_req 外壳（含视频配置与 anchor 兜底开关）。
+
+    Profile：同轮成稿（模型仍自发带块时）优先；否则由携带防拦截预设的独立
+    LLM 链（_profile_llm_fallback）编译，仍失败才走本地事实兜底。
+    逐字自 `_agency_writeback` 搬移。
+    """
+    from app.services import image_prompt_extract
+
+    request_prompt = image_prompt_extract.format_comfy_prompt(target["request_prompt"])
+    # 改造前 request_prompt 是同一个局部变量：格式化后既写进 illustrate_req["prompt"]，
+    # 也被 ⑦ 的 trace 计量（prompt_chars）。此处写回 target 以复原「单变量」语义，
+    # 否则 trace 会读到格式化前的长度，求值口径漂移（见 _wb_emit_illustration_trace）。
+    target["request_prompt"] = request_prompt
+    return (
+        {"prompt": request_prompt, "motion": motion, "actors": target["request_actors"],
+         "anchor": target["requested_anchor"], "scene_spec": scene_spec,
+         # V1.5 默认开放：视频配置随事件透传，供 dry-run 组装「上交视频模型的参数」
+         # （测试视频参数有没有正确上传；无视频工作流/节点也不影响出图）
+         "video_config": {
+             "base_url": str(ctx.get("vid_base") or ""),
+             "model": str(ctx.get("vid_model") or ""),
+             "size": "1280x720",
+             "proxy": str(ctx.get("vid_proxy") or ""),
+         },
+         "allow_anchor_fallback": (
+             bool(sig["visible_story"]) and (
+                 sig["local_scene_fallback"] or sig["missing_plan_fallback"]
+                 or sig["first_story_reply"] or sig["character_encounter"]
+             )
+         ) and not plan}
+        if sig["at_climax"] and (request_prompt or scene_spec["narrative"]) else {}
+    )
+
+
+def _wb_frames_and_video(ctx: dict, illustrate_req: dict, scene_spec: dict,
+                         clean: str, transition_decision, motion: int) -> str:
+    """comfy 路径⑥：首尾帧描述/复用决策 + 视频（含转场）请求编译。
+
+    返回 `video_prompt_text`（未开启/失败时为空串）。逐字自 `_agency_writeback` 搬移。
+    """
+    from app.services import story_frames
+
+    # V1.5/W2：首帧复用决策合并（坑B/坑I）——L0 确定 → L0；L0 ambiguous → 消费 L1 <transition>。
+    # N 尾帧从历史最近角色回复提取（方案 B，零 wire），N+1 首帧从当前正文提取；合并结果
+    # 三态（reuse/regenerate/ambiguous）随出图请求透传，前端叠加坑C「有图前提」裁决。
+    if illustrate_req:
+        # 2026-08-29 验收「帧提示词编译失败」实锤：scene_spec 只随 climax 请求下发，
+        # first_story_reply 等非高潮路径的首尾帧请求拿不到 sceneSpec → 前端帧编译被
+        # 整段跳过 → 触发「禁止中文原文直提」守卫 → 首帧必失败。首尾帧编译以帧描述
+        # 为主输入、scene_spec 提供角色外貌等事实参照，必须恒定随请求下发。
+        illustrate_req.setdefault("scene_spec", scene_spec)
+        prev_tail_desc = _resolve_prev_tail_desc(ctx)
+        frames = story_frames.extract_story_frames(clean)
+        merged = story_frames.merge_frame_reuse(
+            prev_tail_desc, frames.opening, transition_decision,
+        )
+        illustrate_req["transition"] = merged.decision
+        # V1.6/W3：首尾帧描述 + 上尾帧描述随事件下发（firstlast 生图 + 转场编译的素材源）。
+        # climax 也带（无害冗余，前端非 firstlast 忽略）；首帧复用决策用 opening 同源，不重复提取。
+        illustrate_req["first_frame_desc"] = frames.opening[:500].strip()
+        illustrate_req["last_frame_desc"] = frames.closing[:500].strip()
+        illustrate_req["prev_tail_desc"] = (prev_tail_desc or "")[:500].strip()
+    # 正常链路：comfy_video 开启时 produce 层编译视频提示词 + 参数，
+    # 随事件下发；失败静默降级 None，不阻断出图。
+    # 三模态开关：comfy_video 关=不调 _extract_video_action_plan（省 LLM 调用）、
+    # 不编译 video_request/transition_video_request（省 token 干烧），完全对齐图/音链的关=零成本。
+    video_prompt_text = ""
+    if illustrate_req and ctx.get("comfy_video"):
+        try:
+            from app.services import video_prompt as _vp_mod
+            _merged_spec = dict(scene_spec)
+            if "motion" not in _merged_spec:
+                _merged_spec["motion"] = int(motion or 0)
+            # V1.6/W3：视频模式先定（前端「首尾帧生成」选项推导，缺省 climax
+            # 兼容旧预设）——提取协议按模式分支：climax 定格窗口无对白，
+            # firstlast 从头到尾含全部对白。
+            _video_mode = str(ctx.get("video_mode") or "climax")
+            if _video_mode not in ("climax", "firstlast"):
+                _video_mode = "climax"
+            # 选 A：从剧情原文理解体态，补动作延伸 + 简化外貌/场景。
+            # 失败静默回退（_vp_plan 为空），不阻断出图；非 retargeted 时主模型
+            # 已给 action_sequence，本提取作为兜底优先补齐，避免动作段退化。
+            _vp_plan = _extract_video_action_plan(ctx, _merged_spec, video_mode=_video_mode)
+            if _vp_plan.get("action_sequence"):
+                _merged_spec["action_sequence"] = _vp_plan["action_sequence"]
+            if _vp_plan.get("subject_scene"):
+                _merged_spec["video_subject_scene"] = _vp_plan["subject_scene"]
+            if _vp_plan.get("audio_design"):
+                _merged_spec["audio_design"] = _vp_plan["audio_design"]
+            illustrate_req["video_mode"] = _video_mode
+            _vcfg = illustrate_req.get("video_config") or {}
+            if _video_mode == "firstlast":
+                illustrate_req["video_request"] = _vp_mod.build_video_request(
+                    mode="firstlast", spec=_merged_spec, video_config=_vcfg,
+                    first_frame_desc=illustrate_req.get("first_frame_desc") or "",
+                    last_frame_desc=illustrate_req.get("last_frame_desc") or "",
+                    prev_tail_desc=illustrate_req.get("prev_tail_desc") or "",
+                )
+            else:
+                illustrate_req["video_request"] = _vp_mod.build_video_request(
+                    mode="climax", spec=_merged_spec, video_config=_vcfg,
+                    # first_frame_desc 留空：图职责描述由 video_prompt 用画面级
+                    # 动作瞬间（subjects/visual_facts/composition）兜底，与 [动作]
+                    # 同源，避免把围绕锚点截取的可能陈旧 narrative 写进 [参考绑定]。
+                )
+            video_prompt_text = str(
+                (illustrate_req["video_request"].get("submit") or {}).get("prompt") or ""
+            )
+            # W3 转场任务（坑F/坑G）：firstlast 且首帧需独立生成（transition≠reuse）→
+            # 额外编译转场 video_request（图片1=上尾帧、图片2=当前首帧），随事件下发。
+            _decision = str(illustrate_req.get("transition") or "")
+            if _video_mode == "firstlast" and _decision not in ("reuse", ""):
+                illustrate_req["transition_video_request"] = _vp_mod.build_video_request(
+                    mode="transition", spec=_merged_spec, video_config=_vcfg,
+                    # transition 分支：first_frame_desc=当前首帧描述（终点），
+                    # prev_tail_desc=上尾帧描述（起点）；last_frame_desc 该分支不使用。
+                    first_frame_desc=illustrate_req.get("first_frame_desc") or "",
+                    prev_tail_desc=illustrate_req.get("prev_tail_desc") or "",
+                )
+        except Exception:
+            illustrate_req["video_request"] = None
+    return video_prompt_text
+
+
+def _wb_emit_illustration_trace(ctx: dict, illustrate_req: dict, *, plan, sig: dict,
+                                pool: dict, target: dict, scene: str, local_scene: str,
+                                video_prompt_text: str) -> None:
+    """comfy 路径⑦：派发 `illustration.request` 事件（含 reason 阶梯与提示词计量）。
+
+    逐字自 `_agency_writeback` 搬移。
+    """
+    run_trace.emit(
+        ctx,
+        "illustration.request",
+        status="emitted" if illustrate_req else "skipped",
+        reason=_wb_illustration_reason(
+            illustrate_req=illustrate_req,
+            plan_retargeted=target["plan_retargeted"],
+            illustration_plan=plan,
+            character_encounter=sig["character_encounter"],
+            local_scene_fallback=sig["local_scene_fallback"],
+            first_story_reply=sig["first_story_reply"],
+            missing_plan_fallback=sig["missing_plan_fallback"],
+            prompt_source=target["prompt_source"],
+            at_climax=sig["at_climax"],
+        ),
+        scene=scene,
+        inferred_scene=local_scene,
+        actor_count=len(target["request_actors"]),
+        actors=target["request_actors"],
+        actor_candidates=pool["known"],
+        status_actors=[name for name in pool["known"] if name in sig["present"]],
+        plan_retargeted=target["plan_retargeted"],
+        prompt_chars=len(target["request_prompt"]),
+        # V1.5 默认开放：视频生成提示词记入 trace（测试模式核对提示词质量）
+        video_prompt_chars=len(video_prompt_text),
+        video_prompt=video_prompt_text,
+    )
+
+
 def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
                       lost: bool, rag_events: list | None = None,
                       user_text: str = "") -> tuple[str, list, dict, dict]:
@@ -583,538 +1329,51 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
     audio_req：comfy_audio 时产出的对白配音请求 {lines:[{speaker,text,emotion}]}；前端逐角色提交 IndexTTS。
     非 comfy 路径为空 dict。rag_events：可选，收集 RAG 创建（纪要/知识库）状态供前端弹窗。"""
     try:
-        from app.services import character_state, roleplay_agency
-        from app.services import image_prompt_extract, scene_classify
-        from app.services import story_frames, transition_extract
-        from app.services.regex_engine import Placement
+        from app.services import roleplay_agency
         repo_id = ctx.get("repo_id") or ctx.get("thread_id") or ""
         card_name = ctx.get("card_name") or ""
-        # 根因修复（2026-08-31 实锤 3389/11977：幻影协议标签跨界匹配吞正文）：think 是
-        # 输出协议的第一块，块提取链只应作用于其后的正文。think 内复述协议清单产生的
-        # 幻影开标签会让各提取器的懒匹配从 think 内一路吃到真块闭合，把 </think> 与
-        # 全部正文整段当块剥掉。拆出 think 前缀原样保留（前端正则折叠为思考过程），
-        # 提取链只看正文，发布时拼回前缀。
-        think_head, body = roleplay_agency.split_think_prefix(reply)
-        # 孤立 </think>（模型漏写 <think> 开标签，2026-09-12 实锤）会随正文发布，
-        # 发布链先剥；成对块与未闭合开标签不受影响。规划注释情形由裸正文兜底路径
-        # （_wrap_bare_body → repair_orphan_think_close）补包 think 处理。
-        body = roleplay_agency.strip_orphan_think_close(body)
-        # V1.5/W1：<transition> 剥离放最前（与 <illustration>/<audio> 同为生成时搭车块，
-        # 先抽避免干扰插画解析；漏块/非法/只开不闭 → None，L0 永远兕底，不得抛错）
-        clean, transition_decision = transition_extract.extract_transition(body)
-        clean, illustration_plan = image_prompt_extract.extract_illustration_plan(
-            clean,
-            block_filter=lambda value: _apply_regex(
-                ctx, value, Placement.AI_OUTPUT, is_prompt=False, depth=0,
-            ),
-        )
-        # 音频对白配音：comfy_audio 时剥离 <audio> 块并解析台词 + 8 维情感向量。
-        # 与 illustration 块正交（用户可只开配音不开图）；失败只走降级，不阻断正文。
-        audio_plan: dict = {}
-        if ctx.get("comfy_audio"):
-            from app.services import audio_dialogue_extract
-            clean, audio_plan = audio_dialogue_extract.extract_audio_dialogue(
-                clean,
-                block_filter=lambda value: _apply_regex(
-                    ctx, value, Placement.AI_OUTPUT, is_prompt=False, depth=0,
-                ),
-            )
-        # 抽 <status> 快照（不剥，留正文供前端正则渲染）+ 剥 <状态更新> 小数值 JSON
-        snapshot = roleplay_agency.extract_status_snapshot(clean)
-        clean, raw = roleplay_agency.parse_state_block(clean)
-        raw = [*raw, *(ctx.pop("_agency_goal_deltas", []) or [])]
-        before, after = roleplay_agency.writeback(
-            deps, repo_id=repo_id, card_name=card_name, raw_deltas=raw, turn=turn,
-            snapshot=snapshot)
-        run_trace.emit(ctx, "state.writeback", raw_deltas=raw, snapshot=snapshot,
-                       affinity_before=before, affinity_after=after)
-        st = character_state.load_state(deps.state_base, repo_id, card_name)
-        if not snapshot:
-            previous_snapshot = getattr(getattr(st, "快照", None), "text", "")
-            clean = roleplay_agency.ensure_status_snapshot(clean, previous_snapshot)
-        # 旧版/异常模型仍可能输出表格块：这里只清洗，实际更新统一交给独立维护调用。
-        from app.services import table_update
-        had_legacy_table_block = table_update.has_table_block(clean)
-        clean, _legacy_ops = table_update.parse_table_block(clean)
-        if had_legacy_table_block:
-            run_trace.emit(ctx, "table.writeback", status="legacy_ignored")
-        try:
-            from app.services import narrative_ci
-
-            diagnostics = narrative_ci.evaluate(
-                clean, turn=turn, facts=ctx.get("_continuity_facts") or (), raw_deltas=raw,
-                beliefs=ctx.get("_continuity_beliefs") or (),
-                world_rules=ctx.get("_world_rules") or (),
-                recent_openings=[
-                    (m.get("content") or "").strip()[:15]
-                    for m in reversed(_history_messages(ctx))
-                    if m.get("role") == "assistant"
-                ][:3],
-                style_config=ctx.get("_style_config"),
-            )
-            saved = narrative_ci.save(
-                ctx.get("output_dir") or "", repo_id, diagnostics,
-            )
-            run_trace.emit(
-                ctx, "narrative.ci", status="evaluated", count=len(diagnostics), saved=saved,
-                codes=[item.get("code", "") for item in diagnostics],
-            )
-        except Exception as exc:  # noqa: BLE001 CI 永不阻断或改写正文
-            run_trace.emit(ctx, "narrative.ci", status="unavailable", error=str(exc))
-        # 阶段 D：插画（renderer=None 时 maybe_illustrate 直接返回 None）；用去块正文当段落
+        # 阶段 C 前段：think 前缀拆出 + <transition>/<illustration>/<audio> 搭车块抽取
+        think_head, clean, transition_decision, illustration_plan, audio_plan = (
+            _wb_split_media_blocks(ctx, reply))
+        # 阶段 C：状态写回 + 快照兜底 + 旧表格块清洗
+        clean, raw, before, after, snapshot, st = _wb_apply_state(
+            ctx, deps, clean, turn=turn, repo_id=repo_id, card_name=card_name)
+        # 连续性 CI（永不阻断或改写正文）
+        _wb_run_narrative_ci(ctx, clean, turn=turn, raw=raw, repo_id=repo_id)
+        # 阶段 D 前置：可见正文 + 在场/衣着/所在 + 高潮触发信号
         scene = ctx.get("scene") or ""
-        wardrobe = roleplay_agency._narr(st, "衣着")
-        locale = roleplay_agency._narr(st, "所在")
-        snapshot_text = snapshot or str(
-            getattr(getattr(st, "快照", None), "text", "") or "",
-        )
-        # `<status>` 是显示快照，正常不解析；但它经常是唯一的在场人物真源。
-        # LoRA 选择只读取其中精确的 `[在场]` 单行，避免要求模型额外写一份叙事 delta。
-        present = (
-            _status_snapshot_value(snapshot_text, "在场")
-            or roleplay_agency._narr(st, "在场")
-        )
-        locale = _status_snapshot_value(snapshot_text, "所在") or locale
-        # 插画提示词直接由正文 + 已有视觉锚组装，不再额外调用一次聊天模型。
-        visible_story = image_prompt_extract.visible_narrative_text(clean)
+        sig = _wb_scene_signals(
+            ctx, deps, st, clean, snapshot, scene, user_text, illustration_plan, lost)
+        wardrobe, locale = sig["wardrobe"], sig["locale"]
         # 音频对白配音请求：comfy_audio 时组装（含机械降级兜底），随 writeback 返回给前端逐角色提交。
-        audio_req: dict = {}
-        if ctx.get("comfy_audio"):
-            from app.services import audio_dialogue_extract
-            audio_lines = audio_plan.get("lines") or audio_dialogue_extract.build_fallback_dialogue(
-                visible_story, [str(n).strip() for n in (ctx.get("card_names") or []) if str(n).strip()],
-            )
-            if audio_lines:
-                audio_req = {"lines": audio_lines}
-                run_trace.emit(
-                    ctx, "audio.request", status="emitted", line_count=len(audio_lines),
-                    speakers=[ln.get("speaker", "") for ln in audio_lines],
-                    text_chars=[len(ln.get("text", "")) for ln in audio_lines],
-                )
-            else:
-                run_trace.emit(ctx, "audio.request", status="skipped", reason="no_dialogue")
-        local_scene = scene_classify.infer_scene(
-            "\n".join((user_text, visible_story)),
-        )
-        from app.services import scene_illustration
-        local_scene_fallback = (
-            not illustration_plan and local_scene in ("nsfw", "climax")
-        )
-        # ComfyUI 自动插画开启后，主模型即使没带内联计划，也不能让整条请求静默消失。
-        # 普通 dialogue/action 直接复用本轮正文最强视觉段落；完整 Profile 由独立 LLM 链
-        # （_profile_llm_fallback）或本地事实编译提供，前端无需再补调文本模型。
-        missing_plan_fallback = bool(
-            ctx.get("comfy_illustrate") and not illustration_plan and visible_story
-        )
-        (encounter_anchor, encounter_narrative, encounter_actors,
-         encounter_facts) = scene_illustration.encounter_illustration_context(clean)
-        character_encounter = bool(
-            not illustration_plan and encounter_anchor
-            and (deps.renderer is not None or ctx.get("comfy_illustrate"))
-        )
-        first_story_reply = not any(
-            item.get("role") == "user" and str(item.get("content") or "").strip()
-            for item in (ctx.get("history") or [])
-        )
-        at_climax = bool(illustration_plan) or (
-            bool(visible_story) and (
-                lost or scene in ("nsfw", "climax")
-                or local_scene_fallback or missing_plan_fallback
-                or first_story_reply or character_encounter
-            )
-        )
-        prompt_override, motion, actors = "", 0, []
-        image_rating = (
-            "nsfw" if scene in ("nsfw", "climax")
-            or local_scene in ("nsfw", "climax") else "sfw"
-        )
-        if illustration_plan:
-            prompt_override = _apply_regex(
-                ctx, illustration_plan["prompt"], Placement.IMAGE_PROMPT, is_prompt=True).strip()
-            motion = illustration_plan["motion"]
-            actors = illustration_plan["actors"]
-        elif ctx.get("comfy_illustrate") and local_scene_fallback:
-            prompt_override = image_prompt_extract.build_fallback_content_tags(
-                "\n".join((user_text, visible_story)),
-            )
-            motion = image_prompt_extract.infer_motion(visible_story)
-            actors = []
-        elif (deps.renderer is not None or ctx.get("comfy_illustrate")) and at_climax:
-            prompt_override, motion, actors = _build_image_prompt(
-                ctx, paragraph=encounter_narrative if character_encounter else visible_story,
-                appearance=_illustration_appearance(ctx),
-                wardrobe=wardrobe, locale=locale)
-            if character_encounter:
-                actors = encounter_actors
+        audio_req = _wb_build_audio_request(ctx, audio_plan, sig["visible_story"])
+        # 初选出图提示词/动作/角色（comfy 与非 comfy 两条路径共用）
+        prompt_override, motion, actors = _wb_initial_illustration_prompt(
+            ctx, deps, illustration_plan, sig, user_text=user_text)
         # comfy_illustrate：不同步 render，把 prompt + motion + actors 作为出图请求返回，
         # 前端据 motion 智能选图/视频、据 actors 按角色选 LoRA/底图，走异步 ComfyUI 闭环。
+        # 七段接缝依次组装（候选角色池 → 提示词/锚点 → scene_spec → Profile →
+        # 请求外壳 → 首尾帧与视频 → 事件派发），判定逻辑与文案逐字未改。
         if ctx.get("comfy_illustrate"):
-            # 提取模型失败/拒答/返回坏 JSON 时仍要发请求：用既有纯逻辑组装器把正文、
-            # 外观和动态状态拼成降级提示词。旧代码只在 prompt_override 非空时发事件，
-            # 与上方“失败回退中文裸拼接”的设计相反，会让整条 ComfyUI 链静默消失。
-            # actors 只表示画面真实在场角色；配置全集仅用于正文精确补漏，不能整体塞入，
-            # 否则前端会给未出场角色加载 LoRA。
-            _known = [
-                str(name).strip() for name in (ctx.get("illustration_actor_names") or [])
-                if str(name).strip()
-            ]
-            _actor_values = list(actors)
-            if ctx.get("appearance_source") == "worldbook" and card_name:
-                # 世界书作品的 card_name 是作品/父仓库名，不是角色名。旧前端曾把它
-                # 混进候选全集，导致本地降级把作品名精确命中并回退风格 LoRA。
-                _known = [name for name in _known if name != card_name]
-                _actor_values = [name for name in _actor_values if name != card_name]
-            scene_actor_text = encounter_narrative if character_encounter else visible_story
-            _scene_text = "\n".join(filter(None, (scene_actor_text, user_text, present)))
-            _climax_paragraph = (
-                "" if illustration_plan else scene_illustration.fallback_illustration_anchor(
-                    scene_actor_text)
-            )
-            _absent = _repo_table_absent_actors(ctx, repo_id, _known)
-            request_actors = _resolve_illustration_request_actors(
-                _known,
-                planned=_actor_values if illustration_plan else [],
-                user_text=user_text,
-                narrative=scene_actor_text,
-                present=present,
-                encounter=encounter_actors if character_encounter else [],
-                priority_text=_climax_paragraph,
-                absent=_absent,
-            )
-            if not request_actors:
-                request_actors = list(dict.fromkeys(
-                    [name for name in _actor_values
-                     if (not _known or name in _known) and name not in _absent] + (
-                        [card_name]
-                        if card_name and ctx.get("appearance_source") != "worldbook" else []
-                    ),
-                ))
-            request_appearance = _filter_illustration_appearance(
-                _illustration_appearance(ctx), request_actors, _known,
-            )
-            request_prompt = prompt_override.strip()
-            prompt_source = "extracted"
-            if at_climax and not request_prompt:
-                request_prompt = scene_illustration.build_scene_request(
-                    paragraph=encounter_narrative if character_encounter else visible_story,
-                    appearance=request_appearance,
-                    wardrobe=wardrobe,
-                    locale=locale,
-                    actors=request_actors,
-                ).prompt
-                prompt_source = "fallback"
-            fallback_anchor = ""
-            if character_encounter:
-                fallback_anchor = encounter_anchor
-            elif visible_story and (
-                local_scene_fallback or missing_plan_fallback or first_story_reply
-            ) and not illustration_plan:
-                fallback_anchor = scene_illustration.fallback_illustration_anchor(clean)
-            planned_anchor = illustration_plan.get("anchor", "")
-            requested_anchor = planned_anchor or fallback_anchor
-            if illustration_plan:
-                requested_anchor = scene_illustration.resolve_illustration_anchor(
-                    clean, requested_anchor,
-                )
-            plan_retargeted = bool(
-                illustration_plan and planned_anchor
-                and image_prompt_extract.restore_jailbreak(planned_anchor).strip()
-                != image_prompt_extract.restore_jailbreak(requested_anchor).strip()
-            )
-            if plan_retargeted:
-                corrected_scene = scene_illustration.illustration_scene_excerpt(
-                    visible_story, requested_anchor,
-                )
-                # 重定向只替换错误高潮动作，不能把 Krea2 的英文动作底座也清空；
-                # 否则独立 Profile 一旦拒答，只能退回没有角色和剧情事实的通用模板。
-                request_prompt = image_prompt_extract.build_fallback_content_tags(corrected_scene)
-                motion = image_prompt_extract.infer_motion(corrected_scene)
-                # 高潮重定向只纠正动作与锚点；主计划 subjects 已通过配置角色全集
-                # 精确校验，是角色身份真源。代词化正文不应把这些角色覆盖为空。
-                retarget_actors = [
-                    name for name in _known
-                    if name in corrected_scene or name in present
-                ]
-                request_actors = list(dict.fromkeys(request_actors + retarget_actors))
-            scene_narrative = encounter_narrative if character_encounter else (
-                    scene_illustration.illustration_scene_excerpt(
-                        visible_story, requested_anchor,
-                    )
-                )
-            final_actors = _resolve_illustration_request_actors(
-                _known,
-                planned=_actor_values if illustration_plan else [],
-                user_text=user_text,
-                narrative=scene_narrative,
-                present=present,
-                encounter=encounter_actors if character_encounter else [],
-                priority_text=_climax_paragraph,
-                absent=_absent,
-            )
-            if final_actors:
-                request_actors = final_actors
-            request_appearance = _filter_illustration_appearance(
-                _illustration_appearance(ctx), request_actors, _known,
-            )
-            request_appearance = scene_illustration.supplement_actor_table_appearance(
-                request_appearance, request_actors, _repo_tables_for_facts(ctx, repo_id),
-            )
-            profile_draft_prompt = request_prompt
-            if not illustration_plan:
-                # 漏计划时 draft 也只能来自最终高潮片段；整轮正文会把前段离场人物、
-                # 动作和外貌重新带回本地 Profile。
-                profile_draft_prompt = _apply_regex(
-                    ctx,
-                    image_prompt_extract.build_fallback_content_tags(scene_narrative),
-                    Placement.IMAGE_PROMPT,
-                    is_prompt=True,
-                ).strip()
-            protected_narrative = (
-                encounter_narrative if character_encounter else
-                scene_illustration.protected_illustration_scene_excerpt(
-                    clean, scene_narrative,
-                )
-            )
-            scene_spec = {
-                "narrative": image_prompt_extract.restore_jailbreak(scene_narrative),
-                "protected_narrative": protected_narrative,
-                "draft_prompt": profile_draft_prompt,
-                "appearance": request_appearance,
-                "wardrobe": wardrobe,
-                "locale": locale,
-                "actors": request_actors,
-                "rating": image_rating,
-                "aspect_ratio": (
-                    "" if plan_retargeted else illustration_plan.get("aspect_ratio")
-                ) or (
-                    "4:3" if character_encounter else scene_illustration.infer_aspect_ratio(
-                        _scene_text, request_actors,
-                    )
-                ),
-                "profile": ctx.get("prompt_profile") or "anima_tags",
-            }
-            if ctx.get("appearance_source") in {"worldbook", "character_card"}:
-                scene_spec["appearance_source"] = ctx.get("appearance_source")
-            if illustration_plan.get("subjects"):
-                # 主计划的英文主体描述是拒答降级时仍可用的身份真源；即使高潮锚点
-                # 被纠正，稳定外貌不会随动作重定向而失效。
-                selected_subjects = [
-                    subject for subject in illustration_plan["subjects"]
-                    if str(subject.get("name") or "").strip() in request_actors
-                ]
-                if selected_subjects:
-                    scene_spec["subjects"] = selected_subjects
-            if illustration_plan.get("visual_facts"):
-                visual_facts = illustration_plan["visual_facts"]
-                if plan_retargeted:
-                    # 真正需要纠正锚点时，只淘汰不属于纠正后动作窗口的事实；
-                    # 不能因为一个锚点变化就把该窗口内已有逐字证据全部清空。
-                    visible_narrative = image_prompt_extract.restore_jailbreak(
-                        scene_narrative,
-                    )
-                    visual_facts = [
-                        item for item in visual_facts
-                        if image_prompt_extract.restore_jailbreak(
-                            str(item.get("evidence") or ""),
-                        ).strip() in visible_narrative
-                    ]
-                if visual_facts:
-                    scene_spec["visual_facts"] = visual_facts
-            if character_encounter:
-                scene_spec["encounter"] = encounter_facts
-            if not plan_retargeted and illustration_plan.get("art_direction"):
-                scene_spec["art_direction"] = illustration_plan["art_direction"]
-            if not plan_retargeted and illustration_plan.get("camera"):
-                scene_spec["camera"] = illustration_plan["camera"]
-            if not plan_retargeted and illustration_plan.get("composition"):
-                scene_spec["composition"] = illustration_plan["composition"]
-            if not plan_retargeted and illustration_plan.get("action_sequence"):
-                scene_spec["action_sequence"] = illustration_plan["action_sequence"]
-            from app.services import image_prompt_profiles
-            # illustration JSON 已在解析前复用正文的 AI_OUTPUT 正则；成稿再叠加
-            # IMAGE_PROMPT 专用清洗。
-            # 高潮锚点被纠正时，旧成稿描述的是错误桥段，必须丢弃并从纠正后的事实本地编译。
-            inline_profile = ""
-            if illustration_plan and (
-                not plan_retargeted or bool(scene_spec.get("visual_facts"))
-            ):
-                # 锚点被纠正但计划中仍有逐字证据落在纠正后窗口时，保留 Agent 已完成的
-                # 具体英文画面；normalize/字段账本仍会淘汰格式错误或事实不覆盖的成稿。
-                inline_profile = str(illustration_plan.get("profile_prompt") or "")
-                inline_profile = _apply_regex(
-                    ctx, inline_profile, Placement.IMAGE_PROMPT, is_prompt=True, depth=0,
-                )
-            compiled_profile = image_prompt_profiles.normalize_inline(
-                scene_spec["profile"], inline_profile, scene_spec,
-            )
-            profile_strategy = "same_turn" if illustration_plan else "independent_chain"
-            if not compiled_profile:
-                # 同轮成稿被清空，或同轮义务剥离后主模型本就没带 illustration 块：
-                # 全走一次携带当前防拦截预设的独立 LLM 调用（image_prompt_profiles.generate 链，
-                # 已实证 status=ok），让模型按当前正文重写英文画面；失败才回退本地事实兜底。
-                compiled_profile, profile_strategy = _profile_llm_fallback(ctx, scene_spec)
-            if not compiled_profile:
-                local_profile = image_prompt_profiles.deterministic_fallback(
-                    scene_spec["profile"], scene_spec,
-                )
-                compiled_profile = image_prompt_profiles.normalize_inline(
-                    scene_spec["profile"], local_profile, scene_spec,
-                ) or local_profile
-                profile_strategy = "local_fallback"
-            compiled_profile, field_ledger = image_prompt_profiles.complete_field_coverage(
-                scene_spec["profile"], compiled_profile, scene_spec,
-            )
-            missing_fields = [
-                name for name, item in field_ledger.items()
-                if item.get("required") and not item.get("covered")
-            ]
-            if profile_strategy == "same_turn" and any(
-                item.get("expected") for item in field_ledger.values()
-            ) and "Required visible facts:" in compiled_profile:
-                profile_strategy = "same_turn+field_repair"
-            scene_spec["profile_prompt"] = compiled_profile
-            scene_spec["field_ledger"] = field_ledger
-            appearance_missing_actors = [
-                name for name in (scene_spec.get("actors") or [])
-                if name and name not in str(scene_spec.get("appearance") or "")
-            ]
-            run_trace.emit(
-                ctx, "illustration.profile", profile=scene_spec["profile"],
-                strategy=profile_strategy, inline_chars=len(inline_profile),
-                output_chars=len(compiled_profile), plan_retargeted=plan_retargeted,
-                field_ledger=field_ledger, missing_fields=missing_fields,
-                appearance_missing_actors=appearance_missing_actors,
-            )
-            profile_negative = image_prompt_profiles.negative_prompt(
-                ctx.get("prompt_profile") or "anima_tags", scene_spec,
-            )
-            if profile_negative:
-                scene_spec["negative_prompt"] = profile_negative
-            # Profile：同轮成稿（模型仍自发带块时）优先；否则由携带防拦截预设的独立
-            # LLM 链（_profile_llm_fallback）编译，仍失败才走本地事实兜底。
-            request_prompt = image_prompt_extract.format_comfy_prompt(request_prompt)
-            illustrate_req = (
-                {"prompt": request_prompt, "motion": motion, "actors": request_actors,
-                 "anchor": requested_anchor, "scene_spec": scene_spec,
-                 # V1.5 默认开放：视频配置随事件透传，供 dry-run 组装「上交视频模型的参数」
-                 # （测试视频参数有没有正确上传；无视频工作流/节点也不影响出图）
-                 "video_config": {
-                     "base_url": str(ctx.get("vid_base") or ""),
-                     "model": str(ctx.get("vid_model") or ""),
-                     "size": "1280x720",
-                     "proxy": str(ctx.get("vid_proxy") or ""),
-                 },
-                 "allow_anchor_fallback": (
-                     bool(visible_story) and (
-                         local_scene_fallback or missing_plan_fallback
-                         or first_story_reply or character_encounter
-                     )
-                 ) and not illustration_plan}
-                if at_climax and (request_prompt or scene_spec["narrative"]) else {}
-            )
-            # V1.5/W2：首帧复用决策合并（坑B/坑I）——L0 确定 → L0；L0 ambiguous → 消费 L1 <transition>。
-            # N 尾帧从历史最近角色回复提取（方案 B，零 wire），N+1 首帧从当前正文提取；合并结果
-            # 三态（reuse/regenerate/ambiguous）随出图请求透传，前端叠加坑C「有图前提」裁决。
-            if illustrate_req:
-                # 2026-08-29 验收「帧提示词编译失败」实锤：scene_spec 只随 climax 请求下发，
-                # first_story_reply 等非高潮路径的首尾帧请求拿不到 sceneSpec → 前端帧编译被
-                # 整段跳过 → 触发「禁止中文原文直提」守卫 → 首帧必失败。首尾帧编译以帧描述
-                # 为主输入、scene_spec 提供角色外貌等事实参照，必须恒定随请求下发。
-                illustrate_req.setdefault("scene_spec", scene_spec)
-                _prev_tail_desc = _resolve_prev_tail_desc(ctx)
-                _frames = story_frames.extract_story_frames(clean)
-                _merged = story_frames.merge_frame_reuse(
-                    _prev_tail_desc, _frames.opening, transition_decision,
-                )
-                illustrate_req["transition"] = _merged.decision
-                # V1.6/W3：首尾帧描述 + 上尾帧描述随事件下发（firstlast 生图 + 转场编译的素材源）。
-                # climax 也带（无害冗余，前端非 firstlast 忽略）；首帧复用决策用 opening 同源，不重复提取。
-                illustrate_req["first_frame_desc"] = _frames.opening[:500].strip()
-                illustrate_req["last_frame_desc"] = _frames.closing[:500].strip()
-                illustrate_req["prev_tail_desc"] = (_prev_tail_desc or "")[:500].strip()
-            # 正常链路：comfy_video 开启时 produce 层编译视频提示词 + 参数，
-            # 随事件下发；失败静默降级 None，不阻断出图。
-            # 三模态开关：comfy_video 关=不调 _extract_video_action_plan（省 LLM 调用）、
-            # 不编译 video_request/transition_video_request（省 token 干烧），完全对齐图/音链的关=零成本。
-            _video_prompt_text = ""
-            if illustrate_req and ctx.get("comfy_video"):
-                try:
-                    from app.services import video_prompt as _vp_mod
-                    _merged_spec = dict(scene_spec)
-                    if "motion" not in _merged_spec:
-                        _merged_spec["motion"] = int(motion or 0)
-                    # V1.6/W3：视频模式先定（前端「首尾帧生成」选项推导，缺省 climax
-                    # 兼容旧预设）——提取协议按模式分支：climax 定格窗口无对白，
-                    # firstlast 从头到尾含全部对白。
-                    _video_mode = str(ctx.get("video_mode") or "climax")
-                    if _video_mode not in ("climax", "firstlast"):
-                        _video_mode = "climax"
-                    # 选 A：从剧情原文理解体态，补动作延伸 + 简化外貌/场景。
-                    # 失败静默回退（_vp_plan 为空），不阻断出图；非 retargeted 时主模型
-                    # 已给 action_sequence，本提取作为兜底优先补齐，避免动作段退化。
-                    _vp_plan = _extract_video_action_plan(ctx, _merged_spec, video_mode=_video_mode)
-                    if _vp_plan.get("action_sequence"):
-                        _merged_spec["action_sequence"] = _vp_plan["action_sequence"]
-                    if _vp_plan.get("subject_scene"):
-                        _merged_spec["video_subject_scene"] = _vp_plan["subject_scene"]
-                    if _vp_plan.get("audio_design"):
-                        _merged_spec["audio_design"] = _vp_plan["audio_design"]
-                    illustrate_req["video_mode"] = _video_mode
-                    _vcfg = illustrate_req.get("video_config") or {}
-                    if _video_mode == "firstlast":
-                        illustrate_req["video_request"] = _vp_mod.build_video_request(
-                            mode="firstlast", spec=_merged_spec, video_config=_vcfg,
-                            first_frame_desc=illustrate_req.get("first_frame_desc") or "",
-                            last_frame_desc=illustrate_req.get("last_frame_desc") or "",
-                            prev_tail_desc=illustrate_req.get("prev_tail_desc") or "",
-                        )
-                    else:
-                        illustrate_req["video_request"] = _vp_mod.build_video_request(
-                            mode="climax", spec=_merged_spec, video_config=_vcfg,
-                            # first_frame_desc 留空：图职责描述由 video_prompt 用画面级
-                            # 动作瞬间（subjects/visual_facts/composition）兜底，与 [动作]
-                            # 同源，避免把围绕锚点截取的可能陈旧 narrative 写进 [参考绑定]。
-                        )
-                    _video_prompt_text = str(
-                        (illustrate_req["video_request"].get("submit") or {}).get("prompt") or ""
-                    )
-                    # W3 转场任务（坑F/坑G）：firstlast 且首帧需独立生成（transition≠reuse）→
-                    # 额外编译转场 video_request（图片1=上尾帧、图片2=当前首帧），随事件下发。
-                    _decision = str(illustrate_req.get("transition") or "")
-                    if _video_mode == "firstlast" and _decision not in ("reuse", ""):
-                        illustrate_req["transition_video_request"] = _vp_mod.build_video_request(
-                            mode="transition", spec=_merged_spec, video_config=_vcfg,
-                            # transition 分支：first_frame_desc=当前首帧描述（终点），
-                            # prev_tail_desc=上尾帧描述（起点）；last_frame_desc 该分支不使用。
-                            first_frame_desc=illustrate_req.get("first_frame_desc") or "",
-                            prev_tail_desc=illustrate_req.get("prev_tail_desc") or "",
-                        )
-                except Exception:
-                    illustrate_req["video_request"] = None
-            run_trace.emit(
-                ctx,
-                "illustration.request",
-                status="emitted" if illustrate_req else "skipped",
-                reason=("main_plan_retargeted" if plan_retargeted and illustrate_req else
-                        "main_plan" if illustration_plan and illustrate_req else
-                        "character_encounter" if character_encounter and illustrate_req else
-                        "local_scene_fallback" if local_scene_fallback and illustrate_req else
-                        "first_story_reply" if first_story_reply and illustrate_req else
-                        "missing_plan_fallback" if missing_plan_fallback and illustrate_req else
-                        prompt_source if illustrate_req else
-                        "scene_not_triggered" if not at_climax else "empty_prompt"),
-                scene=scene,
-                inferred_scene=local_scene,
-                actor_count=len(request_actors),
-                actors=request_actors,
-                actor_candidates=_known,
-                status_actors=[name for name in _known if name in present],
-                plan_retargeted=plan_retargeted,
-                prompt_chars=len(request_prompt),
-                # V1.5 默认开放：视频生成提示词记入 trace（测试模式核对提示词质量）
-                video_prompt_chars=len(_video_prompt_text),
-                video_prompt=_video_prompt_text,
-            )
+            pool = _wb_comfy_actor_pool(
+                ctx, repo_id, card_name, illustration_plan, actors, sig,
+                user_text=user_text)
+            target = _wb_comfy_scene_target(
+                ctx, repo_id, illustration_plan, clean, sig, pool,
+                prompt_override=prompt_override, motion=motion, user_text=user_text)
+            scene_spec = _wb_comfy_scene_spec(
+                ctx, repo_id, illustration_plan, clean, sig, pool, target)
+            scene_spec = _wb_comfy_profile(
+                ctx, illustration_plan, scene_spec, target["plan_retargeted"])
+            illustrate_req = _wb_comfy_illustrate_env(
+                ctx, illustration_plan, sig, target, scene_spec, motion=target["motion"])
+            video_prompt_text = _wb_frames_and_video(
+                ctx, illustrate_req, scene_spec, clean, transition_decision,
+                target["motion"])
+            _wb_emit_illustration_trace(
+                ctx, illustrate_req, plan=illustration_plan, sig=sig, pool=pool,
+                target=target, scene=scene, local_scene=sig["local_scene"],
+                video_prompt_text=video_prompt_text)
             return think_head + clean, [], illustrate_req, audio_req
         illo = roleplay_agency.maybe_illustrate(
             deps, paragraph=clean, appearance=_illustration_appearance(ctx),
@@ -1122,7 +1381,7 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
             actors=actors or ([card_name] if card_name else []), before=before, after=after,
             turn=turn, cadence=0, explicit=bool(illustration_plan), lost=lost,
             scene=scene, prompt_override=prompt_override,
-            character_encounter=character_encounter)
+            character_encounter=sig["character_encounter"])
         if illo:
             rec = {"id": f"illo-{repo_id}-{turn}", "url": illo["url"], "caption": illo["caption"]}
             return think_head + clean, [rec], {}, audio_req
