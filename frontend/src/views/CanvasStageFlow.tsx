@@ -32,11 +32,11 @@ import {
   loadLayout, saveLayout, clampScale, type NodeLayout, type InspirationCardStored, type ReferenceImageStored, type Viewport,
 } from "../lib/canvasLayout";
 import { consumePendingInspirations, CANVAS_INSPIRATION_EVENT } from "../lib/inspirationInsert";
-import { addWfRun, dropWfRun, updateWfRun, upsertWfRun } from "../lib/wfRunList";
 import {
   buildDraftInputNodes, buildStreamingPlaceholderNodes, buildWfRunNodes,
   type PendingInput, type WfRun,
 } from "../lib/canvasPlaceholderNodes";
+import { useCanvasWfEvents } from "../lib/useCanvasWfEvents";
 import { SendToChatModal, type SendPayload } from "../components/SendToChatModal";
 import { ConfirmModal } from "../components/Modal";
 import { WorkflowToolModal } from "../components/WorkflowToolModal";
@@ -704,70 +704,8 @@ export function CanvasStageFlow({
   }, [settings, threadId, showToast]);
 
   // 运转任务事件：创建占位节点（空位放置）/ 进度更新 / 完成清除
-  useEffect(() => {
-    const onRun = (e: Event) => {
-      const d = (e as CustomEvent).detail as { runId?: string; toolNodeId?: string; templateName?: string } | undefined;
-      if (!d?.runId) return;
-      // 以最新内容节点为锚点展开（生成中占位也遵从此原则）
-      const pos = placePlaceholder(CARD_W, 427, wfRunsRef.current.map((r) => ({ x: r.x, y: r.y, w: CARD_W, h: 427 })));
-      // 列表增删收归单一属主 `lib/wfRunList`（P12）：本组件只管「新项长什么样」
-      setWfRuns((prev) => addWfRun(prev, d.runId!, () => ({
-        id: d.runId!, toolNodeId: d.toolNodeId || "", templateName: d.templateName || "工作流",
-        promptId: "", progress: null, x: pos.x, y: pos.y,
-      })));
-    };
-    const onProg = (e: Event) => {
-      const d = (e as CustomEvent).detail as { taskId?: string; promptId?: string; progress?: number | null; node?: string; templateName?: string } | undefined;
-      if (!d?.taskId) return;
-      // upsert：编辑器弹窗路径只发 progress 事件（不发 run），占位节点同样要出现
-      setWfRuns((prev) => upsertWfRun(
-        prev, d.taskId!,
-        (r) => ({
-          ...r,
-          promptId: d.promptId || r.promptId,
-          progress: d.progress !== undefined ? d.progress : r.progress,
-          node: d.node !== undefined ? d.node : r.node,
-          templateName: d.templateName || r.templateName,
-        }),
-        () => {
-          // 新占位的落点在事务内算：占用矩形必须取自 `prev`（而非 `wfRunsRef`），
-          // 否则同一拍内连续两次事件会各自算到同一个「空位」。
-          const pos = placePlaceholder(CARD_W, 427, prev.map((r) => ({ x: r.x, y: r.y, w: CARD_W, h: 427 })));
-          return {
-            id: d.taskId!, toolNodeId: "", templateName: d.templateName || "工作流",
-            promptId: d.promptId || "", progress: d.progress !== undefined ? d.progress : null,
-            node: d.node || undefined, x: pos.x, y: pos.y,
-          };
-        },
-      ));
-    };
-    const onDone = (e: Event) => {
-      const d = (e as CustomEvent).detail as { taskId?: string } | undefined;
-      if (!d?.taskId) return;
-      // ★ 原位替换：占位节点清除时记录其位置，内容节点到达后落在原位（垂直居中对齐）
-      const run = wfRunsRef.current.find((r) => r.id === d.taskId);
-      if (run) {
-        pendingAnchorRef.current = { x: run.x, y: run.y, w: CARD_W, h: 427 };
-      }
-      setWfRuns((prev) => dropWfRun(prev, d.taskId!));
-    };
-    // 提交后携带 API prompt 图：占位节点据此显示真实提示词/节点名（对齐对话模式）
-    const onRunGraph = (e: Event) => {
-      const d = (e as CustomEvent).detail as { runId?: string; graph?: unknown } | undefined;
-      if (!d?.runId) return;
-      setWfRuns((prev) => updateWfRun(prev, d.runId!, (r) => ({ ...r, graph: d.graph })));
-    };
-    window.addEventListener("laf-canvas-wf-run", onRun);
-    window.addEventListener("laf-canvas-wf-run-graph", onRunGraph);
-    window.addEventListener("laf-canvas-wf-progress", onProg);
-    window.addEventListener("laf-canvas-wf-done", onDone);
-    return () => {
-      window.removeEventListener("laf-canvas-wf-run", onRun);
-      window.removeEventListener("laf-canvas-wf-run-graph", onRunGraph);
-      window.removeEventListener("laf-canvas-wf-progress", onProg);
-      window.removeEventListener("laf-canvas-wf-done", onDone);
-    };
-  }, [placePlaceholder]);
+  //   ⇒ 订阅与字段映射归口 lib/useCanvasWfEvents（T2.1-B）；effect 依赖仍是 [placePlaceholder]。
+  useCanvasWfEvents({ wfRunsRef, pendingAnchorRef, placePlaceholder, setWfRuns });
 
   // 撤销/重做栈：记录完整画布状态快照（nodes / edges / layout / 灵感卡 / 删除黑名单）
   // ★ deletedIds 必须进快照：否则删除节点 → Ctrl+Z 撤销 → 节点从 rfNodes 恢复，
