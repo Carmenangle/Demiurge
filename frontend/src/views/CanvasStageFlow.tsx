@@ -33,6 +33,10 @@ import {
 } from "../lib/canvasLayout";
 import { consumePendingInspirations, CANVAS_INSPIRATION_EVENT } from "../lib/inspirationInsert";
 import { addWfRun, dropWfRun, updateWfRun, upsertWfRun } from "../lib/wfRunList";
+import {
+  buildDraftInputNodes, buildStreamingPlaceholderNodes, buildWfRunNodes,
+  type PendingInput, type WfRun,
+} from "../lib/canvasPlaceholderNodes";
 import { SendToChatModal, type SendPayload } from "../components/SendToChatModal";
 import { ConfirmModal } from "../components/Modal";
 import { WorkflowToolModal } from "../components/WorkflowToolModal";
@@ -397,7 +401,6 @@ export function CanvasStageFlow({
   }, [repoId, settings.outputDir]);
 
   // input 节点事件（占位卡）：draft=双击新建待输入；generating=已提交生成中（由对话流 streamingId 投影）
-  type PendingInput = { id: string; prompt: string; x: number; y: number; status: "draft" | "generating" };
   const [pendingInputs, setPendingInputs] = useState<PendingInput[]>([]);
 
   // 工作流工具卡：/w 选模板后，ChatView 派发 laf-canvas-workflow-tool，画布创建工具型节点
@@ -649,12 +652,6 @@ export function CanvasStageFlow({
   // ===== 工作流运转任务：画布「生成中」占位节点 + 对话框下方进度条 =====
   // 运转工作流 → 画布创建生成中节点（wfRuns 投影）；运转完毕 laf-canvas-wf-done 清除占位，
   // 生成内容节点由 laf-generation-saved 刷新替换。进度经 ComfyUI /ws 直连实时更新。
-  type WfRun = {
-    id: string; toolNodeId: string; promptId: string; templateName: string;
-    progress: number | null; node?: string; x: number; y: number;
-    /** 提交时的 API prompt 图（{id:{class_type,inputs}}）：占位节点显示真实提示词/节点名用 */
-    graph?: unknown;
-  };
   const [wfRuns, setWfRuns] = useState<WfRun[]>([]);
   const wfRunsRef = useRef(wfRuns);
   wfRunsRef.current = wfRuns;
@@ -932,67 +929,15 @@ export function CanvasStageFlow({
         },
       };
     });
-    // ★ 生成中占位节点（对话流 streamingId 投影）：画布输入栏与对话模式同源发送，
-    //   占位节点表面显示调度主管委派过程行（traceText）+ 生成中；生命周期跟随对话流，
-    //   切走再切回不丢失，生成结束即被真实产出节点（或剧情楼层）替换。
-    const streamingMsg = streamingId ? messages.find((m) => m.id === streamingId) : undefined;
-    const streamingPrompt = (() => {
-      if (!streamingId) return "";
-      const idx = messages.findIndex((m) => m.id === streamingId);
-      for (let i = idx - 1; i >= 0; i--) if (messages[i].role === "user") return messages[i].text;
-      return "";
-    })();
-    const streamingPlaceholder: Node<CardNodeData>[] = (streamingId && streamingPosRef.current?.id === streamingId)
-      ? [{
-          id: `gen-${streamingId}`,
-          type: "card" as const,
-          position: { x: streamingPosRef.current!.x, y: streamingPosRef.current!.y },
-          data: {
-            node: {
-              id: `gen-${streamingId}`, type: "input" as const,
-              x: streamingPosRef.current!.x, y: streamingPosRef.current!.y, w: CARD_W, h: 120,
-              generationIds: [], input: true, prompt: streamingPrompt, groupKey: `streaming-${streamingId}`,
-              inputStatus: "generating" as const, traceText: streamingMsg?.text || "",
-            },
-            gens: [], imageUrls: [], prompt: streamingPrompt, isSel: false, naturalSize: undefined,
-            onSelect: () => {},
-            onOpen: () => {},
-            onResize: () => {}, onImgLoaded: () => {},
-            onNodeCtx: (e: React.MouseEvent, nn: CanvasNode) => {
-              const rect = stageWrapRef.current?.getBoundingClientRect();
-              openCtxForNode(e.clientX - (rect?.left || 0), e.clientY - (rect?.top || 0), nn.id);
-            },
-          },
-        }]
-      : [];
-    const draftInputs: Node<CardNodeData>[] = pendingInputs.map((p, i) => ({
-      id: p.id,
-      type: "card",
-      position: { x: p.x, y: p.y },
-      data: {
-        node: {
-          id: p.id, type: "input", x: p.x, y: p.y, w: CARD_W, h: 120,
-          generationIds: [], input: true, prompt: p.prompt, groupKey: `input-${i}`,
-          inputStatus: p.status,
-        },
-        gens: [], imageUrls: [], prompt: p.prompt, isSel: false, naturalSize: undefined,
-        onSelect: () => {},
-        // draft 卡双击 → 新建灵感卡（不是生成内容）
-        onOpen: (nn: CanvasNode) => {
-          if (nn.inputStatus === "draft") {
-            setInspirationEditId("new");
-            setInspirationEditKind("preset");
-            setInspirationEditTitle(nn.prompt && nn.prompt !== "新输入节点" ? nn.prompt : "");
-            setInspirationEditContent(nn.prompt && nn.prompt !== "新输入节点" ? nn.prompt : "");
-          }
-        },
-        onResize: () => {}, onImgLoaded: () => {},
-        onNodeCtx: (e: React.MouseEvent, nn: CanvasNode) => {
-          const rect = stageWrapRef.current?.getBoundingClientRect();
-          openCtxForNode(e.clientX - (rect?.left || 0), e.clientY - (rect?.top || 0), nn.id);
-        },
-      },
-    }));
+    // ★ 生成中占位节点（对话流 streamingId 投影）：builder 见 lib/canvasPlaceholderNodes.ts
+    const streamingPlaceholder: Node<CardNodeData>[] = buildStreamingPlaceholderNodes({
+      streamingId, messages, streamingPos: streamingPosRef.current,
+      stageWrapRef, openCtxForNode,
+    });
+    const draftInputs: Node<CardNodeData>[] = buildDraftInputNodes({
+      pendingInputs, setInspirationEditId, setInspirationEditKind,
+      setInspirationEditTitle, setInspirationEditContent, stageWrapRef, openCtxForNode,
+    });
     const inputs: Node<CardNodeData>[] = [...streamingPlaceholder, ...draftInputs];
     // 工作流工具卡（/w 选模板后由对话消息实时投影，与生成内容节点同机制）
     // ★ 主源 = 对话里的 workflow 消息投影（重启后对话历史恢复 → 节点自动出现，
@@ -1344,40 +1289,9 @@ export function CanvasStageFlow({
         },
       },
     }));
-    // 工作流「生成中」占位节点：运转任务存活期间显示，完毕由生成内容节点替换。
-    // ★ 通用 9:16 占位（与 input generating 占位同款外观 + 模板名 + 实时进度），
-    //   不绑定工作流模板形态——剧情生成/apikey 生成/工作流生成等任何任务都长这样。
-    const wfRunNodes: Node<CardNodeData>[] = wfRuns.map((run) => {
-      // 真实提示词/节点名（对齐对话模式）：graph 在提交后随 run-graph 事件带入
-      const meta = run.graph ? workflowGenMetadata(run.templateName, run.graph) : null;
-      const runPrompt = meta?.prompt || run.templateName;
-      const runNodeLabel = run.node ? (() => {
-        try {
-          const g = (run.graph ?? null) as Record<string, { class_type?: string }> | null;
-          const c = g?.[run.node]?.class_type;
-          return c ? `${c} (#${run.node})` : `节点 #${run.node}`;
-        } catch { return `节点 #${run.node}`; }
-      })() : "";
-      return {
-        id: run.id,
-        type: "card",
-        position: { x: run.x, y: run.y },
-        style: { width: CARD_W, height: 427 },
-        data: {
-          node: {
-            id: run.id, type: "input", x: run.x, y: run.y, w: CARD_W, h: 427,
-            generationIds: [], input: true, inputStatus: "generating",
-            prompt: runPrompt, groupKey: run.id,
-          },
-          gens: [], imageUrls: [], prompt: runPrompt,
-          isSel: false, naturalSize: undefined,
-          wfProgress: run.progress, wfProgressNode: runNodeLabel,
-          onSelect: () => {}, onOpen: () => {}, onResize: () => {}, onImgLoaded: () => {},
-          // 占位节点无右键菜单（临时节点，任务结束自动清除）
-          onNodeCtx: () => {},
-        },
-      };
-    });
+    // ★ 工作流「生成中」占位节点：运转期间显示、完毕由生成内容节点替换
+    //   （builder 见 lib/canvasPlaceholderNodes.ts，与生成中占位同属「临时节点」）
+    const wfRunNodes: Node<CardNodeData>[] = buildWfRunNodes(wfRuns);
     const nextNodes: Node<CardNodeData>[] = [...inputs, ...toolCards, ...storyNodes, ...wfRunNodes, ...inspirationNodes, ...referenceImageNodes, ...projected];
     // 投影时保留用户选中状态（框选/单击），避免 useEffect 重跑强制 selected:false
     // 取消选中；且内容（id/position/selected）未变时返回原数组引用，React 不重渲染 → 不闪
