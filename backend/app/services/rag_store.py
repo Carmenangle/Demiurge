@@ -209,8 +209,8 @@ def index_table_rows(repo_id: str, cfg: EmbedConfig,
         old_ids = got.get("ids", []) or []
         if old_ids:
             store.delete(ids=old_ids)
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - 清旧行失败会留孤儿索引，必须留痕
+        _log.warning("表格旧行索引清理失败 table=%s: %s", table_uid, exc)
     texts = [t for t in row_texts if t and t.strip()]
     if not texts:
         return 0
@@ -589,12 +589,12 @@ def dedup_generations(repo_id: str, cfg: EmbedConfig) -> int:
             try:
                 store.delete(ids=[d["id"]])
                 removed += 1
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001 - 去重删除失败留痕：重复条目会残留
+                _log.warning("生成图去重删除失败 id=%s url=%s: %s", d.get("id"), url, exc)
     return removed
 
 
-def _local_path_of(image_url: str) -> Path | None:
+def local_path_of(image_url: str) -> Path | None:
     """从 local-view?path=... 解出本机磁盘路径；非本机留存图返回 None。"""
     if not image_url or "local-view" not in image_url:
         return None
@@ -644,7 +644,7 @@ def prune_missing_generations(repo_id: str, cfg: EmbedConfig) -> int:
             continue
         image_url = (d.get("image_url") or "").strip()
         missing = False
-        p = _local_path_of(image_url)
+        p = local_path_of(image_url)
         if p is not None:
             missing = not p.is_file()
         else:
@@ -659,8 +659,8 @@ def prune_missing_generations(repo_id: str, cfg: EmbedConfig) -> int:
         try:
             store.delete(ids=[d["id"]])
             removed += 1
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 - 失效清理失败留痕：幽灵条目会残留
+            _log.warning("失效生成图清理失败 id=%s: %s", d.get("id"), exc)
     return removed
 
 

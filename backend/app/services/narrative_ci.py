@@ -37,8 +37,8 @@ CODE_STYLE_PATTERN_REPEAT = prose_style.CODE_STYLE_PATTERN_REPEAT
 CODE_STYLE_OPENING_CUE = prose_style.CODE_STYLE_OPENING_CUE
 
 
-def _diagnostic(turn: int, code: str, message: str, evidence: str,
-                source: str, severity: str = "warning") -> dict:
+def diagnostic_entry(turn: int, code: str, message: str, evidence: str,
+                     source: str, severity: str = "warning") -> dict:
     raw = f"{turn}|{code}|{message}|{evidence}|{source}"
     return {
         "id": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
@@ -92,7 +92,7 @@ def evaluate(text: str, *, turn: int, facts: Iterable[dict] = (),
     for (subject, predicate), items in grouped.items():
         objects = {str(item.get("object") or "") for item in items}
         if subject and predicate and len(objects) > 1:
-            diagnostics.append(_diagnostic(
+            diagnostics.append(diagnostic_entry(
                 turn, CODE_ACTIVE_CONFLICT,
                 f"{subject} 的「{predicate}」同时存在多个有效事实。",
                 "；".join(sorted(objects)), "temporal_fact_store", "error",
@@ -108,7 +108,7 @@ def evaluate(text: str, *, turn: int, facts: Iterable[dict] = (),
             or f"{subject}不在{object_}" in body
             or f"并非{subject}" in body and object_ in body
         ):
-            diagnostics.append(_diagnostic(
+            diagnostics.append(diagnostic_entry(
                 turn, CODE_CONTRADICTION,
                 f"正文可能否定当前有效事实：{subject}／{object_}。",
                 str(fact.get("evidence") or object_), "temporal_fact_store", "error",
@@ -127,13 +127,13 @@ def evaluate(text: str, *, turn: int, facts: Iterable[dict] = (),
             except (TypeError, ValueError):
                 jump = 0
             if jump > 30:
-                diagnostics.append(_diagnostic(
+                diagnostics.append(diagnostic_entry(
                     turn, CODE_RELATIONSHIP_JUMP,
                     f"{field} 单回合变化 {value}，需要明确剧情依据。",
                     evidence_str or "状态更新未提供证据", "character_state",
                 ))
         if field.endswith("所在") and not evidence_str:
-            diagnostics.append(_diagnostic(
+            diagnostics.append(diagnostic_entry(
                 turn, CODE_LOCATION_NO_TRANSIT,
                 f"{field} 已改变但没有过渡证据。",
                 str(value or ""), "character_state",
@@ -148,7 +148,7 @@ def evaluate(text: str, *, turn: int, facts: Iterable[dict] = (),
         if str(item.get("stance") or "") == "unknown" and (character, fact_id) not in known:
             claim = str(item.get("claim") or "").strip()
             if character and claim and character in body and claim in body:
-                diagnostics.append(_diagnostic(
+                diagnostics.append(diagnostic_entry(
                     turn, CODE_KNOWLEDGE_OVERREACH,
                     f"{character} 在正文中使用了尚未知晓的事实。",
                     claim, "character_belief", "error",
@@ -173,7 +173,7 @@ def evaluate(text: str, *, turn: int, facts: Iterable[dict] = (),
                     idx_c = body.index(core)
                     window = body[max(0, idx_c - 60): idx_c + 60]
                     if any(w in window for w in neg_words):
-                        diagnostics.append(_diagnostic(
+                        diagnostics.append(diagnostic_entry(
                             turn, CODE_BELIEF_CONFLICT,
                             f"{character} 相信「{claim}」，但正文否定了这一认知。",
                             f"stance={stance}，claim={claim}", "character_belief", "warning",
@@ -184,21 +184,21 @@ def evaluate(text: str, *, turn: int, facts: Iterable[dict] = (),
     # 简单启发：同一句/段内出现"然后回到"或同一角色先"结果"再"于是"等多步冲突
     temporal_conflicts = _detect_temporal_paradox(body)
     for msg, evd in temporal_conflicts:
-        diagnostics.append(_diagnostic(
+        diagnostics.append(diagnostic_entry(
             turn, CODE_TEMPORAL_PARADOX, msg, evd, "narrative_ci", "warning",
         ))
 
     # ── 7. 空间位置矛盾（新增）：角色出现在两个不相连空间但无过渡 ───────────
     spatial_conflicts = _detect_spatial_inconsistency(body)
     for msg, evd in spatial_conflicts:
-        diagnostics.append(_diagnostic(
+        diagnostics.append(diagnostic_entry(
             turn, CODE_SPATIAL_INCONSIST, msg, evd, "narrative_ci", "warning",
         ))
 
     # ── 8. 关系单轮剧变（新增）───────────────────────────────────────────────
     relation_changes = _detect_relation_change(body)
     for msg, evd in relation_changes:
-        diagnostics.append(_diagnostic(
+        diagnostics.append(diagnostic_entry(
             turn, CODE_RELATION_CHANGE, msg, evd, "narrative_ci", "warning",
         ))
 
@@ -209,7 +209,7 @@ def evaluate(text: str, *, turn: int, facts: Iterable[dict] = (),
             continue
         violated = _check_world_rule_violation(body, rule_text)
         if violated:
-            diagnostics.append(_diagnostic(
+            diagnostics.append(diagnostic_entry(
                 turn, CODE_WORLD_RULE_BREAK,
                 f"正文可能违反世界设定：{rule_text}",
                 violated, "worldbook", "warning",
@@ -222,7 +222,7 @@ def evaluate(text: str, *, turn: int, facts: Iterable[dict] = (),
                        else prose_style.effective_phrases(style_config))
             for item in prose_style.lint(body, recent_openings=list(recent_openings),
                                          banned_phrases=phrases):
-                diagnostics.append(_diagnostic(
+                diagnostics.append(diagnostic_entry(
                     turn, item["code"], item["message"], item["evidence"],
                     "prose_style", item.get("severity", "warning"),
                 ))

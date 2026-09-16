@@ -78,7 +78,7 @@ def maybe_review(*, cfg: dict | None, text: str, turn: int,
     review = result.value
     evidence = f"开头:{review.opening_specificity or '—'}；节奏:{review.rhythm or '—'}；" \
                f"口语化:{review.colloquial or '—'}；细节:{review.detail_support or '—'}"
-    diagnostic = narrative_ci._diagnostic(
+    diagnostic = narrative_ci.diagnostic_entry(
         turn, prose_style.CODE_STYLE_LIVING_REVIEW,
         f"活人感通审：{review.alive_score}/100。{(review.summary or '').strip()}",
         evidence, "style_review", "info",

@@ -523,7 +523,6 @@ def render_plan_md(plan: GenerationPlan) -> str:
     return "\n".join(lines)
 
 
-_PATH_LIKE_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|[/\\])")
 _SECTION_SEP_RE = re.compile(r"^={5,}\s*$")
 
 # 编译期注入的机器目录附件名（agent_graph 铸造）：只供模型解析真实 id/文件名，
@@ -911,7 +910,7 @@ def _declared_read_paths(plan: GenerationPlan) -> list[str]:
         if cap is None or cap.side_effect_level != "readonly":
             continue
         for value in step.params.values():
-            if isinstance(value, str) and _PATH_LIKE_RE.match(value) and value not in out:
+            if isinstance(value, str) and plan_validator.PATH_LIKE_RE.match(value) and value not in out:
                 out.append(value)
     return out
 

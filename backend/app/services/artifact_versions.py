@@ -79,12 +79,18 @@ _storage_root = storage_root  # 内部旧名（本模块内多处调用，保留
 
 
 def _domains(output_dir: str, repo_id: str) -> list[Path]:
-    """产物访问/收集域集合（与产物卡同口径；失败退化为单域）。"""
-    from app.services import collection_artifacts
+    """产物访问/收集域集合（与产物卡同口径；失败退化为单域）。
+
+    2026-09-14 收口：改调**公开属主** `repo_meta.artifact_domains`，不再跨模块 import
+    私有名 `collection_artifacts._domains_of`（后者本就是对前者的薄包装 + 外层兜底）。
+    行为等价：非空 repo_id 两者同源；空 repo_id 原语返回 `[作品库根]`、`_domains_of`
+    同样返回 `[根]`；空 output_dir 两侧都返回 `[]`。
+    """
+    from app.services import repo_meta
     if not (output_dir or "").strip():
         return []
     try:
-        return collection_artifacts._domains_of(output_dir, repo_id)
+        return repo_meta.artifact_domains(output_dir, repo_id)
     except Exception:  # noqa: BLE001 - 域解析异常不该让快照整体失败
         return [Path(output_dir)]
 

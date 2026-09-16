@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import shutil
 import threading
 import uuid
@@ -11,6 +12,8 @@ from dataclasses import dataclass
 from app.services import agent_runner, attachment_store, chat_memory, chat_snapshot, rag_store, repo_meta
 from app.services.pathnames import safe_seg
 from app.services.rag_backend import EmbedConfig
+
+_LOG = logging.getLogger("uvicorn.error")
 
 
 class MaintenanceConflict(RuntimeError):
@@ -110,7 +113,7 @@ def _snapshot_history(snapshot: list[dict]) -> list[dict]:
 def _usable_image(url: str) -> bool:
     if not url:
         return False
-    path = rag_store._local_path_of(url)
+    path = rag_store.local_path_of(url)
     return path is None or path.is_file()
 
 
@@ -157,8 +160,8 @@ def clear_cache(thread_id: str, output_dir: str) -> ClearCacheResult:
         except Exception as exc:
             try:
                 chat_snapshot.save(thread_id, old_snapshot)
-            except Exception:
-                pass
+            except Exception as roll_exc:  # noqa: BLE001 - 回滚失败必须留痕，否则快照静默分叉
+                _LOG.warning("清空对话后快照回滚失败 thread=%s: %s", thread_id, roll_exc)
             raise MaintenanceFailed(f"清空对话失败：{exc}") from exc
         # B1 连带：快照清空 = 该会话附件一起删（历史回放卡随之失效，属预期）
         try:
@@ -232,12 +235,12 @@ def compact(thread_id: str, llm, embed_cfg: EmbedConfig) -> dict:
         except Exception as exc:
             try:
                 chat_snapshot.save(thread_id, old_snapshot)
-            except Exception:
-                pass
+            except Exception as roll_exc:  # noqa: BLE001 - 回滚失败必须留痕，否则快照静默分叉
+                _LOG.warning("压缩后快照回滚失败 thread=%s: %s", thread_id, roll_exc)
             try:
                 chat_memory.replace_history(thread_id, history)
-            except Exception:
-                pass
+            except Exception as roll_exc:  # noqa: BLE001 - 回滚失败必须留痕，否则记忆静默分叉
+                _LOG.warning("压缩后对话记忆回滚失败 thread=%s: %s", thread_id, roll_exc)
             raise MaintenanceFailed(f"写入摘要对话失败：{exc}") from exc
 
     return {

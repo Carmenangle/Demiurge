@@ -18,7 +18,7 @@ from app.services.message_images import extract_image_url
 from app.services.image_prompt_style import guidance_for
 
 # 通用规则；生图提示词的「风格写法」仅在用户选了自定义风格存档时才在 _build 里拼接（见 image_prompt_style）。
-_AGENT_SYSTEM_BASE = (
+AGENT_SYSTEM_BASE = (
     "你是本地通用 AI 助手，默认进行普通对话。你具备生图、图生图、反推图片提示词、联网找灵感等工具能力。\n"
     "只有用户明确要求立即执行，或本轮只提交了一段可直接执行的成稿提示词时，才调用对应工具。"
     "讨论、商讨、评审、解释或优化提示词都属于普通对话，不得自行生成内容。\n"
@@ -193,7 +193,7 @@ def _build(chat_base: str, chat_key: str, chat_model: str,
     if agent_cfg and (agent_cfg.get("systemPrompt") or "").strip():
         system_prompt = agent_cfg["systemPrompt"].strip()
     else:
-        system_prompt = _AGENT_SYSTEM_BASE
+        system_prompt = AGENT_SYSTEM_BASE
     if agent_cfg and (agent_cfg.get("memory") or "").strip():
         system_prompt += "\n\n【长期记忆（关于用户/偏好）】\n" + agent_cfg["memory"].strip()
 

@@ -36,3 +36,21 @@ def test_emit达到上限时轮转(tmp_path, monkeypatch):
 
     assert target.with_name("agent-trace.jsonl.1").read_text(encoding="utf-8") == "x" * 20
     assert json.loads(target.read_text(encoding="utf-8"))["event"] == "turn.started"
+
+
+def test_测试期TRACE必须已重定向出真实日志目录():
+    """契约守卫（2026-09-15 P2）：**本测试不自己 monkeypatch**。
+
+    全量测试的 trace 隔离靠 `tests/conftest.py::_isolate_run_trace`（autouse）。一旦有人删掉
+    那个 fixture，或新写的生产路径绕开 `run_trace` 模块属性直写真实文件，本用例立刻失败——
+    它守的是「跑测试不得写真实 `backend/data/logs/`」：真实 trace 被反复写/轮转时会触发
+    `_rotate` 的 `unlink`，撞沙箱 safe-delete 守卫抛 `SystemExit(1)`（`emit` 的
+    `except Exception` 兜不住），表现为整批假失败。
+    """
+    from app.config import DATA_DIR
+
+    real_dir = (DATA_DIR / "logs").resolve()
+    assert run_trace.TRACE_DIR.resolve() != real_dir, "TRACE_DIR 仍指向真实 logs 目录"
+    assert real_dir not in run_trace.TRACE_DIR.resolve().parents
+    assert run_trace.TRACE_FILE.resolve() != (real_dir / "agent-trace.jsonl").resolve()
+    assert real_dir not in run_trace.TRACE_FILE.resolve().parents

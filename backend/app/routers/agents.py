@@ -46,8 +46,8 @@ def save_agents(agents: list[Agent]) -> list[Agent]:
 @router.get("/default-prompt")
 def default_prompt() -> dict:
     """返回内置默认系统提示词（普通对话优先 + 显式工具调用规则）。"""
-    from app.services.image_agent import _AGENT_SYSTEM_BASE
-    return {"prompt": _AGENT_SYSTEM_BASE}
+    from app.services.image_agent import AGENT_SYSTEM_BASE
+    return {"prompt": AGENT_SYSTEM_BASE}
 
 
 # ── ③ 内置智能体：展示图里所有默认 Agent + 参数 + 绑定工具，开放高价值字段覆盖 ──

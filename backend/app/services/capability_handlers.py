@@ -42,7 +42,7 @@ def submit_batch(template_id: str, variants: list[dict[str, Any]], prompt: str =
         if not isinstance(values, dict):
             results.append({"index": index, "ok": False, "detail": "变体值必须是对象"})
             continue
-        template_id = _resolve_template_id(str(values.get("template_id") or template_id))
+        template_id = resolve_template_id(str(values.get("template_id") or template_id))
         values["template_id"] = template_id
         # 顶层 lora_name 下发到缺省变体（用户指定 LoRA 而模型只在顶层写时）
         if lora_name and not values.get("lora_name"):
@@ -310,7 +310,7 @@ def collect_comfy_outputs(prompt_ids: list[str] | None = None, comfyui_url: str 
     return {"collected": sum(1 for r in results if r.get("ok")), "results": results}
 
 
-def _resolve_template_id(template_id: str) -> str:
+def resolve_template_id(template_id: str) -> str:
     """template_id 查不到时按名称包含匹配归一（容忍「模板」后缀等修饰）。"""
     from app.services import template_store
     if template_store.get_template(template_id) is not None:

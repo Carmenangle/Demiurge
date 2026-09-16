@@ -107,13 +107,13 @@ def submit_task(plan: GenerationPlan, *, output_dir: str, repo_id: str = "",
                 configured_models: set[str] | frozenset[str] = frozenset()) -> dict:
     """校验 → 幂等去重 → 落库排队。返回 {task_id, deduped, duplicate_of?}。"""
     # 运行环境归一与编译器同款：collect 落盘目标由环境决定（堵 reversible 绕过路径域）
-    from app.services.capability_handlers import _resolve_template_id
+    from app.services.capability_handlers import resolve_template_id
     submit_ids = []
     for st in plan.steps:
         if st.operation.startswith("workflow.submit"):
             tid_param = str(st.params.get("template_id") or "")
             if tid_param:
-                st.params["template_id"] = _resolve_template_id(tid_param)
+                st.params["template_id"] = resolve_template_id(tid_param)
             submit_ids.append(st.id)
     for step in plan.steps:
         # 落盘/执行类参数一律环境归一（模型不得决定写入外部）。清单单一属主 =
@@ -494,12 +494,12 @@ def _step_paths(step) -> list[str]:
 
     兼容两种步骤形态：DB Row（params_json）与 Pydantic PlanStep（params）。
     """
-    from app.services.plan_validator import _PATH_LIKE_RE
+    from app.services.plan_validator import PATH_LIKE_RE
     try:  # DB Row（键索引）
         params = json.loads(step["params_json"] or "{}")
     except (TypeError, IndexError, KeyError):  # Pydantic PlanStep
         params = dict(getattr(step, "params", {}) or {})
-    return [v for v in params.values() if isinstance(v, str) and _PATH_LIKE_RE.match(v)]
+    return [v for v in params.values() if isinstance(v, str) and PATH_LIKE_RE.match(v)]
 
 
 def _out_domain_paths(step, output_dir: str) -> list[str]:
@@ -923,8 +923,8 @@ def _publish_progress(task_id: str, status: str) -> None:
             "error": task["error"], "updated_at": _now(),
         }
         task_progress_store.save(PROGRESS_NAMESPACE, tasks)
-    except Exception:  # noqa: BLE001 - 进度发布失败不影响执行
-        pass
+    except Exception as exc:  # noqa: BLE001 - 进度发布失败不影响执行，但必须留痕（否则前端进度停住无诊断）
+        logger.warning("任务进度发布失败 task_id=%s: %s", task_id, exc)
 
 
 def _trace(ctx: dict, event: str, **data: Any) -> None:

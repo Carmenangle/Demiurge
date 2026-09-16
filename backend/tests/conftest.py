@@ -49,6 +49,185 @@ def _isolate_task_progress_store(tmp_path, monkeypatch):
     monkeypatch.setattr(task_progress_store, "STORE_DIR", tmp_path / "task_progress")
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _isolate_run_trace(tmp_path_factory):
+    """Agent trace 全程落 tmp，绝不碰真实 backend/data/logs/agent-trace.jsonl（2026-09-15 P2）。
+
+    **必须是会话级，不能只做函数级** —— 这是踩过才定下的：函数级 monkeypatch 会在每个用例
+    teardown 时把 `TRACE_FILE` 还原成真实路径，而 agent_graph 的**后台维护线程**（table_maintenance /
+    belief.extract / style_review，见 `agent_graph._run_maintenance` 一链）是在用例结束后才 emit 的
+    ⇒ 那几行会落回真实文件。实测：函数级隔离下跑 4 个 emit 密集文件仍向真实文件写入 546 字节
+    （新增行时间戳正好压在该批收尾秒）。会话级把真实路径锁一整个 session，线程再晚也落在 tmp。
+
+    背景（为什么值得单独一个 fixture）：此前触发真实 `emit` 的用例会写真实 trace，其轮转 `_rotate`
+    在超 `MAX_BYTES` 时 `unlink`/`replace` 备份，反复触发会撞沙箱 safe-delete 守卫抛 `SystemExit(1)`
+    ——**不是 `Exception`**，`emit` 的 `except Exception` 兜不住，于是整批假失败（堆栈签名固定为
+    `emit → _rotate(TRACE_FILE)`，留档 `backend/_tmp/pytest_lease.txt`、`junit-p0p1-full.xml`）。
+    重定向到 tmp 后文件远小于 `MAX_BYTES` ⇒ `_rotate` 早返回，**根本不产生 unlink**。
+
+    全仓**没有** `from app.services.run_trace import TRACE_FILE` 式冻结绑定，调用方一律
+    `run_trace.emit(...)` / `run_trace.read_recent(...)` 走模块属性 ⇒ 改模块属性即覆盖全部调用方。
+    用例要断言别的目录/轮转行为，可在自己函数体里再 `monkeypatch.setattr(run_trace, "TRACE_FILE", ...)`
+    （后设者胜，`test_run_trace.py` / `test_run_trace_read.py` / `test_agent_dispatch.py` 即此）。
+    """
+    from app.services import run_trace
+
+    trace_dir = tmp_path_factory.mktemp("agent-trace")
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(run_trace, "TRACE_DIR", trace_dir)
+    monkeypatch.setattr(run_trace, "TRACE_FILE", trace_dir / "agent-trace.jsonl")
+    yield trace_dir
+    monkeypatch.undo()
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-15 P3：其余模块级存储常量补进 conftest（与上一批同口径）。
+#
+# 这批常量都指向**真实 backend/data 运行态**，此前只靠各用例自己
+# `monkeypatch.setattr`，于是任何「新写的生产写入路径」一旦没被显式重定向就会漏
+# （09-10 task_progress_store、09-15 run_trace 两次事故同款成因）。
+#
+# 收口前实测（全量 pytest 前后对比 backend/data 全量文件的 size+mtime，
+# 脚本 `_tmp/data_snapshot.py`，快照 `_tmp/snap_A|B.json`）：**7 个真实文件被写** ——
+# `chat_revisions.json`、`chroma/chroma.sqlite3`、`comfy_extra_paths.yaml`、
+# `flow_docs/{repo-1,repo-123,r1,work}.json`。补完本组 fixture 后应回落为 0。
+#
+# 经 grep 确认：attachment_store / chat_snapshot / build_session_store / procedure_skills /
+# prompt_approval_store / scenario_lab 六者全仓**零**「`from <模块> import <常量>`」式
+# 跨模块冻结绑定（调用方一律走模块属性）⇒ patch 模块属性即覆盖全部调用方。
+# 唯 CHROMA_DIR 例外：被 4 个模块 `from app.config import CHROMA_DIR` 冻结。
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _isolate_attachment_store(tmp_path, monkeypatch):
+    """对话附件一律落 tmp，绝不碰真实 backend/data/attachments/。"""
+    from app.services import attachment_store
+
+    monkeypatch.setattr(attachment_store, "ATTACH_ROOT", tmp_path / "attachments")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_chat_snapshot(tmp_path, monkeypatch):
+    """会话快照 + 修订表落 tmp，绝不碰真实 backend/data/chat_snapshots|chat_revisions.json。
+
+    `_REVISIONS_PATH` 是**收口前实测泄漏点**（`_save_revisions` 直接 mkdir+write，无条件写）。
+    注意：仓库文件夹可解析时快照走仓库目录 —— 那是作品数据不是运行态，本 fixture 只管
+    `SNAP_DIR` 这个「旧位置/未配置仓库文件夹时的回退」。
+    """
+    from app.services import chat_snapshot
+
+    monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path / "chat_snapshots")
+    monkeypatch.setattr(chat_snapshot, "_REVISIONS_PATH", tmp_path / "chat_revisions.json")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_build_session_store(tmp_path, monkeypatch):
+    """AI 搭工作流的会话态落 tmp，绝不碰真实 backend/data/build_sessions/。"""
+    from app.services import build_session_store
+
+    monkeypatch.setattr(build_session_store, "SESS_DIR", tmp_path / "build_sessions")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_procedure_skills(tmp_path, monkeypatch):
+    """流程技能库落 tmp，绝不碰真实 backend/data/procedure_skills.json。"""
+    from app.services import procedure_skills
+
+    monkeypatch.setattr(procedure_skills, "STORE", tmp_path / "procedure_skills.json")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_prompt_approval_store(tmp_path, monkeypatch):
+    """提示词审批表落 tmp，绝不碰真实 backend/data/prompt_approvals.json。"""
+    from app.services import prompt_approval_store
+
+    monkeypatch.setattr(prompt_approval_store, "APPROVALS_FILE", tmp_path / "prompt_approvals.json")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_scenario_lab(tmp_path, monkeypatch):
+    """情景实验的快照/实验区落 tmp，绝不碰真实 backend/data/scenario_{snapshots,experiments}/。"""
+    from app.services import scenario_lab
+
+    monkeypatch.setattr(scenario_lab, "SNAPSHOT_ROOT", tmp_path / "scenario_snapshots")
+    monkeypatch.setattr(scenario_lab, "EXPERIMENT_ROOT", tmp_path / "scenario_experiments")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_flow_context(tmp_path, monkeypatch):
+    """流程文档句柄落 tmp，绝不碰真实 backend/data/flow_docs/（**收口前实测泄漏点**）。
+
+    `flow_context._root()` 在**调用时**才 `from app.config import DATA_DIR`；这里直接把该
+    解析函数指向 tmp —— 比改 `config.DATA_DIR` 安全（后者会连带影响 8 个「调用时读者」，
+    其中读设置的都是 `repo_meta` 属主；2026-09-15 P8 前 `routers/artifacts.py` 的
+    `sync-worldbook` 也直读真实 `user_state.json`，已收口）。
+
+    ⚠ 顺带一条跨 fixture 的事故留档：**别让 `config.DATA_DIR` 指向真实盘的情况出现在
+    「会让端点按真实设置落盘」的用例里** —— P8 实测，`sync-worldbook` 的目标目录来自
+    `user_state.json` 的 `worldbookDir`，没盖住就会把用户真实资产库
+    `userdata/worlds/<卡名>.json` 覆写掉（事故与恢复见 `tests/test_artifacts_sync_worldbook.py` 模块 docstring）。
+    """
+    from app.services import flow_context
+
+    monkeypatch.setattr(flow_context, "_root", lambda: tmp_path / "flow_docs")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_chroma_store(tmp_path, monkeypatch):
+    """向量库持久化目录落 tmp，绝不碰真实 backend/data/chroma/（**收口前实测泄漏点**）。
+
+    为什么两层一起上：全仓有 **5 个 chroma 客户端站点、三种解析方式** ——
+    ① `scenario_lab` / `visual_asset_index` / `output_path_migration` 用**冻结常量**
+       `CHROMA_DIR`（`from app.config import CHROMA_DIR`，改 config 属性覆盖不到）；
+    ② `rag_backend.store()` 走 langchain 的 `Chroma(persist_directory=CHROMA_DIR)`
+       （不是 `chromadb.PersistentClient`，边界桩盖不住，只能改它的模块常量）；
+    ③ `repo_meta._rewrite_paths` 是**调用时**才 `DATA_DIR / "chroma"`，既无常量可改、
+       也非 langchain 路径。
+    ⇒ 常量层改 ① ②，`chromadb.PersistentClient` 边界桩兜 ③（顺带把 ① 再兜一遍）。
+    """
+    import chromadb
+
+    from app import config
+    from app.services import output_path_migration, rag_backend, scenario_lab, visual_asset_index
+
+    chroma = tmp_path / "chroma"
+    monkeypatch.setattr(config, "CHROMA_DIR", chroma)
+    for mod in (output_path_migration, rag_backend, scenario_lab, visual_asset_index):
+        monkeypatch.setattr(mod, "CHROMA_DIR", chroma)
+
+    real_client = chromadb.PersistentClient
+
+    def _sandboxed_client(*args, **kwargs):
+        if args:
+            args = (str(chroma), *args[1:])
+        else:
+            kwargs["path"] = str(chroma)
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(chromadb, "PersistentClient", _sandboxed_client)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_comfy_launcher(tmp_path, monkeypatch):
+    """ComfyUI 启动器**写出的**运行态文件落 tmp（**实测泄漏**：真实 data/comfy_extra_paths.yaml）。
+
+    ⚠ 不能整块改 `comfy_launcher.DATA_DIR` 了事：`DATA_DIR` 同时喂**读侧**
+    —— `_config_path()`（`data/comfy_config.json`，真实 ComfyUI 安装路径）被
+    `load_config()` 读给 `audio_merge.find_ffmpeg()` 用。若连它一起指向 tmp，
+    `find_ffmpeg()` 读不到配置 ⇒ `test_audio_merge` 的 3 条「真实 ffmpeg」用例
+    从**执行**静默退化为**跳过**（2026-09-15 实测踩到：全量 skipped 0→3）。
+    故这里只让 DATA_DIR 影响**写侧**路径（`write_ext_yaml` / `_stdout_log_path`），
+    再把 `_config_path` 钉回真实文件，保读取语义不变。
+    （用例要重定向配置读写时，照 `test_comfy_launcher.py` 自行 patch `_config_path`。）
+    """
+    from app.services import comfy_launcher
+
+    real_config_path = comfy_launcher._config_path()
+    monkeypatch.setattr(comfy_launcher, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(comfy_launcher, "_config_path", lambda: real_config_path)
+
+
 @pytest.fixture(autouse=True)
 def _block_os_folder_reveal(monkeypatch):
     """测试期间绝不真的弹出资源管理器（2026-09-10 事故）。

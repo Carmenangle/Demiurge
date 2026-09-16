@@ -22,7 +22,7 @@ _TYPE_CHECKS: dict[str, tuple] = {
 }
 
 # 像绝对路径的参数值（Windows 盘符/反斜杠 或 POSIX 根开始）
-_PATH_LIKE_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|[/\\])")
+PATH_LIKE_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|[/\\])")
 
 # 「生图提示词/出图提示词」里的「生图/出图」是提示词的**定语**，不是生成动作——
 # 2026-09-11 实锤：「顺便跟我讨论各个服装下的这名角色的生图提示词」被意图守卫的
@@ -255,7 +255,7 @@ def _check_paths(plan: GenerationPlan, allowed_prefix: str,
         if str((by_op.get(step.operation) or {}).get("side_effect_level")) == "readonly":
             continue
         for key, value in step.params.items():
-            if not isinstance(value, str) or not _PATH_LIKE_RE.match(value):
+            if not isinstance(value, str) or not PATH_LIKE_RE.match(value):
                 continue
             try:
                 candidate = PureWindowsPath(value)

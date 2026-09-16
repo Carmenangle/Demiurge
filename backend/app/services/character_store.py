@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +22,8 @@ from typing import Any
 
 from app.services.character_card import NormalizedCard
 from app.services.pathnames import safe_dir
+
+_LOG = logging.getLogger("uvicorn.error")
 
 CARD_FILE = "card.json"
 WORLDBOOK_FILE = "worldbook.json"
@@ -348,7 +351,7 @@ def save_card(
         (folder / CHAT_FILE).write_text(
             json.dumps(existing_chat, ensure_ascii=False), encoding="utf-8"
         )
-    return _summary(folder, card.name)
+    return summary_of_card(folder, card.name)
 
 
 def _write_or_clear(path: Path, value: Any) -> None:
@@ -372,7 +375,7 @@ def list_cards(base: str) -> list[CardSummary]:
             name = json.loads(cf.read_text(encoding="utf-8")).get("name") or child.name
         except (json.JSONDecodeError, OSError):
             name = child.name
-        out.append(_summary(child, name))
+        out.append(summary_of_card(child, name))
     return out
 
 
@@ -397,8 +400,8 @@ def scan_loose_cards(base: str, worldbook_dir: str = "") -> dict[str, list[str]]
             if c.has_worldbook:
                 try:
                     extract_embedded_worldbook(base, c.name, worldbook_dir)
-                except Exception:  # noqa: BLE001  单卡迁移失败不阻断扫描
-                    pass
+                except Exception as exc:  # noqa: BLE001  单卡迁移失败不阻断扫描，但必须留痕
+                    _LOG.warning("存量卡内嵌世界书外拆失败 card=%s: %s", c.name, exc)
     for child in sorted(root.iterdir()):
         # 只处理根目录下的散装文件；卡文件夹（子目录）与非卡后缀跳过
         if not child.is_file() or child.suffix.lower() not in (".json", ".png"):
@@ -421,8 +424,8 @@ def scan_loose_cards(base: str, worldbook_dir: str = "") -> dict[str, list[str]]
         if (worldbook_dir or "").strip():
             try:
                 extract_embedded_worldbook(base, card.name, worldbook_dir)  # 内嵌世界书外拆+剥离
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001  新卡外拆失败不阻断导入，但必须留痕
+                _LOG.warning("新卡内嵌世界书外拆失败 card=%s: %s", card.name, exc)
         try:
             child.unlink()  # 成功入库 → 删散装源，避免重复扫描
         except OSError:
@@ -511,7 +514,7 @@ def delete_card(base: str, name: str) -> bool:
     return not folder.exists()
 
 
-def _summary(folder: Path, name: str) -> CardSummary:
+def summary_of_card(folder: Path, name: str) -> CardSummary:
     return CardSummary(
         name=name,
         folder=folder.name,

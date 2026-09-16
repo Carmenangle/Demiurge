@@ -134,7 +134,7 @@ async def import_character(
     if worldbook_dir:
         character_store.extract_embedded_worldbook(base, card.name, worldbook_dir)
     # 外拆后重新取 summary（has_worldbook 已变 False，卡变干净）
-    summary = character_store._summary(character_store.card_dir(base, card.name), card.name)
+    summary = character_store.summary_of_card(character_store.card_dir(base, card.name), card.name)
     return {"ok": True, **summary.__dict__}
 
 
