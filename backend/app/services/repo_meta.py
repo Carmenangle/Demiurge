@@ -16,14 +16,19 @@ from app.services.pathnames import safe_dir, safe_seg
 
 
 def _load_state() -> dict:
-    """读 user_state.json（repos + settings 单一属主）。缺失/损坏返回空 dict。"""
+    """读 user_state.json（repos + settings 单一属主）。缺失/损坏返回空 dict。
+
+    ⚠ `OSError` 也在吞掉之列：P8（2026-09-15）把 `sync-worldbook` 的设置读取从路由内联
+    （原写法是 `except (OSError, ValueError)` 回退空串）搬到本属主上——属主**不得比它替换掉的
+    代码更不耐错**，否则读盘失败（权限 / 删除竞态）会从「400 未配置」退化成裸异常 500。
+    """
     p = DATA_DIR / "user_state.json"
     if not p.is_file():
         return {}
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else {}
-    except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+    except (json.JSONDecodeError, UnicodeDecodeError, TypeError, OSError):
         return {}
 
 
@@ -64,13 +69,23 @@ def parent_folder_seg(repo_id: str) -> str:
 def works_root_violation(output_dir: str) -> str | None:
     """写/删类端点的作品根校验：必须等于配置的仓库文件夹根（防客户端指定任意目录）。
 
-    未配置仓库文件夹（truth 为空）时放行——功能未启用，各服务自行兜底。
+    **2026-09-15 用户定案「未配置 → 拒绝」**：原先未配置时**放行**（理由「功能未启用，各服务
+    自行兜底」），但这与 `plans._trusted_output_dir` 的「未配置即拒绝」口径**相反**——同一道
+    校验两个结果。现统一为拒绝，并返回**独立文案**（`WORKS_ROOT_NOT_CONFIGURED_MSG`）让前端
+    据此弹窗、引导用户跳转「设置 → 路径与代理」补配置。
     返回 None=通过，否则返回中文错误信息供路由转 HTTPException。
     """
     truth = output_dir_from_state()
-    if truth and output_dir and not _same_path(truth, output_dir):
-        return "output_dir 必须是当前配置的仓库文件夹根路径"
+    if not truth:
+        return WORKS_ROOT_NOT_CONFIGURED_MSG
+    if output_dir and not _same_path(truth, output_dir):
+        return WORKS_ROOT_MSG
     return None
+
+
+# 作品根校验的两条固定文案（单一属主）：前端按「未配置」这条弹窗并跳转设置页，**勿改字面值**。
+WORKS_ROOT_MSG = "output_dir 必须是当前配置的仓库文件夹根路径"
+WORKS_ROOT_NOT_CONFIGURED_MSG = "尚未配置「仓库文件夹」，请先在「设置 → 路径与代理」里填写后再试。"
 
 
 def _same_path(a: str, b: str) -> bool:
@@ -97,7 +112,12 @@ def output_dir_from_state() -> str:
 
 
 def setting_dir_from_state(key: str) -> str:
-    """读取后端已持久化的目录设置；编辑 Agent 发布源库时禁止采用请求传入路径。"""
+    """读取后端已持久化的目录设置；编辑 Agent 发布源库时禁止采用请求传入路径。
+
+    目录类设置的**唯一读入口**（`worldbookDir` 走 `sync-worldbook`、
+    `characterDir`/`presetDir` 走发布源库等）。2026-09-15 P8：`sync-worldbook` 原先在路由里
+    手写 `json.loads(DATA_DIR/"user_state.json")` 自读一份，已改回本函数。
+    """
     settings = _load_state().get("settings")
     if isinstance(settings, dict):
         value = settings.get(key)

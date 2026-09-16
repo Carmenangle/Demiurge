@@ -277,8 +277,8 @@ class TestRouter:
         return _register_work_repo(monkeypatch)
 
     def test_preview_返回文本与元信息(self, sample_works: Path, tmp_path: Path, monkeypatch):
-        # works 根未配置(空)时放行 scope(与现有端一致)
-        monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+        # scope 校验：显式把「仓库文件夹」配成 sample_works（2026-09-15 起「未配置」不再放行，而是 400）
+        monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: str(sample_works))
         repo_id = self._as_repo(monkeypatch)
         path = str(sample_works / "玫瑰与繁花" / "card.json")
         result = artifacts_router.artifact_preview(
@@ -291,7 +291,7 @@ class TestRouter:
         assert result["truncated"] is False
 
     def test_download_返回文件响应(self, sample_works: Path, monkeypatch):
-        monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+        monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: str(sample_works))
         repo_id = self._as_repo(monkeypatch)
         from fastapi.responses import FileResponse
         resp = artifacts_router.artifact_download(
@@ -311,7 +311,7 @@ class TestRouter:
         `Popen(explorer /select,)` 弹了资源管理器窗口；断言还只写 `body is not None`，
         所以一直假绿。现在替换路由绑定并断言真实降级结果（会话级兜底见 conftest）。
         """
-        monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+        monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: str(sample_works))
         repo_id = self._as_repo(monkeypatch)
         card = sample_works / "玫瑰与繁花" / "card.json"
         monkeypatch.setattr(artifacts_router, "reveal_in_folder",
@@ -326,7 +326,7 @@ class TestRouter:
     def test_open_folder_成功路径回ok_true且透传select(self, sample_works: Path, monkeypatch):
         """反向：替换成 True 时路由如实回 ok=true，并透传 select——把「路由走的是可替换
         绑定」这一契约固定下来（换回直连服务模块就会在此暴露）。"""
-        monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+        monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: str(sample_works))
         repo_id = self._as_repo(monkeypatch)
         card = sample_works / "玫瑰与繁花" / "card.json"
         seen: dict[str, object] = {}
@@ -344,7 +344,7 @@ class TestRouter:
         assert Path(seen["path"]).name == "card.json"
 
     def test_list_返回当前作品产物供历史消息补卡(self, sample_works: Path, monkeypatch):
-        monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+        monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: str(sample_works))
         repo_id = self._as_repo(monkeypatch)
         result = artifacts_router.artifact_list(output_dir=str(sample_works), repo_id=repo_id)
         assert result["ok"] is True
@@ -353,7 +353,7 @@ class TestRouter:
 
     def test_list_缺省repo_id回空不串味(self, sample_works: Path, monkeypatch):
         """2026-09-10 用户定案：不给 repo_id 时列表回空 items（而非退回全库 → 刷出别人产物）。"""
-        monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+        monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: str(sample_works))
         assert artifacts_router.artifact_list(
             output_dir=str(sample_works), repo_id="") == {"ok": True, "items": []}
 
@@ -400,7 +400,7 @@ class TestRouter:
         assert artifacts.reveal_in_folder(sample_works) is False
 
     def test_open_folder_目录越界返回400(self, sample_works: Path, monkeypatch):
-        monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+        monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: str(sample_works))
         repo_id = _register_work_repo(monkeypatch)
         from fastapi import HTTPException
         with pytest.raises(HTTPException) as ei:
@@ -434,7 +434,7 @@ class TestAssetEndpoint:
         return png, doc
 
     def test_插图素材按图片类型内联返回(self, sample_works: Path, monkeypatch):
-        monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+        monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: str(sample_works))
         repo_id = _register_work_repo(monkeypatch)
         png, _ = self._seed_doc(sample_works)
         from fastapi.responses import FileResponse
@@ -446,7 +446,7 @@ class TestAssetEndpoint:
         assert "attachment" not in str(resp.headers.get("content-disposition", "")).lower()
 
     def test_文档与主卡不走asset而是400(self, sample_works: Path, monkeypatch):
-        monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+        monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: str(sample_works))
         repo_id = _register_work_repo(monkeypatch)
         _, doc = self._seed_doc(sample_works)
         from fastapi import HTTPException
@@ -459,7 +459,7 @@ class TestAssetEndpoint:
 
     def test_非白名单文件仍先被目录jail与白名单拦(self, sample_works: Path, monkeypatch):
         """加固不放松既有防线：越界/非白名单文件仍是 403/404，而不是 400 后缀错。"""
-        monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+        monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: str(sample_works))
         repo_id = _register_work_repo(monkeypatch)
         from fastapi import HTTPException
         with pytest.raises(HTTPException) as ei:

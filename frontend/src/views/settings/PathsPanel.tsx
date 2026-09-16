@@ -36,6 +36,18 @@ export function PathsPanel({ draft, setDraft }: PanelProps) {
   const [proxyProbe, setProxyProbe] = useState<{ checking: boolean; status: ProxyStatus | null }>(
     { checking: false, status: null },
   );
+  // P15（2026-09-15）：仓库文件夹为空时自动定位 + 高亮该输入框——引导弹窗「去配置」跳过来后
+  // 用户一眼看到该填哪一格（后端已把作品根校验统一为「未配置即拒绝」）。填了就不打扰。
+  const [highlightOutputDir, setHighlightOutputDir] = useState(false);
+  useEffect(() => {
+    if ((draft.outputDir || "").trim()) return;
+    setHighlightOutputDir(true);
+    document.getElementById("setting-output-dir")?.scrollIntoView({ block: "center" });
+    const timer = setTimeout(() => setHighlightOutputDir(false), 2500);
+    return () => clearTimeout(timer);
+    // 仅在面板挂载时判定一次：之后用户自己输入不该反复抢焦点
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   // search=true 时后端会额外真跑一次最小搜索（数秒）；挂载时只做快速探活。
   const probeProxy = async (search = false) => {
     setProxyProbe((p) => ({ ...p, checking: true }));
@@ -85,12 +97,22 @@ export function PathsPanel({ draft, setDraft }: PanelProps) {
           placeholder="D:\\ComfyUI\\workflows"
         />
       </div>
-      <div className="field">
+      <div
+        className="field"
+        id="setting-output-dir"
+        style={highlightOutputDir ? {
+          outline: "2px solid var(--accent, #6F7F5D)",
+          outlineOffset: 4,
+          borderRadius: 8,
+          transition: "outline-color 0.4s",
+        } : undefined}
+      >
         <label>仓库文件夹（图片 + 会话记录）</label>
         <input
           value={draft.outputDir}
           onChange={(e) => setDraft((d) => ({ ...d, outputDir: e.target.value }))}
           placeholder="D:\\ComfyUI\\output"
+          autoFocus={highlightOutputDir}
         />
         <p className="field-hint">
           每个作品的私有产物都落此目录下的作品文件夹：生成图片、会话记录、好感度状态、往事纪要、参考图。

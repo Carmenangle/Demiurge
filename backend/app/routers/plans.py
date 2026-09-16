@@ -11,10 +11,14 @@ router = APIRouter()
 
 
 def _trusted_output_dir(output_dir: str) -> str:
-    """作品根必须来自后端配置真源，禁止客户端指定任意目录（路径域校验的地基）。"""
-    truth = repo_meta.output_dir_from_state()
-    if not truth or output_dir != truth:
-        raise HTTPException(status_code=400, detail="output_dir 必须是当前配置的仓库文件夹根路径")
+    """作品根必须来自后端配置真源，禁止客户端指定任意目录（路径域校验的地基）。
+
+    2026-09-15 口径收口：改调属主 `repo_meta.works_root_violation`（原实现自持一份 `!=` 直比，
+    在 Windows 反斜杠/大小写不同的等价路径下会**误拒**；属主走 `_same_path` 归一）。
+    语义随之统一为「未配置仓库文件夹 → 拒绝」（属主侧本次同步改动，见其 docstring）。
+    """
+    if (err := repo_meta.works_root_violation(output_dir)):
+        raise HTTPException(status_code=400, detail=err)
     return output_dir
 
 

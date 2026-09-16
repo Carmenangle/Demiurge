@@ -20,6 +20,8 @@ import { MiscPanel } from "./MiscPanel";
 interface Props {
   settings: Settings;
   update: (patch: Partial<Settings>) => void;
+  /** 打开时要落的左侧导航项 id（空串/未识别 = 默认「外观」）。P15：未配置仓库文件夹的引导弹窗直达「paths」。 */
+  initialSection?: string;
   onOutputPathMigrated?: (oldDir: string, newDir: string) => void;
 }
 
@@ -50,10 +52,12 @@ function sizeText(bytes: number) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-export function SettingsView({ settings, update, onOutputPathMigrated }: Props) {
+export function SettingsView({ settings, update, initialSection, onOutputPathMigrated }: Props) {
   // 草稿：编辑都改这里，保存才写回，取消则丢弃（与原 Modal 一致）
   const [draft, setDraft] = useState<Settings>(settings);
-  const [active, setActive] = useState<NavId>("general");
+  // 初始面板：P15 引导弹窗可指定「paths」直达；未指定或值非法时退回「外观」（与改前一致）
+  const [active, setActive] = useState<NavId>(() =>
+    NAV.some((g) => g.items.some((i) => i.id === initialSection)) ? (initialSection as NavId) : "general");
   const [saved, setSaved] = useState(false);
   const [busy, setBusy] = useState(false);
   const [pathReview, setPathReview] = useState<{

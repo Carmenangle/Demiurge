@@ -12,6 +12,9 @@
 3. 域外卡（卡名≠作品名）仍能列出 / 预览，别人的卡仍然 403；
 4. 版本：存储域 = 作品域，域外卡按 `origin_dir` 入档并**原位**回档（不搬进作品域）；
 5. 落点：`doc.create_repo` / `doc.attach_material` 写作品域，不再写全局单例 `docs/`。
+6. **接线锁（2026-09-15 P4）**：三个薄包装（路由读端点 / 版本快照 / 产物卡收集）**都走属主**
+   `repo_meta.artifact_domains`（spy 断言返回值来自属主 + 反向锁「不得自建域」）；
+   三者刻意不同的空值短路与异常兜底**分别钉住**，防被顺手「统一」。
 """
 from __future__ import annotations
 
@@ -47,8 +50,18 @@ def _patch_repos(monkeypatch, *repos: dict) -> None:
     monkeypatch.setattr(repo_meta, "_load_state", lambda: _state(*repos))
 
 
-def _patch_no_works_root(monkeypatch) -> None:
-    """works_root 未配置 → 各端点 scope 校验放行（与既有路由测试同法）。"""
+def _patch_works_root(monkeypatch, root) -> None:
+    """把「仓库文件夹」真源配成 <root> ⇒ 各端点 scope 校验按「已配置且匹配」放行。
+
+    2026-09-15 口径变更：属主 `repo_meta.works_root_violation` 由「未配置 → 放行」改为
+    「未配置 → **拒绝**」（用户定案，前端弹窗引导去设置页）。原写法 `lambda: ""` 是拿
+    「未配置」当绕行 scope 校验的手法，现在必须先显式配置——与真实已配置安装一致。
+    """
+    monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: str(root))
+
+
+def _patch_unconfigured_works_root(monkeypatch) -> None:
+    """「仓库文件夹」未配置：所有走 `works_root_violation` 的端点都必须 **400 拒绝**。"""
     monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
 
 
@@ -104,7 +117,7 @@ def test_无repo_id时列表回空且单文件拒绝_带repo_id仍正常(monkeyp
     """缺省策略的端到端行为：list 空（不显示，不报错）、单文件 403（无可放行域）；
     带上 repo_id 一切照旧。"""
     _patch_repos(monkeypatch, {"id": "a1", "name": "甲"})
-    _patch_no_works_root(monkeypatch)
+    _patch_works_root(monkeypatch, tmp_path)
     (tmp_path / "甲" / "docs").mkdir(parents=True)
     md = tmp_path / "甲" / "docs" / "设定总集.md"
     md.write_text("# 甲\n", encoding="utf-8")
@@ -126,7 +139,34 @@ def test_无repo_id时列表回空且单文件拒绝_带repo_id仍正常(monkeyp
     assert [Path(i["path"]).name for i in items] == ["设定总集.md"]
 
 
+def test_未配置仓库文件夹时产物端点一律400拒绝(monkeypatch, tmp_path):
+    """2026-09-15 用户定案「未配置 → 拒绝」：仓库文件夹没配时**不再放行**各端点自行兜底，
+    而是统一 400 + `WORKS_ROOT_NOT_CONFIGURED_MSG`（前端据此弹窗并跳转「设置 → 路径与代理」）。
+
+    改前 `works_root_violation` 在未配置时放行，而 `plans._trusted_output_dir` 拒绝 ⇒ 同一道
+    校验两种结果；本条把统一后的口径钉在属主与路由两层。
+    """
+    _patch_repos(monkeypatch, {"id": "a1", "name": "甲"})
+    _patch_unconfigured_works_root(monkeypatch)
+    (tmp_path / "甲" / "docs").mkdir(parents=True)
+    md = tmp_path / "甲" / "docs" / "设定总集.md"
+    md.write_text("# 甲\n", encoding="utf-8")
+
+    # 属主层：返回「未配置」专文案（与「不匹配」区分），供前端弹窗识别
+    assert repo_meta.works_root_violation(str(tmp_path)) == repo_meta.WORKS_ROOT_NOT_CONFIGURED_MSG
+    # 路由层：读端点同样拒绝（原来 list 会回空 items、单文件 403，现在是明确 400）
+    for call in (
+        lambda: artifacts_router.artifact_list(output_dir=str(tmp_path), repo_id="a1"),
+        lambda: artifacts_router.artifact_preview(output_dir=str(tmp_path), path=str(md), repo_id="a1"),
+    ):
+        with pytest.raises(HTTPException) as ei:
+            call()
+        assert ei.value.status_code == 400
+        assert ei.value.detail == repo_meta.WORKS_ROOT_NOT_CONFIGURED_MSG
+
+
 # ── 2. 收集：按 repo_id 隔离 ───────────────────────────────────────────────
+
 
 def test_list按repo_id隔离不再串味(monkeypatch, tmp_path):
     """旧缺陷：`since=0`（历史消息补卡）退回「全作品库根最新一组」——A 作品的消息里
@@ -153,7 +193,7 @@ def test_域外卡按归属仍被收集并可在预览端点放行(monkeypatch, 
     """卡名≠作品名时，卡在作品域**外**的卡目录里——集合域必须让它照常可见可预览；
     别人的卡仍然 403。"""
     _patch_repos(monkeypatch, *_原创)
-    _patch_no_works_root(monkeypatch)
+    _patch_works_root(monkeypatch, tmp_path)
     (tmp_path / "Anima" / "原创").mkdir(parents=True)
     mine = tmp_path / "御仙"
     mine.mkdir()
@@ -211,7 +251,7 @@ def test_版本快照落作品域且域外卡原位回档(monkeypatch, tmp_path)
 
 def test_版本列表的活文件路径域内取存储域域外取origin(monkeypatch, tmp_path):
     _patch_repos(monkeypatch, *_原创)
-    _patch_no_works_root(monkeypatch)
+    _patch_works_root(monkeypatch, tmp_path)
     storage = tmp_path / "Anima" / "原创"
     storage.mkdir(parents=True)
     card_dir = tmp_path / "御仙"
@@ -290,3 +330,108 @@ def test_插图素材仍拒绝作品库外的文件(monkeypatch, tmp_path):
         capability_handlers.attach_material(
             base=str(tmp_path), src=str(stray), repo_id="r1")
     assert "作品目录内" in str(ei.value)
+
+
+# ── 5. 接线锁：三个包装都必须走属主 `repo_meta.artifact_domains`（P4） ────────
+#
+# 背景：产物域集合是**跨作品串味**（B3/A 红线）的唯一防线，属主只有一个
+# （`repo_meta.artifact_domains`），另有三处薄包装：路由读端点 / 版本快照 / 产物卡收集。
+# 包装若被改回「就地自建域」（自己拼 `repo_scope_path` + `owned_card_dirs`），
+# 口径会分叉且**运行期不报错**（A 作品里刷出 B 的产物、快照漏收）——故照 C5/C6 的现成手法
+# 加 monkeypatch spy：断言三处都真调属主。三个包装都不在模块顶层 import 属主
+# （函数内 `from app.services import repo_meta`，拿到的是同一模块对象）⇒ patch 属主一处即覆盖三处。
+
+_OWNER_SENTINEL = [Path("/__owner_sentinel__")]
+
+
+class _OwnerSpy:
+    """把属主 `repo_meta.artifact_domains` 换成「记录入参 + 返回**哨兵域**」的 spy。
+
+    返回哨兵而非真实域是关键：断言的是「包装的返回值**就是属主给的**」——
+    就地自建域的实现拿不到这个哨兵，于是「改回自建域」必然变红。
+    """
+
+    def __init__(self, monkeypatch) -> None:
+        self.seen: list[tuple[str, str]] = []
+
+        def spy(output_dir: str, repo_id: str) -> list[Path]:
+            self.seen.append((output_dir, repo_id))
+            return list(_OWNER_SENTINEL)
+
+        monkeypatch.setattr(repo_meta, "artifact_domains", spy)
+
+
+def test_三个包装都走属主artifact_domains(monkeypatch, tmp_path):
+    """P4 接线锁（正向）：三处包装的返回值必须来自属主，入参原样透传、无遗漏。"""
+    spy = _OwnerSpy(monkeypatch)
+    root = str(tmp_path)
+
+    assert artifacts_router._domains(root, "r1") == _OWNER_SENTINEL          # 路由读端点
+    assert artifact_versions._domains(root, "r1") == _OWNER_SENTINEL         # 版本快照
+    assert collection_artifacts._domains_of(root, "r1") == _OWNER_SENTINEL   # 产物卡收集
+
+    assert spy.seen == [(root, "r1")] * 3
+
+
+def test_三个包装不得自建域绕过属主(monkeypatch, tmp_path):
+    """P4 接线锁（反向）：属主之外**不得**再自己枚举卡目录拼域集合。
+
+    收口前的写法就是「`repo_scope_path` + `owned_card_dirs`」就地拼；若有人改回去，
+    这里 patch 的 `owned_card_dirs` spy 必被命中 ⇒ 本用例变红（正向用例只比对返回值，挡不住「同样调属主、
+    但另外又自己拼一份」这类回退）。
+
+    ⚠ 属主 `repo_meta.artifact_domains` **内部本来就会**调 `owned_card_dirs`（`repo_meta.py:189`），
+    所以必须先把属主顶成 spy，这里的命中才只可能来自「包装自己绕过属主」。
+    """
+    _OwnerSpy(monkeypatch)
+    touched: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        character_store, "owned_card_dirs",
+        lambda base, repo_id: touched.append((base, repo_id)) or [],
+    )
+    root = str(tmp_path)
+
+    artifacts_router._domains(root, "r1")
+    artifact_versions._domains(root, "r1")
+    collection_artifacts._domains_of(root, "r1")
+
+    assert touched == []          # 没有任何一处绕过属主自己去枚举卡目录
+
+
+def test_包装的空值短路差异被分别钉住(monkeypatch, tmp_path):
+    """三处包装的**空值策略刻意不同**（各自注释都有明文定案），别顺手「统一」：
+
+    - 路由 `_domains(root, "")` → `[]`：产品策略「缺值不给任何域」（防跨作品串味，2026-09-10 定案）；
+    - 版本 `_domains("", repo_id)` → `[]`：空 output_dir 直接空，不进属主；
+    - 收集 `_domains_of(root, "")` → `[root]`：**低层原语**，无 repo 仍是全库（供采产区直接用）。
+
+    三者都**不**落到属主 —— 属主对这些入参另有语义（无 repo 返回 `[作品库根]`）。
+    """
+    spy = _OwnerSpy(monkeypatch)
+    root = str(tmp_path)
+
+    assert artifacts_router._domains(root, "") == []
+    assert artifact_versions._domains("", "r1") == []
+    assert collection_artifacts._domains_of(root, "") == [Path(root)]
+
+    assert spy.seen == []
+
+
+def test_包装的异常兜底差异被分别钉住(monkeypatch, tmp_path):
+    """属主抛错时的兜底**刻意不同**（兜底有无本身就是隔离强度的一部分）：
+
+    - 版本 / 收集包装有兜底 → 退化为单域（注释明文：不该让快照或产物卡整体失败）；
+    - 路由 `_domains` **无**兜底 → 异常上抛（**现状特征**：域解析失败绝不会被当成
+      「只有作品库根」放行——那等于放宽隔离）。若要给它加兜底，必须同时评估这一点。
+    """
+    root = str(tmp_path)
+
+    def boom(output_dir: str, repo_id: str) -> list[Path]:
+        raise RuntimeError("域解析炸了")
+
+    monkeypatch.setattr(repo_meta, "artifact_domains", boom)
+
+    assert artifact_versions._domains(root, "r1") == [Path(root)]
+    assert collection_artifacts._domains_of(root, "r1") == [Path(root)]
+    with pytest.raises(RuntimeError):
+        artifacts_router._domains(root, "r1")

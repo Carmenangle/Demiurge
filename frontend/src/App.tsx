@@ -9,13 +9,14 @@ import { useSettings, activeChatModel, resolvedEmbedModel } from "./stores/setti
 import { useRepos, type Repo } from "./stores/repos";
 import { Lightbox } from "./components/Lightbox";
 import { RagToast } from "./components/RagToast";
-import { ConfirmModal, PromptModal } from "./components/Modal";
+import { ConfirmModal, PromptModal, AlertModal } from "./components/Modal";
 import { RegexModal } from "./components/RegexModal";
 import { PresetModal } from "./components/PresetModal";
 import { BindRepoModal } from "./components/BindRepoModal";
 import { fetchAgentRunning, listGenerations } from "./api/ai";
 import { deleteRepoFolder } from "./api/userState";
 import { AppBody } from "./AppBody";
+import { WORKS_ROOT_UNCONFIGURED_EVENT } from "./api/client";
 import { recentWorks as selectRecentWorks } from "./lib/repoPresentation";
 import { hasPendingComfyGeneration } from "./lib/comfyBackgroundActivity";
 
@@ -45,6 +46,10 @@ export function App() {
     try { return localStorage.getItem("laf_current_work") || null; } catch { return null; }
   }); // 小仓库/作品——同上
   const [settingsOpen, setSettingsOpen] = useState(false);
+  /** 打开设置时要落的左侧导航项（空串 = 默认「外观」）。P15：未配置仓库文件夹的弹窗一键直达「路径与代理」。 */
+  const [settingsSection, setSettingsSection] = useState<string>("");
+  /** 作品根校验因「未配置仓库文件夹」被拒时的引导弹窗文案（P15）。 */
+  const [worksRootAlert, setWorksRootAlert] = useState<string | null>(null);
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
 
   // 仓库/作品切换时同步写入 localStorage；null 时清空
@@ -103,6 +108,19 @@ export function App() {
       setWorkMode(seg);
       setSection("home");
     }
+  }, []);
+
+  // 未配置「仓库文件夹」→ 引导弹窗（P15：后端把作品根校验统一为「未配置即拒绝」，前端半场负责
+  // 把这条拒绝变成「一句话 + 一键去配置」）。事件由 `api/client.ts` 的 parseResponse 广播，
+  // 覆盖所有走作品根校验的端点（artifacts / characters / comfyui / scenario / ai / plans），
+  // 所以不需要在每个调用点写 catch。
+  useEffect(() => {
+    const onUnconfigured = (e: Event) => {
+      const message = (e as CustomEvent<{ message?: string }>).detail?.message || "";
+      setWorksRootAlert(message || "尚未配置「仓库文件夹」，请先在设置里填写后再试。");
+    };
+    window.addEventListener(WORKS_ROOT_UNCONFIGURED_EVENT, onUnconfigured);
+    return () => window.removeEventListener(WORKS_ROOT_UNCONFIGURED_EVENT, onUnconfigured);
   }, []);
 
   const goMode = (m: WorkMode) => {
@@ -189,7 +207,7 @@ export function App() {
         <button
           type="button"
           className={`nav-item nav-settings ${settingsOpen ? "active" : ""}`}
-          onClick={() => setSettingsOpen(true)}
+          onClick={() => { setSettingsSection(""); setSettingsOpen(true); }}
         >
           ⚙ 设置
         </button>
@@ -218,6 +236,7 @@ export function App() {
           <Suspense fallback={<div className="page-loading" role="status">正在载入…</div>}>
             <AppBody
             settingsOpen={settingsOpen}
+            settingsSection={settingsSection}
             section={section}
             subView={subView}
             workMode={workMode}
@@ -281,6 +300,26 @@ export function App() {
         </Suspense>
       </div>
 
+      {worksRootAlert && (
+        <AlertModal
+          title="尚未配置「仓库文件夹」"
+          message={worksRootAlert}
+          actions={[
+            { label: "稍后再说", onClick: () => setWorksRootAlert(null) },
+            {
+              label: "去配置",
+              primary: true,
+              onClick: () => {
+                // 直达「设置 → 路径与代理」；仓库文件夹为空时 PathsPanel 会自动定位并高亮该输入框
+                setWorksRootAlert(null);
+                setSettingsSection("paths");
+                setSettingsOpen(true);
+              },
+            },
+          ]}
+          onClose={() => setWorksRootAlert(null)}
+        />
+      )}
       {creating && (
         <PromptModal
           title="新建仓库"

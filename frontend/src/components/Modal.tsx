@@ -63,10 +63,13 @@ export function ConfirmModal({
 interface AlertProps {
   title: string;
   message?: string;
+  /** 自定义动作按钮（可选）。给了就**替换**默认的「知道了」——用于「提示 + 一键跳转」类弹窗，
+   *  如「未配置仓库文件夹 → 去配置」（2026-09-15 P15）。不传时行为与改前逐字一致。 */
+  actions?: { label: string; onClick: () => void; primary?: boolean }[];
   onClose: () => void;
 }
 
-export function AlertModal({ title, message, onClose }: AlertProps) {
+export function AlertModal({ title, message, actions, onClose }: AlertProps) {
   useEsc(onClose);
   return (
     <div className="modal-mask" onClick={onClose}>
@@ -74,9 +77,22 @@ export function AlertModal({ title, message, onClose }: AlertProps) {
         <h3>{title}</h3>
         {message && <p style={{ color: "#666", marginTop: 0 }}>{message}</p>}
         <div className="modal-actions">
-          <button className="btn primary" autoFocus onClick={onClose}>
-            知道了
-          </button>
+          {actions && actions.length > 0 ? (
+            actions.map((a) => (
+              <button
+                key={a.label}
+                className={`btn ${a.primary ? "primary" : ""}`}
+                autoFocus={a.primary}
+                onClick={a.onClick}
+              >
+                {a.label}
+              </button>
+            ))
+          ) : (
+            <button className="btn primary" autoFocus onClick={onClose}>
+              知道了
+            </button>
+          )}
         </div>
       </div>
     </div>

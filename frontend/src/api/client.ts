@@ -4,6 +4,17 @@ export function apiUrl(path: string): string {
   return `${API_BASE}${path}`;
 }
 
+/** 「仓库文件夹未配置」的后端文案（真源 = `backend/app/services/repo_meta.py` 的
+ *  `WORKS_ROOT_NOT_CONFIGURED_MSG`，两处**必须同时改**：跨语言契约锁见 `client.contract.test.ts`）。
+ *
+ *  2026-09-15 用户定案：仓库文件夹没配时作品根校验**拒绝**（原来放行）——命中这条即代表
+ *  「不是路径不匹配，而是压根没配置」，前端据此弹窗并引导跳转「设置 → 路径与代理」。
+ */
+export const WORKS_ROOT_UNCONFIGURED_MARK = "尚未配置「仓库文件夹」";
+
+/** 前端全局事件：作品根校验因「未配置仓库文件夹」被拒（消费方 = App 的引导弹窗）。 */
+export const WORKS_ROOT_UNCONFIGURED_EVENT = "laf-works-root-unconfigured";
+
 async function parseResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
     // 透出后端 detail（FastAPI 错误体 {detail: ...}），否则只能看到状态码
@@ -13,6 +24,14 @@ async function parseResponse<T>(response: Response): Promise<T> {
       detail = typeof data?.detail === "string" ? data.detail : JSON.stringify(data?.detail ?? data);
     } catch {
       try { detail = await response.text(); } catch { /* ignore */ }
+    }
+    // 未配置仓库文件夹：抛错照旧（调用方的 catch 不受影响），额外广播一次全局事件让 App 弹窗引导。
+    if (detail.includes(WORKS_ROOT_UNCONFIGURED_MARK)) {
+      try {
+        window.dispatchEvent(new CustomEvent(WORKS_ROOT_UNCONFIGURED_EVENT, {
+          detail: { message: detail },
+        }));
+      } catch { /* 非浏览器环境（无 window）忽略 */ }
     }
     throw new Error(detail || `API request failed: ${response.status}`);
   }

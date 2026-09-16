@@ -28,6 +28,8 @@ const NewcomerGuideView = lazy(() => import("./views/NewcomerGuideView").then((m
 
 export interface AppBodyProps {
   settingsOpen: boolean;
+  /** 打开设置时要落的左侧导航项 id（空串 = SettingsView 默认「外观」）。P15 引导弹窗用。 */
+  settingsSection: string;
   section: NavSection;
   subView: string | null;
   workMode: WorkMode;
@@ -88,6 +90,7 @@ export function AppBody(props: AppBodyProps) {
   };
   if (props.settingsOpen) {
     return <SettingsView settings={settings} update={settingsStore.update}
+      initialSection={props.settingsSection}
       onOutputPathMigrated={props.relocateOutputPath} />;
   }
 

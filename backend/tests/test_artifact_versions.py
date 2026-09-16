@@ -170,11 +170,15 @@ class TestResolveVersionFile:
 
 
 class TestRouter:
-    """新版本端点走真实路由函数（scope 放行同现有端点：monkeypatch output_dir_from_state）。"""
+    """新版本端点走真实路由函数（scope 校验：显式把「仓库文件夹」配成 sample_works）。
+
+    2026-09-15 口径变更：属主 `works_root_violation` 由「未配置 → 放行」改为「未配置 → 拒绝」，
+    故原先 `lambda: ""` 的绕行手法改为显式配置真源（与真实已配置安装一致）。
+    """
 
     def test_versions_列表补绝对路径(self, sample_works: Path, monkeypatch):
         from app.services import repo_meta as _rm
-        monkeypatch.setattr(_rm, "output_dir_from_state", lambda: "")
+        monkeypatch.setattr(_rm, "output_dir_from_state", lambda: str(sample_works))
         av.snapshot_current(str(sample_works), trigger="done", summary="完成")
         from app.routers.artifacts import artifact_versions_list
         result = artifact_versions_list(output_dir=str(sample_works), repo_id="")
@@ -191,7 +195,7 @@ class TestRouter:
         走 `/preview`，于是回档前查看旧版本看到的是**现在的**文件内容，版本历史形同摆设。
         """
         from app.services import repo_meta as _rm
-        monkeypatch.setattr(_rm, "output_dir_from_state", lambda: "")
+        monkeypatch.setattr(_rm, "output_dir_from_state", lambda: str(sample_works))
         res = av.snapshot_current(str(sample_works), trigger="done", summary="v1")
         vid = res["version"]["version_id"]
         # 快照后再改当前文件：版本副本仍应保持快照时的内容
@@ -216,7 +220,7 @@ class TestRouter:
 
     def test_restore_与_delete_端点真实路径(self, sample_works: Path, monkeypatch):
         from app.services import repo_meta as _rm
-        monkeypatch.setattr(_rm, "output_dir_from_state", lambda: "")
+        monkeypatch.setattr(_rm, "output_dir_from_state", lambda: str(sample_works))
         res = av.snapshot_current(str(sample_works), trigger="done", summary="v1")
         vid = res["version"]["version_id"]
         from app.routers.artifacts import artifact_version_restore, artifact_version_delete
