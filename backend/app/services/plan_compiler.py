@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import logging
 import json
 import re
 import time
@@ -16,6 +17,8 @@ from typing import Any, Callable
 
 from app.services import capability_registry, plan_validator, structured_output
 from app.services.structured_contracts import GenerationPlan
+
+_LOG = logging.getLogger("uvicorn.error")
 
 # 显式计划语言：命中即委派
 _EXPLICIT = (
@@ -413,15 +416,15 @@ def compile_plan(*, intent: str, history: str = "", attachments: list[dict] | No
             filled_early = fill_prompt_sections(plan, attachments or [])
             if filled_early and trace is not None:
                 trace("plan.sections_filled", count=filled_early, stage="pre_validate")
-        except Exception:  # noqa: BLE001 - 回填失败仍走校验，由 validator 报具体错误
-            pass
+        except Exception as exc:  # noqa: BLE001 [EXC-留痕] 回填失败仍走校验，但预算归一可能被空 variants 带偏
+            _LOG.warning("提交前 variants 回填失败（仍走校验，但预算归一可能拿到空 variants）: %s", exc)
         if prev_batch:
             try:
                 filled_prev = fill_prev_batch_prompts(plan, prev_batch)
                 if filled_prev and trace is not None:
                     trace("plan.prev_batch_filled", count=filled_prev, stage="pre_validate")
-            except Exception:  # noqa: BLE001 - 回填失败仍走校验，由 validator 报具体错误
-                pass
+            except Exception as exc:  # noqa: BLE001 [EXC-留痕] 上批回填失败仍走校验，但 prev_batch 引用未落实
+                _LOG.warning("上批 prompt 回填失败（仍走校验，但 prev_batch 引用未落实）: %s", exc)
         # 代码保真：同模板的多个 submit_batch 合并为一个（模型可能把「分批」误解为
         # 拆多个提交步骤 → 重复烧 GPU）。合并后 inputs_from 引用自动重写到保留步骤。
         _merge_duplicate_submits(plan)

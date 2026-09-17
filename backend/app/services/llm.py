@@ -7,9 +7,12 @@
 
 不含 HTTP 语义（不抛 HTTPException）——路由层按需把 ValueError 包成 4xx/5xx。
 """
+import logging
 import re
 from collections.abc import Callable
 from typing import Any
+
+_LOG = logging.getLogger("uvicorn.error")
 
 
 def normalize_base_url(base_url: str) -> str:
@@ -336,8 +339,8 @@ def chat_messages(base_url: str, api_key: str, model: str, messages: list[dict],
                     stats = _collect_usage(usage_raw)
                     if stats:
                         on_usage(stats)
-                except Exception:
-                    pass
+                except Exception as exc:  # noqa: BLE001 [EXC-留痕] usage 采集失败不阻断回答，但本轮用量不计数
+                    _LOG.warning("usage 采集失败（回答照常返回，但本轮 token 用量统计缺失）: %s", exc)
             return flatten_content(resp.content).strip()
         except Exception as e:  # noqa: BLE001
             last = e
@@ -345,8 +348,8 @@ def chat_messages(base_url: str, api_key: str, model: str, messages: list[dict],
                 if callable(on_retry):
                     try:
                         on_retry(i + 1, e)
-                    except Exception:
-                        pass
+                    except Exception as exc:  # noqa: BLE001 [EXC-留痕] on_retry 回调失败不阻断重试，但该次重试未上报
+                        _LOG.warning("on_retry 回调失败（退避重试继续，但该次重试未上报）: %s", exc)
                 time.sleep(2 ** i)   # 1s、2s、4s 退避
                 continue
             break
@@ -471,13 +474,13 @@ def chat_messages_stream(base_url: str, api_key: str, model: str, messages: list
                     stats = _collect_usage(last_chunk_usage)
                     if stats:
                         on_usage(stats)
-                except Exception:
-                    pass
+                except Exception as exc:  # noqa: BLE001 [EXC-留痕] usage 采集失败不阻断回答，但本轮用量不计数
+                    _LOG.warning("流式 usage 采集失败（回答照常返回，但本轮 token 用量统计缺失）: %s", exc)
             if callable(on_finish):
                 try:
                     on_finish({"finish_reason": stop_reason})
-                except Exception:
-                    pass
+                except Exception as exc:  # noqa: BLE001 [EXC-留痕] on_finish 回调失败不阻断回答，但收尾事件未上报
+                    _LOG.warning("on_finish 回调失败（回答照常返回，但收尾事件未上报）: %s", exc)
             return "".join(parts).strip()
         except _OnDeltaAbort as exc:
             # 回调异常（用户停止等调用方控制流）：原样上抛，不包 RuntimeError

@@ -444,8 +444,8 @@ def search_generations(repo_ids: list[str], cfg: EmbedConfig,
         visual_ids = visual_asset_index.search(repo_ids, query, candidate_k)
         by_id = {str(item.get("id") or ""): item for item in documents}
         rankings.append(("visual", [by_id[item_id] for item_id in visual_ids if item_id in by_id]))
-    except Exception:
-        pass  # 视觉模型未安装/未建索引时维持文本语义搜索
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 视觉检索失败不阻断，但检索融合缺视觉一路
+        _log.warning("视觉资产检索失败（维持文本语义搜索，但融合结果缺视觉一路）: %s", exc)
     fused = rag_retrieval.rrf_fuse(rankings, candidate_k)
     if rag_retrieval.needs_rerank(fused):
         reranked = reranker.rerank(
@@ -544,8 +544,8 @@ def _remove_local_image(image_url: str) -> None:
         p = Path(unquote(path))
         if p.is_file():
             p.unlink()
-    except Exception:
-        pass  # 删文件失败不阻断条目删除
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 删原图失败不阻断条目删除，但磁盘残留孤儿图
+        _log.warning("删除本机留存原图失败（条目照常删除，但磁盘残留孤儿文件）: %s", exc)
 
 
 def delete_doc(doc_id: str, repo_id: str, cfg: EmbedConfig,

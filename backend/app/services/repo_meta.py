@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import logging
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,8 @@ from urllib.parse import quote
 
 from app.config import DATA_DIR
 from app.services.pathnames import safe_dir, safe_seg
+
+_LOG = logging.getLogger("uvicorn.error")
 
 
 def _load_state() -> dict:
@@ -199,8 +202,8 @@ def artifact_domains(output_dir: str, repo_id: str) -> list[Path]:
         for folder in character_store.owned_card_dirs(output_dir, repo_id):
             if folder not in domains:
                 domains.append(folder)
-    except Exception:  # noqa: BLE001 - 归属探测失败不该让产物端点整体 500
-        pass
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 归属探测失败不阻断产物端点，但产物域缺该作品自有卡目录
+        _LOG.warning("作品自有卡目录归属探测失败（产物端点继续，但产物域缺该目录）: %s", exc)
     return domains
 
 
@@ -303,8 +306,8 @@ def write_repo_marker(folder: Path, repo_id: str) -> None:
             json.dumps({"id": repo_id, "name": name}, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 写标记失败不阻断，但文件夹归属缺失（改名迁移会失配）
+        _LOG.warning("写 _repo.json 失败（继续，但文件夹归属标记缺失，改名/占用判定会失配）: %s", exc)
 
 
 def _snapshot_path_for(repo_id: str, folder: Path | None) -> Path:
@@ -344,8 +347,8 @@ def _rewrite_paths(repo_id: str, old_seg: str, new_seg: str, snap_folder: Path |
         if up_ids:
             c.update(ids=up_ids, metadatas=up_metas)
             rag = len(up_ids)
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] RAG 路径重写失败不阻断改名，但库内旧路径残留（断图）
+        _LOG.warning("改名后 RAG 图片路径重写失败（改名继续，但库内旧路径残留会断图）: %s", exc)
     return {"snapshot": snap, "rag": rag}
 
 

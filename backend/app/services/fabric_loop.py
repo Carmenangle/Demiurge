@@ -16,6 +16,7 @@ structured 原生通道传输的是 JSON 字符串，载不动图片，带图时
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from dataclasses import dataclass, field
@@ -24,6 +25,8 @@ from typing import Any, Callable
 from pydantic import BaseModel
 
 from app.services import capability_registry, capability_sandbox, structured_output
+
+_LOG = logging.getLogger("uvicorn.error")
 
 
 class FabricDecision(BaseModel):
@@ -123,7 +126,7 @@ def _usage_sink(trace: Callable | None, model: str) -> Callable[[dict], None]:
     def sink(stats: dict) -> None:
         try:
             trace("model.usage", model=model, usage=stats)
-        except Exception:  # noqa: BLE001 - 观测失败不影响循环
+        except Exception:  # noqa: BLE001 [EXC-保留] 遥测发射 best-effort：观测失败不影响循环
             pass
     return sink
 
@@ -788,8 +791,8 @@ def run_loop(*, intent: str, history: str = "", capabilities: list[dict] | None 
                                 if trace is not None:
                                     trace("tool.result", operation="auto_embed",
                                           ok=True, result=f"自动内嵌 {len(_wb_entries)} 条世界书条目进主卡")
-                except Exception:  # noqa: BLE001 - 内嵌兜底失败不阻断 done
-                    pass
+                except Exception as exc:  # noqa: BLE001 [EXC-留痕] 内嵌兜底失败不阻断 done，但主卡静默缺世界书条目
+                    _LOG.warning("世界书条目自动内嵌主卡失败（done 继续，但主卡缺该批条目）: %s", exc)
             # 2026-09-09 条目数闸门（固化02 §4 下限 40 + 全项目 18 卡实测）：
             # check_density 只查「每条字数」不查「条目数」——26 条全达标也能 done（玫瑰与繁花实锤）。
             # 写了条目的合集卡任务，快照条目数 <40 一律拒绝 done，自动回填「继续补写」指令，
@@ -887,7 +890,7 @@ def run_loop(*, intent: str, history: str = "", capabilities: list[dict] | None 
                         messages.append({"role": "user", "content": json.dumps(
                             {"tool_error": _deny_density}, ensure_ascii=False)})
                         continue
-                except Exception:  # noqa: BLE001 - 机械密度检查失败不阻断 done（check_density 工具兜底）
+                except Exception:  # noqa: BLE001 [EXC-保留] 机械密度检查失败不阻断 done（check_density 工具兜底）
                     pass
             # 2026-09-09 清单落实 + 重复检查闸门（用户定案：流程本身要避免「待写」与同主题拆条）：
             # ① 清单核对：docs/条目清单-*.md 列出的条目名必须都落盘（缺失=待写未完成 → 拒绝 done）；
@@ -962,7 +965,7 @@ def run_loop(*, intent: str, history: str = "", capabilities: list[dict] | None 
                         messages.append({"role": "user", "content": json.dumps(
                             {"tool_error": _deny_dup}, ensure_ascii=False)})
                         continue
-                except Exception:  # noqa: BLE001 - 机械核对失败不阻断 done
+                except Exception:  # noqa: BLE001 [EXC-保留] 机械核对失败不阻断 done
                     pass
             if _wrote_entries and "character.upsert_repo" not in _ops:
                 # 2026-09-08 治本：B 态是用户定案的硬性交付，从「提示一次放行」改为「强制内嵌」——
@@ -1224,8 +1227,8 @@ def run_loop(*, intent: str, history: str = "", capabilities: list[dict] | None 
         if checkpoint_fn is not None:
             try:
                 checkpoint_fn(step_index, messages, outcome.steps, "running")
-            except Exception:  # noqa: BLE001 - 保存失败不阻断循环
-                pass
+            except Exception as exc:  # noqa: BLE001 [EXC-留痕] 断点保存失败不阻断循环，但中断后无恢复点
+                _LOG.warning("循环断点保存失败（循环继续，但中断后无法从该步恢复）: %s", exc)
 
     outcome.status = "step_limit"
     outcome.error = f"达到最大步数 {max_steps}，仍未宣布完成"

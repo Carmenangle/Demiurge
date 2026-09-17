@@ -1,7 +1,7 @@
 """P4 第一批形态锁：业务数据路径的「纯吞」必须留痕，禁止退化回 `pass`。
 
 审计正本：docs/memory/except-exception-audit-2026-09-16.md（2026-09-16 AST 全量 435 处，
-其中 91 处纯吞、T3.3 前复扫 69 处；本锁钉住 C1–C7 与 T3.2/T3.3 追加项，**29 个函数级目标**）。
+其中 91 处纯吞、T3.3 前复扫 69 处；本锁钉住 C1–C7 与 T3.2/T3.3 追加项，**37 个函数级目标**）。
 这些路径吞掉异常会让快照/记忆/索引/审批状态**静默分叉**，或让用户可见面降级
 （如 `_visible_roleplay_text` 剥离失败 ⇒ 内部控制块泄漏），因此处理体必须至少留一条日志/遥测痕迹。
 
@@ -59,6 +59,20 @@ TARGETS: list[tuple[str, str]] = [
     ("services/agent_fabric.py", "_fabric_knowledge_history"),  # 历史缺产物指针/规范文档
     ("services/agent_fabric.py", "_fabric_finalize"),         # 缺版本快照/产物登记
     ("services/agent_fabric.py", "_recipe_offer_answer"),     # 邀约记录未删，可能重复弹出
+    # T3.3 批次 3（编排 / LLM / 元数据层，2026-09-17）：失败 = 用量统计、断点、改名迁移、
+    # 检索融合、卡归属静默降级
+    ("services/llm.py", "chat_messages"),              # 用量统计缺失（on_usage / on_retry 回调）
+    ("services/llm.py", "chat_messages_stream"),       # 同链流式（on_usage / on_finish 回调）
+    ("services/repo_meta.py", "artifact_domains"),     # 产物域缺该作品自有卡目录
+    ("services/repo_meta.py", "write_repo_marker"),    # 文件夹归属标记缺失（改名迁移失配）
+    ("services/repo_meta.py", "_rewrite_paths"),       # 库内旧路径残留 ⇒ 断图
+    ("services/plan_compiler.py", "compile_plan"),     # variants / prev_batch 回填静默丢失
+    ("services/rag_store.py", "search_generations"),   # 检索融合缺视觉一路
+    ("services/rag_store.py", "_remove_local_image"),  # 磁盘残留孤儿图
+    # ⚠ `services/fabric_loop.py::run_loop` **刻意不在表内**：同函数内 791/1227 已留痕，
+    #   但 890/965 是审计**改判保留**（整段机械闸门块：不收窄、也不加日志，见审计报告
+    #   「审计后复核改判保留」）⇒ 该函数必然含纯吞，进 TARGETS 只会永红。
+    #   该文件的保护改由下方「判据三 ②」的标注注册表承担。
 ]
 
 
@@ -79,8 +93,8 @@ def _is_trivial(handler: ast.ExceptHandler) -> bool:
 
 def test_目标注册表非空且模块都存在():
     """防空转①：目标表被删空/改小，或路径写错 ⇒ 整条锁静默失效。"""
-    assert len(TARGETS) >= 29, (
-        f"TARGETS 只剩 {len(TARGETS)} 条（下限 29）——锁的保护面缩水了；"
+    assert len(TARGETS) >= 37, (
+        f"TARGETS 只剩 {len(TARGETS)} 条（下限 37）——锁的保护面缩水了；"
         f"确属重构请同步下调，但不得删到失去意义"
     )
     missing = [rel for rel, _ in TARGETS if not (APP / rel).exists()]
@@ -114,3 +128,134 @@ def test_no_silent_except_exception(rel: str, fname: str) -> None:
                 silent.append(f"{fn.name}:{node.lineno}")
     assert not silent, \
         f"{rel}:{fname} 出现纯吞 except Exception（业务数据路径必须留痕，见审计报告）: {silent}"
+
+
+# ---------------------------------------------------------------------------
+# 判据三（T3.3 批次 3）：「分类标注」与「实现」必须自洽
+# ---------------------------------------------------------------------------
+# 背景：`fabric_loop.run_loop` 这类函数**同函数混档** —— 一部分站点是业务数据路径（留痕），
+# 一部分是审计改判的有意兜底（保留，不加日志）。函数级锁（TARGETS）的判据是「函数内不得有
+# 任何纯吞」，对这种函数永远为红；改用**源码标注即注册表**：把两档都写在 `except` 行上，
+# 让锁去校验「标注与实现一致」。与 routers 的判据二同源（读代码的人不必猜是有意还是写漏）。
+
+MARK_LOG = "[EXC-留痕]"
+MARK_KEEP = "[EXC-保留]"
+# 模块 → 该模块 `except Exception` 处数下限（防空转）
+ANNOTATED_MODULES: dict[str, int] = {
+    # 同函数混档的首个样本：见审计报告「审计后复核改判保留」与 T3.3 批次 3
+    "services/fabric_loop.py": 16,
+}
+APP_FILE_FLOOR = 40      # 实测 232 个 .py
+MARK_LOG_FLOOR = 25      # 全仓 [EXC-留痕] 实测 34 处
+LOG_METHODS = {"warning", "error", "exception", "critical", "info", "debug"}
+
+
+def _log_annotated(src: str, filename: str = "<src>") -> list[ast.ExceptHandler]:
+    """返回 `except` 行带 `[EXC-留痕]` 标注的 handler。"""
+    lines = src.split("\n")
+    return [n for n in ast.walk(ast.parse(src, filename=filename))
+            if isinstance(n, ast.ExceptHandler) and MARK_LOG in lines[n.lineno - 1]]
+
+
+def _keep_offenders(src: str) -> list[str]:
+    """返回**纯吞但未标 `[EXC-保留]`** 的站点（`行号: 原文`）—— 有意兜底必须写在源码上。"""
+    lines = src.split("\n")
+    return [f"{n.lineno}: {lines[n.lineno - 1].strip()}"
+            for n in ast.walk(ast.parse(src))
+            if isinstance(n, ast.ExceptHandler) and _is_bare_exc(n.type) and _is_trivial(n)
+            and MARK_KEEP not in lines[n.lineno - 1]]
+
+
+def _placeholder_offenders(h: ast.ExceptHandler) -> list[str]:
+    """留痕 handler 内「logger 调用传了额外参数、格式串却没有 `%`」的站点。
+
+    这类调用既不报错也不打日志：logging 自己做 `msg % args` 抛 TypeError，随后被
+    `handleError` 吞成 `--- Logging error ---` ⇒ **留痕等于没留**（本轮自查踩到）。
+    """
+    bad: list[str] = []
+    for call in ast.walk(h):
+        if not isinstance(call, ast.Call) or len(call.args) < 2:
+            continue
+        fn = call.func
+        name = fn.attr if isinstance(fn, ast.Attribute) else (fn.id if isinstance(fn, ast.Name) else "")
+        if name not in LOG_METHODS:
+            continue
+        first = call.args[0]
+        if isinstance(first, ast.Constant) and isinstance(first.value, str) and "%" not in first.value:
+            bad.append(f"{call.lineno}: {name}({first.value[:40]!r}, <args>) 缺 % 占位符")
+    return bad
+
+
+def test_留痕标注必须真留痕且占位符齐备():
+    files = sorted(p for p in APP.rglob("*.py") if "__pycache__" not in p.parts)
+    assert len(files) >= APP_FILE_FLOOR, f"app 扫描面只剩 {len(files)} 个文件 —— 锁空转了"
+    marked = 0
+    silent_offenders: dict[str, list[str]] = {}
+    placeholder_offenders: dict[str, list[str]] = {}
+    for p in files:
+        rel = p.relative_to(APP).as_posix()
+        src = p.read_text(encoding="utf-8")
+        if MARK_LOG not in src:      # 只解析带标注的文件：省时，也避免把无关源码的
+            continue                 # SyntaxWarning（如正则串里的 `\w`）算进本用例
+        for h in _log_annotated(src, rel):
+            marked += 1
+            if _is_trivial(h):
+                silent_offenders.setdefault(rel, []).append(str(h.lineno))
+            bad = _placeholder_offenders(h)
+            if bad:
+                placeholder_offenders.setdefault(rel, []).append("；".join(bad))
+    assert marked >= MARK_LOG_FLOOR, (
+        f"全仓只剩 {marked} 处 [EXC-留痕]（下限 {MARK_LOG_FLOOR}）——标注被删/挪走会让本判据空转"
+    )
+    assert not silent_offenders, (
+        "带 [EXC-留痕] 标注却仍是纯吞（标注与实现矛盾）：标注了留痕就必须真的留痕，"
+        "否则请改标 [EXC-保留] 并说明为何有意不记日志。\n"
+        + "\n".join(f"  {k}: {v}" for k, v in silent_offenders.items())
+    )
+    assert not placeholder_offenders, (
+        "留痕调用传了额外参数但格式串没有 `%` 占位符 —— logging 会抛 TypeError 并被自身吞成"
+        " `--- Logging error ---`，日志实际打不出来（留痕等于没留）。\n"
+        + "\n".join(f"  {k}: {v}" for k, v in placeholder_offenders.items())
+    )
+
+
+def test_混合档模块的纯吞必须显式标注保留():
+    """`ANNOTATED_MODULES` 内：**纯吞**的 `except Exception` 必须带 `[EXC-保留]`。
+
+    纯吞只可能是「有意兜底且不加日志」，那就必须把这句话写进源码；写漏（或标注被抹掉）
+    这里会红 —— 这是 `run_loop` 那种混档函数唯一上得了的锁。
+    """
+    for rel, floor in sorted(ANNOTATED_MODULES.items()):
+        src = (APP / rel).read_text(encoding="utf-8")
+        handlers = [n for n in ast.walk(ast.parse(src, filename=rel))
+                    if isinstance(n, ast.ExceptHandler) and _is_bare_exc(n.type)]
+        assert len(handlers) >= floor, (
+            f"{rel} 的 except Exception 只剩 {len(handlers)} 处（下限 {floor}）——锁的保护面缩水了"
+        )
+        bad = _keep_offenders(src)
+        assert not bad, (
+            f"{rel} 出现**未标注**的纯吞 except Exception —— 有意兜底请标注 [EXC-保留]"
+            f"（并说明为何不加日志）；业务数据路径请改为 [EXC-留痕] 并真留日志。\n"
+            + "\n".join(f"  {b}" for b in bad)
+        )
+
+
+def test_分类标注判据自身有牙():
+    """锁的锁：三个方向都要抓得到、且不误伤合法形态。"""
+    fake_log = "try:\n    f()\nexcept Exception:  # [EXC-留痕] 说留痕\n    pass\n"
+    assert any(_is_trivial(h) for h in _log_annotated(fake_log)), "① 抓不到「标注留痕却是纯吞」"
+    real_log = ("try:\n    f()\nexcept Exception as e:  # [EXC-留痕] 真留痕\n"
+                "    _LOG.warning('x: %s', e)\n")
+    assert not any(_is_trivial(h) for h in _log_annotated(real_log)), "① 误伤真留痕"
+    assert not _log_annotated("try:\n    f()\nexcept Exception:\n    pass\n"), \
+        "① 误伤「未标注」的站点（把它当成留痕站点了）"
+    bad_call = ("try:\n    f()\nexcept Exception as e:  # [EXC-留痕] 假留痕\n"
+                "    _LOG.warning('没有占位符', e)\n")
+    assert _placeholder_offenders(_log_annotated(bad_call)[0]), "①b 抓不到「传参但格式串无 %」"
+    good_call = ("try:\n    f()\nexcept Exception as e:  # [EXC-留痕] 真留痕\n"
+                 "    _LOG.warning('有占位符: %s', e)\n")
+    assert not _placeholder_offenders(_log_annotated(good_call)[0]), "①b 误伤合法留痕"
+    assert _keep_offenders("try:\n    f()\nexcept Exception:\n    pass\n"), \
+        "② 抓不到「未标注的纯吞」"
+    assert not _keep_offenders("try:\n    f()\nexcept Exception:  # [EXC-保留] 有意兜底\n    pass\n"), \
+        "② 误伤 [EXC-保留] 标注"
