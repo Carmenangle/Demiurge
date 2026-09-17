@@ -122,6 +122,33 @@ def _isolate_chat_snapshot(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_library_root(tmp_path, monkeypatch):
+    """`user_state.json` 单一属主的读源落 tmp ⇒ 测试永远解析不出真实库根（**收口前实测泄漏点**）。
+
+    **向量（2026-09-17 实测）**：`chat_snapshot._path()` 第一件事就是问属主
+    `repo_meta.output_dir_from_state()`。真实 `backend/data/user_state.json` 里
+    `settings.outputDir` 一旦配了（本机 = `D:/tool/Demiurge/userdata/pictures`），
+    `_path("<任意 thread_id>")` 就解析成 `<库根>/<thread_id>/chat.json` ——
+    上面 `_isolate_chat_snapshot` 只盖住 `SNAP_DIR` 那条**回退**分支，挡不住这个：
+    output_dir 非空时压根不走 SNAP_DIR。实测（`_path('probe-leak-check')`）确为
+    `D:\\tool\\Demiurge\\userdata\\pictures\\probe-leak-check\\chat.json`。
+    后果：任何碰 `chat_snapshot` 却没自行 patch 的用例，都会在用户真实图库里留下
+    以 thread_id 命名的夹具目录（库根现存 `thread/`、`t1/`、`x/`、`work/`、
+    `t-claim/`、`zzz-insp-diag/`、`SAVE01 [09f79e6f]/` 等即此残留）。
+
+    **钉 `repo_meta.DATA_DIR` 而不是钉 `output_dir_from_state` 函数**：前者是这批
+    测试既有的接线缝（`test_artifacts_sync_worldbook._wire` 等 30+ 处 patch 的就是它，
+    后设者胜 ⇒ 那些用例语义不变）；钉函数会把「用例自建 tmp 状态桩」的读法整个旁路掉
+    （首轮实测 15 例红，全是这条）。DATA_DIR 指向空 tmp ⇒ 未配置 ⇒ 快照回退
+    SNAP_DIR（已被 `_isolate_chat_snapshot` 指向 tmp）。
+    要断言「配置了库根」的用例照旧自行写 tmp `user_state.json` 并 patch 本绑定。
+    """
+    from app.services import repo_meta
+
+    monkeypatch.setattr(repo_meta, "DATA_DIR", tmp_path / "data")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_build_session_store(tmp_path, monkeypatch):
     """AI 搭工作流的会话态落 tmp，绝不碰真实 backend/data/build_sessions/。"""
     from app.services import build_session_store

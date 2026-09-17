@@ -1,8 +1,18 @@
 from app.routers import ai_agent
-from app.services import generation_store, image_gen
+from app.services import generation_store, image_gen, repo_meta
 
 
-def test_regenerate_image_reuploads_all_bound_references(monkeypatch):
+def _wire_configured_root(monkeypatch, tmp_path):
+    """给端点的作品根校验一个显式真源。
+
+    conftest `_isolate_library_root` 把 user_state 读源落 tmp 后，「未配置 → 拒绝」
+    对**所有**测试生效。这两条用例此前隐式依赖开发机配过 outputDir（output_dir 留空
+    时 `works_root_violation` 放行）——环境依赖的假绿，这里补成显式配置，机器无关。
+    """
+    monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: str(tmp_path))
+
+
+def test_regenerate_image_reuploads_all_bound_references(monkeypatch, tmp_path):
     calls = []
     snapshot = {
         "kind": "ai-image",
@@ -12,6 +22,7 @@ def test_regenerate_image_reuploads_all_bound_references(monkeypatch):
         "quality": "medium",
         "model": {"baseUrl": "https://images.example", "modelName": "image-v2"},
     }
+    _wire_configured_root(monkeypatch, tmp_path)
 
     def fake_generate(base_url, api_key, model, prompt, images, *, size, quality):
         calls.append((base_url, api_key, model, prompt, images, size, quality))
@@ -33,6 +44,7 @@ def test_regenerate_image_reuploads_all_bound_references(monkeypatch):
         gen_model=snapshot["model"]["modelName"],
         size=snapshot["size"],
         image_quality=snapshot["quality"],
+        output_dir=str(tmp_path),
     )
 
     result = ai_agent.regenerate_image(req)
@@ -45,8 +57,9 @@ def test_regenerate_image_reuploads_all_bound_references(monkeypatch):
     assert result["regeneration"] == snapshot
 
 
-def test_regenerate_masked_image_reuploads_bound_mask(monkeypatch):
+def test_regenerate_masked_image_reuploads_bound_mask(monkeypatch, tmp_path):
     captured = {}
+    _wire_configured_root(monkeypatch, tmp_path)
 
     def fake_generate(base_url, api_key, model, prompt, images, **kwargs):
         captured.update({"images": images, **kwargs})
@@ -67,6 +80,7 @@ def test_regenerate_masked_image_reuploads_bound_mask(monkeypatch):
         gen_base_url="https://images.example",
         gen_api_key="secret",
         gen_model="image-v2",
+        output_dir=str(tmp_path),
     )
 
     result = ai_agent.regenerate_image(req)

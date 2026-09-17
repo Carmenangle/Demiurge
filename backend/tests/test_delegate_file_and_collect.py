@@ -419,17 +419,19 @@ def test_lora模糊解析与提交归一(monkeypatch, tmp_path):
     assert values["strength_model"] == hit["suggested_weight"]
 
 
-def test_plans路由output_dir必须来自配置真源():
+def test_plans路由output_dir必须来自配置真源(monkeypatch, tmp_path):
     # F3 回归：客户端不能指定任意目录撑大路径域校验
+    # conftest 全局把「仓库根」指空以隔离真实库根，故此处显式给真源，
+    # 让「配置了 → 放行」这一半不再依赖开发机是否配过 outputDir（原写法是 `if truth:` 环境分支）。
     from fastapi import HTTPException
     from app.routers import plans
     import pytest
+    truth = str(tmp_path)
+    monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: truth)
     with pytest.raises(HTTPException) as ei:
         plans._trusted_output_dir(r"C:\Windows")
     assert ei.value.status_code == 400
-    truth = repo_meta.output_dir_from_state()
-    if truth:  # 配置了仓库文件夹时应通过
-        assert plans._trusted_output_dir(truth) == truth
+    assert plans._trusted_output_dir(truth) == truth
 
 
 def test_collect嵌入配置来自user_state不经模型参数():
