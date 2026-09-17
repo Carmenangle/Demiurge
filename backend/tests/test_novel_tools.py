@@ -533,3 +533,20 @@ def test_upsert_覆盖保护_短版不能覆盖长版(tmp_path):
     book = worldbook_store.read_repo_snapshot(str(work), "w")
     da = next(e for e in book["entries"] if str(e.get("comment") or "") == "角色卡·戴茂")
     assert "细节" in da["content"], "长版内容应保持不变"
+
+
+def test_模块源码编译无非法转义警告():
+    """scorecard 维度 5 扣分点收口（T6.1，2026-09-17）：novel_tools.py docstring 内
+    「编号开头 ^\\d+\\s*\\.」曾是普通字符串非法转义（SyntaxWarning: invalid escape
+    sequence '\\d'，Python 未来版本升 SyntaxError）。回归锁：以 error 级 SyntaxWarning
+    编译模块源码必须零警告；新增含正则的 docstring/字符串一律用 raw 或显式双反斜杠。"""
+    import io
+    import warnings as _w
+    from app.services import novel_tools as _nt
+    src = io.BytesIO(Path(_nt.__file__).read_bytes()).read()
+    with _w.catch_warnings(record=True) as caught:
+        _w.simplefilter("always")
+        compile(src, str(_nt.__file__), "exec")
+    escapes = [f"{w.category.__name__}: {w.message}" for w in caught
+               if "escape" in str(w.message).lower()]
+    assert escapes == [], f"模块源码存在非法转义: {escapes}"

@@ -1,0 +1,37 @@
+{
+  "pytest_args": ["-p", "no:cacheprovider"],
+  "variants": [
+    {
+      "name": "M1-mcp壳回退空串",
+      "file": "backend/app/routers/mcp.py",
+      "find": "    from app.services.repo_meta import setting_str_from_state\n    return setting_str_from_state(\"smitheryKey\")",
+      "replace": "    return \"\"",
+      "tests": "tests/test_smithery_key_narrowing.py",
+      "expect_red": true
+    },
+    {
+      "name": "M2-skills壳回退空串",
+      "file": "backend/app/routers/skills.py",
+      "find": "    from app.services.repo_meta import setting_str_from_state\n    return setting_str_from_state(\"smitheryKey\")",
+      "replace": "    return \"\"",
+      "tests": "tests/test_smithery_key_narrowing.py",
+      "expect_red": true
+    },
+    {
+      "name": "M3-import_source目录读法旁路属主",
+      "file": "backend/app/services/capability_handlers.py",
+      "find": "    base = repo_meta.setting_dir_from_state(\"characterDir\")",
+      "replace": "    base = \"\"",
+      "tests": "tests/test_capability_import_source.py",
+      "expect_red": true
+    },
+    {
+      "name": "M4-阴性对照-无害注释变异",
+      "file": "backend/app/services/repo_meta.py",
+      "find": "def setting_str_from_state(key: str) -> str:",
+      "replace": "def setting_str_from_state(key: str) -> str:  # 变异：签名行尾注释",
+      "tests": "tests/test_smithery_key_narrowing.py",
+      "expect_red": false
+    }
+  ]
+}

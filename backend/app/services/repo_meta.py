@@ -129,6 +129,21 @@ def setting_dir_from_state(key: str) -> str:
     return ""
 
 
+def setting_str_from_state(key: str) -> str:
+    """读取 settings 中的字符串标量设置（`smitheryKey` 等非目录项的唯一读入口）。
+
+    2026-09-17 T6.3：`routers/mcp._smithery_key` 与 `routers/skills._skey` 原先各自
+    内联自读 `user_state.json`（逐字相同的两份真源），收敛到此。settings 缺失/
+    非 dict/值非字符串一律回 ""；strip 由属主统一做（key 带尾随空白传 header 会 401）。
+    """
+    settings = _load_state().get("settings")
+    if isinstance(settings, dict):
+        value = settings.get(key)
+        if isinstance(value, str):
+            return value.strip()
+    return ""
+
+
 def folder_name(repo_id: str) -> str:
     """决定该仓库的输出文件夹段（相对 output_dir）：有仓库名用仓库名(清洗保中文)，否则回退 UUID。
 

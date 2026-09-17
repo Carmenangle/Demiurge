@@ -18,6 +18,7 @@ import zlib
 import pytest
 
 from app.services import capability_handlers as ch
+from app.services import repo_meta
 from app.services import capability_registry as cr
 from app.services import character_card as cc
 from app.services import character_store as cs
@@ -67,7 +68,10 @@ def dirs(tmp_path, monkeypatch):
     char_dir.mkdir()
     wb_dir.mkdir()
     configured = {"characterDir": str(char_dir), "worldbookDir": str(wb_dir)}
-    monkeypatch.setattr(ch, "_dir_from_state", lambda key: configured.get(key) or "")
+    # T6.3（2026-09-17）：handler 目录读取已收敛到属主 `repo_meta.setting_dir_from_state`，
+    # patch 接缝随之改指属主（monkeypatch 判据=谁在调用期查这个名字）。
+    monkeypatch.setattr(repo_meta, "setting_dir_from_state",
+                        lambda key: configured.get(key) or "")
     return {"character_dir": str(char_dir), "worldbook_dir": str(wb_dir)}
 
 
@@ -149,7 +153,7 @@ def test_路径不存在报错(dirs):
 
 
 def test_未配置characterDir拒绝导入(tmp_path, monkeypatch):
-    monkeypatch.setattr(ch, "_dir_from_state", lambda key: "")
+    monkeypatch.setattr(repo_meta, "setting_dir_from_state", lambda key: "")
     png = _png_with_text({"chara": _encode_card(_v3_card())})
     source = tmp_path / "Helia.png"
     source.write_bytes(png)

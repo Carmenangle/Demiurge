@@ -85,14 +85,10 @@ def smithery_add(req: AddSmitheryRequest) -> list[McpServer]:
 
 
 def _smithery_key() -> str:
-    """从 user_state.json 的 settings 读全局 Smithery API Key。"""
-    import json
-    from app.config import DATA_DIR
-    p = DATA_DIR / "user_state.json"
-    if p.is_file():
-        try:
-            d = json.loads(p.read_text(encoding="utf-8"))
-            return (d.get("settings") or {}).get("smitheryKey", "") or ""
-        except (OSError, ValueError, AttributeError):  # 读盘 / 坏JSON(含编码) / settings非dict
-            pass
-    return ""
+    """从 user_state.json 的 settings 读全局 Smithery API Key。
+
+    2026-09-17 T6.3 收敛：原内联自读改为属主薄壳（读法/容错/strip 以
+    `repo_meta.setting_str_from_state` 为准）；本壳保留供测试与既有调用点引用。
+    """
+    from app.services.repo_meta import setting_str_from_state
+    return setting_str_from_state("smitheryKey")

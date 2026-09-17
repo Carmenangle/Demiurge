@@ -1077,15 +1077,8 @@ def instantiate_recipe(recipe_id: str, output_dir: str = "", repo_id: str = "",
         param_overrides=param_overrides if isinstance(param_overrides, dict) else None)
 
 
-def _dir_from_state(key: str) -> str:
-    """从 user_state settings 读目录配置（characterDir/worldbookDir 等运行态真源）。"""
-    from app.config import DATA_DIR
-
-    try:
-        st = json.loads((DATA_DIR / "user_state.json").read_text(encoding="utf-8"))
-        return str((st.get("settings") or {}).get(key) or "")
-    except (OSError, json.JSONDecodeError):
-        return ""
+# 2026-09-17 T6.3：目录类设置自读薄包装已删除——统一走
+# `repo_meta.setting_dir_from_state`（单一属主，容错/strip 以属主为准）。
 
 
 def import_source_card(path: str, overwrite: bool = False,
@@ -1098,7 +1091,7 @@ def import_source_card(path: str, overwrite: bool = False,
     """
     from pathlib import Path as _Path
 
-    from app.services import character_card, character_store
+    from app.services import character_card, character_store, repo_meta
 
     raw_path = str(path or "").strip().strip('"')
     if not raw_path:
@@ -1106,7 +1099,7 @@ def import_source_card(path: str, overwrite: bool = False,
     target = _Path(raw_path).expanduser()
     if not target.is_file():
         raise ValueError(f"卡文件不存在：{raw_path}")
-    base = _dir_from_state("characterDir")
+    base = repo_meta.setting_dir_from_state("characterDir")
     if not base:
         raise ValueError("请先在设置中配置角色卡文件夹（characterDir）")
     raw = target.read_bytes()
@@ -1122,7 +1115,7 @@ def import_source_card(path: str, overwrite: bool = False,
         raise ValueError(f"源库已存在同名卡「{exc}」；确认后用 overwrite=true 重导") from exc
     worldbook_extracted = False
     if extract_worldbook:
-        wb_dir = _dir_from_state("worldbookDir")
+        wb_dir = repo_meta.setting_dir_from_state("worldbookDir")
         if wb_dir:
             character_store.extract_embedded_worldbook(base, card.name, wb_dir)
             worldbook_extracted = True
@@ -1391,11 +1384,11 @@ def export_work_to_library(base: str, repo_id: str) -> dict[str, Any]:
     2026-09-08 用户定案方案 B：一键导入——固定路径覆盖，不产生多版本。"""
     import shutil
     from pathlib import Path as _Path
-    from app.services import character_store, worldbook_store
+    from app.services import character_store, repo_meta, worldbook_store
     if not (base and repo_id):
         raise ValueError("作品目录与 repo_id 由执行环境归一注入，不接受空值")
-    char_dir = _dir_from_state("characterDir")
-    wb_dir = _dir_from_state("worldbookDir")
+    char_dir = repo_meta.setting_dir_from_state("characterDir")
+    wb_dir = repo_meta.setting_dir_from_state("worldbookDir")
     if not char_dir:
         raise ValueError("未配置角色卡源库目录（characterDir）")
     if not wb_dir:

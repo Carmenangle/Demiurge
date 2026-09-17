@@ -32,15 +32,9 @@ def save_skills(skills: list[Skill]) -> list[Skill]:
 # ===== Smithery 技能市场：浏览/一键添加 =====
 
 def _skey() -> str:
-    import json
-    from app.config import DATA_DIR
-    p = DATA_DIR / "user_state.json"
-    if p.is_file():
-        try:
-            return (json.loads(p.read_text(encoding="utf-8")).get("settings") or {}).get("smitheryKey", "") or ""
-        except (OSError, ValueError, AttributeError):  # 读盘 / 坏JSON(含编码) / settings非dict
-            pass
-    return ""
+    """Smithery Key 属主薄壳（2026-09-17 T6.3 与 mcp._smithery_key 一并收敛）。"""
+    from app.services.repo_meta import setting_str_from_state
+    return setting_str_from_state("smitheryKey")
 
 
 @router.get("/smithery/search")
