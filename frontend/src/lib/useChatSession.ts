@@ -65,8 +65,7 @@ import {
 import {
   applyRouteChoice, appendImageSlot, applyInterruptedStop, bindMediaSlotPrompt, dropMediaSlot, markMediaSlotFailed, appendAudioSlot, appendTransitionSlot,
   failMediaSlot, pruneUnsubmittedMediaSlots, reduceChatStreamEvent, resetMediaSlotForRetry, resolveMediaSlot,
-  restoreSubmittedMediaSlots, upsertMessages, appendUnknownMessages, workflowMessages,
-  pickFreshAssistantMedia,
+  restoreSubmittedMediaSlots, upsertMessages, workflowMessages,
 } from "./chatSessionEvents";
 import { recoverCompactedSummaryImage } from "./contextManagement";
 // C4-A Step 6：媒体种类推导（审计 R8）——工作流出图/出视频的超时合同由抓取图节点类名决定，
@@ -74,13 +73,13 @@ import { recoverCompactedSummaryImage } from "./contextManagement";
 import { deriveWorkflowMediaType } from "./canvasWorkflowRun";
 import { characterDetail } from "../api/characters";
 import { recoverAgentRun, shouldRecoverAgentRun } from "./agentRecovery";
-import { subscribePlanTaskActivities } from "./planTaskActivity";
 import { deletedMessageTombstones } from "./deletedMessageTombstones";
 import { nextStoryTurnNo, sealTurnsOf } from "./storyTurn";
 
 import { releaseAgentStream, type ActiveAgentStream } from "./agentStreamLifecycle";
 import type { ImageQuality, WorkMode } from "./viewRouting";
 import { useIllustrationChain } from "./useIllustrationChain";
+import { usePlanTaskFeed } from "./usePlanTaskFeed";
 import { useChatMaintenance } from "./useChatMaintenance";
 import {
   comfyRegenerationUrl, legacyGenerationPrompt, resolveImageRegenerationModel,
@@ -590,64 +589,9 @@ export function useChatSession(deps: ChatSessionDeps) {
   }, [threadId]);
   // APPEND_HERE
 
-  // 计划采集产物「逐张实时上屏」（2026-09-04 唐柚 14 套画像）：计划任务在本会话执行时，
-  // 后端按图逐条把 plan_collect 消息（图片+套装名+完整提示词）写进对话快照。这里订阅本会话
-  // 的计划任务活动，任务运行/终态扫尾期间周期增量拉快照，只把新增 id 的消息追加上屏——
-  // 页内停留即「生成一张发一张」，无需刷新。绝不覆盖本地已有消息（不打扰流式正文/本地编辑），
-  // Agent 流式/恢复流程在跑时让路，由其自身回显。
-  // 画布/资产桥（2026-09-09）：新上屏的 assistant 图片消息 = 后端已把该产物入 RAG。
-  // 派发 laf-generation-saved（/w 等生成落库同款事件）→ 画布节点与资产网格即时出现该产物，
-  // 不再等计划全部完成/页面刷新（此前缺桥 → 「产物不进画布直到全部生成完」）。
-  useEffect(() => {
-    if (threadId === "home") return;
-    let alive = true;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    let settleLeft = 0;                      // >0 = 还需继续轮询的轮数（任务终态后扫尾捡走最后图）
-    const seenIds = new Set<string>();       // 本轮 effect 已上屏的消息 id（去重，防刷新事件风暴）
-    const RUNNING = new Set(["queued", "running"]);
-    const ENDED = new Set(["done", "partial", "error", "cancelled", "blocked"]);
-    const tick = async () => {
-      timer = null;
-      if (recoveryActiveRef.current || agentBusyRef.current || activeThreadRef.current !== threadId) {
-        if (alive && settleLeft > 0) scheduleNext();   // 忙/切走时顺延，不丢扫尾
-        return;
-      }
-      let freshMedia: ChatMessage[] = [];
-      try {
-        const snap = await fetchSnapshot(threadId);
-        if (!alive || activeThreadRef.current !== threadId) return;
-        const items = deletedMessageTombstones.filterDeleted(
-          threadId, (snap.items || []) as ChatMessage[],
-        );
-        freshMedia = pickFreshAssistantMedia(items, seenIds);
-        setMessages((current) => appendUnknownMessages(current, items));
-      } catch { /* 单轮失败顺延下一轮 */ }
-      if (freshMedia.length > 0) {
-        try {
-          window.dispatchEvent(new CustomEvent("laf-generation-saved", { detail: threadId }));
-        } catch { /* 非关键事件，失败不影响消息上屏 */ }
-      }
-      if (alive && settleLeft > 0) { settleLeft -= 1; scheduleNext(); }
-    };
-    const scheduleNext = () => {
-      if (!alive || settleLeft <= 0) return;
-      timer = setTimeout(() => { void tick(); }, 2000);
-    };
-    const unsub = subscribePlanTaskActivities((activities) => {
-      if (!alive || activeThreadRef.current !== threadId) return;
-      const mine = activities.filter((a) => a.repo_id === threadId);
-      const running = mine.some((a) => RUNNING.has(a.status));
-      const ended = mine.some((a) => ENDED.has(a.status));
-      if (!running && !ended) {            // 本会话无计划任务（或已被挤出列表）→ 停
-        settleLeft = 0;
-        if (timer) { clearTimeout(timer); timer = null; }
-        return;
-      }
-      settleLeft = running ? 60 : 6;       // 运行中持续轮询；终态后再扫 6 轮（~12s）捡尾
-      if (!timer) scheduleNext();
-    });
-    return () => { alive = false; if (timer) clearTimeout(timer); unsub(); };
-  }, [threadId]);
+  // 计划采集产物「逐张实时上屏」订阅（T2.2-B1 外移 → lib/usePlanTaskFeed.ts）：effect 体与注释逐字随体迁入，
+  // 闭包符号以同名 deps 注入；依赖数组 `[threadId]` 不变（重订阅时机＝行为面），调用点＝原 effect 位置。
+  usePlanTaskFeed({ threadId, recoveryActiveRef, agentBusyRef, activeThreadRef, setMessages });
 
   // 存快照前给图片瘦身：把用户上传的 data:URI 大图落盘转 local-view 小地址。
   // data:URI 只来自用户上传的参考图 → 落 reference/ 子夹，与生成图（仓库根目录）分开。
