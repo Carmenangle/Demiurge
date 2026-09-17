@@ -106,3 +106,21 @@ def test_brief超长截断(tmp_path):
     brief = fabric_work.build_work_brief(str(tmp_path), "r1", max_chars=300)
     assert len(brief) <= 700  # brief 本身带固定前后缀
     assert "截断" in brief
+
+
+def test_charfacts库根跨作品扫描_已知有意豁免锁():
+    """T6.2（2026-09-17 用户拍板永久豁免，二轮审计 #23 同判）：`_scan_charfacts`
+    root=库根时会跨作品列出别的作品的素材段——**有意保留**，理由见
+    `fabric_work._scan_charfacts` docstring（charfacts 按作品命名可区分、库根级
+    素材对冷启动有价值、收紧会让老仓库失忆）。本锁固化豁免注释存在：
+    若有人移除 docstring 中的「已知有意」声明或改掉函数行为，此处即红，
+    提示先回读 ARCHITECTURE「明确不做的」对应条目，别静默改语义。"""
+    from pathlib import Path as _P
+    src = _P(fabric_work.__file__).read_text(encoding="utf-8")
+    assert "已知有意（2026-09-17 用户拍板 T6.2 永久豁免）" in src, (
+        "_scan_charfacts 的豁免声明被移除——先回读 ARCHITECTURE「明确不做的」"
+        "对应条目，确认是否真要推翻用户拍板")
+    # 行为面现状锁：库根 _prep/charfacts 仍被扫描（改收紧 = 推翻豁免，须走用户决策）
+    import inspect
+    body = inspect.getsource(fabric_work._scan_charfacts)
+    assert 'cf = root / "_prep" / "charfacts"' in body

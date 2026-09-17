@@ -49,7 +49,13 @@ def _scan_docs(root: Path, out: list[str]) -> None:
 
 
 def _scan_charfacts(root: Path, out: list[str]) -> None:
-    """_prep/charfacts/*.txt（角色素材段）。"""
+    """_prep/charfacts/*.txt（角色素材段）。
+
+    ⚠ **已知有意（2026-09-17 用户拍板 T6.2 永久豁免）**：root 传库根时会把**其他作品**
+    的 charfacts 也列进档案。不改的理由：charfacts 本就按作品命名区分、库根级素材段
+    对开局冷启动仍有参考价值，且收紧后老仓库（素材全在库根 `_prep/` 下）会瞬间「失忆」。
+    二轮审计 #23 与 T6.2 复议均维持不动——别再当缺陷报，也别顺手「修」。
+    """
     cf = root / "_prep" / "charfacts"
     if not cf.is_dir():
         return
