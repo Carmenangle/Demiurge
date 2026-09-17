@@ -5,6 +5,7 @@
 """
 
 from __future__ import annotations
+import logging
 import re
 import time
 from typing import Any
@@ -13,6 +14,8 @@ from app.services import llm as _llm
 from app.services.agent_support import (  # noqa: F401  跨簇底座
     _proxy_kw,
 )
+
+_LOG = logging.getLogger("uvicorn.error")
 
 def _resolve_agent_cfg(agent_id: str) -> dict | None:
     """读自定义 Agent 预设：空 agent_id / 查不到 → None（走内置默认，与单 agent 一致）。"""
@@ -122,8 +125,8 @@ def _card_source(ctx: dict, selected_name: str = "") -> tuple[str, str]:
         )
         if snap:
             return snap, card_name
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 读失败退回 character_dir，但卡来源降级
+        _LOG.warning("卡快照读取失败（上下文退回 character_dir，卡来源降级）: %s", exc)
     return character_dir, card_name
 
 
@@ -739,8 +742,8 @@ def _agent_system(ctx: dict, base: str) -> str:
         try:
             from app.services.image_prompt_style import guidance_for
             sp += "\n\n【生图提示词写法】" + guidance_for("", ctx.get("gen_model", ""), st)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001 [EXC-留痕] 附加失败不阻断，但 system 缺该段
+            _LOG.warning("生图提示词写法指导附加失败（system 缺少该段，写法约束弱化）: %s", exc)
     frags = ctx.get("skill_frags") or []
     if frags:
         sp += "\n\n【用户自定义技能】\n" + "\n".join(f"- {f}" for f in frags)

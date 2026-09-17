@@ -1,8 +1,9 @@
 """P4 第一批形态锁：业务数据路径的「纯吞」必须留痕，禁止退化回 `pass`。
 
 审计正本：docs/memory/except-exception-audit-2026-09-16.md（2026-09-16 AST 全量 435 处，
-其中 91 处纯吞；本锁钉住 C1–C7 共 14 处业务数据路径）。这些路径吞掉异常会让
-快照/记忆/索引/审批状态**静默分叉**，因此处理体必须至少留一条日志/遥测痕迹。
+其中 91 处纯吞、T3.3 前复扫 69 处；本锁钉住 C1–C7 与 T3.2/T3.3 追加项，**20 个函数级目标**）。
+这些路径吞掉异常会让快照/记忆/索引/审批状态**静默分叉**，或让用户可见面降级
+（如 `_visible_roleplay_text` 剥离失败 ⇒ 内部控制块泄漏），因此处理体必须至少留一条日志/遥测痕迹。
 
 刻意不锁（A/B 档 best-effort，有意设计）：遥测包装器（`run_trace.emit`/`sink`）、
 清理路径（interrupt/租约 revoke/taskkill）、探活 `is_up`、`visual_ci._extract_json` 等。
@@ -42,6 +43,12 @@ TARGETS: list[tuple[str, str]] = [
     # C4 续（T3.2）：/rag/list 的顺带播种 best-effort 属主 —— 失败 = 系统指令静默缺索引。
     # 原先这段兜底**写在路由里**（`routers/rag.py:130` 纯吞），T3.2 下沉到服务侧并留痕。
     ("services/rag_store.py", "seed_system_docs_best_effort"),
+    # T3.3 批次 1（agent 辅助层，2026-09-17）：失败 = 用户可见面降级或上下文静默缺失
+    ("services/agent_agency.py", "_extract_video_action_plan"),   # 防拦截预设未生效
+    ("services/agent_agency.py", "_visible_roleplay_text"),       # 控制块（生图/状态/表格）泄漏
+    ("services/agent_context_assembly.py", "_card_source"),       # 卡来源降级为 character_dir
+    ("services/agent_context_assembly.py", "_agent_system"),      # system 缺「生图提示词写法」
+    ("services/agent_retrieval.py", "_reindex_retrieval_tables"),  # 索引与表格数据分叉
 ]
 
 
@@ -58,6 +65,29 @@ def _is_trivial(handler: ast.ExceptHandler) -> bool:
         or (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant))
         for s in handler.body
     )
+
+
+def test_目标注册表非空且模块都存在():
+    """防空转①：目标表被删空/改小，或路径写错 ⇒ 整条锁静默失效。"""
+    assert len(TARGETS) >= 20, (
+        f"TARGETS 只剩 {len(TARGETS)} 条（下限 20）——锁的保护面缩水了；"
+        f"确属重构请同步下调，但不得删到失去意义"
+    )
+    missing = [rel for rel, _ in TARGETS if not (APP / rel).exists()]
+    assert not missing, f"目标模块不存在（路径写错会让该条目标空转）: {missing}"
+
+
+def test_判据自身有牙():
+    """防空转②（锁的锁）：判据必须抓得到纯吞形态、且不误伤留痕（防判据写错导致永久绿灯）。"""
+    def _h(src: str) -> bool:
+        tree = ast.parse(src)
+        return any(isinstance(n, ast.ExceptHandler) and _is_bare_exc(n.type) and _is_trivial(n)
+                   for n in ast.walk(tree))
+
+    assert _h("try:\n    f()\nexcept Exception:\n    pass\n"), "判据抓不到 `except Exception: pass`"
+    assert _h("try:\n    f()\nexcept Exception:\n    ...\n"), "判据抓不到 `except Exception: ...`"
+    assert _h('try:\n    f()\nexcept Exception:\n    """best effort"""\n'), "判据抓不到「仅 docstring」"
+    assert not _h("try:\n    f()\nexcept Exception as e:\n    _LOG.warning('x', e)\n"), "判据误伤「留痕」"
 
 
 @pytest.mark.parametrize("rel, fname", TARGETS)

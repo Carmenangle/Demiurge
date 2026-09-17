@@ -6,8 +6,11 @@
 
 from __future__ import annotations
 from collections import OrderedDict
+import logging
 import threading
 from app.services import run_trace
+
+_LOG = logging.getLogger("uvicorn.error")
 
 def _embed_cfg(ctx: dict):
     """从 ctx 取嵌入配置 → EmbedConfig；缺 base/model → None（无法走语义检索/入库）。"""
@@ -152,8 +155,8 @@ def _reindex_retrieval_tables(ctx: dict, repo_id: str, tables: list) -> None:
         for t in table_store.retrieval_tables(tables):
             texts = [table_store.row_text(t, r) for r in (t.get("rows") or [])]
             rag_store.index_table_rows(repo_id, cfg, t.get("uid", ""), t.get("name", ""), texts)
-    except Exception:  # noqa: BLE001  索引失败不阻断叙述
-        pass
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 不阻断叙述，但索引与表格数据会分叉
+        _LOG.warning("检索表重灌索引失败（不阻断叙述，但索引与表格数据可能分叉）: %s", exc)
 
 
 def _curator_index_fn(ctx: dict, repo_id: str):

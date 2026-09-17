@@ -5,6 +5,7 @@
 """
 
 from __future__ import annotations
+import logging
 import re
 import threading
 import traceback
@@ -33,6 +34,8 @@ from app.services.agent_context_assembly import (  # noqa: F401  跨簇底座
 from app.services.agent_fabric import (  # noqa: F401  跨簇底座
     _live_chat,
 )
+
+_LOG = logging.getLogger("uvicorn.error")
 
 def _builtin(ctx: dict, agent_id: str, field_name: str, fallback):
     """取内置 Agent 生效参数（含用户覆盖）：优先运行时 ctx.builtin，缺失回退硬编码默认。"""
@@ -141,8 +144,8 @@ def _extract_video_action_plan(
             user_name=str(ctx.get("user_name") or ""),
             task_label="内部视频提示词任务",
         )
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 预设组装失败不阻断，但生成缺防拦截预设
+        _LOG.warning("防拦截预设组装失败（保持原 system，本次生成缺该预设）: %s", exc)
     user_lines = [f"剧情高潮正文（可能含防拦截标记，按标记还原原义）：\n{narrative}"]
     if actors:
         user_lines.append(f"在场角色：{'、'.join(actors)}")
@@ -426,20 +429,20 @@ def _visible_roleplay_text(reply: str) -> str:
         from app.services import image_prompt_extract
 
         clean, _ = image_prompt_extract.extract_illustration_plan(clean)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 剥离失败不阻断，但生图提示词块会漏给用户
+        _LOG.warning("生图提示词块剥离失败（该块可能泄漏到用户可见文本）: %s", exc)
     try:
         from app.services import roleplay_agency
 
         clean, _ = roleplay_agency.parse_state_block(clean)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 剥离失败不阻断，但状态块会漏给用户
+        _LOG.warning("状态块剥离失败（该块可能泄漏到用户可见文本）: %s", exc)
     try:
         from app.services import table_update
 
         clean, _ = table_update.parse_table_block(clean)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 剥离失败不阻断，但表格块会漏给用户
+        _LOG.warning("表格块剥离失败（该块可能泄漏到用户可见文本）: %s", exc)
     return (think_head + clean).strip()
 
 
