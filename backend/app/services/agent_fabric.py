@@ -5,6 +5,7 @@
 """
 
 from __future__ import annotations
+import logging
 import json
 import re
 from typing import Any, Callable
@@ -13,6 +14,8 @@ from app.services import llm as _llm
 from app.services.agent_contracts import RunContext
 from app.services.agent_support import _proxy_kw
 from app.services.agent_retrieval import _history_embed_fn
+
+_LOG = logging.getLogger("uvicorn.error")
 
 def _flow_doc_hint(ctx: Any, user_text: str) -> str:
     """current_flow_doc 续跑提示（固化链 §3 设计 A）：延续语 + 有句柄才注入，纯机械。"""
@@ -173,7 +176,7 @@ def _live_trace(ctx: dict, agent: str):
             try:
                 detail = _detail(event, data or {})
                 sink({"trace": text, **({"detail": detail} if detail else {})})
-            except Exception:
+            except Exception:  # noqa: BLE001 [EXC-保留] 遥测发射 best-effort：细节格式化失败只丢该行 trace
                 pass
     return emit
 
@@ -523,8 +526,8 @@ def _fabric_knowledge_history(ctx: Any, user_text: str,
                             + "\n\n【本任务已产出文件（更早轮次交付物，直接引用路径；"
                               "用户要求修改时改这些文件，勿重复生成）】\n"
                             + "\n".join(f"- {_p}" for _p in _prod[:10])).strip()
-    except Exception:  # noqa: BLE001 - 产物指针缺失不影响装配
-        pass
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 产物指针缺失不影响装配，但历史缺已产出文件
+        _LOG.warning("本任务产物指针读取失败（装配继续，但历史缺已产出文件清单）: %s", exc)
     if task_type == "design_discussion":
         insp_block = _recent_inspiration_blocks(ctx)
         if insp_block:
@@ -540,8 +543,8 @@ def _fabric_knowledge_history(ctx: Any, user_text: str,
                 history_text = (history_text
                                 + "\n\n【设计讨论提示词规范（下方产出草案必须逐条遵守）】\n"
                                 + str(_spec["content"])).strip()
-        except Exception:  # noqa: BLE001 - 规范文档缺失不阻断讨论
-            pass
+        except Exception as exc:  # noqa: BLE001 [EXC-留痕] 规范文档缺失不阻断讨论，但草案缺规范约束
+            _LOG.warning("设计讨论提示词规范文档读取失败（讨论继续，但草案缺该规范约束）: %s", exc)
         _hist_att = _recent_attachment_lines(ctx)
         if _hist_att:
             history_text = (history_text + "\n\n" + _hist_att).strip()
@@ -692,8 +695,8 @@ def _fabric_finalize(outcome: Any, text: str, trace: list[str],
             _av.snapshot_current(output_dir, trigger="done",
                                  summary=outcome.reply[:200] or text[:200],
                                  repo_id=str((ctx or {}).get("repo_id") or ""))
-        except Exception:  # noqa: BLE001 - 版本快照失败不影响交付
-            pass
+        except Exception as exc:  # noqa: BLE001 [EXC-留痕] 版本快照失败不影响交付，但本轮无回档点
+            _LOG.warning("交付版本快照失败（交付继续，但本轮无回档点）: %s", exc)
         # 上下文合同⑤产物指针回写（2026-09-12）：本轮实际写入的交付物路径进任务
         # 会话，接续轮注入「已产出文件」——用户说「改一下」时改这些文件而非重生成。
         # 已有活跃任务（讨论/委派）时保留其 task_type，只累积产物。
@@ -711,8 +714,8 @@ def _fabric_finalize(outcome: Any, text: str, trace: list[str],
                     "output_dir": output_dir,
                     "product_paths": _paths[:10],
                 })
-        except Exception:  # noqa: BLE001 - 产物登记失败不影响交付
-            pass
+        except Exception as exc:  # noqa: BLE001 [EXC-留痕] 产物登记失败不影响交付，但下轮缺产物指针
+            _LOG.warning("交付产物登记失败（交付继续，但任务会话缺产物指针）: %s", exc)
         return {"result_text": outcome.reply + recipe_marker,
                 "trace": trace + ["🧵 智能编造自由循环完成"],
                 "artifacts": artifacts}
@@ -750,8 +753,8 @@ def _recipe_offer_answer(text: str, ctx: Any, output_dir: str) -> dict | None:
     from app.services import recipe_offer_store
     try:
         recipe_offer_store.delete(str(offer.get("id") or ""))
-    except Exception:  # noqa: BLE001 - 删除失败也不阻断本次执行
-        pass
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 删除失败不阻断执行，但该邀约可能再次弹出
+        _LOG.warning("配方邀约记录删除失败（执行继续，但该邀约可能再次弹出）: %s", exc)
     return {
         "answer": "solidify" if match.group(1) in _RECIPE_OFFER_YES else "skip",
         "intent": str(offer.get("intent") or ""),

@@ -1,7 +1,7 @@
 """P4 第一批形态锁：业务数据路径的「纯吞」必须留痕，禁止退化回 `pass`。
 
 审计正本：docs/memory/except-exception-audit-2026-09-16.md（2026-09-16 AST 全量 435 处，
-其中 91 处纯吞、T3.3 前复扫 69 处；本锁钉住 C1–C7 与 T3.2/T3.3 追加项，**20 个函数级目标**）。
+其中 91 处纯吞、T3.3 前复扫 69 处；本锁钉住 C1–C7 与 T3.2/T3.3 追加项，**29 个函数级目标**）。
 这些路径吞掉异常会让快照/记忆/索引/审批状态**静默分叉**，或让用户可见面降级
 （如 `_visible_roleplay_text` 剥离失败 ⇒ 内部控制块泄漏），因此处理体必须至少留一条日志/遥测痕迹。
 
@@ -49,6 +49,16 @@ TARGETS: list[tuple[str, str]] = [
     ("services/agent_context_assembly.py", "_card_source"),       # 卡来源降级为 character_dir
     ("services/agent_context_assembly.py", "_agent_system"),      # system 缺「生图提示词写法」
     ("services/agent_retrieval.py", "_reindex_retrieval_tables"),  # 索引与表格数据分叉
+    # T3.3 批次 2（LangGraph 编排层，2026-09-17）：失败 = 编译上下文/任务登记/记忆静默降级
+    ("services/agent_graph.py", "analyze_node"),              # 缺自定义风格写法指引
+    ("services/agent_graph.py", "_pc_collect_attachments"),   # 缺附件路径/LoRA 清单/模板清单
+    ("services/agent_graph.py", "_pc_design_discussion_reply"),  # 任务会话缺本轮登记
+    ("services/agent_graph.py", "_pc_register_delegation"),   # 任务会话缺委派登记
+    ("services/agent_graph.py", "answer_node"),               # 本轮回答缺 chat_facts 块
+    ("services/agent_graph.py", "stream_multi_agent"),        # 附图本地路径未注入
+    ("services/agent_fabric.py", "_fabric_knowledge_history"),  # 历史缺产物指针/规范文档
+    ("services/agent_fabric.py", "_fabric_finalize"),         # 缺版本快照/产物登记
+    ("services/agent_fabric.py", "_recipe_offer_answer"),     # 邀约记录未删，可能重复弹出
 ]
 
 
@@ -69,8 +79,8 @@ def _is_trivial(handler: ast.ExceptHandler) -> bool:
 
 def test_目标注册表非空且模块都存在():
     """防空转①：目标表被删空/改小，或路径写错 ⇒ 整条锁静默失效。"""
-    assert len(TARGETS) >= 20, (
-        f"TARGETS 只剩 {len(TARGETS)} 条（下限 20）——锁的保护面缩水了；"
+    assert len(TARGETS) >= 29, (
+        f"TARGETS 只剩 {len(TARGETS)} 条（下限 29）——锁的保护面缩水了；"
         f"确属重构请同步下调，但不得删到失去意义"
     )
     missing = [rel for rel, _ in TARGETS if not (APP / rel).exists()]

@@ -149,6 +149,9 @@ from app.services.agent_stream import (  # noqa: F401  拆分 re-export
 # 探测日志：会话输入 / AI 思考(<think>) / RAG 召回，输出到 uvicorn 控制台（仅开发可见，不推前端）。
 _probe = logging.getLogger("uvicorn.error")
 
+# T3.3（2026-09-17）：业务数据路径兜底降级留痕（探针日志见上，用途不同）。
+_LOG = logging.getLogger("uvicorn.error")
+
 
 def _probe_think(reply: str) -> str:
     """从回复里抽 <think>…</think> 思考段（GrayWill 等预设的 CoT）。无则空串。"""
@@ -576,8 +579,8 @@ def analyze_node(state: AgentState) -> dict:
             try:
                 from app.services.image_prompt_style import guidance_for
                 style_hint = "\n" + guidance_for("", ctx.get("gen_model", ""), ctx["style_template"])
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001 [EXC-留痕] 风格指引缺失不阻断，但提示词弱化
+                _LOG.warning("自定义风格写法指引附加失败（本次分析提示词缺该段）: %s", exc)
         resp = model.invoke([
             SystemMessage(content="如实完整描述这张图用于再次生成：主体/人物/服饰/动作/背景/光影/构图/画风/画质。"
                           + style_hint + "\n只输出提示词本身。"),
@@ -731,8 +734,8 @@ def _pc_collect_attachments(ctx: dict, text: str, attachments: list[dict]) -> No
                 if _p is not None:
                     _item["path"] = str(_p)
                     run_trace.emit(ctx, "plan.attachment_path", name=_name, path=str(_p))
-            except Exception:  # noqa: BLE001 - 路径解析失败仍可编译
-                pass
+            except Exception as exc:  # noqa: BLE001 [EXC-留痕] 路径解析失败仍可编译，但附件无本地路径
+                _LOG.warning("附件路径解析失败（仍可编译，但该附件无本地路径）: %s", exc)
         attachments.append(_item)
     try:
         from app.services import capability_handlers as _ch
@@ -747,8 +750,8 @@ def _pc_collect_attachments(ctx: dict, text: str, attachments: list[dict]) -> No
                                 "用户提到近似名称时优先用上面的真实文件名；"
                                 "宽泛指向（如「用 krea2 的」）存在多个候选时，"
                                 "在计划卡里列出候选让用户选择，禁止替用户猜。"})
-    except Exception:  # noqa: BLE001 - 目录不可用时跳过
-        pass
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 目录不可用时跳过，但编译上下文缺 LoRA 清单
+        _LOG.warning("LoRA 目录读取失败（编译上下文缺 LoRA 清单，近似名无法对号）: %s", exc)
     try:
         from app.services import template_store
         templates = template_store.list_templates()
@@ -781,8 +784,8 @@ def _pc_collect_attachments(ctx: dict, text: str, attachments: list[dict]) -> No
                             "禁止写 TO_BE_RESOLVED、{{...}} 或任何占位符。"
             attachments.append({"name": plan_compiler.TEMPLATE_CATALOG_NAME,
                                 "text": catalog_text})
-    except Exception:  # noqa: BLE001 - 模板库不可用时跳过
-        pass
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 模板库不可用时跳过，但编译上下文缺模板清单
+        _LOG.warning("模板库读取失败（编译上下文缺模板清单）: %s", exc)
     recipe_catalog = _recipe_catalog_text()
     if recipe_catalog:
         # 固化流程清单进编译上下文：意图高度一致时编译器可编排 plan.instantiate_recipe 整条重放
@@ -928,8 +931,8 @@ def _pc_design_discussion_reply(ctx: dict, state: AgentState, *, intent_text: st
                 if isinstance(_a, dict) and _a.get("file_id")
             ],
         })
-    except Exception:  # noqa: BLE001 - 登记失败不阻断讨论
-        pass
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 登记失败不阻断讨论，但任务会话缺本轮登记
+        _LOG.warning("设计讨论任务登记失败（讨论继续，但任务会话缺该登记）: %s", exc)
     return _run_fabric_content_loop(ctx, state, intent_text=intent_text,
                                     judge_text=judge_text, text=text,
                                     trace=trace, output_dir=output_dir,
@@ -963,8 +966,8 @@ def _pc_register_delegation(ctx: dict, *, intent_text: str, judge_text: str,
                 if isinstance(_a, dict) and _a.get("file_id")
             ],
         })
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 登记失败不阻断委派，但任务会话缺该登记
+        _LOG.warning("委派任务登记失败（委派继续，但任务会话缺该登记）: %s", exc)
 
 
 def _pc_run_full_loop(ctx: dict, state: AgentState, *, text: str, judge_text: str,
@@ -1227,8 +1230,8 @@ def answer_node(state: AgentState) -> dict:
             _facts_block = _chat_facts.render_facts_block(_thread, _turn)
             if _facts_block:
                 system += "\n\n" + _facts_block
-        except Exception:  # noqa: BLE001 - 记忆注入永不阻断对话
-            pass
+        except Exception as exc:  # noqa: BLE001 [EXC-留痕] 记忆注入永不阻断对话，但本轮缺事实记忆
+            _LOG.warning("事实记忆注入失败（对话继续，但本轮回答缺 chat_facts 块）: %s", exc)
         user = agent_context.history_text(ctx) + text
         ans_temp = _builtin(ctx, "answer", "temperature", builtin_agents.ANSWER_TEMPERATURE)
         run_trace.emit(ctx, "model.request", agent="answer", model=ctx["chat_model"],
@@ -1973,8 +1976,8 @@ def stream_multi_agent(context: RunContext) -> Iterator[dict]:
                 + "\n（这是随文附图的真实本地文件路径——需要读取/迁移/转写该文件时"
                   "直接用它调用 file.read_text / character.import_source / character.migrate_scan，"
                   "禁止向用户索要路径。）")
-    except Exception:  # noqa: BLE001 - 路径提取失败不影响主流程
-        pass
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 路径提取失败不影响主流程，但附图本地路径缺失
+        _LOG.warning("附图本地路径提取失败（主流程继续，但用户无法直接引用该文件）: %s", exc)
     from langchain_core.messages import HumanMessage
     content: list = [{"type": "text", "text": message}]
     for u in (images or []):
