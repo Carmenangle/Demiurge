@@ -18,7 +18,7 @@ import {
 } from "../api/comfyui";
 import { listLoras } from "../api/loras";
 import {
-  fetchHistory, multiAgent, sealMemory,
+  multiAgent, sealMemory,
   saveSnapshot, fetchSnapshot, fetchAgentRunning, cancelAgent,
   fetchInspiration, regenerateImage as replayImageGeneration,
   claimIllustrationSubmission, reportIllustrationFailure, reportIllustrationSubmission,
@@ -29,9 +29,7 @@ import {
 import { createScenarioSnapshot } from "../api/scenario";
 import { runVisualCiDiagnostic } from "../api/visualCi";
 import { refreshChatBackgroundActivities } from "./chatBackgroundActivity";
-import { substituteMacros } from "./chatMacros";
 import type { ChatStreamEvent, IllustrationSceneSpec, AudioDialogueLine, VideoParams } from "../api/chatStreamProtocol";
-import { normalizeInspirationCard } from "../api/chatStreamProtocol";
 import {
   reduce as reduceGen, initialGenState,
   blocksDialogueSubmission, streamingBotId, needsConfirm, runningPromptId,
@@ -64,14 +62,12 @@ import {
 } from "./audioGeneration";
 import {
   applyRouteChoice, appendImageSlot, applyInterruptedStop, bindMediaSlotPrompt, dropMediaSlot, markMediaSlotFailed, appendAudioSlot, appendTransitionSlot,
-  failMediaSlot, pruneUnsubmittedMediaSlots, reduceChatStreamEvent, resetMediaSlotForRetry, resolveMediaSlot,
-  restoreSubmittedMediaSlots, upsertMessages, workflowMessages,
+  failMediaSlot, reduceChatStreamEvent, resetMediaSlotForRetry, resolveMediaSlot,
+  upsertMessages, workflowMessages,
 } from "./chatSessionEvents";
-import { recoverCompactedSummaryImage } from "./contextManagement";
 // C4-A Step 6：媒体种类推导（审计 R8）——工作流出图/出视频的超时合同由抓取图节点类名决定，
 // 硬编码 "image" 会让视频模板吃图片的 20 分钟硬上限。纯函数，无副作用、无循环依赖。
 import { deriveWorkflowMediaType } from "./canvasWorkflowRun";
-import { characterDetail } from "../api/characters";
 import { recoverAgentRun, shouldRecoverAgentRun } from "./agentRecovery";
 import { deletedMessageTombstones } from "./deletedMessageTombstones";
 import { nextStoryTurnNo, sealTurnsOf } from "./storyTurn";
@@ -81,7 +77,9 @@ import type { ImageQuality, WorkMode } from "./viewRouting";
 import { useIllustrationChain } from "./useIllustrationChain";
 import { usePlanTaskFeed } from "./usePlanTaskFeed";
 import { useWorkflowResume } from "./useWorkflowResume";
+import { useSessionLoad } from "./useSessionLoad";
 import { useChatMaintenance } from "./useChatMaintenance";
+import { clearHomeDraft, writeHomeDraft } from "./homeDraft";
 import {
   comfyRegenerationUrl, legacyGenerationPrompt, resolveImageRegenerationModel,
   templateRegenerationSnapshot, workflowRegenerationSnapshot, workflowGenMetadata,
@@ -89,31 +87,13 @@ import {
 import { effectiveGlobalProxyUrl, globalProxyAddress, resolveEndpointProxy, resolveModelProxy, type ProxyMode } from "./modelProxy";
 import { searchProviderWireValue } from "./searchSource";
 import {
-  ConversationHistoryRuntime, resolveInitialHistory, type ConversationCheckpoint,
+  ConversationHistoryRuntime, type ConversationCheckpoint,
 } from "./conversationHistoryRuntime";
 import { useChatAgentQueue } from "./useChatAgentQueue";
 
 export type Model = { baseUrl: string; apiKey: string; modelName: string; proxyMode?: ProxyMode; providerProfile?: "openai_compatible" | "claude_compatible" };
 
 export type Checkpoint = ConversationCheckpoint;
-
-// 首页(home)=临时草稿区：草稿存模块级内存变量，随浏览器进程存活——
-// 页面刷新(进程重开)即重置为空，但应用运行期间切走首页再回来仍保留。不落 localStorage / 后端快照。
-let homeDraft: ChatMessage[] = [];
-
-// 卡即作品开场白：读关联角色卡的 first_mes，作首条 bot 消息，替换 {{char}}/{{user}} 宏。读不到/无返回空串。
-async function loadOpeningMessage(
-  characterDir: string, cardName: string, userName: string,
-): Promise<string> {
-  try {
-    const card = await characterDetail(characterDir, cardName);
-    const first = card?.first_mes;
-    const raw = typeof first === "string" ? first.trim() : "";
-    return raw ? substituteMacros(raw, cardName, userName) : "";
-  } catch {
-    return "";
-  }
-}
 
 // 斜杠指令大小写兼容：只把开头的指令词转小写，参数（模板名/主题）保留原样。
 const normCmd = (text: string): string => {
@@ -351,7 +331,7 @@ export function useChatSession(deps: ChatSessionDeps) {
     },
     persist: (next) => {
       if (threadId === "home") {
-        homeDraft = next;
+        writeHomeDraft(next);
         return;
       }
       try { localStorage.setItem(chatKey, JSON.stringify(next)); } catch { /* ignore quota */ }
@@ -426,168 +406,14 @@ export function useChatSession(deps: ChatSessionDeps) {
     cancelPendingSnapshot,
   });
 
-  // 进入仓库/切换时加载消息，三级兜底：本地 localStorage → 后端消息流快照 → langgraph 对话历史。
-  useEffect(() => {
-    let alive = true;
-    loadedRef.current = false;
-    let shownLocal = false;
-    // 首页(home)=临时草稿区：从模块级 homeDraft 恢复（进程内切走切回保留，页面刷新即空）。
-    // 不读 localStorage / 后端快照 / 后端历史。仅保留后台轮询——生成中切回来仍要看到进度。
-    const isHome = threadId === "home";
-    const local = isHome ? null : localStorage.getItem(chatKey);
-    if (local) {
-      try {
-        const arr = JSON.parse(local) as ChatMessage[];
-        if (arr.length > 0) {
-          setMessages(arr);
-          shownLocal = true;
-        }
-      } catch { /* 本地损坏则走后端兜底 */ }
-    }
-    // 切回/刷新时若后台仍有生成任务在跑，轮询快照等其落盘后自动回显。
-    // 必须无论快照是否已有内容都执行——正常对话后快照必然非空，若放在
-    // 加载兜底的 early-return 之后就永远跑不到，等于后台化失效。
-    const maybeStartBgPoll = async () => {
-      try {
-        if (!shouldRecoverAgentRun(threadId)) return;
-        if (!alive || recoveryActiveRef.current) return;
-        // 切回/刷新竞态修复（2026-09-03 实锤）：后端可能恰好在快照拉取前后
-        // 落盘计划卡。无论 running 与否都短轮询几轮快照——捡到新消息就渲染，
-        // 期间发现仍在 running 则转完整后台恢复。
-        for (let i = 0; i < 8; i++) {
-          if (!alive) return;
-          try {
-            const st = await fetchAgentRunning(threadId);
-            if (!alive) return;
-            if (st.running) {
-              startAgentRecovery(threadId, repo?.id);
-              return;
-            }
-            const snap = await fetchSnapshot(threadId);
-            if (!alive) return;
-            const items = (snap.items || []) as ChatMessage[];
-            if (items.length > messagesRef.current.length) {
-              try {
-                const restored = restoreSubmittedMediaSlots(
-                  items.map((m) => m.inspiration
-                    ? { ...m, inspiration: normalizeInspirationCard(m.inspiration as unknown as Record<string, unknown>) }
-                    : m),
-                  workflowRuntime.list(),
-                );
-                setMessages(pruneUnsubmittedMediaSlots(restored).messages);
-                try { localStorage.setItem(chatKey, JSON.stringify(items)); } catch { /* ignore */ }
-              } catch { setMessages(items); }
-              return;
-            }
-            if (items.length > 0) return; // 快照已有内容且未增长，视为稳定
-          } catch { /* 单轮失败继续 */ }
-          await new Promise((r) => setTimeout(r, 2500));
-        }
-      } catch { /* 状态接口失败，忽略 */ }
-    };
-    (async () => {
-      // 首页临时草稿区：从 homeDraft 恢复（进程内切回保留，刷新即空），仅接后台轮询（生成中切回可见进度）。
-      if (isHome) {
-        if (homeDraft.length > 0) setMessages(homeDraft);
-        loadedRef.current = true;
-        await maybeStartBgPoll();
-        return;
-      }
-      try {
-        const snap = await fetchSnapshot(threadId);
-        if (!alive) return;
-        if (snap.items && snap.items.length > 0) {
-          const snapshotMessages = restoreSubmittedMediaSlots(
-            (snap.items as ChatMessage[]).map((m) => m.inspiration
-              ? { ...m, inspiration: normalizeInspirationCard(m.inspiration as unknown as Record<string, unknown>) }
-              : m),
-            workflowRuntime.list(),
-          );
-          const pruned = pruneUnsubmittedMediaSlots(snapshotMessages);
-          let restoredMessages = pruned.messages;
-          for (const item of pruned.removed) {
-            void reportIllustrationFailure({
-              threadId, repoId: repo?.id || threadId,
-              messageId: item.messageId, slotId: item.slotId,
-              stage: "resume_unsubmitted", error: "页面恢复时发现未提交到 ComfyUI 的孤儿插画槽",
-            }).catch(() => undefined);
-          }
-          const needsSummaryImage = snapshotMessages.length === 1
-            && snapshotMessages[0].text.startsWith("【历史摘要】")
-            && !snapshotMessages[0].image
-            && !snapshotMessages[0].parts?.some((part) => part.type === "image");
-          if (needsSummaryImage) {
-            try {
-              const history = await fetchHistory(threadId);
-              restoredMessages = recoverCompactedSummaryImage(snapshotMessages, history.items || []);
-            } catch { /* 旧摘要修复失败时仍显示原摘要 */ }
-          }
-          setMessages(restoredMessages);
-          if (restoredMessages !== snapshotMessages) {
-            try { localStorage.setItem(chatKey, JSON.stringify(restoredMessages)); } catch { /* ignore */ }
-            saveSnapshot(threadId, restoredMessages).catch(() => {});
-          }
-          loadedRef.current = true;
-          await maybeStartBgPoll();
-          return;
-        }
-        // 成功返回的空快照是当前 UUID 的历史真源；仅请求失败时才允许本地缓存兜底。
-        const initialHistory = resolveInitialHistory(
-          snap.items as ChatMessage[], shownLocal ? messagesRef.current : [],
-        );
-        if (initialHistory.length === 0) {
-          shownLocal = false;
-          setMessages([]);
-          try { localStorage.removeItem(chatKey); } catch { /* ignore */ }
-        }
-      } catch { /* 快照接口失败，继续兜底 */ }
-      if (shownLocal) { loadedRef.current = true; await maybeStartBgPoll(); return; }  // 本地已渲染、后端无快照
-      try {
-        const r = await fetchHistory(threadId);
-        if (!alive) return;
-        const historyMessages = (r.items || []).map((m) => {
-          const imgs = m.images || [];
-          const parts: MsgPart[] = [];
-          if (m.content) parts.push({ type: "text", text: m.content });
-          for (const u of imgs) parts.push({ type: "image", url: u });
-          return {
-            id: crypto.randomUUID(),
-            role: m.role === "assistant" ? "assistant" : "user",
-            text: m.content,
-            parts: parts.length > 0 ? parts : undefined,
-          } as ChatMessage;
-        });
-        // 卡即作品：全无历史(本地/快照/后端皆空)且关联角色卡 → 用卡的 first_mes 作开场白首条。
-        // 落一次后进快照，下次从快照恢复，不再重复注入（幂等）。
-        if (historyMessages.length === 0 && openingCardName && settings.characterDir) {
-          const opening = await loadOpeningMessage(settings.characterDir, openingCardName, effectivePersona.name || "");
-          if (!alive) return;
-          if (opening) {
-            setMessages([{ id: crypto.randomUUID(), role: "assistant", text: opening }]);
-          } else {
-            setMessages(historyMessages);
-          }
-        } else {
-          setMessages(historyMessages);
-        }
-      } catch { /* 后端未起/无历史，保持空 */ }
-      finally { if (alive) loadedRef.current = true; }
-      await maybeStartBgPoll();
-    })();
-    return () => {
-      scenarioSnapshotTurnRef.current = -1;
-      alive = false;
-      activeThreadRef.current = "";
-      recoveryTokenRef.current += 1;
-      recoveryActiveRef.current = false;
-      agentBusyRef.current = false;
-      bgRunningRef.current = false;
-      abortRef.current = releaseAgentStream(abortRef.current, "navigation");
-      if (snapTimer.current) { clearTimeout(snapTimer.current); snapTimer.current = null; }
-      wsUnsubRef.current?.(); wsUnsubRef.current = null;  // 关进度 WS，避免切仓库泄漏连接
-      dispatch({ t: "reset" });  // 清空生成状态 + 待发队列，避免串到新仓库
-    };
-  }, [threadId]);
+  // 进入仓库/切换时加载消息（T2.2-B3-b 外移 → lib/useSessionLoad.ts）：effect 体与注释逐字随体迁入，
+  // 闭包符号以同名 deps 注入；依赖数组 `[threadId]` 不变（重订阅时机＝行为面），调用点＝原 effect 位置。
+  useSessionLoad({
+    threadId, chatKey, repo, setMessages, loadedRef, messagesRef, recoveryActiveRef,
+    activeThreadRef, recoveryTokenRef, agentBusyRef, bgRunningRef, abortRef,
+    scenarioSnapshotTurnRef, snapTimer, wsUnsubRef, workflowRuntime, startAgentRecovery,
+    settings, openingCardName, effectivePersona, dispatch,
+  });
   // APPEND_HERE
 
   // 计划采集产物「逐张实时上屏」订阅（T2.2-B1 外移 → lib/usePlanTaskFeed.ts）：effect 体与注释逐字随体迁入，
@@ -611,7 +437,7 @@ export function useChatSession(deps: ChatSessionDeps) {
   // 首页(home)=临时草稿区：只写模块级 homeDraft（进程内切走切回保留，刷新即空），不落 localStorage / 后端快照。
   useEffect(() => {
     if (!loadedRef.current) return;  // 加载完成前不写，防止空数组覆盖
-    if (threadId === "home") { homeDraft = messages; return; }  // 首页草稿区：仅存内存
+    if (threadId === "home") { writeHomeDraft(messages); return; }  // 首页草稿区：仅存内存
     if (snapTimer.current) clearTimeout(snapTimer.current);
     const tid = threadId;
     const original = messages;
@@ -1791,7 +1617,7 @@ export function useChatSession(deps: ChatSessionDeps) {
 
   // 首页(home)临时草稿区手动清空：清当前显示 + 模块级 homeDraft。仅首页有意义（右上角按钮触发）。
   const clearHome = () => {
-    homeDraft = [];
+    clearHomeDraft();
     setMessages([]);
   };
 
