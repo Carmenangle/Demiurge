@@ -15,6 +15,9 @@ import { markMediaSlotFailed } from "./chatSessionEvents";
 const src = readFileSync(new URL("./useChatSession.ts", import.meta.url), "utf-8");
 // 注释里会提到旧写法（`args[7]`）作为背景，判定只看代码，先把注释剥掉。
 const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+// T2.2-A：插画提交链（submitIllustration）已外移 → useIllustrationChain.ts；锁定面随之改指新属主。
+const chainCode = readFileSync(new URL("./useIllustrationChain.ts", import.meta.url), "utf-8")
+  .replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
 
 describe("isolation of illustration submit params", () => {
   it("no positional-shape magic index and no positional snapshot array", () => {
@@ -39,16 +42,16 @@ describe("isolation of illustration submit params", () => {
   });
 
   it("submitIllustration 只吃一个对象参数", () => {
-    expect(code).toMatch(/const submitIllustration = async \(input: IllustrationSubmit\)/);
+    expect(chainCode).toMatch(/const submitIllustration = async \(input: IllustrationSubmit\)/);
   });
 
   it("入参 prompt 与可变局部 prompt 分离（编译链要重写它）", () => {
     // 编译链会按 Profile 重写 prompt（storedProfile / genProfilePrompt / anima 收尾 / LoRA 触发词）。
     // 若把解构写成 `const { prompt, ... } = input`，这些重赋值会让 `tsc` 直接报 TS2588——
     // 而 vitest 走 esbuild 剥类型，跑得再绿也发现不了。这里把形态钉死，让回归落在快测面。
-    expect(code).toMatch(/prompt:\s*promptIn,/);           // 解构时改名承接
-    expect(code).toMatch(/let prompt = promptIn;/);         // 再起可变局部
-    expect(code).toMatch(/prompt:\s*promptIn,\s*motion,\s*actors,/); // 快照存原始入参
+    expect(chainCode).toMatch(/prompt:\s*promptIn,/);           // 解构时改名承接
+    expect(chainCode).toMatch(/let prompt = promptIn;/);         // 再起可变局部
+    expect(chainCode).toMatch(/prompt:\s*promptIn,\s*motion,\s*actors,/); // 快照存原始入参
   });
 });
 
@@ -103,7 +106,7 @@ describe("R8 超时合同接线：工作流出图的 mediaType 必须推导（�
   });
 
   it("帧路径保持显式 image（首尾帧出的确定是帧图，不该改推导）", () => {
-    const framePolls = [...code.matchAll(/await pollWorkflowResult\(r\.prompt_id, settings\.comfyuiUrl, "image"\)/g)];
+    const framePolls = [...chainCode.matchAll(/await pollWorkflowResult\(r\.prompt_id, settings\.comfyuiUrl, "image"\)/g)];
     expect(framePolls).toHaveLength(2);   // 首次提交 + 停顿自愈重提
   });
 });
@@ -217,32 +220,33 @@ describe("P18 进度/节点按线程键分片（不再跨仓库串）", () => {
 // 本组把这 8 点补齐，并把**调用点总数**钉住（增删调用点必须同步改本锁）。
 // 注：与 R5 同一处境（两个调用方组件没有组件测试）⇒ 只读源码文本上锁。
 describe("P5 pollResult 调用点接线锁：10 点全锁（本组 8 + R8 组 2）", () => {
-  it("调用点恰为 10 个（定义处写作 `const pollResult = (`，不会计入）", () => {
-    expect([...code.matchAll(/pollResult\(/g)]).toHaveLength(10);
+  it("调用点共 10 个：视图 3（音频 + /s runWorkflow + regenerateResult）+ 新属主 7（帧 5 + 转场 + 主槽）", () => {
+    expect([...code.matchAll(/pollResult\(/g)]).toHaveLength(3);
+    expect([...chainCode.matchAll(/pollResult\(/g)]).toHaveLength(7);
   });
 
   it("5 个首尾帧调用点必须显式 \"image\"（帧图不许退成推导）", () => {
     // 帧路径产出的确定是帧图 ⇒ 第 6 参必须是字面 "image"。
     // 改成 `deriveWorkflowMediaType(...)` 会让这里的计数掉到 4 ⇒ 本例如实变红（正向已足够，下方反向再加一道）。
-    const frameCalls = [...code.matchAll(
+    const frameCalls = [...chainCode.matchAll(
       /pollResult\(frame(?:First|Last)PromptId, \[\], undefined, frameTarget\([^)]*\), [A-Za-z]+, "image"\)/g,
     )];
     expect(frameCalls).toHaveLength(5);
-    expect(code).not.toMatch(/pollResult\(frame(?:First|Last)PromptId[\s\S]{0,200}?deriveWorkflowMediaType/);
+    expect(chainCode).not.toMatch(/pollResult\(frame(?:First|Last)PromptId[\s\S]{0,200}?deriveWorkflowMediaType/);
   });
 
   it("转场调用点显式 \"video\" + 后台 target（转场是视频，不许吃图片超时）", () => {
-    expect(code).toMatch(
+    expect(chainCode).toMatch(
       /pollResult\(rt\.prompt_id, transitionOutputNodeIds, undefined,\s*\{ messageId, slotId: transitionSlotId, background: true as const \},\s*transitionVideoPrompt, "video"\)/,
     );
   });
 
   it("主槽调用点必须带第 6/7 参（mediaType 推导 + baseSlotRef）—— **最险的一点**", () => {
-    expect(code).toMatch(
+    expect(chainCode).toMatch(
       /pollResult\(r\.prompt_id, outputNodeIds, regeneration, target, prompt, useVideo \? "video" : "image", baseSlotRef\)/,
     );
     // 反向锁：7 参形态不得回退成 6 参（丢 baseSlotRef ⇒ 视频 derived_from 记录消失）
-    expect(code).not.toMatch(
+    expect(chainCode).not.toMatch(
       /pollResult\(r\.prompt_id, outputNodeIds, regeneration, target, prompt, useVideo \? "video" : "image"\)/,
     );
   });
