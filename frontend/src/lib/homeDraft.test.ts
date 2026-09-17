@@ -83,11 +83,21 @@ describe("源码形态锁：草稿读写已全部改走访问器", () => {
     const src = read();
     const code = stripComments(src);
     expect(count(code, "readHomeDraft(")).toBe(0);     // ① length 判空 ② 取值上交 —— 随加载链迁入 useSessionLoad
-    expect(count(code, "writeHomeDraft(")).toBe(2);    // persist 回调 / 持久化 effect
+    expect(count(code, "writeHomeDraft(")).toBe(1);    // persist 回调（持久化 effect 已随 T2.2-B4-b 迁入 useSessionPersist）
     expect(count(code, "clearHomeDraft(")).toBe(1);    // clearHome
     expect(count(src, 'import { clearHomeDraft, writeHomeDraft } from "./homeDraft";')).toBe(1);
     // 状态本体必须只在新属主里声明
     expect(code).not.toMatch(/let\s+homeDraft/);
+  });
+
+  it("T2.2-B4-b：写访问器随持久化链迁入 useSessionPersist（新属主只写、不读不清）", () => {
+    const SEAM = "./useSessionPersist.ts";
+    const seamSrc = readFileSync(new URL(SEAM, import.meta.url), "utf8").replace(/\r\n/g, "\n");
+    const seamCode = stripComments(seamSrc);
+    expect(count(seamCode, "writeHomeDraft(")).toBe(1);   // home 分支唯一写点
+    expect(count(seamSrc, 'import { writeHomeDraft } from "./homeDraft";')).toBe(1);
+    expect(count(seamCode, "readHomeDraft(")).toBe(0);
+    expect(count(seamCode, "clearHomeDraft(")).toBe(0);
   });
 
   it("T2.2-B3-b：读访问器随加载链迁入 useSessionLoad，视图不再持有；新属主恰两处", () => {

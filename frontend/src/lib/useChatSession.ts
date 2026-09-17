@@ -12,7 +12,7 @@ import { emitRagStatus } from "../components/RagToast";
 import type { Template } from "../api/workflows";
 import {
   comfyStatus, startComfy, submitGraph, submitWorkflow, interruptComfy,
-  saveLocalSrc, localViewUrl, uploadImage, finalizeGeneration as persistWorkflowGeneration,
+  localViewUrl, uploadImage, finalizeGeneration as persistWorkflowGeneration,
   mergeAudio, moveComfyOutputToInput, uploadRemoteImageToInput,
   type GenResult,
 } from "../api/comfyui";
@@ -26,7 +26,6 @@ import {
   genFramePrompts, genProfilePrompt, listGenerations,
   type AgentInvocation,
 } from "../api/ai";
-import { createScenarioSnapshot } from "../api/scenario";
 import { runVisualCiDiagnostic } from "../api/visualCi";
 import { refreshChatBackgroundActivities } from "./chatBackgroundActivity";
 import type { ChatStreamEvent, IllustrationSceneSpec, AudioDialogueLine, VideoParams } from "../api/chatStreamProtocol";
@@ -39,9 +38,9 @@ import { subscribeProgress } from "./comfyProgress";
 import { joinForeground, leaveForeground } from "./foregroundRunQueue";
 import {
   needsImageInput, hasImageProvided, pickBestText,
-  slimSnapshot as slimSnapshotPure, promptHistory,
+  promptHistory,
   prepareConversationRegeneration, resolveLoraPromptMetadata, resolveGenerationPrompt,
-  acceptSlimmedMessages, canCommitSnapshot, resolveVideoBaseImageRef, resolvePrevTailDesc,
+  resolveVideoBaseImageRef, resolvePrevTailDesc,
   resolveTransitionBaseImage,
 } from "./chatGeneration";
 import {
@@ -79,6 +78,8 @@ import { usePlanTaskFeed } from "./usePlanTaskFeed";
 import { useWorkflowResume } from "./useWorkflowResume";
 import { useSessionLoad } from "./useSessionLoad";
 import { useChatMaintenance } from "./useChatMaintenance";
+import { useSessionPersist } from "./useSessionPersist";
+import { useWfProgressShard } from "./useWfProgressShard";
 import { clearHomeDraft, writeHomeDraft } from "./homeDraft";
 import {
   comfyRegenerationUrl, legacyGenerationPrompt, resolveImageRegenerationModel,
@@ -147,14 +148,6 @@ export interface IllustrationSubmit {
 
 // PLACEHOLDER_BODY
 
-// 跨导航持久化：切换页面时进度条/节点名不丢失。
-// P18（2026-09-15）：改**按线程键分片**——此前是模块级单例（`{ current }`），跨仓库共享同一格，
-// 切进另一个仓库会读到上一个仓库的进度/节点名（渲染虽被 `wfRunning || slowWatchPromptId` 部分挡住，
-// 但「切进有在途任务的仓库、进入慢守望」的窗口里会短暂显示错仓库的进度与该仓库的节点名）。
-const persistedWfProgress = new Map<string, number | null>();
-const persistedWfNode = new Map<string, string>();
-// 注：原 `persistedWfPromptParams` 已删 —— 全仓零引用的死代码（架构审查 P18 硬约束#3）。
-
 export function useChatSession(deps: ChatSessionDeps) {
   const {
     repo, settings, setGeneratedCover, chat, genModel, videoModel, workMode, size, imageQuality,
@@ -215,18 +208,11 @@ export function useChatSession(deps: ChatSessionDeps) {
   const worldbookName = repo?.worldbookName || "";
   // 对话线 id 单点推导（P17）：仓库 id；首页（无仓库）统一 "home"。
   // 后端按此落盘多轮记忆与 RAG 知识库；runtime / 任务恢复 / 后台面板的线程键也是它。
-  // 必须在下面的 useState 之前声明——首次挂载就要按当前线程读分片（P18）。
+  // 必须在下面的分片 hook 之前声明——首次挂载就要按当前线程读分片（P18）。
   const threadId = threadKey(repo?.id);
-  const [wfProgress, setWfProgress] = useState<number | null>(persistedWfProgress.get(threadId) ?? null);  // 工作流实时进度%（WS，null=无），跨导航持久化
-  const [wfNode, setWfNode] = useState<string>(persistedWfNode.get(threadId) ?? "");  // 当前执行的节点显示名（WS executing 消息），跨导航持久化
-  // 包装 setter：同时写入**当前线程的分片**，确保切换页面回来后进度不丢失
-  const updateWfProgress = (v: number | null) => { persistedWfProgress.set(threadId, v); setWfProgress(v); };
-  const updateWfNode = (v: string) => { persistedWfNode.set(threadId, v); setWfNode(v); };
-  // P18：切线程时把 state 重新对齐到目标线程的分片（否则沿用上一个仓库的进度/节点名）
-  useEffect(() => {
-    setWfProgress(persistedWfProgress.get(threadId) ?? null);
-    setWfNode(persistedWfNode.get(threadId) ?? "");
-  }, [threadId]);
+  // 工作流进度的「跨导航分片」状态（T2.2-B4-a 外移 → lib/useWfProgressShard.ts）：分片 Map / 两条 useState /
+  // 包装 setter / 切线程重对齐 effect 逐字随体迁入；调用点＝原 `useState` 位置（hook 调用序＝状态初始化序）。
+  const { wfProgress, wfNode, updateWfProgress, updateWfNode } = useWfProgressShard(threadId);
   const [regeneratingIds, setRegeneratingIds] = useState<Set<string>>(new Set());
   const wsUnsubRef = useRef<(() => void) | null>(null);  // 当前进度 WS 退订
   const activePromptQueue = useRef<string[]>([]);  // FIFO 队列：首个 = 当前显示进度条；多个 = 排队中
@@ -420,62 +406,14 @@ export function useChatSession(deps: ChatSessionDeps) {
   // 闭包符号以同名 deps 注入；依赖数组 `[threadId]` 不变（重订阅时机＝行为面），调用点＝原 effect 位置。
   usePlanTaskFeed({ threadId, recoveryActiveRef, agentBusyRef, activeThreadRef, setMessages });
 
-  // 存快照前给图片瘦身：把用户上传的 data:URI 大图落盘转 local-view 小地址。
-  // data:URI 只来自用户上传的参考图 → 落 reference/ 子夹，与生成图（仓库根目录）分开。
-  const persistDataUri = async (src: string): Promise<string> => {
-    if (typeof src === "string" && src.startsWith("data:") && settings.outputDir && repo?.id) {
-      try {
-        const s = await saveLocalSrc({ src, repoId: repo.id, outputDir: settings.outputDir, subdir: "reference" });
-        return localViewUrl(s.path);
-      } catch { /* 保留原图 */ }
-    }
-    return src;
-  };
-  const slimSnapshot = (msgs: ChatMessage[]) => slimSnapshotPure(msgs, persistDataUri);
-
-  // 消息变化时持久化：本地快取 + 后端快照统一防抖；本地也写瘦身后内容，避免 dataURI 大图撑爆 localStorage。
-  // 首页(home)=临时草稿区：只写模块级 homeDraft（进程内切走切回保留，刷新即空），不落 localStorage / 后端快照。
-  useEffect(() => {
-    if (!loadedRef.current) return;  // 加载完成前不写，防止空数组覆盖
-    if (threadId === "home") { writeHomeDraft(messages); return; }  // 首页草稿区：仅存内存
-    if (snapTimer.current) clearTimeout(snapTimer.current);
-    const tid = threadId;
-    const original = messages;
-    snapTimer.current = setTimeout(async () => {
-      if (bgRunningRef.current || streamingId || regeneratingIds.size > 0) return;
-      if (!canCommitSnapshot(
-        messagesRef.current, original, activeThreadRef.current, tid,
-      )) return;
-      // 流式正文或重生成尚未终态时不能创建世界状态快照，否则会把半截正文与未完成写回固化。
-      const full = await slimSnapshot(original);
-      // 图片落盘可能耗时；期间若追加了用户消息、开始新 Agent 或切换仓库，
-      // 旧任务连 localStorage/后端都不得写，不能只保护 React 内存。
-      if (agentBusyRef.current || bgRunningRef.current || !canCommitSnapshot(
-        messagesRef.current, original, activeThreadRef.current, tid,
-      )) return;
-      // localStorage 只存轻量快取：去掉 capturedGraph，parts / portsPlan 里的 dataURI 已被 slimSnapshot 转成本地 URL。
-      const slim = full.map((m) =>
-        m.workflow ? { ...m, workflow: { ...m.workflow, capturedGraph: null } } : m,
-      );
-      try {
-        localStorage.setItem(chatKey, JSON.stringify(slim));
-      } catch { /* 超额等忽略 */ }
-      saveSnapshot(tid, full).then(() => {
-        const turn = full.filter((message) => message.role === "assistant"
-          && Boolean((message.text || "").trim())).length;
-        if (settings.outputDir && repo?.id && turn > scenarioSnapshotTurnRef.current) {
-          scenarioSnapshotTurnRef.current = turn;
-          void createScenarioSnapshot({
-            output_dir: settings.outputDir, repo_id: repo.id, turn,
-            label: "自动回合快照", dedupe_key: `turn:${turn}`,
-          }).catch(() => { scenarioSnapshotTurnRef.current = turn - 1; });
-        }
-      }).catch(() => {});  // 后端未起则忽略本地仍在
-      if (tid === threadId && JSON.stringify(full) !== JSON.stringify(original)) {
-        setMessages((current) => acceptSlimmedMessages(current, original, full));
-      }
-    }, 600);
-  }, [messages, chatKey, threadId, settings.outputDir, repo?.id, streamingId, regeneratingIds.size]);
+  // 消息持久化链（T2.2-B4-b 外移 → lib/useSessionPersist.ts）：`persistDataUri` / `slimSnapshot` /
+  // 600ms 防抖持久化 effect 与注释逐字随体迁入，闭包符号以**同名 deps** 注入；依赖数组逐字不变
+  //（重订阅时机＝行为面），调用点＝原 effect 位置（hook 调用序＝ effect 执行序）。
+  useSessionPersist({
+    threadId, chatKey, repo, settings, messages, setMessages, loadedRef, messagesRef,
+    activeThreadRef, agentBusyRef, bgRunningRef, snapTimer, scenarioSnapshotTurnRef,
+    streamingId, regeneratingIds,
+  });
 
   // 选中模板 → 在对话流插入工作流节点卡（卡内嵌锁定画布）
   const pickTemplate = (t: Template) => {

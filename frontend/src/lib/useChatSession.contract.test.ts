@@ -21,6 +21,9 @@ const chainCode = readFileSync(new URL("./useIllustrationChain.ts", import.meta.
 // T2.2-B2：在途生图任务恢复 effect 已外移 → useWorkflowResume.ts；P22「恢复期过期清理」调用点随之迁移。
 const resumeCode = readFileSync(new URL("./useWorkflowResume.ts", import.meta.url), "utf-8")
   .replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+// T2.2-B4-a：进度/节点名的跨导航分片（P18）已外移 → useWfProgressShard.ts；锁定面随之改指新属主。
+const wfShardCode = readFileSync(new URL("./useWfProgressShard.ts", import.meta.url), "utf-8")
+  .replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
 
 describe("isolation of illustration submit params", () => {
   it("no positional-shape magic index and no positional snapshot array", () => {
@@ -189,27 +192,40 @@ describe("P17 线程键单点接线：runtime 入口一律用 threadKey 归一�
 });
 
 describe("P18 进度/节点按线程键分片（不再跨仓库串）", () => {
+  it("分片状态本体只在新属主 useWfProgressShard.ts（视图不得再内联，T2.2-B4-a）", () => {
+    // 视图侧：分片符号一律归零（去注释后判，注释里提一句不算「还在」）
+    expect(code).not.toMatch(/persistedWfProgress/);
+    expect(code).not.toMatch(/persistedWfNode/);
+    expect(code).not.toMatch(/setWfProgress/);
+    expect(code).not.toMatch(/setWfNode/);
+    // 新属主：恰一次调用点
+    expect(code).toMatch(
+      /const \{ wfProgress, wfNode, updateWfProgress, updateWfNode \} = useWfProgressShard\(threadId\);/,
+    );
+  });
+
   it("持久化容器是按线程键分片的 Map（不再是模块级单例 { current }）", () => {
-    expect(code).not.toMatch(/persistedWfProgress[^;]*= \{ current:/);
-    expect(code).toMatch(/const persistedWfProgress = new Map<string, number \| null>\(\)/);
-    expect(code).toMatch(/const persistedWfNode = new Map<string, string>\(\)/);
+    expect(wfShardCode).not.toMatch(/persistedWfProgress[^;]*= \{ current:/);
+    expect(wfShardCode).toMatch(/const persistedWfProgress = new Map<string, number \| null>\(\)/);
+    expect(wfShardCode).toMatch(/const persistedWfNode = new Map<string, string>\(\)/);
   });
 
   it("读写都带线程键（写分片 + 读分片）", () => {
-    expect(code).toMatch(/persistedWfProgress\.set\(threadId, v\)/);
-    expect(code).toMatch(/persistedWfNode\.set\(threadId, v\)/);
-    expect(code).toMatch(/persistedWfProgress\.get\(threadId\) \?\? null/);
-    expect(code).toMatch(/persistedWfNode\.get\(threadId\) \?\? ""/);
+    expect(wfShardCode).toMatch(/persistedWfProgress\.set\(threadId, v\)/);
+    expect(wfShardCode).toMatch(/persistedWfNode\.set\(threadId, v\)/);
+    expect(wfShardCode).toMatch(/persistedWfProgress\.get\(threadId\) \?\? null/);
+    expect(wfShardCode).toMatch(/persistedWfNode\.get\(threadId\) \?\? ""/);
   });
 
   it("切线程时 state 重新对齐到目标线程的分片", () => {
-    expect(code).toMatch(/setWfProgress\(persistedWfProgress\.get\(threadId\) \?\? null\)/);
-    expect(code).toMatch(/setWfNode\(persistedWfNode\.get\(threadId\) \?\? ""\)/);
-    expect(code).toMatch(/\}, \[threadId\]\)/);
+    expect(wfShardCode).toMatch(/setWfProgress\(persistedWfProgress\.get\(threadId\) \?\? null\)/);
+    expect(wfShardCode).toMatch(/setWfNode\(persistedWfNode\.get\(threadId\) \?\? ""\)/);
+    expect(wfShardCode).toMatch(/\}, \[threadId\]\)/);
   });
 
   it("零引用死代码 persistedWfPromptParams 已删除", () => {
     expect(code).not.toMatch(/persistedWfPromptParams/);
+    expect(wfShardCode).not.toMatch(/persistedWfPromptParams/);
   });
 });
 

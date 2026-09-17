@@ -430,7 +430,11 @@ describe("源码形态锁：搬移逐字 + 视图不再自持订阅", () => {
     expect(anchorAt).toBeGreaterThan(0);
     const at = raw.indexOf("usePlanTaskFeed({");
     expect(at).toBeGreaterThan(anchorAt);
-    expect(at).toBeLessThan(raw.indexOf("const persistDataUri"));
+    // ⚠ 上界锚点同样必须先断存在：T2.2-B4-b 把持久化链搬走后 `const persistDataUri` 已不在视图里，
+    //   直接拿它的 `indexOf` 当上界会得 -1，使这条断言**恒真**（防空失效 —— 本用例注释里早就警告过）。
+    const iPersist = raw.indexOf("useSessionPersist({");
+    expect(iPersist).toBeGreaterThan(0);
+    expect(at).toBeLessThan(iPersist);
   });
 
   it("视图行数上界（本步只减不增：<= 2000 行）", () => {
