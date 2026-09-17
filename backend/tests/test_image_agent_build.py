@@ -122,15 +122,14 @@ def test_build_带图物理裁剪工具集(monkeypatch):
     assert "generate_image" not in captured["tool_map"]
 
 
-def test_build_analyze_image已定义但从未注册_现状锁(monkeypatch):
-    """⚠ 现状锁 + 缺陷留档（2026-09-17 发现，待用户拍板）：
+def test_build_analyze_image已删除_删除锁(monkeypatch):
+    """T4 遗留项收口（2026-09-17 用户拍板：删除）：
 
-    `analyze_image` 在 `_build` 里完整定义（含无图报错/风格指引/反推调用），
-    但 has_images 两个分支的 `tools.append` 都**没有它** —— 即「反推图片提示词」
-    这个能力对大脑不可达：system 提示词里写着「可以调 analyze_image」，
-    实际工具表里没有，模型一调就报 unknown tool。
-    修法二选一：① 注册进无图分支（恢复功能，用户可见行为变化，需拍板）；
-    ② 删除死代码。测试按现状锁「不注册」，修复时同步改本锁。
+    `analyze_image` 工具副本原为「已定义但两分支均不注册」的死代码，
+    且 system 提示词虚假声称可调用（模型一调就 unknown tool）。
+    supervisor 侧的 `analyze` 一等路由（agent_graph.analyze_node）是独立活实现，
+    不受本删除影响。本锁固化三件事：模块无此符号、工具表无此名、
+    system 提示词不再声称「反推图片提示词」能力。
     """
     captured = _capture_build(monkeypatch)
     _run_build(captured, monkeypatch, image_sink=[], has_images=True)
@@ -138,6 +137,10 @@ def test_build_analyze_image已定义但从未注册_现状锁(monkeypatch):
     captured2 = _capture_build(monkeypatch)
     _run_build(captured2, monkeypatch, image_sink=[])
     assert "analyze_image" not in captured2["tool_map"]
+    # 符号层面已删除 + 提示词不再虚假声称
+    assert not hasattr(image_agent, "analyze_image")
+    assert "analyze_image" not in image_agent.AGENT_SYSTEM_BASE
+    assert "反推图片提示词" not in image_agent.AGENT_SYSTEM_BASE
 
 
 def test_build_自定义agent人设记忆温度与工具开关(monkeypatch):

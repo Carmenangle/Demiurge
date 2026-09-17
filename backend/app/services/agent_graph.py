@@ -573,7 +573,7 @@ def analyze_node(state: AgentState) -> dict:
     try:
         from langchain_core.messages import SystemMessage, HumanMessage
         model = _llm.build_model(ctx["chat_base"], ctx["chat_key"], ctx["chat_model"])
-        # 选了自定义风格存档时附加写法指引（与单 agent analyze_image 的 style_hint 对齐）
+        # 选了自定义风格存档时附加写法指引（反推能力现仅存于此 supervisor 路由）
         style_hint = ""
         if (ctx.get("style_template") or "").strip():
             try:

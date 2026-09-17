@@ -620,3 +620,4 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
 - 裁判（`agency`）是**纯规则引擎不是 LLM**：好感度档位阈值 + 掷骰 + core 一致性驳回。别改成「导演/裁判 Agent 每回合判断」——那与省 token 初衷冲突，且不可复现。创造力只留给「世界 Agent 生成动作」这一处。
 - 角色 `core`（人设/外观/死穴/机制）**永不自动更**，只有用户能改；只有 `state`（好感度+态度/心情/所在）随剧情走 StateDelta。人为乱改若不带证据 → `source:user, 证据:空`，AI 据此识别为「设定注入」而非剧情，不强行自圆其说到卡死。别把 core 做成可自动生成（人设会崩）。
 - `fabric_work._scan_charfacts(root=库根)` **有意跨作品**（2026-09-17 T6.2 用户拍板永久豁免，二轮审计 #23 同判）：前序产出档案的「角色素材段」扫库根 `_prep/charfacts/`，会把其他作品的素材段也列进来。不改的理由：charfacts 按作品命名可区分、库根级素材对冷启动有参考价值，收紧会让素材全在库根的老仓库瞬间「失忆」。已有形态锁（`test_fabric_work.py`）固化此豁免注释——别再当缺陷报，也别顺手「修」。
+- `image_agent.analyze_image` 工具**已删除**（2026-09-17 用户拍板）：图生图（`image_to_image`）接口自己看图，「反推提示词」能力在 img2img 设计落地时即被有意砍掉，工具副本是死代码且 system 提示词虚假声称可调（一调即 unknown tool）。**「反推」活实现只存在于 supervisor 的 `analyze` 一等路由**（`agent_graph.analyze_node`，工具开关键 `analyze_image` 归属 `agent_store.TOOL_KEYS`，与本删除无关）。删除锁：`test_image_agent_build.py`（无此符号 / 工具表无此名 / 提示词无声称）——别重新加回单 agent 工具副本。

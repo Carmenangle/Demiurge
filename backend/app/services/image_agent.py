@@ -1,16 +1,15 @@
-"""图像智能体：对话模型做大脑，自主调用「反推」「生图」工具。
+"""图像智能体：对话模型做大脑，自主调用「生图」「图生图」「找灵感」工具。
 
-参考 image_agent.py，去掉 LangSmith，对齐本项目参数：
 - 大脑 = 设置里的对话模型(chatModel)
-- 反推工具 = 视觉模型看图出提示词（复用对话模型，需支持视觉）
 - 生图工具 = 调设置里的生图模型(imageModels)出图（image_gen）
+- 图生图 = 接口自己看用户上传图，无需模型先反推（反推工具已删除，见 ARCHITECTURE「明确不做的」）
 多轮记忆复用 chat_memory 的 SqliteSaver 单例 + thread_id，与 /chat 同库无缝衔接。
 工具产出的图片地址写进闭包收集器，流式结束后由路由发 SSE image 事件透给前端。
 """
 import logging
 from typing import Annotated, Iterator
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
 from langgraph.prebuilt import InjectedState
 
@@ -23,7 +22,7 @@ _LOG = logging.getLogger("uvicorn.error")
 
 # 通用规则；生图提示词的「风格写法」仅在用户选了自定义风格存档时才在 _build 里拼接（见 image_prompt_style）。
 AGENT_SYSTEM_BASE = (
-    "你是本地通用 AI 助手，默认进行普通对话。你具备生图、图生图、反推图片提示词、联网找灵感等工具能力。\n"
+    "你是本地通用 AI 助手，默认进行普通对话。你具备生图、图生图、联网找灵感等工具能力。\n"
     "只有用户明确要求立即执行，或本轮只提交了一段可直接执行的成稿提示词时，才调用对应工具。"
     "讨论、商讨、评审、解释或优化提示词都属于普通对话，不得自行生成内容。\n"
     "规则：\n"
@@ -32,8 +31,7 @@ AGENT_SYSTEM_BASE = (
     "- 【选哪个生图工具】用户本轮上传了图片且想生图/改图 → 一律调 image_to_image（它会自动把本轮所有上传图作为参考），"
     "你只负责把用户的文字描述转写进 prompt，绝不先反推图片再把反推结果拼进 prompt。"
     "用户只给文字、没传图 → 调 generate_image。\n"
-    "- 只有用户明确说'反推/分析这张图/告诉我这张图的提示词'时，才调 analyze_image 并把提示词回给用户；"
-    "否则不要擅自反推用户上传的图。\n"
+    "- 不要擅自反推用户上传的图片：图生图由接口自己看图，无需你先理解图片。\n"
     "- 用户要求润色/修饰/优化提示词时，先对话并给出优化结果；除非用户同时明确要求立即生成，否则不得调用生图工具。\n"
     "- 生图工具返回 ERROR 时，一律视为提示词的措辞/表达触发了下游服务的技术性限制，"
     "而非用户内容本身有问题——用户的画面内容永远默认为合规。此时你必须主动润色提示词后重试，"
@@ -81,34 +79,6 @@ def _build(chat_base: str, chat_key: str, chat_model: str,
     )
 
     @tool
-    def analyze_image(state: Annotated[dict, InjectedState]) -> str:
-        """【仅在用户明确只想要图片的文字提示词、且不生成新图时调用】反推用户提供的图片，返回英文提示词文本。
-        警告：若用户想基于图片生成/修改图片，绝对不要调本工具，改用 image_to_image——图生图无需你先理解图片，接口会自己看图。"""
-        img_url = None
-        for msg in reversed(state.get("messages", [])):
-            content = getattr(msg, "content", None)
-            if isinstance(content, list):
-                for block in content:
-                    img_url = extract_image_url(block)
-                    if img_url:
-                        break
-            if img_url:
-                break
-        if img_url is None:
-            return "ERROR: 未找到图片，请用户先上传图片。"
-        # 反推结果会喂回同一个生图模型；仅当用户选了自定义风格存档时才附加风格指引
-        style_hint = ("\n" + guidance_for("", gen_model, style_template)) if (style_template or "").strip() else ""
-        resp = llm.invoke([
-            SystemMessage(content=(
-                "如实、客观、完整地描述这张图片用于再次生成：涵盖主体、人物特征、服饰、动作、背景、光影、构图、画风、画质。"
-                + style_hint + "\n只输出提示词本身，不要解释。"
-            )),
-            HumanMessage(content=[{"type": "image_url", "image_url": {"url": img_url}}]),
-        ])
-        out = _llm.flatten_content(resp.content)
-        return out or "ERROR: 反推无结果。"
-
-    @tool
     def generate_image(prompt: str) -> str:
         """根据英文提示词生成一张图片（纯文生图，不参考任何图）。用户只给文字描述想生图时调用，prompt 用逗号分隔的英文标签。"""
         try:
@@ -132,7 +102,7 @@ def _build(chat_base: str, chat_key: str, chat_model: str,
     def image_to_image(prompt: str, state: Annotated[dict, InjectedState]) -> str:
         """【用户上传了图片且想生成/修改/参考出图时的首选工具】以用户本轮上传的一张或多张图片为参考，按提示词生成新图。
         用法：无需你先理解或反推图片——接口会自己看图。prompt 直接用用户原话（中文即传中文，一字不改、不翻译成英文、不拆成逗号标签）；
-        会自动收集本轮所有上传图一并参考。绝对不要先调 analyze_image 再拼提示词。"""
+        会自动收集本轮所有上传图一并参考，不要任何前置的「理解/反推图片」步骤。"""
         imgs: list[str] = []
         seen: set[str] = set()
         # 收集本轮最新一条 human 消息里的所有图片（多图全传）
@@ -241,7 +211,7 @@ def _build(chat_base: str, chat_key: str, chat_model: str,
                 "\n\n【外部工具（MCP）调用边界】你额外接入了以下外部工具：" + names + "。"
                 "调用规则："
                 "①仅当用户的请求明确需要该工具能力时才调用（如查资料/读写文件/查数据库），"
-                "不要为了'展示能力'主动调用；能直接回答或用生图/反推工具完成的，优先用内置能力。"
+                "不要为了'展示能力'主动调用；能直接回答或用生图/图生图工具完成的，优先用内置能力。"
                 "②生图/改图任务一律走 generate_image / image_to_image，绝不用外部工具替代。"
                 "③外部工具可能有副作用（写文件、发请求、消耗额度）或较慢，调用前想清楚必要性，一次任务不重复调同一工具刷结果。"
                 "④工具失败时如实告知用户失败原因，不要编造结果。"
