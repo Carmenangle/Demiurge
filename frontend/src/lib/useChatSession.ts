@@ -80,6 +80,7 @@ import { releaseAgentStream, type ActiveAgentStream } from "./agentStreamLifecyc
 import type { ImageQuality, WorkMode } from "./viewRouting";
 import { useIllustrationChain } from "./useIllustrationChain";
 import { usePlanTaskFeed } from "./usePlanTaskFeed";
+import { useWorkflowResume } from "./useWorkflowResume";
 import { useChatMaintenance } from "./useChatMaintenance";
 import {
   comfyRegenerationUrl, legacyGenerationPrompt, resolveImageRegenerationModel,
@@ -1232,42 +1233,12 @@ export function useChatSession(deps: ChatSessionDeps) {
     }
   };
 
-  // 进入仓库/切回时，恢复"进行中的生图任务"。
-  const resumedRef = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    let alive = true;
-    const resume = async () => {
-      for (let i = 0; i < 40 && !loadedRef.current; i++) await new Promise((r) => setTimeout(r, 100));
-      if (!alive) return;
-      const list = workflowRuntime.list();
-      for (const p of list) {
-        const action = workflowRuntime.recoveryAction(p, resumedRef.current);
-        if (action === "skip") continue;  // 本会话已处理过，不重复
-        resumedRef.current.add(p.prompt_id);
-        const comfyuiUrl = comfyRegenerationUrl(p.regeneration) || settings.comfyuiUrl;
-        if (action === "expire") {
-          // 超过 30 分钟的遗留任务先查一次 ComfyUI history：任务其实已完成时
-          // 直接归档回填（2026-08-30 21:25 轮实锤：图 3 分钟就出完了，页面回来
-          // 时却按年龄判死丢弃）。只有 history 查不到（watching→not_found 终态）
-          // 才真正交给失败槽，不再凭年龄静默丢弃已完成的图。
-          const outcome = await workflowRuntime.inspect(p, comfyuiUrl, workflowObserver);
-          if (!alive) return;
-          if (outcome !== "watching") continue;
-          if (p.target) discardFailedIllustration(
-            p.target.messageId, p.target.slotId, "resume_expired",
-            "后台出图任务已过期", p.prompt_id,
-          );
-          cancelForegroundRun(p.prompt_id);   // P22：统一入库路径（恢复期队列为空，出队为幂等空操作）
-          continue;
-        }
-        await workflowRuntime.inspect(p, comfyuiUrl, workflowObserver);
-        if (!alive) return;
-      }
-    };
-    resume();
-    return () => { alive = false; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [threadId]);
+  // 进入仓库/切回时恢复「进行中的生图任务」（T2.2-B2 外移 → lib/useWorkflowResume.ts）：
+  // resumedRef 与 effect 体逐字随体迁入，闭包符号以同名 deps 注入；依赖数组 `[threadId]` 不变（重订阅时机＝行为面）。
+  useWorkflowResume({
+    threadId, loadedRef, workflowRuntime, workflowObserver, settings,
+    discardFailedIllustration, cancelForegroundRun,
+  });
   // APPEND4_HERE
 
   // 发送入口：只在 Agent 正生成正文时排队；ComfyUI 运行不占用对话通道。

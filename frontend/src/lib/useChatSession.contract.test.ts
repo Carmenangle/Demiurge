@@ -18,6 +18,9 @@ const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
 // T2.2-A：插画提交链（submitIllustration）已外移 → useIllustrationChain.ts；锁定面随之改指新属主。
 const chainCode = readFileSync(new URL("./useIllustrationChain.ts", import.meta.url), "utf-8")
   .replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+// T2.2-B2：在途生图任务恢复 effect 已外移 → useWorkflowResume.ts；P22「恢复期过期清理」调用点随之迁移。
+const resumeCode = readFileSync(new URL("./useWorkflowResume.ts", import.meta.url), "utf-8")
+  .replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
 
 describe("isolation of illustration submit params", () => {
   it("no positional-shape magic index and no positional snapshot array", () => {
@@ -278,17 +281,33 @@ describe("P22 取消必须出队：`workflowRuntime.cancel` 不得裸调", () =>
 
   it("三个取消场景全部走属主（停止按钮 / 停止单个媒体槽 / 恢复期过期清理）", () => {
     // `cancelForegroundRun(` 只匹配调用形态（定义处写作 `cancelForegroundRun = (`，中间有 ` = `）
-    expect([...code.matchAll(/cancelForegroundRun\(/g)]).toHaveLength(3);
+    //
+    // T2.2-B2 起**跨两个属主**计数：第三处（恢复期过期清理）随 effect 一起搬进了
+    // `useWorkflowResume.ts`。锁不能删、只能改指并加严 —— 总数仍须恰 3，
+    // 且必须是「视图 2 + 新属主 1」，任一侧少一处或多一处都算漂移。
+    expect([...code.matchAll(/cancelForegroundRun\(/g)]).toHaveLength(2);
+    expect([...resumeCode.matchAll(/cancelForegroundRun\(/g)]).toHaveLength(1);
+    expect(
+      [...code.matchAll(/cancelForegroundRun\(/g)].length
+      + [...resumeCode.matchAll(/cancelForegroundRun\(/g)].length,
+    ).toBe(3);
+
     const stopGenerating = code.slice(code.indexOf("const stopGenerating = async ()"));
     expect(stopGenerating.slice(0, 1200)).toMatch(/if \(pid\) cancelForegroundRun\(pid\);/);
     expect(code).toMatch(/cancelForegroundRun\(promptId\);\s*try \{ await interruptComfy/);
-    expect(code).toMatch(/cancelForegroundRun\(p\.prompt_id\);/);
+    // 第三处：新属主里「过期且 history 仍在跑」才归档 + 出队，且出队**在 `if (p.target)` 之外**
+    // （无落点的遗留任务也必须出队，否则 pid 永远留在前台队列 ⇒ 后续出图不订阅进度 WS）
+    expect(resumeCode).toMatch(
+      /if \(outcome !== "watching"\) continue;\s*\n\s*if \(p\.target\) discardFailedIllustration\([\s\S]*?\);\s*\n\s*cancelForegroundRun\(p\.prompt_id\);\s*\n\s*continue;/,
+    );
   });
 
   it("反向锁：不得回退成裸 cancel（两个已修形态都不许复现）", () => {
     expect(code).not.toMatch(/if \(pid\) workflowRuntime\.cancel\(/);       // stopGenerating 旧写法
     expect(code).not.toMatch(/workflowRuntime\.cancel\(p\.prompt_id\)/);    // 恢复期旧写法
     expect(code).not.toMatch(/workflowRuntime\.cancel\(promptId\);\s*\n\s*try \{ await interruptComfy/);
+    // T2.2-B2 扩展：新属主只许经属主 `cancelForegroundRun` 出队，恢复链里不得出现裸 cancel
+    expect(resumeCode).not.toMatch(/workflowRuntime\.cancel\(/);
   });
 
   it("runtime 侧文档化了「cancel 不派发终态、调用方须自行出队」这条义务", () => {

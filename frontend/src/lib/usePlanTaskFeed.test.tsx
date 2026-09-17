@@ -422,9 +422,15 @@ describe("源码形态锁：搬移逐字 + 视图不再自持订阅", () => {
     expect(count(view, "usePlanTaskFeed({")).toBe(1);
     expect(view).toMatch(/usePlanTaskFeed\(\{ threadId, recoveryActiveRef, agentBusyRef, activeThreadRef, setMessages \}\);/);
 
-    const at = view.indexOf("usePlanTaskFeed({");
-    expect(at).toBeGreaterThan(view.indexOf("// APPEND_HERE"));
-    expect(at).toBeLessThan(view.indexOf("const persistDataUri"));
+    // ⚠ `// APPEND_HERE` 是**整行注释**，`stripComments` 会把它抹掉 ⇒ 在 `strip(VIEW)` 上
+    //   `indexOf` 得 -1，下界断言 `at > -1` 恒真（**假通过 / 防空失效**，T2.2-B2 同款坑）。
+    //   位置判据一律落在**未去注释**的原文上，并先断锚点确实存在。
+    const raw = read(VIEW);
+    const anchorAt = raw.indexOf("// APPEND_HERE");
+    expect(anchorAt).toBeGreaterThan(0);
+    const at = raw.indexOf("usePlanTaskFeed({");
+    expect(at).toBeGreaterThan(anchorAt);
+    expect(at).toBeLessThan(raw.indexOf("const persistDataUri"));
   });
 
   it("视图行数上界（本步只减不增：<= 2000 行）", () => {
