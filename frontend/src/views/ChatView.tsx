@@ -220,9 +220,28 @@ export function ChatView({
     } catch { /* ignore */ }
     return "chat";
   });
+  // 对话滚动位置记忆：切画布时 chat-stream 条件渲染卸载会丢 scrollTop，
+  // 切回时恢复到离开前的位置（贴底则保持贴底跟随语义）。2026-09-17 用户反馈。
+  const chatScrollMemRef = useRef<{ top: number; atBottom: boolean } | null>(null);
   const switchContentView = (v: "chat" | "canvas") => {
+    if (v === "canvas" && streamRef.current) {
+      chatScrollMemRef.current = { top: streamRef.current.scrollTop, atBottom: atBottomRef.current };
+    }
     setContentView(v);
     try { if (repo?.id) localStorage.setItem(`laf_view_${repo.id}`, v); } catch { /* ignore */ }
+    if (v === "chat" && chatScrollMemRef.current) {
+      // 恢复：rAF 等重挂载渲染，再加两次延时校正（图片异步加载会改变内容高度）
+      const restore = () => {
+        const mem = chatScrollMemRef.current;
+        const el = streamRef.current;
+        if (!mem || !el) return;
+        el.scrollTop = mem.atBottom ? el.scrollHeight : mem.top;
+      };
+      requestAnimationFrame(restore);
+      const t1 = setTimeout(restore, 300);
+      const t2 = setTimeout(restore, 900);
+      setTimeout(() => { clearTimeout(t1); clearTimeout(t2); }, 1000);
+    }
   };
   // 画布模式下输入栏折叠为悬浮小球（默认折叠最大化画布空间；点小球展开，左下角按钮收起）
   const [canvasInputFolded, setCanvasInputFolded] = useState(true);
