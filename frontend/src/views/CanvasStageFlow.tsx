@@ -756,6 +756,12 @@ export function CanvasStageFlow({
   }, []);
 
   useEffect(() => {
+    // ★ 布局未从后端恢复前不得投影（竞态修复，与下方对话灵感卡投影同款守卫）：
+    //   否则挂载首跑在 layoutNodes={} 上进行，全部剧情楼层走 findFreeSpot 网格重排，
+    //   pendingStoryLayoutsRef 被填满 → 落盘 effect 把【网格】覆盖写进 canvas.json ——
+    //   用户已保存的拖动布局被毁，切走再切回即「位置回弹、存档没了」。
+    //   （GET 随后返回真实布局，界面会临时修正，但当次看不出盘已被覆盖。）
+    if (!layoutLoaded) return;
     // ★ 投影 builder 全部归口 lib/canvasProjection.ts（T2.1-C）：
     //   内容节点 / 工具卡 / 剧情楼层 / 灵感卡 / 参考图 构造 + 合并判定 + 连线派生。
     const projected: Node<CardNodeData>[] = buildContentNodes({
@@ -815,11 +821,14 @@ export function CanvasStageFlow({
     autoEdgeIdsRef.current = autoEdgeIds;
     setRfEdges([...manualEdges, ...autoEdges]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rawNodes, contentPlacement, layoutNodes, pendingInputs, pendingToolCreates, byGroup, layoutEdges, inspirationCards, referenceImages, wfRuns, runWorkflowTask, messages, displayRegex, showStoryFlow]);
+  }, [rawNodes, contentPlacement, layoutNodes, pendingInputs, pendingToolCreates, byGroup, layoutEdges, inspirationCards, referenceImages, wfRuns, runWorkflowTask, messages, displayRegex, showStoryFlow, layoutLoaded]);
 
   // ★ 新内容节点位置立即持久化：锚点网格算出的坐标写进 layoutNodes 并落盘，
   //   否则刷新/切走再回时新节点又会被投影打回原点；同时消费原位替换锚点。
   useEffect(() => {
+    // ★ 布局未恢复前不落盘（与主投影 effect 同款守卫）：挂载早期 layoutNodes={} 会让
+    //   contentPlacement 把「全部已有内容节点」误判为新节点并网格重排覆盖写盘。
+    if (!layoutLoaded) return;
     if (!contentPlacement || contentPlacement.ids.length === 0) return;
     const next = { ...layoutNodesRef.current };
     let changed = false;
@@ -846,11 +855,14 @@ export function CanvasStageFlow({
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [contentPlacement]);
+  }, [contentPlacement, layoutLoaded]);
 
   // 新剧情节点位置立即落盘：首次投影用 findFreeSpot 算出位置后写进 layoutNodes + canvas.json，
   // 否则位置不进持久化，重进画布时由 findFreeSpot 重新计算（受其它节点影响）→ 剧情楼层漂移。
   useEffect(() => {
+    // ★ 布局未恢复前不落盘（与主投影 effect 同款守卫）：挂载首跑时 layoutNodes={}，
+    //   若此时 pending 非空（主投影在守卫缺失时代填的网格）会把网格覆盖写盘毁掉用户布局。
+    if (!layoutLoaded) return;
     const pending = pendingStoryLayoutsRef.current;
     const ids = Object.keys(pending);
     if (ids.length === 0) return;
@@ -872,7 +884,7 @@ export function CanvasStageFlow({
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages, layoutNodes]);
+  }, [messages, layoutNodes, layoutLoaded]);
 
   // 持久化（布局 + edges + 灵感卡 + 删除黑名单）
   // 接受可选覆盖：调用方在 setState 后立刻 persist 时，ref 还未更新，需显式传入新值，

@@ -1025,14 +1025,30 @@ describe("⑨ 源码形态锁：投影 effect 组装 + 依赖数组逐字不变 
     }
   });
 
-  it("依赖数组逐字不变（14 项，顺序与内容一概不动）", () => {
+  it("依赖数组逐字不变（15 项，顺序与内容一概不动）", () => {
     const { body } = projectionEffect(read("../views/CanvasStageFlow.tsx"));
-    expect(body).toContain("}, [rawNodes, contentPlacement, layoutNodes, pendingInputs, pendingToolCreates, byGroup, layoutEdges, inspirationCards, referenceImages, wfRuns, runWorkflowTask, messages, displayRegex, showStoryFlow]);");
+    // layoutLoaded 是 2026-09-17 布局竞态修复加入的守卫（挂载早期 layoutNodes={} 时禁止投影，
+    // 防 findFreeSpot 网格覆盖写盘毁掉用户布局）——必须钉住，防止未来被「精简 deps」删掉。
+    expect(body).toContain("}, [rawNodes, contentPlacement, layoutNodes, pendingInputs, pendingToolCreates, byGroup, layoutEdges, inspirationCards, referenceImages, wfRuns, runWorkflowTask, messages, displayRegex, showStoryFlow, layoutLoaded]);");
   });
 
   it("effect 真的短了（改造前 581 行 → A/B2 后 498 → 本次 ≤ 130）", () => {
     const { start, end } = projectionEffect(read("../views/CanvasStageFlow.tsx"));
     expect(end - start + 1).toBeLessThanOrEqual(130);
+  });
+
+  it("挂载期写盘守卫齐全（layoutLoaded 挡主投影 + 两个落盘 effect）", () => {
+    const src = stripComments(read("../views/CanvasStageFlow.tsx"));
+    // 主投影 effect：守卫在 buildContentNodes 之前出现（挂载早期 layoutNodes={} 禁投影）
+    const { body } = projectionEffect(src);
+    const guardAt = body.indexOf("if (!layoutLoaded) return;");
+    const builderAt = body.indexOf("buildContentNodes({");
+    expect(guardAt, "主投影 effect 缺 layoutLoaded 守卫").toBeGreaterThan(-1);
+    expect(builderAt, "buildContentNodes 调用丢失").toBeGreaterThan(-1);
+    expect(guardAt, "守卫必须在 buildContentNodes 之前").toBeLessThan(builderAt);
+    // 两个「位置落盘」effect 必须各有守卫（pendingStory / contentPlacement），
+    // 它们无条件 saveLayout——守卫缺失 = 挂载期网格覆盖写盘（2026-09-17 用户布局被毁的根因）。
+    expect(src.match(/if \(!layoutLoaded\) return;/g)?.length, "layoutLoaded 守卫应至少 4 处（灵感卡投影 + 主投影 + 两个落盘）").toBeGreaterThanOrEqual(4);
   });
 });
 
