@@ -1,4 +1,8 @@
+import base64
 import re
+import types
+
+import pytest
 
 from app.services import generation_store
 
@@ -611,3 +615,616 @@ def test_最近灵感卡注入讨论上下文(monkeypatch):
     # 空线程不炸
     monkeypatch.setattr(chat_snapshot, "load", lambda tid: [])
     assert agent_graph._recent_inspiration_blocks(ctx) == ""
+
+
+# ---------------------------------------------------------------------------
+# T4.3 低覆盖补测（2026-09-17）：视频批次 / 纯文本批次 / 各 persist_* 失败留痕 /
+# 下载上限 / 小属主。缺口来自 P5 覆盖率复测（scorecard 附录 A：55%）——
+# 本文件是持久化属主、也是 P4 审计里纯吞最集中处，故按「真实失败路径」补：
+# 视频分支此前**零覆盖**，纯文本分支与各 persist_* 的留痕分支此前均未执行。
+# ---------------------------------------------------------------------------
+
+
+def _capture_index(monkeypatch):
+    """把 _index_with_retry 换成可观测桩；返回 state，可用 state["ok"] 翻转成败。"""
+    state = {"ok": True, "calls": []}
+
+    def _fake(repo_id, cfg, prompt, tags="", image_url="", **kw):
+        state["calls"].append({"repo_id": repo_id, "prompt": prompt, "tags": tags,
+                               "image_url": image_url, **kw})
+        return state["ok"]
+
+    monkeypatch.setattr(generation_store, "_index_with_retry", _fake)
+    return state
+
+
+def test_video_batch_持久化并承载提示词(monkeypatch):
+    """视频批次：落盘 + video 字段承载 + 首个产物（无图）带提示词 + media_type=video 入库。"""
+    generation_store._MEMORY_DONE.clear()
+    monkeypatch.setattr(generation_store.image_store, "save_local", lambda *a, **k: "C:/out/v.mp4")
+    idx = _capture_index(monkeypatch)
+    saved: list[dict] = []
+    monkeypatch.setattr(generation_store.chat_snapshot, "upsert", lambda t, m: saved.append(m))
+    monkeypatch.setattr(generation_store.chat_memory, "append_message", lambda *a: None)
+    monkeypatch.setattr(generation_store, "_extract_tags", lambda *a, **k: "t")
+
+    result = generation_store.finalize_workflow_batch(**_args(
+        images=[], videos=[{"filename": "v.mp4", "subfolder": "", "type": "output"}],
+    ))
+
+    msg = result["messages"][0]
+    assert msg["video"].startswith("http://127.0.0.1:8010/api/comfyui/local-view?path=")
+    assert msg["text"] == "text"
+    row = result["images"][0]
+    assert (row["persisted"], row["indexed"], row["snapshotted"], row["errors"]) == (True, True, True, [])
+    assert idx["calls"][0]["media_type"] == "video"
+    assert idx["calls"][0]["derived_from"] is None
+    assert saved and saved[0]["video"] == msg["video"]
+    assert result["complete"] is True
+
+
+def test_video_batch_底图槽弱引用随入库记录(monkeypatch):
+    """base_slot_ref → derived_from 记「视频首帧底图」弱引用（来源删除不级联）。"""
+    generation_store._MEMORY_DONE.clear()
+    monkeypatch.setattr(generation_store.image_store, "save_local", lambda *a, **k: "C:/out/v.mp4")
+    idx = _capture_index(monkeypatch)
+    monkeypatch.setattr(generation_store.chat_snapshot, "upsert", lambda *a, **k: None)
+    monkeypatch.setattr(generation_store.chat_memory, "append_message", lambda *a: None)
+
+    generation_store.finalize_workflow_batch(**_args(
+        images=[], videos=[{"filename": "v.mp4", "subfolder": "", "type": "output"}],
+        base_slot_ref={"message_id": "bot-1", "slot_id": "img-bot-0"},
+    ))
+
+    assert idx["calls"][0]["derived_from"] == [{
+        "media_slot_ref": {"message_id": "bot-1", "slot_id": "img-bot-0"},
+        "kind": "video_base_image",
+    }]
+
+
+def test_video_batch_回填目标槽不新增对话轮(monkeypatch):
+    """inline 视频槽：resolve_media_slot(media_type=video)，不新增气泡、target 带 url。"""
+    generation_store._MEMORY_DONE.clear()
+    monkeypatch.setattr(generation_store.image_store, "save_local", lambda *a, **k: "C:/out/v.mp4")
+    _capture_index(monkeypatch)
+    patched: list[tuple] = []
+    monkeypatch.setattr(generation_store.chat_snapshot, "resolve_media_slot",
+                        lambda *a, **k: patched.append((a, k)) or True)
+    monkeypatch.setattr(generation_store.chat_snapshot, "upsert",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("不得新增视频气泡")))
+
+    result = generation_store.finalize_workflow_batch(**_args(
+        images=[], videos=[{"filename": "v.mp4", "subfolder": "", "type": "output"}],
+        target_message_id="bot-1", target_slot_id="v-bot-0",
+    ))
+
+    assert result["messages"] == []
+    assert result["target"]["media_type"] == "video"
+    assert result["target"]["slot_id"] == "v-bot-0"
+    assert result["target"]["url"] == result["images"][0]["display_url"]
+    assert patched[0][0][:3] == ("thread", "bot-1", "v-bot-0")
+    assert patched[0][1]["media_type"] == "video"
+
+
+def test_video_batch_三阶段全失败仍回落在线地址(monkeypatch):
+    """persist/index/snapshot 各自失败互不阻断：errors 齐、complete=False、仍给可播在线地址。"""
+    generation_store._MEMORY_DONE.clear()
+    monkeypatch.setattr(generation_store.image_store, "save_local",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("磁盘满")))
+    idx = _capture_index(monkeypatch)
+    idx["ok"] = False
+    monkeypatch.setattr(generation_store.chat_snapshot, "upsert",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("锁冲突")))
+    monkeypatch.setattr(generation_store.chat_memory, "append_message", lambda *a: None)
+
+    result = generation_store.finalize_workflow_batch(**_args(
+        images=[], videos=[{"filename": "v.mp4", "subfolder": "sub", "type": "output"}],
+    ))
+
+    row = result["images"][0]
+    assert row["errors"] == ["persist", "index", "snapshot"]
+    assert row["persisted"] is False and row["indexed"] is False and row["snapshotted"] is False
+    assert row["display_url"].startswith("http://127.0.0.1:8010/api/comfyui/view?")
+    assert result["messages"][0]["video"] == row["display_url"]
+    assert result["complete"] is False
+
+
+def test_video_batch_home无持久化副作用(monkeypatch):
+    generation_store._MEMORY_DONE.clear()
+    boom = lambda *a, **k: (_ for _ in ()).throw(AssertionError())  # noqa: E731
+    monkeypatch.setattr(generation_store.image_store, "save_local", boom)
+    monkeypatch.setattr(generation_store, "_index_with_retry", boom)
+    monkeypatch.setattr(generation_store.chat_snapshot, "upsert", boom)
+    monkeypatch.setattr(generation_store.chat_memory, "append_message", boom)
+
+    result = generation_store.finalize_workflow_batch(**_args(
+        repo_id="home", images=[],
+        videos=[{"filename": "v.mp4", "subfolder": "", "type": "output"}],
+    ))
+
+    assert result["durable"] is False and result["complete"] is False
+    assert result["images"][0]["errors"] == []
+    assert result["messages"][0]["video"].startswith("http://127.0.0.1:8010/api/comfyui/view?")
+
+
+def test_纯文本批次落快照入记忆(monkeypatch):
+    """无任何产物但带提示词：仍落一条纯文字助手消息（不产出 media 行、display_url 为空）。"""
+    generation_store._MEMORY_DONE.clear()
+    monkeypatch.setattr(generation_store, "_extract_tags", lambda *a, **k: "标签")
+    idx = _capture_index(monkeypatch)
+    saved: list[dict] = []
+    monkeypatch.setattr(generation_store.chat_snapshot, "upsert", lambda t, m: saved.append(m))
+    mem: list[tuple] = []
+    monkeypatch.setattr(generation_store.chat_memory, "append_message", lambda *a: mem.append(a))
+
+    result = generation_store.finalize_workflow_batch(**_args(images=[]))
+
+    assert [m["text"] for m in result["messages"]] == ["text"]
+    row = result["images"][0]
+    assert row["display_url"] == "" and row["indexed"] is True and row["snapshotted"] is True
+    assert saved and saved[0]["text"] == "text"
+    assert idx["calls"][0]["tags"] == "标签"
+    assert mem == [("thread", "assistant", "text", None)]
+    assert result["complete"] is True
+
+
+def test_纯文本批次索引与快照失败记错误(monkeypatch):
+    generation_store._MEMORY_DONE.clear()
+    monkeypatch.setattr(generation_store, "_extract_tags", lambda *a, **k: "")
+    idx = _capture_index(monkeypatch)
+    idx["ok"] = False
+    monkeypatch.setattr(generation_store.chat_snapshot, "upsert",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("锁冲突")))
+    monkeypatch.setattr(generation_store.chat_memory, "append_message", lambda *a: None)
+
+    result = generation_store.finalize_workflow_batch(**_args(images=[]))
+
+    assert result["images"][0]["errors"] == ["index", "snapshot"]
+    assert result["complete"] is False
+
+
+def test_记忆写入失败留痕且不占去重键(monkeypatch):
+    """chat_memory 写失败必须留痕、且不得进 _MEMORY_DONE —— 否则同一工作流永久不再入记忆。"""
+    generation_store._MEMORY_DONE.clear()
+    monkeypatch.setattr(generation_store, "_extract_tags", lambda *a, **k: "")
+    _capture_index(monkeypatch)
+    monkeypatch.setattr(generation_store.chat_snapshot, "upsert", lambda *a, **k: None)
+    calls: list[tuple] = []
+
+    def _boom(*a):
+        calls.append(a)
+        raise RuntimeError("记忆库锁死")
+
+    monkeypatch.setattr(generation_store.chat_memory, "append_message", _boom)
+
+    result = generation_store.finalize_workflow_batch(**_args(images=[]))
+    generation_store.finalize_workflow_batch(**_args(images=[]))
+
+    assert result["complete"] is True          # 记忆失败不阻断收尾
+    assert len(calls) == 2                     # 未被记「已完成」→ 下次照常重试
+
+
+def test_图片批次索引失败记错误(monkeypatch):
+    generation_store._MEMORY_DONE.clear()
+    monkeypatch.setattr(generation_store.image_store, "save_local", lambda *a, **k: "C:/out/a.png")
+    idx = _capture_index(monkeypatch)
+    idx["ok"] = False
+    monkeypatch.setattr(generation_store.chat_snapshot, "upsert", lambda *a, **k: None)
+    monkeypatch.setattr(generation_store.chat_memory, "append_message", lambda *a: None)
+    monkeypatch.setattr(generation_store, "_extract_tags", lambda *a, **k: "")
+
+    result = generation_store.finalize_workflow_batch(**_args())
+
+    assert result["images"][0]["errors"] == ["index"]
+    assert result["complete"] is False
+
+
+def test_图片批次槽回填与快照失败记错误(monkeypatch):
+    """inline：resolve_media_slot 返回 False 记 snapshot；非 inline：upsert 抛错同样记。"""
+    generation_store._MEMORY_DONE.clear()
+    monkeypatch.setattr(generation_store.image_store, "save_local", lambda *a, **k: "C:/out/a.png")
+    _capture_index(monkeypatch)
+    monkeypatch.setattr(generation_store, "_extract_tags", lambda *a, **k: "")
+    monkeypatch.setattr(generation_store.chat_memory, "append_message", lambda *a: None)
+    monkeypatch.setattr(generation_store.chat_snapshot, "resolve_media_slot", lambda *a, **k: False)
+
+    inline = generation_store.finalize_workflow_batch(**_args(
+        target_message_id="bot-1", target_slot_id="img-1"))
+    assert inline["images"][0]["errors"] == ["snapshot"]
+
+    monkeypatch.setattr(generation_store.chat_snapshot, "upsert",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("锁冲突")))
+    plain = generation_store.finalize_workflow_batch(**_args())
+    assert plain["images"][0]["errors"] == ["snapshot"]
+
+
+def test_音频批次落盘失败回落在线地址(monkeypatch):
+    generation_store._MEMORY_DONE.clear()
+    monkeypatch.setattr(generation_store.image_store, "save_local",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("voices 目录不可写")))
+    monkeypatch.setattr(generation_store.chat_memory, "append_message", lambda *a: None)
+
+    result = generation_store.finalize_workflow_batch(**_args(
+        images=[], audios=[{"filename": "a.flac", "subfolder": "", "type": "output"}],
+    ))
+
+    row = result["images"][0]
+    assert row["errors"] == ["persist"]
+    assert row["persisted"] is False
+    assert row["display_url"].startswith("http://127.0.0.1:8010/api/comfyui/view?")
+
+
+def test_音频批次槽回填失败记错误不抛(monkeypatch):
+    """① 槽不存在（resolve False）② 回填抛错 ③ 非 inline upsert 抛错 —— 都只记错误。"""
+    generation_store._MEMORY_DONE.clear()
+    monkeypatch.setattr(generation_store.image_store, "save_audio_local",
+                        lambda *a, **k: "C:/out/voices/v.flac")
+    monkeypatch.setattr(generation_store.image_store, "save_local", lambda *a, **k: "C:/out/v.flac")
+    monkeypatch.setattr(generation_store, "_audio_slot_meta",
+                        lambda *a, **k: {"speaker": "冷倾雪", "seq": 1})
+    monkeypatch.setattr(generation_store, "_audio_turn", lambda *a, **k: 2)
+    monkeypatch.setattr(generation_store.chat_memory, "append_message", lambda *a: None)
+    audios = [{"filename": "a.flac", "subfolder": "", "type": "output"}]
+
+    monkeypatch.setattr(generation_store.chat_snapshot, "resolve_media_slot", lambda *a, **k: False)
+    inline = generation_store.finalize_workflow_batch(
+        **_args(images=[], audios=audios, target_message_id="bot", target_slot_id="audio-bot-0"))
+    assert inline["images"][0]["errors"] == ["snapshot"]
+
+    monkeypatch.setattr(generation_store.chat_snapshot, "resolve_media_slot",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("快照锁")))
+    inline2 = generation_store.finalize_workflow_batch(
+        **_args(images=[], audios=audios, target_message_id="bot", target_slot_id="audio-bot-0"))
+    assert inline2["images"][0]["errors"] == ["snapshot"]
+
+    monkeypatch.setattr(generation_store.chat_snapshot, "upsert",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("锁冲突")))
+    plain = generation_store.finalize_workflow_batch(**_args(images=[], audios=audios))
+    assert plain["images"][0]["errors"] == ["snapshot"]
+
+
+def test_finalize_缺关键标识抛错():
+    with pytest.raises(ValueError, match="不能为空"):
+        generation_store.finalize_workflow_batch(**_args(thread_id=""))
+    with pytest.raises(ValueError, match="不能为空"):
+        generation_store.finalize_workflow_batch(**_args(prompt_id=""))
+
+
+class _FakeStream:
+    def __init__(self, chunks, status_error=None):
+        self._chunks = list(chunks)
+        self._status_error = status_error
+
+    def raise_for_status(self):
+        if self._status_error is not None:
+            raise self._status_error
+
+    def iter_bytes(self):
+        yield from self._chunks
+
+
+def _patch_http_client(monkeypatch, stream, seen):
+    """把 httpx.Client 换成喂固定分块的桩，记录构造参数与请求。"""
+    class _Client:
+        def __init__(self, **kwargs):
+            seen.append(kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def stream(self, method, url):
+            seen.append((method, url))
+
+            class _Ctx:
+                def __enter__(self_inner):
+                    return stream
+
+                def __exit__(self_inner, *exc):
+                    return False
+
+            return _Ctx()
+
+    monkeypatch.setattr(generation_store.httpx, "Client", _Client)
+
+
+def test_下载上限_拼接分块(monkeypatch):
+    seen: list = []
+    _patch_http_client(monkeypatch, _FakeStream([b"ab", b"cd", b"ef"]), seen)
+    assert generation_store._download_capped("http://x/f", timeout=5, max_bytes=10) == b"abcdef"
+    assert seen[0] == {"trust_env": False, "timeout": 5}
+    assert seen[1] == ("GET", "http://x/f")
+
+
+def test_下载上限_超限中止并抛(monkeypatch):
+    seen: list = []
+    _patch_http_client(monkeypatch, _FakeStream([b"a" * 6, b"b" * 6]), seen)
+    with pytest.raises(ValueError, match="上限"):
+        generation_store._download_capped("http://x/big", timeout=5, max_bytes=10)
+
+
+def test_下载上限_http错误直接抛(monkeypatch):
+    seen: list = []
+    _patch_http_client(monkeypatch, _FakeStream([], status_error=RuntimeError("500")), seen)
+    with pytest.raises(RuntimeError):
+        generation_store._download_capped("http://x/err", timeout=5, max_bytes=10)
+
+
+def test_远程图片_空参直接回原址():
+    assert generation_store._save_remote_image("", "out") == ""
+    assert generation_store._save_remote_image("http://x/a.png", "") == "http://x/a.png"
+
+
+def test_远程图片_data_url按扩展名落盘(tmp_path, monkeypatch):
+    raw = b"\x89PNG-bytes"
+    url = "data:image/webp;base64," + base64.b64encode(raw).decode()
+    monkeypatch.setattr(generation_store.repo_meta, "repo_folder", lambda *a, **k: tmp_path)
+    monkeypatch.setattr(generation_store.image_store, "_next_seq_name",
+                        lambda base, ext: f"seq.{ext}")
+
+    out = generation_store._save_remote_image(url, "out", "repo")
+
+    assert (tmp_path / "seq.webp").read_bytes() == raw
+    assert out == generation_store.view_urls.local_view(str(tmp_path / "seq.webp"))
+
+
+def test_远程图片_下载失败回退原址(monkeypatch):
+    monkeypatch.setattr(generation_store, "_download_capped",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("网络断")))
+    url = "http://x/a.png"
+    assert generation_store._save_remote_image(url, "out", "repo") == url
+
+
+def test_远程视频_data_url落盘(tmp_path, monkeypatch):
+    raw = b"mp4-bytes"
+    url = "data:video/mp4;base64," + base64.b64encode(raw).decode()
+    monkeypatch.setattr(generation_store.repo_meta, "repo_folder", lambda *a, **k: tmp_path)
+
+    out = generation_store._save_remote_video(url, "out", "repo")
+
+    files = list(tmp_path.iterdir())
+    assert len(files) == 1 and files[0].suffix == ".mp4"
+    assert files[0].read_bytes() == raw
+    assert out == generation_store.view_urls.local_view(str(files[0]))
+
+
+def test_远程视频_直链按原名落盘(tmp_path, monkeypatch):
+    monkeypatch.setattr(generation_store.repo_meta, "repo_folder", lambda *a, **k: tmp_path)
+    monkeypatch.setattr(generation_store, "_download_capped", lambda *a, **k: b"bytes")
+
+    out = generation_store._save_remote_video("http://x/movie.mp4?sig=1", "out", "repo")
+
+    assert (tmp_path / "movie.mp4").read_bytes() == b"bytes"
+    assert out == generation_store.view_urls.local_view(str(tmp_path / "movie.mp4"))
+
+
+def test_远程视频_空参与下载失败回退原址(monkeypatch):
+    assert generation_store._save_remote_video("", "out") == ""
+    assert generation_store._save_remote_video("http://x/v.mp4", "") == "http://x/v.mp4"
+    monkeypatch.setattr(generation_store, "_download_capped",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("网络断")))
+    url = "http://x/v.mp4"
+    assert generation_store._save_remote_video(url, "out", "repo") == url
+
+
+def test_persist_video_落快照(monkeypatch, tmp_path):
+    """真快照端到端：Agent 云视频留存后，会话里多出一条带 video 字段的消息。"""
+    monkeypatch.setattr(generation_store.repo_meta, "repo_folder", lambda *a, **k: tmp_path)
+    monkeypatch.setattr(generation_store, "_download_capped", lambda *a, **k: b"v")
+
+    out = generation_store.persist_video("t-video", "repo", "提示", "http://x/v.mp4", "out")
+
+    msgs = generation_store.chat_snapshot.load("t-video")
+    assert [m["video"] for m in msgs] == [out["url"]]
+    assert out["id"]
+
+
+def test_persist_video_写快照失败留痕不阻断(monkeypatch):
+    monkeypatch.setattr(generation_store.chat_snapshot, "upsert",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("锁冲突")))
+    out = generation_store.persist_video("t1", "repo", "提示", "http://x/v.mp4", "")
+    assert out["url"] == "http://x/v.mp4" and out["id"]
+
+
+def test_persist_image_写快照失败留痕不阻断(monkeypatch):
+    monkeypatch.setattr(generation_store, "_index_with_retry", lambda *a, **k: True)
+    monkeypatch.setattr(generation_store.chat_snapshot, "upsert",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("锁冲突")))
+    out = generation_store.persist_image("t1", "repo", "p", "http://x/a.png", "", "", "", "m")
+    assert out["url"] == "http://x/a.png"
+
+
+def test_索引重试_三次失败后返回False(monkeypatch):
+    attempts: list = []
+    sleeps: list = []
+
+    def _boom(*a, **k):
+        attempts.append(a)
+        raise RuntimeError("rag 不可用")
+
+    monkeypatch.setattr(generation_store.rag_store, "index_generation", _boom)
+    monkeypatch.setattr(generation_store, "time", types.SimpleNamespace(sleep=sleeps.append))
+    cfg = generation_store.EmbedConfig("http://e", "k", "m")
+
+    assert generation_store._index_with_retry("repo", cfg, "p") is False
+    assert len(attempts) == 3
+    assert [round(s, 2) for s in sleeps] == [0.8, 1.6]     # 退避递增，最后一次不睡
+
+
+def test_索引重试_第二次成功(monkeypatch):
+    attempts: list = []
+    sleeps: list = []
+
+    def _flaky(*a, **k):
+        attempts.append(a)
+        if len(attempts) == 1:
+            raise RuntimeError("首次抖动")
+
+    monkeypatch.setattr(generation_store.rag_store, "index_generation", _flaky)
+    monkeypatch.setattr(generation_store, "time", types.SimpleNamespace(sleep=sleeps.append))
+    cfg = generation_store.EmbedConfig("http://e", "k", "m")
+
+    assert generation_store._index_with_retry("repo", cfg, "p") is True
+    assert len(attempts) == 2 and len(sleeps) == 1
+
+
+def test_标签提取_切分与回退(monkeypatch):
+    from app.services import llm
+    monkeypatch.setattr(llm, "chat", lambda *a, **k: "光效, 少女， 场景\n光影")
+    assert generation_store._extract_tags("画个少女", "http://e", "k", "m") == "光效,少女,场景,光影"
+
+    called: list = []
+    monkeypatch.setattr(llm, "chat", lambda *a, **k: called.append(1) or "x")
+    assert generation_store._extract_tags("", "http://e", "k", "m") == ""   # 空提示词
+    assert generation_store._extract_tags("p", "", "k", "m") == ""          # 缺配置
+    assert called == []                                                     # 都不碰 LLM
+
+    monkeypatch.setattr(llm, "chat", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("超时")))
+    assert generation_store._extract_tags("p", "http://e", "k", "m") == ""  # 失败兜底空串
+
+
+def test_有界去重集_超限FIFO淘汰与LRU刷新():
+    s = generation_store._BoundedKeySet(cap=2)
+    s.add("a")
+    s.add("b")
+    assert "a" in s and "b" in s
+    s.add("c")                                   # 淘汰最旧 a
+    assert "a" not in s and {"b", "c"} <= set(s._d)
+    s.add("b")                                   # 已有键刷新到最新位次
+    s.add("d")                                   # 此时最旧是 c
+    assert "c" not in s and {"b", "d"} <= set(s._d)
+    s.clear()
+    assert "b" not in s and "d" not in s
+
+
+def test_persist_text_空文本早退(monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(generation_store.chat_snapshot, "append_text", lambda *a: calls.append(a))
+    monkeypatch.setattr(generation_store.chat_snapshot, "upsert", lambda *a: calls.append(a))
+    generation_store.persist_text("t1", "m1", "   ")
+    generation_store.persist_text("t1", "", "正文")
+    assert calls == []
+
+
+def test_persist_text_落盘失败留痕不抛(monkeypatch):
+    boom = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("锁冲突"))  # noqa: E731
+    monkeypatch.setattr(generation_store.chat_snapshot, "upsert", boom)
+    monkeypatch.setattr(generation_store.chat_snapshot, "append_text", boom)
+    generation_store.persist_text("t1", "m1", "正文", interrupted=True)   # 中断路径
+    generation_store.persist_text("t1", "m1", "正文")                     # 增量路径
+
+
+def test_persist_user_message_失败留痕不抛(monkeypatch):
+    monkeypatch.setattr(generation_store.chat_snapshot, "ensure_user_message",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("锁冲突")))
+    generation_store.persist_user_message("t1", "m1", "正文")
+
+
+def test_persist_media_slot_落盘与失败留痕(monkeypatch):
+    got: list = []
+    monkeypatch.setattr(generation_store.chat_snapshot, "ensure_media_slot",
+                        lambda *a, **k: got.append((a, k)))
+    generation_store.persist_media_slot("t1", "m1", "slot", offset=3)
+    assert got == [(("t1", "m1", "slot"), {"offset": 3})]
+    monkeypatch.setattr(generation_store.chat_snapshot, "ensure_media_slot",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("锁冲突")))
+    generation_store.persist_media_slot("t1", "m1", "slot")
+
+
+def test_persist_audio_slot_落盘与失败留痕(monkeypatch):
+    got: list = []
+    monkeypatch.setattr(generation_store.chat_snapshot, "append_media_slot",
+                        lambda *a, **k: got.append((a, k)))
+    generation_store.persist_audio_slot("t1", "m1", "audio-1", speaker="冷倾雪", seq=2, total=3)
+    assert got == [(("t1", "m1", "audio-1"),
+                    {"kind": "audio", "speaker": "冷倾雪", "seq": 2, "total": 3})]
+    monkeypatch.setattr(generation_store.chat_snapshot, "append_media_slot",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("锁冲突")))
+    generation_store.persist_audio_slot("t1", "m1", "audio-1")
+
+
+def test_persist_illustration_submission_失败返回False(monkeypatch):
+    got: list = []
+    monkeypatch.setattr(generation_store.chat_snapshot, "bind_media_slot_prompt",
+                        lambda *a: got.append(a) or True)
+    assert generation_store.persist_illustration_submission(
+        thread_id="t1", message_id="m1", slot_id="s1", prompt_id="p1") is True
+    assert got == [("t1", "m1", "s1", "p1")]
+    monkeypatch.setattr(generation_store.chat_snapshot, "bind_media_slot_prompt",
+                        lambda *a: (_ for _ in ()).throw(RuntimeError("锁冲突")))
+    assert generation_store.persist_illustration_submission(
+        thread_id="t1", message_id="m1", slot_id="s1", prompt_id="p1") is False
+
+
+def test_claim_illustration_submission_记录trace与失败降级(monkeypatch):
+    traced: list = []
+    monkeypatch.setattr(generation_store.run_trace, "emit",
+                        lambda ctx, event, **data: traced.append((event, data)))
+    monkeypatch.setattr(generation_store.chat_snapshot, "claim_media_slot_submission",
+                        lambda *a: True)
+    assert generation_store.claim_illustration_submission(
+        thread_id="t1", message_id="m1", slot_id="s1") is True
+    assert traced == [("illustration.claim",
+                       {"message_id": "m1", "slot_id": "s1", "claimed": True})]
+
+    traced.clear()
+    monkeypatch.setattr(generation_store.chat_snapshot, "claim_media_slot_submission",
+                        lambda *a: (_ for _ in ()).throw(RuntimeError("快照缺失")))
+    assert generation_store.claim_illustration_submission(
+        thread_id="t1", message_id="m1", slot_id="s1") is False
+    assert traced[0][1]["claimed"] is False and traced[0][1]["error"] == "快照缺失"
+
+
+def test_persist_illustration_failure_槽清理失败仍记trace(monkeypatch):
+    traced: list = []
+    monkeypatch.setattr(generation_store.run_trace, "emit",
+                        lambda ctx, event, **data: traced.append((event, data)))
+    monkeypatch.setattr(generation_store.chat_snapshot, "remove_media_slot",
+                        lambda *a: (_ for _ in ()).throw(RuntimeError("锁冲突")))
+    ok = generation_store.persist_illustration_failure(
+        thread_id="t1", repo_id="r1", message_id="m1", slot_id="s1",
+        stage="submit", error="未启动", prompt_id="p1")
+    assert ok is False
+    assert traced[0][0] == "illustration.failed" and traced[0][1]["slot_removed"] is False
+
+
+def test_审批与路由选择_空id早退与失败留痕(monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(generation_store.chat_snapshot, "merge_fields",
+                        lambda *a, **k: calls.append((a, k)))
+    generation_store.persist_prompt_approval("t1", {})      # 无 messageId → 早退
+    generation_store.persist_route_choice("t1", {})
+    assert calls == []
+
+    approval = {"messageId": "m1", "status": "approved"}
+    generation_store.persist_prompt_approval("t1", approval)
+    assert calls == [(("t1", "m1"), {"promptApproval": approval})]
+    calls.clear()
+    choice = {"messageId": "m2", "route": "answer"}
+    generation_store.persist_route_choice("t1", choice)
+    assert calls == [(("t1", "m2"), {"routeChoice": choice})]
+
+    calls.clear()
+    monkeypatch.setattr(generation_store.chat_snapshot, "merge_fields",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("锁冲突")))
+    generation_store.persist_prompt_approval("t1", approval)   # 失败留痕不抛
+    generation_store.persist_route_choice("t1", choice)
+
+
+def test_槽位元数据与轮次_快照读失败回退(monkeypatch):
+    """快照不可读时降级：元数据空、轮次 0 —— finalize 不因快照损坏而中断。"""
+    monkeypatch.setattr(generation_store.chat_snapshot, "load",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("快照损坏")))
+    assert generation_store._audio_slot_meta("t", "m", "s") == {"speaker": "", "seq": 0}
+    assert generation_store._audio_turn("t", "m") == 0
+    assert generation_store._image_turn("t", "m") == 0
+
+
+def test_轮次计数跳过非字典项与无parts项(monkeypatch):
+    monkeypatch.setattr(generation_store.chat_snapshot, "load",
+                        lambda *a, **k: ["not-a-dict", {"id": "m1"},
+                                         {"id": "m2", "parts": [{"kind": "audio"}]}])
+    assert generation_store._audio_turn("t", "m2") == 1
+    assert generation_store._image_turn("t", "m2") == 0
