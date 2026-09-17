@@ -1,13 +1,17 @@
 """P4 第一批形态锁：业务数据路径的「纯吞」必须留痕，禁止退化回 `pass`。
 
 审计正本：docs/memory/except-exception-audit-2026-09-16.md（2026-09-16 AST 全量 435 处，
-其中 91 处纯吞、T3.3 前复扫 69 处；本锁钉住 C1–C7 与 T3.2/T3.3 追加项，**37 个函数级目标**）。
+其中 91 处纯吞、T3.3 前复扫 69 处；本锁钉住 C1–C7 与 T3.2/T3.3/T3.4 追加项，**46 个函数级目标**）。
 这些路径吞掉异常会让快照/记忆/索引/审批状态**静默分叉**，或让用户可见面降级
 （如 `_visible_roleplay_text` 剥离失败 ⇒ 内部控制块泄漏），因此处理体必须至少留一条日志/遥测痕迹。
 
 刻意不锁（A/B 档 best-effort，有意设计）：遥测包装器（`run_trace.emit`/`sink`）、
 清理路径（interrupt/租约 revoke/taskkill）、探活 `is_up`、`visual_ci._extract_json` 等。
 新增同模式收口时往 TARGETS 里加即可。
+
+批次 4（2026-09-17）追加：10 处 C 档留痕（capability_handlers / image_agent / worldbook /
+narrative_ci / workflow_builder / model_downloader / output_path_migration）＋ 4 个 A/B 档模块
+（comfy_launcher / comfyui_client / model_lease / roleplay_turn）的 `[EXC-保留]` 标注注册。
 """
 from __future__ import annotations
 
@@ -69,6 +73,17 @@ TARGETS: list[tuple[str, str]] = [
     ("services/plan_compiler.py", "compile_plan"),     # variants / prev_batch 回填静默丢失
     ("services/rag_store.py", "search_generations"),   # 检索融合缺视觉一路
     ("services/rag_store.py", "_remove_local_image"),  # 磁盘残留孤儿图
+    # T3.3 批次 4（零散站点，2026-09-17）：失败 = 快照留档 / 句柄登记 / 外部工具与技能装载 /
+    # 世界书稠密召回 / 文风诊断 / 编译器提示 / 模型描述 / 资产索引回滚 静默降级
+    ("services/capability_handlers.py", "collect_comfy_outputs"),   # 计划采集产物少一条留档
+    ("services/capability_handlers.py", "create_repo_doc"),         # flow_context 少一条文档句柄
+    ("services/image_agent.py", "_build"),                          # system 缺 MCP 工具/自定义技能
+    ("services/worldbook.py", "_retrieve"),                         # 本轮世界书少 dense 召回一路
+    ("services/narrative_ci.py", "evaluate"),                       # 本轮少 prose_style 诊断
+    ("services/workflow_builder.py", "build_direct"),               # 缺 vram/model_gaps 编译提示
+    ("services/model_downloader.py", "_hf_info"),                   # 模型描述留空
+    ("services/output_path_migration.py", "_update_index"),         # 索引回滚失败残留半更新
+    ("services/output_path_migration.py", "_rollback_index"),       # 同上（显式回滚 helper）
     # ⚠ `services/fabric_loop.py::run_loop` **刻意不在表内**：同函数内 791/1227 已留痕，
     #   但 890/965 是审计**改判保留**（整段机械闸门块：不收窄、也不加日志，见审计报告
     #   「审计后复核改判保留」）⇒ 该函数必然含纯吞，进 TARGETS 只会永红。
@@ -93,8 +108,8 @@ def _is_trivial(handler: ast.ExceptHandler) -> bool:
 
 def test_目标注册表非空且模块都存在():
     """防空转①：目标表被删空/改小，或路径写错 ⇒ 整条锁静默失效。"""
-    assert len(TARGETS) >= 37, (
-        f"TARGETS 只剩 {len(TARGETS)} 条（下限 37）——锁的保护面缩水了；"
+    assert len(TARGETS) >= 46, (
+        f"TARGETS 只剩 {len(TARGETS)} 条（下限 46）——锁的保护面缩水了；"
         f"确属重构请同步下调，但不得删到失去意义"
     )
     missing = [rel for rel, _ in TARGETS if not (APP / rel).exists()]
@@ -144,9 +159,15 @@ MARK_KEEP = "[EXC-保留]"
 ANNOTATED_MODULES: dict[str, int] = {
     # 同函数混档的首个样本：见审计报告「审计后复核改判保留」与 T3.3 批次 3
     "services/fabric_loop.py": 16,
+    # T3.3 批次 4：A/B 档 best-effort（审计「明确保留」/ 清理路径）——所在模块的全部纯吞
+    # 都必须把「有意不记日志」写在源码上
+    "services/comfy_launcher.py": 5,     # taskkill 清理、日志句柄关闭
+    "services/comfyui_client.py": 12,    # 探活 is_up、取消 interrupt 两处
+    "services/model_lease.py": 4,        # 低优租约释放（失败由 remaining_conflicts 复查兜底）
+    "services/roleplay_turn.py": 7,      # 自愈限时 extra、流式提示 notify
 }
 APP_FILE_FLOOR = 40      # 实测 232 个 .py
-MARK_LOG_FLOOR = 25      # 全仓 [EXC-留痕] 实测 34 处
+MARK_LOG_FLOOR = 40      # 全仓 [EXC-留痕] 实测 44 处
 LOG_METHODS = {"warning", "error", "exception", "critical", "info", "debug"}
 
 

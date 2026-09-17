@@ -4,6 +4,7 @@ ComfyUI 原生扫描 models/<type>/，下载到对应子目录即可被识别，
 安全：仅允许 huggingface.co / civitai.com；文件名清洗防路径穿越；token 仅后端使用。
 """
 import hashlib
+import logging
 import re
 import threading
 import time
@@ -15,6 +16,9 @@ import httpx
 
 from app.services.pathnames import safe_seg
 from app.services import task_progress_store
+
+_LOG = logging.getLogger("uvicorn.error")
+
 
 # model_type -> ComfyUI models 子目录（对齐 ComfyUI 原生 models 目录结构）
 TYPE_DIRS = {
@@ -313,6 +317,6 @@ def _hf_info(c: httpx.Client, url: str, token: str) -> dict:
         rd = c.get(f"https://huggingface.co/{repo}/raw/main/README.md", headers=headers)
         if rd.status_code == 200:
             desc = re.sub(r"^---[\s\S]*?---\s*", "", rd.text).strip()[:2000]
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] README 拉取失败仅少描述，不阻断模型信息解析
+        _LOG.warning("HuggingFace README 拉取失败（模型描述留空）: %s", exc)
     return {"name": repo, "description": desc, "images": [], "download_url": url}

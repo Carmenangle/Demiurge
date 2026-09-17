@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import threading
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -20,6 +21,9 @@ from typing import Any, Callable
 
 from app.services import character_store, rag_backend, rag_retrieval
 from app.services.rag_backend import EmbedConfig
+
+_LOG = logging.getLogger("uvicorn.error")
+
 
 _WB_MARK = "worldbook_hash"          # 旧版全量索引哨兵；增量同步时自动清理
 _DEFAULT_K = 8                       # 非常驻条目语义检索条数（关键词命中额外叠加，见 assemble）
@@ -254,8 +258,8 @@ def _retrieve(repo_id: str, query: str, cfg: EmbedConfig, k: int) -> list[str]:
             rankings.append(("dense", [
                 {"id": _hid(d.page_content), "content": d.page_content,
                  "kind": "worldbook", "source": "wb"} for d in docs]))
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001 [EXC-留痕] 稠密检索一路失败不阻断（本轮世界书少 dense 召回）
+            _LOG.warning("世界书稠密检索失败（本轮少 dense 召回）: %s", exc)
         rankings.append(("bm25", rag_retrieval.sparse_rank(query, documents, candidate_k)))
         fused = rag_retrieval.rrf_fuse(rankings, candidate_k)
         return [h["content"] for h in fused[:k]]

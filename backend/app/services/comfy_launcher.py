@@ -184,7 +184,7 @@ def _kill_by_port(port: int = 8188) -> int:
             )
             if result.returncode == 0:
                 killed += 1
-        except Exception:
+        except Exception:  # noqa: BLE001 [EXC-保留] taskkill 清理 best-effort：失败不阻断停服（随后按端口再清一次）
             pass
     return killed
 
@@ -203,7 +203,7 @@ def stop(url: str = COMFYUI_BASE_URL) -> dict:
         if _log_fp is not None:
             try:
                 _log_fp.close()
-            except Exception:
+            except Exception:  # noqa: BLE001 [EXC-保留] 日志句柄关闭 best-effort：失败不阻断停服
                 pass
             _log_fp = None
         # 兜底：端口可能仍被子进程占，再按端口清一次

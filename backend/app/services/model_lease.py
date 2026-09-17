@@ -345,7 +345,7 @@ def acquire(owner: str, capability: str, *, priority: int,
         if release is not None:
             try:
                 release()
-            except Exception:
+            except Exception:  # noqa: BLE001 [EXC-保留] 低优租约释放 best-effort：失败由随后 remaining_conflicts 复查兜底
                 pass
     with _LOCK:
         _prune(now())

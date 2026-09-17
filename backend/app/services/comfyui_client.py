@@ -62,7 +62,7 @@ def is_up(url: str, timeout: float = 5.0) -> bool:
     try:
         with socket.create_connection((host, port), timeout=min(timeout, 3.0)):
             return True
-    except Exception:
+    except Exception:  # noqa: BLE001 [EXC-保留] 探活失败=False 即语义（审计明确保留）
         pass
     try:
         with urlopen(normalized, timeout=timeout) as r:
@@ -352,12 +352,12 @@ def interrupt(url: str, prompt_id: str = "") -> dict:
         try:
             _DIRECT_SESSION.post(base + "/queue", json={"delete": [prompt_id]}, timeout=5)
             deleted = True
-        except Exception:
+        except Exception:  # noqa: BLE001 [EXC-保留] 取消路径 best-effort：ComfyUI 未起/已完成均不报错
             pass
     try:
         _DIRECT_SESSION.post(base + "/interrupt", timeout=5)
         interrupted = True
-    except Exception:
+    except Exception:  # noqa: BLE001 [EXC-保留] 取消路径 best-effort：ComfyUI 未起/已完成均不报错
         pass
     return {"deleted": deleted, "interrupted": interrupted}
 

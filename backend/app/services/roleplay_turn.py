@@ -81,7 +81,7 @@ def _set_selfheal_deadline(ctx: Any, deadline: float | None) -> None:
                 extras.pop("_selfheal_deadline", None)
             else:
                 extras["_selfheal_deadline"] = deadline
-    except Exception:  # noqa: BLE001 - 限时是尽力而为，设不上就退回 httpx 超时
+    except Exception:  # noqa: BLE001 [EXC-保留] 限时尽力而为：设不上就退回 httpx 超时
         pass
 
 
@@ -342,7 +342,7 @@ def _selfheal_notice(turn: TurnExecution, hooks: TurnExecutionHooks, message: st
     if push_stream and hooks.notify is not None:
         try:
             hooks.notify(message)
-        except Exception:  # noqa: BLE001 - 提示失败不阻断自愈
+        except Exception:  # noqa: BLE001 [EXC-保留] 流式提示 best-effort：失败不阻断自愈
             pass
 
 

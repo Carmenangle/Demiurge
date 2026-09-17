@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import Path
 from uuid import uuid4
@@ -9,6 +10,8 @@ from uuid import uuid4
 from app.config import BUILD_TIME_BUDGET_SEC
 from app.services import node_index, structured_output, workflow_build_turn, workflow_graph_rules, workflow_merge
 from app.services.pathnames import safe_seg
+
+_LOG = logging.getLogger("uvicorn.error")
 
 
 def save_workflow(graph: dict, name: str, workflow_dir: str) -> str:
@@ -395,8 +398,8 @@ def build_direct(chat_fn, *, base_url: str, api_key: str, model: str, proxy: str
             {"kind": g.kind, "message": g.message, "suggestion": g.suggestion}
             for g in model_gaps
         ]
-    except Exception:  # noqa: BLE001 编译器增强失败不阻断主流程
-        pass
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 编译器增强失败不阻断主流程（缺 vram/model_gaps 提示）
+        _LOG.warning("工作流编译器增强失败（缺 vram/model_gaps 提示）: %s", exc)
     return {"ok": True, "graph": graph, "errors": [], "warnings": warnings, "missing_nodes": missing,
             "alternatives": alts, "compiler": compiler_notes}
 

@@ -6,12 +6,15 @@ P2 plan_tasks 执行器未来逐 operation 分发到它们（真源见 docs/ROAD
 from __future__ import annotations
 
 import json
+import logging
 import re
 import uuid
 from typing import Any
 
 from app.services.collection_artifacts import DOC_ASSET_MAX_BYTES, DOC_ASSET_SUFFIXES
 from app.services.workflow_submission import WorkflowSubmissionError, submit_template
+
+_LOG = logging.getLogger("uvicorn.error")
 
 
 def list_templates() -> dict[str, Any]:
@@ -293,8 +296,8 @@ def collect_comfy_outputs(prompt_ids: list[str] | None = None, comfyui_url: str 
             _cs.upsert(repo_id, _cs.assistant_message(
                 str(uuid.uuid4()), _message_text, image=shown,
                 meta={"kind": "plan_collect"}))
-        except Exception:  # noqa: BLE001 - 快照追加失败不影响采集主流程
-            pass
+        except Exception as exc:  # noqa: BLE001 [EXC-留痕] 计划采集快照追加失败不阻断采集（产物仅少一条留档）
+            _LOG.warning("计划采集快照追加失败（产物少一条留档）: %s", exc)
         try:
             rag_store.index_generation(
                 repo_id, EmbedConfig(embed_base, embed_key, embed_model),
@@ -895,8 +898,8 @@ def create_repo_doc(base: str, rel_path: str, content: str,
             flow_context.mark_doc(
                 str(repo_id).strip(), kind="doc_repo",
                 path=str(target), step="doc.create_repo")
-        except Exception:  # noqa: BLE001 - 句柄登记失败不影响文档写入
-            pass
+        except Exception as exc:  # noqa: BLE001 [EXC-留痕] 文档句柄登记失败不阻断写入（flow_context 少一条记录）
+            _LOG.warning("文档句柄登记失败（flow_context 少一条记录）: %s", exc)
     return {"path": str(target), "bytes": len((content or "").encode("utf-8"))}
 
 

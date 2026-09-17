@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import shutil
 import uuid
@@ -11,6 +12,8 @@ from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from app.config import CHROMA_DIR, DATA_DIR
+
+_LOG = logging.getLogger("uvicorn.error")
 
 
 class MigrationError(RuntimeError):
@@ -250,8 +253,8 @@ def _update_index(refs: list[AssetRef]) -> list[tuple[object, list[str], list[di
         for collection, ids, old_metas in reversed(applied):
             try:
                 collection.update(ids=ids, metadatas=old_metas)
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001 [EXC-留痕] 索引回滚失败（索引可能残留半更新）
+                _LOG.warning("资产索引回滚失败（索引可能残留半更新）: %s", exc)
         raise MigrationError(f"更新资产库索引失败：{exc}") from exc
     return applied
 
@@ -319,8 +322,8 @@ def _rollback_index(applied: list[tuple[object, list[str], list[dict]]]) -> None
     for collection, ids, old_metas in reversed(applied):
         try:
             collection.update(ids=ids, metadatas=old_metas)
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 [EXC-留痕] 索引回滚失败（索引可能残留半更新）
+            _LOG.warning("资产索引回滚失败（索引可能残留半更新）: %s", exc)
 
 
 def migrate(old_dir: str, new_dir: str) -> dict[str, object]:

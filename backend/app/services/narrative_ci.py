@@ -5,6 +5,7 @@ Narrative CI：内容中立、非阻断的剧情一致性诊断与处置记录�
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import sqlite3
 from pathlib import Path
@@ -12,6 +13,9 @@ from typing import Any, Iterable
 
 from app.services import prose_style
 from app.services.pathnames import safe_seg
+
+_LOG = logging.getLogger("uvicorn.error")
+
 
 DB_NAME = "narrative_ci.db"
 RESOLUTIONS = {"open", "fixed", "foreshadow", "retcon", "accepted"}
@@ -226,8 +230,8 @@ def evaluate(text: str, *, turn: int, facts: Iterable[dict] = (),
                     turn, item["code"], item["message"], item["evidence"],
                     "prose_style", item.get("severity", "warning"),
                 ))
-        except Exception:  # noqa: BLE001 文风检测永不阻断诊断流
-            pass
+        except Exception as exc:  # noqa: BLE001 [EXC-留痕] 文风检测失败不阻断诊断流（本轮少 prose_style 诊断）
+            _LOG.warning("文风检测失败（本轮少 prose_style 诊断）: %s", exc)
 
     unique = {item["id"]: item for item in diagnostics}
     return list(unique.values())

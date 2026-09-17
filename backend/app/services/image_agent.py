@@ -7,6 +7,7 @@
 多轮记忆复用 chat_memory 的 SqliteSaver 单例 + thread_id，与 /chat 同库无缝衔接。
 工具产出的图片地址写进闭包收集器，流式结束后由路由发 SSE image 事件透给前端。
 """
+import logging
 from typing import Annotated, Iterator
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -16,6 +17,9 @@ from langgraph.prebuilt import InjectedState
 from app.services import image_gen, generation_store, llm as _llm
 from app.services.message_images import extract_image_url
 from app.services.image_prompt_style import guidance_for
+
+_LOG = logging.getLogger("uvicorn.error")
+
 
 # 通用规则；生图提示词的「风格写法」仅在用户选了自定义风格存档时才在 _build 里拼接（见 image_prompt_style）。
 AGENT_SYSTEM_BASE = (
@@ -243,8 +247,8 @@ def _build(chat_base: str, chat_key: str, chat_model: str,
                 "④工具失败时如实告知用户失败原因，不要编造结果。"
                 "⑤调用参数严格按工具签名，不臆造未提供的字段。"
             )
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] MCP 工具装载失败不阻断（本轮对话无外部工具）
+        _LOG.warning("MCP 工具装载失败（本轮无外部工具）: %s", exc)
     # 拼入技能扩展：有 Agent 时按其选中的 skillIds（空=不用）；无 Agent（内置默认）用全部已启用技能
     try:
         from app.services import skills_store
@@ -254,8 +258,8 @@ def _build(chat_base: str, chat_key: str, chat_model: str,
             frags = skills_store.enabled_prompt_fragments()
         if frags:
             system_prompt += "\n\n【用户自定义技能】\n" + "\n".join(f"- {f}" for f in frags)
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 技能片段装载失败不阻断（system 缺自定义技能）
+        _LOG.warning("技能片段装载失败（system 缺用户自定义技能）: %s", exc)
     checkpointer = get_saver() if memory_mode == "legacy_checkpoint" else None
     return create_agent(
         model=llm,
