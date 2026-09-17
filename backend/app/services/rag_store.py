@@ -759,3 +759,17 @@ def seed_system_docs(cfg: EmbedConfig) -> int:
         store.delete(ids=dirty)
         changed += len(dirty)
     return changed
+
+
+def seed_system_docs_best_effort(cfg: EmbedConfig) -> int:
+    """播种系统指令的 best-effort 包装：失败**只留痕不外抛**（供 /rag/list 顺带播种用）。
+
+    与 `seed_system_docs` 的分工：手动 `/rag/seed` 要让用户看见失败（保持外抛）；列表接口
+    的顺带播种只是尽力而为 —— 失败时列表照常返回，但**必须留痕**：系统指令静默缺索引
+    等于检索质量无声退化（与审计 §4-C4 同档）。
+    """
+    try:
+        return seed_system_docs(cfg)
+    except Exception as exc:  # [EXC-留痕] 播种失败不阻断列表，但失败=系统指令静默缺索引
+        _log.warning("播种系统指令失败（列表照常返回，检索可能缺系统指令）: %s", exc)
+        return 0

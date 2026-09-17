@@ -468,7 +468,7 @@ def illustration_failure(req: IllustrationFailureRequest) -> dict[str, object]:
         comfy_url = req.comfyui_url or COMFYUI_BASE_URL
         try:
             cancelled = comfyui_client.interrupt(comfy_url, req.prompt_id)
-        except Exception:
+        except Exception:  # [EXC-保留] 取消清理 best-effort：interrupt 失败不改变「已移除」语义
             pass
     return {"ok": True, "removed": removed, "cancelled": cancelled}
 

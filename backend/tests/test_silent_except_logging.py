@@ -39,6 +39,9 @@ TARGETS: list[tuple[str, str]] = [
     # C6/C7 进度发布与取消信号：低危但失败无诊断
     ("services/plan_tasks.py", "_publish_progress"),
     ("services/chat_agent_queue.py", "cancel"),
+    # C4 续（T3.2）：/rag/list 的顺带播种 best-effort 属主 —— 失败 = 系统指令静默缺索引。
+    # 原先这段兜底**写在路由里**（`routers/rag.py:130` 纯吞），T3.2 下沉到服务侧并留痕。
+    ("services/rag_store.py", "seed_system_docs_best_effort"),
 ]
 
 

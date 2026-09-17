@@ -125,10 +125,7 @@ class ListRequest(EmbedAuth):
 @router.post("/list")
 def list_docs(req: ListRequest) -> dict[str, object]:
     """列出「系统库 + 本仓库库」所有条目（含系统指令，locked 标记）。顺带幂等播种系统指令。"""
-    try:
-        rag_store.seed_system_docs(req.embed_cfg())
-    except Exception:
-        pass  # 播种失败（如嵌入接口未配）不阻断列表
+    rag_store.seed_system_docs_best_effort(req.embed_cfg())
     return {"items": rag_store.list_docs(req.repo_id, req.embed_cfg())}
 
 

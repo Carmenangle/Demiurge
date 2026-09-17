@@ -86,8 +86,7 @@ def run_diagnostic(req: RunDiagnosticReq) -> dict:
             vlm_proxy=req.chat.proxy,
             reference_image_url=req.reference_image_url,
         )
-    except Exception as exc:
-        # 诊断层异常不阻断，返回 error 状态
+    except Exception as exc:  # [EXC-保留] 降级回退：诊断层异常不阻断，返回结构化 error
         return {
             "error": str(exc),
             "generation_id": req.generation_id,

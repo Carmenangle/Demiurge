@@ -12,6 +12,12 @@
 清理路径（interrupt / 租约 revoke / taskkill）、探活 `is_up`、以及 `comfyui_client` /
 `agent_graph` 等外部边界模块 —— 它们的兜底降级是设计的一部分。
 
+本文件含**两条互补判据**：
+- 判据一（T3.1）：`PILOT_MODULES` 试点模块内**禁止纯吞**（处理体只有 `pass`/常量）；
+- 判据二（T3.2）：`routers/` 内**非重抛的 `except Exception` 必须显式分类**
+  （`[EXC-保留]` / `[EXC-留痕]`）—— 路由层是外部边界，允许兜底，但不允许「看不出是
+  有意还是写漏」。
+
 纪律：
 1. 新增同模式收口时往 `PILOT_MODULES` 加模块即可（**只做加法**）；
 2. 计数是**下限**（防空转）——新增 handler 不必改，**删除 handler 到低于下限会红**，
@@ -99,3 +105,79 @@ def test_判据自身有牙():
     assert not ok_log, "判据误伤「留痕」写法"
     _, ok_raise = _scan("try:\n    f()\nexcept Exception:\n    raise\n")
     assert not ok_raise, "判据误伤「重抛」写法"
+
+
+# ---------------------------------------------------------------------------
+# 判据二（T3.2）：`routers/` 内「非重抛的 except Exception 必须显式分类」
+# ---------------------------------------------------------------------------
+# 路由层是**外部边界**，这里的 `except Exception` 只有两种合法形态：
+#   ① 重抛 / 转域异常（`raise HTTPException(...)`）—— 语义自明，不需标注；
+#   ② best-effort 边界（遥测发射、取消清理、降级回退）—— **必须**在 `except` 行留
+#      `[EXC-保留]`（有意兜底，不动）或 `[EXC-留痕]`（兜底但已加日志）标注；
+#      否则读代码的人无法区分「有意兜底」与「写漏成 pass」。
+# 分档与审计报告 §3/§4 同源：A 档遥测 / B 档清理 = 保留；C 档业务数据路径 = 留痕。
+#
+# 路由层本身**不引 logging**（本仓 20 个 logger 全在 `services/`）＝ 路由保持薄：
+# 凡需留痕的边界，应把 best-effort 包装**下沉到服务侧**
+# （样板：`rag_store.seed_system_docs_best_effort`，2026-09-17 T3.2 立）。
+
+ROUTERS = APP / "routers"
+ROUTER_FILE_FLOOR = 15      # 实测 39 个路由文件；低于此数＝扫描面缩水
+ROUTER_HANDLER_FLOOR = 25   # 实测 29 处；不得下调到 0
+MARKERS = ("[EXC-保留]", "[EXC-留痕]")
+
+
+def _unclassified_nonrethrow(src: str) -> list[str]:
+    """返回「处理体无 raise、且 `except` 行未带分类标注」的站点（`行号: 原文`）。"""
+    lines = src.split("\n")
+    out: list[str] = []
+    for n in ast.walk(ast.parse(src)):
+        if not isinstance(n, ast.ExceptHandler) or not _is_bare_exc(n.type):
+            continue
+        if any(isinstance(s, ast.Raise) for s in ast.walk(n)):
+            continue    # 重抛 / 转域异常：语义自明，不要求标注
+        line = lines[n.lineno - 1]
+        if any(m in line for m in MARKERS):
+            continue
+        out.append(f"{n.lineno}: {line.strip()}")
+    return out
+
+
+def test_路由层非重抛站点必须显式分类():
+    files = sorted(p for p in ROUTERS.rglob("*.py") if "__pycache__" not in p.parts)
+    assert len(files) >= ROUTER_FILE_FLOOR, (
+        f"routers 扫描面只剩 {len(files)} 个文件（下限 {ROUTER_FILE_FLOOR}）——锁空转了"
+    )
+    total = 0
+    offenders: dict[str, list[str]] = {}
+    for p in files:
+        src = p.read_text(encoding="utf-8")
+        total += sum(1 for n in ast.walk(ast.parse(src, filename=str(p)))
+                     if isinstance(n, ast.ExceptHandler) and _is_bare_exc(n.type))
+        bad = _unclassified_nonrethrow(src)
+        if bad:
+            offenders[p.name] = bad
+    assert total >= ROUTER_HANDLER_FLOOR, (
+        f"routers 的 except Exception 只剩 {total} 处（下限 {ROUTER_HANDLER_FLOOR}）——"
+        f"锁的保护面缩水了；确属重构请同步下调（不得改成 0）"
+    )
+    assert not offenders, (
+        "routers 内出现**未分类**的「非重抛 except Exception」：外部边界必须标注 "
+        "[EXC-保留]（有意兜底）或 [EXC-留痕]（已留日志）；业务数据路径请改为留痕。\n"
+        + "\n".join(f"  {k}: {v}" for k, v in offenders.items())
+    )
+
+
+def test_路由层分类判据自身有牙():
+    """锁的锁：判据必须抓得到「未分类的非重抛」，且不误伤标注 / 重抛（防永久绿灯）。"""
+    assert _unclassified_nonrethrow("try:\n    f()\nexcept Exception:\n    pass\n"), \
+        "判据抓不到未分类的 `except Exception: pass`"
+    assert not _unclassified_nonrethrow(
+        "try:\n    f()\nexcept Exception:  # [EXC-保留] 遥测 best-effort\n    pass\n"), \
+        "判据误伤 [EXC-保留] 标注"
+    assert not _unclassified_nonrethrow(
+        "try:\n    f()\nexcept Exception:  # [EXC-留痕] 原因\n    _LOG.warning('y')\n"), \
+        "判据误伤 [EXC-留痕] 标注"
+    assert not _unclassified_nonrethrow(
+        "try:\n    f()\nexcept Exception:\n    raise HTTPException(status_code=500, detail='x')\n"), \
+        "判据误伤「转域异常」重抛"

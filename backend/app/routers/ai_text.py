@@ -88,7 +88,7 @@ def gen_profile_prompt(req: ProfilePromptRequest) -> dict[str, object]:
             strategy=result.get("strategy", "direct"),
             validation_errors=result.get("validation_errors", []),
         )
-    except Exception:  # noqa: BLE001 Trace 不得阻断提示词生成
+    except Exception:  # noqa: BLE001 [EXC-保留] 遥测发射 best-effort：Trace 不得阻断提示词生成
         pass
     return {**result, "profile": req.profile}
 
@@ -145,7 +145,7 @@ def gen_frame_prompts(req: FramePromptsRequest) -> dict[str, object]:
                 validation_errors=item.get("validation_errors", []),
                 frame_extract_ok=diagnostics.get("frame_extract_ok"),
             )
-    except Exception:  # noqa: BLE001 Trace 不得阻断提示词生成
+    except Exception:  # noqa: BLE001 [EXC-保留] 遥测发射 best-effort：Trace 不得阻断提示词生成
         pass
     return {"frames": frames, "profile": req.profile}
 
