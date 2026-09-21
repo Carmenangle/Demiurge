@@ -20,8 +20,6 @@ def _spec(**overrides):
     return base
 
 
-# ===== climax 七段式：含时间分镜 =====
-
 def test_climax_has_time_segments():
     p = video_prompt.compile_climax_video_prompt(_spec())
     assert "[时间分镜]" in p
@@ -61,8 +59,6 @@ def test_climax_ignores_style_prefix_and_respects_negative():
     assert "禁止柔化转场" in p
     assert "禁止五官漂移" in p
 
-
-# ===== firstlast 七段式：含时间分镜 =====
 
 def test_firstlast_has_six_sections_no_style():
     p = video_prompt.compile_firstlast_video_prompt(_spec(), style_prefix="二次元日常美食 CGDCT")
@@ -165,8 +161,6 @@ def test_climax_identity_lock_only_in_negative():
     assert "人物身份和五官不能发生变化" not in seg
 
 
-# ===== 参数组装 dry-run =====
-
 def test_build_request_firstlast_multipart_two_images():
     req = video_prompt.build_video_request(
         mode="firstlast", spec=_spec(),
@@ -222,8 +216,6 @@ def test_build_request_separates_role_desc_from_image_address():
     assert "举杯同框收尾 → http://x/l.png" in req["reference_binding"]["图片2"]
 
 
-# ===== R2 缺图守卫 =====
-
 def test_firstlast_missing_frames_honest_degredation():
     p = video_prompt.compile_firstlast_video_prompt(
         _spec(), has_first=False, has_last=False,
@@ -245,8 +237,6 @@ def test_build_request_missing_frames_warns():
     assert any("缺尾帧图" in w for w in req["warnings"])
     assert any("纯文生" in w for w in req["warnings"])
 
-
-# ===== W3 转场视频：短桥段编译 + 坑G 不硬控时长 =====
 
 def test_transition_has_six_sections_no_style():
     p = video_prompt.compile_transition_video_prompt(_spec(), style_prefix="二次元日常美食 CGDCT")
@@ -335,8 +325,6 @@ def test_build_request_transition_section_names():
     ]
 
 
-# ===== R3 元信息三件套（模型名透传 + 画幅派生）=====
-
 def test_meta_passthrough_model_name_not_hardcoded():
     p = video_prompt.compile_climax_video_prompt(
         _spec(), model_name="seedance-1.0", size="1280x720",
@@ -353,38 +341,6 @@ def test_aspect_from_size_variants():
     assert video_prompt._aspect_from_size("16:9") == "16:9"
 
 
-# ===== R6 音频：无对白不写「台词=逐字」 =====
-
-def test_audio_no_dialogue_no_script_line():
-    p = video_prompt.compile_firstlast_video_prompt(_spec())
-    assert "音乐=" in p
-    assert "台词=" not in p            # 无逐字对白时不诱导幻觉
-
-
-def test_audio_with_dialogue_lists_script():
-    p = video_prompt.compile_firstlast_video_prompt(
-        _spec(), audio_lines=[{"speaker": "温知夏", "text": "开饭啦"}],
-    )
-    assert "台词=" in p
-    assert "温知夏：开饭啦" in p
-
-
-def test_audio_design_renders_sfx_and_lines():
-    spec = _spec(audio_design={
-        "music": "低沉弦乐铺底",
-        "sfx": ["fleshy claps in steady rhythm", "trickling water"],
-        "lines": [{"speaker": "虞妙玥", "text": "你来了"}],
-        "sync": "掌声卡重音",
-    })
-    p = video_prompt.compile_climax_video_prompt(spec)
-    assert "音乐=低沉弦乐铺底" in p
-    assert "音效=fleshy claps in steady rhythm、trickling water" in p
-    assert "同步=掌声卡重音" in p
-    # climax：高潮定格时刻对白通常已说完（用户定稿）——动作窗口不带台词，
-    # 无论来源（audio_design.lines / comfy_audio 兜底）一律不列
-    assert "台词=" not in p
-
-
 def test_climax_drops_dialogue_from_all_sources():
     # audio_design.lines 与 comfy_audio 兜底 audio_lines 双来源都不进 climax [音频]
     spec = _spec(audio_design={
@@ -399,34 +355,6 @@ def test_climax_drops_dialogue_from_all_sources():
     assert "杀了。" not in p.split("[音频]：", 1)[1].split("[负面约束]：", 1)[0]
 
 
-def test_firstlast_audio_design_renders_timed_lines():
-    # firstlast：首尾帧影片从头到尾覆盖剧情——对白全部入列并带 at_s 时点
-    spec = _spec(audio_design={
-        "music": "低沉弦乐铺底",
-        "sfx": ["fleshy claps in steady rhythm"],
-        "lines": [
-            {"speaker": "温知夏", "text": "开饭了，都过来！", "at_s": 2},
-            {"speaker": "沈糯", "text": "来了。"},
-        ],
-        "sync": "掌声卡重音",
-    })
-    p = video_prompt.compile_firstlast_video_prompt(spec)
-    assert "音乐=低沉弦乐铺底" in p
-    assert "台词=2s｜温知夏：开饭了，都过来！；沈糯：来了。" in p
-    assert "同步=掌声卡重音" in p
-
-
-def test_audio_design_without_sfx_keeps_env_fallback():
-    p = video_prompt.compile_climax_video_prompt(
-        _spec(audio_design={"music": "", "sfx": [], "lines": [], "sync": ""}),
-    )
-    assert "音乐=按本集风格铺底" in p
-    assert "音效=环境声" in p
-    assert "台词=" not in p
-
-
-# ===== R7 负面约束去重 =====
-
 def test_negative_dedup_across_sources():
     p = video_prompt.compile_climax_video_prompt(
         _spec(negative_prompt="禁止五官漂移"),
@@ -436,8 +364,6 @@ def test_negative_dedup_across_sources():
     assert "变成其他画风" in p
 
 
-# ===== R9 视频默认 16:9 =====
-
 def test_build_request_default_size_is_16_9():
     req = video_prompt.build_video_request(
         mode="climax", spec=_spec(),
@@ -445,8 +371,6 @@ def test_build_request_default_size_is_16_9():
     )
     assert req["submit"]["size"] == "1280x720"  # 不再沿用图片的 1024x1024
 
-
-# ===== 防拦截对齐：spec 破甲标记在编译前还原（对齐图像生成第一层）=====
 
 def test_build_request_restores_jailbreak_markers_in_spec():
     req = video_prompt.build_video_request(
@@ -467,8 +391,6 @@ def test_build_request_restores_markers_in_firstlast():
     assert "@(" not in prompt and ")@" not in prompt
     assert "三人举杯同框" in prompt and "面馆内景" in prompt
 
-
-# ===== 高潮动作桥段：画面级要素优先（保证高潮场景用视频结构表现）=====
 
 def test_climax_prefers_visual_facts_over_raw_narrative():
     # 高潮动作优先用主模型同轮提炼的画面级要素，而不是围绕锚点截取的中文叙事原文
@@ -631,26 +553,6 @@ def test_parse_video_plan_at_s_only_numeric_passes():
     assert [e.get("at_s") for e in got] == [2.0, 7.5, 9.0, None, None]
 
 
-def test_audio_design_lines_carry_plot_timing():
-    # 台词时点：at_s 是提取 LLM 按剧情位置推算的『什么时候说』，渲染成 {t}s｜说话人：台词；
-    # 缺 at_s 诚实省略前缀（comfy_audio 兜底台词同样无前缀）。firstlast 专用（climax 无台词）。
-    spec = _spec(audio_design={
-        "music": "低沉弦乐铺底",
-        "sfx": [],
-        "lines": [
-            {"speaker": "宗主(男)", "text": "杀了。", "at_s": 1},
-            {"speaker": "虞妙玥", "text": "他……杀、自己……人……", "at_s": 7.5},
-            {"speaker": "沈糯", "text": "没有时点的台词"},
-        ],
-        "sync": "",
-    })
-    p = video_prompt.compile_firstlast_video_prompt(spec)
-    assert "1s｜宗主(男)：杀了。" in p
-    assert "7.5s｜虞妙玥：他……杀、自己……人……" in p
-    assert "沈糯：没有时点的台词" in p
-    assert "s｜沈糯" not in p
-
-
 def test_parse_video_plan_skips_empty_and_returns_partial():
     # 空 desc 跳过；缺 subject_scene 时只回 action_sequence，不整体失败
     plan = video_prompt.parse_video_plan(
@@ -688,8 +590,6 @@ def test_parse_video_plan_整体拒答返回空():
     )
     assert plan == {}
 
-
-# ===== 参考绑定角色样貌绑定（角色名必须绑定样貌，否则视频模型不认识角色） =====
 
 def test_reference_binding_binds_identity_gloss_from_subjects():
     # subjects 的 name→description 是「角色→样貌」真源，优先用它做身份绑定
@@ -737,9 +637,6 @@ def test_reference_binding_does_not_reflow_appearance_when_subject_scene_exists(
     p = video_prompt.compile_climax_video_prompt(spec)
     assert "丰腴肥熟" not in p
     assert "hourglass figure" in p  # 简化外貌仍在 [主体/场景]
-
-
-# ===== 参考绑定不再写「画面另含未绑定角色」提示（用户拍板 2026-08-28） =====
 
 
 def test_climax_does_not_flag_unbound_person_in_action():
@@ -791,3 +688,62 @@ def test_reference_binding_firstlast_and_transition_bind_identity():
     )
     tbinding = tp.split("[参考绑定]：", 1)[1].split("\n\n", 1)[0]
     assert "画面角色：温知夏、沈糯、柏言" in tbinding
+
+# ===== ⑥[音频]：只有效果音（2026-09-20 用户定案）=====
+# 台词/旁白由「多元数据插入」里的**独立音频生成功能**负责 ⇒ 视频提示词一律不写台词；
+# 音乐结构同样不写（用户口径「只有效果音」）。数据仍留在 spec["audio_design"] 里，只是不渲染。
+
+
+def test_视频音频只有效果音不含台词与音乐():
+    spec = _spec(audio_design={
+        "music": "低音提琴渐强",
+        "sfx": ["fleshy claps in steady rhythm", "trickling water"],
+        "lines": [{"speaker": "宥夏", "text": "不要…", "at_s": 3}],
+        "sync": "每 2 秒卡拍",
+    })
+    p = video_prompt.compile_climax_video_prompt(spec)
+
+    assert "音效=fleshy claps in steady rhythm、trickling water" in p
+    assert "同步=每 2 秒卡拍" in p
+    assert "台词=" not in p
+    assert "音乐=" not in p
+    assert "不要…" not in p
+
+
+def test_firstlast视频音频同样只有效果音():
+    spec = _spec(audio_design={
+        "music": "低音提琴渐强",
+        "sfx": ["fleshy claps in steady rhythm"],
+        "lines": [
+            {"speaker": "宥夏", "text": "我要去了…", "at_s": 2},
+            {"speaker": "泰宇", "text": "嗯。"},
+        ],
+        "sync": "每 2 秒卡拍",
+    })
+    p = video_prompt.compile_firstlast_video_prompt(spec)
+
+    assert "音效=fleshy claps in steady rhythm" in p
+    assert "同步=每 2 秒卡拍" in p
+    assert "台词=" not in p
+    assert "音乐=" not in p
+    assert "我要去了…" not in p
+
+
+def test_comfy_audio对白参数不再进视频提示词():
+    """`audio_lines`（comfy_audio 对白）保留仅为兼容，按新口径一律不渲染。"""
+    p = video_prompt.compile_firstlast_video_prompt(
+        _spec(), audio_lines=[{"speaker": "宥夏", "text": "别停。"}],
+    )
+
+    assert "台词=" not in p
+    assert "别停。" not in p
+
+
+def test_视频音频无音效时回退环境声():
+    p = video_prompt.compile_climax_video_prompt(
+        _spec(audio_design={"music": "", "sfx": [], "lines": [], "sync": ""}),
+    )
+
+    assert "音效=环境声" in p
+    assert "音乐=" not in p
+    assert "台词=" not in p

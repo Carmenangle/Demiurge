@@ -8,11 +8,9 @@ import hashlib
 import logging
 import re
 import sqlite3
-from pathlib import Path
 from typing import Any, Iterable
 
-from app.services import prose_style
-from app.services.pathnames import safe_seg
+from app.services import prose_style, repo_meta
 
 _LOG = logging.getLogger("uvicorn.error")
 
@@ -379,7 +377,7 @@ def _check_world_rule_violation(text: str, rule: str) -> str:
     return ""
 
 def _connect(base: str, repo_id: str) -> sqlite3.Connection:
-    path = Path(base) / safe_seg(repo_id, strip=False) / DB_NAME
+    path = repo_meta.engine_repo_dir(base, repo_id) / DB_NAME
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row

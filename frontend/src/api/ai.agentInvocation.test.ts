@@ -70,4 +70,14 @@ describe("agent invocation wire contract", () => {
     const body = agentInvocationBody(invocation());
     expect(body.attachments).toEqual([]);
   });
+
+  it("画面人称手选进 wire，未选时送空串（空=后端自动判定）", () => {
+    expect(agentInvocationBody(invocation()).illustration_viewpoint).toBe("");
+    expect(agentInvocationBody({
+      ...invocation(), illustrationViewpoint: "third_person",
+    }).illustration_viewpoint).toBe("third_person");
+    expect(agentInvocationBody({
+      ...invocation(), illustrationViewpoint: "first_person",
+    }).illustration_viewpoint).toBe("first_person");
+  });
 });

@@ -137,3 +137,48 @@ def test_writeback主函数由接缝组装且已降到目标行数():
     assert body_lines <= _TARGET_LINES, (
         f"_agency_writeback 仍为 {body_lines} 行（目标 ≤{_TARGET_LINES}）——拆解疑似回退"
     )
+
+
+# ---------------------------------------------------------------------------
+# 优化项③ 接线锁：判据档的「本帧主体名集合」必须随 scene_spec 下传
+#
+# 多人契约原先只看 `actors`（= 取材窗口里被提及的所有角色），窗口一提别人就把单人帧
+# 误判成多人帧。契约改看本帧主体数后，判据档给出的 `subjects` 必须真的传到 scene_spec，
+# 否则「按画面主体数判」在生产链路上根本不生效（探针绿、真机红）。
+# 缺省（空表）不得生成该键 ⇒ 契约退回 actors 的旧行为逐字节不变。
+# ---------------------------------------------------------------------------
+def _scene_spec_args(**target_over):
+    target = {
+        "request_prompt": "kneeling, reaching out",
+        "prompt_source": "fallback",
+        "requested_anchor": "她站在走廊里。",
+        "plan_retargeted": False,
+        "scene_narrative": "她站在走廊里。",
+        "motion": 0,
+        "request_actors": ["甲", "乙"],
+        "request_appearance": "",
+    }
+    target.update(target_over)
+    return (
+        {"prompt_profile": "anima_tags", "appearance_source": "character_card"},
+        "repo",
+        {},
+        "她站在走廊里。",
+        {"character_encounter": False, "encounter_narrative": "",
+         "wardrobe": "", "locale": "", "image_rating": "nsfw"},
+        {"scene_text": "她站在走廊里。", "known": ["甲", "乙"]},
+        target,
+    )
+
+
+def test_缺块路径把本帧主体名集合写进scene_spec():
+    spec = aag._wb_comfy_scene_spec(*_scene_spec_args(frame_subjects=["甲"]))
+    assert spec["frame_subjects"] == ["甲"]
+
+
+def test_无本帧主体信号时scene_spec不得凭空生成该键():
+    """零回归：空表／缺键都不得出现 frame_subjects，契约必须退回 actors。"""
+    assert "frame_subjects" not in aag._wb_comfy_scene_spec(
+        *_scene_spec_args(frame_subjects=[]),
+    )
+    assert "frame_subjects" not in aag._wb_comfy_scene_spec(*_scene_spec_args())

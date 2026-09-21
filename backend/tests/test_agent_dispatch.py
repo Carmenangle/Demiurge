@@ -1178,7 +1178,7 @@ def test_roleplay把机械召回候选与预设上下文合并后只调一次主
     )
     monkeypatch.setattr(
         aag, "_table_maintenance",  # 消费方 _agency_maintenance 已迁 agent_agency（方案 B 之 B）
-        lambda ctx, repo_id, reply, turn: calls.append("table"), raising=False,
+        lambda ctx, deps, repo_id, reply, turn: calls.append("table"), raising=False,
     )
     monkeypatch.setattr(ra, "maybe_illustrate", lambda *a, **k: None)
     monkeypatch.setattr(ra, "maybe_summarize", lambda *a, **k: calls.append("chronicle"))
@@ -1415,6 +1415,60 @@ def test_profile_llm_fallback_carries_guard_preset(monkeypatch, tmp_path):
     assert "防拦截规则生效" in captured["system"]
     assert out  # 校验失败后仍回退本地模板，非空
     assert strategy.startswith("llm_retargeted")
+
+
+def test_profile_llm_fallback_error_carries_reason(monkeypatch):
+    """插桩回归（2026-09-18）：兜底链抛异常必须把类型与消息写进 trace。
+
+    此前 error 事件只带 status（全量 trace 里 700+ 条无原因），无法区分「超时/连接失败」
+    与「上游 4xx 审核」——这正是「NSFW 生图提示词为什么总掉词表兜底」的观测缺口。
+    """
+    from app.services import run_trace
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("上游返回 400：content filter")
+
+    monkeypatch.setattr(aga._llm, "chat_messages_stream", boom)
+    trace: list = []
+    monkeypatch.setattr(
+        run_trace, "emit",
+        lambda ctx, event, **data: trace.append((event, data)),
+    )
+    out, strategy = aga._profile_llm_fallback(_ctx(), {
+        "profile": "krea2", "narrative": "她在雨中回头。",
+    })
+
+    assert (out, strategy) == ("", "")
+    event, data = trace[-1]
+    assert event == "illustration.profile_llm_fallback"
+    assert data["status"] == "error"
+    assert data["error_type"] == "RuntimeError"
+    assert "400" in data["error_message"]
+    assert data["profile"] == "krea2"
+
+
+def test_profile_llm_fallback_skips_without_model_config(monkeypatch):
+    """插桩回归（2026-09-18）：静默早退也必须在 trace 可见。
+
+    缺模型配置时不发起调用就返回空——若不留痕，排查时会误判成「模型返回空」。
+    """
+    from app.services import run_trace
+
+    trace: list = []
+    monkeypatch.setattr(
+        run_trace, "emit",
+        lambda ctx, event, **data: trace.append((event, data)),
+    )
+    out, strategy = aga._profile_llm_fallback({}, {
+        "profile": "anima_tags", "narrative": "她在雨中回头。",
+    })
+
+    assert (out, strategy) == ("", "")
+    event, data = trace[-1]
+    assert event == "illustration.profile_llm_fallback"
+    assert data["status"] == "skipped"
+    assert data["reason"] == "model_config_missing"
+    assert data["profile"] == "anima_tags"
 
 
 def test_extract_video_action_plan_carries_guard_preset_and_refusal_retry(monkeypatch, tmp_path):
@@ -2586,7 +2640,8 @@ def test_高潮重定向保留主计划已验证角色而不依赖正文重复�
     )
     monkeypatch.setattr(
         scene_illustration, "illustration_scene_excerpt",
-        lambda _story, _anchor: "她跌坐在石板上。",
+        # A′ 起取材层多一个关键字参数 `subjects`；替身照收不误，锁定行为不变。
+        lambda _story, _anchor, **_kw: "她跌坐在石板上。",
     )
     reply = (
         "<content>她跌坐在石板上。\n\n远处的风铃响了。</content>"
@@ -3165,11 +3220,12 @@ def test_独立表格维护只写数据库且不把维护响应放进对话(monk
     monkeypatch.setattr(
         ag.run_trace, "emit", lambda ctx, event, **data: traces.append((event, data)),
     )
+    deps = ra.AgencyDeps(chat_fn=maintain, rng=random.Random(0), state_base=str(tmp_path))
     ctx = _ctx(
         output_dir=str(tmp_path), repo_id=repo_id, message="留在孤儿院",
     )
 
-    ag._table_maintenance(ctx, repo_id, "剧情正文。" * 80, turn=1)
+    ag._table_maintenance(ctx, deps, repo_id, "剧情正文。" * 80, turn=1)
 
     global_table = next(
         table for table in table_store.load(str(tmp_path), repo_id)
@@ -3180,6 +3236,184 @@ def test_独立表格维护只写数据库且不把维护响应放进对话(monk
     assert captured["user"].endswith("剧情正文。" * 80)
     assert any(event == "agent.completed" and data.get("agent") == "table_maintenance"
                for event, data in traces)
+
+
+# ── 2026-09-18 兜底状态抽取：主协议失守 → 置信号 → 维护调用顺带补写回 ──
+
+def _signal_deps(tmp_path) -> ra.AgencyDeps:
+    return ra.AgencyDeps(
+        chat_fn=lambda *a, **k: "", rng=random.Random(0), state_base=str(tmp_path))
+
+
+def test_wb_apply_state_协议双缺失时置兜底抽取信号(monkeypatch, tmp_path):
+    monkeypatch.setattr(aag.run_trace, "emit", lambda ctx, event, **data: None)
+    ctx = _ctx(output_dir=str(tmp_path), repo_id="work", message="你好")
+    _, raw, _, _, snapshot, _ = aag._wb_apply_state(
+        ctx, _signal_deps(tmp_path), "她微微一笑。", turn=38, repo_id="work",
+        card_name="凌若冰")
+    assert snapshot == "" and raw == []
+    assert ctx["_agency_state_fallback"] == (True, True)
+
+
+def test_wb_apply_state_缺状态更新只置增量信号(monkeypatch, tmp_path):
+    monkeypatch.setattr(aag.run_trace, "emit", lambda ctx, event, **data: None)
+    ctx = _ctx(output_dir=str(tmp_path), repo_id="work", message="你好")
+    clean = "<status>\n[第38轮]\n[好感] 凌若冰=40\n</status>\n\n她微微一笑。"
+    aag._wb_apply_state(ctx, _signal_deps(tmp_path), clean, turn=38, repo_id="work",
+                        card_name="凌若冰")
+    assert ctx["_agency_state_fallback"] == (True, False)
+
+
+def test_wb_apply_state_缺status只置快照信号(monkeypatch, tmp_path):
+    monkeypatch.setattr(aag.run_trace, "emit", lambda ctx, event, **data: None)
+    ctx = _ctx(output_dir=str(tmp_path), repo_id="work", message="你好")
+    clean = ('她微微一笑。\n<状态更新>'
+             '[{"field":"数值/凌若冰·好感度","op":"add","value":1,"evidence":"笑"}]</状态更新>')
+    aag._wb_apply_state(ctx, _signal_deps(tmp_path), clean, turn=38, repo_id="work",
+                        card_name="凌若冰")
+    assert ctx["_agency_state_fallback"] == (False, True)
+
+
+def test_wb_apply_state_协议齐全不置信号(monkeypatch, tmp_path):
+    monkeypatch.setattr(aag.run_trace, "emit", lambda ctx, event, **data: None)
+    ctx = _ctx(output_dir=str(tmp_path), repo_id="work", message="你好")
+    clean = ("<status>\n[第38轮]\n[好感] 凌若冰=40\n</status>\n\n她微微一笑。\n<状态更新>"
+             '[{"field":"数值/凌若冰·好感度","op":"add","value":1,"evidence":"笑"}]</状态更新>')
+    aag._wb_apply_state(ctx, _signal_deps(tmp_path), clean, turn=38, repo_id="work",
+                        card_name="凌若冰")
+    assert "_agency_state_fallback" not in ctx
+
+
+def _preset_state(tmp_path, repo_id: str, card: str, *, value: float, turn: int):
+    from app.services import character_state
+
+    st = character_state.load_state(str(tmp_path), repo_id, card)
+    deltas = character_state.parse_deltas(
+        [{"field": f"数值/{card}·好感度", "op": "add", "value": value, "evidence": "前情"}],
+        turn=turn, source=character_state.SRC_AUTO, card_name=card, existing_state=st)
+    character_state.apply_deltas(st, deltas)
+    st.快照 = character_state.Snapshot(f"[第{turn}轮]\n[好感] {card}={value:g}", turn)
+    character_state.save_state(str(tmp_path), st)
+
+
+def test_独立表格维护兜底信号驱动状态补写回(monkeypatch, tmp_path):
+    from app.services import character_state
+
+    repo_id, card = "work", "凌若冰"
+    captured = {}
+    traces = []
+
+    def maintain(base, key, model, system, user, **kwargs):
+        captured.update(system=system, user=user)
+        return json.dumps({
+            "ops": [],
+            "state_deltas": [{"field": "数值/凌若冰·好感度", "op": "add", "value": 2,
+                              "evidence": "她收下了信物"}],
+            "status_snapshot": "[第38轮] 夜谈\n[好感] 凌若冰=42",
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(aag._llm, "chat", maintain)
+    monkeypatch.setattr(
+        aag.run_trace, "emit", lambda ctx, event, **data: traces.append((event, data)))
+    deps = ra.AgencyDeps(chat_fn=maintain, rng=random.Random(0), state_base=str(tmp_path))
+    _preset_state(tmp_path, repo_id, card, value=40, turn=37)
+
+    ctx = _ctx(output_dir=str(tmp_path), repo_id=repo_id, card_name=card, message="送出信物")
+    ctx["_agency_state_fallback"] = (True, True)
+    aag._table_maintenance(ctx, deps, repo_id, "她收下了信物，耳根微红。" * 5, turn=38)
+
+    st2 = character_state.load_state(str(tmp_path), repo_id, card)
+    assert st2.数值["凌若冰·好感度"].value == 42.0
+    assert st2.快照.turn == 38
+    assert "[好感] 凌若冰=42" in st2.快照.text  # 增量已先应用，对账后 42 与引擎现值一致
+    assert "【上轮状态栏】" in captured["user"] and "第37轮" in captured["user"]
+    assert any(e == "agent.completed" and d.get("agent") == "table_maintenance"
+               and d.get("state_fallback") for e, d in traces)
+
+
+def test_独立表格维护兜底信号但模型回旧数组时只应用表格ops(monkeypatch, tmp_path):
+    from app.services import character_state, table_store
+
+    repo_id, card = "work", "凌若冰"
+    traces = []
+    table_store.save(str(tmp_path), repo_id, table_store.default_tables())
+
+    def maintain(base, key, model, system, user, **kwargs):
+        return json.dumps([{
+            "op": "insert", "table": table_store.GLOBAL_TABLE,
+            "values": {"时间": "第五日", "地点": "边地孤儿院", "世界状态": "平静", "世界规则": "未变"},
+        }], ensure_ascii=False)
+
+    monkeypatch.setattr(aag._llm, "chat", maintain)
+    monkeypatch.setattr(
+        aag.run_trace, "emit", lambda ctx, event, **data: traces.append((event, data)))
+    deps = ra.AgencyDeps(chat_fn=maintain, rng=random.Random(0), state_base=str(tmp_path))
+    _preset_state(tmp_path, repo_id, card, value=40, turn=37)
+
+    ctx = _ctx(output_dir=str(tmp_path), repo_id=repo_id, card_name=card, message="留在孤儿院")
+    ctx["_agency_state_fallback"] = (True, True)
+    aag._table_maintenance(ctx, deps, repo_id, "剧情正文。" * 80, turn=38)
+
+    st2 = character_state.load_state(str(tmp_path), repo_id, card)
+    assert st2.快照.turn == 37  # 旧数组无状态字段：优雅降级，状态写回不做
+    global_table = next(t for t in table_store.load(str(tmp_path), repo_id)
+                        if t["name"] == table_store.GLOBAL_TABLE)
+    assert global_table["rows"][0][:2] == ["第五日", "边地孤儿院"]
+    assert not any(e == "agent.completed" and d.get("state_fallback") for e, d in traces)
+
+
+def test_独立表格维护快照兜底不重复应用增量(monkeypatch, tmp_path):
+    from app.services import character_state
+
+    repo_id, card = "work", "凌若冰"
+    captured = {}
+    traces = []
+
+    def maintain(base, key, model, system, user, **kwargs):
+        captured.update(system=system, user=user)
+        return json.dumps({
+            "ops": [],
+            "state_deltas": [{"field": "数值/凌若冰·好感度", "op": "add", "value": 2,
+                              "evidence": "模型抗命多给的增量"}],
+            "status_snapshot": "[第38轮] 夜谈\n[好感] 凌若冰=41",
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(aag._llm, "chat", maintain)
+    monkeypatch.setattr(
+        aag.run_trace, "emit", lambda ctx, event, **data: traces.append((event, data)))
+    deps = ra.AgencyDeps(chat_fn=maintain, rng=random.Random(0), state_base=str(tmp_path))
+    _preset_state(tmp_path, repo_id, card, value=40, turn=37)
+
+    ctx = _ctx(output_dir=str(tmp_path), repo_id=repo_id, card_name=card, message="夜谈")
+    ctx["_agency_state_fallback"] = (False, True)
+    aag._table_maintenance(ctx, deps, repo_id, "她收下了信物。" * 5, turn=38)
+
+    st2 = character_state.load_state(str(tmp_path), repo_id, card)
+    assert st2.数值["凌若冰·好感度"].value == 40.0  # 主协议增量已应用过：维护增量不重复计
+    assert st2.快照.turn == 38
+    assert "[好感] 凌若冰=40" in st2.快照.text  # 快照对账到引擎现值
+    assert "state_deltas 固定输出 []" in captured["system"]
+    assert "【上轮状态栏】" in captured["user"]
+
+
+def test_独立表格维护无信号时不要求状态抽取(monkeypatch, tmp_path):
+    from app.services import table_store
+
+    repo_id = "work"
+    table_store.save(str(tmp_path), repo_id, table_store.default_tables())
+    captured = {}
+
+    def maintain(base, key, model, system, user, **kwargs):
+        captured.update(system=system, user=user)
+        return json.dumps([], ensure_ascii=False)
+
+    monkeypatch.setattr(aag._llm, "chat", maintain)
+    monkeypatch.setattr(aag.run_trace, "emit", lambda ctx, event, **data: None)
+    deps = ra.AgencyDeps(chat_fn=maintain, rng=random.Random(0), state_base=str(tmp_path))
+    ctx = _ctx(output_dir=str(tmp_path), repo_id=repo_id, message="留在孤儿院")
+    aag._table_maintenance(ctx, deps, repo_id, "剧情正文。" * 80, turn=1)
+    assert "state_deltas" not in captured["system"]
+    assert "只输出 JSON 数组" in captured["system"]
 
 
 def test_roleplay先交付正文与插画但维护完成后才结束Agent回合(monkeypatch):
@@ -3535,3 +3769,424 @@ def test_answer_node_非用户停止的普通失败仍报回答失败(monkeypatc
     assert not out.get("_interrupted")
     assert (out.get("result_text") or "").startswith("回答失败")
     assert "502" in out["result_text"]
+
+
+# ── ② 纪要引用透出（2026-09-18）：召回引用行进 trace 列表 + 流式通道 ─────────
+
+def test_本轮引用行随roleplay_trace透出(monkeypatch, tmp_path):
+    """② 纪要引用透出：召回命中后「📖 本轮引用」行并入节点 trace（非流式随节点
+    trace 下发，无明细）；计数 = 纪要条数 + 知识条目行数。无命中 → 无引用行。"""
+    deps = ra.AgencyDeps(
+        chat_fn=lambda *a, **k: "[]", rng=random.Random(0), state_base=str(tmp_path),
+        curator_gate=1.0, index_fn=lambda text, title: None,
+    )
+
+    def fake_recall(*a, **k):
+        out = k.get("citations_out")
+        if out is not None:
+            out.extend([
+                {"turn": "4-6", "layer": 0, "overview": "温泉夜话坦白身世"},
+                {"turn": "10-12", "layer": 0, "overview": "雪山救援后态度转暖"},
+            ])
+        return "往事纪要候选"
+
+    monkeypatch.setattr(ag, "_agency_prelude", lambda ctx, text: (deps, 1, 0.0, ""))
+    monkeypatch.setattr(ag, "_agency_propose", lambda ctx, d, aff, wb, text="": ("", False))
+    monkeypatch.setattr(ag, "_agency_writeback",
+                        lambda ctx, d, reply, turn, aff, lost: (reply, [], {}, {}))
+    monkeypatch.setattr(ag, "_resolve_preset", lambda ctx, wb, **k: ([], None, False, [], []))
+    monkeypatch.setattr(ag, "_resolve_worldbook", lambda ctx, q: "")
+    monkeypatch.setattr(ag, "_rag_recall_text",
+                        lambda *a, **k: "- 知识条目甲\n- 知识条目乙")
+    monkeypatch.setattr(ag, "_table_recall_text", lambda *a, **k: "")
+    monkeypatch.setattr(ra, "recall_chronicle", fake_recall)
+    monkeypatch.setattr(aag, "_table_maintenance", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(ra, "maybe_illustrate", lambda *a, **k: None)
+    monkeypatch.setattr(ra, "maybe_summarize", lambda *a, **k: None)
+    monkeypatch.setattr(ra, "maybe_curate", lambda *a, **k: 0)
+
+    def fake_chat_stream(base, key, model, messages, on_delta, *, temperature, **kw):
+        return "<content>正文</content>"
+
+    monkeypatch.setattr(ag._llm, "chat_messages_stream", fake_chat_stream)
+    ctx = _card_ctx(output_dir=str(tmp_path), repo_id="work")
+    out = ag.roleplay_node({"user_text": "继续剧情", "images": [], "_ctx": ctx})
+    ag.join_maintenance_threads()
+
+    cite_lines = [ln for ln in (out.get("trace") or []) if ln.startswith("📖 本轮引用")]
+    assert cite_lines == ["📖 本轮引用：往事纪要 ×2 · 知识条目 ×2"]
+
+
+def test_本轮引用flush_并入trace且流式通道带明细():
+    pushed: list[dict] = []
+    ctx = {"stream_output": True, "stream_sink": pushed.append}
+    ctx["_rp_citations"] = {
+        "text": "📖 本轮引用：往事纪要 ×1 · 知识条目 ×0",
+        "detail": "[4-6] 温泉夜话坦白身世",
+    }
+    trace: list = ["🎭 剧情扮演中…"]
+    ag._rp_flush_citation_trace(ctx, trace)
+    assert trace == ["🎭 剧情扮演中…", "📖 本轮引用：往事纪要 ×1 · 知识条目 ×0"]
+    assert pushed == [{"trace": "📖 本轮引用：往事纪要 ×1 · 知识条目 ×0",
+                       "detail": "[4-6] 温泉夜话坦白身世"}]
+    assert "_rp_citations" not in ctx  # flush 消费掉暂存，不残留到下一轮
+
+
+def test_本轮引用flush_非流式只落trace_无暂存无操作():
+    trace: list = []
+    ag._rp_flush_citation_trace({}, trace)  # 无暂存：无操作
+    assert trace == []
+    ctx = {"_rp_citations": {"text": "📖 本轮引用：往事纪要 ×1", "detail": "d"}}
+    ag._rp_flush_citation_trace(ctx, trace)  # 非流式：只落 trace，不进通道
+    assert trace == ["📖 本轮引用：往事纪要 ×1"]
+
+
+def test_流式trace通知可携带明细_两参调用与旧线逐字节一致():
+    """② 纪要引用透出：_notify_stream_trace 新增可选 detail；两参旧调用线格式
+    必须与改动前逐字节一致（既有自愈提示锁不变）。"""
+    pushed: list[dict] = []
+    ctx = {"stream_output": True, "stream_sink": pushed.append}
+    ag._notify_stream_trace(ctx, "🔧 调用工具：x", detail='{"a":1}')
+    assert pushed == [{"trace": "🔧 调用工具：x", "detail": '{"a":1}'}]
+    ag._notify_stream_trace(ctx, "⚠️ 提示")
+    assert pushed[-1] == {"trace": "⚠️ 提示"}  # 无 detail 不携带（旧前端宽松兼容）
+
+
+# ── 高潮点判据档（2026-09-18）：四态降级 + 缺块路径短路语义 ──────────────────────
+# 判据档**常开**（用户定案去掉启用开关）：任何一步不成立都必须返回 ""，让调用方短路到
+# 现有中文词表。该短路是本层的**失败上界**——最坏情况就是回到词表档，不会中断出图。
+
+_ANCHOR_CLEAN = "前文第一段。\n\n浑身无力的宥夏靠在公告栏上。\n\n后文收束段。"
+_ANCHOR_OK_RAW = (
+    '{"anchor": "浑身无力的宥夏靠在公告栏上。", "composition": "中景", '
+    '"subjects": ["宥夏"], "reason": "事后定型态"}'
+)
+
+
+def _rubric_on():
+    """monkeypatch 用：把「用户判据」塞进 illustration_prompt_store 的生效入口。"""
+    return lambda: "用户判据"
+
+
+def _trace_capture(monkeypatch):
+    from app.services import run_trace
+
+    trace: list = []
+    monkeypatch.setattr(run_trace, "emit", lambda ctx, event, **data: trace.append((event, data)))
+    return trace
+
+
+def test_判据为空时零调用且短路回词表(monkeypatch):
+    """防御性闸：store 侧保证判据非空，但一旦拿不到判据也绝不能去调模型。"""
+    from app.services import illustration_prompt_store
+
+    monkeypatch.setattr(illustration_prompt_store, "effective_climax_anchor_rubric", lambda: "")
+    monkeypatch.setattr(aag._llm, "chat", lambda *a, **k: pytest.fail("无判据不得发起调用"))
+    trace = _trace_capture(monkeypatch)
+
+    assert aag._illustration_anchor_intent(_ctx(), _ANCHOR_CLEAN, {"present": ["宥夏"]}) == ("", {})
+    assert trace[-1][1]["status"] == "skipped"
+    assert trace[-1][1]["reason"] == "rubric_empty"
+
+
+def test_判据空正文早退留痕(monkeypatch):
+    from app.services import illustration_prompt_store
+
+    monkeypatch.setattr(illustration_prompt_store, "effective_climax_anchor_rubric", _rubric_on())
+    monkeypatch.setattr(aag._llm, "chat", lambda *a, **k: pytest.fail("正文为空不得发起调用"))
+    trace = _trace_capture(monkeypatch)
+
+    assert aag._illustration_anchor_intent(_ctx(), "   ", {"present": []}) == ("", {})
+    assert trace[-1][1]["status"] == "skipped"
+    assert trace[-1][1]["reason"] == "narrative_empty"
+
+
+def test_判据缺模型配置静默早退(monkeypatch):
+    from app.services import illustration_prompt_store
+
+    monkeypatch.setattr(illustration_prompt_store, "effective_climax_anchor_rubric", _rubric_on())
+    monkeypatch.setattr(aag._llm, "chat", lambda *a, **k: pytest.fail("缺配置不得发起调用"))
+    trace = _trace_capture(monkeypatch)
+
+    assert aag._illustration_anchor_intent({}, _ANCHOR_CLEAN, {"present": []}) == ("", {})
+    assert trace[-1][1]["status"] == "skipped"
+    assert trace[-1][1]["reason"] == "model_config_missing"
+
+
+def test_判据调用异常留痕并降级(monkeypatch):
+    from app.services import illustration_prompt_store
+
+    def boom(*_a, **_k):
+        raise RuntimeError("上游 400：content filter")
+
+    monkeypatch.setattr(illustration_prompt_store, "effective_climax_anchor_rubric", _rubric_on())
+    monkeypatch.setattr(aag._llm, "chat", boom)
+    trace = _trace_capture(monkeypatch)
+
+    assert aag._illustration_anchor_intent(_ctx(), _ANCHOR_CLEAN, {"present": []}) == ("", {})
+    data = trace[-1][1]
+    assert data["status"] == "error" and data["error_type"] == "RuntimeError"
+    assert "400" in data["error_message"]
+
+
+def test_判据anchor不落文判无效(monkeypatch):
+    from app.services import illustration_prompt_store
+
+    monkeypatch.setattr(illustration_prompt_store, "effective_climax_anchor_rubric", _rubric_on())
+    monkeypatch.setattr(
+        aag._llm, "chat",
+        lambda *a, **k: '{"anchor": "她心满意足地笑了。", "reason": "编的"}',
+    )
+    trace = _trace_capture(monkeypatch)
+
+    assert aag._illustration_anchor_intent(_ctx(), _ANCHOR_CLEAN, {"present": []}) == ("", {})
+    data = trace[-1][1]
+    assert data["status"] == "invalid" and data["parsed"] is True
+    assert data["anchor_candidate"] == "她心满意足地笑了。"
+
+
+def test_判据命中时带只读合同且必带超时(monkeypatch):
+    """验收两条红线：system = 用户判据 + 程序侧只读合同；调用必带超时。"""
+    from app.services import illustration_prompt_store, scene_illustration as si
+
+    monkeypatch.setattr(illustration_prompt_store, "effective_climax_anchor_rubric", _rubric_on())
+    captured: dict = {}
+
+    def fake_chat(base, key, model, system, user, **kw):
+        captured.update(system=system, user=user, timeout=kw.get("timeout"))
+        return _ANCHOR_OK_RAW
+
+    monkeypatch.setattr(aag._llm, "chat", fake_chat)
+    trace = _trace_capture(monkeypatch)
+
+    anchor, detail = aag._illustration_anchor_intent(
+        _ctx(), _ANCHOR_CLEAN, {"present": ["宥夏"]},
+    )
+    assert anchor == "浑身无力的宥夏靠在公告栏上。"
+    assert detail["subjects"] == ["宥夏"]
+    assert captured["system"].startswith("用户判据")
+    assert si.ANCHOR_INTENT_CONTRACT in captured["system"]
+    assert captured["timeout"] is not None and captured["timeout"] > 0
+    assert "在场角色：宥夏" in captured["user"]
+    data = trace[-1][1]
+    assert data["status"] == "ok" and data["subjects"] == ["宥夏"]
+
+
+def _anchor_sig(**over) -> dict:
+    sig = {
+        "visible_story": _ANCHOR_CLEAN, "present": ["宥夏"], "at_climax": True,
+        "character_encounter": False, "encounter_anchor": "",
+        "encounter_narrative": "", "encounter_actors": [],
+        "local_scene_fallback": False, "missing_plan_fallback": True,
+        "first_story_reply": False, "wardrobe": "", "locale": "",
+    }
+    sig.update(over)
+    return sig
+
+
+def _anchor_pool() -> dict:
+    return {
+        "known": [], "actor_values": [], "absent": [],
+        "climax_paragraph": "", "request_actors": [], "request_appearance": "",
+    }
+
+
+def _run_scene_target(monkeypatch, judge_result):
+    from app.services import scene_illustration as si
+
+    intent = judge_result if isinstance(judge_result, tuple) else (judge_result, {})
+    monkeypatch.setattr(
+        aag, "_illustration_anchor_intent",
+        lambda ctx, clean, sig: intent,
+    )
+    out = aag._wb_comfy_scene_target(
+        {}, "", {}, _ANCHOR_CLEAN, _anchor_sig(), _anchor_pool(),
+        prompt_override="", motion=0, user_text="",
+    )
+    return out, si.fallback_illustration_anchor(_ANCHOR_CLEAN)
+
+
+def test_缺块路径判据返回空时锚点仍是词表结果(monkeypatch):
+    """失败上界：判据档拿不到结果时，缺块路径的锚点与接入判据档之前逐字一致。"""
+    out, keyword = _run_scene_target(monkeypatch, "")
+    assert out["requested_anchor"] == keyword
+
+
+def test_缺块路径判据命中时优先于词表(monkeypatch):
+    out, keyword = _run_scene_target(monkeypatch, "浑身无力的宥夏靠在公告栏上。")
+    assert out["requested_anchor"] == "浑身无力的宥夏靠在公告栏上。"
+    assert out["requested_anchor"] != keyword  # 词表本来选的是别的段
+
+
+# 仲裁机（scene_illustration.resolve_illustration_anchor）用的夹具：第 3 段词表评分
+# = 8（决战）+4（转身）+4（回眸）= 16，第 2 段 = 0 ⇒ 差 ≥3，仲裁必然推翻判据锚点。
+_ARB_TEXT = (
+    "第一段只是铺陈。\n\n判据档选的这一句很平淡。\n\n他在决战前转身，回眸看了她一眼。"
+)
+_ARB_JUDGE = "判据档选的这一句很平淡。"
+_ARB_KEYWORD = "他在决战前转身，回眸看了她一眼。"
+
+
+def _run_scene_target_on(monkeypatch, text, judge_result, **sig_over):
+    from app.services import scene_illustration as si
+
+    intent = judge_result if isinstance(judge_result, tuple) else (judge_result, {})
+    monkeypatch.setattr(
+        aag, "_illustration_anchor_intent",
+        lambda ctx, clean, sig: intent,
+    )
+    out = aag._wb_comfy_scene_target(
+        {}, "", {}, text, _anchor_sig(visible_story=text, **sig_over), _anchor_pool(),
+        prompt_override="", motion=0, user_text="",
+    )
+    return out, si.fallback_illustration_anchor(text)
+
+
+def test_缺块路径的判据锚点也要过既有仲裁机(monkeypatch):
+    """接线一致性：缺块路径（76% 回合）的判据锚点必须与「同轮有计划」那条支路一样，
+    过一遍 `resolve_illustration_anchor`。
+
+    2026-09-18 真机复跑实锤（`deepseek-v4-flash-0731`，4 run × 3 采样）：缺块路径原先整条
+    绕过了这台仲裁机 ⇒ 同一三档降级链，有计划那条支路有纠偏网、缺块这条没有，
+    导致判据档在 L1/L3 明显劣于词表档（L1 距离 55.3 vs 35、L3 19.0 vs 12）。
+    接上仲裁后两段改善、且 L2 完美选点零误伤（推翻 0/12）。
+    """
+    out, keyword = _run_scene_target_on(monkeypatch, _ARB_TEXT, _ARB_JUDGE)
+    assert keyword == _ARB_KEYWORD
+    assert out["requested_anchor"] == keyword  # 被仲裁机推翻 ⇒ 改用词表档
+    assert out["requested_anchor"] != _ARB_JUDGE
+
+
+def test_初遇锚点不过仲裁机(monkeypatch):
+    """边界锁：新角色登场的首帧锚点是**有意指定**的画面，不得过仲裁机。
+
+    仲裁机带「高潮纠偏」语义（`fallback_score >= requested_score + 3` 就推翻），
+    把它套到首帧上会把画面从开篇拉到高潮段——这正是 `first_frame_anchor_offset`
+    当初存在的原因。所以接线只扩到「缺块 + 判据」这条支路，不就手扩到 encounter 支路。
+    """
+    out, _ = _run_scene_target_on(
+        monkeypatch, _ARB_TEXT, "",
+        character_encounter=True, encounter_anchor=_ARB_JUDGE,
+        encounter_narrative=_ARB_TEXT, encounter_actors=["宥夏"],
+    )
+    assert out["requested_anchor"] == _ARB_JUDGE
+    assert out["requested_anchor"] != _ARB_KEYWORD
+
+
+def test_缺块路径判据档主体名驱动取材扩窗(monkeypatch):
+    """A′ 接线（§7.3 第 3/5 条）：判据档的 `subjects` 必须回传到取材层。
+
+    锚点句「那么，我该选哪一边呢？」不含任何主体名 ⇒ 取材必须取回场景边界后的
+    整段画面，而不是只给这一句台词。这条同时锁住「detail 被丢掉」的旧行为不再回来。
+    """
+    text = "\n\n".join([
+        "---",
+        "世熙把双手贴到墙上，把重心压得很低。",
+        "宥夏也把重心压低，贴住墙面上前。",
+        "那么，我该选哪一边呢？",
+    ])
+    judged = ("那么，我该选哪一边呢？", {"subjects": ["世熙", "宥夏"], "composition": "双人同框"})
+
+    out, _ = _run_scene_target_on(
+        monkeypatch, text, judged, present=["世熙", "宥夏"],
+    )
+
+    assert out["requested_anchor"] == judged[0]
+    assert "世熙把双手贴到墙上" in out["scene_narrative"]
+    assert "宥夏也把重心压低" in out["scene_narrative"]
+
+
+def test_缺块路径判据档无主体名时取材维持旧行为(monkeypatch):
+    """判据档只回 anchor、`subjects` 为空 ⇒ 取材层无信号 ⇒ 与接入 A′ 之前逐字一致。"""
+    text = "\n\n".join([
+        "---",
+        "世熙把双手贴到墙上，把重心压得很低。",
+        "那么，我该选哪一边呢？",
+    ])
+
+    out, _ = _run_scene_target_on(
+        monkeypatch, text, ("那么，我该选哪一边呢？", {}), present=["世熙"],
+    )
+
+    assert out["requested_anchor"] == "那么，我该选哪一边呢？"
+    assert out["scene_narrative"] == "那么，我该选哪一边呢？"
+
+
+def test_缺块路径词表档用在场角色全集驱动扩窗(monkeypatch):
+    """§7.3 第 4 条词表档口径：判据档拿不到结果时，主体名集合回退 `sig["present"]`。
+
+    夹具里词表档选中的锚点「她缓缓转身回眸。」不含任何在场角色名 ⇒ 扩窗取回前一段。
+    """
+    text = "\n\n".join([
+        "---",
+        "世熙把双手贴到墙上，把重心压得很低。",
+        "她缓缓转身回眸。",
+    ])
+
+    out, _ = _run_scene_target_on(
+        monkeypatch, text, "", present=["世熙", "宥夏"],
+    )
+
+    assert out["requested_anchor"] == "她缓缓转身回眸。"
+    assert "世熙把双手贴到墙上" in out["scene_narrative"]
+
+
+def _run_scene_target_ctx(monkeypatch, text, judge_result, ctx, pool=None, **sig_over):
+    """带 ctx 的 `_wb_comfy_scene_target` 夹具（手选人称 / 主人公性别都从 ctx 进）。"""
+    intent = judge_result if isinstance(judge_result, tuple) else (judge_result, {})
+    monkeypatch.setattr(aag, "_illustration_anchor_intent", lambda ctx, clean, sig: intent)
+    return aag._wb_comfy_scene_target(
+        ctx, "", {}, text, _anchor_sig(visible_story=text, **sig_over),
+        pool if pool is not None else _anchor_pool(),
+        prompt_override="", motion=0, user_text="",
+    )
+
+
+def test_手选人称三档落到画面人称(monkeypatch):
+    """第 23 刀：「多元数据插入」面板的人称按钮组必须真正落到画面人称，并留冲突痕。
+
+    用户 2026-09-20 定案：自动档＝按锚点段自动判（旧行为不变）；手选合法档位 ⇒ 手选优先；
+    手选与自动不一致时 `conflict=True` 留痕供审计。
+    """
+    text = "\n\n".join(["---", "他站在窗前，望着雨幕。", "雨水顺着玻璃滑落。"])
+    auto = _run_scene_target_ctx(monkeypatch, text, "", {})
+    first = _run_scene_target_ctx(monkeypatch, text, "", {"illustration_viewpoint": "first_person"})
+    third = _run_scene_target_ctx(monkeypatch, text, "", {"illustration_viewpoint": "third_person"})
+
+    assert first["viewpoint"] == "first_person"
+    assert first["viewpoint_detail"]["source"] == "override"
+    assert first["viewpoint_detail"]["auto"] == auto["viewpoint"]
+    assert first["viewpoint_detail"]["conflict"] is (auto["viewpoint"] != "first_person")
+    assert third["viewpoint"] == "third_person"
+    assert third["viewpoint_detail"]["source"] == "override"
+    # 自动档 / 非法档位 ⇒ 与不传 override 逐字节一致（零回归）
+    assert auto["viewpoint_detail"] == _run_scene_target_ctx(
+        monkeypatch, text, "", {"illustration_viewpoint": ""},
+    )["viewpoint_detail"]
+
+
+def test_主人公性别注入到外观段(monkeypatch):
+    """第 23 刀：主人公性别作为**画面事实**注入外观段（世界书解析不到 ⇒ 通用表列兜底）。
+
+    只对主人公注入；主人公不在本帧主体里（第一人称 ⇒ 叙事者不占画面）⇒ 连读都不读。
+    """
+    text = "\n\n".join(["---", "甲站在窗前，望着雨幕。", "雨水顺着玻璃滑落。"])
+    monkeypatch.setattr(aag, "_repo_tables_for_facts", lambda ctx, repo_id: [
+        {"columns": ["姓名", "性别", "外貌特征"], "rows": [["甲", "男", "高大"]]},
+    ])
+
+    out = _run_scene_target_ctx(
+        monkeypatch, text, "",
+        {"user_name": "甲", "_illustration_visual_profiles": "甲：高大体格。"},
+        pool=dict(_anchor_pool(), request_actors=["甲"]),
+    )
+    assert "甲" in out["request_actors"]
+    assert "【性别】男" in out["request_appearance"]
+
+    # 主人公不在本帧主体（第一人称 ⇒ 叙事者不占画面）⇒ 不注入
+    out2 = _run_scene_target_ctx(
+        monkeypatch, text, "",
+        {"user_name": "甲", "_illustration_visual_profiles": "乙：矮小。"},
+        pool=dict(_anchor_pool(), request_actors=["乙"]),
+    )
+    assert "【性别】" not in out2["request_appearance"]

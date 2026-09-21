@@ -8,10 +8,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app.services import (
-    chat_snapshot, narrative_memory, narrative_store, structured_output, table_store, table_update,
+    chat_snapshot, narrative_memory, narrative_store, repo_meta, structured_output,
+    table_store, table_update,
 )
 from app.services.structured_contracts import ManualFillResult
-from app.services.pathnames import safe_seg
 
 CHRONICLE_UID = "__chronicle__"
 # 2026-09-13 补数实锤：不传 max_tokens 时网关走自家默认输出上限，一批多表 ops+纪要的
@@ -147,7 +147,7 @@ def dialogue_turns(messages: list[Any]) -> list[DialogueTurn]:
 
 
 def _progress_path(base: str, repo_id: str) -> Path:
-    return Path(base) / safe_seg(repo_id, strip=False) / PROGRESS_FILE
+    return repo_meta.engine_repo_dir(base, repo_id) / PROGRESS_FILE
 
 
 def load_progress(base: str, repo_id: str) -> dict[str, int]:

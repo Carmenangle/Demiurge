@@ -130,6 +130,9 @@ export interface MediaInsertPreset {
   templateId: string;       // 图片工作流模板 id（空=未预设，不异步出图）
   loraMode?: "none" | "single" | "multi"; // 无 LoRA / 高潮角色栈或风格兜底 / 默认风格+高潮角色栈
   appearanceSource?: "worldbook" | "character_card"; // 稳定外貌取世界书角色条目或绑定角色卡
+  // 画面人称（2026-09-20）：手选优先于后端自动判定（按锚点段）。空/未设 = 自动。
+  // 第一人称 ⇒ 叙事者「我」不占画面；第三人称 ⇒ 主人公算一个主体。
+  viewpoint?: "first_person" | "third_person";
   promptProfile?: string; // 存储原样（旧数据可能是已下线的 krea2）；使用处经 normalizePromptProfile 归一
   qualityPrompt?: string;   // Anima 固定质量行；空则使用后端 profile 默认值
   negativePrompt?: string;  // 独立负面提示词；仅模板暴露 negative_prompt 时注入

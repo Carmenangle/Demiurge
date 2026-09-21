@@ -87,6 +87,9 @@ class RunContext:
                                 # produce 层据此编译正片/转场 video_request（W3 前端 2 任务排队前置）
     prompt_profile: str = "anima_tags"  # 当前作品自动插画提示词模式，由主 Roleplay 同轮生成最终提示词（2026-08-31 默认切换自 krea2）
     appearance_source: str = "worldbook"  # worldbook / character_card
+    # 画面人称手选（2026-09-20，UI＝多元数据插入面板按钮组）："" = 自动判定（按锚点段），
+    # first_person / third_person = 用户手选优先（`scene_illustration.frame_viewpoint` 的 override）。
+    illustration_viewpoint: str = ""
     character_base_images: dict = field(default_factory=dict, compare=False)  # ⑥ 角色名→底图（gpt-image 系无 LoRA，按在场角色取底图锁一致性）
     illustration_actor_names: list[str] = field(default_factory=list, compare=False)  # 自动插画可识别的已配置角色名
     style_base_image: str = ""    # ⑥ 无角色底图时的兜底风格底图（gpt-image 系）
@@ -145,6 +148,7 @@ class RunContext:
             "video_mode": self.video_mode,
             "prompt_profile": self.prompt_profile,
             "appearance_source": self.appearance_source,
+            "illustration_viewpoint": self.illustration_viewpoint,
             "character_base_images": self.character_base_images,
             "illustration_actor_names": self.illustration_actor_names,
             "style_base_image": self.style_base_image,

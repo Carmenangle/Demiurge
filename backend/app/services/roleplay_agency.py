@@ -217,6 +217,9 @@ def state_instruction() -> str:
         "角色名必须是剧情角色本人：禁止用角色卡名称/卡面标题代替角色名；"
         "第一人称的「我/主角/你/玩家」不是剧情角色，禁止作为角色名写入状态表，"
         "主角自身的伤势、情绪等状态只写进状态栏 <status>，不写状态表。"
+        "状态栏 <status> 的 [好感] 行数字必须逐字沿用注入的【当前状态】块中的好感度现值，"
+        "禁止沿用历史楼层旧数字或自编数值；本轮好感变化只通过 <状态更新> 的 add 增量表达"
+        "（增量相对现值，不是改后的总数）。"
         "每条必须带 evidence 引用本轮剧情依据；本轮无变化则输出空数组 []。"
         "这段仅供系统解析，不要在正文里复述。"
     )
@@ -394,7 +397,10 @@ def writeback(
         character_state.apply_deltas(st, deltas)
         dirty = True
     if snapshot.strip():
-        st.快照 = character_state.Snapshot(snapshot.strip(), turn)
+        # 落盘前对账（2026-09-18 双账本对齐）：先应用 delta 再用引擎现值覆盖快照
+        # [好感] 行数字——重注入与漏战报兜底（ensure_status_snapshot）拿到的都是真源。
+        st.快照 = character_state.Snapshot(
+            character_state.reconcile_snapshot_affinity(st, snapshot.strip()), turn)
         dirty = True
     if dirty:
         character_state.save_state(deps.state_base, st)
@@ -467,7 +473,8 @@ def maybe_illustrate(
 # ── 纪要记忆（Phase C）：召回（0 LLM）+ 门控抽取&压缩（每 N 轮一次额外 LLM）──
 
 def recall_chronicle(deps: AgencyDeps, *, repo_id: str, query: str, k: int = 10,
-                     rag_text: str = "", actors: list[str] | None = None) -> str:
+                     rag_text: str = "", actors: list[str] | None = None,
+                     citations_out: list | None = None) -> str:
     """按检索词召回往事纪要与 RAG 命中，组装为主 Roleplay 请求的候选记忆块。
 
     本函数 0 LLM，不生成、精选或改写候选；候选与 GrayWill 预设、世界书、对话历史、
@@ -475,6 +482,9 @@ def recall_chronicle(deps: AgencyDeps, *, repo_id: str, query: str, k: int = 10,
     FTS5 trigram 旁路召回，与 Chroma 语义检索（含检索表行）互补。
     actors：当前出场人物，召回排序先人物名相关、再按时间新→旧。
     rag_text：调用方预先从 rag_store 召回的相关条目（知识库 + 检索表行），拼在纪要之后一起注入。
+    citations_out：② 纪要引用透出（2026-09-18）。传入 list 时回填结构化引用
+    （turn 区间 / layer / overview 简要概览，按回合升序，与 render_recall 同序）；
+    不传零开销，旧调用面零改动。召回失败/无命中 → 回填空列表。
     """
     if not (repo_id and query.strip()):
         return rag_text.strip()
@@ -488,6 +498,13 @@ def recall_chronicle(deps: AgencyDeps, *, repo_id: str, query: str, k: int = 10,
         )
     except Exception:  # noqa: BLE001  召回失败不阻断叙述
         hits = []
+    if citations_out is not None:
+        citations_out.clear()
+        citations_out.extend([
+            {"turn": f"{e.turn_start}-{e.turn_end}", "layer": e.layer,
+             "overview": e.short_overview()}
+            for e in sorted(hits, key=lambda x: (x.turn_start, x.turn_end))
+        ])
     chronicle = narrative_memory.render_recall(hits)
     if rag_text.strip():
         block = "【相关知识/表格条目（按剧情召回，供参考勿逐字复述）】\n" + rag_text.strip()

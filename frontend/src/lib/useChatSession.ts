@@ -184,6 +184,9 @@ export function useChatSession(deps: ChatSessionDeps) {
   const cardNames = repo?.cardNames?.length ? repo.cardNames : (repo?.cardName ? [repo.cardName] : []);
   const openingCardName = repo?.openingCardName || repo?.cardName || cardNames[0] || "";
   const appearanceSource = mediaPreset?.appearanceSource === "character_card" ? "character_card" : "worldbook";
+  // 画面人称手选（2026-09-20）：预设里存 first_person / third_person；空 = 交给后端自动判定。
+  const illustrationViewpoint = mediaPreset?.viewpoint === "first_person"
+    || mediaPreset?.viewpoint === "third_person" ? mediaPreset.viewpoint : "";
   const modelProxies = {
     chatProxyUrl: resolveModelProxy(chat.proxyMode, globalProxyAddress(settings), settings.proxyEnabled),
     genProxyUrl: resolveModelProxy(genModel.proxyMode, globalProxyAddress(settings), settings.proxyEnabled),
@@ -282,6 +285,7 @@ export function useChatSession(deps: ChatSessionDeps) {
     videoMode: mediaPreset?.firstlast ? "firstlast" : mediaPreset?.videoMode,
     promptProfile,
     appearanceSource,
+    illustrationViewpoint,
     characterBaseImages,
     illustrationActorNames,
     styleBaseImage,

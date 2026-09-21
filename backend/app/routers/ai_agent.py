@@ -84,6 +84,7 @@ class MultiAgentRequest(ImageAgentRequest):
     video_mode: Literal["", "climax", "firstlast"] = ""  # 视频模式（缺省 climax），前端 preset.videoMode 透传；produce 层据此编译正片/转场 video_request
     prompt_profile: str = "anima_tags"
     appearance_source: Literal["worldbook", "character_card"] = "worldbook"
+    illustration_viewpoint: Literal["", "first_person", "third_person"] = ""  # 画面人称手选（「多元数据插入」面板按钮组；空=按锚点段自动判定）
     character_base_images: dict[str, str] = {}  # ⑥ 角色名→底图（gpt-image 系按在场角色取底图锁一致性）
     illustration_actor_names: list[str] = []  # 自动插画可从正文机械识别的已配置角色名
     style_base_image: str = ""  # ⑥ 无角色底图时的兜底风格底图（gpt-image 系）

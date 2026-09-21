@@ -104,3 +104,14 @@ _tmp/
 htmlcov/
 # .dsh-meow = 另一套本地 Agent 的记忆库（memory.db/日志/sessions），仓库公开，禁止入库
 .dsh-meow/
+
+# === 插画线内部开发文档（走查正文／分轮真机快照／anchor 设计／window-handoff）不入远端 ===
+# 与上面 tech-manual / handoff / plan / memory 同一口径：内部技术资产不进公开仓库。
+docs/illustration-*.md
+
+# === 探针草稿与产物（草稿不入库；探针脚本 probe_*.py 例外，那是可复用的正式工具）===
+_lsroot.txt
+backend/_*.txt
+backend/_*.json
+backend/_*.py
+scripts/_*.py

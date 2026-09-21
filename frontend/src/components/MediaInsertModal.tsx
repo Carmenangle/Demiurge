@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Settings } from "lucide-react";
 import type { Template } from "../api/workflows";
 import {
   SEMANTIC_PROMPT, SEMANTIC_NEGATIVE_PROMPT, SEMANTIC_LORA_NAME, SEMANTIC_BASE_IMAGE,
@@ -13,6 +14,7 @@ import type { MediaInsertPreset, CharacterLoraBinding, CharacterVoiceBinding } f
 import {
   normalizePromptProfile, PROMPT_PROFILE_OPTIONS, workflowFieldBinding,
 } from "../lib/imagePromptProfiles";
+import { IllustrationPromptModal } from "./IllustrationPromptModal";
 
 interface Props {
   templates: Template[];
@@ -83,6 +85,11 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
   const [appearanceSource, setAppearanceSource] = useState<"worldbook" | "character_card">(
     preset?.appearanceSource === "character_card" ? "character_card" : "worldbook",
   );
+  // 画面人称（2026-09-20）："" = 自动（后端按锚点段判）；手选后优先于自动判定。
+  const [viewpoint, setViewpoint] = useState<"" | "first_person" | "third_person">(
+    preset?.viewpoint === "first_person" || preset?.viewpoint === "third_person"
+      ? preset.viewpoint : "",
+  );
   const [promptProfile, setPromptProfile] = useState(() => normalizePromptProfile(preset?.promptProfile));
   const [qualityPrompt, setQualityPrompt] = useState(preset?.qualityPrompt || "");
   const [negativePrompt, setNegativePrompt] = useState(preset?.negativePrompt || "");
@@ -108,12 +115,17 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
   const [loraLoadError, setLoraLoadError] = useState("");
   const [loraReloadKey, setLoraReloadKey] = useState(0);
   const [uploading, setUploading] = useState("");  // 正在上传底图的行 key（""=无）
+  // 提示词设置（右上角齿轮）：控制给 LLM 看的提示词。当前只开放高潮点判据一项。
+  const [promptSettingsOpen, setPromptSettingsOpen] = useState(false);
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    // 提示词设置子层打开时 Esc 只关子层（与 PresetModal 的嵌套确认框同口径）。
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !promptSettingsOpen) onClose();
+    };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, promptSettingsOpen]);
 
   useEffect(() => {
     let active = true;
@@ -249,6 +261,7 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
       templateId: enableImage ? templateId : "",
       loraMode: enableImage ? loraMode : undefined,
       appearanceSource: enableImage ? appearanceSource : undefined,
+      viewpoint: enableImage && viewpoint ? viewpoint : undefined,
       promptProfile: enableImage ? promptProfile : undefined,
       qualityPrompt: enableImage && promptProfile === "anima_tags" ? qualityPrompt.trim() : undefined,
       negativePrompt: enableImage && promptProfile === "anima_tags" ? negativePrompt.trim() : undefined,
@@ -269,9 +282,21 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
   };
 
   return (
+    <>
     <div className="modal-mask" onClick={onClose}>
       <div className="modal" style={{ width: 560, maxWidth: "94vw", maxHeight: "86vh", overflowY: "auto" }} onClick={(e) => e.stopPropagation()}>
-        <h3>多元数据插入</h3>
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10 }}>
+          <h3 style={{ margin: 0 }}>多元数据插入</h3>
+          <button
+            type="button"
+            className="btn"
+            title="提示词设置：控制给 LLM 看的提示词"
+            aria-label="提示词设置"
+            onClick={() => setPromptSettingsOpen(true)}
+          >
+            <Settings size={15} />
+          </button>
+        </div>
         <p style={{ color: "#666", marginTop: 0, fontSize: 13 }}>
           勾选要随剧情自动生成的内容类型（可多选）。保存后会自动开启「剧情自动生成」，剧情高潮点按勾选类型分别生成对应内容。
         </p>
@@ -315,6 +340,27 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
             ? "从当前小仓库世界书中命中的角色视觉条目读取外貌。"
             : "从本作品绑定角色卡的描述读取外貌，适合纯机制世界书。"}
         </p>
+        <div style={{ marginBottom: 12 }}>
+          <span style={{ display: "block", marginBottom: 4, fontSize: 13 }}>画面人称</span>
+          <div className="lora-mode-switch" role="group" aria-label="画面人称">
+            {([
+              ["", "自动"], ["first_person", "第一人称"], ["third_person", "第三人称"],
+            ] as const).map(([value, label]) => (
+              <button
+                key={value || "auto"}
+                type="button"
+                className={`btn${viewpoint === value ? " primary" : ""}`}
+                aria-pressed={viewpoint === value}
+                onClick={() => setViewpoint(value)}
+              >{label}</button>
+            ))}
+          </div>
+          <p className="bind-hint" style={{ margin: "5px 0 0" }}>
+            {viewpoint === "" && "自动：按判据锚点段判人称；判不出时按第一人称处理。"}
+            {viewpoint === "first_person" && "第一人称：叙事者「我」不占画面（身体局部只在原文写明时才入画）。"}
+            {viewpoint === "third_person" && "第三人称：主人公算一个主体，按世界书条目取主人公性别入画。"}
+          </p>
+        </div>
         <div style={{ marginBottom: 12 }}>
           <span style={{ display: "block", marginBottom: 4, fontSize: 13 }}>LoRA 模式</span>
           <div className="lora-mode-switch" role="group" aria-label="LoRA 模式">
@@ -647,5 +693,9 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
         </div>
       </div>
     </div>
+    {promptSettingsOpen && (
+      <IllustrationPromptModal onClose={() => setPromptSettingsOpen(false)} />
+    )}
+    </>
   );
 }

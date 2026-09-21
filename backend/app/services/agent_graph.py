@@ -1542,6 +1542,7 @@ def _rp_recall_memory(ctx: dict, *, deps, text: str) -> tuple[str, str, str]:
 
     返回 (repo_id, table_recall, recall)；`retrieval_query` / `rag_text` 只在本段内用，不外传。
     逐字自 `_rp_inject_agency_context` 搬移。
+    ② 纪要引用透出（2026-09-18）：命中时把「本轮引用」行+明细暂存 `ctx["_rp_citations"]`。
     """
     from app.services import roleplay_agency
     repo_id = ctx.get("repo_id") or ctx.get("thread_id") or ""
@@ -1551,21 +1552,50 @@ def _rp_recall_memory(ctx: dict, *, deps, text: str) -> tuple[str, str, str]:
     table_recall = _table_recall_text(ctx, repo_id, retrieval_query)
     # Recall 只做检索，不独立调 LLM：往事纪要（人物相关优先，简要 Top-10）
     # + 知识库/检索表候选原样并入 GrayWill 主请求，由主模型结合世界书、历史与本轮输入一次判断并生成。
+    citations: list = []
     recall = roleplay_agency.recall_chronicle(
         deps, repo_id=repo_id, query=retrieval_query, rag_text=rag_text,
         actors=[
             name for name in (ctx.get("illustration_actor_names") or [])
             if name and name in retrieval_query
         ] or ([ctx.get("card_name")] if ctx.get("card_name") else []),
+        citations_out=citations,
     )
     if recall:
         _probe.info("🔎[RAG召回] repo=%s 注入%d字:\n%s", repo_id, len(recall), recall[:800])
         run_trace.emit(ctx, "rag.injected", status="ok", content=recall,
                        char_count=len(recall))
+        # ② 纪要引用透出（2026-09-18）：本函数拿不到 trace 列表引用 → 行+明细暂存 ctx，
+        # 由 roleplay_node 统一经 _rp_flush_citation_trace 并入 trace/流式通道。
+        rag_hits = sum(
+            1 for line in rag_text.splitlines() if line.strip().startswith("-"))
+        ctx["_rp_citations"] = {
+            "text": f"📖 本轮引用：往事纪要 ×{len(citations)} · 知识条目 ×{rag_hits}",
+            "detail": "\n".join(
+                [f"[{c['turn']}] {c['overview']}" for c in citations]
+                + ([f"【相关知识/检索表】{rag_hits} 条"] if rag_hits else [])),
+        }
     else:
         _probe.info("🔎[RAG召回] repo=%s 无命中（本轮未注入记忆）", repo_id)
         run_trace.emit(ctx, "rag.injected", status="empty", content="", char_count=0)
     return repo_id, table_recall, recall
+
+
+def _rp_flush_citation_trace(ctx: dict, trace: list) -> None:
+    """② 纪要引用透出（2026-09-18）：把召回阶段暂存的「本轮引用」行并入 trace 列表，
+    并推流式通道（带 detail，前端执行面板折叠卡展开明细）。
+
+    流式模式两路都有（streamed_result 抑制 trace 重放，行不重复下发）；非流式模式
+    只落 trace 列表（节点完成时随 trace 下发，无明细）。无暂存/空行 → 无操作。
+    """
+    cite = ctx.pop("_rp_citations", None)
+    if not cite:
+        return
+    line = str(cite.get("text") or "")
+    if not line:
+        return
+    trace.append(line)
+    _notify_stream_trace(ctx, line, str(cite.get("detail") or ""))
 
 
 def _rp_compile_continuity(
@@ -1782,6 +1812,7 @@ def roleplay_node(state: AgentState) -> dict:
                 ctx, deps=deps, turn=turn, st_block=st_block, text=text, base=base,
                 directive=directive, dynamic_parts=dynamic_parts,
             )
+            _rp_flush_citation_trace(ctx, trace)  # ② 纪要引用透出（2026-09-18）：引用行进 trace/流式
         # 收口：状态块/纪要召回/裁定指令等在 substitute 之后才生成（且预设分支根本没替换
         # base），可能含 {{user}}/{{char}}（如状态字段名「对{{user}}态度」、快照）。统一在此对
         # 最终**两段**各替换一次，缺省 user 回退「我」（用户没填人设时也不让字面 {{user}} 漏进

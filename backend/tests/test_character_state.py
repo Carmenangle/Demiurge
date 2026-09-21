@@ -412,4 +412,79 @@ def test_人为编辑的表格文本原样保留不清洗():
     ], turn=3, source=cs.SRC_USER)
 
     assert deltas[0].value == "@保@留@"
-    assert deltas[0].evidence == "@原@样@"
+
+
+# ── 快照好感行机械对账（2026-09-18 用户实锤：双账本分叉）──────────────────
+# status 行是模型自述（快照存原样）、引擎数值是 delta 累加，两套账漂移后快照每轮
+# 重注入被模型照抄 → 对话里 [好感] 永远停在旧自述值。对账＝注入/落盘前用引擎真源
+# 覆盖行内数字。
+
+
+def _affinity_state() -> cs.CharacterState:
+    st = cs.CharacterState(card_name="凌霄仙母录", repo_id="r1")
+    st.数值["凌若冰·好感度"] = cs.NumericField(40.0, min=-100.0, max=100.0)
+    st.数值["舞姬恋·好感度"] = cs.NumericField(2.0, min=-100.0, max=100.0)
+    return st
+
+
+def test_快照对账_好感行数字替换为引擎现值():
+    st = _affinity_state()
+    snap = ("[时间] 大比前三日·午后\n"
+            "[好感] 凌若冰=40/冰山融化（气急败坏欲夺回交合权）；舞姬恋=52/旖旎试探（骑乘交合中）\n"
+            "[在场] 凌若冰、舞姬恋")
+    out = cs.reconcile_snapshot_affinity(st, snap)
+    assert "凌若冰=40/冰山融化（气急败坏欲夺回交合权）" in out   # 与引擎一致 → 不动
+    assert "舞姬恋=2/旖旎试探（骑乘交合中）" in out               # 52 → 引擎现值 2
+    assert "52" not in out                                        # 旧自述值不得残留
+    assert "[时间] 大比前三日·午后" in out and "[在场] 凌若冰、舞姬恋" in out
+
+
+def test_快照对账_冒号写法同样替换():
+    st = cs.CharacterState(card_name="c", repo_id="r")
+    st.数值["好感度"] = cs.NumericField(12.0, min=-100.0, max=100.0)
+    snap = "[好感] 凌若冰:0"
+    out = cs.reconcile_snapshot_affinity(st, snap)
+    # 引擎只有无归属裸好感度、快照行只有一名角色 → 裸值归属该角色
+    assert out == "[好感] 凌若冰=12"
+
+
+def test_快照对账_引擎有而快照缺的角色追加():
+    st = cs.CharacterState(card_name="c", repo_id="r")
+    st.数值["凌若冰·好感度"] = cs.NumericField(40.0, min=-100.0, max=100.0)
+    st.数值["舞姬恋·好感度"] = cs.NumericField(2.0, min=-100.0, max=100.0)
+    snap = "[好感] 凌若冰=40/冰山融化"
+    out = cs.reconcile_snapshot_affinity(st, snap)
+    assert out == "[好感] 凌若冰=40/冰山融化；舞姬恋=2"
+
+
+def test_快照对账_无好感行保持原样():
+    st = _affinity_state()
+    snap = "[时间] 午后\n[在场] 凌若冰"
+    assert cs.reconcile_snapshot_affinity(st, snap) == snap
+
+
+def test_快照对账_解析不出条目保持原样():
+    st = _affinity_state()
+    snap = "[好感] 暂无"
+    assert cs.reconcile_snapshot_affinity(st, snap) == snap
+
+
+def test_快照对账_幂等():
+    st = _affinity_state()
+    snap = "[好感] 凌若冰=40/冰山融化；舞姬恋=52/旖旎试探"
+    once = cs.reconcile_snapshot_affinity(st, snap)
+    twice = cs.reconcile_snapshot_affinity(st, once)
+    assert once == twice
+
+
+def test_快照对账_引擎为空原样返回():
+    st = cs.CharacterState(card_name="c", repo_id="r")
+    snap = "[好感] 凌若冰=40/冰山融化"
+    assert cs.reconcile_snapshot_affinity(st, snap) == snap
+
+
+def test_render_snapshot_injection_注入前对账好感行():
+    st = _affinity_state()
+    st.快照 = cs.Snapshot("[好感] 凌若冰=40/冰山融化；舞姬恋=52/旖旎试探", turn=36)
+    inj = cs.render_snapshot_injection(st)
+    assert "舞姬恋=2/旖旎试探" in inj and "52" not in inj

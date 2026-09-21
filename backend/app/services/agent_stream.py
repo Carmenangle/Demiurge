@@ -20,18 +20,23 @@ def _stream_enabled(ctx: dict) -> bool:
     return bool(ctx.get("stream_output")) and callable(ctx.get("stream_sink"))
 
 
-def _notify_stream_trace(ctx: dict, message: str) -> None:
+def _notify_stream_trace(ctx: dict, message: str, detail: str = "") -> None:
     """把自愈进度提示推入流式通道（仅流式模式）。
 
     截断自愈重试期间思考阶段不进流式通道，气泡会静默冻结数分钟（2026-08-31 用户
     反馈「正文生成完毕一会儿报错」像卡死）。提示走 trace 事件追加进气泡，最终被
     replace 覆盖不残留；非流式模式无此问题，走 trace 列表照常展示。
+    ② 纪要引用透出（2026-09-18）：可选 detail 随行下发（前端执行面板折叠卡明细）；
+    无 detail 时线格式与改动前逐字节一致（旧前端宽松兼容）。
     """
     if not _stream_enabled(ctx):
         return
     sink = ctx.get("stream_sink")
     try:
-        sink({"trace": message})
+        payload: dict = {"trace": message}
+        if detail:
+            payload["detail"] = detail
+        sink(payload)
     except Exception:  # noqa: BLE001 - 提示失败不阻断生成主流程
         pass
 

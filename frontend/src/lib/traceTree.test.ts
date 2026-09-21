@@ -71,6 +71,28 @@ describe("traceSummary 思考/工具分离解析", () => {
   });
 
   it("空输入返回空汇总", () => {
-    expect(buildTraceSummary([])).toEqual({ plains: [], thinks: [], calls: [] });
+    expect(buildTraceSummary([])).toEqual({ plains: [], thinks: [], calls: [], cites: [] });
+  });
+
+  it("📖 本轮引用行收集进 cites，detail 随行保留且不落平铺", () => {
+    const lines: (string | TraceLine)[] = [
+      "🎭 剧情扮演中…",
+      {
+        text: "📖 本轮引用：往事纪要 ×2 · 知识条目 ×1",
+        detail: "[4-6] 温泉夜话坦白身世\n[10-12] 雪山救援后态度转暖\n【相关知识/检索表】1 条",
+      },
+      { text: "📖 本轮引用：往事纪要 ×1" }, // 无 detail（非流式降级）也不丢行
+    ];
+    const s = buildTraceSummary(lines);
+    expect(s.cites).toEqual([
+      {
+        text: "📖 本轮引用：往事纪要 ×2 · 知识条目 ×1",
+        detail: "[4-6] 温泉夜话坦白身世\n[10-12] 雪山救援后态度转暖\n【相关知识/检索表】1 条",
+      },
+      { text: "📖 本轮引用：往事纪要 ×1" },
+    ]);
+    expect(s.plains).toEqual([{ text: "🎭 剧情扮演中…" }]); // 引用行不落平铺
+    expect(s.thinks).toEqual([]);
+    expect(s.calls).toEqual([]);
   });
 });

@@ -242,9 +242,19 @@ def _profile_llm_fallback(ctx: dict, scene_spec: dict[str, Any]) -> tuple[str, s
     返回 (compiled_profile, strategy)；失败返回 ("", "")，调用方回退本地事实兜底。
     """
     profile = str(scene_spec.get("profile") or "anima_tags")
+    # 插桩（2026-09-18）：静默早退此前在 trace 上完全不可见——排查「提示词为什么
+    # 掉了词表兜底」时会误判成「模型返回空」，实际可能根本没发起调用。
     if not (ctx.get("chat_base") and ctx.get("chat_key") and ctx.get("chat_model")):
+        run_trace.emit(
+            ctx, "illustration.profile_llm_fallback",
+            status="skipped", reason="model_config_missing", profile=profile,
+        )
         return "", ""
     if not str(scene_spec.get("narrative") or "").strip():
+        run_trace.emit(
+            ctx, "illustration.profile_llm_fallback",
+            status="skipped", reason="narrative_empty", profile=profile,
+        )
         return "", ""
     from app.services import image_prompt_profiles
 
@@ -287,14 +297,28 @@ def _profile_llm_fallback(ctx: dict, scene_spec: dict[str, Any]) -> tuple[str, s
         )
 
     diagnostics: dict[str, object] = {}
+    started_at = time.monotonic()
     try:
         compiled = image_prompt_profiles.generate(
             profile, scene_spec, _generate, diagnostics,
         )
-    except Exception:  # noqa: BLE001
-        run_trace.emit(ctx, "illustration.profile_llm_fallback", status="error")
+    except Exception as exc:  # noqa: BLE001
+        # 插桩（2026-09-18）：此前只记 status=error，全量 trace 里 700+ 条 error
+        # 无任何原因，无法区分「超时/连接失败」与「上游 4xx」。补类型/消息/耗时。
+        run_trace.emit(
+            ctx, "illustration.profile_llm_fallback", status="error",
+            profile=profile,
+            error_type=type(exc).__name__,
+            error_message=str(exc)[:500],
+            elapsed_seconds=round(time.monotonic() - started_at, 1),
+        )
         return "", ""
     if not compiled or not str(compiled).strip():
+        run_trace.emit(
+            ctx, "illustration.profile_llm_fallback", status="empty",
+            profile=profile, strategy=diagnostics.get("strategy"),
+            elapsed_seconds=round(time.monotonic() - started_at, 1),
+        )
         return "", ""
     strategy = str(diagnostics.get("strategy") or "llm_retargeted")
     strategy_map = {
@@ -306,9 +330,27 @@ def _profile_llm_fallback(ctx: dict, scene_spec: dict[str, Any]) -> tuple[str, s
     run_trace.emit(
         ctx, "illustration.profile_llm_fallback",
         status="ok", strategy=final_strategy, output_chars=len(compiled),
+        profile=profile,
+        elapsed_seconds=round(time.monotonic() - started_at, 1),
+        # 插桩（2026-09-18）：原始返回长度/剥离后是否为空/是否命中拒答句式——
+        # 三者组合可判定拦截发生在「上游返回空」「模型拒答」还是「清洗剥离」。
+        first_raw_chars=diagnostics.get("first_raw_chars"),
+        first_empty=diagnostics.get("first_empty"),
+        first_refusal=diagnostics.get("first_refusal"),
+        repair_raw_chars=diagnostics.get("repair_raw_chars"),
+        repair_empty=diagnostics.get("repair_empty"),
+        repair_refusal=diagnostics.get("repair_refusal"),
         field_ledger=diagnostics.get("field_ledger"),
         first_errors=diagnostics.get("first_errors") or [],
         repair_errors=diagnostics.get("repair_errors") or [],
+        # 优化项②（2026-09-19）：语言违例的根因形态——CJK 占比高＝整篇中文叙事（远因，
+        # 预设语言偏好压过模板），占比极低＝个别人名残留（近因，本地可清洗）。此前两条
+        # 都只报「必须为纯英文」同一串，trace 里分不出该修哪一层。
+        first_cjk_chars=diagnostics.get("first_cjk_chars"),
+        first_cjk_ratio=diagnostics.get("first_cjk_ratio"),
+        # 2026-09-20 用户口径：自然语言档必须「定格成静止一帧」，不得写气味 / 声音 / 台词 /
+        # 心理。与 CJK 观测同源，只记事实（命中的词面列表），不参与判死。
+        first_unpaintable_terms=diagnostics.get("first_unpaintable_terms"),
     )
     return compiled, final_strategy
 
@@ -345,17 +387,15 @@ def _illustration_appearance(ctx: dict) -> str:
 def _worldbook_session_state_path(ctx: dict) -> str:
     """世界书稳定序列的持久化文件路径（2026-09-13 动态区外置配套）。
 
-    与 repo 快照同目录（`<output_dir>/<safe repo_id>/`，见 worldbook_store.repo_snapshot_path），
+    与 repo 快照同目录（`<output_dir>/<仓库名>/`，见 worldbook_store.repo_snapshot_path），
     重启后锚点段不重排、前缀跨进程延续。取不到 output_dir/repo_id 时返回空串 → 不落盘。
     """
-    from pathlib import Path
-
-    from app.services.pathnames import safe_seg
+    from app.services import repo_meta
     base = str(ctx.get("output_dir") or "").strip()
     repo_id = str(ctx.get("repo_id") or ctx.get("thread_id") or "").strip()
     if not (base and repo_id):
         return ""
-    return str(Path(base) / safe_seg(repo_id, strip=False) / "worldbook_session.json")
+    return str(repo_meta.engine_repo_dir(base, repo_id) / "worldbook_session.json")
 
 
 def _worldbook_session_key(ctx: dict) -> str:

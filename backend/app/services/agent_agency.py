@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+import time
 import traceback
 from typing import Any
 from app.services import agent_context, builtin_agents, run_trace
@@ -530,6 +531,29 @@ def _resolve_illustration_request_actors(
     return []
 
 
+def _protagonist_gender(ctx: dict, repo_id: str, protagonist: str) -> str:
+    """主人公性别（零 LLM）：世界书条目正文优先，通用表「性别」列兜底。
+
+    2026-09-20 用户定案：只服务主人公，且性别只作**画面事实**注入（不机械拼硬标签）。
+    两道来源都取不到 ⇒ `""`（调用方不注入，宁缺勿猜）。
+    """
+    name = str(protagonist or "").strip()
+    if not name:
+        return ""
+    from app.services import scene_illustration, worldbook_store
+    base = str(ctx.get("output_dir") or "").strip()
+    if base:
+        try:
+            gender = worldbook_store.repo_protagonist_gender(base, repo_id, name)
+        except Exception:  # noqa: BLE001 — 世界书读失败不得打断出图链
+            gender = ""
+        if gender:
+            return gender
+    return scene_illustration.gender_from_tables(
+        _repo_tables_for_facts(ctx, repo_id), name,
+    )
+
+
 def _filter_illustration_appearance(
     appearance: str, actors: list[str], known: list[str],
 ) -> str:
@@ -632,6 +656,12 @@ def _wb_apply_state(ctx: dict, deps, clean: str, *, turn: int, repo_id: str,
     # 抽 <status> 快照（不剥，留正文供前端正则渲染）+ 剥 <状态更新> 小数值 JSON
     snapshot = roleplay_agency.extract_status_snapshot(clean)
     clean, raw = roleplay_agency.parse_state_block(clean)
+    if not snapshot or not raw:
+        # 2026-09-18 兜底状态抽取信号：主协议（<状态更新>/<status>）任一失守
+        # （2026-09-17 实锤 deepseek-v4-flash 整轮双缺），交给本轮维护调用顺带
+        # 补抽取并补写回，0 额外 LLM。元组 = (need_deltas, need_snapshot)。
+        # 真值判断而非 .strip()：extract_status_snapshot 产出已 strip，等价且对测试假件宽容。
+        ctx["_agency_state_fallback"] = (not raw, not snapshot)
     raw = [*raw, *(ctx.pop("_agency_goal_deltas", []) or [])]
     before, after = roleplay_agency.writeback(
         deps, repo_id=repo_id, card_name=card_name, raw_deltas=raw, turn=turn,
@@ -718,6 +748,17 @@ def _wb_scene_signals(ctx: dict, deps, st, clean: str, snapshot, scene: str,
         or roleplay_agency._narr(st, "在场")
     )
     locale = _status_snapshot_value(snapshot_text, "所在") or locale
+    # 2026-09-20 用户口径：状态表/快照都取不到「所在 / 衣着」时，回落**数据表**里的旧值
+    # （全局数据表·地点 / 主角信息表·穿着打扮）。表格本质是**上一轮**参数 ⇒ 只补空缺：
+    # 本轮正文或状态表已经给出的一律优先，绝不覆盖（衣服战损、被撕破这类动态以剧情为准）。
+    if not (locale or "").strip() or not (wardrobe or "").strip():
+        from app.services import table_store
+        table_locale, table_wardrobe = table_store.illustration_defaults(
+            str(ctx.get("output_dir") or ""),
+            str(ctx.get("repo_id") or ctx.get("thread_id") or ""),
+        )
+        locale = (locale or "").strip() or table_locale
+        wardrobe = (wardrobe or "").strip() or table_wardrobe
     # 插画提示词直接由正文 + 已有视觉锚组装，不再额外调用一次聊天模型。
     visible_story = image_prompt_extract.visible_narrative_text(clean)
     local_scene = scene_classify.infer_scene(
@@ -903,6 +944,97 @@ def _wb_comfy_actor_pool(ctx: dict, repo_id: str, card_name: str, plan, actors: 
     }
 
 
+# 判据档单次调用的墙钟上限（项目红线：一切外部调用必须带超时，禁止无超时挂起）。
+_ANCHOR_INTENT_TIMEOUT_SECONDS = 60.0
+
+
+def _frame_subject_names(raw) -> list[str]:
+    """归一化「本帧主体名集合」（判据档 `subjects` / 词表档在场角色全集）。
+
+    非序列或全空一律回空表 ⇒ 取材层视为「无信号」＝旧行为，这是 A′ 的零回归前提。
+    """
+    if not isinstance(raw, (list, tuple, set)):
+        return []
+    return [str(name).strip() for name in raw if str(name).strip()]
+
+
+def _illustration_anchor_intent(ctx: dict, clean: str, sig: dict) -> tuple[str, dict]:
+    """判据档：用「高潮点定位判据」（用户态配置，属主 illustration_prompt_store）判定锚点。
+
+    只在**同轮无插画计划**（缺块路径，实测占多数回合）时参与。任一步不成立即返回
+    `("", {})`，调用方顺序走现有中文词表（**零改动**）：
+    判据为空 / 正文为空 / 无模型配置 / 调用异常 / 输出解析不出 anchor / anchor 不逐字落文。
+
+    **本层常开**（2026-09-18 用户定案去掉启用开关）：它只是「词表档之前的一次更聪明的尝试」，
+    失败有上界——最坏情况就是退回词表档，所以不需要一个「用不用它」的开关。
+
+    观测四态（`illustration.anchor_intent`）：`skipped`（前置不足：判据空 / 正文空 / 无模型配置）、
+    `error`（调用失败，带 error_type/message/耗时）、`invalid`（解析或 evidence 校验不过）、
+    `ok`（带 anchor/composition/subjects/reason/耗时）。
+
+    返回 `(anchor, detail)`：`detail` 供**取材层**判「锚点句是否自带画面」（A′ 用
+    `subjects`），与 trace 字段同源；anchor 为空时 detail 恒为 `{}`。四态 trace 字段不动。
+    """
+    from app.services import illustration_prompt_store, scene_illustration
+
+    rubric = illustration_prompt_store.effective_climax_anchor_rubric()
+    if not rubric:
+        # store 侧保证非空（缺文件 / 坏 JSON / 留空都回缺省 v8）；这里是**防御性闸**：
+        # 一旦 store 被替换或回归成可能返回空串，也必须「拿不到判据就不调模型、直接回词表」。
+        run_trace.emit(
+            ctx, "illustration.anchor_intent", status="skipped", reason="rubric_empty",
+        )
+        return "", {}
+    text = (clean or "").strip()
+    if not text:
+        run_trace.emit(
+            ctx, "illustration.anchor_intent", status="skipped", reason="narrative_empty",
+        )
+        return "", {}
+    if not (ctx.get("chat_base") and ctx.get("chat_key") and ctx.get("chat_model")):
+        run_trace.emit(
+            ctx, "illustration.anchor_intent", status="skipped",
+            reason="model_config_missing",
+        )
+        return "", {}
+    actors = [str(name).strip() for name in (sig.get("present") or []) if str(name).strip()]
+    user = "\n\n".join(part for part in (
+        f"在场角色：{'、'.join(actors)}" if actors else "",
+        f"剧情正文：\n{text}",
+    ) if part)
+    started = time.monotonic()
+    try:
+        raw = _llm.chat(
+            ctx["chat_base"], ctx["chat_key"], ctx["chat_model"],
+            scene_illustration.anchor_intent_system(rubric), user,
+            temperature=0.2, timeout=_ANCHOR_INTENT_TIMEOUT_SECONDS, **_proxy_kw(ctx),
+        )
+    except Exception as exc:  # noqa: BLE001 判据是可选增强：任何失败都必须静默降级到词表
+        run_trace.emit(
+            ctx, "illustration.anchor_intent", status="error",
+            error_type=type(exc).__name__, error_message=str(exc)[:500],
+            elapsed_seconds=round(time.monotonic() - started, 1),
+        )
+        return "", {}
+    anchor, detail = scene_illustration.resolve_anchor_intent(text, raw or "")
+    elapsed = round(time.monotonic() - started, 1)
+    if not anchor:
+        run_trace.emit(
+            ctx, "illustration.anchor_intent", status="invalid",
+            raw_chars=len(raw or ""), parsed=bool(detail),
+            anchor_candidate=str(detail.get("anchor") or "")[:120],
+            elapsed_seconds=elapsed,
+        )
+        return "", {}
+    run_trace.emit(
+        ctx, "illustration.anchor_intent", status="ok",
+        anchor=anchor[:120], composition=detail.get("composition") or "",
+        subjects=detail.get("subjects") or [], reason=detail.get("reason") or "",
+        elapsed_seconds=elapsed,
+    )
+    return anchor, detail
+
+
 def _wb_comfy_scene_target(ctx: dict, repo_id: str, plan, clean: str, sig: dict,
                            pool: dict, *, prompt_override: str, motion: int,
                            user_text: str) -> dict:
@@ -936,19 +1068,66 @@ def _wb_comfy_scene_target(ctx: dict, repo_id: str, plan, clean: str, sig: dict,
         ).prompt
         prompt_source = "fallback"
     fallback_anchor = ""
+    # A′（2026-09-18 拍板）：本帧主体名集合，随锚点档一起决定取材是否扩窗。
+    # 只有「缺块 + 判据/词表」这条支路会填；有计划那条支路保持旧行为（§7.3 第 4 条）。
+    anchor_subjects: list[str] = []
+    # 优化项③（2026-09-19）：**判据档**判出的本帧主体名集合 ＝「这帧画面里有几个人」的
+    # 唯一正向证据。`anchor_subjects` 会混入词表档的在场全集（口径太宽，只配用来取材扩窗），
+    # 故另起一份只装判据结论的副本，随 scene_spec 下传，供多人契约按**画面主体数**判
+    # （用户口径：不按角色表人数、也不按在场人数）。
+    frame_subjects: list[str] = []
+    # 缺块路径的锚点必须与「同轮有计划」那条支路一样过**既有仲裁机**
+    # （`resolve_illustration_anchor`：词表分 ≥ 模型分+3 就推翻）。设计稿 §5.2 早就记了
+    # 「§2.2 的推翻逻辑需一并重审」，但实现里仲裁只在 `if plan:` 时跑 ⇒ 同一三档降级链
+    # 有计划那条支路有纠偏网、缺块这条没有。2026-09-18 真机复跑实锤（deepseek-v4-flash-0731，
+    # 4 run × 3 采样）该缺口导致判据档在 L1/L3 反而劣于词表档（55.3 vs 35、19.0 vs 12）；
+    # 接上仲裁后 L1 55.3→35.0、L3 19.0→12.0，且 L2 的完美选点零误伤（推翻 0/12）。
+    fallback_anchor_needs_arbitration = False
     if character_encounter:
+        # 首帧/初遇锚点是**有意指定**的画面，刻意不过仲裁：仲裁机带「高潮纠偏」语义，
+        # 套到首帧上会把画面从开篇拉到高潮段——这正是 `first_frame_anchor_offset`
+        # 当初存在的原因。故接线只扩到「缺块 + 判据」这条支路。
         fallback_anchor = sig["encounter_anchor"]
     elif visible_story and (
         sig["local_scene_fallback"] or sig["missing_plan_fallback"]
         or sig["first_story_reply"]
     ) and not plan:
-        fallback_anchor = scene_illustration.fallback_illustration_anchor(clean)
+        # 判据档（常开，2026-09-18）：用户态判据 + 一次 LLM 判定；判据空 / 无模型配置 /
+        # 调用失败 / 校验不过 一律返回空串，短路到现有中文词表 —— 词表档判定逻辑零改动。
+        intent_anchor, intent_detail = _illustration_anchor_intent(ctx, clean, sig)
+        if intent_anchor:
+            fallback_anchor = intent_anchor
+            # A′：判据档的本帧主体名集合取判据 `subjects`，再过人称口径机械后滤
+            # （吸附全名 / 滤叙事者·主角 / 锚点句点名收敛——见 filter_anchor_subjects）。
+            # 2026-09-20 收紧：把**主角本名**（用户人设名）交给后滤——第一人称视角下
+            # 叙事者不占画面，不再被当成画面里的一个人而误触发多人契约。
+            anchor_subjects = scene_illustration.filter_anchor_subjects(
+                _frame_subject_names(intent_detail.get("subjects")),
+                intent_anchor, known,
+                narrator=str(ctx.get("user_name") or ""),
+                # 手选人称（多元数据插入面板按钮组）同样作用于主体后滤：手选第三人称时
+                # 主人公不再被当叙事者剔除（第三人称 ⇒ 主人公算一个主体）。
+                override=str(ctx.get("illustration_viewpoint") or ""),
+            )
+            # 优化项③：只有判据档给得出「本帧主体」，词表档给不出（它的 subjects 是在场全集）。
+            frame_subjects = list(anchor_subjects)
+        else:
+            fallback_anchor = scene_illustration.fallback_illustration_anchor(clean)
+            # A′：词表档没有判据字段 ⇒ 回退在场角色全集（口径比判据档宽，两档各锁一条）。
+            anchor_subjects = _frame_subject_names(present)
+        fallback_anchor_needs_arbitration = True
     planned_anchor = plan.get("anchor", "")
     requested_anchor = planned_anchor or fallback_anchor
-    if plan:
+    if plan or fallback_anchor_needs_arbitration:
         requested_anchor = scene_illustration.resolve_illustration_anchor(
             clean, requested_anchor,
         )
+    if frame_subjects and image_prompt_extract.restore_jailbreak(
+        requested_anchor,
+    ).strip() != image_prompt_extract.restore_jailbreak(fallback_anchor).strip():
+        # 判据锚点被仲裁机推翻（或计划另指定了锚点）⇒ 画面已经换段，
+        # 判据的 subjects 不再描述这一帧 ⇒ 撤回正向证据，契约退回在场角色（旧行为）。
+        frame_subjects = []
     plan_retargeted = bool(
         plan and planned_anchor
         and image_prompt_extract.restore_jailbreak(planned_anchor).strip()
@@ -956,7 +1135,7 @@ def _wb_comfy_scene_target(ctx: dict, repo_id: str, plan, clean: str, sig: dict,
     )
     if plan_retargeted:
         corrected_scene = scene_illustration.illustration_scene_excerpt(
-            visible_story, requested_anchor,
+            visible_story, requested_anchor, subjects=anchor_subjects,
         )
         # 重定向只替换错误高潮动作，不能把 Krea2 的英文动作底座也清空；
         # 否则独立 Profile 一旦拒答，只能退回没有角色和剧情事实的通用模板。
@@ -971,7 +1150,7 @@ def _wb_comfy_scene_target(ctx: dict, repo_id: str, plan, clean: str, sig: dict,
         request_actors = list(dict.fromkeys(request_actors + retarget_actors))
     scene_narrative = encounter_narrative if character_encounter else (
             scene_illustration.illustration_scene_excerpt(
-                visible_story, requested_anchor,
+                visible_story, requested_anchor, subjects=anchor_subjects,
             )
         )
     final_actors = _resolve_illustration_request_actors(
@@ -986,17 +1165,40 @@ def _wb_comfy_scene_target(ctx: dict, repo_id: str, plan, clean: str, sig: dict,
     )
     if final_actors:
         request_actors = final_actors
+    # 视角（生图模式，2026-09-20 用户定案）：对**终选锚点**判——仲裁机换了段，画面就换了。
+    # 手选优先（`ctx["illustration_viewpoint"]`＝「多元数据插入」面板人称按钮组，三档
+    # 自动/第一人称/第三人称），自动判定拿不到信号时默认第一人称；冲突留痕写进 detail 供审计。
+    viewpoint_detail = scene_illustration.frame_viewpoint_detail(
+        requested_anchor, scene_narrative,
+        override=str(ctx.get("illustration_viewpoint") or ""),
+    )
+    # 主人公（叙事者化身）性别：只对主人公、只作**画面事实**注入（不机械拼 1girl/1boy）；
+    # 姓名取用户人设名（＝世界书「角色卡·<主角名>」条目所绑的主角名），性别先查世界书条目
+    # 正文、再退回通用表「性别」列。主人公不在本帧主体里（第一人称 / 未入画）⇒ 不注入。
+    protagonist = str(ctx.get("user_name") or "").strip()
+    protagonist_gender = ""
+    if protagonist and protagonist in [
+        str(actor).strip() for actor in request_actors
+    ]:
+        # 主人公不入画（第一人称 / 未列为本帧主体）⇒ 连世界书都不读，省一次 I/O。
+        protagonist_gender = _protagonist_gender(ctx, repo_id, protagonist)
     request_appearance = _filter_illustration_appearance(
         _illustration_appearance(ctx), request_actors, known,
     )
     request_appearance = scene_illustration.supplement_actor_table_appearance(
         request_appearance, request_actors, _repo_tables_for_facts(ctx, repo_id),
     )
+    request_appearance = scene_illustration.supplement_protagonist_gender(
+        request_appearance, request_actors, protagonist, protagonist_gender,
+    )
     return {
         "request_prompt": request_prompt, "prompt_source": prompt_source,
         "requested_anchor": requested_anchor, "plan_retargeted": plan_retargeted,
         "scene_narrative": scene_narrative, "motion": motion,
         "request_actors": request_actors, "request_appearance": request_appearance,
+        "frame_subjects": frame_subjects,
+        "viewpoint": viewpoint_detail["viewpoint"],
+        "viewpoint_detail": viewpoint_detail,
     }
 
 
@@ -1061,6 +1263,23 @@ def _wb_comfy_scene_spec(ctx: dict, repo_id: str, plan, clean: str, sig: dict,
         ]
         if selected_subjects:
             scene_spec["subjects"] = selected_subjects
+    frame_subjects = [
+        str(name).strip() for name in (target.get("frame_subjects") or [])
+        if str(name).strip()
+    ]
+    # 视角口径下传（2026-09-20 用户定案）：三档系统提示词据此写「叙事者不入画／身体局部要入画」，
+    # 契约据此在第一人称下剔叙事者。`narrator` 只在**有值**时写 ⇒ 无主角名的旧路径零变化。
+    viewpoint = str(target.get("viewpoint") or "").strip()
+    if viewpoint in scene_illustration.VIEWPOINT_MODES:
+        scene_spec["viewpoint"] = viewpoint
+        narrator_name = str(ctx.get("user_name") or "").strip()
+        if narrator_name:
+            scene_spec["narrator"] = narrator_name
+    if frame_subjects and "subjects" not in scene_spec:
+        # 优化项③：缺块路径没有计划 subjects，但有判据判出的本帧主体 ⇒ 下传，让多人契约
+        # 按画面主体数判。计划 subjects 是身份真源、优先级更高，故只在它缺席时补位。
+        # 空表一律不写键 ⇒ 契约退回 actors 的旧行为逐字节不变（零回归）。
+        scene_spec["frame_subjects"] = list(dict.fromkeys(frame_subjects))
     if plan.get("visual_facts"):
         visual_facts = plan["visual_facts"]
         if plan_retargeted:
@@ -1138,7 +1357,7 @@ def _wb_comfy_profile(ctx: dict, plan, scene_spec: dict, plan_retargeted: bool) 
     ]
     if profile_strategy == "same_turn" and any(
         item.get("expected") for item in field_ledger.values()
-    ) and "Required visible facts:" in compiled_profile:
+    ) and field_ledger.get("__field_repair__"):
         profile_strategy = "same_turn+field_repair"
     scene_spec["profile_prompt"] = compiled_profile
     scene_spec["field_ledger"] = field_ledger
@@ -1532,7 +1751,7 @@ def _agency_maintenance(ctx: dict, deps, clean: str, turn: int,
         from app.services import roleplay_agency
         repo_id = ctx.get("repo_id") or ctx.get("thread_id") or ""
         card_name = ctx.get("card_name") or ""
-        _table_maintenance(ctx, repo_id, clean, turn)
+        _table_maintenance(ctx, deps, repo_id, clean, turn)
         _belief_maintenance(ctx, repo_id, clean, turn)
         from app.services import narrative_memory, table_store
         cadence = max(1, int(table_store.load_config(
@@ -1603,14 +1822,24 @@ def _belief_maintenance(ctx: dict, repo_id: str, clean: str, turn: int) -> None:
         run_trace.emit(ctx, "belief.extract", status="error", error=str(exc))
 
 
-def _table_maintenance(ctx: dict, repo_id: str, clean: str, turn: int) -> None:
-    """正文发出后独立生成并写回表格 ops；响应只进 Trace，不进入对话。"""
+def _table_maintenance(ctx: dict, deps, repo_id: str, clean: str, turn: int) -> None:
+    """正文发出后独立生成并写回表格 ops；响应只进 Trace，不进入对话。
+
+    2026-09-18 兜底状态抽取：主协议（<状态更新>/<status>）失守的轮次由 ctx 信号
+    `_agency_state_fallback`＝(need_deltas, need_snapshot) 驱动，维护 LLM 改收对象
+    协议顺带产出状态增量与状态栏快照并补写回（0 额外调用，写回经 roleplay_agency.
+    writeback 与主链同源，快照落盘前做好感行对账）；模型回旧数组时优雅降级为只应用
+    表格 ops，快照兜底仍由主链 ensure_status_snapshot 承担。need_deltas=False 时
+    增量固定不应用——主协议已取得过增量，维护再取会双计。
+    """
     try:
+        from app.services import character_state, roleplay_agency
         from app.services import table_store, table_update
 
         output_dir = ctx.get("output_dir") or ""
+        need_deltas, need_snapshot = ctx.pop("_agency_state_fallback", (False, False))
         tables = table_store.load(output_dir, repo_id)
-        if not tables:
+        if not tables and not (need_deltas or need_snapshot):
             run_trace.emit(ctx, "agent.skipped", agent="table_maintenance", reason="no_tables")
             return
         cfg = table_store.load_config(output_dir, repo_id)
@@ -1618,12 +1847,19 @@ def _table_maintenance(ctx: dict, repo_id: str, clean: str, turn: int) -> None:
         if len(clean) < int(cfg.get("minReplyLen", 0)):
             scheduled = False
         selected = table_store.tables_for_maintenance(tables, scheduled)
-        system = table_update.maintenance_instruction(selected)
+        previous_snapshot = ""
+        if need_snapshot:
+            st = character_state.load_state(output_dir, repo_id, ctx.get("card_name") or "")
+            previous_snapshot = getattr(getattr(st, "快照", None), "text", "") or ""
+        system = table_update.maintenance_instruction(
+            selected, extract_deltas=need_deltas, extract_snapshot=need_snapshot)
         if not system:
             run_trace.emit(ctx, "agent.skipped", agent="table_maintenance", reason="cadence_not_reached")
             return
         user_input = str(ctx.get("message") or "").strip()
         user = f"【本轮用户输入】\n{user_input}\n\n【已生成剧情正文】\n{clean}".strip()
+        if need_snapshot and previous_snapshot.strip():
+            user += f"\n\n【上轮状态栏】\n{previous_snapshot.strip()}"
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -1636,13 +1872,24 @@ def _table_maintenance(ctx: dict, repo_id: str, clean: str, turn: int) -> None:
             temperature=0.2, proxy=ctx.get("chat_proxy", ""), retries=2,
         )
         run_trace.emit(ctx, "model.response", agent="table_maintenance", content=raw or "")
-        ops = table_update.parse_maintenance_ops(raw)
+        ops, state_deltas, status_snapshot = table_update.parse_maintenance_payload(raw)
         if ops is None:
             run_trace.emit(ctx, "agent.error", agent="table_maintenance",
                            error="invalid_or_truncated_json")
             return
         _apply_table_ops(ctx, repo_id, clean, ops, turn)
-        run_trace.emit(ctx, "agent.completed", agent="table_maintenance", op_count=len(ops))
+        applied_deltas = state_deltas if need_deltas else []
+        applied_snapshot = status_snapshot if need_snapshot else ""
+        state_fallback = bool(applied_deltas or applied_snapshot)
+        if state_fallback:
+            before, after = roleplay_agency.writeback(
+                deps, repo_id=repo_id, card_name=ctx.get("card_name") or "",
+                raw_deltas=applied_deltas, turn=turn, snapshot=applied_snapshot)
+            run_trace.emit(ctx, "state.writeback", source="maintenance_fallback",
+                           raw_deltas=applied_deltas, snapshot=applied_snapshot,
+                           affinity_before=before, affinity_after=after)
+        run_trace.emit(ctx, "agent.completed", agent="table_maintenance",
+                       op_count=len(ops), state_fallback=state_fallback)
     except Exception as exc:  # noqa: BLE001
         run_trace.emit(ctx, "agent.error", agent="table_maintenance", error=str(exc))
 

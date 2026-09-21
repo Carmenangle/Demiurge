@@ -2,7 +2,7 @@
 无状态、单轮，均委托 ai_common 的 chat/build_chat_model。
 """
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.routers.ai_common import ChatModelReq, build_chat_model, chat
 
@@ -148,6 +148,34 @@ def gen_frame_prompts(req: FramePromptsRequest) -> dict[str, object]:
     except Exception:  # noqa: BLE001 [EXC-保留] 遥测发射 best-effort：Trace 不得阻断提示词生成
         pass
     return {"frames": frames, "profile": req.profile}
+
+
+class ClimaxAnchorPromptConfig(BaseModel):
+    # 无「启用」开关（2026-09-18 用户定案）：判据档常开，失败自动退回中文词表档。
+    rubric: str = ""
+
+
+class IllustrationPromptSettingsReq(BaseModel):
+    climax_anchor: ClimaxAnchorPromptConfig = Field(default_factory=ClimaxAnchorPromptConfig)
+
+
+@router.get("/prompt/settings")
+def illustration_prompt_settings() -> dict[str, object]:
+    """多元数据插入 → 提示词设置：当前用户态配置 + 缺省判据 + 只读输出合同。"""
+    from app.services import illustration_prompt_store
+
+    return illustration_prompt_store.settings_payload()
+
+
+@router.post("/prompt/settings")
+def save_illustration_prompt_settings(
+    config: IllustrationPromptSettingsReq,
+) -> dict[str, object]:
+    """保存提示词设置；只保留合法字段，判据留空回缺省（属主 illustration_prompt_store）。"""
+    from app.services import illustration_prompt_store
+
+    illustration_prompt_store.save_config(config.model_dump())
+    return illustration_prompt_store.settings_payload()
 
 
 class KeywordsRequest(ChatModelReq):

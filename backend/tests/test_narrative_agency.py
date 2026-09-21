@@ -30,6 +30,35 @@ def test_召回_无repo或空查询空串(tmp_path):
     assert ra.recall_chronicle(deps, repo_id="r1", query="  ") == ""
 
 
+def test_召回_引用出参回填区间与概览并按回合升序(tmp_path):
+    """② 纪要引用透出（2026-09-18）：citations_out 回填结构化引用（回合区间+概览），
+    按回合升序；正文返回值与不传出参时逐字节一致。"""
+    ns.append(str(tmp_path), "r1",
+              nm.ChronicleEntry(text="第三章雪山救援后态度转暖", turn_start=10, turn_end=12,
+                                overview="雪山救援后态度转暖"))
+    ns.append(str(tmp_path), "r1",
+              nm.ChronicleEntry(text="第五章温泉夜话坦白身世", turn_start=4, turn_end=6,
+                                overview="温泉夜话坦白身世"))
+    deps = _deps(tmp_path)
+    out: list = []
+    text = ra.recall_chronicle(deps, repo_id="r1", query="雪山救援时发生了什么",
+                               citations_out=out)
+    assert "雪山救援" in text
+    assert [c["turn"] for c in out] == ["4-6", "10-12"]  # 回合升序（与 render_recall 同序）
+    assert [c["overview"] for c in out] == ["温泉夜话坦白身世", "雪山救援后态度转暖"]
+    assert all(c["layer"] == 0 for c in out)
+    # 不传出参 = 旧调用面零改动
+    assert ra.recall_chronicle(deps, repo_id="r1", query="雪山救援时发生了什么") == text
+
+
+def test_召回_无命中时引用出参保持空(tmp_path):
+    deps = _deps(tmp_path)
+    out: list = []
+    assert ra.recall_chronicle(deps, repo_id="r1", query="完全无关风马牛的查询",
+                               citations_out=out) == ""
+    assert out == []
+
+
 def test_抽取_未到cadence不调LLM(tmp_path):
     calls = []
 

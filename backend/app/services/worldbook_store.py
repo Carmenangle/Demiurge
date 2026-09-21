@@ -23,7 +23,7 @@ import shutil
 import time
 
 from app.services import repo_meta
-from app.services.pathnames import safe_dir, safe_seg
+from app.services.pathnames import safe_dir
 
 REPO_WORLDBOOK_FILE = "worldbook.json"
 
@@ -194,8 +194,9 @@ def mutate_entries(
 
 
 def repo_snapshot_path(base: str, repo_id: str) -> Path:
-    """当前小仓库的世界书快照，与 state/tables 一样按 repo_id 物理隔离。"""
-    return Path(base) / safe_seg(repo_id, strip=False) / REPO_WORLDBOOK_FILE
+    """当前小仓库的世界书快照，与 state/tables 一样按 repo_id 物理隔离
+    （2026-09-18 ③ 起与 chat/图/文档同域：<base>/<仓库名>/worldbook.json）。"""
+    return repo_meta.engine_repo_dir(base, repo_id) / REPO_WORLDBOOK_FILE
 
 
 def read_repo_snapshot(base: str, repo_id: str) -> dict[str, Any] | None:
@@ -305,6 +306,125 @@ def repo_visual_profiles(base: str, repo_id: str, query: str, *, max_chars: int 
             break
         profiles.append(candidate)
     return "\n".join(profiles)
+
+
+# ── 主人公性别（零 LLM 机械解析，2026-09-20）──────────────────────────────────
+# 用户定案：性别**只作画面事实注入给模型**（不机械拼 1girl/1boy 硬标签），且只服务**主人公**；
+# 其他角色性别沿用「世界书条目兜底、不做代码约束」的既有定案。解析一律「宁缺勿猜」：
+# 拿不准返回空串，调用方不注入。
+#
+# ⚠ 属主说明（importlinter `roleplay-agency-stack`）：文本解析器**必须留在本模块**。
+# 链路 `character_state → repo_meta → character_store → worldbook_store` 与 `scene_illustration`
+# 同层，worldbook_store 反向 import scene_illustration 即构成同层依赖违规（2026-09-20 实测
+# lint-imports BROKEN）。故解析器随**条目正文属主**落在本模块；scene_illustration 只保留
+# 「通用表读取」与「外观段注入」——那两件都不碰条目正文。
+GENDER_FEMALE = "女"
+GENDER_MALE = "男"
+
+# 三级按序短路（先命中先返回），不做统计投票：
+# ① 显式声明（最可靠）：`【性别】女` / `性别：男`
+_GENDER_DECLARED_RE = re.compile(
+    r"【性别】\s*([^\r\n【】]{1,10})"
+    r"|性别\s*[：:]\s*([^\r\n，,。；;、\s]{1,6})"
+)
+# ② 系词句：`他是…少年` / `她是一位…女性`（名字或代词作主语，短窗口内命中）
+# ③ 身份名词：与名字/代词相邻的 `王女` / `公主` / `女仆` / `王子` / `国王` …
+#    ⚠ ②③ 都**必须**有主语（名字或代词）在场 —— 全文裸扫身份名词会把男主人公条目里
+#    顺带提到的「贵妇」误判成主人公性别（真机误判比缺省更糟）。
+_GENDER_SUBJECT_PRONOUNS = r"[他她](?:们)?"
+
+_GENDER_NOUNS = (
+    "女性", "女人", "少女", "女子", "王女", "公主", "女王", "皇后",
+    "熟妇", "贵妇", "侍女", "女仆", "母亲", "妈妈",
+    "男性", "男人", "少年", "男子", "王子", "国王", "皇帝", "父亲", "爸爸",
+)
+_GENDER_FEMALE_WORDS = frozenset({
+    "女性", "女人", "少女", "女子", "王女", "公主", "女王", "皇后",
+    "熟妇", "贵妇", "侍女", "女仆", "母亲", "妈妈",
+})
+_GENDER_MALE_WORDS = frozenset({
+    "男性", "男人", "少年", "男子", "王子", "国王", "皇帝", "父亲", "爸爸",
+})
+
+
+def _gender_of_noun(noun: str) -> str:
+    if noun in _GENDER_FEMALE_WORDS:
+        return GENDER_FEMALE
+    if noun in _GENDER_MALE_WORDS:
+        return GENDER_MALE
+    return ""
+
+
+def _gender_regexes(name: str) -> tuple[re.Pattern[str], re.Pattern[str]]:
+    """构造 ②系词句 / ③身份名词 的正则：主语＝名字（若有）或第三人称代词。"""
+    subject = f"(?:{re.escape(name)}|{_GENDER_SUBJECT_PRONOUNS})" if name else _GENDER_SUBJECT_PRONOUNS
+    copula = re.compile(
+        subject + r"(?:是|为|乃)[^。\r\n]{0,12}?(" + "|".join(_GENDER_NOUNS) + r")"
+    )
+    noun = re.compile(subject + r"[^。\r\n]{0,8}?(" + "|".join(_GENDER_NOUNS) + r")")
+    return copula, noun
+
+
+def gender_from_text(text: str, name: str = "") -> str:
+    """从条目正文机械解析性别（零 LLM，确定性）：`女` / `男` / `""`（无信号）。
+
+    三级按序短路，先命中先返回；都取不到 ⇒ 空串（调用方不注入）。
+    ⚠ `name` 为空时②③只认第三人称代词作主语，仍**不做**全文裸扫身份名词。
+    """
+    if not text:
+        return ""
+    declared = _GENDER_DECLARED_RE.search(text)
+    if declared:
+        raw = (declared.group(1) or declared.group(2) or "").strip()
+        if "女" in raw:
+            return GENDER_FEMALE
+        if "男" in raw:
+            return GENDER_MALE
+        return raw
+    copula, noun = _gender_regexes(str(name or "").strip())
+    for pattern in (copula, noun):
+        match = pattern.search(text)
+        if match:
+            gender = _gender_of_noun(match.group(1))
+            if gender:
+                return gender
+    return ""
+
+
+def repo_protagonist_gender(base: str, repo_id: str, name: str) -> str:
+    """从作品世界书快照解析**主人公**性别（零 LLM，确定性）：`女` / `男` / `""`。
+
+    2026-09-20 用户定案：只服务主人公（其他角色性别沿用条目兜底，不做代码约束）。
+    查找顺序＝① comment 恰为「角色卡·<名>」的条目优先；② 正文或 keys 提及该名的条目按序兜底。
+    每个条目交给本模块 `gender_from_text` 三级解析（显式声明 > 系词句 > 与名字/代词
+    相邻的身份名词）。读不到快照 / 名为空 / 都无信号 ⇒ `""`（调用方不注入，宁缺勿猜）。
+    """
+    target = str(name or "").strip()
+    if not target:
+        return ""
+    book = read_repo_snapshot(base, repo_id)
+    if not book:
+        return ""
+    from app.services import worldbook_edit
+    exact_comment = f"角色卡·{target}"
+    preferred: list[str] = []
+    fallback: list[str] = []
+    for item in worldbook_edit.list_entries(book):
+        comment = str(item.get("comment") or "").strip()
+        content = str(item.get("content") or "")
+        keys = item.get("keys") or item.get("key") or []
+        if isinstance(keys, str):
+            keys = [keys]
+        if comment == exact_comment:
+            preferred.append(content)
+            continue
+        if target in content or any(target == str(key).strip() for key in keys):
+            fallback.append(content)
+    for content in [*preferred, *fallback]:
+        gender = gender_from_text(content, target)
+        if gender:
+            return gender
+    return ""
 
 
 def _merge_character_dynamic(existing: str, update: str) -> str:

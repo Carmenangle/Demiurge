@@ -8,7 +8,8 @@
 「态度: 戒备 (因第3章救援)」= 角色发展而非矛盾；人为改若不带证据 → source=user,证据空，
 供上层识别为「设定注入」而非剧情。
 
-落盘：<base>/<safe repo_id>/state.json，物理隔离不同游玩。base 由调用方注入，不读 config。
+落盘：<base>/<仓库名>/state.json（2026-09-18 ③ 起与 chat/图/文档同域；旧 <base>/<safe repo_id>/
+由 `repo_meta.engine_repo_dir` 惰性迁移）。base 由调用方注入，不读 config。
 纯逻辑（parse_deltas/apply_deltas/render_state_block）无 I/O，可单测；load/save 是唯一 I/O。
 """
 from __future__ import annotations
@@ -19,8 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from app.services import prompt_clean
-from app.services.pathnames import safe_seg
+from app.services import prompt_clean, repo_meta
 
 STATE_FILE = "state.json"
 SRC_AUTO = "auto"
@@ -491,11 +491,102 @@ def render_snapshot_injection(state: CharacterState) -> str:
     """把上轮 <status> 快照原文重注入主控叙述。空快照返回空串。
 
     从文件重建（非翻聊天记录），故上下文压缩后状态栏也不丢——AI 据此续写并刷新状态栏。
+    注入前先做好感行对账（reconcile_snapshot_affinity）：快照里的数字是模型上轮自述，
+    可能与引擎账漂移（2026-09-18 实锤：模型自述 52，引擎 2.0，重注入被照抄 → 漂移固化）。
     """
-    text = (state.快照.text or "").strip()
+    text = reconcile_snapshot_affinity(state)
     if not text:
         return ""
     return "【上轮状态栏（据此延续并按本轮剧情更新，格式不变）】\n" + text
+
+
+# ── 快照好感行机械对账（双账本对齐，2026-09-18 用户实锤）────────────────────
+# status 行是模型自述、引擎数值是 delta 累加，两套账独立演化必然漂移；快照每轮
+# 重注入/漏战报兜底都会被模型照抄 → 漂移固化。对账＝用 state.数值 真源覆盖行内
+# 数字，纯逻辑、幂等、解析不出条目时原样返回（绝不改写其余文本）。
+
+_AFFINITY_LINE_RE = re.compile(
+    r"^(?P<head>\[(?:好感|好感度)\])(?P<body>[^\n]*)$", re.MULTILINE)
+_AFF_ENTRY_RE = re.compile(
+    r"^(?P<name>[^＝=:\n；;]+)[＝=:](?P<num>-?\d+(?:\.\d+)?)(?P<rest>.*)$")
+
+
+def _engine_affinities(state: CharacterState) -> dict[str, float]:
+    """从 state.数值 提取好感度：`角色·好感度` → {角色: 值}；仅一行裸 `好感度` 时
+    归到该唯一行（单主角存档的常见写法，快照行内角色名即归属）。"""
+    out: dict[str, float] = {}
+    suffix = f"·{AFFINITY_FIELD}"
+    for leaf, nf in state.数值.items():
+        if leaf.endswith(suffix):
+            owner = leaf[:-len(suffix)].strip()
+            if owner and not _is_protagonist_leaf(leaf):
+                out[owner] = nf.value
+    if not out:
+        bare = state.数值.get(AFFINITY_FIELD)
+        if bare is not None:
+            out[""] = bare.value  # 空名 = 无归属，调用方在快照行恰一条目时归属之
+    return out
+
+
+def reconcile_snapshot_affinity(state: CharacterState, text: str = "") -> str:
+    """把快照文本里 [好感] 行的数字替换为引擎现值（纯逻辑，幂等）。
+
+    - 行内已有条目：名字能在引擎账里找到 → 数字换成引擎现值，`/档位（描述）` 保留。
+    - 引擎有、行内缺的角色 → 追加 `；名字=值`。
+    - 无 [好感] 行 / 行内解析不出任何条目 / 引擎无好感字段 → 原样返回。
+    text 为空时取 state.快照.text。其余行（时间/在场/进度…）是叙事文本，不做机械
+    对账（无稳定字段名映射），以【当前状态】块注入为真源。
+    """
+    text = (text or state.快照.text or "").strip()
+    if not text:
+        return ""
+    m = _AFFINITY_LINE_RE.search(text)
+    if not m:
+        return text
+    engine = _engine_affinities(state)
+    if not engine:
+        return text
+    anonymous = engine.pop("", None)
+    body = m.group("body")
+    segments = re.split(r"([；;])", body)
+    # split 保留分隔符：奇数位是 `；`，偶数位是条目段
+    seen: set[str] = set()
+    changed = False
+    parsed_any = False
+    for i in range(0, len(segments), 2):
+        seg = segments[i]
+        em = _AFF_ENTRY_RE.match(seg.strip())
+        if not em:
+            continue
+        parsed_any = True
+        name = em.group("name").strip(" ·：:（）()")
+        if anonymous is not None and name and name not in engine and not seen:
+            val: float | None = anonymous
+        else:
+            val = engine.get(name)
+        if val is None:
+            continue
+        seen.add(name)
+        new_num = _fmt_num(val)
+        if new_num != em.group("num"):
+            changed = True
+        lead = " " if seg.startswith(" ") and i == 0 else ""
+        segments[i] = f"{lead}{name}={new_num}{em.group('rest')}"
+    if not parsed_any:
+        return text
+    missing = [n for n in engine if n not in seen]
+    if missing:
+        changed = True
+        tail = "；".join(f"{n}={_fmt_num(engine[n])}" for n in missing)
+        if segments and segments[-1] == "":
+            segments[-1] = tail
+        else:
+            segments.append("；" if segments else "")
+            segments.append(tail)
+    if not changed:
+        return text
+    new_line = m.group("head") + "".join(segments)
+    return text[:m.start()] + new_line + text[m.end():]
 
 
 def _fmt_num(v: float) -> str:
@@ -505,7 +596,7 @@ def _fmt_num(v: float) -> str:
 # ── I/O：唯一落盘接缝，其余全是纯逻辑 ──
 
 def state_path(base: str, repo_id: str) -> Path:
-    return Path(base) / safe_seg(repo_id, strip=False) / STATE_FILE
+    return repo_meta.engine_repo_dir(base, repo_id) / STATE_FILE
 
 
 def load_state(base: str, repo_id: str, card_name: str) -> CharacterState:

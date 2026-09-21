@@ -167,6 +167,137 @@ def repo_folder_path(output_dir: str, repo_id: str) -> Path:
     return _collision_safe_path(candidate, repo_id)
 
 
+_ENGINE_LEGACY_PREFIX = ".engine_legacy_"
+
+# 引擎域落盘文件名**闭集**（与 tests/test_repo_engine_paths.py 的 12 处调用点表一一对应）。
+# 唯一用途：判「某个目录里有没有引擎数据」。`chat.json` / 图片 / 文档 / `_repo.json` 是
+# **非引擎产物**，不能算数——2026-09-20 凌霄仙母录实锤：旧实现只凭「新目录存在」就判
+# 「已有数据」，把活引擎目录整体留档 ⇒ 活跃路径从此没有 tables.json/state.json ⇒
+# UI 上表现为「数据表内容全部丢失」。
+_ENGINE_FILE_NAMES = frozenset({
+    "state.json", "tables.json", "table_config.json", "table_progress.json",
+    "worldbook.json", "worldbook_session.json",
+    "chronicle.db", "temporal_facts.db", "character_beliefs.db",
+    "narrative_ci.db", "visual_preferences.db", "visual_ci.db",
+})
+
+
+def _has_engine_files(path: Path) -> bool:
+    """该目录里是否已有引擎文件。**读不动时保守返回 True**（走「不覆盖」分支，宁留档不误伤）。"""
+    try:
+        return any(
+            child.is_file() and child.name in _ENGINE_FILE_NAMES
+            for child in path.iterdir()
+        )
+    except OSError:
+        return True
+
+
+def _adopt_engine_files(source: Path, target: Path) -> list[str]:
+    """把 source 下的引擎文件**复制**进 target；已存在的一律跳过（绝不覆盖）。
+
+    只搬引擎文件，不碰 chat/图/文档；source 保持原样（它是留档的底，可回滚）。
+    返回实际复制的文件名列表。复制失败不阻断——引擎数据仍在原位置，下次还会再试。
+    """
+    if not source.is_dir():
+        return []
+    import shutil
+
+    copied: list[str] = []
+    for child in sorted(source.iterdir()):
+        if not child.is_file() or child.name not in _ENGINE_FILE_NAMES:
+            continue
+        dst = target / child.name
+        if dst.exists():
+            continue
+        try:
+            shutil.copy2(child, dst)
+        except OSError as exc:  # noqa: BLE001 [EXC-留痕]
+            _LOG.warning("引擎文件并入失败（%s → %s）: %s", child, dst, exc)
+            continue
+        copied.append(child.name)
+    return copied
+
+
+def _legacy_engine_dir(root: Path, seg: str, repo_id: str) -> Path | None:
+    """老口径引擎目录候选，找不到返回 None（不迁移）。
+
+    子仓库历史上出现过**两种**布局，两种都要认：
+    - `<根>/<uuid>`            —— 老口径通用式；
+    - `<根>/<父名>/<uuid>`     —— 子仓库嵌父作品文件夹下（凌霄仙母录实测是这种）。
+    """
+    direct = root / seg
+    if direct.is_dir():
+        return direct
+    parent_seg = parent_folder_seg(repo_id)
+    if parent_seg:
+        nested = root / parent_seg / seg
+        if nested.is_dir():
+            return nested
+    return None
+
+
+def engine_repo_dir(output_dir: str, repo_id: str) -> Path:
+    """**引擎域唯一路径属主**（2026-09-18 ③）：state/tables/chronicle/事实/认知/世界观快照等
+    「引擎私有落盘」的目录解析，与 chat/图/文档/画布/卡同轨（`folder_name` 仓库名文件夹）。
+
+    历史错轨（本刀修）：引擎族一度用 `Path(base)/safe_seg(repo_id)`——`safe_seg` 把中文换成
+    `_`，于是 UUID 仓库落 `<根>/<uuid>/`，而 chat/图/文档落 `<根>/<仓库名>/`，同一作品两套
+    落点。实测 `凌霄仙母录` 的 state.json 因此分裂成两份（引擎处 turn=36 / 仓库名处 turn=21）。
+
+    口径（与 `repo_folder_path` 一致，但**只算路径、不写 marker**，读路径零副作用）：
+    - 有仓库名 → `<根>/<仓库名>`；子仓库 → `<根>/<父名>/<子名>`；
+    - 无仓库名（home / 无记录）→ 退回 `safe_seg(repo_id)`，与老口径逐字节一致（零迁移）；
+    - 无 base → 退回 `safe_seg(repo_id)`（不拼绝对/相对混淆路径）。
+
+    惰性迁移（老口径目录见 `_legacy_engine_dir`，两种布局都认）：
+    - 新位置**不存在** → 老目录整体 rename 过来；
+    - 新位置存在但**没有引擎文件**（只有 chat/图/文档占位）→ **不算「已有数据」**：
+      先把老目录（及已存在的留档目录）里的引擎文件**并入**活跃路径，再把老目录留档。
+      ⚠ 2026-09-20 凌霄仙母录实锤：旧实现只看「新目录存在」，于是引擎目录被留档留到
+      活跃路径看不见，UI 上表现为「数据表内容全部丢失」。
+    - 新位置**已有引擎文件** → 绝不覆盖，老目录挪到 `<新位置>/.engine_legacy_<旧段>/` 留档。
+    幂等：新位置已有引擎文件且老目录已让位 → 无操作；搬迁失败静默回退老位置（不丢数据）。
+
+    ⚠ 本函数**只算/搬目录，不建目录**——建目录由各模块 `mkdir(parents=True)` 自己负责，
+    保持与 `repo_folder_path` 相同的「读路径无副作用」契约（写路径才建）。
+    """
+    seg = safe_seg(repo_id, strip=False)
+    if not (output_dir or "").strip() or not repo_id:
+        return Path(seg)
+    root = Path(output_dir)
+    new_path = root / folder_name(repo_id)
+    if new_path == root / seg:  # home / 纯 ASCII 名：老新同一条，零操作
+        # ⚠ 红检 M12 实测：对本分支而言此短路**行为上冗余**——`folder_name` 在无仓库名时
+        # 本就返回 `safe_seg(repo_id)`，故 `new_path == legacy` 恒成立；而老目录不存在时
+        # 下方 `legacy.is_dir()` 已提前返回（不触发任何 mkdir/rename）。保留作**显式意图声明**
+        # 与「folder_name 对 home 语义变更」的护栏，不依赖隐式巧合。
+        return new_path
+    legacy = _legacy_engine_dir(root, seg, repo_id)
+    if legacy is None:
+        return new_path
+    try:
+        if not new_path.exists():
+            new_path.parent.mkdir(parents=True, exist_ok=True)
+            legacy.rename(new_path)
+            return new_path
+        keeper = new_path / f"{_ENGINE_LEGACY_PREFIX}{seg}"
+        if not _has_engine_files(new_path):
+            # 新位置只有非引擎产物 ⇒ 引擎文件必须先并入，否则活跃路径从此没有
+            # tables.json/state.json。留档目录若已存在，它比受检老目录**更新**，优先并它。
+            new_path.mkdir(parents=True, exist_ok=True)
+            _adopt_engine_files(keeper, new_path)
+            _adopt_engine_files(legacy, new_path)
+        # 老目录留档（已留过则不重复搬）
+        if not keeper.exists():
+            new_path.mkdir(parents=True, exist_ok=True)
+            legacy.rename(keeper)
+    except OSError as exc:  # noqa: BLE001 [EXC-留痕] 搬迁失败不阻断，但引擎数据仍在老位置
+        _LOG.warning(
+            "引擎域目录迁移失败（数据保留在原位置 %s，读写仍走该处）: %s", legacy, exc)
+    return new_path
+
+
 def repo_scope_path(output_dir: str, repo_id: str) -> Path | None:
     """**产物存储域**解析（2026-09-10 B3/A）：repo_id 非空时把域从「作品库根」收窄到「作品文件夹」。
 

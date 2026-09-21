@@ -443,6 +443,7 @@ export interface AgentInvocation {
   videoMode?: "climax" | "firstlast";
   promptProfile: string;
   appearanceSource: "worldbook" | "character_card";
+  illustrationViewpoint?: "" | "first_person" | "third_person";
   characterBaseImages: Record<string, string>;
   illustrationActorNames: string[];
   styleBaseImage: string;
@@ -514,6 +515,7 @@ export function agentInvocationBody(request: AgentInvocation): AgentInvocationWi
     video_mode: request.videoMode || "",
     prompt_profile: request.promptProfile || "krea2",
     appearance_source: request.appearanceSource,
+    illustration_viewpoint: request.illustrationViewpoint || "",
     character_base_images: request.characterBaseImages,
     illustration_actor_names: request.illustrationActorNames,
     style_base_image: request.styleBaseImage,

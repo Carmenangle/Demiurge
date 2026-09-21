@@ -3,16 +3,15 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
-from pathlib import Path
 
-from app.services.pathnames import safe_seg
+from app.services import repo_meta
 
 DB_NAME = "character_beliefs.db"
 STANCES = {"knows", "believes", "suspects", "misbelieves", "conceals", "unknown"}
 
 
 def _connect(base: str, repo_id: str) -> sqlite3.Connection:
-    path = Path(base) / safe_seg(repo_id, strip=False) / DB_NAME
+    path = repo_meta.engine_repo_dir(base, repo_id) / DB_NAME
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row

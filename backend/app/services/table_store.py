@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 from typing import Any, Callable
 
-from app.services.pathnames import safe_seg
+from app.services import repo_meta
 
 TABLES_FILE = "tables.json"
 CONFIG_FILE = "table_config.json"
@@ -446,10 +446,46 @@ def retrieval_tables(tables: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [t for t in tables if t.get("mode") == MODE_RETRIEVAL]
 
 
+# ── 插画兜底用的「旧值」出口（2026-09-20）──
+
+def _first_cell(tables: list[dict[str, Any]], table_name: str, column: str) -> str:
+    """取某张表某列的第一个非空值（单卡表即该卡的值）。表/列不存在 → 空串。"""
+    table = _find(tables, table_name)
+    if table is None:
+        return ""
+    columns = table.get("columns") or []
+    if column not in columns:
+        return ""
+    index = columns.index(column)
+    for row in table.get("rows") or []:
+        if index < len(row) and str(row[index]).strip():
+            return str(row[index]).strip()
+    return ""
+
+
+def illustration_defaults(base: str, repo_id: str) -> tuple[str, str]:
+    """给插画兜底用的「地点 / 穿着」旧值，返回 `(地点, 穿着打扮)`；取不到回空串。
+
+    ⚠ **表格本质是上一轮（甚至更早）的参数**——调用方必须遵守「本轮剧情/状态优先，此处
+    只补空缺」的口径，**绝不能用它覆盖本轮正文已给出的事实**（例如衣服被撕破、战损这类
+    动态变化以剧情为准）。
+
+    - 地点 ← `全局数据表`（单卡）的「地点」列；
+    - 穿着 ← `主角信息表`（单卡）的「穿着打扮」列。
+
+    没有表 / 没有列 / 没有值 / 读盘失败一律返回空串，**不抛**。
+    """
+    tables = load(base, repo_id)
+    return (
+        _first_cell(tables, GLOBAL_TABLE, "地点"),
+        _first_cell(tables, PROTAGONIST_TABLE, "穿着打扮"),
+    )
+
+
 # ── I/O：唯一落盘接缝 ──
 
 def tables_path(base: str, repo_id: str) -> Path:
-    return Path(base) / safe_seg(repo_id, strip=False) / TABLES_FILE
+    return repo_meta.engine_repo_dir(base, repo_id) / TABLES_FILE
 
 
 def load(base: str, repo_id: str) -> list[dict[str, Any]]:
@@ -552,7 +588,7 @@ def mutate_structure(base: str, repo_id: str, apply: Callable[[list[dict[str, An
 
 
 def config_path(base: str, repo_id: str) -> Path:
-    return Path(base) / safe_seg(repo_id, strip=False) / CONFIG_FILE
+    return repo_meta.engine_repo_dir(base, repo_id) / CONFIG_FILE
 
 
 def load_config(base: str, repo_id: str) -> dict[str, int]:

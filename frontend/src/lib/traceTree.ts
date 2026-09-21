@@ -5,12 +5,14 @@
 //   🔧 调用工具：<op>                    = 工具调用（detail=参数摘要）
 //   ✅/❌ 工具完成/失败：<op>             = 工具结果（detail=结果摘要，回填到对应调用）
 //   ✅ 模型响应完成 / 📐 解析模型输出…    = 纯状态噪声，面板不展示
+//   📖 本轮引用…                          = 剧情召回引用（detail=纪要区间/概览明细，折叠卡）
 //   其它（🧭 分派 / 🏁 结束 / 🔄 重试 / ❌ 模型失败 / ▶ 步骤…）= 平铺行
 //
 // 汇总结构（执行过程面板顶层渲染）：
 //   plains —— 分派/结束/重试/失败等关键节点行，按序平铺
 //   thinks —— 思考条目列表（chip「思考 ×N」展开逐条查看 thinking 文本）
 //   calls  —— 工具调用列表（chip「工具 ×N」展开逐条查看参数/结果/状态）
+//   cites  —— 纪要引用列表（chip「引用 ×N」展开查看回合区间+概览明细）
 
 /** agentTrace 行（2026-09-06 起可带 detail） */
 export interface TraceLine {
@@ -31,21 +33,29 @@ export interface TraceCallEntry {
   ok?: boolean;
 }
 
+/** 一条本轮引用汇总行（detail=纪要区间/概览明细，多行 \n 分隔；非流式降级时无 detail） */
+export interface TraceCiteEntry {
+  text: string;
+  detail?: string;
+}
+
 export interface TraceSummary {
   plains: TraceLine[];
   thinks: TraceThinkEntry[];
   calls: TraceCallEntry[];
+  cites: TraceCiteEntry[];
 }
 
 const THINK_RE = /^🤔/;
 const CALL_RE = /^🔧\s*调用工具：(.+)$/;
 const CALL_RESULT_RE = /^[✅❌]\s*工具(?:完成|失败)：(.+)$/;
+const CITE_RE = /^📖\s*本轮引用/;
 const NOISE_RES = [/^✅\s*模型响应完成$/, /^📐\s*解析模型输出/];
 
 /** 解析 agentTrace 行序列为思考/工具分离的汇总。空输入返回空汇总。
  *  兼容 string[] 与 {text, detail}[]。 */
 export function buildTraceSummary(lines: (string | TraceLine)[]): TraceSummary {
-  const summary: TraceSummary = { plains: [], thinks: [], calls: [] };
+  const summary: TraceSummary = { plains: [], thinks: [], calls: [], cites: [] };
   for (const raw of lines || []) {
     const line = typeof raw === "string" ? raw : raw.text;
     const detail = typeof raw === "string" ? undefined : raw.detail;
@@ -74,6 +84,11 @@ export function buildTraceSummary(lines: (string | TraceLine)[]): TraceSummary {
       } else {
         summary.plains.push({ text: line, ...(detail ? { detail } : {}) });
       }
+      continue;
+    }
+    if (CITE_RE.test(line)) {
+      // ② 纪要引用透出（2026-09-18）：引用行进 cites（折叠卡），不落平铺行
+      summary.cites.push({ text: line, ...(detail ? { detail } : {}) });
       continue;
     }
     if (NOISE_RES.some((re) => re.test(line))) continue;

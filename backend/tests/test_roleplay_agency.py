@@ -65,6 +65,15 @@ def test_多角色状态指令要求显式角色归属():
     assert "禁止把身体、精神等状态类别拼进角色名" in instruction
 
 
+def test_状态更新指令要求好感行以引擎现值为准():
+    """2026-09-18 用户实锤：模型自编/沿用历史楼层好感数字（52）而引擎账（2.0）冻结。
+    指令必须硬性约束：[好感] 行逐字用【当前状态】现值；变化只报相对增量。"""
+    instruction = ra.state_instruction()
+    assert "【当前状态】" in instruction
+    assert "禁止沿用历史楼层旧数字或自编数值" in instruction
+    assert "增量相对现值" in instruction
+
+
 # ── 阶段 A：门控 + 仲裁 ──
 
 def test_世界缺core场景时不调LLM(tmp_path):
@@ -266,6 +275,21 @@ def test_快照随写回落盘可重建(tmp_path):
     ra.writeback(deps, repo_id="r1", card_name="卡", raw_deltas=[], turn=4, snapshot="")
     st2 = character_state.load_state(str(tmp_path), "r1", "卡")
     assert st2.快照.text == "[所在] 山洞"
+
+
+def test_writeback落盘快照前先对账好感行(tmp_path):
+    """双账本对齐（2026-09-18）：写回时先应用 delta 再对账快照存盘，
+    保证重注入与漏战报兜底（ensure_status_snapshot）拿到的都是引擎真源数字。"""
+    deps = _deps(tmp_path)
+    ra.writeback(
+        deps, repo_id="r1", card_name="卡", turn=34,
+        raw_deltas=[{"field": "数值/舞姬恋·好感度", "op": "add", "value": 2,
+                     "evidence": "争宠"}],
+        snapshot="[好感] 凌若冰=40/冰山融化；舞姬恋=52/旖旎试探")
+    st = character_state.load_state(str(tmp_path), "r1", "卡")
+    assert st.数值["舞姬恋·好感度"].value == 2.0
+    assert "舞姬恋=2/旖旎试探" in st.快照.text
+    assert "52" not in st.快照.text
 
 
 # ── 阶段 D：插画门控 ──

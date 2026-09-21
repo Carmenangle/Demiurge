@@ -5,9 +5,8 @@ import sqlite3
 import time
 import uuid
 from collections import Counter
-from pathlib import Path
 
-from app.services.pathnames import safe_seg
+from app.services import repo_meta
 
 DB_NAME = "visual_preferences.db"
 REASONS = {"character", "action", "composition", "lighting", "color", "quality", "other"}
@@ -19,7 +18,7 @@ VISUAL_CI_DB = "visual_ci.db"
 
 def _red_asset_ids(base: str, repo_id: str) -> set[str]:
     """读取该作品 visual_ci.db 中 verdict='red' 的 generation_id 集合。"""
-    db = Path(base) / safe_seg(repo_id, strip=False) / VISUAL_CI_DB
+    db = repo_meta.engine_repo_dir(base, repo_id) / VISUAL_CI_DB
     if not db.exists():
         return set()
     try:
@@ -36,7 +35,7 @@ def _red_asset_ids(base: str, repo_id: str) -> set[str]:
 
 
 def _connect(base: str, repo_id: str) -> sqlite3.Connection:
-    path = Path(base) / safe_seg(repo_id, strip=False) / DB_NAME
+    path = repo_meta.engine_repo_dir(base, repo_id) / DB_NAME
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row

@@ -740,7 +740,8 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
                 {traceSummary.plains.map((p, pi) => (
                   <div className="agent-trace-line" key={`p${pi}`}>{p.text}</div>
                 ))}
-                {(traceSummary.thinks.length > 0 || traceSummary.calls.length > 0) && (
+                {(traceSummary.thinks.length > 0 || traceSummary.calls.length > 0
+                  || traceSummary.cites.length > 0) && (
                   <div className="agent-trace-chips">
                     {traceSummary.thinks.length > 0 && (
                       <button
@@ -758,6 +759,15 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
                         onClick={() => toggleTrace("calls")}
                       >
                         🔧 工具 <span className="agent-trace-count">×{traceSummary.calls.length}</span>
+                      </button>
+                    )}
+                    {traceSummary.cites.length > 0 && (
+                      <button
+                        type="button"
+                        className={`agent-trace-chip${traceExpanded.has("cites") ? " is-open" : ""}`}
+                        onClick={() => toggleTrace("cites")}
+                      >
+                        📖 引用 <span className="agent-trace-count">×{traceSummary.cites.length}</span>
                       </button>
                     )}
                   </div>
@@ -790,6 +800,18 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
                         </div>
                         {c.args && <div className="agent-trace-detail">{c.args}</div>}
                         {c.result && <div className="agent-trace-detail">{c.result}</div>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {traceExpanded.has("cites") && (
+                  <div className="agent-trace-panel">
+                    {traceSummary.cites.map((c, ci) => (
+                      <div className="agent-trace-call-entry" key={`ci${ci}`}>
+                        <div className="agent-trace-op">{c.text}</div>
+                        {(c.detail || "").split("\n").filter(Boolean).map((d, di) => (
+                          <div className="agent-trace-detail" key={`cid${di}`}>{d}</div>
+                        ))}
                       </div>
                     ))}
                   </div>

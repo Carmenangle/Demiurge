@@ -261,6 +261,99 @@ def test_独立表格维护提示词只要求JSON不要求拼接剧情正文():
     assert "正文之后" not in ins
 
 
+# ── 2026-09-18 兜底状态抽取：维护响应对象协议 parse_maintenance_payload ──
+
+def test_parse_maintenance_payload_旧数组协议兼容():
+    raw = json.dumps(
+        [{"op": "insert", "table": "背包物品表", "values": {"物品名称": "@药@水@"}}],
+        ensure_ascii=False)
+    ops, deltas, snapshot = tu.parse_maintenance_payload(raw)
+    assert ops[0]["values"] == {"物品名称": "药水"}
+    assert deltas == [] and snapshot == ""
+
+
+def test_parse_maintenance_payload_对象协议全量():
+    raw = json.dumps({
+        "ops": [{"op": "update", "table": "背包物品表", "row": 0, "values": {"数量": 2}}],
+        "state_deltas": [
+            {"field": "数值/凌若冰·好感度", "op": "add", "value": 2, "evidence": "@她@红了脸"},
+            "bad-item",
+        ],
+        "status_snapshot": "[第38轮] 夜谈\n[好感] 凌若冰=42",
+    }, ensure_ascii=False)
+    ops, deltas, snapshot = tu.parse_maintenance_payload(raw)
+    assert ops and ops[0]["table"] == "背包物品表"
+    assert len(deltas) == 1 and deltas[0]["evidence"] == "她红了脸"
+    assert deltas[0]["field"] == "数值/凌若冰·好感度"
+    assert snapshot.startswith("[第38轮]")
+
+
+def test_parse_maintenance_payload_对象缺键取默认():
+    ops, deltas, snapshot = tu.parse_maintenance_payload(
+        '{"ops": [{"op": "delete", "table": "T", "key": "x"}]}')
+    assert len(ops) == 1 and deltas == [] and snapshot == ""
+
+
+def test_parse_maintenance_payload_快照缺好感行不采纳():
+    ops, deltas, snapshot = tu.parse_maintenance_payload(
+        '{"ops": [], "state_deltas": [], "status_snapshot": "第38轮，风平浪静。"}')
+    assert ops == [] and deltas == [] and snapshot == ""
+
+
+def test_parse_maintenance_payload_坏格式与顶层标量返回None():
+    assert tu.parse_maintenance_payload("抱歉，我无法输出JSON") == (None, [], "")
+    assert tu.parse_maintenance_payload("42") == (None, [], "")
+
+
+def test_parse_maintenance_payload_对象ops非法仍取状态字段():
+    ops, deltas, snapshot = tu.parse_maintenance_payload(
+        '{"ops": "not-a-list", "state_deltas": [], "status_snapshot": "[好感] 凌若冰=1"}')
+    assert ops == [] and snapshot == "[好感] 凌若冰=1"
+
+
+# ── 维护提示词：抽取模式扩展（旧协议文案逐字不变）──
+
+def test_独立维护提示词无抽取时不含状态协议且无表返回空():
+    tables = ts.parse_template(_tpl())
+    ins = tu.maintenance_instruction(tables)
+    assert "只输出 JSON 数组" in ins
+    assert "state_deltas" not in ins and "status_snapshot" not in ins
+    assert tu.maintenance_instruction([]) == ""
+
+
+def test_独立维护提示词抽取模式改收对象协议():
+    tables = ts.parse_template(_tpl())
+    ins = tu.maintenance_instruction(tables, extract_deltas=True, extract_snapshot=True)
+    assert "只输出一个 JSON 对象" in ins
+    assert '"state_deltas"' in ins and '"status_snapshot"' in ins
+    # 增量语法与 state_instruction 同源：字段稳定、中点归属、evidence 必带
+    assert "角色名·好感度" in ins
+    assert "增量相对当前现值" in ins
+    assert "evidence" in ins
+    # 快照规则：必须含 [好感] 行
+    assert "[好感]" in ins
+    assert "state_deltas 固定输出" not in ins
+    assert "status_snapshot 固定输出" not in ins
+
+
+def test_独立维护提示词抽取模式可分槽位限定():
+    tables = ts.parse_template(_tpl())
+    ins = tu.maintenance_instruction(tables, extract_deltas=False, extract_snapshot=True)
+    assert "state_deltas 固定输出 []" in ins
+    assert "status_snapshot 固定输出空串" not in ins
+    ins2 = tu.maintenance_instruction(tables, extract_deltas=True, extract_snapshot=False)
+    assert "status_snapshot 固定输出空串" in ins2
+    assert "state_deltas 固定输出 []" not in ins2
+
+
+def test_独立维护提示词无表仅抽取不返回空():
+    ins = tu.maintenance_instruction([], extract_deltas=True, extract_snapshot=True)
+    assert ins != ""
+    assert "你是剧情状态维护助手" in ins
+    assert "ops 固定输出 []" in ins
+    assert '"state_deltas"' in ins
+
+
 def test_create_table_去重去空建表():
     tables: list = []
     t = ts.create_table(tables, "符箓表", ["名称", "名称", " ", "品阶", "数量"],

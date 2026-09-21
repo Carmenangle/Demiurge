@@ -32,6 +32,14 @@ from app.services import prompt_clean
 # 元信息：默认时长（秒）。preset videoDurationHint 可覆盖。
 _DEFAULT_DURATION = 15
 
+# ⑥[音频] 口径（2026-09-20 用户定案）：**视频生成的音频只有效果音**。
+# 理由：台词/旁白由「多元数据插入」里的**独立音频生成功能**负责，视频提示词再写一遍
+# 会让两套音频链互相打架。用户原话：「视频生成的音频生成不包括台词，只有效果音」。
+# ⚠ 两项数据仍完整留在 `spec["audio_design"]` 里（不删数据，只不渲染），
+#    开关集中在这两个常量，一行即可改回。
+_VIDEO_AUDIO_EMIT_MUSIC = False
+_VIDEO_AUDIO_EMIT_LINES = False
+
 # 首尾帧时间分镜的最小三段式（起-承-合），节奏名可被调用方覆盖。
 _FIRSTLAST_BEATS = ("开场定格", "主体演变", "收尾定格")
 
@@ -474,17 +482,17 @@ def _transition_segments(spec: dict[str, Any],
 
 
 def _audio_hint(
-    spec: dict[str, Any], audio_lines: list | None = None, include_lines: bool = True,
+    spec: dict[str, Any],
+    audio_lines: list[Any] | None = None,
+    *,
+    include_lines: bool | None = None,
 ) -> str:
-    """⑥ 音频：音乐 / 音效 / 台词 / 同步 四要素。
+    """⑥ 音频：**只有效果音**（2026-09-20 用户定案）。
 
-    优先读 agent 同轮提取的 audio_design（音乐 + 具体音效清单 + 逐字台词 + 卡拍），
-    让音频不再是「环境声」单薄占位；缺失时回退纯音乐结构（R6：无逐字对白不写
-    「台词=逐字」诱导幻觉）。audio_lines 形如 [{speaker, text}, ...]（comfy_audio
-    对白），在无 audio_design 时作为台词兜底。
-
-    include_lines=False（climax 模式）：高潮定格时刻对白通常已经说完（用户定稿
-    2026-08-28），动作窗口内不写台词——无论来源一律不列，[音频] 只有音乐/音效/同步。
+    台词/旁白归「多元数据插入」里的**独立音频生成功能**，视频提示词一律不写；
+    音乐结构同样不写（用户口径「只有效果音」）。两项数据仍留在 `spec["audio_design"]`
+    里，只由 `_VIDEO_AUDIO_EMIT_MUSIC` / `_VIDEO_AUDIO_EMIT_LINES` 控制是否渲染。
+    `audio_lines`（comfy_audio 对白）参数**保留仅为兼容**，不再进提示词。
     """
     audio_raw = spec.get("audio_design")
     design: dict[str, Any] = dict(audio_raw) if isinstance(audio_raw, dict) else {}
@@ -524,12 +532,15 @@ def _audio_hint(
             if text:
                 lines.append(f"{speaker}：{text}" if speaker else text)
 
-    parts = [f"音乐={music or '按本集风格铺底'}"]
+    del audio_lines, include_lines  # 兼容参数，按 2026-09-20 口径不再进提示词
+    parts: list[str] = []
+    if _VIDEO_AUDIO_EMIT_MUSIC:
+        parts.append(f"音乐={music or '按本集风格铺底'}")
     if sfx:
         parts.append(f"音效={'、'.join(sfx)}")
     else:
         parts.append("音效=环境声")
-    if lines and include_lines:
+    if lines and _VIDEO_AUDIO_EMIT_LINES:
         parts.append(f"台词={'；'.join(lines)}")
     parts.append(f"同步={sync or '视觉事件卡拍'}")
     return "；".join(parts)

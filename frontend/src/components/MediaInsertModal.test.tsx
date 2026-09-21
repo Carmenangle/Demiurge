@@ -171,3 +171,45 @@ describe("MediaInsertModal LoRA modes", () => {
     expect(html).not.toContain("兜底风格 LoRA");
   });
 });
+
+describe("MediaInsertModal prompt settings entry", () => {
+  it("offers a gear entry for the LLM-facing prompts, closed by default", () => {
+    const html = renderToStaticMarkup(
+      <MediaInsertModal templates={[]} modelsDir=""
+        preset={{ templateId: "", appearanceSource: "worldbook" }}
+        onSave={() => {}} onClose={() => {}} />,
+    );
+
+    expect(html).toContain('aria-label="提示词设置"');
+    expect(html).toContain("提示词设置：控制给 LLM 看的提示词");
+    // 子层按需挂载：未点击齿轮时不得预先出现对话框内容
+    expect(html).not.toContain("输出格式与校验");
+  });
+});
+
+describe("MediaInsertModal 画面人称", () => {
+  it("三档人称按钮组同排渲染，并回填手选档", () => {
+    const html = renderToStaticMarkup(
+      <MediaInsertModal templates={[]} modelsDir=""
+        preset={{ templateId: "", viewpoint: "third_person" }}
+        onSave={() => {}} onClose={() => {}} />,
+    );
+
+    expect(html).toContain("画面人称");
+    expect(html).toContain("自动");
+    expect(html).toContain("第一人称");
+    expect(html).toContain('aria-pressed="true">第三人称');
+    expect(html).toContain("主人公算一个主体");
+  });
+
+  it("旧预设未设人称时落地在自动档（零回归）", () => {
+    const html = renderToStaticMarkup(
+      <MediaInsertModal templates={[]} modelsDir=""
+        preset={{ templateId: "" }}
+        onSave={() => {}} onClose={() => {}} />,
+    );
+
+    expect(html).toContain('aria-pressed="true">自动');
+    expect(html).toContain("判不出时按第一人称处理");
+  });
+});

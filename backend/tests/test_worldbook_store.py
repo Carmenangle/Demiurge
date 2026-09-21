@@ -289,3 +289,73 @@ def test_普通条目更新同样保留底座且身份键不可改(tmp_path):
     assert "普通条目" in entry["content"]                            # 底座保留
     assert "更新后的设定" in entry["content"]
     assert "【剧情进展·动态】" in entry["content"]
+
+
+def test_条目正文性别解析优先显式声明():
+    """① 显式声明（【性别】锚点 / 「性别：X」）可靠度最高，优先于正文推断。
+
+    属主说明：解析器随**条目正文属主**落在 `worldbook_store`（2026-09-20 从
+    `scene_illustration` 下沉——那条反向 import 会踩 `roleplay-agency-stack` 同层违规）。
+    """
+    assert worldbook_store.gender_from_text("【性别】女\n【外貌】漆黑墨发。") == "女"
+    assert worldbook_store.gender_from_text("【主角定位】穿越者。\n性别：男") == "男"
+    # 显式声明赢过正文里的相反信号
+    assert worldbook_store.gender_from_text("【性别】男\n【身份】某位贵妇的丈夫。") == "男"
+
+
+def test_条目正文性别解析须有主语_裸扫身份名词不算():
+    """②③ 都要求主语（名字或第三人称代词）在场。
+
+    ⚠ 关键防线：全文裸扫身份名词会把男主人公条目里顺带提到的「贵妇」误判成主人公性别，
+    真机误判比缺省更糟（会往画面事实里注入错性别）。"""
+    assert worldbook_store.gender_from_text("她是流亡的王女，穿越而来。", "甲") == "女"
+    assert worldbook_store.gender_from_text("他原是加林贵族家的少年。", "甲") == "男"
+    # 身份名词出现在别的句子里、且与本名/代词不相邻 ⇒ 不猜
+    assert worldbook_store.gender_from_text("后宫众女与贵妇们围绕着他。", "甲") == ""
+    assert worldbook_store.gender_from_text("【身份】加林领地的女贵族兼财政官。", "甲") == ""
+
+
+def test_条目正文性别解析拿不准就返回空串():
+    """宁缺勿猜：无任何信号 ⇒ 空串（调用方据此不注入）。"""
+    assert worldbook_store.gender_from_text("") == ""
+    assert worldbook_store.gender_from_text("【主角定位】一个来历不明的存在。") == ""
+    assert worldbook_store.gender_from_text(None) == ""  # type: ignore[arg-type]
+
+
+def test_主人公性别从世界书条目正文解析(tmp_path):
+    """2026-09-20 用户定案：主人公性别从**绑定世界书条目**取（只服务主人公）。
+
+    解析优先级＝①「角色卡·<名>」条目优先 ②正文/keys 提及该名的条目兜底；
+    条目内三级解析＝显式声明 > 系词句 > 与名字/代词相邻的身份名词。取不到 ⇒ 空串（不猜）。
+    """
+    repo_id = "work"
+    book = {"entries": [
+        {"comment": "角色卡·甲", "content": "【主角定位】她是流亡的王女，穿越而来。\n【外貌】银发。",
+         "keys": ["甲"]},
+        {"comment": "角色卡·乙", "content": "【性别】男\n【外貌】高大。", "keys": ["乙"]},
+        {"comment": "角色卡·丙", "content": "【身份】加林领地的女贵族兼财政官。", "keys": ["丙"]},
+    ]}
+    worldbook_store.ensure_repo_snapshot(str(tmp_path), repo_id, [book])
+
+    assert worldbook_store.repo_protagonist_gender(str(tmp_path), repo_id, "甲") == "女"
+    assert worldbook_store.repo_protagonist_gender(str(tmp_path), repo_id, "乙") == "男"
+    # 裸身份名词无主语 ⇒ 宁缺勿猜
+    assert worldbook_store.repo_protagonist_gender(str(tmp_path), repo_id, "丙") == ""
+    # 名字不在世界书里 / 名为空 / 无快照 ⇒ 空串
+    assert worldbook_store.repo_protagonist_gender(str(tmp_path), repo_id, "丁") == ""
+    assert worldbook_store.repo_protagonist_gender(str(tmp_path), repo_id, "") == ""
+    assert worldbook_store.repo_protagonist_gender(str(tmp_path), "missing", "甲") == ""
+
+
+def test_主人公性别_角色卡条目优先于正文提及(tmp_path):
+    """同名在多个条目出现时，「角色卡·<名>」条目是身份真源，优先于其他条目的顺带提及。"""
+    repo_id = "work"
+    book = {"entries": [
+        # 机制条目先写到该名，且句中出现女性身份词（若按顺序取会误判成女）
+        {"comment": "系统判定机制·主角归一规则",
+         "content": "【定位】本作主角为{{user}}，与后宫众女互动。", "keys": ["主角", "甲"]},
+        {"comment": "角色卡·甲", "content": "【身份】前骑士团团长，他是被解职的男人。", "keys": ["甲"]},
+    ]}
+    worldbook_store.ensure_repo_snapshot(str(tmp_path), repo_id, [book])
+
+    assert worldbook_store.repo_protagonist_gender(str(tmp_path), repo_id, "甲") == "男"

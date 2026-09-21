@@ -1,6 +1,7 @@
 """叙事纪要落盘+召回：SQLite FTS5（trigram）单一属主。Phase C「表格记忆」的 I/O 层。
 
-按 repo_id 物理隔离：`<base>/<safe repo_id>/chronicle.db`（与 state.json 同目录，同一作品线）。
+按 repo_id 物理隔离：`<base>/<仓库名>/chronicle.db`（2026-09-18 ③ 起与 chat/图/文档同域；
+旧 `<base>/<safe repo_id>/` 由 `repo_meta.engine_repo_dir` 惰性迁移）。与 state.json 同目录，同一作品线。
 纪要**只增不改**（append-only）——`append` 落一条，`recall` 按 trigram 相关性取 top-k，
 `recent` 取最近若干条兜底，`rebuild` 从已存正文清空重建 FTS5 索引（RAG 重建口）。
 
@@ -14,14 +15,14 @@ from pathlib import Path
 from typing import Any
 
 from app.services import narrative_memory as nm
+from app.services import repo_meta
 from app.services.narrative_memory import ChronicleEntry
-from app.services.pathnames import safe_seg
 
 CHRONICLE_DB = "chronicle.db"
 
 
 def db_path(base: str, repo_id: str) -> Path:
-    return Path(base) / safe_seg(repo_id, strip=False) / CHRONICLE_DB
+    return repo_meta.engine_repo_dir(base, repo_id) / CHRONICLE_DB
 
 
 def _connect(base: str, repo_id: str) -> sqlite3.Connection:
