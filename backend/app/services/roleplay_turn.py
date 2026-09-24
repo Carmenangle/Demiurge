@@ -293,6 +293,11 @@ class TurnExecution:
     selfheal_notices: list = field(default_factory=list)
     # 截断自愈次数上限（设置→AI 模型「截断自愈次数」，0=不自愈；默认取 SELFHEAL_MAX_ATTEMPTS）。
     selfheal_attempts: int = SELFHEAL_MAX_ATTEMPTS
+    # 生成字数下限（智能体参数预设→剧情推进「生成字数下限」，0=关闭）。
+    # 产出正文低于该字数 ⇒ `incomplete_story_reason` 判「没写完」⇒ **轮内续写**（同一条
+    # 消息接着写，非多轮），直到达标或预算用尽。对齐 SillyTavern 的 auto_continue.target_length。
+    # ⚠ 默认 0＝关闭：短轮次是合法产物（用户就是要一小段/时光飞逝），开下限会误判并白烧一次调用。
+    story_min_chars: int = 0
 
 
 @dataclass
@@ -305,6 +310,11 @@ class TurnExecutionHooks:
     # 续写式自愈（可选）：入参=被截断的原始输出，返回=续写调用的原始输出；
     # 缺省（None）或不可续时退回整段重掷。
     continue_generate: Callable[[str], str] | None = None
+    # 剧情续写（可选，2026-09-21）：入参=**结构已合格但剧情没写完**的续写预填串，
+    # 返回=续写调用的原始输出；缺省（None）＝剧情完整度闸关闭，行为逐字节等于旧版。
+    # 与 continue_generate 分开是**刻意**的：截断续写给模型的指令是「闭合 </content>」，
+    # 剧情续写给的是「接着往下写」，两者语义不同，必须由接线侧显式选（不靠猜）。
+    continue_story: Callable[[str], str] | None = None
 
 
 
@@ -493,6 +503,181 @@ def _autoclose_content(reply: str) -> str:
     return closed
 
 
+# ── 剧情完整度闸（2026-09-21 用户定案）───────────────────────────────────────────
+#
+# 结构校验（ensure_complete_visible_content）只判「标签闭没闭」——模型完全可以**规规矩矩
+# 闭合 </content> 却只写半段剧情**（末尾停在句中，或在正文尾巴上留下写给自己看的
+# 「（正文到此，继续往后续写一点：…）」注记）。用户口径：**只要认为剧情还未完善，重试就该
+# 继续续写，最起码保证段落是完整的**。故这里补一条**内容层**判据，命中即再续写一轮；
+# 与结构截断的关键差异是**非致命**——补不动／预算用尽就按当前正文发布，绝不作废已付费正文。
+#
+# 「段落完整」（用户强制底线）＝正文末尾（去尾随空白与 markdown 强调符后）落在句末标点上。
+# 标点集**刻意收窄**：不含 `，,`（句中断掉）与 `：:`（后面还要接内容）；含 `；;`／`——`／`…`
+# ——这几种在中文叙事里可以是自觉收束，宁可漏判不误判（漏判＝少一次续写，误判＝白烧一次调用）。
+_STORY_TERMINAL_CHARS = frozenset("。．.！？!?…～~—；;”\"’'』」》〉》）)】]}")
+# 尾巴修剪：空白 ＋ markdown 强调/删除线/转义符（`**他推开门。**` 结尾不该算没收束）
+_STORY_TAIL_TRIM_RE = re.compile(r"[\s*_~\\]+$")
+_CONTENT_CLOSE_RE = re.compile(r"</content\s*>", re.IGNORECASE)
+_CONTENT_OPEN_LEAD_RE = re.compile(r"^\s*<content\b[^>]*>\s*", re.IGNORECASE)
+
+
+def story_body(reply: str) -> str:
+    """取回复里的**纯剧情正文**（剥 think／status／事件块，只留 <content> 内层）。
+
+    与上下文瘦身同源：直接复用 `story_history.prose_only`，不另立一套剥离清单——
+    `prompt_clean` 的 tag 登记一改，这里自动跟上。
+    """
+    from app.services import story_history
+    return story_history.prose_only(reply or "")
+
+
+def _trailing_plan_note(body: str) -> str:
+    """正文末尾的自留注记（识别清单属主＝`roleplay_agency.trailing_plan_note`）。"""
+    from app.services import roleplay_agency
+    return roleplay_agency.trailing_plan_note(body)
+
+
+def _ends_on_sentence_boundary(body: str) -> bool:
+    """末尾（去尾随空白／markdown 符后）是否落在句末标点上。"""
+    tail = _STORY_TAIL_TRIM_RE.sub("", body or "")
+    return bool(tail) and tail[-1] in _STORY_TERMINAL_CHARS
+
+
+def incomplete_story_reason(reply: str, *, min_body_chars: int = 0) -> str:
+    """剧情完整度判据：空串＝「这一轮写完了」；非空＝「未完善」并给出原因。
+
+    只判**可见剧情正文**：模型在 `<think>` 里写「本轮的收束和下一轮的钩子」是设计产物，
+    不算正文没收束。两条触发，按置信度降序：
+    ① 正文末尾残留模型自留的续写注记——模型自己宣告没写完，属硬信号；
+    ② 段落未写完：末尾不是句末标点（用户口径的**强制底线**）。
+    `min_body_chars > 0` 时追加篇幅下限判据（默认 0＝关：短轮次是合法产物，把下限默认
+    打开会把「用户就是要一小段」误判成没写完，白烧一次调用）。
+    """
+    body = story_body(reply)
+    if not body:
+        return ""
+    note = _trailing_plan_note(body)
+    if note:
+        return f"正文末尾残留模型自留的续写注记：{note}"
+    if min_body_chars > 0 and len(body) < min_body_chars:
+        return f"正文仅 {len(body)} 字，低于篇幅下限 {min_body_chars} 字"
+    if not _ends_on_sentence_boundary(body):
+        return "正文末尾段落未写完（末尾不是句末标点）"
+    return ""
+
+
+def open_content_for_continuation(reply: str) -> str:
+    """把「结构合格但剧情没写完」的回复改写成**续写预填**：摘掉最后一个 `</content>`
+    及其后的尾部块，让模型接着在同一个 `<content>` 里往下写。
+
+    与截断续写**共用同一拼接契约**（模型补正文 ＋ 自己闭合 `</content>` ＋ 自己补尾部块），
+    所以接缝处理（think 剥离、只取新增正文）照旧适用。只在 think **之外**找闭合标签——
+    think 里复述协议字面量（「检查 <content> 标签」）不是真结构（2026-08-29 trace 实锤）。
+    找不到闭合标签返回空串（调用方按「改不动」处理）。
+    """
+    from app.services import roleplay_agency
+    head, rest = roleplay_agency.split_think_prefix(reply or "")
+    matches = list(_CONTENT_CLOSE_RE.finditer(rest))
+    if not matches:
+        return ""
+    return head + rest[:matches[-1].start()].rstrip("\r\n")
+
+
+def _try_story_continuation(turn: TurnExecution, hooks: TurnExecutionHooks,
+                            prefill: str, reason: str) -> str:
+    """剧情没写完时的续写（**非致命**）：契约与截断续写一致，差异有三——
+
+    ① 半句**不回退**：`truncate_to_sentence_boundary` 会把「没写完的尾巴」切掉，而这条
+       尾巴正是要接上的东西；
+    ② 模型画蛇添足重开 `<content>` 时只摘掉**开头**那个开标签（防拼出嵌套 content）；
+    ③ 失败一律返回空串——调用方按「照原样发布」处理，不判死、不整段重掷（正文已合格）。
+    """
+    _selfheal_notice(turn, hooks, f"⚠️ {reason}，正在续写补全剧情…")
+    continue_story = hooks.continue_story
+    if continue_story is None:  # 防御：调用方已判定接线后才进来
+        return ""
+    try:
+        continuation = continue_story(prefill) or ""
+    except Exception as exc:  # noqa: BLE001 - 续写失败不影响已合格的正文
+        _selfheal_notice(turn, hooks, f"⚠️ 剧情续写调用失败（{exc}），按已生成正文发布")
+        return ""
+    hooks.generated(continuation)  # 每次生成（含续写）都留痕
+    body = _CONTENT_OPEN_LEAD_RE.sub("", _strip_think(continuation).lstrip(), count=1)
+    if re.search(r"<content\b", body, re.I):
+        # 续写里又插了一个 <content> 开标签（**开头**那个已被摘掉）⇒ 正文会留下字面标签，
+        # 宁可不要这段续写。判定只作用于续写输出：预填里那个 <content> 本就在，不算重复。
+        _selfheal_notice(turn, hooks, "⚠️ 剧情续写重复输出了 <content> 标签，按已生成正文发布")
+        return ""
+    added = re.split(r"</content\s*>", body, maxsplit=1, flags=re.I)[0]
+    added = re.sub(r"<content\b[^>]*>", "", added, flags=re.I)
+    if len(added.strip()) < CONTINUATION_MIN_NEW_CHARS:
+        _selfheal_notice(turn, hooks, "⚠️ 剧情续写无有效新增正文（空回/懒闭合），按已生成正文发布")
+        return ""
+    assembled = prefill + body
+    try:
+        ensure_complete_visible_content(assembled)
+    except TruncatedRoleplayOutput as exc:
+        if _content_open_unclosed(assembled):
+            closed = _autoclose_content(assembled)
+            if closed:
+                _selfheal_notice(turn, hooks, "⚠️ 剧情续写只差闭合标签，已补 </content>")
+                return closed
+        _selfheal_notice(turn, hooks, f"⚠️ {exc}（剧情续写后结构不完整），按已生成正文发布")
+        return ""
+    _selfheal_notice(turn, hooks, f"⚠️ 剧情续写完（补写 {len(added.strip())} 字）")
+    return assembled
+
+
+def _complete_story(turn: TurnExecution, hooks: TurnExecutionHooks, reply: str,
+                    *, now: Callable[[], float] = time.monotonic) -> str:
+    """剧情完整度闸（2026-09-21 用户定案）：结构已合格但内容判为「没写完」⇒ 续写补全。
+
+    与截断自愈的三点差异：① 触发条件是**内容层**判据而不是标签闭合；② **非致命**——
+    补不动／预算用尽一律按当前正文发布（用户已付费的正文绝不作废）；③ 只在
+    `hooks.continue_story` 装配时才生效（未接线＝逐字节等于旧行为）。
+    预算复用「截断自愈次数」（0＝关闭）：每轮一次模型调用，判为写完即止。
+    """
+    if hooks.continue_story is None:
+        return reply
+    budget = max(0, min(5, int(turn.selfheal_attempts)))
+    reason = incomplete_story_reason(reply, min_body_chars=turn.story_min_chars) if budget > 0 else ""
+    if not reason:
+        return reply
+    started = now()
+    spent = 0
+    while spent < budget:
+        # 用户停止：不再花任何模型调用，已合格正文照常发布（中断≠失败）。
+        if user_interrupted(turn.ctx):
+            turn.trace.append("⏹ 剧情续写已中止（用户停止，按已生成正文发布）")
+            break
+        if now() - started > SELFHEAL_TOTAL_BUDGET_SECONDS:
+            turn.trace.append("⚠️ 剧情续写总时长预算已用尽（按已生成正文发布）")
+            break
+        prefill = open_content_for_continuation(reply)
+        if not prefill:
+            break
+        _set_selfheal_deadline(turn.ctx, now() + SELFHEAL_CALL_TIMEOUT_SECONDS)
+        try:
+            candidate = _try_story_continuation(turn, hooks, prefill, reason)
+        finally:
+            _set_selfheal_deadline(turn.ctx, None)
+        spent += 1
+        if not candidate:
+            break
+        reply = candidate
+        reason = incomplete_story_reason(reply, min_body_chars=turn.story_min_chars)
+        if not reason:
+            break
+    # 进度提示（正在续写…）已完成使命：与截断自愈同口径，正文完整后从 trace 清除；
+    # 仍未写完时留**一条**汇总，说明为什么最终按当前正文发布（费用已花在续写上）。
+    turn.trace[:] = [line for line in turn.trace if line not in turn.selfheal_notices]
+    turn.selfheal_notices[:] = []
+    if reason:
+        turn.trace.append(
+            f"⚠️ 剧情续写 {spent} 次后仍未写完整（{reason}），已按当前正文发布")
+    return reply
+
+
 
 def _reroll_once(turn: TurnExecution, hooks: TurnExecutionHooks, reason: str) -> str:
     """整段重掷一次：原始输出原样返回（可能仍截断），截断与否由自愈循环统一校验。
@@ -593,6 +778,22 @@ def _selfheal_loop(turn: TurnExecution, hooks: TurnExecutionHooks, reply: str,
     # 自愈成功：进度提示已完成使命，正文完整后必须清除（2026-08-31 晚用户反馈）；
     # 按登记原文精确清除，不误伤其他模块的 ⚠️ 告警。失败路径保留提示供诊断。
     turn.trace[:] = [line for line in turn.trace if line not in turn.selfheal_notices]
+    # 正文元话语清洗（2026-09-13 用户实锤）在此补齐：自愈路径此前**直接 finalize**，
+    # 与首发路径口径不一致——「输出纪律」清单会当正文发布，且会污染下面剧情闸的尾巴判据
+    # （纪律行不是句末标点 ⇒ 误判「没写完」白烧一次续写）。两段闸必须看到同一份清洗后文本。
+    reply, meta_leaks = strip_meta_leak_in_content(reply)
+    if meta_leaks:
+        turn.trace.append(
+            f"⚠️ 正文元话语残留已剥离 {len(meta_leaks)} 行：{meta_leaks[0][:40]}")
+    # 剧情完整度闸接续（2026-09-21 用户定案「要接上」）：截断自愈只保证**标签闭合**，
+    # 续写／重掷出来的正文完全可能仍停在半段剧情（结构合格 ≠ 剧情写完）——按用户口径
+    # 「只要认为剧情还未完善，重试就该继续续写」，对**已自愈成功**的正文再跑一次内容层判据。
+    # ⚠ 拼接语义与截断自愈**完全一致**（用户明令）：仍在既有正文上续写
+    # （`open_content_for_continuation` ＋ `_try_story_continuation`），**不回退句尾、
+    # 不整段重掷**；非致命——补不动／预算用尽一律按当前正文发布，绝不作废已付费正文。
+    # 预算＝`selfheal_attempts`（与截断自愈同源设置，0＝关闭）；两段各自计费上界
+    # ⇒ 单轮附加调用 ≤ 2 × selfheal_attempts（截断自愈 ≤ N ＋ 剧情续写 ≤ N）。
+    reply = _complete_story(turn, hooks, reply, now=now)
     return finalize_turn(TurnFinalization(
         ctx=turn.ctx,
         text=turn.text,
@@ -654,6 +855,9 @@ def execute_turn(turn: TurnExecution, hooks: TurnExecutionHooks,
     if meta_leaks:
         turn.trace.append(
             f"⚠️ 正文元话语残留已剥离 {len(meta_leaks)} 行：{meta_leaks[0][:40]}")
+    # 剧情完整度闸（2026-09-21 用户定案）：结构合格 ≠ 剧情写完。判为「没写完」就再续写一轮
+    # （复用截断续写的拼接契约），补不动/预算用尽按当前正文发布——非致命、绝不判死。
+    reply = _complete_story(turn, hooks, reply, now=now)
     return finalize_turn(TurnFinalization(
         ctx=turn.ctx,
         text=turn.text,
@@ -665,6 +869,48 @@ def execute_turn(turn: TurnExecution, hooks: TurnExecutionHooks,
         affinity=turn.affinity,
         lost=turn.lost,
     ), hooks.finalization)
+
+
+def _illustrate_rec(request: dict, *, repo_id, turn: int, turn_id: str,
+                    anchor_offset: int, index: int) -> dict:
+    """单条出图请求 → 一条 rec（第 57 刀：主请求与多批请求**共用**本函数，口径不分叉）。
+
+    `index == 0` ⇒ **主图**：id 逐字沿用改造前的 `illo-req-{repo_id}-{turn}`（零回归锁）。
+    `index > 0` ⇒ 多批的后续张：id 加 `-{index}` 后缀 —— 前端按 slotId 去重
+    （`appendMediaSlot` 里 `existing.some(part => part.slotId === slotId)`），**必须唯一**，
+    否则第 2 张起会被当成重复而静默丢弃。
+
+    每张自带 `anchor_offset`（由调用方逐条按该请求的 `anchor` 定位）⇒ 前端
+    `insertSlotAtOffset` 把它们各插到自己的正文位置（多槽能力早已具备）。
+    """
+    suffix = "" if index == 0 else f"-{index}"
+    rec = {
+        "id": f"illo-req-{repo_id}-{turn}{suffix}",
+        "prompt": request.get("prompt", ""),
+        "motion": request.get("motion", 0),
+        "actors": request.get("actors", []),
+        "scene_spec": request.get("scene_spec", {}),
+        "video_config": request.get("video_config", {}),
+        "video_request": request.get("video_request") or {},
+        "anchor_offset": anchor_offset,
+        "turn_id": turn_id,
+    }
+    # V1.5/W1：首帧复用判定（L1 原值）随 rec 透传（有值才带）
+    transition_value = request.get("transition")
+    if isinstance(transition_value, str) and transition_value:
+        rec["transition"] = transition_value
+    # V1.5/B1/P5/W3：视频协议字段透传（有值才带，旧前端/旧数据宽松忽略）。
+    # 这些字段由 produce 层编译进 illustrate_request，若在此漏透传，
+    # _ordered_illustration_events/_streamed_illustration_events 读 rec 时永远拿不到，
+    # 首尾帧生图/首帧复用/转场视频在真实链路上全部静默失效。
+    for _key in ("video_mode", "first_frame_desc", "last_frame_desc",
+                 "prev_tail_desc", "last_frame_url"):
+        _value = request.get(_key)
+        if isinstance(_value, str) and _value:
+            rec[_key] = _value
+    if isinstance(request.get("transition_video_request"), dict):
+        rec["transition_video_request"] = request["transition_video_request"]
+    return rec
 
 
 def finalize_turn(draft: TurnFinalization, hooks: TurnFinalizationHooks) -> dict:
@@ -693,36 +939,41 @@ def finalize_turn(draft: TurnFinalization, hooks: TurnFinalizationHooks) -> dict
     if image_recs:
         result["image_recs"] = image_recs
     if illustrate_request:
-        anchor_offset = hooks.anchor_offset(reply, illustrate_request)
-        if anchor_offset is not None:
-            repo_id = draft.ctx.get("repo_id") or draft.ctx.get("thread_id")
-            rec = {
-                "id": f"illo-req-{repo_id}-{draft.turn}",
-                "prompt": illustrate_request.get("prompt", ""),
-                "motion": illustrate_request.get("motion", 0),
-                "actors": illustrate_request.get("actors", []),
-                "scene_spec": illustrate_request.get("scene_spec", {}),
-                "video_config": illustrate_request.get("video_config", {}),
-                "video_request": illustrate_request.get("video_request") or {},
-                "anchor_offset": anchor_offset,
-                "turn_id": draft.ctx.get("turn_id", ""),
-            }
-            # V1.5/W1：首帧复用判定（L1 原值）随 rec 透传（有值才带）
-            transition_value = illustrate_request.get("transition")
-            if isinstance(transition_value, str) and transition_value:
-                rec["transition"] = transition_value
-            # V1.5/B1/P5/W3：视频协议字段透传（有值才带，旧前端/旧数据宽松忽略）。
-            # 这些字段由 produce 层编译进 illustrate_request，若在此漏透传，
-            # _ordered_illustration_events/_streamed_illustration_events 读 rec 时永远拿不到，
-            # 首尾帧生图/首帧复用/转场视频在真实链路上全部静默失效。
-            for _key in ("video_mode", "first_frame_desc", "last_frame_desc",
-                         "prev_tail_desc", "last_frame_url"):
-                _value = illustrate_request.get(_key)
-                if isinstance(_value, str) and _value:
-                    rec[_key] = _value
-            if isinstance(illustrate_request.get("transition_video_request"), dict):
-                rec["transition_video_request"] = illustrate_request["transition_video_request"]
-            result["illustrate_recs"] = [rec]
+        # 第 57 刀 · 多批派发（2026-09-24）：主请求 + 其余锚点的请求，各自按自己的 `anchor`
+        # 定位 anchor_offset ⇒ N 张图各插到自己的正文位置（前端多槽能力早已具备，零 wire 改动）。
+        # 旧链路 / 批量数目 < 2 ⇒ 只有主请求 ⇒ **逐字节等于改造前**（零回归锁）。
+        requests = [illustrate_request]
+        _extra = illustrate_request.get("extra_requests")
+        if isinstance(_extra, list):
+            requests += [item for item in _extra if isinstance(item, dict)]
+        repo_id = draft.ctx.get("repo_id") or draft.ctx.get("thread_id")
+        turn_id = draft.ctx.get("turn_id", "")
+        illustrate_recs: list[dict] = []
+        for index, request in enumerate(requests):
+            anchor_offset = hooks.anchor_offset(reply, request)
+            if anchor_offset is None:
+                continue
+            illustrate_recs.append(_illustrate_rec(
+                request, repo_id=repo_id, turn=draft.turn, turn_id=turn_id,
+                anchor_offset=anchor_offset, index=index,
+            ))
+            # 第 57 刀 · 观测补口（2026-09-24 · 2 张实测暴露）：多批派发后「两张图挤在一起」
+            # 无法归因 —— extra 的 anchor／anchor_offset 此前**完全不进 trace**
+            # （`illustration.request` 只为主图发、`illustration.slot` 此前不存在）。
+            # 有了这条才能离线复算「每个槽实际插在哪」。纯观测，不参与任何判定。
+            try:
+                from app.services import run_trace as _slot_trace
+
+                _slot_trace.emit(
+                    draft.ctx, "illustration.slot",
+                    slot_id=illustrate_recs[-1]["id"], index=index,
+                    anchor=str(request.get("anchor") or ""),
+                    anchor_offset=anchor_offset,
+                )
+            except Exception:  # noqa: BLE001 [EXC-保留] 观测失败不得打断出图链；无日志价值（trace 端点自身不可用）
+                pass
+        if illustrate_recs:
+            result["illustrate_recs"] = illustrate_recs
     if audio_request:
         repo_id = draft.ctx.get("repo_id") or draft.ctx.get("thread_id")
         result["audio_recs"] = [{

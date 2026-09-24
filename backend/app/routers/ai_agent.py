@@ -85,6 +85,7 @@ class MultiAgentRequest(ImageAgentRequest):
     prompt_profile: str = "anima_tags"
     appearance_source: Literal["worldbook", "character_card"] = "worldbook"
     illustration_viewpoint: Literal["", "first_person", "third_person"] = ""  # 画面人称手选（「多元数据插入」面板按钮组；空=按锚点段自动判定）
+    illustration_batch_count: int = Field(default=0, ge=0)  # 高潮点模式批量生图数目（0/缺省=1 张；面板最小 1、无上限）
     character_base_images: dict[str, str] = {}  # ⑥ 角色名→底图（gpt-image 系按在场角色取底图锁一致性）
     illustration_actor_names: list[str] = []  # 自动插画可从正文机械识别的已配置角色名
     style_base_image: str = ""  # ⑥ 无角色底图时的兜底风格底图（gpt-image 系）

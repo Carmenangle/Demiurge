@@ -1485,11 +1485,28 @@ def _rp_prefix_output_structure(system: str) -> str:
     return system
 
 
-def _rp_build_tail_messages(ctx: dict, dynamic_text: str, chains_tail: list) -> list[dict]:
-    """组装 system **头之后**的尾部 system 消息，顺序＝[动态块][思维链 tail][输出纪律][可选音频指令]。
+def _rp_user_priority_block(user_text: str) -> str:
+    """「本轮用户安排·最高优先级」声明 + **逐字复述**用户本轮输入（空输入 → 空串）。
+
+    2026-09-23 用户定案：**不改预设/世界书/前情/表格的任何内容**，改为在**离生成点最近**处
+    抬升用户输入的权重——本块是尾部 system 消息的**最后一条**，紧跟 [输出纪律]、紧邻本轮 `user`。
+    与随 system 头的 `ROLL_INSTRUCTION` 分处首尾两端，构成「近端锚」。
+
+    纯函数、零副作用、不读 ctx；空输入逐字返回空串 ⇒ 既有消息组一字不变（等价矩阵不破）。
+    """
+    text = (user_text or "").strip()
+    if not text:
+        return ""
+    return f"{builtin_agents.USER_PRIORITY_INSTRUCTION}\n{text}"
+
+
+def _rp_build_tail_messages(ctx: dict, dynamic_text: str, chains_tail: list,
+                            user_text: str = "") -> list[dict]:
+    """组装 system **头之后**的尾部 system 消息，顺序＝[动态块][思维链 tail][输出纪律][音频][用户安排]。
 
     动态块是每轮变化的块 → 落在历史之后，静态头（system）才能逐字节跨轮稳定（P4-roleplay 前缀复用）。
-    逐字自 `roleplay_node` 搬移（输出纪律提示词文案字面值零改动）。
+    逐字自 `roleplay_node` 搬移（输出纪律提示词文案字面值零改动）＋ 末尾追加「用户安排最高优先级」
+    块（2026-09-23：抬升用户输入权重；空 `user_text` ⇒ 不追加，既有消息组逐字不变）。
     """
     tail_msgs: list[dict] = []
     if dynamic_text:
@@ -1534,6 +1551,10 @@ def _rp_build_tail_messages(ctx: dict, dynamic_text: str, chains_tail: list) -> 
             "role": "system",
             "content": audio_dialogue_extract.build_inline_audio_instruction(),
         })
+    # 用户安排最高优先级：落在**最后一条** system ⇒ 紧邻本轮 user，近端权重最高（2026-09-23 用户定案）
+    priority_block = _rp_user_priority_block(user_text)
+    if priority_block:
+        tail_msgs.append({"role": "system", "content": priority_block})
     return tail_msgs
 
 
@@ -1709,7 +1730,7 @@ def _rp_prepare_visual_and_tables(
     # 通用数据表只作只读剧情上下文；更新由正文发出后的独立维护调用完成，
     # 禁止再让主 Roleplay 在正文尾部生成 <表格更新>。
     try:
-        from app.services import table_store, table_update
+        from app.services import character_state, table_store, table_update
         _tables = table_store.load(ctx.get("output_dir") or "", repo_id)
         turn_tables = table_store.tables_for_read(_tables)
         if turn_tables:
@@ -1723,6 +1744,20 @@ def _rp_prepare_visual_and_tables(
                 ctx, "table.prompt", status="skipped", turn=turn,
                 reason="no_tables",
             )
+        # 待建好感度字段（2026-09-23 用户口径）：播种规则只说「状态表里还没有字段时要
+        # set 播种」，而**模型看不到"谁缺字段"**（它只看到【当前状态】块里已有的字段）
+        # ⇒ 已登场却始终没被建过好感度的角色永远轮不到（真机实锤：骆姑姑在「重要角色表」
+        # 有行、状态表里有 4 条叙事字段，好感度字段一直不存在）。
+        # 名单 =「重要角色表」姓名列 − 状态表已有好感度属主；进动态区（不占 continuity
+        # 的 900 token 预算，也不动跨轮逐字节稳定的静态头）。无 state（无卡/无 output_dir）
+        # 时不注入，既有文案逐字不变。
+        st = ctx.get("_character_state")
+        pending = character_state.missing_affinity_owners(
+            st, table_store.column_values(turn_tables, table_store.CHARACTERS_TABLE, "姓名"),
+        ) if st is not None else []
+        if pending:
+            dynamic_parts.append(character_state.render_missing_affinity_block(pending))
+            run_trace.emit(ctx, "affinity.seed_pending", roles=pending, count=len(pending))
     except Exception as exc:  # noqa: BLE001
         run_trace.emit(ctx, "table.prompt", status="error", turn=turn, error=str(exc))
 
@@ -1825,9 +1860,9 @@ def roleplay_node(state: AgentState) -> dict:
         # 命定/登场/检定事件块按剧情穿插正文中间。解析层全部位置无关
         # （extract_status_snapshot 取末块、事件块就地解析），模板是行为引导不是解析契约。
         system = _rp_prefix_output_structure(system)
-        # 尾部顺序（P4-roleplay）：[动态块][思维链 tail][输出纪律][…][本轮 user]。
+        # 尾部顺序（P4-roleplay）：[动态块][思维链 tail][输出纪律][…][用户安排][本轮 user]。
         # 动态块是每轮变化的块，落在历史之后 → 静态头（system）逐字节跨轮稳定。
-        tail_msgs = _rp_build_tail_messages(ctx, dynamic_text, chains_tail)
+        tail_msgs = _rp_build_tail_messages(ctx, dynamic_text, chains_tail, text)
         messages = [{"role": "system", "content": system}, *dialogue, *tail_msgs,
                     {"role": "user", "content": text}]
         compiled_prompt = prompt_compiler.compile_messages(
@@ -1867,6 +1902,9 @@ def roleplay_node(state: AgentState) -> dict:
                 ctx=ctx, text=text, trace=trace, streamed=streamed,
                 deps=deps, turn=turn, affinity=affinity, lost=lost,
                 selfheal_attempts=ctx.get("selfheal_attempts", roleplay_turn.SELFHEAL_MAX_ATTEMPTS),
+                # 生成字数下限（智能体参数预设→剧情推进）：0=关闭；>0 时正文低于该字数
+                # 触发**轮内续写**（同一条消息接着写，非多轮）——对齐 SillyTavern auto-continue。
+                story_min_chars=_builtin(ctx, "roleplay", "storyMinChars", 0),
             ),
             roleplay_turn.TurnExecutionHooks(
                 generate=lambda: _chat_with_optional_stream(
@@ -1879,6 +1917,14 @@ def roleplay_node(state: AgentState) -> dict:
                     ctx, _roleplay_continuation_messages(
                         wire_messages, partial,
                         think_truncated=roleplay_turn.think_truncated(partial),
+                    ),
+                    temperature=temp, **roleplay_sampling,
+                ),
+                # 剧情续写（2026-09-21）：结构合格但剧情没写完时的补写通道。与截断续写
+                # 分开接线——两者的指令语义不同（截断＝闭合标签；剧情＝接着往下写）。
+                continue_story=lambda partial: _chat_with_optional_stream(
+                    ctx, _roleplay_continuation_messages(
+                        wire_messages, partial, story_incomplete=True,
                     ),
                     temperature=temp, **roleplay_sampling,
                 ),

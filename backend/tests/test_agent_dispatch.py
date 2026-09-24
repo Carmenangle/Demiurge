@@ -1225,7 +1225,10 @@ def test_roleplay动态块后置_静态头跨轮逐字节稳定(monkeypatch, tmp
 
     def fake_chat_stream(base, key, model, messages, on_delta, *, temperature, **kw):
         captured.append(messages)
-        return "<content>正文</content>"
+        # 桩回复必须是**段落收束**的完整正文：剧情完整度闸（2026-09-21）对「末尾不是句末
+        # 标点」的正文会再续写一轮，旧桩 `<content>正文</content>` 会让本用例的
+        # 「每轮一次模型调用」前提失效（引用意图＝静态头稳定，不是闸本身）。
+        return "<content>正文。</content>"
 
     monkeypatch.setattr(ag._llm, "chat_messages_stream", fake_chat_stream)
     ctx = _card_ctx(output_dir=str(tmp_path), repo_id="work")
@@ -1792,6 +1795,17 @@ def test_comfy首个用户回合即使已有开场白也兜底生成插画(monke
                 "prompt_chars": len(request["prompt"]),
                 "video_prompt_chars": len(expected_video_prompt),
                 "video_prompt": expected_video_prompt,
+                # 前置观测（2026-09-22）：人称判定与画面主体收敛结果入 trace。
+                # 锚点句「…注视着他。」含第三人称代词 ⇒ `third_person`、source＝`anchor`；
+                # 该场景走词表档（无判据）⇒ 画面主体名集合为空（只有判据档才填）。
+                "viewpoint": "third_person",
+                "viewpoint_detail": {
+                    "viewpoint": "third_person", "auto": "third_person",
+                    "source": "anchor", "conflict": False,
+                },
+                "frame_subjects": [],
+                # 2026-09-22 追加观测：叙事者姓名/来路（本场景无 output_dir/人设 ⇒ 空）。
+                "narrator": "", "narrator_source": "",
             },
         )
 
@@ -3288,8 +3302,9 @@ def _preset_state(tmp_path, repo_id: str, card: str, *, value: float, turn: int)
     from app.services import character_state
 
     st = character_state.load_state(str(tmp_path), repo_id, card)
+    # 2026-09-23：预置值用 `set` 播种（`add` 命中不存在的好感度字段已被新闸拒收）。
     deltas = character_state.parse_deltas(
-        [{"field": f"数值/{card}·好感度", "op": "add", "value": value, "evidence": "前情"}],
+        [{"field": f"数值/{card}·好感度", "op": "set", "value": value, "evidence": "前情"}],
         turn=turn, source=character_state.SRC_AUTO, card_name=card, existing_state=st)
     character_state.apply_deltas(st, deltas)
     st.快照 = character_state.Snapshot(f"[第{turn}轮]\n[好感] {card}={value:g}", turn)
@@ -3972,6 +3987,554 @@ def test_判据命中时带只读合同且必带超时(monkeypatch):
     assert data["status"] == "ok" and data["subjects"] == ["宥夏"]
 
 
+# ── 第 57 刀 · 多批生图：判据采集时同步落「去重 + 取前 N」列表 ──────────────────
+
+
+def _anchor_multi_raw() -> str:
+    """判据吐**多锚点数组**：同带相邻两条（应并成一处）+ 一条异带（应留）。"""
+    return (
+        '{"anchors": ['
+        '{"anchor": "浑身无力的宥夏靠在公告栏上。", "composition": "中景", '
+        '"subjects": ["宥夏"], "reason": "事后定型态", "score": 30},'
+        '{"anchor": "后文收束段。", "composition": "远景", '
+        '"subjects": [], "reason": "收束", "score": 70}'
+        "]}"
+    )
+
+
+def _anchor_multi_clean() -> str:
+    # 段 0 环境 / 段 1 宥夏（无接触）/ 段 2 收束 —— 两条锚点带均为 `.` ⇒ 不并、各留一条。
+    return "前文第一段。\n\n浑身无力的宥夏靠在公告栏上。\n\n后文收束段。"
+
+
+def test_第57刀_判据采集同步落去重后的锚点列表进ctx(monkeypatch):
+    """验收：判据命中时，除返回单条锚点外，还要把**去重 + 取前 N** 的列表写进 ctx。
+
+    ⚠ 两条链必须**同源**：列表第 0 条恒等于 `resolve_anchor_intent` 单条路径的锚点，
+      否则单张出图与多批出图第一张会各画一处。
+    """
+    from app.services import illustration_prompt_store
+
+    monkeypatch.setattr(
+        illustration_prompt_store, "effective_climax_anchor_rubric", _rubric_on(),
+    )
+    monkeypatch.setattr(aag._llm, "chat", lambda *a, **k: _anchor_multi_raw())
+    _trace_capture(monkeypatch)
+    ctx = _ctx()
+
+    anchor, _ = aag._illustration_anchor_intent(
+        ctx, _anchor_multi_clean(), {"present": ["宥夏"]},
+    )
+
+    # 单条路径：分最高那条（收束段 70 > 宥夏段 30）
+    assert anchor == "后文收束段。"
+    items = ctx["illustration_anchor_intents"]
+    # 默认数量 0 ⇒ 1 ⇒ 只留分最高那条 ⇒ 与单条路径**同源**
+    assert len(items) == 1
+    assert items[0]["anchor"] == anchor
+
+
+def test_第57刀_面板数量大于锚点数时全部出图(monkeypatch):
+    """口径锁（用户定案）：数量 ≥ 锚点数 ⇒ 全部出图；结果保持正文序。"""
+    from app.services import illustration_prompt_store
+
+    monkeypatch.setattr(
+        illustration_prompt_store, "effective_climax_anchor_rubric", _rubric_on(),
+    )
+    monkeypatch.setattr(aag._llm, "chat", lambda *a, **k: _anchor_multi_raw())
+    _trace_capture(monkeypatch)
+    ctx = _ctx(illustration_batch_count=5)
+
+    aag._illustration_anchor_intent(ctx, _anchor_multi_clean(), {"present": ["宥夏"]})
+
+    items = ctx["illustration_anchor_intents"]
+    # 正文序：宥夏段在前、收束段在后（不是按分数 70/30 排）
+    assert [item["anchor"] for item in items] == [
+        "浑身无力的宥夏靠在公告栏上。", "后文收束段。",
+    ]
+
+
+def test_第57刀_面板数量小于锚点数时按分取前N(monkeypatch):
+    """口径锁：数量 < 锚点数 ⇒ 按 score 降序取前 N，结果仍保持正文序。"""
+    from app.services import illustration_prompt_store
+
+    monkeypatch.setattr(
+        illustration_prompt_store, "effective_climax_anchor_rubric", _rubric_on(),
+    )
+    monkeypatch.setattr(aag._llm, "chat", lambda *a, **k: _anchor_multi_raw())
+    _trace_capture(monkeypatch)
+    ctx = _ctx(illustration_batch_count=1)
+
+    aag._illustration_anchor_intent(ctx, _anchor_multi_clean(), {"present": ["宥夏"]})
+
+    assert [item["anchor"] for item in ctx["illustration_anchor_intents"]] == ["后文收束段。"]
+
+
+def test_第57刀_锚点列表只在判据命中时落ctx(monkeypatch):
+    """零回归锁：判据不命中（evidence 不过）⇒ **不写** `illustration_anchor_intents`，
+    调用方照旧走单条/词表路径，行为与改造前逐字一致。"""
+    from app.services import illustration_prompt_store
+
+    monkeypatch.setattr(
+        illustration_prompt_store, "effective_climax_anchor_rubric", _rubric_on(),
+    )
+    bad = '{"anchors": [{"anchor": "她心满意足地笑了。", "score": 99}]}'
+    monkeypatch.setattr(aag._llm, "chat", lambda *a, **k: bad)
+    _trace_capture(monkeypatch)
+    ctx = _ctx()
+
+    assert aag._illustration_anchor_intent(
+        ctx, _ANCHOR_CLEAN, {"present": ["宥夏"]},
+    ) == ("", {})
+    assert "illustration_anchor_intents" not in ctx
+
+
+def test_第57刀_面板数量非法时收敛到单张():
+    """边界锁：负数 / 非数 / None ⇒ 1（单张），绝不透传脏值。"""
+    assert aag._anchor_batch_count({}) == 1
+    assert aag._anchor_batch_count({"illustration_batch_count": 0}) == 1
+    assert aag._anchor_batch_count({"illustration_batch_count": -4}) == 1
+    assert aag._anchor_batch_count({"illustration_batch_count": "x"}) == 1
+    assert aag._anchor_batch_count({"illustration_batch_count": None}) == 1
+    assert aag._anchor_batch_count({"illustration_batch_count": 7}) == 7
+
+
+# ── 第 57 刀 · 第 3 步：多事件派发（用户要求统一验证 1／2／999 张三档）──────────
+
+
+def test_第57刀_指定锚点与判据档同一条链且不重复调判据(monkeypatch):
+    """零回归锁 ＋ 省调用锁：
+
+    `anchor_override` 与「判据刚好给出同一锚点」**逐字节等价**（同一锚点 ⇒ 同一画面），
+    且**不再调用判据 LLM** —— 多批的第 2..N 张若各花一次判据调用，N 张图就多 N-1 次成本。
+    """
+    anchor = "浑身无力的宥夏靠在公告栏上。"
+    calls: list = []
+    monkeypatch.setattr(
+        aag, "_illustration_anchor_intent",
+        lambda ctx, clean, sig: (calls.append(1), ("", {}))[1],
+    )
+
+    via_override = aag._wb_comfy_scene_target(
+        {}, "", {}, _ANCHOR_CLEAN, _anchor_sig(), _anchor_pool(),
+        prompt_override="", motion=0, user_text="",
+        anchor_override=anchor, subjects_override=["宥夏"],
+    )
+
+    assert calls == []                                   # 未调判据 LLM
+    assert via_override["requested_anchor"] == anchor
+    via_judge = _run_scene_target_ctx(
+        monkeypatch, _ANCHOR_CLEAN, (anchor, {"subjects": ["宥夏"]}), {},
+    )
+    assert via_override == via_judge                     # 与判据档逐字节等价
+
+
+def _stub_comfy_chain(monkeypatch) -> dict:
+    """把多批编译链换成轻量假件；返回 {built: 被编译的锚点, video: compile_video 实参}。"""
+    built: list[str] = []
+    video: list = []
+
+    def fake_target(ctx, repo_id, plan, clean, sig, pool, *, prompt_override, motion,
+                    user_text, anchor_override="", subjects_override=None):
+        built.append(anchor_override)
+        return {"request_prompt": f"p:{anchor_override}", "plan_retargeted": False,
+                "requested_anchor": anchor_override, "motion": 7}
+
+    monkeypatch.setattr(aag, "_wb_comfy_scene_target", fake_target)
+    monkeypatch.setattr(aag, "_wb_comfy_scene_spec", lambda *a, **k: {"narrative": "n"})
+    monkeypatch.setattr(aag, "_wb_comfy_profile", lambda *a, **k: {"narrative": "n"})
+    monkeypatch.setattr(
+        aag, "_wb_comfy_illustrate_env",
+        lambda ctx, plan, sig, target, spec, *, motion: {
+            "prompt": target["request_prompt"], "anchor": target["requested_anchor"],
+            "motion": motion,
+        },
+    )
+    monkeypatch.setattr(
+        aag, "_wb_frames_and_video",
+        lambda *a, **k: video.append(k.get("compile_video")),
+    )
+    return {"built": built, "video": video}
+
+
+# A（仲裁后按插入点去重）要求锚点**真的在正文里**（`illustration_anchor_offset` 内部有
+# 相似度→词表的多级兜底，假锚点会全部塌缩到同一个兜底 offset）⇒ 测试文本必须含各锚点。
+_ANCHOR_TEXT = "甲处的画面。\n\n乙处的画面。\n\n丙处的画面。\n\n丁处的画面。"
+
+
+def _run_extra(ctx, *, primary_anchor="", motion=0):
+    return aag._wb_comfy_extra_requests(
+        ctx, "", {}, _ANCHOR_TEXT, _anchor_sig(), _anchor_pool(),
+        primary_anchor=primary_anchor, primary_motion=motion,
+        prompt_override="", transition_decision="", user_text="",
+    )
+
+
+def _anchors(*pairs):
+    return {"illustration_anchor_intents": [
+        {"anchor": name, "score": score} for name, score in pairs
+    ]}
+
+
+def test_第57刀_第1张_批量数目缺省时不产出任何额外请求(monkeypatch):
+    """三档之一：**1 张**（批量数目 0/缺省 = 1）⇒ 只出主图，零额外请求、零额外编译。"""
+    stub = _stub_comfy_chain(monkeypatch)
+    ctx = _anchors(("甲处", 10), ("乙处", 90))
+
+    assert _run_extra(ctx, primary_anchor="乙处") == []
+    assert stub["built"] == []
+
+
+def test_第57刀_第2张_按分取前二且跳过已出图的主锚点(monkeypatch):
+    """三档之二：**2 张** ⇒ 取分最高两条；主图已占了其中一条 ⇒ 只多编译**剩下那一条**。"""
+    stub = _stub_comfy_chain(monkeypatch)
+    ctx = {**_anchors(("甲处", 10), ("乙处", 90), ("丙处", 50)),
+           "illustration_batch_count": 2}
+
+    out = _run_extra(ctx, primary_anchor="乙处")
+
+    assert [item["anchor"] for item in out] == ["丙处"]      # 乙处=主图、丙处=新增
+    assert stub["built"] == ["丙处"]
+    assert stub["video"] == [False]                          # 本步不编译视频
+
+
+def test_第57刀_第999张_所有锚点都出图且保持正文序(monkeypatch):
+    """三档之三：**999 张**（≥ 锚点数）⇒ 所有锚点各出一张，**结果保持正文序**
+    （图跟着剧情位置摆，不按分数排）。"""
+    stub = _stub_comfy_chain(monkeypatch)
+    ctx = {**_anchors(("甲处", 10), ("乙处", 90), ("丙处", 50), ("丁处", 30)),
+           "illustration_batch_count": 999}
+
+    out = _run_extra(ctx, primary_anchor="乙处")
+
+    assert [item["anchor"] for item in out] == ["甲处", "丙处", "丁处"]   # 去掉主图乙处
+    assert stub["built"] == ["甲处", "丙处", "丁处"]
+    assert stub["video"] == [False, False, False]
+
+
+def test_第57刀_首尾帧模式不参与多批(monkeypatch):
+    """边界锁：面板该字段**只在高潮点模式出现**；首尾帧链另有落点规则 ⇒ 不参与多批。"""
+    stub = _stub_comfy_chain(monkeypatch)
+    ctx = {**_anchors(("甲处", 10), ("乙处", 90)), "illustration_batch_count": 9,
+           "video_mode": "firstlast"}
+
+    assert _run_extra(ctx, primary_anchor="乙处") == []
+    assert stub["built"] == []
+
+
+def test_第57刀_锚点不足两条时不出额外请求(monkeypatch):
+    """边界锁：只有一个锚点（或无列表）⇒ 没有「别的锚点」可出 ⇒ 零额外请求。"""
+    stub = _stub_comfy_chain(monkeypatch)
+
+    assert _run_extra({**_anchors(("甲处", 10)), "illustration_batch_count": 5}) == []
+    assert _run_extra({"illustration_batch_count": 5}) == []
+    assert stub["built"] == []
+
+
+def test_第57刀_主锚点被仲裁挪走后原锚点不再重复出图(monkeypatch):
+    """去重锁：仲裁把主图挪到别的段时，**判据原本那条也不该再出一张**（否则同一处画两张）。"""
+    stub = _stub_comfy_chain(monkeypatch)
+    ctx = {**_anchors(("甲处", 90), ("乙处", 50)), "illustration_batch_count": 9}
+
+    # 主图判据选的是「甲处」(900 分最高)，但仲裁把它挪到了「别处」⇒ 甲处不得再出。
+    out = _run_extra(ctx, primary_anchor="别处")
+
+    assert [item["anchor"] for item in out] == ["乙处"]
+    assert stub["built"] == ["乙处"]
+
+
+def test_第57刀_多槽流式事件各带自己的偏移():
+    """派发锁：N 条 rec ⇒ N 个事件，**各带自己的 offset**（前端据此各插到自己的位置）。"""
+    events = aag._streamed_illustration_events([
+        {"id": "illo-1", "prompt": "p1", "motion": 1, "actors": ["甲"], "anchor_offset": 5},
+        {"id": "illo-2", "prompt": "p2", "motion": 1, "actors": ["甲"], "anchor_offset": 40},
+    ])
+
+    assert [event["illustrate_request"]["offset"] for event in events] == [5, 40]
+    assert [event["id"] for event in events] == ["illo-1", "illo-2"]
+
+
+def test_第57刀_有序事件按偏移切正文且逐槽插入不丢字():
+    """派发锁：非流式路径按 offset 升序切正文 + 逐槽插入；文本不重不漏、槽按位置排。"""
+    text = "甲乙丙丁戊己庚辛壬癸" * 10
+    events = ag._ordered_illustration_events(text, [
+        {"id": "slot-b", "prompt": "pb", "anchor_offset": 60},
+        {"id": "slot-a", "prompt": "pa", "anchor_offset": 30},   # 故意逆序传入
+    ])
+
+    assert [event.get("id") for event in events if "illustrate_request" in event] == [
+        "slot-a", "slot-b",
+    ]
+    assert "".join(event["delta"] for event in events if "delta" in event) == text
+
+
+# ── 第 57 刀 · 多批派发【集成】：真接线（判据真解析 → 落 ctx → 主链 → 额外链）───
+
+_MULTI_TEXT = "<content>虞妙玥跪倒在石阶前。\n\n她抬手拭去唇角血痕。</content>"
+_MULTI_ANCHOR_RAW = (
+    '{"anchors": ['
+    '{"anchor": "虞妙玥跪倒在石阶前。", "composition": "中景", "subjects": ["虞妙玥"], '
+    '"reason": "高潮动作", "score": 90},'
+    '{"anchor": "她抬手拭去唇角血痕。", "composition": "特写", "subjects": ["虞妙玥"], '
+    '"reason": "余韵", "score": 40}'
+    "]}"
+)
+_MULTI_JUDGED_ANCHORS = {"虞妙玥跪倒在石阶前。", "她抬手拭去唇角血痕。"}
+
+
+def _run_multi_writeback(monkeypatch, tmp_path, ctx, text=_MULTI_TEXT):
+    """跑**真** `_agency_writeback` 的 comfy 分支：判据真解析、真落 ctx、真走额外链。
+
+    只换掉两处外部副作用：① 模型调用（换成固定的多锚点 JSON）；
+    ② Profile 编译（会打外部 LLM，与本测试无关）。
+    """
+    from app.services import character_state, illustration_prompt_store
+
+    deps = ra.AgencyDeps(
+        chat_fn=lambda *a, **k: "[]", rng=random.Random(0), state_base=str(tmp_path),
+    )
+    monkeypatch.setattr(ra, "extract_status_snapshot", lambda reply: {})
+    monkeypatch.setattr(ra, "parse_state_block", lambda reply: (reply, []))
+    monkeypatch.setattr(ra, "writeback", lambda *a, **k: (10.0, 10.0))
+    monkeypatch.setattr(character_state, "load_state", lambda *a, **k: {})
+    monkeypatch.setattr(ra, "_narr", lambda *a, **k: "")
+    monkeypatch.setattr(
+        illustration_prompt_store, "effective_climax_anchor_rubric", lambda: "用户判据")
+    monkeypatch.setattr(aag._llm, "chat", lambda *a, **k: _MULTI_ANCHOR_RAW)
+    monkeypatch.setattr(aag, "_wb_comfy_profile", lambda ctx, plan, spec, retargeted: spec)
+
+    _, _, request, _audio = ag._agency_writeback(
+        ctx, deps, text, turn=2, affinity=10.0, lost=False, user_text="继续",
+    )
+    return request
+
+
+def _multi_ctx(**over) -> dict:
+    ctx = _ctx(
+        repo_id="work", card_name="作品名", scene="climax", comfy_illustrate=True,
+        appearance_source="worldbook", illustration_actor_names=["虞妙玥"],
+        prompt_profile="krea2",
+    )
+    ctx.update(over)
+    return ctx
+
+
+def test_第57刀_集成_单张不挂额外请求键(monkeypatch, tmp_path):
+    """三档之一【集成】：批量数目未开 ⇒ `illustrate_req` 上**根本没有** `extra_requests` 键。
+    键不存在（而不是空列表）才是真正的零回归 —— 下游 `finalize_turn` 走的是老分支。"""
+    request = _run_multi_writeback(monkeypatch, tmp_path, _multi_ctx())
+
+    assert request and request.get("anchor")
+    assert "extra_requests" not in request
+
+
+def test_第57刀_集成_批量两张时挂上另一条锚点(monkeypatch, tmp_path):
+    """三档之二【集成】：批量 2 ⇒ 额外链跑通，挂上**另一条**判据锚点（各带自己的提示词）。"""
+    request = _run_multi_writeback(
+        monkeypatch, tmp_path, _multi_ctx(illustration_batch_count=2),
+    )
+
+    extras = request.get("extra_requests") or []
+    assert len(extras) == 1
+    extra = extras[0]
+    assert extra["anchor"] in _MULTI_JUDGED_ANCHORS
+    assert extra["anchor"] != request["anchor"]                   # 不是主图那一处
+    assert extra["actors"] == request["actors"]                   # 同一批在场角色
+    # 逐点独立编译：各取材到**自己那一段**（不是把主图画面复制一份）——
+    # 这正是「多张图各插自己的位置」能成立的前提。
+    assert extra["scene_spec"]["narrative"] != request["scene_spec"]["narrative"]
+
+
+def test_第57刀_集成_单张与批量两张的主图完全一致(monkeypatch, tmp_path):
+    """零回归锁【集成】：开不开多批，**主图那条请求逐字节不变**（多批只是「多加几条」）。"""
+    single = _run_multi_writeback(monkeypatch, tmp_path, _multi_ctx())
+    multi = _run_multi_writeback(
+        monkeypatch, tmp_path, _multi_ctx(illustration_batch_count=2),
+    )
+
+    assert {key: value for key, value in multi.items() if key != "extra_requests"} == single
+
+
+# ── 第 57 刀 ④：把「画面人称」告知判据（只加调用侧，不动用户判据文本）──────────
+
+
+def test_第57刀_未手选人称时判据user消息逐字节不变(monkeypatch):
+    """零回归锁：`illustration_viewpoint` 为空（自动档）⇒ 提示为空串
+    ⇒ 判据 user 消息与改造前**逐字节相同**。"""
+    from app.services import illustration_prompt_store
+
+    monkeypatch.setattr(
+        illustration_prompt_store, "effective_climax_anchor_rubric", _rubric_on(),
+    )
+    captured: dict = {}
+
+    def fake_chat(base, key, model, system, user, **kw):
+        captured["user"] = user
+        return _ANCHOR_OK_RAW
+
+    monkeypatch.setattr(aag._llm, "chat", fake_chat)
+    _trace_capture(monkeypatch)
+
+    # 不传人称键 / 传空串 —— 两者都必须与「旧格式」（在场角色 + 正文）一致
+    for ctx in (_ctx(), _ctx(illustration_viewpoint="")):
+        aag._illustration_anchor_intent(ctx, _ANCHOR_CLEAN, {"present": ["宥夏"]})
+        assert captured["user"].split("\n\n")[0] == "在场角色：宥夏", captured["user"][:80]
+        assert "画面人称" not in captured["user"]
+
+
+def test_第57刀_手选第一人称时把画面人称告知判据(monkeypatch):
+    """验收：手选第一人称 ⇒ 判据 user 消息带上「画面人称」与选点要求；"""
+    from app.services import illustration_prompt_store
+
+    monkeypatch.setattr(
+        illustration_prompt_store, "effective_climax_anchor_rubric", _rubric_on(),
+    )
+    captured: dict = {}
+
+    def fake_chat(base, key, model, system, user, **kw):
+        captured.update(user=user, system=system)
+        return _ANCHOR_OK_RAW
+
+    monkeypatch.setattr(aag._llm, "chat", fake_chat)
+    _trace_capture(monkeypatch)
+
+    aag._illustration_anchor_intent(
+        _ctx(illustration_viewpoint="first_person"), _ANCHOR_CLEAN, {"present": ["宥夏"]},
+    )
+
+    assert "画面人称：第一人称" in captured["user"]
+    assert "优先" in captured["user"] and "避开" in captured["user"]
+    # ⚠ 红线：用户判据正文**一字不改**（不许往判据里加约束/加门）——
+    #   提示只进 user 消息，system 仍＝「用户判据 + 程序侧只读合同」
+    assert captured["system"].startswith("用户判据")
+    assert "画面人称" not in captured["system"]
+
+
+def test_第57刀_手选第三人称不加第一人称提示(monkeypatch):
+    """边界锁：第三人称不吃第一人称那套选点提示（口径不同：第三人称是「找视角展示完整内容」）。"""
+    assert aag._anchor_intent_viewpoint_hint({"illustration_viewpoint": "third_person"}) == ""
+    assert aag._anchor_intent_viewpoint_hint({}) == ""
+    assert aag._anchor_intent_viewpoint_hint({"illustration_viewpoint": "first_person"}) != ""
+
+
+# ── 第 57 刀 ③：第一人称「画面事实筛分」接缝 ──────────────────────────────────
+
+
+def test_第57刀_筛分接缝生效时就地改scene_spec并留痕(monkeypatch):
+    """验收：applied ⇒ 就地把 appearance/wardrobe 换成筛分后的值，并派发 trace。"""
+    trace = _trace_capture(monkeypatch)
+    scene = {
+        "viewpoint": "first_person",
+        "narrative": "他把指尖压在她唇角。",
+        "appearance": "朱唇饱满、宽厚圆硕的臀",
+        "wardrobe": "月白中衣、蚕丝白袜",
+    }
+
+    verdict = aag._wb_first_person_frame_filter(_ctx(), scene)
+
+    assert verdict["applied"] is True
+    assert scene["appearance"] == "朱唇饱满"
+    assert scene["wardrobe"] == "月白中衣"
+    assert trace[-1][0] == "illustration.first_person_filter"
+    assert trace[-1][1]["removed"] == ["宽厚圆硕的臀", "蚕丝白袜"]
+
+
+def test_第57刀_筛分接缝不生效时一个键都不动(monkeypatch):
+    """零回归锁：第三人称 ⇒ 返回空判定、`scene_spec` **逐字节不变**、**不发** trace。"""
+    trace = _trace_capture(monkeypatch)
+    scene = {
+        "viewpoint": "third_person",
+        "narrative": "他把指尖压在她唇角。",
+        "appearance": "朱唇饱满、宽厚圆硕的臀",
+        "wardrobe": "月白中衣、蚕丝白袜",
+    }
+    before = dict(scene)
+
+    assert aag._wb_first_person_frame_filter(_ctx(), scene) == {}
+    assert scene == before
+    assert trace == []
+
+
+def test_第57刀_多批的每一张都过画面事实筛分(monkeypatch):
+    """真机实锤（2026-09-24 · 2 张实测）：主图筛了、第 2 张没筛 ⇒ 第 2 张提示词仍带
+    `broad rounded hips`／`white silk stockings`（还多了第一人称禁用的
+    `environmental composition`）。锁：extras 循环里**必须**调用筛分接缝，
+    且**必须**在 Profile 编译**之前**（字段账本会把装不下的部位写进稿子）。"""
+    order: list[str] = []
+    _stub_comfy_chain(monkeypatch)
+    # ⚠ 必须在打桩**之后**再补记录，否则会被 `_stub_comfy_chain` 的桩覆盖掉
+    monkeypatch.setattr(
+        aag, "_wb_first_person_frame_filter",
+        lambda ctx, scene: order.append("filter") or {},
+    )
+    monkeypatch.setattr(aag, "_wb_comfy_profile", lambda *a, **k: order.append("profile") or {})
+
+    ctx = {**_anchors(("甲处", 10), ("乙处", 90)), "illustration_batch_count": 9}
+    aag._wb_comfy_extra_requests(
+        ctx, "", {}, _ANCHOR_TEXT, _anchor_sig(), _anchor_pool(),
+        primary_anchor="乙处", primary_motion=0,
+        prompt_override="", transition_decision="", user_text="",
+    )
+
+    assert order == ["filter", "profile"]
+
+
+def test_第57刀_单张时不触发画面事实筛分(monkeypatch):
+    """零回归锁：批量数目 < 2 ⇒ 提前短路 ⇒ 连筛分接缝都不该被调用。"""
+    calls: list = []
+    monkeypatch.setattr(
+        aag, "_wb_first_person_frame_filter", lambda ctx, scene: calls.append(1) or {},
+    )
+    _stub_comfy_chain(monkeypatch)
+
+    ctx = {**_anchors(("甲处", 10), ("乙处", 90))}
+    aag._wb_comfy_extra_requests(
+        ctx, "", {}, "正文", _anchor_sig(), _anchor_pool(),
+        primary_anchor="乙处", primary_motion=0,
+        prompt_override="", transition_decision="", user_text="",
+    )
+
+    assert calls == []
+
+
+def test_第57刀_仲裁后同位只出一张(monkeypatch):
+    """A 锁（2026-09-24 用户拍板）：两个不同的判据锚点若被收敛到**同一处**
+    （真机实锤：仲裁把「手就那么悬…」与 extras 的锚点都改写成「那两团肉…」）
+    ⇒ 只出一张，绝不叠放。"""
+    order: list[str] = []
+
+    def converged_target(ctx, repo_id, plan, clean, sig, pool, *, prompt_override,
+                         motion, user_text, anchor_override="", subjects_override=None):
+        # 模拟「仲裁收敛」：无论输入哪个锚点，都改写成同一段
+        return {"request_prompt": "p", "plan_retargeted": False,
+                "requested_anchor": "同一段。", "motion": 7}
+
+    monkeypatch.setattr(aag, "_wb_comfy_scene_target", converged_target)
+    monkeypatch.setattr(aag, "_wb_comfy_scene_spec", lambda *a, **k: {"narrative": "n"})
+    monkeypatch.setattr(
+        aag, "_wb_first_person_frame_filter",
+        lambda ctx, scene: order.append("filter") or {},
+    )
+    monkeypatch.setattr(aag, "_wb_comfy_profile", lambda *a, **k: order.append("profile") or {})
+    monkeypatch.setattr(
+        aag, "_wb_comfy_illustrate_env",
+        lambda ctx, plan, sig, target, spec, *, motion: {
+            "prompt": "p", "anchor": target["requested_anchor"], "motion": motion},
+    )
+    monkeypatch.setattr(aag, "_wb_frames_and_video", lambda *a, **k: None)
+
+    text = "前文。\n\n同一段。\n\n后文。"
+    ctx = {**_anchors(("甲处", 90), ("乙处", 50)), "illustration_batch_count": 9}
+    out = aag._wb_comfy_extra_requests(
+        ctx, "", {}, text, {}, {},
+        primary_anchor="同一段。", primary_motion=0,
+        prompt_override="", transition_decision="", user_text="",
+    )
+
+    assert out == []                      # 第 2 张与主图同位 ⇒ 跳过
+    assert order == []                    # 连编译都不做（省一次 LLM）
+
+
 def _anchor_sig(**over) -> dict:
     sig = {
         "visible_story": _ANCHOR_CLEAN, "present": ["宥夏"], "at_climax": True,
@@ -4073,6 +4636,323 @@ def test_初遇锚点不过仲裁机(monkeypatch):
     assert out["requested_anchor"] != _ARB_KEYWORD
 
 
+# ── 第 48 刀 · B2（2026-09-22 用户定案）：判据锚点被仲裁机推翻时，画面主体**收窄**而非
+# 整条撤回、退回「在场全集」。真机实锤（thread `09f79e6f`，2026-09-22T12:28）：那一帧剧情
+# 只该画一个人，而契约的 `frame_subjects` 被撤回 ⇒ 按 `actors`（在场角色卡全集＝两名女性）
+# 判成双人帧 ⇒ 成稿 `2girls` ＋「多人提示词必须单独描述第一/第二角色」判红。
+
+
+def _run_scene_target_arb(monkeypatch, judge_result, *, ctx=None, pool=None, **sig_over):
+    """第 48 刀夹具：走「仲裁机必然推翻判据锚点」那条支路，且可注入 ctx / pool / 在场角色。"""
+    intent = judge_result if isinstance(judge_result, tuple) else (judge_result, {})
+    monkeypatch.setattr(aag, "_illustration_anchor_intent", lambda _ctx, clean, sig: intent)
+    monkeypatch.setattr(
+        aag, "_resolve_illustration_request_actors", lambda *a, **k: ["甲", "乙"],
+    )
+    return aag._wb_comfy_scene_target(
+        ctx or {}, "", {}, _ARB_TEXT,
+        _anchor_sig(visible_story=_ARB_TEXT, present=["甲", "乙"], **sig_over),
+        pool if pool is not None else dict(_anchor_pool(), known=["甲", "乙"]),
+        prompt_override="", motion=0, user_text="",
+    )
+
+
+def test_第48刀_判据锚点被推翻时主体收窄到在场角色(monkeypatch):
+    """B2 正例：撤回时收窄到「判据主体 ∩ 在场角色」——不在场的名字不再算画面主体。"""
+    judged = (_ARB_JUDGE, {"subjects": ["甲", "丙"], "composition": "双人同框"})
+    out = _run_scene_target_arb(
+        monkeypatch, judged, ctx={"illustration_viewpoint": "third_person"},
+    )
+
+    assert out["requested_anchor"] == _ARB_KEYWORD  # 仲裁机确实推翻了判据锚点（画面换段）
+    assert out["request_actors"] == ["甲", "乙"]  # 归因不缩：在场角色仍是两人
+    assert out["frame_subjects"] == ["甲"]  # ∩ 在场角色 ⇒ 不在场的「丙」剔出画面主体
+
+    from app.services import image_prompt_profiles as ipp
+
+    # 契约据此看到 1 个画面主体 ⇒ 单人帧；旧行为这里拿到的是 `actors`＝2 ⇒ 双人判据误触发。
+    assert ipp._contract_subject_names(
+        {"frame_subjects": out["frame_subjects"], "actors": out["request_actors"]},
+    ) == ["甲"]
+
+
+def test_第48刀_手选第一人称下同一条收窄(monkeypatch):
+    """同一收窄与手选人称无关（两档都不再退回 `actors`）。"""
+    judged = (_ARB_JUDGE, {"subjects": ["甲", "丙"], "composition": "双人同框"})
+    out = _run_scene_target_arb(
+        monkeypatch, judged, ctx={"illustration_viewpoint": "first_person"},
+    )
+
+    assert out["frame_subjects"] == ["甲"]
+
+
+def test_第48刀_判据主体全不在场时零回归退回在场集合(monkeypatch):
+    """失败上界：交集为空 ⇒ 空表 ⇒ 契约退回 `actors`，与旧行为逐字节一致。"""
+    judged = (_ARB_JUDGE, {"subjects": ["丙", "丁"], "composition": "双人同框"})
+    out = _run_scene_target_arb(
+        monkeypatch, judged, ctx={"illustration_viewpoint": "third_person"},
+    )
+
+    assert out["frame_subjects"] == []
+
+    from app.services import image_prompt_profiles as ipp
+
+    assert ipp._contract_subject_names(
+        {"frame_subjects": out["frame_subjects"], "actors": out["request_actors"]},
+    ) == ["甲", "乙"]
+
+
+def test_第48刀_收窄只作用于契约主体_取材仍按未收窄的判据主体(monkeypatch):
+    """边界锁（用户 2026-09-22 明令）：别把「先生成内容、再考虑视角如何最大程度呈现内容」
+    这条链毁了 —— B2 只改 `frame_subjects`，取材扩窗拿到的仍是**未收窄**的判据主体。"""
+    from app.services import scene_illustration as si
+
+    seen: dict = {}
+    real_excerpt = si.illustration_scene_excerpt
+
+    def _spy(text, requested_anchor="", *, subjects=None):
+        seen["subjects"] = list(subjects or [])
+        return real_excerpt(text, requested_anchor, subjects=subjects)
+
+    monkeypatch.setattr(si, "illustration_scene_excerpt", _spy)
+    judged = (_ARB_JUDGE, {"subjects": ["甲", "丙"], "composition": "双人同框"})
+    out = _run_scene_target_arb(
+        monkeypatch, judged, ctx={"illustration_viewpoint": "third_person"},
+    )
+
+    assert out["frame_subjects"] == ["甲"]  # 契约主体已收窄
+    assert seen["subjects"] == ["甲", "丙"]  # 取材层仍是未收窄的判据主体（零改动）
+
+
+# ── 第 49 刀 · A2（2026-09-22 用户定案「先 B 再 A2」）：把「收窄」从**有条件**（锚点被推翻）
+# 升级为**无条件** —— 只要判据主体里有 ∉ 在场角色的名字就剔。真机（轮 A · 09:54 · thread
+# `09f79e6f`）：判据 `subjects=['妲千沁','凌渊']`（把不入画的主人公算进画面主体）、
+# `actors=['妲千沁']` ⇒ 旧行为 `frame_subjects` 保持 2 人 ⇒ 契约判成双人帧 ⇒ 成稿
+# `2girls, adult woman, adult man`（多画一个人）。
+# 零 LLM 量测（同 thread 三轮）：生效 **1/3 格**（轮 A）、零误伤（轮 B 逐字节不变、轮 C
+# 交集空 ⇒ 回落 `actors` ＝旧行为）。
+
+
+def _run_scene_target_no_arb(monkeypatch, judge_result, *, ctx=None, pool=None,
+                             actors=None, **sig_over):
+    """第 49 刀夹具：把仲裁机**钉成恒等**（锚点不会被推翻）⇒ 隔离出「无条件收窄」这条路径。"""
+    from app.services import scene_illustration as si
+
+    intent = judge_result if isinstance(judge_result, tuple) else (judge_result, {})
+    monkeypatch.setattr(aag, "_illustration_anchor_intent", lambda _ctx, clean, sig: intent)
+    monkeypatch.setattr(
+        si, "resolve_illustration_anchor", lambda _clean, anchor: anchor,
+    )
+    monkeypatch.setattr(
+        aag, "_resolve_illustration_request_actors",
+        lambda *a, **k: ["甲", "乙"] if actors is None else list(actors),
+    )
+    return aag._wb_comfy_scene_target(
+        ctx or {}, "", {}, _ARB_TEXT,
+        _anchor_sig(visible_story=_ARB_TEXT, present=["甲", "乙"], **sig_over),
+        pool if pool is not None else dict(_anchor_pool(), known=["甲", "乙"]),
+        prompt_override="", motion=0, user_text="",
+    )
+
+
+def test_第49刀_锚点未被推翻时主体也收窄到在场角色(monkeypatch):
+    """A2 正例：收窄**不再以「锚点被推翻」为条件** —— 判据把不在场者算进画面主体时无条件剔掉。
+
+    真机轮 A（09:54）：判据 `subjects=['妲千沁','凌渊']`（主人公不入画却算成主体）、
+    `actors=['妲千沁']` ⇒ 旧行为保持 2 人 ⇒ 契约判双人帧 ⇒ 成稿多画一个人。
+    ⚠ 构造上刻意让「不在场者」也在 `known` 里 ⇒ 「第 42 刀 B（∉ `known` 剔）」**测不出来**，
+    **只有 A2（∉ 在场角色剔）能修** —— 真机上 `known` 可能为空（未绑卡）⇒ 那条闸整体空转
+    （见技能 `demiurge-viewpoint-subject-scope` §8 的元教训）。
+    """
+    judged = (_ARB_JUDGE, {"subjects": ["甲", "乙"], "composition": "双人同框"})
+    out = _run_scene_target_no_arb(
+        monkeypatch, judged, actors=["甲"], ctx={"illustration_viewpoint": "first_person"},
+    )
+
+    assert out["requested_anchor"] == _ARB_JUDGE  # 锚点**未**被推翻（隔离变量）
+    assert out["request_actors"] == ["甲"]
+    assert out["frame_subjects"] == ["甲"]  # 不在场的「乙」被剔（无条件收窄）
+
+
+def test_第49刀_判据主体全在场时逐字节不变(monkeypatch):
+    """零回归锁：判据主体本来就是在场角色的子集 ⇒ 收窄是 no-op。"""
+    judged = (_ARB_JUDGE, {"subjects": ["甲", "乙"], "composition": "双人同框"})
+    out = _run_scene_target_no_arb(
+        monkeypatch, judged, ctx={"illustration_viewpoint": "first_person"},
+    )
+
+    assert out["frame_subjects"] == ["甲", "乙"]
+
+
+def test_第49刀_在场角色取不到时不收窄(monkeypatch):
+    """保守边界：本帧取不到在场角色（`actors` 空）⇒ **不动**判据主体（等于旧行为）。
+
+    否则会把判据主体整条清空 ⇒ 契约再回落一次空表，白白丢掉唯一的正向证据。
+    """
+    judged = (_ARB_JUDGE, {"subjects": ["甲", "乙"], "composition": "双人同框"})
+    pool = dict(_anchor_pool(), known=["甲", "乙"], request_actors=[])
+    out = _run_scene_target_no_arb(monkeypatch, judged, actors=[], pool=pool)
+
+    assert out["request_actors"] == []
+    assert out["frame_subjects"] == ["甲", "乙"]  # 保留判据主体，不收窄
+
+
+# ── 第 50 刀 · B3（2026-09-22 用户定案「主人公**不是被剔除，而是等效镜头**」）：
+# 判据锚点句里的**名字**未必是本帧主体 —— 第一人称下它常是「镜头」（被看向／被亲吻的
+# 主人公）。而收敛（`filter_anchor_subjects` 第③步）**只认字面名字** ⇒ 锚点句用**代词**
+# 写主体、用**名字**写镜头时，收敛会把**主体丢掉、只留下镜头**。
+# 真机轮 C（thread `09f79e6f`，12:28）：判据 `subjects=['妲千沁','凌渊']`、锚点句
+# 「**她**掖完被子，把视线从墙上收回来，落到**凌渊**脸上。」⇒ 收敛成 `['凌渊']`
+# （＝镜头；演员表 `actors=['凌若冰','妲千沁']` 里并不含他）⇒ 与在场角色**无交集**
+# ⇒ 第 49 刀 A2 把它收成空表 ⇒ 契约退回 `actors` ⇒ 单人帧被画成 `2girls`（多画一个人）。
+# 修法：收敛结果与在场角色**无交集** ⇒ 视为收敛失败 ⇒ 回退到**未收敛的判据主体**再按
+# 在场收窄（同一份判据，只是跳过收敛这一步；正确画面＝她一人 ＋ 视线朝镜头）。
+
+_A50_TEXT = "\n\n".join([
+    "---",
+    "甲把被子掖好，坐在床沿。",
+    "她把视线从墙上收回来，落到乙脸上。",
+])
+_A50_ANCHOR = "她把视线从墙上收回来，落到乙脸上。"
+
+
+def _run_scene_target_50(monkeypatch, judge_result, *, ctx=None, actors=None):
+    """第 50 刀夹具：仲裁机钉成恒等（隔离「收敛失败 ⇒ 回退」这一条路径）。
+
+    锚点句**只含「乙」的字面名字**、而主体用**代词「她」**写 —— 与真机轮 C 同构。
+    """
+    from app.services import scene_illustration as si
+
+    intent = judge_result if isinstance(judge_result, tuple) else (judge_result, {})
+    monkeypatch.setattr(aag, "_illustration_anchor_intent", lambda _ctx, clean, sig: intent)
+    monkeypatch.setattr(
+        si, "resolve_illustration_anchor", lambda _clean, anchor: anchor,
+    )
+    monkeypatch.setattr(
+        aag, "_resolve_illustration_request_actors",
+        lambda *a, **k: ["甲", "乙"] if actors is None else list(actors),
+    )
+    return aag._wb_comfy_scene_target(
+        ctx or {}, "", {}, _A50_TEXT,
+        _anchor_sig(visible_story=_A50_TEXT, present=["甲", "乙"]),
+        dict(_anchor_pool(), known=["甲", "乙"]),
+        prompt_override="", motion=0, user_text="",
+    )
+
+
+def test_第50刀_收敛结果与在场角色无交集时回退到判据主体(monkeypatch):
+    """B3 正例（真机轮 C 型）：锚点句用**代词**写主体、用**名字**写镜头。
+
+    判据 `subjects=['甲','乙']`；锚点句「她把视线…落到**乙**脸上。」只含字面名字「乙」
+    ⇒ 收敛把主体「甲」丢掉、只留镜头「乙」；而 `actors=['甲']`（乙不在场）⇒ 交集空
+    ⇒ 第 49 刀 A2 会把它清成空表、契约回落在场全集。第 50 刀回退到**未收敛的判据主体**
+    ∩ 在场角色 ⇒ `['甲']`（＝她一人 ＋ 视线朝镜头；主人公是**等效镜头**、不当画面主体）。
+    """
+    judged = (_A50_ANCHOR, {"subjects": ["甲", "乙"], "composition": "单人近景"})
+    out = _run_scene_target_50(
+        monkeypatch, judged, actors=["甲"], ctx={"illustration_viewpoint": "first_person"},
+    )
+
+    assert out["request_actors"] == ["甲"]
+    assert out["frame_subjects"] == ["甲"]
+
+
+def test_第50刀_收敛结果与在场角色有交集时不回退(monkeypatch):
+    """零回归锁：收敛结果与在场角色**有交集** ⇒ 尊重收敛结论（第 49 刀行为逐字节不变）。
+
+    判据 `['甲','乙']`、锚点句含字面名字「甲」⇒ 收敛 = `['甲']`；`actors=['甲','乙']`
+    ⇒ 交集非空 ⇒ **不得**回退成 `['甲','乙']`。
+    """
+    judged = ("甲把被子掖好，坐在床沿。", {"subjects": ["甲", "乙"], "composition": "双人同框"})
+    out = _run_scene_target_50(
+        monkeypatch, judged, actors=["甲", "乙"],
+        ctx={"illustration_viewpoint": "first_person"},
+    )
+
+    assert out["frame_subjects"] == ["甲"]
+
+
+def test_第50刀_判据主体里没有在场角色时不回退(monkeypatch):
+    """保守边界：交集空、但**未收敛的判据主体同样补不回来** ⇒ 不动（回退只在有新解时发生）。
+
+    此时保持第 49 刀既有行为：交回 A2 收窄 ⇒ 空表 ⇒ 契约回落 `actors`（零回归兜底）。
+    """
+    judged = (_A50_ANCHOR, {"subjects": ["乙"], "composition": "单人近景"})
+    out = _run_scene_target_50(
+        monkeypatch, judged, actors=["甲"], ctx={"illustration_viewpoint": "first_person"},
+    )
+
+    assert out["frame_subjects"] == []
+
+
+# ---------------------------------------------------------------------------
+# 前置观测（2026-09-22）：`illustration.request` 必须记入人称判定与画面主体
+#
+# 动机＝全量 `agent-trace.jsonl` 里 `viewpoint` **0 命中** ⇒ 「同一帧人称判两次」与
+# 「判据主体收敛失败」都不可观测，只能靠真机成图反推。观测字段**只进 trace、不进请求**。
+# ---------------------------------------------------------------------------
+def test_前置观测_illustration_request记入人称与画面主体(monkeypatch):
+    """真链路 target ⇒ trace 载荷能读到人称与画面主体（第 50 刀同构场景）。
+
+    场景＝手选第一人称 + 锚点句「**她**把视线…落到**乙**脸上。」⇒ 收敛失败回退
+    ⇒ 画面主体 `['甲']`（＝她一人；主人公是等效镜头、不当画面主体）。
+    ⚠ 同一锚点句因含「她」被判自动档 `third_person` ⇒ 与手选冲突 ⇒ `conflict=True`：
+    这正是「段内有她/他 ⇒ 第三人称」这条过宽判据（D2）的现成实证。
+    """
+    trace = []
+    monkeypatch.setattr(
+        aag.run_trace, "emit",
+        lambda ctx, event, **data: trace.append((event, data)),
+    )
+    target = _run_scene_target_50(
+        monkeypatch,
+        (_A50_ANCHOR, {"subjects": ["甲", "乙"], "composition": "单人近景"}),
+        actors=["甲"], ctx={"illustration_viewpoint": "first_person"},
+    )
+
+    aag._wb_emit_illustration_trace(
+        {}, {"prompt": "x"}, plan={},
+        sig=_anchor_sig(visible_story=_A50_TEXT, present=["甲", "乙"]),
+        pool=dict(_anchor_pool(), known=["甲", "乙"]),
+        target=target, scene="", local_scene="", video_prompt_text="",
+    )
+
+    assert trace[-1][0] == "illustration.request"
+    payload = trace[-1][1]
+    assert payload["viewpoint"] == "first_person"
+    assert payload["viewpoint_detail"]["source"] == "override"
+    assert payload["viewpoint_detail"]["auto"] == "third_person"
+    assert payload["viewpoint_detail"]["conflict"] is True
+    assert payload["frame_subjects"] == ["甲"]
+    # 2026-09-22 追加观测：叙事者姓名/来路（诊断「手选第一人称仍画出主人公」必需）
+    assert "narrator" in payload and "narrator_source" in payload
+
+
+def test_前置观测_缺键时不炸且记空值(monkeypatch):
+    """防御锁：`target` 未提供观测源字段 ⇒ 记空值，不抛错、不改行为（零回归）。"""
+    trace = []
+    monkeypatch.setattr(
+        aag.run_trace, "emit",
+        lambda ctx, event, **data: trace.append((event, data)),
+    )
+
+    aag._wb_emit_illustration_trace(
+        {}, {"prompt": "x"}, plan={}, sig=_anchor_sig(present=["甲"]),
+        pool=dict(_anchor_pool(), known=["甲"]),
+        target={
+            "request_prompt": "x", "prompt_source": "fallback",
+            "plan_retargeted": False, "request_actors": ["甲"],
+        },
+        scene="", local_scene="", video_prompt_text="",
+    )
+
+    payload = trace[-1][1]
+    assert payload["viewpoint"] == ""
+    assert payload["viewpoint_detail"] == {}
+    assert payload["frame_subjects"] == []
+    assert payload["narrator"] == "" and payload["narrator_source"] == ""
+
+
 def test_缺块路径判据档主体名驱动取材扩窗(monkeypatch):
     """A′ 接线（§7.3 第 3/5 条）：判据档的 `subjects` 必须回传到取材层。
 
@@ -4168,20 +5048,34 @@ def test_手选人称三档落到画面人称(monkeypatch):
 def test_主人公性别注入到外观段(monkeypatch):
     """第 23 刀：主人公性别作为**画面事实**注入外观段（世界书解析不到 ⇒ 通用表列兜底）。
 
-    只对主人公注入；主人公不在本帧主体里（第一人称 ⇒ 叙事者不占画面）⇒ 连读都不读。
+    ⚠ **第 37 刀修订**（2026-09-21 用户实锤）：性别是**第三人称**特性——面板按钮文案即
+    「第三人称：取主人公性别入画」；第一人称下主人公＝镜头本身、不占画面 ⇒ 一律不注入。
+    修订前只判「主人公在 `request_actors` 里」，而**自动档无信号时默认第一人称**
+    （此时 `_viewpoint_clause` 已在说「叙事者不入画」）⇒ 注入＝自相矛盾的双口径。
     """
     text = "\n\n".join(["---", "甲站在窗前，望着雨幕。", "雨水顺着玻璃滑落。"])
     monkeypatch.setattr(aag, "_repo_tables_for_facts", lambda ctx, repo_id: [
         {"columns": ["姓名", "性别", "外貌特征"], "rows": [["甲", "男", "高大"]]},
     ])
 
+    # 第三人称（手选）⇒ 注入
     out = _run_scene_target_ctx(
         monkeypatch, text, "",
-        {"user_name": "甲", "_illustration_visual_profiles": "甲：高大体格。"},
+        {"user_name": "甲", "_illustration_visual_profiles": "甲：高大体格。",
+         "illustration_viewpoint": "third_person"},
         pool=dict(_anchor_pool(), request_actors=["甲"]),
     )
     assert "甲" in out["request_actors"]
     assert "【性别】男" in out["request_appearance"]
+
+    # 第一人称（手选）⇒ 主人公＝镜头 ⇒ 不注入（第 37 刀）
+    out_first = _run_scene_target_ctx(
+        monkeypatch, text, "",
+        {"user_name": "甲", "_illustration_visual_profiles": "甲：高大体格。",
+         "illustration_viewpoint": "first_person"},
+        pool=dict(_anchor_pool(), request_actors=["甲"]),
+    )
+    assert "【性别】" not in out_first["request_appearance"]
 
     # 主人公不在本帧主体（第一人称 ⇒ 叙事者不占画面）⇒ 不注入
     out2 = _run_scene_target_ctx(
@@ -4190,3 +5084,62 @@ def test_主人公性别注入到外观段(monkeypatch):
         pool=dict(_anchor_pool(), request_actors=["乙"]),
     )
     assert "【性别】" not in out2["request_appearance"]
+
+
+# ── 2026-09-23（A 治本）：curator 可写集剔除机制层 + 补回在场角色卡 ──
+
+def test_curator可写集剔除机制层并补回在场角色卡(tmp_path):
+    """A 治本（真机根因）：原先 allowed 直接取本轮召回集 `_selected_worldbook_indices`，
+    而 `constant=True` 条目「全程恒开、全文注入」⇒ **永远落在可写集里**；角色卡
+    （constant=False）只有被召回时才在 ⇒ curator 想记「凌若冰的最新状态」时无处可写，
+    只能灌进伪机制条目。真机实锤：`id=1 全局机制·{{user}}(少宗主)`（175 字符）**通篇是
+    凌若冰的身体状态**、`id=2 全局机制·龙阳决与双修`（39 字符）写「舞姬恋…往返抚弄其经脉」。
+
+    现口径＝召回集**剔除机制层** ＋ **补上在场角色的角色卡**（与 `CURATOR_SYSTEM`
+    「机制、规则、历史背景、地点常识等条目默认只读；角色条目中的长期剧情动态是最主要的
+    worldbook_update 对象」一致）；展示视图与写入白名单共用本函数 ⇒ 看得到＝写得进。
+    """
+    repo_id = "work"
+    worldbook_store.ensure_repo_snapshot(str(tmp_path), repo_id, [{"entries": [
+        {"comment": "全局机制·龙阳决与双修", "content": "机制正文", "constant": True},
+        {"comment": "角色卡·凌若冰", "content": "【角色卡·凌若冰】底座", "keys": ["凌若冰"]},
+        {"comment": "角色卡·旁人", "content": "【角色卡·旁人】底座", "keys": ["旁人"]},
+    ]}])
+    ctx = {
+        "output_dir": str(tmp_path), "repo_id": repo_id,
+        "_selected_worldbook_indices": [0],        # 机制条目被召回（constant ⇒ 恒开）
+        "_worldbook_character_names": ["凌若冰"],   # 本轮在场角色
+    }
+
+    allowed = aga._curator_writable_indices(ctx, repo_id)
+
+    assert 0 not in allowed    # 机制层被剔除，即便它在召回集里
+    assert 1 in allowed        # 在场角色卡被补回，即便没被召回
+    assert 2 not in allowed    # 不在场角色卡不补
+
+
+def test_curator可写集取不到世界书时退回旧口径(tmp_path):
+    """等价矩阵锁：世界书读不到 / 无条目 ⇒ 逐字退回旧口径（不改变行为）。"""
+    ctx = {"output_dir": "", "repo_id": "missing", "_selected_worldbook_indices": [0, 2]}
+    assert aga._curator_writable_indices(ctx, "missing") == frozenset({0, 2})
+
+
+def test_第58刀_插图偏移吸附到段落末尾():
+    """主图/extras/首尾帧同走 `_illustration_anchor_offset` ⇒ 一处吸附全覆盖
+    （2026-09-24 用户 999 实测口径：插图插到段落下方，不切进段落中间）。"""
+    clean = "第一段高潮。\n\n第二段，锚点句在中间。后续还有半句。\n\n第三段。"
+    off = ag._illustration_anchor_offset(clean, {"anchor": "锚点句在中间。"})
+    assert off is not None
+    assert "后续还有半句。" in clean[:off]      # 同段剩余内容在插入点之前
+    assert clean[off:].startswith("\n\n") or off == len(clean)
+
+
+def test_第58刀_锚点定位失败时吸附不越界():
+    """虚构锚点 ⇒ 评分选段兜底（既有语义，见 test_scene_illustration 的同名口径）；
+    但返回的偏移**仍必须吸附到段落末尾**（吸附对所有路径一视同仁）。"""
+    clean = "铺垫段。\n\n高潮动作。\n\n事后余韵与收束。"
+    off = ag._illustration_anchor_offset(
+        clean, {"anchor": "模型虚构且正文不存在的句子", "allow_anchor_fallback": False},
+    )
+    assert off is not None                       # 评分选段兜底（既有语义）
+    assert clean[off:].startswith("\n\n") or off == len(clean)

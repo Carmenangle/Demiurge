@@ -117,6 +117,11 @@ _SEAMS = (
     "_wb_comfy_illustrate_env",
     "_wb_frames_and_video",
     "_wb_emit_illustration_trace",
+    # 第 57 刀 · 多批派发（2026-09-24）：为「主锚点之外」的其余锚点各编译一条出图请求
+    "_wb_comfy_extra_requests",
+    # 第 57 刀 ③ · 第一人称「画面事实筛分」（2026-09-24）：进编译器之前按取景剔掉装不下的
+    # 外观/服装事实（`appearance`/`wardrobe` 在字段账本里是 required，剔晚了来不及）
+    "_wb_first_person_frame_filter",
 )
 
 _TARGET_LINES = 160
@@ -182,3 +187,21 @@ def test_无本帧主体信号时scene_spec不得凭空生成该键():
         *_scene_spec_args(frame_subjects=[]),
     )
     assert "frame_subjects" not in aag._wb_comfy_scene_spec(*_scene_spec_args())
+
+# ---------------------------------------------------------------------------
+# 接线锁：正文 <status> 块必须走「引擎真源」对账（2026-09-22 用户实锤）
+#
+# 此前只对账「落盘快照」与「重注入快照」，用户屏幕上看到的 [好感] 行仍是模型自述
+# ⇒ 同一角色正文 16→13→10 乱跳、引擎恒 13（观感＝「好感度根本没加上」）。修复点在本
+# 接缝：写回后 state 已从磁盘重载（＝已对账真值），此处对账正文；本节点末尾发 replace
+# 全文替换气泡，故对账正文即等于修显示。锁住接线与**顺序**，防「探针绿、真机红」。
+# ---------------------------------------------------------------------------
+def test_写回接缝对账正文status块():
+    src = inspect.getsource(aag._wb_apply_state)
+    assert "reconcile_reply_status(clean, st)" in src, (
+        "_wb_apply_state 未对账正文 <status> ⇒ 用户屏幕上的 [好感] 数字会与引擎账漂移"
+    )
+    # 顺序锁：必须发生在 st 从磁盘重载**之后**——用旧 st 会拿不到本轮 delta 的结果
+    assert src.index("load_state") < src.index("reconcile_reply_status(clean, st)"), (
+        "对账早于 load_state ⇒ 拿的是写回前的旧值，等于没对账"
+    )

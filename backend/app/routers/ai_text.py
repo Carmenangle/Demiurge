@@ -131,6 +131,7 @@ def gen_frame_prompts(req: FramePromptsRequest) -> dict[str, object]:
     try:
         from app.services import run_trace
 
+        first_frame = next(iter(frames), "")
         for frame, item in frames.items():
             run_trace.emit(
                 {
@@ -144,6 +145,17 @@ def gen_frame_prompts(req: FramePromptsRequest) -> dict[str, object]:
                 strategy=item.get("strategy", "direct"),
                 validation_errors=item.get("validation_errors", []),
                 frame_extract_ok=diagnostics.get("frame_extract_ok"),
+                # 观测（2026-09-23 甲）：首尾帧「成品几乎逐字相同」的归因证据。
+                # 提取器输入/输出只在首个 frame 上记一次（两帧共用同一次提取调用）。
+                **({
+                    "frame_extract_input": diagnostics.get("frame_extract_input"),
+                    "frame_extract_raw": diagnostics.get("frame_extract_raw"),
+                    "frame_extract_parsed": diagnostics.get("frame_extract_parsed"),
+                } if frame == first_frame else {}),
+                frame_field_ledger=item.get("field_ledger") or {},
+                frame_scene_keys=diagnostics.get(f"{frame}_scene_keys"),
+                frame_prompt_chars=diagnostics.get(f"{frame}_prompt_chars"),
+                frame_prompt=diagnostics.get(f"{frame}_prompt"),
             )
     except Exception:  # noqa: BLE001 [EXC-保留] 遥测发射 best-effort：Trace 不得阻断提示词生成
         pass

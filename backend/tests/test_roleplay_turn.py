@@ -2024,3 +2024,146 @@ def test_execute_turn发布前清洗正文元话语():
     assert "质量检查" not in published[0].split("<content>", 1)[1]
     assert "系统提示" not in published[0]
     assert "玄色窄袍" in published[0]
+
+
+# ── 第 57 刀 · 多批派发：单个请求 → N 条 rec（各带自己的插入位置）──────────────
+
+
+def _multi_draft():
+    return roleplay_turn.TurnFinalization(
+        ctx={"repo_id": "work", "turn_id": "t1"}, text="继续", trace=[], streamed=True,
+        reply="raw", deps=object(), turn=3, affinity=0, lost=False,
+    )
+
+
+def _finalize(writeback, offsets):
+    hooks = roleplay_turn.TurnFinalizationHooks(
+        writeback=lambda _draft, _rag: writeback,
+        apply_output=lambda reply: reply,
+        anchor_offset=lambda _reply, request: offsets.get(request.get("anchor")),
+        emit_ready=lambda _ctx, _result: False,
+        maintain=lambda _draft, _reply, _events: None,
+    )
+    return roleplay_turn.finalize_turn(_multi_draft(), hooks)
+
+
+def test_第57刀_单张rec逐字等于改造前():
+    """三档之一：**1 张** ⇒ 与改造前**逐字一致**（id 沿用旧格式、键集不变、无多余键）。
+
+    这是本步最硬的一条零回归锁：批量数目未开时，整条 rec 的字典必须与旧实现字字相同。
+    """
+    request = {
+        "prompt": "tags", "motion": 2, "actors": ["甲"],
+        "scene_spec": {"narrative": "n"}, "video_config": {"model": "m"},
+        "video_request": {"submit": {"prompt": "vp"}},
+        "anchor": "甲处。",
+        "video_mode": "climax", "first_frame_desc": "首帧", "last_frame_desc": "尾帧",
+        "prev_tail_desc": "上尾", "last_frame_url": "local://u.png",
+        "transition": "reuse",
+        "transition_video_request": {"submit": {"prompt": "转"}},
+    }
+    result = _finalize(("visible", [], request, {}), {"甲处。": 7})
+
+    assert result["illustrate_recs"] == [{
+        "id": "illo-req-work-3",
+        "prompt": "tags", "motion": 2, "actors": ["甲"],
+        "scene_spec": {"narrative": "n"}, "video_config": {"model": "m"},
+        "video_request": {"submit": {"prompt": "vp"}},
+        "anchor_offset": 7, "turn_id": "t1",
+        "transition": "reuse",
+        "video_mode": "climax", "first_frame_desc": "首帧", "last_frame_desc": "尾帧",
+        "prev_tail_desc": "上尾", "last_frame_url": "local://u.png",
+        "transition_video_request": {"submit": {"prompt": "转"}},
+    }]
+
+
+def test_第57刀_第2张_展开成两条rec且各带自己的插入位置():
+    """三档之二：**2 张** ⇒ 两条 rec，各按自己的 anchor 定位 ⇒ 各插到自己的正文位置。
+
+    id 必须唯一（前端 `appendMediaSlot` 按 slotId 去重，重复会被**静默丢弃**）。
+    """
+    result = _finalize(
+        ("visible", [], {
+            "prompt": "主图", "anchor": "甲处。",
+            "extra_requests": [{"prompt": "副1", "anchor": "乙处。"}],
+        }, {}),
+        {"甲处。": 10, "乙处。": 40},
+    )
+
+    recs = result["illustrate_recs"]
+    assert [rec["prompt"] for rec in recs] == ["主图", "副1"]
+    assert [rec["anchor_offset"] for rec in recs] == [10, 40]
+    assert [rec["id"] for rec in recs] == ["illo-req-work-3", "illo-req-work-3-1"]
+
+
+def test_第57刀_第999张_所有锚点各一条rec():
+    """三档之三：**999 张**（≥ 锚点数）⇒ 主图 + 全部其余锚点，各一条 rec、各一个插入点。"""
+    result = _finalize(
+        ("visible", [], {
+            "prompt": "主图", "anchor": "锚0。",
+            "extra_requests": [
+                {"prompt": f"副{i}", "anchor": f"锚{i}。"} for i in range(1, 5)
+            ],
+        }, {}),
+        {f"锚{i}。": i * 10 for i in range(5)},
+    )
+
+    recs = result["illustrate_recs"]
+    assert [rec["prompt"] for rec in recs] == ["主图", "副1", "副2", "副3", "副4"]
+    assert [rec["anchor_offset"] for rec in recs] == [0, 10, 20, 30, 40]
+    assert len({rec["id"] for rec in recs}) == 5          # id 全唯一
+    assert recs[-1]["id"] == "illo-req-work-3-4"
+
+
+def test_第57刀_定位不到的额外请求被跳过且不影响其余():
+    """边界锁：某条额外请求定位不到（anchor 不在正文）⇒ **只跳过该条**，其余照出。"""
+    result = _finalize(
+        ("visible", [], {
+            "prompt": "主图", "anchor": "甲处。",
+            "extra_requests": [
+                {"prompt": "副1", "anchor": "乙处。"},
+                {"prompt": "副2", "anchor": "找不到。"},     # 定位不到
+                {"prompt": "副3", "anchor": "丙处。"},
+            ],
+        }, {}),
+        {"甲处。": 10, "乙处。": 40, "丙处。": 70},
+    )
+
+    recs = result["illustrate_recs"]
+    assert [rec["prompt"] for rec in recs] == ["主图", "副1", "副3"]
+    assert [rec["anchor_offset"] for rec in recs] == [10, 40, 70]
+
+
+def test_第57刀_额外请求全定位不到时退回单张():
+    """边界锁：额外请求全部落空 ⇒ 只剩主图，且主图 id 仍是旧的单张格式。"""
+    result = _finalize(
+        ("visible", [], {
+            "prompt": "主图", "anchor": "甲处。",
+            "extra_requests": [{"prompt": "副1", "anchor": "找不到。"}],
+        }, {}),
+        {"甲处。": 10},
+    )
+
+    recs = result["illustrate_recs"]
+    assert len(recs) == 1
+    assert recs[0]["id"] == "illo-req-work-3"
+
+
+def test_第57刀_extra_requests里的脏项被忽略():
+    """稳健性锁：`extra_requests` 不是列表 / 混入非字典项 ⇒ 忽略脏项，绝不影响主图。"""
+    for dirty in ("不是列表", 123, {"prompt": "x"}, None):
+        result = _finalize(
+            ("visible", [], {"prompt": "主图", "anchor": "甲处。", "extra_requests": dirty}, {}),
+            {"甲处。": 10},
+        )
+        recs = result["illustrate_recs"]
+        assert [rec["prompt"] for rec in recs] == ["主图"], dirty
+
+    result = _finalize(
+        ("visible", [], {
+            "prompt": "主图", "anchor": "甲处。",
+            "extra_requests": ["不是字典", None, 7, {"prompt": "副1", "anchor": "乙处。"}],
+        }, {}),
+        {"甲处。": 10, "乙处。": 40},
+    )
+    assert [rec["prompt"] for rec in result["illustrate_recs"]] == ["主图", "副1"]

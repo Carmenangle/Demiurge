@@ -272,6 +272,9 @@ def _agency_prelude(ctx: dict, text: str):
             curator_sampling=_builtin_sampling(ctx, "curator"))
         deps.trace_fn = lambda event, **data: run_trace.emit(ctx, event, **data)
         st = character_state.load_state(base, repo_id, card_name)
+        # 供回合内动态注入复用同一份 state（待建好感度字段清单）：本回合只读盘一次，
+        # 避免后半段再 load 读到中间态；无卡/无 output_dir 时本函数静默返回，ctx 不写。
+        ctx["_character_state"] = st
         deps.affinities = roleplay_agency._affinities(st)
         deps.state_context = character_state.render_state_block(st) if (st.数值 or st.叙事) else ""
         affinity = roleplay_agency._affinity(st)
@@ -554,6 +557,41 @@ def _protagonist_gender(ctx: dict, repo_id: str, protagonist: str) -> str:
     )
 
 
+def _subject_gender_map(
+    ctx: dict, repo_id: str, names: list[str], *,
+    protagonist: str, protagonist_gender: str, tables,
+) -> dict[str, str]:
+    """逐角色性别映射 `{角色名: "女"/"男"}`（零 LLM，第 46 刀）。
+
+    ⚠ **用途仅限**「按画面主体的实际性别组成写人数词」（`1girl, 2boys` 这种）——
+      **不做画面事实注入**（性别注入仍只对主人公，23 刀红线）。
+    ⚠ 来源定序与主人公一致：世界书条目正文优先、通用表「性别」列兜底；
+      解析不出的名**不进映射**（下游见缺 ⇒ 退回中性措辞，宁缺勿猜）。
+    ⚠ 主人公复用已算好的 `protagonist_gender`（省一次世界书 I/O）。
+    """
+    from app.services import scene_illustration, worldbook_store
+    base = str(ctx.get("output_dir") or "").strip()
+    out: dict[str, str] = {}
+    for raw in names:
+        name = str(raw or "").strip()
+        if not name or name in out:
+            continue
+        if protagonist and name == protagonist and protagonist_gender:
+            out[name] = protagonist_gender
+            continue
+        gender = ""
+        if base:
+            try:
+                gender = worldbook_store.repo_character_gender(base, repo_id, name)
+            except Exception:  # noqa: BLE001 — 世界书读失败不得打断出图链
+                gender = ""
+        if not gender:
+            gender = scene_illustration.gender_from_tables(tables, name)
+        if gender:
+            out[name] = gender
+    return out
+
+
 def _filter_illustration_appearance(
     appearance: str, actors: list[str], known: list[str],
 ) -> str:
@@ -663,15 +701,22 @@ def _wb_apply_state(ctx: dict, deps, clean: str, *, turn: int, repo_id: str,
         # 真值判断而非 .strip()：extract_status_snapshot 产出已 strip，等价且对测试假件宽容。
         ctx["_agency_state_fallback"] = (not raw, not snapshot)
     raw = [*raw, *(ctx.pop("_agency_goal_deltas", []) or [])]
+    rejected_adds: list = []
     before, after = roleplay_agency.writeback(
         deps, repo_id=repo_id, card_name=card_name, raw_deltas=raw, turn=turn,
-        snapshot=snapshot)
+        snapshot=snapshot, rejected=rejected_adds)
     run_trace.emit(ctx, "state.writeback", raw_deltas=raw, snapshot=snapshot,
-                   affinity_before=before, affinity_after=after)
+                   affinity_before=before, affinity_after=after,
+                   rejected_adds=rejected_adds)
     st = character_state.load_state(deps.state_base, repo_id, card_name)
     if not snapshot:
         previous_snapshot = getattr(getattr(st, "快照", None), "text", "")
         clean = roleplay_agency.ensure_status_snapshot(clean, previous_snapshot)
+    # 展示对账（2026-09-22 用户实锤）：正文 <status> 的数字此前只对账「落盘快照」与
+    # 「重注入快照」，用户屏幕上看到的 [好感] 行仍是模型自述 ⇒ 与引擎账漂移（实测同一角色
+    # 正文 16→13→10 乱跳，引擎恒 10→13）。此处用同一函数对账**正文**——本节点末尾发
+    # replace 全文替换气泡，故显示即修。st 已在上面从磁盘重载（即已对账的真值）。
+    clean = roleplay_agency.reconcile_reply_status(clean, st)
     # 旧版/异常模型仍可能输出表格块：这里只清洗，实际更新统一交给独立维护调用。
     had_legacy_table_block = table_update.has_table_block(clean)
     clean, _legacy_ops = table_update.parse_table_block(clean)
@@ -680,12 +725,85 @@ def _wb_apply_state(ctx: dict, deps, clean: str, *, turn: int, repo_id: str,
     return clean, raw, before, after, snapshot, st
 
 
+def _wb_ratchet_sources(
+    ctx: dict, repo_id: str,
+) -> tuple[list[str], list[str], list[str], list[str]]:
+    """术语棘轮（CODE_STYLE_TERM_RATCHET）的输入：注入层 + 最近数轮正文 + 豁免人名 + 设定存量。
+
+    2026-09-23：真机「经脉」在注入块里 33 次、跨 31 个不同句子，而正文里"看经脉"0 命中
+    ⇒ 该码要能看见**持久层**，否则永远量不到。此处注入层＝**本轮维护后**的读侧数据表
+    （＝下一轮会注入的那一份）+ 世界书召回/动态段；正文层＝最近 5 轮 assistant 全文。
+    设定存量（第 4 项）见 ``_wb_setting_sources``。仅只读；失败退回空（不产生诊断）。
+    """
+    injected: list[str] = []
+    names: list[str] = []
+    dyn = str(ctx.get("_worldbook_dynamic_text") or "")
+    recall = str(ctx.get("_worldbook_recall_text") or "")
+    if dyn:
+        injected.append(dyn)
+    if recall:
+        injected.append(recall)
+    try:
+        from app.services import table_store, table_update
+
+        tables = table_store.load(ctx.get("output_dir") or "", repo_id)
+        read_tables = table_store.tables_for_read(tables)
+        block = table_update.table_context(read_tables)
+        if block:
+            injected.append(block)
+        for tb in read_tables:
+            for row in (tb.get("rows") or []):
+                first = str(row[0]).strip() if row else ""
+                if 1 < len(first) <= 6:
+                    names.append(first)
+    except Exception:  # noqa: BLE001 棘轮输入缺失不影响 CI 其余项
+        pass
+    for name in ctx.get("_worldbook_character_names") or ():
+        names.append(str(name).strip())
+    bodies = [
+        (m.get("content") or "").strip()
+        for m in reversed(_history_messages(ctx))
+        if m.get("role") == "assistant"
+    ][:5]
+    bodies = [b for b in bodies if b]
+    return (injected, bodies, [n for n in dict.fromkeys(names) if n][:40],
+            _wb_setting_sources(ctx, repo_id))
+
+
+def _wb_setting_sources(ctx: dict, repo_id: str) -> list[str]:
+    """设定存量来源＝世界书各条目的**静态底座**（`DYNAMIC_MARKER` 之前部分）。
+
+    用途：用户 2026-09-23 口径——「天狐宫多次出现能理解（主角大半后宫在此、后期势力归男主），
+    但经脉，你看设定条目都不怎么提及，就前期提了一嘴，结果一个个女主角找的借口都是经脉」。
+    ⇒ 判据＝「**叙事用量 vs 设定存量**」。此处给出存量：含设定条目 + 角色卡（不含动态区，
+    动态区是叙事、已算进注入层）。失败退回空 ⇒ 报告退回按频次排序，与改造前一致。
+    """
+    try:
+        from app.services import worldbook, worldbook_store
+
+        base = ctx.get("output_dir") or ""
+        book = worldbook_store.read_repo_snapshot(base, repo_id)
+        if not book:
+            return []
+        out: list[str] = []
+        for entry in book.get("entries") or []:
+            content = str(entry.get("content") or "")
+            if worldbook.DYNAMIC_MARKER in content:
+                content = content.split(worldbook.DYNAMIC_MARKER, 1)[0]
+            if content.strip():
+                out.append(content)
+        return out
+    except Exception:  # noqa: BLE001 棘轮输入缺失不影响 CI 其余项
+        return []
+
+
 def _wb_run_narrative_ci(ctx: dict, clean: str, *, turn: int, raw: list,
                          repo_id: str) -> None:
     """连续性 CI 评估 + 落盘（永不阻断/改写正文）。逐字自 `_agency_writeback` 搬移。"""
     try:
         from app.services import narrative_ci
 
+        injected, bodies, exclude, setting = _wb_ratchet_sources(ctx, repo_id)
         diagnostics = narrative_ci.evaluate(
             clean, turn=turn, facts=ctx.get("_continuity_facts") or (), raw_deltas=raw,
             beliefs=ctx.get("_continuity_beliefs") or (),
@@ -696,6 +814,10 @@ def _wb_run_narrative_ci(ctx: dict, clean: str, *, turn: int, raw: list,
                 if m.get("role") == "assistant"
             ][:3],
             style_config=ctx.get("_style_config"),
+            style_injected=injected,
+            style_bodies=bodies,
+            style_exclude=exclude,
+            style_setting=setting,
         )
         saved = narrative_ci.save(
             ctx.get("output_dir") or "", repo_id, diagnostics,
@@ -958,6 +1080,61 @@ def _frame_subject_names(raw) -> list[str]:
     return [str(name).strip() for name in raw if str(name).strip()]
 
 
+def _resolve_anchor_intent_list(ctx: dict, text: str, raw: str) -> list[dict]:
+    """判据原始输出 ⇒ **去重后的锚点列表**，再按面板数量取前 N（第 57 刀）。
+
+    `count` 取 `ctx["illustration_batch_count"]`（面板「批量生图数量」）：
+      · 0/缺省 ⇒ 1（单张：与 `resolve_anchor_intent` 同口径，取分最高、同分取正文更早）；
+      · ≥ 锚点数 ⇒ 全部；
+      · 否则 ⇒ 按判据 `score` 降序取前 N（结果仍保持正文原序）。
+    `list[0]` 恒等于 `resolve_anchor_intent` 单条路径的锚点（两条链**同源**，不会各说各话）。
+    任何解析失败 ⇒ `[]`（调用方回落已有单条路径/词表档）。
+    """
+    from app.services import scene_illustration
+
+    items = scene_illustration.dedupe_anchor_intents(
+        scene_illustration.parse_anchor_intents(raw), text,
+    )
+    if not items:
+        return []
+    return scene_illustration.select_anchor_intents(items, _anchor_batch_count(ctx))
+
+
+def _anchor_batch_count(ctx: dict) -> int:
+    """面板「批量生图数量」：0/缺省/非法 ⇒ 1（单张，与改造前逐字一致）。"""
+    try:
+        value = int(ctx.get("illustration_batch_count") or 0)
+    except (TypeError, ValueError):
+        return 1
+    return value if value >= 1 else 1
+
+
+def _anchor_intent_viewpoint_hint(ctx: dict) -> str:
+    """第 57 刀 ④：把「画面人称」告知判据（**只加在调用侧，不动用户判据文本**）。
+
+    用户口径（原话，第二次重申）：「第三人称是**内容产出再找视角展示完整内容**，而第一人称
+    则是**先内容再核对主人公主视角内容进行筛分**。」
+    ⇒ 第一人称下，**选点阶段**就该避开「只有退到远处／绕到对方背后才画得出来」的时刻；
+    否则下游再筛也救不回。真机实锤（turn `9bb03d04`）：判据选了事后的**非接触帧**，
+    取材窗口只给得出**整夜性场景** ⇒ 编译出「肉棒压在她臀上」这类**只能从外部看到**的画面
+    ⇒ 第一人称成图**必然**呈现第三人称观感。
+
+    ⚠ 刻意**不动 `DEFAULT_CLIMAX_ANCHOR_RUBRIC`**：该文件头明令「**不许往判据里加约束/加门**」
+      （v7/v9/v10/v11 四次实测净亏）；本提示是**调用侧上下文**、不是判据正文
+      ⇒ 用户手写的那份 rubric **逐字不变**、也**不需要 rubric A/B**。
+    未手选人称（`""`＝自动）⇒ 返回空串 ⇒ user 消息**逐字节不变**（零回归锁）。
+    """
+    if str(ctx.get("illustration_viewpoint") or "").strip() != "first_person":
+        return ""
+    return (
+        "画面人称：第一人称（镜头＝叙事者的眼睛、视野有限；叙事者本人不占画面，"
+        "他的身体只在正文写到时以局部入画）。\n"
+        "⇒ 选点时**优先**挑「就站在叙事者眼睛位置、一眼就能看到」的时刻；"
+        "**避开**那些必须退远、绕到对方背后、或要同时看全两人全身才画得出来的时刻"
+        "（那种帧在**选点阶段**就注定画不出来）。"
+    )
+
+
 def _illustration_anchor_intent(ctx: dict, clean: str, sig: dict) -> tuple[str, dict]:
     """判据档：用「高潮点定位判据」（用户态配置，属主 illustration_prompt_store）判定锚点。
 
@@ -999,6 +1176,8 @@ def _illustration_anchor_intent(ctx: dict, clean: str, sig: dict) -> tuple[str, 
         return "", {}
     actors = [str(name).strip() for name in (sig.get("present") or []) if str(name).strip()]
     user = "\n\n".join(part for part in (
+        # 第 57 刀 ④：画面人称（只 disclose，不约束判据正文）。未手选 ⇒ 空串 ⇒ 逐字不变。
+        _anchor_intent_viewpoint_hint(ctx),
         f"在场角色：{'、'.join(actors)}" if actors else "",
         f"剧情正文：\n{text}",
     ) if part)
@@ -1017,6 +1196,13 @@ def _illustration_anchor_intent(ctx: dict, clean: str, sig: dict) -> tuple[str, 
         )
         return "", {}
     anchor, detail = scene_illustration.resolve_anchor_intent(text, raw or "")
+    # 第 57 刀：同步落一份**去重 + 取前 N** 的多锚点列表进 ctx（多批生图的地基）。
+    # ⚠ 只在能解析出锚点时写；单张路径的返回值 `(anchor, detail)` **逐字不变**
+    #   （`resolve_anchor_intent` 仍是「分最高那条」的老语义 —— 零回归锁）。
+    if anchor:
+        ctx["illustration_anchor_intents"] = _resolve_anchor_intent_list(
+            ctx, text, raw or "",
+        )
     elapsed = round(time.monotonic() - started, 1)
     if not anchor:
         run_trace.emit(
@@ -1031,16 +1217,26 @@ def _illustration_anchor_intent(ctx: dict, clean: str, sig: dict) -> tuple[str, 
         anchor=anchor[:120], composition=detail.get("composition") or "",
         subjects=detail.get("subjects") or [], reason=detail.get("reason") or "",
         elapsed_seconds=elapsed,
+        # 第 57 刀 · 观测补口（2026-09-24 用户问「选的是不是高分」）：把判据的**完整榜单**
+        # （含 score）记下来 —— 此前只记「选中那条」，打分发生了却丢掉。
+        # ⚠ 仅进诊断 trace，不进提示词（score 不外泄到生图链路）。
+        anchors=(ctx.get("illustration_anchor_intents") or [])[:8],
     )
     return anchor, detail
 
 
 def _wb_comfy_scene_target(ctx: dict, repo_id: str, plan, clean: str, sig: dict,
                            pool: dict, *, prompt_override: str, motion: int,
-                           user_text: str) -> dict:
+                           user_text: str, anchor_override: str = "",
+                           subjects_override: list | None = None) -> dict:
     """comfy 路径②：提示词落定 + 锚点定位 + 高潮重定向 + 终选角色与外貌。
 
     返回 dict（键为原内联局部名；`motion` 可能被重定向改写）。逐字搬移。
+
+    第 57 刀 · 多批派发（2026-09-24）：`anchor_override` 非空时＝**指定锚点**（多批的第 2..N 张），
+    此时**不再调用判据 LLM**（锚点列表已由本轮主路径的判据调用落进
+    `ctx["illustration_anchor_intents"]`）——否则 N 张图会多花 N-1 次判据调用。
+    默认空串 ⇒ 走**原有**判据档 / 词表档 / 计划档，逐字节不变（零回归锁）。
     """
     from app.services import image_prompt_extract, scene_illustration
 
@@ -1055,6 +1251,19 @@ def _wb_comfy_scene_target(ctx: dict, repo_id: str, plan, clean: str, sig: dict,
     climax_paragraph = pool["climax_paragraph"]
     request_actors = pool["request_actors"]
     request_appearance = pool["request_appearance"]
+    # 第 51 刀（2026-09-22 用户定案「给 FP2 建真源」）：叙事者姓名三段读取
+    # （user_name → 主角信息表姓名列 → 世界书主角条目），修复 **D4/D5**（生产里
+    # `user_name` 常空 ⇒ 第 42 刀数据层保护集体空转）。算一次，下游 filter_anchor_subjects
+    # 与 6 处消费点共用同一 `scene_spec["narrator"]`。
+    _base = str(ctx.get("output_dir") or "").strip()
+    protagonist_name, protagonist_source = "", ""
+    try:
+        from app.services import worldbook_store as _wbs
+        protagonist_name, protagonist_source = _wbs.repo_protagonist_name(
+            _base, repo_id, str(ctx.get("user_name") or ""),
+        )
+    except Exception:  # noqa: BLE001 — 姓名解析失败不得打断出图链
+        protagonist_name, protagonist_source = "", ""
 
     request_prompt = prompt_override.strip()
     prompt_source = "extracted"
@@ -1076,6 +1285,13 @@ def _wb_comfy_scene_target(ctx: dict, repo_id: str, plan, clean: str, sig: dict,
     # 故另起一份只装判据结论的副本，随 scene_spec 下传，供多人契约按**画面主体数**判
     # （用户口径：不按角色表人数、也不按在场人数）。
     frame_subjects: list[str] = []
+    # 第 50 刀（2026-09-22 用户口径「主人公**不是被剔除，而是等效镜头**」）：判据**未经收敛**的
+    # 原始主体名。锚点句点名收敛**只看字面名字**，而锚点句常用**代词**指代真正的主体（"她…"）、
+    # 用**名字**指代镜头（被看向/被亲吻的主人公）⇒ 收敛会把「镜头」误当成本帧唯一主体。
+    # 真机轮 C（thread `09f79e6f`，12:28）：锚点句「**她**掖完被子，把视线从墙上收回来，
+    # 落到**凌渊**脸上。」⇒ 收敛成 `['凌渊']`（凌渊＝镜头、根本不在场）⇒ 画面被读成
+    # 「画主人公一个人」。⇒ 当收敛结果与本帧在场角色**无交集**时，必须能回退到这一份。
+    judge_subjects: list[str] = []
     # 缺块路径的锚点必须与「同轮有计划」那条支路一样过**既有仲裁机**
     # （`resolve_illustration_anchor`：词表分 ≥ 模型分+3 就推翻）。设计稿 §5.2 早就记了
     # 「§2.2 的推翻逻辑需一并重审」，但实现里仲裁只在 `if plan:` 时跑 ⇒ 同一三档降级链
@@ -1083,7 +1299,33 @@ def _wb_comfy_scene_target(ctx: dict, repo_id: str, plan, clean: str, sig: dict,
     # 4 run × 3 采样）该缺口导致判据档在 L1/L3 反而劣于词表档（55.3 vs 35、19.0 vs 12）；
     # 接上仲裁后 L1 55.3→35.0、L3 19.0→12.0，且 L2 的完美选点零误伤（推翻 0/12）。
     fallback_anchor_needs_arbitration = False
-    if character_encounter:
+    if anchor_override and not character_encounter and not plan:
+        # 第 57 刀 · 多批派发（2026-09-24）：锚点由调用方指定 —— 判据已在本轮主路径跑过一次，
+        # **不再重复调用判据 LLM**（否则 N 张图会多花 N-1 次判据调用）。
+        # 主体名沿用该锚点自己的 `subjects`，走与判据档**同一条**过滤链（口径不分叉）。
+        # ⚠ 仲裁策略见分支末尾的 B′ 说明（定位成功即不过仲裁）。
+        fallback_anchor = anchor_override
+        judge_subjects = _frame_subject_names(subjects_override)
+        _vp_anchor = scene_illustration.frame_viewpoint_detail(
+            fallback_anchor, known=known,
+            override=str(ctx.get("illustration_viewpoint") or ""),
+        )
+        anchor_subjects = scene_illustration.filter_anchor_subjects(
+            judge_subjects, fallback_anchor, known,
+            narrator=protagonist_name, viewpoint=_vp_anchor["viewpoint"],
+        )
+        frame_subjects = list(anchor_subjects)
+        # 第 57 刀 B′（2026-09-24 用户拍板）：`anchor_override` 是**有意指定**的画面 ——
+        # 与 `character_encounter`（「首帧/初遇锚点刻意不过仲裁」）同一性质。
+        # 真机实锤（2 张实测，`illustration.slot` 两条）：仲裁 `resolve_illustration_anchor`
+        # 是**确定性**的，把判据锚点「手就那么悬…」与 extras 的锚点**都收敛到同一个**
+        # 词表最优段「那两团肉…」⇒ 两槽 anchor 逐字相同、offset 同为 1133 ⇒ 两张图叠放。
+        # ⇒ 定位成功 ⇒ **不再仲裁**（extras 才能落在**自己**的高潮点）；
+        #   定位失败 ⇒ 仍走仲裁→词表兜底（锚点不在正文里就无从取材）。
+        # ⚠ 只动本分支：单张/主图路径零回归。
+        fallback_anchor_needs_arbitration = not bool(
+            scene_illustration.illustration_anchor_offset(clean, anchor_override))
+    elif character_encounter:
         # 首帧/初遇锚点是**有意指定**的画面，刻意不过仲裁：仲裁机带「高潮纠偏」语义，
         # 套到首帧上会把画面从开篇拉到高潮段——这正是 `first_frame_anchor_offset`
         # 当初存在的原因。故接线只扩到「缺块 + 判据」这条支路。
@@ -1101,13 +1343,22 @@ def _wb_comfy_scene_target(ctx: dict, repo_id: str, plan, clean: str, sig: dict,
             # （吸附全名 / 滤叙事者·主角 / 锚点句点名收敛——见 filter_anchor_subjects）。
             # 2026-09-20 收紧：把**主角本名**（用户人设名）交给后滤——第一人称视角下
             # 叙事者不占画面，不再被当成画面里的一个人而误触发多人契约。
-            anchor_subjects = scene_illustration.filter_anchor_subjects(
-                _frame_subject_names(intent_detail.get("subjects")),
-                intent_anchor, known,
-                narrator=str(ctx.get("user_name") or ""),
-                # 手选人称（多元数据插入面板按钮组）同样作用于主体后滤：手选第三人称时
-                # 主人公不再被当叙事者剔除（第三人称 ⇒ 主人公算一个主体）。
+            # 第 50 刀：**未经收敛**的判据主体名（＝判据的原始结论）。锚点句点名收敛
+            # 只认字面名字（见 filter_anchor_subjects 第 ③ 步），会因「代词指主体、名字指
+            # 镜头」而收敛错；故留一份未收敛的原件，供后文「收敛失败回退」。仅判据档会填。
+            judge_subjects = _frame_subject_names(intent_detail.get("subjects"))
+            # 第 51 刀（人称单一真源，修 D1）：`viewpoint` 由上游唯一接缝算好传入
+            # （已含手选 override 优先），`narrator` 取三段读取结果；filter_anchor_subjects
+            # 不再内部自判人称。
+            _vp_anchor = scene_illustration.frame_viewpoint_detail(
+                intent_anchor, known=known,
                 override=str(ctx.get("illustration_viewpoint") or ""),
+            )
+            anchor_subjects = scene_illustration.filter_anchor_subjects(
+                judge_subjects,
+                intent_anchor, known,
+                narrator=protagonist_name,
+                viewpoint=_vp_anchor["viewpoint"],
             )
             # 优化项③：只有判据档给得出「本帧主体」，词表档给不出（它的 subjects 是在场全集）。
             frame_subjects = list(anchor_subjects)
@@ -1122,12 +1373,6 @@ def _wb_comfy_scene_target(ctx: dict, repo_id: str, plan, clean: str, sig: dict,
         requested_anchor = scene_illustration.resolve_illustration_anchor(
             clean, requested_anchor,
         )
-    if frame_subjects and image_prompt_extract.restore_jailbreak(
-        requested_anchor,
-    ).strip() != image_prompt_extract.restore_jailbreak(fallback_anchor).strip():
-        # 判据锚点被仲裁机推翻（或计划另指定了锚点）⇒ 画面已经换段，
-        # 判据的 subjects 不再描述这一帧 ⇒ 撤回正向证据，契约退回在场角色（旧行为）。
-        frame_subjects = []
     plan_retargeted = bool(
         plan and planned_anchor
         and image_prompt_extract.restore_jailbreak(planned_anchor).strip()
@@ -1165,6 +1410,39 @@ def _wb_comfy_scene_target(ctx: dict, repo_id: str, plan, clean: str, sig: dict,
     )
     if final_actors:
         request_actors = final_actors
+    # 第 48 刀 · B2（2026-09-22）＋ 第 49 刀 · A2（2026-09-22 用户定案「先 B 再 A2」）：
+    # 画面主体（契约/分述/人数词看到的）**只能是「在场角色」的子集** —— 判据 `subjects` 里若混进
+    # 了不在场的名字，一律剔出。真机轮 A（thread `09f79e6f`，09:54）：判据 `['妲千沁','凌渊']`
+    # 把**不入画的主人公**算成画面主体，而 `actors=['妲千沁']` ⇒ 契约判成双人帧 ⇒
+    # 成稿 `2girls, adult woman, adult man`（多画一个人）。
+    #  B2（第 48 刀）：**判据锚点被仲裁机推翻**时（画面已换段 ⇒ 判据 `subjects` 不再逐字描述
+    #    这一帧）**收窄**，而不是整条撤回、退回「在场全集 `actors`」——旧行为会把
+    #    单人帧判成多人帧（真机轮 C，12:28）。
+    #  A2（第 49 刀）：**不再以「锚点被推翻」为条件** —— 只要判据主体里有 ∉ 在场角色的名字
+    #    就剔。⇒ 也覆盖「锚点没被推翻、但判据仍把不在场者算成主体」的轮 A。
+    #    与第 32 刀「归因＝`actors`（在场全集）／输出＝契约主体」一脉相承：
+    #    **输出只会是归因的子集，永不超出在场角色**。
+    # ⚠ 保护：`in_scene` 为空（本帧取不到在场角色）⇒ **不收窄**（保守＝旧行为；免得把判据主体
+    #    整条清空、契约再回落一次空表）。交集为空 ⇒ 空表 ⇒ 契约仍退回 `actors`（零回归兜底）。
+    # ⚠ 只收窄「契约/分述/人数词看到的画面主体」。**不动**：判据 rubric、仲裁机 branch① 门槛、
+    #   以及**内容优先**那条链——取材扩窗仍用未收窄的 `anchor_subjects`（本条只改 `frame_subjects`），
+    #   成稿编译与机位反推（38／39 刀）原样。
+    in_scene = {str(name).strip() for name in request_actors if str(name).strip()}
+    # 第 50 刀 · B3（2026-09-22 用户定案「主人公**不是被剔除，而是等效镜头**」）：
+    # 判据锚点句里的**名字**未必是本帧主体 —— 第一人称下它常是「镜头」（被看向/被亲吻的
+    # 主人公）。而收敛只认字面名字 ⇒ 锚点句用**代词**写主体、用**名字**写镜头时，收敛会把
+    # **主体丢掉、只留下镜头**。真机轮 C（thread `09f79e6f`，12:28）锚点句「**她**掖完被子，
+    # 把视线从墙上收回来，落到**凌渊**脸上。」⇒ 收敛成 `['凌渊']`（＝镜头，且不在场）
+    # ⇒ 与在场角色无交集 ⇒ 契约退回在场全集 ⇒ 成稿把单人帧画成 `2girls`（多画一个人）。
+    # ⇒ 收敛结果与在场角色**无交集**时视为收敛失败：回退到**未收敛的判据主体**再按在场收窄
+    #    （同一份判据，只是跳过收敛这一步；正确画面＝主体 [妲千沁] + 视线朝镜头）。
+    # ⚠ 只在「无交集」这一种确定坏掉的情形回退（有交集就尊重收敛结论）；回退结果仍 ⊂ 在场角色。
+    if judge_subjects and frame_subjects and in_scene:
+        restored = [name for name in judge_subjects if name in in_scene]
+        if restored and not [name for name in frame_subjects if name in in_scene]:
+            frame_subjects = restored
+    if frame_subjects and in_scene:
+        frame_subjects = [name for name in frame_subjects if name in in_scene]
     # 视角（生图模式，2026-09-20 用户定案）：对**终选锚点**判——仲裁机换了段，画面就换了。
     # 手选优先（`ctx["illustration_viewpoint"]`＝「多元数据插入」面板人称按钮组，三档
     # 自动/第一人称/第三人称），自动判定拿不到信号时默认第一人称；冲突留痕写进 detail 供审计。
@@ -1174,32 +1452,87 @@ def _wb_comfy_scene_target(ctx: dict, repo_id: str, plan, clean: str, sig: dict,
     )
     # 主人公（叙事者化身）性别：只对主人公、只作**画面事实**注入（不机械拼 1girl/1boy）；
     # 姓名取用户人设名（＝世界书「角色卡·<主角名>」条目所绑的主角名），性别先查世界书条目
-    # 正文、再退回通用表「性别」列。主人公不在本帧主体里（第一人称 / 未入画）⇒ 不注入。
-    protagonist = str(ctx.get("user_name") or "").strip()
+    # 正文、再退回通用表「性别」列。主人公不入画（第一人称 / 未列为本帧主体）⇒ 不注入。
+    # ⚠ 第 37 刀（2026-09-21 用户实锤）：此闸原先只看 `protagonist in request_actors`、
+    # **不看视角** ⇒ 第一人称下照样注入 ⇒ 真机在正确的 `2girls` 之外多写违规的 `1boy`。
+    # 视角结论上面已算好（`viewpoint_detail`），直接复用。
+    # 第 51 刀：`protagonist` 改用三段读取结果（不再是常空的 `user_name`，修复 D4/D5）。
+    protagonist = protagonist_name
     protagonist_gender = ""
-    if protagonist and protagonist in [
-        str(actor).strip() for actor in request_actors
-    ]:
+    if (
+        viewpoint_detail["viewpoint"] != "first_person"
+        and protagonist
+        and protagonist in [str(actor).strip() for actor in request_actors]
+    ):
         # 主人公不入画（第一人称 / 未列为本帧主体）⇒ 连世界书都不读，省一次 I/O。
         protagonist_gender = _protagonist_gender(ctx, repo_id, protagonist)
     request_appearance = _filter_illustration_appearance(
         _illustration_appearance(ctx), request_actors, known,
     )
+    # 第 36 刀：表格只读一次、两处复用（① 与条目融合 ② 确定性来源诊断）。
+    tables_for_facts = _repo_tables_for_facts(ctx, repo_id)
+    appearance_sources = scene_illustration.actor_appearance_sources(
+        request_appearance, request_actors, tables_for_facts,
+    )
     request_appearance = scene_illustration.supplement_actor_table_appearance(
-        request_appearance, request_actors, _repo_tables_for_facts(ctx, repo_id),
+        request_appearance, request_actors, tables_for_facts,
     )
     request_appearance = scene_illustration.supplement_protagonist_gender(
         request_appearance, request_actors, protagonist, protagonist_gender,
+        viewpoint=viewpoint_detail["viewpoint"],
+    )
+    # 第 46 刀：逐主体性别（零 LLM）—— 只为「人数词按画面主体的实际性别组成写」服务，
+    # **不做画面事实注入**。候选名＝画面主体三支来源的并集（计划 subjects / 判据
+    # frame_subjects / 在场 actors），保证 `_contract_subject_names` 无论走哪支都查得到。
+    gender_candidates = [*request_actors, *frame_subjects]
+    for subject in (plan.get("subjects") or []) if plan else []:
+        if isinstance(subject, dict):
+            gender_candidates.append(str(subject.get("name") or ""))
+    subject_genders = _subject_gender_map(
+        ctx, repo_id, gender_candidates,
+        protagonist=protagonist, protagonist_gender=protagonist_gender,
+        tables=tables_for_facts,
     )
     return {
         "request_prompt": request_prompt, "prompt_source": prompt_source,
         "requested_anchor": requested_anchor, "plan_retargeted": plan_retargeted,
         "scene_narrative": scene_narrative, "motion": motion,
         "request_actors": request_actors, "request_appearance": request_appearance,
+        "appearance_sources": appearance_sources,
         "frame_subjects": frame_subjects,
+        "subject_genders": subject_genders,
         "viewpoint": viewpoint_detail["viewpoint"],
         "viewpoint_detail": viewpoint_detail,
+        "narrator": protagonist_name,
+        "narrator_source": protagonist_source,
     }
+
+
+def _wb_first_person_frame_filter(ctx: dict, scene_spec: dict) -> dict:
+    """第 57 刀 ③：第一人称「画面事实筛分」的接缝（就地改 `scene_spec`，返回被剔片段）。
+
+    用户口径：「第一人称＝先内容，再**核对主人公主视角**、**筛分**镜头里该保留的东西」。
+    第 55 刀只把筛分写成提示词指令（靠模型自觉）⇒ 真机实锤提示词自相矛盾
+    （`close-up` 同时要求 `broad rounded hips` / `white silk stockings`），因为
+    `appearance`/`wardrobe` 在字段账本里是 `required`、编译器**不能省略**。
+    本接缝把筛分**下沉到数据层**：进编译器之前先按取景上限剔掉装不下的部位/衣物。
+
+    判定与白名单全在 `image_prompt_profiles.first_person_frame_filter`（纯函数、可单测）。
+    `applied=False`（第三人称 / 风景帧 / 下半身帧 / 无可剔片段）⇒ **一个键都不动**
+    ⇒ 逐字节等于旧行为（零回归锁）。
+    """
+    from app.services import image_prompt_profiles
+
+    verdict = image_prompt_profiles.first_person_frame_filter(scene_spec)
+    if not verdict["applied"]:
+        return {}
+    scene_spec["appearance"] = verdict["appearance"]
+    scene_spec["wardrobe"] = verdict["wardrobe"]
+    run_trace.emit(
+        ctx, "illustration.first_person_filter", status="applied",
+        scope=verdict["scope"], removed=verdict["removed"],
+    )
+    return verdict
 
 
 def _wb_comfy_scene_spec(ctx: dict, repo_id: str, plan, clean: str, sig: dict,
@@ -1254,6 +1587,13 @@ def _wb_comfy_scene_spec(ctx: dict, repo_id: str, plan, clean: str, sig: dict,
     }
     if ctx.get("appearance_source") in {"worldbook", "character_card"}:
         scene_spec["appearance_source"] = ctx.get("appearance_source")
+    if target.get("appearance_sources"):
+        # 第 36 刀：逐角色外观事实来源（entry/table/merged/none），确定性诊断量。
+        scene_spec["appearance_sources"] = target["appearance_sources"]
+    if target.get("subject_genders"):
+        # 第 46 刀：`{角色名: "女"/"男"}`（零 LLM）。供 `image_prompt_profiles` 按**画面主体的
+        # 实际性别组成**写人数词；缺键 / 全空 ⇒ 不写此键 ⇒ 下游退回中性措辞（零回归）。
+        scene_spec["subject_genders"] = target["subject_genders"]
     if plan.get("subjects"):
         # 主计划的英文主体描述是拒答降级时仍可用的身份真源；即使高潮锚点
         # 被纠正，稳定外貌不会随动作重定向而失效。
@@ -1272,9 +1612,15 @@ def _wb_comfy_scene_spec(ctx: dict, repo_id: str, plan, clean: str, sig: dict,
     viewpoint = str(target.get("viewpoint") or "").strip()
     if viewpoint in scene_illustration.VIEWPOINT_MODES:
         scene_spec["viewpoint"] = viewpoint
-        narrator_name = str(ctx.get("user_name") or "").strip()
+        # 第 51 刀（2026-09-22）：叙事者姓名改取三段读取结果（`target["narrator"]`，
+        # 由 `repo_protagonist_name` 算好），不再只看常空的 `ctx["user_name"]` —— 修复 D4/D5
+        # （生产里 user_name 为空 ⇒ 5 处数据层保护集体空转、主人公入画／女主服装绑错人）。
+        narrator_name = str(target.get("narrator") or "").strip()
         if narrator_name:
             scene_spec["narrator"] = narrator_name
+            src = str(target.get("narrator_source") or "").strip()
+            if src:
+                scene_spec["narrator_source"] = src
     if frame_subjects and "subjects" not in scene_spec:
         # 优化项③：缺块路径没有计划 subjects，但有判据判出的本帧主体 ⇒ 下传，让多人契约
         # 按画面主体数判。计划 subjects 是身份真源、优先级更高，故只在它缺席时补位。
@@ -1371,6 +1717,8 @@ def _wb_comfy_profile(ctx: dict, plan, scene_spec: dict, plan_retargeted: bool) 
         output_chars=len(compiled_profile), plan_retargeted=plan_retargeted,
         field_ledger=field_ledger, missing_fields=missing_fields,
         appearance_missing_actors=appearance_missing_actors,
+        # 第 36 刀：逐角色外观来源（entry/table/merged/none）——确定性、可被探针直接判读。
+        appearance_sources=scene_spec.get("appearance_sources") or {},
     )
     profile_negative = image_prompt_profiles.negative_prompt(
         ctx.get("prompt_profile") or "anima_tags", scene_spec,
@@ -1417,10 +1765,15 @@ def _wb_comfy_illustrate_env(ctx: dict, plan, sig: dict, target: dict,
 
 
 def _wb_frames_and_video(ctx: dict, illustrate_req: dict, scene_spec: dict,
-                         clean: str, transition_decision, motion: int) -> str:
+                         clean: str, transition_decision, motion: int,
+                         *, compile_video: bool = True) -> str:
     """comfy 路径⑥：首尾帧描述/复用决策 + 视频（含转场）请求编译。
 
     返回 `video_prompt_text`（未开启/失败时为空串）。逐字自 `_agency_writeback` 搬移。
+
+    `compile_video=False`（第 57 刀 · 多批派发的第 2..N 张）：只补帧描述，**不编译视频请求** ——
+    多批视频的合并是**后续步骤**，本步先只做多批生图，避免产出「N 段各自独立、未合并」的视频。
+    默认 True ⇒ 主链路逐字节不变（零回归锁）。
     """
     from app.services import story_frames
 
@@ -1449,7 +1802,7 @@ def _wb_frames_and_video(ctx: dict, illustrate_req: dict, scene_spec: dict,
     # 三模态开关：comfy_video 关=不调 _extract_video_action_plan（省 LLM 调用）、
     # 不编译 video_request/transition_video_request（省 token 干烧），完全对齐图/音链的关=零成本。
     video_prompt_text = ""
-    if illustrate_req and ctx.get("comfy_video"):
+    if compile_video and illustrate_req and ctx.get("comfy_video"):
         try:
             from app.services import video_prompt as _vp_mod
             _merged_spec = dict(scene_spec)
@@ -1511,8 +1864,10 @@ def _wb_emit_illustration_trace(ctx: dict, illustrate_req: dict, *, plan, sig: d
                                 video_prompt_text: str) -> None:
     """comfy 路径⑦：派发 `illustration.request` 事件（含 reason 阶梯与提示词计量）。
 
-    逐字自 `_agency_writeback` 搬移。
+    逐字自 `_agency_writeback` 搬移；末尾三字段（`viewpoint` / `viewpoint_detail` /
+    `frame_subjects`）为 2026-09-22「前置观测」新增（见下方注释）。
     """
+    viewpoint_detail = target.get("viewpoint_detail") or {}
     run_trace.emit(
         ctx,
         "illustration.request",
@@ -1539,7 +1894,107 @@ def _wb_emit_illustration_trace(ctx: dict, illustrate_req: dict, *, plan, sig: d
         # V1.5 默认开放：视频生成提示词记入 trace（测试模式核对提示词质量）
         video_prompt_chars=len(video_prompt_text),
         video_prompt=video_prompt_text,
+        # 前置观测（2026-09-22 · 人称「单一真源」改造第一步）：补记人称判定与画面主体。
+        # 动机＝全量 `agent-trace.jsonl` 里 `viewpoint` **0 命中**（D6）⇒ 「同一帧人称判两次」
+        # （D1）与「判据主体收敛失败」都不可观测，只能靠真机成图反推。
+        # ⛔ **纯记录**：不参与任何判定分支，出图请求与成稿逐字节不变。
+        # `viewpoint_detail` 由 `frame_viewpoint_detail` 恒返回 dict（`viewpoint`/`auto`/
+        # `source`/`conflict`）；缺失 ⇒ 记空值（防御 `.get`，不抛错）。
+        viewpoint=str(target.get("viewpoint") or ""),
+        viewpoint_detail=viewpoint_detail,
+        frame_subjects=[str(name) for name in (target.get("frame_subjects") or [])],
+        # ⚠ 2026-09-22 追加：叙事者姓名与其来路。诊断「手选第一人称却仍画出主人公」时，
+        #   旧观测**看不到 narrator 到底有没有取到**（只能靠离线复现反推）⇒ 补记。
+        #   同样**纯记录**、不参与任何判定分支。
+        narrator=str(target.get("narrator") or ""),
+        narrator_source=str(target.get("narrator_source") or ""),
     )
+
+
+def _wb_comfy_extra_requests(ctx: dict, repo_id: str, plan, clean: str, sig: dict,
+                             pool: dict, *, primary_anchor: str, primary_motion: int,
+                             prompt_override: str, transition_decision,
+                             user_text: str) -> list[dict]:
+    """第 57 刀 · 多批派发：给**除主锚点外**的其余锚点各编译一条出图请求（2026-09-24）。
+
+    用户口径（逐字）：「如果用户输入的生图数量 **≥** 高潮点数目，则**是高潮点的片段全部生图**
+    并插入合适的位置；如果 **<** 高潮点数目，则**按照打分制度，从高到低**，选择高潮点位置生图」。
+
+    返回**各请求自带 `anchor`**（下游 `_illustration_anchor_offset` 据此逐条定位插入点）
+    ⇒ 每张图插到**自己的正文位置**（前端 `insertSlotAtOffset` 已支持多槽、零改动）。
+
+    四条短路（任一命中 ⇒ `[]`，主链路逐字节不变）：
+      ① 批量数目 < 2（0/缺省 = 单张）；② `video_mode == "firstlast"`（面板该字段只在高潮点模式出现）；
+      ③ `ctx` 里没有多锚点列表（判据档没跑 / 旧链路）；④ 锚点数 < 2。
+    另：某锚点算出来是空请求（`at_climax` 不成立等）⇒ **跳过该条**，不影响其余。
+
+    ⚠ **逐点各过一遍既有仲裁机**（在 `_wb_comfy_scene_target` 内）—— 红线 74／76 的修法
+      必须对每一张都生效。⚠ **不重复调判据 LLM**（见 `anchor_override` 的说明）。
+    ⚠ 本步**只做多批生图**：第 2..N 张不编译视频（多批视频的合并是后续步骤）。
+    """
+    from app.services import scene_illustration
+
+    count = _anchor_batch_count(ctx)
+    if count < 2:
+        return []
+    if str(ctx.get("video_mode") or "") == "firstlast":
+        return []
+    items = ctx.get("illustration_anchor_intents") or []
+    if len(items) < 2:
+        return []
+    # 主路径用的是「分最高」那条（＝ `select_anchor_intents(items, 1)`），已经在主循环里出过图 ⇒ 跳过。
+    # 同时按**仲裁后**的锚点去重：仲裁若把主图挪到别的段，那一段也不能再出一张。
+    primary_raw = scene_illustration.select_anchor_intents(items, 1)
+    seen = {
+        str(primary_anchor or "").strip(),
+        str(primary_raw[0].get("anchor") or "").strip() if primary_raw else "",
+    }
+    # 第 57 刀 A（2026-09-24 用户拍板）：**仲裁后**再按「插入点」比对一次 —— 两个不同的
+    # 判据锚点可能被定位收敛到**同一处**；同位 ⇒ 跳过（防两图叠放）。
+    # 主图的插入点用同一口径（clean 文本）预置进集合；偏移统一吸附到段落末尾（第 58 刀），
+    # 否则同段内两个不同句尾会吸附到同一段落尾 ⇒ 仍叠放。
+    used_offsets: set[int] = set()
+
+    def _para_off(anchor: str) -> int | None:
+        raw = scene_illustration.illustration_anchor_offset(clean, anchor) if anchor else None
+        return (scene_illustration.snap_offset_to_paragraph_end(clean, raw)
+                if raw is not None else None)
+
+    primary_off = _para_off(primary_anchor)
+    if primary_off is not None:
+        used_offsets.add(primary_off)
+    extras: list[dict] = []
+    for item in scene_illustration.select_anchor_intents(items, count):
+        anchor = str(item.get("anchor") or "").strip()
+        if not anchor or anchor in seen:
+            continue
+        seen.add(anchor)
+        target = _wb_comfy_scene_target(
+            ctx, repo_id, plan, clean, sig, pool,
+            prompt_override=prompt_override, motion=primary_motion, user_text=user_text,
+            anchor_override=anchor, subjects_override=item.get("subjects"),
+        )
+        final_anchor = str(target.get("requested_anchor") or "").strip()
+        final_off = _para_off(final_anchor)
+        if final_off is not None and final_off in used_offsets:
+            continue
+        if final_off is not None:
+            used_offsets.add(final_off)
+        scene_spec = _wb_comfy_scene_spec(ctx, repo_id, plan, clean, sig, pool, target)
+        # 第 57 刀 ③：多批的每一张都要过「画面事实筛分」——真机实锤（2026-09-24 · 2 张实测）：
+        # 主图筛了、第 2 张没筛 ⇒ 第 2 张提示词仍带 `broad rounded hips`／`white silk stockings`。
+        # ⚠ 必须在 `_wb_comfy_profile` 之前（同主图：字段账本会把装不下的部位写进稿子）。
+        _wb_first_person_frame_filter(ctx, scene_spec)
+        scene_spec = _wb_comfy_profile(ctx, plan, scene_spec, target["plan_retargeted"])
+        request = _wb_comfy_illustrate_env(
+            ctx, plan, sig, target, scene_spec, motion=target["motion"])
+        if not request:
+            continue
+        _wb_frames_and_video(
+            ctx, request, scene_spec, clean, transition_decision,
+            target["motion"], compile_video=False)
+        extras.append(request)
+    return extras
 
 
 def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
@@ -1585,6 +2040,10 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
                 prompt_override=prompt_override, motion=motion, user_text=user_text)
             scene_spec = _wb_comfy_scene_spec(
                 ctx, repo_id, illustration_plan, clean, sig, pool, target)
+            # 第 57 刀 ③：第一人称「画面事实筛分」——必须在 Profile 编译**之前**
+            # （`_wb_comfy_profile` 会按字段账本强制补齐 appearance/wardrobe，
+            #   剔晚了就来不及：改完的稿子里那些装不下的部位已经写进去了）。
+            _wb_first_person_frame_filter(ctx, scene_spec)
             scene_spec = _wb_comfy_profile(
                 ctx, illustration_plan, scene_spec, target["plan_retargeted"])
             illustrate_req = _wb_comfy_illustrate_env(
@@ -1596,6 +2055,20 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
                 ctx, illustrate_req, plan=illustration_plan, sig=sig, pool=pool,
                 target=target, scene=scene, local_scene=sig["local_scene"],
                 video_prompt_text=video_prompt_text)
+            # 第 57 刀 · 多批派发：为其余锚点各编译一条请求，随主请求一起交给 finalize_turn
+            # 展开成 N 条 rec（各自 anchor_offset ⇒ 各自插到自己的正文位置）。
+            # ⚠ `illustrate_req` 为空（非高潮点）时不挂键 ⇒ 行为与改造前一致。
+            if illustrate_req:
+                extras = _wb_comfy_extra_requests(
+                    ctx, repo_id, illustration_plan, clean, sig, pool,
+                    primary_anchor=str(target["requested_anchor"] or ""),
+                    primary_motion=target["motion"],
+                    prompt_override=prompt_override,
+                    transition_decision=transition_decision,
+                    user_text=user_text,
+                )
+                if extras:
+                    illustrate_req["extra_requests"] = extras
             return think_head + clean, [], illustrate_req, audio_req
         illo = roleplay_agency.maybe_illustrate(
             deps, paragraph=clean, appearance=_illustration_appearance(ctx),
@@ -1619,23 +2092,28 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
 
 
 def _illustration_anchor_offset(reply: str, request: dict) -> int | None:
-    """在最终显示正文中定位插画槽；本地兜底 anchor 被正则改写时重新选高潮段。"""
+    """在最终显示正文中定位插画槽；本地兜底 anchor 被正则改写时重新选高潮段。
+
+    第 58 刀（2026-09-24 用户口径）：插图插到**段落下方**，不切进段落中间 ——
+    句尾偏移统一吸附到所在段落的末尾（主图／extras／首尾帧同走本口，一处吸附全覆盖）。
+    """
     from app.services import scene_illustration
 
+    snap = scene_illustration.snap_offset_to_paragraph_end
     # 首尾帧模式：主槽=首帧图（尾帧 :last 副槽由前端追加楼层末尾），首帧画面锚正文
     # 第一段——主图用的「高潮纠偏/末段兜底」会把开篇铺垫改判到中央/末尾
     # （2026-08-29 用户验收问题①），firstlast 不走那套纠偏。
     if str(request.get("video_mode") or "") == "firstlast":
-        return scene_illustration.first_frame_anchor_offset(reply)
+        offset = scene_illustration.first_frame_anchor_offset(reply)
+        return snap(reply, offset) if offset is not None else None
     offset = scene_illustration.illustration_anchor_offset(
         reply, str(request.get("anchor") or ""),
     )
-    if offset is not None or not request.get("allow_anchor_fallback"):
-        return offset
-    final_anchor = scene_illustration.fallback_illustration_anchor(reply)
-    if not final_anchor:
-        return None
-    return scene_illustration.illustration_anchor_offset(reply, final_anchor)
+    if offset is None and request.get("allow_anchor_fallback"):
+        final_anchor = scene_illustration.fallback_illustration_anchor(reply)
+        if final_anchor:
+            offset = scene_illustration.illustration_anchor_offset(reply, final_anchor)
+    return snap(reply, offset) if offset is not None else None
 
 
 def _emit_roleplay_ready(ctx: dict, out: dict) -> bool:
@@ -1882,12 +2360,15 @@ def _table_maintenance(ctx: dict, deps, repo_id: str, clean: str, turn: int) -> 
         applied_snapshot = status_snapshot if need_snapshot else ""
         state_fallback = bool(applied_deltas or applied_snapshot)
         if state_fallback:
+            rejected_adds: list = []
             before, after = roleplay_agency.writeback(
                 deps, repo_id=repo_id, card_name=ctx.get("card_name") or "",
-                raw_deltas=applied_deltas, turn=turn, snapshot=applied_snapshot)
+                raw_deltas=applied_deltas, turn=turn, snapshot=applied_snapshot,
+                rejected=rejected_adds)
             run_trace.emit(ctx, "state.writeback", source="maintenance_fallback",
                            raw_deltas=applied_deltas, snapshot=applied_snapshot,
-                           affinity_before=before, affinity_after=after)
+                           affinity_before=before, affinity_after=after,
+                           rejected_adds=rejected_adds)
         run_trace.emit(ctx, "agent.completed", agent="table_maintenance",
                        op_count=len(ops), state_fallback=state_fallback)
     except Exception as exc:  # noqa: BLE001

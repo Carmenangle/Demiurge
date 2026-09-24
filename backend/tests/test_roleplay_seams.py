@@ -356,6 +356,7 @@ _SEAMS = (
     # 收口：宏替换 / 输出结构前置 / 尾部消息
     "_rp_substitute_macros",
     "_rp_prefix_output_structure",
+    "_rp_user_priority_block",
     "_rp_build_tail_messages",
     # 阶段 B 编排器 + 四个内聚子接缝
     "_rp_inject_agency_context",
