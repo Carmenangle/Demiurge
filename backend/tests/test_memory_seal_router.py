@@ -47,8 +47,13 @@ def _seed(base, repo, card):
     tfs.record(base, repo, subject="城主", predicate="担任", object_="新城主",
                valid_from_turn=5, evidence="回合5剧情", source="chronicle")
     st = cs.CharacterState(card_name=card, repo_id=repo)
+    # 2026-09-23（add 无字段拒收闸）：初值改用 `set` 播种（`add` 命中不存在的好感度字段
+    # 已被拒收），再叠一条**封口回合内**的 `add` —— 这样封口撤的是增量、字段本身保留，
+    # 断言语义比旧的「add 从 0 起算 ⇒ 封口后回到 0.0」更贴实际。
     cs.apply_deltas(st, cs.parse_deltas(
-        [{"field": "数值/好感度", "op": "add", "value": 15, "evidence": "回合5事件"}], turn=5))
+        [{"field": "数值/好感度", "op": "set", "value": 15, "evidence": "既有关系"}], turn=4))
+    cs.apply_deltas(st, cs.parse_deltas(
+        [{"field": "数值/好感度", "op": "add", "value": 5, "evidence": "回合5事件"}], turn=5))
     cs.save_state(base, st)
 
 
@@ -61,7 +66,7 @@ def test_封口端点级联三存储(tmp_path):
     assert got["state_incomplete"] == []
     assert ns.recent(base, repo, k=10) == []
     assert tfs.as_of(base, repo, 9) == []
-    assert cs.load_state(base, repo, card).数值["好感度"].value == 0.0
+    assert cs.load_state(base, repo, card).数值["好感度"].value == 15.0
 
 
 def test_封口端点repo缺省用thread并校验参数(tmp_path):

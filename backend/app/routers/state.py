@@ -84,18 +84,26 @@ class DeleteFieldRequest(BaseModel):
     repo_id: str
     card_name: str = ""
     field: str          # "数值/好感度" 或 "叙事/态度"
+    purge: bool = False  # True=彻底清除（连同该字段的审计一起删，重生成/回滚也恢复不了）
 
 
 @router.post("/delete-field")
 def delete_field(req: DeleteFieldRequest) -> dict[str, object]:
-    """删除一个状态字段。删不存在的字段 → 404。"""
+    """删除一个状态字段。删不存在的字段 → 404。
+
+    `purge=False`（默认）＝**可撤销**删除：记一条 `op=delete` 审计，下一次「回滚/重生成」
+    会把字段写回（撤销删除）。`purge=True` ＝**彻底清除**：连同该字段的全部审计条一并
+    移除，审计链里再无东西可还原，重生成/回滚都拉不回来。
+    两者都会摘掉快照 [好感] 行里对应的角色条目（否则旧数字继续注入，模型照旧走 add）。
+    """
     if not (req.output_dir and req.repo_id):
         raise HTTPException(status_code=400, detail="缺少 output_dir 或 repo_id")
     st = character_state.load_state(req.output_dir, req.repo_id, req.card_name)
-    if not character_state.delete_field(st, req.field):
+    apply_fn = character_state.purge_field if req.purge else character_state.delete_field
+    if not apply_fn(st, req.field):
         raise HTTPException(status_code=404, detail="未找到该字段")
     character_state.save_state(req.output_dir, st)
-    return {"ok": True, **_dump(st)}
+    return {"ok": True, "purged": req.purge, **_dump(st)}
 
 
 @router.get("/export")

@@ -15,7 +15,7 @@ def test_读已存状态含快照(tmp_path):
     base = str(tmp_path)
     st = cs.CharacterState(card_name="卡", repo_id="r1")
     cs.apply_deltas(st, cs.parse_deltas(
-        [{"field": "数值/好感度", "op": "add", "value": 8, "evidence": "救援"}], turn=1))
+        [{"field": "数值/好感度", "op": "set", "value": 8, "evidence": "救援"}], turn=1))
     st.快照 = cs.Snapshot("[臣服] 叶燃眉=100", turn=1)
     cs.save_state(base, st)
     got = state_router.get_state(output_dir=base, repo_id="r1", card_name="卡")
@@ -32,7 +32,7 @@ def test_手改设精确值并标user(tmp_path):
     base = str(tmp_path)
     st = cs.CharacterState(card_name="卡", repo_id="r1")
     cs.apply_deltas(st, cs.parse_deltas(
-        [{"field": "数值/好感度", "op": "add", "value": 8}], turn=3))
+        [{"field": "数值/好感度", "op": "set", "value": 8}], turn=3))
     cs.save_state(base, st)
     req = _req(state_router.PatchStateRequest, output_dir=base, repo_id="r1",
                card_name="卡", edits=[{"field": "数值/好感度", "value": 50}])
@@ -49,7 +49,7 @@ def test_回滚撤销最近变更(tmp_path):
     base = str(tmp_path)
     st = cs.CharacterState(card_name="卡", repo_id="r1")
     cs.apply_deltas(st, cs.parse_deltas(
-        [{"field": "数值/好感度", "op": "add", "value": 8}], turn=1))
+        [{"field": "数值/好感度", "op": "set", "value": 8}], turn=1))
     cs.apply_deltas(st, cs.parse_deltas(
         [{"field": "数值/好感度", "op": "add", "value": 5}], turn=2))
     cs.save_state(base, st)  # 好感度 = 13

@@ -18,7 +18,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable, Sequence
 
 from app.services import prompt_clean, repo_meta
 
@@ -33,6 +33,7 @@ _HISTORY_CAP = 1000  # 审计历史封顶，防无限膨胀（超出丢最旧）
 # 显式上报不完整字段（绝不静默还原错值）。
 
 AFFINITY_FIELD = "好感度"       # 好感度字段名（本模块单一属主，roleplay_agency 引用）
+_AFFINITY_SUFFIX = f"·{AFFINITY_FIELD}"  # 多角色归属写法「角色·好感度」（本模块多处共用）
 _NUM_UNBOUNDED = 1e9
 # 已知数值字段的默认边界：好感度是 -100(厌恶)..100(喜爱) 连续标量，不搞卡内档位那套。
 # 首次由 delta/set 创建且未显式带 min/max 时用此表；未登记字段仍无界（±1e9）。
@@ -50,6 +51,15 @@ def _is_protagonist_leaf(leaf: str) -> bool:
     if "·" not in (leaf or ""):
         return False
     return leaf.split("·", 1)[0].strip() in _PROTAGONIST_OWNERS
+
+
+def _is_affinity_leaf(leaf: str) -> bool:
+    """是否好感度字段：裸键 `好感度`（单主角写法）或多角色归属 `角色名·好感度`。
+
+    「add 无字段拒收」闸的**适用范围限定**（红线：判据改动只加适用范围限定）——
+    只对好感度生效，其他数值字段（如 金币）维持旧行为，否则会外溢成全局行为变更。
+    """
+    return leaf == AFFINITY_FIELD or leaf.endswith(_AFFINITY_SUFFIX)
 
 
 def _canonical_leaf(
@@ -154,8 +164,8 @@ class StateDelta:
     """一次状态变更。field = "数值/好感度" 或 "叙事/对{{user}}态度"。"""
     turn: int
     field: str
-    op: str            # add（数值）| set（叙事）
-    value: Any         # add: 数值增量；set: 新字符串值
+    op: str            # add（数值增量）| set（叙事覆盖 / 数值首建初值）
+    value: Any         # add: 数值增量；set: 新字符串值（叙事）或初始数值（数值首建）
     evidence: str = ""
     source: str = SRC_AUTO
 
@@ -241,9 +251,12 @@ def parse_deltas(
             # 检测 ⇒ 落库前机械还原；人为编辑（source=user）原样保留，不动用户输入。
             evidence = prompt_clean.sanitize_table_text(evidence)
         if kind == _KIND_NUM:
-            if op != "add":
+            # 数值只认两种：add（相对现值累加）与 set（角色首次登场时设初始值）。
+            # set 的实际生效门在 apply_deltas——只对尚不存在的字段播种，已存在一律忽略，
+            # 防模型用 set 把累积好感一键重置（等价 godmode）。
+            if op not in ("add", "set"):
                 continue
-            out.append(StateDelta(turn, fld, "add", _num(item.get("value")), evidence, source))
+            out.append(StateDelta(turn, fld, op, _num(item.get("value")), evidence, source))
         elif kind == _KIND_NARR:
             if op != "set":
                 continue
@@ -257,19 +270,66 @@ def parse_deltas(
     return out
 
 
-def apply_deltas(state: CharacterState, deltas: list[StateDelta]) -> CharacterState:
+def apply_deltas(
+    state: CharacterState, deltas: list[StateDelta],
+    *, rejected: list[dict[str, Any]] | None = None,
+) -> CharacterState:
     """按序应用 delta，原地更新 state 并逐条追加审计历史（含 from→to）。返回同一对象。
 
-    数值字段不存在时以 0 起算并沿用默认边界；叙事字段不存在时直接创建。
+    数值：add 命中**不存在的好感度字段**时**拒收并上报**（2026-09-23 用户口径，见下）；
+    set 只对**尚不存在**的字段播种初值（角色首次登场时按剧情因果给出的初始好感/恶感），
+    字段已存在时整条忽略——防止模型用 set 把累积值一键重置（2026-09-22 用户口径：
+    初次登场不应全为 0）。叙事：set 覆盖，字段不存在时直接创建。
+
+    ⚠ 拒收闸（2026-09-23）：旧行为是 `before_n = nf.value if nf else 0.0` ⇒ add 命中不存在
+    字段时**静默从 0 起算并建值**。这是不可逆的：字段一旦以 0 存在，后续 `set` 永远被
+    `:279-281` 忽略、add 只能在 0 上累加 ⇒ 该角色初值被钉死。回滚路径更隐蔽——add 建的
+    字段（审计 `from=0.0`）被 `_undo_entry` **打回 0 而字段保留**（`_tmp/sim_affinity.py`
+    场景 C/E 实测）。故此处拒收，逼模型走 `set` 播种（`set` 口径要求带因果依据）。
+    **适用范围限定**：拒收**只**对好感度字段（`_is_affinity_leaf`）生效；其他数值字段的**值**
+    仍按 0 起算建（闸不外溢，见 `_tmp/sim_affinity*` 回归）。
+    ⚠ 配套修复（2026-09-23 同日）：`add` 命中不存在的**非好感度**数值字段时，**审计的 `from`
+    改记 `None`**（与 `set` 分支同口径）⇒ `_undo_entry` 回滚时 **pop 掉字段**，不再「打回 0
+    留一个空壳」。值语义完全不变（仍 0 + delta），只改审计记法。
+    ⚠ 历史遗留：改动**之前**已落盘的 `from=0.0` 审计条不受影响（改代码不改数据），回滚它们
+    仍会留下「值=0 的空壳」。
+    拒收项在传入 `rejected` 时逐条收集（本模块保持纯逻辑：不落盘、不改审计），供上层上报。
     """
     consolidate_fields(state)
     for d in deltas:
         leaf = d.leaf()
         if d.kind() == _KIND_NUM:
             nf = state.数值.get(leaf)
-            before_n = nf.value if nf else 0.0
             lo, hi = _bounds(leaf, nf)
-            after_n = max(lo, min(hi, before_n + _num(d.value)))
+            if d.op == "set":
+                if nf is not None:
+                    # 已存在 → 拒绝覆盖（含非零累积值与已播种初值）；不记审计，回落忽略。
+                    continue
+                before_n: float | None = None   # None = 字段此前不存在（回滚等价删除）
+                after_n = max(lo, min(hi, _num(d.value)))
+                state.数值[leaf] = NumericField(after_n, lo, hi, d.turn, d.evidence, d.source)
+                _log(state, d, before_n, after_n)
+                continue
+            if nf is None and _is_affinity_leaf(leaf):
+                if rejected is not None:
+                    rejected.append({
+                        "field": f"{_KIND_NUM}/{leaf}", "op": "add",
+                        "value": _num(d.value), "turn": d.turn,
+                        "evidence": d.evidence, "reason": "affinity_field_absent",
+                    })
+                continue
+            if nf is None:
+                # 字段此前不存在：**值**仍按旧的 0 起算（闸不外溢，见上），但审计的 `from`
+                # 改记 `None`——与 set 分支（:302）同口径。`_undo_entry` 的判据是
+                # 「`from is None` ⇒ 此前不存在 ⇒ 直接 pop 字段」，所以只有这样才能让
+                # 回滚删干净；旧写法 `nf.value if nf else 0.0` 会把 0 写成 from，
+                # `_undo_entry` 只打回 0 而**保留字段**，回滚后留下一个「值=0 的空壳」
+                # （比字段消失更难救：`set` 之后永远被忽略、`add` 只能在 0 上加）。
+                before_n = None
+                after_n = max(lo, min(hi, _num(d.value)))
+            else:
+                before_n = nf.value
+                after_n = max(lo, min(hi, before_n + _num(d.value)))
             state.数值[leaf] = NumericField(after_n, lo, hi, d.turn, d.evidence, d.source)
             _log(state, d, before_n, after_n)
         else:
@@ -350,31 +410,85 @@ def rollback_last(state: CharacterState, *, n: int = 1) -> int:
     return undone
 
 
+def _leaf_value(state: CharacterState, field_path: str):
+    """读字段现值（数值取 value，叙事取 value）；不存在返回 None。"""
+    if "/" not in (field_path or ""):
+        return None
+    kind, leaf = field_path.split("/", 1)
+    if kind == _KIND_NUM:
+        nf = state.数值.get(leaf)
+        return nf.value if nf else None
+    nn = state.叙事.get(leaf)
+    return nn.value if nn else None
+
+
 def rollback_from_turn(state: CharacterState, *, turn: int) -> dict:
     """撤销 turn 及之后的所有状态变更（M1 记忆封口，2026-09-06 用户定案）：
     被删除/重新生成回合造成的状态变化等效清除——逆序回放审计历史还原 from 值，
     更早回合的变更与审计保留。返回 {"undone": 条数, "incomplete": 字段列表}（纯逻辑，幂等）。
+
+    ⚠ 第 58 刀（2026-09-24 用户工作流实锤）：**初次登记（from=None）豁免回滚**。
+    用户的工作流是「同一条消息反复重新生成直到满意」——若把字段创建也撤销，回滚后
+    注入状态不再含该角色 ⇒ 模型不再写她 ⇒ 静默永久缺失（真机：师傅好感度两度被卷走）。
+    逆序回放到「字段创建」这条时，该字段的后续变更已被还原、值恰好停在**初值**上
+    ⇒ 保留字段＝保留初值（语义正确），并重盖一条同回合的「登记保留」审计让撤销链不断
+    （下次同封口回滚会再次命中本豁免 ⇒ 幂等）。显式撤销（rollback_last／delete_field／
+    purge_field）不受此豁免影响。
 
     incomplete = 还原后仍带「≥封口回合」变更痕迹的字段——其更早审计已被
     _HISTORY_CAP 截断，无法精确还原（此时保守保留现值并显式上报，绝不静默错账）。
     """
     undone = 0
     oldest_popped: dict[str, int] = {}   # 字段 → 本窗口内被撤的最老条目回合
+    kept_seeds: dict[str, Any] = {}      # 第 58 刀：豁免回滚的初次登记（字段 → 保留的初值）
+    rescue_keep: list[dict] = []         # 已是「登记保留」的条目：原样放回（幂等，不计 undone）
     while state.历史 and int(state.历史[-1].get("turn") or 0) >= turn:
         entry = state.历史.pop()
-        undone += _undo_entry(state, entry)
         fld = str(entry.get("field") or "")
         t = int(entry.get("turn") or 0)
+        if str(entry.get("source") or "") == "rescue":
+            rescue_keep.append(entry)    # 上次豁免留下的保留条目 ⇒ 原样放回，幂等
+            continue
+        frm = entry.get("from")
+        if ((frm is None or (isinstance(frm, str) and not frm.strip()))
+                and "/" in fld):
+            cur = _leaf_value(state, fld)
+            if cur is not None:
+                # 初次登记豁免：保留字段（此刻值＝初值）。⚠ 重盖的审计**循环外**补——
+                # 在循环内 append 会被本循环再次弹出（重盖 turn==封口回合 ⇒ 死循环，
+                # 2026-09-24 实锤：test_character_state 卡死 4 分钟）。
+                kept_seeds[fld] = cur
+                undone += 1
+                if fld not in oldest_popped or t < oldest_popped[fld]:
+                    oldest_popped[fld] = t
+                continue
+        undone += _undo_entry(state, entry)
         if fld not in oldest_popped or t < oldest_popped[fld]:
             oldest_popped[fld] = t
+    # 第 58 刀：为豁免保留的初次登记重盖审计（循环外补，撤销链不断 ⇒ 下次同封口
+    # 回滚命中 source=rescue 分支原样放回 ⇒ 幂等）。
+    for seed_fld, seed_val in kept_seeds.items():
+        state.历史.append({
+            "turn": turn, "field": seed_fld, "op": "set", "from": None,
+            "to": seed_val, "evidence": "初次登记豁免回滚（同回合重生成工作流）",
+            "source": "rescue",
+        })
+    # ⚠ rescue_keep 按 pop 顺序收集（大 turn → 小 turn，降序），必须 reversed 放回以
+    #   维持「历史按 turn 升序、[-1] 最大」的循环终止前提（否则递减封口回滚时会被低 turn
+    #   条目挡住、循环提前终止、rescue 残留 —— 2026-09-24 审计）。
+    state.历史.extend(reversed(rescue_keep))
+    rescue_paths = {str(e.get("field") or "") for e in rescue_keep}
     # 审计 #2 不完整性判定（保守，只报「无法证明精确还原」）：
     # R1 字段完全没撤到但当前变更回合 ≥ 封口回合 → 其在封口范围内的审计条目已被截断；
     # R2 撤到了、但该字段最老被撤条目回合 > 封口回合 → 封口边界与撤销链之间存在断层，
     #    可能有同范围的更早变更已被 _HISTORY_CAP 丢弃。两种都可能有残留，显式上报。
-    incomplete = set(oldest_popped)
+    # 第 58 刀：豁免保留的初次登记是**有意保留**，不算「无法证明精确还原」。
+    incomplete = set(oldest_popped) - set(kept_seeds) - rescue_paths
     for kind, fields in (("数值", state.数值), ("叙事", state.叙事)):
         for leaf, val in fields.items():
             path = f"{kind}/{leaf}"
+            if path in kept_seeds or path in rescue_paths:
+                continue
             if path not in oldest_popped and int(val.turn or 0) >= turn:
                 incomplete.add(path)
     for name in list(oldest_popped):
@@ -415,6 +529,9 @@ def delete_field(state: CharacterState, field_path: str) -> bool:
     """删除一个状态字段（"数值/好感度" 或 "叙事/态度"），并记一条审计（to=None）。返回是否删到。
 
     人工管理状态表用（浏览器 UI）。删不存在的字段返回 False。
+    ⚠ 这是**可撤销**的删除：`_undo_entry` 按审计里的 `from` 把字段写回（等价「撤销删除」），
+    所以下一次「重新生成 / 回滚」会让它复现。要**断根**（重生成也拉不回）请用 `purge_field`。
+    好感度数值字段会顺带摘掉快照 [好感] 行里的该角色——否则旧数字继续注入，模型照旧走 add。
     """
     consolidate_fields(state)
     if "/" not in (field_path or ""):
@@ -434,6 +551,39 @@ def delete_field(state: CharacterState, field_path: str) -> bool:
         return False
     if len(state.历史) > _HISTORY_CAP:
         state.历史 = state.历史[-_HISTORY_CAP:]
+    if kind == _KIND_NUM and _is_affinity_leaf(leaf):
+        drop_snapshot_affinity(state, _owner_of_affinity_leaf(leaf))
+    return True
+
+
+def purge_field(state: CharacterState, field_path: str) -> bool:
+    """彻底清除一个状态字段：删字段 **并把该字段的全部审计条一并移除**（断根）。
+
+    与 `delete_field` 的分工（2026-09-23 用户拍板，修「UI 删除 vs 重生成」打架）：
+    `delete_field` 会记一条 `op=delete` 审计（`from=旧值, to=None`），而回滚/重生成按审计
+    把 `from` 写回 ⇒ 等价于「撤销删除」＝字段复现。这语义本身没错（删除应当可撤销），
+    但后果是**任何手工删除都会被下一次「重新生成」拉回来**——重生成链路
+    （`ai_agent.py:133` mode=regenerate → `memory_rollback.py` → `rollback_from_turn`）
+    正是按审计链还原的。
+    本函数不记审计、并删除该字段的历史 ⇒ **审计链里再无该字段可供还原**，重生成与回滚
+    都无法恢复它。⛔ 不可撤销：调用方须二次确认（UI 侧）。
+    好感度数值字段会顺带从快照 [好感] 行摘掉该角色（否则旧数字继续注入、模型照旧走 add）。
+    """
+    consolidate_fields(state)
+    if "/" not in (field_path or ""):
+        return False
+    kind, leaf = field_path.split("/", 1)
+    leaf = _canonical_leaf(leaf, state.card_name)
+    field_path = f"{kind}/{leaf}"
+    if kind == _KIND_NUM and leaf in state.数值:
+        state.数值.pop(leaf)
+    elif kind == _KIND_NARR and leaf in state.叙事:
+        state.叙事.pop(leaf)
+    else:
+        return False
+    state.历史 = [h for h in state.历史 if str(h.get("field") or "") != field_path]
+    if kind == _KIND_NUM and _is_affinity_leaf(leaf):
+        drop_snapshot_affinity(state, _owner_of_affinity_leaf(leaf))
     return True
 
 
@@ -487,6 +637,55 @@ def render_state_block(state: CharacterState) -> str:
     return "【当前状态】\n" + "\n".join(lines)
 
 
+# ── 待建好感度字段清单（2026-09-23 用户口径）──────────────────────────────
+# 播种规则（`state_instruction` / `_DELTA_RULES`）只说「状态表里还没有某角色的好感度
+# 字段时必须 set 播种」，但**模型看不到"谁缺字段"**：它只看到【当前状态】块里**已有**
+# 的字段 ⇒ 已登场却始终没被建过好感度的角色永远轮不到（真机实锤：骆姑姑在「重要角色
+# 表」有行、状态表里有 4 条叙事字段，好感度字段一直不存在，「角色状态表」里她的卡片
+# 只有状态没有好感度）。这里把差集确定性算出来，供注入侧点名，播种不再靠模型自觉。
+
+def missing_affinity_owners(
+    state: CharacterState, candidates: Iterable[str] = (),
+) -> list[str]:
+    """候选角色里、状态表中还没有好感度字段的（保持 candidates 顺序、去重）。
+
+    - 已有显式属主 `X·好感度` 的角色不再列入（裸键 `好感度` 是单主角写法，不据此
+      认定任何候选已有值，宁缺勿猜）；
+    - 主角代词（`_PROTAGONIST_OWNERS`）与空名一律排除；
+    - 候选来自调用方（通用表「重要角色表」姓名列）：候选里**状态表完全没有字段**的
+      新角色同样列入——规则要求按因果播种，不要求它先在状态表里留过痕迹。
+    """
+    have = {
+        leaf[: -len(_AFFINITY_SUFFIX)].strip()
+        for leaf in state.数值
+        if leaf.endswith(_AFFINITY_SUFFIX) and leaf[: -len(_AFFINITY_SUFFIX)].strip()
+    }
+    out: list[str] = []
+    for raw in candidates:
+        name = str(raw or "").strip()
+        if not name or name in have or name in _PROTAGONIST_OWNERS or name in out:
+            continue
+        out.append(name)
+    return out
+
+
+def render_missing_affinity_block(names: Sequence[str]) -> str:
+    """把「待建好感度字段」名单渲染成注入段（空名单 → 空串，调用方据此零成本跳过）。
+
+    只点名与动作，**不重复档位数字**：档位口径的真源是 `state_instruction` 与
+    `table_update._DELTA_RULES` 两处，这里多写一份会变成第三处同义文案漂移源。
+    """
+    picked = [str(n).strip() for n in names if str(n or "").strip()]
+    if not picked:
+        return ""
+    return (
+        "【待建好感度字段】下列角色已在数据表中登场、但状态表里还没有好感度字段："
+        + "、".join(picked)
+        + "。本轮必须为每个角色用 field=\"数值/角色名·好感度\" op=\"set\" 播种「当前应有的好感度」"
+        "（按世界观、人设与既有关系定值，禁止从 0 起算、禁止跳过；引擎仅在字段不存在时采纳）。"
+    )
+
+
 def render_snapshot_injection(state: CharacterState) -> str:
     """把上轮 <status> 快照原文重注入主控叙述。空快照返回空串。
 
@@ -509,13 +708,16 @@ _AFFINITY_LINE_RE = re.compile(
     r"^(?P<head>\[(?:好感|好感度)\])(?P<body>[^\n]*)$", re.MULTILINE)
 _AFF_ENTRY_RE = re.compile(
     r"^(?P<name>[^＝=:\n；;]+)[＝=:](?P<num>-?\d+(?:\.\d+)?)(?P<rest>.*)$")
+# 删除哨兵：命中「引擎没有、行内有」的条目时把该段标记为 `_DROP_ENTRY`，
+# 收尾时连同相邻分隔符一并清掉（见 `_rebuild_affinity_body`）。
+_DROP_ENTRY = "\x00DROP\x00"
 
 
 def _engine_affinities(state: CharacterState) -> dict[str, float]:
     """从 state.数值 提取好感度：`角色·好感度` → {角色: 值}；仅一行裸 `好感度` 时
     归到该唯一行（单主角存档的常见写法，快照行内角色名即归属）。"""
     out: dict[str, float] = {}
-    suffix = f"·{AFFINITY_FIELD}"
+    suffix = _AFFINITY_SUFFIX
     for leaf, nf in state.数值.items():
         if leaf.endswith(suffix):
             owner = leaf[:-len(suffix)].strip()
@@ -533,9 +735,19 @@ def reconcile_snapshot_affinity(state: CharacterState, text: str = "") -> str:
 
     - 行内已有条目：名字能在引擎账里找到 → 数字换成引擎现值，`/档位（描述）` 保留。
     - 引擎有、行内缺的角色 → 追加 `；名字=值`。
+    - **引擎没有、行内有的条目 → 从行里删掉该条目**（2026-09-23 修，见下）。
     - 无 [好感] 行 / 行内解析不出任何条目 / 引擎无好感字段 → 原样返回。
     text 为空时取 state.快照.text。其余行（时间/在场/进度…）是叙事文本，不做机械
     对账（无稳定字段名映射），以【当前状态】块注入为真源。
+
+    ⚠ 为什么「引擎没有 ⇒ 删」而不是「原样保留」（2026-09-23 深夜实锤死锁）：
+    旧行为是 `engine.get(name) → None → continue`，即原样保留。于是模型在
+    `<status>[好感]` 行里自编的数字（真机 `妲千沁=38`、`=28`）被固化下来，而
+    `render_missing_affinity_block` 同时注入「她还没有好感度字段、本轮必须 set」
+    ⇒ 下一轮 prompt 同屏出现两条互斥信息，模型相信快照行「已经有值」而**永不播种**，
+    死锁可无限循环（引擎侧点名成功、`raw_deltas` 恒为空、输出无 `<状态更新>` 段）。
+    引擎账才是真源 ⇒ 引擎没有的条目就是幻觉，必须从注入文本里抹掉。
+    命中面已量：全库仅 3 条（`凌若冰=0`/`骆姑姑=18`/`妲千沁=38`），全部确为幻觉、零误伤。
     """
     text = (text or state.快照.text or "").strip()
     if not text:
@@ -565,6 +777,11 @@ def reconcile_snapshot_affinity(state: CharacterState, text: str = "") -> str:
         else:
             val = engine.get(name)
         if val is None:
+            # 引擎账里没有这个名字 ⇒ 行内该条目是模型自述产生的幻觉。
+            # 抹掉条目本身（连同它前面那个分隔符），避免与「待建好感度字段」
+            # 点名块在同一轮 prompt 里自相矛盾（详见证言条：播种死锁）。
+            segments[i] = _DROP_ENTRY
+            changed = True
             continue
         seen.add(name)
         new_num = _fmt_num(val)
@@ -574,19 +791,111 @@ def reconcile_snapshot_affinity(state: CharacterState, text: str = "") -> str:
         segments[i] = f"{lead}{name}={new_num}{em.group('rest')}"
     if not parsed_any:
         return text
+    # 先清掉被标记删除的条目（连同相邻分隔符），再补 missing —— 否则 `segments[-1]`
+    # 可能停在哨兵上，`tail` 会被接到一个空段里。
+    segments = _rebuild_affinity_body(segments)
     missing = [n for n in engine if n not in seen]
     if missing:
         changed = True
         tail = "；".join(f"{n}={_fmt_num(engine[n])}" for n in missing)
         if segments and segments[-1] == "":
             segments[-1] = tail
+        elif segments:
+            segments.append("；")
+            segments.append(tail)
         else:
-            segments.append("；" if segments else "")
             segments.append(tail)
     if not changed:
         return text
-    new_line = m.group("head") + "".join(segments)
+    # 行首前导空格可能挂在被删的条目上（如 `[好感] 妲千沁=38；凌若冰=40` 删首条）
+    # ⇒ 重组后若无前导空格则补一个，保持 `[好感] 名字=值` 的可读格式。
+    body_out = "".join(segments)
+    if body_out and not body_out.startswith(" "):
+        body_out = " " + body_out
+    if not body_out.strip():
+        # 行内条目被删空 ⇒ 保留行头本身（`[好感]`），不整行抹除，避免改变快照行数
+        # 影响其它按行解析的逻辑；空行内容天然不构成误导。
+        body_out = ""
+    new_line = m.group("head") + body_out
     return text[:m.start()] + new_line + text[m.end():]
+
+
+def _rebuild_affinity_body(segments: list[str]) -> list[str]:
+    """把带 `_DROP_ENTRY` 哨兵的段列重组为干净段列。
+
+    `segments` 形如 `[条目0, '；', 条目1, '；', ...]`（split 保留分隔符）。规则：
+    - 删除段与**紧邻其前**的分隔符（否则会留下 `；；` 或行首 `；`）；
+      行首条目被删时改删**其后**的分隔符（无前分隔符可用）。
+    - 连续删除时只保留最后一个删除段前面的分隔符判定，避免越删越乱。
+    行内全删时返回 `[]`（调用方据此决定是否保留裸行头）。
+    """
+    out: list[str] = []
+    i = 0
+    n = len(segments)
+    while i < n:
+        seg = segments[i]
+        if seg == _DROP_ENTRY:
+            # 删掉本段；若上一个已落到 out 的是分隔符，一并弹出
+            if out and out[-1] in ("；", ";"):
+                out.pop()
+            elif not out and i + 1 < n and segments[i + 1] in ("；", ";"):
+                # 行首条目被删：跳过紧随的分隔符
+                i += 1
+            i += 1
+            continue
+        out.append(seg)
+        i += 1
+    # 收尾：若剩下的是「分隔符开头」或「分隔符结尾」，清掉多余分隔符
+    while out and out[0] in ("；", ";"):
+        out.pop(0)
+    while out and out[-1] in ("；", ";"):
+        out.pop()
+    # 合并可能出现的连续分隔符
+    merged: list[str] = []
+    for seg in out:
+        if seg in ("；", ";") and merged and merged[-1] in ("；", ";"):
+            continue
+        merged.append(seg)
+    return merged
+
+
+def _owner_of_affinity_leaf(leaf: str) -> str:
+    """`X·好感度` → `X`；裸 `好感度`（单主角写法，无归属）→ 空串（不摘快照条目）。"""
+    return leaf[: -len(_AFFINITY_SUFFIX)].strip() if leaf.endswith(_AFFINITY_SUFFIX) else ""
+
+
+def drop_snapshot_affinity(state: CharacterState, owner: str) -> bool:
+    """从快照 [好感] 行移除某角色的条目（删字段的配套动作，纯逻辑、幂等）。返回是否改动。
+
+    为什么必须做：`reconcile_snapshot_affinity` 对「引擎无、行内有」的条目走的是
+    `val = engine.get(name)` → None → `continue`，即**原样保留**。所以删掉
+    `数值/X·好感度` 之后，快照行里的旧数字会继续注入模型 ⇒ 模型据此认为该角色
+    「已登记」，照样发 `add`（真机实锤：手工删字段后仍走 add 累加）。删字段必须把
+    这条痕迹一并抹掉，删除才算真生效。
+    行内条目全空时保留 `[好感]` 行本身（`<status>` 模板结构不破，交由模型重新播种）。
+    """
+    owner = (owner or "").strip()
+    text = state.快照.text or ""
+    if not owner or not text:
+        return False
+    m = _AFFINITY_LINE_RE.search(text)
+    if not m:
+        return False
+    segments = re.split(r"([；;])", m.group("body"))
+    kept: list[str] = []
+    changed = False
+    for i in range(0, len(segments), 2):
+        em = _AFF_ENTRY_RE.match(segments[i].strip())
+        if em and em.group("name").strip(" ·：:（）()") == owner:
+            changed = True
+            continue
+        kept.append(segments[i].strip())
+    if not changed:
+        return False
+    body = "；".join(s for s in kept if s)
+    new_line = f"{m.group('head')} {body}".rstrip()
+    state.快照 = Snapshot(text[:m.start()] + new_line + text[m.end():], state.快照.turn)
+    return True
 
 
 def _fmt_num(v: float) -> str:
