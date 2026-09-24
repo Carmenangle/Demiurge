@@ -103,28 +103,43 @@ interface PromptProps {
   title: string;
   defaultValue?: string;
   confirmText?: string;
+  /** 多行（textarea）：用于图像提示词这类长文本。多行下 Enter 换行、Ctrl/⌘+Enter 提交。 */
+  multiline?: boolean;
+  rows?: number;
   onConfirm: (value: string) => void;
   onCancel: () => void;
 }
 
-export function PromptModal({ title, defaultValue = "", confirmText = "确认", onConfirm, onCancel }: PromptProps) {
+export function PromptModal({ title, defaultValue = "", confirmText = "确认", multiline = false, rows = 12, onConfirm, onCancel }: PromptProps) {
   const [value, setValue] = useState(defaultValue);
   useEsc(onCancel);
+  const submit = () => { if (value.trim()) onConfirm(value.trim()); };
   return (
     <div className="modal-mask" onClick={onCancel}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <h3>{title}</h3>
-        <input
-          autoFocus
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && value.trim() && onConfirm(value.trim())}
-        />
+        {multiline ? (
+          <textarea
+            autoFocus
+            className="prompt-modal-textarea"
+            rows={rows}
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) submit(); }}
+          />
+        ) : (
+          <input
+            autoFocus
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && submit()}
+          />
+        )}
         <div className="modal-actions">
           <button className="btn" onClick={onCancel}>
             取消
           </button>
-          <button className="btn primary" disabled={!value.trim()} onClick={() => onConfirm(value.trim())}>
+          <button className="btn primary" disabled={!value.trim()} onClick={submit}>
             {confirmText}
           </button>
         </div>

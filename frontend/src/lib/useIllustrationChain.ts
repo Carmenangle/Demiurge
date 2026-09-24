@@ -74,6 +74,16 @@ export interface IllustrationChainDeps {
   ) => void;
 }
 
+// 第 58 刀（2026-09-24）：999 模式 12 个槽**同时** POST /comfyui/submit —— ComfyUI
+// 首个任务触发模型加载、其余在队列里等，5/12 张撞上 60s 提交超时（真机实锤）。
+// ⇒ 提交**串行化**：同一时刻只有一次提交在途（模型加载只发生一次，后续提交秒回）。
+let _submitQueue: Promise<unknown> = Promise.resolve();
+function enqueueSubmit<T>(run: () => Promise<T>): Promise<T> {
+  const chained = _submitQueue.then(run, run);
+  _submitQueue = chained.catch(() => undefined);
+  return chained;
+}
+
 export function useIllustrationChain({
   settings, templates, repo, threadId, cardNames, promptProfile, characterBaseImages,
   chat, modelProxies, effectivePersona, messagesRef, setMessages,
@@ -473,6 +483,24 @@ export function useIllustrationChain({
       if (layout) {
         const lastSlotId = `${slotId}:last`;
         const frameTarget = (sid: string) => ({ messageId, slotId: sid, background: true as const });
+        // 逐帧重生成快照（2026-09-22 补）：帧路径此前 `pollResult` 第 2/3 参传 `[]`/`undefined`，
+        // 槽位因此**没有 regeneration** ⇒ 帧卡上的「重新生图」走 legacy 兜底（按资产库提示词
+        // 提交一张**普通插画**：模板/逐帧 LoRA/尺寸全不是那一帧的，即「换成不同档的图」），
+        // 「重新生图（含提示词）」也无从预填。材料本就齐全（framePrompt + frameMedia +
+        // buildFrameValues 同输入同输出），这里按帧补齐，与主路径（高潮点）对齐。
+        const frameOutputNodeIds = frameTpl.primary_output_node_id ? [frameTpl.primary_output_node_id] : [];
+        const frameRegenSnapshot = (
+          framePrompt: string,
+          media: ReturnType<typeof illustrationWorkflowMedia> | undefined,
+        ) => templateRegenerationSnapshot(
+          preset.templateId,
+          buildFrameValues(framePrompt, media ?? workflowMedia),
+          settings.comfyuiUrl,
+          frameOutputNodeIds,
+          framePrompt,
+          (media ?? workflowMedia).loras.map(({ name, weight }) => ({ name, weight })),
+          preset.loraMode || "single",
+        );
         const reportFrame = (
           promptId: string, sid: string, framePrompt: string, keys: string[],
           media: ReturnType<typeof illustrationWorkflowMedia> = workflowMedia,
@@ -491,22 +519,23 @@ export function useIllustrationChain({
         if (useVideo) {
           // 视频模式：主槽=正片（C 段提交），双帧图入 :first/:last 副槽（reuse 首帧复用上楼图，无新图不建槽）
           if (layout.main === "first_prompt" && frameFirstPromptId) {
-            setMessages((current) => appendImageSlot(current, messageId, `${slotId}:first`, frameFirstPrompt));
-            pollResult(frameFirstPromptId, [], undefined, frameTarget(`${slotId}:first`), frameFirstPrompt, "image");
+            // 第 34 刀：首帧图固定落在**正文第一段下方**（`at: "start"`）；尾帧图（:last）仍落末段末。
+            setMessages((current) => appendImageSlot(current, messageId, `${slotId}:first`, frameFirstPrompt, "start"));
+            pollResult(frameFirstPromptId, frameOutputNodeIds, frameRegenSnapshot(frameFirstPrompt, frameFirstMedia), frameTarget(`${slotId}:first`), frameFirstPrompt, "image");
             reportFrame(frameFirstPromptId, `${slotId}:first`, frameFirstPrompt, frameFirstValueKeys, frameFirstMedia);
           }
           if (frameLastPromptId) {
             setMessages((current) => appendImageSlot(current, messageId, lastSlotId, frameLastPrompt));
-            pollResult(frameLastPromptId, [], undefined, frameTarget(lastSlotId), frameLastPrompt, "image");
+            pollResult(frameLastPromptId, frameOutputNodeIds, frameRegenSnapshot(frameLastPrompt, frameLastMedia), frameTarget(lastSlotId), frameLastPrompt, "image");
             reportFrame(frameLastPromptId, lastSlotId, frameLastPrompt, frameLastValueKeys, frameLastMedia);
           }
         } else {
           // 独立图片模式：主槽=本楼层新画面，尾帧新图进 :last
           if (layout.main === "first_prompt" && frameFirstPromptId) {
-            pollResult(frameFirstPromptId, [], undefined, frameTarget(slotId), frameFirstPrompt, "image");
+            pollResult(frameFirstPromptId, frameOutputNodeIds, frameRegenSnapshot(frameFirstPrompt, frameFirstMedia), frameTarget(slotId), frameFirstPrompt, "image");
             reportFrame(frameFirstPromptId, slotId, frameFirstPrompt, frameFirstValueKeys, frameFirstMedia);
           } else if (layout.main === "last_prompt" && frameLastPromptId) {
-            pollResult(frameLastPromptId, [], undefined, frameTarget(slotId), frameLastPrompt, "image");
+            pollResult(frameLastPromptId, frameOutputNodeIds, frameRegenSnapshot(frameLastPrompt, frameLastMedia), frameTarget(slotId), frameLastPrompt, "image");
             reportFrame(frameLastPromptId, slotId, frameLastPrompt, frameLastValueKeys, frameLastMedia);
           } else if (layout.main === "last_frame_url" && lastFrameUrl) {
             setMessages((current) => resolveMediaSlot(current, messageId, slotId, lastFrameUrl, "image"));
@@ -515,9 +544,12 @@ export function useIllustrationChain({
             if (url) setMessages((current) => resolveMediaSlot(current, messageId, slotId, url, "image"));
           }
           if (layout.lastSlot && frameLastPromptId) {
-            setMessages((current) => appendImageSlot(current, messageId, lastSlotId, lastFrameDesc));
-            pollResult(frameLastPromptId, [], undefined, frameTarget(lastSlotId), lastFrameDesc, "image");
-            reportFrame(frameLastPromptId, lastSlotId, lastFrameDesc, frameLastValueKeys);
+            // 2026-09-22 修复：本分支曾传 lastFrameDesc（中文原文）⇒ 资产库显示帧描述原文
+            // 而非编译后提示词（2026-08-29 同类修复只补了视频分支，这里漏了）。三处必须与
+            // 实际提交 ComfyUI 的 frameLastPrompt 同源，且 media 同源（逐帧 LoRA）。
+            setMessages((current) => appendImageSlot(current, messageId, lastSlotId, frameLastPrompt));
+            pollResult(frameLastPromptId, frameOutputNodeIds, frameRegenSnapshot(frameLastPrompt, frameLastMedia), frameTarget(lastSlotId), frameLastPrompt, "image");
+            reportFrame(frameLastPromptId, lastSlotId, frameLastPrompt, frameLastValueKeys, frameLastMedia);
           }
         }
       }
@@ -607,9 +639,9 @@ export function useIllustrationChain({
       // 图片分支维持既有 loraStack 注入合同。
       const loraStack = useVideo ? [] : loras.map(({ name, weight }) => ({ name, weight }));
       const loraMode = useVideo ? "none" : (preset.loraMode || "single");
-      const r = await submitWorkflow(
+      const r = await enqueueSubmit(() => submitWorkflow(
         chosenId, values, settings.comfyuiUrl, prompt, loraStack, loraMode,
-      );
+      ));
       if (r.prompt_id) {
         void reportIllustrationSubmission({
           threadId, repoId: repo?.id || threadId, turnId, messageId, slotId,

@@ -20,6 +20,33 @@ export function nextStoryTurnNo(messages: readonly ChatMessage[]): number {
   return promptHistory(messages).filter((h) => h.role === "assistant").length + 1;
 }
 
+// 第 58 刀（2026-09-24）：**回合号高位水印**（按会话持久化、只升不降）。
+// 真机实锤：19:09 与 19:52 两轮的回合号**同为 54** ⇒ 槽 id（`illo-req-<repo>-<turn>[-N]`）
+// 撞车 ⇒ 新图的槽/图与上一轮混叠（「新图片不刷新不插入」的根因）。`max(显式 turnNo)+1`
+// 在「最高回合的消息被删除/重新生成」时会**复用旧号** —— 「重生成复用被删回合号」是
+// 有意设计（同回合幂等重写、旧行被替换），但**新消息**复用旧号就会与仍在的旧槽相撞。
+// ⇒ 水印兜底：新回合号不得低于历史最高已用号。⚠ 不改「重生成复用被删回合号」——
+//   重生成走显式 `storyTurn` 入参、且 `rememberStoryTurn` 只在更大时才抬水印。
+const TURN_HWM_KEY = "laf_story_turn_hwm";
+
+export function storyTurnHighWater(threadId: string): number {
+  try {
+    return Number(localStorage.getItem(`${TURN_HWM_KEY}:${threadId}`) || "") || 0;
+  } catch {
+    return 0;
+  }
+}
+
+export function rememberStoryTurn(threadId: string, turnNo: number): void {
+  try {
+    if (Number.isFinite(turnNo) && turnNo > storyTurnHighWater(threadId)) {
+      localStorage.setItem(`${TURN_HWM_KEY}:${threadId}`, String(turnNo));
+    }
+  } catch {
+    // 存储不可用（隐私模式等）⇒ 水印失效，退回 max+1 行为
+  }
+}
+
 /** 一组消息里待封口的回合号（去重升序；只有 assistant 楼层携带回合）。 */
 export function sealTurnsOf(messages: readonly ChatMessage[]): number[] {
   const turns = [...new Set(

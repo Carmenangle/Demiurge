@@ -5,13 +5,13 @@ import {
   createTable, dropTable, setTableMeta, manualFillTables, CHRONICLE_TABLE_UID,
   type DataTable, type TableConfig, type ChatModelInput,
 } from "../api/tables";
-import { getState, patchState, type CharacterStateDto } from "../api/state";
+import { deleteStateField, getState, patchState, type CharacterStateDto } from "../api/state";
 import {
   listChronicle, updateChronicle, deleteChronicle,
   previewNormalizeChronicle, applyNormalizeChronicle,
   type ChronicleEntry,
 } from "../api/narrative";
-import { groupStateCards } from "../lib/stateCards";
+import { groupStateCards, groupStateCardsDetailed } from "../lib/stateCards";
 import { useManualTableFill, useTableConfig } from "../lib/useTableWorkflows";
 
 interface Props {
@@ -354,7 +354,19 @@ function StatePane({ state, outputDir, repoId, cardName, busy, setBusy, setErr, 
     catch (e) { setErr(String((e as Error).message)); }
     finally { setBusy(false); }
   };
-  const cards = groupStateCards(state);
+  // 删除字段两档（2026-09-23）：`删除` 可被回滚撤销（重生成会把字段写回）；
+  // `彻底清除` 连同该字段的审计历史一起删掉，重生成/回滚都恢复不了 ⇒ 二次确认。
+  const onDelete = async (field: string, purge: boolean) => {
+    const msg = purge
+      ? `彻底清除「${field}」？\n\n会连同该字段的历史记录一起删掉，之后「重新生成 / 回滚」都无法恢复。`
+      : `删除「${field}」？\n\n这是可撤销删除：下一次「回滚 / 重新生成」会把它写回。`;
+    if (!window.confirm(msg)) return;
+    setBusy(true); setErr("");
+    try { setState(await deleteStateField(outputDir, repoId, cardName, field, purge)); }
+    catch (e) { setErr(String((e as Error).message)); }
+    finally { setBusy(false); }
+  };
+  const { cards, unowned } = groupStateCardsDetailed(state);
   return (
     <div className="table-scroll">
       <div className="card-grid state-card-grid">
@@ -374,6 +386,22 @@ function StatePane({ state, outputDir, repoId, cardName, busy, setBusy, setErr, 
                     <b className={`state-source ${field.source === "user" ? "is-user" : ""}`}>
                       {field.source === "user" ? "手改" : "剧情"}
                     </b>
+                    <button type="button" className="btn row-card-del" disabled={busy}
+                      title="删除该字段（可被「回滚」撤销；重新生成时会被写回）"
+                      onClick={(e) => {
+                        e.preventDefault(); e.stopPropagation();
+                        onDelete(field.path, false);
+                      }}>
+                      删除
+                    </button>
+                    <button type="button" className="btn danger row-card-del" disabled={busy}
+                      title="彻底清除该字段及其历史（此后重新生成 / 回滚都无法恢复）"
+                      onClick={(e) => {
+                        e.preventDefault(); e.stopPropagation();
+                        onDelete(field.path, true);
+                      }}>
+                      彻除
+                    </button>
                   </span>
                   {field.kind === "number" ? (
                     <input key={`${field.path}-${field.value}`} type="number" className="field-input state-value"
@@ -396,6 +424,12 @@ function StatePane({ state, outputDir, repoId, cardName, busy, setBusy, setErr, 
           </section>
         ))}
       </div>
+      {unowned.length > 0 && (
+        <p style={{ color: "var(--text-muted)", fontSize: 12, marginTop: 10 }}>
+          另有 {unowned.length} 个状态字段无角色归属（{unowned.join("、")}），不属于任何角色，
+          故不在此表；它们仍保留在状态文件里并继续注入剧情。
+        </p>
+      )}
     </div>
   );
 }

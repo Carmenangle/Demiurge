@@ -80,4 +80,18 @@ describe("agent invocation wire contract", () => {
       ...invocation(), illustrationViewpoint: "first_person",
     }).illustration_viewpoint).toBe("first_person");
   });
+
+  it("批量生图数目进 wire，未设时送 0（0=后端按 1 张处理，单张路径不变）", () => {
+    expect(agentInvocationBody(invocation()).illustration_batch_count).toBe(0);
+    expect(agentInvocationBody({
+      ...invocation(), illustrationBatchCount: 3,
+    }).illustration_batch_count).toBe(3);
+    // 非法值（0/负数/NaN）一律兑现 0，不把脏值透传
+    expect(agentInvocationBody({
+      ...invocation(), illustrationBatchCount: 0,
+    }).illustration_batch_count).toBe(0);
+    expect(agentInvocationBody({
+      ...invocation(), illustrationBatchCount: Number.NaN,
+    }).illustration_batch_count).toBe(0);
+  });
 });

@@ -230,12 +230,12 @@ describe("workflow generation runtime", () => {
 
 // ===== V1.3 视频超时独立于图片 =====
 describe("pollSchedule · 媒体类型超时合同", () => {
-  it("图片：5 分钟（150×2s）释放忙碌，20 分钟（210 tries）硬上限", () => {
+  it("图片：5 分钟（150×2s）释放忙碌，30 分钟（250 tries）硬上限", () => {
     expect(pollSchedule(149)).toEqual({ releaseBusy: false, delayMs: 2000 });
     expect(pollSchedule(150)).toEqual({ releaseBusy: true, delayMs: 15000 });
     expect(pollSchedule(151)).toEqual({ releaseBusy: false, delayMs: 15000 });
     expect(pollSchedule(209)).toEqual({ releaseBusy: false, delayMs: 15000 });
-    expect(pollSchedule(210)).toEqual({ releaseBusy: false, delayMs: null });
+    expect(pollSchedule(250)).toEqual({ releaseBusy: false, delayMs: null });
   });
   it("视频：15 分钟（450×2s）释放忙碌，60 分钟（630 tries）硬上限——禁止 5 分钟掐掉 10 分钟任务", () => {
     expect(pollSchedule(150, "video")).toEqual({ releaseBusy: false, delayMs: 2000 });
@@ -339,15 +339,15 @@ describe("pollWorkflowResult · 画布/弹窗运转轮询", () => {
     expect(fetchResult).toHaveBeenCalledTimes(5);
   });
 
-  it("running 撑到 pollSchedule 硬上限（210 tries）→ still_running，不谎报失败", async () => {
+  it("running 撑到 pollSchedule 硬上限（250 tries）→ still_running，不谎报失败", async () => {
     vi.useFakeTimers();
     const fetchResult = vi.fn(async (): Promise<GenResult> => running);
     const outcomePromise = pollWorkflowResult("p1", "http://comfy", "image", { fetchResult });
-    // 图片合同：149×2s + 60×15s ≈ 20 分钟硬上限；第 210 次 fetch 后 pollSchedule(210)=null
-    await vi.advanceTimersByTimeAsync(2_000 * 150 + 15_000 * 61);
+    // 图片合同：149×2s + 100×15s ≈ 30 分钟硬上限；第 250 次 fetch 后 pollSchedule(250)=null
+    await vi.advanceTimersByTimeAsync(2_000 * 150 + 15_000 * 101);
     const outcome = await outcomePromise;
     expect(outcome).toEqual({ kind: "still_running" });
-    expect(fetchResult).toHaveBeenCalledTimes(210);
+    expect(fetchResult).toHaveBeenCalledTimes(250);
   });
 });
 
@@ -539,7 +539,7 @@ describe("advanceWorkflowTick · 后台守望/同步轮询共用判定核心", (
 
   it("到达 pollSchedule 硬上限 → still_running（不谎报失败）", () => {
     let state = initialTickState();
-    for (let index = 0; index < 209; index += 1) {
+    for (let index = 0; index < 249; index += 1) {
       state = advanceWorkflowTick(state, { ok: true, status: "running" }, ctx()).state;
     }
     expect(advanceWorkflowTick(state, { ok: true, status: "running" }, ctx()).decision)
@@ -564,14 +564,14 @@ describe("advanceWorkflowTick · 后台守望/同步轮询共用判定核心", (
 // 抽公共核心时若把自增放进「有观测才推进」的分支，fetch 持续抛错就会永远停在 2s 档、
 // 硬超时永不触发（≡ 无限轮询）。这两条用例把该不变量钉在两套循环上。
 describe("tick 推进不变量：fetch 抛错不影响计时", () => {
-  it("同步轮询：fetch 全程抛错仍走到图片硬超时（210 tries）→ still_running", async () => {
+  it("同步轮询：fetch 全程抛错仍走到图片硬超时（250 tries）→ still_running", async () => {
     vi.useFakeTimers();
     try {
       const fetchResult = vi.fn(async (): Promise<GenResult> => { throw new Error("ComfyUI down"); });
       const promise = pollWorkflowResult("p1", "http://comfy", "image", { fetchResult });
-      await vi.advanceTimersByTimeAsync(2_000 * 150 + 15_000 * 61);
+      await vi.advanceTimersByTimeAsync(2_000 * 150 + 15_000 * 101);
       expect(await promise).toEqual({ kind: "still_running" });
-      expect(fetchResult).toHaveBeenCalledTimes(210);
+      expect(fetchResult).toHaveBeenCalledTimes(250);
     } finally {
       vi.useRealTimers();
     }
@@ -587,8 +587,8 @@ describe("tick 推进不变量：fetch 抛错不影响计时", () => {
     });
     runtime.start({ promptId: "p1", comfyuiUrl: "http://comfy" }, watch);
 
-    // 初排 + 每次 tick 各入队一次；第 210 次 tick 判定硬超时且不再入队
-    for (let index = 0; index < 210; index += 1) {
+    // 初排 + 每次 tick 各入队一次；第 250 次 tick 判定硬超时且不再入队
+    for (let index = 0; index < 250; index += 1) {
       const callback = scheduled.shift();
       expect(callback, `第 ${index + 1} 次 tick 应当已被调度`).toBeTruthy();
       await callback!();
@@ -911,12 +911,13 @@ describe("P14 · 公开门面等价网（导出面收窄前先钉行为）", () 
     expect(runtime.list()).toEqual([{ prompt_id: "p2", createdAt: 2 }]);
   });
 
-  it("recoveryAction：已处理 → skip；30 分钟边界（含端点）→ inspect / expire", () => {
+  it("recoveryAction：已处理 → skip；6 小时边界（含端点）→ inspect / expire", () => {
+    // 第 58 刀：批量生图（999 串行提交＋模型首载）会越过 30 分钟，过期窗口放宽到 6 小时
     const item = { prompt_id: "p1", createdAt: 1000 };
     const at = (now: number) => make("p14-recovery", () => now).runtime;
     expect(at(1000).recoveryAction(item, new Set(["p1"]))).toBe("skip");
-    expect(at(1000 + 30 * 60 * 1000).recoveryAction(item, new Set())).toBe("inspect");   // 恰 30 分钟仍可恢复
-    expect(at(1001 + 30 * 60 * 1000).recoveryAction(item, new Set())).toBe("expire");   // 越界即过期
+    expect(at(1000 + 6 * 60 * 60 * 1000).recoveryAction(item, new Set())).toBe("inspect");   // 恰 6 小时仍可恢复
+    expect(at(1001 + 6 * 60 * 60 * 1000).recoveryAction(item, new Set())).toBe("expire");   // 越界即过期
   });
 
   it("inspect：completed → 归档并返回 complete；failed → 立即失败；其它 → 转后台守望", async () => {

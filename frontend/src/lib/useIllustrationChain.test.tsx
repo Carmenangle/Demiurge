@@ -23,6 +23,13 @@ vi.mock("../api/comfyui", () => ({
   uploadRemoteImageToInput: vi.fn(async () => "remote.png"),
   localViewUrl: (p: string) => `local:${p}`,
   pollWorkflowResult: vi.fn(async () => ({ kind: "complete", result: { images: ["frame.png"] } })),
+  // pollWorkflowResult 真源在 lib/workflowGenerationRuntime，它内部调 getResult；
+  // 帧路径跑到轮询才会用到（此前用例都在更早处就 failSlot 了）。
+  getResult: vi.fn(async () => ({
+    status: "completed", error: undefined,
+    images: [{ filename: "frame.png", subfolder: "", type: "output" }],
+    videos: [], audios: [], texts: [],
+  })),
 }));
 
 vi.mock("../api/ai", () => ({
@@ -42,7 +49,7 @@ import {
   comfyStatus, submitWorkflow,
 } from "../api/comfyui";
 import {
-  claimIllustrationSubmission, genProfilePrompt, reportIllustrationSubmission,
+  claimIllustrationSubmission, genFramePrompts, genProfilePrompt, reportIllustrationSubmission,
 } from "../api/ai";
 
 const SEAM = "./useIllustrationChain.ts";
@@ -339,6 +346,50 @@ describe("useIllustrationChain 行为网", () => {
     expect(call[2]).toBe("frame_gen");
     expect(call[3]).toBe("首帧生图失败：帧提示词编译失败（首帧），已阻止把中文原文直接提交给 ComfyUI");
     expect(submitWorkflow).not.toHaveBeenCalled();
+  });
+
+  it("firstlast 双帧生成：每帧各带 regeneration 快照 + outputNodeIds（帧卡重生成不再走 legacy 兜底）", async () => {
+    // 2026-09-22 补：帧路径此前 pollResult 第 2/3 参传 []/undefined ⇒ 帧槽没有 regeneration，
+    // 帧卡上的「重新生图」会走 legacy 兜底（按资产库提示词提交一张**普通插画**：模板/逐帧
+    // LoRA/尺寸全不是那一帧的），「重新生图（含提示词）」也无从预填。
+    vi.mocked(genFramePrompts).mockResolvedValue({
+      frames: { first: { prompt: "编译首帧P" }, last: { prompt: "编译尾帧P" } },
+    } as never);
+    const frameTpl = {
+      id: "tpl1", name: "图片模板", node_order: [],
+      exposed: [{ node_id: "6", field: "text", semantic: "prompt" }],
+      primary_output_node_id: "9",
+    } as never;
+    const preset = {
+      templateId: "tpl1", firstlast: true, negativePrompt: "", appearanceSource: "character_card", loraMode: "single",
+    };
+    const { deps, pollResult, discardFailedIllustration } = makeDeps({ preset, templates: [frameTpl] });
+    await submitChain(deps, {
+      ...baseInput, source: "automatic",
+      sceneSpec: { narrative: "剧情N", profile: "krea2" },
+      firstFrameDesc: "首帧画面", lastFrameDesc: "尾帧画面",
+    });
+    // 两帧各提交一次、各回填一个槽（不会连坐、也不会只回填一个）
+    expect(pollResult).toHaveBeenCalledTimes(2);
+    const [firstCall, lastCall] = pollResult.mock.calls;
+    // ① outputNodeIds 与主路径同口径（此前是 []）
+    expect(firstCall[1]).toEqual(["9"]);
+    expect(lastCall[1]).toEqual(["9"]);
+    // ② 槽位各是各的：主槽给首帧、":last" 副槽给尾帧
+    expect(firstCall[3]).toEqual({ messageId: "m1", slotId: "s1", background: true });
+    expect(lastCall[3]).toEqual({ messageId: "m1", slotId: "s1:last", background: true });
+    // ③ 快照：逐帧 template 快照，提示词=**该帧自己的**编译产物，values 也按帧绑好
+    //    （此前这里是 undefined ⇒ 帧卡「重新生图」走 legacy 兜底换到不同档的图）
+    expect(firstCall[2]).toMatchObject({
+      kind: "template", templateId: "tpl1", prompt: "编译首帧P", outputNodeIds: ["9"],
+      comfyuiUrl: "http://127.0.0.1:8188", values: { "6.text": "编译首帧P" },
+    });
+    expect(lastCall[2]).toMatchObject({
+      kind: "template", templateId: "tpl1", prompt: "编译尾帧P", outputNodeIds: ["9"],
+      values: { "6.text": "编译尾帧P" },
+    });
+    // ④ 两帧不得共用同一份快照（否则点尾帧卡会按首帧提示词重出）
+    expect(firstCall[2]).not.toBe(lastCall[2]);
   });
 
   it("失败槽快照：retryArgs 携带原始入参（source 为原值）", async () => {

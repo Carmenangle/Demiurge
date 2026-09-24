@@ -7,6 +7,7 @@ import { restoreOpenDetails, trackDetailsToggle } from "../../lib/stableDetailsO
 import { renderMarkdown } from "../../lib/renderMarkdown";
 import { substituteMacros } from "../../lib/chatMacros";
 import { buildTraceSummary } from "../../lib/traceTree";
+import { PromptModal } from "../Modal";
 import { userMessagePlainText, userMessageRichContent } from "../../lib/chatGeneration";
 import type { PortOp } from "../../api/ai";
 import { attachmentUrl, proxyImageUrl, selectInspiration as selectInspirationPost, saveInspirationCard } from "../../api/ai";
@@ -152,6 +153,8 @@ function UserMessageBase({
   onEdit?: (content: RichContent, sourceId?: string) => void;
   onDelete?: (id: string) => void;
   onRegenerate?: (id: string, slotId?: string) => void;
+  /** 「重新生图（含提示词）」：弹提示词编辑框，确认后带新提示词重出图（迭代提示词用）。 */
+  onRegenerateWithPrompt?: (id: string, slotId: string, prompt: string) => void;
   regenerationDisabled?: boolean;
 }) {
   const plainText = userMessagePlainText(msg);
@@ -364,7 +367,7 @@ const MarkdownHtml = memo(function MarkdownHtml({ text, className, htmlRef }: {
   return <div className={className} ref={htmlRef} dangerouslySetInnerHTML={{ __html: html }} />;
 }, (prev, next) => prev.text === next.text && prev.className === next.className);
 
-function AssistantMessageBase({ msg, streaming, avatarState = "default", portrait, displayRegex, depth, macros, onSendImage, onMaskImage, onRunCommand, onSetCover, onPromptApproval, onRouteChoice, onRegenerate, onCancelGeneration, onRetryIllustration, regenerating = false, onEdit, onDelete, onCreateCheckpoint, onBranch, onMergeAudio, visualCiRepoId, visualCiOutputDir, onFabricApprove }: { msg: ChatMessage; streaming?: boolean; avatarState?: AssistantAvatarState; portrait?: { name: string; url: string } | null; displayRegex?: RegexScript[]; depth?: number; macros?: { char: string; user: string }; onSendImage: (url: string) => void; onMaskImage?: (url: string) => void; onRunCommand?: (cmd: string) => void; onSetCover?: (url: string) => void; onPromptApproval?: (approval: PromptApproval, action: "submit" | "change" | "cancel", editedPrompt?: string) => Promise<void>; onRouteChoice?: (choice: RouteChoice, route: AgentRoute) => Promise<void>; onRegenerate?: (messageId: string, slotId?: string) => void; onCancelGeneration?: (messageId: string, slotId: string) => void; onRetryIllustration?: (messageId: string, slotId: string) => void; regenerating?: boolean; onEdit?: (id: string, text: string) => void; onDelete?: (id: string) => void; onCreateCheckpoint?: (id: string) => void; onBranch?: (id: string) => void; onMergeAudio?: (messageId: string) => Promise<void>; visualCiRepoId?: string; visualCiOutputDir?: string; onFabricApprove?: (approve: boolean, mode?: "approve" | "continue") => void }) {
+function AssistantMessageBase({ msg, streaming, avatarState = "default", portrait, displayRegex, depth, macros, onSendImage, onMaskImage, onRunCommand, onSetCover, onPromptApproval, onRouteChoice, onRegenerate, onRegenerateWithPrompt, onCancelGeneration, onRetryIllustration, regenerating = false, onEdit, onDelete, onCreateCheckpoint, onBranch, onMergeAudio, visualCiRepoId, visualCiOutputDir, onFabricApprove }: { msg: ChatMessage; streaming?: boolean; avatarState?: AssistantAvatarState; portrait?: { name: string; url: string } | null; displayRegex?: RegexScript[]; depth?: number; macros?: { char: string; user: string }; onSendImage: (url: string) => void; onMaskImage?: (url: string) => void; onRunCommand?: (cmd: string) => void; onSetCover?: (url: string) => void; onPromptApproval?: (approval: PromptApproval, action: "submit" | "change" | "cancel", editedPrompt?: string) => Promise<void>; onRouteChoice?: (choice: RouteChoice, route: AgentRoute) => Promise<void>; onRegenerate?: (messageId: string, slotId?: string) => void; onRegenerateWithPrompt?: (messageId: string, slotId: string, prompt: string) => void; onCancelGeneration?: (messageId: string, slotId: string) => void; onRetryIllustration?: (messageId: string, slotId: string) => void; regenerating?: boolean; onEdit?: (id: string, text: string) => void; onDelete?: (id: string) => void; onCreateCheckpoint?: (id: string) => void; onBranch?: (id: string) => void; onMergeAudio?: (messageId: string) => Promise<void>; visualCiRepoId?: string; visualCiOutputDir?: string; onFabricApprove?: (approve: boolean, mode?: "approve" | "continue") => void }) {
   const [showThinking, setShowThinking] = useState(false); // 思考默认折叠（2026-08-31 深夜用户反馈：28k 长思考自动展开吞掉正文区），可手动展开
   // 非流式 agent「执行过程」面板：流式中自动展开实时可见；replace 后保留可折叠回看
   const [showTrace, setShowTrace] = useState(false);
@@ -627,6 +630,13 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
                 ? "使用这张结果绑定的原始参数重新生成并替换"
                 : "使用资产库原提示词与当前作品模板重新生成并替换"}
               onClick={() => onRegenerate?.(msg.id, part.slotId)}><RotateCw size={14} /> 重新生图</button>
+            {onRegenerateWithPrompt && part.slotId && (
+              <button className="img-tool" disabled={!canRegenerate || regenerating}
+                title="编辑提示词后重新生成：用于反复调提示词，不必重跑正文"
+                onClick={() => setPromptEdit({
+                  messageId: msg.id, slotId: part.slotId!, prompt: part.regeneration?.prompt || "",
+                })}><Pencil size={14} /> 重新生图（含提示词）</button>
+            )}
             <button className="img-tool" onClick={() => onMaskImage?.(part.url!)}><Brush size={14} /> 蒙化修改</button>
             <button className="img-tool" onClick={() => onSendImage(part.url!)}><Send size={14} /> 发送至对话</button>
             {onSetCover && <button className="img-tool" onClick={() => onSetCover(part.url!)}><ImageIcon size={14} /> 设为封面</button>}
@@ -648,7 +658,10 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
   const hasMergedTrack = (msg.parts || []).some(
     (p) => p.type === "audio" && (p.slotId || "").startsWith("merged-"),
   );
+  // 「重新生图（含提示词）」：弹提示词编辑框。用于反复调提示词——不必重跑正文生成。
+  const [promptEdit, setPromptEdit] = useState<{ messageId: string; slotId: string; prompt: string } | null>(null);
   return (
+    <>
     <div className="msg-bot">
       <div className={`bot-avatar bot-avatar-${avatarState}`}>
         {portrait
@@ -1131,6 +1144,20 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
         ))}
       </div>
     </div>
+    {promptEdit && (
+      <PromptModal
+        title="重新生图（含提示词）"
+        defaultValue={promptEdit.prompt}
+        confirmText="重新生成"
+        multiline
+        onConfirm={(edited) => {
+          onRegenerateWithPrompt?.(promptEdit.messageId, promptEdit.slotId, edited);
+          setPromptEdit(null);
+        }}
+        onCancel={() => setPromptEdit(null)}
+      />
+    )}
+    </>
   );
 }
 

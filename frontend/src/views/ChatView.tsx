@@ -450,6 +450,12 @@ export function ChatView({
     (messageId: string, slotId?: string) => regenerateResultRef.current(messageId, slotId),
     [],
   );
+  // 「重新生图（含提示词）」：把用户编辑后的提示词一并交给重生成（用于反复调提示词）。
+  const handleRegenerateWithPrompt = useCallback(
+    (messageId: string, slotId: string, prompt: string) =>
+      regenerateResultRef.current(messageId, slotId, prompt),
+    [],
+  );
   const stopSlotGenerationRef = useRef(stopSlotGeneration);
   stopSlotGenerationRef.current = stopSlotGeneration;
   const handleCancelGeneration = useCallback(
@@ -901,6 +907,7 @@ export function ChatView({
                     images: [],
                   })}
                   onRegenerate={handleRegenerate}
+                  onRegenerateWithPrompt={handleRegenerateWithPrompt}
                   onCancelGeneration={handleCancelGeneration}
                   onRetryIllustration={retryIllustration}
                   regenerating={regeneratingIds.has(m.id)}

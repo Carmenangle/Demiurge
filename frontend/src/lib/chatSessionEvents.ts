@@ -1,6 +1,8 @@
 import type { FinalizedMessage } from "../api/comfyui";
 import type { ChatStreamEvent, VideoParams } from "../api/chatStreamProtocol";
 import type { ChatMessage, MsgPart, PromptApproval, RegenerationSnapshot, RouteChoice } from "../types/chat";
+import { resolvePrevTailDesc } from "./chatGeneration";
+import { firstParagraphEnd, firstlastMainOffset } from "./illustrationMedia";
 
 export function upsertMessages(current: ChatMessage[], incoming: ChatMessage[]): ChatMessage[] {
   const next = [...current];
@@ -120,6 +122,48 @@ function appendAgentTrace(message: ChatMessage, line: string, detail?: string): 
   return { ...message, agentTrace: lines };
 }
 
+/**
+ * 按字符 offset 把媒体槽切进 `parts`（保留已有槽与顺序；offset 超出文本则 append）。
+ *
+ * 抽成独立函数（第 34 刀）：高潮点走 `appendMediaSlot`、首尾帧副槽走 `appendImageSlot`，
+ * 两处都要「按 offset 切开文本段」这一段**逐字相同**的逻辑。
+ */
+function insertSlotAtOffset(
+  existing: MsgPart[], text: string, slot: MsgPart, offset: number,
+): MsgPart[] {
+  const index = Math.max(0, Math.min(text.length, Math.round(offset)));
+  // parts 已存在（多插画/图文混排）时同样按 offset 定位插入，保留已有槽与顺序：
+  // 遍历文本段累计长度，把新槽切进 offset 落在的那一段；offset 超出文本才 append。
+  const parts: MsgPart[] = [];
+  let consumed = 0;
+  let inserted = false;
+  for (const part of existing) {
+    if (part.type === "text") {
+      const start = consumed;
+      const end = consumed + (part.text || "").length;
+      if (!inserted && index >= start && index <= end) {
+        const cut = index - start;
+        const before = (part.text || "").slice(0, cut);
+        const after = (part.text || "").slice(cut);
+        // 图片块固定从目标句后的新行开始；保留原正文换行数量，不改变文本内容。
+        const slotPrefix = before && !before.endsWith("\n") ? "\n" : "";
+        const slotSuffix = after && !after.startsWith("\n") ? "\n" : "";
+        if (before) parts.push({ ...part, text: before + slotPrefix });
+        parts.push(slot);
+        if (after) parts.push({ ...part, text: slotSuffix + after });
+        inserted = true;
+      } else {
+        parts.push(part);
+      }
+      consumed = end;
+    } else {
+      parts.push(part);
+    }
+  }
+  if (!inserted) parts.push(slot);
+  return parts;
+}
+
 function appendMediaSlot(
   message: ChatMessage, slotId: string, offset?: number,
   lastFrameDesc?: string, videoPrompt?: string, videoParams?: VideoParams,
@@ -133,37 +177,7 @@ function appendMediaSlot(
     ...(videoPrompt ? { videoPrompt } : {}),
     ...(videoParams ? { videoParams } : {}) };
   if (typeof offset === "number") {
-    const index = Math.max(0, Math.min(message.text.length, Math.round(offset)));
-    // parts 已存在（多插画/图文混排）时同样按 offset 定位插入，保留已有槽与顺序：
-    // 遍历文本段累计长度，把新槽切进 offset 落在的那一段；offset 超出文本才 append。
-    const parts: MsgPart[] = [];
-    let consumed = 0;
-    let inserted = false;
-    for (const part of existing) {
-      if (part.type === "text") {
-        const start = consumed;
-        const end = consumed + (part.text || "").length;
-        if (!inserted && index >= start && index <= end) {
-          const cut = index - start;
-          const before = (part.text || "").slice(0, cut);
-          const after = (part.text || "").slice(cut);
-          // 图片块固定从高潮画面句后的新行开始；保留原正文换行数量，不改变文本内容。
-          const slotPrefix = before && !before.endsWith("\n") ? "\n" : "";
-          const slotSuffix = after && !after.startsWith("\n") ? "\n" : "";
-          if (before) parts.push({ ...part, text: before + slotPrefix });
-          parts.push(slot);
-          if (after) parts.push({ ...part, text: slotSuffix + after });
-          inserted = true;
-        } else {
-          parts.push(part);
-        }
-        consumed = end;
-      } else {
-        parts.push(part);
-      }
-    }
-    if (!inserted) parts.push(slot);
-    return { ...message, parts };
+    return { ...message, parts: insertSlotAtOffset(existing, message.text, slot, offset) };
   }
   return {
     ...message,
@@ -190,20 +204,30 @@ export function appendTransitionSlot(
   });
 }
 
-/** 首尾帧副槽（V1.6/P5+ 独立图片模式）：末尾追加 pending 图片槽并保留正文。 */
+/**
+ * 首尾帧副槽（V1.6/P5+）：追加 pending 图片槽并保留正文。
+ *
+ * `at`（第 34 刀，用户规格「首帧图在第一段下方、尾帧图在最后一段下方」）：
+ * - `"end"`（默认）＝末尾追加，**逐字节沿用旧行为**（末段末）；
+ * - `"start"`＝按 `firstParagraphEnd(message.text)` 切进首段之后（`:first` 首帧图用）。
+ */
 export function appendImageSlot(
   current: ChatMessage[], messageId: string, slotId: string, prompt?: string,
+  at: "start" | "end" = "end",
 ): ChatMessage[] {
   return current.map((message) => {
     if (message.id !== messageId) return message;
     const existing = message.parts || (message.text ? [{ type: "text" as const, text: message.text }] : []);
     if (existing.some((part) => part.slotId === slotId)) return message;
+    const slot = {
+      type: "media-slot" as const, slotId, status: "pending" as const, kind: "image" as const,
+      ...(prompt ? { videoPrompt: prompt } : {}),
+    };
     return {
       ...message,
-      parts: [...existing, {
-        type: "media-slot" as const, slotId, status: "pending" as const, kind: "image" as const,
-        ...(prompt ? { videoPrompt: prompt } : {}),
-      }],
+      parts: at === "start"
+        ? insertSlotAtOffset(existing, message.text, slot, firstParagraphEnd(message.text))
+        : [...existing, slot],
     };
   });
 }
@@ -421,10 +445,56 @@ export function applyInterruptedStop(
   });
 }
 
+/**
+ * 插画槽落点上下文（第 34 刀）：由调用方按**前端解析出的**视频模式传入。
+ *
+ * 为什么必须在外面解析：`event.videoMode === "firstlast"` 本身就等价于「前端已预设视频模板」
+ * ——后端只在 `comfy_video` 开时才回填 `video_mode`（`useChatSession.comfyVideo` ↔ 插画链
+ * `useVideo`，同一个 `preset.videoTemplateId`）。而「独立图片模式」（选了首尾帧、但没配视频
+ * 模板）**不会**带回 `video_mode`，事件里再也找不到任何首尾帧痕迹 ⇒ reducer 无从分辨，
+ * 只能退回高潮锚点。故由调用方（`useChatSession`，能拿到 preset）用与插画链**同一套纯函数**
+ * 解析后告知，不在 reducer 里凭字段猜。
+ */
+export interface SlotPlacement {
+  /** 本楼层是否首尾帧模式（`resolveVideoMode` 结果）。false/缺省 ⇒ 高潮点，落点逐字不变。 */
+  firstlast: boolean;
+}
+
+type IllustrateRequestEvent = Extract<ChatStreamEvent, { type: "illustrate_request" }>;
+
+/**
+ * 首尾帧主槽落点（第 34 刀）：首尾帧＝**固定落点**（用户规格「第一张图在第一段下方、
+ * 最后一张图在最后一段下方」），前端按正文自算（零 wire 改动）；高潮点则逐字沿用
+ * 后端下发的 `event.offset`（anchor_offset）。
+ *
+ * `video` 判据取 `event.videoMode === "firstlast"`：该字段在场 ⇔ 前端配了视频模板
+ * （`useVideo === true`）⇔ 主槽装的是**正片**（帧图走 `:first`/`:last` 副槽）⇒ 落末段末。
+ * 独立图片模式下主槽装本楼层新画面（首帧图 ⇒ 首段末；尾帧图/上尾帧延续 ⇒ 末段末）。
+ */
+function firstlastMainSlotOffset(
+  message: ChatMessage,
+  event: IllustrateRequestEvent,
+  current: ChatMessage[],
+  placement?: SlotPlacement,
+): number | undefined {
+  const firstlast = placement?.firstlast ?? event.videoMode === "firstlast";
+  if (!firstlast) return event.offset;
+  return firstlastMainOffset({
+    transition: event.transition,
+    prevTailUrl: resolvePrevTailDesc(current)?.lastFrameUrl,
+    firstFrameDesc: event.firstFrameDesc,
+    lastFrameDesc: event.lastFrameDesc,
+    lastFrameUrl: event.lastFrameUrl,
+    video: event.videoMode === "firstlast",
+    text: message.text,
+  });
+}
+
 export function reduceChatStreamEvent(
   current: ChatMessage[],
   botId: string,
   event: ChatStreamEvent,
+  placement?: SlotPlacement,
 ): ChatMessage[] {
   switch (event.type) {
     case "trace":
@@ -476,7 +546,14 @@ export function reduceChatStreamEvent(
         : message);
     case "illustrate_request":
       return current.map((message) => message.id === botId
-        ? appendMediaSlot(message, event.id || crypto.randomUUID(), event.offset, event.lastFrameDesc, event.videoPrompt, event.videoParams, event.lastFrameUrl)
+        ? appendMediaSlot(
+            message,
+            event.id || crypto.randomUUID(),
+            // 第 34 刀：首尾帧＝**固定落点**（用户规格「第一张图在第一段下方、最后一张图
+            // 在最后一段下方」），前端自算、零 wire；高潮点逐字不动 —— 仍用后端 anchor_offset。
+            firstlastMainSlotOffset(message, event, current, placement),
+            event.lastFrameDesc, event.videoPrompt, event.videoParams, event.lastFrameUrl,
+          )
         : message);
     case "audio_request":
       // 音频对白配音不入气泡流：由 useChatSession 逐角色提交 IndexTTS，完成后聚合到剧情楼层。

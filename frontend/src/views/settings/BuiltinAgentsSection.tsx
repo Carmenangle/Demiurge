@@ -14,6 +14,7 @@ const FIELD_LABEL: Record<string, string> = {
   topP: "topP（0~1，留空用模型默认）", maxTokens: "最大 tokens（留空用模型默认）",
   gate: "启用概率 gate（0=关闭该 Agent，>0 才按概率触发）",
   gateFloor: "门控好感度门槛", gateBaseRate: "门控基础概率", tiers: "好感度档位锚点",
+  storyMinChars: "生成字数下限（0=关闭；低于该字数则在同一轮内续写补全，非多轮）",
 };
 
 // ③ 内置智能体分区：展示图里所有默认 Agent（调度主管/剧情推进/角色主导/裁判/生图专家等）
@@ -158,6 +159,14 @@ export function BuiltinAgentsSection() {
                   <input type="number" min={1} step={1}
                     value={d.maxTokens == null ? "" : Number(d.maxTokens)}
                     onChange={(e) => setField(a.id, "maxTokens", e.target.value === "" ? null : Number(e.target.value))} />
+                </div>
+              )}
+              {a.editable.includes("storyMinChars") && (
+                <div className="field" style={{ margin: 0 }}>
+                  <label className="field-hint">{FIELD_LABEL.storyMinChars}</label>
+                  <input type="number" min={0} step={100}
+                    value={Number(d.storyMinChars ?? 0)}
+                    onChange={(e) => setField(a.id, "storyMinChars", Math.max(0, Math.floor(Number(e.target.value) || 0)))} />
                 </div>
               )}
               {a.editable.includes("gate") && (

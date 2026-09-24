@@ -90,6 +90,12 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
     preset?.viewpoint === "first_person" || preset?.viewpoint === "third_person"
       ? preset.viewpoint : "",
   );
+  // 批量生图数目（2026-09-24）：仅**高潮点模式**（非首尾帧）出现，最小 1、无上限。
+  // 未设/非法 ⇒ 1（单张，与改造前逐字一致）。
+  const [batchImageCount, setBatchImageCount] = useState<number>(() => {
+    const raw = preset?.batchImageCount;
+    return Number.isFinite(raw) && (raw as number) >= 1 ? Math.floor(raw as number) : 1;
+  });
   const [promptProfile, setPromptProfile] = useState(() => normalizePromptProfile(preset?.promptProfile));
   const [qualityPrompt, setQualityPrompt] = useState(preset?.qualityPrompt || "");
   const [negativePrompt, setNegativePrompt] = useState(preset?.negativePrompt || "");
@@ -262,6 +268,7 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
       loraMode: enableImage ? loraMode : undefined,
       appearanceSource: enableImage ? appearanceSource : undefined,
       viewpoint: enableImage && viewpoint ? viewpoint : undefined,
+      batchImageCount: enableImage && batchImageCount > 1 ? batchImageCount : undefined,
       promptProfile: enableImage ? promptProfile : undefined,
       qualityPrompt: enableImage && promptProfile === "anima_tags" ? qualityPrompt.trim() : undefined,
       negativePrompt: enableImage && promptProfile === "anima_tags" ? negativePrompt.trim() : undefined,
@@ -361,6 +368,28 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
             {viewpoint === "third_person" && "第三人称：主人公算一个主体，按世界书条目取主人公性别入画。"}
           </p>
         </div>
+        {!firstlast && (
+          <label style={{ display: "block", marginBottom: 12 }}>
+            <span style={{ display: "block", marginBottom: 4, fontSize: 13 }}>批量生图数目</span>
+            <input
+              type="number"
+              min={1}
+              step={1}
+              value={batchImageCount}
+              onChange={(event) => {
+                const parsed = Number(event.target.value);
+                setBatchImageCount(
+                  Number.isFinite(parsed) && parsed >= 1 ? Math.floor(parsed) : 1,
+                );
+              }}
+              style={{ width: "100%" }}
+            />
+            <p className="bind-hint" style={{ margin: "5px 0 0" }}>
+              仅高潮点模式生效，最小 1、无上限。达到或超过高潮点数 ⇒ 全部出图；
+              少于高潮点数 ⇒ 按判据打分从高到低取前几处，各插到自己的正文位置。
+            </p>
+          </label>
+        )}
         <div style={{ marginBottom: 12 }}>
           <span style={{ display: "block", marginBottom: 4, fontSize: 13 }}>LoRA 模式</span>
           <div className="lora-mode-switch" role="group" aria-label="LoRA 模式">

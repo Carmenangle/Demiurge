@@ -1705,6 +1705,27 @@ textarea.text-tool-short-input { height: auto; min-height: 0; resize: none; over
   margin: 0 0 12px;
 }
 
+/* 多行提示词编辑（「重新生图（含提示词）」）：480px 装不下长提示词，含 textarea 时放宽 */
+.modal:has(.prompt-modal-textarea) {
+  width: min(760px, 94vw);
+}
+
+.prompt-modal-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  background: var(--surface);
+  color: var(--text);
+  margin-bottom: 16px;
+  resize: vertical;
+  min-height: 180px;
+}
+
 .modal input,
 .modal select {
   width: 100%;

@@ -244,13 +244,18 @@ describe("P5 pollResult 调用点接线锁：10 点全锁（本组 8 + R8 组 2�
     expect([...chainCode.matchAll(/pollResult\(/g)]).toHaveLength(7);
   });
 
-  it("5 个首尾帧调用点必须显式 \"image\"（帧图不许退成推导）", () => {
+  it("5 个首尾帧调用点：显式 \"image\" + 逐帧 regeneration 快照（帧图不许退成推导、帧卡重生成不许走 legacy 兜底）", () => {
     // 帧路径产出的确定是帧图 ⇒ 第 6 参必须是字面 "image"。
     // 改成 `deriveWorkflowMediaType(...)` 会让这里的计数掉到 4 ⇒ 本例如实变红（正向已足够，下方反向再加一道）。
+    // 2026-09-22 补：第 2/3 参此前是 `[], undefined` ⇒ 帧槽**没有 regeneration**，帧卡上的
+    // 「重新生图」走 legacy 兜底（按资产库提示词提交一张普通插画：模板/逐帧 LoRA/尺寸全不是
+    // 那一帧的），「重新生图（含提示词）」也无从预填。这里把「逐帧自带快照」一并钉住，
+    // 并用反向引用强制**首帧只能用 frameFirstPrompt/Media、尾帧只能用 frameLastPrompt/Media**（不许串帧）。
     const frameCalls = [...chainCode.matchAll(
-      /pollResult\(frame(?:First|Last)PromptId, \[\], undefined, frameTarget\([^)]*\), [A-Za-z]+, "image"\)/g,
+      /pollResult\(frame(First|Last)PromptId, frameOutputNodeIds, frameRegenSnapshot\(frame\1Prompt, frame\1Media\), frameTarget\([^)]*\), frame\1Prompt, "image"\)/g,
     )];
     expect(frameCalls).toHaveLength(5);
+    expect(chainCode).not.toMatch(/pollResult\(frame(?:First|Last)PromptId, \[\], undefined/);
     expect(chainCode).not.toMatch(/pollResult\(frame(?:First|Last)PromptId[\s\S]{0,200}?deriveWorkflowMediaType/);
   });
 
@@ -331,6 +336,41 @@ describe("P22 取消必须出队：`workflowRuntime.cancel` 不得裸调", () =>
     const raw = readFileSync(new URL("./workflowGenerationRuntime.ts", import.meta.url), "utf-8");
     expect(raw).toMatch(/本方法不派发任何终态回调/);
     expect(raw).toMatch(/cancelForegroundRun/);
+  });
+});
+
+// ── 第 34 刀（首尾帧固定落点）接线锁 ──────────────────────────────────────────
+//
+// 用户规格（2026-09-21）：「第一张图在第一段下方、最后一张图在最后一段下方」——
+// 与高潮点（插在后端判定的 anchor_offset）不同，首尾帧**不需要任何判定**，前端按正文自算。
+// 锁的是**接线**而非纯函数行为（`firstlastMainOffset` 的行为在 illustrationMedia.test.ts /
+// chatSessionEvents.test.ts 里测）：谁把 placement 递给 reducer、哪个副槽走 `at="start"`。
+// 这类漂移行为网抓不到（P5/P17/P22 同款处境：纯函数全对，错在调用点漏了一个参数）。
+describe("第 34 刀 首尾帧固定落点接线锁", () => {
+  it("illustrate_request 用前端解析出的 videoMode 生成 placement（不靠事件字段猜）", () => {
+    expect(code).toMatch(
+      /const firstlast = resolveVideoMode\(mediaPreset, event\.videoMode\) === "firstlast";/,
+    );
+    expect(code).toMatch(
+      /applyStreamEvent\(botId, \{ \.\.\.event, id: slotId \}, firstlast \? \{ firstlast \} : undefined\)/,
+    );
+  });
+
+  it("placement 必须一路传到 reducer（丢了就退回高潮锚点 ⇒ 独立图片模式落点错）", () => {
+    expect(code).toMatch(/placement\?: SlotPlacement/);
+    expect(code).toMatch(/reduceChatStreamEvent\(messagesRef\.current, botId, event, placement\)/);
+  });
+
+  it('视频模式的 :first 首帧图必须 at="start"（落在第一段下方）', () => {
+    expect(chainCode).toMatch(
+      /appendImageSlot\(current, messageId, [`"][^`"]*:first[`"], frameFirstPrompt, "start"\)/,
+    );
+  });
+
+  it("反向锁：:first 副槽不得回退成默认（末段末）", () => {
+    expect(chainCode).not.toMatch(
+      /appendImageSlot\(current, messageId, [`"][^`"]*:first[`"], frameFirstPrompt\)/,
+    );
   });
 });
 

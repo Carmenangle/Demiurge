@@ -11,7 +11,9 @@ export function comfyStatus(url: string) {
   // 6s 超时：NodeCard 等组件用它做 5s 轮询探活。后端 is_up 最坏可达 ~10s（HTTP 5s + TCP 5s），
   // 且 8010 繁忙时响应更慢——若无超时，单次请求挂起会让调用方的轮询链永久中断（表现为
   // 「ComfyUI 未启动，等待中…」后不再加载）。
-  return apiGet<ComfyStatus>(`/comfyui/status?url=${encodeURIComponent(url)}`, 6000);
+  // 30s：插画链每个槽提交前都会探一次状态，999 模式 13 个并发探测曾把 6s 超时挤爆
+  // （2026-09-24 实锤：5/13 张 stage=submit「请求超时（超过 6 秒）」）。
+  return apiGet<ComfyStatus>(`/comfyui/status?url=${encodeURIComponent(url)}`, 30_000);
 }
 
 export function startComfy(path: string, url: string, pythonPath = "") {

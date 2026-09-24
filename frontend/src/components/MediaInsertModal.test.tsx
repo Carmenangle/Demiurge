@@ -213,3 +213,50 @@ describe("MediaInsertModal 画面人称", () => {
     expect(html).toContain("判不出时按第一人称处理");
   });
 });
+
+describe("MediaInsertModal 批量生图数目（第 57 刀）", () => {
+  it("高潮点模式（非首尾帧）下渲染数目输入框，最小 1、缺省回填 1", () => {
+    const html = renderToStaticMarkup(
+      <MediaInsertModal templates={[]} modelsDir=""
+        preset={{ templateId: "" }}
+        onSave={() => {}} onClose={() => {}} />,
+    );
+
+    expect(html).toContain("批量生图数目");
+    expect(html).toContain('min="1"');
+    expect(html).toContain('value="1"');
+    // 说明文案必须点明「仅高潮点模式生效」与两条取值口径
+    expect(html).toContain("仅高潮点模式生效");
+    expect(html).toContain("全部出图");
+  });
+
+  it("回填已存数目（>1）", () => {
+    const html = renderToStaticMarkup(
+      <MediaInsertModal templates={[]} modelsDir=""
+        preset={{ templateId: "", batchImageCount: 4 }}
+        onSave={() => {}} onClose={() => {}} />,
+    );
+
+    expect(html).toContain('value="4"');
+  });
+
+  it("首尾帧模式（firstlast）下整个输入框不出现（零影响首尾帧链）", () => {
+    const html = renderToStaticMarkup(
+      <MediaInsertModal templates={[]} modelsDir=""
+        preset={{ templateId: "", firstlast: true, batchImageCount: 4 }}
+        onSave={() => {}} onClose={() => {}} />,
+    );
+
+    expect(html).not.toContain("批量生图数目");
+  });
+
+  it("非法/0 存量一律收敛到 1（脏数据不透传）", () => {
+    const html = renderToStaticMarkup(
+      <MediaInsertModal templates={[]} modelsDir=""
+        preset={{ templateId: "", batchImageCount: 0 }}
+        onSave={() => {}} onClose={() => {}} />,
+    );
+
+    expect(html).toContain('value="1"');
+  });
+});

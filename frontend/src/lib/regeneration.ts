@@ -1,4 +1,5 @@
 import type { ImageModel } from "../stores/settings";
+import { workflowFieldBinding, type SemanticField } from "./imagePromptProfiles";
 import type {
   AiImageRegeneration, RegenerationSnapshot, TemplateRegeneration, WorkflowRegeneration,
 } from "../types/chat";
@@ -231,4 +232,89 @@ export function resolveImageRegenerationModel(
     model.baseUrl === snapshot.model.baseUrl
     && model.modelName === snapshot.model.modelName,
   );
+}
+
+
+/** 把正向提示词写回工作流图（与 `workflowPositivePrompt` 同一条遍历：采样器 positive 上游的文本节点）。
+ *
+ * ⚠ 图快照的提示词**烧在图里**，改 `snapshot.prompt` 字段不影响出图 ⇒ 必须改图。
+ * 找不到文本节点时原样返回（调用方仍有 `prompt` 字段，出图退化为原图）。
+ */
+export function overrideGraphPrompt(graphValue: unknown, prompt: string): unknown {
+  if (!graphValue || typeof graphValue !== "object" || Array.isArray(graphValue)) return graphValue;
+  const graph = JSON.parse(JSON.stringify(graphValue)) as ApiGraph;
+  const TEXT_KEYS = ["text", "text_g", "text_l", "prompt", "positive"];
+  const writeNode = (node: ApiGraphNode): boolean => {
+    if (!node.inputs) return false;
+    for (const key of TEXT_KEYS) {
+      if (typeof node.inputs[key] === "string") {
+        node.inputs[key] = prompt;
+        return true;
+      }
+    }
+    return false;
+  };
+  const visited = new Set<string>();
+  const visit = (id: string): boolean => {
+    if (visited.has(id)) return false;
+    visited.add(id);
+    const node = graph[id];
+    if (!node) return false;
+    if (/clip.*text.*encode|text.*encode/i.test(node.class_type || "")) return writeNode(node);
+    for (const value of Object.values(node.inputs || {})) {
+      const upstream = linkedNodeId(value);
+      if (upstream && visit(upstream)) return true;
+    }
+    return false;
+  };
+  for (const node of Object.values(graph)) {
+    if (!/sampler/i.test(node.class_type || "")) continue;
+    const root = linkedNodeId(node.inputs?.positive);
+    if (root && visit(root)) return graph;
+  }
+  for (const node of Object.values(graph)) {
+    if (!/clip.*text.*encode|text.*encode/i.test(node.class_type || "")) continue;
+    if (writeNode(node)) return graph;
+  }
+  // UI 格式（wfDraft）兜底：正向编码器的第一个 widget 是提示词
+  const nodes = (graph as unknown as { nodes?: UiGraphNode[] }).nodes;
+  if (Array.isArray(nodes)) {
+    const encoders = nodes.filter((n) => /clip.*text.*encode|text.*encode/i.test(n.type || ""));
+    const picked = encoders.find((n) => !/负面|negative/i.test(n.title || "")) || encoders[0];
+    if (picked && Array.isArray(picked.widgets_values) && typeof picked.widgets_values[0] === "string") {
+      picked.widgets_values[0] = prompt;
+    }
+  }
+  return graph;
+}
+
+/** 「重新生图（含提示词）」：把用户编辑后的提示词写回快照。
+ *
+ * ⚠ **只改 `prompt` 字段大多不影响出图**，三种快照的真源各不相同：
+ *  - `ai-image`：`regenerateImage` 直接 POST `snapshot.prompt` ⇒ 改字段即可；
+ *  - `template`：真源是 `values` 里绑到 `prompt` 语义键的那一格 ⇒ 必须同时改写（`exposed` 来自模板）；
+ *  - `workflow`：提示词烧在图里 ⇒ 必须改写图（`overrideGraphPrompt`）。
+ *
+ * 空串视为「不改」，原样返回快照。
+ */
+export function overrideRegenerationPrompt(
+  snapshot: RegenerationSnapshot,
+  prompt: string,
+  exposed: readonly SemanticField[] = [],
+): RegenerationSnapshot {
+  const next = prompt.trim();
+  if (!next) return snapshot;
+  if (snapshot.kind === "ai-image") return { ...snapshot, prompt: next };
+  if (snapshot.kind === "template") {
+    const values = { ...snapshot.values };
+    let patched = false;
+    for (const field of exposed) {
+      if (workflowFieldBinding(field) !== "prompt") continue;
+      values[`${field.node_id}.${field.field}`] = next;
+      patched = true;
+    }
+    // 模板被删/未暴露 prompt 键 ⇒ 保留原 values（出图退化为原图），但仍记新提示词
+    return { ...snapshot, prompt: next, values: patched ? values : snapshot.values };
+  }
+  return { ...snapshot, prompt: next, graph: overrideGraphPrompt(snapshot.graph, next) };
 }

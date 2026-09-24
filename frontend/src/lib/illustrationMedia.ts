@@ -203,8 +203,49 @@ export function firstlastSlotLayout(
   return null;
 }
 
-/** P5 首尾帧生图的图片模板 values：prompt=帧画面描述（决策 A），复用插画模板的 LoRA/底图/负面/latent。 */
-export function firstlastFrameValues(
+// ===== 第 34 刀：首尾帧固定落点（用户规格 2026-09-21，零 wire 前端自算）=====
+// 用户口径：「固定插入对话的 content 的首段和尾段下发」——第一张图在第一段下方、
+// 最后一张图在最后一段下方；与高潮点（插在**判定的段落**）不同，这里无需任何判定。
+
+/** 段落分隔＝空行（与后端 `story_frames._PARAGRAPH_SPLIT` 同口径）。 */
+const BLANK_LINE = /\r?\n[^\S\r\n]*\r?\n/;
+
+/** 首段末＝正文第一个空行的起点；正文没有空行 ⇒ 全文末尾。 */
+export function firstParagraphEnd(text: string): number {
+  const match = BLANK_LINE.exec(text);
+  return match ? match.index : text.length;
+}
+
+/** 末段末＝正文末尾（最后一张图必然存在，落在最末一段下方）。 */
+export function lastParagraphEnd(text: string): number {
+  return text.length;
+}
+
+/**
+ * 首尾帧主槽落点：主槽装「本楼层新画面」——
+ * - 独立图片模式且主槽装的是**新生成首帧**（`layout.main === "first_prompt"`）⇒ 首段末；
+ * - 其余（尾帧新图 / 事件现成尾帧图 / 上尾帧图延续 / 视频模式下的正片）⇒ 末段末。
+ *
+ * ⚠ 视频模式（`video: true`）下主槽承载的是**正片**（首帧图走 `:first` 副槽），
+ * 正片是整楼层的成片 ⇒ 固定落在末段末。
+ */
+export function firstlastMainOffset(opts: {
+  transition?: string;
+  prevTailUrl?: string;
+  firstFrameDesc?: string;
+  lastFrameDesc?: string;
+  lastFrameUrl?: string;
+  video: boolean;
+  text: string;
+}): number {
+  if (opts.video) return lastParagraphEnd(opts.text);
+  const layout = firstlastSlotLayout(planFirstlastFrameTasks(opts));
+  return layout?.main === "first_prompt"
+    ? firstParagraphEnd(opts.text)
+    : lastParagraphEnd(opts.text);
+}
+
+/** P5 首尾帧生图的图片模板 values：prompt=帧画面描述（决策 A），复用插画模板的 LoRA/底图/负面/latent。 */export function firstlastFrameValues(
   exposed: readonly SemanticField[],
   desc: string,
   media: {

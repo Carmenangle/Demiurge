@@ -3,6 +3,7 @@ import {
   illustrationLoraConfigurationError, illustrationRequestMedia, illustrationWorkflowMedia,
   resolveIllustrationActors, resolveVideoMode, resolveVideoTemplateChoice,
   planFirstlastFrameTasks, firstlastFrameValues, firstlastSlotLayout, transitionVideoValues,
+  firstParagraphEnd, lastParagraphEnd, firstlastMainOffset,
 } from "./illustrationMedia";
 
 const legacyBindings = {
@@ -352,6 +353,47 @@ describe("firstlastSlotLayout（V1.6/P5+ 独立图片模式槽位布局）", () 
 
   it("无任何帧素材：null（调用方拦截）", () => {
     expect(firstlastSlotLayout(planFirstlastFrameTasks({}))).toBeNull();
+  });
+});
+
+describe("第 34 刀 首尾帧固定落点（第一张图在第一段下方、最后一张图在最后一段下方）", () => {
+  // 段落分隔＝空行（与后端 story_frames._PARAGRAPH_SPLIT 同口径）。
+  const text = "第一段正文。\n\n第二段正文。";
+
+  it("firstParagraphEnd 取第一个空行的起点；无空行则整段末尾", () => {
+    expect(firstParagraphEnd(text)).toBe("第一段正文。".length);
+    expect(firstParagraphEnd("只有一段。")).toBe("只有一段。".length);
+    expect(firstParagraphEnd("甲\r\n\r\n乙")).toBe(1);     // CRLF 空行
+    expect(firstParagraphEnd("甲\n   \n乙")).toBe(1);      // 只含空白的空行
+    expect(firstParagraphEnd("")).toBe(0);
+  });
+
+  it("lastParagraphEnd 恒为正文末尾（最后一张图必然存在）", () => {
+    expect(lastParagraphEnd(text)).toBe(text.length);
+    expect(lastParagraphEnd("")).toBe(0);
+  });
+
+  it("视频模式：主槽装正片 ⇒ 落末段末", () => {
+    // 视频模式下首帧图/尾帧图走 :first/:last 副槽，主槽是整楼层的成片 ⇒ 末段末。
+    expect(firstlastMainOffset({
+      video: true, text, transition: "regenerate", firstFrameDesc: "首帧",
+    })).toBe(text.length);
+  });
+
+  it("独立图片模式 + 首帧新图（layout.main=first_prompt）：主槽落首段末", () => {
+    expect(firstlastMainOffset({
+      video: false, text, transition: "regenerate", firstFrameDesc: "首帧", lastFrameDesc: "尾帧",
+    })).toBe("第一段正文。".length);
+  });
+
+  it("独立图片模式 + 尾帧新图（reuse）：主槽落末段末", () => {
+    expect(firstlastMainOffset({
+      video: false, text, transition: "reuse", prevTailUrl: "local://prev.png", lastFrameDesc: "尾帧",
+    })).toBe(text.length);
+  });
+
+  it("独立图片模式 + 无任何帧素材：落末段末（不落空 offset）", () => {
+    expect(firstlastMainOffset({ video: false, text })).toBe(text.length);
   });
 });
 

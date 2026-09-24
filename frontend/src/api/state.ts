@@ -53,9 +53,13 @@ export function rollbackState(outputDir: string, repoId: string, cardName: strin
 }
 
 // ⑤ 删除字段（新增字段复用 patchState，缺失键会被创建）+ 导入导出
-export function deleteStateField(outputDir: string, repoId: string, cardName: string, field: string) {
-  return apiPost<CharacterStateDto & { ok: boolean }>("/state/delete-field", {
-    output_dir: outputDir, repo_id: repoId, card_name: cardName, field,
+// purge=false：可撤销删除 —— 记一条 delete 审计，下一次「回滚/重生成」会把字段写回
+// purge=true ：彻底清除 —— 连同该字段的全部审计一起删，重生成/回滚都无法恢复
+export function deleteStateField(
+  outputDir: string, repoId: string, cardName: string, field: string, purge = false,
+) {
+  return apiPost<CharacterStateDto & { ok: boolean; purged: boolean }>("/state/delete-field", {
+    output_dir: outputDir, repo_id: repoId, card_name: cardName, field, purge,
   });
 }
 

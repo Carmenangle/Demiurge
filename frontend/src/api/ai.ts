@@ -444,6 +444,7 @@ export interface AgentInvocation {
   promptProfile: string;
   appearanceSource: "worldbook" | "character_card";
   illustrationViewpoint?: "" | "first_person" | "third_person";
+  illustrationBatchCount?: number;
   characterBaseImages: Record<string, string>;
   illustrationActorNames: string[];
   styleBaseImage: string;
@@ -516,6 +517,7 @@ export function agentInvocationBody(request: AgentInvocation): AgentInvocationWi
     prompt_profile: request.promptProfile || "krea2",
     appearance_source: request.appearanceSource,
     illustration_viewpoint: request.illustrationViewpoint || "",
+    illustration_batch_count: request.illustrationBatchCount || 0,
     character_base_images: request.characterBaseImages,
     illustration_actor_names: request.illustrationActorNames,
     style_base_image: request.styleBaseImage,

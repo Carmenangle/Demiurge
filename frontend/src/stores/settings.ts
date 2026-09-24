@@ -133,6 +133,9 @@ export interface MediaInsertPreset {
   // 画面人称（2026-09-20）：手选优先于后端自动判定（按锚点段）。空/未设 = 自动。
   // 第一人称 ⇒ 叙事者「我」不占画面；第三人称 ⇒ 主人公算一个主体。
   viewpoint?: "first_person" | "third_person";
+  // 高潮点模式「批量生图数目」（2026-09-24）：仅高潮点模式出现，最小 1、无上限。
+  // 未设/0 = 1 张（单张路径逐字不变）；≥ 锚点数 ⇒ 全出，< 锚点数 ⇒ 按判据 score 降序取前 N。
+  batchImageCount?: number;
   promptProfile?: string; // 存储原样（旧数据可能是已下线的 krea2）；使用处经 normalizePromptProfile 归一
   qualityPrompt?: string;   // Anima 固定质量行；空则使用后端 profile 默认值
   negativePrompt?: string;  // 独立负面提示词；仅模板暴露 negative_prompt 时注入

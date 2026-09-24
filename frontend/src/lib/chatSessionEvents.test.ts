@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import type { ChatStreamEvent } from "../api/chatStreamProtocol";
 import type { ChatMessage } from "../types/chat";
 import {
   appendAudioSlot, appendImageSlot, appendTransitionSlot, appendUnknownMessages, applyInterruptedStop, bindMediaSlotPrompt, dropMediaSlot, markMediaSlotFailed, pickFreshAssistantMedia, pruneUnsubmittedMediaSlots, reduceChatStreamEvent, resetMediaSlotForRetry, resolveMediaSlot,
@@ -428,12 +429,94 @@ describe("appendImageSlot（首尾帧副槽）", () => {
     expect(twice[0].parts).toHaveLength(1);
   });
 
+  it('at="start" 按「首段末」切进正文（第 34 刀：首帧图在第一段下方）', () => {
+    const text = "第一段正文。\n\n第二段正文。";
+    const current: ChatMessage[] = [{ id: "bot", role: "assistant", text }];
+    const withFirst = appendImageSlot(current, "bot", "main:first", "首帧画面", "start");
+    expect(withFirst[0].parts).toEqual([
+      { type: "text", text: "第一段正文。\n" },
+      { type: "media-slot", slotId: "main:first", status: "pending",
+        kind: "image", videoPrompt: "首帧画面" },
+      { type: "text", text: "\n\n第二段正文。" },
+    ]);
+  });
+
   it("纯文本消息先转 text part 保留正文再追加槽", () => {
     const current: ChatMessage[] = [{ id: "bot", role: "assistant", text: "正文" }];
     const withSlot = appendImageSlot(current, "bot", "main:last");
     expect(withSlot[0].parts).toEqual([
       { type: "text", text: "正文" },
       { type: "media-slot", slotId: "main:last", status: "pending", kind: "image" },
+    ]);
+  });
+});
+
+// 第 34 刀：首尾帧＝**固定落点**（用户规格「第一张图在第一段下方、最后一张图在最后一段下方」）。
+// 落点由调用方（useChatSession，能拿到 preset）用与插画链同一套纯函数解析后经 placement 传入；
+// 高潮点（无 placement）逐字沿用后端 anchor_offset，不受本刀影响。
+describe("第 34 刀 首尾帧固定落点（reducer 接线）", () => {
+  const text = "第一段正文。\n\n第二段正文。";
+  const current = (): ChatMessage[] => [{ id: "bot", role: "assistant", text }];
+  const firstFrameEvent = (
+    extra: Partial<Extract<ChatStreamEvent, { type: "illustrate_request" }>> = {},
+  ): ChatStreamEvent => ({
+    type: "illustrate_request", prompt: "p", motion: 0, actors: [], id: "slot-1",
+    offset: 3, transition: "regenerate", firstFrameDesc: "首帧", lastFrameDesc: "尾帧",
+    ...extra,
+  });
+
+  it("高潮点无 placement：落点逐字沿用 event.offset（本刀零影响）", () => {
+    const out = reduceChatStreamEvent(current(), "bot", firstFrameEvent());
+    expect(out[0].parts).toEqual([
+      { type: "text", text: "第一段\n" },
+      { type: "media-slot", slotId: "slot-1", status: "pending", lastFrameDesc: "尾帧" },
+      { type: "text", text: "\n正文。\n\n第二段正文。" },
+    ]);
+  });
+
+  it("placement 显式 false：同样沿用 event.offset（不得顺手改判）", () => {
+    const out = reduceChatStreamEvent(current(), "bot", firstFrameEvent(), { firstlast: false });
+    expect(out[0].parts?.[0]).toEqual({ type: "text", text: "第一段\n" });
+    expect(out[0].parts?.[1]).toEqual({
+      type: "media-slot", slotId: "slot-1", status: "pending", lastFrameDesc: "尾帧",
+    });
+  });
+
+  it("视频模式（event.videoMode=firstlast）：主槽＝正片 ⇒ 末段末", () => {
+    const out = reduceChatStreamEvent(current(), "bot", firstFrameEvent({
+      videoMode: "firstlast", videoPrompt: "视频提示词",
+    }));
+    expect(out[0].parts).toEqual([
+      { type: "text", text: "第一段正文。\n\n第二段正文。\n" },
+      { type: "media-slot", slotId: "slot-1", status: "pending",
+        lastFrameDesc: "尾帧", videoPrompt: "视频提示词" },
+    ]);
+  });
+
+  it("独立图片模式（事件不带 video_mode，靠 placement）：首帧新图 ⇒ 首段末", () => {
+    const out = reduceChatStreamEvent(current(), "bot", firstFrameEvent(), { firstlast: true });
+    expect(out[0].parts).toEqual([
+      { type: "text", text: "第一段正文。\n" },
+      { type: "media-slot", slotId: "slot-1", status: "pending", lastFrameDesc: "尾帧" },
+      { type: "text", text: "\n\n第二段正文。" },
+    ]);
+  });
+
+  it("独立图片模式 + reuse（主槽＝尾帧新图）⇒ 末段末", () => {
+    // reuse 生效前提：能反查到「上尾帧图」（resolvePrevTailDesc 扫最近一条 ready 视频槽）。
+    const withPrev: ChatMessage[] = [
+      { id: "prev", role: "assistant", text: "", parts: [
+        { type: "video", url: "local://prev.mp4", slotId: "prev", status: "ready",
+          lastFrameDesc: "上尾帧", lastFrameUrl: "local://prev-tail.png" },
+      ] },
+      ...current(),
+    ];
+    const out = reduceChatStreamEvent(
+      withPrev, "bot", firstFrameEvent({ transition: "reuse" }), { firstlast: true },
+    );
+    expect(out[1].parts).toEqual([
+      { type: "text", text: "第一段正文。\n\n第二段正文。\n" },
+      { type: "media-slot", slotId: "slot-1", status: "pending", lastFrameDesc: "尾帧" },
     ]);
   });
 });
@@ -613,5 +696,51 @@ describe("applyInterruptedStop（2026-09-04 收口：跨轮续写识别信号）
   it("interrupted 流事件空文本 → 标「（已停止生成）」", () => {
     const out = reduceChatStreamEvent([msg({})], "bot1", { type: "interrupted" });
     expect(out[0].text).toBe("（已停止生成）");
+  });
+});
+
+// 第 57 刀 · 多批派发：同一条楼层内多个插画槽各插到**自己的**正文位置。
+// 前端本就能做（`insertSlotAtOffset` 的注释写明「多插画/图文混排时同样按 offset 定位插入」），
+// 本组测试把这条能力钉死：后端只要给每个事件**唯一的 id** 与**自己的 offset**，即得 N 槽。
+describe("第 57 刀 多事件派发（N 个事件 → N 个槽，各插自己的位置）", () => {
+  const text = "甲乙丙丁戊己庚辛壬癸".repeat(6); // 60 字，无换行
+  const message = (): ChatMessage[] => [{ id: "bot", role: "assistant", text }];
+  const event = (id: string, offset: number): ChatStreamEvent => ({
+    type: "illustrate_request", prompt: `p-${id}`, motion: 0, actors: [], id, offset,
+  });
+  const slotIds = (parts: ChatMessage["parts"]): string[] =>
+    (parts || []).flatMap((part) =>
+      part.type === "media-slot" && part.slotId ? [part.slotId] : []);
+  const bodyText = (parts: ChatMessage["parts"]): string =>
+    (parts || [])
+      .flatMap((part) => (part.type === "text" ? [part.text || ""] : []))
+      .join("")
+      .replace(/\n/g, "");
+
+  it("两个事件（2 张）→ 两个槽，正文不重不漏", () => {
+    let out = reduceChatStreamEvent(message(), "bot", event("illo-1", 5));
+    out = reduceChatStreamEvent(out, "bot", event("illo-2", 17));
+
+    expect(slotIds(out[0].parts)).toEqual(["illo-1", "illo-2"]);
+    expect(bodyText(out[0].parts)).toBe(text);
+  });
+
+  it("五个事件（全部高潮点）→ 五个槽，按正文先后排列", () => {
+    let out = message();
+    for (const [index, offset] of [5, 17, 29, 41, 53].entries()) {
+      out = reduceChatStreamEvent(out, "bot", event(`illo-${index + 1}`, offset));
+    }
+
+    expect(slotIds(out[0].parts)).toEqual([
+      "illo-1", "illo-2", "illo-3", "illo-4", "illo-5",
+    ]);
+    expect(bodyText(out[0].parts)).toBe(text);
+  });
+
+  it("同一 id 重复到达 → 不重复建槽（幂等）", () => {
+    let out = reduceChatStreamEvent(message(), "bot", event("illo-1", 5));
+    out = reduceChatStreamEvent(out, "bot", event("illo-1", 5));
+
+    expect(slotIds(out[0].parts)).toEqual(["illo-1"]);
   });
 });

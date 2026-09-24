@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { groupStateCards } from "./stateCards";
+import { groupStateCards, groupStateCardsDetailed } from "./stateCards";
 import type { CharacterStateDto } from "../api/state";
 
 function sample(): CharacterStateDto {
@@ -84,5 +84,38 @@ describe("groupStateCards", () => {
     expect(cards).toHaveLength(1);
     expect(cards[0].name).toBe("冷倾雪");
     expect(cards[0].fields.map((f) => f.path)).toEqual(["数值/好感度", "叙事/冷倾雪状态"]);
+  });
+
+  it("角色状态表只放角色：卡名不成卡，无归属裸键不入表（2026-09-23 用户实锤）", () => {
+    const state = sample();
+    state.card_name = "凌霄仙母录";
+    state.数值 = {
+      "妲千沁·好感度": { value: 10, min: -100, max: 100, turn: 1, evidence: "", source: "user" },
+      "舞姬恋·好感度": { value: 14, min: -100, max: 100, turn: 1, evidence: "", source: "user" },
+    };
+    state.叙事 = {
+      "妲千沁·身体状态": { value: "颈红至耳根", turn: 1, evidence: "", source: "user" },
+      "舞姬恋·身体状态": { value: "塌腰撅臀", turn: 1, evidence: "", source: "user" },
+      // 关系类裸键：既无分隔符也不带状态后缀 ⇒ 没有可归属的角色
+      师徒名分: { value: "因阳具当面弹击师尊面部当场濒临破裂", turn: 1, evidence: "", source: "auto" },
+    };
+
+    const { cards, unowned } = groupStateCardsDetailed(state);
+
+    expect(cards.map((c) => c.name)).toEqual(["妲千沁", "舞姬恋"]);
+    expect(cards.some((c) => c.name === "凌霄仙母录" || c.name === "全局状态")).toBe(false);
+    expect(unowned).toEqual(["叙事/师徒名分"]);
+  });
+
+  it("全是裸键时一张卡都不出，只登记未归属字段", () => {
+    const state = sample();
+    state.card_name = "凌霄仙母录";
+    state.数值 = {};
+    state.叙事 = {
+      师徒名分: { value: "当场濒临破裂", turn: 1, evidence: "", source: "auto" },
+    };
+    const { cards, unowned } = groupStateCardsDetailed(state);
+    expect(cards).toEqual([]);
+    expect(unowned).toEqual(["叙事/师徒名分"]);
   });
 });

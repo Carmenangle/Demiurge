@@ -3,7 +3,10 @@ import type { RegenerationSnapshot } from "../types/chat";
 
 /** 停顿守卫默认窗口：任务一直未观察到节点运转（/queue 仍是 queue_pending）超过此时长就早停。
  *  5 分钟早于图片 20 分钟 / 视频 60 分钟硬超时，避免 ComfyUI 队列拥堵时误导用户死等。 */
-export const DEFAULT_STALL_TIMEOUT_MS = 300_000;
+// 第 58 刀（2026-09-24）：批量生图（999＝14 深队列）里排在后面的任务要等十几分钟才
+// 开始执行，5 分钟停顿守卫会把它们误判「队列未运转」成批掐死（真机实锤：12/14 stalled）。
+// ⇒ 放宽到 30 分钟（真死机的 ComfyUI 仍会在 30 分钟后被报出，只是晚一点）。
+export const DEFAULT_STALL_TIMEOUT_MS = 1_800_000;
 /** 同步轮询停顿守卫文案（对齐 workflowRuntime stalled 观察者）。 */
 export const STALLED_POLL_MESSAGE = "长时间未开始加载节点（ComfyUI 队列未运转），已停止";
 
@@ -106,16 +109,23 @@ function pendingResumeAction(
   item: PendingGeneration, resumedIds: ReadonlySet<string>, now: number,
 ): "skip" | "expire" | "inspect" {
   if (resumedIds.has(item.prompt_id)) return "skip";
-  return now - item.createdAt > 30 * 60 * 1000 ? "expire" : "inspect";
+  // 第 58 刀（2026-09-24）：30 分钟过期对**批量生图**太短 —— 999 模式 12 张串行提交
+  // （每张一次编译 + 模型首载）很容易越过 30 分钟，刷新页面后在途任务被静默过期
+  // ⇒ 槽永远停在「生成中」、ComfyUI 明明已出图却不落对话（真机实锤：12 个任务
+  // ComfyUI 全部 success、对话只落 1 张）。⇒ 过期窗口放宽到 6 小时（仍是防御性的
+  // 「陈年孤儿清理」，不是正常路径）。
+  return now - item.createdAt > 6 * 60 * 60 * 1000 ? "expire" : "inspect";
 }
 
 export function pollSchedule(
   tries: number, mediaType: "image" | "video" | "audio" = "image",
 ): { releaseBusy: boolean; delayMs: number | null } {
-  // V1.3：视频/音频超时合同独立于图片——图片 5min 释放忙碌 / 20min 上限；
+  // V1.3：视频/音频超时合同独立于图片——图片 5min 释放忙碌 / 30min 上限；
   // 视频/音频放宽为 15min 释放忙碌 / 60min 上限（450×2s + 180×15s = 15min + 45min = 60min）。
+  // 第 58 刀：图片硬上限 20min→30min（对齐 30min 停顿守卫）——批量生图的深队列任务
+  // 要等十几分钟才开始执行，20min 的轮询覆盖会先于任务启动而断粮。
   const releaseTries = mediaType === "video" || mediaType === "audio" ? 450 : 150;   // 2s 间隔：15min / 5min
-  const hardTries = mediaType === "video" ? 630 : 210;      // 之后 15s：上限 60min / 20min
+  const hardTries = mediaType === "video" ? 630 : 250;      // 之后 15s：上限 60min / 30min
   return {
     releaseBusy: tries === releaseTries,
     delayMs: tries < releaseTries ? 2000 : tries < hardTries ? 15000 : null,

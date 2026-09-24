@@ -13,6 +13,9 @@ import { classifyClipboardPaste } from "../lib/richPaste";
 import { uploadAttachment, type FileAttachmentMeta } from "../api/ai";
 import { readFileAsDataURL } from "../lib/fileAttach";
 import { serializeInspirationSend, type InspirationAttachment } from "../lib/inspirationInsert";
+import {
+  clearInputDraft, readInputDraft, writeInputDraft, type InputDraft,
+} from "../lib/inputDraft";
 
 // 序列化结果：图片在上、文本在下两层。parts 保留兼容（图片在前、文本在后）。
 export interface MaskedImageInput {
@@ -106,14 +109,19 @@ export const RichInput = forwardRef<RichInputHandle, Props>(
   ({ templateNames, height, placeholder, threadId = "home", onSubmit, onTextChange, onCanSubmitChange, onNotify }, ref) => {
     const taRef = useRef<HTMLTextAreaElement | null>(null);
     const fileRef = useRef<HTMLInputElement | null>(null);  // 上方 + 按钮的隐藏 file input
-    const [images, setImages] = useState<string[]>([]);     // 图片栏：dataURI/URL，左到右
-    const [inspCards, setInspCards] = useState<InspirationAttachment[]>([]); // 灵感卡附件（9:16 卡片）
-    const [maskedImage, setMaskedImage] = useState<MaskedImageInput | null>(null);
-    const [media, setMedia] = useState<FileAttachmentMeta[]>([]);       // 媒体栏：视频/音频（A1 第二栏）
-    const [attachments, setAttachments] = useState<FileAttachmentMeta[]>([]); // 通用文件栏（A1 第三栏）
+    // ★ 草稿存档回填（2026-09-21）：按 threadId（= 仓库/作品 id）读未发送内容。
+    //   走 useState **惰性初值**而不是挂载后再 setState——避免「先空后填」的闪跳，
+    //   也保证 `onCanSubmitChange` 首帧就是对的（发送按钮直接可用）。
+    //   home 线程由 inputDraft.readInputDraft 内部跳过（临时草稿区不落盘）。
+    const [restoredDraft] = useState<InputDraft | null>(() => readInputDraft(threadId));
+    const [images, setImages] = useState<string[]>(() => restoredDraft?.images ?? []);     // 图片栏：dataURI/URL，左到右
+    const [inspCards, setInspCards] = useState<InspirationAttachment[]>(() => restoredDraft?.inspirationAttachments ?? []); // 灵感卡附件（9:16 卡片）
+    const [maskedImage, setMaskedImage] = useState<MaskedImageInput | null>(() => restoredDraft?.maskedImage ?? null);
+    const [media, setMedia] = useState<FileAttachmentMeta[]>(() => restoredDraft?.media ?? []);       // 媒体栏：视频/音频（A1 第二栏）
+    const [attachments, setAttachments] = useState<FileAttachmentMeta[]>(() => restoredDraft?.attachments ?? []); // 通用文件栏（A1 第三栏）
     const [active, setActive] = useState(0);
     const [closed, setClosed] = useState(false);
-    const [curText, setCurText] = useState("");  // 当前纯文本（驱动补全）
+    const [curText, setCurText] = useState(() => restoredDraft?.text ?? "");  // 当前纯文本（驱动补全）
     const [preview, setPreview] = useState<string | null>(null);  // 悬停放大预览
     const [dragIdx, setDragIdx] = useState<number | null>(null);  // 拖拽中的图片索引（排序）
     const selectingRef = useRef(false);
@@ -191,6 +199,47 @@ export const RichInput = forwardRef<RichInputHandle, Props>(
     useEffect(() => {
       onCanSubmitChange?.(curText.trim().length > 0 || images.length > 0 || !!maskedImage || inspCards.length > 0 || media.length > 0 || attachments.length > 0);
     }, [curText, images, maskedImage, inspCards, media, attachments, onCanSubmitChange]);
+
+    // ★ 草稿写盘（2026-09-21）：两条腿——
+    //   ① 输入变化后短防抖（300ms）：正常打字走这条，避免每次按键都序列化 dataURI 大图；
+    //   ② pagehide / visibilitychange(hidden) 立即 flush：刷新、关标签、切后台都能兜住
+    //      （硬中断时定时器可能还没到点）。
+    //   latestDraftRef 每次渲染刷新（同 doSubmitRef 的既有写法），effect 里读它拿**最新**内容，
+    //   这样监听只挂一次、不随每次按键重建。
+    const latestDraftRef = useRef({
+      text: curText, images, inspirationAttachments: inspCards, maskedImage, media, attachments,
+    });
+    latestDraftRef.current = {
+      text: curText, images, inspirationAttachments: inspCards, maskedImage, media, attachments,
+    };
+    const draftWarnedRef = useRef(false);  // 配额降级只提示一次，避免连续打字刷屏
+    const persistDraft = () => {
+      const result = writeInputDraft(threadId, { ...latestDraftRef.current, updatedAt: Date.now() });
+      if (result === "degraded" && !draftWarnedRef.current) {
+        draftWarnedRef.current = true;
+        onNotify?.("草稿太大：图片/蒙版未能存档，已只保留文字与附件", "info");
+      } else if (result === "saved") {
+        draftWarnedRef.current = false;
+      }
+    };
+    const persistDraftRef = useRef(persistDraft);
+    persistDraftRef.current = persistDraft;
+
+    useEffect(() => {
+      const timer = setTimeout(() => persistDraftRef.current(), 300);
+      return () => clearTimeout(timer);
+    }, [curText, images, inspCards, maskedImage, media, attachments]);
+
+    useEffect(() => {
+      const flush = () => persistDraftRef.current();
+      const onVisibility = () => { if (document.visibilityState === "hidden") flush(); };
+      window.addEventListener("pagehide", flush);
+      document.addEventListener("visibilitychange", onVisibility);
+      return () => {
+        window.removeEventListener("pagehide", flush);
+        document.removeEventListener("visibilitychange", onVisibility);
+      };
+    }, []);
 
     useImperativeHandle(ref, () => ({
       insertImage: (url: string) => addImage(url),
@@ -364,6 +413,9 @@ export const RichInput = forwardRef<RichInputHandle, Props>(
       setAttachments([]);
       setCurText("");
       onTextChange?.("");
+      // 发出去了 ⇒ 草稿即刻作废（不等 300ms 防抖：否则紧接着刷新会把已发送内容又回填回来）
+      clearInputDraft(threadId);
+      draftWarnedRef.current = false;
     };
     doSubmitRef.current = doSubmit;
 

@@ -62,14 +62,14 @@ import {
 import {
   applyRouteChoice, appendImageSlot, applyInterruptedStop, bindMediaSlotPrompt, dropMediaSlot, markMediaSlotFailed, appendAudioSlot, appendTransitionSlot,
   failMediaSlot, reduceChatStreamEvent, resetMediaSlotForRetry, resolveMediaSlot,
-  upsertMessages, workflowMessages,
+  upsertMessages, workflowMessages, type SlotPlacement,
 } from "./chatSessionEvents";
 // C4-A Step 6：媒体种类推导（审计 R8）——工作流出图/出视频的超时合同由抓取图节点类名决定，
 // 硬编码 "image" 会让视频模板吃图片的 20 分钟硬上限。纯函数，无副作用、无循环依赖。
 import { deriveWorkflowMediaType } from "./canvasWorkflowRun";
 import { recoverAgentRun, shouldRecoverAgentRun } from "./agentRecovery";
 import { deletedMessageTombstones } from "./deletedMessageTombstones";
-import { nextStoryTurnNo, sealTurnsOf } from "./storyTurn";
+import { nextStoryTurnNo, rememberStoryTurn, sealTurnsOf, storyTurnHighWater } from "./storyTurn";
 
 import { releaseAgentStream, type ActiveAgentStream } from "./agentStreamLifecycle";
 import type { ImageQuality, WorkMode } from "./viewRouting";
@@ -82,8 +82,9 @@ import { useSessionPersist } from "./useSessionPersist";
 import { useWfProgressShard } from "./useWfProgressShard";
 import { clearHomeDraft, writeHomeDraft } from "./homeDraft";
 import {
-  comfyRegenerationUrl, legacyGenerationPrompt, resolveImageRegenerationModel,
-  templateRegenerationSnapshot, workflowRegenerationSnapshot, workflowGenMetadata,
+  comfyRegenerationUrl, legacyGenerationPrompt, overrideRegenerationPrompt,
+  resolveImageRegenerationModel, templateRegenerationSnapshot, workflowRegenerationSnapshot,
+  workflowGenMetadata,
 } from "./regeneration";
 import { effectiveGlobalProxyUrl, globalProxyAddress, resolveEndpointProxy, resolveModelProxy, type ProxyMode } from "./modelProxy";
 import { searchProviderWireValue } from "./searchSource";
@@ -187,6 +188,12 @@ export function useChatSession(deps: ChatSessionDeps) {
   // 画面人称手选（2026-09-20）：预设里存 first_person / third_person；空 = 交给后端自动判定。
   const illustrationViewpoint = mediaPreset?.viewpoint === "first_person"
     || mediaPreset?.viewpoint === "third_person" ? mediaPreset.viewpoint : "";
+  // 高潮点批量生图数目（2026-09-24）：面板最小 1、无上限；未设/非法 ⇒ 0（后端按 1 张处理）。
+  // ⚠ 只在**非首尾帧**（即高潮点）模式下透传——首尾帧走另一条链、不受本字段影响。
+  const illustrationBatchCount = !mediaPreset?.firstlast
+    && Number.isFinite(mediaPreset?.batchImageCount)
+    && (mediaPreset?.batchImageCount as number) >= 1
+    ? Math.floor(mediaPreset?.batchImageCount as number) : 0;
   const modelProxies = {
     chatProxyUrl: resolveModelProxy(chat.proxyMode, globalProxyAddress(settings), settings.proxyEnabled),
     genProxyUrl: resolveModelProxy(genModel.proxyMode, globalProxyAddress(settings), settings.proxyEnabled),
@@ -286,6 +293,7 @@ export function useChatSession(deps: ChatSessionDeps) {
     promptProfile,
     appearanceSource,
     illustrationViewpoint,
+    illustrationBatchCount,
     characterBaseImages,
     illustrationActorNames,
     styleBaseImage,
@@ -1114,8 +1122,10 @@ export function useChatSession(deps: ChatSessionDeps) {
   // 下一次 render 才同步。illustrate_request 之后 submitIllustration 立即用 messagesRef
   // 保存快照去认领，旧 ref 里没有刚插入的槽 → 覆盖服务端按 offset 建好的槽 → 兜底在
   // 末尾重建（2026-09-01 用户实锤：图总在末尾）。这里强制同步，杜绝该竞态。
-  const applyStreamEvent = (botId: string, event: ChatStreamEvent) => {
-    const next = reduceChatStreamEvent(messagesRef.current, botId, event);
+  const applyStreamEvent = (
+    botId: string, event: ChatStreamEvent, placement?: SlotPlacement,
+  ) => {
+    const next = reduceChatStreamEvent(messagesRef.current, botId, event, placement);
     messagesRef.current = next;
     setMessages(next);
   };
@@ -1131,7 +1141,11 @@ export function useChatSession(deps: ChatSessionDeps) {
     // 剧情高潮点出图请求：按本作品预设提交 ComfyUI 异步出图（不产气泡，出图完成后由 pollResult 补入）
     if (event.type === "illustrate_request") {
       const slotId = event.id || crypto.randomUUID();
-      applyStreamEvent(botId, { ...event, id: slotId });
+      // 第 34 刀：首尾帧＝**固定落点**，前端按正文自算（零 wire 改动）。这里用与插画链
+      // （useIllustrationChain）**同一套** `resolveVideoMode` 解析后告知 reducer —— 独立图片
+      // 模式（选了首尾帧但没配视频模板）事件里不带 `video_mode`，reducer 自己猜不出来。
+      const firstlast = resolveVideoMode(mediaPreset, event.videoMode) === "firstlast";
+      applyStreamEvent(botId, { ...event, id: slotId }, firstlast ? { firstlast } : undefined);
       const illustrationSubmit: IllustrationSubmit = {
         prompt: event.prompt, motion: event.motion, actors: event.actors,
         messageId: botId, slotId, sceneSpec: event.sceneSpec, turnId: event.turnId,
@@ -1200,8 +1214,15 @@ export function useChatSession(deps: ChatSessionDeps) {
     storyTurn?: number,
   ) => {
     const visibleHistory = promptHistory(historyMessages);
-    // 回合号持久化：重生成复用被删回合号（同回合幂等重写），新消息取链尾+1
-    const turnNo = storyTurn && storyTurn > 0 ? storyTurn : nextStoryTurnNo(historyMessages);
+    // 回合号持久化：重生成复用被删回合号（同回合幂等重写），新消息取链尾+1。
+    // 第 58 刀：再与**高位水印**取大 —— 「最高回合的消息被删/重生成」时 max+1 会复用
+    // 旧号 ⇒ 槽 id 撞车（真机：19:09 与 19:52 两轮同为 54 ⇒ 新图不插入/混叠）。
+    const turnNo = Math.max(
+      storyTurn && storyTurn > 0 ? storyTurn : 0,
+      nextStoryTurnNo(historyMessages),
+      storyTurnHighWater(threadId) + 1,
+    );
+    rememberStoryTurn(threadId, turnNo);
     const images = content?.images || [];
     const imageMask = content?.maskedImage
       ? { image: content.maskedImage.image, mask: content.maskedImage.mask }
@@ -1476,14 +1497,25 @@ export function useChatSession(deps: ChatSessionDeps) {
     dispatchSend(item.content);  // 同 thread 新一轮：AI 带上下文续写 = 合并
   };
 
-  const regenerateResult = async (messageId: string, slotId?: string) => {
+  const regenerateResult = async (messageId: string, slotId?: string, promptOverride?: string) => {
     const message = messages.find((item) => item.id === messageId);
     const part = slotId
       ? message?.parts?.find((item) => item.slotId === slotId)
       : undefined;
-    const snapshot = slotId
+    const baseSnapshot = slotId
       ? part?.regeneration
       : message?.regeneration;
+    // 「重新生图（含提示词）」：用户编辑后的提示词写回快照。
+    // ⚠ 三种快照的真源不同（ai-image=prompt 字段 / template=values 里的 prompt 键 /
+    // workflow=图里的文本节点），由 overrideRegenerationPrompt 按 kind 分流——只改
+    // prompt 字段在 template/workflow 下**不影响出图**。
+    const snapshot = baseSnapshot && promptOverride
+      ? overrideRegenerationPrompt(
+        baseSnapshot,
+        promptOverride,
+        templates.find((t) => t.id === (baseSnapshot.kind === "template" ? baseSnapshot.templateId : ""))?.exposed,
+      )
+      : baseSnapshot;
     if (!snapshot && !(slotId && part?.url)) {
       pushBot("这张历史图片生成时尚未保存完整参数，无法保证准确重生成。");
       return;
@@ -1496,7 +1528,8 @@ export function useChatSession(deps: ChatSessionDeps) {
     try {
       if (!snapshot) {
         const generations = await listGenerations(repo?.id || "home", embedModel);
-        const prompt = legacyGenerationPrompt(part?.url || "", generations.items || []);
+        const found = legacyGenerationPrompt(part?.url || "", generations.items || []);
+        const prompt = (promptOverride || "").trim() || found;
         if (!prompt) throw new Error("资产库中未找到这张旧图的原提示词");
         await submitIllustration({ prompt, motion: 0, actors: [], messageId, slotId: slotId!, source: "manual" });
         return;
