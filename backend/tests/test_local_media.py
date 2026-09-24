@@ -11,7 +11,11 @@ def test_完整媒体返回文件元数据(tmp_path):
 
     assert media.partial is False
     assert media.media_type == "image/png"
-    assert media.headers == {"Accept-Ranges": "bytes", "Content-Length": "6"}
+    assert media.headers["Accept-Ranges"] == "bytes"
+    assert media.headers["Content-Length"] == "6"
+    # ⚠ 必须带 no-cache：角色 LoRA 落盘是「同名覆盖、URL 不变」，缺这条浏览器按启发式
+    #   新鲜期缓存 ⇒ 重新生图后界面仍显示旧图、要手动刷新才更新（2026-09-24 用户实锤）。
+    assert media.headers["Cache-Control"] == "no-cache"
 
 
 def test_range读取只返回指定区间(tmp_path):
@@ -23,6 +27,7 @@ def test_range读取只返回指定区间(tmp_path):
     assert media.partial is True
     assert media.media_type == "video/mp4"
     assert media.headers["Content-Range"] == "bytes 1-3/6"
+    assert media.headers["Cache-Control"] == "no-cache"
     assert b"".join(media.iter_bytes(chunk_size=2)) == b"bcd"
 
 
@@ -34,7 +39,9 @@ def test_音频返回audio_media_type(tmp_path):
 
     assert media.partial is False
     assert media.media_type == "audio/wav"
-    assert media.headers == {"Accept-Ranges": "bytes", "Content-Length": "6"}
+    assert media.headers["Accept-Ranges"] == "bytes"
+    assert media.headers["Content-Length"] == "6"
+    assert media.headers["Cache-Control"] == "no-cache"
 
 
 def test_音频range读取(tmp_path):
@@ -62,3 +69,24 @@ def test_拒绝非法本地媒体请求(tmp_path, name, header, status):
         open_local_media(str(path), header)
 
     assert exc_info.value.status == status
+
+
+def test_路由层把no_cache透传给媒体响应(tmp_path):
+    """路由级锁：`Cache-Control: no-cache` 必须真正出现在 HTTP 响应头里。
+
+    直测路由函数（仓库惯例，不起 TestClient）：完整文件走 `FileResponse`（Starlette 会
+    另行补 ETag/Last-Modified，两者组合＝「每次协商、覆盖即拿新图」）。
+    """
+    from app.routers.comfyui import local_view
+
+    class _FakeRequest:
+        headers: dict[str, str] = {}
+
+    path = tmp_path / "shot.png"
+    path.write_bytes(b"abcdef")
+
+    response = local_view(str(path), _FakeRequest())
+
+    cache = (response.headers.get("cache-control")
+             or response.headers.get("Cache-Control"))
+    assert cache == "no-cache"

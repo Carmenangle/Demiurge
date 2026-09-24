@@ -38,7 +38,13 @@ GATE_BASE_RATE = builtin_agents.GATE_BASE_RATE    # 默认每回合判断；0 �
 
 _TAG_OPEN = "<状态更新>"
 _TAG_CLOSE = "</状态更新>"
-_STATE_BLOCK_RE = re.compile(re.escape(_TAG_OPEN) + r"(.*?)" + re.escape(_TAG_CLOSE), re.DOTALL)
+# 第 58 刀（2026-09-24 用户实锤）：模型偶发把标签写成**英文变体** `<status_update>`——
+# 原正则只认中文 `<状态更新>` ⇒ 块既不被剥（原始 JSON 直接留在对话里给用户看）
+# 也不走主写回（只能靠兜底维护调用多烧一次 LLM 补写回）。两种拼法都认。
+_STATE_BLOCK_RE = re.compile(
+    r"<(?:状态更新|status_update)>([\s\S]*?)</(?:状态更新|status_update)>",
+    re.IGNORECASE,
+)
 
 # 显示层状态栏：预设定义字段、AI 每轮吐 <status>…</status>；引擎当不透明整块，
 # **不剥、不解析**（留正文供前端正则渲染），只抽出来存快照 + 下轮重注入。取最后一块。
@@ -121,6 +127,23 @@ def repair_orphan_think_close(text: str) -> tuple[str, str] | None:
     return note, (pre + "\n\n" + post.lstrip()).strip()
 
 
+def trailing_plan_note(text: str) -> str:
+    """末尾残留的模型自留规划/续写注记（如「（正文到此，继续往后续写一点：…）」）。
+
+    **识别清单的单一属主**（`_ORPHAN_NOTE_RE` ＋ `_ORPHAN_NOTE_KEYWORDS`）：孤立 `</think>`
+    修复与剧情完整度判据（`roleplay_turn` 的续写闸）共用同一套识别，调用方勿另立副本。
+    只认**紧贴末尾**的全角括号注记——正文中间引用这些字眼不会命中。返回注记原文，无则空串。
+    """
+    stripped = (text or "").rstrip()
+    match = _ORPHAN_NOTE_RE.search(stripped)
+    if not match:
+        return ""
+    inner = match.group(0)[1:-1]
+    if any(keyword in inner for keyword in _ORPHAN_NOTE_KEYWORDS):
+        return match.group(0)
+    return ""
+
+
 def split_think_prefix(reply: str) -> tuple[str, str]:
     """把回复拆成（think 前缀含闭合标签, 其余全部）。无 think → ("", 原文)。
 
@@ -154,6 +177,37 @@ def ensure_status_snapshot(reply: str, previous_snapshot: str) -> str:
     if extract_status_snapshot(reply) or not (previous_snapshot or "").strip():
         return reply
     return f"<status>\n{previous_snapshot.strip()}\n</status>\n\n{reply.lstrip()}"
+
+def reconcile_reply_status(reply: str, st: Any) -> str:
+    """把正文里最后一个 <status> 块的数字对账为**引擎真源**（展示用，幂等）。
+
+    与落盘快照、重注入快照同源同函数（character_state.reconcile_snapshot_affinity）——
+    此前只对账那两处，正文里的 [好感] 行仍是模型自述 ⇒ 屏幕上与引擎账漂移
+    （2026-09-22 实锤：正文 16→13→10 乱跳，引擎恒 10→13）。本节点末尾会发 replace
+    全文替换气泡，故在 writeback 处对账即等于修显示。
+
+    只认 think 之外的块（与 parse_state_block 同判据）：思考里预写的草稿不得顶替真身，
+    也不得因草稿被改写而污染 think。取**最后一个**（末块为最新，与 extract_status_snapshot
+    同口径）；无块 / 引擎无好感字段 / 行内解析不出条目 → 原样返回（绝不改写其余文本，
+    空白填充原样保留）。
+    """
+    source = reply or ""
+    spans = _think_spans(source)
+    matches = [
+        m for m in _STATUS_TAG_RE.finditer(source)
+        if not any(m.start() < end and start < m.end() for start, end in spans)
+    ]
+    if not matches:
+        return reply
+    match = matches[-1]
+    inner = match.group(1)
+    core = inner.strip()
+    fixed = character_state.reconcile_snapshot_affinity(st, core)
+    if not fixed or fixed == core:
+        return reply
+    lead = inner[:len(inner) - len(inner.lstrip())]
+    trail = inner[len(inner.rstrip()):]
+    return source[:match.start(1)] + lead + fixed + trail + source[match.end(1):]
 
 
 @dataclass
@@ -214,6 +268,25 @@ def state_instruction() -> str:
         "用中点明确角色归属，禁止把身体、精神等状态类别拼进角色名。"
         "字段名必须稳定复用：已有字段（好感度、心情、所在、身体状态等）直接沿用原字段名更新，"
         "禁止换说法或另建同义字段，否则旧字段会被当成新字段并存、原值丢失。"
+        "【重要·好感度初值】状态表中尚没有某角色的好感度字段时（无论其是否已经登场），"
+        "禁止默认从 0 起算：必须按世界观与剧情因果，综合与该角色相关的各项因素，"
+        "给出该角色**当前应有的好感度**（含登场前与其本人/其势力的间接影响），用 "
+        "op=\"set\" 一次性播下初值（引擎仅在字段不存在时采纳，已存在则忽略）。"
+        "判断方法：先列出与该角色好感相关的因素——既有关系、直接或间接接触、"
+        "其自身的好恶与忌讳、{{user}} 的言行举止与仪表、所属势力与传闻、场合与时机等，"
+        "以上仅为举例、不限于此、也不设固定权重——逐项判断方向与强弱，再合成一个值；"
+        "不要只凭单一因素定值，也不要被单场戏的强弱牵着走。"
+        "该角色自身的偏好与忌讳优先于通用关系参考：其条目写明的喜恶若与关系亲疏相冲，"
+        "以其喜恶为准（例如她厌恶俊美男子，则 {{user}} 的容貌优势反而减分）。"
+        "关系类别只作起点参考（亲缘/旧识/恩人/师徒/深情既有人物偏高 55-90；素不相识的中立 "
+        "20-55；{{user}} 或其势力损害过其利益、敌对仇视出身偏低 -30 到 -10），"
+        "可以按其人设与经历越出这一区间。间接影响（虽未见面，但因所属势力/听闻事迹/共同关系而事先有好恶）"
+        "无论是否已经登场，都按因果关系定值、不要一律 0。"
+        "首次为某角色建表时按人设与既有关系把基准定准。"
+        "字段一旦存在，后续发展只报 add 增量、以注入的现值为锚循序渐进，不要重定基准；"
+        "增量的依据同样按上述方法综合判断，并在 evidence 里写出「哪些因素、各起什么作用」"
+        "（例如「其厌恶男子近身（−）；今日替她解围（＋）」）。播种初值用 "
+        "field=\"数值/角色名·好感度\" op=\"set\"，并带 evidence 说明因果依据。"
         "角色名必须是剧情角色本人：禁止用角色卡名称/卡面标题代替角色名；"
         "第一人称的「我/主角/你/玩家」不是剧情角色，禁止作为角色名写入状态表，"
         "主角自身的伤势、情绪等状态只写进状态栏 <status>，不写状态表。"
@@ -379,12 +452,14 @@ def agency_lost(verdicts: list[agency.Verdict]) -> bool:
 
 def writeback(
     deps: AgencyDeps, *, repo_id: str, card_name: str, raw_deltas: list[Any], turn: int,
-    snapshot: str = "",
+    snapshot: str = "", rejected: list[dict[str, Any]] | None = None,
 ) -> tuple[float | None, float | None]:
     """把搭车解析出的 delta 应用并落盘，并存本轮 <status> 快照。返回（写回前好感度, 写回后好感度）。
 
     无 repo_id/card_name → 直接读当前值返回（before==after，不触发跨档）。
     snapshot 非空即刷新快照（抗压缩）；delta/快照有一个变化就落盘。
+    `rejected` 非空时收集**被拒收的增量**（现为「add 命中不存在的好感度字段」，
+    2026-09-23 闸），由调用方 trace 上报——本函数不自行 emit，保持与调用方一致的留痕口径。
     """
     st = character_state.load_state(deps.state_base, repo_id, card_name)
     before = _affinity(st)
@@ -394,7 +469,7 @@ def writeback(
     )
     dirty = False
     if deltas:
-        character_state.apply_deltas(st, deltas)
+        character_state.apply_deltas(st, deltas, rejected=rejected)
         dirty = True
     if snapshot.strip():
         # 落盘前对账（2026-09-18 双账本对齐）：先应用 delta 再用引擎现值覆盖快照

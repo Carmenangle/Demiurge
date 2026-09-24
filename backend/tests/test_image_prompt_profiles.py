@@ -1459,6 +1459,9 @@ def test_双角色Profile分别编译两人的外貌动作再描述整体关系(
         ],
         "rating": "sfw",
         "aspect_ratio": "4:3",
+        # 第 46 刀：人数词改由**逐主体性别**推得（不再硬写 `2girls`）⇒ 显式给全女性别，
+        # 断言才回到「全女两人帧 ⇒ `2girls`」这条正向路径。
+        "subject_genders": {"冷倾雪": "女", "虞妙玥": "女"},
     }
 
     raw = profiles.deterministic_fallback(profile, scene)
@@ -1797,7 +1800,6 @@ def _frame_scene(rating="nsfw"):
     """wardrobe 清空（对齐 342 行先例）：帧成品不含服饰 tags，避免服饰事实校验干扰。"""
     return {**_scene(rating), "wardrobe": ""}
 
-
 def test_首尾帧同构编译_提取成功后走同一编译器():
     """时点提取成功 → 两帧各自走同一编译器，帧 scene 携带提取事实与防拦截标记。"""
     calls: list[tuple[str, str]] = []
@@ -1840,6 +1842,53 @@ def test_首尾帧同构编译_提取成功后走同一编译器():
     assert results["first"]["negative_prompt"]
 
 
+def test_首尾帧观测带出提取器输入输出与逐帧账本():
+    """甲（2026-09-23）：真机出现「两帧成品几乎逐字相同」时，必须能归因到
+    **提取器抹平**还是**编译器稀释**——此前 trace 只有 frame_extract_ok 一个布尔。
+
+    纯记录：断言只读 diagnostics，不改任何返回成品。
+    """
+    seen_extract: list[str] = []
+
+    def generate(system: str, user: str) -> str:
+        if "首尾帧画面事实提取器" in system:
+            seen_extract.append(user)
+            return json.dumps({
+                "first": {"action": "lying on her side facing away",
+                          "visual_facts": ["back turned to the viewer"]},
+                "last": {"action": "turning her head back over her shoulder",
+                         "visual_facts": ["face now visible"]},
+            })
+        return _FRAME_OK
+
+    diagnostics: dict = {}
+    results = profiles.generate_frame_prompts(
+        "anima_tags", _frame_scene("nsfw"),
+        {"first": "她侧躺背对。", "last": "她回过头来。"},
+        generate, diagnostics=diagnostics,
+    )
+
+    # ① 提取器输入：两段帧描述都在，且带防拦截标记
+    payload = diagnostics["frame_extract_input"]
+    assert "她侧躺背对。" in payload and "她回过头来。" in payload
+    assert "@(她侧躺背对。)@" in payload
+    assert seen_extract == [payload]          # 一次调用喂两帧（抹平的怀疑点）
+
+    # ② 提取器原始输出与解析结果都留档（能直接看出两帧是否被写成一个样）
+    assert "lying on her side facing away" in diagnostics["frame_extract_raw"]
+    parsed = diagnostics["frame_extract_parsed"]
+    assert parsed["first"]["action"] != parsed["last"]["action"]
+
+    # ③ 逐帧账本 / 场景键 / 成品：判「编译器有没有把差异落进成品」
+    for frame in ("first", "last"):
+        assert isinstance(diagnostics[f"{frame}_field_ledger"], dict)
+        assert diagnostics[f"{frame}_scene_keys"], f"{frame} 场景键为空"
+        assert diagnostics[f"{frame}_prompt"], f"{frame} 成品未留档"
+        assert diagnostics[f"{frame}_prompt_chars"] == len(diagnostics[f"{frame}_prompt"])
+    # 观测不得污染成品本身
+    assert results["first"]["prompt"] == diagnostics["first_prompt"]
+
+
 def test_首尾帧提取失败重试一次后走narrative降级():
     """提取两次都不可解析 → 不携带提取事实仍编译出成品（narrative 降级），不抛错。"""
     calls: list[str] = []
@@ -1869,6 +1918,215 @@ def test_首尾帧单帧只编译该帧():
         lambda system, _user: _FRAME_OK if "首尾帧画面事实提取器" not in system else "{}",
     )
     assert set(results) == {"last"}
+
+
+# ===== 第 34 刀：帧场景不继承高潮锚点的画面要素（用户规格「无需高潮点判断流程」）=====
+
+
+def test_第34刀_帧场景重建剔除高潮专属画面要素():
+    """旧实现 `frame_scene = dict(scene)` 只覆盖 action/visual_facts ⇒ 高潮锚点的
+    subjects/frame_subjects/composition/camera/narrative/draft_prompt 整体继承，
+    首尾帧被画成高潮画面（真机实锤 i36：L3 首帧描述只有两人对白，产物却列出三
+    primary/second/third adult character）。重建后：事实底座沿用、画面要素换成本帧的。"""
+    scene = {
+        **_frame_scene("nsfw"),
+        "subjects": [{"name": "爱丽丝", "description": "a scarred woman in red silk"}],
+        "frame_subjects": ["爱丽丝", "鲍勃"],
+        "composition": "climax-centered triangular arrangement",
+        "camera": "low angle climax shot",
+        "draft_prompt": "climax fluid tags",
+        "action": "climax action",
+        "visual_facts": ["climax fact"],
+        "action_sequence": [{"beat": "定格起点", "desc": "climax beat"}],
+        "motion": 3,
+    }
+    built = profiles._build_frame_scene(
+        scene, "开场：她推门进屋。",
+        {"action": "opening action", "visual_facts": ["opening fact"]},
+    )
+
+    for key in ("subjects", "frame_subjects", "composition", "camera",
+                "action_sequence", "motion"):
+        assert key not in built
+    assert built["narrative"] == "开场：她推门进屋。"
+    assert built["protected_narrative"] == "@(开场：她推门进屋。)@"
+    assert built["action"] == "opening action"
+    assert built["visual_facts"] == ["opening fact"]
+    assert "climax" not in str(built["draft_prompt"])
+    for key in ("locale", "actors", "rating", "character_lora"):
+        assert built[key] == scene[key]
+
+
+def test_第34刀_帧模型输入不含高潮锚点画面要素():
+    """端到端：帧编译发给模型的 payload 里不得出现高潮锚点的主体/构图/镜头。"""
+    scene = {
+        **_frame_scene("nsfw"),
+        "subjects": [{"name": "爱丽丝", "description": "climax-only description"}],
+        "frame_subjects": ["爱丽丝", "鲍勃"],
+        "composition": "climax-centered triangular arrangement",
+        "camera": "low angle climax shot",
+    }
+    payloads: dict[str, dict] = {}
+
+    def generate(system: str, user: str) -> str:
+        if "首尾帧画面事实提取器" in system:
+            return json.dumps({
+                "first": {"action": "opening action", "visual_facts": ["opening fact"]},
+            })
+        payload = json.loads(user)
+        payloads[payload["narrative"]] = payload
+        return _FRAME_OK
+
+    profiles.generate_frame_prompts(
+        "anima_tags", scene, {"first": "开场：她推门进屋。"}, generate,
+    )
+
+    payload = payloads["@(开场：她推门进屋。)@"]
+    assert payload["action"] == "opening action"
+    assert payload["visual_facts"] == ["opening fact"]
+    for key in ("subjects", "frame_subjects", "composition", "camera"):
+        assert key not in payload
+
+
+# ===== 第 35 刀：帧的「画面主体」听本帧提取，不听在场全集 =====
+# 真机实锤（探针 `D:\pytest-tmp\i38`）：第 34 刀把 `frame_subjects` 一并剔除后，帧的画面
+# 主体退回 `actors`（在场全集）⇒ 契约按「在场人数」成稿，与本帧内容自相矛盾：
+#   · L2·单人锚点[63] 尾帧内容只有一人（微笑着），actors=[罗瑟琳,卢卡] ⇒ 契约要求「必须
+#     包含 2girls」「单独描述第一/第二角色」⇒ 模型写对的单人稿被判死（5 条 error），
+#     最后 patched 出 `primary adult character` 垃圾 tag；
+#   · L3 尾帧内容是车上父母（1boy+1girl），actors 三人 ⇒ 契约要求 2girls ⇒ 好成稿（car
+#     interior / driver seat）被判死。
+# ⇒ 帧主体必须来自**本帧自己的时点提取**（与高潮点同构：高潮点的 subjects 也是模型声明的）。
+
+
+def test_第35刀_帧主体由提取器报出的中性指代映射回本名():
+    """提取器只能看到匿名后的指代（`the second adult character`），本地必须映射回本名
+    ——否则 `_actor_visual_details` 的 facts 归属按键对不上，逐人描述退化成占位符。"""
+    scene = {
+        **_frame_scene("nsfw"),
+        "actors": ["罗瑟琳", "卢卡"],
+        "known": ["罗瑟琳", "卢卡", "塞蕾娜"],
+    }
+    built = profiles._build_frame_scene(
+        scene, "卢卡低下头，什么也没说。",
+        {"action": "looking down", "visual_facts": ["head lowered"],
+         "subjects": ["the second adult character"]},
+    )
+    assert built["frame_subjects"] == ["卢卡"]
+    assert profiles._contract_subject_names(built) == ["卢卡"]
+
+
+def test_第35刀_单人帧不再被硬套多人契约():
+    """这是本刀的病灶：内容一人、在场两人 ⇒ 旧口径 `len(scope)==2` 触发多人契约。
+    本帧提取说一人 ⇒ scope 必须收敛到一人，契约不再触发。"""
+    scene = {
+        **_frame_scene("nsfw"),
+        "actors": ["罗瑟琳", "卢卡"],
+        "known": ["罗瑟琳", "卢卡", "塞蕾娜"],
+    }
+    built = profiles._build_frame_scene(
+        scene, "塞蕾娜正微笑着。",
+        {"action": "smiling", "visual_facts": ["soft smile"],
+         "subjects": ["塞蕾娜"]},
+    )
+    assert len(profiles._contract_subject_names(built)) == 1
+
+
+def test_第35刀_提取器没报主体时退回在场全集零回归():
+    """无正向证据 ⇒ 不写 frame_subjects ⇒ `_contract_subject_names` 照旧退回 actors，
+    逐字节等于第 34 刀行为（零回归前提）。"""
+    scene = {
+        **_frame_scene("nsfw"),
+        "actors": ["罗瑟琳", "卢卡"],
+        "known": ["罗瑟琳", "卢卡", "塞蕾娜"],
+    }
+    built = profiles._build_frame_scene(
+        scene, "开场：她推门进屋。",
+        {"action": "opening action", "visual_facts": ["opening fact"]},
+    )
+    assert "frame_subjects" not in built
+    assert profiles._contract_subject_names(built) == ["罗瑟琳", "卢卡"]
+
+
+def test_第35刀_提取器报的指代全部不可解析时不写主体():
+    """提取器有时会吐中文/散文式主体（`画面中的两个人`）⇒ 一条都对不上 ⇒ 不写 ⇒ 退回
+    actors。**宁缺勿猜**：不拿对不上的串当人名塞进契约。"""
+    scene = {
+        **_frame_scene("nsfw"),
+        "actors": ["罗瑟琳", "卢卡"],
+        "known": ["罗瑟琳", "卢卡", "塞蕾娜"],
+    }
+    built = profiles._build_frame_scene(
+        scene, "开场：她推门进屋。",
+        {"action": "opening action", "visual_facts": ["opening fact"],
+         "subjects": ["画面中的两个人", ""]},
+    )
+    assert "frame_subjects" not in built
+
+
+def test_第35刀_端到端_提取器主体落进帧场景():
+    """端到端：`generate_frame_prompts` 必须把提取器报的主体带进**每帧各自的**场景。
+
+    ⚠ 断言落在**模型入参**上：本地契约跑的是 `_scene_for_facts`（本名），发给模型的是
+    `_scene_for_model`（`actors` 那几名会被匿名成指代）⇒ 首帧本该读作两个指代、
+    尾帧的 `塞蕾娜` 不在 actors 里、保持本名。本名→指代的映射正确性由
+    `test_第35刀_帧主体由提取器报出的中性指代映射回本名` 直接覆盖。"""
+    scene = {
+        **_frame_scene("nsfw"),
+        "actors": ["罗瑟琳", "卢卡"],
+        "known": ["罗瑟琳", "卢卡", "塞蕾娜"],
+    }
+    built_scenes: dict[str, dict] = {}
+
+    def generate(system: str, user: str) -> str:
+        if "首尾帧画面事实提取器" in system:
+            return json.dumps({
+                "first": {"action": "a", "visual_facts": ["af"],
+                          "subjects": ["the primary adult character",
+                                       "the second adult character"]},
+                "last": {"action": "b", "visual_facts": ["bf"],
+                         "subjects": ["塞蕾娜"]},
+            })
+        try:
+            payload = json.loads(user)   # 修复轮会带「上次输出…」尾注 ⇒ 解析失败即跳过
+        except ValueError:
+            return _FRAME_OK
+        built_scenes[payload["narrative"]] = payload
+        return _FRAME_OK
+
+    profiles.generate_frame_prompts(
+        "anima_tags", scene, {"first": "开场甲。", "last": "收尾乙。"}, generate,
+    )
+    assert built_scenes["@(开场甲。)@"]["frame_subjects"] == [
+        "The primary adult character", "The second adult character",
+    ]
+    assert built_scenes["@(收尾乙。)@"]["frame_subjects"] == ["塞蕾娜"]
+
+
+def test_第35刀_诊断落每帧画面主体():
+    """`diagnostics` 必须逐帧给出**画面主体**：模型侧逐格方差大，这是唯一确定性的
+    A/B 观测量（探针 `scripts/probe_frame_prompts.py` 直接打印它）。"""
+    scene = {
+        **_frame_scene("nsfw"),
+        "actors": ["罗瑟琳", "卢卡"],
+        "known": ["罗瑟琳", "卢卡", "塞蕾娜"],
+    }
+    diag: dict = {}
+
+    def generate(system: str, user: str) -> str:
+        if "首尾帧画面事实提取器" in system:
+            return json.dumps({
+                "first": {"action": "a", "visual_facts": ["af"],
+                          "subjects": ["the second adult character"]},
+                "last": {"action": "b", "visual_facts": ["bf"], "subjects": []},
+            })
+        return _FRAME_OK
+
+    profiles.generate_frame_prompts(
+        "anima_tags", scene, {"first": "开场甲。", "last": "收尾乙。"}, generate, diag,
+    )
+    assert diag["first_subjects"] == ["卢卡"]      # 提取器报的第二人
+    assert diag["last_subjects"] == ["罗瑟琳", "卢卡"]  # 没报 ⇒ 退回在场全集
 
 
 def test_编译输出剥离think段():
@@ -2213,20 +2471,126 @@ def test_单人帧的方位描述不触发多人契约():
     assert _分述契约错误(prompt, scene) == []
 
 
-def test_anima的2girls标签要求不因句式放宽而消失():
-    """只放宽「第一/第二角色」句式；Anima 的 `2girls` 是硬标签要求，不随之放宽。"""
+def test_第45刀_2girls不再是硬要求():
+    """第 45 刀（2026-09-22 用户定案）：**删掉「画面主体 ≥2 ⇒ 必须含 2girls」下限**。
+
+    用户口径原话「性别的判断是根据剧情来的」⇒ 人数与性别由剧情实际决定，不得用机械
+    规则反推性别。真机事故（slot -47）：第一人称单女帧被这条下限逼出 `2girls` ⇒ 多画
+    一个女人。这里锁两件事：
+      · 分述句式放宽（位置词对命中）⇒ 无「第一/第二角色」分述错误；
+      · 整稿**一个 girls 计数词都没有**也不再判红。
+    """
     scene = _契约场景(actors=["甲", "乙"], frame_subjects=["甲", "乙"])
     prompt = "The woman on the left smiles; the woman on the right looks away."
 
     errors = profiles._multi_actor_contract_errors("anima_tags", prompt, scene)
 
     assert [error for error in errors if "角色" in error] == []
-    assert "Anima 双人提示词必须包含2girls" in errors
+    assert errors == []
 
 
 def test_本帧主体只一人时与角色表人数无关():
     scene = _契约场景(actors=["甲", "乙", "丙"], frame_subjects=["丙"])
     assert _契约错误(_单人两行文案, scene) == []
+
+
+# ---------------------------------------------------------------------------
+# 第 44 刀（2026-09-22 用户定案）：多人契约的「分述」判据再放一路
+# **外貌／衣着区分式指称**（此前只认位置／序数词）。
+#
+# 真机 B2：42 刀·D 明确要求模型用「可辨识身份（发色／发型／瞳色／体型）」区分两名主体，
+# 模型照做后写成 `The blonde woman in the hollowed-out white wedding dress …` /
+# `the silver-haired woman in the black bunny suit …` —— 两个主体确实被分开指称，
+# 却因**一个位置词都没有**被判红 2 条（2/2 复现）⇒ 白烧一次 repair。
+#
+# ⚠ 三条边界（用户当日明令）：① 仍只判词面、**不引词表**；
+#   ② **不放松人数**（画面主体 <2 时整段不跑；人多不多全按 `_contract_subject_names`）；
+#   ③ **不碰「剧情 > 表格 > 条目」的角色形象获取逻辑**（本判据只读 prompt，不反推外貌）。
+# ---------------------------------------------------------------------------
+
+
+def test_第44刀_真机B2成稿两类错误一起消失():
+    """真机 B2 的原始写法：外貌锚分述 + 已写对 `2girls` ⇒ 契约整体无错（不再白烧 repair）。"""
+    scene = _契约场景(actors=["甲", "乙"], frame_subjects=["甲", "乙"])
+    prompt = (
+        "2girls, indoor, soft light\n"
+        "The blonde woman in the hollowed-out white wedding dress kneels on the floor, "
+        "while the silver-haired woman in the black bunny suit looks back at her."
+    )
+
+    assert profiles._multi_actor_contract_errors("anima_tags", prompt, scene) == []
+
+
+def test_第44刀_前置定语外貌锚算分述():
+    scene = _契约场景(actors=["甲", "乙"], frame_subjects=["甲", "乙"])
+    prompt = "The blonde woman kneels while the silver-haired woman looks back at her."
+
+    assert _分述契约错误(prompt, scene) == []
+
+
+def test_第44刀_后置衣着短语算分述():
+    """衣着锚走「角色名词 + 介词短语」：`wearing the white wedding dress` vs `wearing the black bunny suit`。"""
+    scene = _契约场景(actors=["甲", "乙"], frame_subjects=["甲", "乙"])
+    prompt = (
+        "The woman wearing the white wedding dress kneels; "
+        "the woman wearing the black bunny suit looks back at her."
+    )
+
+    assert _分述契约错误(prompt, scene) == []
+
+
+def test_第44刀_只有一个外貌定语仍判红_不放松():
+    """保护侧：只给一个人定语 ⇒ 仍未分述，契约照旧判红两条。"""
+    scene = _契约场景(actors=["甲", "乙"], frame_subjects=["甲", "乙"])
+    prompt = "The blonde woman kneels while a man watches her."
+
+    assert _分述契约错误(prompt, scene)
+
+
+def test_第44刀_同一主体重复同一定语不算分述():
+    """保护侧：同一个外貌定语出现两次 ⇒ 只有一个指称，不是分述。"""
+    scene = _契约场景(actors=["甲", "乙"], frame_subjects=["甲", "乙"])
+    prompt = "The blonde woman kneels; the blonde woman looks up at the ceiling."
+
+    assert _分述契约错误(prompt, scene)
+
+
+def test_第44刀_地点后置短语不当成外貌指称():
+    """保护侧：`in the room` / `in the corridor` 是地点短语（只有一个实词）⇒ 不算角色分述。"""
+    scene = _契约场景(actors=["甲", "乙"], frame_subjects=["甲", "乙"])
+    prompt = (
+        "The woman in the corridor lowers her gaze, "
+        "while the man in the room turns away."
+    )
+
+    assert _分述契约错误(prompt, scene)
+
+
+def test_第44刀_单人帧不受影响():
+    """人数口径不变：画面主体只一人时任何外貌锚都不打开多人契约。"""
+    scene = _契约场景(actors=["甲"], frame_subjects=["甲"])
+    prompt = "The blonde woman in the white wedding dress kneels."
+
+    assert _分述契约错误(prompt, scene) == []
+
+
+def test_第44刀_外貌锚判据不读场景事实_形象来源仍由三源融合决定():
+    """用户 2026-09-22 明令：可放宽句式，但不得毁坏「剧情 > 表格 > 条目」的形象获取逻辑。
+
+    本判据只吃 `prompt` 字符串 ⇒ 同一 prompt 在不同场景（角色形象来源不同）下必须落同一结论；
+    角色外貌仍一律由 `scene_illustration` 的三源融合给出，**不从这里反推**。
+    """
+    prompt = (
+        "The blonde woman in the white wedding dress kneels; "
+        "the silver-haired woman in the black bunny suit looks back at her."
+    )
+    plain = _契约场景(actors=["甲", "乙"], frame_subjects=["甲", "乙"])
+    with_appearance = _契约场景(actors=["甲", "乙"], frame_subjects=["甲", "乙"])
+    with_appearance["appearance"] = {"甲": "剧情：银发被汗水打湿", "乙": "表格：黑色兔女郎装"}
+
+    assert _分述契约错误(prompt, plain) == []
+    assert _分述契约错误(prompt, with_appearance) == []
+    assert profiles._appearance_designations(prompt) == {"blonde", "silver-haired"}
 
 
 # ---------------------------------------------------------------------------
@@ -2512,13 +2876,79 @@ def test_三人帧兜底模板不得写两人措辞():
 
 
 def test_两人帧兜底措辞逐字节不变():
-    """零回归：两人帧的既有措辞受保护，不得被上面的计数口径改动波及。"""
+    """零回归（第 46 刀修订口径）：**全女两人帧**的措辞与旧实现逐字节一致。
+
+    第 46 刀起 `2girls` 由 `scene["subject_genders"]` 按实际性别组成推得、不再是硬编码
+    ⇒ 拿不到性别时**不写具体性别族**（用户定案「不写」），故此处显式给全女性别再比字节。
+    """
     scene = _多人动作场景(_L3_代词句窗口, ["世熙", "宥夏"])
+    scene["subject_genders"] = {"世熙": "女", "宥夏": "女"}
 
     assert "places two adult women in clearly separated positions" in (
         profiles.deterministic_fallback("natural_language", scene)
     )
     assert "2girls, two-shot" in profiles.deterministic_fallback("anima_tags", scene)
+
+
+def test_第46刀_兜底人数词按实际性别组成写():
+    """第 46 刀（2026-09-22 用户定案）：人数词**按画面主体的实际性别组成**写，不锁死 girls。
+
+    用户原话：「第三人称时按剧情的画面人物判断，男主主人公＋2 女主角就是 `1boy, 2girls`……
+    **根据剧情判断在场的内容，不是锁死女角色**」＋「男主＋1 女兜底写 `2girls` 很明显有问题，
+    正常应该是 `1boy, 1girl`」。
+    """
+    window = _L3_代词句窗口
+
+    def _head(actors: list[str], genders: dict[str, str]) -> str:
+        scene = _多人动作场景(window, actors)
+        scene["subject_genders"] = genders
+        return profiles.deterministic_fallback("anima_tags", scene).splitlines()[0]
+
+    # 男主人公 ＋ 2 女主角（第三人称：主人公入画）⇒ `1boy, 2girls`
+    duo = _head(["凌渊", "世熙", "宥夏"], {"凌渊": "男", "世熙": "女", "宥夏": "女"})
+    assert "1boy" in duo.split(", ")
+    assert "2girls" in duo.split(", ")
+
+    # 女主人公 ＋ 2 男主角 ⇒ `1girl, 2boys`（旧实现恒写 `2girls`／`3girls`）
+    male_duo = _head(["世熙", "泰宇老师", "旁观的男子"], {
+        "世熙": "女", "泰宇老师": "男", "旁观的男子": "男",
+    })
+    assert "1girl" in male_duo.split(", ")
+    assert "2boys" in male_duo.split(", ")
+    assert not any(tag.endswith("girls") for tag in male_duo.split(", "))
+
+    # 男主人公 ＋ 1 女 ⇒ `1boy, 1girl`（用户点名的正例）
+    pair = _head(["凌渊", "世熙"], {"凌渊": "男", "世熙": "女"})
+    assert "1boy" in pair.split(", ")
+    assert "1girl" in pair.split(", ")
+
+    # ⚠ 性别解析不全 ⇒ **不写具体性别族**（用户定案「不写」），只留中性数词
+    partial = _head(["凌渊", "世熙"], {"凌渊": "男"})
+    assert "1boy" not in partial.split(", ")
+    assert "girls" not in partial
+    assert "two-shot" in partial
+
+    # ⚠ 完全没有性别映射 ⇒ 同上（老调用方 / 兜底拿不到表）
+    plain = profiles.deterministic_fallback(
+        "anima_tags", _多人动作场景(window, ["世熙", "宥夏"]),
+    ).splitlines()[0]
+    assert "2girls" not in plain
+    assert "two-shot" in plain
+
+
+def test_第46刀_第一人称剔掉主人公后按剩余主体性别写():
+    """第一人称 ⇒ 叙事者（主人公）不入画 ⇒ 只按**剩下的人**算性别组成。
+
+    用户原话：「如果是第一人称就变成了 `2girls`」「女主人公+2男主角……如果是第一人称
+    就变成了 `2boys`」。
+    """
+    scene = _多人动作场景(_L3_代词句窗口, ["凌渊", "世熙", "宥夏"])
+    scene.update({"viewpoint": "first_person", "narrator": "凌渊"})
+    scene["subject_genders"] = {"凌渊": "男", "世熙": "女", "宥夏": "女"}
+    head = profiles.deterministic_fallback("anima_tags", scene).splitlines()[0]
+
+    assert "2girls" in head.split(", ")
+    assert "1boy" not in head.split(", ")
 
 
 # ---------------------------------------------------------------------------
@@ -3011,6 +3441,73 @@ def test_第一人称契约回落actors时剔除叙事者():
     assert profiles._contract_subject_names({"actors": ["甲", "宥夏"]}) == ["甲", "宥夏"]
 
 
+def test_第37刀_载荷副本剔除叙事者():
+    """第 37 刀（2026-09-21 用户实锤）：手选第一人称，成图 `2girls` 正确却多写 `1boy`。
+
+    画面主体名单（subjects/frame_subjects）是对的 ⇒ 主人公是从**模型载荷**的
+    `actors`／`appearance` 漏进去的。载荷副本剔除，**原 scene 不动**（归因仍按 actors 全集）。
+    """
+    scene = {
+        "actors": ["甲", "宥夏"],
+        "appearance": "甲：【外貌】高大；\n宥夏：【外貌】清秀；",
+        "viewpoint": "first_person",
+        "narrator": "甲",
+    }
+
+    out = profiles._strip_narrator_from_model_view(scene)
+
+    assert out["actors"] == ["宥夏"]
+    assert "甲" not in str(out["appearance"])
+    assert "宥夏" in str(out["appearance"])
+    # 原 scene 逐字节不动（归因名单照旧）
+    assert scene["actors"] == ["甲", "宥夏"]
+    assert "甲" in scene["appearance"]
+
+
+def test_第37刀_载荷剔除的零回归锁():
+    """第三人称 / 缺 `narrator` 键 ⇒ 载荷副本逐字节等于旧行为。"""
+    base = {
+        "actors": ["甲", "宥夏"],
+        "appearance": "甲：【外貌】高大；\n宥夏：【外貌】清秀；",
+    }
+    third = profiles._strip_narrator_from_model_view(
+        {**base, "viewpoint": "third_person", "narrator": "甲"},
+    )
+    assert third["actors"] == ["甲", "宥夏"]
+    assert third["appearance"] == base["appearance"]
+    no_key = profiles._strip_narrator_from_model_view(
+        {**base, "viewpoint": "first_person"},
+    )
+    assert no_key["actors"] == ["甲", "宥夏"]
+    assert no_key["appearance"] == base["appearance"]
+
+
+def test_第37刀_契约主语名单前两条路径也剔叙事者():
+    """补全原注释自认的「只在一半路径生效」：① 计划 `subjects`、② `frame_subjects` 也要剔。"""
+    planned = {
+        "subjects": [{"name": "甲"}, {"name": "宥夏"}],
+        "viewpoint": "first_person", "narrator": "甲",
+    }
+    assert profiles._contract_subject_names(planned) == ["宥夏"]
+    framed = {
+        "frame_subjects": ["甲", "宥夏"],
+        "viewpoint": "first_person", "narrator": "甲",
+    }
+    assert profiles._contract_subject_names(framed) == ["宥夏"]
+    # 第三人称 / 缺 narrator 键 ⇒ 照旧
+    assert profiles._contract_subject_names(
+        {**planned, "viewpoint": "third_person"},
+    ) == ["甲", "宥夏"]
+    assert profiles._contract_subject_names(
+        {"subjects": [{"name": "甲"}, {"name": "宥夏"}], "viewpoint": "first_person"},
+    ) == ["甲", "宥夏"]
+    # 只剩叙事者一人 ⇒ 空表，**不得**回落 actors 把在场旁观者算回来
+    assert profiles._contract_subject_names({
+        "subjects": [{"name": "甲"}], "actors": ["甲", "乙"],
+        "viewpoint": "first_person", "narrator": "甲",
+    }) == []
+
+
 def test_匿名化第三名角色不再输出裸编号():
     """第 17 刀（2026-09-20 用户实锤）：第 3 名起原为 `adult character 3`，**裸编号进最终提示词**。"""
     scene = {"actors": ["甲", "乙", "丙", "丁"]}
@@ -3048,10 +3545,17 @@ def test_抽出拔出按对象分档不再产出鞘中之物():
 
 def test_三档多人分述条款措辞一致():
     """第 19 刀（2026-09-20 用户实锤）：L3·anima「tag 没把两名角色的动作表示出来、没区分人物」，
-    L3·niji「构图动作混乱、出现自己反驳自己动作的现象」⇒ 三档统一加【多人分述】。"""
+    L3·niji「构图动作混乱、出现自己反驳自己动作的现象」⇒ 三档统一加【多人分述】。
+
+    ⚠ 第 38 刀（2026-09-21）：原【多人分述】块**尾部**还挂着「同一主体不得被写成互相矛盾的姿态／
+    构图以小说原文为准」两句 —— 它们被「画面里有两名以上主体时」的**条件**锁死，单人帧
+    （真机 `1girl, solo`）根本没被约束，于是写出「正视图机位 ＋ 后向专属信息」的崩坏画面。
+    该两句已上移到 `_COMMON` 的【画面自洽·机位与可见性】（**无条件**适用），故本测试的**切片
+    终点与标记同步收窄** —— 姿态自洽句若留在这里，就等于又把它锁回「只在多人帧生效」。
+    """
     def _clause(system):
         start = system.index("【多人分述】")
-        end = system.index("不得自创与原文冲突的机位。", start) + len("不得自创与原文冲突的机位。")
+        end = system.index("不得只给动作而不给位置。", start) + len("不得只给动作而不给位置。")
         return system[start:end]
 
     systems = [profiles._system(p, {"rating": "nsfw"}) for p in
@@ -3060,9 +3564,129 @@ def test_三档多人分述条款措辞一致():
     for system in systems[1:]:
         assert _clause(system) == first
 
-    for marker in ("逐人分述", "镜头左侧", "镜头右侧", "即使两人动作完全相同",
-                   "不得被写成互相矛盾的姿态", "构图以小说原文为准"):
+    for marker in ("逐人分述", "镜头左侧", "镜头右侧", "即使两人动作完全相同"):
         assert marker in first, marker
+    # 第 38 刀：姿态自洽句**不再**属于多人块（已上移至 _COMMON 的无条件条款）。
+    assert "互相矛盾的姿态" not in first
+    assert "构图以小说原文为准" not in first
+
+
+def test_第42刀_anima多人分述追加从属绑定条款():
+    """D（2026-09-22 用户定案）：anima 首行是**扁平逗号序列**、没有分块符（用户明确否决分块／
+    分隔符方案，原话「不是分块，而是下方的文段不够详细」）⇒ 归属只能靠「**首行相邻聚拢 ＋
+    文段写全**」。
+
+    真机事故：衣物 tag 只有一份，模型拿到一个多余的归属者就把女主服装绑到主人公身上
+    （成稿含 `adult man`，女主变裸）。
+
+    ⚠ **只加在 anima 档**：natural／niji 的输出本身就是逐人成段的散文，归属天然可辨
+    （用户原话「自然语言和 niji …都是一个文段了，所以说很容易区分从属关系」）。
+    ⚠ 共享的【多人分述】块措辞**逐字节不动**（见 `test_三档多人分述条款措辞一致`）。
+    """
+    anima = profiles._system("anima_tags", {"rating": "nsfw"})
+    natural = profiles._system("natural_language", {"rating": "nsfw"})
+    niji = profiles._system("niji_sections", {"rating": "nsfw"})
+
+    assert "【多人分述·anima 从属绑定】" in anima
+    for marker in (
+        "扁平逗号序列",
+        "可辨识身份",
+        "该人当前的衣着及状态",
+        "衣着一律写在它所属那个人的分句里",
+        "同一件服装、同一个身体部位、同一处接触",
+        "相邻聚拢",
+        "不加任何分隔符",
+    ):
+        assert marker in anima, marker
+    # 用户否决的是「分块」方案 ⇒ 条款里只承认「没有分块符」这个事实，不得反过来要求插分隔符。
+    assert "没有分块符" in anima
+    assert "插入分隔符" not in anima
+    # 只加在 anima 档。
+    assert "【多人分述·anima 从属绑定】" not in natural
+    assert "【多人分述·anima 从属绑定】" not in niji
+    # 追加位置在共享块**之后** ⇒ 共享块切片仍三档一致（该锁另行由上一测试守住）。
+    assert anima.index("【多人分述】") < anima.index("【多人分述·anima 从属绑定】")
+
+
+def test_第38刀_画面自洽条款无条件适用且四档一致():
+    """第 38 刀（2026-09-21 用户真机实锤 + 用户**当场纠正因果方向**）：单人帧必须也拿到
+    「机位由内容反推」与「物理可达性」两条自洽条款。原条款被关在【多人分述】块内、以
+    「两名以上主体」为条件 ⇒ 真机 L3·anima 单人帧同时写 `face down ass up` +
+    `first-person view` + `close-up on face` + `looking at viewer`，后向专属信息配了
+    无方向／正面机位 ⇒ 模型按正视图渲染、结构崩坏（用户原话「小穴张在了背上」）。
+
+    ⚠⚠ 因果方向是本条的**第一要义**（用户当场否掉首版）：**内容必保，机位是因变量** ——
+    先列全内容，再据此反推最能呈现它的机位；不得用机位去删改内容。故本测试显式断言
+    「机位是它的因变量」「列全并全部保留」两个措辞，**同时**断言「不得同时写正面专属构图」
+    这类**反因果**措辞**不存在**（首版写法）。
+    """
+    clauses: list[str] = []
+    end_marker = "（如「双手反绑在背后」与「用手指掰开」互斥；锚点只写了「探手到身后」⇒ 保留掰开，不写绑缚）。"
+    for profile in ("anima_tags", "natural_language", "niji_sections", "krea2"):
+        system = profiles._system(profile, {"rating": "nsfw"})
+        assert "【画面自洽·机位由内容反推】" in system, profile
+        assert "【画面自洽·物理可达性】" in system, profile
+        start = system.index("【画面自洽·机位由内容反推】")
+        end = system.index(end_marker, start) + len(end_marker)
+        clauses.append(system[start:end])
+    for clause in clauses[1:]:
+        assert clause == clauses[0]
+
+    clause = clauses[0]
+    for marker in (
+        "机位是它的因变量", "列全并全部保留", "最能呈现这些信息",
+        "view from behind", "head turned back over shoulder",
+        "互相矛盾的姿态或视线", "构图以小说原文为准",
+        "物理可达性", "中间物理事实", "物理互斥", "有出处的那一项",
+    ):
+        assert marker in clause, marker
+    # 反因果措辞（首版写法）必须已被移除。
+    assert "不得同时写正面专属构图" not in clause
+    # 必须**在【多人分述】之外**（放在它之前 ⇒ 不受「两名以上主体」条件限制）。
+    anima = profiles._system("anima_tags", {"rating": "nsfw"})
+    assert anima.index("【画面自洽·机位由内容反推】") < anima.index("【多人分述】")
+    # 单人帧（无 subjects/actors）也必须拿到条款。
+    solo = profiles._system("natural_language", {"rating": "nsfw"})
+    assert "【画面自洽·物理可达性】" in solo
+
+
+def test_第39刀_两侧都有必须按细节动作分偏侧面():
+    """第 39 刀（2026-09-21 用户细化）：第 38 刀把「内容两侧都有」写成一句话
+    「取能**同时**看见两者的机位（背后视角 ＋ 回头）」——太粗。用户要求**分两档**：
+    「两侧都有的情况就分为**正面偏侧面**和**背面偏侧面**，要区分偏向于正面还是背面就**看细节动作**，
+    就比如双手掰开臀部，这就是背面偏侧面，双手托胸就是正面偏侧面……**不只是手部细节动作，
+    可能还有别的细节动作**」⇒ 偏向由**动作自身的接触面**判定，**不限于手**。
+
+    本测试同时是**零回归锁**：① 四档逐字一致；② 旧的「一句话机位」措辞必须已被移除
+    （否则模型仍会退回「背后视角 ＋ 回头」的粗档）；③ 必须保留与【视角】块的衔接句
+    「身体朝向仍以本轮画面事实为准」，避免模型为迎合「正面偏侧面」把背向式姿势改写成正面。
+    """
+    end_marker = "**身体朝向仍以本轮画面事实为准**（不得把已写明的背向式姿势改写成正面，此时应取背面偏侧面）。"
+    clauses: list[str] = []
+    for profile in ("anima_tags", "natural_language", "niji_sections", "krea2"):
+        system = profiles._system(profile, {"rating": "nsfw"})
+        start = system.index("【画面自洽·机位由内容反推】")
+        end = system.index(end_marker, start) + len(end_marker)
+        clauses.append(system[start:end])
+    for clause in clauses[1:]:
+        assert clause == clauses[0]
+
+    clause = clauses[0]
+    for marker in (
+        "内容两侧都有时", "背面偏侧面", "正面偏侧面",
+        "three-quarter back view", "three-quarter front view",
+        "细节动作", "不限于手", "接触面",
+        "双手掰开臀部", "双手托胸",
+        "head turned back over shoulder", "只取一侧",
+    ):
+        assert marker in clause, marker
+    # 两档必须**并列**存在，且各自绑定身体面（不是只留一档）。
+    assert clause.index("背面可及处") < clause.index("正面可及处")
+    # 旧的一句话机位（粗档）必须已被移除。
+    assert "取能**同时**看见两者的机位" not in clause
+    # 零回归：单人帧同样拿到分档条款。
+    solo = profiles._system("natural_language", {"rating": "nsfw"})
+    assert "背面偏侧面" in solo and "正面偏侧面" in solo
 
 
 def test_第一人称身体局部必须有出处不得凭空添加():
@@ -3568,6 +4192,73 @@ def test_第31刀_多人帧不再同时出现1girl与2girls():
     assert "3girls" not in entries
 
 
+# ---------------------------------------------------------------------------
+# 第 46 刀（2026-09-22 用户定案）：整条人数词设施原本**按 girls 建**，用户实报
+#   「现有的项目是只要角色 > 1 那就一律判定为 girls……我自始至终强调的是**第三人称时按剧情
+#    的画面中有哪些人物判断**，如男主主人公＋2 女主角就是 `1boy, 2girls`；女主人公＋2 男主角
+#    `1girl, 2boys`……也就是说**根据剧情判断在场的内容，不是锁死女角色**」。
+# 四处 girls 偏向：① 族内归一 `_resolve_subject_counts` 只认 girls；② 跨族孤儿闸只剔 boys；
+#   ③ 兜底硬写 `2girls`；④ 契约只判 girls 上界（第 45 刀已删下限）。
+# 本刀治 ①②③（④ 已在第 45 刀收口），并把**逐主体性别**（世界书条目 → 通用表「性别」列）
+# 接进画面主体名单。性别解析不全 ⇒ **不写具体性别族**（用户定案）。
+# ---------------------------------------------------------------------------
+
+def test_第46刀_族内归一认两族_纯男帧不再留下solo():
+    """① 族内归一从「只认 girls」扩到**两族**。
+
+    零 LLM 走查实锤：纯男帧 `2boys, solo` 旧实现整段跳过 ⇒ 首行同时出现 `2boys` 与 `solo`
+    （自相矛盾）；`1girl, 2boys, solo` 更是完全不归一。新口径：**逐族只留最高位**，
+    任一族最高位 ≥2 ⇒ 统一剔 `solo`。
+    """
+    resolve = profiles._resolve_subject_counts
+
+    # 旧实现整段跳过的那格
+    assert resolve("2boys, solo, low angle") == "2boys, low angle"
+    # 旧实现完全不归一的跨族格
+    assert resolve("1girl, 2boys, solo, low angle") == "1girl, 2boys, low angle"
+    # 两族各留最高位（跨族**不相消**：`1girl, 2boys` 是合法阵容）
+    assert resolve("1boy, 2boys, 1girl, low angle") == "2boys, 1girl, low angle"
+    # 零回归：单人帧 / 无计数词 ⇒ 逐字节不动
+    assert resolve("1girl, solo, low angle") == "1girl, solo, low angle"
+    assert resolve("low angle, rim lighting") == "low angle, rim lighting"
+
+
+def test_第46刀_人数词按性别组成且宁缺勿猜():
+    """③ 兜底的性别计数词（纯函数）：全可解析才写具体族，有未知 ⇒ 空串（调用方转中性措辞）。"""
+    words = profiles._subject_count_words
+
+    assert words(["女", "女"]) == "2girls"
+    assert words(["女"]) == "1girl"
+    assert words(["男", "女"]) == "1girl, 1boy"
+    assert words(["女", "男", "男"]) == "1girl, 2boys"
+    assert words(["男", "男"]) == "2boys"
+    # 未知 / 空 ⇒ 空串（**不猜**）
+    assert words(["女", ""]) == ""
+    assert words([]) == ""
+
+
+def test_第46刀_逐主体性别与画面主体名单同长同序():
+    """`_contract_subject_genders` 必须与 `_contract_subject_names` **严格对齐**（缺名 ⇒ 空串）。"""
+    scene = {
+        "narrative": "……", "rating": "nsfw", "actors": ["世熙", "泰宇老师"],
+        "subject_genders": {"世熙": "女", "泰宇老师": "男", "旁人": "女"},
+    }
+    assert profiles._contract_subject_names(scene) == ["世熙", "泰宇老师"]
+    assert profiles._contract_subject_genders(scene) == ["女", "男"]
+
+    # 缺键 / 类型不符 ⇒ 全空串（老调用方零回归）
+    assert profiles._contract_subject_genders({"actors": ["世熙"]}) == [""]
+    assert profiles._contract_subject_genders(
+        {"actors": ["世熙"], "subject_genders": ["女"]},
+    ) == [""]
+    # 第一人称：叙事者已从名单剔掉 ⇒ 性别表也自然不包含他
+    first = {
+        "actors": ["凌渊", "世熙", "宥夏"], "viewpoint": "first_person", "narrator": "凌渊",
+        "subject_genders": {"凌渊": "男", "世熙": "女", "宥夏": "女"},
+    }
+    assert profiles._contract_subject_genders(first) == ["女", "女"]
+
+
 def test_第31刀_单人帧的人数词逐字节不动():
     """⚠ 零回归锁：没有多人计数词时（单人定格帧），`1girl, solo` 必须原样保留。"""
     raw = _anima_raw(chr(10).join((
@@ -3609,20 +4300,31 @@ def test_第31刀_孤立妩媚不得凭空补神情():
     )
 
 
-def test_第31刀_视角条款补视线与朝向口径():
-    """⑤ 用户定案：**第一人称＝看向镜头；第三人称＝看向主人公**。
+def test_视线口径_按剧情写不得强制指向叙事者():
+    """2026-09-22 用户纠正第 31／33 刀：**视线方向由剧情决定**，人称只决定「翻译方向」。
 
-    ⚠ **第 33 刀（2026-09-21）收窄**：本定案里「**身体朝向**也必须指向叙事者」那一半被真机推翻
-    （L3·NSFW多人 natural 把两名**背向**撅臀的角色写成「面向 + 跪着」⇒ 空间关系读成面对面）⇒
-    身体朝向改由**画面事实**决定，见
-    `test_第33刀_视角条款把背向式姿势的身体朝向交回画面事实`。这里只锁**仍然成立的那一半**。
+    - 剧情**没写**某人看向叙事者 ⇒ 不得让角色看向主人公／镜头（**不默认、不强制**）；
+    - 剧情**写了**「看向我／注视我／回眸」⇒ 才写：第三人称→指向**主人公本人**、
+      第一人称→指向**镜头**（＝叙事者眼睛，第 51 刀 FP6 的等价）。
+    ⚠ 身体朝向仍按画面事实（第 33 刀，见
+    `test_第33刀_视角条款把背向式姿势的身体朝向交回画面事实`）。
     """
     third = profiles._viewpoint_clause({"viewpoint": "third_person"})
     first = profiles._viewpoint_clause({"viewpoint": "first_person"})
 
+    # 两条都改成「按本轮画面事实写」＋「不得默认或强制」
+    assert "视线方向按本轮画面事实写" in third
+    assert "视线方向按本轮画面事实写" in first
+    assert "不得默认或强制" in third and "不得默认或强制" in first
+    # 旧的「一律指向」强制句必须消失
+    assert "抬眸）指向叙事者本人" not in third
+    assert "视线方向**指向**镜头" not in first
+    # 有出处时才翻译：第三人称→叙事者本人；第一人称→镜头
     assert "指向叙事者本人" in third
-    assert "不得用 toward the camera" in third
-    assert "指向**镜头**" in first
+    assert "回望" in first and "镜头" in first
+    # 不得把方向凭空交给镜头（第三人称）
+    assert "不得凭空用 toward the camera" in third
+    # 第一人称仍禁把叙事者写成画面里的第三方人物
     assert "不得把叙事者另写成画面里的第三方人物" in first
 
 
@@ -4014,3 +4716,1178 @@ def test_第33刀_无viewpoint时视角条款逐字节不出现():
         "【视角·第一人称】")
 
 
+def test_第42刀_第一人称条款必须认出第三人称叙述的主人公():
+    """C（2026-09-22 用户实锤「手选第一人称，主人公仍在画面内」）。
+
+    第一人称的**数据层**保护（`filter_anchor_subjects`／`_strip_narrator_from_model_view`／
+    `_contract_subject_names`）全部挂在 `narrator` 上 ⇒ 设置为空时集体空转，只剩本条款在挡。
+
+    ⚠ **2026-09-22 再纠正（真机复现）**：第 42 刀原把身份判据落成「看**叙述人称**『我』、
+    **不看名字**」——该规则在**第三人称叙述**的正文上**整体失效**：真机 `illustration.request`
+    （18:26:23）手选第一人称生效（`source=override`），但该轮正文是第三人称、点名主人公
+    「凌渊」10 次、「他」8 次、**一个「我」都没有** ⇒ 模型读到「这不是第一人称」⇒ 交付稿英文
+    正文写出 `the shoulder of the man beside her … his inner robe … the man's lower abdomen`
+    （把主人公画成画面里的一个男人）。
+
+    用户定案：「**文段判断机械做不了，语境理解得靠 LLM**」⇒ 条款改成：
+    ① 人称由**用户手选**确定，**不得据正文叙述人称推翻**；
+    ② 正文可能是**第三人称点名主人公**，**那仍是第一人称**、主人公＝镜头；
+    ③ 请 LLM **按语境**认出他。⚠ 零回归锁不变。"""
+    clause = profiles._viewpoint_clause({"viewpoint": "first_person"})
+
+    assert "手选" in clause and "不得据正文的叙述人称推翻" in clause
+    assert "第三人称" in clause and "仍然是第一人称" in clause
+    assert "按语境" in clause
+    assert "无论他叫什么" in clause
+    # 身份判据不再依赖任何设置 ⇒ 无 narrator 也能指定「谁是叙事者」
+    assert "不入画" in clause
+
+
+def test_第42刀_无narrator时条款仍点得出叙事者身份():
+    """可用性锁：`narrator` 为空（真机默认）时，条款不得退化成无法识别的泛称。"""
+    no_name = profiles._viewpoint_clause({"viewpoint": "first_person"})
+    named = profiles._viewpoint_clause({"viewpoint": "first_person", "narrator": "甲"})
+
+    assert "叙述人称" in no_name and "无论他叫什么" in no_name
+    assert "叙事者（甲）" in named
+    # 有名字时同样带身份判据（两档只差称呼，判据同一份）
+    assert "叙述人称" in named and "无论他叫什么" in named
+
+
+# ---------------------------------------------------------------------------
+# 第 43 刀（2026-09-22 用户实锤）：第一人称「叙事者局部肢体按剧情入画」被杀掉了
+#
+# 真机现场（slot -46 · anima_tags · 手选第一人称）：正文写了「那条肉棒从单衣下摆里挣出来…
+# 命中她鼻梁以下的整张脸。滚烫的柱身拍在她颧骨、鼻尖和唇上」，成稿却只有 `1girl, solo…`。
+# `_viewpoint_clause` 的「身体局部按事实入画」条款还在，但确定性通道两处同时断：
+#   ① `_scene_contact_tags` 的唯一调用点 `_actor_visual_details` 在 `len(scope) < 2` 早退，
+#      第一人称下画面主体只剩女主 ⇒ **单主体帧根本没有这条通道**（唯一消费方
+#      `_multi_actor_sentences` 同样只在 ≥2 主体时产出）；
+#   ② 既有接触表只收「手 × 臀/腰/私处」，且要求句内出现第一人称「我」——真机正文是
+#      「那条肉棒…命中她鼻梁以下的整张脸」（主语是器官、叙事者是名字）⇒ 连句级门槛都过不去。
+# ---------------------------------------------------------------------------
+def _第一人称局部场景(**overrides):
+    # ⚠ 用**真机原句**当夹具：第二句里的「龟头**顶**端…从她**脸**颊一直挂到嘴**角**」
+    #   曾被「同句三元组共现」的宽松判据一次性点着「压脸」「口交」两条规则
+    #   ⇒ 产出正文里根本没有的动作（凭空装置）。只判同句共现的版本会在这条夹具上红。
+    scene = {
+        "viewpoint": "first_person",
+        "subjects": [{"name": "妲千沁", "description": "silver hair, fox ears"}],
+        "actors": ["妲千沁"],
+        "narrative": (
+            "那条肉棒从单衣下摆里挣出来，裹着的那层布被挑开，青筋暴起的一整根直挺挺甩上来，"
+            "命中她鼻梁以下的整张脸。滚烫的柱身拍在她颧骨、鼻尖和唇上，龟头顶端撞过眼罩下沿，"
+            "留下一道黏腻的阳元浊痕，从她脸颊一直挂到嘴角。"
+        ),
+    }
+    scene.update(overrides)
+    return scene
+
+
+def test_第43刀_第一人称解析出叙事者局部入画事实_其余档位零回归():
+    scene = _第一人称局部场景()
+    facts = profiles._narrator_limb_facts(scene)
+    # 真机正文只写了「拍在脸上」，就只许产出这一条
+    assert facts == ["an erect penis slapping her face"]
+    assert "an erect penis thrusting into her mouth" not in facts, "「龟头顶端」的顶不得判成口交"
+    assert "an erect penis pressing against her face" not in facts, "同句共现≠接触，不得虚报压脸"
+    # 零回归锁：`viewpoint` 缺失 / 第三人称 ⇒ 空表
+    assert profiles._narrator_limb_facts({**scene, "viewpoint": ""}) == []
+    assert profiles._narrator_limb_facts({**scene, "viewpoint": "third_person"}) == []
+    # 无画面主体 ⇒ 没有归属对象，不产
+    assert profiles._narrator_limb_facts({**scene, "subjects": [], "actors": []}) == []
+    # 只有器官、没有接触动作/被触部位 ⇒ 不产（第 22 刀同族：无出处不入画）
+    assert profiles._narrator_limb_facts(
+        {**scene, "narrative": "那条肉棒从单衣下摆里挣出来。"}) == []
+    # 邻接判据：动词与其宾语部位隔着远处另一个部位时不得误配（器官…顶…远远的「脸」）
+    assert profiles._narrator_limb_facts(
+        {**scene, "narrative": "龟头顶端撞过眼罩下沿，留下一道浊痕，从她脸颊挂到嘴角。"}) == []
+
+
+def test_第43刀_第一人称条款点明下体局部与入画事实来源():
+    clause = profiles._viewpoint_clause({"viewpoint": "first_person"})
+    assert "下体" in clause and "男根" in clause
+    assert "肉棒拍在她脸上" in clause
+    assert "叙事者局部入画事实" in clause, "条款必须点出载荷里那行事实的出处"
+
+
+def test_第51刀_FP6_接触镜头条款():
+    """FP6（2026-09-22 登记）：第一人称下「看向/亲吻/接触主人公」＝「看向/亲吻/接触镜头」。
+
+    条款必须显式给出来，且第三人称不掺此条款（第三人称下主人公是画面里的真人）。"""
+    first = profiles._viewpoint_clause({"viewpoint": "first_person"})
+    assert "接触镜头" in first
+    assert "看向/亲吻/接触" in first
+    assert "镜头就是" in first, "必须点明『镜头即叙事者眼睛』的等价关系"
+    third = profiles._viewpoint_clause({"viewpoint": "third_person"})
+    assert "接触镜头" not in third
+
+
+def test_第51刀_人称单一真源_消费点一致剔除叙事者():
+    """唯一性锁（第 51 刀，修 D1）：`scene_spec` 一旦写入 `narrator`，6 处消费点必须一致，
+    不得出现「某点把叙事者当画面主体、另一点剔除」的分裂。
+
+    真机症状就是分裂——`_strip_narrator_from_model_view` 把甲从载荷剔掉，但
+    `_contract_subject_names` 仍把甲算进主体数 ⇒ 成稿多画一个人、女主服装被绑到甲身上。"""
+    scene = {"viewpoint": "first_person", "narrator": "甲", "actors": ["甲", "乙"]}
+    # ① 主体数：剔甲
+    assert profiles._contract_subject_names(scene) == ["乙"]
+    # ② 模型载荷：剔甲
+    model = profiles._strip_narrator_from_model_view(scene)
+    assert "甲" not in model.get("actors", [])
+    # ③ 数据层判据：叙事者名
+    assert profiles._first_person_narrator(scene) == "甲"
+    # ④ 第三人称对称：不剔（主人公算一个主体）
+    third = {**scene, "viewpoint": "third_person"}
+    assert "甲" in profiles._contract_subject_names(third)
+
+
+def test_第43刀_模型载荷带显式入画事实行且只在第一人称():
+    first = profiles._scene_for_model(_第一人称局部场景())
+    assert "叙事者局部入画事实" in first["narrative"]
+    assert "an erect penis slapping her face" in first["narrative"]
+    # 第三人称：叙事者本来就在画面里，走常规事实链 ⇒ 不注入
+    third = profiles._scene_for_model(_第一人称局部场景(viewpoint="third_person"))
+    assert "叙事者局部入画事实" not in third["narrative"]
+
+
+def test_第43刀_模型漏写时由字段账本补进成稿且不在状态槽复述成病句():
+    scene = _第一人称局部场景()
+    prompt = (
+        "masterpiece, best quality, 1girl, solo, silver hair, fox ears, kneeling, "
+        "close-up on lower face, medium shot, directional light, consistent anatomy.\n"
+        "The camera looks down at the primary adult character as she kneels in the wet grass."
+    )
+    ledger = profiles.prompt_field_ledger(prompt, scene)
+    assert ledger["action"]["required"] is True
+    assert ledger["action"]["covered"] is False
+    assert "an erect penis slapping her face" in ledger["action"]["expected"]
+
+    anima, _ = profiles.complete_field_coverage("anima_tags", prompt, scene)
+    assert "an erect penis slapping her face" in anima.splitlines()[0]
+    # 病句闸（第 27/29 刀同族）：状态槽不得把叙事者的器官复述给女主
+    assert "depicted with an erect penis" not in anima
+
+    natural, _ = profiles.complete_field_coverage(
+        "natural_language",
+        "A mediaeval stone chamber with one kneeling adult woman in the foreground.",
+        scene,
+    )
+    assert "an erect penis slapping her face" in natural
+
+
+# ---------------------------------------------------------------------------
+# 第 47 刀（2026-09-22 用户口径纠正）：手/臂类「叙事者局部肢体入画」
+#
+# 用户原话：「肢体例外**不是说凌渊的手这种**，而是**主人公对于画面内容的干涉参与到画面内容**
+#   才会显现，比如说**用双手抓住画面角色的巨乳**，或者是**用肉棒拍打画面角色的脸颊**。」
+# ⇒ 判据＝「叙事者（主人公）的身体部位作为**施动者**、主动作用于画面主体」，
+#   **与文本怎么称呼该部位无关**（喊「我」／喊名字／以部位直接作主语都算）。
+# 43 刀只建了**器官类**（器官本身决定归属 ⇒ 无须句级门槛）；手/臂类必须自带三重限定，
+# 否则会把**别人的手**算给叙事者。器官类规则本刀逐条不动。
+# ---------------------------------------------------------------------------
+def _第一人称手类场景(narrative: str) -> dict:
+    return {
+        "viewpoint": "first_person",
+        "subjects": [{"name": "妲千沁", "description": "silver hair, fox ears"}],
+        "actors": ["妲千沁"],
+        "narrative": narrative,
+    }
+
+
+def test_第47刀_手类局部入画按施动者判定_不看文本怎么称呼():
+    facts = profiles._narrator_limb_facts
+    # 用户第一例：施动者没标主、且之前没出现第三人称 ⇒ 第一人称叙事里就是「我」做的
+    assert facts(_第一人称手类场景("用双手抓住画面角色那对巨乳。")) == ["hands grabbing her breasts"]
+    # 写明第一人称 / 以部位直接作主语 ⇒ 同样算
+    assert facts(_第一人称手类场景("我双手抓住她的巨乳。")) == ["hands grabbing her breasts"]
+    assert facts(_第一人称手类场景("双手托着她的脸颊。")) == ["hands touching her face"]
+    # 用户第二例（器官类，43 刀已覆盖）——回归锁：本刀不得改动器官类
+    assert facts(_第一人称手类场景("那条肉棒拍打画面角色的脸颊。")) == ["an erect penis slapping her face"]
+
+
+def test_第47刀_手类三重限定_自己的胸与他人的手不算叙事者():
+    facts = profiles._narrator_limb_facts
+    # ① 间隙里的「自己的」⇒ 是女主自己的动作，不是叙事者的手
+    assert facts(_第一人称手类场景("她双手抓住自己的巨乳。")) == []
+    # ② 施动者被第三人称领有（`她的双手`／`她手`）
+    assert facts(_第一人称手类场景("她的双手抓住巨乳。")) == []
+    # ③ 施动者之前已出现第三人称 ⇒ 画面里已有别人在做，归属不确定（宁漏不编）
+    assert facts(_第一人称手类场景("他伸手拍她的脸。")) == []
+    assert facts(_第一人称手类场景("她双手捧着巨乳。")) == []
+    # ④ **已锁边界**（宁漏不编的反面，显式登记）：同一逗号分句里若**先出现第一人称**，
+    #    ③ 仍会放行 ⇒ 手类可能多认一条。若日后收紧，本断言变红＝预期变更，不是回归。
+    assert facts(_第一人称手类场景("我抱住她，她伸手拍她的脸。")) == ["hands touching her face"]
+
+
+def test_第47刀_手类与器官类同走零回归锁与邻接判据():
+    facts = profiles._narrator_limb_facts
+    scene = _第一人称手类场景("我双手抓住她的巨乳。")
+    assert facts({**scene, "viewpoint": ""}) == []
+    assert facts({**scene, "viewpoint": "third_person"}) == []
+    assert facts({**scene, "subjects": [], "actors": []}) == []
+    # 邻接判据（≤10 字、不跨句）在手类同样生效：手在榻沿、胸在远处 ⇒ 不得配成接触
+    assert facts(_第一人称手类场景("我双手搭在榻沿上，另一头她的巨乳随着呼吸起伏。")) == []
+    # 跨句不得配（句读切开）
+    assert facts(_第一人称手类场景("我抬起双手。她的巨乳在灯下起伏。")) == []
+
+
+def test_第47刀_手的入画事实进动作槽由账本补进成稿且不出物主错配病句():
+    scene = _第一人称手类场景("我双手抓住她的巨乳。")
+    prompt = (
+        "masterpiece, best quality, 1girl, solo, silver hair, fox ears, kneeling, "
+        "medium shot, directional light, consistent anatomy.\n"
+        "The camera looks down at the primary adult character as she kneels."
+    )
+    ledger = profiles.prompt_field_ledger(prompt, scene)
+    assert ledger["action"]["required"] is True
+    assert ledger["action"]["covered"] is False
+    assert "hands grabbing her breasts" in ledger["action"]["expected"]
+
+    anima, _ = profiles.complete_field_coverage("anima_tags", prompt, scene)
+    assert "hands grabbing her breasts" in anima.splitlines()[0]
+    # 病句闸（第 29／31／43 刀同族）：状态槽不得把手复述给女主
+    assert "depicted with hands" not in anima
+
+
+# ---------------------------------------------------------------------------
+# 第 40 刀（2026-09-21 用户实报）：第一人称下模型仍写 `1boy`
+#
+# 真机现场（`backend/data/logs/agent-trace.jsonl` · `illustration.submitted` ·
+# 2026-09-21T21:48:20 · slot 43）：
+#   `illustration.request` 明写 `actors: ["舞姬恋", "凌若冰"]`、`actor_count: 2`
+#   ——**叙事者根本不在 `actors` 里**；契约 `_multi_actor_contract_errors` 也只要求 `2girls`。
+#   但交付首行是 `…, anime coloring, 2girls, 1boy, male viewer pov, first-person view,
+#   no viewer face, …`。`1boy` 与 `male viewer pov` **同现** ⇒ 模型把**不入画的叙事者**
+#   （男性）写成了画面里的第 3 个人（用户原话：「除非是第三人称，主角相关的 tag 才可能
+#   进入提示词中」）。
+#
+# 归因（技能 `demiurge-viewpoint-subject-scope` §2 三步）：
+#   ① 程序产出？—— `_SUBJECT_COUNT_RE` 只认 `\d+ girls?`，全链**从不产** `Nboy`；37 刀又把
+#      性别注入按视角关掉（`agent_agency` 里 `viewpoint_detail["viewpoint"] != "first_person"`
+#      才读世界书）⇒ `1boy` 是**模型自写**。
+#   ② 不列禁词表（第一人称下画面里**真可能**有别的男性，禁词闸会误杀），改用**客观量数判据**：
+#
+#   **girls 族计数已占满画面主体名额时，多出来的 boys 族计数词是孤儿** ⇒ 剔除
+#   （画面主体已按 37 刀口径剔掉叙事者）：`2girls` 占满 2 个名额 ＋ 模型多写 `1boy` ⇒ 剔 `1boy`。
+#   ⚠ 与 31 刀同源（「同一帧只允许一个画面主体数口径」），只是从**族内**（`1girl`+`2girls`）
+#     扩到**跨族**（girls 族 + boys 族）。
+#   ⚠ 只剔 **boys 族**：girls 族是合同硬要求（`2girls` 不得动、不得升格 `3girls`，31 刀红线）。
+#   ⚠ **不是禁词表**：girls 族没占满名额时（`1girl, 1boy`、`2boys, 1girl`、纯男性帧）
+#     **原样保留** —— 第一人称下画面里真可能有别的男性。
+#   ⚠ 这恰好就是用户口径的**客观形态**——第三人称下叙事者算一个画面主体 ⇒ girls 族占不满
+#     名额 ⇒ `1boy` 原样保留。
+# ---------------------------------------------------------------------------
+
+
+def _第40刀_raw(extra: str) -> str:
+    return _anima_raw(chr(10).join((
+        f"masterpiece, 2girls, {extra}, low angle, rim lighting, close-up",
+        "The two adult characters kneel side by side in a warm room.",
+    )))
+
+
+def test_第40刀_第一人称画面主体无男性时不得出现1boy():
+    """真机 slot 43：`actors` 两名女性、契约只要求 `2girls`，模型却多写 `1boy`。
+    修后 `1boy` 必须消失，**与人数无关的模型 tag 一个都不许丢**（这不是禁词闸）。"""
+    scene = _anima_场景(narrator="泰宇老师", viewpoint="first_person")
+    tags = profiles._normalize(
+        "anima_tags", _第40刀_raw("1boy, male viewer pov, first-person view"), scene,
+    ).splitlines()[0]
+    entries = tags.split(", ")
+
+    assert "2girls" in entries
+    assert "1boy" not in entries
+    assert "1boys" not in entries
+    for kept in ("male viewer pov", "first-person view", "low angle", "rim lighting", "close-up"):
+        assert kept in tags, (kept, tags)
+    assert "3girls" not in tags
+
+
+def test_第40刀_叙事者名未写进scene时闸照样生效():
+    """⚠ 真机现场本来就是这个形态：`actors` 只有两名女性、叙事者不在其中 ⇒
+    37 刀的「剔叙事者」是 no-op。闸**不得**依赖 `narrator` 是否写进了 scene。"""
+    scene = {
+        "narrative": "两边同时被掰开。", "rating": "nsfw",
+        "actors": ["世熙", "宥夏"], "viewpoint": "first_person",
+    }
+    tags = profiles._normalize("anima_tags", _第40刀_raw("1boy"), scene).splitlines()[0]
+
+    assert "1boy" not in tags.split(", ")
+    assert "2girls" in tags.split(", ")
+
+
+def test_第40刀_第三人称叙事者占主体名额时保留1boy():
+    """⚠ 反向锁（用户口径的客观形态）：第三人称下叙事者**是**画面里的一个人 ⇒
+    主体数 3、`2girls + 1boy = 3` ⇒ 不溢出 ⇒ `1boy` 原样保留。"""
+    scene = {
+        "narrative": "他站在两名女子身后。", "rating": "nsfw",
+        "actors": ["世熙", "宥夏", "泰宇老师"],
+        "narrator": "泰宇老师", "viewpoint": "third_person",
+    }
+    tags = profiles._normalize("anima_tags", _第40刀_raw("1boy"), scene).splitlines()[0]
+
+    assert "1boy" in tags.split(", ")
+    assert "2girls" in tags.split(", ")
+
+
+def test_第40刀_第一人称画面主体含男性时1boy不被误杀():
+    """⚠ 反向锁（技能 §2 红线「加禁词闸会误伤合法场景」）：第一人称下画面里**完全可能**
+    真有别的男性。主体数 2 ＋ `1girl, 1boy`（总和 2）⇒ 不溢出 ⇒ 保留。"""
+    raw = _anima_raw(chr(10).join((
+        "masterpiece, 1girl, 1boy, towering adult man, slim adult woman, low angle, rim lighting",
+        "An adult man stands behind an adult woman in a warm room.",
+    )))
+    scene = {
+        "narrative": "一名男子站在女子身后。", "rating": "nsfw",
+        "actors": ["世熙", "旁观的男子"],
+        "narrator": "泰宇老师", "viewpoint": "first_person",
+    }
+    tags = profiles._normalize("anima_tags", raw, scene).splitlines()[0]
+
+    assert "1boy" in tags.split(", ")
+    assert "1girl" in tags.split(", ")
+
+
+def test_第40刀_单人帧多出的1boy同样剔除():
+    """主体数 1（`1girl, solo`）而模型写 `1girl, solo, 1boy` ⇒ 总和 2 > 1 ⇒ 剔 boys。"""
+    raw = _anima_raw(chr(10).join((
+        "masterpiece, 1girl, solo, 1boy, low angle, rim lighting, close-up",
+        "A lone adult woman kneels in a warm room.",
+    )))
+    tags = profiles._normalize("anima_tags", raw, _anima_场景(actors=["世熙"])).splitlines()[0]
+    entries = tags.split(", ")
+
+    assert "1boy" not in entries
+    assert "1girl" in entries
+    assert "solo" in entries
+
+
+def test_第40刀_主体数取不到时人数词逐字节不动():
+    """零回归锁：`scene` 没有 `actors` / `subjects` / `frame_subjects`（老调用方）
+    ⇒ 主体数取不到 ⇒ 闸 no-op。"""
+    tags = profiles._normalize(
+        "anima_tags", _第40刀_raw("1boy"), {"narrative": "……", "rating": "nsfw"},
+    ).splitlines()[0]
+
+    assert "1boy" in tags.split(", ")
+
+
+def test_第46刀_孤儿闸_无性别只剔boys_有性别对称():
+    """判据自检（锁的锁）。
+
+    · **第 40 刀口径**（无逐主体性别）＝只剔 boys 族，girls 族一字不动；
+    · **第 46 刀口径**（有逐主体性别）＝**对称**：某族真值为 0 ⇒ 该族计数词整族剔。
+    两种口径下**不触发时都逐字节返回原串**。
+    """
+    drop = profiles._drop_orphan_subject_counts
+
+    # —— 第 40 刀口径（genders 缺省）——
+    # 触发：girls 族已占满主体名额 ＋ 行内存在 boys 族 ⇒ 剔 boys
+    assert drop("2girls, 1boy, low angle", 2) == "2girls, low angle"
+    assert drop("1girl, solo, 1boy, low angle", 1) == "1girl, solo, low angle"
+    assert drop("3girls, 1boy, low angle", 3) == "3girls, low angle"  # girls 族一字不动
+
+    # 不触发：girls 族**没占满** ⇒ 第一人称下画面里真有别的男性，不得误杀
+    assert drop("2girls, 1boy, low angle", 3) == "2girls, 1boy, low angle"
+    assert drop("1girl, 1boy, low angle", 2) == "1girl, 1boy, low angle"
+    assert drop("2boys, 1girl, low angle", 2) == "2boys, 1girl, low angle"
+    assert drop("1girl, 1boy, 1vs1, low angle", 2) == "1girl, 1boy, 1vs1, low angle"
+
+    # 不触发：没有 boys 族 ⇒ girls 族一律不动（哪怕计数超过主体数，属另一刀的范围）
+    assert drop("3girls, low angle", 2) == "3girls, low angle"
+    assert drop("2boys, low angle", 2) == "2boys, low angle"
+
+    # 零回归：主体数取不到 ⇒ 逐字节返回
+    assert drop("2girls, 1boy, low angle", 0) == "2girls, 1boy, low angle"
+
+    # —— 第 46 刀对称口径（有逐主体性别）——
+    # 两女帧写 `1boy` ⇒ boys 真值 0 ⇒ 剔 boys
+    assert drop("2girls, 1boy, low angle", 2, ["女", "女"]) == "2girls, low angle"
+    # 纯男帧写 `1girl` ⇒ girls 真值 0 ⇒ **剔 girls**（旧口径不许动 girls 族的反向形态）
+    assert drop("2boys, 1girl, low angle", 2, ["男", "男"]) == "2boys, low angle"
+    # 两族真值都 > 0 ⇒ 不触发（模型可能只是顺序不同）⇒ 逐字节
+    assert drop("2girls, 1boy, low angle", 2, ["男", "女"]) == "2girls, 1boy, low angle"
+    assert drop("2girls, 1boy, low angle", 3, ["女", "女", "男"]) == "2girls, 1boy, low angle"
+    # 性别不全 / 与主体数不同长 ⇒ **退回第 40 刀口径**（只剔 boys、girls 族不动）
+    # ⚠ 退回口径**仍会剔 boys**（girls 族 2 已占满 2 个名额）——这正是第 40 刀的行为。
+    assert drop("2girls, 1boy, low angle", 2, ["女", ""]) == "2girls, low angle"
+    assert drop("2girls, 1boy, low angle", 2, ["女"]) == "2girls, low angle"
+
+
+# ---------------------------------------------------------------------------
+# 第 41 刀（2026-09-21 用户口径）：多人契约的人数词判据从**硬编码 `2girls`**
+# 泛化成「**只给 girls 族上下界**：`2 ≤ girls ≤ 画面主体数`」。
+#
+# 用户口径（原样）：
+#   「第三人称模式时就按照剧情正常来就行，**无需像第一人称一样删去剧情里面出现的
+#     主人公的 tag**（除非有什么动作时第一人称下出现部分肢体…）」
+#   ＋「主人公是男的，现场两女的 `2girls, 1boy`；主人公是女的，现场两女的 `3girls`」
+#
+# 旧判据 `\b(?:2girls|two girls)\b` 把「画面主体**恒为 2** 且全女」写死 ⇒ 三人帧里
+# 模型**写对的 `3girls` 反被判红**（零 LLM 复现：`_tmp/i41_probe.py` 的 A2/C2 格）。
+#
+# ⚠ 本刀**只放宽「必须是 2」这一个数字**，不放松别的：
+#   · `1girl, 1boy`（girls 族只占 1 个名额）**仍判红** —— 31 刀那条锁原样；
+#   · `1girl, 2girls` 并存**仍通过**（同族只认最高位，与 `_resolve_subject_counts` 同口径）
+#     ⇒ 不给 31 刀的实锤残留新增判红面；
+#   · `4girls` 于 3 人帧（4 > 3）**仍判红**（旧判据同样判红 ⇒ 行为对齐）；
+#   · ⚠ **boys 族刻意不进契约**：`2girls, 1boy` 于 2 主体帧是 40 刀的真机形态，旧判据
+#     **放行**；若把 boys 计入总数就会判红 ⇒ 给已知真机形态**新增判红面**。
+#     boys 族的归属是**归一化侧** 40 刀的「剔孤儿」，契约只判、不重复治。
+# ---------------------------------------------------------------------------
+
+
+def _第41刀_人数词错误(prompt, scene):
+    """只取人数词那两条，跟「第一/第二角色」分述错误分开看。"""
+    return [
+        error for error in profiles._multi_actor_contract_errors(
+            "anima_tags", prompt, scene,
+        )
+        if "2girls" in error or "画面主体数" in error
+    ]
+
+
+def test_第41刀_三人帧写对3girls不再被判红():
+    """用户口径正面例（主人公女 ＋ 现场两女）：`3girls` 是**正确**输出，不得判红。
+
+    旧行为：`\\b(?:2girls|two girls)\\b` 匹配不到 `3girls` ⇒ 判红 ⇒ 逼修复轮
+    （修复轮会换稿，极端情况掉通用兜底模板，把模型的真实画面全丢）。
+    """
+    scene = _契约场景(actors=["甲", "乙", "丙"], frame_subjects=["甲", "乙", "丙"])
+    prompt = "3girls, low angle, rim lighting\nA quiet indoor scene with soft light."
+
+    assert _第41刀_人数词错误(prompt, scene) == []
+
+
+def test_第41刀_三人帧2girls1boy通过():
+    """用户口径正面例（主人公男 ＋ 现场两女）：`2girls, 1boy` 合法。
+
+    注意：这里**不需要**知道主人公性别就成立 —— 计数字面只有「2 女 + 1 男」，
+    与画面主体数 3 对齐。性别由模型按注入的 `【性别】男` 自己写（23 刀定案：
+    性别只作画面事实、不机械拼硬标签）。
+    """
+    scene = _契约场景(actors=["甲", "乙", "丙"], frame_subjects=["甲", "乙", "丙"])
+    prompt = "2girls, 1boy, low angle, rim lighting\nA quiet indoor scene."
+
+    assert _第41刀_人数词错误(prompt, scene) == []
+
+
+def test_第41刀_第一人称三人帧的3girls同样通过():
+    """第一人称下画面主体已按 37 刀口径**剔掉叙事者**（这里 3 名女性主体）⇒ 同样是 `3girls`。"""
+    scene = _契约场景(actors=["甲", "乙", "丙"], frame_subjects=["甲", "乙", "丙"])
+    scene["viewpoint"] = "first_person"
+    scene["narrator"] = "我"
+    prompt = "3girls, low angle\nA quiet indoor scene."
+
+    assert len(profiles._contract_subject_names(scene)) == 3
+    assert _第41刀_人数词错误(prompt, scene) == []
+
+
+def test_第41刀_第一人称多写的1boy不新增判红面():
+    """行为对齐（零回归）：第一人称下模型多写 `1boy`（40 刀真机形态）⇒ 契约**仍放行**。
+
+    旧判据同样放行（`2girls` / `3girls` 里的 girls 族都 ≥ 2）⇒ 本刀不改变这一格。
+    ⚠ boys 族**故意不进契约**：它若被计入总数，`2girls, 1boy` 于 2 主体帧就成了 3 > 2
+    ⇒ 给已知真机形态**新增判红面**（正是本刀明令避免的）。boys 族的归属是**归一化侧**
+    40 刀的「剔孤儿」（`_drop_orphan_boy_counts`）：契约只判、不重复治。
+    """
+    duo = _契约场景(actors=["甲", "乙"], frame_subjects=["甲", "乙"])
+    duo["viewpoint"] = "first_person"
+    duo["narrator"] = "我"
+    trio = _契约场景(actors=["甲", "乙", "丙"], frame_subjects=["甲", "乙", "丙"])
+    trio["viewpoint"] = "first_person"
+    trio["narrator"] = "我"
+
+    assert _第41刀_人数词错误("2girls, 1boy, low angle\nA quiet indoor scene.", duo) == []
+    assert _第41刀_人数词错误("3girls, 1boy, low angle\nA quiet indoor scene.", trio) == []
+
+
+def test_第41刀_girls族超出画面主体数仍判红():
+    """反向锁（上界，只管 girls 族）：`4girls` 于 3 人帧 ⇒ 4 > 3 ⇒ 判红。
+
+    ⚠ 上界**只在 girls 族上**：旧判据对 `4girls` 也判红（匹配不到 `\\b2girls\\b`）
+    ⇒ 这一格是**行为对齐**，不是新增。
+    """
+    scene = _契约场景(actors=["甲", "乙", "丙"], frame_subjects=["甲", "乙", "丙"])
+
+    assert _第41刀_人数词错误("4girls, low angle\nA quiet indoor scene.", scene) == [
+        "Anima 提示词人数词不得超过画面主体数"
+    ]
+    assert _第41刀_人数词错误("3girls, low angle\nA quiet indoor scene.", scene) == []
+
+
+def test_第45刀_双人帧写1girl1boy放行():
+    """第 45 刀反转此前的反向锁：`1girl, 1boy` 于 2 人帧**合法**。
+
+    理由（用户 2026-09-22 定案「性别的判断是根据剧情来的」）：2 人帧可以是「男主＋1 女」，
+    机械要求 `2girls` 会逼模型凭空多画一个女人（真机 slot -47 实锤）。
+    """
+    scene = _契约场景(actors=["甲", "乙"], frame_subjects=["甲", "乙"])
+    prompt = "1girl, 1boy, low angle\nA quiet indoor scene."
+
+    assert _第41刀_人数词错误(prompt, scene) == []
+
+
+def test_第41刀_31刀锁不变_同族并存只认最高位():
+    """`1girl, 2girls` 并存是 31 刀实锤残留（`_resolve_subject_counts` 会剔低位）。
+
+    契约必须先按**同一口径**（同族最高位）数，否则会给出 3 ⇒ 于 2 人帧判红 ⇒
+    **给 31 刀的真机残留新增判红面**（本刀明确禁止）。
+    """
+    scene = _契约场景(actors=["甲", "乙"], frame_subjects=["甲", "乙"])
+    prompt = "1girl, 2girls, low angle\nA quiet indoor scene."
+
+    assert _第41刀_人数词错误(prompt, scene) == []
+
+
+def test_第41刀_兼容旧two_girls写法():
+    """旧判据接受 `two girls` 词形；新判据不得因此产生回归。"""
+    scene = _契约场景(actors=["甲", "乙"], frame_subjects=["甲", "乙"])
+    prompt = "two girls, low angle\nA quiet indoor scene."
+
+    assert _第41刀_人数词错误(prompt, scene) == []
+
+
+def test_第41刀_判据自检_只认最高位且两岸分开数():
+    """判据自检（锁的锁）：同族只认最高位；girls/boys 分开数；无计数词 ⇒ 双 0。"""
+    totals = profiles._subject_count_totals
+
+    assert totals("1girl, 2girls, low angle") == (2, 0)
+    assert totals("2girls, 1boy, low angle") == (2, 1)
+    assert totals("3girls, low angle") == (3, 0)
+    assert totals("2boys, 1girl, low angle") == (1, 2)
+    assert totals("low angle, rim lighting") == (0, 0)
+    assert totals("two girls, low angle") == (2, 0)
+    assert totals("two-shot, low angle") == (0, 0)  # 不带数字的 shot 词不算计数词
+
+
+
+
+# ── T1：本轮事件性必现事实（体液/睡眠）· 2026-09-23 深夜 ────────────────────
+# 真机：窗口 1676 字里颜射三股＋精液＋睡中俱全，成稿却 `cum/facial/closed eyes/sleeping` 全无；
+# 且该帧 `wardrobe` 为空 ⇒ narrative 不进 `_current_visual_source` ⇒ 旧通道**结构性扫不到**。
+
+
+def _事件场景(**kw):
+    scene = {
+        "narrative": "",
+        "appearance": "妲千沁：银发高马尾、狐耳、蕾丝眼罩",
+        "wardrobe": "",
+        "locale": "客院矮屋",
+        "actors": ["妲千沁"],
+        "rating": "nsfw",
+    }
+    scene.update(kw)
+    return scene
+
+
+def test_T1_窗口里的颜射与睡中被识别为必现事实():
+    scene = _事件场景(narrative="第一股射在鼻梁和眼罩边沿；她还没醒，睡梦里蹙了下眉。")
+    assert profiles._required_event_facts(scene) == ["cum on face", "closed eyes"]
+
+
+def test_T1_窗口无此类事实则不产生强制项_零回归():
+    scene = _事件场景(narrative="她站在剑场中央，握剑起势，衣袂随晨风轻扬。")
+    assert profiles._required_event_facts(scene) == []
+    assert profiles._missing_event_facts("a girl stands in a courtyard", scene) == []
+
+
+def test_T1_源恒为narrative_不随wardrobe变化():
+    """T1 的核心：旧通道在 wardrobe 为空时扫不到 narrative；新通道必须恒定扫窗口。"""
+    scene = _事件场景(narrative="精液挂在眼罩角上。", wardrobe="")
+    assert "精液" not in profiles._current_visual_source(scene)   # 旧通道确实扫不到
+    assert profiles._required_event_facts(scene) == ["cum on face"]  # 新通道扫得到
+
+
+def test_T1_账本把事件事实标为必填且列出期望():
+    scene = _事件场景(narrative="射满她半边脸，精液挂着；她还没醒。")
+    ledger = profiles.prompt_field_ledger("1girl, silver hair, closed eyes", scene)
+    vf = ledger["visual_facts"]
+    assert vf["required"] is True
+    assert "cum on face" in vf["expected"] and "closed eyes" in vf["expected"]
+
+
+def test_T1_成稿漏写时报未落实_触发修补():
+    scene = _事件场景(narrative="射满她半边脸；她还没醒。")
+    errors = profiles._visual_fact_errors("1girl, silver hair, lying on back", scene)
+    assert any("cum on face" in e for e in errors)
+    assert any("closed eyes" in e for e in errors)
+
+
+def test_T1_wardrobe为空时事件事实仍能报错_旧实现会早退():
+    """真机该帧 wardrobe 为空 ⇒ 旧实现 `if not source.strip(): return []` 直接早退。"""
+    scene = _事件场景(narrative="精液挂在眼罩角上。", wardrobe="", appearance="")
+    assert not profiles._current_visual_source(scene).strip()
+    assert profiles._visual_fact_errors("1girl, standing", scene)
+
+
+def test_T1_补写把漏掉的事件事实追加进成稿():
+    scene = _事件场景(narrative="射满她半边脸；她还没醒。")
+    # ⚠ anima_tags 的补写通道要求**恰好两行**（tags 行 + 文段行）；单行会直接返回不补。
+    prompt = "1girl, solo female, silver hair, lying on back, close-up\nA dark room."
+    fixed, _ledger = profiles.complete_field_coverage("anima_tags", prompt, scene)
+    assert fixed != prompt
+    assert "cum on face" in fixed and "closed eyes" in fixed
+    assert fixed.splitlines()[0].startswith("1girl, solo female")
+
+
+def test_T1_成稿已写对则不再判缺失_不重复补():
+    scene = _事件场景(narrative="射满她半边脸；她还没醒。")
+    prompt = ("1girl, silver hair, lying on back, closed eyes, facial, close-up\n"
+              "A dark room.")
+    assert profiles._missing_event_facts(prompt, scene) == []
+    assert profiles.prompt_field_ledger(prompt, scene)["visual_facts"]["covered"] is True
+
+
+@pytest.mark.parametrize("word", ["睡不着", "睡不醒", "睡意全无"])
+def test_T1_否定写法不误判为睡中(word):
+    scene = _事件场景(narrative=f"她{word}，翻身坐起。")
+    assert profiles._required_event_facts(scene) == []
+
+
+@pytest.mark.parametrize("text,expect", [
+    ("她还没醒。", "closed eyes"),
+    ("睡着的狐不认人。", "closed eyes"),
+    ("她阖眼不语。", "closed eyes"),
+    ("精液挂在眼罩角上。", "cum on face"),
+    ("颜射在她左颊。", "cum on face"),
+    ("她射满了一整张脸。", "cum on face"),
+])
+def test_T1_各类写法都能命中(text, expect):
+    assert expect in profiles._required_event_facts(_事件场景(narrative=text))
+
+
+def test_T1_expected_present走事件表的精确正则():
+    """`cum on face` 若退化成按词拆判，会要求 cum+face 同时命中；事件表提供精确正则。"""
+    assert profiles._expected_present("she has cum on face", "cum on face") is True
+    assert profiles._expected_present("a facial finish", "cum on face") is True
+    assert profiles._expected_present("closed eyes, sleeping", "closed eyes") is True
+    assert profiles._expected_present("1girl, silver hair", "cum on face") is False
+
+
+def test_T1_帧场景无narrative时零回归():
+    """帧路径的 scene 被 `_FRAME_SCENE_EXCLUDE` 剥掉 narrative ⇒ 不应凭空产生事件事实。"""
+    scene = _事件场景()
+    scene.pop("narrative", None)
+    assert profiles._required_event_facts(scene) == []
+    assert profiles._missing_event_facts("1girl, standing", scene) == []
+
+
+def test_T1_事件事实进模型输入底座():
+    scene = _事件场景(narrative="精液挂在眼罩角上；她还没醒。")
+    facts = profiles._concrete_scene_facts(scene)
+    assert "cum on face" in facts and "closed eyes" in facts
+
+
+# ---------------------------------------------------------------------------
+# T3（2026-09-23 真机实锤）：账本 `covered` 必须与修补层**同判据**
+#
+# 现场（`agent-trace.jsonl` · `illustration.profile`）：
+#   strategy=patched, missing_fields=['action','location']
+#   action.required=True / covered=False
+#   action.expected=['looking back','sitting','kneeling','lying down',
+#                    'withdrawing just before completion','pressing down']
+#   逐条复算：6 条里 3 条被第 29 刀冲突闸豁免、余 3 条**全部已命中**，只有 `kneeling`
+#   既缺席又被豁免 —— 它本就**不该**再写（与 `lying down` 互斥）⇒ `covered` 恒 False。
+# ⇒ 旧判据用**未过滤**的候选做 `all()`，而 `complete_field_coverage` 用**过滤后**的名单补写，
+#   两处不同判据 ⇒ `action` 出现**永不消失的假红**（`missing_fields` 变成噪声）。
+# 适用范围限定：**只对 action 生效**；`appearance`/`location` 的
+# 「有来源但无可验证期望 ⇒ 不判覆盖」是**故意**的 fail-closed 设计（见 `test_字段账本不把
+# 无可验证期望的通用外貌词判为覆盖`），本刀逐字不动。
+# ---------------------------------------------------------------------------
+def _T3场景(draft_prompt: str) -> dict:
+    return {
+        "narrative": "她仰起脸看着我。",
+        "draft_prompt": draft_prompt,
+        "wardrobe": "红色长裙",
+        "locale": "寝殿",
+        "actors": ["爱丽丝"],
+        "rating": "nsfw",
+        "character_lora": True,
+    }
+
+
+_T3_PROMPT = (
+    "masterpiece, best quality, 1girl, solo, long legs, arching her back, "
+    "looking back, bedchamber, medium shot, directional light, consistent anatomy.\n"
+    "The camera frames the adult woman as she arches her back in the bedchamber."
+)
+
+
+def test_T3_被冲突闸豁免的动作候选不再拖累覆盖判据():
+    """旧判据会把「缺席但已被同部位动作豁免」的候选算成缺口 ⇒ 永久假红。"""
+    scene = _T3场景("kneeling, looking back")
+    ledger = profiles.prompt_field_ledger(_T3_PROMPT, scene)
+    action = ledger["action"]
+
+    assert action["required"] is True
+    # 用例前提（若哪天候选表变了，本断言先红，比断言结论更有信息量）
+    assert "kneeling" in action["expected"]
+    assert profiles._expected_present(_T3_PROMPT, "kneeling") is False
+    assert profiles._action_fact_conflicts(_T3_PROMPT, "kneeling") is True
+    # 新判据：豁免项不计入 ⇒ 余下候选全命中 ⇒ 已覆盖
+    assert action["covered"] is True
+
+
+def test_T3_候选全被冲突闸豁免时视动作已覆盖():
+    scene = _T3场景("kneeling")
+    ledger = profiles.prompt_field_ledger(_T3_PROMPT, scene)
+    action = ledger["action"]
+    assert action["expected"] == ["kneeling"]
+    assert profiles._action_fact_conflicts(_T3_PROMPT, "kneeling") is True
+    assert action["covered"] is True
+
+
+def test_T3_无豁免的真实缺口仍判未覆盖_防过度放宽():
+    """回归锁：既缺席又**不**被豁免的动作事实，仍须判未覆盖。"""
+    scene = _T3场景("looking")
+    prompt = (
+        "masterpiece, best quality, 1girl, solo, long legs, arching her back, "
+        "bedchamber, medium shot, directional light, consistent anatomy.\n"
+        "The camera frames the adult woman as she arches her back in the bedchamber."
+    )
+    ledger = profiles.prompt_field_ledger(prompt, scene)
+    action = ledger["action"]
+    assert "looking" in action["expected"]
+    assert profiles._expected_present(prompt, "looking") is False
+    assert profiles._action_fact_conflicts(prompt, "looking") is False   # 无部位词 ⇒ 不豁免
+    assert action["covered"] is False
+
+
+def test_T3_不可验证期望的地点仍按设计判未覆盖_非缺陷():
+    """`location` 的 `expected=[]` + `covered=False` 是**故意的** fail-closed：
+
+    本地视觉词典没覆盖这个地点时，宁可报「未验证」也不让通用 `room` 词冒充覆盖。
+    真机 `missing_fields` 里常驻 `location` 属**预期**，不是待修补的缺口
+    （`complete_field_coverage` 对它既无 `defaults` 也无片段可补 ⇒ 不该去补）。
+    """
+    scene = {
+        **_T3场景("close-up"),
+        "locale": "一座漏雨破屋，门外是黎明山路",
+    }
+    ledger = profiles.prompt_field_ledger(_T3_PROMPT, scene)
+    assert ledger["location"] == {"required": True, "covered": False, "expected": []}
+
+
+# ---------------------------------------------------------------------------
+# T2（2026-09-23 深夜）：`_THROAT_GRIP_SOURCE` 把「扣后颈」误升格为「掐喉」
+#
+# 真机正文（assistant 末尾）：`一手撑住榻底，一手扣她后颈` —— 按住后颈，画面里**没有**掐喉。
+# 旧式 `(?:掐|扣|卡)…(?:脖子|颈部?|喉咙)` 里 `颈部?` 会匹配 **后颈 / 颈侧 / 颈背 / 颈椎**，
+# 于是确定性层产出 `one hand gripping the partner's throat`；
+# 若 800 字内还有插入动词，还会连带触发 `_COMPOUND_THROAT_INTERCOURSE`
+# （**删掉** `penetrative intercourse` 等真实动作、换成编排出的复合动作）
+# ⇒ 第 22 刀「无出处不得入画」同族。
+# 修法＝解剖位限定 `(?<!后)颈(?:部)?(?!侧|背|椎)`；真正的掐喉措辞逐字不变。
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("narrative", [
+    "一手扣她后颈。",
+    "他一手扣住她的后颈。",
+    "他一手撑住榻底，一手扣她后颈。",
+    "他扣住她的颈侧。",
+    "他按住她的颈背。",
+    "他托着她的颈椎。",
+])
+def test_T2_扣后颈颈侧颈背不算掐喉(narrative):
+    assert "one hand gripping the partner's throat" not in profiles._scene_action_tags(
+        {"narrative": narrative},
+    )
+
+
+@pytest.mark.parametrize("narrative", [
+    "他掐住她的脖子。",
+    "他一手掐住她的颈部。",
+    "他掐住她的颈。",
+    "一手卡住喉咙。",
+    "他扣住她的颈子。",
+])
+def test_T2_真正的掐喉措辞逐字不变(narrative):
+    assert "one hand gripping the partner's throat" in profiles._scene_action_tags(
+        {"narrative": narrative},
+    )
+
+
+def test_T2_真掐喉加插入的复合动作仍成立():
+    """零回归锁：真·掐喉 ＋ 插入同现时，复合动作照旧接管（删具体项 → 换复合项）。"""
+    tags = profiles._scene_action_tags({"narrative": "他掐住她的脖子，同时插入。"})
+    assert profiles._COMPOUND_THROAT_INTERCOURSE in tags
+    assert "penetrative intercourse" not in tags
+    assert "one hand gripping the partner's throat" not in tags
+
+
+def test_T2_扣后颈不触发复合动作():
+    tags = profiles._scene_action_tags({"narrative": "他一手扣她后颈，同时插入。"})
+    assert profiles._COMPOUND_THROAT_INTERCOURSE not in tags
+    assert "penetrative intercourse" in tags
+
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 第 55 刀（2026-09-24 用户定案）：第一人称「取景收束」
+#
+# 用户口径（原话）：「按照我之前要求的，先获取画面内容，再寻找合适视角，所以说为了全面展示
+#   提示词的内容，自然会像第三方视角一样展示所有，然后自然会类似将女主角的全身涵盖在画面，
+#   而在这情况下，主人公的动作想实现极有可能暴露全身，也就是说**没有收束第一人称主角视角的
+#   画面**。比如说该画面应该**仅局限于上半身**……」
+# 修法（原话）：「就是把当前情况的**内容优先、机位是因变量**划分给**第三人称**；如果是
+#   第一人称，那就是**先内容优先，再判断第一人称的数据视野朝向，最后筛分镜头里面应该保留
+#   的东西**。」
+# 真机实锤（`agent-trace.jsonl` 三轮同病）：turn 52 判据自报「特写」，交付却含
+#   `three-quarter back view` + 女主全身侧躺 + 抬腿 + 白袜 ⇒ 物理装不下。
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def test_第55刀_第一人称口部接触收束到上半身():
+    """真机投诉轮（turn 52）的形状：接触点在口/面 ⇒ 取景上限＝上半身。"""
+    scene = {
+        "viewpoint": "first_person", "narrator": "甲", "rating": "nsfw",
+        "narrative": "他把肉棒移过来，先在她半边脸颊上贴着，龟头在唇缝上蹭了两下。",
+    }
+    clause = profiles._viewpoint_clause(scene)
+    assert "数据视野朝向" in clause
+    assert "上半身" in clause
+    assert "waist-up" in clause
+
+
+def test_第55刀_第一人称下半身接触收束到下半身():
+    scene = {
+        "viewpoint": "first_person", "narrator": "甲", "rating": "nsfw",
+        "narrative": "他的手指探进她下身，指尖按在大腿内侧缓缓磨。",
+    }
+    clause = profiles._viewpoint_clause(scene)
+    assert "下半身" in clause
+    assert "waist-down shot" in clause
+
+
+def test_第55刀_三步顺序逐字落地且顺序不可颠倒():
+    """用户定案的三步顺序必须按序出现（顺序本身是口径的一部分）。"""
+    scene = {
+        "viewpoint": "first_person", "narrator": "甲", "rating": "nsfw",
+        "narrative": "龟头在唇缝上蹭了两下。",
+    }
+    clause = profiles._viewpoint_clause(scene)
+    i1 = clause.index("先内容优先")
+    i2 = clause.index("再判数据视野朝向")
+    i3 = clause.index("最后筛分镜头里该保留的东西")
+    assert i1 < i2 < i3
+
+
+def test_第55刀_无接触证据时不给上限且条款逐字节退化为底款():
+    """零回归锁：没有接触证据 ⇒ 不猜取景上限 ⇒ 整个取景块不写
+    （避免「以上一条为准」指向空条款的悬空引用）。
+
+    ⚠ 第 56 刀起本测试改用**无环境词、无接触词**的中性正文：
+    原先的「窗外雨点落在瓦上。」命中了 `_VIEW_ENVIRONMENT_RE` ⇒ 现在归**风景帧**
+    （见 `test_第56刀_第一人称风景帧放行全景`），不再走「无证据」这一态。
+    """
+    scene = {"viewpoint": "first_person", "narrator": "甲", "narrative": "她想了想，没说话。"}
+    assert profiles._first_person_framing(scene) == ""
+    clause = profiles._viewpoint_clause(scene)
+    assert "数据视野朝向" not in clause
+    assert "【视角·第一人称】" in clause
+    assert "不入画" in clause
+
+
+def test_第55刀_禁用第三方全景机位():
+    scene = {
+        "viewpoint": "first_person", "narrator": "甲", "rating": "nsfw",
+        "narrative": "龟头在唇缝上蹭了两下。",
+    }
+    clause = profiles._viewpoint_clause(scene)
+    assert "禁用机位" in clause
+    for banned in ("from behind", "three-quarter back view", "full body", "wide shot",
+                   "bird's eye view", "looking down at face"):
+        assert banned in clause, banned
+
+
+def test_第55刀_叙事者从画面下缘进入且不写躯干():
+    scene = {
+        "viewpoint": "first_person", "narrator": "甲", "rating": "nsfw",
+        "narrative": "龟头在唇缝上蹭了两下。",
+    }
+    clause = profiles._viewpoint_clause(scene)
+    assert "从画面下缘" in clause
+    assert "enters from the lower frame edge" in clause
+    assert "永远不出现" in clause
+
+
+def test_第55刀_景别只收不放():
+    """第一人称：超出取景上限的远景别一律收窄；更近的显式景别保留。"""
+    base = {"viewpoint": "first_person", "narrator": "甲",
+            "narrative": "龟头在唇缝上蹭了两下。"}
+    # 显式 wide shot ⇒ 收窄到上限
+    assert profiles._scene_camera_tag({**base, "camera": "wide shot"}) == "medium close-up"
+    # 显式 close-up（比上限更近）⇒ 保留
+    assert profiles._scene_camera_tag({**base, "camera": "close-up"}) == "close-up"
+
+
+def test_第55刀_景别收束的零回归锁():
+    """`viewpoint` 非 first_person（含缺失）⇒ 景别判定逐字节等于旧行为。"""
+    cases = [
+        ({"narrative": "他亲吻她的嘴唇。"}, "close-up"),
+        ({"narrative": "远处群山连绵。"}, "wide shot"),
+        ({"narrative": "她站着。"}, "medium shot"),
+    ]
+    for scene, expected in cases:
+        assert profiles._scene_camera_tag(scene) == expected
+        assert profiles._scene_camera_tag({**scene, "viewpoint": "third_person"}) == expected
+
+
+def test_第55刀_第三人称保留机位因变量口径():
+    """用户定案：内容优先、机位是自变量**划分给第三人称**（第 38 刀口径保留）。"""
+    clause = profiles._viewpoint_clause(
+        {"viewpoint": "third_person", "narrator": "甲", "rating": "sfw"},
+    )
+    assert "机位是自变量" in clause
+    assert "再据此选择最能呈现它们的机位与景别" in clause
+    # ⚠ 第一人称专属的三步顺序/取景收束**不得**泄进第三人称
+    assert "数据视野朝向" not in clause
+    assert "禁用机位" not in clause
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 第 56 刀（2026-09-24 · 用户第二次纠正）
+#
+# 用户原话：「不行，**你不能限制死特写中景**，因为我开着第一人称，**有时候如果只是描写
+#   风景**，那被限制成近景/中景**基本彰显不了风景全貌**。」
+# ⇒ 第 55 刀的取景收束**只对近身接触帧**成立；风景/环境帧必须**放行全景**。
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_第56刀_第一人称风景帧放行全景():
+    """用户实锤：开着第一人称但只是描写风景 ⇒ **不得**收成近景/中景。"""
+    scene = {
+        "viewpoint": "first_person",
+        "narrator": "甲",
+        "rating": "sfw",
+        "narrative": "远处群山连绵，云霞漫过山脊，宫道的风灯在檐角下摇。",
+    }
+    clause = profiles._viewpoint_clause(scene)
+    assert "不设近景上限" in clause
+    # 必须**明确放行**远景（用户原话「彰显不了风景全貌」）
+    assert "wide shot" in clause and "long shot" in clause
+    assert "风景全貌" in clause
+    # ⚠ 不得再把「上半身/下半身」上限套到风景帧上
+    assert "取景上限＝" not in clause
+
+
+def test_第56刀_风景帧景别不被收窄():
+    """零回归锁：风景帧的景别**逐字节等于**未收窄的结果（wide shot 保持 wide shot）。"""
+    scene = {"viewpoint": "first_person", "narrative": "远处群山连绵，云霞漫天。"}
+    tag = profiles._scene_camera_tag(scene)
+    assert tag == "wide shot"
+    # 对照：第三人称同一场景也是 wide shot（说明未被任何人称分支改动）
+    assert profiles._scene_camera_tag({**scene, "viewpoint": "third_person"}) == "wide shot"
+
+
+def test_第56刀_风景帧仍禁旁观机位():
+    """边界锁：放行**远景** ≠ 放行**旁观**——俯视/背后仍属身份矛盾，恒禁。"""
+    clause = profiles._viewpoint_clause({
+        "viewpoint": "first_person", "narrator": "甲", "rating": "sfw",
+        "narrative": "院子里四下无人，屋外雪落了一夜，晨光斜进天井。",
+    })
+    assert "不设近景上限" in clause
+    assert "bird's eye view" in clause            # 仍禁俯视
+    assert "from behind" in clause                # 仍禁背后
+    # 但**不再**禁 full body / wide shot（那些是取景矛盾，风景帧不成立）
+    assert "`full body`" not in clause
+
+
+def test_第56刀_近身帧仍收束不受风景分支影响():
+    """次序锁：近身接触帧（有接触点）必须走**收束**分支，不得被风景分支截胡。"""
+    scene = {
+        "viewpoint": "first_person", "narrator": "甲", "rating": "nsfw",
+        "narrative": "他把肉棒压在她唇上，从画面下缘进入。院里雪还在下。",
+    }
+    clause = profiles._viewpoint_clause(scene)
+    assert "取景上限＝**上半身**" in clause        # 近身接触优先于环境词
+    assert "不设近景上限" not in clause
+
+
+def test_第56刀_无接触无环境的帧逐字节退化为底款():
+    """零回归锁：既无接触证据、也无环境词 ⇒ `framing` 为空 ⇒ 整个收束块不写。"""
+    scene = {"viewpoint": "first_person", "narrator": "甲", "rating": "sfw",
+             "narrative": "她想了想，没说话。"}
+    clause = profiles._viewpoint_clause(scene)
+    assert "取景上限＝" not in clause
+    assert "不设近景上限" not in clause
+    assert "三步顺序" not in clause               # 收束块整体缺席
+    assert "禁用机位" not in clause
+
+
+def test_第56刀_环境词表与接触表互斥使用():
+    """结构锁：`_VIEW_ENVIRONMENT_RE` 只在**两个接触表都空**时才被查（三态互斥）。"""
+    import inspect
+
+    src = inspect.getsource(profiles._first_person_framing)
+    assert "if not face and not lower:" in src, "环境分支必须挂在两个接触表都空之下"
+    assert "_VIEW_ENVIRONMENT_RE.search(blob)" in src
+
+
+# ── 第 57 刀 ③：第一人称「画面事实筛分」（按取景剔掉装不下的外观/服装事实）──────────
+#
+# 用户口径（第二次重申）：「第三人称＝内容产出再找视角展示完整内容；第一人称＝先内容
+# 再核对主人公主视角内容进行筛分」。第 55 刀只把筛分写成提示词指令（靠模型自觉）；
+# 真机 turn `9bb03d04` 提示词自相矛盾（`close-up` 同时又要求 `broad rounded hips`＋
+# `white silk stockings`）——因为 appearance/wardrobe 在字段账本里是 required、编译器不能省。
+# 本组把筛分下沉到数据层：进编译器之前先剔。
+
+
+def _fp_scene(**over):
+    scene = {
+        "viewpoint": "first_person",
+        "narrator": "凌渊",
+        "narrative": "他把指尖压在她唇角，低声说了一句。",
+        "appearance": "银发高马尾、白狐耳、黑蕾丝眼罩、朱唇饱满、肌肤白皙、宽厚圆硕的臀、修长白皙的双腿",
+        "wardrobe": "月白中衣、蚕丝白袜",
+    }
+    scene.update(over)
+    return scene
+
+
+def test_第57刀_第一人称上半身近身帧剔掉装不下的外观与服装():
+    """真机复现：`宽厚圆硕的臀` / `修长白皙的双腿` / `蚕丝白袜` 在上半身近身帧里装不下
+    ⇒ 必须从 appearance / wardrobe 剔掉（否则字段账本强制补齐、模型只能把镜头推远）。"""
+    scene = _fp_scene()
+
+    verdict = profiles.first_person_frame_filter(scene)
+
+    assert verdict["applied"] is True
+    assert verdict["scope"] == "upper_body"
+    assert verdict["removed"] == ["宽厚圆硕的臀", "修长白皙的双腿", "蚕丝白袜"]
+    # 保留下来的文字**逐字不变**（只丢整条命中片段，不改写不重组）
+    assert verdict["appearance"] == "银发高马尾、白狐耳、黑蕾丝眼罩、朱唇饱满、肌肤白皙"
+    assert verdict["wardrobe"] == "月白中衣"
+
+
+def test_第57刀_第三人称与无人称键逐字节不动():
+    """零回归锁：第三人称 / 缺 `viewpoint` 键 ⇒ `applied=False` 且字段原样返回。"""
+    for scene in (_fp_scene(viewpoint="third_person"), _fp_scene(viewpoint=""), {}):
+        verdict = profiles.first_person_frame_filter(scene)
+        assert verdict["applied"] is False
+        assert verdict["removed"] == []
+        assert verdict["appearance"] == str(scene.get("appearance") or "")
+        assert verdict["wardrobe"] == str(scene.get("wardrobe") or "")
+
+
+def test_第57刀_风景帧豁免不受取景筛分():
+    """第 56 刀三态：风景帧要**放行全景**（用户定案「不能限制死特写中景」）
+    ⇒ 无近身接触 ⇒ 不筛（逐字节不动）。"""
+    verdict = profiles.first_person_frame_filter(_fp_scene(
+        narrative="山风穿过廊下，檐角的灯在远处晃。",
+        appearance="宽厚圆硕的臀",
+    ))
+
+    assert verdict["applied"] is False
+
+
+def test_第57刀_取景上限判定与first_person_framing同口径面优先():
+    """一致性锁：取景上限必须与 `_first_person_framing` **同口径**（同一 4 键 blob ＋
+    「面优先」）—— 否则会出现「提示词声明上半身、本函数却按下半身不筛」的自相矛盾。
+
+    ⚠ 真机踩过：把闸写成「命中下半身就不筛」，而 `appearance` 里本就有「臀／双腿」
+    ⇒ **被筛字段反过来关掉了筛分**（循环）。故此处断言「appearance 自带下半身词
+    不影响判定」。"""
+    scene = _fp_scene(narrative="他压住她的大腿内侧，膝盖顶开。")  # narrative 半身接触
+
+    # blob 里同时有「唇／胸」（face）与「臀／腿」（lower）⇒ 面优先 ⇒ 上半身 ⇒ 仍要筛
+    verdict = profiles.first_person_frame_filter(scene)
+    assert verdict["applied"] is True
+    assert verdict["scope"] == "upper_body"
+    # 与提示词侧的三态推导同源：face 命中 ⇒ 给「上半身」上限
+    assert "上半身" in profiles._first_person_framing(scene)
+
+
+def test_第57刀_下半身帧不筛只做上半身一个方向():
+    """保守锁：只有下半身接触点（无任何面颈胸肩词）⇒ 是下半身帧 ⇒ **不筛**
+    （只做上半身这一个方向，反向不猜）。"""
+    scene = _fp_scene(
+        narrative="他压进她的大腿内侧，膝盖把腿分开。",
+        appearance="修长白皙的双腿、白袜",
+        wardrobe="蚕丝白袜",
+    )
+
+    verdict = profiles.first_person_frame_filter(scene)
+
+    assert verdict["applied"] is False
+
+
+def test_第57刀_无可剔片段时不改任何字段():
+    """零回归锁：上半身帧但外观/服装里本就没有下半身词 ⇒ `applied=False`（键一个不动）。"""
+    verdict = profiles.first_person_frame_filter(_fp_scene(
+        appearance="银发高马尾、白狐耳、黑蕾丝眼罩、朱唇饱满",
+        wardrobe="月白中衣",
+    ))
+
+    assert verdict["applied"] is False
+
+
+def test_第57刀_整条都是下半身时保留原文不清空():
+    """剔空保护：某字段**整条**都是下半身 ⇒ 保留原文（清空会让编译器彻底编造）。"""
+    verdict = profiles.first_person_frame_filter(_fp_scene(
+        appearance="宽厚圆硕的臀",
+        wardrobe="蚕丝白袜",
+    ))
+
+    assert verdict["applied"] is False
+    assert verdict["appearance"] == "宽厚圆硕的臀"
+    assert verdict["wardrobe"] == "蚕丝白袜"
+
+
+def test_第57刀_属性测试_任意输入不抛异常():
+    """稳健性锁：scene 是任意 dict ⇒ 不得抛异常。"""
+    for scene in (
+        {}, {"viewpoint": None}, {"viewpoint": "first_person", "narrative": None},
+        {"viewpoint": "first_person", "narrative": "他压在她唇角。", "appearance": 5},
+        {"viewpoint": "first_person", "narrative": "他压在她唇角。", "wardrobe": ["x"]},
+    ):
+        profiles.first_person_frame_filter(scene)   # 不抛即通过
+
+
+# ── 第 58 刀：两行格式判死 ⇒ 本地归一，不整稿作废退薄兜底（2026-09-24 用户口径）──────
+#
+# 真机实锤：25 次编译 3 次死于「第二行必须包含英文自然语言画面描述」——模型稿
+# 1400–1900 字内容合格、只是没排成两行；兜底稿 662–794 字、无角色身份。
+
+
+def test_第58刀_anima两行格式判死时本地归一保住角色身份(monkeypatch):
+    scene = {
+        **_scene("nsfw"),
+        "appearance": "冷倾雪: long black hair, straight bangs, narrow red eyes",
+    }
+    # 模拟真机形态：tags 行 ＋ 合格英文画面句 ＋ 一行中文 ⇒ 三行、第二行不是画面描述句。
+    # ⚠ 真机链路里 `_patch_failed_prompt`（⑤ 补丁降级）先跑且失败后才轮到归一 ——
+    #   置空它以走真机形态（补丁救不了 ⇒ 归一救）。
+    monkeypatch.setattr(profiles, "_patch_failed_prompt", lambda *a, **k: "")
+    messy = (
+        "masterpiece, best quality, solo, cold qingxue, long black hair, straight bangs, "
+        "narrow red eyes, a red long dress, white sleeves, wrist held, pulling closer, "
+        "rain-soaked railing, side light\n"
+        "she kneels by the railing in the rain in a red long dress with her wrist held and "
+        "pulled closer, her long black hair plastered across her face as she looks back over "
+        "her shoulder.\n"
+        "这一段是混进来的中文说明。"
+    )
+    diagnostics: dict = {}
+    prompt = profiles.generate(
+        "anima_tags", scene, lambda _system, _user: messy, diagnostics,
+    )
+
+    assert diagnostics.get("strategy") == "normalized_two_line"
+    lines = prompt.splitlines()
+    assert len(lines) == 2                       # 本地归一成两行
+    assert "long black hair" in prompt           # 角色身份保住（不再是 adult woman 式兜底）
+    assert "中文字" not in prompt                 # 非 ASCII 段不进 tags 行
+
+
+def test_第58刀_组装不出两行时仍照旧兜底():
+    scene = {**_scene("nsfw")}
+    diagnostics: dict = {}
+    # 全中文输入：归一无法组装（无 ASCII tags、无英文句）⇒ 照旧走词表兜底
+    prompt = profiles.generate(
+        "anima_tags", scene,
+        lambda _system, _user: "这一段全是中文，没有任何英文tags与英文句子。", diagnostics,
+    )
+
+    assert diagnostics.get("strategy") == "fallback"
+    assert len(prompt.splitlines()) == 2

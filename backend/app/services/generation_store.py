@@ -263,6 +263,35 @@ def _image_turn(thread_id: str, message_id: str) -> int:
     return turn
 
 
+# 插画／配音槽 id 的真源格式＝`roleplay_turn.finalize_turn` 里 `illo-req-{repo_id}-{draft.turn}`
+# 与 `audio-req-{repo_id}-{draft.turn}`（`draft.turn` 是**真实回合号**）；首尾帧/转场副槽在
+# 前端以 `:first` / `:last` / `:transition` 后缀挂在同一 id 上（`useIllustrationChain`）。
+_SLOT_TURN_RE = re.compile(
+    r"^(?:illo|audio)-req-(?P<repo>.+)-(?P<turn>\d+)(?::(?P<sub>[A-Za-z_]+))?$",
+)
+
+
+def _slot_turn(slot_id: str) -> tuple[int, str]:
+    """从槽 id 解析**真实回合号**与副槽后缀；解析不出来返回 `(0, "")`。
+
+    2026-09-22 用户实锤（资产覆盖）：`{角色}_{轮次}_{序号}` 里的「轮次」原先取
+    `_image_turn`（快照里含图片的 assistant 消息数）。而 finalize 落盘时本槽在快照里
+    还是 `media-slot`（pending）⇒ 计数**不含自己**，与**上一轮**算出来的数相同
+    （真机：第 46 轮算出 33＝第 45 轮的号）⇒ `save_image_named` 同名覆盖：
+    两个槽指向同一 URL、刷新后第 45 轮的槽显示第 46 轮的图、第 45 轮的资产条目被顶掉。
+
+    槽 id 里的 `draft.turn` 是**生成时就已经确定的真实回合号**，取它即可：
+      · 相邻回合必然不同 ⇒ 不同槽永不撞名；
+      · **同一槽重生成**前后同名 ⇒ 仍走既有「同名覆盖、URL 不变」语义（这是特性，不是 bug）；
+      · 首尾帧副槽带 `_first` / `_last` ⇒ 同回合内的双帧图也互不撞名。
+    ⚠ 解析失败（老调用方／测试里的 `img-bot-0` 之类）⇒ 返回 0，调用方回落旧计数 ⇒ 零回归。
+    """
+    match = _SLOT_TURN_RE.match(str(slot_id or "").strip())
+    if not match:
+        return 0, ""
+    return int(match.group("turn")), str(match.group("sub") or "")
+
+
 def finalize_workflow_batch(
     *, thread_id: str, repo_id: str, prompt_id: str, prompt: str,
     images: list[dict], output_dir: str, comfyui_url: str,
@@ -314,14 +343,19 @@ def finalize_workflow_batch(
         if durable:
             try:
                 if character_actor:
-                    turn = _image_turn(thread_id, target_message_id) if inline_target else 0
+                    # 2026-09-22：轮次优先取**槽 id 里的真实回合号**（见 `_slot_turn`），
+                    # 取不到才回落「快照含图消息数」的旧口径（零回归）。
+                    turn, sub = _slot_turn(target_slot_id) if inline_target else (0, "")
+                    if not turn:
+                        turn = _image_turn(thread_id, target_message_id) if inline_target else 0
+                        sub = ""
                     path = image_store.save_image_named(
                         output_dir, repo_id,
                         filename=str(image.get("filename", "")),
                         subfolder=str(image.get("subfolder", "")),
                         type=str(image.get("type", "output")),
                         url=comfyui_url,
-                        dest_stem=f"{character_actor}_{turn}_{index + 1}",
+                        dest_stem=f"{character_actor}_{turn}{f'_{sub}' if sub else ''}_{index + 1}",
                     )
                 else:
                     path = image_store.save_local(

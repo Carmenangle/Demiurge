@@ -141,9 +141,156 @@ def test_人物按姓名更新_技能废除与任务完成保留_背包允许删
 
 def test_读取与维护频率彻底分离():
     tables = ts.default_tables()
-    assert ts.tables_for_read(tables) == tables
+    # 2026-09-23 F2：选项表不进正文轮读侧（它只归维护调用），其余表全返回
+    assert [table["name"] for table in ts.tables_for_read(tables)] == [
+        "全局数据表", "主角信息表", "重要角色表", "主角技能表",
+        "背包物品表", "任务与事件表",
+    ]
     assert [table["name"] for table in ts.tables_for_maintenance(tables, False)] == ["全局数据表"]
     assert ts.tables_for_maintenance(tables, True) == tables
+
+
+def test_选项表不进正文轮读侧但仍归维护():
+    """2026-09-23 用户定案 F2。真机实锤：选项表进 prompt 后，模型把表里预写的
+    「她终于开口以'明早得换件新中衣'点破」当成已发生剧情照抄、并把「后续动作选项」
+    第 1 条的动作逐字执行 ⇒ 候选走向变成既定剧情。故读侧排除、维护侧保留。"""
+    tables = ts.default_tables()
+    ts.apply_ops(tables, [{"op": "insert", "table": ts.OPTIONS_TABLE,
+                           "values": {"后续动作选项": "1. 潜行", "推导依据": "追捕中"}}])
+    read_tables = ts.tables_for_read(tables)
+    assert ts.OPTIONS_TABLE not in [table["name"] for table in read_tables]
+    assert ts.OPTIONS_TABLE in [table["name"] for table in ts.tables_for_maintenance(tables, True)]
+    # 正文轮上下文整块里不得出现选项表的表头或列名
+    block = tu.table_context(read_tables)
+    assert ts.OPTIONS_TABLE not in block
+    assert "后续动作选项" not in block and "推导依据" not in block
+    assert "全局数据表" in block
+
+
+def test_选项表维护口径_候选不得写成既成事实():
+    """F2-b：选项表是唯一「描述未来」的表；维护提示词必须钉住「候选≠已发生」。"""
+    ins = tu.maintenance_instruction(ts.default_tables())
+    assert "尚未发生" in ins and "既成事实" in ins
+    # 无选项表时不出现该段（旧协议文案逐字不变）
+    no_options = [t for t in ts.default_tables() if t["name"] != ts.OPTIONS_TABLE]
+    assert "尚未发生" not in tu.maintenance_instruction(no_options)
+
+
+def test_叙事列事实边界_禁预写台词与角色未来反应():
+    """2026-09-23 用户定案：表格叙事列只承载「已经发生」的客观事实。
+
+    真机实锤——表里记下的台词成品（「她终于开口以'明早得换件新中衣'点破」）被后续轮次
+    当成既定剧情，于是**本该沉默的角色又开了口**；同源还有「不可过激以免引发反抗」
+    把角色反应提前写死。⇒ 维护提示词必须钉住「台词归正文」与「不许预演角色反应」。
+    """
+    ins = tu.maintenance_instruction(ts.default_tables())
+    assert "只写**已经发生**的客观事实" in ins
+    assert "台词只属于剧情正文" in ins
+    assert "将要反抗" in ins and "将要开口" in ins
+    # 与选项表专栏口径措辞不重叠（那两句由 test_选项表维护口径 锁定）
+    assert "既成事实" in ins  # 选项表段仍应在
+    # 无表（仅抽取状态）时不该出现叙事列口径
+    no_tables = tu.maintenance_instruction([], extract_deltas=True, extract_snapshot=True)
+    assert "台词只属于剧情正文" not in no_tables
+    assert "追加名目" not in no_tables
+
+
+def test_叙事列禁为动作追加名目_术语棘轮写入侧闸():
+    """2026-09-23 用户定案（续「对经脉执着」）。
+
+    真机实测：「看经脉」「守经脉」在 assistant 正文里 **0 命中**（从未被说出口），
+    却活在表格叙事列与世界书动态区里被 `alwaysFill` 每轮注入 33 次 ⇒ 模型把
+    「以『看经脉』为名」当成这条关系线的**正式名称**，每轮都必须复述一遍。
+    ⇒ 维护提示词必须显式禁止**为已发生的动作追加名目**（这是棘轮的齿）。
+
+    措辞仍须避开选项表锁定串「尚未发生」「既成事实」。
+    """
+    ins = tu.maintenance_instruction(ts.default_tables())
+    assert "不要为动作追加名目" in ins
+    assert "以『某某』为名" in ins
+    assert "为长期名分或事件名称" in ins
+    # 无选项表时不得出现选项表专栏的锁定串（与 test_选项表维护口径 同口径）；
+    # 本口径刻意用「还没发生」而非「尚未发生」。
+    no_opts = [t for t in ts.default_tables() if t["name"] != ts.OPTIONS_TABLE]
+    ins_no_opts = tu.maintenance_instruction(no_opts, extract_deltas=True, extract_snapshot=True)
+    assert "尚未发生" not in ins_no_opts and "既成事实" not in ins_no_opts
+    # 无表（仅抽取状态）时不附
+    no_tables = tu.maintenance_instruction([], extract_deltas=True, extract_snapshot=True)
+    assert "不要为动作追加名目" not in no_tables
+
+
+def test_叙事列施受方向必须忠实_方向反转写入闸():
+    """2026-09-23 用户定案（「剧情生成的还是不对」）。
+
+    真机实锤：turn47 模型自创「妲千沁给凌渊捋经脉/按肩井」（用户输入只说
+    「我装睡后动手脚」，user 侧「捋/肩井」全程 0 次），写进表格后每轮整表注入
+    （召回块 26150 字符 vs 用户输入 58 字符 ≈ 450:1）；turn52 用户要「用昨晚
+    我摸她的事调戏她」，模型为保住表格事实把施受整个对调——
+    主角台词变成「昨夜您给我捋经脉」「您替我按肩井」。
+    ⇒ 叙事列必须钉死「谁对谁」，且禁止把接触改写成功法/穴位名目。
+    措辞避开选项表锁定串「尚未发生」「既成事实」。
+    """
+    ins = tu.maintenance_instruction(ts.default_tables())
+    assert "施受方向必须忠实" in ins
+    assert "谁对谁" in ins
+    assert "主角主动做的动作不得记成对方做的" in ins
+    assert "不得因为两人身份高低" in ins
+    # 功法名目闸：抚摸/按揉不得改写成穴位施治
+    assert "不要给身体接触换功法名目" in ins
+    assert "捋经脉" in ins and "灌顶施治" in ins
+    assert "以剧情正文里真写过的为准" in ins
+    # 无表（仅抽取状态）时不附
+    no_tables = tu.maintenance_instruction([], extract_deltas=True, extract_snapshot=True)
+    assert "施受方向必须忠实" not in no_tables
+
+
+def test_设定列禁写角色关系与往来经历_世界规则复发闸():
+    """2026-09-23 二次复发闸。
+
+    09-23 早刚把凌若冰个人体质从「世界规则」格拆走，当晚又复发成
+    「妲千沁曾在双修中半推半就交出初次」——纯幻觉（assistant 正文「初次」0 次）
+    且是**角色个人经历**，却被写进 alwaysFill 的世界规则格。
+    ⇒ 设定列口径必须显式覆盖「关系与人际往来经历」。
+    """
+    ins = tu.maintenance_instruction(ts.default_tables())
+    assert "关系与人际往来经历" in ins
+    assert "谁和谁之间发生过什么" in ins
+    # 既有锁定串不得被改坏
+    assert "个人体质或状态" in ins and "升格为全局规则" in ins
+    # 措辞不得撞选项表专栏口径的锁定串
+    no_opts = [t for t in ts.default_tables() if t["name"] != ts.OPTIONS_TABLE]
+    ins_no_opts = tu.maintenance_instruction(no_opts, extract_deltas=True, extract_snapshot=True)
+    assert "尚未发生" not in ins_no_opts and "既成事实" not in ins_no_opts
+
+
+def test_设定列禁升格个人体质与自造机制_世界规则写入口径闸():
+    """2026-09-23 用户定案「彻底拆解」（续「对经脉执着」）。
+
+    真机实测：`全局数据表·世界规则`（alwaysFill，每轮注入）被写成 734 字符大杂烩——
+    ① 把凌若冰的**个人体质**「冰凤经脉感知」升格为全局规则并绑性场景
+    ② 混入模型自造的临时机制（「碾磨方向翻转会导致掌控权丧失」「不应期敏感度翻三倍」）
+    ③ 复述用户本轮输入（「敏感部位需循序渐进」）
+    ⇒ 模型每轮读到「经脉感知＝性刺激传导机制」，任何场景都能顺手挂「经脉」。
+    """
+    ins = tu.maintenance_instruction(ts.default_tables())
+    assert "设定类列" in ins and "世界规则" in ins
+    assert "个人体质或状态" in ins and "升格为全局规则" in ins
+    assert "世界书设定条目里已经成立" in ins
+    assert "用户本轮输入里的一次性要求不是设定" in ins
+    # 措辞不得撞选项表专栏口径的锁定串（用无选项表的表列表测，避免被选项表段干扰）
+    no_opts = [t for t in ts.default_tables() if t["name"] != ts.OPTIONS_TABLE]
+    ins_no_opts = tu.maintenance_instruction(no_opts, extract_deltas=True, extract_snapshot=True)
+    assert "升格为全局规则" in ins_no_opts
+    assert "尚未发生" not in ins_no_opts and "既成事实" not in ins_no_opts
+    # 无「世界规则」列的表列表 → 不附（旧文案逐字不变）
+    no_col = [
+        {**t, "columns": [c for c in t["columns"] if c != "世界规则"]}
+        for t in ts.default_tables()
+    ]
+    assert "升格为全局规则" not in tu.maintenance_instruction(no_col)
+    # 无表（仅抽取状态）时不附
+    assert "升格为全局规则" not in tu.maintenance_instruction(
+        [], extract_deltas=True, extract_snapshot=True)
 
 
 def test_检索表身份列精确优先且无嵌入也可召回():
@@ -330,6 +477,15 @@ def test_独立维护提示词抽取模式改收对象协议():
     assert "角色名·好感度" in ins
     assert "增量相对当前现值" in ins
     assert "evidence" in ins
+    # 好感度初值规则（与 state_instruction 同源；闸门＝字段存在性，2026-09-23 修正）
+    assert "好感度初值" in ins
+    assert "无论其是否已经登场" in ins
+    assert "禁止默认从 0 起算" in ins
+    assert "op=\"set\"" in ins
+    # 2026-09-23 用户口径：综合因素考量（举例、不限、不设权重）+ 角色好恶优先
+    assert "综合与该角色相关的各项因素" in ins
+    assert "偏好与忌讳优先" in ins
+    assert "不设固定权重" in ins
     # 快照规则：必须含 [好感] 行
     assert "[好感]" in ins
     assert "state_deltas 固定输出" not in ins

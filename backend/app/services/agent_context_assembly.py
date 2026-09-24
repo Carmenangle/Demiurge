@@ -550,6 +550,54 @@ def _repo_worldbook(ctx: dict) -> dict | None:
     return {"entries": entries}
 
 
+# 机制层评论前缀（与 worldbook_store._MECHANISM_TITLE_PREFIXES 同义；此处只读，
+# 不反向依赖那个模块的私有常量，避免 lint-imports 同层违规）。
+_MECHANISM_COMMENT_PREFIXES = ("系统判定机制", "全局机制", "局部机制")
+
+
+def _curator_writable_indices(ctx: dict, repo_id: str) -> frozenset[int]:
+    """curator 的**可写条目集**＝本轮召回集 **剔除机制层** ＋ **补上在场角色的角色卡**。
+
+    2026-09-23 根因修复。原先直接用 `_selected_worldbook_indices`，而 `constant=True` 的条目
+    「全程恒开、全文注入」⇒ **永远落在可写集里**；角色卡（constant=False）只有被召回时才在。
+    ⇒ curator 要记录「凌若冰的最新状态」时，凌若冰角色卡不可写、而伪机制条目永远可写
+    ⇒ 状态只能灌进「全局机制·{{user}}(少宗主)」。真机实锤：那条 175 字符的正文**通篇是
+    凌若冰的身体状态**（「凌若冰数日夜被凌渊以龟头碾磨宫口，身体渐次贪欢上瘾…」），
+    标题却叫「全局机制」；另一条 39 字符的「龙阳决与双修」写的是「舞姬恋…往返抚弄其经脉」
+    ⇒ 「经脉」于是**每轮无条件注入**。curator prompt 本就写着「机制条目默认只读／角色条目
+    是最主要的 worldbook_update 对象」，是**可写集与 prompt 不一致**才逼它写错地方。
+
+    与 `_curator_worldbook_context_fn`（展示视图）共用，保证「看得到＝写得进」。
+    取不到世界书时退回旧口径（不改变行为）。
+    """
+    selected = list(ctx.get("_selected_worldbook_indices") or [])
+    try:
+        from app.services import worldbook_store
+
+        book = worldbook_store.read_repo_snapshot(ctx.get("output_dir") or "", repo_id) or {}
+        entries = book.get("entries") or []
+    except Exception:  # noqa: BLE001 取不到就退回旧口径
+        return frozenset(selected)
+    if not entries:
+        return frozenset(selected)
+    out: set[int] = set()
+    for i in selected:
+        e = entries[i] if 0 <= i < len(entries) else None
+        cm = str((e or {}).get("comment") or "")
+        if cm.split("·", 1)[0].strip() in _MECHANISM_COMMENT_PREFIXES:
+            continue                      # 机制层默认只读（与 curator prompt 一致）
+        out.add(i)
+    names = {
+        str(n).strip() for n in (ctx.get("_worldbook_character_names") or ())
+        if str(n).strip()
+    }
+    for i, e in enumerate(entries):
+        cm = str(e.get("comment") or "")
+        if cm.startswith("角色卡·") and cm.split("·", 1)[1].strip() in names:
+            out.add(i)
+    return frozenset(out)
+
+
 def _curator_worldbook_context(ctx: dict, repo_id: str) -> str:
     from app.services import worldbook_store
     if not _repo_worldbook(ctx):
@@ -562,7 +610,7 @@ def _curator_worldbook_context_fn(ctx: dict, repo_id: str):
     base = ctx.get("output_dir") or ""
     if not (base and repo_id and _repo_worldbook(ctx)):
         return None
-    allowed = frozenset(ctx.get("_selected_worldbook_indices") or [])
+    allowed = _curator_writable_indices(ctx, repo_id)
 
     def context(window_text: str) -> str:
         # 2026-08-30 成本实锤：整本世界书快照 ≈2万字符/轮（JSON 转义后实测 4.4 万字符）。
@@ -581,7 +629,7 @@ def _curator_worldbook_fn(ctx: dict, repo_id: str):
     base = ctx.get("output_dir") or ""
     if not (base and repo_id and _repo_worldbook(ctx)):
         return None
-    allowed = frozenset(ctx.get("_selected_worldbook_indices") or [])
+    allowed = _curator_writable_indices(ctx, repo_id)
 
     def apply(ops):
         rejected = []

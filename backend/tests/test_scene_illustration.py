@@ -298,6 +298,87 @@ def test_结果句锚点保留本场景从姿态到反复动作再到开口的�
         assert fact in context
 
 
+# ── 高潮结果帧豁免：颜射/内射完＝完成时（2026-09-24 用户定案）────────────────────
+# 用户口径逐字：「颜射完不就是完成时」——体液已经落在角色身上那一刻**本身就是视觉高潮**，
+# 既不是「静态收束」也不是「低强度结尾钩子」。真机（轮 `9cbce6c528cd`）：判据挑中了这一帧，
+# 却被兜底段「亥时的第二记钟磬…把剑谱搁在案角…借窗纸光」（`_anchor_score`=7，全靠
+# 「搁在」+5／「光」+2 两个**陈设词**）以 7 ≥ 0+3 推翻 ⇒ 交付稿从「满是白浊的脸＋还压在
+# 她颊边蹭的肉棒」变成「她一个人侧卧、背对镜头、外半边让得更敞」。
+# 修法＝给 `resolve_illustration_anchor` 的**两道**推翻闸各加一条同形豁免；两道收紧：
+#   ① 兜底段**本身也是**高潮结果帧 ⇒ 不动（两帧同等，保留旧行为）；
+#   ② `requested_excerpt` 仍需命中 ≥2 个动作语境词（与既有 `requested_is_action_outcome` 同形，
+#      防「孤立体液词」凭一个名词就翻案）。
+# ⚠ 不动 3 分门槛、不动 `_FALLBACK_ANCHOR_TERMS` 打分表（红线）。
+
+
+def test_高潮结果帧词表是躯体事实表的子集():
+    """`_CLIMAX_RESULT_TERMS` 只取体液名词族，且必须与 `_VISIBLE_BODY_TERMS` 同源（防两表漂移）。
+
+    刻意**不收**「射在／射完」这类动词——它们会命中台词（见下一条用例）。
+    """
+    assert set(si._CLIMAX_RESULT_TERMS) <= set(si._VISIBLE_BODY_TERMS)
+    assert "射在" not in si._CLIMAX_RESULT_TERMS
+    assert "射完" not in si._CLIMAX_RESULT_TERMS
+
+
+def test_高潮结果帧不被无体液的兜底段推翻():
+    text = (
+        "<content>她把剑谱搁在案角，借着窗纸透进来的光站了一会儿。\n\n"
+        "他把她的双腿分开，动作放得极缓。她仰面躺在枕上，那股白浊顺着人中往下淌，"
+        "滴进唇缝。</content>"
+    )
+    requested = (
+        "他把她的双腿分开，动作放得极缓。她仰面躺在枕上，那股白浊顺着人中往下淌，滴进唇缝。"
+    )
+    # 前提锁：兜底段靠两个陈设词拿到 7 分，而判据句在打分表上**是 0 分**
+    assert si.fallback_illustration_anchor(text) == "她把剑谱搁在案角，借着窗纸透进来的光站了一会儿。"
+    assert si._anchor_score(requested) == 0
+    assert si._anchor_score(si.fallback_illustration_anchor(text)) >= si._anchor_score(requested) + 3
+    # 结论：有体液的收束帧**不得**被没有体液的段顶掉
+    assert si.resolve_illustration_anchor(text, requested) == requested
+    assert "白浊" in si.illustration_scene_excerpt(text, requested)
+
+
+def test_兜底段本身也是高潮结果帧时保留旧行为():
+    """两道收紧之①：两帧都是高潮结果帧时**不豁免**，仍走打分表（零翻转、不制造新分叉）。"""
+    text = (
+        "<content>他的手按住她的肩头，高潮袭来，精液顺着嘴角淌下来。\n\n"
+        "她仰面躺在枕上，那股白浊混着口水从下颌角滑到脖颈。</content>"
+    )
+    fallback = "他的手按住她的肩头，高潮袭来，精液顺着嘴角淌下来。"
+    requested = "她仰面躺在枕上，那股白浊混着口水从下颌角滑到脖颈。"
+
+    assert si.fallback_illustration_anchor(text) == fallback
+    assert si.resolve_illustration_anchor(text, requested) == fallback
+
+
+def test_孤立体液词不带动作语境时不豁免():
+    """两道收紧之②：锚点句只挑出一个体液名词、窗口拿不出动作语境 ⇒ 不算高潮结果帧，照旧被推翻。"""
+    text = (
+        "<content>她伸手把乌木匣子搁在长凳上。\n\n"
+        "桌上的白浊已经干了一层。</content>"
+    )
+    requested = "桌上的白浊已经干了一层。"
+    fallback = "她伸手把乌木匣子搁在长凳上。"
+
+    assert si.fallback_illustration_anchor(text) == fallback
+    assert sum(t in si.illustration_scene_excerpt(text, requested)
+               for t in si._ACTION_CONTEXT_TERMS) < 2, "本用例的前提：窗口里没有动作语境"
+    assert si.resolve_illustration_anchor(text, requested) == fallback
+
+
+def test_台词里的射精措辞不得被当成高潮结果帧():
+    """台词只有声音、没有画面——「射在」不在词表内，故含它的对白不得凭此翻案。"""
+    text = (
+        "<content>她抬起手把帛书搁在案角。\n\n"
+        "「等他射在你里头的时候，会想我的。」</content>"
+    )
+    requested = "「等他射在你里头的时候，会想我的。」"
+
+    assert si.fallback_illustration_anchor(text) == "她抬起手把帛书搁在案角。"
+    assert si.resolve_illustration_anchor(text, requested) == "她抬起手把帛书搁在案角。"
+
+
 def test_时间跳转后的末尾揭示锚点不得被前一时段高潮覆盖():
     text = (
         "<content>他将玉碾安置妥当，锁上牢门离开。\n\n"
@@ -465,7 +546,9 @@ def test_世界书锚失配时从重要角色表补外貌与穿着():
     assert "【穿着】藕荷色束腰长裙" in out
 
 
-def test_已被世界书覆盖的角色不重复补():
+def test_表格里没有的角色不动且原有段落保留():
+    # ⚠ 第 36 刀改了「两边都有」的语义（改为融合），本用例只覆盖「表格里没有该角色」
+    # 那一支 ⇒ 断言不变；融合面见下面的第 36 刀用例。
     tables = [{"name": "重要角色表", "columns": ["姓名", "外貌特征"], "rows": [["舞姬恋", "美母"]]}]
     out = si.supplement_actor_table_appearance("凌若冰：冰肌玉骨", ["凌若冰", "舞姬恋"], tables)
     assert out.startswith("凌若冰：")
@@ -484,6 +567,168 @@ def test_支持tables包裹形状并跳过无姓名列表():
     out = si.supplement_actor_table_appearance("", ["舞姬恋"], wrapped)
     assert "【外貌】美母" in out
     assert "【穿着】" not in out
+
+
+# ── 第 36 刀：角色事实三源融合（用户 2026-09-21 定案「剧情表现 > 表格补充 > 角色条目」）──
+# 原实现是「条目已点名该角色 ⇒ 表格整行跳过」（实为「条目 > 表格」）；现在改为**融合**：
+# 表格分句并入同属性桶、条目在前表格在后（最新状态落在最后）、完全重复的不重写。
+
+
+def _冰表格() -> list[dict]:
+    return [{
+        "name": "重要角色表",
+        "columns": ["姓名", "外貌特征", "穿着打扮"],
+        "rows": [[
+            "凌若冰",
+            "凤眸冷艳，耳根残红未褪；仙裙滑落半肩又拢好",
+            "宗主仙裙半褪后重新拢好，肩头衣料微湿",
+        ]],
+    }]
+
+
+def test_第36刀_条目与表格同时存在时融合而非整行跳过():
+    entry = "凌若冰：【外貌】冷艳高华的绝世美妇，一头乌黑长发；【身材】媚软纤腰；【穿着】素雅华贵的宗主仙裙"
+    out = si.supplement_actor_table_appearance(entry, ["凌若冰"], _冰表格())
+
+    assert out != entry                       # 不再是「已点名就跳过」
+    assert "一头乌黑长发" in out                 # 条目＝最初设定，保留
+    assert "媚软纤腰" in out                     # 表里没有的属性桶（身材）原样保留
+    assert "耳根残红未褪" in out                 # 表格＝上轮信息，并入
+    assert "肩头衣料微湿" in out
+
+
+def test_第36刀_条目在前表格在后即最新状态落在最后():
+    entry = "凌若冰：【外貌】乌黑长发；【穿着】宗主仙裙"
+    out = si.supplement_actor_table_appearance(entry, ["凌若冰"], _冰表格())
+
+    assert out.index("乌黑长发") < out.index("耳根残红未褪")
+    assert out.index("宗主仙裙") < out.index("宗主仙裙半褪后重新拢好")
+    # 两个桶都留在原位，没有新起第二段
+    assert out.count("凌若冰：") == 1
+    assert "【身材】" not in out
+
+
+def test_第36刀_表格分句与条目逐字重复时不重写():
+    tables = [{"name": "重要角色表", "columns": ["姓名", "外貌特征"],
+               "rows": [["凌若冰", "冰肌玉骨"]]}]
+    entry = "凌若冰：【外貌】冰肌玉骨，乌黑长发"
+
+    assert si.supplement_actor_table_appearance(entry, ["凌若冰"], tables) == entry
+
+
+def test_第36刀_表格缺该属性桶时在块尾新起桶():
+    tables = [{"name": "重要角色表", "columns": ["姓名", "外貌特征"],
+               "rows": [["凌若冰", "凤眸冷艳"]]}]
+    entry = "凌若冰：【穿着】宗主仙裙"
+    out = si.supplement_actor_table_appearance(entry, ["凌若冰"], tables)
+
+    assert "【外貌】凤眸冷艳" in out
+    assert out.index("【穿着】") < out.index("【外貌】")
+
+
+def test_第36刀_表格里没有该角色时逐字节不变():
+    entry = "凌若冰：【外貌】冰肌玉骨"
+    tables = [{"name": "重要角色表", "columns": ["姓名", "外貌特征"],
+               "rows": [["舞姬恋", "美母"]]}]
+
+    assert si.supplement_actor_table_appearance(entry, ["凌若冰"], tables) == entry
+
+
+def test_第36刀_无表或空主体时逐字节不变():
+    entry = "凌若冰：【外貌】冰肌玉骨"
+
+    assert si.supplement_actor_table_appearance(entry, ["凌若冰"], []) == entry
+    assert si.supplement_actor_table_appearance(entry, [], _冰表格()) == entry
+
+
+def test_第36刀_条目没有该角色时仍按旧形态新起一行():
+    out = si.supplement_actor_table_appearance(
+        "凌若冰：冰肌玉骨", ["凌若冰", "舞姬恋"],
+        [{"name": "重要角色表", "columns": ["姓名", "外貌特征"],
+          "rows": [["舞姬恋", "美母"]]}],
+    )
+
+    assert out.startswith("凌若冰：冰肌玉骨\n")
+    assert "舞姬恋：【外貌】美母" in out
+
+
+def test_第36刀_诊断逐角色报外观事实来源():
+    entry = "凌若冰：【外貌】冰肌玉骨\n舞姬恋：藕荷色长裙"
+    tables = [{"name": "重要角色表", "columns": ["姓名", "外貌特征"],
+               "rows": [["凌若冰", "耳根残红未褪"], ["路人甲", "魁梧"]]}]
+
+    sources = si.actor_appearance_sources(
+        entry, ["凌若冰", "舞姬恋", "丁", "路人甲"], tables,
+    )
+
+    assert sources["凌若冰"] == "merged"   # 条目＋表格都供了事实
+    assert sources["舞姬恋"] == "entry"    # 只有条目
+    assert sources["路人甲"] == "table"    # 只有表格（条目缺粮那一支）
+    assert sources["丁"] == "none"        # 两边都没有
+    assert si.actor_appearance_sources(entry, [], tables) == {}
+
+
+# ── 第 36 刀补丁：**单槽位属性**（穿着）的互斥筛查 ────────────────────────────
+# 用户 2026-09-21 当场点出：「剧情的兔女郎服饰和上个表格的婚纱两个 tag 可能同时存在，
+# 即服装被你兼容了」⇒ 穿着＝同一时刻只有一套主装 ⇒ 必须先判「同物」再决定融合还是覆盖。
+
+
+def test_第36刀_同一套服装的新状态仍融合():
+    entry = "凌若冰：【穿着】素雅华贵的宗主仙裙配黑色蕾丝长丝袜与金绑带高跟"
+    out = si.supplement_actor_table_appearance(entry, ["凌若冰"], _冰表格())
+
+    assert "素雅华贵的宗主仙裙" in out          # 同物（共享「宗主仙裙」）⇒ 基础款保留
+    assert "黑色蕾丝长丝袜" in out
+    assert "宗主仙裙半褪后重新拢好" in out        # 当前状态并入
+    assert "肩头衣料微湿" in out
+
+
+def test_第36刀_两套互斥服装不并存按优先级覆盖():
+    tables = [{"name": "重要角色表", "columns": ["姓名", "穿着打扮"],
+               "rows": [["凌若冰", "曳地白色婚纱"]]}]
+    entry = "凌若冰：【穿着】黑色兔女郎紧身衣、兔耳发箍"
+    out = si.supplement_actor_table_appearance(entry, ["凌若冰"], tables)
+
+    assert "婚纱" in out            # 表格＝上轮信息，优先级高于条目
+    assert "兔女郎" not in out       # 互斥 ⇒ 旧的整套丢掉，**不并存**
+
+
+def test_第36刀_穿着互斥只覆盖穿着桶不动可叠加属性():
+    tables = [{"name": "重要角色表", "columns": ["姓名", "外貌特征", "穿着打扮"],
+               "rows": [["凌若冰", "凤眸冷艳", "曳地白色婚纱"]]}]
+    entry = "凌若冰：【外貌】冷艳高华的绝世美妇；【身材】媚软纤腰；【穿着】黑色兔女郎紧身衣"
+    out = si.supplement_actor_table_appearance(entry, ["凌若冰"], tables)
+
+    assert "冷艳高华的绝世美妇" in out and "媚软纤腰" in out   # 外貌／身材照旧融合
+    assert "凤眸冷艳" in out
+    assert "婚纱" in out and "兔女郎" not in out
+
+
+def test_第36刀_表格空值占位不当事实并入():
+    # 真机数据实测：虞莹纱的「外貌特征」「穿着打扮」两列字面写的就是「未提及」。
+    tables = [{"name": "重要角色表", "columns": ["姓名", "外貌特征", "穿着打扮"],
+               "rows": [["虞莹纱", "未提及", "未提及"]]}]
+    entry = "虞莹纱：【外貌】红绸束发、粉雕玉琢"
+
+    assert si.supplement_actor_table_appearance(entry, ["虞莹纱"], tables) == entry
+    assert si.actor_appearance_sources(entry, ["虞莹纱"], tables) == {"虞莹纱": "entry"}
+
+
+def test_第36刀_互斥覆盖保留桶内换行不粘连下一个标签():
+    # 条目是**整卡正文**（【外貌】…\n【穿着】…\n【绑定世界书】…）；覆盖穿着桶时
+    # 若吞掉桶内换行，会把下一个标签粘进穿着内容（真机实测到「未着衣【绑定世界书】」）。
+    tables = [{"name": "重要角色表", "columns": ["姓名", "穿着打扮"],
+               "rows": [["凌若冰", "灌顶施术中浸泡浮花泉，未着衣"]]}]
+    entry = (
+        "凌若冰：【外貌】冷艳高华\n"
+        "【穿着】素雅华贵的宗主仙裙配黑色蕾丝长丝袜\n"
+        "【绑定世界书】凌霄仙母录"
+    )
+    out = si.supplement_actor_table_appearance(entry, ["凌若冰"], tables)
+
+    assert "未着衣\n【绑定世界书】" in out
+    assert "未着衣【绑定世界书】" not in out
+    assert "黑色蕾丝长丝袜" not in out       # 互斥 ⇒ 旧的整套确实丢掉了
 
 
 # ── 2026-09-18 三段真实文本走查回归（nsfw_test.txt / simple_test.txt）──────────────
@@ -1330,6 +1575,27 @@ def test_第三人称正向证据才算第三人称_否则默认第一人称():
     assert si.frame_viewpoint("啵嗯…！", "我抓住宥夏的手腕。", known=known) == "first_person"
 
 
+def test_viewpoint_scope_单一真源接缝():
+    """第 51 刀：viewpoint_scope 算一次、打包 mode/narrator/narrator_source/detail。
+
+    下游 6 处消费点一律消费本结果，`filter_anchor_subjects` 不得再自判（修 D1）。"""
+    scope = si.viewpoint_scope("我推开门。", ["宥夏"], override="")
+    assert scope.mode == "first_person"
+    assert scope.narrator == ""
+    assert scope.narrator_source == ""
+    assert scope.detail["viewpoint"] == "first_person"
+
+    # 手选优先 + 三段姓名（narrator/narrator_source 由上游算好传入）
+    scope2 = si.viewpoint_scope(
+        "她推开门。", ["宥夏"], override="first_person",
+        narrator="甲", narrator_source="user_name",
+    )
+    assert scope2.mode == "first_person"
+    assert scope2.narrator == "甲"
+    assert scope2.narrator_source == "user_name"
+    assert scope2.detail["source"] == "override"
+
+
 def test_空主体表原样透传():
     """零回归锁：词表档（subjects 为空）必须原样返回，绝不凭空造人。"""
     assert si.filter_anchor_subjects([], "塞蕾娜正微笑着。", ["塞蕾娜"]) == []
@@ -1345,11 +1611,11 @@ def test_手选人称同样作用于主体后滤():
     assert si.filter_anchor_subjects(["甲", "宥夏"], anchor, known, narrator="甲") == ["甲", "宥夏"]
     # 手选第一人称 ⇒ 主人公被剔（即使自动判成第三人称）
     assert si.filter_anchor_subjects(
-        ["甲", "宥夏"], anchor, known, narrator="甲", override="first_person",
+        ["甲", "宥夏"], anchor, known, narrator="甲", viewpoint="first_person",
     ) == ["宥夏"]
     # 手选第三人称 ⇒ 主人公保留（即使锚点段是第一人称）
     assert si.filter_anchor_subjects(
-        ["甲", "宥夏"], "我再也忍不住了。", known, narrator="甲", override="third_person",
+        ["甲", "宥夏"], "我再也忍不住了。", known, narrator="甲", viewpoint="third_person",
     ) == ["甲", "宥夏"]
 
 
@@ -1359,8 +1625,63 @@ def test_手选人称缺省参数逐字节等于旧行为():
     assert si.filter_anchor_subjects(
         ["甲", "宥夏"], "我再也忍不住了。", known, narrator="甲",
     ) == si.filter_anchor_subjects(
-        ["甲", "宥夏"], "我再也忍不住了。", known, narrator="甲", override="",
+        ["甲", "宥夏"], "我再也忍不住了。", known, narrator="甲", viewpoint="",
     ) == ["宥夏"]
+
+
+# ── 第 42 刀·B（2026-09-22 用户实锤「手选第一人称，主人公仍在画面内」）──
+# 真机事故：判据 `subjects=["甲","乙"]`，其中「甲」是**用户人设名**（叙事者本名），而
+# `narrator` 只从用户设置取 ⇒ 设置为空时第 37 刀那条「滤主角本名」空转 ⇒ 叙事者占掉一个
+# 主体名额 ⇒ 多人契约误触发 ⇒ 模型按「两人」成稿 ⇒ 主人公入画、女主服装被绑到他身上。
+# 收紧口径：画面主体的**身份真源＝已配置角色卡**，第一人称下 ∉ `known` 的名字一律不占画面。
+
+
+def test_第一人称下非角色卡主体被剔出画面():
+    """手选／自动判第一人称 ⇒ 判据 subjects 里 ∉ 已配置角色卡的名字不占画面主体。
+
+    真机形态：`subjects=["甲","乙"]`、角色卡只有 `乙` ⇒ 只剩 `乙`（契约据此判单人帧）。"""
+    known = ["乙", "丙"]
+    anchor = "我再也忍不住了。"          # 第一人称 ⇒ 叙事者不占画面
+    assert si.filter_anchor_subjects(
+        ["甲", "乙"], anchor, known, viewpoint="first_person",
+    ) == ["乙"]
+    # 自动判定同样生效（锚点段第一人称，无需手选）
+    assert si.filter_anchor_subjects(["甲", "乙"], anchor, known) == ["乙"]
+
+
+def test_第一人称下非角色卡主体剔空则回退不剔():
+    """剔空的边界：某帧画面里真的没有角色卡人物时，不得把主体数算成 0。
+
+    宁可按原名单交给下游（可能多一个主体），也不能凭空清空——清空 ⇒ 契约退回 `actors`
+    （在场全集），画面只会更宽。"""
+    known = ["丙", "丁"]
+    assert si.filter_anchor_subjects(
+        ["甲", "乙"], "我再也忍不住了。", known, viewpoint="first_person",
+    ) == ["甲", "乙"]
+
+
+def test_第三人称下非角色卡主体不剔():
+    """第三人称 ⇒ 主人公算一个主体（2026-09-19 用户定案）：本闸只在第一人称下生效。"""
+    known = ["乙", "丙"]
+    assert si.filter_anchor_subjects(
+        ["甲", "乙"], "我再也忍不住了。", known, viewpoint="third_person",
+    ) == ["甲", "乙"]
+
+
+def test_非角色卡剔除在_known_为空时逐字节空转():
+    """零回归锁：`known` 为空（无角色卡配置）⇒ 本闸不介入，与旧实现逐字节一致。"""
+    assert si.filter_anchor_subjects(
+        ["甲", "乙"], "我再也忍不住了。", [], viewpoint="first_person",
+    ) == ["甲", "乙"]
+
+
+def test_非角色卡剔除后锚点收敛仍照常生效():
+    """两步叠加且**顺序不变**：B 先剔非角色卡，锚点句点名收敛再按剩余名单收敛。"""
+    known = ["乙", "丙"]
+    anchor = "乙趴在课桌上，肩膀微微发抖。"
+    assert si.filter_anchor_subjects(
+        ["甲", "乙", "丙"], anchor, known, viewpoint="first_person",
+    ) == ["乙"]
 
 
 def test_通用表性别列兜底():
@@ -1403,3 +1724,512 @@ def test_主人公性别注入落到本人那一行():
     assert si.supplement_protagonist_gender(
         "", ["甲"], "甲", "女",
     ) == "甲：【性别】女"
+
+
+def test_第37刀_第一人称不注入主人公性别():
+    """第 37 刀（2026-09-21 用户实锤）：第一人称下主人公＝镜头本身、不占画面 ⇒ 性别事实不注入。
+
+    真机现场：手选第一人称、画面主体 `2girls` 正确，却因注入了主人公性别而多写 `1boy`
+    （违规）。⚠ 缺省 `viewpoint=""` ⇒ 逐字节等于旧行为（老调用方零回归）。
+    """
+    assert si.supplement_protagonist_gender(
+        "甲：高大", ["甲"], "甲", "男", viewpoint="first_person",
+    ) == "甲：高大"
+    assert si.supplement_protagonist_gender(
+        "甲：高大", ["甲"], "甲", "男", viewpoint="third_person",
+    ) == "甲：高大；【性别】男"
+    # 缺省口径不变（老调用方零回归）
+    assert si.supplement_protagonist_gender(
+        "甲：高大", ["甲"], "甲", "男",
+    ) == "甲：高大；【性别】男"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 取材层窗口：「取最近时点」（2026-09-24 第 56 刀）
+#
+# 用户原话：「有时候你看上下文实际会发现**高潮点片段的那个位置有不同的时点**，
+#   前一段描述**肉棒在腰部**，下一段就描述**插入嘴巴**了，而我的建议就是
+#   **高潮点选在离它最近的一个时点为准，不要两个都出现**，
+#   这样会生成**多个器官肢体冲突**」。
+# 真机形态（`_tmp/probe_tp_ab.py` · turn `f926775566b0`）：窗口 36..42、锚点段 42，
+# 段 39 是纯 `L`（只贴大腿外侧）＝更早的时点，段 40/41/42 是 `FL`／`F`／`FL` 的**上行链**
+# ⇒ 只丢 39、保留 40..42。
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_第56刀_跨时点低带段被丢弃():
+    """主路径：锚点在口部（F），前驱有一条只到腰/腿的**更早时点** ⇒ 必须截断。
+
+    锚点句含动作词（`磨`）⇒ 走**动作链回扫**分支（真机投诉帧正是这条路径）。
+    """
+    text = "\n\n".join([
+        "他侧躺过去，隔着裤料让那根硬热贴住她大腿外侧，先蹭。",   # L：更早时点
+        "他把顶端抵上去，绕着小腹缓磨，布料塌出一个窝。",          # FL：上行（含动作词）
+        "肉棒从她小腹一路往上拖，过了乳沟，从乳尖贴着擦过去。",     # FL：上行
+        "它悬在她唇边，拇指压住下唇往下一分，抵住那两片软唇，缓磨。",  # FL：锚点
+    ])
+
+    excerpt = si.illustration_scene_excerpt(
+        text, "它悬在她唇边，拇指压住下唇往下一分，抵住那两片软唇，缓磨。", subjects=["她"],
+    )
+
+    assert "抵住那两片软唇" in excerpt        # 锚点必在
+    assert "过了乳沟" in excerpt              # 上行链保留（同一条动作链）
+    assert "大腿外侧" not in excerpt          # 更早时点被丢弃
+
+
+def test_第56刀_无接触证据时窗口逐字不变():
+    """零回归锁：锚点段没有任何接触部位词 ⇒ 本机制**整体不介入**。"""
+    text = "\n\n".join([
+        "她把书放回架子上，转身去熄灯。",
+        "她想了想，没说话，只是垂下眼。",
+    ])
+
+    assert si.illustration_scene_excerpt(
+        text, "她想了想，没说话，只是垂下眼。", subjects=["她"],
+    ) == "\n\n".join(text.split("\n\n"))
+
+
+def test_第56刀_桥接段不触发截断():
+    """边界锁：无接触部位词的段（`.`）是桥接段 ⇒ **保留**、且**不**中断上溯。
+
+    真机门禁实锤：`start` 若不随 `.` 段同步推进，尾部桥接段会被丢掉
+    （既有用例 `test_高潮重定向保留体位动作链而不是只取单个结果段` 首段
+    「她仰卧在冰冷石板上。」＝**体位**事实，被误判成窗口外）。
+    """
+    text = "\n\n".join([
+        "他把她放倒在石板上。",                        # . 体位/桥接
+        "他把顶端抵上去，绕着她小腹与乳下缘缓磨。",     # U+L 并存
+        "炭盆的火明了又暗。",                          # . 桥接
+        "它悬在她唇边，压住下唇，缓磨。",              # U：锚点
+    ])
+
+    excerpt = si.illustration_scene_excerpt(
+        text, "它悬在她唇边，压住下唇，缓磨。", subjects=["她"],
+    )
+
+    assert "绕着她小腹与乳下缘缓磨" in excerpt   # 桥接段没有把它截掉
+    assert "炭盆的火明了又暗" in excerpt          # 中间桥接段保留
+    assert "她放倒在石板上" in excerpt            # 尾部桥接段保留
+
+
+def test_第56刀_体位与衣着段不算接触时点():
+    """边界锁（真机门禁实锤的两例）：身体名词若只描述**衣着/体位** ⇒ 不得判成高度带。
+
+    ·「散乱的华袍残片**垂在腰侧**」＝衣着位置；
+    ·「双手仍被锁链**拷在腰前**，**双腿弯曲分开**」＝体位。
+    若把它们当成「下半身时点」，既有的两条高潮重定向用例会当场翻红。
+    """
+    assert si._timepoint_band("散乱的华袍残片垂在腰侧。") == si._TP_BAND_NONE
+    assert si._timepoint_band("她侧卧在石板上，双手仍被锁链拷在腰前，双腿弯曲分开。") == si._TP_BAND_NONE
+    # 有接触动作 + 身体名词 ⇒ 才判带
+    assert si._timepoint_band("他把它贴住她大腿外侧，先蹭。") == si._TP_BAND_LOWER
+    assert si._timepoint_band("他把顶端抵住她下唇。") == si._TP_BAND_FACE
+    # 有接触动作但无高度名词 ⇒ 高度未知 ⇒ 桥接（不截断）
+    assert si._timepoint_band("他俯身贴近她。") == si._TP_BAND_NONE
+
+
+def test_第56刀_接触闸不复用动作上下文词表():
+    """结构锁：接触闸必须是**独立**表。
+
+    `_ACTION_CONTEXT_TERMS` 含「转向/看向/分开/弯曲」等**非接触**姿态词，
+    拿它当接触闸等于没闸（真机门禁：「双腿弯曲分开」那一段会被判成下半身时点）。
+    """
+    assert si._TP_CONTACT_RE is not si._ACTION_CONTEXT_TERMS
+    assert "分开" not in si._TP_CONTACT_RE.pattern
+    assert "弯曲" not in si._TP_CONTACT_RE.pattern
+    assert "转向" not in si._TP_CONTACT_RE.pattern
+    assert "看向" not in si._TP_CONTACT_RE.pattern
+
+
+def test_第56刀_锚点为下半身时反向截断():
+    """对称性锁：锚点带为 `L`（腰腹/下体）时，靠上的 `F` 段属**更早时点** ⇒ 同样截断。"""
+    text = "\n\n".join([
+        "他抵住她的唇，拇指压着下唇。",           # F：更早时点
+        "他退下来，把肉棒贴住她的小腹，缓磨。",     # L：锚点所在时点
+    ])
+
+    excerpt = si.illustration_scene_excerpt(
+        text, "他退下来，把肉棒贴住她的小腹，缓磨。", subjects=["她"],
+    )
+
+    assert "贴住她的小腹" in excerpt
+    assert "压着下唇" not in excerpt
+
+
+def test_第56刀_并存段不误判为更早时点():
+    """结构锁：`?`（同段 F+L 并存）必须**同时**含 F 与 L。
+
+    真机踩过：`anchor_band in band` 的字符串包含判定对 `?` 恒为假
+    ⇒ 攀爬链 40/41 被判成更早时点、窗口塌成锚点单段（659 字 → 159 字）。
+    """
+    assert si._tp_has_band("他膝跪在被里，让它悬在她唇边。", si._TP_BAND_FACE)
+    mixed = "他把它搁在她腰侧，又凑到她唇边。"
+    assert si._timepoint_band(mixed) == si._TP_BAND_UNCLEAR
+    assert si._tp_has_band(mixed, si._TP_BAND_FACE)
+    assert si._tp_has_band(mixed, si._TP_BAND_LOWER)
+
+
+def test_第56刀_姿势词不算接触点():
+    """边界锁：「膝/跪/骑/坐」是姿势而非接触高度 ⇒ 不进带表。
+
+    真机段 42「**膝跪在被里**不压她，让它悬在她**唇边**」＝接触点在唇 ⇒ 必须判成 F。
+    """
+    assert si._timepoint_band("他膝跪在被里，把它悬在她唇边。") == si._TP_BAND_FACE
+    # 只有姿势、没有任何接触部位词 ⇒ 判「无带」（不得凭「跪/膝」造出一个高度带）
+    assert si._timepoint_band("他跪坐着，什么也没碰。") == si._TP_BAND_NONE
+    # 纯姿势 + 手肘 ⇒ 仍无带（腕/肘不是高度带表里的词）
+    assert si._timepoint_band("他撑着手肘，侧过身去。") == si._TP_BAND_NONE
+
+
+def test_第56刀_带判定不含单字面():
+    """边界锁：带表刻意**不含**单字「面」——真机「布面」「案角压纸的镇石」会误命中。"""
+    assert si._TP_FACE_RE.search("布面") is None
+    assert si._TP_FACE_RE.search("两面") is None
+    assert si._timepoint_band("他隔着中衣布面贴上去。") != si._TP_BAND_FACE
+
+
+def test_第56刀_高频词陷阱不得进高度带表():
+    """**本轮最贵的一条锁**：真机零 LLM 逐段复算（`turn 1339a9a2b586`）抓出的量词/常用词陷阱。
+
+    这些词若进表，整条判据会失效——最严重的是**量词「一股」**被判成下半身带
+    （「渗出**一股**雌香」），以及「两**人中**间」「**头**」这类高频噪声：
+    当时实测 13 段里 11 段被判成「上下带并存（`?`）」，窗口该收的 2500 字**一个字都没收**。
+    """
+    # 量词 / 常用词（真机逐条命中过的原文）
+    traps_none = [
+        "她鼻息里便慢慢漫出一股雌香。",          # 股＝量词
+        "两人中间那道被缝照旧留着。",            # 人中＝人/中间
+        "剑诀讲到转腕那一节，腕子已经酸得发木。",  # 头/口 类噪声
+        "门外脚步声响了。",                      # 脚＝脚步
+        "满足于眼前的安静。",                    # 足＝满足
+        "阴影里看不清脸色。",                    # 阴＝阴影
+        "她心头一跳，抬起头来。",                # 头
+    ]
+    for trap in traps_none:
+        # 无接触动作 ⇒ 一律判「非接触段」（不进入任何带）
+        assert si._timepoint_band(trap) == si._TP_BAND_NONE, trap
+
+    # 单字只留双字/限定写法：裸单字不得入表
+    for bare in ("头", "口", "牙", "人中", "脚", "足", "阴", "股", "腹"):
+        assert si._TP_FACE_RE.fullmatch(bare) is None, bare
+        assert si._TP_LOWER_RE.fullmatch(bare) is None, bare
+
+    # 限定写法照常命中（宁缺勿猜，但该认的认）
+    assert si._TP_FACE_RE.search("嘴角") is not None
+    assert si._TP_FACE_RE.search("口鼻") is not None
+    assert si._TP_FACE_RE.search("牙龈") is not None
+    assert si._TP_LOWER_RE.search("大腿") is not None
+    assert si._TP_LOWER_RE.search("小腹") is not None
+    assert si._TP_LOWER_RE.search("脚踝") is not None
+    assert si._TP_LOWER_RE.search("阴部") is not None
+    assert si._TP_LOWER_RE.search("股间") is not None
+
+
+def test_第56刀_器官名不算高度带():
+    """结构锁：器官（肉棒/阳具/龟头/柱身）是**器官**不是**高度** ⇒ 不进带表。
+
+    真机踩过：把「肉棒」放进下半身带后，整条攀爬链几乎每段都「上下带并存」
+    ⇒ 判据失效（窗口 2500 字零收窄）。器官的**位置**由同段的高度名词表达。
+    """
+    for organ in ("肉棒", "阳具", "龟头", "柱身"):
+        assert si._TP_LOWER_RE.search(organ) is None, organ
+        assert si._TP_FACE_RE.search(organ) is None, organ
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 判据契约扩为「锚点数组 + score」（2026-09-24 第 57 刀 · 多批生图的地基）
+#
+# 用户口径：高潮点判断改为**打分式多批**——一次产出全部高潮点并各自打分；
+#   出图数量 < 锚点数 ⇒ 按分从高到低取前 N，数量 ≥ 锚点数 ⇒ 全部出图。
+# 本刀只落**契约与解析**（出图仍 1 张，取分最高者）；派发多事件是后续步骤。
+# ⚠ 两条零回归锁：① 旧单条形态逐字维持；② `score` 缺失/非法记 0、不判死。
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_第57刀_新形态锚点数组按正文序解析():
+    """主路径：`{"anchors":[…]}` 解析成列表，**保持判据给的正文顺序**（不重排）。"""
+    raw = (
+        '{"anchors": ['
+        '{"anchor": "她仰面躺在枕上。", "composition": "特写", "subjects": ["乙"],'
+        ' "reason": "事后定型", "score": 60},'
+        '{"anchor": "他把顶端凑过去抵住那两片软唇。", "composition": "特写",'
+        ' "subjects": ["乙"], "reason": "动作收束", "score": 90}'
+        "]}"
+    )
+
+    items = si.parse_anchor_intents(raw)
+
+    assert [item["anchor"] for item in items] == [
+        "她仰面躺在枕上。", "他把顶端凑过去抵住那两片软唇。",
+    ]
+    assert [item["score"] for item in items] == [60, 90]      # 未按分数重排
+    assert items[1]["subjects"] == ["乙"]
+
+
+def test_第57刀_旧单条形态逐字维持旧行为():
+    """**零回归锁**：老判据（在播的单锚点 rubric）仍按单条输出 ⇒ 单元素列表 + `score=0`。
+
+    这是「用户手上那份判据不必改也能继续用」的保证（合同变了但解析兼容）。
+    """
+    raw = (
+        '{"anchor": "浑身无力的宥夏靠在公告栏上。", "composition": "中景", '
+        '"subjects": ["宥夏"], "reason": "事后定型态"}'
+    )
+
+    items = si.parse_anchor_intents(raw)
+
+    assert len(items) == 1
+    assert items[0]["anchor"] == "浑身无力的宥夏靠在公告栏上。"
+    assert items[0]["score"] == 0                              # 缺 score ⇒ 0，**不判死**
+    # 单条兼容函数逐字等价
+    assert si.parse_anchor_intent(raw)["anchor"] == "浑身无力的宥夏靠在公告栏上。"
+
+
+def test_第57刀_顶层裸数组也认():
+    """容错锁：模型可能直接吐裸数组（不裹 `anchors` 键）⇒ 同样认。"""
+    raw = '[{"anchor": "塞蕾娜正微笑着。", "score": "80"}, {"anchor": "她垂下眼。", "score": 10}]'
+
+    items = si.parse_anchor_intents(raw)
+
+    assert [item["anchor"] for item in items] == ["塞蕾娜正微笑着。", "她垂下眼。"]
+    assert [item["score"] for item in items] == [80, 10]       # 字符串数字也收敛
+
+
+def test_第57刀_score缺失或非数一律记0不判死():
+    """边界锁：`score` 缺 / 空串 / 非数 / 布尔 ⇒ 0，**绝不因它整条判死**。"""
+    for bad in ("null", '""', '"很高"', "true"):
+        raw = f'{{"anchor": "她垂下眼。", "score": {bad}}}'
+        items = si.parse_anchor_intents(raw)
+        assert len(items) == 1, bad
+        assert items[0]["score"] == 0, bad
+
+
+def test_第57刀_数组里没给anchor的项被剔除():
+    """边界锁：合同允许「某条 evidence 不过 ⇒ 只废该条」⇒ 无 anchor 的项必须剔。"""
+    raw = (
+        '{"anchors": [{"anchor": "", "score": 99}, '
+        '{"anchor": "她垂下眼。", "score": 10}]}'
+    )
+
+    items = si.parse_anchor_intents(raw)
+
+    assert [item["anchor"] for item in items] == ["她垂下眼。"]
+
+
+def test_第57刀_空数组退回无锚点():
+    """零回归锁：`{"anchors": []}` ⇒ 空列表 ⇒ 调用方退回中文词表档。"""
+    assert si.parse_anchor_intents('{"anchors": []}') == []
+    assert si.parse_anchor_intents("") == []
+    assert si.parse_anchor_intents("模型这次什么都没按格式说。") == []
+    assert si.parse_anchor_intent('{"anchors": []}') is None
+
+
+def test_第57刀_单张出图取分最高且同分取正文更早():
+    """口径锁（用户定案「数量 < 高潮点数 ⇒ 按分从高到低」）：
+
+    出图数 = 1 时取分最高者；**同分取正文更早**（保序稳定，避免同分随机漂移）。
+    """
+    raw = (
+        '{"anchors": ['
+        '{"anchor": "第一处。", "score": 50},'
+        '{"anchor": "第二处。", "score": 90},'
+        '{"anchor": "第三处。", "score": 50}'
+        "]}"
+    )
+
+    # 分最高 ⇒ 第二处
+    assert si.parse_anchor_intent(raw)["anchor"] == "第二处。"
+    # 同分（都把 90 拿掉）⇒ 取正文更早的「第一处」
+    tie = raw.replace('"score": 90', '"score": 50')
+    assert si.parse_anchor_intent(tie)["anchor"] == "第一处。"
+
+
+def test_第57刀_取前N按分数降序但结果保持正文序():
+    """口径锁：`select_anchor_intents` **只决定选哪几条**；返回顺序仍是**正文序**
+    （图要跟着剧情位置摆，不是按分数摆）。"""
+    items = [
+        {"anchor": "A", "score": 10},
+        {"anchor": "B", "score": 70},
+        {"anchor": "C", "score": 40},
+    ]
+
+    assert [x["anchor"] for x in si.select_anchor_intents(items, 2)] == ["B", "C"]
+    # 数量 ≥ 锚点数 ⇒ 全部（「上限不限制」的口径）
+    assert [x["anchor"] for x in si.select_anchor_intents(items, 3)] == ["A", "B", "C"]
+    assert [x["anchor"] for x in si.select_anchor_intents(items, 99)] == ["A", "B", "C"]
+    assert si.select_anchor_intents([], 5) == []
+
+
+def test_第57刀_合同同时声明数组与score():
+    """合同锁：数组键、`score` 字段、以及「按正文先后排列 / 不要按分数排序」都必须写明。"""
+    contract = si.ANCHOR_INTENT_CONTRACT
+
+    assert si.ANCHOR_INTENTS_KEY in contract
+    assert "score" in contract
+    assert "先后" in contract and "不要" in contract
+    # `ANCHOR_INTENT_FIELDS` 是**单条**字段集，逐字段都必须出现在合同正文里
+    for field in si.ANCHOR_INTENT_FIELDS:
+        assert field in contract
+
+
+def test_第57刀_属性测试_多锚点解析永不抛异常():
+    """稳健性锁：判据输出是**模型自由文本** ⇒ 任意输入都不得抛异常（失败退回词表档）。"""
+    for raw in (
+        "[]", "[1, 2, 3]", '{"anchors": "不是数组"}', '{"anchors": [1, "x"]}',
+        '{"anchors": [{"anchor": 5}]}', '{"anchor": ["x"]}', "null", "{}",
+        "```json\n{\"anchors\": []}\n```", "<think>想一下</think>\n{\"anchors\": []}",
+    ):
+        si.parse_anchor_intents(raw)          # 不抛即通过
+        si.parse_anchor_intent(raw)
+
+
+# ── 第 57 刀 · 多锚点去重（高度带 + 相邻段落，用户定案 2026-09-24）──────────────
+
+
+def test_第57刀_去重_同带相邻两锚点合并留高分():
+    """口径锁：**高度带相同**（复用 56 刀 `_timepoint_band`）**且相邻** ⇒ 同一处 ⇒ 合并，
+    保留 `score` 更高者（用户 56 刀点名的「前一段在腰间、后一段插进嘴里」正属此列）。"""
+    text = "他抵着她的唇角。\n他凑近她颈窝，鼻尖擦过。"
+    items = [
+        {"anchor": "他抵着她的唇角。", "score": 30},
+        {"anchor": "他凑近她颈窝，鼻尖擦过。", "score": 80},
+    ]
+
+    merged = si.dedupe_anchor_intents(items, text)
+
+    assert len(merged) == 1
+    assert merged[0]["score"] == 80              # 高分那条留下
+    assert merged[0]["anchor"] == "他凑近她颈窝，鼻尖擦过。"
+
+
+def test_第57刀_去重_同带但远隔不合并():
+    """口径锁：**只有「相邻段落」才算同一处**。同带但隔得远（这里是 4 段）⇒ 两处，
+    ⛔ 不并（否则一次长剧情里两处独立的口交会被吞成一处）。"""
+    text = "\n".join([
+        "他贴着她的大腿外侧缓缓上移。",   # L
+        "她仰着头，唇瓣微启。",           # F
+        "他把手压在她肩上。",             # F
+        "窗外雨声渐急。",                 # .
+        "他碰到她膝弯内侧。",             # L
+    ])
+    items = [
+        {"anchor": "他贴着她的大腿外侧缓缓上移。", "score": 90},
+        {"anchor": "他碰到她膝弯内侧。", "score": 20},
+    ]
+
+    merged = si.dedupe_anchor_intents(items, text)
+
+    assert len(merged) == 2
+    assert [item["score"] for item in merged] == [90, 20]
+
+
+def test_第57刀_去重_异带相邻不合并():
+    """口径锁：带不同 ⇒ 本就是**两个时点**（口/面 vs 腰下）⇒ 不并。"""
+    text = "他抵着她的唇角。\n他碰到她膝弯内侧。"
+    items = [
+        {"anchor": "他抵着她的唇角。", "score": 90},          # F
+        {"anchor": "他碰到她膝弯内侧。", "score": 20},        # L
+    ]
+
+    assert len(si.dedupe_anchor_intents(items, text)) == 2
+
+
+def test_第57刀_去重_无接触证据的锚点不参与合并():
+    """保守锁：带为空（`.`／`?`，无接触证据）⇒ **不猜**，一律不并（宁多出一张，不并错一处）。"""
+    text = "她仰着头望着天。\n她垂下眼，睫毛轻颤。"
+    items = [
+        {"anchor": "她仰着头望着天。", "score": 90},
+        {"anchor": "她垂下眼，睫毛轻颤。", "score": 20},
+    ]
+
+    assert len(si.dedupe_anchor_intents(items, text)) == 2
+
+
+def test_第57刀_去重_不给anchor或在原文找不到时不参与合并():
+    """保守锁：`anchor` 为空 / 不逐字落文（模型造词）⇒ 段位无从定位 ⇒ 不并。"""
+    text = "他抵着她的唇角。\n他凑近她颈窝，鼻尖擦过。"
+    items = [
+        {"anchor": "", "score": 90},
+        {"anchor": "他凑近她颈窝，鼻尖擦过。", "score": 80},
+    ]
+
+    assert len(si.dedupe_anchor_intents(items, text)) == 2
+
+
+def test_第57刀_去重_同一句在正文出现两次时定位有歧义不并():
+    """保守锁：逐字命中的**段位有歧义**（同一句出现两次）⇒ 不并（并错一处比多出一张更贵）。"""
+    text = "他抵着她的唇角。\n他抵着她的唇角。\n他凑近她颈窝，鼻尖擦过。"
+    items = [
+        {"anchor": "他抵着她的唇角。", "score": 90},
+        {"anchor": "他凑近她颈窝，鼻尖擦过。", "score": 80},
+    ]
+
+    assert len(si.dedupe_anchor_intents(items, text)) == 2
+
+
+def test_第57刀_去重_结果保持正文原序且同分保留更早的():
+    """口径锁：返回**正文原序**（图跟着剧情位置摆）；同分时保留**正文更早**那条。"""
+    text = "\n".join([
+        "他抵着她的唇角。",           # 0  F
+        "他凑近她颈窝，鼻尖擦过。",   # 1  F
+        "她垂下眼。",                 # 2  .
+    ])
+    items = [
+        {"anchor": "他抵着她的唇角。", "score": 50},
+        {"anchor": "他凑近她颈窝，鼻尖擦过。", "score": 50},   # 同分
+        {"anchor": "她垂下眼。", "score": 10},
+    ]
+
+    merged = si.dedupe_anchor_intents(items, text)
+
+    assert [item["anchor"] for item in merged] == ["他抵着她的唇角。", "她垂下眼。"]
+
+
+def test_第57刀_去重_空表与单条原样返回():
+    """零回归锁：空表 ⇒ 空表；单条 ⇒ 原样（不触发任何定位/合并逻辑）。"""
+    text = "他抵着她的唇角。"
+    assert si.dedupe_anchor_intents([], text) == []
+    one = [{"anchor": "他抵着她的唇角。", "score": 42}]
+    assert si.dedupe_anchor_intents(one, text) == one
+
+
+def test_第57刀_去重_属性测试_永不抛异常():
+    """稳健性锁：正文/锚点都是模型自由文本 ⇒ 任意输入不得抛异常。"""
+    for text, items in (
+        ("", []),                          # 正文空
+        ("只有一段。", [{"anchor": "只有一段。"}]),
+        (None, [{"anchor": "她垂下眼。"}]),  # type: ignore[list-item] 故意传 None
+        ("他抵着她的唇角。", [{"score": 1}, "不是字典", None]),
+        ("他抵着她的唇角。", [{"anchor": None}, {"anchor": 5}]),
+    ):
+        si.dedupe_anchor_intents(items, text)   # type: ignore[arg-type]  不抛即通过
+
+
+# ── 第 58 刀：插图插到**段落下方**，不切进段落中间（2026-09-24 用户 999 实测口径）──────
+#
+# 用户原话：「首先,插入到段落下方,不是段落中间」。锚点句常在段落中间，按句尾插入会把
+# 一张图切进段落中间。吸附到段落边界（2+ 换行）后，图落在整段之下。
+
+
+def test_第58刀_句尾偏移吸附到段落末尾():
+    text = "第一段高潮。\n\n第二段，锚点句在中间。后续还有半句。\n\n第三段。"
+    off = si.illustration_anchor_offset(text, "锚点句在中间。")
+    snapped = si.snap_offset_to_paragraph_end(text, off)
+    # 锚点句之后的**同段**内容必须仍在插入点之前（图落在整段之下）
+    assert "后续还有半句。" in text[:snapped]
+    # 插入点之后是段界或文本末尾
+    assert text[snapped:].startswith("\n\n") or snapped == len(text)
+
+
+def test_第58刀_none原样返回_越界钳制():
+    text = "一段。\n\n二段。"
+    assert si.snap_offset_to_paragraph_end(text, None) is None
+    assert si.snap_offset_to_paragraph_end(text, -5) == 0
+    assert si.snap_offset_to_paragraph_end(text, 999) == len(text)
+
+
+def test_第58刀_锚点在末段时吸附到文本末尾():
+    text = "第一段。\n\n末段里有锚点。之后没有了"
+    off = si.illustration_anchor_offset(text, "末段里有锚点。")
+    snapped = si.snap_offset_to_paragraph_end(text, off)
+    assert snapped == len(text)
+    assert "末段里有锚点。" in text[:snapped]

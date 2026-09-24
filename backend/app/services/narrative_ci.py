@@ -37,6 +37,7 @@ CODE_STYLE_RHYTHM_METRONOME = prose_style.CODE_STYLE_RHYTHM_METRONOME
 CODE_STYLE_SELF_QA = prose_style.CODE_STYLE_SELF_QA
 CODE_STYLE_PATTERN_REPEAT = prose_style.CODE_STYLE_PATTERN_REPEAT
 CODE_STYLE_OPENING_CUE = prose_style.CODE_STYLE_OPENING_CUE
+CODE_STYLE_TERM_RATCHET = prose_style.CODE_STYLE_TERM_RATCHET
 
 
 def diagnostic_entry(turn: int, code: str, message: str, evidence: str,
@@ -73,7 +74,11 @@ def evaluate(text: str, *, turn: int, facts: Iterable[dict] = (),
              raw_deltas: Iterable[dict] = (), beliefs: Iterable[dict] = (),
              world_rules: Iterable[str] = (),
              recent_openings: Iterable[str] = (),
-             style_config: dict | None = None) -> list[dict]:
+             style_config: dict | None = None,
+             style_injected: Iterable[str] = (),
+             style_bodies: Iterable[str] = (),
+             style_exclude: Iterable[str] = (),
+             style_setting: Iterable[str] = ()) -> list[dict]:
     """只返回带证据诊断；不分类内容、不阻断、不重写正文。
 
     新增参数：
@@ -81,6 +86,13 @@ def evaluate(text: str, *, turn: int, facts: Iterable[dict] = (),
         recent_openings：最近数层 assistant 楼层的开头文本（供跨轮开场趋同检测）。
         style_config：prose_style.load_config() 的结果；None=内置默认，
             enabled=False 时跳过全部文风检测（文风功能总开关）。
+        style_injected / style_bodies：跨来源术语棘轮（CODE_STYLE_TERM_RATCHET）的两组输入，
+            前者＝注入层（数据表块、世界书召回/动态段），后者＝最近数轮正文。
+            **两组都要非空才会出该码**（默认空 ⇒ 与改造前同行为）。
+        style_exclude：上述检测要豁免的合法高频词（角色名/称呼等）。默认空。
+        style_setting：设定存量来源（世界书设定条目 + 角色卡静态底座）。传了就按
+            「用量/存量」重排并把两个数打进 message，用来把「设定支撑的高频」
+            （如 天狐宫）与「无锚点膨胀」（如 经脉）分开。默认空 ⇒ message 逐字不变。
     """
     body = text or ""
     diagnostics: list[dict] = []
@@ -223,7 +235,11 @@ def evaluate(text: str, *, turn: int, facts: Iterable[dict] = (),
             phrases = (None if style_config is None
                        else prose_style.effective_phrases(style_config))
             for item in prose_style.lint(body, recent_openings=list(recent_openings),
-                                         banned_phrases=phrases):
+                                         banned_phrases=phrases,
+                                         ratchet_injected=tuple(style_injected or ()),
+                                         ratchet_bodies=tuple(style_bodies or ()),
+                                         ratchet_exclude=tuple(style_exclude or ()),
+                                         ratchet_setting=tuple(style_setting or ())):
                 diagnostics.append(diagnostic_entry(
                     turn, item["code"], item["message"], item["evidence"],
                     "prose_style", item.get("severity", "warning"),

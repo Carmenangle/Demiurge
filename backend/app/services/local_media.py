@@ -39,6 +39,14 @@ class LocalMedia:
         headers = {
             "Accept-Ranges": "bytes",
             "Content-Length": str(self.content_length),
+            # ⚠ 角色 LoRA 落盘用「角色_轮次_序号」**同名覆盖**（image_store.save_image_named：
+            #   「同一槽位重新生成时覆盖同名文件 → URL 不变、内容更新」）⇒ 重新生图后
+            #   `<img src>` 不变。不带缓存指令时浏览器按**启发式新鲜期**（≈距今的 10%）缓存，
+            #   旧图能吃上几小时 ⇒ 界面显示重生成**前**的图、要手动刷新才更新
+            #   （2026-09-24 用户实锤）。`no-cache`＝允许缓存但**每次都必须协商**：
+            #   文件被覆盖 ⇒ mtime/size 变 ⇒ ETag 变 ⇒ 浏览器拿到新字节；未变 ⇒ 304（零流量）。
+            #   ⚠ 不能用 `no-store`：整个资产库/头像/背景都走本端点，会变成每次渲染全量重拉。
+            "Cache-Control": "no-cache",
         }
         if self.partial:
             headers["Content-Range"] = f"bytes {self.start}-{self.end}/{self.file_size}"

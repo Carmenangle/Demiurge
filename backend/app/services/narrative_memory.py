@@ -244,17 +244,37 @@ def to_trigram_query(text: str) -> str:
     return " OR ".join(f'"{g}"' for g in grams)
 
 
+def turn_span(entry: ChronicleEntry) -> str:
+    """回合区间锚：`[第a-b回合] `；单回合 `[第a回合] `；两侧都无 → 空串（不编造）。"""
+    start = int(entry.turn_start or 0)
+    end = int(entry.turn_end or 0)
+    if start <= 0 and end <= 0:
+        return ""
+    if start <= 0:
+        start = end
+    if end <= 0 or end == start:
+        return f"[第{start}回合] "
+    return f"[第{start}-{end}回合] "
+
+
 def render_recall(entries: list[ChronicleEntry]) -> str:
     """把召回到的纪要组装成注入块（供 roleplay 主控叙述参考往事）。空 → 空串。
 
-    只读注入，不回灌进对话历史（token 护栏，同插画 url 处理）。按回合升序排，标时序。
+    只读注入，不回灌进对话历史（token 护栏，同插画 url 处理）。按回合升序排，**每条带回合锚**。
+    2026-09-23 用户实锤（F5）：原先只注入「- 概览」，无任何时序，模型分不清「上一夜」与
+    「这一夜」，把较早回合「她开口点破」当成当下事实 ⇒ 本轮本该沉默她又开口。⇒ 每条前置
+    回合区间 + 块首声明「这是往事、不是本轮正在发生的事」。
     只注入简要内容（overview ≤30 字，落盘时已由字数门槛保证），注入侧不再截断。
     """
     if not entries:
         return ""
     ordered = sorted(entries, key=lambda e: (e.turn_start, e.turn_end))
-    lines = [f"- {e.short_overview()}" for e in ordered]
-    return "【前情提要（相关人物最近事件，仅供保持连贯，勿逐字复述）】\n" + "\n".join(lines)
+    lines = [f"- {turn_span(e)}{e.short_overview()}" for e in ordered]
+    return (
+        "【前情提要（以上都是已经发生过的往事，不是本轮正在发生的事；"
+        "括号内为剧情回合区间，据此区分先后，勿把较早回合的事当作当前场景，勿逐字复述）】\n"
+        + "\n".join(lines)
+    )
 
 
 def recency_weight(turn_end: int, reference_turn: int, *,

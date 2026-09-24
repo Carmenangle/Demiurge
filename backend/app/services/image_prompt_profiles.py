@@ -82,6 +82,54 @@ _COMMON = (
     "任何剧情关键物件若没有可靠英文通用名，必须用材质、几何外形与尺度、可见结构或运动方式、当前功能及"
     "与人物/环境的交互来建立可画身份；只采用输入证据支持的维度，不猜内部原理，也不得因缺少术语而省略。"
     "人物、服装、动作、镜头、光影、背景和构图必须彼此一致。"
+    # 【画面自洽】（2026-09-21 第 38 刀 · 用户真机实锤）：这段原先**只写在【多人分述】块内**、
+    # 以「画面里有两名以上主体时」为条件 ⇒ 单人帧（`1girl, solo`）根本不受约束。
+    # 真机 L3·anima 单人帧同时写出 `face down ass up` + `first-person view` + `close-up on face`
+    # + `looking at viewer`：后向专属信息（翘臀／阴部／背后绑缚／脊线）配了**无方向**的机位
+    # ＋**正面专属**构图 ⇒ 模型按正视图渲染 ⇒ 结构崩坏（用户原话「小穴张在了背上」）。
+    # ⚠⚠ 因果方向（用户 2026-09-21 **当场纠正**）：**内容优先，机位是因变量** —— 先列全并
+    # **必保**剧情拿到的画面信息，再据此反推「最能呈现它」的观察机位；**不是**反过来用机位
+    # 去删改／回避内容。（本条首版写成「机位写明了方向就得看得到所写信息 ⇒ 不得同时写正面
+    # 构图」＝把因果写反了，已被用户否掉。）
+    # ⇒ 拆成**无条件**条款（不再挂多人条件），并把原多人块里的姿态自洽句一并收编到这里，
+    # 使「单主体 / 多主体」共用**同一份判据**（单一真源，不在两处各写一份）。
+    # 【两侧都有 · 偏侧面分档】（2026-09-21 第 39 刀 · 用户细化）：原句把「内容两侧都有」判成
+    # 一句话「取能**同时**看见两者的机位（背后视角 ＋ 回头）」——太粗。用户口径：
+    # 「两侧都有的情况就分为**正面偏侧面**和**背面偏侧面**，要区分偏向于正面还是背面就**看细节动作**，
+    # 就比如双手掰开臀部，这就是背面偏侧面，双手托胸就是正面偏侧面……**不只是手部细节动作，
+    # 可能还有别的细节动作**」⇒ 偏向由**动作自身的接触面**判定（不限于手），不是按默认机位。
+    # ⚠ 与【视角·第一人称】块的「身体朝向按画面事实」不冲突，但要在本条里点明，避免模型把
+    # 已写明的背向式姿势改写成正面来「迎合」正面偏侧面。
+    "【画面自洽·机位由内容反推】**剧情画面信息是必保内容，镜头机位是它的因变量**："
+    "先把你已经拿到的画面事实（人物、动作、身体部位、服装当前状态、接触点）**列全并全部保留**，"
+    "再据此选择**最能呈现这些信息**的观察方向与景别；不得反过来用一个默认机位去删改、回避"
+    "或改写已经拿到的内容。只可能从背后看到的部位与状态（翘起的臀部、臀缝、肛门、阴部、"
+    "脊线与背部、背后的绑缚、身后的交合处）⇒ 机位取**从背后看**（view from behind／"
+    "from behind／rear view）；只可能从正面看到的（面部表情、胸前、正面服装）⇒ 才取正面机位；"
+    "内容两侧都有时（既写了臀部又写了面部表情）⇒ 机位取**偏侧面**，偏向哪一侧由**细节动作的"
+    "接触面**决定：动作的接触点或受力部位落在**背面可及处**（臀部、臀缝、肛门、阴部、脊背、"
+    "身后的绑缚或交合处）⇒ **背面偏侧面**（three-quarter back view／from behind）；落在"
+    "**正面可及处**（胸部、乳房、面孔、正面服装与饰物）⇒ **正面偏侧面**"
+    "（three-quarter front view／from the front）。判断看的是**动作自身的接触面，不限于手**——"
+    "双手掰开臀部＝背面偏侧面、双手托胸＝正面偏侧面；吮吸与舔舐、抵靠与磨蹭、穿插、牵引等"
+    "任何带明确接触点或受力方向的细节动作同理。两侧动作方向相反时**只取一侧**"
+    "（取接触点更具体、动作更明确的那一侧），另一侧只留 head turned back over shoulder 回头；"
+    "**身体朝向仍以本轮画面事实为准**（不得把已写明的背向式姿势改写成正面，此时应取背面偏侧面）。"
+    "**同一主体不得被写成互相矛盾的姿态或视线**（不得既写「背对镜头」又写「正对镜头」，"
+    "也不得既写「站」又写「跪」）；构图以小说原文为准，不得自创与原文冲突的机位。"
+    # 【画面自洽·物理可达性】同刀同源（用户 2026-09-21 口径）：「要考虑下物理逻辑关系」——
+    # 用户原话：「凌若冰身材丰满，让她跪着翘起屁股、手要够着掰开小穴，手的长度不一定足够；
+    # 如果要够着，手要将肥臀挤压着有压痕才能够到才是」。⇒ 同样**内容优先**：动作保留，
+    # 把让动作成立的**中间物理事实**补写出来（挤压／压痕／绷紧），不得写成互不接触地叠放。
+    # 另一实证：`arms bound behind back, wrists tied` 与 `fingers spreading labia` 同稿共存且
+    # 画面只有 `1girl, solo` ⇒ **同一主体物理互斥**；按既有「出处闸」口径只保留有本轮正文／
+    # 画面事实出处的一项（本例锚点写了「探手到身后」⇒ 留动作、去模型自加的绑缚）。
+    "【画面自洽·物理可达性】**内容里的动作优先保留**，但只写主体**做得到**的：肢体长度、"
+    "关节活动度与身体朝向决定手能不能够到目标；够到目标必然伴随挤压与形变，必须把让该动作"
+    "成立的**中间物理事实**一并写出（如手指陷进丰臀、臀部被压出凹陷、皮肤绷紧），"
+    "不得写成两个物体互不接触地叠在一起。**同一主体物理互斥的两项，只保留本轮正文或画面"
+    "事实有出处的那一项**（如「双手反绑在背后」与「用手指掰开」互斥；锚点只写了"
+    "「探手到身后」⇒ 保留掰开，不写绑缚）。"
     + _VISUAL_BLUEPRINT
 )
 
@@ -107,7 +155,28 @@ _ANIMA_SYSTEM = _COMMON + (
     # anima 档的「视觉装置」是**处理方式**（反射/遮挡/框景/重复），不是引入新道具的许可，
     # 故这里显式把装置也约束在输入已有元素上。
     "【事实边界】画面里的人、物、服装、场景与配色只能来自输入画面事实；视觉装置必须由输入已有元素构成"
-    "【多人分述】画面里有两名以上主体时，**必须逐人分述、各自点名**：每人写明**画面位置**（镜头左侧／镜头右侧／前景／后景）＋**该人自己的动作与可见身体部位**。**即使两人动作完全相同，也要分别写**（例：「镜头左侧的A翘起臀部、掰开臀瓣；镜头右侧的B同样翘起臀部、掰开臀瓣」），不得只写一次动作让读者以为是同一人；不得只给人物名而不给动作，也不得只给动作而不给位置。**同一主体不得被写成互相矛盾的姿态**（不得既写「背对镜头」又写「正对镜头」，也不得既写「站」又写「跪」）；构图以小说原文为准，不得自创与原文冲突的机位。"
+    "【多人分述】画面里有两名以上主体时，**必须逐人分述、各自点名**：每人写明**画面位置**（镜头左侧／镜头右侧／前景／后景）＋**该人自己的动作与可见身体部位**。**即使两人动作完全相同，也要分别写**（例：「镜头左侧的A翘起臀部、掰开臀瓣；镜头右侧的B同样翘起臀部、掰开臀瓣」），不得只写一次动作让读者以为是同一人；不得只给人物名而不给动作，也不得只给动作而不给位置。"
+    # 第 42 刀·D（2026-09-22 用户定案）：anima 首行是**扁平逗号序列**（用户明确否决分块／分隔符
+    # 方案，原话「不是分块，而是下方的文段不够详细」）⇒ 归属只能靠「**首行相邻聚拢 ＋ 文段写全**」
+    # 编码。真机事故：衣物 tag 只有一份，模型拿到一个多余的归属者就把女主服装绑到主人公身上
+    # （成稿含 `adult man`，女主变裸）。
+    # ⚠ **只加在 anima 档**：natural／niji 的输出本身就是逐人成段的散文，归属天然可辨
+    #    （用户原话「自然语言和 niji …都是一个文段了，所以说很容易区分从属关系」）。
+    # ⚠ 共享的【多人分述】块措辞**逐字节不动**（`test_三档多人分述条款措辞一致` 的切片锁；
+    #    本块追加在其切片终点**之后**，故该锁不受影响）。
+    "【多人分述·anima 从属绑定】本档第一行是**扁平逗号序列**、没有分块符，"
+    "所以每个画面主体的**衣着与身体部位只能靠位置聚拢与文段点明来绑定**，额外要求："
+    "①文段里每名主体除位置与动作外，**还必须写明该人自己的可辨识身份**"
+    "（发色／发型／瞳色／体型等稳定外貌中至少一项，用来把两名主体区分开，不得两人共用同一个泛称）"
+    "**与该人当前的衣着及状态**（穿着什么，以及裸露、镂空、半褪、破损、凌乱、沾污到什么程度）"
+    "——**衣着一律写在它所属那个人的分句里**，不得把服装、配饰、鞋袜单独列成一条让人猜归属。"
+    "②**朝向**（面向谁／背对谁／是否回头）与**接触点**（谁的手碰到谁身上的哪个部位）"
+    "同样只能写在所属主体的分句里。"
+    "③⚠ 同一件服装、同一个身体部位、同一处接触**只能归属到一个主体**，"
+    "分句里必须写明「谁的什么正处于什么状态」；"
+    "不得把所有服装 tag 集中提到两人之前或之后让它归属不明。"
+    "④第一行 tags 按主体**相邻聚拢**：把同一主体的身份、稳定外貌、当前服装与状态、姿态动作 tag "
+    "紧挨着写在一起，各主体按画面顺序依次排列——**不加任何分隔符**，仍是英文逗号分隔的扁平序列。"
     "【具体化必须有出处】画面事实分两级，**具体化一律要有出处**：①**可直接写**——输入画面事实里出现过的可见项（人、动作、身体部位、服装、物件、地点、光线）；②**只能中性化**——只给了类别、没给细节的（有「墙」无材质、有「床」无床品、有「衣服」无款式）只写类别，**不得补具体材质、颜色、款式**；③**地点、道具、光源、场景类型只能来自输入**，不得新增或升级——「背靠墙壁」不是「窄巷」「走廊」，「坐着」不是「床边」，输入没写灯就不写台灯、蜡烛、床头灯；④人物外观（发色、瞳色、体型、服装款式）只能来自「外观」栏与输入画面事实，两边都没有的项**留白不写**。"
     "（反射、遮挡、框景、重复、负空间是处理方式），不得新增输入未提及的新道具、新场景或新配色；"
     "宁可少写也不编造。"
@@ -184,7 +253,7 @@ _NATURAL_SYSTEM = _COMMON + (
     # 【事实边界】同源（真机 L2·natural 整段幻觉：20 字窗口被写成「废墟大厅 + 断裂立柱 + 红围巾」，
     # 而 L1 三档在同一窗口下分别脑补出「教室办公桌」与「卧室床铺」两套互斥场景）。
     "【事实边界】只描述输入画面事实里出现过的人、物、服装、场景与色彩；"
-    "【多人分述】画面里有两名以上主体时，**必须逐人分述、各自点名**：每人写明**画面位置**（镜头左侧／镜头右侧／前景／后景）＋**该人自己的动作与可见身体部位**。**即使两人动作完全相同，也要分别写**（例：「镜头左侧的A翘起臀部、掰开臀瓣；镜头右侧的B同样翘起臀部、掰开臀瓣」），不得只写一次动作让读者以为是同一人；不得只给人物名而不给动作，也不得只给动作而不给位置。**同一主体不得被写成互相矛盾的姿态**（不得既写「背对镜头」又写「正对镜头」，也不得既写「站」又写「跪」）；构图以小说原文为准，不得自创与原文冲突的机位。"
+    "【多人分述】画面里有两名以上主体时，**必须逐人分述、各自点名**：每人写明**画面位置**（镜头左侧／镜头右侧／前景／后景）＋**该人自己的动作与可见身体部位**。**即使两人动作完全相同，也要分别写**（例：「镜头左侧的A翘起臀部、掰开臀瓣；镜头右侧的B同样翘起臀部、掰开臀瓣」），不得只写一次动作让读者以为是同一人；不得只给人物名而不给动作，也不得只给动作而不给位置。"
     "【具体化必须有出处】画面事实分两级，**具体化一律要有出处**：①**可直接写**——输入画面事实里出现过的可见项（人、动作、身体部位、服装、物件、地点、光线）；②**只能中性化**——只给了类别、没给细节的（有「墙」无材质、有「床」无床品、有「衣服」无款式）只写类别，**不得补具体材质、颜色、款式**；③**地点、道具、光源、场景类型只能来自输入**，不得新增或升级——「背靠墙壁」不是「窄巷」「走廊」，「坐着」不是「床边」，输入没写灯就不写台灯、蜡烛、床头灯；④人物外观（发色、瞳色、体型、服装款式）只能来自「外观」栏与输入画面事实，两边都没有的项**留白不写**。"
     "不得新增输入未提及的道具、服装、场景或配色，宁可少写也不编造。"
     # 「覆盖式」语言指令（2026-09-19 优化项②）：此前这里只有一句位于**块末**的
@@ -217,7 +286,7 @@ _NIJI_SYSTEM = _COMMON + (
     # 【事实边界】同 _NATURAL_SYSTEM（2026-09-20）：L1 真机成稿把 59 字窗口写成
     # `bed / mattress / bedside lamp / dark bedroom`，而原文是教室。
     "【事实边界】四段里出现的人、物、服装、场景与配色只能来自输入画面事实；"
-    "【多人分述】画面里有两名以上主体时，**必须逐人分述、各自点名**：每人写明**画面位置**（镜头左侧／镜头右侧／前景／后景）＋**该人自己的动作与可见身体部位**。**即使两人动作完全相同，也要分别写**（例：「镜头左侧的A翘起臀部、掰开臀瓣；镜头右侧的B同样翘起臀部、掰开臀瓣」），不得只写一次动作让读者以为是同一人；不得只给人物名而不给动作，也不得只给动作而不给位置。**同一主体不得被写成互相矛盾的姿态**（不得既写「背对镜头」又写「正对镜头」，也不得既写「站」又写「跪」）；构图以小说原文为准，不得自创与原文冲突的机位。"
+    "【多人分述】画面里有两名以上主体时，**必须逐人分述、各自点名**：每人写明**画面位置**（镜头左侧／镜头右侧／前景／后景）＋**该人自己的动作与可见身体部位**。**即使两人动作完全相同，也要分别写**（例：「镜头左侧的A翘起臀部、掰开臀瓣；镜头右侧的B同样翘起臀部、掰开臀瓣」），不得只写一次动作让读者以为是同一人；不得只给人物名而不给动作，也不得只给动作而不给位置。"
     "【具体化必须有出处】画面事实分两级，**具体化一律要有出处**：①**可直接写**——输入画面事实里出现过的可见项（人、动作、身体部位、服装、物件、地点、光线）；②**只能中性化**——只给了类别、没给细节的（有「墙」无材质、有「床」无床品、有「衣服」无款式）只写类别，**不得补具体材质、颜色、款式**；③**地点、道具、光源、场景类型只能来自输入**，不得新增或升级——「背靠墙壁」不是「窄巷」「走廊」，「坐着」不是「床边」，输入没写灯就不写台灯、蜡烛、床头灯；④人物外观（发色、瞳色、体型、服装款式）只能来自「外观」栏与输入画面事实，两边都没有的项**留白不写**。"
     "不得新增输入未提及的道具、服装、场景或配色，宁可少写也不编造。"
 )
@@ -479,35 +548,204 @@ def _anima_dedupe_tags(tag_line: str) -> str:
 
 # 人数词（Danbooru 计数族）：同一帧只允许一个「画面主体数」口径。
 # 第 31 刀真机实锤：L3·anima 首行 `1girl, 2girls` 并存 —— `1girl` 是 krea2/solo 时代的习惯
-# 残留，与多人帧自相矛盾（`_multi_actor_contract_errors` 只要求「必须含 2girls」，没有禁止
-# 低位计数词，闸拦不住）。用户定案：**保留多人计数词**（`2girls` 是合同硬要求，且不得升格
-# `3girls`），剔除冲突的低位词与 `solo`。
-# ⚠ 单人帧（最高位计数词＝1，或压根没有计数词）**逐字返回原串** ⇒ 零回归。
-_SUBJECT_COUNT_RE = re.compile(r"^(\d+)\s*girls?$", re.I)
+# 残留，与多人帧自相矛盾（没有闸禁止低位计数词）。用户定案：**保留多人计数词**，
+# 剔除冲突的低位词与 `solo`。
+# ⚠ 单人帧（各族最高位都 <2，或压根没有计数词）**逐字返回原串** ⇒ 零回归。
+#
+# 第 46 刀（2026-09-22 用户口径）：**族内归一从「只认 girls」改成认两族**。
+# 用户原话：「第三人称时按剧情的画面人物判断，男主主人公+2女主角就是 `1boy, 2girls`……
+# 女主人公+2男主角 `1girl, 2boys`，也就是说**根据剧情判断在场的内容，不是锁死女角色**」。
+# 旧口径只认 girls（`^(\d+)\s*girls?$`）⇒ 纯男性帧 `2boys, solo` 整段跳过归一
+# ⇒ 首行同时出现 `2boys` 与 `solo`（自相矛盾；零 LLM 走查实锤）。
+# ⚠ 跨族**不相消**：`1girl, 2boys` 是合法阵容（2 人帧＝1 女 2 男不是 3 人帧），两族各自留最高位。
 
 
 def _resolve_subject_counts(tag_line: str) -> str:
+    """族内归一：**逐族**只留最高位计数词；有任一族最高位 ≥2 时统一剔除 `solo`（第 46 刀）。"""
     tags = [tag.strip() for tag in (tag_line or "").split(",")]
-    counts = {
-        tag: int(match.group(1))
-        for tag in tags
-        if (match := _SUBJECT_COUNT_RE.match(tag))
-    }
-    if not counts or max(counts.values()) < 2:
+    family_max: dict[str, int] = {}
+    for tag in tags:
+        match = _SUBJECT_FAMILY_RE.match(tag)
+        if not match:
+            continue
+        family = "boys" if match.group(2).lower().startswith("boy") else "girls"
+        family_max[family] = max(family_max.get(family, 0), int(match.group(1)))
+    if not family_max or max(family_max.values()) < 2:
         return _anima_dedupe_tags(tag_line)
-    highest = max(counts.values())
     kept: list[str] = []
     for tag in tags:
         cleaned = tag.strip()
         if not cleaned:
             continue
-        match = _SUBJECT_COUNT_RE.match(cleaned)
-        if match and int(match.group(1)) != highest:
-            continue
+        match = _SUBJECT_FAMILY_RE.match(cleaned)
+        if match:
+            family = "boys" if match.group(2).lower().startswith("boy") else "girls"
+            if int(match.group(1)) != family_max[family]:
+                continue
         if cleaned.lower() == "solo":
             continue
         kept.append(cleaned)
     return _anima_dedupe_tags(", ".join(kept))
+
+
+# 跨族人数词（第 40 刀 · 2026-09-21 用户实报）：girls 族**已把画面主体名额占满**时，
+# 多出来的 boys 族计数词是**孤儿**——没有任何画面主体可以对应它。
+#
+# 真机现场（`backend/data/logs/agent-trace.jsonl` · `illustration.submitted` ·
+# 2026-09-21T21:48:20 · slot 43）：`illustration.request` 明写 `actors: ["舞姬恋", "凌若冰"]`、
+# `actor_count: 2`（**叙事者根本不在 `actors` 里**），契约只要求 `2girls`；但交付首行是
+# `…, anime coloring, 2girls, 1boy, male viewer pov, first-person view, no viewer face, …`
+# —— `1boy` 与 `male viewer pov` 同现 ⇒ 模型把**不入画的叙事者**（男性）写成了第 3 个人。
+# 用户口径：「**除非是第三人称，主角相关的 tag 才可能进入提示词中**」。
+#
+# ⚠ **不是禁词表**（技能 `demiurge-viewpoint-subject-scope` §2 红线：第一人称下画面里
+#   完全可能真有别的男性，禁词闸会误杀）：
+#   · `1girl, 1boy`（girls 族只占 1 个名额、主体数 2）⇒ **原样保留**；
+#   · 纯男性帧 `2boys`（girls 族 0）⇒ **不动**；
+#   · `2boys, 1girl`（主体数 2）⇒ girls 族未占满 ⇒ **不动**。
+# ⚠ 40 刀当时**只能剔 boys**（整条计数设施按 girls 建），故写「girls 族永远不动」。
+# ⚠ **第 46 刀（2026-09-22）对称化**：用户口径原话「**根据剧情判断在场的内容，不是锁死
+#   女角色**」——女主人公＋2 男主角就是 `1girl, 2boys`，纯男帧写 `1girl` 同样是孤儿。
+#   有了**逐主体性别**（`scene["subject_genders"]`）后，判据改成「**某族真值为 0 ⇒ 整族剔**」；
+#   拿不到性别（老调用方 / 解析不全）⇒ **退回 40 刀口径**（只剔 boys），老测试逐格不变。
+_SUBJECT_FAMILY_RE = re.compile(r"^(\d+)\s*(girls?|boys?)$", re.I)
+
+
+def _is_boy_count(tag: str) -> bool:
+    match = _SUBJECT_FAMILY_RE.match(tag.strip())
+    return bool(match and match.group(2).lower().startswith("boy"))
+
+
+def _drop_orphan_subject_counts(
+    tag_line: str, subject_count: int, genders: list[str] | None = None,
+) -> str:
+    """跨族人数词孤儿闸：**没有对应画面主体的计数词族整族剔除**（第 40 刀／第 46 刀）。
+
+    · 有逐主体性别（`genders` 与画面主体名单**同长同序**、且全部可解析）⇒ **对称**：
+      某族真值为 0 而行内写了该族计数词 ⇒ 剔该族（两女帧 `2girls, 1boy` ⇒ 剔 `1boy`；
+      纯男帧 `2boys, 1girl` ⇒ 剔 `1girl`）。
+    · 无性别（老调用方 / 解析不全）⇒ **退回第 40 刀口径**：`girls 族计数 ≥ 画面主体数`
+      且行内存在 boys 族 ⇒ 剔 boys 族（girls 族不动）—— 该支逐字节等价旧实现。
+
+    ⚠ 零回归锁：`subject_count < 1` ⇒ **逐字节返回原串**；不触发 ⇒ 同样逐字节返回原串。
+    ⚠ 只在 `_resolve_subject_counts` **之后**调用（那时整行已归一成 `", "` 连接的非空 tag 串，
+    重连接才是字节安全的）。
+    """
+    if subject_count < 1:
+        return tag_line
+    tags = [tag.strip() for tag in (tag_line or "").split(",")]
+    resolved = (
+        genders if genders is not None and len(genders) == subject_count
+        and all(str(gender).strip() for gender in genders) else None
+    )
+    if resolved is not None:
+        girls_true = sum(1 for gender in resolved if "女" in str(gender))
+        boys_true = sum(1 for gender in resolved if "男" in str(gender))
+        drop_girls, drop_boys = girls_true == 0, boys_true == 0
+    else:
+        girls = 0
+        for tag in tags:
+            match = _SUBJECT_FAMILY_RE.match(tag)
+            if match and not match.group(2).lower().startswith("boy"):
+                girls += int(match.group(1))
+        if girls < subject_count or not any(_is_boy_count(tag) for tag in tags):
+            return tag_line
+        drop_girls, drop_boys = False, True
+    if not drop_girls and not drop_boys:
+        return tag_line
+    kept: list[str] = []
+    for tag in tags:
+        if not tag:
+            continue
+        match = _SUBJECT_FAMILY_RE.match(tag)
+        if match:
+            is_boy = match.group(2).lower().startswith("boy")
+            if (is_boy and drop_boys) or (not is_boy and drop_girls):
+                continue
+        kept.append(tag)
+    if len(kept) == len([tag for tag in tags if tag]):
+        return tag_line
+    return ", ".join(kept)
+
+
+def _contract_subject_genders(scene: Mapping[str, object]) -> list[str]:
+    """画面主体的**逐主体性别**，与 `_contract_subject_names(scene)` **同长同序**（第 46 刀）。
+
+    数据源＝`scene["subject_genders"]`（`{角色名: "女"/"男"}`；由接线侧按**世界书条目正文优先、
+    通用表「性别」列兜底**的零 LLM 解析后随 `scene_spec` 下传）。
+    ⚠ 取不到的名 ⇒ `""`（**宁缺勿猜**：调用方据此退回中性措辞，不写具体性别族）。
+    ⚠ 缺键 / 类型不符 ⇒ 全 `""`（老调用方零回归）。
+    """
+    names = _contract_subject_names(scene)
+    table = scene.get("subject_genders")
+    if not names or not isinstance(table, Mapping):
+        return ["" for _ in names]
+    return [str(table.get(name) or "").strip() for name in names]
+
+
+def _subject_count_words(genders: list[str]) -> str:
+    """按画面主体的**实际性别组成**给出人数词（第 46 刀，纯函数、零 LLM）。
+
+    全可解析 ⇒ `2girls` / `2girls, 1boy` / `1girl, 2boys`（**girls 族在前**＝Danbooru 习惯，
+    也是真机既有形态 `2girls, 1boy` 的顺序；计数为 0 的族不写）。
+    任一体性别解析不出 ⇒ `""`（调用方**退回中性措辞**，不写具体性别族——用户定案「不写」）。
+    """
+    if not genders:
+        return ""
+    girls = 0
+    boys = 0
+    for gender in genders:
+        text = str(gender).strip()
+        if "女" in text:
+            girls += 1
+        elif "男" in text:
+            boys += 1
+        else:
+            return ""
+    parts: list[str] = []
+    if girls:
+        parts.append(f"{girls}girl" + ("" if girls == 1 else "s"))
+    if boys:
+        parts.append(f"{boys}boy" + ("" if boys == 1 else "s"))
+    return ", ".join(parts)
+
+
+# 第 41 刀（2026-09-21 用户口径）：多人契约的人数词**不再硬编码 `2girls`**。
+# 用户口径：「第三人称就按剧情正常来就行，无需像第一人称一样删去剧情里出现的主人公的 tag」；
+# 「主人公是男的 ⇒ `2girls, 1boy`；主人公是女的 ⇒ `3girls`」。
+# 旧判据 `\b(?:2girls|two girls)\b` 把「画面主体**恒为 2** 且全女」写死 ⇒ 三人帧里模型
+# **写对的 `3girls` 反被判红**（零 LLM 复现 `_tmp/i41_probe.py` A2／C2 格）⇒ 逼出修复轮，
+# 极端情况掉通用兜底模板、把模型真实画面全丢。
+# 新判据＝只给 **girls 族**一个上/下界：`2 ≤ girls ≤ 画面主体数`。
+# ⚠ **boys 族刻意不进契约**（40 刀真机格 `2girls, 1boy` 于 2 主体帧，旧判据放行；
+#   若把 boys 计入总数会判红 ⇒ **给已知真机形态新增判红面**）。
+#   boys 族的归属是**归一化侧**的「剔孤儿」（40 刀），契约只负责判、不重复治。
+# ⚠ 本刀**不需要**逐主体性别：只约束 girls 族区间，`2girls, 1boy` 与 `3girls` 都合法；
+#   性别由模型按注入的 `【性别】X` 画面事实自己写（23 刀定案：不机械拼硬标签）。
+# ⚠ 必须与 `_resolve_subject_counts` **同口径**（同族并存只认最高位）：否则
+#   `1girl, 2girls` 会被数成 3 ⇒ 给 31 刀的真机残留**新增判红面**。
+_COUNT_FAMILY_RE = re.compile(r"(\d+)\s*(girls?|boys?)\b", re.I)
+
+
+def _subject_count_totals(prompt: str) -> tuple[int, int]:
+    """数出提示词里 girls / boys 族的**有效**计数（第 41 刀，纯函数）。
+
+    口径与 `_resolve_subject_counts` 一致：**同族并存只认最高位**
+    （`1girl, 2girls` 的有效值是 2，不是 3 —— 那是 31 刀实锤的习惯残留）。
+    兼容旧判据的 `two girls` 词形；`two-shot` 这类不带计数的 `shot` 词不算。
+    """
+    girls = 0
+    boys = 0
+    text = prompt or ""
+    for match in _COUNT_FAMILY_RE.finditer(text):
+        value = int(match.group(1))
+        if match.group(2).lower().startswith("boy"):
+            boys = max(boys, value)
+        else:
+            girls = max(girls, value)
+    if re.search(r"\btwo girls\b", text, re.I):
+        girls = max(girls, 2)
+    return girls, boys
 
 
 def anima_quality_tags(rating: str = "sfw") -> str:
@@ -854,6 +1092,15 @@ def _normalize(
         # 第 31 刀①②：**先拼质量行、再整行归一**——去重必须横跨「程序前置的质量行」与
         # 「模型自带的内容 tags」两个来源（真机首行这两块整段重复），人数词归一同样要看全行。
         head = _resolve_subject_counts(f"{anima_quality_tags(rating)}, {tag_head}")
+        # 第 40 刀：族内归一之后再查**跨族**——girls 族已占满画面主体名额时，多出来的 boys 族
+        # 计数词是孤儿（真机：第一人称下模型把**不入画的叙事者**写成了 `1boy`）。
+        # 画面主体按 37 刀口径（已剔叙事者）⇒ 第三人称下叙事者占一个名额，`1boy` 自然保留。
+        # 第 46 刀：有逐主体性别时口径**对称**（某族真值为 0 ⇒ 整族剔；纯男帧的 `1girl` 也剔）。
+        head = _drop_orphan_subject_counts(
+            head,
+            len(_contract_subject_names(scene or {})),
+            _contract_subject_genders(scene or {}),
+        )
         return _anonymize_prompt_names(
             f"{head},\n{prose}", scene or {},
         )
@@ -895,12 +1142,81 @@ def _scene_for_facts(scene: Mapping[str, object]) -> dict[str, object]:
     return restored
 
 
-def _scene_for_model(scene: Mapping[str, object]) -> dict[str, object]:
-    """模型输入保留防拦截正文并匿名化角色名；姓名只用于本地关联外貌。"""
+def _first_person_narrator(scene: Mapping[str, object]) -> str:
+    """第一人称且给了叙事者名 ⇒ 返回该名；否则空串（＝调用方一律不做删改，零回归）。
+
+    第 37 刀（2026-09-21 用户实锤）统一口径：**「叙事者不入画」的唯一判据**。
+    `viewpoint` 缺失／非法、或 `narrator` 为空 ⇒ 空串。
+    """
+    narrator = str(scene.get("narrator") or "").strip()
+    if not narrator:
+        return ""
+    if str(scene.get("viewpoint") or "").strip() != "first_person":
+        return ""
+    return narrator
+
+
+def _strip_narrator_from_model_view(scene: Mapping[str, object]) -> dict[str, object]:
+    """第一人称下，从**模型可见副本**里摘掉叙事者（`actors` 名单 ＋ `appearance` 段落）。
+
+    第 37 刀（2026-09-21 用户实锤）：手选第一人称，成图 `2girls` 正确却多写 `1boy`。
+    画面主体名单（计划 `subjects` / 判据 `frame_subjects`）是对的 ⇒ 主人公是从
+    **模型载荷**漏进去的：`actors` 把他算进 `char_name`，`appearance` 把他的段落塞进
+    `char_description`／`worldbook` ⇒ 模型据此把叙事者写进画面。
+
+    ⚠ 只改**载荷副本**，原 `scene` 一字不动 ⇒ `_actor_visual_details` 的句级归因
+    （仍按 `actors` 全集，32 刀红线）、字段账本与兜底路径全部逐字节不变。
+    """
     result = dict(scene)
+    narrator = _first_person_narrator(scene)
+    if not narrator:
+        return result
+    actors = result.get("actors")
+    names: list[str] = []
+    if isinstance(actors, list):
+        names = [str(name).strip() for name in actors if str(name).strip()]
+        result["actors"] = [name for name in names if name != narrator]
+    appearance = result.get("appearance")
+    if isinstance(appearance, str) and appearance.strip():
+        # 段落头＝行首「名字[：:]」，只认**原名单**里的名字（叙事者已从 actors 移除，
+        # 故用未过滤的那份做 marker），叙事者整段丢弃直到下一个段落头。
+        marker = re.compile(
+            rf"^\s*({'|'.join(re.escape(name) for name in sorted(names, key=len, reverse=True))})"
+            r"\s*[：:]",
+        ) if names else None
+        kept: list[str] = []
+        dropping = False
+        for line in appearance.splitlines():
+            hit = marker.match(line) if marker else None
+            if hit:
+                dropping = hit.group(1) == narrator
+            if not dropping:
+                kept.append(line)
+        result["appearance"] = "\n".join(kept)
+    return result
+
+
+def _scene_for_model(scene: Mapping[str, object]) -> dict[str, object]:
+    """模型输入保留防拦截正文并匿名化角色名；姓名只用于本地关联外貌。
+
+    第 37 刀：第一人称下**先摘掉叙事者**（见 `_strip_narrator_from_model_view`），再匿名化。
+    第 43 刀：第一人称下把「叙事者局部肢体入画」写成**显式事实行**（见 `_narrator_limb_facts`）
+    ——只靠正文叙事，模型读不出「这是必须画进画面的东西」（`_viewpoint_clause` 那句
+    「有出处就按事实写具体」举的例子全是手/臀，器官类没有先例）。
+    """
+    result = _strip_narrator_from_model_view(scene)
     protected = result.pop("protected_narrative", None)
     if isinstance(protected, str) and protected.strip():
         result["narrative"] = protected
+    limb_facts = _narrator_limb_facts(result)
+    if limb_facts:
+        # ⚠ 只改**载荷副本**，原 `scene` 一字不动 ⇒ 字段账本与词表兜底走自己的注入点
+        #   （`prompt_field_ledger` / `_concrete_scene_facts` / `_english_scene_details`）。
+        result["narrative"] = (
+            f"{str(result.get('narrative') or '')}\n"
+            "【第一人称·叙事者局部入画事实（只写这些局部，不得写他的脸或全身）】"
+            + "；".join(limb_facts)
+        )
     return _anonymize_scene_characters(result)
 
 
@@ -1035,7 +1351,17 @@ _ANIMA_ACTION_RE = re.compile(
     r"carrying|lifting|unloading)\b",
     re.I,
 )
-_THROAT_GRIP_SOURCE = r"(?:掐|扣|卡)(?:着|住|紧)?.{0,8}(?:脖子|颈部?|喉咙)|(?:脖子|颈部?|喉咙).{0,8}(?:掐|扣|卡)(?:着|住|紧)?"
+# T2（2026-09-23 深夜）：「扣后颈」曾被误升格为「掐喉」。原式 `(?:掐|扣|卡)…(?:脖子|颈部?|喉咙)`
+# 里 `颈部?` 会匹配**后颈 / 颈侧 / 颈背 / 颈椎**，且 `扣` 语义本可只是「按住」——
+# 真机正文写的是「一手撑住榻底，一手**扣她后颈**」（＝按住后颈，画面里根本没有掐喉），
+# 却被确定性层升格成 `one hand gripping the partner's throat`；一旦与 800 字内的插入动词同现，
+# 还会连带触发 `_COMPOUND_THROAT_INTERCOURSE`（**删除** `penetrative intercourse` 等真实动作、
+# 换成一条编排出来的复合动作）⇒ 属第 22 刀「无出处不得入画」同族。
+# 修法＝**解剖位限定**：`(?<!后)颈(?:部)?(?!侧|背|椎)` —— 真正的「掐脖子 / 卡喉咙 / 掐颈」逐字不变。
+_THROAT_GRIP_SOURCE = (
+    r"(?:掐|扣|卡)(?:着|住|紧)?.{0,8}(?:脖子|喉咙|(?<!后)颈(?:部)?(?!侧|背|椎))|"
+    r"(?:脖子|喉咙|(?<!后)颈(?:部)?(?!侧|背|椎)).{0,8}(?:掐|扣|卡)(?:着|住|紧)?"
+)
 _PENETRATION_SOURCE = r"(?:重新.{0,6}(?:推进|进入)|推进去|推入|插入|抽插|交媾|做爱|性交)"
 _COMPOUND_THROAT_INTERCOURSE = (
     "penetrative intercourse while the secondary adult partner grips the primary woman's throat"
@@ -1256,7 +1582,7 @@ def _action_fact_part_re(fact: str) -> re.Pattern[str] | None:
     可能写的是 `spreading her own buttocks` —— 只比字面 `hips` 会漏判，故同组词一并认。
     """
     key = " ".join(str(fact or "").split()).lower()
-    if key in _ACTION_FACT_NO_PART:
+    if key in _ACTION_FACT_NO_PART or key in _NARRATOR_LIMB_FACT_TEXTS:
         return None
     override = _ACTION_FACT_PART_OVERRIDES.get(key)
     if override:
@@ -1447,6 +1773,66 @@ _VISUAL_FACT_RULES: tuple[tuple[str, str, str], ...] = (
 )
 
 
+# ── 本轮事件性必现事实（T1，2026-09-23 深夜 · 用户实锤）──────────────────────
+# 与 `_VISUAL_FACT_RULES` 的**分工**（两者同层、互补，源不同）：
+#   · `_VISUAL_FACT_RULES` ＝**长驻外观/服饰**（发色/唇/胸/袜/袍…），源＝
+#     `_current_visual_source`（appearance/wardrobe，且 narrative **只在衣物变化时**才并入）。
+#   · 本表 ＝**本轮事件才产生的客观画面事实**（体液 / 睡眠状态），源**恒为 narrative
+#     （取材窗口）**，与 `_current_visual_source` 解耦。
+#
+# ⚠ 为什么必须解耦（真机 2026-09-23 23:26 实锤，用户判定「提取错误」）：
+#   取材窗口 1676 字里「第一股射在鼻梁和眼罩边沿／第二股歪了糊在她左颊／第三股落在唇上、
+#   下巴」「精液挂在眼罩角上」「睡着的狐不认人」「她还没醒」**全都在**，成稿却
+#   `cum/semen/facial/on face/closed eyes/sleeping/asleep` **一个都没有** ⇒ 画面变成
+#   「阴茎抵在舌头上」而不是「睡着被颜射的脸」。而该帧 `wardrobe` 为空 ⇒
+#   `clothing_changed=False` ⇒ narrative **根本不进** `_current_visual_source`
+#   ⇒ 旧通道**结构性扫不到**这两类事实（实测：wardrobe="" 时源仅 25 字）。
+#   ⇒ 只把规则加进 `_VISUAL_FACT_RULES` 是**无效**的，必须自带 narrative 源。
+#
+# 命中面已量（改前，全库所有存档）：体液族仅本作 1 处、睡眠族仅本作 8 处，其余存档全 0
+# ⇒ 误伤风险极低。负向断言刻意排掉「不像睡着／睡意全无」这类否定写法。
+_EVENT_FACT_RULES: tuple[tuple[str, str, str], ...] = (
+    # 体液：颜射/精液在脸上——画面必须有体液（用户原话「师傅脸上应该有精液才是」）。
+    # ① 直接写体液名词（最强、零歧义）；② 「射在/射满/射了」＋常见身体部位词
+    # （真机窗口写的是「第一股射在鼻梁和眼罩边沿」，无「脸」字 ⇒ 部位词表须含鼻/眼罩等）。
+    (r"精液|白浊|颜射|射满|射在[^。\n]{0,12}(?:脸|面|颊|腮|唇|嘴|口|鼻|眼|眉|颈|脖|肩|胸|乳|腹|肚|背|臀|腿|身)"
+     r"|射了[^。\n]{0,8}(?:脸|面|颊|唇|嘴|口|胸|身)",
+     "cum on face",
+     r"\b(?:facial|cum|semen|ejaculat\w*|spunk)\b"),
+    # 睡眠状态：睡中/未醒——画面必须闭眼（用户原话「师傅的睡觉…丢失了」）。
+    # `(?!不着|不醒|意)` 排掉「睡不着／睡不醒／睡意」；`没醒` 仍算睡中故保留。
+    (r"(?:睡(?:着|梦|沉|熟)|沉睡|阖眼|未醒|没醒)(?!不着|不醒|意)",
+     "closed eyes",
+     r"\bclosed eyes\b|\beyes (?:shut|closed)\b|\bsleeping\b|\basleep\b"),
+)
+
+
+def _event_fact_source(scene: Mapping[str, object]) -> str:
+    """事件性必现事实的源＝**取材窗口**（`narrative`），恒扫、与衣物变化解耦。"""
+    return image_prompt_extract.restore_jailbreak(str(scene.get("narrative") or ""))
+
+
+def _required_event_facts(scene: Mapping[str, object]) -> list[str]:
+    """窗口里出现的事件性事实（体液/睡眠）⇒ 画面必须体现，返回英文短语列表。"""
+    source = _event_fact_source(scene)
+    if not source.strip():
+        return []
+    return list(dict.fromkeys(
+        phrase for pattern, phrase, _ in _EVENT_FACT_RULES if re.search(pattern, source)
+    ))
+
+
+def _missing_event_facts(prompt: str, scene: Mapping[str, object]) -> list[str]:
+    """窗口有、成稿漏的事件性事实（供报错与补写）；窗口无 ⇒ 空表（零回归）。"""
+    source = _event_fact_source(scene)
+    if not source.strip():
+        return []
+    return list(dict.fromkeys(
+        phrase for pattern, phrase, output_pattern in _EVENT_FACT_RULES
+        if re.search(pattern, source) and not re.search(output_pattern, prompt, re.I)
+    ))
+
+
 def _current_visual_source(scene: Mapping[str, object]) -> str:
     appearance = str(scene.get("appearance") or "")
     wardrobe = str(scene.get("wardrobe") or "")
@@ -1531,6 +1917,149 @@ def _scene_contact_tags(clauses: list[str]) -> list[str]:
             tag for pattern, tag in _SCENE_CONTACT_RULES if re.search(pattern, clause)
         )
     return list(dict.fromkeys(tags))
+
+
+# ---------------------------------------------------------------------------
+# 第一人称「叙事者的局部肢体按剧情入画」（2026-09-22 用户实锤 · 第 43 刀）
+#
+# 用户原话：「第一人称时如果画面有描述肢体是能进入画面的……这个画面中第一人称视角本应该在
+#   镜头下方会出现主人公的肉棒拍在画面女主角的脸上挤压的动作，但是却没有这个提示词，可能是
+#   前面为了防止主人公完整入镜杀的太狠，导致之前协议的部分肢体可以根据剧情的主人公动作描述
+#   进入画面的功能被杀掉了」。
+#
+# 归因（两条通道同时断，缺一都复现不了该帧）：
+#   ① `_scene_contact_tags` 的**唯一调用点**在 `_actor_visual_details`，而后者在
+#      `len(scope) < 2` 时早退；第一人称下画面主体只剩女主 ⇒ **单主体帧没有这条通道**；
+#      唯一消费方 `_multi_actor_sentences` 同样只在 ≥2 主体时产出。
+#      ⇒ 「局部入画」只剩 `_viewpoint_clause` 的 system 条款在喊，**没有任何确定性事实源**，
+#        模型不主动写就是一条都没有。
+#   ② 既有 `_SCENE_CONTACT_RULES` 只收「手 × 臀/腰/私处」，且要求句内出现第一人称
+#      （`我/咱/俺`）——真机正文用的是「那条肉棒从单衣下摆里挣出来…命中她鼻梁以下的整张脸」
+#      （主语是器官、叙事者是名字）⇒ 连句级门槛都过不去。
+#
+# 设计（**按类管、不是禁词表**）：
+#   · 只认**部位本身决定归属**的类：男性器官（肉棒/阳具/阴茎/龟头…）不可能是画面里女性主体的
+#     部位 ⇒ 归属无歧义，绝不会把女主自己的动作误配给叙事者（这是本表敢放宽句级门槛的前提）；
+#   · 只在**同句**出现「器官 + 接触动作 + 被触部位」三元组时产出（第 22 刀同族：无出处不入画）；
+#   · 只在 `first_person` 生效 ⇒ 第三人称下叙事者本来就在画面里、走常规事实链，逐字节零回归。
+#   ⚠ 输出写成**名词短语**：既进得了 anima 的 `depicted with` 状态槽，也进得了散文通道；
+#     动名词片段会被 `_is_dangling_fact` 剔掉，正是第 27 刀踩过的坑。
+#   ⚠ 目标侧代词沿用既有 `_SCENE_CONTACT_RULES` 的 `her` 口径（画面主体为女性角色）。
+# ---------------------------------------------------------------------------
+_PENIS_NOUN = r"(?:肉棒|阳具|阴茎|玉茎|巨根|龟头|柱身)"
+_FACE_NOUN = r"(?:脸|面|脸颊|颊|鼻|唇|嘴|口)"
+_MOUTH_NOUN = r"(?:口|嘴|唇|口腔|喉咙?)"
+_BUTT_NOUN = r"(?:臀|屁股|臀肉|后庭|股沟|腰)"
+# ⚠ **必须限定「器官 → 接触动词 → 被触部位」的邻接距离**（2026-09-22 零 LLM 走查实锤）：
+#   只判「同句三元组共现」会在真机正文上**过度命中** —— 原句
+#   `…龟头顶端撞过眼罩下沿，留下一道黏腻的阳元浊痕，从她脸颊一直挂到嘴角。`
+#   里的 `顶`（＝「顶端」的一半）与 `唇/脸` 同句 ⇒ 一次点着「压脸」与「口交」两条规则，
+#   产出**正文里根本没有**的动作（＝凭空装置，踩第 22 刀红线）。
+#   ⇒ 判据形同既有的 `_SCENE_CONTACT_RULES`：**动词与其宾语部位必须邻近**（≤10 字且不跨句）。
+#   ⚠ 宁可漏（少写一条局部）绝不编造（多写一条没发生的动作）。
+_LIMB_GAP = r"[^。！？!?\n]{0,10}"
+_NARRATOR_LIMB_RULES: tuple[tuple[str, str], ...] = (
+    (rf"{_PENIS_NOUN}{_LIMB_GAP}(?:拍|甩|弹|抽打|击|撞|扇){_LIMB_GAP}{_FACE_NOUN}",
+     "an erect penis slapping her face"),
+    (rf"{_PENIS_NOUN}{_LIMB_GAP}(?:贴|抵|压|蹭|摩|擦|挤压|顶){_LIMB_GAP}{_FACE_NOUN}",
+     "an erect penis pressing against her face"),
+    (rf"{_PENIS_NOUN}{_LIMB_GAP}(?:插|顶|戳|捅|送入|推进){_LIMB_GAP}{_MOUTH_NOUN}",
+     "an erect penis thrusting into her mouth"),
+    (rf"{_PENIS_NOUN}{_LIMB_GAP}(?:顶|抵|蹭|摩|擦|贴|压){_LIMB_GAP}{_BUTT_NOUN}",
+     "an erect penis pressing against her buttocks"),
+)
+
+# ---------------------------------------------------------------------------
+# 第 47 刀 · 手/臂类「叙事者局部肢体入画」（2026-09-22 用户口径纠正）
+#
+# 用户原话：「肢体例外**不是说凌渊的手这种**，而是**主人公对于画面内容的干涉参与到画面内容**
+#   才会显现，比如说**用双手抓住画面角色的巨乳**，或者是**用肉棒拍打画面角色的脸颊**。」
+# ⇒ 判据＝「**叙事者（主人公）的身体部位作为施动者、主动作用于画面主体**」，
+#   **与文本怎么称呼该部位无关**（喊「我」／喊名字／以部位直接作主语都算）。
+#
+# 43 刀只建了**器官类**：因为「器官本身决定归属」（男性器官不可能是画面里女性主体的部位）
+#   ⇒ 无须句级门槛也判不错。**手/臂类没有这个性质**（「手」既可能是叙事者的、也可能是女主的）
+#   ⇒ 本表用三重限定换回确定性（缺一就可能把别人的手算给叙事者）：
+#     ① 施动者**不接受第三人称领有**：`她的双手…`／`他伸手…` 这种不认（`_HAND_NO_THIRD_OWNER`）；
+#     ② 施动者与目标之间的间隙里不得出现 `自己的／自身`（女主抓自己 ⇒ 不是叙事者的手）；
+#     ③ 句级门槛（见 `_hand_facts`）：分句里**有第一人称`我/咱/俺`**，或施动者**之前**没出现过
+#        第三人称（第一人称叙事里，未标主的施动者就是叙事者）⇒ 才认。
+#   ⚠ 三重限定**只作用于手/臂类**；器官类规则逐条不动（零回归）。
+#   ⚠ 目标部位**刻意只收 胸/乳 与 脸** —— 25 刀 `_SCENE_CONTACT_RULES` 已管 臀/腰/私处
+#     （多人帧走 `has a hand resting on her buttocks`），此处再收会与之**重复出两条事实**。
+#   ⚠ 同 43 刀「宁漏不编」：只在**同一分句内**、**邻接且不跨句**（≤10 字）时产出。
+# ---------------------------------------------------------------------------
+_HAND_NOUN = r"(?:双手|两只手|一只手|手掌|巴掌|手指|指尖|手臂|双臂|手)"
+_BREAST_NOUN = r"(?:巨乳|双乳|乳房|胸部|胸|奶子)"
+_HAND_NO_THIRD_OWNER = r"(?<![她他])(?<!她的)(?<!他的)"
+_HAND_SELF_DENY = r"(?!自己的|自身)"
+_HAND_GAP = rf"(?:{_HAND_SELF_DENY}[^。！？!?\n]){{0,10}}"
+# ⚠⚠ 措辞**必须以 `hands` 开头**（不可写 `a hand …`）：`_ACTION_FACT_LEAD_RE`（`:2997`）刻意
+#   只认 `both hands?`／`two hands?`／`hands?` 与**男根一族**（认冠词的放宽只给器官类），
+#   写成 `a hand grabbing her breasts` 会被判成**状态事实** ⇒ 塞进 `depicted with` 槽 ⇒
+#   复述成 `The primary adult woman is depicted with a hand grabbing her breasts.`
+#   —— 主语是女性主体、手却属于叙事者（第 29／31／43 刀同族的「主语/物主错配」病句）。
+#   单/复数按 tag 惯用形归一（同既有的 `both hands spreading her buttocks apart` 口径）。
+_NARRATOR_HAND_RULES: tuple[tuple[str, str], ...] = (
+    (rf"{_HAND_NO_THIRD_OWNER}{_HAND_NOUN}{_HAND_GAP}"
+     rf"(?:抓|握住|攥|捏|托|捧|揉|揉捏|掐){_HAND_GAP}{_BREAST_NOUN}",
+     "hands grabbing her breasts"),
+    (rf"{_HAND_NO_THIRD_OWNER}{_HAND_NOUN}{_HAND_GAP}"
+     rf"(?:抚摸|抚弄|摩挲|按|压){_HAND_GAP}{_BREAST_NOUN}",
+     "hands caressing her breasts"),
+    (rf"{_HAND_NO_THIRD_OWNER}{_HAND_NOUN}{_HAND_GAP}"
+     rf"(?:拍|扇|抚摸|捧住|托起|托|捧|捏|掐|按){_HAND_GAP}{_FACE_NOUN}",
+     "hands touching her face"),
+)
+_THIRD_PARTY_RE = re.compile(r"她|他")
+
+# ⚠ 这些事实**豁免第 29 刀的同部位冲突闸**（`_action_fact_part_re` 返回 None）：判据会把
+#   「her face」并进「头/面」组 ⇒ 模型只要写了 `close-up on lower face` ＋ 任意姿态动词，
+#   本事实就被判成「同部位已写过动作」而整条丢弃 —— 可「写了脸的特写」绝不等于「写了器官与
+#   脸的接触」。同第 31 刀神态事实口径：**判不了部位就当不判**。
+_NARRATOR_LIMB_FACT_TEXTS = frozenset(
+    phrase for *_rest, phrase in (*_NARRATOR_LIMB_RULES, *_NARRATOR_HAND_RULES)
+)
+
+
+def _hand_facts(clause: str) -> list[str]:
+    """手/臂类「叙事者局部肢体入画」事实（第 47 刀；判据见上表注释）。
+
+    句级门槛（器官类**不设**，见上）：① 分句里有第一人称`我/咱/俺`；或
+    ② 施动者**之前**没出现过第三人称（第一人称叙事里，未标主的施动者就是叙事者）。
+    ⚠ 已知边界（宁漏不编的代价）：同一逗号分句里若先出现别的施动者
+      （`我抱住她，她伸手拍她的脸`），① 仍会放行 ⇒ 手/臂类可能多认一条；器官类无此问题。
+    """
+    self_narrated = bool(_NARRATOR_SELF_RE.search(clause))
+    found: list[str] = []
+    for pattern, phrase in _NARRATOR_HAND_RULES:
+        for match in re.finditer(pattern, clause):
+            if self_narrated or not _THIRD_PARTY_RE.search(clause[: match.start()]):
+                found.append(phrase)
+    return found
+
+
+def _narrator_limb_facts(scene: Mapping[str, object]) -> list[str]:
+    """第一人称下「叙事者局部肢体入画」的**确定性事实源**（第 43 刀 ＋ 第 47 刀，见上表注释）。
+
+    ⚠ 零回归锁：`viewpoint` 缺失／非 `first_person`、或画面主体为空 ⇒ 返回空表
+      ⇒ 所有下游（模型载荷／字段账本／词表兜底）逐字节等于旧行为。
+    """
+    if str(scene.get("viewpoint") or "").strip() != "first_person":
+        return []
+    if not _contract_subject_names(scene):
+        return []
+    narrative = image_prompt_extract.restore_jailbreak(str(scene.get("narrative") or ""))
+    facts: list[str] = []
+    for clause in re.split(r"[。！？!?；;\n]", narrative):
+        if not clause.strip():
+            continue
+        facts.extend(
+            phrase for pattern, phrase in _NARRATOR_LIMB_RULES
+            if re.search(pattern, clause)
+        )
+        facts.extend(_hand_facts(clause))
+    return list(dict.fromkeys(facts))
 
 
 def _actor_visual_details(scene: Mapping[str, object]) -> list[tuple[str, list[str], list[str]]]:
@@ -1766,18 +2295,27 @@ def _mapped_wardrobe_facts_from(source: str) -> list[str]:
 def _missing_visual_facts(prompt: str, scene: Mapping[str, object]) -> list[str]:
     source = _current_visual_source(scene)
     lowered = prompt.lower()
-    return list(dict.fromkeys(
+    missing = list(dict.fromkeys(
         phrase for source_pattern, phrase, output_pattern in _VISUAL_FACT_RULES
         if re.search(source_pattern, source) and not re.search(output_pattern, lowered, re.I)
     ))
+    # T1：事件性必现事实（体液/睡眠）走自己的 narrative 源，与外观类共用「漏」的报错出口
+    # ⇒ `_visual_fact_errors` 报「未落实」、触发修补重试；窗口无该事实时返回空表（零回归）。
+    missing.extend(
+        phrase for phrase in _missing_event_facts(prompt, scene) if phrase not in missing
+    )
+    return missing
 
 
 def _visual_fact_errors(prompt: str, scene: Mapping[str, object]) -> list[str]:
     source = _current_visual_source(scene)
-    if not source.strip():
+    # T1：事件性必现事实（体液/睡眠）走自己的 narrative 源，**不受 `source` 是否为空影响**——
+    # 真机该帧 `wardrobe` 为空 ⇒ 旧实现在此早退 ⇒ 事件事实连报错机会都没有。
+    event_missing = _missing_event_facts(prompt, scene)
+    if not source.strip() and not event_missing:
         return []
     errors: list[str] = []
-    if _VAGUE_IDENTITY_RE.search(prompt):
+    if source.strip() and _VAGUE_IDENTITY_RE.search(prompt):
         errors.append("角色段落使用了空泛身份锁，必须改写为条目中的具体可视外貌与当前服装")
     errors.extend(
         f"角色条目中的可视事实未落实：{phrase}"
@@ -2076,6 +2614,13 @@ def _contract_subject_names(scene: Mapping[str, object]) -> list[str]:
     被提及的旁观者会把单人定格帧推成多人帧，模型写对的单人成稿反被判死，甚至被硬塞
     「second adult character」污染画面（2026-09-19 真机实锤）。
     """
+    narrator = _first_person_narrator(scene)
+
+    def _drop_narrator(names: list[str]) -> list[str]:
+        if not narrator:
+            return names
+        return [name for name in names if name != narrator]
+
     subjects = scene.get("subjects")
     if isinstance(subjects, list):
         planned = [
@@ -2084,23 +2629,22 @@ def _contract_subject_names(scene: Mapping[str, object]) -> list[str]:
         ]
         planned = [name for name in planned if name]
         if planned:
-            return list(dict.fromkeys(planned))
+            # 第 37 刀：① 计划 `subjects` 原本**早返回、不过人称滤** ⇒ 第一人称下叙事者
+            # 仍被算成本帧主体（② `frame_subjects` 同理）。判据与 ③ 完全一致。
+            return list(dict.fromkeys(_drop_narrator(planned)))
     frame = scene.get("frame_subjects")
     if isinstance(frame, list):
         named = [str(name).strip() for name in frame if str(name).strip()]
         if named:
-            return list(dict.fromkeys(named))
+            return list(dict.fromkeys(_drop_narrator(named)))
     actors = scene.get("actors")
     if not isinstance(actors, list):
         return []
     names = [str(name).strip() for name in actors if str(name).strip()]
     # 2026-09-20 用户定案：第一人称下叙事者不占画面主体数。③ 这条回落路径原本只看 actors，
-    # 叙事者若在角色表里就会被算回来 ⇒ 收紧只在一半路径生效。只在 `narrator` 键**存在**时剔
-    # ⇒ 老调用方（无该键）逐字节等于旧行为。
-    narrator = str(scene.get("narrator") or "").strip()
-    if narrator and str(scene.get("viewpoint") or "").strip() == "first_person":
-        names = [name for name in names if name != narrator]
-    return list(dict.fromkeys(names))
+    # 叙事者若在角色表里就会被算回来 ⇒ 收紧**只在一半路径生效**（第 37 刀把 ①/② 一并补齐）。
+    # 只在 `narrator` 键**存在**时剔 ⇒ 老调用方（无该键）逐字节等于旧行为。
+    return list(dict.fromkeys(_drop_narrator(names)))
 
 
 # 多人契约的「语义分述」判据（优化项⑨ 句式放宽，2026-09-19）：
@@ -2144,8 +2688,72 @@ def _actor_designated_by(prompt: str, marker: str) -> bool:
     return any(re.search(pattern, prompt or "", re.I) for pattern in patterns)
 
 
+# 外貌／衣着区分式指称（第 44 刀 · 2026-09-22 用户定案「分述判据只认位置词，按你的修复来」）：
+# 真机 B2（2026-09-22）成稿按 42 刀·D 的引导写成
+#   `The blonde woman in the hollowed-out white wedding dress …`
+#   `the silver-haired woman in the black bunny suit …`
+# 两名主体**确实被分开指称**（blonde vs silver-haired），却因**一个位置词都没有**
+# ⇒ `_ACTOR_CONTRAST_PAIRS` 一对都命中不了 ⇒ 判红 2 条 ⇒ 白烧一次 repair（2/2 复现）。
+# ⚠ 与既有位置锚判据同族：**只判词面、不引词表**，靠「定语是否绑在角色名词上」这一句式特征，
+#   不去列任何外貌词。
+# ⚠ 与角色形象来源完全无关：本组判据只读 `prompt` 字符串，**不从这里反推／回写任何外貌事实**，
+#   角色外貌仍一律来自 `scene_illustration` 的**三源融合（剧情表现 > 表格补充 > 角色条目，
+#   第 36 刀）**。
+_MODIFIER_TOKEN = r"[A-Za-z][A-Za-z'-]+"
+# ⚠ ② 的介词是**功能词白名单**（不是外貌词表）：只收「绑定在身上之物」的介词短语，
+#   刻意**排除** `in/at/on` —— `in the corridor`、`in the room` 这类是**地点**，
+#   纳入就会把场景方位当成角色分述（保精度）。
+_APPEARANCE_PREP = r"(?:with|wearing|dressed\s+in|clad\s+in|carrying|holding)"
+_APPEARANCE_DESIGNATION_RES: tuple[re.Pattern[str], ...] = (
+    # ① 定语在名词前：`the blonde woman` / `a silver-haired girl`
+    re.compile(rf"\b(?:the|a|an)\s+({_MODIFIER_TOKEN})\s+{_ACTOR_NOUN_PATTERN}\b", re.I),
+    # ② 定语在名词后（衣着／携带／发色）：`the woman with glossy jet-black hair` /
+    #   `a girl wearing a black bunny suit` / `the blonde woman wearing a white wedding dress`
+    #   （名词前可再带一个定语；短语本体最多 3 个实词，避免把后面的动词吞进来）
+    re.compile(
+        rf"\b(?:the|a|an)\s+(?:{_MODIFIER_TOKEN}\s+)?{_ACTOR_NOUN_PATTERN}\s+"
+        rf"{_APPEARANCE_PREP}\s+"
+        rf"(?:the\s+|a\s+|an\s+|his\s+|her\s+|their\s+)?"
+        rf"((?:{_MODIFIER_TOKEN})(?:\s+{_MODIFIER_TOKEN}){{0,2}})",
+        re.I,
+    ),
+)
+
+
+def _appearance_designations(prompt: str) -> set[str]:
+    """提取「定语 + 角色名词」式指称（**纯词面、无词表**）；只留**彼此无共享实词**的指称。
+
+    只做**句式**判定：
+      · ① 前置定语：取紧贴角色名词前的那**一个** token（`silver-haired woman` → `silver-haired`）；
+      · ② 后置短语：取介词短语本体（`with glossy jet-black hair` → `glossy jet-black hair`，≤3 词）。
+    ⚠ 两道保精度闸（都靠**结构**、不靠词表）：
+      ① ② 的实词数必须 **≥2**（`the woman with a scar` 这种单词短语不算外貌指称）；
+      ② 只保留**与其它指称无共享实词**的指称 —— `the woman with blonde hair` 与
+         `the girl with blonde hair`（同一个人写了两遍）共享 `blonde/hair` ⇒ 判为同一指称。
+    ⚠ 与角色形象来源无关：结果只由 `prompt` 决定，绝不反推／回写任何外貌事实。
+    """
+    entries: list[tuple[str, frozenset[str]]] = []
+    for index, pattern in enumerate(_APPEARANCE_DESIGNATION_RES):
+        for match in pattern.finditer(prompt or ""):
+            phrase = " ".join(match.group(1).split()).lower()
+            tokens = frozenset(token for token in re.split(r"\W+", phrase) if token)
+            if not tokens:
+                continue
+            if index == 1 and len(tokens) < 2:
+                continue
+            entries.append((phrase, tokens))
+    return {
+        phrase for position, (phrase, tokens) in enumerate(entries)
+        if all(
+            tokens.isdisjoint(other_tokens)
+            for other_position, (_other, other_tokens) in enumerate(entries)
+            if other_position != position
+        )
+    }
+
+
 def _has_separate_actor_designations(prompt: str) -> bool:
-    """多人契约的「语义分述」等价物（优化项⑨ 句式放宽，2026-09-19）。
+    """多人契约的「语义分述」等价物（优化项⑨ 句式放宽 2026-09-19；第 44 刀扩外貌锚 2026-09-22）。
 
     旧口径只认模板字样 `primary/second adult character|woman`；真机 L3·natural 成稿用
     `the woman on the left … the woman on the right …` 已把两名主体**分开描述**，却因不认
@@ -2155,17 +2763,30 @@ def _has_separate_actor_designations(prompt: str) -> bool:
     这里把「命中一对互斥指称、且各自绑定角色名词」视为已单独描述每个主体。
     **只放宽句式、不放松人数**：是否走多人契约仍由 `_contract_subject_names` 决定；
     指称对必须互斥（只写「左边」不算），且必须绑定角色名词（纯场景方位不算）。
+
+    **第 44 刀（2026-09-22 用户定案）**：再加一路**外貌／衣着区分式指称** —— 出现
+    **≥2 个互不相同**的「定语 + 角色名词」式指称（`_appearance_designations`）即视为已分述。
+    理由：42 刀·D 明确**要求**模型用「可辨识身份（发色／发型／瞳色／体型）」区分两名主体，
+    而位置锚词表认不出这种写法 ⇒ **我们要求的写法判不过我们自己的契约**。
+    ⚠ 三条边界不动：① 仍**只判词面、不引词表**；② **不放松人数**（画面主体 <2 时
+    `_multi_actor_contract_errors` 整段不跑；人多不多、人称口径全按 `_contract_subject_names`）；
+    ③ **不碰角色形象来源** —— 本函数只读 `prompt` 字符串，角色外貌仍一律来自
+    `scene_illustration` 的**三源融合（剧情表现 > 表格补充 > 角色条目，第 36 刀）**，
+    绝不从提示词反推或回写外貌事实。
     """
-    return any(
+    if any(
         _actor_designated_by(prompt, first) and _actor_designated_by(prompt, second)
         for first, second in _ACTOR_CONTRAST_PAIRS
-    )
+    ):
+        return True
+    return len(_appearance_designations(prompt)) >= 2
 
 
 def _multi_actor_contract_errors(
     profile: str, prompt: str, scene: Mapping[str, object],
 ) -> list[str]:
-    if len(_contract_subject_names(scene)) < 2:
+    subject_count = len(_contract_subject_names(scene))
+    if subject_count < 2:
         return []
     errors: list[str] = []
     if not _has_separate_actor_designations(prompt):
@@ -2173,8 +2794,20 @@ def _multi_actor_contract_errors(
             errors.append("多人提示词必须单独描述第一角色")
         if not re.search(r"\bsecond adult (?:character|woman)\b", prompt, re.I):
             errors.append("多人提示词必须单独描述第二角色")
-    if profile == "anima_tags" and not re.search(r"\b(?:2girls|two girls)\b", prompt, re.I):
-        errors.append("Anima 双人提示词必须包含2girls")
+    if profile == "anima_tags":
+        # 第 45 刀（2026-09-22 用户定案）：**删掉「必须包含 2girls」下限**。
+        # 用户口径原话：「性别的判断是根据剧情来的」—— 人数与性别由**剧情实际**决定
+        # （剧情里几人、什么性别，模型照着写），不得用「画面主体 ≥2 ⇒ 必须 `2girls`」
+        # 这种机械规则反推性别。
+        # 真机事故（2026-09-22 12:28，slot -47）：第一人称单女帧（师尊在榻边掖被子、
+        # 视线落到主人公脸上）被这条下限逼出 `2girls` ⇒ 模型凭空多画一个女人；
+        # 且 2 主体帧的区间 `2 ≤ girls ≤ 2` 会把写对的 `1girl, 1boy`（男主＋1 女）判死。
+        # 保留**上界**：人数词不得超过画面主体数（仍与 `_contract_subject_names` 同口径）。
+        # ⚠ boys 族刻意不进契约（见 `_subject_count_totals` 上方注释）：它的归属是
+        # 归一化侧 40 刀的「剔孤儿」。
+        girls, _boys = _subject_count_totals(prompt)
+        if girls > subject_count:
+            errors.append("Anima 提示词人数词不得超过画面主体数")
     return errors
 
 
@@ -2245,6 +2878,255 @@ def _body_errors(profile: str, prompt: str) -> list[str]:
     return errors
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# 第一人称「取景收束」（2026-09-24 用户定案 · 第 55 刀）
+#
+# 用户口径（原话）：「按照我之前要求的，**先获取画面内容，再寻找合适视角**，所以说为了
+#   全面展示提示词的内容，自然会像第三方视角一样展示所有，然后自然会类似将女主角的全身
+#   涵盖在画面，而在这情况下，主人公的动作想实现极有可能暴露全身，也就是说**没有收束
+#   第一人称主角视角的画面**。比如说该画面应该**仅局限于上半身**，就是以第一人称视角压在
+#   师傅的上半身，肉棒从**镜头下半区域**露出压在师傅嘴上。」
+# 用户随后给出修法（原话）：「就是把当前情况的**内容优先、机位是因变量**划分给**第三人称**；
+#   如果是**第一人称**，那就是**先内容优先，再判断第一人称的数据视野朝向，最后筛分镜头
+#   里面应该保留的东西**。」
+#
+# ⇒ 三档因果方向（本条＝第 38 刀口径的**人称分支**，不是推翻）：
+#   · 第三人称：内容 ⇒ 机位（远到能容纳全部内容）—— **保持第 38 刀原样**。
+#   · 第一人称：内容 ⇒ **数据视野朝向**（镜头已固定在叙事者眼睛上、视野是**有限**的）
+#     ⇒ **取景筛分**（装不下的内容按层级省略）。**镜头不再是因变量，而是已给定的约束**。
+#
+# 真机实锤（零 LLM，`agent-trace.jsonl` 三轮同病）：
+#   · turn 52（`line 291`）：交付含 `close-up` ＋ `three-quarter back view` ＋ `from behind`，
+#     却同时要求「男手捏下巴＋器官贴唇＋女全身侧躺＋抬腿＋白袜」⇒ **物理装不下**。
+#   · turn 51（`line 230`）：`close-up` 却写「臀部压进被褥、**床边叠着外袍、门边倚着剑**」
+#     ⇒ 全景信息塞进特写。
+#   · turn 50（`line 172`）：写「薄被推开半掌、**另一半床空着且冷**」
+#     ⇒ 拿叙事者的空位当构图元素 ＝ 上帝视角。
+#   ⇒ `close-up` 在这个链路里**形同虚设**：模型一边写特写、一边描述只有退到远处才看得见的
+#     东西（床、门、地上的外袍、臀部曲线）。
+#
+# ⚠ 判据的 `composition` 字段是**死数据**：判据每次都自报了景别（turn 52/51 报「特写」、
+#   turn 50/48 报「中景」），但 `scene_spec["composition"]` 只从**主计划** `plan["composition"]`
+#   取（`agent_agency.py:1524`），**判据那份从未被消费** ⇒ 本函数不依赖它，改用确定性推导。
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# 「数据视野朝向」的确定性数据源：画面事实里**接触点落在哪个高度带**。
+# 用户示例「压在师傅的上半身，肉棒从镜头下半区域露出压在师傅嘴上」⇒ 接触点在**口/面**
+# ⇒ 视野上限＝**上半身**（不是全身）。
+_VIEW_FACE_CONTACT_RE = re.compile(
+    r"(?:嘴|唇|口|舌|脸颊|脸|面|鼻|下颌|下巴|颈|脖子|锁骨|胸|乳|肩|咽喉|喉)",
+)
+# 接触点落在**腰部以下** ⇒ 视野下移但不是推远（仍保持近距离）。
+_VIEW_LOWER_CONTACT_RE = re.compile(r"(?:下体|私处|阴|穴|臀|股|腿|脚|足|膝|大腿|小腿|腰腹)")
+
+# 第三方全景机位措辞：**仅在「近身接触帧」**下禁用（它们隐含「有一个站在旁边看的观察者」，
+# 与「镜头＝叙事者眼睛」自相矛盾）。
+# ⚠ 2026-09-24 第 56 刀（用户第二次纠正）：这些措辞**不得在纯风景/环境帧**里禁用 ——
+#   用户原话：「不行，**你不能限制死特写中景**，因为我开着第一人称，**有时候如果只是描写
+#   风景**，那被限制成近景/中景**基本彰显不了风景全貌**」。
+#   ⇒ 风景帧**没有接触锚点** ⇒ 本来就不该进近身收束态。
+_VIEWPOINT_FORBIDDEN_CAMERA = (
+    "from behind", "three-quarter back view", "rear view", "back view",
+    "full body", "wide shot", "long shot", "full shot", "medium wide shot",
+    "environmental composition", "god's eye view", "bird's eye view",
+    "looking down at face", "from above",
+)
+
+# ⚠ 上述禁表里**只有「俯视/背后」这一半**是身份矛盾（上帝视角 ＝ 旁观者，恒禁）；
+#   「full body / wide shot / long shot」这一半是**取景矛盾**，只在近身帧成立。
+#   ⇒ 风景帧只用「恒禁那一半」（见 `_first_person_framing`）。
+_VIEWPOINT_BYSTANDER_ONLY = (
+    "from behind", "three-quarter back view", "rear view", "back view",
+    "god's eye view", "bird's eye view", "looking down at face", "from above",
+    "environmental composition",
+)
+_VIEWPOINT_WIDE_ONLY = (
+    "full body", "wide shot", "long shot", "full shot", "medium wide shot",
+)
+
+# 「纯风景 / 环境帧」的确定性判据（第 56 刀）：**没有人体接触**但**有环境陈设词**。
+# 用户口径「有时候如果只是描写风景……基本彰显不了风景全貌」——
+#   这类帧必须**放行全景**，不得收成近景/中景。
+# ⚠ 与 `_VIEW_FACE_CONTACT_RE` / `_VIEW_LOWER_CONTACT_RE` 互斥使用：
+#   两者任一命中 ⇒ 是**近身帧** ⇒ 走取景收束；两者都不命中且本表命中 ⇒ 是**风景帧** ⇒ 放行远景。
+_VIEW_ENVIRONMENT_RE = re.compile(
+    r"(?:山|峰|岭|崖|谷|林|树|竹|松|枫|槐|柳|梅|湖|河|江|溪|池|潭|海|浪|潮|"
+    r"云|霞|雾|霜|雪|风|雨|露|月|星|天|日|阳|霞光|晨光|曦|暮|黄昏|夜|"
+    r"宫|殿|楼|阁|亭|台|院|廊|桥|街|巷|道|路|阶|墙|瓦|檐|窗|门|灯|烛|"
+    r"屋|房|室|堂|案|桌|榻|床|椅|柜|架|屏|帘|帐|书|剑|琴|棋|画|茶|酒|炭盆|香炉|"
+    r"远处|远方|山脚|天际|全貌|风景|景致|四下|四周|屋外|院外|窗外|院中)",
+)
+
+
+def _first_person_framing(scene: Mapping[str, object]) -> str:
+    """第一人称「数据视野朝向 ＋ 取景筛分」的确定性推导（第 55／56 刀）。
+
+    **三态**（第 56 刀据用户第二次纠正扩为三态，原来只有「近身」与「不设限」两态）：
+      · **近身接触帧**（命中 `_VIEW_FACE_CONTACT_RE`／`_VIEW_LOWER_CONTACT_RE`）
+        ⇒ 给**取景上限**（上半身 / 下半身）＋ 筛分口径；
+      · **纯风景 / 环境帧**（两边接触都是空、但命中 `_VIEW_ENVIRONMENT_RE`）
+        ⇒ **明确放行全景**（用户原话：风景被限成近景/中景「彰显不了风景全貌」）
+        —— 只禁**身份矛盾那一半**（俯视/背后 ＝ 上帝视角），**不禁** `full body`/`wide shot`；
+      · **其他**（无接触、也无环境词）⇒ 返回空串、**不回上限**（宁缺勿猜，
+        调用方跳过整个收束块 ⇒ 逐字节等于旧行为）。
+    `viewpoint` 非 `first_person` ⇒ 返回空串（零回归锁）。
+    """
+    if str(scene.get("viewpoint") or "").strip() != "first_person":
+        return ""
+    sources: list[str] = []
+    for key in ("narrative", "appearance", "wardrobe", "draft_prompt"):
+        value = scene.get(key)
+        if isinstance(value, str) and value.strip():
+            sources.append(image_prompt_extract.restore_jailbreak(value))
+    blob = "\n".join(sources)
+    if not blob.strip():
+        return ""
+    face = bool(_VIEW_FACE_CONTACT_RE.search(blob))
+    lower = bool(_VIEW_LOWER_CONTACT_RE.search(blob))
+    if not face and not lower:
+        if _VIEW_ENVIRONMENT_RE.search(blob):
+            # ── 第 56 刀：风景帧——**放行全景**（不得限制死特写/中景）────────────────
+            bystander = "、".join(f"`{item}`" for item in _VIEWPOINT_BYSTANDER_ONLY)
+            return (
+                "【视角·第一人称·本帧为环境/风景镜（不设近景上限）】本帧画面事实里"
+                "**没有近身人体接触**、只有环境与陈设 ⇒ **不得**把它收成特写/近景："
+                "那样**彰显不了风景全貌**（用户定案）。本帧**允许**远景/全景机位"
+                "（`wide shot`／`long shot`／`full shot`／`medium wide shot` 均可），"
+                "按画面事实把环境与陈设写全。⚠ 唯有一条仍然成立：镜头**仍是**叙事者的眼睛"
+                "（不是旁边站着的观察者）⇒ **仍禁止**"
+                f"{bystander}这类**俯视/背后/第三旁观**措辞——远景与旁观是两回事。"
+            )
+        # ⚠ 两边都没命中 ⇒ **不给取景上限**（宁缺勿猜：没有接触证据就没有收束依据，
+        #   此时按常规景别走）。返回空串 ⇒ 调用方跳过整个收束块、**逐字节等于旧行为**。
+        return ""
+    if face:
+        limit, limit_en = "上半身", "upper body (waist-up, bust shot)"
+    else:
+        limit, limit_en = "下半身", "waist-down shot"
+    return (
+        f"【视角·第一人称·数据视野朝向（本帧为{limit}）】镜头**已经固定**在叙事者的"
+        f"眼睛位置上、**视野是有限的**——它**不是**一个可以自由后退的旁观机位。"
+        f"⇒ 本帧取景上限＝**{limit}**（{limit_en}）：**先保留**剧情拿到的画面事实，"
+        f"再按这个固定视野**筛分**——**只有这个视野里真正看得见的**才写进画面，"
+        f"装不下的内容按层级**省略**（可写进区域内的局部，不得为了「展示全部内容」把镜头推远）。"
+        f"⚠ 本上限**只适用于近身接触帧**：若本帧只是描写环境/风景而无人体接触，"
+        f"不应套用（那种帧要放行全景）。"
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 第一人称「画面事实筛分」（2026-09-24 · 第 57 刀 ③）
+#
+# 用户口径（原话，第二次重申）：「第三人称是**内容产出再找视角展示完整内容**，而第一人称则是
+#   **先内容再核对主人公主视角内容进行筛分**。」
+#
+# 第 55 刀只把「筛分」写成了**一句提示词指令**（`_first_person_framing`：「只有这个视野里
+#   真正看得见的才写进画面，装不下的内容按层级省略」）——**靠模型自觉**。
+# 真机实锤（turn `9bb03d04`，第一人称 + 上半身近身帧）提示词**自相矛盾**：
+#   `upper body, close-up, from above, first-person view`（取景已收）
+#   **同时**要求 `broad rounded hips` ＋ `white silk stockings … on her legs`（**装不下**）。
+# ⇒ 只靠指令赢不了：`appearance` / `wardrobe` 在字段账本里是 **`required`**
+#   （`complete_field_coverage` 必须补齐）⇒ 编译器**不能省略**它们 ⇒ 模型只能把镜头推远。
+# ⇒ 本函数把「筛分」**从提示词指令下沉到数据层**：进编译器之前，先按取景上限把
+#   **装不下的部位/衣物从 `appearance` / `wardrobe` 里剔掉**，让账本不再强制它们出场。
+#
+# 设计（全部服从「宁缺勿猜」）：
+#   · 只在 **`first_person` ＋ 上半身近身帧**（命中 `_VIEW_FACE_CONTACT_RE` 且未命中
+#     下半身接触）时生效 —— 只做**一个方向**（上半身帧剔下半身），反向不猜；
+#   · 风景帧（第 56 刀三态）**豁免**：用户定案「风景帧要放行全景」；
+#   · 下半身帧 / 其他 / 第三人称 / 无 `viewpoint` ⇒ **原样返回**（零回归锁）；
+#   · **剔空保护**：若某字段整条都被剔（说明该字段本就只写下半身），**保留原文**，
+#     绝不把字段清空（宁缺勿猜 —— 清空会让编译器彻底编造）。
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# 下半身部位／裤袜类（保守：以多字词为主；裸「臀／腿／胯／袜」保留 —— 本表只作用于
+# **外貌/服装这类短名词短语**，不是自由叙事，量词陷阱（第 56 刀「一股」）不适用；
+# 而真机 `appearance` 正是「宽厚圆硕的臀」「修长白皙的双腿」这种写法，漏掉裸字就整条失效）。
+# ⚠ 与 `_TP_LOWER_RE`（scene_illustration，判**接触高度带**）**不同源**：那张表服务
+#   「时点截断」，本表服务「取景筛分」，两者判的不是同一件事 ⇒ 刻意各留一份、不互相 import。
+_FP_LOWER_BODY_RE = re.compile(
+    r"(?:臀|屁股|股间|股沟|胯|裆|"
+    r"大腿|小腿|膝弯|膝窝|腿|足尖|脚踝|脚背|脚趾|脚心|脚掌|双足|脚|"
+    r"腰腹|小腹|腹部|腹股沟|腰侧|腰肢|腰间|腰|髋|"
+    r"白袜|白丝|裤袜|丝袜|长袜|袜)",
+)
+
+# 字段内的**片段分隔符**（外貌/服装都是顿号/逗号/分号串起来的中文短语）。
+_FP_SEGMENT_SPLIT_RE = re.compile(r"[、，,；;\n]+")
+
+
+def _strip_lower_body(text: str) -> tuple[str, list[str]]:
+    """按**片段**剔掉含下半身部位/裤袜的短语。返回 `(保留文本, 被剔片段)`。
+
+    只按分隔符切、只丢整条命中片段 ⇒ **不改写、不重组**保留下来的文字（逐字不变）。
+    被剔片段非空但保留文本为空 ⇒ 放弃本次剔（宁缺勿猜，见模块注释的「剔空保护」）。
+    """
+    raw = text or ""
+    if not raw.strip():
+        return raw, []
+    segments = _FP_SEGMENT_SPLIT_RE.split(raw)
+    kept: list[str] = []
+    removed: list[str] = []
+    for segment in segments:
+        if not segment.strip():
+            continue
+        if _FP_LOWER_BODY_RE.search(segment):
+            removed.append(segment.strip())
+        else:
+            kept.append(segment)
+    if not removed or not kept:
+        return raw, []
+    return "、".join(kept), removed
+
+
+def first_person_frame_filter(scene: Mapping[str, object]) -> dict:
+    """第一人称「画面事实筛分」：按取景上限剔掉装不下的外观/服装事实（第 57 刀 ③）。
+
+    返回 `{"applied": bool, "scope": str, "appearance": str, "wardrobe": str,
+    "removed": [str, ...]}`；`applied=False` 时 `appearance`/`wardrobe` **原样返回调用方的值**
+    （调用方据此判断「没动过」⇒ 逐字节等于旧行为）。
+    """
+    appearance = str(scene.get("appearance") or "")
+    wardrobe = str(scene.get("wardrobe") or "")
+    # `dict`（不带参数）⇒ 值按 Any 处理，免得为一次内部返回值引入 TypedDict。
+    untouched: dict = {
+        "applied": False, "scope": "", "removed": [],
+        "appearance": appearance, "wardrobe": wardrobe,
+    }
+    if str(scene.get("viewpoint") or "").strip() != "first_person":
+        return untouched
+    sources: list[str] = []
+    for key in ("narrative", "appearance", "wardrobe", "draft_prompt"):
+        value = scene.get(key)
+        if isinstance(value, str) and value.strip():
+            sources.append(image_prompt_extract.restore_jailbreak(value))
+    blob = "\n".join(sources)
+    if not blob.strip():
+        return untouched
+    # 取景上限的判定必须与 `_first_person_framing` **同口径**（同一个 4 键 blob、同一条
+    # 「**面优先**」规则）—— 否则会出现「提示词声明上半身、本函数却按下半身不筛」的
+    # 自相矛盾。⚠ 曾经踩过：把闸写成「命中下半身就不筛」，而 `appearance` 里本就有
+    # 「臀／双腿」⇒ **被筛字段反过来关掉了筛分**（循环）。面优先之后，
+    # `appearance` 里的唇/胸与 narrative 里的口/面共同得出「上半身」，与本函数目的自洽。
+    face = bool(_VIEW_FACE_CONTACT_RE.search(blob))
+    if not face:
+        # 未命中「面/颈/胸/肩」⇒ 不是上半身近身帧（下半身帧不做反向筛；风景帧/无接触按
+        # 第 56 刀三态要放行全景）⇒ 一律不筛（宁缺勿猜）。
+        # ⚠ 刻意**不**把 `_VIEW_LOWER_CONTACT_RE` 也纳入本闸：`_first_person_framing` 用的是
+        #   「**面优先**」（face 命中即给上半身上限，lower 只在其后兜底）⇒ 本函数跟着只认 face，
+        #   才与提示词声明的取景上限恒一致。
+        return untouched
+    new_appearance, removed_appearance = _strip_lower_body(appearance)
+    new_wardrobe, removed_wardrobe = _strip_lower_body(wardrobe)
+    if not removed_appearance and not removed_wardrobe:
+        return untouched
+    return {
+        "applied": True, "scope": "upper_body",
+        "appearance": new_appearance, "wardrobe": new_wardrobe,
+        "removed": [*removed_appearance, *removed_wardrobe],
+    }
+
+
 def _viewpoint_clause(scene: Mapping[str, object]) -> str:
     """视角口径（生图模式，2026-09-20 用户定案）。
 
@@ -2262,38 +3144,130 @@ def _viewpoint_clause(scene: Mapping[str, object]) -> str:
             "【视角·第三人称】叙事者是画面里的一个人物，正常参与画面主体数；该出现在画面里时，"
             "按与其他角色**完全相同**的规格写全（外貌、当前服装、动作与可见接触点），"
             "不得因为他是叙事者而省略、含糊或降格成背景。"
+            # 2026-09-24 第 55 刀（用户定案「把内容优先、机位是因变量**划分给第三人称**」）：
+            # 第 38 刀那条因果**只在第三人称成立** ⇒ 在此**显式绑定到第三人称**，
+            # 免得它被误当成全局通则而在第一人称下把镜头推远（本刀的真机事故成因）。
+            # ⚠ 措辞只是把既有限定补明，不改第 38 刀的判定内容 ⇒ 第三人称侧零行为变化。
+            "【视角·第三人称·机位是自变量】本帧机位**因变量**成立的前提是「观察者可以自由"
+            "选择站位」——第三人称下观察者在画面之外，**可以**退远到容纳全部画面事实，"
+            "故：**先列全并保留剧情拿到的画面事实，再据此选择最能呈现它们的机位与景别**。"
             # 2026-09-21 第 31 刀（用户实锤）：本条款原先只规定「谁入画」，**没有视线与朝向的
             # 方向口径** ⇒ 真机 L3·natural 在第三人称下写 `exposes … directly toward the
-            # camera`，而主人公就站在画面里；用户定案「第三人称＝看向主人公」。
-            "【视角·视线与朝向（第三人称）】画面里其他角色的**视线方向**（回头、回眸、注视、"
-            "抬眸）指向叙事者本人；**身体朝向按画面事实写**——事实写明「撅起臀部、掰开臀瓣"
-            "呈现给某人」这类**背向式**姿势时，身体是**背对叙事者本人**的（臀部朝事实指明的那一方），"
-            "只有头与视线回望；"
+            # camera`，而主人公就站在画面里；当时落成「第三人称＝看向主人公」。
+            # ⚠ 2026-09-22 用户纠正：**不得强制**视线指向叙事者 —— 视线方向**按剧情**，
+            #   只有剧情明写「看向/注视/回望叙事者」时才写；人称只决定**翻译方向**。
+            "【视角·视线与朝向（第三人称）】**视线方向按本轮画面事实写**——只有当剧情/画面事实明确写到"
+            "某角色看向、注视、回望叙事者时，才把该角色的视线写成指向叙事者本人；"
+            "**不得默认或强制**让角色看向叙事者（没写就不写）。**身体朝向按画面事实写**——"
+            "事实写明「撅起臀部、掰开臀瓣呈现给某人」这类**背向式**姿势时，身体是"
+            "**背对叙事者本人**的（臀部朝事实指明的那一方）；头与视线也按画面事实写"
+            "（事实写回望才回望）；"
             # 2026-09-21 第 33 刀（用户实锤 · L3·NSFW多人 natural_language）：第 31 刀把「身体朝向」
             # 也一刀切钉成「必须指向叙事者本人」，真机据此把两名**背向**撅臀的角色写成
             # 「both facing toward him / 面向 + 跪着」⇒ 空间关系被读成面对面，与「背对主角、只回头」
-            # 的剧情矛盾。定案：**视线**仍归叙事者，**身体朝向**改由画面事实决定（背向式姿势＝背对）。
+            # 的剧情矛盾。定案：**身体朝向**改由画面事实决定（背向式姿势＝背对）；
+            # ⚠ 2026-09-22 再纠正：**视线也一并交回画面事实**（不得强制指向叙事者）。
             "不得把这写成「面向叙事者」「面向镜头」「跪在他面前」等**正对式**措辞——那会把空间"
-            "关系写成面对面。也不得用 toward the camera、at the viewer 之类把方向交给镜头。"
+            "关系写成面对面。也不得凭空用 toward the camera、at the viewer 之类把方向交给镜头"
+            "（只有本轮事实明写看向镜头时才可写）。"
         )
     who = f"叙事者（{narrator}）" if narrator else "叙事者"
+    # 第 42 刀·C（2026-09-22 用户实锤「手选第一人称，成图仍含主人公」）：第一人称的**数据层**
+    # 保护（`filter_anchor_subjects`／`_strip_narrator_from_model_view`／`_contract_subject_names`）
+    # 全部挂在 `narrator` 上，而它来自用户设置的人设名 ⇒ 为空时四条判据集体空转，只剩本条款在挡。
+    # 原条款只说「叙事者不入画」，**说不出谁是叙事者** ⇒ 模型读到正文里被角色点名的男主人公
+    # （真机：`凌渊`），照样把他画成画面里的人（成稿含 `adult man`，女主服装被绑到他身上）。
+    # ⇒ 当时把身份判据从**名字**换成**叙述人称**：以第一人称「我」叙述／行动的那个人就是叙事者。
+    #   ⚠ **2026-09-22 再纠正**（真机复现：第三人称叙述的正文点名主人公「凌渊」10 次、
+    #   「他」8 次，一个「我」都没有 ⇒ 该规则**整体失效**、主人公被画进画面）：
+    #   **文段级判断机械做不了，语境理解得靠 LLM** ⇒ 条款改为「人称由用户手选确定、
+    #   不得据正文叙述人称推翻」＋「第三人称点名主人公仍是第一人称、主人公＝镜头」
+    #   ＋「请按语境认出他」。⚠ 零回归锁不变（`viewpoint` 缺失/非法 ⇒ 空串）。
+    framing = _first_person_framing(scene)
+    # ⚠ 三态分流（第 56 刀）：
+    #   · `framing` 为空（无接触、也无环境词）⇒ 整个取景块不写，避免出现
+    #     「取景上限以上一条为准」这种**指向空条款**的悬空引用（零回归锁）。
+    #   · `framing` 是**环境/风景镜**条款（含「不设近景上限」）⇒ **只写它**、
+    #     **不写**「近身三步顺序／禁用机位／叙事者从画面下缘进入」三块——
+    #     那三块全都以「近身接触」为前提（真机踩过：风景帧被套上禁用
+    #     `full body`/`wide shot` 的取景矛盾条款，与「放行风景全貌」直接对撞）。
+    #   · 否则＝近身接触帧 ⇒ 写全部四块（第 55 刀原样）。
+    if not framing:
+        scope = ""
+    elif "不设近景上限" in framing:
+        scope = framing
+    else:
+        scope = framing + (
+        f"【视角·第一人称·三步顺序（不可颠倒）】① **先内容优先**——先把剧情拿到的画面事实"
+        f"（人物、动作、接触点、服装当前状态）**读全**，这一步与第三人称相同；"
+        f"② **再判数据视野朝向**——但本帧镜头**已固定**在{who}的眼睛上，**不是**可以自由退远的"
+        f"旁观机位 ⇒ **不得**用「内容装不下就把镜头推远」来解决（那是第三人称的做法）；"
+        f"③ **最后筛分镜头里该保留的东西**——按上一条给出的取景上限，**只有真正看得见的**"
+        f"才写进画面，凡超出该视野的画面事实一律**不进画面**（不是删剧情，是**这一帧看不见**）。"
+        f"【视角·第一人称·禁用机位】本帧**禁止**第三方全景机位与旁观视角措辞——包括 "
+        f"`from behind`、`three-quarter back view`、`rear view`、`full body`、`wide shot`、"
+        f"`long shot`、`environmental composition`、`bird's eye view`，以及"
+        f"**`looking down at face`/`from above` 这类俯视**（俯视隐含「有一个站在上方看的人」"
+        f"＝旁观者，与「镜头＝{who}的眼睛」矛盾）。若剧情确需表现某个背向部位，"
+        f"改用**该部位向你这一侧呈现**的措辞（如 `her back arching toward the camera`），"
+        f"**不得**把整个镜头搬到她背后。"
+        f"【视角·第一人称·叙事者从画面下缘进入】{who}的身体局部**从画面下缘/下侧边缘进入**"
+        f"（`enters from the lower frame edge`／`cropped at the bottom edge`），"
+        f"**只看见接触所需的那一小段**——例如「压在{who}的面上」写成"
+        f"「器官从画面下缘进入、压在她唇上」，**不写**它的根部、躯干、腿，"
+        f"**不写**{who}的脸、肩、视线或任何可以反推出全身的部位。"
+        f"⚠ 局部入画**不是**把{who}画到镜头里来——他是**镜头本身**，"
+        f"故**永远不出现**他的躯干与面部。"
+        )
     return (
-        f"【视角·第一人称】镜头就是{who}的眼睛，{who}本人**不入画**。{who}的**身体局部**"
-        f"（手、手臂、腿、腰、臀等）**只在输入画面事实写明时才入画**——有出处就按事实写具体"
-        f"（窗口写了「抓住她的臀部」⇒ 写可见的双手；写了「贴近臀部」⇒ 写该身体部位），"
-        f"**没写就一律不写**；不得为了体现第一人称而凭空补一只手或任何身体部位。"
+        f"【视角·第一人称】镜头就是{who}的眼睛，{who}本人**不入画**。"
+        # ═══ 2026-09-24 第 55 刀：第一人称的**三步因果**（用户定案原话）═══════════════
+        # 「如果是第一人称，那就是**先内容优先，再判断第一人称的数据视野朝向，
+        #   最后筛分镜头里面应该保留的东西**。」
+        # ⇒ 三步必须**按此顺序**写进条款（顺序本身是口径的一部分，不可重排）：
+        #   ① 内容优先（与第三人称共有的前提，但要明说它**不推导机位**）；
+        #   ② 数据视野朝向（镜头已固定 ⇒ 视野有限，见 `_first_person_framing`）；
+        #   ③ 取景筛分（装不下的按层级省略）。
+        # ⚠ 与第 38 刀的关系：第 38 刀「内容优先、机位是因变量」已在上方**限定给第三人称**
+        #   （用户原话「划分给第三人称」）⇒ 第一人称走本条，不再复用那条的「机位自由」含义。
+        #   **不是推翻第 38 刀**，而是补它的**人称分支**。
+        # ⚠ `scope` 为空（无接触证据）⇒ 只保留「不入画」底款 ⇒ 零回归锁。
+        + scope
+        + f"【视角·第一人称·谁是{who}】本帧人称由**用户手选**确定＝第一人称，"
+        f"**不得据正文的叙述人称推翻它**：正文**不一定**以「我」叙述——它可能用**第三人称**"
+        f"点名{who}、或只用「他」指代他，**这仍然是第一人称**：正文里的主人公就是{who}"
+        f"＝**镜头本身**。请**按语境**认出他（他可能被其他角色点名、也可能只以「他」"
+        f"出现在动作里），**无论他叫什么、正文用第几人称写他、输入画面事实里是否写了他的"
+        f"外貌与服装，都不得把他算作画面主体**。"
+        f"{who}的**身体局部**"
+        f"（手、手臂、腿、腰、臀、**下体/男根**等）**只在输入画面事实写明时才入画**"
+        f"（输入画面事实＝本帧摘录正文，以及其中以「叙事者局部入画事实」标注的行）——"
+        f"有出处就按事实写具体"
+        f"（窗口写了「抓住她的臀部」⇒ 写可见的双手；写了「肉棒拍在她脸上」⇒ 就要把这段器官"
+        f"写进画面、**从画面下缘进入**压在她脸部接触），**没写就一律不写**；"
+        f"⚠ 「有出处就写」**仍受本帧取景上限约束**（上一条）：有出处 ≠ 可以因此把镜头推远、"
+        f"把{who}的躯干或面部带进画面；超出取景上限的部分**只写接触点那一小段、其余省略**。"
+        f"不得为了体现第一人称而凭空"
+        f"补一只手或任何身体部位。"
         f"不得写{who}的脸或全身，也不得把{who}写成画面里的第二个人；画面主体数只算其他角色。"
-        # 2026-09-21 第 31 刀（用户定案「第一人称＝看向镜头」）：镜头就是叙事者的眼睛 ⇒
-        # 其他角色的视线与朝向应当指向镜头；反之，把叙事者另写成画面里的第三方人物
+        # 2026-09-21 第 31 刀（当时定案「第一人称＝看向镜头」）：镜头就是叙事者的眼睛 ⇒
+        # 剧情写「看向叙事者」时翻译成「看向镜头」；把叙事者另写成画面里的第三方人物
         # （真机 L3·natural 曾写 `a dominant third figure who stands just beyond the frame`）
         # 与「叙事者不入画」自相矛盾，必须一并禁掉。
-        # 2026-09-21 第 33 刀（与第三人称同口径）：**视线**归镜头，**身体朝向**按画面事实——
-        # 背向式姿势（撅臀、掰开臀瓣呈现给某人）身体是**背对镜头**的，只有头与视线回望。
-        f"【视角·视线与朝向（第一人称）】画面里其他角色的**视线方向**指向**镜头**（镜头就是"
-        f"{who}的眼睛，看向镜头即看向{who}）；**身体朝向按画面事实写**——「撅起臀部、掰开臀瓣」"
-        f"这类**背向式**姿势，身体是**背对镜头**的（臀部朝事实指明的那一方），只有头与视线回望镜头；"
+        # ⚠ 2026-09-22 用户纠正：**不得强制**视线指向镜头 —— 视线方向**按剧情**。
+        # 2026-09-21 第 33 刀（与第三人称同口径）：**身体朝向**按画面事实——
+        # 背向式姿势（撅臀、掰开臀瓣呈现给某人）身体是**背对镜头**的。
+        f"【视角·视线与朝向（第一人称）】**视线方向按本轮画面事实写**——只有当剧情/画面事实明确写到"
+        f"某角色看向、注视、回望{who}（＝镜头）时，才写成看向镜头；**不得默认或强制**让角色看向镜头"
+        f"（没写就不写）。**身体朝向按画面事实写**——「撅起臀部、掰开臀瓣」这类**背向式**姿势，"
+        f"身体是**背对镜头**的（臀部朝事实指明的那一方）；头与视线也按画面事实写"
+        f"（事实写回望才回望）；"
         f"不得写成「面向镜头」的正对式措辞。不得把{who}另写成画面里的第三方人物、旁观者或"
         f"「画面之外的某个人」，也不得写他站在画面里或占据画面位置。"
+        # 第 51 刀 · FP6（2026-09-22 登记）：「看向/亲吻/接触主人公」＝「看向/亲吻/接触镜头」。
+        f"【视角·接触镜头（第一人称）】正文里其他角色「看向/亲吻/接触{who}」"
+        f"＝「看向/亲吻/接触**镜头**」——因为镜头就是{who}的眼睛；不得把这种接触写成"
+        f"「接触画面里的另一个人」或「接触第三方」，也不得因此把主人公画进画面。"
     )
 
 
@@ -2350,6 +3324,7 @@ def _english_scene_details(scene: Mapping[str, object]) -> list[str]:
             english_details.append(detail)
     return list(dict.fromkeys([
         *english_details, *_mapped_visual_facts(scene), *_evidenced_visual_facts(scene),
+        *_required_event_facts(scene), *_narrator_limb_facts(scene),
     ]))
 
 
@@ -2363,7 +3338,8 @@ def _concrete_scene_facts(
         if detail and detail.isascii() and re.search(r"[A-Za-z]{3}", detail):
             direct_facts.append(detail)
     facts = [*direct_facts, *_mapped_visual_facts(scene), *_scene_action_tags(scene),
-             *_evidenced_visual_facts(scene)]
+             *_evidenced_visual_facts(scene), *_required_event_facts(scene),
+             *_narrator_limb_facts(scene)]
     locations = [
         phrase for pattern, phrase in _LOCATION_RULES
         if re.search(pattern, str(scene.get("locale") or ""))
@@ -2399,21 +3375,54 @@ def _concrete_scene_facts(
 
 
 def _scene_camera_tag(scene: Mapping[str, object]) -> str:
-    """景别服从要展示的内容，不固定套 medium shot。"""
+    """景别服从要展示的内容，不固定套 medium shot。
+
+    ⚠ 2026-09-24 第 55 刀（用户定案）：第一人称下**镜头已固定在叙事者眼睛上** ⇒ 景别不再
+    「服从要展示的内容」（那是第三人称的因变量逻辑），而受**取景上限**约束
+    （`_first_person_framing`）。真机事故：turn 52 写 `close-up` 却同时要求
+    `three-quarter back view` + 女主全身侧躺 + 抬腿 + 白袜 ⇒ 自相矛盾、物理装不下。
+    ⇒ 第一人称下：先取判据/计划的显式景别，**再按取景上限收窄**（只收不放——
+    显式要求的更近景别保留，更远景别一律收窄到上限）。
+    `viewpoint` 非 `first_person`（含缺失）⇒ **逐字节等于旧行为**（零回归锁）。
+    """
     source = image_prompt_extract.restore_jailbreak(str(scene.get("narrative") or ""))
     explicit = str(scene.get("camera") or "").strip()
+    tag = ""
     if explicit and explicit.isascii():
         match = re.search(
             r"\b(?:extreme close-up|close-up|close shot|medium close-up|medium shot|"
             r"medium wide shot|wide shot|long shot|full shot)\b", explicit, re.I,
         )
         if match:
-            return match.group(0).lower()
-    if re.search(r"亲吻|眼睛|瞳|嘴唇|内裤|局部|特写|脸部", source):
-        return "close-up"
-    if re.search(r"远景|全景|城市全貌|群山|天际线|辽阔|远处风景", source):
-        return "wide shot"
-    return "medium shot"
+            tag = match.group(0).lower()
+    if not tag:
+        if re.search(r"亲吻|眼睛|瞳|嘴唇|内裤|局部|特写|脸部", source):
+            tag = "close-up"
+        elif re.search(r"远景|全景|城市全貌|群山|天际线|辽阔|远处风景", source):
+            tag = "wide shot"
+        else:
+            tag = "medium shot"
+    if str(scene.get("viewpoint") or "").strip() != "first_person":
+        return tag
+    # ── 第 55／56 刀：第一人称取景收束（只收不放）───────────────────────────
+    # ⚠ 第 56 刀（用户第二次纠正）：**只有近身接触帧才收**。风景/环境帧
+    #   （`framing` 给出的是「放行全景」条款）**绝不能被收成 medium close-up**——
+    #   用户原话「你不能限制死特写中景……只是描写风景……基本彰显不了风景全貌」。
+    framing = _first_person_framing(scene)
+    if not framing or "不设近景上限" in framing:
+        # 无接触证据 / 风景帧 ⇒ 不收景别（逐字节等于旧行为，或按画面事实放行全景）。
+        return tag
+    cap = "medium close-up"
+    _ORDER = (
+        "extreme close-up", "close-up", "close shot", "medium close-up",
+        "medium shot", "medium wide shot", "wide shot", "long shot", "full shot",
+    )
+    try:
+        if _ORDER.index(tag) > _ORDER.index(cap):
+            return cap
+    except ValueError:
+        pass
+    return tag
 
 
 # 动名词事实（2026-09-20 第 27 刀）：`withdrawing the fingers` / `swaying her hips` 这类**动作片段**
@@ -2425,12 +3434,21 @@ _GERUND_FACT_RE = re.compile(r"^[A-Za-z]+ing\b", re.I)
 # `depicted with` 槽要的名词短语。旧口径只认动名词（`_GERUND_FACT_RE`）⇒ 新串会被误判成状态，
 # 被拼成 `The two adult characters are depicted with both hands spreading her buttocks apart.`
 # 这种「复数主语＋单数物主」病句（第 29 刀同族）。
-# ⚠ 本表**只认 hand(s) 一族**，而现有事实表里没有任何一条以它开头 ⇒ 对既有事实**零影响**。
-_ACTION_FACT_LEAD_RE = re.compile(r"^\s*(?:both\s+hands?|two\s+hands?|hands?)\b", re.I)
+# 2026-09-22 第 43 刀：并入**男根一族**（`an erect penis slapping her face`，第一人称「叙事者
+# 局部入画」的措辞）。同一条理由——它是本帧的**动作**，若留在状态槽会被复述成
+# `The primary adult woman is depicted with an erect penis slapping her face.`
+# （主语是女性主体、器官却属于画外的叙事者 ⇒ 与第 29 刀同族的「主语/物主错配」病句）。
+# ⚠ 认冠词 `a/an/the` 的放宽**只作用在男根一族**：hand 一族维持原样 ⇒ 既有事实零影响
+#   （`a hand resting on her buttocks` 这类接触措辞仍不进动作槽）。
+_ACTION_FACT_LEAD_RE = re.compile(
+    r"^\s*(?:both\s+hands?|two\s+hands?|hands?|"
+    r"(?:(?:a|an|the)\s+)?(?:erect\s+)?(?:penis|shaft|cock))\b",
+    re.I,
+)
 
 
 def _is_action_fact(fact: str) -> bool:
-    """动作事实＝动名词开头（既有口径）**或**施动部位先行（第 31 刀补）。"""
+    """动作事实＝动名词开头（既有口径）**或**施动部位先行（第 31 刀补，第 43 刀并入男根一族）。"""
     value = fact or ""
     return bool(_GERUND_FACT_RE.match(value) or _ACTION_FACT_LEAD_RE.match(value))
 
@@ -2522,8 +3540,11 @@ def _krea_scene_fallback(scene: Mapping[str, object]) -> str:
             "as the decisive action and visual focus."
         )
     elif actor_count == 2:
+        # 第 46 刀：两人帧旧实现写死 `two adult women`（一男一女帧同样如此）⇒ 改按画面主体
+        # 的**实际性别组成**；性别拿不到 ⇒ 中性 `two adult characters`（与 anima/natural 同口径）。
         subject_opening = (
-            "A balanced two-character environmental composition gives two adult women distinct silhouettes, "
+            "A balanced two-character environmental composition gives "
+            f"{_two_subject_phrase(scene)} distinct silhouettes, "
             f"readable positions, and one shared visual focus against {environment}."
         )
     else:
@@ -2634,23 +3655,22 @@ def _anima_scene_fallback(scene: Mapping[str, object]) -> str:
         # 多角色分工句只作为正文补充。
         # 2026-09-20 第 24 刀：人数措辞改按**画面主体数**（三主体帧仍写 `2girls, two-shot` /
         # `The two adult characters' …` 是双口径残留）。2 人帧逐字节不变。
-        actor_count, count_word = _multi_actor_count(scene)
-        if actor_count == 2:
-            count_tags = "2girls, two-shot, balanced composition, clear spatial separation, "
-            count_tail = (
-                " The two adult characters' distinct appearances and actions form one readable relationship, "
-            )
-        else:
-            # ⚠ `2girls` **必须保留**：多人契约有硬要求（`Anima 双人提示词必须包含2girls`，
-            # 用户 2026-09-20 定案「只需 2girls、不要求补 1boy」）⇒ 兜底不得自违契约。
-            # 本刀只修**人数措辞**（同框人数）：`two-shot` / `two adult characters'` 这类在三人帧
-            # 上是双口径残留；中性数词同时避免「兜底层拿不到角色性别却写 3girls」的错误。
-            count_tags = (
-                f"2girls, {count_word}-shot, balanced composition, clear spatial separation, "
-            )
-            count_tail = (
-                f" The {count_word} adult characters' distinct appearances and actions form one readable relationship, "
-            )
+        # 第 46 刀（2026-09-22 用户定案）：人数词**不再硬写 `2girls`**，改按
+        # `scene["subject_genders"]` 里**画面主体的实际性别组成**写（`2girls` / `2girls, 1boy` /
+        # `1girl, 2boys`）。用户原话：「第三人称时按剧情的画面人物判断，男主主人公＋2 女主角
+        # 就是 `1boy, 2girls`……**根据剧情判断在场的内容，不是锁死女角色**」
+        # ＋「男主＋1 女兜底写 `2girls` 很明显有问题，正常应该是 `1boy, 1girl`」。
+        # ⚠ 任一体性别解析不出 ⇒ 只留中性数词（`two-shot`），**不写具体性别族**（用户定案「不写」）。
+        # ⚠ 全女二人帧仍得到 `2girls, two-shot, …` ⇒ 与旧措辞逐字节一致（零回归）。
+        _actor_count, count_word = _multi_actor_count(scene)
+        count_words = _subject_count_words(_contract_subject_genders(scene))
+        gender_prefix = f"{count_words}, " if count_words else ""
+        count_tags = (
+            f"{gender_prefix}{count_word}-shot, balanced composition, clear spatial separation, "
+        )
+        count_tail = (
+            f" The {count_word} adult characters' distinct appearances and actions form one readable relationship, "
+        )
         content = (
             count_tags
             + content
@@ -2693,14 +3713,40 @@ def _environment_phrase(
     return f"a layered {locale} environment"
 
 
+def _two_subject_phrase(scene: Mapping[str, object]) -> str:
+    """两人帧的**主体名词短语**，按画面主体的实际性别组成（第 46 刀，纯函数）。
+
+    · 全女 ⇒ `two adult women`（＝第 24 刀旧措辞**逐字节一致**，零回归）；
+    · 一男一女 ⇒ `one adult woman and one adult man`；
+    · 全男 ⇒ `two adult men`；
+    · 性别解析不全（缺键 / 有空 / 长度不符）⇒ 中性 `two adult characters`
+      （用户定案「**不写**具体性别族」，宁缺勿猜）。
+    """
+    genders = _contract_subject_genders(scene)
+    if len(genders) != 2 or any(not str(gender).strip() for gender in genders):
+        return "two adult characters"
+    girls = sum(1 for gender in genders if "女" in str(gender))
+    boys = sum(1 for gender in genders if "男" in str(gender))
+    if girls + boys != 2:
+        return "two adult characters"
+    if girls == 2:
+        return "two adult women"
+    if boys == 2:
+        return "two adult men"
+    return "one adult woman and one adult man"
+
+
 def _natural_scene_fallback(scene: Mapping[str, object]) -> str:
     multi_sentences = _fallback_multi_actor_sentences(scene)
     if multi_sentences:
         actor_count, count_word = _multi_actor_count(scene)
         environment = _environment_phrase(scene)
         if actor_count == 2:
+            # 第 46 刀：旧实现把两人帧写死成 `two adult women`（一男一女帧同样如此）⇒
+            # 改按画面主体的**实际性别组成**；性别拿不到时用中性 `two adult characters`。
             opening = (
-                "A balanced two-character composition places two adult women in clearly separated positions against "
+                "A balanced two-character composition places "
+                f"{_two_subject_phrase(scene)} in clearly separated positions against "
                 f"{environment}. "
             )
         else:
@@ -2801,7 +3847,9 @@ def _evidenced_visual_facts(scene: Mapping[str, object]) -> list[str]:
 
 
 def _expected_present(prompt: str, phrase: str) -> bool:
-    for _source_pattern, known_phrase, output_pattern in _VISUAL_FACT_RULES:
+    # T1：事件性必现事实（体液/睡眠）也在这张配对表里找自己的 output_pattern，
+    # 否则会退化成按词拆的粗判（`cum on face` 要求 cum+face 至少 2 词同时命中）。
+    for _source_pattern, known_phrase, output_pattern in (*_VISUAL_FACT_RULES, *_EVENT_FACT_RULES):
         if known_phrase == phrase:
             return bool(re.search(output_pattern, prompt, re.I))
     words = [word for word in re.findall(r"[a-z]{3,}", phrase.lower())
@@ -2857,8 +3905,22 @@ def prompt_field_ledger(prompt: str, scene: Mapping[str, object]) -> dict[str, d
         )
     appearance_expected = list(dict.fromkeys(filter(None, appearance_expected)))
     wardrobe_expected = list(dict.fromkeys(filter(None, wardrobe_expected)))
-    actions = _scene_action_tags(fact_scene)
-    visual_facts = _evidenced_visual_facts(fact_scene)
+    # 第 43 刀：第一人称「叙事者局部入画」事实并入**账本可验证的动作期望** ⇒ 模型漏写时由
+    # `complete_field_coverage` 补进成稿（anima/niji 进 tags 行、散文档进正文尾巴），
+    # 不再只靠模型自觉。归**动作槽**而非状态槽：它是本帧的决定性动作，且状态槽会被
+    # `_anima_content_description` 复述成 `The primary adult woman is depicted with … penis …`
+    # 这种「主语不是器官持有者」的病句（第 27/29 刀同族）。
+    actions = list(dict.fromkeys([
+        *_scene_action_tags(fact_scene),
+        *_narrator_limb_facts(fact_scene),
+    ]))
+    visual_facts = list(dict.fromkeys([
+        *_evidenced_visual_facts(fact_scene),
+        # T1：事件性必现事实（体液/睡眠）——提取器常漏写 `scene.visual_facts`，
+        # 若只认它，`required` 会恒为 False ⇒ 这类事实零校验零补充（真机实锤）。
+        # 并进同一槽位 ⇒ 既进 `required`、又进 `expected`，由 `complete_field_coverage` 补写。
+        *_required_event_facts(fact_scene),
+    ]))
     locale = str(fact_scene.get("locale") or "")
     locations = [phrase for pattern, phrase in _LOCATION_RULES if re.search(pattern, locale)]
     if locale.isascii() and re.search(r"[A-Za-z]{3}", locale):
@@ -2885,10 +3947,25 @@ def prompt_field_ledger(prompt: str, scene: Mapping[str, object]) -> dict[str, d
     ledger: dict[str, dict[str, object]] = {}
     for field, required in requirements.items():
         phrases = expected.get(field, [])
-        if phrases:
-            covered = all(_expected_present(prompt, phrase) for phrase in phrases)
+        # T3（2026-09-23 真机实锤）：`covered` 必须与**修补层同判据**。
+        # `complete_field_coverage` 会把「同部位已写过动作」的候选交给第 29 刀的冲突闸剔除
+        # （`_action_fact_conflicts`）；若这里仍按**未过滤**的候选做 `all()`，被剔的那条
+        # **永远不会命中**（模型本来就不该再写它）⇒ `action.covered` 变成**永不消失的假红**，
+        # `missing_fields` 里恒挂 `action`、把 trace 观测变成噪声（真机：6 条候选里 3 条被豁免、
+        # 余 3 条全已命中，却仍报 `covered=False`）。
+        # ⚠ 适用范围限定：**只对 action 生效**，其余字段（含 appearance/location 的
+        # 「无可验证期望 ⇒ 不判覆盖」设计）逐字不动。
+        applicable = phrases
+        if field == "action" and phrases:
+            applicable = [item for item in phrases if not _action_fact_conflicts(prompt, item)]
+        if applicable:
+            covered = all(_expected_present(prompt, phrase) for phrase in applicable)
             if field == "location" and not covered:
                 covered = bool(_FIELD_PATTERNS["location"].search(prompt))
+        elif phrases and field == "action":
+            # 候选**全部**被第 29 刀的冲突闸豁免 ⇒ 名单为空，但事实源仍在：本帧没有
+            # 「该补而未补」的动作 ⇒ 视为已覆盖（不能落进下面的 `covered = False`）。
+            covered = True
         elif required and field in {
             "appearance", "wardrobe", "action", "location", "visual_facts",
         }:
@@ -3126,6 +4203,54 @@ def _patch_failed_prompt(
     return patched
 
 
+def _anima_two_line_rescue(raw: str, fact_scene: Mapping[str, object]) -> str:
+    """第 58 刀（2026-09-24 用户口径）：两行格式合同判死时的**本地归一**。
+
+    真机实锤：25 次编译里 3 次死于「第二行必须包含英文自然语言画面描述」——模型稿
+    1400–1900 字内容合格（非空/非拒答/无 CJK）、只是没排成「第一行 tags ＋ 第二行
+    英文画面描述」的两行结构；repair 重写仍不合格；而确定性兜底只有 662–794 字
+    （`adult woman` 开头、**无角色身份**）。
+    ⇒ 内容/英文/分级/禁词全过、只剩**格式**时，本地重排成两行，不整稿作废。
+    组装不出来（tags < 6 或没有合格英文句）⇒ 返回 ""（调用方照旧走词表兜底，不劣化）。
+    """
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"```[a-zA-Z]*", "", text)
+    restored = image_prompt_extract.restore_jailbreak(text)
+    # ① 英文画面描述行：取最长的一条「字母开头、≥25 字符、句读收尾」的句子
+    #    （正则与合同同款 ⇒ 提出来的句子必然过「第二行」那关；⚠ 必须排除换行，
+    #    否则 tags 行（无句读）会被连同下一句一起吞成一个「跨行 prose」）
+    prose = ""
+    for match in re.finditer(r"[A-Za-z][^.?!\n]{24,}[.?!]", restored):
+        cand = match.group(0).strip()
+        if len(cand) > len(prose):
+            prose = cand
+    if not prose:
+        return ""
+    # ② tags 行：prose 之外的剩余文本里的 ASCII 逗号段（丢中英文混杂段/代码围栏）。
+    #    ⚠ prose 是从 `restored`（restore_jailbreak 还原后）提取的，residue 也必须用
+    #    `restored` 去 replace，否则含破甲标记时匹配不到 ⇒ prose 残留进 tags（2026-09-24 审计）。
+    residue = restored.replace(prose, " ")
+    tags: list[str] = []
+    for seg in re.split(r"[\n;。！？]", residue):
+        seg = seg.strip()
+        if not seg or not seg.isascii():
+            continue
+        for tag in seg.split(","):
+            tag = tag.strip().strip("-. ")
+            if tag and tag.isascii() and len(tag) <= 40:
+                tags.append(tag)
+    tags = list(dict.fromkeys(tags))[:40]
+    if len(tags) < 6:
+        return ""
+    rebuilt = f"{', '.join(tags)}\n{prose}"
+    errors, _warnings = _split_length_warnings(_errors("anima_tags", rebuilt, fact_scene))
+    if errors:
+        return ""
+    return rebuilt
+
+
 def generate(
     profile: str,
     scene: Mapping[str, object],
@@ -3198,6 +4323,13 @@ def generate(
             completed, ledger = complete_field_coverage(profile, patched, fact_scene)
             report["field_ledger"] = ledger
             return completed
+        # 第 58 刀：两行格式判死 ⇒ 本地归一（内容合格、只剩格式时不整稿作废）。
+        rescued = _anima_two_line_rescue(raw, fact_scene)
+        if rescued:
+            report["strategy"] = "normalized_two_line"
+            completed, ledger = complete_field_coverage(profile, rescued, fact_scene)
+            report["field_ledger"] = ledger
+            return completed
         report["strategy"] = "fallback"
         fallback = deterministic_fallback(profile, fact_scene)
         completed, ledger = complete_field_coverage(profile, fallback, fact_scene)
@@ -3227,6 +4359,13 @@ def generate(
         errors.extend(_anima_scene_fact_errors(prompt, fact_scene))
     if errors:
         report["repair_errors"] = list(dict.fromkeys(errors))
+        # 第 58 刀：repair 后仍只剩两行格式问题 ⇒ 本地归一，不整稿作废退词表。
+        rescued = _anima_two_line_rescue(repaired_raw, fact_scene)
+        if rescued:
+            report["strategy"] = "normalized_two_line"
+            completed, ledger = complete_field_coverage(profile, rescued, fact_scene)
+            report["field_ledger"] = ledger
+            return completed
         report["strategy"] = "fallback"
         # Krea2 的长度只用于引导纠错；英文、段落、分级和禁词仍是硬合同。
         if profile == "krea2" and not _inline_krea_errors(prompt, fact_scene):
@@ -3287,11 +4426,14 @@ def generate_result(
 _FRAME_EXTRACT_SYSTEM = (
     "你是首尾帧画面事实提取器。输入包含两段画面描述（first=楼层开头画面、last=楼层结尾画面）"
     "与角色/场景结构化事实。分别针对每个时点提取英文结构化画面事实，只输出 JSON 对象："
-    '{"first": {"action": "...", "visual_facts": ["...", "..."]}, '
-    '"last": {"action": "...", "visual_facts": ["...", "..."]}}。'
+    '{"first": {"action": "...", "visual_facts": ["...", "..."], "subjects": ["..."]}, '
+    '"last": {"action": "...", "visual_facts": ["...", "..."], "subjects": ["..."]}}。'
     "action：该时点人物的身体动作与姿态，一条具体可见的英文短语，不含心理与叙事总结。"
     "visual_facts：该时点可见的视觉事实列表（3-6 条英文短语：肢体位置、衣物状态、道具、"
     "环境互动），必须与该时点的画面描述一致，不得引入画面描述之外的事件。"
+    "subjects：该时点**画面里实际可见的人物**列表，按出现顺序，逐条抄输入中给出的指代"
+    "（`The primary adult character` 等）或该时点描述里明确出现的人名；"
+    "只被台词提及、并未出现在这个画面里的人**不要写**；判断不了就留空数组。"
 )
 
 
@@ -3324,12 +4466,108 @@ def _parse_frame_extract(raw: str) -> dict[str, dict[str, object]] | None:
             for entry in (facts if isinstance(facts, list) else [])
             if str(entry).strip()
         ]
+        raw_subjects = item.get("subjects")
+        subjects = [
+            str(entry).strip()
+            for entry in (raw_subjects if isinstance(raw_subjects, list) else [])
+            if str(entry).strip()
+        ]
         if action or visual_facts:
             parsed[frame] = {
                 "action": action,
                 "visual_facts": visual_facts,
+                "subjects": subjects,
             }
     return parsed or None
+
+
+# 第 34 刀：帧场景**不得继承高潮锚点的画面要素**（用户规格 2026-09-21「首尾帧无需高潮点
+# 判断流程，只提取剧情前面部分 / 尾部部分」）。`scene` 是随请求恒定下发的高潮锚点
+# `scene_spec`（`agent_agency._wb_frames_and_video`），其中
+# narrative / draft_prompt / subjects / frame_subjects / composition / camera /
+# action / visual_facts / action_sequence 全按**高潮锚点**算出来 —— 旧实现
+# `frame_scene = dict(scene)` 只覆盖 action/visual_facts/protected_narrative，
+# 于是首/尾帧被画成高潮画面。真机实锤（探针 i36）：L3 首帧描述只有两人对白，
+# 产物却同时列出 primary/second/third adult character（三人）。
+#
+# ⚠ `frame_subjects` 在**剔除之列**（高潮那份不能用），但第 35 刀把它**按本帧重建**填回来
+# ——见 `_build_frame_scene`。剔了不填会让画面主体退回 `actors`（在场全集），
+# 契约便按在场人数成稿（真机 i38 实锤：单人的尾帧被硬套多人契约、好成稿被判死）。
+_FRAME_SCENE_EXCLUDE = frozenset({
+    "narrative", "protected_narrative", "draft_prompt",
+    "subjects", "frame_subjects", "secondary_characters",
+    "composition", "camera", "action", "visual_facts", "action_sequence", "motion",
+})
+
+
+def _resolve_frame_subjects(
+    scene: Mapping[str, object], tokens: object, label_map: Mapping[str, str] | None = None,
+) -> list[str]:
+    """把时点提取器报出的「本帧可见人物」映射回本名（第 35 刀）。
+
+    为什么要映射：提取器看到的是**匿名后的指代**（`the primary adult character`，见
+    `_anonymize_scene_characters`），而本地多人契约（`_actor_visual_details` 的 facts
+    归属）按**本名**建键 ⇒ 不映射回去，逐人描述会退化成 `is present in frame` 占位符。
+
+    ⚠ **宁缺勿猜**：一条都对不上（提取器吐中文散文式主体）⇒ 返回空表 ⇒ 调用方**不写**
+    `frame_subjects` ⇒ 退回 `actors`，逐字节等于第 34 刀行为（零回归）。
+    """
+    if not isinstance(tokens, list):
+        return []
+    base = [str(name).strip() for name in _character_names(scene) if str(name).strip()]
+    mapping = dict(label_map) if label_map else dict(
+        zip(_character_labels(len(base)), base, strict=False)
+    )
+    lowered = {str(label).strip().lower(): str(name).strip() for label, name in mapping.items()}
+    known_values = scene.get("known")
+    candidates = [*base]
+    if isinstance(known_values, list):
+        candidates.extend(str(name).strip() for name in known_values if str(name).strip())
+    candidates = list(dict.fromkeys(candidates))
+    resolved: list[str] = []
+    for token in tokens:
+        text = str(token).strip()
+        if not text:
+            continue
+        name = lowered.get(text.lower()) or next(
+            (item for item in candidates if item == text or item.lower() == text.lower()), ""
+        )
+        if name and name not in resolved:
+            resolved.append(name)
+    return resolved
+
+
+def _build_frame_scene(
+    scene: Mapping[str, object], desc: str, facts: Mapping[str, object] | None,
+    label_map: Mapping[str, str] | None = None,
+) -> dict[str, object]:
+    """按帧时点重建帧场景。
+
+    事实底座沿用（外貌 / 服装 / 地点 / 在场 / 评级 / 画幅 / 视角 / LoRA），
+    画面要素一律取自**本帧自己的描述**：`narrative`/`protected_narrative` 换成帧描述、
+    `draft_prompt` 由帧描述重建（与高潮场景从自己那段正文重建同口径）、
+    `action`/`visual_facts` 由时点提取器回填（缺失则留空，交 `generate()` 从帧描述推）。
+
+    第 35 刀：`frame_subjects`（**画面主体**）同样只认本帧——取提取器报出的本帧可见人物
+    （`_resolve_frame_subjects` 映射回本名）。提取器没报 / 对不上 ⇒ **不写**该键 ⇒
+    `_contract_subject_names` 退回 `actors`（零回归）。⚠ 只剔高潮锚点那一份，绝不接管
+    `actors`：`actors` 是事实底座（在场全集），第 32 刀「缩输出、不缩归因」的红线。
+    """
+    frame_scene: dict[str, object] = {
+        key: value for key, value in scene.items() if key not in _FRAME_SCENE_EXCLUDE
+    }
+    frame_scene["narrative"] = desc
+    frame_scene["protected_narrative"] = f"@({desc})@"
+    frame_scene["draft_prompt"] = image_prompt_extract.build_fallback_content_tags(desc)
+    if facts:
+        if facts.get("action"):
+            frame_scene["action"] = facts["action"]
+        if facts.get("visual_facts"):
+            frame_scene["visual_facts"] = facts["visual_facts"]
+        subjects = _resolve_frame_subjects(scene, facts.get("subjects"), label_map)
+        if subjects:
+            frame_scene["frame_subjects"] = subjects
+    return frame_scene
 
 
 def generate_frame_prompts(
@@ -3342,10 +4580,14 @@ def generate_frame_prompts(
     """首尾帧提示词：与高潮点同构——先提取帧时点结构化事实，再走同一编译器。
 
     高潮点的 action/visual_facts 是主生成同轮搭车提取的结构化产物；首尾帧没有同轮
-    载体，这里补一步「时点提取」：一次 LLM 从楼层首段/尾段分别提取该时点的
-    action/visual_facts（英文结构化，字段名与高潮链 scene 对齐），再逐帧
+    载体，这里补一步「时点提取」：一次 LLM 从楼层前/尾部分分别提取该时点的
+    action/visual_facts/subjects（英文结构化，字段名与高潮链 scene 对齐），再逐帧
     generate() 编译（同一校验、带因重写、deterministic_fallback 兜底）。
     帧描述是剧情可见正文，模型侧以 @(...)@ 防拦截标记保护（对齐 protected_narrative）。
+
+    ⚠ 传入的 `scene` 是**高潮锚点**的 scene_spec；每帧实际编译用的是 `_build_frame_scene()`
+    重建出的帧场景（事实底座沿用、画面要素只取本帧自己的描述、画面主体取本帧提取结果）
+    ——见 `_FRAME_SCENE_EXCLUDE` 与 `_resolve_frame_subjects`。
     """
     if profile not in PROFILE_IDS:
         raise ValueError(f"未知提示词模式：{profile}")
@@ -3366,12 +4608,20 @@ def generate_frame_prompts(
     extract_scene = {
         key: scene[key] for key in fact_keys if key in scene
     }
-    extract_source = _scene_for_model({
+    extract_model_input = {
         **extract_scene,
         "frames": {
             frame: f"@({desc})@" for frame, desc in wanted.items()
         },
-    })
+    }
+    # 第 35 刀：提取器读到的是**匿名后的指代**（`the primary adult character`）⇒ 先按
+    # `_anonymize_scene_characters` 的同一份名单与同一份序数词表记下「指代 ↔ 本名」，
+    # 提取回来后用它映射回本名（否则多人契约的 facts 归属按键对不上）。
+    extract_names = _character_names(extract_model_input)
+    label_map = dict(
+        zip(_character_labels(len(extract_names)), extract_names, strict=False)
+    )
+    extract_source = _scene_for_model(extract_model_input)
     extract_payload = json.dumps(
         extract_source, ensure_ascii=False, separators=(",", ":"),
     )
@@ -3385,21 +4635,33 @@ def generate_frame_prompts(
         )
         extracted = _parse_frame_extract(generate_text(_FRAME_EXTRACT_SYSTEM, retry))
     report["frame_extract_ok"] = extracted is not None
+    # 观测（2026-09-23 甲）：此前 trace 只记 frame_extract_ok 一个布尔 ⇒ 真机出现
+    # 「首尾帧成品几乎逐字相同」时，无法判断是**提取器把两帧抹平**还是**编译器稀释**。
+    # 这里把提取器的输入/原始输出/解析结果原样带出（纯记录，不参与任何判定）。
+    report["frame_extract_input"] = extract_payload
+    report["frame_extract_raw"] = raw
+    report["frame_extract_parsed"] = extracted
     results: dict[str, dict[str, object]] = {}
     for frame, desc in wanted.items():
-        frame_scene: dict[str, object] = dict(scene)
         facts = (extracted or {}).get(frame)
-        if facts:
-            if facts.get("action"):
-                frame_scene["action"] = facts["action"]
-            if facts.get("visual_facts"):
-                frame_scene["visual_facts"] = facts["visual_facts"]
-        else:
+        if not facts:
             report[f"{frame}_extract_missing"] = True
-        # 帧描述以 protected_narrative 进链：模型侧带防拦截标记，本地校验用还原正文。
-        frame_scene["protected_narrative"] = f"@({desc})@"
+        # 帧场景按本帧时点重建（不继承高潮锚点的画面要素），帧描述以 protected_narrative
+        # 进链：模型侧带防拦截标记，本地校验用还原正文。
+        frame_scene = _build_frame_scene(scene, desc, facts, label_map)
+        # 诊断（第 35 刀）：本帧的**画面主体**（多人契约的判据）。模型侧逐格方差大
+        # （真机实测：同输入同代码，高潮基线也会 direct↔fallback 翻转），唯这一项是
+        # 确定性的 ⇒ 改帧逻辑时只认它做 A/B 归因。
+        report[f"{frame}_subjects"] = list(_contract_subject_names(frame_scene))
         frame_diag: dict[str, object] = {}
         prompt = generate(profile, frame_scene, generate_text, frame_diag)
+        # 观测（2026-09-23 甲）：本帧实际喂进编译器的字段账本 + 场景键 + 成品。
+        # 关键怀疑点：两帧的 camera/composition 不是继承来的（scene_spec 本就没有这两个键），
+        # 而是编译器从各自 ≤500 字的帧描述里推的 ⇒ 需要账本与成品来判「谁抹平的」。
+        report[f"{frame}_field_ledger"] = frame_diag.get("field_ledger") or {}
+        report[f"{frame}_scene_keys"] = sorted(frame_scene.keys())
+        report[f"{frame}_prompt"] = prompt
+        report[f"{frame}_prompt_chars"] = len(prompt)
         results[frame] = {
             "prompt": prompt,
             "negative_prompt": negative_prompt(profile, frame_scene),

@@ -37,3 +37,22 @@ def test_explicit_empty_history_is_not_replaced_by_checkpoint_fallback():
 def test_missing_history_keeps_legacy_fallback_available():
     context = from_payload({"thread_id": "repo-1", "message": "继续"})
     assert context.history_override is None
+
+
+def test_batch_image_count_defaults_to_zero_when_absent():
+    # 未提供 ⇒ 0（后端按 1 张处理，单张路径逐字不变）。
+    context = from_payload({"thread_id": "repo-1", "message": "继续"})
+    assert context.illustration_batch_count == 0
+
+
+def test_batch_image_count_passthrough_and_negative_clamped():
+    assert from_payload({
+        "thread_id": "repo-1", "message": "继续", "illustration_batch_count": 5,
+    }).illustration_batch_count == 5
+    # 脏值（负数）按 0 收敛，绝不透传负数量。
+    assert from_payload({
+        "thread_id": "repo-1", "message": "继续", "illustration_batch_count": -3,
+    }).illustration_batch_count == 0
+    assert from_payload({
+        "thread_id": "repo-1", "message": "继续", "illustration_batch_count": None,
+    }).illustration_batch_count == 0

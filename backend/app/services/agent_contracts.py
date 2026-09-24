@@ -90,6 +90,10 @@ class RunContext:
     # 画面人称手选（2026-09-20，UI＝多元数据插入面板按钮组）："" = 自动判定（按锚点段），
     # first_person / third_person = 用户手选优先（`scene_illustration.frame_viewpoint` 的 override）。
     illustration_viewpoint: str = ""
+    # 高潮点模式「批量生图数目」（2026-09-24，UI＝多元数据插入面板，仅高潮点模式出现）：
+    # 0/缺省 = 1 张（单张路径逐字不变）；≥1 = 至多出这么多张锚点图（≥锚点数 ⇒ 全出，
+    # < 锚点数 ⇒ 按判据 score 降序取前 N）。面板最小 1、无上限。
+    illustration_batch_count: int = 0
     character_base_images: dict = field(default_factory=dict, compare=False)  # ⑥ 角色名→底图（gpt-image 系无 LoRA，按在场角色取底图锁一致性）
     illustration_actor_names: list[str] = field(default_factory=list, compare=False)  # 自动插画可识别的已配置角色名
     style_base_image: str = ""    # ⑥ 无角色底图时的兜底风格底图（gpt-image 系）
@@ -149,6 +153,7 @@ class RunContext:
             "prompt_profile": self.prompt_profile,
             "appearance_source": self.appearance_source,
             "illustration_viewpoint": self.illustration_viewpoint,
+            "illustration_batch_count": self.illustration_batch_count,
             "character_base_images": self.character_base_images,
             "illustration_actor_names": self.illustration_actor_names,
             "style_base_image": self.style_base_image,

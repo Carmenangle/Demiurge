@@ -106,3 +106,93 @@ def test_覆盖坏json回退默认(monkeypatch, tmp_path):
     (tmp_path / "builtin_agents.json").write_text("{ not json", encoding="utf-8")
     assert ba.load_overrides() == {}
     assert ba.resolved()["roleplay"]["temperature"] == ba.ROLEPLAY_TEMPERATURE
+
+
+def test_节奏以用户输入为准不把多日计划当已完成():
+    """2026-09-22 用户定案（方案乙）：主提示词不得再把「多日/多阶段推进计划」当「一口气推到结局」。
+
+    真机 19:33：用户输入给了三天的节拍表（第一天不动手→第二天装睡动手→第三天装没事），
+    正文只覆盖「次日卯初」一个清晨（1847 字）。原【节奏】「单轮聚焦一个场景推进…避免一口气
+    推到结局」被模型读成「别把计划走完」⇒ 主动砍掉后两拍。改为**跨度与事件量以用户输入为准**。
+    """
+    base = ba.ROLEPLAY_BASE
+    # 旧的压制口径必须消失
+    assert "避免一口气推到结局" not in base
+    assert "单轮聚焦一个场景推进，留有余地让用户接话" not in base
+    # 新口径：以用户输入为准 + 不得一笔带过 + 转场可跳过 + 单场景降级为默认
+    # 做法二（2026-09-22 精简）：一句主口径 ＋ 一句默认值，不写枚举示例、不列转场词表、不打补丁
+    assert "以用户本轮输入为准" in base
+    assert "用户写明的进展要实写到位" in base
+    assert "不得一笔带过" in base
+    assert "默认聚焦一个场景推进、留白收尾" in base
+    # ⚠ 回归锁（2026-09-22 实锤）：改【节奏】时我的替换区间吃掉了整条【状态栏】规则，
+    # 导致状态栏模板丢失。四个分区必须俱在。
+    for section in ("【出演准则】", "【禁则】", "【输入性质】", "【节奏】", "【状态栏】"):
+        assert section in base, f"ROLEPLAY_BASE 分区丢失：{section}"
+    assert "必须在本轮末尾按既定格式续写更新" in base
+    # 不再有枚举式示例与转场词表（机械式预设，用户明令精简掉）
+    assert "第一天…第二天…第三天…" not in base
+    assert "「翌日」" not in base
+    assert "时光飞逝" not in base
+    assert "不是**把用户已经写明的进展砍掉" not in base
+
+
+def test_生成字数下限默认关闭且可覆盖(monkeypatch, tmp_path):
+    """2026-09-22 用户定案：智能体参数预设→剧情推进「生成字数下限」，默认 0＝关闭。
+
+    低于该字数 ⇒ 判「没写完」并**轮内续写**（同一条消息接着写，非多轮），
+    对齐 SillyTavern `auto_continue.target_length`（它用 token，这里用中文字数）。
+    """
+    monkeypatch.setattr(ba, "DATA_DIR", tmp_path)
+    # 默认关闭
+    assert ba.resolved()["roleplay"]["storyMinChars"] == 0
+    assert "storyMinChars" in ba._BY_ID["roleplay"]["editable"]
+    # 合法覆盖生效
+    ba.save_overrides({"roleplay": {"storyMinChars": 3000}})
+    assert ba.resolved()["roleplay"]["storyMinChars"] == 3000
+    # 非法值被丢弃（负数 / bool / 字符串）
+    assert ba.save_overrides({"roleplay": {"storyMinChars": -1}}) == {}
+    assert ba.save_overrides({"roleplay": {"storyMinChars": True}}) == {}
+    assert ba.save_overrides({"roleplay": {"storyMinChars": "3000"}}) == {}
+
+
+def test_输入性质分两种_说明安排如实描写_操控主人公写后续影响():
+    """2026-09-22 用户定案（用户原话）：「一个是根据用户说明的去描写说明的，一个是用户操控
+    主人公做事情，查看做事后的剧情影响」。
+
+    真机 20:17 的失败点：用户写「第一天先不动手」它首段就动手、写「第三天装没事」它自行加出
+    第 3/4/5 夜 ⇒ **把计划当背景资料，而不是必须照着走的剧本**。故补【输入性质】分区。
+    """
+    base = ba.ROLEPLAY_BASE
+    assert "【输入性质】" in base
+    # ① 说明安排：照说明如实描写，节点不增不减，限制照做
+    assert "说明安排" in base and "如实描写出来" in base
+    assert "节点不增不减" in base and "说明里的限制照做" in base
+    # ② 操控主人公：写后续反应与剧情影响，不替他加戏
+    assert "操控主人公" in base and "后续反应与剧情影响" in base
+    # 2026-09-22 用户定案删除「不替他加戏」：「那么长的剧情不可能就用户描述的那么一个动作限制死」
+    # —— ② 里用户给的动作只是**引子**，后续发展不得被这一个动作框死。
+    assert "不替他加戏" not in base
+    # 靠语境判断（不写机械枚举示例）
+    assert "按语境分两种" in base
+    assert "第一天" not in base and "第二天" not in base
+
+
+def test_命运骰点规则_既定现实不掷骰_有争议仍须掷骰():
+    """2026-09-22 用户定案：「用户明确说明的既定现实无需掷骰子，但如果是有争议的，还是要
+    判断下点数的」。
+
+    原口径「日常相处与既定推进直接叙事，不必掷骰」豁免过宽——用户习惯把结果写死
+    （真机 19:29~21:33 连续 8 轮零出骰），且与世界书「绝不由我单方面宣告成功」相冲。
+    """
+    r = ba.ROLL_INSTRUCTION
+    # 新口径：既定现实免掷 + 有争议仍须掷
+    assert "明确说明的既定现实" in r
+    assert "不必掷骰" in r
+    assert "有争议的" in r
+    assert "仍须掷骰裁决" in r
+    assert "单方面宣告得手" in r
+    # 旧豁免不得回潮
+    assert "日常相处与既定推进直接叙事，不必掷骰" not in r
+    # 判定步骤与输出格式契约未动
+    assert "<roll>" in r and "</roll>" in r and "[SKILL]" in r and "[ROLL]" in r

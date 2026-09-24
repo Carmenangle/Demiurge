@@ -96,6 +96,7 @@ def from_payload(payload: Mapping[str, Any]) -> RunContext:
         prompt_profile=str(payload.get("prompt_profile") or "anima_tags"),
         appearance_source=str(payload.get("appearance_source") or "worldbook"),
         illustration_viewpoint=str(payload.get("illustration_viewpoint") or ""),
+        illustration_batch_count=max(0, int(payload.get("illustration_batch_count") or 0)),
         character_base_images=dict(payload.get("character_base_images") or {}),
         illustration_actor_names=list(payload.get("illustration_actor_names") or []),
         style_base_image=str(payload.get("style_base_image") or ""),

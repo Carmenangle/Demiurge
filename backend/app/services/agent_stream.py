@@ -100,8 +100,9 @@ def _resume_interrupted_messages(wire_messages: list[dict]) -> list[dict]:
 
 
 def _roleplay_continuation_messages(wire_messages: list[dict], partial: str,
-                                    *, think_truncated: bool = False) -> list[dict]:
-    """截断续写的消息序列：残缺输出回喂为最后一条 assistant + 断点续写指令（2026-08-31）。
+                                    *, think_truncated: bool = False,
+                                    story_incomplete: bool = False) -> list[dict]:
+    """续写的消息序列：残缺/未写完的输出回喂为最后一条 assistant + 续写指令（2026-08-31）。
 
     残缺输出全文回喂（含 think 与 @逐字@ 段落），保证续写的格式与文风接得上；
     指令要求从断点直接续写、不重复不重开。残缺输出保持 assistant 身份追加，
@@ -122,6 +123,20 @@ def _roleplay_continuation_messages(wire_messages: list[dict], partial: str,
             "二、</think> 之后严格按既有协议继续输出：<content>正文</content> 与后续块，"
             "格式与之前保持完全一致（包括逐字间隔标记等既有格式）；\n"
             "三、把剩余篇幅全部留给正文，正文必须写完整；再超长思考等于白烧付费额度。"
+        )
+    # story_incomplete=True（剧情完整度闸，2026-09-21）：残缺输出**结构已合格**
+    # （`</content>` 已闭合），只是剧情没写完——`roleplay_turn.open_content_for_continuation`
+    # 已把闭合标签摘掉、构造成「写到一半」的预填，指令因此改为**接着往下写**，
+    # 而不是截断分支的「闭合标签」。两者共用同一条 assistant 预填 + 一条 user 指令的形态。
+    elif story_incomplete:
+        instruction = (
+            "你上一条消息只写了这一段剧情的**前半部分**：正文虽然写到了断点，"
+            "但这一轮剧情并没有写完。现在接着往下写（你写的内容会与已有正文无缝拼成同一段故事）：\n"
+            "一、第一个字必须紧接已写出的最后一个字，直接续写后续剧情——"
+            "禁止重复已有内容、禁止改写或重新开始；\n"
+            "二、不要重新输出 <content> 开标签，也不要输出 <think> 思考块，直接续写正文；\n"
+            "三、把这一段剧情写到一个自然的收束点（至少再写两段），禁止只补一句就闭合；\n"
+            "四、正文写完后闭合 </content>，再按协议正常输出后续块（如状态更新块）。"
         )
     else:
         instruction = (

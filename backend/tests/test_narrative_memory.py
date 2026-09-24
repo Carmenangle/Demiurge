@@ -111,6 +111,28 @@ def test_渲染召回_按回合升序():
     assert "详情" not in out
 
 
+def test_渲染召回_每条带回合锚且声明这是往事():
+    """2026-09-23 F5。用户实锤：注入只给「- 概览」、无时序 ⇒ 模型分不清「上一夜」与
+    「这一夜」，把较早回合「她开口点破」当成当下事实，本轮本该沉默的场景又让她开口。
+    ⇒ 每条必须带回合区间，块首必须声明「已发生的往事、不是本轮正在发生的事」。"""
+    e1 = nm.ChronicleEntry(text="详情A", overview="早先的事", turn_start=1, turn_end=3)
+    e2 = nm.ChronicleEntry(text="详情B", overview="后来的事", turn_start=10, turn_end=10)
+    out = nm.render_recall([e1, e2])
+    assert "[第1-3回合]" in out and "[第10回合]" in out
+    assert "已经发生过的往事" in out and "不是本轮正在发生的事" in out
+    assert out.index("[第1-3回合]") < out.index("[第10回合]")
+
+
+def test_回合锚_缺回合信息不编造():
+    """没有回合区间的条目不得硬造锚，只回退成无锚条目。"""
+    spanless = nm.ChronicleEntry(text="详情", overview="事", turn_start=0, turn_end=0)
+    assert nm.turn_span(spanless) == ""
+    out = nm.render_recall([spanless])
+    assert "- 事" in out and "[第" not in out
+    single = nm.ChronicleEntry(text="详情", overview="只知结束", turn_start=0, turn_end=7)
+    assert nm.turn_span(single) == "[第7回合] "
+
+
 def test_人物名相关优先再按时间新到旧且最多十条():
     # 上下文合同：召回排序先人物名相关、再按时间（新→旧），取 Top-k
     entries = [

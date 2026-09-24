@@ -65,6 +65,100 @@ def test_多角色状态指令要求显式角色归属():
     assert "禁止把身体、精神等状态类别拼进角色名" in instruction
 
 
+def test_状态更新指令要求缺字段时播种初值不默认0():
+    """2026-09-22 用户口径：角色应按剧情因果给初始好感/恶感，不应从 0 起算。
+
+    2026-09-23 修正闸门（真机实锤）：旧措辞「某角色**第一次出现**、状态表中尚没有其好感度
+    字段时」把叙事条件与引擎条件绑在一起 ⇒ 已登场但被删过字段的角色**永远不满足**（妲千沁
+    turn 51 已登场 7 轮、字段为空、三条前提全齐，仍判「不是第一次出现」⇒ 照样 add 从 0 起算）。
+    闸门必须只说引擎认的那个条件：**字段是否存在**。
+    """
+    instruction = ra.state_instruction()
+    assert "好感度初值" in instruction
+    assert "尚没有某角色的好感度字段" in instruction
+    assert "无论其是否已经登场" in instruction          # 闸门＝字段存在性，非叙事首次
+    assert "第一次出现" not in instruction            # 旧闸门已废，防回退
+    assert "禁止默认从 0 起算" in instruction
+    assert "当前应有的好感度" in instruction          # 定「当前应有」而非「初始」
+    assert "间接影响" in instruction
+    assert '"set"' in instruction or "op=\"set\"" in instruction
+    assert "仅" in instruction and "字段不存在时采纳" in instruction
+
+
+def test_状态更新指令区分建表定锚与后续增量():
+    """用户 2026-09-23 口径：初次见面用因果定值（乙方案），后续靠表格已有值循序渐进。
+
+    即「防飘忽」不靠把初值写准，而靠建表后**改为增量累积**、以注入现值为锚。
+    """
+    instruction = ra.state_instruction()
+    assert "首次为某角色建表时按人设与既有关系把基准定准" in instruction
+    assert "不要被单场戏的强弱牵着走" in instruction
+    assert "字段一旦存在" in instruction
+    assert "只报 add 增量" in instruction
+    assert "以注入的现值为锚循序渐进" in instruction
+    assert "不要重定基准" in instruction
+
+def test_好感度初值规则两处真源同源():
+    """闸门措辞必须同时出现在 `state_instruction`（正文通道）与 `table_update._DELTA_RULES`
+    （独立维护通道）——只改一处的那一半通路会继续用旧闸门（叙事「第一次出现」）判案。"""
+    from app.services import table_update
+    a = ra.state_instruction()
+    b = table_update._DELTA_RULES
+    for frag in (
+        "状态表中尚没有某角色的好感度字段时",
+        "无论其是否已经登场",
+        "禁止默认从 0 起算",
+        "首次为某角色建表时",
+        "字段一旦存在，",
+        "只报 add 增量",
+        "不要重定基准",
+    ):
+        assert frag in a, f"state_instruction 缺：{frag}"
+        assert frag in b, f"_DELTA_RULES 缺：{frag}"
+    # 旧闸门两处都不得残留
+    assert "第一次出现" not in a and "第一次出现" not in b
+
+
+def test_好感度是综合因素考量而非封闭清单():
+    """2026-09-23 用户口径：好感度像掷骰一样是**多因素综合考量**的产物——初次见面的
+    仪表/相貌、角色自身的好恶与忌讳、既有关系、直接或间接接触等都可参与；且**角色自身的
+    偏好与忌讳优先于通用关系参考**（条目写其厌恶俊美男子，则 {{user}} 的容貌优势反而减分）。
+
+    ⚠ 措辞刻意把因素写成「举例、不限于此、不设固定权重」，**不做封闭清单**——用户明示
+    固定清单会限制模型自由发挥的空间；与本仓【输入性质】两种演法刻意不写枚举示例同源。
+    三档关系区间同时**降级为「起点参考、可越出」**（保留防 0 起算的锚，但不再是归类判定）。
+    """
+    instruction = ra.state_instruction()
+    assert "综合与该角色相关的各项因素" in instruction
+    assert "仅为举例" in instruction and "不限于此" in instruction
+    assert "不设固定权重" in instruction              # 不给权重表，避免退化成逐项打分
+    assert "偏好与忌讳优先" in instruction            # 角色好恶 > 通用关系参考
+    assert "可以按其人设与经历越出这一区间" in instruction
+    assert "不要只凭单一因素定值" in instruction
+    # 关系区间仍在（防 0 起算的锚不许丢），但必须是「只作起点参考」
+    assert "只作起点参考" in instruction
+    assert "55-90" in instruction and "20-55" in instruction
+
+
+def test_综合因素口径两处真源同源():
+    """新口径必须**同时**落在 `state_instruction`（正文通道）与 `table_update._DELTA_RULES`
+    （独立维护通道）——只改一处 ⇒ 另一半通路继续按「关系区间归类」判案。"""
+    from app.services import table_update
+    a = ra.state_instruction()
+    b = table_update._DELTA_RULES
+    for frag in (
+        "综合与该角色相关的各项因素",
+        "仅为举例",
+        "不限于此",
+        "不设固定权重",
+        "偏好与忌讳优先",
+        "不要只凭单一因素定值",
+        "可以按其人设与经历越出这一区间",
+    ):
+        assert frag in a, f"state_instruction 缺：{frag}"
+        assert frag in b, f"_DELTA_RULES 缺：{frag}"
+
+
 def test_状态更新指令要求好感行以引擎现值为准():
     """2026-09-18 用户实锤：模型自编/沿用历史楼层好感数字（52）而引擎账（2.0）冻结。
     指令必须硬性约束：[好感] 行逐字用【当前状态】现值；变化只报相对增量。"""
@@ -195,9 +289,12 @@ def test_已尝试但失败的自主行动也必须进入叙事():
 
 def test_写回累加好感度并落盘(tmp_path):
     deps = _deps(tmp_path)
-    raw = [{"field": "数值/好感度", "op": "add", "value": 5, "evidence": "救援"}]
-    before, after = ra.writeback(deps, repo_id="r1", card_name="卡", raw_deltas=raw, turn=1)
+    # 2026-09-23（add 命中不存在的好感度字段 ⇒ 拒收闸）：初值必须先 `set` 播种，
+    # 之后的 `add` 才有字段可累加——本用例考的是「落盘生效 + 二次从已存值继续累加」。
+    seed = [{"field": "数值/好感度", "op": "set", "value": 5, "evidence": "救援"}]
+    before, after = ra.writeback(deps, repo_id="r1", card_name="卡", raw_deltas=seed, turn=1)
     assert before is None and after == 5.0
+    raw = [{"field": "数值/好感度", "op": "add", "value": 5, "evidence": "救援"}]
     # 二次写回从已存值继续累加，证明落盘生效
     b2, a2 = ra.writeback(deps, repo_id="r1", card_name="卡", raw_deltas=raw, turn=2)
     assert b2 == 5.0 and a2 == 10.0
@@ -283,12 +380,112 @@ def test_writeback落盘快照前先对账好感行(tmp_path):
     deps = _deps(tmp_path)
     ra.writeback(
         deps, repo_id="r1", card_name="卡", turn=34,
-        raw_deltas=[{"field": "数值/舞姬恋·好感度", "op": "add", "value": 2,
+        raw_deltas=[{"field": "数值/舞姬恋·好感度", "op": "set", "value": 2,
                      "evidence": "争宠"}],
         snapshot="[好感] 凌若冰=40/冰山融化；舞姬恋=52/旖旎试探")
     st = character_state.load_state(str(tmp_path), "r1", "卡")
     assert st.数值["舞姬恋·好感度"].value == 2.0
     assert "舞姬恋=2/旖旎试探" in st.快照.text
+# ── 展示对账：正文 <status> 也走引擎真源（2026-09-22 用户实锤）──
+# 此前只对账「落盘快照」与「重注入快照」，用户屏幕上看到的 [好感] 行仍是模型自述
+# ⇒ 同一角色正文 16→13→10 乱跳、引擎恒 13。本节点末尾发 replace 全文替换气泡，
+# 故 writeback 处对账正文即等于修显示。
+
+def _affinity_state(*pairs) -> character_state.CharacterState:
+    st = character_state.CharacterState(card_name="凌霄仙母录", repo_id="r1")
+    for leaf, value in pairs:
+        st.数值[leaf] = character_state.NumericField(value, min=-100.0, max=100.0)
+    return st
+
+
+def test_正文status好感行对账为引擎真值():
+    st = _affinity_state(("妲千沁·好感度", 13.0), ("凌若冰·好感度", 52.0))
+    reply = """正文她没回头。
+<status>
+[在场] 妲千沁
+[好感] 妲千沁=10/清冷；凌若冰=52
+</status>"""
+    out = ra.reconcile_reply_status(reply, st)
+    assert "妲千沁=13/清冷" in out      # 引擎真值覆盖模型自述（档位描述保留）
+    assert "妲千沁=10" not in out
+    assert "凌若冰=52" in out           # 本就一致的不动
+    assert out == reply.replace("妲千沁=10", "妲千沁=13")   # 其余逐字不动（含空白填充）
+
+
+def test_正文对账幂等():
+    st = _affinity_state(("妲千沁·好感度", 13.0))
+    reply = """<status>
+[好感] 妲千沁=10
+</status>"""
+    once = ra.reconcile_reply_status(reply, st)
+    assert ra.reconcile_reply_status(once, st) == once
+
+
+def test_正文对账只改最后一个status块():
+    """多块时末块为最新（与 extract_status_snapshot 同口径）；复述的旧栏不被动。"""
+    st = _affinity_state(("妲千沁·好感度", 13.0))
+    reply = """<status>
+[好感] 妲千沁=77
+</status>过场<status>
+[好感] 妲千沁=10
+</status>"""
+    out = ra.reconcile_reply_status(reply, st)
+    assert "妲千沁=77" in out       # 旧栏原样
+    assert "妲千沁=13" in out       # 末块已对账
+    assert "妲千沁=10" not in out
+
+
+def test_正文无status块原样返回():
+    st = _affinity_state(("妲千沁·好感度", 13.0))
+    assert ra.reconcile_reply_status("纯叙事，没有状态栏。", st) == "纯叙事，没有状态栏。"
+
+
+def test_引擎无好感字段时正文原样返回():
+    """用户手删光好感字段后（2026-09-23 实机场景）：不得改写正文，也不得抛错。"""
+    st = character_state.CharacterState(card_name="卡", repo_id="r1")
+    reply = """<status>
+[好感] 妲千沁=10
+</status>"""
+    assert ra.reconcile_reply_status(reply, st) == reply
+
+
+def test_正文对账不碰think内草稿():
+    """think 里的 <status> 草稿既不当真身、也不得被改写（与 parse_state_block 同判据）。"""
+    st = _affinity_state(("妲千沁·好感度", 13.0))
+    reply = """<think>推演：先列草稿
+<status>
+[好感] 妲千沁=99
+</status>
+继续想</think>正文。 <status>
+[好感] 妲千沁=10
+</status>"""
+    out = ra.reconcile_reply_status(reply, st)
+    assert "妲千沁=99" in out       # 草稿原样（未被改写，也未顶替真身）
+    assert "妲千沁=10" not in out
+
+
+def test_写回后对账正文拿到的是本轮delta结果(tmp_path):
+    """真机序列复刻（_wb_apply_state 四步）：抽快照 → 写回落盘 → 重载 → 对账正文。
+
+    锁「必须用重载后的 st」：拿写回前的 st 对账，正文会停在旧值（等于没修）。
+    """
+    deps = _deps(tmp_path)
+    reply = """正文她没回头。
+<status>
+[好感] 妲千沁=10/清冷
+</status>
+<状态更新>[{"field": "数值/妲千沁·好感度", "op": "set", "value": 3, "evidence": "第三夜"}]</状态更新>"""
+    snapshot = ra.extract_status_snapshot(reply)
+    clean, raw = ra.parse_state_block(reply)
+    ra.writeback(deps, repo_id="r1", card_name="卡", raw_deltas=raw, turn=50,
+                 snapshot=snapshot)
+    st = character_state.load_state(str(tmp_path), "r1", "卡")
+    out = ra.reconcile_reply_status(clean, st)
+    assert st.数值["妲千沁·好感度"].value == 3.0     # 字段不存在 ⇒ 由 set 播种（add 已被闸拒收）
+    assert "妲千沁=3/清冷" in out                   # 正文换成引擎真值
+    assert "妲千沁=10" not in out
+    assert "状态更新" not in out                    # 搭车块已剥，不进正文
+
     assert "52" not in st.快照.text
 
 
@@ -480,3 +677,33 @@ def test_repair_orphan_think_close拆出规划注释():
     assert note_out2 == "" and joined2 == "正文A\n\n（她轻轻笑了。）\n\n正文B"
     # 无孤立闭标签 → None
     assert ra.repair_orphan_think_close("正文A（括注）正文B") is None
+
+
+# ── 第 58 刀：模型偶发把状态块写成英文变体 <status_update> —— 两种拼法都要剥＋解析
+# （2026-09-24 用户实锤：原始 JSON 块直接留在对话里给用户看、且没走主写回）
+
+
+def test_状态更新英文变体标签同样被剥离并解析():
+    reply = (
+        "正文第一段。\n\n<status_update>"
+        '[{"field":"数值/好感度","op":"add","value":5,"evidence":"本轮证据"}]'
+        "</status_update>"
+    )
+    clean, deltas = ra.parse_state_block(reply)
+
+    assert "status_update" not in clean
+    assert "正文第一段。" in clean
+    assert deltas and deltas[0]["field"] == "数值/好感度"
+    assert deltas[0]["value"] == 5
+
+
+def test_状态更新中文标签解析不受影响():
+    reply = (
+        "正文。\n\n<状态更新>"
+        '[{"field":"数值/好感度","op":"add","value":3,"evidence":"e"}]'
+        "</状态更新>"
+    )
+    clean, deltas = ra.parse_state_block(reply)
+
+    assert "状态更新" not in clean
+    assert deltas and deltas[0]["value"] == 3

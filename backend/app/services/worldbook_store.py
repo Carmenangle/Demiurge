@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +25,8 @@ import time
 
 from app.services import repo_meta
 from app.services.pathnames import safe_dir
+
+_LOG = logging.getLogger("uvicorn.error")
 
 REPO_WORLDBOOK_FILE = "worldbook.json"
 
@@ -391,13 +394,15 @@ def gender_from_text(text: str, name: str = "") -> str:
     return ""
 
 
-def repo_protagonist_gender(base: str, repo_id: str, name: str) -> str:
-    """从作品世界书快照解析**主人公**性别（零 LLM，确定性）：`女` / `男` / `""`。
+def repo_character_gender(base: str, repo_id: str, name: str) -> str:
+    """从作品世界书快照解析**任意角色**的性别（零 LLM，确定性）：`女` / `男` / `""`。
 
-    2026-09-20 用户定案：只服务主人公（其他角色性别沿用条目兜底，不做代码约束）。
+    第 46 刀（2026-09-22）新增：这是 `repo_protagonist_gender` 的**通用版**，共用同一套
+    条目扫描与三级解析口径（不只是主人公）。
+    ⚠ **用途仅限**「按画面主体的实际性别组成写人数词」这类**结构化计数**；**画面事实注入
+      仍只对主人公**（23 刀红线：性别只对主人公、只作画面事实注入、宁缺勿猜）。
     查找顺序＝① comment 恰为「角色卡·<名>」的条目优先；② 正文或 keys 提及该名的条目按序兜底。
-    每个条目交给本模块 `gender_from_text` 三级解析（显式声明 > 系词句 > 与名字/代词
-    相邻的身份名词）。读不到快照 / 名为空 / 都无信号 ⇒ `""`（调用方不注入，宁缺勿猜）。
+    读不到快照 / 名为空 / 都无信号 ⇒ `""`（调用方不注入，宁缺勿猜）。
     """
     target = str(name or "").strip()
     if not target:
@@ -425,6 +430,87 @@ def repo_protagonist_gender(base: str, repo_id: str, name: str) -> str:
         if gender:
             return gender
     return ""
+
+
+def repo_protagonist_gender(base: str, repo_id: str, name: str) -> str:
+    """从作品世界书快照解析**主人公**性别（零 LLM，确定性）：`女` / `男` / `""`。
+
+    2026-09-20 用户定案：**画面事实注入**只服务主人公（其他角色性别沿用条目兜底，
+    不做代码约束）；第 46 刀起实现委托给通用版 `repo_character_gender`（同一口径），
+    本函数保留为「主人公语义」的具名入口。
+    """
+    return repo_character_gender(base, repo_id, name)
+
+
+def repo_protagonist_name(
+    base: str, repo_id: str, user_name: str = "",
+) -> tuple[str, str]:
+    """从三段来源解析**主人公姓名**（零 LLM，确定性）：返回 `(name, source)`。
+
+    第 51 刀（2026-09-22 用户定案「给 FP2 建真源」）：修复 **D4／D5** ——
+    叙事者真源不能只靠 `ctx["user_name"]`（生产里常空 ⇒ 第 42 刀数据层保护集体空转），
+    也不存在反向解析主角名的函数。三段定序（取第一个非空者）：
+
+      ① `user_name` 非空 ⇒ `(user_name, "user_name")`；
+      ② 通用表「主角信息表」姓名列（单卡）非空 ⇒ `(name, "protagonist_table")`；
+      ③ 世界书「主角」条目兜底：comment／keys 含「主角」或「主人公」且形如
+         `角色卡·<名>` 的条目 ⇒ `(<名>, "worldbook")`。
+
+    三段都取不到 ⇒ `("", "")`（**宁缺勿猜**）。读盘／解析失败一律降级为空，不抛。
+
+    ⚠ `source` 只用于观察与审计，不进入任何判定分支；姓名空 ⇒ 一律返回空串。
+    """
+    uname = str(user_name or "").strip()
+    if uname:
+        return uname, "user_name"
+    if base and repo_id:
+        # ② 通用表「主角信息表」姓名列（单卡表即该卡的值）。
+        try:
+            from app.services import table_store
+            name = table_store._first_cell(
+                table_store.load(base, repo_id),
+                table_store.PROTAGONIST_TABLE, "姓名",
+            )
+        except Exception as exc:  # noqa: BLE001 — 表格读失败不得打断出图链
+            _LOG.warning("repo_protagonist_name 主角信息表读取失败 base=%s repo=%s: %s", base, repo_id, exc)
+            name = ""
+        if name:
+            return name, "protagonist_table"
+        # ③ 世界书「主角」条目兜底（只认 `角色卡·<名>` 这种明确身份，不猜正文首行）。
+        try:
+            from app.services import worldbook_edit
+            book = read_repo_snapshot(base, repo_id)
+            if book:
+                for item in worldbook_edit.list_entries(book):
+                    comment = str(item.get("comment") or "").strip()
+                    keys = item.get("keys") or item.get("key") or []
+                    if isinstance(keys, str):
+                        keys = [keys]
+                    keytext = " ".join(str(k) for k in keys)
+                    # 明确的「主角/主人公」标记；排除「角色卡·X」（含「主角」子串但只是角色卡，
+                    # 不是主角标记）——否则会误把任意角色卡当主人公。
+                    is_protagonist = (
+                        comment in ("主角", "主人公", "主角信息", "主人公信息")
+                        or ("主角" in comment and "角色卡" not in comment)
+                        or ("主角" in keytext or "主人公" in keytext)
+                    )
+                    if not is_protagonist:
+                        continue
+                    if comment.startswith("角色卡·"):
+                        cand = comment[len("角色卡·"):].strip()
+                        if cand:
+                            return cand, "worldbook"
+        except Exception as exc:  # noqa: BLE001 — 世界书读失败不得打断出图链
+            _LOG.warning("repo_protagonist_name 世界书兜底读取失败 base=%s repo=%s: %s", base, repo_id, exc)
+    return "", ""
+
+
+# 机制层标题前缀（`系统判定机制·` / `全局机制·` / `局部机制·`）。
+# 2026-09-23：这些层是**建卡时由用户设计**的，运行时 curator 不得自造同名层条目——
+# 真机实锤「全局机制·{{user}}(少宗主)」「全局机制·龙阳决与双修」「全局机制·龙阳双修采补突破」
+# 三条（175 / 39 / 444 字符）正文全是**角色状态与剧情流水**（本该进对应角色卡的动态区），
+# 却常年挂 `constant=True`（全程恒开、全文注入、永不截断）⇒ 成了「经脉」等说法的恒定注入源。
+_MECHANISM_TITLE_PREFIXES = ("系统判定机制", "全局机制", "局部机制")
 
 
 def _merge_character_dynamic(existing: str, update: str) -> str:
@@ -486,6 +572,25 @@ def apply_repo_ops(base: str, repo_id: str, ops: list[dict[str, Any]], *,
         if "enabled" in op:
             patch["enabled"] = bool(op["enabled"])
         if kind == "worldbook_add" and text:
+            # 2026-09-23（C 约束）：
+            #  ① 机制层标题前缀属**建卡时用户设计**的层，运行时新增一律拒绝（无法可靠改名，
+            #     宁可漏记也不要把角色状态挂进「全局机制·X」这类恒开条目）；
+            #  ② 运行时新增条目**一律 constant=False**——constant ⇒ 全程恒开、全文注入、
+            #     永不截断，代价极高，只能由用户在卡里显式设置。
+            title = str(patch.get("comment") or "").strip()
+            if title.split("·", 1)[0].strip() in _MECHANISM_TITLE_PREFIXES:
+                if rejections is not None:
+                    rejections.append({
+                        "op": kind, "title": title,
+                        "reason": "mechanism_layer_forbidden",
+                    })
+                continue
+            if bool(op.get("constant")):
+                if rejections is not None:
+                    rejections.append({
+                        "op": kind, "title": title, "reason": "constant_forced_off",
+                    })
+            patch["constant"] = False
             worldbook_edit.add_entry(book, patch)
             applied += 1
         elif kind == "worldbook_update" and text and str(op.get("evidence") or "").strip():

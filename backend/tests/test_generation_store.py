@@ -429,6 +429,86 @@ def test_image_finalize_角色lora命名_非角色lora时间戳(monkeypatch, tmp
     assert not named and called, "非角色 LoRA 应走 save_local 时间戳命名"
 
 
+def test_角色lora落盘轮次取槽id真实回合号_相邻两轮不撞名(monkeypatch, tmp_path):
+    """2026-09-22 用户实锤（资产覆盖）：相邻两轮算出同一个「轮次」⇒ 同名覆盖。
+
+    真机：第 45 轮槽 `illo-req-…-45`、第 46 轮槽 `illo-req-…-46`，但两轮 finalize 时
+    `_image_turn` 都返回 33（本槽在快照里还是 media-slot、计数不含自己）⇒ 第 46 轮把
+    第 45 轮的 `妲千沁_33_1.png` 覆盖掉；两槽共享同一 URL ⇒ 刷新后第 45 轮的槽显示
+    第 46 轮的图、第 45 轮的资产条目消失。
+
+    修法：轮次取**槽 id 里的 `draft.turn`**（生成时就已确定）⇒ 相邻两轮必然不同。
+    """
+    monkeypatch.setattr(generation_store.chat_snapshot, "SNAP_DIR", tmp_path)
+    generation_store.chat_snapshot.save("thread", [
+        {"id": "m1", "role": "assistant", "text": "a",
+         "parts": [{"type": "image", "slotId": "x", "url": "u"}]},
+        {"id": "bot", "role": "assistant", "text": "b",
+         "parts": [{"type": "media-slot", "slotId": "illo-req-repo-46", "kind": "image"}]},
+    ])
+    named = []
+    monkeypatch.setattr(generation_store.image_store, "save_image_named",
+                        lambda *a, **k: named.append(k) or "C:/out/x.png")
+    monkeypatch.setattr(generation_store, "_index_with_retry", lambda *a, **k: True)
+    monkeypatch.setattr(generation_store.chat_memory, "append_message", lambda *a, **k: None)
+    monkeypatch.setattr(generation_store.chat_snapshot, "upsert", lambda *a, **k: None)
+    regen = {"kind": "template", "templateId": "t", "values": {},
+             "comfyuiUrl": "http://comfy", "outputNodeIds": [], "prompt": "",
+             "characterLoraActor": "妲千沁"}
+    imgs = [{"filename": "a.png", "subfolder": "", "type": "output"}]
+
+    generation_store.finalize_workflow_batch(**_args(
+        images=imgs, regeneration=regen,
+        target_message_id="bot", target_slot_id="illo-req-repo-45",
+    ))
+    generation_store.finalize_workflow_batch(**_args(
+        images=imgs, regeneration=regen,
+        target_message_id="bot", target_slot_id="illo-req-repo-46",
+    ))
+    assert [k["dest_stem"] for k in named] == ["妲千沁_45_1", "妲千沁_46_1"]
+
+
+def test_角色lora落盘首尾帧副槽不撞名_槽id解析不出回落旧计数(monkeypatch, tmp_path):
+    """① 同回合的 `:first` / `:last` 副槽要各占一个名字；② 解析不出回合号时零回归。"""
+    assert generation_store._slot_turn("illo-req-r-46") == (46, "")
+    assert generation_store._slot_turn("illo-req-r-46:first") == (46, "first")
+    assert generation_store._slot_turn("audio-req-r-7:last") == (7, "last")
+    assert generation_store._slot_turn("img-bot-0") == (0, "")
+    assert generation_store._slot_turn("") == (0, "")
+
+    monkeypatch.setattr(generation_store.chat_snapshot, "SNAP_DIR", tmp_path)
+    generation_store.chat_snapshot.save("thread", [
+        {"id": "m1", "role": "assistant", "text": "a",
+         "parts": [{"type": "image", "slotId": "x", "url": "u"}]},
+        {"id": "bot", "role": "assistant", "text": "b",
+         "parts": [{"type": "media-slot", "slotId": "img-bot-0", "kind": "image"}]},
+    ])
+    named = []
+    monkeypatch.setattr(generation_store.image_store, "save_image_named",
+                        lambda *a, **k: named.append(k) or "C:/out/x.png")
+    monkeypatch.setattr(generation_store, "_index_with_retry", lambda *a, **k: True)
+    monkeypatch.setattr(generation_store.chat_memory, "append_message", lambda *a, **k: None)
+    monkeypatch.setattr(generation_store.chat_snapshot, "upsert", lambda *a, **k: None)
+    regen = {"kind": "template", "templateId": "t", "values": {},
+             "comfyuiUrl": "http://comfy", "outputNodeIds": [], "prompt": "",
+             "characterLoraActor": "虞妙玥"}
+    imgs = [{"filename": "a.png", "subfolder": "", "type": "output"}]
+
+    for slot in ("illo-req-repo-46:first", "illo-req-repo-46:last"):
+        generation_store.finalize_workflow_batch(**_args(
+            images=imgs, regeneration=regen,
+            target_message_id="bot", target_slot_id=slot,
+        ))
+    assert [k["dest_stem"] for k in named] == ["虞妙玥_46_first_1", "虞妙玥_46_last_1"]
+
+    named.clear()
+    generation_store.finalize_workflow_batch(**_args(
+        images=imgs, regeneration=regen,
+        target_message_id="bot", target_slot_id="img-bot-0",
+    ))
+    assert [k["dest_stem"] for k in named] == ["虞妙玥_2_1"]  # 旧口径
+
+
 def test_persist_text_interrupted_appends_marker(monkeypatch):
     """2026-09-04 收口：中断半成品落快照必须拼「（已打断）」后缀——它是跨轮续写
     （agent_graph._resume_interrupted_messages）的唯一识别信号（to_prompt_history 只带

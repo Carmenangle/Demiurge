@@ -49,6 +49,11 @@ QUESTS_TABLE = "任务与事件表"
 OPTIONS_TABLE = "选项表"
 _SINGLETON_TABLES = {GLOBAL_TABLE, PROTAGONIST_TABLE, OPTIONS_TABLE}
 _ALWAYS_FILL_TABLES = {GLOBAL_TABLE}
+# 选项表只给玩家看，**不进正文轮的只读剧情上下文**（2026-09-23 用户定案 F2）。
+# 真机实锤：它进 prompt 后模型会把「候选走向」当成①已发生事实②本轮剧本逐字执行——
+# 表里预写的「她终于开口以'明早得换件新中衣'点破」被照抄成既成剧情，选项第 1 条的动作
+# 被原文执行。⇒ 读侧排除，只留给维护调用（tables_for_maintenance）重排。
+_READ_EXCLUDED_TABLES = {OPTIONS_TABLE}
 
 
 def _is_character_table(table: dict[str, Any]) -> bool:
@@ -242,8 +247,12 @@ def tables_for_maintenance(tables: list[dict[str, Any]], scheduled: bool) -> lis
 
 
 def tables_for_read(tables: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """读侧不受填表频率影响；full 表读现值，retrieval 表由渲染器只读 schema。"""
-    return list(tables)
+    """读侧不受填表频率影响；full 表读现值，retrieval 表由渲染器只读 schema。
+
+    选项表**不在其中**（`_READ_EXCLUDED_TABLES`）：它是给玩家看的候选走向，进正文轮
+    会被当成已发生事实/本轮剧本（2026-09-23 定案）；它仍由维护调用读取与重排。
+    """
+    return [t for t in tables if t.get("name") not in _READ_EXCLUDED_TABLES]
 
 
 def tables_for_turn(tables: list[dict[str, Any]], scheduled: bool) -> list[dict[str, Any]]:
@@ -461,6 +470,29 @@ def _first_cell(tables: list[dict[str, Any]], table_name: str, column: str) -> s
         if index < len(row) and str(row[index]).strip():
             return str(row[index]).strip()
     return ""
+
+
+def column_values(tables: list[dict[str, Any]], table_name: str, column: str) -> list[str]:
+    """取某张表某列的**全部**非空值（去重保序）。表/列不存在 / 空表 → 空列表。
+
+    与 `_first_cell`（单卡取值）配对：这里给「名单」类用途（如 `重要角色表` 的姓名列，
+    供上层算「哪些角色还没有好感度字段」）。不抛、不写盘——纯读。
+    """
+    table = _find(tables, table_name)
+    if table is None:
+        return []
+    columns = table.get("columns") or []
+    if column not in columns:
+        return []
+    index = columns.index(column)
+    out: list[str] = []
+    for row in table.get("rows") or []:
+        if index >= len(row):
+            continue
+        value = str(row[index]).strip()
+        if value and value not in out:
+            out.append(value)
+    return out
 
 
 def illustration_defaults(base: str, repo_id: str) -> tuple[str, str]:

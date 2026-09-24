@@ -359,3 +359,121 @@ def test_主人公性别_角色卡条目优先于正文提及(tmp_path):
     worldbook_store.ensure_repo_snapshot(str(tmp_path), repo_id, [book])
 
     assert worldbook_store.repo_protagonist_gender(str(tmp_path), repo_id, "甲") == "男"
+
+
+# ── 第 51 刀（2026-09-22）：主人公姓名三段读取（修复 D4/D5）──
+
+def _write_protagonist_table(base: str, repo_id: str, name: str) -> None:
+    """写一张最小「主角信息表」（只含姓名列）供测试读取。"""
+    from app.services import table_store
+    tables = [{
+        "name": table_store.PROTAGONIST_TABLE,
+        "columns": ["姓名", "性别", "外貌特征"],
+        "rows": [[name, "女", "示例"]],
+        "mode": "full", "rowPolicy": "singleton", "alwaysFill": False,
+        "deletePolicy": "retain", "keyCol": "姓名",
+    }]
+    table_store.save(base, repo_id, tables)
+
+
+def test_主角姓名三段读取_user_name优先(tmp_path):
+    """① user_name 非空 ⇒ 直接返回，source='user_name'（②/③ 即使有数据也不抢）。"""
+    repo_id = "work"
+    _write_protagonist_table(str(tmp_path), repo_id, "乙")
+    book = {"entries": [
+        {"comment": "角色卡·丙", "content": "【性别】女", "keys": ["丙", "主角"]},
+    ]}
+    worldbook_store.ensure_repo_snapshot(str(tmp_path), repo_id, [book])
+
+    assert worldbook_store.repo_protagonist_name(str(tmp_path), repo_id, "甲") == ("甲", "user_name")
+
+
+def test_主角姓名三段读取_主角信息表兜底(tmp_path):
+    """② user_name 为空 ⇒ 取通用表「主角信息表」姓名列，source='protagonist_table'。"""
+    repo_id = "work"
+    _write_protagonist_table(str(tmp_path), repo_id, "乙")
+
+    assert worldbook_store.repo_protagonist_name(str(tmp_path), repo_id, "") == ("乙", "protagonist_table")
+
+
+def test_主角姓名三段读取_世界书兜底(tmp_path):
+    """③ 主角信息表无姓名 ⇒ 世界书「角色卡·<主角>」（keys 含『主角』）兜底，
+    source='worldbook'；普通角色卡（无主角标记）不得被误当主人公。"""
+    repo_id = "work"
+    book = {"entries": [
+        {"comment": "角色卡·乙", "content": "【性别】女", "keys": ["乙"]},  # 无主角标记 ⇒ 跳过
+        {"comment": "角色卡·丙", "content": "【性别】女", "keys": ["丙", "主角"]},  # 命中
+    ]}
+    worldbook_store.ensure_repo_snapshot(str(tmp_path), repo_id, [book])
+
+    assert worldbook_store.repo_protagonist_name(str(tmp_path), repo_id, "") == ("丙", "worldbook")
+
+
+def test_主角姓名三段读取_全空返回空串(tmp_path):
+    """三段都取不到 ⇒ ('', '')（宁缺勿猜）。"""
+    repo_id = "work"
+    assert worldbook_store.repo_protagonist_name(str(tmp_path), repo_id, "") == ("", "")
+    # 读盘失败不得抛（user_name 必须留空，否则①段短路、走不到读盘路径）
+    assert worldbook_store.repo_protagonist_name(str(tmp_path), "missing", "") == ("", "")
+    # ①段优先与仓库是否存在无关：缺仓库但 user_name 非空，仍返回 user_name
+    assert worldbook_store.repo_protagonist_name(str(tmp_path), "missing", "甲") == ("甲", "user_name")
+
+
+# ── 2026-09-23（C 约束）：运行时新增条目禁建机制层、一律 constant=False ──
+
+def test_新增条目拒绝机制层标题前缀并上报(tmp_path):
+    """C 约束之一：`全局机制·` / `系统判定机制·` / `局部机制·` 是**建卡时由用户设计**的层，
+    运行时 curator 不得自造同名层条目。
+
+    真机实锤（2026-09-23）：curator 把凌若冰的身体状态写进了「全局机制·{{user}}(少宗主)」
+    （175 字符）、把「舞姬恋…往返抚弄其经脉」写进「全局机制·龙阳决与双修」（仅 39 字符），
+    而这几条常年 `constant=True` ⇒ 全程恒开、全文注入、永不截断 ⇒ 「经脉」每轮无条件注入。
+    处理策略＝**拒收而非改名**：改名等价于替用户决定分层，宁可漏记也不污染设定。
+    """
+    base = str(tmp_path)
+    worldbook_store.ensure_repo_snapshot(base, "repo", [{"entries": [{"content": "底座"}]}])
+    rejections: list = []
+    applied = worldbook_store.apply_repo_ops(base, "repo", [
+        {"op": "worldbook_add", "title": "全局机制·新机制", "text": "自造机制"},
+        {"op": "worldbook_add", "title": "系统判定机制·X", "text": "自造判定"},
+        {"op": "worldbook_add", "title": "局部机制·Y", "text": "自造局部"},
+    ], rejections=rejections)
+
+    assert applied == 0
+    assert [r["reason"] for r in rejections] == ["mechanism_layer_forbidden"] * 3
+    assert [r["title"] for r in rejections] == ["全局机制·新机制", "系统判定机制·X", "局部机制·Y"]
+    assert len(worldbook_store.read_repo_snapshot(base, "repo")["entries"]) == 1
+
+
+def test_新增条目强制关闭constant并上报(tmp_path):
+    """C 约束之二：`constant` ⇒ 全程恒开、全文注入、永不截断，代价极高，只能由用户在卡里
+    显式设置；运行时新增一律降为 `constant=False`（条目照常落盘，只是不再恒开）。"""
+    base = str(tmp_path)
+    worldbook_store.ensure_repo_snapshot(base, "repo", [{"entries": [{"content": "底座"}]}])
+    rejections: list = []
+    applied = worldbook_store.apply_repo_ops(base, "repo", [
+        {"op": "worldbook_add", "title": "新设定", "text": "月蚀时城门关闭", "constant": True},
+    ], rejections=rejections)
+
+    assert applied == 1
+    assert rejections == [
+        {"op": "worldbook_add", "title": "新设定", "reason": "constant_forced_off"},
+    ]
+    entry = worldbook_store.read_repo_snapshot(base, "repo")["entries"][1]
+    assert entry["content"] == "月蚀时城门关闭"
+    assert not entry.get("constant")   # 不得恒开
+
+
+def test_新增普通设定条目不受新约束影响(tmp_path):
+    """等价矩阵锁：合法的运行时新增（非机制层、未请求 constant）逐字不变、零 rejections。"""
+    base = str(tmp_path)
+    worldbook_store.ensure_repo_snapshot(base, "repo", [{"entries": []}])
+    rejections: list = []
+    assert worldbook_store.apply_repo_ops(base, "repo", [
+        {"op": "worldbook_add", "title": "北门", "text": "北门在宵禁后关闭", "keys": ["北门"]},
+    ], rejections=rejections) == 1
+    assert rejections == []
+    entry = worldbook_store.read_repo_snapshot(base, "repo")["entries"][0]
+    assert entry["comment"] == "北门"
+    assert entry["content"] == "北门在宵禁后关闭"
+    assert entry["keys"] == ["北门"]
