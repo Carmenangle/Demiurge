@@ -145,12 +145,14 @@ function insertSlotAtOffset(
         const cut = index - start;
         const before = (part.text || "").slice(0, cut);
         const after = (part.text || "").slice(cut);
-        // 图片块固定从目标句后的新行开始；保留原正文换行数量，不改变文本内容。
-        const slotPrefix = before && !before.endsWith("\n") ? "\n" : "";
-        const slotSuffix = after && !after.startsWith("\n") ? "\n" : "";
-        if (before) parts.push({ ...part, text: before + slotPrefix });
+        // 第 59 刀：切口两侧**不注入换行** —— 注入会让文本段变长，后续槽的 offset 在
+        // 被注水的坐标系里逐个前移 ⇒ 切进句子中间（真机实锤：9 槽里第 4 槽早 3 字，
+        // "还带了一层[图]薄汗。"把句子劈成两半）；注入的 \n 还随 parts 落库并回灌
+        // 上下文（promptHistory 的 parts 兜底路径），教坏模型断行。图片块由渲染层
+        // 成块展示，无需文本换行配合；后端 offset 已吸附段落边界 ⇒ 切口即段落尾。
+        if (before) parts.push({ ...part, text: before });
         parts.push(slot);
-        if (after) parts.push({ ...part, text: slotSuffix + after });
+        if (after) parts.push({ ...part, text: after });
         inserted = true;
       } else {
         parts.push(part);

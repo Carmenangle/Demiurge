@@ -202,9 +202,9 @@ describe("reduceChatStreamEvent", () => {
     });
 
     expect(messages[0].parts).toEqual([
-      { type: "text", text: "高潮段落。\n" },
+      { type: "text", text: "高潮段落。" },
       { type: "media-slot", slotId: "slot-1", status: "pending" },
-      { type: "text", text: "\n后续段落。" },
+      { type: "text", text: "后续段落。" },
     ]);
   });
 
@@ -217,7 +217,7 @@ describe("reduceChatStreamEvent", () => {
     });
 
     expect(messages[0].parts).toEqual([
-      { type: "text", text: "高潮画面。\n" },
+      { type: "text", text: "高潮画面。" },
       { type: "media-slot", slotId: "slot-1", status: "pending" },
       { type: "text", text: "\n\n后续段落。" },
     ]);
@@ -242,9 +242,9 @@ describe("reduceChatStreamEvent", () => {
     expect(next[0].parts).toEqual([
       { type: "text", text: "开篇。" },
       { type: "media-slot", slotId: "slot-1", status: "pending" },
-      { type: "text", text: "高潮画面句。\n" },
+      { type: "text", text: "高潮画面句。" },
       { type: "media-slot", slotId: "slot-2", status: "pending" },
-      { type: "text", text: "\n收束。" },
+      { type: "text", text: "收束。" },
     ]);
   });
 
@@ -434,7 +434,7 @@ describe("appendImageSlot（首尾帧副槽）", () => {
     const current: ChatMessage[] = [{ id: "bot", role: "assistant", text }];
     const withFirst = appendImageSlot(current, "bot", "main:first", "首帧画面", "start");
     expect(withFirst[0].parts).toEqual([
-      { type: "text", text: "第一段正文。\n" },
+      { type: "text", text: "第一段正文。" },
       { type: "media-slot", slotId: "main:first", status: "pending",
         kind: "image", videoPrompt: "首帧画面" },
       { type: "text", text: "\n\n第二段正文。" },
@@ -468,15 +468,15 @@ describe("第 34 刀 首尾帧固定落点（reducer 接线）", () => {
   it("高潮点无 placement：落点逐字沿用 event.offset（本刀零影响）", () => {
     const out = reduceChatStreamEvent(current(), "bot", firstFrameEvent());
     expect(out[0].parts).toEqual([
-      { type: "text", text: "第一段\n" },
+      { type: "text", text: "第一段" },
       { type: "media-slot", slotId: "slot-1", status: "pending", lastFrameDesc: "尾帧" },
-      { type: "text", text: "\n正文。\n\n第二段正文。" },
+      { type: "text", text: "正文。\n\n第二段正文。" },
     ]);
   });
 
   it("placement 显式 false：同样沿用 event.offset（不得顺手改判）", () => {
     const out = reduceChatStreamEvent(current(), "bot", firstFrameEvent(), { firstlast: false });
-    expect(out[0].parts?.[0]).toEqual({ type: "text", text: "第一段\n" });
+    expect(out[0].parts?.[0]).toEqual({ type: "text", text: "第一段" });
     expect(out[0].parts?.[1]).toEqual({
       type: "media-slot", slotId: "slot-1", status: "pending", lastFrameDesc: "尾帧",
     });
@@ -487,7 +487,7 @@ describe("第 34 刀 首尾帧固定落点（reducer 接线）", () => {
       videoMode: "firstlast", videoPrompt: "视频提示词",
     }));
     expect(out[0].parts).toEqual([
-      { type: "text", text: "第一段正文。\n\n第二段正文。\n" },
+      { type: "text", text: "第一段正文。\n\n第二段正文。" },
       { type: "media-slot", slotId: "slot-1", status: "pending",
         lastFrameDesc: "尾帧", videoPrompt: "视频提示词" },
     ]);
@@ -496,7 +496,7 @@ describe("第 34 刀 首尾帧固定落点（reducer 接线）", () => {
   it("独立图片模式（事件不带 video_mode，靠 placement）：首帧新图 ⇒ 首段末", () => {
     const out = reduceChatStreamEvent(current(), "bot", firstFrameEvent(), { firstlast: true });
     expect(out[0].parts).toEqual([
-      { type: "text", text: "第一段正文。\n" },
+      { type: "text", text: "第一段正文。" },
       { type: "media-slot", slotId: "slot-1", status: "pending", lastFrameDesc: "尾帧" },
       { type: "text", text: "\n\n第二段正文。" },
     ]);
@@ -515,7 +515,7 @@ describe("第 34 刀 首尾帧固定落点（reducer 接线）", () => {
       withPrev, "bot", firstFrameEvent({ transition: "reuse" }), { firstlast: true },
     );
     expect(out[1].parts).toEqual([
-      { type: "text", text: "第一段正文。\n\n第二段正文。\n" },
+      { type: "text", text: "第一段正文。\n\n第二段正文。" },
       { type: "media-slot", slotId: "slot-1", status: "pending", lastFrameDesc: "尾帧" },
     ]);
   });
