@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   illustrationLoraConfigurationError, illustrationRequestMedia, illustrationWorkflowMedia,
+  isSegmentBridgeEvent,
   resolveIllustrationActors, resolveVideoMode, resolveVideoTemplateChoice,
   planFirstlastFrameTasks, firstlastFrameValues, firstlastSlotLayout, transitionVideoValues,
   firstParagraphEnd, lastParagraphEnd, firstlastMainOffset,
@@ -430,5 +431,30 @@ describe("firstlastFrameValues（V1.6/P5 首尾帧生图模板 values）", () =>
       "8.w": 704,
       "9.h": 1024,
     });
+  });
+});
+
+
+describe("第59刀 段桥判定 isSegmentBridgeEvent", () => {
+  it("firstlast + 只下发转场提示词（无正片提示词）⇒ 段桥", () => {
+    expect(isSegmentBridgeEvent({
+      useVideo: true, videoMode: "firstlast",
+      videoPrompt: "", transitionVideoPrompt: "bridge prompt",
+    })).toBe(true);
+  });
+
+  it("主图（有正片提示词）/非 firstlast/视频未启用 ⇒ 非段桥", () => {
+    expect(isSegmentBridgeEvent({
+      useVideo: true, videoMode: "firstlast",
+      videoPrompt: "main prompt", transitionVideoPrompt: "bridge",
+    })).toBe(false);
+    expect(isSegmentBridgeEvent({
+      useVideo: true, videoMode: "climax",
+      videoPrompt: "", transitionVideoPrompt: "bridge",
+    })).toBe(false);
+    expect(isSegmentBridgeEvent({
+      useVideo: false, videoMode: "firstlast",
+      videoPrompt: "", transitionVideoPrompt: "bridge",
+    })).toBe(false);
   });
 });

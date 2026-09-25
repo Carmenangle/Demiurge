@@ -413,7 +413,7 @@ describe("逐字搬移锁（T2.2-A 插画链）", () => {
     ["prompt = withLoraTriggers(prompt);", 1],
     ["const st = await comfyStatus(settings.comfyuiUrl);", 1],
     ["failSlot(\"submit\", \"ComfyUI 没有返回任务 ID\");", 1],
-    ["pollResult(r.prompt_id, outputNodeIds, regeneration, target, prompt, useVideo ? \"video\" : \"image\", baseSlotRef);", 1],
+    ["pollResult(r.prompt_id, outputNodeIds, regeneration, target, prompt, mainIsVideo ? \"video\" : \"image\", baseSlotRef);", 1],
   ];
 
   it("判定/副作用语句在新属主按次数出现", () => {

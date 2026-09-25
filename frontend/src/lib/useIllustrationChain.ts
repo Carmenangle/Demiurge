@@ -36,7 +36,7 @@ import {
 } from "./imagePromptProfiles";
 import {
   illustrationLoraConfigurationError, illustrationWorkflowMedia, resolveIllustrationActors,
-  resolveVideoMode, resolveVideoTemplateChoice, planFirstlastFrameTasks, firstlastFrameValues,
+  isSegmentBridgeEvent, resolveVideoMode, resolveVideoTemplateChoice, planFirstlastFrameTasks, firstlastFrameValues,
   firstlastSlotLayout, transitionVideoValues, illustrationRequestMedia,
 } from "./illustrationMedia";
 import {
@@ -149,7 +149,14 @@ export function useIllustrationChain({
     // V1.6/P5+（2026-08-28 用户拍板）：首尾帧是独立图片模式——只配图片模板即生效；
     // 视频模式跟随该选项推导，有视频模板才追加视频任务。
     const useFirstlastImages = videoMode === "firstlast" && !!preset.templateId;
-    const chosenId = useVideo ? preset.videoTemplateId! : preset.templateId;
+    // 第 59 刀（视频连续化）：段桥 = firstlast + 后端只下发转场提示词（无正片提示词）
+    // ⇒ 该槽 = 段桥：主槽按普通图出（本锚点画面），帧任务只做首帧（上一张画面），
+    // 桥视频走 transition 块（起点=上一画面、终点=本画面）；衔接不上 ⇒ 退高潮延续（纯图）。
+    const isSegmentBridge = isSegmentBridgeEvent({
+      useVideo, videoMode, videoPrompt, transitionVideoPrompt,
+    });
+    const mainIsVideo = useVideo && !isSegmentBridge;
+    const chosenId = mainIsVideo ? preset.videoTemplateId! : preset.templateId;
     if (!chosenId) {
       failSlot("configuration", "当前图/视频模式没有配置工作流模板");
       return;
@@ -361,7 +368,10 @@ export function useIllustrationChain({
       const plan = planFirstlastFrameTasks({
         transition,
         prevTailUrl: resolvePrevTailDesc(messagesRef.current)?.lastFrameUrl,
-        firstFrameDesc, lastFrameDesc, lastFrameUrl,
+        // 第 59 刀：段桥只做**首帧**（上一张画面）——尾帧 = 本锚点画面 = 主槽自己的图
+        //（标准图提交），不重复生成。
+        lastFrameDesc: isSegmentBridge ? "" : lastFrameDesc,
+        firstFrameDesc, lastFrameUrl,
       });
       if (useVideo && !plan.canGenerateVideo) {
         failSlot("image_required", "firstlast 视频需要首帧图：既无上尾帧图可复用，也无首帧画面描述可生成");
@@ -560,9 +570,13 @@ export function useIllustrationChain({
     if (useVideo && videoMode === "firstlast" && transition !== "reuse"
         && transitionVideoPrompt && firstFrameGenerated) {
       const transitionSlotId = `${slotId}:transition`;
-      const prevTailRef = resolvePrevTailDesc(messagesRef.current);
+      // 第 59 刀：段桥的图片1 = 本 run 刚生成的「上一张画面」（frameFirstImage 已是
+      // ComfyUI input 名，免上传）；跨楼层转场维持 resolvePrevTailDesc（上楼尾帧图）。
+      const prevTailRef = isSegmentBridge ? null : resolvePrevTailDesc(messagesRef.current);
       let prevTailInput = "";
-      if (prevTailRef?.lastFrameUrl) {
+      if (isSegmentBridge && frameFirstImage) {
+        prevTailInput = frameFirstImage;
+      } else if (prevTailRef?.lastFrameUrl) {
         try {
           prevTailInput = await uploadRemoteImageToInput(
             localViewUrl(prevTailRef.lastFrameUrl), settings.comfyuiUrl,
@@ -615,19 +629,20 @@ export function useIllustrationChain({
       prompt, negativePrompt, loraName, loraWeight, baseImage: uploadedImage,
       latentSize,
       // V1.2 视频最小事实：时长/镜头 = 用户预设值（模板无 exposed binding 时自然忽略）；motion 已由后端透传
-      videoDuration: useVideo && preset.videoDurationHint ? preset.videoDurationHint : undefined,
-      videoCamera: useVideo ? preset.videoCamera : undefined,
+      videoDuration: mainIsVideo && preset.videoDurationHint ? preset.videoDurationHint : undefined,
+      videoCamera: mainIsVideo ? preset.videoCamera : undefined,
       // V1.5/B1 视频模式 + 首尾帧描述：有值才传（模板无 exposed binding 时自然忽略）
-      videoMode: useVideo ? videoMode : undefined,
-      firstFrameDesc: useVideo && firstFrameDesc ? firstFrameDesc : undefined,
-      lastFrameDesc: useVideo && lastFrameDesc ? lastFrameDesc : undefined,
-      prevTailDesc: useVideo && prevTailDescForUse ? prevTailDescForUse : undefined,
-      lastFrameUrl: useVideo && lastFrameUrl ? lastFrameUrl : undefined,
+      // 第 59 刀：段桥的主槽=普通图（本锚点画面）⇒ 视频字段全部不传
+      videoMode: mainIsVideo ? videoMode : undefined,
+      firstFrameDesc: mainIsVideo && firstFrameDesc ? firstFrameDesc : undefined,
+      lastFrameDesc: mainIsVideo && lastFrameDesc ? lastFrameDesc : undefined,
+      prevTailDesc: mainIsVideo && prevTailDescForUse ? prevTailDescForUse : undefined,
+      lastFrameUrl: mainIsVideo && lastFrameUrl ? lastFrameUrl : undefined,
       // V1.5/B3 双帧图：V1.6/P5 首尾帧顺序链后，首帧=生成的图（兜底底图），尾帧=生成的图（兜底事件图）
       firstFrameImage: useVideo && frameFirstImage ? frameFirstImage : undefined,
       lastFrameImage: useVideo && frameLastImage ? frameLastImage : undefined,
       // V1.5 默认开放：后端编译的 climax 视频提示词（仅视频分支注入；无模板时仍留在槽位供测试核对）
-      videoPrompt: useVideo && videoPrompt ? videoPrompt : undefined,
+      videoPrompt: mainIsVideo && videoPrompt ? videoPrompt : undefined,
     });
     try {
       const st = await comfyStatus(settings.comfyuiUrl);
@@ -636,9 +651,9 @@ export function useIllustrationChain({
         return;
       }
       // V1.1 红线：视频模板 LoRA 不自动接线（loader 结构各异），只认模板自身暴露字段；
-      // 图片分支维持既有 loraStack 注入合同。
-      const loraStack = useVideo ? [] : loras.map(({ name, weight }) => ({ name, weight }));
-      const loraMode = useVideo ? "none" : (preset.loraMode || "single");
+      // 图片分支维持既有 loraStack 注入合同。第 59 刀：段桥主槽=普通图 ⇒ 图片 LoRA 照常。
+      const loraStack = mainIsVideo ? [] : loras.map(({ name, weight }) => ({ name, weight }));
+      const loraMode = mainIsVideo ? "none" : (preset.loraMode || "single");
       const r = await enqueueSubmit(() => submitWorkflow(
         chosenId, values, settings.comfyuiUrl, prompt, loraStack, loraMode,
       ));
@@ -658,10 +673,10 @@ export function useIllustrationChain({
           characterLoraActor,
         );
         setMessages((current) => bindMediaSlotPrompt(current, messageId, slotId, r.prompt_id!));
-        const baseSlotRef = useVideo && videoBaseRef?.sourceMessageId && videoBaseRef?.sourceSlotId
+        const baseSlotRef = mainIsVideo && videoBaseRef?.sourceMessageId && videoBaseRef?.sourceSlotId
           ? { messageId: videoBaseRef.sourceMessageId, slotId: videoBaseRef.sourceSlotId }
           : undefined;
-        pollResult(r.prompt_id, outputNodeIds, regeneration, target, prompt, useVideo ? "video" : "image", baseSlotRef);
+        pollResult(r.prompt_id, outputNodeIds, regeneration, target, prompt, mainIsVideo ? "video" : "image", baseSlotRef);
       } else {
         failSlot("submit", "ComfyUI 没有返回任务 ID");
       }

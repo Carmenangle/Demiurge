@@ -113,6 +113,19 @@ export function resolveVideoMode(
   return "climax";
 }
 
+/** 第 59 刀（视频连续化）段桥判定：firstlast + 后端只下发转场提示词（无正片提示词）
+ * ⇒ 该槽 = 段桥（首帧=上一张画面、尾帧=本锚点画面；主槽按普通图出，桥视频走 transition 块）。
+ * 衔接不上（桥提交失败/首帧生图失败）⇒ 退高潮片段延续（纯图/普通图）。 */
+export function isSegmentBridgeEvent(opts: {
+  useVideo: boolean;
+  videoMode?: string;
+  videoPrompt?: string;
+  transitionVideoPrompt?: string;
+}): boolean {
+  return !!opts.useVideo && opts.videoMode === "firstlast"
+    && !opts.videoPrompt && !!opts.transitionVideoPrompt;
+}
+
 /** V1.5/B3（R4）视频模板触发闸门：firstlast 是楼层触发不看 motion；climax 维持 smartVideo+motion。
  * 返回是否用视频模板（模板已配置为前提）。 */
 export function resolveVideoTemplateChoice(

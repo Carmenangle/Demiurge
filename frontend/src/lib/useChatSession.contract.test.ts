@@ -235,7 +235,7 @@ describe("P18 进度/节点按线程键分片（不再跨仓库串）", () => {
 // 后 4 个可选 ⇒ **漏一个 TS 不报错**，症状只在运行期显形：漏 `mediaType` ⇒ 视频吃图片的 20 分钟硬上限；
 // 漏 `baseSlotRef` ⇒ 视频 `derived_from` 记录**静默消失**（无报错、无 trace）。
 // 收口前 10 个调用点里只有 2 个有形态锁（即下方「R8 超时合同接线」那两条），其余 **8 个裸奔**：
-// 5 个首尾帧（`"image"`）、1 个转场（`"video"`）、1 个主槽（`useVideo ? "video" : "image"` + 第 7 参）、1 个音频（`"audio"`）。
+// 5 个首尾帧（`"image"`）、1 个转场（`"video"`）、1 个主槽（`mainIsVideo ? "video" : "image"` + 第 7 参）、1 个音频（`"audio"`）。
 // 本组把这 8 点补齐，并把**调用点总数**钉住（增删调用点必须同步改本锁）。
 // 注：与 R5 同一处境（两个调用方组件没有组件测试）⇒ 只读源码文本上锁。
 describe("P5 pollResult 调用点接线锁：10 点全锁（本组 8 + R8 组 2）", () => {
@@ -267,11 +267,11 @@ describe("P5 pollResult 调用点接线锁：10 点全锁（本组 8 + R8 组 2�
 
   it("主槽调用点必须带第 6/7 参（mediaType 推导 + baseSlotRef）—— **最险的一点**", () => {
     expect(chainCode).toMatch(
-      /pollResult\(r\.prompt_id, outputNodeIds, regeneration, target, prompt, useVideo \? "video" : "image", baseSlotRef\)/,
+      /pollResult\(r\.prompt_id, outputNodeIds, regeneration, target, prompt, mainIsVideo \? "video" : "image", baseSlotRef\)/,
     );
     // 反向锁：7 参形态不得回退成 6 参（丢 baseSlotRef ⇒ 视频 derived_from 记录消失）
     expect(chainCode).not.toMatch(
-      /pollResult\(r\.prompt_id, outputNodeIds, regeneration, target, prompt, useVideo \? "video" : "image"\)/,
+      /pollResult\(r\.prompt_id, outputNodeIds, regeneration, target, prompt, mainIsVideo \? "video" : "image"\)/,
     );
   });
 
