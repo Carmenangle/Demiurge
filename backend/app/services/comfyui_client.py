@@ -199,8 +199,11 @@ def fetch_result(url: str, prompt_id: str,
                 # 已进入执行队列（节点开始加载/运转 = 有动弹）
                 return {"status": "running", "images": [], "videos": [], "audios": [], "texts": []}
             if prompt_id in pending_q:
-                # 仍在排队，节点尚未开始加载（无动弹）
-                return {"status": "pending", "images": [], "videos": [], "audios": [], "texts": []}
+                # 仍在排队，节点尚未开始加载（无动弹）。
+                # 第 59 刀（队列感知停顿）：附队列活性 —— running 非空 ⇒ 队列在推进，
+                # 排队是合法等待；前端停顿守卫据此豁免，不再误杀深队列任务。
+                return {"status": "pending", "queue_busy": bool(running),
+                        "images": [], "videos": [], "audios": [], "texts": []}
             # 不在历史也不在队列：任务已丢失（ComfyUI 重启等原因）
             return {"status": "not_found", "images": [], "videos": [], "audios": [], "texts": []}
         except Exception:

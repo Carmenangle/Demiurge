@@ -153,7 +153,7 @@ const notFoundPollAction = (count: number): "retry" | "fail" => count >= 5 ? "fa
 
 /** 一次 fetch 的观测。`ok=false` = ComfyUI 暂不可达（重启中/忙）：不计入状态，仅继续计时与调度。 */
 export type WorkflowFetchObservation =
-  | { ok: true; status: string; error?: string }
+  | { ok: true; status: string; error?: string; queueBusy?: boolean }
   | { ok: false };
 
 /** tick 核心的滚动状态（纯数据，由调用方各自持有）。 */
@@ -165,6 +165,10 @@ export interface WorkflowTickState {
   seenRunning: boolean;
   /** `first_pending` 基准下的停顿计时起点；-1 = 尚未开始计时 */
   stallBasisAt: number;
+  /** 第 59 刀（队列感知停顿）：最近一次「队列在推进」的观测时刻；-1 = 尚未观测到。
+   *  created_at 基准下把停顿基准顶到 max(createdAt, lastAliveAt) —— 队列在推进期间
+   *  深队列排队是合法等待，不算停顿。 */
+  lastAliveAt: number;
 }
 
 export interface WorkflowTickContext {
@@ -187,7 +191,7 @@ export type WorkflowTickDecision =
   | { kind: "poll"; released: boolean; delayMs: number };
 
 export function initialTickState(): WorkflowTickState {
-  return { tries: 0, consecutiveNotFound: 0, seenRunning: false, stallBasisAt: -1 };
+  return { tries: 0, consecutiveNotFound: 0, seenRunning: false, stallBasisAt: -1, lastAliveAt: -1 };
 }
 
 /** 停顿守卫：返回 true 表示应当 early-stop。两个调用方的口径差异全在这里。 */
@@ -197,7 +201,11 @@ export function workflowStalled(
   if (state.seenRunning) return false;
   if (context.stallBasis === "created_at") {
     const createdAt = context.createdAt ?? context.now;
-    return context.now - createdAt >= context.stallWindowMs;
+    // 第 59 刀（队列感知停顿）：最近一次「队列在推进」的观测把基准顶起来 ——
+    // ComfyUI 还在跑别的任务时，深队列排队是合法等待，不算停顿；
+    // 队列空转（无任务执行）后才开始计停顿窗口。
+    const basis = Math.max(createdAt, state.lastAliveAt);
+    return context.now - basis >= context.stallWindowMs;
   }
   // 同步轮询口径：只在「观测到 pending」时判定，且基准是首个 pending 观测时刻。
   // 注意 `>= 0` 而非 `> 0`：原实现以 -1 作「尚未开始计时」哨兵，`now()` 返回 0 时基准就是 0，
@@ -231,6 +239,13 @@ export function advanceWorkflowTick(
       next.consecutiveNotFound = 0;
       if (context.stallBasis === "first_pending" && next.stallBasisAt < 0) {
         next.stallBasisAt = context.now;
+      }
+      // 第 59 刀（队列感知停顿）：观测到「ComfyUI 有任务在执行」⇒ 队列在推进，
+      // 本任务排队是合法等待 ⇒ 重置停顿基准（同步口径）并记录存活时刻
+      // （created_at 口径）。队列空转后才开始计停顿窗口。
+      if (observation.queueBusy) {
+        next.stallBasisAt = -1;
+        next.lastAliveAt = context.now;
       }
     } else if (status === "not_found") {
       next.consecutiveNotFound = state.consecutiveNotFound + 1;
@@ -295,7 +310,7 @@ export async function pollWorkflowResult(
     let observation: WorkflowFetchObservation;
     try {
       result = await fetchResult(promptId, comfyuiUrl, []);
-      observation = { ok: true, status: result.status, error: result.error };
+      observation = { ok: true, status: result.status, error: result.error, queueBusy: result.queue_busy };
     } catch {
       // ComfyUI 暂不可达（重启中/忙）：继续轮询，硬超时兜底
       observation = { ok: false };
@@ -448,7 +463,7 @@ export class WorkflowGenerationRuntime {
           result = await this.fetchResult(
             pending.prompt_id, input.comfyuiUrl, pending.outputNodeIds || [],
           );
-          observation = { ok: true, status: result.status, error: result.error };
+          observation = { ok: true, status: result.status, error: result.error, queueBusy: result.queue_busy };
         } catch {
           // ComfyUI may be temporarily unavailable; retain the task and keep watching.
         }

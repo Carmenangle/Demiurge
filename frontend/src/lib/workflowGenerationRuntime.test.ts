@@ -556,6 +556,54 @@ describe("advanceWorkflowTick · 后台守望/同步轮询共用判定核心", (
     expect(advanceWorkflowTick(at149.state, { ok: true, status: "running" }, ctx()).decision)
       .toEqual({ kind: "poll", released: true, delayMs: 15000 });
   });
+
+  // ── 第 59 刀（队列感知停顿）：ComfyUI 有任务在执行 ⇒ 队列在推进 ⇒ 深队列排队
+  //    是合法等待，停顿基准被存活观测顶起；队列空转后才起算停顿窗口。──────────
+
+  it("第59刀 created_at 基准：队列在推进（queueBusy）就不算停顿，空转后才起算", () => {
+    // 任务创建于 0，窗口 1000ms；ComfyUI 一直在跑别的任务（queueBusy=true）
+    let state = initialTickState();
+    let now = 0;
+    for (let step = 0; step < 5; step += 1) {
+      now = step * 700;                     // 0 / 700 / 1400 / 2100 / 2800 —— 早已越过窗口
+      state = advanceWorkflowTick(
+        state, { ok: true, status: "pending", queueBusy: true },
+        ctx({ now, stallBasis: "created_at", createdAt: 0 }),
+      ).state;
+    }
+    expect(advanceWorkflowTick(
+      state, { ok: true, status: "pending", queueBusy: true },
+      ctx({ now: now + 700, stallBasis: "created_at", createdAt: 0 }),
+    ).decision.kind).toBe("poll");          // 队列一直在推进 ⇒ 永不停顿
+
+    // 队列空转（queueBusy 消失）⇒ 从最后一次存活时刻（2800）起算停顿窗口
+    const idle = advanceWorkflowTick(
+      state, { ok: true, status: "pending" },
+      ctx({ now: now + 700, stallBasis: "created_at", createdAt: 0 }),
+    );
+    expect(idle.decision.kind).toBe("poll");                      // 空转首跳：窗口刚起算
+    expect(advanceWorkflowTick(
+      idle.state, { ok: true, status: "pending" },
+      ctx({ now: now + 700 + 1000, stallBasis: "created_at", createdAt: 0 }),
+    ).decision.kind).toBe("stalled");                             // 空转超窗 ⇒ 停顿
+  });
+
+  it("第59刀 同步口径（first_pending）：busy 重置停顿计时，重新起算", () => {
+    const first = advanceWorkflowTick(
+      initialTickState(), { ok: true, status: "pending" },
+      ctx({ now: 100, stallBasis: "first_pending" }));
+    expect(first.state.stallBasisAt).toBe(100);
+    // 队列在推进 ⇒ 计时重置（-1），下次非 busy 观测重新起算
+    const busy = advanceWorkflowTick(
+      first.state, { ok: true, status: "pending", queueBusy: true },
+      ctx({ now: 1100, stallBasis: "first_pending" }));
+    expect(busy.state.stallBasisAt).toBe(-1);
+    expect(busy.decision.kind).toBe("poll");
+    // 重新起算后一个窗口内不判停顿
+    expect(advanceWorkflowTick(
+      busy.state, { ok: true, status: "pending" }, ctx({ now: 2000, stallBasis: "first_pending" }),
+    ).decision.kind).toBe("poll");
+  });
 });
 
 // ===== 两套循环的推进不变量 =====

@@ -96,6 +96,8 @@ export interface ResultImage {
 
 export interface GenResult {
   status: "pending" | "running" | "completed" | "failed" | "not_found";
+  /** 第 59 刀（队列感知停顿）：status=pending 时附带 —— ComfyUI 有任务在执行 ⇒ 队列在推进 */
+  queue_busy?: boolean;
   error?: string;
   images: ResultImage[];
   videos: ResultImage[];

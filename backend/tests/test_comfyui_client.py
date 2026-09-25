@@ -301,3 +301,38 @@ def test_fetch_result_filter_mismatch_skips_temp_preview(monkeypatch):
     r = comfyui_client.fetch_result("http://127.0.0.1:8188", "pid", ["999"])
 
     assert [image["filename"] for image in r["images"]] == ["saved.png"]
+
+
+# ── 第 59 刀（队列感知停顿）：任务排队时附队列活性 —— ComfyUI 有任务在执行 ⇒
+#    队列在推进，前端停顿守卫据此豁免深队列等待，不再误杀批量生图。
+
+
+def test_第59刀_排队且队列在推进时pending附queue_busy_true(monkeypatch):
+    def fake_urlopen(req, *a, **k):
+        url = str(getattr(req, "full_url", req))
+        if "/history/" in url:
+            return _FakeResp({})                       # 不在 history ⇒ 转查队列
+        return _FakeResp({"queue_running": [{"prompt_id": "other"}],
+                          "queue_pending": [{"prompt_id": "pid"}]})
+
+    monkeypatch.setattr(comfyui_client, "urlopen", fake_urlopen)
+
+    r = comfyui_client.fetch_result("http://127.0.0.1:8188", "pid")
+
+    assert r["status"] == "pending"
+    assert r["queue_busy"] is True
+
+
+def test_第59刀_排队但队列空转时queue_busy_false(monkeypatch):
+    def fake_urlopen(req, *a, **k):
+        url = str(getattr(req, "full_url", req))
+        if "/history/" in url:
+            return _FakeResp({})
+        return _FakeResp({"queue_running": [], "queue_pending": [{"prompt_id": "pid"}]})
+
+    monkeypatch.setattr(comfyui_client, "urlopen", fake_urlopen)
+
+    r = comfyui_client.fetch_result("http://127.0.0.1:8188", "pid")
+
+    assert r["status"] == "pending"
+    assert r["queue_busy"] is False
