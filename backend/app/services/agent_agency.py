@@ -1919,7 +1919,7 @@ def _wb_emit_illustration_trace(ctx: dict, illustrate_req: dict, *, plan, sig: d
 def _wb_comfy_extra_requests(ctx: dict, repo_id: str, plan, clean: str, sig: dict,
                              pool: dict, *, primary_anchor: str, primary_motion: int,
                              prompt_override: str, transition_decision,
-                             user_text: str) -> list[dict]:
+                             user_text: str, primary_prompt: str = "") -> list[dict]:
     """第 57 刀 · 多批派发：给**除主锚点外**的其余锚点各编译一条出图请求（2026-09-24）。
 
     用户口径（逐字）：「如果用户输入的生图数量 **≥** 高潮点数目，则**是高潮点的片段全部生图**
@@ -1928,21 +1928,23 @@ def _wb_comfy_extra_requests(ctx: dict, repo_id: str, plan, clean: str, sig: dic
     返回**各请求自带 `anchor`**（下游 `_illustration_anchor_offset` 据此逐条定位插入点）
     ⇒ 每张图插到**自己的正文位置**（前端 `insertSlotAtOffset` 已支持多槽、零改动）。
 
-    四条短路（任一命中 ⇒ `[]`，主链路逐字节不变）：
-      ① 批量数目 < 2（0/缺省 = 单张）；② `video_mode == "firstlast"`（面板该字段只在高潮点模式出现）；
-      ③ `ctx` 里没有多锚点列表（判据档没跑 / 旧链路）；④ 锚点数 < 2。
+    三条短路（任一命中 ⇒ `[]`，主链路逐字节不变）：
+      ① 批量数目 < 2（0/缺省 = 单张）；② `ctx` 里没有多锚点列表（判据档没跑 / 旧链路）；
+      ③ 锚点数 < 2。
     另：某锚点算出来是空请求（`at_climax` 不成立等）⇒ **跳过该条**，不影响其余。
 
     ⚠ **逐点各过一遍既有仲裁机**（在 `_wb_comfy_scene_target` 内）—— 红线 74／76 的修法
       必须对每一张都生效。⚠ **不重复调判据 LLM**（见 `anchor_override` 的说明）。
-    ⚠ 本步**只做多批生图**：第 2..N 张不编译视频（多批视频的合并是后续步骤）。
+    ⚠ 第 59 刀（视频连续化 · 用户定案「前后衔接按首尾帧生成，衔接不上就是高潮片段延续」）：
+      firstlast 模式下 extras **不再整跳过** —— 每张 extra = **段桥**：
+        首帧 = 上一张的画面（正文序链，首桥 = 主图画面）；尾帧 = 本锚点画面（槽位自己的图）；
+        桥视频复用现有 `mode="transition"` 编译（起点=prev_tail、终点=first_frame）。
+      衔接不上（上一张帧图失败）⇒ 前端退**高潮片段延续**（该槽按普通图出、视频从定格延续）。
     """
     from app.services import scene_illustration
 
     count = _anchor_batch_count(ctx)
     if count < 2:
-        return []
-    if str(ctx.get("video_mode") or "") == "firstlast":
         return []
     items = ctx.get("illustration_anchor_intents") or []
     if len(items) < 2:
@@ -1968,6 +1970,8 @@ def _wb_comfy_extra_requests(ctx: dict, repo_id: str, plan, clean: str, sig: dic
     primary_off = _para_off(primary_anchor)
     if primary_off is not None:
         used_offsets.add(primary_off)
+    # 第 59 刀（视频连续化）：段链起点 = 主图画面（首桥的「上一张」）。
+    _prev_pic = str(primary_prompt or "")
     extras: list[dict] = []
     for item in scene_illustration.select_anchor_intents(items, count):
         anchor = str(item.get("anchor") or "").strip()
@@ -1998,6 +2002,30 @@ def _wb_comfy_extra_requests(ctx: dict, repo_id: str, plan, clean: str, sig: dic
         _wb_frames_and_video(
             ctx, request, scene_spec, clean, transition_decision,
             target["motion"], compile_video=False)
+        # 第 59 刀（视频连续化）：firstlast 模式下每张 extra = **段桥**——
+        #   首帧 = 上一张的画面（正文序链，首桥 = 主图画面）；尾帧 = 本锚点画面（槽位自己的图）；
+        #   桥视频复用现有 mode="transition" 编译（起点=prev_tail、终点=first_frame）。
+        # 衔接不上（上一张帧图失败/前端拿不到桥）⇒ 前端退**高潮片段延续**（该槽按普通图出）。
+        if str(ctx.get("video_mode") or "") == "firstlast" and ctx.get("comfy_video"):
+            _own_pic = str(request.get("prompt") or "")
+            request["video_mode"] = "firstlast"
+            request["transition"] = "regenerate"     # 首帧（上一画面）需独立生成
+            request["prev_tail_desc"] = _prev_pic[:500].strip()
+            request["first_frame_desc"] = _prev_pic[:500].strip()   # 帧任务①：上一画面（桥首帧）
+            request["last_frame_desc"] = _own_pic[:500].strip()     # 帧任务②：本画面（桥尾帧）
+            try:
+                from app.services import video_prompt as _vp_mod
+                _merged_spec = dict(scene_spec)
+                _merged_spec.setdefault("motion", int(target["motion"] or 0))
+                request["transition_video_request"] = _vp_mod.build_video_request(
+                    mode="transition", spec=_merged_spec,
+                    video_config=request.get("video_config") or {},
+                    first_frame_desc=request["first_frame_desc"],
+                    prev_tail_desc=request["prev_tail_desc"],
+                )
+            except Exception:  # noqa: BLE001
+                pass   # 桥编译失败 ⇒ 前端退高潮延续（该槽按普通图出）
+            _prev_pic = _own_pic
         extras.append(request)
     return extras
 
@@ -2071,6 +2099,7 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
                     prompt_override=prompt_override,
                     transition_decision=transition_decision,
                     user_text=user_text,
+                    primary_prompt=str(illustrate_req.get("prompt") or ""),
                 )
                 if extras:
                     illustrate_req["extra_requests"] = extras

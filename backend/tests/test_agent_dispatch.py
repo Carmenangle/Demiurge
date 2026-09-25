@@ -4162,11 +4162,12 @@ def _stub_comfy_chain(monkeypatch) -> dict:
 _ANCHOR_TEXT = "甲处的画面。\n\n乙处的画面。\n\n丙处的画面。\n\n丁处的画面。"
 
 
-def _run_extra(ctx, *, primary_anchor="", motion=0):
+def _run_extra(ctx, *, primary_anchor="", motion=0, primary_prompt=""):
     return aag._wb_comfy_extra_requests(
         ctx, "", {}, _ANCHOR_TEXT, _anchor_sig(), _anchor_pool(),
         primary_anchor=primary_anchor, primary_motion=motion,
         prompt_override="", transition_decision="", user_text="",
+        primary_prompt=primary_prompt,
     )
 
 
@@ -4213,13 +4214,15 @@ def test_第57刀_第999张_所有锚点都出图且保持正文序(monkeypatch)
 
 
 def test_第57刀_首尾帧模式不参与多批(monkeypatch):
-    """边界锁：面板该字段**只在高潮点模式出现**；首尾帧链另有落点规则 ⇒ 不参与多批。"""
+    """第 59 刀改约：firstlast 模式下 extras **不再整跳过** —— 每张编译为段桥
+    （首帧=上一张画面、尾帧=本锚点画面；衔接不上 ⇒ 前端退高潮片段延续）。
+    无 comfy_video（视频工作流未配）⇒ 桥编译短路、rec 无视频字段（纯图降级）。"""
     stub = _stub_comfy_chain(monkeypatch)
     ctx = {**_anchors(("甲处", 10), ("乙处", 90)), "illustration_batch_count": 9,
            "video_mode": "firstlast"}
 
-    assert _run_extra(ctx, primary_anchor="乙处") == []
-    assert stub["built"] == []
+    assert _run_extra(ctx, primary_anchor="乙处") != []
+    assert stub["built"] != []
 
 
 def test_第57刀_锚点不足两条时不出额外请求(monkeypatch):
@@ -5143,3 +5146,38 @@ def test_第58刀_锚点定位失败时吸附不越界():
     )
     assert off is not None                       # 评分选段兜底（既有语义）
     assert clean[off:].startswith("\n\n") or off == len(clean)
+
+
+# ── 第 59 刀（视频连续化）：firstlast 模式下 extras = 段桥 —— 首帧=上一张画面、
+#    尾帧=本锚点画面、transition_video_request 复用 mode="transition" 编译；
+#    衔接不上 ⇒ 前端退高潮片段延续（该槽按普通图出）。
+
+
+def test_第59刀_firstlast模式extras编译段桥(monkeypatch):
+    _stub_comfy_chain(monkeypatch)
+    ctx = {
+        **_anchors(("甲处的画面。", 70), ("乙处的画面。", 50), ("丙处的画面。", 60)),
+        "video_mode": "firstlast",
+        "comfy_video": True,
+        "illustration_batch_count": 99,
+    }
+
+    extras = _run_extra(ctx, primary_anchor="甲处的画面。", primary_prompt="p:甲处的画面")
+
+    assert len(extras) == 2
+    # 链式：首桥的「上一张」= 主图画面；第二桥的「上一张」= 第一桥的画面
+    first, second = extras
+    assert first["video_mode"] == "firstlast"
+    assert first["transition"] == "regenerate"
+    assert first["prev_tail_desc"] == "p:甲处的画面"
+    assert first["first_frame_desc"] == "p:甲处的画面"
+    assert first["last_frame_desc"] == "p:乙处的画面。"
+    assert second["prev_tail_desc"] == "p:乙处的画面。"
+    assert second["first_frame_desc"] == "p:乙处的画面。"
+    assert second["last_frame_desc"] == "p:丙处的画面。"
+    # 桥视频走现有 transition 编译（起点=prev_tail、终点=first_frame）
+    for extra in extras:
+        bridge = extra.get("transition_video_request") or {}
+        assert bridge, "段桥必须编译 transition_video_request"
+        submit = bridge.get("submit") or {}
+        assert submit.get("prompt"), "桥视频必须有提示词"
