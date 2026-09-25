@@ -13,7 +13,7 @@ import os
 import re
 
 import numpy as np
-from PIL import Image
+from PIL import Image, PngImagePlugin
 import torch
 
 
@@ -50,12 +50,16 @@ class SeqSaveImage:
             if m:
                 max_seq = max(max_seq, int(m.group(1)))
 
+        # ⚠ pnginfo 必须是 PngImagePlugin.PngInfo 对象（裸 dict 会在 PIL._save 炸
+        #   'dict' object has no attribute 'chunks'——真机 18:37 实锤）。
         metadata = None
-        if prompt is not None or extra_pnginfo is not None:
-            metadata = {"prompt": json.dumps(prompt), }
-            if extra_pnginfo is not None:
-                for key, value in extra_pnginfo.items():
-                    metadata[key] = json.dumps(value)
+        if prompt is not None:
+            metadata = PngImagePlugin.PngInfo()
+            metadata.add_text("prompt", json.dumps(prompt))
+        if extra_pnginfo is not None:
+            metadata = metadata or PngImagePlugin.PngInfo()
+            for key, value in extra_pnginfo.items():
+                metadata.add_text(key, json.dumps(value))
 
         results = []
         for i, image in enumerate(images):
