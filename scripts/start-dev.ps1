@@ -194,23 +194,37 @@ if (Test-PortOpen $comfyPort) {
   }
 }
 
-# 残留侦测（只报告、不处理）：命令行含 ComfyUI main.py、创建时间早于本次脚本、却没有任何
-# 监听端口的 python 实例，多半是启动早期卡死或被强杀的僵尸。它会占住 ComfyUI\user\comfyui.db
-# 的排他锁，让新实例报「Another ComfyUI process may already be using it」；而 stop 只按 8188
-# 端口杀，恰恰清不掉这种不监听端口的残留。（2026-09-23 实锤：15:45 留下的僵尸挂了 1 小时 20 分。）
+# 残留侦测 + 自动清理（第 59 刀，2026-09-25 用户需求）：命令行含 ComfyUI main.py、却没有任何
+# 监听端口的 python 实例 ⇒ 僵尸（占住 ComfyUI\user\comfyui.db 的排他锁，让新实例报
+# 「Another ComfyUI process may already be using it」；而 stop 只按 8188 端口杀，清不掉这种残留）。
+# ⚠ 自动清理带 **10 分钟宽限窗**：ComfyUI 加载插件要 1~3 分钟才开监听，刚拉起的实例
+#   （无监听属正常初始化）绝不能误杀——只清「创建早于 10 分钟前且零监听」的真僵尸。
+#   （2026-09-23 实锤：15:45 留下的僵尸挂了 1 小时 20 分，当时只报告不处理。）
 $staleComfy = @()
 Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
   Where-Object { $_.CommandLine -and $_.CommandLine -match 'ComfyUI' -and $_.CommandLine -match 'main\.py' } |
   ForEach-Object {
     $ownPid = [int]$_.ProcessId
-    if ($_.CreationDate -and $_.CreationDate -lt $comfyCheckStart) {
+    $staleCutoff = (Get-Date).AddMinutes(-10)
+    if ($_.CreationDate -and $_.CreationDate -lt $staleCutoff) {
       $listen = @(Get-NetTCPConnection -State Listen -OwningProcess $ownPid -ErrorAction SilentlyContinue)
-      if ($listen.Count -eq 0) { $staleComfy += "$ownPid（启动于 $($_.CreationDate)）" }
+      if ($listen.Count -eq 0) { $staleComfy += $_ }
     }
   }
 if ($staleComfy.Count -gt 0) {
-  Write-Host "[WARN] 发现 $($staleComfy.Count) 个未监听端口的 ComfyUI 残留：$($staleComfy -join '；')" -ForegroundColor Yellow
-  Write-Host "       确认无用后可清理：taskkill /F /T /PID <pid>（它们会锁住 ComfyUI\user\comfyui.db）。" -ForegroundColor Yellow
+  $cleaned = @()
+  foreach ($proc in $staleComfy) {
+    $ownPid = [int]$proc.ProcessId
+    taskkill /F /T /PID $ownPid 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+      $cleaned += "$ownPid（启动于 $($proc.CreationDate)）"
+    } else {
+      Write-Host "[WARN] 僵尸 ComfyUI pid=$ownPid 清理失败（可能权限不足），请手动：taskkill /F /T /PID $ownPid" -ForegroundColor Yellow
+    }
+  }
+  if ($cleaned.Count -gt 0) {
+    Write-Host "[INFO] 已自动清理 $($cleaned.Count) 个 ComfyUI 僵尸（无监听、创建早于 10 分钟前）：$($cleaned -join '；')" -ForegroundColor DarkGray
+  }
 }
 $aiHelper = @(Get-NetTCPConnection -LocalPort 8080 -State Listen -ErrorAction SilentlyContinue)
 if ($aiHelper.Count -gt 0) {
