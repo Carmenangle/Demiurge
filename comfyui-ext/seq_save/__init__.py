@@ -11,10 +11,13 @@
 import json
 import os
 import re
+import shutil
 
 import numpy as np
 from PIL import Image, PngImagePlugin
 import torch
+
+import folder_paths
 
 
 class SeqSaveImage:
@@ -62,6 +65,8 @@ class SeqSaveImage:
                 metadata.add_text(key, json.dumps(value))
 
         results = []
+        out_root = os.path.abspath(folder_paths.get_output_directory())
+        preview_dir = os.path.join(out_root, "_seq_preview")
         for i, image in enumerate(images):
             seq = max_seq + 1 + i          # 已删的号不回收：永远现有最大 + 1
             name = f"{prefix.strip()}{str(seq).zfill(digits)}.png"
@@ -69,7 +74,20 @@ class SeqSaveImage:
             arr = 255.0 * image.cpu().numpy()
             img = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
             img.save(path, pnginfo=metadata, compress_level=4)
-            results.append({"filename": name, "subfolder": "", "type": "output"})
+            # 预览回传：/view 只服务 output/input/temp ⇒ 目标文件夹在 output 之外时，
+            # 复制一份进 output/_seq_preview/（同序号覆盖）供前端展示。
+            try:
+                abs_path = os.path.abspath(path)
+                if os.path.commonpath([abs_path, out_root]) == out_root:
+                    rel = os.path.relpath(abs_path, out_root)
+                    sub, ui_name = os.path.dirname(rel), os.path.basename(rel)
+                else:
+                    os.makedirs(preview_dir, exist_ok=True)
+                    shutil.copyfile(path, os.path.join(preview_dir, name))
+                    sub, ui_name = "_seq_preview", name
+                results.append({"filename": ui_name, "subfolder": sub, "type": "output"})
+            except Exception:  # noqa: BLE001
+                results.append({"filename": name, "subfolder": "", "type": "output"})
         return {"ui": {"images": results}}
 
     @classmethod
