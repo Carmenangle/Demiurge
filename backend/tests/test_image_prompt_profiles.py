@@ -2249,6 +2249,8 @@ def test_anima重写后content仍不合格继续词表兜底():
     outputs = iter([
         _anima_json(bad_content, primary_focus="a single focus phrase kept short"),
         _anima_json(bad_content, primary_focus="a single focus phrase kept short"),
+        # 第 59 刀：仅余格式错时定向重试一次（第三调）——仍不合格 ⇒ 照旧词表兜底
+        _anima_json(bad_content, primary_focus="a single focus phrase kept short"),
     ])
 
     def generate(_system, _user):
@@ -3099,12 +3101,19 @@ _补丁合格稿 = (
 
 
 def _补丁生成(profile, raw, scene=None, *, allow_repair=True):
-    """同一份 raw 连给两次（首轮 + 重写），把 prompt / diagnostics 一起交回。"""
+    """同一份 raw 连给两次（首轮 + 重写），把 prompt / diagnostics 一起交回。
+
+    ⚠ 第 59 刀：repair 后的**定向重试**会多要一次调用 ⇒ 脚本耗尽后**复用末条**，
+    不再 StopIteration（复用同一份 raw ⇒ 归一/兜底判定与两脚本时代一致）。"""
     scene = _补丁场景() if scene is None else scene
-    outputs = iter([raw, raw])
+    scripted = [raw, raw]
+    outputs = iter(scripted)
 
     def _next(_system, _user):
-        return next(outputs)
+        try:
+            return next(outputs)
+        except StopIteration:
+            return scripted[-1]
 
     diagnostics: dict = {}
     prompt = profiles.generate(
@@ -5891,3 +5900,67 @@ def test_第58刀_组装不出两行时仍照旧兜底():
 
     assert diagnostics.get("strategy") == "fallback"
     assert len(prompt.splitlines()) == 2
+
+
+# ── 第 59 刀：归一救不回 ⇒ 定向重试一次（两行模板写死进纠错指令），首稿也纳入归一候选 ──
+
+
+_MESSY_TWO_LINE = (
+    "masterpiece, best quality, solo, cold qingxue, long black hair, straight bangs, "
+    "narrow red eyes, a red long dress, white sleeves, wrist held, pulling closer, "
+    "rain-soaked railing, side light\n"
+    "she kneels by the railing in the rain in a red long dress with her wrist held and "
+    "pulled closer, her long black hair plastered across her face as she looks back over "
+    "her shoulder.\n"
+    "这一段是混进来的中文说明。"
+)
+
+
+def test_第59刀_定向重试给两行模板_第三次调用救回(monkeypatch):
+    """repair 后只剩两行格式错 ⇒ 定向重试一次（两行模板写死进纠错指令），
+    第三次调用被本地归一救回，不退无角色身份薄兜底。"""
+    scene = {
+        **_scene("nsfw"),
+        "appearance": "冷倾雪: long black hair, straight bangs, narrow red eyes",
+    }
+    calls: list[str] = []
+
+    def gen(_system: str, user: str) -> str:
+        calls.append(user)
+        if len(calls) == 1:
+            # 首版：JSON 合同合格、但最终稿只有一行 tags（无画面句）⇒ 格式错
+            return _anima_json("1girl, black hair, a red long dress, close-up")
+        if len(calls) == 2:
+            return _anima_json("1girl, black hair, a red long dress, close-up")  # repair 仍一行
+        return _MESSY_TWO_LINE                                # 定向重试 ⇒ 可归一
+
+    diagnostics: dict = {}
+    prompt = profiles.generate("anima_tags", scene, gen, diagnostics)
+
+    assert len(calls) == 3                       # 首次 + repair + 定向重试
+    assert diagnostics.get("strategy") == "normalized_two_line+retry"
+    assert "long black hair" in prompt           # 角色身份保住，不是薄兜底
+
+
+def test_第59刀_重试也失败时首稿纳入归一候选(monkeypatch):
+    """重试输出也不可归一 ⇒ 首次输出（可归一）作为候选被捞回，仍不退薄兜底。"""
+    scene = {
+        **_scene("nsfw"),
+        "appearance": "冷倾雪: long black hair, straight bangs, narrow red eyes",
+    }
+    calls: list[str] = []
+
+    def gen(_system: str, user: str) -> str:
+        calls.append(user)
+        if len(calls) == 1:
+            return _MESSY_TWO_LINE               # 首稿可归一但流程先走 repair
+        if len(calls) == 2:
+            # repair：JSON 合同合格、facts 落实、只剩一行 ⇒ 仅格式错 ⇒ 触发定向重试
+            return _anima_json("1girl, black hair, a red long dress, close-up")
+        return "这一段全是中文，没有任何英文tags与英文句子。"   # 重试也不可归一
+
+    diagnostics: dict = {}
+    prompt = profiles.generate("anima_tags", scene, gen, diagnostics)
+
+    assert diagnostics.get("strategy") == "normalized_two_line+retry"
+    assert "long black hair" in prompt           # 首稿被归一候选捞回

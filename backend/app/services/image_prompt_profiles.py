@@ -4366,6 +4366,30 @@ def generate(
             completed, ledger = complete_field_coverage(profile, rescued, fact_scene)
             report["field_ledger"] = ledger
             return completed
+        if profile == "anima_tags" and set(errors) <= {
+            "必须正好两行",
+            "第一行必须包含质量词与至少六个英文内容tags",
+            "第二行必须包含英文自然语言画面描述",
+        }:
+            # 第 59 刀：归一救不回且**只剩两行格式错** ⇒ 定向重试一次——把两行模板
+            # 写死进纠错指令（比「请严格按系统协议重写」具体得多），输出再走本地归一；
+            # 首次输出也纳入归一候选。兜底稿是无角色身份的降级，能救一张是一张。
+            # ⚠ 只对格式错重试：焦点/事实/JSON 结构违例是模板修不了的，不烧这次调用。
+            retry_prompt = (
+                f"{source}\n\n上次输出未通过：{'；'.join(errors)}。"
+                "重写必须**严格两行**：第一行是英文逗号分隔的内容 tags（至少 6 个）；"
+                "第二行是一句英文画面描述（字母开头、至少 25 个字符、以句号/问号/感叹号收尾）。"
+                f"\n上次输出：{repaired_raw or raw}"
+            )
+            third_raw = _strip_refusal_suffix(_strip_think(generate_text(system, retry_prompt)))
+            report["retry_raw_chars"] = len(third_raw or "")
+            for candidate in (third_raw, raw):
+                third = _anima_two_line_rescue(candidate, fact_scene)
+                if third:
+                    report["strategy"] = "normalized_two_line+retry"
+                    completed, ledger = complete_field_coverage(profile, third, fact_scene)
+                    report["field_ledger"] = ledger
+                    return completed
         report["strategy"] = "fallback"
         # Krea2 的长度只用于引导纠错；英文、段落、分级和禁词仍是硬合同。
         if profile == "krea2" and not _inline_krea_errors(prompt, fact_scene):
