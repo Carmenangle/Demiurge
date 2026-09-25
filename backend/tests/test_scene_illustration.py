@@ -2233,3 +2233,17 @@ def test_第58刀_锚点在末段时吸附到文本末尾():
     snapped = si.snap_offset_to_paragraph_end(text, off)
     assert snapped == len(text)
     assert "末段里有锚点。" in text[:snapped]
+
+
+def test_第59刀_零分过滤落在本体之外_旧形态包装零回归():
+    """用户定案（2026-09-25）：判据显式打 0 分＝「这个时刻不值得画」⇒ 不生成。
+    ⚠ 但过滤落**多批选择层**（agent_agency）而非本函数——旧单锚点形态被
+    `parse_anchor_intents` 有意包装成 `score=0`（零回归锁）⇒ 本体过滤会误杀
+    单条路径（真机回归 11 连红实锤）。锁：本函数对 score=0 的条目照常返回。"""
+    items = [
+        {"anchor": "A", "score": 0},   # 旧形态包装出的 score=0
+        {"anchor": "B", "score": 70},
+    ]
+
+    assert [x["anchor"] for x in si.select_anchor_intents(items, 0)] == ["A", "B"]
+    assert [x["anchor"] for x in si.select_anchor_intents(items, 1)] == ["B"]

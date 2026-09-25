@@ -205,3 +205,24 @@ def test_写回接缝对账正文status块():
     assert src.index("load_state") < src.index("reconcile_reply_status(clean, st)"), (
         "对账早于 load_state ⇒ 拿的是写回前的旧值，等于没对账"
     )
+
+
+def test_第59刀_多批选择层滤零分锚点():
+    """用户定案（2026-09-25）：判据显式打 0 分＝「这个时刻不值得画」⇒ 不建槽。
+    过滤落在多批选择层（`_resolve_anchor_intent_list`），不落
+    `select_anchor_intents` 本体（旧单锚点形态被包装成 score=0，本体过滤会误杀）。"""
+    from app.services import agent_agency
+
+    text = "开头。A句。中间。B句。结尾。C句。"
+    raw = (
+        '{"anchors": ['
+        '{"anchor": "A句。", "score": 70, "composition": "中景", "subjects": ["甲"], "reason": "x"}, '
+        '{"anchor": "B句。", "score": 0, "composition": "特写", "subjects": ["甲"], "reason": "x"}, '
+        '{"anchor": "C句。", "score": 30, "composition": "特写", "subjects": ["甲"], "reason": "x"}'
+        ']}'
+    )
+    ctx = {"illustration_batch_count": 99}   # 不限制 ⇒ 全出（但 0 分的 B 被滤）
+
+    picked = agent_agency._resolve_anchor_intent_list(ctx, text, raw)
+
+    assert [x["anchor"] for x in picked] == ["A句。", "C句。"]

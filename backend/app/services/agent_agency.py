@@ -1095,6 +1095,11 @@ def _resolve_anchor_intent_list(ctx: dict, text: str, raw: str) -> list[dict]:
     items = scene_illustration.dedupe_anchor_intents(
         scene_illustration.parse_anchor_intents(raw), text,
     )
+    # 第 59 刀（用户定案 2026-09-25）：判据**显式打 0 分**＝「这个时刻不值得画」
+    # ⇒ 无论批量上限多大都不为它建槽。⚠ 过滤落在本层（多批选择）而非
+    # `select_anchor_intents` 本体——旧单锚点形态被 parse 层有意包装成 score=0
+    # （零回归锁），本体过滤会误杀单条路径（真机回归 11 连红实锤）。
+    items = [item for item in items if int(item.get("score") or 0) > 0]
     if not items:
         return []
     return scene_illustration.select_anchor_intents(items, _anchor_batch_count(ctx))
