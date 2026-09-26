@@ -95,4 +95,29 @@ describe("ComfyUI node selection exposure", () => {
       node_id: "3", field: "lang", binding: undefined,
     }));
   });
+
+  it("字符串载体节点按节点标题声明 binding（Anima AIO 流没有 CLIPTextEncode）", () => {
+    const fields = exposeWorkflowNodeFields({
+      id: "1610",
+      class_type: "String",
+      title: "POS Prompt",
+      bypassed: false,
+      fields: [{ name: "String", value: "1girl", linked: false, required: true }],
+    });
+    expect(fields).toContainEqual(expect.objectContaining({
+      node_id: "1610", field: "String", binding: "prompt",
+    }));
+  });
+
+  it("标题声明负面提示词的载体节点绑定 negative_prompt，未声明的绝不猜", () => {
+    const titles = ["NEG Prompt", "负面", "词条临时工作区", "画师串", "Anima首选质量词条"];
+    const bindings = titles.map((title, i) => exposeWorkflowNodeFields({
+      id: String(i), class_type: "String", title,
+      bypassed: false,
+      fields: [{ name: "String", value: "x", linked: false, required: true }],
+    })[0].binding);
+    expect(bindings).toEqual([
+      "negative_prompt", "negative_prompt", undefined, undefined, undefined,
+    ]);
+  });
 });

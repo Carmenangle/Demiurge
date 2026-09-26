@@ -143,3 +143,24 @@ def test_非number字段不做数值收窄():
     workflow_injector.inject_template_values(api, exposed, {"9.text": "123"})
     assert api["9"]["inputs"]["text"] == "123"
     assert type(api["9"]["inputs"]["text"]) is str
+
+
+def test_文本字段按大写String键注入():
+    # Anima AIO 全能流的提示词节点是原生 String 节点（输入键就是 "String"），
+    # 且模板没有 prompt_node_id、只有 exposed 上 binding=="prompt" 这一条线索 ——
+    # 兜底分支必须真把正文写进去（2026-09-26 真机：改造前这里静默落空）。
+    api = {"1610": {"inputs": {"String": "模板里烘焙的旧正文"}}}
+    exposed = [{"node_id": "1610", "field": "String", "control": "text", "binding": "prompt"}]
+    missing = workflow_injector.inject_template_values(api, exposed, {}, "新正文", "")
+    assert missing == []
+    assert api["1610"]["inputs"]["String"] == "新正文"
+
+
+def test_提示词不落到非文本字段():
+    # 键名大小写不敏感后仍要认 _TEXT_FIELDS 的语义优先级：只有一个 STRING 能装正文时，
+    # 绝不能落进 filename_prefix 这类恰好也是字符串的字段（旧实现按「首个字符串字段」
+    # 兜底，键序一变就写错地方）。
+    api = {"9": {"inputs": {"filename_prefix": "Demiurge_x", "STRING": "old"}}}
+    workflow_injector.inject_template_values(api, [], {}, "hello", "9")
+    assert api["9"]["inputs"]["STRING"] == "hello"
+    assert api["9"]["inputs"]["filename_prefix"] == "Demiurge_x"

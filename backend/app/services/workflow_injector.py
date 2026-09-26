@@ -154,7 +154,10 @@ def inject_template_values(
             pid = str(target_field["node_id"])
     if prompt and pid and pid in api:
         inp = api[pid].setdefault("inputs", {})
-        target = next((k for k in _TEXT_FIELDS if k in inp), None)
+        # 字段名大小写不敏感（原生 String 节点的输入键就是 "String"）：按 _TEXT_FIELDS 的
+        # 优先级顺序取，找不到才退回「首个字符串字段」。改造前键名全小写时逐字等价。
+        lowered = {str(k).lower(): k for k in inp}
+        target = next((lowered[name] for name in _TEXT_FIELDS if name in lowered), None)
         if target is None:
             target = next((k for k, v in inp.items() if isinstance(v, str)), None)
         if target is not None:

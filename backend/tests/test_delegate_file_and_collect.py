@@ -440,3 +440,83 @@ def test_collect嵌入配置来自user_state不经模型参数():
     assert "embed_base" not in (cap.params_schema.get("properties") or {})
     base, key, model = capability_handlers._embed_config_from_state()
     assert isinstance(base, str) and isinstance(key, str) and isinstance(model, str)
+
+
+def _离线采集(store, monkeypatch):
+    """把 ComfyUI / 快照 / RAG 全部替换成内存桩，返回 (works, upserted, indexed)。"""
+    from app.services import chat_snapshot, comfyui_client
+
+    upserted: list[dict] = []
+    indexed: list[dict] = []
+
+    def fake_fetch_result(url, prompt_id, filter_node_ids=None):
+        return {"status": "done",
+                "images": [{"filename": f"{prompt_id}.png", "subfolder": "", "type": "output"}],
+                "videos": [], "audios": [], "texts": []}
+
+    monkeypatch.setattr(comfyui_client, "fetch_result", fake_fetch_result)
+    monkeypatch.setattr(comfyui_client, "fetch_view",
+                        lambda url, filename, type="output", subfolder="", timeout=15:
+                        (f"bytes-{filename}".encode(), "image/png"))
+    monkeypatch.setattr(chat_snapshot, "upsert", lambda _tid, msg: upserted.append(msg))
+    import app.services.rag_store as rag_store
+    monkeypatch.setattr(rag_store, "index_generation",
+                        lambda repo_id, cfg, prompt, tags="", image_url="", **kw:
+                        indexed.append({"prompt": prompt, "url": image_url}))
+    return store["works"], upserted, indexed
+
+
+def test_采集按变体原序对齐_中间变体失败不串位(store, monkeypatch):
+    """2026-09-26 核对：只收成功条目会让「采到第几条」与「第几个变体」错位 ——
+    第 2 个变体提交失败时，第 3 个变体的产物会被命名成 02-*、挂上第 2 个变体的套装名
+    与提示词（落盘名 / 对话消息 / RAG 三处一起错配到别的变体上）。"""
+    from pathlib import Path
+
+    works, upserted, indexed = _离线采集(store, monkeypatch)
+    out = capability_handlers.collect_comfy_outputs(
+        comfyui_url="http://127.0.0.1:8188", output_dir=str(works), repo_id="work",
+        names=["图0531", "图0532", "图0533"], prompts=["正文一", "正文二", "正文三"],
+        submit_result={"submitted": 2, "failed": 1, "results": [
+            {"index": 0, "ok": True, "prompt_id": "pid-1", "prompt": "正文一", "name": "0531"},
+            {"index": 1, "ok": False, "detail": "缺输入图"},
+            {"index": 2, "ok": True, "prompt_id": "pid-3", "prompt": "正文三", "name": "0533"},
+        ]},
+        timeout_seconds=10)
+
+    assert out["collected"] == 2
+    on_disk = sorted(p.name for p in Path(works).rglob("*.png"))
+    assert on_disk[0].startswith("01-图0531-")     # 第一个变体
+    assert on_disk[1].startswith("03-图0533-")     # 第三个变体仍是 03-，不是 02-
+    assert upserted[0]["text"].startswith("图0531")
+    assert upserted[1]["text"].startswith("图0533")
+    assert indexed[0]["prompt"] == "正文一"
+    assert indexed[1]["prompt"] == "正文三"
+
+
+def test_采集用submit回带的变体名命名产物(store, monkeypatch):
+    """模型没在 collect 步骤写 names 时，产物名与消息标签仍要带变体名（图号）——
+    名字由 submit_batch 回带的 results[].name 兜底，扩展名不进文件名。"""
+    from pathlib import Path
+
+    works, upserted, _indexed = _离线采集(store, monkeypatch)
+    out = capability_handlers.collect_comfy_outputs(
+        comfyui_url="http://127.0.0.1:8188", output_dir=str(works), repo_id="work",
+        submit_result={"submitted": 1, "failed": 0, "results": [
+            {"index": 0, "ok": True, "prompt_id": "pid-1", "prompt": "正文", "name": "0531.jpg"},
+        ]},
+        timeout_seconds=10)
+
+    assert out["collected"] == 1
+    png = next(Path(works).rglob("*.png"))
+    assert png.name.startswith("01-0531-")
+    assert upserted[0]["text"] == "0531.jpg\n\n正文"
+
+
+def test_产物标签清洗():
+    slug = capability_handlers._artifact_label_slug
+    assert slug("0531.jpg") == "0531"
+    assert slug("冬·套一") == "冬·套一"
+    assert slug("../../etc/passwd") == "passwd"
+    assert slug("a b:c") == "a b_c"
+    assert slug("   ") == ""
+    assert len(slug("x" * 80)) == 32

@@ -73,7 +73,10 @@ def submit_batch(template_id: str, variants: list[dict[str, Any]], prompt: str =
                 outcome["lora_unresolved"] = unresolved
             results.append({"index": index, "ok": True,
                             "prompt_id": outcome.get("prompt_id"),
-                            "prompt": step_prompt})
+                            "prompt": step_prompt,
+                            # 变体名（套装名/图号）随结果回带：collect 侧据此给产物命名与
+                            # 打标签，模型不必在 collect 步骤重复写一遍 names。
+                            "name": str(values.get("name") or "")})
         except WorkflowSubmissionError as exc:
             results.append({"index": index, "ok": False, "detail": str(exc.detail)})
     return {
@@ -160,6 +163,29 @@ def _ordered_submit_items(submit_result: dict[str, Any] | list[Any] | None) -> l
     return []
 
 
+def _slot_of(item: dict[str, Any], fallback: int) -> int:
+    """取该条提交结果所属的**变体原序**（submit_batch 的 results[].index）；坏值退回 fallback。"""
+    try:
+        return int(str(item.get("index")))
+    except (TypeError, ValueError):
+        return fallback
+
+
+_UNSAFE_FILENAME_RE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+
+
+def _artifact_label_slug(label: str) -> str:
+    """把变体标签（图号/套装名）洗成可进文件名的短串；洗不出有效内容则返回空串。
+
+    `0531.jpg` → `0531`（吃常见扩展名）；去路径成分与 Windows 非法字符；限长 32。
+    """
+    stem = str(label or "").strip().replace("\\", "/").rsplit("/", 1)[-1]
+    head, dot, tail = stem.rpartition(".")
+    if head and dot and tail and len(tail) <= 5 and not tail.isdigit():
+        stem = head
+    return _UNSAFE_FILENAME_RE.sub("_", stem).strip(" ._")[:32]
+
+
 def collect_comfy_outputs(prompt_ids: list[str] | None = None, comfyui_url: str = "",
                           output_dir: str = "", repo_id: str = "",
                           submit_result: dict[str, Any] | None = None,
@@ -183,6 +209,11 @@ def collect_comfy_outputs(prompt_ids: list[str] | None = None, comfyui_url: str 
     # submit_batch（results 数组）/ submit_template（顶层 prompt_id）/ 其列表三种形态
     # submit_result 链接值优先（编译期写入的 prompt_ids 可能是占位符）
     ids: list[str] = []
+    # 逐条记下**变体原序**与变体名：只收成功条目会让「采到第几条」与「第几个变体」错位——
+    # 一条提交失败就把后面所有产物的序号、names/prompts 全体串位（落盘名、对话消息、
+    # RAG 提示词跟着一起错配）。原序从 submit 结果一路带到落盘与入库。
+    slots: list[int] = []
+    var_names: list[str] = []
     if submit_result:
         items = submit_result if isinstance(submit_result, list) else [submit_result]
         for item in items:
@@ -190,11 +221,17 @@ def collect_comfy_outputs(prompt_ids: list[str] | None = None, comfyui_url: str 
                 continue
             if item.get("prompt_id"):
                 ids.append(str(item["prompt_id"]))
+                slots.append(_slot_of(item, len(slots)))
+                var_names.append(str(item.get("name") or ""))
             for r in item.get("results") or []:
                 if r.get("ok") and r.get("prompt_id"):
                     ids.append(str(r["prompt_id"]))
+                    slots.append(_slot_of(r, len(slots)))
+                    var_names.append(str(r.get("name") or ""))
     if not ids:
         ids = [str(x) for x in (prompt_ids or [])]
+        slots = list(range(len(ids)))
+        var_names = [""] * len(ids)
     if not ids:
         raise ValueError("collect 缺少 prompt_ids（或 inputs_from 提供的 submit_result）")
     # 总超时 = max(调用方给的 timeout_seconds, 每张 300s × 张数)——ComfyUI 串行
@@ -231,9 +268,17 @@ def collect_comfy_outputs(prompt_ids: list[str] | None = None, comfyui_url: str 
 
     results: list[dict[str, Any]] = []
     prompt_ids = ids
-    for index, prompt_id in enumerate(prompt_ids):
-        label = (names[index] if names and index < len(names) and str(names[index]).strip()
-                 else f"output-{index + 1}")
+    for position, prompt_id in enumerate(prompt_ids):
+        # 一律按**变体原序**取材：names 是调用方按变体写的，采到的第几条不能拿来当变体序
+        # （有失败变体时两者不等，会把标签/提示词/文件名整批错配到别的变体上）。
+        slot = slots[position] if position < len(slots) else position
+        label = ""
+        if names and slot < len(names) and str(names[slot]).strip():
+            label = str(names[slot]).strip()
+        elif position < len(var_names) and var_names[position].strip():
+            label = var_names[position].strip()      # submit_batch 回带的变体名
+        declared = label                             # 明确标签（进产物文件名）；空 = 只有序号
+        label = label or f"output-{slot + 1}"
         ck = _load_ck()
         prev = ck["done"].get(str(prompt_id))
         if prev and isinstance(prev, dict) and prev.get("file"):
@@ -268,21 +313,25 @@ def collect_comfy_outputs(prompt_ids: list[str] | None = None, comfyui_url: str 
         data, _content_type = comfyui_client.fetch_view(
             comfyui_url, first["filename"], type=first.get("type", "output"),
             subfolder=first.get("subfolder", ""))
-        # 固定序号命名（index+1 而非「已采数量」）：同一变体跨重启编号稳定，便于对照去重
-        dest = base / f"{index + 1:02d}-{uuid.uuid4().hex[:8]}.png"
+        # 固定序号命名（变体原序 +1 而非「已采数量」）：同一变体跨重启编号稳定，便于对照去重。
+        # 有明确变体标签（图号/套装名）时把它写进文件名 ⇒ 光看文件名就能对回是哪个变体；
+        # 无标签则退回纯序号命名（与旧格式一致）。
+        _slug = _artifact_label_slug(declared)
+        dest = base / (f"{slot + 1:02d}-{_slug}-{uuid.uuid4().hex[:8]}.png" if _slug
+                       else f"{slot + 1:02d}-{uuid.uuid4().hex[:8]}.png")
         dest.write_bytes(data)
         shown = view_urls.local_view(str(dest))
-        ck["done"][str(prompt_id)] = {"file": str(dest), "url": shown, "index": index}
+        ck["done"][str(prompt_id)] = {"file": str(dest), "url": shown, "index": slot}
         _save_ck(ck)
         # 图片消息内容 = 套装名称 + 完整提示词（优先 prompts 参数，其次 submit_result
         # 里该变体实际使用的 prompt，最后回退套装名）。
-        _prompt_text = str(prompts[index] if prompts and index < len(prompts) else "")
+        _prompt_text = str(prompts[slot] if prompts and slot < len(prompts) else "")
         if not _prompt_text and submit_result:
             # submit_batch 整包形态：prompt 在 results[i]（顶层只有 submitted/failed），
             # 直接 [submit_result][index].get("prompt") 会取到整包/空 dict → 提示词丢失，
-            # 消息只剩套装名（2026-09-04 唐柚 14 套画像实锤）。先摊平成逐条结果再按位取。
+            # 消息只剩套装名（2026-09-04 唐柚 14 套画像实锤）。先摊平成逐条结果再按变体原序取。
             _items = _ordered_submit_items(submit_result)
-            _item = _items[index] if index < len(_items) and isinstance(_items[index], dict) else {}
+            _item = _items[slot] if slot < len(_items) and isinstance(_items[slot], dict) else {}
             _prompt_text = str(_item.get("prompt") or "")
         if not _prompt_text:
             _prompt_text = str(label)

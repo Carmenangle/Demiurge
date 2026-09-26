@@ -23,10 +23,20 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 
 from app.config import TEMPLATES_DIR
+
+# 纯文本载体节点（原生 String / PrimitiveString / 自定义 Text）：字段名本身没有语义
+# （就是 "String"/"text"），节点类型也看不出去向，**只有节点标题**能声明它装的是什么。
+# Anima AIO 全能流整条流里没有任何 CLIPTextEncode——提示词在 title="POS Prompt" 的
+# String 节点里；只按节点类型判会漏掉它，正文注入静默落空（2026-09-26 真机实锤）。
+_TEXT_CARRIER_TYPES = ("string", "primitive", "text")
+_TEXT_CARRIER_FIELDS = frozenset({"string", "text", "value", "prompt", "positive"})
+_NEG_PROMPT_TITLE_RE = re.compile(r"negative|neg[\s_-]*prompt|负面|负向|反向", re.IGNORECASE)
+_POS_PROMPT_TITLE_RE = re.compile(r"positive|\bpos[\s_-]*prompt\b|正面|正向", re.IGNORECASE)
 
 
 def _ensure_dir() -> None:
@@ -79,6 +89,12 @@ def _infer_binding(record: dict, node_id: str, field_name: str) -> str:
         return "base_image"
     if "cliptextencode" in node_type and name == "text":
         return "negative_prompt" if any(word in title for word in ("negative", "负面", "负向")) else "prompt"
+    # 文本载体节点：字段名与节点类型都判不出语义，改由**节点标题**声明（负面优先）。
+    if any(mark in node_type for mark in _TEXT_CARRIER_TYPES) and name in _TEXT_CARRIER_FIELDS:
+        if _NEG_PROMPT_TITLE_RE.search(title):
+            return "negative_prompt"
+        if _POS_PROMPT_TITLE_RE.search(title):
+            return "prompt"
     return ""
 
 

@@ -105,6 +105,54 @@ def test_unique_api_format_empty_latent_is_automatically_exposed():
     ]
 
 
+def _文本载体记录() -> dict:
+    """Anima AIO 全能流的真实形状：整条流没有任何 CLIPTextEncode，提示词在 String 节点里。"""
+    return {"workflow_data": {"nodes": [
+        {"id": 1610, "type": "String", "title": "POS Prompt", "widgets_values": ["1girl"]},
+        {"id": 1611, "type": "String", "title": "NEG Prompt", "widgets_values": [""]},
+        {"id": 1348, "type": "String", "title": "负面", "widgets_values": [""]},
+        {"id": 1347, "type": "String", "title": "Anima首选质量词条", "widgets_values": [""]},
+        {"id": 1673, "type": "String", "title": "词条临时工作区", "widgets_values": [""]},
+        {"id": 1692, "type": "PrimitiveStringMultiline", "title": "画师串", "widgets_values": [""]},
+    ]}}
+
+
+def test_文本载体节点按标题声明binding():
+    record = _文本载体记录()
+    assert template_store._infer_binding(record, "1610", "String") == "prompt"
+    assert template_store._infer_binding(record, "1611", "String") == "negative_prompt"
+    assert template_store._infer_binding(record, "1348", "String") == "negative_prompt"
+    # 标题没声明正负的载体节点一律不猜（质量词条 / 临时工作区 / 画师串）
+    assert template_store._infer_binding(record, "1347", "String") == ""
+    assert template_store._infer_binding(record, "1673", "String") == ""
+    assert template_store._infer_binding(record, "1692", "String") == ""
+
+
+def test_无cliptextencode的模板归一后正文有落点():
+    # 整链验收：归一必须给 1610.String 补上 binding=="prompt"，否则 inject 的兜底分支
+    # 永不命中，模型写的正文被静默丢弃、出图用的是模板里烘焙的旧文本（2026-09-26 真机）。
+    normalized = template_store._normalize({
+        "workflow_data": _文本载体记录()["workflow_data"],
+        "exposed": [{"node_id": "1610", "field": "String", "control": "text", "default": "old"}],
+        "input_node_ids": ["1610"],
+    })
+
+    assert [(f["node_id"], f["field"], f.get("binding")) for f in normalized["exposed"]] == [
+        ("1610", "String", "prompt"),
+    ]
+
+
+def test_专用语义不被标题声明规则抢走():
+    # LoRA 加载器 / 音频节点即使标题里带 prompt 字样，也仍走各自的专用 binding。
+    record = {"workflow_data": {"nodes": [
+        {"id": 19, "type": "LoraLoader", "title": "Positive Prompt 风格 LoRA"},
+        {"id": 3, "type": "IndexTTS25EmotionVectorNode", "title": "Positive Prompt"},
+    ]}}
+    assert template_store._infer_binding(record, "19", "lora_name") == "lora_name"
+    assert template_store._infer_binding(record, "19", "strength_model") == "lora_weight"
+    assert template_store._infer_binding(record, "3", "text") == ""
+
+
 def test_legacy_semantic_aliases_become_hidden_bindings_and_duplicates_are_removed():
     normalized = template_store._normalize({
         "workflow_data": {"nodes": [

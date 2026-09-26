@@ -3,6 +3,12 @@ import {
   type ControlType, type ExposedField, type ParsedField, type ParsedNode,
 } from "../api/workflows";
 
+// 文本载体节点 binding 的标题声明规则（与后端 template_store 同口径，改动需双端同步）。
+const TEXT_CARRIER_TYPES = ["string", "primitive", "text"];
+const TEXT_CARRIER_FIELDS = new Set(["string", "text", "value", "prompt", "positive"]);
+const NEG_PROMPT_TITLE_RE = /negative|neg[\s_-]*prompt|负面|负向|反向/i;
+const POS_PROMPT_TITLE_RE = /positive|\bpos[\s_-]*prompt\b|正面|正向/i;
+
 export function inferWorkflowFieldControl(field: ParsedField): ControlType {
   const name = field.name.toLowerCase();
   if (name.includes("image") || name.includes("mask")) return "image";
@@ -34,6 +40,14 @@ export function inferWorkflowFieldBinding(node: ParsedNode, field: ParsedField):
   if (type.includes("loadimage") && (name === "image" || name === "images")) return "base_image";
   if (type.includes("cliptextencode") && name === "text") {
     return /negative|负面|负向/.test(title) ? "negative_prompt" : "prompt";
+  }
+  // 文本载体节点（原生 String / PrimitiveString / 自定义 Text）：字段名与节点类型都判不出
+  // 语义，只有节点标题能声明它装的是什么。Anima AIO 全能流没有 CLIPTextEncode——提示词
+  // 在 title="POS Prompt" 的 String 节点里，只按节点类型判会漏掉它。
+  if (TEXT_CARRIER_TYPES.some((mark) => type.includes(mark))
+      && TEXT_CARRIER_FIELDS.has(name)) {
+    if (NEG_PROMPT_TITLE_RE.test(title)) return "negative_prompt";
+    if (POS_PROMPT_TITLE_RE.test(title)) return "prompt";
   }
   // 音频（IndexTTS 系）：LoadAudio 参考音轨 / IndexTTS 台词与情感向量。
   // 情感字段名大小写归一（节点 widget 名 Happy/Angry…，与语义绑定 voice_emotion_<key> 解耦）。
