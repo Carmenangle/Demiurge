@@ -615,6 +615,121 @@ def test_fill_prompt_sections_模型直写数量不符时以标题抽取重建()
     assert all("模型只写了一套" not in v["prompt"] for v in variants)
 
 
+# ── 段落回填保真：逐项引用优先 / 重建按变体取回注入字段（2026-09-26）───────────
+# 真实需求：按《inpaint 遮挡核对表》逐图号批量 inpaint。模型只写段落引用
+# （prompt_section=图号），每个变体另带自己的输入图绑定
+# {"1608.image": "0218.jpg", "1758.image": "0218.png"}。旧实现只要「无直写 prompt」
+# 就整体重建 → 每变体的图号绑定被整批丢成公共值 ⇒ 全批共用同一张输入图。
+#
+# 两类文档共存：
+# ① 「## 【套名】…」标题 —— extract_all_sections 认得，可整体重建（固化流程 01）；
+# ② 「## 0218.jpg — …」图号标题 —— 无【】，整体重建拿不到段，只走逐项抽取。
+
+def _图号文档(数量: int) -> str:
+    """图号标题文档（无【】）：整体抽取拿不到段，只能逐项 prompt_section 抽取。"""
+    blocks = []
+    for i in range(数量):
+        blocks.append("\n".join([
+            f"## 020{i}.jpg — 第{i}张",
+            f"QRQ, masterpiece, 图{i}, " + "tag, " * 200,
+            "=" * 60,
+        ]))
+    return "\n".join(blocks)
+
+
+def _套名文档(数量: int) -> str:
+    """【套名】标题文档：extract_all_sections 认得，可整体重建。"""
+    blocks = []
+    for i in range(数量):
+        blocks.append("\n".join([
+            f"## 【图{i}】测试套装",
+            f"QRQ, masterpiece, 标记{i}, " + "tag, " * 200,
+            "=" * 60,
+        ]))
+    return "\n".join(blocks)
+
+
+def test_fill_prompt_sections_图号文档逐项回填并保留每变体注入字段():
+    """真实 inpaint 批量：逐图号一个变体，各自绑定自己的 jpg/png 输入。"""
+    docs = _图号文档(3)
+    plan = _plan(steps=[PlanStep(
+        id="s3", operation="workflow.submit_batch",
+        params={"template_id": "a546d311", "url": "http://127.0.0.1:8188",
+                "variants": [
+                    {"name": f"020{i}.jpg", "prompt_section": f"020{i}.jpg",
+                     "1608.image": f"020{i}.jpg", "1758.image": f"020{i}.png"}
+                    for i in range(3)
+                ]})],
+        approval_required=["workflow.submit_batch"])
+    filled = plan_compiler.fill_prompt_sections(plan, [
+        {"name": "inpaint_遮挡核对表.md", "text": docs},
+    ])
+    variants = plan.steps[0].params["variants"]
+    assert len(variants) == 3  # 逐项回填，不整体重建
+    assert filled == 3
+    for i, v in enumerate(variants):
+        assert v["1608.image"] == f"020{i}.jpg"  # 每变体自己的输入图未被覆盖
+        assert v["1758.image"] == f"020{i}.png"
+        assert f"图{i}" in v["prompt"]  # 拿到的是自己那一段，不是公共段
+    errors = plan_validator.validate(
+        plan, capabilities=all_capabilities(), configured_models={"chat", "image"})
+    assert not errors, errors
+
+
+def test_fill_prompt_sections_字符串引用少列时仍以文档全量重建():
+    """固化流程 01 原行为不变：模型只列部分段落名 ⇒ 卫生兜底仍以文档全量为准。"""
+    docs = _套名文档(3)
+    plan = _plan(steps=[PlanStep(
+        id="s3", operation="workflow.submit_batch",
+        params={"template_id": "a546d311", "url": "http://127.0.0.1:8188",
+                "variants": ["【图0】测试套装", "【图1】测试套装"]})],
+        approval_required=["workflow.submit_batch"])
+    plan_compiler.fill_prompt_sections(plan, [{"name": "doc.md", "text": docs}])
+    variants = plan.steps[0].params["variants"]
+    assert len(variants) == 3  # 文档真实段数（旧行为：整体重建）
+    assert all("masterpiece" in v["prompt"] for v in variants)
+    assert "标记2" in variants[2]["prompt"]  # 第三段同样来自文档抽取
+
+
+def test_fill_prompt_sections_数量不符重建时按变体取回注入字段():
+    """变体数与文档段数不符触发重建时，仍按 prompt_section 标记取回原变体字段。"""
+    docs = _套名文档(3)
+    plan = _plan(steps=[PlanStep(
+        id="s3", operation="workflow.submit_batch",
+        params={"template_id": "a546d311", "url": "http://127.0.0.1:8188",
+                "variants": [
+                    {"name": "【图0】测试套装", "prompt_section": "【图0】测试套装",
+                     "1608.image": "0200.jpg", "1758.image": "0200.png"},
+                    {"name": "【图1】测试套装", "prompt_section": "【图1】测试套装",
+                     "1608.image": "0201.jpg", "1758.image": "0201.png"},
+                ]})],
+        approval_required=["workflow.submit_batch"])
+    plan_compiler.fill_prompt_sections(plan, [{"name": "doc.md", "text": docs}])
+    variants = plan.steps[0].params["variants"]
+    assert len(variants) == 3  # 以文档段数为唯一真源
+    assert variants[0]["1608.image"] == "0200.jpg"
+    assert variants[1]["1608.image"] == "0201.jpg"
+    assert "1608.image" not in variants[2]  # 文档多出的段落无对应变体 ⇒ 无绑定
+    assert "标记2" in variants[2]["prompt"]
+
+
+def test_fill_prompt_sections_无引用时重建仍保住每变体注入字段():
+    """变体一个 prompt/prompt_section 都没写 ⇒ 走整体重建，但仍按序号取回自带字段。"""
+    docs = _套名文档(2)
+    plan = _plan(steps=[PlanStep(
+        id="s3", operation="workflow.submit_batch",
+        params={"template_id": "a546d311", "url": "http://127.0.0.1:8188",
+                "variants": [{"name": "甲", "1608.image": "a.jpg"},
+                             {"name": "乙", "1608.image": "b.jpg"}]})],
+        approval_required=["workflow.submit_batch"])
+    filled = plan_compiler.fill_prompt_sections(plan, [{"name": "doc.md", "text": docs}])
+    variants = plan.steps[0].params["variants"]
+    assert len(variants) == 2 and filled == 2
+    assert variants[0]["1608.image"] == "a.jpg"  # 按序号取回，不再整批丢成公共值
+    assert variants[1]["1608.image"] == "b.jpg"
+    assert all("masterpiece" in v["prompt"] for v in variants)
+
+
 def test_讨论生图提示词不是委派(monkeypatch):
     """2026-09-11 实锤：「跟我讨论各服装下的生图提示词」被「生图」二字拽进机械计划。
 

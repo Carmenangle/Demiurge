@@ -760,6 +760,44 @@ def _common_variant_extra(variants: list) -> dict:
     return extra
 
 
+def _rebuild_variants_from_sections(variants: list, sections: list[tuple[str, str]]) -> list[dict]:
+    """以文档标题抽取结果重建变体，尽量保住每个原变体自带的注入字段。
+
+    文档驱动批量（如按图号一一对应）里每个变体常自带绑定参数
+    （{"1608.image": "0218.jpg", "1758.image": "0218.png"}）；旧实现只写
+    name/prompt，这些字段被整体丢弃 → 整批变体共用同一张输入图。这里按
+    prompt_section 标记 / 变体名与段落名匹配取回原变体，匹配不上再按同序号兜底；
+    都没取到时退化为纯 name/prompt + 全批共有字段（_common_variant_extra）。
+    """
+    extras = _common_variant_extra(variants)
+    used: set[int] = set()
+    out: list[dict] = []
+    for index, (name, body) in enumerate(sections):
+        origin = None
+        for i, item in enumerate(variants):
+            if i in used or not isinstance(item, dict):
+                continue
+            marker = str(item.get("prompt_section") or "").strip()
+            vname = str(item.get("name") or "").strip()
+            if (marker and (marker in name or name in marker)) or (vname and vname == name):
+                origin = item
+                used.add(i)
+                break
+        if origin is None and index < len(variants) and index not in used:
+            candidate = variants[index]
+            if isinstance(candidate, dict):
+                origin = candidate
+                used.add(index)
+        if origin is not None:
+            merged = {key: value for key, value in origin.items() if key != "prompt_section"}
+            merged["name"] = name
+            merged["prompt"] = body
+            out.append(merged)
+        else:
+            out.append({"name": name, "prompt": body, **extras})
+    return out
+
+
 def fill_prompt_sections(plan, attachments: list[dict]) -> int:
     """把变体里的 prompt_section 引用按预读附件机械回填为完整提示词（确定性，无 LLM）。
 
@@ -782,15 +820,16 @@ def fill_prompt_sections(plan, attachments: list[dict]) -> int:
             {"name": item, "prompt_section": item} if isinstance(item, str) else item
             for item in variants
         ]
-        # 全变体都无可用提示词 → 从文档按标题重建全部变体（终极确定性兜底）
-        if not any(isinstance(v, dict) and (v.get("prompt") or v.get("positive_prompt"))
+        # 全变体都无可用提示词（既没直写 prompt，也没写 prompt_section 引用）→
+        # 从文档按标题重建全部变体（终极确定性兜底）。模型只要给了段落引用，就走下面
+        # 的逐项机械回填——逐项路径能保住每个变体自带的注入字段（如 1608.image）。
+        if not any(isinstance(v, dict) and (v.get("prompt") or v.get("positive_prompt")
+                                            or v.get("prompt_section"))
                    for v in variants):
             sections = extract_all_sections(docs)
             if sections:
-                _common = _common_variant_extra(variants)
-                step.params["variants"] = [
-                    {"name": name, "prompt": body, **_common} for name, body in sections
-                ]
+                # 重建统一走 helper：变体虽无引用，自带的注入字段仍按序号取回
+                step.params["variants"] = _rebuild_variants_from_sections(variants, sections)
                 filled += len(sections)
                 continue
         step.params["variants"] = variants
@@ -817,10 +856,8 @@ def fill_prompt_sections(plan, attachments: list[dict]) -> int:
                 for v in variants
             )
             if len(variants) != len(sections) or has_junk:
-                _common = _common_variant_extra(variants)
-                step.params["variants"] = [
-                    {"name": name, "prompt": body, **_common} for name, body in sections
-                ]
+                # 重建时按变体匹配取回自带字段（图号绑定等），不再整批丢成公共值
+                step.params["variants"] = _rebuild_variants_from_sections(variants, sections)
                 filled += len(sections)
     return filled
 
