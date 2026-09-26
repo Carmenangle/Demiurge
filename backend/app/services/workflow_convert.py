@@ -1,6 +1,8 @@
 """把 ComfyUI UI(编辑器导出)格式工作流转换为 API(/prompt)格式。
 
 难点：
+- 编辑器导出的图可能含 subgraph / rgthree Set-Get / 纯前端节点，而 /prompt 只接受
+  扁平图；这部分由 workflow_flatten 在前端语义上展开（见其模块文档）。
 - UI 格式的 widgets_values 是无名数组，需按节点类型的输入顺序还原成 {名: 值}。
 - seed 类节点有隐藏的 control_after_generate 控件，会多占一个 widget 值，API 格式不需要它。
 - 连线输入要从顶层 links 反查 [src_node_id, src_slot]。
@@ -10,7 +12,7 @@
 """
 from __future__ import annotations
 
-from app.services import comfyui_client
+from app.services import comfyui_client, workflow_flatten
 from app.services.workflow_parser import PASSTHROUGH_TYPES, WIDGET_NAMES
 
 # 不进入 API 格式的隐藏/UI-only 控件名
@@ -60,7 +62,12 @@ _SEED_LIKE = {"seed", "noise_seed", "rand_seed"}
 
 
 def ui_to_api(workflow: dict, comfy_url: str = "") -> dict:
-    """UI 格式 → API 格式。非 UI 格式（已是 API）原样返回。"""
+    """UI 格式 → API 格式。非 UI 格式（已是 API）原样返回。
+
+    先做一次前端级展平（subgraph 内联 / Set-Get 线性化 / UI-only 剔除），
+    因为 /prompt 只接受扁平图；不含这些结构的工作流走原路径、输出逐字节不变。
+    """
+    workflow, widget_overlay = workflow_flatten.flatten(workflow)
     nodes = workflow.get("nodes")
     if not isinstance(nodes, list):
         return workflow  # 已是 API 格式或无法识别
@@ -171,5 +178,10 @@ def ui_to_api(workflow: dict, comfy_url: str = "") -> dict:
                     wi += 1
 
         api[nid] = {"class_type": ntype, "inputs": inputs}
+        # 提升到 subgraph 实例上的 widget 值：体内节点里那份是旧值，必须被实例值覆盖
+        # （前端提交前同语义）。已连线的输入以连线为准，不被覆盖。
+        for name, value in (widget_overlay.get(nid) or {}).items():
+            if name not in linked_names:
+                inputs[name] = value
 
     return api
