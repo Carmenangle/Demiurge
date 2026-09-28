@@ -5181,3 +5181,20 @@ def test_第59刀_firstlast模式extras编译段桥(monkeypatch):
         assert bridge, "段桥必须编译 transition_video_request"
         submit = bridge.get("submit") or {}
         assert submit.get("prompt"), "桥视频必须有提示词"
+
+
+# ── 第 66 刀：POV 覆盖面的「防呆登记」接线锁（2026-09-28）────────────────────────
+#
+# 告警必须**真的接进 `illustration.profile` 事件的派发点**，否则「可观测」是句空话。
+# 真机取证：`prompt_profile` **33/33 全 `anima_tags`** ⇒ `natural_language` 零使用，
+# 而它刻意没有机械层（手册红线 79 ④）⇒ 一旦被选用，要能在 trace 里**看见**。
+
+
+def test_第66刀_告警已接进profile事件派发点():
+    import inspect
+
+    from app.services import agent_agency as aag
+
+    src = inspect.getsource(aag._wb_comfy_profile)
+    assert '"illustration.profile"' in src
+    assert "viewpoint_coverage_warning=" in src

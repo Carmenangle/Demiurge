@@ -5964,3 +5964,600 @@ def test_第59刀_重试也失败时首稿纳入归一候选(monkeypatch):
 
     assert diagnostics.get("strategy") == "normalized_two_line+retry"
     assert "long black hair" in prompt           # 首稿被归一候选捞回
+
+
+# ── 第 60 刀：第一人称「旁观/取景矛盾机位词」机械闸 ────────────────────────────────
+#
+# 真机实锤（2026-09-28 · slot `illo-req-09f79e6f-…-53` **同一槽位四次重生成**）：
+#   `illustration.request` 四次都写 `viewpoint_detail={viewpoint: first_person,
+#   auto: third_person, source: override, conflict: true}`、`frame_subjects=["妲千沁"]`
+#   —— **人称判定层健康**（37 刀摘叙事者、`override` 正确压住自动档）；
+#   但 `illustration.submitted` 的最终提示词：第 1 次 `first person view, pov,
+#   looking down at face`、第 4 次 `from behind, three-quarter back view, … penis against
+#   rear, hand on hip, hand on knee` ⇒ `_VIEWPOINT_FORBIDDEN_CAMERA`（本模块 2928）**明列**
+#   这些词，却**从未被任何代码消费**（全仓只有定义处与注释 —— 只被抄进了中文指令）
+#   ⇒ 模型不听话时禁词直接提交给 ComfyUI ⇒ 用户实报「手选第一人称，出来的却是
+#   第三人称人物在场的画面」。
+# 修法：把这张**已建好却空转**的禁表接成机械闸（纯剔除、宁缺勿猜，与 31/40/46 刀同族）。
+# ⚠ 三态判据**复用** `_first_person_framing`（近身帧＝全表／风景帧＝恒禁那一半／
+#   无接触无环境＝不动），不得另写一份。
+
+
+def test_第60刀_近身帧剔掉旁观与取景矛盾机位词():
+    """近身接触帧 ⇒ 用全表 `_VIEWPOINT_FORBIDDEN_CAMERA`（旁观 ＋ 取景矛盾两半）。"""
+    scene = _fp_scene()                      # narrative 命中「唇角」⇒ 上半身近身帧
+    head = (
+        "masterpiece, best quality, solo female, silver hair, lying on side, "
+        "from behind, three-quarter back view, looking down at face, "
+        "penis against rear, hand on hip, close-up"
+    )
+
+    out = profiles._strip_bystander_camera_tags(head, scene)
+
+    for banned in ("from behind", "three-quarter back view", "looking down at face"):
+        assert banned not in out
+    # 未命中的 tag 逐字保留、顺序不变
+    assert out == (
+        "masterpiece, best quality, solo female, silver hair, lying on side, "
+        "penis against rear, hand on hip, close-up"
+    )
+
+
+def test_第60刀_风景帧只剔恒禁那一半():
+    """第 56 刀三态：风景帧放行全景 ⇒ 只剔 `_VIEWPOINT_BYSTANDER_ONLY`；
+    `wide shot` / `full body` 这类**取景**词必须原样保留（用户定案：不能限制死特写中景）。
+
+    ⚠ 夹具必须**不含任何接触词**：`_VIEW_FACE_CONTACT_RE` 含「唇」⇒ 用 `_fp_scene()` 的
+    默认 `appearance`（「朱唇饱满」）会把本帧带成近身帧、测不到风景分支。"""
+    scene = _fp_scene(
+        narrative="山风穿过廊下，檐角的灯在远处晃。",
+        appearance="银发高马尾、黑蕾丝眼罩",
+        wardrobe="外袍",
+    )
+    head = "wide shot, full body, from behind, god's eye view, distant mountains"
+
+    out = profiles._strip_bystander_camera_tags(head, scene)
+
+    assert out == "wide shot, full body, distant mountains"
+
+
+def test_第60刀_第三人称与缺人称键逐字节不动():
+    """零回归锁：`viewpoint` 非 `first_person`（含缺键／空串／None）⇒ 逐字节返回原串。"""
+    head = "from behind, wide shot, close-up"
+    for scene in (
+        _fp_scene(viewpoint="third_person"), _fp_scene(viewpoint=""),
+        _fp_scene(viewpoint=None), {},
+    ):
+        assert profiles._strip_bystander_camera_tags(head, scene) == head
+
+
+def test_第60刀_无接触无环境帧不收():
+    """零回归锁：两边接触表都空、也无环境词 ⇒ `_first_person_framing` 为空
+    ⇒ 没有收束依据 ⇒ 闸同样不动（与提示词侧「整个收束块不写」同口径）。
+
+    ⚠ 与第 56 刀同款夹具（**不带 `appearance` / `wardrobe`**）——
+    那两个字段也进 `_first_person_framing` 的 blob，`_fp_scene()` 默认值里
+    「朱唇饱满」含「唇」、「宽厚圆硕的臀」含「臀」，会把本帧带成近身帧。"""
+    scene = {"viewpoint": "first_person", "narrator": "凌渊", "rating": "sfw",
+             "narrative": "她想了想，没说话。"}
+    assert profiles._strip_bystander_camera_tags("from behind, close-up", scene) == \
+        "from behind, close-up"
+
+
+def test_第60刀_未命中时逐字节返回原串():
+    """零回归锁：行内没有任何禁词 ⇒ 内容逐字节不变（不改写、不重排、不去重）。"""
+    scene = _fp_scene()
+    head = "masterpiece, best quality, solo female, close-up, her back arching toward the camera"
+    assert profiles._strip_bystander_camera_tags(head, scene) == head
+
+
+def test_第60刀_全部命中时不把首行剔空():
+    """剔空保护（与 57 刀 `_strip_lower_body` 同族）：整行都是禁词 ⇒ 放弃本次剔、
+    返回原串（宁缺勿猜 —— 清空首行会让下游质量行与内容 tag 全数丢失）。"""
+    scene = _fp_scene()
+    head = "from behind, rear view"
+    assert profiles._strip_bystander_camera_tags(head, scene) == head
+
+
+def test_第60刀_闸判据与first_person_framing同口径():
+    """一致性锁：闸的三态必须**复用** `_first_person_framing`（同一个三态判据），
+    不得各写一份 —— 否则会出现「提示词声明风景帧、闸却按近身帧剔掉全景词」。"""
+    import inspect
+
+    src = inspect.getsource(profiles._first_person_camera_ban)
+    assert "_first_person_framing(scene)" in src
+    assert "_VIEWPOINT_BYSTANDER_ONLY" in src
+    assert "_VIEWPOINT_FORBIDDEN_CAMERA" in src
+
+
+def test_第60刀_闸已接进anima归一化收口():
+    """接线锁：`_normalize` 的 anima_tags 分支必须真的调用本闸
+    （禁表建好却空转，正是本刀的成因）。"""
+    import inspect
+
+    src = inspect.getsource(profiles._normalize)
+    assert "_strip_bystander_camera_tags(" in src
+
+
+def test_第60刀_端到端首行禁词被剔而第二行不动():
+    """端到端：走 `_normalize` 全路径，首行禁词必须消失；第二行是自由文本、不受闸影响。"""
+    scene = _fp_scene()
+    raw = (
+        "masterpiece, best quality, anime coloring, solo female, from behind, close-up\n"
+        "The camera looks at her back from behind while she lies on her side."
+    )
+
+    out = profiles._normalize("anima_tags", raw, scene)
+
+    head, _, prose = out.partition(",\n")
+    assert "from behind" not in head
+    assert "close-up" in head                    # 未命中的镜头词保留
+    assert "from behind" in prose                # 第二行不动
+
+
+# ── 第 61 刀：第一人称「POV 正向声明」机械补（2026-09-28 · 用户定案「机械补」）──────
+#
+# 真机背景（第 60 刀同一批取证）：同一 slot 四次重生成里 `first person view`／`pov`
+# **只在第 1 次出现**（profile LLM 自觉写的），第 2／3／4 次全缺 ⇒ 生图模型按默认
+# **第三人称**构图、把叙事者的躯体当第三方画进画面。全仓 grep 证明该词形**没有任何注入点**
+# （只出现在注释里）。
+# 用户定案（原话）：「**机械补**」。
+#
+# ⚠ 与红线 23（「不机械拼硬标签」）的关系：红线 23 管的是**角色性别**那类「注入事实、
+#   让模型自己措辞」的场景；本刀补的是**镜头身份声明**——它不是事实、是**视角口径**，
+#   与 `_viewpoint_clause` 的中文条款同源 ⇒ 用户已就本项单独拍板，不构成对红线 23 的推翻。
+
+
+def test_第61刀_第一人称缺声明时机械补上():
+    scene = _fp_scene()
+
+    out = profiles._ensure_first_person_view_tag(
+        "masterpiece, best quality, solo female, close-up", scene)
+
+    assert out == "masterpiece, best quality, solo female, close-up, first person view, pov"
+
+
+def test_第61刀_已有等价声明时逐字节不动():
+    """幂等锁：`first person view`／`first-person view`／`pov`／`male viewer pov` 任一在场
+    ⇒ 不重复追加（否则首行会被叠成 `pov, pov`）。"""
+    scene = _fp_scene()
+    for head in (
+        "masterpiece, solo female, first person view",
+        "masterpiece, solo female, first-person view",
+        "masterpiece, solo female, pov",
+        "masterpiece, solo female, male viewer pov",
+        "masterpiece, solo female, no viewer face, pov",
+    ):
+        assert profiles._ensure_first_person_view_tag(head, scene) == head
+
+
+def test_第61刀_第三人称与缺人称键逐字节不动():
+    """零回归锁：`viewpoint` 非 `first_person`（含缺键／空串／None）⇒ 逐字节返回原串。"""
+    head = "masterpiece, solo female, close-up"
+    for scene in (
+        _fp_scene(viewpoint="third_person"), _fp_scene(viewpoint=""),
+        _fp_scene(viewpoint=None), {},
+    ):
+        assert profiles._ensure_first_person_view_tag(head, scene) == head
+
+
+def test_第61刀_空串不补():
+    """宁缺勿猜：空串／纯空白没有位置语义 ⇒ 原样返回（不得补出一条孤零零的 tag）。"""
+    scene = _fp_scene()
+    assert profiles._ensure_first_person_view_tag("", scene) == ""
+    assert profiles._ensure_first_person_view_tag("   ", scene) == "   "
+
+
+def test_第61刀_端到端第一人称首行必含声明():
+    scene = _fp_scene()
+    raw = (
+        "masterpiece, best quality, anime coloring, solo female, close-up, lying on side\n"
+        "She lies on her side while the man's hand rests on her cheek."
+    )
+
+    out = profiles._normalize("anima_tags", raw, scene)
+
+    head = out.splitlines()[0]
+    assert "first person view" in head
+    assert "pov" in head
+
+
+def test_第61刀_端到端第三人称不补():
+    scene = _fp_scene(viewpoint="third_person")
+    raw = (
+        "masterpiece, best quality, anime coloring, 2girls, close-up\n"
+        "The two women stand facing each other."
+    )
+
+    out = profiles._normalize("anima_tags", raw, scene)
+
+    assert "first person view" not in out.splitlines()[0]
+
+
+def test_第61刀_接线锁_闸与补都接在归一化收口():
+    import inspect
+
+    src = inspect.getsource(profiles._normalize)
+    assert "_strip_bystander_camera_tags(" in src
+    assert "_ensure_first_person_view_tag(" in src
+
+
+# ── 第 62 刀：第一人称「叙事者部位事实」的取舍（2026-09-28 · 用户定性）──────────────
+#
+# 用户定性（原话）：「2 的问题在于第一人称的**视觉下的取舍**，即第三人称是保证内容提示词
+#   选择合适视角**全面展示信息**，那第一人称就是在内容的基础上**用第一人称去进行取舍或修改
+#   使其符合第一人称情况下的特色**」。
+#
+# 真机现场（第 60 刀同一批取证 · 第 4 次重生成）：该帧是**上半身近身帧**（face 命中），
+# 首行却**同时**写着 `an erect penis pressing against her buttocks`（下半身）与
+# `… her face`（上半身）—— 两条**物理上不可能同现**，且前者根本装不进上半身取景。
+# ⇒ 根因：57 刀 ③ 的「取景筛分」**只覆盖 `appearance`/`wardrobe`**，
+#   **不覆盖 `_narrator_limb_facts` 产出的动作事实**。
+# 修法＝把 57 刀 ③ 的同一条口径（**面优先**、**只做一个方向**、**剔空保护**）
+#   延伸到叙事者部位事实。⚠ 只做「上半身帧剔下半身」这一个方向，反向不猜。
+
+
+def _第一人称部位场景(**overrides):
+    scene = {
+        "viewpoint": "first_person",
+        "narrator": "甲",
+        "actors": ["乙"],
+        "subjects": [{"name": "乙"}],
+        "narrative": "那条肉棒贴着她脸颊，又抵在她腰上。",
+        "appearance": "朱唇饱满",
+        "wardrobe": "月白中衣",
+    }
+    scene.update(overrides)
+    return scene
+
+
+def test_第62刀_上半身帧剔掉下半身部位事实():
+    """真机复现：上半身近身帧里的 `… her buttocks` 必须被剔（与 57 刀 ③ 同口径）。"""
+    facts = profiles._narrator_limb_facts(_第一人称部位场景())
+
+    assert "an erect penis pressing against her face" in facts
+    assert not [fact for fact in facts if "buttocks" in fact], "上半身帧不得留下下半身部位事实"
+
+
+def test_第62刀_下半身帧不筛只做一个方向():
+    """保守锁：只有下半身接触点（无任何面颈胸肩词）⇒ **反向不猜**（与 57 刀 ③ 同口径）。"""
+    scene = _第一人称部位场景(
+        narrative="那条肉棒抵在她腰上。",
+        appearance="银发高马尾",
+        wardrobe="外袍",
+    )
+
+    facts = profiles._narrator_limb_facts(scene)
+
+    assert facts == ["an erect penis pressing against her buttocks"]
+
+
+def test_第62刀_无接触依据时不筛():
+    """零回归锁：本帧无 face 依据（既非上半身帧）⇒ 不筛（与 57 刀 ③「宁缺勿猜」同口径）。"""
+    scene = _第一人称部位场景(
+        narrative="那条肉棒抵在她腰上。",
+        appearance="银发高马尾",
+        wardrobe="外袍",
+    )
+
+    assert profiles._first_person_upper_frame(scene) is False
+    assert profiles._narrator_limb_facts(scene) == ["an erect penis pressing against her buttocks"]
+
+
+def test_第62刀_剔空保护不把事实全剔掉():
+    """剔空保护（与 57 刀 ③ `_strip_lower_body` 同族）：整帧只有下半身事实、
+    而帧又是上半身 ⇒ 剔空 ⇒ **保留原文**（清空会让「叙事者局部入画」整条消失）。"""
+    scene = _第一人称部位场景(narrative="那条肉棒抵在她腰上。", appearance="朱唇饱满")
+
+    assert profiles._narrator_limb_facts(scene) == ["an erect penis pressing against her buttocks"]
+
+
+def test_第62刀_第三人称与无人称键仍是空表():
+    """零回归锁（与 43／47 刀同一条）：非第一人称 ⇒ 不产任何事实。"""
+    for viewpoint in ("third_person", "", None):
+        assert profiles._narrator_limb_facts(_第一人称部位场景(viewpoint=viewpoint)) == []
+
+
+def test_第62刀_取舍判据与57刀筛分同口径():
+    """一致性锁：上半身判据必须**复用同一个 4 键 blob ＋ `_VIEW_FACE_CONTACT_RE`**
+    （不得另写一份），否则会出现「提示词侧算上半身、事实侧算下半身」的自相矛盾。"""
+    import inspect
+
+    src = inspect.getsource(profiles._first_person_upper_frame)
+    assert "_VIEW_FACE_CONTACT_RE" in src
+    for key in ("narrative", "appearance", "wardrobe", "draft_prompt"):
+        assert key in src
+
+
+# ── 第 63 刀：POV 声明「按三态分级」＋ 幂等识别面的**保守边界**（2026-09-28）──────
+#
+# 起因＝第 61 刀落完后的两个后患（先取证再动手）：
+#   · 后患 A：幂等识别面若放宽到 `point of view`，会把 `from her/his point of view`
+#     （**第三人称下也可能出现**的「从某人视角拍」）误当「已有第一人称声明」⇒ **不补**
+#     ⇒ 缺陷反向复发。**方向原则：宁可重复追加（冗余、无害），不可误认为已有（漏补、致命）**
+#     ⇒ 只认**无歧义的第一人称写法**：`first person perspective`／`from my point of view`。
+#   · 后患 B：`pov` 在 Danbooru 里隐含「**视角人物的部分身体可见**」⇒ 风景帧（用户定案「放行
+#     全景、彰显风景全貌」）与「无收束依据」帧若也补 `pov`，与该帧意图打架（可能诱导在风景里
+#     画进一只手）⇒ 收成三态：**只有近身接触帧才补 `pov`**，其余只补 `first person view`。
+
+
+def test_第63刀_受控放宽后这两条第一人称写法被认作已有声明():
+    """明确无歧义的第一人称写法 ⇒ 幂等（不重复追加）。"""
+    scene = _fp_scene()
+    for head in (
+        "masterpiece, solo female, first person perspective",
+        "masterpiece, solo female, from my point of view",
+    ):
+        assert profiles._ensure_first_person_view_tag(head, scene) == head
+
+
+def test_第63刀_有歧义的point_of_view一律不认_宁可冗余不可漏补():
+    """方向锁：`from her/his/… point of view` **不得**被认作第一人称声明 ——
+    它同样可能是第三人称下「从某角色视角拍」的描述；认错 ⇒ **不补** ⇒ 缺陷反向复发。
+    正确行为是**照常补**（冗余无害）。"""
+    scene = _fp_scene()
+    for tail in (
+        "from her point of view", "from his point of view",
+        "from the woman's point of view", "from the man's point of view",
+    ):
+        head = f"masterpiece, solo female, {tail}"
+        out = profiles._ensure_first_person_view_tag(head, scene)
+        assert out == f"{head}, first person view, pov", f"{tail} 必须仍被补上"
+
+
+def test_第63刀_近身帧补两个标签():
+    scene = _fp_scene()                      # narrative 命中「唇角」⇒ 近身接触帧
+    assert profiles._first_person_frame_kind(scene) == "near"
+    out = profiles._ensure_first_person_view_tag("masterpiece, solo female", scene)
+    assert out == "masterpiece, solo female, first person view, pov"
+
+
+def test_第63刀_风景帧只补first_person_view不补pov():
+    """`pov` 隐含「视角人物局部可见」⇒ 风景帧（放行全景）不声明它。"""
+    scene = _fp_scene(
+        narrative="山风穿过廊下，檐角的灯在远处晃。",
+        appearance="银发高马尾", wardrobe="外袍",
+    )
+    assert profiles._first_person_frame_kind(scene) == "scenery"
+    out = profiles._ensure_first_person_view_tag("masterpiece, solo female", scene)
+    assert out == "masterpiece, solo female, first person view"
+    assert "pov" not in out
+
+
+def test_第63刀_无收束依据帧只补first_person_view():
+    """无接触、也无环境词 ⇒ 没有「有局部入画」的正向证据 ⇒ 保守只补声明（宁缺勿猜）。"""
+    scene = {"viewpoint": "first_person", "narrator": "甲", "rating": "sfw",
+             "narrative": "她想了想，没说话。"}
+    assert profiles._first_person_frame_kind(scene) == ""
+
+    out = profiles._ensure_first_person_view_tag("masterpiece, solo female", scene)
+
+    assert out == "masterpiece, solo female, first person view"
+    assert "pov" not in out
+
+
+def test_第63刀_三态与禁词闸同源_第三人称两处都零动作():
+    """一致性锁＋反向锁：`_first_person_frame_kind` 必须与禁词闸**同源**
+    （都从 `_first_person_framing` 派生）；第三人称 ⇒ 三态为空、禁词 0 条、POV 不补。"""
+    import inspect
+
+    src = inspect.getsource(profiles._first_person_frame_kind)
+    assert "_first_person_framing(scene)" in src
+    assert "不设近景上限" in src
+
+    third = _fp_scene(viewpoint="third_person")
+    assert profiles._first_person_frame_kind(third) == ""
+    assert profiles._first_person_camera_ban(third) == ()
+    head = "masterpiece, solo female"
+    assert profiles._ensure_first_person_view_tag(head, third) == head
+
+
+# ── 第 64 刀：把 POV 保证与禁词闸扩到 krea2 / niji_sections（2026-09-28）────────
+#
+# 第 63 刀实测登记：机制**只覆盖 `anima_tags`** ⇒ 换 profile 出图等于回到缺陷态。
+# 本刀**按输出结构决定落点**（不硬套 anima 的做法）：
+#   · `krea2` —— 两段式（首行 tags ＋ 散文），与 anima **同构** ⇒ 首行照 anima 处理；
+#   · `niji_sections` —— 四段（`subject`/`style`/`additions`/参数），POV 声明与机位词
+#     都属**内容**语义 ⇒ **只动 `subject` 段**；`style`/`additions` 是画风与附加词（塞 POV 会污染
+#     风格语义）、`suffix` 是 niji 参数串（动了写坏参数语法）⇒ 一律不动；
+#   · `natural_language` —— **单段散文**：机械剔词会伤语法/语义，追加声明句又会违反
+#     红线 28「交付文本只写画面」（不得出现机制自述）⇒ **本刀刻意不动**，只登记。
+
+
+def test_第64刀_krea2第一人称首行补声明并剔禁词():
+    scene = _fp_scene()
+    raw = (
+        "masterpiece, best quality, solo female, from behind, close-up\n"
+        "She lies on her side while the man's hand rests on her cheek."
+    )
+
+    out = profiles._normalize("krea2", raw, scene)
+
+    head = out.splitlines()[0]
+    assert "from behind" not in head
+    assert "first person view" in head
+    # 散文行不动
+    assert "She lies on her side" in out
+
+
+def test_第64刀_krea2第三人称逐字节不动():
+    scene = _fp_scene(viewpoint="third_person")
+    raw = "masterpiece, best quality, solo female, from behind, close-up\nShe lies on her side."
+
+    out = profiles._normalize("krea2", raw, scene)
+
+    assert "from behind" in out.splitlines()[0]
+    assert "first person view" not in out
+
+
+def test_第64刀_krea2单段形态也安全():
+    """krea2 只有一行时同样是 tags 串 ⇒ 照样收口，不得抛错。"""
+    scene = _fp_scene()
+    out = profiles._normalize("krea2", "solo female, from behind", scene)
+    assert out.splitlines()[0] == "solo female, first person view, pov"
+
+
+def test_第64刀_niji声明落subject段且风格段与参数段不动():
+    scene = _fp_scene()
+    raw = (
+        '{"subject": "solo female, from behind, close-up", "style": "anime coloring", '
+        '"additions": "dramatic light", "suffix": "--ar 4:3 --niji 6"}'
+    )
+
+    out = profiles._normalize("niji_sections", raw, scene)
+
+    lines = out.splitlines()
+    assert "from behind" not in lines[0]
+    assert "first person view" in lines[0]
+    # 风格段 / 附加段 / 参数段逐字不动
+    assert "anime coloring" in lines[1]
+    assert "dramatic light" in lines[2]
+    assert "--ar 4:3 --niji 6" in lines[3]
+
+
+def test_第64刀_niji第三人称逐字节不动():
+    scene = _fp_scene(viewpoint="third_person")
+    raw = (
+        '{"subject": "2girls, from behind", "style": "anime coloring", '
+        '"additions": "dramatic light", "suffix": "--ar 4:3"}'
+    )
+
+    out = profiles._normalize("niji_sections", raw, scene)
+
+    assert "from behind" in out.splitlines()[0]
+    assert "first person view" not in out
+
+
+def test_第64刀_natural_language刻意不动():
+    """单段散文：机械剔词会伤语法、追加机制自述会违反红线 28 ⇒ 本刀刻意不动（登记为边界）。"""
+    scene = _fp_scene()
+    raw = "The camera looks at her back from behind while she lies on her side."
+
+    out = profiles._normalize("natural_language", raw, scene)
+
+    assert out.strip().startswith("The camera looks at her back from behind")
+    assert "first person view" not in out
+
+
+def test_第64刀_收口是幂等的_重跑不再追加():
+    """`normalize_inline` 可能二次经过 ⇒ 已有声明的成稿必须逐字节不变。"""
+    scene = _fp_scene()
+    raw = (
+        "masterpiece, best quality, solo female, close-up, first person view, pov\n"
+        "She lies on her side."
+    )
+
+    out = profiles._normalize("krea2", raw, scene)
+
+    assert out.splitlines()[0].count("pov") == 1
+
+
+# ── 第 65 刀：叙事者部位事实的「呈现形态」机械化（追加式 · 2026-09-28）──────────
+#
+# 用户定性（原话）：「第一人称就是在内容的基础上**用第一人称去进行取舍或修改**使其符合
+#   第一人称情况下的特色」。第 62 刀已做「**取舍**」；本刀补「**修改**」的机械保证。
+#
+# ⚠⚠ **刻意不做「改写」，只做「追加」**（复核后定案）：
+#   · **改写**（把 `an erect penis slapping her face` 直接插成带状语的长串）⇒
+#     ① 字段账本的 `expected` 与成稿形态**不一致** ⇒ 模型写短形态就判不 `covered`
+#        ⇒ **新增假红面**（正是红线 72 警告的「永不消失的假红」）；
+#     ② 打红 43／47 刀 **12 处**特征锁（那些锁断言的正是这些精确串）。
+#   · **追加**（保留原串 **并** 补一条 `entering from the lower frame edge`）⇒
+#     ① 原串**仍是成稿的连续子串** ⇒ 账本判据不受影响、**零假红**；
+#     ② 既有 12 处断言全绿；
+#     ③ 画面语义完全达成 —— `entering from the lower frame edge` 就是
+#        `_viewpoint_clause` 既有的「局部从画面下缘进入」措辞。
+
+
+def test_第65刀_部位事实补下缘进入限定且原串保留():
+    scene = _第一人称局部场景()
+    head = "masterpiece, solo female, an erect penis slapping her face, close-up"
+
+    out = profiles._first_person_limb_entry_phrasing(head, scene)
+
+    assert "entering from the lower frame edge" in out
+    assert "an erect penis slapping her face" in out, "原串必须保留（账本 expected 判据不受影响）"
+
+
+def test_第65刀_非部位事实不加限定():
+    scene = _第一人称局部场景()
+    head = "masterpiece, solo female, close-up, silver hair"
+    assert profiles._first_person_limb_entry_phrasing(head, scene) == head
+
+
+def test_第65刀_幂等_已有下缘进入时不重复追加():
+    scene = _第一人称局部场景()
+    head = ("masterpiece, solo female, an erect penis slapping her face, "
+            "entering from the lower frame edge")
+    assert profiles._first_person_limb_entry_phrasing(head, scene) == head
+
+
+def test_第65刀_第三人称不加():
+    scene = _第一人称局部场景(viewpoint="third_person")
+    head = "masterpiece, solo female, an erect penis slapping her face"
+    assert profiles._first_person_limb_entry_phrasing(head, scene) == head
+
+
+def test_第65刀_端到端_anima首行含限定且原串仍在():
+    scene = _第一人称局部场景()
+    raw = (
+        "masterpiece, best quality, anime coloring, solo female, close-up, "
+        "an erect penis slapping her face\n"
+        "She gasps as he presses the shaft against her cheek."
+    )
+
+    out = profiles._normalize("anima_tags", raw, scene)
+
+    head = out.splitlines()[0]
+    assert "entering from the lower frame edge" in head
+    assert "an erect penis slapping her face" in head
+
+
+def test_第65刀_krea2与niji走同一收口():
+    scene = _第一人称局部场景()
+    raw_krea = ("masterpiece, best quality, solo female, an erect penis slapping her face\n"
+                "She gasps.")
+    head_krea = profiles._normalize("krea2", raw_krea, scene).splitlines()[0]
+    assert "entering from the lower frame edge" in head_krea
+
+    raw_niji = ('{"subject": "solo female, an erect penis slapping her face", '
+                '"style": "anime coloring", "additions": "dramatic light", "suffix": "--ar 4:3"}')
+    head_niji = profiles._normalize("niji_sections", raw_niji, scene).splitlines()[0]
+    assert "entering from the lower frame edge" in head_niji
+
+
+# ── 第 66 刀：POV 覆盖面的「防呆登记」（2026-09-28 · 用户「按防呆登记动手」）──────
+#
+# 真机取证：`agent-trace.jsonl` 的 `prompt_profile` **33/33 全是 `anima_tags`**
+# ⇒ `natural_language` **近期零使用**；而它按第 64 刀的设计**刻意没有机械层**
+# （单段散文：机械剔词伤语法/语义、追加声明句违反红线 28「交付文本只写画面」）。
+# 本刀把这件事**变成可观测的**：第一人称下若真的用了它，trace 里能看到告警，
+# 而不是静默回到「**第三人称人物在场**」的缺陷态。
+# ⚠ 只**返回诊断串**、不改任何输出（零回归：非第一人称／已覆盖 profile／未知 profile ⇒ 空串）。
+
+
+def test_第66刀_已覆盖的三个profile不告警():
+    scene = _fp_scene()
+    for profile in ("anima_tags", "krea2", "niji_sections"):
+        assert profiles.viewpoint_coverage_warning(profile, scene) == ""
+
+
+def test_第66刀_未覆盖的profile告警且点名手册():
+    scene = _fp_scene()
+
+    msg = profiles.viewpoint_coverage_warning("natural_language", scene)
+
+    assert "natural_language" in msg
+    assert "红线 79" in msg
+
+
+def test_第66刀_第三人称不告警():
+    scene = _fp_scene(viewpoint="third_person")
+    assert profiles.viewpoint_coverage_warning("natural_language", scene) == ""
+
+
+def test_第66刀_未知或空profile不制造噪音():
+    """白名单式：只对**已知未覆盖**的 profile 告警 ⇒ 空值/未知 profile 一律静默。"""
+    scene = _fp_scene()
+    for profile in ("", "unknown_profile"):
+        assert profiles.viewpoint_coverage_warning(profile, scene) == ""

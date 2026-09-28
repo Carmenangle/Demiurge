@@ -983,7 +983,10 @@ def _normalize(
     profile: str, raw: str, scene: Mapping[str, object] | None = None,
 ) -> str:
     if profile == "krea2":
-        return _anonymize_prompt_names(_krea_prompt(raw, scene), scene or {})
+        # 第 64 刀：krea2 与 anima **同构**（首行 tags ＋ 散文）⇒ 首行也走第一人称收口
+        # （剔旁观机位词 ＋ 补 POV 声明）；散文行逐字节不动。
+        return _anonymize_prompt_names(
+            _first_person_krea_guards(_krea_prompt(raw, scene), scene or {}), scene or {})
     if profile == "anima_tags":
         # 第 33 刀（2026-09-21）：`{}` 形式的 JSON 之外，再认一种**合法序列化变体** ——
         # 模型用 `visual_hook: … / primary_focus: … / supporting_elements: … / content: …`
@@ -1101,6 +1104,22 @@ def _normalize(
             len(_contract_subject_names(scene or {})),
             _contract_subject_genders(scene or {}),
         )
+        # 第 60 刀（2026-09-28）：第一人称下剔掉**旁观/取景矛盾机位词**。
+        # `_VIEWPOINT_FORBIDDEN_CAMERA` 原先是一张**空转的禁表**——只被抄进
+        # `_viewpoint_clause` 的中文指令，**从未被任何代码消费** ⇒ 模型不听话时
+        # `from behind` / `three-quarter back view` / `looking down at face` 直接提交
+        # 给 ComfyUI（真机 slot `illo-req-…-53` 四次重生成里命中两次）。
+        # ⚠ 零回归锁：非第一人称 / 无收束依据 / 行内无命中 ⇒ 都逐字节返回原串。
+        head = _strip_bystander_camera_tags(head, scene or {})
+        # 第 65 刀（2026-09-28）：给「叙事者部位事实」补**从画面下缘进入**的呈现限定
+        # （**追加**原串、不改写 ⇒ 账本 `expected` 判据不受影响、43／47 刀 12 处锁全绿）。
+        # ⚠ 必须夹在「剔禁词」与「补 POV」之间（与 `_first_person_head_guards` 同序）。
+        head = _first_person_limb_entry_phrasing(head, scene or {})
+        # 第 61 刀（2026-09-28 · 用户定案「机械补」）：第一人称下**确保首行有 POV 正向声明**。
+        # 该词形在本仓原先**没有任何注入点**（只出现在注释里）⇒ 全靠 profile LLM 自觉；
+        # 真机四次重生成里它只在第 1 次自觉写了 ⇒ 后三次按默认第三人称构图。
+        # ⚠ 幂等：已有 `first person view`/`pov`/`male viewer pov` ⇒ 逐字节返回原串。
+        head = _ensure_first_person_view_tag(head, scene or {})
         return _anonymize_prompt_names(
             f"{head},\n{prose}", scene or {},
         )
@@ -1109,13 +1128,14 @@ def _normalize(
             _unwrap_stray_parentheses(_strip_wrapping(raw)), scene or {})
     if profile == "niji_sections":
         value = _json_object(raw)
+        # 第 64 刀：只给 `subject` 段做第一人称收口（风格段／附加段／参数段一律不动）。
+        sections = _first_person_niji_guards(
+            [str(value.get(key) or "").strip()
+             for key in ("subject", "style", "additions", "suffix")],
+            scene or {},
+        )
         return _anonymize_prompt_names(
-            _unwrap_stray_parentheses(
-                _niji_sections_join(
-                    [str(value.get(key) or "").strip()
-                     for key in ("subject", "style", "additions", "suffix")],
-                ),
-            ),
+            _unwrap_stray_parentheses(_niji_sections_join(sections)),
             scene or {},
         )
     raise ValueError(f"未知提示词模式：{profile}")
@@ -1214,7 +1234,10 @@ def _scene_for_model(scene: Mapping[str, object]) -> dict[str, object]:
         #   （`prompt_field_ledger` / `_concrete_scene_facts` / `_english_scene_details`）。
         result["narrative"] = (
             f"{str(result.get('narrative') or '')}\n"
-            "【第一人称·叙事者局部入画事实（只写这些局部，不得写他的脸或全身）】"
+            "【第一人称·叙事者局部入画事实（只写这些局部，不得写他的脸或全身）；"
+            "**一律写成第一人称的呈现形态**——局部**从画面下缘进入**"
+            "（`entering from the lower frame edge`／`cropped at the bottom edge`），"
+            "**不写**它的根部、躯干、腿】"
             + "；".join(limb_facts)
         )
     return _anonymize_scene_characters(result)
@@ -2039,11 +2062,52 @@ def _hand_facts(clause: str) -> list[str]:
     return found
 
 
+# 第 62 刀（2026-09-28 · 用户定性）：第一人称「叙事者部位事实」的**取舍**。
+#
+# 用户原话：「2 的问题在于第一人称的**视觉下的取舍**，即第三人称是保证内容提示词选择合适
+#   视角**全面展示信息**，那第一人称就是在内容的基础上**用第一人称去进行取舍或修改使其
+#   符合第一人称情况下的特色**」。
+#
+# 真机现场（第 60 刀同一批取证 · 第 4 次重生成）：该帧是**上半身近身帧**（face 命中），
+# 首行却**同时**写着 `an erect penis pressing against her buttocks`（下半身）与
+# `… her face`（上半身）—— 两条**物理上不可能同现**，且前者根本装不进上半身取景。
+# ⇒ 57 刀 ③ 的取景筛分**只覆盖 `appearance`/`wardrobe`**，**不覆盖**本函数产出的动作事实。
+#
+# ⚠ 判据**复用** 57 刀 ③ 的口径（同一个 4 键 blob ＋ `_VIEW_FACE_CONTACT_RE` 面优先）；
+#   刻意**不改** `first_person_frame_filter` / `_first_person_framing` 的既有实现
+#   （它们各自保留原 blob 构建 ⇒ 零回归），本函数只服务「叙事者部位事实的取舍」。
+# ⚠ 只做**一个方向**（上半身帧剔下半身），反向不猜（与 57 刀 ③ 一致）；带**剔空保护**。
+_FP_LOWER_LIMB_RE = re.compile(
+    r"\b(?:buttocks?|butt|hips?|thighs?|legs?|waist|groin|lower body|lower frame)\b",
+    re.I,
+)
+
+
+def _first_person_upper_frame(scene: Mapping[str, object]) -> bool:
+    """本帧是否「上半身近身帧」（第 62 刀）：与 57 刀 ③ **同口径**（4 键 blob ＋ 面优先）。
+
+    ⚠ 只读、纯函数；`viewpoint` 非 `first_person` ⇒ `False`（零回归锁）。
+    """
+    if str(scene.get("viewpoint") or "").strip() != "first_person":
+        return False
+    sources: list[str] = []
+    for key in ("narrative", "appearance", "wardrobe", "draft_prompt"):
+        value = scene.get(key)
+        if isinstance(value, str) and value.strip():
+            sources.append(image_prompt_extract.restore_jailbreak(value))
+    blob = "\n".join(sources)
+    return bool(blob.strip()) and bool(_VIEW_FACE_CONTACT_RE.search(blob))
+
+
 def _narrator_limb_facts(scene: Mapping[str, object]) -> list[str]:
-    """第一人称下「叙事者局部肢体入画」的**确定性事实源**（第 43 刀 ＋ 第 47 刀，见上表注释）。
+    """第一人称下「叙事者局部肢体入画」的**确定性事实源**（第 43 ＋ 47 ＋ 62 刀）。
 
     ⚠ 零回归锁：`viewpoint` 缺失／非 `first_person`、或画面主体为空 ⇒ 返回空表
       ⇒ 所有下游（模型载荷／字段账本／词表兜底）逐字节等于旧行为。
+    ⚠ 第 62 刀（用户定性「第一人称＝在内容基础上用第一人称取舍」）：产出**先按本帧取景族
+      取舍** —— 上半身近身帧里**装不下**下半身部位事实（真机第 4 次重生成里
+      `… against her buttocks` 与 `… her face` 同现、物理上不可能）。
+      判据与 57 刀 ③ 同口径（4 键 blob ＋ 面优先）、只做一个方向、剔空保护。
     """
     if str(scene.get("viewpoint") or "").strip() != "first_person":
         return []
@@ -2059,7 +2123,13 @@ def _narrator_limb_facts(scene: Mapping[str, object]) -> list[str]:
             if re.search(pattern, clause)
         )
         facts.extend(_hand_facts(clause))
-    return list(dict.fromkeys(facts))
+    facts = list(dict.fromkeys(facts))
+    if facts and _first_person_upper_frame(scene):
+        # 第 62 刀：上半身帧 ⇒ 剔下半身部位事实；**剔空保护**（全被剔 ⇒ 保留原文，
+        # 宁缺勿猜 —— 清空会让「叙事者局部入画」整条消失，与 57 刀 ③ 同族）。
+        kept = [fact for fact in facts if not _FP_LOWER_LIMB_RE.search(fact)]
+        facts = kept or facts
+    return facts
 
 
 def _actor_visual_details(scene: Mapping[str, object]) -> list[tuple[str, list[str], list[str]]]:
@@ -3125,6 +3195,259 @@ def first_person_frame_filter(scene: Mapping[str, object]) -> dict:
         "appearance": new_appearance, "wardrobe": new_wardrobe,
         "removed": [*removed_appearance, *removed_wardrobe],
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 第一人称「旁观/取景矛盾机位词」机械闸（2026-09-28 · 第 60 刀）
+#
+# 真机实锤（slot `illo-req-09f79e6f-…-53` **同一槽位四次重生成**）：
+#   `illustration.request` 四次的 `viewpoint_detail` 全是
+#   `{viewpoint: first_person, auto: third_person, source: override, conflict: true}`、
+#   `frame_subjects=["妲千沁"]` ⇒ **人称判定层健康**（37 刀摘叙事者、`override` 正确压住自动档）；
+#   但 `illustration.submitted` 的最终提示词：第 1 次 `first person view, pov,
+#   looking down at face`、第 4 次 `from behind, three-quarter back view, … penis against
+#   rear, hand on hip, hand on knee` ⇒ `_VIEWPOINT_FORBIDDEN_CAMERA`（上方）**明列**这些词，
+#   却**从未被任何代码消费** —— 它只被抄进了 `_viewpoint_clause` 的中文指令。
+#   ⇒ 约束停在提示词层 ⇒ 模型不听话时禁词直接提交给 ComfyUI ⇒ 用户实报
+#     「手选第一人称，出来的却是**第三人称人物在场**的画面」。
+#
+# 本刀把这张**已建好却空转**的禁表接成机械闸（纯剔除、宁缺勿猜，与 31/40/46/57 刀同族）。
+# ⚠ 三态**复用** `_first_person_framing`（近身帧＝全表／风景帧＝恒禁那一半／
+#   无接触无环境＝不动），绝不另写一份判据 —— 否则会出现「提示词声明风景帧、
+#   闸却按近身帧剔掉全景词」的自相矛盾。
+# ⚠ 修订闸时**只剔整条命中的 tag**，不改写、不重组、不合并（改写＝猜测，违反宁缺勿猜）。
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _first_person_camera_ban(scene: Mapping[str, object]) -> tuple[str, ...]:
+    """第一人称本帧**禁用的机位词表**（第 60 刀）；无收束依据／非第一人称 ⇒ 空表（零回归锁）。
+
+    三态判据**直接复用** `_first_person_framing` 的返回值（同一个 4 键 blob、同一条「面优先」）：
+      · 空串（第三人称／无接触无环境）⇒ `()` ⇒ 调用方逐字节返回原串；
+      · 含「不设近景上限」（风景/环境帧）⇒ 只禁**恒禁那一半**
+        （`_VIEWPOINT_BYSTANDER_ONLY`：俯视/背后/第三旁观＝身份矛盾，风景帧也成立）；
+      · 其余＝近身接触帧 ⇒ 禁**全表** `_VIEWPOINT_FORBIDDEN_CAMERA`
+        （旁观 ＋ `full body`/`wide shot` 这一半取景矛盾）。
+    """
+    framing = _first_person_framing(scene)
+    if not framing:
+        return ()
+    if "不设近景上限" in framing:
+        return _VIEWPOINT_BYSTANDER_ONLY
+    return _VIEWPOINT_FORBIDDEN_CAMERA
+
+
+def _strip_bystander_camera_tags(tag_line: str, scene: Mapping[str, object]) -> str:
+    """第一人称下从**首行 tag 串**里剔掉旁观/取景矛盾机位词（第 60 刀）。
+
+    ⚠ 零回归锁（任一成立即**逐字节返回原串**、且不改动空格的既有形态）：
+      ① `viewpoint` 非 `first_person`（`_first_person_camera_ban` 回空表）；
+      ② 本帧无收束依据（既无近身接触、也无环境词）；
+      ③ 行内无命中项。
+    ⚠ 剔空保护（与 57 刀 `_strip_lower_body` 同族）：整行都是禁词 ⇒ **放弃本次剔**、
+      返回原串 —— 清空首行会让下游质量行与内容 tag 全数丢失（宁缺勿猜）。
+    ⚠ 只作用于**首行 tags**：第二行是自由散文，机械剔词必然误伤，刻意不碰。
+    """
+    banned = _first_person_camera_ban(scene)
+    if not banned:
+        return tag_line
+    tags = [tag.strip() for tag in (tag_line or "").split(",")]
+    kept: list[str] = []
+    dropped = 0
+    for tag in tags:
+        if not tag:
+            continue
+        if any(re.search(rf"\b{re.escape(item)}\b", tag, re.I) for item in banned):
+            dropped += 1
+            continue
+        kept.append(tag)
+    if not dropped or not kept:
+        return tag_line
+    return ", ".join(kept)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 第一人称「POV 正向声明」机械补（2026-09-28 · 第 61 刀 · 用户定案「机械补」）
+#
+# 真机背景（与第 60 刀同一批取证）：同一 slot 四次重生成里 `first person view`／`pov`
+# **只在第 1 次出现**（profile LLM 自觉写的），第 2／3／4 次**全缺** ⇒ 生图模型按默认
+# **第三人称**构图、把叙事者的躯体当第三方画进画面。全仓 grep 证明该词形**没有任何注入点**
+# （只出现在注释里）。
+#
+# ⚠ 与红线 23（「不机械拼硬标签」）的关系：红线 23 管的是**角色性别**那类「注入事实、
+#   让模型自己措辞」的场景；本刀补的是**镜头身份声明** —— 它不是事实、是**视角口径**，
+#   与 `_viewpoint_clause` 的中文条款同源 ⇒ 用户已就本项单独拍板，不构成对红线 23 的推翻。
+# ⚠ 只**追加**、不重排、不删除 ⇒ 下游所有按位置的归一（人数词／孤儿计数词／第 60 刀闸）
+#   都不受影响；已有等价声明时逐字节返回原串（**幂等**）。
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ⚠ 识别面**刻意保守**（第 63 刀）：只认**无歧义的第一人称**写法。
+#   `from her/his/the man's point of view` 这类**不认** —— 它同样可能是第三人称下
+#   「从某角色视角拍」的描述；认错 ⇒ **不补** ⇒ 缺陷反向复发。
+#   **方向原则：宁可重复追加（冗余、无害），不可误认为已有（漏补、致命）。**
+_FP_VIEW_TAG_RE = re.compile(
+    r"\b(?:first[-\s]?person\s+(?:view|pov|perspective)"
+    r"|from\s+my\s+point\s+of\s+view"
+    r"|male\s+viewer\s+pov|viewer\s+pov|pov)\b",
+    re.I,
+)
+_FP_VIEW_TAGS = "first person view, pov"
+# 风景帧／无收束依据帧只补这一条（见 `_ensure_first_person_view_tag` 的三态说明）。
+_FP_VIEW_TAG_MIN = "first person view"
+
+
+def _first_person_frame_kind(scene: Mapping[str, object]) -> str:
+    """第一人称本帧的**取景三态**（第 63 刀统一收口）：`"near"`／`"scenery"`／`""`。
+
+    ⚠ 与 `_first_person_camera_ban` **同源**（都从 `_first_person_framing` 派生：同一个返回串、
+      同一条「不含『不设近景上限』即近身帧」的判据）—— 下游不得各自重判。
+    ⚠ `viewpoint` 非 `first_person` ⇒ `""`（零回归锁）。
+    """
+    framing = _first_person_framing(scene)
+    if not framing:
+        return ""
+    return "scenery" if "不设近景上限" in framing else "near"
+
+
+def _ensure_first_person_view_tag(tag_line: str, scene: Mapping[str, object]) -> str:
+    """第一人称下确保首行含 **POV 正向声明**（第 61 刀；第 63 刀按三态分级）。
+
+    ⚠ 零回归锁：`viewpoint` 非 `first_person` ⇒ **逐字节返回原串**；
+      行内已有等价声明（见 `_FP_VIEW_TAG_RE`）⇒ 同样逐字节返回（**幂等**，不重复追加）。
+    ⚠ 空串／纯空白 ⇒ 原样返回（宁缺勿猜：没有位置语义，不补一条孤零零的 tag）。
+
+    第 63 刀（三态分级）—— `pov` 在 Danbooru 里隐含「**视角人物的部分身体可见**」：
+      · **近身接触帧**（`kind == "near"`）⇒ `first person view, pov`；
+      · **风景帧／无收束依据帧** ⇒ 只补 `first person view`。理由是风景帧的既有定案
+        （红线 76）是「**放行全景**、彰显风景全貌」——声明 `pov` 与该帧意图打架
+        （可能诱导模型在风景里画进一只手）；而无收束依据帧**没有**「有局部入画」的正向证据
+        ⇒ 不声明（宁缺勿猜）。
+    """
+    if str(scene.get("viewpoint") or "").strip() != "first_person":
+        return tag_line
+    if not (tag_line or "").strip():
+        return tag_line
+    if _FP_VIEW_TAG_RE.search(tag_line):
+        return tag_line
+    tags = _FP_VIEW_TAGS if _first_person_frame_kind(scene) == "near" else _FP_VIEW_TAG_MIN
+    return f"{tag_line.rstrip(' ,')}, {tags}"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 第一人称收口扩到 krea2／niji_sections（2026-09-28 · 第 64 刀）
+#
+# 第 63 刀实测登记：第 60／61／63 刀的机制**只在 `_normalize` 的 `anima_tags` 分支接线**
+# ⇒ 换 profile 出图等于回到缺陷态。本刀**按输出结构决定落点**（不硬套 anima 的做法）：
+#   · `krea2` —— 两段式（首行 tags ＋ 散文），与 anima **同构** ⇒ 首行照 anima 收口；
+#   · `niji_sections` —— 四段，**只动 `subject` 段**：POV 声明与机位词都属内容语义；
+#     `style`／`additions` 是画风与附加词（塞 POV 会污染风格语义）、`suffix` 是 niji 参数串
+#     （动了会写坏参数语法）⇒ 一律不动；
+#   · `natural_language` —— **单段散文**：机械剔词会伤语法/语义，追加声明句又会违反红线 28
+#     「交付文本只写画面」（不得出现机制自述）⇒ **刻意不动**，只登记为已知边界。
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+# ═══ 第 65 刀：叙事者部位事实的「呈现形态」（追加式）═══════════════════════════
+# 用户定性（原话）：「第一人称就是在内容的基础上**用第一人称去进行取舍或修改**使其符合
+#   第一人称情况下的特色」。第 62 刀＝「取舍」；本刀＝「修改」的**机械保证**。
+# ⚠ 只**追加**、不改写 —— 理由见 `_first_person_limb_entry_phrasing` 的 docstring
+#   （改写会新增账本假红面 ＋ 打红 43／47 刀 12 处锁）。
+_FP_LIMB_ENTRY_TAG = "entering from the lower frame edge"
+_FP_LIMB_ENTRY_MARK = "lower frame edge"
+
+
+def _first_person_limb_entry_phrasing(head: str, scene: Mapping[str, object]) -> str:
+    """第一人称下给「叙事者部位事实」补一条**从画面下缘进入**的呈现限定（第 65 刀 · **追加式**）。
+
+    用户定性：「第一人称就是在内容的基础上**用第一人称去进行取舍或修改**使其符合第一人称
+    情况下的特色」。第 62 刀做了「取舍」；本刀补「修改」的**机械保证**（不再只靠指令自觉）。
+
+    ⚠⚠ **刻意不做「改写」，只做「追加」**（复核后定案）：
+      · **改写**（插进原有短语中间）会让字段账本的 `expected` 与成稿形态**不一致** ——
+        模型写短形态就判不 `covered` ⇒ **新增假红面**（红线 72 的「永不消失的假红」）；
+        且会打红 43／47 刀 **12 处**特征锁（那些锁断言的正是这些精确串）。
+      · **追加**（原串**保留**并补一条限定）⇒ 原串**仍是成稿的连续子串** ⇒ 账本判据零影响、
+        既有锁全绿，而画面语义完全达成（`entering from the lower frame edge` 就是
+        `_viewpoint_clause` 既有的「局部从画面下缘进入」措辞）。
+
+    ⚠ 判据＝**精确匹配 `_NARRATOR_LIMB_FACT_TEXTS`**（43／47 刀的固定产出集）⇒ 零误伤；
+    ⚠ 幂等：已有下缘进入字样 ⇒ 逐字节返回原串；非第一人称／无部位事实 ⇒ 逐字节返回原串。
+    """
+    if str(scene.get("viewpoint") or "").strip() != "first_person":
+        return head
+    raw = head or ""
+    if not raw.strip():
+        return head
+    tags = [tag.strip() for tag in raw.split(",")]
+    if not any(tag in _NARRATOR_LIMB_FACT_TEXTS for tag in tags):
+        return head
+    if any(_FP_LIMB_ENTRY_MARK in tag.lower() for tag in tags):
+        return head
+    kept = [tag for tag in tags if tag]
+    kept.append(_FP_LIMB_ENTRY_TAG)
+    return ", ".join(kept)
+
+
+def _first_person_head_guards(head: str, scene: Mapping[str, object]) -> str:
+    """第一人称「首行 tags」统一收口：**剔旁观机位词 → 补下缘进入限定 → 补 POV 声明**
+    （第 60／61／63／65 刀）。
+
+    ⚠ 与 `_normalize` 的 anima 分支**同序同语义**（那三行因接线锁必须显式留在 `_normalize` 里
+      —— 见 `test_第60刀_闸已接进anima归一化收口`／`test_第61刀_接线锁_闸与补都接在归一化收口`）。
+    ⚠ 每一步各自带零回归锁与非第一人称短路 ⇒ 本函数对第三人称**逐字节返回原串**。
+    """
+    head = _strip_bystander_camera_tags(head, scene)
+    head = _first_person_limb_entry_phrasing(head, scene)
+    return _ensure_first_person_view_tag(head, scene)
+
+
+def _first_person_krea_guards(prompt: str, scene: Mapping[str, object]) -> str:
+    """krea2 的两段式也走第一人称收口（第 64 刀）：**只动首行**，散文行逐字节不动。"""
+    if str(scene.get("viewpoint") or "").strip() != "first_person":
+        return prompt
+    lines = prompt.splitlines()
+    if not lines:
+        return prompt
+    return "\n".join([_first_person_head_guards(lines[0], scene), *lines[1:]])
+
+
+def _first_person_niji_guards(sections: list[str], scene: Mapping[str, object]) -> list[str]:
+    """niji 四段的第一人称收口（第 64 刀）：**只动 `subject` 段**，其余段逐字节不动。
+
+    ⚠ `subject` 段本身以 `--` 开头时（畸形输入）同样不动 —— 防写坏参数语法。
+    """
+    if str(scene.get("viewpoint") or "").strip() != "first_person":
+        return sections
+    if not sections or sections[0].lstrip().startswith("--"):
+        return sections
+    return [_first_person_head_guards(sections[0], scene), *sections[1:]]
+
+
+# 第 60～65 刀已把 POV 保证与禁词闸覆盖到 `anima_tags`／`krea2`／`niji_sections`
+# （按各自输出结构落点）。下面这张表是**已知未覆盖**的 profile —— **白名单式**：
+# 只对它告警，不给空值/未知 profile 制造噪音。
+# ⚠ 将来新增 profile 时必须回来评估：做了机械层就不必登记，没做就在这里加一项。
+_FP_UNCOVERED_PROFILES = frozenset({"natural_language"})
+
+
+def viewpoint_coverage_warning(profile: str, scene: Mapping[str, object]) -> str:
+    """第一人称下**该 profile 有没有 POV 机械保证**的诊断告警（第 66 刀 · 防呆登记）。
+
+    ⚠ 只**返回诊断串**、**不改任何输出**：非第一人称／不在未覆盖表里 ⇒ 空串（零回归锁）。
+    ⚠ 语义是「**防呆**」而不是「修复」：第 64 刀刻意不给 `natural_language` 做机械层
+      （单段散文：机械剔词伤语法/语义，追加声明句违反红线 28「交付文本只写画面」）。
+      本函数让这件事**可观测** —— 第一人称下若真的用了它，trace 里能看到告警，
+      而不是静默回到「**第三人称人物在场**」的缺陷态。
+    """
+    if str(scene.get("viewpoint") or "").strip() != "first_person":
+        return ""
+    if str(profile or "").strip() not in _FP_UNCOVERED_PROFILES:
+        return ""
+    return (
+        f"profile `{profile}` 在第一人称下**没有 POV 机械保证**"
+        "（无 POV 声明注入、无旁观机位词剔除）；详见技术手册 "
+        "`A-roleplay-illustration/03` §5 红线 79 ④"
+    )
 
 
 def _viewpoint_clause(scene: Mapping[str, object]) -> str:

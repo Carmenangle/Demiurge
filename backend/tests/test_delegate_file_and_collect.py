@@ -334,8 +334,8 @@ def test_采集幂等_同批重启续跑不重复落盘(store, tmp_path, monkeyp
     assert out1["collected"] == 2
     pngs = sorted(Path(works).rglob("*.png"))
     assert len(pngs) == 2
-    # 固定序号命名（index+1 而非「已采数量」）：跨重启编号稳定，便于对照去重
-    assert pngs[0].name.startswith("01-") and pngs[1].name.startswith("02-")
+    # 有明确标签（套装名/图号）时**产物名＝标签**（`春-套一.png`）：逐图号审核一眼对得上
+    assert [p.name for p in pngs] == ["春-套一.png", "春-套二.png"]
     assert len(upserted) == 2 and len(indexed) == 2
     polls_before = polls["n"]
 
@@ -485,8 +485,8 @@ def test_采集按变体原序对齐_中间变体失败不串位(store, monkeypa
 
     assert out["collected"] == 2
     on_disk = sorted(p.name for p in Path(works).rglob("*.png"))
-    assert on_disk[0].startswith("01-图0531-")     # 第一个变体
-    assert on_disk[1].startswith("03-图0533-")     # 第三个变体仍是 03-，不是 02-
+    # 产物名＝变体标签（图号）；中间变体失败不影响第三个仍叫「图0533」而不是「图0532」
+    assert on_disk == ["图0531.png", "图0533.png"]
     assert upserted[0]["text"].startswith("图0531")
     assert upserted[1]["text"].startswith("图0533")
     assert indexed[0]["prompt"] == "正文一"
@@ -508,8 +508,29 @@ def test_采集用submit回带的变体名命名产物(store, monkeypatch):
 
     assert out["collected"] == 1
     png = next(Path(works).rglob("*.png"))
-    assert png.name.startswith("01-0531-")
+    assert png.name == "0531.png"
     assert upserted[0]["text"] == "0531.jpg\n\n正文"
+
+
+def test_同批同名标签不互相覆盖_无标签退回序号命名(store, monkeypatch):
+    """产物名＝标签；同一次采集内标签撞车要加尾号（绝不静默覆盖），无标签才退回旧格式。"""
+    from pathlib import Path
+
+    works, _upserted, _indexed = _离线采集(store, monkeypatch)
+    out = capability_handlers.collect_comfy_outputs(
+        comfyui_url="http://127.0.0.1:8188", output_dir=str(works), repo_id="work",
+        submit_result={"submitted": 3, "failed": 0, "results": [
+            {"index": 0, "ok": True, "prompt_id": "pid-1", "prompt": "甲", "name": "0218.jpg"},
+            {"index": 1, "ok": True, "prompt_id": "pid-2", "prompt": "乙", "name": "0218.jpg"},
+            {"index": 2, "ok": True, "prompt_id": "pid-3", "prompt": "丙"},
+        ]},
+        timeout_seconds=10)
+
+    assert out["collected"] == 3
+    on_disk = sorted(p.name for p in Path(works).rglob("*.png"))
+    assert "0218.png" in on_disk and "0218-2.png" in on_disk   # 撞车加尾号，两张都留
+    assert len(on_disk) == 3
+    assert on_disk[-1].startswith("03-")                       # 无标签退回旧格式
 
 
 def test_产物标签清洗():

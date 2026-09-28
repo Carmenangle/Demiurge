@@ -1724,6 +1724,13 @@ def _wb_comfy_profile(ctx: dict, plan, scene_spec: dict, plan_retargeted: bool) 
         appearance_missing_actors=appearance_missing_actors,
         # 第 36 刀：逐角色外观来源（entry/table/merged/none）——确定性、可被探针直接判读。
         appearance_sources=scene_spec.get("appearance_sources") or {},
+        # 第 66 刀（2026-09-28 · 防呆登记）：第一人称下该 profile **有没有 POV 机械保证**。
+        # 只进诊断 trace、**不进提示词**；非第一人称／已覆盖 profile ⇒ 空串（零回归）。
+        # 真机取证：`prompt_profile` 33/33 全 `anima_tags` ⇒ `natural_language` 零使用，
+        # 而它刻意没有机械层（见手册红线 79 ④）⇒ 一旦被选用要能**看见**，不能静默退回缺陷态。
+        viewpoint_coverage_warning=image_prompt_profiles.viewpoint_coverage_warning(
+            scene_spec["profile"], scene_spec,
+        ),
     )
     profile_negative = image_prompt_profiles.negative_prompt(
         ctx.get("prompt_profile") or "anima_tags", scene_spec,

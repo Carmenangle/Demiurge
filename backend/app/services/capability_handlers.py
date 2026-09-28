@@ -267,6 +267,7 @@ def collect_comfy_outputs(prompt_ids: list[str] | None = None, comfyui_url: str 
             pass
 
     results: list[dict[str, Any]] = []
+    named_this_run: set[str] = set()   # 本次采集已占用的产物名（同批标签撞车时才加尾号）
     prompt_ids = ids
     for position, prompt_id in enumerate(prompt_ids):
         # 一律按**变体原序**取材：names 是调用方按变体写的，采到的第几条不能拿来当变体序
@@ -313,12 +314,21 @@ def collect_comfy_outputs(prompt_ids: list[str] | None = None, comfyui_url: str 
         data, _content_type = comfyui_client.fetch_view(
             comfyui_url, first["filename"], type=first.get("type", "output"),
             subfolder=first.get("subfolder", ""))
-        # 固定序号命名（变体原序 +1 而非「已采数量」）：同一变体跨重启编号稳定，便于对照去重。
-        # 有明确变体标签（图号/套装名）时把它写进文件名 ⇒ 光看文件名就能对回是哪个变体；
-        # 无标签则退回纯序号命名（与旧格式一致）。
+        # 产物命名：**有明确标签（图号/套装名）时直接用标签做文件名** —— `0218.jpg` → `0218.png`。
+        # 用户口径是「产物名＝图号」，逐图号审核时光看文件名就能对回原图；同一图号重绘＝
+        # 覆盖同名文件（幂等，旧图不保留）。同**一次**采集内标签撞车才加 `-2/-3` 尾号，
+        # 绝不静默互相覆盖。无标签才退回「变体原序 + 随机尾」的旧格式。
         _slug = _artifact_label_slug(declared)
-        dest = base / (f"{slot + 1:02d}-{_slug}-{uuid.uuid4().hex[:8]}.png" if _slug
-                       else f"{slot + 1:02d}-{uuid.uuid4().hex[:8]}.png")
+        if _slug:
+            _name = f"{_slug}.png"
+            _n = 2
+            while _name in named_this_run:
+                _name = f"{_slug}-{_n}.png"
+                _n += 1
+            named_this_run.add(_name)
+            dest = base / _name
+        else:
+            dest = base / f"{slot + 1:02d}-{uuid.uuid4().hex[:8]}.png"
         dest.write_bytes(data)
         shown = view_urls.local_view(str(dest))
         ck["done"][str(prompt_id)] = {"file": str(dest), "url": shown, "index": slot}
