@@ -40,3 +40,56 @@ describe("资产库删除与恢复合同", () => {
     expect(gallery).toContain("enhanced && onSendToChat &&");
   });
 });
+
+describe("P0-1 资产列表 keyset 分页（RepoGallery 契约）", () => {
+  it("消费后端 has_more，翻页游标用列表末条 created_at（beforeTs）", () => {
+    expect(gallery).toContain("has_more === true");
+    expect(gallery).toContain("beforeTs: cursor");
+    expect(gallery).toContain("loadMore");
+  });
+
+  it("分页只在资产库单仓库且未升级全量时启用；搜索/筛选触发一次全量（sticky）", () => {
+    expect(gallery).toContain("const needFull = !enhanced || repoIds.length !== 1 || fullyLoaded;");
+    expect(gallery).toContain("const filtering = !!tagQuery.trim() || semanticMode || mediaFilter !== \"all\";");
+  });
+
+  it("切仓库重置回分页浏览态（不沿用上一个仓库的 fullyLoaded）", () => {
+    expect(gallery).toContain("prevKeyRef.current !== key");
+    expect(gallery).toContain("cancel = refresh(1, false);");
+  });
+
+  it("自动描述在分页态先升级全量再执行（不只看已加载页）", () => {
+    expect(gallery).toContain("setPendingDescribe(true)");
+    expect(gallery).toContain("if (!pendingDescribe || !fullyLoaded || loading) return;");
+  });
+});
+
+describe("P0-2 缩略图派生层（RepoGallery 契约）", () => {
+  it("网格优先缩略图，无 thumbUrl 回落原图", () => {
+    expect(gallery).toContain("src={g.thumbUrl || g.image_url}");
+  });
+
+  it("详情弹窗仍取原图（thumbUrl 只用于网格）", () => {
+    expect(gallery).toContain("<img src={active.image_url}");
+  });
+
+  it("工具栏提供补缩略图入口（新图入库时已自动生成，此为历史补生成）", () => {
+    expect(gallery).toContain("buildThumbs");
+    expect(gallery).toContain("补缩略图");
+  });
+});
+
+describe("P0-3 WD14 反推打标（RepoGallery 契约）", () => {
+  it("标签编辑条提供 WD14 反推入口（与 AI 打标并列）", () => {
+    expect(gallery).toContain("onWd14");
+    expect(gallery).toContain("wd14TagActive");
+    expect(gallery).toContain("WD14 反推");
+  });
+
+  it("反推打标走「快照」而非合并（2026-10-17 定案）：tags＝本次快照结果，另拉快照列表", () => {
+    expect(gallery).toContain("await tagGeneration(taggerModel, g.id, repoId, embed)");
+    expect(gallery).toContain("tags: result.tags");                       // 不合并旧标签
+    expect(gallery).toContain("listTagSnapshots(id, repoId, embed)");    // 打标后刷新版本列表
+    expect(gallery).toContain("activateSnapshot");                        // 版本可切换
+  });
+});

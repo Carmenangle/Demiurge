@@ -72,7 +72,7 @@ export function SmitheryBrowser({ onClose, onAdded }: {
 
   // APPEND_SMITHERY_RENDER
   return (
-    <div className="modal-mask" onClick={onClose}>
+    <div className="modal-mask">
       <div className="modal smithery-modal" onClick={(e) => e.stopPropagation()}>
         <div className="settings-head">
           <h3 style={{ margin: 0 }}>Smithery 市场</h3>

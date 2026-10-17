@@ -375,6 +375,159 @@ def web_material_list(req: WebMaterialListRequest) -> dict[str, object]:
     return {"items": image_store.list_web_materials(req.output_dir)}
 
 
+class WebMaterialSaveSeriesRequest(BaseModel):
+    output_dir: str = ""
+    illust_id: int = 0
+    source_url: str = ""
+    title: str = ""
+    proxy: str = ""
+    thread_id: str = ""
+
+
+@router.post("/web-materials/save-series")
+def web_material_save_series(req: WebMaterialSaveSeriesRequest) -> dict[str, object]:
+    """pixiv 多页作品整册保存：后端一次性拉全页 + 逐页落盘（前端崩溃/断连不影响，服务端继续写完）。"""
+    from app.services.repo_meta import setting_str_from_state
+
+    px = req.proxy.strip() or (setting_str_from_state("systemProxyUrl")
+                               or setting_str_from_state("proxyUrl"))
+    try:
+        return image_store.save_web_series(
+            req.output_dir, req.illust_id, req.source_url, req.title,
+            refresh_token=setting_str_from_state("pixivRefreshToken"), proxy=px,
+            thread_id=req.thread_id,
+        )
+    except ComfyError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)
+
+
+# ===== 图站素材源（P2-1 切片）：pixiv / danbooru 搜索 → 登记候选 → 走 save 落盘 =====
+
+class WebMaterialSearchRequest(BaseModel):
+    source: str = "danbooru"    # danbooru | pixiv
+    query: str = ""
+    limit: int = 20
+    page: int = 1
+    proxy: str = ""
+    mode: str = "search"        # pixiv: search | recommended | ranking | bookmarks | author
+    mode_param: str = ""        # pixiv: ranking 周期(day/week/month) | author user_id
+
+
+@router.post("/web-materials/search")
+def web_material_search(req: WebMaterialSearchRequest) -> dict[str, object]:
+    """搜索图站素材（danbooru 公开 API / pixiv SDK）。
+
+    成功即把结果登记为受控下载候选 ⇒ 随后走既有 `/web-materials/save` 保存
+    （安全模型不变：只落登记过的 URL）。凭证读「设置 → 凭证」面板。
+
+    **空 query 合法**（danbooru 默认按最新返回）= 不选排行榜/收藏夹时的默认时间序浏览。
+    ⚠ 代理兜底：前端传空时用设置里的 systemProxyUrl/proxyUrl（2026-10-16 实锤：
+    前端探测值可能为空 ⇒ 直连 danbooru 超时，用户侧表现为「搜了没反应」）。
+    """
+    from app.services import material_sources
+    from app.services.repo_meta import setting_str_from_state
+
+    proxy = req.proxy.strip() or (setting_str_from_state("systemProxyUrl")
+                                  or setting_str_from_state("proxyUrl"))
+    return material_sources.search(
+        req.source, req.query, max(1, min(req.limit, 50)),
+        pixiv_token=setting_str_from_state("pixivRefreshToken"),
+        danbooru_key=setting_str_from_state("danbooruApiKey"),
+        danbooru_login=setting_str_from_state("danbooruLogin"),
+        page=req.page,
+        proxy=proxy,
+        mode=req.mode,
+        mode_param=req.mode_param,
+    )
+
+
+class WebMaterialFavoriteRequest(BaseModel):
+    post_id: int = 0
+    proxy: str = ""
+    source: str = "danbooru"    # danbooru | pixiv
+    remove: bool = False        # True=取消收藏（pixiv 支持；danbooru 需 favorite id，暂不支持）
+
+
+@router.post("/web-materials/favorite")
+def web_material_favorite(req: WebMaterialFavoriteRequest) -> dict[str, object]:
+    """收藏 / 取消收藏（danbooru 需用户名+API Key；pixiv 用 refresh token，支持 remove 取消）。幂等。"""
+    from app.services import material_sources
+    from app.services.repo_meta import setting_str_from_state
+
+    proxy = req.proxy.strip() or (setting_str_from_state("systemProxyUrl")
+                                  or setting_str_from_state("proxyUrl"))
+    if (req.source or "danbooru").strip().lower() == "pixiv":
+        fn = material_sources.unfavorite_pixiv if req.remove else material_sources.favorite_pixiv
+        return fn(
+            req.post_id,
+            refresh_token=setting_str_from_state("pixivRefreshToken"),
+            proxy=proxy,
+        )
+    if req.remove:
+        return {"ok": False, "already": False,
+                "error": "danbooru 暂不支持从卡片取消收藏（需收藏条目的 favorite id）。pixiv 支持。"}
+    return material_sources.favorite_danbooru(
+        req.post_id,
+        login=setting_str_from_state("danbooruLogin"),
+        api_key=setting_str_from_state("danbooruApiKey"),
+        proxy=proxy,
+    )
+
+
+@router.get("/web-materials/pixiv/following")
+def web_material_pixiv_following(proxy: str = "", page: int = 1) -> dict[str, object]:
+    """pixiv 关注作者列表（user_following）。返回 {ok, users:[{id,name,account,avatar_url}], error}。"""
+    from app.services import material_sources
+    from app.services.repo_meta import setting_str_from_state
+
+    px = proxy.strip() or (setting_str_from_state("systemProxyUrl")
+                           or setting_str_from_state("proxyUrl"))
+    return material_sources.pixiv_following(
+        setting_str_from_state("pixivRefreshToken"), proxy=px, page=page,
+    )
+
+
+class PixivPagesRequest(BaseModel):
+    illust_id: int = 0
+    proxy: str = ""
+
+
+@router.post("/web-materials/pixiv/pages")
+def web_material_pixiv_pages(req: PixivPagesRequest) -> dict[str, object]:
+    """多页作品全页 URL（illust_detail）——feed 只给 page_count 时按需补全，供翻页/下载全部页。"""
+    from app.services import material_sources
+    from app.services.repo_meta import setting_str_from_state
+
+    px = req.proxy.strip() or (setting_str_from_state("systemProxyUrl")
+                               or setting_str_from_state("proxyUrl"))
+    return material_sources.pixiv_pages(
+        req.illust_id, refresh_token=setting_str_from_state("pixivRefreshToken"), proxy=px,
+    )
+
+
+@router.get("/web-materials/proxy-image")
+def web_material_proxy_image(url: str, proxy: str = ""):
+    """图站图片代理（「查看大图」用：浏览器不一定能直连 CDN / 有防盗链）。
+
+    仅放行图站白名单 host；字节流回传并带 1h 缓存。
+    """
+    from fastapi import Response
+
+    from app.services import material_sources
+    from app.services.repo_meta import setting_str_from_state
+
+    if not url.strip():
+        raise HTTPException(status_code=400, detail="缺少 url")
+    px = proxy.strip() or (setting_str_from_state("systemProxyUrl")
+                           or setting_str_from_state("proxyUrl"))
+    try:
+        data, ctype = material_sources.fetch_image_bytes(url.strip(), proxy=px)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return Response(content=data, media_type=ctype,
+                    headers={"Cache-Control": "public, max-age=3600"})
+
+
 @router.post("/web-materials/delete")
 def web_material_delete(req: WebMaterialDeleteRequest) -> dict[str, object]:
     """删除 _web_materials/ 下的指定文件。"""

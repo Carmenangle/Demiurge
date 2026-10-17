@@ -609,7 +609,7 @@ export function AgentPanel({ draft, setDraft }: PanelProps) {
         ))}
       </div>
       {knowledgeDoc && (
-        <div className="modal-mask" onClick={() => setKnowledgeDoc(null)}>
+        <div className="modal-mask">
           <div className="modal" style={{ width: "min(780px, 94vw)" }} onClick={(e) => e.stopPropagation()}>
             <h3 style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
               <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>

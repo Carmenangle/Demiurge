@@ -35,7 +35,7 @@ export function StylePresetModal({
 
   return (
     <>
-    <div className="modal-mask" onClick={onClose}>
+    <div className="modal-mask">
       <div className="modal" style={{ width: 860, maxWidth: "94vw", maxHeight: "88vh", display: "flex", flexDirection: "column" }} onClick={(e) => e.stopPropagation()}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
           <h3 style={{ margin: 0 }}>提示词风格存档</h3>

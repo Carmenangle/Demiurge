@@ -190,6 +190,7 @@ export interface Settings {
   userPersonas?: UserPersona[]; // 用户人设多档：可定制多个「我是谁」自由切换
   activeUserPersonaId?: string; // 当前选中的用户人设 id（空=不注入用户人设）
   illustrate: boolean; // 剧情插画开关：开=高潮点自动配图（复用生图模型，能动性 D 阶段）
+  promptOnlyGeneration: boolean; // 试跑：只生成提示词，**不提交 ComfyUI**（图片/视频都不出图），成稿照常上报 trace 供审查
   mediaInsert?: Record<string, MediaInsertPreset>; // 多元数据插入预设，按作品(repoId)绑定 ComfyUI 模板+LoRA
   comfyuiPath: string; // ComfyUI 本体目录（含 main.py），用于后端启动
   comfyuiPython: string; // ComfyUI 自己的 Python；禁止使用本工具 Runtime 代替
@@ -204,6 +205,9 @@ export interface Settings {
   systemProxySource?: "system" | "env" | "manual" | "none"; // 生效来源，供界面说明
   searchProvider?: SearchProvider; // 联网搜索源（默认 auto=后端按 bing-cn→ddg 回落）
   smitheryKey?: string; // Smithery MCP 市场 API Key（浏览/连接托管 MCP 服务器用）
+  pixivRefreshToken?: string; // pixiv refresh token（「上网素材 → pixiv 市场」搜索/下载用；OAuth 令牌已含账号身份）
+  danbooruLogin?: string; // danbooru 用户名（与 API Key 配对做 Basic 鉴权；单独 key 不生效）
+  danbooruApiKey?: string; // danbooru API key（可选：与用户名配对可提额；都不填=匿名搜索）
   chatBgPath?: string; // 小仓库对话背景图（本地文件路径，走 local-view 读取）
   chatBgOpacity?: number; // 对话背景透明度 0~1（默认 0.15）
   chatBgFit?: "cover" | "contain"; // 填充方式：cover 铺满裁剪 / contain 完整显示
@@ -311,6 +315,7 @@ const DEFAULT: Settings = {
   userPersona: "",
   userPersonas: [],
   illustrate: false,
+  promptOnlyGeneration: false,
   mediaInsert: {},
   comfyuiPath: "",
   comfyuiPython: "",
@@ -324,6 +329,9 @@ const DEFAULT: Settings = {
   systemProxySource: "none",
   searchProvider: "auto",
   smitheryKey: "",
+  pixivRefreshToken: "",
+  danbooruLogin: "",
+  danbooruApiKey: "",
   chatBgPath: "",
   chatBgOpacity: 0.15,
   chatBgFit: "cover",
@@ -606,6 +614,9 @@ export function exportSettings(s: Settings, keepKeys: boolean): string {
     out.hfToken = "";
     out.civitaiToken = "";
     out.smitheryKey = "";
+    out.pixivRefreshToken = "";
+    out.danbooruLogin = "";
+    out.danbooruApiKey = "";
   }
   return JSON.stringify(out, null, 2);
 }

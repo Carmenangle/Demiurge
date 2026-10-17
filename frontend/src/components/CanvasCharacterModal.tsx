@@ -42,7 +42,7 @@ export function CanvasCharacterModal({
   const creatorNotes = String(card?.creator_notes ?? "");
 
   return (
-    <div className="modal-mask" onClick={onClose}>
+    <div className="modal-mask">
       <div className="modal" onClick={(e) => e.stopPropagation()}
         style={{ maxWidth: 640, width: "90vw", maxHeight: "85vh", display: "flex", flexDirection: "column" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>

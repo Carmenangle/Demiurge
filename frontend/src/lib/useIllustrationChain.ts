@@ -44,7 +44,7 @@ import {
 } from "./chatGeneration";
 import { templateRegenerationSnapshot } from "./regeneration";
 import { pollWorkflowResult, type PendingGeneration } from "./workflowGenerationRuntime";
-import { appendImageSlot, appendTransitionSlot, bindMediaSlotPrompt, resolveMediaSlot } from "./chatSessionEvents";
+import { appendImageSlot, appendTransitionSlot, bindMediaSlotPrompt, markMediaSlotFailed, resolveMediaSlot } from "./chatSessionEvents";
 
 /** 插画链的 hook 闭包依赖（T2.2-A 同名 deps 注入；类型逐字抄 useChatSession 内声明）。 */
 export interface IllustrationChainDeps {
@@ -73,6 +73,12 @@ export interface IllustrationChainDeps {
     messageId: string, slotId: string, stage: string, error: string, promptId?: string, retryArgs?: unknown,
   ) => void;
 }
+
+// 第 60～66 刀之后的「试跑」开关（2026-09-28 用户需求）：跑剧情时只生成提示词、不提交 ComfyUI。
+// 动机：批量生图约 4.7 分钟/张，审查提示词不该等出图；视频同理。
+// 语义：**编译链一字不改**（60～66 刀全部照跑），只是把「提交 + 轮询」整段换成「上报 trace」。
+const PROMPT_ONLY_NOTE =
+  "试跑：只生成提示词，未提交 ComfyUI（图片/视频均不出图）；成稿见 trace 的 illustration.submitted";
 
 // 第 58 刀（2026-09-24）：999 模式 12 个槽**同时** POST /comfyui/submit —— ComfyUI
 // 首个任务触发模型加载、其余在队列里等，5/12 张撞上 60s 提交超时（真机实锤）。
@@ -299,6 +305,17 @@ export function useIllustrationChain({
       }
       return withLoraTriggers(compiled);
     };
+    // 试跑（只生成提示词）：编译链**一字不改**照跑，但全程不碰 ComfyUI ——
+    // 状态检查/底图上传/首尾帧提交/转场提交/正片提交/轮询全部短路，成稿改走
+    // reportIllustrationSubmission 进 trace（promptId 空 = 未提交），供审查比对。
+    // 槽位在这里立刻落「试跑」终态：**可见、可重新生成、绝不悬挂**（后续若真的编译失败，
+    // 下方 failSlot 会用真实错误覆写它 ⇒ 终态永远反映最后一次尝试的真实结果）。
+    const promptOnly = settings.promptOnlyGeneration === true;
+    if (promptOnly) {
+      setMessages((current) => markMediaSlotFailed(
+        current, messageId, slotId, "prompt_only", PROMPT_ONLY_NOTE, retrySnapshot,
+      ));
+    }
     // 底图需先上传到 ComfyUI input 目录，取回可供 LoadImage 引用的文件名
     let uploadedImage = "";
     const needsImage = tpl.exposed.some((f) => workflowFieldBinding(f) === "base_image");
@@ -307,7 +324,7 @@ export function useIllustrationChain({
       failSlot("image_required", "视频模板需要首帧底图，但当前没有可用的已完成插画，请先出图或用预设指定底图");
       return;
     }
-    if (needsImage && baseImageForUse) {
+    if (!promptOnly && needsImage && baseImageForUse) {
       try {
         const blob = await (await fetch(localViewUrl(baseImageForUse))).blob();
         const file = new File([blob], baseImageForUse.split(/[\\/]/).pop() || "base.png", { type: blob.type || "image/png" });
@@ -323,7 +340,7 @@ export function useIllustrationChain({
     // V1.5/B3 firstlast 双帧：事件携带尾帧图（lastFrameUrl）→ 上传为 last_frame_image；
     // 上传失败/无尾帧图 → 降级为首帧单图提交（后端 firstlast 缺尾帧有 warning，不挂死槽）。
     let uploadedLastFrameImage = "";
-    if (useVideo && videoMode === "firstlast" && lastFrameUrl) {
+    if (!promptOnly && useVideo && videoMode === "firstlast" && lastFrameUrl) {
       try {
         const blob = await (await fetch(localViewUrl(lastFrameUrl))).blob();
         const file = new File([blob], lastFrameUrl.split(/[\\/]/).pop() || "last.png", { type: blob.type || "image/png" });
@@ -437,6 +454,21 @@ export function useIllustrationChain({
           const frameMedia = frameMediaFor(task.desc);
           const frameLoras = frameMedia.loras.map(({ name, weight }) => ({ name, weight }));
           const frameValues = buildFrameValues(framePrompt, frameMedia);
+          if (promptOnly) {
+            // 试跑：该帧提示词照常编译并上报 trace，但不提交 ComfyUI。
+            // `frameFirstPromptId` 保持空 ⇒ 下游槽位回填/转场/正片一并短路（无悬挂槽）。
+            void reportIllustrationSubmission({
+              threadId, repoId: repo?.id || threadId, turnId, messageId,
+              slotId: `${slotId}${isFirst ? ":first" : ":last"}`,
+              templateId: preset.templateId!, promptId: "", prompt: framePrompt, promptProfile,
+              loraName: frameMedia.loraName, loraWeight: frameMedia.loraWeight,
+              latentWidth: latentSize.width, latentHeight: latentSize.height,
+              loraMode: preset.loraMode || "single",
+              loraNames: frameLoras.map((item) => item.name),
+              valueKeys: Object.keys(frameValues).sort(), source,
+            }).catch(() => undefined);
+            continue;
+          }
           const recordIds = (res: { prompt_id: string }) => {
             if (isFirst) { frameFirstPromptId = res.prompt_id; frameFirstPrompt = framePrompt; frameFirstValueKeys = Object.keys(frameValues).sort(); frameFirstMedia = frameMedia; }
             else { frameLastPromptId = res.prompt_id; frameLastPrompt = framePrompt; frameLastValueKeys = Object.keys(frameValues).sort(); frameLastMedia = frameMedia; }
@@ -567,7 +599,7 @@ export function useIllustrationChain({
     // W3 转场任务（2 任务排队）：firstlast + 首帧独立生成（非 reuse）+ 后端下发转场提示词 →
     // 先提交转场视频（图片1=上尾帧、图片2=当前首帧），正片随后提交（ComfyUI 队列顺序执行）。
     // 坑F：无上尾帧图 → 降级文字转场（不拦截）；转场失败/提交失败 → 不挂死正片（仅槽位标失败）。
-    if (useVideo && videoMode === "firstlast" && transition !== "reuse"
+    if (!promptOnly && useVideo && videoMode === "firstlast" && transition !== "reuse"
         && transitionVideoPrompt && firstFrameGenerated) {
       const transitionSlotId = `${slotId}:transition`;
       // 第 59 刀：段桥的图片1 = 本 run 刚生成的「上一张画面」（frameFirstImage 已是
@@ -645,15 +677,27 @@ export function useIllustrationChain({
       videoPrompt: mainIsVideo && videoPrompt ? videoPrompt : undefined,
     });
     try {
+      // V1.1 红线：视频模板 LoRA 不自动接线（loader 结构各异），只认模板自身暴露字段；
+      // 图片分支维持既有 loraStack 注入合同。第 59 刀：段桥主槽=普通图 ⇒ 图片 LoRA 照常。
+      const loraStack = mainIsVideo ? [] : loras.map(({ name, weight }) => ({ name, weight }));
+      const loraMode = mainIsVideo ? "none" : (preset.loraMode || "single");
+      if (promptOnly) {
+        // 试跑：主图/正片（含 video 分支）的成稿上报 trace，不查 ComfyUI、不提交、不轮询。
+        void reportIllustrationSubmission({
+          threadId, repoId: repo?.id || threadId, turnId, messageId, slotId,
+          templateId: chosenId, promptId: "", prompt, promptProfile,
+          loraName, loraWeight, latentWidth: latentSize.width, latentHeight: latentSize.height,
+          loraMode, loraNames: loraStack.map((item) => item.name),
+          valueKeys: Object.keys(values).sort(),
+          source,
+        }).catch(() => undefined);
+        return;
+      }
       const st = await comfyStatus(settings.comfyuiUrl);
       if (!st.running) {
         failSlot("comfyui_status", "ComfyUI 尚未启动");
         return;
       }
-      // V1.1 红线：视频模板 LoRA 不自动接线（loader 结构各异），只认模板自身暴露字段；
-      // 图片分支维持既有 loraStack 注入合同。第 59 刀：段桥主槽=普通图 ⇒ 图片 LoRA 照常。
-      const loraStack = mainIsVideo ? [] : loras.map(({ name, weight }) => ({ name, weight }));
-      const loraMode = mainIsVideo ? "none" : (preset.loraMode || "single");
       const r = await enqueueSubmit(() => submitWorkflow(
         chosenId, values, settings.comfyuiUrl, prompt, loraStack, loraMode,
       ));

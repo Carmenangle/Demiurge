@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import json
 import re
+import time
 from typing import Any, Callable
 from app.services import agent_context, plan_compiler, run_trace
 from app.services import llm as _llm
@@ -16,6 +17,10 @@ from app.services.agent_support import _proxy_kw
 from app.services.agent_retrieval import _history_embed_fn
 
 _LOG = logging.getLogger("uvicorn.error")
+
+# 历史自动压缩的摘要请求超时（秒，2026-10-14）：原默认 200s×2 重试，慢中压下用户
+# 每轮「发送→就绪」要等 6–10 分钟。收紧为 60s 单次，快速失败退机械保头保尾。
+_COMPACT_TIMEOUT_SECONDS = 60
 
 def _flow_doc_hint(ctx: Any, user_text: str) -> str:
     """current_flow_doc 续跑提示（固化链 §3 设计 A）：延续语 + 有句柄才注入，纯机械。"""
@@ -216,6 +221,11 @@ def _history_summarizer(context: RunContext):
     """自动压缩的摘要回调（/compact 对齐）：LLM 把旧段历史压成结构化要点。
 
     失败/空摘要返回 None → recent_history 退回机械保头保尾裁剪（fail-open）。
+
+    2026-10-14 实锤改造（慢中压下用户每轮干等 6–10 分钟，全程盲跑）：
+    - 超时收紧为 60s、单次尝试（原默认 200s×2，最坏 400s+ 才失败）；
+    - cancel_event 置位则不发起请求（暂停后不再往慢中转打摘要）；
+    - 无论成败都发 history.compact trace 事件（含耗时/降级原因）。
     """
     try:
         base = context.chat.base_url
@@ -228,6 +238,11 @@ def _history_summarizer(context: RunContext):
     proxy = (context.chat_proxy_url or "").strip()
 
     def _summarize(old: list[dict]) -> str | None:
+        if getattr(context, "cancel_event", None) is not None \
+                and context.cancel_event.is_set():
+            run_trace.emit(context, "history.compact",
+                           outcome="cancelled", old_items=len(old))
+            return None
         transcript = "\n".join(
             ("用户" if item.get("role") == "user" else "助手") + "：" + str(item.get("content") or "")
             for item in old)
@@ -235,12 +250,23 @@ def _history_summarizer(context: RunContext):
             "你是对话压缩器。把以下历史对话压缩成一段结构化摘要，供后续对话作为唯一历史依据。"
             "必须保留：任务目标与演变、已确认的决定与设定（角色/服装/配色/文件路径等专名与数字原样保留）、"
             "用户明确否决的内容、未完成事项。不新增内容、不评论、不提问。只输出摘要正文。")
+        started = time.monotonic()
         try:
             out = _llm.chat(base, key, model, system, transcript, temperature=0.2,
+                            retries=1, timeout=_COMPACT_TIMEOUT_SECONDS,
                             **({"proxy": proxy} if proxy else {}))
-        except Exception:  # noqa: BLE001 - 压缩失败退机械裁剪
+        except Exception as exc:  # noqa: BLE001 - 压缩失败退机械裁剪
+            run_trace.emit(context, "history.compact",
+                           outcome="failed", old_items=len(old),
+                           elapsed_ms=int((time.monotonic() - started) * 1000),
+                           error=str(exc)[:200])
             return None
-        return (out or "").strip() or None
+        summary = (out or "").strip() or None
+        run_trace.emit(context, "history.compact",
+                       outcome="ok" if summary else "empty",
+                       old_items=len(old),
+                       elapsed_ms=int((time.monotonic() - started) * 1000))
+        return summary
 
     return _summarize
 

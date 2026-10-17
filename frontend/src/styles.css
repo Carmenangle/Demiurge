@@ -1985,11 +1985,13 @@ textarea.text-tool-short-input { height: auto; min-height: 0; resize: none; over
 }
 
 /* 仓库图片网格 */
+/* 生成内容（资产库）：瀑布流自然比例（2026-10-17 与上网素材对齐，不再方形裁剪） */
 .gallery-grid {
-  display: grid;
-  grid-template-columns: repeat(8, minmax(0, 1fr));
-  gap: 12px;
+  columns: 6 170px;
+  column-gap: 12px;
 }
+@media (max-width: 900px) { .gallery-grid { columns: 4 150px; } }
+@media (max-width: 640px) { .gallery-grid { columns: 3 130px; } }
 .gallery-cell {
   padding: 0;
   border: 1px solid var(--border);
@@ -1997,22 +1999,22 @@ textarea.text-tool-short-input { height: auto; min-height: 0; resize: none; over
   overflow: hidden;
   background: var(--surface);
   cursor: pointer;
-  aspect-ratio: 1;
   position: relative;
+  break-inside: avoid;        /* 瀑布流下不被跨列切断 */
+  margin: 0 0 12px;
 }
 .gallery-cell img {
   width: 100%;
-  height: 100%;
-  object-fit: cover;
+  height: auto;
   display: block;
 }
 .gallery-cell:hover {
   border-color: var(--accent, #4a90d9);
 }
-/* M2.1/M2.2：视频资产单元格（占位 + 角标 + 标签） */
+/* M2.1/M2.2：视频资产单元格（占位 + 角标 + 标签）；瀑布流下给固定 16:9 高度 */
 .gallery-video-cell {
   width: 100%;
-  height: 100%;
+  aspect-ratio: 16 / 9;
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -2246,17 +2248,22 @@ textarea.text-tool-short-input { height: auto; min-height: 0; resize: none; over
 }
 
 /* 上网素材网格（复用资产库 gallery 样式） */
+/* 上网素材：瀑布流（自然长宽比，参考 danbooru 市场，不再方形裁剪；2026-10-17 用户要求） */
 .web-materials-grid {
-  display: grid;
-  grid-template-columns: repeat(8, minmax(0, 1fr));
-  gap: 12px;
+  columns: 6 170px;
+  column-gap: 12px;
 }
+@media (max-width: 900px) { .web-materials-grid { columns: 4 150px; } }
+@media (max-width: 640px) { .web-materials-grid { columns: 3 130px; } }
 .web-materials-cell {
   position: relative; padding: 0; border: 1px solid var(--border);
   border-radius: 10px; overflow: hidden; background: var(--surface);
-  cursor: pointer; aspect-ratio: 1;
+  cursor: pointer;
+  break-inside: avoid;        /* 瀑布流下不被跨列切断 */
+  margin: 0 0 12px;           /* column 布局用 margin-bottom 控制行距 */
 }
-.web-materials-cell img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.web-materials-cell img { width: 100%; height: auto; display: block; }  /* 自然比例，不裁方 */
+.web-materials-cell.insp-card-cell img { height: 100%; object-fit: cover; }  /* 灵感卡封面仍填满方形 */
 .web-materials-cell:hover { border-color: var(--accent); }
 .web-materials-cell.sel { outline: 3px solid var(--accent); outline-offset: -3px; }
 .web-materials-cell .wm-del {
@@ -7912,3 +7919,63 @@ html:is([data-theme="bright"], [data-theme="night"], [data-theme="green"], [data
 .fabric-approval-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
 .fabric-approval-hint { font-size: 12px; color: var(--text-muted, #999); }
 .fabric-approval-bar .cmd-chip { cursor: pointer; }
+
+/* 2026-10-16 图站市场：瀑布流自然排版（按原图宽高比，不裁切）+ 卡片悬浮操作 */
+.market-masonry { columns: 4 180px; column-gap: 10px; }
+@media (max-width: 900px) { .market-masonry { columns: 3 160px; } }
+@media (max-width: 640px) { .market-masonry { columns: 2 140px; } }
+.market-card {
+  break-inside: avoid;
+  margin: 0 0 10px;           /* column 布局下用 margin-bottom 控制行距 */
+  position: relative;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--surface-2, rgba(128, 128, 128, 0.12));
+  cursor: pointer;
+}
+.market-card img { width: 100%; display: block; }
+.market-card.sel { outline: 2px solid var(--accent); outline-offset: -2px; }
+.market-card-meta {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  padding: 4px 7px; font-size: 11px; color: #fff;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.72), rgba(0, 0, 0, 0));
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  z-index: 1;                     /* 低于操作按钮：裂图时卡片塌缩成矮条，meta 不许盖住四个按钮 */
+  pointer-events: none;           /* 纯展示层，不吃点击 */
+}
+.market-card-actions {
+  position: absolute; top: 6px; right: 6px;
+  display: flex; gap: 4px; opacity: 0; transition: opacity 0.15s ease;
+  z-index: 2;                     /* 永远在 meta 之上 ⇒ 裂图/矮卡时四个按钮仍可点 */
+}
+.market-card:hover .market-card-actions, .market-card.sel .market-card-actions { opacity: 1; }
+.market-act {
+  width: 26px; height: 26px; border-radius: 50%; border: none; cursor: pointer;
+  background: rgba(0, 0, 0, 0.62); color: #fff;
+  display: flex; align-items: center; justify-content: center;
+}
+.market-act:hover { background: var(--accent); }
+.market-act:disabled { opacity: 0.5; cursor: default; }
+.market-act.on { color: #ff6b81; }   /* 已收藏 */
+
+/* 详情面板：分组标签（配色对齐 danbooru 习惯） */
+.market-tag {
+  display: inline-block; margin: 2px 4px 2px 0; padding: 2px 7px;
+  border-radius: 4px; font-size: 11.5px; cursor: pointer; user-select: none;
+}
+.market-tag:hover { outline: 1px solid var(--accent); }
+.market-tag.t-artist { background: #f5e0b8; color: #5a4210; }
+.market-tag.t-copyright { background: #e6d2f2; color: #4a2560; }
+.market-tag.t-character { background: #d2edcc; color: #245c22; }
+.market-tag.t-general { background: #c9e4f2; color: #1d4b5e; }
+.market-tag.t-meta { background: #dcdcdc; color: #444; }
+.market-tag-menu {
+  position: fixed; min-width: 96px; padding: 4px 0;
+  background: var(--surface, #fff); border: 1px solid var(--border, #ccc);
+  border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+}
+.market-tag-menu button {
+  display: block; width: 100%; padding: 6px 14px; text-align: left;
+  background: none; border: none; cursor: pointer; font-size: 13px; color: var(--text, #222);
+}
+.market-tag-menu button:hover { background: var(--surface-2, rgba(128, 128, 128, 0.12)); }

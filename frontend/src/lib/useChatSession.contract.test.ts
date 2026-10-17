@@ -374,3 +374,26 @@ describe("第 34 刀 首尾帧固定落点接线锁", () => {
   });
 });
 
+
+// ── 2026-10-14 A 方案：暂停后必须等后端释放 thread 准入再亮发送键 ──────────────
+//
+// 实锤：`request_cancel` 只 set cancel_event，release 要等后台运行自己走 finally；
+// 它卡在同步阻塞（历史压缩摘要 LLM 调用、参考图上传）时取消无人消费，用户暂停后
+// 立即重发就撞 409「该对话已有生成任务正在运行」（换模型无效——按 thread_id 判）。
+// 这两条锁**接线顺序**，行为细节在 agentReleaseWait.test.ts。
+describe("暂停后等待准入释放（A 方案接线锁）", () => {
+  it("hardCancel 必须 await waitForAgentRelease（取消后不立刻返回）", () => {
+    expect(code).toMatch(/await waitForAgentRelease\(threadId/);
+  });
+
+  it("stopGenerating 的 busy 释放必须晚于 hardCancel（等待期间发送键保持禁用）", () => {
+    const body = code.slice(
+      code.indexOf("const stopGenerating"),
+      code.indexOf("const stopSlotGeneration"),
+    );
+    expect(body).toContain("await hardCancel(pid)");
+    expect(body.indexOf("await hardCancel(pid)")).toBeLessThan(
+      body.indexOf("agentBusyRef.current = false"),
+    );
+  });
+});

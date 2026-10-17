@@ -4,10 +4,15 @@
 // 双击灵感卡 → 详情弹窗（文本内容，不是生成参数；可删图只留文本）。
 // 批量选择：图片 / 灵感卡各自支持 删除 / 发送至画布 / 插入输入框。
 import { useEffect, useState } from "react";
-import { Check, FileText, Images, Search, Send, Trash2 } from "lucide-react";
+import { Check, FileText, Folder, Images, Search, Send, Store, Trash2 } from "lucide-react";
 import { PageShell, EmptyState } from "../components/layout/PageShell";
 import { ConfirmModal } from "../components/Modal";
+import { WebMaterialDetailModal } from "../components/WebMaterialDetailModal";
 import { Pager } from "../components/Pager";
+import { MaterialMarketModal } from "../components/MaterialMarketModalLive";
+import { useSettings } from "../stores/settings";
+import { effectiveGlobalProxyUrl } from "../lib/modelProxy";
+import { UI_BUILD } from "../lib/buildInfo";
 import {
   listWebMaterials, deleteWebMaterial, type WebMaterial,
   listInspirationCards, deleteInspirationCard, updateInspirationCard,
@@ -18,14 +23,59 @@ const PAGE_SIZE = 32;
 
 type Tab = "images" | "inspiration";
 
+// ===== 多页作品「文件夹」聚合（2026-10-17 用户需求）=====
+// pixiv 多页作品下载时每页都带同一个 source_url（作品页 URL）+ 标题「<作品名> · P<n>/<N>」
+// ⇒ 前端按 source_url 聚合成一个文件夹卡片，点开再看里面各页（省得 98 张平铺占满素材库）。
+const PAGE_RE = / · P(\d+)\/(\d+)$/;
+const pageIdxOf = (t: string) => { const m = (t || "").match(PAGE_RE); return m ? parseInt(m[1], 10) : 0; };
+const baseTitleOf = (t: string) => (t || "").replace(PAGE_RE, "");
+
+type Cell =
+  | { kind: "image"; m: WebMaterial }
+  | { kind: "folder"; key: string; title: string; cover: WebMaterial; pages: WebMaterial[] };
+
+function buildImageCells(list: WebMaterial[]): Cell[] {
+  const groups = new Map<string, WebMaterial[]>();
+  const order: string[] = [];
+  const singles: WebMaterial[] = [];
+  for (const m of list) {
+    // 只聚合图站搜索保存的（有 provider + source_url）；灵感卡/本地上传不聚
+    if (m.provider && m.source_url) {
+      if (!groups.has(m.source_url)) { groups.set(m.source_url, []); order.push(m.source_url); }
+      groups.get(m.source_url)!.push(m);
+    } else {
+      singles.push(m);
+    }
+  }
+  const cells: Cell[] = [];
+  for (const key of order) {
+    const pages = groups.get(key)!;
+    if (pages.length > 1) {
+      const sorted = [...pages].sort((a, b) => pageIdxOf(a.title) - pageIdxOf(b.title));
+      cells.push({ kind: "folder", key, title: baseTitleOf(sorted[0].title) || sorted[0].title,
+                   cover: sorted[0], pages: sorted });
+    } else {
+      cells.push({ kind: "image", m: pages[0] });
+    }
+  }
+  for (const m of singles) cells.push({ kind: "image", m });
+  return cells;
+}
+
 export function WebMaterialsView({
   outputDir,
   onSendToCanvas,
+  onSendToChat,
+  onSendAsRecipe,
   onSendInspirationToChat,
   onSendInspirationToCanvas,
 }: {
   outputDir: string;
   onSendToCanvas?: (items: WebMaterial[]) => void;
+  /** 发送至对话框：只发图（与资产库同名功能对齐） */
+  onSendToChat?: (item: WebMaterial) => void;
+  /** 发送至对话：图 + 可读文本（素材用来源/标签/搜索词替代提示词） */
+  onSendAsRecipe?: (item: WebMaterial) => void;
   onSendInspirationToChat?: (items: InspirationCardAsset[]) => void;
   onSendInspirationToCanvas?: (items: InspirationCardAsset[]) => void;
 }) {
@@ -38,9 +88,21 @@ export function WebMaterialsView({
   const [batchDel, setBatchDel] = useState(false);
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
+  const [folderView, setFolderView] = useState<string | null>(null);  // 打开的多页文件夹（其 source_url）
   // 灵感卡详情弹窗（双击打开：文本内容 / 删图只留文本）
   const [detailCard, setDetailCard] = useState<InspirationCardAsset | null>(null);
+  const [detailMaterial, setDetailMaterial] = useState<WebMaterial | null>(null);
   const [detailBusy, setDetailBusy] = useState(false);
+  // P2-1：图站素材市场（pixiv / danbooru）
+  const [market, setMarket] = useState<"pixiv" | "danbooru" | null>(null);
+  const [note, setNote] = useState<{ msg: string; kind: "success" | "error" } | null>(null);
+  const { settings } = useSettings();
+  const proxy = effectiveGlobalProxyUrl(settings);
+
+  const flashNote = (msg: string, kind: "success" | "error" = "success") => {
+    setNote({ msg, kind });
+    window.setTimeout(() => setNote(null), 4000);
+  };
 
   const refresh = () => {
     if (!outputDir) { setItems([]); setCards([]); setLoading(false); return; }
@@ -66,6 +128,16 @@ export function WebMaterialsView({
       if (tab === "images") await deleteWebMaterial(outputDir, id);
       else await deleteInspirationCard(outputDir, id);
     } catch { /* ignore */ }
+    refresh();
+  };
+
+  // 删除整个多页文件夹（逐页删；若正看着这个文件夹则退回主视图）
+  const deleteFolder = async (pages: WebMaterial[]) => {
+    const src = pages[0]?.source_url || "";
+    for (const p of pages) {
+      try { await deleteWebMaterial(outputDir, p.filename); } catch { /* 单条失败不阻断 */ }
+    }
+    if (src && folderView === src) setFolderView(null);
     refresh();
   };
 
@@ -114,13 +186,20 @@ export function WebMaterialsView({
       (i.content || "").toLowerCase().includes(q));
   })();
 
-  const filtered = tab === "images" ? filteredImages : filteredCards;
+  // 图片页：folderView 非空＝钻进某文件夹看它的页（按页码排序）；否则聚合成文件夹卡片 + 单图
+  const imageCells: Cell[] = folderView
+    ? filteredImages.filter((m) => m.source_url === folderView)
+        .sort((a, b) => pageIdxOf(a.title) - pageIdxOf(b.title))
+        .map((m) => ({ kind: "image" as const, m }))
+    : buildImageCells(filteredImages);
 
-  const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const displayLen = tab === "images" ? imageCells.length : filteredCards.length;
+  const pageCount = Math.max(1, Math.ceil(displayLen / PAGE_SIZE));
   const curPage = Math.min(page, pageCount);
   const start = (curPage - 1) * PAGE_SIZE;
-  const shownImages = filteredImages.slice(start, start + PAGE_SIZE);
+  const shownImages = imageCells.slice(start, start + PAGE_SIZE);
   const shownCards = filteredCards.slice(start, start + PAGE_SIZE);
+  const curFolder = folderView ? filteredImages.find((m) => m.source_url === folderView) : undefined;
 
   const sendSelection = (toCanvas: boolean) => {
     if (tab === "images") {
@@ -134,6 +213,17 @@ export function WebMaterialsView({
     else onSendInspirationToChat?.(picked);
   };
 
+  // 「选本页」：选中当前页显示的所有图（文件夹⇒其全部页；单图⇒自身）
+  const selectThisPage = () => {
+    if (tab !== "images") { setSelected(new Set(filteredCards.map((m) => m.id))); return; }
+    const names = new Set<string>();
+    for (const cell of shownImages) {
+      if (cell.kind === "image") names.add(cell.m.filename);
+      else cell.pages.forEach((p) => names.add(p.filename));
+    }
+    setSelected(names);
+  };
+
   return (
     <PageShell
       title="上网素材"
@@ -145,19 +235,19 @@ export function WebMaterialsView({
               style={{ width: "100%", paddingLeft: 28, boxSizing: "border-box" }}
               placeholder={tab === "images" ? "搜索标题或来源…" : "搜索标题或内容…"}
               value={query}
-              onChange={(e) => { setQuery(e.target.value); setPage(1); }}
+              onChange={(e) => { setQuery(e.target.value); setPage(1); setFolderView(null); }}
             />
           </div>
           <div className="lora-mode-switch" role="group" aria-label="素材类型" style={{ display: "flex", gap: 4 }}>
             <button
               className={`btn ${tab === "images" ? "primary" : ""}`}
-              onClick={() => { setTab("images"); setSelected(new Set()); setPage(1); }}
+              onClick={() => { setTab("images"); setSelected(new Set()); setPage(1); setFolderView(null); }}
             >
               <Images size={13} style={{ verticalAlign: "-2px", marginRight: 4 }} />图片素材
             </button>
             <button
               className={`btn ${tab === "inspiration" ? "primary" : ""}`}
-              onClick={() => { setTab("inspiration"); setSelected(new Set()); setPage(1); }}
+              onClick={() => { setTab("inspiration"); setSelected(new Set()); setPage(1); setFolderView(null); }}
             >
               <FileText size={13} style={{ verticalAlign: "-2px", marginRight: 4 }} />灵感卡
             </button>
@@ -165,6 +255,18 @@ export function WebMaterialsView({
           <button className="btn" onClick={() => { setSelMode((v) => !v); setSelected(new Set()); }}>
             {selMode ? "退出多选" : "批量选择"}
           </button>
+          <button className="btn" title="pixiv 图站搜索（需在「设置 → 凭证」填 Refresh Token）"
+            onClick={() => { setMarket("pixiv"); setTab("images"); }}>
+            <Store size={13} style={{ verticalAlign: "-2px", marginRight: 4 }} />pixiv 市场
+          </button>
+          <button className="btn" title="danbooru 图站搜索（公开 API，标签用英文下划线）"
+            onClick={() => { setMarket("danbooru"); setTab("images"); }}>
+            <Store size={13} style={{ verticalAlign: "-2px", marginRight: 4 }} />danbooru 市场
+          </button>
+          <span title="前端构建标记：刷新后仍显示旧值＝标签页没真正重载（需清缓存/无痕）"
+            style={{ marginLeft: "auto", alignSelf: "center", fontSize: 11, color: "var(--text-muted)", opacity: 0.75 }}>
+            UI {UI_BUILD}
+          </span>
         </div>
       }
     >
@@ -176,7 +278,7 @@ export function WebMaterialsView({
             <div key={i} className="web-materials-cell skeleton" style={{ aspectRatio: "1 / 1" }} />
           ))}
         </div>
-      ) : filtered.length === 0 && items.length === 0 && cards.length === 0 ? (
+      ) : displayLen === 0 && items.length === 0 && cards.length === 0 ? (
         <div className="empty-state">
           <Images size={32} strokeWidth={1.4} style={{ opacity: 0.5 }} />
           <p style={{ margin: 0 }}>
@@ -185,7 +287,7 @@ export function WebMaterialsView({
               : "还没有灵感卡。保存灵感卡后（对话框灵感卡 → 保存到素材库）会出现在这里。"}
           </p>
         </div>
-      ) : filtered.length === 0 ? (
+      ) : displayLen === 0 ? (
         <div className="empty-state">
           <Search size={30} strokeWidth={1.4} style={{ opacity: 0.5 }} />
           <p style={{ margin: 0 }}>没有匹配「{query}」的{tab === "images" ? "素材" : "灵感卡"}。</p>
@@ -217,33 +319,87 @@ export function WebMaterialsView({
                     <Send size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />发送至画布（{selected.size}）
                   </button>
                 )}
-              <button className="btn" onClick={() => setSelected(new Set(tab === "images"
-                ? filteredImages.map((m) => m.filename)
-                : filteredCards.map((m) => m.id)))}>选本页</button>
+              <button className="btn" onClick={selectThisPage}>选本页</button>
               <button className="btn" disabled={selected.size === 0} onClick={() => setSelected(new Set())}>清除</button>
+            </div>
+          )}
+          {/* 文件夹面包屑：钻进多页文件夹时显示，可返回主视图 */}
+          {tab === "images" && folderView && (
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+              <button className="btn" onClick={() => { setFolderView(null); setPage(1); setSelected(new Set()); }}>
+                ← 返回素材库
+              </button>
+              <span style={{ fontWeight: 600, fontSize: 13, display: "flex", alignItems: "center", gap: 5 }}>
+                <Folder size={14} /> {curFolder ? (baseTitleOf(curFolder.title) || curFolder.title) : "文件夹"}
+              </span>
+              <span style={{ fontSize: 12, color: "var(--text-muted)" }}>（{imageCells.length} 张）</span>
             </div>
           )}
           <div className="web-materials-grid">
             {tab === "images"
-              ? shownImages.map((m) => (
+              ? shownImages.map((cell) => cell.kind === "folder" ? (
                   <div
-                    key={m.filename}
-                    className={`web-materials-cell ${selMode && selected.has(m.filename) ? "sel" : ""}`}
-                    title={m.title}
-                    onClick={() => selMode && toggleSel(m.filename)}
+                    key={cell.key}
+                    className={`web-materials-cell ${selMode && cell.pages.every((p) => selected.has(p.filename)) ? "sel" : ""}`}
+                    title={`${cell.title}（${cell.pages.length} 张）${selMode ? "" : " · 点击打开"}`}
+                    style={{ cursor: "pointer" }}
+                    onClick={() => {
+                      if (selMode) {
+                        // 选中/取消整个文件夹（全部页）
+                        setSelected((s) => {
+                          const n = new Set(s);
+                          const allSel = cell.pages.every((p) => n.has(p.filename));
+                          cell.pages.forEach((p) => { if (allSel) n.delete(p.filename); else n.add(p.filename); });
+                          return n;
+                        });
+                      } else {
+                        setFolderView(cell.key); setPage(1); setSelected(new Set());
+                      }
+                    }}
                   >
-                    <img src={m.url} alt={m.title} loading="lazy" />
+                    <img src={cell.cover.url} alt={cell.title} loading="lazy" style={{ objectFit: "cover" }} />
+                    <div style={{
+                      position: "absolute", top: 8, left: 8, background: "rgba(0,0,0,0.62)", color: "#fff",
+                      fontSize: 11.5, padding: "2px 8px", borderRadius: 6,
+                      display: "flex", alignItems: "center", gap: 4,
+                    }}>
+                      <Folder size={12} /> {cell.pages.length} 张
+                    </div>
                     {selMode ? (
-                      <span className={`wm-check ${selected.has(m.filename) ? "on" : ""}`}>
-                        {selected.has(m.filename) && <Check size={14} />}
+                      <span className={`wm-check ${cell.pages.every((p) => selected.has(p.filename)) ? "on" : ""}`}>
+                        {cell.pages.every((p) => selected.has(p.filename)) && <Check size={14} />}
                       </span>
                     ) : (
-                      <button className="wm-del" title="删除素材"
-                        onClick={(e) => { e.stopPropagation(); deleteOne(m.filename); }}>
+                      <button className="wm-del" title="删除整个文件夹（全部页）"
+                        onClick={(e) => { e.stopPropagation(); void deleteFolder(cell.pages); }}>
                         <Trash2 size={14} />
                       </button>
                     )}
-                    <div className="web-materials-source">{m.source_url || m.filename}</div>
+                    <div className="web-materials-source">{cell.title}</div>
+                  </div>
+                ) : (
+                  <div
+                    key={cell.m.filename}
+                    className={`web-materials-cell ${selMode && selected.has(cell.m.filename) ? "sel" : ""}`}
+                    title={selMode ? cell.m.title : `${cell.m.title}（点击查看详情）`}
+                    style={{ cursor: selMode ? "pointer" : "zoom-in" }}
+                    onClick={() => {
+                      if (selMode) { toggleSel(cell.m.filename); return; }
+                      setDetailMaterial(cell.m);   // 详情面板（左图右信息）；图内点击再进全屏 Lightbox
+                    }}
+                  >
+                    <img src={cell.m.url} alt={cell.m.title} loading="lazy" />
+                    {selMode ? (
+                      <span className={`wm-check ${selected.has(cell.m.filename) ? "on" : ""}`}>
+                        {selected.has(cell.m.filename) && <Check size={14} />}
+                      </span>
+                    ) : (
+                      <button className="wm-del" title="删除素材"
+                        onClick={(e) => { e.stopPropagation(); deleteOne(cell.m.filename); }}>
+                        <Trash2 size={14} />
+                      </button>
+                    )}
+                    <div className="web-materials-source">{cell.m.source_url || cell.m.filename}</div>
                   </div>
                 ))
               : shownCards.map((c) => (
@@ -296,7 +452,7 @@ export function WebMaterialsView({
 
       {/* 灵感卡详情弹窗：双击打开，显示文本内容（非生成参数），可删图只留文本 */}
       {detailCard && (
-        <div className="modal-mask" onClick={() => setDetailCard(null)}>
+        <div className="modal-mask">
           <div className="modal" style={{ maxWidth: 620 }} onClick={(e) => e.stopPropagation()}>
             <h3>灵感卡 · {detailCard.title || "（无标题）"}</h3>
             <div style={{ maxHeight: "55vh", overflow: "auto", marginBottom: 12 }}>
@@ -343,6 +499,37 @@ export function WebMaterialsView({
             </div>
           </div>
         </div>
+      )}
+      {note && (
+        <div style={{
+          position: "fixed", top: 16, left: "50%", transform: "translateX(-50%)", zIndex: 2000,
+          background: note.kind === "success" ? "var(--accent)" : "var(--danger, #c0392b)",
+          color: "#fff", padding: "8px 16px", borderRadius: 8, fontSize: 13,
+          boxShadow: "0 4px 16px rgba(0,0,0,0.25)",
+        }}>
+          {note.msg}
+        </div>
+      )}
+      {detailMaterial && (
+        <WebMaterialDetailModal
+          item={detailMaterial}
+          onClose={() => setDetailMaterial(null)}
+          onDelete={(filename) => { setDetailMaterial(null); void deleteOne(filename); }}
+          onNotify={flashNote}
+          onSendToChat={onSendToChat}
+          onSendAsRecipe={onSendAsRecipe}
+        />
+      )}
+      {market && (
+        <MaterialMarketModal
+          source={market}
+          outputDir={outputDir}
+          proxy={proxy}
+          login={settings.danbooruLogin || ""}
+          onClose={() => setMarket(null)}
+          onSaved={refresh}
+          onNotify={flashNote}
+        />
       )}
     </PageShell>
   );

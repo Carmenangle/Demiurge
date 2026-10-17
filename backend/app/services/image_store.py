@@ -35,6 +35,23 @@ def _next_seq_name(base: Path, ext: str) -> str:
     return f"{ts}_{uuid4().hex[:8]}.{ext}"
 
 
+# 仓库内「按产出类型分文件夹」（2026-10-17 用户定案）：图片/视频/音频各一夹，
+# 根目录只留应用数据（state.json/chat.json/世界书/数据库）。<repo>/pictures|videos|audios。
+MEDIA_DIRS = {"image": "pictures", "video": "videos", "audio": "audios"}
+
+
+def media_dir(base: Path, kind: str = "image") -> Path:
+    """<repo>/pictures|videos|audios —— 按类型归置媒体产出（不存在则创建）。"""
+    d = Path(base) / MEDIA_DIRS.get(kind, "pictures")
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+
+# 图站 CDN host（danbooru / pixiv）：下载有防盗链（需 Referer/UA），且本机 Python HTTP
+# 栈抓大文件易挂（2026-10-16 实测 httpx 抓 cdn.donmai.us 挂死 >200s、curl 20s）
+_IMAGE_SOURCE_HOSTS = ("donmai.us", "pximg.net", "pixiv.net")
+
 
 def _download_external_url(url: str, max_bytes: int = 20 * 1024 * 1024) -> bytes:
     """下载公网 URL，重定向逐跳校验（防校验后重定向 SSRF 绕过）。
@@ -43,11 +60,31 @@ def _download_external_url(url: str, max_bytes: int = 20 * 1024 * 1024) -> bytes
     外部 URL 可 302 跳到私网/metadata 地址，把内网响应下载回作品目录。
     改为 httpx follow_redirects=False + 每跳 validate_media_url 校验通过才发下一跳。
     trust_env 保持默认 True，保留「外部 URL 走系统代理」的既有通路。
+
+    2026-10-16：图站 CDN 分支改走 `material_sources.fetch_image_bytes`——那里有
+    host 白名单（防 SSRF，等价或更严）+ curl 优先通路 + 带 Referer/UA 解防盗链
+    （用户实测「下载失败 403 Forbidden」即缺 Referer 所致）。
     """
     from app.services.url_guard import validate_media_url
 
     current = validate_media_url(url)
-    with httpx.Client(follow_redirects=False, timeout=30) as client:
+    host = (httpx.URL(current).host or "").lower()
+    if any(host == h or host.endswith("." + h) for h in _IMAGE_SOURCE_HOSTS):
+        from app.services import material_sources
+        from app.services.repo_meta import setting_str_from_state
+
+        px = (setting_str_from_state("systemProxyUrl")
+              or setting_str_from_state("proxyUrl"))
+        try:
+            data, _ctype = material_sources.fetch_image_bytes(current, proxy=px)
+        except RuntimeError as exc:
+            raise ComfyError(f"下载图片失败：{exc}", 502) from exc
+        if len(data) > max_bytes:
+            raise ComfyError(f"下载超过 {max_bytes // (1024 * 1024)}MB 上限", 400)
+        return data
+
+    with httpx.Client(follow_redirects=False, timeout=30,
+                      headers={"User-Agent": "Demiurge/1.0"}) as client:
         for _ in range(5):
             resp = client.get(current)
             if resp.status_code in (301, 302, 303, 307, 308):
@@ -137,10 +174,14 @@ def save_local(
     if not output_dir:
         raise ComfyError("未配置输出图片路径", 400)
     from app.services import repo_meta
-    base = repo_meta.repo_folder(output_dir, repo_id)  # 文件夹名=仓库名(保中文)，并写 _repo.json
+    root = repo_meta.repo_folder(output_dir, repo_id)  # 文件夹名=仓库名(保中文)，并写 _repo.json
     if subdir:
-        base = base / safe_seg(subdir)
+        # 参考图等显式子夹保持原位（如 reference/），不并入 pictures/
+        base = root / safe_seg(subdir)
         base.mkdir(parents=True, exist_ok=True)
+    else:
+        # 生成图按类型归入 <repo>/pictures/（2026-10-17 用户定案：产出按类型分夹）
+        base = media_dir(root, "image")
     if idempotency_key and filename and not src:
         fn = Path(filename).name
         ext = fn.rsplit(".", 1)[1] if "." in fn else "png"
@@ -191,7 +232,7 @@ def save_image_named(output_dir: str, repo_id: str, *,
     if not output_dir:
         raise ComfyError("未配置输出图片路径", 400)
     from app.services import repo_meta
-    base = repo_meta.repo_folder(output_dir, repo_id)
+    base = media_dir(repo_meta.repo_folder(output_dir, repo_id), "image")  # 生成图 → pictures/
     fn = Path(filename).name
     ext = fn.rsplit(".", 1)[1] if "." in fn else "png"
     stem = safe_dir(dest_stem) or "image"
@@ -379,9 +420,14 @@ def save_web_material(output_dir: str, src: str, source_url: str = "", title: st
         "source_url": source_url or candidate.get("source_url") or "",
         "query": candidate.get("query") or "",
         "provider": candidate.get("provider") or "",
+        "title": title or dest.name,   # 原始标题（素材库/多页文件夹显示用；旧记录无此键回退文件名）
         "downloaded_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "size": len(data),
         "detected_ext": ext,
+        # P2-1：图站素材的原站标签/作者（danbooru/pixiv 搜索时写入候选），供资产化与溯源
+        "tags": candidate.get("tags") or [],
+        "author": candidate.get("author") or "",
+        "rating": candidate.get("rating") or "",
     }
     _save_provenance(d, provenance)
 
@@ -395,6 +441,48 @@ def save_web_material(output_dir: str, src: str, source_url: str = "", title: st
         "query": candidate.get("query") or "",
         "downloaded_at": provenance[dest.name]["downloaded_at"],
     }
+
+
+def save_web_series(
+    output_dir: str, illust_id: int, source_url: str = "", title: str = "",
+    refresh_token: str = "", proxy: str = "", thread_id: str = "",
+) -> dict:
+    """pixiv 多页作品：**后端一次性拉全页 + 逐页落盘**。
+
+    为什么放后端：前端是「for 循环逐页调 save」的客户端流程，**浏览器中途崩溃/断连就断了**
+    （2026-10-17 用户实锤：5 页只落 1 页就崩了）。改成后端一次请求内完成——即便前端断连，
+    FastAPI 线程池里的本函数也会继续写完，下次刷新即可看到全部页。
+    返回 {ok, saved, failed, page_count}；每页内部重试 3 次抗瞬时网络抖动。
+    """
+    from app.services import material_sources
+
+    if not output_dir:
+        raise ComfyError("未配置输出图片路径", 400)
+    r = material_sources.pixiv_pages(int(illust_id or 0), refresh_token=refresh_token, proxy=proxy)
+    if not r.get("ok"):
+        raise ComfyError(r.get("error") or "拉取作品分页失败", 502)
+    urls: list[str] = r.get("originals") or r.get("pages") or []
+    if not urls:
+        raise ComfyError("该作品没有可保存的页", 404)
+
+    saved = 0
+    failed = 0
+    for i, u in enumerate(urls):
+        page_title = f"{title} · P{i + 1}/{len(urls)}" if len(urls) > 1 else (title or "")
+        ok = False
+        for _ in range(3):  # 服务端重试抗抖动
+            try:
+                save_web_material(output_dir, u, source_url, page_title, thread_id)
+                ok = True
+                break
+            except Exception:  # noqa: BLE001 单页失败继续其余页
+                pass
+        if ok:
+            saved += 1
+        else:
+            failed += 1
+    return {"ok": failed == 0, "saved": saved, "failed": failed, "page_count": len(urls)}
+
 
 
 def list_web_materials(output_dir: str) -> list[dict]:
@@ -414,11 +502,17 @@ def list_web_materials(output_dir: str) -> list[dict]:
                 "path": str(f),
                 "url": view_urls.local_view(str(f)),
                 "source_url": meta.get("source_url") or "",
-                "title": f.name,
+                "title": meta.get("title") or f.name,   # 优先用原始标题；旧记录无此键回退文件名
                 "filename": f.name,
                 "query": meta.get("query") or "",
                 "provider": meta.get("provider") or "",
                 "downloaded_at": meta.get("downloaded_at") or "",
+                # 2026-10-16 扩充：原站标签/作者/评级/大小（「左图右信息」详情面板用；
+                # 搜索落盘时已写入 provenance，数据本就就绪）
+                "tags": meta.get("tags") or [],
+                "author": meta.get("author") or "",
+                "rating": meta.get("rating") or "",
+                "size": meta.get("size") or 0,
             })
     return items
 

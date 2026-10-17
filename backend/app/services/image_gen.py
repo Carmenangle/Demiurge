@@ -8,6 +8,7 @@ trust_env=False 规避本地系统代理劫持 127.0.0.1 的坑（与 rag_store 
 import logging
 import os
 import re
+import threading
 import time
 import uuid
 
@@ -27,6 +28,19 @@ class UpstreamDeliveryUnknown(RuntimeError):
 
 class UpstreamRequestNotSent(RuntimeError):
     """连接阶段失败，可以确认请求没有发送到上游。"""
+
+
+def _ensure_not_cancelled(cancel_event: "threading.Event | None") -> None:
+    """入口取消检查（2026-10-14 C2）：暂停信号已置位则不得再发起上游请求。
+
+    实锤背景：ReAct 工具链里取消只断 SSE 流，模型后续回合还会再调生图工具——
+    不拦这一步，「暂停了还在扣费生成」。读参考图/上传之前就拦，取消后连
+    30MB 下载都不做。
+    """
+    if cancel_event is not None and cancel_event.is_set():
+        raise UpstreamRequestNotSent(
+            "已取消：请求未发送到上游（用户已停止本次生成）"
+        )
 
 
 def _validated_size(size: str) -> str:
@@ -165,13 +179,16 @@ def multipart_image_files(images: list[str], proxy: str = "") -> list[tuple[str,
 
 
 def generate(base_url: str, api_key: str, model: str, prompt: str,
-             size: str = "1024x1024", quality: str = "high", proxy: str = "") -> str:
+             size: str = "1024x1024", quality: str = "high", proxy: str = "",
+             cancel_event: "threading.Event | None" = None) -> str:
     """纯文生图，返回可展示地址（http URL 或 data:image/...;base64,...）。
 
     失败抛异常，由调用方（工具/路由）捕获转成错误文本。
+    cancel_event 置位时在请求上游前抛 UpstreamRequestNotSent（见 _ensure_not_cancelled）。
     """
     if not base_url or not model:
         raise ValueError("未配置生图模型（设置 → 生图模型：API URL / 模型名）")
+    _ensure_not_cancelled(cancel_event)
     size = _validated_size(size)
     url = _norm_url(base_url)
     request_id = uuid.uuid4().hex
@@ -218,17 +235,20 @@ def generate(base_url: str, api_key: str, model: str, prompt: str,
 def generate_with_images(base_url: str, api_key: str, model: str, prompt: str,
                          images: list[str], size: str = "1024x1024",
                          quality: str = "high", mask: str | None = None,
-                         proxy: str = "") -> str:
+                         proxy: str = "",
+                         cancel_event: "threading.Event | None" = None) -> str:
     """图生图：把提示词 + 一张或多张参考图交给 images/edits 接口，返回图片地址。
 
     走 OpenAI 官方 multipart/form-data，多图用同名 image[] 字段全部上传；
     原生局部编辑时把独立 Alpha 蒙版放在 mask 字段，透明区域表示允许修改。
     失败抛异常，由调用方（工具）捕获转成错误文本。
+    cancel_event 置位时在读参考图/请求上游前抛 UpstreamRequestNotSent。
     """
     if not base_url or not model:
         raise ValueError("未配置生图模型（设置 → 生图模型：API URL / 模型名）")
     if not images:
         raise ValueError("图生图需要至少一张参考图")
+    _ensure_not_cancelled(cancel_event)
     size = _validated_size(size)
     url = _norm_edits_url(base_url)
     request_id = uuid.uuid4().hex

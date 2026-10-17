@@ -181,6 +181,8 @@ export function buildContentNodes(deps: ContentNodesDeps): Node<CardNodeData>[] 
         node: n,
         gens: gensFor,
         imageUrls: gensFor.map((g) => g.image_url),
+        // 画布节点优先渲染缩略图（P0-2 派生层）；详情/全屏仍用 imageUrls 原图
+        thumbUrls: gensFor.map((g) => g.thumbUrl || g.thumb_url || ""),
         prompt: n.type === "input" ? (n.prompt || "") : (gensFor[0]?.prompt || ""),
         customLabel: lyt?.label || "",
         customSize: !!lyt?.custom,

@@ -166,13 +166,32 @@ export function AppBody(props: AppBodyProps) {
     if (props.subView === "generations") return (
       <>
         <AssetsView
-          onSendToChat={(url) => setSendTarget({ title: "发送至对话框", payload: { text: "", images: [url] } })}
+          onSendToChat={(g) => setSendTarget({
+            title: "发送至对话框",
+            payload: {
+              text: "", images: [g.image_url],
+              // 溯源元数据随发送入库：资产库详情的「模板 / 模型 / LoRA」靠它
+              templateName: g.templateName || g.template_name || "",
+              modelName: g.modelName || g.model_name || "",
+              loraNames: (Array.isArray(g.loraNames) && g.loraNames.length > 0)
+                ? g.loraNames.join(", ") : (g.lora_names || ""),
+            },
+          })}
           onSendAsRecipe={(g) => {
             const recipe = [
               g.prompt ? `提示词：${g.prompt}` : "",
               g.description ? `描述：${g.description}` : "",
             ].filter(Boolean).join("\n");
-            setSendTarget({ title: "发送至对话", payload: { text: recipe, images: [g.image_url], prompt: g.prompt || "" } });
+            setSendTarget({
+              title: "发送至对话",
+              payload: {
+                text: recipe, images: [g.image_url], prompt: g.prompt || "",
+                templateName: g.templateName || g.template_name || "",
+                modelName: g.modelName || g.model_name || "",
+                loraNames: (Array.isArray(g.loraNames) && g.loraNames.length > 0)
+                  ? g.loraNames.join(", ") : (g.lora_names || ""),
+              },
+            });
           }}
           onBatchSendToCanvas={(items) => setSendTarget({ title: "发送至画布", payload: { text: "", images: items.map((g) => g.image_url) } })}
         />
@@ -191,6 +210,17 @@ export function AppBody(props: AppBodyProps) {
         <WebMaterialsView
           outputDir={settings.outputDir}
           onSendToCanvas={(items) => setSendTarget({ title: "发送至画布", payload: { text: "", images: items.map((m) => m.url) } })}
+          onSendToChat={(m) => setSendTarget({ title: "发送至对话框", payload: { text: "", images: [m.url] } })}
+          onSendAsRecipe={(m) => {
+            // 与资产库「发送至对话」同构：图 + 可读文本（素材没有提示词，用来源/标签/搜索词替代）
+            const recipe = [
+              m.provider ? `来源：${m.provider}` : "",
+              m.source_url ? `来源页：${m.source_url}` : "",
+              (m.tags || []).length ? `标签：${(m.tags || []).join(", ")}` : "",
+              m.query ? `搜索词：${m.query}` : "",
+            ].filter(Boolean).join("\n");
+            setSendTarget({ title: "发送至对话", payload: { text: recipe, images: [m.url] } });
+          }}
           onSendInspirationToChat={(cards) => {
             // 灵感卡「插入输入框」：选作品后 push 到该作品输入框（画布/对话共用），可继续编辑后发送
             setSendTarget({

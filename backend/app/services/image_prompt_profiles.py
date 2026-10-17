@@ -979,6 +979,26 @@ def _looks_like_scene_description(text: str) -> bool:
     return any(len(segment.split()) >= 6 for segment in text.split(","))
 
 
+def _split_comma_phrase(content: str) -> tuple[str, str]:
+    """把「整段纯逗号串」按**段长**切成 (tag 行, 散文行) —— 纯机械切分，**不新增任何字**。
+
+    第 72 刀（2026-09-29）：本函数服务的场景原本是 **`tag_head` 与 `prose` 同串**
+    （见 `_looks_like_scene_description` 那条分支），而交付时那是**两行**
+    ⇒ 整段逐字出现两遍（真机 [38] 第 1 跑 2340 字里约 1100 字重复；
+       零 LLM 复现：同一串出现 2 次、首行以逗号收尾、次行以句号收尾）。
+
+    切分门槛与 `_looks_like_scene_description` **共用同一个 6 词判据**，不另立阈值
+    （两处口径必须恒等，否则会出现「判定它是描述、却切不出描述段」的空转）。
+    切不动（tag 段不足 6 条 / 没有成句段）⇒ 返回 `(原串, "")`，调用方**保持旧行为**。
+    """
+    segments = [seg.strip() for seg in content.split(",") if seg.strip()]
+    long_parts = [seg for seg in segments if len(seg.split()) >= 6]
+    tags = [seg for seg in segments if seg not in long_parts]
+    if not long_parts or len(tags) < 6:
+        return content.strip(), ""
+    return ", ".join(tags), ", ".join(long_parts)
+
+
 def _normalize(
     profile: str, raw: str, scene: Mapping[str, object] | None = None,
 ) -> str:
@@ -1085,12 +1105,21 @@ def _normalize(
                 tag_head = tag_part.strip(" ,")
                 prose = prose_part.strip()
             elif _looks_like_scene_description(content):
-                prose = content.strip()
+                # 第 72 刀：旧行为把 `tag_head` 与 `prose` 设成**同一个串** ⇒ 交付两遍。
+                # 先试机械切分（tag 形状的短段留首行、成句段给次行）；切不动才退回旧法。
+                split_tags, split_prose = _split_comma_phrase(content)
+                if split_prose:
+                    tag_head, prose = split_tags, split_prose
+                else:
+                    prose = content.strip()
             if prose and prose[-1] not in ".!?":
                 prose += "."
         tag_head = _anima_clean_tag_head(tag_head)
         tag_head = _drop_generic_anima_tags(tag_head)
         prose = _unwrap_stray_parentheses(_anima_naturalize_prose(prose))
+        # 第 68 刀：第一人称下剔掉散文行的元语言镜头句
+        # （`the camera is the narrator's eyes` 这类；零命中即逐字节返回）。
+        prose = _first_person_prose_meta_guard(prose, scene or {})
         rating = str((scene or {}).get("rating") or "sfw")
         # 第 31 刀①②：**先拼质量行、再整行归一**——去重必须横跨「程序前置的质量行」与
         # 「模型自带的内容 tags」两个来源（真机首行这两块整段重复），人数词归一同样要看全行。
@@ -1110,6 +1139,10 @@ def _normalize(
         # `from behind` / `three-quarter back view` / `looking down at face` 直接提交
         # 给 ComfyUI（真机 slot `illo-req-…-53` 四次重生成里命中两次）。
         # ⚠ 零回归锁：非第一人称 / 无收束依据 / 行内无命中 ⇒ 都逐字节返回原串。
+        # 第 73 刀（2026-09-29）：先削掉首行里**指向镜头的方位短语**
+        # （上游「禁用机位」条款曾亲手给出 `her back arching toward the camera`
+        #   范例，探针 [38] 首行因此出现 `back facing the camera`。）
+        head = _first_person_strip_camera_direction_tags(head, scene or {})
         head = _strip_bystander_camera_tags(head, scene or {})
         # 第 65 刀（2026-09-28）：给「叙事者部位事实」补**从画面下缘进入**的呈现限定
         # （**追加**原串、不改写 ⇒ 账本 `expected` 判据不受影响、43／47 刀 12 处锁全绿）。
@@ -1120,6 +1153,10 @@ def _normalize(
         # 真机四次重生成里它只在第 1 次自觉写了 ⇒ 后三次按默认第三人称构图。
         # ⚠ 幂等：已有 `first person view`/`pov`/`male viewer pov` ⇒ 逐字节返回原串。
         head = _ensure_first_person_view_tag(head, scene or {})
+        # 第 67 刀（用户真机审查）：JSON 残片一律不得交付（见 `_json_residue_hits`）
+        # ⇒ 返回空串，走既有的「空稿」兜底通道。
+        if _json_residue_hits(f"{head},\n{prose}"):
+            return ""
         return _anonymize_prompt_names(
             f"{head},\n{prose}", scene or {},
         )
@@ -2096,7 +2133,7 @@ def _first_person_upper_frame(scene: Mapping[str, object]) -> bool:
         if isinstance(value, str) and value.strip():
             sources.append(image_prompt_extract.restore_jailbreak(value))
     blob = "\n".join(sources)
-    return bool(blob.strip()) and bool(_VIEW_FACE_CONTACT_RE.search(blob))
+    return _view_face_frame(blob)
 
 
 def _narrator_limb_facts(scene: Mapping[str, object]) -> list[str]:
@@ -2506,6 +2543,70 @@ def _device_hits_are_simile(prompt: str, pattern: re.Pattern[str]) -> bool:
         if not _DEVICE_SIMILE_RE.search(prompt[start + 1:match.start()]):
             return False
     return bool(hits)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 第 70 刀（2026-09-29 · 与第 69 刀配套）：**隔着布料的器官接触**出处闸
+#
+# 第 69 刀放开了「隔着衣物接触」的写法（用户原话：「肉棒贴在女角色的小穴口隔着内裤布料
+# 磨蹭、女角色内裤湿透透明」）。**放开即须配闸**：这类描述最容易被写到没有出处的帧上，
+# 而既有的编造闸（`_UNSOURCED_DEVICE_RULES`）**只管道具、不含身体部位与接触形态**
+# ⇒ 本刀按道具闸**同构**补上。
+# ⚠ 与道具闸同一条红线：**宁可白跑一轮 repair，不可放走编造**。
+# ⚠ 出处侧用**两个前瞻的合取**（「有隔绝/透湿/磨蹭」**且**「有布料」），
+#   避免「只要有衣服词就放行」的空转（那样等于没有闸）。
+# ⚠ 正则**刻意零反斜杠**（`(?<![A-Za-z])` 替 `\b`、`(?s)` 替 `[\s\S]`）。
+_UNSOURCED_CONTACT_RULES: tuple[tuple[str, str, str], ...] = (
+    (
+        "隔着布料的器官接触",
+        r"(?<![A-Za-z])(?:bulge|bulging|outline|erection|erect|penis|shaft|groin|crotch|manhood)"
+        r"(?![A-Za-z])[^.]{0,80}?(?<![A-Za-z])(?:through|under|beneath|against|behind)"
+        r"(?![A-Za-z])[^.]{0,40}?"
+        r"(?<![A-Za-z])(?:cloth|fabric|garment|clothes|clothing|underwear|underpants|"
+        r"loincloth|robe|dress|skirt|trousers|pants)(?![A-Za-z])"
+        r"|"
+        r"(?<![A-Za-z])(?:through|under|beneath|against)(?![A-Za-z])[^.]{0,40}?"
+        r"(?<![A-Za-z])(?:cloth|fabric|garment|underwear|robe|loincloth)(?![A-Za-z])"
+        r"[^.]{0,60}?(?<![A-Za-z])(?:bulge|outline|erection|penis|shaft|groin|crotch)"
+        r"(?![A-Za-z])",
+        r"(?s)(?=.*(?:隔|透|湿|渗|洇|蹭|磨|贴|压|碾|rub|grind|press|wet|through))"
+        r"(?=.*(?:布|衣|裤|袍|裙|cloth|fabric|robe|underwear|loincloth|garment))",
+    ),
+)
+
+_UNSOURCED_CONTACT_MESSAGE = (
+    "提示词写入了画面事实中没有出处的「隔着布料的器官接触」：{label}；"
+    "这类接触只能在画面事实写明时才写（宁可少写也不编造）"
+)
+
+
+def _unsourced_contact_hits(
+    prompt: str, scene: Mapping[str, object],
+) -> list[tuple[str, re.Pattern[str]]]:
+    """列出成稿里**没有出处**的「隔着布料的器官接触」（第 70 刀，与道具闸同构）。
+
+    出处来源复用 `_device_source`（同一份事实口径，不另抄一份正则）。
+    """
+    source = _device_source(scene)
+    if not source.strip():
+        return []
+    hits: list[tuple[str, re.Pattern[str]]] = []
+    for label, prompt_pattern, source_pattern in _UNSOURCED_CONTACT_RULES:
+        pattern = re.compile(prompt_pattern, re.I)
+        if not pattern.search(prompt):
+            continue
+        if re.search(source_pattern, source, re.I):
+            continue
+        hits.append((label, pattern))
+    return hits
+
+
+def _unsourced_contact_errors(prompt: str, scene: Mapping[str, object]) -> list[str]:
+    """画面事实里没有出处的「隔着布料的器官接触」（第 70 刀）。"""
+    return [
+        _UNSOURCED_CONTACT_MESSAGE.format(label=label)
+        for label, _pattern in _unsourced_contact_hits(prompt, scene)
+    ]
 
 
 _UNSOURCED_DEVICE_MESSAGE = (
@@ -2933,6 +3034,8 @@ def _errors(profile: str, prompt: str, scene: Mapping[str, object]) -> list[str]
     # 放在 `if profile != "krea2"` 之外＝四档都过同一份闸（krea2 的 `_krea_contract_errors`
     # 只并了「漏」那一半，这里补齐「加」那一半）。
     errors.extend(_unsourced_visual_device_errors(prompt, scene))
+    # 第 70 刀：与道具闸**同层同向** —— 身体部位与接触形态的编造同样不得放行。
+    errors.extend(_unsourced_contact_errors(prompt, scene))
     return errors
 
 
@@ -2984,10 +3087,53 @@ def _body_errors(profile: str, prompt: str) -> list[str]:
 # 用户示例「压在师傅的上半身，肉棒从镜头下半区域露出压在师傅嘴上」⇒ 接触点在**口/面**
 # ⇒ 视野上限＝**上半身**（不是全身）。
 _VIEW_FACE_CONTACT_RE = re.compile(
-    r"(?:嘴|唇|口|舌|脸颊|脸|面|鼻|下颌|下巴|颈|脖子|锁骨|胸|乳|肩|咽喉|喉)",
+    # 第 71 刀 ②（2026-09-29 真机 + 探针双实锤）：本表只收**不可与下身复合**的上半身部位写法。
+    # 旧式含裸 `口`／`唇`／`面` 三个**子串**，真机把下列词误当面部接触：
+    #   `穴口`／`缝口` 的「口」、`阴唇` 的「唇」、`布面`／`褥面` 的「面」
+    # ⇒ `face=True` ⇒ 取景上限锁成「上半身」——而那一帧的画面事实全是下半身动作
+    # ⇒ 模型为了把器官接触塞进上半身，**把接触点挪到了脸上**
+    #   （探针复现：事实「肉棒贴着阴唇碾」写成 `penis on face` / `glans pressing her cheek`）。
+    # ⚠ 裸「面」一并去掉（改 `面部`／`面颊`）：`布面`／`褥面` 在真机窗口里是高频词。
+    #   代价＝「压在面上」这类写法不再命中 ⇒ 退回「不给上限」（宁缺勿猜），可接受。
+    # ⚠ `口`／`唇` **保留但加负向后顾**（首版把裸字整个删掉 ⇒ 真机/既有锁双双回归：
+    #   「压在她**唇**上」「朱**唇**饱满」是**真上半身接触**，删掉就丢召回）。
+    #   要排除的只是**下身复合词**：穴口／缝口／伤口／创口／裂口／门口／洞口、阴唇。
+    r"(?:嘴|嘴角|嘴唇|唇角|口腔|口交|口水|"
+    r"(?<!穴)(?<!缝)(?<!伤)(?<!创)(?<!裂)(?<!门)(?<!洞)口|"
+    r"(?<!阴)唇|"
+    r"舌|脸颊|脸|面部|面容|面颊|"
+    r"鼻|下颌|下巴|颈|脖子|锁骨|胸|乳|肩|咽喉|喉)",
 )
 # 接触点落在**腰部以下** ⇒ 视野下移但不是推远（仍保持近距离）。
-_VIEW_LOWER_CONTACT_RE = re.compile(r"(?:下体|私处|阴|穴|臀|股|腿|脚|足|膝|大腿|小腿|腰腹)")
+# ⚠ 第 71 刀 ②：裸 `股` 改为复合词 —— `一股接一股`／`那股` 会把上半身帧误判成下半身。
+_VIEW_LOWER_CONTACT_RE = re.compile(
+    # ⚠ **不变式**：`_VIEW_LOWER_STRICT_RE` ⊆ 本表 —— 否则「下身专有词压过面命中」之后
+    #   本表却认不出它 ⇒ 取景上限掉成「不给上限」（第 71 刀自测抓到 `缝口` 这个洞）。
+    r"(?:下体|私处|阴|穴|臀|屁股|股间|股沟|胯|裆|腿|脚|足|膝|大腿|小腿|腰腹|"
+    r"腿根|膝弯|会阴|缝口|龟头|肉棒)",
+)
+# 第 71 刀 ③：**下身专有词** —— 命中即**压过**上面的面命中。
+# 口径：只收「接触点不可能落在上半身」的词（`阴唇`／`穴口`／`缝口`／`胯`／`裆` …），
+# **刻意不收** `臀`／`大腿`／`腿` 这类**可与面部接触同现**的部位
+# （反例：「她的大腿搭在他肩上」＋「肉棒压在她脸上」两条同真 ⇒ 不该被压成下半身）。
+_VIEW_LOWER_STRICT_RE = re.compile(
+    r"(?:阴唇|阴部|阴户|阴道|阴蒂|阴阜|穴口|穴内|缝口|会阴|股间|腿根|胯|裆)",
+)
+
+
+def _view_face_frame(blob: str) -> bool:
+    """本帧是否「**上半身**近身帧」（第 57 刀 ③ 口径 ＋ 第 71 刀 ③ 例外）。
+
+    **三处消费者共用同一真源**（`_first_person_framing`／`_first_person_frame_filter`／
+    `_first_person_upper_frame`）—— 口径分叉就会出现「提示词声明上半身、筛分却按下半身」
+    的自相矛盾（第 57 刀 ③ 的注释里记着这条）。
+    """
+    if not blob.strip():
+        return False
+    if _VIEW_LOWER_STRICT_RE.search(blob):
+        # 下身专有词 ⇒ 压过面命中（第 71 刀 ③）。
+        return False
+    return bool(_VIEW_FACE_CONTACT_RE.search(blob))
 
 # 第三方全景机位措辞：**仅在「近身接触帧」**下禁用（它们隐含「有一个站在旁边看的观察者」，
 # 与「镜头＝叙事者眼睛」自相矛盾）。
@@ -3051,8 +3197,10 @@ def _first_person_framing(scene: Mapping[str, object]) -> str:
     blob = "\n".join(sources)
     if not blob.strip():
         return ""
-    face = bool(_VIEW_FACE_CONTACT_RE.search(blob))
-    lower = bool(_VIEW_LOWER_CONTACT_RE.search(blob))
+    face = _view_face_frame(blob)
+    # 即使两张表哪天漂移，strict 命中**必然**蕴含 lower（第 71 刀不变式的运行期兜底）。
+    lower = (bool(_VIEW_LOWER_CONTACT_RE.search(blob))
+             or bool(_VIEW_LOWER_STRICT_RE.search(blob)))
     if not face and not lower:
         if _VIEW_ENVIRONMENT_RE.search(blob):
             # ── 第 56 刀：风景帧——**放行全景**（不得限制死特写/中景）────────────────
@@ -3062,9 +3210,10 @@ def _first_person_framing(scene: Mapping[str, object]) -> str:
                 "**没有近身人体接触**、只有环境与陈设 ⇒ **不得**把它收成特写/近景："
                 "那样**彰显不了风景全貌**（用户定案）。本帧**允许**远景/全景机位"
                 "（`wide shot`／`long shot`／`full shot`／`medium wide shot` 均可），"
-                "按画面事实把环境与陈设写全。⚠ 唯有一条仍然成立：镜头**仍是**叙事者的眼睛"
-                "（不是旁边站着的观察者）⇒ **仍禁止**"
+                "按画面事实把环境与陈设写全。⚠ 唯有一条仍然成立：本帧**仍是从叙事者的"
+                "位置看出去**（不是旁边站着的观察者）⇒ **仍禁止**"
                 f"{bystander}这类**俯视/背后/第三旁观**措辞——远景与旁观是两回事。"
+                + _FP_PROSE_NO_META_CLAUSE
             )
         # ⚠ 两边都没命中 ⇒ **不给取景上限**（宁缺勿猜：没有接触证据就没有收束依据，
         #   此时按常规景别走）。返回空串 ⇒ 调用方跳过整个收束块、**逐字节等于旧行为**。
@@ -3074,13 +3223,13 @@ def _first_person_framing(scene: Mapping[str, object]) -> str:
     else:
         limit, limit_en = "下半身", "waist-down shot"
     return (
-        f"【视角·第一人称·数据视野朝向（本帧为{limit}）】镜头**已经固定**在叙事者的"
-        f"眼睛位置上、**视野是有限的**——它**不是**一个可以自由后退的旁观机位。"
-        f"⇒ 本帧取景上限＝**{limit}**（{limit_en}）：**先保留**剧情拿到的画面事实，"
-        f"再按这个固定视野**筛分**——**只有这个视野里真正看得见的**才写进画面，"
-        f"装不下的内容按层级**省略**（可写进区域内的局部，不得为了「展示全部内容」把镜头推远）。"
+        f"【视角·第一人称·数据视野朝向（本帧为{limit}）】本帧取景上限＝**{limit}**"
+        f"（{limit_en}）：**先保留**剧情拿到的画面事实，再按第一人称的**有限视野**"
+        f"筛分——**只有真正看得见的**才写进画面，装不下的内容按层级**省略**"
+        f"（可写进区域内的局部；不得为了「展示全部内容」把视角拉开）。"
         f"⚠ 本上限**只适用于近身接触帧**：若本帧只是描写环境/风景而无人体接触，"
         f"不应套用（那种帧要放行全景）。"
+        + _FP_PROSE_NO_META_CLAUSE
     )
 
 
@@ -3178,7 +3327,7 @@ def first_person_frame_filter(scene: Mapping[str, object]) -> dict:
     # 自相矛盾。⚠ 曾经踩过：把闸写成「命中下半身就不筛」，而 `appearance` 里本就有
     # 「臀／双腿」⇒ **被筛字段反过来关掉了筛分**（循环）。面优先之后，
     # `appearance` 里的唇/胸与 narrative 里的口/面共同得出「上半身」，与本函数目的自洽。
-    face = bool(_VIEW_FACE_CONTACT_RE.search(blob))
+    face = _view_face_frame(blob)
     if not face:
         # 未命中「面/颈/胸/肩」⇒ 不是上半身近身帧（下半身帧不做反向筛；风景帧/无接触按
         # 第 56 刀三态要放行全景）⇒ 一律不筛（宁缺勿猜）。
@@ -3264,6 +3413,58 @@ def _strip_bystander_camera_tags(tag_line: str, scene: Mapping[str, object]) -> 
     if not dropped or not kept:
         return tag_line
     return ", ".join(kept)
+
+
+# 第 73 刀（2026-09-29 探针 [38] / 真机 09-29 批次）：第一人称首行 tags 的
+# **指向镜头的方位短语**去机位化。
+#
+# 根因：`_first_person_framing` 的「禁用机位」条款一边禁 `from behind`／`rear view`，
+#   **一边亲手给出** `her back arching toward the camera` 作范例——而同一段提示词里的
+#   `_FP_PROSE_NO_META_CLAUSE` 又明禁散文行出现 `camera`／`viewer` ⇒ 指令自相矛盾。
+#   后果：真机 slot `-54-5` 首行 `back turned toward the camera, back facing viewer`、
+#   探针 [38] 首行 `back facing the camera`。第 60 刀是**整条字面禁表**，
+#   扫不到「身体部位 ＋ 机位方位短语」这种组合（`back view` 有边界词，`back faced` 没有）。
+#
+# 口径：**只削方位短语、部位与姿势逐字保留**（`back turned toward the camera` →
+#   `back turned`），不发明新词、不改姿势语义 ⇒ 与第 60 刀「不得把整个镜头搬到她背后」互补。
+#   与 `_strip_bystander_camera_tags` 分工：那条**剔整条**禁词 tag，本函数**只削短语**。
+_FP_TAG_CAMERA_DIRECTION_RE = re.compile(
+    r"\s+(?:toward|towards|to|at|into)\s+the\s+camera\b", re.I,
+)
+
+
+def _first_person_strip_camera_direction_tags(
+    tag_line: str, scene: Mapping[str, object],
+) -> str:
+    """第一人称下削掉**首行 tags 里指向镜头的方位短语**（第 73 刀）。
+
+    ⚠ 零回归锁（任一成立即**逐字节返回原串**）：① `viewpoint` 非 `first_person`；
+      ② 行内无命中；③ 命中 tag 削完**不足两个词** ⇒ 放弃该条（防悬空动词：
+      `looking at the camera` → `looking`）。
+    ⚠ 只作用于**首行 tags**：第二行是自由散文，由 `_first_person_prose_meta_guard`
+      （第 68 刀）另行收口。
+    """
+    if str(scene.get("viewpoint") or "").strip() != "first_person":
+        return tag_line
+    segments = (tag_line or "").split(",")
+    changed = False
+    kept: list[str] = []
+    for segment in segments:
+        body = segment.strip()
+        if not body or not _FP_TAG_CAMERA_DIRECTION_RE.search(body):
+            kept.append(segment)
+            continue
+        candidate = re.sub(r"\s{2,}", " ", _FP_TAG_CAMERA_DIRECTION_RE.sub("", body))
+        candidate = candidate.strip(" ,;")
+        if len(candidate.split()) < 2:
+            kept.append(segment)          # 防悬空动词
+            continue
+        changed = True
+        indent = segment[: len(segment) - len(segment.lstrip())]
+        kept.append(indent + candidate)
+    if not changed:
+        return tag_line
+    return ",".join(kept)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -3388,14 +3589,149 @@ def _first_person_limb_entry_phrasing(head: str, scene: Mapping[str, object]) ->
     return ", ".join(kept)
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# 第 67 刀（2026-09-29 用户真机审查）：**JSON 残留机械闸**
+#
+# 真机实锤（turn `d3d32fda` · 槽 `illo-req-…-54-1`）：模型／repair 轮返回**被截断的半 JSON**，
+# `_json_object` 与 `_labelled_fields_object` **双双失败** ⇒ 掉进 `_normalize` 的**非 JSON 分支**。
+# 该分支 `explicit_tags = ", ".join((lines[0], body))` **无条件吞并**原文各行 ⇒
+#   · 首行混进 `{, … "supporting_elements": [, "Her flattened hand on the mattress, ], …`（残片当 tag）；
+#   · 第二行变成 `content": "1girl, solo, … anime style.`（**JSON 的 key 标签**进了散文行）；
+#   · 而散文判据 `^[A-Za-z][^.?!]{24,}[.?!]` 被 `content": "…` **意外满足**（`c` 是字母、
+#     中间无句点、末尾有句点）⇒ **一条格式红都不报** ⇒ `_patch_failed_prompt` 补上通用构图
+#     词表后**交付 976 字半 JSON 残留**，而**真正的第二行内容描述整段丢失**。
+# 用户口径（原话）：「正常来说这里上半段应该还是 tag」「槽 1 的下一段的内容描述文段还丢失了」。
+#
+# ⇒ 口径：**结构化残片一律不得当提示词交付**。命中即返回空串 ⇒ 调用方照旧判死并走 repair
+#   （与「空稿／拒答」同一条兜底通道），**不新增任何交付路径**。
+# ⚠ 只查**组装后的成稿**、不查 raw：raw 若是**合法 JSON**，花括号与引号本就是协议的一部分
+#   （那种情况早已被 `_json_object` 解析成 `value`）⇒ 组装结果里不带符号 ⇒ 零误报。
+_JSON_RESIDUE_SCHEMA_RE = re.compile(
+    r"(?:visual_hook|primary_focus|supporting_elements|content)\s*[\"']?\s*:\s*[\"'\[{]",
+    re.I,
+)
+# 引号**紧邻结构标点**才算残留（`the "crimson eye"` 这种正常引号不算）。
+_JSON_RESIDUE_NOISE_RE = re.compile(r"[\"']\s*[,:\]\[]|[,:\[\{]\s*[\"']")
+
+
+def _json_residue_hits(text: str) -> list[str]:
+    """成稿里的 **JSON 残留**特征（空列表＝干净）。第 67 刀，只服务「判死」这一个用途。"""
+    body = text or ""
+    hits: list[str] = []
+    if "{" in body or "}" in body:
+        hits.append("花括号")
+    match = _JSON_RESIDUE_SCHEMA_RE.search(body)
+    if match:
+        hits.append(f"规格字段裸标签 {match.group(0).strip()[:40]}")
+    if _JSON_RESIDUE_NOISE_RE.search(body):
+        hits.append("引号紧邻结构标点")
+    return hits
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 第 68 刀（2026-09-29 用户真机审查）：**散文行元语言机械剔**
+#
+# 用户口径（原话）：「内容描述不是说要明说**镜头即叙述者的双眼**、所以叙述者从不出现在画面里，
+# **而是你的内容描述能透露出这一点**，因为**人家模型哪里知道叙述者是谁**，真要说你上面的
+# 第一人称视角描述就够用了」。
+# ⇒ `narrator`／`camera` 是 **Agent 侧概念**，ComfyUI 侧读不懂；第一人称由**首行 tag** 声明
+#   （第 61 刀 `_ensure_first_person_view_tag` 已保证），散文行只写**画面里看得见的东西**。
+# 根因（第 55／56 刀指令原文）：中文指令写着「镜头**已经固定**在**叙事者的眼睛位置上**」⇒
+#   模型把它**照抄**成英文散文（turn `d3d32fda` 7 份成稿里 **4 份**中招）。
+# ⚠ 零回归锁：`viewpoint` 非第一人称 ⇒ **逐字节返回原串**；无命中 ⇒ 同样逐字节返回。
+# 第 68 刀：这段**逐字进中文指令**（近身帧与风景帧共用），模型照抄元语言正是本次真机缺陷的根因。
+# 口径＝**只禁止，不引导造句**（红线 28 ②：不新增模板引导句），且把「叙事者入画」正确形态
+# 说清为「**具体部位在画面里的位置**」——与第 43／65 刀 `_narrator_limb_facts` 同源。
+_FP_PROSE_NO_META_CLAUSE = (
+    "⚠ **散文行（第二行）不得出现 `camera`／`narrator`／`viewer`／`point of view` "
+    "这类元语言**——生图模型不认识「叙事者」是谁，第一人称由首行 tag 的 "
+    "`first person view` 声明即可。叙事者入画时只写**具体部位在画面里的位置**"
+    "（如 `a hand prying her leg open`／`a single hand entering from the lower frame edge`），"
+    "**不得**写「镜头即叙述者的双眼」「叙述者不出现在画面里」这类解释句。"
+)
+
+
+_FP_PROSE_META_REWRITES: tuple[tuple[re.Pattern[str], str], ...] = (
+    # ① 「镜头＝叙述者双眼 ＋ 叙述者不入画」整块前缀 → 只保留「谁可见」那半句
+    (re.compile(
+        r"the\s+camera\s+is\s+the\s+narrator'?s\s+eyes\s*,?\s*"
+        r"(?:so\s+)?the\s+narrator\s+never\s+appears\s+in\s+frame\s*;?\s*",
+        re.I), ""),
+    # ①b 兜底：「镜头＝叙述者双眼」**裸前缀**（真机 slot `-54-4`：「…, looking down at
+    #     the woman's sleeping face … from a first-person perspective.」——前半句
+    #     没有 `so the narrator never appears…`，① 匹配不到）。必须先于 ④ 执行。
+    (re.compile(r"the\s+camera\s+is\s+the\s+narrator'?s\s+eyes\s*,?\s*", re.I), ""),
+    # ② 「镜头固定在叙述者眼高／位置」从句
+    (re.compile(
+        r"the\s+camera\s+(?:holds?|sits?|stays?|rests?)\s+(?:at|to)?\s*the\s+narrator'?s\s+"
+        r"(?:eye\s+level|eyes|position)\s*,?\s*", re.I), ""),
+    (re.compile(
+        r"the\s+camera\s+holds?\s+the\s+narrator'?s\s+position\s+", re.I), ""),
+    (re.compile(
+        r"the\s+camera\s+(?:is\s+)?(?:fixed|locked)\s+(?:at|on|to)\s+[^,.;]*[,;]?\s*",
+        re.I), ""),
+    # ③ 指向镜头的方位短语
+    (re.compile(r"\s+(?:toward|towards|into|to|at)\s+the\s+camera", re.I), ""),
+    # ④ 「从第一人称视角」这类自指视角短语（首行 tag 已声明，散文行不必复述）
+    (re.compile(
+        r"\s+from\s+a\s+(?:first[-\s]?person|pov|the\s+narrator'?s)\s+"
+        r"(?:perspective|view|angle|eyes)", re.I), ""),
+    (re.compile(r"\s+in\s+the\s+first[-\s]?person\s+(?:perspective|view)", re.I), ""),
+    # ⑤ 「叙述者身体只作为局部可见」→ 只留局部事实本身
+    (re.compile(
+        r"the\s+narrator'?s\s+(?:body|arm|hand|leg)s?\s+is\s+only\s+visible\s+as\s+",
+        re.I), "only "),
+    (re.compile(r"the\s+narrator\s+never\s+appears\s+in\s+frame\s*;?\s*", re.I), ""),
+    # ⑥ 兜底：任何残留的「叙述者的 X」→ 去主语化成「a X」。真机 slot `-54-3`：
+    #     `while the narrator's lower body enters only as a cropped segment from the
+    #     bottom edge` —— 语义是对的（局部入画），但 `narrator` 一词必须去掉。
+    #     ⚠ 必须排在 ①②⑤ 之后：那几条要连同整个从句一起删，不能被本条的 "a X" 抢走。
+    (re.compile(r"the\s+narrator'?s\s+", re.I), "a "),
+    (re.compile(r"the\s+narrator\s+", re.I), ""),
+)
+
+
+def _first_person_prose_meta_guard(prose: str, scene: Mapping[str, object]) -> str:
+    """第一人称下把**散文行里的元语言镜头句**机械剔掉（第 68 刀）。
+
+    ⚠ 只动**指向镜头/叙述者的元语言**，**不动任何画面事实**：命中短语被删后重排标点与大小写，
+    句子其余部分逐字保留。删完若不再像「英文画面句」，下游既有判据会照旧判死 ⇒ 走 repair，
+    不会交付残句（fail-closed，不新增交付路径）。
+    """
+    if str(scene.get("viewpoint") or "").strip() != "first_person":
+        return prose
+    body = prose or ""
+    if not body.strip():
+        return prose
+    guarded = body
+    for pattern, replacement in _FP_PROSE_META_REWRITES:
+        guarded = pattern.sub(replacement, guarded)
+    if guarded == body:
+        return prose          # 零命中 ⇒ 逐字节返回（幂等锁）
+    # 重排：压空白 → 修标点 → 修大小写
+    guarded = re.sub(r"\s{2,}", " ", guarded)
+    guarded = re.sub(r"\s+([,;.])", r"", guarded)
+    guarded = re.sub(r"[,;]\s*([,;.])", r"", guarded)
+    guarded = re.sub(r"([,;])\s*$", "", guarded).strip()
+    guarded = re.sub(r"^[,;.\s]+", "", guarded).strip()
+    if guarded:
+        guarded = guarded[0].upper() + guarded[1:]
+    if guarded and guarded[-1] not in ".!?":
+        guarded += "."
+    if not guarded.strip():
+        return prose          # 全被剔空 ⇒ 交回原串（下游判据接手，不做二次发明）
+    return guarded
+
+
 def _first_person_head_guards(head: str, scene: Mapping[str, object]) -> str:
     """第一人称「首行 tags」统一收口：**剔旁观机位词 → 补下缘进入限定 → 补 POV 声明**
     （第 60／61／63／65 刀）。
 
-    ⚠ 与 `_normalize` 的 anima 分支**同序同语义**（那三行因接线锁必须显式留在 `_normalize` 里
+    ⚠ 与 `_normalize` 的 anima 分支**同序同语义**（那四行因接线锁必须显式留在 `_normalize` 里
       —— 见 `test_第60刀_闸已接进anima归一化收口`／`test_第61刀_接线锁_闸与补都接在归一化收口`）。
     ⚠ 每一步各自带零回归锁与非第一人称短路 ⇒ 本函数对第三人称**逐字节返回原串**。
     """
+    head = _first_person_strip_camera_direction_tags(head, scene)
     head = _strip_bystander_camera_tags(head, scene)
     head = _first_person_limb_entry_phrasing(head, scene)
     return _ensure_first_person_view_tag(head, scene)
@@ -3532,7 +3868,8 @@ def _viewpoint_clause(scene: Mapping[str, object]) -> str:
         f"`long shot`、`environmental composition`、`bird's eye view`，以及"
         f"**`looking down at face`/`from above` 这类俯视**（俯视隐含「有一个站在上方看的人」"
         f"＝旁观者，与「镜头＝{who}的眼睛」矛盾）。若剧情确需表现某个背向部位，"
-        f"改用**该部位向你这一侧呈现**的措辞（如 `her back arching toward the camera`），"
+        f"改用**该部位本身＋当前姿态**的措辞（如 `her bare back arched, facing away, "
+        f"spine and shoulder blades visible`），"
         f"**不得**把整个镜头搬到她背后。"
         f"【视角·第一人称·叙事者从画面下缘进入】{who}的身体局部**从画面下缘/下侧边缘进入**"
         f"（`enters from the lower frame edge`／`cropped at the bottom edge`），"
@@ -3572,6 +3909,28 @@ def _viewpoint_clause(scene: Mapping[str, object]) -> str:
         f"把{who}的躯干或面部带进画面；超出取景上限的部分**只写接触点那一小段、其余省略**。"
         f"不得为了体现第一人称而凭空"
         f"补一只手或任何身体部位。"
+        # ═══ 第 69 刀（2026-09-29 用户口径）：**接触形态的具体写法** ═══════════════
+        # 用户原话：「你的描述应该是一个腿被手掰开、肉棒贴在女角色的小穴口隔着内裤布料磨蹭、
+        #   女角色内裤湿透透明。这种描述就没有说主人公完整入场，只是**描述有器官在对应的位置**」。
+        # 动机：第 68 刀只做了「**剔掉元语言**」这一半（减法），剔完会出现**描述真空**
+        #   （真机 slot `-54-2` 剔完只剩「Only the woman is visible, her lower face …
+        #   draw the eye downward」）⇒ 必须补上「**该怎么写**」这一半（加法）。
+        # ⚠ 三条自我约束（与第 68 刀同一批口径）：
+        #   ① 例子**一律条件式**：只有画面事实写明才写，承接上一条「没写就一律不写」；
+        #   ② **只引身体部位与接触词，不引任何机位词**（否则会诱发第 60 刀的禁用机位）；
+        #   ③ 无出处的编造由第 70 刀的出处闸机械兜底。
+        f"【视角·第一人称·接触形态的具体写法】{who}的部位入画时**只写器官在对应位置**——"
+        f"写清**哪一段器官、在谁身上的哪个位置、是隔着衣物还是直接接触**；"
+        f"本帧取景上限与「只写接触点那一小段」的约束**仍然全部适用**。"
+        f"两种形态（**仅在输入画面事实写明时才写**，没写一律不写）："
+        f"①**撬开／推动肢体**——事实写了把她的腿拨开、架起或压向某处 ⇒ 写成"
+        f"`a hand prying her leg open`／`her leg lifted and pressed aside by a hand`"
+        f"（只写手与腿，**不写这只手的主人**，也不写它从哪来）；"
+        f"②**隔着衣物的接触**——事实写了器官贴上去隔着布磨蹭、布面洇湿 ⇒ 写成"
+        f"`the shaft pressed against her through the damp fabric`／"
+        f"`the wet cloth clinging translucent to the skin`，"
+        f"⚠ **只写衣物本身可见的状态**（湿透、透出底色、被顶起、贴出形状），"
+        f"**不得**补写衣物之下的器官形态或内部构造。"
         f"不得写{who}的脸或全身，也不得把{who}写成画面里的第二个人；画面主体数只算其他角色。"
         # 2026-09-21 第 31 刀（当时定案「第一人称＝看向镜头」）：镜头就是叙事者的眼睛 ⇒
         # 剧情写「看向叙事者」时翻译成「看向镜头」；把叙事者另写成画面里的第三方人物
@@ -4510,6 +4869,10 @@ def _patch_failed_prompt(
         return ""
     patched, _ledger = complete_field_coverage(profile, prompt, scene)
     if not str(patched or "").strip() or _body_errors(profile, patched):
+        return ""
+    # 第 70 刀：编造的「隔着布料的器官接触」**不做机械摘除**（改句子会伤语法/语义，
+    # 与道具闸「摘掉装置」不同）⇒ 直接作废，交回调用方走既有兜底通道。
+    if _unsourced_contact_hits(patched, scene):
         return ""
     device_hits = _unsourced_device_hits(patched, scene)
     if device_hits:

@@ -11,6 +11,10 @@ export interface SendPayload {
   text: string;        // 完整配方文本（发送至对话）或 ""（发送至对话框仅图片）
   images?: string[];   // 图片 URL 列表
   prompt?: string;     // 纯提示词（创建画布节点时作为 generation 的 prompt）
+  // 2026-10-16 补：生成溯源元数据随发送一起入库，资产库详情才能显示「模板 / 模型 / LoRA」
+  templateName?: string;
+  modelName?: string;
+  loraNames?: string;   // 逗号分隔
 }
 
 export function SendToChatModal({
@@ -59,7 +63,14 @@ export function SendToChatModal({
         if (images.length) {
           try {
             for (const url of images) {
-              await indexGeneration(repoId, { prompt: payload.prompt || payload.text, image_url: url }, embed);
+              await indexGeneration(repoId, {
+                prompt: payload.prompt || payload.text,
+                image_url: url,
+                // 溯源元数据随发送入库（否则资产库详情的模板/模型/LoRA 恒空）
+                template_name: payload.templateName || "",
+                model_name: payload.modelName || "",
+                lora_names: payload.loraNames || "",
+              }, embed);
             }
             window.dispatchEvent(new CustomEvent("laf-generation-saved", { detail: repoId }));
           } catch (nodeErr) {
@@ -77,7 +88,7 @@ export function SendToChatModal({
   };
 
   return (
-    <div className="modal-mask" onClick={onCancel}>
+    <div className="modal-mask">
       <div className="modal" style={{ maxWidth: 420 }} onClick={(e) => e.stopPropagation()}>
         <h3>{title}</h3>
         <p style={{ fontSize: 13, color: "var(--text-muted)", margin: "4px 0 10px" }}>

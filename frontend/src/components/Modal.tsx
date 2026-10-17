@@ -72,7 +72,7 @@ interface AlertProps {
 export function AlertModal({ title, message, actions, onClose }: AlertProps) {
   useEsc(onClose);
   return (
-    <div className="modal-mask" onClick={onClose}>
+    <div className="modal-mask">
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <h3>{title}</h3>
         {message && <p style={{ color: "#666", marginTop: 0 }}>{message}</p>}
@@ -115,7 +115,7 @@ export function PromptModal({ title, defaultValue = "", confirmText = "确认", 
   useEsc(onCancel);
   const submit = () => { if (value.trim()) onConfirm(value.trim()); };
   return (
-    <div className="modal-mask" onClick={onCancel}>
+    <div className="modal-mask">
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <h3>{title}</h3>
         {multiline ? (

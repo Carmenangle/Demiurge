@@ -194,7 +194,7 @@ export function RegexModal({ onClose, cardName, characterDir, presetName, preset
 
   return (
     <>
-      <div className="modal-mask" onClick={onClose}>
+      <div className="modal-mask">
         <div className="modal" style={{ width: 900, maxWidth: "95vw", maxHeight: "90vh", display: "flex", flexDirection: "column" }} onClick={(e) => e.stopPropagation()}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 12 }}>

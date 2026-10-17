@@ -153,3 +153,69 @@ def test_灵感卡图片_thread快照可保存(monkeypatch, tmp_path):
     assert res["filename"].endswith(".png")
     assert res["query"] == ""
     web_material_candidates._CANDIDATES.clear()
+
+
+# ===== 2026-10-16：图站 CDN 下载通路（用户实测 403 修复的回归锁） =====
+
+def test_image_host_download_routes_via_material_sources(monkeypatch):
+    """cdn.donmai.us 等图站 host 必须走 fetch_image_bytes（带 Referer/UA 的 curl 通路）。
+
+    用户实测「下载失败 403 Forbidden」＝旧 httpx 直连无 Referer 被 CDN 防盗链拒绝。
+    """
+    from app.services import material_sources
+
+    seen: dict = {}
+
+    def fake_fetch(url, proxy=""):
+        seen["url"] = url
+        seen["proxy"] = proxy
+        return b"\x89PNG-fake", "image/png"
+
+    monkeypatch.setattr(material_sources, "fetch_image_bytes", fake_fetch)
+    data = image_store._download_external_url(
+        "https://cdn.donmai.us/original/ef/93/x.jpg")
+    assert data == b"\x89PNG-fake"
+    assert seen["url"].startswith("https://cdn.donmai.us/")
+
+
+def test_image_host_download_enforces_size_limit(monkeypatch):
+    from app.services import material_sources
+
+    monkeypatch.setattr(material_sources, "fetch_image_bytes",
+                        lambda url, proxy="": (b"x" * 32, "image/jpeg"))
+    with pytest.raises(image_store.ComfyError, match="上限"):
+        image_store._download_external_url("https://cdn.donmai.us/original/a.jpg",
+                                           max_bytes=16)
+
+
+def test_non_image_host_keeps_httpx_path(monkeypatch):
+    """非图站 host 保持原 httpx 逐跳校验通路（不误改通用下载）。"""
+    calls: list[str] = []
+
+    class _Client:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def get(self, url):
+            calls.append(url)
+
+            class _R:
+                status_code = 200
+
+                def iter_bytes(self):
+                    yield b"DATA"
+
+                def raise_for_status(self):
+                    return None
+            return _R()
+
+    monkeypatch.setattr(image_store.httpx, "Client", _Client)
+    data = image_store._download_external_url("https://example.com/img.png")
+    assert data == b"DATA"
+    assert calls == ["https://example.com/img.png"]

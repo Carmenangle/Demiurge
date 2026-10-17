@@ -39,7 +39,7 @@ export interface EditLabelDialogProps {
 }
 export function EditLabelDialog({ editLabelVal, setEditLabelVal, setEditLabelId, saveEditLabel }: EditLabelDialogProps) {
   return (
-    <div className="modal-mask" onClick={() => setEditLabelId(null)}>
+    <div className="modal-mask">
       <div className="modal" style={{ maxWidth: 420 }} onClick={(e) => e.stopPropagation()}>
         <h3>编辑卡片介绍文字</h3>
         <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "0 0 8px" }}>
@@ -74,7 +74,7 @@ export interface NewInspirationDialogProps {
 }
 export function NewInspirationDialog({ newInspiration, setNewInspiration, createInspiration }: NewInspirationDialogProps) {
   return (
-    <div className="modal-mask" onClick={() => setNewInspiration(null)}>
+    <div className="modal-mask">
       <div className="modal" style={{ maxWidth: 560 }} onClick={(e) => e.stopPropagation()}>
         <h3>新建灵感卡</h3>
         <input
@@ -119,7 +119,7 @@ export interface GroupRenameDialogProps {
 }
 export function GroupRenameDialog({ groupRenameTitle, setGroupRenameTitle, setGroupRenameId, saveGroupRename }: GroupRenameDialogProps) {
   return (
-    <div className="modal-mask" onClick={() => setGroupRenameId(null)}>
+    <div className="modal-mask">
       <div className="modal" style={{ maxWidth: 420 }} onClick={(e) => e.stopPropagation()}>
         <h3>编辑组名</h3>
         <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "0 0 8px" }}>
@@ -192,7 +192,7 @@ export interface EdgeInfoDialogProps {
 }
 export function EdgeInfoDialog({ edgeInfo, setEdgeInfo, rfNodes }: EdgeInfoDialogProps) {
   return (
-    <div className="modal-mask" onClick={() => setEdgeInfo(null)}>
+    <div className="modal-mask">
       <div className="modal" style={{ maxWidth: 460 }} onClick={(e) => e.stopPropagation()}>
         {edgeInfo.storyFrom !== undefined ? (
           <>
@@ -258,7 +258,7 @@ export function InspirationEditDialog({ inspirationEditId, inspirationCardsRef, 
   const editCard = inspirationCardsRef.current.find((c) => c.id === inspirationEditId) || null;
   const editImage = editCard?.imageUrl || "";
   return (
-    <div className="modal-mask" onClick={() => setInspirationEditId(null)}>
+    <div className="modal-mask">
       <div className="modal" style={{
         width: "92vw", maxWidth: 1200, height: "86vh",
         display: "flex", flexDirection: "column",

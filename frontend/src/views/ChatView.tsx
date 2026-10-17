@@ -24,6 +24,7 @@ import {
   X,
   Minimize2,
   MessageSquarePlus,
+  FileText,
 } from "lucide-react";
 import { type Repo, type RepoBinding } from "../stores/repos";
 import { type WorkMode } from "../lib/viewRouting";
@@ -671,6 +672,16 @@ export function ChatView({
                 title={`剧情自动生成${settings.illustrate ? "（开）" : "（关）"}：开启后在剧情高潮点（好感度跨档/失控/每段兜底）按多元数据插入勾选的类型自动生成图片/视频/音频。异步后台进行，可在右侧徽记查看进度`}
               >
                 <ImageIcon size={15} />
+              </button>
+            )}
+            {cardName && (
+              <button
+                className={`btn icon-only ${settings.promptOnlyGeneration ? "primary" : ""}`}
+                aria-pressed={settings.promptOnlyGeneration}
+                onClick={() => update({ promptOnlyGeneration: !settings.promptOnlyGeneration })}
+                title={`试跑（只生成提示词）${settings.promptOnlyGeneration ? "（开）" : "（关）"}：开后提示词照常完整编译，但不提交 ComfyUI——图片与视频都不出图，成稿只落 trace 供审查（ illustration.submitted ），用于批量对照提示词`}
+              >
+                <FileText size={15} />
               </button>
             )}
             {cardName && (

@@ -153,7 +153,8 @@ def execute_generation(ctx: Any, kind: str, original: str, prompt: str,
                     size=ctx.get("size", "1024x1024"), proxy=ctx.get("vid_proxy", ""),
                 )
             rec = generation_store.persist_video(ctx["thread_id"], ctx["repo_id"], prompt,
-                                                 url, ctx["output_dir"])
+                                                 url, ctx["output_dir"],
+                                                 vid_proxy=ctx.get("vid_proxy", ""))
             approved = prompt_approval_store.get(ctx["thread_id"], approval_id) if approval_id else None
             _clear_after_success(ctx["thread_id"], approval_id)
             mode = "图生视频（首帧参考图）" if images else "文生视频"
@@ -168,6 +169,7 @@ def execute_generation(ctx: Any, kind: str, original: str, prompt: str,
                 "size": ctx.get("size", "1024x1024"),
                 "quality": ctx.get("image_quality", "high"),
                 "proxy": ctx.get("gen_proxy", ""),
+                "cancel_event": ctx.get("cancel_event"),
             }
             if image_mask:
                 kwargs["mask"] = image_mask.get("mask", "")
@@ -181,7 +183,8 @@ def execute_generation(ctx: Any, kind: str, original: str, prompt: str,
             }
             rec = generation_store.persist_image(
                 tid, rid, prompt, url, od, eb, ek, em, regeneration,
-                embed_proxy=ctx.get("embed_proxy", ""))
+                embed_proxy=ctx.get("embed_proxy", ""),
+                gen_proxy=ctx.get("gen_proxy", ""))
             approved = prompt_approval_store.get(ctx["thread_id"], approval_id) if approval_id else None
             _clear_after_success(ctx["thread_id"], approval_id)
             return {"result_text": f"已基于 {len(images)} 张参考图生成。提示词：{prompt}",
@@ -194,6 +197,7 @@ def execute_generation(ctx: Any, kind: str, original: str, prompt: str,
             size=ctx.get("size", "1024x1024"),
             quality=ctx.get("image_quality", "high"),
             proxy=ctx.get("gen_proxy", ""),
+            cancel_event=ctx.get("cancel_event"),
         )
         regeneration = {
             "kind": "ai-image", "prompt": prompt, "images": [],
@@ -203,7 +207,8 @@ def execute_generation(ctx: Any, kind: str, original: str, prompt: str,
         }
         rec = generation_store.persist_image(
             tid, rid, prompt, url, od, eb, ek, em, regeneration,
-            embed_proxy=ctx.get("embed_proxy", ""))
+            embed_proxy=ctx.get("embed_proxy", ""),
+            gen_proxy=ctx.get("gen_proxy", ""))
         approved = prompt_approval_store.get(ctx["thread_id"], approval_id) if approval_id else None
         _clear_after_success(ctx["thread_id"], approval_id)
         return {"result_text": f"已生成图片。提示词：{prompt}",

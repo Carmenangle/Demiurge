@@ -34,7 +34,7 @@ export interface CanvasDetailPanelProps {
 export function CanvasDetailPanel({ detailNode, detail, setDetailNode, showStoryThinking, setShowStoryThinking,
   detailHtmlRef, naturalSizesRef, displayRegex, openSend, requestDelete }: CanvasDetailPanelProps) {
   return (
-    <div className="modal-mask" onClick={() => setDetailNode(null)}>
+    <div className="modal-mask">
       <div className="modal" style={{
         width: detailNode.type === "story" ? "92vw" : 760,
         maxWidth: detailNode.type === "story" ? 1200 : undefined,

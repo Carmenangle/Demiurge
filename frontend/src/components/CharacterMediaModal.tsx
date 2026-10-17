@@ -49,7 +49,7 @@ export function CharacterMediaModal({ base, name, onClose, onChanged }: {
 
   const mediaBase = media?.base || base;
   return (
-    <div className="modal-mask" onClick={(event) => { event.stopPropagation(); onClose(); }}>
+    <div className="modal-mask">
       <div className="modal character-media-modal" onClick={(event) => event.stopPropagation()}>
         <div className="character-modal-head">
           <h3>{name} · 头像与表情</h3>

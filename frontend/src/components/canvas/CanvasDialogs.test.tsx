@@ -155,12 +155,12 @@ describe("EditLabelDialog", () => {
     expect(api.saveEditLabel).not.toHaveBeenCalled();
   });
 
-  it("点遮罩关闭；点内层 modal 不冒泡（stopPropagation 保留）", async () => {
+  it("点内层 modal 不冒泡；⚠ 点遮罩**不**关闭（2026-10-16 改：复制粘贴友好，改用 X/取消）", async () => {
     const api = await render();
     await click(modal());
     expect(api.setEditLabelId).not.toHaveBeenCalled();
     await click(mask());
-    expect(api.setEditLabelId).toHaveBeenCalledWith(null);
+    expect(api.setEditLabelId).not.toHaveBeenCalled();   // 点外不关（防划出弹窗丢内容）
   });
 });
 
@@ -206,7 +206,7 @@ describe("NewInspirationDialog", () => {
     expect(api.setNewInspiration).not.toHaveBeenCalled();
   });
 
-  it("「取消」与遮罩 → setNewInspiration(null)", async () => {
+  it("「取消」→ setNewInspiration(null)；点内层不冒泡、点遮罩**不**关闭（2026-10-16）", async () => {
     const api = await render();
     await click(btn("取消"));
     expect(api.setNewInspiration).toHaveBeenCalledWith(null);
@@ -214,7 +214,7 @@ describe("NewInspirationDialog", () => {
     await click(modal());
     expect(api.setNewInspiration).not.toHaveBeenCalled();
     await click(mask());
-    expect(api.setNewInspiration).toHaveBeenCalledWith(null);
+    expect(api.setNewInspiration).not.toHaveBeenCalled();   // 点外不关
   });
 });
 
@@ -394,7 +394,7 @@ describe("EdgeInfoDialog", () => {
     expect(count(container.textContent || "", "（节点已不存在）")).toBe(2);
   });
 
-  it("「知道了」与遮罩 → setEdgeInfo(null)；内层不冒泡", async () => {
+  it("「知道了」→ setEdgeInfo(null)；内层不冒泡、点遮罩**不**关闭（2026-10-16）", async () => {
     const api = await render({ source: "s", target: "t" }, []);
     await click(modal());
     expect(api.setEdgeInfo).not.toHaveBeenCalled();
@@ -402,7 +402,7 @@ describe("EdgeInfoDialog", () => {
     expect(api.setEdgeInfo).toHaveBeenCalledWith(null);
     api.setEdgeInfo.mockClear();
     await click(mask());
-    expect(api.setEdgeInfo).toHaveBeenCalledWith(null);
+    expect(api.setEdgeInfo).not.toHaveBeenCalled();   // 点外不关
   });
 });
 
@@ -494,7 +494,7 @@ describe("InspirationEditDialog", () => {
     expect(setInspirationEditContent).toHaveBeenCalledWith("新内容Y");
   });
 
-  it("「保存」→ saveInspirationEdit 恰 1 次；「取消」/遮罩 → setInspirationEditId(null)；内层不冒泡", async () => {
+  it("「保存」→ saveInspirationEdit 恰 1 次；「取消」→ setInspirationEditId(null)；内层不冒泡、点遮罩**不**关闭（2026-10-16）", async () => {
     const { saveInspirationEdit, setInspirationEditId } = await render();
     await click(btn("保存"));
     expect(saveInspirationEdit).toHaveBeenCalledTimes(1);
@@ -504,7 +504,7 @@ describe("InspirationEditDialog", () => {
     expect(setInspirationEditId).toHaveBeenCalledWith(null);
     setInspirationEditId.mockClear();
     await click(mask());
-    expect(setInspirationEditId).toHaveBeenCalledWith(null);
+    expect(setInspirationEditId).not.toHaveBeenCalled();   // 点外不关
   });
 });
 
@@ -573,10 +573,10 @@ describe("逐字搬移锁（T2.1-D1）", () => {
     ["setDeletePending(null)", 2],                 // onConfirm + onCancel
     ['title="从画布删除节点"', 1],
     ['confirmText="删除"', 1],
-    ["setEditLabelId(null)", 2],                    // 遮罩 + 取消
-    ["setNewInspiration(null)", 2],                 // 遮罩 + 取消
-    ["setGroupRenameId(null)", 2],                  // 遮罩 + 取消
-    ["setEdgeInfo(null)", 2],                       // 遮罩 + 知道了
+    ["setEditLabelId(null)", 1],                    // 取消（2026-10-16：遮罩不再关闭）
+    ["setNewInspiration(null)", 1],                 // 取消
+    ["setGroupRenameId(null)", 1],                  // 取消
+    ["setEdgeInfo(null)", 1],                       // 知道了
     ["rfNodes.find((n) => n.id === edgeInfo.source)", 1],
     ["<h3>剧情顺序线</h3>", 1],
   ];

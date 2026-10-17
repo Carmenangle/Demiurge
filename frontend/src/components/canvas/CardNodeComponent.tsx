@@ -21,6 +21,11 @@ function areCardPropsEqual(prev: CardNodeProps, next: CardNodeProps): boolean {
   // 数组引用在新 useMemo 产物中必然不同 → 按值比较，避免每次 resize/drag 全量重渲染
   const sameUrls = p.imageUrls === n.imageUrls
     || (p.imageUrls.length === n.imageUrls.length && p.imageUrls.every((u, i) => u === n.imageUrls[i]));
+  // 缩略图数组也要比较（否则 thumb 后到/更新时卡片不重渲染）
+  const pT = p.thumbUrls || [];
+  const nT = n.thumbUrls || [];
+  const sameThumbs = pT === nT
+    || (pT.length === nT.length && pT.every((u, i) => u === nT[i]));
   const sameGens = p.gens === n.gens
     || (p.gens.length === n.gens.length && p.gens.every((g, i) => g === n.gens[i]));
   const sameAudioLines = audioLinesKey(p.node.storyAudioLines) === audioLinesKey(n.node.storyAudioLines);
@@ -30,6 +35,7 @@ function areCardPropsEqual(prev: CardNodeProps, next: CardNodeProps): boolean {
     p.prompt === n.prompt &&
     p.customLabel === n.customLabel &&
     sameUrls &&
+    sameThumbs &&
     p.naturalSize === n.naturalSize &&
     sameGens &&
     p.node.type === n.node.type &&
@@ -65,7 +71,9 @@ function areCardPropsEqual(prev: CardNodeProps, next: CardNodeProps): boolean {
 
 export const CardNodeComponent = memo(function CardNodeComponent({ id, data, selected }: CardNodeProps) {
   const d = data;
-  const images = d.imageUrls.slice(0, 8);
+  // 节点渲染优先缩略图（P0-2 派生层），缺项回退原图；详情/全屏走 imageUrls 原图
+  const thumbs = d.thumbUrls;
+  const images = d.imageUrls.map((full, i) => thumbs?.[i] || full).slice(0, 8);
   const size = d.naturalSize;
   // 剧情节点正文：跑显示层正则（markdownOnly）后 Markdown 渲染（与对话模式同款管线）
   const storyHtml = useMemo(() => {

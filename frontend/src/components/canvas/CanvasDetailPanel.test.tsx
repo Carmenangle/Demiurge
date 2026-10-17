@@ -256,7 +256,7 @@ describe("CanvasDetailPanel 剧情分支", () => {
 });
 
 describe("CanvasDetailPanel 关闭行为", () => {
-  it("X 按钮 / 遮罩 → setDetailNode(null)；内层点击不冒泡；bot-html 挂 detailHtmlRef（剧情分支）", async () => {
+  it("X 按钮 → setDetailNode(null)；内层不冒泡、点遮罩**不**关闭（2026-10-16）；bot-html 挂 detailHtmlRef（剧情分支）", async () => {
     const { mocks, detailHtmlRef } = await mountPanel({ node: node({ type: "story", storyText: "x" }), detail: detailOf({ type: "story" }) });
     expect(detailHtmlRef.current).toBeInstanceOf(HTMLElement);
     await click(modal());
@@ -265,7 +265,7 @@ describe("CanvasDetailPanel 关闭行为", () => {
     expect(mocks.setDetailNode).toHaveBeenCalledWith(null);
     mocks.setDetailNode.mockClear();
     await click(mask());
-    expect(mocks.setDetailNode).toHaveBeenCalledWith(null);
+    expect(mocks.setDetailNode).not.toHaveBeenCalled();   // 点外不关（复制粘贴友好）
   });
 });
 

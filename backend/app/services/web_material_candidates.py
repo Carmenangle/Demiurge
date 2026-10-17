@@ -48,6 +48,10 @@ def register_candidates(images: list[dict], query: str = "", provider: str = "")
                 "source_url": str(image.get("source_url") or ""),
                 "query": query,
                 "provider": provider,
+                # P2-1：图站素材带原站标签/作者（可选，供保存落 provenance 与后续资产化）
+                "tags": [str(t) for t in (image.get("tags") or []) if str(t).strip()],
+                "author": str(image.get("author") or ""),
+                "rating": str(image.get("rating") or ""),
                 "registered_at": now,
             }
             _CANDIDATES.move_to_end(url)

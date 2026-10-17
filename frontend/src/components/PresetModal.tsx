@@ -128,7 +128,7 @@ export function PresetModal({
 
   return (
     <>
-      <div className="modal-mask" onClick={onClose}>
+      <div className="modal-mask">
         <div className="modal" style={{ width: 960, maxWidth: "96vw", maxHeight: "90vh", display: "flex", flexDirection: "column" }} onClick={(e) => e.stopPropagation()}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
             <h3 style={{ margin: 0 }}>偏置预设</h3>

@@ -320,7 +320,7 @@ function ArtifactPreviewModal({
   const showVersions = versions !== null && versions.length > 0;
 
   return (
-    <div className="modal-mask artifact-modal-mask" onClick={onClose}>
+    <div className="modal-mask artifact-modal-mask">
       <div className="artifact-modal" onClick={(e) => e.stopPropagation()}>
         <div className="artifact-modal-head">
           <TypeIcon size={16} className={`artifact-tile-icon artifact-tile-icon-${art.kind}`} />

@@ -266,7 +266,7 @@ export function WorkflowToolModal({ node: nodeProp, repoId, settings, onClose, o
   };
 
   return (
-    <div className="modal-mask" onClick={onClose}>
+    <div className="modal-mask">
       <div
         className="modal"
         style={{
@@ -432,7 +432,7 @@ export function WorkflowToolModal({ node: nodeProp, repoId, settings, onClose, o
       </div>
       {/* 选择完毕 → LoRA 确认后 → 第二级弹窗：运转/更改/关闭 */}
       {postConfirm && (
-        <div className="modal-mask" onClick={() => setPostConfirm(false)} style={{ zIndex: 10001 }}>
+        <div className="modal-mask" style={{ zIndex: 10001 }}>
           <div className="modal" style={{ maxWidth: 420 }} onClick={(e) => e.stopPropagation()}>
             <h3>参数已确认</h3>
             <p style={{ fontSize: 13, color: "var(--text-muted)", margin: "8px 0" }}>

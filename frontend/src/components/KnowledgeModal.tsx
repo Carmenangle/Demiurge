@@ -133,7 +133,7 @@ export function KnowledgeModal({ repoName, repoId, busy, embed, onSubmit, onClos
 
   return (
     <>
-    <div className="modal-mask" onClick={onClose}>
+    <div className="modal-mask">
       <div className="modal" style={{ width: 600, maxHeight: "80vh", display: "flex", flexDirection: "column" }} onClick={(e) => e.stopPropagation()}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <h3 style={{ margin: 0 }}>知识库 · {repoName}</h3>

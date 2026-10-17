@@ -2119,7 +2119,28 @@ def _agency_writeback(ctx: dict, deps, reply: str, turn: int, affinity,
             scene=scene, prompt_override=prompt_override,
             character_encounter=sig["character_encounter"])
         if illo:
-            rec = {"id": f"illo-{repo_id}-{turn}", "url": illo["url"], "caption": illo["caption"]}
+            # 2026-10-16 修复（用户实锤：云端生成时画布只有参考图节点、没有生成内容节点）：
+            # 此前云端插画只把 URL 通过 SSE 下发、**从不入库**，而画布内容节点只从 RAG 的
+            # generation 记录投影（rag_store.list_generations）⇒ 结构性看不到产物。
+            # 改为经 persist_image 落盘 + RAG 入库（画布/资产库可见），但
+            # **write_snapshot=False** 保持 roleplay_agency 的原设计「绝不把图回灌进对话历史」。
+            # 与 generation_approval / image_agent 的云端路径逐字同源。
+            from app.services import generation_store
+            _illo_prompt = prompt_override or str(illo.get("caption") or "")
+            rec = generation_store.persist_image(
+                str(ctx.get("thread_id") or repo_id), repo_id,
+                _illo_prompt,
+                str(illo["url"]),
+                str(ctx.get("output_dir") or ""),
+                str(ctx.get("embed_base") or ""),
+                str(ctx.get("embed_key") or ""),
+                str(ctx.get("embed_model") or ""),
+                {"kind": "ai-image", "prompt": _illo_prompt, "images": []},
+                embed_proxy=str(ctx.get("embed_proxy") or ""),
+                gen_proxy=str(ctx.get("gen_proxy") or ""),
+                write_snapshot=False,
+            )
+            rec["caption"] = illo["caption"]  # 下游沿用原 caption 字段
             return think_head + clean, [rec], {}, audio_req
         return think_head + clean, [], {}, audio_req
     except Exception as exc:  # noqa: BLE001

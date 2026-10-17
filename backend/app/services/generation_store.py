@@ -46,15 +46,46 @@ _MEMORY_DONE = _BoundedKeySet()
 _MAX_IMAGE_BYTES = 30 * 1024 * 1024   # 30 MB
 _MAX_VIDEO_BYTES = 200 * 1024 * 1024  # 200 MB
 
+# CDN 结果下载的**总时限**兜底（2026-10-13，B）。httpx 的 read timeout 语义是
+# 「两次 recv 之间」的超时：GFW 对境外 CDN 的限速/滴漏会让分块间隔始终小于它
+# ⇒ 计时器被反复重置、总耗时无上界（真机：同一直链直连 217s 只拿到 10% 后
+# ReadTimeout；走本机代理 24.1s 下完 3.9MB。当日 5 轮取回 4.5～73 分钟）。
+# 故在分块循环里另按单调时钟掐总时长；超时抛 TimeoutError，调用方回退远程 URL
+# （浏览器走系统代理仍能开图），不再无限挂死。0＝不启用。
+# ⚠ 界的诚实口径：截止检查只能在「收到一个分块后」跑，而单次 recv 最多阻塞
+# `timeout`（per-read 超时）秒 ⇒ 最坏耗时 ≈ total_timeout + timeout。真机实测
+# total_timeout=45 时 154.1s 才抛（45+109，滴漏间隔 109s < read timeout 120s），
+# 与推导一致。要再紧只能上加 watchdog 线程 response.close()（暂不做，避免线程面）。
+_DOWNLOAD_TOTAL_TIMEOUT_IMAGE = 600   # 10 min：30MB 上限下 ≥50KB/s 均不误杀
+_DOWNLOAD_TOTAL_TIMEOUT_VIDEO = 1800  # 30 min：视频体积大、CDN 更慢
 
-def _download_capped(url: str, timeout: int, max_bytes: int) -> bytes:
-    """流式下载并在超过 max_bytes 时中止，避免全量读入超大响应。超限抛 ValueError。"""
-    with httpx.Client(trust_env=False, timeout=timeout) as client:
+
+def _download_capped(url: str, timeout: int, max_bytes: int, proxy: str = "",
+                     total_timeout: int = 0) -> bytes:
+    """流式下载并在超过 max_bytes 时中止，避免全量读入超大响应。超限抛 ValueError。
+
+    proxy：显式代理（生图/视频模型配了代理时透传，与上传侧
+    `image_gen._load_image_bytes` 对齐——download 侧原先一个代理参数都没有，
+    直连境外 CDN 被 GFW 滴漏限速，取回可拖到几十分钟）。trust_env=False 下不读
+    环境变量，故代理必须显式给；local-view 本机回环地址跳过代理（Clash 等无法
+    转发回环请求，会把取图打成 502）。
+    total_timeout>0 时按单调时钟掐**总**时长，防「滴漏」绕开 per-read 超时。
+    """
+    from app.services.url_guard import is_local_view_url
+    client_kwargs = {"trust_env": False, "timeout": timeout}
+    if proxy and not is_local_view_url(url):
+        client_kwargs["proxy"] = proxy
+    started = time.monotonic()
+    with httpx.Client(**client_kwargs) as client:
         with client.stream("GET", url) as response:
             response.raise_for_status()
             chunks: list[bytes] = []
             total = 0
             for chunk in response.iter_bytes():
+                if total_timeout and time.monotonic() - started > total_timeout:
+                    raise TimeoutError(
+                        f"下载超过总时限 {total_timeout}s（已收 {total} 字节），已中止：{url}"
+                    )
                 total += len(chunk)
                 if total > max_bytes:
                     raise ValueError(f"远程文件超过 {max_bytes // (1024 * 1024)}MB 上限，已中止下载")
@@ -62,8 +93,13 @@ def _download_capped(url: str, timeout: int, max_bytes: int) -> bytes:
     return b"".join(chunks)
 
 
-def _save_remote_image(url: str, output_dir: str, repo_id: str = "home") -> str:
-    """Agent 云图容错留存；失败回退原地址，不阻断已完成的生成。"""
+def _save_remote_image(url: str, output_dir: str, repo_id: str = "home",
+                       proxy: str = "") -> str:
+    """Agent 云图容错留存；失败回退原地址，不阻断已完成的生成。
+
+    proxy：生图模型代理，透传给 CDN 结果图下载（2026-10-13 实锤：直连境外 CDN
+    被 GFW 限速滴漏，120s read timeout 被反复重置 ⇒ 取回 4.5～73 分钟且常挂死）。
+    """
     if not output_dir or not url:
         return url
     try:
@@ -74,15 +110,19 @@ def _save_remote_image(url: str, output_dir: str, repo_id: str = "home") -> str:
             if "image/" in header:
                 ext = header.split("image/")[1].split(";")[0] or "png"
         else:
-            data = _download_capped(url, timeout=120, max_bytes=_MAX_IMAGE_BYTES)
+            data = _download_capped(url, timeout=120, max_bytes=_MAX_IMAGE_BYTES,
+                                    proxy=proxy,
+                                    total_timeout=_DOWNLOAD_TOTAL_TIMEOUT_IMAGE)
             tail = safe_seg(Path(url.split("?")[0]).name)
             ext = tail.rsplit(".", 1)[1] if "." in tail else "png"
-        base = repo_meta.repo_folder(output_dir, repo_id)
+        base = image_store.media_dir(repo_meta.repo_folder(output_dir, repo_id), "image")  # → pictures/
         name = image_store._next_seq_name(base, ext)
         dest = base / name
         dest.write_bytes(data)
         return view_urls.local_view(str(dest))
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        # 留痕：否则「云端 Success 但对话没图」时只能看到无限挂死、无声失败
+        _LOG.warning("远程图片留存失败，回退远程地址 url=%s: %s", url, exc)
         return url
 
 
@@ -109,30 +149,43 @@ def _index_with_retry(repo_id: str, cfg: EmbedConfig, prompt: str,
 
 
 def persist_image(thread_id: str, repo_id: str, prompt: str, image_url: str,
-                   output_dir: str, embed_base: str, embed_key: str,
-                   embed_model: str, regeneration: dict | None = None,
-                   embed_proxy: str = "") -> dict:
-    """Agent 图片：容错留存后入库并追加快照，返回前后端共用身份。"""
-    shown = _save_remote_image(image_url, output_dir, repo_id)
+                  output_dir: str, embed_base: str, embed_key: str,
+                  embed_model: str, regeneration: dict | None = None,
+                  embed_proxy: str = "", gen_proxy: str = "",
+                  write_snapshot: bool = True) -> dict:
+    """Agent 图片：容错留存后入库并追加快照，返回前后端共用身份。
+
+    gen_proxy：生图模型代理，透传给 CDN 结果图下载（与 embed_proxy 同一传法）。
+    write_snapshot=False：只「落盘 + RAG 入库」，**不写 chat 快照**——供刻意
+    「不回灌对话历史」的云端自动插画使用（2026-10-16：画布需要 generation 记录
+    才能投影出内容节点，而插画产物不得进对话历史 ⇒ 两个开关分开）。
+    默认 True ＝ 既有调用行为逐字不变。
+    """
+    shown = _save_remote_image(image_url, output_dir, repo_id, proxy=gen_proxy)
     mid = str(uuid.uuid4())
     cfg = EmbedConfig(embed_base, embed_key, embed_model, proxy=embed_proxy)
     _index_with_retry(repo_id, cfg, prompt, image_url=shown)
-    try:
-        chat_snapshot.upsert(
-            thread_id,
-            chat_snapshot.assistant_message(
-                mid, "", image=shown,
-                **({"regeneration": regeneration} if regeneration else {}),
-            ),
-        )
-    except Exception as exc:  # noqa: BLE001  失败不阻断返回，但要留痕（否则丢快照无声）
-        _LOG.warning("persist_image 写快照失败 thread=%s mid=%s: %s", thread_id, mid, exc)
+    if write_snapshot:
+        try:
+            chat_snapshot.upsert(
+                thread_id,
+                chat_snapshot.assistant_message(
+                    mid, "", image=shown,
+                    **({"regeneration": regeneration} if regeneration else {}),
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001  失败不阻断返回，但要留痕（否则丢快照无声）
+            _LOG.warning("persist_image 写快照失败 thread=%s mid=%s: %s", thread_id, mid, exc)
     return {"id": mid, "url": shown,
             **({"regeneration": regeneration} if regeneration else {})}
 
 
-def _save_remote_video(url: str, output_dir: str, repo_id: str = "home") -> str:
-    """Agent 云视频容错留存；失败回退原地址，不阻断已完成的生成。"""
+def _save_remote_video(url: str, output_dir: str, repo_id: str = "home",
+                       proxy: str = "") -> str:
+    """Agent 云视频容错留存；失败回退原地址，不阻断已完成的生成。
+
+    proxy：视频模型代理，透传给 CDN 结果视频下载（与图片同链路）。
+    """
     if not output_dir or not url:
         return url
     try:
@@ -144,20 +197,26 @@ def _save_remote_video(url: str, output_dir: str, repo_id: str = "home") -> str:
                 ext = header.split("video/")[1].split(";")[0] or "mp4"
             name = f"{uuid.uuid4().hex}.{safe_seg(ext)}"
         else:
-            data = _download_capped(url, timeout=300, max_bytes=_MAX_VIDEO_BYTES)
+            data = _download_capped(url, timeout=300, max_bytes=_MAX_VIDEO_BYTES,
+                                    proxy=proxy,
+                                    total_timeout=_DOWNLOAD_TOTAL_TIMEOUT_VIDEO)
             tail = safe_seg(Path(url.split("?")[0]).name)
             name = tail if "." in tail else f"{uuid.uuid4().hex}.mp4"
-        dest = repo_meta.repo_folder(output_dir, repo_id) / name
+        dest = image_store.media_dir(repo_meta.repo_folder(output_dir, repo_id), "video") / name  # → videos/
         dest.write_bytes(data)
         return view_urls.local_view(str(dest))
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        _LOG.warning("远程视频留存失败，回退远程地址 url=%s: %s", url, exc)
         return url
 
 
 def persist_video(thread_id: str, repo_id: str, prompt: str, video_url: str,
-                  output_dir: str) -> dict:
-    """Agent 视频：容错留存后追加快照，返回前后端共用身份 {id,url}。"""
-    shown = _save_remote_video(video_url, output_dir, repo_id)
+                  output_dir: str, vid_proxy: str = "") -> dict:
+    """Agent 视频：容错留存后追加快照，返回前后端共用身份 {id,url}。
+
+    vid_proxy：视频模型代理，透传给 CDN 结果视频下载。
+    """
+    shown = _save_remote_video(video_url, output_dir, repo_id, proxy=vid_proxy)
     mid = str(uuid.uuid4())
     try:
         chat_snapshot.upsert(thread_id, chat_snapshot.assistant_message(mid, "", video=shown))

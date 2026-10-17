@@ -6,7 +6,8 @@ import { RepoGallery, type GenWithRepo } from "../components/RepoGallery";
 // 资产库：全站聚合。列出所有仓库(含小仓库)的生成图，支持按标签/仓库名搜索、从新到旧、
 // 批量删除、标签统计排序、发送至对话(选仓库)。
 export function AssetsView({ onSendToChat, onSendAsRecipe, onBatchSendToCanvas }: {
-  onSendToChat: (url: string) => void;
+  /** 传完整生成记录（此前只传 image_url ⇒ 溯源元数据在发送链路上丢失） */
+  onSendToChat: (g: GenWithRepo) => void;
   onSendAsRecipe?: (g: GenWithRepo) => void;
   onBatchSendToCanvas?: (items: GenWithRepo[]) => void;
 }) {
@@ -20,7 +21,7 @@ export function AssetsView({ onSendToChat, onSendAsRecipe, onBatchSendToCanvas }
         <EmptyState>还没有任何仓库，生成的图片会自动出现在这里。</EmptyState>
       ) : (
         <RepoGallery repoIds={repoIds} embed={resolvedEmbedModel(settings)} repoNames={repoNames} hideTitle
-          enhanced onSendToChat={(g) => onSendToChat(g.image_url)}
+          enhanced onSendToChat={onSendToChat}
           onSendAsRecipe={onSendAsRecipe}
           onBatchSendToCanvas={onBatchSendToCanvas} />
       )}

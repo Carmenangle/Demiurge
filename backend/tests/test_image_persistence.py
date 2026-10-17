@@ -44,6 +44,6 @@ def test_generation_archives_by_marker_when_repo_state_is_temporarily_missing(tm
         str(tmp_path), "old-repo-id", filename="done.png", idempotency_key="prompt-1",
     ))
 
-    assert saved.parent == owned
+    assert saved.parent == owned / "pictures"   # 2026-10-17：生图归入 <repo>/pictures/
     assert saved.name.startswith("workflow_")
     assert saved.read_bytes() == b"generated-png"

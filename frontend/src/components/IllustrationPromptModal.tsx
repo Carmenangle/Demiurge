@@ -59,7 +59,7 @@ export function IllustrationPromptModal({ onClose }: { onClose: () => void }) {
   };
 
   return (
-    <div className="modal-mask" onClick={onClose}>
+    <div className="modal-mask">
       <div
         className="modal"
         style={{ width: 720, maxWidth: "94vw", maxHeight: "88vh", overflowY: "auto" }}

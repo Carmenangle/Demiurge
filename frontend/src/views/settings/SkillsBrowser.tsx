@@ -67,7 +67,7 @@ export function SkillsBrowser({ onClose, onAdded }: {
 
   // APPEND_SKILLS_BROWSER_RENDER
   return (
-    <div className="modal-mask" onClick={onClose}>
+    <div className="modal-mask">
       <div className="modal smithery-modal" onClick={(e) => e.stopPropagation()}>
         <div className="settings-head">
           <h3 style={{ margin: 0 }}>Smithery 技能市场</h3>

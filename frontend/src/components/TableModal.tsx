@@ -70,7 +70,7 @@ export function TableModal({ outputDir, repoId, cardName, chat, onClose }: Props
   };
 
   return (
-    <div className="modal-mask" onClick={onClose}>
+    <div className="modal-mask">
       <div className="modal table-modal" onClick={(e) => e.stopPropagation()}>
         <div className="table-modal-head">
           <h3 style={{ margin: 0, flex: 1 }}>数据表</h3>

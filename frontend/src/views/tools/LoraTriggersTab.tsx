@@ -32,7 +32,7 @@ export function LoraDataModal({ item, onConfirm, onCancel }: {
     return () => window.removeEventListener("keydown", onKey);
   }, [onCancel]);
   return (
-    <div className="modal-mask" onClick={onCancel}>
+    <div className="modal-mask">
       <div className="modal" onClick={(event) => event.stopPropagation()}>
         <h3>{item.lora_name}</h3>
         <label style={{ display: "block", marginBottom: 12 }}>

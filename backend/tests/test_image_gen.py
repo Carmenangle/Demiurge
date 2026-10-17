@@ -1,5 +1,6 @@
 import httpx
 import pytest
+import threading
 
 from app.services import image_gen
 
@@ -238,6 +239,56 @@ def test_非法自定义尺寸在请求上游前拒绝(size, monkeypatch):
 
     with pytest.raises(ValueError, match="图片"):
         image_gen.generate("https://img.test/v1", "key", "model", "prompt", size=size)
+
+
+def test_生图入口已取消则不请求上游(monkeypatch):
+    """2026-10-14 C2：暂停后 ReAct 可能还有后续工具调用——取消置位时不得再发起
+    上游请求（防「暂停了还在扣费生成」）。"""
+    cancelled = threading.Event()
+    cancelled.set()
+    monkeypatch.setattr(
+        image_gen.httpx, "Client",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("已取消不得请求上游")),
+    )
+
+    with pytest.raises(image_gen.UpstreamRequestNotSent, match="已取消"):
+        image_gen.generate(
+            "https://img.test/v1", "key", "model", "prompt", cancel_event=cancelled,
+        )
+
+
+def test_图生图入口已取消则不读参考图不请求上游(monkeypatch):
+    """取消检查放在读参考图之前——取消后连 30MB 下载都不做。"""
+    cancelled = threading.Event()
+    cancelled.set()
+
+    def boom(*_a, **_k):
+        raise AssertionError("已取消不得读参考图/请求上游")
+
+    monkeypatch.setattr(image_gen, "_load_image_bytes", boom)
+    monkeypatch.setattr(
+        image_gen.httpx, "Client",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("已取消不得请求上游")),
+    )
+
+    with pytest.raises(image_gen.UpstreamRequestNotSent, match="已取消"):
+        image_gen.generate_with_images(
+            "https://img.test/v1", "key", "model", "prompt", ["source"],
+            cancel_event=cancelled,
+        )
+
+
+def test_生图取消事件未置位时路径不变(monkeypatch):
+    """默认 None / 未置位 ⇒ 与改造前逐字节一致（照常请求上游）。"""
+    captured = {}
+    monkeypatch.setattr(image_gen.httpx, "Client", _capture_client(captured))
+    pending = threading.Event()
+
+    image_gen.generate(
+        "https://img.test/v1", "key", "model", "prompt", cancel_event=pending,
+    )
+
+    assert captured["json"]["prompt"] == "prompt"
 
 
 def test_load_image_bytes_local_view_bypasses_explicit_proxy(monkeypatch):

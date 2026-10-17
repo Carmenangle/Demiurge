@@ -92,6 +92,11 @@ export interface GenLike {
   id: string;
   prompt: string;
   image_url: string;
+  /** P0-2 缩略图派生层：画布节点用它渲染（原图动辄数 MB，多节点会把画布拖垮）；
+      详情/全屏仍用 image_url。历史记录可能为空 ⇒ 消费侧必须兜底回原图。
+      ⚠ 后端两个返回分支键名不一致（默认路径 `thumb_url`、分页路径 `thumbUrl`）⇒ 两个都要认。 */
+  thumb_url?: string;
+  thumbUrl?: string;
   tags?: string[];
   description?: string;
   created_at?: number;

@@ -43,6 +43,7 @@ import {
   resolveVideoBaseImageRef, resolvePrevTailDesc,
   resolveTransitionBaseImage,
 } from "./chatGeneration";
+import { waitForAgentRelease } from "./agentReleaseWait";
 import {
   durableFinalizeSucceeded, getRuntime, threadKey, pollWorkflowResult,
   type PendingGeneration, type WorkflowWatchObserver,
@@ -1429,6 +1430,13 @@ export function useChatSession(deps: ChatSessionDeps) {
       try { await interruptComfy(settings.comfyuiUrl, promptId); } catch { /* 忽略 */ }
     }
     abortRef.current = releaseAgentStream(abortRef.current, "stop");
+    // 2026-10-14：后端 `request_cancel` 只置取消事件、不释放准入（release 等 worker
+    // finally）⇒ 若同步阻塞段（压缩摘要 / 上传）无人消费取消信号，暂停后立即重发会撞
+    // 409「该对话已有生成任务正在运行」。这里等准入真正释放再解禁发送键（A 方案）。
+    const released = await waitForAgentRelease(threadId);
+    if (!released) {
+      pushBot("后端仍在收尾生成任务，请稍等几秒再发消息");
+    }
   };
 
   // 中断当前生成（「停止」按钮）——兼容快轮询阶段（wfRunning）和慢守望阶段（slowWatchPromptId）
@@ -1442,7 +1450,9 @@ export function useChatSession(deps: ChatSessionDeps) {
     const sid = streamingId;
     const pid = runningPromptId(gen) ?? slowWatchPromptId;  // 慢守望阶段 gen 里已无 promptId
     dispatch({ t: "stop" });
-    agentBusyRef.current = false;
+    // ⚠ 不在此处置 `agentBusyRef.current = false`：否则发送键在准入释放前就解禁，
+    // 重发会直连后端撞 409「该对话已有生成任务正在运行」（2026-10-14 实测）。
+    // 必须等 `hardCancel` 里 `waitForAgentRelease` 完成后再解禁（见下方）。
     stopProgress();
     setSlowWatchPromptId(null);  // 清慢守望状态，停止键消失
     // P22：`cancel` 不派发终态 ⇒ 必须同时出队，否则残留 id 会让下一次前台任务
@@ -1450,6 +1460,8 @@ export function useChatSession(deps: ChatSessionDeps) {
     if (pid) cancelForegroundRun(pid);
     refreshChatBackgroundActivities();
     await hardCancel(pid);
+    // hardCancel 已等到准入释放（或超时提示）⇒ 此刻解禁发送键才安全
+    agentBusyRef.current = false;
     if (sid) {
       // 2026-09-04 收口：半成品文本补「（已打断）」标记（下轮后端 _resume_interrupted_messages
       // 依此从断点续写）；空文本沿用「（已停止生成）」提示。reducer interrupted 事件同函数幂等。

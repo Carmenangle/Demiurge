@@ -939,9 +939,14 @@ export function cancelWorkflowBuildTask(id: string) {
 }
 
 // 生图完成后把这次生成的提示词/标签/图片入全局 RAG 知识库
+// template_name / model_name / lora_names：生成溯源元数据（可选，2026-10-16 补；
+// 不传时后端存空串 ⇒ 资产库详情的「模板/模型/LoRA」不显示）
 export function indexGeneration(
   threadId: string,
-  data: { prompt?: string; tags?: string; image_url?: string },
+  data: {
+    prompt?: string; tags?: string; image_url?: string;
+    template_name?: string; model_name?: string; lora_names?: string;
+  },
   embed: { baseUrl: string; apiKey: string; modelName: string },
 ) {
   return apiPost<{ ok: boolean }>("/rag/index-generation", {
@@ -949,6 +954,9 @@ export function indexGeneration(
     prompt: data.prompt || "",
     tags: data.tags || "",
     image_url: data.image_url || "",
+    template_name: data.template_name || "",
+    model_name: data.model_name || "",
+    lora_names: data.lora_names || "",
     ...ragEmbed(embed),
   });
 }
@@ -1005,13 +1013,23 @@ export interface Generation {
   description?: string;
   image_url: string;
   tags: string[];
-  /** 工作流生成元数据：模板名、主模型、LoRA（逗号分隔） */
+  /** 工作流生成元数据：模板名、主模型、LoRA（逗号分隔）。
+      ⚠ 后端两个返回分支键名不一致：默认路径给 snake（`template_name`/`lora_names` 字符串），
+      keyset 分页路径给 camel（`templateName`/`loraNames` 数组）⇒ 消费侧两个都要认。 */
   template_name?: string;
   model_name?: string;
   lora_names?: string;
+  templateName?: string;
+  modelName?: string;
+  loraNames?: string[];
   created_at?: number;   // 入库毫秒时间戳（权威排序键；历史记录可能为 0/缺失）
+  /** 标签快照（版本化反推，2026-10-17）：JSON 字符串 [{id,tags,model,label,at}] + 当前版 id */
+  tag_snapshots?: string;
+  active_tag_snapshot?: string;
   /** M2.1/M2.2：媒体类型（image|video），视频资产按 video 渲染/播放 */
   mediaType?: "image" | "video";
+  /** P0-2：缩略图派生层 URL（.thumbs/ 长边 512）；空则回落 image_url 原图 */
+  thumbUrl?: string;
   /** M2.1：派生链弱引用（视频→首帧底图槽），只读展示不级联 */
   derivedFrom?: Array<{
     media_slot_ref?: { message_id: string; slot_id: string };
@@ -1022,8 +1040,69 @@ export interface Generation {
 }
 
 // 列出某仓库的生成记录（图片+提示词+标签），供仓库详情页图片网格
-export function listGenerations(repoId: string, embed: Embed) {
-  return apiPost<{ items: Generation[] }>("/rag/generations", {
+export function listGenerations(
+  repoId: string,
+  embed: Embed,
+  opts: { limit?: number; beforeTs?: number } = {},
+) {
+  // P0-1 keyset 分页：limit>0 时后端按 created_at 倒序截断并回 has_more；
+  // beforeTs 为上一页末条 created_at（翻页游标，不重不漏）。两者缺省=全量（旧行为）。
+  return apiPost<{ items: Generation[]; has_more?: boolean }>("/rag/generations", {
+    repo_id: repoId,
+    limit: opts.limit ?? 0,
+    before_ts: opts.beforeTs ?? 0,
+    ...ragEmbed(embed),
+  });
+}
+
+export function wd14Tag(id: string, repoId: string, embed: Embed) {
+  // P0-3：WD14 本地反推打标（合并进 tags，不动原有）；模型未安装时后端 503 附下载指引
+  return apiPost<{ ok: boolean; added: string[]; total: number }>("/rag/wd14-tag", {
+    id,
+    repo_id: repoId,
+    ...ragEmbed(embed),
+  });
+}
+
+// 可插拔打标器：列出可用模型（内置 WD14 家族 + 丢在 models/taggers/ 下的自定义）
+export type TaggerInfo = { id: string; name: string; family: string; available: boolean; source: string };
+export function listTaggers() {
+  return apiPost<{ items: TaggerInfo[]; default: string }>("/rag/taggers", {});
+}
+
+// 按指定打标器反推（model 空＝默认）。结果已合并落库。
+export function tagGeneration(model: string, id: string, repoId: string, embed: Embed) {
+  return apiPost<{ ok: boolean; model: string; snapshot_id: string; tags: string[]; total: number }>(
+    "/rag/tag", {
+      id,
+      repo_id: repoId,
+      model,
+      ...ragEmbed(embed),
+    },
+  );
+}
+
+// 标签快照（版本化）：每次反推存一版，可切换/删除
+export type TagSnapshot = { id: string; tags: string[]; model: string; label: string; at: number };
+export function listTagSnapshots(id: string, repoId: string, embed: Embed) {
+  return apiPost<{ snapshots: TagSnapshot[]; active: string }>("/rag/tag-snapshots", {
+    id, repo_id: repoId, ...ragEmbed(embed),
+  });
+}
+export function activateTagSnapshot(id: string, repoId: string, snapshotId: string, embed: Embed) {
+  return apiPost<{ ok: boolean }>("/rag/tag-snapshot/activate", {
+    id, repo_id: repoId, snapshot_id: snapshotId, ...ragEmbed(embed),
+  });
+}
+export function deleteTagSnapshot(id: string, repoId: string, snapshotId: string, embed: Embed) {
+  return apiPost<{ ok: boolean }>("/rag/tag-snapshot/delete", {
+    id, repo_id: repoId, snapshot_id: snapshotId, ...ragEmbed(embed),
+  });
+}
+
+export function generateThumbs(repoId: string, embed: Embed) {
+  // P0-2：为本仓库历史资产补生成缩略图（.thumbs/ 派生层），返回 generated/skipped
+  return apiPost<{ generated: number; skipped: number }>("/rag/generate-thumbs", {
     repo_id: repoId,
     ...ragEmbed(embed),
   });
@@ -1081,12 +1160,101 @@ export interface WebMaterial {
   title: string;
   filename: string;
   content?: string;    // 灵感卡内容（M1.4 统一展示用；图片素材为空）
+  // 2026-10-16 扩充（详情面板「左图右信息」用；来自落盘时的 provenance）
+  query?: string;
+  provider?: string;
+  downloaded_at?: string;
+  tags?: string[];
+  author?: string;
+  rating?: string;
+  size?: number;
 }
 
 export function listWebMaterials(outputDir: string) {
   return apiPost<{ items: WebMaterial[] }>("/comfyui/web-materials/list", {
     output_dir: outputDir,
   });
+}
+
+// P2-1：图站素材市场（pixiv / danbooru）搜索——结果由后端登记受控下载候选，
+// 勾选后走 saveWebMaterial 落盘（安全模型不变）
+export interface WebMaterialSearchItem {
+  full_url: string;
+  /** danbooru 的 1920px 版（「查看大图」用它：原图常 20MB+，large 约 1MB 秒开） */
+  large_url?: string;
+  thumb_url: string;
+  source_url: string;
+  title: string;
+  tags: string[];
+  author: string;
+  provider: string;
+  rating?: string;
+  /** 「编辑/详情」面板：danbooru post 分组标签与元数据 */
+  post_id?: number;
+  tags_general?: string[];
+  tags_artist?: string[];
+  tags_character?: string[];
+  tags_copyright?: string[];
+  tags_meta?: string[];
+  width?: number;
+  height?: number;
+  file_size?: number;
+  created_at?: string;
+  score?: number;
+  fav_count?: number;
+  is_favorited?: boolean;
+  /** pixiv 多页作品：总页数 + 每页 large URL（查看大图翻页 / 下载全部页用） */
+  page_count?: number;
+  pages?: string[];
+}
+
+export function searchWebMaterials(
+  source: "pixiv" | "danbooru", query: string, limit = 20, proxy = "", page = 1,
+  mode = "search", modeParam = "",
+) {
+  return apiPost<{ ok: boolean; items: WebMaterialSearchItem[]; error: string; provider: string; next_cursor?: string }>(
+    "/comfyui/web-materials/search",
+    { source, query, limit, proxy, page, mode, mode_param: modeParam },
+  );
+}
+
+// pixiv 关注作者列表（user_following）
+export interface PixivUser {
+  id: number;
+  name: string;
+  account: string;
+  avatar_url: string;
+}
+
+export function pixivFollowing(proxy = "", page = 1) {
+  const q = new URLSearchParams({ page: String(page) });
+  if (proxy) q.set("proxy", proxy);
+  return apiGet<{ ok: boolean; users: PixivUser[]; error: string; provider: string }>(
+    `/comfyui/web-materials/pixiv/following?${q.toString()}`,
+  );
+}
+
+// 多页作品全页 URL（illust_detail；feed 对大作品只给 page_count，查看/下载前按需补全）
+export function pixivPages(illustId: number, proxy = "") {
+  return apiPost<{ ok: boolean; pages: string[]; originals?: string[]; page_count: number; error: string }>(
+    "/comfyui/web-materials/pixiv/pages",
+    { illust_id: illustId, proxy },
+  );
+}
+
+// 收藏 / 取消收藏到账号收藏夹（danbooru 需用户名+API Key；pixiv 用 refresh token）
+export function favoriteWebMaterial(postId: number, proxy = "", source = "danbooru", remove = false) {
+  return apiPost<{ ok: boolean; already: boolean; error: string }>(
+    "/comfyui/web-materials/favorite",
+    { post_id: postId, proxy, source, remove },
+  );
+}
+
+// 「查看大图」链接：经后端代理抓取（浏览器不一定能直连 CDN / 有防盗链）
+export function marketImageProxyUrl(url: string, proxy = "") {
+  const q = new URLSearchParams({ url });
+  if (proxy) q.set("proxy", proxy);
+  return apiUrl(`/comfyui/web-materials/proxy-image?${q.toString()}`);
 }
 
 export function saveWebMaterial(outputDir: string, src: string, sourceUrl = "", title = "", threadId = "") {
@@ -1097,6 +1265,16 @@ export function saveWebMaterial(outputDir: string, src: string, sourceUrl = "", 
     title,
     thread_id: threadId,
   });
+}
+
+// pixiv 多页作品整册保存：后端一次性拉全页 + 逐页落盘（前端崩溃/断连也不影响完成）
+export function saveWebSeries(
+  outputDir: string, illustId: number, sourceUrl = "", title = "", proxy = "",
+) {
+  return apiPost<{ ok: boolean; saved: number; failed: number; page_count: number; error?: string }>(
+    "/comfyui/web-materials/save-series",
+    { output_dir: outputDir, illust_id: illustId, source_url: sourceUrl, title, proxy },
+  );
 }
 
 export function deleteWebMaterial(outputDir: string, filename: string) {

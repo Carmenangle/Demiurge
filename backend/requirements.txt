@@ -16,5 +16,6 @@ langchain-mcp-adapters         # 接入 MCP 服务器工具（转成 langchain �
 aiosqlite                      # langgraph sqlite checkpoint 异步依赖
 tiktoken                       # token 计数/切分
 rank_bm25  # 节点检索的稀疏(BM25 关键词)召回，与向量检索做 Hybrid（治专有名词点名却漏）
+pixivpy3  # pixiv 图站素材源 SDK（material_sources.search_pixiv；此前漏写，重建 venv 会 ImportError）
 # 可选本地 Cross-Encoder Reranker 见 requirements-reranker.txt。
 # 开发/CI 工具(pytest/ruff/mypy/import-linter/pre-commit)见 requirements-dev.txt，普通用户不装。

@@ -19,7 +19,7 @@ from pathlib import Path
 
 from langchain_core.documents import Document
 
-from app.services import comfyui_client, rag_backend, rag_retrieval, reranker
+from app.services import comfyui_client, rag_backend, rag_retrieval, reranker, thumbnail_store
 from app.services.rag_backend import EmbedConfig
 
 
@@ -123,6 +123,9 @@ def index_generation(repo_id: str, cfg: EmbedConfig,
                            "model_name": model_name or "",
                            "lora_names": lora_names or "",
                            "media_type": media_type,
+                           # P0-2：本机静态图同步生成缩略图（.thumbs/ 派生层）；
+                           # 远程图/视频/失败一律空串，前端回落原图，不阻断入库
+                           "thumb_url": thumbnail_store.thumb_url_for(image_url),
                            "derived_from": json.dumps(derived_from or [],
                                                       ensure_ascii=False),
                            "created_at": (created_at if created_at is not None
@@ -137,14 +140,24 @@ def index_generation_reliable(
     tags: str = "",
     image_url: str = "",
     *,
+    template_name: str = "",
+    model_name: str = "",
+    lora_names: str = "",
     attempts: int = 3,
     sleep_fn=time.sleep,
 ) -> int:
-    """可靠入库事务；重试策略由 RAG Module 统一拥有，路由不参与编排。"""
+    """可靠入库事务；重试策略由 RAG Module 统一拥有，路由不参与编排。
+
+    template_name / model_name / lora_names：工作流或云端生成的溯源元数据
+    （2026-10-16 补：此前这条链路只收 prompt/tags/image_url ⇒ 资产库详情的
+    「模板 / 模型 / LoRA」恒空。默认空串，既有调用行为不变）。
+    """
     last: Exception | None = None
     for attempt in range(max(1, attempts)):
         try:
-            index_generation(repo_id, cfg, prompt, tags, image_url)
+            index_generation(repo_id, cfg, prompt, tags, image_url,
+                             template_name=template_name, model_name=model_name,
+                             lora_names=lora_names)
             return attempt + 1
         except Exception as exc:  # noqa: BLE001 - 嵌入后端错误类型不统一
             last = exc
@@ -324,11 +337,15 @@ def _parse_derived_from(raw: str) -> list[dict]:
         return []
 
 
-def _dump(collection: str, cfg: EmbedConfig) -> list[dict]:
-    """导出单个 collection 的全部条目为统一 dict 列表。"""
+def _dump(collection: str, cfg: EmbedConfig, where: dict | None = None) -> list[dict]:
+    """导出单个 collection 的条目为统一 dict 列表。
+
+    where：Chroma metadata 过滤（None=不过滤，行为与改造前一致）；
+    供 list_generations 的 keyset 分页把 created_at 游标下推（P0-1）。
+    """
     try:
         store = _store(collection, cfg)
-        data = store.get()  # {ids, documents, metadatas}
+        data = store.get(where=where)  # {ids, documents, metadatas}
     except Exception:
         return []
     ids = data.get("ids", []) or []
@@ -352,8 +369,11 @@ def _dump(collection: str, cfg: EmbedConfig) -> list[dict]:
             "model_name": meta.get("model_name", ""),
             "lora_names": meta.get("lora_names", ""),
             "media_type": meta.get("media_type", "image"),
+            "thumb_url": meta.get("thumb_url", ""),
             "derived_from": meta.get("derived_from", ""),
             "created_at": int(meta.get("created_at", 0) or 0),
+            "tag_snapshots": meta.get("tag_snapshots", ""),
+            "active_tag_snapshot": meta.get("active_tag_snapshot", ""),
         })
     return out
 
@@ -367,15 +387,23 @@ def list_docs(repo_id: str, cfg: EmbedConfig) -> list[dict]:
     return out
 
 
-def list_generations(repo_id: str, cfg: EmbedConfig) -> list[dict]:
+def list_generations(repo_id: str, cfg: EmbedConfig, *, limit: int = 0,
+                     before_ts: int = 0) -> list[dict]:
     """列出某仓库的生成记录（kind=generation）。
 
     返回 [{id, prompt, image_url, tags, templateName, modelName, loraNames, ...}]，
     供仓库详情页图片网格展示。字段用 camelCase，与前端 GenLike 契约一致，
     否则画布详情面板的「模板/模型/LoRA」取不到值。
+
+    P0-1 keyset 分页（created_at 倒序）：
+    - before_ts > 0：只返回 created_at < before_ts 的记录（游标下推 Chroma where）；
+    - limit > 0：排序后截前 limit 条（调用方按「多取一条」判 has_more）。
+    两者都为 0 时**逐字返回全量原顺序**（默认路径与改造前一致，既有调用方无感）。
     """
+    where = ({"kind": "generation", "created_at": {"$lt": before_ts}}
+             if before_ts > 0 else None)
     out: list[dict] = []
-    for d in _dump(_repo_collection(repo_id), cfg):
+    for d in _dump(_repo_collection(repo_id), cfg, where=where):
         if d["kind"] != "generation" or not d["image_url"]:
             continue
         legacy = d["content"] if d["content"] != "生成图片" else ""
@@ -389,9 +417,15 @@ def list_generations(repo_id: str, cfg: EmbedConfig) -> list[dict]:
                     # lora_names 在 metadata 存为逗号分隔字符串，读时拆为数组与前端 GenLike 类型一致
                     "loraNames": [s for s in (d.get("lora_names", "") or "").split(",") if s.strip()],
                     "mediaType": d.get("media_type", "image"),
+                    # P0-2：优先用入库时写入的 thumb_url；历史记录没有时读路径兜底发现
+                    # （`/rag/generate-thumbs` 补生成后不重嵌元数据也能生效）
+                    "thumbUrl": d.get("thumb_url", "") or thumbnail_store.thumb_url_if_ready(d["image_url"]),
                     "derivedFrom": _parse_derived_from(d.get("derived_from", "")),
                     "created_at": d.get("created_at", 0)})
-    return out
+    if limit <= 0 and before_ts <= 0:
+        return out  # 默认路径：原顺序原样返回
+    out.sort(key=lambda d: d.get("created_at", 0), reverse=True)
+    return out[:limit] if limit > 0 else out
 
 
 def _generation_search_item(item: dict) -> dict:
@@ -496,6 +530,90 @@ def set_doc_tags(doc_id: str, repo_id: str, cfg: EmbedConfig,
     return True
 
 
+# ===== 标签快照（版本化反推打标，2026-10-17 用户定案：不合并、按快照切换） =====
+
+def _parse_tag_snapshots(meta: dict) -> list[dict]:
+    raw = meta.get("tag_snapshots") or ""
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, list) else []
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+def _content_for(meta: dict) -> str:
+    if meta.get("kind") == "generation":
+        return "\n".join(v for v in [
+            str(meta.get("prompt") or ""), str(meta.get("tags") or ""),
+            str(meta.get("description") or ""),
+        ] if v) or "生成图片"
+    return str(meta.get("tags") or "")
+
+
+def add_tag_snapshot(doc_id: str, repo_id: str, cfg: EmbedConfig,
+                     tags: list[str], *, model: str = "", label: str = "") -> dict | None:
+    """新增一版标签快照并设为当前（**不合并旧标签**，旧版保留可切回）。返回快照 dict。"""
+    store, meta = _find_store(doc_id, repo_id, cfg)
+    if store is None or meta.get("locked"):
+        return None
+    clean = list(dict.fromkeys(t.strip() for t in tags if t and t.strip()))
+    snaps = _parse_tag_snapshots(meta)
+    snap = {"id": uuid.uuid4().hex[:12], "tags": clean, "model": model,
+            "label": label or "", "at": int(time.time())}
+    snaps.append(snap)
+    meta["tag_snapshots"] = json.dumps(snaps, ensure_ascii=False)
+    meta["active_tag_snapshot"] = snap["id"]
+    meta["tags"] = ",".join(clean)
+    store.update_document(doc_id, Document(page_content=_content_for(meta), metadata=meta))
+    return snap
+
+
+def list_tag_snapshots(doc_id: str, repo_id: str, cfg: EmbedConfig) -> dict:
+    store, meta = _find_store(doc_id, repo_id, cfg)
+    if store is None:
+        return {"snapshots": [], "active": ""}
+    return {"snapshots": _parse_tag_snapshots(meta),
+            "active": str(meta.get("active_tag_snapshot") or "")}
+
+
+def set_active_tag_snapshot(doc_id: str, repo_id: str, cfg: EmbedConfig,
+                            snapshot_id: str) -> bool:
+    """切到某一版标签快照（把 metadata.tags 同步成该版）。不存在返回 False。"""
+    store, meta = _find_store(doc_id, repo_id, cfg)
+    if store is None or meta.get("locked"):
+        return False
+    snap = next((s for s in _parse_tag_snapshots(meta) if str(s.get("id")) == str(snapshot_id)), None)
+    if snap is None:
+        return False
+    meta["active_tag_snapshot"] = str(snapshot_id)
+    meta["tags"] = ",".join(snap.get("tags") or [])
+    store.update_document(doc_id, Document(page_content=_content_for(meta), metadata=meta))
+    return True
+
+
+def delete_tag_snapshot(doc_id: str, repo_id: str, cfg: EmbedConfig,
+                        snapshot_id: str) -> bool:
+    """删一版快照；删的是当前版时回退到最后一版（全删则清空 tags）。"""
+    store, meta = _find_store(doc_id, repo_id, cfg)
+    if store is None or meta.get("locked"):
+        return False
+    snaps = _parse_tag_snapshots(meta)
+    remaining = [s for s in snaps if str(s.get("id")) != str(snapshot_id)]
+    if len(remaining) == len(snaps):
+        return False
+    meta["tag_snapshots"] = json.dumps(remaining, ensure_ascii=False)
+    if str(meta.get("active_tag_snapshot") or "") == str(snapshot_id):
+        if remaining:
+            last = remaining[-1]
+            meta["active_tag_snapshot"] = str(last.get("id"))
+            meta["tags"] = ",".join(last.get("tags") or [])
+        else:
+            meta["active_tag_snapshot"] = ""
+            meta["tags"] = ""
+    store.update_document(doc_id, Document(page_content=_content_for(meta), metadata=meta))
+    return True
+
+
 def set_generation_description(doc_id: str, repo_id: str, cfg: EmbedConfig,
                                description: str) -> bool:
     """保存 VLM 描述并重建该 generation 的文本向量；不写聊天历史。"""
@@ -544,6 +662,7 @@ def _remove_local_image(image_url: str) -> None:
         p = Path(unquote(path))
         if p.is_file():
             p.unlink()
+        thumbnail_store.remove_thumb(p)  # 顺手清派生缩略图（防 .thumbs/ 留孤儿）
     except Exception as exc:  # noqa: BLE001 [EXC-留痕] 删原图失败不阻断条目删除，但磁盘残留孤儿图
         _log.warning("删除本机留存原图失败（条目照常删除，但磁盘残留孤儿文件）: %s", exc)
 
@@ -595,13 +714,26 @@ def dedup_generations(repo_id: str, cfg: EmbedConfig) -> int:
 
 
 def local_path_of(image_url: str) -> Path | None:
-    """从 local-view?path=... 解出本机磁盘路径；非本机留存图返回 None。"""
+    """从 local-view?path=... 解出本机磁盘路径；非本机留存图返回 None。
+
+    2026-10-17：媒体产出已按类型迁入 <repo>/pictures|videos|audios/，但老索引仍记
+    <repo>/<name> ⇒ 原路径不存在时在同级类型夹里找同名文件（否则 prune 会误判丢失、删记录）。
+    """
     if not image_url or "local-view" not in image_url:
         return None
     try:
         from urllib.parse import urlparse, parse_qs, unquote
         path = (parse_qs(urlparse(image_url).query).get("path") or [""])[0]
-        return Path(unquote(path)) if path else None
+        if not path:
+            return None
+        p = Path(unquote(path))
+        if p.exists():
+            return p
+        for _sub in ("pictures", "videos", "audios"):
+            alt = p.parent / _sub / p.name
+            if alt.exists():
+                return alt
+        return p
     except Exception:
         return None
 
@@ -656,6 +788,8 @@ def prune_missing_generations(repo_id: str, cfg: EmbedConfig) -> int:
                 ) == "missing"
         if not missing:
             continue  # 文件仍在 / 无法判定（外链、ComfyUI 未起）→ 保留
+        if p is not None:
+            thumbnail_store.remove_thumb(p)  # 裂图记录清除时顺手清派生缩略图
         try:
             store.delete(ids=[d["id"]])
             removed += 1

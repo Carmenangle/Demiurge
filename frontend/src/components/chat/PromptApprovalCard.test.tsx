@@ -177,7 +177,11 @@ describe("generated image actions", () => {
     expect(html).toContain("蒙化修改");
     expect(html).not.toContain("识图微调");
     expect(html).not.toContain("复制链接");
-    expect(html).not.toContain("disabled=\"\"");
+    // 「重新生图」本体必须可用（绑定了完整参数）；不再要求整段 HTML 无 disabled——
+    // 2026-10-14 起图片卡多了一个「打开文件位置」，远程图（未留存本机）它本就该禁用。
+    const regenBtn = /<button[^>]*>(?:(?!<\/button>).)*?重新生图(?:(?!<\/button>).)*?<\/button>/.exec(html);
+    expect(regenBtn?.[0]).toBeTruthy();
+    expect(regenBtn![0]).not.toContain("disabled=");
   });
 
   it("disables regeneration for legacy results without an exact snapshot", () => {

@@ -23,6 +23,9 @@ export type CardNodeData = {
   node: CanvasNode;
   gens: GenLike[];
   imageUrls: string[];
+  /** 与 imageUrls 一一对应的缩略图（P0-2 派生层）；画布节点优先用它渲染，
+      详情/全屏继续用 imageUrls（原图）。缺项时消费侧必须回退原图。 */
+  thumbUrls?: string[];
   prompt: string;
   /** 卡片底部介绍文字（右键「编辑介绍文字」的自定义覆盖，优先于 prompt） */
   customLabel?: string;

@@ -290,7 +290,7 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
 
   return (
     <>
-    <div className="modal-mask" onClick={onClose}>
+    <div className="modal-mask">
       <div className="modal" style={{ width: 560, maxWidth: "94vw", maxHeight: "86vh", overflowY: "auto" }} onClick={(e) => e.stopPropagation()}>
         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10 }}>
           <h3 style={{ margin: 0 }}>多元数据插入</h3>
@@ -716,7 +716,17 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
           ))}
         </>)}
 
-        <div className="modal-actions">
+        {/* 取消/保存吸附在滚动容器底部：滚轮在任何位置都能点到（2026-10-16 用户口径）；
+            点遮罩不再关闭（复制粘贴友好），改用 ESC 关闭 */}
+        <div
+          className="modal-actions"
+          style={{
+            position: "sticky", bottom: 0, zIndex: 2,
+            background: "var(--surface, #fff)",
+            borderTop: "1px solid var(--border, rgba(128,128,128,0.25))",
+            paddingTop: 8, marginTop: 8,
+          }}
+        >
           <button className="btn" onClick={onClose}>取消</button>
           <button className="btn primary" disabled={saveDisabled} onClick={save}>保存</button>
         </div>

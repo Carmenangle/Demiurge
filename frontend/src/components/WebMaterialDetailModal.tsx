@@ -1,0 +1,171 @@
+// WebMaterialDetailModal.tsx — 上网素材详情（2026-10-16）
+// 结构向画布模式的详情看齐：**左侧完整图片 + 右侧信息**（来源/作者/评级/标签/时间/大小）。
+// 图片点击 → 共享 Lightbox 全屏（可滚轮缩放）；标签点击 → 复制。
+import { Copy, Trash2, ExternalLink, Send } from "lucide-react";
+
+import { openLightbox } from "./Lightbox";
+import type { WebMaterial } from "../api/ai";
+
+const RATING_LABEL: Record<string, string> = {
+  g: "普通 (g)", s: "敏感 (s)", q: "可疑 (q)", e: "露骨 (e)",
+};
+
+function fmtSize(n?: number): string {
+  if (!n) return "—";
+  return n >= 1048576 ? `${(n / 1048576).toFixed(2)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
+}
+
+/** 详情右栏分区：小标题 + 上分隔线 + 留白（与资产库详情同款分层口径）。 */
+function Section({ title, extra, children, first = false }: {
+  title: string;
+  extra?: React.ReactNode;
+  children: React.ReactNode;
+  first?: boolean;
+}) {
+  return (
+    <div style={{
+      marginTop: first ? 0 : 14,
+      paddingTop: first ? 0 : 10,
+      borderTop: first ? "none" : "1px solid var(--border)",
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+        <span style={{ fontSize: 11.5, color: "var(--text-muted)", letterSpacing: 0.4 }}>{title}</span>
+        {extra != null && <span style={{ marginLeft: "auto" }}>{extra}</span>}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+export function WebMaterialDetailModal({
+  item, onClose, onDelete, onNotify, onSendToChat, onSendAsRecipe,
+}: {
+  item: WebMaterial;
+  onClose: () => void;
+  onDelete?: (filename: string) => void;
+  onNotify?: (msg: string, kind?: "success" | "error") => void;
+  /** 发送至对话框：只发图（与资产库「发送至对话框」同款） */
+  onSendToChat?: (item: WebMaterial) => void;
+  /** 发送至对话：图 + 文本（与资产库「发送至对话」同款） */
+  onSendAsRecipe?: (item: WebMaterial) => void;
+}) {
+  const tags = item.tags || [];
+
+  const copy = async (text: string, what: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      onNotify?.(`已复制${what}：${text.length > 40 ? text.slice(0, 40) + "…" : text}`, "success");
+    } catch {
+      onNotify?.("复制失败（浏览器未授权剪贴板）", "error");
+    }
+  };
+
+  const row = (label: string, value: React.ReactNode) => (
+    <div style={{ display: "flex", gap: 8, fontSize: 12.5, lineHeight: 1.9 }}>
+      <span style={{ color: "var(--text-muted)", minWidth: 62 }}>{label}</span>
+      <span style={{ flex: 1, minWidth: 0, wordBreak: "break-all" }}>{value || "—"}</span>
+    </div>
+  );
+
+  return (
+    <div className="modal-mask">
+      <div
+        className="modal"
+        style={{
+          maxWidth: 1020, width: "95vw", maxHeight: "90vh",
+          display: "flex", flexDirection: "column",
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 style={{ marginTop: 0, marginBottom: 10, flexShrink: 0 }}>素材详情</h3>
+
+        {/* 左图右信息（左：完整图片；右：来源与标签） */}
+        <div style={{ flex: 1, minHeight: 0, display: "flex", gap: 14, flexWrap: "wrap" }}>
+          <div style={{
+            flex: "1 1 56%", minWidth: 260, minHeight: 200,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            background: "var(--surface-2)", borderRadius: 10, overflow: "hidden",
+          }}>
+            <img
+              src={item.url}
+              alt={item.title}
+              title="点击全屏查看（滚轮缩放）"
+              onClick={() => openLightbox(item.url)}
+              style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", cursor: "zoom-in" }}
+            />
+          </div>
+
+          <div style={{ flex: "1 1 38%", minWidth: 240, overflow: "auto", paddingRight: 4 }}>
+            {/* 分区 1：来源（谁/从哪来） */}
+            <Section title="来源" first>
+              {row("来源站", item.provider ? <b>{item.provider}</b> : "—")}
+              {row("作者", item.author)}
+              {row("评级", item.rating ? (RATING_LABEL[item.rating] || item.rating) : "—")}
+              {row("来源页", item.source_url ? (
+                <a href={item.source_url} target="_blank" rel="noreferrer"
+                  style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                  {item.source_url} <ExternalLink size={11} />
+                </a>
+              ) : "—")}
+            </Section>
+
+            {/* 分区 2：文件（本地这条记录的属性） */}
+            <Section title="文件">
+              {row("文件名", item.filename)}
+              {row("大小", fmtSize(item.size))}
+              {row("下载时间", item.downloaded_at ? item.downloaded_at.replace("T", " ").slice(0, 19) : "—")}
+              {row("搜索词", item.query)}
+            </Section>
+
+            <Section title={`标签（${tags.length}）`}
+              extra={tags.length > 0 ? (
+                <button className="btn" style={{ fontSize: 11.5, padding: "1px 6px" }}
+                  onClick={() => void copy(tags.join(", "), "全部标签")}>
+                  <Copy size={11} style={{ verticalAlign: "-1px", marginRight: 3 }} />复制全部
+                </button>
+              ) : null}
+            >
+              {tags.length === 0 ? (
+                <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                  （无标签：仅图站搜索保存的素材会带原站标签）
+                </span>
+              ) : (
+                <div>
+                  {tags.map((t) => (
+                    <span
+                      key={t}
+                      className="market-tag t-general"
+                      title="点击复制此标签"
+                      onClick={() => void copy(t, "标签")}
+                    >{t}</span>
+                  ))}
+                </div>
+              )}
+            </Section>
+          </div>
+        </div>
+
+        <div className="modal-actions" style={{ flexShrink: 0 }}>
+          {onDelete && (
+            <button className="btn danger" style={{ marginRight: "auto" }} onClick={() => onDelete(item.filename)}>
+              <Trash2 size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />删除素材
+            </button>
+          )}
+          {onSendToChat && (
+            <button className="btn" title="把这张图发到目标作品的对话框（只发图）"
+              onClick={() => { onSendToChat(item); onClose(); }}>
+              <Send size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />发送至对话框
+            </button>
+          )}
+          {onSendAsRecipe && (
+            <button className="btn" title="把图片连同来源/标签文本一起发到目标作品对话"
+              onClick={() => { onSendAsRecipe(item); onClose(); }}>
+              <Send size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />发送至对话
+            </button>
+          )}
+          <button className="btn primary" onClick={onClose}>关闭</button>
+        </div>
+      </div>
+    </div>
+  );
+}

@@ -186,7 +186,7 @@ export function NodeIndexView() {
       )}
 
       {editing && (
-        <div className="modal-mask" onClick={() => !saving && setEditing(null)}>
+        <div className="modal-mask">
           <div className="modal" style={{ maxWidth: 720, width: "90%" }} onClick={(e) => e.stopPropagation()}>
             <h3>编辑用途描述 — {editing.title}</h3>
             <p style={{ color: "var(--text-muted)", fontSize: 12, marginTop: 0 }}>

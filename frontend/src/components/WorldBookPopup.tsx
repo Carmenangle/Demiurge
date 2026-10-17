@@ -85,7 +85,7 @@ export function WorldBookPopup({
   };
 
   return (
-    <div className="modal-mask" onClick={onClose}>
+    <div className="modal-mask">
       <div className="modal" style={{ width: "90vw", maxWidth: 1200, maxHeight: "85vh", display: "flex", flexDirection: "column" }} onClick={(e) => e.stopPropagation()}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
           <h3 style={{ margin: 0 }}>{title || "世界书条目"}</h3>

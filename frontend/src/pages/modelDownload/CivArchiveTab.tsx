@@ -133,7 +133,7 @@ export function CivArchiveTab({ settings, modelsDir }: { settings: Settings; mod
       )}
 
       {srcCard && (
-        <div className="modal-mask" onClick={() => setSrcCard(null)}>
+        <div className="modal-mask">
           <div className="modal" style={{ width: 560, maxHeight: "80vh", overflow: "auto" }} onClick={(e) => e.stopPropagation()}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <h3 style={{ margin: 0 }}>下载源 · {srcCard.name}</h3>

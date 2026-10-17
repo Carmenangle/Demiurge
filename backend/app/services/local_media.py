@@ -99,7 +99,16 @@ def open_local_media(path: str, range_header: str | None = None) -> LocalMedia:
 
     media_path = Path(path)
     if not media_path.is_file():
-        raise LocalMediaError(404, "本地图片不存在")
+        # 兼容回退（2026-10-17）：媒体产出已按类型迁到 <repo>/pictures|videos|audios/，
+        # 但老 RAG 索引里记的仍是 <repo>/<name> ⇒ 原路径找不到就在同级类型夹里找同名文件。
+        # 这样迁移旧图/旧视频不会导致画廊裂图（索引 B 方案同步更新后也不会再走到这里）。
+        for _sub in ("pictures", "videos", "audios"):
+            alt = media_path.parent / _sub / media_path.name
+            if alt.is_file():
+                media_path = alt
+                break
+        else:
+            raise LocalMediaError(404, "本地图片不存在")
 
     file_size = media_path.stat().st_size
     if not range_header:

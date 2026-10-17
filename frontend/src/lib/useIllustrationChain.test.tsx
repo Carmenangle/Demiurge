@@ -402,6 +402,97 @@ describe("useIllustrationChain 行为网", () => {
   });
 });
 
+// ───────────── 试跑（只生成提示词、不提交 ComfyUI）2026-09-28 ─────────────
+// 用户需求：跑剧情时先只生成提示词、不参与 ComfyUI 出图（批量生图 ≈4.7 分钟/张，审查不该等），
+// 且开关要**同时涵盖生图与生成视频**。语义＝编译链一字不改，只把「提交＋轮询」换成「上报 trace」。
+describe("试跑开关（promptOnlyGeneration）", () => {
+  /** 造一个带 pending 插画槽的楼层，用来断言试跑终态（槽位必须可见、可重新生成、绝不悬挂）。 */
+  const seededMessage = () => ({
+    id: "m1", role: "assistant", text: "正文",
+    parts: [{ type: "media-slot", slotId: "s1", status: "pending", kind: "image" }],
+  }) as never;
+
+  it("生图：不查 ComfyUI、不提交、不轮询；成稿以 promptId 空上报 trace；槽位落试跑终态", async () => {
+    const md0 = makeDeps({ settings: { promptOnlyGeneration: true } });
+    md0.state.messages = [seededMessage()];
+    await submitChain(md0.deps, { ...baseInput, source: "automatic" });
+
+    // ① 全程不碰 ComfyUI（状态检查也不查：ComfyUI 没开也必须能试跑）
+    expect(comfyStatus).not.toHaveBeenCalled();
+    expect(submitWorkflow).not.toHaveBeenCalled();
+    expect(md0.pollResult).not.toHaveBeenCalled();
+    // ② 成稿照常上报 —— 与真出图**同一形状**（交接文档 §6 的六项检查表在试跑下原样可用）
+    expect(reportIllustrationSubmission).toHaveBeenCalledTimes(1);
+    expect(reportIllustrationSubmission).toHaveBeenCalledWith(expect.objectContaining({
+      messageId: "m1", slotId: "s1", promptId: "", prompt: "原始P", source: "automatic",
+    }));
+    // ③ 槽位不悬挂：终态可见、带原因、带重试快照（可重新生成）
+    const slot = (md0.state.messages[0] as unknown as { parts: Record<string, unknown>[] }).parts[0];
+    expect(slot.status).toBe("failed");
+    expect(String(slot.error)).toContain("试跑");
+    expect(slot.retryArgs).toEqual(expect.objectContaining({ prompt: "原始P", slotId: "s1" }));
+  });
+
+  it("涵盖生成视频：smartVideo+motion≥2 仍不提交视频模板，但成稿照常上报", async () => {
+    const preset = {
+      templateId: "tpl1", videoTemplateId: "vid1", smartVideo: true,
+      negativePrompt: "", appearanceSource: "character_card", loraMode: "single",
+    };
+    const md0 = makeDeps({ preset, settings: { promptOnlyGeneration: true } });
+    await submitChain(md0.deps, { ...baseInput, source: "automatic", motion: 3 });
+
+    expect(submitWorkflow).not.toHaveBeenCalled();
+    expect(md0.pollResult).not.toHaveBeenCalled();
+    // 模板选择仍按视频分支算（templateId=vid1、视频口径 loraMode=none）⇒ 试跑与真跑同一条判定
+    expect(reportIllustrationSubmission).toHaveBeenCalledWith(expect.objectContaining({
+      templateId: "vid1", promptId: "", loraMode: "none",
+    }));
+  });
+
+  it("涵盖首尾帧生图：两帧提示词各上报一次、一次都不提交", async () => {
+    vi.mocked(genFramePrompts).mockResolvedValue({
+      frames: { first: { prompt: "编译首帧P" }, last: { prompt: "编译尾帧P" } },
+    } as never);
+    const frameTpl = {
+      id: "tpl1", name: "图片模板", node_order: [],
+      exposed: [{ node_id: "6", field: "text", semantic: "prompt" }],
+      primary_output_node_id: "9",
+    } as never;
+    const preset = {
+      templateId: "tpl1", firstlast: true, negativePrompt: "",
+      appearanceSource: "character_card", loraMode: "single",
+    };
+    const md0 = makeDeps({ preset, templates: [frameTpl], settings: { promptOnlyGeneration: true } });
+    md0.state.messages = [seededMessage()];   // 独立图片模式会跳过主提交块 ⇒ 主槽必须仍不悬挂
+    await submitChain(md0.deps, {
+      ...baseInput, source: "automatic",
+      sceneSpec: { narrative: "剧情N", profile: "krea2" },
+      firstFrameDesc: "首帧画面", lastFrameDesc: "尾帧画面",
+    });
+
+    expect(submitWorkflow).not.toHaveBeenCalled();
+    expect(md0.pollResult).not.toHaveBeenCalled();
+    const reported = vi.mocked(reportIllustrationSubmission).mock.calls.map(
+      (c) => c[0] as { prompt: string; slotId: string; promptId: string },
+    );
+    expect(reported.map((r) => r.prompt)).toEqual(["编译首帧P", "编译尾帧P"]);
+    expect(reported.map((r) => r.slotId)).toEqual(["s1:first", "s1:last"]);
+    expect(reported.every((r) => r.promptId === "")).toBe(true);
+    // 主槽落试跑终态（该模式跳过主提交块，若不标记就会永久 pending）
+    const mainSlot = (md0.state.messages[0] as unknown as { parts: Record<string, unknown>[] }).parts[0];
+    expect(mainSlot.status).toBe("failed");
+    expect(String(mainSlot.error)).toContain("试跑");
+  });
+
+  it("开关缺省（false）⇒ 试跑闸完全惰性：照常查 ComfyUI 并提交（零回归）", async () => {
+    const md0 = makeDeps({ settings: { promptOnlyGeneration: false } });
+    await submitChain(md0.deps, { ...baseInput, source: "automatic" });
+    expect(comfyStatus).toHaveBeenCalledTimes(1);
+    expect(submitWorkflow).toHaveBeenCalledTimes(1);
+    expect(md0.pollResult).toHaveBeenCalledTimes(1);
+  });
+});
+
 // ───────────── 逐字搬移锁 + 源码形态锁 ─────────────
 describe("逐字搬移锁（T2.2-A 插画链）", () => {
   const MOVED: [string, number][] = [
@@ -440,6 +531,11 @@ describe("逐字搬移锁（T2.2-A 插画链）", () => {
 });
 
 describe("源码形态锁（T2.2-A 插画链）", () => {
+  it("试跑闸只认显式 `=== true`（旧数据/字符串 \"false\" 不得开启试跑）", () => {
+    const seam = stripComments(read(SEAM));
+    expect(seam).toContain("const promptOnly = settings.promptOnlyGeneration === true;");
+  });
+
   it("视图恰一次使用 + 调用块逐字（14 deps 同名接线）", () => {
     const view = read(VIEW);
     const block = [

@@ -6259,14 +6259,24 @@ def test_第62刀_第三人称与无人称键仍是空表():
 
 
 def test_第62刀_取舍判据与57刀筛分同口径():
-    """一致性锁：上半身判据必须**复用同一个 4 键 blob ＋ `_VIEW_FACE_CONTACT_RE`**
-    （不得另写一份），否则会出现「提示词侧算上半身、事实侧算下半身」的自相矛盾。"""
+    """一致性锁：上半身判据必须**复用同一份真源**（不得另写一份），否则会出现
+    「提示词侧算上半身、事实侧算下半身」的自相矛盾。
+
+    ⚠ 第 71 刀（2026-09-29）把真源从「裸调 `_VIEW_FACE_CONTACT_RE.search`」收敛成
+    `_view_face_frame(blob)`（同一个 4 键 blob ＋ 面优先 ＋ **下身专有词例外**）。
+    本锁随之内聚到新真源：断言**三处消费者**都走它、且**都不再裸调正则**
+    （裸调＝口径分叉的开始，正是第 71 刀要根治的那类缺陷）。"""
     import inspect
 
     src = inspect.getsource(profiles._first_person_upper_frame)
-    assert "_VIEW_FACE_CONTACT_RE" in src
+    assert "_view_face_frame(blob)" in src
     for key in ("narrative", "appearance", "wardrobe", "draft_prompt"):
         assert key in src
+    for fn in (profiles._first_person_framing, profiles.first_person_frame_filter,
+               profiles._first_person_upper_frame):
+        fn_src = inspect.getsource(fn)
+        assert "_view_face_frame(blob)" in fn_src, fn
+        assert "_VIEW_FACE_CONTACT_RE.search(blob)" not in fn_src, fn
 
 
 # ── 第 63 刀：POV 声明「按三态分级」＋ 幂等识别面的**保守边界**（2026-09-28）──────
@@ -6561,3 +6571,636 @@ def test_第66刀_未知或空profile不制造噪音():
     scene = _fp_scene()
     for profile in ("", "unknown_profile"):
         assert profiles.viewpoint_coverage_warning(profile, scene) == ""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 第 67 刀（2026-09-29 用户真机审查）：JSON 残留机械闸
+# 真机 turn `d3d32fda` · 槽 `illo-req-…-54-1`：模型/repair 返回被截断的半 JSON，
+# `_json_object` 与 `_labelled_fields_object` 双双失败 ⇒ 非 JSON 分支把残片当 tag、
+# `content": "` 当散文行，而散文判据 `^[A-Za-z][^.?!]{24,}[.?!]` 被它**意外满足**
+# ⇒ 交付 976 字半 JSON 残留，真正的第二行内容描述整段丢失。
+# 用户原话：「正常来说这里上半段应该还是 tag」「槽 1 的下一段的内容描述文段还丢失了」。
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def test_第67刀_JSON残留体检_花括号命中():
+    assert profiles._json_residue_hits('a tag run, {, "content": "x')
+    assert profiles._json_residue_hits("1girl, solo, }")
+
+
+def test_第67刀_JSON残留体检_规格字段裸标签命中():
+    raw = 'medium shot, "supporting_elements": [, "her hand, ], " in the room'
+    assert profiles._json_residue_hits(raw)
+
+
+def test_第67刀_JSON残留体检_引号紧邻结构标点命中():
+    assert profiles._json_residue_hits('masterpiece, "1girl", solo')
+    assert profiles._json_residue_hits('masterpiece, zoom"[, solo')
+
+
+def test_第67刀_JSON残留体检_正常英文成稿零命中():
+    clean = (
+        "masterpiece, best quality, anime coloring, 1girl, solo, first person view,\n"
+        "Her head tips back into the bedding as her spine bows in a taut arc, the lace "
+        "blindfold pressing a shallow red line across her nose bridge."
+    )
+    assert profiles._json_residue_hits(clean) == []
+    # 正常引号（不紧邻结构标点）不得误伤
+    assert profiles._json_residue_hits('a "crimson eye" glows in the dark') == []
+
+
+def test_第67刀_半JSON残片成稿判死不再交付():
+    """真机原样残片：非 JSON 分支曾把它当 tag＋散文行交付；现在必须判死（返回空串）。"""
+    residue = (
+        "{\n"
+        '  "visual_hook": "full crimson lips parted in sleep,\n'
+        '  "supporting_elements": [\n'
+        '    "Her flattened hand on the mattress,\n'
+        "  ],\n"
+        '  "content": "1girl, solo, fox ears, silver hair, upper body, anime style.\n'
+    )
+    assert profiles._normalize("anima_tags", residue, _scene()) == ""
+
+
+def test_第67刀_干净的anima两行稿不受影响():
+    """零回归锁：合格稿逐字不变（不得被新闸误判为残留）。"""
+    clean = (
+        "1girl, solo, fox ears, upper body, first person view, anime style,\n"
+        "Her head tips back into the bedding as her spine bows in a taut arc and the "
+        "lace blindfold presses a shallow red line across her nose bridge."
+    )
+    out = profiles._normalize("anima_tags", clean, _scene())
+    assert out.strip()
+    assert profiles._json_residue_hits(out) == []
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 第 68 刀（2026-09-29 用户真机审查）：散文行元语言机械剔
+# 用户原话：「内容描述不是说要明说**镜头即叙述者的双眼**、所以叙述者从不出现在画面里，
+# **而是你的内容描述能透露出这一点**，因为**人家模型哪里知道叙述者是谁**」。
+# 真机 7 份成稿里 4 份散文行开头就是元语言（根因＝第 55／56 刀中文指令
+# 「镜头**已经固定**在**叙事者的眼睛位置上**」被模型照抄成英文）。
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _fp_prose_scene():
+    return {"viewpoint": "first_person", "narrator": "凌渊", "actors": ["妲千沁"]}
+
+
+def test_第68刀_剔掉镜头即叙述者双眼整块前缀_画面事实留全():
+    prose = (
+        "The camera is the narrator's eyes, so the narrator never appears in frame; "
+        "only the woman is visible, her lower face and silver ponytail occupying the top "
+        "of the composition while her loosened robe draws the eye downward."
+    )
+    out = profiles._first_person_prose_meta_guard(prose, _fp_prose_scene())
+    assert "camera" not in out.lower()
+    assert "narrator" not in out.lower()
+    # 画面事实逐字保留
+    assert "her lower face and silver ponytail occupying the top of the composition" in out
+    assert "her loosened robe draws the eye downward." in out
+    assert out[0].isupper()
+
+
+def test_第68刀_剔掉镜头固定在叙述者眼高的从句():
+    prose = (
+        "The camera holds at the narrator's eye level, close enough that only the woman's "
+        "upper body fills the frame; her silver ponytail spills across the pillow."
+    )
+    out = profiles._first_person_prose_meta_guard(prose, _fp_prose_scene())
+    assert "camera" not in out.lower()
+    assert "narrator" not in out.lower()
+    assert "only the woman's upper body fills the frame" in out
+    assert "her silver ponytail spills across the pillow." in out
+
+
+def test_第68刀_剔掉指向镜头方位短语():
+    prose = "Her back is turned toward the camera, silver ponytail edged in warm light."
+    out = profiles._first_person_prose_meta_guard(prose, _fp_prose_scene())
+    assert "camera" not in out.lower()
+    assert "Her back is turned" in out
+    assert "silver ponytail edged in warm light." in out
+
+
+def test_第68刀_非第一人称逐字节返回原串():
+    prose = "The camera is the narrator's eyes, so the narrator never appears in frame."
+    assert profiles._first_person_prose_meta_guard(prose, {"viewpoint": "third_person"}) == prose
+    assert profiles._first_person_prose_meta_guard(prose, {}) == prose
+
+
+def test_第68刀_零命中逐字节返回_幂等():
+    prose = "Her head tips back into the bedding as her spine bows in a taut arc."
+    assert profiles._first_person_prose_meta_guard(prose, _fp_prose_scene()) == prose
+
+
+def test_第68刀_端到端_第一人称成稿散文行不含元语言():
+    raw = json.dumps({
+        "visual_hook": "a strong diagonal lead the eye to the decisive glance",
+        "primary_focus": "the reflected crimson eye",
+        "supporting_elements": ["silver crest", "pale silhouette"],
+        "content": (
+            "1girl, solo, fox ears, upper body, first person view, anime style,\n"
+            "The camera is the narrator's eyes, so the narrator never appears in frame; "
+            "only the woman is visible, her loosened robe draws the eye downward."
+        ),
+    })
+    scene = dict(_scene())
+    scene.update({"viewpoint": "first_person", "narrator": "凌渊"})
+    out = profiles._normalize("anima_tags", raw, scene)
+    assert out.strip()
+    assert "camera" not in out.lower()
+    assert "narrator" not in out.lower()
+    assert "her loosened robe draws the eye downward." in out
+
+
+def test_第68刀_裸前缀镜头即叙述者双眼也剔掉():
+    """真机 slot `-54-4`：「The camera is the narrator's eyes, looking down at … from a
+    first-person perspective.」——前半句没有 `so the narrator never appears…`，① 匹配不到。"""
+    prose = (
+        "The camera is the narrator's eyes, looking down at the woman's sleeping face and "
+        "upper body from a first-person perspective. Her lace eye mask sits above her nose."
+    )
+    out = profiles._first_person_prose_meta_guard(prose, _fp_prose_scene())
+    assert "camera" not in out.lower()
+    assert "narrator" not in out.lower()
+    assert out.startswith("Looking down at the woman's sleeping face and upper body.")
+    assert "Her lace eye mask sits above her nose." in out
+
+
+def test_第68刀_残留的叙述者所有格去主语化():
+    """真机 slot `-54-3`：`while the narrator's lower body enters only as a cropped segment
+    from the bottom edge`——局部入画语义正确，但 `narrator` 一词必须去掉。"""
+    prose = (
+        "Its fabric creased where her body has shifted, while the narrator's lower body "
+        "enters only as a cropped segment from the bottom edge."
+    )
+    out = profiles._first_person_prose_meta_guard(prose, _fp_prose_scene())
+    assert "narrator" not in out.lower()
+    assert "while a lower body enters only as a cropped segment from the bottom edge." in out
+    assert "Its fabric creased where her body has shifted," in out
+
+
+def test_第68刀_真机七份成稿散文行全清():
+    """回归网：把真机 7 份成稿的散文行原样过闸，全部不得再有元语言残留。"""
+    reals = [
+        "Her head tips back into the bedding as her spine bows in a taut arc.",
+        "The camera is the narrator's eyes, so the narrator never appears in frame; "
+        "only the woman is visible, her lower face and silver ponytail occupying the top.",
+        "The camera holds at the narrator's eye level, close enough that only the woman's "
+        "upper body fills the frame.",
+        "The camera is the narrator's eyes, looking down at the woman's sleeping face and "
+        "upper body from a first-person perspective.",
+        "The camera holds the narrator's position at the bedside as she sits with her back turned.",
+        "Her back is turned toward the camera and she sits without moving.",
+    ]
+    for prose in reals:
+        out = profiles._first_person_prose_meta_guard(prose, _fp_prose_scene())
+        assert "camera" not in out.lower(), prose
+        assert "narrator" not in out.lower(), prose
+        assert out.strip(), prose
+
+
+def _fp_nsfw_system():
+    return profiles._system(
+        "natural_language", {"rating": "nsfw", "viewpoint": "first_person", "narrator": "甲"},
+    )
+
+
+def _guide_block() -> str:
+    system = _fp_nsfw_system()
+    i = system.index("【视角·第一人称·接触形态的具体写法】")
+    j = system.find("【", i + 1)
+    return system[i: j if j != -1 else len(system)]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 第 69 刀（2026-09-29 用户口径）：接触形态的**正向引导**
+# 用户原话：「你的描述应该是一个腿被手掰开、肉棒贴在女角色的小穴口隔着内裤布料磨蹭、
+#   女角色内裤湿透透明。这种描述就没有说主人公完整入场，只是**描述有器官在对应的位置**」。
+# 动机：第 68 刀只做了「剔掉元语言」这半（减法），剔完出现**描述真空**
+#   （真机 slot `-54-2` 剔完只剩「Only the woman is visible, her lower face …」）。
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def test_第69刀_两类接触形态例子逐字落地():
+    clause = _guide_block()
+
+    assert "只写器官在对应位置" in clause
+    # ① 撬开／推动肢体
+    assert "a hand prying her leg open" in clause
+    assert "her leg lifted and pressed aside by a hand" in clause
+    # ② 隔着衣物的接触
+    assert "the shaft pressed against her through the damp fabric" in clause
+    assert "the wet cloth clinging translucent to the skin" in clause
+    # 只写衣物可见状态、不得补布下形态
+    assert "只写衣物本身可见的状态" in clause
+    assert "衣物之下的器官形态" in clause
+
+
+def test_第69刀_例子一律条件式不得变成无条件许可():
+    """红线：新例子必须承接上一条「没写就一律不写」，不得变成无条件放行。"""
+    clause = _guide_block()
+
+    # 两类例子必须在**同一句**里被「条件 + 禁止」框住，不得变成无条件放行
+    assert "两种形态（**仅在输入画面事实写明时才写**，没写一律不写）" in clause
+
+
+def test_第69刀_例子不得顶掉取景上限():
+    """红线：新增例子必须**继承**既有取景上限与「只写接触点那一小段」。"""
+    clause = _guide_block()
+
+    assert "本帧取景上限与「只写接触点那一小段」的约束**仍然全部适用**" in clause
+
+
+def test_第69刀_例子不引任何机位词():
+    """红线：例子只引身体部位与接触词——引机位词会诱发第 60 刀的禁用机位。"""
+    low = _guide_block().lower()
+
+    for word in ("wide shot", "long shot", "full body", "from above", "from behind",
+                 "rear view", "looking down", "bird", "camera"):
+        assert word not in low, word
+
+
+def test_第69刀_第三人称与无视角不出现接触形态条款():
+    """零回归锁：第三人称走独立分支；`viewpoint` 缺失 ⇒ 整块视角条款缺席。"""
+    third = profiles._system(
+        "natural_language", {"rating": "nsfw", "viewpoint": "third_person", "narrator": "甲"},
+    )
+    assert "接触形态的具体写法" not in third
+    assert "接触形态" not in profiles._system("natural_language", {"rating": "sfw"})
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 第 70 刀（2026-09-29 · 与第 69 刀配套）：**隔着布料的器官接触**出处闸
+# 放开写法即须配闸：这类描述最容易被写到没有出处的帧上，而既有编造闸
+# （`_UNSOURCED_DEVICE_RULES`）**只管道具、不含身体部位与接触形态**。
+# ══════════════════════════════════════════════════════════════════════════════
+
+_FAKE_CONTACT = "the shaft pressed against her through the damp fabric"
+
+_SOURCED_CONTACT_SCENE = (
+    "他胯下那件勃起的东西贴上去，先在穴口外沿碾了两遭，柱身压住那道缝，"
+    "上下拖过去两次，每拖一次，布面上就洇出一层新的湿。"
+)
+
+
+def test_第70刀_有出处则放行():
+    """真机 slot `-54-2` 的画面事实（隔着布料磨蹭、布面洇湿）⇒ 必须放行。"""
+    scene = dict(_scene())
+    scene["narrative"] = _SOURCED_CONTACT_SCENE
+    assert profiles._unsourced_contact_hits(_FAKE_CONTACT, scene) == []
+    assert profiles._unsourced_contact_errors(_FAKE_CONTACT, scene) == []
+
+
+def test_第70刀_无出处则判死():
+    scene = dict(_scene())
+    scene["narrative"] = "院里雪还在下，他站在窗前看雪。"
+    scene["locale"] = "书房"
+    assert profiles._unsourced_contact_hits(_FAKE_CONTACT, scene)
+    assert profiles._unsourced_contact_errors(_FAKE_CONTACT, scene)
+    assert "没有出处" in profiles._unsourced_contact_errors(_FAKE_CONTACT, scene)[0]
+
+
+def test_第70刀_空场景一律放行():
+    """与道具闸同构：`_device_source` 为空 ⇒ 无出处可言 ⇒ 不得误杀。"""
+    assert profiles._unsourced_contact_hits(_FAKE_CONTACT, {}) == []
+    assert profiles._unsourced_contact_hits(_FAKE_CONTACT, {"narrative": "  "}) == []
+
+
+def test_第70刀_阴性不误伤():
+    """只写「湿布料」「光柱」而不写器官隔着布料接触 ⇒ 不得命中。"""
+    scene = dict(_scene())
+    scene["narrative"] = "床上只有她一个人。"
+    for prose in (
+        "the shaft of light falls across her thigh and the cloth of her robe",
+        "she is wet through, the fabric of her robe clings to her back",
+        "a damp patch darkens the cloth beneath her, translucent with sweat",
+    ):
+        assert profiles._unsourced_contact_hits(prose, scene) == [], prose
+
+
+def test_第70刀_两个词序都覆盖():
+    """器官在前／布料在前两种语序都要命中。"""
+    scene = dict(_scene())
+    scene["narrative"] = "床上只有她一个人。"
+    for prose in (
+        "the bulge of his groin pressing against her through the thin underwear",
+        "a hard outline straining beneath the wet cloth of her robe",
+        "through the soaked loincloth the shaft grinds against her",
+    ):
+        assert profiles._unsourced_contact_hits(prose, scene), prose
+
+
+def test_第70刀_接线到_errors与补丁门槛():
+    """两处接线必须都在（缺一处就会「判错看得见、交付拦不住」）。"""
+    import inspect
+
+    assert "_unsourced_contact_errors(prompt, scene)" in inspect.getsource(profiles._errors)
+    patched_src = inspect.getsource(profiles._patch_failed_prompt)
+    assert "_unsourced_contact_hits(patched, scene)" in patched_src
+
+
+def test_第70刀_端到端_errors出现编造接触():
+    scene = dict(_scene())
+    scene.update({"viewpoint": "first_person", "narrator": "甲"})
+    scene["narrative"] = "院里雪还在下，她坐在窗边。"
+    prompt = ("1girl, solo, first person view,\n"
+              "the shaft pressed against her through the damp fabric while she sits still.")
+    errs = profiles._errors("anima_tags", prompt, scene)
+    assert any("隔着布料的器官接触" in e for e in errs), errs
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 第 71 刀（2026-09-29 真机 + 探针双实锤）：取景上限判错
+# 病根：`_VIEW_FACE_CONTACT_RE` 含**裸子串** `口`／`唇`／`面` ⇒
+#   「**穴口**」的「口」、「**阴唇**」的「唇」、「**布面／褥面**」的「面」被当成面部接触
+#   ⇒ `face=True` ⇒ 取景上限锁成「上半身」，而那一帧的画面事实全是下半身动作
+#   ⇒ 模型为了把器官接触塞进上半身，**把接触点挪到了脸上**（探针复现：
+#     事实「肉棒贴着阴唇碾两遭」→ 成稿 `penis on face` / `glans pressing her cheek`）。
+# 修法：② 裸字改复合词；③ 下身专有词压过面命中。
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _vp_scene(narrative: str):
+    return {
+        "narrative": narrative,
+        "appearance": "爱丽丝：银发",
+        "wardrobe": "月白中衣、白袜",
+        "draft_prompt": "close-up",
+        "viewpoint": "first_person",
+        "narrator": "甲",
+        "actors": ["爱丽丝"],
+        "rating": "nsfw",
+    }
+
+
+def _vp_limit(narrative: str) -> str:
+    text = profiles._first_person_framing(_vp_scene(narrative))
+    if "上半身" in text:
+        return "上半身"
+    return "下半身" if "下半身" in text else "不给上限"
+
+
+def test_第71刀_穴口不再被当成面部接触():
+    """真机 `[38]`：「穴口那圈软肉」的「口」曾被当成口部接触 ⇒ 锁成上半身。"""
+    assert _vp_limit("指腹压在穴口那圈软肉上。") == "下半身"
+    assert _vp_limit("他把她一条大腿往前拨开、膝弯往外搁平。") == "下半身"
+
+
+def test_第71刀_阴唇与缝口不再被当成面部接触():
+    """真机 `[39]`：「阴唇」的「唇」、「缝口」的「口」双双误命中 ⇒ 锁成上半身。"""
+    assert _vp_limit("他把肉棒先贴着阴唇上下碾了两遭。") == "下半身"
+    assert _vp_limit("龟头在缝口上顶住，再往里推。") == "下半身"
+
+
+def test_第71刀_布面褥面不再被当成面部接触():
+    """真机高频词「布面上洇出一层新的湿」「褥面中间那块洇透了」不得算面部。"""
+    assert _vp_limit("布面上洇出一层新的湿。") != "上半身"
+    assert _vp_limit("褥面中间那块洇透了。") != "上半身"
+
+
+def test_第71刀_真上半身接触仍判上半身():
+    """零回归锁：真正的面/唇/胸/颈接触不得被 ② 改坏。"""
+    for nar in ("他把肉棒压在她嘴唇上。", "龟头贴着她的脸颊蹭了一下。",
+                "他低头咬住她锁骨。", "他把脸埋在她胸前。"):
+        assert _vp_limit(nar) == "上半身", nar
+
+
+def test_第71刀_下身专有词压过面命中():
+    """③：`阴唇`／`穴口` 命中时**压过**面命中；但「大腿＋脸同现」这类**不许**被压。"""
+    assert _vp_limit("他把肉棒贴着阴唇上下碾，她嘴唇微启。") == "下半身"
+    assert _vp_limit("龟头顶在穴口，她脸埋在枕里。") == "下半身"
+    # 反例：大腿与面部接触同真 ⇒ 接触点在脸 ⇒ 仍按上半身（③刻意不收 `大腿`/`臀`）
+    assert _vp_limit("她的大腿搭在他肩上，龟头压在她脸上。") == "上半身"
+
+
+def test_第71刀_strict表是lower表的子集():
+    """不变式锁：strict ⊆ lower —— 否则压过面命中后本表认不出它，上限掉成「不给上限」。"""
+    words = [
+        w for w in profiles._VIEW_LOWER_STRICT_RE.pattern.replace("(?:", "").replace(")", "").split("|")
+        if w
+    ]
+    assert words
+    for word in words:
+        assert profiles._VIEW_LOWER_CONTACT_RE.search(word), word
+
+
+def test_第71刀_三处消费者共用同一真源():
+    """口径分叉就会出现「提示词声明上半身、筛分却按下半身」（第 57 刀 ③ 的老坑）。"""
+    import inspect
+
+    for fn in (profiles._first_person_framing, profiles.first_person_frame_filter,
+               profiles._first_person_upper_frame):
+        fn_src = inspect.getsource(fn)
+        assert "_view_face_frame(blob)" in fn_src, fn
+        assert "_VIEW_FACE_CONTACT_RE.search(blob)" not in fn_src, fn
+
+
+def test_第71刀_取景上限与筛分scope恒一致():
+    """同一帧上，`_first_person_framing` 的上限与 `_first_person_upper_frame` 必须同真同假。"""
+    for nar in ("他把肉棒先贴着阴唇上下碾了两遭。", "指腹压在穴口那圈软肉上。",
+                "他把肉棒压在她嘴唇上。", "布面上洇出一层新的湿。"):
+        scene = _vp_scene(nar)
+        upper_limit = "上半身" in profiles._first_person_framing(scene)
+        assert upper_limit == profiles._first_person_upper_frame(scene), nar
+
+
+def test_第71刀_非第一人称零回归():
+    """零回归锁：`viewpoint` 非第一人称 ⇒ 三处一律不介入。"""
+    scene = _vp_scene("他把肉棒先贴着阴唇上下碾了两遭。")
+    scene["viewpoint"] = "third_person"
+    assert profiles._first_person_framing(scene) == ""
+    assert profiles._first_person_upper_frame(scene) is False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 第 72 刀（2026-09-29 探针抓到、零 LLM 复现）：纯逗号串整段交付两遍
+# 根因：`_normalize` 的「纯逗号短语」分支把 `tag_head` 与 `prose` 设成**同一个串**
+#   （注释里写明「同一段文字既进 tags 又进 prose」），而交付时那是**两行**
+#   ⇒ 整段逐字出现两遍（真机 [38] 第 1 跑 2340 字里约 1100 字重复；
+#      零 LLM 复现形状：同一串出现 2 次、首行以逗号收尾、次行以句号收尾）。
+# 修法：按段长机械切分（≥6 词＝成句段），**不新增任何字**；切不动则保持旧行为。
+# ══════════════════════════════════════════════════════════════════════════════
+
+_PHRASE_CONTENT = (
+    "masterpiece, best quality, anime coloring, 1girl, solo, first person view, upper body, "
+    "silver hair, high ponytail, fox ears, lace eye blindfold, moon-white inner robe, "
+    "a single hand entering from the lower frame edge with fingertips pressing the damp patch"
+)
+_PHRASE_LONG = "a single hand entering from the lower frame edge with fingertips pressing the damp patch"
+
+
+def _phrase_raw(content: str) -> str:
+    return json.dumps({
+        "visual_hook": "a narrow moonlight blade",
+        "primary_focus": "the reflected eye",
+        "supporting_elements": ["silver crest"],
+        "content": content,
+    })
+
+
+def _phrase_scene():
+    return {"viewpoint": "third_person", "rating": "sfw", "actors": ["爱丽丝"], "narrative": "她侧躺着。"}
+
+
+def test_第72刀_纯逗号串不再整段交付两遍():
+    """真机形状：同一串出现两次、首行逗号收尾、次行句号收尾 ⇒ 必须消除。"""
+    out = profiles._normalize("anima_tags", _phrase_raw(_PHRASE_CONTENT), _phrase_scene())
+
+    assert len(out.splitlines()) == 2
+    assert out.count(_PHRASE_LONG) == 1, out
+    assert out.lower().count("masterpiece") == 1, out
+    # 首行是 tag 串、次行是散文行（成句段只出现在次行）
+    head, _, prose = out.partition("\n")
+    assert _PHRASE_LONG not in head
+    assert _PHRASE_LONG in prose
+
+
+def test_第72刀_切分后仍满足两行合同():
+    """切分不得把合同切坏：仍须「正好两行 ＋ 首行质量词与 ≥6 tags ＋ 次行英文画面描述」。"""
+    out = profiles._normalize("anima_tags", _phrase_raw(_PHRASE_CONTENT), _phrase_scene())
+
+    assert profiles._errors("anima_tags", out, _phrase_scene()) == []
+
+
+def test_第72刀_tag行不留成句长段():
+    """首行不得再含任何 ≥6 词的成句段（那正是重复的来源）。"""
+    out = profiles._normalize("anima_tags", _phrase_raw(_PHRASE_CONTENT), _phrase_scene())
+    head = out.splitlines()[0]
+
+    assert not any(len(seg.split()) >= 6 for seg in head.split(",")), head
+
+
+def test_第72刀_切不动时保持旧行为不劣化():
+    """tag 段不足 6 条 / 没有成句段 ⇒ `_split_comma_phrase` 返回 `(原串, "")`，不制造新形态。"""
+    content = "1girl, solo, silver hair, a single hand pressing the damp patch here"
+    tags, prose = profiles._split_comma_phrase(content)
+    assert (tags, prose) == (content, "")
+    # 裸 tag 串（最长 3 词）本就不算描述 ⇒ 仍走旧判死路径
+    bare = "1girl, long black hair, amber eyes, white shirt, black pencil skirt, legs together"
+    assert profiles._split_comma_phrase(bare) == (bare, "")
+    assert profiles._looks_like_scene_description(bare) is False
+
+
+def test_第72刀_切分门槛与描述判据同源():
+    """两处必须共用同一个 6 词门槛：判定「是描述」却切不出描述段＝空转。"""
+    five = "a hand pressing down hard"               # 5 词
+    six = "a single hand pressing down on the patch"  # 7 词
+    assert profiles._looks_like_scene_description(f"1girl, solo, {five}") is False
+    assert profiles._looks_like_scene_description(f"1girl, solo, {six}") is True
+    tags, prose = profiles._split_comma_phrase("1girl, solo, a, b, c, d, e, f, " + six)
+    assert prose == six
+    assert "1girl, solo" in tags
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 第 73 刀（2026-09-29 探针 [38] ＋ 真机 09-29 批次）：第一人称首行「指向镜头的
+# 方位短语」去机位化
+#
+# 根因：上游「禁用机位」条款**自相矛盾**——`_viewpoint_clause` 一边禁 `from behind`／
+#   `rear view`，一边**亲手给出** `her back arching toward the camera` 作范例；
+#   而同一段提示词里的 `_FP_PROSE_NO_META_CLAUSE`（第 68 刀）又明禁散文行出现
+#   `camera`／`viewer`。⇒ 真机 slot `-54-5` 首行 `back turned toward the camera,
+#   back facing viewer`、探针 [38] 首行 `back facing the camera`。
+#   第 60 刀是**整条字面禁表**（`from behind`／`rear view`／`back view`），
+#   扫不到「身体部位 ＋ 机位方位短语」这种组合。
+# 修法：① 上游范例去机位化（不再给 `toward the camera` 这类例子）；
+#      ② 首行 tags 机械**只削方位短语**、逐字保留部位与姿势（第 60 刀同族兜底）。
+# ══════════════════════════════════════════════════════════════════════════════
+
+_FP_TAG_CAMERA_SCENE = {
+    "viewpoint": "first_person",
+    "narrator": "凌渊",
+    "rating": "sfw",
+    "actors": ["爱丽丝"],
+    "narrative": "她侧躺着。",
+}
+
+
+def test_第73刀_上游禁用机位条款不再给机位范例():
+    """源码锁：第一人称「禁用机位」条款**不得再亲手给出**机位相对范例。"""
+    import inspect
+
+    src = inspect.getsource(profiles._viewpoint_clause)
+    assert "her back arching toward the camera" not in src
+    # 条款仍要给背向部位一个**去机位**范例，不能只删不给（否则模型只能自己发明）
+    assert "facing away" in src
+
+
+def test_第73刀_首行机位方位短语被削而部位逐字保留():
+    head = ("masterpiece, best quality, solo female, close-up, "
+            "back turned toward the camera, hips lifted toward the camera")
+    out = profiles._first_person_strip_camera_direction_tags(head, _FP_TAG_CAMERA_SCENE)
+
+    assert "camera" not in out
+    assert "back turned" in out
+    assert "hips lifted" in out
+    # 未命中的片段逐字保留（不改写、不重排、不去重）
+    assert "masterpiece, best quality, solo female, close-up" in out
+
+
+def test_第73刀_防悬空动词():
+    """`looking at the camera` 削完只剩一个词 ⇒ 放弃该条（与剔空保护同族，宁缺勿猜）。"""
+    head = "close-up, looking at the camera"
+    assert profiles._first_person_strip_camera_direction_tags(head, _FP_TAG_CAMERA_SCENE) == head
+
+
+def test_第73刀_非第一人称与零命中逐字节返回原串():
+    head = "close-up, back turned toward the camera"
+    for scene in ({"viewpoint": "third_person"}, {}, {"viewpoint": ""}):
+        assert profiles._first_person_strip_camera_direction_tags(head, scene) == head
+    assert profiles._first_person_strip_camera_direction_tags(
+        "close-up, solo", _FP_TAG_CAMERA_SCENE,
+    ) == "close-up, solo"
+
+
+def test_第73刀_端到端首行去机位第二行由68刀收口():
+    raw = (
+        "masterpiece, best quality, anime coloring, solo female, back turned toward the camera\n"
+        "Her back is turned toward the camera while she sits."
+    )
+
+    out = profiles._normalize("anima_tags", raw, _FP_TAG_CAMERA_SCENE)
+
+    head, _, prose = out.partition(",\n")
+    assert "camera" not in head
+    assert "back turned" in head
+    assert "camera" not in prose.lower()
+
+
+def test_第73刀_krea2与niji首行同样去机位():
+    """第 64 刀的共用收口 ⇒ 三个 profile 必须同口径（散文段／参数段逐字节不动）。"""
+    krea = "close-up, back turned toward the camera\nA woman lies on her side."
+    lines = profiles._first_person_krea_guards(krea, _FP_TAG_CAMERA_SCENE).splitlines()
+    assert "camera" not in lines[0]
+    assert lines[1] == "A woman lies on her side."
+
+    sections = profiles._first_person_niji_guards(
+        ["close-up, back turned toward the camera", "--ar 4:3"], _FP_TAG_CAMERA_SCENE,
+    )
+    assert "camera" not in sections[0]
+    assert sections[1] == "--ar 4:3"
+
+
+def test_第73刀_接线锁_归一化与头收口都接上():
+    import inspect
+
+    assert "_first_person_strip_camera_direction_tags(" in inspect.getsource(profiles._normalize)
+    assert "_first_person_strip_camera_direction_tags(" in inspect.getsource(
+        profiles._first_person_head_guards
+    )
+
+
+def test_第73刀_真机产物首行原样过闸():
+    """回归网：真机 slot `-54-5` 与探针 [38] 的首行原样过闸，不得再有 `toward the camera`。"""
+    reals = [
+        "masterpiece, best quality, score_7, anime coloring, solo, adult, silver hair, "
+        "white cross-collar inner robe, thin fabric, sitting on bed, back turned toward the camera",
+        "masterpiece, best quality, first person view, waist-down shot, cropped at the bottom edge, "
+        "a hand entering from the lower frame edge, a woman lying on her side, back facing the camera",
+    ]
+    for head in reals:
+        out = profiles._first_person_strip_camera_direction_tags(head, _FP_TAG_CAMERA_SCENE)
+        assert "toward the camera" not in out, head
+        # 身体部位与姿势必须留下（只削方位短语，不剔整条）
+        assert "back" in out

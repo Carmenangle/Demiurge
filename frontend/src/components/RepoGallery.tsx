@@ -1,19 +1,59 @@
-import { useEffect, useCallback, useRef, useState } from "react";
-import { Check, ExternalLink, Images, Play, Plus, Search, Send, Sparkles, Trash2, X } from "lucide-react";
+import { useEffect, useCallback, useRef, useState, type ReactNode } from "react";
+import { Check, ExternalLink, Images, Play, Plus, Search, Send, Sparkles, Tag, Trash2, X } from "lucide-react";
 import { activeChatModel, useSettings } from "../stores/settings";
 import {
   listGenerations, deleteDoc, setTags, describeImage, tagStats, pruneGenerations,
   searchGenerations, setGenerationDescription, type Generation,
   indexVisualGenerations, recordVisualPreference, type VisualPreferenceReason,
+  generateThumbs, listTaggers, tagGeneration, listTagSnapshots, activateTagSnapshot,
+  type TaggerInfo, type TagSnapshot,
 } from "../api/ai";
 import { ConfirmModal } from "./Modal";
 import { CopyButton } from "./CopyButton";
+import { openLightbox } from "./Lightbox";
 import { Pager } from "./Pager";
 import { ToastLayer } from "./canvas/ToastLayer";
 import type { ToastItem } from "./canvas/CanvasTypes";
 
 // 合并展示时给每张图附带来源仓库 id（资产库按仓库名搜索用）
 export type GenWithRepo = Generation & { repoId?: string };
+
+/** 生成时间（入库毫秒时间戳）→ 可读文本；缺失返回空串（调用处据此不渲染该行）。 */
+function fmtCreatedAt(ms?: number): string {
+  if (!ms) return "";
+  const d = new Date(ms);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/** 详情面板分区：小标题 + 上分隔线 + 留白（2026-10-16 加分层感；此前各段平铺成一坨）。 */
+function DetailSection({ title, extra, children, first = false }: {
+  title: string; extra?: ReactNode; children: ReactNode; first?: boolean;
+}) {
+  return (
+    <div style={{
+      marginTop: first ? 0 : 14,
+      paddingTop: first ? 0 : 10,
+      borderTop: first ? "none" : "1px solid var(--border)",
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+        <span style={{ fontSize: 11.5, color: "var(--text-muted)", letterSpacing: 0.4 }}>{title}</span>
+        {extra != null && <span style={{ marginLeft: "auto", display: "flex", alignItems: "center" }}>{extra}</span>}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+/** 两列键值行：左标签定宽灰字、右值自适应（比用全角空格凑对齐稳）。 */
+function DetailKV({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div style={{ display: "flex", gap: 10, fontSize: 12.5, lineHeight: 1.9 }}>
+      <span style={{ color: "var(--text-muted)", width: 58, flexShrink: 0 }}>{label}</span>
+      <span style={{ flex: 1, minWidth: 0, wordBreak: "break-all" }}>{children}</span>
+    </div>
+  );
+}
 
 // 从 image_url 里解析顺序编号做时间序：每仓库顺序命名 000001.png…（越大越新）；
 // 旧图 anima1_00073_.png 取尾部数字兜底；都取不到返回 0。
@@ -23,14 +63,24 @@ function seqOf(url: string): number {
   return m ? parseInt(m[1], 10) : 0;
 }
 
-// 单张图的标签编辑条：加/删标签、AI 打标、按标签搜索。
+// 单张图的标签编辑条：加/删标签、AI 打标、WD14 反推、按标签搜索。
 function GalleryTags({
-  g, tagging, onAdd, onRemove, onAiTag, onSearch, onAppendSearch, onClear,
+  g, tagging, wd14ing, onAdd, onRemove, onAiTag, onWd14, taggers, taggerModel, onTagger,
+  onActivateSnapshot, onSearch, onAppendSearch, onClear,
 }: {
-  g: Generation; tagging: boolean;
+  g: Generation; tagging: boolean; wd14ing: boolean;
   onAdd: (t: string) => void; onRemove: (t: string) => void; onAiTag: () => void;
+  onWd14: () => void;
+  taggers: TaggerInfo[]; taggerModel: string; onTagger: (id: string) => void;
+  onActivateSnapshot: (snapshotId: string) => void;
   onSearch: (t: string) => void; onAppendSearch: (t: string) => void; onClear: () => void;
 }) {
+  const snaps: TagSnapshot[] = (() => {
+    try {
+      const arr = JSON.parse(g.tag_snapshots || "[]");
+      return Array.isArray(arr) ? (arr as TagSnapshot[]) : [];
+    } catch { return []; }
+  })();
   const [adding, setAdding] = useState(false);
   const [val, setVal] = useState("");
   const [menuTag, setMenuTag] = useState<string | null>(null);  // 当前弹悬浮框的标签
@@ -81,6 +131,30 @@ function GalleryTags({
       <button className="tag-add" title="AI 打标" disabled={tagging} onClick={onAiTag}>
         {tagging ? "…" : <Sparkles size={11} />}
       </button>
+      {snaps.length > 0 && (
+        <select className="tag-input"
+          title={`标签版本（每次反推存一版，共 ${snaps.length} 版）`}
+          value={g.active_tag_snapshot || snaps[snaps.length - 1].id}
+          onChange={(e) => onActivateSnapshot(e.target.value)} style={{ width: 104 }}
+          onClick={(e) => e.stopPropagation()}>
+          {snaps.map((s, i) => (
+            <option key={s.id} value={s.id}>{`v${i + 1}·${s.model || "tag"}(${s.tags.length})`}</option>
+          ))}
+        </select>
+      )}
+      {taggers.filter((t) => t.available).length > 1 && taggerModel && (
+        <select className="tag-input" title="反推打标模型" value={taggerModel}
+          onChange={(e) => onTagger(e.target.value)} style={{ width: 132 }}
+          onClick={(e) => e.stopPropagation()}>
+          {taggers.filter((t) => t.available).map((t) => (
+            <option key={t.id} value={t.id}>{t.name}</option>
+          ))}
+        </select>
+      )}
+      <button className="tag-add" title="反推打标（本地 Danbooru tagger；模型未安装时会提示下载地址）"
+        disabled={wd14ing} onClick={onWd14}>
+        {wd14ing ? "…" : <Tag size={11} />}
+      </button>
       {g.tags.length > 0 && (
         <button className="tag-add" title="清除全部标签" onClick={onClear}>
           <Trash2 size={11} />
@@ -107,10 +181,27 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
   const [items, setItems] = useState<GenWithRepo[]>([]);
   const [loading, setLoading] = useState(true);
   const [active, setActive] = useState<GenWithRepo | null>(null);
+  // 详情面板的图片实际像素尺寸（图片加载后读 naturalWidth/Height；与画布详情同款做法）
+  const [detailImgSize, setDetailImgSize] = useState<{ w: number; h: number } | null>(null);
   const [page, setPage] = useState(1);
   const [deleting, setDeleting] = useState<Generation | null>(null);
   const [tagQuery, setTagQuery] = useState("");      // 标签/提示词搜索
   const [tagging, setTagging] = useState<string | null>(null);  // 正在 AI 打标的图 id
+  const [wd14ing, setWd14ing] = useState<string | null>(null);  // P0-3：正在 WD14 反推的图 id
+  // 可插拔打标器：可用模型列表 + 当前选择（默认取后端 default 且已安装的）
+  const [taggers, setTaggers] = useState<TaggerInfo[]>([]);
+  const [taggerModel, setTaggerModel] = useState("");
+  useEffect(() => {
+    let alive = true;
+    listTaggers().then((r) => {
+      if (!alive) return;
+      setTaggers(r.items);
+      const chosen = r.items.find((t) => t.id === r.default && t.available)?.id
+        || r.items.find((t) => t.available)?.id || "";
+      setTaggerModel((cur) => cur || chosen);
+    }).catch(() => { /* 后端未就绪时静默走默认 */ });
+    return () => { alive = false; };
+  }, []);
   // Toast 队列：非阻断状态提示（打标/删除/描述/索引等）用 2s 自动渐隐弹窗替代模态框
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const toastIdRef = useRef(0);
@@ -128,11 +219,31 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
   const [semanticItems, setSemanticItems] = useState<GenWithRepo[]>([]);
   const [describing, setDescribing] = useState(false);
   const [visualIndexing, setVisualIndexing] = useState(false);
+  const [thumbnailing, setThumbnailing] = useState(false);   // P0-2：补生成缩略图中
+  // 切换详情对象时重置图片尺寸（读新图的 naturalWidth/Height）
+  useEffect(() => { setDetailImgSize(null); }, [active]);
+
+  // 详情参数键名归一：后端默认路径给 snake、keyset 分页路径给 camel（两套都要认，否则静默空）
+  const dTemplate = active ? (active.templateName || active.template_name || "") : "";
+  const dModel = active ? (active.modelName || active.model_name || "") : "";
+  const dLoras = active
+    ? (Array.isArray(active.loraNames) && active.loraNames.length > 0
+      ? active.loraNames
+      : (active.lora_names || "").split(",").map((s) => s.trim()).filter(Boolean))
+    : [];
+
   const [preferenceBase, setPreferenceBase] = useState<GenWithRepo | null>(null);
   const [preferenceReason, setPreferenceReason] = useState<VisualPreferenceReason>("character");
   const [savingPreference, setSavingPreference] = useState(false);
   const [mediaFilter, setMediaFilter] = useState<"all" | "image" | "video">("all");  // M2.2 媒体类型筛选
+  const [hasMore, setHasMore] = useState(false);         // P0-1：分页模式是否还有下一页
+  const [loadingMore, setLoadingMore] = useState(false); // P0-1：正在加载下一页
+  const [fullyLoaded, setFullyLoaded] = useState(false); // P0-1：已升级全量（搜索/筛选触发一次，sticky）
+  const [pendingDescribe, setPendingDescribe] = useState(false); // P0-1：升级全量后接着跑自动描述
+  const prevKeyRef = useRef("");                          // P0-1：检测切仓库（重置回分页浏览态）
   const PAGE_SIZE = 32; // 一行 8 个 × 四行
+  // 分页浏览态：后端已按 created_at 倒序返回，不再本地重排（重排会打乱已按页追加的顺序）
+  const browsing = enhanced && repoIds.length === 1 && !fullyLoaded;
 
   // AI 打标专用对话模型（与生图主流程用的是同一处配置）
   const chat = activeChatModel(settings);
@@ -140,23 +251,37 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
   const key = repoIds.join(",");
   const reposSet = repoIds;
 
-  const refresh = (retryLeft = 1) => {
+  // P0-1 分页浏览态：资产库页 + 单仓库 + 未升级全量。needFull=false 时首屏只拉一页。
+  // 多仓库合并（游标语义复杂）与嵌入画廊（数据量小）恒全量，行为与改造前一致。
+  const needFull = !enhanced || repoIds.length !== 1 || fullyLoaded;
+
+  const refresh = (retryLeft = 1, full = needFull) => {
     let alive = true;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
     setLoading(true);
-    Promise.all(repoIds.map((id) =>
+    const firstPage = () => listGenerations(repoIds[0], embed, { limit: PAGE_SIZE })
+      .then((r) => {
+        setHasMore(r.has_more === true);
+        return (r.items || []).map((g) => ({ ...g, repoId: repoIds[0] } as GenWithRepo));
+      })
+      .catch(() => { setHasMore(false); return [] as GenWithRepo[]; });
+    const allPages = () => Promise.all(repoIds.map((id) =>
       listGenerations(id, embed)
         .then((r) => (r.items || []).map((g) => ({ ...g, repoId: id } as GenWithRepo)))
         .catch(() => [] as GenWithRepo[]),
     ))
       .then((lists) => {
-        if (!alive) return;
         // 合并去重（按 id），保留来源仓库 id
         const seen = new Set<string>();
         const merged: GenWithRepo[] = [];
         for (const list of lists) for (const g of list) {
           if (!seen.has(g.id)) { seen.add(g.id); merged.push(g); }
         }
+        return merged;
+      });
+    (full ? allPages() : firstPage())
+      .then((merged) => {
+        if (!alive) return;
         setItems(merged);
         // 全量标签统计（新增图/改标签后刷新时同步更新，供输入补全）
         if (enhanced) {
@@ -164,15 +289,42 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
         }
         // 首次读到空可能是 Chroma 写入尚未可见（刚出图/刚进仓库），短延迟重试一次兜底
         if (merged.length === 0 && retryLeft > 0) {
-          retryTimer = setTimeout(() => { if (alive) refresh(retryLeft - 1); }, 800);
+          retryTimer = setTimeout(() => { if (alive) refresh(retryLeft - 1, full); }, 800);
         }
       })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; if (retryTimer) clearTimeout(retryTimer); };
   };
 
+  // 加载下一页：keyset 游标＝当前列表末条 created_at（不重不漏）；nextPage＝加载成功后停留页
+  const loadMore = async (nextPage?: number) => {
+    if (loadingMore || !hasMore || repoIds.length !== 1 || items.length === 0) return;
+    const cursor = items[items.length - 1]?.created_at || 0;
+    setLoadingMore(true);
+    try {
+      const r = await listGenerations(repoIds[0], embed, { limit: PAGE_SIZE, beforeTs: cursor });
+      const more = (r.items || []).map((g) => ({ ...g, repoId: repoIds[0] } as GenWithRepo));
+      setHasMore(r.has_more === true);
+      if (more.length > 0) {
+        setItems((prev) => [...prev, ...more]);
+        if (nextPage !== undefined) setPage(nextPage);
+      }
+    } catch { /* 加载失败保持现状，用户可再次翻页重试 */ }
+    finally { setLoadingMore(false); }
+  };
+
   useEffect(() => {
-    const cancel = refresh();
+    let cancel: (() => void) | undefined;
+    if (prevKeyRef.current !== key) {
+      // 切仓库：重置回分页浏览态（强制一页，不沿用上一个仓库的 fullyLoaded）
+      prevKeyRef.current = key;
+      setFullyLoaded(false);
+      setPage(1);
+      setHasMore(false);
+      cancel = refresh(1, false);
+    } else {
+      cancel = refresh();
+    }
     // 出图后（finalize 入库落定后派发）若属于本组仓库则刷新。
     // 延迟一拍 + 二次刷新兜底：Chroma 写入到可检索有轻微延迟，避免刷太早读不到新图。
     const onSaved = (e: Event) => {
@@ -184,7 +336,14 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
     window.addEventListener("laf-generation-saved", onSaved);
     return () => { cancel?.(); window.removeEventListener("laf-generation-saved", onSaved); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, embed]);
+  }, [key, embed, fullyLoaded]);
+
+  // 搜索/筛选/语义模式一旦启用，本组仓库升级全量加载（sticky：不清回分页，
+  // 避免用户逐字输入时在全量/分页间抖动）。多仓库与嵌入画廊本就全量，无需升级。
+  useEffect(() => {
+    const filtering = !!tagQuery.trim() || semanticMode || mediaFilter !== "all";
+    if (enhanced && repoIds.length === 1 && filtering) setFullyLoaded(true);
+  }, [tagQuery, semanticMode, mediaFilter, enhanced, repoIds.length]);
 
   // 详情大图弹窗 Esc 关闭
   useEffect(() => {
@@ -303,7 +462,7 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
     finally { setTagging(null); }
   };
 
-  const describeMissing = async () => {
+  const runDescribeMissing = async () => {
     const targets = items.filter((g) => !g.description?.trim());
     if (targets.length === 0) { showToast("所有资产已有视觉描述。"); return; }
     setDescribing(true);
@@ -331,6 +490,63 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
     }
   };
 
+  // 分页态只加载了首批：先升级全量，刷新完成后由下方 effect 接着跑（避免只描述已加载页）
+  // 反推打标（版本化）：每次打标存一版快照，可切换；不合并旧版（2026-10-17 用户定案）
+  const refreshSnapshots = async (id: string, repoId: string) => {
+    try { return await listTagSnapshots(id, repoId, embed); } catch { return null; }
+  };
+  const patchItem = (id: string, patch: Partial<Generation>) => {
+    setItems((arr) => arr.map((x) => (x.id === id ? { ...x, ...patch } : x)));
+    setActive((a) => (a && a.id === id ? { ...a, ...patch } : a));
+  };
+
+  const wd14TagActive = async (g: Generation) => {
+    setWd14ing(g.id);
+    try {
+      const repoId = (g as GenWithRepo).repoId || g.repo_id || repoIds[0];
+      const result = await tagGeneration(taggerModel, g.id, repoId, embed);
+      const snaps = await refreshSnapshots(g.id, repoId);
+      patchItem(g.id, {
+        tags: result.tags,
+        ...(snaps ? { tag_snapshots: JSON.stringify(snaps.snapshots), active_tag_snapshot: snaps.active } : {}),
+      });
+      showToast(`已生成标签快照（${result.total} 个标签，共 ${snaps?.snapshots.length ?? 1} 版）。`, "success");
+    } catch (e) {
+      showToast(`反推打标失败：${(e as Error).message}`, "error");
+    } finally {
+      setWd14ing(null);
+    }
+  };
+
+  // 切换标签版本快照
+  const activateSnapshot = async (g: Generation, snapshotId: string) => {
+    const repoId = (g as GenWithRepo).repoId || g.repo_id || repoIds[0];
+    try {
+      await activateTagSnapshot(g.id, repoId, snapshotId, embed);
+      const snaps = await refreshSnapshots(g.id, repoId);
+      const tags = snaps?.snapshots.find((s) => s.id === snapshotId)?.tags ?? g.tags;
+      patchItem(g.id, {
+        tags,
+        ...(snaps ? { tag_snapshots: JSON.stringify(snaps.snapshots), active_tag_snapshot: snapshotId } : {}),
+      });
+      showToast("已切换到该标签版本。", "success");
+    } catch (e) {
+      showToast(`切换版本失败：${(e as Error).message}`, "error");
+    }
+  };
+
+  const describeMissing = () => {
+    if (browsing) { setPendingDescribe(true); setFullyLoaded(true); return; }
+    void runDescribeMissing();
+  };
+
+  useEffect(() => {
+    if (!pendingDescribe || !fullyLoaded || loading) return;
+    setPendingDescribe(false);
+    void runDescribeMissing();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingDescribe, fullyLoaded, loading]);
+
   const buildVisualIndex = async () => {
     setVisualIndexing(true);
     let indexed = 0;
@@ -346,6 +562,26 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
       showToast(`视觉索引失败：${(error as Error).message}`, "error");
     } finally {
       setVisualIndexing(false);
+    }
+  };
+
+  // P0-2：历史资产补生成缩略图（本机静态图；远程/裂图跳过）。幂等，可重复跑。
+  const buildThumbs = async () => {
+    setThumbnailing(true);
+    let generated = 0;
+    let skipped = 0;
+    try {
+      for (const repoId of repoIds) {
+        const result = await generateThumbs(repoId, embed);
+        generated += result.generated;
+        skipped += result.skipped;
+      }
+      showToast(`缩略图补生成完成：${generated} 张，跳过 ${skipped} 张远程或缺失图片。`, "success");
+      refresh();  // 刷新让 thumb_url_if_ready 兜底发现的 URL 立即生效
+    } catch (error) {
+      showToast(`缩略图补生成失败：${(error as Error).message}`, "error");
+    } finally {
+      setThumbnailing(false);
     }
   };
 
@@ -402,14 +638,16 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
   // M2.2：媒体类型筛选（全部/图片/视频），视频资产按 mediaType 识别
   const filtered = mediaFilter === "all" ? filteredBase
     : filteredBase.filter((g) => (g.mediaType || "image") === mediaFilter);
-  // 从新到旧：优先按后端权威时间戳 created_at 倒序（不受文件改名/删图影响）；
-  // 历史记录无 created_at(=0) 时回退到 image_url 文件名编号（时间戳/旧顺序命名都能取到）。
+  // 分页浏览态：后端已按 created_at 倒序返回，不再本地重排（重排会打乱已按页追加的顺序）
   const orderKey = (g: Generation) => g.created_at || seqOf(g.image_url);
   const sorted = semanticMode && terms.length > 0
     ? filtered
-    : [...filtered].sort((a, b) => orderKey(b) - orderKey(a));
+    : browsing ? filtered
+      : [...filtered].sort((a, b) => orderKey(b) - orderKey(a));
   const pageCount = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
-  const curPage = Math.min(page, pageCount);  // filtered 变短后自愈，避免越界空页
+  // 分页态把「还有更多」暴露为虚拟下一页（点击触发 loadMore，加载成功后停留该页）
+  const pagerCount = browsing && hasMore ? pageCount + 1 : pageCount;
+  const curPage = Math.min(page, pagerCount);  // filtered 变短后自愈，避免越界空页
   const shown = sorted.slice((curPage - 1) * PAGE_SIZE, curPage * PAGE_SIZE);
 
   // 搜索框标签补全：取当前输入最后一段(分隔符后)为前缀，从标签统计里匹配，按图片数降序
@@ -505,6 +743,10 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
             title="使用本机 Qwen3-VL-Embedding 建立图片向量索引">
             {visualIndexing ? "视觉索引中…" : "构建视觉索引"}
           </button>
+          <button className="btn" onClick={buildThumbs} disabled={thumbnailing}
+            title="为本仓库历史图片补生成缩略图（长边 512，网格加载更快；新图入库时已自动生成）">
+            {thumbnailing ? "补生成中…" : "补缩略图"}
+          </button>
           <button className="btn" onClick={doPrune} disabled={pruning}
             title="删除指向本机图但磁盘文件已不存在的裂图记录（多因手动删文件留下）">
             {pruning ? "清理中…" : "清理裂图"}
@@ -553,7 +795,7 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
                     <span className="gallery-media-badge">🎬</span>
                   </div>
                 ) : (
-                  <img src={g.image_url} alt="生成图" loading="lazy"
+                  <img src={g.thumbUrl || g.image_url} alt="生成图" loading="lazy"
                     onClick={() => selMode ? toggleSel(g.id) : setActive(g)} />
                 )}
                 {g.mediaType === "video" && !selMode && (
@@ -586,7 +828,13 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
               </div>
             ))}
           </div>
-          <Pager page={curPage} pageCount={pageCount} onPage={setPage} always />
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+            <Pager page={curPage} pageCount={pagerCount}
+              onPage={(n) => { if (browsing && n > pageCount) loadMore(n); else setPage(n); }} always />
+            {loadingMore && (
+              <span style={{ fontSize: 12, color: "var(--text-muted)" }}>加载中…</span>
+            )}
+          </div>
         </>
       )}
       {deleting && (
@@ -616,26 +864,106 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
         />
       )}
       {active && (
-        <div className="modal-mask" onClick={() => setActive(null)}>
-          <div className="modal" style={{ width: 720, maxHeight: "88vh", display: "flex", flexDirection: "column" }} onClick={(e) => e.stopPropagation()}>
+        <div className="modal-mask">
+          <div className="modal" style={{
+            maxWidth: 1060, width: "95vw", maxHeight: "90vh",
+            display: "flex", flexDirection: "column",
+            // ⚠ 必须覆盖 `.modal` 基线的 `overflow-y: auto`：外层滚动会吃掉高度约束，
+            // 内层右栏拿不到确定高度 ⇒ 右栏不滚、底部按钮被内容穿过（2026-10-16 实机截图）
+            overflow: "hidden",
+          }} onClick={(e) => e.stopPropagation()}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
               <h3 style={{ margin: 0 }}>生成详情</h3>
               <button className="icon-btn" style={{ background: "transparent", color: "var(--text)" }} onClick={() => setActive(null)}>
                 <X size={18} />
               </button>
             </div>
-            <div style={{ overflowY: "auto" }}>
-              {active.mediaType === "video" ? (
-                <video src={active.image_url} controls style={{ width: "100%", borderRadius: 10, marginBottom: 12, maxHeight: 420, background: "#000" }} />
-              ) : (
-                <img src={active.image_url} alt="大图" style={{ width: "100%", borderRadius: 10, marginBottom: 12 }} />
-              )}
-              {active.mediaType === "video" && (
-                <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 8 }}>🎬 视频资产（首帧底图派生链见下）</div>
-              )}
+            {/* 左图右信息（2026-10-16 重排，对齐画布模式 `CanvasDetailPanel` 的结构）
+                ⚠ 不要 flexWrap：换行会让容器高度需求翻倍 ⇒ 撑破 maxHeight、右栏失去滚动 */}
+            <div style={{ flex: 1, minHeight: 0, display: "flex", gap: 14, overflow: "hidden" }}>
+              {/* 左：完整图片 / 视频（点击进共享 Lightbox 全屏） */}
+              <div style={{ flex: "0 0 52%", minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", gap: 8 }}>
+                <div style={{
+                  flex: 1, minHeight: 0, display: "flex", alignItems: "center",
+                  justifyContent: "center", background: "var(--surface-2)",
+                  borderRadius: 10, overflow: "hidden",
+                }}>
+                  {active.mediaType === "video" ? (
+                    <video src={active.image_url} controls style={{ maxWidth: "100%", maxHeight: "100%", background: "#000" }} />
+                  ) : (
+                    // 保持 P0-2 契约「详情取原图」（质量优先）；原图不可用时（云端图未落盘/
+                    // 被清理）onError 回退本机缩略图 —— 否则出现空白框（2026-10-16 实机截图）
+                    <img src={active.image_url} alt="大图" title="点击全屏查看（滚轮缩放）"
+                      onClick={() => openLightbox(active.image_url)}
+                      onLoad={(e) => {
+                        const el = e.currentTarget;
+                        if (el.naturalWidth > 0) setDetailImgSize({ w: el.naturalWidth, h: el.naturalHeight });
+                      }}
+                      onError={(e) => {
+                        const el = e.currentTarget;
+                        const fallback = active.thumbUrl || "";
+                        if (fallback && el.dataset.fb !== "1") {
+                          el.dataset.fb = "1";
+                          el.src = fallback;
+                        }
+                      }}
+                      style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", cursor: "zoom-in" }} />
+                  )}
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0, fontSize: 12, color: "var(--text-muted)" }}>
+                  <span title={active.image_url} style={{
+                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 260,
+                  }}>
+                    {decodeURIComponent((active.image_url || "").split("?")[0].split("/").pop() || "")}
+                  </span>
+                  <a className="img-tool" href={active.image_url} target="_blank" rel="noreferrer">
+                    <ExternalLink size={14} /> 查看原图
+                  </a>
+                  {active.mediaType === "video" && <span>🎬 视频资产（首帧底图派生链见右）</span>}
+                </div>
+              </div>
+              {/* 右：生成信息（可滚动；flex-basis 0 才不会被内容顶开） */}
+              <div style={{ flex: "1 1 0%", minWidth: 0, minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
+              <DetailSection title="生成参数" first>
+                {dTemplate && (
+                  <DetailKV label="模板">
+                    <span style={{ color: "var(--primary, #3b82f6)", fontWeight: 500 }}>{dTemplate}</span>
+                  </DetailKV>
+                )}
+                {dModel && (
+                  <DetailKV label="模型"><span style={{ fontFamily: "monospace" }}>{dModel}</span></DetailKV>
+                )}
+                {dLoras.length > 0 && (
+                  <DetailKV label="LoRA">
+                    <span style={{ display: "inline-flex", gap: 6, flexWrap: "wrap" }}>
+                      {dLoras.map((n) => (
+                        <span key={n} style={{
+                          padding: "1px 6px", borderRadius: 3,
+                          background: "rgba(127,127,127,0.16)",
+                        }}>{n}</span>
+                      ))}
+                    </span>
+                  </DetailKV>
+                )}
+                {active.mediaType === "video" ? (
+                  <DetailKV label="尺寸">视频</DetailKV>
+                ) : detailImgSize ? (
+                  <DetailKV label="尺寸">{detailImgSize.w} × {detailImgSize.h}</DetailKV>
+                ) : null}
+                {fmtCreatedAt(active.created_at) && (
+                  <DetailKV label="生成时间">{fmtCreatedAt(active.created_at)}</DetailKV>
+                )}
+                {(active.repoId || "") && (
+                  <DetailKV label="作品">
+                    {(repoNames && active.repoId ? repoNames[active.repoId] : "") || active.repoId}
+                  </DetailKV>
+                )}
+              </DetailSection>
               {active.derivedFrom?.length ? (
-                <div style={{ fontSize: 12, color: "var(--text-muted)", margin: "0 0 10px", lineHeight: 1.6 }}>
-                  <div style={{ marginBottom: 2 }}>派生来源（只读展示，删除来源不影响本条）</div>
+                <DetailSection title="派生来源">
+                  <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6, marginBottom: 4 }}>
+                    只读展示，删除来源不影响本条
+                  </div>
                   {active.derivedFrom.map((d, i) => {
                     const slot = d.media_slot_ref;
                     const label = slot
@@ -648,42 +976,47 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
                       </div>
                     );
                   })}
-                </div>
+                </DetailSection>
               ) : null}
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-                <div style={{ fontSize: 12, color: "var(--text-muted)" }}>生成参数 / 提示词</div>
-                {active.prompt && <CopyButton text={active.prompt} className="img-tool" />}
-              </div>
-              <div style={{ fontSize: 13, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{active.prompt || "（无提示词记录）"}</div>
+              <DetailSection
+                title="提示词"
+                extra={active.prompt ? <CopyButton text={active.prompt} className="img-tool" /> : null}
+              >
+                <div style={{ fontSize: 13, lineHeight: 1.6, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                  {active.prompt || "（无提示词记录）"}
+                </div>
+              </DetailSection>
               {active.description && (
-                <>
-                  <div style={{ fontSize: 12, color: "var(--text-muted)", margin: "12px 0 4px" }}>视觉描述</div>
-                  <div style={{ fontSize: 13, lineHeight: 1.5 }}>{active.description}</div>
-                </>
+                <DetailSection title="视觉描述">
+                  <div style={{ fontSize: 13, lineHeight: 1.6 }}>{active.description}</div>
+                </DetailSection>
               )}
-              <div style={{ fontSize: 12, color: "var(--text-muted)", margin: "12px 0 4px" }}>标签</div>
-              <GalleryTags
-                g={active}
-                tagging={tagging === active.id}
-                onAdd={(t) => addTag(active, t)}
-                onRemove={(t) => removeTag(active, t)}
-                onAiTag={() => aiTag(active)}
-                onSearch={(t) => { setTagQuery(`${t}，`); setPage(1); setActive(null); }}
-                onAppendSearch={(t) => {
-                  // 追加到已有搜索词，末尾自带「，」方便继续加下一个标签
-                  setTagQuery((q) => (q.trim() ? `${q.trim().replace(/[,，;；]\s*$/, "")}，${t}，` : `${t}，`));
-                  setPage(1);
-                  setActive(null);
-                }}
-                onClear={() => saveTags(active, [])}
-              />
-              <div style={{ marginTop: 12 }}>
-                <a className="img-tool" href={active.image_url} target="_blank" rel="noreferrer">
-                  <ExternalLink size={14} /> 查看原图
-                </a>
-              </div>
+              <DetailSection title="标签">
+                <GalleryTags
+                  g={active}
+                  tagging={tagging === active.id}
+                  wd14ing={wd14ing === active.id}
+                  onAdd={(t) => addTag(active, t)}
+                  onRemove={(t) => removeTag(active, t)}
+                  onAiTag={() => aiTag(active)}
+                  onWd14={() => wd14TagActive(active)}
+                  taggers={taggers}
+                  taggerModel={taggerModel}
+                  onTagger={setTaggerModel}
+                  onActivateSnapshot={(sid) => activateSnapshot(active, sid)}
+                  onSearch={(t) => { setTagQuery(`${t}，`); setPage(1); setActive(null); }}
+                  onAppendSearch={(t) => {
+                    // 追加到已有搜索词，末尾自带「，」方便继续加下一个标签
+                    setTagQuery((q) => (q.trim() ? `${q.trim().replace(/[,，;；]\s*$/, "")}，${t}，` : `${t}，`));
+                    setPage(1);
+                    setActive(null);
+                  }}
+                  onClear={() => saveTags(active, [])}
+                />
+              </DetailSection>
               {enhanced && (
-                <div style={{ marginTop: 14, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                <DetailSection title="偏好比较">
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                   {!preferenceBase || preferenceBase.id === active.id ? (
                     <button className="btn" onClick={() => setPreferenceBase(
                       preferenceBase?.id === active.id ? null : active,
@@ -708,7 +1041,23 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
                     </>
                   )}
                 </div>
+                </DetailSection>
               )}
+              </div>
+            </div>
+            {/* 底部操作条：与画布详情 / 上网素材详情统一 */}
+            <div className="modal-actions" style={{ flexShrink: 0 }}>
+              {enhanced && onSendToChat && (
+                <button className="btn" onClick={() => { onSendToChat(active); setActive(null); }}>
+                  <Send size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />发送至对话框
+                </button>
+              )}
+              {enhanced && onSendAsRecipe && (
+                <button className="btn" onClick={() => { onSendAsRecipe(active); setActive(null); }}>
+                  <Send size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />发送至对话
+                </button>
+              )}
+              <button className="btn primary" style={{ marginLeft: "auto" }} onClick={() => setActive(null)}>关闭</button>
             </div>
           </div>
         </div>

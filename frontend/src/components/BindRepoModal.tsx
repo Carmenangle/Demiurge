@@ -75,7 +75,7 @@ export function BindRepoModal({
   };
 
   return (
-    <div className="modal-mask" onClick={onClose}>
+    <div className="modal-mask">
       <div className="modal" onClick={(e) => e.stopPropagation()} style={{ width: 460, maxWidth: "92vw" }}>
         <h3 style={{ margin: "0 0 4px", display: "flex", alignItems: "center", gap: 6 }}>
           <Link2 size={17} />为「{repo.name}」绑定资料

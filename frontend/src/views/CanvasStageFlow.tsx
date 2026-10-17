@@ -247,6 +247,8 @@ export function CanvasStageFlow({
         modelName: g.model_name || g.modelName || "",
         loraName: g.lora_names ? (typeof g.lora_names === "string" ? g.lora_names.split(",").filter(Boolean)[0] || "" : "") : (g.loraName || ""),
         loraNames: g.lora_names ? (typeof g.lora_names === "string" ? g.lora_names.split(",").filter(Boolean) : []) : (g.loraNames || []),
+        // 缩略图键名归一：后端默认路径返 thumb_url、分页路径返 thumbUrl（两个都要认）
+        thumbUrl: g.thumb_url || g.thumbUrl || "",
       })));
     } catch {
       if (seq !== refreshSeqRef.current) return;

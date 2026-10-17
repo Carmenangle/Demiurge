@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Bot, Brush, Check, ChevronDown, CopyPlus, CornerDownRight, Download, ExternalLink, File as FileIcon, Flag, GitBranch, Image as ImageIcon, Images, Merge, MessageCircle, MoreHorizontal, Pause, Pencil, Play, Plus, RotateCw, ScanText, Search, Send, Sparkles, Square, Trash2, Video, Workflow, Wrench, X } from "lucide-react";
+import { Bot, Brush, Check, ChevronDown, CopyPlus, CornerDownRight, Download, ExternalLink, File as FileIcon, Flag, FolderOpen, GitBranch, Image as ImageIcon, Images, Merge, MessageCircle, MoreHorizontal, Pause, Pencil, Play, Plus, RotateCw, ScanText, Search, Send, Sparkles, Square, Trash2, Video, Workflow, Wrench, X } from "lucide-react";
 import type { AgentRoute, ChatMessage, MsgPart, PromptApproval, RouteChoice } from "../../types/chat";
 import type { AssistantAvatarState } from "../../lib/assistantAvatar";
 import { runScripts, Placement, type RegexScript } from "../../lib/regexEngine";
@@ -12,6 +12,8 @@ import { userMessagePlainText, userMessageRichContent } from "../../lib/chatGene
 import type { PortOp } from "../../api/ai";
 import { attachmentUrl, proxyImageUrl, selectInspiration as selectInspirationPost, saveInspirationCard } from "../../api/ai";
 import { pushInspirationsToCanvas, inspirationToCanvasPayload, inspirationCanvasLabel } from "../../lib/inspirationInsert";
+import { normalizeMediaUrl } from "../../lib/canvasConversation";
+import { openArtifactFolder } from "../../api/artifacts";
 import { isBodyShotRatio } from "../../lib/inspirationAutoPick";
 import { approvePlanTask, cancelPlanTask, deleteRecipe, getPlanTask, keepRecipe, type PlanTask } from "../../lib/planTaskActivity";
 import type { RichContent } from "../RichInput";
@@ -544,6 +546,25 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
   if (msg.image) imgs.push(msg.image);
   // 执行过程汇总（2026-09-06 重构）：思考与工具调用分离，chips 展开各自详情
   const traceSummary = msg.agentTrace?.length ? buildTraceSummary(msg.agentTrace) : null;
+  // 「打开文件位置」（2026-10-14 用户需求：生图结果在对应仓库里找不到，要给个直达入口）：
+  // local-view URL 里就带本机绝对路径（?path=…），取出来复用 artifacts/open-folder
+  // （后端 explorer /select 定位并选中文件）。远程 URL（云端图未留存）没有本机路径，
+  // 按钮禁用并说明原因——与产物卡「打开位置」同一端点、同一降级文案。
+  const openMediaLocation = async (url: string) => {
+    const norm = normalizeMediaUrl(url);
+    if (!norm.startsWith("path:")) return;
+    const path = norm.slice("path:".length);
+    if (!visualCiOutputDir) {
+      window.alert("尚未配置仓库文件夹，无法定位文件（设置 → 路径与代理）");
+      return;
+    }
+    try {
+      const res = await openArtifactFolder(visualCiOutputDir, path, true, visualCiRepoId || "");
+      if (!res.ok) window.alert("打开文件位置失败：文件可能已被移动或删除");
+    } catch (e) {
+      window.alert(`打开文件位置失败：${(e as Error).message || "未知原因"}`);
+    }
+  };
   const renderMediaPart = (part: MsgPart | undefined, index: number) => {
     if (!part) return null;
     if (part.type === "file") {
@@ -619,12 +640,20 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
     if ((part.type === "image" || part.type === "masked-image") && part.url) {
       const regeneration = part.regeneration || msg.regeneration;
       const canRegenerate = !!regeneration || !!part.slotId;
+      // 本机已留存的图才有「文件位置」可定位（local-view URL 带绝对路径）
+      const mediaNorm = normalizeMediaUrl(part.url);
+      const localMediaPath = mediaNorm.startsWith("path:") ? mediaNorm.slice("path:".length) : "";
       return (
         <div className="img-card" key={part.slotId || part.url}>
           <img src={part.url} alt="剧情插画" loading="lazy" onClick={() => openLightbox(part.url!)} style={{ cursor: "zoom-in" }} />
           <div className="img-tools">
             <a className="img-tool" href={part.url} target="_blank" rel="noreferrer"><ExternalLink size={14} /> 查看原图</a>
             <button className="img-tool" onClick={() => downloadMedia(part.url!)}><Download size={14} /> 下载</button>
+            <button className="img-tool" disabled={!localMediaPath}
+              title={localMediaPath
+                ? `在资源管理器中定位并选中该文件：${localMediaPath}`
+                : "云端图片未留存到本机（下载失败回退了远程地址），没有文件可定位"}
+              onClick={() => openMediaLocation(part.url!)}><FolderOpen size={14} /> 打开文件位置</button>
             <button className="img-tool" disabled={!canRegenerate || !onRegenerate || regenerating}
               title={regeneration
                 ? "使用这张结果绑定的原始参数重新生成并替换"
@@ -836,7 +865,10 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
             )}
           </div>
         )}
-        {imgs.map((url, i) => (
+        {imgs.map((url, i) => {
+          const mediaNorm = normalizeMediaUrl(url);
+          const localMediaPath = mediaNorm.startsWith("path:") ? mediaNorm.slice("path:".length) : "";
+          return (
             <div className="img-card" key={url}>
               <img src={url} alt={`生成结果 ${i + 1}`} loading="lazy" onClick={() => openLightbox(url)} style={{ cursor: "zoom-in" }} />
               <div className="img-tools">
@@ -844,6 +876,11 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
                   <ExternalLink size={14} /> 查看原图
                 </a>
                 <button className="img-tool" onClick={() => downloadMedia(url)}><Download size={14} /> 下载</button>
+                <button className="img-tool" disabled={!localMediaPath}
+                  title={localMediaPath
+                    ? `在资源管理器中定位并选中该文件：${localMediaPath}`
+                    : "云端图片未留存到本机（下载失败回退了远程地址），没有文件可定位"}
+                  onClick={() => openMediaLocation(url)}><FolderOpen size={14} /> 打开文件位置</button>
                   <button
                     className="img-tool"
                     disabled={!msg.regeneration || !onRegenerate || regenerating}
@@ -861,7 +898,8 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
               )}
             </div>
           </div>
-        ))}
+          );
+        })}
         {msg.video && (
           <div className="img-card">
             {isAnimatedImage(msg.video) ? (

@@ -134,10 +134,10 @@ def test_agent_remote_image_uses_standard_time_name(tmp_path, monkeypatch):
         "repo",
     )
 
-    names = [path.name for path in repo.iterdir()]
+    names = [path.name for path in (repo / "pictures").iterdir()]
     assert len(names) == 1
     assert re.fullmatch(r"\d{8}_\d{6}_\d{6}_[0-9a-f]{8}\.png", names[0])
-    assert (repo / names[0]).read_bytes() == b"png"
+    assert (repo / "pictures" / names[0]).read_bytes() == b"png"
 
 
 def test_supervisor_route_choice_is_persisted_on_its_message(monkeypatch):
@@ -170,7 +170,7 @@ def test_agent_image_persists_exact_regeneration_snapshot(monkeypatch):
         "quality": "medium",
         "model": {"baseUrl": "https://images.example", "modelName": "image-v2"},
     }
-    monkeypatch.setattr(generation_store, "_save_remote_image", lambda *args: "saved.png")
+    monkeypatch.setattr(generation_store, "_save_remote_image", lambda *args, **kwargs: "saved.png")
     monkeypatch.setattr(generation_store, "_index_with_retry", lambda *args, **kwargs: True)
     monkeypatch.setattr(
         generation_store.chat_snapshot,
@@ -379,7 +379,7 @@ def test_save_image_named_角色lora命名并覆盖(monkeypatch, tmp_path):
         dest_stem="虞妙玥_2_1",
     )
     assert Path(p1).name == "虞妙玥_2_1.png"
-    assert str(Path(p1).parent).endswith("repo")  # 根目录，非 voices
+    assert str(Path(p1).parent).endswith("pictures")  # 2026-10-17：生图归入 <repo>/pictures/
     # 同名覆盖：内容更新，路径不变
     p2 = generation_store.image_store.save_image_named(
         str(out), "repo", filename="workflow_b.png", url="http://comfy",
@@ -1046,8 +1046,8 @@ def test_远程图片_data_url按扩展名落盘(tmp_path, monkeypatch):
 
     out = generation_store._save_remote_image(url, "out", "repo")
 
-    assert (tmp_path / "seq.webp").read_bytes() == raw
-    assert out == generation_store.view_urls.local_view(str(tmp_path / "seq.webp"))
+    assert (tmp_path / "pictures" / "seq.webp").read_bytes() == raw
+    assert out == generation_store.view_urls.local_view(str(tmp_path / "pictures" / "seq.webp"))
 
 
 def test_远程图片_下载失败回退原址(monkeypatch):
@@ -1064,7 +1064,7 @@ def test_远程视频_data_url落盘(tmp_path, monkeypatch):
 
     out = generation_store._save_remote_video(url, "out", "repo")
 
-    files = list(tmp_path.iterdir())
+    files = list((tmp_path / "videos").iterdir())
     assert len(files) == 1 and files[0].suffix == ".mp4"
     assert files[0].read_bytes() == raw
     assert out == generation_store.view_urls.local_view(str(files[0]))
@@ -1076,8 +1076,8 @@ def test_远程视频_直链按原名落盘(tmp_path, monkeypatch):
 
     out = generation_store._save_remote_video("http://x/movie.mp4?sig=1", "out", "repo")
 
-    assert (tmp_path / "movie.mp4").read_bytes() == b"bytes"
-    assert out == generation_store.view_urls.local_view(str(tmp_path / "movie.mp4"))
+    assert (tmp_path / "videos" / "movie.mp4").read_bytes() == b"bytes"
+    assert out == generation_store.view_urls.local_view(str(tmp_path / "videos" / "movie.mp4"))
 
 
 def test_远程视频_空参与下载失败回退原址(monkeypatch):
@@ -1308,3 +1308,242 @@ def test_轮次计数跳过非字典项与无parts项(monkeypatch):
                                          {"id": "m2", "parts": [{"kind": "audio"}]}])
     assert generation_store._audio_turn("t", "m2") == 1
     assert generation_store._image_turn("t", "m2") == 0
+
+
+# ---------------------------------------------------------------------------
+# A+B（2026-10-13）：云图「取回」侧透传代理 + 总时限兜底
+#
+# 真机根因（thread 8fed7f23，作品 Anima/原创）：云端任务面板 6 单全 Success
+# （27–115s），但对话迟迟没有图。py-spy 抓到 img2img 线程 60+ 分钟卡在
+# `_download_capped` 的 SSL recv——直连 CDN（webstatic.aiproxy.vip）被 GFW 限速
+# 「滴漏」：httpx 的 read timeout=120 语义是「两次 recv 之间」的超时，分块间隔
+# 始终小于它 ⇒ 计时器被反复重置、总耗时无上界。受控对比：同一直链直连 217s
+# 只拿到 10%（393,216 B）后 ReadTimeout，走本机代理 24.1s 下完 3,923,634 B。
+# 当日 5 轮取回耗时 4.5/13.7/42/73/4.6 分钟、零图落盘，chat.json 全是远程 URL。
+#
+# 修法（只动 download 一侧，默认路径逐字不变）：
+#   A：`_download_capped`/`_save_remote_image`/`persist_image` 增加 proxy 透传
+#      （上传侧 `image_gen._load_image_bytes` 早有代理模式，download 侧漏了）；
+#   B：分块循环按单调时钟掐**总**时限，超时抛 TimeoutError → 调用方回退远程
+#      URL（浏览器走系统代理仍能开图），不再无限挂死。
+# ---------------------------------------------------------------------------
+
+
+def test_下载_显式代理透传给httpx(monkeypatch):
+    """A：配置了生图代理时，CDN 结果图下载必须走同一代理。
+
+    `_download_capped` 用 trust_env=False（规避系统代理劫持 127.0.0.1），
+    因此代理只能显式传——原来 download 侧一个代理参数都没有。
+    """
+    seen: list = []
+    _patch_http_client(monkeypatch, _FakeStream([b"ab"]), seen)
+    generation_store._download_capped("http://cdn/x.png", timeout=5, max_bytes=10,
+                                      proxy="http://127.0.0.1:7897")
+    assert seen[0] == {"trust_env": False, "timeout": 5, "proxy": "http://127.0.0.1:7897"}
+    assert seen[1] == ("GET", "http://cdn/x.png")
+
+
+def test_下载_未配置代理时不传proxy键(monkeypatch):
+    """默认路径逐字不变：无代理时 client kwargs 仍只有 trust_env/timeout 两个键。"""
+    seen: list = []
+    _patch_http_client(monkeypatch, _FakeStream([b"ab"]), seen)
+    generation_store._download_capped("http://cdn/x.png", timeout=5, max_bytes=10)
+    assert seen[0] == {"trust_env": False, "timeout": 5}
+
+
+def test_下载_local_view地址不走代理(monkeypatch):
+    """A 的边界：local-view 指向本机后端，Clash 等代理无法转发回环请求（502）。
+
+    与上传侧 `image_gen._load_image_bytes` 同一判据（`is_local_view_url`）。
+    """
+    seen: list = []
+    _patch_http_client(monkeypatch, _FakeStream([b"ab"]), seen)
+    generation_store._download_capped(
+        "http://127.0.0.1:8010/api/comfyui/local-view?path=C:/out/a.png",
+        timeout=5, max_bytes=10, proxy="http://127.0.0.1:7897")
+    assert seen[0] == {"trust_env": False, "timeout": 5}
+
+
+def test_下载_滴漏分块被总时限截断(monkeypatch):
+    """B：分块间隔 < read timeout 时 per-read 超时形同虚设（真机 217s/10% 实锤）。
+
+    必须按单调时钟单独掐**总**时长；超时抛 TimeoutError，由 `_save_remote_image`
+    捕获回退远程地址。这里用假时钟每分块前进 30s（< read timeout 120s）。
+    """
+    clock = {"t": 0.0}
+
+    def _tick():
+        clock["t"] += 30.0
+        return clock["t"]
+
+    monkeypatch.setattr(generation_store, "time",
+                        types.SimpleNamespace(monotonic=_tick, sleep=lambda s: None))
+    seen: list = []
+    _patch_http_client(monkeypatch, _FakeStream([b"a" * 4] * 10), seen)
+    with pytest.raises(TimeoutError, match="总时限"):
+        generation_store._download_capped("http://cdn/drip.png", timeout=120,
+                                          max_bytes=1024, total_timeout=120)
+
+
+def test_下载_总时限为零不启用(monkeypatch):
+    """B 的边界：total_timeout=0（默认）不掐总时长，慢但健康的连接不被误杀。"""
+    clock = {"t": 0.0}
+
+    def _tick():
+        clock["t"] += 10000.0
+        return clock["t"]
+
+    monkeypatch.setattr(generation_store, "time",
+                        types.SimpleNamespace(monotonic=_tick, sleep=lambda s: None))
+    seen: list = []
+    _patch_http_client(monkeypatch, _FakeStream([b"ab", b"cd"]), seen)
+    assert generation_store._download_capped(
+        "http://cdn/x.png", timeout=5, max_bytes=10) == b"abcd"
+
+
+def test_远程图片_下载透传代理与总时限(monkeypatch, tmp_path):
+    """A+B 接线：_save_remote_image 把 proxy 与图片总时限一起交给 _download_capped。"""
+    calls: list = []
+    monkeypatch.setattr(generation_store.repo_meta, "repo_folder", lambda *a, **k: tmp_path)
+    monkeypatch.setattr(generation_store.image_store, "_next_seq_name",
+                        lambda base, ext: f"seq.{ext}")
+
+    def _fake(url, timeout, max_bytes, **kw):
+        calls.append((url, timeout, max_bytes, kw))
+        return b"png"
+
+    monkeypatch.setattr(generation_store, "_download_capped", _fake)
+
+    generation_store._save_remote_image("http://cdn/x.png", "out", "repo",
+                                        proxy="http://127.0.0.1:7897")
+
+    assert calls == [("http://cdn/x.png", 120, generation_store._MAX_IMAGE_BYTES,
+                      {"proxy": "http://127.0.0.1:7897",
+                       "total_timeout": generation_store._DOWNLOAD_TOTAL_TIMEOUT_IMAGE})]
+
+
+def test_远程视频_下载透传代理与总时限(monkeypatch, tmp_path):
+    """视频同链路：_save_remote_video 透传 vid 代理与视频总时限（timeout=300）。"""
+    calls: list = []
+    monkeypatch.setattr(generation_store.repo_meta, "repo_folder", lambda *a, **k: tmp_path)
+
+    def _fake(url, timeout, max_bytes, **kw):
+        calls.append((url, timeout, max_bytes, kw))
+        return b"mp4"
+
+    monkeypatch.setattr(generation_store, "_download_capped", _fake)
+
+    generation_store._save_remote_video("http://cdn/v.mp4", "out", "repo",
+                                        proxy="http://127.0.0.1:7897")
+
+    assert calls == [("http://cdn/v.mp4", 300, generation_store._MAX_VIDEO_BYTES,
+                      {"proxy": "http://127.0.0.1:7897",
+                       "total_timeout": generation_store._DOWNLOAD_TOTAL_TIMEOUT_VIDEO})]
+
+
+def test_persist_image_透传生图代理给下载(monkeypatch):
+    """A 接线：ctx.gen_proxy 必须一路送到 CDN 下载（原来只送到上传侧）。"""
+    seen: list = []
+    monkeypatch.setattr(generation_store, "_save_remote_image",
+                        lambda url, out, rid, proxy="": seen.append((url, out, rid, proxy)) or "local.png")
+    monkeypatch.setattr(generation_store, "_index_with_retry", lambda *a, **k: True)
+    monkeypatch.setattr(generation_store.chat_snapshot, "upsert", lambda *a, **k: None)
+
+    out = generation_store.persist_image(
+        "t1", "repo", "p", "http://cdn/a.png", "out", "", "", "m", None,
+        gen_proxy="http://127.0.0.1:7897")
+
+    assert seen == [("http://cdn/a.png", "out", "repo", "http://127.0.0.1:7897")]
+    assert out["url"] == "local.png"
+
+
+def test_远程图片_下载失败留痕并回退远程地址(monkeypatch):
+    """B 的用户可见收口：总时限/网络失败不再无限挂死；回退远程 URL 并留 warning。"""
+    warns: list = []
+    monkeypatch.setattr(generation_store._LOG, "warning", lambda *a, **k: warns.append(a))
+    monkeypatch.setattr(generation_store, "_download_capped",
+                        lambda *a, **k: (_ for _ in ()).throw(TimeoutError("下载超过总时限 600s")))
+    url = "http://cdn/a.png"
+    assert generation_store._save_remote_image(url, "out", "repo") == url
+    assert warns and "总时限" in str(warns[0]) and url in str(warns[0])
+
+
+# ===== 2026-10-16：云端插画入库开关（画布内容节点修复的回归锁）=====
+
+def test_persist_image_write_snapshot_false_skips_snapshot(monkeypatch):
+    """云端自动插画：write_snapshot=False ⇒ 落盘 + RAG 入库，但**不写 chat 快照**
+    （保持 roleplay_agency「绝不把图回灌进对话历史」的原设计）；
+    默认 True 的既有调用行为必须逐字不变（仍写快照）。"""
+    from app.services import generation_store
+
+    calls = {"snapshot": 0, "index": 0}
+    monkeypatch.setattr(generation_store, "_save_remote_image",
+                        lambda *a, **kw: "local-view://kept")
+    monkeypatch.setattr(generation_store, "_index_with_retry",
+                        lambda *a, **kw: calls.__setitem__("index", calls["index"] + 1) or True)
+    monkeypatch.setattr(generation_store.chat_snapshot, "upsert",
+                        lambda *a, **kw: calls.__setitem__("snapshot", calls["snapshot"] + 1))
+
+    rec = generation_store.persist_image(
+        "tid", "rid", "prompt", "http://cdn/x.png", "", "", "", "",
+        write_snapshot=False)
+
+    assert rec["url"] == "local-view://kept"     # 已留存（画布/资产库要能读本机图）
+    assert calls["index"] == 1                    # 已入 RAG（画布投影的唯一数据源）
+    assert calls["snapshot"] == 0                 # 未回灌对话历史
+
+    generation_store.persist_image("tid", "rid", "p", "http://cdn/y.png", "", "", "", "")
+    assert calls["snapshot"] == 1                 # 默认路径不变
+
+
+def test_cloud_illustration_persists_without_snapshot():
+    """云端插画分支必须走 persist_image 入库（此前只发 SSE ⇒ 画布黑）；且传 write_snapshot=False。"""
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[1] / "app" / "services" / "agent_agency.py"
+    text = src.read_text(encoding="utf-8")
+    assert "generation_store.persist_image(" in text
+    assert "write_snapshot=False" in text
+    # 旧的「只造 rec、不入库」写法必须消失
+    assert '{"id": f"illo-{repo_id}-{turn}", "url": illo["url"]' not in text
+
+
+def test_index_generation_endpoint_passes_trace_metadata(monkeypatch):
+    """2026-10-16：/rag/index-generation 必须透传 template_name/model_name/lora_names。
+
+    此前该请求模型只有 prompt/tags/image_url ⇒ 经此链路入库的图在资产库详情里
+    「模板/模型/LoRA」恒空（真机实测 14 仓库 130 条全空）。
+    """
+    from app.routers import rag as rag_router
+
+    seen: dict = {}
+
+    def fake_reliable(*args, **kwargs):
+        seen.update(kwargs)
+        return 1
+
+    monkeypatch.setattr(rag_router.rag_store, "index_generation_reliable", fake_reliable)
+    req = rag_router.IndexGenRequest(
+        thread_id="r1", prompt="p", tags="t", image_url="u",
+        template_name="TplA", model_name="ModelB", lora_names="L1,L2")
+    rag_router.index_generation(req)
+    assert seen["template_name"] == "TplA"
+    assert seen["model_name"] == "ModelB"
+    assert seen["lora_names"] == "L1,L2"
+
+
+def test_index_generation_reliable_forwards_metadata(monkeypatch):
+    """reliable 包装层也要透传（它是端点与 rag_store.index_generation 之间的唯一缝）。"""
+    from app.services import rag_store
+
+    seen: dict = {}
+
+    def fake_index(repo_id, cfg, prompt, tags="", image_url="", **kw):
+        seen.update(kw)
+        return None
+
+    monkeypatch.setattr(rag_store, "index_generation", fake_index)
+    rag_store.index_generation_reliable(
+        "r", rag_store.EmbedConfig("", "", ""), "p", "t", "u",
+        template_name="T", model_name="M", lora_names="L")
+    assert seen == {"template_name": "T", "model_name": "M", "lora_names": "L"}
