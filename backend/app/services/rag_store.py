@@ -730,11 +730,25 @@ def _parse_tag_snapshots(meta: dict) -> list[dict]:
 
 def _content_for(meta: dict) -> str:
     if meta.get("kind") == "generation":
+        # 2026-10-18：**tags 不再进语义嵌入文本**。标签是结构化元数据（走 SQLite FTS5 精确检索），
+        # 语义向量只表达图片本身（生成 prompt + 视觉描述）。关键收益：切标签/切快照时图片没变，
+        # 内容就不变 ⇒ 无需重嵌入（此前把 tags 拼进来，导致每次切快照重嵌入整条 ~1.6s）。
         return "\n".join(v for v in [
-            str(meta.get("prompt") or ""), str(meta.get("tags") or ""),
+            str(meta.get("prompt") or ""),
             str(meta.get("description") or ""),
         ] if v) or "生成图片"
     return str(meta.get("tags") or "")
+
+
+def _save_tags_meta(store, doc_id: str, meta: dict) -> None:
+    """标签类变更落库：**只更新 Chroma 元数据、不重嵌入**（图片语义没变，向量不该重算）。
+    失败回退 update_document 保底（能跑，只是退化为重嵌入）。"""
+    try:
+        store._collection.update(ids=[doc_id], metadatas=[meta])
+        return
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 私有 API 不可用/更新失败 ⇒ 回退
+        _log.warning("元数据-only 更新失败，回退重嵌入 id=%s: %s", doc_id, exc)
+    store.update_document(doc_id, Document(page_content=_content_for(meta), metadata=meta))
 
 
 def add_tag_snapshot(doc_id: str, repo_id: str, cfg: EmbedConfig,
@@ -751,7 +765,7 @@ def add_tag_snapshot(doc_id: str, repo_id: str, cfg: EmbedConfig,
     meta["tag_snapshots"] = json.dumps(snaps, ensure_ascii=False)
     meta["active_tag_snapshot"] = snap["id"]
     meta["tags"] = ",".join(clean)
-    store.update_document(doc_id, Document(page_content=_content_for(meta), metadata=meta))
+    _save_tags_meta(store, doc_id, meta)  # 只改元数据、不重嵌入（图片没变）
     # P1 主表对账（2026-10-18）：快照操作也必须同步 SQLite，否则列表/搜索读主表会看到旧标签
     _sync_asset_tags(doc_id, clean)
     return snap
@@ -776,7 +790,7 @@ def set_active_tag_snapshot(doc_id: str, repo_id: str, cfg: EmbedConfig,
         return False
     meta["active_tag_snapshot"] = str(snapshot_id)
     meta["tags"] = ",".join(snap.get("tags") or [])
-    store.update_document(doc_id, Document(page_content=_content_for(meta), metadata=meta))
+    _save_tags_meta(store, doc_id, meta)  # 只改元数据、不重嵌入（切快照图片没变，此前重嵌入 ~1.6s）
     _sync_asset_tags(doc_id, list(snap.get("tags") or []))   # P1 主表对账
     return True
 
@@ -800,7 +814,7 @@ def delete_tag_snapshot(doc_id: str, repo_id: str, cfg: EmbedConfig,
         else:
             meta["active_tag_snapshot"] = ""
             meta["tags"] = ""
-    store.update_document(doc_id, Document(page_content=_content_for(meta), metadata=meta))
+    _save_tags_meta(store, doc_id, meta)  # 只改元数据、不重嵌入（删快照图片没变）
     _sync_asset_tags(doc_id, [t for t in (meta.get("tags") or "").split(",") if t.strip()])
     return True
 
@@ -821,8 +835,8 @@ def set_generation_description(doc_id: str, repo_id: str, cfg: EmbedConfig,
         prompt = legacy
     meta["prompt"] = prompt
     meta["description"] = value
-    content = "\n".join(part for part in [prompt, str(meta.get("tags") or ""), value] if part)
-    store.update_document(doc_id, Document(page_content=content, metadata=meta))
+    # 语义内容＝prompt + 描述（标签不进嵌入，见 _content_for）；描述本身是语义 ⇒ 这里重嵌入是对的
+    store.update_document(doc_id, Document(page_content=_content_for(meta), metadata=meta))
     # P1 主表对账：描述同步（FTS 索引由触发器重建）
     try:
         asset_store.sync_description(doc_id, value)
