@@ -337,6 +337,8 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
   const [semanticMode, setSemanticMode] = useState(false);
   const [semanticItems, setSemanticItems] = useState<GenWithRepo[]>([]);
   const [describing, setDescribing] = useState(false);
+  const [describeProgress, setDescribeProgress] = useState<{ done: number; total: number } | null>(null);  // 批量描述进度 X/N
+  const describeCancelRef = useRef(false);  // 批量描述「暂停」信号（已完成的不回退）
   const [visualIndexing, setVisualIndexing] = useState(false);
   const [thumbnailing, setThumbnailing] = useState(false);   // P0-2：补生成缩略图中
   // 切换详情对象时重置图片尺寸（读新图的 naturalWidth/Height）
@@ -708,27 +710,50 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
     if (targets.length === 0) { showToast("所有资产已有视觉描述。"); return; }
     if (!vlmChat) { showToast(vlmGapMessage(settings), "error"); return; }
     setDescribing(true);
-    let completed = 0;
-    try {
-      for (const g of targets) {
-        const image = await imageDataUri(g.image_url);
-        const result = await describeImage(
-          [image], vlmChat!,
-          "用一段简洁中文客观描述图片中的人物外观、服装、动作、场景、构图和画风；不要写提示词，不要解释。",
-        );
-        const description = (result.prompt || "").trim();
-        if (!description) continue;
-        const repoId = (g as GenWithRepo).repoId || g.repo_id || repoIds[0];
-        await setGenerationDescription(g.id, repoId, description, embed);
-        setItems((current) => current.map((item) => item.id === g.id
-          ? { ...item, description } : item));
-        completed += 1;
+    setDescribeProgress({ done: 0, total: targets.length });
+    describeCancelRef.current = false;
+    let done = 0;
+    let ok = 0;
+    // 并发 3：本地 Ollama 同时吃 3 张够快、又不至于挤爆；单张失败不中断其余。
+    // 后端写入是 WAL + busy_timeout=5000，并发 SQLite 写会排队、不撞锁。
+    const CONCURRENCY = 3;
+    const queue = [...targets];
+    const worker = async () => {
+      while (queue.length > 0 && !describeCancelRef.current) {
+        const g = queue.shift();
+        if (!g) return;
+        try {
+          const image = await imageDataUri(g.image_url);
+          const result = await describeImage(
+            [image], vlmChat!,
+            "用一段简洁中文客观描述图片中的人物外观、服装、动作、场景、构图和画风；不要写提示词，不要解释。",
+          );
+          const description = (result.prompt || "").trim();
+          if (description) {
+            const repoId = (g as GenWithRepo).repoId || g.repo_id || repoIds[0];
+            await setGenerationDescription(g.id, repoId, description, embed);
+            setItems((current) => current.map((item) => item.id === g.id
+              ? { ...item, description } : item));
+            ok += 1;
+          }
+        } catch { /* 单张失败跳过，其余继续 */ }
+        finally {
+          done += 1;
+          setDescribeProgress({ done, total: targets.length });
+        }
       }
-      showToast(`已为 ${completed} 张资产补充视觉描述并更新语义索引。`, "success");
-    } catch (error) {
-      showToast(`自动描述中断：已完成 ${completed} 张；${(error as Error).message}`, "error");
+    };
+    try {
+      await Promise.all(Array.from({ length: Math.min(CONCURRENCY, targets.length) }, () => worker()));
+      showToast(
+        describeCancelRef.current
+          ? `已暂停：完成 ${ok}/${targets.length} 张（已完成的不回退，可再次点击继续）。`
+          : `已为 ${ok}/${targets.length} 张资产补充视觉描述。`,
+        "success",
+      );
     } finally {
       setDescribing(false);
+      setDescribeProgress(null);
     }
   };
 
@@ -1066,9 +1091,13 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
             onClick={() => { setSemanticMode((value) => !value); setPage(1); }}>
             {semanticMode ? "语义搜索：开" : "语义搜索"}
           </button>
-          <button className="btn" onClick={describeMissing} disabled={describing}
-            title="调用当前视觉模型描述缺少描述的图片，并更新资产语义索引">
-            {describing ? "自动描述中…" : "自动描述缺失资产"}
+          <button className="btn"
+            onClick={() => { if (describing) describeCancelRef.current = true; else describeMissing(); }}
+            title={describing ? "点击暂停批量描述（已完成的不回退，可再次点击继续）"
+              : "调用当前视觉模型并发描述缺少描述的图片，并更新资产语义索引"}>
+            {describing
+              ? (describeProgress ? `描述中 ${describeProgress.done}/${describeProgress.total}（暂停）` : "自动描述中…（暂停）")
+              : "自动描述缺失资产"}
           </button>
           <button className="btn" onClick={buildVisualIndex} disabled={visualIndexing}
             title="使用本机 Qwen3-VL-Embedding 建立图片向量索引">

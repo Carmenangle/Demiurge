@@ -366,3 +366,18 @@ describe("P3 仓库同步（2026-10-18 建议顺序⑤：只读体检 + 一键�
     expect(syncModal).toContain("不删你的磁盘文件、不覆盖已有索引");
   });
 });
+
+describe("批量描述：并发 + 实时进度 + 可暂停（2026-10-18 优化②）", () => {
+  it("并发 3 跑（不再是逐张串行），单张失败不中断", () => {
+    expect(gallery).toContain("const CONCURRENCY = 3;");
+    expect(gallery).toContain("await Promise.all(Array.from({ length: Math.min(CONCURRENCY, targets.length) }, () => worker()))");
+    expect(gallery).toContain("while (queue.length > 0 && !describeCancelRef.current)");
+  });
+
+  it("实时进度 X/N + 可点暂停（已完成不回退）", () => {
+    expect(gallery).toContain("const [describeProgress, setDescribeProgress] = useState<{ done: number; total: number } | null>(null)");
+    expect(gallery).toContain("描述中 ${describeProgress.done}/${describeProgress.total}（暂停）");
+    expect(gallery).toContain("if (describing) describeCancelRef.current = true; else describeMissing();");
+    expect(gallery).toContain("已完成的不回退");
+  });
+});
