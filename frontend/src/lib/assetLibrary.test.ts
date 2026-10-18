@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 const gallery = readFileSync(new URL("../components/RepoGallery.tsx", import.meta.url), "utf8");
 const assetsView = readFileSync(new URL("../views/PlaceholderViews.tsx", import.meta.url), "utf8");
+const aiApi = readFileSync(new URL("../api/ai.ts", import.meta.url), "utf8");
 
 describe("资产库删除与恢复合同", () => {
   it("删除资产记录时保留本机图片", () => {
@@ -91,5 +92,38 @@ describe("P0-3 WD14 反推打标（RepoGallery 契约）", () => {
     expect(gallery).toContain("tags: result.tags");                       // 不合并旧标签
     expect(gallery).toContain("listTagSnapshots(id, repoId, embed)");    // 打标后刷新版本列表
     expect(gallery).toContain("activateSnapshot");                        // 版本可切换
+  });
+});
+
+describe("P2-1 素材入库即资产记录（契约）", () => {
+  it("Generation 契约带素材来源三字段（可选 ⇒ 兼容无来源的历史记录）", () => {
+    expect(aiApi).toContain("source?: string;");
+    expect(aiApi).toContain("sourceUrl?: string;");
+    expect(aiApi).toContain("sourceMeta?: {");
+  });
+
+  it("合成仓库常量前后端同值（web-materials），且注明不進仓库选择器", () => {
+    expect(aiApi).toContain('export const WEB_MATERIALS_REPO_ID = "web-materials";');
+    expect(aiApi).toContain("WEB_MATERIALS_REPO_ID");
+  });
+
+  it("「生成内容」页只聚合真实仓库（上网素材不并入，2026-10-18 用户定案）", () => {
+    // 素材 RAG 记录仍在合成库 repo_web-materials（留作上网素材页接检索时复用），
+    // 但不进本聚合列表（用户实测：素材混在生成内容里造成混淆）
+    expect(assetsView).not.toContain("WEB_MATERIALS_REPO_ID");
+    expect(assetsView).not.toContain('[WEB_MATERIALS_REPO_ID]: "上网素材"');
+  });
+
+  it("空态判断基于真实仓库（repoIds 不含合成仓库）", () => {
+    expect(assetsView).toContain("{repos.length === 0 ? (");
+  });
+
+  it("详情面板来源段：source 非空才渲染，渠道/作者/评级/搜索词/来源页", () => {
+    expect(gallery).toContain("{active.source ? (");
+    expect(gallery).toContain('<DetailSection title="来源">');
+    expect(gallery).toContain("active.sourceMeta?.author");
+    expect(gallery).toContain("active.sourceMeta?.rating");
+    expect(gallery).toContain("active.sourceMeta?.query");
+    expect(gallery).toContain("active.sourceUrl");
   });
 });

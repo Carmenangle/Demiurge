@@ -959,6 +959,31 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
                   </DetailKV>
                 )}
               </DetailSection>
+              {/* P2-1：素材资产来源（上网素材入库即资产记录；generation 链无此段） */}
+              {active.source ? (
+                <DetailSection title="来源">
+                  <DetailKV label="渠道">
+                    {active.source === "web" ? "联网素材" : active.source}
+                  </DetailKV>
+                  {active.sourceMeta?.author && (
+                    <DetailKV label="作者">{active.sourceMeta.author}</DetailKV>
+                  )}
+                  {active.sourceMeta?.rating && (
+                    <DetailKV label="评级">{active.sourceMeta.rating}</DetailKV>
+                  )}
+                  {active.sourceMeta?.query && (
+                    <DetailKV label="搜索词">{active.sourceMeta.query}</DetailKV>
+                  )}
+                  {active.sourceUrl && (
+                    <DetailKV label="来源页">
+                      <a href={active.sourceUrl} target="_blank" rel="noreferrer"
+                        style={{ color: "var(--primary, #3b82f6)", wordBreak: "break-all" }}>
+                        {active.sourceUrl}
+                      </a>
+                    </DetailKV>
+                  )}
+                </DetailSection>
+              ) : null}
               {active.derivedFrom?.length ? (
                 <DetailSection title="派生来源">
                   <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6, marginBottom: 4 }}>

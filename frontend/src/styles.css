@@ -2274,6 +2274,25 @@ textarea.text-tool-short-input { height: auto; min-height: 0; resize: none; over
 }
 .web-materials-cell:hover .wm-del { display: inline-flex; }
 .web-materials-cell .wm-del:hover { background: #d9534f; }
+/* 卡片发送钮（2026-10-18 对齐资产库 gallery-send 双按钮：hover 出现，定位于删除钮左侧） */
+.web-materials-cell .wm-send {
+  position: absolute; top: 6px; right: 38px;
+  display: none; align-items: center; justify-content: center;
+  width: 26px; height: 26px; padding: 0; border: none; border-radius: 6px;
+  background: rgba(20,20,20,0.6); color: #fff; cursor: pointer;
+}
+.web-materials-cell:hover .wm-send { display: inline-flex; }
+.web-materials-cell .wm-send:hover { background: var(--accent); }
+
+/* 发送至对话（完整配方：来源/标签/搜索词 + 图），在发送至对话框更左侧 */
+.web-materials-cell .wm-send-recipe {
+  position: absolute; top: 6px; right: 70px;
+  display: none; align-items: center; justify-content: center;
+  width: 26px; height: 26px; padding: 0; border: none; border-radius: 6px;
+  background: rgba(20,20,20,0.6); color: #fff; cursor: pointer;
+}
+.web-materials-cell:hover .wm-send-recipe { display: inline-flex; }
+.web-materials-cell .wm-send-recipe:hover { background: var(--accent); }
 .web-materials-cell .wm-check {
   position: absolute; top: 6px; right: 6px;
   width: 22px; height: 22px; border-radius: 6px;

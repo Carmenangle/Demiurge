@@ -87,8 +87,11 @@ describe("上网素材详情（左图右信息，与生成内容一致）", () =
     expect(panel).toContain("openLightbox(item.url)");
     expect(panel).toContain("素材详情");
 
-    expect(panel).toContain('flex: "1 1 56%"');   // 左侧完整图片
-    expect(panel).toContain('flex: "1 1 38%"');   // 右侧信息（来源/作者/评级/标签）
+    // 2026-10-18 修竖长图裁切：左列 0 0 52% 竖排 + 内层 flex:1 盒 + 右栏 1 1 0%
+    // （对齐资产库详情 RepoGallery 结构；旧 1 1 56%/1 1 38% + flexWrap 会裁图底）
+    expect(panel).toContain('flex: "0 0 52%"');     // 左侧完整图片列
+    expect(panel).toContain('flex: "1 1 0%"');      // 右侧信息（来源/作者/评级/标签）
+    expect(panel).not.toContain('flexWrap: "wrap"'); // 行容器禁换行（撑破 maxHeight）
     // 同款分层：来源 / 文件 / 标签三区（分区容器带分隔线）
     expect(panel).toContain('<Section title="来源" first>');
     expect(panel).toContain('<Section title="文件">');

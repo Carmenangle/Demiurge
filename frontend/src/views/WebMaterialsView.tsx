@@ -394,10 +394,26 @@ export function WebMaterialsView({
                         {selected.has(cell.m.filename) && <Check size={14} />}
                       </span>
                     ) : (
-                      <button className="wm-del" title="删除素材"
-                        onClick={(e) => { e.stopPropagation(); deleteOne(cell.m.filename); }}>
-                        <Trash2 size={14} />
-                      </button>
+                      <>
+                        {/* 与资产库卡片同构：hover 出现「发送至对话 / 发送至对话框 / 删除」三钮
+                            （2026-10-18 用户实测：此前只有删除钮，发送入口只剩详情弹窗，找不到） */}
+                        {onSendAsRecipe && (
+                          <button className="wm-send-recipe" title="发送至对话（来源/标签/搜索词 + 图）"
+                            onClick={(e) => { e.stopPropagation(); onSendAsRecipe(cell.m); }}>
+                            <Send size={13} />
+                          </button>
+                        )}
+                        {onSendToChat && (
+                          <button className="wm-send" title="发送至对话框（仅图片）"
+                            onClick={(e) => { e.stopPropagation(); onSendToChat(cell.m); }}>
+                            <Send size={13} />
+                          </button>
+                        )}
+                        <button className="wm-del" title="删除素材"
+                          onClick={(e) => { e.stopPropagation(); deleteOne(cell.m.filename); }}>
+                          <Trash2 size={14} />
+                        </button>
+                      </>
                     )}
                     <div className="web-materials-source">{cell.m.source_url || cell.m.filename}</div>
                   </div>

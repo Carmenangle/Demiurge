@@ -431,10 +431,16 @@ def save_web_material(output_dir: str, src: str, source_url: str = "", title: st
     }
     _save_provenance(d, provenance)
 
-    from app.services import view_urls
+    from app.services import rag_store as _rag_store, view_urls
+
+    url = view_urls.local_view(str(dest))
+    # P2-1 完整刀：落盘即资产记录（素材进资产库/标签统计/语义索引/视觉索引）。
+    # 入库失败不阻断保存——文件已落盘即报成功；资产库缺席该条只留 warning
+    # （存量补录走 scripts/index_web_materials.py）。
+    _rag_store.index_web_material_asset(url, provenance[dest.name])
     return {
         "path": str(dest),
-        "url": view_urls.local_view(str(dest)),
+        "url": url,
         "source_url": provenance[dest.name]["source_url"],
         "title": title or dest.name,
         "filename": dest.name,
@@ -530,6 +536,10 @@ def delete_web_material(output_dir: str, filename: str) -> bool:
         provenance = _load_provenance(d)
         if provenance.pop(safe_name, None) is not None:
             _save_provenance(d, provenance)
+        # P2-1 完整刀：同步删资产记录（文件已删，只删库条目；失败不阻断删文件）
+        from app.services import rag_store as _rag_store, view_urls
+
+        _rag_store.delete_web_material_asset(view_urls.local_view(str(target)))
         return True
     return False
 

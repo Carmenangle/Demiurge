@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 // 用源码锁防止「按钮加了但没接保存链」这类半落地（用户 2026-10-15 实锤：落点放错页面）。
 const view = readFileSync(new URL("../views/WebMaterialsView.tsx", import.meta.url), "utf8");
 const modal = readFileSync(new URL("../components/MaterialMarketModalLive.tsx", import.meta.url), "utf8");
+const detail = readFileSync(new URL("../components/WebMaterialDetailModal.tsx", import.meta.url), "utf8");
 const tokens = readFileSync(new URL("../views/settings/TokensPanel.tsx", import.meta.url), "utf8");
 const settings = readFileSync(new URL("../stores/settings.ts", import.meta.url), "utf8");
 
@@ -294,5 +295,79 @@ describe("多页作品文件夹聚合（2026-10-17 用户需求：98 张别平�
     expect(view).toContain("deleteFolder");                 // 整夹删除
     expect(view).toContain("m.source_url === folderView");  // 夹内页筛选
     expect(view).toContain("cell.pages.forEach((p) => names.add(p.filename))"); // 选本页含夹内全部页
+  });
+});
+
+describe("素材详情弹窗 · 竖长图不裁切（2026-10-18 用户实测：图底被截断）", () => {
+  // 根因：详情弹窗行容器 flexWrap:"wrap" + 左图盒是直接 flex 项（高度由内容推导）
+  // ⇒ 图片 maxHeight:"100%" 循环解析失效，被 overflow:"hidden" 裁底。
+  // 修法＝对齐资产库详情 RepoGallery 的可行结构（其源码注释即警告）。
+  it("行容器不 flexWrap + overflow hidden（换行⇒高度需求翻倍⇒撑破 maxHeight）", () => {
+    expect(detail).not.toContain('flexWrap: "wrap"');
+    expect(detail).toContain('display: "flex", gap: 14, overflow: "hidden"');
+  });
+
+  it("左图列 0 0 52% 竖排 + 内层 flex:1 盒（maxHeight:100% 才有确定高度可解析）", () => {
+    expect(detail).toContain('flex: "0 0 52%"');
+    expect(detail).toContain('flexDirection: "column"');
+    expect(detail).toContain("flex: 1, minHeight: 0");
+  });
+
+  it("右栏 1 1 0% + 独立滚动（basis 0 才有确定高度，内容高不被顶开）", () => {
+    expect(detail).toContain('flex: "1 1 0%"');
+    expect(detail).toContain('overflowY: "auto"');
+  });
+
+  it("图片 contain 完整显示 + 点击进共享 Lightbox（不裁切契约）", () => {
+    expect(detail).toContain('objectFit: "contain"');
+    expect(detail).toContain("openLightbox(item.url)");
+  });
+
+  it("适配语义是「以绑定边为准」的完整展示：竖长图按高、宽长图按宽，⛔ 禁 cover", () => {
+    // contain＝scale=min(盒宽/图宽, 盒高/图高)：相对更长的那条边成为绑定边，
+    // 另一方向留白 ⇒ 完整展示；cover 会裁切＝本刀要修的 bug 本身。
+    expect(detail).not.toContain('objectFit: "cover"');
+    expect(detail).toContain('maxWidth: "100%", maxHeight: "100%"');
+  });
+});
+
+describe("素材卡片 · 发送按钮与资产库对齐（2026-10-18 用户实测：卡片只有删除）", () => {
+  // 诉求：上网素材图片卡片与资产库卡片同构——hover 出现「发送至对话 / 发送至对话框 /
+  // 删除」三钮（此前只有 wm-del，发送入口只剩详情弹窗与批量选择，用户找不到）。
+  const css = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
+
+  it("图片卡片提供两个发送按钮（onSendAsRecipe/onSendToChat 均贯传到卡片）", () => {
+    expect(view).toContain('className="wm-send-recipe"');
+    expect(view).toContain('className="wm-send"');
+    expect(view).toContain("onSendAsRecipe(cell.m)");
+    expect(view).toContain("onSendToChat(cell.m)");
+  });
+
+  it("按钮 stopPropagation（不冒泡触发卡片点击＝误开详情）", () => {
+    expect(view).toContain("e.stopPropagation(); onSendAsRecipe(cell.m)");
+    expect(view).toContain("e.stopPropagation(); onSendToChat(cell.m)");
+  });
+
+  it("发送钮只在非选择模式分支渲染，且顺序＝发送至对话→发送至对话框→删除（对齐资产库）", () => {
+    const selIdx = view.indexOf("selMode ? (");
+    const elseIdx = view.indexOf(") : (", view.indexOf("wm-check", selIdx));
+    const recipeIdx = view.indexOf("wm-send-recipe", elseIdx);
+    const sendIdx = view.indexOf('className="wm-send"', recipeIdx);
+    const delIdx = view.indexOf("wm-del", sendIdx);
+    expect(recipeIdx).toBeGreaterThan(elseIdx);   // 在非 selMode 分支内
+    expect(sendIdx).toBeGreaterThan(recipeIdx);
+    expect(delIdx).toBeGreaterThan(sendIdx);
+  });
+
+  it("样式：hover 才显示，定位于删除钮左侧（right 38/70，删除 6）", () => {
+    expect(css).toContain(".web-materials-cell:hover .wm-send {");
+    expect(css).toContain(".web-materials-cell:hover .wm-send-recipe {");
+    expect(css).toContain("top: 6px; right: 38px");
+    expect(css).toContain("top: 6px; right: 70px");
+  });
+
+  it("详情弹窗底部同样保留两个发送按钮（卡片+详情双入口，不裁一）", () => {
+    expect(detail).toContain("发送至对话框");
+    expect(detail).toContain("发送至对话");
   });
 });

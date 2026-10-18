@@ -24,6 +24,10 @@ from app.services.rag_backend import EmbedConfig
 
 
 SYSTEM_COLLECTION = "global"  # 系统指令独占库，全局共享
+# 上网素材合成仓库（P2-1 完整刀）：_web_materials/ 在 outputDir 根、全局共享、
+# 不属于任何真实仓库 ⇒ 素材资产记录统一落这个作用域（Chroma 库名 repo_web_materials）。
+# ⚠ 它只是 RAG 集合作用域，不进仓库注册表/仓库选择器。
+WEB_MATERIALS_REPO_ID = "web-materials"
 _log = logging.getLogger("uvicorn.error")
 
 
@@ -89,12 +93,26 @@ def _auto_tags(prompt: str, tags: str) -> list[str]:
     return out
 
 
+def generation_doc_id(repo_id: str, image_url: str) -> str:
+    """生成/素材资产记录的 doc_id（单一公式，index 与 delete 共用）。
+
+    有图 = gen-<sha1(repo_id|image_url)>：同一张图重复入库天然 upsert（防双写/去重）；
+    无图 = 随机 uuid。⚠ 公式原内联在 index_generation，抽取须逐字等价
+    （img 先 strip、repo_id 原样拼接）。
+    """
+    img = (image_url or "").strip()
+    return ("gen-" + hashlib.sha1(f"{repo_id}|{img}".encode("utf-8")).hexdigest()
+            if img else str(uuid.uuid4()))
+
+
 def index_generation(repo_id: str, cfg: EmbedConfig,
                      prompt: str, tags: str = "", image_url: str = "",
                      created_at: int | None = None, description: str = "",
                      template_name: str = "", model_name: str = "",
                      lora_names: str = "", media_type: str = "image",
-                     derived_from: list | None = None) -> None:
+                     derived_from: list | None = None,
+                     source: str = "", source_url: str = "",
+                     source_meta: str = "") -> None:
     """生图完成后入库：提示词 + 标签合为一条文档，附图片URL元数据。写入本仓库库。
 
     只要有图片就入库——智能体出图常无提示词文本，此时用占位文本嵌入，
@@ -104,6 +122,9 @@ def index_generation(repo_id: str, cfg: EmbedConfig,
     供画布卡片展示「用哪个模板/主模型/LoRA 生成的」。
     media_type = image|video（默认 image）；derived_from 为派生链弱引用
     （[{asset_id|media_slot_ref, turn_id, kind}]，M2.1 只读展示不级联重建）。
+    source / source_url / source_meta（P2-1 素材链专用）：素材资产记录带来源
+    （渠道/来源页/作者/评级/搜索词 JSON）。默认空串 ⇒ **不写这三个键**，
+    既有生成链与历史记录形状逐字不变。
     """
     text = "\n".join(t for t in [prompt, tags, description] if t and t.strip())
     if not text.strip() and not (image_url or "").strip():
@@ -112,24 +133,31 @@ def index_generation(repo_id: str, cfg: EmbedConfig,
     tag_list = _auto_tags(prompt, tags)
     store = _store(_repo_collection(repo_id), cfg)
     img = (image_url or "").strip()
-    doc_id = ("gen-" + hashlib.sha1(f"{repo_id}|{img}".encode("utf-8")).hexdigest()
-              if img else str(uuid.uuid4()))
+    doc_id = generation_doc_id(repo_id, img)
+    metadata = {"kind": "generation", "image_url": image_url or "",
+                "repo_id": repo_id or "", "tags": ",".join(tag_list),
+                "prompt": prompt or "", "description": description or "",
+                "template_name": template_name or "",
+                "model_name": model_name or "",
+                "lora_names": lora_names or "",
+                "media_type": media_type,
+                # P0-2：本机静态图同步生成缩略图（.thumbs/ 派生层）；
+                # 远程图/视频/失败一律空串，前端回落原图，不阻断入库
+                "thumb_url": thumbnail_store.thumb_url_for(image_url),
+                "derived_from": json.dumps(derived_from or [],
+                                           ensure_ascii=False),
+                "created_at": (created_at if created_at is not None
+                               else int(time.time() * 1000))}
+    # P2-1：素材来源信息仅素材链传；默认空 ⇒ 不写键（回归锁见
+    # tests/test_web_material_assets.py::test_index_generation_默认路径不写_source三键）
+    if source:
+        metadata["source"] = source
+    if source_url:
+        metadata["source_url"] = source_url
+    if source_meta:
+        metadata["source_meta"] = source_meta
     store.add_documents([
-        Document(page_content=embed_text,
-                 metadata={"kind": "generation", "image_url": image_url or "",
-                           "repo_id": repo_id or "", "tags": ",".join(tag_list),
-                           "prompt": prompt or "", "description": description or "",
-                           "template_name": template_name or "",
-                           "model_name": model_name or "",
-                           "lora_names": lora_names or "",
-                           "media_type": media_type,
-                           # P0-2：本机静态图同步生成缩略图（.thumbs/ 派生层）；
-                           # 远程图/视频/失败一律空串，前端回落原图，不阻断入库
-                           "thumb_url": thumbnail_store.thumb_url_for(image_url),
-                           "derived_from": json.dumps(derived_from or [],
-                                                      ensure_ascii=False),
-                           "created_at": (created_at if created_at is not None
-                                          else int(time.time() * 1000))})
+        Document(page_content=embed_text, metadata=metadata)
     ], ids=[doc_id])
 
 
@@ -165,6 +193,94 @@ def index_generation_reliable(
             if attempt + 1 < max(1, attempts):
                 sleep_fn(0.8 * (attempt + 1))
     raise RuntimeError(f"入库失败(重试{max(1, attempts)}次)：{last}") from last
+
+
+def embed_config_from_state() -> EmbedConfig:
+    """后端自发入库链的嵌入配置：读 user_state.json 的 settings.embedModel。
+
+    为什么不用前端 wire 透传：/rag/* 端点由前端传三元组，但「保存素材即入库」是
+    后端自发链（image_store 保存成功后直接调），没有请求上下文带 embed 字段
+    ⇒ 与 capability_handlers._embed_config_from_state 同源读运行态真源。
+    ⚠ 已知局限：settings.embedModel.proxyUrl 是前端运行时解析值、通常不持久化
+    ⇒ 需要代理的远程嵌入端点这里取不到代理（capability_handlers 同样局限）。
+    """
+    from app.config import DATA_DIR
+
+    try:
+        st = json.loads((DATA_DIR / "user_state.json").read_text(encoding="utf-8"))
+        embed = (st.get("settings") or {}).get("embedModel") or {}
+        if not isinstance(embed, dict):
+            embed = {}
+    except (OSError, json.JSONDecodeError):
+        embed = {}
+    return EmbedConfig(
+        base_url=str(embed.get("baseUrl") or ""),
+        api_key=str(embed.get("apiKey") or ""),
+        embed_model=str(embed.get("modelName") or ""),
+        model_dir=str(embed.get("modelDir") or ""),
+        reranker_dir=str(embed.get("rerankerDir") or ""),
+        mode=str(embed.get("mode") or "remote"),
+        proxy=str(embed.get("proxyUrl") or ""),
+    )
+
+
+def index_web_material_asset(image_url: str, provenance: dict,
+                             created_at: int | None = None) -> bool:
+    """上网素材落盘后入库（P2-1 完整刀「入库即资产记录」）。
+
+    provenance：image_store 写的 _web_materials/.provenance.json 条目
+    {source_url, query, provider, title, downloaded_at, size, detected_ext,
+     tags, author, rating}。
+    - 作用域 = WEB_MATERIALS_REPO_ID（合成仓库；素材全局共享，不属任何真实仓库）；
+    - source = provider（danbooru/pixiv 原名，其余归一 "web"，枚举不无限膨胀）；
+    - tags 原站标签走 _auto_tags 同款过滤；title 作 description（进嵌入文本）；
+    - source_meta = JSON（作者/评级/搜索词/渠道/大小/下载时间）。
+
+    失败只 warning 返回 False，**绝不抛**：保存已成功，入库失败不该让用户看到
+    「保存失败」（与 capability_handlers 采集链的失败语义一致）。
+    """
+    if not (image_url or "").strip():
+        return False
+    prov = provenance if isinstance(provenance, dict) else {}
+    provider = str(prov.get("provider") or "").strip()
+    source = provider if provider in ("danbooru", "pixiv") else "web"
+    tags = ",".join(str(t) for t in (prov.get("tags") or []) if str(t).strip())
+    source_meta = json.dumps({
+        "author": str(prov.get("author") or ""),
+        "rating": str(prov.get("rating") or ""),
+        "query": str(prov.get("query") or ""),
+        "provider": provider,
+        "size": prov.get("size") or 0,
+        "downloaded_at": str(prov.get("downloaded_at") or ""),
+    }, ensure_ascii=False)
+    try:
+        index_generation(
+            WEB_MATERIALS_REPO_ID, embed_config_from_state(),
+            prompt="", tags=tags, image_url=image_url,
+            description=str(prov.get("title") or ""),
+            source=source, source_url=str(prov.get("source_url") or ""),
+            source_meta=source_meta, created_at=created_at,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 入库失败不丢文件（保存已成功）
+        _log.warning("上网素材入库失败（文件已保存，资产库将缺席该条）: %s", exc)
+        return False
+
+
+def delete_web_material_asset(image_url: str) -> bool:
+    """上网素材删除后同步删资产记录（P2-1 完整刀）。
+
+    文件已由 image_store.delete_web_material 删除 ⇒ 这里只删库条目
+    （remove_file=False）。从未入库过的素材静默返回 False。
+    """
+    if not (image_url or "").strip():
+        return False
+    try:
+        return delete_doc(generation_doc_id(WEB_MATERIALS_REPO_ID, image_url),
+                          WEB_MATERIALS_REPO_ID, embed_config_from_state())
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 删记录失败不阻断删文件
+        _log.warning("上网素材资产记录删除失败（文件已删，资产库可能留幽灵条目）: %s", exc)
+        return False
 
 
 def index_document(repo_id: str, cfg: EmbedConfig,
@@ -337,6 +453,18 @@ def _parse_derived_from(raw: str) -> list[dict]:
         return []
 
 
+def _parse_source_meta(raw: str) -> dict:
+    """解析 metadata 里 JSON 序列化的 source_meta（素材来源：作者/评级/搜索词
+    等）；损坏/空返回 {}（P2-1，读侧投影给前端详情面板）。"""
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except (ValueError, TypeError):
+        return {}
+
+
 def _dump(collection: str, cfg: EmbedConfig, where: dict | None = None) -> list[dict]:
     """导出单个 collection 的条目为统一 dict 列表。
 
@@ -374,6 +502,9 @@ def _dump(collection: str, cfg: EmbedConfig, where: dict | None = None) -> list[
             "created_at": int(meta.get("created_at", 0) or 0),
             "tag_snapshots": meta.get("tag_snapshots", ""),
             "active_tag_snapshot": meta.get("active_tag_snapshot", ""),
+            "source": meta.get("source", ""),
+            "source_url": meta.get("source_url", ""),
+            "source_meta": meta.get("source_meta", ""),
         })
     return out
 
@@ -421,6 +552,10 @@ def list_generations(repo_id: str, cfg: EmbedConfig, *, limit: int = 0,
                     # （`/rag/generate-thumbs` 补生成后不重嵌元数据也能生效）
                     "thumbUrl": d.get("thumb_url", "") or thumbnail_store.thumb_url_if_ready(d["image_url"]),
                     "derivedFrom": _parse_derived_from(d.get("derived_from", "")),
+                    # P2-1：素材资产来源（generation 链为空串/{}，前端 `|| ""` 兼容历史记录）
+                    "source": d.get("source", ""),
+                    "sourceUrl": d.get("source_url", ""),
+                    "sourceMeta": _parse_source_meta(d.get("source_meta", "")),
                     "created_at": d.get("created_at", 0)})
     if limit <= 0 and before_ts <= 0:
         return out  # 默认路径：原顺序原样返回

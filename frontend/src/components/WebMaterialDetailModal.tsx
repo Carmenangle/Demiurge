@@ -79,23 +79,33 @@ export function WebMaterialDetailModal({
       >
         <h3 style={{ marginTop: 0, marginBottom: 10, flexShrink: 0 }}>素材详情</h3>
 
-        {/* 左图右信息（左：完整图片；右：来源与标签） */}
-        <div style={{ flex: 1, minHeight: 0, display: "flex", gap: 14, flexWrap: "wrap" }}>
-          <div style={{
-            flex: "1 1 56%", minWidth: 260, minHeight: 200,
-            display: "flex", alignItems: "center", justifyContent: "center",
-            background: "var(--surface-2)", borderRadius: 10, overflow: "hidden",
-          }}>
-            <img
-              src={item.url}
-              alt={item.title}
-              title="点击全屏查看（滚轮缩放）"
-              onClick={() => openLightbox(item.url)}
-              style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", cursor: "zoom-in" }}
-            />
+        {/* 左图右信息（结构对齐资产库详情 RepoGallery：其源码注释即本例的警告）
+            ⚠ 不要 flexWrap：换行会让容器高度需求翻倍 ⇒ 撑破 maxHeight、右栏失去滚动 */}
+        <div style={{ flex: 1, minHeight: 0, display: "flex", gap: 14, overflow: "hidden" }}>
+          {/* 左：完整图片 / 点击进共享 Lightbox 全屏（2026-10-18 修裁切：
+              左列改 0 0 52% 竖排 + 内层 flex:1 盒 ⇒ 图片 maxHeight:100% 有确定高度
+              可解析；此前左盒是直接 flex 项、高度由内容推导，竖长图被 overflow 裁底。
+              ⚠ 适配语义＝contain「以绑定边为准」：竖长图（长边＝高）按高度收窄、
+              宽长图（长边＝宽）按宽度收窄，**完整展示不裁剪**；⛔ 不得改 cover
+              （cover＝裁切，正是本刀要修的 bug） */}
+          <div style={{ flex: "0 0 52%", minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column" }}>
+            <div style={{
+              flex: 1, minHeight: 0, display: "flex", alignItems: "center",
+              justifyContent: "center", background: "var(--surface-2)",
+              borderRadius: 10, overflow: "hidden",
+            }}>
+              <img
+                src={item.url}
+                alt={item.title}
+                title="点击全屏查看（滚轮缩放）"
+                onClick={() => openLightbox(item.url)}
+                style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", cursor: "zoom-in" }}
+              />
+            </div>
           </div>
 
-          <div style={{ flex: "1 1 38%", minWidth: 240, overflow: "auto", paddingRight: 4 }}>
+          {/* 右：来源与标签（可滚动；flex-basis 0 才不会被内容顶开） */}
+          <div style={{ flex: "1 1 0%", minWidth: 0, minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
             {/* 分区 1：来源（谁/从哪来） */}
             <Section title="来源" first>
               {row("来源站", item.provider ? <b>{item.provider}</b> : "—")}

@@ -1037,7 +1037,26 @@ export interface Generation {
     turn_id?: string;
     kind?: string;
   }>;
+  /** P2-1：素材资产来源（上网素材「落盘即资产记录」；generation 链为空/缺失） */
+  source?: string;
+  sourceUrl?: string;
+  sourceMeta?: {
+    author?: string;
+    rating?: string;
+    query?: string;
+    provider?: string;
+    size?: number;
+    downloaded_at?: string;
+  };
 }
+
+/**
+ * 上网素材合成仓库 id（P2-1）——与后端 `rag_store.WEB_MATERIALS_REPO_ID` 同值。
+ * 素材在 `outputDir/_web_materials/` 全局共享、不属于任何真实仓库 ⇒ 资产记录统一落
+ * 这个作用域；资产库（AssetsView）把它并入 repoIds 聚合展示，标签统计/语义搜索/
+ * 视觉索引/WD14 反推全链路复用。⚠ 它不是真仓库，不进仓库注册表/选择器。
+ */
+export const WEB_MATERIALS_REPO_ID = "web-materials";
 
 // 列出某仓库的生成记录（图片+提示词+标签），供仓库详情页图片网格
 export function listGenerations(
