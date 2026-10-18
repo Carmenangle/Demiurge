@@ -278,17 +278,45 @@ _REVERSE_SYSTEM = (
 )
 
 
+def _downscale_datauri(u: str, max_side: int = 1024) -> str:
+    """把 dataURI 图缩到长边 ≤ max_side 再以 JPEG 重编码后返回。
+
+    为什么必须缩：视觉模型按像素计 token——一张 3.5MB 原图（≈1500px+）编码成 ~4150
+    token，会超出小上下文 VLM 的上限（qwen3vl:8b 走 Ollama 仅 4096 ctx ⇒ 直接 400，
+    前端看到 502）。缩到长边 1024 后 token 大幅下降、还能加速推理；gemma4 等大 ctx
+    模型同样受益（更快）。非 dataURI（http 直链）或解码失败则原样返回交给模型侧。
+    """
+    import base64
+    import io
+
+    if not isinstance(u, str) or not u.startswith("data:"):
+        return u
+    try:
+        from PIL import Image
+
+        _header, b64 = u.split(",", 1)
+        img = Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
+        img.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, "JPEG", quality=85, optimize=True)
+        return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+    except Exception:  # noqa: BLE001 [EXC-留痕] 解码失败原样发，让模型侧报真实错
+        return u
+
+
 @router.post("/describe-image")
 def describe_image(req: DescribeImageRequest) -> dict[str, object]:
     """反推：看图输出提示词（/r）。需视觉模型，复用「对话模型」配置。"""
     if not req.images:
         raise HTTPException(status_code=400, detail="没有图片输入")
+    # 先缩图再喂模型：降 token（塞进小 ctx VLM）＋加速（2026-10-18 qwen3vl:8b 实测 4150>4096 报 400）
+    images = [_downscale_datauri(u) for u in req.images]
     llm = build_chat_model(
         req.base_url, req.api_key, req.model, temperature=0.3, proxy=req.proxy,
     )
     from langchain_core.messages import HumanMessage, SystemMessage
     content: list = [{"type": "text", "text": req.hint or "请反推这张图片的提示词"}]
-    content += [{"type": "image_url", "image_url": {"url": u}} for u in req.images]
+    content += [{"type": "image_url", "image_url": {"url": u}} for u in images]
     try:
         resp = llm.invoke([SystemMessage(content=_REVERSE_SYSTEM),
                            HumanMessage(content=content)])

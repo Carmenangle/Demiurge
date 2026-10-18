@@ -132,3 +132,41 @@ def test_unknown_filter_falls_back_to_lanczos():
     data, w, _, _ = image_resize.resize(
         _png(_detailed(128, 64)), target_w=64, filter_name="nope")
     assert w == 64 and data
+
+
+# ---- describe-image 前置缩图（2026-10-18：qwen3vl:8b 4096 ctx，3.5MB 原图 ≈4150 token 报 400）----
+from app.routers.ai_text import _downscale_datauri  # noqa: E402
+
+
+def _datauri(img, fmt="PNG"):
+    import base64
+
+    buf = io.BytesIO()
+    img.save(buf, format=fmt)
+    return "data:image/%s;base64,%s" % (fmt.lower(), base64.b64encode(buf.getvalue()).decode())
+
+
+def test_downscale_caps_long_side():
+    """竖长巨图必须压到长边 ≤1024（塞进小 ctx VLM + 加速），并统一成 JPEG。"""
+    import base64
+
+    uri = _downscale_datauri(_datauri(_detailed(400, 880)), max_side=1024)
+    assert uri.startswith("data:image/jpeg;base64,")
+    out = Image.open(io.BytesIO(base64.b64decode(uri.split(",", 1)[1])))
+    assert max(out.size) <= 1024 and out.format == "JPEG"
+
+
+def test_downscale_keeps_small_image_as_jpeg():
+    """本就小的图也统一转 JPEG（去 alpha、统一格式），尺寸不放大。"""
+    import base64
+
+    uri = _downscale_datauri(_datauri(_detailed(200, 120)), max_side=1024)
+    out = Image.open(io.BytesIO(base64.b64decode(uri.split(",", 1)[1])))
+    assert out.size == (200, 120) and out.format == "JPEG"
+
+
+def test_downscale_passthrough_non_datauri_and_garbage():
+    """http 直链 / 非 dataURI 原样返回；坏 dataURI 也不炸（原样交模型侧报错）。"""
+    assert _downscale_datauri("http://x/y.png") == "http://x/y.png"
+    bad = "data:image/png;base64,!!!notbase64!!!"
+    assert _downscale_datauri(bad) == bad
