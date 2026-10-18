@@ -274,3 +274,40 @@ def _block_os_folder_reveal(monkeypatch):
 
     monkeypatch.setattr(collection_artifacts, "reveal_in_folder", _never_reveal)
     monkeypatch.setattr(artifacts_router, "reveal_in_folder", _never_reveal)
+
+
+# ===== P1 资产主表（2026-10-18）：双写会落 app.db —— 全量测试一律指向 tmp =====
+# rag_store.index_generation / delete_doc / set_doc_tags 现在会双写 SQLite 主表；
+# 若不隔离，跑一次全量测试就往用户真实 app.db 里灌几百条假资产（repo="r1" 之类）。
+# 做法＝模板库 init 一次 + 每个测试复制一份 ⇒ 隔离且便宜（读路径「空库回退 Chroma」
+# 的断言也依赖每测试干净库，共享库会串味）。
+
+@pytest.fixture(scope="session")
+def _app_db_template(tmp_path_factory):
+    from app import db as app_db
+
+    path = tmp_path_factory.mktemp("appdb-template") / "app.db"
+    original = app_db.DB_PATH
+    app_db.DB_PATH = path
+    try:
+        app_db.init_db()
+    finally:
+        app_db.DB_PATH = original
+    return path
+
+
+@pytest.fixture(autouse=True)
+def _isolate_app_db(_app_db_template, monkeypatch, tmp_path_factory):
+    """每测试一份全新的主表副本（模板克隆）；需要自定义时自行再 monkeypatch DB_PATH。
+
+    ⚠ 副本必须放**独立目录**（tmp_path_factory.mktemp），不能塞进用例的 tmp_path——
+    多个用例断言「tmp_path 里只有自己写的文件」，多一个 app.db 就假红
+    （2026-10-18 首轮全量实锤 5 例）。
+    """
+    import shutil
+
+    from app import db as app_db
+
+    target = tmp_path_factory.mktemp("appdb-run") / "app.db"
+    shutil.copyfile(_app_db_template, target)
+    monkeypatch.setattr(app_db, "DB_PATH", target)

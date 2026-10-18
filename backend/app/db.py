@@ -24,6 +24,19 @@ def connection_scope() -> Iterator[sqlite3.Connection]:
 
 def init_db() -> None:
     with get_connection() as connection:
+        # P1 资产主表：FTS5 **外部内容表**的列名必须与内容表（assets）列名一致。
+        # 早期 schema 误用列名 `tags`（内容表实际叫 tags_json）⇒ FTS 需读列值的路径
+        # （count/rebuild）报 "no such column: T.tags"。检测到旧形态先删表删触发器，
+        # 随后按新 schema 重建并 rebuild 索引（幂等；已正确的库不动）。
+        stale_fts = False
+        row = connection.execute(
+            "select sql from sqlite_master where name = 'assets_fts'"
+        ).fetchone()
+        if row is not None and "tags_json" not in (row[0] or ""):
+            connection.execute("drop table assets_fts")
+            for trig in ("assets_ai", "assets_ad", "assets_au"):
+                connection.execute(f"drop trigger if exists {trig}")
+            stale_fts = True
         connection.executescript(
             """
             create table if not exists ai_providers (
@@ -156,5 +169,67 @@ def init_db() -> None:
             );
             create index if not exists idx_plan_task_steps_seq
                 on plan_task_steps(task_id, seq);
+
+            -- ===== P1-1 资产主表（元数据真相）＋ P1-2 回收站 ＋ P1-3 FTS5（2026-10-18）=====
+            -- schema 按 docs/PLAN-ASSET-LIBRARY-UX §P1-1；另加 derived_from（读侧契约
+            -- 需要派生链，否则详情面板「派生来源」断）。deleted_at 非空＝回收站。
+            -- 双写纪律：rag_store 写 Chroma 后同步这里（失败只 warning，回填脚本可补）；
+            -- 读路径（列表/标签统计/结构化搜索/回收站）以本表为准，语义检索仍走 Chroma。
+            create table if not exists assets (
+                id text primary key,
+                repo_id text not null default '',
+                kind text not null default 'generation',
+                media_type text not null default 'image',
+                source text not null default '',
+                image_url text not null default '',
+                thumb_url text not null default '',
+                prompt text not null default '',
+                description text not null default '',
+                tags_json text not null default '[]',
+                template_name text not null default '',
+                model_name text not null default '',
+                lora_names text not null default '',
+                created_at integer not null default 0,
+                deleted_at integer,
+                source_url text not null default '',
+                source_meta text not null default '',
+                derived_from text not null default '[]'
+            );
+            create index if not exists idx_assets_repo_created
+                on assets(repo_id, created_at);
+            create index if not exists idx_assets_deleted
+                on assets(deleted_at);
+            create table if not exists asset_tags (
+                asset_id text not null,
+                tag text not null,
+                repo_id text not null default '',
+                primary key (asset_id, tag)
+            );
+            create index if not exists idx_asset_tags_tag
+                on asset_tags(tag, repo_id);
+            -- FTS5 外部内容表（正文留在 assets，触发器同步索引；unicode61 对英文标签够用，
+            -- 中文子串检索由 SQL 侧 LIKE 兜底）。⚠ 列名必须与 assets 列名逐一对应
+            -- （外部内容表契约），故用 tags_json 而非 tags。
+            create virtual table if not exists assets_fts using fts5(
+                prompt, description, tags_json,
+                content='assets', content_rowid='rowid', tokenize='unicode61'
+            );
+            create trigger if not exists assets_ai after insert on assets begin
+                insert into assets_fts(rowid, prompt, description, tags_json)
+                values (new.rowid, new.prompt, new.description, new.tags_json);
+            end;
+            create trigger if not exists assets_ad after delete on assets begin
+                insert into assets_fts(assets_fts, rowid, prompt, description, tags_json)
+                values ('delete', old.rowid, old.prompt, old.description, old.tags_json);
+            end;
+            create trigger if not exists assets_au after update on assets begin
+                insert into assets_fts(assets_fts, rowid, prompt, description, tags_json)
+                values ('delete', old.rowid, old.prompt, old.description, old.tags_json);
+                insert into assets_fts(rowid, prompt, description, tags_json)
+                values (new.rowid, new.prompt, new.description, new.tags_json);
+            end;
             """
         )
+        if stale_fts:
+            # 旧 FTS 表已重建 ⇒ 从 assets 重建索引（否则检索空）
+            connection.execute("insert into assets_fts(assets_fts) values('rebuild')")

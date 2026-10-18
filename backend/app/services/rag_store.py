@@ -17,9 +17,12 @@ import uuid
 import json
 from pathlib import Path
 
+import httpx
 from langchain_core.documents import Document
 
-from app.services import comfyui_client, rag_backend, rag_retrieval, reranker, thumbnail_store
+from app.services import (
+    asset_store, comfyui_client, rag_backend, rag_retrieval, reranker, thumbnail_store,
+)
 from app.services.rag_backend import EmbedConfig
 
 
@@ -29,6 +32,26 @@ SYSTEM_COLLECTION = "global"  # 系统指令独占库，全局共享
 # ⚠ 它只是 RAG 集合作用域，不进仓库注册表/仓库选择器。
 WEB_MATERIALS_REPO_ID = "web-materials"
 _log = logging.getLogger("uvicorn.error")
+
+
+def _asset_db_delete(ids: list[str]) -> None:
+    """主表对账硬删（prune/dedup：破损与重复记录不进回收站）。失败只留痕。"""
+    try:
+        asset_store.delete_rows(ids)
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 主表对账失败不阻断向量侧清理
+        _log.warning("资产主表硬删失败 ids=%s: %s", ids, exc)
+
+
+def _sync_asset_tags(doc_id: str, tags: list[str]) -> None:
+    """主表标签对账（快照新增/切换/删除后调用）。
+
+    SQLite 主表是**列表与 FTS5 搜索的真源**：只改 Chroma 元数据的话，刷新后
+    列表还显示旧标签（2026-10-18 用户实测快照切换后标签回退）。失败只留痕。
+    """
+    try:
+        asset_store.sync_tags(doc_id, [str(t) for t in tags if str(t).strip()])
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 主表同步失败不阻断向量写
+        _log.warning("主表标签同步失败 id=%s: %s", doc_id, exc)
 
 
 class DocumentImportError(RuntimeError):
@@ -159,6 +182,12 @@ def index_generation(repo_id: str, cfg: EmbedConfig,
     store.add_documents([
         Document(page_content=embed_text, metadata=metadata)
     ], ids=[doc_id])
+    # P1-1 双写（2026-10-18）：元数据真相落 SQLite 主表。失败只留痕——
+    # 向量已入库，主表可由 scripts/backfill_asset_db.py 幂等补齐。
+    try:
+        asset_store.upsert_from_generation(repo_id, metadata, doc_id)
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 主表双写失败不阻断入库
+        _log.warning("资产主表双写失败 id=%s: %s", doc_id, exc)
 
 
 def index_generation_reliable(
@@ -233,7 +262,9 @@ def index_web_material_asset(image_url: str, provenance: dict,
      tags, author, rating}。
     - 作用域 = WEB_MATERIALS_REPO_ID（合成仓库；素材全局共享，不属任何真实仓库）；
     - source = provider（danbooru/pixiv 原名，其余归一 "web"，枚举不无限膨胀）；
-    - tags 原站标签走 _auto_tags 同款过滤；title 作 description（进嵌入文本）；
+    - tags 原站标签走 _auto_tags 同款过滤；**title 作 prompt**（进嵌入文本）；
+      2026-10-18 修正：此前 title 塞 description ⇒ 素材的「视觉描述」字段其实是标题
+      （用户实测「素材只有标签没有描述」），描述字段留空等 VLM 生成。
     - source_meta = JSON（作者/评级/搜索词/渠道/大小/下载时间）。
 
     失败只 warning 返回 False，**绝不抛**：保存已成功，入库失败不该让用户看到
@@ -256,8 +287,8 @@ def index_web_material_asset(image_url: str, provenance: dict,
     try:
         index_generation(
             WEB_MATERIALS_REPO_ID, embed_config_from_state(),
-            prompt="", tags=tags, image_url=image_url,
-            description=str(prov.get("title") or ""),
+            prompt=str(prov.get("title") or ""), tags=tags, image_url=image_url,
+            description="",
             source=source, source_url=str(prov.get("source_url") or ""),
             source_meta=source_meta, created_at=created_at,
         )
@@ -465,6 +496,16 @@ def _parse_source_meta(raw: str) -> dict:
         return {}
 
 
+def _fresh_thumb_url(stored: str, image_url: str) -> str:
+    """缩略图 URL 取用（2026-10-18）：元数据 thumb_url 若指向**已不存在文件** ⇒
+    丢弃（防网格渲染破图），回退「只查不生成」的派生发现（历史补生成后无需重嵌
+    元数据也能生效）。真实文件存在则原样返回（不因探测抖动换 URL）。"""
+    thumb = (stored or "").strip()
+    if thumb and thumbnail_store.local_path_of_url(thumb) is None:
+        thumb = ""
+    return thumb or thumbnail_store.thumb_url_if_ready(image_url)
+
+
 def _dump(collection: str, cfg: EmbedConfig, where: dict | None = None) -> list[dict]:
     """导出单个 collection 的条目为统一 dict 列表。
 
@@ -550,7 +591,10 @@ def list_generations(repo_id: str, cfg: EmbedConfig, *, limit: int = 0,
                     "mediaType": d.get("media_type", "image"),
                     # P0-2：优先用入库时写入的 thumb_url；历史记录没有时读路径兜底发现
                     # （`/rag/generate-thumbs` 补生成后不重嵌元数据也能生效）
-                    "thumbUrl": d.get("thumb_url", "") or thumbnail_store.thumb_url_if_ready(d["image_url"]),
+                    # 2026-10-18：元数据 thumb_url 可能**陈旧**（.thumbs 被清/迁移后文件
+                    # 已不在）⇒ 指向失效文件时必须丢弃，否则网格直接渲染破图（prune 只看
+                    # 原图，救不了这个场景）。
+                    "thumbUrl": _fresh_thumb_url(d.get("thumb_url", ""), d["image_url"]),
                     "derivedFrom": _parse_derived_from(d.get("derived_from", "")),
                     # P2-1：素材资产来源（generation 链为空串/{}，前端 `|| ""` 兼容历史记录）
                     "source": d.get("source", ""),
@@ -568,7 +612,9 @@ def _generation_search_item(item: dict) -> dict:
         item.get("prompt", ""), " ".join(item.get("tags", [])),
         item.get("description", ""),
     ] if value)
-    return {**item, "content": content, "title": item.get("description", "")}
+    # 标题：描述优先（生成图的语义摘要），回退 prompt（素材的 title 存在 prompt 里，
+    # 2026-10-18 起描述字段只放 VLM 视觉描述）
+    return {**item, "content": content, "title": item.get("description") or item.get("prompt") or ""}
 
 
 def search_generations(repo_ids: list[str], cfg: EmbedConfig,
@@ -662,6 +708,12 @@ def set_doc_tags(doc_id: str, repo_id: str, cfg: EmbedConfig,
             str(meta.get("description") or ""),
         ] if value) or "生成图片"
     store.update_document(doc_id, Document(page_content=content, metadata=meta))
+    # P1 主表对账：标签改动同步（asset_tags 精确过滤 + FTS 重建）
+    if meta.get("kind") == "generation":
+        try:
+            asset_store.sync_tags(doc_id, list(dict.fromkeys(clean)))
+        except Exception as exc:  # noqa: BLE001 [EXC-留痕] 主表同步失败不阻断向量写
+            _log.warning("主表标签同步失败 id=%s: %s", doc_id, exc)
     return True
 
 
@@ -700,6 +752,8 @@ def add_tag_snapshot(doc_id: str, repo_id: str, cfg: EmbedConfig,
     meta["active_tag_snapshot"] = snap["id"]
     meta["tags"] = ",".join(clean)
     store.update_document(doc_id, Document(page_content=_content_for(meta), metadata=meta))
+    # P1 主表对账（2026-10-18）：快照操作也必须同步 SQLite，否则列表/搜索读主表会看到旧标签
+    _sync_asset_tags(doc_id, clean)
     return snap
 
 
@@ -723,6 +777,7 @@ def set_active_tag_snapshot(doc_id: str, repo_id: str, cfg: EmbedConfig,
     meta["active_tag_snapshot"] = str(snapshot_id)
     meta["tags"] = ",".join(snap.get("tags") or [])
     store.update_document(doc_id, Document(page_content=_content_for(meta), metadata=meta))
+    _sync_asset_tags(doc_id, list(snap.get("tags") or []))   # P1 主表对账
     return True
 
 
@@ -746,6 +801,7 @@ def delete_tag_snapshot(doc_id: str, repo_id: str, cfg: EmbedConfig,
             meta["active_tag_snapshot"] = ""
             meta["tags"] = ""
     store.update_document(doc_id, Document(page_content=_content_for(meta), metadata=meta))
+    _sync_asset_tags(doc_id, [t for t in (meta.get("tags") or "").split(",") if t.strip()])
     return True
 
 
@@ -767,6 +823,11 @@ def set_generation_description(doc_id: str, repo_id: str, cfg: EmbedConfig,
     meta["description"] = value
     content = "\n".join(part for part in [prompt, str(meta.get("tags") or ""), value] if part)
     store.update_document(doc_id, Document(page_content=content, metadata=meta))
+    # P1 主表对账：描述同步（FTS 索引由触发器重建）
+    try:
+        asset_store.sync_description(doc_id, value)
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 主表同步失败不阻断向量写
+        _log.warning("主表描述同步失败 id=%s: %s", doc_id, exc)
     return True
 
 
@@ -816,6 +877,13 @@ def delete_doc(doc_id: str, repo_id: str, cfg: EmbedConfig,
     if remove_file and meta.get("kind") == "generation":
         _remove_local_image(meta.get("image_url", ""))
     store.delete(ids=[doc_id])
+    # P1-2 回收站（2026-10-18）：向量立即删（语义检索不再命中），元数据主表置
+    # deleted_at（可恢复）。先 upsert 再软删 ⇒ 即使这条尚未回填过也能进回收站。
+    try:
+        asset_store.upsert_from_generation(repo_id, meta, doc_id)
+        asset_store.soft_delete(doc_id)
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 回收站记账失败不阻断删除
+        _log.warning("回收站记账失败 id=%s: %s", doc_id, exc)
     return True
 
 
@@ -842,6 +910,7 @@ def dedup_generations(repo_id: str, cfg: EmbedConfig) -> int:
         for d in docs[1:]:
             try:
                 store.delete(ids=[d["id"]])
+                _asset_db_delete([d["id"]])   # 主表对账：去重硬删（不进回收站）
                 removed += 1
             except Exception as exc:  # noqa: BLE001 - 去重删除失败留痕：重复条目会残留
                 _log.warning("生成图去重删除失败 id=%s url=%s: %s", d.get("id"), url, exc)
@@ -898,6 +967,61 @@ def _remote_view_target(image_url: str) -> dict | None:
         return None
 
 
+def _probe_external_image(url: str, timeout: float = 8) -> str:
+    """外部 http(s) 图存在性探测（裂图清理用，2026-10-18）。
+
+    返回三态 "ok"/"missing"/"unreachable"：
+    - HEAD 优先；404/410 ⇒ missing（云端产物过期/删除的典型形态）；
+    - 2xx ⇒ ok；405/501（CDN 不支持 HEAD）⇒ 用 Range GET 复核一次；
+    - 其余状态、非 http(s) 形态、网络/TLS 异常 ⇒ unreachable（调用方按保留处理，
+      绝不因探测失败误删真源）。
+    ⚠ trust_env=False：不走环境代理（后端探活按直连判定；用户环境需代理时
+    探活失败只会导致保留，不会误删）。
+    """
+    if not re.match(r"^https?://", url or "", re.IGNORECASE):
+        return "unreachable"
+    try:
+        with httpx.Client(trust_env=False, follow_redirects=True, timeout=timeout) as client:
+            resp = client.head(url)
+            status = resp.status_code
+            if status in (404, 410):
+                return "missing"
+            if 200 <= status < 300:
+                return "ok"
+            if status in (405, 501):
+                resp = client.get(url, headers={"Range": "bytes=0-0"})
+                status = resp.status_code
+                if status in (404, 410):
+                    return "missing"
+                return "ok" if 200 <= status < 400 else "unreachable"
+            return "unreachable"
+    except Exception:  # noqa: BLE001 - 探活失败一律视为无法判定（保留）
+        return "unreachable"
+
+
+def list_generations_multi(repo_ids: list[str], cfg: EmbedConfig, *, limit: int = 0,
+                           before_ts: int = 0) -> list[dict]:
+    """多仓库合并列表（P0-1 keyset 分页的聚合页扩展，2026-10-18）。
+
+    资产库页聚合全部仓库：此前只能「全量 dump 后前端切片」，千图库首屏越来越慢。
+    这里每库按同一游标各取 limit 条 → 按 created_at 倒序归并 → 截 limit。
+    全局 top-limit 必在各库 top-limit 的并集内 ⇒ 游标翻页不重不漏。
+    limit=0 = 全量合并（旧行为，兼容升级全量/搜索路径）；按 id 去重（防御性）。
+    """
+    merged: list[dict] = []
+    for rid in repo_ids:
+        merged.extend(list_generations(rid, cfg, limit=limit, before_ts=before_ts))
+    merged.sort(key=lambda d: d.get("created_at", 0), reverse=True)
+    out: list[dict] = []
+    seen: set[str] = set()
+    for d in merged:
+        if d["id"] in seen:
+            continue
+        seen.add(d["id"])
+        out.append(d)
+    return out[:limit] if limit > 0 else out
+
+
 def prune_missing_generations(repo_id: str, cfg: EmbedConfig) -> int:
     """清理「僵尸记录」：指向本机留存图、但磁盘文件已不存在的 generation 条目
     （多因用户手动删磁盘文件、未走应用删除按钮，留下裂图记录）。返回删除条数。
@@ -921,16 +1045,76 @@ def prune_missing_generations(repo_id: str, cfg: EmbedConfig) -> int:
                     target["url"], target["filename"],
                     target["type"], target["subfolder"],
                 ) == "missing"
+            else:
+                # 2026-10-18（用户实测：清理裂图后 aiproxy 云端死链仍在）：外部 http(s)
+                # 直链此前一律「无法判定→保留」⇒ 断链永远清不掉。改为显式探活：
+                # 404/410 判缺失；200/网络异常仍保留（防误删）。
+                missing = _probe_external_image(image_url) == "missing"
         if not missing:
             continue  # 文件仍在 / 无法判定（外链、ComfyUI 未起）→ 保留
         if p is not None:
             thumbnail_store.remove_thumb(p)  # 裂图记录清除时顺手清派生缩略图
         try:
             store.delete(ids=[d["id"]])
+            _asset_db_delete([d["id"]])   # 主表对账：裂图硬删（不进回收站）
             removed += 1
         except Exception as exc:  # noqa: BLE001 - 失效清理失败留痕：幽灵条目会残留
             _log.warning("失效生成图清理失败 id=%s: %s", d.get("id"), exc)
     return removed
+
+
+# 保留/合成 repo_id：不参与孤儿判定（素材合成仓库 + 默认 home）。
+_RESERVED_REPO_IDS = {WEB_MATERIALS_REPO_ID, "home"}
+
+
+def _registered_repo_ids() -> set[str]:
+    """已注册仓库 id 集合（user_state.repos，前端仓库注册表的后端镜像）。
+    读失败/无文件返回空集——空集会让「所有有记录的仓库」都算孤儿，过于激进，
+    故读取异常时保守返回空集并留痕，由调用方决定是否继续。"""
+    try:
+        from app.config import DATA_DIR
+
+        p = DATA_DIR / "user_state.json"
+        if not p.is_file():
+            return set()
+        st = json.loads(p.read_text(encoding="utf-8"))
+        return {str(r.get("id")) for r in (st.get("repos") or []) if r.get("id")}
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 读注册表失败不炸，返回空集
+        _log.warning("读注册仓库表失败: %s", exc)
+        return set()
+
+
+def prune_orphan_repos(cfg: EmbedConfig) -> dict:
+    """孤儿仓库清理（2026-10-18）：把「有资产记录、但不在注册表、也非合成 repo」的仓库
+    也纳入 prune。此前 prune 只跑前端传来的注册仓库 ⇒ 孤儿仓库（删了文件夹/丢了注册）
+    的裂图记录永远清不掉、在搜索里冒幽灵。
+
+    对每个孤儿跑 prune_missing_generations——**只删磁盘文件已缺失的记录**；文件仍在的
+    保留（仓库可能只是暂时未注册，防止误删真源）。返回 {orphan_repos, removed, per_repo}。
+    """
+    registered = _registered_repo_ids()
+    conn = asset_store.get_connection()
+    try:
+        # 只算**在线**记录（deleted_at is null）——回收站软删行不掺和，避免把
+        # 回收站里的行误判成孤儿、清掉用户本想保留/待还原的记录。
+        rows = conn.execute(
+            "select distinct repo_id from assets where deleted_at is null"
+        ).fetchall()
+    finally:
+        conn.close()
+    all_ids = {str(r["repo_id"]) for r in rows if r["repo_id"]}
+    orphans = sorted(all_ids - registered - _RESERVED_REPO_IDS)
+    per_repo: dict[str, int] = {}
+    total = 0
+    for rid in orphans:
+        try:
+            n = prune_missing_generations(rid, cfg)
+        except Exception as exc:  # noqa: BLE001 [EXC-留痕] 单个孤儿失败不阻断其余
+            _log.warning("孤儿仓库清理失败 repo=%s: %s", rid, exc)
+            n = 0
+        per_repo[rid] = n
+        total += n
+    return {"orphan_repos": orphans, "removed": total, "per_repo": per_repo}
 
 
 def update_doc(doc_id: str, text: str, repo_id: str, cfg: EmbedConfig,

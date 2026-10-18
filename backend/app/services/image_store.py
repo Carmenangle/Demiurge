@@ -499,14 +499,27 @@ def list_web_materials(output_dir: str) -> list[dict]:
     if not d.exists():
         return []
     from app.services import view_urls
+    # 2026-10-18：素材也进了资产主表（P1）——列表顺带投影 assetId（RAG 文档 id，
+    # 反推/描述落库要用）与已生成的视觉描述，避免逐张再查一次。
+    from app.services import asset_store, rag_store
     provenance = _load_provenance(d)
+    desc_by_asset: dict[str, str] = {}
+    try:
+        for asset in asset_store.list_assets([rag_store.WEB_MATERIALS_REPO_ID]):
+            desc_by_asset[asset["id"]] = asset.get("description") or ""
+    except Exception:  # noqa: BLE001 [EXC-保留] 主表不可用不影响素材列表
+        desc_by_asset = {}
     items = []
     for f in sorted(d.iterdir(), key=lambda x: x.name, reverse=True):
         if f.is_file() and f.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"):
             meta = provenance.get(f.name, {})
+            url = view_urls.local_view(str(f))
+            asset_id = rag_store.generation_doc_id(rag_store.WEB_MATERIALS_REPO_ID, url)
             items.append({
                 "path": str(f),
-                "url": view_urls.local_view(str(f)),
+                "url": url,
+                "assetId": asset_id,
+                "description": desc_by_asset.get(asset_id, ""),
                 "source_url": meta.get("source_url") or "",
                 "title": meta.get("title") or f.name,   # 优先用原始标题；旧记录无此键回退文件名
                 "filename": f.name,

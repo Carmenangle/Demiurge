@@ -22,6 +22,9 @@ _log = logging.getLogger("uvicorn.error")
 _THUMB_EDGE = 512
 _JPEG_QUALITY = 82
 _THUMB_DIR = ".thumbs"
+# 媒体产出按类型分夹（2026-10-17 迁移）：老索引记 `<仓库>/<name>`，真实文件在
+# `<仓库>/<类型>/<name>` ⇒ URL 解析要按这张表回退（见 local_path_of_url 注释）。
+_KIND_DIRS = ("pictures", "videos", "audios")
 # 只处理静态图（视频缩略图需抽帧，超 P0-2 范围；GIF 由 Pillow 天然抽首帧）
 _STATIC_EXTS = {"jpg", "jpeg", "png", "webp", "bmp", "gif"}
 
@@ -32,12 +35,27 @@ def thumb_path_for(image_path: Path) -> Path:
 
 
 def local_path_of_url(image_url: str) -> Path | None:
-    """从 local-view?path=... 解出本机磁盘路径；非本机留存图/文件不存在返回 None。"""
+    """从 local-view?path=... 解出本机磁盘路径；非本机留存图/文件不存在返回 None。
+
+    2026-10-18（用户实锤「反推打标报仅支持本机留存图片，但图明明在盘上」）：
+    媒体产出早已按类型迁入 `<仓库>/pictures|videos|audios/`，但老索引仍记
+    `<仓库>/<name>` ⇒ 原路径不存在时必须到同级类型夹找同名文件（与
+    `rag_store.local_path_of` 同一张回退表）。此前这里只认精确路径，导致
+    **打标 / 自动描述 / 补缩略图** 对 200/203 条老记录一律假报「远程图」。
+    """
     if not image_url or "local-view" not in image_url:
         return None
     value = (parse_qs(urlparse(image_url).query).get("path") or [""])[0]
     path = Path(unquote(value)) if value else None
-    return path if path and path.is_file() else None
+    if path is None:
+        return None
+    if path.is_file():
+        return path
+    for sub in _KIND_DIRS:
+        alt = path.parent / sub / path.name
+        if alt.is_file():
+            return alt
+    return None
 
 
 def ensure_thumb(image_path: Path) -> Path | None:

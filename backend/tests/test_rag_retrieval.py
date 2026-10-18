@@ -178,6 +178,10 @@ def test_prune_removes_only_missing_local_generation(tmp_path, monkeypatch):
     ]
     monkeypatch.setattr(rag_store, "_store", lambda *_args: FakeStore())
     monkeypatch.setattr(rag_store, "_dump", lambda *_args: rows)
+    # 2026-10-18：外部 http(s) 图改为显式探活（404/410 才删）。本例语义＝「无法判定⇒保留」，
+    # 因此把探活钉成 unreachable；404 删除路径见 test_prune_external_url_deletes_on_404_*。
+    monkeypatch.setattr(rag_store, "_probe_external_image",
+                        lambda url, timeout=8: "unreachable")
 
     assert rag_store.prune_missing_generations(
         "repo", rag_backend.EmbedConfig(),
@@ -280,3 +284,148 @@ def test_probe_view_maps_status_and_never_raises(monkeypatch):
     calls_before = len(unreachable_session.calls)
     assert comfyui_client.probe_view("http://evil.com", "a.png") == "unreachable"
     assert len(unreachable_session.calls) == calls_before
+
+
+# ===== 2026-10-18：外部 URL 裂图清理（用户实测「清理裂图」清不掉 aiproxy 死链） =====
+
+def test_prune_external_url_deletes_on_404_keeps_on_ok_and_unreachable(monkeypatch):
+    """外部 http(s) 图（云端产物直链）：HEAD/GET 明确 404/410 ⇒ 裂图删除；
+    200 或网络异常（无法判定）⇒ 保留，防误删真源。"""
+    deleted: list[str] = []
+
+    class FakeStore:
+        def delete(self, ids):
+            deleted.extend(ids)
+
+    rows = [
+        {"id": "dead", "kind": "generation",
+         "image_url": "https://webstatic.example.invalid/output/a.png"},
+        {"id": "alive", "kind": "generation",
+         "image_url": "https://webstatic.example.invalid/output/b.png"},
+        {"id": "unknown", "kind": "generation",
+         "image_url": "https://webstatic.example.invalid/output/c.png"},
+    ]
+    verdicts = {
+        "https://webstatic.example.invalid/output/a.png": "missing",
+        "https://webstatic.example.invalid/output/b.png": "ok",
+        "https://webstatic.example.invalid/output/c.png": "unreachable",
+    }
+    monkeypatch.setattr(rag_store, "_store", lambda *_a: FakeStore())
+    monkeypatch.setattr(rag_store, "_dump", lambda *_a: rows)
+    monkeypatch.setattr(rag_store, "_probe_external_image",
+                        lambda url, timeout=8: verdicts[url])
+
+    assert rag_store.prune_missing_generations("repo", rag_backend.EmbedConfig()) == 1
+    assert deleted == ["dead"]
+
+
+def test_probe_external_image_maps_status(monkeypatch):
+    """探测三态：404/410→missing；2xx→ok；405/501 走 GET 复核；异常→unreachable。"""
+    class Resp:
+        def __init__(self, status):
+            self.status_code = status
+
+    class Client:
+        def __init__(self, head_status, get_status=None):
+            self.head_status = head_status
+            self.get_status = get_status
+            self.mode = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def head(self, url):
+            self.mode = "head"
+            return Resp(self.head_status)
+
+        def get(self, url, headers=None):
+            self.mode = "get"
+            return Resp(self.get_status if self.get_status is not None else self.head_status)
+
+    def use(head_status, get_status=None):
+        client = Client(head_status, get_status)
+        monkeypatch.setattr(rag_store.httpx, "Client", lambda **kw: client)
+        return client
+
+    use(404)
+    assert rag_store._probe_external_image("https://x.invalid/a.png") == "missing"
+    use(410)
+    assert rag_store._probe_external_image("https://x.invalid/a.png") == "missing"
+    use(200)
+    assert rag_store._probe_external_image("https://x.invalid/a.png") == "ok"
+    client = use(405, get_status=404)          # HEAD 不支持 → GET 复核到 404
+    assert rag_store._probe_external_image("https://x.invalid/a.png") == "missing"
+    assert client.mode == "get"
+    use(500)
+    assert rag_store._probe_external_image("https://x.invalid/a.png") == "unreachable"
+
+    def boom(**kw):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(rag_store.httpx, "Client", boom)
+    assert rag_store._probe_external_image("https://x.invalid/a.png") == "unreachable"
+    # 非 http(s)（data URI / 非法）直接不可判定
+    assert rag_store._probe_external_image("data:image/png;base64,xx") == "unreachable"
+
+
+def test_list_generations_drops_stale_thumb_url(monkeypatch):
+    """元数据里的 thumb_url 指向已不存在文件 ⇒ 丢弃（防网格渲染破图），回退重推导。"""
+    class FakeStore:
+        def get(self, where=None):
+            return {"ids": ["g1"], "documents": ["p"],
+                    "metadatas": [{"kind": "generation",
+                                   "image_url": "/api/local-view?path=/tmp/x.png",
+                                   "thumb_url": "/api/local-view?path=/tmp/.thumbs/x_thumb.jpg"}]}
+
+    monkeypatch.setattr(rag_store, "_store", lambda *_a: FakeStore())
+    monkeypatch.setattr(rag_store.thumbnail_store, "local_path_of_url", lambda url: None)
+    monkeypatch.setattr(rag_store.thumbnail_store, "thumb_url_if_ready", lambda url: "")
+
+    items = rag_store.list_generations("r", rag_backend.EmbedConfig())
+    assert items[0]["thumbUrl"] == ""      # 陈旧 URL 被丢弃（否则网格破图）
+
+
+def test_prune_orphan_repos_only_prunes_unregistered(tmp_path, monkeypatch):
+    """孤儿清理（2026-10-18）：只对「不在注册表、非合成 repo」的仓库跑 prune；
+    注册仓库与 web-materials 合成仓库都不动。"""
+    deleted: list = []
+    db_deleted: list = []
+
+    class FakeStore:
+        def delete(self, ids):
+            deleted.extend(ids)
+
+    class FakeConn:
+        def execute(self, _sql):
+            class _R:
+                def fetchall(self):
+                    return [
+                        {"repo_id": "reg-repo"},
+                        {"repo_id": "orphan-repo"},
+                        {"repo_id": rag_store.WEB_MATERIALS_REPO_ID},
+                    ]
+            return _R()
+
+        def close(self):
+            pass
+
+    missing = tmp_path / "gone.png"
+    monkeypatch.setattr(rag_store, "_registered_repo_ids", lambda: {"reg-repo"})
+    monkeypatch.setattr(rag_store.asset_store, "get_connection", lambda: FakeConn())
+    monkeypatch.setattr(rag_store, "_asset_db_delete", lambda ids: db_deleted.extend(ids))
+    monkeypatch.setattr(rag_store.thumbnail_store, "remove_thumb", lambda *_a, **_k: None)
+    monkeypatch.setattr(rag_store, "_store", lambda *_args: FakeStore())
+    monkeypatch.setattr(rag_store, "_dump", lambda *_args: [
+        {"id": "orphan-missing", "kind": "generation",
+         "image_url": f"http://127.0.0.1:8010/api/local-view?path={missing}"},
+    ])
+
+    report = rag_store.prune_orphan_repos(rag_backend.EmbedConfig())
+    assert report["orphan_repos"] == ["orphan-repo"]
+    assert report["removed"] == 1
+    assert report["per_repo"] == {"orphan-repo": 1}
+    assert deleted == ["orphan-missing"]
+    assert db_deleted == ["orphan-missing"]  # 主表对账硬删同步走
