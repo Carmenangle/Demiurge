@@ -397,3 +397,30 @@ describe("暂停后等待准入释放（A 方案接线锁）", () => {
     );
   });
 });
+
+// ── 试跑（promptOnlyGeneration）→「重新生成」出图 接线锁（2026-10-18 用户诉求） ──
+//
+// 诉求：试跑只生成提示词（不提交 ComfyUI），后续要能用「那个提示词」生成图片。
+// 路径＝失败槽（试跑终态即 failed+「试跑」文案）的「重新生成」按钮 →
+// retryIllustration 读 retryArgs 快照 → submitIllustration({...snapshot, source:"manual"})。
+// 行为细节（快照原参重编译、同源提交）在 useIllustrationChain.test.tsx 的试跑组；
+// 这里锁**出口层接线**（按钮不是死的、回调不是断的）。
+describe("试跑后重试出图：失败槽按钮 → retryIllustration 接线", () => {
+  const chatMessages = viewSrc("../components/chat/ChatMessages.tsx");
+  const chatView = viewSrc("../views/ChatView.tsx");
+
+  it("失败槽渲染「重新生成」按钮并回调 onRetryIllustration(msg.id, slotId)", () => {
+    expect(chatMessages).toContain("media-slot-retry");
+    expect(chatMessages).toMatch(/onRetryIllustration\(msg\.id, part\.slotId!\)/);
+  });
+
+  it("ChatView 把 retryIllustration 接进 ChatMessages（断线即按钮变死键）", () => {
+    expect(chatView).toContain("onRetryIllustration={retryIllustration}");
+  });
+
+  it("retryIllustration 读槽位 retryArgs 快照、按名翻 manual 重调（无快照静默返回）", () => {
+    expect(code).toMatch(/const snapshot = part\?\.retryArgs;/);
+    expect(code).toMatch(/if \(!snapshot\) return;/);
+    expect(code).toMatch(/submitIllustration\(\{\s*\.\.\.snapshot,\s*source:\s*"manual"\s*\}\)/);
+  });
+});

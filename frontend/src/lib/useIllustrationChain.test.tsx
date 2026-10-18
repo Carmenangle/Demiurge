@@ -491,6 +491,39 @@ describe("试跑开关（promptOnlyGeneration）", () => {
     expect(submitWorkflow).toHaveBeenCalledTimes(1);
     expect(md0.pollResult).toHaveBeenCalledTimes(1);
   });
+
+  it("试跑后关试跑重试 ⇒ 快照原参重编译并提交 ComfyUI（那个提示词能出图）", async () => {
+    // 用户诉求（2026-10-18）：试跑只出提示词，后续要能用「那个提示词」生成图片。
+    // 路径＝失败槽（试跑终态即 failed）「重新生成」按钮 → retryIllustration 读 retryArgs
+    // 快照 → submitIllustration({...snapshot, source:"manual"})。本用例把这条链钉死：
+    const withSpec = { ...baseInput, source: "automatic",
+                       sceneSpec: { narrative: "剧情N", profile: "krea2" } };
+
+    // ① 试跑：不提交、trace 上报（promptId 空）、槽位 prompt_only 终态 + retryArgs 快照
+    const md0 = makeDeps({ settings: { promptOnlyGeneration: true } });
+    md0.state.messages = [seededMessage()];
+    await submitChain(md0.deps, withSpec);
+    expect(submitWorkflow).not.toHaveBeenCalled();
+    const slot0 = (md0.state.messages[0] as unknown as { parts: Record<string, unknown>[] }).parts[0];
+    expect(slot0.status).toBe("failed");
+    const snapshot = slot0.retryArgs as Record<string, unknown>;
+    expect(snapshot.prompt).toBe("原始P");            // 快照存原始入参（重试时重编译，非复用旧成稿）
+    const reported = vi.mocked(reportIllustrationSubmission).mock.calls[0][0] as {
+      prompt: string; promptId: string;
+    };
+    expect(reported.promptId).toBe("");               // 未提交 ComfyUI
+    expect(reported.prompt).toBe("编译后P");          // 试跑成稿＝编译后提示词（trace 可审查）
+
+    // ② 关试跑 + 用快照重试（＝ retryIllustration 的动作）
+    const md1 = makeDeps({ settings: { promptOnlyGeneration: false } });
+    await submitChain(md1.deps, { ...snapshot, source: "manual" });
+    expect(submitWorkflow).toHaveBeenCalledTimes(1);  // 真的提交了 ComfyUI
+    expect(vi.mocked(submitWorkflow).mock.calls[0][3]).toBe("编译后P");  // 提交提示词与试跑成稿同源
+    expect(vi.mocked(genProfilePrompt)).toHaveBeenCalledTimes(2); // 两轮都重编译（manual 不复用旧成稿文本）
+    // 重试成稿也照常上报（这次带真 promptId）
+    const retryReport = vi.mocked(reportIllustrationSubmission).mock.calls[1][0] as { promptId: string };
+    expect(retryReport.promptId).toBe("pid-1");
+  });
 });
 
 // ───────────── 逐字搬移锁 + 源码形态锁 ─────────────
