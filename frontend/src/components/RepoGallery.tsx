@@ -1,16 +1,49 @@
 import { useEffect, useCallback, useRef, useState, type ReactNode } from "react";
-import { Check, ExternalLink, Images, Play, Plus, Search, Send, Sparkles, Tag, Trash2, X } from "lucide-react";
-import { activeChatModel, useSettings } from "../stores/settings";
+import { Check, ChevronDown, ExternalLink, Eye, FileText, Images, Music, Play, Plus, RotateCcw, Search, Send, Sparkles, Tag, Trash2, X } from "lucide-react";
+import { activeVlmChat, vlmGapMessage, useSettings } from "../stores/settings";
 import {
-  listGenerations, deleteDoc, setTags, describeImage, tagStats, pruneGenerations,
+  listGenerations, deleteDoc, setTags, describeImage, tagStats, pruneGenerations, pruneOrphanRepos,
   searchGenerations, setGenerationDescription, type Generation,
   indexVisualGenerations, recordVisualPreference, type VisualPreferenceReason,
   generateThumbs, listTaggers, tagGeneration, listTagSnapshots, activateTagSnapshot,
   type TaggerInfo, type TagSnapshot,
+  // P1-3 结构化搜索（FTS5）＋ P1-2 回收站（2026-10-18）
+  searchAssets, listTrash, restoreAsset, purgeAsset, clearTrash, tagFromText,
 } from "../api/ai";
+import { parseAssetQuery, removeTagFromQuery } from "../lib/assetQuery";
+import { imageDataUri } from "../lib/imageData";
+
+// 反推模式（2026-10-18 用户定案：WD14 / 视觉模型 / VLM 两段式共用一个按钮 + 模式选择）。
+// vlm 与 ComfyUI「反推动漫」工作流同构：第一段＝质量+内容 tag 行，空行后第二段＝自然语言描述。
+type TagMode = "vlm" | "wd14" | "ai" | "desc";
+const TAG_MODES: { value: string; label: string }[] = [
+  { value: "vlm", label: "VLM 两段式（标签+描述）" },
+  { value: "wd14", label: "WD14 本地（纯标签）" },
+  { value: "ai", label: "视觉模型（纯标签）" },
+  { value: "desc", label: "视觉描述（只写描述）" },
+];
+const TAG_MODE_HINT: Record<string, string> = {
+  vlm: "反推（两段式）：质量+内容 tag 行 + 自然语言描述——标签存快照，描述写回资产",
+  wd14: "反推（WD14 本地）：只出 danbooru 标签，快、不动描述",
+  ai: "反推（视觉模型）：只出标签，不动描述",
+  desc: "视觉描述：只生成一段自然语言描述（不碰标签），可用于补素材/资产的描述",
+};
+// 纯描述模式（与「自动描述缺失资产」同一口径：只写描述，不产标签）
+const VISION_DESC_PROMPT =
+  "用一段简洁中文客观描述图片中的人物外观、服装、动作、场景、构图和画风；不要写提示词，不要解释。";
+const VLM_TWO_PARA_PROMPT = [
+  "你是 Danbooru 标签反推专家。分析这张图，严格输出两段，中间用一个空行分隔：",
+  "第一段：一行英文标签，逗号+空格分隔。顺序＝质量标签（masterpiece, score_9, year 2025, highres, safe 或 nsfw 等）→ 人物数量/类型（1girl/1boy…）→ 能识别则写画师名（并紧接用 @//画师名/ 形式再写一次）→ 外观/服装/动作/配饰/构图/画风细节（danbooru 风格：全小写、多词用下划线）。",
+  "第二段：1-2 句英文自然语言，客观描述人物、服装、动作、场景与构图。",
+  "只输出这两段正文，禁止标题、编号、解释或代码块。",
+].join("\n");
+const AI_TAG_PROMPT =
+  "只输出 8-16 个描述画面内容的英文标签（质量/人物数量/外观/服装/动作/场景/画风），"
+  + "danbooru 风格（全小写、多词用下划线），英文逗号分隔，不要解释、不要句子";
 import { ConfirmModal } from "./Modal";
 import { CopyButton } from "./CopyButton";
 import { openLightbox } from "./Lightbox";
+import { RepoSyncModal } from "./RepoSyncModal";
 import { Pager } from "./Pager";
 import { ToastLayer } from "./canvas/ToastLayer";
 import type { ToastItem } from "./canvas/CanvasTypes";
@@ -63,14 +96,64 @@ function seqOf(url: string): number {
   return m ? parseInt(m[1], 10) : 0;
 }
 
+// 标签条里的胶囊下拉（2026-10-18 用户实拍：原生 select 白底高框、文字被截成
+// 「v1·wd-si…」，和周围胶囊标签/小图标按钮格格不入）。改用同一套语言：
+// 虚线胶囊（同 .tag-add）+ 浮层列表（同 .tag-menu），选中项打勾。
+function TagPillSelect({
+  label, title, options, value, onChange,
+}: {
+  label: string;
+  title?: string;
+  options: { value: string; label: string }[];
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLSpanElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [open]);
+  const active = options.find((o) => o.value === value);
+  return (
+    <span className="tag-pill-select" ref={ref} onClick={(e) => e.stopPropagation()}>
+      <button type="button" className={`tag-pill ${open ? "open" : ""}`}
+        title={title} aria-haspopup="listbox" aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}>
+        <span className="tag-pill-label">{active?.label ?? label}</span>
+        <ChevronDown size={11} className="tag-pill-caret" />
+      </button>
+      {open && (
+        <div className="tag-pill-pop" role="listbox">
+          {options.map((o) => (
+            <button key={o.value} type="button" role="option" aria-selected={o.value === value}
+              className={o.value === value ? "on" : ""}
+              onClick={() => { onChange(o.value); setOpen(false); }}>
+              <Check size={11} className="tag-pill-check"
+                style={{ opacity: o.value === value ? 1 : 0 }} />
+              {o.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </span>
+  );
+}
+
 // 单张图的标签编辑条：加/删标签、AI 打标、WD14 反推、按标签搜索。
 function GalleryTags({
-  g, tagging, wd14ing, onAdd, onRemove, onAiTag, onWd14, taggers, taggerModel, onTagger,
+  g, tagging, wd14ing, onAdd, onRemove, onTag, mode, onMode, taggers, taggerModel, onTagger,
   onActivateSnapshot, onSearch, onAppendSearch, onClear,
 }: {
   g: Generation; tagging: boolean; wd14ing: boolean;
-  onAdd: (t: string) => void; onRemove: (t: string) => void; onAiTag: () => void;
-  onWd14: () => void;
+  onAdd: (t: string) => void; onRemove: (t: string) => void;
+  /** 统一反推入口（按 mode 分派：wd14 / ai / vlm 两段式） */
+  onTag: () => void;
+  mode: string; onMode: (mode: string) => void;
   taggers: TaggerInfo[]; taggerModel: string; onTagger: (id: string) => void;
   onActivateSnapshot: (snapshotId: string) => void;
   onSearch: (t: string) => void; onAppendSearch: (t: string) => void; onClear: () => void;
@@ -103,8 +186,8 @@ function GalleryTags({
     <div className="gallery-tags" ref={rootRef} onClick={(e) => e.stopPropagation()}>
       {g.tags.map((t) => (
         <span key={t} className="tag-chip" style={{ position: "relative" }}>
-          <span style={{ cursor: "pointer" }} onClick={() => setMenuTag(menuTag === t ? null : t)}>{t}</span>
-          <X size={11} style={{ cursor: "pointer", marginLeft: 3 }} onClick={() => onRemove(t)} />
+          <span className="tag-chip-label" onClick={() => setMenuTag(menuTag === t ? null : t)}>{t}</span>
+          <X size={11} className="tag-chip-x" onClick={() => onRemove(t)} />
           {menuTag === t && (
             <div className="tag-menu" onClick={(e) => e.stopPropagation()}>
               <button onClick={() => { onSearch(t); setMenuTag(null); }}>🔍 搜索此标签</button>
@@ -128,33 +211,45 @@ function GalleryTags({
           <Plus size={11} />
         </button>
       )}
-      <button className="tag-add" title="AI 打标" disabled={tagging} onClick={onAiTag}>
-        {tagging ? "…" : <Sparkles size={11} />}
+      {/* 统一反推入口：一个按钮 + 模式选择（2026-10-18 用户定案，三个机制不再各占一键）。
+          图标随模式变（#3：desc 模式不再与其他模式共用同一图标，避免误以为会出标签）。 */}
+      <button className="tag-add" title={TAG_MODE_HINT[mode] ?? "反推打标"}
+        disabled={tagging || wd14ing} onClick={onTag}>
+        {tagging || wd14ing ? "…"
+          : mode === "desc" ? <FileText size={11} />
+          : mode === "wd14" ? <Tag size={11} />
+          : mode === "ai" ? <Eye size={11} />
+          : <Sparkles size={11} />}
       </button>
+      <TagPillSelect
+        label="反推模式"
+        title={TAG_MODE_HINT[mode] ?? "反推模式"}
+        value={mode}
+        onChange={onMode}
+        options={TAG_MODES}
+      />
       {snaps.length > 0 && (
-        <select className="tag-input"
-          title={`标签版本（每次反推存一版，共 ${snaps.length} 版）`}
+        <TagPillSelect
+          label={`版本 v${snaps.length}`}
+          title={`标签版本（每次反推存一版，共 ${snaps.length} 版；切换只换当前生效版，不丢旧版）`}
           value={g.active_tag_snapshot || snaps[snaps.length - 1].id}
-          onChange={(e) => onActivateSnapshot(e.target.value)} style={{ width: 104 }}
-          onClick={(e) => e.stopPropagation()}>
-          {snaps.map((s, i) => (
-            <option key={s.id} value={s.id}>{`v${i + 1}·${s.model || "tag"}(${s.tags.length})`}</option>
-          ))}
-        </select>
+          onChange={onActivateSnapshot}
+          options={snaps.map((s, i) => ({
+            value: s.id,
+            label: `v${i + 1} · ${s.model || "tag"} · ${s.tags.length} 标签`,
+          }))}
+        />
       )}
-      {taggers.filter((t) => t.available).length > 1 && taggerModel && (
-        <select className="tag-input" title="反推打标模型" value={taggerModel}
-          onChange={(e) => onTagger(e.target.value)} style={{ width: 132 }}
-          onClick={(e) => e.stopPropagation()}>
-          {taggers.filter((t) => t.available).map((t) => (
-            <option key={t.id} value={t.id}>{t.name}</option>
-          ))}
-        </select>
+      {/* WD14 模型选择只在 WD14 模式下有意义 */}
+      {mode === "wd14" && taggers.filter((t) => t.available).length > 1 && taggerModel && (
+        <TagPillSelect
+          label="打标模型"
+          title="反推打标模型"
+          value={taggerModel}
+          onChange={onTagger}
+          options={taggers.filter((t) => t.available).map((t) => ({ value: t.id, label: t.name }))}
+        />
       )}
-      <button className="tag-add" title="反推打标（本地 Danbooru tagger；模型未安装时会提示下载地址）"
-        disabled={wd14ing} onClick={onWd14}>
-        {wd14ing ? "…" : <Tag size={11} />}
-      </button>
       {g.tags.length > 0 && (
         <button className="tag-add" title="清除全部标签" onClick={onClear}>
           <Trash2 size={11} />
@@ -191,6 +286,16 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
   // 可插拔打标器：可用模型列表 + 当前选择（默认取后端 default 且已安装的）
   const [taggers, setTaggers] = useState<TaggerInfo[]>([]);
   const [taggerModel, setTaggerModel] = useState("");
+  // 反推模式（统一入口用）：vlm 两段式 / wd14 本地 / ai 视觉模型；存 localStorage 跨会话记住
+  const [tagMode, setTagMode] = useState<string>(() => {
+    try {
+      const saved = localStorage.getItem("demiurge.tagMode");
+      return saved && TAG_MODES.some((m) => m.value === saved) ? saved : "vlm";
+    } catch { return "vlm"; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("demiurge.tagMode", tagMode); } catch { /* 隐私模式忽略 */ }
+  }, [tagMode]);
   useEffect(() => {
     let alive = true;
     listTaggers().then((r) => {
@@ -213,6 +318,20 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
   const [selMode, setSelMode] = useState(false);     // 批量选择模式（增强页开）
   const [selected, setSelected] = useState<Set<string>>(new Set());  // 选中的图 id
   const [batchDel, setBatchDel] = useState(false);   // 批量删除确认
+  // 2026-10-18：浏览器侧检测到的裂图 id（缩略图与原图都加载失败）。
+  // 后端「清理裂图」按磁盘/probe 判定，外部死链探测失败时会保守保留 ⇒
+  // 这里以**渲染事实**兜底：工具栏出「删除 N 条裂图记录」，走既有批量删除确认。
+  const [brokenIds, setBrokenIds] = useState<Set<string>>(new Set());
+  // P1-3 结构化搜索（tag: 语法 ⇒ 服务端 FTS5）
+  const [searching, setSearching] = useState(false);
+  const [searchItems, setSearchItems] = useState<GenWithRepo[]>([]);
+  // P1-2 回收站（软删除记录：恢复 / 彻底删除 / 清空）
+  const [trashMode, setTrashMode] = useState(false);
+  const [trashItems, setTrashItems] = useState<GenWithRepo[]>([]);
+  const [trashLoading, setTrashLoading] = useState(false);
+  const [purgeTarget, setPurgeTarget] = useState<GenWithRepo | null>(null);
+  const [restoringId, setRestoringId] = useState("");
+  const [clearConfirm, setClearConfirm] = useState(false);
   const [showTagCloud, setShowTagCloud] = useState(false);  // 标签统计面板
   const [allTags, setAllTags] = useState<{ tag: string; count: number }[]>([]);  // 后端全量标签统计
   const [semanticMode, setSemanticMode] = useState(false);
@@ -235,34 +354,45 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
   const [preferenceBase, setPreferenceBase] = useState<GenWithRepo | null>(null);
   const [preferenceReason, setPreferenceReason] = useState<VisualPreferenceReason>("character");
   const [savingPreference, setSavingPreference] = useState(false);
-  const [mediaFilter, setMediaFilter] = useState<"all" | "image" | "video">("all");  // M2.2 媒体类型筛选
+  const [mediaFilter, setMediaFilter] = useState<"all" | "image" | "video" | "audio">("all");  // M2.2 媒体类型筛选（P2-2 补音频）
   const [hasMore, setHasMore] = useState(false);         // P0-1：分页模式是否还有下一页
   const [loadingMore, setLoadingMore] = useState(false); // P0-1：正在加载下一页
   const [fullyLoaded, setFullyLoaded] = useState(false); // P0-1：已升级全量（搜索/筛选触发一次，sticky）
   const [pendingDescribe, setPendingDescribe] = useState(false); // P0-1：升级全量后接着跑自动描述
   const prevKeyRef = useRef("");                          // P0-1：检测切仓库（重置回分页浏览态）
   const PAGE_SIZE = 32; // 一行 8 个 × 四行
-  // 分页浏览态：后端已按 created_at 倒序返回，不再本地重排（重排会打乱已按页追加的顺序）
-  const browsing = enhanced && repoIds.length === 1 && !fullyLoaded;
+  // P0-1 分页浏览态（2026-10-18 扩到多仓库）：资产库页 + 未升级全量。
+  // 多仓库走后端合并 keyset（repo_ids）⇒ 聚合页不再全量 dump（千图库首屏提速）。
+  const browsing = enhanced && !fullyLoaded;
 
   // AI 打标专用对话模型（与生图主流程用的是同一处配置）
-  const chat = activeChatModel(settings);
+  // 图像描述/反推一律用「视觉大模型（VLM）」——不能用普通对话模型（云对话模型普遍拒识图，
+  // 2026-10-18 用户实测「素材/资产生成描述后仍空」根因就在此：claude 经第三方代理拒答）。
+  const vlmChat = activeVlmChat(settings);
 
   const key = repoIds.join(",");
   const reposSet = repoIds;
 
-  // P0-1 分页浏览态：资产库页 + 单仓库 + 未升级全量。needFull=false 时首屏只拉一页。
-  // 多仓库合并（游标语义复杂）与嵌入画廊（数据量小）恒全量，行为与改造前一致。
-  const needFull = !enhanced || repoIds.length !== 1 || fullyLoaded;
+  // P0-1 分页浏览态：资产库页 + 未升级全量。needFull=false 时首屏只拉一页。
+  // 多仓库由后端合并 keyset（同一游标各库取 limit+1 后归并）⇒ 也不再全量。
+  const needFull = !enhanced || fullyLoaded;
+
+  // P1-3（2026-10-18）：`tag:xxx` 语法 ⇒ 服务端结构化搜索（FTS5 + asset_tags 精确 AND）。
+  // 无 tag: 前缀时维持旧口径（自由文本/仓库名，走客户端过滤），不改变既有输入习惯。
+  const structured = parseAssetQuery(tagQuery);
+  const serverSearch = enhanced && !trashMode && structured.tags.length > 0;
 
   const refresh = (retryLeft = 1, full = needFull) => {
     let alive = true;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
     setLoading(true);
-    const firstPage = () => listGenerations(repoIds[0], embed, { limit: PAGE_SIZE })
+    setBrokenIds(new Set());   // 2026-10-18：刷新/切仓库后旧裂图集合作废（防计数虚高）
+    // 单仓库传字符串、多仓库传数组（后端走 list_generations_multi 合并分页）
+    const scope: string | string[] = repoIds.length === 1 ? repoIds[0] : repoIds;
+    const firstPage = () => listGenerations(scope, embed, { limit: PAGE_SIZE })
       .then((r) => {
         setHasMore(r.has_more === true);
-        return (r.items || []).map((g) => ({ ...g, repoId: repoIds[0] } as GenWithRepo));
+        return (r.items || []).map((g) => ({ ...g, repoId: g.repo_id || repoIds[0] } as GenWithRepo));
       })
       .catch(() => { setHasMore(false); return [] as GenWithRepo[]; });
     const allPages = () => Promise.all(repoIds.map((id) =>
@@ -298,12 +428,15 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
 
   // 加载下一页：keyset 游标＝当前列表末条 created_at（不重不漏）；nextPage＝加载成功后停留页
   const loadMore = async (nextPage?: number) => {
-    if (loadingMore || !hasMore || repoIds.length !== 1 || items.length === 0) return;
+    // 结构化搜索 / 回收站一次取全，不分页
+    if (serverSearch || trashMode) return;
+    if (loadingMore || !hasMore || items.length === 0) return;
     const cursor = items[items.length - 1]?.created_at || 0;
+    const scope: string | string[] = repoIds.length === 1 ? repoIds[0] : repoIds;
     setLoadingMore(true);
     try {
-      const r = await listGenerations(repoIds[0], embed, { limit: PAGE_SIZE, beforeTs: cursor });
-      const more = (r.items || []).map((g) => ({ ...g, repoId: repoIds[0] } as GenWithRepo));
+      const r = await listGenerations(scope, embed, { limit: PAGE_SIZE, beforeTs: cursor });
+      const more = (r.items || []).map((g) => ({ ...g, repoId: g.repo_id || repoIds[0] } as GenWithRepo));
       setHasMore(r.has_more === true);
       if (more.length > 0) {
         setItems((prev) => [...prev, ...more]);
@@ -342,13 +475,64 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
   // 避免用户逐字输入时在全量/分页间抖动）。多仓库与嵌入画廊本就全量，无需升级。
   useEffect(() => {
     const filtering = !!tagQuery.trim() || semanticMode || mediaFilter !== "all";
-    if (enhanced && repoIds.length === 1 && filtering) setFullyLoaded(true);
-  }, [tagQuery, semanticMode, mediaFilter, enhanced, repoIds.length]);
+    // 结构化搜索由服务端过滤（媒体类型也下推）；此处只给「客户端过滤」升级全量
+    if (enhanced && !serverSearch && repoIds.length === 1 && filtering) setFullyLoaded(true);
+  }, [tagQuery, semanticMode, mediaFilter, enhanced, repoIds.length, serverSearch]);
 
-  // 详情大图弹窗 Esc 关闭
+  // P1-3：结构化搜索（tag: 语法）——服务端 FTS5 + asset_tags 精确 AND，千图库不走全量 dump。
+  // 一次取全量匹配（SQL 单查询，1000 图级 ~10ms）⇒ 搜索结果不分页，避免与浏览分页语义打架。
+  useEffect(() => {
+    if (!serverSearch) { setSearchItems([]); return; }
+    let alive = true;
+    setSearching(true);
+    const timer = setTimeout(() => {
+      searchAssets(repoIds, embed, {
+        q: structured.text, tags: structured.tags,
+        mediaType: mediaFilter === "all" ? "" : mediaFilter, limit: 0,
+      })
+        .then((r) => {
+          if (!alive) return;
+          setSearchItems((r.items || []).map((g) => ({ ...g, repoId: g.repo_id || repoIds[0] } as GenWithRepo)));
+        })
+        .catch((e) => { if (alive) { setSearchItems([]); showToast(`搜索失败：${(e as Error).message}`, "error"); } })
+        .finally(() => { if (alive) setSearching(false); });
+    }, 220);
+    return () => { alive = false; clearTimeout(timer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverSearch, tagQuery, mediaFilter, key]);
+
+  // 退出结构化搜索：回到常规浏览（重新拉一页，避免停在搜索结果）
+  const prevSearchRef = useRef(serverSearch);
+  useEffect(() => {
+    if (prevSearchRef.current === serverSearch) return;
+    prevSearchRef.current = serverSearch;
+    if (!serverSearch) refresh(1, needFull);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverSearch]);
+
+  // 详情弹窗键盘导航（P3 ③，2026-10-18）：Esc 关闭；←/→ 在当前结果集里切上一张/下一张
+  // （正对「审 150 张挑图」：开一张、方向键过片、顺手打标/删，手不离键盘）。
+  // 结果集用 ref 持最新（filtered 定义在本 effect 之后，避免前向引用＋免得每渲染重订阅）；
+  // 输入框内的方向键留给光标移动，不触发翻页。
+  const navListRef = useRef<Generation[]>([]);
   useEffect(() => {
     if (!active) return;
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setActive(null);
+    const onKey = (e: KeyboardEvent) => {
+      // 全屏 Lightbox 开着时它是最上层：Esc/方向键都交给它，别连带关掉/切走底层详情弹窗
+      // （否则点图看大图后按 Esc 会一口气关两层、直接飞回网格）。
+      if (document.querySelector(".lightbox-mask")) return;
+      if (e.key === "Escape") { setActive(null); return; }
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      const list = navListRef.current;
+      const idx = list.findIndex((g) => g.id === active.id);
+      if (idx < 0) return;
+      const next = idx + (e.key === "ArrowRight" ? 1 : -1);
+      if (next < 0 || next >= list.length) return;
+      e.preventDefault();
+      setActive(list[next]);
+    };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [active]);
@@ -380,6 +564,11 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
     const removeFile = settings.galleryRemoveFile === true;
     for (const g of targets) await deleteOne(g, removeFile);
     setItems((prev) => prev.filter((x) => !ids.has(x.id)));
+    setBrokenIds((prev) => {
+      const next = new Set(prev);
+      for (const id of ids) next.delete(id);   // 删掉的裂图记录从计数集合里摘掉
+      return next;
+    });
     setSelected(new Set());
     setSelMode(false);
     if (removeFile) showToast(`已删除 ${targets.length} 条资产记录及本机图片文件`, "success");
@@ -404,6 +593,82 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
       else showToast(total > 0 ? `已清理 ${total} 条裂图记录（磁盘文件已不存在）。` : "没有发现裂图记录。", total > 0 ? "success" : "info");
       refresh();
     } finally { setPruning(false); }
+  };
+
+  // 孤儿仓库清理（2026-10-18）：把「有记录但不在注册表、也非合成 repo」的仓库也纳入 prune
+  // （此前 doPrune 只扫注册仓库 ⇒ 删了文件夹/丢了注册的仓库，其裂图记录永远清不掉、搜索里冒幽灵）。
+  const [orphanPruning, setOrphanPruning] = useState(false);
+  const doOrphanPrune = async () => {
+    setOrphanPruning(true);
+    try {
+      const r = await pruneOrphanRepos(embed);
+      if (r.orphan_repos.length === 0) {
+        showToast("没有孤儿仓库（所有有记录的仓库都在注册表内）。", "info");
+      } else {
+        showToast(
+          r.removed > 0
+            ? `发现 ${r.orphan_repos.length} 个孤儿仓库，清理了 ${r.removed} 条失效记录。`
+            : `发现 ${r.orphan_repos.length} 个孤儿仓库，但无失效记录可清（文件都还在）。`,
+          r.removed > 0 ? "success" : "info",
+        );
+      }
+      refresh();
+    } catch (e) {
+      showToast(`孤儿仓库清理失败：${(e as Error).message}`, "error");
+    } finally { setOrphanPruning(false); }
+  };
+
+  // ===== 仓库同步（P3 ⑤，2026-10-18）：只读体检 + 一键修复 =====
+  const [showSync, setShowSync] = useState(false);
+
+  // ===== P1-2 回收站（2026-10-18）=====
+  const loadTrash = async () => {
+    setTrashLoading(true);
+    try {
+      const r = await listTrash(repoIds, embed);
+      setTrashItems((r.items || []).map((g) => ({ ...g, repoId: g.repo_id || repoIds[0] } as GenWithRepo)));
+    } catch (e) {
+      showToast(`回收站加载失败：${(e as Error).message}`, "error");
+    } finally { setTrashLoading(false); }
+  };
+  useEffect(() => {
+    if (!trashMode) { setTrashItems([]); return; }
+    void loadTrash();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [trashMode, key]);
+
+  const doRestore = async (g: GenWithRepo) => {
+    const rid = g.repoId || g.repo_id || repoIds[0];
+    setRestoringId(g.id);
+    try {
+      await restoreAsset(g.id, rid, embed);
+      showToast("已恢复到资产库", "success");
+      await loadTrash();
+      refresh();
+    } catch (e) {
+      showToast(`恢复失败：${(e as Error).message}`, "error");
+    } finally { setRestoringId(""); }
+  };
+  const doPurge = async (g: GenWithRepo) => {
+    const rid = g.repoId || g.repo_id || repoIds[0];
+    setPurgeTarget(null);
+    try {
+      await purgeAsset(g.id, rid, embed);
+      showToast("已彻底删除（不可恢复）", "success");
+    } catch (e) {
+      showToast(`彻底删除失败：${(e as Error).message}`, "error");
+    }
+    await loadTrash();
+  };
+  const doClearTrash = async () => {
+    setClearConfirm(false);
+    try {
+      const r = await clearTrash(repoIds, embed);
+      showToast(`已清空回收站（${r.removed} 条）`, "success");
+    } catch (e) {
+      showToast(`清空失败：${(e as Error).message}`, "error");
+    }
+    await loadTrash();
   };
 
   // 标签统计：整合所有图的标签，按出现数目降序（供标签云排序/筛选）
@@ -434,44 +699,21 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
   };
   const removeTag = (g: Generation, t: string) => saveTags(g, g.tags.filter((x) => x !== t));
 
-  const imageDataUri = async (url: string) => {
-    if (/^data:/i.test(url)) return url;
-    const blob = await (await fetch(url)).blob();
-    return new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result || ""));
-      reader.onerror = () => reject(new Error("读图失败"));
-      reader.readAsDataURL(blob);
-    });
-  };
-
   // AI 打标：分析图片本身提取标签（始终反推图片），结果追加到现有标签。人工点才触发。
   // 注意：g.image_url 是后端本地代理地址(127.0.0.1)，外部视觉模型访问不到，必须先取回转 dataURI 再喂模型。
-  const aiTag = async (g: Generation) => {
-    setTagging(g.id);
-    try {
-      const imgForModel = await imageDataUri(g.image_url);
-      const r = await describeImage([imgForModel], chat, "只输出 4-8 个描述画面内容的简短标签（主体/风格/场景/动作等），英文逗号分隔，不要解释、不要句子");
-      const got = (r.prompt || "").split(/[,，;；\n]+/).map((s) => s.trim()).filter(Boolean);
-      if (got.length === 0) { showToast("AI 打标没返回有效标签，可能模型不支持视觉，请换支持视觉的对话模型。", "error"); return; }
-      const merged = Array.from(new Set([...g.tags, ...got])).slice(0, 16);
-      await saveTags(g, merged);
-    } catch (e) {
-      showToast(`AI 打标失败：${(e as Error).message}（需支持视觉的对话模型）`, "error");
-    }
-    finally { setTagging(null); }
-  };
+  // 旧的「AI 打标」独立入口已并入统一反推（runTag 的 ai 分支）——2026-10-18 用户定案
 
   const runDescribeMissing = async () => {
     const targets = items.filter((g) => !g.description?.trim());
     if (targets.length === 0) { showToast("所有资产已有视觉描述。"); return; }
+    if (!vlmChat) { showToast(vlmGapMessage(settings), "error"); return; }
     setDescribing(true);
     let completed = 0;
     try {
       for (const g of targets) {
         const image = await imageDataUri(g.image_url);
         const result = await describeImage(
-          [image], chat,
+          [image], vlmChat!,
           "用一段简洁中文客观描述图片中的人物外观、服装、动作、场景、构图和画风；不要写提示词，不要解释。",
         );
         const description = (result.prompt || "").trim();
@@ -510,7 +752,7 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
         tags: result.tags,
         ...(snaps ? { tag_snapshots: JSON.stringify(snaps.snapshots), active_tag_snapshot: snaps.active } : {}),
       });
-      showToast(`已生成标签快照（${result.total} 个标签，共 ${snaps?.snapshots.length ?? 1} 版）。`, "success");
+      showToast(`已生成 ${result.total} 个标签（第 ${snaps?.snapshots.length ?? 1} 版）——详情里可「复制标签 / 复制提示词」。`, "success");
     } catch (e) {
       showToast(`反推打标失败：${(e as Error).message}`, "error");
     } finally {
@@ -518,19 +760,76 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
     }
   };
 
-  // 切换标签版本快照
+  // 统一反推（2026-10-18 用户定案）：一个按钮，按 mode 分派三种机制——
+  // wd14＝本地 tagger；ai＝视觉模型纯标签；vlm＝两段式（标签行 + 空行 + 描述段，
+  // 与 ComfyUI「反推动漫」工作流同构：标签存快照、描述写回资产并重建语义索引）。
+  const runTag = async (g: Generation) => {
+    if (tagMode === "wd14") { await wd14TagActive(g); return; }
+    if (!vlmChat) { showToast(vlmGapMessage(settings), "error"); return; }
+    setTagging(g.id);
+    try {
+      const repoId = (g as GenWithRepo).repoId || g.repo_id || repoIds[0];
+      const imgForModel = await imageDataUri(g.image_url);
+      // 纯描述模式：只写描述，不产标签、不动快照
+      if (tagMode === "desc") {
+        const r = await describeImage([imgForModel], vlmChat!, VISION_DESC_PROMPT);
+        const desc = (r.prompt || "").trim();
+        if (!desc) { showToast("视觉模型没有返回描述，可能不支持视觉。", "error"); return; }
+        await setGenerationDescription(g.id, repoId, desc, embed);
+        patchItem(g.id, { description: desc });
+        showToast("视觉描述已写回——详情里可「复制描述」。", "success");
+        return;
+      }
+      const prompt = tagMode === "vlm" ? VLM_TWO_PARA_PROMPT : AI_TAG_PROMPT;
+      const r = await describeImage([imgForModel], vlmChat!, prompt);
+      const text = (r.prompt || "").trim();
+      if (!text) {
+        showToast("反推没有返回内容：可能模型不支持视觉，请换支持视觉的对话模型。", "error");
+        return;
+      }
+      const saved = await tagFromText(g.id, repoId, embed, text, {
+        model: tagMode,
+        label: tagMode === "vlm" ? "两段式" : "视觉打标",
+        saveDescription: tagMode === "vlm",
+      });
+      const snaps = await refreshSnapshots(g.id, repoId);
+      patchItem(g.id, {
+        tags: saved.tags,
+        ...(saved.description ? { description: saved.description } : {}),
+        ...(snaps ? { tag_snapshots: JSON.stringify(snaps.snapshots), active_tag_snapshot: snaps.active } : {}),
+      });
+      showToast(
+        saved.saved_description
+          ? `两段式反推完成：${saved.total} 个标签＋描述（第 ${snaps?.snapshots.length ?? 1} 版）——详情里可「复制提示词（两段式）」。`
+          : `反推完成：${saved.total} 个标签（第 ${snaps?.snapshots.length ?? 1} 版）——详情里可「复制标签」。`,
+        "success",
+      );
+    } catch (e) {
+      showToast(`反推失败：${(e as Error).message}（需支持视觉的对话模型）`, "error");
+    } finally { setTagging(null); }
+  };
+
+  // 切换标签版本快照：**乐观更新**——后端要重嵌入整条文档（实测 ≈1.6s），
+  // 不能挡 UI；失败再回滚（2026-10-18 用户反馈「切个快照要 3.5s」）。
   const activateSnapshot = async (g: Generation, snapshotId: string) => {
     const repoId = (g as GenWithRepo).repoId || g.repo_id || repoIds[0];
+    const snaps: TagSnapshot[] = (() => {
+      try {
+        const arr = JSON.parse(g.tag_snapshots || "[]");
+        return Array.isArray(arr) ? (arr as TagSnapshot[]) : [];
+      } catch { return []; }
+    })();
+    const target = snaps.find((s) => s.id === snapshotId);
+    const prev = { tags: g.tags, active: g.active_tag_snapshot };
+    patchItem(g.id, {
+      ...(target ? { tags: target.tags } : {}),
+      active_tag_snapshot: snapshotId,
+    });
     try {
       await activateTagSnapshot(g.id, repoId, snapshotId, embed);
-      const snaps = await refreshSnapshots(g.id, repoId);
-      const tags = snaps?.snapshots.find((s) => s.id === snapshotId)?.tags ?? g.tags;
-      patchItem(g.id, {
-        tags,
-        ...(snaps ? { tag_snapshots: JSON.stringify(snaps.snapshots), active_tag_snapshot: snapshotId } : {}),
-      });
-      showToast("已切换到该标签版本。", "success");
+      showToast("已切换到该标签版本（语义索引后台更新）。", "success");
     } catch (e) {
+      patchItem(g.id, { tags: prev.tags, active_tag_snapshot: prev.active });
       showToast(`切换版本失败：${(e as Error).message}`, "error");
     }
   };
@@ -626,8 +925,10 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
   // 标签/提示词搜索：多关键词（空格/逗号/分号分隔），全部命中才显示（AND）。纯前端过滤。
   // 资产库模式额外支持按仓库名搜索：命中仓库名则显示该仓库全部图。
   const terms = tagQuery.toLowerCase().split(/[\s,，;；]+/).filter(Boolean);
-  const sourceItems = semanticMode && terms.length > 0 ? semanticItems : items;
-  const filteredBase = semanticMode && terms.length > 0
+  // P1-3：结构化搜索（tag: 语法）与服务端语义搜索都直接吃服务端结果；否则本地 items
+  const sourceItems = serverSearch ? searchItems
+    : semanticMode && terms.length > 0 ? semanticItems : items;
+  const filteredBase = serverSearch || (semanticMode && terms.length > 0)
     ? sourceItems
     : terms.length === 0 ? sourceItems : sourceItems.filter((g) => {
         const repoName = (repoNames?.[(g as GenWithRepo).repoId || ""] || "").toLowerCase();
@@ -636,19 +937,28 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
         return terms.every((term) => hay.some((h) => h.includes(term)));
       });
   // M2.2：媒体类型筛选（全部/图片/视频），视频资产按 mediaType 识别
-  const filtered = mediaFilter === "all" ? filteredBase
-    : filteredBase.filter((g) => (g.mediaType || "image") === mediaFilter);
+  // 结构化搜索时已下推 SQL（media_type），不再本地二次过滤
+  const filtered = serverSearch ? filteredBase
+    : mediaFilter === "all" ? filteredBase
+      : filteredBase.filter((g) => (g.mediaType || "image") === mediaFilter);
+  // 详情弹窗键盘导航用的「当前结果集」：每次渲染后同步进 ref（键盘 ←/→ 在这份列表里切）。
+  useEffect(() => { navListRef.current = filtered; });
   // 分页浏览态：后端已按 created_at 倒序返回，不再本地重排（重排会打乱已按页追加的顺序）
   const orderKey = (g: Generation) => g.created_at || seqOf(g.image_url);
-  const sorted = semanticMode && terms.length > 0
-    ? filtered
-    : browsing ? filtered
-      : [...filtered].sort((a, b) => orderKey(b) - orderKey(a));
-  const pageCount = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
+  const sorted = serverSearch ? filtered
+    : semanticMode && terms.length > 0
+      ? filtered
+      : browsing ? filtered
+        : [...filtered].sort((a, b) => orderKey(b) - orderKey(a));
+  // 结构化搜索 / 回收站：一次取全、不分页（搜索走 SQL 单查询；回收站量小）
+  const pageCount = (serverSearch || trashMode) ? 1
+    : Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
   // 分页态把「还有更多」暴露为虚拟下一页（点击触发 loadMore，加载成功后停留该页）
-  const pagerCount = browsing && hasMore ? pageCount + 1 : pageCount;
+  const pagerCount = !serverSearch && !trashMode && browsing && hasMore ? pageCount + 1 : pageCount;
   const curPage = Math.min(page, pagerCount);  // filtered 变短后自愈，避免越界空页
-  const shown = sorted.slice((curPage - 1) * PAGE_SIZE, curPage * PAGE_SIZE);
+  const shown = trashMode ? trashItems
+    : serverSearch ? sorted
+      : sorted.slice((curPage - 1) * PAGE_SIZE, curPage * PAGE_SIZE);
 
   // 搜索框标签补全：取当前输入最后一段(分隔符后)为前缀，从标签统计里匹配，按图片数降序
   const lastSeg = tagQuery.split(/[,，;；]/).pop()?.trim().toLowerCase() || "";
@@ -671,7 +981,7 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
           <input
             style={{ width: "100%", paddingLeft: 28, boxSizing: "border-box" }}
             placeholder={semanticMode ? "按画面语义搜索，例如：雨夜里穿红裙的角色…"
-              : repoNames ? "按标签或仓库名搜索…" : "按标签搜索（回车确认一个标签后自动补「，」接着输下一个）…"}
+              : repoNames ? "按标签或仓库名搜索（tag:xxx 精确标签筛）…" : "按标签搜索（回车确认一个标签后自动补「，」接着输下一个）…"}
             value={tagQuery}
             onChange={(e) => { setTagQuery(e.target.value); setPage(1); }}
             onKeyDown={(e) => {
@@ -692,6 +1002,19 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
               ))}
             </div>
           )}
+        </div>
+      )}
+      {/* P1-3：已选标签 chips（tag: 语法解析结果，点 ✕ 移除该项） */}
+      {structured.tags.length > 0 && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginBottom: 10 }}>
+          <span style={{ fontSize: 12, color: "var(--text-muted)" }}>标签筛选：</span>
+          {structured.tags.map((t) => (
+            <button key={t} className="tag-cloud-chip" title="移除该标签"
+              onClick={() => { setTagQuery(removeTagFromQuery(tagQuery, t)); setPage(1); }}>
+              {t} ✕
+            </button>
+          ))}
+          {searching && <span style={{ fontSize: 12, color: "var(--text-muted)" }}>搜索中…</span>}
         </div>
       )}
       {enhanced && items.length > 0 && (
@@ -720,14 +1043,22 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
           <button className="btn" onClick={() => setShowTagCloud((v) => !v)}>
             标签统计（{tagCounts.length}）
           </button>
+          <button className="btn" disabled={orphanPruning} onClick={doOrphanPrune}
+            title="清理「孤儿仓库」的失效记录：有资产记录但已不在仓库注册表里的仓库（如删了文件夹），其裂图记录平时扫不到，这里统一清掉">
+            {orphanPruning ? "清理中…" : "清理孤儿仓库"}
+          </button>
+          <button className="btn" onClick={() => setShowSync(true)}
+            title="仓库同步体检：对账「注册表/磁盘/索引」三方——补录丢进文件夹但没入库的文件、清理磁盘已没了的裂图/孤儿">
+            同步体检
+          </button>
           <div className="lora-mode-switch" role="group" aria-label="媒体类型" style={{ display: "inline-flex", gap: 4 }}>
-            {(["all", "image", "video"] as const).map((m) => (
+            {(["all", "image", "video", "audio"] as const).map((m) => (
               <button
                 key={m}
                 className={`btn ${mediaFilter === m ? "primary" : ""}`}
                 onClick={() => { setMediaFilter(m); setPage(1); }}
               >
-                {m === "all" ? "全部" : m === "image" ? "图片" : "视频"}
+                {m === "all" ? "全部" : m === "image" ? "图片" : m === "video" ? "视频" : "音频"}
               </button>
             ))}
           </div>
@@ -751,6 +1082,26 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
             title="删除指向本机图但磁盘文件已不存在的裂图记录（多因手动删文件留下）">
             {pruning ? "清理中…" : "清理裂图"}
           </button>
+          {items.some((g) => brokenIds.has(g.id)) && (
+            <button className="btn danger"
+              onClick={() => { setSelected(new Set(brokenIds)); setBatchDel(true); }}
+              title="删除当前列表中**浏览器检测到**的裂图记录（缩略图与原图都加载失败，如云端过期直链）；走批量删除确认，本机文件按设置处理">
+              <Trash2 size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />
+              删除 {items.filter((g) => brokenIds.has(g.id)).length} 条裂图记录
+            </button>
+          )}
+          {/* P1-2 回收站（2026-10-18）：删除改软删，回收站里可恢复 / 彻底删除 / 清空 */}
+          <button className={`btn ${trashMode ? "primary" : ""}`}
+            onClick={() => { setTrashMode((v) => !v); setSelMode(false); setSelected(new Set()); }}
+            title="回收站：删除的资产先放这里，可恢复或彻底删除">
+            <RotateCcw size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />
+            {trashMode ? "退出回收站" : "回收站"}
+          </button>
+          {trashMode && trashItems.length > 0 && (
+            <button className="btn danger" onClick={() => setClearConfirm(true)}>
+              <Trash2 size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />清空回收站（{trashItems.length}）
+            </button>
+          )}
         </div>
       )}
       {enhanced && showTagCloud && (
@@ -765,6 +1116,10 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
             </button>
           ))}
         </div>
+      )}
+      {/* P1-2：回收站空态 */}
+      {trashMode && !trashLoading && trashItems.length === 0 && (
+        <div style={{ color: "var(--text-muted)", fontSize: 13, margin: "10px 0" }}>回收站是空的。</div>
       )}
       {loading ? (
         <div className="gallery-grid">
@@ -787,21 +1142,47 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
           <div className="gallery-grid">
             {shown.map((g) => (
               <div key={g.id} className={`gallery-cell ${selMode && selected.has(g.id) ? "sel" : ""}`} title={g.prompt}>
-                {g.mediaType === "video" ? (
+                {g.mediaType === "video" || g.mediaType === "audio" ? (
                   <div className="gallery-video-cell" onClick={() => selMode ? toggleSel(g.id) : setActive(g)}>
                     <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", gap: 6 }}>
-                      <Play size={22} /> 视频
+                      {g.mediaType === "video" ? <Play size={22} /> : <Music size={22} />}
+                      {g.mediaType === "video" ? "视频" : "音频"}
                     </div>
-                    <span className="gallery-media-badge">🎬</span>
+                    <span className="gallery-media-badge">{g.mediaType === "video" ? "🎬" : "🎵"}</span>
                   </div>
                 ) : (
                   <img src={g.thumbUrl || g.image_url} alt="生成图" loading="lazy"
-                    onClick={() => selMode ? toggleSel(g.id) : setActive(g)} />
+                    onClick={() => { if (trashMode) return; selMode ? toggleSel(g.id) : setActive(g); }}
+                    style={trashMode ? { cursor: "default", opacity: 0.75 } : undefined}
+                    onError={(e) => {
+                      // 2026-10-18 裂图修复：缩略图坏 ⇒ 回退原图；原图也坏 ⇒ 记为裂图
+                      // （此前网格无回退，陈旧 thumb_url / 云端死链直接显示破图图标）
+                      const el = e.currentTarget;
+                      if (el.dataset.fb !== "1" && g.thumbUrl && g.image_url) {
+                        el.dataset.fb = "1";
+                        el.src = g.image_url;
+                        return;
+                      }
+                      setBrokenIds((s) => (s.has(g.id) ? s : new Set(s).add(g.id)));
+                      el.style.opacity = "0.15";
+                    }} />
                 )}
                 {g.mediaType === "video" && !selMode && (
                   <span className="gallery-media-tag" title="视频资产（点击播放）">视频</span>
                 )}
-                {selMode ? (
+                {trashMode ? (
+                  <>
+                    <button className="gallery-send-recipe" title={restoringId === g.id ? "恢复中…" : "恢复（回到资产库）"}
+                      disabled={restoringId === g.id}
+                      onClick={(e) => { e.stopPropagation(); void doRestore(g); }}>
+                      <RotateCcw size={13} />
+                    </button>
+                    <button className="gallery-del" title="彻底删除（不可恢复）"
+                      onClick={(e) => { e.stopPropagation(); setPurgeTarget(g); }}>
+                      <Trash2 size={14} />
+                    </button>
+                  </>
+                ) : selMode ? (
                   <span className={`gallery-check ${selected.has(g.id) ? "on" : ""}`}>
                     {selected.has(g.id) && <Check size={14} />}
                   </span>
@@ -863,6 +1244,35 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
           onCancel={() => setBatchDel(false)}
         />
       )}
+      {/* P1-2 回收站：彻底删除 / 清空都要二次确认（不可恢复） */}
+      {purgeTarget && (
+        <ConfirmModal
+          title="彻底删除"
+          message="确认彻底删除这条资产记录？此操作不可恢复。"
+          confirmText="彻底删除"
+          danger
+          onConfirm={() => void doPurge(purgeTarget)}
+          onCancel={() => setPurgeTarget(null)}
+        />
+      )}
+      {clearConfirm && (
+        <ConfirmModal
+          title="清空回收站"
+          message={`确认清空回收站里的 ${trashItems.length} 条记录？此操作不可恢复。`}
+          confirmText="清空"
+          danger
+          onConfirm={() => void doClearTrash()}
+          onCancel={() => setClearConfirm(false)}
+        />
+      )}
+      {showSync && (
+        <RepoSyncModal
+          outputDir={settings.outputDir || ""}
+          embed={embed}
+          onClose={() => setShowSync(false)}
+          onFixed={() => refresh()}
+        />
+      )}
       {active && (
         <div className="modal-mask">
           <div className="modal" style={{
@@ -890,6 +1300,9 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
                 }}>
                   {active.mediaType === "video" ? (
                     <video src={active.image_url} controls style={{ maxWidth: "100%", maxHeight: "100%", background: "#000" }} />
+                  ) : active.mediaType === "audio" ? (
+                    // P2-2 音频：内嵌播放器（与视频同构；音频没有「画面」，居中一个播放条即可）
+                    <audio src={active.image_url} controls style={{ width: "100%", maxWidth: 480 }} />
                   ) : (
                     // 保持 P0-2 契约「详情取原图」（质量优先）；原图不可用时（云端图未落盘/
                     // 被清理）onError 回退本机缩略图 —— 否则出现空白框（2026-10-16 实机截图）
@@ -919,7 +1332,14 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
                   <a className="img-tool" href={active.image_url} target="_blank" rel="noreferrer">
                     <ExternalLink size={14} /> 查看原图
                   </a>
+                  {(() => {
+                    const i = filtered.findIndex((g) => g.id === active.id);
+                    return i >= 0
+                      ? <span title="← / → 切换上一张/下一张，Esc 关闭">第 {i + 1} / {filtered.length} 张（← → 切换）</span>
+                      : null;
+                  })()}
                   {active.mediaType === "video" && <span>🎬 视频资产（首帧底图派生链见右）</span>}
+                  {active.mediaType === "audio" && <span>🎵 音频资产</span>}
                 </div>
               </div>
               {/* 右：生成信息（可滚动；flex-basis 0 才不会被内容顶开） */}
@@ -1011,11 +1431,23 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
                   {active.prompt || "（无提示词记录）"}
                 </div>
               </DetailSection>
-              {active.description && (
-                <DetailSection title="视觉描述">
-                  <div style={{ fontSize: 13, lineHeight: 1.6 }}>{active.description}</div>
-                </DetailSection>
-              )}
+              <DetailSection title="视觉描述">
+                {active.description
+                  ? (
+                    <>
+                      <div style={{ fontSize: 13, lineHeight: 1.6 }}>{active.description}</div>
+                      {/* 2026-10-18：描述/标签都补一键复制（用户反馈此前无处可复制） */}
+                      <div style={{ marginTop: 6 }}>
+                        <CopyButton text={active.description} label="复制描述" className="btn" />
+                      </div>
+                    </>
+                  )
+                  : (
+                    <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                      还没有视觉描述——把反推模式切到「视觉描述（只写描述）」后点反推即可生成。
+                    </div>
+                  )}
+              </DetailSection>
               <DetailSection title="标签">
                 <GalleryTags
                   g={active}
@@ -1023,8 +1455,9 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
                   wd14ing={wd14ing === active.id}
                   onAdd={(t) => addTag(active, t)}
                   onRemove={(t) => removeTag(active, t)}
-                  onAiTag={() => aiTag(active)}
-                  onWd14={() => wd14TagActive(active)}
+                  onTag={() => runTag(active)}
+                  mode={tagMode}
+                  onMode={setTagMode}
                   taggers={taggers}
                   taggerModel={taggerModel}
                   onTagger={setTaggerModel}
@@ -1038,6 +1471,18 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
                   }}
                   onClear={() => saveTags(active, [])}
                 />
+                {/* 一键复制：标签（逗号+空格）；以及「两段式」＝标签行＋空行＋描述段，
+                    直接可贴进 ComfyUI 提示词框（就是你最初要的形态，2026-10-18 闭环） */}
+                <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  <CopyButton text={active.tags.join(", ")} label="复制标签" className="btn" />
+                  {(active.tags.length > 0 || active.description) && (
+                    <CopyButton
+                      text={[active.tags.join(", "), active.description].filter(Boolean).join("\n\n")}
+                      label="复制提示词（两段式）"
+                      className="btn"
+                    />
+                  )}
+                </div>
               </DetailSection>
               {enhanced && (
                 <DetailSection title="偏好比较">

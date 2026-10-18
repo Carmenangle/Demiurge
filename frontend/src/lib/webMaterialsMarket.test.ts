@@ -7,6 +7,8 @@ import { describe, expect, it } from "vitest";
 const view = readFileSync(new URL("../views/WebMaterialsView.tsx", import.meta.url), "utf8");
 const modal = readFileSync(new URL("../components/MaterialMarketModalLive.tsx", import.meta.url), "utf8");
 const detail = readFileSync(new URL("../components/WebMaterialDetailModal.tsx", import.meta.url), "utf8");
+const appBody = readFileSync(new URL("../AppBody.tsx", import.meta.url), "utf8");
+const api = readFileSync(new URL("../api/ai.ts", import.meta.url), "utf8");
 const tokens = readFileSync(new URL("../views/settings/TokensPanel.tsx", import.meta.url), "utf8");
 const settings = readFileSync(new URL("../stores/settings.ts", import.meta.url), "utf8");
 
@@ -369,5 +371,50 @@ describe("素材卡片 · 发送按钮与资产库对齐（2026-10-18 用户实�
   it("详情弹窗底部同样保留两个发送按钮（卡片+详情双入口，不裁一）", () => {
     expect(detail).toContain("发送至对话框");
     expect(detail).toContain("发送至对话");
+  });
+});
+
+describe("删除确认 + 详情 X/ESC（2026-10-18 用户定案）", () => {
+  it("素材单删/整夹/灵感卡删除都先弹确认（此前点删即 unlink 磁盘文件）", () => {
+    expect(view).toContain('setConfirmDel({ kind: "image"');
+    expect(view).toContain('setConfirmDel({ kind: "folder"');
+    expect(view).toContain('setConfirmDel({ kind: "card"');
+    expect(view).toContain("文件会从磁盘删除，此操作不可恢复。");
+  });
+
+  it("详情弹窗有 ESC 关闭 + 标题栏 X（应用口径「关闭走 X/ESC」）", () => {
+    expect(detail).toContain('e.key === "Escape"');
+    expect(detail).toContain("关闭（ESC 亦可）");
+    expect(detail).toContain("<X size={18} />");
+  });
+});
+
+describe("素材标签搜索 + 批量发送（2026-10-18）", () => {
+  it("搜索接标签/作者/搜索词（原站 tags 可搜），多词 AND", () => {
+    expect(view).toContain("...(i.tags || [])");
+    expect(view).toContain("terms.every((t) => haystack.includes(t))");
+    expect(view).toContain("搜索标题/来源/标签");
+  });
+
+  it("批量选择提供 发送至对话框 + 发送至对话（此前只有发送至画布）", () => {
+    expect(view).toContain("onBatchSendToChat(picked)");
+    expect(view).toContain("onBatchSendAsRecipe(picked)");
+    expect(appBody).toContain("onBatchSendToChat={");
+    expect(appBody).toContain("onBatchSendAsRecipe={");
+  });
+});
+
+describe("素材视觉描述（2026-10-18 用户建议）", () => {
+  it("素材详情可单独生成视觉描述（原站只有 tag，没有描述）", () => {
+    expect(detail).toContain("生成视觉描述");
+    expect(detail).toContain("onDescribe");
+    expect(view).toContain("describeMaterial");
+    expect(view).toContain("WEB_MATERIALS_REPO_ID");
+    expect(view).toContain("setGenerationDescription(m.assetId, WEB_MATERIALS_REPO_ID");
+  });
+
+  it("素材列表带 assetId/description（后端从主表投影，供描述落库与回显）", () => {
+    expect(api).toContain("assetId?: string");
+    expect(api).toContain("description?: string");
   });
 });

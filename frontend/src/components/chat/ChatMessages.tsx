@@ -582,7 +582,11 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
                   <button
                     type="button"
                     className="media-slot-retry"
-                    title="用原参数重新生成这张图"
+                    title={
+                      (part.error || "").includes("prompt_only")
+                        ? "用试跑成稿直接提交 ComfyUI 出图（不受试跑开关影响）"
+                        : "用原参数重新生成这张图"
+                    }
                     aria-label="重新生成"
                     onClick={() => onRetryIllustration(msg.id, part.slotId!)}
                   >

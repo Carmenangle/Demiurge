@@ -1027,7 +1027,7 @@ export interface Generation {
   tag_snapshots?: string;
   active_tag_snapshot?: string;
   /** M2.1/M2.2：媒体类型（image|video），视频资产按 video 渲染/播放 */
-  mediaType?: "image" | "video";
+  mediaType?: "image" | "video" | "audio";
   /** P0-2：缩略图派生层 URL（.thumbs/ 长边 512）；空则回落 image_url 原图 */
   thumbUrl?: string;
   /** M2.1：派生链弱引用（视频→首帧底图槽），只读展示不级联 */
@@ -1058,16 +1058,18 @@ export interface Generation {
  */
 export const WEB_MATERIALS_REPO_ID = "web-materials";
 
-// 列出某仓库的生成记录（图片+提示词+标签），供仓库详情页图片网格
+// 列出生成记录（图片+提示词+标签），供仓库详情页图片网格
 export function listGenerations(
-  repoId: string,
+  repoId: string | string[],
   embed: Embed,
   opts: { limit?: number; beforeTs?: number } = {},
 ) {
   // P0-1 keyset 分页：limit>0 时后端按 created_at 倒序截断并回 has_more；
   // beforeTs 为上一页末条 created_at（翻页游标，不重不漏）。两者缺省=全量（旧行为）。
+  // 2026-10-18：传数组 ⇒ 后端多仓库合并分页（资产库聚合页，repo_ids）。
+  const multi = Array.isArray(repoId);
   return apiPost<{ items: Generation[]; has_more?: boolean }>("/rag/generations", {
-    repo_id: repoId,
+    ...(multi ? { repo_ids: repoId } : { repo_id: repoId }),
     limit: opts.limit ?? 0,
     before_ts: opts.beforeTs ?? 0,
     ...ragEmbed(embed),
@@ -1170,11 +1172,121 @@ export function pruneGenerations(repoId: string, embed: Embed) {
   });
 }
 
+/** 孤儿仓库清理（2026-10-18）：把「有记录但不在注册表、也非合成 repo」的仓库也纳入 prune，
+ *  只删磁盘文件已缺失的裂图记录。返回孤儿仓库列表与清理条数。 */
+export function pruneOrphanRepos(embed: Embed) {
+  return apiPost<{ orphan_repos: string[]; removed: number; per_repo: Record<string, number> }>(
+    "/rag/prune-orphan-repos", { ...ragEmbed(embed) },
+  );
+}
+
+// ===== 仓库同步（P3 ⑤，2026-10-18）：对账「注册表/磁盘/索引」三方 =====
+export interface RepoSyncRepo {
+  repo_id: string; name: string; folder_exists: boolean;
+  disk: number; indexed: number; unindexed: string[]; missing: string[];
+}
+export interface RepoSyncReport {
+  repos: RepoSyncRepo[]; orphan_index_repos: string[];
+  total_unindexed: number; total_missing: number;
+}
+
+/** 同步体检（只读）：报告漂移，不改数据。 */
+export function repoSyncReport(outputDir: string, embed: Embed) {
+  return apiPost<RepoSyncReport>("/rag/repo-sync-report", {
+    output_dir: outputDir, ...ragEmbed(embed),
+  });
+}
+
+/** 同步修复（保守）：补录未入库文件 + 清理裂图/孤儿。 */
+export function repoSyncFix(outputDir: string, embed: Embed) {
+  return apiPost<{ indexed: number; pruned: number }>("/rag/repo-sync-fix", {
+    output_dir: outputDir, ...ragEmbed(embed),
+  });
+}
+
+// ===== P1-3 结构化搜索（FTS5 + asset_tags）＋ P1-2 回收站（2026-10-18） =====
+
+/** 结构化搜索：tag 精确 AND + 自由文本（FTS5，中文子串 LIKE 兜底）。语义搜索另走 searchGenerations。 */
+export function searchAssets(
+  repoIds: string[],
+  embed: Embed,
+  opts: { q?: string; tags?: string[]; mediaType?: string; limit?: number; beforeTs?: number } = {},
+) {
+  return apiPost<{ items: Generation[]; has_more?: boolean }>("/rag/search-assets", {
+    repo_ids: repoIds,
+    q: opts.q ?? "",
+    tags: opts.tags ?? [],
+    media_type: opts.mediaType ?? "",
+    limit: opts.limit ?? 0,
+    before_ts: opts.beforeTs ?? 0,
+    ...ragEmbed(embed),
+  });
+}
+
+/** 回收站列表（软删除记录，按删除时间倒序）。 */
+export function listTrash(repoIds: string[], embed: Embed) {
+  return apiPost<{ items: Generation[] }>("/rag/assets/trash", {
+    repo_ids: repoIds,
+    ...ragEmbed(embed),
+  });
+}
+
+/** 从回收站恢复（后端先重建向量成功再清 deleted_at）。 */
+export function restoreAsset(id: string, repoId: string, embed: Embed) {
+  return apiPost<{ ok: boolean; id?: string; already?: boolean }>("/rag/assets/restore", {
+    id, repo_id: repoId, ...ragEmbed(embed),
+  });
+}
+
+/** 彻底删除（只允许回收站内记录）。 */
+export function purgeAsset(id: string, repoId: string, embed: Embed) {
+  return apiPost<{ ok: boolean }>("/rag/assets/purge", {
+    id, repo_id: repoId, ...ragEmbed(embed),
+  });
+}
+
+/**
+ * 两段式反推落库（2026-10-18）：第一段 tag 行 → 新标签快照；第二段描述 → 资产描述。
+ * 视觉推理由前端发起（对话模型），后端只解析+落库（切分规则单一真源）。
+ */
+export function tagFromText(
+  id: string,
+  repoId: string,
+  embed: Embed,
+  text: string,
+  opts: { model?: string; label?: string; saveDescription?: boolean } = {},
+) {
+  return apiPost<{
+    ok: boolean; snapshot_id: string; tags: string[]; total: number;
+    description: string; saved_description: boolean;
+  }>("/rag/tag-text", {
+    id,
+    repo_id: repoId,
+    text,
+    model: opts.model ?? "",
+    label: opts.label ?? "",
+    save_description: opts.saveDescription ?? true,
+    ...ragEmbed(embed),
+  });
+}
+
+/** 清空回收站（repoIds 给范围；空数组＝全部仓库）。 */
+export function clearTrash(repoIds: string[], embed: Embed) {
+  return apiPost<{ removed: number }>("/rag/assets/trash-clear", {
+    repo_ids: repoIds,
+    ...ragEmbed(embed),
+  });
+}
+
 // ===== 上网素材：联网搜索下载的图片 =====
 
 export interface WebMaterial {
   path: string;
   url: string;         // local-view URL
+  /** 素材在资产主表里的 RAG 文档 id（反推/视觉描述落库用；2026-10-18） */
+  assetId?: string;
+  /** 已生成的视觉描述（素材大多数只有原站标签，没有描述） */
+  description?: string;
   source_url: string;  // 来源网页
   title: string;
   filename: string;

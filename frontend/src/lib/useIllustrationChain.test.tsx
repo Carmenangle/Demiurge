@@ -431,6 +431,8 @@ describe("试跑开关（promptOnlyGeneration）", () => {
     expect(slot.status).toBe("failed");
     expect(String(slot.error)).toContain("试跑");
     expect(slot.retryArgs).toEqual(expect.objectContaining({ prompt: "原始P", slotId: "s1" }));
+    // 快照同时带**编译成稿**（2026-10-18 成稿直送；本用例无 sceneSpec ⇒ 成稿=原始P）
+    expect((slot.retryArgs as { finalPrompt?: string }).finalPrompt).toBe("原始P");
   });
 
   it("涵盖生成视频：smartVideo+motion≥2 仍不提交视频模板，但成稿照常上报", async () => {
@@ -482,6 +484,9 @@ describe("试跑开关（promptOnlyGeneration）", () => {
     const mainSlot = (md0.state.messages[0] as unknown as { parts: Record<string, unknown>[] }).parts[0];
     expect(mainSlot.status).toBe("failed");
     expect(String(mainSlot.error)).toContain("试跑");
+    // 主槽快照带双帧成稿 ⇒ 重试可逐字提交两帧（不再调 genFramePrompts 重编译）
+    expect((mainSlot.retryArgs as { finalFramePrompts?: { first?: string; last?: string } }).finalFramePrompts)
+      .toEqual({ first: "编译首帧P", last: "编译尾帧P" });
   });
 
   it("开关缺省（false）⇒ 试跑闸完全惰性：照常查 ComfyUI 并提交（零回归）", async () => {
@@ -492,37 +497,56 @@ describe("试跑开关（promptOnlyGeneration）", () => {
     expect(md0.pollResult).toHaveBeenCalledTimes(1);
   });
 
-  it("试跑后关试跑重试 ⇒ 快照原参重编译并提交 ComfyUI（那个提示词能出图）", async () => {
-    // 用户诉求（2026-10-18）：试跑只出提示词，后续要能用「那个提示词」生成图片。
-    // 路径＝失败槽（试跑终态即 failed）「重新生成」按钮 → retryIllustration 读 retryArgs
-    // 快照 → submitIllustration({...snapshot, source:"manual"})。本用例把这条链钉死：
+  it("试跑槽重试＝成稿直送：开关仍开也提交 ComfyUI，且不再重编译（2026-10-18 用户定案）", async () => {
+    // 用户定案：试跑槽的「重新生成」意思是「直接用成稿跑图」——拿 trace 里那版编译
+    // 成稿逐字提交，不走重编译（2026-08-30「manual 必须重编译」是有范围定案：
+    // 普通失败槽仍重编译，见下一条；试跑成稿是用户审查过的对象， verbatim 才是本意）。
     const withSpec = { ...baseInput, source: "automatic",
                        sceneSpec: { narrative: "剧情N", profile: "krea2" } };
 
-    // ① 试跑：不提交、trace 上报（promptId 空）、槽位 prompt_only 终态 + retryArgs 快照
+    // ① 试跑：不提交、trace 上报（promptId 空）、槽位终态 + 带成稿的快照
     const md0 = makeDeps({ settings: { promptOnlyGeneration: true } });
     md0.state.messages = [seededMessage()];
     await submitChain(md0.deps, withSpec);
     expect(submitWorkflow).not.toHaveBeenCalled();
     const slot0 = (md0.state.messages[0] as unknown as { parts: Record<string, unknown>[] }).parts[0];
-    expect(slot0.status).toBe("failed");
-    const snapshot = slot0.retryArgs as Record<string, unknown>;
-    expect(snapshot.prompt).toBe("原始P");            // 快照存原始入参（重试时重编译，非复用旧成稿）
-    const reported = vi.mocked(reportIllustrationSubmission).mock.calls[0][0] as {
-      prompt: string; promptId: string;
-    };
-    expect(reported.promptId).toBe("");               // 未提交 ComfyUI
-    expect(reported.prompt).toBe("编译后P");          // 试跑成稿＝编译后提示词（trace 可审查）
+    const snapshot = slot0.retryArgs as Record<string, unknown> & { finalPrompt?: string };
+    expect(snapshot.prompt).toBe("原始P");            // 原始入参仍在快照里
+    expect(snapshot.finalPrompt).toBe("编译后P");     // 成稿一并入快照
 
-    // ② 关试跑 + 用快照重试（＝ retryIllustration 的动作）
+    // ② 点「重新生成」——试跑开关**不关**也照常出图（显式动作优先于批量开关）
+    const md1 = makeDeps({ settings: { promptOnlyGeneration: true } });
+    await submitChain(md1.deps, { ...snapshot, source: "manual" });
+    expect(submitWorkflow).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(submitWorkflow).mock.calls[0][3]).toBe("编译后P");  // 成稿逐字提交
+    expect(vi.mocked(genProfilePrompt)).toHaveBeenCalledTimes(1);       // 不再重编译（仅试跑那轮）
+    const retryReport = vi.mocked(reportIllustrationSubmission).mock.calls[1][0] as {
+      promptId: string; prompt: string;
+    };
+    expect(retryReport.promptId).toBe("pid-1");       // 真提交 ⇒ 带 promptId
+    expect(retryReport.prompt).toBe("编译后P");
+    expect(md1.pollResult).toHaveBeenCalledTimes(1);  // 走正常回填入库链
+  });
+
+  it("普通失败槽（快照无成稿）重试仍重编译（2026-08-30 定案不回退）", async () => {
+    // 首轮：ComfyUI 没起 → failSlot(comfyui_status)；快照只有原始入参、无 finalPrompt
+    // ⚠ 夹具的 discardFailedIllustration 是空 mock（不真改消息状态）⇒ 从调用参数取快照
+    vi.mocked(comfyStatus).mockResolvedValue({ running: false } as never);
+    const md0 = makeDeps({ settings: { promptOnlyGeneration: false } });
+    md0.state.messages = [seededMessage()];
+    await submitChain(md0.deps, { ...baseInput, source: "automatic",
+                                  sceneSpec: { narrative: "剧情N", profile: "krea2" } });
+    expect(submitWorkflow).not.toHaveBeenCalled();
+    expect(md0.discardFailedIllustration).toHaveBeenCalledTimes(1);
+    expect(md0.discardFailedIllustration.mock.calls[0][2]).toBe("comfyui_status");
+    const snapshot = md0.discardFailedIllustration.mock.calls[0][5] as Record<string, unknown>;
+    expect(snapshot.finalPrompt).toBeUndefined();     // 无成稿
+    // 二轮：ComfyUI 起了，重试 ⇒ 照旧重编译后提交（编译链升级能生效）
+    vi.mocked(comfyStatus).mockResolvedValue({ running: true } as never);
     const md1 = makeDeps({ settings: { promptOnlyGeneration: false } });
     await submitChain(md1.deps, { ...snapshot, source: "manual" });
-    expect(submitWorkflow).toHaveBeenCalledTimes(1);  // 真的提交了 ComfyUI
-    expect(vi.mocked(submitWorkflow).mock.calls[0][3]).toBe("编译后P");  // 提交提示词与试跑成稿同源
-    expect(vi.mocked(genProfilePrompt)).toHaveBeenCalledTimes(2); // 两轮都重编译（manual 不复用旧成稿文本）
-    // 重试成稿也照常上报（这次带真 promptId）
-    const retryReport = vi.mocked(reportIllustrationSubmission).mock.calls[1][0] as { promptId: string };
-    expect(retryReport.promptId).toBe("pid-1");
+    expect(submitWorkflow).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(genProfilePrompt)).toHaveBeenCalledTimes(2);  // 两轮都编译
   });
 });
 
@@ -566,7 +590,8 @@ describe("逐字搬移锁（T2.2-A 插画链）", () => {
 describe("源码形态锁（T2.2-A 插画链）", () => {
   it("试跑闸只认显式 `=== true`（旧数据/字符串 \"false\" 不得开启试跑）", () => {
     const seam = stripComments(read(SEAM));
-    expect(seam).toContain("const promptOnly = settings.promptOnlyGeneration === true;");
+    // 2026-10-18：尾部追加 `&& !useFinalDraft`（成稿直送旁路）——显式 === true 的前提不变
+    expect(seam).toContain("const promptOnly = settings.promptOnlyGeneration === true && !useFinalDraft;");
   });
 
   it("视图恰一次使用 + 调用块逐字（14 deps 同名接线）", () => {

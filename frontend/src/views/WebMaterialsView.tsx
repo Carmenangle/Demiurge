@@ -11,12 +11,17 @@ import { WebMaterialDetailModal } from "../components/WebMaterialDetailModal";
 import { Pager } from "../components/Pager";
 import { MaterialMarketModal } from "../components/MaterialMarketModalLive";
 import { useSettings } from "../stores/settings";
+import { activeVlmChat } from "../stores/settings";
+import { vlmGapMessage } from "../stores/settings";
 import { effectiveGlobalProxyUrl } from "../lib/modelProxy";
+import { imageDataUri } from "../lib/imageData";
 import { UI_BUILD } from "../lib/buildInfo";
 import {
   listWebMaterials, deleteWebMaterial, type WebMaterial,
   listInspirationCards, deleteInspirationCard, updateInspirationCard,
   type InspirationCardAsset,
+  // 2026-10-18：素材也能单独生成视觉描述（原站只有 tag，没有描述）
+  describeImage, setGenerationDescription, WEB_MATERIALS_REPO_ID,
 } from "../api/ai";
 
 const PAGE_SIZE = 32;
@@ -69,6 +74,8 @@ export function WebMaterialsView({
   onSendAsRecipe,
   onSendInspirationToChat,
   onSendInspirationToCanvas,
+  onBatchSendToChat,
+  onBatchSendAsRecipe,
 }: {
   outputDir: string;
   onSendToCanvas?: (items: WebMaterial[]) => void;
@@ -78,6 +85,10 @@ export function WebMaterialsView({
   onSendAsRecipe?: (item: WebMaterial) => void;
   onSendInspirationToChat?: (items: InspirationCardAsset[]) => void;
   onSendInspirationToCanvas?: (items: InspirationCardAsset[]) => void;
+  /** 2026-10-18 批量选择 → 发送至对话框（多图，只发图） */
+  onBatchSendToChat?: (items: WebMaterial[]) => void;
+  /** 2026-10-18 批量选择 → 发送至对话（每张带来源/标签/搜索词文本） */
+  onBatchSendAsRecipe?: (items: WebMaterial[]) => void;
 }) {
   const [tab, setTab] = useState<Tab>("images");
   const [items, setItems] = useState<WebMaterial[]>([]);
@@ -86,6 +97,13 @@ export function WebMaterialsView({
   const [selMode, setSelMode] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [batchDel, setBatchDel] = useState(false);
+  // 2026-10-18：单张/整夹/灵感卡删除补确认（此前点删即 unlink 磁盘文件，误点不可恢复）
+  const [confirmDel, setConfirmDel] = useState<
+    | { kind: "image"; id: string; title: string }
+    | { kind: "folder"; pages: WebMaterial[]; title: string }
+    | { kind: "card"; id: string; title: string }
+    | null
+  >(null);
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
   const [folderView, setFolderView] = useState<string | null>(null);  // 打开的多页文件夹（其 source_url）
@@ -102,6 +120,37 @@ export function WebMaterialsView({
   const flashNote = (msg: string, kind: "success" | "error" = "success") => {
     setNote({ msg, kind });
     window.setTimeout(() => setNote(null), 4000);
+  };
+
+  // 视觉描述（2026-10-18）：素材来自图站，只有原站 tag、没有描述 ⇒ 详情里单独生成。
+  // 写回走资产主表（repo_id=web-materials，素材的合成仓库），语义搜索立即可见。
+  const [describingId, setDescribingId] = useState("");
+  const describeMaterial = async (m: WebMaterial) => {
+    if (!m.assetId) {
+      flashNote("该素材还没有资产记录：重启后端后新下载的素材会自动补，旧素材需回填", "error");
+      return;
+    }
+    setDescribingId(m.filename);
+    try {
+      const vlm = activeVlmChat(settings);
+      if (!vlm) {
+        flashNote(vlmGapMessage(settings), "error");
+        return;
+      }
+      const img = await imageDataUri(m.url);
+      const r = await describeImage([img], vlm,
+        "用一段简洁中文客观描述图片中的人物外观、服装、动作、场景、构图和画风；不要写提示词，不要解释。");
+      const desc = (r.prompt || "").trim();
+      if (!desc) { flashNote("视觉模型没有返回描述（可能不支持视觉）", "error"); return; }
+      await setGenerationDescription(m.assetId, WEB_MATERIALS_REPO_ID, desc, settings.embedModel);
+      setItems((cur) => cur.map((x) => (x.filename === m.filename ? { ...x, description: desc } : x)));
+      setDetailMaterial((cur) => (cur && cur.filename === m.filename ? { ...cur, description: desc } : cur));
+      flashNote("视觉描述已写回——详情里可「复制描述 / 复制提示词」。");
+    } catch (e) {
+      flashNote(`生成失败：${(e as Error).message}`, "error");
+    } finally {
+      setDescribingId("");
+    }
   };
 
   const refresh = () => {
@@ -170,12 +219,19 @@ export function WebMaterialsView({
     }
   };
 
+  // 2026-10-18：搜索接**标签/作者/搜索词**（原站 tags 已在 provenance 里，此前只能搜标题/来源）；
+  // 多关键词按逗号/空格拆分后 AND（与资产库标签搜索口径一致）。
   const filteredImages = (() => {
     const q = query.trim().toLowerCase();
     if (!q) return items;
-    return items.filter((i) =>
-      (i.title || "").toLowerCase().includes(q) ||
-      (i.source_url || "").toLowerCase().includes(q));
+    const terms = q.split(/[，,;\s]+/).filter(Boolean);
+    return items.filter((i) => {
+      const haystack = [
+        i.title || "", i.source_url || "", i.author || "", i.query || "",
+        ...(i.tags || []),
+      ].join("\n").toLowerCase();
+      return terms.every((t) => haystack.includes(t));
+    });
   })();
 
   const filteredCards = (() => {
@@ -233,7 +289,7 @@ export function WebMaterialsView({
             <Search size={14} style={{ position: "absolute", left: 9, top: 9, color: "var(--text-muted)" }} />
             <input
               style={{ width: "100%", paddingLeft: 28, boxSizing: "border-box" }}
-              placeholder={tab === "images" ? "搜索标题或来源…" : "搜索标题或内容…"}
+              placeholder={tab === "images" ? "搜索标题/来源/标签…" : "搜索标题或内容…"}
               value={query}
               onChange={(e) => { setQuery(e.target.value); setPage(1); setFolderView(null); }}
             />
@@ -314,11 +370,29 @@ export function WebMaterialsView({
                     )}
                   </>
                 )
-                : onSendToCanvas && (
-                  <button className="btn" disabled={selected.size === 0} onClick={() => sendSelection(true)}>
-                    <Send size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />发送至画布（{selected.size}）
-                  </button>
-                )}
+                : (() => {
+                  // 2026-10-18：批量选择补齐两个发送入口（此前只有发送至画布）
+                  const picked = items.filter((m) => selected.has(m.filename));
+                  return (
+                    <>
+                      {onSendToCanvas && (
+                        <button className="btn" disabled={selected.size === 0} onClick={() => onSendToCanvas(picked)}>
+                          <Send size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />发送至画布（{selected.size}）
+                        </button>
+                      )}
+                      {onBatchSendToChat && (
+                        <button className="btn" disabled={selected.size === 0} onClick={() => onBatchSendToChat(picked)}>
+                          <Send size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />发送至对话框（{selected.size}）
+                        </button>
+                      )}
+                      {onBatchSendAsRecipe && (
+                        <button className="btn" disabled={selected.size === 0} onClick={() => onBatchSendAsRecipe(picked)}>
+                          <Send size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />发送至对话（{selected.size}）
+                        </button>
+                      )}
+                    </>
+                  );
+                })()}
               <button className="btn" onClick={selectThisPage}>选本页</button>
               <button className="btn" disabled={selected.size === 0} onClick={() => setSelected(new Set())}>清除</button>
             </div>
@@ -371,7 +445,7 @@ export function WebMaterialsView({
                       </span>
                     ) : (
                       <button className="wm-del" title="删除整个文件夹（全部页）"
-                        onClick={(e) => { e.stopPropagation(); void deleteFolder(cell.pages); }}>
+                        onClick={(e) => { e.stopPropagation(); setConfirmDel({ kind: "folder", pages: cell.pages, title: cell.title }); }}>
                         <Trash2 size={14} />
                       </button>
                     )}
@@ -410,7 +484,7 @@ export function WebMaterialsView({
                           </button>
                         )}
                         <button className="wm-del" title="删除素材"
-                          onClick={(e) => { e.stopPropagation(); deleteOne(cell.m.filename); }}>
+                          onClick={(e) => { e.stopPropagation(); setConfirmDel({ kind: "image", id: cell.m.filename, title: cell.m.title }); }}>
                           <Trash2 size={14} />
                         </button>
                       </>
@@ -442,7 +516,7 @@ export function WebMaterialsView({
                       </span>
                     ) : (
                       <button className="wm-del" title="删除灵感卡"
-                        onClick={(e) => { e.stopPropagation(); deleteOne(c.id); }}>
+                        onClick={(e) => { e.stopPropagation(); setConfirmDel({ kind: "card", id: c.id, title: c.title }); }}>
                         <Trash2 size={14} />
                       </button>
                     )}
@@ -463,6 +537,38 @@ export function WebMaterialsView({
           danger
           onConfirm={doBatchDelete}
           onCancel={() => setBatchDel(false)}
+        />
+      )}
+      {/* 2026-10-18：单张/整夹/灵感卡删除确认（此前点删即执行，误点不可恢复） */}
+      {confirmDel && (
+        <ConfirmModal
+          title={
+            confirmDel.kind === "folder" ? "删除整个文件夹"
+              : confirmDel.kind === "card" ? "删除灵感卡" : "删除素材"
+          }
+          message={
+            confirmDel.kind === "folder"
+              ? `确认删除「${confirmDel.title}」的全部 ${confirmDel.pages.length} 张素材？文件会从磁盘删除，此操作不可恢复。`
+              : confirmDel.kind === "card"
+                ? `确认删除灵感卡「${confirmDel.title}」？只删除灵感卡记录，图片文件保留。`
+                : "确认删除这张素材？文件会从磁盘删除，此操作不可恢复。"
+          }
+          confirmText="删除"
+          danger
+          onConfirm={async () => {
+            const c = confirmDel;
+            setConfirmDel(null);
+            if (c.kind === "folder") {
+              await deleteFolder(c.pages);
+            } else if (c.kind === "card") {
+              try { await deleteInspirationCard(outputDir, c.id); } catch { /* 单条失败不阻断 */ }
+              refresh();
+            } else {
+              try { await deleteWebMaterial(outputDir, c.id); } catch { /* 单条失败不阻断 */ }
+              refresh();
+            }
+          }}
+          onCancel={() => setConfirmDel(null)}
         />
       )}
 
@@ -530,10 +636,16 @@ export function WebMaterialsView({
         <WebMaterialDetailModal
           item={detailMaterial}
           onClose={() => setDetailMaterial(null)}
-          onDelete={(filename) => { setDetailMaterial(null); void deleteOne(filename); }}
+          onDelete={(filename) => {
+            // 2026-10-18：详情里的删除同样先确认（文件将从磁盘删除）
+            setConfirmDel({ kind: "image", id: filename, title: detailMaterial.title || filename });
+            setDetailMaterial(null);
+          }}
           onNotify={flashNote}
           onSendToChat={onSendToChat}
           onSendAsRecipe={onSendAsRecipe}
+          onDescribe={(m) => void describeMaterial(m)}
+          describing={describingId === detailMaterial.filename}
         />
       )}
       {market && (

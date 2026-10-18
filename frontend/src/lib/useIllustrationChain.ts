@@ -78,7 +78,7 @@ export interface IllustrationChainDeps {
 // 动机：批量生图约 4.7 分钟/张，审查提示词不该等出图；视频同理。
 // 语义：**编译链一字不改**（60～66 刀全部照跑），只是把「提交 + 轮询」整段换成「上报 trace」。
 const PROMPT_ONLY_NOTE =
-  "试跑：只生成提示词，未提交 ComfyUI（图片/视频均不出图）；成稿见 trace 的 illustration.submitted";
+  "试跑：只生成提示词，未提交 ComfyUI（图片/视频均不出图）；成稿见 trace 的 illustration.submitted；点「重新生成」用成稿直接出图";
 
 // 第 58 刀（2026-09-24）：999 模式 12 个槽**同时** POST /comfyui/submit —— ComfyUI
 // 首个任务触发模型加载、其余在队列里等，5/12 张撞上 60s 提交超时（真机实锤）。
@@ -101,11 +101,22 @@ export function useIllustrationChain({
   const submitIllustration = async (input: IllustrationSubmit) => {
     // 解构带默认值：函数体沿用局部名，签名收成对象后调用点不必再数位置（审计 C7）。
     const {
-      prompt: promptIn, motion = 0, actors = [], messageId, slotId, sceneSpec, turnId = "",
-      source = "automatic", eventVideoMode, firstFrameDesc = "", lastFrameDesc = "",
-      prevTailDesc = "", lastFrameUrl = "", videoPrompt = "", transition = "",
-      transitionVideoPrompt = "", transitionVideoParams,
-    } = input;
+    prompt: promptIn, motion = 0, actors = [], messageId, slotId, sceneSpec, turnId = "",
+    source = "automatic", eventVideoMode, firstFrameDesc = "", lastFrameDesc = "",
+    prevTailDesc = "", lastFrameUrl = "", videoPrompt = "", transition = "",
+    transitionVideoPrompt = "", transitionVideoParams,
+    finalPrompt = "", finalFramePrompts,
+  } = input;
+  // 2026-10-18 试跑成稿直送（用户定案）：快照带成稿 ⇒ 本次是「用成稿跑图」——
+  // 逐字采用、跳过编译链，且**绕过试跑闸**（显式点「重新生成」优先于批量开关；
+  // 试跑开关只拦自动链，不该拦用户对单个槽的显式动作）。无成稿（普通失败槽）
+  // ⇒ 走原路径：原参重编译（2026-08-30 定案）。
+  const finalDraft = (finalPrompt || "").trim();
+  const finalFrameDrafts = (finalFramePrompts
+    && ((finalFramePrompts.first || "").trim() || (finalFramePrompts.last || "").trim()))
+    ? { first: (finalFramePrompts.first || "").trim(), last: (finalFramePrompts.last || "").trim() }
+    : null;
+  const useFinalDraft = !!finalDraft || !!finalFrameDrafts;
     // 入参 prompt 是原始请求值（不改）；编译链会在下文按 Profile 重写 → 另起可变局部承接。
     let prompt = promptIn;
     // 重试参数快照 = 本对象（默认值已落定、按名取用）：失败槽「重新生成」按钮按名重调，
@@ -240,6 +251,12 @@ export function useIllustrationChain({
     };
     // V1.6/P5+：首尾帧独立图片模式跳过高潮 Profile 渲染（帧提示词在生成循环内走同一 Profile 编译链单独编译）。
     if (!useFirstlastImages) {
+    if (finalDraft) {
+      // 2026-10-18 成稿直送（用户定案）：试跑成稿已含 quality 行/风格句/LoRA 触发词
+      // ⇒ 逐字采用，跳过整条编译链（storedProfile/genProfilePrompt/anima 收尾/触发词前置）。
+      // ⚠ 副作用：负面提示词取当前预设值（成稿快照不存 negative）——已知边界。
+      prompt = finalDraft;
+    } else {
     // 重新生成（manual）必须重编译：重试快照里的 profile_prompt 是当初链路的产物——
     // 编译链升级（措辞收敛/预设瘦身/LoRA 绑定修正）后旧成稿不会自愈，复用=永远提交污染提示词
     //（2026-08-30 用户实锤：重试反复提交带旧措辞的成稿）。automatic 路径仍复用 produce 已编译结果。
@@ -288,6 +305,7 @@ export function useIllustrationChain({
     }
     prompt = withLoraTriggers(prompt);
     }
+    }
     // V1.6/P5+（2026-08-29 用户拍板）：首尾帧提示词与高潮点生图完全同构——后端
     // /ai/prompt/profile/frames 先做「时点提取」（首/尾各自时点的英文结构化 action/visual_facts，
     // 帧描述走 @(…)@ 防拦截保护），再逐帧走同一 Profile 编译器（同一校验/带因重写/兜底），
@@ -297,6 +315,9 @@ export function useIllustrationChain({
     // 这里禁止静默降级：编译失败必须显式失败（失败槽可见、可重新生成），绝不提交原文。
     const frameCompiled: Partial<Record<"first" | "last", string>> = {};
     const compileFramePrompt = (frame: "first" | "last", frameDesc: string): string => {
+      // 2026-10-18 成稿直送：快照带该帧成稿 ⇒ 逐字采用（已含触发词，不再前置）
+      const draft = finalFrameDrafts?.[frame];
+      if (draft) return draft;
       const compiled = frameCompiled[frame];
       if (!compiled || !compiled.trim()) {
         throw new Error(
@@ -308,9 +329,11 @@ export function useIllustrationChain({
     // 试跑（只生成提示词）：编译链**一字不改**照跑，但全程不碰 ComfyUI ——
     // 状态检查/底图上传/首尾帧提交/转场提交/正片提交/轮询全部短路，成稿改走
     // reportIllustrationSubmission 进 trace（promptId 空 = 未提交），供审查比对。
+    // 2026-10-18：快照带成稿（useFinalDraft）时**不短路**——显式「重新生成」要用
+    // 成稿出图，试跑开关只拦自动链（见上方 useFinalDraft 注释）。
     // 槽位在这里立刻落「试跑」终态：**可见、可重新生成、绝不悬挂**（后续若真的编译失败，
     // 下方 failSlot 会用真实错误覆写它 ⇒ 终态永远反映最后一次尝试的真实结果）。
-    const promptOnly = settings.promptOnlyGeneration === true;
+    const promptOnly = settings.promptOnlyGeneration === true && !useFinalDraft;
     if (promptOnly) {
       setMessages((current) => markMediaSlotFailed(
         current, messageId, slotId, "prompt_only", PROMPT_ONLY_NOTE, retrySnapshot,
@@ -368,6 +391,9 @@ export function useIllustrationChain({
     let firstFrameGenerated = false; // W3：首帧是否独立生图成功（决定要不要发转场任务）
     let frameFirstPromptId = "";
     let frameLastPromptId = "";
+    // 2026-10-18 试跑期收集的双帧成稿（成稿直送富化主槽快照用；非试跑留空）
+    let frameFirstDraft = "";
+    let frameLastDraft = "";
     // 编译后帧提示词：提交 ComfyUI 用它，回填入库/上报 trace 必须同源（2026-08-29 验收：
     // 资产库显示帧描述原文的根因=入库链传了 firstFrameDesc/lastFrameDesc 原文）。
     let frameFirstPrompt = "";
@@ -416,7 +442,8 @@ export function useIllustrationChain({
         latentSize,
       );
       // 帧提示词同构编译：一次调用出两帧成品（时点提取+同一 Profile 编译器）。
-      if (sceneSpec) {
+      // 2026-10-18：快照带双帧成稿 ⇒ 跳过 LLM 编译（compileFramePrompt 逐字采用）。
+      if (sceneSpec && !finalFrameDrafts) {
         const frameDescs: { first?: string; last?: string } = {};
         for (const task of plan.tasks) {
           if (task.kind === "generate") frameDescs[task.frame] = task.desc;
@@ -457,6 +484,8 @@ export function useIllustrationChain({
           if (promptOnly) {
             // 试跑：该帧提示词照常编译并上报 trace，但不提交 ComfyUI。
             // `frameFirstPromptId` 保持空 ⇒ 下游槽位回填/转场/正片一并短路（无悬挂槽）。
+            // 2026-10-18：收集成稿，循环结束后富化主槽快照（finalFramePrompts）。
+            if (isFirst) frameFirstDraft = framePrompt; else frameLastDraft = framePrompt;
             void reportIllustrationSubmission({
               threadId, repoId: repo?.id || threadId, turnId, messageId,
               slotId: `${slotId}${isFirst ? ":first" : ":last"}`,
@@ -517,6 +546,15 @@ export function useIllustrationChain({
           if (!useVideo) { failSlot("frame_gen", `尾帧生图失败：${message}`); return; }
           console.warn("[auto-video] 尾帧生图失败，降级首帧单图", { message });
         }
+      }
+      // 2026-10-18 成稿直送：试跑模式下把双帧成稿写进主槽快照 ⇒「重新生成」逐字提交
+      // 两帧（首尾帧图片模式不进主提交块，主槽无 finalPrompt，成稿只在这里富化）。
+      // 与 314 行的早期标记同 stage/同文案 ⇒ 槽位视觉不变，仅快照多带成稿。
+      if (promptOnly && (frameFirstDraft || frameLastDraft)) {
+        setMessages((current) => markMediaSlotFailed(
+          current, messageId, slotId, "prompt_only", PROMPT_ONLY_NOTE,
+          { ...retrySnapshot, finalFramePrompts: { first: frameFirstDraft, last: frameLastDraft } },
+        ));
       }
       // V1.6/P5+ 独立图片模式回填（2026-08-28 拍板）：双帧图经 pollResult 走既有回填+入库全链。
       // useVideo 时主槽留给视频正片（避免同槽双 pollResult 竞态），双帧图走 :first/:last 副槽；
@@ -683,6 +721,12 @@ export function useIllustrationChain({
       const loraMode = mainIsVideo ? "none" : (preset.loraMode || "single");
       if (promptOnly) {
         // 试跑：主图/正片（含 video 分支）的成稿上报 trace，不查 ComfyUI、不提交、不轮询。
+        // 2026-10-18 成稿直送：把编译成稿写进槽位快照 ⇒「重新生成」逐字提交 ComfyUI
+        // （首尾帧图片模式不进此块——主槽无成稿，双帧成稿在帧循环末尾富化）。
+        setMessages((current) => markMediaSlotFailed(
+          current, messageId, slotId, "prompt_only", PROMPT_ONLY_NOTE,
+          { ...retrySnapshot, finalPrompt: prompt },
+        ));
         void reportIllustrationSubmission({
           threadId, repoId: repo?.id || threadId, turnId, messageId, slotId,
           templateId: chosenId, promptId: "", prompt, promptProfile,

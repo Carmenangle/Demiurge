@@ -146,6 +146,12 @@ export interface IllustrationSubmit {
   transition?: string;
   transitionVideoPrompt?: string;
   transitionVideoParams?: VideoParams;
+  // 2026-10-18 试跑成稿直送（用户定案）：试跑（promptOnly）上报时把**编译成稿**写进
+  // 快照，「重新生成」据此逐字提交 ComfyUI（不再重编译）。普通失败槽无这两键 ⇒ 保持
+  // 2026-08-30「manual 重试必须重编译」语义（编译链升级能生效）。
+  // finalPrompt＝主图/正片成稿；finalFramePrompts＝首尾帧双帧成稿（首尾帧模式主槽不产成稿）。
+  finalPrompt?: string;
+  finalFramePrompts?: { first?: string; last?: string };
 }
 
 // PLACEHOLDER_BODY

@@ -462,6 +462,49 @@ export function resolvedEmbedModel(s: Settings): EmbedModel {
   };
 }
 
+/** 视觉大模型（VLM）→ 图像描述/反推用的 Chat 形态（2026-10-18）。
+ *  与 useChatSession 的 Visual CI 取值同源：local(gguf) 走 ollamaName，remote 走 baseUrl+modelName。
+ *  ⚠ 图像描述/反推必须用视觉模型，不能用普通对话模型（云对话模型普遍拒识图，
+ *    用户实测「素材生成视觉描述后仍空」的根绪就在此）。未配置返回 null。 */
+export function activeVlmChat(
+  s: Settings,
+): { baseUrl: string; apiKey: string; modelName: string; proxyUrl?: string } | null {
+  const vlm = s.vlmModel;
+  if (!vlm) return null;
+  if (vlm.mode === "local") {
+    if (!vlm.ollamaName) return null;
+    return { baseUrl: "http://localhost:11434/v1", apiKey: "ollama", modelName: vlm.ollamaName, proxyUrl: "" };
+  }
+  if (!vlm.baseUrl || !vlm.modelName) return null;
+  return {
+    baseUrl: vlm.baseUrl,
+    apiKey: vlm.apiKey || "",
+    modelName: vlm.modelName,
+    // 回环端点（本地 Ollama 127.0.0.1）必须直连、不走全局代理，否则 describe 502
+    //（resolveEndpointProxy 对 loopback 返空；resolveModelProxy 不豁免回环，不能用）。
+    proxyUrl: resolveEndpointProxy(vlm.baseUrl, vlm.proxyMode, globalProxyAddress(s), s.proxyEnabled),
+  };
+}
+
+/** activeVlmChat 返 null 时，给出「为什么不能用」的精准提示（2026-10-18：用户配了本地 GGUF
+ *  却报「未配置视觉大模型」，根因是本地模式没走完「导入到 Ollama＋保存」）。 */
+export function vlmGapMessage(s: Settings): string {
+  const v = s.vlmModel;
+  if (!v) return "未配置视觉大模型：请到「设置 → 模型」配置「视觉大模型（VLM）」。";
+  if (v.mode === "local") {
+    if (!v.ggufPath) return "本地视觉模型还没选 GGUF 文件：请到「设置 → 模型 → 视觉大模型」填写本地模型路径。";
+    if (!v.ollamaName) {
+      return "本地视觉模型（GGUF）还没导入 Ollama：请在「设置 → 模型 → 视觉大模型」点「导入到 Ollama」，"
+        + "或直接切到「API / Ollama」模式、模型名填 Ollama 里已有的名字后保存。";
+    }
+    return "本地视觉模型已导入但不可用：请确认 Ollama 已启动、且导入的模型名正确。";
+  }
+  if (!v.baseUrl || !v.modelName) {
+    return "未配置视觉大模型：请到「设置 → 模型 → 视觉大模型（VLM）」填写接口地址与模型名。";
+  }
+  return "视觉大模型不可用：请检查接口地址 / 模型名是否正确。";
+}
+
 export function modelDisplayName(model: { displayName?: string; modelName: string }): string {
   return model.displayName?.trim() || model.modelName.trim() || "未命名模型";
 }

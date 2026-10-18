@@ -44,6 +44,9 @@ describe("isolation of illustration submit params", () => {
       "source", "eventVideoMode", "firstFrameDesc", "lastFrameDesc", "prevTailDesc",
       "lastFrameUrl", "videoPrompt", "transition", "transitionVideoPrompt",
       "transitionVideoParams",
+      // 2026-10-18 试跑成稿直送：试跑（promptOnly）上报时把编译成稿写进快照，
+      // 「重新生成」据此逐字提交 ComfyUI（不再重编译）；普通失败槽无这两键 ⇒ 仍重编译
+      "finalPrompt", "finalFramePrompts",
     ]);
   });
 
@@ -412,6 +415,11 @@ describe("试跑后重试出图：失败槽按钮 → retryIllustration 接线",
   it("失败槽渲染「重新生成」按钮并回调 onRetryIllustration(msg.id, slotId)", () => {
     expect(chatMessages).toContain("media-slot-retry");
     expect(chatMessages).toMatch(/onRetryIllustration\(msg\.id, part\.slotId!\)/);
+  });
+
+  it("试跑槽的按钮口径＝成稿直送（title 明示，不与普通失败槽混词）", () => {
+    // 2026-10-18 用户定案：试跑槽的「重新生成」意思是「直接用成稿跑图」
+    expect(chatMessages).toContain("用试跑成稿直接提交 ComfyUI 出图");
   });
 
   it("ChatView 把 retryIllustration 接进 ChatMessages（断线即按钮变死键）", () => {

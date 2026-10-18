@@ -1,7 +1,9 @@
 // WebMaterialDetailModal.tsx — 上网素材详情（2026-10-16）
 // 结构向画布模式的详情看齐：**左侧完整图片 + 右侧信息**（来源/作者/评级/标签/时间/大小）。
 // 图片点击 → 共享 Lightbox 全屏（可滚轮缩放）；标签点击 → 复制。
-import { Copy, Trash2, ExternalLink, Send } from "lucide-react";
+// 2026-10-18：补标题栏 X + ESC 关闭（应用口径「关闭走 X/ESC」；此前只有底部「关闭」）。
+import { useEffect } from "react";
+import { Copy, Trash2, ExternalLink, Send, X } from "lucide-react";
 
 import { openLightbox } from "./Lightbox";
 import type { WebMaterial } from "../api/ai";
@@ -38,7 +40,7 @@ function Section({ title, extra, children, first = false }: {
 }
 
 export function WebMaterialDetailModal({
-  item, onClose, onDelete, onNotify, onSendToChat, onSendAsRecipe,
+  item, onClose, onDelete, onNotify, onSendToChat, onSendAsRecipe, onDescribe, describing,
 }: {
   item: WebMaterial;
   onClose: () => void;
@@ -48,8 +50,18 @@ export function WebMaterialDetailModal({
   onSendToChat?: (item: WebMaterial) => void;
   /** 发送至对话：图 + 文本（与资产库「发送至对话」同款） */
   onSendAsRecipe?: (item: WebMaterial) => void;
+  /** 视觉描述（2026-10-18）：素材大多只有原站标签、没有描述 ⇒ 详情里可单独生成 */
+  onDescribe?: (item: WebMaterial) => void;
+  describing?: boolean;
 }) {
   const tags = item.tags || [];
+
+  // ESC 关闭（与市场弹窗/资产库详情同口径；点遮罩仍不关闭，复制粘贴友好）
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
 
   const copy = async (text: string, what: string) => {
     try {
@@ -77,7 +89,19 @@ export function WebMaterialDetailModal({
         }}
         onClick={(e) => e.stopPropagation()}
       >
-        <h3 style={{ marginTop: 0, marginBottom: 10, flexShrink: 0 }}>素材详情</h3>
+        <h3 style={{ marginTop: 0, marginBottom: 10, flexShrink: 0, display: "flex", alignItems: "center" }}>
+          素材详情
+          <button
+            type="button"
+            className="icon-btn"
+            style={{ marginLeft: "auto", background: "transparent", color: "var(--text)" }}
+            title="关闭（ESC 亦可）"
+            aria-label="关闭"
+            onClick={onClose}
+          >
+            <X size={18} />
+          </button>
+        </h3>
 
         {/* 左图右信息（结构对齐资产库详情 RepoGallery：其源码注释即本例的警告）
             ⚠ 不要 flexWrap：换行会让容器高度需求翻倍 ⇒ 撑破 maxHeight、右栏失去滚动 */}
@@ -149,6 +173,45 @@ export function WebMaterialDetailModal({
                       onClick={() => void copy(t, "标签")}
                     >{t}</span>
                   ))}
+                </div>
+              )}
+            </Section>
+
+            {/* 分区 3：视觉描述（2026-10-18）：素材原站只有 tags，描述要单独生成；
+                生成结果写回资产主表（语义搜索可见），这里可一键复制。 */}
+            <Section title="视觉描述"
+              extra={item.description ? (
+                <span style={{ display: "inline-flex", gap: 6 }}>
+                  <button className="btn" style={{ fontSize: 11.5, padding: "1px 6px" }}
+                    onClick={() => void copy(item.description || "", "视觉描述")}>
+                    <Copy size={11} style={{ verticalAlign: "-1px", marginRight: 3 }} />复制描述
+                  </button>
+                  <button className="btn" style={{ fontSize: 11.5, padding: "1px 6px" }}
+                    title="复制「标签行＋空行＋描述段」两段式，直接贴进 ComfyUI 提示词框"
+                    onClick={() => void copy(
+                      [tags.join(", "), item.description].filter(Boolean).join("\n\n"),
+                      "两段式提示词",
+                    )}>
+                    <Copy size={11} style={{ verticalAlign: "-1px", marginRight: 3 }} />复制提示词
+                  </button>
+                </span>
+              ) : null}
+            >
+              {item.description ? (
+                <div style={{ fontSize: 12.5, lineHeight: 1.6 }}>{item.description}</div>
+              ) : (
+                <span style={{ fontSize: 12, color: "var(--text-muted)" }}>（还没有视觉描述）</span>
+              )}
+              {onDescribe && (
+                <div style={{ marginTop: 6 }}>
+                  <button className="btn" style={{ fontSize: 11.5 }}
+                    disabled={describing || !item.assetId}
+                    title={item.assetId
+                      ? "用当前视觉模型生成一段描述并写回素材（语义搜索可见）"
+                      : "该素材还没有资产记录：重启后端后新下载的素材会自动补"}
+                    onClick={() => onDescribe(item)}>
+                    {describing ? "生成中…" : "生成视觉描述"}
+                  </button>
                 </div>
               )}
             </Section>

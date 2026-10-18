@@ -221,6 +221,20 @@ export function AppBody(props: AppBodyProps) {
             ].filter(Boolean).join("\n");
             setSendTarget({ title: "发送至对话", payload: { text: recipe, images: [m.url] } });
           }}
+          // 2026-10-18：批量选择的两个发送入口（此前只有发送至画布）
+          onBatchSendToChat={(items) => setSendTarget({
+            title: "发送至对话框", payload: { text: "", images: items.map((m) => m.url) },
+          })}
+          onBatchSendAsRecipe={(items) => {
+            const recipe = items.map((m, i) => [
+              `#${i + 1}${m.title ? ` ${m.title}` : ""}`,
+              m.provider ? `来源：${m.provider}` : "",
+              m.source_url ? `来源页：${m.source_url}` : "",
+              (m.tags || []).length ? `标签：${(m.tags || []).join(", ")}` : "",
+              m.query ? `搜索词：${m.query}` : "",
+            ].filter(Boolean).join("\n")).join("\n\n");
+            setSendTarget({ title: "发送至对话", payload: { text: recipe, images: items.map((m) => m.url) } });
+          }}
           onSendInspirationToChat={(cards) => {
             // 灵感卡「插入输入框」：选作品后 push 到该作品输入框（画布/对话共用），可继续编辑后发送
             setSendTarget({
