@@ -6,6 +6,7 @@ from typing import Literal
 
 import json
 import re
+import threading
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -191,28 +192,43 @@ def seed(req: EmbedAuth) -> dict[str, object]:
 
 class GenerationsRequest(EmbedAuth):
     repo_id: str = "home"
-    repo_ids: list[str] = []   # 2026-10-18：非空 ⇒ 多仓库合并 keyset 分页（资产库聚合页）
+    repo_ids: list[str] = []   # 2026-10-18：非空 ⇒ 多仓库合并分页（资产库聚合页）
     limit: int = 0          # 0=全量（默认，兼容）；>0=每页条数
     before_ts: int = 0      # keyset 游标：只取 created_at 早于此的记录；0=不过滤
+    offset: int = 0         # 按偏移取（2026-10-19：分页条要「共 N 页」+ 直达任意页）
+    media_type: str = ""    # image/video/audio；空＝不限（2026-10-19 下推，别再前端过滤）
 
 
 @router.post("/generations")
 def list_generations(req: GenerationsRequest) -> dict[str, object]:
     """列出生成记录（图片+提示词+标签），供仓库详情页图片网格。
 
-    limit>0 时为 keyset 分页（created_at 倒序）：响应带 has_more（多取一条判定），
-    翻页把上一页末条 created_at 作为 before_ts 传入。limit=0 时全量返回、
-    has_more=False，行为与改造前一致。
-    repo_ids 非空时走**多仓库合并**分页（资产库聚合页，2026-10-18）：各库按同一游标
-    取 limit 条后归并排序——避免聚合页每次都全量 dump。
+    limit>0 时为分页（created_at 倒序）：响应带 has_more 与 **total**（命中的总条数）。
+    - keyset：把上一页末条 created_at 作为 before_ts 传入（新增图不会打乱已有页）；
+    - offset：按偏移取，供「共 N 页 / 直达第 N 页」用（只靠游标前端根本算不出总页数）。
+    media_type 下推到 SQL（2026-10-19）：此前媒体筛选只在前端过滤**已加载项**，
+    聚合页翻页不会为筛选结果取更多 ⇒ 筛「视频」后滚动一直加载却看不到新内容。
+    total 与 items 同口径（都按 media_type 过滤后的计数）。
+    limit=0 时全量返回、has_more=False，行为与改造前一致。
     """
     fetch = req.limit + 1 if req.limit > 0 else 0
+    media = req.media_type if req.media_type in ("image", "video", "audio") else ""
     repo_ids = req.repo_ids or [req.repo_id]
     items: list[dict] | None = None
+    total = 0
     if not _asset_db_empty():
         # P1-1 读路径（2026-10-18）：列表/分页/多仓库走 SQLite 主表（元数据真相），
-        # 单查询完成 repo 范围 + keyset —— 不再依赖 Chroma 全量 dump。
-        items = asset_store.list_assets(repo_ids, limit=fetch, before_ts=req.before_ts)
+        # 单查询完成 repo 范围 + 分页 + 媒体类型 —— 不再依赖 Chroma 全量 dump。
+        if req.before_ts > 0:
+            items = asset_store.list_assets(
+                repo_ids, limit=fetch, before_ts=req.before_ts, media_type=media)
+        else:
+            items = asset_store.list_assets(
+                repo_ids, limit=fetch, offset=req.offset, media_type=media)
+        try:
+            total = asset_store.count_assets(repo_ids, deleted=False, media_type=media)
+        except Exception:  # noqa: BLE001 [EXC-保留] 计数失败不该让列表 500（total=0 ⇒ 前端退回虚拟页）
+            total = 0
     if items is None:
         # 回退（主表尚未回填）：沿用向量库路径，行为与改造前一致
         if req.repo_ids:
@@ -223,10 +239,11 @@ def list_generations(req: GenerationsRequest) -> dict[str, object]:
             items = rag_store.list_generations(
                 req.repo_id, req.embed_cfg(), limit=fetch, before_ts=req.before_ts,
             )
+        total = 0   # 向量库路径不计数 ⇒ 0＝未知，前端退回「虚拟下一页」
     has_more = req.limit > 0 and len(items) > req.limit
     if has_more:
         items = items[:req.limit]
-    return {"items": items, "has_more": has_more}
+    return {"items": items, "has_more": has_more, "total": total}
 
 
 class SearchGenerationsRequest(EmbedAuth):
@@ -249,23 +266,44 @@ def search_generations(req: SearchGenerationsRequest) -> dict[str, object]:
 
 class GenerateThumbsRequest(EmbedAuth):
     repo_id: str = "home"
+    repo_ids: list[str] = []   # 2026-10-18：非空 ⇒ 多仓库一次跑，聚合成一个总进度
 
 
 @router.post("/generate-thumbs")
 def generate_thumbs(req: GenerateThumbsRequest) -> dict[str, object]:
     """为本仓库历史资产补生成缩略图（P0-2）。只处理本机静态图；远程/裂图跳过。
-    幂等可重跑；读路径有 thumb_url_if_ready 兜底发现，无需回写元数据（避免重嵌）。"""
-    from app.services import thumbnail_store
+    幂等可重跑；读路径有 thumb_url_if_ready 兜底发现，无需回写元数据（避免重嵌）。
+    2026-10-18：登记为后台任务（jobs），面板显示 X/N 进度。"""
+    from app.services import jobs, thumbnail_store
 
-    items = rag_store.list_generations(req.repo_id, req.embed_cfg())
-    generated = skipped = 0
-    for item in items:
-        path = thumbnail_store.local_path_of_url(str(item.get("image_url") or ""))
-        if path is None or thumbnail_store.ensure_thumb(path) is None:
-            skipped += 1
-        else:
-            generated += 1
-    return {"ok": True, "generated": generated, "skipped": skipped}
+    repo_ids = req.repo_ids or [req.repo_id]
+    cfg = req.embed_cfg()
+    per_repo_items = {rid: rag_store.list_generations(rid, cfg) for rid in repo_ids}
+    total = sum(
+        1 for items in per_repo_items.values() for it in items
+        if thumbnail_store.local_path_of_url(str(it.get("image_url") or "")) is not None
+    )
+    job = jobs.create("thumbnails", f"补缩略图（{len(repo_ids)} 仓库）", total)
+    try:
+        generated = skipped = 0
+        for items in per_repo_items.values():
+            for item in items:
+                if jobs.should_cancel(job.id):
+                    break
+                path = thumbnail_store.local_path_of_url(str(item.get("image_url") or ""))
+                if path is None:          # 远程/裂图：不计入 total，也不 tick
+                    skipped += 1
+                    continue
+                if thumbnail_store.ensure_thumb(path) is None:
+                    skipped += 1
+                else:
+                    generated += 1
+                jobs.tick(job.id)
+        jobs.finish(job.id, "cancelled" if jobs.should_cancel(job.id) else "done")
+        return {"ok": True, "generated": generated, "skipped": skipped, "job_id": job.id}
+    except Exception as exc:  # noqa: BLE001
+        jobs.finish(job.id, "failed", str(exc))
+        raise HTTPException(status_code=500, detail=f"补缩略图失败：{exc}") from exc
 
 
 class Wd14TagRequest(EmbedAuth):
@@ -519,14 +557,91 @@ def set_generation_description(req: SetGenerationDescriptionRequest) -> dict[str
 
 @router.post("/index-visual-generations")
 def index_visual_generations(req: GenerationsRequest) -> dict[str, object]:
-    """用已安装的视觉嵌入模型为本仓库图片建立独立向量索引。"""
-    from app.services import visual_asset_index
+    """为仓库图片建立独立视觉向量索引。
 
+    2026-10-18：登记为**后台任务**（jobs），前端「后台活动」面板轮询 /jobs 显示 X/N 进度条；
+    支持 repo_ids 多仓库一次跑（聚合出一个 1/157 的总进度）；分块编码、可协作式取消。"""
+    from app.services import jobs, visual_asset_index
+
+    repo_ids = req.repo_ids or [req.repo_id]
+    cfg = req.embed_cfg()
     try:
-        items = rag_store.list_generations(req.repo_id, req.embed_cfg())
-        return {"ok": True, **visual_asset_index.index_items(req.repo_id, items)}
+        per_repo_items = {rid: rag_store.list_generations(rid, cfg) for rid in repo_ids}
+        total = sum(visual_asset_index.count_indexable(items) for items in per_repo_items.values())
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"视觉索引不可用：{exc}") from exc
+
+    job = jobs.create("visual_index", f"视觉索引（{len(repo_ids)} 仓库）", total)
+    try:
+        indexed = skipped = 0
+        for rid, items in per_repo_items.items():
+            if jobs.should_cancel(job.id):
+                break
+            r = visual_asset_index.index_items(
+                rid, items, on_progress=lambda n: jobs.tick(job.id, n),
+            )
+            indexed += int(r.get("indexed") or 0)
+            skipped += int(r.get("skipped") or 0)
+        jobs.finish(job.id, "cancelled" if jobs.should_cancel(job.id) else "done")
+        return {"ok": True, "indexed": indexed, "skipped": skipped, "job_id": job.id}
+    except Exception as exc:  # noqa: BLE001
+        jobs.finish(job.id, "failed", str(exc))
+        raise HTTPException(status_code=503, detail=f"视觉索引不可用：{exc}") from exc
+
+
+class _VlmCfg(BaseModel):
+    """视觉模型三元组：由前端从设置透传（唯一真源仍是「设置 → 模型 → 视觉模型」）。
+
+    后端刻意不解析 local/remote 两态——此前 activeVlmChat 的代理口径改过一次，
+    在此重复实现必然再次漂移。
+    """
+    base_url: str = ""
+    api_key: str = ""
+    model: str = ""
+    proxy: str = ""
+
+
+class DescribeMissingRequest(EmbedAuth):
+    repo_ids: list[str] = []
+    vlm: _VlmCfg = _VlmCfg()
+    hint: str = ""
+    concurrency: int = 3
+
+
+@router.post("/describe-missing")
+def describe_missing(req: DescribeMissingRequest) -> dict[str, object]:
+    """批量补视觉描述（后台任务，立即返回 job_id）。
+
+    2026-10-18：从浏览器端搬到后端。原实现有三个硬伤——
+      ① 只覆盖「当前画廊已加载的条目」，全库要靠手动翻页；
+      ② 切页/刷新即断；
+      ③ 本地 8B VLM 全库跑十几分钟，浏览器端没有任何持久化进度。
+    现在登记为 job：GET /jobs 轮询可得 X/N，「后台活动」面板显示进度条，可取消。
+    图片从本机磁盘直读（不再绕后端代理 URL → dataURI 那一圈）。
+    """
+    from app.services import jobs, vlm_batch
+
+    repo_ids = req.repo_ids or ["home"]
+    if not str(req.vlm.model or "").strip() or not str(req.vlm.base_url or "").strip():
+        raise HTTPException(status_code=400, detail="未配置视觉模型（设置 → 模型 → 视觉模型）")
+    cfg = req.embed_cfg()
+    try:
+        total = len(vlm_batch.missing_description_assets(repo_ids))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"资产库不可用：{exc}") from exc
+
+    job = jobs.create("vlm_describe", f"视觉描述（{len(repo_ids)} 仓库）", total)
+
+    def _run() -> None:
+        try:
+            vlm_batch.run_describe_missing(
+                job.id, repo_ids, cfg, req.vlm.model_dump(), req.hint, req.concurrency,
+            )
+        except Exception as exc:  # noqa: BLE001 [EXC-保留] 后台线程兜底：线程内异常不能静默吞掉
+            jobs.finish(job.id, "failed", str(exc))
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"ok": True, "job_id": job.id, "total": total}
 
 
 @router.post("/dedup-generations")

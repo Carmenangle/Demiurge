@@ -5,6 +5,10 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.routers.ai_common import ChatModelReq, build_chat_model, chat
+# 反推系统提示 + 缩图实现统一放在 services/vlm_batch（后台批量描述任务复用同一套口径，
+# 避免两处漂移）；这里保留旧名做别名，既有测试 import _downscale_datauri 不变。
+from app.services.vlm_batch import REVERSE_SYSTEM as _REVERSE_SYSTEM
+from app.services.vlm_batch import downscale_datauri as _downscale_datauri
 
 router = APIRouter()
 
@@ -269,39 +273,6 @@ def image_proxy(url: str, proxy: str = ""):
 class DescribeImageRequest(ChatModelReq):
     images: list[str] = []         # 待反推图片（data URI 或可访问 URL），送 VLM
     hint: str = ""                 # 可选额外要求（如「侧重画风」）；model 须为支持视觉的模型
-
-
-_REVERSE_SYSTEM = (
-    "你是图像反推助手。仔细观察用户提供的图片，输出适合 Stable Diffusion / ComfyUI "
-    "使用的英文正向提示词，用逗号分隔的 Danbooru 风格标签或短语，涵盖主体、人物特征、"
-    "服饰、动作、画风、光影、构图、画质。只输出提示词本身，不要解释、不要引号、不要换行。"
-)
-
-
-def _downscale_datauri(u: str, max_side: int = 1024) -> str:
-    """把 dataURI 图缩到长边 ≤ max_side 再以 JPEG 重编码后返回。
-
-    为什么必须缩：视觉模型按像素计 token——一张 3.5MB 原图（≈1500px+）编码成 ~4150
-    token，会超出小上下文 VLM 的上限（qwen3vl:8b 走 Ollama 仅 4096 ctx ⇒ 直接 400，
-    前端看到 502）。缩到长边 1024 后 token 大幅下降、还能加速推理；gemma4 等大 ctx
-    模型同样受益（更快）。非 dataURI（http 直链）或解码失败则原样返回交给模型侧。
-    """
-    import base64
-    import io
-
-    if not isinstance(u, str) or not u.startswith("data:"):
-        return u
-    try:
-        from PIL import Image
-
-        _header, b64 = u.split(",", 1)
-        img = Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
-        img.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
-        buf = io.BytesIO()
-        img.save(buf, "JPEG", quality=85, optimize=True)
-        return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
-    except Exception:  # noqa: BLE001 [EXC-留痕] 解码失败原样发，让模型侧报真实错
-        return u
 
 
 @router.post("/describe-image")

@@ -182,44 +182,59 @@ def _purge_orphan_rows(repo_id: str) -> int:
 
 
 def repo_sync_fix(output_dir: str, cfg, *, do_index: bool = True, do_prune: bool = True) -> dict:
-    """按体检结果修复（保守）：补录未入库文件 + 清理裂图/孤儿。返回 {indexed, pruned}。
+    """按体检结果修复（保守）：补录未入库文件 + 清理裂图/孤儿。返回 {indexed, pruned, job_id}。
 
+    2026-10-18：登记为后台任务（jobs），前端面板显示 X/N 进度；协作式取消。
     ⛔ 不删磁盘文件、不覆盖已有索引；单个文件失败只留痕、不阻断其余。
     """
-    from app.services import view_urls
+    from app.services import jobs, view_urls
 
     report = repo_sync_report(output_dir, cfg)
+    total = report["total_unindexed"] + report["total_missing"]
+    job = jobs.create("sync_index", "仓库同步（补录+清理）", total)
     indexed = 0
     pruned = 0
-    if do_index:
-        for repo in report["repos"]:
-            for path in repo["unindexed"]:
-                p = Path(path)
-                kind = media_kind_of(p) or "image"
+    try:
+        if do_index:
+            for repo in report["repos"]:
+                for path in repo["unindexed"]:
+                    if jobs.should_cancel(job.id):
+                        break
+                    p = Path(path)
+                    kind = media_kind_of(p) or "image"
+                    try:
+                        rag_store.index_generation(
+                            repo["repo_id"], cfg, prompt="",
+                            image_url=view_urls.local_view(str(p)), media_type=kind,
+                        )
+                        indexed += 1
+                        jobs.tick(job.id)
+                    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 单文件失败不阻断
+                        _log.warning("补录失败 %s: %s", path, exc)
+        if do_prune:
+            for repo in report["repos"]:
+                if jobs.should_cancel(job.id):
+                    break
+                if repo["missing"]:
+                    try:
+                        n = rag_store.prune_missing_generations(repo["repo_id"], cfg)
+                        pruned += n
+                        jobs.tick(job.id, n)  # 计入 total 的部分
+                    except Exception as exc:  # noqa: BLE001 [EXC-留痕]
+                        _log.warning("清理裂图失败 repo=%s: %s", repo["repo_id"], exc)
+            if report["orphan_index_repos"]:
                 try:
-                    rag_store.index_generation(
-                        repo["repo_id"], cfg, prompt="",
-                        image_url=view_urls.local_view(str(p)), media_type=kind,
-                    )
-                    indexed += 1
-                except Exception as exc:  # noqa: BLE001 [EXC-留痕] 单文件失败不阻断
-                    _log.warning("补录失败 %s: %s", path, exc)
-    if do_prune:
-        for repo in report["repos"]:
-            if repo["missing"]:
-                try:
-                    pruned += rag_store.prune_missing_generations(repo["repo_id"], cfg)
+                    pruned += rag_store.prune_orphan_repos(cfg)["removed"]
                 except Exception as exc:  # noqa: BLE001 [EXC-留痕]
-                    _log.warning("清理裂图失败 repo=%s: %s", repo["repo_id"], exc)
-        if report["orphan_index_repos"]:
-            try:
-                pruned += rag_store.prune_orphan_repos(cfg)["removed"]
-            except Exception as exc:  # noqa: BLE001 [EXC-留痕]
-                _log.warning("孤儿仓库清理失败: %s", exc)
-            # 补刀：prune 只走 Chroma，主表有行/Chroma 文档没了的残留清不掉，按主表再清一遍
-            for rid in report["orphan_index_repos"]:
-                try:
-                    pruned += _purge_orphan_rows(rid)
-                except Exception as exc:  # noqa: BLE001 [EXC-留痕]
-                    _log.warning("孤儿主表补刀失败 repo=%s: %s", rid, exc)
-    return {"indexed": indexed, "pruned": pruned}
+                    _log.warning("孤儿仓库清理失败: %s", exc)
+                # 补刀：prune 只走 Chroma，主表有行/Chroma 文档没了的残留清不掉，按主表再清一遍
+                for rid in report["orphan_index_repos"]:
+                    try:
+                        pruned += _purge_orphan_rows(rid)
+                    except Exception as exc:  # noqa: BLE001 [EXC-留痕]
+                        _log.warning("孤儿主表补刀失败 repo=%s: %s", rid, exc)
+        jobs.finish(job.id, "cancelled" if jobs.should_cancel(job.id) else "done")
+        return {"indexed": indexed, "pruned": pruned, "job_id": job.id}
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕]
+        jobs.finish(job.id, "failed", str(exc))
+        raise

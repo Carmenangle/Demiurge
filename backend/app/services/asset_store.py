@@ -15,7 +15,7 @@ import json
 import re
 import time
 
-from app.db import get_connection
+from app.db import get_connection, write_with_retry
 from app.services import thumbnail_store
 
 # 读侧 camelCase 契约与本表字段的映射见 _row_to_item（形状必须与
@@ -190,16 +190,18 @@ def sync_tags(doc_id: str, tags: list[str]) -> bool:
 
 
 def sync_description(doc_id: str, description: str) -> bool:
-    conn = get_connection()
-    try:
-        with conn:
-            cur = conn.execute(
-                "update assets set description = ? where id = ?",
-                (description or "", doc_id),
-            )
-        return cur.rowcount > 0
-    finally:
-        conn.close()
+    """写描述到主表（批量描述后台任务并发写：走 write_with_retry 兜 WAL 竞态）。"""
+    def _op(conn):
+        try:
+            with conn:
+                cur = conn.execute(
+                    "update assets set description = ? where id = ?",
+                    (description or "", doc_id),
+                )
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+    return bool(write_with_retry(_op))
 
 
 def delete_rows(ids: list[str]) -> int:
@@ -286,10 +288,12 @@ def _scope_clause(repo_ids: list[str] | None, deleted: bool,
 
 
 def list_assets(repo_ids: list[str] | None, *, limit: int = 0, before_ts: int = 0,
-                media_type: str = "", deleted: bool = False) -> list[dict]:
-    """列表（keyset 分页，created_at 倒序）。limit=0 ⇒ 全量。
+                media_type: str = "", deleted: bool = False, offset: int = 0) -> list[dict]:
+    """列表（created_at 倒序）。limit=0 ⇒ 全量。
 
     deleted=True ⇒ 回收站视图（按 deleted_at 倒序）。
+    offset>0 ⇒ 按偏移取（2026-10-19：分页条要显示「共 N 页」并直达任意页，
+    光有 keyset 游标做不到——前端不知道总页数，也只能顺序翻）。
     """
     where, args = _scope_clause(repo_ids, deleted)
     if media_type:
@@ -303,6 +307,10 @@ def list_assets(repo_ids: list[str] | None, *, limit: int = 0, before_ts: int = 
     if limit > 0:
         sql += " limit ?"
         args.append(int(limit))
+        if offset > 0:
+            # SQLite 要求 offset 必须跟在 limit 后面（无 limit 的 offset 用 `limit -1`）
+            sql += " offset ?"
+            args.append(int(offset))
     conn = get_connection()
     try:
         return [_row_to_item(row) for row in conn.execute(sql, args)]
@@ -397,8 +405,13 @@ def get_row(doc_id: str) -> dict | None:
         conn.close()
 
 
-def count_assets(repo_ids: list[str] | None = None, *, deleted: bool | None = None) -> int:
-    """计数（deleted=None ⇒ 全部，含回收站）。读路径回退判定用（0 = 未回填）。"""
+def count_assets(repo_ids: list[str] | None = None, *, deleted: bool | None = None,
+                 media_type: str = "") -> int:
+    """计数（deleted=None ⇒ 全部，含回收站）。读路径回退判定用（0 = 未回填）。
+
+    media_type 与 list_assets 同口径（2026-10-19：媒体筛选下推后，分页条的
+    「共 N 页」必须按过滤后的数量算，否则会出现「共 10 页但内容只有一页」的假页）。
+    """
     clauses: list[str] = []
     args: list = []
     if deleted is not None:
@@ -406,6 +419,9 @@ def count_assets(repo_ids: list[str] | None = None, *, deleted: bool | None = No
     if repo_ids:
         clauses.append(f"repo_id in ({_placeholders(repo_ids)})")
         args.extend(repo_ids)
+    if media_type:
+        clauses.append("media_type = ?")
+        args.append(media_type)
     where = (" where " + " and ".join(clauses)) if clauses else ""
     conn = get_connection()
     try:

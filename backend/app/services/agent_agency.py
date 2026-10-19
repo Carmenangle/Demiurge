@@ -2272,11 +2272,15 @@ def _agency_maintenance_async(ctx: dict, deps, clean: str, turn: int,
     lock = _maintenance_lock(repo_key)
 
     def run() -> None:
-        with lock:
-            try:
-                _agency_maintenance(ctx, deps, clean, turn, rag_events)
-            except Exception as exc:  # noqa: BLE001 后台维护失败只留痕
-                run_trace.emit(ctx, "memory.maintenance", status="error", error=str(exc))
+        _maintenance_enter(repo_key, turn)
+        try:
+            with lock:
+                try:
+                    _agency_maintenance(ctx, deps, clean, turn, rag_events)
+                except Exception as exc:  # noqa: BLE001 后台维护失败只留痕
+                    run_trace.emit(ctx, "memory.maintenance", status="error", error=str(exc))
+        finally:
+            _maintenance_leave(repo_key)
 
     thread = threading.Thread(target=run, name=f"maintenance-{repo_key[:8]}", daemon=True)
     with _MAINTENANCE_THREADS_LOCK:
@@ -2444,3 +2448,42 @@ _MAINTENANCE_LOCKS: dict[str, threading.Lock] = {}
 
 
 _MAINTENANCE_THREADS_LOCK = threading.Lock()
+
+# 在跑的维护登记：repo_key -> {turn, queued, started_at}。仅供「后台活动」面板投影，
+# 生命周期跟随线程（进入 +1、退出 -1，归零即删）；不进任何持久化。
+_MAINTENANCE_RUNS: dict[str, dict] = {}
+
+
+def _maintenance_enter(repo_key: str, turn: int) -> None:
+    with _MAINTENANCE_THREADS_LOCK:
+        entry = _MAINTENANCE_RUNS.get(repo_key)
+        if entry is None:
+            entry = {"turn": 0, "queued": 0, "started_at": time.time()}
+            _MAINTENANCE_RUNS[repo_key] = entry
+        entry["queued"] += 1
+        if turn:
+            entry["turn"] = turn
+
+
+def _maintenance_leave(repo_key: str) -> None:
+    with _MAINTENANCE_THREADS_LOCK:
+        entry = _MAINTENANCE_RUNS.get(repo_key)
+        if entry is None:
+            return
+        entry["queued"] -= 1
+        if entry["queued"] <= 0:
+            _MAINTENANCE_RUNS.pop(repo_key, None)
+
+
+def maintenance_snapshot() -> list[dict]:
+    """在跑的对话后置维护（供后台活动面板只读投影）。"""
+    with _MAINTENANCE_THREADS_LOCK:
+        return [
+            {
+                "repo_id": key,
+                "turn": int(entry.get("turn") or 0),
+                "queued": int(entry.get("queued") or 0),
+                "started_at": float(entry.get("started_at") or 0),
+            }
+            for key, entry in _MAINTENANCE_RUNS.items()
+        ]

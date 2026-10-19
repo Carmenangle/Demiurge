@@ -401,20 +401,3 @@ def test_tag_snapshot_ops_sync_main_table(db, fake_store):
     assert set(asset_store.list_assets(["r1"])[0]["tags"]) == {"c"}
 
 
-def test_tag_snapshot_ops_sync_main_table(db, fake_store):
-    """快照新增/切换后主表标签必须同步（2026-10-18 用户实测：切换后刷新标签回退）。"""
-    url = "/api/local-view?path=/tmp/snap.png"
-    rag_store.index_generation("r1", None, prompt="p", image_url=url)
-    doc_id = rag_store.generation_doc_id("r1", url)
-
-    s1 = rag_store.add_tag_snapshot(doc_id, "r1", None, ["a", "b"], model="m1")
-    assert set(asset_store.list_assets(["r1"])[0]["tags"]) == {"a", "b"}
-    s2 = rag_store.add_tag_snapshot(doc_id, "r1", None, ["c"], model="m2")
-    assert set(asset_store.list_assets(["r1"])[0]["tags"]) == {"c"}
-    assert s1 and s2
-
-    assert rag_store.set_active_tag_snapshot(doc_id, "r1", None, s1["id"]) is True
-    assert set(asset_store.list_assets(["r1"])[0]["tags"]) == {"a", "b"}
-
-    assert rag_store.delete_tag_snapshot(doc_id, "r1", None, s1["id"]) is True
-    assert set(asset_store.list_assets(["r1"])[0]["tags"]) == {"c"}

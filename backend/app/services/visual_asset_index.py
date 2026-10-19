@@ -102,21 +102,37 @@ def _local_path(image_url: str) -> Path | None:
     return path if path and path.is_file() else None
 
 
-def index_items(repo_id: str, items: list[dict]) -> dict[str, int]:
-    """只索引仍存在的本机资产；跳过远程与裂图。"""
+def count_indexable(items: list[dict]) -> int:
+    """可索引（本机存在、非远程非裂图）的资产数——建 job 时先算 total，好显示 1/157。"""
+    return sum(1 for item in items if _local_path(str(item.get("image_url") or "")) is not None)
+
+
+def index_items(repo_id: str, items: list[dict], *, on_progress=None,
+                batch: int = 8) -> dict[str, int]:
+    """只索引仍存在的本机资产；跳过远程与裂图。
+
+    **分小块编码**（默认 8 张一块）：既降峰值显存，又能按块回调 on_progress 推进度（1/157）。
+    on_progress：每完成一块回调一次，入参为本块张数。"""
     rows = [(item, _local_path(str(item.get("image_url") or ""))) for item in items]
     rows = [(item, path) for item, path in rows if path is not None]
     if not rows:
         return {"indexed": 0, "skipped": len(items)}
-    vectors = _encode([{"image": str(path)} for _item, path in rows])
     collection = _collection(repo_id)
-    collection.upsert(
-        ids=[str(item["id"]) for item, _path in rows], embeddings=vectors,
-        documents=[str(item.get("description") or item.get("prompt") or "") for item, _path in rows],
-        metadatas=[{"repo_id": repo_id, "image_url": str(item.get("image_url") or "")}
-                   for item, _path in rows],
-    )
-    return {"indexed": len(rows), "skipped": len(items) - len(rows)}
+    step = max(1, batch)
+    indexed = 0
+    for start in range(0, len(rows), step):
+        chunk = rows[start:start + step]
+        vectors = _encode([{"image": str(path)} for _item, path in chunk])
+        collection.upsert(
+            ids=[str(item["id"]) for item, _path in chunk], embeddings=vectors,
+            documents=[str(item.get("description") or item.get("prompt") or "") for item, _path in chunk],
+            metadatas=[{"repo_id": repo_id, "image_url": str(item.get("image_url") or "")}
+                       for item, _path in chunk],
+        )
+        indexed += len(chunk)
+        if on_progress is not None:
+            on_progress(len(chunk))
+    return {"indexed": indexed, "skipped": len(items) - indexed}
 
 
 def search(repo_ids: list[str], query: str, k: int) -> list[str]:
