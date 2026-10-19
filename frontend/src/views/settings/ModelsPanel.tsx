@@ -439,10 +439,15 @@ export function ModelsPanel({ draft, setDraft }: PanelProps) {
         <div className="model-capability-head">
           <CapabilityTitle icon={<Eye size={18} />} title="视觉大模型" count={1}
             configured={draft.vlmModel.mode === "local"
-              ? Boolean(draft.vlmModel.ggufPath)
+              // 本地 GGUF 光有路径还不够——必须先「导入 Ollama」拿到 ollamaName 才真能用，
+              // 否则会误显示「已配置」而实际调不动（2026-10-18 用户实锤）。
+              ? Boolean(draft.vlmModel.ggufPath && draft.vlmModel.ollamaName)
               : Boolean(draft.vlmModel.baseUrl && draft.vlmModel.modelName)} />
         </div>
         <p className="field-hint" style={{ margin: "0 0 10px" }}>用于 Visual CI 自动验收插画（检查人物/动作/场景/噪点）。需支持图片输入的多模态模型：API / Ollama（如 qwen3vl、gemma4、GLM-4V）或本地 GGUF 模型导入 Ollama。模型文件不随项目发布包提供。</p>
+        <p className="field-hint" style={{ margin: "0 0 10px", color: "#b45309" }}>
+          ⚠ 「本地模型」标签只是把 GGUF **导入 Ollama 的暂存区**，本身不能直接用；导入后请切到「**API / Ollama**」标签并填模型名（如 qwen3vl:8b）——那就是你**本机 Ollama 跑这个 GGUF，全程本地、不走云**，务必**点保存**才生效。
+        </p>
         <div className="embedding-mode-tabs" role="group" aria-label="视觉大模型来源">
           <button
             type="button"
