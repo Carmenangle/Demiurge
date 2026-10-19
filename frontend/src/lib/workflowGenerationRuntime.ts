@@ -1,4 +1,4 @@
-import { getResult, type GenResult } from "../api/comfyui";
+import { clearComfyPending, getResult, registerComfyPending, type GenResult } from "../api/comfyui";
 import type { RegenerationSnapshot } from "../types/chat";
 
 /** 停顿守卫默认窗口：任务一直未观察到节点运转（/queue 仍是 queue_pending）超过此时长就早停。
@@ -63,7 +63,18 @@ type RuntimeOptions = {
   now?: () => number;
   fetchResult?: typeof getResult;
   schedule?: (callback: () => void, delayMs: number) => unknown;
+  /** 服务端在途登记（默认 POST /comfyui/pending；测试可注入 noop）。 */
+  reportPending?: (promptId: string, threadId: string, createdAt: number) => void;
+  /** 服务端终态清除（默认 POST /comfyui/pending/finish；测试可注入 noop）。 */
+  clearPending?: (promptId: string) => void;
 };
+
+/**
+ * 服务端镜像开关：单元测试（vitest MODE=test）不真发 HTTP —— 否则每构造一个
+ * runtime 都会往真实后端的 pending 表登记假 prompt_id（污染生产快照）。
+ * 注入 `reportPending`/`clearPending` 时仍按注入执行（专测这条链的用例不受影响）。
+ */
+const SERVER_MIRROR_ENABLED = import.meta.env.MODE !== "test";
 
 /**
  * ⚠ **P14（2026-09-15）起本组纯判定函数是模块内实现细节**：只服务于本模块的
@@ -366,19 +377,32 @@ export function durableFinalizeSucceeded(result: {
 
 export class WorkflowGenerationRuntime {
   private readonly key: string;
+  private readonly threadId: string;
   private readonly storageOverride?: Pick<Storage, "getItem" | "setItem">;
   private readonly now: () => number;
   private readonly fetchResult: typeof getResult;
   private readonly schedule: (callback: () => void, delayMs: number) => unknown;
+  private readonly reportPending: (promptId: string, threadId: string, createdAt: number) => void;
+  private readonly clearPending: (promptId: string) => void;
   private readonly finalized = new Set<string>();
   private readonly cancelled = new Set<string>();
 
   constructor(threadId: string, options: RuntimeOptions = {}) {
     this.key = `laf_pending_gen_${threadId}`;
+    this.threadId = threadId;
     this.storageOverride = options.storage;
     this.now = options.now || Date.now;
     this.fetchResult = options.fetchResult || getResult;
     this.schedule = options.schedule || ((callback, delayMs) => setTimeout(callback, delayMs));
+    // 服务端登记只是镜像：失败（后端未起/超时）不得影响生成链，故 fire-and-forget 吞错。
+    this.reportPending = options.reportPending ?? ((promptId, key, createdAt) => {
+      if (!SERVER_MIRROR_ENABLED) return;
+      void registerComfyPending(promptId, key, createdAt).catch(() => {});
+    });
+    this.clearPending = options.clearPending ?? ((promptId) => {
+      if (!SERVER_MIRROR_ENABLED) return;
+      void clearComfyPending(promptId).catch(() => {});
+    });
   }
 
   /**
@@ -410,11 +434,15 @@ export class WorkflowGenerationRuntime {
       input.baseSlotRef, input.runId,
     );
     this.write(next);
-    return next.find((item) => item.prompt_id === input.promptId)!;
+    const entry = next.find((item) => item.prompt_id === input.promptId)!;
+    // 服务端镜像（跨浏览器可见；localStorage 仍是判重/恢复的主存）。
+    this.reportPending(entry.prompt_id, this.threadId, entry.createdAt);
+    return entry;
   }
 
   remove(promptId: string): void {
     this.write(unregisterPending(this.list(), promptId));
+    this.clearPending(promptId);
   }
 
   /**

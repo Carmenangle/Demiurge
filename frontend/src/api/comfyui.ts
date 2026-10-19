@@ -112,6 +112,35 @@ export function getResult(promptId: string, url: string, nodeIds: string[] = [])
   );
 }
 
+// ---- 在途出图登记（2026-10-19）----
+// localStorage 存根换浏览器/清缓存就丢，服务端这份让「后台活动」跨端可见。
+// 真源分工：这里只回答「prompt_id 属于哪个 thread」，任务结果仍走 getResult/归档链。
+export interface ComfyPendingItem {
+  prompt_id: string;
+  thread_id: string;
+  created_at: number;   // epoch 秒
+  updated_at?: number;
+}
+
+export function listComfyPending() {
+  // 轮询类接口必须带超时：后端挂起时否则 await 永不返回，面板轮询链会静默断掉。
+  return apiGet<{ items: ComfyPendingItem[] }>("/comfyui/pending", 8_000);
+}
+
+export function registerComfyPending(promptId: string, threadId: string, createdAt: number) {
+  return apiPost<{ ok: boolean; item: ComfyPendingItem }>(
+    "/comfyui/pending",
+    { prompt_id: promptId, thread_id: threadId, created_at: createdAt / 1000 },
+    8_000,
+  );
+}
+
+export function clearComfyPending(promptId: string) {
+  return apiPost<{ ok: boolean; removed: boolean }>(
+    "/comfyui/pending/finish", { prompt_id: promptId }, 8_000,
+  );
+}
+
 export interface FinalizedMessage {
   id: string;
   role: "assistant";

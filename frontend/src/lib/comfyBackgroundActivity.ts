@@ -1,6 +1,8 @@
-// ComfyUI 工作流后台活动：扫描各仓库的 laf_pending_gen_* localStorage，
-// 把进行中的出图任务暴露给后台活动面板(SupportWidget)。
-// pending 项由 useChatSession 在完成/失败时删除，还在的即为进行中。
+// ComfyUI 工作流后台活动：本地 pending（laf_pending_gen_*）+ 服务端登记合并。
+// 2026-10-19：原先只扫 localStorage，换浏览器/清缓存后就看不到在跑任务；
+// 现在以「服务端 /comfyui/pending」补齐跨端可见性，localStorage 仍是判重/恢复的主存。
+// pending 项由 useChatSession / WorkflowGenerationRuntime 在终态时删除。
+import { listComfyPending, type ComfyPendingItem } from "../api/comfyui";
 import type { Repo } from "../stores/repos";
 import { repoActivityLabel } from "./repoPresentation";
 
@@ -15,6 +17,7 @@ const STALE_MS = 30 * 60 * 1000;  // 只影响面板展示；任务生命周期�
 const listeners = new Set<(items: ComfyBackgroundActivity[]) => void>();
 let snapshot: ComfyBackgroundActivity[] = [];
 let timer: ReturnType<typeof setInterval> | null = null;
+let inFlight = false;
 
 function loadRepos(): Repo[] {
   try { return JSON.parse(localStorage.getItem("laf_repos") || "[]") as Repo[]; }
@@ -29,6 +32,8 @@ function publish() { listeners.forEach((fn) => fn(snapshot)); }
 
 // 扫描所有仓库进行中的出图任务（纯函数，便于单测；storage 默认为 globalThis.localStorage）
 // 展示层必须只读：不得删除 pending，否则慢工作流完成时会跳过 finalize。
+// `home`（首页/未绑仓库的画布）也要列出来——2026-10-19 用户实锤：画布在首页出的图，
+// 面板原本一条都不显示，用户以为任务丢了。
 export function scanComfyActivities(
   now: number,
   label: (threadId: string) => string,
@@ -39,7 +44,7 @@ export function scanComfyActivities(
     const key = storage.key(i);
     if (!key?.startsWith("laf_pending_gen_")) continue;
     const threadId = key.slice("laf_pending_gen_".length);
-    if (!threadId || threadId === "home") continue;
+    if (!threadId) continue;  // 遗留空键（P17 前拼串笔误），已由迁移链并入 home
     let pending: { prompt_id: string; createdAt: number }[] = [];
     try { pending = JSON.parse(storage.getItem(key) || "[]"); } catch { continue; }
     const fresh = pending.filter((item) => now - item.createdAt <= STALE_MS);
@@ -63,9 +68,59 @@ export function hasPendingComfyGeneration(
   });
 }
 
+/**
+ * 服务端在途登记里是否有这些 thread 的任务（删除仓库守卫用）。
+ * 换浏览器/清缓存后 localStorage 查不到，但后端仍知道；后端不可用时不阻断删除
+ * （本地检查已覆盖同浏览器场景，宁可放过也不要因网络错误卡死删除）。
+ */
+export async function hasServerPendingComfyGeneration(
+  threadIds: readonly string[],
+): Promise<boolean> {
+  try {
+    const { items } = await listComfyPending();
+    const wanted = new Set(threadIds);
+    return items.some((item) => wanted.has(String(item.thread_id || "home")));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 合并本地 pending 与服务端登记（纯函数，便于单测）。
+ * 本地优先（它带判重域与恢复语义），服务端补「本浏览器没见过」的任务（换设备/清缓存场景）；
+ * 按 promptId 去重，服务端 created_at 是 epoch 秒。
+ */
+export function mergeComfyActivities(
+  local: readonly ComfyBackgroundActivity[],
+  server: readonly ComfyPendingItem[],
+  label: (threadId: string) => string,
+  now: number,
+): ComfyBackgroundActivity[] {
+  const items = [...local];
+  const seen = new Set(local.map((item) => item.promptId));
+  for (const item of server) {
+    const promptId = String(item.prompt_id || "");
+    if (!promptId || seen.has(promptId)) continue;
+    if (now - Number(item.created_at || 0) * 1000 > STALE_MS) continue;  // 后端已 prune，再兜一层
+    seen.add(promptId);
+    const threadId = String(item.thread_id || "home");
+    items.push({ promptId, threadId, label: label(threadId) });
+  }
+  return items;
+}
+
 function refresh() {
-  snapshot = scanComfyActivities(Date.now(), repoLabel);
-  publish();
+  if (inFlight) return;  // 后端慢/超时（8s）时别让 1.5s 轮询堆请求
+  inFlight = true;
+  const now = Date.now();
+  const local = scanComfyActivities(now, repoLabel);
+  listComfyPending()
+    .then(({ items }) => { snapshot = mergeComfyActivities(local, items || [], repoLabel, now); })
+    .catch(() => { snapshot = local; })  // 后端离线/超时：本地 pending 仍然可用
+    .finally(() => {
+      inFlight = false;
+      publish();
+    });
 }
 
 function ensurePolling() {

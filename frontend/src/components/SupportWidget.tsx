@@ -3,8 +3,11 @@ import { Activity, X } from "lucide-react";
 import { subscribeWorkflowBuildActivities, type WorkflowBuildActivity } from "../lib/workflowBuildActivity";
 import { subscribeChatBackgroundActivities, type ChatBackgroundActivity } from "../lib/chatBackgroundActivity";
 import { subscribeComfyBackgroundActivities, type ComfyBackgroundActivity } from "../lib/comfyBackgroundActivity";
+import { subscribeJobActivities, JOB_KIND_LABEL, type JobActivity } from "../lib/jobActivity";
+import { subscribeSubsystemActivities, type SubsystemActivity } from "../lib/subsystemActivity";
 import {
   subscribePlanTaskActivities,
+  visiblePlanActivities,
   type PlanTaskActivity,
 } from "../lib/planTaskActivity";
 import { announceFloatingPanel, subscribeFloatingPanels } from "../lib/floatingPanels";
@@ -22,12 +25,16 @@ export function SupportWidget(props: {
   embed: unknown;
   repoId: string;
   onOpenChat: (threadId: string) => void;
+  /** 点击下载/节点/LoRA 活动时跳到设置对应子视图（models / node-manager / lora-data）。 */
+  onOpenSettings?: (subView: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [activities, setActivities] = useState<WorkflowBuildActivity[]>([]);
   const [chatActivities, setChatActivities] = useState<ChatBackgroundActivity[]>([]);
   const [comfyActivities, setComfyActivities] = useState<ComfyBackgroundActivity[]>([]);
   const [planActivities, setPlanActivities] = useState<PlanTaskActivity[]>([]);
+  const [jobActivities, setJobActivities] = useState<JobActivity[]>([]);
+  const [subsystemActivities, setSubsystemActivities] = useState<SubsystemActivity[]>([]);
   const [fabTop, setFabTop] = useState<number>(() => {
     const value = Number(localStorage.getItem(FAB_TOP_KEY));
     return Number.isFinite(value) && value > 0 ? value : window.innerHeight - 80;
@@ -40,6 +47,8 @@ export function SupportWidget(props: {
   useEffect(() => subscribeChatBackgroundActivities(setChatActivities), []);
   useEffect(() => subscribeComfyBackgroundActivities(setComfyActivities), []);
   useEffect(() => subscribePlanTaskActivities(setPlanActivities), []);
+  useEffect(() => subscribeJobActivities(setJobActivities), []);
+  useEffect(() => subscribeSubsystemActivities(setSubsystemActivities), []);
   useEffect(() => { localStorage.setItem(FAB_TOP_KEY, String(fabTop)); }, [fabTop]);
   useEffect(() => { localStorage.setItem(FAB_HIDDEN_KEY, hidden ? "1" : "0"); }, [hidden]);
   useEffect(() => () => { if (longPressRef.current) clearTimeout(longPressRef.current); }, []);
@@ -74,12 +83,18 @@ export function SupportWidget(props: {
   const runningChatThreads = new Set(
     chatActivities.filter((c) => c.kind === "running").map((c) => c.threadId),
   );
-  const visiblePlanActivities = planActivities.filter(
-    (p) => !runningChatThreads.has(p.repo_id),
-  );
+  const visiblePlans = visiblePlanActivities(planActivities, runningChatThreads);
+  const runningJobs = jobActivities.filter((j) => j.status === "running");
+  const failedJobs = jobActivities.filter((j) => j.status === "failed");
   const total = running.length + chatActivities.length + comfyActivities.length
-    + visiblePlanActivities.length;
+    + visiblePlans.length + runningJobs.length + failedJobs.length
+    + subsystemActivities.length;
   const openRepoChat = (threadId: string) => { props.onOpenChat(threadId); setOpen(false); };
+  const openSettings = (subView: string) => {
+    if (!props.onOpenSettings) return;
+    props.onOpenSettings(subView);
+    setOpen(false);
+  };
   if (hidden) return <button className="support-handle" title="显示后台活动" onClick={() => setHidden(false)}>&lt;&lt;&lt;</button>;
   if (!open) return (
     <button className="support-fab" title="后台活动（拖动可移动，长按隐藏）" style={{ top: fabTop, bottom: "auto" }}
@@ -101,6 +116,53 @@ export function SupportWidget(props: {
             <span>{item.label}</span>
           </button>
         ))}
+        {[...runningJobs, ...failedJobs].map((job) => {
+          const pct = job.total > 0 ? Math.min(100, Math.round((job.done / job.total) * 100)) : 0;
+          return (
+            <div key={`job-${job.id}`} className="support-activity"
+              style={{ display: "block", textAlign: "left" }}>
+              <strong>{JOB_KIND_LABEL[job.kind] ?? job.kind}</strong>
+              <span>
+                {job.label}
+                {job.status === "failed"
+                  ? `　失败：${job.error || "未知错误"}`
+                  : `　${job.done}/${job.total}`}
+                {/* 成功/失败拆分（批量描述常有单张失败，只看 X/N 判断不出还剩多少没补上） */}
+                {job.detail ? `　${job.detail}` : ""}
+              </span>
+              {job.status === "running" && (
+                <div title={`${pct}%`} style={{
+                  marginTop: 6, height: 6, borderRadius: 3, overflow: "hidden",
+                  background: "rgba(127,127,127,.25)",
+                }}>
+                  <div style={{
+                    width: `${pct}%`, height: "100%", background: "#3b82f6",
+                    transition: "width .3s ease",
+                  }} />
+                </div>
+              )}
+            </div>
+          );
+        })}
+        {subsystemActivities.map((item) => {
+          const clickable = Boolean(item.target || item.repo_id);
+          return (
+            <div key={`sub-${item.id}`} className="support-activity"
+              style={{ display: "block", textAlign: "left", cursor: clickable ? "pointer" : "default" }}
+              title={item.target ? "点击打开对应设置面板" : item.repo_id ? "点击回到对应会话" : ""}
+              onClick={() => {
+                if (item.target) openSettings(item.target);
+                else if (item.repo_id) openRepoChat(item.repo_id);
+              }}>
+              <strong>{item.title}</strong>
+              <span>
+                {item.repoLabel ? `${item.repoLabel} · ` : ""}{item.label}
+                {item.progress ? `　${item.progress}` : ""}
+                {item.status === "failed" ? `　失败：${item.error || "未知错误"}` : ""}
+              </span>
+            </div>
+          );
+        })}
         {chatActivities.map((item) => (
           <button key={`chat-${item.taskId || item.threadId}`} className="support-activity"
             onClick={() => openRepoChat(item.threadId)}>
@@ -108,7 +170,7 @@ export function SupportWidget(props: {
             <span>{item.label}{item.need ? `：${item.need}` : ""}</span>
           </button>
         ))}
-        {visiblePlanActivities.map((item) => (
+        {visiblePlans.map((item) => (
           <div key={`plan-${item.id}`} className="support-activity"
             style={{ display: "block", textAlign: "left", cursor: "pointer" }}
             onClick={() => openRepoChat(item.repo_id)} title="点击回到对应会话">

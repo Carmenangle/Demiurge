@@ -18,7 +18,7 @@ import { deleteRepoFolder } from "./api/userState";
 import { AppBody } from "./AppBody";
 import { WORKS_ROOT_UNCONFIGURED_EVENT } from "./api/client";
 import { recentWorks as selectRecentWorks } from "./lib/repoPresentation";
-import { hasPendingComfyGeneration } from "./lib/comfyBackgroundActivity";
+import { hasPendingComfyGeneration, hasServerPendingComfyGeneration } from "./lib/comfyBackgroundActivity";
 
 // 页面边界按需加载；应用壳、后台活动和快捷工具保持常驻。
 const SupportWidget = lazy(() => import("./components/SupportWidget").then((m) => ({ default: m.SupportWidget })));
@@ -164,6 +164,15 @@ export function App() {
   };
 
   const openBackgroundChat = (threadId: string) => {
+    // 首页画布（未绑小仓库）没有可解析的会话目标，但它的出图同样进后台活动面板：
+    // 点击应回首页，而不是像以前那样静默无反应（2026-10-19）。
+    if (threadId === "home") {
+      setWorkId(null);
+      setSection("home");
+      setSettingsOpen(false);
+      setSubView(null);
+      return;
+    }
     const target = resolveActivityChatTarget(repos, threadId);
     if (!target) return;
     setRepoId(target.repoId);
@@ -172,6 +181,15 @@ export function App() {
     setSettingsOpen(false);
     setSubView(null);
     // 模式由 workId effect 恢复该作品记忆值（含 hash）
+  };
+
+  /** 后台活动里下载/节点/LoRA 条目 → 设置对应子视图。 */
+  const openSettingsSubview = (subView: string) => {
+    setSection("system");
+    setSubView(subView);
+    setSettingsOpen(false);
+    setBrowseRepoId(null);
+    window.location.hash = `#/system/${subView}`;
   };
 
   const drilledIn = section !== "home" && !settingsOpen;
@@ -289,6 +307,7 @@ export function App() {
             embed={resolvedEmbedModel(settings)}
             repoId={workId || repoId || "home"}
             onOpenChat={openBackgroundChat}
+            onOpenSettings={openSettingsSubview}
           />
           <QuickToolsWidget onOpenFull={() => {
             setSection("system");
@@ -376,7 +395,8 @@ export function App() {
             const target = deleting;
             setDeleting(null);
             const ids = [target.id, ...childrenOf(target.id).map((c) => c.id)];
-            if (hasPendingComfyGeneration(ids)) {
+            // 先查本浏览器（同步、零延迟），再查服务端登记（换浏览器/清缓存后仍能挡住删除）。
+            if (hasPendingComfyGeneration(ids) || await hasServerPendingComfyGeneration(ids)) {
               setDelBlocked(`「${target.name}」还有生图任务未完成，已阻止删除。请等待归档完成或先显式停止任务。`);
               return;
             }

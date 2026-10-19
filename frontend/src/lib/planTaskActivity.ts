@@ -70,12 +70,30 @@ function publish() {
   listeners.forEach((listener) => listener([...cache]));
 }
 
+// 终态计划不占面板位：后端 /plans 按 created_at 取最近 10 条（含 done/error），
+// 原实现全量渲染，导致已完成计划长期顶住悬浮数字（2026-10-19 修为只显示活跃态）。
+// blocked 保留：它在等人处理（换租约/改参数），不是终态。
+export const PLAN_ACTIVE_STATUS = new Set([
+  "queued", "running", "awaiting_approval", "blocked",
+]);
+
+/** 面板可见的计划活动（纯函数，便于单测）：排除终态与「同会话正有对话在跑」的重复项。 */
+export function visiblePlanActivities(
+  items: readonly PlanTaskActivity[],
+  runningChatThreads: ReadonlySet<string>,
+): PlanTaskActivity[] {
+  return items.filter(
+    (item) => PLAN_ACTIVE_STATUS.has(item.status) && !runningChatThreads.has(item.repo_id),
+  );
+}
+
 async function poll() {
   try {
-    const tasks = await apiGet<PlanTask[]>("/plans?limit=10");
+    // 轮询类接口必须带超时：后端挂起时否则 await 永不返回，轮询链静默断掉。
+    const tasks = await apiGet<PlanTask[]>("/plans?limit=10", 8000);
     cache = tasks.map(fromTask);
     publish();
-  } catch { /* 后端离线：保留上次快照 */ }
+  } catch { /* 后端离线/超时：保留上次快照 */ }
 }
 
 export function subscribePlanTaskActivities(listener: (items: PlanTaskActivity[]) => void): () => void {

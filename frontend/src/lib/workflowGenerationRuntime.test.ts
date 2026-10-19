@@ -1012,3 +1012,38 @@ describe("P14 · 公开门面等价网（导出面收窄前先钉行为）", () 
     expect(watch.finalize).toHaveBeenCalledOnce();
   });
 });
+
+describe("服务端在途登记（跨浏览器可见）", () => {
+  it("track 上报 prompt_id/thread/createdAt，remove 清除 —— 登记点唯一", () => {
+    const reported: Array<[string, string, number]> = [];
+    const cleared: string[] = [];
+    const runtime = new WorkflowGenerationRuntime("work", {
+      storage: memoryStorage(), now: () => 1234,
+      reportPending: (promptId, threadId, createdAt) => reported.push([promptId, threadId, createdAt]),
+      clearPending: (promptId) => cleared.push(promptId),
+    });
+
+    const pending = runtime.track({ promptId: "p1", comfyuiUrl: "http://comfy" });
+    expect(reported).toEqual([["p1", "work", pending.createdAt]]);
+
+    runtime.remove("p1");
+    expect(cleared).toEqual(["p1"]);
+    expect(runtime.list()).toEqual([]);
+  });
+
+  it("终态（完整走一遍 start→complete）同样触发清除，不给面板留幽灵任务", async () => {
+    const scheduled: Array<() => void> = [];
+    const cleared: string[] = [];
+    const runtime = new WorkflowGenerationRuntime("work", {
+      storage: memoryStorage(), now: () => 10,
+      fetchResult: vi.fn(async () => completed),
+      schedule: (callback) => scheduled.push(callback),
+      reportPending: () => {},
+      clearPending: (promptId) => cleared.push(promptId),
+    });
+
+    runtime.start({ promptId: "p9", comfyuiUrl: "http://comfy" }, observer());
+    await scheduled.shift()!();
+    expect(cleared).toEqual(["p9"]);
+  });
+});
