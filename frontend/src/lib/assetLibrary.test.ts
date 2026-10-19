@@ -10,6 +10,11 @@ const indexHtml = readFileSync(new URL("../../index.html", import.meta.url), "ut
 const view = readFileSync(new URL("../views/WebMaterialsView.tsx", import.meta.url), "utf8");
 const settings = readFileSync(new URL("../stores/settings.ts", import.meta.url), "utf8");
 const syncModal = readFileSync(new URL("../components/RepoSyncModal.tsx", import.meta.url), "utf8");
+const supportWidget = readFileSync(new URL("../components/SupportWidget.tsx", import.meta.url), "utf8");
+const jobActivity = readFileSync(new URL("./jobActivity.ts", import.meta.url), "utf8");
+const jobsApi = readFileSync(new URL("../api/jobs.ts", import.meta.url), "utf8");
+const pager = readFileSync(new URL("../components/Pager.tsx", import.meta.url), "utf8");
+const masonry = readFileSync(new URL("./masonry.ts", import.meta.url), "utf8");
 
 describe("资产库删除与恢复合同", () => {
   it("删除资产记录时保留本机图片", () => {
@@ -50,14 +55,16 @@ describe("资产库删除与恢复合同", () => {
 describe("P0-1 资产列表 keyset 分页（RepoGallery 契约）", () => {
   it("消费后端 has_more，翻页游标用列表末条 created_at（beforeTs）", () => {
     expect(gallery).toContain("has_more === true");
-    expect(gallery).toContain("beforeTs: cursor");
+    // 2026-10-19：翻页改 offset 区间取（keyset 游标算不出总页数、也只能顺序翻）
+    expect(gallery).toContain("offset: loaded");
     expect(gallery).toContain("loadMore");
   });
 
   it("分页在资产库（单/多仓库）都启用；搜索/筛选触发一次全量（sticky）", () => {
     // 2026-10-18：多仓库改走后端合并 keyset ⇒ 不再按仓库数强制全量
     expect(gallery).toContain("const needFull = !enhanced || fullyLoaded;");
-    expect(gallery).toContain("const filtering = !!tagQuery.trim() || semanticMode || mediaFilter !== \"all\";");
+    // 2026-10-19：媒体类型下推 SQL ⇒ 不再为它升级全量（聚合页也能正常翻页）
+    expect(gallery).toContain("const filtering = !!tagQuery.trim() || semanticMode;");
   });
 
   it("切仓库重置回分页浏览态（不沿用上一个仓库的 fullyLoaded）", () => {
@@ -65,9 +72,12 @@ describe("P0-1 资产列表 keyset 分页（RepoGallery 契约）", () => {
     expect(gallery).toContain("cancel = refresh(1, false);");
   });
 
-  it("自动描述在分页态先升级全量再执行（不只看已加载页）", () => {
-    expect(gallery).toContain("setPendingDescribe(true)");
-    expect(gallery).toContain("if (!pendingDescribe || !fullyLoaded || loading) return;");
+  // 2026-10-18 改口径：批量描述搬到**后端后台任务**，直接读库筛选，与前端分页/已加载页解耦
+  // （旧实现在浏览器里循环 items ⇒ 只覆盖已加载页，且切页即断）。
+  it("自动描述不再依赖已加载页（不再有 pendingDescribe 升级全量那段）", () => {
+    expect(gallery).not.toContain("pendingDescribe");
+    expect(gallery).not.toContain("runDescribeMissing");
+    expect(gallery).toContain("describeMissingAssets(repoIds");
   });
 });
 
@@ -88,9 +98,10 @@ describe("P0-2 缩略图派生层（RepoGallery 契约）", () => {
 
 describe("P0-3 WD14 反推打标（RepoGallery 契约）", () => {
   it("WD14 反推作为统一入口的一个模式存在（2026-10-18 起不再单独占一键）", () => {
-    expect(gallery).toContain("wd14TagActive");
     expect(gallery).toContain("WD14 本地（纯标签）");
-    expect(gallery).toContain('if (tagMode === "wd14")');
+    // 2026-10-19：wd14 从独立函数并入 reverseOne 的 mode 分支（单图/批量共用一份核心）
+    expect(gallery).toContain('if (mode === "wd14") {');
+    expect(gallery).toContain("await tagGeneration(taggerModel, g.id, repoId, embed)");
   });
 
   it("反推打标走「快照」而非合并（2026-10-17 定案）：tags＝本次快照结果，另拉快照列表", () => {
@@ -144,7 +155,8 @@ describe("多仓库增量加载（2026-10-18）", () => {
     expect(gallery).toContain("const browsing = enhanced && !fullyLoaded;");
     expect(gallery).toContain("const needFull = !enhanced || fullyLoaded;");
     expect(gallery).toContain("repoIds.length === 1 ? repoIds[0] : repoIds");
-    expect(gallery).toContain("listGenerations(scope, embed, { limit: PAGE_SIZE })");
+    // 2026-10-19：媒体类型下推，首屏请求带 mediaType（total 与 items 同口径）
+    expect(gallery).toContain("listGenerations(scope, embed, { limit: PAGE_SIZE, mediaType: media })");
   });
 
   it("翻页不再限定单仓库（多仓库同样接续）", () => {
@@ -208,7 +220,7 @@ describe("统一反推入口（2026-10-18 用户定案：一套按钮 + 模式�
   it("两段式落库走 /rag/tag-text（标签快照 + 描述写回）", () => {
     expect(aiApi).toContain('"/rag/tag-text"');
     expect(gallery).toContain("tagFromText(g.id, repoId, embed, text");
-    expect(gallery).toContain("saveDescription: tagMode === \"vlm\"");
+    expect(gallery).toContain("saveDescription: mode === \"vlm\"");
   });
 });
 
@@ -274,9 +286,7 @@ describe("反推按钮图标随模式变 + toast 引导（#3/#4，2026-10-18 用
   });
 
   it("生成后 toast 指引去详情里复制（提升可发现性）", () => {
-    expect(gallery).toContain("详情里可「复制提示词（两段式）」");
-    expect(gallery).toContain("详情里可「复制标签」");
-    expect(gallery).toContain("详情里可「复制描述」");
+    expect(gallery).toContain("详情里可「复制标签 / 复制提示词」");
     expect(view).toContain("详情里可「复制描述 / 复制提示词」");
   });
 });
@@ -368,16 +378,135 @@ describe("P3 仓库同步（2026-10-18 建议顺序⑤：只读体检 + 一键�
 });
 
 describe("批量描述：并发 + 实时进度 + 可暂停（2026-10-18 优化②）", () => {
-  it("并发 3 跑（不再是逐张串行），单张失败不中断", () => {
-    expect(gallery).toContain("const CONCURRENCY = 3;");
-    expect(gallery).toContain("await Promise.all(Array.from({ length: Math.min(CONCURRENCY, targets.length) }, () => worker()))");
-    expect(gallery).toContain("while (queue.length > 0 && !describeCancelRef.current)");
+  // 并发与容错下沉到后端 services/vlm_batch.py（ThreadPoolExecutor + 单张失败记数不中断）；
+  // 前端只管提交 job 与收尾刷新，故此处不再断言浏览器端 worker 池。
+  it("批量描述提交后端 job（切页/刷新不断），跑完自动刷新列表", () => {
+    expect(gallery).toContain("const [describeJobId, setDescribeJobId] = useState(\"\")");
+    expect(gallery).toContain("setDescribeJobId(r.job_id)");
+    expect(aiApi).toContain('"/rag/describe-missing"');
+    expect(gallery).toContain("subscribeJobActivities((list) => {");
+    expect(jobActivity).toContain('vlm_describe: "视觉描述"');
   });
 
-  it("实时进度 X/N + 可点暂停（已完成不回退）", () => {
-    expect(gallery).toContain("const [describeProgress, setDescribeProgress] = useState<{ done: number; total: number } | null>(null)");
-    expect(gallery).toContain("描述中 ${describeProgress.done}/${describeProgress.total}（暂停）");
-    expect(gallery).toContain("if (describing) describeCancelRef.current = true; else describeMissing();");
-    expect(gallery).toContain("已完成的不回退");
+  // 2026-10-18 用户实锤：面板 192/307 时第一页仍全是「无描述」——只在收尾刷新，
+  // 网格停在页面加载时的快照。运行中必须节流增量刷新。
+  it("运行中节流刷新（否则面板进度与网格不一致）", () => {
+    expect(gallery).toContain("if (job.status === \"running\") {");
+    expect(gallery).toContain("if (now - lastAt < 4000) return;");
+    expect(gallery).toContain("refreshRef.current();");
+  });
+
+  it("收尾显示成功/失败拆分（detail 字段贯通后端→面板→toast）", () => {
+    expect(jobsApi).toContain("detail?: string;");
+    expect(supportWidget).toContain("job.detail");
+    expect(gallery).toContain("${job.detail ?");
+  });
+});
+
+describe("统一后台任务进度（2026-10-18：视觉索引/补缩略图/同步 都要 X/N 进度条）", () => {
+  it("后端 /jobs 轮询 + SupportWidget 面板渲染进度条", () => {
+    // 轮询类接口必须带超时（后端挂起时否则 await 永不返回，轮询链静默断掉）
+    expect(jobsApi).toContain('apiGet<{ jobs: JobInfo[] }>("/jobs", POLL_TIMEOUT_MS)');
+    expect(jobsApi).toContain("const POLL_TIMEOUT_MS = 8000;");
+    expect(jobActivity).toContain("export function subscribeJobActivities");
+    expect(jobActivity).toContain("setInterval");
+    expect(supportWidget).toContain("subscribeJobActivities(setJobActivities)");
+    expect(supportWidget).toContain("job.done}/${job.total}");
+    expect(supportWidget).toContain("width: `${pct}%`");
+  });
+
+  it("视觉索引/补缩略图一次传 repo_ids（聚合成一个总进度）", () => {
+    expect(gallery).toContain("await indexVisualGenerations(repoIds, embed)");
+    expect(gallery).toContain("await generateThumbs(repoIds, embed)");
+    expect(gallery).not.toContain("for (const repoId of repoIds) {\n        const result = await indexVisualGenerations");
+  });
+
+  it("视觉描述按钮说明覆盖范围（资产库页＝全库，子仓库页＝该仓库）", () => {
+    expect(gallery).toContain("当前视图的全部仓库");
+    expect(gallery).toContain("在「资产库」总页点＝补全库；在子仓库页点＝只补该仓库");
+  });
+
+  // 2026-10-19 用户实锤：单图反推/视觉描述跑在浏览器里，没登记 job ⇒ 右侧「后台活动」
+  // 什么都不显示。现在单图也走 createJob/tickJob/finishJob（total=1）。
+  it("单图反推也登记 job（后台活动不再对反推瞎眼）", () => {
+    expect(jobsApi).toContain("export function createJob(");
+    expect(jobsApi).toContain("export function tickJob(");
+    expect(jobsApi).toContain("export function finishJob(");
+    expect(gallery).toContain('await createJob("tag_infer",');
+    expect(gallery).toContain("await tickJob(jobId)");
+    expect(gallery).toContain('await finishJob(jobId, "done", { detail })');
+    // 单张也走同一条批量入口（total=1），保证行为一致
+    expect(gallery).toContain("const runTag = (g: Generation) => void runReverseBatch([g], tagMode);");
+  });
+
+  it("批量反推所选（多选模式下新增入口，并发 3 + X/N）", () => {
+    expect(gallery).toContain("反推所选（{selected.size}）");
+    expect(gallery).toContain("const runTagBatch = () => {");
+    expect(gallery).toContain("Math.min(3, targets.length)");
+    expect(gallery).toContain("`反推标签（${targets.length} 张）`");
+  });
+
+  // 2026-10-19 用户实锤：① 只能一页页点下一页，没有页码输入/末页；
+  // ② CSS columns 瀑布流列底参差 ⇒ 一排排空隙（暗色素材/超宽图混排时明显）。
+  it("无限滚动：滚到底自动加载下一页并延伸内容（哨兵 + IntersectionObserver）", () => {
+    expect(gallery).toContain("const sentinelRef = useRef<HTMLDivElement | null>(null)");
+    // ⚠ 刻意**不用** IntersectionObserver：滚动层是 .app-body 内层容器，
+    //   IO 的 root 默认视口，跨嵌套滚动时回调可能不触发（用户实锤滚到底无反应）
+    expect(gallery).not.toContain("new IntersectionObserver(");
+    expect(gallery).toContain("window.addEventListener(\"scroll\", onScroll, true)");
+    expect(gallery).toContain("shouldLoadMore(rect.top, vh, 600)");
+    expect(gallery).toContain("void loadMore(page + 1)");
+    // 翻页并发闸：同一帧多次回调不能发起两笔相同 offset 的请求
+    expect(gallery).toContain("const loadingMoreRef = useRef(false);");
+    expect(gallery).toContain("if (loadingMoreRef.current || items.length === 0) return;");
+    expect(gallery).toContain("向下滚动自动加载更多");
+  });
+
+  it("分页条：首页/末页按钮 + 页码输入框（keyset 下跳远页先升级全量）", () => {
+    expect(pager).toContain("ChevronsLeft");
+    expect(pager).toContain("ChevronsRight");
+    expect(pager).toContain("className=\"page-jump\"");
+    expect(pager).toContain("if (e.key === \"Enter\") commit();");
+    expect(gallery).toContain("onFirst={() => jumpToPage(1)}");
+    expect(gallery).toContain("onLast={() => jumpToPage(\"last\")}");
+    // 有 offset 后跳页只需一笔区间请求，不再「升级全量」；加载完滚到该页第一张
+    expect(gallery).toContain("const jumpToPage = (target: number | \"last\") => {");
+    expect(gallery).toContain("if (n * PAGE_SIZE <= items.length) { setPage(n); scrollToPage(n); return; }");
+    expect(gallery).toContain("void loadMore(n).then(() => scrollToPage(n));");
+    expect(gallery).toContain("data-gal-page=");
+    expect(gallery).not.toContain("setPendingJump(");
+  });
+
+  // 2026-10-19：媒体类型筛选从「前端过滤已加载项」改为「下推 SQL」。
+  // 旧实现的坑：聚合页筛「视频」后翻页不会为筛选结果取更多 ⇒ 滚动一直加载却看不到新内容；
+  // 且 total 是未筛选的总数 ⇒ 分页条出现「共 10 页但内容只有一页」的假页。
+  it("媒体类型筛选下推 SQL（切筛选重取第一页，total 与 items 同口径）", () => {
+    expect(aiApi).toContain("media_type: opts.mediaType ?? \"\"");
+    expect(gallery).toContain("listGenerations(scope, embed, { limit: take, offset: loaded, mediaType: media })");
+    // 切筛选 ⇒ 旧列表作废、从第一页重取
+    expect(gallery).toContain("}, [mediaFilter]);");
+    expect(gallery).toContain("setItems([]);");
+    // 不再本地二次过滤；clientFiltering 也不含媒体类型（否则页数被压回「已加载页」）
+    expect(gallery).not.toContain("mediaFilter === \"all\" ? filteredBase");
+    expect(gallery).toContain("const clientFiltering = !!tagQuery.trim() || semanticMode;");
+  });
+
+  it("跳远页链式分段补（单笔有上限，别一笔打几万条）", () => {
+    expect(gallery).toContain("const MAX_FETCH = 512;");
+    expect(gallery).toContain("while (loaded < target && more) {");
+    expect(gallery).toContain("const take = Math.min(MAX_FETCH, target - loaded);");
+    expect(gallery).toContain("if (got.length === 0) break;");
+  });
+
+  it("瀑布流改 JS 均列（CSS columns 列优先顺序 + 列底空隙）", () => {    // 算法本体抽到 lib/masonry.ts 并单测（列底齐平/不乱序/不丢项）
+    expect(gallery).toContain("distributeMasonry(shown, colCount,");
+    expect(gallery).toContain("const ratioRef = useRef<Map<string, number>>(new Map());");
+    expect(gallery).toContain("className=\"gallery-masonry\"");
+    expect(gallery).toContain("className=\"gallery-masonry-col\"");
+    expect(gallery).toContain("noteRatio(g.id, e.currentTarget.naturalWidth / e.currentTarget.naturalHeight)");
+    expect(gallery).not.toContain("<div className=\"gallery-grid\">\n            {shown.map(");
+    expect(styles).toContain(".gallery-masonry { display: flex; gap: 12px; align-items: flex-start; }");
+    expect(styles).toContain(".gallery-masonry-col .gallery-cell { margin: 0; }");
+    expect(masonry).toContain("export function distributeMasonry");
   });
 });

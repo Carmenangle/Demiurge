@@ -1992,6 +1992,39 @@ textarea.text-tool-short-input { height: auto; min-height: 0; resize: none; over
 }
 @media (max-width: 900px) { .gallery-grid { columns: 4 150px; } }
 @media (max-width: 640px) { .gallery-grid { columns: 3 130px; } }
+/* JS 均列瀑布流（2026-10-19 替掉上面的 CSS columns）：
+   CSS columns 两个硬伤——① 阅读顺序变成「列优先」，视觉上顺序是乱的；
+   ② 列底参差 ⇒ 一排排空隙（暗色素材/超宽图混排时特别明显）。
+   改成 flex 多列 + 「当前最矮的列」投放，列底天然齐平、顺序仍是左到右。 */
+.gallery-masonry { display: flex; gap: 12px; align-items: flex-start; }
+.gallery-masonry-col { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+.gallery-masonry-col .gallery-cell { margin: 0; }  /* 列间距交给 gap，避免双重 12px */
+/* 分页条：页码输入框 */
+.page-jump {
+  width: 92px; margin-left: 6px; padding: 5px 8px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--surface); color: var(--text); font-size: 12px; text-align: center;
+}
+.page-jump:focus { outline: none; border-color: var(--accent, #4a90d9); }
+/* 分页条吸底常驻（2026-10-19）：无限滚动会一直往下加载内容，分页条若留在内容最底部
+   就得滚到最后一页才够得着，等于没法自由跳页。sticky bottom:0 让它钉在滚动视口底部，
+   滚动层是 .app-body（overflow:auto），本页无 overflow 阻断 ⇒ 全程可见。 */
+.pager-dock {
+  position: sticky;
+  bottom: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 10px 12px;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+  border-radius: 0 0 var(--radius) var(--radius);
+}
+/* 底部留白：吸底栏会遮住最后一张图的一角，垫一格让内容能被完整滚出 */
+.pager-dock::after { content: ""; display: block; height: 1px; }
 .gallery-cell {
   padding: 0;
   border: 1px solid var(--border);

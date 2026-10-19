@@ -15,6 +15,9 @@ import {
 import type { AgentInvocationWire } from "../generated/wireContracts";
 import type { PresetSampling } from "../stores/settings";
 
+// 轮询类接口必须带超时：后端挂起时否则 await 永不返回，调用方的轮询链会静默断掉。
+const POLL_TIMEOUT_MS = 8000;
+
 // 嵌入模型配置（设置 → 嵌入模型），单一属主。
 export type Embed = {
   mode?: "remote" | "local";
@@ -646,7 +649,7 @@ export function cancelAgent(threadId: string) {
 
 // 当前有后台生成任务在跑的所有仓库 thread（后台活动面板据此列出正在跑的仓库对话）
 export function fetchRunningChatThreads() {
-  return apiGet<{ threads: string[] }>("/ai/image-agent/running-threads");
+  return apiGet<{ threads: string[] }>("/ai/image-agent/running-threads", POLL_TIMEOUT_MS);
 }
 
 // ---- 仓库对话排队消息：后端持久化队列（离开页面/刷新后仍继续）----
@@ -756,7 +759,9 @@ export function ensureAudioSlot(payload: {
   });
 }
 export function listChatQueueTasks(threadId = "") {
-  return apiGet<{ tasks: ChatQueueTask[] }>(`/ai/chat-queue?thread_id=${encodeURIComponent(threadId)}`);
+  return apiGet<{ tasks: ChatQueueTask[] }>(
+    `/ai/chat-queue?thread_id=${encodeURIComponent(threadId)}`, POLL_TIMEOUT_MS,
+  );
 }
 export function cancelChatQueueTask(taskId: string) {
   return apiPost<{ task: ChatQueueTask }>("/ai/chat-queue/cancel", { task_id: taskId });
@@ -932,7 +937,9 @@ export function enqueueWorkflowBuildTask(payload: {
   });
 }
 export function listWorkflowBuildTasks(sessionId = "") {
-  return apiGet<{ tasks: WorkflowBuildTask[] }>(`/ai/build/tasks?session_id=${encodeURIComponent(sessionId)}`);
+  return apiGet<{ tasks: WorkflowBuildTask[] }>(
+    `/ai/build/tasks?session_id=${encodeURIComponent(sessionId)}`, POLL_TIMEOUT_MS,
+  );
 }
 export function cancelWorkflowBuildTask(id: string) {
   return apiPost<WorkflowBuildTask>("/ai/build/task/cancel", { id });
@@ -1062,16 +1069,20 @@ export const WEB_MATERIALS_REPO_ID = "web-materials";
 export function listGenerations(
   repoId: string | string[],
   embed: Embed,
-  opts: { limit?: number; beforeTs?: number } = {},
+  opts: { limit?: number; beforeTs?: number; offset?: number; mediaType?: string } = {},
 ) {
-  // P0-1 keyset 分页：limit>0 时后端按 created_at 倒序截断并回 has_more；
-  // beforeTs 为上一页末条 created_at（翻页游标，不重不漏）。两者缺省=全量（旧行为）。
-  // 2026-10-18：传数组 ⇒ 后端多仓库合并分页（资产库聚合页，repo_ids）。
+  // P0-1 分页：limit>0 时后端按 created_at 倒序截断并回 has_more + total。
+  // - beforeTs：上一页末条 created_at（keyset，新增图不打乱已有页）
+  // - offset：按偏移取（2026-10-19：分页条要「共 N 页」并直达任意页；只靠游标算不出总页数）
+  // - mediaType：媒体类型**下推 SQL**（此前只在前端过滤已加载项 ⇒ 聚合页翻页不取更多）
+  // 三者缺省=全量（旧行为）。传数组 ⇒ 后端多仓库合并分页（资产库聚合页）。
   const multi = Array.isArray(repoId);
-  return apiPost<{ items: Generation[]; has_more?: boolean }>("/rag/generations", {
+  return apiPost<{ items: Generation[]; has_more?: boolean; total?: number }>("/rag/generations", {
     ...(multi ? { repo_ids: repoId } : { repo_id: repoId }),
     limit: opts.limit ?? 0,
     before_ts: opts.beforeTs ?? 0,
+    offset: opts.offset ?? 0,
+    media_type: opts.mediaType ?? "",
     ...ragEmbed(embed),
   });
 }
@@ -1121,10 +1132,11 @@ export function deleteTagSnapshot(id: string, repoId: string, snapshotId: string
   });
 }
 
-export function generateThumbs(repoId: string, embed: Embed) {
-  // P0-2：为本仓库历史资产补生成缩略图（.thumbs/ 派生层），返回 generated/skipped
-  return apiPost<{ generated: number; skipped: number }>("/rag/generate-thumbs", {
-    repo_id: repoId,
+export function generateThumbs(repoIds: string | string[], embed: Embed) {
+  // P0-2：为仓库历史资产补生成缩略图（.thumbs/ 派生层），返回 generated/skipped。
+  // 2026-10-18：支持多仓库一次跑（repo_ids）⇒ 后端聚合成一个后台任务总进度。
+  return apiPost<{ generated: number; skipped: number; job_id: string }>("/rag/generate-thumbs", {
+    repo_ids: Array.isArray(repoIds) ? repoIds : [repoIds],
     ...ragEmbed(embed),
   });
 }
@@ -1158,10 +1170,26 @@ export function setGenerationDescription(
   });
 }
 
-export function indexVisualGenerations(repoId: string, embed: Embed) {
-  return apiPost<{ ok: boolean; indexed: number; skipped: number }>(
-    "/rag/index-visual-generations", { repo_id: repoId, ...ragEmbed(embed) },
+export function indexVisualGenerations(repoIds: string | string[], embed: Embed) {
+  // 2026-10-18：支持多仓库一次跑（repo_ids），后端登记为一个后台任务、面板显示 1/157 进度
+  return apiPost<{ ok: boolean; indexed: number; skipped: number; job_id: string }>(
+    "/rag/index-visual-generations", {
+      repo_ids: Array.isArray(repoIds) ? repoIds : [repoIds], ...ragEmbed(embed),
+    },
   );
+}
+
+/** 视觉模型三元组（由设置透传；后端不解析 local/remote 两态，避免口径漂移） */
+export type VlmWire = { base_url: string; api_key: string; model: string; proxy: string };
+
+export function describeMissingAssets(
+  repoIds: string[], vlm: VlmWire, embed: Embed, hint = "",
+) {
+  // 2026-10-18：批量补视觉描述搬到后端做后台任务——原浏览器端实现只覆盖「已加载条目」、
+  // 切页/刷新即断、且没有持久化进度。这里一次传全部 repo_ids ⇒ 面板显示 1/318 进度条。
+  return apiPost<{ ok: boolean; job_id: string; total: number }>("/rag/describe-missing", {
+    repo_ids: repoIds, vlm, hint, ...ragEmbed(embed),
+  });
 }
 
 // 清理僵尸记录：指向本机留存图但磁盘文件已不存在的条目（手动删文件留下的裂图）。返回删除条数。

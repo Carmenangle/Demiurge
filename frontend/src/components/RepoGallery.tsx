@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useRef, useState, type ReactNode } from "react";
+import { useEffect, useCallback, useMemo, useRef, useState, type ReactNode } from "react";
 import { Check, ChevronDown, ExternalLink, Eye, FileText, Images, Music, Play, Plus, RotateCcw, Search, Send, Sparkles, Tag, Trash2, X } from "lucide-react";
 import { activeVlmChat, vlmGapMessage, useSettings } from "../stores/settings";
 import {
@@ -9,8 +9,13 @@ import {
   type TaggerInfo, type TagSnapshot,
   // P1-3 结构化搜索（FTS5）＋ P1-2 回收站（2026-10-18）
   searchAssets, listTrash, restoreAsset, purgeAsset, clearTrash, tagFromText,
+  describeMissingAssets,
 } from "../api/ai";
 import { parseAssetQuery, removeTagFromQuery } from "../lib/assetQuery";
+import { distributeMasonry } from "../lib/masonry";
+import { shouldLoadMore } from "../lib/infiniteScroll";
+import { subscribeJobActivities } from "../lib/jobActivity";
+import { createJob, tickJob, finishJob } from "../api/jobs";
 import { imageDataUri } from "../lib/imageData";
 
 // 反推模式（2026-10-18 用户定案：WD14 / 视觉模型 / VLM 两段式共用一个按钮 + 模式选择）。
@@ -146,10 +151,10 @@ function TagPillSelect({
 
 // 单张图的标签编辑条：加/删标签、AI 打标、WD14 反推、按标签搜索。
 function GalleryTags({
-  g, tagging, wd14ing, onAdd, onRemove, onTag, mode, onMode, taggers, taggerModel, onTagger,
+  g, tagging, onAdd, onRemove, onTag, mode, onMode, taggers, taggerModel, onTagger,
   onActivateSnapshot, onSearch, onAppendSearch, onClear,
 }: {
-  g: Generation; tagging: boolean; wd14ing: boolean;
+  g: Generation; tagging: boolean;
   onAdd: (t: string) => void; onRemove: (t: string) => void;
   /** 统一反推入口（按 mode 分派：wd14 / ai / vlm 两段式） */
   onTag: () => void;
@@ -214,8 +219,8 @@ function GalleryTags({
       {/* 统一反推入口：一个按钮 + 模式选择（2026-10-18 用户定案，三个机制不再各占一键）。
           图标随模式变（#3：desc 模式不再与其他模式共用同一图标，避免误以为会出标签）。 */}
       <button className="tag-add" title={TAG_MODE_HINT[mode] ?? "反推打标"}
-        disabled={tagging || wd14ing} onClick={onTag}>
-        {tagging || wd14ing ? "…"
+        disabled={tagging} onClick={onTag}>
+        {tagging ? "…"
           : mode === "desc" ? <FileText size={11} />
           : mode === "wd14" ? <Tag size={11} />
           : mode === "ai" ? <Eye size={11} />
@@ -282,7 +287,6 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
   const [deleting, setDeleting] = useState<Generation | null>(null);
   const [tagQuery, setTagQuery] = useState("");      // 标签/提示词搜索
   const [tagging, setTagging] = useState<string | null>(null);  // 正在 AI 打标的图 id
-  const [wd14ing, setWd14ing] = useState<string | null>(null);  // P0-3：正在 WD14 反推的图 id
   // 可插拔打标器：可用模型列表 + 当前选择（默认取后端 default 且已安装的）
   const [taggers, setTaggers] = useState<TaggerInfo[]>([]);
   const [taggerModel, setTaggerModel] = useState("");
@@ -336,9 +340,9 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
   const [allTags, setAllTags] = useState<{ tag: string; count: number }[]>([]);  // 后端全量标签统计
   const [semanticMode, setSemanticMode] = useState(false);
   const [semanticItems, setSemanticItems] = useState<GenWithRepo[]>([]);
-  const [describing, setDescribing] = useState(false);
-  const [describeProgress, setDescribeProgress] = useState<{ done: number; total: number } | null>(null);  // 批量描述进度 X/N
-  const describeCancelRef = useRef(false);  // 批量描述「暂停」信号（已完成的不回退）
+  // 批量视觉描述：提交给后端后只持有 job_id（2026-10-18）。
+  // 原浏览器端循环跑有三个硬伤：只覆盖已加载条目、切页即断、没有持久化进度。
+  const [describeJobId, setDescribeJobId] = useState("");
   const [visualIndexing, setVisualIndexing] = useState(false);
   const [thumbnailing, setThumbnailing] = useState(false);   // P0-2：补生成缩略图中
   // 切换详情对象时重置图片尺寸（读新图的 naturalWidth/Height）
@@ -358,11 +362,14 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
   const [savingPreference, setSavingPreference] = useState(false);
   const [mediaFilter, setMediaFilter] = useState<"all" | "image" | "video" | "audio">("all");  // M2.2 媒体类型筛选（P2-2 补音频）
   const [hasMore, setHasMore] = useState(false);         // P0-1：分页模式是否还有下一页
+  const [totalCount, setTotalCount] = useState(0);       // 命中总数（后端回；0=未知 ⇒ 退回虚拟页）
+  const [loadMoreError, setLoadMoreError] = useState(""); // 翻页失败原因（无限滚动下否则「毫无反应」）
+  const loadingMoreRef = useRef(false);                  // 并发翻页闸（见 loadMore 注释）
   const [loadingMore, setLoadingMore] = useState(false); // P0-1：正在加载下一页
   const [fullyLoaded, setFullyLoaded] = useState(false); // P0-1：已升级全量（搜索/筛选触发一次，sticky）
-  const [pendingDescribe, setPendingDescribe] = useState(false); // P0-1：升级全量后接着跑自动描述
   const prevKeyRef = useRef("");                          // P0-1：检测切仓库（重置回分页浏览态）
   const PAGE_SIZE = 32; // 一行 8 个 × 四行
+  const MAX_FETCH = 512;  // 单笔拉取上限（16 页）：跳远页链式补，别一笔打几万条
   // P0-1 分页浏览态（2026-10-18 扩到多仓库）：资产库页 + 未升级全量。
   // 多仓库走后端合并 keyset（repo_ids）⇒ 聚合页不再全量 dump（千图库首屏提速）。
   const browsing = enhanced && !fullyLoaded;
@@ -391,14 +398,19 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
     setBrokenIds(new Set());   // 2026-10-18：刷新/切仓库后旧裂图集合作废（防计数虚高）
     // 单仓库传字符串、多仓库传数组（后端走 list_generations_multi 合并分页）
     const scope: string | string[] = repoIds.length === 1 ? repoIds[0] : repoIds;
-    const firstPage = () => listGenerations(scope, embed, { limit: PAGE_SIZE })
+    // 媒体类型下推 SQL（2026-10-19）：total 与 items 同口径，分页条才是真页数
+    const media = mediaFilter === "all" ? "" : mediaFilter;
+    // ⚠ 分页元信息与 items 必须同批更新：hasMore 先翻转会让 effect 在「items 还是空」
+    //   那一帧跑完一次然后早退（本轮「滚到底不加载」的真根因），故统一放到第二段 then。
+    let pageMeta = { hasMore: false, total: 0 };
+    const firstPage = () => listGenerations(scope, embed, { limit: PAGE_SIZE, mediaType: media })
       .then((r) => {
-        setHasMore(r.has_more === true);
+        pageMeta = { hasMore: r.has_more === true, total: r.total ?? 0 };
         return (r.items || []).map((g) => ({ ...g, repoId: g.repo_id || repoIds[0] } as GenWithRepo));
       })
-      .catch(() => { setHasMore(false); return [] as GenWithRepo[]; });
+      .catch(() => { pageMeta = { hasMore: false, total: 0 }; return [] as GenWithRepo[]; });
     const allPages = () => Promise.all(repoIds.map((id) =>
-      listGenerations(id, embed)
+      listGenerations(id, embed, { mediaType: media })
         .then((r) => (r.items || []).map((g) => ({ ...g, repoId: id } as GenWithRepo)))
         .catch(() => [] as GenWithRepo[]),
     ))
@@ -415,6 +427,8 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
       .then((merged) => {
         if (!alive) return;
         setItems(merged);
+        setHasMore(full ? false : pageMeta.hasMore);
+        setTotalCount(full ? merged.length : pageMeta.total);
         // 全量标签统计（新增图/改标签后刷新时同步更新，供输入补全）
         if (enhanced) {
           tagStats(repoIds, embed).then((r) => { if (alive) setAllTags(r.items || []); }).catch(() => {});
@@ -428,24 +442,118 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
     return () => { alive = false; if (retryTimer) clearTimeout(retryTimer); };
   };
 
-  // 加载下一页：keyset 游标＝当前列表末条 created_at（不重不漏）；nextPage＝加载成功后停留页
+  // 加载下一页 / 直达第 N 页：用 **offset 区间取**（2026-10-19）。
+  // 旧实现只走 keyset 游标 ⇒ 前端永远算不出总页数，也只能一页页顺序翻（用户实锤）。
+  // 现在 items 始终是「从头累积的前缀」，所以：offset = items.length。
+  // ⚠ 单笔有上限（MAX_FETCH）：跳远页若一笔打「目标页*32 − 已加载」，5000 图库跳末页
+  //   就是一笔 16 万条的请求。改成链式分段补，界面仍是「加载中…」直到到位。
+  // nextPage：加载成功后停留的页码。
+  // ⚠ loadingMore 用 ref 双保险：滚动回调可能在同一帧触发多次，
+  //   React state 还没刷出来，纯靠 state 判重会并发发起两笔相同 offset 的请求。
   const loadMore = async (nextPage?: number) => {
     // 结构化搜索 / 回收站一次取全，不分页
     if (serverSearch || trashMode) return;
-    if (loadingMore || !hasMore || items.length === 0) return;
-    const cursor = items[items.length - 1]?.created_at || 0;
-    const scope: string | string[] = repoIds.length === 1 ? repoIds[0] : repoIds;
+    if (loadingMoreRef.current || items.length === 0) return;
+    const wantPage = nextPage ?? (page + 1);
+    const target = Math.max(PAGE_SIZE, wantPage * PAGE_SIZE);   // 目标累积条数
+    if (totalCount > 0 && items.length >= totalCount) { setHasMore(false); return; }
+    if (totalCount === 0 && !hasMore) return;
+    loadingMoreRef.current = true;
     setLoadingMore(true);
     try {
-      const r = await listGenerations(scope, embed, { limit: PAGE_SIZE, beforeTs: cursor });
-      const more = (r.items || []).map((g) => ({ ...g, repoId: g.repo_id || repoIds[0] } as GenWithRepo));
-      setHasMore(r.has_more === true);
-      if (more.length > 0) {
-        setItems((prev) => [...prev, ...more]);
-        if (nextPage !== undefined) setPage(nextPage);
+      const scope: string | string[] = repoIds.length === 1 ? repoIds[0] : repoIds;
+      const media = mediaFilter === "all" ? "" : mediaFilter;
+      const batch: GenWithRepo[] = [];
+      let loaded = items.length;
+      let more = hasMore;
+      let total = totalCount;
+      while (loaded < target && more) {
+        const take = Math.min(MAX_FETCH, target - loaded);
+        const r = await listGenerations(scope, embed, { limit: take, offset: loaded, mediaType: media });
+        const got = (r.items || []).map((g) => ({ ...g, repoId: g.repo_id || repoIds[0] } as GenWithRepo));
+        batch.push(...got);
+        loaded += got.length;
+        more = r.has_more === true;
+        if (typeof r.total === "number" && r.total > 0) total = r.total;
+        if (got.length === 0) break;   // 兜底：空响应别死循环
       }
-    } catch { /* 加载失败保持现状，用户可再次翻页重试 */ }
-    finally { setLoadingMore(false); }
+      // 去重：offset 分页期间若有新图插到最前，会与已加载项重叠（keyset 不会）
+      setItems((prev) => {
+        const seen = new Set(prev.map((g) => g.id));
+        return [...prev, ...batch.filter((g) => !seen.has(g.id))];
+      });
+      setHasMore(more);
+      setTotalCount(total);
+      setPage(wantPage);
+      setLoadMoreError("");
+    } catch (e) {
+      // 别静默吞：翻页失败在无限滚动下等于「滚到底毫无反应」，用户无从判断
+      setLoadMoreError((e as Error)?.message || "加载失败");
+    }
+    finally { loadingMoreRef.current = false; setLoadingMore(false); }
+    // 等一帧让 React 把新 items 提交进 DOM：跳页的调用方（loadMore(n).then(scroll)）
+    // 要能立刻 scrollIntoView 到刚加载出来的项，否则目标节点还不存在 ⇒ 静默不滚动。
+    await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+  };
+
+  // ── 无限滚动（2026-10-19）────────────────────────────────────────────
+  // ⚠ 不用 IntersectionObserver：本应用滚动发生在 `.app-body`（overflow:auto）这层
+  //   内层容器，IO 的 root 默认是视口，跨嵌套滚动 + 祖先裁剪时回调可能永不触发
+  //   （用户实锤：滚到最下方毫无反应）。改为直接量哨兵到视口底的距离。
+  //   scroll 事件不冒泡，但对 window 用 capture=true 能收到所有内层容器的滚动。
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const lastAutoRef = useRef(0);   // 自动加载节流：失败/连续触发时别把请求打爆
+  useEffect(() => {
+    if (!browsing || !hasMore) return;
+    let raf = 0;
+    let timer = 0;
+    const check = () => {
+      raf = 0;
+      const el = sentinelRef.current;
+      if (!el || loadingMoreRef.current) return;
+      if (loadMoreError) return;                              // 失败态交给用户点重试
+      const since = Date.now() - lastAutoRef.current;
+      if (since < 800) {
+        // 刚加载过：等节流窗口过去再量一次（内容仍不足一屏时要能继续续加载）
+        timer = window.setTimeout(check, 800 - since + 20);
+        return;
+      }
+      const rect = el.getBoundingClientRect();
+      const vh = window.innerHeight || document.documentElement.clientHeight || 0;
+      if (!shouldLoadMore(rect.top, vh, 600)) return;
+      lastAutoRef.current = Date.now();
+      void loadMore(page + 1);
+    };
+    const onScroll = () => { if (!raf) raf = requestAnimationFrame(check); };
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", onScroll);
+    // 挂载/换页/追加后先量一次：内容不足一屏时不必等用户滚动就继续续加载
+    timer = window.setTimeout(check, 0);
+    return () => {
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", onScroll);
+      window.clearTimeout(timer);
+      if (raf) cancelAnimationFrame(raf);
+    };
+    // ⚠ items.length 必须在 deps 里：首帧 effect 会在「hasMore 已翻转、items 还没到」
+    //   那一刻跑完，此时哨兵尚未渲染（items=0 走空态分支）⇒ 一次早退后再不重跑。
+    //   这是本轮「滚到底毫无反应」的真根因（埋点实测 hasEl=false / itemLen=0）。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [browsing, hasMore, loadingMore, page, loadMoreError, items.length]);
+
+  // ── 跳页（输入框 / 末页）──────────────────────────────────────────────
+  // 有 offset 支持后不再需要「升级全量」：目标页没加载就从当前前缀末尾一次取到那里
+  // （limit = 目标页*32 − 已加载数），代价只是一笔请求；加载完滚到该页第一张。
+  const scrollToPage = (n: number) => {
+    const el = document.querySelector(`[data-gal-page="${n}"]`);
+    if (el) el.scrollIntoView({ block: "start", behavior: "smooth" });
+  };
+  const jumpToPage = (target: number | "last") => {
+    const last = Math.max(1, pagerCount);
+    const n = target === "last" ? last : Math.max(1, Math.min(last, Math.floor(target) || 1));
+    if (n * PAGE_SIZE <= items.length) { setPage(n); scrollToPage(n); return; }   // 已加载
+    if (clientFiltering) { setPage(Math.min(n, pageCount)); scrollToPage(Math.min(n, pageCount)); return; }
+    void loadMore(n).then(() => scrollToPage(n));
   };
 
   useEffect(() => {
@@ -456,6 +564,8 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
       setFullyLoaded(false);
       setPage(1);
       setHasMore(false);
+      setTotalCount(0);
+      setLoadMoreError("");
       cancel = refresh(1, false);
     } else {
       cancel = refresh();
@@ -473,13 +583,28 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, embed, fullyLoaded]);
 
-  // 搜索/筛选/语义模式一旦启用，本组仓库升级全量加载（sticky：不清回分页，
+  // 自由文本/语义模式一旦启用，本组仓库升级全量加载（sticky：不清回分页，
   // 避免用户逐字输入时在全量/分页间抖动）。多仓库与嵌入画廊本就全量，无需升级。
+  // ⚠ 媒体类型**不在**此列：它已下推 SQL（list_generations.media_type），
+  //    分页照样能取 ⇒ 不再需要为它升级全量（聚合页也能正常翻页）。
   useEffect(() => {
-    const filtering = !!tagQuery.trim() || semanticMode || mediaFilter !== "all";
-    // 结构化搜索由服务端过滤（媒体类型也下推）；此处只给「客户端过滤」升级全量
+    const filtering = !!tagQuery.trim() || semanticMode;
     if (enhanced && !serverSearch && repoIds.length === 1 && filtering) setFullyLoaded(true);
-  }, [tagQuery, semanticMode, mediaFilter, enhanced, repoIds.length, serverSearch]);
+  }, [tagQuery, semanticMode, enhanced, repoIds.length, serverSearch]);
+
+  // 媒体类型切换 ⇒ 从第一页重取（服务端筛选，旧列表作废）。
+  // 不这么做的话，切到「视频」后 items 还是之前那批图片，翻页只会往后追加。
+  useEffect(() => {
+    if (serverSearch || trashMode) return;   // 结构化搜索/回收站各自的重取链已覆盖
+    setPage(1);
+    setItems([]);
+    setHasMore(false);
+    setTotalCount(0);
+    setLoadMoreError("");
+    const cancel = refresh(1, fullyLoaded);
+    return cancel;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mediaFilter]);
 
   // P1-3：结构化搜索（tag: 语法）——服务端 FTS5 + asset_tags 精确 AND，千图库不走全量 dump。
   // 一次取全量匹配（SQL 单查询，1000 图级 ~10ms）⇒ 搜索结果不分页，避免与浏览分页语义打架。
@@ -705,59 +830,6 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
   // 注意：g.image_url 是后端本地代理地址(127.0.0.1)，外部视觉模型访问不到，必须先取回转 dataURI 再喂模型。
   // 旧的「AI 打标」独立入口已并入统一反推（runTag 的 ai 分支）——2026-10-18 用户定案
 
-  const runDescribeMissing = async () => {
-    const targets = items.filter((g) => !g.description?.trim());
-    if (targets.length === 0) { showToast("所有资产已有视觉描述。"); return; }
-    if (!vlmChat) { showToast(vlmGapMessage(settings), "error"); return; }
-    setDescribing(true);
-    setDescribeProgress({ done: 0, total: targets.length });
-    describeCancelRef.current = false;
-    let done = 0;
-    let ok = 0;
-    // 并发 3：本地 Ollama 同时吃 3 张够快、又不至于挤爆；单张失败不中断其余。
-    // 后端写入是 WAL + busy_timeout=5000，并发 SQLite 写会排队、不撞锁。
-    const CONCURRENCY = 3;
-    const queue = [...targets];
-    const worker = async () => {
-      while (queue.length > 0 && !describeCancelRef.current) {
-        const g = queue.shift();
-        if (!g) return;
-        try {
-          const image = await imageDataUri(g.image_url);
-          const result = await describeImage(
-            [image], vlmChat!,
-            "用一段简洁中文客观描述图片中的人物外观、服装、动作、场景、构图和画风；不要写提示词，不要解释。",
-          );
-          const description = (result.prompt || "").trim();
-          if (description) {
-            const repoId = (g as GenWithRepo).repoId || g.repo_id || repoIds[0];
-            await setGenerationDescription(g.id, repoId, description, embed);
-            setItems((current) => current.map((item) => item.id === g.id
-              ? { ...item, description } : item));
-            ok += 1;
-          }
-        } catch { /* 单张失败跳过，其余继续 */ }
-        finally {
-          done += 1;
-          setDescribeProgress({ done, total: targets.length });
-        }
-      }
-    };
-    try {
-      await Promise.all(Array.from({ length: Math.min(CONCURRENCY, targets.length) }, () => worker()));
-      showToast(
-        describeCancelRef.current
-          ? `已暂停：完成 ${ok}/${targets.length} 张（已完成的不回退，可再次点击继续）。`
-          : `已为 ${ok}/${targets.length} 张资产补充视觉描述。`,
-        "success",
-      );
-    } finally {
-      setDescribing(false);
-      setDescribeProgress(null);
-    }
-  };
-
-  // 分页态只加载了首批：先升级全量，刷新完成后由下方 effect 接着跑（避免只描述已加载页）
   // 反推打标（版本化）：每次打标存一版快照，可切换；不合并旧版（2026-10-17 用户定案）
   const refreshSnapshots = async (id: string, repoId: string) => {
     try { return await listTagSnapshots(id, repoId, embed); } catch { return null; }
@@ -767,71 +839,114 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
     setActive((a) => (a && a.id === id ? { ...a, ...patch } : a));
   };
 
-  const wd14TagActive = async (g: Generation) => {
-    setWd14ing(g.id);
-    try {
-      const repoId = (g as GenWithRepo).repoId || g.repo_id || repoIds[0];
+  // 反推模式 → 面板用的短标签（单图 job 的 label 用它）
+  const tagModeLabel = (mode: string) =>
+    TAG_MODES.find((m) => m.value === mode)?.label ?? mode;
+
+  // 单张反推核心（不碰 UI 态）：返回 {ok, summary}。批量/单图都走它。
+  // 2026-10-19：拆出来是为了让「单图」和「批量所选」共用同一份逻辑 + 都能登记 job。
+  const reverseOne = async (g: Generation, mode: string) => {
+    const repoId = (g as GenWithRepo).repoId || g.repo_id || repoIds[0];
+    if (mode === "wd14") {
       const result = await tagGeneration(taggerModel, g.id, repoId, embed);
       const snaps = await refreshSnapshots(g.id, repoId);
       patchItem(g.id, {
         tags: result.tags,
         ...(snaps ? { tag_snapshots: JSON.stringify(snaps.snapshots), active_tag_snapshot: snaps.active } : {}),
       });
-      showToast(`已生成 ${result.total} 个标签（第 ${snaps?.snapshots.length ?? 1} 版）——详情里可「复制标签 / 复制提示词」。`, "success");
+      return { ok: true, summary: `${result.total} 个标签（第 ${snaps?.snapshots.length ?? 1} 版）` };
+    }
+    if (!vlmChat) { showToast(vlmGapMessage(settings), "error"); return { ok: false, summary: "未配置视觉模型" }; }
+    const imgForModel = await imageDataUri(g.image_url);
+    // 纯描述模式：只写描述，不产标签、不动快照
+    if (mode === "desc") {
+      const r = await describeImage([imgForModel], vlmChat!, VISION_DESC_PROMPT);
+      const desc = (r.prompt || "").trim();
+      if (!desc) return { ok: false, summary: "模型未返回描述（可能不支持视觉）" };
+      await setGenerationDescription(g.id, repoId, desc, embed);
+      patchItem(g.id, { description: desc });
+      return { ok: true, summary: "已写回视觉描述" };
+    }
+    const prompt = mode === "vlm" ? VLM_TWO_PARA_PROMPT : AI_TAG_PROMPT;
+    const r = await describeImage([imgForModel], vlmChat!, prompt);
+    const text = (r.prompt || "").trim();
+    if (!text) return { ok: false, summary: "模型未返回内容（可能不支持视觉）" };
+    const saved = await tagFromText(g.id, repoId, embed, text, {
+      model: mode,
+      label: mode === "vlm" ? "两段式" : "视觉打标",
+      saveDescription: mode === "vlm",
+    });
+    const snaps = await refreshSnapshots(g.id, repoId);
+    patchItem(g.id, {
+      tags: saved.tags,
+      ...(saved.description ? { description: saved.description } : {}),
+      ...(snaps ? { tag_snapshots: JSON.stringify(snaps.snapshots), active_tag_snapshot: snaps.active } : {}),
+    });
+    return {
+      ok: true,
+      summary: saved.saved_description
+        ? `${saved.total} 个标签＋描述（第 ${snaps?.snapshots.length ?? 1} 版）`
+        : `${saved.total} 个标签（第 ${snaps?.snapshots.length ?? 1} 版）`,
+    };
+  };
+
+  // 反推一批（并发 3）：登记 job ⇒ 面板显示 X/N；逐张失败不中断其余。
+  // 单图也走这条（total=1），保证「后台活动」对反推不再瞎眼（2026-10-19 用户实锤）。
+  const runReverseBatch = async (targets: Generation[], mode: string) => {
+    if (targets.length === 0) return;
+    if (!vlmChat && mode !== "wd14") { showToast(vlmGapMessage(settings), "error"); return; }
+    const labelOf = (g: Generation) => g.prompt?.slice(0, 12) || g.id.slice(0, 8);
+    let jobId = "";
+    try {
+      const created = await createJob("tag_infer",
+        targets.length > 1 ? `反推标签（${targets.length} 张）` : `反推标签 · ${tagModeLabel(mode)}`,
+        targets.length);
+      jobId = created.job_id;
+      const queue = [...targets];
+      let ok = 0; let failed = 0;
+      const errs: string[] = [];   // 汇总失败原因，收尾一次性提示（逐张弹会刷屏）
+      const worker = async () => {
+        while (queue.length > 0) {
+          const g = queue.shift();
+          if (!g) return;
+          setTagging(g.id);
+          try {
+            const r = await reverseOne(g, mode);
+            if (r.ok) ok += 1;
+            else { failed += 1; errs.push(`「${labelOf(g)}」：${r.summary}`); }
+          } catch (e) {
+            failed += 1;
+            errs.push(`「${labelOf(g)}」：${(e as Error).message}`);
+          } finally {
+            await tickJob(jobId);
+            // 不在这里清 tagging：并发 3 时先完成的 worker 会把别人的转圈也擦掉
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(3, targets.length) }, () => worker()));
+      const detail = `成功 ${ok} / 失败 ${failed}`;
+      await finishJob(jobId, "done", { detail });
+      const head = errs.length > 0 ? `${detail}；首条失败：${errs[0]}` : detail;
+      showToast(targets.length > 1
+        ? `批量反推完成（${head}）——详情里可「复制标签 / 复制提示词」。`
+        : errs.length === 0 ? "反推完成：1 张——详情里可「复制标签 / 复制提示词」。" : `反推失败：${errs[0]}`,
+        failed === targets.length ? "error" : "success");
     } catch (e) {
-      showToast(`反推打标失败：${(e as Error).message}`, "error");
+      if (jobId) { await finishJob(jobId, "failed", { error: (e as Error).message }); }
+      showToast(`反推失败：${(e as Error).message}`, "error");
     } finally {
-      setWd14ing(null);
+      setTagging(null);
     }
   };
 
-  // 统一反推（2026-10-18 用户定案）：一个按钮，按 mode 分派三种机制——
-  // wd14＝本地 tagger；ai＝视觉模型纯标签；vlm＝两段式（标签行 + 空行 + 描述段，
-  // 与 ComfyUI「反推动漫」工作流同构：标签存快照、描述写回资产并重建语义索引）。
-  const runTag = async (g: Generation) => {
-    if (tagMode === "wd14") { await wd14TagActive(g); return; }
-    if (!vlmChat) { showToast(vlmGapMessage(settings), "error"); return; }
-    setTagging(g.id);
-    try {
-      const repoId = (g as GenWithRepo).repoId || g.repo_id || repoIds[0];
-      const imgForModel = await imageDataUri(g.image_url);
-      // 纯描述模式：只写描述，不产标签、不动快照
-      if (tagMode === "desc") {
-        const r = await describeImage([imgForModel], vlmChat!, VISION_DESC_PROMPT);
-        const desc = (r.prompt || "").trim();
-        if (!desc) { showToast("视觉模型没有返回描述，可能不支持视觉。", "error"); return; }
-        await setGenerationDescription(g.id, repoId, desc, embed);
-        patchItem(g.id, { description: desc });
-        showToast("视觉描述已写回——详情里可「复制描述」。", "success");
-        return;
-      }
-      const prompt = tagMode === "vlm" ? VLM_TWO_PARA_PROMPT : AI_TAG_PROMPT;
-      const r = await describeImage([imgForModel], vlmChat!, prompt);
-      const text = (r.prompt || "").trim();
-      if (!text) {
-        showToast("反推没有返回内容：可能模型不支持视觉，请换支持视觉的对话模型。", "error");
-        return;
-      }
-      const saved = await tagFromText(g.id, repoId, embed, text, {
-        model: tagMode,
-        label: tagMode === "vlm" ? "两段式" : "视觉打标",
-        saveDescription: tagMode === "vlm",
-      });
-      const snaps = await refreshSnapshots(g.id, repoId);
-      patchItem(g.id, {
-        tags: saved.tags,
-        ...(saved.description ? { description: saved.description } : {}),
-        ...(snaps ? { tag_snapshots: JSON.stringify(snaps.snapshots), active_tag_snapshot: snaps.active } : {}),
-      });
-      showToast(
-        saved.saved_description
-          ? `两段式反推完成：${saved.total} 个标签＋描述（第 ${snaps?.snapshots.length ?? 1} 版）——详情里可「复制提示词（两段式）」。`
-          : `反推完成：${saved.total} 个标签（第 ${snaps?.snapshots.length ?? 1} 版）——详情里可「复制标签」。`,
-        "success",
-      );
-    } catch (e) {
-      showToast(`反推失败：${(e as Error).message}（需支持视觉的对话模型）`, "error");
-    } finally { setTagging(null); }
+  const runTag = (g: Generation) => void runReverseBatch([g], tagMode);
+
+  // 批量反推所选（按当前模式；wd14/ai/vlm/desc 四种都支持）
+  const runTagBatch = () => {
+    const ids = new Set(selected);
+    const targets = items.filter((g) => ids.has(g.id));
+    if (targets.length === 0) { showToast("请先选择要反推的图片。", "error"); return; }
+    void runReverseBatch(targets, tagMode);
   };
 
   // 切换标签版本快照：**乐观更新**——后端要重嵌入整条文档（实测 ≈1.6s），
@@ -859,29 +974,58 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
     }
   };
 
-  const describeMissing = () => {
-    if (browsing) { setPendingDescribe(true); setFullyLoaded(true); return; }
-    void runDescribeMissing();
+  // 批量补视觉描述：提交给后端做后台任务（覆盖**当前视图的全部仓库**，不看已加载页）。
+  // 在「资产库」页点 ⇒ repoIds 是全部仓库 ⇒ 等价于全库补；在子仓库页点 ⇒ 只补该仓库。
+  const describeMissing = async () => {
+    if (!vlmChat) { showToast(vlmGapMessage(settings), "error"); return; }
+    try {
+      const r = await describeMissingAssets(repoIds, {
+        base_url: vlmChat.baseUrl, api_key: vlmChat.apiKey,
+        model: vlmChat.modelName, proxy: vlmChat.proxyUrl || "",
+      }, embed);
+      if (!r.total) { showToast("当前范围内所有资产已有视觉描述。", "success"); return; }
+      setDescribeJobId(r.job_id);
+      showToast(`已提交后台任务：为 ${r.total} 张资产补视觉描述（进度见左下「后台活动」）。`, "success");
+    } catch (e) {
+      showToast(`提交失败：${(e as Error).message}`, "error");
+    }
   };
 
+  // 视觉描述任务：运行中**节流增量刷新**（4s 一次），跑完再整刷一次。
+  // 2026-10-18 用户实锤：只在收尾刷新 ⇒ 面板显示 192/307 时第一页仍全是「无描述」，
+  // 因为网格停留在页面加载时的快照。后端处理顺序＝created_at desc＝前端首页顺序，
+  // 所以边跑边刷就能看到描述逐张出现。
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
   useEffect(() => {
-    if (!pendingDescribe || !fullyLoaded || loading) return;
-    setPendingDescribe(false);
-    void runDescribeMissing();
+    if (!describeJobId) return;
+    let lastAt = 0;
+    return subscribeJobActivities((list) => {
+      const job = list.find((j) => j.id === describeJobId);
+      if (!job) return;
+      if (job.status === "running") {
+        const now = Date.now();
+        if (now - lastAt < 4000) return;   // 节流：全量刷新别把 UI 拖死
+        lastAt = now;
+        refreshRef.current();
+        return;
+      }
+      setDescribeJobId("");
+      refreshRef.current();
+      const label = job.status === "cancelled" ? "已取消"
+        : job.status === "failed" ? `失败：${job.error || "未知"}` : "完成";
+      showToast(`视觉描述任务${label}（${job.done}/${job.total}）${job.detail ? `　${job.detail}` : ""}`,
+        job.status === "failed" ? "error" : "success");
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingDescribe, fullyLoaded, loading]);
+  }, [describeJobId]);
 
   const buildVisualIndex = async () => {
     setVisualIndexing(true);
-    let indexed = 0;
-    let skipped = 0;
     try {
-      for (const repoId of repoIds) {
-        const result = await indexVisualGenerations(repoId, embed);
-        indexed += result.indexed;
-        skipped += result.skipped;
-      }
-      showToast(`视觉索引完成：${indexed} 张，跳过 ${skipped} 张远程或缺失图片。`, "success");
+      // 一次传全部 repo_ids ⇒ 后端登记为一个后台任务，进度在「后台活动」面板显示 1/157
+      const result = await indexVisualGenerations(repoIds, embed);
+      showToast(`视觉索引完成：${result.indexed} 张（只建搜索向量、不含描述；要描述请点「自动描述缺失资产」）。`, "success");
     } catch (error) {
       showToast(`视觉索引失败：${(error as Error).message}`, "error");
     } finally {
@@ -892,15 +1036,10 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
   // P0-2：历史资产补生成缩略图（本机静态图；远程/裂图跳过）。幂等，可重复跑。
   const buildThumbs = async () => {
     setThumbnailing(true);
-    let generated = 0;
-    let skipped = 0;
     try {
-      for (const repoId of repoIds) {
-        const result = await generateThumbs(repoId, embed);
-        generated += result.generated;
-        skipped += result.skipped;
-      }
-      showToast(`缩略图补生成完成：${generated} 张，跳过 ${skipped} 张远程或缺失图片。`, "success");
+      // 一次传全部 repo_ids ⇒ 后端聚合为一个后台任务，进度在「后台活动」面板显示 X/N
+      const result = await generateThumbs(repoIds, embed);
+      showToast(`缩略图补生成完成：${result.generated} 张，跳过 ${result.skipped} 张远程或缺失图片。`, "success");
       refresh();  // 刷新让 thumb_url_if_ready 兜底发现的 URL 立即生效
     } catch (error) {
       showToast(`缩略图补生成失败：${(error as Error).message}`, "error");
@@ -961,11 +1100,11 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
           ...g.tags.map((t) => t.toLowerCase()), repoName];
         return terms.every((term) => hay.some((h) => h.includes(term)));
       });
-  // M2.2：媒体类型筛选（全部/图片/视频），视频资产按 mediaType 识别
-  // 结构化搜索时已下推 SQL（media_type），不再本地二次过滤
-  const filtered = serverSearch ? filteredBase
-    : mediaFilter === "all" ? filteredBase
-      : filteredBase.filter((g) => (g.mediaType || "image") === mediaFilter);
+  // M2.2 媒体类型筛选（图片/视频/音频）：**已下推 SQL**（2026-10-19）。
+  // 旧实现是前端过滤已加载项 ⇒ 聚合页筛「视频」后翻页不会为筛选结果取更多
+  // （滚动一直加载却看不到新内容）。现在 list_generations 带 media_type，
+  // total 与 items 同口径 ⇒ 分页条页数也准。此处不再本地二次过滤。
+  const filtered = filteredBase;
   // 详情弹窗键盘导航用的「当前结果集」：每次渲染后同步进 ref（键盘 ←/→ 在这份列表里切）。
   useEffect(() => { navListRef.current = filtered; });
   // 分页浏览态：后端已按 created_at 倒序返回，不再本地重排（重排会打乱已按页追加的顺序）
@@ -978,12 +1117,79 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
   // 结构化搜索 / 回收站：一次取全、不分页（搜索走 SQL 单查询；回收站量小）
   const pageCount = (serverSearch || trashMode) ? 1
     : Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
-  // 分页态把「还有更多」暴露为虚拟下一页（点击触发 loadMore，加载成功后停留该页）
-  const pagerCount = !serverSearch && !trashMode && browsing && hasMore ? pageCount + 1 : pageCount;
-  const curPage = Math.min(page, pagerCount);  // filtered 变短后自愈，避免越界空页
+  // 客户端筛选（自由文本/语义）时，total 是「未筛选」的总数 ⇒ 不能拿来算页数，
+  // 否则会出现「共 N 页但内容只有一页」的假页。此时退回已加载页模型。
+  // ⚠ 媒体类型不算：它已下推 SQL，total 与 items 同口径，页数照样准。
+  const clientFiltering = !!tagQuery.trim() || semanticMode;
+  // 总页数优先用后端给的 total（2026-10-19：只靠游标算不出总页数 ⇒ 用户看到「共 2 页」
+  // 却明明有五六页）。total=0（未知/向量库回退）才退回「已加载页 + 虚拟下一页」。
+  const useServerTotal = !serverSearch && !trashMode && browsing && totalCount > 0 && !clientFiltering;
+  const pagerCount = (serverSearch || trashMode)
+    ? pageCount
+    : useServerTotal
+      ? Math.max(1, Math.ceil(totalCount / PAGE_SIZE))
+      : (browsing && hasMore && !clientFiltering ? pageCount + 1 : pageCount);
+  // 页码：分页浏览态＝「已加载/当前跳到的页」（由 loadMore/jumpToPage 驱动，确定性）；
+  // 全量/搜索态按页切。
+  // ⚠ 不做「跟随视口反推页码」：平滑滚动 + 瀑布流重排（宽高比量到后会重新分配列）
+  //   会让反推结果抖动，实测点「末页」会先显示 10 再跳回 2——比不跟随更糟。
+  const curPage = Math.min(pagerCount, Math.max(1, page));
+  // 分页浏览态**连续渲染全部已加载项**（2026-10-19）：切成单页会让「滚动加载」变成
+  // 视图跳到下一页而不是往下延伸（用户要的是 danbooru 市场那种连续延伸）。
   const shown = trashMode ? trashItems
     : serverSearch ? sorted
-      : sorted.slice((curPage - 1) * PAGE_SIZE, curPage * PAGE_SIZE);
+      : browsing ? sorted
+        : sorted.slice((curPage - 1) * PAGE_SIZE, curPage * PAGE_SIZE);
+  // 项 id → 全局序号（用于「跳到第 N 页」定位到该页第一张）
+  const idxOf = useMemo(() => {
+    const m = new Map<string, number>();
+    sorted.forEach((g, i) => m.set(g.id, i));
+    return m;
+  }, [sorted]);
+
+  // ── 瀑布流：JS 均列（2026-10-19 替掉 CSS columns）──────────────────────
+  // CSS columns 的硬伤：阅读顺序变成列优先 + 列底参差（暗色素材/超宽图混排时一排排空隙）。
+  // 这里按「当前最矮的列」投放 ⇒ 列底齐平；宽高比在 img onLoad 时回填
+  // （未知按 1 估，量到后批量重排一次）。
+  const gridRef = useRef<HTMLDivElement | null>(null);
+  const ratioRef = useRef<Map<string, number>>(new Map());
+  const ratioTimer = useRef<number | null>(null);
+  const [colCount, setColCount] = useState(6);
+  const [ratioTick, setRatioTick] = useState(0);
+  useEffect(() => () => { if (ratioTimer.current) window.clearTimeout(ratioTimer.current); }, []);
+  // 列数跟随容器宽度（与旧 CSS 断点同口径：>900 → 6，>640 → 4，否则 3）
+  useEffect(() => {
+    const el = gridRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width ?? 0;
+      const n = w > 0 && w <= 640 ? 3 : w > 0 && w <= 900 ? 4 : 6;
+      setColCount((prev) => (prev === n ? prev : n));
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const noteRatio = (id: string, ratio: number) => {
+    if (!(ratio > 0) || ratioRef.current.get(id) === ratio) return;
+    ratioRef.current.set(id, ratio);
+    if (ratioTimer.current) return;   // 60ms 内的多次 onLoad 合并成一次重排
+    ratioTimer.current = window.setTimeout(() => {
+      ratioTimer.current = null;
+      setRatioTick((t) => t + 1);
+    }, 60);
+  };
+  const masonryCols = useMemo(
+    () => distributeMasonry(shown, colCount, (g) => {
+      const measured = ratioRef.current.get(g.id);
+      if (measured) return measured;
+      // 视频/音频单元格是固定 16:9 的占位（CSS aspect-ratio），没有 <img> 可量 ⇒ 直接给已知比例，
+      // 否则会按 1（方形）估高，列底立刻参差（本轮「空隙」类问题的同一个病根）。
+      if (g.mediaType === "video" || g.mediaType === "audio") return 16 / 9;
+      return 0;
+    }),
+    // ratioTick：图片量到真实宽高比后重排
+    [shown, colCount, ratioTick],
+  );
 
   // 搜索框标签补全：取当前输入最后一段(分隔符后)为前缀，从标签统计里匹配，按图片数降序
   const lastSeg = tagQuery.split(/[,，;；]/).pop()?.trim().toLowerCase() || "";
@@ -1061,6 +1267,10 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
                   <Send size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />发送至画布（{selected.size}）
                 </button>
               )}
+              <button className="btn" disabled={selected.size === 0} onClick={runTagBatch}
+                title={`按当前反推模式（${tagModeLabel(tagMode)}）反推选中的图片；并发 3，进度显示在右下「后台活动」`}>
+                <Tag size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />反推所选（{selected.size}）
+              </button>
               <button className="btn" onClick={() => setSelected(new Set(shown.map((g) => g.id)))}>选本页</button>
               <button className="btn" disabled={selected.size === 0} onClick={() => setSelected(new Set())}>清除</button>
             </>
@@ -1091,16 +1301,12 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
             onClick={() => { setSemanticMode((value) => !value); setPage(1); }}>
             {semanticMode ? "语义搜索：开" : "语义搜索"}
           </button>
-          <button className="btn"
-            onClick={() => { if (describing) describeCancelRef.current = true; else describeMissing(); }}
-            title={describing ? "点击暂停批量描述（已完成的不回退，可再次点击继续）"
-              : "调用当前视觉模型并发描述缺少描述的图片，并更新资产语义索引"}>
-            {describing
-              ? (describeProgress ? `描述中 ${describeProgress.done}/${describeProgress.total}（暂停）` : "自动描述中…（暂停）")
-              : "自动描述缺失资产"}
+          <button className="btn" onClick={() => void describeMissing()} disabled={describeJobId !== ""}
+            title="用视觉模型并发描述【当前视图的全部仓库】内缺描述的图片——不看已加载页、后端跑、切页也不中断。在「资产库」总页点＝补全库；在子仓库页点＝只补该仓库">
+            {describeJobId ? "描述中（见后台活动）" : "自动描述缺失资产"}
           </button>
           <button className="btn" onClick={buildVisualIndex} disabled={visualIndexing}
-            title="使用本机 Qwen3-VL-Embedding 建立图片向量索引">
+            title="把图片画面编码成向量，供「语义搜索按图匹配」用——不生成描述文字。要生成描述请点「自动描述缺失资产」">
             {visualIndexing ? "视觉索引中…" : "构建视觉索引"}
           </button>
           <button className="btn" onClick={buildThumbs} disabled={thumbnailing}
@@ -1168,9 +1374,14 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
         </div>
       ) : (
         <>
-          <div className="gallery-grid">
-            {shown.map((g) => (
-              <div key={g.id} className={`gallery-cell ${selMode && selected.has(g.id) ? "sel" : ""}`} title={g.prompt}>
+          {/* JS 均列瀑布流：外层 flex 行 + 每列一个纵向 flex。
+              单元格内容与旧实现完全一致（不裁剪、保留 hover 操作/角标/裂图回退）。 */}
+          <div className="gallery-masonry" ref={gridRef}>
+            {masonryCols.map((col, ci) => (
+              <div className="gallery-masonry-col" key={ci}>
+                {col.map((g) => (
+                  <div key={g.id} data-gal-page={Math.floor((idxOf.get(g.id) ?? 0) / PAGE_SIZE) + 1}
+                    className={`gallery-cell ${selMode && selected.has(g.id) ? "sel" : ""}`} title={g.prompt}>
                 {g.mediaType === "video" || g.mediaType === "audio" ? (
                   <div className="gallery-video-cell" onClick={() => selMode ? toggleSel(g.id) : setActive(g)}>
                     <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", gap: 6 }}>
@@ -1183,6 +1394,10 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
                   <img src={g.thumbUrl || g.image_url} alt="生成图" loading="lazy"
                     onClick={() => { if (trashMode) return; selMode ? toggleSel(g.id) : setActive(g); }}
                     style={trashMode ? { cursor: "default", opacity: 0.75 } : undefined}
+                    onLoad={(e) => {
+                      // 量到真实宽高比 ⇒ 回填供均列重排（60ms 批量合并，避免每张都重渲）
+                      noteRatio(g.id, e.currentTarget.naturalWidth / e.currentTarget.naturalHeight);
+                    }}
                     onError={(e) => {
                       // 2026-10-18 裂图修复：缩略图坏 ⇒ 回退原图；原图也坏 ⇒ 记为裂图
                       // （此前网格无回退，陈旧 thumb_url / 云端死链直接显示破图图标）
@@ -1235,12 +1450,31 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
                     </button>
                   </>
                 )}
+                  </div>
+                ))}
               </div>
             ))}
           </div>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+          {/* 无限滚动哨兵：分页浏览态才有；滚到距底 600px 触发 loadMore */}
+          {browsing && hasMore && <div ref={sentinelRef} style={{ height: 1 }} aria-hidden />}
+          {browsing && hasMore && (
+            <div style={{ textAlign: "center", color: "var(--text-muted)", fontSize: 12, padding: "6px 0 2px" }}>
+              {loadMoreError ? (
+                <button className="btn" style={{ fontSize: 12, padding: "3px 10px" }}
+                  onClick={() => { setLoadMoreError(""); void loadMore(page + 1); }}>
+                  加载失败（{loadMoreError}）—— 点此重试
+                </button>
+              ) : loadingMore ? "正在加载下一页…" : "向下滚动自动加载更多"}
+            </div>
+          )}
+          {/* 分页条吸底常驻：无限滚动下内容会一直变长，留在内容底部等于要滚到最后一页
+              才能跳页（用户实锤）。见 styles.css .pager-dock。 */}
+          <div className="pager-dock">
             <Pager page={curPage} pageCount={pagerCount}
-              onPage={(n) => { if (browsing && n > pageCount) loadMore(n); else setPage(n); }} always />
+              onPage={(n) => jumpToPage(n)}
+              onFirst={() => jumpToPage(1)}
+              onLast={() => jumpToPage("last")}
+              always />
             {loadingMore && (
               <span style={{ fontSize: 12, color: "var(--text-muted)" }}>加载中…</span>
             )}
@@ -1481,7 +1715,6 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
                 <GalleryTags
                   g={active}
                   tagging={tagging === active.id}
-                  wd14ing={wd14ing === active.id}
                   onAdd={(t) => addTag(active, t)}
                   onRemove={(t) => removeTag(active, t)}
                   onTag={() => runTag(active)}
