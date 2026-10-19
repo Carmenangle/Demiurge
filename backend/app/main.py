@@ -14,7 +14,7 @@ from app.services import comfy_launcher
 from app.services.workflow_build_tasks import start_worker as start_workflow_build_worker
 from app.services.chat_agent_queue import start_worker as start_chat_agent_queue_worker
 from app.services.plan_tasks import start_worker as start_plan_task_worker
-from app.routers import ai, ai_providers, agents, artifacts, assets, attachments, characters, comfyui, docs, gif_sprite, gguf_importer, image_resize, loras, mcp, models, narrative, node_manager, palette, plans, preset, procedures, rag, regex, runs, scenario, skills, state, table, user_state, visual_ci, workflows, worldbook
+from app.routers import ai, ai_providers, agents, artifacts, assets, attachments, characters, comfyui, docs, gif_sprite, gguf_importer, image_resize, jobs, loras, mcp, models, narrative, node_manager, palette, plans, preset, procedures, rag, regex, runs, scenario, skills, state, table, user_state, visual_ci, workflows, worldbook, activity
 
 app = FastAPI(title="Local AI ComfyUI Frontend API")
 init_db()
@@ -65,6 +65,8 @@ app.include_router(plans.router, prefix="/api/plans", tags=["plans"])
 app.include_router(ai.router, prefix="/api/ai", tags=["ai"])
 app.include_router(ai_providers.router, prefix="/api/ai/providers", tags=["ai-providers"])
 app.include_router(rag.router, prefix="/api/rag", tags=["rag"])
+app.include_router(jobs.router, prefix="/api/jobs", tags=["jobs"])
+app.include_router(activity.router, prefix="/api/activity", tags=["activity"])
 app.include_router(assets.router, prefix="/api/assets", tags=["assets"])
 app.include_router(characters.router, prefix="/api/characters", tags=["characters"])
 app.include_router(worldbook.router, prefix="/api/worldbook", tags=["worldbook"])

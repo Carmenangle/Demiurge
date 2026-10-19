@@ -1,7 +1,32 @@
 import sqlite3
+import threading
+import time
 from collections.abc import Iterator
 
 from app.config import DB_PATH
+
+# WAL 是**写在库文件头里的持久设置**，只需切一次。
+# 2026-10-18 真机复现：并发首连（批量视觉描述 ThreadPoolExecutor）各自跑
+# `pragma journal_mode=WAL` 抢建 -wal/-shm ⇒ 输的连接后续 UPDATE 全报
+# "attempt to write a readonly database"（4 并发里头 3 个写失败，表现是
+# 「任务显示 done，但资产库里看不到描述」）。故用进程内锁把「首次切换」串行化。
+_WAL_LOCK = threading.Lock()
+_wal_ready = False
+
+
+def _ensure_wal(connection: sqlite3.Connection) -> None:
+    """首次连接时切 WAL（串行），之后靠库文件头即可，不再重复 pragma。"""
+    global _wal_ready
+    if _wal_ready:
+        return
+    with _WAL_LOCK:
+        if _wal_ready:
+            return
+        try:
+            connection.execute("pragma journal_mode=WAL")
+        except sqlite3.Error:  # 切不成不致命：后续写入按默认 journal 走，列表/写入仍可用
+            pass
+        _wal_ready = True
 
 
 def get_connection() -> sqlite3.Connection:
@@ -9,8 +34,28 @@ def get_connection() -> sqlite3.Connection:
     connection = sqlite3.connect(DB_PATH)
     connection.row_factory = sqlite3.Row
     connection.execute("pragma busy_timeout=5000")
-    connection.execute("pragma journal_mode=WAL")
+    _ensure_wal(connection)
     return connection
+
+
+def write_with_retry(operation, attempts: int = 3) -> object:
+    """写库重试：Windows 上「最后一个连接关闭即删除 -wal/-shm」，并发下新连接可能
+    撞上正被删除的 WAL ⇒ UPDATE 报 "attempt to write a readonly database"。
+
+    这不是数据问题（重开连接即恢复），2026-10-18 批量视觉描述并发写真机复现
+    （4 张里 2 张主表同步失败 ⇒ 任务显示 done、资产库里却看不到描述）。
+    operation(conn) 内请自行开连接/关连接；失败按 20ms→60ms 退避重试。
+    """
+    last: Exception | None = None
+    for i in range(max(1, attempts)):
+        try:
+            return operation(get_connection())
+        except sqlite3.OperationalError as exc:
+            last = exc
+            if "readonly" not in str(exc).lower():
+                raise
+            time.sleep(0.02 * (i + 1))
+    raise last  # type: ignore[misc]
 
 
 def connection_scope() -> Iterator[sqlite3.Connection]:

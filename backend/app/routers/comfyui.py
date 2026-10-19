@@ -3,7 +3,7 @@ from pydantic import BaseModel
 
 from app.config import COMFYUI_BASE_URL
 from app.services import (
-    comfyui_client, comfy_launcher, generation_store, image_store,
+    comfy_pending, comfyui_client, comfy_launcher, generation_store, image_store,
     inspiration_store, local_media, repo_meta, workflow_submission,
 )
 from app.services.url_guard import validate_comfyui_url
@@ -114,6 +114,41 @@ def submit_graph(req: SubmitGraphRequest) -> dict[str, object]:
         return workflow_submission.submit_graph(req.workflow, req.url, req.client_id)
     except workflow_submission.WorkflowSubmissionError as exc:
         raise HTTPException(status_code=exc.status, detail=exc.detail)
+
+
+class PendingTrackRequest(BaseModel):
+    prompt_id: str
+    thread_id: str = "home"
+    created_at: float = 0.0        # 秒；缺省用服务端当前时间
+
+
+class PendingFinishRequest(BaseModel):
+    prompt_id: str = ""
+
+
+@router.post("/pending")
+def track_pending(req: PendingTrackRequest) -> dict[str, object]:
+    """登记一个在途出图任务（前端 WorkflowGenerationRuntime.track 上报）。
+
+    此前只在浏览器 localStorage 里记，换浏览器/清缓存就丢了在跑任务（2026-10-19）。
+    """
+    try:
+        item = comfy_pending.track(req.prompt_id, req.thread_id, req.created_at)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "item": item}
+
+
+@router.post("/pending/finish")
+def finish_pending(req: PendingFinishRequest) -> dict[str, object]:
+    """终态清除（完成/取消/失败/超时）。幂等：不存在也返回 ok。"""
+    return {"ok": True, "removed": comfy_pending.finish(req.prompt_id)}
+
+
+@router.get("/pending")
+def list_pending() -> dict[str, object]:
+    """在途任务列表（后台活动面板跨端读取；顺手清 30 分钟以上的僵尸条目）。"""
+    return {"items": comfy_pending.snapshot()}
 
 
 @router.post("/upload")
