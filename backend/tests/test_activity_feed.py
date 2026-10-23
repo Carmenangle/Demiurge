@@ -11,7 +11,7 @@ import time
 
 import pytest
 
-from app.services import activity_feed, agent_agency, lora_index, model_downloader, node_update
+from app.services import activity_feed, agency_maintenance, lora_index, model_downloader, node_update
 
 
 @pytest.fixture(autouse=True)
@@ -20,7 +20,7 @@ def _isolate_sources(monkeypatch):
     monkeypatch.setattr(model_downloader, "list_tasks", lambda: [])
     monkeypatch.setattr(node_update, "progress", lambda: {"running": False})
     monkeypatch.setattr(lora_index, "sync_progress", lambda: {"running": False})
-    monkeypatch.setattr(agent_agency, "maintenance_snapshot", lambda: [])
+    monkeypatch.setattr(agency_maintenance, "maintenance_snapshot", lambda: [])
 
 
 def test_download_items_map_bytes_and_kind(monkeypatch):
@@ -121,7 +121,7 @@ def test_lora_sync_activity(monkeypatch):
 
 
 def test_maintenance_activity_carries_repo(monkeypatch):
-    monkeypatch.setattr(agent_agency, "maintenance_snapshot", lambda: [{
+    monkeypatch.setattr(agency_maintenance, "maintenance_snapshot", lambda: [{
         "repo_id": "repo-1", "turn": 42, "queued": 2, "started_at": time.time(),
     }])
     item = activity_feed.snapshot()[0]
@@ -130,6 +130,41 @@ def test_maintenance_activity_carries_repo(monkeypatch):
     assert item["repo_id"] == "repo-1"
     assert item["progress"] == "第 42 回合 · 排队 2 个"
     assert item["target"] == ""
+
+
+def test_表格整理与纪要索引在后台活动可见(monkeypatch):
+    """2026-10-20 用户实锤：「点击整理索引时后台任务还是未看到有任务」。
+
+    `manual_table_fill` 每批都会更新进度，但过去只被
+    `GET /tables/manual-fill/progress` 按**单仓库**轮询，后台活动面板无从枚举
+    ⇒ 这个要跑十几批、几分钟的长操作在面板里完全不可见。
+    """
+    from app.services import manual_table_fill
+
+    manual_table_fill._FILL_PROGRESS.clear()
+    manual_table_fill.set_fill_progress("/out|repo-chron", 3, 11)
+    try:
+        items = [i for i in activity_feed.snapshot() if i["kind"] == "table_fill"]
+    finally:
+        manual_table_fill._FILL_PROGRESS.clear()
+
+    assert len(items) == 1
+    item = items[0]
+    assert item["title"] == "表格整理 / 纪要索引"
+    assert item["progress"] == "第 3/11 批"
+    assert item["repo_id"] == "repo-chron"
+    assert item["status"] == "running"
+
+
+def test_表格整理结束后不再出现在活动列表(monkeypatch):
+    """`clear_fill_progress` 在 `finally` 里 ⇒ 跑完/失败都不留僵尸条目。"""
+    from app.services import manual_table_fill
+
+    manual_table_fill._FILL_PROGRESS.clear()
+    manual_table_fill.set_fill_progress("/out|repo-x", 1, 2)
+    manual_table_fill.clear_fill_progress("/out|repo-x")
+
+    assert [i for i in activity_feed.snapshot() if i["kind"] == "table_fill"] == []
 
 
 def test_snapshot_sorted_by_started_at_desc(monkeypatch):

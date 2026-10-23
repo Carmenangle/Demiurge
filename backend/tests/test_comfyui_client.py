@@ -336,3 +336,38 @@ def test_第59刀_排队但队列空转时queue_busy_false(monkeypatch):
 
     assert r["status"] == "pending"
     assert r["queue_busy"] is False
+
+
+def test_提交超时后要在宽限窗口内轮询确认接单(monkeypatch):
+    """2026-10-20 实锤（19:12:18 提交 / 19:13:10 失败，共 52s）：
+
+    大型工作流在 ComfyUI 里做节点校验/模型加载时，`POST /prompt` 的响应会晚于
+    客户端 30s 超时——请求其实已被受理、稍后照常出图。旧实现只在超时**那一刻**
+    查一次队列：此刻任务还没进 queue ⇒ 查不到 ⇒ 判「提交失败」⇒ 前端删槽
+    ⇒ 图生成了、却无处回填、也进不了资产库（用户实锤「明明出了图却没插入」）。
+
+    现在改为宽限窗口内轮询：只要窗口内任一次探测到接单，就必须救回 prompt_id。
+    """
+    probes: list[float] = []
+
+    def fake_prompt_accepted(url, prompt_id, timeout=8):
+        probes.append(timeout)
+        # 前两次「还没进队列」，第三次才被受理 —— 模拟校验耗时
+        return len(probes) >= 3
+
+    monkeypatch.setattr(comfyui_client, "_prompt_accepted", fake_prompt_accepted)
+    monkeypatch.setattr(comfyui_client, "PROMPT_ACCEPT_POLL_INTERVAL", 0.0)
+
+    assert comfyui_client._await_prompt_accepted("http://127.0.0.1:8188", "pid") is True
+    assert len(probes) == 3
+    # 轮询用短探测超时，否则单轮就把整个窗口吃光
+    assert all(t == comfyui_client.PROMPT_ACCEPT_PROBE_TIMEOUT for t in probes)
+
+
+def test_宽限窗口用尽仍未接单判失败(monkeypatch):
+    """窗口内始终没接单 ⇒ 如实判失败（不无限等）。"""
+    monkeypatch.setattr(comfyui_client, "_prompt_accepted", lambda *a, **k: False)
+    monkeypatch.setattr(comfyui_client, "PROMPT_ACCEPT_POLL_INTERVAL", 0.0)
+    monkeypatch.setattr(comfyui_client, "PROMPT_ACCEPT_GRACE_SECONDS", 0.05)
+
+    assert comfyui_client._await_prompt_accepted("http://127.0.0.1:8188", "pid") is False

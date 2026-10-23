@@ -104,11 +104,11 @@ def fetch_object_info(
         return result
 
 
-def _prompt_accepted(url: str, prompt_id: str) -> bool:
+def _prompt_accepted(url: str, prompt_id: str, timeout: float = 8) -> bool:
     """查 history 与 queue，确认任务是否已被 ComfyUI 接收（响应丢失后的救回判定）。"""
     for path in (f"/history/{prompt_id}", "/queue"):
         try:
-            with urlopen(_base(url) + path, timeout=8) as r:
+            with urlopen(_base(url) + path, timeout=timeout) as r:
                 data = json.loads(r.read())
         except Exception:
             continue
@@ -120,6 +120,30 @@ def _prompt_accepted(url: str, prompt_id: str) -> bool:
             if prompt_id in ids:
                 return True
     return False
+
+
+# 提交响应超时后的**接单宽限窗口**（2026-10-20 实锤）。
+# 旧实现只在超时那一刻查一次队列：大型工作流此刻还在 ComfyUI 里做节点校验/模型加载，
+# 尚未进 queue，于是查不到 ⇒ 判「提交失败」并**删掉插画槽**；可 ComfyUI 稍后照常出图
+# ⇒ 图生成了却无处回填、也进不了资产库（用户实锤 19:12:18 提交 / 19:13:10 失败，
+# 共 52s，ComfyUI 侧确有产出）。改成在窗口内轮询确认，宁可多等几秒也不误杀任务。
+PROMPT_ACCEPT_GRACE_SECONDS = 25.0
+PROMPT_ACCEPT_POLL_INTERVAL = 2.5
+PROMPT_ACCEPT_PROBE_TIMEOUT = 3.0
+
+
+def _await_prompt_accepted(url: str, prompt_id: str) -> bool:
+    """在宽限窗口内反复确认任务是否已被接收；命中即返回 True。
+
+    探测用短超时（3s）而不是 8s：窗口内要多轮探测，单轮太慢会吃掉整个窗口。
+    """
+    started = time.monotonic()
+    while True:
+        if _prompt_accepted(url, prompt_id, timeout=PROMPT_ACCEPT_PROBE_TIMEOUT):
+            return True
+        if time.monotonic() - started >= PROMPT_ACCEPT_GRACE_SECONDS:
+            return False
+        time.sleep(PROMPT_ACCEPT_POLL_INTERVAL)
 
 
 def submit_prompt(url: str, api: dict, client_id: str = "") -> str | None:
@@ -148,7 +172,7 @@ def submit_prompt(url: str, api: dict, client_id: str = "") -> str | None:
             detail = str(e)
         raise ComfyError(detail, 500)
     except Exception as e:
-        if _prompt_accepted(url, prompt_id):
+        if _await_prompt_accepted(url, prompt_id):
             return prompt_id
         raise ComfyError(str(e), 500)
 

@@ -259,7 +259,16 @@ export function saveLocalSrc(args: { src: string; repoId: string; outputDir: str
 // 从锁定画布回传的完整工作流直接提交生成
 export function submitGraph(workflow: unknown, url: string) {
   // 与 submitWorkflow 同理：提交阶段必须有超时，后端挂起时前端要能失败并走自愈/失败槽。
-  return apiPost<SubmitResult>("/comfyui/submit_graph", { workflow, url, client_id: comfyClientId() }, 60_000);
+  // 文案要点名「提交」——默认文案「需求太复杂，建议把需求拆小」对生图提交是误导
+  // （2026-10-19 实锤：那次的真实原因是前置帧提示词编译耗光时间，与需求复杂度无关）。
+  return apiPost<SubmitResult>(
+    "/comfyui/submit_graph",
+    { workflow, url, client_id: comfyClientId() },
+    60_000,
+    undefined,
+    "ComfyUI 未在时限内接受本次任务：可能队列里还有别的图在跑，或工作流节点过多。"
+      + "建议先确认 ComfyUI 空闲后重试；若反复出现，请检查前置提示词编译是否已超时。",
+  );
 }
 
 // 强行停止 ComfyUI 生图（人工打断工作流）：删排队项 + 中断执行。prompt_id 可空。

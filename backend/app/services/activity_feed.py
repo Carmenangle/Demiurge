@@ -39,6 +39,8 @@ KIND_LABEL = {
     "comfyui_update": "ComfyUI 本体",
     "lora_sync": "LoRA 同步",
     "chat_maintenance": "对话后置维护",
+    "table_fill": "表格整理 / 纪要索引",
+    "comfy_watchdog": "ComfyUI 守护",
 }
 
 # node_update 的 phase → 中文阶段名（只列出真实会出现的值）。
@@ -185,10 +187,10 @@ def _lora_items() -> list[dict]:
 
 def _maintenance_items() -> list[dict]:
     """对话后置维护（表格/信念/记忆），正文发出后仍在跑的收尾工作。"""
-    from app.services import agent_agency
+    from app.services import agency_maintenance
 
     items: list[dict] = []
-    for entry in agent_agency.maintenance_snapshot():
+    for entry in agency_maintenance.maintenance_snapshot():
         turn = int(entry.get("turn") or 0)
         parts = [f"第 {turn} 回合" if turn > 0 else "本轮"]
         queued = int(entry.get("queued") or 0)
@@ -210,6 +212,57 @@ def _maintenance_items() -> list[dict]:
     return items
 
 
+def _comfy_watchdog_items() -> list[dict]:
+    """ComfyUI 看门狗：自动重启中 / 停手 / autostart 失败 / 已恢复（只读投影）。"""
+    from app.services import comfy_watchdog
+
+    items: list[dict] = []
+    for entry in comfy_watchdog.watchdog_snapshot():
+        items.append({
+            "id": "comfy-watchdog",
+            "kind": "comfy_watchdog",
+            "label": "ComfyUI 守护",
+            "status": entry["status"],
+            "progress": entry["progress"],
+            "detail": "",
+            "error": entry["error"],
+            "target": entry["target"],
+            "repo_id": "",
+            "started_at": entry["started_at"],
+            "updated_at": entry["updated_at"],
+        })
+    return items
+
+def _table_fill_items() -> list[dict]:
+    """表格整理 / 纪要索引（2026-10-20 用户实锤：点「整理索引」面板里看不到任务）。
+
+    `manual_table_fill` 本来就有每批进度（`_FILL_PROGRESS`），但只被
+    `GET /tables/manual-fill/progress` 按**单仓库**轮询 ⇒ 后台活动面板第七源缺失。
+    该操作要跑十几批、几分钟，正是最需要看到进度的那类长操作。
+    """
+    from app.services import manual_table_fill
+
+    items: list[dict] = []
+    for key, state in manual_table_fill.snapshot_fill_progress().items():
+        done = int(state.get("batch_done") or 0)
+        total = int(state.get("batch_total") or 0)
+        repo_id = key.rsplit("|", 1)[-1] if "|" in key else key
+        items.append({
+            "id": f"table_fill:{key}",
+            "kind": "table_fill",
+            "label": "表格整理 / 纪要索引",
+            "status": "running",
+            "progress": f"第 {done}/{total} 批" if total else "准备中",
+            "detail": "",
+            "error": "",
+            "target": "",
+            "repo_id": repo_id,
+            "started_at": 0.0,          # 进度快照不带起始时间，由 updated_at 参与排序
+            "updated_at": time.time(),
+        })
+    return items
+
+
 def snapshot() -> list[dict]:
     """全部外部长操作活动（不含 jobs 注册表，那一份走 GET /api/jobs）。"""
     now = time.time()
@@ -218,6 +271,8 @@ def snapshot() -> list[dict]:
         *_node_items(),
         *_lora_items(),
         *_maintenance_items(),
+        *_table_fill_items(),
+        *_comfy_watchdog_items(),
     ]
     for item in items:
         # 标题由后端定（KIND_LABEL 单一属主），前端不再维护第二份映射。

@@ -543,8 +543,13 @@ export function reduceChatStreamEvent(
         ? { ...message, artifacts: [...(message.artifacts || []), ...event.items] }
         : message);
     case "error":
+      // 2026-10-23：流中断（网络波动/后端重启）时常已有部分正文——此前 error 只在
+      // text 为空时展示，半途断流被静默吞掉（用户看到正文「莫名其妙没了结尾」）。
+      // 现在无论有无正文都留痕：空文本照旧整条替换，有正文则追加警示块。
       return current.map((message) => message.id === botId
-        ? { ...message, text: message.text || `对话失败：${event.message}` }
+        ? { ...message, text: message.text
+            ? `${message.text}\n\n⚠ ${event.message}`
+            : `对话失败：${event.message}` }
         : message);
     case "illustrate_request":
       return current.map((message) => message.id === botId

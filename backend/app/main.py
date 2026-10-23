@@ -1,4 +1,5 @@
 import ipaddress
+import logging
 import os
 from pathlib import Path
 
@@ -7,14 +8,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+
 import threading
 
 from app.db import init_db
 from app.services import comfy_launcher
+from app.services import comfy_watchdog
 from app.services.workflow_build_tasks import start_worker as start_workflow_build_worker
 from app.services.chat_agent_queue import start_worker as start_chat_agent_queue_worker
 from app.services.plan_tasks import start_worker as start_plan_task_worker
 from app.routers import ai, ai_providers, agents, artifacts, assets, attachments, characters, comfyui, docs, gif_sprite, gguf_importer, image_resize, jobs, loras, mcp, models, narrative, node_manager, palette, plans, preset, procedures, rag, regex, runs, scenario, skills, state, table, user_state, visual_ci, workflows, worldbook, activity
+
+_LOG = logging.getLogger("uvicorn.error")
 
 app = FastAPI(title="Local AI ComfyUI Frontend API")
 init_db()
@@ -23,11 +28,42 @@ start_chat_agent_queue_worker()
 start_plan_task_worker()
 
 
-@app.on_event("startup")
+# 后端进程可能跑在受限上下文（低完整性/沙箱），它拉起的 ComfyUI 写不了安装树：
+# AlekPet 的 `.install.lock` 会把冷启动拖到 600 秒。此类环境由 start-dev 在用户身份下
+# 先拉起 ComfyUI（scripts/start_comfy.py），并设 LAF_COMFY_AUTOSTART=0 关掉这里的钩子。
+_COMFY_AUTOSTART = os.environ.get("LAF_COMFY_AUTOSTART", "1") != "0"
+
+
 def _autostart_comfyui() -> None:
-    """服务真正开始接收请求时，按已保存配置在后台自动拉起 ComfyUI。
-    放在 startup 钩子而非模块级：runtime_entry 自检只 import 本模块，不应误起子进程。"""
-    threading.Thread(target=comfy_launcher.autostart, daemon=True).start()
+    """按已保存配置在后台自动拉起 ComfyUI；成败都登记到看门狗（失败要在面板可见）。
+
+    放在 startup 钩子而非模块级：runtime_entry 自检只 import 本模块，不应误起子进程。
+    此前 autostart() 的返回值被线程直接丢弃 ⇒ 启动失败时用户只看到「生图没反应」，
+    原因（路径没配/启动失败）无从查起（2026-10-23 架构评审运行时稳健性短板 ②）。
+    """
+    if not _COMFY_AUTOSTART:
+        return
+
+    def _run() -> None:
+        result = comfy_launcher.autostart()
+        if result.get("started"):
+            comfy_watchdog.note_owned()
+            return
+        reason = str(result.get("reason") or "未知原因")
+        _LOG.warning("ComfyUI 自动启动失败：%s", reason)
+        comfy_watchdog.note_autostart_failed(reason)
+
+    threading.Thread(target=_run, name="comfy-autostart", daemon=True).start()
+
+
+@app.on_event("startup")
+def _start_comfy_watchdog() -> None:
+    """看门狗：托管进程死亡后按已存配置自动重启（防重启风暴 + 面板留痕）。
+
+    未配置/外部实例时全程 no-op；开发链（LAF_COMFY_AUTOSTART=0，ComfyUI 由
+    start-dev 在用户身份下拉起）同样安全——没托管过就不管。
+    """
+    comfy_watchdog.start_watchdog()
 
 # 默认只服务本机：这是单机桌面壳，含无鉴权的进程控制/文件读写接口（start/stop/interrupt/
 # save-local/local-view 等）。CORS 只挡浏览器跨源，挡不住非浏览器客户端；故加回环门禁作纵深防御。

@@ -5,6 +5,7 @@ from app.config import COMFYUI_BASE_URL
 from app.services import (
     comfy_pending, comfyui_client, comfy_launcher, generation_store, image_store,
     inspiration_store, local_media, repo_meta, workflow_submission,
+    comfy_watchdog,
 )
 from app.services.url_guard import validate_comfyui_url
 from app.services.comfyui_client import ComfyError
@@ -59,7 +60,9 @@ def set_config(cfg: ComfyConfig) -> ComfyConfig:
 @router.post("/start")
 def start(req: StartRequest) -> dict[str, object]:
     try:
-        return comfy_launcher.start(req.path, req.url, req.python_path)
+        result = comfy_launcher.start(req.path, req.url, req.python_path)
+        comfy_watchdog.note_owned()
+        return result
     except LaunchError as e:
         raise HTTPException(status_code=e.status, detail=e.detail)
 
@@ -67,14 +70,16 @@ def start(req: StartRequest) -> dict[str, object]:
 @router.post("/stop")
 def stop(req: StartRequest) -> dict[str, object]:
     """关闭 ComfyUI（装插件/依赖后需先关）。"""
-    return comfy_launcher.stop(req.url)
+    return comfy_launcher.stop(req.url, req.path, req.python_path)
 
 
 @router.post("/restart")
 def restart(req: StartRequest) -> dict[str, object]:
     """重启 ComfyUI：先关再起（装完插件生效）。需提供 path 以重新拉起。"""
     try:
-        return comfy_launcher.restart(req.path, req.url, req.python_path)
+        result = comfy_launcher.restart(req.path, req.url, req.python_path)
+        comfy_watchdog.note_owned()
+        return result
     except LaunchError as e:
         raise HTTPException(status_code=e.status, detail=e.detail)
 

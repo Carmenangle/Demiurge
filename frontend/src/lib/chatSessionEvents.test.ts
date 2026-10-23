@@ -744,3 +744,19 @@ describe("第 57 刀 多事件派发（N 个事件 → N 个槽，各插自己�
     expect(slotIds(out[0].parts)).toEqual(["illo-1"]);
   });
 });
+
+describe("reduceChatStreamEvent · error 事件（2026-10-23 断流留痕）", () => {
+  it("无正文时照旧整条替换为「对话失败」", () => {
+    const messages = reduceChatStreamEvent(base(), "bot", { type: "error", message: " boom " } as ChatStreamEvent);
+    expect(messages[0].text).toBe("对话失败： boom ");
+  });
+
+  it("已有部分正文时追加警示块，不吞掉半途断流", () => {
+    let messages = reduceChatStreamEvent(base(), "bot", { type: "delta", text: "正文前半" });
+    messages = reduceChatStreamEvent(messages, "bot", {
+      type: "error",
+      message: "连接中断：与后端的流式连接已断开",
+    } as ChatStreamEvent);
+    expect(messages[0].text).toBe("正文前半\n\n⚠ 连接中断：与后端的流式连接已断开");
+  });
+});

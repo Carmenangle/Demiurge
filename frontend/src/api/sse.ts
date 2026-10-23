@@ -7,6 +7,13 @@
 
 import { apiUrl } from "./client";
 
+// 连接层断开（fetch 被拒 / 流读到一半终止）的统一文案：浏览器原生 message
+// （"Failed to fetch"/"terminated"）对用户不可读，且要说清「进度不丢、去哪看」。
+// HTTP 错误响应不走这里（上面已解析 detail）；AbortError 是用户主动停止，无文案。
+const STREAM_DROP_MESSAGE =
+  "连接中断：与后端的流式连接已断开（网络波动或后端重启）。" +
+  "本轮进度不丢，可在后台活动面板查看；重新发送即可继续。";
+
 // 打开一条 SSE 流：POST body 到 path，逐事件回调 onEvent。
 // onEvent 返回 "stop" 可提前结束（如收到 error 后不再继续）。
 // onDone(err?) 在流正常结束、[DONE]、中止、或出错时调用一次。返回中止函数。
@@ -53,7 +60,7 @@ export function openSSE(
       onDone();
     } catch (e) {
       if ((e as Error).name === "AbortError") onDone();
-      else onDone((e as Error).message);
+      else onDone(STREAM_DROP_MESSAGE);
     }
   })();
   return () => ctrl.abort();
