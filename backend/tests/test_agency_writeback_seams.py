@@ -10,6 +10,7 @@
 `agent_agency._agency_writeback` 内联段），不得顺手"优化"——它是等价性的唯一参照。
 """
 
+import importlib
 import inspect
 import itertools
 
@@ -98,40 +99,48 @@ def test_illustration_reason等价矩阵():
 
 # ---------------------------------------------------------------------------
 # 源码形态锁
+#
+# 2026-10-23 方案 B 再拆：15 个接缝按域迁出（agent_agency 2589 → 666 行），属主改指新
+# 模块（改锁不删锁，且比原单文件判据更严——逐个接缝钉属主）：
+#   阶段 A/B（场景状态域）→ agency_scene_state；阶段 C（comfy 编译域）→ agency_scene_comfy。
+# 接缝本体仍可经 agent_agency 门面访问（aag._wb_*），但 getsourcefile 必须落在新属主内。
 # ---------------------------------------------------------------------------
-_SEAMS = (
+_SEAMS = {
     # 阶段 A：think 前缀拆分 / 状态写回 / 连续性 CI
-    "_wb_split_media_blocks",
-    "_wb_apply_state",
-    "_wb_run_narrative_ci",
+    "_wb_split_media_blocks": "agency_scene_state",
+    "_wb_apply_state": "agency_scene_state",
+    "_wb_run_narrative_ci": "agency_scene_state",
     # 阶段 B：在场信号 / 配音请求 / 初选出图提示词
-    "_wb_scene_signals",
-    "_wb_build_audio_request",
-    "_wb_initial_illustration_prompt",
+    #（_wb_at_climax / _wb_illustration_reason 是纯判定接缝，由 scene_signals /
+    #  emit_illustration_trace 调用而非 writeback 直调 ⇒ 归等价矩阵覆盖，不进组装锁）
+    "_wb_scene_signals": "agency_scene_state",
+    "_wb_build_audio_request": "agency_scene_state",
+    "_wb_initial_illustration_prompt": "agency_scene_state",
     # 阶段 C：comfy 七段（候选池 → 提示词/锚点 → scene_spec → Profile → 请求外壳
     #         → 首尾帧与视频 → 事件派发）
-    "_wb_comfy_actor_pool",
-    "_wb_comfy_scene_target",
-    "_wb_comfy_scene_spec",
-    "_wb_comfy_profile",
-    "_wb_comfy_illustrate_env",
-    "_wb_frames_and_video",
-    "_wb_emit_illustration_trace",
+    "_wb_comfy_actor_pool": "agency_scene_comfy",
+    "_wb_comfy_scene_target": "agency_scene_comfy",
+    "_wb_comfy_scene_spec": "agency_scene_comfy",
+    "_wb_comfy_profile": "agency_scene_comfy",
+    "_wb_comfy_illustrate_env": "agency_scene_comfy",
+    "_wb_frames_and_video": "agency_scene_comfy",
+    "_wb_emit_illustration_trace": "agency_scene_comfy",
     # 第 57 刀 · 多批派发（2026-09-24）：为「主锚点之外」的其余锚点各编译一条出图请求
-    "_wb_comfy_extra_requests",
+    "_wb_comfy_extra_requests": "agency_scene_comfy",
     # 第 57 刀 ③ · 第一人称「画面事实筛分」（2026-09-24）：进编译器之前按取景剔掉装不下的
-    # 外观/服装事实（`appearance`/`wardrobe` 在字段账本里是 required，剔晚了来不及）
-    "_wb_first_person_frame_filter",
-)
+    # 外貌/服装事实（`appearance`/`wardrobe` 在字段账本里是 required，剔晚了来不及）
+    "_wb_first_person_frame_filter": "agency_scene_comfy",
+}
 
 _TARGET_LINES = 160
 
 
 def test_拆解接缝齐备且同属主():
-    for name in _SEAMS:
+    for name, owner in _SEAMS.items():
         fn = getattr(aag, name, None)
         assert callable(fn), f"接缝缺失：{name}"
-        assert inspect.getsourcefile(fn) == aag.__file__, f"{name} 不在 agent_agency 属主内"
+        owner_file = importlib.import_module(f"app.services.{owner}").__file__
+        assert inspect.getsourcefile(fn) == owner_file, f"{name} 不在 {owner} 属主内"
 
 
 def test_writeback主函数由接缝组装且已降到目标行数():

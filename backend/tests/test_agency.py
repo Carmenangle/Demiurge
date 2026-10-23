@@ -85,3 +85,43 @@ def test_tier与跨档():
     assert agency.tier_index(100, th) == 5
     assert agency.crossed_tier(19, 25, th) is True    # 第2档→第3档
     assert agency.crossed_tier(21, 30, th) is False   # 同档内
+
+
+# ── 2026-10-21 世界事件司门：event / user_action 裁定 ──
+
+def test_事件提案缺登门对象与来源被驳回():
+    v = agency.judge(
+        agency.Proposal(actor="世界", intent="塞壬渗透", difficulty=60,
+                        min_affinity=0, basis="E3 塞壬战线", kind="event"),
+        affinity=0, rng=random.Random(1),
+    )
+    assert v.outcome == agency.OUTCOME_REJECT and v.roll == 0
+    assert "凭空造人" in v.reason
+
+
+def test_事件与用户行动不吃好感门槛():
+    event = agency.judge(
+        agency.Proposal(actor="埃姆登", intent="登门", difficulty=50, min_affinity=99,
+                        basis="E3", kind="event", who="埃姆登", source="E3"),
+        affinity=-100, rng=random.Random(1),
+    )
+    user = agency.judge(
+        agency.Proposal(actor="用户", intent="一句话臣服", difficulty=50, min_affinity=99,
+                        basis="与立场冲突", kind="user_action"),
+        affinity=-100, rng=random.Random(1),
+    )
+    assert event.roll > 0 and user.roll > 0            # 没被好感门槛拦下
+    assert event.kind == "event" and user.kind == "user_action"
+    # 两类提案的成功率只由难度决定（好感不参与加成）
+    assert event.chance == 50 and user.chance == 50
+
+
+def test_事件裁定保留来源字段供叙事追溯():
+    v = agency.judge(
+        agency.Proposal(actor="埃姆登", intent="登门", difficulty=40, min_affinity=0,
+                        basis="E3", kind="event", who="埃姆登",
+                        source="E3 铁血数据实验", timing="本轮", stakes="俾斯麦先手"),
+        affinity=0, rng=random.Random(2),
+    )
+    assert (v.kind, v.who, v.source, v.timing, v.stakes) == (
+        "event", "埃姆登", "E3 铁血数据实验", "本轮", "俾斯麦先手")

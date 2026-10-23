@@ -32,13 +32,23 @@ DEGREE_LABEL = {
 
 @dataclass
 class Proposal:
-    """世界 Agent 对某角色的一次自主行动提案（由 LLM 产出后归一为本结构）。"""
-    actor: str            # 角色名
+    """世界 Agent 对某角色/事件/用户行动的一次提案（由 LLM 产出后归一为本结构）。
+
+    2026-10-21 世界事件司门：kind 区分三类提案，裁判仍共用同一套 d100 六档——
+    `npc`=在场 NPC 自发行动（旧语义）；`event`=事件/新角色登门；`user_action`=用户
+    单方面宣告结果的裁定。创意仍只由世界 Agent（LLM）产出，本结构只承载可复现输入。
+    """
+    actor: str            # 角色名；user_action 用「用户」，event 用 who 或「世界」
     intent: str           # 想做什么（叙事描述，供后续叙述节点用）
     difficulty: int       # 1–100，越高越难成功
-    min_affinity: float   # 低于此好感度该角色根本不会尝试（档位门槛）
-    basis: str            # 依据的 core 机制（世界 Agent 必须声明；空=无依据→驳回，防 OOC）
+    min_affinity: float   # 低于此好感度该角色根本不会尝试（仅 npc 生效）
+    basis: str            # 依据的 core 机制/事件锚点（空=无依据→驳回，防 OOC）
     goal: str = ""        # 当前持续目标；供主叙事保持行动因果，不参与机械裁判
+    kind: str = "npc"     # npc | event | user_action
+    who: str = ""         # event：登门角色名（必须来自卡内角色卡）
+    source: str = ""      # event：来源条目名/编号（必须命中世界书大事件条目）
+    timing: str = ""      # event：登门时机
+    stakes: str = ""      # event：若不应对的后果
 
 
 @dataclass
@@ -52,6 +62,11 @@ class Verdict:
     reason: str
     intent: str = ""      # 原始行动提案，不能在裁判后丢失
     goal: str = ""        # 行动服务的持续目标
+    kind: str = "npc"     # npc | event | user_action（供 directive 分流）
+    who: str = ""         # event：登门角色名
+    source: str = ""      # event：来源条目名/编号
+    timing: str = ""      # event：登门时机
+    stakes: str = ""      # event：不应对的后果
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
@@ -89,23 +104,36 @@ def classify_roll(roll: int, chance: int) -> tuple[str, str]:
 
 
 def judge(proposal: Proposal, affinity: float, *, rng: random.Random) -> Verdict:
-    """机械仲裁一条提案。顺序：core 依据 → 好感度门槛 → 掷骰分六档。任一前置不过直接驳回（roll=0）。"""
+    """机械仲裁一条提案。顺序：core 依据 → 好感度门槛（仅 npc）→ 掷骰分六档。
+
+    事件与用户行动是「世界/用户」层面的裁定，不吃 NPC 好感门槛与好感加成——成功率
+    只由难度决定（可复现、可解释）；`event` 缺登门对象与来源即驳回，防凭空造人。
+    """
+    meta = dict(kind=proposal.kind, who=proposal.who, source=proposal.source,
+                timing=proposal.timing, stakes=proposal.stakes)
     if not proposal.basis.strip():
         return Verdict(proposal.actor, OUTCOME_REJECT, DEGREE_NONE, 0, 0,
-                       "无 core 依据，驳回（防 OOC）", proposal.intent, proposal.goal)
-    if affinity < proposal.min_affinity:
+                       "无 core 依据，驳回（防 OOC）", proposal.intent, proposal.goal, **meta)
+    if proposal.kind == "event" and not (proposal.who.strip() or proposal.source.strip()):
+        return Verdict(proposal.actor, OUTCOME_REJECT, DEGREE_NONE, 0, 0,
+                       "事件无登门对象与来源，驳回（防凭空造人）",
+                       proposal.intent, proposal.goal, **meta)
+    if proposal.kind == "npc" and affinity < proposal.min_affinity:
         return Verdict(proposal.actor, OUTCOME_REJECT, DEGREE_NONE, 0, 0,
                        f"好感度 {_fmt(affinity)} < 门槛 {_fmt(proposal.min_affinity)}，不会尝试",
-                       proposal.intent, proposal.goal)
-    chance = success_chance(proposal.difficulty, affinity, proposal.min_affinity)
+                       proposal.intent, proposal.goal, **meta)
+    if proposal.kind == "npc":
+        chance = success_chance(proposal.difficulty, affinity, proposal.min_affinity)
+    else:
+        chance = success_chance(proposal.difficulty, 0.0, 0.0)
     roll = rng.randint(1, 100)
     outcome, degree = classify_roll(roll, chance)
     label = DEGREE_LABEL[degree]
     if outcome == OUTCOME_ACCEPT:
         return Verdict(proposal.actor, OUTCOME_ACCEPT, degree, roll, chance,
-                       f"掷骰 {roll}/{chance}，{label}", proposal.intent, proposal.goal)
+                       f"掷骰 {roll}/{chance}，{label}", proposal.intent, proposal.goal, **meta)
     return Verdict(proposal.actor, OUTCOME_REJECT, degree, roll, chance,
-                   f"掷骰 {roll}/{chance}，{label}", proposal.intent, proposal.goal)
+                   f"掷骰 {roll}/{chance}，{label}", proposal.intent, proposal.goal, **meta)
 
 
 def should_consult_world(affinities: dict[str, float], *, rng: random.Random,

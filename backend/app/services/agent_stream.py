@@ -5,6 +5,7 @@
 """
 
 from __future__ import annotations
+from app.services.agent_contracts import CtxLike
 import time
 from app.services import roleplay_turn, run_trace
 from app.services import llm as _llm
@@ -16,11 +17,11 @@ from app.services.agent_agency import (  # noqa: F401  跨簇底座
     _video_request_for,
 )
 
-def _stream_enabled(ctx: dict) -> bool:
+def _stream_enabled(ctx: CtxLike) -> bool:
     return bool(ctx.get("stream_output")) and callable(ctx.get("stream_sink"))
 
 
-def _notify_stream_trace(ctx: dict, message: str, detail: str = "") -> None:
+def _notify_stream_trace(ctx: CtxLike, message: str, detail: str = "") -> None:
     """把自愈进度提示推入流式通道（仅流式模式）。
 
     截断自愈重试期间思考阶段不进流式通道，气泡会静默冻结数分钟（2026-08-31 用户
@@ -39,6 +40,58 @@ def _notify_stream_trace(ctx: dict, message: str, detail: str = "") -> None:
         sink(payload)
     except Exception:  # noqa: BLE001 - 提示失败不阻断生成主流程
         pass
+
+
+def _persist_interrupted_partial(ctx: dict, exc: Exception) -> None:
+    """把异常携带的已收**可见正文**按中断语义落快照（best-effort）。
+
+    2026-10-20（turn f77e68b1 实锤）：首发断流后 `roleplay_node` 只返回「扮演失败」气泡，
+    失败轮次不写快照 ⇒ 下一轮 `_resume_interrupted_messages` 认不到「（已打断）」标记
+    ⇒ 用户再点生成仍然从头再来。这里补落一次，让跨轮拼接能接上。
+    阈值 200 字与 `_resume_interrupted_messages` 的续写门槛一致（太短不如重写）。
+    **只落可见正文**：think 原文落进正文会污染气泡与下一轮 wire；思考-only 的场景
+    由轮内「思考断点续写」（`llm.StreamInterrupted.partial`）消化。
+    """
+    from app.services import chat_snapshot, generation_store
+    partial = roleplay_turn._stream_partial(exc)
+    if not partial:
+        return
+    body = roleplay_turn.visible_body_of(partial)
+    if len(body) < 200 or body.endswith(chat_snapshot.INTERRUPT_MARKER):
+        return
+    thread_id = str((ctx or {}).get("thread_id") or "")
+    message_id = str((ctx or {}).get("message_id") or "")
+    if not (thread_id and message_id):
+        return
+    try:
+        generation_store.persist_text(thread_id, message_id, body, interrupted=True)
+    except Exception:  # noqa: BLE001 [EXC-保留] 半成品落库 best-effort：失败不阻断失败收尾
+        pass
+
+
+def _roleplay_failure_result(ctx: CtxLike, trace: list, streamed: bool, exc: Exception) -> dict:
+    """roleplay 失败收尾的唯一接缝（2026-10-20，从 `roleplay_node` 的 except 下沉）。
+
+    三件事：错误留痕（trace 事件）→ 半成品按中断语义落库 → 返回失败气泡。
+    下沉动机：`roleplay_node` 有 150 行硬上限（`test_roleplay_seams`），新逻辑只落接缝。
+
+    2026-10-20 用户实锤（turn 14:08，首轮已流式 4867 字正文）：失败时
+    `result_text = "扮演失败：…"` 会把**已流式给用户的正文整段替换掉** ⇒
+    「明明生成了很多，内容却没了」。口径与同函数的 `RoleplayInterrupted` 分支对齐
+    （那里早就是 `result_text: ""`）：已流式过就**不覆盖正文**，错误只进 trace，
+    半成品由 `_persist_interrupted_partial` 落库供下一轮续写。
+    """
+    run_trace.emit(ctx, "agent.error", agent="roleplay", error=str(exc))
+    _persist_interrupted_partial(ctx, exc)
+    if streamed:
+        # `_interrupted` 必须一起给：runner 的 finally（`agent_runner:128`）会用
+        # `interrupted=False` 再落一次盘，把 `_persist_interrupted_partial` 写上的
+        # 「（已打断）」标记抹掉 ⇒ 下一轮 `_resume_interrupted_messages` 接不上。
+        # 与同函数的 RoleplayInterrupted 分支保持同一套语义（半成品保留 + 跨轮续写）。
+        return {"result_text": "", "trace": trace + [f"⚠️ 扮演失败：{exc}"],
+                "_streamed_result": streamed, "_interrupted": True}
+    return {"result_text": f"扮演失败：{exc}", "trace": trace,
+            "_streamed_result": streamed}
 
 
 def _resume_interrupted_messages(wire_messages: list[dict]) -> list[dict]:
@@ -152,7 +205,7 @@ def _roleplay_continuation_messages(wire_messages: list[dict], partial: str,
             {"role": "user", "content": instruction}]
 
 
-def _chat_with_optional_stream(ctx: dict, messages: list[dict], *, temperature: float,
+def _chat_with_optional_stream(ctx: CtxLike, messages: list[dict], *, temperature: float,
                                top_p: float | None = None,
                                max_tokens: int | None = None,
                                max_duration_seconds: float | None = None) -> str:
@@ -180,6 +233,13 @@ def _chat_with_optional_stream(ctx: dict, messages: list[dict], *, temperature: 
         except Exception:
             pass
 
+    def _abort_probe() -> bool:
+        # 2026-10-21：取消探针从「每个 delta」前移到「无增量窗口」也在查——中转缓冲式
+        # 下发时首字 40~80s 才到，on_delta 检查点在那段时间根本不存在；用户点停止后
+        # 后端仍阻塞在 next()（thread 准入不释放 ⇒ 前端 60s 后提示「后端仍在收尾」），
+        # 上游继续生成并按完整用量计费（网关侧记「客户端断开」，用户实锤 $1.3031）。
+        return roleplay_turn.user_interrupted(ctx)
+
     if not _stream_enabled(ctx):
         # 非流式也走可取消通道（2026-09-04 A 方案）：整段 invoke 期间零取消检查点，
         # 用户点停止只能等整段模型跑完（_tmp/smoke_pause_real.py 实锤复现）。关闭流式
@@ -196,14 +256,18 @@ def _chat_with_optional_stream(ctx: dict, messages: list[dict], *, temperature: 
             if roleplay_turn.user_interrupted(ctx):
                 raise roleplay_turn.RoleplayInterrupted("用户已停止生成")
 
-        return _llm.chat_messages_stream(
-            ctx["chat_base"], ctx["chat_key"], ctx["chat_model"], messages,
-            on_delta=_plain_collect_check, temperature=temperature, **_proxy_kw(ctx),
-            top_p=top_p, max_tokens=max_tokens,
-            provider_profile=ctx.get("provider_profile") or "openai_compatible",
-            timeout_override=120.0 if _chat_proxy else 200.0,
-            on_usage=_emit_usage,
-        )
+        try:
+            return _llm.chat_messages_stream(
+                ctx["chat_base"], ctx["chat_key"], ctx["chat_model"], messages,
+                on_delta=_plain_collect_check, temperature=temperature, **_proxy_kw(ctx),
+                top_p=top_p, max_tokens=max_tokens,
+                provider_profile=ctx.get("provider_profile") or "openai_compatible",
+                timeout_override=120.0 if _chat_proxy else 200.0,
+                on_usage=_emit_usage,
+                should_abort=_abort_probe,
+            )
+        except _llm.StreamAborted as exc:
+            raise roleplay_turn.RoleplayInterrupted("用户已停止生成") from exc
 
     from app.services.stream_text import VisibleTextStream
 
@@ -278,7 +342,10 @@ def _chat_with_optional_stream(ctx: dict, messages: list[dict], *, temperature: 
             top_p=top_p, max_tokens=max_tokens,
             provider_profile=ctx.get("provider_profile") or "openai_compatible",
             on_usage=_emit_usage, on_finish=_emit_finish,
+            should_abort=_abort_probe,
         )
+    except _llm.StreamAborted as exc:
+        raise roleplay_turn.RoleplayInterrupted("用户已停止生成") from exc
     finally:
         tail = visible.finish()
         if tail:

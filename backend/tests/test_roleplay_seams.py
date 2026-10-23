@@ -32,6 +32,7 @@ import inspect
 import itertools
 
 from app.services import agent_graph as ag
+from app.services import agent_graph_roleplay as agr  # roleplay 域新属主（2026-10-23 方案 B 再拆）
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +195,9 @@ def test_append_static_blocks等价矩阵(monkeypatch):
     seen = set()
     checked = 0
     for ch, rule in itertools.product(chains, rules):
+        # 2026-10-23 拆域后双绑定：新接缝在 agr 查 _builtin，legacy 参照逐字走 ag 门面
+        # ⇒ 两侧都必须打，否则等价矩阵拿「真 _builtin」对「假 _builtin」必红。
+        monkeypatch.setattr(agr, "_builtin", lambda *a, _r=rule, **k: _r)
         monkeypatch.setattr(ag, "_builtin", lambda *a, _r=rule, **k: _r)
         ctx = {}
         assert (ag._rp_append_static_blocks(ctx, "BASE", ch)
@@ -379,7 +383,7 @@ def test_拆解接缝齐备且同属主():
     for name in _SEAMS:
         fn = getattr(ag, name, None)
         assert callable(fn), f"接缝缺失：{name}"
-        assert inspect.getsourcefile(fn) == ag.__file__, f"{name} 不在 agent_graph 属主内"
+        assert inspect.getsourcefile(fn) == agr.__file__, f"{name} 不在 agent_graph_roleplay 属主内"
 
 
 def test_roleplay_node主函数已降到目标行数():
@@ -417,3 +421,52 @@ def test_主函数由接缝组装_全部接缝自roleplay_node可达():
                 frontier.append(n)
     unreachable = [n for n in _SEAMS if n not in seen]
     assert not unreachable, f"接缝从主函数不可达（疑似内联回退 / 死接缝）：{unreachable}"
+
+
+def test_失败收尾_已收可见正文按中断语义落库(monkeypatch):
+    """2026-10-20（turn f77e68b1）：首发断流后失败轮次不写快照 ⇒ 下一轮
+    `_resume_interrupted_messages` 认不到「（已打断）」⇒ 用户再点生成仍从头再来。
+    失败收尾必须把已收的**可见正文**补落一次；think 不得混进正文。
+    """
+    from app.services import agent_stream, generation_store
+    from app.services import llm as _llm
+
+    calls: list = []
+    monkeypatch.setattr(
+        generation_store, "persist_text",
+        lambda *a, **k: calls.append({"args": a, "kwargs": k}),
+    )
+    body = "烛火把两个人的影子拉长又揉碎。" * 20  # 15×20=300 字，过 200 字门槛
+    exc = _llm.StreamInterrupted(
+        "调用对话模型失败：The read operation timed out",
+        "<think>内部推演不该落正文</think><content>" + body,
+    )
+    out = agent_stream._roleplay_failure_result(
+        {"thread_id": "t1", "message_id": "m1"}, ["trace"], True, exc)
+
+    # 2026-10-20 用户实锤（turn 14:08，首轮已流式 4867 字正文）：失败时若把
+    # 「扮演失败：…」当 result_text 下发，`agent_graph` 的 `if upd.get("result_text")`
+    # 会发 replace 事件，**把用户已付费的正文整段覆盖掉**。
+    # ⇒ 已流式过就空串（不发 replace），错误只进 trace；与 RoleplayInterrupted 分支同口径。
+    assert out["result_text"] == ""
+    assert out["_streamed_result"] is True
+    assert any("扮演失败" in line for line in out["trace"])
+    assert len(calls) == 1
+    assert calls[0]["kwargs"].get("interrupted") is True
+    text = calls[0]["args"][2]
+    assert text == body.strip()
+    assert "内部推演" not in text  # think 不得混进正文
+
+
+def test_失败收尾_短视频不落库(monkeypatch):
+    """不足 200 字没有续写价值（阈值与 `_resume_interrupted_messages` 同源）。"""
+    from app.services import agent_stream, generation_store
+    from app.services import llm as _llm
+
+    calls: list = []
+    monkeypatch.setattr(generation_store, "persist_text",
+                        lambda *a, **k: calls.append(a))
+    exc = _llm.StreamInterrupted("调用对话模型失败：断流", "<content>只有半句")
+    agent_stream._roleplay_failure_result(
+        {"thread_id": "t1", "message_id": "m1"}, [], False, exc)
+    assert calls == []

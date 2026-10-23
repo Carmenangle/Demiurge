@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 import uuid
 from dataclasses import dataclass, field
-from typing import Callable, TypedDict
+from typing import Any, Callable, TypedDict
 
 
 _MISSING = object()
@@ -137,6 +137,15 @@ class RunContext:
             "context_count": self.context_count,
             "compact_trigger_pct": self.compact_trigger_pct,
             "selfheal_attempts": self.selfheal_attempts,
+            # 2026-10-20 补：以下两键此前**字段有、映射表没有** ⇒ `ctx.get()` 恒返回 None，
+            # 属于「声明了但永远读不到」的静默失效（探针实证：`from_payload(preset_sampling=…)`
+            # 之后 `ctx.get("preset_sampling")` 仍是 None）。
+            # 后果实锤：`agent_graph._roleplay_sampling` 读到的 preset_sampling 永远是空字典
+            # ⇒ 用户在「采样参数」里设的单次输出（600000）**从未生效** ⇒ 请求不带 max_tokens
+            # ⇒ 中转默认 4096 ⇒ 每轮长生成在 4096 tokens 处 finish_reason=length 截断
+            # ⇒ 自愈连环重掷（19:03/19:04 两次 length 实锤）。
+            "preset_sampling": self.preset_sampling,
+            "story_turn": self.story_turn,
             "history_override": self.history_override,
             "agent_cfg": self.agent_cfg, "builtin": self.builtin, "history": self.history,
             "skill_frags": self.skill_frags, "has_mcp": self.has_mcp,
@@ -202,3 +211,9 @@ class AgentEvent(TypedDict, total=False):
     error: str
     done: bool
     illustrate_request: dict  # 高潮点出图请求（{prompt}）；前端据本地预设模板走异步 ComfyUI 闭环
+
+
+# ctx 双形态（2026-10-23 mypy 收口）：图链执行上下文 RunContext（dict 协议适配器，
+# 见类内 get/__getitem__/__contains__）或裸 dict（测试/旧路径/状态快照）。
+# 业务助手历史上注解 `ctx: dict`，实则两者都收 ⇒ 统一加宽到本别名，调用侧零改动。
+CtxLike = RunContext | dict[str, Any]

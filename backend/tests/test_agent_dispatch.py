@@ -1,4 +1,5 @@
 """Supervisor 分派 Interface 测试：模型拥有语义判断，代码只校验能力条件。"""
+import inspect
 import json
 import random
 import threading
@@ -6,8 +7,13 @@ import threading
 import pytest
 
 from app.services import agency, agent_context, agent_graph as ag, worldbook, worldbook_store
+from app.services import agent_graph_nodes as agn  # 专家节点域（2026-10-23 方案 B 再拆）
+from app.services import agent_graph_roleplay as agr  # Roleplay 回合域（2026-10-23 方案 B 再拆）
 from app.services import agent_context_assembly as aga  # A 簇新属主（方案 B 拆分）
 from app.services import agent_agency as aag  # B 簇新属主（方案 B 第二步之 B）
+from app.services import agency_illustration_actors as aa  # 插画主体域（2026-10-23 方案 B 再拆）
+from app.services import agency_scene_comfy as asc  # 插画 comfy 编译域（2026-10-23 方案 B 再拆）
+from app.services import agency_maintenance as am  # 维护簇新属主（2026-10-23 方案 B 再拆）
 from app.services import roleplay_agency as ra
 from app.services.agent_contracts import RunContext
 
@@ -183,13 +189,13 @@ def test_roleplay在世界书解析后按首轮或出场角色选择描述(
         ctx["_worldbook_character_names"] = ["米拉"]
         return "【米拉】已进入房间"
 
-    monkeypatch.setattr(ag, "_resolve_worldbook", resolve_worldbook)
+    monkeypatch.setattr(agr, "_resolve_worldbook", resolve_worldbook)
 
     def resolve_preset(ctx, wb, **kwargs):
         captured["persona"] = ctx.get("persona") or ""
         return [], None, False, [], []
 
-    monkeypatch.setattr(ag, "_resolve_preset", resolve_preset)
+    monkeypatch.setattr(agr, "_resolve_preset", resolve_preset)
     monkeypatch.setattr(ag._llm, "chat_messages_stream", lambda *args, **kwargs: "剧情正文")
     ctx = _card_ctx(
         opening_card_name="露娜", card_names=["露娜", "米拉"],
@@ -394,7 +400,8 @@ def test_首次世界书索引立即发送非阻塞状态事件(monkeypatch):
     monkeypatch.setattr(
         worldbook,
         "schedule_index",
-        lambda repo_id, entries, cfg, on_initial=None: bool(on_initial and on_initial(len(entries))),
+        lambda repo_id, entries, cfg, on_initial=None, on_backfill=None: bool(
+            on_initial and on_initial(len(entries))),
     )
     monkeypatch.setattr(
         worldbook,
@@ -497,7 +504,7 @@ def test_编辑节点把当前输入和附件交给受限Agent(monkeypatch):
         captured.update(ctx=ctx, text=text, images=images, trace=trace)
         return {"result_text": "done", "trace": trace}
 
-    monkeypatch.setattr(ag.edit_agent, "run", fake_run)
+    monkeypatch.setattr(agn.edit_agent, "run", fake_run)  # 消费方 edit_node 已迁 agent_graph_nodes（2026-10-23）
     ctx = _ctx(repo_id="work", workspace_mode="edit")
     result = ag.edit_node({
         "_ctx": ctx, "user_text": "修复 scripts/a.js", "images": ["error.png"], "trace": [],
@@ -1087,14 +1094,14 @@ def test_roleplay状态块里的user宏未设人设时回退我(monkeypatch):
     # deps 非 None 才会走 st_block + state_instruction 拼接分支
     class _Deps:
         pass
-    monkeypatch.setattr(ag, "_agency_prelude",
+    monkeypatch.setattr(agr, "_agency_prelude",
                         lambda ctx, text: (_Deps(), 1, 0.0, "\n\n【当前状态】\nLyra·对{{user}}态度: 好奇"))
-    monkeypatch.setattr(ag, "_agency_propose", lambda ctx, deps, aff, wb, text="": ("", False))
-    monkeypatch.setattr(ag, "_agency_writeback",
+    monkeypatch.setattr(agr, "_agency_propose", lambda ctx, deps, aff, wb, text="": ("", False))
+    monkeypatch.setattr(agr, "_agency_writeback",
                         lambda ctx, deps, reply, turn, aff, lost: (reply, [], {}, {}))
-    monkeypatch.setattr(ag, "_resolve_preset",
+    monkeypatch.setattr(agr, "_resolve_preset",
                         lambda ctx, wb, **k: ([], None, False, [], []))
-    monkeypatch.setattr(ag, "_resolve_worldbook", lambda ctx, q: "")
+    monkeypatch.setattr(agr, "_resolve_worldbook", lambda ctx, q: "")
     # 记忆检索走假件（本测只验宏替换，不碰 RAG）
     monkeypatch.setattr(ra, "recall_chronicle", lambda *a, **k: "")
 
@@ -1127,17 +1134,17 @@ def test_roleplay把机械召回候选与预设上下文合并后只调一次主
         rng=random.Random(0), state_base=str(tmp_path), curator_gate=1.0,
         index_fn=lambda text, title: None,
     )
-    monkeypatch.setattr(ag, "_agency_prelude", lambda ctx, text: (deps, 1, 10.0, ""))
+    monkeypatch.setattr(agr, "_agency_prelude", lambda ctx, text: (deps, 1, 10.0, ""))
     monkeypatch.setattr(
-        ag, "_agency_propose",
+        agr, "_agency_propose",
         lambda ctx, current, affinity, wb, text="": (calls.append("world") or ("", False)),
     )
-    monkeypatch.setattr(ag, "_resolve_worldbook", lambda ctx, query: "世界书候选")
+    monkeypatch.setattr(agr, "_resolve_worldbook", lambda ctx, query: "世界书候选")
     monkeypatch.setattr(
-        ag, "_resolve_preset",
+        agr, "_resolve_preset",
         lambda ctx, wb, **kw: ([{"role": "system", "content": "GrayWill预设"}], None, False, [], []),
     )
-    monkeypatch.setattr(ag, "_rag_recall_text", lambda *a, **k: calls.append("rag") or "作品记忆候选")
+    monkeypatch.setattr(agr, "_rag_recall_text", lambda *a, **k: calls.append("rag") or "作品记忆候选")
     monkeypatch.setattr(
         ag.run_trace, "emit",
         lambda ctx, event, **data: events.append((event, data)),
@@ -1177,7 +1184,7 @@ def test_roleplay把机械召回候选与预设上下文合并后只调一次主
         roleplay_once,
     )
     monkeypatch.setattr(
-        aag, "_table_maintenance",  # 消费方 _agency_maintenance 已迁 agent_agency（方案 B 之 B）
+        am, "_table_maintenance",  # 消费方 _agency_maintenance 已迁 agency_maintenance（2026-10-23）
         lambda ctx, deps, repo_id, reply, turn: calls.append("table"), raising=False,
     )
     monkeypatch.setattr(ra, "maybe_illustrate", lambda *a, **k: None)
@@ -1207,18 +1214,18 @@ def test_roleplay动态块后置_静态头跨轮逐字节稳定(monkeypatch, tmp
         chat_fn=lambda *a, **k: "[]", rng=random.Random(0), state_base=str(tmp_path),
         curator_gate=1.0, index_fn=lambda text, title: None,
     )
-    monkeypatch.setattr(ag, "_agency_prelude", lambda ctx, text: (deps, 1, 0.0, ""))
-    monkeypatch.setattr(ag, "_agency_propose", lambda ctx, d, aff, wb, text="": ("", False))
+    monkeypatch.setattr(agr, "_agency_prelude", lambda ctx, text: (deps, 1, 0.0, ""))
+    monkeypatch.setattr(agr, "_agency_propose", lambda ctx, d, aff, wb, text="": ("", False))
     monkeypatch.setattr(
-        ag, "_agency_writeback",
+        agr, "_agency_writeback",
         lambda ctx, d, reply, turn, aff, lost: (reply, [], {}, {}),
     )
-    monkeypatch.setattr(ag, "_resolve_preset", lambda ctx, wb, **k: ([], None, False, [], []))
-    monkeypatch.setattr(ag, "_resolve_worldbook", lambda ctx, q: "世界书条目")
-    monkeypatch.setattr(ag, "_rag_recall_text", lambda *a, **k: "")
-    monkeypatch.setattr(ag, "_table_recall_text", lambda *a, **k: "")
+    monkeypatch.setattr(agr, "_resolve_preset", lambda ctx, wb, **k: ([], None, False, [], []))
+    monkeypatch.setattr(agr, "_resolve_worldbook", lambda ctx, q: "世界书条目")
+    monkeypatch.setattr(agr, "_rag_recall_text", lambda *a, **k: "")
+    monkeypatch.setattr(agr, "_table_recall_text", lambda *a, **k: "")
     monkeypatch.setattr(ra, "recall_chronicle", lambda *a, **k: next(recalls, ""))
-    monkeypatch.setattr(aag, "_table_maintenance", lambda *a, **k: None, raising=False)  # 消费方已迁 agent_agency
+    monkeypatch.setattr(am, "_table_maintenance", lambda *a, **k: None, raising=False)  # 消费方已迁 agency_maintenance
     monkeypatch.setattr(ra, "maybe_illustrate", lambda *a, **k: None)
     monkeypatch.setattr(ra, "maybe_summarize", lambda *a, **k: None)
     monkeypatch.setattr(ra, "maybe_curate", lambda *a, **k: 0)
@@ -1258,15 +1265,15 @@ def test_输出纪律尾注包含实测浪费源逐条禁令(monkeypatch, tmp_pa
     deps = ra.AgencyDeps(
         chat_fn=lambda *a, **k: "[]", rng=random.Random(0), state_base=str(tmp_path),
     )
-    monkeypatch.setattr(ag, "_agency_prelude", lambda ctx, text: (deps, 1, 10.0, ""))
-    monkeypatch.setattr(ag, "_agency_propose", lambda ctx, cur, aff, wb, text="": ("", False))
-    monkeypatch.setattr(ag, "_resolve_worldbook", lambda ctx, query: "")
+    monkeypatch.setattr(agr, "_agency_prelude", lambda ctx, text: (deps, 1, 10.0, ""))
+    monkeypatch.setattr(agr, "_agency_propose", lambda ctx, cur, aff, wb, text="": ("", False))
+    monkeypatch.setattr(agr, "_resolve_worldbook", lambda ctx, query: "")
     monkeypatch.setattr(
-        ag, "_resolve_preset",
+        agr, "_resolve_preset",
         lambda ctx, wb, **kw: ([{"role": "system", "content": "预设"}], None, False, [], []),
     )
-    monkeypatch.setattr(ag, "_rag_recall_text", lambda *a, **k: "")
-    monkeypatch.setattr(ag, "_table_recall_text", lambda *a, **k: "")
+    monkeypatch.setattr(agr, "_rag_recall_text", lambda *a, **k: "")
+    monkeypatch.setattr(agr, "_table_recall_text", lambda *a, **k: "")
     monkeypatch.setattr(ra, "recall_chronicle", lambda *a, **k: "")
     monkeypatch.setattr(ag.run_trace, "emit", lambda ctx, event, **data: None)
 
@@ -1806,6 +1813,9 @@ def test_comfy首个用户回合即使已有开场白也兜底生成插画(monke
                 "frame_subjects": [],
                 # 2026-09-22 追加观测：叙事者姓名/来路（本场景无 output_dir/人设 ⇒ 空）。
                 "narrator": "", "narrator_source": "",
+                # 2026-10-19 画幅可观测：锚点句含「站在」⇒ 关键词档判 2:3（竖构图全身）；
+                # 本场景无插画计划（first_story_reply）⇒ source 必为 keyword_infer。
+                "aspect_ratio": "2:3", "aspect_ratio_source": "keyword_infer",
             },
         )
 
@@ -1823,7 +1833,7 @@ def test_comfy_video关闭时不编译视频且不调提取LLM(monkeypatch, tmp_
     )
     video_calls = []
     monkeypatch.setattr(
-        aag, "_extract_video_action_plan",  # 消费方 _agency_writeback 已迁 agent_agency（方案 B 之 B）
+        asc, "_extract_video_action_plan",  # 消费方 _agency_writeback 已迁 agent_agency（方案 B 之 B）
         lambda *a, **k: video_calls.append(1) or {},
         raising=False,
     )
@@ -3440,15 +3450,15 @@ def test_roleplay先交付正文与插画但维护完成后才结束Agent回合(
     class _Deps:
         renderer = None
 
-    monkeypatch.setattr(ag, "_agency_prelude", lambda ctx, text: (_Deps(), 1, 0.0, ""))
-    monkeypatch.setattr(ag, "_agency_propose", lambda *args, **kwargs: ("", False))
-    monkeypatch.setattr(ag, "_resolve_worldbook", lambda *args: "")
-    monkeypatch.setattr(ag, "_resolve_preset", lambda *args, **kwargs: ([], None, False, [], []))
+    monkeypatch.setattr(agr, "_agency_prelude", lambda ctx, text: (_Deps(), 1, 0.0, ""))
+    monkeypatch.setattr(agr, "_agency_propose", lambda *args, **kwargs: ("", False))
+    monkeypatch.setattr(agr, "_resolve_worldbook", lambda *args: "")
+    monkeypatch.setattr(agr, "_resolve_preset", lambda *args, **kwargs: ([], None, False, [], []))
     monkeypatch.setattr(ra, "recall_chronicle", lambda *args, **kwargs: "")
-    monkeypatch.setattr(ag, "_rag_recall_text", lambda *args: "")
+    monkeypatch.setattr(agr, "_rag_recall_text", lambda *args: "")
     monkeypatch.setattr(ag._llm, "chat_messages_stream", lambda *args, **kwargs: "<content>最终正文</content>")
     monkeypatch.setattr(
-        ag,
+        agr,
         "_agency_writeback",
         lambda *args: ("最终正文", [], {
             "prompt": "完整提示词", "motion": 1, "actors": ["Lyra"], "anchor": "",
@@ -3459,7 +3469,7 @@ def test_roleplay先交付正文与插画但维护完成后才结束Agent回合(
         maintenance_started.set()
         release_maintenance.wait(2)
 
-    monkeypatch.setattr(aag, "_agency_maintenance", slow_maintenance)  # 消费方 _agency_maintenance_async 已迁 agent_agency
+    monkeypatch.setattr(am, "_agency_maintenance", slow_maintenance)  # 消费方 _agency_maintenance_async 已迁 agency_maintenance
     ctx = _card_ctx(
         repo_id="work", thread_id="work", comfy_illustrate=True,
         stream_sink=emitted.append,
@@ -3786,6 +3796,32 @@ def test_answer_node_非用户停止的普通失败仍报回答失败(monkeypatc
     assert "502" in out["result_text"]
 
 
+def test_answer_node_首字未到也能立即停止(monkeypatch):
+    """2026-10-21 用户实锤：点停止后上游仍跑到 61.4s（网关记「客户端断开」，
+    $1.3031、输出 0）。取消检查此前只挂在 on_delta 回调里——中转缓冲式下发时
+    首字可能 40~80s 才到，那段时间停止信号无人消费。
+    锁：_chat_with_optional_stream 必须把 should_abort 接到流式层（无增量也能停）。
+    """
+    from app.services import roleplay_turn as rt
+
+    stop = threading.Event()
+    ctx = _ctx(repo_id="work", thread_id="work", cancel_event=stop,
+               chat_base="b", chat_key="k", chat_model="m")
+    seen: dict = {}
+
+    def fake_stream(base, key, model, messages, on_delta=None, should_abort=None, **_kw):
+        seen["should_abort"] = should_abort
+        assert should_abort is not None  # 接线：缺失即回到「只能等下一个 delta」
+        stop.set()                        # 用户在首字到达前点了停止
+        assert should_abort() is True
+        raise rt.RoleplayInterrupted("用户已停止生成")
+
+    monkeypatch.setattr(ag._llm, "chat_messages_stream", fake_stream)
+    out = ag.answer_node({"user_text": "你好", "images": [], "_ctx": ctx})
+    assert out.get("_interrupted") is True
+    assert seen["should_abort"] is not None
+
+
 # ── ② 纪要引用透出（2026-09-18）：召回引用行进 trace 列表 + 流式通道 ─────────
 
 def test_本轮引用行随roleplay_trace透出(monkeypatch, tmp_path):
@@ -3805,17 +3841,17 @@ def test_本轮引用行随roleplay_trace透出(monkeypatch, tmp_path):
             ])
         return "往事纪要候选"
 
-    monkeypatch.setattr(ag, "_agency_prelude", lambda ctx, text: (deps, 1, 0.0, ""))
-    monkeypatch.setattr(ag, "_agency_propose", lambda ctx, d, aff, wb, text="": ("", False))
-    monkeypatch.setattr(ag, "_agency_writeback",
+    monkeypatch.setattr(agr, "_agency_prelude", lambda ctx, text: (deps, 1, 0.0, ""))
+    monkeypatch.setattr(agr, "_agency_propose", lambda ctx, d, aff, wb, text="": ("", False))
+    monkeypatch.setattr(agr, "_agency_writeback",
                         lambda ctx, d, reply, turn, aff, lost: (reply, [], {}, {}))
-    monkeypatch.setattr(ag, "_resolve_preset", lambda ctx, wb, **k: ([], None, False, [], []))
-    monkeypatch.setattr(ag, "_resolve_worldbook", lambda ctx, q: "")
-    monkeypatch.setattr(ag, "_rag_recall_text",
+    monkeypatch.setattr(agr, "_resolve_preset", lambda ctx, wb, **k: ([], None, False, [], []))
+    monkeypatch.setattr(agr, "_resolve_worldbook", lambda ctx, q: "")
+    monkeypatch.setattr(agr, "_rag_recall_text",
                         lambda *a, **k: "- 知识条目甲\n- 知识条目乙")
-    monkeypatch.setattr(ag, "_table_recall_text", lambda *a, **k: "")
+    monkeypatch.setattr(agr, "_table_recall_text", lambda *a, **k: "")
     monkeypatch.setattr(ra, "recall_chronicle", fake_recall)
-    monkeypatch.setattr(aag, "_table_maintenance", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(am, "_table_maintenance", lambda *a, **k: None, raising=False)
     monkeypatch.setattr(ra, "maybe_illustrate", lambda *a, **k: None)
     monkeypatch.setattr(ra, "maybe_summarize", lambda *a, **k: None)
     monkeypatch.setattr(ra, "maybe_curate", lambda *a, **k: 0)
@@ -4111,7 +4147,7 @@ def test_第57刀_指定锚点与判据档同一条链且不重复调判据(monk
     anchor = "浑身无力的宥夏靠在公告栏上。"
     calls: list = []
     monkeypatch.setattr(
-        aag, "_illustration_anchor_intent",
+        asc, "_illustration_anchor_intent",
         lambda ctx, clean, sig: (calls.append(1), ("", {}))[1],
     )
 
@@ -4140,18 +4176,18 @@ def _stub_comfy_chain(monkeypatch) -> dict:
         return {"request_prompt": f"p:{anchor_override}", "plan_retargeted": False,
                 "requested_anchor": anchor_override, "motion": 7}
 
-    monkeypatch.setattr(aag, "_wb_comfy_scene_target", fake_target)
-    monkeypatch.setattr(aag, "_wb_comfy_scene_spec", lambda *a, **k: {"narrative": "n"})
-    monkeypatch.setattr(aag, "_wb_comfy_profile", lambda *a, **k: {"narrative": "n"})
+    monkeypatch.setattr(asc, "_wb_comfy_scene_target", fake_target)
+    monkeypatch.setattr(asc, "_wb_comfy_scene_spec", lambda *a, **k: {"narrative": "n"})
+    monkeypatch.setattr(asc, "_wb_comfy_profile", lambda *a, **k: {"narrative": "n"})
     monkeypatch.setattr(
-        aag, "_wb_comfy_illustrate_env",
+        asc, "_wb_comfy_illustrate_env",
         lambda ctx, plan, sig, target, spec, *, motion: {
             "prompt": target["request_prompt"], "anchor": target["requested_anchor"],
             "motion": motion,
         },
     )
     monkeypatch.setattr(
-        aag, "_wb_frames_and_video",
+        asc, "_wb_frames_and_video",
         lambda *a, **k: video.append(k.get("compile_video")),
     )
     return {"built": built, "video": video}
@@ -4304,7 +4340,7 @@ def _run_multi_writeback(monkeypatch, tmp_path, ctx, text=_MULTI_TEXT):
     monkeypatch.setattr(
         illustration_prompt_store, "effective_climax_anchor_rubric", lambda: "用户判据")
     monkeypatch.setattr(aag._llm, "chat", lambda *a, **k: _MULTI_ANCHOR_RAW)
-    monkeypatch.setattr(aag, "_wb_comfy_profile", lambda ctx, plan, spec, retargeted: spec)
+    monkeypatch.setattr(asc, "_wb_comfy_profile", lambda ctx, plan, spec, retargeted: spec)
 
     _, _, request, _audio = ag._agency_writeback(
         ctx, deps, text, turn=2, affinity=10.0, lost=False, user_text="继续",
@@ -4467,10 +4503,10 @@ def test_第57刀_多批的每一张都过画面事实筛分(monkeypatch):
     _stub_comfy_chain(monkeypatch)
     # ⚠ 必须在打桩**之后**再补记录，否则会被 `_stub_comfy_chain` 的桩覆盖掉
     monkeypatch.setattr(
-        aag, "_wb_first_person_frame_filter",
+        asc, "_wb_first_person_frame_filter",
         lambda ctx, scene: order.append("filter") or {},
     )
-    monkeypatch.setattr(aag, "_wb_comfy_profile", lambda *a, **k: order.append("profile") or {})
+    monkeypatch.setattr(asc, "_wb_comfy_profile", lambda *a, **k: order.append("profile") or {})
 
     ctx = {**_anchors(("甲处", 10), ("乙处", 90)), "illustration_batch_count": 9}
     aag._wb_comfy_extra_requests(
@@ -4486,7 +4522,7 @@ def test_第57刀_单张时不触发画面事实筛分(monkeypatch):
     """零回归锁：批量数目 < 2 ⇒ 提前短路 ⇒ 连筛分接缝都不该被调用。"""
     calls: list = []
     monkeypatch.setattr(
-        aag, "_wb_first_person_frame_filter", lambda ctx, scene: calls.append(1) or {},
+        asc, "_wb_first_person_frame_filter", lambda ctx, scene: calls.append(1) or {},
     )
     _stub_comfy_chain(monkeypatch)
 
@@ -4512,19 +4548,19 @@ def test_第57刀_仲裁后同位只出一张(monkeypatch):
         return {"request_prompt": "p", "plan_retargeted": False,
                 "requested_anchor": "同一段。", "motion": 7}
 
-    monkeypatch.setattr(aag, "_wb_comfy_scene_target", converged_target)
-    monkeypatch.setattr(aag, "_wb_comfy_scene_spec", lambda *a, **k: {"narrative": "n"})
+    monkeypatch.setattr(asc, "_wb_comfy_scene_target", converged_target)
+    monkeypatch.setattr(asc, "_wb_comfy_scene_spec", lambda *a, **k: {"narrative": "n"})
     monkeypatch.setattr(
-        aag, "_wb_first_person_frame_filter",
+        asc, "_wb_first_person_frame_filter",
         lambda ctx, scene: order.append("filter") or {},
     )
-    monkeypatch.setattr(aag, "_wb_comfy_profile", lambda *a, **k: order.append("profile") or {})
+    monkeypatch.setattr(asc, "_wb_comfy_profile", lambda *a, **k: order.append("profile") or {})
     monkeypatch.setattr(
-        aag, "_wb_comfy_illustrate_env",
+        asc, "_wb_comfy_illustrate_env",
         lambda ctx, plan, sig, target, spec, *, motion: {
             "prompt": "p", "anchor": target["requested_anchor"], "motion": motion},
     )
-    monkeypatch.setattr(aag, "_wb_frames_and_video", lambda *a, **k: None)
+    monkeypatch.setattr(asc, "_wb_frames_and_video", lambda *a, **k: None)
 
     text = "前文。\n\n同一段。\n\n后文。"
     ctx = {**_anchors(("甲处", 90), ("乙处", 50)), "illustration_batch_count": 9}
@@ -4562,7 +4598,7 @@ def _run_scene_target(monkeypatch, judge_result):
 
     intent = judge_result if isinstance(judge_result, tuple) else (judge_result, {})
     monkeypatch.setattr(
-        aag, "_illustration_anchor_intent",
+        asc, "_illustration_anchor_intent",
         lambda ctx, clean, sig: intent,
     )
     out = aag._wb_comfy_scene_target(
@@ -4598,7 +4634,7 @@ def _run_scene_target_on(monkeypatch, text, judge_result, **sig_over):
 
     intent = judge_result if isinstance(judge_result, tuple) else (judge_result, {})
     monkeypatch.setattr(
-        aag, "_illustration_anchor_intent",
+        asc, "_illustration_anchor_intent",
         lambda ctx, clean, sig: intent,
     )
     out = aag._wb_comfy_scene_target(
@@ -4648,9 +4684,9 @@ def test_初遇锚点不过仲裁机(monkeypatch):
 def _run_scene_target_arb(monkeypatch, judge_result, *, ctx=None, pool=None, **sig_over):
     """第 48 刀夹具：走「仲裁机必然推翻判据锚点」那条支路，且可注入 ctx / pool / 在场角色。"""
     intent = judge_result if isinstance(judge_result, tuple) else (judge_result, {})
-    monkeypatch.setattr(aag, "_illustration_anchor_intent", lambda _ctx, clean, sig: intent)
+    monkeypatch.setattr(asc, "_illustration_anchor_intent", lambda _ctx, clean, sig: intent)
     monkeypatch.setattr(
-        aag, "_resolve_illustration_request_actors", lambda *a, **k: ["甲", "乙"],
+        asc, "_resolve_illustration_request_actors", lambda *a, **k: ["甲", "乙"],
     )
     return aag._wb_comfy_scene_target(
         ctx or {}, "", {}, _ARB_TEXT,
@@ -4742,12 +4778,12 @@ def _run_scene_target_no_arb(monkeypatch, judge_result, *, ctx=None, pool=None,
     from app.services import scene_illustration as si
 
     intent = judge_result if isinstance(judge_result, tuple) else (judge_result, {})
-    monkeypatch.setattr(aag, "_illustration_anchor_intent", lambda _ctx, clean, sig: intent)
+    monkeypatch.setattr(asc, "_illustration_anchor_intent", lambda _ctx, clean, sig: intent)
     monkeypatch.setattr(
         si, "resolve_illustration_anchor", lambda _clean, anchor: anchor,
     )
     monkeypatch.setattr(
-        aag, "_resolve_illustration_request_actors",
+        asc, "_resolve_illustration_request_actors",
         lambda *a, **k: ["甲", "乙"] if actors is None else list(actors),
     )
     return aag._wb_comfy_scene_target(
@@ -4827,12 +4863,12 @@ def _run_scene_target_50(monkeypatch, judge_result, *, ctx=None, actors=None):
     from app.services import scene_illustration as si
 
     intent = judge_result if isinstance(judge_result, tuple) else (judge_result, {})
-    monkeypatch.setattr(aag, "_illustration_anchor_intent", lambda _ctx, clean, sig: intent)
+    monkeypatch.setattr(asc, "_illustration_anchor_intent", lambda _ctx, clean, sig: intent)
     monkeypatch.setattr(
         si, "resolve_illustration_anchor", lambda _clean, anchor: anchor,
     )
     monkeypatch.setattr(
-        aag, "_resolve_illustration_request_actors",
+        asc, "_resolve_illustration_request_actors",
         lambda *a, **k: ["甲", "乙"] if actors is None else list(actors),
     )
     return aag._wb_comfy_scene_target(
@@ -5017,7 +5053,7 @@ def test_缺块路径词表档用在场角色全集驱动扩窗(monkeypatch):
 def _run_scene_target_ctx(monkeypatch, text, judge_result, ctx, pool=None, **sig_over):
     """带 ctx 的 `_wb_comfy_scene_target` 夹具（手选人称 / 主人公性别都从 ctx 进）。"""
     intent = judge_result if isinstance(judge_result, tuple) else (judge_result, {})
-    monkeypatch.setattr(aag, "_illustration_anchor_intent", lambda ctx, clean, sig: intent)
+    monkeypatch.setattr(asc, "_illustration_anchor_intent", lambda ctx, clean, sig: intent)
     return aag._wb_comfy_scene_target(
         ctx, "", {}, text, _anchor_sig(visible_story=text, **sig_over),
         pool if pool is not None else _anchor_pool(),
@@ -5057,9 +5093,10 @@ def test_主人公性别注入到外观段(monkeypatch):
     （此时 `_viewpoint_clause` 已在说「叙事者不入画」）⇒ 注入＝自相矛盾的双口径。
     """
     text = "\n\n".join(["---", "甲站在窗前，望着雨幕。", "雨水顺着玻璃滑落。"])
-    monkeypatch.setattr(aag, "_repo_tables_for_facts", lambda ctx, repo_id: [
-        {"columns": ["姓名", "性别", "外貌特征"], "rows": [["甲", "男", "高大"]]},
-    ])
+    _fact_tables = [{"columns": ["姓名", "性别", "外貌特征"], "rows": [["甲", "男", "高大"]]}]
+    # 双消费方（2026-10-23 拆域后）：_protagonist_gender 在 aa、_wb_comfy_scene_target 在 asc
+    monkeypatch.setattr(aa, "_repo_tables_for_facts", lambda ctx, repo_id: _fact_tables)
+    monkeypatch.setattr(asc, "_repo_tables_for_facts", lambda ctx, repo_id: _fact_tables)
 
     # 第三人称（手选）⇒ 注入
     out = _run_scene_target_ctx(
@@ -5198,3 +5235,85 @@ def test_第66刀_告警已接进profile事件派发点():
     src = inspect.getsource(aag._wb_comfy_profile)
     assert '"illustration.profile"' in src
     assert "viewpoint_coverage_warning=" in src
+
+
+def test_采样额度不得与显式temperature重复传参():
+    """2026-10-20 实锤（用户「明明没点停止却显示已停止生成」）：
+
+    `RunContext._legacy()` 漏了 `preset_sampling` 键 ⇒ `_roleplay_sampling` 恒返回空
+    sampling ⇒ `roleplay_node` 里四处 `temperature=temp, **roleplay_sampling`
+    从不冲突（latent bug）。修好 `_legacy()` 后 sampling 带上 `temperature` ⇒
+    `TypeError: got multiple values for keyword argument 'temperature'` ⇒
+    整轮 roleplay 崩在发请求之前，`_roleplay_failure_result` 按中断语义收尾，
+    前端显示「已停止生成」。
+
+    回归锁两层：
+    ① 功能层——预设带 temperature 时，剔除后的 kwargs 与显式 temperature 可共存；
+    ② 结构层——源码里不得再出现「未过滤的 `**roleplay_sampling`」与 temperature 同现。
+    """
+    from app.services import agent_graph as _ag
+
+    ctx = _ctx(preset_sampling={"temperature": 1.0, "openai_max_tokens": 600000})
+    sampling = _ag._roleplay_sampling(ctx)
+    assert sampling.get("temperature") == 1.0, "预设 temperature 必须真的生效（否则本锁失效）"
+
+    kwargs = {k: v for k, v in sampling.items() if k != "temperature"}
+
+    def _accept(**kw):  # 模拟四处调用点的关键字展开
+        return kw
+
+    merged = _accept(temperature=0.9, **kwargs)
+    assert merged["temperature"] == 0.9, "显式 temperature 必须是最终生效值"
+    assert merged.get("max_tokens") == 604000
+
+    # 结构层：未过滤的 spread 一律不得出现
+    # 只扫 `roleplay_node` 本体（风险就在那几处调用点）；剥掉行内注释，
+    # 避免匹配到说明文字。
+    src = inspect.getsource(_ag.roleplay_node)
+    code = "\n".join(line.split("#", 1)[0] for line in src.splitlines())
+    import re as _re
+
+    hits = _re.findall(r"\*\*roleplay_sampling(?!_kwargs)", code)
+    assert not hits, f"仍有未过滤的 **roleplay_sampling（{len(hits)} 处）"
+
+
+def test_采样kwargs按接收方签名过滤_预设新增字段不会打挂整轮():
+    """2026-10-20 第二次实锤（同一症状复现）：
+
+    修完 `temperature` 重复传参后，用户仍看到「已停止生成」——这次是
+    `_chat_with_optional_stream() got an unexpected keyword argument 'top_k'`。
+    预设采样有 6 个字段（temperature/top_p/top_k/frequency_penalty/presence_penalty/
+    max_tokens），而 `_chat_with_optional_stream` 只认 temperature/top_p/max_tokens/
+    max_duration_seconds。**黑名单逐个剔永远追不上预设新增字段。**
+
+    回归锁：`_roleplay_sampling_kwargs` 必须按**接收方真实签名**白名单过滤，
+    且必须包含 `top_k`/`frequency_penalty`/`presence_penalty` 这些"会炸"的键在表外。
+    """
+    from app.services import agent_graph as _ag
+    from app.services.agent_request_context import from_payload
+
+    accepted = _ag._stream_sampling_keys()
+    for dangerous in ("top_k", "frequency_penalty", "presence_penalty"):
+        assert dangerous not in accepted, f"{dangerous} 不应直接透传给流式调用"
+
+    ctx = from_payload({
+        "preset_sampling": {
+            "temperature": 1.0, "top_p": 0.98, "top_k": 50,
+            "frequency_penalty": 0.0, "presence_penalty": 0.0,
+            "openai_max_tokens": 600000,
+        },
+        "model": "claude-opus-4-8",
+    })
+    kwargs = _ag._roleplay_sampling_kwargs(ctx)
+
+    # 能过去的只有接收方认识的 + temperature 已剔除
+    assert sorted(kwargs) == ["max_tokens", "top_p"]
+    assert kwargs["max_tokens"] == 604000
+    assert kwargs["top_p"] == 0.98
+
+    # 与调用点的显式 temperature 共存，不重复
+    def _accept(**kw):
+        return kw
+
+    merged = _accept(temperature=0.9, **kwargs)
+    assert merged["temperature"] == 0.9

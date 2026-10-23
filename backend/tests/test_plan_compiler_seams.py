@@ -27,6 +27,7 @@ import itertools
 import re
 
 from app.services import agent_graph as ag
+from app.services import agent_graph_plan as agp  # plan 域新属主（2026-10-23 方案 B 再拆）
 from app.services import plan_compiler as pm
 
 
@@ -178,7 +179,7 @@ def test_拆解接缝齐备且同属主():
     for name in _SEAMS:
         fn = getattr(ag, name, None)
         assert callable(fn), f"接缝缺失：{name}"
-        assert inspect.getsourcefile(fn) == ag.__file__, f"{name} 不在 agent_graph 属主内"
+        assert inspect.getsourcefile(fn) == agp.__file__, f"{name} 不在 agent_graph_plan 属主内"
 
 
 def test_plan_compiler主函数已降到目标行数():

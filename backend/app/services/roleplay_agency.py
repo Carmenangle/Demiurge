@@ -225,6 +225,11 @@ class AgencyDeps:
     gate_base_rate: float = builtin_agents.GATE_BASE_RATE
     affinities: dict[str, float] = field(default_factory=dict)
     state_context: str = ""
+    # 2026-10-21 世界事件司门：event 提案开关与可登门来源清单（由 agent_graph 从当前
+    # 仓库世界书快照机械提取；清单为空 ⇒ 事件提案降级关闭，只保留 npc/user_action）。
+    events_enabled: bool = True
+    event_names: tuple[str, ...] = ()
+    event_sources: tuple[str, ...] = ()
     # ③ 条目维护 Agent（curator）：默认每轮启用；剧情后 LLM 抽新知识 → index_fn 写库（只增不改）。
     curator_system: str = builtin_agents.CURATOR_SYSTEM
     curator_temperature: float = builtin_agents.CURATOR_TEMPERATURE
@@ -362,6 +367,53 @@ def parse_state_block(reply: str) -> tuple[str, list[Any]]:
 _WORLD_SYSTEM = builtin_agents.WORLD_SYSTEM
 
 
+def _event_catalog_text(deps: AgencyDeps) -> str:
+    """世界 Agent 的事件来源清单（只给名字/条目名，不给全文——成本闸）。
+
+    清单为空 ⇒ 返回空串：世界 Agent 只做 NPC 行动与用户行动裁定，不伪造事件来源。
+    """
+    if not deps.event_names and not deps.event_sources:
+        return ""
+    parts = []
+    if deps.event_names:
+        parts.append("【可登门角色清单（who 只能从中选，不得自创）】\n"
+                     + "\n".join(f"- {name}" for name in deps.event_names))
+    if deps.event_sources:
+        parts.append("【可用事件锚点（source 必须逐字引用条目名或编号）】\n"
+                     + "\n".join(f"- {source}" for source in deps.event_sources))
+    return "\n\n" + "\n\n".join(parts)
+
+
+def _name_hit(name: str, names: tuple[str, ...]) -> bool:
+    """角色名命中白名单：双向包含且至少 2 字，避免「腓特烈」vs「腓特烈大帝」被误驳。"""
+    probe = (name or "").strip()
+    if not probe:
+        return False
+    for item in names:
+        candidate = (item or "").strip()
+        if not candidate:
+            continue
+        if (len(probe) >= 2 and probe in candidate) or (len(candidate) >= 2 and candidate in probe):
+            return True
+    return False
+
+
+def _event_source_hit(source: str, sources: tuple[str, ...]) -> bool:
+    """事件来源命中：source 包含某条目名，或包含该条目名里的编号（如 E3）。"""
+    probe = (source or "").strip()
+    if not probe:
+        return False
+    for entry in sources:
+        if not entry:
+            continue
+        if entry in probe:
+            return True
+        for token in re.findall(r"[A-Za-z]+\d+|\d+", entry):
+            if len(token) >= 2 and token in probe:
+                return True
+    return False
+
+
 def consult_world(
     deps: AgencyDeps, *, chat_base: str, chat_key: str, chat_model: str,
     core: str, scene: str, affinity: float | None, proxy: str = "",
@@ -369,6 +421,8 @@ def consult_world(
     """门控通过时唤起世界 Agent 提案并逐条机械仲裁；否则返回空（塌回单次 LLM）。
 
     affinity 是兼容旧单角色状态的好感度快照；多角色优先用 deps.affinities。失败/空提案/门控关返回 []。
+    2026-10-21：提案分 npc / event / user_action 三类；event 的 who/source 必须命中当前
+    世界书来源清单（机械校验，防凭空造人），events_enabled=False 或清单为空时事件降级关闭。
     """
     if not core.strip() or not scene.strip():
         _trace(deps, "agent.skipped", agent="world", reason="missing_context")
@@ -384,7 +438,8 @@ def consult_world(
     try:
         state = f"\n\n【当前动态状态】\n{deps.state_context}" if deps.state_context.strip() else ""
         user = (f"【在场角色 core】\n{core}{state}\n\n【当前场景】\n{scene}\n\n"
-                f"【角色好感度】{json.dumps(gate_affinities, ensure_ascii=False)}")
+                f"【角色好感度】{json.dumps(gate_affinities, ensure_ascii=False)}"
+                f"{_event_catalog_text(deps)}")
         _trace(deps, "agent.started", agent="world")
         _trace(deps, "model.request", agent="world", model=chat_model,
                messages=[{"role": "system", "content": deps.world_system},
@@ -404,15 +459,48 @@ def consult_world(
     for item in data if isinstance(data, list) else []:
         if not isinstance(item, dict):
             continue
+        kind = str(item.get("kind") or "npc").strip().lower()
+        if kind not in {"npc", "event", "user_action"}:
+            kind = "npc"
+        raw_event = item.get("event")
+        event: dict[str, Any] = raw_event if isinstance(raw_event, dict) else {}
+        if kind == "event":
+            if not deps.events_enabled:
+                _trace(deps, "world.rejected", kind="event", reason="events_disabled")
+                continue
+            if not deps.event_names and not deps.event_sources:
+                _trace(deps, "world.rejected", kind="event", reason="no_worldbook_sources")
+                continue
+            who = str(item.get("who") or event.get("who") or "").strip()
+            source = str(item.get("source") or event.get("source") or "").strip()
+            if not (who or source):
+                _trace(deps, "world.rejected", kind="event", reason="source_not_found")
+                continue
+            if who and deps.event_names and not _name_hit(who, deps.event_names):
+                _trace(deps, "world.rejected", kind="event", who=who, reason="source_not_found")
+                continue
+            if source and deps.event_sources and not _event_source_hit(source, deps.event_sources):
+                _trace(deps, "world.rejected", kind="event", source=source,
+                       reason="source_not_found")
+                continue
         prop = agency.Proposal(
-            actor=str(item.get("actor") or "").strip(),
+            actor=("用户" if kind == "user_action" else
+                   str(item.get("actor") or event.get("who") or "世界").strip()),
             intent=str(item.get("intent") or "").strip(),
             difficulty=int(item.get("difficulty") or 50),
-            min_affinity=float(item.get("min_affinity") or 0),
+            min_affinity=0.0 if kind != "npc" else float(item.get("min_affinity") or 0),
             basis=str(item.get("basis") or "").strip(),
             goal=str(item.get("goal") or "").strip(),
+            kind=kind,
+            who=str(item.get("who") or event.get("who") or "").strip(),
+            source=str(item.get("source") or event.get("source") or "").strip(),
+            timing=str(item.get("timing") or event.get("timing") or "").strip(),
+            stakes=str(item.get("stakes") or event.get("stakes") or "").strip(),
         )
-        actor_affinity = deps.affinities.get(prop.actor, fallback_affinity)
+        if kind == "npc":
+            actor_affinity = deps.affinities.get(prop.actor, fallback_affinity)
+        else:
+            actor_affinity = 0.0
         verdicts.append(agency.judge(prop, actor_affinity, rng=deps.rng))
     _trace(deps, "agent.completed", agent="world", proposal_count=len(verdicts),
            verdicts=[vars(v) for v in verdicts])
@@ -420,31 +508,64 @@ def consult_world(
 
 
 def narrative_directive(verdicts: list[agency.Verdict]) -> str:
-    """把有效自主尝试转成主叙事指令；成功落实，失败也必须呈现为未遂。
+    """把有效自主尝试/事件/用户行动裁定转成主叙事指令。
 
+    三段固定顺序：世界事件（登门/余波）→ NPC 自主目标与行动 → 用户行动裁定。
+    成功落实、失败必须呈现为未遂；空段不出，整段为空时返回空串。
     intent 由 judge 从 Proposal 复制到 Verdict，此处直接取用；空 intent 落「自主行动」兜底。
     """
-    attempted = [v for v in verdicts if v.roll > 0 and v.intent]
+    attempted = [v for v in verdicts if v.roll > 0]
     if not attempted:
         return ""
-    lines = []
-    for verdict in attempted:
-        intent = verdict.intent or "自主行动"
-        goal = f"；持续目标：{verdict.goal}" if verdict.goal else ""
-        if verdict.outcome == agency.OUTCOME_ACCEPT:
-            result = f"按{agency.DEGREE_LABEL[verdict.degree]}落实"
-        else:
-            result = f"已尝试但按{agency.DEGREE_LABEL[verdict.degree]}处理，必须写成未遂或受挫"
-        lines.append(f"- {verdict.actor}：{intent}{goal}；{result}")
-    return ("\n\n【本轮 NPC 自主目标与行动（不由用户驱动，必须在本轮叙事中体现）】\n"
-            + "\n".join(lines))
+    sections: list[str] = []
+    events = [v for v in attempted if v.kind == "event"]
+    if events:
+        lines = []
+        for verdict in events:
+            who = verdict.who or verdict.actor or "世界"
+            extras = [f"{label}：{value}" for label, value in (
+                ("来源", verdict.source), ("时机", verdict.timing), ("不应对的后果", verdict.stakes),
+            ) if value]
+            detail = f"（{'；'.join(extras)}）" if extras else ""
+            if verdict.outcome == agency.OUTCOME_ACCEPT:
+                result = f"按{agency.DEGREE_LABEL[verdict.degree]}登门落实"
+            else:
+                result = (f"按{agency.DEGREE_LABEL[verdict.degree]}处理："
+                          "只以预兆/余波出现，不得静默消失")
+            lines.append(f"- {who}：{verdict.intent or '事件登门'}{detail}；{result}")
+        sections.append("【本轮世界事件（必须在本轮正文体现）】\n" + "\n".join(lines))
+    npcs = [v for v in attempted if v.kind == "npc" and v.intent]
+    if npcs:
+        lines = []
+        for verdict in npcs:
+            intent = verdict.intent or "自主行动"
+            goal = f"；持续目标：{verdict.goal}" if verdict.goal else ""
+            if verdict.outcome == agency.OUTCOME_ACCEPT:
+                result = f"按{agency.DEGREE_LABEL[verdict.degree]}落实"
+            else:
+                result = f"已尝试但按{agency.DEGREE_LABEL[verdict.degree]}处理，必须写成未遂或受挫"
+            lines.append(f"- {verdict.actor}：{intent}{goal}；{result}")
+        sections.append("【本轮 NPC 自主目标与行动（不由用户驱动，必须在本轮叙事中体现）】\n"
+                        + "\n".join(lines))
+    users = [v for v in attempted if v.kind == "user_action" and v.intent]
+    if users:
+        lines = []
+        for verdict in users:
+            if verdict.outcome == agency.OUTCOME_ACCEPT:
+                result = f"按{agency.DEGREE_LABEL[verdict.degree]}裁定用户达成"
+            else:
+                result = (f"按{agency.DEGREE_LABEL[verdict.degree]}裁定为未遂/受挫，"
+                          "禁止写成变相成功")
+            lines.append(f"- 用户意图：{verdict.intent}；{result}")
+        sections.append("【本轮用户行动裁定（成败已定，不得单方面改写）】\n" + "\n".join(lines))
+    return "\n\n".join(sections)
 
 
 def agency_lost(verdicts: list[agency.Verdict]) -> bool:
     """是否有配角强得手（大成功/极难/困难成功）→ 用户短期失控，插画阶段当高潮点。
     普通成功(partial)只算基本达成，不触发失控。"""
     strong = {agency.DEGREE_CRIT, agency.DEGREE_HARD, agency.DEGREE_FULL}
-    return any(v.outcome == agency.OUTCOME_ACCEPT and v.degree in strong
+    return any(v.kind == "npc" and v.outcome == agency.OUTCOME_ACCEPT and v.degree in strong
               for v in verdicts)
 
 

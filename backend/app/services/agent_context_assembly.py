@@ -5,6 +5,7 @@
 """
 
 from __future__ import annotations
+from app.services.agent_contracts import CtxLike
 import logging
 import re
 import time
@@ -39,7 +40,7 @@ def _resolve_skills(agent_cfg: dict | None) -> list[str]:
         return []
 
 
-def _render_user_persona(ctx: dict) -> str:
+def _render_user_persona(ctx: CtxLike) -> str:
     """无预设扮演时组装用户人设片段（有预设走 personaDescription marker，不重复注入）。
     名+描述任一非空即渲染，让角色知道'用户是谁'。"""
     name = (ctx.get("user_name") or "").strip()
@@ -58,7 +59,7 @@ def _bound_card_names(ctx: dict) -> list[str]:
     return list(dict.fromkeys(names))
 
 
-def _recent_character_context(ctx: dict) -> str:
+def _recent_character_context(ctx: CtxLike) -> str:
     """角色回退只看最近一条 AI 剧情，避免更早楼层角色持续滞留。"""
     for item in reversed(ctx.get("history") or []):
         if item.get("role") != "assistant":
@@ -167,7 +168,7 @@ def _resolve_persona(character_dir: str, card_name: str) -> str:
 
 
 def _resolve_personas(
-    ctx: dict, query: str = "", *, opening_only: bool = False, fallback_query: str = "",
+    ctx: CtxLike, query: str = "", *, opening_only: bool = False, fallback_query: str = "",
     worldbook_names: list[str] | None = None,
 ) -> str:
     """只注入本轮出场角色的非空 description；首轮固定为开场卡。"""
@@ -230,7 +231,7 @@ def _resolve_personas(
     return selection + "\n\n" + "\n\n".join(profiles)
 
 
-def _profile_llm_fallback(ctx: dict, scene_spec: dict[str, Any]) -> tuple[str, str]:
+def _profile_llm_fallback(ctx: CtxLike, scene_spec: dict[str, Any]) -> tuple[str, str]:
     """同轮成稿被清空（锚点重定向且无存活视觉事实）时，补一次携带当前防拦截预设的
     LLM 调用，按纠正后正文重写图像 Profile（Krea2 英文画面）。
 
@@ -301,6 +302,11 @@ def _profile_llm_fallback(ctx: dict, scene_spec: dict[str, Any]) -> tuple[str, s
     try:
         compiled = image_prompt_profiles.generate(
             profile, scene_spec, _generate, diagnostics,
+            # ⚠ 2026-10-20 回退：曾在此传 allow_repair=False 省掉一次 LLM 往返（实测 93.5s→约58s），
+            # 但 `docs/tech-manual/A-roleplay-illustration/03-backend-illustration-pipeline.md:343-345`
+            # 记着 **2026-09-01 用户确认**：单次不重写会让提示词**明显简略**，必须保留这一次带因重写。
+            # 用户同期口径也是「只要结果是好的就没问题」⇒ 质量优先，不砍这一轮。
+            allow_repair=True,
         )
     except Exception as exc:  # noqa: BLE001
         # 插桩（2026-09-18）：此前只记 status=error，全量 trace 里 700+ 条 error
@@ -318,6 +324,13 @@ def _profile_llm_fallback(ctx: dict, scene_spec: dict[str, Any]) -> tuple[str, s
             ctx, "illustration.profile_llm_fallback", status="empty",
             profile=profile, strategy=diagnostics.get("strategy"),
             elapsed_seconds=round(time.monotonic() - started_at, 1),
+            # 2026-10-19 补口：`ok` 分支本来就记这三项，`empty` 分支却没记 ⇒
+            # 「模型拒答」与「清洗剥离后为空」在 empty 里分不出来（今天那次 93.5s 的 empty
+            # 就无法判断是不是安全层拦截）。三者组合可判定拦截发生在哪一环。
+            first_raw_chars=diagnostics.get("first_raw_chars"),
+            first_empty=diagnostics.get("first_empty"),
+            first_refusal=diagnostics.get("first_refusal"),
+            repair_raw_chars=diagnostics.get("repair_raw_chars"),
         )
         return "", ""
     strategy = str(diagnostics.get("strategy") or "llm_retargeted")
@@ -355,7 +368,7 @@ def _profile_llm_fallback(ctx: dict, scene_spec: dict[str, Any]) -> tuple[str, s
     return compiled, final_strategy
 
 
-def _card_visual_profiles(ctx: dict, query: str) -> str:
+def _card_visual_profiles(ctx: CtxLike, query: str) -> str:
     """角色卡模式的生图外貌真源；只读取本轮出现的绑定卡，未命中时回退开场卡。"""
     names = _bound_card_names(ctx)
     selected = [name for name in names if name in query]
@@ -377,7 +390,7 @@ def _card_visual_profiles(ctx: dict, query: str) -> str:
     return "\n".join(profiles)
 
 
-def _illustration_appearance(ctx: dict) -> str:
+def _illustration_appearance(ctx: CtxLike) -> str:
     selected = str(ctx.get("_illustration_visual_profiles") or "").strip()
     if ctx.get("appearance_source") in {"worldbook", "character_card"}:
         return selected
@@ -412,7 +425,7 @@ def _worldbook_session_key(ctx: dict) -> str:
     return "|".join(part for part in parts if part)
 
 
-def _resolve_worldbook(ctx: dict, query: str) -> str:
+def _resolve_worldbook(ctx: CtxLike, query: str) -> str:
     """卡内嵌世界书：constant 常驻 + 非常驻按当前上下文语义检索，组装注入文本。
 
     查询用「最近历史 + 本轮输入」以贴合当前剧情。无卡/无书/读不到 → 空串。
@@ -448,9 +461,18 @@ def _resolve_worldbook(ctx: dict, query: str) -> str:
 
         worldbook.schedule_index(
             ctx.get("repo_id", ""), entries, cfg, on_initial=notify_initial_index,
+            on_backfill=_worldbook_metadata_backfill(ctx, entries),
         )
         scan = _worldbook_scan_text(ctx, query)
         ctx["_worldbook_scan_chars"] = len(scan)
+        # P1 绿灯决策（2026-10-22，对标 ST SP·数据库）：候选=白名单池元数据（不给正文），
+        # 决策上下文=最近 2 条消息**全文**（宽于检索 scan 的尾 1800 字）。选中条目经
+        # recall_override **替换召回轨**（BM25 退场）；keyword 点名与 constant 仍保底。
+        # ran 且无 error ⇒ 用绿灯结果（选空也压制 BM25，同 A/B 语义）；否则退回 BM25。
+        greenlight = _worldbook_greenlight(ctx, entries, query)
+        recall_override = (
+            greenlight.positions if greenlight.ran and not greenlight.error else None
+        )
         # 会话内稳定序列（2026-09-12）：条目按首次激活顺序单调追加 → 注入文本跨轮只增不改，
         # 上游前缀缓存才能命中（重排版每轮整块换序，位于其后的历史与尾部合同全部作废）。
         # 取不到会话键时退回无状态的重排版，行为与改动前一致。
@@ -459,10 +481,16 @@ def _resolve_worldbook(ctx: dict, query: str) -> str:
             worldbook.assemble_selection_stable(
                 ctx.get("repo_id", ""), entries, scan, cfg, session_key=session_key,
                 state_path=_worldbook_session_state_path(ctx) or None,
+                recall_override=recall_override,
             )
             if session_key
             else worldbook.assemble_selection(ctx.get("repo_id", ""), entries, scan, cfg)
         )
+        if getattr(selection, "retired", None):
+            # 锚点退役（2026-10-22）：旧弧线锚点连续 N 轮未命中被移出稳定序列（前缀收缩一次）。
+            run_trace.emit(ctx, "worldbook.anchor_retired",
+                           count=len(selection.retired),
+                           identities=[i[:40] for i in selection.retired[:10]])
         ctx["_selected_worldbook_indices"] = selection.indices
         ctx["_worldbook_dropped"] = selection.dropped
         current_keyword_indices = set(worldbook.keyword_match_indices(entries, query))
@@ -492,6 +520,58 @@ def _resolve_worldbook(ctx: dict, query: str) -> str:
         return selection.text
     except Exception:  # noqa: BLE001
         return ""
+
+
+def _worldbook_greenlight(ctx: dict, entries: list, query: str):
+    """P1 每轮绿灯决策（失败/未配置不抛，由调用方判 ran/error 决定是否退回 BM25）。"""
+    from app.services import worldbook_greenlight
+    try:
+        result = worldbook_greenlight.greenlight_select(
+            entries, ctx.get("history") or [], query,
+            base_url=ctx.get("chat_base", ""), api_key=ctx.get("chat_key", ""),
+            model=ctx.get("chat_model", ""),
+        )
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 决策链任何意外都不得阻断世界书组装
+        return worldbook_greenlight.GreenlightResult(error=f"greenlight 异常：{exc}"[:200])
+    if result.ran or result.error:
+        run_trace.emit(
+            ctx, "worldbook.greenlight",
+            picks=len(result.positions), dropped=result.dropped, chars=result.chars,
+            error=result.error[:120], recursion=len(result.recursion),
+            topped_up=len(result.topped_up),
+            entries=[entries[p].comment[:24] for p in result.positions[:12]
+                     if 0 <= p < len(entries)],
+        )
+    return result
+
+
+def _worldbook_metadata_backfill(ctx: dict, entries: list):
+    """P1 元数据兜底闭包（挂 schedule_index 后台线程）：缺/过期元数据 ⇒ 补生成写回快照。
+
+    返回 None 表示不挂（无 output_dir/repo_id）；有则返回闭包。闭包内部对
+    「快照文件不存在/缺凭证/无需补」全部安全短路，绝不抛。
+    """
+    from app.services import worldbook_greenlight, worldbook_store
+    output_dir = ctx.get("output_dir") or ""
+    repo_id = ctx.get("repo_id") or ""
+    if not (output_dir and repo_id):
+        return None
+    path = worldbook_store.repo_snapshot_path(output_dir, repo_id)
+    base_url = ctx.get("chat_base", "") or ""
+    api_key = ctx.get("chat_key", "") or ""
+    model = ctx.get("chat_model", "") or ""
+
+    def _run() -> None:
+        try:
+            if not path.is_file():
+                return
+            worldbook_greenlight.backfill_repo_metadata(
+                path, entries, base_url=base_url, api_key=api_key, model=model,
+            )
+        except Exception as exc:  # noqa: BLE001 [EXC-留痕] 兜底链任何意外都不得影响索引线程
+            _LOG.warning("世界书元数据兜底闭包失败：%s", exc)
+
+    return _run
 
 
 def _worldbook_scan_text(ctx: dict, query: str, *, history_chars: int = 1800) -> str:
@@ -605,7 +685,7 @@ def _curator_worldbook_context(ctx: dict, repo_id: str) -> str:
     return worldbook_store.repo_snapshot_context(ctx.get("output_dir") or "", repo_id)
 
 
-def _curator_worldbook_context_fn(ctx: dict, repo_id: str):
+def _curator_worldbook_context_fn(ctx: CtxLike, repo_id: str):
     from app.services import worldbook_store
     base = ctx.get("output_dir") or ""
     if not (base and repo_id and _repo_worldbook(ctx)):
@@ -624,7 +704,7 @@ def _curator_worldbook_context_fn(ctx: dict, repo_id: str):
     return context
 
 
-def _curator_worldbook_fn(ctx: dict, repo_id: str):
+def _curator_worldbook_fn(ctx: CtxLike, repo_id: str):
     from app.services import worldbook_store
     base = ctx.get("output_dir") or ""
     if not (base and repo_id and _repo_worldbook(ctx)):
@@ -695,7 +775,7 @@ def _resolve_regex_scripts(ctx: dict) -> list:
     return scripts
 
 
-def _apply_regex(ctx: dict, text: str, placement: int, *,
+def _apply_regex(ctx: CtxLike, text: str, placement: int, *,
                  is_prompt: bool = False, depth: int | None = 0,
                  skip_depth_gated: bool = False) -> str:
     """在指定 placement 上跑后端侧正则（存储/发送档，不含 markdownOnly 显示档——那在前端）。
@@ -719,7 +799,7 @@ def _apply_regex(ctx: dict, text: str, placement: int, *,
         return text
 
 
-def _history_messages(ctx: dict) -> list[dict]:
+def _history_messages(ctx: CtxLike) -> list[dict]:
     """把 ctx.history 转成真实的多轮消息（保留 user/assistant role），供 chat_messages 用。
     替代旧的 history_text 折叠——历史作真实对话轮出现，模型更好衔接、role 不被抹平。"""
     out: list[dict] = []
@@ -731,7 +811,7 @@ def _history_messages(ctx: dict) -> list[dict]:
 
 
 def _resolve_preset(
-    ctx: dict, worldbook_text: str, *, scene: str = "", affinity: float | None = None, turn: int = 0,
+    ctx: CtxLike, worldbook_text: str, *, scene: str = "", affinity: float | None = None, turn: int = 0,
     history: list[dict] | None = None,
 ) -> tuple[list[dict], float | None, bool, list[str], list[str]]:
     """有激活偏置预设 → 组装带 role 的多条消息 + 采样温度 + 是否含历史 marker + 命中的思维链(尾/头)。
@@ -818,7 +898,7 @@ def _has_mcp(agent_cfg: dict | None) -> bool:
         return False
 
 
-def _agent_system(ctx: dict, base: str) -> str:
+def _agent_system(ctx: CtxLike, base: str) -> str:
     """按预设/风格/技能拼 system_prompt（与单 agent _build 对齐）：
     自定义预设的 systemPrompt 完全替换人设，memory 作长期记忆，风格模板+技能追加。"""
     cfg = ctx.get("agent_cfg")
@@ -838,7 +918,7 @@ def _agent_system(ctx: dict, base: str) -> str:
     return sp
 
 
-def _temperature(ctx: dict, default: float) -> float:
+def _temperature(ctx: CtxLike, default: float) -> float:
     cfg = ctx.get("agent_cfg")
     if cfg and isinstance(cfg.get("temperature"), (int, float)):
         return cfg["temperature"]

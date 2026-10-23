@@ -1617,6 +1617,36 @@ def test_首次生成4xx确定性错误判死不重掷():
     assert calls == ["generate"]  # 无任何自愈重掷
 
 
+def test_首发断流_已收思考进入预填续写而非整段重掷():
+    """2026-10-20 真机（turn f77e68b1）：首发流中途 ReadTimeout，异常里带着已收的
+    1304 字思考。此前 `_selfheal_loop(..., "", ...)` 把这 1304 字全判死，每轮从头
+    重掷（thinking 745→972→1184→1304 反复重写，正文 0 字）。
+    现在必须走「思考断点续写」：残缺输出以 assistant 预填回喂，已付费篇幅不作废。
+    """
+    from app.services import llm as _llm_mod
+
+    calls: list = []
+    partial = "<think>" + "推演" * 450  # think 开而未闭，远超 800 字下限
+    continuation = "</think>\n<content>" + "正文续写" * 120 + "。</content>"
+
+    def generate():
+        calls.append("generate")
+        raise _llm_mod.StreamInterrupted(
+            "调用对话模型失败：The read operation timed out", partial)
+
+    def continue_generate(value):
+        calls.append(("continue", value))
+        return continuation
+
+    result = _run_turn(_Hooks(generate, lambda _reply: None, continue_generate))
+    assert calls[0] == "generate"
+    assert calls[1][0] == "continue"
+    assert calls[1][1] == partial            # 预填的是原始残缺输出（含未闭合 think）
+    assert partial in result["result_text"]  # 已生成的思考保留在最终正文里
+    # 关键回归：只花这 2 次调用——不再有第二次整段重掷（此前是 4 次全量重跑）
+    assert len(calls) == 2
+
+
 def test_自愈重掷触发4xx确定性错误立即判死():
     """首发截断入自愈后，重掷若遇 4xx 也应立即停止，不把剩余自愈预算烧完。"""
     calls: list = []
@@ -2167,3 +2197,76 @@ def test_第57刀_extra_requests里的脏项被忽略():
         {"甲处。": 10, "乙处。": 40},
     )
     assert [rec["prompt"] for rec in result["illustrate_recs"]] == ["主图", "副1"]
+
+
+
+def test_自愈全败_有可见正文则非致命发布并裁掉末尾半句():
+    """2026-10-20 用户定案（非致命）：自愈全败不再上抛判死，按当前已生成正文发布。
+    用户口径：「用户的产出是要保留的」——三次调用的钱已经花了，判死等于字和图都没有
+    （整轮失败时插画链路根本不跑）。同 2026-09-21 剧情完整度闸
+    「已付费正文绝不作废，补不动按当前正文发布」。
+
+    同时钉死四件事：
+      ① 发布的是**可见正文最多**那一版（首轮），不是末版「（无回复）」；
+      ② 末尾半句被**裁掉**（`truncate_to_sentence_boundary`，与重试拼接前同款）；
+      ③ `<content>` 开而未闭被**自动补闭合**（`_autoclose_content`）；
+      ④ 插画/状态表链路照常走（用户定案「不跳过插画」「状态表照常更新」）。
+    """
+    from app.services import llm as _llm_mod
+
+    first = "<think>内部推演" + "</think>\n<content>" + "他抬起手。" * 120 + "她刚要开口"
+    reroll = "<think>" + "推演" * 2100
+    calls: list = []
+
+    def generate():
+        calls.append(len(calls))
+        if calls[-1] == 0:
+            raise _llm_mod.StreamInterrupted("The read operation timed out", first)
+        if calls[-1] == 1:
+            return reroll
+        return ""
+
+    result = _run_turn(_Hooks(generate, lambda _reply: None, None))
+    text = result["result_text"]
+    assert "他抬起手。" in text
+    assert "（无回复）" not in text
+    assert "她刚要开口" not in text
+    assert "</content>" in text
+    assert text.rstrip().endswith("</content>") or text.rstrip().endswith("。")
+
+
+def test_自愈全败_可见正文不足200字仍判死():
+    """门槛与 `_resume_interrupted_messages` / `_persist_interrupted_partial` 同源（200 字）：
+    残句太短没有发布价值，发布出去用户只看到一个几乎空的气泡 ⇒ 仍按判死处理，
+    让用户重点「重新生成」。同时守住 2026-08-30 用户定的
+    「正文一旦生成完成，绝不会被残缺内容顶替」——零/极短正文时 writeback/publish 不许跑。
+    """
+    import pytest
+    from app.services import llm as _llm_mod
+
+    short = "<think>内部推演" + "</think>\n<content>只有一句半。"
+    order: list[str] = []
+
+    def generate():
+        raise _llm_mod.StreamInterrupted("The read operation timed out", short)
+
+    hooks = roleplay_turn.TurnExecutionHooks(
+        generate=generate,
+        generated=lambda _reply: order.append("generated"),
+        finalization=roleplay_turn.TurnFinalizationHooks(
+            writeback=lambda item, events: order.append("writeback") or (item.reply, [], {}, {}),
+            apply_output=lambda value: value,
+            anchor_offset=lambda reply, request: None,
+            emit_ready=lambda ctx, result: order.append("publish") or True,
+            maintain=lambda item, reply, events: order.append("maintain"),
+        ),
+    )
+    with pytest.raises(roleplay_turn.TruncatedRoleplayOutput):
+        roleplay_turn.execute_turn(
+            roleplay_turn.TurnExecution(
+                ctx={}, text="输入", trace=[], streamed=False,
+                deps=None, turn=1, affinity=None, lost=False,
+            ),
+            hooks,
+        )
+    assert "writeback" not in order

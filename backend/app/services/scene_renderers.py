@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Any, Callable
 from urllib.parse import urlencode
 
 from app.services import comfyui_client, image_gen, workflow_submission
@@ -69,7 +69,9 @@ def cloud_renderer(cfg: CloudConfig) -> Renderer:
     """
     def render(req: SceneRequest) -> str:
         base_image = _pick_base_image(cfg, list(req.actors))
-        proxy_kw = {"proxy": cfg.proxy} if cfg.proxy else {}
+        # 显式标 Any：mypy 会把 `**dict[str, str]` 逐参数展开校验，误报「可能把 str
+        # 喂给 generate 的 cancel_event: Event | None」。运行期这里只承载 proxy 一项。
+        proxy_kw: dict[str, Any] = {"proxy": cfg.proxy} if cfg.proxy else {}
         if base_image:
             return image_gen.generate_with_images(
                 cfg.base_url, cfg.api_key, cfg.model, req.prompt,

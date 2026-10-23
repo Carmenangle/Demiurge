@@ -707,3 +707,101 @@ def test_状态更新中文标签解析不受影响():
 
     assert "状态更新" not in clean
     assert deltas and deltas[0]["value"] == 3
+
+
+# ── 2026-10-21 世界事件司门：event / user_action 提案与三段 directive ──
+
+def _event_deps(tmp_path, proposal_json, *, seed=1, **kw):
+    return ra.AgencyDeps(
+        chat_fn=lambda *a, **k: proposal_json, rng=random.Random(seed),
+        state_base=str(tmp_path), gate_base_rate=1.0, **kw)
+
+
+def test_事件提案进世界事件段且来源可追溯(tmp_path):
+    proposal_json = (
+        '[{"kind":"event","who":"埃姆登","source":"E3 铁血数据实验",'
+        '"timing":"本轮","stakes":"俾斯麦先一步掌握满值之谜",'
+        '"intent":"埃姆登主动登门接近实验体","difficulty":40,'
+        '"basis":"E3 铁血数据实验正在推进"}]'
+    )
+    deps = _event_deps(tmp_path, proposal_json, event_names=("埃姆登",),
+                       event_sources=("E3 铁血数据实验·埃姆登的满值之谜",))
+    verdicts = ra.consult_world(deps, chat_base="", chat_key="", chat_model="",
+                                core="埃姆登 core", scene="铁血港区", affinity=0)
+    directive = ra.narrative_directive(verdicts)
+
+    assert verdicts and verdicts[0].kind == "event"
+    assert "【本轮世界事件" in directive
+    assert "埃姆登" in directive and "E3" in directive
+
+
+def test_事件来源不在白名单被驳回(tmp_path):
+    calls = []
+    proposal_json = (
+        '[{"kind":"event","who":"凭空舰娘","source":"E99 卡里没有",'
+        '"intent":"天降新角色","difficulty":40,"basis":"无"}]'
+    )
+    deps = ra.AgencyDeps(
+        chat_fn=lambda *a, **k: proposal_json, rng=random.Random(1),
+        state_base=str(tmp_path), gate_base_rate=1.0,
+        event_names=("埃姆登",), event_sources=("E3 铁血数据实验·埃姆登的满值之谜",),
+        trace_fn=lambda event, **data: calls.append((event, data)))
+    verdicts = ra.consult_world(deps, chat_base="", chat_key="", chat_model="",
+                                core="core", scene="港区", affinity=0)
+
+    assert verdicts == []  # 来源假 ⇒ 驳回，不进入叙事
+    assert any(event == "world.rejected" and data.get("reason") == "source_not_found"
+               for event, data in calls)
+
+
+def test_事件开关关闭时事件提案被拒(tmp_path):
+    calls = []
+    proposal_json = ('[{"kind":"event","who":"埃姆登","source":"E3",'
+                     '"intent":"登门","difficulty":40,"basis":"E3"}]')
+    deps = ra.AgencyDeps(
+        chat_fn=lambda *a, **k: proposal_json, rng=random.Random(1),
+        state_base=str(tmp_path), gate_base_rate=1.0, events_enabled=False,
+        event_names=("埃姆登",), event_sources=("E3 铁血数据实验",),
+        trace_fn=lambda event, **data: calls.append((event, data)))
+    verdicts = ra.consult_world(deps, chat_base="", chat_key="", chat_model="",
+                                core="core", scene="港区", affinity=0)
+
+    assert verdicts == []
+    assert any(event == "world.rejected" and data.get("reason") == "events_disabled"
+               for event, data in calls)
+
+
+def test_用户行动裁定进入独立段且失败不得变相成功(tmp_path):
+    proposal_json = ('[{"kind":"user_action","intent":"一句话让她彻底臣服","difficulty":99,'
+                     '"basis":"与腓特烈立场冲突"}]')
+    deps = _event_deps(tmp_path, proposal_json)
+    verdicts = ra.consult_world(deps, chat_base="", chat_key="", chat_model="",
+                                core="core", scene="港区", affinity=80)
+    directive = ra.narrative_directive(verdicts)
+
+    assert verdicts and verdicts[0].kind == "user_action"
+    assert "【本轮用户行动裁定" in directive
+    if verdicts[0].outcome == agency.OUTCOME_REJECT:
+        assert "禁止写成变相成功" in directive
+
+
+def test_三段指令顺序固定():
+    event = agency.Verdict("埃姆登", agency.OUTCOME_ACCEPT, agency.DEGREE_PARTIAL, 30, 60,
+                           "普通成功", intent="主动登门", kind="event", who="埃姆登",
+                           source="E3", timing="本轮", stakes="俾斯麦先手")
+    npc = agency.Verdict("腓特烈大帝", agency.OUTCOME_REJECT, agency.DEGREE_NONE, 80, 58,
+                         "掷骰失败", intent="提议婚礼", kind="npc")
+    user = agency.Verdict("用户", agency.OUTCOME_REJECT, agency.DEGREE_NONE, 82, 30,
+                          "掷骰失败", intent="一句话臣服", kind="user_action")
+
+    directive = ra.narrative_directive([npc, user, event])
+
+    i_ev = directive.index("【本轮世界事件")
+    i_npc = directive.index("【本轮 NPC")
+    i_user = directive.index("【本轮用户行动裁定")
+    assert i_ev < i_npc < i_user
+    # 事件/用户行动成功不算「NPC 失控」；只有 npc 强成功才触发插画高潮
+    won_event = agency.Verdict("埃姆登", agency.OUTCOME_ACCEPT, agency.DEGREE_CRIT, 1, 60,
+                               "大成功", intent="登门", kind="event", who="埃姆登")
+    assert ra.agency_lost([won_event, user]) is False
+    assert ra.agency_lost([npc]) is False

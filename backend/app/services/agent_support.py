@@ -6,6 +6,9 @@
 
 from __future__ import annotations
 
-def _proxy_kw(ctx: dict, key: str = "chat_proxy") -> dict:
+from app.services.agent_contracts import CtxLike
+
+
+def _proxy_kw(ctx: CtxLike, key: str = "chat_proxy") -> dict:
     value = (ctx.get(key, "") or "").strip()
     return {"proxy": value} if value else {}

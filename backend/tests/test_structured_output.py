@@ -142,3 +142,40 @@ def test_trace_includes_raw_chars_for_diagnosis():
         '{"route":"answer"}', Decision,
         trace=lambda event, **data: events.append(data))
     assert events[-1]["raw_chars"] == len('{"route":"answer"}')
+
+
+def test_纪要字段写成数组时不得让整批作废():
+    """2026-10-20 实锤（整理索引整批失败）：
+
+    ```
+    chronicles.0.dialogue  Input should be a valid string
+    input_value=['腓特烈:「对不起,...有什么问题吗?」']  input_type=list
+    ```
+    模型把多行文本写成数组是合理表达；旧契约要求 `str` ⇒ 整批（**含同批已算好的
+    表格 ops**）一起作废。现在按行拼成字符串。
+    """
+    from app.services.structured_contracts import ManualFillResult
+
+    result = ManualFillResult.model_validate({
+        "ops": [{"op": "update", "table": "全局数据表", "row": 0, "values": {"时间": "第四天"}}],
+        "chronicles": [{
+            "overview": "主角宣告腓特烈为性奴",
+            "chronicle": ["第一段", "第二段"],
+            "dialogue": ['腓特烈:「对不起…」', '指挥官:「…」'],
+        }],
+    })
+
+    assert result.ops, "表格 ops 不得因纪要字段类型被连带丢弃"
+    chronicle = result.chronicles[0]
+    assert chronicle.dialogue == '腓特烈:「对不起…」\n指挥官:「…」'
+    assert chronicle.chronicle == "第一段\n第二段"
+
+
+def test_纪要名单写成顿号字符串时切成列表():
+    """反向情形：`characters: "腓特烈、指挥官"` 不该被判类型错误。"""
+    from app.services.structured_contracts import RichChronicle
+
+    entry = RichChronicle.model_validate({"characters": "腓特烈、指挥官", "keywords": "NTR,背德"})
+
+    assert entry.characters == ["腓特烈", "指挥官"]
+    assert entry.keywords == ["NTR", "背德"]

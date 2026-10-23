@@ -47,3 +47,17 @@ app/services/capability_handlers.py
 app/services/collection_artifacts.py
 app/services/artifact_versions.py
 app/services/json_file_store.py
+app/services/novel_tools.py
+app/services/worldbook_coverage.py
+app/services/agent_agency.py
+app/services/agency_maintenance.py
+app/services/agency_illustration_actors.py
+app/services/agency_scene_state.py
+app/services/agency_scene_comfy.py
+app/services/agent_graph.py
+app/services/agent_graph_state.py
+app/services/agent_graph_supervisor.py
+app/services/agent_graph_nodes.py
+app/services/agent_graph_plan.py
+app/services/agent_graph_roleplay.py
+app/services/comfy_watchdog.py

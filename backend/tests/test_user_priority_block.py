@@ -1,13 +1,17 @@
-"""用户安排最高优先级块（2026-09-23 用户定案）。
+"""用户安排最高优先级块（2026-09-23 首次定案；2026-10-21 部分修订）。
 
 口径：**不改预设/世界书/前情/表格的任何内容**，改为在**离生成点最近**处追加
 「本轮用户安排·最高优先级」声明 + 逐字复述用户本轮输入，抬升用户输入的权重。
 
+2026-10-21 修订：原口径把「用户单方面宣告的结果」也抬成既定事实，导致世界书判定、
+裁判裁定与 NPC 自主性被压过（真机：堕落魔戒 17 轮 0 骰点）。现在用户安排只定
+「事实/界限/点名的时点/意图」；成败交 D100 与世界 Agent 裁定，裁定块放最后一条 system。
+
 本文件锁三件事：
 ① 纯函数行为（空输入→空串；有输入→声明头+逐字原文）；
-② 声明头必须钉住**四条**执行口径（要发生的要发生／点名的后续时点必须本轮演到／
-   界限与状态要守住／冲突让位）；
-③ 尾部顺序契约 —— 该块是**最后一条** system（紧跟输出纪律、紧邻本轮 user），
+② 声明头必须钉住**四条**执行口径（事实/界限/点名的时点必须演到；
+   单方面宣告得手仍须检定；判定机制与世界裁定不被覆盖）；
+③ 尾部顺序契约 —— 用户安排块贴近本轮 user，世界裁定块在其后（更近端）；
    且**默认参数下不出现** ⇒ `test_roleplay_seams.py` 的等价矩阵不被破坏。
 
 2026-09-23 深夜（T4）：原口径只覆盖「①用户写明**要发生**的事」，而用户点名的
@@ -55,12 +59,20 @@ def test_无宏残留():
 # ---------------------------------------------------------------------------
 # ② 声明头口径（钉住三条，防被「优化」成空话）
 # ---------------------------------------------------------------------------
-def test_声明头钉住最高优先级与让位():
+def test_声明头钉住最高优先级与判定不让位():
+    """2026-10-21 部分修订：用户安排仍最高优先，但**不再压过判定结果**。
+
+    旧口径「与①②③冲突者一律让位」把用户单方面宣告抬成既定事实
+    （真机：堕落魔戒 17 轮 0 骰点）⇒ 现在④改为「不覆盖系统判定机制与世界裁定」。
+    """
     head = ba.USER_PRIORITY_INSTRUCTION
     assert "最高优先级" in head
-    assert "让位" in head
-    for diluted in ("世界书", "命定危机", "前情提要"):
-        assert diluted in head, diluted
+    assert "不覆盖" in head
+    for kept in ("世界书", "命定危机", "前情提要"):
+        assert kept in head, kept
+    # 旧绝对化措辞不得回潮：结局不再由用户单方面宣告决定
+    assert "一律让位" not in head
+    assert "单方面" in head and "检定" in head
 
 
 def test_声明头钉住要发生与界限两条():
@@ -91,9 +103,9 @@ def test_声明头四条口径齐全且编号有序():
     positions = [head.find(mark) for mark in order]
     assert all(pos >= 0 for pos in positions), positions
     assert positions == sorted(positions), positions
-    # ④ 是兜底条：与前面冲突者一律让位
+    # ④ 是兜底条：判定机制与世界裁定不被用户安排覆盖
     tail = head[positions[3]:]
-    assert "让位" in tail
+    assert "不覆盖" in tail and "判定结果为准" in tail
 
 
 def test_声明头仍以逐字复述引导语收尾():
@@ -119,6 +131,24 @@ def test_传入user_text时块为最后一条system():
     assert msgs[-1]["content"].endswith("她的乳头")
     # 输出纪律仍在该块之前（其文案不得被本次改动碰到）
     assert msgs[2]["content"].startswith("[输出纪律]")
+
+
+def test_世界裁定块紧随用户安排之后():
+    """2026-10-21：World 裁定必须落在最后一条 system（不被末位用户安排压过）。"""
+    ctx = {"_rp_agency_directive": "【本轮世界事件（必须在本轮正文体现）】\n- 事件"}
+    msgs = ag._rp_build_tail_messages(ctx, "动态块", ["T1"], "她的乳头")
+    assert msgs[-1]["content"].startswith("【本轮世界事件")
+    assert msgs[-2]["content"].startswith("【本轮用户安排·最高优先级】")
+    # 单次取用：ctx 里的临时键被清掉，不得跨轮残留
+    assert "_rp_agency_directive" not in ctx
+
+
+def test_裁定块宏被替换():
+    ctx = {"_rp_agency_directive": "{{char}} 对 {{user}} 出手", "card_name": "腓特烈大帝"}
+    got = ag._rp_pop_agency_directive(ctx)
+    assert "腓特烈大帝" in got
+    assert "{{user}}" not in got          # 缺省 user 回退「我」
+    assert "{{char}}" not in got
 
 
 def test_顺序契约_动态块_思维链_输出纪律_音频_用户安排():

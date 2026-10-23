@@ -5,6 +5,7 @@
 """
 
 from __future__ import annotations
+from app.services.agent_contracts import CtxLike
 from collections import OrderedDict
 import logging
 import threading
@@ -56,7 +57,7 @@ def _history_embed_fn(ctx: dict):
     return _embed
 
 
-def _rag_recall_text(ctx: dict, repo_id: str, query: str, k: int = 6) -> str:
+def _rag_recall_text(ctx: CtxLike, repo_id: str, query: str, k: int = 6) -> str:
     """从 rag_store 召回本仓库知识库条目 + 检索表行（kind!=generation），拼成候选文本。
 
     这是"表格+RAG 结合"的读侧接缝：curator 知识与检索表行同库同通道，一起按 query 召回。
@@ -82,7 +83,7 @@ def _rag_recall_text(ctx: dict, repo_id: str, query: str, k: int = 6) -> str:
     )
 
 
-def _table_recall_text(ctx: dict, repo_id: str, query: str, k: int = 5) -> str:
+def _table_recall_text(ctx: CtxLike, repo_id: str, query: str, k: int = 5) -> str:
     """检索表专属读通道；与普通知识 RAG 分池、分配额。"""
     try:
         from app.services import table_store
@@ -95,7 +96,7 @@ def _table_recall_text(ctx: dict, repo_id: str, query: str, k: int = 5) -> str:
     return "\n".join(f"- {row}" for row in rows)
 
 
-def _repo_tables_for_facts(ctx: dict, repo_id: str) -> list:
+def _repo_tables_for_facts(ctx: CtxLike, repo_id: str) -> list:
     """插画视觉事实兜底读通道：整读 通用表（含 重要角色表），不检索、不分配额。
 
     世界书视觉锚按条目名匹配，剧情常用名/道号可能连不上（舞姬恋↔角色卡·舞柔）；
@@ -112,7 +113,7 @@ def _repo_tables_for_facts(ctx: dict, repo_id: str) -> list:
         return []
 
 
-def _repo_table_absent_actors(ctx: dict, repo_id: str, known: list[str]) -> set:
+def _repo_table_absent_actors(ctx: CtxLike, repo_id: str, known: list[str]) -> set:
     """表格在场状态里明确「不在场」的绑定角色——点名提及不等于画面在场。
 
     2026-09-01 用户实锤：高潮段只有凌若冰（浮花泉封域内），舞姬恋在封域外石廊
@@ -145,7 +146,7 @@ def _repo_table_absent_actors(ctx: dict, repo_id: str, known: list[str]) -> set:
         return set()
 
 
-def _reindex_retrieval_tables(ctx: dict, repo_id: str, tables: list) -> None:
+def _reindex_retrieval_tables(ctx: CtxLike, repo_id: str, tables: list) -> None:
     """把 mode=retrieval 的表的当前行重灌进 RAG（表格写回后调用）。缺嵌入配置则跳过。"""
     cfg = _embed_cfg(ctx)
     if cfg is None or not repo_id:
@@ -159,7 +160,7 @@ def _reindex_retrieval_tables(ctx: dict, repo_id: str, tables: list) -> None:
         _LOG.warning("检索表重灌索引失败（不阻断叙述，但索引与表格数据可能分叉）: %s", exc)
 
 
-def _curator_index_fn(ctx: dict, repo_id: str):
+def _curator_index_fn(ctx: CtxLike, repo_id: str):
     """构造条目维护 Agent 的写库闭包 (text,title)→写入本仓库 RAG 知识库。缺 embed 配置 → None（不写）。"""
     cfg = _embed_cfg(ctx)
     if cfg is None or not repo_id:

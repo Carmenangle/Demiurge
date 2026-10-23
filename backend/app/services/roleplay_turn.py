@@ -10,6 +10,7 @@ import re
 import time
 from typing import Any, Callable
 
+from app.services.agent_contracts import CtxLike
 from app.services import llm as _llm
 from app.services import prompt_clean as _prompt_clean
 
@@ -57,9 +58,19 @@ CONTINUATION_MIN_NEW_CHARS = 30
 # 运行值可在 设置→AI 模型「截断自愈次数」调整（selfheal_attempts，0=不自愈，钳位 0–5）。
 SELFHEAL_MAX_ATTEMPTS = 3
 # 自愈限时（2026-08-31 晚实锤 turn13：思考续写单次流式拖了 10 分钟，整轮自愈 15 分钟
-# 才报错——付费用户等不起）。单次自愈调用最长 3 分钟；整轮自愈总预算 6 分钟。
-SELFHEAL_CALL_TIMEOUT_SECONDS = 180.0
-SELFHEAL_TOTAL_BUDGET_SECONDS = 360.0
+# 才报错——付费用户等不起）。
+# ⚠ 2026-10-20 按真机重新标定：中转缓冲式下发，单次调用实测 **181.3s / 241.7s**
+#    （第二次甚至超出当时的 180s 上限——截止检查只在收到 delta 时触发，模型停住时没人触发它）。
+#    原值 180s/360s 对 3 轮只够 1.5 轮 ⇒ 14:08 那轮两次重掷后就报「总时长预算已用尽」。
+# ⇒ 单次上限 300s（覆盖实测 241.7s＋余量）；总预算不再写死，改为
+#   `_selfheal_loop` 内按**运行期轮次**× 单次上限现算（见下），设置里改次数自动跟着缩放。
+SELFHEAL_CALL_TIMEOUT_SECONDS = 300.0
+# 兼容旧引用的兜底值（`_complete_story` 剧情续写闸用）；`_selfheal_loop` 已改为现算。
+SELFHEAL_TOTAL_BUDGET_SECONDS = SELFHEAL_MAX_ATTEMPTS * SELFHEAL_CALL_TIMEOUT_SECONDS
+# 自愈全败时「按当前正文发布」的最低可见正文字数（2026-10-20 用户定案非致命发布）。
+# 与 `_resume_interrupted_messages` / `_persist_interrupted_partial` 的 200 字门槛同源：
+# 低于此值的残句没有发布价值，仍按判死处理（用户重点「重新生成」更划算）。
+PARTIAL_PUBLISH_MIN_CHARS = 200
 
 
 def _set_selfheal_deadline(ctx: Any, deadline: float | None) -> None:
@@ -259,7 +270,7 @@ def _wrap_bare_body(reply: str) -> str:
 
 @dataclass
 class TurnFinalization:
-    ctx: dict
+    ctx: CtxLike
     text: str
     trace: list
     streamed: bool
@@ -275,13 +286,13 @@ class TurnFinalizationHooks:
     writeback: Callable[[TurnFinalization, list], tuple[str, list, dict, dict]]
     apply_output: Callable[[str], str]
     anchor_offset: Callable[[str, dict], int | None]
-    emit_ready: Callable[[dict, dict], bool]
+    emit_ready: Callable[[CtxLike, dict], bool]
     maintain: Callable[[TurnFinalization, str, list], None]
 
 
 @dataclass
 class TurnExecution:
-    ctx: dict
+    ctx: CtxLike
     text: str
     trace: list
     streamed: bool
@@ -317,6 +328,28 @@ class TurnExecutionHooks:
     continue_story: Callable[[str], str] | None = None
 
 
+
+
+def _stream_partial(exc: Exception) -> str:
+    """取流式异常携带的已收增量（`llm.StreamInterrupted.partial`）；无则空串。
+
+    2026-10-20 真机（turn f77e68b1）：首发流中途 ReadTimeout，已收的 1304 字思考跟着
+    异常一起丢 ⇒ 自愈循环只能整段重掷。这里把那份残缺输出原样交给循环，让它走
+    「思考断点续写 / 正文断点续写」——与「正常返回但被截断」共用同一套拼接契约。
+    **不 strip**：think 预填续写靠原文直连，剥空白会破坏拼接锚点。
+    """
+    partial = getattr(exc, "partial", "")
+    return partial if isinstance(partial, str) else ""
+
+
+def visible_body_of(reply: str) -> str:
+    """剥 think 与 <content> 标签，返回**纯可见正文**（落库 / 展示 / 拼接共用一份口径）。
+
+    2026-10-20：失败落库与续写预填都要「只拿正文」，此前各模块手写正则会漂移。
+    """
+    visible = _strip_think(reply or "")
+    visible = re.sub(r"</?\s*content\b[^>]*>", "", visible, flags=re.I)
+    return visible.strip()
 
 
 def _strip_think(reply: str) -> str:
@@ -501,6 +534,27 @@ def _autoclose_content(reply: str) -> str:
     except TruncatedRoleplayOutput:
         return ""
     return closed
+
+
+def _prepare_partial_for_publish(partial: str) -> str:
+    """把自愈全败时挑出的发布候选整理成**可发布**的正文（2026-10-20 用户定案）。
+
+    两步，顺序不能反：
+    1. **裁掉末尾半句**（`truncate_to_sentence_boundary`，与重试拼接前的裁剪同款）——
+       模型句中被掐会留下「他说到一半…」这种残句；原样进历史，下一轮模型会当真续写，
+       插画锚点也可能落在半截动作上 ⇒ 语义误解。回退到上一个断句符号之后。
+    2. **补闭合标签**——`<content>` 开而未闭时 `ensure_complete_visible_content` 必败，
+       用 `_autoclose_content` 补 `</content>`（补不上返回空串 ⇒ 调用方按无正文处理）。
+
+    ⚠ 只在**自愈全败**这条路上用；成功路径的正文是校验过的，不走这里。
+    ⚠ 裁剪后再闭合：若先闭合再裁剪，截断点可能又把 `</content>` 前的正文切出新的半句。
+    """
+    trimmed = truncate_to_sentence_boundary(partial or "")
+    if not trimmed.strip():
+        return ""
+    if _content_open_unclosed(trimmed):
+        return _autoclose_content(trimmed)
+    return trimmed
 
 
 # ── 剧情完整度闸（2026-09-21 用户定案）───────────────────────────────────────────
@@ -707,11 +761,22 @@ def _selfheal_loop(turn: TurnExecution, hooks: TurnExecutionHooks, reply: str,
     budget = max(0, min(5, int(turn.selfheal_attempts)))
     selfheal_started = now()
     healed = False
+    # 总预算按**运行期轮次**× 单次上限现算：曾写死 360s，而单次实测 181.3s/241.7s
+    # ⇒ 第 2 轮就被掐（2026-10-20 14:08 实锤：两次重掷后报「总时长预算已用尽」）。
+    # 设置里把「截断自愈次数」调到 5，这里自动变 5×300s，不用再改常量。
+    total_budget = budget * SELFHEAL_CALL_TIMEOUT_SECONDS
+    # 失败时的**发布候选**：这一轮里产生过最多可见正文的那一版。
+    # 与续写种子 `reply` **分道**——`reply` 每轮被候选替换（「接续之前的动作」，语义不变），
+    # 但整段重掷是**从头生成**，完全可能比首轮更差：2026-10-20 实锤（turn 14:08）
+    # 首轮 4867 字正文 → 重掷1 只剩 6385 字思考（visible=0）→ 重掷2 空。
+    # 若跟着 `reply` 走，首轮那 4867 字会被最后那版抹掉 ⇒ 「内容都没了」。
+    # 用户口径（2026-09-21 剧情完整度闸定案）：「已付费正文绝不作废，补不动按当前正文发布」。
+    publish_partial = reply
     for _ in range(budget):
         # 用户停止（2026-09-04 事故实锤）：中断不是失败，不得继续自愈 reroll 烧 token。
         if user_interrupted(turn.ctx):
             raise RoleplayInterrupted("用户已停止生成") from final_exc
-        if now() - selfheal_started > SELFHEAL_TOTAL_BUDGET_SECONDS:
+        if now() - selfheal_started > total_budget:
             final_exc = TruncatedRoleplayOutput("自愈总时长预算已用尽")
             break
         _set_selfheal_deadline(
@@ -743,10 +808,16 @@ def _selfheal_loop(turn: TurnExecution, hooks: TurnExecutionHooks, reply: str,
                             f"自愈重掷失败：{exc3}；该错误为请求/配置类错误（4xx），"
                             f"自动重试无法恢复，已停止（不再重复计费）。") from exc3
                     turn.trace.append(f"⚠️ 重掷调用失败（{exc3}），继续下一轮自愈")
-                    candidate = ""
+                    # 重掷断流时同样保留已收增量：下一轮拿它做续写素材（付费 token 不作废）
+                    candidate = _stream_partial(exc3)
                 method = "整段重掷"
             attempts += 1
             methods.append(method)
+            # 候选的可见正文比现有发布候选更多 ⇒ 它才是失败时该发布的那一版。
+            # ⚠ 不看总长度看**可见正文**：重掷常产出几千字纯思考（visible=0），
+            # 按总长度挑会选中它、把首轮真正文挤掉（14:08 那轮正是这个坑）。
+            if candidate and len(visible_body_of(candidate)) > len(visible_body_of(publish_partial)):
+                publish_partial = candidate
         finally:
             _set_selfheal_deadline(turn.ctx, None)
         if candidate:
@@ -771,13 +842,57 @@ def _selfheal_loop(turn: TurnExecution, hooks: TurnExecutionHooks, reply: str,
             detail = f"已自动自愈 {len(methods)} 次（{'、'.join(methods)}）"
         else:
             detail = "未启用自动自愈（截断自愈次数为 0）"
-        raise TruncatedRoleplayOutput(
+        failure = TruncatedRoleplayOutput(
             f"{str(final_exc).rstrip('。')}；{detail}仍未恢复——本轮共 {attempts} 次模型调用，"
             f"tokens 已消耗但未能产出可用正文，本次失败不重复计费。"
-            f"请重新生成（重新生成将重新计费）。") from final_exc
-    # 自愈成功：进度提示已完成使命，正文完整后必须清除（2026-08-31 晚用户反馈）；
-    # 按登记原文精确清除，不误伤其他模块的 ⚠️ 告警。失败路径保留提示供诊断。
-    turn.trace[:] = [line for line in turn.trace if line not in turn.selfheal_notices]
+            f"请重新生成（重新生成将重新计费）。")
+        # 把**失败时的发布候选**挂到异常上：自愈循环的语义是「接续之前的动作」——
+        # 每轮候选替换 `reply` 往下写，所以 `reply` 是「当前续写种子」；
+        # 但整段重掷是**从头生成**，`reply` 末版可能比首轮差得多（实锤：4867 字正文
+        # → 6385 字纯思考 → 空）。故发布候选单独按「可见正文最多」挑，与 `reply` 分道。
+        # `_persist_interrupted_partial` 靠 `getattr(exc, "partial")` 把它按中断语义落库，
+        # 下一轮 `_resume_interrupted_messages` 才能接着写，而不是从头再来。
+        # 2026-10-20 前这里什么都不挂 ⇒ 首轮 4867 字正文直接蒸发（用户实锤「内容都没了」）。
+        # 口径同 2026-09-21 剧情完整度闸定案：**已付费正文绝不作废，补不动按当前正文发布**。
+        setattr(failure, "partial", publish_partial)
+        # 流式模式下 graph 不转发 trace 行（`agent_graph:2092`）⇒ 最终失败原因必须走
+        # notify 通道，否则用户只看到半截正文、不知道为什么停了。
+        _selfheal_notice(turn, hooks, f"⚠️ {failure}", push_stream=True)
+        # 2026-10-20 用户定案（非致命）：自愈全败**不再上抛判死**，按当前已生成正文发布。
+        # 用户口径：「用户的产出是要保留的」——三次调用的钱已经花了，判死等于字和图
+        # 都没有（整轮失败时插画链路根本不跑）。同 2026-09-21 剧情完整度闸
+        # 「补不动 ⇒ 按当前正文发布」的口径。
+        # 用户同时明确三点：
+        #   ① **不跳过插画**；
+        #   ② 发布前裁掉末尾半句（与重试拼接前的裁剪同款），
+        #      避免「话说一半」的残句进历史/插画锚点造成语义误解；
+        #   ③ **状态表照常更新**——半段正文会作为下一轮上下文发出，
+        #      状态表不更新会造成信息差。
+        # ⚠ **有可见正文才走非致命**：`visible_body_of(publish_partial)` 为空
+        #   （think-only / 全空 / 纯思考）说明这一轮**没有任何可保留的产出**，
+        #   仍然上抛判死——否则等于发布空壳，也正是 2026-08-30 用户定的
+        #   「正文一旦生成完成，绝不会被残缺内容顶替」要防的那件事（见
+        #   `test_重试仍失败时绝不发布replace正文绝不被顶替`：零正文时 writeback/publish
+        #   一次都不许跑）。
+        # ⚠ 判据是**可见正文**不是原文长度：think-only 原文几千字但可见正文为 0，
+        #   按原文长度判会把纯思考当正文发布（2026-10-20 探针实锤过这个坑）。
+        # ⚠ 还要过**发布价值门槛**（与 `_resume_interrupted_messages` /
+        #   `_persist_interrupted_partial` 的 200 字门槛同源）：太短的残句没有发布价值，
+        #   发布出去用户只看到一个几乎空的气泡，不如判死让用户重点「重新生成」。
+        # ⚠ **只有真跑过自愈才非致命**：`budget == 0`（设置里「截断自愈次数＝0」）
+        #   时循环一次都不跑，「首发截断」按旧契约判死上抛——用户显式关掉重试，
+        #   不该被非致命发布改掉语义（见 `test_接上_自愈次数为0时两段闸都关闭`）。
+        if (budget <= 0
+                or len(visible_body_of(publish_partial).strip()) < PARTIAL_PUBLISH_MIN_CHARS):
+            raise failure from final_exc
+        reply = _prepare_partial_for_publish(publish_partial)
+        turn.trace.append(
+            f"⚠️ {detail}仍未恢复，已按当前正文发布（末尾半句已裁剪，剧情可能不完整）")
+        # 注意：**不清** selfheal_notices（成功路径才清），失败发布的诊断链要留着。
+    else:
+        # 自愈成功：进度提示已完成使命，正文完整后必须清除（2026-08-31 晚用户反馈）；
+        # 按登记原文精确清除，不误伤其他模块的 ⚠️ 告警。
+        turn.trace[:] = [line for line in turn.trace if line not in turn.selfheal_notices]
     # 正文元话语清洗（2026-09-13 用户实锤）在此补齐：自愈路径此前**直接 finalize**，
     # 与首发路径口径不一致——「输出纪律」清单会当正文发布，且会污染下面剧情闸的尾巴判据
     # （纪律行不是句末标点 ⇒ 误判「没写完」白烧一次续写）。两段闸必须看到同一份清洗后文本。
@@ -829,8 +944,11 @@ def execute_turn(turn: TurnExecution, hooks: TurnExecutionHooks,
                 f"首次生成失败：{exc}；该错误为请求/配置类错误（4xx），"
                 f"自动重试无法恢复，已停止（本轮仅 1 次模型调用，未重复计费）。") from exc
         final_exc = TruncatedRoleplayOutput(f"首次生成失败：{exc}")
+        # 2026-10-20 修：异常若带着已收增量（StreamInterrupted.partial），必须交给自愈
+        # 循环当续写素材——此前一律传 ""，导致「思考已写 1304 字、正文 0 字」时也每轮
+        # 整段重掷（真机 turn f77e68b1：thinking 745→972→1184→1304 反复重写）。
         return _selfheal_loop(
-            turn, hooks, "", final_exc,
+            turn, hooks, _stream_partial(exc), final_exc,
             attempts=1, methods=[], tried_continuations=set(), now=now)
     try:
         ensure_complete_visible_content(reply)

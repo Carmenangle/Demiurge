@@ -196,3 +196,35 @@ def test_命运骰点规则_既定现实不掷骰_有争议仍须掷骰():
     assert "日常相处与既定推进直接叙事，不必掷骰" not in r
     # 判定步骤与输出格式契约未动
     assert "<roll>" in r and "</roll>" in r and "[SKILL]" in r and "[ROLL]" in r
+
+
+# ── 2026-10-21 世界事件司门：judge.eventsEnabled + World 三类提案协议 ──
+
+def test_judge_eventsEnabled_默认可覆盖且校验():
+    spec = next(a for a in ba.REGISTRY if a["id"] == "judge")
+    assert "eventsEnabled" in spec["editable"]
+    assert spec["defaults"]["eventsEnabled"] == ba.EVENTS_ENABLED == 1.0
+    assert ba._valid_override("judge", "eventsEnabled", 0.0) is True
+    assert ba._valid_override("judge", "eventsEnabled", True) is False   # 布尔不是合法旋钮
+    assert ba._valid_override("judge", "eventsEnabled", "x") is False
+
+
+def test_world提示词钉住三类提案与来源约束():
+    w = ba.WORLD_SYSTEM
+    for kind in ("npc", "event", "user_action"):
+        assert kind in w, kind
+    assert "可登门角色清单" in w and "不得自创" in w
+    assert "可用事件锚点" in w
+    assert "连续两轮最多一次" in w
+    # 旧单类型协议不得回潮：仍须保留原 NPC 行为生成器判据
+    assert "死穴/攻略路径/个体机制" in w
+
+
+def test_用户安排块不再宣告结果绝对():
+    """2026-10-21 部分修订的源码锁：结果交判定，冲突时判定结果为准。"""
+    head = ba.USER_PRIORITY_INSTRUCTION
+    assert "意图与场景安排" in head
+    assert "成败与代价不由任何一方单方面决定" in head
+    assert "交 D100 检定" in head
+    assert "不覆盖" in head and "判定结果为准" in head
+    assert "一律让位" not in head

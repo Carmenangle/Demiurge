@@ -48,17 +48,17 @@ TARGETS: list[tuple[str, str]] = [
     # 原先这段兜底**写在路由里**（`routers/rag.py:130` 纯吞），T3.2 下沉到服务侧并留痕。
     ("services/rag_store.py", "seed_system_docs_best_effort"),
     # T3.3 批次 1（agent 辅助层，2026-09-17）：失败 = 用户可见面降级或上下文静默缺失
-    ("services/agent_agency.py", "_extract_video_action_plan"),   # 防拦截预设未生效
+    ("services/agency_scene_comfy.py", "_extract_video_action_plan"),   # 防拦截预设未生效（2026-10-23 随 comfy 域迁出）
     ("services/agent_agency.py", "_visible_roleplay_text"),       # 控制块（生图/状态/表格）泄漏
     ("services/agent_context_assembly.py", "_card_source"),       # 卡来源降级为 character_dir
     ("services/agent_context_assembly.py", "_agent_system"),      # system 缺「生图提示词写法」
     ("services/agent_retrieval.py", "_reindex_retrieval_tables"),  # 索引与表格数据分叉
     # T3.3 批次 2（LangGraph 编排层，2026-09-17）：失败 = 编译上下文/任务登记/记忆静默降级
-    ("services/agent_graph.py", "analyze_node"),              # 缺自定义风格写法指引
-    ("services/agent_graph.py", "_pc_collect_attachments"),   # 缺附件路径/LoRA 清单/模板清单
-    ("services/agent_graph.py", "_pc_design_discussion_reply"),  # 任务会话缺本轮登记
-    ("services/agent_graph.py", "_pc_register_delegation"),   # 任务会话缺委派登记
-    ("services/agent_graph.py", "answer_node"),               # 本轮回答缺 chat_facts 块
+    ("services/agent_graph_nodes.py", "analyze_node"),              # 缺自定义风格写法指引
+    ("services/agent_graph_plan.py", "_pc_collect_attachments"),   # 缺附件路径/LoRA 清单/模板清单
+    ("services/agent_graph_plan.py", "_pc_design_discussion_reply"),  # 任务会话缺本轮登记
+    ("services/agent_graph_plan.py", "_pc_register_delegation"),   # 任务会话缺委派登记
+    ("services/agent_graph_nodes.py", "answer_node"),               # 本轮回答缺 chat_facts 块
     ("services/agent_graph.py", "stream_multi_agent"),        # 附图本地路径未注入
     ("services/agent_fabric.py", "_fabric_knowledge_history"),  # 历史缺产物指针/规范文档
     ("services/agent_fabric.py", "_fabric_finalize"),         # 缺版本快照/产物登记

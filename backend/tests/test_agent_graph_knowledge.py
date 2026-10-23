@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 from app.services import agent_graph as ag
+from app.services import agent_graph_plan as agp  # _pc_collect_attachments 域（2026-10-23 方案 B 再拆）
 from app.services import agent_fabric
 from app.services import plan_compiler, plan_tasks
 from app.services import capability_sandbox
@@ -176,9 +177,9 @@ def test_approval模式目录附件包含固化清单与知识库(monkeypatch, t
 
     monkeypatch.setattr(plan_tasks, "_agent_access_mode",
                         lambda: capability_sandbox.ACCESS_APPROVAL)
-    monkeypatch.setattr(ag, "_recipe_catalog_text",
+    monkeypatch.setattr(agp, "_recipe_catalog_text",
                         lambda: "《示例配方》 id=r0（2 步）意图：导入角色卡")
-    monkeypatch.setattr(ag, "_knowledge_catalog_text",
+    monkeypatch.setattr(agp, "_knowledge_catalog_text",
                         lambda: "【固化知识库】合集卡制作规范摘要")
     monkeypatch.setattr(plan_compiler, "compile_plan", fake_compile_plan)
 
@@ -205,8 +206,8 @@ def test_approval模式目录为空时清单与知识库不进attachments(monkey
 
     monkeypatch.setattr(plan_tasks, "_agent_access_mode",
                         lambda: capability_sandbox.ACCESS_APPROVAL)
-    monkeypatch.setattr(ag, "_recipe_catalog_text", lambda: "")
-    monkeypatch.setattr(ag, "_knowledge_catalog_text", lambda: "")
+    monkeypatch.setattr(agp, "_recipe_catalog_text", lambda: "")
+    monkeypatch.setattr(agp, "_knowledge_catalog_text", lambda: "")
     monkeypatch.setattr(plan_compiler, "compile_plan",
                         lambda **kwargs: captured.update(kwargs) or _Outcome())
 

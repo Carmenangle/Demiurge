@@ -9,7 +9,7 @@
 并把「生成侧承诺 ⊆ 清洗侧登记」做成断言（与 #17 环境注入的自动一致性断言同族）。
 """
 from app.services import (
-    agent_graph,
+    agent_graph_roleplay,
     image_prompt_extract,
     prompt_clean,
     roleplay_turn,
@@ -42,10 +42,10 @@ def test_三处清洗清单确实取自单一属主():
 
 def test_prompt_源码里真的点名了承诺的这三个块():
     """属主常量与生成侧 prompt 是**两条防线**，必须同向：常量说承诺 roll/encounter/fate，
-    `agent_graph` 的 prompt 文本里就得真出现这三个标签（否则常量是自说自话）。"""
+    `agent_graph_roleplay` 的 prompt 文本里就得真出现这三个标签（否则常量是自说自话）。"""
     from pathlib import Path
 
-    src = Path(agent_graph.__file__).read_text(encoding="utf-8")
+    src = Path(agent_graph_roleplay.__file__).read_text(encoding="utf-8")
     for tag in prompt_clean.EVENT_BLOCK_TAGS:
         assert f"<{tag}>" in src, f"prompt 里没有 <{tag}>，与 EVENT_BLOCK_TAGS 脱节"
 
