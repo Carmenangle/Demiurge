@@ -92,6 +92,11 @@ def test_full_rag_portable_uses_single_7z_archive(monkeypatch, tmp_path):
     mingit = tmp_path / "mingit.zip"
     with zipfile.ZipFile(mingit, "w") as bundle:
         bundle.writestr("cmd/git.exe", b"git")
+    desktop = tmp_path / "desktop-publish"
+    (desktop / "runtimes" / "win-x64").mkdir(parents=True)
+    for name in ("Demiurge.exe", "Demiurge.dll", "runtimes/win-x64/WebView2Loader.dll"):
+        (desktop / name).write_bytes(b"shell")
+    (desktop / "Demiurge.pdb").write_bytes(b"symbols")
 
     seen = {}
 
@@ -114,7 +119,12 @@ def test_full_rag_portable_uses_single_7z_archive(monkeypatch, tmp_path):
         )
         assert "DEMIURGE_PORT" in start_script
         assert "LAF_RUNTIME_PORT" in start_script
-        assert not (source / "Demiurge.exe").exists()
+        assert (source / "install-shortcut.bat").is_file()
+        assert (source / "scripts" / "install-shortcut.ps1").is_file()
+        assert (source / "Demiurge.exe").is_file()
+        assert (source / "Demiurge.dll").is_file()
+        assert (source / "runtimes" / "win-x64" / "WebView2Loader.dll").is_file()
+        assert not (source / "Demiurge.pdb").exists()
         state = json.loads((source / "data" / "runtime" / "current.json").read_text())
         assert state["edition"] == "full-rag"
         archive.parent.mkdir(parents=True, exist_ok=True)
@@ -123,12 +133,79 @@ def test_full_rag_portable_uses_single_7z_archive(monkeypatch, tmp_path):
     monkeypatch.setattr(portable_release.subprocess, "run", fake_run)
     outputs = portable_release.build_portable(
         assets, mingit, "v0.15", Path("out"), tmp_path / "work",
-        "windows-x64-full-rag",
+        "windows-x64-full-rag", desktop,
     )
 
     assert [output.suffix for output in outputs] == [".7z"]
     assert not any(part.startswith("-v") for part in seen["command"])
     assert seen["command"][-1] == "Demiurge"
+
+
+def _full_rag_assets(tmp_path):
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    base = _layer(assets, "base.zip", "base-base-a", {"Demiurge-Runtime.exe": b"runtime"})
+    application = _layer(assets, "application.zip", "application-app-a", {"backend/app/main.py": b""})
+    rag = _layer(assets, "rag.zip", "rag-rag-a", {"site-packages/torch/__init__.py": b""})
+    (assets / "Demiurge-update-v0.15-windows-x64-full-rag.json").write_text(
+        json.dumps({
+            "schema_version": 2,
+            "app_version": "v0.15",
+            "target": "windows-x64-full-rag",
+            "edition": "full-rag",
+            "base_id": "base-a",
+            "application_id": "app-a",
+            "rag_id": "rag-a",
+            "layers": {"base": base, "application": application, "rag": rag},
+        }),
+        encoding="utf-8",
+    )
+    mingit = tmp_path / "mingit.zip"
+    with zipfile.ZipFile(mingit, "w") as bundle:
+        bundle.writestr("cmd/git.exe", b"git")
+    return assets, mingit
+
+
+def test_desktop_shell_is_mandatory(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(portable_release.subprocess, "run", lambda *a, **k: None)
+    assets, mingit = _full_rag_assets(tmp_path)
+
+    with pytest.raises(RuntimeError, match="必须带桌面壳"):
+        portable_release.build_portable(
+            assets, mingit, "v0.15", Path("out"), tmp_path / "work",
+            "windows-x64-full-rag",
+        )
+
+
+def test_desktop_payload_without_exe_is_rejected(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(portable_release.subprocess, "run", lambda *a, **k: None)
+    assets, mingit = _full_rag_assets(tmp_path)
+    desktop = tmp_path / "desktop-publish"
+    desktop.mkdir()
+
+    with pytest.raises(RuntimeError, match="Demiurge.exe"):
+        portable_release.build_portable(
+            assets, mingit, "v0.15", Path("out"), tmp_path / "work",
+            "windows-x64-full-rag", desktop,
+        )
+
+
+def test_desktop_payload_conflicting_with_package_tree_is_rejected(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(portable_release.subprocess, "run", lambda *a, **k: None)
+    assets, mingit = _full_rag_assets(tmp_path)
+    desktop = tmp_path / "desktop-publish"
+    (desktop / "data" / "runtime").mkdir(parents=True)
+    (desktop / "Demiurge.exe").write_bytes(b"shell")
+    (desktop / "data" / "runtime" / "current.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="冲突"):
+        portable_release.build_portable(
+            assets, mingit, "v0.15", Path("out"), tmp_path / "work",
+            "windows-x64-full-rag", desktop,
+        )
 
 
 def test_seven_zip_resolves_standard_windows_install(monkeypatch, tmp_path):

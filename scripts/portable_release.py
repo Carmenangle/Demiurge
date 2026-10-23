@@ -1,4 +1,4 @@
-"""组装 Windows 开箱即用包：启动/停止脚本、分层 Runtime 和 MinGit。"""
+"""组装 Windows 开箱即用包：桌面壳、启动/停止脚本、分层 Runtime 和 MinGit。"""
 from __future__ import annotations
 
 import argparse
@@ -15,12 +15,15 @@ APP_NAME = "Demiurge"
 FULL_RAG_TARGET = "windows-x64-full-rag"
 CHUNK_SIZE = 1024 * 1024
 GITHUB_ASSET_LIMIT = 2_000_000_000
+DESKTOP_SHELL_EXE = "Demiurge.exe"
 WINDOWS_SCRIPT_DIR = Path(__file__).resolve().parents[1] / "release" / "windows"
 WINDOWS_SCRIPTS = {
     "start-dev.bat": "start-dev.bat",
     "stop-dev.bat": "stop-dev.bat",
+    "install-shortcut.bat": "install-shortcut.bat",
     "scripts/start-portable.ps1": "start-portable.ps1",
     "scripts/stop-portable.ps1": "stop-portable.ps1",
+    "scripts/install-shortcut.ps1": "install-shortcut.ps1",
 }
 
 
@@ -93,6 +96,28 @@ def _assemble_layer(assets_dir: Path, layer: dict, work_dir: Path) -> Path:
     return archive
 
 
+def _install_desktop_shell(tree: Path, desktop_dir: Path) -> list[str]:
+    """把桌面壳发布产物铺到包根。
+
+    壳从自身所在目录向上找 `data/runtime/current.json`，所以产物必须与 `data/` 同级；
+    调试符号不进用户包。
+    """
+    if not (desktop_dir / DESKTOP_SHELL_EXE).is_file():
+        raise RuntimeError(f"桌面壳发布产物缺少 {DESKTOP_SHELL_EXE}：{desktop_dir}")
+    installed: list[str] = []
+    for source in sorted(p for p in desktop_dir.rglob("*") if p.is_file()):
+        relative = source.relative_to(desktop_dir).as_posix()
+        if relative.endswith(".pdb"):
+            continue
+        target = _safe_target(tree, relative)
+        if target.exists():
+            raise RuntimeError(f"桌面壳产物与包内既有文件冲突：{relative}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        installed.append(relative)
+    return installed
+
+
 def _write_zip(tree: Path, output: Path, root_name: str) -> Path:
     output.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
@@ -131,6 +156,7 @@ def _write_7z(tree: Path, output: Path, root_name: str) -> Path:
 def build_portable(
     assets_dir: Path, mingit_archive: Path, version: str,
     output_dir: Path, work_dir: Path, target: str = FULL_RAG_TARGET,
+    desktop_dir: Path | None = None,
 ) -> list[Path]:
     assets_dir = assets_dir.resolve()
     _, manifest = _manifest(assets_dir, version, target)
@@ -138,6 +164,11 @@ def build_portable(
         shutil.rmtree(work_dir)
     if manifest.get("edition") != "full-rag":
         raise RuntimeError("终端用户包只支持 Full RAG Runtime")
+    if desktop_dir is None:
+        raise RuntimeError("Windows 用户包必须带桌面壳：未提供 --desktop-dir 发布产物")
+    desktop_dir = Path(desktop_dir).resolve()
+    if not desktop_dir.is_dir():
+        raise RuntimeError(f"桌面壳发布产物目录不存在：{desktop_dir}")
     edition = "Full-RAG"
     root_name = APP_NAME
     tree = work_dir / root_name
@@ -180,6 +211,8 @@ def build_portable(
     if not (tree / "dependencies" / "git" / "cmd" / "git.exe").is_file():
         raise RuntimeError("MinGit 压缩包缺少 cmd/git.exe")
 
+    _install_desktop_shell(tree, desktop_dir)
+
     prefix = f"{APP_NAME}_windows_{version}"
     return [_write_7z(tree, output_dir / f"{prefix}.7z", root_name)]
 
@@ -211,6 +244,7 @@ def main() -> int:
     build.add_argument("--output-dir", type=Path, required=True)
     build.add_argument("--work-dir", type=Path, required=True)
     build.add_argument("--mingit-archive", type=Path)
+    build.add_argument("--desktop-dir", type=Path, required=True)
     build.add_argument("--target", required=True, choices=(FULL_RAG_TARGET,))
     args = parser.parse_args()
 
@@ -222,7 +256,7 @@ def main() -> int:
     )
     outputs = build_portable(
         args.assets_dir, mingit, args.version,
-        args.output_dir, args.work_dir / "bundle", args.target,
+        args.output_dir, args.work_dir / "bundle", args.target, args.desktop_dir,
     )
     for output in outputs:
         print(output)

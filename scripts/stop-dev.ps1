@@ -50,8 +50,67 @@ function Stop-BackendByPath {
   }
 }
 
+# 补杀「启动中、还没监听 8188」的 ComfyUI：冷启动 import 阶段可长达数分钟，
+# 此时按端口杀不掉，进程会继续占着安装树锁与 comfyui.db，下次启动又被拖 600 秒。
+# 判据与后端 comfy_launcher.find_install_processes 同口径：python 进程 + main.py
+# + （本安装目录或本安装解释器路径）；路径边界避免 ComfyUI 误伤 ComfyUI_TE。
+function Stop-ComfyByIdentity {
+  $cfgPath = Join-Path $projectRoot "backend\data\comfy_config.json"
+  if (-not (Test-Path -LiteralPath $cfgPath)) { return }
+  try {
+    $cfg = Get-Content -LiteralPath $cfgPath -Raw -Encoding UTF8 | ConvertFrom-Json
+  } catch {
+    Write-Host "读取 $cfgPath 失败，跳过命令行补杀：$($_.Exception.Message)" -ForegroundColor Yellow
+    return
+  }
+  $base = ([string]$cfg.path).Trim().TrimEnd('\')
+  $configured = ([string]$cfg.python_path).Trim()
+  # 解释器候选与 comfy_launcher.find_python 同口径：默认 python_path 为空时，
+  # launcher 子进程命令行里只有解释器路径（cwd=<base> + 相对 main.py）。
+  $pyCandidates = @()
+  if ($configured) {
+    $pyCandidates = @($configured)
+  } elseif ($base) {
+    $parent = Split-Path -Parent $base
+    $pyCandidates = @(
+      (Join-Path $base ".venv\Scripts\python.exe"),
+      (Join-Path $base "venv\Scripts\python.exe"),
+      (Join-Path $base "python\python.exe")
+    )
+    if ($parent) {
+      $pyCandidates += @(
+        (Join-Path $parent "python_embeded\python.exe"),
+        (Join-Path $parent "python\python.exe"),
+        (Join-Path $parent "python312\python.exe")
+      )
+    }
+  }
+  $needles = @()
+  foreach ($t in $pyCandidates) {
+    if ($t -and (Test-Path -LiteralPath $t)) { $needles += [Regex]::Escape($t.TrimEnd('\')) }
+  }
+  if ($base) { $needles += [Regex]::Escape($base) }
+  if ($needles.Count -eq 0) { return }
+  foreach ($p in (Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)) {
+    if ($p.Name -notmatch '^python' -or -not $p.CommandLine) { continue }
+    if ($p.CommandLine -notmatch 'main\.py') { continue }
+    $hit = $false
+    foreach ($n in $needles) {
+      if ($p.CommandLine -match ('(?i)' + $n + '(?=[\\"''\s]|$)')) { $hit = $true; break }
+    }
+    if (-not $hit) { continue }
+    try {
+      Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop
+      Write-Host "停止 ComfyUI python PID $($p.ProcessId)（命令行匹配，未监听端口）"
+    } catch {
+      Write-Host "停止 ComfyUI PID $($p.ProcessId) 失败：$_"
+    }
+  }
+}
+
 Stop-PortProcess 5173    # 前端
 Stop-PortProcess 8010    # 后端
 Stop-BackendByPath       # 补杀父 reloader
-Stop-PortProcess 8188    # ComfyUI（后端 autostart 拉起的）
+Stop-ComfyByIdentity     # 补杀冷启动中的 ComfyUI
+Stop-PortProcess 8188    # ComfyUI（监听端口的实例）
 Write-Host "完成。" -ForegroundColor Green

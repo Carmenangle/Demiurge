@@ -83,6 +83,37 @@ jobs:
       - name: 发布闭包门禁
         run: python scripts/release_preflight.py
 
+  desktop-shell:
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: 构建桌面壳
+        shell: pwsh
+        run: >-
+          dotnet publish desktop/Demiurge.Desktop -c Release -r win-x64
+          --self-contained false -o desktop/publish
+      - name: 自检桌面壳
+        shell: pwsh
+        run: |
+          $env:DEMIURGE_SHELL_HOME = Join-Path $env:RUNNER_TEMP "demiurge-shell"
+          & desktop/publish/Demiurge.exe --self-test
+          if ($LASTEXITCODE -ne 0) { throw "desktop shell self-test failed" }
+      - name: 归档桌面壳产物
+        shell: pwsh
+        run: |
+          Compress-Archive -Path desktop/publish/* -DestinationPath Demiurge-desktop-windows-x64.zip
+          if (-not (Test-Path Demiurge-desktop-windows-x64.zip)) { throw "桌面壳压缩包生成失败" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-shell
+          path: Demiurge-desktop-windows-x64.zip
+          if-no-files-found: error
+          retention-days: 7
+
   build:
     needs: [plan, quality, vendor-closure]
     strategy:
@@ -121,7 +152,7 @@ jobs:
 
   publish:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [plan, build]
+    needs: [plan, build, desktop-shell]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -132,7 +163,8 @@ jobs:
       - name: 组装 Windows 便携支撑包
         run: |
           sudo apt-get update && sudo apt-get install -y p7zip-full
-          python scripts/portable_release.py build --target windows-x64-full-rag --version "${{ needs.plan.outputs.version }}" --assets-dir release-assets --output-dir release-assets --work-dir .portable-work
+          python -c "import zipfile; zipfile.ZipFile('release-assets/Demiurge-desktop-windows-x64.zip').extractall('desktop-shell')"
+          python scripts/portable_release.py build --target windows-x64-full-rag --version "${{ needs.plan.outputs.version }}" --assets-dir release-assets --output-dir release-assets --work-dir .portable-work --desktop-dir desktop-shell
       - name: 附加分片合并工具
         run: cp scripts/join-runtime.ps1 scripts/join-runtime.sh release-assets/
       - uses: softprops/action-gh-release@v2

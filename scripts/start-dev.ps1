@@ -89,8 +89,12 @@ function Test-BackendHealthy {
   return $true
 }
 
-# 后端：隐藏窗口后台跑。ComfyUI 由后端 startup 钩子(comfy_launcher.autostart)按
-# data/comfy_config.json 的路径自动在后台拉起，脚本不重复管（避免两处维护/冲突）。
+# 后端：隐藏窗口后台跑。ComfyUI 不由后端拉起：后端可能跑在受限上下文（低完整性/
+# 沙箱），它 Popen 出的 ComfyUI 继承同一完整性级别，写不了安装树——AlekPet 节点的
+# FileLock(.install.lock, timeout=600) 会把冷启动拖成 600.1 秒 IMPORT FAILED
+# （2026-10-23 实测），端口全程不监听。关掉后端的 autostart，改由本脚本在用户身份下
+# 调 scripts\start_comfy.py 拉起（见下方 ComfyUI 段）。
+$env:LAF_COMFY_AUTOSTART = "0"
 $backendUp = $false
 if (Test-PortOpen 8010) {
   if (Test-BackendHealthy) {
@@ -134,12 +138,14 @@ if (-not (Wait-HttpOk $backendHealth 30)) {
   Write-Host "后端暂未就绪，可能仍在启动（首次装 Chroma/模型较慢）。" -ForegroundColor Yellow
 }
 
-# ── ComfyUI：真源仍是后端 comfy_launcher（唯一持有子进程句柄的地方），脚本只负责
-# 「探活 + 在后端已在跑时补发一次启动指令」。背景（2026-09-23 实锤）：后端 startup 钩子
-# 只在后端进程**新启动**时跑一次；若 ComfyUI 之后退出（OOM／端口竞争／被手动关掉），再跑
-# 本脚本会因「后端已在运行」跳过整段启动 ⇒ ComfyUI 永远不再被拉起。前端的自动拉起只在
-# 发 /s 或手动点按钮时懒触发，所以「启动开发环境」这一步此前是空缺。
-$comfyCheckStart = Get-Date
+# ── ComfyUI：由本脚本（用户身份）拉起，不能交给后端。后端可能运行在受限上下文
+# （低完整性/沙箱），它 Popen 出的 ComfyUI 继承同一完整性级别，写不了安装树：
+# AlekPet 节点的 FileLock(.install.lock, timeout=600) 把冷启动拖成 600.1 秒后才
+# IMPORT FAILED（2026-10-23 实测），端口全程不监听，用户看到的就是「启动要 9 分钟」。
+# 背景（2026-09-23 实锤）：后端 startup 钩子只在后端进程**新启动**时跑一次；若
+# ComfyUI 之后退出（OOM／端口竞争／被手动关掉），再跑本脚本会因「后端已在运行」跳过
+# 整段启动 ⇒ ComfyUI 永远不再被拉起。前端自动拉起只在发 /s 或手动点按钮时懒触发，
+# 所以「启动开发环境」必须自己兜住这一段。
 $comfyConfig = Join-Path $backendDir "data\comfy_config.json"
 $comfyCfg = $null
 $comfyUrl = "http://127.0.0.1:8188"
@@ -164,33 +170,115 @@ if (Test-PortOpen $comfyPort) {
 } elseif (-not (Test-PortOpen 8010)) {
   Write-Host "后端尚未就绪，跳过 ComfyUI 启动（稍后可在界面手动启动）。" -ForegroundColor Yellow
 } else {
-  Write-Host "ComfyUI 未运行，通知后端拉起（真源：comfy_launcher）…"
-  $comfyJson = @{ path = [string]$comfyCfg.path; url = $comfyUrl; python_path = [string]$comfyCfg.python_path } | ConvertTo-Json -Compress
-  # PS 5.1 的 -Body <string> 固定按 ISO-8859-1 发送，路径含中文会静默损坏 ⇒ 显式传 UTF-8 字节
-  $comfyBytes = [System.Text.Encoding]::UTF8.GetBytes($comfyJson)
-  # 必须用 Invoke-WebRequest + 手动 UTF-8 解码：PS 5.1 的 Invoke-RestMethod 在响应头不带
-  # charset 时按 ISO-8859-1 解码 JSON 响应体，而 FastAPI 的 application/json 恰好不带 charset
-  # ⇒ 中文 message 会落成「å·²å¯å¨」这类乱码（2026-09-23 实测）。
-  try {
-    $comfyResp = Invoke-WebRequest -Method Post -Uri "http://127.0.0.1:8010/api/comfyui/start" -ContentType "application/json; charset=utf-8" -Body $comfyBytes -TimeoutSec 20 -UseBasicParsing
-    $comfyMsg = ""
+  # 本机沙箱按**映像路径**降级：工作区内（D:\tool\Demiurge）的可执行文件一律 Low，
+  # 工作区外（ComfyUI 自带 python）保持 Medium（2026-10-23 ctypes 逐级实测：同一份
+  # whoami.exe 放工作区内跑是 Low、放工作区外是 Medium）。后端与 venv python 都在
+  # 工作区内，经它们 Popen 出的 ComfyUI 必然 Low、写不动安装树——AlekPet 的
+  # FileLock(.install.lock, timeout=600) 把冷启动拖成 600.1 秒后才 IMPORT FAILED。
+  # 所以规划（读配置/拼参数，可用 venv python）与执行（spawn，必须用 ComfyUI 的
+  # 解释器）拆开；可写性也用**将实际启动的那个解释器**探，不能由规划者代判。
+  $comfyStarted = $false
+  $comfyCliErr = ""
+  $comfyPlan = $null
+  $comfyPlanScript = Join-Path $projectRoot "scripts\start_comfy.py"
+  $comfyProbeScript = Join-Path $projectRoot "scripts\comfy_probe_write.py"
+  if (-not (Test-Path -LiteralPath $comfyPlanScript)) {
+    $comfyCliErr = "缺 scripts\start_comfy.py，无法生成 ComfyUI 启动规格。"
+  } else {
+    # start_comfy.py 已把 stdout/stderr 重配置为 UTF-8；PS 5.1 解 native 输出按
+    # [Console]::OutputEncoding，不同步会显示成乱码。
+    $oldConsoleEncoding = [Console]::OutputEncoding
+    [Console]::OutputEncoding = [Text.Encoding]::UTF8
+    $env:PYTHONUTF8 = "1"
     try {
-      $comfyText = [System.Text.Encoding]::UTF8.GetString($comfyResp.RawContentStream.ToArray())
-      $comfyObj = $comfyText | ConvertFrom-Json
-      $comfyMsg = [string]$comfyObj.message
-    } catch { }
-    if (-not $comfyMsg) { $comfyMsg = "已发出启动指令" }
-    Write-Host "ComfyUI：$comfyMsg（插件加载慢，通常 1~3 分钟才能访问）"
-  } catch {
-    $comfyErr = ""
-    try {
-      $comfyStream = $_.Exception.Response.GetResponseStream()
-      if ($comfyStream) {
-        $comfyErr = [System.IO.StreamReader]::new($comfyStream, [System.Text.Encoding]::UTF8).ReadToEnd()
+      $planOut = & $backendPython $comfyPlanScript --print-plan 2>&1
+      $planCode = $LASTEXITCODE
+      $planText = (@($planOut) | ForEach-Object { [string]$_ }) -join "`n"
+      if ($planCode -eq 0 -and $planText) {
+        $comfyPlan = $planText | ConvertFrom-Json
+      } else {
+        $comfyCliErr = $planText
       }
-    } catch { }
-    if (-not $comfyErr) { $comfyErr = $_.Exception.Message }
-    Write-Host "拉起 ComfyUI 失败：$comfyErr" -ForegroundColor Yellow
+    } catch {
+      $comfyCliErr = $_.Exception.Message
+    } finally {
+      [Console]::OutputEncoding = $oldConsoleEncoding
+    }
+  }
+
+  if ($comfyPlan) {
+    $comfyPy = [string]$comfyPlan.python
+    $comfyBase = [string]$comfyPlan.cwd
+    $probeOut = $null
+    $probeCode = 0
+    if (-not (Test-Path -LiteralPath $comfyPlanScript)) {
+      $probeCode = 1
+      $probeOut = @("缺 scripts\start_comfy.py")
+    } elseif (-not (Test-Path -LiteralPath $comfyProbeScript)) {
+      $probeCode = 1
+      $probeOut = @("缺 scripts\comfy_probe_write.py，拒绝盲拉起（否则会被 AlekPet 文件锁拖 9 分钟）")
+    } elseif (-not (Test-Path -LiteralPath $comfyPy)) {
+      $probeCode = 1
+      $probeOut = @("ComfyUI 解释器不存在：$comfyPy")
+    } else {
+      $probeOut = & $comfyPy $comfyProbeScript $comfyBase 2>&1
+      $probeCode = $LASTEXITCODE
+    }
+    if ($probeCode -ne 0) {
+      $probeMsg = (@($probeOut) | ForEach-Object { [string]$_ } | Where-Object { $_ }) -join "`n"
+      if (-not $probeMsg) { $probeMsg = "写探测失败（exit=$probeCode）" }
+      $comfyCliErr = "当前上下文写不了 ComfyUI 安装树：$comfyBase（$probeMsg）"
+    } else {
+      $savedEnv = @{}
+      $spawnErr = ""
+      try {
+        foreach ($prop in $comfyPlan.env.PSObject.Properties) {
+          $savedEnv[$prop.Name] = [Environment]::GetEnvironmentVariable($prop.Name, "Process")
+          Set-Item -Path ("env:" + $prop.Name) -Value ([string]$prop.Value)
+        }
+        $planArgv = @($comfyPlan.argv | ForEach-Object { [string]$_ })
+        # 用 cmd 只负责「追加写日志」：Start-Process 的 -RedirectStandardOutput 会截断，
+        # 而 ComfyUI 日志是排查 600 秒锁的唯一现场。cmd 在 System32（工作区外），
+        # 不改变 python 的完整性级别。
+        $inner = (@($planArgv) | ForEach-Object { '"' + ($_ -replace '"', '\"') + '"' }) -join ' '
+        $inner = $inner + ' >> "' + [string]$comfyPlan.log_path + '" 2>&1'
+        $comfyProc = Start-Process -FilePath $env:ComSpec -ArgumentList ('/d /s /c "' + $inner + '"') `
+          -WorkingDirectory $comfyBase -WindowStyle Hidden -PassThru
+        $comfyStarted = $true
+        Write-Host "ComfyUI 已在用户上下文拉起（pid=$($comfyProc.Id)，解释器：$comfyPy）"
+      } catch {
+        $spawnErr = $_.Exception.Message
+      } finally {
+        foreach ($k in @($savedEnv.Keys)) {
+          if ($null -eq $savedEnv[$k]) {
+            Remove-Item -Path ("env:" + $k) -ErrorAction SilentlyContinue
+          } else {
+            Set-Item -Path ("env:" + $k) -Value $savedEnv[$k]
+          }
+        }
+      }
+      if (-not $comfyStarted) {
+        $comfyCliErr = "拉起 ComfyUI 失败：$spawnErr"
+      }
+    }
+  }
+}
+
+# ComfyUI 没起来时不要以「完成」收尾：必须把可执行的下一步说清楚。
+$comfyFinalErr = ""
+if (-not $comfyStarted -and $comfyCfg -and $comfyCfg.path -and -not (Test-PortOpen $comfyPort)) {
+  if ($comfyCliErr) { $comfyFinalErr = $comfyCliErr }
+  else { $comfyFinalErr = "未生成启动规格（原因未知）" }
+}
+if ($comfyFinalErr) {
+  Write-Host ""
+  Write-Host "[WARN] ComfyUI 未启动：$comfyFinalErr" -ForegroundColor Red
+  Write-Host "  聊天与云端生图不受影响；本地生图/工作流会不可用。" -ForegroundColor Yellow
+  if ($comfyFinalErr -match '受限上下文|安装树|写不了') {
+    Write-Host "  当前窗口继承的是受限（低完整性）上下文。" -ForegroundColor Yellow
+    Write-Host "  处理：从资源管理器双击 start-dev.bat（普通用户上下文）；若 ComfyUI 装在工作区内，请移到工作区外。" -ForegroundColor Yellow
+  } else {
+    Write-Host "  按上面的错误排查后重跑 start-dev.bat。" -ForegroundColor Yellow
   }
 }
 
@@ -233,4 +321,8 @@ if ($aiHelper.Count -gt 0) {
 
 Write-Host "打开浏览器：$frontendUrl"
 Start-Process $frontendUrl | Out-Null
-Write-Host "完成。停止请运行 stop-dev.bat；强制重启后端：scripts/start-dev.ps1 -RestartBackend" -ForegroundColor Green
+if ($comfyFinalErr) {
+  Write-Host "开发环境已启动（ComfyUI 未启动，见上方 WARN）。停止请运行 stop-dev.bat" -ForegroundColor Yellow
+} else {
+  Write-Host "完成。停止请运行 stop-dev.bat；强制重启后端：scripts/start-dev.ps1 -RestartBackend" -ForegroundColor Green
+}

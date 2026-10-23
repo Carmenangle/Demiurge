@@ -28,13 +28,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release download "${{ inputs.version }}" --pattern "*${{ matrix.target }}*" --dir release-assets
+      - name: 下载桌面壳产物
+        if: matrix.target == 'windows-x64-full-rag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "${{ inputs.version }}" --pattern "Demiurge-desktop-windows-x64.zip" --dir desktop-zip
+          python -c "import zipfile; zipfile.ZipFile('desktop-zip/Demiurge-desktop-windows-x64.zip').extractall('desktop-shell')"
       - name: 生成用户一键包
         run: |
           if [[ "${{ matrix.target }}" == "windows-x64-full-rag" || "${{ matrix.target }}" == "linux-x64-full-rag" ]] && ! command -v 7z >/dev/null; then
             sudo apt-get update && sudo apt-get install -y p7zip-full
           fi
           if [[ "${{ matrix.target }}" == windows-* ]]; then
-            python scripts/portable_release.py build --target "${{ matrix.target }}" --version "${{ inputs.version }}" --assets-dir release-assets --output-dir user-assets --work-dir .portable-work
+            python scripts/portable_release.py build --target "${{ matrix.target }}" --version "${{ inputs.version }}" --assets-dir release-assets --output-dir user-assets --work-dir .portable-work --desktop-dir desktop-shell
           else
             python scripts/unix_portable_release.py --target "${{ matrix.target }}" --version "${{ inputs.version }}" --assets-dir release-assets --output-dir user-assets --work-dir .portable-work
           fi
