@@ -118,3 +118,4 @@ scripts/_*.py
 
 # 桌面壳产物（本地编译/拷贝，9 MB 二进制不入库）
 /Demiurge.exe
+/webview-data/
