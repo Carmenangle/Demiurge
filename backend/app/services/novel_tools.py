@@ -12,9 +12,12 @@ _feiji_charfacts / _nv_charfacts / _feiji_audit §3）只读提炼；ST 组装/P
 """
 from __future__ import annotations
 
+import hashlib
 import html
 import io
+import json
 import re
+import time
 import zipfile
 from collections import Counter
 from html.parser import HTMLParser
@@ -236,13 +239,41 @@ _NATIVE_CHAPTER_RE = re.compile(
 )
 
 
+def _native_heading_matches(text: str) -> list[Any]:
+    """原生「第X章」**标题行**匹配（行级 plausibility 过滤）。
+
+    背景（2026-10-20 实锤）：正文段落若以「第1章第2段正文…」开头，旧实现会把每一段
+    都当章节头 → 21 万字的《60 章》小说切出上千个伪章节，真章节全被「<200 字残留头」
+    规则跳过，chapter_count 塌成 1（索引/差异全失效）。标题行判据（机械、可解释）：
+    行首位置 + 整行 ≤40 字 + 行内无句末标点（。！？；）。
+    非常规排版兜底：过滤后不足 2 条而原始匹配 ≥5 条（标题与正文同行），退回旧口径，
+    避免把整本塌成单章。
+    """
+    raw = [m for m in _NATIVE_CHAPTER_RE.finditer(text) if m.group(0).strip()]
+    picked: list[Any] = []
+    for m in raw:
+        line_start = text.rfind("\n", 0, m.start()) + 1
+        line_end = text.find("\n", m.end())
+        if line_end == -1:
+            line_end = len(text)
+        line = text[line_start:line_end].strip()
+        if not line or len(line) > 40:
+            continue
+        if any(ch in line for ch in "。！？；"):
+            continue
+        picked.append(m)
+    if len(picked) < 2 and len(raw) >= 5:
+        return raw
+    return picked
+
+
 def split_chapters_native(text: str, min_title: int = 6) -> list[dict[str, Any]]:
     """按原生「第X章·标题」切分章节，返回 [{name, start, chars}]（含字符偏移，供定向 read_text）。
 
     去重：纯「第N章 作者/日期」残留头（标题过短且与下一个标记紧邻 <500 字符）跳过。
     无任何章节标记 → 整本作单章。
     """
-    matches = [m for m in _NATIVE_CHAPTER_RE.finditer(text) if m.group(0).strip()]
+    matches = _native_heading_matches(text)
     if not matches:
         return [{"name": "", "start": 0, "chars": len(text)}]
     chapters: list[dict[str, Any]] = []
@@ -263,18 +294,22 @@ def split_chapters_native(text: str, min_title: int = 6) -> list[dict[str, Any]]
     return chapters
 
 
-def split_chapters(text: str) -> list[dict[str, str]]:
+def split_chapters(text: str) -> list[dict[str, Any]]:
+    """按「===== 名 =====」把全文切成章节；无标记时整本作单章。
 
-    """按「===== 名 =====」把全文切成章节；无标记时整本作单章。"""
+    2026-10-20：带 `start`/`chars` 绝对偏移（与 split_chapters_native 同形）——
+    此前标记形态不给 offset，epub 抽取产物只能靠标题猜位置，无法定向读。
+    """
     matches = list(CHAPTER_MARKER.finditer(text))
     if not matches:
-        return [{"name": "", "text": text}]
-    chapters: list[dict[str, str]] = []
+        return [{"name": "", "text": text, "start": 0, "chars": len(text)}]
+    chapters: list[dict[str, Any]] = []
     for idx, m in enumerate(matches):
         end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
         body = text[m.end():end].strip()
         if body:
-            chapters.append({"name": m.group(1).strip(), "text": body})
+            chapters.append({"name": m.group(1).strip(), "text": body,
+                             "start": m.start(), "chars": end - m.start()})
     return chapters
 
 
@@ -313,11 +348,13 @@ def survey_fulltext(full_txt: str, top_names: int = 60, max_titles: int = 40) ->
         "total_chars": len(text),
         "chapter_count": len(chapters),
         "titles": [ch["name"] for ch in chapters[:max_titles] if ch["name"]],
+        # 2026-10-20：两种形态都带 start/chars（split_chapters 已补偏移），
+        # 不再按「首章有没有 start」分叉——否则 epub 抽取产物恒返回空 chapters。
         "chapters": [
-            {"index": i + 1, "title": ch["name"], "chars": ch["chars"],
-             "start": ch["start"]}
+            {"index": i + 1, "title": ch["name"], "chars": int(ch.get("chars") or 0),
+             "start": int(ch.get("start") or 0)}
             for i, ch in enumerate(chapters[:max_titles])
-        ] if "start" in (chapters[0] if chapters else {}) else [],
+        ],
         "name_counts": [[name, count] for name, count in counter.most_common(top_names)],
     }
 
@@ -418,14 +455,14 @@ def _pick_top_n(text: str, name: str, max_paras: int) -> list[str]:
     return picked
 
 
-def _pick_anchors(chapters: list[dict[str, str]], name: str,
+def _pick_anchors(chapters: list[dict[str, Any]], name: str,
                   window: tuple[int, int] = (180, 320)) -> list[dict[str, str]]:
     before, after = window
     hits: list[tuple[str, int, str]] = []
-    for chapter in chapters:
-        body = chapter["text"]
+    for ch in chapters:
+        body = str(ch.get("text") or "")
         for m in re.finditer(re.escape(name), body):
-            hits.append((chapter["name"], m.start(), body))
+            hits.append((str(ch.get("name") or ""), m.start(), body))
     if not hits:
         return []
     picks = [hits[0]]
@@ -435,14 +472,15 @@ def _pick_anchors(chapters: list[dict[str, str]], name: str,
         picks.append(hits[-1])
     out: list[dict[str, str]] = []
     seen: set[tuple[str, int]] = set()
-    for chapter, idx, body in picks:
-        key = (chapter, idx // 200)
+    for chapter_name, idx, body in picks:
+        key = (chapter_name, idx // 200)
         if key in seen:
             continue
         seen.add(key)
         start = max(0, idx - before)
         end = min(len(body), idx + after)
-        out.append({"chapter": chapter, "snippet": body[start:end].replace("\n", " ").strip()})
+        out.append({"chapter": chapter_name,
+                    "snippet": body[start:end].replace("\n", " ").strip()})
     return out
 
 
@@ -503,3 +541,460 @@ def charfacts(full_txt: str, names: list[str], out_dir: str,
         "missing": missing,
         "total_chars": sum(item["chars"] for item in items),
     }
+
+
+# ── T4 增量定位：章节索引 + 新旧对比（2026-10-20 用户定案）──────────────────
+#
+# 目的：更新版小说（同一作品的新版本）做合集卡时，模型必须**只读新增/被改章节**，
+# 不得整本重读（24 万字 ≈ 20 万 token 级，重读一遍就是白烧）。
+# 机械层只做确定性定位：章节绝对偏移、空白无关的章节/段落哈希、三档匹配
+# （同哈希 → 同标题 → 顺序）、阅读区间（read_plan，按 max_chars 分窗）、
+# 新出现人名候选（更名/新角色初判）。
+# 语义判断（哪些条目要改、怎么改、要不要合并）仍归自由循环——机械不裁决语义。
+#
+# 与固化02 §3.9 的关系：§3.9 定义「更新语义」（修订/新增/废弃/更名映射），
+# 本节提供它缺的「输入范围界定」；索引落 <作品>/_prep/novel.index.json，
+# 供下一次更新复用（跨 run 台账的第一步）。
+
+INDEX_VERSION = 1
+_MAX_INDEX_PARAS = 4000      # 单章段落哈希上限（防索引膨胀；相似度用上限内集合）
+_MAX_LIST_OUT = 300          # 工具返回的清单条数上限（防工具结果爆量）
+_DIFF_MIN_SIMILARITY = 0.5   # 顺序配对时判「同一章的修订」而非「删+增」的相似度下限
+
+_TITLE_ORDINAL_RE = re.compile(
+    r"^第\s*[0-9０-９零一二三四五六七八九十百千万两]{1,8}\s*[章节回卷部篇]\s*[·:：、.\-—\s]*")
+_TITLE_NOISE_RE = re.compile(
+    r"[\s\u3000·、，。．,:：;；()（）\[\]【】《》<>\"'“”‘’!?！？/\\\-—_]+")
+
+
+def _norm_title(title: str) -> str:
+    """标题归一：去掉「第X章」序号与标点空白，供跨版本同名对齐（重编号不影响）。"""
+    cleaned = _TITLE_ORDINAL_RE.sub("", (title or "").strip())
+    return _TITLE_NOISE_RE.sub("", cleaned).lower()
+
+
+def _norm_body(text: str) -> str:
+    """正文归一：抹平空白（换行/缩进/空格）——排版重排不应被当成内容变更。"""
+    return re.sub(r"\s+", "", text or "")
+
+
+def _sha12(text: str) -> str:
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
+
+
+def chapter_records(text: str) -> list[dict[str, Any]]:
+    """全文切章节，返回 [{index,title,start,chars,body}]；start/chars 是全文绝对偏移。
+
+    三种形态：`===== 章节 =====`（extract 产物）优先 → 原生「第X章·标题」→ 整本单章。
+    偏移是定向 read_text 的唯一依据（索引 / 差异 / 材料切段共用同一套）。
+    """
+    marks = list(CHAPTER_MARKER.finditer(text))
+    if marks:
+        out: list[dict[str, Any]] = []
+        for i, m in enumerate(marks):
+            end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
+            body = text[m.end():end].strip()
+            if not body:
+                continue
+            out.append({"index": len(out) + 1, "title": m.group(1).strip(),
+                        "start": m.start(), "chars": end - m.start(), "body": body})
+        if out:
+            return out
+    native = _native_heading_matches(text)
+    if native:
+        rows: list[dict[str, Any]] = []
+        for i, m in enumerate(native):
+            start = m.start()
+            end = native[i + 1].start() if i + 1 < len(native) else len(text)
+            # 残留头跳过（纯「第N章 作者/日期」行）：与 split_chapters_native 同口径
+            if end - start < 200 and i + 1 < len(native):
+                continue
+            body = text[start:end].strip()
+            if not body:
+                continue
+            rows.append({"index": len(rows) + 1,
+                         "title": (m.group("title") or m.group("wrap") or "").strip(),
+                         "start": start, "chars": end - start, "body": body})
+        if rows:
+            return rows
+    return [{"index": 1, "title": "", "start": 0, "chars": len(text), "body": text.strip()}]
+
+
+def _index_from_records(records: list[dict[str, Any]], total_chars: int) -> dict[str, Any]:
+    chapters: list[dict[str, Any]] = []
+    for rec in records:
+        digests = [_sha12(_norm_body(p)) for p in _paragraphs(rec["body"])]
+        chapters.append({
+            "index": rec["index"],
+            "title": rec["title"],
+            "title_norm": _norm_title(rec["title"]),
+            "start": rec["start"],
+            "chars": rec["chars"],
+            "sha1": _sha12(_norm_body(rec["body"])),
+            "para_count": len(digests),
+            "paras": digests[:_MAX_INDEX_PARAS],
+        })
+    return {"version": INDEX_VERSION, "total_chars": total_chars,
+            "chapter_count": len(chapters), "chapters": chapters}
+
+
+def build_index(text: str) -> dict[str, Any]:
+    """构建章节索引（纯函数）：每章 sha1 + 段落哈希集合，供后续跨版本对比。"""
+    return _index_from_records(chapter_records(text), len(text))
+
+
+def write_index(full_txt: str, out_json: str) -> dict[str, Any]:
+    """构建索引并落盘；返回**摘要**（不含段落哈希——工具结果不能爆量）。"""
+    text = _read_text_safe(full_txt)
+    index = build_index(text)
+    target = Path(out_json)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(index, ensure_ascii=False), encoding="utf-8")
+    return {
+        "source": str(full_txt),
+        "index_path": str(target),
+        "total_chars": index["total_chars"],
+        "chapter_count": index["chapter_count"],
+        "chapters": [{"index": c["index"], "title": c["title"], "start": c["start"],
+                      "chars": c["chars"]} for c in index["chapters"][:_MAX_LIST_OUT]],
+        "note": "索引已落盘（含每章 sha1 与段落哈希，不回传）。更新版对比用 novel.diff。",
+    }
+
+
+def read_index(path: str) -> dict[str, Any]:
+    """读已落盘索引；缺失/损坏一律抛可操作错误（禁止静默退化成「全量重读」）。"""
+    target = Path(path)
+    if not target.is_file():
+        raise NovelToolError(
+            f"章节索引不存在：{path}。更新版对比必须先对旧版全文跑 novel.index 生成索引；"
+            "没有旧索引就没有输入范围依据，不要整本重读旧文代替。")
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise NovelToolError(f"章节索引不可读（{exc}）：{path}") from exc
+    chapters = data.get("chapters") if isinstance(data, dict) else None
+    if not isinstance(chapters, list) or not chapters:
+        raise NovelToolError(f"章节索引没有章节数据：{path}（重建索引后再对比）")
+    return data
+
+
+def _similarity(old_paras: list[str], new_paras: list[str]) -> float:
+    """段落哈希的多重集包含度：交集计数 / 较大侧总数。空集给 0（判重写，宁可多读）。
+
+    用多重集而非 set：章节里重复出现的段落（叠句/仪式段）被折叠成一条时，
+    改一段会让 set 相似度直接掉到 0——把 minor 修订误判成整章重写。
+    """
+    a = Counter(old_paras or [])
+    b = Counter(new_paras or [])
+    total = max(sum(a.values()), sum(b.values()))
+    if not total:
+        return 0.0
+    return sum((a & b).values()) / total
+
+
+def _name_counter(text: str) -> Counter[str]:
+    counter: Counter[str] = Counter()
+    for m in _NAME_RE.finditer(text or ""):
+        candidate = _clean_name_candidate(m.group(1))
+        if candidate:
+            counter[candidate] += 1
+    return counter
+
+
+def _name_delta(changed_text: str, baseline_text: str,
+                min_hits: int = 2, limit: int = 40) -> list[list[Any]]:
+    """变更章节里新出现的人名（旧章节零出现）——新角色 / 更名候选的机械初判。
+
+    只做候选提示：判定是否同一人（戴茂→黛茂）仍归模型语义判断（固化02 §3.9）。
+    """
+    changed = _name_counter(changed_text)
+    baseline = _name_counter(baseline_text)
+    out: list[list[Any]] = []
+    for name, hits in changed.most_common():
+        if hits < min_hits or baseline.get(name):
+            continue
+        out.append([name, hits, 0])
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _read_plan(chapters: list[dict[str, Any]], max_chars: int) -> list[dict[str, Any]]:
+    """把待读章节展开成 read_text 窗口：[{chapter_index,title,start,max_chars}]。"""
+    step = max(1000, int(max_chars or 20000))
+    plan: list[dict[str, Any]] = []
+    for ch in chapters:
+        start = int(ch.get("start") or 0)
+        end = start + max(0, int(ch.get("chars") or 0))
+        pos = start
+        while pos < end:
+            plan.append({"chapter_index": int(ch.get("index") or 0),
+                         "title": str(ch.get("title") or ""),
+                         "start": pos, "max_chars": min(step, end - pos)})
+            pos += step
+    return plan
+
+
+def diff_novel(*, new_txt: str, old_index: str | None = None, old_txt: str | None = None,
+               max_chars: int = 20000, include_minor_read: bool = False,
+               minor_ratio: float = 0.03, work_dir: str | None = None) -> dict[str, Any]:
+    """新旧版本机械对比：unchanged / modified(minor|major) / added / removed + read_plan。
+
+    匹配三档（确定性，与章节序号无关）：
+    1. 同 sha1 → unchanged（插入章节导致的整体后移不会误判修订）；
+    2. 剩余里归一标题唯一 1:1 → 同一章，按段落相似度判 minor/major；
+    3. 仍剩余按顺序配对，相似度 ≥ _DIFF_MIN_SIMILARITY 判修订，否则 old=removed / new=added。
+
+    read_plan 只含 added + modified(major)（minor 差异 < minor_ratio 默认不读，
+    显式 include_minor_read=True 才纳入）。输出不含段落哈希。
+
+    work_dir（2026-10-20，固化02 §3.9 第四步）：给了就把「本轮范围」落成
+    `<work_dir>/_prep/novel.scope.json`（未变更章节区间 + read_plan），
+    fabric 读拦截据此拒读未变更章节——把「只读新章」从提示词纪律变成机制。
+    """
+    idx_path = str(old_index or "").strip()
+    old_path = str(old_txt or "").strip()
+    if not idx_path and not old_path:
+        raise NovelToolError(
+            "缺少旧版基准：给 old_index（推荐，先对旧版跑 novel.index）或 old_txt（旧版全文）；"
+            "没有基准无法界定输入范围。")
+    if idx_path and Path(idx_path).is_file():
+        old_data = read_index(idx_path)
+    elif idx_path:
+        raise NovelToolError(f"章节索引不存在：{idx_path}（先对旧版跑 novel.index，或改传 old_txt）")
+    else:
+        old_data = build_index(_read_text_safe(old_path))
+
+    new_text = _read_text_safe(str(new_txt))
+    records = chapter_records(new_text)
+    new_index = _index_from_records(records, len(new_text))
+    old_chapters = [c for c in old_data.get("chapters") or [] if isinstance(c, dict)]
+    new_chapters = new_index["chapters"]
+
+    unchanged: list[dict[str, Any]] = []
+    modified: list[dict[str, Any]] = []
+    added: list[dict[str, Any]] = []
+    removed: list[dict[str, Any]] = []
+    used_new: set[int] = set()
+    matched_old: set[int] = set()
+
+    # 1) 同 sha1
+    buckets: dict[str, list[dict[str, Any]]] = {}
+    for c in new_chapters:
+        buckets.setdefault(str(c.get("sha1") or ""), []).append(c)
+    for o in old_chapters:
+        bucket = buckets.get(str(o.get("sha1") or ""))
+        if not bucket:
+            continue
+        n = bucket.pop(0)
+        used_new.add(int(n["index"]))
+        matched_old.add(int(o["index"]))
+        unchanged.append({"index_old": int(o["index"]), "index_new": int(n["index"]),
+                          "title_old": str(o.get("title") or ""),
+                          "title_new": str(n.get("title") or ""),
+                          "chars": int(n.get("chars") or 0)})
+
+    def _modify(o: dict[str, Any], n: dict[str, Any]) -> dict[str, Any]:
+        ratio = round(1.0 - _similarity(list(o.get("paras") or []),
+                                       list(n.get("paras") or [])), 4)
+        item = {"index_old": int(o["index"]), "index_new": int(n["index"]),
+                "title_old": str(o.get("title") or ""),
+                "title_new": str(n.get("title") or ""),
+                "start": int(n.get("start") or 0),
+                "chars": int(n.get("chars") or 0),
+                "change_ratio": ratio,
+                "level": "minor" if ratio <= minor_ratio else "major"}
+        modified.append(item)
+        return item
+
+    def _add(n: dict[str, Any]) -> None:
+        added.append({"index_new": int(n["index"]), "title": str(n.get("title") or ""),
+                      "start": int(n.get("start") or 0),
+                      "chars": int(n.get("chars") or 0)})
+
+    # 2) 归一标题唯一 1:1
+    def _group(chapters: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+        out: dict[str, list[dict[str, Any]]] = {}
+        for c in chapters:
+            key = str(c.get("title_norm") or "")
+            if key:
+                out.setdefault(key, []).append(c)
+        return out
+
+    rest_old = [o for o in old_chapters if int(o["index"]) not in matched_old]
+    rest_new = [n for n in new_chapters if int(n["index"]) not in used_new]
+    old_by_title = _group(rest_old)
+    new_by_title = _group(rest_new)
+    for key, olds in old_by_title.items():
+        news = new_by_title.get(key) or []
+        if len(olds) != 1 or len(news) != 1:
+            continue
+        o, n = olds[0], news[0]
+        _modify(o, n)
+        matched_old.add(int(o["index"]))
+        used_new.add(int(n["index"]))
+
+    # 3) 剩余按顺序配对
+    rest_old = sorted((o for o in old_chapters if int(o["index"]) not in matched_old),
+                      key=lambda c: int(c["index"]))
+    rest_new = sorted((n for n in new_chapters if int(n["index"]) not in used_new),
+                      key=lambda c: int(c["index"]))
+    for i in range(min(len(rest_old), len(rest_new))):
+        o, n = rest_old[i], rest_new[i]
+        sim = _similarity(list(o.get("paras") or []), list(n.get("paras") or []))
+        if sim >= _DIFF_MIN_SIMILARITY:
+            _modify(o, n)
+            matched_old.add(int(o["index"]))
+            used_new.add(int(n["index"]))
+        else:
+            removed.append({"index_old": int(o["index"]),
+                            "title": str(o.get("title") or ""),
+                            "chars": int(o.get("chars") or 0)})
+            _add(n)
+            matched_old.add(int(o["index"]))
+            used_new.add(int(n["index"]))
+    for o in rest_old:
+        if int(o["index"]) not in matched_old:
+            removed.append({"index_old": int(o["index"]),
+                            "title": str(o.get("title") or ""),
+                            "chars": int(o.get("chars") or 0)})
+    for n in rest_new:
+        if int(n["index"]) not in used_new:
+            _add(n)
+
+    # ── 阅读范围：只覆盖 added + modified(major)（+ 显式纳入的 minor）──
+    to_read = [n for n in new_chapters
+               if int(n["index"]) in {a["index_new"] for a in added}]
+    major_idx = {m["index_new"] for m in modified if m["level"] == "major"}
+    minor_idx = {m["index_new"] for m in modified if m["level"] == "minor"}
+    to_read += [n for n in new_chapters if int(n["index"]) in major_idx]
+    if include_minor_read:
+        to_read += [n for n in new_chapters if int(n["index"]) in minor_idx]
+    to_read.sort(key=lambda c: int(c["index"]))
+    plan = _read_plan(to_read, int(max_chars or 20000))
+
+    total_chars = new_index["total_chars"]
+    changed_chars = sum(int(c.get("chars") or 0) for c in to_read)
+    body_by_idx = {int(r["index"]): r["body"] for r in records}
+    changed_text = "\n".join(body_by_idx.get(int(c["index"]), "") for c in to_read)
+    baseline_text = "\n".join(r["body"] for r in records
+                              if int(r["index"]) not in {int(c["index"]) for c in to_read})
+
+    result: dict[str, Any] = {
+        "old_source": idx_path or old_path,
+        "new_source": str(new_txt),
+        "old_chapter_count": len(old_chapters),
+        "new_chapter_count": len(new_chapters),
+        "total_chars": total_chars,
+        "changed_chars": changed_chars,
+        "coverage_ratio": round(changed_chars / total_chars, 4) if total_chars else 0.0,
+        "unchanged": unchanged[:_MAX_LIST_OUT],
+        "modified": modified[:_MAX_LIST_OUT],
+        "added": added[:_MAX_LIST_OUT],
+        "removed": removed[:_MAX_LIST_OUT],
+        "read_plan": plan,
+        "name_delta": _name_delta(changed_text, baseline_text),
+        "hint": ("只读 read_plan 里的区间（file.read_text 按 start/max_chars）；unchanged 章节"
+                 "对应的条目不要重写，minor 修订默认视为无需改条目。条目级影响面由覆盖台账"
+                 "反查（worldbook.coverage + 变更章节号），不要为找线索整本重读。"),
+    }
+    wd = str(work_dir or "").strip()
+    if wd:
+        # 范围落盘：fabric 读拦截的基线（未变更章节整段读取会被拒）
+        result["scope_path"] = str(write_scope(wd, result, new_chapters))
+    return result
+
+
+# ── T5 增量范围落盘 + 读拦截（2026-10-20，固化02 §3.9 第四步）─────────────
+#
+# 提示词纪律在长循环里必然衰减（模型第 20 步就开始重读旧章）。治本是把「本轮允许
+# 读哪些区间」落成文件，由 fabric_loop 的 file.read_text 分支机械拦截。
+# 范围文件与索引/台账同目录：<作品>/_prep/novel.scope.json。
+
+SCOPE_VERSION = 1
+SCOPE_FILE = "novel.scope.json"
+
+
+def scope_path(work_dir: str) -> Path:
+    return Path(str(work_dir)) / "_prep" / SCOPE_FILE
+
+
+def write_scope(work_dir: str, result: dict[str, Any],
+                new_chapters: list[dict[str, Any]]) -> Path:
+    """把 diff 结果落成范围文件（只存读拦截必需的最小集合，不存条目内容）。"""
+    unchanged_idx = {int(u["index_new"]) for u in result.get("unchanged") or []}
+    payload = {
+        "version": SCOPE_VERSION,
+        "generated_at": time.time(),
+        "new_source": result.get("new_source") or "",
+        "old_source": result.get("old_source") or "",
+        "unchanged_chapters": [
+            {"index": int(c.get("index") or 0), "title": str(c.get("title") or ""),
+             "start": int(c.get("start") or 0), "chars": int(c.get("chars") or 0)}
+            for c in new_chapters if int(c.get("index") or 0) in unchanged_idx
+        ],
+        "read_plan": result.get("read_plan") or [],
+        "counts": {
+            "unchanged": len(result.get("unchanged") or []),
+            "modified": len(result.get("modified") or []),
+            "added": len(result.get("added") or []),
+            "removed": len(result.get("removed") or []),
+        },
+        "coverage_ratio": result.get("coverage_ratio") or 0.0,
+    }
+    p = scope_path(work_dir)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return p
+
+
+def load_scope(dirs: list[str]) -> dict[str, Any] | None:
+    """在候选目录里找最近一份范围文件（`<dir>/_prep/novel.scope.json`）。
+
+    读不到/坏了返回 None（范围文件是增效信息，不能阻断普通读取）。
+    """
+    for d in dirs or []:
+        if not str(d or "").strip():
+            continue
+        p = scope_path(str(d))
+        if not p.is_file():
+            continue
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(data, dict) and data.get("unchanged_chapters") is not None:
+            data["_path"] = str(p)
+            return data
+    return None
+
+
+def scope_blocks_read(scope: dict[str, Any] | None, target_path: str,
+                      offset: int, max_chars: int) -> dict[str, Any] | None:
+    """请求区间**完整落在**某个未变更章节内 → 返回该章节（供拦截文案），否则 None。
+
+    只拦「整段都在未变章节里」的读：跨章/跨到变更章的读一律放行——宁可少拦，
+    不可把合法读取拦死（模型确需上下文时要能通过「读大窗口」跳出）。
+    """
+    if not isinstance(scope, dict):
+        return None
+    new_src = str(scope.get("new_source") or "")
+    if not new_src or not str(target_path or "").strip():
+        return None
+    try:
+        if Path(new_src).resolve() != Path(str(target_path)).resolve():
+            return None
+    except OSError:
+        if (new_src.replace("\\", "/").lower()
+                != str(target_path).replace("\\", "/").lower()):
+            return None
+    start = max(0, int(offset or 0))
+    end = start + max(1, int(max_chars or 20000))
+    for ch in scope.get("unchanged_chapters") or []:
+        if not isinstance(ch, dict):
+            continue
+        ch_start = int(ch.get("start") or 0)
+        ch_end = ch_start + int(ch.get("chars") or 0)
+        if ch_start <= start and end <= ch_end:
+            return ch
+    return None

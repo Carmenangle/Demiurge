@@ -140,6 +140,9 @@ def _chat_messages(base_url: str, api_key: str, model: str,
 
 _READ_SUMMARY_MARK = "【分卷已读摘要】"
 
+# 2026-10-20：范围文件未加载哨兵（None = 明确「没有范围文件」，两者语义不同）
+_SCOPE_UNSET = object()
+
 # 2026-09-06 用户定案 A+B：内容类参数敏感词拦截（网关 400 兜底）。
 # 背景：NSFW 小说转卡时模型在卡纲/条目输出里带露骨词汇 → xtoken 网关
 # 400 LITELLM_ERROR「输入或生成内容可能包含不安全或敏感内容」，fabric.retry
@@ -612,6 +615,54 @@ def _dispatch(operation: str, params: dict) -> dict:
     filtered = {k: v for k, v in params.items() if k in allowed}
     result = func(**filtered)
     return result if isinstance(result, dict) else {"result": result}
+
+
+def _novel_scope_denial(outcome: Any, output_dir: str, repo_id: str,
+                        path: str, offset: int, max_chars: int) -> str | None:
+    """更新任务读拦截判定（固化02 §3.9 第四步）：返回拒绝文案，None = 放行。
+
+    范围文件由 `novel.diff(work_dir=…)` 落在 `<作品>/_prep/novel.scope.json`，记「哪些章节
+    sha 未变」。只在「请求区间**整段**落在未变更章节内」时拒绝——跨章/跨到变更章的读取
+    一律放行（宁可少拦，不可把合法读取拦死）。每 run 只加载一次（缓存在
+    `outcome._novel_scope`，None 也是有效缓存值，避免每步重读文件）。
+    任何异常按放行处理：拦截是增效手段，不能变成新的故障源。
+    """
+    if not str(path or "").strip():
+        return None
+    scope: dict[str, Any] | None
+    _cached = getattr(outcome, "_novel_scope", _SCOPE_UNSET)
+    if _cached is _SCOPE_UNSET:
+        scope = None
+        try:
+            from app.services import novel_tools, repo_meta
+
+            dirs = [str(output_dir or "")]
+            if output_dir and repo_id:
+                dirs.append(str(repo_meta.engine_repo_dir(output_dir, repo_id)))
+            scope = novel_tools.load_scope(dirs)
+        except Exception:  # noqa: BLE001 - 范围文件读不到不阻断正常读取
+            scope = None
+        setattr(outcome, "_novel_scope", scope)
+    else:
+        scope = _cached if isinstance(_cached, dict) else None
+    if not scope:
+        return None
+    try:
+        from app.services import novel_tools
+
+        hit = novel_tools.scope_blocks_read(scope, str(path), int(offset), int(max_chars))
+    except Exception:  # noqa: BLE001 - 判定失败按放行
+        return None
+    if not hit:
+        return None
+    ch_start = int(hit.get("start") or 0)
+    ch_end = ch_start + int(hit.get("chars") or 0)
+    ch_name = str(hit.get("title") or "") or f"第{hit.get('index')}章"
+    return (
+        f"增量范围拦截：该区间（offset={int(offset)}，约 {int(max_chars)} 字符）完整落在"
+        f"**未变更章节**「{ch_name}」[{ch_start},{ch_end}) 内。本轮是更新任务，只读 "
+        f"novel.diff 返回的 read_plan 区间；未变更章节不重读。需要旧设定请读旧条目正文"
+        f"（worldbook.coverage 给出的受影响条目），确需整段原文时读跨章窗口（跨章即放行）。")
 
 
 def run_loop(*, intent: str, history: str = "", capabilities: list[dict] | None = None,
@@ -1187,6 +1238,21 @@ def run_loop(*, intent: str, history: str = "", capabilities: list[dict] | None 
                         messages.append({"role": "user", "content": json.dumps(
                             {"tool_error": step_record["error"]}, ensure_ascii=False)})
                         continue
+            # 2026-10-20 增量范围拦截（固化02 §3.9 第四步）：`novel.diff` 落下的
+            # `_prep/novel.scope.json` 里记着「哪些章节没变」。请求区间**整段**落在未变
+            # 章节内 → 拒读（提示去读 read_plan / 旧条目正文）。跨章读一律放行，
+            # 宁可少拦不可拦死。没有范围文件（普通任务）= 零行为变化。
+            _deny_scope = _novel_scope_denial(outcome, output_dir, repo_id, _rp, _off, _mc)
+            if _deny_scope:
+                step_record["error"] = _deny_scope
+                outcome.steps.append(step_record)
+                messages.append({"role": "assistant", "content": json.dumps(
+                    {"tool": operation, "params": params}, ensure_ascii=False)})
+                messages.append({"role": "user", "content": json.dumps(
+                    {"tool_error": step_record["error"]}, ensure_ascii=False)})
+                if trace is not None:
+                    trace("tool.blocked", operation=operation, reason="novel_scope")
+                continue
         if trace is not None:
             trace("tool.call", operation=operation, params=params)
         try:

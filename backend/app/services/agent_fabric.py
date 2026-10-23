@@ -5,6 +5,7 @@
 """
 
 from __future__ import annotations
+from app.services.agent_contracts import CtxLike
 import logging
 import json
 import re
@@ -109,7 +110,7 @@ def _recipe_catalog_text() -> str:
             "不完全一致才逐步编排：\n" + "\n".join(lines))
 
 
-def _live_trace(ctx: dict, agent: str):
+def _live_trace(ctx: CtxLike, agent: str):
     """把 run_trace 事件同时实时推给前端对话流（stream_sink.trace）。
 
     非流式节点（计划编译/自由循环）内部阻塞时，SSE 也要能看到过程：
@@ -186,7 +187,7 @@ def _live_trace(ctx: dict, agent: str):
     return emit
 
 
-def _live_chat(ctx: dict):
+def _live_chat(ctx: CtxLike):
     """包装 chat_fn：调用前/成功/失败/重试都实时 sink 到对话流。
 
     模型调用可能挂起数分钟——调用前先显示「思考中」，重试时逐次显示原因，
@@ -604,7 +605,12 @@ def _fabric_knowledge_history(ctx: Any, user_text: str,
             "先 novel.survey 拿候选名单 → novel.charfacts 切素材段（用 chapter_start/end "
             "限定到当前剧情推进章节）→ 角色条目只读素材段；理解机制/背景/事件可 "
             "file.read_text 分卷读（每次 ≤20000 字符，按章节顺序），禁止一次硬塞超长文本。"
-            "写角色经历/事件不得使用未读章节的未来剧情。")
+            "写角色经历/事件不得使用未读章节的未来剧情。"
+            # 2026-10-20：更新版（同一作品的新稿）禁止整本重读——机械定位后只读新/改章节。
+            "\n【更新版纪律】若这次是「更新已有合集卡」（同一作品的新版/修订稿）："
+            "先对旧版全文 novel.index 建索引（旧索引已存在就直接用）→ novel.diff 拿 "
+            "read_plan → 只按 read_plan 的 start/max_chars 读新增与大改章节；"
+            "unchanged 章节一律不读、minor 修订默认不当变更；禁止用整本 read_text 替代 diff。")
     return history_text
 
 

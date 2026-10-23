@@ -587,7 +587,9 @@ def test_done前auto_embed只内嵌本作品归属的卡(tmp_path):
         {"tool": "doc.create_repo", "params": {
             "rel_path": "条目清单-测试.md", "content": "测试条目清单"}},
         {"tool": "worldbook.upsert_repo", "params": {"entries": [
-            {"comment": f"新条目{i}", "content": "x" * 120} for i in range(3)]}},
+            # 内容必须互不相同（L1 重复闸：三条相同填充会被判 same_content 而只落一条；
+            # 本用例考的是「内嵌到哪张卡」，不是重复语义）。
+            {"comment": f"新条目{i}", "content": f"条目正文{i}：" + "x" * 118} for i in range(3)]}},
         {"done": True, "reply": "写好了"},
     ]
     fabric_loop.run_loop(
