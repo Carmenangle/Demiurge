@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <title>Demiurge</title>
+  <style>
+    html, body { height: 100%; margin: 0; }
+    body {
+      display: flex; align-items: center; justify-content: center;
+      font: 14px/1.7 "Segoe UI", system-ui, sans-serif;
+      background: radial-gradient(1200px 600px at 50% 0%, #17202b 0%, #0e1218 60%, #0b0e13 100%);
+      color: #e6eaf0; user-select: none;
+    }
+    .wrap { width: 520px; text-align: center; }
+    .brand { font-size: 20px; letter-spacing: .16em; color: #cfd8e3; margin-bottom: 22px; }
+    /* 一行只显示当前在做的这一件事；做完了就换下一件。 */
+    .step { font-size: 14px; color: #9fb0c3; min-height: 22px; transition: color .2s; }
+    .step.done { color: #6f7d8d; }
+    .step.fail { color: #ff9b9b; }
+    .bar { display: flex; gap: 6px; justify-content: center; margin: 18px 0 0; }
+    .dot { width: 6px; height: 6px; border-radius: 50%; background: #2b3644; transition: background .2s, transform .2s; }
+    .dot.done { background: #7fd6a2; }
+    .dot.now { background: #4a90d9; transform: scale(1.35); }
+    .hint { margin-top: 26px; font-size: 12px; color: #5f6c7b; min-height: 16px; }
+    .error {
+      display: none; margin-top: 22px; padding: 14px 16px; text-align: left;
+      background: rgba(255, 120, 120, .08); border: 1px solid rgba(255, 120, 120, .28);
+      border-radius: 8px; color: #ffc9c9; font-size: 12.5px; white-space: pre-wrap;
+      max-height: 190px; overflow: auto;
+    }
+    .error.show { display: block; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="brand">DEMIURGE</div>
+    <div class="step" id="step">正在启动…</div>
+    <div class="bar" id="bar"></div>
+    <div class="hint" id="hint">关窗会隐藏到托盘；要退出请用托盘菜单</div>
+    <div class="error" id="error"></div>
+  </div>
+  <script>
+    (function () {
+      var stepEl = document.getElementById("step");
+      var barEl = document.getElementById("bar");
+      var hintEl = document.getElementById("hint");
+      var errorEl = document.getElementById("error");
+      var dots = [];
+
+      // 壳每推进一步就调用一次：上一项标完成，新起一项标"进行中"。
+      window.__dsh_step = function (text) {
+        if (dots.length) {
+          dots[dots.length - 1].className = "dot done";
+        }
+        var dot = document.createElement("div");
+        dot.className = "dot now";
+        barEl.appendChild(dot);
+        dots.push(dot);
+        if (dots.length > 12) {            // 长时间等待时不要铺满一行
+          barEl.removeChild(dots.shift());
+        }
+        stepEl.className = "step";
+        stepEl.textContent = text;
+      };
+
+      window.__dsh_note = function (text) {
+        hintEl.textContent = text;
+      };
+
+      window.__dsh_fail = function (title, detail) {
+        if (dots.length) { dots[dots.length - 1].className = "dot"; }
+        stepEl.className = "step fail";
+        stepEl.textContent = title;
+        errorEl.textContent = detail || "";
+        errorEl.className = "error show";
+        hintEl.textContent = "关掉这个窗口即可退出；原因也写在 logs\\desktop.log";
+      };
+    })();
+  </script>
+</body>
+</html>

@@ -151,6 +151,10 @@ WPF 壳的换壳实现，合同不变（同源 8010 + 无业务 IPC）。当前�
 已含：托盘（左键唤出 / 菜单显示·退出）、「关窗 = 隐藏到托盘」、第二实例激活既有窗口、
 `portable_release.py --desktop-dir` 同时接受两套壳产物（包内统一落名 `Demiurge.exe`）。
 
+启动体验（2026-10-23 第三刀）：**先开窗、再拉服务**。双击后立刻看到窗口逐项报进度
+（检查服务 → 复用/启动后端 → 等健康 → 图像服务 → 打开界面）；失败就停在窗口里写原因，
+不再出现「双击没反应」。产物拷成仓库根 `Demiurge.exe` 即可双击启动，替代 `start-dev` / `stop-dev`。
+
 ```
 cd desktop/tauri && cargo build
 target\debug\demiurge-shell.exe --self-test    # 15 项，与 WPF 同一份

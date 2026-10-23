@@ -127,6 +127,7 @@ impl RuntimeHost {
             }
             self.reused_external = true;
             self.mode = None;
+            progress(&format!("复用已在运行的后端：{}", self.base_url()));
             crate::shell_log::info(&format!("复用已运行的 Demiurge：{}", self.base_url()));
             return Ok(());
         }
@@ -142,8 +143,8 @@ impl RuntimeHost {
         self.mode = Some(launch.mode);
         self.spawn(launch)?;
         progress(match self.mode {
-            Some(RuntimeMode::Packaged) => "正在启动内置运行时…",
-            _ => "正在启动开发运行时（Python）…",
+            Some(RuntimeMode::Packaged) => "启动内置运行时…",
+            _ => "启动后端（Python / uvicorn）…",
         });
         self.wait_until_ready(&mut progress)
     }
@@ -341,8 +342,9 @@ impl RuntimeHost {
 
     fn wait_until_ready(&mut self, progress: &mut impl FnMut(&str)) -> StartupResult<()> {
         let timeout = ready_timeout();
-        let deadline = Instant::now() + timeout;
-        let mut next_notice = Instant::now();
+        let started = Instant::now();
+        let deadline = started + timeout;
+        let mut next_notice = started;
         while Instant::now() < deadline {
             if let Some(child) = self.child.as_mut() {
                 if let Ok(Some(status)) = child.try_wait() {
@@ -354,12 +356,14 @@ impl RuntimeHost {
                 }
             }
             if self.is_healthy() {
+                progress("后端健康检查通过");
                 crate::shell_log::info(&format!("运行时已就绪：{}", self.base_url()));
                 return Ok(());
             }
             if Instant::now() >= next_notice {
-                next_notice = Instant::now() + Duration::from_secs(5);
-                progress(&format!("等待服务就绪…（{}）", self.base_url()));
+                next_notice = Instant::now() + Duration::from_secs(3);
+                let waited = started.elapsed().as_secs();
+                progress(&format!("等待后端健康检查…（已等待 {waited}s）"));
             }
             std::thread::sleep(Duration::from_millis(300));
         }

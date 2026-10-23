@@ -20,6 +20,8 @@ WPF 壳（`../Demiurge.Desktop`）的换壳实现。**合同不变**：
 | Job Object + taskkill | ✅ | `KILL_ON_JOB_CLOSE` 兜整棵进程树；退出先 `taskkill /T` 再 `/F` 再 kill |
 | 日志 | ✅ | `logs/desktop.log`（壳）+ `logs/runtime.log`（运行时 stdout/stderr），失败时附最近 25 行 |
 | 窗口状态 | ✅ | `desktop.json`（PascalCase，与 WPF 双向兼容）+ 夹到虚拟屏幕内 |
+| 启动页 | ✅ | **先开窗再拉服务**：`ui/boot.html` 一行一项报进度（检查服务 → 复用/启动后端 → 等健康 → 图像服务 → 打开界面）；失败停在窗口里给原因 |
+| 根目录入口 | ✅ | 编译产物拷成仓库根 `Demiurge.exe` 即可双击启动，替代 `start-dev` / `stop-dev` |
 | 单实例 + 激活既有窗口 | ✅ | 互斥量判唯一 + 命名事件 `Local\Demiurge.Desktop.Activate`；第二实例 SetEvent 后退出，第一个把窗口 show+置前 |
 | WebView2 数据目录 | ✅ 必做 | 见下：默认目录在本机建不出来 |
 | `--self-test` 15 项 | ✅ | 与 WPF 同一份判据、同一串名字，输出可逐行比对 |
@@ -45,6 +47,9 @@ cargo build --release
 
 # 正常运行（在仓库内会自动用 backend\.venv 起开发运行时）
 .\target\debug\demiurge-shell.exe
+
+# 想双击就启动：把 release 产物拷到仓库根并改名（.gitignore 已忽略该 exe）
+copy desktop\tauri\target\release\demiurge-shell.exe Demiurge.exe
 ```
 
 本机网络备忘：cargo 直连 crates.io 会被系统代理拦，需
@@ -54,6 +59,8 @@ cargo build --release
 
 **关窗 = 隐藏到托盘**，运行时**不回收**（手机端要连就必须常驻）；真正退出只走托盘菜单「退出」，
 那条路径会先 `stop()` 运行时再 `app.exit(0)`。
+
+启动失败时例外：窗口停在错误页，关窗即退出（没有需要保活的东西）。
 
 WPF 壳保持旧行为（关窗即退出并回收），不再两边各改一套——决策只在新壳落地。
 

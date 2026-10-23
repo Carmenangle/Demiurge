@@ -1,14 +1,14 @@
 //! Demiurge 桌面壳（Tauri 2 版）。
 //!
 //! 壳的唯一合同：**同源 `http://127.0.0.1:8010` + 无业务 IPC**。
-//! 窗口、单实例、托盘、运行时生命周期、自检都在这份合同里；业务全在后端与前端，壳不掺和。
 //!
-//! 关窗语义（本刀定死）：**关窗 = 隐藏到托盘**，运行时继续跑（手机端要连就必须常驻）；
-//! 真正退出只走托盘菜单「退出」。
+//! 启动顺序是刻意的（2026-10-23 第三刀改）：**先开窗，再拉服务**。
+//! 双击后一秒内就该看到一个窗口在逐项报进度——「检查端口 → 复用/拉起后端 → 等健康 →
+//! 校验前端 → 图像服务 → 打开界面」。失败也停在窗口里写明原因，而不是静默退出
+//! （旧写法是「全部就绪才建窗口」，于是探测失败时用户看到的就是"双击没反应"）。
 //!
-//! 用法：
-//! - `demiurge-shell`              正常启动
-//! - `demiurge-shell --self-test`  跑 15 项自检（与 WPF 壳同一份判据）
+//! 关窗语义：正常状态下**关窗 = 隐藏到托盘**（运行时继续跑，手机端要连就得常驻）；
+//! 启动失败时关窗即退出（没有需要保活的东西）。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod http_probe;
@@ -20,11 +20,12 @@ mod settings;
 mod shell_log;
 mod single_instance;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 use runtime_host::RuntimeHost;
 use settings::ShellSettings;
@@ -40,7 +41,6 @@ fn run_app() -> i32 {
     let _guard = match single_instance::acquire() {
         Some(guard) => guard,
         None => {
-            // 已有实例：发一次激活信号就退出（对齐 WPF 的「第二实例唤出第一实例」）。
             if single_instance::signal_existing() {
                 shell_log::info("已有实例在运行，已请它把窗口拉出来；本次启动退出。");
             } else {
@@ -59,35 +59,42 @@ fn run_app() -> i32 {
         }
     };
 
-    let mut host = RuntimeHost::new(port);
-    if let Err(err) = host.ensure_ready(|message| shell_log::info(message)) {
-        shell_log::warn(&format!("运行时未能就绪：{err}"));
-        return 3;
-    }
-
-    let host = Arc::new(Mutex::new(host));
-    let url = format!("http://127.0.0.1:{port}");
+    let startup_failed = Arc::new(AtomicBool::new(false));
+    let host_slot: Arc<Mutex<Option<RuntimeHost>>> = Arc::new(Mutex::new(None));
     let window_settings = settings.clone();
-    let host_for_state = Arc::clone(&host);
+    let failed_for_event = Arc::clone(&startup_failed);
+    let host_for_state = Arc::clone(&host_slot);
 
     let app = tauri::Builder::default()
         .manage(AppState {
             host: host_for_state,
+            startup_failed: Arc::clone(&startup_failed),
         })
         .setup(move |app| {
-            build_window(app, &url, &window_settings)?;
+            // ① 先把窗口亮出来（加载 boot 页），后面每一步都往这个页面里报。
+            build_window(app, &window_settings)?;
             build_tray(app)?;
+
             let handle = app.handle().clone();
-            single_instance::spawn_activation_listener(move || activate(&handle));
+            let activation_handle = handle.clone();
+            single_instance::spawn_activation_listener(move || activate(&activation_handle));
+
+            // ② 启动链放后台线程：主线程要留在事件循环里，否则窗口画不出来。
+            std::thread::spawn(move || boot(handle, port));
             Ok(())
         })
-        .on_window_event(|window, event| {
+        .on_window_event(move |window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
-                // 关窗 = 隐藏：运行时不停，手机端还要连。
-                api.prevent_close();
                 persist_geometry(window);
-                let _ = window.hide();
-                shell_log::info("关窗 = 隐藏到托盘（运行时继续跑，退出请走托盘菜单）");
+                if failed_for_event.load(Ordering::Relaxed) {
+                    // 启动就没成功：没有需要保活的运行时，关窗即退出。
+                    shell_log::info("启动未成功，关窗即退出");
+                    window.app_handle().exit(0);
+                } else {
+                    api.prevent_close();
+                    let _ = window.hide();
+                    shell_log::info("关窗 = 隐藏到托盘（运行时继续跑，退出请走托盘菜单）");
+                }
             }
         })
         .build(tauri::generate_context!());
@@ -95,44 +102,132 @@ fn run_app() -> i32 {
     match app {
         Ok(app) => {
             app.run(|_, _| {});
-            if let Ok(mut host) = host.lock() {
-                host.stop();
+            if let Ok(mut slot) = host_slot.lock() {
+                if let Some(host) = slot.as_mut() {
+                    host.stop();
+                }
             }
             0
         }
         Err(err) => {
             shell_log::warn(&format!("窗口初始化失败：{err}"));
-            if let Ok(mut host) = host.lock() {
-                host.stop();
-            }
             4
         }
     }
 }
 
 struct AppState {
-    host: Arc<Mutex<RuntimeHost>>,
+    host: Arc<Mutex<Option<RuntimeHost>>>,
+    startup_failed: Arc<AtomicBool>,
+}
+
+/// 启动链：逐项推给 boot 页，一项做完换下一项。
+fn boot(handle: AppHandle, port: u16) {
+    step(&handle, &format!("检查 127.0.0.1:{port} 上的服务…"));
+    let mut host = RuntimeHost::new(port);
+    let push = |message: &str| step(&handle, message);
+
+    match host.ensure_ready(push) {
+        Ok(()) => {
+            // 图像服务不阻塞进入界面：ComfyUI 冷启 8~10 分钟，这里只报状态。
+            step(&handle, "检查图像服务（ComfyUI）…");
+            let comfy = match http_probe::get(port, "/api/comfyui/status", std::time::Duration::from_millis(2000)) {
+                Some(response) if response.status == 200 => {
+                    let running = response.body.contains("\"running\":true")
+                        || response.body.contains("\"running\": true");
+                    if running {
+                        "图像服务：运行中"
+                    } else {
+                        "图像服务：未运行（后端会在后台拉起，首次冷启较慢）"
+                    }
+                }
+                _ => "图像服务：状态未知（不影响使用）",
+            };
+            step(&handle, comfy);
+
+            step(&handle, "正在打开界面…");
+            if let Some(window) = handle.get_webview_window("main") {
+                let url = format!("http://127.0.0.1:{port}/");
+                let _ = window.eval(&format!("location.replace({});", json_string(&url)));
+            }
+            if let Some(state) = handle.try_state::<AppState>() {
+                if let Ok(mut slot) = state.host.lock() {
+                    *slot = Some(host);
+                }
+            }
+        }
+        Err(err) => {
+            let detail = err.to_string();
+            shell_log::warn(&format!("运行时未能就绪：{detail}"));
+            if let Some(state) = handle.try_state::<AppState>() {
+                state.startup_failed.store(true, Ordering::Relaxed);
+            }
+            if let Some(window) = handle.get_webview_window("main") {
+                let _ = window.eval(&format!(
+                    "window.__dsh_fail({}, {});",
+                    json_string("启动失败"),
+                    json_string(&detail)
+                ));
+            }
+        }
+    }
+}
+
+/// 推进一步：写壳日志 + 更新 boot 页那一行。
+fn step(handle: &AppHandle, message: &str) {
+    shell_log::info(message);
+    if let Some(window) = handle.get_webview_window("main") {
+        let _ = window.eval(&format!("window.__dsh_step({});", json_string(message)));
+    }
+}
+
+fn json_string(text: &str) -> String {
+    serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+/// WebView2 数据目录：三级回退。
+///
+/// 🔴 两条实测约束：
+/// ① 默认目录（exe 同目录 / `%LOCALAPPDATA%\<identifier>`）在本机建不出来 ⇒ 必须显式指定；
+/// ② 受限上下文（低完整性 / 沙箱派生的进程）写不了 `%LOCALAPPDATA%` ⇒ 建目录失败不能直接
+///    panic 掉整个窗口，回退到 exe 同级的 `webview-data` 再回退到 temp，并把选中路径写进日志。
+fn pick_webview_data_dir() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    let mut candidates = vec![paths::webview_data_dir()];
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|parent| parent.join("webview-data")))
+    {
+        candidates.push(dir);
+    }
+    candidates.push(std::env::temp_dir().join("demiurge-webview2"));
+
+    for dir in &candidates {
+        match std::fs::create_dir_all(dir) {
+            Ok(()) => {
+                shell_log::info(&format!("WebView2 数据目录：{}", dir.display()));
+                return Ok(dir.clone());
+            }
+            Err(err) => shell_log::warn(&format!(
+                "WebView2 数据目录不可用：{}（{err}）",
+                dir.display()
+            )),
+        }
+    }
+    Err("所有候选 WebView2 数据目录都不可用".into())
 }
 
 fn build_window(
     app: &mut tauri::App,
-    url: &str,
     window_settings: &ShellSettings,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let data_dir = paths::webview_data_dir();
-    // 🔴 本机实测：WebView2 默认数据目录建不出来（Io os error 5），必须显式指定。
-    std::fs::create_dir_all(&data_dir)?;
-    let mut builder = WebviewWindowBuilder::new(
-        app,
-        "main",
-        WebviewUrl::External(url.parse().expect("合法 URL")),
-    )
-    .title("Demiurge")
-    .inner_size(
-        window_settings.width.unwrap_or(settings::DEFAULT_WIDTH),
-        window_settings.height.unwrap_or(settings::DEFAULT_HEIGHT),
-    )
-    .data_directory(data_dir);
+    let data_dir = pick_webview_data_dir()?;
+    let mut builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("boot.html".into()))
+        .title("Demiurge")
+        .inner_size(
+            window_settings.width.unwrap_or(settings::DEFAULT_WIDTH),
+            window_settings.height.unwrap_or(settings::DEFAULT_HEIGHT),
+        )
+        .data_directory(data_dir);
     if let (Some(left), Some(top)) = (window_settings.left, window_settings.top) {
         builder = builder.position(left, top);
     }
@@ -163,8 +258,10 @@ fn build_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             "show" => activate(app),
             "quit" => {
                 if let Some(state) = app.try_state::<AppState>() {
-                    if let Ok(mut host) = state.host.lock() {
-                        host.stop();
+                    if let Ok(mut slot) = state.host.lock() {
+                        if let Some(host) = slot.as_mut() {
+                            host.stop();
+                        }
                     }
                 }
                 shell_log::info("托盘菜单退出：已回收自己拉起的运行时");
