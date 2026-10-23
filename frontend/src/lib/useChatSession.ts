@@ -70,7 +70,7 @@ import {
 import { deriveWorkflowMediaType } from "./canvasWorkflowRun";
 import { recoverAgentRun, shouldRecoverAgentRun } from "./agentRecovery";
 import { deletedMessageTombstones } from "./deletedMessageTombstones";
-import { nextStoryTurnNo, rememberStoryTurn, sealTurnsOf, storyTurnHighWater } from "./storyTurn";
+import { nextStoryTurnNo, rememberStoryTurn, resolveStoryTurn, sealTurnsOf, syncStoryTurnHighWater } from "./storyTurn";
 
 import { releaseAgentStream, type ActiveAgentStream } from "./agentStreamLifecycle";
 import type { ImageQuality, WorkMode } from "./viewRouting";
@@ -278,6 +278,12 @@ export function useChatSession(deps: ChatSessionDeps) {
     selfhealAttempts: settings.selfhealAttempts,
     // 2026-09-04 设置整合：智能体参数预设（settings 全局权威，温度/采样/输入输出上限）
     presetSampling: settings.presetSampling,
+    // 2026-10-20 方案 C：主对话此前**从不传代理**（`chatProxyUrl` 算了却被丢掉），
+    // 而后端 `build_model(proxy="")` 走「完全默认构造」⇒ 看起来像"自由切换"，
+    // 实际是"从未使用"。填表/插画 profile 却照传 ⇒ 两条路径行为割裂
+    // （实锤：同一模型对话能通、填表 `Connection error`）。
+    // 现在三路共用 `modelProxies.chatProxyUrl` 这一个来源。
+    chatProxyUrl: modelProxies.chatProxyUrl,
     providerProfile: chat.providerProfile || "openai_compatible",
     history,
     characterDir: settings.characterDir,
@@ -1222,14 +1228,15 @@ export function useChatSession(deps: ChatSessionDeps) {
   ) => {
     const visibleHistory = promptHistory(historyMessages);
     // 回合号持久化：重生成复用被删回合号（同回合幂等重写），新消息取链尾+1。
-    // 第 58 刀：再与**高位水印**取大 —— 「最高回合的消息被删/重生成」时 max+1 会复用
+    // 第 58 刀：新回合再与**高位水印**取大 —— 「最高回合的消息被删/重生成」时 max+1 会复用
     // 旧号 ⇒ 槽 id 撞车（真机：19:09 与 19:52 两轮同为 54 ⇒ 新图不插入/混叠）。
-    const turnNo = Math.max(
-      storyTurn && storyTurn > 0 ? storyTurn : 0,
-      nextStoryTurnNo(historyMessages),
-      storyTurnHighWater(threadId) + 1,
+    // 2026-10-21：显式 storyTurn 不取大、不抬水印（否则反复重试把复用号顶高：9 层虚到 16）；
+    // 先 sync 校准水印再 resolve（删末尾回合后水印停高位 ⇒ 跳号：9 轮会话出 turnNo=17）。
+    const resolved = resolveStoryTurn(
+      storyTurn, historyMessages, syncStoryTurnHighWater(threadId, historyMessages),
     );
-    rememberStoryTurn(threadId, turnNo);
+    const turnNo = resolved.turnNo;
+    if (resolved.remember) rememberStoryTurn(threadId, turnNo);
     const images = content?.images || [];
     const imageMask = content?.maskedImage
       ? { image: content.maskedImage.image, mask: content.maskedImage.mask }

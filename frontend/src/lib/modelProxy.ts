@@ -1,7 +1,14 @@
 export type ProxyMode = "on" | "off" | "inherit";
 
 export function normalizeProxyMode(value: unknown): ProxyMode {
-  return value === "off" || value === "inherit" || value === "on" ? value : "on";
+  // 2026-10-20 用户定案（方案 C）：未设置 / 非法值一律按 **"inherit"**（跟随全局探测）。
+  //
+  // 旧行为是回落 `"on"`，而 `resolveModelProxy` 对 `"on"` 的定义是「用户**显式强制**，
+  // 探测判定不可用也照走」⇒ 从未设置过 proxyMode 的模型会**无视 `proxyEnabled` 的探测结果**
+  // 强制走代理，与「模型能检测当前代理环境自由切换」的产品语义正好相反。
+  // 实锤后果：填表/插画链带上一个探测已判不可用的代理 ⇒ `Connection error`，
+  // 而主对话因为压根没传代理反而能通，两条路径行为割裂。
+  return value === "off" || value === "inherit" || value === "on" ? value : "inherit";
 }
 
 export function resolveModelProxy(

@@ -2,9 +2,19 @@ import { describe, expect, it } from "vitest";
 import { effectiveGlobalProxyUrl, globalProxyAddress, resolveModelProxy, normalizeProxyMode } from "./modelProxy";
 
 describe("模型三级代理", () => {
-  it("缺省按使用代理处理", () => {
-    expect(normalizeProxyMode(undefined)).toBe("on");
-    expect(resolveModelProxy(undefined, "http://127.0.0.1:7897", false)).toBe("http://127.0.0.1:7897");
+  it("缺省按「继承全局」处理，跟随探测结果", () => {
+    // 2026-10-20 用户定案（方案 C）：未设置 = 跟随探测，不再是「强制走代理」。
+    // 旧默认 "on" 会让从没设过 proxyMode 的模型无视 proxyEnabled 强制走代理，
+    // 与「能检测当前代理环境自由切换」的产品语义相反。
+    expect(normalizeProxyMode(undefined)).toBe("inherit");
+    expect(normalizeProxyMode(null)).toBe("inherit");
+    // 探测判定不可用 ⇒ 直连；可用 ⇒ 用全局地址
+    expect(resolveModelProxy(undefined, "http://127.0.0.1:7897", false)).toBe("");
+    expect(resolveModelProxy(undefined, "http://127.0.0.1:7897", true)).toBe("http://127.0.0.1:7897");
+  });
+
+  it("显式「使用代理」是用户强制，探测不可用也照走", () => {
+    expect(resolveModelProxy("on", "http://127.0.0.1:7897", false)).toBe("http://127.0.0.1:7897");
   });
 
   it("直连和继承全局语义互不混淆", () => {

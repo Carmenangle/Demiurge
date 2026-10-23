@@ -369,10 +369,44 @@ const MarkdownHtml = memo(function MarkdownHtml({ text, className, htmlRef }: {
   return <div className={className} ref={htmlRef} dangerouslySetInnerHTML={{ __html: html }} />;
 }, (prev, next) => prev.text === next.text && prev.className === next.className);
 
+/** 执行耗时格式化：`2m28s` / `45s`；无可用值返回空串（标题退回计数口径）。 */
+function formatElapsed(ms: number | null): string {
+  if (ms === null || !Number.isFinite(ms) || ms <= 0) return "";
+  const total = Math.round(ms / 1000);
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return minutes > 0 ? `${minutes}m${String(seconds).padStart(2, "0")}s` : `${seconds}s`;
+}
+
 function AssistantMessageBase({ msg, streaming, avatarState = "default", portrait, displayRegex, depth, macros, onSendImage, onMaskImage, onRunCommand, onSetCover, onPromptApproval, onRouteChoice, onRegenerate, onRegenerateWithPrompt, onCancelGeneration, onRetryIllustration, regenerating = false, onEdit, onDelete, onCreateCheckpoint, onBranch, onMergeAudio, visualCiRepoId, visualCiOutputDir, onFabricApprove }: { msg: ChatMessage; streaming?: boolean; avatarState?: AssistantAvatarState; portrait?: { name: string; url: string } | null; displayRegex?: RegexScript[]; depth?: number; macros?: { char: string; user: string }; onSendImage: (url: string) => void; onMaskImage?: (url: string) => void; onRunCommand?: (cmd: string) => void; onSetCover?: (url: string) => void; onPromptApproval?: (approval: PromptApproval, action: "submit" | "change" | "cancel", editedPrompt?: string) => Promise<void>; onRouteChoice?: (choice: RouteChoice, route: AgentRoute) => Promise<void>; onRegenerate?: (messageId: string, slotId?: string) => void; onRegenerateWithPrompt?: (messageId: string, slotId: string, prompt: string) => void; onCancelGeneration?: (messageId: string, slotId: string) => void; onRetryIllustration?: (messageId: string, slotId: string) => void; regenerating?: boolean; onEdit?: (id: string, text: string) => void; onDelete?: (id: string) => void; onCreateCheckpoint?: (id: string) => void; onBranch?: (id: string) => void; onMergeAudio?: (messageId: string) => Promise<void>; visualCiRepoId?: string; visualCiOutputDir?: string; onFabricApprove?: (approve: boolean, mode?: "approve" | "continue") => void }) {
   const [showThinking, setShowThinking] = useState(false); // 思考默认折叠（2026-08-31 深夜用户反馈：28k 长思考自动展开吞掉正文区），可手动展开
   // 非流式 agent「执行过程」面板：流式中自动展开实时可见；replace 后保留可折叠回看
   const [showTrace, setShowTrace] = useState(false);
+  // 执行耗时（WorkBuddy 式「已完成 2m28s」）：流式开始记时，结束时定格。
+  // 计时只活在本次挂载内 ⇒ 刷新/重开对话后为 null，标题自动退回「思考 N · 工具 M」口径。
+  const [elapsedMs, setElapsedMs] = useState<number | null>(null);
+  const [, tickElapsed] = useState(0);
+  const streamStartRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (streaming) {
+      if (streamStartRef.current === null) {
+        streamStartRef.current = Date.now();
+        setElapsedMs(null);
+      }
+      // 每秒推进一次，让「进行中 1m05s」像在跑（WorkBuddy 同款观感）
+      const timer = window.setInterval(() => tickElapsed((n) => n + 1), 1000);
+      return () => window.clearInterval(timer);
+    }
+    if (streamStartRef.current !== null) {
+      setElapsedMs(Date.now() - streamStartRef.current);
+      streamStartRef.current = null;
+    }
+    return undefined;
+  }, [streaming]);
+  const liveElapsed = streamStartRef.current !== null
+    ? Date.now() - streamStartRef.current
+    : elapsedMs;
+  const elapsedLabel = formatElapsed(liveElapsed);
   const [traceExpanded, setTraceExpanded] = useState<Set<string>>(new Set());
   const toggleTrace = useCallback((key: string) => {
     setTraceExpanded((prev) => {
@@ -756,7 +790,10 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
             )}
           </div>
         )}
-        {msg.thinking && (
+        {/* 思考内容并入执行过程面板（2026-10-20 用户实锤「透明度不够高」）：
+            两面板并存时思考只在该面板内出现，避免「思考在上面、过程在下面」各说各话；
+            没有 trace 的普通消息仍保留独立思考块（旧行为不变）。 */}
+        {msg.thinking && !traceSummary && (
           <div className="thinking">
             <button className="thinking-head" onClick={() => setShowThinking((s) => !s)}>
               <span>思考过程</span>
@@ -773,8 +810,9 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
             <button className="agent-trace-head" onClick={() => setShowTrace((s) => !s)}>
               <span>
                 {streaming
-                  ? "执行过程 · 进行中"
-                  : `执行过程 · 思考 ${traceSummary.thinks.length} · 工具 ${traceSummary.calls.length}`}
+                  ? `执行过程 · 进行中${elapsedLabel ? ` ${elapsedLabel}` : ""}`
+                  : `已完成${elapsedLabel ? ` ${elapsedLabel}` : ""}`
+                    + ` · 思考 ${traceSummary.thinks.length} · 工具 ${traceSummary.calls.length}`}
               </span>
               <ChevronDown
                 size={16}
@@ -783,6 +821,12 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
             </button>
             {(showTrace || streaming) && (
               <div className="agent-trace-body">
+                {msg.thinking && (
+                  <div className="agent-trace-think">
+                    <div className="agent-trace-think-label">思考内容</div>
+                    <div className="agent-trace-think-body">{msg.thinking}</div>
+                  </div>
+                )}
                 {traceSummary.plains.map((p, pi) => (
                   <div className="agent-trace-line" key={`p${pi}`}>{p.text}</div>
                 ))}
