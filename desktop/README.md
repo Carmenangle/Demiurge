@@ -132,6 +132,16 @@ desktop\publish\Demiurge.exe --self-test
 **验收标准**：直接用现成的 `--self-test` 那 15 项，两套壳跑同一份，谁的输出不一样就是谁没对齐。
 这比写迁移文档有用。
 
+**已实测（2026-10-23，空窗口跑通）**：`tauri 2.12.5` + MSVC 14.44.35207 + WebView2 155.0.4283.62，
+探针工程见 `_tmp/tauri-smoke/`（gitignored，不入库）。结果：窗口出现、标题 `TAURI_SMOKE_OK`、
+WebView2 子进程 12 个。但踩到一个**必做项**：
+
+🔴 **必须显式指定 WebView2 数据目录**。不指定时默认目录（exe 同目录 `<exe>.WebView2` 或
+`%LOCALAPPDATA%\<identifier>`）创建失败，错成 `Failed to setup app: 拒绝访问。 (os error 5)`
+（底层 `Io(Os { code: 5, PermissionDenied })`），窗口根本不出现；换成
+`WebviewWindowBuilder::data_directory(<可写目录>)` 立刻正常。⇒ 迁移清单里的
+「WebView2 data directory」不是可选项；WPF 壳那边已有的 data directory 口径要原样带过去。
+
 ## 待决：关窗语义（迁移时一并定死）
 
 现状：关窗会回收自己拉起的运行时（见「验证记录 · 第一刀」）。手机端要连就必须常驻 ⇒
