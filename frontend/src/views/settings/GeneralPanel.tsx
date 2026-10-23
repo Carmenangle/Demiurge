@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { ImagePlus, Monitor } from "lucide-react";
-import type { Settings, Theme } from "../../stores/settings";
+import { chatBgRenderOpacity, type Settings, type Theme } from "../../stores/settings";
 import { localViewUrl } from "../../api/comfyui";
 import { uploadChatBg } from "../../api/userState";
 
@@ -16,6 +16,7 @@ const THEMES: { value: Exclude<Theme, "system">; label: string; description: str
   { value: "eye-care", label: "象牙鼠尾草", description: "暖象牙与鼠尾草绿", colors: ["#FAF7EA", "#6F7F5D"] },
   { value: "green", label: "群青翡翠", description: "群青与翡翠", colors: ["#e9f5e9", "#395932"] },
   { value: "gray", label: "暖烟灰胭脂", description: "暖烟灰与深胭脂", colors: ["#e3dede", "#a63f4f"] },
+  { value: "liquid-glass", label: "深空液态玻璃", description: "独立壁纸、自由配色与玻璃控制台", colors: ["#0a1024", "#8fb4ff", "#63e0d4"] },
 ];
 
 export function GeneralPanel({ draft, setDraft }: PanelProps) {
@@ -47,7 +48,7 @@ export function GeneralPanel({ draft, setDraft }: PanelProps) {
     backgroundSize: fit === "cover" ? `${scale * 100}%` : "contain",
     backgroundPosition: `${posX}% ${posY}%`,
     backgroundRepeat: "no-repeat",
-    opacity,
+    opacity: chatBgRenderOpacity(draft.theme, opacity),
   };
 
   return (
@@ -82,6 +83,15 @@ export function GeneralPanel({ draft, setDraft }: PanelProps) {
         </button>
       </div>
 
+      {draft.theme === "liquid-glass" ? (
+        <div className="settings-section">
+          <h4>液态玻璃控制台</h4>
+          <p className="field-hint" style={{ margin: "0 0 12px" }}>
+            液态玻璃是独立主题：配色、玻璃、壁纸与全部效果都在右侧拉绳控制台里调。
+            先点下方「保存」，回到主界面后向左拉（或点击）屏幕右侧的拉绳即可打开。
+          </p>
+        </div>
+      ) : (
       <div className="settings-section">
         <h4>对话背景</h4>
         <p className="field-hint" style={{ margin: "0 0 12px" }}>
@@ -140,6 +150,7 @@ export function GeneralPanel({ draft, setDraft }: PanelProps) {
           </>
         )}
       </div>
+      )}
     </>
   );
 }

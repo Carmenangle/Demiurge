@@ -1,4 +1,4 @@
-import { apiGet, apiPost } from "./client";
+import { apiGet, apiGetBuffer, apiPost, apiUpload, apiUrl } from "./client";
 import type { Repo } from "../stores/repos";
 import type { Settings } from "../stores/settings";
 
@@ -75,6 +75,159 @@ export async function uploadVoice(
   if (!resp.ok) throw new Error(`上传失败: ${resp.status}`);
   return resp.json();
 }
+
+// 壁纸库：扫描用户存放地址（后端递归、分页、按类型过滤），返回缩略图直链。
+export interface WallpaperLibraryItem {
+  path: string;
+  name: string;
+  kind: "image" | "video";
+  animated: boolean;
+  size: number;
+  mtime: number;
+}
+
+export interface WallpaperLibraryPage {
+  folder: string;
+  query?: string;
+  total: number;
+  visible_total: number;
+  hidden_total: number;
+  page: number;
+  pages: number;
+  page_size: number;
+  truncated: boolean;
+  items: WallpaperLibraryItem[];
+}
+
+export type WallpaperLibraryKind = "all" | "video" | "image";
+
+export function scanWallpapers(args: {
+  folder: string;
+  kind?: WallpaperLibraryKind;
+  page?: number;
+  pageSize?: number;
+  hidden?: string[];
+  hiddenOnly?: boolean;
+  query?: string;
+}) {
+  return apiPost<WallpaperLibraryPage>("/user-state/wallpapers/scan", {
+    folder: args.folder,
+    kind: args.kind || "all",
+    page: args.page || 1,
+    page_size: args.pageSize || 21,
+    hidden: args.hidden || [],
+    hidden_only: args.hiddenOnly === true,
+    query: args.query || "",
+  }, 60000);
+}
+
+export function wallpaperThumbUrl(folder: string, path: string): string {
+  const q = new URLSearchParams({ folder, path });
+  return apiUrl(`/user-state/wallpapers/thumb?${q.toString()}`);
+}
+
+/**
+ * scene 作品的 `scene.pkg` 原始字节。
+ *
+ * 后端只按工坊 id 定位文件并原样吐出，不解析包格式（PKGV/LZ4/TEX 的解码真源在
+ * 前端 vendored 渲染器，见 `src/lib/scene/`）；id 非纯数字或包不存在都会 404。
+ */
+export function fetchWallpaperScenePkg(workshopId: string, signal?: AbortSignal): Promise<ArrayBuffer> {
+  const q = new URLSearchParams({ workshop_id: workshopId });
+  return apiGetBuffer(`/user-state/wallpapers/workshop/scene-pkg?${q.toString()}`, signal);
+}
+
+// Wallpaper Engine 创意工坊：后端自动发现 Steam 库（含 libraryfolders.vdf），按 431960 扫描。
+// web/application 无法在浏览器直接渲染，回落到作品自带 preview，并标 preview_only。
+// scene 作品自带 scene.pkg，前端 vendored 渲染器可实时渲染（见 scene_pkg）。
+export interface WallpaperWorkshopItem extends WallpaperLibraryItem {
+  folder: string;          // 作品目录（缩略图端点需要按作品目录做包含性校验）
+  title: string;
+  source: "workshop";
+  workshop_id: string;
+  we_type: string;         // scene / video / web / application…
+  preview_only: boolean;   // true=应用的是静态预览图，不是真正的动态场景
+  scene_pkg: boolean;      // true=作品带 scene.pkg，可交给前端实时渲染
+  preview: string;         // 作品自带预览图（常见 GIF）；空串=没有
+  preview_width: number;   // 预览图原始像素，用于标注低清
+  preview_height: number;
+}
+
+export interface WallpaperWorkshopPage {
+  folder: string;
+  roots: string[];
+  found: boolean;
+  query?: string;
+  total: number;
+  visible_total: number;
+  hidden_total: number;
+  page: number;
+  pages: number;
+  page_size: number;
+  truncated: boolean;
+  items: WallpaperWorkshopItem[];
+}
+
+export function scanWorkshopWallpapers(args: {
+  kind?: WallpaperLibraryKind;
+  page?: number;
+  pageSize?: number;
+  hidden?: string[];
+  hiddenOnly?: boolean;
+  query?: string;
+} = {}) {
+  return apiPost<WallpaperWorkshopPage>("/user-state/wallpapers/workshop", {
+    kind: args.kind || "all",
+    page: args.page || 1,
+    page_size: args.pageSize || 21,
+    hidden: args.hidden || [],
+    hidden_only: args.hiddenOnly === true,
+    query: args.query || "",
+  }, 60000);
+}
+
+// 自定义壁纸：存储位置（支持 ~）、上传（JPG/PNG/MP4）与更改位置时的文件迁移。
+export interface WallpaperStoreInfo {
+  dir: string;
+  raw: string;
+  default: string;
+  is_default: boolean;
+  count: number;
+  formats: string[];
+}
+
+export function getWallpaperStore(dir: string) {
+  const q = new URLSearchParams({ dir });
+  return apiGet<WallpaperStoreInfo>(`/user-state/wallpapers/store?${q.toString()}`, 15000);
+}
+
+export interface WallpaperMigration {
+  ok: boolean;
+  from: string;
+  to: string;
+  mapping: Record<string, string>;
+  moved: number;
+  count: number;
+  skipped: string[];
+  truncated: boolean;
+}
+
+export function migrateWallpaperStore(args: { fromDir: string; toDir: string }) {
+  return apiPost<WallpaperMigration>("/user-state/wallpapers/store/migrate", {
+    from_dir: args.fromDir,
+    to_dir: args.toDir,
+  }, 120000);
+}
+
+export function uploadWallpaper(file: File, dir: string) {
+  const fd = new FormData();
+  fd.append("file", file);
+  fd.append("dir", dir);
+  return apiUpload<{ ok: boolean; path: string; name: string; count: number }>(
+    "/user-state/wallpapers/upload", fd, 120000,
+  );
+}
+
 
 // 画布布局：每作品 canvas.json（布局/连线/视口），替换 localStorage 持久化
 export interface CanvasLayoutWire {

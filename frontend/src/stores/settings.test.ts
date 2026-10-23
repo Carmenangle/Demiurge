@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  activeChatModel, importSettings, modelDisplayName, normalizeContextBudgets, normalizeTheme,
-  resolvedEmbedModel, resolveTheme,
+  activeChatModel, chatBgRenderOpacity, DEFAULT_LIQUID_GLASS, importSettings, modelDisplayName,
+  normalizeContextBudgets, normalizeLiquidGlass, normalizeTheme, resolvedEmbedModel, resolveTheme,
 } from "./settings";
 
 describe("theme settings", () => {
@@ -18,6 +18,130 @@ describe("theme settings", () => {
     expect(resolveTheme("system", false)).toBe("bright");
     expect(resolveTheme("system", true)).toBe("night");
     expect(resolveTheme("green", true)).toBe("green");
+  });
+
+  it("accepts the liquid glass theme independently of the system preference", () => {
+    expect(normalizeTheme("liquid-glass")).toBe("liquid-glass");
+    expect(resolveTheme("liquid-glass", false)).toBe("liquid-glass");
+    expect(resolveTheme("liquid-glass", true)).toBe("liquid-glass");
+  });
+
+  it("boosts wallpaper opacity only for the liquid glass theme", () => {
+    expect(chatBgRenderOpacity("eye-care", 0.15)).toBe(0.15);
+    expect(chatBgRenderOpacity("liquid-glass", 0.15)).toBeCloseTo(0.6175);
+    expect(chatBgRenderOpacity("liquid-glass", 1)).toBe(1);
+  });
+});
+
+describe("liquid glass standalone theme settings", () => {
+  it("fills the full control-console defaults for missing config", () => {
+    const lg = normalizeLiquidGlass(undefined);
+    expect(lg.accent).toBe(DEFAULT_LIQUID_GLASS.accent);
+    expect(lg.glassColor).toBe("#ffffff");
+    expect(lg.glassWindow).toBe(true);
+    expect(lg.sidebarGlass).toBe(true);
+    expect(lg.wallpapers).toEqual([]);
+    expect(lg.rotationInterval).toBe(30);
+    expect(lg.ropeShown).toBe(true);
+    expect(lg.ropeScale).toBe(1);
+  });
+
+  it("clamps every numeric range and rejects invalid colors/fits", () => {
+    const lg = normalizeLiquidGlass({
+      accent: "javascript:alert(1)",
+      glassColor: "red",
+      glassAlpha: 999,
+      glassBlur: -3,
+      sidebarAlpha: -20,
+      contentAlpha: 500,
+      contentColor: "not-a-color",
+      wallpaperFit: "weird",
+      wallpaperBrightness: 999,
+      playbackRate: 9,
+      rotationInterval: 1,
+      ropeScale: 9,
+    });
+    expect(lg.accent).toBe(DEFAULT_LIQUID_GLASS.accent);
+    expect(lg.glassColor).toBe(DEFAULT_LIQUID_GLASS.glassColor);
+    expect(lg.glassAlpha).toBe(60);
+    expect(lg.glassBlur).toBe(0);
+    expect(lg.sidebarAlpha).toBe(0);
+    expect(lg.contentAlpha).toBe(80);
+    expect(lg.contentColor).toBe(DEFAULT_LIQUID_GLASS.contentColor);
+    expect(lg.wallpaperFit).toBe("cover");
+    expect(lg.wallpaperBrightness).toBe(160);
+    expect(lg.playbackRate).toBe(2);
+    expect(lg.rotationInterval).toBe(10);
+    expect(lg.ropeScale).toBe(2.5);
+  });
+
+  it("keeps an explicit empty content color as follow-glass", () => {
+    expect(normalizeLiquidGlass({ contentColor: "" }).contentColor).toBe("");
+  });
+
+  it("dedupes wallpapers and repairs the active id", () => {
+    const lg = normalizeLiquidGlass({
+      wallpapers: [
+        { path: "D:/wall/a.mp4" },
+        { path: "D:/wall/a.mp4" },
+        { path: "" },
+        { id: "second", path: "D:/wall/b.PNG" },
+      ],
+      activeWallpaperId: "missing",
+    });
+    expect(lg.wallpapers).toHaveLength(2);
+    expect(lg.wallpapers[0].kind).toBe("video");
+    expect(lg.wallpapers[0].name).toBe("a.mp4");
+    expect(lg.wallpapers[1].kind).toBe("image");
+    expect(lg.activeWallpaperId).toBe(lg.wallpapers[0].id);
+  });
+
+  it("keeps workshop preview covers and low-res marks across reloads", () => {
+    const lg = normalizeLiquidGlass({
+      wallpapers: [{
+        id: "we",
+        path: "D:/SteamLibrary/steamapps/workshop/content/431960/1/clip.mp4",
+        name: "作品",
+        preview: "  D:/SteamLibrary/steamapps/workshop/content/431960/1/preview.gif  ",
+        lowRes: true,
+      }],
+    });
+    expect(lg.wallpapers[0].preview).toBe(
+      "D:/SteamLibrary/steamapps/workshop/content/431960/1/preview.gif",
+    );
+    expect(lg.wallpapers[0].lowRes).toBe(true);
+    expect(normalizeLiquidGlass({ wallpapers: [{ path: "D:/a.png" }] }).wallpapers[0])
+      .not.toHaveProperty("preview");
+  });
+
+  it("keeps an explicit closed wallpaper closed across reloads", () => {
+    const lg = normalizeLiquidGlass({
+      wallpapers: [{ id: "kept", path: "D:/wall/a.png" }],
+      activeWallpaperId: "",
+    });
+    expect(lg.wallpapers).toHaveLength(1);
+    expect(lg.activeWallpaperId).toBe("");
+  });
+
+  it("trims the wallpaper folder and dedupes hidden paths", () => {
+    const lg = normalizeLiquidGlass({
+      wallpaperDir: '  "D:/wall/engine"  ',
+      wallpaperHidden: [" D:/wall/a.mp4 ", "", 3, "D:/wall/a.mp4", "D:/wall/b.png"],
+      wallpaperStoreDir: '  "~/Demiurge/wallpapers"  ',
+    });
+    expect(lg.wallpaperDir).toBe("D:/wall/engine");
+    expect(lg.wallpaperHidden).toEqual(["D:/wall/a.mp4", "D:/wall/b.png"]);
+    expect(lg.wallpaperStoreDir).toBe("~/Demiurge/wallpapers");
+    expect(normalizeLiquidGlass(undefined).wallpaperDir).toBe("");
+    expect(normalizeLiquidGlass(undefined).wallpaperHidden).toEqual([]);
+    expect(normalizeLiquidGlass(undefined).wallpaperStoreDir).toBe("");
+  });
+
+  it("migrates legacy settings that predate the standalone theme", () => {
+    const settings = importSettings(JSON.stringify({ theme: "liquid-glass" }));
+    expect(settings.theme).toBe("liquid-glass");
+    expect(settings.liquidGlass.glassWindow).toBe(true);
+    expect(settings.liquidGlass.ropeForm).toBe("icon");
   });
 });
 
@@ -87,7 +211,10 @@ describe("model display names", () => {
 });
 
 describe("model proxy migration", () => {
-  it("defaults every legacy model to proxy on", () => {
+  it("历史模型（无 proxyMode）迁移为「继承全局」，跟随探测结果", () => {
+    // 2026-10-20 用户定案（方案 C）**取代**了原先「历史模型一律 proxy on」的决定：
+    // 「on」语义是「用户显式强制，探测判定不可用也照走」——把从没设过的模型当
+    // 「强制走代理」，会让探测结果失效，并造成「对话能通、填表 Connection error」的割裂。
     const settings = importSettings(JSON.stringify({
       chatModels: [{ id: "c", baseUrl: "c", apiKey: "", modelName: "c" }],
       imageModels: [{ id: "i", baseUrl: "i", apiKey: "", modelName: "i" }],
@@ -95,10 +222,20 @@ describe("model proxy migration", () => {
       embedModel: { mode: "remote", baseUrl: "e", apiKey: "", modelName: "e" },
     }));
 
+    expect(settings.chatModels[0].proxyMode).toBe("inherit");
+    expect(settings.imageModels[0].proxyMode).toBe("inherit");
+    expect(settings.videoModels[0].proxyMode).toBe("inherit");
+    expect(settings.embedModel.proxyMode).toBe("inherit");
+  });
+
+  it("用户显式选过的 proxyMode 不被迁移覆盖", () => {
+    const settings = importSettings(JSON.stringify({
+      chatModels: [{ id: "c", baseUrl: "c", apiKey: "", modelName: "c", proxyMode: "on" }],
+      imageModels: [{ id: "i", baseUrl: "i", apiKey: "", modelName: "i", proxyMode: "off" }],
+    }));
+
     expect(settings.chatModels[0].proxyMode).toBe("on");
-    expect(settings.imageModels[0].proxyMode).toBe("on");
-    expect(settings.videoModels[0].proxyMode).toBe("on");
-    expect(settings.embedModel.proxyMode).toBe("on");
+    expect(settings.imageModels[0].proxyMode).toBe("off");
   });
 
   it("resolves the active chat and embedding proxies used during app startup", () => {

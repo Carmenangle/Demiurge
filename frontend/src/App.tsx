@@ -5,7 +5,9 @@ import {
   SECTION_SUBNAV,
   resolveActivityChatTarget,
 } from "./lib/viewRouting";
-import { useSettings, activeChatModel, resolvedEmbedModel } from "./stores/settings";
+import { useSettings, activeChatModel, resolvedEmbedModel, activeLiquidGlassWallpaper } from "./stores/settings";
+import { liquidGlassCssVars, nextLiquidGlassWallpaper } from "./lib/liquidGlass";
+import { LiquidGlassBackdrop } from "./components/LiquidGlassBackdrop";
 import { useRepos, type Repo } from "./stores/repos";
 import { Lightbox } from "./components/Lightbox";
 import { RagToast } from "./components/RagToast";
@@ -23,6 +25,7 @@ import { hasPendingComfyGeneration, hasServerPendingComfyGeneration } from "./li
 // 页面边界按需加载；应用壳、后台活动和快捷工具保持常驻。
 const SupportWidget = lazy(() => import("./components/SupportWidget").then((m) => ({ default: m.SupportWidget })));
 const QuickToolsWidget = lazy(() => import("./components/QuickToolsWidget").then((m) => ({ default: m.QuickToolsWidget })));
+const LiquidGlassDock = lazy(() => import("./components/LiquidGlassDock").then((m) => ({ default: m.LiquidGlassDock })));
 
 // 导航壳（重设计 v2）：左上 Demiurge▾ 常驻切三模式；返回键在 Demiurge 下方第一个（不顶掉 Demiurge）。
 // 首页顶部 仓库▾+作品▾ 两级选择器；选作品后三种模式都进入该作品会话(ChatView)。
@@ -30,6 +33,31 @@ const QuickToolsWidget = lazy(() => import("./components/QuickToolsWidget").then
 export function App() {
   const settingsStore = useSettings();
   const { settings } = settingsStore;
+  const lg = settings.liquidGlass;
+
+  // 液态玻璃的配色/透明度全部落到 CSS 变量；属性开关控制设置窗口与侧栏玻璃。
+  useEffect(() => {
+    const vars = liquidGlassCssVars(lg);
+    const root = document.documentElement;
+    for (const [key, value] of Object.entries(vars)) root.style.setProperty(key, value);
+    root.dataset.lgSidebar = lg.sidebarGlass ? "on" : "off";
+    root.dataset.lgSettings = lg.glassWindow ? "on" : "off";
+  }, [lg]);
+
+  // 自动轮换：只在液态玻璃主题下运行，参数变化后从当前壁纸重新计时。
+  const lgRef = useRef(lg);
+  lgRef.current = lg;
+  const updateLgRef = useRef(settingsStore.updateLiquidGlass);
+  updateLgRef.current = settingsStore.updateLiquidGlass;
+  useEffect(() => {
+    if (settings.theme !== "liquid-glass" || !lg.rotationEnabled || lg.wallpapers.length < 2) return;
+    // 用户主动关闭壁纸（activeId 为空）时不轮换，避免「关了又自己回来」。
+    if (!lg.activeWallpaperId) return;
+    const timer = window.setInterval(() => {
+      updateLgRef.current({ activeWallpaperId: nextLiquidGlassWallpaper(lgRef.current) });
+    }, lg.rotationInterval * 1000);
+    return () => window.clearInterval(timer);
+  }, [settings.theme, lg.rotationEnabled, lg.rotationInterval, lg.wallpapers.length, lg.activeWallpaperId]);
   const {
     repos, addRepo, addCardWork, addBranch, renameRepo, bindRepo, resolveBinding,
     setCover, setGeneratedCover, touchRepo,
@@ -197,6 +225,10 @@ export function App() {
 
   return (
     <div className="app">
+      {/* 液态玻璃的全应用壁纸层；只在主题启用或设置页预览时挂载，避免其他主题后台解码视频。 */}
+      {(settings.theme === "liquid-glass" || settingsOpen) && (
+        <LiquidGlassBackdrop lg={lg} wallpaper={activeLiquidGlassWallpaper(settings)} />
+      )}
       <Lightbox />
       <RagToast />
       <aside className="app-nav sidebar">
@@ -459,6 +491,11 @@ export function App() {
           onSelectActive={(name) => settingsStore.update({ activePresetName: name })}
           onClose={() => setPresetOpen(false)}
         />
+      )}
+      {settings.theme === "liquid-glass" && !settingsOpen && (
+        <Suspense fallback={null}>
+          <LiquidGlassDock lg={lg} update={settingsStore.updateLiquidGlass} />
+        </Suspense>
       )}
     </div>
   );

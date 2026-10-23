@@ -6,7 +6,7 @@ import {
 } from "../lib/modelProxy";
 import { normalizeSearchProvider, type SearchProvider } from "../lib/searchSource";
 
-export type ManualTheme = "bright" | "night" | "eye-care" | "green" | "gray";
+export type ManualTheme = "bright" | "night" | "eye-care" | "green" | "gray" | "liquid-glass";
 export type Theme = ManualTheme | "system";
 
 const MANUAL_THEMES: readonly ManualTheme[] = [
@@ -15,6 +15,7 @@ const MANUAL_THEMES: readonly ManualTheme[] = [
   "eye-care",
   "green",
   "gray",
+  "liquid-glass",
 ];
 
 export interface ChatModel {
@@ -165,9 +166,216 @@ export interface MediaInsertPreset {
   characterVoices?: Record<string, CharacterVoiceBinding>; // 角色名→参考音轨（音色）
 }
 
+// 液态玻璃主题（独立主题）的完整控制台配置。语义对齐 dsh-plugin-wallpaper-engine：
+// glassAlpha / sidebarAlpha / contentAlpha 越大越透明；其余滑杆为直观百分比。
+export type LiquidGlassWallpaperKind = "image" | "video";
+export type LiquidGlassRopeForm = "icon" | "orb";
+export type LiquidGlassFit = "cover" | "contain" | "center" | "fill";
+
+export interface LiquidGlassWallpaper {
+  id: string;
+  path: string;
+  name: string;
+  kind: LiquidGlassWallpaperKind;
+  preview?: string;   // 工坊作品自带预览图（GIF/PNG），优先用作列表封面
+  lowRes?: boolean;   // 只有作品预览图且分辨率过低（该作品浏览器渲染不了，只能贴预览图）
+  workshopId?: string; // 创意工坊作品 id（实时渲染按 id 取 scene.pkg）
+  scenePkg?: boolean;  // true=作品带 scene.pkg，可在页面内实时渲染而非只用静态预览
+}
+
+export interface LiquidGlassSettings {
+  accent: string;              // 主色（按钮/滑杆/选中态/高光）
+  glassColor: string;          // 玻璃基色
+  glassAlpha: number;          // 玻璃透明度 0~60（越大越透）
+  glassBlur: number;           // 玻璃模糊 px
+  border: number;              // 玻璃边框强度 0~100
+  scrim: number;               // 壁纸暗化 0~100
+  glassWindow: boolean;        // 设置窗口玻璃
+  sidebarGlass: boolean;       // 侧栏玻璃
+  sidebarBlur: number;         // 侧栏模糊 px
+  sidebarAlpha: number;        // 侧栏透明度 0~200（越大越透）
+  sidebarColor: string;        // 侧栏玻璃基色
+  contentAlpha: number;        // 内容面透明度 0~80（越大越透）
+  contentColor: string;        // 内容面底色（空=跟随玻璃基色）
+  wallpapers: LiquidGlassWallpaper[];
+  activeWallpaperId: string;
+  wallpaperDir: string;        // 壁纸库存放地址（扫描该文件夹生成预览，不写入其中）
+  wallpaperHidden: string[];   // 壁纸库中「已隐藏」的路径（不删除源文件）
+  wallpaperStoreDir: string;   // 自定义壁纸存储位置（空=后端默认；支持 ~ 表示用户主目录）
+  wallpaperFit: LiquidGlassFit;
+  wallpaperBlur: number;       // 壁纸模糊 px
+  wallpaperBrightness: number; // 亮度 %（100=原样）
+  wallpaperContrast: number;   // 对比度 %
+  wallpaperSaturate: number;   // 饱和度 %
+  flip: boolean;               // 水平翻转
+  playbackRate: number;        // 视频倍速 0.5~2
+  pauseOnHidden: boolean;      // 最小化/切标签页暂停
+  pauseOnBlur: boolean;        // 窗口失焦暂停
+  pauseOnBattery: boolean;     // 电池供电暂停
+  wallpaperPaused: boolean;    // 用户手动暂停
+  rotationEnabled: boolean;    // 自动轮换
+  rotationInterval: number;    // 轮换间隔（秒）
+  ropeShown: boolean;          // 显示右侧拉绳
+  ropeForm: LiquidGlassRopeForm;
+  ropeScale: number;           // 拉绳大小 0.5~2.5
+}
+
+export const DEFAULT_LIQUID_GLASS: LiquidGlassSettings = {
+  accent: "#8fb4ff",
+  glassColor: "#ffffff",
+  glassAlpha: 12,
+  glassBlur: 24,
+  border: 35,
+  scrim: 25,
+  glassWindow: true,
+  sidebarGlass: true,
+  sidebarBlur: 24,
+  sidebarAlpha: 120,
+  sidebarColor: "#ffffff",
+  contentAlpha: 30,
+  contentColor: "#0d1524",
+  wallpapers: [],
+  activeWallpaperId: "",
+  wallpaperDir: "",
+  wallpaperHidden: [],
+  wallpaperStoreDir: "",
+  wallpaperFit: "cover",
+  wallpaperBlur: 0,
+  wallpaperBrightness: 100,
+  wallpaperContrast: 100,
+  wallpaperSaturate: 100,
+  flip: false,
+  playbackRate: 1,
+  pauseOnHidden: true,
+  pauseOnBlur: false,
+  pauseOnBattery: false,
+  wallpaperPaused: false,
+  rotationEnabled: false,
+  rotationInterval: 30,
+  ropeShown: true,
+  ropeForm: "icon",
+  ropeScale: 1,
+};
+
+const HEX_COLOR_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+const LIQUID_GLASS_FITS: readonly LiquidGlassFit[] = ["cover", "contain", "center", "fill"];
+const LIQUID_GLASS_ROPE_FORMS: readonly LiquidGlassRopeForm[] = ["icon", "orb"];
+
+function normalizeHexColor(value: unknown, fallback: string): string {
+  return typeof value === "string" && HEX_COLOR_RE.test(value) ? value : fallback;
+}
+
+function clampLiquidGlassNumber(
+  value: unknown, lo: number, hi: number, fallback: number, roundInt = false,
+): number {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  const clamped = Math.min(hi, Math.max(lo, n));
+  return roundInt ? Math.round(clamped) : clamped;
+}
+
+export function liquidGlassWallpaperKind(path: string): LiquidGlassWallpaperKind {
+  return /\.(mp4|webm|mov|m4v|ogv)(?:[?#].*)?$/i.test(path) ? "video" : "image";
+}
+
+export function normalizeLiquidGlass(raw: unknown): LiquidGlassSettings {
+  const o = (raw && typeof raw === "object" ? raw : {}) as Partial<LiquidGlassSettings>;
+  const wallpapers: LiquidGlassWallpaper[] = [];
+  const seenPaths = new Set<string>();
+  for (const item of Array.isArray(o.wallpapers) ? o.wallpapers : []) {
+    if (!item || typeof item !== "object") continue;
+    const path = typeof item.path === "string" ? item.path.trim() : "";
+    if (!path || seenPaths.has(path)) continue;
+    seenPaths.add(path);
+    const preview = typeof item.preview === "string" ? item.preview.trim() : "";
+    // scene 实时渲染的两条线必须一起留：只有 id 没有 pkg 标记（或反之）都渲染不出来，
+    // 少了这一步，重载后作品会静默退回静态预览（2026-10-23 第三刀）。
+    const workshopId = typeof item.workshopId === "string" ? item.workshopId.trim() : "";
+    const scenePkg = item.scenePkg === true && /^\d{1,20}$/.test(workshopId);
+    wallpapers.push({
+      id: typeof item.id === "string" && item.id.trim() ? item.id : crypto.randomUUID(),
+      path,
+      name: typeof item.name === "string" && item.name.trim()
+        ? item.name.trim()
+        : path.split(/[\\/]/).pop() || "壁纸",
+      kind: liquidGlassWallpaperKind(path),
+      ...(preview ? { preview } : {}),
+      ...(item.lowRes === true ? { lowRes: true } : {}),
+      ...(workshopId ? { workshopId } : {}),
+      ...(scenePkg ? { scenePkg: true } : {}),
+    });
+  }
+  // 显式空串＝用户主动「关闭壁纸」，重载后必须保持关闭；缺失/失效才回退到第一张。
+  const activeId = o.activeWallpaperId === ""
+    ? ""
+    : wallpapers.some((w) => w.id === o.activeWallpaperId)
+      ? String(o.activeWallpaperId)
+      : (wallpapers[0]?.id || "");
+  const hidden: string[] = [];
+  const seenHidden = new Set<string>();
+  for (const p of Array.isArray(o.wallpaperHidden) ? o.wallpaperHidden : []) {
+    if (typeof p !== "string") continue;
+    const path = p.trim();
+    if (!path || seenHidden.has(path)) continue;
+    seenHidden.add(path);
+    hidden.push(path);
+  }
+  return {
+    accent: normalizeHexColor(o.accent, DEFAULT_LIQUID_GLASS.accent),
+    glassColor: normalizeHexColor(o.glassColor, DEFAULT_LIQUID_GLASS.glassColor),
+    glassAlpha: clampLiquidGlassNumber(o.glassAlpha, 0, 60, DEFAULT_LIQUID_GLASS.glassAlpha, true),
+    glassBlur: clampLiquidGlassNumber(o.glassBlur, 0, 60, DEFAULT_LIQUID_GLASS.glassBlur, true),
+    border: clampLiquidGlassNumber(o.border, 0, 100, DEFAULT_LIQUID_GLASS.border, true),
+    scrim: clampLiquidGlassNumber(o.scrim, 0, 100, DEFAULT_LIQUID_GLASS.scrim, true),
+    glassWindow: o.glassWindow !== false,
+    sidebarGlass: o.sidebarGlass !== false,
+    sidebarBlur: clampLiquidGlassNumber(o.sidebarBlur, 0, 60, DEFAULT_LIQUID_GLASS.sidebarBlur, true),
+    sidebarAlpha: clampLiquidGlassNumber(o.sidebarAlpha, 0, 200, DEFAULT_LIQUID_GLASS.sidebarAlpha, true),
+    sidebarColor: normalizeHexColor(o.sidebarColor, DEFAULT_LIQUID_GLASS.sidebarColor),
+    contentAlpha: clampLiquidGlassNumber(o.contentAlpha, 0, 80, DEFAULT_LIQUID_GLASS.contentAlpha, true),
+    contentColor: o.contentColor === ""
+      ? ""
+      : normalizeHexColor(o.contentColor, DEFAULT_LIQUID_GLASS.contentColor),
+    wallpapers,
+    activeWallpaperId: activeId,
+    wallpaperDir: typeof o.wallpaperDir === "string"
+      ? o.wallpaperDir.trim().replace(/^"(.*)"$/, "$1").trim()
+      : "",
+    wallpaperHidden: hidden,
+    wallpaperStoreDir: typeof o.wallpaperStoreDir === "string"
+      ? o.wallpaperStoreDir.trim().replace(/^"(.*)"$/, "$1").trim()
+      : "",
+    wallpaperFit: LIQUID_GLASS_FITS.includes(o.wallpaperFit as LiquidGlassFit)
+      ? o.wallpaperFit as LiquidGlassFit
+      : DEFAULT_LIQUID_GLASS.wallpaperFit,
+    wallpaperBlur: clampLiquidGlassNumber(o.wallpaperBlur, 0, 60, DEFAULT_LIQUID_GLASS.wallpaperBlur, true),
+    wallpaperBrightness: clampLiquidGlassNumber(o.wallpaperBrightness, 20, 160, DEFAULT_LIQUID_GLASS.wallpaperBrightness, true),
+    wallpaperContrast: clampLiquidGlassNumber(o.wallpaperContrast, 20, 160, DEFAULT_LIQUID_GLASS.wallpaperContrast, true),
+    wallpaperSaturate: clampLiquidGlassNumber(o.wallpaperSaturate, 0, 200, DEFAULT_LIQUID_GLASS.wallpaperSaturate, true),
+    flip: o.flip === true,
+    playbackRate: clampLiquidGlassNumber(o.playbackRate, 0.5, 2, DEFAULT_LIQUID_GLASS.playbackRate),
+    pauseOnHidden: o.pauseOnHidden !== false,
+    pauseOnBlur: o.pauseOnBlur === true,
+    pauseOnBattery: o.pauseOnBattery === true,
+    wallpaperPaused: o.wallpaperPaused === true,
+    rotationEnabled: o.rotationEnabled === true,
+    rotationInterval: clampLiquidGlassNumber(o.rotationInterval, 10, 600, DEFAULT_LIQUID_GLASS.rotationInterval, true),
+    ropeShown: o.ropeShown !== false,
+    ropeForm: LIQUID_GLASS_ROPE_FORMS.includes(o.ropeForm as LiquidGlassRopeForm)
+      ? o.ropeForm as LiquidGlassRopeForm
+      : DEFAULT_LIQUID_GLASS.ropeForm,
+    ropeScale: clampLiquidGlassNumber(o.ropeScale, 0.5, 2.5, DEFAULT_LIQUID_GLASS.ropeScale),
+  };
+}
+
+export function activeLiquidGlassWallpaper(s: Settings): LiquidGlassWallpaper | null {
+  return s.liquidGlass.wallpapers.find((w) => w.id === s.liquidGlass.activeWallpaperId) || null;
+}
+
 
 export interface Settings {
   theme: Theme;
+  liquidGlass: LiquidGlassSettings; // 液态玻璃独立主题的全套外观配置（其他主题忽略）
   chatModels: ChatModel[];          // 对话模型（可多个供应商）
   activeChatModelId?: string;       // 当前选中的对话模型 id
   providerProfileSemanticsVersion?: number; // v2 起只保留用户明确选择，禁止按模型名猜 wire
@@ -298,6 +506,7 @@ const KEY = "demiurge_settings";
 
 const DEFAULT: Settings = {
   theme: "system",
+  liquidGlass: DEFAULT_LIQUID_GLASS,
   chatModels: [],
   embedModel: { mode: "remote", apiKey: "ollama", baseUrl: "http://localhost:11434/v1", modelName: "qwen3-embedding:latest", proxyMode: "on" },
   vlmModel: { mode: "remote", apiKey: "ollama", baseUrl: "http://localhost:11434/v1", modelName: "gemma4:latest", proxyMode: "on" },
@@ -352,6 +561,7 @@ const DEFAULT: Settings = {
 function migrate(s: Record<string, unknown>): Settings {
   const merged = { ...DEFAULT, ...s } as Settings & { chatModel?: ChatModel };
   merged.theme = normalizeTheme(s.theme);
+  merged.liquidGlass = normalizeLiquidGlass(s.liquidGlass);
   merged.streamOutput = s.streamOutput === true;
   merged.agentAccessMode = s.agentAccessMode === "full" ? "full" : "approval";
   merged.searchProvider = normalizeSearchProvider(s.searchProvider);
@@ -520,6 +730,13 @@ export function resolveTheme(theme: Theme, prefersDark: boolean): ManualTheme {
   return prefersDark ? "night" : "bright";
 }
 
+// 液态玻璃主题把聊天背景升格为全应用壁纸；默认 15% 透明度会失去壁纸存在感，
+// 故加一个可见度下限（仍随原滑杆单调变化）。
+export function chatBgRenderOpacity(theme: Theme, opacity: number): number {
+  if (theme !== "liquid-glass") return opacity;
+  return Math.min(1, 0.55 + opacity * 0.45);
+}
+
 export function applyTheme(theme: Theme) {
   const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
   document.documentElement.dataset.theme = resolveTheme(theme, prefersDark);
@@ -583,6 +800,8 @@ export function useSettings() {
   }, [settings.theme]);
 
   const update = (patch: Partial<Settings>) => setSettings((p) => ({ ...p, ...patch }));
+  const updateLiquidGlass = (patch: Partial<LiquidGlassSettings>) =>
+    setSettings((p) => ({ ...p, liquidGlass: { ...p.liquidGlass, ...patch } }));
 
   // 继承全局的实时检测（2026-09-10 升级）：后端先读**系统代理**（WinINET/环境变量）、
   // 再回退手填地址，TCP 探活后返回生效值。结果经 withProxyStatus 写回
@@ -639,7 +858,7 @@ export function useSettings() {
     }));
 
   return {
-    settings, update, addImageModel, updateImageModel, removeImageModel,
+    settings, update, updateLiquidGlass, addImageModel, updateImageModel, removeImageModel,
     addStylePreset, updateStylePreset, removeStylePreset, refreshProxyStatus,
   };
 }

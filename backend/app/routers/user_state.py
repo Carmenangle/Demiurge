@@ -8,7 +8,7 @@
 import json
 from pathlib import Path
 
-from fastapi import APIRouter, File, Form, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from app.config import DATA_DIR
@@ -155,15 +155,128 @@ def sync_markers(req: SyncMarkersRequest) -> dict[str, int]:
     return {"written": n}
 
 
+class WallpaperScanRequest(BaseModel):
+    folder: str = ""
+    kind: str = "all"          # all / video / image
+    page: int = 1
+    page_size: int = 21
+    hidden: list[str] | None = None   # 已隐藏路径：正常列表过滤掉，hidden_only 时只看它们
+    hidden_only: bool = False
+    query: str = ""            # 名称搜索（相对路径/文件名，不区分大小写）
+
+
+class WallpaperStoreMoveRequest(BaseModel):
+    from_dir: str = ""
+    to_dir: str = ""           # 空串=恢复默认目录；支持 ~ 表示用户主目录
+
+
+class WallpaperWorkshopRequest(BaseModel):
+    kind: str = "all"
+    page: int = 1
+    page_size: int = 21
+    hidden: list[str] | None = None
+    hidden_only: bool = False
+    query: str = ""            # 作品标题 / 创意工坊 id 搜索，不区分大小写
+
+
+@router.post("/wallpapers/scan")
+def scan_wallpapers(req: WallpaperScanRequest) -> dict:
+    """递归扫描液态玻璃壁纸文件夹（图片 + 浏览器可播放视频），分页返回。"""
+    from app.services import wallpaper_library
+    try:
+        return wallpaper_library.scan(
+            req.folder, kind=req.kind, page=req.page, page_size=req.page_size,
+            hidden=req.hidden or (), hidden_only=req.hidden_only, query=req.query,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/wallpapers/thumb")
+def wallpaper_thumb(folder: str, path: str):
+    """壁纸缩略图（图片缩放 / 视频首帧），缓存到 data/wallpaper_thumbs/。"""
+    from fastapi.responses import FileResponse
+    from app.services import wallpaper_library
+    try:
+        source = wallpaper_library.resolve_wallpaper(folder, path)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    thumb = wallpaper_library.thumbnail(source)
+    if thumb is None:
+        raise HTTPException(status_code=404, detail="缩略图生成失败")
+    return FileResponse(
+        thumb, media_type="image/jpeg",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@router.post("/wallpapers/workshop")
+def scan_workshop_wallpapers(req: WallpaperWorkshopRequest) -> dict:
+    """自动发现 Steam 库并扫描 Wallpaper Engine 创意工坊（431960）壁纸。"""
+    from app.services import wallpaper_library
+    return wallpaper_library.scan_workshop(
+        kind=req.kind, page=req.page, page_size=req.page_size,
+        hidden=req.hidden or (), hidden_only=req.hidden_only, query=req.query,
+    )
+
+
+@router.get("/wallpapers/workshop/scene-pkg")
+def workshop_scene_pkg(workshop_id: str):
+    """把工坊 scene 作品的 `scene.pkg` 原样交给前端实时渲染器解码（后端不解析包格式）。"""
+    from fastapi.responses import FileResponse
+    from app.services import wallpaper_library
+    try:
+        pkg = wallpaper_library.scene_package(workshop_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(
+        pkg, media_type="application/octet-stream",
+        headers={"Cache-Control": "private, max-age=86400"},
+    )
+
+
+@router.get("/wallpapers/store")
+def wallpaper_store(dir: str = "") -> dict:
+    """自定义壁纸存储位置：解析 ~、返回绝对路径与已上传数量。"""
+    from app.services import wallpaper_library
+    try:
+        return wallpaper_library.store_info(dir)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/wallpapers/upload")
+def wallpaper_upload(file: UploadFile = File(...), dir: str = Form("")) -> dict:
+    """上传自定义壁纸到存储位置（仅 JPG/PNG/MP4，重名自动加序号）。"""
+    from app.services import wallpaper_library
+    try:
+        return wallpaper_library.save_upload(file.file, file.filename or "", dir)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/wallpapers/store/migrate")
+def wallpaper_store_migrate(req: WallpaperStoreMoveRequest) -> dict:
+    """更改存储位置：迁移旧位置中的壁纸文件，返回路径映射供前端改写列表。"""
+    from app.services import wallpaper_library
+    try:
+        return wallpaper_library.migrate_store(req.from_dir, req.to_dir)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/upload-bg")
 async def upload_bg(file: UploadFile = File(...)) -> dict:
-    """上传对话背景图，存到 data/backgrounds/，返回本地绝对路径（前端填进 chatBgPath，走 local-view 读）。"""
+    """上传对话/液态玻璃壁纸，存到 data/backgrounds/。
+
+    图片供 chatBgPath；视频供液态玻璃主题的独立壁纸，走 local-view（支持 Range 拖动进度）。
+    """
     from uuid import uuid4
     bg_dir = DATA_DIR / "backgrounds"
     bg_dir.mkdir(parents=True, exist_ok=True)
     name = file.filename or "bg.png"
     ext = name.rsplit(".", 1)[-1].lower() if "." in name else "png"
-    if ext not in ("png", "jpg", "jpeg", "webp", "gif", "bmp"):
+    if ext not in ("png", "jpg", "jpeg", "webp", "gif", "bmp", "mp4", "webm", "mov", "m4v", "ogv"):
         ext = "png"
     dest = bg_dir / f"{uuid4().hex}.{ext}"
     data = await file.read()

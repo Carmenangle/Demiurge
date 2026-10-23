@@ -61,11 +61,33 @@ export async function apiGet<T>(path: string, timeoutMs?: number): Promise<T> {
   }
 }
 
+/**
+ * GET 一个二进制响应（scene.pkg 这类「后端只给字节、由前端解析」的端点）。
+ *
+ * 不走 parseResponse：那是 JSON 语义。非 2xx 仍尽量透出后端 detail，
+ * 否则用户只能看到「API request failed: 404」这种没法行动的文案。
+ */
+export async function apiGetBuffer(path: string, signal?: AbortSignal): Promise<ArrayBuffer> {
+  const response = await fetch(apiUrl(path), { signal });
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const data = await response.json();
+      detail = typeof data?.detail === "string" ? data.detail : JSON.stringify(data?.detail ?? data);
+    } catch {
+      try { detail = await response.text(); } catch { /* ignore */ }
+    }
+    throw new Error(detail || `API request failed: ${response.status}`);
+  }
+  return response.arrayBuffer();
+}
+
 export async function apiPost<T>(
   path: string,
   body: unknown,
   timeoutMs?: number,
   externalSignal?: AbortSignal,
+  timeoutHint?: string,
 ): Promise<T> {
   // 可选超时：传 timeoutMs 时用 AbortController 限时，超时抛可读错误（避免前端永久“思考中…”死等）。
   // externalSignal：调用方（如“停止”按钮）主动中止；与超时区分，抛不同文案。
@@ -96,7 +118,12 @@ export async function apiPost<T>(
   } catch (e) {
     if ((e as Error)?.name === "AbortError") {
       if (externalSignal?.aborted) throw new Error("已停止本次请求。");
-      throw new Error(`请求超时（超过 ${Math.round((timeoutMs || 0) / 1000)} 秒）。可能是模型/中转较慢或需求太复杂，建议把需求拆小、分几轮发，或稍后重试。`);
+      // timeoutHint：调用方给场景化建议。默认文案在**生图提交**等非 LLM 场景是误导的
+      // （2026-10-19 实锤：ComfyUI 提交超时报「需求太复杂，建议把需求拆小」）。
+      throw new Error(
+        `请求超时（超过 ${Math.round((timeoutMs || 0) / 1000)} 秒）。`
+        + (timeoutHint ?? "可能是模型/中转较慢或需求太复杂，建议把需求拆小、分几轮发，或稍后重试。"),
+      );
     }
     throw e;
   } finally {
