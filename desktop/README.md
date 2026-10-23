@@ -88,10 +88,54 @@ desktop\publish\Demiurge.exe --self-test
 
 ## 已知限制
 
-- scene 壁纸仍使用页面内低清预览/静态封面；MIT scene 渲染器尚未接入。
-- 无安装器（NSIS/MSI）、无自动更新、无代码签名。
+- **scene 壁纸**：工坊作品与本地 WE 工程都能实时渲染（`scene.pkg` → Worker 解码 → 隔离 iframe
+  播放器，见 `frontend/src/lib/scene/`）；列表封面仍用作品自带 preview，尚未改成实时缩略图。
 - 复用仅支持「健康且提供前端」的同端口服务；仅提供 API 的开发后端会明确报错而不是静默换端口。
-- 仅 Windows x64；macOS/Linux 包仍只有浏览器入口。
+- 仅 Windows x64。
+
+## 明确不做（不是待办）
+
+以下五条**不进待办表**——列在这里是为了不再被反复提起。要重开，先改本节。
+
+- **安装器（NSIS/MSI）**：便携目录 + `install-shortcut` 已覆盖「装一下」的需求；引入安装器就要
+  连带写升级/卸载/回滚/静默参数，成本远超收益。
+- **自动更新**：壳只是「打开本机正在跑的服务」，版本由代码与 Runtime 包决定；壳内再加更新器
+  只会造出第二条版本真源。
+- **代码签名**：需要证书与长期密钥托管，而当前分发范围是自用与内测。
+- **随包分发固定版 WebView2**：体积 +150 MB 起，而 Evergreen Runtime 已是 Win10/11 的预装面。
+- **macOS/Linux 壳**：先有对应 Runtime 包与 CI 矩阵，再谈壳；现在写壳等于写一份没人能验的代码。
+
+## 唯一剩余待办（本机做不了）
+
+打 tag 时端到端跑一次 `.github/workflows/runtime-release.yml` + `portable-release.yml`，
+确认 `portable_release.py --desktop-dir` 这条链在 CI（干净 runner、无本机 NuGet 缓存）里也成立：
+
+1. `desktop-shell` job 的 `dotnet publish` + `--self-test` 通过，并产出固定名
+   `Demiurge-desktop-windows-x64.zip`；
+2. `publish` 与 `portable-release` 两个下游都取到该产物；
+3. 产出的包解开后，包根 `Demiurge.exe --self-test` 15/15。
+
+本机只能验到「发布 → 装配 → 自检」这三步（见下验证记录）；runner 差异只能由一次真实 tag 收口。
+
+## 迁移到 Tauri 2 的入口条件（备忘，不是当前任务）
+
+**前置不是代码，是工具链**：本机没有 VS Build Tools 与 Rust，两者不装，`cargo tauri` 一步都走不了。
+迁移的第一件事是装完并跑通一个空窗口，不是先写壳。
+
+真正的迁移物只有一份合同：**同源 `http://127.0.0.1:8010` + 无业务 IPC**。WPF 壳已经把这份合同
+压得很薄（窗口、单实例、托盘、窗口位置、运行时生命周期），所以 Tauri 是换壳不是重写。要搬的清单：
+
+端口解析 · health/前端文档探测 · 复用已在跑的服务 · 单实例 · 窗口状态 · 托盘 ·
+`std::process::Command` 拉起运行时 · Job Object + taskkill 兜底 · WebView2 data directory ·
+就绪超时 · 日志尾部。
+
+**验收标准**：直接用现成的 `--self-test` 那 15 项，两套壳跑同一份，谁的输出不一样就是谁没对齐。
+这比写迁移文档有用。
+
+## 待决：关窗语义（迁移时一并定死）
+
+现状：关窗会回收自己拉起的运行时（见「验证记录 · 第一刀」）。手机端要连就必须常驻 ⇒
+Tauri 那次把「**关窗 = 隐藏到托盘**」定死，不要两边各写一套。
 
 ## 验证记录（2026-10-23）
 
