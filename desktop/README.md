@@ -142,6 +142,21 @@ WebView2 子进程 12 个。但踩到一个**必做项**：
 `WebviewWindowBuilder::data_directory(<可写目录>)` 立刻正常。⇒ 迁移清单里的
 「WebView2 data directory」不是可选项；WPF 壳那边已有的 data directory 口径要原样带过去。
 
+## Tauri 2 壳（`desktop/tauri/`）：第一刀已落地
+
+WPF 壳的换壳实现，合同不变（同源 8010 + 无业务 IPC）。当前状态：端口解析、健康/前端文档探测、
+复用已在跑的服务、拉起运行时（便携包 / 仓库两种）、就绪超时、Job Object + taskkill 回收、
+窗口状态持久化、单实例（基础版）、15 项 `--self-test` 全部对齐 WPF 判据。
+
+未做：托盘 + 「关窗 = 隐藏到托盘」、激活既有窗口、并入 `portable_release.py --desktop-dir`。
+
+```
+cd desktop/tauri && cargo build
+target\debug\demiurge-shell.exe --self-test    # 15 项，与 WPF 同一份
+```
+
+细节见 `desktop/tauri/README.md`。
+
 ## 待决：关窗语义（迁移时一并定死）
 
 现状：关窗会回收自己拉起的运行时（见「验证记录 · 第一刀」）。手机端要连就必须常驻 ⇒
