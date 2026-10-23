@@ -300,6 +300,10 @@ export function LiquidGlassWallpaperLibrary({
       ? rendersLive(item) ? "（实时渲染）" : lowRes ? "（低清预览）" : "（静态预览）"
       : "";
     const name = workshop ? `${workshop.title}${suffix}` : displayName(item);
+    // 场景包来源与「工坊 id」解耦：本地 WE 工程没有工坊 id，但同样能实时渲染。
+    const sceneSource = workshop
+      ? (workshop.scene_pkg ? `workshop:${workshop.workshop_id}` : "")
+      : (item.scene_pkg === true ? (item.scene_source || "") : "");
     const entry: LiquidGlassWallpaper = {
       ...(existing || {
         id: crypto.randomUUID(),
@@ -310,11 +314,12 @@ export function LiquidGlassWallpaperLibrary({
       ...(workshop?.preview ? { preview: workshop.preview } : {}),
       ...(lowRes ? { lowRes: true } : {}),
       ...(workshop ? { workshopId: workshop.workshop_id } : {}),
-      ...(workshop?.scene_pkg ? { scenePkg: true } : {}),
+      ...(sceneSource ? { scenePkg: true, sceneSource } : {}),
     };
     if (!lowRes) delete entry.lowRes;
     if (!workshop) delete entry.workshopId;
-    if (!workshop?.scene_pkg) delete entry.scenePkg;
+    if (!sceneSource) delete entry.scenePkg;
+    if (!sceneSource) delete entry.sceneSource;
     update({
       wallpapers: existing
         ? lg.wallpapers.map((w) => (w.path === item.path ? entry : w))

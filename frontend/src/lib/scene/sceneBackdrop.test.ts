@@ -108,7 +108,7 @@ describe("attachSceneBackdrop", () => {
 
     const attach = attachSceneBackdrop({
       host,
-      workshopId: "123456",
+      source: "123456",
       fit: "center",
       paused: false,
       onState: (state) => { states.push(state); },
@@ -130,7 +130,7 @@ describe("attachSceneBackdrop", () => {
     const player = fakePlayer();
     const attach = attachSceneBackdrop({
       host: document.createElement("div"),
-      workshopId: "1",
+      source: "1",
       fit: "cover",
       paused: false,
       onState: () => {},
@@ -156,7 +156,7 @@ describe("attachSceneBackdrop", () => {
     const states: SceneBackdropState[] = [];
     attachSceneBackdrop({
       host: document.createElement("div"),
-      workshopId: "1",
+      source: "1",
       fit: "cover",
       paused: false,
       onState: (state) => { states.push(state); },
@@ -175,7 +175,7 @@ describe("attachSceneBackdrop", () => {
     const captured = {} as { callbacks: PlayerCallbacks };
     const attach = attachSceneBackdrop({
       host: document.createElement("div"),
-      workshopId: "1",
+      source: "1",
       fit: "cover",
       paused: false,
       onState: (state) => { states.push(state); },
@@ -199,7 +199,7 @@ describe("attachSceneBackdrop", () => {
     let mounts = 0;
     const attach = attachSceneBackdrop({
       host: document.createElement("div"),
-      workshopId: "1",
+      source: "1",
       fit: "cover",
       paused: false,
       onState: (state) => { states.push(state); },
@@ -233,7 +233,7 @@ describe("attachSceneBackdrop", () => {
     const mounted: number[] = [];
     const attach = attachSceneBackdrop({
       host: document.createElement("div"),
-      workshopId: "1",
+      source: "1",
       fit: "cover",
       paused: false,
       onState: (state) => { states.push(state); },
@@ -251,5 +251,49 @@ describe("attachSceneBackdrop", () => {
     expect(mounted).toEqual([]);
     expect(states).toEqual([]);
     expect(urls.revoked).toEqual([]);
+  });
+});
+
+describe("场景来源标识（A 刀：不再只认纯数字工坊 id）", () => {
+  it("来源原样交给取包通道——工坊与本地工程共用同一条路", async () => {
+    stubObjectUrls();
+    const seen: string[] = [];
+    const attach = attachSceneBackdrop({
+      host: document.createElement("div"),
+      source: "local:D:/wallpaper/we-project",
+      fit: "cover",
+      paused: false,
+      onState: () => {},
+      load: async (source) => {
+        seen.push(source);
+        return { decoded: decodedFixture(), pkgBytes: 1 };
+      },
+      mount: () => fakePlayer().handle,
+    });
+
+    await flush();
+    expect(seen).toEqual(["local:D:/wallpaper/we-project"]);
+    attach.dispose();
+  });
+
+  it("工坊来源仍按 workshop:<id> 形态透传，不在前端拆解", async () => {
+    stubObjectUrls();
+    const seen: string[] = [];
+    const attach = attachSceneBackdrop({
+      host: document.createElement("div"),
+      source: "workshop:200",
+      fit: "cover",
+      paused: false,
+      onState: () => {},
+      load: async (source) => {
+        seen.push(source);
+        return { decoded: decodedFixture(), pkgBytes: 1 };
+      },
+      mount: () => fakePlayer().handle,
+    });
+
+    await flush();
+    expect(seen).toEqual(["workshop:200"]);
+    attach.dispose();
   });
 });

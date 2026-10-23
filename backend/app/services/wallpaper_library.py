@@ -103,6 +103,56 @@ def _matches_query(query: str, *haystacks: str) -> bool:
     return any(text in (value or "").casefold() for value in haystacks)
 
 
+def _walk_scene_projects(root: Path) -> list[Path]:
+    """递归找本地 Wallpaper Engine 工程目录（`project.json` 与 `scene.pkg` 同目录）。
+
+    与 `_walk_media` 分开走：工程目录里的 preview.* 会被媒体遍历当成普通图片收一遍，
+    调用方据此把工程目录下的媒体条目剔掉，避免同一个作品在列表里出现两次。
+    """
+    found: list[Path] = []
+    root_depth = len(root.parts)
+    for current, dirs, files in os.walk(root, followlinks=False):
+        cur = Path(current)
+        if len(cur.parts) - root_depth >= _MAX_DEPTH:
+            dirs[:] = []
+        dirs[:] = sorted(
+            d for d in dirs
+            if not d.startswith(".") and not Path(current, d).is_symlink()
+        )
+        if "project.json" in files and "scene.pkg" in files:
+            found.append(cur)
+            if len(found) >= _MAX_FILES:
+                break
+    return found
+
+
+def _local_scene_entry(project_dir: Path) -> tuple[Path, dict] | None:
+    """本地 WE 工程 ⇒ (列表里展示用的预览图, 附加字段)。
+
+    列表项仍以预览图为 `path`：缩略图端点只认媒体文件，scene.pkg 它不认；
+    实时渲染走 `scene_source`，与预览图是两条独立的通道。
+    没有预览图的工程直接跳过——它在列表里既没有封面也没有可比对的名字。
+    """
+    try:
+        project = json.loads(
+            (project_dir / "project.json").read_text(encoding="utf-8-sig", errors="replace")
+        )
+    except (OSError, ValueError):
+        return None
+    if not isinstance(project, dict):
+        return None
+    preview = _workshop_preview(project_dir, project)
+    if preview is None or _kind_of(preview.suffix) != "image":
+        return None
+    title = str(project.get("title") or "").strip() or project_dir.name
+    return preview, {
+        "scene_pkg": True,
+        "scene_source": f"{_LOCAL_SOURCE_PREFIX}{project_dir.as_posix()}",
+        "project": project_dir.as_posix(),
+        "title": title,
+    }
+
+
 def scan(
     folder: str, *, kind: str = "all", page: int = 1, page_size: int = 21,
     hidden: list[str] | tuple[str, ...] = (), hidden_only: bool = False,
@@ -118,6 +168,22 @@ def scan(
     root = root.resolve()
 
     entries, truncated = _walk_media(root)
+    # 本地 WE 工程：把工程目录下的媒体条目从逐文件扫描结果里剔掉，改以「工程」为单位出条目，
+    # 否则同一个作品会以 preview 图和场景两条身份各出现一次。
+    scene_meta: dict[Path, dict] = {}
+    project_dirs = _walk_scene_projects(root)
+    if project_dirs:
+        entries = [
+            entry for entry in entries
+            if not any(entry[0] != d and d in entry[0].parents for d in project_dirs)
+        ]
+        for project_dir in project_dirs:
+            built = _local_scene_entry(project_dir)
+            if built is None:
+                continue
+            preview, meta = built
+            scene_meta[preview] = meta
+            entries.append((preview, "image"))
     if kind in ("video", "image"):
         entries = [e for e in entries if e[1] == kind]
     entries.sort(key=lambda item: item[0].relative_to(root).as_posix().casefold())
@@ -149,14 +215,19 @@ def scan(
             stat = path.stat()
         except OSError:
             continue
-        items.append({
+        item = {
             "path": str(path),
             "name": path.relative_to(root).with_suffix("").as_posix(),
             "kind": item_kind,
             "animated": item_kind == "video" or path.suffix.lower() == ".gif",
             "size": stat.st_size,
             "mtime": int(stat.st_mtime),
-        })
+        }
+        meta = scene_meta.get(path)
+        if meta is not None:
+            item.update(meta)
+            item["name"] = meta["title"]
+        items.append(item)
     return {
         "folder": str(root),
         "query": (query or "").strip(),
@@ -317,18 +388,50 @@ def _workshop_media(
 
 
 _WE_SCENE_ID_RE = re.compile(r"^\d{1,20}$")
+_WORKSHOP_SOURCE_PREFIX = "workshop:"
+_LOCAL_SOURCE_PREFIX = "local:"
 
 
-def scene_package(workshop_id: str) -> Path:
-    """工坊 scene 作品的打包文件 `scene.pkg`（实时渲染的唯一数据入口）。
+def _local_scene_package(raw: str) -> Path:
+    """本地文件夹里的 Wallpaper Engine 工程 ⇒ 它的 `scene.pkg`。
+
+    判据刻意用「目录里同时有 project.json 与 scene.pkg」而不是「任意目录里有 scene.pkg」：
+    前者能证明这是 WE 工程（而不是用户随手放了同名文件的目录），也让报错可操作。
+    只读用户自己填的目录，不做递归猜测。
+    """
+    folder_raw = (raw or "").strip().strip('"')
+    if not folder_raw:
+        raise ValueError("缺少本地场景目录")
+    folder = Path(folder_raw).expanduser()
+    if not folder.is_dir():
+        raise ValueError("本地场景目录不存在")
+    folder = folder.resolve()
+    if not (folder / "project.json").is_file():
+        raise ValueError("该目录不是 Wallpaper Engine 工程（缺 project.json）")
+    pkg = folder / "scene.pkg"
+    if not pkg.is_file():
+        raise ValueError("该作品没有可用的 scene.pkg")
+    return pkg.resolve()
+
+
+def scene_package(source: str) -> Path:
+    """scene 作品的打包文件 `scene.pkg`（实时渲染的唯一数据入口）。
+
+    来源标识两种形态（前端只透传、不解释）：
+    - `workshop:<id>` 或纯数字 → 创意工坊作品，包在 `<工坊根>/<id>/scene.pkg`；
+      id 必须是纯数字（Steam 发布 id）且落在已发现的工坊根下，越界无从构造。
+    - `local:<绝对路径>` → 本地文件夹里的 WE 工程（见 `_local_scene_package`）。
 
     `project.json` 的 `file` 指向包内的 `scene.json`，磁盘上并不存在，所以 scene 作品
     只有这一个可读的媒体；后端只负责把它原样交给前端解码，不解析包格式。
-    id 必须是纯数字（Steam 发布 id），且落在已发现的工坊根下，越界无从构造。
     """
-    ident = str(workshop_id or "").strip()
+    ident = str(source or "").strip()
+    if ident.startswith(_LOCAL_SOURCE_PREFIX):
+        return _local_scene_package(ident[len(_LOCAL_SOURCE_PREFIX):])
+    if ident.startswith(_WORKSHOP_SOURCE_PREFIX):
+        ident = ident[len(_WORKSHOP_SOURCE_PREFIX):].strip()
     if not _WE_SCENE_ID_RE.match(ident):
-        raise ValueError("工坊作品 id 不合法")
+        raise ValueError("场景来源不合法（应为 workshop:<id> 或 local:<目录>）")
     for root in workshop_roots():
         candidate = root / ident / "scene.pkg"
         try:

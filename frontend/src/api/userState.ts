@@ -84,6 +84,13 @@ export interface WallpaperLibraryItem {
   animated: boolean;
   size: number;
   mtime: number;
+  /**
+   * 本地文件夹里的 Wallpaper Engine 工程（含 project.json + scene.pkg）会带这两项：
+   * `scene_pkg`=可实时渲染，`scene_source`=`local:<绝对路径>`（直接喂给取包接口）。
+   * 普通图片/视频没有这两个字段。
+   */
+  scene_pkg?: boolean;
+  scene_source?: string;
 }
 
 export interface WallpaperLibraryPage {
@@ -132,9 +139,13 @@ export function wallpaperThumbUrl(folder: string, path: string): string {
  * 后端只按工坊 id 定位文件并原样吐出，不解析包格式（PKGV/LZ4/TEX 的解码真源在
  * 前端 vendored 渲染器，见 `src/lib/scene/`）；id 非纯数字或包不存在都会 404。
  */
-export function fetchWallpaperScenePkg(workshopId: string, signal?: AbortSignal): Promise<ArrayBuffer> {
-  const q = new URLSearchParams({ workshop_id: workshopId });
-  return apiGetBuffer(`/user-state/wallpapers/workshop/scene-pkg?${q.toString()}`, signal);
+/**
+ * 取场景包字节。`source` 是通用来源标识（见 sceneBackdrop.attachSceneBackdrop）：
+ * `workshop:<id>` / 纯数字 = 创意工坊作品；`local:<绝对路径>` = 本地 WE 工程文件夹。
+ */
+export function fetchWallpaperScenePkg(source: string, signal?: AbortSignal): Promise<ArrayBuffer> {
+  const q = new URLSearchParams({ source });
+  return apiGetBuffer(`/user-state/wallpapers/scene-pkg?${q.toString()}`, signal);
 }
 
 // Wallpaper Engine 创意工坊：后端自动发现 Steam 库（含 libraryfolders.vdf），按 431960 扫描。

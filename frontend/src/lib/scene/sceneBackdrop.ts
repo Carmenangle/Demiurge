@@ -117,12 +117,20 @@ const MAX_PLAYER_REBUILDS = 2;
  */
 export function attachSceneBackdrop(options: {
   host: HTMLElement;
-  workshopId: string;
+  /**
+   * 场景来源标识（后端 `scene_package` 的入参）：
+   * - `workshop:<id>` / 纯数字 → 创意工坊作品，包在 `<工坊根>/<id>/scene.pkg`
+   * - `local:<绝对路径>` → 本地文件夹里的 Wallpaper Engine 工程（含 project.json + scene.pkg）
+   * 这一层刻意不认识「工坊」这个概念，只把来源原样交给后端解析。
+   */
+  source: string;
   fit: LiquidGlassFit;
   paused: boolean;
   onState(state: SceneBackdropState): void;
   /** 测试注入口：真机走 fetch + Worker，单测传桩件即可跑完整挂载链。 */
-  load?(workshopId: string, signal: AbortSignal): Promise<{ decoded: SceneDecodeSuccess; pkgBytes: number }>;
+  /** 是否把宿主鼠标位置转发给播放器做视差（默认开）。 */
+  pointer?: boolean;
+  load?(source: string, signal: AbortSignal): Promise<{ decoded: SceneDecodeSuccess; pkgBytes: number }>;
   mount?(host: HTMLElement, resources: SceneResources, fit: WeSceneFit, paused: boolean,
     callbacks: { onUnavailable(reason: string): void; onNeedsReload(): void }): ScenePlayerHandle;
 }): SceneBackdropMount {
@@ -145,6 +153,7 @@ export function attachSceneBackdrop(options: {
           manifestJson: resources.manifestJson,
           fit: currentFit,
           paused: currentPaused,
+          pointer: options.pointer,
           onUnavailable: (reason) => finish({ status: "fallback", reason }),
           onNeedsReload: () => rebuild(),
         });
@@ -169,13 +178,13 @@ export function attachSceneBackdrop(options: {
   };
 
   const load = options.load
-    ?? (async (workshopId: string, signal: AbortSignal) => {
-      const bytes = await fetchWallpaperScenePkg(workshopId, signal);
+    ?? (async (source: string, signal: AbortSignal) => {
+      const bytes = await fetchWallpaperScenePkg(source, signal);
       const decoded = await decodeSceneInWorker(bytes);
       return { decoded, pkgBytes: bytes.byteLength };
     });
 
-  load(options.workshopId, controller.signal)
+  load(options.source, controller.signal)
     .then(({ decoded, pkgBytes }) => {
       if (disposed) return;
       resources = createSceneResources(decoded, pkgBytes);

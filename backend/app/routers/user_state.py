@@ -220,19 +220,30 @@ def scan_workshop_wallpapers(req: WallpaperWorkshopRequest) -> dict:
     )
 
 
-@router.get("/wallpapers/workshop/scene-pkg")
-def workshop_scene_pkg(workshop_id: str):
-    """把工坊 scene 作品的 `scene.pkg` 原样交给前端实时渲染器解码（后端不解析包格式）。"""
+@router.get("/wallpapers/scene-pkg")
+def wallpaper_scene_pkg(source: str = "", workshop_id: str = ""):
+    """把 scene 作品的 `scene.pkg` 原样交给前端实时渲染器解码（后端不解析包格式）。
+
+    `source` 是通用来源标识：`workshop:<id>`（或旧前端传的纯数字）/ `local:<绝对路径>`。
+    `workshop_id` 只为兼容旧前端保留，新代码一律走 `source`。
+    """
     from fastapi.responses import FileResponse
     from app.services import wallpaper_library
+    ident = (source or "").strip() or (workshop_id or "").strip()
     try:
-        pkg = wallpaper_library.scene_package(workshop_id)
+        pkg = wallpaper_library.scene_package(ident)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return FileResponse(
         pkg, media_type="application/octet-stream",
         headers={"Cache-Control": "private, max-age=86400"},
     )
+
+
+@router.get("/wallpapers/workshop/scene-pkg")
+def workshop_scene_pkg(workshop_id: str):
+    """旧路径（工坊 id 单参）；保留一版避免老前端 404，内部与上者同源。"""
+    return wallpaper_scene_pkg(source="", workshop_id=workshop_id)
 
 
 @router.get("/wallpapers/store")

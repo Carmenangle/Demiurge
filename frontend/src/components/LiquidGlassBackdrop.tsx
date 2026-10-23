@@ -158,13 +158,17 @@ export function LiquidGlassBackdrop({
   const sceneHostRef = useRef<HTMLDivElement>(null);
   const sceneMountRef = useRef<SceneBackdropMount | null>(null);
   const [sceneStatus, setSceneStatus] = useState<"off" | "loading" | "ready" | "fallback">("off");
-  const sceneWorkshopId = wallpaper?.scenePkg ? wallpaper.workshopId : undefined;
+  // 场景来源：新条目存 sceneSource（workshop:<id> / local:<路径>）；旧条目只有 workshopId，
+  // 按工坊口径补出来，避免升级后已应用的工坊壁纸失去实时渲染。
+  const sceneSource = wallpaper?.scenePkg
+    ? (wallpaper.sceneSource || (wallpaper.workshopId ? `workshop:${wallpaper.workshopId}` : undefined))
+    : undefined;
   const presentRef = useRef({ fit: lg.wallpaperFit, paused });
   presentRef.current = { fit: lg.wallpaperFit, paused };
 
   useEffect(() => {
     const host = sceneHostRef.current;
-    if (!sceneWorkshopId || !host) {
+    if (!sceneSource || !host) {
       sceneMountRef.current?.dispose();
       sceneMountRef.current = null;
       setSceneStatus("off");
@@ -173,7 +177,7 @@ export function LiquidGlassBackdrop({
     setSceneStatus("loading");
     const mount = attachSceneBackdrop({
       host,
-      workshopId: sceneWorkshopId,
+      source: sceneSource,
       fit: presentRef.current.fit,
       paused: presentRef.current.paused,
       onState: (state: SceneBackdropState) => {
@@ -188,7 +192,7 @@ export function LiquidGlassBackdrop({
       mount.dispose();
       if (sceneMountRef.current === mount) sceneMountRef.current = null;
     };
-  }, [sceneWorkshopId, revision]);
+  }, [sceneSource, revision]);
 
   useEffect(() => {
     sceneMountRef.current?.update({ fit: lg.wallpaperFit, paused });
@@ -228,7 +232,7 @@ export function LiquidGlassBackdrop({
           />
         )
       )}
-      {sceneWorkshopId && (
+      {sceneSource && (
         <div
           ref={sceneHostRef}
           className="app-backdrop-scene-host"

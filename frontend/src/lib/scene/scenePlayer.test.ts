@@ -147,3 +147,83 @@ describe("mountScenePlayer", () => {
     expect(options.onNeedsReload).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("鼠标视差转发（背景层 pointer-events:none 时仍能驱动画面）", () => {
+  const withUrls = () => {
+    vi.spyOn(URL, "createObjectURL").mockImplementation(() => "blob:test/doc");
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+  };
+
+  const mountWithFrames = (options: Partial<Parameters<typeof mountScenePlayer>[1]> = {}) => {
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+      frames.push(cb);
+      return frames.length;
+    });
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+    const parent = document.createElement("div");
+    document.body.appendChild(parent);
+    const handle = mountScenePlayer(parent, {
+      manifestJson: "{}",
+      fit: "cover",
+      paused: false,
+      onUnavailable: () => {},
+      onNeedsReload: () => {},
+      ...options,
+    });
+    const posted: Record<string, unknown>[] = [];
+    Object.defineProperty(handle.element.contentWindow, "postMessage", {
+      configurable: true,
+      writable: true,
+      value: (message: Record<string, unknown>) => { posted.push(message); },
+    });
+    return { handle, posted, frames };
+  };
+
+  it("宿主 mousemove 归一化坐标，按帧节流后才发给 iframe", () => {
+    withUrls();
+    const { handle, posted, frames } = mountWithFrames();
+    try {
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: 1000 });
+      Object.defineProperty(window, "innerHeight", { configurable: true, value: 500 });
+
+      window.dispatchEvent(new MouseEvent("mousemove", { clientX: 250, clientY: 125 }));
+      expect(posted).toEqual([]);                 // 未到帧不发，避免洪水
+      window.dispatchEvent(new MouseEvent("mousemove", { clientX: 750, clientY: 250 }));
+      frames.splice(0).forEach((cb) => cb(0));
+      expect(posted).toEqual([{ type: "dsh-pointer", x: 0.75, y: 0.5 }]);  // 只发最后一帧位置
+    } finally {
+      handle.dispose();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("pointer:false 时不监听宿主鼠标；dispose 后也不再转发", () => {
+    withUrls();
+    const off = mountWithFrames({ pointer: false });
+    try {
+      window.dispatchEvent(new MouseEvent("mousemove", { clientX: 100, clientY: 100 }));
+      off.frames.splice(0).forEach((cb) => cb(0));
+      expect(off.posted).toEqual([]);
+    } finally {
+      off.handle.dispose();
+    }
+
+    const on = mountWithFrames();
+    try {
+      window.dispatchEvent(new MouseEvent("mousemove", { clientX: 100, clientY: 100 }));
+      on.handle.dispose();
+      window.dispatchEvent(new MouseEvent("mousemove", { clientX: 200, clientY: 200 }));
+      on.frames.splice(0).forEach((cb) => cb(0));
+      expect(on.posted).toEqual([]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("垫片负责把 dsh-pointer 还原成播放器自己的 mousemove", () => {
+    const src = buildScenePlayerSrcdoc("blob:http://localhost/m");
+    expect(src).toContain("dsh-pointer");
+    expect(src).toContain("new MouseEvent('mousemove'");
+  });
+});

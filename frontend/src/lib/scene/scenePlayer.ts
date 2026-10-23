@@ -23,6 +23,8 @@ export interface ScenePlayerOptions {
   manifestJson: string;
   fit: WeSceneFit;
   paused: boolean;
+  /** 是否转发宿主鼠标位置给播放器（视差）。默认开；关闭后场景不再随鼠标偏移。 */
+  pointer?: boolean;
   /** 清单不可用（包里没有场景结构）⇒ 调用方回落静态预览。 */
   onUnavailable: (reason: string) => void;
   /** WebGL 上下文丢失且无法自行恢复 ⇒ 调用方重建播放器。 */
@@ -53,6 +55,22 @@ export function buildScenePlayerSrcdoc(manifestUrl: string): string {
     }
     return nativeFetch(input, init);
   };
+  // 视差输入转发：壁纸层是 pointer-events:none 的背景 iframe（放行会被它吞掉滚轮/拖拽），
+  // 所以鼠标坐标由宿主按 rAF 节流 postMessage 进来，这里还原成播放器自己要的 mousemove。
+  // 播放器按 e.clientX / window.innerWidth 归一化，故按同口径反算回去。
+  window.addEventListener('message', function (ev) {
+    var msg = ev.data;
+    if (!msg || msg.type !== 'dsh-pointer') return;
+    var nx = typeof msg.x === 'number' ? msg.x : 0.5;
+    var ny = typeof msg.y === 'number' ? msg.y : 0.5;
+    try {
+      window.dispatchEvent(new MouseEvent('mousemove', {
+        clientX: nx * window.innerWidth,
+        clientY: ny * window.innerHeight,
+        bubbles: true
+      }));
+    } catch (e) {}
+  });
 })();</script>`;
   // 用函数形式替换，避免 blob URL 里的 $ 序列被当成替换模式。
   return WE_SCENE_PLAYER_HTML.replace("<script>", () => shim + "<script>");
@@ -103,6 +121,24 @@ export function mountScenePlayer(
   iframe.addEventListener("load", onLoad);
   parent.appendChild(iframe);
 
+  // 鼠标视差：iframe 保持 pointer-events:none（背景层不能抢宿主的滚轮/拖拽/点选），
+  // 改由宿主监听 mousemove 并把归一化坐标按帧转发进去；rAF 节流 ⇒ 一帧最多一条消息。
+  let pointerRaf = 0;
+  let pointerX = 0.5;
+  let pointerY = 0.5;
+  const onPointerMove = (event: MouseEvent) => {
+    pointerX = event.clientX / Math.max(1, window.innerWidth);
+    pointerY = event.clientY / Math.max(1, window.innerHeight);
+    if (pointerRaf) return;
+    pointerRaf = requestAnimationFrame(() => {
+      pointerRaf = 0;
+      post({ type: "dsh-pointer", x: pointerX, y: pointerY });
+    });
+  };
+  if (options.pointer !== false) {
+    window.addEventListener("mousemove", onPointerMove, { passive: true });
+  }
+
   return {
     element: iframe,
     setFit(next) {
@@ -116,6 +152,9 @@ export function mountScenePlayer(
     dispose() {
       if (disposed) return;
       disposed = true;
+      if (pointerRaf) cancelAnimationFrame(pointerRaf);
+      pointerRaf = 0;
+      window.removeEventListener("mousemove", onPointerMove);
       iframe.removeEventListener("load", onLoad);
       window.removeEventListener("message", onMessage);
       iframe.remove();

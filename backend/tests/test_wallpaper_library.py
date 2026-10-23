@@ -456,3 +456,73 @@ def test_router_store_非法路径与上传格式返回400(tmp_path, monkeypatch
     saved = user_state.wallpaper_upload(file=good, dir="")
     assert saved["count"] == 1
     assert Path(saved["path"]).is_file()
+
+
+# ── 本地文件夹里的 Wallpaper Engine 工程（A 刀①：来源不再只认纯数字工坊 id）──────────
+
+
+def _local_project(root: Path, title: str = "My Scene") -> Path:
+    """造一个 WE 工程目录：project.json + scene.pkg + preview.gif。"""
+    project = root / "we-project"
+    project.mkdir(parents=True, exist_ok=True)
+    (project / "project.json").write_text(
+        json.dumps({"title": title, "type": "scene", "file": "scene.json", "preview": "preview.gif"}),
+        encoding="utf-8",
+    )
+    (project / "scene.pkg").write_bytes(b"PKGV0001 fake package")
+    _png(project / "preview.gif")
+    return project
+
+
+def test_scene_package_本地工程来源(tmp_path):
+    project = _local_project(tmp_path)
+    assert wallpaper_library.scene_package("local:" + str(project)) == (project / "scene.pkg").resolve()
+    for bad in ("local:", "local:" + str(tmp_path / "nope"), "local:" + str(tmp_path)):
+        with pytest.raises(ValueError):
+            wallpaper_library.scene_package(bad)
+
+
+def test_scene_package_本地目录必须同时有工程清单和包(tmp_path):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "scene.pkg").write_bytes(b"x")
+    with pytest.raises(ValueError):  # 只有同名包，不能证明是 WE 工程
+        wallpaper_library.scene_package("local:" + str(plain))
+
+    project = _local_project(tmp_path / "p2")
+    (project / "scene.pkg").unlink()
+    with pytest.raises(ValueError):
+        wallpaper_library.scene_package("local:" + str(project))
+
+
+def test_scene_package_workshop前缀等价于纯数字(tmp_path, monkeypatch):
+    root = _workshop_tree(tmp_path)
+    monkeypatch.setattr(wallpaper_library, "workshop_roots", lambda: [root])
+    assert wallpaper_library.scene_package("workshop:200") == (root / "200" / "scene.pkg").resolve()
+    for bad in ("workshop:", "workshop:abc"):
+        with pytest.raises(ValueError):
+            wallpaper_library.scene_package(bad)
+
+
+def test_scan_本地工程作为一条场景条目(tmp_path):
+    project = _local_project(tmp_path)
+    _png(tmp_path / "plain.png")
+
+    result = wallpaper_library.scan(str(tmp_path))
+    assert result["total"] == 2  # 工程只出 1 条（不是 preview 图 + 场景两条）
+    by_name = {item["name"]: item for item in result["items"]}
+    scene = by_name["My Scene"]
+    assert scene["scene_pkg"] is True
+    assert scene["scene_source"] == "local:" + project.as_posix()
+    assert scene["path"].endswith("preview.gif")
+    assert "plain" in by_name
+
+
+def test_router_scene_pkg_接受通用来源(tmp_path):
+    project = _local_project(tmp_path)
+    response = user_state.wallpaper_scene_pkg(source="local:" + str(project))
+    assert Path(response.path).resolve() == (project / "scene.pkg").resolve()
+
+    with pytest.raises(HTTPException) as exc:
+        user_state.wallpaper_scene_pkg(source="local:" + str(tmp_path / "nope"))
+    assert exc.value.status_code == 404

@@ -179,8 +179,13 @@ export interface LiquidGlassWallpaper {
   kind: LiquidGlassWallpaperKind;
   preview?: string;   // 工坊作品自带预览图（GIF/PNG），优先用作列表封面
   lowRes?: boolean;   // 只有作品预览图且分辨率过低（该作品浏览器渲染不了，只能贴预览图）
-  workshopId?: string; // 创意工坊作品 id（实时渲染按 id 取 scene.pkg）
+  workshopId?: string; // 创意工坊作品 id（列表/跳转用，渲染不再按它取包）
   scenePkg?: boolean;  // true=作品带 scene.pkg，可在页面内实时渲染而非只用静态预览
+  /**
+   * 场景包来源标识（后端 `scene_package` 的唯一入参）：`workshop:<id>` 或 `local:<绝对路径>`。
+   * 与 workshopId 分开是因为本地文件夹里的 Wallpaper Engine 工程没有工坊 id，但仍能实时渲染。
+   */
+  sceneSource?: string;
 }
 
 export interface LiquidGlassSettings {
