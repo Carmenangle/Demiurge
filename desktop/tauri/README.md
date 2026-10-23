@@ -61,6 +61,9 @@ desktop\tauri\target\release\demiurge-shell.exe --self-test
 `--self-test` 的 stdout 只有 `PASS/FAIL <名字>` + `self-test: N passed, M failed`；
 诊断信息（home 与工作目录）走 stderr，不参与比对。
 
+**2026-10-23 实跑结果：两套壳输出逐行一致**（各 16 行，15 PASS + summary，`diff` 为空）。
+比对时把 `DEMIURGE_SHELL_HOME` 指到同一个可写目录，否则两边会各读各的 `desktop.json`。
+
 ## 代码地图
 
 - `src/paths.rs` — 本地数据布局、便携包/仓库识别（对应 WPF `ShellPaths.cs`）
