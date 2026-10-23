@@ -8,7 +8,7 @@ description = "Demiurge 桌面壳（Tauri 2）：同源 http://127.0.0.1:8010 + 
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 windows-sys = { version = "0.59", features = [

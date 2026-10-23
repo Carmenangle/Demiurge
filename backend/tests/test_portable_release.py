@@ -208,6 +208,39 @@ def test_desktop_payload_conflicting_with_package_tree_is_rejected(monkeypatch, 
         )
 
 
+def test_tauri_desktop_payload_lands_as_demiurge_exe(monkeypatch, tmp_path):
+    """Tauri 壳产物（demiurge-shell.exe）也要能装，且包内落名 Demiurge.exe。
+
+    换壳不该改包内路径：启动器、快捷方式与「壳向上找 data/runtime/current.json」只认
+    Demiurge.exe。
+    """
+    monkeypatch.chdir(tmp_path)
+    assets, mingit = _full_rag_assets(tmp_path)
+    desktop = tmp_path / "tauri-release"
+    desktop.mkdir()
+    (desktop / "demiurge-shell.exe").write_bytes(b"tauri-shell")
+    (desktop / "demiurge-shell.pdb").write_bytes(b"symbols")
+
+    seen = {}
+
+    def fake_run(command, cwd, check):
+        seen["command"] = command
+        source = Path(cwd) / command[-1]
+        assert (source / "Demiurge.exe").read_bytes() == b"tauri-shell"
+        assert not (source / "demiurge-shell.exe").exists()
+        assert not (source / "demiurge-shell.pdb").exists()
+        archive = Path(command[-2])
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        archive.write_bytes(b"archive")
+
+    monkeypatch.setattr(portable_release.subprocess, "run", fake_run)
+    portable_release.build_portable(
+        assets, mingit, "v0.15", Path("out"), tmp_path / "work",
+        "windows-x64-full-rag", desktop,
+    )
+    assert [output.suffix for output in [Path(seen["command"][-2])]] == [".7z"]
+
+
 def test_seven_zip_resolves_standard_windows_install(monkeypatch, tmp_path):
     if portable_release.os.name != "nt":
         pytest.skip("Windows path discovery")

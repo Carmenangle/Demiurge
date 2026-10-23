@@ -20,11 +20,11 @@ WPF 壳（`../Demiurge.Desktop`）的换壳实现。**合同不变**：
 | Job Object + taskkill | ✅ | `KILL_ON_JOB_CLOSE` 兜整棵进程树；退出先 `taskkill /T` 再 `/F` 再 kill |
 | 日志 | ✅ | `logs/desktop.log`（壳）+ `logs/runtime.log`（运行时 stdout/stderr），失败时附最近 25 行 |
 | 窗口状态 | ✅ | `desktop.json`（PascalCase，与 WPF 双向兼容）+ 夹到虚拟屏幕内 |
-| 单实例 | ✅ 基础版 | 命名互斥量；**激活既有窗口**还没做（WPF 用命名事件） |
+| 单实例 + 激活既有窗口 | ✅ | 互斥量判唯一 + 命名事件 `Local\Demiurge.Desktop.Activate`；第二实例 SetEvent 后退出，第一个把窗口 show+置前 |
 | WebView2 数据目录 | ✅ 必做 | 见下：默认目录在本机建不出来 |
 | `--self-test` 15 项 | ✅ | 与 WPF 同一份判据、同一串名字，输出可逐行比对 |
-| 托盘 + 关窗隐藏 | ⬜ 未做 | 当前关窗 = 退出 + 回收自己拉起的运行时（WPF 现状）；托盘与「关窗=隐藏」是下一刀 |
-| 打包装配 | ⬜ 未做 | `portable_release.py --desktop-dir` 目前只认 WPF 产物 |
+| 托盘 + 关窗隐藏 | ✅ | 托盘左键唤出、菜单「显示主窗口 / 退出」；**关窗 = 隐藏到托盘**，运行时继续跑（手机端可连），真退出只走托盘菜单 |
+| 打包装配 | ✅ | `portable_release.py --desktop-dir` 同时认 WPF `Demiurge.exe` 与 Tauri `demiurge-shell.exe`，包内一律落名 `Demiurge.exe` |
 
 ## 🔴 WebView2 数据目录必须显式指定
 
@@ -49,6 +49,17 @@ cargo build --release
 
 本机网络备忘：cargo 直连 crates.io 会被系统代理拦，需
 `NO_PROXY='*' no_proxy='*'` + crates-io 走 rsproxy 稀疏索引（已写进用户级 `~/.cargo/config.toml`）。
+
+## 关窗语义（已定案）
+
+**关窗 = 隐藏到托盘**，运行时**不回收**（手机端要连就必须常驻）；真正退出只走托盘菜单「退出」，
+那条路径会先 `stop()` 运行时再 `app.exit(0)`。
+
+WPF 壳保持旧行为（关窗即退出并回收），不再两边各改一套——决策只在新壳落地。
+
+实跑证据（2026-10-23，release 版）：
+`CloseMainWindow()` 返回 true → 4 秒后进程 **alive=True** 且 `MainWindowTitle=''`（窗口已隐藏）；
+再起第二个实例 → 它 **立即退出（exit=0）**，第一个窗口标题回到 `Demiurge`（被唤出）。
 
 ## 与 WPF 壳对拍
 

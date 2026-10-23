@@ -16,6 +16,9 @@ FULL_RAG_TARGET = "windows-x64-full-rag"
 CHUNK_SIZE = 1024 * 1024
 GITHUB_ASSET_LIMIT = 2_000_000_000
 DESKTOP_SHELL_EXE = "Demiurge.exe"
+# Tauri 壳的产物名（Cargo package 名）。包内一律落成 DESKTOP_SHELL_EXE：
+# 快捷方式、启动器与「壳向上找 data/runtime/current.json」都只认这一个名字。
+TAURI_SHELL_EXE = "demiurge-shell.exe"
 WINDOWS_SCRIPT_DIR = Path(__file__).resolve().parents[1] / "release" / "windows"
 WINDOWS_SCRIPTS = {
     "start-dev.bat": "start-dev.bat",
@@ -96,19 +99,38 @@ def _assemble_layer(assets_dir: Path, layer: dict, work_dir: Path) -> Path:
     return archive
 
 
+def _resolve_shell_source(desktop_dir: Path) -> tuple[Path, str]:
+    """定位桌面壳产物，返回 (源文件, 包内目标名)。
+
+    两套壳都能装：WPF 产物叫 `Demiurge.exe`，Tauri 产物叫 `demiurge-shell.exe`。
+    包内统一落成 `Demiurge.exe` —— 启动器、快捷方式与「向上找 data/runtime」都只认它，
+    换壳不该顺手改包内路径。
+    """
+    wpf = desktop_dir / DESKTOP_SHELL_EXE
+    if wpf.is_file():
+        return wpf, DESKTOP_SHELL_EXE
+    tauri = desktop_dir / TAURI_SHELL_EXE
+    if tauri.is_file():
+        return tauri, DESKTOP_SHELL_EXE
+    raise RuntimeError(
+        f"桌面壳发布产物缺少 {DESKTOP_SHELL_EXE} 或 {TAURI_SHELL_EXE}：{desktop_dir}"
+    )
+
+
 def _install_desktop_shell(tree: Path, desktop_dir: Path) -> list[str]:
     """把桌面壳发布产物铺到包根。
 
     壳从自身所在目录向上找 `data/runtime/current.json`，所以产物必须与 `data/` 同级；
     调试符号不进用户包。
     """
-    if not (desktop_dir / DESKTOP_SHELL_EXE).is_file():
-        raise RuntimeError(f"桌面壳发布产物缺少 {DESKTOP_SHELL_EXE}：{desktop_dir}")
+    shell_source, shell_target = _resolve_shell_source(desktop_dir)
     installed: list[str] = []
     for source in sorted(p for p in desktop_dir.rglob("*") if p.is_file()):
         relative = source.relative_to(desktop_dir).as_posix()
         if relative.endswith(".pdb"):
             continue
+        if source == shell_source and relative != shell_target:
+            relative = shell_target
         target = _safe_target(tree, relative)
         if target.exists():
             raise RuntimeError(f"桌面壳产物与包内既有文件冲突：{relative}")
