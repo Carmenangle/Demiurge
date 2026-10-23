@@ -262,6 +262,396 @@ def _entry_matches(item: dict[str, Any], query: str) -> bool:
     return any(term and term in query for term in terms)
 
 
+# ── 角色外貌提取（2026-10-23 重构）──────────────────────────────────────────────
+# 旧实现只认「comment 含『角色卡·』＋ 行首【外貌/身材/穿着】」：
+#   · 导入的世界书若没有这套结构（【外观】、`外貌：`、纯散文）⇒ 一个字都提不出来；
+#   · 只取整行 ⇒ 简介里的「暗黄色的眼睛」这类外貌事实被丢掉；
+#   · 单条超过 max_chars ⇒ 直接 break，连裁剪都没有。
+# 新口径＝**确定性三层抽取，零新增 LLM 调用**（省价格）：
+#   ① 结构化标题 / 行标签（外貌、外观、身材、穿着、Appearance…）整段保留；
+#   ② 其余正文里**带外貌线索的整句**（发色/瞳色/身高/服装/饰品…）；
+#   ③ 两者都抽不到、但确属角色条目 ⇒ 整条正文兜底（限预算裁剪）。
+# 提示词编译器（下游 LLM）本来就要从这段文字里写英文外貌，无需再单独调一次模型。
+_VISUAL_CUE_CN_RE = re.compile(
+    "|".join((
+        "外貌", "外观", "容貌", "长相", "面容", "样貌", "外表", "形象", "气质", "神态",
+        "身高", "体型", "体态", "身形", "体格", "身材",
+        "肌肤", "皮肤", "肤色", "发色", "发型", "头发", "长发", "短发", "卷发", "直发",
+        "秀发", "银发", "金发", "黑发", "红发", "白发", "棕发", "褐发", "青发", "蓝发",
+        "粉发", "紫发", "马尾", "辫子", "刘海",
+        "眼眸", "眼睛", "双眼", "瞳孔", "瞳色", "双眸", "眼瞳", "眸子", "眉眼", "眉毛",
+        "睫毛", "鼻子", "鼻梁", "嘴唇", "唇色", "朱唇", "脸颊", "脸型", "五官",
+        "胸部", "乳房", "巨乳", "丰乳", "乳沟", "乳贴", "溢乳",
+        "腰", "臀", "腿", "脚踝", "手指", "指甲",
+        "纹身", "刺青", "疤痕", "胎记", "痣",
+        "耳环", "耳饰", "项链", "发簪", "发饰", "头饰", "饰品",
+        "穿着", "衣着", "服装", "服饰", "衣装", "装扮", "打扮",
+        "裙子", "长裙", "短裙", "连衣裙", "裙", "袍", "衣", "裤", "袜", "鞋", "靴",
+        "手套", "披风", "斗篷", "制服", "铠甲",
+        "高挑", "娇小", "丰满", "纤细", "修长", "白皙", "黝黑", "肌肉", "曲线",
+        "年龄", "雀斑", "酒窝", "眼罩", "眼镜", "面具", "锁骨", "脖颈", "手腕",
+        "马甲", "衬衣", "衬衫", "腰带", "披肩", "围巾", "戒指", "手镯", "胸针",
+        "宝石", "纹章",
+    ))
+)
+_VISUAL_CUE_EN_RE = re.compile(
+    r"\b(?:appearance|body|build|height|tall|hair|eyes?|pupils?|"
+    r"skin|complexion|face|facial|lips?|cheeks?|nose|brows?|lashes|"
+    r"breasts?|bust|waist|hips?|legs?|thighs?|feet|foot|tattoo|scar|birthmark|"
+    r"clothing|clothes|outfit|attire|dress|robe|skirt|shirt|pants|trousers|"
+    r"stockings|socks|shoes|boots|gloves|cloak|cape|uniform|armor|"
+    r"accessor(?:y|ies)|ornament|jewel(?:ry|s)?|necklace|earrings?|bracelet|hairpin|"
+    r"voluptuous|slender|slim|curvy|muscular|pale|tanned)\b",
+    re.I,
+)
+# 只用来判断「这条像不像角色条目」：必须是人物身体/仪容词，不能只靠服装词
+# （否则「【外观】黑色长裙」这类服装/道具条目也会被当成角色）。
+_PERSON_BODY_CUE_RE = re.compile(
+    r"外貌|容貌|长相|面容|样貌|外表|身高|体型|体态|身形|体格|身材|"
+    r"肌肤|皮肤|肤色|发色|发型|头发|长发|短发|卷发|直发|秀发|马尾|辫子|刘海|"
+    r"银发|金发|黑发|红发|白发|棕发|褐发|青发|蓝发|粉发|紫发|"
+    r"眼眸|眼睛|双眼|瞳孔|瞳色|双眸|眼瞳|眸子|眉眼|眉毛|睫毛|"
+    r"金眼|银眼|红眼|蓝眼|绿眼|紫眼|异色瞳|"
+    r"鼻子|鼻梁|嘴唇|唇色|朱唇|脸颊|脸型|脸|五官|胸部|乳房|巨乳|丰乳|乳沟|胸|"
+    r"腰|臀|腿|脚踝|手指|指甲|纹身|刺青|疤痕|胎记|痣|锁骨|脖颈|手腕|"
+    r"\b(?:appearance|hair|eyes?|pupil|skin|complexion|face|facial|lips?|cheek|nose|"
+    r"brow|breast|bust|waist|hips?|legs?|thigh|tattoo|scar|birthmark)\b",
+    re.I,
+)
+_PERSON_HEADING_RE = re.compile(
+    r"外貌|容貌|长相|面容|样貌|外表|形象|身高|体型|体态|身形|体格|身材|"
+    r"穿着|衣着|服装|服饰|衣装|装扮|打扮|发型|发色|眼睛|眼眸|瞳色|肤色|皮肤|"
+    r"\b(?:appearance|body|build|height|hair|eyes?|skin|complexion|clothing|"
+    r"outfit|attire|dress)\b",
+    re.I,
+)
+_PERSON_PRONOUN_RE = re.compile(r"[她他]|她们|他们|\b(?:she|he|her|his|him)\b", re.I)
+_CHARACTER_MARKER_RE = re.compile(
+    r"角色卡|人物卡|角色条目|^(?:角色|人物)\s*[：:·]",
+)
+# 只认**标题/小标题**声明的角色卡：系统指令正文里顺带提到「角色条目」不能算
+# （真机 2026-10-23：`系统判定机制·AI叙事核心指令` 因此被当成角色画像）。
+
+# 条目**标题**（comment）明确属于事件/势力/系统/地点/物品等非角色类别 ⇒ 整条不收。
+# 真机 2026-10-23：`大事件·…`、`势力与种族·…` 都因正文顺带提到某人发色而混入画像。
+_NON_CHARACTER_TITLE_RE = re.compile(
+    r"大事件|事件|剧情|时间线|时间轴|年表|速览|名录|一览|列表|清单|"
+    r"系统|机制|规则|指令|设定集|世界观|"
+    r"势力|种族|宗门|皇室|组织|阵营|体系|境界|心决|功法|法术|技能|"
+    r"地点|场景|地图|区域|城池|遗迹|物品|道具|装备|资源|经济|"
+    r"任务|玩法|指南|说明|前言|目录|索引",
+    re.I,
+)
+# 剧情/性格/好感等段落里也会有「金眸」「红发」这类外貌词，但它们是**动态或非外貌**事实；
+# 把它们当稳定画像会污染提示词（真机 2026-10-23：开场白/命定危机整段被收进来）。
+_DENIED_SECTION_RE = re.compile(
+    r"剧情|动态|开场白|场景|好感|命定|性格|反差|情爱|性癖|玩法|机制|状态|关系|"
+    r"历史|事件|触发|危机|阶段|性爱|床戏|"
+    r"\b(?:progress|dynamic|scene|history|relationship|status)\b",
+    re.I,
+)
+# 命中这些标题 ⇒ 重新进入「收外貌线索」态（把上一段动态段的拒绝态收回来）。
+_SECTION_RESET_RE = re.compile(
+    r"角色卡|人物卡|人物设定|角色设定|身份|简介|介绍|背景|"
+    r"外貌|外观|容貌|长相|面容|样貌|外表|形象|身高|体型|体态|身形|体格|身材|"
+    r"穿着|衣着|服装|服饰|衣装|装扮|打扮|"
+    r"\b(?:appearance|profile|identity|description|background|outfit|clothing)\b",
+    re.I,
+)
+_HEADING_RE = re.compile(
+    r"^(?:【(?P<cn>[^】\n]{1,30})】|#{1,6}\s*(?P<md>[^\n]{1,40})|"
+    r"\*\*(?P<bold>[^*\n]{1,30})\*\*\s*[：:]?)\s*(?P<tail>.*)$"
+)
+_LABEL_RE = re.compile(
+    r"^(?:[-*+]\s*)?(?P<label>【[^】\n]{1,24}】|\*\*[^*\n]{1,24}\*\*|[^：:\n]{1,20})"
+    r"\s*[：:]\s*(?P<body>.*)$"
+)
+_SENTENCE_RE = re.compile(r"[^\n。！？!?；;]+[。！？!?；;]?")
+_CLIP_BOUNDARY = "。！？；\n，,;"
+
+
+def _has_visual_cue(text: str) -> bool:
+    return bool(_VISUAL_CUE_CN_RE.search(text) or _VISUAL_CUE_EN_RE.search(text))
+
+
+def _visual_cue_hits(text: str) -> set[str]:
+    hits = {match.group(0) for match in _VISUAL_CUE_CN_RE.finditer(text)}
+    hits.update(match.group(0).lower() for match in _VISUAL_CUE_EN_RE.finditer(text))
+    return hits
+
+
+def _heading_of(line: str) -> tuple[str, str] | None:
+    match = _HEADING_RE.match(line)
+    if not match:
+        return None
+    label = match.group("cn") or match.group("md") or match.group("bold") or ""
+    return label.strip().strip("#").strip(), match.group("tail").strip()
+
+
+def _label_of(line: str) -> tuple[str, str] | None:
+    match = _LABEL_RE.match(line)
+    if not match:
+        return None
+    label = match.group("label").strip().strip("【】[]*#").strip()
+    if not label or not _has_visual_cue(label):
+        return None
+    return label, match.group("body").strip()
+
+
+def _character_marker(item: dict[str, Any], content: str) -> bool:
+    comment = str(item.get("comment") or "").strip()
+    if comment and _CHARACTER_MARKER_RE.search(comment):
+        return True
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        heading = _heading_of(stripped)
+        if heading and _CHARACTER_MARKER_RE.search(heading[0]):
+            return True
+    return False
+
+
+def _section_denied(label: str, denied: bool) -> bool:
+    """标题之后的「是否拒绝外貌线索」状态。
+
+    命中动态/剧情类 ⇒ 拒绝；命中画像/外观类 ⇒ 恢复；中性标题 ⇒ **沿用上一段状态**。
+    中性标题不能解拒绝态：`【命定危机】` 下的 `【第一次是怎么被迫的】` 不含任何关键词，
+    若按标题各自判定就会把正文里的外貌句重新收进来（真机 2026-10-23 实测泄漏）。
+    """
+    if _DENIED_SECTION_RE.search(label):
+        return True
+    if _SECTION_RESET_RE.search(label):
+        return False
+    return denied
+
+
+def _section_boundaries(content: str) -> list[tuple[int, bool]]:
+    """每个 `【…】`/Markdown 标题的起点与该标题之后的 sticky 拒绝态。"""
+    boundaries: list[tuple[int, bool]] = []
+    pos = 0
+    denied = False
+    for line in content.splitlines(keepends=True):
+        heading = _heading_of(line.strip())
+        if heading:
+            denied = _section_denied(heading[0], denied)
+            boundaries.append((pos, denied))
+        pos += len(line)
+    return boundaries
+
+
+def _section_denied_at(offset: int, boundaries: list[tuple[int, bool]]) -> bool:
+    denied = False
+    for start, state in boundaries:
+        if start > offset:
+            break
+        denied = state
+    return denied
+
+
+def _block_body(text: str) -> str:
+    first, _, rest = text.partition("\n")
+    heading = _heading_of(first.strip())
+    if not heading:
+        return text.strip()
+    inline = heading[1].strip()
+    return "\n".join(part for part in (inline, rest) if part.strip()).strip()
+
+
+def _visual_block_spans(content: str) -> list[tuple[int, int, str]]:
+    """结构化外貌块：`【外貌】…`、`外观：…`、`## Appearance`、`**穿着**：…`。"""
+    lines = content.splitlines(keepends=True)
+    offsets: list[tuple[int, int]] = []
+    pos = 0
+    for line in lines:
+        offsets.append((pos, pos + len(line)))
+        pos += len(line)
+    spans: list[tuple[int, int, str]] = []
+    boundaries = _section_boundaries(content)
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        heading = _heading_of(line)
+        if heading:
+            if (
+                not _has_visual_cue(heading[0])
+                or _section_denied_at(offsets[i][0], boundaries)
+            ):
+                i += 1
+                continue
+            j = i + 1
+            while j < len(lines):
+                nxt = lines[j].strip()
+                if not nxt:
+                    j += 1
+                    continue
+                if _heading_of(nxt) or _label_of(nxt):
+                    break
+                j += 1
+            end = offsets[j - 1][1] if j > i else offsets[i][1]
+            text = content[offsets[i][0]:end].strip()
+            if _block_body(text):
+                spans.append((offsets[i][0], end, text))
+            i = j
+            continue
+        label = _label_of(line)
+        if (
+            label and label[1]
+            and not _section_denied_at(offsets[i][0], boundaries)
+        ):
+            end = offsets[i][1]
+            text = content[offsets[i][0]:end].strip()
+            if text:
+                spans.append((offsets[i][0], end, text))
+        i += 1
+    return spans
+
+
+def _cue_spans(
+    content: str, blocks: list[tuple[int, int, str]],
+) -> list[tuple[int, int, str]]:
+    """结构化块之外的**带外貌线索整句**（简介里的瞳色、散落的身高/服装描述）。"""
+    spans: list[tuple[int, int, str]] = []
+    boundaries = _section_boundaries(content)
+    for match in _SENTENCE_RE.finditer(content):
+        raw_start = match.start()
+        start, end = match.span()
+        if _section_denied_at(raw_start, boundaries):
+            continue
+        raw = match.group(0)
+        start += len(raw) - len(raw.lstrip())
+        text = raw.strip()
+        if len(text) < 4:
+            continue
+        prefix = re.match(
+            r"^(?:【[^】\n]{1,30}】|#{1,6}\s*|\*\*[^*\n]{1,30}\*\*)\s*", text,
+        )
+        if prefix:
+            start += prefix.end()
+            text = text[prefix.end():].strip()
+        if len(text) < 4:
+            continue
+        if any(not (end <= block_start or start >= block_end)
+               for block_start, block_end, _ in blocks):
+            continue
+        if _has_visual_cue(text):
+            spans.append((start, end, text))
+    return spans
+
+
+def _visual_profile_name(item: dict[str, Any], content: str) -> str:
+    def _clean(value: str) -> str:
+        return re.sub(r"^[【\[]\s*|\s*[】\]]$", "", value.strip()).strip()
+
+    comment = str(item.get("comment") or "").strip()
+    if "角色卡·" in comment:
+        return _clean(comment.split("角色卡·", 1)[-1]) or "角色"
+    titled = re.search(r"【角色卡·([^】\n]{1,30})】", content)
+    if titled:
+        return _clean(titled.group(1)) or "角色"
+    titled = re.search(r"【(?:角色|人物)\s*[：:·]\s*([^】\n]{1,30})】", content)
+    if titled:
+        return _clean(titled.group(1)) or "角色"
+    if comment and comment not in {"角色", "人物", "新条目", "条目"}:
+        return _clean(comment)
+    keys = item.get("keys") or []
+    if isinstance(keys, str):
+        keys = [keys]
+    for key in keys:
+        value = str(key).strip()
+        if value:
+            return _clean(value)
+    return "角色"
+
+
+def _visual_profile_candidate(item: dict[str, Any]) -> str:
+    """单条条目的外貌画像文本；抽不到外貌信号 ⇒ 空串（不注入）。"""
+    content = str(item.get("content") or "").strip()
+    if not content:
+        return ""
+    marker = _character_marker(item, content)
+    # 条目标题自身的类别优先于正文里的角色字样：系统/事件条目常带
+    # `【角色条目规则】` 这类小标题，不能反过来把整条事件叙述放进画像。
+    comment = str(item.get("comment") or "").strip()
+    if (
+        not _CHARACTER_MARKER_RE.search(comment)
+        and _NON_CHARACTER_TITLE_RE.search(comment)
+    ):
+        return ""
+    blocks = _visual_block_spans(content)
+    spans = sorted([*blocks, *_cue_spans(content, blocks)], key=lambda span: span[0])
+    parts = list(dict.fromkeys(text for _, _, text in spans))
+    person_heading = any(
+        (heading := _heading_of(line.strip())) and _PERSON_HEADING_RE.search(heading[0])
+        for line in content.splitlines()
+    )
+    if not parts:
+        # 结构化与线索句都抽不到：只有「无标题的纯散文角色条目 + 正文确有外貌信号」
+        # 才整条兜底；有条目结构却只在动态/性格段出现外貌词 ⇒ 宁可空，不把剧情当稳定外貌。
+        if not (marker and _has_visual_cue(content)):
+            return ""
+        if any(_heading_of(line.strip()) for line in content.splitlines()):
+            return ""
+        parts = [content]
+    elif not marker and not person_heading:
+        # 非角色卡命名、也没有人物标题：必须再有人物身体信号，避免把服装/道具/地点
+        # 条目误当角色外观。
+        hits = _visual_cue_hits(content)
+        if not (
+            _PERSON_BODY_CUE_RE.search(content)
+            and (_PERSON_PRONOUN_RE.search(content) or len(hits) >= 2)
+        ):
+            return ""
+    body = "；".join(parts).strip()
+    if not body:
+        return ""
+    return f"{_visual_profile_name(item, content)}：{body}"
+
+
+def _clip_visual_text(text: str, limit: int) -> str:
+    if limit <= 0:
+        return ""
+    if len(text) <= limit:
+        return text
+    window = text[:limit]
+    cut = max(window.rfind(char) for char in _CLIP_BOUNDARY)
+    if cut >= max(16, limit // 2):
+        return window[:cut + 1].rstrip()
+    return window.rstrip()
+
+
+def repo_visual_profiles(base: str, repo_id: str, query: str, *, max_chars: int = 4_000) -> str:
+    """提取本轮命中角色的稳定视觉锚点，供主模型与当前状态合并。
+
+    结构不再依赖「角色卡·」前缀或【外貌/身材/穿着】行首锚点：任意导入格式都走
+    「结构化块 → 外貌线索句 → 整条兜底」三层抽取；超出预算时**裁剪**而不是整条丢弃。
+    """
+    book = read_repo_snapshot(base, repo_id)
+    if not book or not query or max_chars <= 0:
+        return ""
+    from app.services import worldbook_edit
+    profiles: list[str] = []
+    used = 0
+    for item in worldbook_edit.list_entries(book):
+        if not _entry_matches(item, query):
+            continue
+        candidate = _visual_profile_candidate(item)
+        if not candidate:
+            continue
+        remaining = max_chars - used
+        if remaining <= 0:
+            break
+        if len(candidate) > remaining:
+            candidate = _clip_visual_text(candidate, remaining)
+        if not candidate.strip():
+            continue
+        profiles.append(candidate)
+        used += len(candidate) + 1
+        if used >= max_chars:
+            break
+    return "\n".join(profiles)
+
+
 def repo_snapshot_context(base: str, repo_id: str, *, query: str = "",
                           max_chars: int = 20_000,
                           allowed_indices: set[int] | frozenset[int] | None = None) -> str:
@@ -286,29 +676,6 @@ def repo_snapshot_context(base: str, repo_id: str, *, query: str = "",
             break
         selected.append(item)
     return json.dumps(selected, ensure_ascii=False, separators=(",", ":"))
-
-
-def repo_visual_profiles(base: str, repo_id: str, query: str, *, max_chars: int = 4_000) -> str:
-    """提取本轮命中角色的稳定视觉锚点，供主模型与当前状态合并。"""
-    book = read_repo_snapshot(base, repo_id)
-    if not book or not query:
-        return ""
-    from app.services import worldbook_edit
-    profiles: list[str] = []
-    for item in worldbook_edit.list_entries(book):
-        content = str(item.get("content") or "")
-        comment = str(item.get("comment") or "")
-        if not _entry_matches(item, query) or not ("角色卡·" in comment or "【角色卡·" in content):
-            continue
-        name = comment.split("角色卡·", 1)[-1].strip() or "角色"
-        anchors = re.findall(r"^【(?:外貌|身材|穿着)】[^\r\n]*", content, flags=re.M)
-        if not anchors:
-            continue
-        candidate = f"{name}：" + "；".join(anchors)
-        if sum(len(value) for value in profiles) + len(candidate) > max_chars:
-            break
-        profiles.append(candidate)
-    return "\n".join(profiles)
 
 
 # ── 主人公性别（零 LLM 机械解析，2026-09-20）──────────────────────────────────
@@ -533,9 +900,10 @@ def apply_repo_ops(base: str, repo_id: str, ops: list[dict[str, Any]], *,
 
     **所有条目**的 worldbook_update 都只允许按剧情进度改正文末尾的动态段
     （_merge_character_dynamic：保留原文底座 + 替换/追加唯一的【剧情进展·动态】区）；
-    身份键（comment/keys/constant/enabled）不随 ops 变更并上报 rejections，理由是改名/
-    改键会让 repo_visual_profiles 的「角色卡·」+【外貌】锚识别失配断粮（2026-08-31 实锤：
-    舞姬恋↔舞柔条目连不上 → 空泛提示词）。
+    身份键（comment/keys/constant/enabled）不随 ops 变更并上报 rejections，理由是 comment
+    仍是角色名单/主角识别与视觉画像**命名**锚点，改名会让角色识别与画像段落名失配
+    （2026-08-31 实锤：舞姬恋↔舞柔条目连不上 → 空泛提示词；2026-10-23 起外貌提取本身
+    不再依赖「角色卡·」前缀，但画像名字仍取 comment 前缀）。
 
     ⚠ 2026-09-12 修：底座保护原先只对「comment 含『角色卡·』」的条目生效，非角色卡条目走
     `patch = {"content": text}` **整体覆盖**，导致 curator 一次 update 就把机制/设定/地点条目
@@ -591,7 +959,20 @@ def apply_repo_ops(base: str, repo_id: str, ops: list[dict[str, Any]], *,
                         "op": kind, "title": title, "reason": "constant_forced_off",
                     })
             patch["constant"] = False
-            worldbook_edit.add_entry(book, patch)
+            # L1 写入闸（2026-10-22）：新增与既有条目重复 ⇒ 拒绝并点名既有条目，
+            # 让 curator 拿到「改为 update 该条」的明确反馈（与机制层/constant 拒绝同口径）。
+            try:
+                worldbook_edit.add_entry(book, patch)
+            except worldbook_edit.DuplicateEntryError as dup:
+                if rejections is not None:
+                    rejections.append({
+                        "op": kind, "title": title,
+                        "reason": "duplicate_entry",
+                        "existing": dup.existing_comment,
+                        "existing_index": dup.existing_index,
+                        "detail": dup.reason,
+                    })
+                continue
             applied += 1
         elif kind == "worldbook_update" and text and str(op.get("evidence") or "").strip():
             try:

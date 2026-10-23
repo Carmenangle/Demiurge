@@ -155,6 +155,9 @@ ENV_INJECTED_OPS: dict[str, tuple[str, ...]] = {
     "worldbook.upsert_repo": ("base", "repo_id"),
     "worldbook.check_density": ("base", "repo_id"),
     "worldbook.replace_protagonist": ("base", "repo_id"),
+    # 2026-10-20 增量链：台账反查与废弃删除同样只认作品域（模型传值作废）
+    "worldbook.coverage": ("base", "repo_id"),
+    "worldbook.delete_entries": ("base", "repo_id"),
     "character.upsert_repo": ("base",),
     "character.migrate_mechanical": ("base", "repo_id"),
     "character.embed_worldbook": ("base", "repo_id"),
@@ -236,6 +239,11 @@ FABRIC_DOC_DELIVERY_OPS: frozenset[str] = frozenset({
     "knowledge.load_doc",
     "file.list_dir", "file.read_text", "file.edit",
     "novel.extract_epub", "novel.survey", "novel.charfacts",
+    # 增量定位（固化02 §3.9，2026-10-20）：更新版小说必须先用 novel.index 建旧索引、
+    # 再用 novel.diff 拿 read_plan，否则只能整本重读（24 万字 ≈ 20 万 token 打水漂）。
+    "novel.index", "novel.diff",
+    # 增量链第三/四步（2026-10-20）：台账反查（哪些条目受变更章节影响）+ 废弃条目删除。
+    "worldbook.coverage", "worldbook.delete_entries",
     "worldbook.upsert_repo", "worldbook.check_density",
     "worldbook.replace_protagonist", "character.embed_worldbook",
     "character.upsert_repo", "character.import_source", "character.migrate_scan",
@@ -497,7 +505,7 @@ register(Capability(
 ))
 
 # 世界书条目 5 字段契约（固化02 §1/§3.3）：只有这五个字段有效；keys 非空、
-# comment 以「角色卡·<名>」开头（视觉画像提取器锚点）。嵌套 schema 供 validator
+# comment 以「角色卡·<名>」开头（角色名单/主角识别锚点）。嵌套 schema 供 validator
 # 递归校验 + handler 归一容错（模型写 key 等杂字段会被归一/拒绝）。
 WORLDBOOK_ENTRY_SCHEMA = {
     "type": "object",
@@ -517,14 +525,22 @@ register(Capability(
     category="worldbook",
     description="向当前作品的世界书快照 upsert 条目（同 keys/comment 更新，新条目追加）。"
                 "条目只认 content/comment/keys/constant/enabled 五字段：keys 必须非空、"
-                "comment 按『角色卡·<名>』前缀写（视觉画像锚点）。"
-                "写入路径由执行环境归一注入，模型不得填 base。",
+                "comment 按『角色卡·<名>』前缀写（角色名单/主角识别锚点；外貌提取已不依赖该前缀）。"
+                "写入路径由执行环境归一注入，模型不得填 base。"
+                "**source_chapters（2026-10-20 增量链）**：本轮条目依据的章节序号——写入成功后"
+                "机械记进覆盖台账 <作品>/_prep/coverage.json，供 worldbook.coverage 反查"
+                "「哪章变了→哪几条要改」；更新版任务必须带。"
+                "**allow_shrink + revision_reason**：作者删减修订时放行短版覆盖，必须给原因"
+                "（无原因直接报错，防被当默认开关）。",
     params_schema={
         "type": "object",
         "properties": {
             "entries": {"type": "array", "items": WORLDBOOK_ENTRY_SCHEMA, "minItems": 1},
             "repo_id": {"type": "string"},
             "base": {"type": "string"},
+            "source_chapters": {"type": "array", "items": {"type": "integer"}},
+            "allow_shrink": {"type": "boolean"},
+            "revision_reason": {"type": "string"},
         },
         "required": ["entries"],
         "additionalProperties": False,
@@ -533,6 +549,55 @@ register(Capability(
     side_effect_level=SIDE_EFFECT_DURABLE,
     channel=CHANNEL_SYNC,
     handler="app.services.capability_handlers:upsert_repo_worldbook",
+))
+
+register(Capability(
+    operation="worldbook.coverage",
+    category="worldbook",
+    description="条目↔章节覆盖台账反查（readonly，固化02 §3.9 第三步）：给定本次变更章节"
+                "（added + modified major 的章节号），返回 affected（这些章节影响到的条目，"
+                "= 本轮真正要改的条目）、uncovered_chapters（没被任何条目覆盖的章节 → 需新增条目）、"
+                "unregistered（台账上线前就有、没有来源信息的条目）、stale（台账有、快照已无）。"
+                "更新版任务先跑本能力，**不要**拿旧世界书全文逐条比对来找影响面。",
+    params_schema={
+        "type": "object",
+        "properties": {
+            "repo_id": {"type": "string"},
+            "base": {"type": "string"},
+            "chapters": {"type": "array", "items": {"type": "integer"}},
+        },
+        "required": [],
+        "additionalProperties": False,
+    },
+    needs_model=None,
+    side_effect_level=SIDE_EFFECT_READONLY,
+    channel=CHANNEL_SYNC,
+    handler="app.services.capability_handlers:coverage_report",
+))
+
+register(Capability(
+    operation="worldbook.delete_entries",
+    category="worldbook",
+    description="按 comment 或 keys 删除世界书快照条目（durable，固化02 §3.9 废弃语义）："
+                "新版本里被作者删掉的情节，对应条目必须真的删（不能留成既定事实）。"
+                "comment 归一后精确匹配，keys 用任一方向子串匹配；删除后同步清覆盖台账。"
+                "⚠ 只改世界书快照，卡目录内嵌副本要用 character.embed_worldbook 重嵌同步；"
+                "删前必须确认新版真的删了（novel.diff 的 removed 不等于已删，可能只是没读到）。",
+    params_schema={
+        "type": "object",
+        "properties": {
+            "repo_id": {"type": "string"},
+            "base": {"type": "string"},
+            "comments": {"type": "array", "items": {"type": "string"}},
+            "keys": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": [],
+        "additionalProperties": False,
+    },
+    needs_model=None,
+    side_effect_level=SIDE_EFFECT_DURABLE,
+    channel=CHANNEL_SYNC,
+    handler="app.services.capability_handlers:delete_repo_entries",
 ))
 
 register(Capability(
@@ -775,7 +840,7 @@ register(Capability(
     description="只读扫描一张 ST/通用卡（PNG 内嵌或 JSON）或独立世界书/预设/正则文件，"
                 "产出迁移体检报告：逐条目标注待转写点（注入位语义 order/depth/atDepth、"
                 "constant 越权、keys 缺失/过长、渲染层 <status>/<roll>、运行时表格 "
-                "<if cell=…>、dict 容器、first_mes 空、视觉画像前缀缺失）。"
+                "<if cell=…>、dict 容器、first_mes 空、角色卡前缀缺失）。"
                 "第二套固定流程（机械+LLM 转写）的机械前置；不写任何文件，"
                 "命中项交 LLM 判断转写后经 upsert/import 落盘。",
     params_schema={
@@ -871,6 +936,60 @@ register(Capability(
     side_effect_level=SIDE_EFFECT_REVERSIBLE,
     channel=CHANNEL_SYNC,
     handler="app.services.capability_handlers:novel_charfacts",
+))
+
+register(Capability(
+    operation="novel.index",
+    category="novel",
+    description="为一部小说建立章节索引并落盘（固化02 §3.9 增量定位 T4）：每章记录"
+                "标题/绝对偏移 start/chars/sha1/段落哈希。落点 out_json 或 work_dir"
+                "（自动 _prep/<book>.index.json）。**任何「更新版小说」任务开工前，先对旧版跑"
+                "本能力**——没有旧索引就没有输入范围依据；产出是摘要（章节+偏移），"
+                "段落哈希只落盘不回传。索引可再生，不入世界书快照、不进资产库。",
+    params_schema={
+        "type": "object",
+        "properties": {
+            "full_txt": {"type": "string"},
+            "out_json": {"type": "string"},
+            "work_dir": {"type": "string"},
+            "book_name": {"type": "string"},
+        },
+        "required": ["full_txt"],
+        "additionalProperties": False,
+    },
+    needs_model=None,
+    side_effect_level=SIDE_EFFECT_REVERSIBLE,
+    channel=CHANNEL_SYNC,
+    handler="app.services.capability_handlers:novel_index",
+))
+
+register(Capability(
+    operation="novel.diff",
+    category="novel",
+    description="新旧版本小说机械对比：返回 unchanged / modified（minor|major，"
+                "带 change_ratio）/ added / removed、**read_plan（只读这些区间，按 start+max_chars）**、"
+                "name_delta（新章出现的新人名=新角色或更名候选）。用于更新已有合集卡："
+                "只读 read_plan，unchanged 章节条目不要重写；未变的章节靠 sha1 判定，"
+                "章节插入/重编号不会误判修订。基准二选一：old_index（推荐，先 novel.index）"
+                "或 old_txt。**给 work_dir 时落 <work_dir>/_prep/novel.scope.json**，"
+                "fabric 的 file.read_text 会拒读未变更章节。禁止用整本重读替代本能力。",
+    params_schema={
+        "type": "object",
+        "properties": {
+            "new_txt": {"type": "string"},
+            "old_index": {"type": "string"},
+            "old_txt": {"type": "string"},
+            "max_chars": {"type": "integer"},
+            "include_minor_read": {"type": "boolean"},
+            "work_dir": {"type": "string"},
+        },
+        "required": ["new_txt"],
+        "additionalProperties": False,
+    },
+    needs_model=None,
+    side_effect_level=SIDE_EFFECT_REVERSIBLE,
+    channel=CHANNEL_SYNC,
+    handler="app.services.capability_handlers:novel_diff",
 ))
 
 

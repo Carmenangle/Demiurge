@@ -49,6 +49,22 @@ class Entry:
     keys: list[str] = None  # type: ignore[assignment]
     source_index: int = -1
     uid: str = ""           # 条目稳定身份键（原书 id/uid；curator ops 不改）
+    # 2026-10-22 白名单准入（对标 ST Vector Storage `entry.vectorized`）：None=按 comment 前缀
+    # 推导类型默认值；显式 True/False 覆盖。**只影响语义召回通道**（索引 + BM25），
+    # 不影响 keyword 点名与 constant 常驻——被排除的条目一旦被提到，仍由 `_keyword_hits`
+    # 精准带回锚点段。判据体系见 `_tmp/wb_audit.py`（L1 类型 / L2 频次 / L3 兜底 / L4 轨迹）。
+    smart_recall: bool | None = None
+    # 2026-10-22 条目元数据（对标 ST SP·数据库 Skills化）：description=用途概括（可复用语义，
+    # 不复抄正文）、trigger_when=何时需要（触发时机，不与 description 同义）、tk=预计消耗
+    # （**字符**——本仓注入预算单位就是字符，ST 原版 tk 是 token，需要时换算）。
+    # **只服务 P1 每轮绿灯决策通道**（候选只给元数据不给正文 ⇒ 53 条仅 ~8.7k 字，无需分片）；
+    # 对 keyword/constant/语义通道完全惰性。空/0 = 未生成 ⇒ skillify 兜底补（tech-manual A/02）。
+    description: str = ""
+    trigger_when: str = ""
+    tk: int = 0
+    # 元数据生成时的**静态底座** hash（剥掉【剧情进展·动态】区）：curator 只改动态区不算变
+    # （每轮都可能追加），改静态底座才算 ⇒ 用于兜底补生成时的幂等判定（worldbook_greenlight）。
+    meta_src_hash: str = ""
 
     def __post_init__(self) -> None:
         if self.keys is None:
@@ -79,6 +95,9 @@ def parse_entries(book: dict[str, Any] | None) -> list[Entry]:
         if not content:
             continue
         keys = e.get("keys") or e.get("key") or []
+        description = e.get("description")
+        trigger_when = e.get("trigger_when")
+        tk_raw = e.get("tk")
         out.append(Entry(
             content=content,
             constant=bool(e.get("constant")),
@@ -86,8 +105,43 @@ def parse_entries(book: dict[str, Any] | None) -> list[Entry]:
             keys=[str(k) for k in keys if str(k).strip()] if isinstance(keys, list) else [],
             source_index=source_index,
             uid=str(e.get("id") or e.get("uid") or key_uid or "").strip(),
+            smart_recall=(None if e.get("smart_recall") is None else bool(e.get("smart_recall"))),
+            description=description.strip() if isinstance(description, str) else "",
+            trigger_when=trigger_when.strip() if isinstance(trigger_when, str) else "",
+            # bool 是 int 子类必须排除；负值/非 int 一律回退 0（未生成）
+            tk=tk_raw if isinstance(tk_raw, int) and not isinstance(tk_raw, bool) and tk_raw >= 0 else 0,
+            meta_src_hash=(e.get("meta_src_hash") or "").strip()
+            if isinstance(e.get("meta_src_hash"), str) else "",
         ))
     return out
+
+
+# ── 白名单准入（2026-10-22）────────────────────────────────────────────────────
+# 规则型（全局机制 / 系统判定机制）的作用是「每轮都在场的规则」，本应 constant 常驻，
+# 且**本来就不该被 keyword 触发** ⇒ 频次对它们无意义，类型默认即不进语义池。
+# 内容型（角色卡 / 事件 / 世界观 / 局部机制 / 速览表）按情节开启 ⇒ 进语义池等召回。
+_RULE_PREFIXES = ("全局机制", "系统判定机制")
+
+
+def _default_smart_recall(comment: str) -> bool:
+    """未显式声明 smart_recall 时的类型默认值。
+
+    空/异常 comment 兜底按**内容型**（True）：宁可多召回一条，不可让条目静默失语
+    ——误召回只费 token，漏召回会让 AI 在没有设定的事实真空里编造。
+    """
+    head = (comment or "").split("·")[0].strip()
+    return head not in _RULE_PREFIXES
+
+
+def recall_eligible(entry: Entry) -> bool:
+    """该条目是否进入语义召回池（白名单）。
+
+    三态：显式 `smart_recall` 优先；缺省按 comment 前缀推导类型默认值。
+    ⚠ 只影响语义召回通道，**不影响** keyword 点名与 constant 常驻。
+    """
+    if entry.smart_recall is not None:
+        return bool(entry.smart_recall)
+    return _default_smart_recall(entry.comment)
 
 
 def entry_identity(entry: Entry) -> str:
@@ -144,7 +198,7 @@ def ensure_indexed(repo_id: str, entries: list[Entry], cfg: EmbedConfig) -> bool
     Curator 经常只修改一个角色条目；不得因整本书 hash 改变而清库重嵌。
     旧版随机 ID 按正文 hash 识别并保留，新增内容才调用嵌入，删除内容只删对应向量。
     """
-    retrievable = [e for e in entries if not e.constant]
+    retrievable = [e for e in entries if not e.constant and recall_eligible(e)]
     try:
         store = rag_backend.store(_collection(repo_id), cfg)
         _existing, missing, stale_ids = _index_delta(store, retrievable)
@@ -164,8 +218,14 @@ def ensure_indexed(repo_id: str, entries: list[Entry], cfg: EmbedConfig) -> bool
 
 
 def _index_delta(store: Any, entries: list[Entry]) -> tuple[list[str], list[Entry], list[str]]:
-    """只读计算已有正文哈希、待嵌入条目和待删除 ID。"""
-    retrievable = [entry for entry in entries if not entry.constant]
+    """只读计算已有正文哈希、待嵌入条目和待删除 ID。
+
+    白名单过滤在此处生效（而非只在 `ensure_indexed`）：`schedule_index` 直接调它做
+    变化探测，不过滤就不会触发清理 ⇒ 库里会残留已踢出语义池的旧向量。
+    存量清理是自动的：库里 `content_hash not in desired` ⇒ 判 stale 删除，无需手动 purge。
+    """
+    retrievable = [entry for entry in entries
+                   if not entry.constant and recall_eligible(entry)]
     desired = {_hid(entry.content): entry for entry in retrievable}
     existing: dict[str, str] = {}
     stale_ids: list[str] = []
@@ -196,8 +256,15 @@ def schedule_index(
     cfg: EmbedConfig,
     *,
     on_initial: Callable[[int], None] | None = None,
+    on_backfill: Callable[[], None] | None = None,
 ) -> bool:
-    """后台增量同步索引；首次确有待嵌入条目时即时通知调用方。"""
+    """后台增量同步索引；首次确有待嵌入条目时即时通知调用方。
+
+    on_backfill（P1 元数据兜底）：与索引增量**解耦**——索引已满但条目缺元数据
+    （新导入卡 / curator 改写静态底座）时也起后台线程补生成（LLM 调用在
+    `worldbook_greenlight.backfill_repo_metadata`，写回世界书快照）。探测本身失败
+    不阻断索引同步；线程内 on_backfill 异常被吞并记日志（兜底不能拖垮索引）。
+    """
     key = (repo_id, rag_backend.embedding_key(cfg))
     with _INDEX_LOCK:
         if key in _INDEXING:
@@ -211,7 +278,14 @@ def schedule_index(
         with _INDEX_LOCK:
             _INDEXING.discard(key)
         return False
-    if not (missing or stale_ids):
+    backfill_pending = False
+    if on_backfill is not None:
+        try:
+            from app.services import worldbook_greenlight
+            backfill_pending = any(worldbook_greenlight.needs_metadata(e) for e in entries)
+        except Exception:  # noqa: BLE001 [EXC-留痕] 兜底探测失败不阻断索引同步
+            backfill_pending = False
+    if not (missing or stale_ids) and not backfill_pending:
         with _INDEX_LOCK:
             _INDEXING.discard(key)
         return False
@@ -221,6 +295,11 @@ def schedule_index(
     def run() -> None:
         try:
             ensure_indexed(repo_id, list(entries), cfg)
+            if on_backfill is not None:
+                try:
+                    on_backfill()
+                except Exception as exc:  # noqa: BLE001 [EXC-留痕] 兜底失败不影响索引结果
+                    _LOG.warning("世界书元数据兜底失败：%s", exc)
         finally:
             with _INDEX_LOCK:
                 _INDEXING.discard(key)
@@ -267,6 +346,11 @@ def _retrieve(repo_id: str, query: str, cfg: EmbedConfig, k: int) -> list[str]:
         return []
 
 
+def entry_static_base(content: str) -> str:
+    """条目正文的静态底座（剥掉【剧情进展·动态】区）。元数据 hash 的口径见 Entry.meta_src_hash。"""
+    return _split_dynamic(content)[0]
+
+
 def _hid(content: str) -> str:
     return hashlib.sha1(content.encode("utf-8")).hexdigest()
 
@@ -289,10 +373,12 @@ def _keyword_hits(entries: list[Entry], query: str) -> list[str]:
 
 
 def _sparse_retrieve(entries: list[Entry], query: str, k: int) -> list[str]:
+    # 与 `_index_delta` 同一套白名单：本函数从**内存 entries** 直接构造 BM25 文档，
+    # 不经索引层，若不过滤，被踢出语义池的条目仍会从这条路混进候选。
     documents = [
         {"id": _hid(entry.content), "content": entry.content,
          "kind": "worldbook", "source": "wb"}
-        for entry in entries if not entry.constant
+        for entry in entries if not entry.constant and recall_eligible(entry)
     ]
     return [item["content"] for item in rag_retrieval.sparse_rank(query, documents, k)]
 
@@ -316,6 +402,9 @@ class Selection:
     #    =锚点段末尾，仍 < 缓存粒度）。锚点段因此会话内**双冻结**（条目集+内容快照），
     #    curator 的一切产出改道尾部动态块，前缀分叉点回到历史追加点（≫ 缓存粒度）。
     dynamic_text: str = ""
+    # 2026-10-22 锚点退役：本轮被移出稳定序列的条目身份（供 trace 归因；退役后若再被命中
+    # 按 mid-session 规则进动态块，锚点段不重长）。
+    retired: list[str] = field(default_factory=list)
 
 
 def keyword_match_indices(entries: list[Entry], query: str) -> list[int]:
@@ -330,12 +419,16 @@ def keyword_match_indices(entries: list[Entry], query: str) -> list[int]:
 
 def _candidate_entries(
     repo_id: str, entries: list[Entry], query: str, cfg: EmbedConfig, k: int,
+    *, retrieve: bool = True,
 ) -> tuple[list[tuple[int, Entry]], set[int]]:
     """本轮候选条目（keyword 命中 → constant → 语义/BM25 top-k），保序去重。
 
     返回 (candidates, keyword_indices)：candidates 元素为 (原始 index, Entry)。
     这是 assemble_selection / assemble_selection_stable 共用的**条目选择**规则；
     两者只在**排列与裁剪**上不同（见各自 docstring）。
+
+    retrieve=False 时跳过语义/BM25 检索（P1 绿灯决策用自选条目替换召回轨时省掉这次
+    检索；keyword/constant 锚点轨不受影响）。默认 True ⇒ 行为与改造前逐字节一致。
     """
     indexed = [
         (entry.source_index if entry.source_index >= 0 else position, entry)
@@ -351,20 +444,21 @@ def _candidate_entries(
     candidates.extend((index, entry) for index, entry in indexed
                       if _hid(entry.content) in keyword_hashes)
     candidates.extend((index, entry) for index, entry in indexed if entry.constant)
-    retrieved = [
-        *_retrieve(repo_id, query, cfg, k),
-        *_sparse_retrieve(entries, query, k),
-    ]
-    retrieved_hashes: set[str] = set()
-    for content in retrieved:
-        matched = by_hash.get(_hid(content))
-        content_hash = _hid(content)
-        if matched is None or content_hash in retrieved_hashes:
-            continue
-        candidates.append(matched)
-        retrieved_hashes.add(content_hash)
-        if len(retrieved_hashes) >= k:
-            break
+    if retrieve:
+        retrieved = [
+            *_retrieve(repo_id, query, cfg, k),
+            *_sparse_retrieve(entries, query, k),
+        ]
+        retrieved_hashes: set[str] = set()
+        for content in retrieved:
+            matched = by_hash.get(_hid(content))
+            content_hash = _hid(content)
+            if matched is None or content_hash in retrieved_hashes:
+                continue
+            candidates.append(matched)
+            retrieved_hashes.add(content_hash)
+            if len(retrieved_hashes) >= k:
+                break
     return candidates, keyword_indices
 
 
@@ -385,8 +479,13 @@ _SESSION_ANCHOR: dict[str, set[str]] = {}    # session_key -> {entry_identity}�
 #   （追加入段会把分叉点拉到锚点段末尾，仍够不到缓存粒度），永远走尾部动态块。
 _SESSION_CONTENT: dict[str, dict[str, str]] = {}
 _SESSION_LATE: dict[str, set[str]] = {}
+# 锚点退役计数（2026-10-22，对标 ST sticky/cooldown）：session_key -> {identity: 连续未命中轮数}
+_SESSION_MISS: dict[str, dict[str, int]] = {}
 _SESSION_LOCK = threading.Lock()
 _SESSION_MAX_ENTRIES = 400                   # 防御：单会话序列条数上限
+# 连续这么多轮未被**本轮**命中（keyword/constant）⇒ 锚点退役。棘轮为前缀缓存刻意只增不改，
+# 但旧弧线锚点（E1 荒岛初遇等）会永久注入占预算；退役落在轮边界，代价是一次前缀收缩。
+_ANCHOR_RETIRE_MISSES = 6
 _SESSION_MAX_SESSIONS = 128                  # 防御：驻留会话数上限
 
 # 与 worldbook_store._merge_character_dynamic 的唯一动态区标记同口径。
@@ -450,6 +549,7 @@ def assemble_selection_stable(
     session_key: str, k: int = _DEFAULT_K,
     max_chars: int = WORLDBOOK_INJECT_MAX_CHARS,
     state_path: str | None = None,
+    recall_override: list[int] | None = None,
 ) -> Selection:
     """会话内稳定版 assemble_selection：按「首次激活顺序」单调追加，跨轮前缀只增不改。
 
@@ -476,6 +576,11 @@ def assemble_selection_stable(
     session_key：会话标识（作品级，见 agent_graph._worldbook_session_key）。
     无 session_key 时调用方应退回 assemble_selection（无状态、每轮重排）。
 
+    recall_override（P1 绿灯决策，2026-10-22）：传入条目位置列表时，**召回轨改用这份自选
+    条目**（按给定顺序、仍吃 max_chars 预算、仍不进会话稳定序列），并**跳过语义/BM25 检索**
+    （省掉检索开销；锚点轨 keyword/constant 不受影响）。None（默认）⇒ 走 BM25/dense top-k，
+    行为与改造前逐字节一致。
+
     ⚠ 2026-09-12 返回值分两段（见 Selection.recall_text）：`text` = 锚点段，`recall_text` =
     召回段。调用方必须把 recall_text 放进**尾部动态块**（history 之后）。早期实现把两段拼在
     一起放进世界书块（history 之前）⇒ 召回段每轮变 ⇒ 其后的历史与全部预设片段每轮作废，
@@ -495,8 +600,9 @@ def assemble_selection_stable(
     明示代价：锚点条目的**底座**被用户手动编辑后，会话内不反映（仍显示首次激活快照），
     重开会话生效；动态内容不受影响（动态区每轮取条目最新值）。
     """
-    candidates, keyword_indices = _candidate_entries(repo_id, entries, query, cfg, k)
-    if not candidates:
+    candidates, keyword_indices = _candidate_entries(
+        repo_id, entries, query, cfg, k, retrieve=recall_override is None)
+    if not candidates and not recall_override:
         return Selection("", [])
     # 统一 index 口径（与 _candidate_entries 一致：source_index 缺失时回退位置序号），
     # 全量 entries 兜底解析旧序列里的条目，避免本轮未命中的已注入条目被丢掉。
@@ -511,9 +617,21 @@ def assemble_selection_stable(
         indexed_map.setdefault(entry_identity(entry), (index, entry))
 
     anchor_pairs = [(i, e) for i, e in candidates if i in keyword_indices or e.constant]
-    recall_pairs = [(i, e) for i, e in candidates
-                    if not (i in keyword_indices or e.constant)]
+    if recall_override is None:
+        recall_pairs = [(i, e) for i, e in candidates
+                        if not (i in keyword_indices or e.constant)]
+    else:
+        # 绿灯自选召回轨：按调用方给定顺序（LLM 相关度序）解析，排除本轮锚点；
+        # 越界位置静默跳过（绿灯侧已校验，双保险）。
+        anchor_idx = {i for i, _e in anchor_pairs}
+        pos_map: dict[int, Entry] = {}
+        for position, entry in enumerate(entries):
+            idx = entry.source_index if entry.source_index >= 0 else position
+            pos_map.setdefault(idx, entry)
+        recall_pairs = [(i, pos_map[i]) for i in recall_override
+                        if i in pos_map and i not in anchor_idx]
 
+    retired_now: list[str] = []
     with _SESSION_LOCK:
         if len(_SESSION_SEQ) >= _SESSION_MAX_SESSIONS and session_key not in _SESSION_SEQ:
             for stale in list(_SESSION_SEQ)[: max(1, _SESSION_MAX_SESSIONS // 2)]:
@@ -521,6 +639,7 @@ def assemble_selection_stable(
                 _SESSION_ANCHOR.pop(stale, None)
                 _SESSION_CONTENT.pop(stale, None)
                 _SESSION_LATE.pop(stale, None)
+                _SESSION_MISS.pop(stale, None)
         # 内存 miss 时从持久化恢复（重启后锚点段不重排，前缀跨重启延续）。
         if session_key not in _SESSION_SEQ:
             restored = _session_file_read(state_path)
@@ -534,10 +653,14 @@ def assemble_selection_stable(
                     _SESSION_SEQ[session_key] = seq_restored
                     _SESSION_CONTENT[session_key] = content_restored
                     _SESSION_LATE[session_key] = late_restored
+                    _SESSION_MISS[session_key] = {
+                        str(k): int(v) for k, v in (restored.get("miss") or {}).items()
+                        if isinstance(v, int)}
         seq = _SESSION_SEQ.setdefault(session_key, [])
         anchors = _SESSION_ANCHOR.setdefault(session_key, set())
         contents = _SESSION_CONTENT.setdefault(session_key, {})
         late = _SESSION_LATE.setdefault(session_key, set())
+        misses = _SESSION_MISS.setdefault(session_key, {})
         # 序列**只登记锚点**（keyword 命中 / constant）：召回段每轮可变，登记进去会把它
         # 拖成「冻结集」并让序列无限膨胀（真机 38 条里 24 条永远进不来）。
         known = set(seq)
@@ -557,6 +680,23 @@ def assemble_selection_stable(
             else:
                 late.add(identity)
                 new_anchor_pairs.append((_index, entry))
+        # 锚点退役（2026-10-22，ST 定时效果等价物）：连续 N 轮未被本轮命中 ⇒ 移出序列。
+        hit_now = {entry_identity(entry) for _i, entry in anchor_pairs}
+        retired_now: list[str] = []
+        for identity in list(seq):
+            if identity in hit_now:
+                misses[identity] = 0
+                continue
+            misses[identity] = misses.get(identity, 0) + 1
+            if misses[identity] < _ANCHOR_RETIRE_MISSES:
+                continue
+            seq.remove(identity)
+            known.discard(identity)
+            anchors.discard(identity)
+            contents.pop(identity, None)
+            late.discard(identity)
+            misses.pop(identity, None)
+            retired_now.append(identity)
         # 底座快照补记：锚点条目首次见到时剥出静态底座（后续 curator 只改末尾动态区，
         # 快照保证锚点段逐字节不变）。
         for _index, entry in anchor_pairs:
@@ -566,7 +706,8 @@ def assemble_selection_stable(
         snapshot = list(seq)
         late_snapshot = set(late)
         state_to_save: dict[str, Any] | None = (
-            {"seq": list(seq), "content": dict(contents), "late": sorted(late)}
+            {"seq": list(seq), "content": dict(contents), "late": sorted(late),
+             "miss": dict(misses)}
             if state_path else None
         )
 
@@ -646,7 +787,7 @@ def assemble_selection_stable(
     )
     return Selection(
         head, kept_indices, picked_keyword, dropped, recall_seg, recall_indices,
-        dynamic_seg,
+        dynamic_seg, retired=list(retired_now),
     )
 
 

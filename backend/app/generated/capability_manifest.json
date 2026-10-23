@@ -107,7 +107,7 @@
     {
       "operation": "character.migrate_scan",
       "category": "character",
-      "description": "只读扫描一张 ST/通用卡（PNG 内嵌或 JSON）或独立世界书/预设/正则文件，产出迁移体检报告：逐条目标注待转写点（注入位语义 order/depth/atDepth、constant 越权、keys 缺失/过长、渲染层 <status>/<roll>、运行时表格 <if cell=…>、dict 容器、first_mes 空、视觉画像前缀缺失）。第二套固定流程（机械+LLM 转写）的机械前置；不写任何文件，命中项交 LLM 判断转写后经 upsert/import 落盘。",
+      "description": "只读扫描一张 ST/通用卡（PNG 内嵌或 JSON）或独立世界书/预设/正则文件，产出迁移体检报告：逐条目标注待转写点（注入位语义 order/depth/atDepth、constant 越权、keys 缺失/过长、渲染层 <status>/<roll>、运行时表格 <if cell=…>、dict 容器、first_mes 空、角色卡前缀缺失）。第二套固定流程（机械+LLM 转写）的机械前置；不写任何文件，命中项交 LLM 判断转写后经 upsert/import 落盘。",
       "params_schema": {
         "type": "object",
         "properties": {
@@ -514,6 +514,42 @@
       "handler": "app.services.capability_handlers:novel_charfacts"
     },
     {
+      "operation": "novel.diff",
+      "category": "novel",
+      "description": "新旧版本小说机械对比：返回 unchanged / modified（minor|major，带 change_ratio）/ added / removed、**read_plan（只读这些区间，按 start+max_chars）**、name_delta（新章出现的新人名=新角色或更名候选）。用于更新已有合集卡：只读 read_plan，unchanged 章节条目不要重写；未变的章节靠 sha1 判定，章节插入/重编号不会误判修订。基准二选一：old_index（推荐，先 novel.index）或 old_txt。**给 work_dir 时落 <work_dir>/_prep/novel.scope.json**，fabric 的 file.read_text 会拒读未变更章节。禁止用整本重读替代本能力。",
+      "params_schema": {
+        "type": "object",
+        "properties": {
+          "new_txt": {
+            "type": "string"
+          },
+          "old_index": {
+            "type": "string"
+          },
+          "old_txt": {
+            "type": "string"
+          },
+          "max_chars": {
+            "type": "integer"
+          },
+          "include_minor_read": {
+            "type": "boolean"
+          },
+          "work_dir": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "new_txt"
+        ],
+        "additionalProperties": false
+      },
+      "needs_model": null,
+      "side_effect_level": "reversible",
+      "channel": "sync",
+      "handler": "app.services.capability_handlers:novel_diff"
+    },
+    {
       "operation": "novel.extract_epub",
       "category": "novel",
       "description": "把 .epub 长篇小说按 OPF spine 顺序抽取为分章纯文本并落盘（固化02 脚本辅助层 T1）。epub 源可在作品外（只读）；输出路径out_txt 与 work_dir 二选一——out_txt 显式给全路径（须在作品域/临时工作区）；或给 work_dir（作品根）+ 可选 book_name（缺省取 epub文件名），自动落 <work_dir>/_prep/<书名>.full.txt，不用手拼 _prep/。产出用「===== 章节 =====」标记，供 novel.survey / novel.charfacts 复用；抽取后禁止再整本读全文（上下文防爆）。",
@@ -542,6 +578,36 @@
       "side_effect_level": "reversible",
       "channel": "sync",
       "handler": "app.services.capability_handlers:novel_extract_epub"
+    },
+    {
+      "operation": "novel.index",
+      "category": "novel",
+      "description": "为一部小说建立章节索引并落盘（固化02 §3.9 增量定位 T4）：每章记录标题/绝对偏移 start/chars/sha1/段落哈希。落点 out_json 或 work_dir（自动 _prep/<book>.index.json）。**任何「更新版小说」任务开工前，先对旧版跑本能力**——没有旧索引就没有输入范围依据；产出是摘要（章节+偏移），段落哈希只落盘不回传。索引可再生，不入世界书快照、不进资产库。",
+      "params_schema": {
+        "type": "object",
+        "properties": {
+          "full_txt": {
+            "type": "string"
+          },
+          "out_json": {
+            "type": "string"
+          },
+          "work_dir": {
+            "type": "string"
+          },
+          "book_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "full_txt"
+        ],
+        "additionalProperties": false
+      },
+      "needs_model": null,
+      "side_effect_level": "reversible",
+      "channel": "sync",
+      "handler": "app.services.capability_handlers:novel_index"
     },
     {
       "operation": "novel.survey",
@@ -898,6 +964,68 @@
       "handler": "app.services.capability_handlers:worldbook_check_density"
     },
     {
+      "operation": "worldbook.coverage",
+      "category": "worldbook",
+      "description": "条目↔章节覆盖台账反查（readonly，固化02 §3.9 第三步）：给定本次变更章节（added + modified major 的章节号），返回 affected（这些章节影响到的条目，= 本轮真正要改的条目）、uncovered_chapters（没被任何条目覆盖的章节 → 需新增条目）、unregistered（台账上线前就有、没有来源信息的条目）、stale（台账有、快照已无）。更新版任务先跑本能力，**不要**拿旧世界书全文逐条比对来找影响面。",
+      "params_schema": {
+        "type": "object",
+        "properties": {
+          "repo_id": {
+            "type": "string"
+          },
+          "base": {
+            "type": "string"
+          },
+          "chapters": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "needs_model": null,
+      "side_effect_level": "readonly",
+      "channel": "sync",
+      "handler": "app.services.capability_handlers:coverage_report"
+    },
+    {
+      "operation": "worldbook.delete_entries",
+      "category": "worldbook",
+      "description": "按 comment 或 keys 删除世界书快照条目（durable，固化02 §3.9 废弃语义）：新版本里被作者删掉的情节，对应条目必须真的删（不能留成既定事实）。comment 归一后精确匹配，keys 用任一方向子串匹配；删除后同步清覆盖台账。⚠ 只改世界书快照，卡目录内嵌副本要用 character.embed_worldbook 重嵌同步；删前必须确认新版真的删了（novel.diff 的 removed 不等于已删，可能只是没读到）。",
+      "params_schema": {
+        "type": "object",
+        "properties": {
+          "repo_id": {
+            "type": "string"
+          },
+          "base": {
+            "type": "string"
+          },
+          "comments": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "keys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "needs_model": null,
+      "side_effect_level": "durable",
+      "channel": "sync",
+      "handler": "app.services.capability_handlers:delete_repo_entries"
+    },
+    {
       "operation": "worldbook.replace_protagonist",
       "category": "worldbook",
       "description": "把作品世界书快照里非主角条目正文与 keys 中的主角名全局替换为 {{user}}（durable）。主角条目（comment=角色卡·主角名）本身是 {{user}} 定位卡，不改。机械字符串替换，不重读不重写达标条目；主角归一通用规则对任何作品生效。",
@@ -927,7 +1055,7 @@
     {
       "operation": "worldbook.upsert_repo",
       "category": "worldbook",
-      "description": "向当前作品的世界书快照 upsert 条目（同 keys/comment 更新，新条目追加）。条目只认 content/comment/keys/constant/enabled 五字段：keys 必须非空、comment 按『角色卡·<名>』前缀写（视觉画像锚点）。写入路径由执行环境归一注入，模型不得填 base。",
+      "description": "向当前作品的世界书快照 upsert 条目（同 keys/comment 更新，新条目追加）。条目只认 content/comment/keys/constant/enabled 五字段：keys 必须非空、comment 按『角色卡·<名>』前缀写（角色名单/主角识别锚点；外貌提取已不依赖该前缀）。写入路径由执行环境归一注入，模型不得填 base。**source_chapters（2026-10-20 增量链）**：本轮条目依据的章节序号——写入成功后机械记进覆盖台账 <作品>/_prep/coverage.json，供 worldbook.coverage 反查「哪章变了→哪几条要改」；更新版任务必须带。**allow_shrink + revision_reason**：作者删减修订时放行短版覆盖，必须给原因（无原因直接报错，防被当默认开关）。",
       "params_schema": {
         "type": "object",
         "properties": {
@@ -969,6 +1097,18 @@
             "type": "string"
           },
           "base": {
+            "type": "string"
+          },
+          "source_chapters": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          },
+          "allow_shrink": {
+            "type": "boolean"
+          },
+          "revision_reason": {
             "type": "string"
           }
         },

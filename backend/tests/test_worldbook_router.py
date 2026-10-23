@@ -154,6 +154,18 @@ def test_add_entry_空书首条index为0也必须落盘(tmp_path):
     assert [e["content"] for e in _raw_entries(_standalone_file(base))] == ["首条"]
 
 
+def test_add_entry_重复条目报409且不落盘(tmp_path):
+    """L1 写入闸（2026-10-22）：新增与既有条目重复（内容相同/同开头/同名）⇒ 409 + 不落盘。"""
+    base = _seed_standalone(tmp_path)
+    before = _standalone_file(base).read_bytes()
+    with pytest.raises(HTTPException) as ei:
+        worldbook_router.add_entry(worldbook_router.EntryAddRequest(
+            **_standalone_loc(base).model_dump(), entry=_entry_payload("魔法体系", comment="别名")))
+    assert ei.value.status_code == 409
+    assert "已存在同主题条目" in ei.value.detail
+    assert _standalone_file(base).read_bytes() == before     # 一个字节都不落盘
+
+
 def test_add_entry_卡内嵌写回卡文件(tmp_path):
     base = _seed_card(tmp_path)
     got = worldbook_router.add_entry(worldbook_router.EntryAddRequest(

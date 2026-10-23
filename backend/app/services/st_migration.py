@@ -158,14 +158,16 @@ def _entry_issues(index: int, item: dict[str, Any]) -> dict[str, Any]:
     if policy:
         issues.append(policy)
     issues.extend(_content_issues(content))
-    # 视觉画像契约（§3.2 第 6 层 / worldbook_store.repo_visual_profiles 特判）
+    # 角色命名契约：`角色卡·` 前缀仍是角色名单、主角识别与上下文注入的命名锚点。
+    # ⚠ 2026-10-23 起 `worldbook_store.repo_visual_profiles` **不再**依赖该前缀
+    #   （外貌改为结构化块 → 线索句 → 整条兜底三层抽取），本条不再是「否则提不到外貌」。
     if any(anchor in content for anchor in ("【外貌】", "【身材】", "【穿着】")) \
             and not comment.startswith("角色卡·"):
         issues.append(_issue(
-            "visual_anchor", "含外貌/身材/穿着锚点但 comment 缺「角色卡·」前缀", "mid",
+            "visual_anchor", "含角色外貌锚点但 comment 缺「角色卡·」前缀", "mid",
             f"comment={comment!r}",
-            "把 comment 前缀归一为「角色卡·<角色名>」，正文保留【外貌】/【身材】/【穿着】"
-            "行首锚点以激活视觉画像提取",
+            "把 comment 前缀归一为「角色卡·<角色名>」，供角色名单、主角识别与上下文注入使用"
+            "（外貌提取已不再依赖该前缀，正文锚点可原样保留）",
         ))
     return {
         "index": index,

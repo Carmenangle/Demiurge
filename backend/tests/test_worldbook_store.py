@@ -88,6 +88,27 @@ def test_世界书更新必须有依据且索引有效(tmp_path):
     assert worldbook_store.read_repo_snapshot(str(tmp_path), "repo")["entries"][0]["content"] == "旧设定"
 
 
+def test_新增重复条目被拒且不影响同批其它op(tmp_path):
+    """L1 写入闸（2026-10-22）：worldbook_add 撞既有条目 ⇒ rejections 记 duplicate_entry，
+    同批其它 op 照常 apply（与机制层/constant 拒绝同口径）。"""
+    worldbook_store.ensure_repo_snapshot(str(tmp_path), "repo", [{"entries": [
+        {"content": "王都仍由旧王统治", "comment": "王都", "keys": ["王都"]},
+    ]}])
+    rejections: list[dict] = []
+    applied = worldbook_store.apply_repo_ops(
+        str(tmp_path), "repo", [
+            {"op": "worldbook_add", "title": "王都（重复）", "text": "王都仍由旧王统治", "keys": ["王都"]},
+            {"op": "worldbook_add", "title": "北门", "text": "北门在宵禁后关闭", "keys": ["北门"]},
+        ], rejections=rejections)
+    assert applied == 1
+    assert rejections == [{
+        "op": "worldbook_add", "title": "王都（重复）", "reason": "duplicate_entry",
+        "existing": "王都", "existing_index": 0, "detail": "same_content",
+    }]
+    snap = worldbook_store.read_repo_snapshot(str(tmp_path), "repo")
+    assert [e.get("comment") for e in snap["entries"]] == ["王都", "北门"]
+
+
 def test_空世界书快照仍允许当前小仓库新增(tmp_path):
     assert worldbook_store.ensure_repo_snapshot(str(tmp_path), "repo", [{"entries": []}]) == {"entries": []}
     assert worldbook_store.apply_repo_ops(str(tmp_path), "repo", [
@@ -477,3 +498,189 @@ def test_新增普通设定条目不受新约束影响(tmp_path):
     assert entry["comment"] == "北门"
     assert entry["content"] == "北门在宵禁后关闭"
     assert entry["keys"] == ["北门"]
+
+
+# ── 2026-10-23：角色外貌提取不再依赖「角色卡·」＋固定行首锚点 ──────────────
+
+def _visual_profiles(tmp_path, entries, query, **kwargs):
+    worldbook_store.ensure_repo_snapshot(
+        str(tmp_path), "work", [{"entries": entries}],
+    )
+    return worldbook_store.repo_visual_profiles(str(tmp_path), "work", query, **kwargs)
+
+
+def test_外貌提取保留简介瞳色并兼容任意标题(tmp_path):
+    """真机实锤：旧实现只取【外貌】整行 ⇒ 简介里的「暗黄色的眼睛」整段丢失。
+    新实现保留结构化块（含【外观】），并把块外的外貌线索句一并带上。"""
+    entries = [{
+        "comment": "腓特烈大帝",
+        "keys": ["腓特烈大帝"],
+        "content": (
+            "她有一双暗黄色的眼睛。\n"
+            "【外观】身高近两米，比 {{user}} 高出一个头。暗黄色长发。\n"
+            "【身材】巨乳、蜂腰、肥臀。\n"
+            "【穿着】黑色连衣裙、黑色连裤袜、黑色高跟鞋。\n"
+            "【剧情进展·动态】三夜未合眼。"
+        ),
+    }]
+
+    profiles = _visual_profiles(tmp_path, entries, "腓特烈大帝")
+
+    assert profiles.startswith("腓特烈大帝：")
+    for fact in (
+        "暗黄色的眼睛", "身高近两米", "暗黄色长发",
+        "巨乳", "黑色连衣裙", "黑色连裤袜", "黑色高跟鞋",
+    ):
+        assert fact in profiles
+    # 非外貌的动态段不得因「整条兜底」被当进外貌
+    assert "三夜未合眼" not in profiles
+
+
+def test_外貌提取支持纯散文与行标签(tmp_path):
+    """任意导入格式：纯散文（无角色卡前缀/无标题）与 `外貌：` 行标签都要能提到。"""
+    prose = _visual_profiles(
+        tmp_path / "prose",
+        [{
+            "comment": "艾莉丝",
+            "keys": ["艾莉丝"],
+            "content": "艾莉丝是王国公主。她有一头银发和一双金眼，穿着黑色长裙。",
+        }],
+        "艾莉丝",
+    )
+    assert "银发" in prose and "金眼" in prose and "黑色长裙" in prose
+    assert "王国公主" not in prose
+
+    labels = _visual_profiles(
+        tmp_path / "labels",
+        [{
+            "comment": "米拉",
+            "keys": ["米拉"],
+            "content": "外貌：黑色长发，金色眼睛。\n穿着：红色长裙。",
+        }],
+        "米拉",
+    )
+    assert "黑色长发" in labels and "金色眼睛" in labels and "红色长裙" in labels
+
+    english = _visual_profiles(
+        tmp_path / "english",
+        [{
+            "comment": "Elise",
+            "keys": ["Elise"],
+            "content": "Appearance: long silver hair and golden eyes, wearing a black dress.",
+        }],
+        "Elise",
+    )
+    assert "silver hair" in english and "black dress" in english
+
+
+def test_外貌提取长条目按预算裁剪而不是整条丢弃(tmp_path):
+    """旧实现单条超过 max_chars 就直接 break ⇒ 明明有角色却返回空串。
+    新实现必须裁剪到预算内并保留可用外貌，而不是丢弃。"""
+    entries = [{
+        "comment": "长外貌",
+        "keys": ["长外貌"],
+        "content": "【外貌】" + "银发金眼，黑色长裙。" * 600,
+    }]
+
+    profiles = _visual_profiles(tmp_path, entries, "长外貌", max_chars=120)
+
+    assert profiles
+    assert len(profiles) <= 120
+    assert "银发" in profiles
+
+
+def test_非角色条目不会误当外貌画像(tmp_path):
+    """地点/道具/状态条目即使命中 query，也不得被塞进「角色外貌」。"""
+    entries = [
+        {"comment": "港区账房", "keys": ["账房"], "content": "【外观】一间昏暗的账房，长桌与油灯。"},
+        {"comment": "魔戒", "keys": ["魔戒"], "content": "【外观】金色戒指，镶嵌红宝石，戒面刻有纹章。"},
+        {"comment": "状态", "keys": ["状态"], "content": "【状态】胸口涨得发沉，三夜未合眼。"},
+    ]
+    worldbook_store.ensure_repo_snapshot(
+        str(tmp_path), "work", [{"entries": entries}],
+    )
+
+    assert worldbook_store.repo_visual_profiles(str(tmp_path), "work", "账房") == ""
+    assert worldbook_store.repo_visual_profiles(str(tmp_path), "work", "魔戒") == ""
+    assert worldbook_store.repo_visual_profiles(str(tmp_path), "work", "状态") == ""
+
+
+def test_外貌提取跳过动态段及其中性子标题(tmp_path):
+    """真机实锤：`【命定危机·详版】` 下的 `【第一次是怎么被迫的】` 不含任何动态关键词，
+    若按标题各自判定就会把正文里的「红发／蕾丝眼罩」当成稳定外貌收进画像。"""
+    entries = [{
+        "comment": "角色卡·花见怜",
+        "keys": ["花见怜"],
+        "content": (
+            "【外貌】高挑妖娆的倾城御姐，金色眼眸，涂红色唇釉。\n"
+            "【命定危机·详版】\n"
+            "【第一次是怎么被迫的】成年红发异域妖姬落入拍卖行后，被戴上蕾丝眼罩与口球。\n"
+            "【触发时间与地点】无阙城地下拍卖行，压轴拍品。\n"
+            "【性格与反差】表面妩媚、内里冷酷。\n"
+        ),
+    }]
+
+    profiles = _visual_profiles(tmp_path, entries, "花见怜")
+
+    assert "金色眼眸" in profiles and "倾城御姐" in profiles
+    for leak in ("红发", "蕾丝眼罩", "拍卖行", "冷酷"):
+        assert leak not in profiles
+
+
+def test_动态段之后的外貌标题仍要重新放行(tmp_path):
+    """sticky 拒绝态只沿中性标题向下传；遇到 `【外貌】` 这类画像标题必须恢复收录。"""
+    entries = [{
+        "comment": "角色卡·花见怜",
+        "keys": ["花见怜"],
+        "content": (
+            "【命定危机】她被红发妖姬戴上蕾丝眼罩。\n"
+            "【外貌】银发金眼，黑色长裙。\n"
+        ),
+    }]
+
+    profiles = _visual_profiles(tmp_path, entries, "花见怜")
+
+    assert "银发" in profiles and "黑色长裙" in profiles
+    assert "蕾丝眼罩" not in profiles
+
+
+def test_事件系统势力条目不会因顺带提外貌混入(tmp_path):
+    """非角色条目的正文常顺带提到某人发色/「角色条目」，标题级门必须先于正文启发式生效。"""
+    entries = [
+        {
+            "comment": "15. 大事件·天魔教花见怜的暗局",
+            "keys": ["花见怜"],
+            "content": "天魔教红发妖姬花见怜潜伏商会，她以千金令换一个要求。",
+        },
+        {
+            "comment": "系统判定机制·AI叙事核心指令",
+            "keys": ["系统"],
+            "content": (
+                "【角色条目规则】不得捏造世界书里不存在的人物。\n"
+                "金发女战士炽姬（碧眼、白丝长腿）。"
+            ),
+        },
+        {
+            "comment": "1. 势力与种族·中土宗门",
+            "keys": ["势力"],
+            "content": "掌门之妹天狐剑仙妲千沁（银狐、白丝长腿、佩眼罩）。",
+        },
+    ]
+    worldbook_store.ensure_repo_snapshot(
+        str(tmp_path), "work", [{"entries": entries}],
+    )
+
+    for query in ("花见怜", "系统", "势力"):
+        assert worldbook_store.repo_visual_profiles(str(tmp_path), "work", query) == ""
+
+
+def test_外貌提取多角色共享受预算约束(tmp_path):
+    entries = [
+        {"comment": "甲", "keys": ["甲"], "content": "外貌：银发金眼。"},
+        {"comment": "乙", "keys": ["乙"], "content": "外貌：黑发红眼。"},
+    ]
+
+    profiles = _visual_profiles(tmp_path, entries, "甲与乙", max_chars=200)
+
+    assert "甲：" in profiles and "乙：" in profiles
+    assert len(profiles) <= 200

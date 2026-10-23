@@ -143,12 +143,18 @@ class EntryAddRequest(EntryLocation):
 
 @router.post("/entry/add")
 def add_entry(req: EntryAddRequest) -> dict[str, object]:
-    """新增一条世界书条目，返回其 index。"""
+    """新增一条世界书条目，返回其 index。
+
+    L1 写入闸（2026-10-22）：与既有条目重复 ⇒ 409 + 可读说明（含可改为编辑的既有条目标题/位置）。
+    """
     load, save = _locator(req)
     patch = req.entry.model_dump()
     # 新增恒为「有变化」（即便 index==0）——显式 True，不用真值判定。
-    index, _ = worldbook_store.mutate_entries(
-        load, save, lambda book: (worldbook_edit.add_entry(book, patch), True))
+    try:
+        index, _ = worldbook_store.mutate_entries(
+            load, save, lambda book: (worldbook_edit.add_entry(book, patch), True))
+    except worldbook_edit.DuplicateEntryError as dup:
+        raise HTTPException(status_code=409, detail=str(dup)) from dup
     return {"ok": True, "index": index}
 
 

@@ -424,16 +424,22 @@ def _repo_entry_patch(entry: RepoWorldbookEntryPayload) -> dict[str, object]:
 
 @router.post("/repo-worldbook/entry/add")
 def repo_worldbook_entry_add(req: RepoWorldbookEntryAdd) -> dict[str, object]:
-    """向小仓库快照世界书新增一条条目。"""
+    """向小仓库快照世界书新增一条条目。
+
+    L1 写入闸（2026-10-22）：与既有条目重复 ⇒ 409 + 可读说明（含可改为编辑的既有条目标题/位置）。
+    """
     from app.services import worldbook_edit, worldbook_store
 
     patch = _repo_entry_patch(req.entry)
     # 新增恒为「有变化」（即便 index==0）——显式 True，不用真值判定。
-    index, _ = worldbook_store.mutate_entries(
-        _repo_snapshot_load(req.output_dir, req.repo_id,
-                            missing="快照不存在，请先绑定世界书并运行至少一次剧情"),
-        _repo_snapshot_save(req.output_dir, req.repo_id),
-        lambda book: (worldbook_edit.add_entry(book, patch), True))
+    try:
+        index, _ = worldbook_store.mutate_entries(
+            _repo_snapshot_load(req.output_dir, req.repo_id,
+                                missing="快照不存在，请先绑定世界书并运行至少一次剧情"),
+            _repo_snapshot_save(req.output_dir, req.repo_id),
+            lambda book: (worldbook_edit.add_entry(book, patch), True))
+    except worldbook_edit.DuplicateEntryError as dup:
+        raise HTTPException(status_code=409, detail=str(dup)) from dup
     return {"ok": True, "index": index}
 
 

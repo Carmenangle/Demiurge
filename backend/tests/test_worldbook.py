@@ -651,3 +651,292 @@ def test_reset_session_带state_path时删除持久化文件(tmp_path):
     state_path.write_text("{}", encoding="utf-8")
     wb.reset_session(key, state_path=str(state_path))
     assert not state_path.exists()
+
+
+# ── 白名单准入 smart_recall（2026-10-22，对标 ST Vector Storage entry.vectorized）────────
+# 只影响**语义召回通道**（索引 + BM25），不影响 keyword 点名与 constant 常驻。
+# 被排除的条目一旦被提到，仍由 _keyword_hits 精准带回锚点段。
+
+def test_parse_entries_读取smart_recall字段():
+    entries = wb.parse_entries({"entries": [
+        {"content": "甲", "smart_recall": False},
+        {"content": "乙", "smart_recall": True},
+        {"content": "丙"},                       # 缺省 ⇒ None（按类型推导）
+    ]})
+    assert [e.smart_recall for e in entries] == [False, True, None]
+
+
+def test_recall_eligible_未声明时按类型推导():
+    # 规则型：本应 constant 常驻，不进语义池（ freq 对它们无意义）
+    assert wb.recall_eligible(wb.Entry("x", False, comment="系统判定机制·骰点检定")) is False
+    assert wb.recall_eligible(wb.Entry("x", False, comment="全局机制·后宫秩序与主母制")) is False
+    # 内容型：按情节开启，进语义池等 keyword/语义捞回
+    assert wb.recall_eligible(wb.Entry("x", False, comment="角色卡·武藏")) is True
+    assert wb.recall_eligible(wb.Entry("x", False, comment="E5 铁血二度发育·后宫淫趴")) is True
+    assert wb.recall_eligible(wb.Entry("x", False, comment="局部机制·NSFW·母牛化")) is True
+    assert wb.recall_eligible(wb.Entry("x", False, comment="角色速览表")) is True
+    # 空 comment 兜底按内容型（宁可多召回，不可静默失语）
+    assert wb.recall_eligible(wb.Entry("x", False, comment="")) is True
+
+
+def test_recall_eligible_显式覆盖优先于类型默认():
+    assert wb.recall_eligible(
+        wb.Entry("x", False, comment="全局机制·A", smart_recall=True)) is True    # 规则型显式开（调试）
+    assert wb.recall_eligible(
+        wb.Entry("x", False, comment="角色卡·B", smart_recall=False)) is False   # 内容型显式关（审计踢出）
+
+
+def test_白名单排除条目_keyword点名仍能进锚点段(monkeypatch):
+    """核心安全保证：移出语义池不丢内容——被提到就由 keyword 带回锚点段。"""
+    monkeypatch.setattr(wb, "_retrieve", lambda *a, **k: [])
+    entries = wb.parse_entries({"entries": [
+        {"content": "武藏角色卡", "keys": ["武藏"], "comment": "角色卡·武藏", "smart_recall": False},
+        {"content": "常驻机制", "constant": True, "comment": "全局机制·A"},
+    ]})
+    sel = wb.assemble_selection("r1", entries, "武藏来访", None)
+    assert 0 in sel.indices                    # keyword 命中 ⇒ 锚点段
+    assert sel.keyword_indices == [0]
+    assert "武藏角色卡" in sel.text
+
+
+def test_assemble_白名单排除不影响constant(monkeypatch):
+    monkeypatch.setattr(wb, "_retrieve", lambda *a, **k: [])
+    entries = wb.parse_entries({"entries": [
+        {"content": "常驻机制", "constant": True, "comment": "全局机制·A", "smart_recall": False},
+    ]})
+    out = wb.assemble("r1", entries, "q", None)
+    assert "常驻机制" in out
+
+
+# ── 条目元数据 description/trigger_when/tk（2026-10-22 傍晚，对标 ST SP·数据库 Skills化）──
+# 元数据是条目级、内容派生的一次性属性：description=用途概括、trigger_when=何时需要、
+# tk=预计消耗（字符，本仓注入预算单位）。只服务 P1 的每轮绿灯决策通道（候选只给元数据
+# 不给正文）；对现有 keyword/constant/语义通道完全惰性。空/0 = 未生成（skillify 兜底补）。
+
+def test_parse_entries_读取条目元数据三字段():
+    entries = wb.parse_entries({"entries": [
+        {"content": "甲", "description": "甲条目用途", "trigger_when": "涉及甲时", "tk": 1234},
+        {"content": "乙"},                       # 缺省 ⇒ 空/0（未生成）
+    ]})
+    assert entries[0].description == "甲条目用途"
+    assert entries[0].trigger_when == "涉及甲时"
+    assert entries[0].tk == 1234
+    assert entries[1].description == ""
+    assert entries[1].trigger_when == ""
+    assert entries[1].tk == 0
+
+
+def test_parse_entries_元数据字段类型容错():
+    """脏数据不得炸解析：tk 非 int/负值/bool、description 非 str ⇒ 回退默认值。"""
+    entries = wb.parse_entries({"entries": [
+        {"content": "甲", "tk": "abc"},
+        {"content": "乙", "tk": -5},
+        {"content": "丙", "tk": True},           # bool 是 int 子类，必须排除
+        {"content": "丁", "description": 42, "trigger_when": None},
+        {"content": "戊", "description": "  带空白  ", "tk": 7},
+    ]})
+    assert [e.tk for e in entries] == [0, 0, 0, 0, 7]
+    assert entries[3].description == ""
+    assert entries[3].trigger_when == ""
+    assert entries[4].description == "带空白"    # 与 comment 同口径 strip
+
+
+def test_parse_entries_读取meta_src_hash字段():
+    entries = wb.parse_entries({"entries": [
+        {"content": "甲", "description": "用途", "trigger_when": "时机", "tk": 10,
+         "meta_src_hash": "abc123"},
+        {"content": "乙"},                       # 缺省 ⇒ 空
+        {"content": "丙", "meta_src_hash": 42},  # 非 str ⇒ 空（容错）
+    ]})
+    assert entries[0].meta_src_hash == "abc123"
+    assert entries[1].meta_src_hash == ""
+    assert entries[2].meta_src_hash == ""
+
+
+def test_recall_override_替换召回轨且跳过检索(monkeypatch):
+    """P1 绿灯：recall_override 给定 ⇒ 召回轨用自选条目，语义/BM25 一次都不查。"""
+    def _boom(*_a, **_k):
+        raise AssertionError("recall_override 模式下不应触发检索")
+    monkeypatch.setattr(wb, "_retrieve", _boom)
+    monkeypatch.setattr(wb, "_sparse_retrieve", _boom)
+    entries = wb.parse_entries({"entries": [
+        {"content": "常驻机制", "constant": True, "comment": "全局机制·A"},
+        {"content": "武藏角色卡", "keys": ["武藏"], "comment": "角色卡·武藏",
+         "description": "重樱军师", "trigger_when": "涉及武藏时", "tk": 2635},
+        {"content": "信浓角色卡", "keys": ["信浓"], "comment": "角色卡·信浓",
+         "description": "重樱仙狐", "trigger_when": "涉及信浓时", "tk": 2493},
+    ]})
+    sel = wb.assemble_selection_stable(
+        "r1", entries, "继续观察", None, session_key="s-gl-1", recall_override=[2],
+    )
+    assert 0 in sel.indices                      # constant 锚点仍在
+    assert 2 in sel.indices                      # 绿灯自选进召回轨
+    assert "信浓角色卡" in sel.recall_text
+    assert "武藏角色卡" not in sel.recall_text    # 未选中的不进召回轨
+    # 无 session 状态文件 ⇒ 纯内存序列；换会话键不复用
+    sel2 = wb.assemble_selection_stable(
+        "r1", entries, "继续观察", None, session_key="s-gl-2", recall_override=[],
+    )
+    assert sel2.recall_text == ""                # 选空 ⇒ 召回轨空（压制 BM25，同 A/B 语义）
+
+
+def test_recall_override_缺省时行为不变(monkeypatch):
+    """不传 recall_override ⇒ 检索照常发生（默认路径逐字节等于改造前）。"""
+    called = []
+    monkeypatch.setattr(wb, "_retrieve", lambda *_a, **_k: called.append(1) or [])
+    monkeypatch.setattr(wb, "_sparse_retrieve", lambda *_a, **_k: [])
+    entries = wb.parse_entries({"entries": [
+        {"content": "角色卡", "keys": ["武藏"], "comment": "角色卡·武藏"},
+    ]})
+    wb.assemble_selection_stable("r1", entries, "武藏来访", None, session_key="s-gl-3")
+    assert called == [1]
+
+
+def test_元数据对现有激活通道惰性(monkeypatch):
+    """元数据不得改变 keyword/constant/语义任何行为（P0 只加字段不改通道）。"""
+    monkeypatch.setattr(wb, "_retrieve", lambda *a, **k: [])
+    entries = wb.parse_entries({"entries": [
+        {"content": "武藏角色卡", "keys": ["武藏"], "comment": "角色卡·武藏",
+         "description": "重樱军师", "trigger_when": "涉及武藏时", "tk": 2635},
+        {"content": "常驻机制", "constant": True, "comment": "全局机制·A",
+         "description": "规则", "trigger_when": "每轮", "tk": 100},
+    ]})
+    sel = wb.assemble_selection("r1", entries, "武藏来访", None)
+    assert 0 in sel.indices and "武藏角色卡" in sel.text
+    assert wb.recall_eligible(entries[0]) is True
+    assert wb.recall_eligible(entries[1]) is False    # 规则型默认不进语义池（与元数据无关）
+
+
+def test_index_delta_非白名单条目被清理出索引(monkeypatch):
+    class FakeStore:
+        def __init__(self):
+            self.rows = {"wb_old": ("旧角色卡", {"kind": "worldbook"})}
+            self.deleted: list[str] = []
+
+        def get(self, ids=None):
+            rows = list(self.rows.items())
+            return {"ids": [i for i, _ in rows],
+                    "documents": [v[0] for _, v in rows],
+                    "metadatas": [v[1] for _, v in rows]}
+
+        def delete(self, ids):
+            self.deleted.extend(ids)
+            for i in ids:
+                self.rows.pop(i, None)
+
+    store = FakeStore()
+    entries = [
+        wb.Entry(content="新条目", constant=False, comment="角色卡·X"),
+        wb.Entry(content="旧角色卡", constant=False, comment="角色卡·Y", smart_recall=False),
+    ]
+    _existing, missing, stale = wb._index_delta(store, entries)
+    assert [e.content for e in missing] == ["新条目"]
+    assert "wb_old" in stale          # 不在白名单 ⇒ 存量向量被清理（无需手动 purge）
+
+
+def test_index_delta_规则型显式开后仍可入索引(monkeypatch):
+    class FakeStore:
+        def get(self, ids=None):
+            return {"ids": [], "documents": [], "metadatas": []}
+
+    missing = wb._index_delta(FakeStore(), [
+        wb.Entry("机制内容", False, comment="全局机制·A", smart_recall=True),
+    ])[1]
+    assert [e.content for e in missing] == ["机制内容"]
+
+
+def test_sparse_retrieve_排除非白名单条目():
+    entries = [
+        wb.Entry(content="甲内容文本", constant=False, keys=["甲"], comment="角色卡·甲"),
+        wb.Entry(content="乙内容文本", constant=False, keys=["乙"], comment="角色卡·乙", smart_recall=False),
+        wb.Entry(content="机制内容文本", constant=False, keys=["机制"], comment="全局机制·丙"),
+    ]
+    # 注意：`_tokenize` 是中文 bigram 切分 ⇒ query 必须与文档有 bigram 交集才有分。
+    out = wb._sparse_retrieve(entries, "甲内容文本 乙内容文本 机制内容文本", 5)
+    assert "甲内容文本" in out
+    assert "乙内容文本" not in out
+    assert "机制内容文本" not in out
+
+
+def test_ensure_indexed_不为非白名单条目调用嵌入(monkeypatch):
+    class FakeStore:
+        def __init__(self):
+            self.rows: dict = {}
+            self.added: list[str] = []
+
+        def get(self, ids=None):
+            rows = list(self.rows.items())
+            return {"ids": [i for i, _ in rows],
+                    "documents": [v[0] for _, v in rows],
+                    "metadatas": [v[1] for _, v in rows]}
+
+        def add_documents(self, docs, ids):
+            for i, d in zip(ids, docs):
+                self.added.append(d.page_content)
+                self.rows[i] = (d.page_content, d.metadata)
+
+        def delete(self, ids):
+            for i in ids:
+                self.rows.pop(i, None)
+
+    store = FakeStore()
+    monkeypatch.setattr(wb.rag_backend, "store", lambda *_a, **_k: store)
+    entries = [
+        wb.Entry(content="入池条目", constant=False, comment="角色卡·X"),
+        wb.Entry(content="踢出条目", constant=False, comment="角色卡·Y", smart_recall=False),
+    ]
+    wb.ensure_indexed("repo", entries, None)
+    assert store.added == ["入池条目"]
+
+
+# ── 锚点退役（2026-10-22，对标 ST sticky/cooldown）────────────────────────────
+
+def _retire_entries():
+    return wb.parse_entries({"entries": [
+        {"content": "荒岛初遇事件", "keys": ["荒岛"], "comment": "E1 荒岛初遇"},
+        {"content": "常驻机制", "constant": True, "comment": "全局机制·A"},
+    ]})
+
+
+def test_锚点退役_连续N轮未命中移出序列(monkeypatch):
+    """旧弧线锚点（E1 类）连续 N 轮不被命中 ⇒ 移出序列；constant 永不退役。"""
+    monkeypatch.setattr(wb, "_retrieve", lambda *_a, **_k: [])
+    monkeypatch.setattr(wb, "_sparse_retrieve", lambda *_a, **_k: [])
+    entries = _retire_entries()
+    key = "s-retire-1"
+    sel = wb.assemble_selection_stable("r", entries, "荒岛初遇", None, session_key=key)
+    assert 0 in sel.indices and sel.retired == []
+    for _ in range(wb._ANCHOR_RETIRE_MISSES):
+        sel = wb.assemble_selection_stable("r", entries, "无关话题", None, session_key=key)
+    assert 0 not in sel.indices
+    assert len(sel.retired) == 1               # 恰在最后一轮退役
+    assert 1 in sel.indices                    # constant 不动
+
+
+def test_锚点退役_命中即重置计数(monkeypatch):
+    monkeypatch.setattr(wb, "_retrieve", lambda *_a, **_k: [])
+    monkeypatch.setattr(wb, "_sparse_retrieve", lambda *_a, **_k: [])
+    entries = _retire_entries()
+    key = "s-retire-2"
+    wb.assemble_selection_stable("r", entries, "荒岛初遇", None, session_key=key)
+    for _ in range(wb._ANCHOR_RETIRE_MISSES - 1):
+        wb.assemble_selection_stable("r", entries, "无关话题", None, session_key=key)
+    sel = wb.assemble_selection_stable("r", entries, "回荒岛", None, session_key=key)  # 命中 ⇒ 归零
+    assert 0 in sel.indices and sel.retired == []
+    for _ in range(wb._ANCHOR_RETIRE_MISSES - 1):
+        sel = wb.assemble_selection_stable("r", entries, "无关话题", None, session_key=key)
+    assert 0 in sel.indices and sel.retired == []   # 未到 6 连未命中
+
+
+def test_锚点退役_退役后再命中进动态块不重长锚点段(monkeypatch):
+    monkeypatch.setattr(wb, "_retrieve", lambda *_a, **_k: [])
+    monkeypatch.setattr(wb, "_sparse_retrieve", lambda *_a, **_k: [])
+    entries = _retire_entries()
+    key = "s-retire-3"
+    wb.assemble_selection_stable("r", entries, "荒岛初遇", None, session_key=key)
+    for _ in range(wb._ANCHOR_RETIRE_MISSES):
+        wb.assemble_selection_stable("r", entries, "无关话题", None, session_key=key)
+    sel = wb.assemble_selection_stable("r", entries, "再次荒岛", None, session_key=key)
+    assert 0 in sel.indices
+    assert "荒岛初遇事件" not in sel.text        # 锚点段不重长（前缀安全）
+    assert "荒岛初遇事件" in sel.dynamic_text    # 按 mid-session 规则进动态块

@@ -622,12 +622,24 @@ def _entry_match_keys(item: dict[str, Any]) -> list[str]:
 
 
 def upsert_repo_worldbook(base: str, repo_id: str,
-                          entries: list[dict[str, Any]]) -> dict[str, Any]:
-    """向作品世界书快照 upsert 条目（durable）。快照不存在则创建骨架。"""
+                          entries: list[dict[str, Any]],
+                          source_chapters: list[int] | None = None,
+                          allow_shrink: bool = False,
+                          revision_reason: str = "") -> dict[str, Any]:
+    """向作品世界书快照 upsert 条目（durable）。快照不存在则创建骨架。
+
+    source_chapters（2026-10-20，固化02 §3.9 增量链）：本轮条目依据的章节序号，
+    写入成功后机械记进 `<作品>/_prep/coverage.json`（台账，**不进条目五字段**）——
+    下次更新时据它反查「第 X 章变了 → 哪几条条目要改」，免去整本读旧世界书。
+    allow_shrink / revision_reason（同批）：作者删减修订时放行「短版覆盖」，
+    必须给原因（凭据进 warnings，防被当默认放行开关滥用）。
+    """
     from app.services import worldbook_edit, worldbook_store
 
     if not (base and repo_id):
         raise ValueError("作品目录与 repo_id 由执行环境归一注入，不接受空值")
+    if allow_shrink and not str(revision_reason or "").strip():
+        raise ValueError("allow_shrink 必须同时给 revision_reason（说明这轮为什么是删减修订）")
     book = worldbook_store.read_repo_snapshot(base, repo_id)
     if book is None:
         book = {"entries": []}
@@ -635,7 +647,10 @@ def upsert_repo_worldbook(base: str, repo_id: str,
         snap.parent.mkdir(parents=True, exist_ok=True)
     applied = 0
     skipped = 0
+    applied_items: list[dict[str, Any]] = []
     warnings: list[str] = []
+    if allow_shrink:
+        warnings.append(f"删减修订放行（allow_shrink）：{str(revision_reason).strip()}")
     indexed = {str(item.get("index")): item for item in worldbook_edit.list_entries(book)}
     # 2026-09-07 实锤修复：批内去重——indexed 是写入前快照，批内先 add 的条目不更新
     # indexed → 同一批两条相同 comment 被重复添加（角色卡×2 等 8 组重复实锤）。
@@ -644,9 +659,9 @@ def upsert_repo_worldbook(base: str, repo_id: str,
 
     def _norm_comment(text: str) -> str:
         """comment 归一：去空白/全半角/标点，用于跨批匹配（「局部机制·史莱姆体质」
-        vs「局部机制·史莱姆体质　」应视为同一条；旧 A 态条目标点/空格漂移也会归一）。"""
-        import re as _re
-        return _re.sub(r"[\s·、。，．,．:：()（）\[\]【】\-—/\\]+", "", text or "").strip()
+        vs「局部机制·史莱姆体质　」应视为同一条；旧 A 态条目标点/空格漂移也会归一）。
+        2026-10-20：规则收归模块级 `_norm_comment_key`（台账反查/删除同口径），此处只别名。"""
+        return _norm_comment_key(text)
 
 
     for patch in entries or []:
@@ -680,7 +695,8 @@ def upsert_repo_worldbook(base: str, repo_id: str,
         _existing = next((it for it in indexed.values()
                           if _norm_comment(str(it.get("comment") or "")) == _norm_comment_c), None)
         if (_target and _existing is not None and len(_content) < _target
-                and len(_content) < len(str(_existing.get("content") or ""))):
+                and len(_content) < len(str(_existing.get("content") or ""))
+                and not allow_shrink):
             warnings.append(
                 f"覆盖保护拒绝写入：{_comment_c}（{len(_content)}字 < {_target} 且短于已有"
                 f"{len(str(_existing.get('content') or ''))}字）。按素材锚定扩写法："
@@ -707,6 +723,7 @@ def upsert_repo_worldbook(base: str, repo_id: str,
         if hit is not None:
             if worldbook_edit.update_entry(book, int(hit["index"]), norm):
                 applied += 1
+                applied_items.append({"comment": comment, "chars": len(_content)})
             # 2026-09-07 治本（审计实锤 12 组重复）：同名条目历史遗留多版本并存
             # （旧 A 态短版 + 新补写长版），update 只改一条，其余旧版残留。
             # 命中后把「归一 comment 相同」的其他旧条目一并删除，保证同 comment
@@ -722,14 +739,112 @@ def upsert_repo_worldbook(base: str, repo_id: str,
                 for _oi in _others:
                     worldbook_edit.delete_entry(book, _oi)
         else:
-            worldbook_edit.add_entry(book, norm)
+            # L1 写入闸（2026-10-22）：本路径已按 comment/keys 做过匹配（不中才走到这里），
+            # 这里再撞内容级重复（精确内容/同开头 ≥14 字）⇒ 说明是 comment 与 keys 都不同、
+            # 但正文同源的条目：跳过并记警告，不阻断整批导入。
+            try:
+                worldbook_edit.add_entry(book, norm)
+            except worldbook_edit.DuplicateEntryError as dup:
+                skipped += 1
+                warnings.append(f"跳过重复条目「{comment or '(无标题)'}」：{dup}")
+                continue
             applied += 1
+            applied_items.append({"comment": comment, "chars": len(_content)})
             if comment:
                 _seen_comments.add(_norm_comment(comment))
     if applied:
         worldbook_store.save_repo_snapshot(base, repo_id, book)
+    coverage: dict[str, Any] = {}
+    if applied_items and source_chapters:
+        # 台账（机械，零 LLM）：只记真正写入成功的条目；读不到作品域不阻断写库
+        try:
+            from app.services import repo_meta, worldbook_coverage
+
+            _wd = str(repo_meta.engine_repo_dir(base, repo_id))
+            coverage = worldbook_coverage.record(_wd, applied_items, source_chapters)
+        except Exception as exc:  # noqa: BLE001 [EXC-留痕] 台账失败不影响快照已写入
+            warnings.append(f"覆盖台账记账失败（快照已写入，不影响条目）：{exc}")
     return {"repo_id": repo_id, "applied": applied, "skipped": skipped,
-            "warnings": warnings}
+            "warnings": warnings, "coverage": coverage}
+
+
+def _norm_comment_key(text: str) -> str:
+    """comment 归一（跨批匹配口径，与 upsert 内联版一致）：去空白/标点/全半角差异。"""
+    return re.sub(r"[\s·、。，．,．:：()（）\[\]【】\-—/\\]+", "", str(text or "")).strip()
+
+
+def coverage_report(base: str, repo_id: str,
+                    chapters: list[int] | None = None) -> dict[str, Any]:
+    """条目↔章节覆盖台账反查（readonly，固化02 §3.9 第三步）。
+
+    chapters 给定时返回 affected（本次变更章节影响到的条目）、uncovered_chapters
+    （没被任何条目覆盖的章节 → 提示新增条目）；不给则只出全量台账与
+    unregistered（台账上线前的条目，无来源信息）。
+    """
+    from app.services import (repo_meta, worldbook_coverage, worldbook_edit,
+                             worldbook_store)
+
+    if not (base and repo_id):
+        raise ValueError("作品目录与 repo_id 由执行环境归一注入，不接受空值")
+    book = worldbook_store.read_repo_snapshot(base, repo_id) or {}
+    comments = [str(it.get("comment") or "") for it in worldbook_edit.list_entries(book)
+                if str(it.get("comment") or "").strip()]
+    wd = str(repo_meta.engine_repo_dir(base, repo_id))
+    ledger = worldbook_coverage.read_ledger(wd)
+    rep = worldbook_coverage.report(ledger, comments, chapters)
+    rep["ledger_path"] = str(worldbook_coverage.ledger_path(wd))
+    rep["has_ledger"] = bool(ledger.get("entries"))
+    if not rep["has_ledger"]:
+        rep["note"] = ("台账为空：此前的条目没有来源信息。修订前按章节标题定位条目，"
+                       "本轮写条目时带 source_chapters 即可从这里开始积累。")
+    return rep
+
+
+def delete_repo_entries(base: str, repo_id: str,
+                        comments: list[str] | None = None,
+                        keys: list[str] | None = None) -> dict[str, Any]:
+    """按 comment 或 keys 删除世界书快照条目（durable，固化02 §3.9 废弃语义）。
+
+    新版本里被作者删掉的情节，对应条目要真的删掉（不能留着当事实）。
+    comments 先归一后精确匹配；keys 用「任一方向子串」匹配（与 upsert 同口径）。
+    删除后同步清覆盖台账，防「已删条目仍被算作受影响条目」。
+    """
+    from app.services import (repo_meta, worldbook_coverage, worldbook_edit,
+                             worldbook_store)
+
+    if not (base and repo_id):
+        raise ValueError("作品目录与 repo_id 由执行环境归一注入，不接受空值")
+    want_comments = {_norm_comment_key(c) for c in (comments or []) if str(c).strip()}
+    want_keys = [str(k).strip() for k in (keys or []) if str(k).strip()]
+    if not want_comments and not want_keys:
+        raise ValueError("comments 与 keys 至少要给一个（按 comment 或 keys 定位要删的条目）")
+    book = worldbook_store.read_repo_snapshot(base, repo_id)
+    if book is None:
+        raise ValueError("世界书快照不存在，无可删除条目")
+    targets: list[tuple[int, str]] = []
+    for item in worldbook_edit.list_entries(book):
+        comment = str(item.get("comment") or "")
+        hit_comment = bool(want_comments) and _norm_comment_key(comment) in want_comments
+        hit_key = bool(want_keys) and any(
+            k and any(k in ek or ek.startswith(k) or k.startswith(ek)
+                      for ek in _entry_match_keys(item))
+            for k in want_keys)
+        if hit_comment or hit_key:
+            targets.append((int(item["index"]), comment))
+    for idx, _c in sorted(targets, key=lambda x: x[0], reverse=True):
+        worldbook_edit.delete_entry(book, idx)
+    if targets:
+        worldbook_store.save_repo_snapshot(base, repo_id, book)
+        try:
+            worldbook_coverage.drop(str(repo_meta.engine_repo_dir(base, repo_id)),
+                                    [c for _i, c in targets])
+        except Exception:  # noqa: BLE001 - 台账清理失败不影响删除结果
+            pass
+    deleted = [c for _i, c in targets]
+    missing = sorted(want_comments - {_norm_comment_key(c) for c in deleted})
+    return {"repo_id": repo_id, "deleted": len(deleted), "comments": deleted,
+            "not_found": missing,
+            "note": "删除只作用于作品世界书快照；卡目录 card.json 内嵌副本需 character.embed_worldbook 重嵌同步。"}
 
 
 def migrate_mechanical(path: str, base: str = "", repo_id: str = "") -> dict[str, Any]:
@@ -1274,6 +1389,66 @@ def novel_charfacts(full_txt: str, names: list[str],
                                      chapter_end=int(chapter_end or 0))
     except novel_tools.NovelToolError as exc:
         raise ValueError(str(exc)) from exc
+
+# ── 固化02 §3.9 增量定位（novel.index / novel.diff）：更新版小说的输入范围界定 ──
+# 逻辑真源 backend/app/services/novel_tools.py（T4 段）；本组只做参数归一与路径兜底。
+# 背景（2026-10-20 用户定案）：更新版做合集卡时不得整本重读旧文——先有旧索引，
+# 再由 diff 给出「新增/被改章节 + read_plan 窗口」，模型只读这些区间。
+
+
+def novel_index(full_txt: str, out_json: str | None = None,
+                work_dir: str | None = None, book_name: str | None = None) -> dict[str, Any]:
+    """为一部小说建立章节索引（每章 sha1 + 段落哈希）并落盘，供后续更新对比。
+
+    落点二选一：`out_json` 显式给全路径（给了 work_dir 时必须落在其内），或给
+    `work_dir`（作品根）自动落 `<work_dir>/_prep/<book_name 或 novel>.index.json`。
+    返回摘要（章节清单 + 偏移），**不回传段落哈希**（工具结果防爆量）。
+    """
+    from pathlib import Path
+
+    from app.services import novel_tools
+
+    target = str(out_json or "").strip()
+    wd = str(work_dir or "").strip()
+    if not target:
+        if not wd:
+            raise ValueError("out_json 与 work_dir 至少要给一个"
+                             "（给 work_dir 自动落 _prep/<book>.index.json）")
+        book = re.sub(r'[\\/:*?"<>|\s]+', "_", str(book_name or "novel").strip()).strip("._") or "novel"
+        target = str(Path(wd) / "_prep" / f"{book}.index.json")
+    elif wd:
+        try:
+            Path(target).resolve().relative_to(Path(wd).resolve())
+        except ValueError as exc:
+            raise ValueError(f"out_json 必须落在作品域（{wd}）内：{target}") from exc
+    try:
+        return novel_tools.write_index(str(full_txt), target)
+    except novel_tools.NovelToolError as exc:
+        raise ValueError(str(exc)) from exc
+
+
+def novel_diff(new_txt: str, old_index: str | None = None, old_txt: str | None = None,
+               max_chars: int = 20000, include_minor_read: bool = False,
+               work_dir: str | None = None) -> dict[str, Any]:
+    """新旧版本对比：unchanged / modified(minor|major) / added / removed + read_plan。
+
+    `old_index` 优先（先对旧版跑 novel.index 落盘）；也接受 `old_txt`（旧版全文，现场建索引）。
+    两者都没有 → ValueError（没有基准就没有输入范围，禁止整本重读代替）。
+    输出不带段落哈希；read_plan 默认只覆盖新增与 major 修订。
+    `work_dir` 给定时把范围落成 `<work_dir>/_prep/novel.scope.json`——fabric 的
+    `file.read_text` 拦截据此拒读未变更章节（把纪律变机制）。
+    """
+    from app.services import novel_tools
+
+    try:
+        return novel_tools.diff_novel(
+            new_txt=str(new_txt), old_index=old_index, old_txt=old_txt,
+            max_chars=int(max_chars or 20000),
+            include_minor_read=bool(include_minor_read),
+            work_dir=work_dir)
+    except novel_tools.NovelToolError as exc:
+        raise ValueError(str(exc)) from exc
+
 
 def worldbook_check_density(entries: list[dict[str, Any]] | None = None,
                          repo_id: str = "", base: str = "",
