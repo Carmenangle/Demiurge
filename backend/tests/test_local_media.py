@@ -31,6 +31,20 @@ def test_range读取只返回指定区间(tmp_path):
     assert b"".join(media.iter_bytes(chunk_size=2)) == b"bcd"
 
 
+@pytest.mark.parametrize(
+    ("name", "media_type"),
+    [("clip.m4v", "video/x-m4v"), ("clip.ogv", "video/ogg")],
+)
+def test_补充视频容器返回正确media_type(tmp_path, name, media_type):
+    path = tmp_path / name
+    path.write_bytes(b"abcdef")
+
+    media = open_local_media(str(path))
+
+    assert media.media_type == media_type
+    assert media.headers["Accept-Ranges"] == "bytes"
+
+
 def test_音频返回audio_media_type(tmp_path):
     path = tmp_path / "voice.wav"
     path.write_bytes(b"abcdef")

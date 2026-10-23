@@ -503,6 +503,9 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
   //   scroll 事件不冒泡，但对 window 用 capture=true 能收到所有内层容器的滚动。
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const lastAutoRef = useRef(0);   // 自动加载节流：失败/连续触发时别把请求打爆
+  // 显式跳页的时间窗（毫秒时间戳）：窗口内自动加载链一律让位，避免「点 11 跳 2」
+  const suppressAutoRef = useRef(0);
+  const jumpRetryRef = useRef(0);  // 跳页遇到在途加载时的重试计数（有界，防无限排自己）
   useEffect(() => {
     if (!browsing || !hasMore) return;
     let raf = 0;
@@ -512,6 +515,8 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
       const el = sentinelRef.current;
       if (!el || loadingMoreRef.current) return;
       if (loadMoreError) return;                              // 失败态交给用户点重试
+      // 显式跳页进行中：自动链必须让位（2026-10-19 用户实锤「点 11 却跳到 2」）
+      if (Date.now() < suppressAutoRef.current) return;
       const since = Date.now() - lastAutoRef.current;
       if (since < 800) {
         // 刚加载过：等节流窗口过去再量一次（内容仍不足一屏时要能继续续加载）
@@ -551,8 +556,22 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
   const jumpToPage = (target: number | "last") => {
     const last = Math.max(1, pagerCount);
     const n = target === "last" ? last : Math.max(1, Math.min(last, Math.floor(target) || 1));
-    if (n * PAGE_SIZE <= items.length) { setPage(n); scrollToPage(n); return; }   // 已加载
+    if (n * PAGE_SIZE <= items.length) { jumpRetryRef.current = 0; setPage(n); scrollToPage(n); return; }   // 已加载
     if (clientFiltering) { setPage(Math.min(n, pageCount)); scrollToPage(Math.min(n, pageCount)); return; }
+    // ⚠ 2026-10-19 用户实锤：「点 11 页却先跳到 2 页，要再点一次才行」。
+    //   根因＝自动加载链正在跑时 `loadingMoreRef` 为 true，`loadMore(n)` 被并发闸
+    //   提前 return ⇒ 这次跳页请求**静默丢失**，随后自动链把页码一级级爬上去。
+    //   两件防护：① 跳页期间压住自动链（suppressAutoRef）；
+    //             ② 若已有加载在途，等它落地再重发跳页（有界重试，别无限排自己）。
+    suppressAutoRef.current = Date.now() + 4000;
+    if (loadingMoreRef.current) {
+      if (jumpRetryRef.current < 50) {
+        jumpRetryRef.current += 1;
+        window.setTimeout(() => jumpToPage(n), 120);
+      }
+      return;
+    }
+    jumpRetryRef.current = 0;
     void loadMore(n).then(() => scrollToPage(n));
   };
 

@@ -401,3 +401,61 @@ def test_tag_snapshot_ops_sync_main_table(db, fake_store):
     assert set(asset_store.list_assets(["r1"])[0]["tags"]) == {"c"}
 
 
+
+# ===== 空内容不覆盖（2026-10-22 资产库「提示词全空」事故回归锁） =====
+# 事故链：`index_generation` 的 Chroma 侧是 add（同 id 静默忽略），主表侧此前无条件覆盖。
+# 「发送至对话框」（text: "" ⇒ prompt=""）或仓库同步补录（prompt=""）一次即可把主表
+# 提示词清空，而 Chroma 保留真值 ⇒ 列表读主表 ⇒ 用户看到「（无提示词记录）」。
+
+def test_upsert_blank_prompt_keeps_existing(db):
+    """空 prompt 重入不得抹掉已有提示词（真机 130 条就是被这样清的）。"""
+    asset_store.upsert_asset(_mk("a1", prompt="masterpiece, 1girl, beach"))
+    asset_store.upsert_asset(_mk("a1", prompt=""))
+
+    row = asset_store.get_row("a1")
+    assert row["prompt"] == "masterpiece, 1girl, beach"
+    # FTS 也要能搜到（触发器按行重建，提示词不能从索引里消失）
+    assert [i["id"] for i in asset_store.search_assets(["r1"], q="beach")] == ["a1"]
+
+
+def test_upsert_non_blank_prompt_still_overwrites(db):
+    """非空新值照常覆盖（改提示词重入库不能被「保护」误挡）。"""
+    asset_store.upsert_asset(_mk("a1", prompt="old prompt"))
+    asset_store.upsert_asset(_mk("a1", prompt="new prompt"))
+    assert asset_store.get_row("a1")["prompt"] == "new prompt"
+
+
+def test_upsert_blank_description_and_tags_keep_existing(db):
+    """描述/标签同样「空不覆盖」，且 asset_tags 不被清空（防 tags_json 与结构化表劈叉）。"""
+    asset_store.upsert_asset(_mk("a1", prompt="p", description="银发少女", tags=["1girl", "solo"]))
+    asset_store.upsert_asset(_mk("a1", prompt="", description="", tags=[]))
+
+    row = asset_store.get_row("a1")
+    assert row["description"] == "银发少女"
+    assert set(asset_store.list_assets(["r1"])[0]["tags"]) == {"1girl", "solo"}
+    assert {s["tag"] for s in asset_store.tag_stats(["r1"])} == {"1girl", "solo"}
+
+
+def test_index_generation_reentry_with_blank_prompt_keeps_prompt(db, fake_store):
+    """「发送至对话框」式重入（同图同仓库、prompt 空）不得清空提示词与标签。"""
+    url = "/api/local-view?path=/tmp/reentry.png"
+    rag_store.index_generation("r1", None, prompt="masterpiece, 1girl", tags="1girl",
+                               image_url=url, description="少女")
+    doc_id = rag_store.generation_doc_id("r1", url)
+    # 前端 SendToChatModal「发送至对话框」payload.text = "" ⇒ prompt=""
+    rag_store.index_generation("r1", None, prompt="", image_url=url)
+
+    assert fake_store.docs[doc_id]["metadata"]["prompt"] == "masterpiece, 1girl"
+    item = asset_store.list_assets(["r1"])[0]
+    assert item["prompt"] == "masterpiece, 1girl"
+    assert item["description"] == "少女"
+    assert "1girl" in item["tags"]
+
+
+def test_index_generation_reentry_with_new_prompt_updates(db, fake_store):
+    """重入带了新提示词 ⇒ 以新值为准（继承只补空，不锁死旧值）。"""
+    url = "/api/local-view?path=/tmp/reentry2.png"
+    rag_store.index_generation("r1", None, prompt="old", image_url=url)
+    doc_id = rag_store.generation_doc_id("r1", url)
+    rag_store.index_generation("r1", None, prompt="new", image_url=url)
+    assert asset_store.get_row(doc_id)["prompt"] == "new"

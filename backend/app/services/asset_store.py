@@ -94,7 +94,18 @@ def _placeholders(values) -> str:
 # ─────────────────────────── 写入 ───────────────────────────
 
 def upsert_asset(item: dict) -> None:
-    """幂等 upsert（id 冲突覆盖元数据；**不复活已软删行**——deleted_at 保留）。"""
+    """幂等 upsert（id 冲突覆盖元数据；**不复活已软删行**——deleted_at 保留）。
+
+    ⚠ 2026-10-22 真机事故（资产库「之前生成的图片均无提示词记录」）：本表此前对
+    prompt/description/tags 是**无条件覆盖**，而 Chroma 侧 `index_generation` 用的是
+    langchain `add_documents`（底层 Chroma `add`），同 id 重复写入是**静默忽略**。
+    于是任何「带空内容的重入」——最常见的是资产库「发送至对话框」（前端
+    `SendToChatModal` 传 `text: ""` ⇒ prompt=""），其次是仓库同步补录
+    （`repo_sync_fix` 传 prompt=""）——都会把主表的提示词清成空串，Chroma 却留着真值，
+    列表页（读主表）就显示「（无提示词记录）」。
+    ⇒ 修法：**空内容不覆盖已有非空值**（coalesce 语义），与 Chroma 的「忽略重写」
+    行为对齐。真要有意清空，走 `sync_tags` / `sync_description` 这类专用入口。
+    """
     tags = item.get("tags") or []
     if isinstance(tags, str):
         tags = [t for t in tags.split(",") if t.strip()]
@@ -113,8 +124,13 @@ def upsert_asset(item: dict) -> None:
                     repo_id=excluded.repo_id, kind=excluded.kind,
                     media_type=excluded.media_type, source=excluded.source,
                     image_url=excluded.image_url, thumb_url=excluded.thumb_url,
-                    prompt=excluded.prompt, description=excluded.description,
-                    tags_json=excluded.tags_json,
+                    -- 空内容不覆盖非空真值（见 docstring）：prompt/description/tags
+                    prompt=case when excluded.prompt <> '' then excluded.prompt
+                                else assets.prompt end,
+                    description=case when excluded.description <> '' then excluded.description
+                                     else assets.description end,
+                    tags_json=case when excluded.tags_json not in ('', '[]') then excluded.tags_json
+                                   else assets.tags_json end,
                     template_name=excluded.template_name, model_name=excluded.model_name,
                     lora_names=excluded.lora_names, created_at=excluded.created_at,
                     source_url=excluded.source_url, source_meta=excluded.source_meta,
@@ -134,11 +150,15 @@ def upsert_asset(item: dict) -> None:
                     item.get("derived_from") or "[]",
                 ),
             )
-            conn.execute("delete from asset_tags where asset_id = ?", (item["id"],))
-            conn.executemany(
-                "insert or ignore into asset_tags (asset_id, tag, repo_id) values (?,?,?)",
-                [(item["id"], t, item.get("repo_id") or "") for t in tags],
-            )
+            # 标签结构化表只在「本次真的带了标签」时重建：空标签=不更新（与上面
+            # tags_json 的 coalesce 保持一致，否则会出现 tags_json 有值、asset_tags
+            # 空表的劈叉）。显式清空标签走 sync_tags。
+            if tags:
+                conn.execute("delete from asset_tags where asset_id = ?", (item["id"],))
+                conn.executemany(
+                    "insert or ignore into asset_tags (asset_id, tag, repo_id) values (?,?,?)",
+                    [(item["id"], t, item.get("repo_id") or "") for t in tags],
+                )
     finally:
         conn.close()
 

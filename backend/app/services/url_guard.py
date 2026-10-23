@@ -139,7 +139,7 @@ def is_local_view_url(url: str) -> bool:
 # 但严格限制只回媒体文件——挡住读 .env/.db/.py/密钥/源码等敏感文件的 LFI 攻击面。
 _MEDIA_EXTS = {
     "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "ico", "avif", "tiff",
-    "mp4", "webm", "mov", "mkv", "m4v", "avi",
+    "mp4", "webm", "mov", "mkv", "m4v", "avi", "ogv",
     "wav", "mp3", "flac", "ogg", "oga", "opus", "m4a", "aac", "wma",
 }
 

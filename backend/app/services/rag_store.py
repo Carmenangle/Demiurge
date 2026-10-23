@@ -128,6 +128,31 @@ def generation_doc_id(repo_id: str, image_url: str) -> str:
             if img else str(uuid.uuid4()))
 
 
+def _inherit_existing_fields(store, doc_id: str, prompt: str, tags: str,
+                             description: str) -> tuple[str, str, str]:
+    """同 id 已入库时，本次缺省的 prompt / tags / description 沿用既有非空值。
+
+    契约：只补「本次为空」的字段，非空一律以本次为准（改提示词重入库照常生效）；
+    读失败/记录不存在 ⇒ 原样返回（绝不因探测失败而阻断入库）。
+    """
+    if prompt.strip() and tags.strip() and description.strip():
+        return prompt, tags, description
+    try:
+        got = store.get(ids=[doc_id])
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 探测失败不阻断入库
+        _log.warning("入库空值继承探测失败 id=%s: %s", doc_id, exc)
+        return prompt, tags, description
+    metas = (got or {}).get("metadatas") or []
+    meta = (metas[0] if metas else None) or {}
+    if not meta:
+        return prompt, tags, description
+    return (
+        prompt if prompt.strip() else str(meta.get("prompt") or ""),
+        tags if tags.strip() else str(meta.get("tags") or ""),
+        description if description.strip() else str(meta.get("description") or ""),
+    )
+
+
 def index_generation(repo_id: str, cfg: EmbedConfig,
                      prompt: str, tags: str = "", image_url: str = "",
                      created_at: int | None = None, description: str = "",
@@ -149,14 +174,19 @@ def index_generation(repo_id: str, cfg: EmbedConfig,
     （渠道/来源页/作者/评级/搜索词 JSON）。默认空串 ⇒ **不写这三个键**，
     既有生成链与历史记录形状逐字不变。
     """
-    text = "\n".join(t for t in [prompt, tags, description] if t and t.strip())
-    if not text.strip() and not (image_url or "").strip():
-        return  # 既无文本也无图，无意义
-    embed_text = text if text.strip() else ("生成视频" if media_type == "video" else "生成图片")
-    tag_list = _auto_tags(prompt, tags)
     store = _store(_repo_collection(repo_id), cfg)
     img = (image_url or "").strip()
     doc_id = generation_doc_id(repo_id, img)
+    # 2026-10-22：幂等重入（仓库同步补录 / 「发送至对话框」建画布节点 / 恢复重建索引）
+    # 常带空 prompt 再调一次；Chroma 的 add 对同 id 静默忽略、主表若不补就会写空 ⇒
+    # 两侧劈叉（真机 130 条提示词被清空）。写之前把缺省字段沿用既有值。
+    prompt, tags, description = _inherit_existing_fields(
+        store, doc_id, prompt, tags, description)
+    text = "\n".join(t for t in [prompt, tags, description] if t and t.strip())
+    if not text.strip() and not img:
+        return  # 既无文本也无图，无意义
+    embed_text = text if text.strip() else ("生成视频" if media_type == "video" else "生成图片")
+    tag_list = _auto_tags(prompt, tags)
     metadata = {"kind": "generation", "image_url": image_url or "",
                 "repo_id": repo_id or "", "tags": ",".join(tag_list),
                 "prompt": prompt or "", "description": description or "",

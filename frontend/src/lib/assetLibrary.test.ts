@@ -471,7 +471,15 @@ describe("统一后台任务进度（2026-10-18：视觉索引/补缩略图/同�
     expect(gallery).toContain("onLast={() => jumpToPage(\"last\")}");
     // 有 offset 后跳页只需一笔区间请求，不再「升级全量」；加载完滚到该页第一张
     expect(gallery).toContain("const jumpToPage = (target: number | \"last\") => {");
-    expect(gallery).toContain("if (n * PAGE_SIZE <= items.length) { setPage(n); scrollToPage(n); return; }");
+    expect(gallery).toContain("if (n * PAGE_SIZE <= items.length) { jumpRetryRef.current = 0; setPage(n); scrollToPage(n); return; }");
+    // 2026-10-19 用户实锤「点 11 页却先跳到 2 页、要再点一次」：
+    // 自动加载链在途时 loadingMoreRef=true，loadMore(n) 被并发闸提前 return ⇒
+    // 显式跳页请求静默丢失。两件防护必须同时在位：
+    //   ① 跳页期间压住自动链；② 有在途加载就等它落地再重发（有界重试）。
+    expect(gallery).toContain("suppressAutoRef.current = Date.now() + 4000;");
+    expect(gallery).toContain("window.setTimeout(() => jumpToPage(n), 120);");
+    expect(gallery).toContain("if (jumpRetryRef.current < 50) {");
+    expect(gallery).toContain("if (Date.now() < suppressAutoRef.current) return;");
     expect(gallery).toContain("void loadMore(n).then(() => scrollToPage(n));");
     expect(gallery).toContain("data-gal-page=");
     expect(gallery).not.toContain("setPendingJump(");
