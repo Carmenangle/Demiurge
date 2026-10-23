@@ -1,3 +1,5 @@
+import json
+
 from app.services import manual_table_fill as mtf
 
 
@@ -276,6 +278,331 @@ def test_空纪要重试耗尽计入失败清单(monkeypatch, tmp_path):
     assert narrative_store.get_last_turn(base, "r1", "卡A") == 6
 
 
+# ── 纪要超限压缩兜底（2026-10-21 真机：第 1–3 层永远补不上）────────────────
+
+
+def _chronicle_payload(overview: str, detail: str) -> str:
+    """主请求的整包返回（ManualFillResult）。"""
+    return json.dumps({"ops": [], "chronicles": [{
+        "overview": overview, "chronicle": detail, "dialogue": "",
+        "characters": ["卡A"], "keywords": ["事件"],
+    }]}, ensure_ascii=False)
+
+
+def _entry_payload(overview: str, detail: str) -> str:
+    """压缩稿的返回（COMPRESS_SYSTEM 要求单条纪要对象，不是整包）。"""
+    return json.dumps({
+        "overview": overview, "chronicle": detail, "dialogue": "",
+        "characters": ["卡A"], "keywords": ["事件"], "facts": [],
+    }, ensure_ascii=False)
+
+
+def test_纪要超限_压缩轮到第二轮达标_不整批失败(monkeypatch, tmp_path):
+    """真机：第 1–3 层模型其实正常返回了纪要（overview 26 字合格 / chronicle 428 字超限），
+    只压一次落在 296~320 字之间随机浮动 ⇒ 同一批时成时败，用户看到「补了还是空的」。
+    现压最多 2 轮、任一达标即收 ⇒ 第二轮达标照样落盘。"""
+    from app.services import narrative_store
+
+    base = str(tmp_path)
+    monkeypatch.setattr(mtf.chat_snapshot, "load", lambda _repo_id: _messages(3))
+    monkeypatch.setattr(mtf.table_store, "load_config", lambda _b, _r: {"chronicleEvery": 3})
+    calls = []
+
+    def fake_chat(*_args, **_kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            return _chronicle_payload("快艇途中装虚弱引发嫉妒", "长" * 428)   # 主请求：超限
+        if len(calls) == 2:
+            return _entry_payload("快艇途中装虚弱引发嫉妒", "中" * 318)       # 压缩1：仍超
+        return _entry_payload("快艇途中装虚弱引发嫉妒", "短" * 250)            # 压缩2：达标
+
+    result = mtf.run_manual_fill(
+        base=base, repo_id="r1", card_name="卡A", selected=[mtf.CHRONICLE_UID],
+        recent_turns=3, batch_turns=3, overwrite=True,
+        base_url="b", api_key="k", model="m", proxy="", chat_fn=fake_chat,
+    )
+
+    assert result["chronicles"] == 1
+    assert result["failed_batches"] == []
+    assert len(calls) == 3                     # 主请求 1 + 压缩 2 轮
+    entries = narrative_store.recent(base, "r1", k=10)
+    assert [(e.turn_start, e.turn_end) for e in entries] == [(1, 3)]
+    assert len(entries[0].text) == 250
+
+
+def test_纪要超限_两轮压缩都不达标_仍记失败不无限重试(monkeypatch, tmp_path):
+    base = str(tmp_path)
+    monkeypatch.setattr(mtf.chat_snapshot, "load", lambda _repo_id: _messages(3))
+    monkeypatch.setattr(mtf.table_store, "load_config", lambda _b, _r: {"chronicleEvery": 3})
+    calls = []
+
+    def fake_chat(*_args, **_kwargs):
+        calls.append(1)
+        return _chronicle_payload("概览", "长" * 400) if len(calls) == 1 \
+            else _entry_payload("概览", "长" * 400)   # 怎么压都超
+
+    result = mtf.run_manual_fill(
+        base=base, repo_id="r1", card_name="卡A", selected=[mtf.CHRONICLE_UID],
+        recent_turns=3, batch_turns=3, overwrite=True,
+        base_url="b", api_key="k", model="m", proxy="", chat_fn=fake_chat,
+    )
+
+    assert result["chronicles"] == 0
+    assert len(result["failed_batches"]) == 1
+    assert "纪要抽取无效或超限" in result["failed_batches"][0]
+    assert len(calls) == 3                     # 主请求 1 + 压缩 2 轮，封顶不无限重试
+
+
+def test_返回空数组_重试带纠错提示_第二次成功(monkeypatch, tmp_path):
+    """真机：模型连续返回 `[]`（顶层空数组）⇒ 结构性失败，缺口永远补不上。
+    根因是重试原样重发同一条 prompt。现首次 prompt 不变、**重试才追加纠错提示**。
+    ⚠ 且 `maxRetry` 默认 0 —— 必须仍给一次纠错机会（否则这段修复永远用不上）。"""
+    from app.services import narrative_store
+
+    base = str(tmp_path)
+    monkeypatch.setattr(mtf.chat_snapshot, "load", lambda _repo_id: _messages(3))
+    # 故意不设 maxRetry（真实默认 0）
+    monkeypatch.setattr(mtf.table_store, "load_config", lambda _b, _r: {"chronicleEvery": 3})
+    prompts: list[str] = []
+
+    def fake_chat(_b, _k, _m, _system, user, **_kwargs):
+        prompts.append(user)
+        if len(prompts) == 1:
+            return "[]"                                  # 首次：模型退化
+        return _chronicle_payload("开场与初次接触", "主角落地荒岛并与舰娘初次接触。")
+
+    result = mtf.run_manual_fill(
+        base=base, repo_id="r1", card_name="卡A", selected=[mtf.CHRONICLE_UID],
+        recent_turns=3, batch_turns=3, overwrite=True,
+        base_url="b", api_key="k", model="m", proxy="", chat_fn=fake_chat,
+    )
+
+    assert result["chronicles"] == 1
+    assert result["failed_batches"] == []
+    assert len(prompts) == 2
+    assert "上一轮输出不合格" not in prompts[0]        # 首次 prompt 逐字不变
+    assert "上一轮输出不合格" in prompts[1]            # 重试才纠错
+    assert "不要输出数组" in prompts[1]
+    assert len(narrative_store.recent(base, "r1", k=5)) == 1
+
+
+def test_空数组重试耗尽_计入失败清单(monkeypatch, tmp_path):
+    base = str(tmp_path)
+    monkeypatch.setattr(mtf.chat_snapshot, "load", lambda _repo_id: _messages(3))
+    monkeypatch.setattr(mtf.table_store, "load_config", lambda _b, _r: {"chronicleEvery": 3})
+    calls = []
+
+    result = mtf.run_manual_fill(
+        base=base, repo_id="r1", card_name="卡A", selected=[mtf.CHRONICLE_UID],
+        recent_turns=3, batch_turns=3, overwrite=True,
+        base_url="b", api_key="k", model="m", proxy="",
+        chat_fn=lambda *_a, **_k: calls.append(1) or "[]",
+    )
+
+    assert result["chronicles"] == 0
+    assert len(result["failed_batches"]) == 1
+    assert "结构无效" in result["failed_batches"][0]
+    assert len(calls) == 2                            # 1 次原始 + 1 次纠错，封顶不无限重试
+
+
+def test_覆盖是真覆盖_封口被完整包住的旧条而不是再追加一条(monkeypatch, tmp_path):
+    """2026-10-21 用户质疑「『覆盖』若只追加、不把同层旧条去掉，那你叫覆盖有什么用」。
+    真机：6 条重叠里点「确定」变成 9 条。现在 overwrite=True ⇒ 旧条**封口替换**
+    （封口=隐藏，数据保留可审计），live 里只剩新生成的。"""
+    from app.services import narrative_store
+
+    base = _seed_covered(monkeypatch, tmp_path, [(1, 3), (4, 6)])
+    assert len(narrative_store.live_entries(base, "r1")) == 2
+    monkeypatch.setattr(mtf.chat_snapshot, "load", lambda _repo_id: _messages(6))
+    monkeypatch.setattr(mtf.table_store, "load_config", lambda _b, _r: {"chronicleEvery": 3})
+
+    result = mtf.run_manual_fill(
+        base=base, repo_id="r1", card_name="卡A", selected=[mtf.CHRONICLE_UID],
+        recent_turns=6, batch_turns=3, overwrite=True,
+        base_url="b", api_key="k", model="m", proxy="",
+        chat_fn=lambda *_a, **_k: _chronicle_payload("新批次概览", "新生成的这一版更完整。"),
+    )
+
+    assert result["chronicles"] == 2
+    assert result["sealed_overlap"] == 2        # 两条旧条被封口替换
+    live = narrative_store.live_entries(base, "r1")
+    assert len(live) == 2                       # 不再叠加成 4 条
+    assert all(e.text == "新生成的这一版更完整。" for e in live)
+    # 旧数据没物理删，仍在 all_entries 里可审计
+    assert len(narrative_store.all_entries(base, "r1")) == 4
+
+
+def test_覆盖时跨批的旧条也能被替换(monkeypatch, tmp_path):
+    """真机：旧条 5-7 横跨 4-6 与 7-9 两个新批次 —— 按「单批包含」判断封不掉它，
+    会留下一条跨批重叠。改为按**成功批次并集**判断后应被封口。"""
+    from app.services import narrative_store
+
+    base = _seed_covered(monkeypatch, tmp_path, [(4, 6), (5, 7), (8, 9), (8, 9)])
+    monkeypatch.setattr(mtf.chat_snapshot, "load", lambda _repo_id: _messages(9))
+    monkeypatch.setattr(mtf.table_store, "load_config", lambda _b, _r: {"chronicleEvery": 3})
+
+    result = mtf.run_manual_fill(
+        base=base, repo_id="r1", card_name="卡A", selected=[mtf.CHRONICLE_UID],
+        recent_turns=1, batch_turns=3, overwrite=True,
+        base_url="b", api_key="k", model="m", proxy="",
+        chat_fn=lambda *_a, **_k: _chronicle_payload("批次概览", "本批次发生关键事件。"),
+        ranges=[[4, 9]],
+    )
+
+    assert result["chronicles"] == 2            # 4-6 / 7-9 两批
+    assert result["sealed_overlap"] == 4        # 4-6、5-7、8-9、8-9 四条旧条全被封口
+    live = narrative_store.live_entries(base, "r1")
+    assert sorted((e.turn_start, e.turn_end) for e in live) == [(4, 6), (7, 9)]
+
+
+def test_覆盖时某批失败_失败范围的旧条不封口(monkeypatch, tmp_path):
+    """新的没来就绝不能先封旧的 —— 否则那几层的纪要直接消失。"""
+    from app.services import narrative_store
+
+    base = _seed_covered(monkeypatch, tmp_path, [(1, 3), (4, 6)])
+    monkeypatch.setattr(mtf.chat_snapshot, "load", lambda _repo_id: _messages(6))
+    monkeypatch.setattr(mtf.table_store, "load_config", lambda _b, _r: {"chronicleEvery": 3})
+    calls = []
+
+    def fake_chat(*_a, **_k):
+        calls.append(1)
+        if len(calls) == 1:
+            return _chronicle_payload("新批次概览", "新生成的这一版更完整。")
+        return "[]"                             # 第二批失败（maxRetry=0 ⇒ 一次就放弃）
+
+    result = mtf.run_manual_fill(
+        base=base, repo_id="r1", card_name="卡A", selected=[mtf.CHRONICLE_UID],
+        recent_turns=6, batch_turns=3, overwrite=True,
+        base_url="b", api_key="k", model="m", proxy="", chat_fn=fake_chat,
+    )
+
+    assert result["chronicles"] == 1
+    assert result["sealed_overlap"] == 1        # 只封 1-3 那条旧条
+    assert result["failed_batches"]             # 4-6 那批如实报失败
+    live = narrative_store.live_entries(base, "r1")
+    assert sorted((e.turn_start, e.turn_end) for e in live) == [(1, 3), (4, 6)]  # 4-6 旧条还在
+
+
+def test_跳过模式绝不封口(monkeypatch, tmp_path):
+    from app.services import narrative_store
+
+    base = _seed_covered(monkeypatch, tmp_path, [(5, 7)])
+    monkeypatch.setattr(mtf.chat_snapshot, "load", lambda _repo_id: _messages(9))
+    monkeypatch.setattr(mtf.table_store, "load_config", lambda _b, _r: {"chronicleEvery": 3})
+
+    result = mtf.run_manual_fill(
+        base=base, repo_id="r1", card_name="卡A", selected=[mtf.CHRONICLE_UID],
+        recent_turns=10, batch_turns=3, overwrite=False,
+        base_url="b", api_key="k", model="m", proxy="",
+        chat_fn=lambda *_a, **_k: _chronicle_payload("批次概览", "本批次发生关键事件。"),
+    )
+
+    assert result["sealed_overlap"] == 0
+    assert result["covered_skipped"] == [[4, 6], [7, 9]]
+    assert len(narrative_store.live_entries(base, "r1")) == 2   # 旧条 1 + 新增 1-3
+
+
+# ── 已覆盖层的「覆盖 or 跳过」（2026-10-21 用户：8-9 出现多条要说明）────────
+
+
+def _seed_covered(monkeypatch, tmp_path, ranges: list[tuple[int, int]]) -> str:
+    """先落一批纪要，模拟「已覆盖」的层。"""
+    from app.services import narrative_memory, narrative_store
+
+    base = str(tmp_path)
+    for start, end in ranges:
+        narrative_store.append(base, "r1", narrative_memory.ChronicleEntry(
+            text=f"第{start}-{end}层的事件经过。", overview=f"{start}-{end}概览",
+            turn_start=start, turn_end=end, keywords=["事件"]))
+    return base
+
+
+def test_已覆盖层默认跳过_不再产出重复纪要(monkeypatch, tmp_path):
+    """真机：全量补跑 [(1,3)(4,6)(7,9)] 时 7-9 整批落在既有 5-7/8-9 覆盖内 ⇒ 又生成一条
+    「7-9 婚礼」⇒ 8-9 变 3 条。overwrite=False 时整批已有纪要 ⇒ 不出纪要。"""
+    from app.services import narrative_store
+
+    base = _seed_covered(monkeypatch, tmp_path, [(5, 7), (8, 9)])
+    monkeypatch.setattr(mtf.chat_snapshot, "load", lambda _repo_id: _messages(9))
+    monkeypatch.setattr(mtf.table_store, "load_config", lambda _b, _r: {"chronicleEvery": 3})
+
+    def fake_chat(*_a, **_k):
+        return _chronicle_payload("批次概览", "本批次发生关键事件。")
+
+    result = mtf.run_manual_fill(
+        base=base, repo_id="r1", card_name="卡A", selected=[mtf.CHRONICLE_UID],
+        recent_turns=10, batch_turns=3, overwrite=False,
+        base_url="b", api_key="k", model="m", proxy="", chat_fn=fake_chat,
+    )
+
+    # 只有 1-3 批（1~3 未覆盖）出纪要；4-6 / 7-9 都含已覆盖层 ⇒ 跳过
+    assert result["chronicles"] == 1
+    assert result["covered_skipped"] == [[4, 6], [7, 9]]
+    assert result["chronicle_overlap"] == [[5, 9]]
+    assert len(narrative_store.live_entries(base, "r1")) == 3   # 2 条既有 + 1 条新增
+
+
+def test_覆盖模式仍追加_并回显重叠层(monkeypatch, tmp_path):
+    """overwrite=True（用户在弹窗选「确定」）⇒ 照常追加（与现有并存），但要回显重叠层，
+    让用户知道这些层现在有两条纪要。"""
+    from app.services import narrative_store
+
+    base = _seed_covered(monkeypatch, tmp_path, [(5, 7)])
+    monkeypatch.setattr(mtf.chat_snapshot, "load", lambda _repo_id: _messages(6))
+    monkeypatch.setattr(mtf.table_store, "load_config", lambda _b, _r: {"chronicleEvery": 3})
+
+    result = mtf.run_manual_fill(
+        base=base, repo_id="r1", card_name="卡A", selected=[mtf.CHRONICLE_UID],
+        recent_turns=6, batch_turns=3, overwrite=True,
+        base_url="b", api_key="k", model="m", proxy="",
+        chat_fn=lambda *_a, **_k: _chronicle_payload("批次概览", "本批次发生关键事件。"),
+    )
+
+    assert result["chronicles"] == 2            # 1-3 与 4-6 都出
+    assert result["covered_skipped"] == []      # 覆盖模式不跳过
+    assert result["chronicle_overlap"] == [[5, 6]]
+    assert len(narrative_store.live_entries(base, "r1")) == 3
+
+
+def test_与已有纪要重叠且未表态_要求先确认覆盖还是跳过(monkeypatch, tmp_path):
+    """overwrite=None 且本次范围落在已覆盖层 ⇒ 必须先确认，不能默默产出重复。"""
+
+    base = _seed_covered(monkeypatch, tmp_path, [(5, 7)])
+    monkeypatch.setattr(mtf.chat_snapshot, "load", lambda _repo_id: _messages(6))
+    monkeypatch.setattr(mtf.table_store, "load_config", lambda _b, _r: {"chronicleEvery": 3})
+    calls = []
+
+    result = mtf.run_manual_fill(
+        base=base, repo_id="r1", card_name="卡A", selected=[mtf.CHRONICLE_UID],
+        recent_turns=6, batch_turns=3, overwrite=None,
+        base_url="b", api_key="k", model="m", proxy="",
+        chat_fn=lambda *_a, **_k: calls.append(1) or "",
+    )
+
+    assert result["needs_confirmation"] is True
+    assert result["chronicle_overlap"] == [[5, 6]]
+    assert calls == []                          # 确认前一次模型都不调
+
+
+def test_无重叠时不需要确认_照常补跑(monkeypatch, tmp_path):
+    # 已覆盖 1-3；recent_turns=3 只跑 4-6 ⇒ 本次范围与已有纪要零交集 ⇒ 不弹确认
+    base = _seed_covered(monkeypatch, tmp_path, [(1, 3)])
+    monkeypatch.setattr(mtf.chat_snapshot, "load", lambda _repo_id: _messages(6))
+    monkeypatch.setattr(mtf.table_store, "load_config", lambda _b, _r: {"chronicleEvery": 3})
+
+    result = mtf.run_manual_fill(
+        base=base, repo_id="r1", card_name="卡A", selected=[mtf.CHRONICLE_UID],
+        recent_turns=3, batch_turns=3, overwrite=None,
+        base_url="b", api_key="k", model="m", proxy="",
+        chat_fn=lambda *_a, **_k: _chronicle_payload("批次概览", "本批次发生关键事件。"),
+    )
+
+    assert result["needs_confirmation"] is False
+    assert result["chronicles"] == 1            # 只有 4-6 这一批（范围内无覆盖）
+    assert result["covered_skipped"] == []
+    assert result["chronicle_overlap"] == []
+
+
 # ── 缺口补跑（2026-09-13 用户要求「针对空缺建立索引」）────────────────────
 
 
@@ -404,3 +731,49 @@ def test_会话层数取自快照且不可读时退回零(monkeypatch):
     monkeypatch.setattr(mtf.chat_snapshot, "load",
                         lambda _repo_id: (_ for _ in ()).throw(OSError()))
     assert mtf.session_turn_count("r1") == 0
+
+
+def test_越界区间不再静默丢弃_进入失败清单(monkeypatch, tmp_path):
+    """2026-10-20 真机：缺口显示「第 10–13 层」，而本会话只有 9 层
+
+    ⇒ 该区间每次都被 `if start <= end` 静默丢掉——既不跑、也不报错，
+    用户只能靠「怎么还没补上」反推。现在必须写成一条可见的失败，
+    并同时给出 `dropped_ranges` 供程序化消费。
+    """
+    import json
+
+    base = str(tmp_path)
+    repo = "repo-gap"
+    (tmp_path / "tables.json").write_text("[]", encoding="utf-8")
+
+    def _chat(*_a, **_k):
+        return json.dumps({"ops": [], "chronicles": [{
+            "overview": "概览", "chronicle": "纪要", "dialogue": "",
+            "characters": ["甲"], "keywords": ["关键词"],
+        }]})
+
+    monkeypatch.setattr(mtf.chat_snapshot, "load", lambda _repo_id: _messages(9))
+
+    out = mtf.run_manual_fill(
+        base=base, repo_id=repo, card_name="", selected=[mtf.CHRONICLE_UID],
+        recent_turns=3, batch_turns=3, overwrite=None,
+        base_url="", api_key="", model="m", proxy="", chat_fn=_chat,
+        ranges=[[1, 4], [10, 13]],
+    )
+    # 10–13 完全越界 ⇒ 不处理、但必须可见
+    assert out["dropped_ranges"] == [[10, 13]]
+    assert any("10–13" in item and "越界" in item for item in out["failed_batches"])
+    # 1–4 照常处理（仍按 3 层一批切分）
+    assert out["processed"] == 4
+
+
+def test_越界上报_部分越界只裁不报():
+    """部分越界是「裁剪」不是「丢弃」：[[8, 99]] 在 9 层会话里变成 8–9，不该报错。"""
+    kept, dropped = mtf.normalize_ranges_with_report([[8, 99]], 9)
+    assert kept == [(8, 9)]
+    assert dropped == []
+    kept2, dropped2 = mtf.normalize_ranges_with_report([[12, 20]], 9)
+    assert kept2 == []
+    assert dropped2 == [(12, 20)]
+    # 层数未知（0）时不谎报丢弃
+    assert mtf.normalize_ranges_with_report([[1, 3]], 0) == ([], [])

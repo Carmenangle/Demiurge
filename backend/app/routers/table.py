@@ -16,6 +16,22 @@ from pydantic import BaseModel
 from app.routers.ai_common import ChatModelReq
 from app.services import chat_snapshot, llm, manual_table_fill, table_store
 
+
+def _mask_proxy(proxy: str) -> str:
+    """代理走线只暴露 host:port，别把带账号的 URL 回给前端。"""
+    raw = (proxy or "").strip()
+    if not raw:
+        return ""
+    try:
+        from urllib.parse import urlsplit
+
+        parts = urlsplit(raw if "://" in raw else f"http://{raw}")
+        host = parts.hostname or ""
+        port = f":{parts.port}" if parts.port else ""
+        return f"{host}{port}" if host else "自定义代理"
+    except Exception:  # noqa: BLE001 [EXC-保留] 解析失败按「自定义代理」呈现
+        return "自定义代理"
+
 router = APIRouter()
 
 
@@ -233,4 +249,10 @@ def manual_fill(req: ManualFillRequest) -> dict[str, object]:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=f"手动填表失败：{exc}")
+        # 2026-10-20 用户实锤「手动填表失败：调用对话模型失败：Connection error.」：
+        # `build_model` 只在 proxy **非空**时注入代理 http_client（见其 docstring 的
+        # 「Connection error / timed out」教训），所以这个异常几乎必然与代理走线有关。
+        # 但调用方看不出到底是「直连」还是「走了哪个代理」⇒ 把走线写进错误信息。
+        route = f"代理 {_mask_proxy(req.proxy)}" if (req.proxy or "").strip() else "直连（未注入代理）"
+        raise HTTPException(
+            status_code=502, detail=f"手动填表失败：{exc}｜模型 {req.model or '?'} @ {route}")

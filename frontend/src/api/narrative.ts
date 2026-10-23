@@ -59,6 +59,8 @@ export interface NormalizePlan {
   duplicates: NormalizeDuplicate[];
   rebases: NormalizeRebase[]; // 相邻批次共享边界层，顺延保宽
   gaps: [number, number][];   // 没有任何纪要覆盖的回合区间
+  // 2026-10-21：顺延后超出本会话层数的 rowid（用户定案「接受级联」，不改写顺延结果）。
+  // UI 必须明示警告：这些区间会落到不存在的回合上，建议先删重复条目再整理。
   overrun: number[];
 }
 

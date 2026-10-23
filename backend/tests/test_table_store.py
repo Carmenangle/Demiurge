@@ -764,3 +764,104 @@ def test_mutate_structure_空base或repo静默返回不抛():
     """base/repo 为空 → load 返 []、save 跳过；不抛（no-op 响应口径由路由决定）。"""
     assert ts.mutate_structure("", "r", lambda t: ts.drop_table(t, "x")) == ([], False)
     assert ts.mutate_structure("/tmp", "", lambda t: ts.drop_table(t, "x")) == ([], False)
+
+
+# ── 方案 C（2026-10-22）：累积型字段写入侧截断 ────────────────────────────
+def _quests_table() -> dict:
+    return {
+        "name": ts.QUESTS_TABLE,
+        "columns": ["名称", "类型", "状态", "目标", "进展", "相关人物", "地点", "备注"],
+        "rows": [],
+        "rowPolicy": "keyed",
+        "keyCol": "名称",
+    }
+
+
+def test_clip_cell_未超限时逐字返回():
+    assert ts._clip_cell("短值", 120) == "短值"
+    exact = "甲" * 120
+    assert ts._clip_cell(exact, 120) == exact
+
+
+def test_clip_cell_在句读处收敛而不是切半句():
+    long = "第一句结论。第二句补充。" + "第三句多余。" * 20
+    got = ts._clip_cell(long, 40)
+    assert len(got) <= 40
+    # 必须收在句读上，不能是半句
+    assert got.endswith("。")
+
+
+def test_clip_cell_无句读时硬切并补省略号():
+    got = ts._clip_cell("甲" * 300, 50)
+    assert len(got) <= 50
+    assert got.endswith("…")
+
+
+def test_clip_cell_幂等_重复截断不累积省略号():
+    once = ts._clip_cell("甲" * 300, 50)
+    twice = ts._clip_cell(once, 50)
+    assert twice == once
+    assert "……" not in twice
+
+
+def test_apply_ops_进度超长被截断():
+    tables = [_quests_table()]
+    ts.apply_ops(tables, [{
+        "op": "insert", "table": ts.QUESTS_TABLE,
+        "values": {"名称": "取得港区实权", "类型": "主线", "状态": "进行中",
+                   "进展": "经过。" * 300, "备注": "备" * 200},
+    }])
+    row = tables[0]["rows"][0]
+    cols = tables[0]["columns"]
+    assert len(row[cols.index("进展")]) <= 120
+    assert len(row[cols.index("备注")]) <= 100
+
+
+def test_apply_ops_update路径同样截断():
+    tables = [_quests_table()]
+    tables[0]["rows"] = [["老任务", "主线", "进行中", "目标", "旧进展", "", "", ""]]
+    ts.apply_ops(tables, [{
+        "op": "update", "table": ts.QUESTS_TABLE, "key": "老任务",
+        "values": {"进展": "新。" * 400},
+    }])
+    assert len(tables[0]["rows"][0][4]) <= 120
+
+
+def test_apply_ops_身份列与真源列永不截断():
+    """红线：定位键（名称）与真源列（时间/地点/世界规则）不得被截断。"""
+    tables = [{
+        "name": ts.GLOBAL_TABLE,
+        "columns": ["时间", "地点", "世界状态", "世界规则"],
+        "rows": [["", "", "", ""]],
+        "rowPolicy": "singleton",
+    }, _quests_table()]
+    long_key = "任" * 200
+    long_rule = "规" * 500
+    ts.apply_ops(tables, [
+        {"op": "update", "table": ts.GLOBAL_TABLE, "row": 0,
+         "values": {"时间": "婚" * 100, "地点": "地" * 100,
+                    "世界状态": "状。" * 300, "世界规则": long_rule}},
+        {"op": "insert", "table": ts.QUESTS_TABLE,
+         "values": {"名称": long_key, "进展": "短进展"}},
+    ])
+    g = tables[0]["rows"][0]
+    assert g[0] == "婚" * 100          # 时间：不截
+    assert g[1] == "地" * 100          # 地点：不截
+    assert g[3] == long_rule           # 世界规则：不截
+    assert len(g[2]) <= 220            # 世界状态：截
+    assert tables[1]["rows"][0][0] == long_key   # 身份列：不截
+
+
+def test_clip_op_values_非字符串列不改类型():
+    """数量列可能被 JSON 解析成 int，截断逻辑不得把它变成 str。"""
+    got = ts._clip_op_values({"数量": 3, "进展": "甲" * 500})
+    assert got["数量"] == 3
+    assert isinstance(got["数量"], int)
+    assert len(got["进展"]) <= 120
+
+
+def test_ops_rules_已包含字段长度硬约束():
+    """文案锁：模型侧必须被告知上限，否则只靠引擎截断等于白写一轮。"""
+    assert "字段长度" in tu._OPS_RULES
+    assert "进展≤120" in tu._OPS_RULES
+    assert "不写过程" in tu._OPS_RULES

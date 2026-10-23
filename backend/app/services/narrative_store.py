@@ -548,6 +548,8 @@ def normalize_preview(base: str, repo_id: str, *, total_turns: int = 0) -> dict[
         ],
         "gaps": [[start, end] for start, end in plan.gaps],
         # 顺延后超出总层数的条目：保留顺延结果，仅提示（用户定案接受级联）。
+        # ⚠ 真机上这会让 9 层会话的条目落到 10~16（不存在的回合）⇒ 前端必须明示警告，
+        # 并建议先删重复条目（2026-10-21：改「不顺延」需用户重新拍板，未做）。
         "overrun": plan.overrun,
     }
 

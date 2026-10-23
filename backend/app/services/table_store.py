@@ -64,6 +64,62 @@ _RETAIN_ON_DELETE_TABLES = {
     GLOBAL_TABLE, PROTAGONIST_TABLE, CHARACTERS_TABLE, SKILLS_TABLE, QUESTS_TABLE, OPTIONS_TABLE,
 }
 
+# ── 累积型字段长度上限（2026-10-22「方案 C」）────────────────────────────────
+# 问题：这些字段设计上只该写「当前状态」，实际被写成**整段剧情复述**
+# （真机实测：任务表「进展」263/305/531 字、全局表「世界状态」528 字），
+# 且内容与纪要/时序事实**重复** ⇒ 每轮白付 token（读侧全表 4,003 字里 47% 是这类膨胀）。
+# 处理：**写入侧**兜底截断（不依赖模型自律）+ `table_update._OPS_RULES` 文案约束。
+# ⚠ 只收**累积型**列。绝不收录：`时间`/`地点`/`世界规则`（规则是真源）、
+#   身份列（`姓名`/`名称`/`物品名称`/`技能名称`，是 update/delete 的定位键）、
+#   `状态`/`类型`/`数量` 等短枚举列，以及选项表的两列（每轮整体重写，截断无意义）。
+_LENGTH_CAPPED_COLUMNS: dict[str, int] = {
+    "进展": 120,        # 当前状态 + 下一步；过程归纪要
+    "世界状态": 220,    # 当前有效事实；过程归纪要
+    "过往经历": 180,
+    "人际关系": 120,
+    "在场状态": 120,
+    "当前状态": 120,
+    "备注": 100,
+}
+# 句读：按这些字符断句，避免把一句话切一半
+_SENTENCE_END = "。！？；!?;\n…"
+
+
+def _clip_cell(text: str, limit: int) -> str:
+    """把单元格文本截到 `limit` 以内，优先在句读处收敛（幂等）。
+
+    策略：先剥掉上一次截断留下的尾巴省略号（保证重复截断不会累积成「……」），
+    再在 `[limit/2, limit]` 区间内从后往前找最后一个句读；找到就截到它，
+    找不到才硬切并在末尾补一个「…」。⇒ 已合规的文本原样返回，可安全重复调用。
+    """
+    text = str(text or "").strip()
+    if limit <= 0 or len(text) <= limit:
+        return text
+    # 只剥「硬切标记」省略号，**不碰正文句读**（否则「第一句。@limit=4」会丢句号）
+    body = text.rstrip("…") if text.endswith("…") else text
+    if len(body) <= limit:
+        return body
+    floor = max(1, limit // 2)
+    for index in range(min(limit, len(body)) - 1, floor - 1, -1):
+        if body[index] in _SENTENCE_END:
+            return body[: index + 1]
+    return body[: max(1, limit - 1)] + "…"
+
+
+def _clip_op_values(values: Any) -> Any:
+    """把一次 op 的 `values` 里累积型列截断到上限；非 dict / 无限制列原样返回。
+
+    只在有上限的列上做 `str()` 归一——其它列的类型一律不动（数量列可能是数字）。
+    """
+    if not isinstance(values, dict):
+        return values
+    out: dict[str, Any] = {}
+    for key, value in values.items():
+        limit = _LENGTH_CAPPED_COLUMNS.get(str(key).strip())
+        out[key] = _clip_cell(value, limit) if limit else value
+    return out
+
+
 
 def default_tables() -> list[dict[str, Any]]:
     """新作品默认的剧情资料分类；与状态/纪要两个专用引擎互补，不复制它们的数据。"""
@@ -185,7 +241,7 @@ def apply_ops(tables: list[dict[str, Any]], ops: Any) -> int:
         cols: list[str] = tbl["columns"]
         rows: list[list[str]] = tbl["rows"]
         if op == "insert":
-            vals = item.get("values")
+            vals = _clip_op_values(item.get("values"))
             if not isinstance(vals, dict):
                 continue
             if tbl.get("rowPolicy") == "singleton":
@@ -209,7 +265,7 @@ def apply_ops(tables: list[dict[str, Any]], ops: Any) -> int:
                     rows.append([str(vals.get(c, "")) for c in cols])
             done += 1
         elif op == "update":
-            vals = item.get("values")
+            vals = _clip_op_values(item.get("values"))
             if not isinstance(vals, dict):
                 continue
             idx = 0 if tbl.get("rowPolicy") == "singleton" and rows else _locate(tbl, item)

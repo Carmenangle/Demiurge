@@ -490,6 +490,10 @@ def normalize_plan(entries: list[ChronicleEntry], *, total_turns: int = 0) -> No
         width = max(0, entry.turn_end - entry.turn_start)
         new_start = cursor + 1
         new_end = new_start + width
+        # ⚠ 2026-10-21 复核：顺延后超出 total_turns 时**照样顺延、只记 overrun 提示**，
+        # 是用户 2026-09-13 的定案（「接受级联」），test_narrative_memory 有锁。
+        # 真机上这会让 9 层会话的条目落到 10~16（不存在的回合）⇒ 现状是**在 UI 明示警告**，
+        # 而不是擅自改成不顺延（改行为需用户重新拍板）。
         rebases.append(RangeRebase(
             rowid=entry.rowid, old_start=entry.turn_start, old_end=entry.turn_end,
             new_start=new_start, new_end=new_end,

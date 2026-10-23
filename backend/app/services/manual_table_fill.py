@@ -17,7 +17,11 @@ CHRONICLE_UID = "__chronicle__"
 # 2026-09-13 补数实锤：不传 max_tokens 时网关走自家默认输出上限，一批多表 ops+纪要的
 # 大 JSON 会被截断（「模型未返回完整 JSON」）。8192 远低于 deepseek-v4-flash 输出上限
 # 393216（cap_max_tokens 兜底 min 语义），足够容纳整批 ops 与纪要。
-_FILL_MAX_TOKENS = 8192
+# 2026-10-20 实锤：第4–4层 / 第8–9层连续报「模型未返回完整 JSON（输出可能被截断）」。
+# 单批要同时产出「6 张通用表的 ops」+「1 条纪实」，8192 对层数偏大或模型话多时不够，
+# 一旦截断整批作废（含已算好的表格 ops）。抬到 16384（仍远低于各模型输出上限，
+# 经 cap_max_tokens 收敛后下发）。
+_FILL_MAX_TOKENS = 16384
 PROGRESS_FILE = "table_progress.json"
 
 # ── 填表进度上报（2026-09-13 用户实锤：十几批要跑几分钟，UI 全程无进度）──────
@@ -42,6 +46,22 @@ def get_fill_progress(key: str) -> dict[str, int]:
 def clear_fill_progress(key: str) -> None:
     with _FILL_PROGRESS_LOCK:
         _FILL_PROGRESS.pop(key, None)
+
+
+def snapshot_fill_progress() -> dict[str, dict[str, int]]:
+    """当前所有**正在跑**的填表批次（`<base>|<repo_id>` → 进度）。
+
+    2026-10-20 用户实锤：「点击整理索引时后台任务还是未看到有任务」。
+    原先只有 `get_fill_progress(key)` 这个**单仓库**读口，后台活动面板无从枚举
+    ⇒ 「表格整理 / 纪要索引」这个长操作在面板里完全不可见。这里补一个只读快照，
+    由 `activity_feed` 投影成 Activity（真源仍在本模块，投影不持有状态）。
+    """
+    with _FILL_PROGRESS_LOCK:
+        return {
+            key: dict(state)
+            for key, state in _FILL_PROGRESS.items()
+            if int(state.get("running") or 0)
+        }
 
 
 @dataclass
@@ -87,16 +107,25 @@ def plan_manual_fill(*, total_turns: int, recent_turns: int, selected: list[str]
     return ManualFillPlan(total, requested_start, minimum, False, starts, overlap_turns)
 
 
-def normalize_ranges(ranges: list[Any] | None, total_turns: int) -> list[tuple[int, int]]:
-    """把前端传来的显式回合区间规整成按序不重叠的 [(start, end), ...]（纯逻辑）。
+def normalize_ranges_with_report(
+    ranges: list[Any] | None, total_turns: int,
+) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
+    """`normalize_ranges` + 被丢弃区间的清单（2026-10-20 观测补口）。
 
-    2026-09-13 用户要求「针对空缺建立索引」：缺口补跑走显式区间模式，允许只处理
-    中间某几层。非法项丢弃、越界裁剪到 [1, total_turns]、相邻/重叠区间合并。
+    为什么要拆出「被丢弃」这一路：越界区间（`start > total`）在旧实现里只是
+    `if start <= end` 不成立就**整段消失**，既不处理也不报错 ⇒ 用户点了「补缺口」，
+    结果里既没有成功也没有失败，用户只能靠「怎么还没补上」来反推（真机：
+    缺口显示第 10–13 层，而 `total_turns` 只有 9 ⇒ 这个区间每次都被静默丢掉）。
+    静默丢弃比失败更糟：失败至少有 failed_batches 一行，丢弃什么都没有。
+
+    返回 `(kept, dropped)`；`dropped` 只含**完全落在区间外**的条目（部分越界已裁剪进 kept）。
     """
     total = max(0, int(total_turns))
     if total <= 0:
-        return []
+        # 层数未知时无法判断「是否越界」，故不谎报丢弃。
+        return [], []
     items: list[tuple[int, int]] = []
+    dropped: list[tuple[int, int]] = []
     for raw in ranges or []:
         if not isinstance(raw, (list, tuple)) or len(raw) != 2:
             continue
@@ -104,16 +133,29 @@ def normalize_ranges(ranges: list[Any] | None, total_turns: int) -> list[tuple[i
             start, end = int(raw[0]), int(raw[1])
         except (TypeError, ValueError):
             continue
-        start, end = max(1, min(start, end)), min(total, max(start, end))
-        if start <= end:
-            items.append((start, end))
+        lo, hi = max(1, min(start, end)), max(start, end)
+        clipped_end = min(total, hi)
+        if lo > clipped_end:
+            dropped.append((lo, hi))
+            continue
+        items.append((lo, clipped_end))
     merged: list[tuple[int, int]] = []
     for start, end in sorted(items):
         if merged and start <= merged[-1][1] + 1:
             merged[-1] = (merged[-1][0], max(merged[-1][1], end))
             continue
         merged.append((start, end))
-    return merged
+    return merged, dropped
+
+
+def normalize_ranges(ranges: list[Any] | None, total_turns: int) -> list[tuple[int, int]]:
+    """把前端传来的显式回合区间规整成按序不重叠的 [(start, end), ...]（纯逻辑）。
+
+    2026-09-13 用户要求「针对空缺建立索引」：缺口补跑走显式区间模式，允许只处理
+    中间某几层。非法项丢弃、越界裁剪到 [1, total_turns]、相邻/重叠区间合并。
+    """
+    kept, _dropped = normalize_ranges_with_report(ranges, total_turns)
+    return kept
 
 
 def chunk_spans(spans: list[tuple[int, int]], batch_size: int) -> list[tuple[int, int]]:
@@ -274,6 +316,36 @@ def _parse_result(raw: str) -> dict[str, Any]:
         raise ValueError(f"填表 Agent 返回结构无效：{exc}") from exc
 
 
+def _compress_to_limits(chat_fn: Callable[..., str], *, base_url: str, api_key: str,
+                        model: str, proxy: str, entry: Any,
+                        turn_start: int, turn_end: int) -> Any:
+    """超限纪要压缩改写：**最多 2 轮，任一达标即收**，返回最后得到的 entry。
+
+    2026-10-21 真机实锤（第 1–3 层永远补不上）：原实现只压一次，压不回来就把整批
+    判成「纪要抽取无效或超限」丢掉 —— 而这一批**模型其实正常返回了纪要**（overview
+    26 字合格、chronicle 428 字超限 128 字），压缩一次落在 296~320 字之间随机浮动
+    ⇒ 同一批时成时败，用户看到的就是「点了补跑，1–3 层还是空的」。
+    第 2 轮拿上一轮结果再压（prompt 会带上「现 N 字」，模型会继续收），比直接失败划算。
+    字数上限（30/300）是用户 2026-09-13 定稿阈值，此处**不动**；也不做机械截断。
+    """
+    current = entry
+    for _attempt in range(2):
+        compressed = chat_fn(
+            base_url, api_key, model, narrative_memory.COMPRESS_SYSTEM,
+            narrative_memory.build_compress_user(current.overview, current.text),
+            temperature=0.2, proxy=proxy, max_tokens=_FILL_MAX_TOKENS)
+        parsed = narrative_memory.parse_rich_summary(
+            compressed or "", turn_start=turn_start, turn_end=turn_end)
+        if parsed is None:
+            continue  # 压缩稿解析不动 ⇒ 保留上一版，进入下一轮
+        if not parsed.facts and current.facts:
+            parsed.facts = current.facts  # 事实账本素材不因压缩丢失
+        current = parsed
+        if narrative_memory.chronicle_within_limits(parsed.overview, parsed.text):
+            return parsed
+    return current
+
+
 def run_manual_fill(*, base: str, repo_id: str, card_name: str,
                     selected: list[str], recent_turns: int, batch_turns: int,
                     overwrite: bool | None, base_url: str, api_key: str, model: str,
@@ -285,7 +357,7 @@ def run_manual_fill(*, base: str, repo_id: str, card_name: str,
     batch_size = max(1, int(batch_turns))
     # 缺口补跑（2026-09-13 用户要求「针对空缺建立索引」）：给了显式区间就走区间模式，
     # 批次只覆盖这些层；缺口按定义不与既有纪要重叠 ⇒ 不做覆盖确认。
-    spans = normalize_ranges(ranges, len(turns))
+    spans, dropped_ranges = normalize_ranges_with_report(ranges, len(turns))
     if spans:
         plan = ManualFillPlan(
             total_turns=len(turns), requested_start=spans[0][0], minimum_unrecorded=0,
@@ -313,6 +385,32 @@ def run_manual_fill(*, base: str, repo_id: str, card_name: str,
     if not selected or not turns or not batches:
         return {"ok": True, "needs_confirmation": False, "processed": 0}
 
+    # 2026-10-21 用户要求「出现多个 8-9 这类情况要说明是覆盖还是跳过」：
+    # 纪要表「只新建、不更新、不删除」（2026-09-01 定案）⇒ 重复跑同一段**必然**并存多条
+    # （真机：8-9 变成 3 条，7-9 与 8-9 内容同讲一场婚礼）。补跑前先算「本次范围里已被
+    # 纪要覆盖的层」，三态交给调用方：
+    #   overwrite=None  ⇒ 需要确认（前端必须明示「覆盖=追加并存 / 跳过」）
+    #   overwrite=False ⇒ 跳过：这些层不再出纪要
+    #   overwrite=True  ⇒ 覆盖：照常追加（与现有纪要并存，不替换）
+    chronicle_covered: set[int] = set()
+    if CHRONICLE_UID in selected:
+        for entry in narrative_store.live_entries(base, repo_id):
+            chronicle_covered.update(
+                range(max(1, entry.turn_start), min(entry.turn_end, len(turns)) + 1))
+    planned_turns: set[int] = set()
+    for _start, _end in batches:
+        planned_turns.update(range(_start, _end + 1))
+    covered_overlap = sorted(chronicle_covered & planned_turns)
+    overlap_ranges = [[a, b] for a, b in narrative_memory.compress_ranges(set(covered_overlap))]
+    if overwrite is None and covered_overlap:
+        return {
+            "ok": False, "needs_confirmation": True, "total_turns": len(turns),
+            "requested_start": batches[0][0],
+            "minimum_unrecorded": 0,
+            # 已被纪要覆盖、且落在本次范围内的层（连续段）——前端据此让用户选覆盖还是跳过。
+            "chronicle_overlap": overlap_ranges,
+        }
+
     tables = table_store.load(base, repo_id)
     selected_tables = [table for table in tables if table.get("uid") in selected]
     allowed_names = {str(table.get("name") or "") for table in selected_tables}
@@ -323,6 +421,15 @@ def run_manual_fill(*, base: str, repo_id: str, card_name: str,
     generated_entries: list[narrative_memory.ChronicleEntry] = []
     calls = 0
     failed_batches: list[str] = []
+    skipped_covered: list[tuple[int, int]] = []
+    # 2026-10-21：真正出了纪要的批次区间（用于「覆盖」时精确替换旧条，见落盘段）
+    covered_batches: list[tuple[int, int]] = []
+    # 2026-10-20：越界区间此前**静默消失**（既不跑也不报错）⇒ 用户只看到「补了但没补上」。
+    # 这里把它明写成一条失败，并附上线索（层数口径），便于一眼看出是编号口径不一致。
+    for start, end in dropped_ranges:
+        failed_batches.append(
+            f"第{start}–{end}层（区间越界未处理：本会话仅 {len(turns)} 层"
+            f"——缺口若来自另一套回合编号，先统一口径再补）")
     progress_key = f"{base}|{repo_id}"
     set_fill_progress(progress_key, 0, len(batches))
     try:
@@ -340,6 +447,12 @@ def run_manual_fill(*, base: str, repo_id: str, card_name: str,
                 CHRONICLE_UID in eligible
                 and (bool(spans) or (batch_end - batch_start + 1) >= chronicle_freq)
             )
+            # 跳过已覆盖层（overwrite != True）：这批的层已有纪要 ⇒ 再出一条只会并存重复。
+            # 通用表照常处理（它是 update 语义，不会被这里影响）。
+            if include_chronicle and overwrite is not True and (
+                    chronicle_covered & set(range(batch_start, batch_end + 1))):
+                include_chronicle = False
+                skipped_covered.append((batch_start, batch_end))
             body = []
             for item in turns[batch_start - 1:batch_end]:
                 body.append(f"【第{item.turn}回合·用户】{item.user}\n【第{item.turn}回合·助手】{item.assistant}")
@@ -350,9 +463,23 @@ def run_manual_fill(*, base: str, repo_id: str, card_name: str,
             # 已成功批次照常落盘。
             data: dict[str, Any] | None = None
             last_error = ""
-            for attempt in range(1 + max_retry):
-                raw = chat_fn(base_url, api_key, model, _manual_system(batch_tables, include_chronicle),
-                              user, temperature=0.2, proxy=proxy, max_tokens=_FILL_MAX_TOKENS)
+            system_prompt = _manual_system(batch_tables, include_chronicle)
+            # ⚠ 2026-10-21 真机第二次实锤：`maxRetry` 默认 **0** ⇒ 只有 1 次尝试 ⇒
+            # 下面那段纠错提示**永远用不上**（4–6 批又一次返回 `[]`，直接判失败）。
+            # 结构无效是「模型输出形状错」，值得固定给一次纠错机会，故下限取 1。
+            for attempt in range(1 + max(1, max_retry)):
+                # 2026-10-21 真机：第 1–3 层连续返回 `[]`（顶层空数组）⇒ 整批判结构无效，
+                # 缺口永远补不上。根因是重试**原样重发同一条 prompt**，模型每次都这样退化。
+                # ⇒ 首次沿用原 prompt（不改变 4–6/7–9 这些已成功批次的行为），
+                #   **只有重试才追加纠错提示**（输出形状 + 「开场/设定层也要概括，不许返空」）。
+                prompt = user if attempt == 0 else (
+                    f"【上一轮输出不合格：{last_error[:120]}】\n"
+                    "必须输出**单个 JSON 对象**（顶层形状 {\"ops\": [...], \"chronicles\": [...]}），"
+                    "不要输出数组、更不要输出空数组。\n"
+                    "即使某层是开场或设定说明、剧情推进很少，也要用 overview/chronicle 概括"
+                    "人物处境与实际发生了什么，不得因此返回空。\n\n" + user)
+                raw = chat_fn(base_url, api_key, model, system_prompt,
+                              prompt, temperature=0.2, proxy=proxy, max_tokens=_FILL_MAX_TOKENS)
                 calls += 1
                 try:
                     parsed = _parse_result(raw)
@@ -381,44 +508,81 @@ def run_manual_fill(*, base: str, repo_id: str, card_name: str,
                     if isinstance(op, dict) and str(op.get("table") or "") in allowed_names
                 )
             if include_chronicle:
+                # 2026-10-20 实锤「整理索引跑完了，纪要表还是没更新」：
+                # 下面三段都会**静默**失败，且都不进 failed_batches ⇒ 用户只看到「0 条」：
+                #   ① 键名不符：只认 `chronicles`（复数列表）；模型给单数 `chronicle` 时
+                #      `data.get("chronicles")` 为 None ⇒ 循环不跑、什么都不记；
+                #   ② 解析失败：`entry is None` ⇒ 落到 else 记失败（这条本来就有）；
+                #   ③ 超限：压缩一次仍超限 ⇒ 记失败。
+                # 现在：单数也收；并且**只要本批要求出纪要却一条没产出，必定记进 failed_batches**，
+                # 不再让「什么都没发生」伪装成成功（该文件自己的注释就写着「不再静默吞掉」）。
                 chronicles = data.get("chronicles")
-                for raw_entry in (chronicles if isinstance(chronicles, list) else [])[:1]:
+                if not isinstance(chronicles, list):
+                    single = data.get("chronicle")
+                    chronicles = [single] if isinstance(single, dict) else []
+                produced_here = 0
+                chr_start = max(batch_start, plan.starts[CHRONICLE_UID])
+                for raw_entry in chronicles[:1]:
                     entry = narrative_memory.parse_rich_summary(
                         json.dumps(raw_entry, ensure_ascii=False),
-                        turn_start=max(batch_start, plan.starts[CHRONICLE_UID]), turn_end=batch_end,
+                        turn_start=chr_start, turn_end=batch_end,
                     )
-                    # 字数门槛：填表 prompt 已写明前提，超写压缩改写一次，仍超限拒绝落盘
+                    # 字数门槛：填表 prompt 已写明前提，超写走压缩改写（最多 2 轮，任一达标即收）
                     if entry is not None and not narrative_memory.chronicle_within_limits(
                             entry.overview, entry.text):
-                        compressed = chat_fn(
-                            base_url, api_key, model, narrative_memory.COMPRESS_SYSTEM,
-                            narrative_memory.build_compress_user(entry.overview, entry.text),
-                            temperature=0.2, proxy=proxy, max_tokens=_FILL_MAX_TOKENS)
-                        entry = narrative_memory.parse_rich_summary(
-                            compressed or "",
-                            turn_start=max(batch_start, plan.starts[CHRONICLE_UID]),
-                            turn_end=batch_end,
-                        )
+                        entry = _compress_to_limits(
+                            chat_fn, base_url=base_url, api_key=api_key, model=model,
+                            proxy=proxy, entry=entry,
+                            turn_start=chr_start, turn_end=batch_end)
                     if entry is not None and narrative_memory.chronicle_within_limits(
                             entry.overview, entry.text):
                         generated_entries.append(entry)
+                        produced_here += 1
                     else:
                         # 2026-09-13：抽取无效/超限不再静默吞掉（旧逻辑 4–6、7–9 两批
                         # 就是这么丢的），记入失败清单让用户看到并可重跑。
                         failed_batches.append(
                             f"第{batch_start}–{batch_end}层（纪要抽取无效或超限）")
+                if include_chronicle and produced_here == 0 and not any(
+                        str(batch_start) in item for item in failed_batches):
+                    # 本批要求出纪要却一条没产出、且上面没记过原因 ⇒ 记「模型没给 chronicles」
+                    keys = ",".join(sorted(str(k) for k in (data or {}).keys())) or "空"
+                    failed_batches.append(
+                        f"第{batch_start}–{batch_end}层（模型未返回 chronicles；返回键：{keys}）")
+                if produced_here > 0:
+                    covered_batches.append((chr_start, batch_end))
     finally:
         clear_fill_progress(progress_key)
 
-    # 2026-09-01 用户定案：纪要表只新建、不更新、不删除（只有用户手动删才允许）。
-    # 手动填表补建纪要时只追加新存档，不再删除与消息范围重叠的旧纪要。
-    if overwrite and CHRONICLE_UID in selected:
-        pass
+    # 2026-09-01 定案是「纪要表只新建、不更新、不删除」，当年因此把「删重叠旧条」整段关掉
+    # （只留一个 pass）。但 2026-10-21 用户当场质疑：**「覆盖」若不把同层的旧条去掉、只往里
+    # 追加，那就名不副实**（真机：6 条重叠里点「确定」后变 9 条，越点越乱）。
+    # ⇒ 现在把「用户手点确定」这条路的覆盖做成真的，但用**封口**而不是物理删：
+    #   `normalize_apply(seal_rowids=...)` 隐藏旧条（数据保留可审计、可恢复），与「整理索引」
+    #   的重复封口同一口径。自动链（overwrite=None/False）完全不受影响，仍是只追加。
+    # ⚠ 两条安全约束：① 只在**真生成了纪要**时才封口，新的没来绝不先删旧的；
+    #   ② 只封「**被成功批次范围完整包住**」的旧条 —— 部分重叠的保留，避免某批失败就丢层。
+    replaced_rowids: list[int] = []
+    if overwrite is True and CHRONICLE_UID in selected and covered_batches:
+        # 用**成功批次的并集**判断（不是单批）：真机上 5-7 横跨 4-6 与 7-9 两个批，
+        # 按单批判断就封不掉它，会留下一条跨批的重叠旧条。
+        covered_turns_ok: set[int] = set()
+        for start, end in covered_batches:
+            covered_turns_ok.update(range(start, end + 1))
+        for entry in narrative_store.live_entries(base, repo_id):
+            span = set(range(entry.turn_start, entry.turn_end + 1))
+            if span and span <= covered_turns_ok:   # 整条都被本次成功范围包住才封
+                replaced_rowids.append(entry.rowid)
     applied = table_store.apply_ops(tables, generated_ops)
     if selected_tables and (applied or generated_ops):
         table_store.save(base, repo_id, tables)
     for entry in generated_entries:
         narrative_store.append(base, repo_id, entry)
+    sealed_overlap = 0
+    if replaced_rowids:
+        sealed = narrative_store.normalize_apply(
+            base, repo_id, seal_rowids=replaced_rowids)
+        sealed_overlap = int(sealed.get("sealed") or 0)
     # 缺口补跑只覆盖被点名的几层：不能推游标（否则「中间补了一卷」会被记成「37 层全处理过」，
     # 既误导进度又让后续自动纪要跳层）。进度改由覆盖并集（_chronicle_coverage）体现。
     if spans:
@@ -438,4 +602,12 @@ def run_manual_fill(*, base: str, repo_id: str, card_name: str,
         "calls": calls, "applied": applied, "chronicles": len(generated_entries),
         # 2026-09-13：解析失败被跳过的批次（重试耗尽）。空串 = 全部成功。
         "failed_batches": failed_batches,
+        # 2026-10-20：越界被丢弃的区间（同时已写进 failed_batches，这里给程序化消费方）。
+        "dropped_ranges": [[start, end] for start, end in dropped_ranges],
+        # 2026-10-21：本次范围内已被纪要覆盖的层；以及因「已有纪要」而跳过出纪要的批次。
+        # overwrite=True 时 covered_skipped 为空（走覆盖=追加并存），overlap 仍会如实回显。
+        "chronicle_overlap": overlap_ranges,
+        "covered_skipped": [[start, end] for start, end in skipped_covered],
+        # 2026-10-21：覆盖（overwrite=True）时被封口替换掉的旧纪要条数（数据保留可审计）。
+        "sealed_overlap": sealed_overlap,
     }

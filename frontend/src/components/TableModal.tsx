@@ -41,13 +41,37 @@ export function TableModal({ outputDir, repoId, cardName, chat, onClose }: Props
   const [busy, setBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
-  const load = () => {
+  const load = async () => {
     setErr("");
     listTables(outputDir, repoId).then((d) => setTables(d.tables)).catch((e) => setErr(String((e as Error).message)));
-    getState(outputDir, repoId, cardName).then(setState).catch(() => setState(null));
-    listChronicle(outputDir, repoId, 100).then((d) => setChron(d.items)).catch(() => setChron([]));
+    // 2026-10-20 实锤「整理索引任务结束后整个表格就看不了了，右侧一直『加载中…』」：
+    // 旧写法 `getState(...).then(setState).catch(() => setState(null))` 把**任何**失败
+    // 静默吞成 null，而 `null` 的渲染文案正好是「加载中…」⇒ 永远转圈、不报错、不重试；
+    // 纪要列表同样被 `.catch(() => setChron([]))` 吞成 0 条，于是「0 人 · 0 项 / 0 条」。
+    // 现在：失败先重试一次（整理索引刚结束时后台可能还在收尾/占锁），仍失败则把原因
+    // 写进 err 条（可见），不再让失败伪装成「加载中」。
+    const withRetry = async <T,>(fn: () => Promise<T>, fallback: T): Promise<T> => {
+      try {
+        return await fn();
+      } catch {
+        await new Promise((r) => setTimeout(r, 600));
+        try {
+          return await fn();
+        } catch (e) {
+          setErr((prev) => prev || String((e as Error).message));
+          return fallback;
+        }
+      }
+    };
+    setState(await withRetry(() => getState(outputDir, repoId, cardName), null));
+    const chronicle = await withRetry(
+      () => listChronicle(outputDir, repoId, 100),
+      { items: [] as ChronicleEntry[] },
+    );
+    setChron(chronicle.items);
   };
-  useEffect(load, [outputDir, repoId, cardName]);
+  // load 现在返回 Promise（内部带重试），effect 里显式 void 掉，避免返回 Promise 当清理函数
+  useEffect(() => { void load(); }, [outputDir, repoId, cardName]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -479,7 +503,11 @@ function ChroniclePane({ chron, outputDir, repoId, chat, busy, setBusy, setErr, 
       const fill = await manualFillTables(
         outputDir, repoId, "", [CHRONICLE_TABLE_UID], 1, 3, null, chat, gaps);
       const failed = fill.failed_batches ?? [];
+      const skipped = fill.covered_skipped ?? [];
       setNote(`${prefix}缺口补跑：处理 ${fill.processed ?? 0} 层、新增纪要 ${fill.chronicles ?? 0} 条`
+        + (skipped.length
+          ? `；已跳过 ${skipped.length} 批已有纪要的层（${skipped.map(([s, e]) => range(s, e)).join("、")}）`
+          : "")
         + (failed.length ? `；⚠ ${failed.length} 批失败已跳过（${failed.join("；")}）` : "。"));
       reload();
     } catch (e) { setErr(String((e as Error).message)); }
@@ -504,6 +532,13 @@ function ChroniclePane({ chron, outputDir, repoId, chat, busy, setBusy, setErr, 
       if (plan.rebases.length) {
         lines.push(`边界重叠 ${plan.rebases.length} 条顺延保宽（`
           + plan.rebases.map((r) => `${r.old[0]}–${r.old[1]}→${r.new[0]}–${r.new[1]}`).join("、") + "）");
+      }
+      // 2026-10-21：顺延会超出本会话层数的必须明说 —— 否则用户以为「整理」把重叠解决了，
+      // 实际那几条区间会落到 10~16 这些不存在的回合上（缺口/封口/召回全错位）。
+      if (plan.overrun?.length) {
+        lines.push(`⚠ 其中 ${plan.overrun.length} 条顺延后会超出本会话 ${plan.total_turns} 层`
+          + `（rowid ${plan.overrun.join("、")}）—— 那些区间将没有对应的对话层。`
+          + "建议点「取消」，先删掉重复的那几条纪要再整理。");
       }
       const gapNote = plan.gaps.length
         ? `\n缺口 ${plan.gaps.map(([s, e]) => range(s, e)).join("、")}（整理后另行补跑）` : "";

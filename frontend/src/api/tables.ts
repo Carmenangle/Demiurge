@@ -62,6 +62,13 @@ export interface ManualFillResult {
   chronicles?: number;
   // 2026-09-13：解析失败被跳过的批次描述（重试耗尽）。空数组 = 全部成功。
   failed_batches?: string[];
+  // 2026-10-21：本次范围内已被纪要覆盖的层（连续段）。needs_confirmation 时据此让用户
+  // 选「覆盖（追加新纪要，与现有并存）」还是「跳过（只补没有任何纪要的层）」。
+  chronicle_overlap?: Array<[number, number]>;
+  // 2026-10-21：因「已有纪要」而跳过出纪要的批次（overwrite=true 时为空）。
+  covered_skipped?: Array<[number, number]>;
+  // 2026-10-21：覆盖（overwrite=true）时被封口替换掉的旧纪要条数（数据保留可审计）。
+  sealed_overlap?: number;
 }
 
 // 手动填表批次进度（run 期间前端轮询；running=false 表示当前没有在跑的任务）
