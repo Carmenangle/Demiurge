@@ -37,13 +37,17 @@ Demiurge 把剧情对话、角色卡、世界书、RAG 记忆、状态表、自�
 
 | 平台 | 启动 | 关闭 |
 |------|------|------|
-| Windows x64 | `start-dev.bat` | `stop-dev.bat` |
+| Windows x64 | `Demiurge.exe`（原生窗口） | 关闭窗口（自动回收后端进程树） |
 | macOS ARM64 | `Start-Demiurge.command` | 关闭启动终端或停止对应进程 |
 | Linux x64 | `start-demiurge.sh` | 关闭启动终端或停止对应进程 |
 
+Windows 原生壳需要 **.NET 8 Desktop Runtime** 与 **Microsoft Edge WebView2 Runtime**（Win10/11 多数已自带后者）。
+想继续用浏览器：运行 `start-dev.bat` / `stop-dev.bat`（同一端口，二者只能有一个在跑）；
+`install-shortcut.bat` 会为桌面与开始菜单生成 `Demiurge` 快捷方式。
+
 **四步跑到第一张图**（完整图文步骤见 [图解快速开始](docs/guide/quick-start.md)（10 步配图）；详细文字说明见 [教程 01 · 快速开始](docs/tutorials/01-quick-start.md)）：
 
-1. 解压并启动，浏览器打开 `http://127.0.0.1:8010`。
+1. 解压后启动（Windows 双击 `Demiurge.exe`，其他平台运行启动脚本），界面即 `http://127.0.0.1:8010`。
 2. 「⚙ 设置 → 模型」添加对话模型（必配）；生图/视频/嵌入模型按需添加，点「测试模型」确认连通。
 3. 「⚙ 设置 → 路径」填 ComfyUI 目录与仓库文件夹——保存后下次启动会**自动拉起 ComfyUI**。
 4. 「工作流管理 → 工作流模板」导入一个工作流，回到对话输入 `/w` 选择它、按节点顺序填参提交，
@@ -186,6 +190,10 @@ start-dev.bat
 ```
 
 源码开发模式打开 `http://127.0.0.1:5173`；停止时运行 `stop-dev.bat`。
+
+源码模式下也可以用桌面壳：先在 `frontend` 运行 `npm run build`，再执行
+`dotnet run --project desktop/Demiurge.Desktop`（或先 `dotnet build` 后跑生成的 `Demiurge.exe`），
+壳会用 `backend\.venv` 起 8010 同源服务并在原生窗口里打开——详见 [desktop/README.md](desktop/README.md)。
 
 ### 质量门禁
 
