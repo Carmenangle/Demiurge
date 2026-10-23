@@ -375,7 +375,7 @@ impl RuntimeHost {
     }
 
     fn log_hint(&self) -> String {
-        let path = paths::runtime_log_path();
+        let path = crate::shell_log::runtime_log_file();
         let tail = crate::shell_log::tail(&path, MAX_LOG_TAIL_LINES);
         if tail.trim().is_empty() {
             format!("\n\n日志：{}", path.display())

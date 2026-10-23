@@ -185,13 +185,14 @@ fn json_string(text: &str) -> String {
     serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string())
 }
 
-/// WebView2 数据目录：三级回退。
+/// WebView2 数据目录候选：`%LOCALAPPDATA%` → exe 同级 → temp。
 ///
 /// 🔴 两条实测约束：
 /// ① 默认目录（exe 同目录 / `%LOCALAPPDATA%\<identifier>`）在本机建不出来 ⇒ 必须显式指定；
-/// ② 受限上下文（低完整性 / 沙箱派生的进程）写不了 `%LOCALAPPDATA%` ⇒ 建目录失败不能直接
-///    panic 掉整个窗口，回退到 exe 同级的 `webview-data` 再回退到 temp，并把选中路径写进日志。
-fn pick_webview_data_dir() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+/// ② **只 `create_dir_all` 成功不算可用**：低完整性进程能"看到"Medium 标签的目录却打不开
+///    WebView2（报 `0x800700AA 请求的资源在使用中`），所以必须真写一个探针文件才算可用，
+///    并且建窗失败要换下一个候选重试 —— 否则就是"双击一瞬间关闭"。
+fn candidate_data_dirs() -> Vec<std::path::PathBuf> {
     let mut candidates = vec![paths::webview_data_dir()];
     if let Some(dir) = std::env::current_exe()
         .ok()
@@ -200,27 +201,51 @@ fn pick_webview_data_dir() -> Result<std::path::PathBuf, Box<dyn std::error::Err
         candidates.push(dir);
     }
     candidates.push(std::env::temp_dir().join("demiurge-webview2"));
+    candidates
+}
 
-    for dir in &candidates {
-        match std::fs::create_dir_all(dir) {
-            Ok(()) => {
-                shell_log::info(&format!("WebView2 数据目录：{}", dir.display()));
-                return Ok(dir.clone());
-            }
-            Err(err) => shell_log::warn(&format!(
-                "WebView2 数据目录不可用：{}（{err}）",
-                dir.display()
-            )),
-        }
+fn writable(dir: &std::path::Path) -> bool {
+    if !dir.is_dir() && std::fs::create_dir_all(dir).is_err() {
+        return false;
     }
-    Err("所有候选 WebView2 数据目录都不可用".into())
+    let probe = dir.join(".write-probe");
+    let ok = std::fs::write(&probe, b"x").is_ok();
+    let _ = std::fs::remove_file(&probe);
+    ok
 }
 
 fn build_window(
     app: &mut tauri::App,
     window_settings: &ShellSettings,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let data_dir = pick_webview_data_dir()?;
+    let mut last_error: Option<String> = None;
+    for data_dir in candidate_data_dirs() {
+        if !writable(&data_dir) {
+            shell_log::warn(&format!("WebView2 数据目录不可写，跳过：{}", data_dir.display()));
+            continue;
+        }
+        match build_window_with(app, window_settings, data_dir.clone()) {
+            Ok(()) => {
+                shell_log::info(&format!("WebView2 数据目录：{}", data_dir.display()));
+                return Ok(());
+            }
+            Err(err) => {
+                shell_log::warn(&format!(
+                    "用数据目录 {} 建窗口失败：{err}",
+                    data_dir.display()
+                ));
+                last_error = Some(err.to_string());
+            }
+        }
+    }
+    return Err(last_error.unwrap_or_else(|| "所有候选 WebView2 数据目录都不可用".to_string()).into());
+}
+
+fn build_window_with(
+    app: &mut tauri::App,
+    window_settings: &ShellSettings,
+    data_dir: std::path::PathBuf,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("boot.html".into()))
         .title("Demiurge")
         .inner_size(
