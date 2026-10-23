@@ -235,22 +235,59 @@ def build_scene_request(
     )
 
 
+# 画幅判定词表（2026-10-19 重构）。分组按「景别 → 空间 → 姿态 → 人数」的优先级，
+# 每组内最具体的先判：面部特写不该被「站立」抢走，全景也不该被「两人」抢走。
+_ASPECT_CLOSE = ("面部特写", "脸部特写", "眼睛特写", "紧凑特写", "头像", "大头")
+_ASPECT_WIDE = ("全景", "远景", "广角", "大远景")
+_ASPECT_FULL = ("全身", "整个人", "换装", "展示身材", "展示服装")
+_ASPECT_MEDIUM = ("半身", "上半身", "近景")
+_ASPECT_STAND = ("站立", "站在", "跪", "跃起", "向上扬起", "纵向")
+_ASPECT_SPACE_WIDE = ("战场", "群山", "天际线", "辽阔", "横跨", "旷野", "海面")
+_ASPECT_SPACE_ROOM = ("建筑", "街道", "室内", "大厅", "广场", "走廊", "厅堂")
+_ASPECT_POSE_HORIZONTAL = ("躺", "横卧", "长榻", "床上", "横向", "铺开")
+_ASPECT_VERTICAL_TOWER = ("高塔", "坠落", "俯冲", "向上延伸", "垂直", "纵深高耸")
+_ASPECT_MULTI = ("两人", "多人", "对峙", "隔着", "并肩", "围坐")
+
+
 def infer_aspect_ratio(text: str, actors: list[str] | None = None) -> str:
-    """主计划缺失时按可见空间关系选择画幅，避免所有降级插画固定为 2:3。"""
+    """主计划缺失时按**镜头尺度**选择画幅（2026-10-19 重构，原为关键词平铺短路）。
+
+    为什么改成景别优先：画幅不只裁边，它**强制改变主体占画面的比例**——
+    同一句提示词，1:1 出中景/特写，16:9 时模型必须补环境、主体被动变小。
+    所以「景别」才是第一判据；人数只是「需要横向并置」的补充信号。
+
+    旧实现的坑（用户实锤：最近 87 次提交里 79 次是 4:3）：
+    `actor_count >= 2 or 两人/多人/对峙/…` 排在第二，几乎吃掉所有双人场景——
+    但「两人并肩站立」该给 9:16/2:3、「两人对峙于辽阔战场」该给 16:9，
+    全被压成中景双人的 4:3。
+    """
     source = image_prompt_extract.restore_jailbreak(text or "")
     actor_count = len(list(dict.fromkeys(actors or [])))
-    if any(word in source for word in ("全景", "远景", "战场", "群山", "天际线", "辽阔", "横跨")):
-        return "16:9"
-    if actor_count >= 2 or any(word in source for word in ("两人", "多人", "对峙", "隔着", "并肩", "围坐")):
-        return "4:3"
-    if any(word in source for word in ("躺", "横卧", "长榻", "床上", "横向", "铺开")):
-        return "3:2"
-    if any(word in source for word in ("面部特写", "脸部特写", "眼睛特写", "紧凑特写", "头像")):
+
+    # ① 景别：直接决定主体在画面里的占比
+    if any(word in source for word in _ASPECT_CLOSE):
         return "1:1"
-    if any(word in source for word in ("高塔", "坠落", "俯冲", "向上延伸", "垂直", "纵深高耸")):
+    if any(word in source for word in _ASPECT_WIDE):
+        return "16:9"
+    if any(word in source for word in _ASPECT_FULL):
         return "9:16"
-    if any(word in source for word in ("全身", "站立", "站在", "跪", "跃起", "向上扬起", "纵向")):
+    if any(word in source for word in _ASPECT_MEDIUM):
+        return "3:4"
+    if any(word in source for word in _ASPECT_STAND):
         return "2:3"
+    # ② 空间：宽度用来承载环境信息
+    if any(word in source for word in _ASPECT_SPACE_WIDE):
+        return "16:9"
+    if any(word in source for word in _ASPECT_SPACE_ROOM):
+        return "16:9"
+    # ③ 姿态：横向铺陈与垂直纵深
+    if any(word in source for word in _ASPECT_POSE_HORIZONTAL):
+        return "3:2"
+    if any(word in source for word in _ASPECT_VERTICAL_TOWER):
+        return "9:16"
+    # ④ 人数：**仅作补充**——多人才需要横向并置，且必须没有更强景别信号
+    if actor_count >= 2 or any(word in source for word in _ASPECT_MULTI):
+        return "4:3"
     return "3:4"
 
 

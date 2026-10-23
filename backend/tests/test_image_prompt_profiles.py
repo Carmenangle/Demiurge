@@ -6536,6 +6536,171 @@ def test_第65刀_krea2与niji走同一收口():
     assert "entering from the lower frame edge" in head_niji
 
 
+# ── 2026-10-23：第一人称身高差 ⇒ 低机位仰拍（用户定案）────────────────────────
+#
+# 用户原话：「她近两米、比男主高一头，低机位能同时解决身高差和第一人称」。
+# 判据只认**明确的身高差证据**（比 {{user}} 高 / 高出一个头 / a head taller than the user），
+# 不按「身高近两米」单独猜；风景帧与第三人称零动作。
+# 2026-10-23 用户纠正：身高差**只是参考**——「主角被对方抱起来不就是平视了吗」。
+# ⇒ 画面事实出现改变相对高度的动作/姿态时，不机械补仰拍、也不剔高机位。
+
+def _身高差场景(**over):
+    scene = _fp_scene(
+        appearance=(
+            "身高近两米，比 {{user}} 高出一个头、暗黄色长发、朱唇饱满、"
+            "黑色连衣裙、黑色连裤袜"
+        ),
+        narrative="他把指尖压在她唇角，抬头看她。",
+    )
+    scene.update(over)
+    return scene
+
+
+def test_身高差_首行补轻微仰拍并剔高机位():
+    scene = _身高差场景()
+    head = "masterpiece, best quality, 1girl, solo, from above, high angle, medium shot"
+
+    out = profiles._first_person_head_guards(head, scene)
+
+    assert "slight low angle, looking up" in out
+    assert "from above" not in out and "high angle" not in out
+    assert out.endswith("first person view, pov")
+
+
+def test_身高差_无证据逐字节不动():
+    """零回归锁：没有「比叙事者高」的明确证据 ⇒ 不补仰拍、条款也不出现。"""
+    head = "masterpiece, best quality, 1girl, solo, medium shot"
+    scene = _fp_scene()
+
+    assert profiles._ensure_first_person_height_angle(head, scene) == head
+    assert "身高差与仰拍" not in profiles._viewpoint_clause(scene)
+
+
+def test_身高差_只写近两米不单独触发仰拍():
+    """宁缺勿猜：绝对身高不是身高差证据——叙事者也可能同样高。"""
+    head = "masterpiece, 1girl, solo, close-up"
+    scene = _fp_scene(appearance="身高近两米、朱唇饱满")
+
+    assert profiles._ensure_first_person_height_angle(head, scene) == head
+
+
+def test_身高差_第三人称与风景帧不补仰拍():
+    head = "masterpiece, 1girl, solo, close-up"
+    third = _身高差场景(viewpoint="third_person")
+    assert profiles._ensure_first_person_height_angle(head, third) == head
+    assert "身高差与仰拍" not in profiles._viewpoint_clause(third)
+
+    scenery = _身高差场景(
+        appearance="比 {{user}} 高出一个头、黑色长裙",
+        narrative="远处群山与湖面在暮色里展开。",
+    )
+    assert profiles._first_person_height_angle(scenery) is False
+    assert profiles._ensure_first_person_height_angle(head, scenery) == head
+
+
+def test_身高差_已有仰拍写法幂等():
+    scene = _身高差场景()
+    head = "masterpiece, 1girl, solo, slight low angle, looking up, close-up"
+
+    assert profiles._ensure_first_person_height_angle(head, scene) == head
+
+
+def test_身高差_中文条款只在有证据时出现():
+    clause = profiles._viewpoint_clause(_身高差场景())
+
+    assert "【视角·第一人称·身高差与仰拍】" in clause
+    assert "slight low angle" in clause
+    assert "**不得**用俯视、高机位" in clause
+
+
+def test_身高差_端到端anima首行含仰拍第二行不动():
+    scene = _身高差场景()
+    raw = (
+        "masterpiece, best quality, anime coloring, 1girl, solo, from above, medium shot\n"
+        "She stands before him."
+    )
+
+    out = profiles._normalize("anima_tags", raw, scene)
+    head, prose = out.splitlines()
+
+    assert "slight low angle" in head
+    assert "from above" not in head
+    assert prose == "She stands before him."
+
+
+def test_身高差_接线锁_归一化与头收口都接上():
+    import inspect
+
+    assert "_ensure_first_person_height_angle(" in inspect.getsource(profiles._normalize)
+    assert "_ensure_first_person_height_angle(" in inspect.getsource(
+        profiles._first_person_head_guards,
+    )
+
+
+def test_身高差_被抱起时不机械仰拍也不剔高机位():
+    """用户纠正：「主角被对方抱起来不就是平视了吗」⇒ 身高差只是参考。"""
+    scene = _身高差场景(narrative="他将她打横抱起，她垂眸看他。")
+    head = "masterpiece, best quality, 1girl, solo, high angle, medium shot"
+
+    assert profiles._first_person_height_angle(scene) is False
+    assert profiles._ensure_first_person_height_angle(head, scene) == head
+    clause = profiles._viewpoint_clause(scene)
+    assert "【视角·第一人称·相对位置优先（身高差只是参考）】" in clause
+    assert "打横抱起" in clause
+    assert "slight low angle" not in clause
+
+
+def test_身高差_相对高度变化线索覆盖常见姿态():
+    head = "masterpiece, 1girl, solo, high angle, close-up"
+    for extra in (
+        "她坐在他腿上，低头看他。",
+        "她坐在椅子上，抬眸看他。",
+        "她俯身凑近，鼻尖几乎相触。",
+        "他跪在她面前。",
+        "她躺在他怀里。",
+        "She is carried in his arms.",
+        "She straddles his lap.",
+        "She bends down to his level.",
+        "She is kneeling in front of him.",
+    ):
+        scene = _身高差场景(narrative=extra)
+        assert profiles._first_person_height_angle(scene) is False, extra
+        assert profiles._ensure_first_person_height_angle(head, scene) == head, extra
+
+
+def test_身高差_抱起双臂不算相对高度变化():
+    """「抱起双臂」是手臂动作、不是位移 ⇒ 不得因此关掉仰拍。"""
+    scene = _身高差场景(narrative="她抱起双臂，站在他面前。")
+
+    assert profiles._first_person_height_angle(scene) is True
+
+
+def test_身高差_相对高度未变时仍按内容补仰拍():
+    """同一身高差、动作是并立陈述 ⇒ 身高差在此时才真正成立，仰拍照补。"""
+    scene = _身高差场景(narrative="她站在他面前。")
+    head = "masterpiece, 1girl, solo, high angle, close-up"
+
+    out = profiles._ensure_first_person_height_angle(head, scene)
+
+    assert "slight low angle, looking up" in out
+    assert "high angle" not in out
+
+
+def test_身高差_端到端anima被抱起保留高机位():
+    scene = _身高差场景(narrative="他将她打横抱起。")
+    raw = (
+        "masterpiece, best quality, 1girl, solo, high angle, medium shot\n"
+        "She is held in his arms."
+    )
+
+    out = profiles._normalize("anima_tags", raw, scene)
+    head, prose = out.splitlines()
+
+    assert "slight low angle" not in head
+    assert "high angle" in head
+    assert prose == "She is held in his arms."
+
+
 # ── 第 66 刀：POV 覆盖面的「防呆登记」（2026-09-28 · 用户「按防呆登记动手」）──────
 #
 # 真机取证：`agent-trace.jsonl` 的 `prompt_profile` **33/33 全是 `anima_tags`**

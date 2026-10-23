@@ -463,6 +463,42 @@ def test_降级画幅按单人特写多人关系与横向动作变化():
     assert si.infer_aspect_ratio("她躺在长榻上，衣摆横向铺开。", ["甲"]) == "3:2"
     assert si.infer_aspect_ratio("她站在高台上，披风向上扬起。", ["甲"]) == "2:3"
     assert si.infer_aspect_ratio("她安静地坐在栏杆旁。", ["甲"]) == "3:4"
+
+
+# ── 画幅判定：景别优先（2026-10-19 重构）────────────────────────────────
+# 用户实锤：87 次提交里 79 次 4:3。根因是把「有两个人」当成「中景双人」——
+# 但两人并肩站立该给竖幅、两人对峙于辽阔战场该给横幅，全被压成 4:3。
+# 下列用例把「景别 > 空间 > 姿态 > 人数」的优先级钉住。
+
+
+def test_画幅判定_两人并肩站立不再被压成4比3():
+    """人数只是补充信号：有更强景别/空间证据时必须让位。"""
+    # 两人 + 全身 → 竖幅（旧实现：4:3）
+    assert si.infer_aspect_ratio("两人并排站着，全身入镜。", ["甲", "乙"]) == "9:16"
+    # 两人 + 站立 → 2:3（旧实现：4:3）
+    assert si.infer_aspect_ratio("甲与乙并肩站在门口。", ["甲", "乙"]) == "2:3"
+    # 两人 + 辽阔战场 → 横幅（旧实现：4:3）
+    assert si.infer_aspect_ratio("两人对峙于辽阔战场之上。", ["甲", "乙"]) == "16:9"
+
+
+def test_画幅判定_景别优先于空间与姿态():
+    # 面部特写压过「站立」与「群」的字面
+    assert si.infer_aspect_ratio("她的面部特写，身后是群山。", ["甲"]) == "1:1"
+    # 全景压过「两人」
+    assert si.infer_aspect_ratio("远景中两人并肩而行。", ["甲", "乙"]) == "16:9"
+    # 全身压过横卧姿态（展示优先）
+    assert si.infer_aspect_ratio("全身展示，她横卧在长榻。", ["甲"]) == "9:16"
+
+
+def test_画幅判定_空间词独立生效():
+    assert si.infer_aspect_ratio("她独自走在空旷的街道上。", ["甲"]) == "16:9"
+    assert si.infer_aspect_ratio("大厅的穹顶高悬。", ["甲"]) == "16:9"
+
+
+def test_画幅判定_无信号时退回3比4():
+    """无景别/空间/姿态/多人信号 ⇒ 保持旧默认 3:4（不引入行为漂移）。"""
+    assert si.infer_aspect_ratio("她安静地坐着。", ["甲"]) == "3:4"
+    assert si.infer_aspect_ratio("", []) == "3:4"
     assert si.encounter_illustration_context(
         "<content>庭院里风声渐紧。\n\n<encounter>[WHAT] 有人来访</encounter></content>"
     ) == ("", "", [], {})

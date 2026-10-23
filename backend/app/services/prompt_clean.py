@@ -109,8 +109,12 @@ def sanitize_table_text(value: str) -> str:
 # 拒答句式：模型拒答文本泄漏进提示词时的识别规则（生图与视频提示词链共用）。
 REFUSAL_RE = re.compile(
     r"\bI\s+(?:can't|cannot|can not|won't|will not)\s+"
-    r"(?:help|assist|comply|generate|create|produce|write|transform|provide|fulfill)\b|"
-    r"无法(?:协助|帮助|满足)|不能(?:协助|帮助|满足)",
+    r"(?:help|assist|comply|generate|create|produce|write|transform|provide|fulfill"
+    # 2026-10-19 实锤补词：R-18 正文下模型回的是
+    #   "I can't analyze this content for illustration anchor points."
+    # 旧动词表没有 analyze/process/describe ⇒ 拒答被漏判，被记成 `invalid`（JSON 格式错）。
+    r"|analy[sz]e|process|describe|discuss|engage|support|work)\b|"
+    r"无法(?:协助|帮助|满足|分析|处理|描述)|不能(?:协助|帮助|满足|分析|处理|描述)",
     re.I,
 )
 

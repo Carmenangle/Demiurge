@@ -1148,6 +1148,9 @@ def _normalize(
         # （**追加**原串、不改写 ⇒ 账本 `expected` 判据不受影响、43／47 刀 12 处锁全绿）。
         # ⚠ 必须夹在「剔禁词」与「补 POV」之间（与 `_first_person_head_guards` 同序）。
         head = _first_person_limb_entry_phrasing(head, scene or {})
+        # 2026-10-23（用户定案）：画面事实写明对方比叙事者高 ⇒ 机械补**轻微仰拍**，
+        # 并剔掉 `from above`/`high angle` 这类会把身高差画反的高机位词。
+        head = _ensure_first_person_height_angle(head, scene or {})
         # 第 61 刀（2026-09-28 · 用户定案「机械补」）：第一人称下**确保首行有 POV 正向声明**。
         # 该词形在本仓原先**没有任何注入点**（只出现在注释里）⇒ 全靠 profile LLM 自觉；
         # 真机四次重生成里它只在第 1 次自觉写了 ⇒ 后三次按默认第三人称构图。
@@ -3386,18 +3389,12 @@ def _first_person_camera_ban(scene: Mapping[str, object]) -> tuple[str, ...]:
     return _VIEWPOINT_FORBIDDEN_CAMERA
 
 
-def _strip_bystander_camera_tags(tag_line: str, scene: Mapping[str, object]) -> str:
-    """第一人称下从**首行 tag 串**里剔掉旁观/取景矛盾机位词（第 60 刀）。
+def _strip_camera_tags(tag_line: str, banned: tuple[str, ...]) -> str:
+    """从首行 tag 串里剔掉命中 `banned` 的整条 tag（纯剔除，不改写）。
 
-    ⚠ 零回归锁（任一成立即**逐字节返回原串**、且不改动空格的既有形态）：
-      ① `viewpoint` 非 `first_person`（`_first_person_camera_ban` 回空表）；
-      ② 本帧无收束依据（既无近身接触、也无环境词）；
-      ③ 行内无命中项。
-    ⚠ 剔空保护（与 57 刀 `_strip_lower_body` 同族）：整行都是禁词 ⇒ **放弃本次剔**、
-      返回原串 —— 清空首行会让下游质量行与内容 tag 全数丢失（宁缺勿猜）。
-    ⚠ 只作用于**首行 tags**：第二行是自由散文，机械剔词必然误伤，刻意不碰。
+    剔空保护（与 57 刀 `_strip_lower_body` 同族）：整行都是禁词 ⇒ 返回原串，
+    避免清空首行后下游质量行与内容 tag 全数丢失。
     """
-    banned = _first_person_camera_ban(scene)
     if not banned:
         return tag_line
     tags = [tag.strip() for tag in (tag_line or "").split(",")]
@@ -3413,6 +3410,20 @@ def _strip_bystander_camera_tags(tag_line: str, scene: Mapping[str, object]) -> 
     if not dropped or not kept:
         return tag_line
     return ", ".join(kept)
+
+
+def _strip_bystander_camera_tags(tag_line: str, scene: Mapping[str, object]) -> str:
+    """第一人称下从**首行 tag 串**里剔掉旁观/取景矛盾机位词（第 60 刀）。
+
+    ⚠ 零回归锁（任一成立即**逐字节返回原串**、且不改动空格的既有形态）：
+      ① `viewpoint` 非 `first_person`（`_first_person_camera_ban` 回空表）；
+      ② 本帧无收束依据（既无近身接触、也无环境词）；
+      ③ 行内无命中项。
+    ⚠ 剔空保护（与 57 刀 `_strip_lower_body` 同族）：整行都是禁词 ⇒ **放弃本次剔**、
+      返回原串 —— 清空首行会让下游质量行与内容 tag 全数丢失（宁缺勿猜）。
+    ⚠ 只作用于**首行 tags**：第二行是自由散文，机械剔词必然误伤，刻意不碰。
+    """
+    return _strip_camera_tags(tag_line, _first_person_camera_ban(scene))
 
 
 # 第 73 刀（2026-09-29 探针 [38] / 真机 09-29 批次）：第一人称首行 tags 的
@@ -3532,6 +3543,178 @@ def _ensure_first_person_view_tag(tag_line: str, scene: Mapping[str, object]) ->
         return tag_line
     tags = _FP_VIEW_TAGS if _first_person_frame_kind(scene) == "near" else _FP_VIEW_TAG_MIN
     return f"{tag_line.rstrip(' ,')}, {tags}"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 第一人称「身高差 ⇒ 低机位仰拍」（2026-10-23 · 用户定案）
+#
+# 用户口径（原话）：「她近两米、比男主高一头，低机位能同时解决身高差和第一人称」。
+# 第一人称的镜头固定在叙事者眼睛上 ⇒ 镜头高度本来就是叙事者眼高；当画面事实明确
+# 写了对方**比叙事者更高**时，正确表现是**轻微仰拍**（slight low angle / looking up），
+# 而不是把镜头抬到对方眼高（抹平身高差）或俯视。
+#
+# ⚠ 2026-10-23 用户纠正：「不是说 100% 高身高就要仰视的，比如说主角被对方抱起来不就是
+#   平视了吗……身高只能说是一个参考情况，而不是说一定是这个情况」⇒ 身高差**只是参考**：
+#   · 先取内容（含动作与相对位置），再选**最能呈现内容**的机位；
+#   · 第一人称只画叙事者在该位置**真正看得见**的东西；
+#   · 画面事实出现**改变相对高度**的动作/姿态（抱起、坐腿上、躺卧、俯身、跪蹲……）⇒
+#     **不机械套仰拍、也不剔高机位**（此时平视甚至俯视才对），改由条款按实际相对位置取景。
+# ⚠ 数据驱动、宁缺勿猜：只认**明确的身高差证据**（「比 {{user}} 高」「高出一个头」
+#   「a head taller than the user」这类），不按「身高近两米」单独猜——叙事者也可能同样高。
+# ⚠ 只作用于**非风景帧**：风景帧的既有定案是放行全景，不强行套人物仰拍。
+# ⚠ 零回归锁：第三人称／无证据／风景帧／有相对高度变化 ⇒ 逐字节返回原串。
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_FP_TALLER_THAN_NARRATOR_RE = re.compile(
+    r"比\s*(?:\{\{\s*user\s*\}\}|user|你|我|男主(?:角|人公)?|主人公|主角|玩家|叙事者)"
+    r"\s*(?:还|仍|要)?\s*高"
+    r"|高(?:出|过)\s*(?:\{\{\s*user\s*\}\}|user|你|我|男主(?:角|人公)?|主人公|主角|玩家|叙事者)?"
+    r"\s*(?:一个头|一头|半个头|半头|一截)"
+    r"|\b(?:a\s+head|one\s+head|half\s+a\s+head)\s+taller\s+than\s+"
+    r"(?:me|you|the\s+(?:user|protagonist|narrator|player))\b"
+    r"|\btaller\s+than\s+(?:me|you|the\s+(?:user|protagonist|narrator|player))\b",
+    re.I,
+)
+_FP_LOW_ANGLE_TAG = "slight low angle, looking up"
+_FP_LOW_ANGLE_RE = re.compile(
+    r"\b(?:slight\s+)?(?:low[-\s]?angle|upward(?:\s+camera)?\s+angle|"
+    r"from\s+below|looking\s+up|worm'?s[-\s]?eye)\b",
+    re.I,
+)
+# 与「仰拍」直接冲突的高机位词：只在身高差成立且相对高度未变时剔（不可动普通 `looking down` 这类动作）。
+_FP_HIGH_ANGLE_ONLY = (
+    "from above", "looking down at face", "bird's eye view", "god's eye view", "high angle",
+)
+# 「改变相对高度」的画面事实（2026-10-23 用户纠正）：出现这些动作/姿态时，双方当下的
+# 实际相对高度可能与「身高差」相反或相等（被对方抱起＝平视甚至俯视；对方俯身/跪蹲＝平视），
+# ⇒ 身高差退为**参考**：不机械补仰拍，也不剔高机位，机位按实际相对位置选最佳呈现。
+_FP_RELATIVE_LEVEL_RE = re.compile(
+    # 中文：抱起/扛起/打横/公主抱；⚠「抱起双臂」不是位移，用负向断言挡掉。
+    r"抱(?:起|起来)(?!(?:双)?(?:臂|手|胳膊))"
+    r"|打横|横抱|公主抱|扛(?:在|到)?(?:肩上|肩头)|扛起"
+    r"|(?:把|将|被)[^。；;，,\n]{0,10}(?:抱起|扛起|举起|托起|捧起)"
+    r"|(?:抱|搂|拥)(?:在|进|入)(?:怀里|怀中)"
+    r"|(?:坐|跨坐|骑)(?:在|到|上|回)"
+    r"|(?:躺|卧|趴|伏)(?:在|于|到|下)|仰卧|仰面|俯卧|侧卧"
+    r"|(?:跪|蹲)(?:在|下|着|到)|俯身|弯腰|弓腰|俯下|屈膝|半跪|单膝(?:跪|着)"
+    r"|(?:压|按)在[^。；;，,\n]{0,10}(?:身下|床上|榻上|地上)"
+    # 英文
+    r"|\b(?:carried|lifted|picked\s+up|hoisted)\b[^.;,\n]{0,30}\b(?:in|on)\s+"
+    r"(?:his|her|their)\s+(?:arms|lap)\b"
+    r"|\bon\s+(?:his|her|their)\s+lap\b|\bstraddl\w*"
+    r"|\b(?:lying|laid)\s+(?:on|in|across)\b"
+    r"|\bkneel\w*|\bcrouch\w*|\bbent\s+over\b|\bbend(?:s|ing)?\s+(?:over|down)\b"
+    r"|\blean(?:s|ing)?\s+(?:in|down|over|closer)\b"
+    r"|\b(?:pinned|pressed)\s+(?:under|beneath|down)\b"
+    r"|\b(?:sitting|sat|seated)\s+(?:on|in)\b",
+    re.I,
+)
+
+
+def _first_person_match(
+    scene: Mapping[str, object], pattern: re.Pattern[str],
+) -> str:
+    """第一人称下在画面事实里搜一条匹配（非第一人称 ⇒ 空串）。"""
+    if str(scene.get("viewpoint") or "").strip() != "first_person":
+        return ""
+    for key in ("appearance", "wardrobe", "narrative"):
+        value = scene.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        match = pattern.search(image_prompt_extract.restore_jailbreak(value))
+        if match:
+            return match.group(0)
+    subjects = scene.get("subjects")
+    if isinstance(subjects, list):
+        for item in subjects:
+            if not isinstance(item, Mapping):
+                continue
+            match = pattern.search(str(item.get("description") or ""))
+            if match:
+                return match.group(0)
+    return ""
+
+
+def _first_person_height_evidence(scene: Mapping[str, object]) -> str:
+    """本帧有没有「对方比叙事者高」的**明确**证据（第一人称限定）。"""
+    return _first_person_match(scene, _FP_TALLER_THAN_NARRATOR_RE)
+
+
+def _first_person_relative_level(scene: Mapping[str, object]) -> str:
+    """本帧有没有**改变相对高度**的动作/姿态（抱起、坐腿上、躺卧、俯身、跪蹲……）。
+
+    命中 ⇒ 身高差只是参考，实际机位应由画面事实决定（可能平视甚至俯视）。
+    """
+    return _first_person_match(scene, _FP_RELATIVE_LEVEL_RE)
+
+
+def _first_person_height_angle(scene: Mapping[str, object]) -> bool:
+    """是否应给本帧补「叙事者眼高 ＋ 轻微仰拍」（风景帧／相对高度已变 ⇒ 不套）。"""
+    if not _first_person_height_evidence(scene):
+        return False
+    if _first_person_relative_level(scene):
+        return False
+    return _first_person_frame_kind(scene) != "scenery"
+
+
+def _ensure_first_person_height_angle(
+    head: str, scene: Mapping[str, object],
+) -> str:
+    """身高差成立且**相对高度未变**时，确保首行含**低机位仰拍** tag，并剔掉冲突的高机位词。
+
+    ⚠ 零回归锁：第三人称／无证据／风景帧／**相对高度已变**／空串 ⇒ 逐字节返回原串。
+    ⚠ 幂等：已有 `low angle`／`looking up` 等写法 ⇒ 不重复追加。
+    ⚠ 这里**允许**在「整行都是高机位词」时剔空后只留仰拍 tag：身高差已由画面事实确证，
+      继续保留俯视会把「她比叙事者高」直接画反（与第 60 刀的剔空保护场景不同）。
+    ⚠ 相对高度已变（抱起/坐腿上/躺卧/俯身/跪蹲）⇒ 高机位可能才是 POV 真实所见 ⇒ 不剔。
+    """
+    if not _first_person_height_angle(scene):
+        return head
+    raw = head or ""
+    if not raw.strip():
+        return head
+    tags = [tag.strip() for tag in raw.split(",") if tag.strip()]
+    kept = [
+        tag for tag in tags
+        if not any(re.search(rf"\b{re.escape(item)}\b", tag, re.I)
+                   for item in _FP_HIGH_ANGLE_ONLY)
+    ]
+    changed = len(kept) != len(tags)
+    if any(_FP_LOW_ANGLE_RE.search(tag) for tag in kept):
+        return ", ".join(kept) if changed else head
+    kept.append(_FP_LOW_ANGLE_TAG)
+    return ", ".join(kept)
+
+
+def _first_person_height_clause(scene: Mapping[str, object], who: str) -> str:
+    """身高差条款（无证据／风景帧 ⇒ 空串）。
+
+    2026-10-23 用户纠正：身高差**只是参考**。画面事实出现改变相对高度的动作/姿态时，
+    不写「仰拍」硬规则，改写成「按实际相对位置选最佳机位、只画 POV 看得见的」。
+    """
+    if not _first_person_height_evidence(scene):
+        return ""
+    if _first_person_frame_kind(scene) == "scenery":
+        return ""
+    cue = _first_person_relative_level(scene)
+    if cue:
+        return (
+            f"【视角·第一人称·相对位置优先（身高差只是参考）】画面事实写了对方比{who}更高，"
+            f"但本帧还有**改变相对高度**的动作/姿态（「{cue[:40]}」）⇒ **不得**机械套用仰拍，"
+            f"也**不得**为了保住身高差而改写动作。**先按画面事实确定双方当下的实际相对高度，"
+            f"再选最能呈现画面内容的机位**：平视、俯视、仰拍都可能成立；"
+            f"只画{who}在这个位置**真正看得见**的内容。"
+        )
+    return (
+        f"【视角·第一人称·身高差与仰拍】画面事实明确写了对方**比{who}更高**"
+        f"（如「高出一个头」这类**明确的身高差**），且本帧**没有改变相对高度**的动作/姿态"
+        f"（抱起、坐腿上、躺卧、俯身、跪蹲等）⇒ 此时保持**{who}的眼高**、"
+        f"取**轻微仰拍**（`slight low angle`／`looking up`），让对方在画面中显得高于{who}；"
+        f"**不得**用俯视、高机位或把镜头抬到对方眼高来抹平身高差。"
+        f"⚠ 身高差只是**参考**：一旦画面出现上述改变相对高度的动作，本条不适用，"
+        f"机位按实际相对位置取景。仰拍只改变机位高度，**不得**因此新增任何画面事实；"
+        f"第一人称只画{who}在该位置**真正看得见**的内容。"
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -3724,16 +3907,17 @@ def _first_person_prose_meta_guard(prose: str, scene: Mapping[str, object]) -> s
 
 
 def _first_person_head_guards(head: str, scene: Mapping[str, object]) -> str:
-    """第一人称「首行 tags」统一收口：**剔旁观机位词 → 补下缘进入限定 → 补 POV 声明**
-    （第 60／61／63／65 刀）。
+    """第一人称「首行 tags」统一收口：**剔旁观机位词 → 补下缘进入限定 → 补身高差仰拍
+    → 补 POV 声明**（第 60／61／63／65 刀 ＋ 2026-10-23 身高差仰拍）。
 
-    ⚠ 与 `_normalize` 的 anima 分支**同序同语义**（那四行因接线锁必须显式留在 `_normalize` 里
+    ⚠ 与 `_normalize` 的 anima 分支**同序同语义**（那几行因接线锁必须显式留在 `_normalize` 里
       —— 见 `test_第60刀_闸已接进anima归一化收口`／`test_第61刀_接线锁_闸与补都接在归一化收口`）。
     ⚠ 每一步各自带零回归锁与非第一人称短路 ⇒ 本函数对第三人称**逐字节返回原串**。
     """
     head = _first_person_strip_camera_direction_tags(head, scene)
     head = _strip_bystander_camera_tags(head, scene)
     head = _first_person_limb_entry_phrasing(head, scene)
+    head = _ensure_first_person_height_angle(head, scene)
     return _ensure_first_person_view_tag(head, scene)
 
 
@@ -3879,6 +4063,7 @@ def _viewpoint_clause(scene: Mapping[str, object]) -> str:
         f"⚠ 局部入画**不是**把{who}画到镜头里来——他是**镜头本身**，"
         f"故**永远不出现**他的躯干与面部。"
         )
+    height_clause = _first_person_height_clause(scene, who)
     return (
         f"【视角·第一人称】镜头就是{who}的眼睛，{who}本人**不入画**。"
         # ═══ 2026-09-24 第 55 刀：第一人称的**三步因果**（用户定案原话）═══════════════
@@ -3893,6 +4078,8 @@ def _viewpoint_clause(scene: Mapping[str, object]) -> str:
         #   **不是推翻第 38 刀**，而是补它的**人称分支**。
         # ⚠ `scope` 为空（无接触证据）⇒ 只保留「不入画」底款 ⇒ 零回归锁。
         + scope
+        # 2026-10-23：画面事实写明对方比叙事者高 ⇒ 眼高 ＋ 轻微仰拍（无证据 ⇒ 空串）。
+        + height_clause
         + f"【视角·第一人称·谁是{who}】本帧人称由**用户手选**确定＝第一人称，"
         f"**不得据正文的叙述人称推翻它**：正文**不一定**以「我」叙述——它可能用**第三人称**"
         f"点名{who}、或只用「他」指代他，**这仍然是第一人称**：正文里的主人公就是{who}"
@@ -5364,6 +5551,10 @@ def generate_frame_prompts(
         # 确定性的 ⇒ 改帧逻辑时只认它做 A/B 归因。
         report[f"{frame}_subjects"] = list(_contract_subject_names(frame_scene))
         frame_diag: dict[str, object] = {}
+        # ⚠ 2026-10-20 回退：曾在此传 allow_repair=False 省一轮 LLM 往返（该链最多 6 次调用，
+        # 240s 前端超时易打满），但 `03-backend-illustration-pipeline.md:343-345` 记着
+        # **2026-09-01 用户确认**：单次不重写会让提示词明显简略。用户口径「只要结果好就没问题」
+        # ⇒ 质量优先，帧编译同样保留这次带因重写。
         prompt = generate(profile, frame_scene, generate_text, frame_diag)
         # 观测（2026-09-23 甲）：本帧实际喂进编译器的字段账本 + 场景键 + 成品。
         # 关键怀疑点：两帧的 camera/composition 不是继承来的（scene_spec 本就没有这两个键），

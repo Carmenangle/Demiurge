@@ -39,6 +39,9 @@ vi.mock("../api/ai", () => ({
   genFramePrompts: vi.fn(async () => ({ frames: {} })),
   reportIllustrationSubmission: vi.fn(async () => undefined),
   reportIllustrationFailure: vi.fn(async () => undefined),
+  // 2026-10-19：插画链新增 claim/compile/upload/submit 四段阶段标记（纯观测），
+  // mock 必须提供，否则整条提交链在测试环境直接抛「No export」。
+  reportIllustrationStage: vi.fn(async () => undefined),
 }));
 
 vi.mock("../api/loras", () => ({

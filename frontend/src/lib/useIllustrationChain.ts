@@ -27,7 +27,7 @@ import {
 import { listLoras } from "../api/loras";
 import {
   saveSnapshot, claimIllustrationSubmission, genFramePrompts, genProfilePrompt,
-  reportIllustrationSubmission,
+  reportIllustrationSubmission, reportIllustrationStage,
 } from "../api/ai";
 import {
   applyProfileLoraTriggers, ensureAnimaIllustrationStyle, latentSizeFor,
@@ -128,6 +128,21 @@ export function useIllustrationChain({
     };
     const failSlot = (stage: string, error: string) =>
       discardFailedIllustration(messageId, slotId, stage, error, "", retrySnapshot);
+    // 阶段标记（2026-10-19）：claim→failed 之间原本是观测黑洞（实锤卡 7 分 47 秒、
+    // 后端 trace 零事件）。四个节点各报一条，fire-and-forget，绝不阻断出图。
+    const stageStart = new Map<string, number>();
+    const mark = (
+      stage: "claim" | "compile" | "upload" | "submit",
+      status: "start" | "ok" | "error",
+      detail = "",
+    ) => {
+      if (status === "start") stageStart.set(stage, Date.now());
+      const elapsed = status === "start" ? undefined : Date.now() - (stageStart.get(stage) || Date.now());
+      void reportIllustrationStage({
+        threadId, repoId: repo?.id || threadId, turnId, messageId, slotId,
+        stage, status, detail, elapsedMs: elapsed,
+      }).catch(() => undefined);
+    };
     const preset = settings.mediaInsert?.[repo?.id || ""];
     if (!preset) { failSlot("configuration", "当前作品没有配置自动插画模板"); return; }
     if (source === "automatic") {
@@ -155,6 +170,7 @@ export function useIllustrationChain({
         return;
       }
     }
+    mark("claim", "ok");
     if (!prompt.trim() && !sceneSpec?.narrative.trim()) {
       failSlot("prompt", "剧情出图提示词为空");
       return;
@@ -292,7 +308,15 @@ export function useIllustrationChain({
       }
     }
     if (!prompt.trim()) {
-      failSlot("prompt_profile", "智能提示词结果为空");
+      // 2026-10-20 用户实锤「之前从没出现过提示词为空」。后端 generate 实测拒答也回退
+      // 647~795 字（永不为空）⇒ 空值只可能来自前端三个分支之一。把分支证据写进错误
+      // 文案，下次一眼能判是「sceneSpec 丢了」「storedProfile 是空串」还是「编译返回空」。
+      failSlot(
+        "prompt_profile",
+        `智能提示词结果为空（sceneSpec=${sceneSpec ? "有" : "无"}`
+        + ` storedProfile=${sceneSpec?.profile_prompt ? "有" : "无"}`
+        + ` source=${source} profile=${promptProfile}）`,
+      );
       return;
     }
     if (promptProfile === "anima_tags") {
@@ -348,10 +372,12 @@ export function useIllustrationChain({
       return;
     }
     if (!promptOnly && needsImage && baseImageForUse) {
+      mark("upload", "start", baseImageForUse);
       try {
         const blob = await (await fetch(localViewUrl(baseImageForUse))).blob();
         const file = new File([blob], baseImageForUse.split(/[\\/]/).pop() || "base.png", { type: blob.type || "image/png" });
         uploadedImage = (await uploadImage(file, settings.comfyuiUrl)).name;
+        mark("upload", "ok");
       } catch {
         // 底图上传失败：图片分支退化为纯文生图；视频分支按文档终态失败（不重试乘法）
         if (useVideo) {
@@ -449,6 +475,7 @@ export function useIllustrationChain({
           if (task.kind === "generate") frameDescs[task.frame] = task.desc;
         }
         if (frameDescs.first || frameDescs.last) {
+          mark("compile", "start", "frames");
           try {
             const compiled = await genFramePrompts(
               promptProfile,
@@ -468,7 +495,9 @@ export function useIllustrationChain({
               const item = compiled.frames[frame];
               if (item?.prompt?.trim()) frameCompiled[frame] = item.prompt;
             }
+            mark("compile", "ok", "frames");
           } catch (error) {
+            mark("compile", "error", error instanceof Error ? error.message : "frames");
             console.warn("[auto-video] 帧提示词同构编译失败，降级帧描述原文", error);
           }
         }
@@ -737,6 +766,8 @@ export function useIllustrationChain({
         }).catch(() => undefined);
         return;
       }
+      // submit 计时段含 ComfyUI 探活 + 队列等待：这段正是历史上「卡 4 分钟」的嫌疑区。
+      mark("submit", "start");
       const st = await comfyStatus(settings.comfyuiUrl);
       if (!st.running) {
         failSlot("comfyui_status", "ComfyUI 尚未启动");
@@ -745,6 +776,7 @@ export function useIllustrationChain({
       const r = await enqueueSubmit(() => submitWorkflow(
         chosenId, values, settings.comfyuiUrl, prompt, loraStack, loraMode,
       ));
+      mark("submit", "ok", chosenId);
       if (r.prompt_id) {
         void reportIllustrationSubmission({
           threadId, repoId: repo?.id || threadId, turnId, messageId, slotId,

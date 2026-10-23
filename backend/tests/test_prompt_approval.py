@@ -1,4 +1,5 @@
 from app.services import agent_graph as ag
+from app.services import agent_graph_nodes as agn  # generate_node 域（2026-10-23 方案 B 再拆）
 from app.services import generation_approval as approval_flow
 from app.services import prompt_approval_store as approvals
 from app.services.agent_contracts import ModelConfig, RunContext
@@ -36,7 +37,7 @@ def _handle(context: RunContext):
 
 def test_风格模板只产出待审核稿不直接生图(tmp_path, monkeypatch):
     _use_tmp_store(tmp_path, monkeypatch)
-    monkeypatch.setattr(ag, "_styled_prompt", lambda ctx, prompt: "结构化后的完整提示词")
+    monkeypatch.setattr(agn, "_styled_prompt", lambda ctx, prompt: "结构化后的完整提示词")
     monkeypatch.setattr(approval_flow.image_gen, "generate", lambda *a, **k: (_ for _ in ()).throw(
         AssertionError("用户审核前不得调用生图上游")))
 
@@ -51,7 +52,7 @@ def test_风格模板只产出待审核稿不直接生图(tmp_path, monkeypatch)
 
 def test_风格模板返回结构化审批卡而不是文字口令(tmp_path, monkeypatch):
     _use_tmp_store(tmp_path, monkeypatch)
-    monkeypatch.setattr(ag, "_styled_prompt", lambda ctx, prompt: "结构化后的完整提示词")
+    monkeypatch.setattr(agn, "_styled_prompt", lambda ctx, prompt: "结构化后的完整提示词")
 
     result = ag.generate_node({"_ctx": _ctx("模板结构"), "user_text": "原始全部细节", "trace": []})
 

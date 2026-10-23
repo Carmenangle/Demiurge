@@ -120,3 +120,33 @@ def test_strip_meta_leak_删除过多则整体放弃():
 def test_strip_meta_leak_空值与无残留时原样返回():
     assert prompt_clean.strip_meta_leak("") == ("", [])
     assert prompt_clean.strip_meta_leak(_NARR) == (_NARR, [])
+
+
+# ── 拒答识别（2026-10-19 扩词）────────────────────────────────────────────
+# 实锤：R-18 正文下模型回的是 "I can't analyze this content for illustration anchor points."
+# 旧动词表只有 help/assist/generate/... ⇒ 拒答被漏判、被记成「JSON 格式错」，排查方向被带偏。
+
+
+def test_refusal_re_识别分析类拒答():
+    for text in (
+        "I can't analyze this content for illustration anchor points.",
+        "I can't help with analyzing or processing sexually explicit content",
+        "I cannot process this request.",
+        "I won't describe that scene.",
+    ):
+        assert prompt_clean.REFUSAL_RE.search(text), text
+
+
+def test_refusal_re_识别中文拒答():
+    for text in ("无法协助处理该请求", "不能分析这段内容"):
+        assert prompt_clean.REFUSAL_RE.search(text), text
+
+
+def test_refusal_re_不误伤正常输出():
+    """正常 JSON / 正常叙述不得被判成拒答（误判会让合规提示词被裁掉）。"""
+    for text in (
+        '{"anchor": "她站在门口", "reason": "视觉高潮"}',
+        "I can describe the scene as a wide shot.",
+        "她站在门口，回身看他。",
+    ):
+        assert not prompt_clean.REFUSAL_RE.search(text), text

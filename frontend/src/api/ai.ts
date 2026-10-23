@@ -693,6 +693,32 @@ export function claimIllustrationSubmission(payload: {
   });
 }
 
+/**
+ * 插画提交链的阶段标记（2026-10-19）。
+ *
+ * claim → failed 之间原本是观测黑洞：实锤一次卡 7 分 47 秒，后端 trace 零事件，
+ * 只能靠时间线倒推「卡在编译还是提交」。这里在四个节点各报一条，纯观测。
+ * ⚠ 必须 fire-and-forget（调用方 `.catch(() => undefined)`）：遥测不得阻断出图。
+ */
+export function reportIllustrationStage(payload: {
+  threadId: string; repoId?: string; turnId?: string; messageId: string; slotId: string;
+  stage: "claim" | "compile" | "upload" | "submit";
+  status?: "start" | "ok" | "error";
+  detail?: string; elapsedMs?: number;
+}) {
+  return apiPost<{ ok: boolean }>("/ai/image-agent/illustration-stage", {
+    thread_id: payload.threadId,
+    repo_id: payload.repoId || "",
+    turn_id: payload.turnId || "",
+    message_id: payload.messageId,
+    slot_id: payload.slotId,
+    stage: payload.stage,
+    status: payload.status || "start",
+    detail: payload.detail || "",
+    elapsed_ms: payload.elapsedMs,
+  }, 8_000);   // 遥测用短超时：网络差时别拖住主流程
+}
+
 export function reportIllustrationSubmission(payload: {
   threadId: string; repoId: string; turnId?: string; messageId: string; slotId: string;
   templateId: string; promptId: string; prompt: string; promptProfile: string;

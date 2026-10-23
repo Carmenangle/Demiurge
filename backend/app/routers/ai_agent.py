@@ -355,6 +355,24 @@ class IllustrationClaimRequest(BaseModel):
     slot_id: str
 
 
+class IllustrationStageRequest(BaseModel):
+    """前端插画提交链的**阶段标记**（2026-10-19）。
+
+    动机：`illustration.claim` 到 `illustration.failed` 之间是**观测黑洞**——
+    实锤一次卡了 7 分 47 秒，后端 trace 一条事件都没有，只能靠时间线倒推。
+    这里让前端在 claim / 编译 / 上传 / 提交 四个节点各报一条，纯观测、不改行为。
+    """
+    thread_id: str = ""
+    repo_id: str = ""
+    turn_id: str = ""
+    message_id: str = ""
+    slot_id: str = ""
+    stage: str                      # claim | compile | upload | submit
+    status: str = "start"           # start | ok | error
+    detail: str = ""
+    elapsed_ms: int | None = None
+
+
 class EnsureAudioSlotRequest(BaseModel):
     thread_id: str
     message_id: str
@@ -384,6 +402,30 @@ def illustration_claim(req: IllustrationClaimRequest) -> dict[str, bool]:
         thread_id=req.thread_id, message_id=req.message_id, slot_id=req.slot_id,
     )
     return {"ok": True, "claimed": claimed}
+
+
+@router.post("/image-agent/illustration-stage")
+def illustration_stage(req: IllustrationStageRequest) -> dict[str, bool]:
+    """前端插画提交链的阶段标记；追踪失败绝不影响生图（best-effort）。"""
+    from app.services import run_trace
+    try:
+        run_trace.emit(
+            {
+                "thread_id": req.thread_id,
+                "repo_id": req.repo_id or req.thread_id,
+                "turn_id": req.turn_id,
+            },
+            "illustration.stage",
+            message_id=req.message_id,
+            slot_id=req.slot_id,
+            stage=req.stage,
+            status=req.status,
+            detail=req.detail[:200],
+            elapsed_ms=req.elapsed_ms,
+        )
+    except Exception:  # noqa: BLE001 [EXC-保留] 遥测 best-effort，绝不阻断提交
+        pass
+    return {"ok": True}
 
 
 @router.post("/image-agent/illustration-submission")

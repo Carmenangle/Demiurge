@@ -91,6 +91,10 @@ def gen_profile_prompt(req: ProfilePromptRequest) -> dict[str, object]:
             profile=req.profile,
             strategy=result.get("strategy", "direct"),
             validation_errors=result.get("validation_errors", []),
+            # 2026-10-20：前端报「智能提示词结果为空」，而后端 generate 实测拒答也回退
+            # 647~795 字（永不为空）⇒ 记成品长度才能区分「后端真返空」与「前端没拿到」。
+            # 此前该事件不含长度，两边对不上账。
+            prompt_chars=len(str(result.get("prompt") or "")),
         )
     except Exception:  # noqa: BLE001 [EXC-保留] 遥测发射 best-effort：Trace 不得阻断提示词生成
         pass

@@ -52,6 +52,19 @@ describe("illustration LoRA modes", () => {
     )).toMatchObject({ illustrationActorNames: ["甲", "乙", "丙"] });
   });
 
+  it("只绑兜底风格 LoRA（角色 LoRA 映射为空）时回退到绑定角色卡名", () => {
+    // 2026-10-20 实锤：演员池只取 characterLoras 的键 ⇒ 只绑风格 LoRA 时为空
+    // ⇒ 后端 known=[] ⇒ actor_count=0 ⇒ 提示词没有角色条目 ⇒ 生图看不到角色面貌。
+    // 「没有角色 LoRA」≠「没有角色」：外貌描述不该依赖 LoRA 绑定。
+    expect(illustrationRequestMedia(
+      { ...preset, characterLoras: {}, appearanceSource: "worldbook" }, ["腓特烈"],
+    )).toMatchObject({ illustrationActorNames: ["腓特烈"] });
+    // 无任何绑定卡时仍为空（不虚构角色）
+    expect(illustrationRequestMedia(
+      { ...preset, characterLoras: {}, appearanceSource: "worldbook" }, [],
+    )).toMatchObject({ illustrationActorNames: [] });
+  });
+
   it("单 LoRA 只匹配真实在场角色，不把全部绑定卡当作在场角色", () => {
     expect(illustrationWorkflowMedia({ ...preset, loraMode: "single" }, ["乙"], ["甲", "乙"]))
       .toMatchObject({

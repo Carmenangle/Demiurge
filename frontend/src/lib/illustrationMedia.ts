@@ -37,6 +37,14 @@ export function illustrationLoraConfigurationError(
 export function illustrationRequestMedia(preset: MediaInsertPreset | undefined, cardNames: string[]) {
   const useCharacterCards = preset?.appearanceSource === "character_card";
   const characterLoras = useCharacterCards ? {} : preset?.characterLoras || {};
+  // 2026-10-20 实锤（用户：「总不能因为我只绑定了兜底的风格 LoRA 这个功能就失效了吧」）：
+  // 演员池此前**只**取 `characterLoras` 的键 ⇒ 只绑风格 LoRA（兜底）时映射为空
+  // ⇒ `illustrationActorNames=[]` ⇒ 后端 `known=[]` ⇒ `actor_count=0`
+  // ⇒ 提示词里**没有任何角色条目** ⇒ 生图看不到角色面貌、提示词像乱拼（真机实锤
+  // `illustration.request actor_count=0 / actors=[] / actor_candidates=[]`）。
+  // 修：角色 LoRA 映射为空时回退到**本作品绑定的角色卡名**——
+  // 「没有角色 LoRA」不等于「没有角色」，外貌描述本就不该依赖 LoRA 绑定。
+  const loraNames = Object.keys(characterLoras);
   return {
     characterBaseImages: Object.fromEntries(
       Object.entries(characterLoras)
@@ -44,7 +52,7 @@ export function illustrationRequestMedia(preset: MediaInsertPreset | undefined, 
         .map(([name, binding]) => [name, binding.baseImage as string]),
     ),
     illustrationActorNames: [...new Set(
-      useCharacterCards ? cardNames : Object.keys(characterLoras),
+      useCharacterCards || loraNames.length === 0 ? cardNames : loraNames,
     )],
     styleBaseImage: useCharacterCards ? "" : preset?.styleBaseImage || "",
   };
