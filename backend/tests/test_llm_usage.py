@@ -443,3 +443,233 @@ def test_is_local_url_public_false():
     assert llm._is_local_url("https://api.openai.com/v1") is False
     assert llm._is_local_url("https://open.bigmodel.cn/api/paas/v4") is False
     assert llm._is_local_url("") is False
+
+
+# ── prompt cache：显式 cache_control(ttl=1h)（2026-10-19）─────────────────
+# 用户实锤：8 笔请求缓存创建 291,657 tokens、读取仅 61,438（4.75 倍），白付约 $6.7。
+# 根因＝Anthropic 默认 5 分钟 TTL 扛不住剧情对话间隔。这里显式把寿命拉到 1 小时。
+
+
+def _msgs() -> list[dict]:
+    return [
+        {"role": "system", "content": "静态头（跨轮不变）"},
+        {"role": "user", "content": "第一轮"},
+        {"role": "assistant", "content": "回复"},
+        {"role": "system", "content": "【世界设定·本轮召回（每轮重排）】动态块"},
+        {"role": "user", "content": "第二轮"},
+    ]
+
+
+def test_inject_prompt_cache_claude_wraps_head_only():
+    out = llm._inject_prompt_cache(_msgs(), is_claude=True)
+    head = out[0]
+    assert isinstance(head["content"], list)
+    assert head["content"][0]["type"] == "text"
+    assert head["content"][0]["text"] == "静态头（跨轮不变）"
+    assert head["content"][0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+    # 只有第一条 system 被包；动态块与对话原样
+    assert out[3]["content"] == "【世界设定·本轮召回（每轮重排）】动态块"
+    assert out[1] == {"role": "user", "content": "第一轮"}
+    assert len([m for m in out if isinstance(m.get("content"), list)]) == 1
+
+
+def test_inject_prompt_cache_skips_non_claude():
+    out = llm._inject_prompt_cache(_msgs(), is_claude=False)
+    assert out[0]["content"] == "静态头（跨轮不变）"
+
+
+def test_inject_prompt_cache_respects_disable(monkeypatch):
+    monkeypatch.setenv("LAF_PROMPT_CACHE", "0")
+    out = llm._inject_prompt_cache(_msgs(), is_claude=True)
+    assert out[0]["content"] == "静态头（跨轮不变）"
+
+
+def test_inject_prompt_cache_no_double_wrap():
+    """内容已是块数组时只补 cache_control，不重复包 text（否则提示词结构被破坏）。"""
+    msgs = [{"role": "system", "content": [
+        {"type": "text", "text": "已是块"}, {"type": "text", "text": "第二块"}]}]
+    out = llm._inject_prompt_cache(msgs, is_claude=True)
+    blocks = out[0]["content"]
+    assert len(blocks) == 2
+    assert blocks[0]["text"] == "已是块"
+    assert blocks[1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+
+
+def test_payload_injects_cache_for_claude_model():
+    """_payload 对 claude 模型生效（无显式 profile ⇒ 按模型名推断）。"""
+    payload = llm._payload("claude-opus-4-8", _msgs())
+    head_content = payload[0][1]
+    assert isinstance(head_content, list)
+    assert head_content[0]["cache_control"]["ttl"] == "1h"
+
+
+def test_payload_explicit_openai_profile_overrides_model_name():
+    """显式 openai_compatible 必须压过模型名里的 claude——否则给不该缓存的请求也挂断点。
+
+    这条是回归锁：2026-10-19 首版把两个条件用 `or` 拼，被本测试抓出来后改成
+    与 prepare_messages 逐字同构的「显式 profile 优先」。
+    """
+    payload = llm._payload("claude-opus-4-8", _msgs(), provider_profile="openai_compatible")
+    assert payload[0][1] == "静态头（跨轮不变）"
+
+
+# ── 稳定前缀断点（2026-10-19 第二刀）──────────────────────────────────────
+# 只挂 system 头只能覆盖 2,883 字，而实测稳定前缀有 36,942 字（占上下文 75.5%）。
+# 这里把「断点落在最后一条静态预设块、绝不落到每轮块上」钉死。
+
+
+def _roleplay_shape() -> list[dict]:
+    """仿真真实 roleplay 结构：静态头 → 对话 → 预设静态块 → 本轮输入 → 动态块。"""
+    return [
+        {"role": "system", "content": "【输出结构】静态头，里面写着「本轮剧情导致的状态变化」"},  # 0
+        {"role": "user", "content": "第一轮输入"},                                                # 1
+        {"role": "assistant", "content": "第一轮回复"},                                            # 2
+        {"role": "system", "content": "预设块 A（静态）"},                                          # 3
+        {"role": "system", "content": "预设块 B：分析<user last input>中主人输入"},                 # 4 ← 旧版会误判
+        {"role": "system", "content": "* 升华描写。</Order>"},                                     # 5 ← 应落在这里
+        {"role": "user", "content": "以下为用户最新输入。 <user last input> 新剧情"},               # 6 ← 首个动态
+        {"role": "system", "content": "【世界设定·本轮召回（每轮重排）】…"},                        # 7 动态
+        {"role": "system", "content": "[输出纪律] 静态但夹在动态之后"},                             # 8
+        {"role": "system", "content": "【本轮用户安排·最高优先级】…"},                              # 9 动态
+        {"role": "user", "content": "新剧情"},                                                     # 10
+    ]
+
+
+def test_stable_prefix_tail_落在最后一条静态预设块():
+    assert llm._stable_prefix_tail(_roleplay_shape()) == 5
+
+
+def test_stable_prefix_tail_不被静态提示词里的裸标签骗到():
+    """预设 COT 指南里写了「分析<user last input>…」——那是静态指令，不能当动态块。"""
+    msgs = [
+        {"role": "system", "content": "头"},
+        {"role": "system", "content": "指南：在这里分析<user last input>中主人输入内容。"},
+        {"role": "system", "content": "末尾静态块"},
+        {"role": "user", "content": "以下为用户最新输入。 <user last input> 正文"},
+        {"role": "system", "content": "【世界设定·本轮召回（每轮重排）】…"},
+    ]
+    # 触发点是 index 3（带「以下为」前缀的包装），回退到 index 2
+    assert llm._stable_prefix_tail(msgs) == 2
+
+
+def test_stable_prefix_tail_无标记时返回负一():
+    """world/table_maintenance 那类 2 条消息请求没有每轮块 ⇒ 只留头断点，绝不猜。"""
+    assert llm._stable_prefix_tail([
+        {"role": "system", "content": "系统提示"},
+        {"role": "user", "content": "问题"},
+    ]) == -1
+
+
+def _roleplay_shape_with_history() -> list[dict]:
+    """仿真 2026-10-21 的真实 roleplay 布局（预设把 <history> 排在 Order/COT 静态块之前）。
+
+    实测 trace（37 条）：静态头+问候对+预设静态块 → `<history>` 开标签行 → 上一轮
+    剧情轮（user+assistant）→ Order/COT/格式等**静态**块 → 本轮召回/用户安排 → 本轮输入。
+    """
+    return [
+        {"role": "system", "content": "【输出结构】静态头"},                                     # 0
+        {"role": "user", "content": "你是谁？"},                                                  # 1 静态问候
+        {"role": "assistant", "content": "<GrayWill> 我是灰魂…"},                                 # 2 静态问候
+        {"role": "system", "content": "【世界设定（相关条目）】静态锚点段"},                        # 3
+        {"role": "system", "content": "预设静态块（含 COT 指南，提到 <history> 是历史记录）"},      # 4 ← 只提到、不以标签结尾
+        {"role": "system", "content": "预设静态块末尾"},                                          # 5 ← 应落在这里
+        {"role": "system", "content": "- <history>是历史推演记录及其他补充设定\n<history>"},       # 6 ← 每轮边界（开标签行）
+        {"role": "user", "content": "办婚礼，进行婚纱甜蜜 sex 环节"},                               # 7 上一轮 user
+        {"role": "assistant", "content": "腓特烈跪在@我@身前…（上一轮正文）"},                      # 8 上一轮 assistant
+        {"role": "system", "content": "</history>"},                                              # 9
+        {"role": "system", "content": "* 升华描写。</Order>"},                                      # 10 静态但排在历史之后
+        {"role": "user", "content": "以下为用户最新输入。 <user last input> 正常推进"},             # 11 本轮输入
+        {"role": "system", "content": "【世界设定·本轮召回（每轮重排）】…"},                        # 12 动态
+        {"role": "user", "content": "正常推进时间甜蜜过日子"},                                      # 13
+    ]
+
+
+def test_stable_prefix_tail_历史块也算每轮边界():
+    """2026-10-21 实锤：跨回合首异在 `<history>`（上一轮剧情），不是一个回合的重试。
+
+    旧逻辑只认显式每轮短语 ⇒ 断点落到历史之后（msg10），缓存块每轮都变、永远读不中，
+    只剩 system 头能命中（账单实测命中率 8.3%）。修后断点落在历史块之前（msg5）。"""
+    assert llm._stable_prefix_tail(_roleplay_shape_with_history()) == 5
+
+
+def test_stable_prefix_tail_静态指令提到history不算边界():
+    """静态块里**提到** `<history>`（不以标签结尾）不得当边界——与裸标签教训同源。"""
+    msgs = [
+        {"role": "system", "content": "头"},
+        {"role": "system", "content": "指南：把内容写进 <history> 段落里"},  # 提到但不以标签结尾
+        {"role": "system", "content": "静态块末尾"},                          # ← 应落在这里
+        {"role": "system", "content": "- <history>是历史记录\n<history>"},     # 真正的开标签行
+        {"role": "user", "content": "上一轮输入"},
+        {"role": "system", "content": "【世界设定·本轮召回（每轮重排）】…"},
+    ]
+    assert llm._stable_prefix_tail(msgs) == 2
+
+
+def test_inject_prompt_cache_挂两个断点且不碰动态块():
+    out = llm._inject_prompt_cache(_roleplay_shape(), is_claude=True)
+    marked = [
+        i for i, m in enumerate(out)
+        if isinstance(m.get("content"), list)
+        and any(isinstance(b, dict) and "cache_control" in b for b in m["content"])
+    ]
+    assert marked == [0, 5]
+    # 动态块必须是原样字符串，不能被包成块数组
+    assert out[6]["content"] == "以下为用户最新输入。 <user last input> 新剧情"
+    assert out[7]["content"] == "【世界设定·本轮召回（每轮重排）】…"
+    assert out[9]["content"] == "【本轮用户安排·最高优先级】…"
+
+
+def test_inject_prompt_cache_覆盖率显著提升():
+    """第二个断点必须把缓存面从「system 头」扩到「最后一条静态预设块」。"""
+    msgs = _roleplay_shape()
+    out = llm._inject_prompt_cache(msgs, is_claude=True)
+    head_only = len(llm._content_text(out[0]))
+    with_tail = sum(len(llm._content_text(m)) for m in out[:6])
+    assert with_tail > head_only * 3
+
+
+def test_inject_prompt_cache_无每轮块时只挂头():
+    out = llm._inject_prompt_cache([
+        {"role": "system", "content": "系统提示"},
+        {"role": "user", "content": "问题"},
+    ], is_claude=True)
+    marked = [
+        i for i, m in enumerate(out)
+        if isinstance(m.get("content"), list)
+        and any(isinstance(b, dict) and "cache_control" in b for b in m["content"])
+    ]
+    assert marked == [0]
+
+
+def test_payload_no_cache_for_non_claude():
+    payload = llm._payload("gpt-5.6-terra", _msgs(), provider_profile="openai_compatible")
+    assert payload[0][1] == "静态头（跨轮不变）"
+
+
+def test_inject_prompt_cache_does_not_mutate_input():
+    """不得就地改调用方传入的 messages（上层会复用同一列表）。"""
+    msgs = _msgs()
+    before = msgs[0]["content"]
+    llm._inject_prompt_cache(msgs, is_claude=True)
+    assert msgs[0]["content"] == before
+
+
+# ── 流式读超时（2026-10-20 从 30s 放宽到 120s）──────────────────────────
+# 实锤：中转缓冲式下发，首字 43s、段间空档 62/68/80s；30s 会把**正常生成**的请求断开
+# （网关侧记「客户端断开」，3 笔 × $2.7735，每笔已产出 4,000 output tokens）。
+
+
+def test_流式读超时默认120秒(monkeypatch):
+    monkeypatch.delenv("LAF_STREAM_READ_TIMEOUT", raising=False)
+    assert llm._stream_read_timeout() == 120.0
+
+
+def test_流式读超时可被环境变量覆盖(monkeypatch):
+    monkeypatch.setenv("LAF_STREAM_READ_TIMEOUT", "200")
+    assert llm._stream_read_timeout() == 200.0
+
+
+def test_流式读超时非法值回落默认(monkeypatch):
+    for bad in ("abc", "0", "-5", ""):
+        monkeypatch.setenv("LAF_STREAM_READ_TIMEOUT", bad)
+        assert llm._stream_read_timeout() == 120.0, bad
