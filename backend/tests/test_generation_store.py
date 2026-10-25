@@ -572,16 +572,26 @@ def test_persist_inspiration_无图与脏图不炸(monkeypatch):
     assert len(insp["images"]) == 1 and insp["images"][0]["full_url"] == "https://cdn.test/ok.jpg"
 
 
-def test_设计讨论注入提示词规范(monkeypatch):
+def test_设计讨论注入提示词规范(monkeypatch, tmp_path):
     """_fabric_knowledge_history(task_type="design_discussion") 追加规范全文。
 
     2026-09-11 用户四条质量反馈固化：锚点第一句/渐变恒定/三段式混排/长度下限
     ——讨论产出的草案必须逐条遵守，规范随设计讨论分支注入自由循环历史。
+    规范正文属用户本机知识文档（`backend/data/` 被 gitignore，CI 干净检出不存在）
+    ⇒ 自带一份最小规范并把 DATA_DIR 指到 tmp：测的是注入机制，不依赖本机内容。
     """
-    from app.services import agent_graph, chat_snapshot
+    from app import config
+    from app.services import agent_graph, agent_knowledge, chat_snapshot
 
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    know = tmp_path / agent_knowledge.KNOWLEDGE_DIR_NAME
+    know.mkdir()
+    (know / "设计讨论-角色服装提示词规范.md").write_text(
+        "锚点第一句 / 渐变特征恒定 / 三段式 tag+自然语言混排 / 参考图 / 长度下限\n",
+        encoding="utf-8",
+    )
     monkeypatch.setattr(chat_snapshot, "load", lambda tid: [])
-    ctx = {"thread_id": "Anima/原创", "message": "讨论场景1的生图提示词"}
+    ctx = {"thread_id": "work/scene", "message": "讨论场景1的生图提示词"}
     out = agent_graph._fabric_knowledge_history(ctx, "讨论场景1的生图提示词",
                                                 task_type="design_discussion")
     assert "设计讨论提示词规范" in out
@@ -995,7 +1005,7 @@ def _patch_http_client(monkeypatch, stream, seen):
         def __exit__(self, *exc):
             return False
 
-        def stream(self, method, url):
+        def stream(self, method, url, **kwargs):
             seen.append((method, url))
 
             class _Ctx:
