@@ -12,6 +12,7 @@ app/routers/ai.py
 app/routers/ai_agent.py
 app/routers/ai_chat.py
 app/routers/ai_model_probe.py
+app/routers/ai_prompt_templates.py
 app/routers/ai_providers.py
 app/routers/ai_text.py
 app/routers/ai_workflow_builder.py
@@ -150,6 +151,7 @@ app/services/instruction_provenance.py
 app/services/jobs.py
 app/services/json_file_store.py
 app/services/llm.py
+app/services/local_auth.py
 app/services/local_media.py
 app/services/lora_index.py
 app/services/lora_inject.py
@@ -190,6 +192,7 @@ app/services/prompt_approval_store.py
 app/services/prompt_clean.py
 app/services/prompt_compiler.py
 app/services/prompt_compliance.py
+app/services/prompt_template_store.py
 app/services/prose_style.py
 app/services/rag_backend.py
 app/services/rag_evaluation.py
