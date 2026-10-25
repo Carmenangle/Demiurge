@@ -60,6 +60,45 @@ describe("ErrorBoundary", () => {
     }
   });
 
+  it("旧 chunk 404 ⇒ 自动重载一次并提示版本更新，而不是停在错误卡片", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      window.sessionStorage.removeItem("demiurge:stale-chunk-reload-at");
+      const Stale = () => {
+        throw new Error(
+          "Failed to fetch dynamically imported module: " +
+            "http://127.0.0.1:8010/assets/NodeManagerView-BDZquKu_.js",
+        );
+      };
+      await mount(<ErrorBoundary><Stale /></ErrorBoundary>);
+      expect(container.textContent).toContain("界面版本已更新");
+      expect(container.textContent).toContain("正在自动重新加载最新资源");
+    } finally {
+      spy.mockRestore();
+      window.sessionStorage.removeItem("demiurge:stale-chunk-reload-at");
+    }
+  });
+
+  it("重载限频窗口内再次失败 ⇒ 停卡片并说明版本不一致（防无限刷新）", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      window.sessionStorage.setItem(
+        "demiurge:stale-chunk-reload-at",
+        String(Date.now()),
+      );
+      const Stale = () => {
+        throw new Error("Failed to fetch dynamically imported module: http://x/old.js");
+      };
+      await mount(<ErrorBoundary><Stale /></ErrorBoundary>);
+      const text = container.textContent || "";
+      expect(text).toContain("界面渲染出错");
+      expect(text).toContain("资源版本不一致");
+    } finally {
+      spy.mockRestore();
+      window.sessionStorage.removeItem("demiurge:stale-chunk-reload-at");
+    }
+  });
+
   it("getDerivedStateFromError 返回 {error}（静态方法合约）", () => {
     const err = new Error("合约错误");
     const next = ErrorBoundary.getDerivedStateFromError(err);

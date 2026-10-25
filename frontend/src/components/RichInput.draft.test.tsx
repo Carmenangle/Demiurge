@@ -11,6 +11,20 @@
 // 外加：首页 home 是临时草稿区不落盘；配额不足降级落盘并提示一次。
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// Node 25 的内置 localStorage 桩遮蔽 jsdom（clear 等方法缺失，settings.test 同源坑）：
+// 统一换成内存实现，组件与测试读写的都是同一实例。
+class MemoryStorage implements Storage {
+  private map = new Map<string, string>();
+  get length() { return this.map.size; }
+  clear() { this.map.clear(); }
+  getItem(k: string) { return this.map.get(k) ?? null; }
+  key(i: number) { return [...this.map.keys()][i] ?? null; }
+  removeItem(k: string) { return this.map.delete(k); }
+  setItem(k: string, v: string) { this.map.set(k, String(v)); }
+}
+vi.stubGlobal("localStorage", new MemoryStorage());
+
 import { act, createRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { RichInput, type RichInputHandle } from "./RichInput";
@@ -160,11 +174,13 @@ describe("首页（home）= 临时草稿区，不落 localStorage", () => {
 
 describe("配额不足 ⇒ 降级落盘并提示一次（不静默丢草稿）", () => {
   it("图片撑爆配额时保住文字，并只提示一次", async () => {
-    const original = Storage.prototype.setItem;
-    // 只放行轻载荷（降级副本），整包（带 dataURI 大图）抛配额错误
-    Storage.prototype.setItem = function (k: string, v: string) {
+    // 打在**实例**上：上方 stubGlobal 的内存实现不继承 jsdom 的 Storage.prototype，
+    // 原型补丁够不着它（语义不变：只放行轻载荷，整包抛配额错误）
+    const ls = localStorage;
+    const original = ls.setItem.bind(ls);
+    ls.setItem = (k: string, v: string) => {
       if (String(v).length > 300) throw new DOMException("quota", "QuotaExceededError");
-      return original.call(this, k, v);
+      return original(k, v);
     };
     try {
       const h = mount("r1");
@@ -179,7 +195,7 @@ describe("配额不足 ⇒ 降级落盘并提示一次（不静默丢草稿）",
       expect(stored.images).toEqual([]);       // 重字段被摘掉
       expect(stored.heavyDropped).toBe(true);
     } finally {
-      Storage.prototype.setItem = original;
+      ls.setItem = original;
     }
   });
 });

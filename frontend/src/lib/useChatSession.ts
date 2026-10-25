@@ -12,8 +12,8 @@ import { emitRagStatus } from "../components/RagToast";
 import type { Template } from "../api/workflows";
 import {
   comfyStatus, startComfy, submitGraph, submitWorkflow, interruptComfy,
-  localViewUrl, uploadImage, finalizeGeneration as persistWorkflowGeneration,
-  mergeAudio, moveComfyOutputToInput, uploadRemoteImageToInput,
+  finalizeGeneration as persistWorkflowGeneration,
+  moveComfyOutputToInput, uploadRemoteImageToInput,
   type GenResult,
 } from "../api/comfyui";
 import { listLoras } from "../api/loras";
@@ -22,13 +22,13 @@ import {
   saveSnapshot, fetchSnapshot, fetchAgentRunning, cancelAgent,
   fetchInspiration, regenerateImage as replayImageGeneration,
   claimIllustrationSubmission, reportIllustrationFailure, reportIllustrationSubmission,
-  reportAudioSubmission, ensureAudioSlot, editMessageRemote,
+  editMessageRemote,
   genFramePrompts, genProfilePrompt, listGenerations,
   type AgentInvocation,
 } from "../api/ai";
 import { runVisualCiDiagnostic } from "../api/visualCi";
 import { refreshChatBackgroundActivities } from "./chatBackgroundActivity";
-import type { ChatStreamEvent, IllustrationSceneSpec, AudioDialogueLine, VideoParams } from "../api/chatStreamProtocol";
+import type { ChatStreamEvent, IllustrationSceneSpec, VideoParams } from "../api/chatStreamProtocol";
 import {
   reduce as reduceGen, initialGenState,
   blocksDialogueSubmission, streamingBotId, needsConfirm, runningPromptId,
@@ -58,10 +58,7 @@ import {
   planFirstlastFrameTasks, firstlastFrameValues, firstlastSlotLayout, transitionVideoValues,
 } from "./illustrationMedia";
 import {
-  audioTemplateValues, resolvableAudioLines, skippedAudioSpeakers, voiceReferenceFor,
-} from "./audioGeneration";
-import {
-  applyRouteChoice, appendImageSlot, applyInterruptedStop, bindMediaSlotPrompt, dropMediaSlot, markMediaSlotFailed, appendAudioSlot, appendTransitionSlot,
+  applyRouteChoice, appendImageSlot, applyInterruptedStop, bindMediaSlotPrompt, markMediaSlotFailed, appendTransitionSlot,
   failMediaSlot, reduceChatStreamEvent, resetMediaSlotForRetry, resolveMediaSlot,
   upsertMessages, workflowMessages, type SlotPlacement,
 } from "./chatSessionEvents";
@@ -75,6 +72,7 @@ import { nextStoryTurnNo, rememberStoryTurn, resolveStoryTurn, sealTurnsOf, sync
 import { releaseAgentStream, type ActiveAgentStream } from "./agentStreamLifecycle";
 import type { ImageQuality, WorkMode } from "./viewRouting";
 import { useIllustrationChain } from "./useIllustrationChain";
+import { useAudioTracks } from "./useAudioTracks";
 import { usePlanTaskFeed } from "./usePlanTaskFeed";
 import { useWorkflowResume } from "./useWorkflowResume";
 import { useSessionLoad } from "./useSessionLoad";
@@ -817,145 +815,11 @@ export function useChatSession(deps: ChatSessionDeps) {
   });
   // 模板是否定义了图像输入口 / 图值是否已填 → 见 lib/chatGeneration（纯逻辑，已抽出可测）
 
-  // 剧情对白音频化：后端发来台词分段（含 8 维情感向量），逐角色提交 IndexTTS 工作流。
-  // 每段台词独立一次运转（模型一次只认一个音色），完成后按角色分条聚合到楼层气泡。
-  const submitAudio = async (lines: AudioDialogueLine[], messageId: string) => {
-    const preset = settings.mediaInsert?.[repo?.id || ""];
-    const audioTemplateId = preset?.audioTemplateId;
-    if (!audioTemplateId) {
-      console.warn("[auto-audio] 跳过：未配置音频模板", { repoId: repo?.id, mediaInsert: settings.mediaInsert });
-      return;
-    }
-    const tpl = templates.find((t) => t.id === audioTemplateId);
-    if (!tpl) {
-      console.warn("[auto-audio] 跳过：模板不存在", { audioTemplateId, templates: templates.map((t) => t.id) });
-      return;
-    }
-    // 未配置参考音轨的角色台词会静默跳过——明确提示一次，避免用户以为配音漏了
-    const skipped = skippedAudioSpeakers(preset, lines);
-    if (skipped.length > 0) {
-      const configured = Object.keys(preset?.characterVoices || {});
-      console.warn("[auto-audio] 跳过未配置音轨的角色", {
-        skipped, configuredVoices: configured, lines: lines.map((l) => `${l.speaker}:${l.text}`),
-      });
-      onNotify?.(
-        `未配置音轨，已跳过配音：${skipped.join("、")}（已配置：${configured.join("、") || "无"}，在「媒体插入」设置里为角色配置音色）`,
-        "info",
-      );
-    }
-    const resolvable = resolvableAudioLines(preset, lines);
-    if (!resolvable.length) {
-      console.warn("[auto-audio] 无可配音台词行", {
-        lines: lines.map((l) => ({ speaker: l.speaker, text: l.text })),
-      });
-      return;
-    }
-    const outputNodeIds = tpl.primary_output_node_id ? [tpl.primary_output_node_id] : [];
-
-    let index = 0;
-    for (const line of resolvable) {
-      const seq = index + 1;
-      const slotId = `audio-${messageId}-${index}`;
-      index += 1;
-      const voiceRef = voiceReferenceFor(preset, line.speaker)!;
-      // 音轨先上传 ComfyUI input，取回 LoadAudio 引用的文件名
-      let uploadedRef = "";
-      try {
-        const blob = await (await fetch(localViewUrl(voiceRef))).blob();
-        const file = new File(
-          [blob], voiceRef.split(/[\\/]/).pop() || "voice.wav",
-          { type: blob.type || "audio/wav" },
-        );
-        uploadedRef = (await uploadImage(file, settings.comfyuiUrl)).name;
-      } catch {
-        console.error("[auto-audio]", { threadId, messageId, stage: "upload_voice", speaker: line.speaker, voiceRef });
-        continue; // 单角色音轨上传失败不阻断其它角色
-      }
-      const values = audioTemplateValues(tpl.exposed, {
-        text: line.text,
-        reference: uploadedRef,
-        emotion: line.emotion,
-      });
-      // 追加按角色分条的 audio 槽（生成中占位：角色名 + 第几条/总数），完成后由 pollResult 填充音频 URL。
-      // appendAudioSlot 会把纯文本消息先转成 text part，避免正文被槽位顶掉（图片插槽同款处理）。
-      setMessages((current) => appendAudioSlot(current, messageId, slotId, line.speaker, seq, resolvable.length));
-      // 槽位补写后端快照：finalize 时 resolve_media_slot 需在快照里命中该 slot，
-      // 否则 snapshotted=false → durableFinalizeSucceeded=false → 前端不填充 → 音频不在对话。
-      if (threadId && threadId !== "home") {
-        void ensureAudioSlot({
-          threadId, messageId, slotId, speaker: line.speaker, seq, total: resolvable.length,
-        }).catch(() => undefined);
-      }
-      try {
-        const r = await submitWorkflow(audioTemplateId, values, settings.comfyuiUrl, line.text, [], "none");
-        if (r.prompt_id) {
-          console.info("[auto-audio]", {
-            threadId, messageId, slotId, speaker: line.speaker,
-            promptId: r.prompt_id, valueKeys: Object.keys(values).sort(),
-          });
-          // 持久化音频生成日志（对齐插画 submitted trace），便于排查音色/情感/台词
-          void reportAudioSubmission({
-            threadId, repoId: repo?.id || threadId, messageId, slotId,
-            speaker: line.speaker, text: line.text, voiceRef,
-            templateId: audioTemplateId, promptId: r.prompt_id,
-            emotion: line.emotion, valueKeys: Object.keys(values).sort(),
-          }).catch(() => undefined);
-          pollResult(r.prompt_id, outputNodeIds, undefined, { messageId, slotId, background: true }, line.text, "audio");
-        } else {
-          console.error("[auto-audio]", { threadId, messageId, stage: "submit", speaker: line.speaker, error: "ComfyUI 没有返回任务 ID" });
-          setMessages((current) => dropMediaSlot(current, messageId, slotId));
-        }
-      } catch (error) {
-        console.error("[auto-audio]", { threadId, messageId, stage: "submit", speaker: line.speaker, error });
-        setMessages((current) => dropMediaSlot(current, messageId, slotId));
-      }
-    }
-  };
-
-  // 音频分条按顺序拼接完整版：后端 ffmpeg concat + 落盘回写快照，
-  // 成功后移除分条音频、只保留 merged（刷新后从快照恢复，仍只显示完整版）。
-  const mergeAudioTracks = async (messageId: string) => {
-    const msg = messagesRef.current.find((m) => m.id === messageId);
-    const tracks = (msg?.parts || []).filter(
-      (p) => p.type === "audio" && p.url && !(p.slotId || "").startsWith("merged-"),
-    );
-    if (tracks.length < 2) {
-      console.warn("[merge-audio] 分条音频不足，跳过", { messageId, count: tracks.length });
-      return;
-    }
-    // 已有旧完整版（如早前 -c copy 时长错误产物）时强制覆盖重拼
-    const hasMerged = (msg?.parts || []).some(
-      (p) => p.type === "audio" && (p.slotId || "").startsWith("merged-"),
-    );
-    try {
-      const r = await mergeAudio({ threadId, messageId, force: hasMerged });
-      if (r.ok && r.url) {
-        setMessages((current) => current.map((m) => m.id === messageId ? {
-          ...m,
-          // 移除所有分条音频（type=audio 且非 merged-），只保留完整版一个
-          parts: [
-            ...(m.parts || []).filter(
-              (p) => !(p.type === "audio" && !(p.slotId || "").startsWith("merged-")),
-            ),
-            {
-              type: "audio" as const, url: r.url, slotId: `merged-${messageId}`,
-              status: "ready" as const, kind: "audio" as const, speaker: "完整版",
-            },
-          ],
-        } : m));
-        onNotify?.("完整版音频已生成", "success");
-      } else {
-        console.error("[merge-audio] 后端返回异常", { threadId, messageId, r });
-        onNotify?.("音频拼接失败", "error");
-      }
-    } catch (error) {
-      console.error("[merge-audio]", { threadId, messageId, error });
-      // 透出后端原因（如「拼接产物时长异常…已丢弃」）；分条未动 → 按钮仍在，可重试
-      const reason = error instanceof Error && error.message ? error.message : "音频拼接失败";
-      onNotify?.(reason, "error");
-    }
-  };
-  // APPEND3_HERE
+  // 剧情对白音频化链（T2.2-C1 外移 → lib/useAudioTracks.ts）：submitAudio / mergeAudioTracks
+  // 函数体与注释逐字随体迁入，闭包符号以同名 deps 注入；调用点（handleAgentStreamEvent / 对外 return）留在视图。
+  const { submitAudio, mergeAudioTracks } = useAudioTracks({
+    settings, repo, templates, onNotify, threadId, setMessages, messagesRef, pollResult,
+  });
 
   // /s 启动：取最近一张已确认的工作流卡，用抓取到的画布工作流提交生成
   // 支持队列：不锁运转按钮，多个任务依次提交到 ComfyUI 队列排队执行

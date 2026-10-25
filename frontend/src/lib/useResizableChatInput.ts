@@ -13,24 +13,49 @@ interface StorageLike {
 export function useResizableChatInput(storage: StorageLike = localStorage) {
   const [height, setHeight] = useState(() => loadChatInputHeight(storage));
   const dragRef = useRef<{ startY: number; startHeight: number; height: number } | null>(null);
+  const pendingRef = useRef<number | null>(null);
+  const rafRef = useRef(0);
 
   useEffect(() => {
+    const flush = () => {
+      if (rafRef.current) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = 0;
+      }
+      if (pendingRef.current != null) {
+        setHeight(pendingRef.current);
+        pendingRef.current = null;
+      }
+    };
     const onMove = (event: MouseEvent) => {
       const drag = dragRef.current;
       if (!drag) return;
-      const next = clampChatInputHeight(drag.startHeight + drag.startY - event.clientY);
-      drag.height = next;
-      setHeight(next);
+      drag.height = clampChatInputHeight(drag.startHeight + drag.startY - event.clientY);
+      pendingRef.current = drag.height;
+      // 高频鼠标每帧会产生多次 mousemove：合并成每帧一次 setState，
+      // 否则会话视图会跟着指针事件频率重渲染，拖拽手感发飘。
+      if (rafRef.current) return;
+      rafRef.current = requestAnimationFrame(() => {
+        rafRef.current = 0;
+        if (pendingRef.current != null) {
+          setHeight(pendingRef.current);
+          pendingRef.current = null;
+        }
+      });
     };
     const onUp = () => {
       const drag = dragRef.current;
       if (!drag) return;
+      flush();
       try { saveChatInputHeight(storage, drag.height); } catch { /* ignore */ }
       dragRef.current = null;
     };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
     return () => {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      rafRef.current = 0;
+      pendingRef.current = null;
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
     };

@@ -24,6 +24,9 @@ const resumeCode = readFileSync(new URL("./useWorkflowResume.ts", import.meta.ur
 // T2.2-B4-a：进度/节点名的跨导航分片（P18）已外移 → useWfProgressShard.ts；锁定面随之改指新属主。
 const wfShardCode = readFileSync(new URL("./useWfProgressShard.ts", import.meta.url), "utf-8")
   .replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+// T2.2-C1：剧情对白音频化链（submitAudio/mergeAudioTracks）已外移 → useAudioTracks.ts；音频 pollResult 调用点随之迁移。
+const audioCode = readFileSync(new URL("./useAudioTracks.ts", import.meta.url), "utf-8")
+  .replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
 
 describe("isolation of illustration submit params", () => {
   it("no positional-shape magic index and no positional snapshot array", () => {
@@ -240,11 +243,13 @@ describe("P18 进度/节点按线程键分片（不再跨仓库串）", () => {
 // 收口前 10 个调用点里只有 2 个有形态锁（即下方「R8 超时合同接线」那两条），其余 **8 个裸奔**：
 // 5 个首尾帧（`"image"`）、1 个转场（`"video"`）、1 个主槽（`mainIsVideo ? "video" : "image"` + 第 7 参）、1 个音频（`"audio"`）。
 // 本组把这 8 点补齐，并把**调用点总数**钉住（增删调用点必须同步改本锁）。
+// 2026-10-24 T2.2-C1：音频调用点随 submitAudio 外移到 useAudioTracks.ts ⇒ 音频那条锁改指音域属主（audioCode）并加严。
 // 注：与 R5 同一处境（两个调用方组件没有组件测试）⇒ 只读源码文本上锁。
 describe("P5 pollResult 调用点接线锁：10 点全锁（本组 8 + R8 组 2）", () => {
-  it("调用点共 10 个：视图 3（音频 + /s runWorkflow + regenerateResult）+ 新属主 7（帧 5 + 转场 + 主槽）", () => {
-    expect([...code.matchAll(/pollResult\(/g)]).toHaveLength(3);
+  it("调用点共 10 个：视图 2（/s runWorkflow + regenerateResult）+ 新属主 7（帧 5 + 转场 + 主槽）+ 音域 1（T2.2-C1 外移）", () => {
+    expect([...code.matchAll(/pollResult\(/g)]).toHaveLength(2);
     expect([...chainCode.matchAll(/pollResult\(/g)]).toHaveLength(7);
+    expect([...audioCode.matchAll(/pollResult\(/g)]).toHaveLength(1);
   });
 
   it("5 个首尾帧调用点：显式 \"image\" + 逐帧 regeneration 快照（帧图不许退成推导、帧卡重生成不许走 legacy 兜底）", () => {
@@ -279,7 +284,11 @@ describe("P5 pollResult 调用点接线锁：10 点全锁（本组 8 + R8 组 2�
   });
 
   it("音频调用点显式 \"audio\"（IndexTTS 配音不受图片 20 分钟上限约束）", () => {
-    expect(code).toMatch(
+    // T2.2-C1：音频链外移 → useAudioTracks.ts；锁定面改指新属主并加严（视图不得回潮）。
+    expect(audioCode).toMatch(
+      /pollResult\(r\.prompt_id, outputNodeIds, undefined, \{ messageId, slotId, background: true \}, line\.text, "audio"\)/,
+    );
+    expect(code).not.toMatch(
       /pollResult\(r\.prompt_id, outputNodeIds, undefined, \{ messageId, slotId, background: true \}, line\.text, "audio"\)/,
     );
   });

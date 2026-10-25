@@ -27,6 +27,20 @@ import { readFileSync } from "node:fs";
 import { act, createElement, type MutableRefObject } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// Node 25 的内置 localStorage 桩遮蔽 jsdom（clear 等方法缺失，settings.test 同源坑）：
+// 统一换成内存实现，组件与测试读写的都是同一实例。
+class MemoryStorage implements Storage {
+  private map = new Map<string, string>();
+  get length() { return this.map.size; }
+  clear() { this.map.clear(); }
+  getItem(k: string) { return this.map.get(k) ?? null; }
+  key(i: number) { return [...this.map.keys()][i] ?? null; }
+  removeItem(k: string) { return this.map.delete(k); }
+  setItem(k: string, v: string) { this.map.set(k, String(v)); }
+}
+vi.stubGlobal("localStorage", new MemoryStorage());
+
 import type { ChatMessage } from "../types/chat";
 import { clearHomeDraft, writeHomeDraft } from "./homeDraft";
 import { useSessionLoad, type SessionLoadDeps } from "./useSessionLoad";
