@@ -23,7 +23,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "backend" / "_probe_anchor_intent.out"
-HOLDOUT_CHAT = ROOT / "userdata" / "pictures" / "凌霄仙母录" / "SAVE01" / "chat.json"
+# 留出集来自本机某个作品：作品名走环境变量，仓库里不留真实作品标题
+HOLDOUT_CHAT = (ROOT / "userdata" / "pictures" / os.environ.get("PROBE_WORK", "_未配置_")
+                / "SAVE01" / "chat.json")
 DL = Path(os.path.expanduser("~")) / "Downloads"
 
 OLLAMA = "http://127.0.0.1:11434"
@@ -126,9 +128,9 @@ def build_cases() -> list[dict]:
     cases = [
         {
             "name": "L1 nsfw_solo(标注)",
-            "actors": "宥夏、泰宇老师",
+            "actors": "清夏、泰宇老师",
             "text": (DL / "nsfw_test.txt").read_text(encoding="utf-8"),
-            "expect": "事后结果图：「浑身无力的宥夏靠在公告栏上。」",
+            "expect": "事后结果图：「浑身无力的清夏靠在公告栏上。」",
             "expect_any": ["靠在公告栏上"],
         },
         {
@@ -142,14 +144,14 @@ def build_cases() -> list[dict]:
     if multi:
         cases.append({
             "name": "L3 nsfw_multi(标注)",
-            "actors": "世熙、宥夏、泰宇老师",
+            "actors": "明澜、清夏、泰宇老师",
             "text": multi,
             "expect": "双人同框：「那么，我该插进哪一边呢？」",
             "expect_any": ["插进哪一边"],
         })
         cases.append({
             "name": "H1 留出·车内对白",
-            "actors": "宥夏母亲、宥夏父亲",
+            "actors": "清夏母亲、清夏父亲",
             "text": multi[multi.find("***") + 3:].strip() if "***" in multi else "",
             "expect": "（留出：不预设答案，看是否符合判据——局面定型的一刻 / 表情）",
             "expect_any": [],
@@ -157,7 +159,7 @@ def build_cases() -> list[dict]:
     if holdout_scene():
         cases.append({
             "name": "H2 留出·真实长剧情",
-            "actors": "舞姬恋、凌渊",
+            "actors": "星织恋、洛渊",
             "text": holdout_scene(),
             "expect": "（留出：按判据，单人场景应取事后状态，而非动作过程）",
             "expect_any": [],

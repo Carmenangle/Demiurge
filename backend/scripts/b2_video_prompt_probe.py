@@ -8,9 +8,11 @@
 区块完整性 / 无破甲残留 / 动作·运镜·特效随 motion 强度 / 模型名·画幅·时长·参考图·缺图警告。
 """
 import json
+import pathlib
 import sys
 
-sys.path.insert(0, r"D:\tool\Demiurge\backend")
+BACKEND = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(BACKEND))
 
 from app.services import agent_graph as ag
 
@@ -28,11 +30,11 @@ SPECS = [
         "label": "motion=3（强动态）",
         "motion": 3,
         "scene_spec": {
-            "narrative": "温知夏猛地起身，椅子向后倒去，一把攥住林屿的手腕",
-            "appearance": "温知夏米色针织开衫，栗色长发",
+            "narrative": "纪含章猛地起身，椅子向后倒去，一把攥住林屿的手腕",
+            "appearance": "纪含章米色针织开衫，栗色长发",
             "wardrobe": "全员日常私服",
             "locale": "温暖小面馆内景，暖黄吊灯",
-            "actors": ["温知夏", "林屿"],
+            "actors": ["纪含章", "林屿"],
             "rating": "sfw",
             "negative_prompt": "低质量；畸形手；文字水印",
             "aspect_ratio": "16:9",
@@ -42,11 +44,11 @@ SPECS = [
         "label": "motion=2（中动态）",
         "motion": 2,
         "scene_spec": {
-            "narrative": "林屿抬眼，与温知夏目光相撞",
+            "narrative": "林屿抬眼，与纪含章目光相撞",
             "appearance": "林屿深色夹克，短寸",
             "wardrobe": "全员日常私服",
             "locale": "面馆靠窗位，雨夜玻璃",
-            "actors": ["林屿", "温知夏"],
+            "actors": ["林屿", "纪含章"],
             "rating": "sfw",
             "aspect_ratio": "16:9",
         },
@@ -56,10 +58,10 @@ SPECS = [
         "motion": 0,
         "scene_spec": {
             "narrative": "三人围坐，举杯轻碰",
-            "appearance": "温知夏米色针织开衫",
+            "appearance": "纪含章米色针织开衫",
             "wardrobe": "全员日常私服",
             "locale": "面馆内景",
-            "actors": ["温知夏", "林屿", "苏绾"],
+            "actors": ["纪含章", "林屿", "苏绾"],
             "rating": "sfw",
             "aspect_ratio": "16:9",
         },
@@ -69,12 +71,12 @@ SPECS = [
         "motion": 3,
         "scene_spec": {
             "narrative": "陈旧叙事：孤儿院院长看向石凳上的黑色匣子。",
-            "appearance": "冷倾雪(白衣+长剑)",
+            "appearance": "顾凝霜(白衣+长剑)",
             "wardrobe": "战斗装束",
             "locale": "雷雨中的山巅",
-            "actors": ["冷倾雪"],
+            "actors": ["顾凝霜"],
             "rating": "sfw",
-            "subjects": [{"name": "冷倾雪", "description": "drawing sword, crimson cloak in lightning", "weight": 1.2}],
+            "subjects": [{"name": "顾凝霜", "description": "drawing sword, crimson cloak in lightning", "weight": 1.2}],
             "visual_facts": [{"kind": "action", "fact": "leaps upward with blade raised", "evidence": "拔剑跃起"}],
             "composition": "low-angle dynamic shot",
             "camera": "fast tracking push-in",
@@ -85,19 +87,19 @@ SPECS = [
         "label": "motion=3 + LLM 提取路径（action_sequence + video_subject_scene，mock _extract_video_action_plan）",
         "motion": 3,
         "scene_spec": {
-            "narrative": "温知夏猛地起身，椅子向后倒去，一把攥住林屿的手腕",
-            "appearance": "温知夏(米色针织开衫+栗色长发)、林屿(深色夹克+短寸)",
+            "narrative": "纪含章猛地起身，椅子向后倒去，一把攥住林屿的手腕",
+            "appearance": "纪含章(米色针织开衫+栗色长发)、林屿(深色夹克+短寸)",
             "wardrobe": "全员日常私服",
             "locale": "温暖小面馆内景，暖黄吊灯",
-            "actors": ["温知夏", "林屿"],
+            "actors": ["纪含章", "林屿"],
             "rating": "sfw",
             "subjects": [
-                {"name": "温知夏", "description": "beige cardigan, chestnut long hair", "weight": 1.2},
+                {"name": "纪含章", "description": "beige cardigan, chestnut long hair", "weight": 1.2},
                 {"name": "林屿", "description": "dark jacket, short hair", "weight": 1.0},
             ],
             # 以下两字段模拟 _extract_video_action_plan 成功返回后被并入 _merged_spec：
             "action_sequence": [
-                {"beat": "定格起点", "desc": "温知夏猛地起身，椅子向后倒去"},
+                {"beat": "定格起点", "desc": "纪含章猛地起身，椅子向后倒去"},
                 {"beat": "延伸", "desc": "一把攥住林屿的手腕"},
                 {"beat": "收尾", "desc": "两人对视，气氛紧绷"},
             ],
@@ -136,22 +138,22 @@ wire = [protocol.encode_event(ev) for ev in ag._streamed_illustration_events([
         "id": "slot-1",
         "prompt": "booru prompt",
         "motion": 3,
-        "actors": ["温知夏", "林屿"],
+        "actors": ["纪含章", "林屿"],
         "anchor_offset": 0,
         "video_config": dict(VIDEO_CONFIG),
         "scene_spec": {
-            "narrative": "温知夏猛地起身，攥住林屿手腕",
-            "appearance": "温知夏米色针织开衫",
+            "narrative": "纪含章猛地起身，攥住林屿手腕",
+            "appearance": "纪含章米色针织开衫",
             "wardrobe": "全员日常私服",
             "locale": "面馆内景",
-            "actors": ["温知夏", "林屿"],
+            "actors": ["纪含章", "林屿"],
             "rating": "sfw",
             "negative_prompt": "低质量；畸形手",
             "aspect_ratio": "16:9",
         },
     },
 ])]
-out_path = r"D:\tool\Demiurge\frontend\src\api\__fixtures__\b2_climax_video_prompt.json"
-with open(out_path, "w", encoding="utf-8") as f:
-    json.dump(wire, f, ensure_ascii=False, indent=2)
+out_path = (BACKEND.parent / "frontend" / "src" / "api" / "__fixtures__"
+            / "b2_climax_video_prompt.json")
+out_path.write_text(json.dumps(wire, ensure_ascii=False, indent=2), encoding="utf-8")
 print(f"wire 已导出 → {out_path}")

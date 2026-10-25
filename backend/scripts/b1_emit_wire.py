@@ -3,9 +3,12 @@
 链路：agent_graph._streamed_illustration_events → chat_stream_protocol.encode_event → JSON。
 """
 import json
+import pathlib
 import sys
 
-sys.path.insert(0, r"D:\tool\Demiurge\backend")
+BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
+REPO_ROOT = BACKEND_ROOT.parent
+sys.path.insert(0, str(BACKEND_ROOT))
 
 from app.services import agent_graph as ag
 from app.services import chat_stream_protocol as protocol
@@ -14,19 +17,19 @@ rec = {
     "id": "slot-1",
     "prompt": "三人举杯同框，暖黄吊灯",
     "motion": 3,
-    "actors": ["温知夏", "林屿", "苏绾"],
+    "actors": ["纪含章", "林屿", "苏绾"],
     "anchor_offset": 12,
     "video_mode": "firstlast",
-    "first_frame_desc": "雨夜门口，温知夏收伞，暖黄灯笼倒影",
+    "first_frame_desc": "雨夜门口，纪含章收伞，暖黄灯笼倒影",
     "last_frame_desc": "三人举杯同框，温情对视",
     "prev_tail_desc": "上一楼层：林屿在门口抽烟回望",
     "last_frame_url": "data:image/png;base64,ZmFrZS10YWlsLWZyYW1l",
     "scene_spec": {
         "narrative": "三人围坐举杯，气氛升温",
-        "appearance": "温知夏米色针织开衫",
+        "appearance": "纪含章米色针织开衫",
         "wardrobe": "全员日常私服",
         "locale": "温暖小面馆内景",
-        "actors": ["温知夏", "林屿", "苏绾"],
+        "actors": ["纪含章", "林屿", "苏绾"],
         "rating": "sfw",
         "aspect_ratio": "16:9",
     },
@@ -39,7 +42,6 @@ wire = [protocol.encode_event(ev) for ev in sink_events]
 payload = json.dumps(wire, ensure_ascii=False, indent=2)
 print(payload)
 
-with open(r"D:\tool\Demiurge\frontend\src\api\__fixtures__\b1_illustrate_request.json",
-          "w", encoding="utf-8") as f:
-    f.write(payload)
-print("\n--- written to frontend/src/api/__fixtures__/b1_illustrate_request.json ---")
+out_path = REPO_ROOT / "frontend" / "src" / "api" / "__fixtures__" / "b1_illustrate_request.json"
+out_path.write_text(payload, encoding="utf-8")
+print(f"\n--- written to {out_path} ---")

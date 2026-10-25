@@ -3,23 +3,28 @@
 # 从 canvas.json 的 wfCaptured 提取正确元数据，按原 created_at/image_url 重新入库
 # （doc_id = gen-sha1(repo|img) 确定性 → 同 id 覆盖，不会重复）。
 import json
+import pathlib
 import re
 import sys
+import urllib.parse
 
 import chromadb
 
-sys.path.insert(0, r"D:\tool\Demiurge\backend")
+BACKEND = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(BACKEND))
 
 from app.services import rag_store, generation_store
 from app.services.rag_backend import EmbedConfig
 
 REPO = "8fed7f23-d4fe-43ca-bf36-25cdc43f9c6c"
-CANVAS = r"D:\tool\Demiurge\userdata\pictures\Anima\原创\canvas.json"
-VIEW = "http://127.0.0.1:8010/api/comfyui/local-view?path=D%3A%5Ctool%5CDemiurge%5Cuserdata%5Cpictures%5CAnima%5C%E5%8E%9F%E5%88%9B%5C"
+CANVAS_DIR = BACKEND.parent / "userdata" / "pictures" / "Anima" / "原创"
+CANVAS = str(CANVAS_DIR / "canvas.json")
+VIEW = ("http://127.0.0.1:8010/api/comfyui/local-view?path="
+        + urllib.parse.quote(str(CANVAS_DIR), safe=""))
 
 cfg = EmbedConfig("http://localhost:11434/v1", "ollama", "qwen3-embedding:latest")
 
-state = json.load(open(r"D:\tool\Demiurge\backend\data\user_state.json", encoding="utf-8"))
+state = json.load(open(BACKEND / "data" / "user_state.json", encoding="utf-8"))
 chat_models = state["settings"].get("chatModels", [])
 active_id = state["settings"].get("activeChatModelId", "")
 chat = next((m for m in chat_models if m.get("id") == active_id), chat_models[0] if chat_models else {})
