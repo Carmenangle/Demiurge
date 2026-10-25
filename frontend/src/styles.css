@@ -197,6 +197,13 @@ body {
   overflow: auto;
 }
 
+/* Windows Chromium 的原生下拉弹层不吃 select 自身的通透底色：暗色主题里会落成
+   白底浅字（选项几乎看不清）。给 option 显式实底 + 正文色，所有主题按当前配色走。 */
+select option {
+  background-color: var(--bg);
+  color: var(--text);
+}
+
 /* layout */
 .layout {
   display: flex;
@@ -4758,6 +4765,58 @@ textarea.state-value { min-height: 58px; }
   to { opacity: 1; transform: translateY(0); }
 }
 
+/* ComfyUI 状态监测：未启动时挂在内容区左上角，启动后自动收起；可点 X 关闭 */
+.comfy-monitor {
+  position: absolute;
+  top: 74px;
+  left: 18px;
+  z-index: 1090;
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  max-width: 340px;
+  padding: 10px 8px 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  backdrop-filter: blur(16px) saturate(1.4);
+  -webkit-backdrop-filter: blur(16px) saturate(1.4);
+  box-shadow: var(--shadow-card);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.35;
+  animation: comfy-monitor-in 0.18s ease-out;
+}
+.comfy-monitor__icon { flex-shrink: 0; margin-top: 2px; color: var(--text-muted); }
+.comfy-monitor--down .comfy-monitor__icon { color: var(--warning); }
+.comfy-monitor--unknown .comfy-monitor__icon { color: var(--danger); }
+.comfy-monitor--up .comfy-monitor__icon { color: var(--success); }
+.comfy-monitor--checking .comfy-monitor__icon { animation: comfy-monitor-spin 1s linear infinite; }
+.comfy-monitor__text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.comfy-monitor__text strong { font-size: 13px; font-weight: 600; }
+.comfy-monitor__text span { color: var(--text-muted); font-size: 12px; }
+.comfy-monitor__close {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-left: 2px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.comfy-monitor__close:hover { background: var(--surface-2); color: var(--text); }
+@keyframes comfy-monitor-in {
+  from { opacity: 0; transform: translateX(-6px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes comfy-monitor-spin { to { transform: rotate(360deg); } }
+
 .img-chip-pop {
   position: absolute;
   bottom: calc(100% + 6px);
@@ -7313,7 +7372,7 @@ html:is([data-theme="bright"], [data-theme="night"], [data-theme="green"], [data
 .nav-settings.active { background: var(--accent); color: var(--accent-text); }
 
 /* 主区 */
-.app-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.app-main { flex: 1; display: flex; flex-direction: column; min-width: 0; position: relative; }
 .app-topbar {
   display: flex; align-items: center; gap: 20px;
   padding: 0 32px; height: 60px; flex-shrink: 0;
@@ -7467,9 +7526,35 @@ html[data-theme="eye-care"] .app-topbar {
   color: var(--text) !important;
   opacity: 1;
 }
+/* 开启态必须是「实心强调色 + 反色图标」：旧写法「10% 强调色底 + 同色图标」
+   在明亮壁纸上与未开启态几乎同色（用户实锤看不清生图模式是否开启）。 */
 .chat-view-head .btn.icon-only.primary {
-  color: var(--accent) !important;
-  background: color-mix(in srgb, var(--accent) 10%, transparent) !important;
+  color: var(--accent-text) !important;
+  background: var(--accent) !important;
+  border-color: color-mix(in srgb, var(--accent) 70%, #fff) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.55),
+    0 0 0 1px rgba(2, 6, 18, 0.18),
+    0 4px 14px rgba(2, 6, 18, 0.30) !important;
+}
+html[data-theme="liquid-glass"] .chat-view-head .btn.icon-only.primary {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--lg-accent) 70%, #fff),
+    var(--lg-accent)
+  ) !important;
+  border-color: rgba(255, 255, 255, 0.62) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.70),
+    0 0 0 1px rgba(2, 6, 18, 0.22),
+    0 4px 14px rgba(2, 6, 18, 0.35) !important;
+}
+/* 壁纸主题下未开启的图标也提亮并加暗投影，浅色场景上才不会糊成一片。 */
+html[data-theme="liquid-glass"] .chat-view-head .btn.icon-only:not(.primary) {
+  color: rgba(248, 250, 255, 0.94) !important;
+}
+html[data-theme="liquid-glass"] .chat-view-head .btn.icon-only:not(.primary) > svg {
+  filter: drop-shadow(0 1px 2px rgba(2, 6, 18, 0.65));
 }
 html:is([data-theme="bright"], [data-theme="night"], [data-theme="green"], [data-theme="eye-care"], [data-theme="gray"]) .chat-input-bar {
   padding-top: 12px;
@@ -8257,6 +8342,12 @@ html[data-theme="liquid-glass"] .app-backdrop-scrim {
   to { transform: translate3d(4%, 3%, 0) scale(1.12) rotate(3deg); }
 }
 
+/* 滚动/拖动期间冻住极光位移动画：动画中的 40px 模糊是全屏合成的大头，
+   停住后合成器可复用上一帧；交互结束（180ms 空闲）由前端移除该类自动恢复。 */
+html[data-theme="liquid-glass"] .app-backdrop.is-interacting .app-backdrop-aurora::before {
+  animation-play-state: paused;
+}
+
 @media (prefers-reduced-motion: reduce) {
   html[data-theme="liquid-glass"] .app-backdrop-aurora::before { animation: none; }
 }
@@ -8264,10 +8355,14 @@ html[data-theme="liquid-glass"] .app-backdrop-scrim {
 /* —— 侧栏 + 顶栏 —— */
 html[data-theme="liquid-glass"] .app-nav.sidebar,
 html[data-theme="liquid-glass"] .app-topbar {
-  background: linear-gradient(180deg, var(--lg-sidebar-top), var(--lg-sidebar-bottom));
-  backdrop-filter: blur(var(--lg-sidebar-blur)) saturate(1.6) brightness(1.05);
-  -webkit-backdrop-filter: blur(var(--lg-sidebar-blur)) saturate(1.6) brightness(1.05);
-  box-shadow: inset 0 1px 0 var(--lg-glass-highlight);
+  background:
+    linear-gradient(180deg, var(--lg-sidebar-top), var(--lg-sidebar-bottom)),
+    rgba(6, 11, 24, 0.14);
+  backdrop-filter: blur(var(--lg-sidebar-blur)) saturate(1.7) brightness(1.04);
+  -webkit-backdrop-filter: blur(var(--lg-sidebar-blur)) saturate(1.7) brightness(1.04);
+  box-shadow:
+    inset 0 1px 0 var(--lg-glass-highlight),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.05);
 }
 html[data-theme="liquid-glass"] .app-nav.sidebar { border-right: 1px solid var(--lg-sidebar-border); }
 html[data-theme="liquid-glass"] .app-topbar { border-bottom: 1px solid var(--lg-sidebar-border); }
@@ -8284,13 +8379,20 @@ html[data-theme="liquid-glass"][data-lg-sidebar="off"] .app-topbar {
 html[data-theme="liquid-glass"] .app-nav.sidebar :is(.mode-trigger, .nav-sections button, .nav-settings):hover {
   background: rgba(255, 255, 255, 0.10);
 }
+/* 激活态用「深色主色调玻璃 + 白字」：原来的半透明主色底会让深色文字在暗壁纸上
+   失去对比，亮壁纸上又偏荧光；先铺深色玻璃底再混入 ~20% 主色，两侧都稳定。 */
 html[data-theme="liquid-glass"] .app-nav.sidebar :is(.nav-sections button.active, .nav-settings.active) {
-  background: linear-gradient(180deg, var(--lg-accent-soft), var(--lg-accent-glow));
-  color: var(--lg-accent-text);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.10), rgba(255, 255, 255, 0.02)),
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--lg-accent) 28%, rgba(5, 10, 20, 0.76)),
+      color-mix(in srgb, var(--lg-accent) 16%, rgba(5, 10, 20, 0.82)));
+  color: #f7faff;
   box-shadow:
-    inset 0 0 0 1px var(--lg-accent-border),
-    inset 0 1px 0 rgba(255, 255, 255, 0.34),
-    0 8px 20px var(--lg-accent-glow);
+    inset 3px 0 0 var(--lg-accent),
+    inset 0 0 0 1px color-mix(in srgb, var(--lg-accent) 42%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    0 6px 16px rgba(2, 6, 18, 0.22);
 }
 html[data-theme="liquid-glass"] .mode-menu {
   background:
@@ -8299,12 +8401,26 @@ html[data-theme="liquid-glass"] .mode-menu {
   border-color: var(--lg-glass-border);
   backdrop-filter: blur(var(--lg-glass-blur)) saturate(1.5);
   -webkit-backdrop-filter: blur(var(--lg-glass-blur)) saturate(1.5);
-  box-shadow: inset 0 1px 0 var(--lg-glass-highlight), 0 18px 44px rgba(2, 6, 18, 0.50);
+  box-shadow:
+    inset 0 1px 0 var(--lg-glass-highlight),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.04),
+    0 18px 44px rgba(2, 6, 18, 0.50);
 }
 html[data-theme="liquid-glass"] .app-topbar :is(select, input) {
-  background: rgba(255, 255, 255, 0.08);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.04)),
+    rgba(6, 11, 24, 0.20);
   border-color: var(--lg-glass-border);
   color: var(--text);
+  box-shadow: inset 0 1px 0 var(--lg-glass-highlight);
+  backdrop-filter: blur(16px) saturate(1.35);
+  -webkit-backdrop-filter: blur(16px) saturate(1.35);
+}
+html[data-theme="liquid-glass"] .app-topbar :is(select, input):hover {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.17), rgba(255, 255, 255, 0.07)),
+    rgba(6, 11, 24, 0.24);
+  border-color: color-mix(in srgb, var(--lg-accent) 52%, transparent);
 }
 /* 原生 select 会被最长的仓库名撑宽，导致顶栏标签竖排、右侧按钮被挤出。
    本主题内收口（不改其他主题的既有布局）。 */
@@ -8321,21 +8437,37 @@ html[data-theme="liquid-glass"] .app-topbar .repo-picker select {
 html[data-theme="liquid-glass"] .chat-bg { display: none; }
 html[data-theme="liquid-glass"] .chat-stream { background: transparent; }
 
+/* 用户气泡同样是深色主色调玻璃 + 白字：主色透明底会把 accentTextColor 的深色字
+   压在暗壁纸上；深底白字对亮/暗壁纸都有对比下限，也保持「用户实、AI 虚」的层次。 */
 html[data-theme="liquid-glass"] .bubble-user {
-  background: linear-gradient(180deg, var(--lg-accent-soft), var(--lg-accent-glow));
-  border: 1px solid var(--lg-accent-border);
-  color: var(--lg-accent-text);
-  backdrop-filter: blur(var(--lg-glass-blur)) saturate(1.5) brightness(1.05);
-  -webkit-backdrop-filter: blur(var(--lg-glass-blur)) saturate(1.5) brightness(1.05);
-  box-shadow: inset 0 1px 0 var(--lg-glass-highlight), 0 12px 28px var(--lg-accent-glow);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.10), rgba(255, 255, 255, 0.02)),
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--lg-accent) 30%, rgba(5, 10, 20, 0.76)),
+      color-mix(in srgb, var(--lg-accent) 18%, rgba(5, 10, 20, 0.82)));
+  border: 1px solid color-mix(in srgb, var(--lg-accent) 46%, transparent);
+  color: #f7faff;
+  backdrop-filter: blur(var(--lg-glass-blur)) saturate(1.45) brightness(1.04);
+  -webkit-backdrop-filter: blur(var(--lg-glass-blur)) saturate(1.45) brightness(1.04);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.26),
+    0 12px 28px rgba(2, 6, 18, 0.28);
+}
+html[data-theme="liquid-glass"] .bubble-user .user-msg-act {
+  border-color: rgba(255, 255, 255, 0.30);
 }
 
 html[data-theme="liquid-glass"] .bot-content {
-  background: linear-gradient(180deg, var(--lg-glass-top), var(--lg-glass-bottom));
+  background:
+    linear-gradient(180deg, var(--lg-glass-top), var(--lg-glass-bottom)),
+    rgba(6, 11, 24, 0.20);
   border: 1px solid var(--lg-glass-border);
   backdrop-filter: blur(var(--lg-glass-blur)) saturate(1.6) brightness(1.05);
   -webkit-backdrop-filter: blur(var(--lg-glass-blur)) saturate(1.6) brightness(1.05);
-  box-shadow: inset 0 1px 0 var(--lg-glass-highlight), 0 16px 40px rgba(2, 6, 18, 0.34);
+  box-shadow:
+    inset 0 1px 0 var(--lg-glass-highlight),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.04),
+    0 16px 40px rgba(2, 6, 18, 0.38);
 }
 
 html[data-theme="liquid-glass"] .bot-avatar {
@@ -8346,14 +8478,43 @@ html[data-theme="liquid-glass"] .bot-avatar {
   -webkit-backdrop-filter: blur(14px) saturate(1.4);
 }
 
+/* 工作台功能栏：未开启态原本完全透明，在花壁纸上只剩一排浮空图标；
+   给同尺寸玻璃片后按钮边界清楚，又不会抢过开启态的实心主色。 */
+html[data-theme="liquid-glass"] .chat-view-head .btn.icon-only:not(.primary) {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.04)),
+    rgba(6, 11, 24, 0.28) !important;
+  border-color: var(--lg-glass-border) !important;
+  box-shadow:
+    inset 0 1px 0 var(--lg-glass-highlight),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.05) !important;
+  backdrop-filter: blur(16px) saturate(1.4);
+  -webkit-backdrop-filter: blur(16px) saturate(1.4);
+}
+html[data-theme="liquid-glass"] .chat-view-head .btn.icon-only:not(.primary):hover,
+html[data-theme="liquid-glass"] .chat-view-head .btn.icon-only:not(.primary):focus-visible {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.19), rgba(255, 255, 255, 0.08)),
+    rgba(6, 11, 24, 0.32) !important;
+  color: #f7faff !important;
+}
+html[data-theme="liquid-glass"] .chat-view-head .btn.icon-only:not(.primary) > svg {
+  filter: drop-shadow(0 1px 2px rgba(2, 6, 18, 0.45));
+}
+
 /* —— 输入栏 —— */
 html[data-theme="liquid-glass"] .chat-input-bar {
-  background: linear-gradient(180deg, var(--lg-glass-top), var(--lg-glass-bottom));
+  background:
+    linear-gradient(180deg, var(--lg-glass-top), var(--lg-glass-bottom)),
+    rgba(6, 11, 24, 0.30);
   border: 1px solid var(--lg-glass-border);
   border-radius: 22px;
-  backdrop-filter: blur(var(--lg-glass-blur)) saturate(1.7) brightness(1.06);
-  -webkit-backdrop-filter: blur(var(--lg-glass-blur)) saturate(1.7) brightness(1.06);
-  box-shadow: inset 0 1px 0 var(--lg-glass-highlight), 0 20px 50px rgba(2, 8, 22, 0.46);
+  backdrop-filter: blur(var(--lg-glass-blur)) saturate(1.7) brightness(1.04);
+  -webkit-backdrop-filter: blur(var(--lg-glass-blur)) saturate(1.7) brightness(1.04);
+  box-shadow:
+    inset 0 1px 0 var(--lg-glass-highlight),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.05),
+    0 20px 50px rgba(2, 8, 22, 0.50);
 }
 html[data-theme="liquid-glass"] .chat-input-bar::before { display: none; }
 html[data-theme="liquid-glass"] .chat-actions::before {
@@ -8362,15 +8523,57 @@ html[data-theme="liquid-glass"] .chat-actions::before {
 }
 html[data-theme="liquid-glass"] .chat-input-resize-handle { color: rgba(255, 255, 255, 0.55); }
 
+/* —— ComfyUI 状态提示 —— */
+/* 基础规则是实底 --surface；本主题下统一成「深色玻璃 + 语气色薄层」，
+   既保留黄/红/绿的语义，又不在玻璃界面里露出一块不透明系统通知。 */
+html[data-theme="liquid-glass"] .comfy-monitor {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.11), rgba(255, 255, 255, 0.035)),
+    rgba(6, 11, 24, 0.52);
+  border-color: var(--lg-glass-border);
+  box-shadow:
+    inset 0 1px 0 var(--lg-glass-highlight),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.05),
+    0 16px 36px rgba(2, 6, 18, 0.38);
+  backdrop-filter: blur(var(--lg-glass-blur)) saturate(1.6);
+  -webkit-backdrop-filter: blur(var(--lg-glass-blur)) saturate(1.6);
+}
+html[data-theme="liquid-glass"] .comfy-monitor--down {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--warning) 17%, transparent), color-mix(in srgb, var(--warning) 6%, transparent)),
+    rgba(6, 11, 24, 0.46);
+  border-color: color-mix(in srgb, var(--warning) 34%, transparent);
+}
+html[data-theme="liquid-glass"] .comfy-monitor--unknown {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--danger) 17%, transparent), color-mix(in srgb, var(--danger) 6%, transparent)),
+    rgba(6, 11, 24, 0.46);
+  border-color: color-mix(in srgb, var(--danger) 34%, transparent);
+}
+html[data-theme="liquid-glass"] .comfy-monitor--up {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--success) 16%, transparent), color-mix(in srgb, var(--success) 5%, transparent)),
+    rgba(6, 11, 24, 0.46);
+  border-color: color-mix(in srgb, var(--success) 34%, transparent);
+}
+html[data-theme="liquid-glass"] .comfy-monitor__close:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: #f7faff;
+}
+
 /* —— 设置窗口 —— */
 html[data-theme="liquid-glass"] .settings-page { background: transparent; }
 
 html[data-theme="liquid-glass"] .settings-nav {
-  background: linear-gradient(180deg, var(--lg-sidebar-top), var(--lg-sidebar-bottom));
+  background:
+    linear-gradient(180deg, var(--lg-sidebar-top), var(--lg-sidebar-bottom)),
+    rgba(6, 11, 24, 0.14);
   border-right: 1px solid var(--lg-sidebar-border);
-  backdrop-filter: blur(var(--lg-sidebar-blur)) saturate(1.6);
-  -webkit-backdrop-filter: blur(var(--lg-sidebar-blur)) saturate(1.6);
-  box-shadow: inset 0 1px 0 var(--lg-glass-highlight);
+  backdrop-filter: blur(var(--lg-sidebar-blur)) saturate(1.7) brightness(1.04);
+  -webkit-backdrop-filter: blur(var(--lg-sidebar-blur)) saturate(1.7) brightness(1.04);
+  box-shadow:
+    inset 0 1px 0 var(--lg-glass-highlight),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.05);
 }
 
 html[data-theme="liquid-glass"] .settings-content {
@@ -8380,7 +8583,10 @@ html[data-theme="liquid-glass"] .settings-content {
   border-radius: 22px;
   backdrop-filter: blur(var(--lg-content-blur)) saturate(1.6) brightness(1.04);
   -webkit-backdrop-filter: blur(var(--lg-content-blur)) saturate(1.6) brightness(1.04);
-  box-shadow: inset 0 1px 0 var(--lg-glass-highlight), 0 24px 60px rgba(2, 6, 18, 0.44);
+  box-shadow:
+    inset 0 1px 0 var(--lg-glass-highlight),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.04),
+    0 24px 60px rgba(2, 6, 18, 0.44);
 }
 
 /* 设置窗口玻璃总开关：关闭后导航与内容面都回退实底。 */
@@ -8397,11 +8603,16 @@ html[data-theme="liquid-glass"][data-lg-settings="off"] .settings-nav {
 
 html[data-theme="liquid-glass"] .settings-nav-item:hover { background: rgba(255, 255, 255, 0.10); }
 html[data-theme="liquid-glass"] .settings-nav-item.active {
-  background: linear-gradient(180deg, var(--lg-accent-soft), var(--lg-accent-glow));
-  color: var(--lg-accent-text);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.10), rgba(255, 255, 255, 0.02)),
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--lg-accent) 28%, rgba(5, 10, 20, 0.76)),
+      color-mix(in srgb, var(--lg-accent) 16%, rgba(5, 10, 20, 0.82)));
+  color: #f7faff;
   box-shadow:
-    inset 0 0 0 1px var(--lg-accent-border),
-    inset 0 1px 0 rgba(255, 255, 255, 0.30);
+    inset 3px 0 0 var(--lg-accent),
+    inset 0 0 0 1px color-mix(in srgb, var(--lg-accent) 42%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.22);
 }
 html[data-theme="liquid-glass"] .settings-footer { border-top: 1px solid var(--lg-glass-border); }
 
@@ -8700,6 +8911,47 @@ html[data-theme="liquid-glass"] .btn.primary:hover:not(:disabled) {
   font-size: 11px;
   line-height: 1.45;
   color: var(--text-muted, rgba(226, 232, 255, 0.66));
+}
+
+/* WE 预设面板：combo 用原生 select，底色沿用玻璃面（下拉弹层由全局 select option 兜底） */
+.lg-select {
+  width: 100%;
+  padding: 7px 9px;
+  border-radius: 9px;
+  border: 1px solid var(--lg-glass-border, rgba(255, 255, 255, 0.2));
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text, #f2f5ff);
+  font-size: 12px;
+  cursor: pointer;
+}
+.lg-select:focus {
+  outline: none;
+  border-color: var(--lg-accent-border, rgba(143, 180, 255, 0.52));
+}
+/* WE 预设面板：textinput（「可自定义文字」正文）用单行输入，样式与 select 同一玻璃面 */
+.lg-input {
+  width: 100%;
+  padding: 7px 9px;
+  border-radius: 9px;
+  border: 1px solid var(--lg-glass-border, rgba(255, 255, 255, 0.2));
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text, #f2f5ff);
+  font-size: 12px;
+}
+.lg-input:focus {
+  outline: none;
+  border-color: var(--lg-accent-border, rgba(143, 180, 255, 0.52));
+}
+.lg-preset__error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.lg-preset__error .lg-error { flex: 1; min-width: 0; margin: 0; }
+.lg-btn--tiny {
+  padding: 4px 8px;
+  border-radius: 7px;
+  font-size: 11px;
 }
 
 .lg-switch-row {
@@ -9469,4 +9721,153 @@ html[data-theme="liquid-glass"] .btn.primary:hover:not(:disabled) {
     width: 100vw;
     border-left: none;
   }
+}
+
+/* ============================================================
+   手机壳层（≤720px）
+   2026-10-25 真机截图暴露出旧规则不够：它只是把侧栏折成一条「可横向滚动」
+   的顶栏，结果导航被右缘截断、顶栏的 创作/仓库/作品 标签被挤成竖排、
+   首页三卡并排后中文被迫逐字换行。这里改成真正的手机壳：
+   - 底部标签栏（固定，等宽，均分）
+   - 顶栏允许换行、标签不换行
+   - 内容单列、留出底部栏高度
+   全部限定在 ≤720px，桌面布局零影响。
+   ============================================================ */
+@media (max-width: 720px) {
+  /* ---- 底部标签栏 ---- */
+  html[data-theme] .app-nav.sidebar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 900;
+    width: 100%;
+    height: auto;
+    min-height: 56px;
+    flex-direction: row;
+    align-items: stretch;
+    gap: 0;
+    padding: 4px 2px calc(4px + env(safe-area-inset-bottom, 0px));
+    overflow: visible;
+    border-right: 0;
+    border-bottom: 0;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+    box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.3);
+  }
+  /* 品牌位在底部栏里没有意义（顶栏已有页名） */
+  html[data-theme] .app-nav.sidebar .mode-dropdown.brand-only { display: none; }
+
+  html[data-theme] .app-nav.sidebar .nav-sections {
+    display: flex;
+    flex-direction: row;
+    flex: 1 1 auto;
+    gap: 0;
+    margin: 0;
+    min-width: 0;
+  }
+  /* 一级导航固定 5 项：均分剩余宽度；设置按钮保持自身宽度 */
+  html[data-theme] .app-nav.sidebar .nav-sections:not(.drill) { overflow: visible; }
+  /* 钻入子导航条目数不定，允许横向滑动而不是被裁掉 */
+  html[data-theme] .app-nav.sidebar .nav-sections.drill {
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+  }
+  html[data-theme] .app-nav.sidebar .nav-sections.drill::-webkit-scrollbar { display: none; }
+
+  html[data-theme] .app-nav.sidebar .nav-sections:not(.drill) button {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+  html[data-theme] .app-nav.sidebar .nav-sections.drill button { flex: 0 0 auto; }
+
+  html[data-theme] .app-nav.sidebar .nav-item,
+  html[data-theme] .app-nav.sidebar .nav-sections button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 48px;
+    padding: 4px 6px;
+    text-align: center;
+    font-size: 11px;
+    line-height: 1.15;
+    white-space: nowrap;
+    border-radius: 8px;
+  }
+  html[data-theme] .app-nav.sidebar .nav-settings {
+    flex: 0 0 auto;
+    margin-top: 0;
+    padding: 4px 10px;
+    font-size: 11px;
+    white-space: nowrap;
+  }
+
+  /* ---- 顶栏：换行而不是挤压 ---- */
+  .app-topbar {
+    height: auto;
+    min-height: 52px;
+    padding: 8px 12px;
+    gap: 6px 10px;
+    flex-wrap: wrap;
+  }
+  .app-topbar .topbar-title { font-size: 15px; }
+  .app-topbar .repo-picker { font-size: 12px; gap: 6px; white-space: nowrap; }
+  .app-topbar .repo-picker select {
+    min-width: 0;
+    max-width: 46vw;
+    padding: 4px 6px;
+    font-size: 12px;
+  }
+  .app-topbar .topbar-methods { gap: 6px !important; margin-left: auto !important; }
+  .app-topbar .topbar-methods .btn { padding: 4px 10px; font-size: 12px; }
+
+  /* ---- 内容区 ---- */
+  .app-body { padding-bottom: calc(64px + env(safe-area-inset-bottom, 0px)); }
+  .page { padding: 16px 14px 8px; }
+  .page-head { margin-bottom: 12px; }
+  .page-head h1 { font-size: 18px; }
+
+  /* 页内 tab 条（模型下载 / 节点管理 / 设置等共用）：手机上改为横滑，别把中文挤成两行 */
+  .node-tabs {
+    overflow-x: auto;
+    overflow-y: hidden;
+    flex-wrap: nowrap;
+    scrollbar-width: none;
+  }
+  .node-tabs::-webkit-scrollbar { display: none; }
+  .node-tab { flex: 0 0 auto; white-space: nowrap; padding: 8px 12px; font-size: 13px; }
+
+  /* 顶栏换行后高度不定，绝对定位的浮层会压住页标题与筛选栏 ⇒ 手机上改为流内横幅 */
+  .comfy-monitor {
+    position: static;
+    margin: 8px 12px 0;
+    max-width: none;
+  }
+  /* 贴底提示与浮动面板要让开底部标签栏 */
+  .rag-toast { bottom: calc(72px + env(safe-area-inset-bottom, 0px)); right: 12px; max-width: calc(100vw - 24px); }
+  /* 各主题的旧规则用 !important 把浮标钉在 bottom:10px，会被底部栏压住 ⇒ 同特异性后置覆盖；
+     抬高到快捷工具浮标（bottom 76 + 56 高）之上，两个圆钮竖排不重叠。 */
+  html[data-theme] .support-fab {
+    top: auto !important;
+    right: 12px;
+    bottom: calc(140px + env(safe-area-inset-bottom, 0px)) !important;
+  }
+
+  /* ---- 首页三张入口卡：单列，图标在左 ---- */
+  .home-launcher-tip { margin-bottom: 12px; }
+  .home-launcher-cards { grid-template-columns: 1fr; gap: 10px; max-width: none; }
+  .home-launcher-card {
+    display: grid;
+    grid-template-columns: 44px minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    align-items: center;
+    column-gap: 12px;
+    row-gap: 2px;
+    padding: 12px 14px;
+  }
+  .home-launcher-icon { grid-row: 1 / span 2; width: 44px; height: 44px; border-radius: 12px; }
+  .home-launcher-icon svg { width: 22px; height: 22px; }
+  .home-launcher-name { font-size: 15px; }
+  .home-launcher-desc { font-size: 12px; line-height: 1.45; }
 }

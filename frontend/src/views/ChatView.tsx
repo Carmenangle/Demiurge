@@ -97,6 +97,7 @@ export function ChatView({
   // 显示层正则（markdownOnly）：全局脚本 + 当前卡内嵌脚本里的显示档，渲染 AI 正文前隐藏/压缩 <think> 等区块
   const cardNames = repo?.cardNames?.length ? repo.cardNames : (repo?.cardName ? [repo.cardName] : []);
   const cardName = repo?.openingCardName || repo?.cardName || cardNames[0] || "";
+  const mediaInsertOn = Boolean(settings.mediaInsert?.[repo?.id || ""]?.templateId);
   const characterDir = settings.characterDir || "";
   // 仓库绑定预设优先于全局设置
   const resolvedPresetName = repo?.presetName || settings.activePresetName;
@@ -686,9 +687,10 @@ export function ChatView({
             )}
             {cardName && (
               <button
-                className={`btn icon-only ${settings.mediaInsert?.[repo?.id || ""]?.templateId ? "primary" : ""}`}
+                className={`btn icon-only ${mediaInsertOn ? "primary" : ""}`}
+                aria-pressed={mediaInsertOn}
                 onClick={() => setShowMediaInsert(true)}
-                title="多元数据插入：勾选随剧情自动生成的内容类型（图片/视频/音频），并分别预设 ComfyUI 工作流模板 + 按角色参数（LoRA/底图/参考音轨）。保存预设会自动开启剧情自动生成"
+                title={`多元数据插入${mediaInsertOn ? "（开）" : "（关）"}：勾选随剧情自动生成的内容类型（图片/视频/音频），并分别预设 ComfyUI 工作流模板 + 按角色参数（LoRA/底图/参考音轨）。保存预设会自动开启剧情自动生成`}
               >
                 <Clapperboard size={15} />
               </button>

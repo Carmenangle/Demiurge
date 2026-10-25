@@ -37,6 +37,13 @@ describe("liquid glass variable mapping", () => {
     expect(vars["--lg-content-top"]).toBe("rgba(13, 21, 36, 0.665)");
   });
 
+  it("falls back to the dark content base when contentColor is empty", () => {
+    // 「跟随玻璃色」曾让内容面吃到白色玻璃基色 → 设置页白底浅字。
+    const vars = liquidGlassCssVars(lg({ contentColor: "", glassColor: "#ffffff", contentAlpha: 30 }));
+    expect(vars["--lg-content-top"]).toBe("rgba(13, 21, 36, 0.665)");
+    expect(vars["--lg-content-bottom"]).toBe("rgba(13, 21, 36, 0.560)");
+  });
+
   it("builds wallpaper filters and the flip transform", () => {
     expect(wallpaperFilter(lg({ wallpaperBlur: 8, wallpaperBrightness: 110, wallpaperContrast: 90, wallpaperSaturate: 120 })))
       .toBe("blur(8px) brightness(110%) contrast(90%) saturate(120%)");

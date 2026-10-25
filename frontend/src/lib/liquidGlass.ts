@@ -71,10 +71,13 @@ export function wallpaperTransform(lg: LiquidGlassSettings): string {
   return `scale(${scale.toFixed(3)}) scaleX(${lg.flip ? -1 : 1})`;
 }
 
+/** 内容面空值回退：不能跟随玻璃基色（默认白），否则大块正文面白底浅字。 */
+const DEFAULT_CONTENT_BASE = "#0d1524";
+
 export function liquidGlassCssVars(lg: LiquidGlassSettings): Record<string, string> {
   const glass = glassOpacity(lg.glassAlpha);
   const sidebar = sidebarOpacity(lg.sidebarAlpha);
-  const contentBase = lg.contentColor || lg.glassColor;
+  const contentBase = lg.contentColor || DEFAULT_CONTENT_BASE;
   const content = contentOpacity(lg.contentAlpha);
   const border = rgba("#ffffff", borderOpacity(lg.border));
   const highlight = rgba("#ffffff", Math.min(0.8, 0.10 + borderOpacity(lg.border) * 0.7));
