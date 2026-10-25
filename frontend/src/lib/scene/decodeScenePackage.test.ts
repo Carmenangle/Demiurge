@@ -371,7 +371,7 @@ describe("vendored 源码约束", () => {
     expect(branch).toContain("/ Math.max(1, flowContent.width)");
   });
 
-  it("视频纹理走 <video> 通道：逐帧重传、NPOT 先设 CLAMP、暂停要真的停播", () => {
+  it("视频纹理由渲染循环每帧重采：rVFC 只是加速通道，不能当唯一通道", () => {
     const source = readFileSync(new URL("./vendor/we-scene-player-html.js", import.meta.url), "utf8");
     const branch = source.slice(
       source.indexOf("if (video) {"),
@@ -384,6 +384,27 @@ describe("vendored 源码约束", () => {
     expect(source).toContain("rec.video.pause()");
     // 换预设后不在 live 集合里的视频要被摘下并停播，否则 4K 解码永不停止。
     expect(source).toContain("url.endsWith('|video')");
+
+    // 真机（WebView2 / Edge 155，2026-10-25）实锤：1px + opacity:0 挂在 body 外的 <video>
+    // 只是纹理源，合成器不呈现它 ⇒ rVFC 连续 12 秒一次都不回调，而 currentTime 照常 1:1 推进、
+    // totalVideoFrames 每秒 +30。只挂 rVFC 时美术层永久停在最后一次 loadeddata 的那张图上
+    // ⇒ 用户看到「艺术字还在走，壁纸不动了」。可靠通道只有渲染循环自己按 currentTime 重传。
+    expect(branch).toContain("videoTextures.add(record)");
+    expect(source).toContain("function pumpVideoTextures(now) {");
+    // uploadVideo 必须有调用方（缺陷形态正是「定义了却没人调」的整条死代码）。
+    expect(source).toContain("record.uploadVideo();");
+    expect(source).toContain("el.currentTime === record.videoTime");
+    // 调用点必须在 renderFrame 内部：挂在别处（事件里、初始化里）等于没挂。
+    const renderStart = source.indexOf("function renderFrame(now) {");
+    const pumpCall = source.indexOf("pumpVideoTextures(now);", renderStart);
+    expect(renderStart, "renderFrame 没找到").toBeGreaterThan(-1);
+    expect(pumpCall, "渲染循环没有重新采样视频纹理").toBeGreaterThan(renderStart);
+    // 回收时摘出视频集合，否则泵会永久遍历已 disposed 的记录。
+    expect(
+      source.slice(source.indexOf("function pruneTextures("), source.indexOf("function pumpVideoTextures")),
+    ).toContain("videoTextures.delete(record)");
+    // 播放被拒要能自愈：创建时那次 play() 的 rejection 是被吞掉的，不重试就没有第二次机会。
+    expect(source).toContain("const mayRetry = now - lastVideoPlayRetry > 1000;");
   });
 
   it("播放器脚本能被解析（模板字符串里的 JS 不能有语法错误）", async () => {

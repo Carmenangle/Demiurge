@@ -19,10 +19,11 @@ Demiurge 的 scene 壁纸实时渲染用的两个文件是从第三方 MIT 插�
 - `lib/scene-player.js` — `df8d4eb0f6c6f489a16a46683591a8968f01fef7140b96c6bbff2edf8a057a36`
 
 本仓库内拷贝的 SHA-256（当前改动后，含 Demiurge 视差 / puppet 蒙皮动画 / 用户预设 /
-文字与时钟 / 日期脚本模板 / 问候语与帧率脚本 / 字号自身+中间父组 scale / 2D 粒子 / 云层流动 / 视频纹理 补丁）：
+文字与时钟 / 日期脚本模板 / 问候语与帧率脚本 / 字号自身+中间父组 scale / 2D 粒子 / 云层流动 /
+视频纹理 / 视频纹理逐帧重采 补丁）：
 
 - `we-scene-manifest.js` — `b76f3f7ea2389b6adccfa00e886e08c8085f91fc6d934ee49e6a9e2c388a653e`
-- `we-scene-player-html.js` — `af5cc049f30f6c649f6700db5f0a3f48bd48719ab5479cbba9bda9d647b67bee`
+- `we-scene-player-html.js` — `c9bbd319ef02da77693e461fe0e23e2e776169db7d7bd77e5e0d2189afeabb5e`
 
 ## 改动清单（全部改动，逐字）
 
@@ -364,8 +365,8 @@ puppet 嵌套未实现；脚本引擎仍不执行（`scripted:true` 场景渲染
     真机 `3723257973`）`loadTexture(url, repeat, video)` 增加第三参：清单里 `videoTex: true`
     的图层不再创建 `<img>`，而是建一个 `muted / loop / playsInline` 的 `<video>`
     （1×1 隐形挂在 `document.body`，`preload=auto`），`loadeddata` / `seeked` 与
-    `requestVideoFrameCallback` 每帧把当前帧 `texImage2D` 成纹理（无 rVFC 的浏览器退到
-    `timeupdate`）。三条必须点：
+    `requestVideoFrameCallback` 把当前帧 `texImage2D` 成纹理，逐帧重采由改动⑭ 的渲染循环泵负责。
+    三条必须点：
     - **NPOT 先设 CLAMP**：3840×2160 不是 2 的幂，`loadTexture` 的默认环绕停在 REPEAT，
       NPOT + REPEAT 是 incomplete 纹理 ⇒ 采样恒 (0,0,0,1) ⇒ 整层画成不透明黑；
       视频分支在第一次上传时就设 `CLAMP_TO_EDGE`（与改动⑨的天图同一教训）。
@@ -407,7 +408,28 @@ puppet 嵌套未实现；脚本引擎仍不执行（`scripted:true` 场景渲染
 13. **提交卫生：3 行行尾空格清理**（2026-10-25，`git diff --check` 口径）。仅删除空白行的
     行尾空格，模板字符串与代码逐字未变；EOL 仍为纯 CRLF。
 
-除上述 13 项外模板字符串本体未改（`<script>` 数量与垫片插入点保持不变）。
+14. **Demiurge 改动⑭（播放器侧）：视频纹理由渲染循环每帧重采，rVFC 降级为加速通道。**
+    （2026-10-25，真机 `3723257973` 修「艺术字修好后壁纸又不动了」）改动⑩ 把逐帧重传**只**挂在
+    `requestVideoFrameCallback` 上（无 rVFC 才退到 `timeupdate`），而 rVFC 的触发前提是
+    **解码帧真的被合成器呈现**。这里的 `<video>` 是 1px、`opacity:0`、挂在 `document.body` 之外
+    的纯纹理源，Chromium/WebView2 不呈现它 ⇒ 实测（Edge/WebView2 155，CDP 直连真实壳）
+    连续 12 秒 `rVFC` 回调 **0 次**、视频源 `texImage2D` **0 次**，而同一段媒体
+    `currentTime` 按 1:1 推进、`readyState` 恒 4、`buffered 0.00–19.98`、
+    `totalVideoFrames 1310→2014`、`droppedVideoFrames 851→1541`、`playbackRate 1`。
+    于是美术层纹理永久停在最后一次 `loadeddata` 那一帧——画布类的文字/时钟/帧率层照常走，
+    唯一的视频主图定格，正是用户报的现象。（`record.uploadVideo` 在旧形态里是**定义了没人调**
+    的死代码，所以缺陷无法从函数名看出来。）
+    现在：`loadTexture` 创建视频记录时把 record 登记进 `videoTextures`（`pruneTextures` 摘出），
+    `renderFrame` 在 `sceneData` 闸门之后第一件事调 `pumpVideoTextures(now)`——
+    `el.currentTime !== record.videoTime` 且 `readyState ≥ 2` 就重传一次（rVFC 到位时它幂等地
+    什么都不做）；同时给「创建时那次 `play()` 被自动播放策略拒绝」补上自愈：`!isPaused && el.paused`
+    时按 **≤1 次/秒**重试（`lastVideoPlayRetry`），否则一次拒绝就永久定格。
+    暂停态不产生额外开销：`setPaused` 已 `pause()` 所有视频，`currentTime` 不推进 ⇒ 泵不上传，
+    `!isPaused` 闸门也挡住重试。
+    修复后同一壳同一作品复验：`videoUploadsPerSec 15` 对 `rafPerSec 22.3`（媒体 30fps、rAF 约 22fps，
+    比值 ≈0.5 是预期上限），且把宿主窗口节流到 1Hz 时纹理上传仍继续。
+
+除上述 14 项外模板字符串本体未改（`<script>` 数量与垫片插入点保持不变）。
 
 播放器文档用 `blob:` URL 装载而**不是 `srcdoc`**：`about:srcdoc` 文档里
 `window.location.origin` 读到的是字符串 `'null'`，而上游播放器两头都拿它做校验
@@ -451,7 +473,10 @@ puppet 嵌套未实现；脚本引擎仍不执行（`scripted:true` 场景渲染
   之前）、`const progWaterflow`、`const fsWaterflow`、`function whiteTex(`，分支里的
   `flowAmp = (layer.flow.strength || 1) / Math.max(1, flowContent.width)` **不能删**（那是像素→UV 的
   唯一换算点），内容贴图那一句必须是 `loadTexture(layer.texUrl)`（**不带** repeat）且着色器里带
-  `fract(`（NPOT 贴图用 REPEAT 会整张失效）；热换清单搜 `function swapSceneManifest(` 与 `manifestOverridden`。
+  `fract(`（NPOT 贴图用 REPEAT 会整张失效）；热换清单搜 `function swapSceneManifest(` 与 `manifestOverridden`；
+  视频泵搜 `function pumpVideoTextures(` 与 `renderFrame` 里的 `pumpVideoTextures(now)`（**必须排在
+  `if (!sceneData)` 闸门之后、渲染循环内**，只在 `loadTexture` 里挂 rVFC 会定格）、
+  `videoTextures.add(record)` / `videoTextures.delete(record)` 与 `lastVideoPlayRetry`。
 
 整份替换上游文件后必须重新施加以上补丁，并更新本文件里的 SHA-256。
 
@@ -499,7 +524,8 @@ puppet 嵌套未实现；脚本引擎仍不执行（`scripted:true` 场景渲染
   **仍不支持**其他任意 `update()` 脚本形状（认不出就整层跳过）。
   FPS 数字是浏览器真实帧率，不会等于 WE 自己的统计值。
 - **视频纹理已接入**（2026-10-25，`3723257973`）：`.tex` 里内嵌的 MP4 由清单侧切成裸流，
-  播放器按 `<video>` 逐帧上传；暂停随 `setPaused` 真的停解码。**未做**：H.264 之外的编码由
+  播放器由**渲染循环逐帧重采**（改动⑭：rVFC 在隐形 `<video>` 上不回调，不能当唯一通道）；
+  暂停随 `setPaused` 真的停解码。**未做**：H.264 之外的编码由
   浏览器决定（WE 用的就是 H.264，实测 Edge 可解）；视频纹理的透明通道不受支持（H.264 无 alpha）。
 - **WE 属性覆盖面由清单说了算**：`manifest.userBindings` 只登记真正落到渲染层的键，面板据此收窄。
   `3346715292` 实测 78 条属性里 **41 条生效**（含本作的 `newproperty9` 云层流动 /

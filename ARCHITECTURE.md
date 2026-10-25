@@ -261,6 +261,16 @@
    问候语 32×0.23025×3.125=23.025、帧率 24×0.948=22.752、SUN 96.653×0.85=82.155，与日期 25.2 / 时钟 56.71
    的比例（SUN/日期 3.26、时钟/日期 2.25）和参考图一致；只吃自身 scale 会让问候语只剩 7.37 的小糊点。
    回归：scene vitest **113 例**、前端全量 **1864 例**、build 0，e2e 一例扩到五段文字（清单/坐标/字号/光栅/字体）全绿。
+    **2026-10-25 四补（重载后壁纸不动：视频纹理的上传通道）**：用户实锤「艺术字问题解决了，但重新加载后壁纸又不动了」。
+    缺陷不在解码 / 清单 / 垫片停帧，在**逐帧上传唯一挂在 `requestVideoFrameCallback`**：rVFC 只在该帧真被合成器**呈现**时回调，
+    而纹理源 `<video>` 是 1px / `opacity:0` 的隐形元素，WebView2 解它不呈现 ⇒ 真机连续 12s rVFC 0 次、源是 `<video>` 的
+    `texImage2D` 0 次，同期 `currentTime` 1:1 推进、`readyState=4`、`totalVideoFrames` 每秒 +30（`droppedVideoFrames` 同步涨）
+    ⇒ 纹理钉在最后一次 `loadeddata` 的那一帧，而文字层照常刷新 = 「艺术字还在、壁纸不动」。修法＝`renderFrame` 每帧调
+    `pumpVideoTextures(now)`（`currentTime` 变了就重传；`videoTextures` 空即 return ⇒ 暂停零成本；rVFC 降级为加速通道；
+    顺带按 ≤1 次/秒重试此前被 `catch {}` 吞掉的 `play()` 拒绝）。**验收量必须换成「源是 `<video>` 的 `texImage2D` 次数」**：
+    draw call 照常 + 时钟照常推进 + `paused=false` 三项全绿仍会放过这个缺陷。回归：`decodeScenePackage.test.ts` 形态锁
+    （受控红：只删那一行调用即红）+ 新 `e2e-manual/wallpaper-scene-reload.spec.ts` 三例（重载后仍在动 / 刷新 + 加载中滚动后
+    恢复 / 逐帧重采比值），scene vitest **113 例**、前端全量 **1864 例**、tsc/build 0；vendor 播放器新 SHA 见 `NOTICE.md` 改动⑭。
 
 55. **出站建连 IP 钉扎：url_guard TOCTOU 关窗（已完成 · 2026-10-24）**：全库安全审计建议第 3 项
    （SVG 加固文档 §1.6 #6 登记的另立刀）。**根因**：`validate_media_url` 校验时解析一次 DNS，
@@ -1044,7 +1054,7 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
    → blob 不是合法 PNG → `<img>` 失败 → `if (!texRec.loaded) continue;` 跳过唯一美术层（8 个 canvas
    文字层照画，用户看到「只剩日期」）。**分层落点**：manifest 交裸 MP4（不猜语义）/ 产品侧
    `readScenePackage` 用 `isMp4Bytes` 反查并 `markSceneVideoLayers` 标 `videoTex` / blob MIME 按字节嗅探 /
-   播放器 `<video muted loop playsInline>` + `requestVideoFrameCallback` 逐帧 `texImage2D`，缓存键 `|video`。
+   播放器 `<video muted loop playsInline>` 逐帧 `texImage2D`，缓存键 `|video`（🔴 **逐帧重采由 `renderFrame` 每帧的 `pumpVideoTextures` 驱动，`requestVideoFrameCallback` 只当「早一帧拿到」的加速通道**——只靠 rVFC 会在 WebView2 定格，见条 54 的 2026-10-25 四补）。
    🔴 NPOT 必须 `CLAMP_TO_EDGE`（3840×2160，REPEAT ⇒ incomplete 纹理 ⇒ 取样 `(0,0,0,1)` 画黑，
    与 waterflow 同一条陷阱）；暂停必须真 `pause()`；`pruneTextures` 必须拆 `<video>`（清 `src` + `load()`）。
    真机：1600×900 截图与 WE 同内容，`readyState=4`、`currentTime` 0.078→2.591 s，暂停钉 5.876 s、恢复 7.079 s，

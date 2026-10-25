@@ -60,6 +60,9 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
   let wallClock = Date.now();
   let frameSeq = 0;
   let textureCache = new Map();
+  // 视频纹理单独登记：它们必须每帧被重新采样，见 pumpVideoTextures。
+  const videoTextures = new Set();
+  let lastVideoPlayRetry = 0;
   let activeParticles = [];
   let mouseX = 0.5, mouseY = 0.5;
   let curRotX = 0, curRotY = 0;
@@ -1074,6 +1077,7 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
       record.uploadVideo = upload;
       el.addEventListener('loadeddata', upload);
       el.addEventListener('seeked', upload);
+      // rVFC 只是「早一点拿到这一帧」的加速通道，不能当唯一通道（见 pumpVideoTextures）。
       if (typeof el.requestVideoFrameCallback === 'function') {
         const pump = () => {
           if (record.disposed) return;
@@ -1081,9 +1085,8 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
           el.requestVideoFrameCallback(pump);
         };
         el.requestVideoFrameCallback(pump);
-      } else {
-        el.addEventListener('timeupdate', upload);
       }
+      videoTextures.add(record);
       el.src = url;
       if (isPaused) {
         el.pause();
@@ -1561,9 +1564,43 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
           record.video.load();
         } catch (e) {}
         if (record.video.parentNode) record.video.parentNode.removeChild(record.video);
+        videoTextures.delete(record);
       }
       gl.deleteTexture(record.texture);
       textureCache.delete(key);
+    }
+  }
+
+  /**
+   * 每帧把视频纹理重新采上来。
+   *
+   * 为什么不能只靠 requestVideoFrameCallback：rVFC 只在「解码帧真的被合成器呈现」时
+   * 回调，而这里的 <video> 是 1px / opacity:0 / 移出视口的纯纹理源，Chromium 不呈现它
+   * ——真机（WebView2/Edge 155）实测 currentTime 按 1:1 推进、totalVideoFrames 每秒 +30、
+   * droppedVideoFrames 同步上涨，而 rVFC 连续 12 秒一次都不来。只挂 rVFC 时美术层永久
+   * 停在最后一次 loadeddata 的那张图上，用户看到的就是「艺术字还在走，壁纸不动了」。
+   * 播放被拒（自动播放策略）也在这里自愈：创建时那次 play() 的 rejection 是吞掉的，
+   * 不重试就再没有第二次机会。
+   */
+  function pumpVideoTextures(now) {
+    if (videoTextures.size === 0) return;
+    const mayRetry = now - lastVideoPlayRetry > 1000;
+    for (const record of videoTextures) {
+      if (record.disposed || !record.video) {
+        videoTextures.delete(record);
+        continue;
+      }
+      const el = record.video;
+      if (!isPaused && el.paused && el.readyState >= 2) {
+        if (mayRetry) {
+          lastVideoPlayRetry = now;
+          const started = el.play();
+          if (started && typeof started.catch === 'function') started.catch(function () {});
+        }
+        continue;
+      }
+      if (el.readyState < 2 || el.currentTime === record.videoTime) continue;
+      record.uploadVideo();
     }
   }
   function swapSceneManifest(next) {
@@ -1940,6 +1977,8 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
       requestAnimationFrame(render);
       return;
     }
+
+    pumpVideoTextures(now);
 
     // Reset stale vertex-attribute bindings from the previous frame so a draw
     // that switches shaders never hits "no buffer is bound to enabled attribute".

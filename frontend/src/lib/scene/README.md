@@ -99,16 +99,26 @@ WE 允许把**视频**当图层贴图：`.tex` 的 TEXB 头带 v4 视频标记�
 3. `sceneBackdrop.ts`：blob MIME **按字节嗅探**（`mimeOf(path, bytes)` → `video/mp4`）——
    清单里的后缀仍叫 `.tex`，按后缀猜会得到 `image/png`、`<img>` 失败、整层被 `!loaded` 静默跳过。
 4. `vendor/we-scene-player-html.js`：`loadTexture(url, repeat, video)` 创建
-   `<video muted loop playsInline>`（append 到 body、不可见），`requestVideoFrameCallback`
-   （无则回落 `timeupdate`）逐帧 `texImage2D(el)` 上传；缓存键带 `|video` 后缀，
-   `pruneTextures` 据此识别并拆掉 video（`pause` → 清 `src` → `load()` → 移除节点），
+   `<video muted loop playsInline>`（append 到 body、不可见）；**逐帧重采由渲染循环做**——
+   `renderFrame` 每帧调 `pumpVideoTextures(now)`，凡 `currentTime` 变了就 `texImage2D(el)` 重传。
+   `requestVideoFrameCallback` 只是「早一帧拿到」的加速通道，**不能当唯一通道**（见下）。
+   缓存键带 `|video` 后缀，`pruneTextures` 据此识别并拆掉 video（`pause` → 清 `src` → `load()` → 移除节点），
    `dsh-set-pause` 也遍历缓存真正 `pause()`。
+
+🔴 **rVFC 不能当纹理上传的唯一通道**（2026-10-25 真机 WebView2 实锤「重载后壁纸不动」）：rVFC 只在
+解码帧**真被合成器呈现**时回调，而这里的 `<video>` 是 1px / `opacity:0` 的纯纹理源，WebView2 不呈现它
+⇒ 连续 12 秒 rVFC **0 次回调、视频源 `texImage2D` 0 次**，同期 `currentTime` 1:1 推进、`readyState=4`、
+`totalVideoFrames` 每秒 +30（`droppedVideoFrames` 同步涨）⇒ 纹理钉在最后一次 `loadeddata` 的帧上，
+而文字层照常走 = 用户看到的「艺术字还在、壁纸不动了」。同一个 `pumpVideoTextures` 还顺带按
+**≤1 次/秒**重试此前被 `catch {}` 吞掉的 `play()` 拒绝；`videoTextures` 为空时直接 return，暂停零成本。
 
 🔴 两条硬约束：**NPOT 先 `CLAMP_TO_EDGE`**（3840×2160；WebGL1 的 NPOT + REPEAT 会成为
 incomplete 纹理、取样恒 `(0,0,0,1)`，画面直接画黑）；**暂停要真停解码**，不是只冻时钟。
 边界：只认 H.264/MP4、按 CLAMP 采样（不重复平铺）、MP4 无 alpha；每帧上传有解码+拷贝成本，
 这是「视频当纹理」的固有代价。真机探针 `_tmp/probe-3723-video.mjs`：截图与 WE 参考同内容、
-`currentTime` 推进 / 暂停钉住 / 恢复推进、`glError=0`。
+`currentTime` 推进 / 暂停钉住 / 恢复推进、`glError=0`；重载与「刷新壁纸/加载中滚动」两条网
+见 `e2e-manual/wallpaper-scene-reload.spec.ts`（判据是**源是 `<video>` 的上传次数**跟得上渲染帧数，
+不是 draw call——draw call 照常而纹理不换帧正是这次缺陷的形态）。
 
 ## 文字与日期
 
