@@ -195,9 +195,9 @@ export function RegexModal({ onClose, cardName, characterDir, presetName, preset
   return (
     <>
       <div className="modal-mask">
-        <div className="modal" style={{ width: 900, maxWidth: "95vw", maxHeight: "90vh", display: "flex", flexDirection: "column" }} onClick={(e) => e.stopPropagation()}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <div className="modal regex-modal" style={{ width: 900, maxWidth: "95vw", maxHeight: "90vh", display: "flex", flexDirection: "column" }} onClick={(e) => e.stopPropagation()}>
+          <div className="modal-split-head">
+            <div className="modal-split-head-left">
               <h3 style={{ margin: 0 }}>正则脚本</h3>
               <div className="seg-tabs" style={{ display: "flex", gap: 4 }}>
                 <button className={`btn ${scope === "global" ? "primary" : ""}`} style={{ padding: "3px 10px", fontSize: 12 }}
@@ -209,7 +209,7 @@ export function RegexModal({ onClose, cardName, characterDir, presetName, preset
                 </button>
               </div>
             </div>
-            <div style={{ display: "flex", gap: 8 }}>
+            <div className="modal-split-head-actions">
               <input ref={fileRef} type="file" accept=".json" style={{ display: "none" }} onChange={onImport} />
               <button className="btn" onClick={() => fileRef.current?.click()}>
                 <Upload size={14} style={{ marginRight: 4 }} /> 导入
@@ -221,9 +221,9 @@ export function RegexModal({ onClose, cardName, characterDir, presetName, preset
             </div>
           </div>
           {importErr && <p style={{ color: "var(--danger, #c0392b)", fontSize: 13, marginTop: 0 }}>{importErr}</p>}
-          <div style={{ display: "flex", gap: 14, flex: 1, minHeight: 0 }}>
+          <div className="modal-split-body">
             {/* 左：脚本列表 */}
-            <div style={{ width: 220, flexShrink: 0, display: "flex", flexDirection: "column" }}>
+            <div className="modal-split-list">
               <button className="btn" onClick={add} style={{ marginBottom: 8 }}>
                 <Plus size={14} style={{ marginRight: 4 }} /> 新建正则
               </button>
@@ -287,7 +287,7 @@ export function RegexModal({ onClose, cardName, characterDir, presetName, preset
               </div>
             </div>
             {/* 右：编辑 */}
-            <div style={{ flex: 1, minWidth: 0, overflow: "auto" }}>
+            <div className="modal-split-editor">
               {!active && <p style={{ color: "var(--text-muted)" }}>选择或新建一条正则进行编辑。</p>}
               {active && (
                 <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>

@@ -598,6 +598,7 @@ function NodeEditor({
 
                 {cfg && (
                   <div
+                    className="template-field-grid"
                     style={{
                       display: "grid",
                       gridTemplateColumns: "1fr 1fr",

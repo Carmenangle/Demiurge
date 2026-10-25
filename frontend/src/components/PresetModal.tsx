@@ -129,10 +129,10 @@ export function PresetModal({
   return (
     <>
       <div className="modal-mask">
-        <div className="modal" style={{ width: 960, maxWidth: "96vw", maxHeight: "90vh", display: "flex", flexDirection: "column" }} onClick={(e) => e.stopPropagation()}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+        <div className="modal preset-modal" style={{ width: 960, maxWidth: "96vw", maxHeight: "90vh", display: "flex", flexDirection: "column" }} onClick={(e) => e.stopPropagation()}>
+          <div className="modal-split-head">
             <h3 style={{ margin: 0 }}>偏置预设</h3>
-            <div style={{ display: "flex", gap: 8 }}>
+            <div className="modal-split-head-actions">
               <input ref={fileRef} type="file" accept=".json" style={{ display: "none" }} onChange={onPick} />
               <button className="btn" disabled={!base} onClick={() => fileRef.current?.click()}>
                 <Upload size={14} style={{ marginRight: 4 }} /> 导入
@@ -142,9 +142,9 @@ export function PresetModal({
           </div>
           {!base && <p style={{ color: "var(--text-muted)" }}>请先到「设置 → 路径 → 偏置预设文件夹」设置目录。</p>}
           {err && <p style={{ color: "var(--danger, #c0392b)" }}>{err}</p>}
-          <div style={{ display: "flex", gap: 14, flex: 1, minHeight: 0 }}>
+          <div className="modal-split-body">
             {/* 左：预设列表 + 激活选择 */}
-            <div style={{ width: 240, flexShrink: 0, overflow: "auto" }}>
+            <div className="modal-split-list preset-modal-list">
               <button
                 className={`nav-item ${activeName === "" ? "active" : ""}`}
                 style={{ width: "100%", marginBottom: 6, textAlign: "left" }}
@@ -172,7 +172,7 @@ export function PresetModal({
               ))}
             </div>
             {/* 右：片段列表 + 开关 */}
-            <div style={{ flex: 1, minWidth: 0, overflow: "auto" }}>
+            <div className="modal-split-editor">
               {!detail && <p style={{ color: "var(--text-muted)" }}>选择左侧预设查看/编辑片段；可改名称、角色、内容并勾选启用/停用，拖左上角把手调顺序（越靠后越接近生成点、遵守越强；排到「聊天历史」占位之后遵守最严），改完点「保存修改」落盘（占位片段由卡字段/世界书自动填充，不可编辑内容）。</p>}
               {detail && (
                 <>

@@ -1802,6 +1802,29 @@ textarea.text-tool-short-input { height: auto; min-height: 0; resize: none; over
   justify-content: flex-end;
   gap: 8px;
 }
+
+/* 宽弹窗（正则/预设/风格存档）：头部 + 左列表 + 右编辑。手机端在同名媒体查询里改成上下堆叠。 */
+.modal-split-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.modal-split-head-left { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.modal-split-head-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.modal-split-body { display: flex; gap: 14px; flex: 1; min-height: 0; }
+.modal-split-list {
+  width: 220px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+  overflow-y: auto;
+}
+.modal-split-list.preset-modal-list { width: 240px; }
+.modal-split-editor { flex: 1; min-width: 0; overflow: auto; }
 .upd-target { margin: 4px 0 8px; color: var(--text-muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* 偏置预设：长列表滚动时始终保留激活/保存/导出/删除入口 */
@@ -9827,6 +9850,19 @@ html[data-theme="liquid-glass"] .btn.primary:hover:not(:disabled) {
   .page { padding: 16px 14px 8px; }
   .page-head { margin-bottom: 12px; }
   .page-head h1 { font-size: 18px; }
+  /* 页头在 390px 改成上下两段：标题独占一行、操作按钮另起一行均分。
+     否则 4–8 个按钮会把标题挤成一字一行（工作流模板 / AI 搭工作流 / LoRA / 节点管理实测）。 */
+  .page-head { flex-direction: column; align-items: stretch; gap: 10px; }
+  .page-title-row { width: 100%; }
+  .page-actions { justify-content: flex-start; gap: 6px; }
+  .page-actions > * { min-width: 0; }
+  .page-actions .btn {
+    flex: 1 1 auto;
+    justify-content: center;
+    white-space: nowrap;
+    padding: 8px 10px;
+    font-size: 13px;
+  }
 
   /* 页内 tab 条（模型下载 / 节点管理 / 设置等共用）：手机上改为横滑，别把中文挤成两行 */
   .node-tabs {
@@ -9838,12 +9874,9 @@ html[data-theme="liquid-glass"] .btn.primary:hover:not(:disabled) {
   .node-tabs::-webkit-scrollbar { display: none; }
   .node-tab { flex: 0 0 auto; white-space: nowrap; padding: 8px 12px; font-size: 13px; }
 
-  /* 顶栏换行后高度不定，绝对定位的浮层会压住页标题与筛选栏 ⇒ 手机上改为流内横幅 */
-  .comfy-monitor {
-    position: static;
-    margin: 8px 12px 0;
-    max-width: none;
-  }
+  /* ComfyUI 是 PC 独占能力，手机上没有可操作项：unknown/未启动/检测中都会常驻占一条，
+     用户明确不要这条横幅 ⇒ 手机上不渲染。桌面（>720px）行为不变。 */
+  .comfy-monitor { display: none !important; }
   /* 贴底提示与浮动面板要让开底部标签栏 */
   .rag-toast { bottom: calc(72px + env(safe-area-inset-bottom, 0px)); right: 12px; max-width: calc(100vw - 24px); }
   /* 各主题的旧规则用 !important 把浮标钉在 bottom:10px，会被底部栏压住 ⇒ 同特异性后置覆盖；
@@ -9870,4 +9903,153 @@ html[data-theme="liquid-glass"] .btn.primary:hover:not(:disabled) {
   .home-launcher-icon svg { width: 22px; height: 22px; }
   .home-launcher-name { font-size: 15px; }
   .home-launcher-desc { font-size: 12px; line-height: 1.45; }
+
+  /* ---- 弹窗：全宽底部抽屉（固定 900px 的宽弹窗靠 !important 压过内联宽度）；
+     底部标签栏在手机上被提到 fixed/z-index:900，遮罩要压过它才不会被导航条截穿 ---- */
+  .modal-mask { align-items: flex-end; background: rgba(0, 0, 0, 0.45); z-index: 1000; }
+  .modal {
+    width: 100vw !important;
+    max-width: 100vw !important;
+    max-height: 92dvh !important;
+    border-radius: 18px 18px 0 0;
+    padding: 18px 14px calc(18px + env(safe-area-inset-bottom, 0px));
+    box-shadow: 0 -10px 32px rgba(0, 0, 0, 0.45);
+  }
+  .modal-actions { flex-wrap: wrap; gap: 8px; }
+  .modal-actions .btn { flex: 1 1 auto; min-height: 42px; }
+
+  /* 宽弹窗内部：左列表与编辑区由左右两栏改为上下堆叠，列表限高内滚 */
+  .regex-modal,
+  .preset-modal,
+  .modal:has(.modal-split-body) { height: 86dvh; max-height: 86dvh !important; }
+  .modal-split-head { flex-wrap: wrap; align-items: center; }
+  .modal-split-head-left { flex-wrap: wrap; gap: 8px; }
+  .modal-split-head-actions { margin-left: auto; }
+  .modal-split-head-actions .btn { padding: 6px 10px; }
+  .modal-split-body { flex-direction: column; overflow-y: auto; }
+  .modal-split-list { width: 100% !important; max-height: 30dvh; flex-shrink: 0; }
+  .modal-split-editor { flex: 1 0 auto; overflow: visible; }
+
+  /* ---- 设置中心：240px 左栏 → 顶部横滚 chip 条 ---- */
+  .settings-page { flex-direction: column; }
+  .settings-nav {
+    width: 100%;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 10px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+    flex-shrink: 0;
+  }
+  .settings-nav::-webkit-scrollbar { display: none; }
+  .settings-nav-group { display: flex; flex-direction: row; gap: 6px; margin-bottom: 0; }
+  .settings-nav-title { display: none; }
+  .settings-nav-item {
+    width: auto;
+    flex: 0 0 auto;
+    padding: 8px 12px;
+    font-size: 13px;
+    white-space: nowrap;
+    border-radius: 8px;
+    gap: 6px;
+  }
+  .settings-content-body { padding: 14px 12px 18px; }
+  .settings-footer {
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 10px 12px calc(10px + env(safe-area-inset-bottom, 0px));
+  }
+  .settings-footer .btn { flex: 1 1 auto; }
+  .settings-export-opt { flex: 1 1 100%; margin-right: 0; }
+  .settings-head { padding: 12px 14px; }
+  .settings-body { padding: 4px 12px 8px; }
+  .settings-foot { padding: 12px 14px; }
+  .field-row { grid-template-columns: 1fr; }
+  .theme-picker { grid-template-columns: 1fr; gap: 8px; }
+  .theme-choice { min-height: 64px; }
+  .background-path-row { flex-wrap: wrap; }
+  .background-path-row input { flex: 1 1 140px !important; }
+
+  /* ---- 上网素材工具栏：搜索独占一行，类型 tab 均分，其余按钮一行 3 个 ---- */
+  .web-materials-toolbar { flex-wrap: wrap; row-gap: 8px; }
+  .web-materials-toolbar .search-field { flex: 1 1 100% !important; width: 100%; }
+  .web-materials-toolbar .lora-mode-switch { flex: 1 1 100%; }
+  .web-materials-toolbar .lora-mode-switch .btn {
+    flex: 1 1 0;
+    justify-content: center;
+    white-space: nowrap;
+  }
+  .web-materials-toolbar > .btn {
+    flex: 1 1 calc(33.333% - 6px);
+    justify-content: center;
+    white-space: nowrap;
+    padding: 8px 6px;
+    font-size: 12.5px;
+  }
+  /* UI 构建标记：桌面上靠 margin-left:auto 贴右，手机上单独一行（内联样式需 !important） */
+  .web-materials-toolbar > span { flex: 1 1 100%; margin-left: 0 !important; text-align: right; }
+
+  /* ---- 工作流模板编辑器：摘要/工具栏换行，画布与已选节点上下堆叠 ---- */
+  .template-editor-summary { flex-wrap: wrap; gap: 6px; }
+  .template-editor-toolbar { flex-wrap: wrap; align-items: stretch; gap: 8px; }
+  .template-editor-toolbar .field { flex: 1 1 100% !important; max-width: none !important; }
+  .template-editor-toolbar .btn { flex: 1 1 auto; white-space: nowrap; }
+  .template-canvas-layout { flex-direction: column; }
+  .template-canvas-layout .lock-canvas { flex: 0 0 auto !important; height: 55dvh !important; }
+  .picked-panel { width: 100%; }
+  .template-field-grid { grid-template-columns: 1fr !important; margin-left: 0 !important; }
+  /* 保存按钮是 fixed 的，桌面上避开客服球；手机上要让开底部标签栏 */
+  .template-save-fab {
+    right: 12px;
+    bottom: calc(76px + env(safe-area-inset-bottom, 0px));
+    padding: 10px 18px;
+  }
+
+  /* ---- AI 搭工作流：左对话/右画布改上下，各自给固定可视高度 ---- */
+  .ai-build-split { flex-direction: column; height: auto; gap: 12px; }
+  .ai-build-chat { flex: 0 0 auto; height: 62dvh; }
+  .ai-build-canvas-wrap { flex: 0 0 auto; height: 55dvh; }
+
+  /* ---- 宽表格：手机上横向滚动，不把七列压成竖排 ---- */
+  .node-table { overflow-x: auto; }
+  .node-table .node-row { min-width: 680px; }
+  .lora-table .node-row { min-width: 760px; }
+
+  /* ---- 指南正文：Windows 绝对路径等长串无处折行，会把正文撑出屏幕 ---- */
+  .guide-doc p,
+  .guide-doc li,
+  .guide-doc td { overflow-wrap: anywhere; }
+  .guide-doc pre { overflow-x: auto; }
+
+  /* ---- 世界书：220 / 内容 / 220 三栏在 390px 放不下，改单列并取消贴顶 ---- */
+  .worldbook-layout { grid-template-columns: 1fr; gap: 12px; }
+  .worldbook-library,
+  .worldbook-index { position: static; max-height: none; overflow: visible; }
+  /* 条目导航是给宽屏右栏用的，窄屏上它在正文下方白占一屏，直接收起 */
+  .worldbook-index { display: none; }
+
+  /* ---- 对话页：桌面 60% 的气泡在手机上只剩 215px，正文近乎竖排 ---- */
+  .chat-stream { padding: 12px 2px; }
+  .bubble-user { max-width: 88%; }
+  .bot-content { max-width: calc(100% - 42px); }
+  /* 高度拖拽把手只监听鼠标事件（触屏拖不动），留着只会误导；输入框回到 rows=4 自适应 */
+  .chat-input-resize-handle { display: none; }
+  .chat-input-bar .rich-input { height: auto !important; min-height: 76px; max-height: 140px; padding-right: 44px; }
+  /* 右下两个浮标（后台活动 / 快捷工具）默认压在发送键上：给它们让出右侧 48px 通道 */
+  .chat-actions { padding-right: 48px; gap: 6px; }
+
+  /* 设置页/弹窗打开时，右下两个圆钮会盖住保存按钮与正文 ⇒ 手机上让位 */
+  .app:has(.settings-page) .support-fab,
+  .app:has(.settings-page) .support-handle,
+  .app:has(.settings-page) .quick-tools-fab,
+  .app:has(.settings-page) .quick-tools-handle,
+  .app:has(.modal-mask) .support-fab,
+  .app:has(.modal-mask) .support-handle,
+  .app:has(.modal-mask) .quick-tools-fab,
+  .app:has(.modal-mask) .quick-tools-handle { display: none; }
 }

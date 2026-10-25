@@ -37,7 +37,7 @@ export function StylePresetModal({
     <>
     <div className="modal-mask">
       <div className="modal" style={{ width: 860, maxWidth: "94vw", maxHeight: "88vh", display: "flex", flexDirection: "column" }} onClick={(e) => e.stopPropagation()}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+        <div className="modal-split-head">
           <h3 style={{ margin: 0 }}>提示词风格存档</h3>
           <button className="icon-btn" style={{ background: "transparent", color: "var(--text)" }} onClick={onClose} aria-label="关闭">
             <X size={18} />
@@ -46,9 +46,9 @@ export function StylePresetModal({
         <p style={{ color: "var(--text-muted)", fontSize: 13, marginTop: 0 }}>
           粘贴一段风格模板（画风、动作/构图/光影结构、负面词，格式随意）。生图时 AI 会模仿它的组织结构来写提示词，不照抄具体内容。
         </p>
-        <div style={{ display: "flex", gap: 12, flex: 1, minHeight: 0 }}>
+        <div className="modal-split-body">
           {/* 左：存档列表 */}
-          <div style={{ width: 220, flexShrink: 0, display: "flex", flexDirection: "column", gap: 6, overflowY: "auto" }}>
+          <div className="modal-split-list">
             {presets.map((p) => (
               <button
                 key={p.id}
@@ -65,7 +65,7 @@ export function StylePresetModal({
             </button>
           </div>
           {/* 右：编辑区 */}
-          <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 8 }}>
+          <div className="modal-split-editor" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {active ? (
               <>
                 <div style={{ display: "flex", gap: 8, alignItems: "center" }}>

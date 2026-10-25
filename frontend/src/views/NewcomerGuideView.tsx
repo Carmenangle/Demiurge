@@ -71,7 +71,7 @@ function StepText({ text, onActivate }: { text: string; onActivate: (link: Guide
   return (
     <>
       {paragraphs.map((p, i) => (
-        <p key={i} style={{ margin: "6px 0", fontSize: 20, lineHeight: 1.8, color: "var(--text)" }}>
+        <p key={i} style={{ margin: "6px 0", fontSize: 20, lineHeight: 1.8, color: "var(--text)", overflowWrap: "anywhere" }}>
           {splitGuideLinks(p).map((seg, j) =>
             seg.link
               ? <GuideLinkChip key={j} link={seg.link} onActivate={onActivate} />

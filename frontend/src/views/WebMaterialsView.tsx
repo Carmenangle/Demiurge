@@ -284,7 +284,7 @@ export function WebMaterialsView({
     <PageShell
       title="上网素材"
       toolbar={
-        <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+        <div className="web-materials-toolbar" style={{ display: "flex", gap: 8, marginBottom: 12 }}>
           <div className="search-field" style={{ flex: 1, position: "relative" }}>
             <Search size={14} style={{ position: "absolute", left: 9, top: 9, color: "var(--text-muted)" }} />
             <input
