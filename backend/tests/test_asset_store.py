@@ -309,7 +309,7 @@ def test_route_tag_stats_reads_sqlite(db):
 # ===== 两段式反推（2026-10-18，对齐 ComfyUI「反推动漫」工作流产物形态）=====
 
 def test_parse_tagged_text_two_paragraphs_and_artist_marker():
-    from app.routers import rag as rag_router
+    from app.services import asset_library
 
     text = (
         "masterpiece, score_9, year 2025, highres, safe, 1girl, liduke, piromizu, "
@@ -317,7 +317,7 @@ def test_parse_tagged_text_two_paragraphs_and_artist_marker():
         "A single girl with blonde hair and red eyes stands confidently, one hand raised "
         "in a peace sign, wearing a pink visor against a stark white background."
     )
-    tags, desc = rag_router.parse_tagged_text(text)
+    tags, desc = asset_library.parse_tagged_text(text)
     assert tags[:6] == ["masterpiece", "score_9", "year 2025", "highres", "safe", "1girl"]
     assert tags.count("liduke") == 1        # 裸名 + @//liduke/ 折算后去重
     assert tags.count("piromizu") == 1
@@ -326,16 +326,16 @@ def test_parse_tagged_text_two_paragraphs_and_artist_marker():
 
 
 def test_parse_tagged_text_tags_only_and_separators():
-    from app.routers import rag as rag_router
+    from app.services import asset_library
 
-    tags, desc = rag_router.parse_tagged_text("1girl, solo，smile; 下划线_tag\nsecond line tag")
+    tags, desc = asset_library.parse_tagged_text("1girl, solo，smile; 下划线_tag\nsecond line tag")
     assert tags == ["1girl", "solo", "smile", "下划线_tag", "second line tag"]
     assert desc == ""
-    assert rag_router.parse_tagged_text("") == ([], "")
-    assert rag_router.parse_tagged_text("   \n\n  ") == ([], "")
+    assert asset_library.parse_tagged_text("") == ([], "")
+    assert asset_library.parse_tagged_text("   \n\n  ") == ([], "")
 
     # 描述段含多个空行：全部归入描述（不被当成标签）
-    tags2, desc2 = rag_router.parse_tagged_text("1girl, smile\n\n第一段描述。\n\n第二段描述。")
+    tags2, desc2 = asset_library.parse_tagged_text("1girl, smile\n\n第一段描述。\n\n第二段描述。")
     assert tags2 == ["1girl", "smile"]
     assert "第一段描述。" in desc2 and "第二段描述。" in desc2
 
@@ -364,6 +364,7 @@ def test_route_tag_text_rejects_empty_tags(db, fake_store):
     """模型没按两段式输出（只给一整句描述）⇒ 不把整句当标签，返回 400 让前端提示重试。"""
     from fastapi import HTTPException
     from app.routers import rag as rag_router
+    from app.services import asset_library
 
     url = "/api/local-view?path=/tmp/tagtext2.png"
     rag_store.index_generation("r1", None, prompt="p", image_url=url)
@@ -371,7 +372,7 @@ def test_route_tag_text_rejects_empty_tags(db, fake_store):
 
     sentence = ("A single girl with blonde hair and red eyes stands confidently in shallow "
                 "water while wearing a pink visor and holding a flower")
-    tags, desc = rag_router.parse_tagged_text(sentence)
+    tags, desc = asset_library.parse_tagged_text(sentence)
     assert tags == [] and desc == sentence          # 护栏：整句 → 描述，不当标签
     with pytest.raises(HTTPException) as ei:
         rag_router.tag_text(rag_router.TagTextRequest(id=doc_id, repo_id="r1", text=sentence))

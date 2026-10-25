@@ -4,29 +4,13 @@
 """
 from typing import Literal
 
-import json
-import re
-import threading
-
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app.services import asset_store, rag_store
+from app.services import asset_library, asset_store, rag_store
 from app.services.rag_backend import EmbedConfig
 
 router = APIRouter()
-
-
-def _asset_db_empty() -> bool:
-    """主表尚未回填（0 行）⇒ 读路径回退 Chroma（旧行为）。
-
-    升级瞬间不能让资产列表变空：未跑 scripts/backfill_asset_db.py 时以向量库为准；
-    主表异常同样回退（列表绝不 500）。
-    """
-    try:
-        return asset_store.count_assets() == 0
-    except Exception:  # noqa: BLE001 [EXC-保留] 主表不可用一律回退（列表绝不 500）
-        return True
 
 
 class _EmbedFields(BaseModel):
@@ -203,47 +187,13 @@ class GenerationsRequest(EmbedAuth):
 def list_generations(req: GenerationsRequest) -> dict[str, object]:
     """列出生成记录（图片+提示词+标签），供仓库详情页图片网格。
 
-    limit>0 时为分页（created_at 倒序）：响应带 has_more 与 **total**（命中的总条数）。
-    - keyset：把上一页末条 created_at 作为 before_ts 传入（新增图不会打乱已有页）；
-    - offset：按偏移取，供「共 N 页 / 直达第 N 页」用（只靠游标前端根本算不出总页数）。
-    media_type 下推到 SQL（2026-10-19）：此前媒体筛选只在前端过滤**已加载项**，
-    聚合页翻页不会为筛选结果取更多 ⇒ 筛「视频」后滚动一直加载却看不到新内容。
-    total 与 items 同口径（都按 media_type 过滤后的计数）。
-    limit=0 时全量返回、has_more=False，行为与改造前一致。
+    读路径策略（主表↔向量库回退）、分页口径（keyset/offset、total 与 items 同口径）
+    见 services/asset_library.list_generations_page（2026-10-24 审计中期项下沉）。
     """
-    fetch = req.limit + 1 if req.limit > 0 else 0
-    media = req.media_type if req.media_type in ("image", "video", "audio") else ""
-    repo_ids = req.repo_ids or [req.repo_id]
-    items: list[dict] | None = None
-    total = 0
-    if not _asset_db_empty():
-        # P1-1 读路径（2026-10-18）：列表/分页/多仓库走 SQLite 主表（元数据真相），
-        # 单查询完成 repo 范围 + 分页 + 媒体类型 —— 不再依赖 Chroma 全量 dump。
-        if req.before_ts > 0:
-            items = asset_store.list_assets(
-                repo_ids, limit=fetch, before_ts=req.before_ts, media_type=media)
-        else:
-            items = asset_store.list_assets(
-                repo_ids, limit=fetch, offset=req.offset, media_type=media)
-        try:
-            total = asset_store.count_assets(repo_ids, deleted=False, media_type=media)
-        except Exception:  # noqa: BLE001 [EXC-保留] 计数失败不该让列表 500（total=0 ⇒ 前端退回虚拟页）
-            total = 0
-    if items is None:
-        # 回退（主表尚未回填）：沿用向量库路径，行为与改造前一致
-        if req.repo_ids:
-            items = rag_store.list_generations_multi(
-                req.repo_ids, req.embed_cfg(), limit=fetch, before_ts=req.before_ts,
-            )
-        else:
-            items = rag_store.list_generations(
-                req.repo_id, req.embed_cfg(), limit=fetch, before_ts=req.before_ts,
-            )
-        total = 0   # 向量库路径不计数 ⇒ 0＝未知，前端退回「虚拟下一页」
-    has_more = req.limit > 0 and len(items) > req.limit
-    if has_more:
-        items = items[:req.limit]
-    return {"items": items, "has_more": has_more, "total": total}
+    return asset_library.list_generations_page(
+        req.repo_id, req.repo_ids, cfg=req.embed_cfg(), limit=req.limit,
+        before_ts=req.before_ts, offset=req.offset, media_type=req.media_type,
+    )
 
 
 class SearchGenerationsRequest(EmbedAuth):
@@ -273,37 +223,12 @@ class GenerateThumbsRequest(EmbedAuth):
 def generate_thumbs(req: GenerateThumbsRequest) -> dict[str, object]:
     """为本仓库历史资产补生成缩略图（P0-2）。只处理本机静态图；远程/裂图跳过。
     幂等可重跑；读路径有 thumb_url_if_ready 兜底发现，无需回写元数据（避免重嵌）。
-    2026-10-18：登记为后台任务（jobs），面板显示 X/N 进度。"""
-    from app.services import jobs, thumbnail_store
-
-    repo_ids = req.repo_ids or [req.repo_id]
-    cfg = req.embed_cfg()
-    per_repo_items = {rid: rag_store.list_generations(rid, cfg) for rid in repo_ids}
-    total = sum(
-        1 for items in per_repo_items.values() for it in items
-        if thumbnail_store.local_path_of_url(str(it.get("image_url") or "")) is not None
-    )
-    job = jobs.create("thumbnails", f"补缩略图（{len(repo_ids)} 仓库）", total)
+    2026-10-18：登记为后台任务（jobs），面板显示 X/N 进度。任务循环见
+    services/asset_library.generate_thumbs（2026-10-24 审计中期项下沉）。"""
     try:
-        generated = skipped = 0
-        for items in per_repo_items.values():
-            for item in items:
-                if jobs.should_cancel(job.id):
-                    break
-                path = thumbnail_store.local_path_of_url(str(item.get("image_url") or ""))
-                if path is None:          # 远程/裂图：不计入 total，也不 tick
-                    skipped += 1
-                    continue
-                if thumbnail_store.ensure_thumb(path) is None:
-                    skipped += 1
-                else:
-                    generated += 1
-                jobs.tick(job.id)
-        jobs.finish(job.id, "cancelled" if jobs.should_cancel(job.id) else "done")
-        return {"ok": True, "generated": generated, "skipped": skipped, "job_id": job.id}
-    except Exception as exc:  # noqa: BLE001
-        jobs.finish(job.id, "failed", str(exc))
-        raise HTTPException(status_code=500, detail=f"补缩略图失败：{exc}") from exc
+        return asset_library.generate_thumbs(req.repo_id, req.repo_ids, req.embed_cfg())
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 class Wd14TagRequest(EmbedAuth):
@@ -316,29 +241,16 @@ def wd14_tag(req: Wd14TagRequest) -> dict[str, object]:
     """对单条资产跑 WD14 反推打标（P0-3），结果合并进 tags（不动原有标签）。
 
     仅支持本机留存图片（远程图取不到字节）；模型未安装回 503 并附下载指引。
+    打标编排见 services/asset_library.wd14_tag_asset（2026-10-24 审计中期项下沉）。
     """
-    from fastapi import HTTPException
-
-    from app.services import thumbnail_store, wd14_tagger
-
-    if not wd14_tagger.model_available():
-        raise HTTPException(
-            status_code=503,
-            detail="WD14 模型未安装：请将 model.onnx 与 selected_tags.csv 放到 "
-                   "data/models/wd14-tagger/（HF: SmilingWolf/wd-swinv2-tagger-v3）",
-        )
-    items = rag_store.list_generations(req.repo_id, req.embed_cfg())
-    item = next((i for i in items if i.get("id") == req.id), None)
-    if item is None:
-        raise HTTPException(status_code=404, detail="资产不存在")
-    path = thumbnail_store.local_path_of_url(str(item.get("image_url") or ""))
-    if path is None:
-        raise HTTPException(status_code=400, detail="仅支持本机留存图片（远程图取不到字节）")
-    tags = wd14_tagger.reverse_tags(path)
-    existing = list(item.get("tags") or [])
-    merged = list(dict.fromkeys([*existing, *tags]))[:32]
-    rag_store.set_doc_tags(req.id, req.repo_id, req.embed_cfg(), merged)
-    return {"ok": True, "added": [t for t in tags if t not in existing], "total": len(merged)}
+    try:
+        return asset_library.wd14_tag_asset(req.id, req.repo_id, req.embed_cfg())
+    except asset_library.TaggerUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except asset_library.AssetMissing as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 class TaggerTagRequest(EmbedAuth):
@@ -356,28 +268,16 @@ def list_taggers() -> dict[str, object]:
 
 @router.post("/tag")
 def tag_generation(req: TaggerTagRequest) -> dict[str, object]:
-    """按指定打标器对单条资产反推打标（合并进 tags，不动原有）。可插拔，见 tagger_registry。"""
-    from fastapi import HTTPException
-
-    from app.services import tagger_registry, thumbnail_store, wd14_tagger
-
-    spec = tagger_registry.resolve(req.model)
-    if not wd14_tagger.model_available(spec.dir):
-        raise HTTPException(503, f"打标模型未安装：{spec.name}（请放到 {spec.dir}）")
-    items = rag_store.list_generations(req.repo_id, req.embed_cfg())
-    item = next((i for i in items if i.get("id") == req.id), None)
-    if item is None:
-        raise HTTPException(status_code=404, detail="资产不存在")
-    path = thumbnail_store.local_path_of_url(str(item.get("image_url") or ""))
-    if path is None:
-        raise HTTPException(status_code=400, detail="仅支持本机留存图片（远程图取不到字节）")
-    tags = [name for name, _score in tagger_registry.predict(req.model, path)]
-    snap = rag_store.add_tag_snapshot(req.id, req.repo_id, req.embed_cfg(), tags,
-                                      model=spec.id, label=spec.name)
-    if snap is None:
-        raise HTTPException(status_code=400, detail="无法写入标签快照（条目被锁定或不存在）")
-    return {"ok": True, "model": spec.id, "snapshot_id": snap["id"],
-            "tags": snap["tags"], "total": len(snap["tags"])}
+    """按指定打标器对单条资产反推打标（合并进 tags，不动原有）。可插拔，见 tagger_registry。
+    打标编排见 services/asset_library.tag_asset_with（2026-10-24 审计中期项下沉）。"""
+    try:
+        return asset_library.tag_asset_with(req.id, req.repo_id, req.model, req.embed_cfg())
+    except asset_library.TaggerUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except asset_library.AssetMissing as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 class TagTextRequest(EmbedAuth):
@@ -389,87 +289,21 @@ class TagTextRequest(EmbedAuth):
     save_description: bool = True
 
 
-# 画师标记 `@//画师名/`（ComfyUI「反推动漫」工作流里 DanbooruGallery 的画师串写法）
-_ARTIST_MARK = re.compile(r"^@//(.+?)/+$")
-
-
-def parse_tagged_text(text: str) -> tuple[list[str], str]:
-    """两段式反推文本 →（标签列表, 描述段）——与 ComfyUI「反推动漫」工作流同构。
-
-    工作流最终产物（PromptStashPassthrough）＝
-        masterpiece, score_9, year 2025, highres, safe, 1girl, liduke, @//liduke/, ...
-        <空行>
-        A single girl with blonde hair ... against a stark white background.
-
-    解析规则（单一真源，前后端不得各写一份）：
-    - 按**空行**切段：第一段是标签行，其余全部拼回＝描述段；
-    - 标签按英文逗号/中文逗号/顿号/分号/换行切分，去引号去空白；
-    - `@//画师名/` 折成 `画师名`（同一画师裸名已存在则不重复，避免存两份）；
-    - 去重保序（大小写不敏感）。
-    """
-    raw = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
-    if not raw:
-        return [], ""
-    parts = re.split(r"\n\s*\n", raw, maxsplit=1)
-    head = parts[0]
-    description = parts[1].strip() if len(parts) > 1 else ""
-    tags: list[str] = []
-    seen: set[str] = set()
-
-    def push(value: str) -> None:
-        value = value.strip().strip("\"'“”‘’")
-        if not value:
-            return
-        artist = _ARTIST_MARK.match(value)
-        if artist:
-            value = artist.group(1).strip()
-        key = value.lower()
-        if key in seen:
-            return
-        seen.add(key)
-        tags.append(value)
-
-    for token in re.split(r"[,，、;；\n]+", head):
-        push(token)
-    # 护栏：模型没按两段式输出（只给了一整句描述、没有逗号）⇒ 不把整句话塞成标签
-    if len(tags) == 1 and len(tags[0].split()) >= 8:
-        merged = head if not description else f"{head}\n\n{description}"
-        return [], merged.strip()
-    return tags, description
-
-
 @router.post("/tag-text")
 def tag_text(req: TagTextRequest) -> dict[str, object]:
     """两段式反推落库：标签行 → 新标签快照；描述段 → 资产描述（重建语义索引）。
 
     视觉推理由前端发起（wire 透传对话模型配置，模型可以是本地 llama.cpp / 云端），
-    后端只做**解析 + 落库**，保证切分规则与快照/描述写入只有一份实现。
+    后端只做**解析 + 落库**。切分规则单一真源 = services/asset_library.parse_tagged_text，
+    落库编排 = save_tag_text（2026-10-24 审计中期项下沉）。
     """
-    tags, description = parse_tagged_text(req.text)
-    if not tags:
-        raise HTTPException(
-            status_code=400,
-            detail="没有解析出标签：第一段应为逗号分隔的 tag 行（第二段描述用空行分隔）",
+    try:
+        return asset_library.save_tag_text(
+            req.id, req.repo_id, text=req.text, model=req.model, label=req.label,
+            save_description=req.save_description, cfg=req.embed_cfg(),
         )
-    cfg = req.embed_cfg()
-    snap = rag_store.add_tag_snapshot(
-        req.id, req.repo_id, cfg, tags, model=req.model, label=req.label,
-    )
-    if snap is None:
-        raise HTTPException(status_code=400, detail="无法写入标签快照（条目被锁定或不存在）")
-    saved_description = False
-    if req.save_description and description:
-        saved_description = rag_store.set_generation_description(
-            req.id, req.repo_id, cfg, description,
-        )
-    return {
-        "ok": True,
-        "snapshot_id": snap["id"],
-        "tags": snap["tags"],
-        "total": len(snap["tags"]),
-        "description": description if saved_description else "",
-        "saved_description": saved_description,
-    }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 class TagSnapshotRequest(EmbedAuth):
@@ -560,33 +394,13 @@ def index_visual_generations(req: GenerationsRequest) -> dict[str, object]:
     """为仓库图片建立独立视觉向量索引。
 
     2026-10-18：登记为**后台任务**（jobs），前端「后台活动」面板轮询 /jobs 显示 X/N 进度条；
-    支持 repo_ids 多仓库一次跑（聚合出一个 1/157 的总进度）；分块编码、可协作式取消。"""
-    from app.services import jobs, visual_asset_index
-
-    repo_ids = req.repo_ids or [req.repo_id]
-    cfg = req.embed_cfg()
+    支持 repo_ids 多仓库一次跑（聚合出一个 1/157 的总进度）；分块编码、可协作式取消。
+    任务循环见 services/asset_library.index_visual_generations（2026-10-24 审计中期项下沉）。
+    """
     try:
-        per_repo_items = {rid: rag_store.list_generations(rid, cfg) for rid in repo_ids}
-        total = sum(visual_asset_index.count_indexable(items) for items in per_repo_items.values())
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=503, detail=f"视觉索引不可用：{exc}") from exc
-
-    job = jobs.create("visual_index", f"视觉索引（{len(repo_ids)} 仓库）", total)
-    try:
-        indexed = skipped = 0
-        for rid, items in per_repo_items.items():
-            if jobs.should_cancel(job.id):
-                break
-            r = visual_asset_index.index_items(
-                rid, items, on_progress=lambda n: jobs.tick(job.id, n),
-            )
-            indexed += int(r.get("indexed") or 0)
-            skipped += int(r.get("skipped") or 0)
-        jobs.finish(job.id, "cancelled" if jobs.should_cancel(job.id) else "done")
-        return {"ok": True, "indexed": indexed, "skipped": skipped, "job_id": job.id}
-    except Exception as exc:  # noqa: BLE001
-        jobs.finish(job.id, "failed", str(exc))
-        raise HTTPException(status_code=503, detail=f"视觉索引不可用：{exc}") from exc
+        return asset_library.index_visual_generations(req.repo_id, req.repo_ids, req.embed_cfg())
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 class _VlmCfg(BaseModel):
@@ -617,31 +431,17 @@ def describe_missing(req: DescribeMissingRequest) -> dict[str, object]:
       ② 切页/刷新即断；
       ③ 本地 8B VLM 全库跑十几分钟，浏览器端没有任何持久化进度。
     现在登记为 job：GET /jobs 轮询可得 X/N，「后台活动」面板显示进度条，可取消。
-    图片从本机磁盘直读（不再绕后端代理 URL → dataURI 那一圈）。
+    任务循环见 services/asset_library.describe_missing_assets（2026-10-24 审计中期项下沉）。
     """
-    from app.services import jobs, vlm_batch
-
-    repo_ids = req.repo_ids or ["home"]
     if not str(req.vlm.model or "").strip() or not str(req.vlm.base_url or "").strip():
         raise HTTPException(status_code=400, detail="未配置视觉模型（设置 → 模型 → 视觉模型）")
-    cfg = req.embed_cfg()
     try:
-        total = len(vlm_batch.missing_description_assets(repo_ids))
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=503, detail=f"资产库不可用：{exc}") from exc
-
-    job = jobs.create("vlm_describe", f"视觉描述（{len(repo_ids)} 仓库）", total)
-
-    def _run() -> None:
-        try:
-            vlm_batch.run_describe_missing(
-                job.id, repo_ids, cfg, req.vlm.model_dump(), req.hint, req.concurrency,
-            )
-        except Exception as exc:  # noqa: BLE001 [EXC-保留] 后台线程兜底：线程内异常不能静默吞掉
-            jobs.finish(job.id, "failed", str(exc))
-
-    threading.Thread(target=_run, daemon=True).start()
-    return {"ok": True, "job_id": job.id, "total": total}
+        return asset_library.describe_missing_assets(
+            req.repo_ids or ["home"], req.vlm.model_dump(), req.hint, req.concurrency,
+            req.embed_cfg(),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.post("/dedup-generations")
@@ -710,64 +510,18 @@ class SearchAssetsRequest(EmbedAuth):
     before_ts: int = 0
 
 
-def _row_tags(row: dict) -> list[str]:
-    """主表 tags_json → 标签列表（兼容裸逗号串/损坏 JSON）。"""
-    raw = row.get("tags_json") or "[]"
-    try:
-        data = json.loads(raw) if isinstance(raw, str) else list(raw)
-        if isinstance(data, list):
-            return [str(t) for t in data if str(t).strip()]
-    except (ValueError, TypeError):
-        pass
-    return [t.strip() for t in str(raw).split(",") if t.strip()]
-
-
-def _fallback_search_chroma(req: SearchAssetsRequest, repo_ids: list[str]) -> list[dict]:
-    """主表未回填时的结构化搜索兜底（内存过滤；仅升级过渡期用，与 FTS5 同语义）。"""
-    cfg = req.embed_cfg()
-    merged: list[dict] = []
-    for rid in repo_ids:
-        merged.extend(rag_store.list_generations(rid, cfg, before_ts=req.before_ts))
-    wanted = [t.strip() for t in req.tags if t.strip()]
-    text = (req.q or "").strip().lower()
-    out: list[dict] = []
-    for it in merged:
-        if req.media_type and it.get("mediaType") != req.media_type:
-            continue
-        if wanted and not all(t in (it.get("tags") or []) for t in wanted):
-            continue
-        if text:
-            hay = "\n".join([
-                it.get("prompt") or "", it.get("description") or "",
-                ",".join(it.get("tags") or []),
-            ]).lower()
-            if text not in hay:
-                continue
-        out.append(it)
-    out.sort(key=lambda d: d.get("created_at", 0), reverse=True)
-    return out
-
-
 @router.post("/search-assets")
 def search_assets(req: SearchAssetsRequest) -> dict[str, object]:
     """结构化搜索：FTS5 全文 + asset_tags 精确 AND + LIKE 兜底（中文子串）。
 
     与 /search-generations（Chroma hybrid 语义检索）**并存**，不是二选一：
-    标签/chips/关键词走这里，语义开关走那里。
+    标签/chips/关键词走这里，语义开关走那里。检索与主表未回填时的内存兜底见
+    services/asset_library.search_assets_page（2026-10-24 审计中期项下沉）。
     """
-    repo_ids = req.repo_ids or [req.repo_id]
-    fetch = req.limit + 1 if req.limit > 0 else 0
-    if _asset_db_empty():
-        items = _fallback_search_chroma(req, repo_ids)
-    else:
-        items = asset_store.search_assets(
-            repo_ids, q=req.q, tags=req.tags, media_type=req.media_type,
-            limit=fetch, before_ts=req.before_ts,
-        )
-    has_more = req.limit > 0 and len(items) > req.limit
-    if has_more:
-        items = items[:req.limit]
-    return {"items": items, "has_more": has_more}
+    return asset_library.search_assets_page(
+        req.repo_id, req.repo_ids, cfg=req.embed_cfg(), q=req.q, tags=req.tags,
+        media_type=req.media_type, limit=req.limit, before_ts=req.before_ts,
+    )
 
 
 class AssetIdRequest(EmbedAuth):
@@ -787,49 +541,14 @@ def restore_asset(req: AssetIdRequest) -> dict[str, object]:
     """从回收站恢复：**先重建向量、成功后才清 deleted_at**。
 
     顺序刻意如此：嵌入失败则保持回收站态（可重试），绝不出现「列表有、语义搜不到」
-    的半状态。旧版随机 uuid 记录恢复后 id 变为 gen-<sha1>，顺手清掉旧空壳行。
+    的半状态。恢复流程见 services/asset_library.restore_asset（2026-10-24 审计中期项下沉）。
     """
-    row = asset_store.get_row(req.id)
-    if row is None:
-        raise HTTPException(status_code=404, detail="回收站里没有这条记录")
-    if row.get("deleted_at") is None:
-        return {"ok": True, "already": True, "id": req.id}
-    repo_id = row.get("repo_id") or req.repo_id
-    cfg = req.embed_cfg()
-    if not (cfg.base_url or cfg.model_dir):
-        # wire 未带嵌入配置（脚本/后端自发调用）⇒ 读运行态真源，避免重建向量报缺协议
-        cfg = rag_store.embed_config_from_state()
-    derived_raw = row.get("derived_from") or "[]"
     try:
-        derived = json.loads(derived_raw) if isinstance(derived_raw, str) else list(derived_raw)
-        if not isinstance(derived, list):
-            derived = []
-    except (ValueError, TypeError):
-        derived = []
-    try:
-        rag_store.index_generation(
-            repo_id, cfg,
-            prompt=row.get("prompt") or "",
-            tags=",".join(_row_tags(row)),
-            image_url=row.get("image_url") or "",
-            created_at=int(row.get("created_at") or 0),
-            description=row.get("description") or "",
-            template_name=row.get("template_name") or "",
-            model_name=row.get("model_name") or "",
-            lora_names=row.get("lora_names") or "",
-            media_type=row.get("media_type") or "image",
-            derived_from=derived,
-            source=row.get("source") or "",
-            source_url=row.get("source_url") or "",
-            source_meta=row.get("source_meta") or "",
-        )
-    except Exception as exc:  # noqa: BLE001 - 重建向量失败：保持回收站态，可重试
-        raise HTTPException(status_code=503, detail=f"恢复失败（重建向量出错）：{exc}")
-    new_id = rag_store.generation_doc_id(repo_id, row.get("image_url") or "")
-    if new_id != req.id:
-        asset_store.delete_rows([req.id])
-    asset_store.restore(new_id)
-    return {"ok": True, "id": new_id}
+        return asset_library.restore_asset(req.id, req.repo_id, req.embed_cfg())
+    except asset_library.AssetMissing as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.post("/assets/purge")
@@ -858,11 +577,10 @@ class TagStatsRequest(EmbedAuth):
 def tag_stats(req: TagStatsRequest) -> dict[str, object]:
     """聚合仓库集合的标签→图片数量（按量降序），供加标签/搜索的输入补全。
 
-    P1-1：主表已回填 ⇒ SQLite 聚合（asset_tags 索引）；否则回退 Chroma 全量扫。
+    主表已回填 ⇒ SQLite 聚合，否则回退 Chroma 全量扫——回退策略见
+    services/asset_library.tag_stats（2026-10-24 审计中期项下沉）。
     """
-    if not _asset_db_empty():
-        return {"items": asset_store.tag_stats(req.repo_ids)}
-    return {"items": rag_store.tag_stats(req.repo_ids, req.embed_cfg())}
+    return asset_library.tag_stats(req.repo_ids, req.embed_cfg())
 
 
 class SetTagsRequest(EmbedAuth):
