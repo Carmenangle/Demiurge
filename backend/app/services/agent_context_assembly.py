@@ -51,7 +51,7 @@ def _render_user_persona(ctx: CtxLike) -> str:
     return head + ("\n" + desc if desc else "")
 
 
-def _bound_card_names(ctx: dict) -> list[str]:
+def _bound_card_names(ctx: CtxLike) -> list[str]:
     names = [str(name).strip() for name in (ctx.get("card_names") or []) if str(name).strip()]
     opening = str(ctx.get("opening_card_name") or ctx.get("card_name") or "").strip()
     if opening and opening not in names:
@@ -108,7 +108,7 @@ def _active_fallback_names(names: list[str], text: str) -> list[str]:
     return selected
 
 
-def _card_source(ctx: dict, selected_name: str = "") -> tuple[str, str]:
+def _card_source(ctx: CtxLike, selected_name: str = "") -> tuple[str, str]:
     """作品用卡/世界书/正则的读取 base：**快照优先**。
 
     新建作品时卡已快照进作品文件夹（<outputDir>/<卡名>/角色卡/）；命中则运行时读快照——
@@ -287,7 +287,8 @@ def _profile_llm_fallback(ctx: CtxLike, scene_spec: dict[str, Any]) -> tuple[str
                         elapsed_seconds=round(now - started, 1),
                         visible_chars=chars[0],
                     )
-                except Exception:
+                except Exception as exc:
+                    _LOG.debug("agent_context_assembly::_on_delta 兜底异常: %s", exc)
                     pass
 
         return _llm.chat_messages_stream(
@@ -397,7 +398,7 @@ def _illustration_appearance(ctx: CtxLike) -> str:
     return selected or str(ctx.get("persona") or "").strip()
 
 
-def _worldbook_session_state_path(ctx: dict) -> str:
+def _worldbook_session_state_path(ctx: CtxLike) -> str:
     """世界书稳定序列的持久化文件路径（2026-09-13 动态区外置配套）。
 
     与 repo 快照同目录（`<output_dir>/<仓库名>/`，见 worldbook_store.repo_snapshot_path），
@@ -411,7 +412,7 @@ def _worldbook_session_state_path(ctx: dict) -> str:
     return str(repo_meta.engine_repo_dir(base, repo_id) / "worldbook_session.json")
 
 
-def _worldbook_session_key(ctx: dict) -> str:
+def _worldbook_session_key(ctx: CtxLike) -> str:
     """世界书稳定序列的会话键（2026-09-12，P4-roleplay 配套）。
 
     取「作品」粒度（output_dir + repo_id/thread_id）：同一作品连续推进的剧情共享一条序列，
@@ -522,7 +523,7 @@ def _resolve_worldbook(ctx: CtxLike, query: str) -> str:
         return ""
 
 
-def _worldbook_greenlight(ctx: dict, entries: list, query: str):
+def _worldbook_greenlight(ctx: CtxLike, entries: list, query: str):
     """P1 每轮绿灯决策（失败/未配置不抛，由调用方判 ran/error 决定是否退回 BM25）。"""
     from app.services import worldbook_greenlight
     try:
@@ -545,7 +546,7 @@ def _worldbook_greenlight(ctx: dict, entries: list, query: str):
     return result
 
 
-def _worldbook_metadata_backfill(ctx: dict, entries: list):
+def _worldbook_metadata_backfill(ctx: CtxLike, entries: list):
     """P1 元数据兜底闭包（挂 schedule_index 后台线程）：缺/过期元数据 ⇒ 补生成写回快照。
 
     返回 None 表示不挂（无 output_dir/repo_id）；有则返回闭包。闭包内部对
@@ -574,7 +575,7 @@ def _worldbook_metadata_backfill(ctx: dict, entries: list):
     return _run
 
 
-def _worldbook_scan_text(ctx: dict, query: str, *, history_chars: int = 1800) -> str:
+def _worldbook_scan_text(ctx: CtxLike, query: str, *, history_chars: int = 1800) -> str:
     """世界书激活窗口：本轮输入 + 最近一组对话，不扫描整段旧历史。"""
     recent: list[str] = []
     for message in reversed(ctx.get("history") or []):
@@ -588,7 +589,7 @@ def _worldbook_scan_text(ctx: dict, query: str, *, history_chars: int = 1800) ->
     return "\n".join(part for part in (history, (query or "").strip()) if part).strip()
 
 
-def _worldbook_sources(ctx: dict) -> list[dict]:
+def _worldbook_sources(ctx: CtxLike) -> list[dict]:
     """读取卡快照/源卡与绑定独立书，仅供首次建立小仓库世界书快照。"""
     from app.services import character_store, worldbook_store
     books: list[dict] = []
@@ -609,7 +610,7 @@ def _worldbook_sources(ctx: dict) -> list[dict]:
     return books
 
 
-def _repo_worldbook(ctx: dict) -> dict | None:
+def _repo_worldbook(ctx: CtxLike) -> dict | None:
     """返回当前小仓库世界书；首次读取从绑定来源复制，之后只读隔离快照。"""
     from app.services import worldbook_store
     output_dir = ctx.get("output_dir") or ""
@@ -622,7 +623,7 @@ def _repo_worldbook(ctx: dict) -> dict | None:
     sources = _worldbook_sources(ctx)
     if not sources:
         return None
-    entries = []
+    entries: list[dict] = []
     for source in sources:
         raw = source.get("entries")
         values = raw.values() if isinstance(raw, dict) else raw
@@ -635,7 +636,7 @@ def _repo_worldbook(ctx: dict) -> dict | None:
 _MECHANISM_COMMENT_PREFIXES = ("系统判定机制", "全局机制", "局部机制")
 
 
-def _curator_writable_indices(ctx: dict, repo_id: str) -> frozenset[int]:
+def _curator_writable_indices(ctx: CtxLike, repo_id: str) -> frozenset[int]:
     """curator 的**可写条目集**＝本轮召回集 **剔除机制层** ＋ **补上在场角色的角色卡**。
 
     2026-09-23 根因修复。原先直接用 `_selected_worldbook_indices`，而 `constant=True` 的条目
@@ -716,10 +717,14 @@ def _curator_worldbook_fn(ctx: CtxLike, repo_id: str):
         for op in ops:
             if not isinstance(op, dict) or str(op.get("op") or "").strip() != "worldbook_update":
                 continue
-            try:
-                index = int(op.get("index"))
-            except (TypeError, ValueError):
+            raw_index = op.get("index")
+            if raw_index is None:  # 原 int(None)→TypeError→None，显式化
                 index = None
+            else:
+                try:
+                    index = int(raw_index)
+                except ValueError:
+                    index = None
             if index not in allowed:
                 rejected.append(index)
         run_trace.emit(
@@ -740,7 +745,7 @@ def _curator_worldbook_fn(ctx: CtxLike, repo_id: str):
     return apply
 
 
-def _resolve_regex_scripts(ctx: dict) -> list:
+def _resolve_regex_scripts(ctx: CtxLike) -> list:
     """合并全局正则 + 本作品卡内嵌正则 → RegexScript 列表。读一次缓存到 ctx。
 
     全局跨作品生效在前，卡内嵌在后（ST 顺序：GLOBAL→SCOPED）。读不到任一侧不影响另一侧。
@@ -868,7 +873,8 @@ def _resolve_preset(
         # 2026-09-04 设置整合：trace 里的 temperature 取 settings 全局（权威源），
         # preset 顶层 sampling 字段保留但仅作旧 settings 迁移期兼容——新链路已迁移完毕。
         # 若 settings 缺该字段，回退 preset 字段。
-        _ps = ctx.get("preset_sampling") if isinstance(ctx.get("preset_sampling"), dict) else {}
+        _ps_raw = ctx.get("preset_sampling")
+        _ps = _ps_raw if isinstance(_ps_raw, dict) else {}
         _t = _ps.get("temperature")
         if not isinstance(_t, (int, float)) or isinstance(_t, bool):
             _t = params.get("temperature")

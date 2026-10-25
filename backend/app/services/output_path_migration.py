@@ -1,6 +1,8 @@
 """输出图片根路径审查与资产迁移。"""
 from __future__ import annotations
 
+from typing import Any, cast
+
 import hashlib
 import json
 import logging
@@ -105,7 +107,7 @@ def _scan_asset_refs(old_root: Path, new_root: Path) -> list[AssetRef]:
             meta = dict(metadata or {})
             if meta.get("kind") != "generation":
                 continue
-            old_url = meta.get("image_url")
+            old_url = str(meta.get("image_url") or "")  # 缺失⇒_local_path("")→None→continue（与原 None 同路径）
             source = _local_path(old_url) if isinstance(old_url, str) else None
             if source is None:
                 continue
@@ -233,28 +235,28 @@ def _copy_files(files: list[tuple[Path, Path]]) -> int:
     return copied
 
 
-def _update_index(refs: list[AssetRef]) -> list[tuple[object, list[str], list[dict]]]:
+def _update_index(refs: list[AssetRef]) -> list[tuple[Any, list[str], list[dict]]]:
     import chromadb
 
     client = chromadb.PersistentClient(path=str(CHROMA_DIR))
     grouped: dict[str, list[AssetRef]] = {}
     for ref in refs:
         grouped.setdefault(ref.collection, []).append(ref)
-    applied: list[tuple[object, list[str], list[dict]]] = []
+    applied: list[tuple[Any, list[str], list[dict]]] = []
     try:
         for name, items in grouped.items():
             collection = client.get_collection(name)
             ids = [item.doc_id for item in items]
             old_metas = [item.metadata for item in items]
             new_metas = [{**item.metadata, "image_url": item.new_url} for item in items]
-            collection.update(ids=ids, metadatas=new_metas)
+            collection.update(ids=ids, metadatas=cast(Any, new_metas))  # chromadb MetadataType stub 过窄
             applied.append((collection, ids, old_metas))
     except Exception as exc:  # noqa: BLE001
         for collection, ids, old_metas in reversed(applied):
             try:
-                collection.update(ids=ids, metadatas=old_metas)
-            except Exception as exc:  # noqa: BLE001 [EXC-留痕] 索引回滚失败（索引可能残留半更新）
-                _LOG.warning("资产索引回滚失败（索引可能残留半更新）: %s", exc)
+                collection.update(ids=ids, metadatas=cast(Any, old_metas))
+            except Exception as rollback_exc:  # noqa: BLE001 [EXC-留痕] 索引回滚失败（索引可能残留半更新）
+                _LOG.warning("资产索引回滚失败（索引可能残留半更新）: %s", rollback_exc)
         raise MigrationError(f"更新资产库索引失败：{exc}") from exc
     return applied
 
@@ -272,12 +274,13 @@ def _rewrite_value(value, destinations: dict[str, Path]) -> tuple[object, int]:
             count += n
         return changed, count
     if isinstance(value, dict):
-        changed, count = {}, 0
+        changed_map: dict[str, object] = {}
+        count = 0
         for key, item in value.items():
             next_value, n = _rewrite_value(item, destinations)
-            changed[key] = next_value
+            changed_map[key] = next_value
             count += n
-        return changed, count
+        return changed_map, count
     return value, 0
 
 
@@ -285,7 +288,9 @@ def _rewrite_json_references(
     files: list[tuple[Path, Path]], extra_candidates: list[Path] | None = None,
 ) -> tuple[list[tuple[Path, bytes]], int]:
     destinations = {_path_key(source): destination for source, destination in files}
-    candidates = [DATA_DIR / "user_state.json"]
+    from app.services import repo_meta
+
+    candidates = [repo_meta.user_state_path()]  # 路径唯一属主（2026-10-24 收口）
     snapshots = DATA_DIR / "chat_snapshots"
     if snapshots.is_dir():
         candidates.extend(snapshots.glob("*.json"))  # 未随作品文件夹迁移的存量会话（回退位置）
@@ -318,7 +323,7 @@ def _rewrite_json_references(
     return backups, count
 
 
-def _rollback_index(applied: list[tuple[object, list[str], list[dict]]]) -> None:
+def _rollback_index(applied: list[tuple[Any, list[str], list[dict]]]) -> None:
     for collection, ids, old_metas in reversed(applied):
         try:
             collection.update(ids=ids, metadatas=old_metas)

@@ -13,6 +13,10 @@ import threading
 from app.config import DATA_DIR
 from app.services.pathnames import safe_seg
 
+import logging
+
+_LOG = logging.getLogger("uvicorn.error")
+
 SNAP_DIR = DATA_DIR / "chat_snapshots"   # 旧位置/未配置仓库文件夹时的回退
 # 中断半成品落盘后缀（唯一属主，三处消费方对齐）：
 #   - generation_store.persist_text(interrupted=True)    → 快照文本拼该后缀（刷新后仍可识别）
@@ -208,7 +212,8 @@ def load(thread_id: str) -> list:
     """读取该 thread 的消息流，无则返回空列表。"""
     try:
         return load_strict(thread_id)
-    except Exception:
+    except Exception as exc:
+        _LOG.debug("chat_snapshot::load 兜底异常: %s", exc)
         return []
 
 
@@ -261,7 +266,8 @@ def load_prompt_history(thread_id: str) -> list[dict] | None:
         return None
     try:
         return to_prompt_history(json.loads(path.read_text(encoding="utf-8")))
-    except Exception:
+    except Exception as exc:
+        _LOG.debug("chat_snapshot::load_prompt_history 兜底异常: %s", exc)
         return []
 
 
@@ -349,7 +355,7 @@ def user_message(mid: str, text: str, images: list[str] | None = None,
                 "mime": item.get("mime", ""),
                 "size": item.get("size", 0),
             })
-    message = {"id": mid, "role": "user", "text": text}
+    message: dict[str, object] = {"id": mid, "role": "user", "text": text}
     if parts:
         message["parts"] = parts
     return message
@@ -479,7 +485,7 @@ def resolve_media_slot(thread_id: str, message_id: str, slot_id: str, url: str,
             for part_index, part in enumerate(parts):
                 if (isinstance(part, dict) and part.get("type") in ("media-slot", "image", "video", "audio")
                         and part.get("slotId") == slot_id):
-                    ready = {"type": kind, "url": url, "slotId": slot_id, "status": "ready"}
+                    ready: dict[str, object] = {"type": kind, "url": url, "slotId": slot_id, "status": "ready"}
                     # 音频分条元数据（角色名/序号/媒体类型提示）随槽位保留：刷新恢复后
                     # 气泡与画布楼层仍能按角色分条展示，不因服务端回填而丢失标签。
                     if isinstance(part, dict) and part.get("kind") == "audio":

@@ -6,6 +6,8 @@
 """
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
@@ -29,7 +31,7 @@ class ScanRequest(BaseModel):
 
 
 @router.post("/scan")
-def scan_loose(req: ScanRequest) -> dict[str, object]:
+def scan_loose(req: ScanRequest) -> dict[str, Any]:
     """扫描角色卡文件夹根目录下手动放入的散装卡文件(.json/.png)，解析入库后删源。
     已设 worldbook_dir 时把内嵌世界书外拆成独立世界书（含存量卡迁移）。供前端刷新时调用。"""
     if not req.base:

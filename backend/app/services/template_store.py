@@ -27,6 +27,8 @@ import re
 import time
 import uuid
 
+from pathlib import Path
+
 from app.config import TEMPLATES_DIR
 
 # 纯文本载体节点（原生 String / PrimitiveString / 自定义 Text）：字段名本身没有语义
@@ -43,7 +45,7 @@ def _ensure_dir() -> None:
     TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def _path(template_id: str) -> "object":
+def _path(template_id: str) -> Path:
     return TEMPLATES_DIR / f"{template_id}.json"
 
 
@@ -147,7 +149,8 @@ def _auto_latent_fields(record: dict, exposed: list[dict]) -> list[dict]:
     if not node_id:
         return exposed
     widgets = node.get("widgets_values")
-    inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+    raw_inputs = node.get("inputs")
+    inputs = raw_inputs if isinstance(raw_inputs, dict) else {}
     width = widgets[0] if isinstance(widgets, list) and len(widgets) > 0 else inputs.get("width", 1024)
     height = widgets[1] if isinstance(widgets, list) and len(widgets) > 1 else inputs.get("height", 1024)
     result = [*exposed]

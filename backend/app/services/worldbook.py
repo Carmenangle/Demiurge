@@ -631,7 +631,6 @@ def assemble_selection_stable(
         recall_pairs = [(i, pos_map[i]) for i in recall_override
                         if i in pos_map and i not in anchor_idx]
 
-    retired_now: list[str] = []
     with _SESSION_LOCK:
         if len(_SESSION_SEQ) >= _SESSION_MAX_SESSIONS and session_key not in _SESSION_SEQ:
             for stale in list(_SESSION_SEQ)[: max(1, _SESSION_MAX_SESSIONS // 2)]:

@@ -4,8 +4,8 @@ from __future__ import annotations
 from typing import Literal, Mapping, TypedDict
 
 
-PROTOCOL = "laf-chat-stream"
-VERSION = 1
+PROTOCOL: Literal["laf-chat-stream"] = "laf-chat-stream"
+VERSION: Literal[1] = 1
 
 
 class ChatStreamEvent(TypedDict):
@@ -50,7 +50,7 @@ def encode_event(event: Mapping[str, object]) -> ChatStreamEvent | None:
     if kind in ("delta", "thinking", "replace"):
         return _wire(kind, {"text": str(event[kind])})
     if kind == "trace":
-        data = {"text": str(event["trace"])}
+        data: dict[str, object] = {"text": str(event["trace"])}
         # 2026-09-06：trace 可携带执行详情（思考文本/工具参数/结果摘要），
         # 前端执行过程面板点开「思考/工具」面板查看；无 detail 不携带（旧前端宽松兼容）。
         detail = event.get("detail")
@@ -88,14 +88,14 @@ def encode_event(event: Mapping[str, object]) -> ChatStreamEvent | None:
         prompt = req.get("prompt", "") if isinstance(req, Mapping) else ""
         motion = req.get("motion", 0) if isinstance(req, Mapping) else 0
         actors = req.get("actors", []) if isinstance(req, Mapping) else []
-        data: dict = {"prompt": str(prompt), "motion": int(motion) if isinstance(motion, (int, float)) else 0,
+        req_data: dict = {"prompt": str(prompt), "motion": int(motion) if isinstance(motion, (int, float)) else 0,
                       "actors": [str(a) for a in actors] if isinstance(actors, list) else []}
         if isinstance(req, Mapping) and isinstance(req.get("scene_spec"), Mapping):
-            data["scene_spec"] = dict(req["scene_spec"])
+            req_data["scene_spec"] = dict(req["scene_spec"])
         if isinstance(req, Mapping) and isinstance(req.get("offset"), (int, float)):
-            data["offset"] = max(0, int(req["offset"]))
+            req_data["offset"] = max(0, int(req["offset"]))
         if isinstance(req, Mapping) and req.get("turn_id"):
-            data["turn_id"] = str(req["turn_id"])
+            req_data["turn_id"] = str(req["turn_id"])
         # V1.5/B1：透传视频协议可选字段（字符串且非空才带，旧数据/旧前端宽松忽略）
         if isinstance(req, Mapping):
             for _field in ("video_mode", "first_frame_desc", "last_frame_desc",
@@ -103,16 +103,16 @@ def encode_event(event: Mapping[str, object]) -> ChatStreamEvent | None:
                            "transition", "transition_video_prompt"):
                 _value = req.get(_field)
                 if isinstance(_value, str) and _value:
-                    data[_field] = _value
+                    req_data[_field] = _value
         # V1.5 默认开放：透传结构化视频参数（dry-run 组装结果，供测试核对参数是否上传）
         if isinstance(req, Mapping) and isinstance(req.get("video_params"), Mapping):
-            data["video_params"] = dict(req["video_params"])
+            req_data["video_params"] = dict(req["video_params"])
         # W3 转场视频参数随事件透传（结构同 video_params，供前端转场任务提交）
         if isinstance(req, Mapping) and isinstance(req.get("transition_video_params"), Mapping):
-            data["transition_video_params"] = dict(req["transition_video_params"])
+            req_data["transition_video_params"] = dict(req["transition_video_params"])
         if event.get("id"):
-            data["id"] = str(event["id"])
-        return _wire("illustrate_request", data)
+            req_data["id"] = str(event["id"])
+        return _wire("illustrate_request", req_data)
     if kind == "audio_request":
         req = event["audio_request"]
         lines: list[dict] = []
@@ -133,19 +133,19 @@ def encode_event(event: Mapping[str, object]) -> ChatStreamEvent | None:
                         if isinstance(emotion.get(key), (int, float))
                     }
                 lines.append(line)
-        data: dict = {"lines": lines}
+        audio_data: dict = {"lines": lines}
         if event.get("id"):
-            data["id"] = str(event["id"])
-        return _wire("audio_request", data)
+            audio_data["id"] = str(event["id"])
+        return _wire("audio_request", audio_data)
     if kind == "insp":
         return _wire("inspiration", {"card": event["insp"]})
     if kind == "rag_status":
         rs = event["rag_status"]
         rs = rs if isinstance(rs, Mapping) else {}
-        data = {"state": str(rs.get("state", "")), "kind": str(rs.get("kind", ""))}
+        rag_data: dict[str, object] = {"state": str(rs.get("state", "")), "kind": str(rs.get("kind", ""))}
         if rs.get("count") is not None:
-            data["count"] = int(rs["count"]) if isinstance(rs["count"], (int, float)) else 0
-        return _wire("rag_status", data)
+            rag_data["count"] = int(rs["count"]) if isinstance(rs["count"], (int, float)) else 0
+        return _wire("rag_status", rag_data)
     if kind == "approval":
         return _wire("approval", {"approval": event["approval"]})
     if kind == "route_choice":

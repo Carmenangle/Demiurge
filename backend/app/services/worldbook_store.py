@@ -975,9 +975,12 @@ def apply_repo_ops(base: str, repo_id: str, ops: list[dict[str, Any]], *,
                 continue
             applied += 1
         elif kind == "worldbook_update" and text and str(op.get("evidence") or "").strip():
+            raw_index = op.get("index")
+            if raw_index is None:  # 原 int(None)→TypeError→continue，显式化
+                continue
             try:
-                index = int(op.get("index"))
-            except (TypeError, ValueError):
+                index = int(raw_index)
+            except ValueError:
                 continue
             if allowed_update_indices is not None and index not in allowed_update_indices:
                 continue

@@ -14,6 +14,10 @@ from __future__ import annotations
 
 from app.services.comfyui_client import fetch_object_info
 
+import logging
+
+_LOG = logging.getLogger("uvicorn.error")
+
 # 模型名 widget 的名字。判定「这个 widget 装的是模型文件」用它。
 MODEL_WIDGETS = frozenset({
     "ckpt_name", "unet_name", "lora_name", "vae_name", "clip_name",
@@ -26,7 +30,8 @@ def options_for(comfy_url: str, class_type: str, widget: str) -> list[str]:
     """某节点某 widget 的合法取值列表。取不到返回 []（调用方据此放行，不误拦）。"""
     try:
         info = fetch_object_info(comfy_url, class_type)
-    except Exception:
+    except Exception as exc:
+        _LOG.debug("model_options::options_for 兜底异常: %s", exc)
         return []
     schema = info.get(class_type) if isinstance(info, dict) else None
     if not isinstance(schema, dict):

@@ -48,7 +48,7 @@ def _ensure_idle(thread_id: str) -> None:
         raise MaintenanceConflict("该对话仍有后台生成任务，请等待完成或先停止")
 
 
-def _revision(history: list[dict]) -> str:
+def _revision(history: list[object]) -> str:
     raw = json.dumps(history, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 

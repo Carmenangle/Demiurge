@@ -134,7 +134,7 @@ def _preprocess(image_path: Path, input_size: int = _INPUT_SIZE, layout: str = "
         if w != h:
             img = ImageOps.pad(img, (max(w, h), max(w, h)),
                                color=(255, 255, 255), centering=(0.5, 0.5))
-        img = img.resize((input_size, input_size), Image.BICUBIC)
+        img = img.resize((input_size, input_size), Image.Resampling.BICUBIC)
     arr = np.asarray(img, dtype=np.float32) / 255.0
     if layout == "NCHW":
         arr = arr.transpose(2, 0, 1)
@@ -170,7 +170,8 @@ def predict(image_path: Path, *, model_dir: Path | str | None = None,
     for (name, category), prob in zip(tags, probs):  # zip 截断防维度错位
         if category == rating_category and not include_rating:
             continue
-        if float(prob) >= thr.get(category, _DEFAULT_THRESHOLD):
+        threshold = thr.get(category, _DEFAULT_THRESHOLD) if category is not None else _DEFAULT_THRESHOLD
+        if float(prob) >= threshold:  # category None ⇒ 默认阈值（与原 get(None) 等值）
             out.append((name, float(prob)))
     out.sort(key=lambda item: item[1], reverse=True)
     return out

@@ -208,7 +208,8 @@ def normalize_card(obj: dict[str, Any]) -> NormalizedCard:
     if not isinstance(obj, dict):
         raise CardParseError("角色卡 JSON 根不是对象")
     spec = _s(obj.get("spec")) or "chara_card_v1"
-    data = obj.get("data") if isinstance(obj.get("data"), dict) else obj
+    raw_data = obj.get("data")
+    data = raw_data if isinstance(raw_data, dict) else obj
 
     def pick(key: str) -> Any:
         # data 优先，缺失回退顶层
@@ -220,9 +221,11 @@ def normalize_card(obj: dict[str, Any]) -> NormalizedCard:
     if not name:
         raise CardParseError("角色卡缺少 name")
 
-    ext = data.get("extensions") if isinstance(data.get("extensions"), dict) else {}
+    raw_ext = data.get("extensions")
+    ext = raw_ext if isinstance(raw_ext, dict) else {}
     book = pick("character_book")
-    regex = ext.get("regex_scripts") if isinstance(ext.get("regex_scripts"), list) else []
+    raw_regex = ext.get("regex_scripts")
+    regex = raw_regex if isinstance(raw_regex, list) else []
 
     return NormalizedCard(
         name=name,

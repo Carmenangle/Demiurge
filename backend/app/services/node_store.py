@@ -10,6 +10,9 @@ from app.services import rag_backend
 from app.services.rag_backend import EmbedConfig
 
 
+_LOG = logging.getLogger("uvicorn.error")
+
+
 NODE_INDEX_COLLECTION = "node_index"
 NODE_CHUNK_COLLECTION = "node_index_chunks_v1"
 
@@ -104,7 +107,8 @@ def node_chunks_ready(cfg: EmbedConfig, pack_id: str) -> bool:
     try:
         data = _store(NODE_CHUNK_COLLECTION, cfg).get(where={"pack_id": pack_id}, limit=1)
         return bool(data.get("ids"))
-    except Exception:
+    except Exception as exc:
+        _LOG.debug("node_store::node_chunks_ready 兜底异常: %s", exc)
         return False
 
 
@@ -125,7 +129,8 @@ def chunk_collection_ready(cfg: EmbedConfig) -> bool:
             for metadata in (data.get("metadatas", []) or [])
             if isinstance(metadata, dict) and metadata.get("pack_id")
         }
-    except Exception:
+    except Exception as exc:
+        _LOG.debug("node_store::chunk_collection_ready 兜底异常: %s", exc)
         actual = set()
     ready = expected == actual
     _NODE_CHUNK_READY_CACHE[cache_key] = ready
@@ -135,7 +140,8 @@ def chunk_collection_ready(cfg: EmbedConfig) -> bool:
 def list_node_packs(cfg: EmbedConfig) -> list[dict]:
     try:
         data = _store(NODE_INDEX_COLLECTION, cfg).get()
-    except Exception:
+    except Exception as exc:
+        _LOG.debug("node_store::list_node_packs 兜底异常: %s", exc)
         return []
     ids = data.get("ids", []) or []
     metadatas = data.get("metadatas", []) or []
@@ -160,7 +166,8 @@ def list_node_packs(cfg: EmbedConfig) -> list[dict]:
 def get_node_pack(cfg: EmbedConfig, pack_id: str) -> dict | None:
     try:
         data = _store(NODE_INDEX_COLLECTION, cfg).get(ids=[pack_id])
-    except Exception:
+    except Exception as exc:
+        _LOG.debug("node_store::get_node_pack 兜底异常: %s", exc)
         return None
     ids = data.get("ids", []) or []
     if not ids:
@@ -187,7 +194,8 @@ def update_node_pack_content(cfg: EmbedConfig, pack_id: str, content: str) -> bo
     store = _store(NODE_INDEX_COLLECTION, cfg)
     try:
         existing = store.get(ids=[pack_id])
-    except Exception:
+    except Exception as exc:
+        _LOG.debug("node_store::update_node_pack_content 兜底异常: %s", exc)
         return False
     if not existing.get("ids"):
         return False
@@ -232,7 +240,8 @@ def _get_bm25(cfg: EmbedConfig, collection: str):
         return None, []
     try:
         data = _store(collection, cfg).get()
-    except Exception:
+    except Exception as exc:
+        _LOG.debug("node_store::_get_bm25 兜底异常: %s", exc)
         return None, []
     packs = []
     corpus = []
@@ -296,11 +305,11 @@ def _rrf_fuse(dense: list[dict], sparse: list[dict], k: int, c: int = 60) -> lis
     scores: dict[str, float] = {}
     by_id: dict[str, dict] = {}
     for rank, item in enumerate(dense):
-        pack_id = item.get("id") or item.get("python_module") or item.get("title")
+        pack_id = str(item.get("id") or item.get("python_module") or item.get("title") or "")
         scores[pack_id] = scores.get(pack_id, 0.0) + 1.0 / (c + rank)
         by_id[pack_id] = item
     for rank, item in enumerate(sparse):
-        pack_id = item.get("id") or item.get("python_module") or item.get("title")
+        pack_id = str(item.get("id") or item.get("python_module") or item.get("title") or "")
         scores[pack_id] = scores.get(pack_id, 0.0) + 1.0 / (c + rank)
         by_id[pack_id] = (
             _merge_candidates([by_id[pack_id], item])[0] if pack_id in by_id else item

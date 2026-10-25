@@ -135,7 +135,7 @@ def get_lora_data_map() -> dict[str, dict]:
 
 def normalize_suggested_weight(value: object) -> float:
     try:
-        weight = float(value)
+        weight = float(value)  # type: ignore[arg-type]  # value 实为 JSON 标量(str/int/float/bool)；其余类型由下方 except 兜 TypeError，属主动态边界
     except (TypeError, ValueError):
         return DEFAULT_SUGGESTED_WEIGHT
     if weight != weight:  # NaN

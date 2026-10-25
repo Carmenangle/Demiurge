@@ -337,6 +337,10 @@ def compile_plan(*, intent: str, history: str = "", attachments: list[dict] | No
             "若本轮其实是全新任务（与上一批无关），忽略该清单按新任务编排。")
     user = _COMPILE_USER.format(history=history, intent=intent,
                                 repo_id=repo_id or "（未指定）", output_dir=output_dir or "（未指定）")
+    from typing import Any as _Any, cast as _cast
+
+    native_chat = _cast(_Any, structured_chat_fn)  # None 时走 legacy（原语义）
+    legacy_chat = _cast(_Any, chat_fn)             # None 时调用失败进重试链（原语义）
     call_args = (chat_base, chat_key, chat_model, system, user)
     call_kwargs: dict[str, Any] = {"temperature": temperature, "max_tokens": 32000,
                                    **(proxy_kwargs or {})}
@@ -365,10 +369,11 @@ def compile_plan(*, intent: str, history: str = "", attachments: list[dict] | No
         try:
             result = structured_output.invoke(
                 GenerationPlan,
-                native=(lambda u=attempt_user: structured_chat_fn(
-                    *call_args[:4], u, schema=GenerationPlan, **call_kwargs))
-                if callable(structured_chat_fn) else None,
-                legacy=lambda u=attempt_user: chat_fn(*call_args[:4], u, **call_kwargs),
+                # 零参闭包（invoke 同步消费，无晚绑定风险）；default-arg lambda 令 mypy 无法推断
+                native=(lambda: native_chat(
+                    *call_args[:4], attempt_user, schema=GenerationPlan, **call_kwargs))
+                if callable(native_chat) else None,
+                legacy=lambda: legacy_chat(*call_args[:4], attempt_user, **call_kwargs),
                 trace=trace,
             )
         except Exception as exc:  # noqa: BLE001 - 解析/截断失败也重试一次
@@ -675,11 +680,12 @@ def fill_prev_batch_prompts(plan, prev: dict | None) -> int:
             source = by_name.get(str(variant.get("name") or "").strip())
             if source is None and same_count:
                 source = prev_variants[index]  # 按序兜底
-            prompt = str((source or {}).get("prompt") or "")
+            src_entry = source or {}
+            prompt = str(src_entry.get("prompt") or "")
             if not prompt:
                 continue
             variant["prompt"] = prompt
-            for key, val in source.items():
+            for key, val in src_entry.items():
                 if key not in ("name", "prompt", "prompt_section", "positive_prompt",
                                "template_id"):
                     variant.setdefault(key, val)

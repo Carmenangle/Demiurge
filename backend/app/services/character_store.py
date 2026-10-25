@@ -86,7 +86,7 @@ def repo_card_base(output_dir: str, repo_id: str, card_name: str) -> str | None:
     if repo_meta.parent_folder_seg(repo_id):
         candidates.append(folder.parent / WORK_CARD_SUBDIR)
     for base in candidates:
-        if (card_dir(base, card_name) / CARD_FILE).is_file():
+        if (card_dir(str(base), card_name) / CARD_FILE).is_file():
             return str(base)
     return work_card_base(output_dir, card_name)
 
@@ -102,7 +102,7 @@ def snapshot_to_work(character_dir: str, card_name: str, work_folder: str) -> bo
     src = card_dir(character_dir, card_name)
     if not (src / CARD_FILE).is_file():
         return False
-    dst = card_dir(Path(work_folder) / WORK_CARD_SUBDIR, card_name)
+    dst = card_dir(str(Path(work_folder) / WORK_CARD_SUBDIR), card_name)
     if (dst / CARD_FILE).is_file():
         return False  # 已快照过 → 隔离不覆盖
     dst.mkdir(parents=True, exist_ok=True)

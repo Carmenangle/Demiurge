@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import io
 
+from typing import cast
+
 from PIL import Image
 
 MAX_COLORS = 256
@@ -62,7 +64,7 @@ def extract(data: bytes, max_colors: int = 16, bit_depth: str = "rgb888",
     """
     n = max(1, min(int(max_colors), MAX_COLORS))
     depth = BIT_DEPTHS.get(bit_depth, BIT_DEPTHS["rgb888"])
-    src = Image.open(io.BytesIO(data))
+    src: Image.Image = Image.open(io.BytesIO(data))
     # 有 alpha 的图先合到白底：透明像素参与量化会引入一个假的「黑色」主色
     if src.mode in ("RGBA", "LA", "P"):
         src = src.convert("RGBA")
@@ -87,7 +89,7 @@ def extract(data: bytes, max_colors: int = 16, bit_depth: str = "rgb888",
     # 吸附会让相邻色并成同一个值：按占比合并，否则调色盘里出现重复色块
     merged: dict[str, int] = {}
     for cnt, idx in counts:
-        base = idx * 3
+        base = cast(int, idx) * 3  # P 模式量化后 color 即调色板下标 int；cast 仅类型面
         if base + 2 >= len(snapped):
             continue
         hx = "#{:02x}{:02x}{:02x}".format(*snapped[base:base + 3])

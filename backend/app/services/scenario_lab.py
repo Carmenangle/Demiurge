@@ -22,6 +22,10 @@ from app.config import CHROMA_DIR, DATA_DIR
 from app.services import repo_meta
 from app.services.pathnames import safe_seg
 
+import logging
+
+_LOG = logging.getLogger("uvicorn.error")
+
 
 SNAPSHOT_ROOT = DATA_DIR / "scenario_snapshots"
 EXPERIMENT_ROOT = DATA_DIR / "scenario_experiments"
@@ -89,14 +93,16 @@ def _export_collections(repo_id: str, target: Path) -> list[dict[str, Any]]:
         import chromadb
 
         client = chromadb.PersistentClient(path=str(CHROMA_DIR))
-    except Exception:
+    except Exception as exc:
+        _LOG.debug("scenario_lab::_export_collections 兜底异常: %s", exc)
         return []
     exported: list[dict[str, Any]] = []
     for name in _collection_names(repo_id):
         try:
             collection = client.get_collection(name)
             raw = collection.get(include=["documents", "metadatas", "embeddings"])
-        except Exception:
+        except Exception as exc:
+            _LOG.debug("scenario_lab::_export_collections 兜底异常: %s", exc)
             continue
         embeddings = raw.get("embeddings")
         payload = {
@@ -223,7 +229,8 @@ def _restore_collections(root: Path, manifest: dict[str, Any], target_repo_id: s
         import chromadb
 
         client = chromadb.PersistentClient(path=str(CHROMA_DIR))
-    except Exception:
+    except Exception as exc:
+        _LOG.debug("scenario_lab::_restore_collections 兜底异常: %s", exc)
         return 0
     restored = 0
     source_repo_id = str(manifest["source_repo_id"])
@@ -254,12 +261,14 @@ def _delete_collections(repo_id: str) -> None:
         import chromadb
 
         client = chromadb.PersistentClient(path=str(CHROMA_DIR))
-    except Exception:
+    except Exception as exc:
+        _LOG.debug("scenario_lab::_delete_collections 兜底异常: %s", exc)
         return
     for name in _collection_names(repo_id):
         try:
             client.delete_collection(name)
-        except Exception:
+        except Exception as exc:
+            _LOG.debug("scenario_lab::_delete_collections 兜底异常: %s", exc)
             continue
 
 

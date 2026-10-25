@@ -61,7 +61,7 @@ def resize(data: bytes, target_w: int = 0, target_h: int = 0, scale: float = 0.0
            sharpen: int = 0, fmt: str = "png",
            quality: int = 92) -> tuple[bytes, int, int, str]:
     """缩放图片，返回 (字节, 宽, 高, mime)。"""
-    src = Image.open(io.BytesIO(data))
+    src: Image.Image = Image.open(io.BytesIO(data))
     # 有 alpha 的保住 alpha；调色板图先转真彩再缩放（P 模式缩放会串色）
     src = src.convert("RGBA" if src.mode in ("RGBA", "LA", "P", "PA") else "RGB")
     tw, th = plan_size(src.width, src.height, target_w, target_h, scale, keep_aspect)

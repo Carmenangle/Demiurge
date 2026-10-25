@@ -7,7 +7,7 @@
 """
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from app.services import narrative_ci, prose_style, structured_output
 from app.services.structured_contracts import BaseModel, Field
@@ -68,7 +68,7 @@ def maybe_review(*, cfg: dict | None, text: str, turn: int,
             StyleReview,
             native=(lambda: structured_chat_fn(*call_args, schema=StyleReview, **call_kwargs))
             if callable(structured_chat_fn) else None,
-            legacy=lambda: chat_fn(*call_args, **call_kwargs),
+            legacy=lambda: cast(Callable, chat_fn)(*call_args, **call_kwargs),  # None 时 lambda 调用走下方 except 降级（原语义）
             trace=trace,
         )
     except Exception as exc:  # noqa: BLE001 - 通审失败静默降级

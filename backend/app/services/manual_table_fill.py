@@ -523,20 +523,20 @@ def run_manual_fill(*, base: str, repo_id: str, card_name: str,
                 produced_here = 0
                 chr_start = max(batch_start, plan.starts[CHRONICLE_UID])
                 for raw_entry in chronicles[:1]:
-                    entry = narrative_memory.parse_rich_summary(
+                    chronicle = narrative_memory.parse_rich_summary(
                         json.dumps(raw_entry, ensure_ascii=False),
                         turn_start=chr_start, turn_end=batch_end,
                     )
                     # 字数门槛：填表 prompt 已写明前提，超写走压缩改写（最多 2 轮，任一达标即收）
-                    if entry is not None and not narrative_memory.chronicle_within_limits(
-                            entry.overview, entry.text):
-                        entry = _compress_to_limits(
+                    if chronicle is not None and not narrative_memory.chronicle_within_limits(
+                            chronicle.overview, chronicle.text):
+                        chronicle = _compress_to_limits(
                             chat_fn, base_url=base_url, api_key=api_key, model=model,
-                            proxy=proxy, entry=entry,
+                            proxy=proxy, entry=chronicle,
                             turn_start=chr_start, turn_end=batch_end)
-                    if entry is not None and narrative_memory.chronicle_within_limits(
-                            entry.overview, entry.text):
-                        generated_entries.append(entry)
+                    if chronicle is not None and narrative_memory.chronicle_within_limits(
+                            chronicle.overview, chronicle.text):
+                        generated_entries.append(chronicle)
                         produced_here += 1
                     else:
                         # 2026-09-13：抽取无效/超限不再静默吞掉（旧逻辑 4–6、7–9 两批

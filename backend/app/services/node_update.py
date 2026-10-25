@@ -30,6 +30,10 @@ from urllib.parse import urlparse
 from app.services import update_progress as up
 from app.services import task_progress_store
 
+import logging
+
+_LOG = logging.getLogger("uvicorn.error")
+
 # 动这些包极易连带弄坏别的插件（推理栈共享依赖），一律先问过用户。
 # 命名按 pip 规范化后比较（小写、-/_ 归一）。
 SENSITIVE = {
@@ -334,6 +338,7 @@ def start(pack_dir: str, python_exe: str = "", proxy: str = "",
                          + f"依赖 {len(planned)} 个、共 {up.human_bytes(total)}。"
                          "重启 ComfyUI 后生效。")
         except Exception as e:
+            _LOG.debug("node_update::run 兜底异常: %s", e)
             _set(running=False, finished=True, phase="done", error=str(e),
                  message=f"更新「{name}」失败：{e}")
 
@@ -453,6 +458,7 @@ def start_install(comfy_path: str, repository: str, python_exe: str = "", proxy:
             _set(running=False, finished=True, phase="done", changed=True,
                  message=f"「{target.name}」安装完成，重启 ComfyUI 后生效。")
         except Exception as e:
+            _LOG.debug("node_update::run 兜底异常: %s", e)
             _set(running=False, finished=True, phase="done", error=str(e),
                  message=f"安装「{target.name}」失败：{e}")
 
@@ -505,6 +511,7 @@ def start_core_switch(comfy_path: str, version: str, proxy: str = "") -> dict:
                  new=new, changed=bool(old and new and old != new),
                  message=f"ComfyUI 已切换到 {target_version}（{old} → {new}），重启后生效。")
         except Exception as e:
+            _LOG.debug("node_update::run 兜底异常: %s", e)
             _set(running=False, finished=True, phase="done", error=str(e),
                  message=f"ComfyUI 版本切换失败：{e}")
 

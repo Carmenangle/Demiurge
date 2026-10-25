@@ -31,7 +31,7 @@ def _headers(api_key: str) -> dict:
 def search_servers(q: str = "", page: int = 1, page_size: int = 20,
                    api_key: str = "", proxy_url: str = "") -> dict:
     """搜索 MCP 服务器。返回 {ok, servers:[...], pagination, error}。"""
-    params = {"page": page, "pageSize": page_size}
+    params: dict[str, str | int] = {"page": page, "pageSize": page_size}
     if q:
         params["q"] = q
     try:
@@ -68,7 +68,7 @@ def connection_url(qualified_name: str, api_key: str) -> str:
 def search_skills(q: str = "", page: int = 1, page_size: int = 20,
                   api_key: str = "", proxy_url: str = "") -> dict:
     """搜索 Smithery skills。返回 {ok, skills:[...], pagination, error}。"""
-    params = {"page": page, "pageSize": page_size}
+    params: dict[str, str | int] = {"page": page, "pageSize": page_size}
     if q:
         params["q"] = q
     try:

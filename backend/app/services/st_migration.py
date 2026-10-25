@@ -230,7 +230,7 @@ def analyze_card(card: character_card.NormalizedCard) -> dict[str, Any]:
         "has_regex": card.has_regex,
         "issues": issues,
     }
-    book_section = analyze_worldbook(card.character_book) if card.has_worldbook else None
+    book_section = analyze_worldbook(card.character_book or {}) if card.has_worldbook else None
     return {
         "card": profile,
         "worldbook": book_section,
@@ -239,8 +239,10 @@ def analyze_card(card: character_card.NormalizedCard) -> dict[str, Any]:
 
 
 def analyze_preset(obj: dict[str, Any]) -> dict[str, Any]:
-    prompts = obj.get("prompts") if isinstance(obj.get("prompts"), list) else []
-    regex = obj.get("regexScripts") if isinstance(obj.get("regexScripts"), list) else []
+    raw_prompts = obj.get("prompts")
+    prompts = raw_prompts if isinstance(raw_prompts, list) else []
+    raw_regex = obj.get("regexScripts")
+    regex = raw_regex if isinstance(raw_regex, list) else []
     leaks = [field for field in ("api_key", "apiKey", "reverse_proxy", "reverseProxy",
                                  "proxy", "authorization", "auth")
              if field in obj]
@@ -370,7 +372,7 @@ def analyze_source(path: str) -> dict[str, Any]:
                 else:
                     scripts = obj.get("regexScripts") or obj.get("regex_scripts") \
                         if isinstance(obj, dict) else obj
-                    report.update(analyze_regex([s for s in scripts if isinstance(s, dict)]))
+                    report.update(analyze_regex([s for s in (scripts or []) if isinstance(s, dict)]))
         else:
             report["kind"] = _kind_of(obj)
             if report["kind"] == "worldbook":
@@ -380,7 +382,7 @@ def analyze_source(path: str) -> dict[str, Any]:
             else:
                 scripts = obj.get("regexScripts") or obj.get("regex_scripts") \
                     if isinstance(obj, dict) else obj
-                report.update(analyze_regex([s for s in scripts if isinstance(s, dict)]))
+                report.update(analyze_regex([s for s in (scripts or []) if isinstance(s, dict)]))
 
     # 常驻预算提醒（§3.3）：book_section 同时兼容卡内嵌（report["worldbook"]）
     # 与独立世界书（report 顶层即 worldbook 结构）两种形态。

@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, cast
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 
 from app.services import (
@@ -263,20 +264,22 @@ def run(ctx: Any, message: str, images: list[str], trace: list[str]) -> dict:
         agent = create_agent(
             model=model, tools=_tools(ctx, root, session, images), system_prompt=system_prompt,
         )
-        messages = []
+        messages: list[BaseMessage] = []
         for item in ctx.get("history") or []:
             content = str(item.get("content") or "")
             if not content:
                 continue
             messages.append(AIMessage(content=content) if item.get("role") == "assistant"
                             else HumanMessage(content=content))
-        current: str | list[dict] = message
+        current: str | list[str | dict[str, Any]] = message
         if images:
             current = [{"type": "text", "text": message}]
             current.extend({"type": "image_url", "image_url": {"url": url}} for url in images)
         messages.append(HumanMessage(content=current))
         run_trace.emit(ctx, "agent.started", agent=specialist.id, project_root=str(root))
-        result = agent.invoke({"messages": messages}, {"recursion_limit": 24})
+        config: RunnableConfig = {"recursion_limit": 24}
+        # create_agent 的 Input 泛型对 messages 元素型过窄（运行时即 BaseMessage 列表），cast 仅类型面
+        result = agent.invoke(cast(Any, {"messages": messages}), config)
         for path, validation in session.verify_changes():
             run_trace.emit(
                 ctx, "edit.validation_succeeded", path=path,

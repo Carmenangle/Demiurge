@@ -73,14 +73,14 @@ def merge_module(base: dict, module_nodes: dict, anchors: list | None = None) ->
         mn = str(a.get("module_node", ""))
         # 正向：模块节点某输入口 接 现有节点输出
         if a.get("module_input") is not None and a.get("base_node") is not None:
-            new_id = id_map.get(mn)
-            if new_id and new_id in graph:
-                graph[new_id]["inputs"][a["module_input"]] = [str(a["base_node"]), a.get("base_output", 0)]
+            mid = id_map.get(mn)
+            if mid and mid in graph:
+                graph[mid]["inputs"][a["module_input"]] = [str(a["base_node"]), a.get("base_output", 0)]
         # 反向：现有节点某输入口 改接 模块节点输出
         elif a.get("base_input") is not None and a.get("base_node") is not None:
             bn = str(a["base_node"])
-            new_id = id_map.get(mn)
-            if bn in graph and new_id:
-                graph[bn]["inputs"][a["base_input"]] = [new_id, a.get("module_output", 0)]
+            mid = id_map.get(mn)
+            if bn in graph and mid:
+                graph[bn]["inputs"][a["base_input"]] = [mid, a.get("module_output", 0)]
 
     return {"graph": graph, "id_map": id_map}

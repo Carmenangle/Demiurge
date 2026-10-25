@@ -22,6 +22,10 @@ from urllib.parse import urlencode
 from app.services import comfyui_client, image_gen, workflow_submission
 from app.services.scene_illustration import FMT_COMFY, FMT_GPT_IMAGE, Renderer, SceneRequest
 
+import logging
+
+_LOG = logging.getLogger("uvicorn.error")
+
 BUILTIN_FORMATS = (FMT_GPT_IMAGE, FMT_COMFY)
 
 
@@ -126,7 +130,8 @@ def comfy_renderer(
             # 超时/任务丢失/异常时取消 ComfyUI 侧任务，防止僵尸/已停任务霸占队列
             try:
                 comfyui_client.interrupt(cfg.url, prompt_id)
-            except Exception:
+            except Exception as exc:
+                _LOG.debug("scene_renderers::render 兜底异常: %s", exc)
                 pass
             raise
         finally:

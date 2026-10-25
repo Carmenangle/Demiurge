@@ -24,6 +24,10 @@ from typing import Callable
 
 from app.config import COMFYUI_BASE_URL
 
+import logging
+
+_LOG = logging.getLogger("uvicorn.error")
+
 
 # ── 数据类 ───────────────────────────────────────────────────────────────────
 
@@ -143,6 +147,7 @@ def device_probe() -> DeviceInfo:
             info.probe_source = "torch_cuda"
             return info
     except Exception as e:
+        _LOG.debug("model_lease::device_probe 兜底异常: %s", e)
         info.probe_error = f"torch.cuda 探测失败：{e}"
 
     # 2. nvidia-smi
@@ -170,6 +175,7 @@ def device_probe() -> DeviceInfo:
     except subprocess.TimeoutExpired:
         info.probe_error = "nvidia-smi 超时"
     except Exception as e:
+        _LOG.debug("model_lease::device_probe 兜底异常: %s", e)
         info.probe_error = f"nvidia-smi 探测失败：{e}"
 
     # 3. 完全不可用
@@ -192,6 +198,7 @@ def comfyui_queue_status(comfyui_url: str) -> ComfyuiQueueStatus:
         resp.raise_for_status()
         q = resp.json()
     except Exception as e:
+        _LOG.debug("model_lease::comfyui_queue_status 兜底异常: %s", e)
         status.probe_error = f"拉取队列失败：{e}"
         return status
 

@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 import httpx
@@ -62,7 +62,7 @@ class _RemoteEmbeddings(Embeddings):
         self._keep_alive = _is_loopback_url(cfg.base_url)
 
     def _embed(self, texts: list[str]) -> list[list[float]]:
-        client_kwargs = {"trust_env": False, "timeout": 120}
+        client_kwargs: dict[str, Any] = {"trust_env": False, "timeout": 120}  # 后塞 proxy(str)，值域必须宽
         if self._proxy:
             client_kwargs["proxy"] = self._proxy
         bounded = [text[:_MAX_REMOTE_TEXT_CHARS] for text in texts]

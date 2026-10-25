@@ -7,6 +7,12 @@ capability_sandbox path 精确租约是执行期闸门，本模块是计划期�
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.services.capability_registry import Capability
+
 import re
 from pathlib import PureWindowsPath
 from typing import Any
@@ -44,7 +50,7 @@ def _requires_generation(intent: str) -> bool:
 
 
 def validate(plan: GenerationPlan, *,
-             capabilities: list[dict],
+             capabilities: Sequence[dict | Capability],
              configured_models: set[str] | frozenset[str] = frozenset(),
              allowed_prefix: str = "") -> list[str]:
     """返回逐条中文错误；空列表=合法计划。capabilities 接受 manifest dict 或 Capability。"""

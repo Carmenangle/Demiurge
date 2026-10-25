@@ -177,7 +177,8 @@ def substitute_macros(text: str, markers: dict[str, str]) -> str:
     for macro_l, key in (("{{lastusermessage}}", "last_user_message"),
                          ("{{lastcharmessage}}", "last_char_message")):
         if key in markers:
-            out = _re_ci(macro_l).sub(lambda _m, v=markers[key]: v, out)
+            v = markers[key]
+            out = _re_ci(macro_l).sub(lambda _m: v, out)
     return out
 
 
@@ -247,7 +248,7 @@ def assemble_system(
             ident = p.get("identifier")
             if ident in _SKIP_MARKERS:
                 continue
-            key = _MARKER_KEYS.get(ident)
+            key = _MARKER_KEYS.get(ident) if isinstance(ident, str) else None
             val = substitute_macros((markers.get(key, "") if key else "").strip(), markers)
             if val:
                 parts.append(val)
@@ -292,7 +293,7 @@ def assemble_messages(
                     if content:
                         msgs.append({"role": h.get("role") or "user", "content": content})
                 continue
-            key = _MARKER_KEYS.get(ident)
+            key = _MARKER_KEYS.get(ident) if isinstance(ident, str) else None
             val = substitute_macros((markers.get(key, "") if key else "").strip(), markers)
             if val:
                 msgs.append({"role": "system", "content": val})
@@ -340,7 +341,8 @@ def select_chains(
         content = (ch.get("content") or "").strip()
         if not content:
             continue
-        when = ch.get("when") if isinstance(ch.get("when"), dict) else {}
+        raw_when = ch.get("when")
+        when = raw_when if isinstance(raw_when, dict) else {}
         if not _chain_matches(when, scene=scene, affinity=affinity, turn=turn):
             continue
         (head if ch.get("position") == "head" else tail).append(content)

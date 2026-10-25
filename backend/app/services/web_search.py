@@ -26,6 +26,10 @@ from typing import Protocol, runtime_checkable
 
 import httpx
 
+import logging
+
+_LOG = logging.getLogger("uvicorn.error")
+
 
 # ── Adapter 协议 ─────────────────────────────────────────────
 
@@ -252,7 +256,8 @@ class DDGSearchAdapter:
                 r = c.get(_DDG_HTML, headers=_HEADERS, params={"q": query})
                 r.raise_for_status()
                 html = r.text
-        except Exception:
+        except Exception as exc:
+            _LOG.debug("web_search::search 兜底异常: %s", exc)
             return []
         out: list[dict] = []
         titles = re.findall(r'result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', html, re.S)
@@ -304,7 +309,8 @@ class BingCnSearchAdapter:
                 r = c.get(_BING_CN, headers=_HEADERS, params={"q": query, "ensearch": "0"})
                 r.raise_for_status()
                 page = r.text
-        except Exception:
+        except Exception as exc:
+            _LOG.debug("web_search::search 兜底异常: %s", exc)
             return []
         links = re.findall(r'<h2[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>', page, re.S)
         snippets = re.findall(r'<p class="[^"]*b_lineclamp[^"]*"[^>]*>(.*?)</p>', page, re.S)
@@ -363,7 +369,8 @@ class MoegirlSearchAdapter:
                     "limit": max_results, "redirects": "resolve"})
                 r.raise_for_status()
                 data = r.json()
-        except Exception:
+        except Exception as exc:
+            _LOG.debug("web_search::search 兜底异常: %s", exc)
             return []
         # 响应形如 [query, [titles], [descs], [urls]]；计数不一致时按最小公共长度取
         if not isinstance(data, list) or len(data) < 4:
@@ -405,7 +412,8 @@ class BingImageSearchAdapter:
                           params={"q": query, "form": "HDRSC2"})
                 r.raise_for_status()
                 html = r.text
-        except Exception:
+        except Exception as exc:
+            _LOG.debug("web_search::search_images 兜底异常: %s", exc)
             return []
         import html as html_lib
         out: list[dict] = []

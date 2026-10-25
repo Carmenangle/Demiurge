@@ -237,9 +237,12 @@ def standalone_execution_prompt(ctx: Any, text: str) -> str:
     user = history_text(ctx) + "本轮执行要求：" + original
     try:
         proxy = (ctx.get("chat_proxy", "") or "").strip()
+        extra: dict[str, Any] = {}  # 仅 proxy 键；Any 让 ** 解包过 chat 的全参槽位
+        if proxy:
+            extra["proxy"] = proxy
         resolved = chat_fn(
             ctx["chat_base"], ctx["chat_key"], ctx["chat_model"],
-            system, user, temperature=0.2, **({"proxy": proxy} if proxy else {}),
+            system, user, temperature=0.2, **extra,
         )
         return (resolved or "").strip() or original
     except Exception:  # noqa: BLE001

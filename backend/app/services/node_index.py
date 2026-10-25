@@ -14,6 +14,10 @@ from app.services import reranker as _reranker
 from app.services.rag_middleware import expand_query as expand_query, plan_queries
 from app.services.rag_backend import EmbedConfig
 
+import logging
+
+_LOG = logging.getLogger("uvicorn.error")
+
 
 # 同步进度（进程内单例，同一时刻只允许一个同步任务）：
 #   running 是否在跑，done/total 已处理/总包数，current 当前包名，
@@ -306,7 +310,8 @@ def search(cfg: EmbedConfig, need: str, k: int = 8) -> list[dict]:
             cfg, [branch.query for branch in branches], k=candidate_k,
             dense_indexes={dense_index},
         )
-    except Exception:
+    except Exception as exc:
+        _LOG.debug("node_index::search 兜底异常: %s", exc)
         raw_groups = [[] for _ in branches]
     raw_groups = [*raw_groups, *([[]] * max(0, len(branches) - len(raw_groups)))]
     groups = [

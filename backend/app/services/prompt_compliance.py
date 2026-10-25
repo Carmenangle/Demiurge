@@ -43,8 +43,10 @@ def evaluate_turn(records: list[dict[str, Any]]) -> dict[str, Any]:
     worldbook = _data(_last(records, "worldbook.resolved"))
     rag = _data(_last(records, "rag.retrieve"))
     table_retrieval = _data(_last(records, "table.retrieve"))
-    messages = request.get("messages") if isinstance(request.get("messages"), list) else []
-    manifest = request.get("prompt_manifest") if isinstance(request.get("prompt_manifest"), list) else []
+    raw_messages = request.get("messages")
+    messages = raw_messages if isinstance(raw_messages, list) else []
+    raw_manifest = request.get("prompt_manifest")
+    manifest = raw_manifest if isinstance(raw_manifest, list) else []
     wire_messages = [message for message in messages if isinstance(message, dict)]
     preset_name = str(context.get("preset_name") or "").strip()
     attached_name = str(request.get("preset") or "").strip()
@@ -65,7 +67,8 @@ def evaluate_turn(records: list[dict[str, Any]]) -> dict[str, Any]:
         outcome = "model_noncompliance"
     else:
         outcome = "ok"
-    hits = rag.get("hits") if isinstance(rag.get("hits"), list) else []
+    raw_hits = rag.get("hits")
+    hits = raw_hits if isinstance(raw_hits, list) else []
     table_hits = int(table_retrieval.get("hit_count") or 0)
     return {
         "outcome": outcome,

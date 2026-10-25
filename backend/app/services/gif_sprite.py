@@ -90,7 +90,7 @@ def compose_sheet(frames: list[Image.Image], cols: int = 0, padding: int = 0,
     sheet_w = per * cw + pad * (per + 1)
     sheet_h = rows * ch + pad * (rows + 1)
     bg = (0, 0, 0, 0) if not background else background
-    sheet = Image.new("RGBA", (sheet_w, sheet_h), bg)  # type: ignore[arg-type]
+    sheet = Image.new("RGBA", (sheet_w, sheet_h), bg)
     for i, fr in enumerate(frames):
         r, c = divmod(i, per)
         x = pad + c * (cw + pad) + (cw - fr.width) // 2

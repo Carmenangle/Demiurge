@@ -29,6 +29,10 @@ from app.services import (
 )
 from app.services.scene_illustration import Renderer, SceneRequest
 
+import logging
+
+_LOG = logging.getLogger("uvicorn.error")
+
 # 好感度是 -100(厌恶)..100(喜爱) 连续标量（字段边界由 character_state 单一属主）。
 # 档位/门控默认由 builtin_agents 单一属主（③ 可被用户覆盖），此处仅做别名，保留旧引用不破坏。
 DEFAULT_TIERS: list[float] = builtin_agents.DEFAULT_TIERS
@@ -250,7 +254,8 @@ def _trace(deps: AgencyDeps, event: str, **data: Any) -> None:
     if deps.trace_fn is not None:
         try:
             deps.trace_fn(event, **data)
-        except Exception:
+        except Exception as exc:
+            _LOG.debug("roleplay_agency::_trace 兜底异常: %s", exc)
             pass
 
 

@@ -76,7 +76,7 @@ def run_multi_stream(context: RunContext) -> "queue.Queue":
         stream_output=context.stream_output,
     )
 
-    def emit(event: AgentEvent) -> None:
+    def emit(event: AgentEvent | dict) -> None:  # 上游两形态都喂（正文事件 dict / wire 事件 AgentEvent）
         if event.get("replace") is not None:
             final_text[:] = [event["replace"]]
             generation_store.persist_text(

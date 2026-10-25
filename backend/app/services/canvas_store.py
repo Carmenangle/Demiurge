@@ -18,6 +18,10 @@ from typing import Any
 
 from app.services import repo_meta
 
+import logging
+
+_LOG = logging.getLogger("uvicorn.error")
+
 
 def _canvas_path(output_dir: str, repo_id: str) -> Path:
     folder = repo_meta.repo_folder(output_dir, repo_id) if output_dir else None
@@ -52,7 +56,8 @@ def load_layout(output_dir: str, repo_id: str) -> dict[str, Any]:
             "reference_images": data.get("reference_images") if isinstance(data.get("reference_images"), list) else [],
             "deleted_ids": data.get("deleted_ids") if isinstance(data.get("deleted_ids"), list) else [],
         }
-    except Exception:
+    except Exception as exc:
+        _LOG.debug("canvas_store::load_layout 兜底异常: %s", exc)
         return empty
 
 

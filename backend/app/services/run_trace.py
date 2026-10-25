@@ -11,6 +11,10 @@ from typing import Any, Mapping
 
 from app.config import DATA_DIR
 
+import logging
+
+_LOG = logging.getLogger("uvicorn.error")
+
 TRACE_DIR = DATA_DIR / "logs"
 TRACE_FILE = TRACE_DIR / "agent-trace.jsonl"
 MAX_BYTES = int(os.environ.get("LAF_AGENT_TRACE_MAX_BYTES", 10 * 1024 * 1024))
@@ -80,7 +84,8 @@ def emit(ctx: Any, event: str, /, **data: Any) -> None:
             _rotate(TRACE_FILE)
             with TRACE_FILE.open("a", encoding="utf-8", newline="\n") as stream:
                 stream.write(line)
-    except Exception:
+    except Exception as exc:
+        _LOG.debug("run_trace::emit 兜底异常: %s", exc)
         return
 
 

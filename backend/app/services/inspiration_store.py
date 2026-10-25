@@ -23,6 +23,10 @@ from uuid import uuid4
 from app.services.comfyui_client import ComfyError
 from app.services import image_store
 
+import logging
+
+_LOG = logging.getLogger("uvicorn.error")
+
 _CARD_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 _LOCK = threading.Lock()
 
@@ -46,7 +50,8 @@ def _read_card(path: Path) -> dict | None:
             return None
         data = json.loads(path.read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else None
-    except Exception:
+    except Exception as exc:
+        _LOG.debug("inspiration_store::_read_card 兜底异常: %s", exc)
         return None
 
 

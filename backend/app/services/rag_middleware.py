@@ -8,6 +8,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+import logging
+
+_LOG = logging.getLogger("uvicorn.error")
+
 
 _QUERY_EXPANSIONS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("出图", "文生图", "生成图片", "text to image", "txt2img"),
@@ -98,5 +102,6 @@ def rewrite_query(need: str, chat_fn, base_url: str, api_key: str,
         )
         keywords = (keywords or "").strip().replace("\n", " ")
         return f"{need} {keywords}" if keywords else need
-    except Exception:
+    except Exception as exc:
+        _LOG.debug("rag_middleware::rewrite_query 兜底异常: %s", exc)
         return need

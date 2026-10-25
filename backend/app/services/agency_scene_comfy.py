@@ -835,7 +835,8 @@ def _wb_frames_and_video(ctx: CtxLike, illustrate_req: dict, scene_spec: dict,
                     first_frame_desc=illustrate_req.get("first_frame_desc") or "",
                     prev_tail_desc=illustrate_req.get("prev_tail_desc") or "",
                 )
-        except Exception:
+        except Exception as exc:
+            _LOG.debug("agency_scene_comfy::_wb_frames_and_video 兜底异常: %s", exc)
             illustrate_req["video_request"] = None
     return video_prompt_text
 

@@ -206,7 +206,7 @@ class _Graph:
             if not name:
                 name = str(item.get("name") or item["widget"].get("name") or "").strip()
             if name:
-                self.overlay.setdefault(flat_id, {})[name] = value
+                self.overlay.setdefault(flat_id or "", {})[name] = value  # flat_id 为 None 时上方已 continue
 
     def linearize_set_get(self) -> None:
         """rgthree Set/Get → 把 Set/Get 的下游直连到该变量的真实源头。

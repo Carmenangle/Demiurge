@@ -8,12 +8,17 @@ import sqlite3
 from typing import Iterator
 
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import START, MessagesState, StateGraph
 
 from app.config import CHECKPOINT_DB
 from app.services import llm as _llm
 from app.services.chat_snapshot import INTERRUPT_MARKER
+
+import logging
+
+_LOG = logging.getLogger("uvicorn.error")
 
 _saver: SqliteSaver | None = None
 
@@ -140,7 +145,7 @@ def get_history(thread_id: str) -> list[dict]:
     返回 [{role, content, images}]，images 为该条消息的图片 URL/dataURI 列表。
     """
     saver = _get_saver()
-    config = {"configurable": {"thread_id": thread_id}}
+    config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
     cp = saver.get(config)
     if not cp:
         return []
@@ -224,6 +229,7 @@ def summarize_history(history: list[dict], llm, generations: list[dict] | None =
                            HumanMessage(content=user_content)])
         summary = _llm.flatten_content(getattr(resp, "content", "")) or ""
     except Exception as e:
+        _LOG.debug("chat_memory::summarize_history 兜底异常: %s", e)
         return {"ok": False, "summary": "", "image_count": len(gens), "error": str(e)}
     if not summary.strip():
         return {"ok": False, "summary": "", "image_count": len(gens)}

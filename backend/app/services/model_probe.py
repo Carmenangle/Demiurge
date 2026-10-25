@@ -1,6 +1,7 @@
 """设置页模型测试：远程只做无计费目录探测，本地执行最小推理。"""
 from __future__ import annotations
 
+from typing import Any
 from pathlib import Path
 
 import httpx
@@ -37,7 +38,7 @@ def probe_remote(kind: str, base_url: str, api_key: str, model_name: str,
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     reachable: list[str] = []
     errors: list[str] = []
-    client_kwargs = {"trust_env": False, "timeout": 12, "follow_redirects": True}
+    client_kwargs: dict[str, Any] = {"trust_env": False, "timeout": 12, "follow_redirects": True}  # 同 rag_backend：后塞 proxy
     if proxy:
         client_kwargs["proxy"] = proxy
     with httpx.Client(**client_kwargs) as client:

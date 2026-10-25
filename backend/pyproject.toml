@@ -10,7 +10,8 @@ select = ["E4", "E7", "E9", "F"]
 ignore = ["E741"]
 
 # mypy 类型门禁：「契约模块」+ 2026-10-23 并入的编排域（agent_agency / agent_graph 及
-# 方案 B 再拆的 9 个新属主）——稳定接缝、零重依赖、签名是别人依赖的真源。
+# 方案 B 再拆的 9 个新属主）+ 2026-10-24 并入的云端生图/生视频（image_gen / video_gen）
+# ——稳定接缝、零重依赖、签名是别人依赖的真源。
 # 不全库开（业务模块历史无注解，全开会淹没门禁）；follow_imports=silent 让被 import 的
 # 非契约模块不冒错。跑：cd backend && .venv/Scripts/python -m mypy @mypy_files.txt
 # ctx 双形态注解见 agent_contracts.CtxLike（RunContext | dict）。

@@ -5,6 +5,8 @@
 """
 
 from __future__ import annotations
+from typing import Callable, cast
+
 from app.services.agent_contracts import CtxLike
 import time
 from app.services import roleplay_turn, run_trace
@@ -16,6 +18,9 @@ from app.services.agent_agency import (  # noqa: F401  跨簇底座
     _video_params_payload,
     _video_request_for,
 )
+import logging
+
+_LOG = logging.getLogger("uvicorn.error")
 
 def _stream_enabled(ctx: CtxLike) -> bool:
     return bool(ctx.get("stream_output")) and callable(ctx.get("stream_sink"))
@@ -32,7 +37,10 @@ def _notify_stream_trace(ctx: CtxLike, message: str, detail: str = "") -> None:
     """
     if not _stream_enabled(ctx):
         return
-    sink = ctx.get("stream_sink")
+    # 闭包内调用 ⇒ mypy 不延续 assert 收窄，用 cast 定型（运行时即同一对象）
+    sink = cast("Callable[[dict], None]", ctx.get("stream_sink"))
+    if not callable(sink):
+        return
     try:
         payload: dict = {"trace": message}
         if detail:
@@ -42,7 +50,7 @@ def _notify_stream_trace(ctx: CtxLike, message: str, detail: str = "") -> None:
         pass
 
 
-def _persist_interrupted_partial(ctx: dict, exc: Exception) -> None:
+def _persist_interrupted_partial(ctx: CtxLike, exc: Exception) -> None:
     """把异常携带的已收**可见正文**按中断语义落快照（best-effort）。
 
     2026-10-20（turn f77e68b1 实锤）：首发断流后 `roleplay_node` 只返回「扮演失败」气泡，
@@ -222,7 +230,8 @@ def _chat_with_optional_stream(ctx: CtxLike, messages: list[dict], *, temperatur
             run_trace.emit(
                 ctx, "model.usage", agent=agent_name, model=model_name, usage=stats,
             )
-        except Exception:
+        except Exception as exc:
+            _LOG.debug("agent_stream::_emit_usage 兜底异常: %s", exc)
             pass
 
     def _emit_finish(meta: dict) -> None:
@@ -230,7 +239,8 @@ def _chat_with_optional_stream(ctx: CtxLike, messages: list[dict], *, temperatur
         #（中转掐流不给结束原因）。2026-08-31 正文截断诊断用。
         try:
             run_trace.emit(ctx, "model.finish", agent=agent_name, model=model_name, **meta)
-        except Exception:
+        except Exception as exc:
+            _LOG.debug("agent_stream::_emit_finish 兜底异常: %s", exc)
             pass
 
     def _abort_probe() -> bool:
@@ -271,7 +281,7 @@ def _chat_with_optional_stream(ctx: CtxLike, messages: list[dict], *, temperatur
 
     from app.services.stream_text import VisibleTextStream
 
-    sink = ctx.get("stream_sink")
+    sink = cast("Callable[[dict], None] | None", ctx.get("stream_sink"))
     deadline = ctx.get("_selfheal_deadline")
     started = time.monotonic()
     # 实时 token 流监测（2026-08-31 深夜用户要求）：正常吐字 1 秒都不到，30s 无任何
@@ -300,7 +310,8 @@ def _chat_with_optional_stream(ctx: CtxLike, messages: list[dict], *, temperatur
                     visible_chars=visible_chars[0],
                     thinking_chars=thinking_chars[0],
                 )
-            except Exception:
+            except Exception as exc:
+                _LOG.debug("agent_stream::_touch_stream 兜底异常: %s", exc)
                 pass
 
     def _check_deadline() -> None:
@@ -324,7 +335,8 @@ def _chat_with_optional_stream(ctx: CtxLike, messages: list[dict], *, temperatur
             _touch_stream(0, len(text))
             # 思考全公开（2026-08-31 晚用户定调）：think 块内容实时送前端思考面板，
             # 正文 delta 仍只含可见文本，两不污染；其余隐藏块（状态更新等）不送。
-            sink({"thinking": text})
+            if callable(sink):
+                sink({"thinking": text})
 
     visible = VisibleTextStream(on_hidden=on_hidden)
 
@@ -333,7 +345,8 @@ def _chat_with_optional_stream(ctx: CtxLike, messages: list[dict], *, temperatur
         text = visible.feed(raw)
         if text:
             _touch_stream(len(text), 0)
-            sink({"delta": text})
+            if callable(sink):
+                sink({"delta": text})
 
     try:
         return _llm.chat_messages_stream(
@@ -349,7 +362,8 @@ def _chat_with_optional_stream(ctx: CtxLike, messages: list[dict], *, temperatur
     finally:
         tail = visible.finish()
         if tail:
-            sink({"delta": tail})
+            if callable(sink):
+                sink({"delta": tail})
         try:
             run_trace.emit(
                 ctx, "model.stream", agent=agent_name,
@@ -358,7 +372,8 @@ def _chat_with_optional_stream(ctx: CtxLike, messages: list[dict], *, temperatur
                 thinking_chars=thinking_chars[0],
                 max_gap_seconds=round(max_gap[0], 1),
             )
-        except Exception:
+        except Exception as exc:
+            _LOG.debug("agent_stream::_chat_with_optional_stream 兜底异常: %s", exc)
             pass
 
 

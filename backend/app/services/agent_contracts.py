@@ -208,6 +208,7 @@ class AgentEvent(TypedDict, total=False):
     approval: dict
     route_choice: dict
     interrupted: bool
+    thinking: str  # 思考流 delta（chat_stream_protocol 已编码；2026-10-24 补登记）
     error: str
     done: bool
     illustrate_request: dict  # 高潮点出图请求（{prompt}）；前端据本地预设模板走异步 ComfyUI 闭环

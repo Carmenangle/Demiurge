@@ -37,7 +37,7 @@ def save_workflow(graph: dict, name: str, workflow_dir: str) -> str:
 # ======================================================================
 # 搭建编排：检索节点 → 拼 prompt → 调模型 → 校验 → 回喂重试。
 # 从路由层下沉（ARCHITECTURE：路由薄、不写循环/业务逻辑）。LLM 调用由调用方
-# 注入 chat_fn（签名同 ai_common.chat），故本服务不 import routers，无循环依赖。
+# 注入 chat_fn（签名同 services.ai_common.chat），wire 适配留在路由，本服务不依赖 HTTP 层。
 # ======================================================================
 
 def _trim_catalog(packs: list[dict], per_pack: int = 1500, total: int = 12000) -> str:
@@ -90,7 +90,7 @@ def _slim_graph_for_prompt(base: dict) -> dict:
         if not isinstance(node, dict):
             slim[nid] = node
             continue
-        new_inputs = {}
+        new_inputs: dict[str, object] = {}
         for k, v in (node.get("inputs") or {}).items():
             if isinstance(v, list) and len(v) == 2 and isinstance(v[0], (str, int)) and isinstance(v[1], int):
                 new_inputs[k] = v                       # 连线 [id, 序号]：原样保留（拓扑关键）

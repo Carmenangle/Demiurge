@@ -17,6 +17,10 @@ from app.services.agent_graph_state import AgentState
 from app.services.agent_support import _proxy_kw
 from app.services.structured_contracts import SupervisorDecision
 
+import logging
+
+_LOG = logging.getLogger("uvicorn.error")
+
 
 
 # 内置 Agent 默认提示词由 builtin_agents 单一属主（③ 可被用户覆盖）；别名保留旧引用不破坏。
@@ -76,6 +80,7 @@ def _supervisor_route(text: str, image_count: int, ctx: CtxLike) -> tuple[str, b
         if r in available:
             return r, True, [], ""
     except Exception as exc:
+        _LOG.debug("agent_graph_supervisor::_supervisor_route 兜底异常: %s", exc)
         run_trace.emit(ctx, "agent.error", agent="supervisor", error=str(exc))
     return "answer", True, [], ""
 

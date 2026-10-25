@@ -12,7 +12,7 @@ import os
 import re
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 _LOG = logging.getLogger("uvicorn.error")
 
@@ -105,7 +105,7 @@ def build_model(base_url: str, api_key: str, model: str,
         kw["timeout"] = _read_timeout  # 公网中转：不带代理也设单次超时(不碰 http_client，保持系统代理通路)。
         #   非流式慢时单次搭建(复杂prompt+长JSON)可能60-120s，给足200s；
         #   流式 60s 无 token 即断（见上）。
-    return init_chat_model(model, **kw)
+    return init_chat_model(model, **cast("dict[str, Any]", kw))  # kw 键集即 chat 构造参数；stub 重载解析不了 dict[str, object]
 
 
 def _make_http_client(base_url: str, proxy: str, timeout: float | None = None):
@@ -846,7 +846,9 @@ def chat_messages_stream(base_url: str, api_key: str, model: str, messages: list
         except _OnDeltaAbort as exc:
             # 回调异常（用户停止等调用方控制流）：原样上抛，不包 RuntimeError
             #（2026-09-04：包了会让普通对话节点把停止显示成「回答失败」）。
-            raise exc.__cause__ from None
+            cause = exc.__cause__
+            assert cause is not None  # _OnDeltaAbort 恒带 cause；若缺失，AssertionError 与原 TypeError 同为立即失败
+            raise cause from None
         except StreamAborted:
             # 用户停止：中断不是失败，不重试（重试=再花一次钱），不包装成错误。
             raise

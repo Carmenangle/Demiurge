@@ -23,7 +23,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 # ── 数据类 ───────────────────────────────────────────────────────────────────
 
@@ -320,12 +320,12 @@ def _meta_dict(m: GgufMeta) -> dict[str, Any]:
 def find_mmproj_for(gguf_dir: str | Path, model_path: str) -> str:
     """为指定主模型找同目录下匹配的 mmproj。优先文件名架构匹配。"""
     root = Path(gguf_dir).expanduser().resolve()
-    model_path = Path(model_path)
+    model = Path(model_path)
     candidates = [p for p in root.rglob("*.gguf") if "mmproj" in p.name.lower()]
     if not candidates:
         return ""
     # 优先同目录
-    same_dir = [p for p in candidates if p.parent == model_path.parent]
+    same_dir = [p for p in candidates if p.parent == model.parent]
     pool = same_dir or candidates
     return str(pool[0])
 
@@ -514,8 +514,8 @@ def import_to_ollama(
     preset = _OLLAMA_PRESETS.get(meta.architecture.lower(), {})
     modelfile = _modelfile_content(
         str(path), mmproj_path,
-        template=preset.get("template", ""),
-        stop=preset.get("stop"),
+        template=str(preset.get("template") or ""),
+        stop=cast("list[str] | None", preset.get("stop")),
     )
 
     try:

@@ -66,7 +66,8 @@ def _build(chat_base: str, chat_key: str, chat_model: str,
     try:
         from app.services import agent_store
         agent_cfg = agent_store.get_agent(agent_id)
-    except Exception:
+    except Exception as exc:
+        _LOG.debug("image_agent::_build 兜底异常: %s", exc)
         agent_cfg = None
 
     _temp = 0.5
@@ -96,6 +97,7 @@ def _build(chat_base: str, chat_key: str, chat_model: str,
             image_sink.append(rec)  # {"id","url"}
             return f"SUCCESS: 已生成图片。提示词：{prompt}"
         except Exception as e:
+            _LOG.debug("image_agent::generate_image 兜底异常: %s", e)
             return f"ERROR: 生图失败：{e}"
 
     @tool
@@ -135,6 +137,7 @@ def _build(chat_base: str, chat_key: str, chat_model: str,
             image_sink.append(rec)
             return f"SUCCESS: 已基于 {len(imgs)} 张参考图生成图片。提示词：{prompt}"
         except Exception as e:
+            _LOG.debug("image_agent::image_to_image 兜底异常: %s", e)
             return f"ERROR: 图生图失败：{e}"
 
     @tool
@@ -157,6 +160,7 @@ def _build(chat_base: str, chat_key: str, chat_model: str,
         except _insp.NoResults:
             return "ERROR: 联网搜索无结果（网络或搜索源不可用）。"
         except Exception as e:
+            _LOG.debug("image_agent::search_inspiration 兜底异常: %s", e)
             return f"ERROR: 找灵感失败：{e}"
 
     from langchain.agents import create_agent
@@ -279,7 +283,8 @@ def stream_agent(thread_id: str, message: str, images: list[str] | None,
                 text = item.get("content") or ""
                 history_messages.append(HumanMessage(content=text) if item.get("role") == "user"
                                         else AIMessage(content=text))
-        except Exception:
+        except Exception as exc:
+            _LOG.debug("image_agent::stream_agent 兜底异常: %s", exc)
             history_messages = []
     if images:
         content: list = [{"type": "text", "text": message or "（见图）"}]
@@ -331,6 +336,7 @@ def stream_agent(thread_id: str, message: str, images: list[str] | None,
             if delta:
                 yield {"delta": delta}
     except Exception as e:
+        _LOG.debug("image_agent::stream_agent 兜底异常: %s", e)
         # 关键：即便后续步骤（如对话模型总结）报错，已生成的图也要先发出去，
         # 否则前端收到 error 立即结束，导致生成成功的图被丢弃。
         while sent_imgs < len(sink):

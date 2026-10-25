@@ -46,7 +46,7 @@ def _knowledge_catalog_text() -> str:
     cfg = agent_knowledge.injection_config()  # 缺省 {} → smart
     mode = str(cfg.get("mode") or agent_knowledge.MODE_SMART)
     force_always = {str(n) for n in (cfg.get("always_docs") or []) if str(n).strip()}
-    skill_lines: list[str] = []
+    skill_lines: list[dict] = []
     legacy: list[dict] = []
     for meta in agent_knowledge.list_docs():
         is_skill = bool(meta.get("skill")) and mode == agent_knowledge.MODE_SMART \
@@ -159,7 +159,8 @@ def _live_trace(ctx: CtxLike, agent: str):
                 return None
             try:
                 return json.dumps(p, ensure_ascii=False)[:400]
-            except Exception:
+            except Exception as exc:
+                _LOG.debug("agent_fabric::_detail 兜底异常: %s", exc)
                 return str(p)[:400]
         if event == "tool.result":
             r = data.get("result")
@@ -168,7 +169,8 @@ def _live_trace(ctx: CtxLike, agent: str):
             try:
                 return (json.dumps(r, ensure_ascii=False)[:500]
                         if not isinstance(r, str) else r[:500])
-            except Exception:
+            except Exception as exc:
+                _LOG.debug("agent_fabric::_detail 兜底异常: %s", exc)
                 return str(r)[:500]
         return None
 
@@ -200,7 +202,8 @@ def _live_chat(ctx: CtxLike):
         if callable(sink):
             try:
                 sink({"trace": text})
-            except Exception:
+            except Exception as exc:
+                _LOG.debug("agent_fabric::_sink 兜底异常: %s", exc)
                 pass
 
     def wrapped(base, key, model, system, user, **kw):
@@ -253,9 +256,11 @@ def _history_summarizer(context: RunContext):
             "用户明确否决的内容、未完成事项。不新增内容、不评论、不提问。只输出摘要正文。")
         started = time.monotonic()
         try:
+            extra: dict[str, Any] = {}
+            if proxy:
+                extra["proxy"] = proxy
             out = _llm.chat(base, key, model, system, transcript, temperature=0.2,
-                            retries=1, timeout=_COMPACT_TIMEOUT_SECONDS,
-                            **({"proxy": proxy} if proxy else {}))
+                            retries=1, timeout=_COMPACT_TIMEOUT_SECONDS, **extra)
         except Exception as exc:  # noqa: BLE001 - 压缩失败退机械裁剪
             run_trace.emit(context, "history.compact",
                            outcome="failed", old_items=len(old),
@@ -412,7 +417,8 @@ def _recent_inspiration_blocks(ctx: Any, limit: int = 2, chars: int = 700) -> st
         for item in chat_snapshot.load(thread_id):
             if isinstance(item, dict) and isinstance(item.get("inspiration"), dict):
                 cards.append(item["inspiration"])
-    except Exception:
+    except Exception as exc:
+        _LOG.debug("agent_fabric::_recent_inspiration_blocks 兜底异常: %s", exc)
         return ""
     if not cards:
         return ""

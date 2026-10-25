@@ -13,7 +13,7 @@ from app.services import run_trace
 
 _LOG = logging.getLogger("uvicorn.error")
 
-def _embed_cfg(ctx: dict):
+def _embed_cfg(ctx: CtxLike):
     """从 ctx 取嵌入配置 → EmbedConfig；缺 base/model → None（无法走语义检索/入库）。"""
     embed_base = (ctx.get("embed_base") or "").strip()
     embed_model = (ctx.get("embed_model") or "").strip()
