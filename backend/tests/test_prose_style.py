@@ -176,7 +176,7 @@ def test_文风注入段禁用破折号且自身不带破折号():
 # ⇒ 它从未被说出口，只活在持久层里被反复重新确认。载体从「单轮 token」换成「跨轮持久层」。
 
 def test_术语棘轮命中_同词跨注入层与正文():
-    injected = "凌渊以“守经脉”为名贴身上前，替她守着经脉。" * 3
+    injected = "洛渊以“守经脉”为名贴身上前，替她守着经脉。" * 3
     bodies = ("她按住他腕上那处经脉，没有说话。", "他指尖顺着经脉往下走了一寸。")
 
     items = prose_style.term_ratchet_report(injected=(injected,), bodies=bodies)
@@ -192,7 +192,7 @@ def test_术语棘轮只躺在注入层不报():
 
     实测：「好感／感度／度表」是「好感度表」的切词碎片，只在注入层。
     """
-    injected = ("【好感分阶·随好感度表·汐颜】好感度越高越黏人。" * 8,)
+    injected = ("【好感分阶·随好感度表·晚颜】好感度越高越黏人。" * 8,)
 
     assert prose_style.term_ratchet_report(injected=injected, bodies=("他什么也没说。",)) == []
     # 正文层缺省（空）同样不出——默认路径不变
@@ -220,19 +220,19 @@ def test_术语棘轮默认不参与lint_默认路径不变():
 
 
 def test_术语棘轮豁免角色名及其切词碎片():
-    """exclude 传名字后，含名字的更长/更短片段也必须一并豁免（妲千／千沁 不许冒出来）。"""
-    injected = ("凌渊看着妲千沁，凌渊没有开口，妲千沁也没有开口。" * 4,)
+    """exclude 传名字后，含名字的更长/更短片段也必须一并豁免（沈映／映澜 不许冒出来）。"""
+    injected = ("洛渊看着沈映澜，洛渊没有开口，沈映澜也没有开口。" * 4,)
 
     items = prose_style.term_ratchet_report(
-        injected=injected, bodies=("妲千沁没有动。凌渊也没有动。",),
-        exclude=("凌渊", "妲千沁"))
+        injected=injected, bodies=("沈映澜没有动。洛渊也没有动。",),
+        exclude=("洛渊", "沈映澜"))
 
-    assert not any(k in i["message"] for i in items for k in ("凌渊", "妲千", "千沁"))
+    assert not any(k in i["message"] for i in items for k in ("洛渊", "沈映", "映澜"))
 
 
 def test_narrative_ci转发棘轮源且缺省不出码():
     text = "她按住他腕上那处经脉，没有说话。" * 2
-    injected = ("凌渊以“守经脉”为名上前，替她守着经脉。",) * 3
+    injected = ("洛渊以“守经脉”为名上前，替她守着经脉。",) * 3
 
     forwarded = [i["code"] for i in narrative_ci.evaluate(
         text, turn=1, style_injected=injected, style_bodies=(text,))]
@@ -257,35 +257,35 @@ def test_术语棘轮剔除虚词边界切词():
 
 
 def test_术语棘轮剔除被更长词解释的碎片():
-    """「天狐」多是以「天狐宫／天狐媚体」的片段出现 ⇒ 判碎片剔除，只留「天狐宫」。"""
-    injected = ("天狐宫的天狐媚体。天狐宫弟子。" * 4,)
+    """「天狐／月宫／霜月」多是以「霜月宫」「天狐媚体」的片段出现 ⇒ 判碎片剔除，只留完整词。"""
+    injected = ("霜月宫的天狐媚体。霜月宫弟子。" * 4,)
 
     got = _terms(prose_style.term_ratchet_report(
-        injected=injected, bodies=("天狐宫。",)))
+        injected=injected, bodies=("霜月宫。",)))
 
-    assert "天狐宫" in got
-    assert "天狐" not in got and "狐宫" not in got
+    assert "霜月宫" in got
+    assert "天狐" not in got and "月宫" not in got and "霜月" not in got
 
 
 def test_术语棘轮按设定存量排序_区分合理高频与无锚点膨胀():
-    """2026-09-23 用户口径：「天狐宫多次出现能理解（主角大半后宫在此、后期势力归男主），
+    """2026-09-23 用户口径：「霜月宫多次出现能理解（主角大半后宫在此、后期势力归男主），
     但经脉——你看设定条目都不怎么提及，就前期提了一嘴，结果一个个女主角找的借口都是经脉」。
 
     判据＝**设定存量 vs 叙事用量**。三档：
       · 经脉（设定里只有 1 处） ⇒ 用量 6 / 存量 1 = 6.0 ⇒ 排第一（无锚点膨胀）
-      · 天狐宫（设定里 3 处）   ⇒ 6 / 3 = 2.0          ⇒ 排第二（设定支撑得住）
+      · 霜月宫（设定里 3 处）   ⇒ 6 / 3 = 2.0          ⇒ 排第二（设定支撑得住）
       · 指腹（设定里从未出现）  ⇒ 日常描写词，排最后，message 单独标注
     """
-    injected = ("经脉、经脉、经脉；天狐宫、天狐宫、天狐宫；指腹、指腹、指腹。",)
+    injected = ("经脉、经脉、经脉；霜月宫、霜月宫、霜月宫；指腹、指腹、指腹。",)
     bodies = injected
-    setting = ("经脉。天狐宫、天狐宫、天狐宫。",)
+    setting = ("经脉。霜月宫、霜月宫、霜月宫。",)
 
     items = prose_style.term_ratchet_report(
         injected=injected, bodies=bodies, setting=setting)
     got = _terms(items)
     msgs = [i["message"] for i in items]
 
-    assert got[:2] == ["经脉", "天狐宫"]
+    assert got[:2] == ["经脉", "霜月宫"]
     assert got[-1] == "指腹"
     assert "设定存量 1 次、用量/存量 6.0" in msgs[0]
     assert "设定存量 3 次、用量/存量 2.0" in msgs[1]
