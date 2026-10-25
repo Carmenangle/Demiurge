@@ -3,8 +3,11 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const gallery = readFileSync(new URL("../components/RepoGallery.tsx", import.meta.url), "utf8");
+// 2026-10-24 RepoGallery 第一刀：反推模式表/VLM prompt/纯 helper 外移 lib/repoGalleryShared——符号断言随属主改指
+const galleryShared = readFileSync(new URL("./repoGalleryShared.ts", import.meta.url), "utf8");
 const assetsView = readFileSync(new URL("../views/PlaceholderViews.tsx", import.meta.url), "utf8");
-const aiApi = readFileSync(new URL("../api/ai.ts", import.meta.url), "utf8");
+// 2026-10-24 api/ai 按资源域拆分：本组锁的 rag 资产合同现居 ai/rag.ts（门面 api/ai 仍全量 re-export）。
+const ragApi = readFileSync(new URL("../api/ai/rag.ts", import.meta.url), "utf8");
 const styles = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
 const indexHtml = readFileSync(new URL("../../index.html", import.meta.url), "utf8");
 const view = readFileSync(new URL("../views/WebMaterialsView.tsx", import.meta.url), "utf8");
@@ -98,7 +101,7 @@ describe("P0-2 缩略图派生层（RepoGallery 契约）", () => {
 
 describe("P0-3 WD14 反推打标（RepoGallery 契约）", () => {
   it("WD14 反推作为统一入口的一个模式存在（2026-10-18 起不再单独占一键）", () => {
-    expect(gallery).toContain("WD14 本地（纯标签）");
+    expect(galleryShared).toContain("WD14 本地（纯标签）");
     // 2026-10-19：wd14 从独立函数并入 reverseOne 的 mode 分支（单图/批量共用一份核心）
     expect(gallery).toContain('if (mode === "wd14") {');
     expect(gallery).toContain("await tagGeneration(taggerModel, g.id, repoId, embed)");
@@ -114,14 +117,14 @@ describe("P0-3 WD14 反推打标（RepoGallery 契约）", () => {
 
 describe("P2-1 素材入库即资产记录（契约）", () => {
   it("Generation 契约带素材来源三字段（可选 ⇒ 兼容无来源的历史记录）", () => {
-    expect(aiApi).toContain("source?: string;");
-    expect(aiApi).toContain("sourceUrl?: string;");
-    expect(aiApi).toContain("sourceMeta?: {");
+    expect(ragApi).toContain("source?: string;");
+    expect(ragApi).toContain("sourceUrl?: string;");
+    expect(ragApi).toContain("sourceMeta?: {");
   });
 
   it("合成仓库常量前后端同值（web-materials），且注明不進仓库选择器", () => {
-    expect(aiApi).toContain('export const WEB_MATERIALS_REPO_ID = "web-materials";');
-    expect(aiApi).toContain("WEB_MATERIALS_REPO_ID");
+    expect(ragApi).toContain('export const WEB_MATERIALS_REPO_ID = "web-materials";');
+    expect(ragApi).toContain("WEB_MATERIALS_REPO_ID");
   });
 
   it("「生成内容」页只聚合真实仓库（上网素材不并入，2026-10-18 用户定案）", () => {
@@ -147,8 +150,8 @@ describe("P2-1 素材入库即资产记录（契约）", () => {
 
 describe("多仓库增量加载（2026-10-18）", () => {
   it("listGenerations 支持数组作用域（发 repo_ids 走后端合并分页）", () => {
-    expect(aiApi).toContain("repo_ids: repoId");
-    expect(aiApi).toContain("const multi = Array.isArray(repoId);");
+    expect(ragApi).toContain("repo_ids: repoId");
+    expect(ragApi).toContain("const multi = Array.isArray(repoId);");
   });
 
   it("资产库聚合页也走分页（不再按仓库数强制全量 dump）", () => {
@@ -203,22 +206,23 @@ describe("标签条观感（2026-10-18 用户实拍：快照下拉与胶囊格�
 
 describe("统一反推入口（2026-10-18 用户定案：一套按钮 + 模式选择）", () => {
   it("只有一个反推按钮，模式用胶囊下拉选（含三种机制）", () => {
-    expect(gallery).toContain("const TAG_MODES");
-    expect(gallery).toContain('label: "VLM 两段式（标签+描述）"');
-    expect(gallery).toContain('label: "WD14 本地（纯标签）"');
-    expect(gallery).toContain('label: "视觉模型（纯标签）"');
+    expect(galleryShared).toContain("const TAG_MODES");
+    expect(gallery).toContain('from "../lib/repoGalleryShared"');  // 组件经门面消费
+    expect(galleryShared).toContain('label: "VLM 两段式（标签+描述）"');
+    expect(galleryShared).toContain('label: "WD14 本地（纯标签）"');
+    expect(galleryShared).toContain('label: "视觉模型（纯标签）"');
     expect(gallery).toContain("onTag={() => runTag(active)}");
     expect(gallery).not.toContain("onAiTag");
   });
 
   it("两段式提示词要求「空行分隔」两段（对齐 ComfyUI 反推动漫产物）", () => {
-    expect(gallery).toContain("VLM_TWO_PARA_PROMPT");
-    expect(gallery).toContain("严格输出两段");
-    expect(gallery).toContain("@//画师名/");
+    expect(galleryShared).toContain("VLM_TWO_PARA_PROMPT");
+    expect(galleryShared).toContain("严格输出两段");
+    expect(galleryShared).toContain("@//画师名/");
   });
 
   it("两段式落库走 /rag/tag-text（标签快照 + 描述写回）", () => {
-    expect(aiApi).toContain('"/rag/tag-text"');
+    expect(ragApi).toContain('"/rag/tag-text"');
     expect(gallery).toContain("tagFromText(g.id, repoId, embed, text");
     expect(gallery).toContain("saveDescription: mode === \"vlm\"");
   });
@@ -247,7 +251,7 @@ describe("快照切换提速 / 复制 / 纯描述模式（2026-10-18 用户反�
   });
 
   it("反推模式增加「视觉描述（只写描述）」——只写描述、不动标签", () => {
-    expect(gallery).toContain('value: "desc"');
+    expect(galleryShared).toContain('value: "desc"');
     expect(gallery).toContain("VISION_DESC_PROMPT");
     expect(gallery).toContain("setGenerationDescription(g.id, repoId, desc");
   });
@@ -307,8 +311,8 @@ describe("VLM 缺口精准提示 vlmGapMessage（2026-10-18 用户配了本地 G
 
 describe("孤儿仓库清理（2026-10-18，建议顺序①）", () => {
   it("前端有 API + 工具栏按钮 + handler", () => {
-    expect(aiApi).toContain('"/rag/prune-orphan-repos"');
-    expect(aiApi).toContain("export function pruneOrphanRepos");
+    expect(ragApi).toContain('"/rag/prune-orphan-repos"');
+    expect(ragApi).toContain("export function pruneOrphanRepos");
     expect(gallery).toContain("const doOrphanPrune = async () => {");
     expect(gallery).toContain("pruneOrphanRepos(embed)");
     expect(gallery).toContain("清理孤儿仓库");
@@ -318,7 +322,7 @@ describe("孤儿仓库清理（2026-10-18，建议顺序①）", () => {
 
 describe("P2-2 多媒体：音频入库/播放（2026-10-18 建议顺序②）", () => {
   it("Generation.mediaType 支持 audio", () => {
-    expect(aiApi).toContain('mediaType?: "image" | "video" | "audio"');
+    expect(ragApi).toContain('mediaType?: "image" | "video" | "audio"');
   });
 
   it("媒体滤镜加「音频」档（全部/图片/视频/音频）", () => {
@@ -361,10 +365,10 @@ describe("P3 键盘导航（2026-10-18 建议顺序③：审 150 张挑图手不
 
 describe("P3 仓库同步（2026-10-18 建议顺序⑤：只读体检 + 一键修复）", () => {
   it("前端有 API（report/fix）+ 工具栏「同步体检」按钮 + 弹窗", () => {
-    expect(aiApi).toContain('"/rag/repo-sync-report"');
-    expect(aiApi).toContain('"/rag/repo-sync-fix"');
-    expect(aiApi).toContain("export function repoSyncReport");
-    expect(aiApi).toContain("export function repoSyncFix");
+    expect(ragApi).toContain('"/rag/repo-sync-report"');
+    expect(ragApi).toContain('"/rag/repo-sync-fix"');
+    expect(ragApi).toContain("export function repoSyncReport");
+    expect(ragApi).toContain("export function repoSyncFix");
     expect(gallery).toContain("同步体检");
     expect(gallery).toContain("<RepoSyncModal");
   });
@@ -383,7 +387,7 @@ describe("批量描述：并发 + 实时进度 + 可暂停（2026-10-18 优化�
   it("批量描述提交后端 job（切页/刷新不断），跑完自动刷新列表", () => {
     expect(gallery).toContain("const [describeJobId, setDescribeJobId] = useState(\"\")");
     expect(gallery).toContain("setDescribeJobId(r.job_id)");
-    expect(aiApi).toContain('"/rag/describe-missing"');
+    expect(ragApi).toContain('"/rag/describe-missing"');
     expect(gallery).toContain("subscribeJobActivities((list) => {");
     expect(jobActivity).toContain('vlm_describe: "视觉描述"');
   });
@@ -489,7 +493,7 @@ describe("统一后台任务进度（2026-10-18：视觉索引/补缩略图/同�
   // 旧实现的坑：聚合页筛「视频」后翻页不会为筛选结果取更多 ⇒ 滚动一直加载却看不到新内容；
   // 且 total 是未筛选的总数 ⇒ 分页条出现「共 10 页但内容只有一页」的假页。
   it("媒体类型筛选下推 SQL（切筛选重取第一页，total 与 items 同口径）", () => {
-    expect(aiApi).toContain("media_type: opts.mediaType ?? \"\"");
+    expect(ragApi).toContain("media_type: opts.mediaType ?? \"\"");
     expect(gallery).toContain("listGenerations(scope, embed, { limit: take, offset: loaded, mediaType: media })");
     // 切筛选 ⇒ 旧列表作废、从第一页重取
     expect(gallery).toContain("}, [mediaFilter]);");

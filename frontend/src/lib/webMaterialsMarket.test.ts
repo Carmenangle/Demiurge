@@ -8,7 +8,7 @@ const view = readFileSync(new URL("../views/WebMaterialsView.tsx", import.meta.u
 const modal = readFileSync(new URL("../components/MaterialMarketModalLive.tsx", import.meta.url), "utf8");
 const detail = readFileSync(new URL("../components/WebMaterialDetailModal.tsx", import.meta.url), "utf8");
 const appBody = readFileSync(new URL("../AppBody.tsx", import.meta.url), "utf8");
-const api = readFileSync(new URL("../api/ai.ts", import.meta.url), "utf8");
+const api = readFileSync(new URL("../api/ai/webMaterials.ts", import.meta.url), "utf8"); // 2026-10-24 拆分：素材合同在 webMaterials 域
 const tokens = readFileSync(new URL("../views/settings/TokensPanel.tsx", import.meta.url), "utf8");
 const settings = readFileSync(new URL("../stores/settings.ts", import.meta.url), "utf8");
 

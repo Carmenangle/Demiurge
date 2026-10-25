@@ -5,7 +5,8 @@ import { describe, expect, it } from "vitest";
 import { parseAssetQuery, removeTagFromQuery } from "./assetQuery";
 
 const gallery = readFileSync(new URL("../components/RepoGallery.tsx", import.meta.url), "utf8");
-const api = readFileSync(new URL("../api/ai.ts", import.meta.url), "utf8");
+// 2026-10-24 api/ai 按资源域拆分：结构化搜索/回收站合同现居 ai/rag.ts。
+const ragApi = readFileSync(new URL("../api/ai/rag.ts", import.meta.url), "utf8");
 
 describe("tag: 语法解析（P1-3）", () => {
   it("tag: 词项进 tags，其余进自由文本；多标签去重保序", () => {
@@ -31,17 +32,17 @@ describe("tag: 语法解析（P1-3）", () => {
 
 describe("P1 前端接线契约", () => {
   it("结构化搜索走 /search-assets（FTS5），不与语义搜索混用", () => {
-    expect(api).toContain('"/rag/search-assets"');
-    expect(api).toContain("export function searchAssets");
+    expect(ragApi).toContain('"/rag/search-assets"');
+    expect(ragApi).toContain("export function searchAssets");
     expect(gallery).toContain("searchAssets(repoIds, embed");
     expect(gallery).toContain("parseAssetQuery");
   });
 
   it("回收站接四个端点（列表/恢复/彻底删除/清空）", () => {
-    expect(api).toContain('"/rag/assets/trash"');
-    expect(api).toContain('"/rag/assets/restore"');
-    expect(api).toContain('"/rag/assets/purge"');
-    expect(api).toContain('"/rag/assets/trash-clear"');
+    expect(ragApi).toContain('"/rag/assets/trash"');
+    expect(ragApi).toContain('"/rag/assets/restore"');
+    expect(ragApi).toContain('"/rag/assets/purge"');
+    expect(ragApi).toContain('"/rag/assets/trash-clear"');
   });
 
   it("回收站视图：恢复/彻底删除按钮 + 清空 + 退出", () => {

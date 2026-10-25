@@ -147,7 +147,7 @@ describe("资产库详情重排 + 画布节点缩略图（2026-10-16 建议落�
 
 describe("生成溯源元数据链路（模板 / 模型 / LoRA 能真的显示出来）", () => {
   it("入库端点请求模型与前端 API 都带三个字段（否则经此链路的图永久为空）", () => {
-    const api = readFileSync("src/api/ai.ts", "utf-8");
+    const api = readFileSync("src/api/ai/rag.ts", "utf-8"); // 2026-10-24 api/ai 拆分：溯源元数据链在 rag 域
     expect(api).toContain("template_name?: string; model_name?: string; lora_names?: string;");
     expect(api).toContain('template_name: data.template_name || ""');
   });

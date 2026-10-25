@@ -38,9 +38,11 @@ describe("后台活动轮询契约", () => {
   it("面板其余四个轮询源都必须带超时（无超时会让轮询链静默断掉）", () => {
     const jobs = read("../api/jobs.ts");
     expect(jobs).toContain("POLL_TIMEOUT_MS");
-    const ai = read("../api/ai.ts");
-    expect(ai).toContain('"/ai/image-agent/running-threads", POLL_TIMEOUT_MS');
-    expect(ai).toContain("POLL_TIMEOUT_MS,");
+    // 2026-10-24 api/ai 按资源域拆分：running-threads 在 ai/agent.ts，chat-queue 在 ai/chatQueue.ts
+    const agentApi = read("../api/ai/agent.ts");
+    expect(agentApi).toContain('"/ai/image-agent/running-threads", POLL_TIMEOUT_MS');
+    const chatQueueApi = read("../api/ai/chatQueue.ts");
+    expect(chatQueueApi).toContain("POLL_TIMEOUT_MS,");
     const plans = read("./planTaskActivity.ts");
     expect(plans).toContain('apiGet<PlanTask[]>("/plans?limit=10", 8000)');
   });
