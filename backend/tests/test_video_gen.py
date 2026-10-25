@@ -121,3 +121,24 @@ def test_generate_with_images_requires_images(monkeypatch):
     _fake_client(monkeypatch)
     with pytest.raises(ValueError, match="至少一张参考图"):
         video_gen.generate_with_images("https://x.com/v2/videos/generations", "k", "m", "p", [])
+
+
+def test_generate_显式代理传入http客户端(monkeypatch):
+    """F 刀（2026-10-24）：video_gen 两处客户端改复用 image_gen.build_http_client 后，
+    显式代理 + trust_env=False 的语义不变（与 image_gen 侧同判据）。"""
+    calls = _fake_client(monkeypatch)
+
+    video_gen.generate("https://x.com/v1/video/generations", "k", "m", "p",
+                       proxy="http://127.0.0.1:7897")
+
+    assert calls["client_kwargs"]["proxy"] == "http://127.0.0.1:7897"
+    assert calls["client_kwargs"]["trust_env"] is False
+
+
+def test_generate_无代理时不传proxy键(monkeypatch):
+    """空代理不传键（不是传 None）——与 image_gen._load_image_bytes 的 local-view 旁路同语义。"""
+    calls = _fake_client(monkeypatch)
+
+    video_gen.generate("https://x.com/v1/video/generations", "k", "m", "p")
+
+    assert "proxy" not in calls["client_kwargs"]

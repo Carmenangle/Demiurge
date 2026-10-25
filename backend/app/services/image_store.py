@@ -58,43 +58,54 @@ def _download_external_url(url: str, max_bytes: int = 20 * 1024 * 1024) -> bytes
 
     旧实现用 urllib.urlopen：默认自动跟随重定向，重定向目标完全不校验，
     外部 URL 可 302 跳到私网/metadata 地址，把内网响应下载回作品目录。
-    改为 httpx follow_redirects=False + 每跳 validate_media_url 校验通过才发下一跳。
+    改为 httpx follow_redirects=False + 每跳「校验+钉扎→建连」（pinned_media_url：
+    连接只用校验解析到的 IP，rebinding 在校验与建连之间换 IP 无效，见 url_guard）。
     trust_env 保持默认 True，保留「外部 URL 走系统代理」的既有通路。
 
     2026-10-16：图站 CDN 分支改走 `material_sources.fetch_image_bytes`——那里有
     host 白名单（防 SSRF，等价或更严）+ curl 优先通路 + 带 Referer/UA 解防盗链
     （用户实测「下载失败 403 Forbidden」即缺 Referer 所致）。
     """
-    from app.services.url_guard import validate_media_url
+    from app.services.url_guard import pinned_media_url
 
-    current = validate_media_url(url)
-    host = (httpx.URL(current).host or "").lower()
-    if any(host == h or host.endswith("." + h) for h in _IMAGE_SOURCE_HOSTS):
-        from app.services import material_sources
-        from app.services.repo_meta import setting_str_from_state
-
-        px = (setting_str_from_state("systemProxyUrl")
-              or setting_str_from_state("proxyUrl"))
-        try:
-            data, _ctype = material_sources.fetch_image_bytes(current, proxy=px)
-        except RuntimeError as exc:
-            raise ComfyError(f"下载图片失败：{exc}", 502) from exc
-        if len(data) > max_bytes:
-            raise ComfyError(f"下载超过 {max_bytes // (1024 * 1024)}MB 上限", 400)
-        return data
-
+    current = url
     with httpx.Client(follow_redirects=False, timeout=30,
                       headers={"User-Agent": "Demiurge/1.0"}) as client:
-        for _ in range(5):
-            resp = client.get(current)
-            if resp.status_code in (301, 302, 303, 307, 308):
-                location = (resp.headers.get("location") or "").strip()
-                if not location:
-                    raise ComfyError("重定向响应缺少 Location", 502)
-                try:
-                    current = validate_media_url(str(httpx.URL(current).join(location)))
-                except ValueError as exc:
-                    raise ComfyError(f"重定向目标被拒：{exc}", 400) from exc
+        for hop in range(5):
+            redirect = False
+            try:
+                with pinned_media_url(current) as pinned:
+                    host = (httpx.URL(pinned).host or "").lower()
+                    if any(host == h or host.endswith("." + h) for h in _IMAGE_SOURCE_HOSTS):
+                        from app.services import material_sources
+                        from app.services.repo_meta import setting_str_from_state
+
+                        px = (setting_str_from_state("systemProxyUrl")
+                              or setting_str_from_state("proxyUrl"))
+                        try:
+                            data, _ctype = material_sources.fetch_image_bytes(pinned, proxy=px)
+                        except RuntimeError as exc:
+                            raise ComfyError(f"下载图片失败：{exc}", 502) from exc
+                        if len(data) > max_bytes:
+                            raise ComfyError(f"下载超过 {max_bytes // (1024 * 1024)}MB 上限", 400)
+                        return data
+
+                    resp = client.get(pinned)
+                    if resp.status_code in (301, 302, 303, 307, 308):
+                        location = (resp.headers.get("location") or "").strip()
+                        if not location:
+                            raise ComfyError("重定向响应缺少 Location", 502)
+                        # 下一跳由下一轮 pinned_media_url 校验+钉扎后才建连
+                        current = str(httpx.URL(pinned).join(location))
+                        redirect = True
+            except ValueError as exc:
+                # ComfyError 不是 ValueError 子类，不受此分支影响。
+                # 首跳＝原始 URL 校验失败（保持 ValueError，由 _from_src 统一转 400）；
+                # 后续跳＝重定向目标被拒。
+                if hop == 0:
+                    raise
+                raise ComfyError(f"重定向目标被拒：{exc}", 400) from exc
+            if redirect:
                 continue
             resp.raise_for_status()
             chunks: list[bytes] = []
@@ -125,6 +136,7 @@ def _from_src(src: str) -> tuple[bytes, str]:
             ext = header.split("video/")[1].split(";")[0] or "mp4"
         return data, ext
     # 校验外部 URL 防 SSRF；本应用 local-view 代理地址豁免（已在后端可信路径落盘）
+    from app.services import view_urls
     from app.services.url_guard import is_local_view_url, validate_media_url
     if not is_local_view_url(src):
         try:
@@ -139,7 +151,9 @@ def _from_src(src: str) -> tuple[bytes, str]:
         if is_local_view_url(src):
             import urllib.request
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-            with opener.open(src, timeout=30) as r:
+            # local-view 的 wire 形态是根相对（属主 view_urls），urllib 只吃绝对地址
+            # ⇒ 先按本机实际监听端口拼回 origin；已是绝对地址的原样通过。
+            with opener.open(view_urls.fetchable(src), timeout=30) as r:
                 data = r.read(20 * 1024 * 1024)  # 最大 20 MB，防超大文件撑爆内存
         else:
             data = _download_external_url(src)

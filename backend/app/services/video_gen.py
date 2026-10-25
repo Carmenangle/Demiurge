@@ -13,7 +13,7 @@ import time
 
 import httpx
 
-from app.services.image_gen import multipart_image_files
+from app.services.image_gen import build_http_client, multipart_image_files
 
 # 轮询上限：视频生成普遍较慢，最长约 5 分钟（60 次 * 5 秒）。
 _POLL_INTERVAL = 5.0
@@ -128,10 +128,7 @@ def generate(base_url: str, api_key: str, model: str, prompt: str,
     headers = {"Authorization": f"Bearer {api_key or 'not-needed'}",
                "Content-Type": "application/json"}
     payload = {"model": model, "prompt": prompt, "size": size}
-    client_kwargs = {"trust_env": False, "timeout": 300}
-    if proxy:
-        client_kwargs["proxy"] = proxy
-    with httpx.Client(**client_kwargs) as c:
+    with build_http_client(proxy, 300) as c:
         return _submit_and_resolve(c, url, headers, json=payload)
 
 
@@ -151,8 +148,5 @@ def generate_with_images(base_url: str, api_key: str, model: str, prompt: str,
     headers = {"Authorization": f"Bearer {api_key or 'not-needed'}"}  # multipart 不设 Content-Type
     files = multipart_image_files(images, proxy)
     payload = {"model": model, "prompt": prompt, "size": size}
-    client_kwargs = {"trust_env": False, "timeout": 300}
-    if proxy:
-        client_kwargs["proxy"] = proxy
-    with httpx.Client(**client_kwargs) as c:
+    with build_http_client(proxy, 300) as c:
         return _submit_and_resolve(c, url, headers, data=payload, files=files)

@@ -7,8 +7,9 @@ from app.services.image_proxy import fetch_remote_image, ImageProxyError, MAX_IM
 def test_拒绝非http协议():
     with pytest.raises(ImageProxyError, match="http/https"):
         fetch_remote_image("file:///etc/passwd")
-    # data: URI 通过 SSRF 校验（本地解码不走网络），但 httpx 会拒绝
-    with pytest.raises(ImageProxyError, match="图片拉取失败"):
+    # data: URI 原先漏过校验靠 httpx 抛 502；2026-10-24 起校验层（pinned_media_url）
+    # 直接 400「只支持 http/https」——代理只做网络 fetch，data: 属调用方错误。
+    with pytest.raises(ImageProxyError, match="http/https"):
         fetch_remote_image("data:image/png;base64,xxx")
 
 

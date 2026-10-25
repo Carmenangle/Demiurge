@@ -334,6 +334,53 @@ def test_load_image_bytes_local_view_bypasses_explicit_proxy(monkeypatch):
     assert "proxy" not in captured["client_kwargs"]  # 显式代理被剥离
 
 
+def test_load_image_bytes_relative_local_view_gets_local_origin(monkeypatch):
+    """取图地址的 wire 形态是根相对（属主 view_urls），httpx 只吃绝对地址 ⇒
+    `_load_image_bytes` 必须先用本机实际监听端口拼回 origin，否则图生图上传直接报错。"""
+    captured: dict = {}
+
+    class _StreamResp:
+        headers = {"content-type": "image/png"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def raise_for_status(self):
+            pass
+
+        def iter_bytes(self):
+            yield b"pngdata"
+
+    class _StreamClient:
+        def __init__(self, *args, **kwargs):
+            captured["client_kwargs"] = kwargs
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def stream(self, method, url, *args, **kwargs):
+            captured["url"] = url
+            return _StreamResp()
+
+    monkeypatch.setattr(image_gen.httpx, "Client", _StreamClient)
+    from app.config import BACKEND_BASE_URL
+
+    data, _fn, _mime = image_gen._load_image_bytes(
+        "/api/comfyui/local-view?path=C%3A%5Ctest.png",
+        proxy="http://127.0.0.1:7897",
+    )
+
+    assert captured["url"] == f"{BACKEND_BASE_URL}/api/comfyui/local-view?path=C%3A%5Ctest.png"
+    assert "proxy" not in captured["client_kwargs"]  # 本机地址仍绕开代理
+    assert data == b"pngdata"
+
+
 def test_load_image_bytes_external_url_keeps_explicit_proxy(monkeypatch):
     """外部图片 URL 仍走显式代理（中转通路依赖它）。"""
     captured = {}
@@ -375,3 +422,17 @@ def test_load_image_bytes_external_url_keeps_explicit_proxy(monkeypatch):
 
     assert data == b"jpgdata"
     assert captured["client_kwargs"]["proxy"] == "http://127.0.0.1:7897"
+
+
+def test_build_http_client_空代理不传proxy键(monkeypatch):
+    """F 刀（2026-10-24）：`**client_kwargs` dict 拆包是 77 个 mypy 错的共同根因，修法是
+    直接传参；空代理必须**不传 proxy 键**（不能传 None）——local-view 绕过显式代理的语义由
+    test_load_image_bytes_local_view_bypasses_explicit_proxy 锁，这里锁 helper 本身。"""
+    made = []
+    monkeypatch.setattr(image_gen.httpx, "Client", lambda **kw: made.append(kw))
+
+    image_gen.build_http_client("")
+    image_gen.build_http_client("http://127.0.0.1:7897", 42.0)
+
+    assert made[0] == {"trust_env": False, "timeout": 120}
+    assert made[1] == {"trust_env": False, "timeout": 42.0, "proxy": "http://127.0.0.1:7897"}

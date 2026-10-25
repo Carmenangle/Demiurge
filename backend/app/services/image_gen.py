@@ -122,6 +122,19 @@ def _norm_edits_url(base_url: str) -> str:
     return url + "/images/edits"
 
 
+def build_http_client(proxy: str, timeout: float | httpx.Timeout = 120) -> httpx.Client:
+    """建 httpx 客户端：显式代理优先；否则禁用环境代理（trust_env=False，与 rag_store 一致）。
+
+    代理为空串时刻意**不传 proxy 键**（与旧实现「if proxy: 才加键」同语义）——
+    local-view 等本机回环请求即使配了显式代理也必须直连（Clash 转发不了 localhost，
+    会打成 502）。不用 `**client_kwargs` dict 拆包：mypy 会把 dict 值类型收窄成
+    int/object，再对 Client 的逐参数报 arg-type（2026-10-24 F 刀 77 错的共同根因）。
+    """
+    if proxy:
+        return httpx.Client(trust_env=False, timeout=timeout, proxy=proxy)
+    return httpx.Client(trust_env=False, timeout=timeout)
+
+
 def _load_image_bytes(img: str, proxy: str = "") -> tuple[bytes, str, str]:
     """把 data URI / http(s) URL / 本地文件路径 图片读成 (字节, 文件名, mime)。图生图上传用。"""
     import base64
@@ -140,13 +153,13 @@ def _load_image_bytes(img: str, proxy: str = "") -> tuple[bytes, str, str]:
         _max = 30 * 1024 * 1024  # 30MB 上限，防超大直链读爆内存
         # local-view 指向本机后端（config 的 BACKEND_BASE_URL），即使配置了显式代理也必须绕过——
         # Clash 等代理无法转发 localhost 回环请求，会把取图打成 502 Bad Gateway。
+        from app.services import view_urls
         from app.services.url_guard import is_local_view_url
         _use_proxy = proxy if not is_local_view_url(img) else ""
-        client_kwargs = {"trust_env": False, "timeout": 120}
-        if _use_proxy:
-            client_kwargs["proxy"] = _use_proxy
-        with httpx.Client(**client_kwargs) as c:  # 显式代理优先；否则禁用环境代理
-            with c.stream("GET", img) as r:
+        # httpx 只吃绝对地址，而 local-view 的 wire 形态是根相对（属主 view_urls）
+        _target = view_urls.fetchable(img)
+        with build_http_client(_use_proxy) as c:  # 显式代理优先；否则禁用环境代理
+            with c.stream("GET", _target) as r:
                 r.raise_for_status()
                 mime = r.headers.get("content-type", "image/png").split(";")[0]
                 chunks: list[bytes] = []
@@ -199,10 +212,7 @@ def generate(base_url: str, api_key: str, model: str, prompt: str,
     started = time.monotonic()
     _LOG.info("image request start request_id=%s endpoint=generations model=%s size=%s quality=%s",
               request_id, model, size, quality)
-    client_kwargs = {"trust_env": False, "timeout": _request_timeout(size)}
-    if proxy:
-        client_kwargs["proxy"] = proxy
-    with httpx.Client(**client_kwargs) as c:
+    with build_http_client(proxy, _request_timeout(size)) as c:
         try:
             r = c.post(url, headers=headers, json=payload)
         except httpx.TimeoutException as exc:
@@ -269,10 +279,7 @@ def generate_with_images(base_url: str, api_key: str, model: str, prompt: str,
         "image request start request_id=%s endpoint=edits model=%s size=%s quality=%s images=%d mask=%s bytes=%d",
         request_id, model, size, quality, len(images), bool(mask), upload_bytes,
     )
-    client_kwargs = {"trust_env": False, "timeout": _request_timeout(size)}
-    if proxy:
-        client_kwargs["proxy"] = proxy
-    with httpx.Client(**client_kwargs) as c:
+    with build_http_client(proxy, _request_timeout(size)) as c:
         try:
             r = c.post(url, headers=headers, data=payload, files=files)
         except httpx.TimeoutException as exc:

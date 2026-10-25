@@ -16,6 +16,7 @@ import httpx
 
 from app.services.pathnames import safe_seg
 from app.services import task_progress_store
+from app.services.url_guard import pinned_host
 
 _LOG = logging.getLogger("uvicorn.error")
 
@@ -192,34 +193,40 @@ def _download(task_id: str, url: str, comfy_models_dir: str, model_type: str,
         if proxy and proxy.strip():
             cli_kw["proxy"] = proxy.strip()
         with httpx.Client(**cli_kw) as c:
-            with c.stream("GET", direct, headers=headers) as r:
-                if r.status_code >= 400:
-                    raise RuntimeError(f"HTTP {r.status_code}（可能需要 token 或链接失效）")
-                fname = _filename_from_headers(r, fname_hint)
-                total = int(r.headers.get("content-length", 0) or 0)
-                trust = artifact_trust(fname)
-                _set(task_id, filename=fname, total=total, phase="downloading",
-                     source_url=public_source_url(url), **trust)
-                dest = target_dir / fname
-                if dest.exists():
-                    raise RuntimeError(f"目标文件已存在，拒绝覆盖：{fname}")
-                part = target_dir / f"{fname}.{task_id}.part"
-                done = 0
-                digest = hashlib.sha256()
-                sample = (time.monotonic(), 0)
-                with open(part, "wb") as f:
-                    for chunk in r.iter_bytes(1024 * 256):
-                        f.write(chunk)
-                        digest.update(chunk)
-                        done += len(chunk)
-                        sample = _record_transfer(task_id, done, sample)
-                if total and done != total:
-                    raise RuntimeError(f"下载大小校验失败：期望 {total} 字节，实际 {done} 字节")
-                _set(task_id, phase="saving", downloaded=done)
-                part.replace(dest)  # 原子重命名，避免半截文件被 ComfyUI 读到
+            # 白名单域名解析一次、连接钉在解析到的 IP（TOCTOU 关窗：rebinding 在
+            # 校验与建连之间换 IP 无效）。follow_redirects=True 的后续跳跨主机时
+            # 不受钉扎约束（同主机跳仍钉）——重定向目标域未白名单化是既有行为，
+            # 收窄属另一刀，不混入本改动。
+            with pinned_host((urlparse(direct).hostname or "").lower()):
+                with c.stream("GET", direct, headers=headers) as r:
+                    if r.status_code >= 400:
+                        raise RuntimeError(f"HTTP {r.status_code}（可能需要 token 或链接失效）")
+                    fname = _filename_from_headers(r, fname_hint)
+                    total = int(r.headers.get("content-length", 0) or 0)
+                    trust = artifact_trust(fname)
+                    _set(task_id, filename=fname, total=total, phase="downloading",
+                         source_url=public_source_url(url), **trust)
+                    dest = target_dir / fname
+                    if dest.exists():
+                        raise RuntimeError(f"目标文件已存在，拒绝覆盖：{fname}")
+                    part = target_dir / f"{fname}.{task_id}.part"
+                    done = 0
+                    digest = hashlib.sha256()
+                    sample = (time.monotonic(), 0)
+                    with open(part, "wb") as f:
+                        for chunk in r.iter_bytes(1024 * 256):
+                            f.write(chunk)
+                            digest.update(chunk)
+                            done += len(chunk)
+                            sample = _record_transfer(task_id, done, sample)
+                    if total and done != total:
+                        raise RuntimeError(f"下载大小校验失败：期望 {total} 字节，实际 {done} 字节")
+                    _set(task_id, phase="saving", downloaded=done)
+                    part.replace(dest)  # 原子重命名，避免半截文件被 ComfyUI 读到
         _set(task_id, status="done", phase="done", speed_bps=0,
              sha256=digest.hexdigest(), saved_files=[str(dest)], updated_at=time.time())
     except Exception as e:
+        _LOG.debug("model_downloader::_download 兜底异常: %s", e)
         if part is not None:
             part.unlink(missing_ok=True)
         _set(task_id, status="error", phase="failed", speed_bps=0,
@@ -267,7 +274,7 @@ def fetch_info(url: str, hf_token: str = "", civitai_token: str = "", proxy: str
     cli_kw: dict = {"trust_env": False, "follow_redirects": True, "timeout": 30}
     if proxy and proxy.strip():
         cli_kw["proxy"] = proxy.strip()
-    with httpx.Client(**cli_kw) as c:
+    with httpx.Client(**cli_kw) as c, pinned_host(host):
         if host == "civitai.com":
             return _civitai_info(c, url, civitai_token)
         return _hf_info(c, url, hf_token)

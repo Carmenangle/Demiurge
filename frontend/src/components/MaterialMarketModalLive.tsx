@@ -22,6 +22,7 @@ import {
   pixivFollowing, pixivPages, type WebMaterialSearchItem, type PixivUser,
 } from "../api/ai";
 import { UI_BUILD as BUILD_TAG } from "../lib/buildInfo";
+import { safeExternalHref } from "../lib/externalUrl";
 
 const PAGE_LIMIT = 24;
 
@@ -947,7 +948,7 @@ export function MaterialMarketModal({
                   {detail.file_size ? ` · ${(detail.file_size / 1048576).toFixed(1)}MB` : ""}</div>
                 <div>评分：{detail.score ?? "—"} · 收藏数：{detail.fav_count ?? "—"} · 评级：{detail.rating || "—"}</div>
                 <div>
-                  来源：<a href={detail.source_url} target="_blank" rel="noreferrer">{detail.source_url}</a>
+                  来源：<a href={safeExternalHref(detail.source_url)} target="_blank" rel="noreferrer">{detail.source_url}</a>
                 </div>
               </div>
               <div style={{ maxHeight: "46vh", overflow: "auto", marginBottom: 12 }}>

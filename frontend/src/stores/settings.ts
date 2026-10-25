@@ -186,6 +186,12 @@ export interface LiquidGlassWallpaper {
    * 与 workshopId 分开是因为本地文件夹里的 Wallpaper Engine 工程没有工坊 id，但仍能实时渲染。
    */
   sceneSource?: string;
+  /**
+   * 该壁纸自己的 WE 预设覆盖值（键=general.properties 里的属性名）。
+   * 只存用户改过的键；没写的键由渲染器回落到工程默认值，用户在 Wallpaper Engine
+   * 里的取值则由后端在首次读取时作为初值给出（见 api/userState.fetchWallpaperSceneProperties）。
+   */
+  preset?: Record<string, string | number | boolean>;
 }
 
 export interface LiquidGlassSettings {
@@ -201,7 +207,7 @@ export interface LiquidGlassSettings {
   sidebarAlpha: number;        // 侧栏透明度 0~200（越大越透）
   sidebarColor: string;        // 侧栏玻璃基色
   contentAlpha: number;        // 内容面透明度 0~80（越大越透）
-  contentColor: string;        // 内容面底色（空=跟随玻璃基色）
+  contentColor: string;        // 内容面底色（空=默认深色玻璃面）
   wallpapers: LiquidGlassWallpaper[];
   activeWallpaperId: string;
   wallpaperDir: string;        // 壁纸库存放地址（扫描该文件夹生成预览，不写入其中）
@@ -296,7 +302,17 @@ export function normalizeLiquidGlass(raw: unknown): LiquidGlassSettings {
     // scene 实时渲染的两条线必须一起留：只有 id 没有 pkg 标记（或反之）都渲染不出来，
     // 少了这一步，重载后作品会静默退回静态预览（2026-10-23 第三刀）。
     const workshopId = typeof item.workshopId === "string" ? item.workshopId.trim() : "";
-    const scenePkg = item.scenePkg === true && /^\d{1,20}$/.test(workshopId);
+    const sceneSource = typeof item.sceneSource === "string" ? item.sceneSource.trim() : "";
+    // 场景来源既可能是工坊 id，也可能是本地工程目录：只认工坊会把本地工程判成「不能实时渲染」。
+    const scenePkg = item.scenePkg === true && (sceneSource !== "" || /^\d{1,20}$/.test(workshopId));
+    const preset: Record<string, string | number | boolean> = {};
+    if (item.preset && typeof item.preset === "object") {
+      for (const [key, value] of Object.entries(item.preset)) {
+        if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+          preset[key] = value;
+        }
+      }
+    }
     wallpapers.push({
       id: typeof item.id === "string" && item.id.trim() ? item.id : crypto.randomUUID(),
       path,
@@ -307,7 +323,9 @@ export function normalizeLiquidGlass(raw: unknown): LiquidGlassSettings {
       ...(preview ? { preview } : {}),
       ...(item.lowRes === true ? { lowRes: true } : {}),
       ...(workshopId ? { workshopId } : {}),
+      ...(sceneSource ? { sceneSource } : {}),
       ...(scenePkg ? { scenePkg: true } : {}),
+      ...(Object.keys(preset).length > 0 ? { preset } : {}),
     });
   }
   // 显式空串＝用户主动「关闭壁纸」，重载后必须保持关闭；缺失/失效才回退到第一张。
@@ -375,6 +393,17 @@ export function normalizeLiquidGlass(raw: unknown): LiquidGlassSettings {
 
 export function activeLiquidGlassWallpaper(s: Settings): LiquidGlassWallpaper | null {
   return s.liquidGlass.wallpapers.find((w) => w.id === s.liquidGlass.activeWallpaperId) || null;
+}
+
+/**
+ * 场景壁纸的来源标识（后端 scene 通道的唯一入参）。
+ * 旧存档只有 workshopId、没有 sceneSource，按工坊口径补出来，避免升级后已应用的
+ * 工坊壁纸失去实时渲染；非 scene 作品返回空串。
+ */
+export function liquidGlassSceneSource(w: LiquidGlassWallpaper | null | undefined): string {
+  if (!w || w.scenePkg !== true) return "";
+  if (w.sceneSource) return w.sceneSource;
+  return w.workshopId ? `workshop:${w.workshopId}` : "";
 }
 
 
@@ -650,9 +679,41 @@ export function normalizeTheme(value: unknown): Theme {
   return DEFAULT.theme;
 }
 
-function load(): Settings {
+// localStorage 持久化剥离密钥（2026-10-24 XSS→密钥链加固）：localStorage 可被任意同源
+// 脚本/扩展读取，且与「密钥只落后端 user_state.json」的架构合同漂移。写盘前清空全部
+// 密钥/令牌字段（与 exportSettings(keepKeys=false) 同一张清单，改字段两边同步）；
+// 内存里的 settings 不受影响（编辑/回传后端照常用真值），密钥真源在后端，启动水合回填。
+export function stripSecrets(s: Settings): Settings {
+  const out: Settings = JSON.parse(JSON.stringify(s));
+  out.chatModels = (out.chatModels || []).map((m) => ({ ...m, apiKey: "" }));
+  out.imageModels = (out.imageModels || []).map((m) => ({ ...m, apiKey: "" }));
+  out.videoModels = (out.videoModels || []).map((m) => ({ ...m, apiKey: "" }));
+  out.embedModel = { ...out.embedModel, apiKey: "" };
+  out.vlmModel = { ...out.vlmModel, apiKey: "" };
+  out.hfToken = "";
+  out.civitaiToken = "";
+  out.smitheryKey = "";
+  out.pixivRefreshToken = "";
+  out.danbooruLogin = "";
+  out.danbooruApiKey = "";
+  return out;
+}
+
+// persist/load 的 Storage 参数是测试注入缝：jsdom 30 的 localStorage 在 Node 25 下不可用
+// （Node 内置桩遮蔽，见 ARCHITECTURE 条 51），测试注入 MemoryStorage——lastSelection.ts 同款惯例。
+function persist(s: Settings, storage: Storage = window.localStorage): void {
+  storage.setItem(KEY, JSON.stringify(stripSecrets(s)));
+}
+
+/** 读 localStorage 存档并顺带清洗旧密钥存量（useSettings 初始化用；导出供回归测试）。 */
+export function loadPersistedSettings(storage: Storage = window.localStorage): Settings {
   try {
-    return migrate(JSON.parse(localStorage.getItem(KEY) || "{}"));
+    const migrated = migrate(JSON.parse(storage.getItem(KEY) || "{}"));
+    // 一次性清洗：旧版本写进 localStorage 的完整 settings（含密钥）读入后立刻
+    // 用剥离版覆写，之后所有写入路径都经 persist，密钥不再回潮。
+    const cleaned = stripSecrets(migrated);
+    storage.setItem(KEY, JSON.stringify(cleaned));
+    return cleaned;
   } catch {
     return DEFAULT;
   }
@@ -764,7 +825,7 @@ export function withProxyStatus(p: Settings, st: ProxyStatus): Settings {
 }
 
 export function useSettings() {
-  const [settings, setSettings] = useState<Settings>(load);
+  const [settings, setSettings] = useState<Settings>(loadPersistedSettings);
   const [hydrated, setHydrated] = useState(false); // 后端为准：回填完成前不回写后端
 
   // 启动时拉后端存档，有则以后端为准覆盖本地（跨浏览器/换机恢复）
@@ -775,7 +836,7 @@ export function useSettings() {
         if (alive && s.settings) {
           const migrated = migrate(s.settings as unknown as Record<string, unknown>);
           setSettings(migrated);
-          localStorage.setItem(KEY, JSON.stringify(migrated));
+          persist(migrated); // localStorage 不落密钥（剥离见 stripSecrets）
         }
       })
       .catch(() => { /* 后端离线：沿用 localStorage */ })
@@ -790,7 +851,7 @@ export function useSettings() {
   }, []);
 
   useEffect(() => {
-    localStorage.setItem(KEY, JSON.stringify(settings));
+    persist(settings); // localStorage 不落密钥（剥离见 stripSecrets）；密钥真源在后端 user_state.json
     applyTheme(settings.theme);
     if (hydrated) pushSettings(settings); // 回填完成后，本地变更（及升级时的本地存量）镜像到后端
   }, [settings, hydrated]);
@@ -870,22 +931,12 @@ export function useSettings() {
 
 // 导出设置为 JSON。keepKeys=false 时清空所有密钥/令牌字段（模型 apiKey、下载令牌等），
 // 只留结构与非敏感配置，便于分享/迁移不泄露凭证。
+// ⚠ 密钥字段清单单一属主＝stripSecrets（localStorage 持久化同用），不得另抄一份。
 export function exportSettings(s: Settings, keepKeys: boolean): string {
-  const out: Settings = JSON.parse(JSON.stringify(s));
   if (!keepKeys) {
-    out.chatModels = out.chatModels.map((m) => ({ ...m, apiKey: "" }));
-    out.imageModels = out.imageModels.map((m) => ({ ...m, apiKey: "" }));
-    out.videoModels = out.videoModels.map((m) => ({ ...m, apiKey: "" }));
-    out.embedModel = { ...out.embedModel, apiKey: "" };
-    out.vlmModel = { ...out.vlmModel, apiKey: "" };
-    out.hfToken = "";
-    out.civitaiToken = "";
-    out.smitheryKey = "";
-    out.pixivRefreshToken = "";
-    out.danbooruLogin = "";
-    out.danbooruApiKey = "";
+    return JSON.stringify(stripSecrets(s), null, 2);
   }
-  return JSON.stringify(out, null, 2);
+  return JSON.stringify(s, null, 2);
 }
 
 // 从导出的 JSON 文本回填设置。走 migrate 做校验+旧字段迁移+补默认，非法 JSON 抛错。

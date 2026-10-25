@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
-  activeChatModel, chatBgRenderOpacity, DEFAULT_LIQUID_GLASS, importSettings, modelDisplayName,
-  normalizeContextBudgets, normalizeLiquidGlass, normalizeTheme, resolvedEmbedModel, resolveTheme,
+  activeChatModel, chatBgRenderOpacity, DEFAULT_LIQUID_GLASS, exportSettings, importSettings,
+  liquidGlassSceneSource, loadPersistedSettings, modelDisplayName, normalizeContextBudgets,
+  normalizeLiquidGlass, normalizeTheme, resolvedEmbedModel, resolveTheme, stripSecrets,
 } from "./settings";
+import type { Settings } from "./settings";
 
 describe("theme settings", () => {
   it("migrates the old light and dark values", () => {
@@ -112,6 +114,39 @@ describe("liquid glass standalone theme settings", () => {
     expect(lg.wallpapers[0].lowRes).toBe(true);
     expect(normalizeLiquidGlass({ wallpapers: [{ path: "D:/a.png" }] }).wallpapers[0])
       .not.toHaveProperty("preview");
+  });
+
+  it("keeps the scene source and per-wallpaper preset deviations across reloads", () => {
+    const lg = normalizeLiquidGlass({
+      wallpapers: [
+        {
+          id: "local-scene",
+          path: "D:/wallpapers/we-project/scene.pkg",
+          scenePkg: true,
+          sceneSource: " local:D:/wallpapers/we-project ",
+          preset: { display: "1", scale: 0.5, shu: true, junk: { a: 1 }, nope: null },
+        },
+        {
+          id: "legacy-we",
+          path: "D:/SteamLibrary/steamapps/workshop/content/431960/3346715292/preview.gif",
+          scenePkg: true,
+          workshopId: "3346715292",
+        },
+        { id: "junk", path: "D:/wall/a.mp4", scenePkg: true, workshopId: "not-a-number" },
+      ],
+    });
+    // 本地 WE 工程没有工坊 id，但仍要能实时渲染：scenePkg 不能只认数字 workshopId
+    expect(lg.wallpapers[0].scenePkg).toBe(true);
+    expect(lg.wallpapers[0].sceneSource).toBe("local:D:/wallpapers/we-project");
+    expect(lg.wallpapers[0].preset).toEqual({ display: "1", scale: 0.5, shu: true });
+    // 旧存档只有 workshopId：按工坊口径补出来源，升级后不该失去实时渲染
+    expect(liquidGlassSceneSource(lg.wallpapers[1])).toBe("workshop:3346715292");
+    // 取不到包的脏标记一律丢掉，否则会去请求一个必然 404 的来源
+    expect(lg.wallpapers[2].scenePkg).toBeUndefined();
+    expect(lg.wallpapers[2]).not.toHaveProperty("preset");
+    expect(liquidGlassSceneSource(lg.wallpapers[2])).toBe("");
+    expect(liquidGlassSceneSource(null)).toBe("");
+    expect(liquidGlassSceneSource({ ...lg.wallpapers[0], scenePkg: false })).toBe("");
   });
 
   it("keeps an explicit closed wallpaper closed across reloads", () => {
@@ -303,5 +338,83 @@ describe("provider profile migration", () => {
     }));
 
     expect(settings.chatModels[0].providerProfile).toBe("claude_compatible");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 2026-10-24 XSS→密钥链加固：localStorage 持久化不落密钥。
+// 真实失败路径：localStorage 可被任意同源脚本/扩展读取，含 apiKey 的完整 settings
+// 双写进 localStorage 与「密钥只落后端 user_state.json」合同漂移。剥离清单单一属主
+// ＝ stripSecrets（persist 与 exportSettings(keepKeys=false) 共用）。
+// ---------------------------------------------------------------------------
+
+describe("localStorage 密钥剥离", () => {
+  const withSecrets = {
+    theme: "system",
+    chatModels: [{ id: "c", apiKey: "sk-chat", baseUrl: "https://api.test/v1", modelName: "m1", proxyMode: "on" }],
+    imageModels: [{ id: "i", apiKey: "sk-img", baseUrl: "", modelName: "m2", proxyMode: "on" }],
+    videoModels: [{ id: "v", apiKey: "sk-vid", baseUrl: "", modelName: "m3", proxyMode: "on" }],
+    embedModel: { mode: "remote", apiKey: "sk-embed", baseUrl: "", modelName: "e", proxyMode: "on" },
+    vlmModel: { mode: "remote", apiKey: "sk-vlm", baseUrl: "", modelName: "vl", proxyMode: "on" },
+    hfToken: "hf_x",
+    civitaiToken: "civ_x",
+    smitheryKey: "sm_x",
+    pixivRefreshToken: "px_x",
+    danbooruLogin: "dan_login",
+    danbooruApiKey: "dan_key",
+    workflowDir: "D:/wf",
+    outputDir: "D:/out",
+  } as unknown as Settings;
+
+  it("stripSecrets 清空全部密钥/令牌字段且保留非敏感配置", () => {
+    const out = stripSecrets(withSecrets);
+    expect(out.chatModels[0].apiKey).toBe("");
+    expect(out.imageModels[0].apiKey).toBe("");
+    expect(out.videoModels[0].apiKey).toBe("");
+    expect(out.embedModel.apiKey).toBe("");
+    expect(out.vlmModel.apiKey).toBe("");
+    expect(out.hfToken).toBe("");
+    expect(out.civitaiToken).toBe("");
+    expect(out.smitheryKey).toBe("");
+    expect(out.pixivRefreshToken).toBe("");
+    expect(out.danbooruLogin).toBe("");
+    expect(out.danbooruApiKey).toBe("");
+    // 非敏感字段逐字保留
+    expect(out.workflowDir).toBe("D:/wf");
+    expect(out.outputDir).toBe("D:/out");
+    expect(out.chatModels[0].modelName).toBe("m1");
+    // 原对象不被就地修改（内存里的真值照常用于编辑/回传后端）
+    expect(withSecrets.hfToken).toBe("hf_x");
+  });
+
+  it("exportSettings(keepKeys=false) 与 stripSecrets 同一张清单", () => {
+    expect(JSON.parse(exportSettings(withSecrets, false))).toEqual(stripSecrets(withSecrets));
+    // keepKeys=true 保留真值（导出走文件，用户显式选择才带密钥）
+    expect((JSON.parse(exportSettings(withSecrets, true)) as Settings).hfToken).toBe("hf_x");
+  });
+
+  it("loadPersistedSettings 清洗旧存量：含密钥的 localStorage 读入即覆写为剥离版", () => {
+    // Storage 参数注入（lastSelection 同款惯例）：Node 25 的内置 localStorage 桩不可用
+    class MemoryStorage implements Storage {
+      private map = new Map<string, string>();
+      get length() { return this.map.size; }
+      clear() { this.map.clear(); }
+      getItem(k: string) { return this.map.get(k) ?? null; }
+      key(i: number) { return [...this.map.keys()][i] ?? null; }
+      removeItem(k: string) { this.map.delete(k); }
+      setItem(k: string, v: string) { this.map.set(k, String(v)); }
+    }
+    const storage = new MemoryStorage();
+    storage.setItem("demiurge_settings", JSON.stringify(withSecrets));
+
+    const loaded = loadPersistedSettings(storage);
+
+    expect(loaded.hfToken).toBe("");
+    expect(loaded.chatModels[0].apiKey).toBe("");
+    // 盘上旧密钥被一次性清洗，之后 persist 也不会回潮
+    const onDisk = JSON.parse(storage.getItem("demiurge_settings") || "{}");
+    expect(onDisk.hfToken).toBe("");
+    expect(onDisk.chatModels[0].apiKey).toBe("");
+    expect(onDisk.workflowDir).toBe("D:/wf");
   });
 });

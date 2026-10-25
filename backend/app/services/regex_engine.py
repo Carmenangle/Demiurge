@@ -90,6 +90,112 @@ def from_st_dict(d: dict[str, Any]) -> RegexScript:
 
 _JS_FLAG_TO_RE = {"i": re.IGNORECASE, "s": re.DOTALL, "m": re.MULTILINE, "x": re.VERBOSE}
 
+# ── ReDoS 防护（2026-10-24 二轮审计）：确定性启发，不是沙箱 ──────────────
+# findRegex 是第三方内容（社区角色卡/预设导入），会在**每条消息**上自动执行；Python re
+# 无执行超时，一条指数回溯模式即可挂死剧情回合线程。三道确定性防线：
+# ① pattern/输入/脚本数上限；② 「组内含无界量词化原子 + 组自身被无界量词修饰」的指数
+#    经典形态拒编译（返回 None → 跳过脚本，与「编译失败→None→跳过」的既有 fail-open
+#    语义一致；edit_artifacts 的导入编译校验因此对坏卡 fail-closed）；
+# ③ 已知局限（登记而非假装解决）：纯交替歧义（(a|aa)+）与多项式形态不在拦截之列——
+#    要拦截得换带超时的执行引擎，属另立刀。双端合同：frontend/src/lib/regexEngine.ts
+#    是同逻辑 JS 版，本段常量与判定必须两边同步改（各有测试锁值）。
+MAX_PATTERN_CHARS = 2000
+MAX_INPUT_CHARS = 400_000
+MAX_SCRIPTS_PER_RUN = 64
+
+
+def _is_quant(body: str, i: int) -> bool:
+    """body[i] 起是否量词 token：+ * ? 或 {n}/{n,m}/{n,}。落单 { 按字面量（re 同语义）。"""
+    if i >= len(body):
+        return False
+    c = body[i]
+    if c in "+*?":
+        return True
+    if c == "{":
+        close = body.find("}", i + 1)
+        if close != -1 and close - i <= 32:
+            inner = body[i + 1:close]
+            return any(ch.isdigit() for ch in inner) and all(
+                ch.isdigit() or ch == "," for ch in inner)
+    return False
+
+
+def _quant_unbounded(body: str, i: int) -> bool:
+    """量词是否有界：+ * {n,} 无界（回溯可指数）；? {n,m} 有界（回溯上限常数/多项式有界）。"""
+    c = body[i]
+    if c in "+*":
+        return True
+    if c == "{":
+        close = body.find("}", i + 1)
+        if close != -1:
+            upper = body[i + 1:close].split(",", 1)
+            return len(upper) == 2 and not upper[1].strip().isdigit()
+    return False
+
+
+def _skip_quant(body: str, i: int) -> int:
+    """跳过量词本体（{..} 整段）与惰性 ? 后缀，返回原子终点之后的下标。"""
+    j = i + 1
+    if body[i] == "{":
+        j = body.find("}", i + 1)
+        j = len(body) if j == -1 else j + 1
+    if j < len(body) and body[j] == "?":
+        j += 1
+    return j
+
+
+def _has_nested_unbounded_quant(body: str) -> bool:
+    """检测 (a+)+ 家族：某层的组被无界量词修饰、且组内顶层已有无界量词化原子。
+
+    有界外量词（(a+)?、(?:https?://)?）放行——真实卡里大量存在且不构成指数回溯。
+    扫描跳过转义、字符类与 (?# 注释；锚点 ^$ 跟量词本就 re.error，误登记无害。
+    """
+    n = len(body)
+    i = 0
+    depth = 0
+    level_unbounded: list[bool] = [False]  # 每层组：顶层是否出现「原子 + 无界量词」
+    while i < n:
+        c = body[i]
+        if c == "\\":
+            i += 2
+        elif c == "[":
+            j = i + 1
+            if j < n and body[j] == "^":
+                j += 1
+            if j < n and body[j] == "]":
+                j += 1
+            while j < n and body[j] != "]":
+                j += 2 if body[j] == "\\" else 1
+            i = j + 1
+        elif c == "(":
+            if body.startswith("(?#", i):
+                end = body.find(")", i + 3)
+                i = n if end == -1 else end + 1
+                continue
+            depth += 1
+            level_unbounded.append(False)
+            i += 1
+            continue
+        elif c == ")":
+            i += 1
+            if depth > 0:
+                inner = level_unbounded.pop()
+                depth -= 1
+                if _is_quant(body, i):
+                    unbounded = _quant_unbounded(body, i)
+                    if inner and unbounded:
+                        return True
+                    if unbounded:
+                        level_unbounded[depth] = True
+                    i = _skip_quant(body, i)
+            continue
+        else:
+            i += 1
+        if i < n and _is_quant(body, i) and _quant_unbounded(body, i):
+            level_unbounded[depth] = True
+            i = _skip_quant(body, i)
+    return False
+
 
 def _js_body_flags(pattern: str) -> tuple[str, str]:
     """拆 /body/flags 形式；非该形式则整串作 body、无 flags。"""
@@ -108,10 +214,18 @@ def _translate_named_groups(body: str) -> str:
 
 
 def compile_js_regex(pattern: str) -> re.Pattern[str] | None:
-    """把 JS 风格正则（可含 /.../flags）编译成 Python Pattern。失败返回 None（对标 ST regexFromString 容错）。"""
+    """把 JS 风格正则（可含 /.../flags）编译成 Python Pattern。失败返回 None（对标 ST regexFromString 容错）。
+
+    ReDoS 防线在此收口：超长 pattern 与嵌套无界量词形态一律 None（调用方按既有
+    语义跳过该脚本；edit_artifacts 的导入校验因此对坏卡拒绝）。
+    """
     if not pattern:
         return None
+    if len(pattern) > MAX_PATTERN_CHARS:
+        return None
     body, flags = _js_body_flags(pattern)
+    if _has_nested_unbounded_quant(body):
+        return None
     body = _translate_named_groups(body)
     re_flags = 0
     for ch in flags:
@@ -212,6 +326,11 @@ def run_scripts(text: str, placement: int, scripts: list[RegexScript], *,
     """
     if not isinstance(text, str) or not text:
         return text
+    # ReDoS 上限（2026-10-24）：超长输入整轮跳过、脚本数截到前 N（保 ST 顺序优先级）。
+    # 形态级拦截在 compile_js_regex；这里的上限兜住「合法但慢」的剩余面。
+    if len(text) > MAX_INPUT_CHARS:
+        return text
+    scripts = scripts[:MAX_SCRIPTS_PER_RUN]
     out = text
     for script in scripts:
         if skip_depth_gated and (script.min_depth is not None or script.max_depth is not None):

@@ -371,3 +371,35 @@ def test_to_data_uri_missing_file():
     """文件不存在返回空串（调用方跳过 VLM）。"""
     from app.services.visual_ci import _to_data_uri
     assert _to_data_uri(r"D:\no\such\file.png") == ""
+
+
+def test_to_data_uri_relative_local_view_is_fetched_not_read_as_file(monkeypatch):
+    """根相对 local-view 必须走 HTTP 取图。
+
+    分支判据只看 `http(s)://` 前缀时，它会掉进「本地文件路径」分支 ⇒ 路径不存在抛异常
+    被 `except` 吞成空串 ⇒ 视觉 CI **静默不判分**（界面看不出任何异常）。
+    """
+    import base64
+    from app.config import BACKEND_BASE_URL
+    from app.services.visual_ci import _to_data_uri
+
+    captured: dict = {}
+
+    class _Resp:
+        status_code = 200
+        content = b"\x89PNG\r\n\x1a\nfake"
+
+        def raise_for_status(self):
+            pass
+
+    def fake_get(url, *args, **kwargs):
+        captured["url"] = url
+        return _Resp()
+
+    monkeypatch.setattr("httpx.get", fake_get)
+
+    uri = _to_data_uri("/api/comfyui/local-view?path=D%3A%5Ca.png")
+
+    assert captured["url"] == f"{BACKEND_BASE_URL}/api/comfyui/local-view?path=D%3A%5Ca.png"
+    assert uri.startswith("data:image/png;base64,")
+    assert base64.b64decode(uri.split(",", 1)[1]) == b"\x89PNG\r\n\x1a\nfake"

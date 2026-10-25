@@ -601,12 +601,21 @@ def _fetch_via_curl(curl: str, url: str, proxy: str) -> tuple[bytes, str] | None
 
 
 def _fetch_via_httpx(url: str, proxy: str) -> tuple[bytes, str]:
-    """httpx 兜底抓图（先代理、后直连两级重试）。"""
+    """httpx 兜底抓图（先代理、后直连两级重试）。
+
+    建连包 pinned_host：白名单域名的解析只发生一次，连接钉在解析到的 IP
+    （TOCTOU 关窗；curl 主通路是子进程无法钉扎，见 url_guard 模块 docstring）。
+    """
+    from urllib.parse import urlparse
+
+    from app.services.url_guard import pinned_host
+
+    host = (urlparse(url).hostname or "").lower()
     attempts = ([proxy] if proxy else []) + [""]
     last: Exception | None = None
     for px in attempts:
         try:
-            with _client(px, timeout=_IMAGE_TIMEOUT) as c:
+            with pinned_host(host), _client(px, timeout=_IMAGE_TIMEOUT) as c:
                 r = c.get(url, headers={
                     "User-Agent": "Demiurge/1.0 (material source)",
                     "Referer": _referer_for_url(url),  # 防盗链按 host 区分（pximg/danbooru）

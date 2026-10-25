@@ -4,6 +4,7 @@ import logging
 import re
 import time
 import uuid
+from typing import Any
 from collections import OrderedDict
 from pathlib import Path
 
@@ -72,12 +73,13 @@ def _download_capped(url: str, timeout: int, max_bytes: int, proxy: str = "",
     total_timeout>0 时按单调时钟掐**总**时长，防「滴漏」绕开 per-read 超时。
     """
     from app.services.url_guard import is_local_view_url
-    client_kwargs = {"trust_env": False, "timeout": timeout}
+    client_kwargs: dict[str, Any] = {"trust_env": False, "timeout": timeout}  # 后塞 proxy(str)，值域必须宽
     if proxy and not is_local_view_url(url):
         client_kwargs["proxy"] = proxy
     started = time.monotonic()
     with httpx.Client(**client_kwargs) as client:
-        with client.stream("GET", url) as response:
+        # local-view 的 wire 形态是根相对（属主 view_urls），httpx 只吃绝对地址
+        with client.stream("GET", view_urls.fetchable(url)) as response:
             response.raise_for_status()
             chunks: list[bytes] = []
             total = 0
@@ -249,7 +251,8 @@ def _extract_tags(prompt: str, base_url: str, api_key: str, model: str) -> str:
         )
         out = llm.chat(base_url, api_key, model, system, prompt, temperature=0.2)
         return ",".join(t.strip() for t in re.split(r"[,，;；\n]+", out) if t.strip())
-    except Exception:
+    except Exception as exc:
+        _LOG.debug("标签反推失败，返回空串: %s", exc)
         return ""
 
 
@@ -427,7 +430,8 @@ def finalize_workflow_batch(
                     )
                 shown = view_urls.local_view(path)
                 persisted = True
-            except Exception:  # 保留在线图，不影响本批其他产出
+            except Exception as exc:  # 保留在线图，不影响本批其他产出
+                _LOG.debug("留存失败(persist) key=%s，保留在线图: %s", key, exc)
                 errors.append("persist")
         if not shown:
             shown = view_urls.remote_view(
@@ -458,13 +462,15 @@ def finalize_workflow_batch(
                     )
                     if not snapshotted:
                         errors.append("snapshot")
-                except Exception:
+                except Exception as exc:
+                    _LOG.debug("图片快照 upsert 失败 thread=%s: %s", thread_id, exc)
                     errors.append("snapshot")
             elif not inline_target:
                 try:
                     chat_snapshot.upsert(thread_id, message)
                     snapshotted = True
-                except Exception:
+                except Exception as exc:
+                    _LOG.debug("消息快照 upsert 失败 thread=%s: %s", thread_id, exc)
                     errors.append("snapshot")
         if inline_target and target is None:
             target = {"message_id": target_message_id, "slot_id": target_slot_id,
@@ -479,7 +485,7 @@ def finalize_workflow_batch(
         key = _workflow_key(thread_id, prompt_id, video)
         mid = _message_id(key)
         persisted = indexed = snapshotted = False
-        errors: list[str] = []
+        errors = []  # 同函数复位不重声明
         shown = ""
         if durable:
             try:
@@ -493,7 +499,8 @@ def finalize_workflow_batch(
                 )
                 shown = view_urls.local_view(path)
                 persisted = True
-            except Exception:
+            except Exception as exc:
+                _LOG.debug("留存失败(persist) key=%s: %s", key, exc)
                 errors.append("persist")
         if not shown:
             shown = view_urls.remote_view(
@@ -530,13 +537,15 @@ def finalize_workflow_batch(
                     )
                     if not snapshotted:
                         errors.append("snapshot")
-                except Exception:
+                except Exception as exc:
+                    _LOG.debug("视频快照 upsert 失败 thread=%s: %s", thread_id, exc)
                     errors.append("snapshot")
             elif not inline_target:
                 try:
                     chat_snapshot.upsert(thread_id, message)
                     snapshotted = True
-                except Exception:
+                except Exception as exc:
+                    _LOG.debug("消息快照 upsert 失败 thread=%s: %s", thread_id, exc)
                     errors.append("snapshot")
         if inline_target and target is None:
             target = {"message_id": target_message_id, "slot_id": target_slot_id,
@@ -551,7 +560,7 @@ def finalize_workflow_batch(
         key = _workflow_key(thread_id, prompt_id, audio)
         mid = _message_id(key)
         persisted = snapshotted = False
-        errors: list[str] = []
+        errors = []  # 类型已由 L402 声明（同函数多消息块各自复位）
         shown = ""
         if durable:
             # 配音分条：存 voices/ 并按「角色_轮次_句号」命名；无槽位元数据时回退旧逻辑
@@ -580,7 +589,8 @@ def finalize_workflow_batch(
                     )
                 shown = view_urls.local_view(path)
                 persisted = True
-            except Exception:
+            except Exception as exc:
+                _LOG.debug("留存失败(persist) key=%s: %s", key, exc)
                 errors.append("persist")
         if not shown:
             shown = view_urls.remote_view(
@@ -603,13 +613,15 @@ def finalize_workflow_batch(
                     )
                     if not snapshotted:
                         errors.append("snapshot")
-                except Exception:
+                except Exception as exc:
+                    _LOG.debug("音频快照 upsert 失败 thread=%s: %s", thread_id, exc)
                     errors.append("snapshot")
             elif not inline_target:
                 try:
                     chat_snapshot.upsert(thread_id, message)
                     snapshotted = True
-                except Exception:
+                except Exception as exc:
+                    _LOG.debug("消息快照 upsert 失败 thread=%s: %s", thread_id, exc)
                     errors.append("snapshot")
         if inline_target and target is None:
             target = {"message_id": target_message_id, "slot_id": target_slot_id,
@@ -625,7 +637,7 @@ def finalize_workflow_batch(
         message = chat_snapshot.assistant_message(mid, prompt)
         messages.append(message)
         indexed = snapshotted = False
-        errors: list[str] = []
+        errors = []  # 同上：复位不重声明
         if durable:
             indexed = _index_with_retry(repo_id, cfg, prompt, tags,
                                        template_name=template_name,
@@ -636,7 +648,8 @@ def finalize_workflow_batch(
             try:
                 chat_snapshot.upsert(thread_id, message)
                 snapshotted = True
-            except Exception:
+            except Exception as exc:
+                _LOG.debug("快照 upsert 失败 thread=%s: %s", thread_id, exc)
                 errors.append("snapshot")
         results.append({
             "key": _workflow_key(thread_id, prompt_id), "message_id": mid,
@@ -679,8 +692,8 @@ def persist_inspiration(thread_id: str, title: str, content: str,
          "title": (im.get("title") or "")[:200]}
         for im in (images or [])[:8] if isinstance(im, dict) and im.get("full_url")
     ]
-    card = {"id": str(uuid.uuid4()), "title": title, "content": content,
-            "sources": sources, "images": images or []}
+    card: dict[str, Any] = {"id": str(uuid.uuid4()), "title": title, "content": content,
+                            "sources": sources, "images": images or []}
     try:
         chat_snapshot.upsert(thread_id, chat_snapshot.assistant_message(
             card["id"], "",

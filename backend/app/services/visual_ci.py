@@ -24,7 +24,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import logging
+
 from app.services import run_trace
+
+_LOG = logging.getLogger("uvicorn.error")
 
 # ── 数据库 ──────────────────────────────────────────────────────────────────
 
@@ -277,6 +281,7 @@ def run_diagnostic(
     try:
         _probe_visual_ci_trace(diag, repo_id, generation_id)
     except Exception as exc:
+        _LOG.debug("visual_ci::run_diagnostic 兜底异常: %s", exc)
         diag.evidence["trace_error"] = str(exc)
 
     # ── 2. Field Ledger（从 scene_spec 初始化）─────────────────────────────
@@ -297,6 +302,7 @@ def run_diagnostic(
                 vlm_proxy=vlm_proxy,
             )
         except Exception as exc:
+            _LOG.debug("visual_ci::run_diagnostic 兜底异常: %s", exc)
             diag.evidence["vlm_error"] = str(exc)
             diag.evidence["vlm_trace"] = traceback.format_exc()
 
@@ -305,6 +311,7 @@ def run_diagnostic(
         try:
             _compute_similarity(diag, reference_image_url, generation_record, vlm_base, vlm_key, vlm_model, vlm_proxy)
         except Exception as exc:
+            _LOG.debug("visual_ci::run_diagnostic 兜底异常: %s", exc)
             diag.evidence["similarity_error"] = str(exc)
 
     # ── 5. 综合 verdict ───────────────────────────────────────────────────
@@ -316,6 +323,7 @@ def run_diagnostic(
         _init_db(db)
         _save_diagnostic(db, diag)
     except Exception as exc:
+        _LOG.debug("visual_ci::run_diagnostic 兜底异常: %s", exc)
         diag.evidence["db_error"] = str(exc)
 
     # ── 7. Trace 事件 ────────────────────────────────────────────────────
@@ -343,7 +351,8 @@ def _probe_visual_ci_trace(diag: VisualCIDiagnostic, repo_id: str, generation_id
     """从 run_trace 读取最近的 illustration.submitted 条目，提取机械事实。"""
     try:
         recent = run_trace.read_recent(repo_id, limit=50)
-    except Exception:
+    except Exception as exc:
+        _LOG.debug("visual_ci::_probe_visual_ci_trace 兜底异常: %s", exc)
         recent = []
 
     submitted = None
@@ -525,6 +534,7 @@ def _run_vlm_assessment(
                     f.score = min(f.score, 0.3)
 
     except Exception as exc:
+        _LOG.debug("visual_ci::_run_vlm_assessment 兜底异常: %s", exc)
         diag.evidence["vlm_call_error"] = str(exc)
 
 
@@ -543,30 +553,46 @@ def _to_data_uri(image_url: str, max_bytes: int = 30 * 1024 * 1024) -> str:
     import mimetypes
 
     try:
-        if image_url.startswith(("http://", "https://")):
+        from app.services import view_urls
+        from app.services.url_guard import is_local_view_url, pinned_media_url, validate_media_url
+        # 分支判据必须把根相对形态也算 URL：local-view 的 wire 形态不带 origin（属主
+        # view_urls），只看 http(s) 前缀会让它掉进下面的「本地文件路径」分支，被
+        # except 吞成空串 ⇒ 视觉 CI 静默不判分。
+        if image_url.startswith(("http://", "https://")) or is_local_view_url(image_url):
             import httpx
-            from app.services.url_guard import is_local_view_url, validate_media_url
             # local-view（本机落盘产物）豁免 SSRF 校验；其余 URL 必须过校验，
             # 防止内网/metadata 地址的响应被拉回后分析（数据外泄面）。
-            if not is_local_view_url(image_url):
-                validate_media_url(image_url)
-            # trust_env=False：避免系统代理劫持 127.0.0.1 的 local-view 取图
-            resp = httpx.get(image_url, timeout=60, trust_env=False,
-                             follow_redirects=False)
-            if resp.status_code in (301, 302, 303, 307, 308):
-                location = (resp.headers.get("location") or "").strip()
-                target = str(httpx.URL(image_url).join(location))
-                # 重定向逐跳校验：校验通过才发下一跳（与 image_proxy 同一合同）
-                if not is_local_view_url(target):
-                    validate_media_url(target)
-                resp = httpx.get(target, timeout=60, trust_env=False,
+            # 校验+钉扎+建连同上下文：连接只用校验解析到的 IP（TOCTOU 关窗）。
+            if is_local_view_url(image_url):
+                # trust_env=False：避免系统代理劫持 127.0.0.1 的 local-view 取图
+                base = view_urls.fetchable(image_url)
+                resp = httpx.get(base, timeout=60, trust_env=False,
                                  follow_redirects=False)
+                if resp.status_code in (301, 302, 303, 307, 308):
+                    location = (resp.headers.get("location") or "").strip()
+                    target = view_urls.fetchable(str(httpx.URL(base).join(location)))
+                    # 重定向逐跳校验：校验通过才发下一跳（与 image_proxy 同一合同）
+                    if not is_local_view_url(target):
+                        validate_media_url(target)
+                    resp = httpx.get(target, timeout=60, trust_env=False,
+                                     follow_redirects=False)
+            else:
+                with pinned_media_url(image_url) as pinned:
+                    resp = httpx.get(pinned, timeout=60, trust_env=False,
+                                     follow_redirects=False)
+                if resp.status_code in (301, 302, 303, 307, 308):
+                    location = (resp.headers.get("location") or "").strip()
+                    target = str(httpx.URL(image_url).join(location))
+                    with pinned_media_url(target) as pinned_next:
+                        resp = httpx.get(pinned_next, timeout=60, trust_env=False,
+                                         follow_redirects=False)
             resp.raise_for_status()
             data = resp.content
         else:
             # 本地文件路径
             data = Path(image_url).read_bytes()
-    except Exception:
+    except Exception as exc:
+        _LOG.debug("visual_ci::_to_data_uri 兜底异常: %s", exc)
         return ""
     if not data or len(data) > max_bytes:
         return ""
@@ -671,6 +697,7 @@ def _compute_similarity(
             diag.similarity = 0.0
             diag.evidence["similarity_parse_error"] = raw[:200]
     except Exception as exc:
+        _LOG.debug("visual_ci::_compute_similarity 兜底异常: %s", exc)
         diag.evidence["similarity_error"] = str(exc)
 
 

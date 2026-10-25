@@ -43,7 +43,7 @@ def test_workflow_batch_home_has_no_durable_side_effects(monkeypatch):
     result = generation_store.finalize_workflow_batch(**_args(repo_id="home"))
 
     assert result["durable"] is False
-    assert result["messages"][0]["image"].startswith("http://127.0.0.1:8010/api/comfyui/view?")
+    assert result["messages"][0]["image"].startswith("/api/comfyui/view?")
 
 
 def test_workflow_batch_persists_audio_messages(monkeypatch):
@@ -60,8 +60,8 @@ def test_workflow_batch_persists_audio_messages(monkeypatch):
         audios=[{"filename": "voice.wav", "subfolder": "", "type": "output"}],
     ))
 
-    assert result["messages"][0]["audio"].startswith("http://127.0.0.1:8010/api/comfyui/local-view?path=")
-    assert saved[0]["audio"].startswith("http://127.0.0.1:8010/api/comfyui/local-view?path=")
+    assert result["messages"][0]["audio"].startswith("/api/comfyui/local-view?path=")
+    assert saved[0]["audio"].startswith("/api/comfyui/local-view?path=")
     assert saved[0]["text"] == "text"  # 首个产物承载提示词
     assert result["images"][0]["persisted"] is True
     assert result["images"][0]["snapshotted"] is True
@@ -119,7 +119,7 @@ def test_workflow_batch_keeps_online_image_when_save_fails(monkeypatch):
     result = generation_store.finalize_workflow_batch(**_args())
 
     assert result["images"][0]["errors"] == ["persist"]
-    assert result["messages"][0]["image"].startswith("http://127.0.0.1:8010/api/comfyui/view?")
+    assert result["messages"][0]["image"].startswith("/api/comfyui/view?")
 
 
 def test_agent_remote_image_uses_standard_time_name(tmp_path, monkeypatch):
@@ -733,7 +733,7 @@ def test_video_batch_持久化并承载提示词(monkeypatch):
     ))
 
     msg = result["messages"][0]
-    assert msg["video"].startswith("http://127.0.0.1:8010/api/comfyui/local-view?path=")
+    assert msg["video"].startswith("/api/comfyui/local-view?path=")
     assert msg["text"] == "text"
     row = result["images"][0]
     assert (row["persisted"], row["indexed"], row["snapshotted"], row["errors"]) == (True, True, True, [])
@@ -804,7 +804,7 @@ def test_video_batch_三阶段全失败仍回落在线地址(monkeypatch):
     row = result["images"][0]
     assert row["errors"] == ["persist", "index", "snapshot"]
     assert row["persisted"] is False and row["indexed"] is False and row["snapshotted"] is False
-    assert row["display_url"].startswith("http://127.0.0.1:8010/api/comfyui/view?")
+    assert row["display_url"].startswith("/api/comfyui/view?")
     assert result["messages"][0]["video"] == row["display_url"]
     assert result["complete"] is False
 
@@ -824,7 +824,7 @@ def test_video_batch_home无持久化副作用(monkeypatch):
 
     assert result["durable"] is False and result["complete"] is False
     assert result["images"][0]["errors"] == []
-    assert result["messages"][0]["video"].startswith("http://127.0.0.1:8010/api/comfyui/view?")
+    assert result["messages"][0]["video"].startswith("/api/comfyui/view?")
 
 
 def test_纯文本批次落快照入记忆(monkeypatch):
@@ -931,7 +931,7 @@ def test_音频批次落盘失败回落在线地址(monkeypatch):
     row = result["images"][0]
     assert row["errors"] == ["persist"]
     assert row["persisted"] is False
-    assert row["display_url"].startswith("http://127.0.0.1:8010/api/comfyui/view?")
+    assert row["display_url"].startswith("/api/comfyui/view?")
 
 
 def test_音频批次槽回填失败记错误不抛(monkeypatch):

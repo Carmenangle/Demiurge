@@ -1,4 +1,31 @@
+import os
+
 import pytest
+
+# ---------------------------------------------------------------------------
+# app.main 测试导入闸（必须先于任何测试模块执行；2026-10-24 从 test_request_guard.py
+# 上收，落实「第二个 app.main 导入方出现前先抽公共 fixture」的约定）。
+#
+# app.main 在 import 期读取 LAF_COMFY_AUTOSTART 等常量，且 lifespan 装配（2026-10-24
+# 卫生刀从模块级搬入）的 `start_*_worker()` 会拉起三个**无停止 API** 的守护 worker：
+# 轻则与手动 `_claim_next()` 的用例抢任务（claim=None ⇒ TypeError），重则轮询真实
+# DATA_DIR 的计划队列执行用户真任务。conftest 先于一切测试模块导入 ⇒ 在这里换掉
+# start_worker（app.main 的 from-import 绑定的就是替身，lifespan 在测试进程里即使被
+# uvicorn / `with TestClient(app)` 触发也只调到替身），任何测试文件随后 `import app.main`
+# 都安全。
+# ⚠ 语义约束：所有导入方共享同一模块实例与同一 env 预置（AUTOSTART=0）；需要其它
+#   LAF_* env 的测试在 import app.main 之前于**自己模块顶部** setdefault，
+#   且不得与既有导入方的语义冲突。
+# ---------------------------------------------------------------------------
+os.environ.setdefault("LAF_COMFY_AUTOSTART", "0")
+
+import app.services.chat_agent_queue as _caq  # noqa: E402
+import app.services.plan_tasks as _pt  # noqa: E402
+import app.services.workflow_build_tasks as _wbt  # noqa: E402
+
+for _m in (_pt, _caq, _wbt):
+    # setattr：循环变量跨三种模块类型，mypy 对属性赋值收窄不了；语义就是「无论谁有 start_worker 都换掉」
+    setattr(_m, "start_worker", lambda *a, **k: None)  # noqa: E731 测试进程禁启 worker（理由见上）
 
 
 @pytest.fixture(autouse=True)
@@ -311,3 +338,116 @@ def _isolate_app_db(_app_db_template, monkeypatch, tmp_path_factory):
     target = tmp_path_factory.mktemp("appdb-run") / "app.db"
     shutil.copyfile(_app_db_template, target)
     monkeypatch.setattr(app_db, "DB_PATH", target)
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-24 出站建连 IP 钉扎（url_guard TOCTOU 关窗）的测试基建。
+#
+# 真实失败路径：validate 校验时解析一次 DNS，httpx 建连时再解析一次——两次解析之间
+# DNS rebinding 可把已验证的公网域名换到私网 IP。测试用「可编程 DNS 替身 + 双回环
+# 服务」精确复刻：校验解析回 127.0.0.1（legit 服务），后续解析毒化为 127.0.0.2
+# （poison 服务）；钉扎正确时连接必须命中 legit。Windows 全 127/8 都是回环，两地址
+# 可同端口。回环在真实校验里是「私网」被拒，故配 `_is_private_ip` 测试缝模拟
+# 「公网域名解析到可路由 IP」。
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fake_dns(monkeypatch):
+    """可编程解析替身：替换 `url_guard._orig_getaddrinfo`（钉扎包装对未钉主机的
+    委托点＝真实系统解析点）。
+
+    用法：`fake_dns["evil.test"] = ["127.0.0.1", "127.0.0.2"]` —— 每次解析按序取
+    一个 IP，取完停在最后一个（= 校验拿到第 1 个、之后全部毒化成第 2 个）。
+    未配置的 host 抛 OSError（模拟 NXDOMAIN）。
+
+    ⚠ 同时清掉 `urllib.request.getproxies()`（2026-10-24 实锤）：httpx `trust_env=True`
+    在 Windows 上经它读到**注册表系统代理**（如 Clash 的 127.0.0.1:7897）⇒ httpcore
+    改连代理主机，而全进程 getaddrinfo 都已被本夹具替换 ⇒ 「fake DNS: 127.0.0.1 未配置」，
+    TOCTOU 端到端用例随用户系统代理开关随机红。E2E 链的隐含前提「无系统代理」由此钉死。
+    """
+    import socket
+
+    from app.services import url_guard
+
+    table: dict[str, list[str]] = {}
+    seq: dict[str, list[str]] = {}
+
+    def fake_getaddrinfo(host, port, *args, **kwargs):
+        key = str(host).lower()
+        if key not in seq:
+            ips = list(table.get(key) or [])
+            if not ips:
+                raise OSError(f"fake DNS: {host} 未配置")
+            seq[key] = ips
+        ips = seq[key]
+        ip = ips.pop(0) if len(ips) > 1 else ips[0]
+        family = socket.AF_INET if ":" not in ip else socket.AF_INET6
+        sockaddr = (ip, port or 0) if family == socket.AF_INET else (ip, port or 0, 0, 0)
+        return [(family, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", sockaddr)]
+
+    monkeypatch.setattr(url_guard, "_orig_getaddrinfo", fake_getaddrinfo)
+    # httpx 是 `from urllib.request import getproxies` 的绑定式导入（_utils.py:7），
+    # 必须打在 httpx 自己的命名空间上；打 urllib.request 模块属性够不着它。
+    import httpx._utils as _httpx_utils
+
+    monkeypatch.setattr(_httpx_utils, "getproxies", lambda: {})
+    return table
+
+
+@pytest.fixture
+def loopback_servers():
+    """127.0.0.1 / 127.0.0.2 各起一个一次性 HTTP 服务，返回 `{ip: 端口}`（**同端口**）。
+
+    127.0.0.1 回 `b"legit-bytes"`、127.0.0.2 回 `b"poison-bytes"`，Content-Type 恒
+    image/png——连接打到哪个一目了然。两地址必须同端口：TOCTOU 用例里毒化 DNS 只换
+    IP 不换端口，poison 服务必须监听同一端口才能接到被毒化的连接。
+    """
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    payload = {"127.0.0.1": b"legit-bytes", "127.0.0.2": b"poison-bytes"}
+    started: list[ThreadingHTTPServer] = []
+    port = 0
+    for ip, body in payload.items():
+        class Handler(BaseHTTPRequestHandler):
+            # ⚠ 必须用类属性定格本轮 body：方法里引用外层循环变量是晚绑定闭包，
+            #   两个服务会都返回最后一轮的 poison-bytes（首轮实锤：钉扎明明命中
+            #   legit 服务却断言失败，排查半天是夹具自己吐了毒字节）。
+            payload_bytes = body
+
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Length", str(len(self.payload_bytes)))
+                self.end_headers()
+                self.wfile.write(self.payload_bytes)
+
+            def log_message(self, *args):
+                pass
+
+        srv = ThreadingHTTPServer((ip, port), Handler)
+        if port == 0:
+            port = srv.server_address[1]  # 第二个地址绑同一端口
+        thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        thread.start()
+        started.append(srv)
+    yield {ip: port for ip in payload}
+    for srv in started:
+        srv.shutdown()
+        srv.server_close()
+
+
+@pytest.fixture
+def allow_loopback_as_public(monkeypatch):
+    """测试缝：`url_guard._is_private_ip` 只留 metadata 拒绝，回环/私网放行。
+
+    真实攻击里被验证的是**公网 IP**；测试用回环段当替身（本机唯一可绑定的地址），
+    必须放开私网判定才能走到钉扎逻辑。只许在 TOCTOU 专测里用。
+    """
+    from app.services import url_guard
+
+    monkeypatch.setattr(
+        url_guard, "_is_private_ip",
+        lambda ip: str(ip) in url_guard._METADATA_IPS,
+    )

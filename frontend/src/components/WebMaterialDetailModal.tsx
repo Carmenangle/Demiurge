@@ -7,6 +7,7 @@ import { Copy, Trash2, ExternalLink, Send, X } from "lucide-react";
 
 import { openLightbox } from "./Lightbox";
 import type { WebMaterial } from "../api/ai";
+import { safeExternalHref } from "../lib/externalUrl";
 
 const RATING_LABEL: Record<string, string> = {
   g: "普通 (g)", s: "敏感 (s)", q: "可疑 (q)", e: "露骨 (e)",
@@ -136,7 +137,7 @@ export function WebMaterialDetailModal({
               {row("作者", item.author)}
               {row("评级", item.rating ? (RATING_LABEL[item.rating] || item.rating) : "—")}
               {row("来源页", item.source_url ? (
-                <a href={item.source_url} target="_blank" rel="noreferrer"
+                <a href={safeExternalHref(item.source_url)} target="_blank" rel="noreferrer"
                   style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
                   {item.source_url} <ExternalLink size={11} />
                 </a>

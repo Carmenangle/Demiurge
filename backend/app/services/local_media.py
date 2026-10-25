@@ -47,7 +47,15 @@ class LocalMedia:
             #   文件被覆盖 ⇒ mtime/size 变 ⇒ ETag 变 ⇒ 浏览器拿到新字节；未变 ⇒ 304（零流量）。
             #   ⚠ 不能用 `no-store`：整个资产库/头像/背景都走本端点，会变成每次渲染全量重拉。
             "Cache-Control": "no-cache",
+            # ⚠ 内容型安全（2026-10-24 审计改进项 2）：白名单含 .svg 且远程 svg 可经
+            #   image_proxy（content-type image/* 即放行）落盘，直接导航到一个恶意 svg 的
+            #   local-view URL ＝ 脚本在应用同源（回环端口）执行。nosniff 全量加杜绝
+            #   浏览器对媒体响应做内容嗅探；svg 另加 CSP sandbox：直航时禁脚本/表单、
+            #   静态图形照常渲染（<img>/<video> 引用不受影响——媒体元素上下文本就不执行脚本）。
+            "X-Content-Type-Options": "nosniff",
         }
+        if self.path.suffix.lower() == ".svg":
+            headers["Content-Security-Policy"] = "sandbox"
         if self.partial:
             headers["Content-Range"] = f"bytes {self.start}-{self.end}/{self.file_size}"
         return headers
@@ -92,6 +100,13 @@ def _media_type(path: Path) -> str:
     }
     if ext in audios:
         return audios[ext]
+    images = {
+        # 显式映射：兜底 image/<ext> 对 svg 产出的是非标准 image/svg（笔误级），浏览器会
+        # 内容嗅探；标准 image/svg+xml 配合 local-view 响应头 CSP sandbox 才构成完整防线。
+        "svg": "image/svg+xml",
+    }
+    if ext in images:
+        return images[ext]
     return f"image/{'jpeg' if ext in ('jpg', 'jpeg') else ext or 'png'}"
 
 

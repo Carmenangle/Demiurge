@@ -1,6 +1,9 @@
-import ipaddress
+import asyncio
 import logging
 import os
+import threading
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -8,24 +11,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-
-import threading
-
+from app.asyncio_quiet import install_connection_reset_filter
 from app.db import init_db
 from app.services import comfy_launcher
 from app.services import comfy_watchdog
+from app.services import request_guard
 from app.services.workflow_build_tasks import start_worker as start_workflow_build_worker
 from app.services.chat_agent_queue import start_worker as start_chat_agent_queue_worker
 from app.services.plan_tasks import start_worker as start_plan_task_worker
 from app.routers import ai, ai_providers, agents, artifacts, assets, attachments, characters, comfyui, docs, gif_sprite, gguf_importer, image_resize, jobs, loras, mcp, models, narrative, node_manager, palette, plans, preset, procedures, rag, regex, runs, scenario, skills, state, table, user_state, visual_ci, workflows, worldbook, activity
 
 _LOG = logging.getLogger("uvicorn.error")
-
-app = FastAPI(title="Local AI ComfyUI Frontend API")
-init_db()
-start_workflow_build_worker()
-start_chat_agent_queue_worker()
-start_plan_task_worker()
 
 
 # 后端进程可能跑在受限上下文（低完整性/沙箱），它拉起的 ComfyUI 写不了安装树：
@@ -35,56 +31,130 @@ _COMFY_AUTOSTART = os.environ.get("LAF_COMFY_AUTOSTART", "1") != "0"
 
 
 def _autostart_comfyui() -> None:
-    """按已保存配置在后台自动拉起 ComfyUI；成败都登记到看门狗（失败要在面板可见）。
+    """autostart 线程体：按已保存配置拉起 ComfyUI；成败都登记到看门狗（失败要在面板可见）。
 
-    放在 startup 钩子而非模块级：runtime_entry 自检只 import 本模块，不应误起子进程。
     此前 autostart() 的返回值被线程直接丢弃 ⇒ 启动失败时用户只看到「生图没反应」，
     原因（路径没配/启动失败）无从查起（2026-10-23 架构评审运行时稳健性短板 ②）。
     """
-    if not _COMFY_AUTOSTART:
+    result = comfy_launcher.autostart()
+    if result.get("started"):
+        comfy_watchdog.note_owned()
         return
-
-    def _run() -> None:
-        result = comfy_launcher.autostart()
-        if result.get("started"):
-            comfy_watchdog.note_owned()
-            return
-        reason = str(result.get("reason") or "未知原因")
-        _LOG.warning("ComfyUI 自动启动失败：%s", reason)
-        comfy_watchdog.note_autostart_failed(reason)
-
-    threading.Thread(target=_run, name="comfy-autostart", daemon=True).start()
+    reason = str(result.get("reason") or "未知原因")
+    _LOG.warning("ComfyUI 自动启动失败：%s", reason)
+    comfy_watchdog.note_autostart_failed(reason)
 
 
-@app.on_event("startup")
-def _start_comfy_watchdog() -> None:
-    """看门狗：托管进程死亡后按已存配置自动重启（防重启风暴 + 面板留痕）。
+@asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """运行期唯一装配点（2026-10-24 卫生刀）：持久队列 worker 与看护设施只在 uvicorn
+    起服务时拉起，import 本模块零副作用——runtime_entry 自检与测试进程都因此安全。
 
-    未配置/外部实例时全程 no-op；开发链（LAF_COMFY_AUTOSTART=0，ComfyUI 由
-    start-dev 在用户身份下拉起）同样安全——没托管过就不管。
+    - 三个队列 worker 无停止 API，测试进程由 tests/conftest.py 的「app.main 测试导入闸」
+      把 start_worker 换成 no-op；lifespan 在测试里即使被触发也拉不起真 worker。
+    - ComfyUI 看门狗：托管进程死亡后按已存配置自动重启（防重启风暴 + 面板留痕）；
+      未配置/外部实例时全程 no-op。
     """
+    start_workflow_build_worker()
+    start_chat_agent_queue_worker()
+    start_plan_task_worker()
+    if _COMFY_AUTOSTART:
+        threading.Thread(target=_autostart_comfyui, name="comfy-autostart", daemon=True).start()
     comfy_watchdog.start_watchdog()
+    install_connection_reset_filter(asyncio.get_running_loop())
+    yield
+
+
+app = FastAPI(title="Local AI ComfyUI Frontend API", lifespan=_lifespan)
+init_db()
 
 # 默认只服务本机：这是单机桌面壳，含无鉴权的进程控制/文件读写接口（start/stop/interrupt/
 # save-local/local-view 等）。CORS 只挡浏览器跨源，挡不住非浏览器客户端；故加回环门禁作纵深防御。
 # 确需局域网访问时，设环境变量 LAF_ALLOW_REMOTE=1 放开（自担风险）。
+# 对端 IP 之外还有两道闸（Origin/Host，属主 request_guard）：本机浏览器发起的跨站请求对端
+# 同样是回环——form 编码 CSRF 能打到全部扁平模型 POST 端点（含 install-tracked 的
+# clone+pip），DNS rebinding 能读走含密钥的 GET。判定语义与残留边界见该模块 docstring 与
+# docs/security-hardening-origin-guard-and-svg-2026-10-24.md。
 _ALLOW_REMOTE = os.environ.get("LAF_ALLOW_REMOTE", "") == "1"
 
 
 @app.middleware("http")
 async def _loopback_only(request: Request, call_next):
-    if not _ALLOW_REMOTE:
-        client = request.client.host if request.client else ""
-        try:
-            is_loopback = ipaddress.ip_address(client).is_loopback
-        except ValueError:
-            is_loopback = client in ("localhost", "")
-        if not is_loopback:
-            return JSONResponse(
-                status_code=403,
-                content={"detail": "仅允许本机访问（如需局域网访问请设 LAF_ALLOW_REMOTE=1）"},
-            )
+    verdict = request_guard.inbound_verdict(
+        client_host=request.client.host if request.client else "",
+        origin=request.headers.get("origin", ""),
+        host_header=request.headers.get("host", ""),
+        allow_remote=_ALLOW_REMOTE,
+    )
+    if verdict is not None:
+        return JSONResponse(status_code=403, content={"detail": verdict})
     return await call_next(request)
+
+
+# 应用页 CSP（2026-10-24 XSS→密钥链第三环）：壳的 webview（location.replace 到本端口）与
+# 浏览器直连的页面**都由本后端送达**——tauri.conf 的 csp 罩不到远程 http 页面，故 CSP 的
+# 单一属主在这里，只挂 text/html 文档响应（API JSON 与媒体流不受影响）。
+# 指令依据：script-src 'unsafe-inline' 是 scene 播放器 blob: 文档内联脚本所必需（vendor
+# 文件不可改、blob 文档继承宿主 CSP；remote script 仍被 'self' 拦死、eval 不放行）；img/
+# media 全同源（local-view 即本端口）加 data:/blob: 即可；ws 仅回环＝ComfyUI 进度 WS 直连
+# （LAN ComfyUI 失去进度条为登记取舍）；object/base-uri/form-action/frame-ancestors 为
+# 常规加固。注意壳侧注入脚本走 WebView2 ExecuteScript，不受页面 CSP 约束。
+# frame-src 必须含回环 http：前端 ComfyUI 画布（ChatView/WorkflowCard/AIBuildView 等）
+# 直接嵌 settings.comfyuiUrl（默认回环，端口真源 config.COMFYUI_DEFAULT_PORT）。曾只写
+# blob: ⇒ 真机实测同源 http iframe 被拦成不透明 blocked page，画布全挂。LAN ComfyUI 的
+# 画布嵌入同样被拦，与 connect-src 的 WS 取舍同口径登记。
+_DOCUMENT_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: blob:; "
+    "media-src 'self' blob:; "
+    "connect-src 'self' blob: ws://127.0.0.1:* ws://localhost:* ws://[::1]:*; "
+    "frame-src blob: http://127.0.0.1:* http://localhost:* http://[::1]:*; "
+    "worker-src 'self' blob:; "
+    "font-src 'self' data: blob:; "
+    "object-src 'none'; "
+    "base-uri 'self'; "
+    "form-action 'self'; "
+    "frame-ancestors 'none'"
+)
+
+
+@app.middleware("http")
+async def _csp_document_header(request: Request, call_next):
+    response = await call_next(request)
+    if (response.headers.get("content-type") or "").startswith("text/html"):
+        response.headers.setdefault("Content-Security-Policy", _DOCUMENT_CSP)
+    return response
+
+
+# 出口媒体 URL 归一（治存量）：历史快照/消息正文/RAG 记录里写死了带本机 origin 的取图
+# 地址，不迁移存档（用户定案「读时归一」），在发往客户端前收敛成根相对。
+# 发射侧已由 view_urls 收口成新形态，这里只兜旧数据。
+# 只碰 application/json：`text/event-stream` 由 sse.sse_response 逐帧归一（流式响应在此
+# 整体读回会把增量下发缓冲成一次性），图片/文件流没有 JSON 体可改。
+@app.middleware("http")
+async def _normalize_media_urls(request: Request, call_next):
+    # 本地 import：顶部 import 块会被并行改动整块重写（2026-10-24 实锤：加在顶部的
+    # `view_urls`/`Response` 两行被冲掉，中间件运行期 NameError，连带打落下游闸测试）。
+    from fastapi.responses import Response
+
+    from app.services import view_urls
+
+    response = await call_next(request)
+    content_type = response.headers.get("content-type") or ""
+    if "application/json" not in content_type:
+        return response
+    body = b"".join([chunk async for chunk in response.body_iterator])
+    normalized = view_urls.normalize_wire_bytes(body)
+    # 一律重建响应：call_next 给的是 _StreamingResponse，body_iterator 只支持 async 迭代，
+    # 原地塞回同步迭代器会让下发炸在 'async for' 上。content-length 交给 Response 重算
+    # （字节数会变），背景任务手工带过去。
+    headers = {k: v for k, v in response.headers.items() if k.lower() != "content-length"}
+    out = Response(content=normalized, status_code=response.status_code,
+                   headers=headers, media_type=content_type)
+    out.background = response.background
+    return out
 
 
 app.add_middleware(
