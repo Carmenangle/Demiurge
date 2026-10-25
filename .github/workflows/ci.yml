@@ -62,7 +62,9 @@ jobs:
       - name: import-linter
         run: lint-imports
       - name: mypy（mypy_files.txt 契约清单）
-        run: python -m mypy @mypy_files.txt
+        # 🔴 '@mypy_files.txt' 必须带引号：pwsh 把裸 @name 当 splatting 语法，
+        # 会在**启动前**就 ParserError（本地 Git Bash 无此语义，所以只有 CI 红）。
+        run: python -m mypy '@mypy_files.txt'
       - name: 静默宽捕获棘轮
         run: python scripts/check_silent_except.py --check
       - name: 硬编码检查
