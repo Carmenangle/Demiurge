@@ -2,6 +2,8 @@ import importlib.util
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location(
@@ -51,3 +53,41 @@ def test_release_preflight_detects_secret_candidate(tmp_path):
     paths = preflight.candidate_paths(tmp_path)
     assert paths == [tmp_path / "README.md"]
     assert preflight._contains_secret(paths[0])
+
+
+def test_private_name_denylist_is_ignored(tmp_path):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / ".gitignore").write_text("backend/data/\n", encoding="utf-8")
+    denylist = tmp_path / "backend" / "data" / "privacy_denylist.txt"
+    denylist.parent.mkdir(parents=True)
+    denylist.write_text(
+        "# 注释行\n\n某个很长的真实作品标题\n某个真实作品标题\n某个真实作品标题\n",
+        encoding="utf-8",
+    )
+
+    assert preflight.privacy_denylist(tmp_path) == ["某个很长的真实作品标题", "某个真实作品标题"]
+    assert preflight.candidate_paths(tmp_path) == [tmp_path / ".gitignore"]
+    assert subprocess.run(
+        ["git", "check-ignore", "-q", "--", str(denylist)], cwd=tmp_path, check=False
+    ).returncode == 0
+
+
+def test_private_name_leak_blocks_upload_surface(tmp_path):
+    leaked = tmp_path / "ARCHITECTURE.md"
+    leaked.write_text("作品《某个真实作品标题》的世界书注入", encoding="utf-8")
+    clean = tmp_path / "README.md"
+    clean.write_text("作品《虚构占位标题》的世界书注入", encoding="utf-8")
+
+    errors = preflight.private_name_leaks(
+        tmp_path, [leaked, clean], ["某个真实作品标题"]
+    )
+
+    assert errors == ["用户真实专名出现在上传面: ARCHITECTURE.md → 某个真实作品标题"]
+
+
+def test_current_tree_has_no_private_name():
+    names = preflight.privacy_denylist(ROOT)
+    if not names:
+        # 专名表是 gitignored 本机运行态文件；CI 干净检出没有它，闸自然不生效（不得因此判红）。
+        pytest.skip("本机缺少 backend/data/privacy_denylist.txt，无法校验真实专名")
+    assert preflight.private_name_leaks(ROOT, preflight.candidate_paths(ROOT), names) == []

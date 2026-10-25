@@ -1,4 +1,8 @@
-"""Demiurge 源码上传前检查。只读，不暂存、不提交、不推送。"""
+"""Demiurge 源码上传前检查。只读，不暂存、不提交、不推送。
+
+真实专名清单 `backend/data/privacy_denylist.txt` 本身是 Git 忽略的本机运行态文件，
+因此在干净检出（CI）上该项自动为空、不判红；上传前的真实拦截发生在开发机本地跑本脚本时。
+"""
 
 from __future__ import annotations
 
@@ -134,6 +138,30 @@ def _contains_secret(path: Path) -> bool:
     return any(pattern.search(content) for pattern in SECRET_PATTERNS)
 
 
+def privacy_denylist(root: Path) -> list[str]:
+    """用户真实专名表，只存在被 Git 忽略的运行态文件里（清单本身不得入库）。"""
+    path = root / "backend" / "data" / "privacy_denylist.txt"
+    if not path.is_file():
+        return []
+    return sorted({line.strip() for line in path.read_text(encoding="utf-8").splitlines()
+                   if line.strip() and not line.startswith("#")}, key=len, reverse=True)
+
+
+def private_name_leaks(root: Path, paths: list[Path], names: list[str]) -> list[str]:
+    leaks: list[str] = []
+    for path in paths:
+        if path.suffix.lower() not in TEXT_SUFFIXES or path.stat().st_size > 5 * 1024 * 1024:
+            continue
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        hit = [name for name in names if name in content]
+        if hit:
+            leaks.append(f"用户真实专名出现在上传面: {relative(root, path)} → {', '.join(hit[:6])}")
+    return leaks
+
+
 def validate(root: Path) -> list[str]:
     errors: list[str] = []
     paths = candidate_paths(root)
@@ -167,6 +195,8 @@ def validate(root: Path) -> list[str]:
     for missing in missing_css_assets(css, public):
         errors.append(f"CSS 引用资产缺失: frontend/public/{missing}")
 
+    errors += private_name_leaks(root, paths, privacy_denylist(root))
+
     public_assets = {path for path in public.rglob("*") if path.is_file()}
     for ignored in ignored_release_paths(root, public_assets):
         errors.append(f"运行所需前端资产被忽略: {ignored}")
@@ -184,6 +214,12 @@ def main() -> int:
             print(f"- {error}")
         return 1
     print(f"发布前检查通过：{len(paths)} 个候选文件，{total / 1024 / 1024:.1f} MiB。")
+    names = privacy_denylist(root)
+    print(
+        f"真实专名清单：{len(names)} 条。"
+        if names
+        else "⚠ 真实专名清单为空（本机缺少 backend/data/privacy_denylist.txt），本轮未做专名反查。"
+    )
     print("此结果不代表已暂存；提交前仍需逐项检查 git status。")
     return 0
 
