@@ -11,10 +11,21 @@ on:
 # 判绿只看退出码（CI 里 junitxml 四数口径由 pytest 自身退出码承载）。
 # Runner 用 windows-latest：工程含 Windows 专属面（system_proxy/WinINET、路径清洗、
 # 完整性标签相关测试），ubuntu 上会出与本地无关的红。
+# ⚠ runner 与本机的默认编码不同（cp1252 vs cp936）⇒ backend job 整段钉 PYTHONUTF8=1，
+#   见该 job env 上的注释。
 
 jobs:
   backend:
     runs-on: windows-latest
+    # PYTHONUTF8=1（PEP 540 UTF-8 模式）＝本 job 所有 Python 步骤用 UTF-8 打开文件与标准流。
+    # 起因：runner 的区域默认编码是 cp1252，本机是 cp936 —— cp936 能把 UTF-8 字节当 GBK
+    # 前导字节「解码成功」（输出乱码但不报错），cp1252 遇到 0x8f 这类未定义字节直接抛
+    # UnicodeDecodeError。实测：lint-imports 读 backend/.importlinter 第 1 行中文注释即崩，
+    # CI 报 `'charmap' codec can't decode byte 0x8f in position 13`，而本机同命令一直绿
+    # ——「绿在错的环境上」。工程口径是 UTF-8（见 AGENTS.md），故在此钉死解释器编码而不是
+    # 把配置注释改成英文。
+    env:
+      PYTHONUTF8: "1"
     defaults:
       run:
         working-directory: backend
@@ -57,9 +68,12 @@ jobs:
       - name: 硬编码检查
         run: python scripts/check_hardcode.py
       - name: wire 合同校验
-        # 两条合同生成器都要 import 后端模块（app.schemas.* / app.services.capability_handlers），
-        # 只有这个 job 装了后端依赖，故从 frontend job 移过来；语义与本地
-        # `npm run check:wire` / `npm run check:manifest` 完全一致（同一个脚本、同样 --check）。
+        # 两条合同校验都放在装了后端依赖的 job 里，不再蹭 runner 镜像自带的 Python：
+        # manifest 生成器会 import app.services.capability_handlers（链上依赖 requests），
+        # frontend job 没有 setup-python，那条链必然断（实测 37 条 handler 全判死）；
+        # wire 生成器只用标准库 + shared/schemas/*.json，本机/runner 恰好能跑，但它校验的
+        # 是 backend/app/generated 的产物，与 manifest 同属后端契约面，放同一个 job 口径一致。
+        # 语义与本地 `npm run check:wire` / `npm run check:manifest` 完全一致（同一个脚本、同样 --check）。
         run: python ../scripts/generate_wire_contracts.py --check
       - name: capability manifest 校验
         run: python ../scripts/generate_capability_manifest.py --check
