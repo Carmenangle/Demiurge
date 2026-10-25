@@ -6,7 +6,8 @@ on:
   pull_request:
 
 # 后端质量门禁与 AGENTS PreCompletion / docs/memory/topic-release-audit-test.md 的判绿口径一致：
-# ruff → import-linter → mypy（mypy_files.txt 清单）→ 静默捕获棘轮 → 硬编码 → pytest 全量。
+# pip-audit（漏洞豁免见该步注释）→ ruff → import-linter → mypy（mypy_files.txt 清单）→
+# 静默捕获棘轮 → 硬编码 → wire / capability manifest 双合同 → pytest 全量。
 # 判绿只看退出码（CI 里 junitxml 四数口径由 pytest 自身退出码承载）。
 # Runner 用 windows-latest：工程含 Windows 专属面（system_proxy/WinINET、路径清洗、
 # 完整性标签相关测试），ubuntu 上会出与本地无关的红。
@@ -34,9 +35,17 @@ jobs:
         # 扫描的是已装环境（runner 上即 requirements 全集）；需联网查 OSV。
         # 命中公告即红=门禁语义；确需暂缓修复的条目用 --ignore-vuln <ID> 显式
         # 豁免并在本行注释留因——不允许静默放宽。
+        # 现豁免四条，全部落在 chromadb（PYSEC-2026-311 / -3813 / -3814 / -3815，
+        # 对应 CVE-2026-45829/45830/45831/45833）：上游公告的 last_affected 就是当前
+        # 最新版 1.5.9，**没有修复版本可升**（PyPI 实测 1.5.9 即 2026-05-05 最新）。
+        # 可达性：本工程的 Chroma 只以嵌入式 PersistentClient 读本机目录（rag_backend /
+        # repo_meta / scenario_lab / output_path_migration），不起 chromd、不经 HttpClient、
+        # 不用多租户与 SimpleRBACAuthorizationProvider ⇒ 这四条（服务端预认证代码注入、
+        # 跨租户集合读写、RBAC 权限作用域）都不在本产品暴露的面上。
+        # ⚠ 收口条件：上游一发新版就把这四行 ignore 删掉并升级，别把豁免当永久。
         run: |
           python -m pip install pip-audit
-          python -m pip_audit --skip-editable
+          python -m pip_audit --skip-editable --ignore-vuln PYSEC-2026-311 --ignore-vuln PYSEC-2026-3813 --ignore-vuln PYSEC-2026-3814 --ignore-vuln PYSEC-2026-3815
       - name: ruff
         run: python -m ruff check app tests
       - name: import-linter
@@ -47,6 +56,13 @@ jobs:
         run: python scripts/check_silent_except.py --check
       - name: 硬编码检查
         run: python scripts/check_hardcode.py
+      - name: wire 合同校验
+        # 两条合同生成器都要 import 后端模块（app.schemas.* / app.services.capability_handlers），
+        # 只有这个 job 装了后端依赖，故从 frontend job 移过来；语义与本地
+        # `npm run check:wire` / `npm run check:manifest` 完全一致（同一个脚本、同样 --check）。
+        run: python ../scripts/generate_wire_contracts.py --check
+      - name: capability manifest 校验
+        run: python ../scripts/generate_capability_manifest.py --check
       - name: pytest 全量
         env:
           # 临时目录一律仓库外（basetemp 自伤教训：指进仓库会让 find_ffmpeg 扫到假树）
@@ -74,7 +90,4 @@ jobs:
         run: npm test
       - name: build
         run: npm run build
-      - name: wire 合同校验
-        run: npm run check:wire
-      - name: capability manifest 校验
-        run: npm run check:manifest
+      # 合同校验（wire / capability manifest）需要后端解释器与依赖，已移到 backend job。
