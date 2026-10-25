@@ -11,7 +11,8 @@ from pathlib import Path
 import httpx
 
 from app.services import (
-    chat_memory, chat_snapshot, image_store, rag_store, repo_meta, run_trace, view_urls,
+    chat_memory, chat_snapshot, image_store, local_auth, rag_store, repo_meta, run_trace,
+    view_urls,
 )
 from app.services.rag_backend import EmbedConfig
 from app.services.pathnames import safe_seg
@@ -73,13 +74,17 @@ def _download_capped(url: str, timeout: int, max_bytes: int, proxy: str = "",
     total_timeout>0 时按单调时钟掐**总**时长，防「滴漏」绕开 per-read 超时。
     """
     from app.services.url_guard import is_local_view_url
+    local = is_local_view_url(url)
     client_kwargs: dict[str, Any] = {"trust_env": False, "timeout": timeout}  # 后塞 proxy(str)，值域必须宽
-    if proxy and not is_local_view_url(url):
+    if proxy and not local:
         client_kwargs["proxy"] = proxy
     started = time.monotonic()
     with httpx.Client(**client_kwargs) as client:
         # local-view 的 wire 形态是根相对（属主 view_urls），httpx 只吃绝对地址
-        with client.stream("GET", view_urls.fetchable(url)) as response:
+        # 自取图同属「本机 API」：移动端启用 LAF_LOCAL_TOKEN 后必须带令牌头，
+        # 否则会被 local_auth 中间件判 401（桌面未启用时为空字典，行为不变）。
+        headers = local_auth.outbound_headers() if local else None
+        with client.stream("GET", view_urls.fetchable(url), headers=headers) as response:
             response.raise_for_status()
             chunks: list[bytes] = []
             total = 0

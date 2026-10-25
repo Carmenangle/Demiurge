@@ -15,6 +15,7 @@ from app.asyncio_quiet import install_connection_reset_filter
 from app.db import init_db
 from app.services import comfy_launcher
 from app.services import comfy_watchdog
+from app.services import local_auth
 from app.services import request_guard
 from app.services.workflow_build_tasks import start_worker as start_workflow_build_worker
 from app.services.chat_agent_queue import start_worker as start_chat_agent_queue_worker
@@ -215,3 +216,7 @@ if _DOCS_ASSETS.is_dir():
 _FRONTEND_DIST = Path(os.environ.get("LAF_FRONTEND_DIST", "")).expanduser()
 if str(_FRONTEND_DIST) not in {"", "."} and (_FRONTEND_DIST / "index.html").is_file():
     app.mount("/", StaticFiles(directory=_FRONTEND_DIST, html=True), name="frontend")
+
+# 移动端独立模式：壳层设了 LAF_LOCAL_TOKEN 才安装（未设为 no-op，PC 行为不变）。
+# 放在静态挂载之后：install() 会把引导端点插到路由表最前，挂载不会吞掉它。
+local_auth.install_from_env(app)

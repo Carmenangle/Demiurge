@@ -153,13 +153,16 @@ def _load_image_bytes(img: str, proxy: str = "") -> tuple[bytes, str, str]:
         _max = 30 * 1024 * 1024  # 30MB 上限，防超大直链读爆内存
         # local-view 指向本机后端（config 的 BACKEND_BASE_URL），即使配置了显式代理也必须绕过——
         # Clash 等代理无法转发 localhost 回环请求，会把取图打成 502 Bad Gateway。
-        from app.services import view_urls
+        from app.services import local_auth, view_urls
         from app.services.url_guard import is_local_view_url
-        _use_proxy = proxy if not is_local_view_url(img) else ""
+        _local = is_local_view_url(img)
+        _use_proxy = proxy if not _local else ""
         # httpx 只吃绝对地址，而 local-view 的 wire 形态是根相对（属主 view_urls）
         _target = view_urls.fetchable(img)
+        # 自取图也走本机 API：移动端启用 LAF_LOCAL_TOKEN 后必须带令牌头（桌面为 None）
+        _headers = local_auth.outbound_headers() if _local else None
         with build_http_client(_use_proxy) as c:  # 显式代理优先；否则禁用环境代理
-            with c.stream("GET", _target) as r:
+            with c.stream("GET", _target, headers=_headers) as r:
                 r.raise_for_status()
                 mime = r.headers.get("content-type", "image/png").split(";")[0]
                 chunks: list[bytes] = []

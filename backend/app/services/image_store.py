@@ -136,7 +136,7 @@ def _from_src(src: str) -> tuple[bytes, str]:
             ext = header.split("video/")[1].split(";")[0] or "mp4"
         return data, ext
     # 校验外部 URL 防 SSRF；本应用 local-view 代理地址豁免（已在后端可信路径落盘）
-    from app.services import view_urls
+    from app.services import local_auth, view_urls
     from app.services.url_guard import is_local_view_url, validate_media_url
     if not is_local_view_url(src):
         try:
@@ -153,7 +153,10 @@ def _from_src(src: str) -> tuple[bytes, str]:
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
             # local-view 的 wire 形态是根相对（属主 view_urls），urllib 只吃绝对地址
             # ⇒ 先按本机实际监听端口拼回 origin；已是绝对地址的原样通过。
-            with opener.open(view_urls.fetchable(src), timeout=30) as r:
+            # 自取图同属本机 API：移动端启用 LAF_LOCAL_TOKEN 后必须带令牌头（桌面为空）。
+            request = urllib.request.Request(view_urls.fetchable(src),
+                                             headers=local_auth.outbound_headers())
+            with opener.open(request, timeout=30) as r:
                 data = r.read(20 * 1024 * 1024)  # 最大 20 MB，防超大文件撑爆内存
         else:
             data = _download_external_url(src)

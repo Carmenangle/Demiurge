@@ -35,3 +35,12 @@ export no_proxy='*'
 export GIT_CONFIG_COUNT=1
 export GIT_CONFIG_KEY_0='url.https://gh-proxy.com/https://github.com/.insteadOf'
 export GIT_CONFIG_VALUE_0='https://github.com/'
+
+# utoipa-swagger-ui 的 build.rs 会在编译期用 curl 抓 swagger-ui 发布包（GitHub 直连不通 ⇒ curl 56）。
+# 它的 URL 可用 SWAGGER_UI_DOWNLOAD_URL 覆盖，且支持 file: 协议（该 crate 的 default features 带
+# `url`，走 Url::to_file_path 解析），所以指到 vendor 里那份 zip 就能完全离线。
+# 版本必须与 build.rs 里的 SWAGGER_UI_DOWNLOAD_URL_DEFAULT 一致（当前 v5.17.14）；
+# 这份 zip 从首次 dev 编译的 OUT_DIR 缓存里取出（target/aarch64-linux-android/debug/build/
+# utoipa-swagger-ui-*/out/v5.17.14.zip），⇒ 与 G1 产物用的是同一份资源（补丁 #8）。
+# 路径写 Windows 绝对形式：url crate 的 to_file_path 只在 "<盘符>:/" 形态下才认驱动器。
+export SWAGGER_UI_DOWNLOAD_URL="file:///D:/tool/Demiurge/mobile/spike/vendor/v5.17.14.zip"

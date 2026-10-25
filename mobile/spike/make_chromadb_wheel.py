@@ -70,10 +70,14 @@ def build(abi_key: str, profile: str = "debug") -> Path:
 
 
 if __name__ == "__main__":
-    args = sys.argv[1:] or ["arm64_v8a"]
+    args = sys.argv[1:]
     profile = "debug"
-    if "--release" in args:
+    flags = [a for a in args if a.startswith("--profile=")]
+    for flag in flags:
+        profile = flag.split("=", 1)[1]
+        args.remove(flag)
+    if "--release" in args:  # PLAN §5.5 的既有配方用的就是这个旗标
         profile = "release"
         args.remove("--release")
-    for key in args:
+    for key in args or ["arm64_v8a"]:
         build(key, profile)

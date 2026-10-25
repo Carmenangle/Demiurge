@@ -553,7 +553,7 @@ def _to_data_uri(image_url: str, max_bytes: int = 30 * 1024 * 1024) -> str:
     import mimetypes
 
     try:
-        from app.services import view_urls
+        from app.services import local_auth, view_urls
         from app.services.url_guard import is_local_view_url, pinned_media_url, validate_media_url
         # 分支判据必须把根相对形态也算 URL：local-view 的 wire 形态不带 origin（属主
         # view_urls），只看 http(s) 前缀会让它掉进下面的「本地文件路径」分支，被
@@ -565,9 +565,11 @@ def _to_data_uri(image_url: str, max_bytes: int = 30 * 1024 * 1024) -> str:
             # 校验+钉扎+建连同上下文：连接只用校验解析到的 IP（TOCTOU 关窗）。
             if is_local_view_url(image_url):
                 # trust_env=False：避免系统代理劫持 127.0.0.1 的 local-view 取图
+                # 自取图同属本机 API：移动端启用 LAF_LOCAL_TOKEN 后必须带令牌头（桌面为空）
+                auth_headers = local_auth.outbound_headers()
                 base = view_urls.fetchable(image_url)
                 resp = httpx.get(base, timeout=60, trust_env=False,
-                                 follow_redirects=False)
+                                 headers=auth_headers, follow_redirects=False)
                 if resp.status_code in (301, 302, 303, 307, 308):
                     location = (resp.headers.get("location") or "").strip()
                     target = view_urls.fetchable(str(httpx.URL(base).join(location)))
@@ -575,7 +577,7 @@ def _to_data_uri(image_url: str, max_bytes: int = 30 * 1024 * 1024) -> str:
                     if not is_local_view_url(target):
                         validate_media_url(target)
                     resp = httpx.get(target, timeout=60, trust_env=False,
-                                     follow_redirects=False)
+                                     headers=auth_headers, follow_redirects=False)
             else:
                 with pinned_media_url(image_url) as pinned:
                     resp = httpx.get(pinned, timeout=60, trust_env=False,
