@@ -4,9 +4,9 @@
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from typing import Literal
+from typing import Any, Literal
 
-from app.routers.ai_common import EmbedModelReq
+from app.services.ai_common import EmbedModelReq
 from app.generated.wire_contracts import AGENT_INVOCATION_WIRE_FIELDS
 from app.services.sse import sse_response
 
@@ -215,7 +215,7 @@ def regenerate_image(req: RegenerateImageRequest) -> dict[str, object]:
             images = list(req.images)
             if req.image_mask and req.image_mask.image not in images:
                 images.insert(0, req.image_mask.image)
-            kwargs = {"size": req.size, "quality": req.image_quality}
+            kwargs: dict[str, Any] = {"size": req.size, "quality": req.image_quality}
             if req.image_mask:
                 kwargs["mask"] = req.image_mask.mask
             if req.gen_proxy_url:
@@ -225,12 +225,12 @@ def regenerate_image(req: RegenerateImageRequest) -> dict[str, object]:
                 req.prompt, images, **kwargs,
             )
         else:
-            proxy_kw = {"proxy": req.gen_proxy_url} if req.gen_proxy_url else {}
+            proxy_kw: dict[str, Any] = {"proxy": req.gen_proxy_url} if req.gen_proxy_url else {}
             url = image_gen.generate(
                 req.gen_base_url, req.gen_api_key, req.gen_model,
                 req.prompt, size=req.size, quality=req.image_quality, **proxy_kw,
             )
-        persist_kw: dict[str, str] = {}
+        persist_kw: dict[str, Any] = {}
         if req.embed_proxy_url:
             persist_kw["embed_proxy"] = req.embed_proxy_url
         if req.gen_proxy_url:

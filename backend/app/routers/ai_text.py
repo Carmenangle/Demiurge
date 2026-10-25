@@ -4,7 +4,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app.routers.ai_common import ChatModelReq, build_chat_model, chat
+from app.services.ai_common import ChatModelReq, build_chat_model, chat
 # 反推系统提示 + 缩图实现统一放在 services/vlm_batch（后台批量描述任务复用同一套口径，
 # 避免两处漂移）；这里保留旧名做别名，既有测试 import _downscale_datauri 不变。
 from app.services.vlm_batch import REVERSE_SYSTEM as _REVERSE_SYSTEM

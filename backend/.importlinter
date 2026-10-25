@@ -159,3 +159,11 @@ source_modules =
 forbidden_modules =
     app.services.agent_graph
     app.routers
+
+[importlinter:contract:routers-flat]
+name = routers 平面内不得互相依赖（跨路由共享一律下沉 services，装配只发生在 main；2026-10-24 条目 59，ai_common 上移后落地）
+type = forbidden
+source_modules =
+    app.routers
+forbidden_modules =
+    app.routers

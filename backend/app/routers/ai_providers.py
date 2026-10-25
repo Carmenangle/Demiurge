@@ -47,7 +47,7 @@ def delete_provider(provider_id: str) -> dict[str, bool]:
 @router.post("/discover-models", response_model=DiscoverModelsResponse)
 def discover_provider_models(payload: DiscoverModelsRequest) -> DiscoverModelsResponse:
     result = ai_provider_service.discover_models(payload.base_url, payload.api_key)
-    return DiscoverModelsResponse(**result)
+    return DiscoverModelsResponse.model_validate(result)
 
 
 @router.post("/{provider_id}/test")

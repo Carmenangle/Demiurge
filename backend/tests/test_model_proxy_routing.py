@@ -1,8 +1,8 @@
 """模型代理必须按用途透传，联网搜索代理不得污染聊天模型。"""
 import json
 
-from app.routers import ai_chat, ai_common, ai_text
-from app.services import inspiration, llm, preset_store
+from app.routers import ai_chat, ai_text
+from app.services import ai_common, inspiration, llm, preset_store
 
 
 def test_build_chat_model透传聊天代理(monkeypatch):

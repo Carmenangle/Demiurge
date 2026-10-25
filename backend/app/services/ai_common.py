@@ -1,5 +1,10 @@
-"""AI 路由共用：对话模型请求基类 + 建模/单轮对话封装（委托 services.llm）。
-各 ai_* 子路由共享，避免 base_url/api_key/model 三元组与错误映射到处复制。
+"""AI 请求共用底座：对话模型请求基类 + 建模/单轮对话封装（委托 services.llm）。
+
+各 ai_* 子路由与 loras/table 共享，避免 base_url/api_key/model 三元组与错误映射到处复制。
+2026-10-24 审计中期项：自 routers/ai_common.py 上移进 services——它此前是 routers
+平面内唯一的跨路由共享点（6 个路由互相 import 它），也是「routers 平面内不得互相
+依赖」契约（.importlinter routers-flat）落地的唯一障碍。HTTPException 属 wire 语义
+适配（services 引 fastapi 有 sse 先例），分层合同 services ↛ routers 不受影响。
 """
 from typing import Literal
 

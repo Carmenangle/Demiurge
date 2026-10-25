@@ -13,8 +13,8 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app.routers.ai_common import ChatModelReq
 from app.services import chat_snapshot, llm, manual_table_fill, table_store
+from app.services.ai_common import ChatModelReq
 
 
 def _mask_proxy(proxy: str) -> str:

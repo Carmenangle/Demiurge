@@ -15,7 +15,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.config import COMFYUI_BASE_URL
-from app.routers.ai_common import EmbedModelReq, chat
+from app.services.ai_common import EmbedModelReq, chat
 from app.services import (
     node_index, workflow_builder, skeleton_store, build_session_store, workflow_build_tasks,
 )

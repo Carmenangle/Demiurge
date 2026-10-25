@@ -5,7 +5,7 @@
 """
 from fastapi import APIRouter, HTTPException
 
-from app.routers.ai_common import EmbedModelReq
+from app.services.ai_common import EmbedModelReq
 from app.services import lora_index
 
 router = APIRouter()

@@ -3,7 +3,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app.routers.ai_common import EmbedModelReq, build_chat_model
+from app.services.ai_common import EmbedModelReq, build_chat_model
 from app.services.sse import sse_response
 
 router = APIRouter()
@@ -150,11 +150,11 @@ class SnapshotSaveRequest(BaseModel):
 def chat_snapshot_save(req: SnapshotSaveRequest) -> dict[str, object]:
     """落盘前端完整消息流快照，作为可靠真源（关浏览器/清端口不丢）。"""
     from app.services import chat_snapshot
-    saved = (
-        chat_snapshot.save_if_newer(req.thread_id, req.messages, req.revision)
-        if req.revision is not None
-        else (chat_snapshot.save(req.thread_id, req.messages) is None)
-    )
+    if req.revision is not None:
+        saved = chat_snapshot.save_if_newer(req.thread_id, req.messages, req.revision)
+    else:
+        chat_snapshot.save(req.thread_id, req.messages)  # save() 恒返回 None，成功=未抛
+        saved = True
     return {"ok": True, "saved": saved}
 
 
