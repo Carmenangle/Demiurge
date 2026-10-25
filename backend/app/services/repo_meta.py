@@ -6,6 +6,8 @@
 """
 from __future__ import annotations
 
+from typing import Any, cast
+
 import logging
 import json
 import os
@@ -33,6 +35,16 @@ def _load_state() -> dict:
         return data if isinstance(data, dict) else {}
     except (json.JSONDecodeError, UnicodeDecodeError, TypeError, OSError):
         return {}
+
+
+def user_state_path() -> Path:
+    """user_state.json 唯一路径属主（调用期查模块属性 DATA_DIR ⇒ monkeypatch(repo_meta, "DATA_DIR") 即注入）。"""
+    return DATA_DIR / "user_state.json"
+
+
+def load_user_state() -> dict:
+    """公开读点：services 各处读用户态（repos/settings）一律走这里；语义同 _load_state。"""
+    return _load_state()
 
 
 def repo_name(repo_id: str) -> str:
@@ -483,7 +495,7 @@ def _rewrite_paths(repo_id: str, old_seg: str, new_seg: str, snap_folder: Path |
         c = client.get_collection(f"repo_{repo_id}")
         d = c.get(include=["metadatas"])
         up_ids, up_metas = [], []
-        for i, m in enumerate(d["metadatas"]):
+        for i, m in enumerate(d["metadatas"] or []):  # include=["metadatas"] 时键恒在，None 仅为 stub 放宽
             iu = m.get("image_url")
             if isinstance(iu, str) and old_seg in iu:
                 m = dict(m)
@@ -491,7 +503,7 @@ def _rewrite_paths(repo_id: str, old_seg: str, new_seg: str, snap_folder: Path |
                 up_ids.append(d["ids"][i])
                 up_metas.append(m)
         if up_ids:
-            c.update(ids=up_ids, metadatas=up_metas)
+            c.update(ids=up_ids, metadatas=cast(Any, up_metas))  # chromadb MetadataType stub 过窄，运行时即 dict 列表
             rag = len(up_ids)
     except Exception as exc:  # noqa: BLE001 [EXC-留痕] RAG 路径重写失败不阻断改名，但库内旧路径残留（断图）
         _LOG.warning("改名后 RAG 图片路径重写失败（改名继续，但库内旧路径残留会断图）: %s", exc)

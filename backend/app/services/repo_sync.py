@@ -14,7 +14,6 @@
       清理：索引有、磁盘无的裂图 + 孤儿仓库 → prune（复用既有逻辑）；
   - ⛔ 绝不反向删磁盘文件、绝不覆盖已有索引记录。
 """
-import json
 import logging
 from pathlib import Path
 
@@ -60,12 +59,7 @@ def _disk_media(folder: Path) -> dict[str, Path]:
 def _registered_repos() -> dict[str, str]:
     """{repo_id: name}，从 user_state.repos。读失败返回空 dict（保守：无注册表就不动）。"""
     try:
-        from app.config import DATA_DIR
-
-        p = DATA_DIR / "user_state.json"
-        if not p.is_file():
-            return {}
-        st = json.loads(p.read_text(encoding="utf-8"))
+        st = repo_meta.load_user_state()  # 2026-10-24 收口：读点唯一属主
         return {
             str(r["id"]): str(r.get("name") or "")
             for r in (st.get("repos") or []) if r.get("id")

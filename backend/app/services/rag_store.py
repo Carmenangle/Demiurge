@@ -20,8 +20,10 @@ from pathlib import Path
 import httpx
 from langchain_core.documents import Document
 
+from typing import Literal, cast
+
 from app.services import (
-    asset_store, comfyui_client, rag_backend, rag_retrieval, reranker, thumbnail_store,
+    asset_store, comfyui_client, rag_backend, rag_retrieval, reranker, repo_meta, thumbnail_store,
 )
 from app.services.rag_backend import EmbedConfig
 
@@ -263,14 +265,9 @@ def embed_config_from_state() -> EmbedConfig:
     ⚠ 已知局限：settings.embedModel.proxyUrl 是前端运行时解析值、通常不持久化
     ⇒ 需要代理的远程嵌入端点这里取不到代理（capability_handlers 同样局限）。
     """
-    from app.config import DATA_DIR
-
-    try:
-        st = json.loads((DATA_DIR / "user_state.json").read_text(encoding="utf-8"))
-        embed = (st.get("settings") or {}).get("embedModel") or {}
-        if not isinstance(embed, dict):
-            embed = {}
-    except (OSError, json.JSONDecodeError):
+    st = repo_meta.load_user_state()  # 2026-10-24 收口：读点唯一属主
+    embed = (st.get("settings") or {}).get("embedModel") or {}
+    if not isinstance(embed, dict):
         embed = {}
     return EmbedConfig(
         base_url=str(embed.get("baseUrl") or ""),
@@ -278,7 +275,7 @@ def embed_config_from_state() -> EmbedConfig:
         embed_model=str(embed.get("modelName") or ""),
         model_dir=str(embed.get("modelDir") or ""),
         reranker_dir=str(embed.get("rerankerDir") or ""),
-        mode=str(embed.get("mode") or "remote"),
+        mode=cast("Literal['remote', 'local']", str(embed.get("mode") or "remote")),  # 非法值由消费侧按非 local 处理（原语义）
         proxy=str(embed.get("proxyUrl") or ""),
     )
 
@@ -433,7 +430,8 @@ def _context_item(source: str, content: str, metadata: dict) -> dict:
 def _context_documents(collection: str, source: str, cfg: EmbedConfig) -> list[dict]:
     try:
         data = _store(collection, cfg).get()
-    except Exception:
+    except Exception as exc:
+        _log.debug("读上下文文档失败 collection=%s: %s", collection, exc)
         return []
     documents = data.get("documents", []) or []
     metadatas = data.get("metadatas", []) or []
@@ -463,7 +461,8 @@ def retrieve_with_trace(repo_id: str, cfg: EmbedConfig,
     documents: list[dict] = []
     try:
         vector = rag_backend.embed_query(cfg, query)
-    except Exception:
+    except Exception as exc:
+        _log.debug("查询向量生成失败，转纯关键词检索: %s", exc)
         vector = None
     for collection, source in sources:
         documents.extend(_context_documents(collection, source, cfg))
@@ -476,7 +475,8 @@ def retrieve_with_trace(repo_id: str, cfg: EmbedConfig,
             dense = [
                 _context_item(source, doc.page_content, doc.metadata or {}) for doc in docs
             ]
-        except Exception:
+        except Exception as exc:
+            _log.debug("向量检索失败 source=%s: %s", source, exc)
             dense = []
         rankings.append((f"dense:{source}", dense))
     rankings.append(("bm25", rag_retrieval.sparse_rank(query, documents, candidate_k)))
@@ -545,7 +545,8 @@ def _dump(collection: str, cfg: EmbedConfig, where: dict | None = None) -> list[
     try:
         store = _store(collection, cfg)
         data = store.get(where=where)  # {ids, documents, metadatas}
-    except Exception:
+    except Exception as exc:
+        _log.debug("列出文档失败 collection=%s: %s", collection, exc)
         return []
     ids = data.get("ids", []) or []
     docs = data.get("documents", []) or []
@@ -666,7 +667,8 @@ def search_generations(repo_ids: list[str], cfg: EmbedConfig,
     rankings: list[tuple[str, list[dict]]] = []
     try:
         vector = rag_backend.embed_query(cfg, query)
-    except Exception:
+    except Exception as exc:
+        _log.debug("查询向量生成失败，转纯关键词检索: %s", exc)
         vector = None
     if vector is not None:
         for repo_id in dict.fromkeys(repo_ids):
@@ -674,7 +676,8 @@ def search_generations(repo_ids: list[str], cfg: EmbedConfig,
                 dense_docs = _store(_repo_collection(repo_id), cfg).similarity_search_by_vector(
                     vector, k=candidate_k, filter={"kind": "generation"},
                 )
-            except Exception:
+            except Exception as exc:
+                _log.debug("仓库向量检索失败 repo=%s: %s", repo_id, exc)
                 dense_docs = []
             dense = []
             for doc in dense_docs:
@@ -881,7 +884,8 @@ def _find_store(doc_id: str, repo_id: str, cfg: EmbedConfig):
         store = _store(coll, cfg)
         try:
             got = store.get(ids=[doc_id])
-        except Exception:
+        except Exception as exc:
+            _log.debug("读单条文档失败 doc=%s: %s", doc_id, exc)
             continue
         if got.get("ids"):
             metas = got.get("metadatas", []) or []
@@ -982,7 +986,8 @@ def local_path_of(image_url: str) -> Path | None:
             if alt.exists():
                 return alt
         return p
-    except Exception:
+    except Exception as exc:
+        _log.debug("本地路径解析失败: %s", exc)
         return None
 
 
@@ -1007,7 +1012,8 @@ def _remote_view_target(image_url: str) -> dict | None:
             "subfolder": (query.get("subfolder") or [""])[0],
             "url": (query.get("url") or [""])[0],
         }
-    except Exception:
+    except Exception as exc:
+        _log.debug("解析 remote-view 参数失败: %s", exc)
         return None
 
 
@@ -1116,12 +1122,8 @@ def _registered_repo_ids() -> set[str]:
     读失败/无文件返回空集——空集会让「所有有记录的仓库」都算孤儿，过于激进，
     故读取异常时保守返回空集并留痕，由调用方决定是否继续。"""
     try:
-        from app.config import DATA_DIR
 
-        p = DATA_DIR / "user_state.json"
-        if not p.is_file():
-            return set()
-        st = json.loads(p.read_text(encoding="utf-8"))
+        st = repo_meta.load_user_state()  # 2026-10-24 收口：读点唯一属主
         return {str(r.get("id")) for r in (st.get("repos") or []) if r.get("id")}
     except Exception as exc:  # noqa: BLE001 [EXC-留痕] 读注册表失败不炸，返回空集
         _log.warning("读注册仓库表失败: %s", exc)
@@ -1232,7 +1234,8 @@ def seed_system_docs(cfg: EmbedConfig) -> int:
         ids_all = got.get("ids", []) or []
         old = {i: (got.get("documents") or [])[n] for n, i in enumerate(ids_all)}
         metas_all = {i: (got.get("metadatas") or [])[n] or {} for n, i in enumerate(ids_all)}
-    except Exception:
+    except Exception as exc:
+        _log.debug("读取既有系统文档失败（按空集处理）: %s", exc)
         old, metas_all = {}, {}
     meta = {"kind": "system", "locked": True, "title": "系统指令"}
     changed = 0

@@ -10,8 +10,10 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -223,9 +225,9 @@ def scan(
             "size": stat.st_size,
             "mtime": int(stat.st_mtime),
         }
-        meta = scene_meta.get(path)
-        if meta is not None:
-            item.update(meta)
+        scene = scene_meta.get(path)
+        if scene is not None:
+            item.update(scene)
             item["name"] = meta["title"]
         items.append(item)
     return {
@@ -440,6 +442,296 @@ def scene_package(source: str) -> Path:
         except OSError:
             continue
     raise ValueError("该作品没有可用的 scene.pkg")
+
+
+def wallpaper_engine_asset_roots() -> list[Path]:
+    """所有 Steam 库下 Wallpaper Engine 安装目录的 `assets` 根（去重、只留存在的）。"""
+    seen: set[str] = set()
+    roots: list[Path] = []
+    for library in steam_libraries():
+        candidate = library / "steamapps" / "common" / "wallpaper_engine" / "assets"
+        try:
+            if not candidate.is_dir():
+                continue
+        except OSError:
+            continue
+        key = os.path.normcase(str(candidate))
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(candidate)
+    return roots
+
+
+# scene 工程按相对路径引用 WE 安装目录里的字体与粒子贴图，却不把它们打进 scene.pkg，
+# 实时渲染只能另取一份。只开这四个子目录：素材之外的（如 exe、用户配置）一律不给读。
+_WE_ASSET_DIRS = ("fonts", "particle", "materials", "textures")
+# 工坊用的中文字体动辄十几 MB；设上限避免一次请求把整个磁盘文件压进响应。
+_WE_ASSET_MAX_BYTES = 48 * 1024 * 1024
+
+
+def we_builtin_asset(raw: str) -> Path:
+    """按 `assets` 下的相对路径取一个 Wallpaper Engine 内置资产文件。
+
+    首段必须落在白名单子目录里，再交给 `_child_file` 做绝对路径/越界/软链外的兜底；
+    两个库里都有同名文件时取先发现的那个（内容相同，不区分版本）。
+    """
+    rel = str(raw or "").strip().replace("\\", "/")
+    parts = [seg for seg in rel.split("/") if seg]
+    if not parts or parts[0].lower() not in _WE_ASSET_DIRS or ".." in parts:
+        raise ValueError("内置资产路径不合法")
+    for assets in wallpaper_engine_asset_roots():
+        candidate = _child_file(assets, rel)
+        if candidate is None:
+            continue
+        if candidate.stat().st_size > _WE_ASSET_MAX_BYTES:
+            raise ValueError("内置资产过大")
+        return candidate
+    raise ValueError("该内置资产不存在")
+
+
+_MISSING = object()
+_PROPERTY_TYPES = {"slider", "bool", "combo", "color", "textinput"}
+# 工坊作品常把广告/作者主页塞成 bool/color 属性（键是压缩过的 URL，text 里是 <img>/<a>）。
+# 这些条目与场景渲染无关，前端不该给用户看。
+_AD_KEY_RE = re.compile(
+    r"(https?|imgsrc|href|weixin|qq\.com|pixiv|afdian|steamcommunity|filecusers)",
+    re.IGNORECASE,
+)
+_AD_TEXT_RE = re.compile(r"(<img\b|<a\b|https?://)", re.IGNORECASE)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_BR_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
+_LABEL_NOISE_RE = re.compile(r"[🔘▸▶•·]+")
+_WE_CONFIG_NAME = "config.json"
+
+
+def _scene_project_dir(source: str) -> Path:
+    """场景来源 ⇒ 含 project.json 的目录（预设元数据只能从磁盘工程读，包里没有）。"""
+    ident = str(source or "").strip()
+    if ident.startswith(_LOCAL_SOURCE_PREFIX):
+        return _local_scene_package(ident[len(_LOCAL_SOURCE_PREFIX):]).parent
+    if ident.startswith(_WORKSHOP_SOURCE_PREFIX):
+        ident = ident[len(_WORKSHOP_SOURCE_PREFIX):].strip()
+    if not _WE_SCENE_ID_RE.match(ident):
+        raise ValueError("场景来源不合法（应为 workshop:<id> 或 local:<目录>）")
+    for root in workshop_roots():
+        candidate = root / ident
+        try:
+            if (candidate / "project.json").is_file():
+                return candidate.resolve()
+        except OSError:
+            continue
+    raise ValueError("该作品没有可用的 project.json")
+
+
+def _path_key(path: Path) -> str:
+    try:
+        resolved = path.resolve()
+    except OSError:
+        resolved = path
+    return os.path.normcase(str(resolved)).replace("\\", "/")
+
+
+def _we_config_files() -> list[Path]:
+    """所有 Steam 库下的 Wallpaper Engine 用户配置（保存了每张壁纸的属性覆盖）。"""
+    found: list[Path] = []
+    seen: set[str] = set()
+    for library in steam_libraries():
+        candidate = library / "steamapps" / "common" / "wallpaper_engine" / _WE_CONFIG_NAME
+        key = _path_key(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            if candidate.is_file():
+                found.append(candidate)
+        except OSError:
+            continue
+    return found
+
+
+def _we_property_overrides(pkg: Path) -> tuple[dict, str]:
+    """读取用户在 Wallpaper Engine 里调过的属性（`wproperties[<pkg>][Monitor0]`）。
+
+    config.json 顶层是安装信息（`?installdirectory`）+ 用户名 → 各自一份 `wproperties`；
+    WE 对场景壁纸以 `scene.pkg` 的绝对路径作键，显示器名作子键。多用户配置按顺序合并，
+    后读到的覆盖先读到的；找不到配置不是错误（用户可能没装 WE 或用便携版）。
+    """
+    want = _path_key(pkg)
+    merged: dict = {}
+    source = ""
+    for config_path in _we_config_files():
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8-sig", errors="replace"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(config, dict):
+            continue
+        for name, user in config.items():
+            if str(name).startswith("?") or not isinstance(user, dict):
+                continue
+            wproperties = user.get("wproperties")
+            if not isinstance(wproperties, dict):
+                continue
+            for raw_key, monitors in wproperties.items():
+                if _path_key(Path(str(raw_key))) != want or not isinstance(monitors, dict):
+                    continue
+                values = monitors.get("Monitor0")
+                if not isinstance(values, dict):
+                    values = next(
+                        (v for v in monitors.values() if isinstance(v, dict)), None,
+                    )
+                if not values:
+                    continue
+                merged.update(values)
+                source = str(config_path)
+    return merged, source
+
+
+def _clean_property_label(raw: object, key: str) -> str:
+    text = str(raw or "")
+    text = _BR_RE.sub(" ", text)
+    # 广告属性在 text 里用 <img>/<a> 排版；标签只保留可读文字。
+    text = _HTML_TAG_RE.sub("", text)
+    text = html.unescape(text).replace("\xa0", " ")
+    text = _LABEL_NOISE_RE.sub("", text)
+    text = re.sub(r"\s+", " ", text).strip(" -_/·|")
+    return text or key
+
+
+def _is_ad_property(key: str, meta: dict) -> bool:
+    if key.strip().lower() == "schemecolor":
+        return True  # WE 浏览器的 UI 主题色，不参与场景渲染
+    if len(key) > 40 or _AD_KEY_RE.search(key):
+        return True
+    return bool(_AD_TEXT_RE.search(str(meta.get("text") or "")))
+
+
+def _coerce_property_value(kind: str, raw: object) -> object:
+    """把 project.json / WE config 的原始值收敛成前端控件能直接吃的类型。"""
+    if kind == "bool":
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, (int, float)):
+            return bool(raw)
+        text = str(raw).strip().lower()
+        if text in ("true", "1", "yes", "on"):
+            return True
+        if text in ("false", "0", "no", "off", ""):
+            return False
+        return None
+    if kind == "slider":
+        if isinstance(raw, bool):
+            return None
+        if not isinstance(raw, (str, int, float)):
+            return None
+        try:
+            number = float(raw)
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) else None
+    if kind == "combo":
+        if raw is None:
+            return None
+        text = str(raw).strip()
+        return text or None
+    if kind == "color":
+        if isinstance(raw, (list, tuple)) and len(raw) >= 3:
+            return " ".join(str(v) for v in raw[:3])
+        text = str(raw or "").strip()
+        return text or None
+    if kind == "textinput":
+        # 文字内容（「可自定义文字」的正文）：字符串原样保留，空串是合法值（用户可能
+        # 刻意清空）；value 缺失（None）才视为无此属性。
+        if raw is None:
+            return None
+        return str(raw)
+    return None
+
+
+def scene_properties(source: str) -> dict:
+    """场景壁纸的可用预设：project.json 的属性表 + 用户在 WE 里的当前取值。
+
+    只保留渲染器可能消费的类型（slider/bool/combo/color/textinput），剔除广告与 WE 的 UI 主题色。
+    哪些键真的生效由前端解码清单的 `userBindings` 决定——这里不做「支持性」判断，
+    否则每新增一个渲染特性都要改后端。
+    """
+    folder = _scene_project_dir(source)
+    project_path = folder / "project.json"
+    try:
+        project = json.loads(project_path.read_text(encoding="utf-8-sig", errors="replace"))
+    except (OSError, ValueError) as exc:
+        raise ValueError("作品 project.json 不可读") from exc
+    if not isinstance(project, dict):
+        raise ValueError("作品 project.json 不是有效对象")
+    raw_props = project.get("general", {}).get("properties")
+    if not isinstance(raw_props, dict):
+        raw_props = {}
+    pkg = folder / "scene.pkg"
+    overrides, config_path = _we_property_overrides(pkg)
+
+    items: list[dict] = []
+    for key, meta in raw_props.items():
+        if not isinstance(meta, dict):
+            continue
+        kind = str(meta.get("type") or "").strip().lower()
+        if kind not in _PROPERTY_TYPES or _is_ad_property(key, meta):
+            continue
+        default = _coerce_property_value(kind, meta.get("value"))
+        if default is None:
+            continue
+        override = overrides.get(key, _MISSING)
+        value = default
+        overridden = False
+        if override is not _MISSING:
+            coerced = _coerce_property_value(kind, override)
+            if coerced is not None:
+                value = coerced
+                overridden = True
+        raw_order = meta.get("order")
+        try:
+            order = int(raw_order) if raw_order is not None else 1000
+        except (TypeError, ValueError):
+            order = 1000
+        item: dict = {
+            "key": key,
+            "type": kind,
+            "label": _clean_property_label(meta.get("text"), key),
+            "order": order,
+            "condition": str(meta.get("condition") or "").strip() or None,
+            "default": default,
+            "value": value,
+            "we_overridden": overridden,
+        }
+        for field in ("min", "max", "step", "precision"):
+            raw = meta.get(field)
+            if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+                item[field] = float(raw)
+        if isinstance(meta.get("fraction"), bool):
+            item["fraction"] = meta["fraction"]
+        if kind == "combo":
+            options = meta.get("options")
+            if isinstance(options, list):
+                item["options"] = [
+                    {
+                        "label": _clean_property_label(opt.get("label"), str(opt.get("value"))),
+                        "value": str(opt.get("value")),
+                    }
+                    for opt in options
+                    if isinstance(opt, dict) and opt.get("value") is not None
+                ]
+        items.append(item)
+
+    items.sort(key=lambda item: (item["order"], item["key"]))
+    return {
+        "source": str(source or "").strip(),
+        "title": str(project.get("title") or folder.name).strip() or folder.name,
+        "folder": folder.as_posix(),
+        "pkg": pkg.as_posix(),
+        "found": True,
+        "we_config": config_path,
+        "properties": items,
+    }
 
 
 def has_scene_package(item_dir: Path, we_type: str) -> bool:

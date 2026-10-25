@@ -222,7 +222,7 @@ def test_index_generation_显式传source才写键(store):
 # ===== embed 配置从 user_state 解析（后端自发链） =====
 
 def test_embed_config_from_state_解析嵌套embedModel(monkeypatch, tmp_path):
-    from app import config
+    from app.services import repo_meta
 
     (tmp_path / "user_state.json").write_text(json.dumps(
         {"settings": {"embedModel": {
@@ -230,7 +230,8 @@ def test_embed_config_from_state_解析嵌套embedModel(monkeypatch, tmp_path):
             "modelName": "qwen3-embedding:latest", "mode": "local",
             "modelDir": "D:/models/embed", "rerankerDir": "D:/models/rerank",
             "proxyUrl": "http://127.0.0.1:7890"}}}), encoding="utf-8")
-    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    # 注入面随 A 刀收口：读取走 repo_meta.load_user_state，钉属主的模块级 DATA_DIR
+    monkeypatch.setattr(repo_meta, "DATA_DIR", tmp_path)
     cfg = rag_store.embed_config_from_state()
     assert cfg.base_url == "http://localhost:11434/v1"
     assert cfg.api_key == "k"
@@ -242,9 +243,10 @@ def test_embed_config_from_state_解析嵌套embedModel(monkeypatch, tmp_path):
 
 
 def test_embed_config_from_state_缺失回退远程空配置(monkeypatch, tmp_path):
-    from app import config
+    from app.services import repo_meta
 
-    monkeypatch.setattr(config, "DATA_DIR", tmp_path)      # 无 user_state.json
+    # 注入面随 A 刀收口：读取走 repo_meta.load_user_state，钉属主的模块级 DATA_DIR
+    monkeypatch.setattr(repo_meta, "DATA_DIR", tmp_path)      # 无 user_state.json
     cfg = rag_store.embed_config_from_state()
     assert cfg.base_url == "" and cfg.api_key == "" and cfg.mode == "remote"
 

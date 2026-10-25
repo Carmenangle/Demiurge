@@ -92,5 +92,6 @@ def test_capability_handlers_无目录自读残留():
     import re
     src = _src("app/services/capability_handlers.py")
     assert re.search(r"\b_dir_from_state\b", src) is None, "已删除的目录自读不得复活"
-    assert src.count("user_state.json") == 1, (
-        "capability_handlers 只允许 _embed_config_from_state 一处自读（embedModel 嵌套对象）")
+    assert src.count("user_state.json") == 0, (
+        "capability_handlers 读取已收口 repo_meta.load_user_state，不得再出现字面量 user_state.json")
+    assert "repo_meta.load_user_state" in src, "embedModel 读取必须经属主 load_user_state"

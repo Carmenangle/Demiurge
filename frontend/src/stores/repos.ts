@@ -330,7 +330,7 @@ export function useRepos() {
   };
 
   return {
-    repos, addRepo, addCardWork, addBranch, renameRepo, bindRepo, resolveBinding,
+    repos, hydrated, addRepo, addCardWork, addBranch, renameRepo, bindRepo, resolveBinding,
     setCover, setGeneratedCover, touchRepo, relocateOutputPath,
     coverOf, deleteRepo, childrenOf,
   };

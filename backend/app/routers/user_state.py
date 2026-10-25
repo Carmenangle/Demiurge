@@ -4,6 +4,11 @@
 现改为落盘到 backend/data（已被 .gitignore 排除、不进打包），前端启动时以此为准恢复。
 
 隐私：user_state.json 含 API Key 等隐私，绝不上传（data 目录整体排除）。
+
+分工（2026-10-24 审计中期项）：**读侧属主 = repo_meta**（load_user_state /
+setting_str_from_state / user_state_path），本路由的三处内联自读已收口；写侧属主
+仍在本路由（整体覆盖写 + selection 保留语义见 set_state）。测试注入接缝随读侧
+改钉 `repo_meta.DATA_DIR`（见 test_user_state_ownership / test_user_state_selection）。
 """
 import json
 from pathlib import Path
@@ -27,46 +32,46 @@ def proxy_status(search: bool = False) -> dict:
     """
     from app.services import system_proxy
 
-    manual = ""
-    try:
-        data = json.loads(_state_path().read_text(encoding="utf-8"))
-        settings = data.get("settings") or {}
-        if isinstance(settings, dict):
-            manual = str(settings.get("proxyUrl") or "").strip()
-    except (OSError, json.JSONDecodeError, AttributeError):
-        manual = ""
-    return system_proxy.resolve(manual, search=search)
-
-
-def _state_path() -> Path:
-    return DATA_DIR / "user_state.json"
+    return system_proxy.resolve(repo_meta.setting_str_from_state("proxyUrl"), search=search)
 
 
 class UserState(BaseModel):
     # 前端结构自由（仓库列表、设置对象），后端只负责整体读写不解释内容
     repos: list | None = None
     settings: dict | None = None
+    # 上次选中的大仓库/作品（前端结构：{repoId, workId, savedAt}）。桌面壳的 WebView2
+    # 数据目录可能切换（受限上下文会回落到别的目录），selection 存后端才能跨目录/跨浏览器恢复。
+    selection: dict | None = None
 
 
 @router.get("")
 def get_state() -> UserState:
-    """读用户存档。缺失/损坏返回空（前端据此回退 localStorage）。"""
-    p = _state_path()
-    if p.is_file():
-        try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-            return UserState(repos=data.get("repos"), settings=data.get("settings"))
-        except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
-            pass
-    return UserState()
+    """读用户存档。缺失/损坏返回空（前端据此回退 localStorage）；读取经读侧属主 repo_meta。"""
+    data = repo_meta.load_user_state()
+    return UserState(
+        repos=data.get("repos"),
+        settings=data.get("settings"),
+        selection=data.get("selection"),
+    )
 
 
 @router.post("")
 def set_state(state: UserState) -> dict[str, bool]:
-    """保存用户存档到 data/user_state.json。整体覆盖写。"""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    payload = {"repos": state.repos, "settings": state.settings}
-    _state_path().write_text(
+    """保存用户存档到 data/user_state.json。整体覆盖写。
+
+    `selection` 未出现在请求里时沿用盘上旧值：启动早期 repos/settings 的合并上传
+    不该把已记住的作品选择抹掉（旧前端也不带这个字段）。盘上旧值经读侧属主
+    repo_meta.load_user_state 取（缺失/损坏即无旧值可保）。
+    """
+    existing = repo_meta.load_user_state()
+    payload: dict = {"repos": state.repos, "settings": state.settings}
+    if "selection" in state.model_fields_set:
+        payload["selection"] = state.selection
+    elif "selection" in existing:
+        payload["selection"] = existing.get("selection")
+    p = repo_meta.user_state_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     return {"ok": True}
@@ -142,8 +147,15 @@ def canvas_layout_save(req: CanvasLayoutRequest) -> dict[str, bool]:
 @router.post("/sync-markers")
 def sync_markers(req: SyncMarkersRequest) -> dict[str, int]:
     """扫描 output_dir 下的 UUID 子文件夹，按当前仓库列表补/更新 _repo.json。
-    文件夹名保留 UUID 不动，只写标记文件——文件系统里一看便知对应哪个仓库。"""
+    文件夹名保留 UUID 不动，只写标记文件——文件系统里一看便知对应哪个仓库。
+
+    根校验与写/删类端点同口径（works_root_violation，2026-10-24 审计补齐）：
+    必须等于配置的仓库文件夹根且已配置——本端点会向目录**写入**标记文件，
+    不能例外于「防客户端指定任意目录」的合同。"""
     from app.services import repo_meta
+    err = repo_meta.works_root_violation(req.output_dir)
+    if err:
+        raise HTTPException(status_code=400, detail=err)
     out = Path(req.output_dir)
     if not out.is_dir():
         return {"written": 0}
@@ -244,6 +256,35 @@ def wallpaper_scene_pkg(source: str = "", workshop_id: str = ""):
 def workshop_scene_pkg(workshop_id: str):
     """旧路径（工坊 id 单参）；保留一版避免老前端 404，内部与上者同源。"""
     return wallpaper_scene_pkg(source="", workshop_id=workshop_id)
+
+
+@router.get("/wallpapers/scene-properties")
+def wallpaper_scene_properties(source: str = "") -> dict:
+    """场景壁纸的预设属性表（类型/范围/选项/当前值，已合并用户在 WE 里的覆盖）。"""
+    from app.services import wallpaper_library
+    try:
+        return wallpaper_library.scene_properties(source)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/wallpapers/we-asset")
+def wallpaper_we_asset(path: str = ""):
+    """Wallpaper Engine 安装目录里的内置资产（字体 / 粒子贴图 / 材质）。
+
+    scene 工程按相对路径引用它们，却不把这些文件打进 `scene.pkg`，实时渲染要另取一份。
+    `path` 是 `assets/` 下的相对路径，首段限定在字体等素材子目录，越界与绝对路径 404。
+    """
+    from fastapi.responses import FileResponse
+    from app.services import wallpaper_library
+    try:
+        asset = wallpaper_library.we_builtin_asset(path)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(
+        asset, media_type="application/octet-stream",
+        headers={"Cache-Control": "public, max-age=604800"},
+    )
 
 
 @router.get("/wallpapers/store")

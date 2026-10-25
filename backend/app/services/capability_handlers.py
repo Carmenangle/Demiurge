@@ -126,16 +126,17 @@ def read_text_file(path: str, max_chars: int = 20000, offset: int = 0) -> dict[s
 
 
 def _embed_config_from_state() -> tuple[str, str, str]:
-    """从 user_state（gitignored 运行态真源）读嵌入配置；密钥不经模型产出参数。"""
-    from app.config import DATA_DIR
+    """从 user_state（gitignored 运行态真源）读嵌入配置；密钥不经模型产出参数。
 
-    try:
-        st = json.loads((DATA_DIR / "user_state.json").read_text(encoding="utf-8"))
-        embed = (st.get("settings") or {}).get("embedModel") or {}
-        return (str(embed.get("baseUrl") or ""), str(embed.get("apiKey") or ""),
-                str(embed.get("modelName") or ""))
-    except (OSError, json.JSONDecodeError):
-        return "", "", ""
+    2026-10-24 收口：读取走属主 `repo_meta.load_user_state`（缺失/损坏回空 dict，
+    容错语义已含原 OSError/JSONDecodeError 分支），本函数只做字段投影。
+    """
+    from app.services import repo_meta
+
+    st = repo_meta.load_user_state()
+    embed = (st.get("settings") or {}).get("embedModel") or {}
+    return (str(embed.get("baseUrl") or ""), str(embed.get("apiKey") or ""),
+            str(embed.get("modelName") or ""))
 
 
 def _ordered_submit_items(submit_result: dict[str, Any] | list[Any] | None) -> list[dict[str, Any]]:

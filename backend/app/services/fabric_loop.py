@@ -20,7 +20,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from pydantic import BaseModel
 
@@ -211,26 +211,20 @@ def _local_chat_config() -> dict | None:
     用户定案（2026-09-06 混合模式）：敏感内容交本地模型处理（无审核），
     主流程用云端模型；没有本地模型 → 返回 None（回退云端重写提示）。
 
-    2026-09-14 治本：真源是 `config.DATA_DIR`（`<backend>/data/`）。旧实现用
-    `Path(__file__).resolve().parents[1] / "data"`——本文件在 `app/services/` 下，
-    `parents[1]` 落到 `backend/app`，拼出 `backend/app/data/user_state.json`（**该文件不存在**），
-    `read_text` 恒抛 FileNotFoundError 被 `except` 吞掉 ⇒ 本函数恒返回 None ⇒
-    混合模式（本地改写 / 云端 400 降级本地决策）全链失效。改为 `DATA_DIR`，与
-    `capability_handlers._embed_config_from_state` 等同源；函数内 import 便于测试注入 DATA_DIR。
+    2026-09-14 治本：真源从 `Path(__file__).parents[1] / "data"`（拼出不存在的
+    `backend/app/data/user_state.json` ⇒ 恒 None ⇒ 混合模式全链失效）改为 `config.DATA_DIR`。
+    2026-10-24 收口：读取统一走属主 `repo_meta.load_user_state`（测试注入面 =
+    `monkeypatch.setattr(repo_meta, "DATA_DIR", ...)`），本函数只做「挑本地模型」的语义投影。
     """
-    try:
-        from app.config import DATA_DIR
+    from app.services import repo_meta
 
-        p = DATA_DIR / "user_state.json"
-        st = json.loads(p.read_text(encoding="utf-8"))
-        for m in (st.get("settings") or {}).get("chatModels") or []:
-            base = str(m.get("baseUrl") or "")
-            if "11434" in base or "localhost" in base:
-                return {"baseUrl": base.rstrip("/"),
-                        "apiKey": str(m.get("apiKey") or "ollama"),
-                        "model": str(m.get("modelName") or "")}
-    except Exception:  # noqa: BLE001 - 配置不可读静默回退
-        return None
+    st = repo_meta.load_user_state()
+    for m in (st.get("settings") or {}).get("chatModels") or []:
+        base = str(m.get("baseUrl") or "")
+        if "11434" in base or "localhost" in base:
+            return {"baseUrl": base.rstrip("/"),
+                    "apiKey": str(m.get("apiKey") or "ollama"),
+                    "model": str(m.get("modelName") or "")}
     return None
 
 
@@ -294,24 +288,24 @@ def _local_rewrite_params(params: dict, local: dict | None = None) -> dict | Non
                 return out
             return v
         if isinstance(v, dict):
-            out: dict = {}
+            out_dict: dict = {}
             for k, val in v.items():
                 if k in _NSFW_SKIP_KEYS:
-                    out[k] = val
+                    out_dict[k] = val
                 else:
                     r = rewrite_node(val)
                     if r is None:
                         return None
-                    out[k] = r
-            return out
+                    out_dict[k] = r
+            return out_dict
         if isinstance(v, list):
-            out = []
+            out_list = []
             for it in v:
                 r = rewrite_node(it)
                 if r is None:
                     return None
-                out.append(r)
-            return out
+                out_list.append(r)
+            return out_list
         return v
 
     try:
@@ -554,7 +548,8 @@ def _compress_upsert_results(messages: list[dict]) -> None:
             comments = "、".join(
                 str(e.get("comment") or "?")[:18]
                 for e in entries if isinstance(e, dict))
-        except Exception:
+        except Exception as exc:
+            _LOG.debug("fabric_loop::_compress_upsert_results 兜底异常: %s", exc)
             comments = "?"
         ids.append((i, comments))
         i += 1
@@ -569,7 +564,8 @@ def _compress_upsert_results(messages: list[dict]) -> None:
             count = len(entries) if isinstance(entries, list) else 0
             if count == 0:
                 continue
-        except Exception:
+        except Exception as exc:
+            _LOG.debug("fabric_loop::_compress_upsert_results 兜底异常: %s", exc)
             continue
         params["entries"] = ("UPSERT_ENTRIES 已写 " + str(count) + " 条：" + comments
                              + "（原文已压缩；需要细节可查看作品 worldbook.json 快照）")
@@ -759,13 +755,14 @@ def run_loop(*, intent: str, history: str = "", capabilities: list[dict] | None 
                     FabricDecision, trace=trace,
                 )
             else:
+                _u = json.dumps(wire_messages, ensure_ascii=False)
+                # 零参闭包（invoke 同步消费）；chat_fn None 时调用进异常链＝原语义，cast 仅类型面
                 result = structured_output.invoke(
                     FabricDecision,
-                    native=(lambda u=json.dumps(wire_messages, ensure_ascii=False):
-                            structured_chat_fn(*call_args[:4], u, schema=FabricDecision, **call_kwargs))
+                    native=(lambda: cast(Callable, structured_chat_fn)(
+                        *call_args[:4], _u, schema=FabricDecision, **call_kwargs))
                     if callable(structured_chat_fn) else None,
-                    legacy=lambda u=json.dumps(wire_messages, ensure_ascii=False):
-                        chat_fn(*call_args[:4], u, **call_kwargs),
+                    legacy=lambda: cast(Callable, chat_fn)(*call_args[:4], _u, **call_kwargs),
                     trace=trace,
                 )
             decision = result.value
@@ -791,8 +788,8 @@ def run_loop(*, intent: str, history: str = "", capabilities: list[dict] | None 
                 try:
                     retry_result = structured_output.invoke(
                         FabricDecision,
-                        legacy=lambda u=retry_user: chat_fn(
-                            chat_base, chat_key, chat_model, retry_sys, u, **call_kwargs),
+                        legacy=lambda: cast(Callable, chat_fn)(
+                            chat_base, chat_key, chat_model, retry_sys, retry_user, **call_kwargs),
                         trace=trace,
                     )
                     decision = retry_result.value
@@ -877,7 +874,7 @@ def run_loop(*, intent: str, history: str = "", capabilities: list[dict] | None 
             _stats = getattr(outcome, "_density_stats", None)
             if _stats is None:
                 _stats = {}
-                outcome._density_stats = _stats
+                setattr(outcome, "_density_stats", _stats)  # 动态挂载统计（不改 FabricOutcome 合同字段）
             if _wrote_entries and output_dir and repo_id:
                 try:
                     import re as _re
@@ -1049,14 +1046,13 @@ def run_loop(*, intent: str, history: str = "", capabilities: list[dict] | None 
             if trace is not None:
                 trace("fabric.retry", step=step_index, reason="空决策：既没调工具也没宣布完成")
             try:
+                _empty_u = ("你上一条输出是空决策（tool/done/reply 全空），无效。必须输出一个有效决策："
+                            + "要么调用工具（给出 tool 与 params），要么宣布完成（给出 done 与 reply）。"
+                            + "不要空输出。")
                 empty_retry = structured_output.invoke(
                     FabricDecision,
-                    legacy=lambda u=json.dumps(wire_messages, ensure_ascii=False): chat_fn(
-                        chat_base, chat_key, chat_model,
-                        ("你上一条输出是空决策（tool/done/reply 全空），无效。必须输出一个有效决策："
-                         + "要么调用工具（给出 tool 与 params），要么宣布完成（给出 done 与 reply）。"
-                         + "不要空输出。"),
-                        u, **call_kwargs),
+                    legacy=lambda: cast(Callable, chat_fn)(
+                        chat_base, chat_key, chat_model, _empty_u, **call_kwargs),
                     trace=trace,
                 )
                 decision = empty_retry.value

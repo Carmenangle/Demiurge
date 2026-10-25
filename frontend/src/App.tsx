@@ -9,8 +9,15 @@ import { useSettings, activeChatModel, resolvedEmbedModel, activeLiquidGlassWall
 import { liquidGlassCssVars, nextLiquidGlassWallpaper } from "./lib/liquidGlass";
 import { LiquidGlassBackdrop } from "./components/LiquidGlassBackdrop";
 import { useRepos, type Repo } from "./stores/repos";
+import {
+  parseSelection, pickSelection, readLocalSelection, reconcileSelection,
+  writeLocalSelection, type LastSelection,
+} from "./lib/lastSelection";
+import { getUserState } from "./api/userState";
+import { pushSelection } from "./lib/userStateSync";
 import { Lightbox } from "./components/Lightbox";
 import { RagToast } from "./components/RagToast";
+import { ComfyStatusMonitor } from "./components/ComfyStatusMonitor";
 import { ConfirmModal, PromptModal, AlertModal } from "./components/Modal";
 import { RegexModal } from "./components/RegexModal";
 import { PresetModal } from "./components/PresetModal";
@@ -59,7 +66,7 @@ export function App() {
     return () => window.clearInterval(timer);
   }, [settings.theme, lg.rotationEnabled, lg.rotationInterval, lg.wallpapers.length, lg.activeWallpaperId]);
   const {
-    repos, addRepo, addCardWork, addBranch, renameRepo, bindRepo, resolveBinding,
+    repos, hydrated: reposHydrated, addRepo, addCardWork, addBranch, renameRepo, bindRepo, resolveBinding,
     setCover, setGeneratedCover, touchRepo,
     relocateOutputPath, coverOf, deleteRepo, childrenOf,
   } = useRepos();
@@ -67,12 +74,10 @@ export function App() {
   const [workMode, setWorkMode] = useState<WorkMode>("story");
   const [section, setSection] = useState<NavSection>("home");
   const [subView, setSubView] = useState<string | null>(null);
-  const [repoId, setRepoId] = useState<string | null>(() => {
-    try { return localStorage.getItem("laf_current_repo") || null; } catch { return null; }
-  }); // 大仓库（顶部选择器）—— localStorage 持久化防 Vite HMR 刷新丢失
-  const [workId, setWorkId] = useState<string | null>(() => {
-    try { return localStorage.getItem("laf_current_work") || null; } catch { return null; }
-  }); // 小仓库/作品——同上
+  const initialSelection = useState(readLocalSelection)[0];
+  // 大仓库（顶部选择器）/小仓库（作品）：localStorage 先手恢复，后端 selection 启动后按时间戳校正。
+  const [repoId, setRepoId] = useState<string | null>(initialSelection.repoId || null);
+  const [workId, setWorkId] = useState<string | null>(initialSelection.workId || null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   /** 打开设置时要落的左侧导航项（空串 = 默认「外观」）。P15：未配置仓库文件夹的弹窗一键直达「路径与代理」。 */
   const [settingsSection, setSettingsSection] = useState<string>("");
@@ -80,9 +85,62 @@ export function App() {
   const [worksRootAlert, setWorksRootAlert] = useState<string | null>(null);
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
 
-  // 仓库/作品切换时同步写入 localStorage；null 时清空
-  useEffect(() => { try { if (repoId) localStorage.setItem("laf_current_repo", repoId); else localStorage.removeItem("laf_current_repo"); } catch {} }, [repoId]);
-  useEffect(() => { try { if (workId) localStorage.setItem("laf_current_work", workId); else localStorage.removeItem("laf_current_work"); } catch {} }, [workId]);
+  // 上次选择的双份记忆：localStorage 立即生效；user_state.selection 负责跨 WebView2
+  // 数据目录（桌面壳受限上下文会换目录）与跨浏览器恢复。
+  const selectionRef = useRef({
+    repoId: initialSelection.repoId,
+    workId: initialSelection.workId,
+  });
+  const lastPersistedSelection = useRef({
+    repoId: initialSelection.repoId,
+    workId: initialSelection.workId,
+  });
+  const selectionLoadedRef = useRef(false);
+  selectionRef.current = { repoId: repoId || "", workId: workId || "" };
+
+  // 启动合并：本地与后端都读，savedAt 较新者胜。合并完成前不把本地旧值写回后端，
+  // 否则每次启动都会用旧缓存压掉后端记录。
+  useEffect(() => {
+    let alive = true;
+    getUserState()
+      .then((state) => {
+        if (!alive) return;
+        const merged = pickSelection(readLocalSelection(), parseSelection(state.selection));
+        selectionLoadedRef.current = true;
+        if (merged.repoId !== selectionRef.current.repoId) setRepoId(merged.repoId || null);
+        if (merged.workId !== selectionRef.current.workId) setWorkId(merged.workId || null);
+        lastPersistedSelection.current = { repoId: merged.repoId, workId: merged.workId };
+        writeLocalSelection(merged);
+        pushSelection(merged);
+      })
+      .catch(() => { if (alive) selectionLoadedRef.current = true; });
+    return () => { alive = false; };
+  }, []);
+
+  // 之后每次切换仓库/作品：落 localStorage + 镜像后端（空选择也写，代表用户主动回到首页）。
+  useEffect(() => {
+    if (!selectionLoadedRef.current) return;
+    const nextRepo = repoId || "";
+    const nextWork = workId || "";
+    if (nextRepo === lastPersistedSelection.current.repoId
+      && nextWork === lastPersistedSelection.current.workId) return;
+    const selection: LastSelection = { repoId: nextRepo, workId: nextWork, savedAt: Date.now() };
+    lastPersistedSelection.current = { repoId: nextRepo, workId: nextWork };
+    writeLocalSelection(selection);
+    pushSelection(selection);
+  }, [repoId, workId]);
+
+  // 仓库表就绪后按真实数据校正：作品/仓库被删时退回大仓库或首页，不卡在空页。
+  useEffect(() => {
+    if (!reposHydrated) return;
+    const reconciled = reconcileSelection(
+      { repoId: repoId || "", workId: workId || "", savedAt: 0 }, repos,
+    );
+    const nextRepo = reconciled?.repoId || "";
+    const nextWork = reconciled?.workId || "";
+    if (nextRepo !== (repoId || "")) setRepoId(nextRepo || null);
+    if (nextWork !== (workId || "")) setWorkId(nextWork || null);
+  }, [reposHydrated, repos, repoId, workId]);
 
   // 资产·作品 钻入时的浏览态（大仓库→小仓库两级），与顶部选择器解耦
   const [browseRepoId, setBrowseRepoId] = useState<string | null>(null);
@@ -282,6 +340,7 @@ export function App() {
           activePersonaId={settings.activeUserPersonaId || ""}
           onPickPersona={(id) => settingsStore.update({ activeUserPersonaId: id || undefined })}
         />
+        <ComfyStatusMonitor comfyuiUrl={settings.comfyuiUrl} />
         <main className="app-body main">
           <Suspense fallback={<div className="page-loading" role="status">正在载入…</div>}>
             <AppBody

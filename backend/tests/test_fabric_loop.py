@@ -352,8 +352,10 @@ def test_本地聊天模型配置读DATA_DIR真源(tmp_path, monkeypatch):
     ⇒ 混合模式（本地改写 / 云端 400 降级本地决策）全链失效，且此前零测试面覆盖。
     本用例把 DATA_DIR 指到夹具目录：旧实现**无视 DATA_DIR** ⇒ 返回 None 必红；
     新实现读到夹具里的本地模型 ⇒ 绿。
+    2026-10-24 收口：读取走属主 `repo_meta.load_user_state`，注入面随属主改为
+    `monkeypatch.setattr(repo_meta, "DATA_DIR", ...)`（与 conftest / smithery 锁同款接缝）。
     """
-    import app.config as _cfg
+    from app.services import repo_meta
 
     (tmp_path / "user_state.json").write_text(json.dumps({
         "settings": {"chatModels": [
@@ -361,7 +363,7 @@ def test_本地聊天模型配置读DATA_DIR真源(tmp_path, monkeypatch):
             {"baseUrl": "http://localhost:11434", "modelName": "qwen-local", "apiKey": ""},
         ]},
     }, ensure_ascii=False), encoding="utf-8")
-    monkeypatch.setattr(_cfg, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(repo_meta, "DATA_DIR", tmp_path)
 
     cfg = fabric_loop._local_chat_config()
     assert cfg is not None                      # 旧实现此处恒为 None

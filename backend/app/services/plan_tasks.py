@@ -33,7 +33,6 @@ import uuid
 from uuid import uuid4
 from typing import Any
 
-from app.config import DATA_DIR
 from app.db import get_connection
 from app.services import capability_registry, capability_sandbox, plan_validator, task_progress_store
 from app.services.structured_contracts import GenerationPlan, PlanBudgets, PlanStep
@@ -70,13 +69,14 @@ def _now() -> int:
 #            免逐项审批但配额/路径域等硬闸门照旧。设置真源：DATA_DIR/user_state.json
 #            的 settings.agentAccessMode（前端 Settings 面板写入）。
 def _agent_access_mode() -> str:
-    """读访问模式设置（真源 DATA_DIR/user_state.json，缺失/损坏一律回退 approval）。"""
-    try:
-        data = json.loads((DATA_DIR / "user_state.json").read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001 - 设置文件缺失/损坏不阻断提交，安全默认 approval
-        return capability_sandbox.ACCESS_APPROVAL
-    if not isinstance(data, dict):
-        return capability_sandbox.ACCESS_APPROVAL
+    """读访问模式设置（真源 user_state.json 的 settings.agentAccessMode，缺失/损坏一律回退 approval）。
+
+    2026-10-24 收口：读取走属主 `repo_meta.load_user_state`（缺失/损坏/非 dict 恒回 {}），
+    原「读失败不阻断提交」语义由属主容错承载。
+    """
+    from app.services import repo_meta
+
+    data = repo_meta.load_user_state()
     settings = data.get("settings")
     if not isinstance(settings, dict):
         return capability_sandbox.ACCESS_APPROVAL
@@ -774,11 +774,11 @@ def _resolve_params(step, outputs: dict[str, dict]) -> dict:
 
     for ref in json.loads(step["inputs_from_json"] or "[]"):
         if ref in outputs:
-            value = outputs[ref]
+            value: object = outputs[ref]
         else:
-            head, _, key = ref.partition(".")
+            head, _, field = ref.partition(".")
             source = outputs.get(head) or {}
-            value = source.get(key)
+            value = source.get(field)
             if value is None and head in outputs:
                 # 产出里没有同名键：回退为整包产出（handler 自行取所需字段）
                 value = source
@@ -786,7 +786,7 @@ def _resolve_params(step, outputs: dict[str, dict]) -> dict:
             continue
         if isinstance(value, dict) and ref not in outputs:
             # 点引用命中整包回退时按「引用键=整包」处理，不摊开字段
-            _assign(key, value)
+            _assign(field, value)
             continue
         if isinstance(value, dict):
             for name, item in value.items():

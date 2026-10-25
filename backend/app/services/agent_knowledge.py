@@ -56,8 +56,11 @@ def _split_frontmatter(text: str) -> tuple[dict, str]:
             continue
         value = value.strip().strip('"').strip("'")
         if key == "tools":  # 只支持单行 [a, b, c]
-            value = [t.strip().strip('"').strip("'") for t in value.strip("[]").split(",")
+            tools = [t.strip().strip('"').strip("'") for t in value.strip("[]").split(",")
                      if t.strip().strip('"').strip("'")]
+            if tools:
+                meta[key] = tools
+            continue
         if value:
             meta[key] = value
     return meta, text[end + 4:].lstrip("\n")
@@ -164,8 +167,9 @@ def read_doc(name: str) -> dict:
 
 
 def _user_state_path() -> Path:
-    from app.config import DATA_DIR
-    return DATA_DIR / "user_state.json"
+    from app.services import repo_meta
+
+    return repo_meta.user_state_path()  # 2026-10-24 收口：路径唯一属主
 
 
 def _validate_doc_name(name: str) -> str:
@@ -262,15 +266,10 @@ def injection_config() -> dict:
 
 def save_injection_config(cfg: dict) -> dict:
     """读-改-写 user_state.json 的 settings.agentKnowledge（保留其它 settings 键）。"""
+    from app.services import repo_meta
+
     path = _user_state_path()
-    state: dict = {}
-    if path.is_file():
-        try:
-            state = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            state = {}
-    if not isinstance(state, dict):
-        state = {}
+    state = repo_meta.load_user_state()  # 2026-10-24 收口：读点唯一属主（缺失/损坏回 {}）
     settings = dict(state.get("settings") or {})
     settings["agentKnowledge"] = {
         "mode": MODE_SMART if str(cfg.get("mode") or MODE_SMART) != MODE_ALWAYS else MODE_ALWAYS,

@@ -1,11 +1,13 @@
 import { apiGet, apiGetBuffer, apiPost, apiUpload, apiUrl } from "./client";
 import type { Repo } from "../stores/repos";
 import type { Settings } from "../stores/settings";
+import type { LastSelection } from "../lib/lastSelection";
 
-// 后端 data/user_state.json 的形状（repos/settings 任一可为空）
+// 后端 data/user_state.json 的形状（repos/settings 任一可为空；selection=上次选中的仓库/作品）
 export interface UserState {
   repos: Repo[] | null;
   settings: Settings | null;
+  selection?: LastSelection | null;
 }
 
 export function getUserState() {
@@ -32,7 +34,10 @@ export function fetchProxyStatus(opts: { search?: boolean } = {}) {
 }
 
 // 整体覆盖写。repos 与 settings 分头变更，故这里合并当前两块一起 POST。
-export function saveUserState(state: { repos: Repo[]; settings: Settings }) {
+// selection 缺省时后端保留盘上旧值（启动早期合并上传不应抹掉已记住的作品）。
+export function saveUserState(state: {
+  repos: Repo[]; settings: Settings; selection?: LastSelection;
+}) {
   return apiPost<{ ok: boolean }>("/user-state", state);
 }
 
@@ -58,9 +63,7 @@ export function deleteRepoFolder(args: {
 export async function uploadChatBg(file: File): Promise<{ ok: boolean; path: string }> {
   const fd = new FormData();
   fd.append("file", file);
-  const resp = await fetch("http://127.0.0.1:8010/api/user-state/upload-bg", { method: "POST", body: fd });
-  if (!resp.ok) throw new Error(`上传失败: ${resp.status}`);
-  return resp.json();
+  return apiUpload("/user-state/upload-bg", fd);
 }
 
 // 上传参考音轨到 <repo>/voices/，返回本地路径（填进 characterVoices[角色].voiceRef）
@@ -71,9 +74,7 @@ export async function uploadVoice(
   fd.append("file", file);
   fd.append("repo_id", repoId);
   fd.append("output_dir", outputDir);
-  const resp = await fetch("http://127.0.0.1:8010/api/user-state/upload-voice", { method: "POST", body: fd });
-  if (!resp.ok) throw new Error(`上传失败: ${resp.status}`);
-  return resp.json();
+  return apiUpload("/user-state/upload-voice", fd);
 }
 
 // 壁纸库：扫描用户存放地址（后端递归、分页、按类型过滤），返回缩略图直链。
@@ -146,6 +147,65 @@ export function wallpaperThumbUrl(folder: string, path: string): string {
 export function fetchWallpaperScenePkg(source: string, signal?: AbortSignal): Promise<ArrayBuffer> {
   const q = new URLSearchParams({ source });
   return apiGetBuffer(`/user-state/wallpapers/scene-pkg?${q.toString()}`, signal);
+}
+
+/**
+ * Wallpaper Engine 内置资产字节（字体 / 粒子贴图 / 材质）。
+ *
+ * scene 工程按 `assets/` 下的相对路径引用这些文件，但不把它们打进 scene.pkg，实时渲染
+ * 要另取一份。后端只吐白名单子目录里的文件；取不到时前端按「字体退回系统栈、贴图退回
+ * 程序生成」继续渲染，不会整幅回落静态预览。
+ */
+export function fetchWallpaperSceneAsset(path: string, signal?: AbortSignal): Promise<ArrayBuffer> {
+  const q = new URLSearchParams({ path });
+  return apiGetBuffer(`/user-state/wallpapers/we-asset?${q.toString()}`, signal);
+}
+
+/** WE 预设项的取值类型（与渲染器消费的 userProperties 同形）。 */
+export type ScenePropertyValue = string | number | boolean;
+export type ScenePropertyValues = Record<string, ScenePropertyValue>;
+
+/** 一条可暴露给用户的 WE 预设（project.json general.properties 里的一项）。 */
+export interface ScenePropertyItem {
+  key: string;
+  type: "slider" | "bool" | "combo" | "color" | "textinput";
+  label: string;
+  order: number;
+  /** WE 的条件显示表达式（非空=只在别的选项取某值时才显示），当前版本不解析。 */
+  condition: string | null;
+  /** project.json 里烘焙的默认值。 */
+  default: ScenePropertyValue;
+  /** 生效值 = 用户在 Wallpaper Engine 里的覆盖值（没有则=default）。 */
+  value: ScenePropertyValue;
+  we_overridden: boolean;
+  min?: number;
+  max?: number;
+  step?: number;
+  precision?: number;
+  fraction?: boolean;
+  options?: { label: string; value: string }[];
+}
+
+export interface ScenePropertiesPage {
+  source: string;
+  title: string;
+  folder: string;
+  pkg: string;
+  found: boolean;
+  /** 读到的 WE config.json 路径（空=没找到，此时 value=default）。 */
+  we_config: string;
+  properties: ScenePropertyItem[];
+}
+
+/**
+ * 场景壁纸的预设属性表（含用户在 Wallpaper Engine 里的当前取值）。
+ *
+ * 后端只负责「这条工程属性是什么、用户把它调成了什么」；哪些属性真正影响画面由
+ * 渲染清单的 `userBindings` 决定（见 lib/scene/sceneBindings），前端据此过滤控件。
+ */
+export function fetchWallpaperSceneProperties(source: string): Promise<ScenePropertiesPage> {
+  const q = new URLSearchParams({ source });
+  return apiGet<ScenePropertiesPage>(`/user-state/wallpapers/scene-properties?${q.toString()}`, 30000);
 }
 
 // Wallpaper Engine 创意工坊：后端自动发现 Steam 库（含 libraryfolders.vdf），按 431960 扫描。

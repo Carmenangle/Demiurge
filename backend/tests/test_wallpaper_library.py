@@ -342,6 +342,127 @@ def test_scene_package_只按数字id在工坊根下找(tmp_path, monkeypatch):
             wallpaper_library.scene_package(absent)
 
 
+_SCENE_PROJECT = {
+    "title": "Preset Scene",
+    "type": "scene",
+    "file": "scene.json",
+    "general": {
+        "properties": {
+            "display": {
+                "type": "combo", "value": "0", "order": 114,
+                "text": "<hr><big><b>🔘时间选择 Timing",
+                "options": [{"label": "白天 Day", "value": "0"}, {"label": "夜晚 Night", "value": "1"}],
+            },
+            "x9": {
+                "type": "slider", "value": 0.494, "order": 118, "min": 0, "max": 1,
+                "step": 0.001, "precision": 4, "fraction": True, "text": "人物位置X",
+            },
+            "hrb": {"type": "bool", "value": True, "order": 174, "text": "支持一下"},
+            "imgsrchttpsexamplecomad": {"type": "bool", "value": True, "order": 175, "text": "<img src=\"x\">"},
+            "adcolorwithlongkey": {"type": "color", "value": "1 0 0", "order": 176, "text": "<a href='https://x'>ad</a>"},
+            "schemecolor": {"type": "color", "value": "0.4 0.6 1", "order": 103, "text": "ui_browse_properties_scheme_color"},
+            "note": {"type": "textinput", "value": "hi", "order": 180, "text": "note"},
+        },
+    },
+}
+
+
+def _preset_scene(root: Path, item_id: str = "700") -> Path:
+    item = _workshop_item(root, item_id, _SCENE_PROJECT, {"scene.pkg": b"pkg", "preview.jpg": b"jpg"})
+    return item
+
+
+def _we_config(tmp_path: Path, pkg: Path, values: dict) -> Path:
+    config = tmp_path / "we" / "config.json"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(json.dumps({
+        "?installdirectory": "D:/we",
+        "tester": {"version": 5, "wproperties": {str(pkg): {"Monitor0": values}}},
+    }), encoding="utf-8")
+    return config
+
+
+def test_scene_properties_过滤广告并合并WE覆盖(tmp_path, monkeypatch):
+    root = tmp_path / "steamapps" / "workshop" / "content" / "431960"
+    item = _preset_scene(root)
+    monkeypatch.setattr(wallpaper_library, "workshop_roots", lambda: [root])
+    config = _we_config(
+        tmp_path, item / "scene.pkg",
+        {"display": "1", "x9": 0.52700001, "note": "自定义文本"},
+    )
+    monkeypatch.setattr(wallpaper_library, "_we_config_files", lambda: [config])
+
+    result = wallpaper_library.scene_properties("workshop:700")
+    assert result["title"] == "Preset Scene"
+    assert result["we_config"] == str(config)
+    by_key = {prop["key"]: prop for prop in result["properties"]}
+    # textinput（「可自定义文字」的正文，2026-10-24 起进面板）与 slider/bool 同表
+    assert set(by_key) == {"display", "x9", "hrb", "note"}
+    assert by_key["display"]["label"] == "时间选择 Timing"
+    assert by_key["display"]["value"] == "1"
+    assert by_key["display"]["default"] == "0"
+    assert by_key["display"]["we_overridden"] is True
+    assert by_key["display"]["options"] == [
+        {"label": "白天 Day", "value": "0"}, {"label": "夜晚 Night", "value": "1"},
+    ]
+    assert by_key["x9"]["value"] == pytest.approx(0.52700001)
+    assert by_key["x9"]["we_overridden"] is True
+    assert by_key["x9"]["fraction"] is True
+    assert by_key["hrb"]["value"] is True
+    assert by_key["hrb"]["we_overridden"] is False
+    assert by_key["note"]["type"] == "textinput"
+    assert by_key["note"]["default"] == "hi"
+    assert by_key["note"]["value"] == "自定义文本"
+    assert by_key["note"]["we_overridden"] is True
+    assert [prop["key"] for prop in result["properties"]] == ["display", "x9", "hrb", "note"]
+
+
+def test_scene_properties_textinput空串是合法值而不是缺属性(tmp_path, monkeypatch):
+    # 用户可能刻意清空自定义文字：空串必须保留成 value=""，不得被「空=无值」吃掉
+    folder = tmp_path / "local scene"
+    folder.mkdir()
+    project = json.loads(json.dumps(_SCENE_PROJECT, ensure_ascii=False))
+    project["general"]["properties"]["note"]["value"] = ""
+    (folder / "project.json").write_text(json.dumps(project, ensure_ascii=False), encoding="utf-8")
+    (folder / "scene.pkg").write_bytes(b"pkg")
+    monkeypatch.setattr(wallpaper_library, "_we_config_files", lambda: [])
+
+    result = wallpaper_library.scene_properties(f"local:{folder}")
+    by_key = {prop["key"]: prop for prop in result["properties"]}
+    assert by_key["note"]["value"] == ""
+    assert by_key["note"]["we_overridden"] is False
+
+
+def test_scene_properties_支持本地工程与无WE配置(tmp_path, monkeypatch):
+    folder = tmp_path / "local scene"
+    folder.mkdir()
+    (folder / "project.json").write_text(json.dumps(_SCENE_PROJECT, ensure_ascii=False), encoding="utf-8")
+    (folder / "scene.pkg").write_bytes(b"pkg")
+    monkeypatch.setattr(wallpaper_library, "_we_config_files", lambda: [])
+
+    result = wallpaper_library.scene_properties(f"local:{folder}")
+    assert result["title"] == "Preset Scene"
+    assert result["we_config"] == ""
+    by_key = {prop["key"]: prop for prop in result["properties"]}
+    assert by_key["display"]["value"] == "0"
+    assert by_key["display"]["we_overridden"] is False
+
+
+def test_scene_properties_非法来源报错(tmp_path, monkeypatch):
+    monkeypatch.setattr(wallpaper_library, "workshop_roots", lambda: [])
+    with pytest.raises(ValueError, match="场景来源不合法"):
+        wallpaper_library.scene_properties("http://example.com")
+    with pytest.raises(ValueError, match="没有可用的 project.json"):
+        wallpaper_library.scene_properties("workshop:404")
+
+
+def test_router_scene_properties_404(tmp_path, monkeypatch):
+    monkeypatch.setattr(wallpaper_library, "workshop_roots", lambda: [])
+    with pytest.raises(HTTPException) as exc:
+        user_state.wallpaper_scene_properties("workshop:404")
+    assert exc.value.status_code == 404
+
+
 def test_router_scene_pkg_交出包字节否则404(tmp_path, monkeypatch):
     root = _workshop_tree(tmp_path)
     monkeypatch.setattr(wallpaper_library, "workshop_roots", lambda: [root])
@@ -526,3 +647,48 @@ def test_router_scene_pkg_接受通用来源(tmp_path):
     with pytest.raises(HTTPException) as exc:
         user_state.wallpaper_scene_pkg(source="local:" + str(tmp_path / "nope"))
     assert exc.value.status_code == 404
+
+
+def _asset_root(tmp_path, monkeypatch):
+    """造一个假的 WE `assets` 目录：字体在白名单内，exe 与外层文件都不该给读。"""
+    assets = tmp_path / "assets"
+    (assets / "fonts").mkdir(parents=True)
+    font = assets / "fonts" / "cn.ttf"
+    font.write_bytes(b"OTTO")
+    (assets / "wallpaper64.exe").write_bytes(b"no")
+    (tmp_path / "secret.txt").write_text("no", encoding="utf-8")
+    monkeypatch.setattr(wallpaper_library, "wallpaper_engine_asset_roots", lambda: [assets])
+    return font
+
+
+def test_we_builtin_asset_只放开素材子目录(tmp_path, monkeypatch):
+    font = _asset_root(tmp_path, monkeypatch)
+
+    assert wallpaper_library.we_builtin_asset("fonts/cn.ttf") == font.resolve()
+    # scene.json 里是 Windows 反斜杠写法，进来先归一成 /。
+    assert wallpaper_library.we_builtin_asset("fonts\\cn.ttf") == font.resolve()
+
+    for bad in ("", "wallpaper64.exe", "materials/../../secret.txt", "fonts/../../secret.txt", str(font)):
+        with pytest.raises(ValueError):
+            wallpaper_library.we_builtin_asset(bad)
+    with pytest.raises(ValueError):
+        wallpaper_library.we_builtin_asset("fonts/missing.ttf")
+
+
+def test_we_builtin_asset_体积超限拒答(tmp_path, monkeypatch):
+    font = _asset_root(tmp_path, monkeypatch)
+    font.write_bytes(b"OTTO" * 8)
+    monkeypatch.setattr(wallpaper_library, "_WE_ASSET_MAX_BYTES", 8)
+    with pytest.raises(ValueError):
+        wallpaper_library.we_builtin_asset("fonts/cn.ttf")
+
+
+def test_router_we_asset_越界与缺失都是404(tmp_path, monkeypatch):
+    font = _asset_root(tmp_path, monkeypatch)
+    response = user_state.wallpaper_we_asset(path="fonts/cn.ttf")
+    assert Path(response.path) == font.resolve()
+
+    for bad in ("wallpaper64.exe", "fonts/../../secret.txt", "fonts/nope.ttf", ""):
+        with pytest.raises(HTTPException) as exc:
+            user_state.wallpaper_we_asset(path=bad)
+        assert exc.value.status_code == 404
