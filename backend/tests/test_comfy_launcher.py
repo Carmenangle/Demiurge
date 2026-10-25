@@ -415,11 +415,11 @@ def test_start_安装树不可写快速失败503(tmp_path, monkeypatch):
 
 
 def test_build_plan_不做可写性判断且只带覆盖环境变量(tmp_path, monkeypatch):
-    """规划与执行必须拆开（2026-10-23 真机实锤）：本机沙箱按**映像路径**降级——
-    工作区内的可执行文件一律 Low，工作区外（ComfyUI 自带 python）保持 Medium。
-    后端与 venv python 都在工作区内，实际 spawn 必须由 PowerShell 用 ComfyUI 的
-    解释器完成；而规划者可能正是那个 Low 进程 ⇒ build_plan 不得代判可写性、
-    不得 spawn，也不能把整个宿主环境塞进 JSON。"""
+    """规划与执行必须拆开（2026-10-23 真机实锤；2026-10-24 机制纠正）：
+    降级来自工作区目录（D:\\tool\\Demiurge）的 Low 强制性标签，进程完整性取
+    min(父,映像)、子进程永不高过父 ⇒ 工作区内的后端/venv python 起的 ComfyUI 必 Low。
+    实际 spawn 由 PowerShell 用 ComfyUI 的解释器完成；规划者可能正是那个 Low 进程
+    ⇒ build_plan 不得代判可写性、不得 spawn，也不能把整个宿主环境塞进 JSON。"""
     import json
 
     monkeypatch.setattr(comfy_launcher, "DATA_DIR", tmp_path)

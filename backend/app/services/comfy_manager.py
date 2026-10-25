@@ -12,6 +12,10 @@ from urllib.request import Request, urlopen
 
 from app.services.comfyui_client import ComfyError
 
+import logging
+
+_LOG = logging.getLogger("uvicorn.error")
+
 
 def _base(url: str) -> str:
     return url.rstrip("/")
@@ -245,7 +249,8 @@ def local_git_info(comfy_path: str) -> dict:
     def _run(args: list[str]) -> str:
         try:
             return subprocess.run(args, capture_output=True, text=True, timeout=10).stdout.strip()
-        except Exception:
+        except Exception as exc:
+            _LOG.debug("comfy_manager::_run 兜底异常: %s", exc)
             return ""
 
     for entry in base.iterdir():
@@ -261,7 +266,7 @@ def local_git_info(comfy_path: str) -> dict:
             info["date"] = _run(["git", "-C", d, "log", "-1", "--format=%cd", "--date=format:%Y-%m-%d"])
             info["remote"] = _run(["git", "-C", d, "config", "--get", "remote.origin.url"])
             if info["remote"]:
-                by_repo[_norm_repo(info["remote"])] = info
+                by_repo[_norm_repo(str(info["remote"]))] = info
         by_dir[entry.name.lower()] = info
     return {"by_repo": by_repo, "by_dir": by_dir}
 
@@ -294,7 +299,8 @@ def find_pack_dir(comfy_path: str, pack: dict):
                 try:
                     r = subprocess.run(["git", "-C", str(entry), "config", "--get", "remote.origin.url"],
                                        capture_output=True, text=True, timeout=10).stdout.strip()
-                except Exception:
+                except Exception as exc:
+                    _LOG.debug("comfy_manager::find_pack_dir 兜底异常: %s", exc)
                     r = ""
                 if r and _norm_repo(r) == target:
                     return entry
@@ -364,7 +370,8 @@ def check_updates_git(comfy_path: str, proxy_url: str = "") -> dict:
                 continue
             behind = int((br.stdout or "0").strip() or "0")
             out["updatable"][entry.name.lower()] = behind > 0
-        except Exception:
+        except Exception as exc:
+            _LOG.debug("comfy_manager::check_updates_git 兜底异常: %s", exc)
             out["failed"].append(entry.name)
     return out
 

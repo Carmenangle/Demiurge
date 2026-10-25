@@ -170,12 +170,11 @@ if (Test-PortOpen $comfyPort) {
 } elseif (-not (Test-PortOpen 8010)) {
   Write-Host "后端尚未就绪，跳过 ComfyUI 启动（稍后可在界面手动启动）。" -ForegroundColor Yellow
 } else {
-  # 本机沙箱按**映像路径**降级：工作区内（D:\tool\Demiurge）的可执行文件一律 Low，
-  # 工作区外（ComfyUI 自带 python）保持 Medium（2026-10-23 ctypes 逐级实测：同一份
-  # whoami.exe 放工作区内跑是 Low、放工作区外是 Medium）。后端与 venv python 都在
-  # 工作区内，经它们 Popen 出的 ComfyUI 必然 Low、写不动安装树——AlekPet 的
-  # FileLock(.install.lock, timeout=600) 把冷启动拖成 600.1 秒后才 IMPORT FAILED。
-  # 所以规划（读配置/拼参数，可用 venv python）与执行（spawn，必须用 ComfyUI 的
+  # 降级来自**工作区目录的 Low 强制性标签**（D:\tool\Demiurge，文件继承）：进程完整性取
+  # min(父令牌, 映像文件标签)，子进程永不高过父，所以工作区内的后端/venv python 起的
+  # ComfyUI 必为 Low、写不动安装树（2026-10-24 实测：Low 后端起工作区外解释器仍 Low）。
+  # 工作区标签已在 2026-10-24 改为 Medium（icacls /setintegritylevel），本链路保留为
+  # 受限上下文的回退通道：规划（读配置/拼参数）与执行（spawn，必须用 ComfyUI 的
   # 解释器）拆开；可写性也用**将实际启动的那个解释器**探，不能由规划者代判。
   $comfyStarted = $false
   $comfyCliErr = ""

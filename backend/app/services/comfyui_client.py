@@ -13,7 +13,12 @@ from urllib.request import ProxyHandler, Request, build_opener
 
 import requests
 
+from app.config import COMFYUI_DEFAULT_PORT
 from app.services.url_guard import validate_comfyui_url
+
+import logging
+
+_LOG = logging.getLogger("uvicorn.error")
 
 
 # ComfyUI 只能指向本机/局域网白名单地址。显式禁用环境代理，避免 localhost
@@ -58,7 +63,7 @@ def is_up(url: str, timeout: float = 5.0) -> bool:
         return False
     parsed = urlparse(normalized)
     host = parsed.hostname or "127.0.0.1"
-    port = parsed.port or 8188
+    port = parsed.port or COMFYUI_DEFAULT_PORT
     try:
         with socket.create_connection((host, port), timeout=min(timeout, 3.0)):
             return True
@@ -67,7 +72,8 @@ def is_up(url: str, timeout: float = 5.0) -> bool:
     try:
         with urlopen(normalized, timeout=timeout) as r:
             return r.status < 500
-    except Exception:
+    except Exception as exc:
+        _LOG.debug("comfyui_client::is_up 兜底异常: %s", exc)
         return False
 
 
@@ -110,7 +116,8 @@ def _prompt_accepted(url: str, prompt_id: str, timeout: float = 8) -> bool:
         try:
             with urlopen(_base(url) + path, timeout=timeout) as r:
                 data = json.loads(r.read())
-        except Exception:
+        except Exception as exc:
+            _LOG.debug("comfyui_client::_prompt_accepted 兜底异常: %s", exc)
             continue
         if path.startswith("/history"):
             if data.get(prompt_id):
@@ -168,7 +175,8 @@ def submit_prompt(url: str, api: dict, client_id: str = "") -> str | None:
     except HTTPError as e:
         try:
             detail = e.read().decode("utf-8", "replace")
-        except Exception:
+        except Exception as exc:
+            _LOG.debug("comfyui_client::submit_prompt 兜底异常: %s", exc)
             detail = str(e)
         raise ComfyError(detail, 500)
     except Exception as e:
@@ -230,7 +238,8 @@ def fetch_result(url: str, prompt_id: str,
                         "images": [], "videos": [], "audios": [], "texts": []}
             # 不在历史也不在队列：任务已丢失（ComfyUI 重启等原因）
             return {"status": "not_found", "images": [], "videos": [], "audios": [], "texts": []}
-        except Exception:
+        except Exception as exc:
+            _LOG.debug("comfyui_client::fetch_result 兜底异常: %s", exc)
             # 队列查询失败时保守返回 pending，避免误判
             return {"status": "pending", "images": [], "videos": [], "texts": []}
 
@@ -362,7 +371,8 @@ def probe_view(url: str, filename: str, type: str = "output", subfolder: str = "
     qs = urlencode({"filename": filename, "type": type, "subfolder": subfolder})
     try:
         resp = _DIRECT_SESSION.get(f"{base}/view?{qs}", timeout=timeout, stream=True)
-    except Exception:
+    except Exception as exc:
+        _LOG.debug("comfyui_client::probe_view 兜底异常: %s", exc)
         return "unreachable"
     with resp:
         if resp.status_code == 200:

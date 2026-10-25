@@ -170,7 +170,8 @@ def upload_image(
         raise HTTPException(status_code=400, detail="ComfyUI 未运行，无法上传图片")
     try:
         data = file.file.read()
-        ref = comfyui_client.upload_image(url, file.filename, data, file.content_type or "image/png")
+        ref = comfyui_client.upload_image(url, file.filename or "upload.png", data,
+                                          file.content_type or "image/png")
     except ComfyError as e:
         raise HTTPException(status_code=e.status, detail=e.detail)
     return {"name": ref}
@@ -286,7 +287,7 @@ def interrupt(req: InterruptRequest) -> dict[str, object]:
 
 @router.get("/view")
 def view(filename: str, type: str = "output", subfolder: str = "", url: str = COMFYUI_BASE_URL):
-    """代理 ComfyUI 的 /view，返回图片二进制（避免前端跨域直连 8188）。"""
+    """代理 ComfyUI 的 /view，返回图片二进制（避免前端跨域直连 ComfyUI 端口）。"""
     from fastapi.responses import Response
 
     try:

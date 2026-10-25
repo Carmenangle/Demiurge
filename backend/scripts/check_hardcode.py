@@ -13,8 +13,11 @@ from pathlib import Path
 
 # 只允许出现在这里的“单一真源”
 _ALLOWED = {"config.py"}
-# 要盯住的地址字面量（后端自身/ComfyUI），按需扩充
-_PATTERNS = [re.compile(r"127\.0\.0\.1:8188"), re.compile(r"127\.0\.0\.1:8010")]
+# 要盯住的服务端口（后端自身/ComfyUI）。裸端口字面量与完整地址都算——语义是
+# 「端口/地址真源只在 config.py」，`or 8188` 这类回退与注释里的字面量同样逃逸
+# （2026-10-24 审计收编：此前只盯 127.0.0.1:端口 完整地址，or 8188 回退漏网）。
+# \b8188\b 同时命中 127.0.0.1:8188，故无需另列完整地址模式。
+_PATTERNS = [re.compile(r"\b8188\b"), re.compile(r"\b8010\b")]
 _MACHINE_PATH = re.compile(r'''(?:r|u|b|f|br|rb|fr|rf)?["'][A-Za-z]:\\''', re.I)
 
 _APP_DIR = Path(__file__).resolve().parent.parent / "app"

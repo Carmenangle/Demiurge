@@ -12,8 +12,12 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-from app.config import COMFY_EXT_DIR, COMFYUI_BASE_URL, DATA_DIR
+from app.config import COMFYUI_DEFAULT_PORT, COMFY_EXT_DIR, COMFYUI_BASE_URL, DATA_DIR
 from app.services import comfyui_client
+
+import logging
+
+_LOG = logging.getLogger("uvicorn.error")
 
 # 本进程拉起的 ComfyUI 子进程（None = 未由本工具启动）
 _proc: "subprocess.Popen | None" = None
@@ -49,7 +53,7 @@ def _numba_cache_dir() -> Path:
     numba `ensure_cache_path` 在 ComfyUI 树 `__pycache__` 建临时文件 ⇒
     PermissionError ⇒ `tempfile._mkstemp_inner` 把 PermissionError 当可重试
     （`isdir && W_OK` 即 continue），而本机 `os.TMP_MAX = 2**31-1` ⇒ 无限自旋，
-    ComfyUI 永远卡在自定义节点 import 阶段（现象：8188 无监听、进程 ~1 核空转）。
+    ComfyUI 永远卡在自定义节点 import 阶段（现象：服务端口无监听、进程 ~1 核空转）。
     把 numba 缓存指到本工具保证可写的数据目录，numba 即走
     UserProvidedCacheLocator，不再碰 ComfyUI 树。
     """
@@ -214,10 +218,12 @@ def find_install_processes(path: str, python_path: str = "") -> list[int]:
 def install_tree_writable(base: Path) -> bool:
     """当前进程能不能写 ComfyUI 安装树（决定 Popen 出的子进程会不会被拦死）。
 
-    只探「目录能建文件」不够：低完整性进程能*新建*文件（新文件继承低标签），却打不开
-    已存在的中等标签文件——AlekPet 的 `.install.lock` 正是这种已存在文件，filelock
-    把 EACCES 当「锁被占用」，静默重试到 600 秒超时（2026-10-22 实测 22 次）。
-    故同时探：① 目录内新建/删除；② 以写方式打开已存在的 main.py（不写入）。
+    安装树在沙箱外（无完整性标签=Medium），低完整性进程对它的写入会被 MIC 一律
+    拒绝：2026-10-24 实测连新建探针文件都拿 PermissionError（新文件也不会继承 Low，
+    目录本身是 Medium）。仍保留 ②「以写方式打开已存在的 main.py」，覆盖 ACL 允许
+    建文件但拒绝改已存在文件的场景——AlekPet 的 `.install.lock` 正是这种已存在
+    文件，filelock 把 EACCES 当「锁被占用」，静默重试到 600 秒超时（2026-10-22
+    实测 22 次）。
     """
     try:
         probe = base / f".laf-write-probe-{os.getpid()}"
@@ -332,12 +338,13 @@ _PLAN_ENV_KEYS = (
 def build_plan(path: str, python_path: str = "") -> dict:
     """给「由外部进程实际 spawn」的调用方返回 JSON 友好的 spawn 规格；自身不 spawn。
 
-    **也不判断当前进程能否写安装树**：本机沙箱按映像路径降级——工作区内的可执行
-    文件一律 Low，工作区外（ComfyUI 自带 python）保持 Medium。后端与 venv python
-    都在工作区内，它们 spawn 出的 ComfyUI 必然 Low、写不动安装树；而 start-dev 的
-    PowerShell（System32，工作区外）能直接 spawn 工作区外的解释器。故规划（可用
-    低完整性 python 做）与执行（PowerShell 做）必须拆开，可写性由执行者在自己的
-    上下文里探（scripts/comfy_probe_write.py 用**将实际启动的那个解释器**探）。
+    **也不判断当前进程能否写安装树**：本机沙箱给整个工作区打了 Low 完整性标签，
+    工作区内的可执行文件（Demiurge.exe / venv python）一启动就是 Low，其子进程
+    一律继承 Low——即便目标是工作区外的 ComfyUI 解释器也升不上去。start-dev 的
+    PowerShell（System32，无 Low 标签）才是能 spawn 工作区外解释器（Medium）的
+    执行者。故规划（可用低完整性 python 做）与执行（PowerShell 做）必须拆开，
+    可写性由执行者在自己的上下文里探（scripts/comfy_probe_write.py 用**将实际
+    启动的那个解释器**探）。
     """
     base, py = _resolve_targets(path, python_path)
     spec = _build_spec(base, py)
@@ -392,8 +399,9 @@ def start(path: str, url: str, python_path: str = "") -> dict:
 
     # 2026-10-23 真机实锤：冷启动被拖到 600 秒的根因是 AlekPet 节点
     # `FileLock(.install.lock, timeout=600)`——filelock 把受限上下文的 EACCES 当
-    # 「锁被占用」静默轮询到超时。拉起的子进程继承本进程完整性级别，本进程写不动
-    # 安装树时子进程必然也写不动 ⇒ 直接 503 快速失败，不再让人等 9 分钟。
+    # 「锁被占用」静默轮询到超时。子进程继承本进程完整性级别（Low 父进程的孩子
+    # 永远升不上去，即便镜像是工作区外的 ComfyUI python），故本进程写不动安装树
+    # 时子进程必然也写不动 ⇒ 直接 503 快速失败，不再让人等 9 分钟。
     if not install_tree_writable(base):
         raise LaunchError(503, _restricted_message(base))
 
@@ -478,7 +486,7 @@ def autostart() -> dict:
         return {"started": False, "reason": e.detail}
 
 
-def _kill_by_port(port: int = 8188) -> int:
+def _kill_by_port(port: int = COMFYUI_DEFAULT_PORT) -> int:
     """按监听端口找进程并杀（含子进程树）。返回杀掉的进程数。
     用于停止非本工具拉起的 ComfyUI（整合包/外部启动，_proc 为空时）。
     Windows 用 taskkill /T 杀进程树，规避子 worker 残留(见记忆 uvicorn 幽灵进程教训)。"""
@@ -494,7 +502,8 @@ def _kill_by_port(port: int = 8188) -> int:
             errors="replace",
         )
         out, _ = proc.communicate(timeout=10)
-    except Exception:
+    except Exception as exc:
+        _LOG.debug("comfy_launcher::_kill_by_port 兜底异常: %s", exc)
         return 0
     pids = set()
     for line in (out or "").splitlines():
@@ -523,7 +532,7 @@ def stop(url: str = COMFYUI_BASE_URL, path: str = "", python_path: str = "") -> 
     进程继续占着 `.install.lock`/`comfyui.db`，下一次启动又被拖 600 秒）。
     """
     global _proc, _log_fp
-    port = urlparse(url).port or 8188
+    port = urlparse(url).port or COMFYUI_DEFAULT_PORT
     cfg = load_config()
     target_path = (path or "").strip() or (cfg.get("path") or "").strip()
     target_py = python_path or (cfg.get("python_path") or "")
