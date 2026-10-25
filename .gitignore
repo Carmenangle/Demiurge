@@ -45,6 +45,10 @@ chroma/
 
 # === 日志与临时 ===
 *.log
+# 运行态日志目录（desktop.log/runtime.log 等；*.log 只盖文件名，这里盖目录以防未来非 .log 产物混入）
+/logs/
+# pytest 未显式指定 basetemp 时会在 backend/ 下生成 pytest-of-<用户名>/ ——真名目录名，隐私红线（MEMORY §5），禁止入库
+backend/pytest-of-*/
 .env
 .env.*
 !.env.example
@@ -64,6 +68,7 @@ user-assets/
 .launcher-work*/
 .portable-work*/
 .portable-smoke*/
+.installer-work*/
 *.zip
 *.7z
 *.tar.gz
@@ -115,7 +120,14 @@ backend/_*.txt
 backend/_*.json
 backend/_*.py
 scripts/_*.py
+frontend/_tmp_*.mjs
+
+# Vite 依赖预打包缓存（可随时重算）
+/.vite/
 
 # 桌面壳产物（本地编译/拷贝，9 MB 二进制不入库）
 /Demiurge.exe
 /webview-data/
+
+# 手机壳构建产物（APK / 调试签名 / 中间件不入库）
+/mobile/android/build/
