@@ -402,22 +402,22 @@ describe("行为网：三级兜底（本地 → 后端快照 → langgraph 历�
 
   it("全无历史且关联角色卡 ⇒ 用 first_mes 作开场白首条（宏已替换）", async () => {
     H.card = { first_mes: "你好 {{user}}，我是 {{char}}。" };
-    const d = makeDeps({ openingCardName: "冷倾雪" });
+    const d = makeDeps({ openingCardName: "顾凝霜" });
     const h = await mount(d.deps);
     await flush();
-    expect(H.calls).toContain("characterDetail:chars/冷倾雪");
+    expect(H.calls).toContain("characterDetail:chars/顾凝霜");
     expect(finalMessages()).toHaveLength(1);
     expect(finalMessages()[0].role).toBe("assistant");
-    expect(finalMessages()[0].text).toBe("你好 玩家，我是 冷倾雪。");
+    expect(finalMessages()[0].text).toBe("你好 玩家，我是 顾凝霜。");
     await h.unmount();
   });
 
   it("全无历史但 first_mes 为空 ⇒ 保持空（不注入空开场白）", async () => {
     H.card = { first_mes: "   " };
-    const d = makeDeps({ openingCardName: "冷倾雪" });
+    const d = makeDeps({ openingCardName: "顾凝霜" });
     const h = await mount(d.deps);
     await flush();
-    expect(H.calls).toContain("characterDetail:chars/冷倾雪");
+    expect(H.calls).toContain("characterDetail:chars/顾凝霜");
     // 空快照 → setMessages([])（历史真源）+ 空历史 → setMessages([])：两次调用，末次才是用户所见
     expect(H.setMessages).toHaveLength(2);
     expect(finalMessages()).toEqual([]);

@@ -7,7 +7,7 @@ from app.services import character_state as cs
 
 
 def _state() -> cs.CharacterState:
-    st = cs.CharacterState(card_name="埃斯托利亚", repo_id="repo1")
+    st = cs.CharacterState(card_name="奥瑞利亚", repo_id="repo1")
     st.数值["好感度"] = cs.NumericField(-30.0, min=-50.0, max=120.0)
     return st
 
@@ -32,23 +32,23 @@ def test_parse_deltas_归一与非法跳过():
 def test_数值set只在字段不存在时播种初值():
     """2026-09-22 用户口径：角色初次登场按剧情因果给初始好感/恶感，不应全为 0。
     数值 set 只对「尚不存在」的字段生效；字段已存在时忽略，防模型一键重置累积值。"""
-    st = cs.CharacterState(card_name="凌霄仙母录", repo_id="r")
+    st = cs.CharacterState(card_name="苍梧仙闻录", repo_id="r")
     # 首次登场：set 播种初值（高好感），from=None 表「此前不存在」供回滚删除
     cs.apply_deltas(st, cs.parse_deltas(
-        [{"field": "数值/妲千沁·好感度", "op": "set", "value": 60,
+        [{"field": "数值/沈映澜·好感度", "op": "set", "value": 60,
           "evidence": "授业师傅、旧情深厚"}], turn=45))
-    assert st.数值["妲千沁·好感度"].value == 60.0
+    assert st.数值["沈映澜·好感度"].value == 60.0
     assert st.历史[-1]["from"] is None and st.历史[-1]["to"] == 60.0
     # 已存在 → set 被忽略（不覆盖），add 仍正常累加
     cs.apply_deltas(st, cs.parse_deltas(
-        [{"field": "数值/妲千沁·好感度", "op": "set", "value": 5}], turn=46))
-    assert st.数值["妲千沁·好感度"].value == 60.0
+        [{"field": "数值/沈映澜·好感度", "op": "set", "value": 5}], turn=46))
+    assert st.数值["沈映澜·好感度"].value == 60.0
     cs.apply_deltas(st, cs.parse_deltas(
-        [{"field": "数值/妲千沁·好感度", "op": "add", "value": 4}], turn=47))
-    assert st.数值["妲千沁·好感度"].value == 64.0
+        [{"field": "数值/沈映澜·好感度", "op": "add", "value": 4}], turn=47))
+    assert st.数值["沈映澜·好感度"].value == 64.0
     # 回滚首次播种 → 字段整条移除（等效从未出现）
     cs.rollback_last(st, n=3)
-    assert "妲千沁·好感度" not in st.数值
+    assert "沈映澜·好感度" not in st.数值
 
 
 def test_数值set播种初值仍受边界clamp():
@@ -79,11 +79,11 @@ def test_add命中不存在的好感度字段被拒收不建值():
     st = cs.CharacterState(card_name="c", repo_id="r")
     rejected: list[dict] = []
     cs.apply_deltas(st, cs.parse_deltas(
-        [{"field": "数值/妲千沁·好感度", "op": "add", "value": 6,
+        [{"field": "数值/沈映澜·好感度", "op": "add", "value": 6,
           "evidence": "贴身接触"}], turn=1), rejected=rejected)
-    assert "妲千沁·好感度" not in st.数值           # 不建值
+    assert "沈映澜·好感度" not in st.数值           # 不建值
     assert st.历史 == []                            # 不记审计
-    assert rejected and rejected[0]["field"] == "数值/妲千沁·好感度"
+    assert rejected and rejected[0]["field"] == "数值/沈映澜·好感度"
     assert rejected[0]["reason"] == "affinity_field_absent"
     assert rejected[0]["value"] == 6.0 and rejected[0]["turn"] == 1
     # 裸键（单主角写法）同样受闸
@@ -149,76 +149,76 @@ def test_apply_叙事覆盖并记history():
 
 
 def test_同角色状态字段别名归一并由最新值替换():
-    st = cs.CharacterState(card_name="冷倾雪", repo_id="r")
-    st.叙事["冷倾雪身体状态"] = cs.NarrativeField("旧值", turn=1)
+    st = cs.CharacterState(card_name="顾凝霜", repo_id="r")
+    st.叙事["顾凝霜身体状态"] = cs.NarrativeField("旧值", turn=1)
     st.叙事["身体状态"] = cs.NarrativeField("中间值", turn=2)
-    st.叙事["冷倾雪·身体状态"] = cs.NarrativeField("最新值", turn=3)
+    st.叙事["顾凝霜·身体状态"] = cs.NarrativeField("最新值", turn=3)
 
     cs.consolidate_fields(st)
 
-    assert list(st.叙事) == ["冷倾雪·身体状态"]
-    assert st.叙事["冷倾雪·身体状态"].value == "最新值"
+    assert list(st.叙事) == ["顾凝霜·身体状态"]
+    assert st.叙事["顾凝霜·身体状态"].value == "最新值"
 
 
 def test_无归属状态沿用同字段唯一已有角色而非主卡名():
-    st = cs.CharacterState(card_name="白给谷", repo_id="r")
-    st.叙事["冷倾雪身体状态"] = cs.NarrativeField("旧值", turn=1)
+    st = cs.CharacterState(card_name="白露谷", repo_id="r")
+    st.叙事["顾凝霜身体状态"] = cs.NarrativeField("旧值", turn=1)
     st.叙事["身体状态"] = cs.NarrativeField("最新值", turn=2)
 
     cs.consolidate_fields(st)
 
-    assert list(st.叙事) == ["冷倾雪·身体状态"]
-    assert st.叙事["冷倾雪·身体状态"].value == "最新值"
+    assert list(st.叙事) == ["顾凝霜·身体状态"]
+    assert st.叙事["顾凝霜·身体状态"].value == "最新值"
 
 
 def test_明确归属字段淘汰同名无归属旧副本():
-    st = cs.CharacterState(card_name="神权大陆", repo_id="r")
-    st.数值["塞西莉亚·好感度"] = cs.NumericField(10, turn=4)
+    st = cs.CharacterState(card_name="神恩大陆", repo_id="r")
+    st.数值["卡蜜莉亚·好感度"] = cs.NumericField(10, turn=4)
     st.数值["好感度"] = cs.NumericField(2, turn=3)
-    st.叙事["塞西莉亚·态度"] = cs.NarrativeField("玩味浓厚", turn=4)
+    st.叙事["卡蜜莉亚·态度"] = cs.NarrativeField("玩味浓厚", turn=4)
     st.叙事["院长·态度"] = cs.NarrativeField("压抑不安", turn=4)
     st.叙事["态度"] = cs.NarrativeField("旧值", turn=3)
     st.叙事["我·所在"] = cs.NarrativeField("自己房间", turn=4)
-    st.叙事["塞西莉亚·所在"] = cs.NarrativeField("马车内", turn=4)
+    st.叙事["卡蜜莉亚·所在"] = cs.NarrativeField("马车内", turn=4)
     st.叙事["所在"] = cs.NarrativeField("旧地点", turn=3)
 
     cs.consolidate_fields(st)
 
     # 「好感度」例外：单主角全局好感度就是裸键，被多角色字段连带清理会让好感度
     # 凭空消失/换新（2026-09-01 用户实锤），故保留；其余裸键照旧淘汰。
-    assert set(st.数值) == {"塞西莉亚·好感度", "好感度"}
-    assert set(st.叙事) == {"塞西莉亚·态度", "院长·态度", "我·所在", "塞西莉亚·所在"}
+    assert set(st.数值) == {"卡蜜莉亚·好感度", "好感度"}
+    assert set(st.叙事) == {"卡蜜莉亚·态度", "院长·态度", "我·所在", "卡蜜莉亚·所在"}
 
 
 def test_写入同角色同字段时替换而非新增别名():
-    st = cs.CharacterState(card_name="冷倾雪", repo_id="r")
-    st.叙事["冷倾雪·精神状态"] = cs.NarrativeField("平静", turn=1)
+    st = cs.CharacterState(card_name="顾凝霜", repo_id="r")
+    st.叙事["顾凝霜·精神状态"] = cs.NarrativeField("平静", turn=1)
     deltas = cs.parse_deltas(
         [{"field": "叙事/精神状态", "op": "set", "value": "崩溃"}],
         turn=2,
-        card_name="冷倾雪",
+        card_name="顾凝霜",
     )
 
     cs.apply_deltas(st, deltas)
 
-    assert list(st.叙事) == ["冷倾雪·精神状态"]
-    assert st.叙事["冷倾雪·精神状态"].value == "崩溃"
+    assert list(st.叙事) == ["顾凝霜·精神状态"]
+    assert st.叙事["顾凝霜·精神状态"].value == "崩溃"
 
 
 def test_自动写入无归属字段沿用状态中唯一角色():
-    st = cs.CharacterState(card_name="白给谷", repo_id="r")
-    st.叙事["冷倾雪·身体状态"] = cs.NarrativeField("旧值", turn=1)
+    st = cs.CharacterState(card_name="白露谷", repo_id="r")
+    st.叙事["顾凝霜·身体状态"] = cs.NarrativeField("旧值", turn=1)
     deltas = cs.parse_deltas(
         [{"field": "叙事/身体状态", "op": "set", "value": "新值"}],
         turn=2,
-        card_name="白给谷",
+        card_name="白露谷",
         existing_state=st,
     )
 
     cs.apply_deltas(st, deltas)
 
-    assert list(st.叙事) == ["冷倾雪·身体状态"]
-    assert st.叙事["冷倾雪·身体状态"].value == "新值"
+    assert list(st.叙事) == ["顾凝霜·身体状态"]
+    assert st.叙事["顾凝霜·身体状态"].value == "新值"
 
 
 def test_人为改无证据保留供识别():
@@ -237,8 +237,8 @@ def test_render_state_block_带provenance():
     ], turn=3))
     block = cs.render_state_block(st)
     assert "【当前状态】" in block
-    assert "埃斯托利亚·好感度: 20 (一桌菜)" in block
-    assert "埃斯托利亚·所在: 北境要塞" in block  # 无证据不带括号
+    assert "奥瑞利亚·好感度: 20 (一桌菜)" in block
+    assert "奥瑞利亚·所在: 北境要塞" in block  # 无证据不带括号
 
 
 def test_落盘往返(tmp_path):
@@ -247,7 +247,7 @@ def test_落盘往返(tmp_path):
     cs.apply_deltas(st, cs.parse_deltas(
         [{"field": "叙事/所在", "op": "set", "value": "舞会", "evidence": "赴宴"}], turn=2))
     cs.save_state(base, st)
-    got = cs.load_state(base, "repo1", "埃斯托利亚")
+    got = cs.load_state(base, "repo1", "奥瑞利亚")
     assert got.数值["好感度"].value == -30.0
     assert got.叙事["所在"].value == "舞会" and got.叙事["所在"].evidence == "赴宴"
     assert len(got.历史) == 1
@@ -261,10 +261,10 @@ def test_空作品返回空状态(tmp_path):
 def test_快照落盘往返(tmp_path):
     base = str(tmp_path)
     st = _state()
-    st.快照 = cs.Snapshot("[所在] 沉梦峡谷\n[臣服] 叶燃眉=100", turn=7)
+    st.快照 = cs.Snapshot("[所在] 沉梦峡谷\n[臣服] 蓝婉眉=100", turn=7)
     cs.save_state(base, st)
-    got = cs.load_state(base, "repo1", "埃斯托利亚")
-    assert got.快照.text == "[所在] 沉梦峡谷\n[臣服] 叶燃眉=100"
+    got = cs.load_state(base, "repo1", "奥瑞利亚")
+    assert got.快照.text == "[所在] 沉梦峡谷\n[臣服] 蓝婉眉=100"
     assert got.快照.turn == 7
 
 
@@ -428,13 +428,13 @@ def test_第一人称主角字段不入状态表():
     ⚠ 2026-09-23：末条改用 `set` 建字段——`add` 命中不存在的**好感度**字段已被新闸拒收
     （见 `test_add命中不存在的好感度字段被拒收不建值`），本用例考的是主角名过滤，不考 add 语义。
     """
-    st = cs.CharacterState(card_name="凌霄仙母录", repo_id="r")
+    st = cs.CharacterState(card_name="苍梧仙闻录", repo_id="r")
     deltas = cs.parse_deltas([
         {"field": "叙事/我·所在", "op": "set", "value": "寝殿"},
         {"field": "数值/主角·好感度", "op": "add", "value": 5},
         {"field": "数值/你·信任", "op": "add", "value": 2},
         {"field": "数值/好感度", "op": "set", "value": 3},
-    ], turn=1, card_name="凌霄仙母录", existing_state=st)
+    ], turn=1, card_name="苍梧仙闻录", existing_state=st)
 
     assert [d.field for d in deltas] == ["数值/好感度"]
     cs.apply_deltas(st, deltas)
@@ -443,66 +443,66 @@ def test_第一人称主角字段不入状态表():
 
 
 def test_无归属状态无唯一角色时不再回退卡名():
-    """合集卡名（如「凌霄仙母录」）不是角色名：无归属裸字段在 owner_hints 给不出
+    """合集卡名（如「苍梧仙闻录」）不是角色名：无归属裸字段在 owner_hints 给不出
     唯一角色时保留裸键，禁止回退 card_name（2026-09-01 用户实锤：卡名被记成角色）。"""
-    st = cs.CharacterState(card_name="凌霄仙母录", repo_id="r")
+    st = cs.CharacterState(card_name="苍梧仙闻录", repo_id="r")
     deltas = cs.parse_deltas(
         [{"field": "叙事/身体状态", "op": "set", "value": "平静"}],
         turn=1,
-        card_name="凌霄仙母录",
+        card_name="苍梧仙闻录",
         existing_state=st,
     )
 
     cs.apply_deltas(st, deltas)
 
     assert list(st.叙事) == ["身体状态"]
-    assert "凌霄仙母录" not in st.叙事
+    assert "苍梧仙闻录" not in st.叙事
 
 
 def test_无归属状态有唯一显式角色时仍沿用该角色():
-    """owner_hints 命中时保持旧行为：无归属「身体状态」沿用到唯一显式角色「冷倾雪」，
+    """owner_hints 命中时保持旧行为：无归属「身体状态」沿用到唯一显式角色「顾凝霜」，
     不因卡名保护而退化。"""
-    st = cs.CharacterState(card_name="白给谷", repo_id="r")
-    st.叙事["冷倾雪·身体状态"] = cs.NarrativeField("旧值", turn=1)
+    st = cs.CharacterState(card_name="白露谷", repo_id="r")
+    st.叙事["顾凝霜·身体状态"] = cs.NarrativeField("旧值", turn=1)
     deltas = cs.parse_deltas(
         [{"field": "叙事/身体状态", "op": "set", "value": "新值"}],
         turn=2,
-        card_name="白给谷",
+        card_name="白露谷",
         existing_state=st,
     )
 
     cs.apply_deltas(st, deltas)
 
-    assert list(st.叙事) == ["冷倾雪·身体状态"]
-    assert st.叙事["冷倾雪·身体状态"].value == "新值"
+    assert list(st.叙事) == ["顾凝霜·身体状态"]
+    assert st.叙事["顾凝霜·身体状态"].value == "新值"
 
 
 def test_render_state_block_跳过主角字段():
     """存量主角字段不注入主控叙述：AI 看不到就不再继续更新它们。"""
-    st = cs.CharacterState(card_name="凌霄仙母录", repo_id="r")
+    st = cs.CharacterState(card_name="苍梧仙闻录", repo_id="r")
     st.叙事["我·所在"] = cs.NarrativeField("寝殿", turn=1)
     st.叙事["主角·心情"] = cs.NarrativeField("焦急", turn=1)
-    st.叙事["凌若冰·心情"] = cs.NarrativeField("平静", turn=1)
+    st.叙事["谢若冰·心情"] = cs.NarrativeField("平静", turn=1)
 
     block = cs.render_state_block(st)
 
     assert "我·所在" not in block and "主角" not in block
-    assert "凌若冰·心情" in block
+    assert "谢若冰·心情" in block
 
 
 def test_好感度裸键不被多角色字段清理():
     """单主角全局好感度 = 裸键「好感度」；consolidate 的裸键清理必须跳过它，
     否则多角色字段混入后单主角好感度被删（2026-09-01 用户实锤「好感度换新/消失」）。"""
-    st = cs.CharacterState(card_name="白给谷", repo_id="r")
+    st = cs.CharacterState(card_name="白露谷", repo_id="r")
     st.数值["好感度"] = cs.NumericField(50, turn=5)
-    st.数值["冷倾雪·好感度"] = cs.NumericField(30, turn=6)
+    st.数值["顾凝霜·好感度"] = cs.NumericField(30, turn=6)
     st.叙事["心情"] = cs.NarrativeField("平静", turn=5)
-    st.叙事["冷倾雪·心情"] = cs.NarrativeField("戒备", turn=6)
+    st.叙事["顾凝霜·心情"] = cs.NarrativeField("戒备", turn=6)
 
     cs.consolidate_fields(st)
 
-    assert set(st.数值) == {"好感度", "冷倾雪·好感度"}
-    assert list(st.叙事) == ["冷倾雪·心情"]  # 裸「心情」仍有显式归属 → 照旧淘汰
+    assert set(st.数值) == {"好感度", "顾凝霜·好感度"}
+    assert list(st.叙事) == ["顾凝霜·心情"]  # 裸「心情」仍有显式归属 → 照旧淘汰
 
 
 # ── M1 记忆封口（2026-09-06 用户定案）：删除/重生成回合的状态变更整体撤销 ──
@@ -538,20 +538,20 @@ def test_第58刀_初次登记豁免回滚_同回合重生成不丢角色():
     静默永久缺失（真机：师傅好感度两度被卷走）。新语义：登记保留、审计重盖、幂等。"""
     st = _state()
     cs.apply_deltas(st, cs.parse_deltas(
-        [{"field": "数值/妲千沁·好感度", "op": "set", "value": 58,
+        [{"field": "数值/沈映澜·好感度", "op": "set", "value": 58,
           "evidence": "授业师尊、连续十二夜同床渐进（初次登记）"}], turn=53))
-    assert st.数值["妲千沁·好感度"].value == 58.0
+    assert st.数值["沈映澜·好感度"].value == 58.0
     cs.apply_deltas(st, cs.parse_deltas(
-        [{"field": "数值/妲千沁·好感度", "op": "add", "value": 5,
+        [{"field": "数值/沈映澜·好感度", "op": "add", "value": 5,
           "evidence": "回合55事件"}], turn=55))
 
     rolled = cs.rollback_from_turn(st, turn=55)
 
     assert rolled == {"undone": 1, "incomplete": []}
-    assert st.数值["妲千沁·好感度"].value == 58.0   # add 被撤、**登记保留**
+    assert st.数值["沈映澜·好感度"].value == 58.0   # add 被撤、**登记保留**
     # 同封口再回滚 ⇒ 命中 source=rescue 原样放回 ⇒ 幂等
     assert cs.rollback_from_turn(st, turn=55) == {"undone": 0, "incomplete": []}
-    assert st.数值["妲千沁·好感度"].value == 58.0
+    assert st.数值["沈映澜·好感度"].value == 58.0
 
 
 def test_第58刀_深封口越过登记回合时登记也豁免():
@@ -559,13 +559,13 @@ def test_第58刀_深封口越过登记回合时登记也豁免():
     不再像旧行为那样把整个字段连根拔掉。"""
     st = _state()
     cs.apply_deltas(st, cs.parse_deltas(
-        [{"field": "叙事/妲千沁·师徒界限", "op": "set", "value": "夜间默许",
+        [{"field": "叙事/沈映澜·师徒界限", "op": "set", "value": "夜间默许",
           "evidence": "初次登记"}], turn=53))
 
     rolled = cs.rollback_from_turn(st, turn=48)   # 封口早于登记 ⇒ 创建条目也在撤销窗内
 
     assert rolled["undone"] == 1
-    assert st.叙事["妲千沁·师徒界限"].value == "夜间默许"   # 保留初值
+    assert st.叙事["沈映澜·师徒界限"].value == "夜间默许"   # 保留初值
     assert any(e.get("source") == "rescue" for e in st.历史)
 
 
@@ -650,45 +650,45 @@ def test_人为编辑的表格文本原样保留不清洗():
 
 
 def _affinity_state() -> cs.CharacterState:
-    st = cs.CharacterState(card_name="凌霄仙母录", repo_id="r1")
-    st.数值["凌若冰·好感度"] = cs.NumericField(40.0, min=-100.0, max=100.0)
-    st.数值["舞姬恋·好感度"] = cs.NumericField(2.0, min=-100.0, max=100.0)
+    st = cs.CharacterState(card_name="苍梧仙闻录", repo_id="r1")
+    st.数值["谢若冰·好感度"] = cs.NumericField(40.0, min=-100.0, max=100.0)
+    st.数值["星织恋·好感度"] = cs.NumericField(2.0, min=-100.0, max=100.0)
     return st
 
 
 def test_快照对账_好感行数字替换为引擎现值():
     st = _affinity_state()
     snap = ("[时间] 大比前三日·午后\n"
-            "[好感] 凌若冰=40/冰山融化（气急败坏欲夺回交合权）；舞姬恋=52/旖旎试探（骑乘交合中）\n"
-            "[在场] 凌若冰、舞姬恋")
+            "[好感] 谢若冰=40/冰山融化（气急败坏欲夺回交合权）；星织恋=52/旖旎试探（骑乘交合中）\n"
+            "[在场] 谢若冰、星织恋")
     out = cs.reconcile_snapshot_affinity(st, snap)
-    assert "凌若冰=40/冰山融化（气急败坏欲夺回交合权）" in out   # 与引擎一致 → 不动
-    assert "舞姬恋=2/旖旎试探（骑乘交合中）" in out               # 52 → 引擎现值 2
+    assert "谢若冰=40/冰山融化（气急败坏欲夺回交合权）" in out   # 与引擎一致 → 不动
+    assert "星织恋=2/旖旎试探（骑乘交合中）" in out               # 52 → 引擎现值 2
     assert "52" not in out                                        # 旧自述值不得残留
-    assert "[时间] 大比前三日·午后" in out and "[在场] 凌若冰、舞姬恋" in out
+    assert "[时间] 大比前三日·午后" in out and "[在场] 谢若冰、星织恋" in out
 
 
 def test_快照对账_冒号写法同样替换():
     st = cs.CharacterState(card_name="c", repo_id="r")
     st.数值["好感度"] = cs.NumericField(12.0, min=-100.0, max=100.0)
-    snap = "[好感] 凌若冰:0"
+    snap = "[好感] 谢若冰:0"
     out = cs.reconcile_snapshot_affinity(st, snap)
     # 引擎只有无归属裸好感度、快照行只有一名角色 → 裸值归属该角色
-    assert out == "[好感] 凌若冰=12"
+    assert out == "[好感] 谢若冰=12"
 
 
 def test_快照对账_引擎有而快照缺的角色追加():
     st = cs.CharacterState(card_name="c", repo_id="r")
-    st.数值["凌若冰·好感度"] = cs.NumericField(40.0, min=-100.0, max=100.0)
-    st.数值["舞姬恋·好感度"] = cs.NumericField(2.0, min=-100.0, max=100.0)
-    snap = "[好感] 凌若冰=40/冰山融化"
+    st.数值["谢若冰·好感度"] = cs.NumericField(40.0, min=-100.0, max=100.0)
+    st.数值["星织恋·好感度"] = cs.NumericField(2.0, min=-100.0, max=100.0)
+    snap = "[好感] 谢若冰=40/冰山融化"
     out = cs.reconcile_snapshot_affinity(st, snap)
-    assert out == "[好感] 凌若冰=40/冰山融化；舞姬恋=2"
+    assert out == "[好感] 谢若冰=40/冰山融化；星织恋=2"
 
 
 def test_快照对账_无好感行保持原样():
     st = _affinity_state()
-    snap = "[时间] 午后\n[在场] 凌若冰"
+    snap = "[时间] 午后\n[在场] 谢若冰"
     assert cs.reconcile_snapshot_affinity(st, snap) == snap
 
 
@@ -700,7 +700,7 @@ def test_快照对账_解析不出条目保持原样():
 
 def test_快照对账_幂等():
     st = _affinity_state()
-    snap = "[好感] 凌若冰=40/冰山融化；舞姬恋=52/旖旎试探"
+    snap = "[好感] 谢若冰=40/冰山融化；星织恋=52/旖旎试探"
     once = cs.reconcile_snapshot_affinity(st, snap)
     twice = cs.reconcile_snapshot_affinity(st, once)
     assert once == twice
@@ -708,75 +708,75 @@ def test_快照对账_幂等():
 
 def test_快照对账_引擎为空原样返回():
     st = cs.CharacterState(card_name="c", repo_id="r")
-    snap = "[好感] 凌若冰=40/冰山融化"
+    snap = "[好感] 谢若冰=40/冰山融化"
     assert cs.reconcile_snapshot_affinity(st, snap) == snap
 
 
 def test_render_snapshot_injection_注入前对账好感行():
     st = _affinity_state()
-    st.快照 = cs.Snapshot("[好感] 凌若冰=40/冰山融化；舞姬恋=52/旖旎试探", turn=36)
+    st.快照 = cs.Snapshot("[好感] 谢若冰=40/冰山融化；星织恋=52/旖旎试探", turn=36)
     inj = cs.render_snapshot_injection(st)
-    assert "舞姬恋=2/旖旎试探" in inj and "52" not in inj
+    assert "星织恋=2/旖旎试探" in inj and "52" not in inj
 
 
 # ── 播种死锁修复：引擎无、行内有 ⇒ 从行里删条目（2026-09-23 深夜）─────────────
-# 真机：模型把幻觉数字写进 <status>[好感] 行（妲千沁=38），旧行为原样保留 ⇒ 下轮
+# 真机：模型把幻觉数字写进 <status>[好感] 行（沈映澜=38），旧行为原样保留 ⇒ 下轮
 # prompt 同屏出现「快照说她=38」与「点名块说她还没有字段」两条互斥信息 ⇒ 永不播种。
 
 def test_快照对账_引擎无的条目从行里删掉_这是播种死锁的根():
-    st = _affinity_state()          # 引擎：凌若冰=40、舞姬恋=2
-    snap = "[好感] 舞姬恋=2；凌若冰=40；妲千沁=38"
+    st = _affinity_state()          # 引擎：谢若冰=40、星织恋=2
+    snap = "[好感] 星织恋=2；谢若冰=40；沈映澜=38"
     out = cs.reconcile_snapshot_affinity(st, snap)
-    assert "妲千沁" not in out       # 幻觉条目被抹掉，不再与点名块打架
+    assert "沈映澜" not in out       # 幻觉条目被抹掉，不再与点名块打架
     assert "38" not in out
-    assert out == "[好感] 舞姬恋=2；凌若冰=40"
+    assert out == "[好感] 星织恋=2；谢若冰=40"
 
 
 def test_快照对账_幻觉条目在行首时不留多余分隔符():
     st = _affinity_state()
-    snap = "[好感] 妲千沁=38；凌若冰=40；舞姬恋=2"
+    snap = "[好感] 沈映澜=38；谢若冰=40；星织恋=2"
     out = cs.reconcile_snapshot_affinity(st, snap)
-    assert out == "[好感] 凌若冰=40；舞姬恋=2"
+    assert out == "[好感] 谢若冰=40；星织恋=2"
     assert not out.startswith("[好感] ；")
     assert "；；" not in out
 
 
 def test_快照对账_幻觉条目在行尾时不留尾随分隔符():
     st = _affinity_state()
-    snap = "[好感] 凌若冰=40；舞姬恋=2；骆姑姑=18"
+    snap = "[好感] 谢若冰=40；星织恋=2；苏姑姑=18"
     out = cs.reconcile_snapshot_affinity(st, snap)
-    assert out == "[好感] 凌若冰=40；舞姬恋=2"
+    assert out == "[好感] 谢若冰=40；星织恋=2"
     assert not out.rstrip().endswith("；")
 
 
 def test_快照对账_连续多条幻觉一次删净():
     st = _affinity_state()
-    snap = "[好感] 妲千沁=38；骆姑姑=18；凌若冰=40；舞姬恋=2；路人甲=5"
+    snap = "[好感] 沈映澜=38；苏姑姑=18；谢若冰=40；星织恋=2；路人甲=5"
     out = cs.reconcile_snapshot_affinity(st, snap)
-    assert out == "[好感] 凌若冰=40；舞姬恋=2"
+    assert out == "[好感] 谢若冰=40；星织恋=2"
 
 
 def test_快照对账_行内全被删空时保留裸行头():
     st = _affinity_state()
-    snap = "[好感] 妲千沁=38；骆姑姑=18\n[在场] 妲千沁"
+    snap = "[好感] 沈映澜=38；苏姑姑=18\n[在场] 沈映澜"
     out = cs.reconcile_snapshot_affinity(st, snap)
     # 引擎两条都不在行内 ⇒ 追加，同时确保没有残留幻觉
     assert "38" not in out and "18" not in out
     assert "[好感]" in out
-    assert "[在场] 妲千沁" in out
+    assert "[在场] 沈映澜" in out
 
 
 def test_快照对账_删幻觉后仍会把引擎有而行内缺的补上():
     st = _affinity_state()
-    snap = "[好感] 妲千沁=38"
+    snap = "[好感] 沈映澜=38"
     out = cs.reconcile_snapshot_affinity(st, snap)
-    assert "妲千沁" not in out and "38" not in out
-    assert "凌若冰=40" in out and "舞姬恋=2" in out
+    assert "沈映澜" not in out and "38" not in out
+    assert "谢若冰=40" in out and "星织恋=2" in out
 
 
 def test_快照对账_删幻觉后仍幂等():
     st = _affinity_state()
-    snap = "[好感] 舞姬恋=2；妲千沁=38；凌若冰=40"
+    snap = "[好感] 星织恋=2；沈映澜=38；谢若冰=40"
     once = cs.reconcile_snapshot_affinity(st, snap)
     twice = cs.reconcile_snapshot_affinity(st, once)
     assert once == twice
@@ -784,19 +784,19 @@ def test_快照对账_删幻觉后仍幂等():
 
 def test_快照对账_带档位描述的幻觉条目整条删掉不残留描述():
     st = cs.CharacterState(card_name="c", repo_id="r")
-    st.数值["凌若冰·好感度"] = cs.NumericField(40.0, min=-100.0, max=100.0)
-    snap = "[好感] 凌若冰=40/冰山融化；妲千沁=38/动摇（师尊架子尚存）"
+    st.数值["谢若冰·好感度"] = cs.NumericField(40.0, min=-100.0, max=100.0)
+    snap = "[好感] 谢若冰=40/冰山融化；沈映澜=38/动摇（师尊架子尚存）"
     out = cs.reconcile_snapshot_affinity(st, snap)
-    assert out == "[好感] 凌若冰=40/冰山融化"
+    assert out == "[好感] 谢若冰=40/冰山融化"
     assert "动摇" not in out and "师尊架子" not in out
 
 
 def test_快照对账_冒号写法的幻觉条目同样删掉():
     st = cs.CharacterState(card_name="c", repo_id="r")
-    st.数值["凌若冰·好感度"] = cs.NumericField(40.0, min=-100.0, max=100.0)
-    snap = "[好感] 凌若冰:40；妲千沁:38"
+    st.数值["谢若冰·好感度"] = cs.NumericField(40.0, min=-100.0, max=100.0)
+    snap = "[好感] 谢若冰:40；沈映澜:38"
     out = cs.reconcile_snapshot_affinity(st, snap)
-    assert out == "[好感] 凌若冰=40"
+    assert out == "[好感] 谢若冰=40"
 
 
 @pytest.mark.parametrize("snap", [

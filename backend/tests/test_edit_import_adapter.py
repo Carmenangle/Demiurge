@@ -11,9 +11,9 @@ def test_ST角色卡转换为Demiurge扁平卡和侧车():
     source = {
         "spec": "chara_card_v2", "spec_version": "2.0",
         "data": {
-            "name": "塞西莉亚", "description": "孤儿院院长", "first_mes": "欢迎回来。",
+            "name": "卡蜜莉亚", "description": "孤儿院院长", "first_mes": "欢迎回来。",
             "character_book": {"entries": [{
-                "keys": ["塞西莉亚"], "content": "她是孤儿院院长。", "enabled": True,
+                "keys": ["卡蜜莉亚"], "content": "她是孤儿院院长。", "enabled": True,
             }]},
             "extensions": {"regex_scripts": [{
                 "scriptName": "隐藏思考", "findRegex": "/<think>[\\s\\S]*?<\\/think>/g",
@@ -27,12 +27,12 @@ def test_ST角色卡转换为Demiurge扁平卡和侧车():
     )
 
     assert set(converted.files) == {
-        "导入/角色卡/塞西莉亚/card.json",
-        "导入/角色卡/塞西莉亚/worldbook.json",
-        "导入/角色卡/塞西莉亚/regex.json",
+        "导入/角色卡/卡蜜莉亚/card.json",
+        "导入/角色卡/卡蜜莉亚/worldbook.json",
+        "导入/角色卡/卡蜜莉亚/regex.json",
     }
-    card = json.loads(converted.files["导入/角色卡/塞西莉亚/card.json"])
-    assert card["name"] == "塞西莉亚"
+    card = json.loads(converted.files["导入/角色卡/卡蜜莉亚/card.json"])
+    assert card["name"] == "卡蜜莉亚"
     assert "data" not in card
     assert card["character_book"] is None
     assert card["regex_scripts"] == []

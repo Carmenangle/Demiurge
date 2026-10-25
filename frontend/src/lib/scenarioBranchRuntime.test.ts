@@ -30,7 +30,7 @@ describe("scenario branch runtime", () => {
     const runtime = deps();
     const result = await createScenarioBranch({
       outputDir: "output", sourceRepoId: "source", parentId: "parent",
-      binding: { cardName: "冷倾雪" }, messages: [{ role: "assistant", text: "reply" }],
+      binding: { cardName: "顾凝霜" }, messages: [{ role: "assistant", text: "reply" }],
       isLatest: true,
     }, runtime);
 

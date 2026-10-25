@@ -133,9 +133,9 @@ def test_运行期瞬态键可写回并读出():
     # graph 节点把 scene/_regex_scripts 等瞬态键写回 ctx，供后续节点读。
     ctx = RunContext(thread_id="t", message="m")
     assert ctx.get("scene") is None          # 未写入 → 默认 None
-    ctx["scene"] = "谷中冷倾雪"                # 曾抛 item assignment 错
+    ctx["scene"] = "谷中顾凝霜"                # 曾抛 item assignment 错
     ctx["_regex_scripts"] = [1, 2, 3]
-    assert ctx["scene"] == "谷中冷倾雪"
+    assert ctx["scene"] == "谷中顾凝霜"
     assert ctx.get("_regex_scripts") == [1, 2, 3]
     assert "scene" in ctx
     assert "context_max_tokens" in ctx        # __contains__ 也覆盖固定字段
@@ -143,9 +143,9 @@ def test_运行期瞬态键可写回并读出():
 
 def test_运行期瞬态键支持弹出且缺失时返回默认值():
     ctx = RunContext(thread_id="t", message="m")
-    ctx["_agency_goal_deltas"] = [{"field": "叙事/塞西莉亚·当前目标"}]
+    ctx["_agency_goal_deltas"] = [{"field": "叙事/卡蜜莉亚·当前目标"}]
 
-    assert ctx.pop("_agency_goal_deltas") == [{"field": "叙事/塞西莉亚·当前目标"}]
+    assert ctx.pop("_agency_goal_deltas") == [{"field": "叙事/卡蜜莉亚·当前目标"}]
     assert ctx.pop("_agency_goal_deltas", []) == []
     assert "_agency_goal_deltas" not in ctx
 

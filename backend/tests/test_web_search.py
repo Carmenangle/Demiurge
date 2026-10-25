@@ -623,7 +623,7 @@ def test_inspire_node_搜索源为空时传None走自动链(monkeypatch):
 
 
 # ── 相关性过滤（2026-09-11，修「引擎改写查询返回垃圾」） ─────────
-# 事故：搜「超时空辉夜姬的月见八千代的外貌信息」，Bing CN 无 cookie SERP 把查询
+# 事故：搜「超时空辉夜姬的雪村八千代的外貌信息」，Bing CN 无 cookie SERP 把查询
 # 放松到首字「超」，返回超（汉语汉字）/超星/超自然行动组；搜「搜索X」则把引导动词
 # 当主题词，返回搜狗/360/一起搜/必应/Google 五个搜索引擎首页。垃圾结果照单全收
 # 喂给模型 → 模型声明检索失败或凭角色名编造设定。
@@ -634,17 +634,17 @@ def test_filter_relevant_丢弃改写产生的无关结果():
         {"title": "超（汉语汉字）_百度百科", "snippet": "超的意思", "url": "https://a.test"},
         {"title": "超星", "snippet": "学习平台", "url": "https://b.test"},
     ]
-    assert ws.filter_relevant("超时空辉夜姬的月见八千代的外貌信息", rs) == []
+    assert ws.filter_relevant("超时空辉夜姬的雪村八千代的外貌信息", rs) == []
 
 
 def test_filter_relevant_保留命中结果并容错改写():
     """标题被引擎改写但仍有 bigram 命中的要保留（别误杀真结果）。"""
     rs = [
-        {"title": "月见八千代 - 萌娘百科 万物皆可萌的百科全书", "snippet": "", "url": "https://a.test"},
+        {"title": "雪村八千代 - 萌娘百科 万物皆可萌的百科全书", "snippet": "", "url": "https://a.test"},
         {"title": "超辉夜姬！ - 萌娘百科", "snippet": "", "url": "https://b.test"},
         {"title": "搜狗搜索引擎 - 上网从搜狗开始", "snippet": "", "url": "https://c.test"},
     ]
-    out = ws.filter_relevant("超时空辉夜姬 月见八千代", rs)
+    out = ws.filter_relevant("超时空辉夜姬 雪村八千代", rs)
     assert [r["url"] for r in out] == ["https://a.test", "https://b.test"]
 
 
@@ -666,12 +666,12 @@ def test_web_search_整批无关视为该源失败回落下一源(monkeypatch):
             calls.append(self.tag)
             if self.tag == "bing-cn":
                 return [{"title": "搜狗搜索引擎 - 上网从搜狗开始", "snippet": "", "url": "https://sogou.test"}]
-            return [{"title": "月见八千代 - 萌娘百科", "snippet": "", "url": "https://moegirl.test"}]
+            return [{"title": "雪村八千代 - 萌娘百科", "snippet": "", "url": "https://moegirl.test"}]
 
     table = {"bing-cn": FakeAdapter("bing-cn"), "ddg": FakeAdapter("ddg")}
     monkeypatch.setattr(ws, "get_adapter", lambda name: table.get(name))
 
-    out = ws.web_search("月见八千代的外貌", provider=None)
+    out = ws.web_search("雪村八千代的外貌", provider=None)
 
     assert calls == ["bing-cn", "ddg"]
     assert [r["url"] for r in out] == ["https://moegirl.test"]
@@ -698,8 +698,8 @@ def test_filter_relevant_英文按词判相关():
 
 
 # ── 图片相关性过滤 + 正文抓取（2026-09-11 晚，修「图片全是无关垃圾/内容最浅层」） ──
-# 实锤：Bing Images 与文字 SERP 一样放松查询——「月见八千代 外貌」返回钢筋调直机
-# 防护罩、「月见八千代」返回电击棍；且 SERP 摘要只有 1-2 行，外貌细节在页面正文里
+# 实锤：Bing Images 与文字 SERP 一样放松查询——「雪村八千代 外貌」返回钢筋调直机
+# 防护罩、「雪村八千代」返回电击棍；且 SERP 摘要只有 1-2 行，外貌细节在页面正文里
 # （萌娘百科正文 9.8K 字含发色/瞳色/声优全套，摘要里一个字没有）。
 
 def test_filter_relevant_images_整批无关判空():
@@ -708,28 +708,28 @@ def test_filter_relevant_images_整批无关判空():
         {"title": "918电击棍-防抢夺电击棍多少钱", "full_url": "https://x/1.jpg"},
         {"title": "钢筋调直机防护罩进料口防护", "full_url": "https://x/2.jpg"},
     ]
-    assert ws.filter_relevant_images("月见八千代", junk) == []
+    assert ws.filter_relevant_images("雪村八千代", junk) == []
 
 
 def test_filter_relevant_images_跨词bigram擦边图被丢():
     """09-11 晚真机反例：无关新闻标题偶然含 bigram「的外」擦边过关 → 收窄回 ≥2 命中。"""
     junk = [{"title": "凝固历史的外滩老建筑_海关大楼_中山东一路_风格",
              "full_url": "https://x/1.jpg"}]
-    assert ws.filter_relevant_images("超时空辉夜姬的月见八千代的外貌信息", junk) == []
+    assert ws.filter_relevant_images("超时空辉夜姬的雪村八千代的外貌信息", junk) == []
 
 
 def test_filter_relevant_images_保留实体相关图():
-    kept = ws.filter_relevant_images("月见八千代 外貌", [
-        {"title": "月见八千代 立绘", "full_url": "https://x/1.jpg"},
-        {"title": "月见八千代 官方人设图", "full_url": "https://x/2.jpg"},
+    kept = ws.filter_relevant_images("雪村八千代 外貌", [
+        {"title": "雪村八千代 立绘", "full_url": "https://x/1.jpg"},
+        {"title": "雪村八千代 官方人设图", "full_url": "https://x/2.jpg"},
     ])
     assert len(kept) == 2
 
 
 def test_filter_relevant_images_空标题用来源文件名兜底():
-    kept = ws.filter_relevant_images("月见八千代", [
-        {"title": "", "source_url": "https://example.com/wiki/月见八千代", "full_url": "https://x/1.jpg"},
-        {"title": "", "source_url": "", "full_url": "https://x/月见八千代.png"},
+    kept = ws.filter_relevant_images("雪村八千代", [
+        {"title": "", "source_url": "https://example.com/wiki/雪村八千代", "full_url": "https://x/1.jpg"},
+        {"title": "", "source_url": "", "full_url": "https://x/雪村八千代.png"},
     ])
     assert len(kept) == 2
 
@@ -775,7 +775,7 @@ def test_fetch_page_text_剥脚本与标签():
     _FakePageClient.pages = {
         "https://a.test/page": (
             "<html><head><style>.x{}</style></head><body>"
-            "<script>var a=1;</script><h1>月见八千代</h1>"
+            "<script>var a=1;</script><h1>雪村八千代</h1>"
             "<p>多种发色 渐变发（银色→粉色），多种瞳色 渐变瞳（上粉下青）。</p>"
             + "正文填充" * 150 + "</body></html>"
         ),
@@ -788,7 +788,7 @@ def test_fetch_page_text_剥脚本与标签():
     finally:
         _hx.Client = orig
     assert "var a=1" not in text and ".x{}" not in text
-    assert "月见八千代" in text and "渐变瞳" in text
+    assert "雪村八千代" in text and "渐变瞳" in text
 
 
 def test_fetch_page_text_反爬验证页判失败():
@@ -862,7 +862,7 @@ def test_moegirl_parse_opensearch(monkeypatch):
     import httpx
 
     class FakeResponse:
-        text = _moegirl_json(["月见八千代", "超时空辉夜姬！"], ["", ""],
+        text = _moegirl_json(["雪村八千代", "超时空辉夜姬！"], ["", ""],
                              ["https://zh.moegirl.org.cn/A", "https://zh.moegirl.org.cn/B"])
 
         def raise_for_status(self):
@@ -890,8 +890,8 @@ def test_moegirl_parse_opensearch(monkeypatch):
     monkeypatch.setattr(httpx, "Client", FakeClient)
     adapter = ws.get_adapter("moegirl")
     assert adapter is not None
-    results = adapter.search("月见八千代", max_results=6, proxy="")
-    assert [r["title"] for r in results] == ["月见八千代", "超时空辉夜姬！"]
+    results = adapter.search("雪村八千代", max_results=6, proxy="")
+    assert [r["title"] for r in results] == ["雪村八千代", "超时空辉夜姬！"]
     assert results[0]["url"] == "https://zh.moegirl.org.cn/A"
 
 
@@ -914,7 +914,7 @@ def test_moegirl_空结果与异常返回空(monkeypatch):
     monkeypatch.setattr(httpx, "Client", FakeClient)
     adapter = ws.get_adapter("moegirl")
     assert adapter is not None
-    assert adapter.search("月见八千代", proxy="") == []
+    assert adapter.search("雪村八千代", proxy="") == []
     assert adapter.search("", proxy="") == []
 
 
@@ -951,12 +951,12 @@ def test_web_search_链上bing垃圾回落到moegirl(monkeypatch):
                                     "<p class='b_lineclamp'>月的笔画与释义</p>")
             # moegirl opensearch
             return FakeResponse(_moegirl_json(
-                ["月见八千代"], [""], ["https://zh.moegirl.org.cn/%E6%9C%88%E8%A7%81%E5%85%AB%E5%8D%83%E4%BB%A3"]))
+                ["雪村八千代"], [""], ["https://zh.moegirl.org.cn/%E6%9C%88%E8%A7%81%E5%85%AB%E5%8D%83%E4%BB%A3"]))
 
     monkeypatch.setattr(httpx, "Client", FakeClient)
-    results = ws.web_search("月见八千代", max_results=4, proxy="")  # 不点名 → 自动链
+    results = ws.web_search("雪村八千代", max_results=4, proxy="")  # 不点名 → 自动链
     assert len(results) == 1
-    assert results[0]["title"] == "月见八千代"
+    assert results[0]["title"] == "雪村八千代"
     assert results[0]["url"].startswith("https://zh.moegirl.org.cn/")
 
 

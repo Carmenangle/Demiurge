@@ -78,7 +78,7 @@ def test_索引_正文段首第N章不产生伪章节(tmp_path):
     21 万字 60 章被切成上千个伪章节、chapter_count 塌成 1（索引与差异全失效）。"""
     chapters = []
     for i in (1, 2, 3):
-        paras = "".join(f"第{i}章第{j}段正文，戴茂说道：这是用来模拟真实长篇的填充内容。\n\n"
+        paras = "".join(f"第{i}章第{j}段正文，裴肃说道：这是用来模拟真实长篇的填充内容。\n\n"
                         for j in range(1, 30))
         chapters.append(f"第{i}章·标题{i}\n{paras}")
     text = "\n".join(chapters)
@@ -213,7 +213,7 @@ def test_长章按max_chars分窗且覆盖整章(tmp_path):
 
 
 def test_新章人名进候选_旧章既有名不进(tmp_path):
-    old_text = "第一章·码头\n" + "戴茂说道：走吧。\n\n" * 3
+    old_text = "第一章·码头\n" + "裴肃说道：走吧。\n\n" * 3
     old = _write(tmp_path, "old.txt", old_text)
     ch.novel_index(str(old), work_dir=str(tmp_path))
     new_chunk = ("\n第四章·新人\n" + "苏晚晚说道：初次见面。\n\n"
@@ -223,7 +223,7 @@ def test_新章人名进候选_旧章既有名不进(tmp_path):
     res = ch.novel_diff(str(new), old_index=str(tmp_path / "_prep" / "novel.index.json"))
     names = {row[0]: (row[1], row[2]) for row in res["name_delta"]}
     assert "苏晚晚" in names and names["苏晚晚"][1] == 0
-    assert "戴茂" not in names  # 只在未变章节出现 → 不算新名/更名候选
+    assert "裴肃" not in names  # 只在未变章节出现 → 不算新名/更名候选
 
 
 def test_旧索引缺失必须报可操作错误(tmp_path):

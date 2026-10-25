@@ -54,7 +54,7 @@ def test_classify_card_intent_keeps_card_history_summarizes_image_history():
 
 def test_classify_image_intent_keeps_image_history():
     history = [
-        _h("user", "把《玫瑰与繁花》制作成合集卡，整理全局机制"),
+        _h("user", "把《青梧与晚风》制作成合集卡，整理全局机制"),
         _h("assistant", "已完成合集卡"),
         _h("user", "按这个模板出图，14 套穿搭"),
     ]
@@ -124,7 +124,7 @@ def test_history_text_gated_layered_sections_keep_order():
     ctx = {"history": [
         _h("user", "x" * 500),  # clip：无域特征且超长
         _h("user", "按这个模板出图，14 套穿搭"),  # 跨域 summary
-        _h("user", "把《玫瑰与繁花》制作成合集卡，整理全局机制"),  # 同域 keep（上一轮指令）
+        _h("user", "把《青梧与晚风》制作成合集卡，整理全局机制"),  # 同域 keep（上一轮指令）
         _h("assistant", "合集卡已生成，含机制整理"),  # 同域 keep
     ]}
     intent = "根据这本小说制作合集卡，把体系、角色都整理好"
@@ -135,7 +135,7 @@ def test_history_text_gated_layered_sections_keep_order():
     i_clip = out.index("[截断]")
     assert i_anchor < i_keep < i_agg < i_clip
     assert "此前为『生图』类任务 ×1" in out
-    assert "把《玫瑰与繁花》制作成合集卡" in out  # 上一轮同域指令 keep 全文（普通历史层）
+    assert "把《青梧与晚风》制作成合集卡" in out  # 上一轮同域指令 keep 全文（普通历史层）
 
 
 def test_history_text_gated_empty_history():

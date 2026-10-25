@@ -985,7 +985,7 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
         {/* 2026-09-09 收紧：产物卡只属于「最终交付」消息——
             中间态（需要批准/执行未完成/已编译计划/计划编译失败）即使含智能编造关键词也不渲染、不补卡；
             autoLoad 仅为旧快照里无 artifacts 的完成消息兜底。
-            实锤：任务只编译出空壳计划时，中间态消息也补卡 → 拉到上一次的旧产物（玫瑰与繁花）。 */}
+            实锤：任务只编译出空壳计划时，中间态消息也补卡 → 拉到上一次的旧产物（青梧与晚风）。 */}
         {(() => {
           const _has = !!(msg.artifacts && msg.artifacts.length > 0);
           const _isFabric = /智能编造|合集卡/.test(cleanText);

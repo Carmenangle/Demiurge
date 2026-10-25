@@ -30,7 +30,7 @@ def _make_ctx(**over) -> dict:
 def test_fabric_discipline_任务定性NSFW口径():
     """2026-09-06 网关 400 实锤修复：纪律必须含「合集卡任务定性 + NSFW 转写口径」——
     模型看到露骨内容时不得回避删除成人设定、不得复述露骨描写、不得失焦换任务。"""
-    ctx = {"attachments": [{"name": "玫瑰与繁花.txt"}]}
+    ctx = {"attachments": [{"name": "青梧与晚风.txt"}]}
     d = ag._fabric_discipline(ctx)
     assert "任务定性" in d
     assert "六层条目" in d

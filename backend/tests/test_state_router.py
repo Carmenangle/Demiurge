@@ -16,11 +16,11 @@ def test_读已存状态含快照(tmp_path):
     st = cs.CharacterState(card_name="卡", repo_id="r1")
     cs.apply_deltas(st, cs.parse_deltas(
         [{"field": "数值/好感度", "op": "set", "value": 8, "evidence": "救援"}], turn=1))
-    st.快照 = cs.Snapshot("[臣服] 叶燃眉=100", turn=1)
+    st.快照 = cs.Snapshot("[臣服] 蓝婉眉=100", turn=1)
     cs.save_state(base, st)
     got = state_router.get_state(output_dir=base, repo_id="r1", card_name="卡")
     assert got["数值"]["好感度"]["value"] == 8.0
-    assert got["快照"]["text"] == "[臣服] 叶燃眉=100"
+    assert got["快照"]["text"] == "[臣服] 蓝婉眉=100"
     assert len(got["历史"]) == 1
 
 

@@ -53,14 +53,14 @@ describe("reduceChatStreamEvent", () => {
     messages = reduceChatStreamEvent(messages, "bot", {
       type: "artifacts",
       items: [
-        { kind: "card", name: "角色主卡 · 玫瑰与繁花", path: "D:/w/玫瑰与繁花/card.json", size: 85764 },
-        { kind: "worldbook", name: "世界书 · 玫瑰与繁花", path: "D:/w/玫瑰与繁花/worldbook.json", size: 82474 },
+        { kind: "card", name: "角色主卡 · 青梧与晚风", path: "D:/w/青梧与晚风/card.json", size: 85764 },
+        { kind: "worldbook", name: "世界书 · 青梧与晚风", path: "D:/w/青梧与晚风/worldbook.json", size: 82474 },
       ],
     });
     // 再叠加一批：不覆盖而是累积（多轮落盘的产物都展示）
     messages = reduceChatStreamEvent(messages, "bot", {
       type: "artifacts",
-      items: [{ kind: "worldbook", name: "世界书 · 续写", path: "D:/w/玫瑰与繁花/worldbook.json", size: 10 }],
+      items: [{ kind: "worldbook", name: "世界书 · 续写", path: "D:/w/青梧与晚风/worldbook.json", size: 10 }],
     });
 
     expect(messages[0].text).toBe("合集卡已完成");
@@ -303,20 +303,20 @@ describe("reduceChatStreamEvent", () => {
     const current: ChatMessage[] = [{
       id: "bot", role: "assistant", text: "她低声道：「我认输。」",
     }];
-    const next = appendAudioSlot(current, "bot", "audio-0", "虞妙玥", 1, 2);
+    const next = appendAudioSlot(current, "bot", "audio-0", "苏映晚", 1, 2);
     expect(next[0].parts).toEqual([
       { type: "text", text: "她低声道：「我认输。」" },
       { type: "media-slot", slotId: "audio-0", status: "pending",
-        kind: "audio", speaker: "虞妙玥", seq: 1, total: 2 },
+        kind: "audio", speaker: "苏映晚", seq: 1, total: 2 },
     ]);
     // 幂等：同 slot 不重复追加
-    const again = appendAudioSlot(next, "bot", "audio-0", "虞妙玥", 1, 2);
+    const again = appendAudioSlot(next, "bot", "audio-0", "苏映晚", 1, 2);
     expect(again[0].parts).toHaveLength(2);
     // 已有 parts 的消息（如同轮已插画）在末尾追加，不动已有内容
     const withParts = appendAudioSlot([{
       id: "bot", role: "assistant", text: "正文",
       parts: [{ type: "image", url: "local://img", slotId: "img-1", status: "ready" }],
-    }], "bot", "audio-0", "虞妙玥", 1, 2);
+    }], "bot", "audio-0", "苏映晚", 1, 2);
     expect(withParts[0].parts).toHaveLength(2);
     expect(withParts[0].parts?.[0]).toEqual({
       type: "image", url: "local://img", slotId: "img-1", status: "ready",
@@ -586,7 +586,7 @@ describe("媒体槽自愈兜底（2026-08-31 深夜实锤：槽丢失导致生�
 });
 
 
-describe("计划采集产物逐张上屏增量追加（2026-09-04 唐柚 14 套画像）", () => {
+describe("计划采集产物逐张上屏增量追加（2026-09-04 阮秋白 14 套画像）", () => {
   it("只追加服务端新增 id 的消息，保持服务端顺序", () => {
     const current: ChatMessage[] = [
       { id: "plan-card", role: "assistant", text: "📋 已编译计划…" },

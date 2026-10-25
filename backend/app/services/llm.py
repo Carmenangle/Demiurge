@@ -215,7 +215,7 @@ def _is_proxy_side_error(err: Exception) -> bool:
 # ── 模型单轮输出上限（OpenAI 兼容网关按模型 max output 校验 max_tokens）──
 # 2026-09-04 trace 实锤：GrayWill 预设 openai_max_tokens=600000 → 正文 +4000=604000 直发，
 # tokenrhythm 网关对 deepseek-v4-flash-0731 报 400 LITELLM_ERROR「max_tokens should be
-# less or equal to 393216」→ 扮演失败且自愈整段重掷 3 次全白烧（opus@xtoken 网关无此校验
+# less or equal to 393216」→ 扮演失败且自愈整段重掷 3 次全白烧（opus@中转网关 网关无此校验
 # 故此前未炸）。用户定案语义（2026-09-04）：请求上限 > 模型上限 → 按模型上限（min）；
 # 模型上限更高/未登记 → 按请求原样正常走。登记键 = 模型名前缀（精确或带 -/_ 后缀变体均命中）。
 MODEL_OUTPUT_TOKEN_CAPS: dict[str, int] = {
@@ -350,7 +350,7 @@ def _prompt_cache_enabled() -> bool:
     按 4× 服务系数白付约 $6.7。根因是 Anthropic 默认 **5 分钟 TTL**扛不住剧情对话间隔
     （相邻两轮常 >5 分钟），每轮全额重建。这里显式带 `ttl:"1h"` 把缓存寿命拉到 1 小时。
 
-    ⚠ 2026-10-20 A/B（本机 → xtoken 网关 / claude-opus-4-8，三臂串行实测）：
+    ⚠ 2026-10-20 A/B（本机 → 中转网关 网关 / claude-opus-4-8，三臂串行实测）：
       none 200 / ephemeral(5m) 200 / ephemeral+ttl=1h 200 —— **`ttl:"1h"` 不被拒**；
       但三臂 usage 里 `cache_creation_input_tokens` / `cache_read_input_tokens` **全为 null**
       ⇒ 该网关在 OpenAI 兼容路径上不回缓存统计，**命中率不可观测**。

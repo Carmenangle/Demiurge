@@ -241,9 +241,9 @@ def test_纯文档交付也能收集(work):
 
 def test_卡与文档并存都展示(work):
     _seed_doc_work(work)
-    card_dir = work / "玫瑰与繁花"
+    card_dir = work / "青梧与晚风"
     card_dir.mkdir()
-    (card_dir / "card.json").write_text('{"name":"玫瑰与繁花"}', encoding="utf-8")
+    (card_dir / "card.json").write_text('{"name":"青梧与晚风"}', encoding="utf-8")
     items = collection_artifacts.collect_artifacts(str(work))
     kinds = {i["kind"] for i in items}
     assert {"card", "doc"} <= kinds

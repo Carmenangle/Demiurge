@@ -36,7 +36,7 @@ def test_块内json坏不丢正文():
 def test_状态更新缺闭标签仍解析并从正文剥离():
     reply = (
         "正文\n<状态更新>"
-        '[{"field":"叙事/冷倾雪·精神状态","op":"set",'
+        '[{"field":"叙事/顾凝霜·精神状态","op":"set",'
         '"value":"清醒","evidence":"本轮明确"}]'
     )
 
@@ -44,7 +44,7 @@ def test_状态更新缺闭标签仍解析并从正文剥离():
 
     assert clean == "正文"
     assert raw == [{
-        "field": "叙事/冷倾雪·精神状态", "op": "set",
+        "field": "叙事/顾凝霜·精神状态", "op": "set",
         "value": "清醒", "evidence": "本轮明确",
     }]
 
@@ -52,9 +52,9 @@ def test_状态更新缺闭标签仍解析并从正文剥离():
 def test_模型漏战报时把上轮快照保留在正文开头():
     reply = "<content>本轮正文</content>"
 
-    restored = ra.ensure_status_snapshot(reply, "[时间] 第四日\n[在场] 冷倾雪")
+    restored = ra.ensure_status_snapshot(reply, "[时间] 第四日\n[在场] 顾凝霜")
 
-    assert restored.startswith("<status>\n[时间] 第四日\n[在场] 冷倾雪\n</status>")
+    assert restored.startswith("<status>\n[时间] 第四日\n[在场] 顾凝霜\n</status>")
     assert restored.endswith(reply)
 
 
@@ -69,7 +69,7 @@ def test_状态更新指令要求缺字段时播种初值不默认0():
     """2026-09-22 用户口径：角色应按剧情因果给初始好感/恶感，不应从 0 起算。
 
     2026-09-23 修正闸门（真机实锤）：旧措辞「某角色**第一次出现**、状态表中尚没有其好感度
-    字段时」把叙事条件与引擎条件绑在一起 ⇒ 已登场但被删过字段的角色**永远不满足**（妲千沁
+    字段时」把叙事条件与引擎条件绑在一起 ⇒ 已登场但被删过字段的角色**永远不满足**（沈映澜
     turn 51 已登场 7 轮、字段为空、三条前提全齐，仍判「不是第一次出现」⇒ 照样 add 从 0 起算）。
     闸门必须只说引擎认的那个条件：**字段是否存在**。
     """
@@ -204,14 +204,14 @@ def test_门控关时塌回不调LLM(tmp_path):
 
 def test_门控开时提案被仲裁(tmp_path):
     # 高好感度让门控几乎必开；世界 Agent 返回一条有 basis 的提案
-    proposal_json = ('[{"actor":"埃斯托利亚","intent":"在酒里下药","difficulty":30,'
+    proposal_json = ('[{"actor":"奥瑞利亚","intent":"在酒里下药","difficulty":30,'
                      '"min_affinity":20,"basis":"[从舌头开始] 个体机制"}]')
     deps = ra.AgencyDeps(chat_fn=lambda *a, **k: proposal_json,
                          rng=random.Random(3), state_base=str(tmp_path),
                          gate_base_rate=0.2)
     verdicts = ra.consult_world(deps, chat_base="", chat_key="", chat_model="",
                                 core="core", scene="舞会", affinity=90)
-    assert len(verdicts) == 1 and verdicts[0].actor == "埃斯托利亚"
+    assert len(verdicts) == 1 and verdicts[0].actor == "奥瑞利亚"
 
 
 def test_首轮无好感记录仍调用世界agent(tmp_path):
@@ -228,7 +228,7 @@ def test_首轮无好感记录仍调用世界agent(tmp_path):
 
     verdicts = ra.consult_world(
         deps, chat_base="", chat_key="", chat_model="",
-        core="塞西莉亚角色条目", scene="拒绝收养", affinity=None,
+        core="卡蜜莉亚角色条目", scene="拒绝收养", affinity=None,
     )
 
     assert verdicts == []
@@ -237,7 +237,7 @@ def test_首轮无好感记录仍调用世界agent(tmp_path):
 
 def test_世界提案保留目标与行动供主模型叙述(tmp_path):
     proposal_json = (
-        '[{"actor":"塞西莉亚","goal":"把有价值的孩子纳入长期掌控",'
+        '[{"actor":"卡蜜莉亚","goal":"把有价值的孩子纳入长期掌控",'
         '"intent":"留下可被幽影商会识别的徽章作为后手","difficulty":40,'
         '"min_affinity":-10,"basis":"掌控欲极强，越在意越想掌控"}]'
     )
@@ -248,7 +248,7 @@ def test_世界提案保留目标与行动供主模型叙述(tmp_path):
 
     verdicts = ra.consult_world(
         deps, chat_base="", chat_key="", chat_model="",
-        core="塞西莉亚角色条目", scene="主角拒绝收养", affinity=0,
+        core="卡蜜莉亚角色条目", scene="主角拒绝收养", affinity=0,
     )
     directive = ra.narrative_directive(verdicts)
 
@@ -275,7 +275,7 @@ def test_无得手时指令为空():
 
 def test_已尝试但失败的自主行动也必须进入叙事():
     miss = agency.Verdict(
-        "塞西莉亚", agency.OUTCOME_REJECT, agency.DEGREE_NONE, 90, 80, "掷骰失败",
+        "卡蜜莉亚", agency.OUTCOME_REJECT, agency.DEGREE_NONE, 90, 80, "掷骰失败",
         intent="暗中留下追踪印记", goal="保持对主角的长期掌控",
     )
 
@@ -309,9 +309,9 @@ def test_空delta不改值(tmp_path):
 # ── <status> 快照：抽取（不剥）+ 落盘 + 抗压缩重建 ──
 
 def test_抽取status快照不剥正文():
-    reply = "她别过脸。\n<status>[所在] 山洞\n[臣服] 叶燃眉=100</status>\n尾句。"
+    reply = "她别过脸。\n<status>[所在] 山洞\n[臣服] 蓝婉眉=100</status>\n尾句。"
     snap = ra.extract_status_snapshot(reply)
-    assert snap == "[所在] 山洞\n[臣服] 叶燃眉=100"
+    assert snap == "[所在] 山洞\n[臣服] 蓝婉眉=100"
 
 
 def test_无status块返回空():
@@ -380,42 +380,42 @@ def test_writeback落盘快照前先对账好感行(tmp_path):
     deps = _deps(tmp_path)
     ra.writeback(
         deps, repo_id="r1", card_name="卡", turn=34,
-        raw_deltas=[{"field": "数值/舞姬恋·好感度", "op": "set", "value": 2,
+        raw_deltas=[{"field": "数值/星织恋·好感度", "op": "set", "value": 2,
                      "evidence": "争宠"}],
-        snapshot="[好感] 凌若冰=40/冰山融化；舞姬恋=52/旖旎试探")
+        snapshot="[好感] 谢若冰=40/冰山融化；星织恋=52/旖旎试探")
     st = character_state.load_state(str(tmp_path), "r1", "卡")
-    assert st.数值["舞姬恋·好感度"].value == 2.0
-    assert "舞姬恋=2/旖旎试探" in st.快照.text
+    assert st.数值["星织恋·好感度"].value == 2.0
+    assert "星织恋=2/旖旎试探" in st.快照.text
 # ── 展示对账：正文 <status> 也走引擎真源（2026-09-22 用户实锤）──
 # 此前只对账「落盘快照」与「重注入快照」，用户屏幕上看到的 [好感] 行仍是模型自述
 # ⇒ 同一角色正文 16→13→10 乱跳、引擎恒 13。本节点末尾发 replace 全文替换气泡，
 # 故 writeback 处对账正文即等于修显示。
 
 def _affinity_state(*pairs) -> character_state.CharacterState:
-    st = character_state.CharacterState(card_name="凌霄仙母录", repo_id="r1")
+    st = character_state.CharacterState(card_name="苍梧仙闻录", repo_id="r1")
     for leaf, value in pairs:
         st.数值[leaf] = character_state.NumericField(value, min=-100.0, max=100.0)
     return st
 
 
 def test_正文status好感行对账为引擎真值():
-    st = _affinity_state(("妲千沁·好感度", 13.0), ("凌若冰·好感度", 52.0))
+    st = _affinity_state(("沈映澜·好感度", 13.0), ("谢若冰·好感度", 52.0))
     reply = """正文她没回头。
 <status>
-[在场] 妲千沁
-[好感] 妲千沁=10/清冷；凌若冰=52
+[在场] 沈映澜
+[好感] 沈映澜=10/清冷；谢若冰=52
 </status>"""
     out = ra.reconcile_reply_status(reply, st)
-    assert "妲千沁=13/清冷" in out      # 引擎真值覆盖模型自述（档位描述保留）
-    assert "妲千沁=10" not in out
-    assert "凌若冰=52" in out           # 本就一致的不动
-    assert out == reply.replace("妲千沁=10", "妲千沁=13")   # 其余逐字不动（含空白填充）
+    assert "沈映澜=13/清冷" in out      # 引擎真值覆盖模型自述（档位描述保留）
+    assert "沈映澜=10" not in out
+    assert "谢若冰=52" in out           # 本就一致的不动
+    assert out == reply.replace("沈映澜=10", "沈映澜=13")   # 其余逐字不动（含空白填充）
 
 
 def test_正文对账幂等():
-    st = _affinity_state(("妲千沁·好感度", 13.0))
+    st = _affinity_state(("沈映澜·好感度", 13.0))
     reply = """<status>
-[好感] 妲千沁=10
+[好感] 沈映澜=10
 </status>"""
     once = ra.reconcile_reply_status(reply, st)
     assert ra.reconcile_reply_status(once, st) == once
@@ -423,20 +423,20 @@ def test_正文对账幂等():
 
 def test_正文对账只改最后一个status块():
     """多块时末块为最新（与 extract_status_snapshot 同口径）；复述的旧栏不被动。"""
-    st = _affinity_state(("妲千沁·好感度", 13.0))
+    st = _affinity_state(("沈映澜·好感度", 13.0))
     reply = """<status>
-[好感] 妲千沁=77
+[好感] 沈映澜=77
 </status>过场<status>
-[好感] 妲千沁=10
+[好感] 沈映澜=10
 </status>"""
     out = ra.reconcile_reply_status(reply, st)
-    assert "妲千沁=77" in out       # 旧栏原样
-    assert "妲千沁=13" in out       # 末块已对账
-    assert "妲千沁=10" not in out
+    assert "沈映澜=77" in out       # 旧栏原样
+    assert "沈映澜=13" in out       # 末块已对账
+    assert "沈映澜=10" not in out
 
 
 def test_正文无status块原样返回():
-    st = _affinity_state(("妲千沁·好感度", 13.0))
+    st = _affinity_state(("沈映澜·好感度", 13.0))
     assert ra.reconcile_reply_status("纯叙事，没有状态栏。", st) == "纯叙事，没有状态栏。"
 
 
@@ -444,24 +444,24 @@ def test_引擎无好感字段时正文原样返回():
     """用户手删光好感字段后（2026-09-23 实机场景）：不得改写正文，也不得抛错。"""
     st = character_state.CharacterState(card_name="卡", repo_id="r1")
     reply = """<status>
-[好感] 妲千沁=10
+[好感] 沈映澜=10
 </status>"""
     assert ra.reconcile_reply_status(reply, st) == reply
 
 
 def test_正文对账不碰think内草稿():
     """think 里的 <status> 草稿既不当真身、也不得被改写（与 parse_state_block 同判据）。"""
-    st = _affinity_state(("妲千沁·好感度", 13.0))
+    st = _affinity_state(("沈映澜·好感度", 13.0))
     reply = """<think>推演：先列草稿
 <status>
-[好感] 妲千沁=99
+[好感] 沈映澜=99
 </status>
 继续想</think>正文。 <status>
-[好感] 妲千沁=10
+[好感] 沈映澜=10
 </status>"""
     out = ra.reconcile_reply_status(reply, st)
-    assert "妲千沁=99" in out       # 草稿原样（未被改写，也未顶替真身）
-    assert "妲千沁=10" not in out
+    assert "沈映澜=99" in out       # 草稿原样（未被改写，也未顶替真身）
+    assert "沈映澜=10" not in out
 
 
 def test_写回后对账正文拿到的是本轮delta结果(tmp_path):
@@ -472,18 +472,18 @@ def test_写回后对账正文拿到的是本轮delta结果(tmp_path):
     deps = _deps(tmp_path)
     reply = """正文她没回头。
 <status>
-[好感] 妲千沁=10/清冷
+[好感] 沈映澜=10/清冷
 </status>
-<状态更新>[{"field": "数值/妲千沁·好感度", "op": "set", "value": 3, "evidence": "第三夜"}]</状态更新>"""
+<状态更新>[{"field": "数值/沈映澜·好感度", "op": "set", "value": 3, "evidence": "第三夜"}]</状态更新>"""
     snapshot = ra.extract_status_snapshot(reply)
     clean, raw = ra.parse_state_block(reply)
     ra.writeback(deps, repo_id="r1", card_name="卡", raw_deltas=raw, turn=50,
                  snapshot=snapshot)
     st = character_state.load_state(str(tmp_path), "r1", "卡")
     out = ra.reconcile_reply_status(clean, st)
-    assert st.数值["妲千沁·好感度"].value == 3.0     # 字段不存在 ⇒ 由 set 播种（add 已被闸拒收）
-    assert "妲千沁=3/清冷" in out                   # 正文换成引擎真值
-    assert "妲千沁=10" not in out
+    assert st.数值["沈映澜·好感度"].value == 3.0     # 字段不存在 ⇒ 由 set 播种（add 已被闸拒收）
+    assert "沈映澜=3/清冷" in out                   # 正文换成引擎真值
+    assert "沈映澜=10" not in out
     assert "状态更新" not in out                    # 搭车块已剥，不进正文
 
     assert "52" not in st.快照.text
@@ -617,7 +617,7 @@ def test_思考内幻影协议标签跨界匹配不吞正文():
     气泡「正文被思考过程覆盖」。交叠判断必须排除跨界匹配、保住正文与真块解析。"""
     reply = (
         "<think>灰魂吐槽：推演。格式确认：\n- <status> 块\n- <roll> 块\n"
-        "- <content> 正文\n- <状态更新> 块\n骰点信息：[PLAYER] 凌渊</think>\n"
+        "- <content> 正文\n- <状态更新> 块\n骰点信息：[PLAYER] 洛渊</think>\n"
         "<content>她踏前一步，指尖挑起他的下颌。正文核心段落，必须完整保留。</content>\n"
         '<状态更新>[{"field":"数值/好感度","op":"add","value":5,"evidence":"本轮"}]</状态更新>'
     )
@@ -668,7 +668,7 @@ def test_strip_orphan_think_close只删孤立闭标签():
 
 def test_repair_orphan_think_close拆出规划注释():
     """闭标签前紧邻的全角括号规划注释拆出（补包 think 由调用方负责）。"""
-    note = "（正文到此，继续往后续写一点：凌渊的应对，以及本轮的收束和下一轮的钩子）"
+    note = "（正文到此，继续往后续写一点：洛渊的应对，以及本轮的收束和下一轮的钩子）"
     note_out, joined = ra.repair_orphan_think_close("正文A\n\n" + note + "</think>正文B")
     assert note_out == note
     assert joined == "正文A\n\n正文B"

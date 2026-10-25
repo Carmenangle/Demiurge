@@ -74,13 +74,13 @@ def test_assemble_selection_returns_original_indices_for_all_activation_paths(mo
     monkeypatch.setattr(wb, "_retrieve", lambda *a, **k: ["语义命中"])
     entries = wb.parse_entries({"entries": [
         {"content": "已关闭", "constant": True, "enabled": False},
-        {"content": "关键词命中", "keys": ["冷倾雪"]},
+        {"content": "关键词命中", "keys": ["顾凝霜"]},
         {"content": "常驻设定", "constant": True},
         {"content": "语义命中"},
         {"content": "未注入条目"},
     ]})
 
-    selection = wb.assemble_selection("r1", entries, "冷倾雪醒来", None)
+    selection = wb.assemble_selection("r1", entries, "顾凝霜醒来", None)
 
     assert selection.indices == [1, 2, 3]
     assert selection.keyword_indices == [1]
@@ -93,13 +93,13 @@ def test_assemble_selection_returns_original_indices_for_all_activation_paths(mo
 def test_assemble_uses_in_memory_sparse_retrieval_while_index_is_empty(monkeypatch):
     monkeypatch.setattr(wb, "_retrieve", lambda *a, **k: [])
     entries = [
-        wb.Entry(content="塞西莉亚是幽影帝国的统治者", constant=False),
+        wb.Entry(content="卡蜜莉亚是幽影帝国的统治者", constant=False),
         wb.Entry(content="奥萝拉掌控碧海航路", constant=False),
     ]
 
-    selection = wb.assemble_selection("repo", entries, "拒绝塞西莉亚的收养", None)
+    selection = wb.assemble_selection("repo", entries, "拒绝卡蜜莉亚的收养", None)
 
-    assert "塞西莉亚是幽影帝国的统治者" in selection.text
+    assert "卡蜜莉亚是幽影帝国的统治者" in selection.text
     assert "奥萝拉掌控碧海航路" not in selection.text
 
 

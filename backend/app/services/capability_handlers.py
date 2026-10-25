@@ -340,7 +340,7 @@ def collect_comfy_outputs(prompt_ids: list[str] | None = None, comfyui_url: str 
         if not _prompt_text and submit_result:
             # submit_batch 整包形态：prompt 在 results[i]（顶层只有 submitted/failed），
             # 直接 [submit_result][index].get("prompt") 会取到整包/空 dict → 提示词丢失，
-            # 消息只剩套装名（2026-09-04 唐柚 14 套画像实锤）。先摊平成逐条结果再按变体原序取。
+            # 消息只剩套装名（2026-09-04 阮秋白 14 套画像实锤）。先摊平成逐条结果再按变体原序取。
             _items = _ordered_submit_items(submit_result)
             _item = _items[slot] if slot < len(_items) and isinstance(_items[slot], dict) else {}
             _prompt_text = str(_item.get("prompt") or "")
@@ -674,7 +674,7 @@ def upsert_repo_worldbook(base: str, repo_id: str,
             skipped += 1
             continue
         # 2026-09-07 治本（用户定案「按原文关键词扩写，防偏差」）：密度硬门槛——
-        # 短版重写覆盖是退化（22:08 实锤：戴茂 1945→949 倒退）。写入前按 comment
+        # 短版重写覆盖是退化（22:08 实锤：裴肃 1945→949 倒退）。写入前按 comment
         # 前缀判定类别，字数低于 ST 目标即拒绝本批并回填「读素材扩写」提示，
         # 让模型带着目标去读 charfacts 素材提取细节再重写，而不是接受压缩版。
         _content = str(norm.get("content") or "")
@@ -690,7 +690,7 @@ def upsert_repo_worldbook(base: str, repo_id: str,
             _target = 400
         # 覆盖保护（2026-09-07 用户定案「按原文关键词扩写，防偏差」）：只拦
         # 「短版想覆盖已有/达标内容」——已有同名条目存在且新内容没到 ST 目标
-        # 字数时拒绝（防 22:08 实锤：戴茂 1945→949 倒退）；无同名的新骨架允许
+        # 字数时拒绝（防 22:08 实锤：裴肃 1945→949 倒退）；无同名的新骨架允许
         # 先落盘（模型随后补密度）。目标字数也不作为绝对门槛（防测试短数据误伤）。
         _norm_comment_c = _norm_comment(_comment_c)
         _existing = next((it for it in indexed.values()
@@ -928,7 +928,7 @@ def migrate_mechanical(path: str, base: str = "", repo_id: str = "") -> dict[str
                 if isinstance(_existing, list):
                     normalized.regex_scripts = [r for r in _existing if isinstance(r, dict)]
         character_store.save_card(base, normalized, overwrite=True)
-        # 归属标记（2026-09-09）：卡名常与作品名不同（实锤作品「原创」导入「御仙」卡），
+        # 归属标记（2026-09-09）：卡名常与作品名不同（实锤作品「原创」导入「驭云录」卡），
         # embed_worldbook / export_to_library 靠它只处理本作品的卡，防写进别的作品。
         character_store.write_work_marker(base, card_name, repo_id)
         card_path = str(character_store.card_dir(base, card_name) / "card.json")
@@ -957,7 +957,7 @@ def upsert_repo_character(base: str, card: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("card 必须是角色卡 JSON 对象")
     normalized = character_card.normalize_card(card)
     # 2026-09-09 增量更新保护：模型重写主卡常漏传 regex_scripts，原逻辑
-    # save_card 会把卡目录已有 regex.json 清掉（玫瑰与繁花更新实锤）。
+    # save_card 会把卡目录已有 regex.json 清掉（青梧与晚风更新实锤）。
     # 卡未带正则时，继承卡目录已有 regex.json（装饰性文件，不清比误删安全）。
     if not normalized.regex_scripts:
         try:
@@ -1572,7 +1572,7 @@ def _work_card_files(base: str, repo_id: str) -> list[Any]:
     """本作品的主卡文件（库根一层，按归属判定），绝不误伤其它作品。
 
     2026-09-09 治本：原实现 glob 全库「*/card.json」。当 base 是**作品库根**（多作品
-    混放，实锤 pictures 下有妈妈娼馆/玫瑰与繁花/御仙）时，会把当前作品的世界书写进
+    混放，实锤 pictures 下有旧巷当铺/青梧与晚风/驭云录）时，会把当前作品的世界书写进
     别的作品的卡——数据污染。
     2026-09-10 B3/A：归属判定上移到 `character_store.owned_card_dirs` 单一属主
     （产物访问域复用同一判定），本函数只做「目录 → card.json」的形态收口。
@@ -1629,7 +1629,7 @@ def export_work_to_library(base: str, repo_id: str) -> dict[str, Any]:
     if not wb_dir:
         raise ValueError("未配置世界书源库目录（worldbookDir）")
     exported = []
-    # 2026-09-09 用户定案：世界书导出名用「作品卡名」（唯一主卡目录名，如「玫瑰与繁花」），
+    # 2026-09-09 用户定案：世界书导出名用「作品卡名」（唯一主卡目录名，如「青梧与晚风」），
     # 而非 repo_id（uuid 形态在作品库目录里不可读）；多卡（A 态多角色）时无唯一名，兜底 repo_id。
     # 2026-09-09 治本：只导出本作品文件夹内的卡（原 glob 全库会把别的作品的卡同步进源库）
     _card_files = _work_card_files(base, repo_id)

@@ -51,12 +51,12 @@ def test_用户消息带附件时快照持久化file_part(monkeypatch, tmp_path)
     monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
     monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
 
-    attachments = [{"file_id": "a" * 32, "name": "形象提示词-唐柚.md", "mime": "text/markdown", "size": 45800}]
+    attachments = [{"file_id": "a" * 32, "name": "形象提示词-阮秋白.md", "mime": "text/markdown", "size": 45800}]
     assert chat_snapshot.ensure_user_message("thread", "user-file", "帮我读取", attachments=attachments)
     saved = chat_snapshot.load("thread")[0]
     assert saved["parts"] == [
         {"type": "text", "text": "帮我读取"},
-        {"type": "file", "fileId": "a" * 32, "name": "形象提示词-唐柚.md", "mime": "text/markdown", "size": 45800},
+        {"type": "file", "fileId": "a" * 32, "name": "形象提示词-阮秋白.md", "mime": "text/markdown", "size": 45800},
     ]
 
 
@@ -550,14 +550,14 @@ def test_音频槽追加保留已有图片槽并写入分条元数据(monkeypatc
     }])
 
     assert chat_snapshot.append_media_slot(
-        "thread", "bot", "audio-0", speaker="虞妙玥", seq=1, total=2,
+        "thread", "bot", "audio-0", speaker="苏映晚", seq=1, total=2,
     )
     parts = chat_snapshot.load("thread")[0]["parts"]
     # 图片槽保留，音频槽追加在末尾且带分条元数据
     assert parts == [
         {"type": "image", "url": "local://img", "slotId": "img-1", "status": "ready"},
         {"type": "media-slot", "slotId": "audio-0", "status": "pending",
-         "kind": "audio", "speaker": "虞妙玥", "seq": 1, "total": 2},
+         "kind": "audio", "speaker": "苏映晚", "seq": 1, "total": 2},
     ]
 
 

@@ -56,7 +56,7 @@ describe("regeneration snapshots", () => {
     const args = (actor = "") => templateRegenerationSnapshot(
       "tpl", {}, "http://127.0.0.1:8188", ["45"], "prompt", [], "single", actor,
     );
-    expect(args("虞妙玥").characterLoraActor).toBe("虞妙玥");
+    expect(args("苏映晚").characterLoraActor).toBe("苏映晚");
     expect(args().characterLoraActor).toBeUndefined();
   });
 

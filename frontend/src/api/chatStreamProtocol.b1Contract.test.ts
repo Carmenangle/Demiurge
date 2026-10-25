@@ -28,12 +28,12 @@ describe("B1 协议透传 · 跨语言端到端契约", () => {
 
     // snake_case wire → camelCase TS 全链路无丢失
     expect(event.videoMode).toBe("firstlast");
-    expect(event.firstFrameDesc).toBe("雨夜门口，温知夏收伞，暖黄灯笼倒影");
+    expect(event.firstFrameDesc).toBe("雨夜门口，纪含章收伞，暖黄灯笼倒影");
     expect(event.lastFrameDesc).toBe("三人举杯同框，温情对视");
     expect(event.prevTailDesc).toBe("上一楼层：林屿在门口抽烟回望");
     expect(event.lastFrameUrl).toBe("data:image/png;base64,ZmFrZS10YWlsLWZyYW1l");
     expect(event.motion).toBe(3);
-    expect(event.actors).toEqual(["温知夏", "林屿", "苏绾"]);
+    expect(event.actors).toEqual(["纪含章", "林屿", "苏绾"]);
     expect(event.sceneSpec?.locale).toBe("温暖小面馆内景");
   });
 
@@ -74,7 +74,7 @@ describe("B1 协议透传 · 跨语言端到端契约", () => {
     });
 
     expect(values["1.mode"]).toBe("firstlast");
-    expect(values["2.first"]).toBe("雨夜门口，温知夏收伞，暖黄灯笼倒影");
+    expect(values["2.first"]).toBe("雨夜门口，纪含章收伞，暖黄灯笼倒影");
     expect(values["3.last"]).toBe("三人举杯同框，温情对视");
     expect(values["4.prev"]).toBe("上一楼层：林屿在门口抽烟回望");
     expect(values["5.url"]).toBe("data:image/png;base64,ZmFrZS10YWlsLWZyYW1l");

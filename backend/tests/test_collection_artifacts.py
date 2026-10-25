@@ -16,12 +16,12 @@ from app.routers import artifacts as artifacts_router
 
 @pytest.fixture()
 def sample_works(tmp_path: Path) -> Path:
-    """构造一个作品根：<根>/玫瑰与繁花/card.json + worldbook.json；_prep 与根级文件垫底。"""
+    """构造一个作品根：<根>/青梧与晚风/card.json + worldbook.json；_prep 与根级文件垫底。"""
     root = tmp_path / "works"
-    work = root / "玫瑰与繁花"
+    work = root / "青梧与晚风"
     work.mkdir(parents=True)
     (work / "card.json").write_text(
-        json.dumps({"name": "玫瑰与繁花", "character_book": {"entries": []}}, ensure_ascii=False),
+        json.dumps({"name": "青梧与晚风", "character_book": {"entries": []}}, ensure_ascii=False),
         encoding="utf-8",
     )
     (work / "worldbook.json").write_text(
@@ -35,7 +35,7 @@ def sample_works(tmp_path: Path) -> Path:
 
 
 def _register_work_repo(monkeypatch) -> str:
-    """把 sample_works 的「玫瑰与繁花」当成已登记仓库，返回可用的 repo_id。
+    """把 sample_works 的「青梧与晚风」当成已登记仓库，返回可用的 repo_id。
 
     B3/A（2026-09-10）起读端点**必须带 repo_id**：缺省 = 不给任何域
     （列表回空 / 单文件 403，见 `test_artifact_domains.py` 的缺省策略用例）。
@@ -43,7 +43,7 @@ def _register_work_repo(monkeypatch) -> str:
     一律经此拿 id，不要再传 `repo_id=""` 去撞新策略。
     """
     monkeypatch.setattr(repo_meta, "_load_state",
-                        lambda: {"repos": [{"id": "r-mrh", "name": "玫瑰与繁花"}]})
+                        lambda: {"repos": [{"id": "r-mrh", "name": "青梧与晚风"}]})
     return "r-mrh"
 
 
@@ -51,8 +51,8 @@ class TestCollect:
     def test_收集主卡与世界书并带元数据(self, sample_works: Path):
         items = artifacts.collect_artifacts(str(sample_works))
         names = [i["name"] for i in items]
-        assert any("角色主卡" in n and "玫瑰与繁花" in n for n in names)
-        assert any("世界书" in n and "玫瑰与繁花" in n for n in names)
+        assert any("角色主卡" in n and "青梧与晚风" in n for n in names)
+        assert any("世界书" in n and "青梧与晚风" in n for n in names)
         card = next(i for i in items if i["name"].startswith("角色主卡"))
         assert card["kind"] == "card"
         assert card["path"].endswith("card.json")
@@ -74,21 +74,21 @@ class TestCollect:
     def test_最新目录聚合_不混入历史作品的交付物(self, sample_works: Path):
         """2026-09-08：产物卡只展示「最近一次被写入」的目录——历史作品更旧，
         修改其 mtime 后混入同一根，也不得出现在本次产物里。"""
-        other = sample_works / "神权大陆"
+        other = sample_works / "神恩大陆"
         other.mkdir()
         (other / "card.json").write_text("{}", encoding="utf-8")
-        # 神权大陆本是最新创建的——人为调旧，让「最新目录」= 玫瑰与繁花
+        # 神恩大陆本是最新创建的——人为调旧，让「最新目录」= 青梧与晚风
         old = _time.time() - 7200
         _os.utime(other / "card.json", (old, old))
         items = artifacts.collect_artifacts(str(sample_works))
         paths = [Path(i["path"]) for i in items]
-        assert all(Path("神权大陆") not in p.parts for p in paths)
+        assert all(Path("神恩大陆") not in p.parts for p in paths)
         names = [p.name for p in paths]
         assert "card.json" in names and "worldbook.json" in names
 
     def test_最新目录无世界书时补充根级世界书(self, sample_works: Path):
-        # 玫瑰与繁花只有主卡：worldbook.json 移到根级，并把 card 时间戳设为最新
-        work = sample_works / "玫瑰与繁花"
+        # 青梧与晚风只有主卡：worldbook.json 移到根级，并把 card 时间戳设为最新
+        work = sample_works / "青梧与晚风"
         (work / "worldbook.json").rename(sample_works / "worldbook.json")
         now = _time.time()
         _os.utime(work / "card.json", (now, now))
@@ -124,7 +124,7 @@ class TestCollect:
         """2026-09-09 用户定案（通用，不针对某个作品）：产物卡必须对应**本轮任务**
         实际写入的产物——since = 本轮开始时间，早于它的（上一轮/历史作品）一律不收。
 
-        实锤：御仙 ST 卡任务没有产出时，产物卡把上一轮「玫瑰与繁花」当成本轮产物。
+        实锤：驭云录 ST 卡任务没有产出时，产物卡把上一轮「青梧与晚风」当成本轮产物。
         """
         root = tmp_path / "w"
         old = root / "上一轮作品"
@@ -181,7 +181,7 @@ class TestCollect:
 
 class TestResolve:
     def test_正常文件通过(self, sample_works: Path):
-        path = str(sample_works / "玫瑰与繁花" / "card.json")
+        path = str(sample_works / "青梧与晚风" / "card.json")
         assert artifacts.resolve_artifact(str(sample_works), path).is_file()
 
     def test_目录穿越被拒(self, sample_works: Path):
@@ -200,7 +200,7 @@ class TestResolve:
         assert ei.value.status == 404
 
     def test_目录默认拒绝_allow_dir放行定位(self, sample_works: Path):
-        work = sample_works / "玫瑰与繁花"
+        work = sample_works / "青梧与晚风"
         with pytest.raises(artifacts.ArtifactAccessError):
             artifacts.resolve_artifact(str(sample_works), str(work))
         assert artifacts.resolve_artifact(str(sample_works), str(work), allow_dir=True).is_dir()
@@ -209,7 +209,7 @@ class TestResolve:
 class TestProtocol:
     def test_artifacts事件编码为版本化判定联合(self):
         event = protocol.encode_event({"artifacts": [
-            {"kind": "card", "name": "角色主卡 · 玫瑰与繁花",
+            {"kind": "card", "name": "角色主卡 · 青梧与晚风",
              "path": r"D:\works\card.json", "size": 85764, "mtime": 1234.5},
         ]})
         assert event["type"] == "artifacts"
@@ -234,7 +234,7 @@ class TestFabricFinalize:
 
     @staticmethod
     def _make_works(tmp_path: Path) -> Path:
-        work = tmp_path / "玫瑰与繁花"
+        work = tmp_path / "青梧与晚风"
         work.mkdir(parents=True)
         (work / "card.json").write_text('{"name":"x"}', encoding="utf-8")
         return tmp_path
@@ -280,14 +280,14 @@ class TestRouter:
         # scope 校验：显式把「仓库文件夹」配成 sample_works（2026-09-15 起「未配置」不再放行，而是 400）
         monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: str(sample_works))
         repo_id = self._as_repo(monkeypatch)
-        path = str(sample_works / "玫瑰与繁花" / "card.json")
+        path = str(sample_works / "青梧与晚风" / "card.json")
         result = artifacts_router.artifact_preview(
             output_dir=str(sample_works), path=path, repo_id=repo_id,
         )
         assert result["ok"] is True
         assert result["name"] == "card.json"
         assert result["kind"] == "card"
-        assert "玫瑰与繁花" in result["text"]
+        assert "青梧与晚风" in result["text"]
         assert result["truncated"] is False
 
     def test_download_返回文件响应(self, sample_works: Path, monkeypatch):
@@ -295,11 +295,11 @@ class TestRouter:
         repo_id = self._as_repo(monkeypatch)
         from fastapi.responses import FileResponse
         resp = artifacts_router.artifact_download(
-            output_dir=str(sample_works), path=str(sample_works / "玫瑰与繁花" / "worldbook.json"),
+            output_dir=str(sample_works), path=str(sample_works / "青梧与晚风" / "worldbook.json"),
             repo_id=repo_id,
         )
         assert isinstance(resp, FileResponse)
-        original = (sample_works / "玫瑰与繁花" / "worldbook.json").read_bytes()
+        original = (sample_works / "青梧与晚风" / "worldbook.json").read_bytes()
         assert original.startswith(b'{"entries"')
 
     def test_open_folder_打开失败时降级ok_false(self, sample_works: Path, monkeypatch):
@@ -313,7 +313,7 @@ class TestRouter:
         """
         monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: str(sample_works))
         repo_id = self._as_repo(monkeypatch)
-        card = sample_works / "玫瑰与繁花" / "card.json"
+        card = sample_works / "青梧与晚风" / "card.json"
         monkeypatch.setattr(artifacts_router, "reveal_in_folder",
                             lambda path, select=True: False)
         resp = artifacts_router.artifact_open_folder(artifacts_router.OpenFolderRequest(
@@ -328,7 +328,7 @@ class TestRouter:
         绑定」这一契约固定下来（换回直连服务模块就会在此暴露）。"""
         monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: str(sample_works))
         repo_id = self._as_repo(monkeypatch)
-        card = sample_works / "玫瑰与繁花" / "card.json"
+        card = sample_works / "青梧与晚风" / "card.json"
         seen: dict[str, object] = {}
 
         def _fake(path, select=True):
@@ -373,7 +373,7 @@ class TestRouter:
         repo_id = self._as_repo(monkeypatch)
         resp = artifacts_router.artifact_preview(
             output_dir=str(sample_works).replace(_os.sep, "/"),  # 故意用反斜杠/正斜杠混合形式
-            path=str(sample_works / "玫瑰与繁花" / "card.json"),
+            path=str(sample_works / "青梧与晚风" / "card.json"),
             repo_id=repo_id,
         )
         assert resp["ok"] is True
@@ -384,7 +384,7 @@ class TestRouter:
         with pytest.raises(HTTPException) as ei:
             artifacts_router.artifact_preview(
                 output_dir=str(sample_works),
-                path=str(sample_works / "玫瑰与繁花" / "card.json"),
+                path=str(sample_works / "青梧与晚风" / "card.json"),
                 repo_id=repo_id,
             )
         assert ei.value.status_code == 400
@@ -424,12 +424,12 @@ class TestAssetEndpoint:
 
     @staticmethod
     def _seed_doc(sample_works: Path) -> tuple[Path, Path]:
-        """B3/A 后 docs/ 落**作品域**（<根>/玫瑰与繁花/docs/），不再落作品库根。"""
-        assets = sample_works / "玫瑰与繁花" / "docs" / "assets"
+        """B3/A 后 docs/ 落**作品域**（<根>/青梧与晚风/docs/），不再落作品库根。"""
+        assets = sample_works / "青梧与晚风" / "docs" / "assets"
         assets.mkdir(parents=True, exist_ok=True)
         png = assets / "pic.png"
         png.write_bytes(TestAssetEndpoint._PNG)
-        doc = sample_works / "玫瑰与繁花" / "docs" / "设定总集.md"
+        doc = sample_works / "青梧与晚风" / "docs" / "设定总集.md"
         doc.write_text("# 设定总集\n", encoding="utf-8")
         return png, doc
 
@@ -450,7 +450,7 @@ class TestAssetEndpoint:
         repo_id = _register_work_repo(monkeypatch)
         _, doc = self._seed_doc(sample_works)
         from fastapi import HTTPException
-        for target in (doc, sample_works / "玫瑰与繁花" / "card.json"):
+        for target in (doc, sample_works / "青梧与晚风" / "card.json"):
             with pytest.raises(HTTPException) as ei:
                 artifacts_router.artifact_asset(output_dir=str(sample_works), path=str(target),
                                                 repo_id=repo_id)
@@ -467,7 +467,7 @@ class TestAssetEndpoint:
                 output_dir=str(sample_works), path=str(sample_works.parent / "外面.png"),
                 repo_id=repo_id)
         assert ei.value.status_code == 403
-        stray = sample_works / "玫瑰与繁花" / "杂项.png"
+        stray = sample_works / "青梧与晚风" / "杂项.png"
         stray.write_bytes(self._PNG)
         with pytest.raises(HTTPException) as ei2:
             artifacts_router.artifact_asset(output_dir=str(sample_works), path=str(stray),

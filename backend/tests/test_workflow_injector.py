@@ -110,7 +110,7 @@ def test_无lora模式把工作流内全部lora权重归零():
 
 def test_number字段的字符串数字自动收窄为数值():
     # Autopilot 批量注入的宽高可能是字符串（'720'/'1080'），必须转数值再进
-    # ComfyUI prompt，否则节点类型校验失败（2026-09-04 唐柚批次实况）。
+    # ComfyUI prompt，否则节点类型校验失败（2026-09-04 阮秋白批次实况）。
     api = {"20": {"inputs": {"width": 1280, "height": 720}}}
     exposed = [
         {"node_id": "20", "field": "width", "control": "number", "semantic": "width", "binding": "latent_width"},

@@ -30,7 +30,7 @@ def test_idempotent_image_store_reuses_path(tmp_path, monkeypatch):
 
 def test_generation_archives_by_marker_when_repo_state_is_temporarily_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(repo_meta, "_load_state", lambda: {"repos": []})
-    owned = tmp_path / "白给谷" / "SAVE01"
+    owned = tmp_path / "白露谷" / "SAVE01"
     owned.mkdir(parents=True)
     (owned / "_repo.json").write_text(
         '{"id":"old-repo-id","name":"SAVE01"}', encoding="utf-8",

@@ -67,7 +67,7 @@ def parent_folder_seg(repo_id: str) -> str:
     """子仓库的父作品文件夹段：有父且父有名 → safe_dir(父名)，否则空串。
 
     卡作品的对话子仓库都叫 "SAVE01"，若直接按子仓库名建文件夹会互相覆盖
-    （九天神女传/SAVE01 与 神权大陆/SAVE01 撞进同一 outputDir/SAVE01/）。
+    （九霄仙纪/SAVE01 与 神恩大陆/SAVE01 撞进同一 outputDir/SAVE01/）。
     故子仓库嵌到父作品文件夹下：outputDir/<父名>/<子名>/。父名=卡名，唯一。
     """
     rec = _repo_record(repo_id)
@@ -183,7 +183,7 @@ _ENGINE_LEGACY_PREFIX = ".engine_legacy_"
 
 # 引擎域落盘文件名**闭集**（与 tests/test_repo_engine_paths.py 的 12 处调用点表一一对应）。
 # 唯一用途：判「某个目录里有没有引擎数据」。`chat.json` / 图片 / 文档 / `_repo.json` 是
-# **非引擎产物**，不能算数——2026-09-20 凌霄仙母录实锤：旧实现只凭「新目录存在」就判
+# **非引擎产物**，不能算数——2026-09-20 苍梧仙闻录实锤：旧实现只凭「新目录存在」就判
 # 「已有数据」，把活引擎目录整体留档 ⇒ 活跃路径从此没有 tables.json/state.json ⇒
 # UI 上表现为「数据表内容全部丢失」。
 _ENGINE_FILE_NAMES = frozenset({
@@ -236,7 +236,7 @@ def _legacy_engine_dir(root: Path, seg: str, repo_id: str) -> Path | None:
 
     子仓库历史上出现过**两种**布局，两种都要认：
     - `<根>/<uuid>`            —— 老口径通用式；
-    - `<根>/<父名>/<uuid>`     —— 子仓库嵌父作品文件夹下（凌霄仙母录实测是这种）。
+    - `<根>/<父名>/<uuid>`     —— 子仓库嵌父作品文件夹下（苍梧仙闻录实测是这种）。
     """
     direct = root / seg
     if direct.is_dir():
@@ -255,7 +255,7 @@ def engine_repo_dir(output_dir: str, repo_id: str) -> Path:
 
     历史错轨（本刀修）：引擎族一度用 `Path(base)/safe_seg(repo_id)`——`safe_seg` 把中文换成
     `_`，于是 UUID 仓库落 `<根>/<uuid>/`，而 chat/图/文档落 `<根>/<仓库名>/`，同一作品两套
-    落点。实测 `凌霄仙母录` 的 state.json 因此分裂成两份（引擎处 turn=36 / 仓库名处 turn=21）。
+    落点。实测 `苍梧仙闻录` 的 state.json 因此分裂成两份（引擎处 turn=36 / 仓库名处 turn=21）。
 
     口径（与 `repo_folder_path` 一致，但**只算路径、不写 marker**，读路径零副作用）：
     - 有仓库名 → `<根>/<仓库名>`；子仓库 → `<根>/<父名>/<子名>`；
@@ -266,7 +266,7 @@ def engine_repo_dir(output_dir: str, repo_id: str) -> Path:
     - 新位置**不存在** → 老目录整体 rename 过来；
     - 新位置存在但**没有引擎文件**（只有 chat/图/文档占位）→ **不算「已有数据」**：
       先把老目录（及已存在的留档目录）里的引擎文件**并入**活跃路径，再把老目录留档。
-      ⚠ 2026-09-20 凌霄仙母录实锤：旧实现只看「新目录存在」，于是引擎目录被留档留到
+      ⚠ 2026-09-20 苍梧仙闻录实锤：旧实现只看「新目录存在」，于是引擎目录被留档留到
       活跃路径看不见，UI 上表现为「数据表内容全部丢失」。
     - 新位置**已有引擎文件** → 绝不覆盖，老目录挪到 `<新位置>/.engine_legacy_<旧段>/` 留档。
     幂等：新位置已有引擎文件且老目录已让位 → 无操作；搬迁失败静默回退老位置（不丢数据）。
@@ -338,7 +338,7 @@ def artifact_domains(output_dir: str, repo_id: str) -> list[Path]:
 
     为什么是集合而不是单根（2026-09-10 实证）：卡一律落 `<作品库根>/<卡名>/`
     （`character.upsert_repo` 的 base 注入是作品库根），而**卡目录名可以与作品文件夹名不同**
-    ——实锤仓库「原创」（子仓库：`<作品库根>/Anima/原创/`）的卡在 `<作品库根>/御仙/`，
+    ——实锤仓库「原创」（子仓库：`<作品库根>/Anima/原创/`）的卡在 `<作品库根>/驭云录/`，
     归属靠该目录的 `_work.json`（= repo_id）判定。若只认作品域，这类作品的产物卡会在
     fabric done 与历史补卡里**整批消失**（`_collect_fabric_artifacts` 收的正是 `<卡名>/card.json`）。
     故访问域取并集：路径落在**任一**域内即放行，jail 仍是目录级（`../` 逃逸照旧被拒）。

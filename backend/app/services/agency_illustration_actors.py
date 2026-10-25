@@ -158,7 +158,7 @@ def _filter_illustration_appearance(
 
     段落头用通用「名字[：:]」识别（不限 known 白名单），这样 known 之外的角色段
     （如世界书 NPC 未进入 illustration_actor_names）也能被正确识别并过滤，
-    否则会把非选中角色段当成选中角色的续行保留（虞莹纱混入缺陷）。
+    否则会把非选中角色段当成选中角色的续行保留（陆莹纱混入缺陷）。
     """
     source = (appearance or "").strip()
     selected = set(actors)

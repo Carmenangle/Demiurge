@@ -261,8 +261,8 @@ def test_backfill_写回只加四键且保留格式(tmp_path, monkeypatch):
 def test_backfill_按uid定位不串条目(tmp_path, monkeypatch):
     """同名 comment 两条（脏数据）：uid 命中正确那条，另一条不动。"""
     book = {"entries": [
-        {"id": "", "comment": "人物·韦尔纳", "keys": [], "content": "重复条目"},
-        {"id": 66, "comment": "人物·韦尔纳", "keys": ["韦尔纳"], "content": "正式条目"},
+        {"id": "", "comment": "人物·雷纳", "keys": [], "content": "重复条目"},
+        {"id": 66, "comment": "人物·雷纳", "keys": ["雷纳"], "content": "正式条目"},
     ]}
     p = tmp_path / "worldbook.json"
     _write_book(p, book["entries"])

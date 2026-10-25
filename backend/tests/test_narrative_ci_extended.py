@@ -49,11 +49,11 @@ def test_relation_change_detected():
 def test_belief_conflict_detected():
     """角色知道/相信的事实被正文否定应产生 character_belief_conflict。"""
     beliefs = [{
-        "character": "冷倾雪", "fact_id": "f1", "claim": "药王谷的药材不可带出",
+        "character": "顾凝霜", "fact_id": "f1", "claim": "药王谷的药材不可带出",
         "stance": "knows", "confidence": 0.95, "witnessed_at": 1,
         "evidence": "她一直遵守门规", "source": "auto",
     }]
-    body = "冷倾雪并没有遵守门规，她把药材带出了谷外。"
+    body = "顾凝霜并没有遵守门规，她把药材带出了谷外。"
     diags = narrative_ci.evaluate(body, turn=2, beliefs=beliefs)
     codes = {item["code"] for item in diags}
     assert "character_belief_conflict" in codes
@@ -62,41 +62,41 @@ def test_belief_conflict_detected():
 def test_belief_extractor_knows():
     """"知道"句应抽取为 knows。"""
     items = belief_extractor.extract(
-        "冷倾雪知道药王谷的药材不可带出。",
-        known_names=["冷倾雪"],
+        "顾凝霜知道药王谷的药材不可带出。",
+        known_names=["顾凝霜"],
     )
     assert items and items[0]["stance"] == "knows"
-    assert items[0]["character"] == "冷倾雪"
+    assert items[0]["character"] == "顾凝霜"
 
 
 def test_belief_extractor_misbelieves():
     """"误以为"句应抽取为 misbelieves。"""
     items = belief_extractor.extract(
-        "虞妙玥误以为冷倾雪背叛了师门。",
-        known_names=["虞妙玥", "冷倾雪"],
+        "苏映晚误以为顾凝霜背叛了师门。",
+        known_names=["苏映晚", "顾凝霜"],
     )
     assert items and items[0]["stance"] == "misbelieves"
-    assert items[0]["character"] == "虞妙玥"
+    assert items[0]["character"] == "苏映晚"
 
 
 def test_belief_extractor_unknown():
     """"不知道"句应抽取为 unknown。"""
     items = belief_extractor.extract(
-        "冷倾雪并不知道谷外的阴谋。",
-        known_names=["冷倾雪"],
+        "顾凝霜并不知道谷外的阴谋。",
+        known_names=["顾凝霜"],
     )
     assert items and items[0]["stance"] == "unknown"
 
 
 def test_belief_extractor_ingest_roundtrip(tmp_path):
     """ingest 应落库且幂等（同 turn 同 claim 不重复写）。"""
-    text = "冷倾雪知道药王谷的药材不可带出。虞妙玥怀疑她另有隐情。"
+    text = "顾凝霜知道药王谷的药材不可带出。苏映晚怀疑她另有隐情。"
     result1 = belief_extractor.ingest(
-        str(tmp_path), "repo", text=text, turn=1, known_names=["冷倾雪", "虞妙玥"],
+        str(tmp_path), "repo", text=text, turn=1, known_names=["顾凝霜", "苏映晚"],
     )
     assert result1["recorded"] >= 2
     result2 = belief_extractor.ingest(
-        str(tmp_path), "repo", text=text, turn=1, known_names=["冷倾雪", "虞妙玥"],
+        str(tmp_path), "repo", text=text, turn=1, known_names=["顾凝霜", "苏映晚"],
     )
     assert result2["recorded"] == 0
     # active 应包含已抽取的认知

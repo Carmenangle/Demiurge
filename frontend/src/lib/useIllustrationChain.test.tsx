@@ -109,7 +109,7 @@ function makeDeps(over: DepsOver = {}) {
     templates: over.templates ?? [TPL, VIDEO_TPL] as never,
     repo: { id: "r1" } as never,
     threadId: "r1",
-    cardNames: ["沈糯"] as never,
+    cardNames: ["庄听澜"] as never,
     promptProfile: "krea2" as never,
     characterBaseImages: {} as never,
     chat: { baseUrl: "u", apiKey: "k", modelName: "m" } as never,
@@ -228,7 +228,7 @@ describe("useIllustrationChain 行为网", () => {
   it("LoRA 元数据缺失 → failSlot(lora_metadata,「实际加载的 LoRA 没有精确元数据记录：xxx」)", async () => {
     const preset = {
       templateId: "tpl1", negativePrompt: "", appearanceSource: "worldbook", loraMode: "single",
-      characterLoras: { "沈糯": { loraName: "loraA", loraWeight: 0.8 } },
+      characterLoras: { "庄听澜": { loraName: "loraA", loraWeight: 0.8 } },
     };
     const md0 = makeDeps({ preset });
     await submitChain(md0.deps, { ...baseInput });

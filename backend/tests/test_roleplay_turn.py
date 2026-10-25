@@ -1863,7 +1863,7 @@ def test_wrap_bare_body_preserves_latest_status_block():
     """
     raw = (
         "<status>\n[时间] 旧栏\n</status>\n"
-        "<status>\n[时间] 大比前三日·入夜\n[好感] 凌若冰=38\n</status>\n"
+        "<status>\n[时间] 大比前三日·入夜\n[好感] 谢若冰=38\n</status>\n"
         + "剧情正文。" + "字" * 320
     )
     wrapped = roleplay_turn._wrap_bare_body(raw)
@@ -1873,7 +1873,7 @@ def test_wrap_bare_body_preserves_latest_status_block():
     assert "<content>" in wrapped and "</content>" in wrapped
     # 与 extract 口径闭环：抽出的快照 = 新栏
     from app.services import roleplay_agency
-    assert roleplay_agency.extract_status_snapshot(wrapped) == "[时间] 大比前三日·入夜\n[好感] 凌若冰=38"
+    assert roleplay_agency.extract_status_snapshot(wrapped) == "[时间] 大比前三日·入夜\n[好感] 谢若冰=38"
 
 
 def test_wrap_bare_body_still_strips_event_blocks():
@@ -1891,18 +1891,18 @@ def test_wrap_bare_body_wraps_leading_bare_cot_into_think():
     """
     cot = (
         "灰魂吐槽：主人这是要当着娘亲的面直接抓恋娘胸口揉奶了……\n\n"
-        "输入分析：主人选择继续抱着凌若冰，腾出一只手去抓舞姬恋的胸口。\n\n"
-        "认知情境：当前浮花泉→回廊，凌渊赤身抱着凌若冰。\n\n"
-        "关键NPC分析：舞姬恋——乳柔媚体的母性慈爱与骚浪雌媚并存。\n\n"
+        "输入分析：主人选择继续抱着谢若冰，腾出一只手去抓星织恋的胸口。\n\n"
+        "认知情境：当前浮花泉→回廊，洛渊赤身抱着谢若冰。\n\n"
+        "关键NPC分析：星织恋——乳柔媚体的母性慈爱与骚浪雌媚并存。\n\n"
         "文风规划：短句为主，动作密。"
     )
-    body_text = "凌渊没有放开凌若冰。他一只手掌从她膝弯底下穿过。" + "字" * 320
+    body_text = "洛渊没有放开谢若冰。他一只手掌从她膝弯底下穿过。" + "字" * 320
     wrapped = roleplay_turn._wrap_bare_body(cot + "\n\n" + body_text)
     assert wrapped, "裸 COT+完整正文应包装发布而非判死"
     assert wrapped.startswith("<think>")
     assert "</think>" in wrapped
     assert "灰魂吐槽" in wrapped and wrapped.index("灰魂吐槽") < wrapped.index("<content>")
-    assert "<content>" in wrapped and "凌渊没有放开凌若冰" in wrapped
+    assert "<content>" in wrapped and "洛渊没有放开谢若冰" in wrapped
     # think 在 content 之外，结构校验通过（包装内部已过 ensure）
     roleplay_turn.ensure_complete_visible_content(wrapped)
 
@@ -1935,15 +1935,15 @@ def test_wrap_bare_body_cot_prefix_and_body_mentioning_tuoyan():
 
 def test_wrap_bare_body_strips_status_update_block_with_content():
     """<状态更新> 增量 JSON 块必须整块含内容剥除，不得漏进正文（09-12 21:11 截图实锤）。"""
-    body_text = "凌渊垂眼看去，两个女人并排跪着。" + "字" * 320
+    body_text = "洛渊垂眼看去，两个女人并排跪着。" + "字" * 320
     raw = (
         body_text
-        + "\n\n<状态更新>[{\"field\":\"数值/凌若冰·好感度\",\"op\":\"add\",\"value\":3}]</状态更新>"
+        + "\n\n<状态更新>[{\"field\":\"数值/谢若冰·好感度\",\"op\":\"add\",\"value\":3}]</状态更新>"
     )
     wrapped = roleplay_turn._wrap_bare_body(raw)
     assert wrapped and "好感度" not in wrapped and "field" not in wrapped
     assert "<状态更新>" not in wrapped
-    assert "凌渊垂眼看去" in wrapped
+    assert "洛渊垂眼看去" in wrapped
 
 
 def test_wrap_bare_body_rejects_cot_paragraph_in_middle_of_body():
@@ -1958,9 +1958,9 @@ def test_wrap_bare_body_repairs_orphan_think_close_with_meta_note():
     模型输出结构=正文A+（正文到此，继续往后续写一点：…）</think>+正文B，旧逻辑把
     注释和闭标签随裸正文包装发布，正文区间出现非正文内容。
     """
-    body_a = "凌若冰含着他的龟头僵了一瞬，随即喉头一滚，缓缓吞回。" + "字" * 320
-    note = "（正文到此，继续往后续写一点：凌渊的应对，以及本轮的收束和下一轮的钩子）"
-    body_b = "凌渊的笑音还挂在喉间未散，那截低哑已经变成一段压不住的闷哼。" + "字" * 320
+    body_a = "谢若冰含着他的龟头僵了一瞬，随即喉头一滚，缓缓吞回。" + "字" * 320
+    note = "（正文到此，继续往后续写一点：洛渊的应对，以及本轮的收束和下一轮的钩子）"
+    body_b = "洛渊的笑音还挂在喉间未散，那截低哑已经变成一段压不住的闷哼。" + "字" * 320
     wrapped = roleplay_turn._wrap_bare_body(body_a + "\n\n" + note + "</think>" + body_b)
     assert wrapped, "孤立闭标签情形应修复后包装发布，不得判死重掷"
     # 注释只出现在 think 块内，不出现在正文区间
@@ -1970,8 +1970,8 @@ def test_wrap_bare_body_repairs_orphan_think_close_with_meta_note():
     assert note not in wrapped[content_start:], "规划注释不得塞入正文区间"
     assert "</think>" not in wrapped[think_end + len("</think>"):content_start], "孤立闭标签必须剥除"
     # 正文 A、B 都保留
-    assert "凌若冰含着他的龟头" in wrapped[content_start:]
-    assert "凌渊的笑音还挂在喉间" in wrapped[content_start:]
+    assert "谢若冰含着他的龟头" in wrapped[content_start:]
+    assert "洛渊的笑音还挂在喉间" in wrapped[content_start:]
     # 成对完整：全文恰一个 </think>（补包 think 的闭合）
     assert wrapped.count("</think>") == 1
 

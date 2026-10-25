@@ -72,7 +72,7 @@ def _run_once():
 # ── file.read_text ───────────────────────────────────────────────────────────
 
 def test_read_text_handler安全边界(tmp_path):
-    doc = tmp_path / "唐柚.md"
+    doc = tmp_path / "阮秋白.md"
     doc.write_text("# 套装一\n提示词内容", encoding="utf-8")
     out = capability_handlers.read_text_file(str(doc))
     assert "套装一" in out["text"] and out["truncated"] is False
@@ -126,7 +126,7 @@ def test_read_text_handler_offset边界(tmp_path):
 def test_越域读取需审批_批准后执行(store, monkeypatch):
     outside = store["outside"]
     outside.mkdir()
-    doc = outside / "唐柚.md"
+    doc = outside / "阮秋白.md"
     doc.write_text("套装提示词内容", encoding="utf-8")
     plan = GenerationPlan(
         intent="读取设计文档", repo_id="work",
@@ -175,7 +175,7 @@ def test_计划卡明示将读取的文件():
         budgets=PlanBudgets(max_steps=2, max_gpu_tasks=2, max_llm_calls=2),
         steps=[
             PlanStep(id="s1", operation="file.read_text",
-                     params={"path": r"D:\video\寻味电台\形象提示词-唐柚.md"}),
+                     params={"path": r"D:\video\拾光电台\形象提示词-阮秋白.md"}),
             PlanStep(id="s2", operation="workflow.submit_batch",
                      params={"template_id": "t", "variants": [{}], "prompt": "p",
                              "url": "http://127.0.0.1:8188"}),
@@ -183,9 +183,9 @@ def test_计划卡明示将读取的文件():
         approval_required=["workflow.submit_batch"])
     card = plan_compiler.render_plan_card(plan, "x.plan.json")
     assert "将读取文件（批准即授权）" in card
-    assert "形象提示词-唐柚.md" in card
+    assert "形象提示词-阮秋白.md" in card
     md = plan_compiler.render_plan_md(plan)
-    assert "将读取文件" in md and "形象提示词-唐柚.md" in md
+    assert "将读取文件" in md and "形象提示词-阮秋白.md" in md
 
 
 # ── media.collect_comfy_outputs ──────────────────────────────────────────────
@@ -235,7 +235,7 @@ def test_采集闭环_轮询取图落盘入库(store, tmp_path, monkeypatch):
 
 
 def test_采集闭环_submit整包回退取回每张完整提示词(store, tmp_path, monkeypatch):
-    """回归（2026-09-04 唐柚 14 套画像实锤）：collect 收到的 submit_result 是 submit_batch
+    """回归（2026-09-04 阮秋白 14 套画像实锤）：collect 收到的 submit_result 是 submit_batch
     整包 {"submitted":…,"results":[{prompt_id, prompt}, …]}，提示词在 results[i] 而非顶层。
     旧回退把整包当单条取 .get("prompt") → 恒空 → 消息只剩套装名、资产库也只挂套装名。
     """
@@ -264,12 +264,12 @@ def test_采集闭环_submit整包回退取回每张完整提示词(store, tmp_p
     monkeypatch.setattr(rag_store, "index_generation", fake_index_generation)
 
     works = store["works"]
-    full_prompt_1 = "1girl, 唐柚, 浅杏短款绗缝棉服, masterpiece, best quality"
-    full_prompt_2 = "1girl, 唐柚, 米白针织开衫, masterpiece, best quality"
+    full_prompt_1 = "1girl, 阮秋白, 浅杏短款绗缝棉服, masterpiece, best quality"
+    full_prompt_2 = "1girl, 阮秋白, 米白针织开衫, masterpiece, best quality"
     out = capability_handlers.collect_comfy_outputs(
         prompt_ids=None, comfyui_url="http://127.0.0.1:8188",
         output_dir=str(works), repo_id="work",
-        names=["唐柚-棉袄套一", "唐柚-棉袄套二"],
+        names=["阮秋白-棉袄套一", "阮秋白-棉袄套二"],
         prompts=None,
         submit_result={
             "submitted": 2, "failed": 0,
@@ -282,8 +282,8 @@ def test_采集闭环_submit整包回退取回每张完整提示词(store, tmp_p
     assert out["collected"] == 2
     # 消息 = 套装名 + 完整提示词（像 /w 工作流「图片+提示词」格式），而不是只有套装名
     assert len(upserted) == 2
-    assert upserted[0]["text"] == f"唐柚-棉袄套一\n\n{full_prompt_1}"
-    assert upserted[1]["text"] == f"唐柚-棉袄套二\n\n{full_prompt_2}"
+    assert upserted[0]["text"] == f"阮秋白-棉袄套一\n\n{full_prompt_1}"
+    assert upserted[1]["text"] == f"阮秋白-棉袄套二\n\n{full_prompt_2}"
     assert upserted[0]["image"] and upserted[0]["meta"]["kind"] == "plan_collect"
     # 资产库登记同样挂完整提示词而非套装名
     assert indexed[0]["prompt"] == full_prompt_1

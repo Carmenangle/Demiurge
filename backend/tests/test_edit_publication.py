@@ -23,28 +23,28 @@ def test_发布角色卡到后端设置源库并带头像表情(monkeypatch, tmp
     library = tmp_path / "characters"
     root.mkdir()
     card = {
-        "name": "塞西莉亚", "description": "孤儿院院长", "spec": "chara_card_v2",
+        "name": "卡蜜莉亚", "description": "孤儿院院长", "spec": "chara_card_v2",
         "character_book": None, "regex_scripts": [], "extensions": {},
     }
-    project_files.write_text(root, "角色卡/塞西莉亚/card.json", _dump(card))
-    project_files.write_text(root, "角色卡/塞西莉亚/worldbook.json", _dump({
+    project_files.write_text(root, "角色卡/卡蜜莉亚/card.json", _dump(card))
+    project_files.write_text(root, "角色卡/卡蜜莉亚/worldbook.json", _dump({
         "entries": [{"keys": ["孤儿院"], "content": "她经营的孤儿院。"}],
     }))
     png = project_files.PNG_SIGNATURE + b"avatar"
-    project_files.write_png(root, "角色卡/塞西莉亚/avatar.png", png)
-    project_files.write_png(root, "角色卡/塞西莉亚/expressions/微笑.png", png)
+    project_files.write_png(root, "角色卡/卡蜜莉亚/avatar.png", png)
+    project_files.write_png(root, "角色卡/卡蜜莉亚/expressions/微笑.png", png)
     monkeypatch.setattr(
         edit_publication.repo_meta, "setting_dir_from_state",
         lambda key: str(library) if key == "characterDir" else "",
     )
 
-    result = edit_publication.publish_character(root, "塞西莉亚")
+    result = edit_publication.publish_character(root, "卡蜜莉亚")
 
-    assert result["name"] == "塞西莉亚"
-    saved = json.loads((library / "塞西莉亚" / "card.json").read_text(encoding="utf-8"))
+    assert result["name"] == "卡蜜莉亚"
+    saved = json.loads((library / "卡蜜莉亚" / "card.json").read_text(encoding="utf-8"))
     assert saved["character_book"]["entries"][0]["keys"] == ["孤儿院"]
-    assert (library / "塞西莉亚" / "avatar.png").read_bytes() == png
-    assert (library / "塞西莉亚" / "expressions" / "微笑.png").read_bytes() == png
+    assert (library / "卡蜜莉亚" / "avatar.png").read_bytes() == png
+    assert (library / "卡蜜莉亚" / "expressions" / "微笑.png").read_bytes() == png
 
 
 def test_发布预设到后端设置源库且默认拒绝覆盖(monkeypatch, tmp_path):

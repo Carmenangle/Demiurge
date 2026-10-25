@@ -18,7 +18,7 @@
 ⚠ **本文件的隔离是「两条读法都盖住」，不是常规样板**（2026-09-15 事故留档）：
 首次运行本文件时 `_wire` 只 patch 了属主侧 `repo_meta._load_state`，而**当时**的实现在路由里
 直读 `DATA_DIR/user_state.json` ⇒ 用例照着**真实**配置跑，把用户的真实资产库
-`<userdata>/worlds/玫瑰与繁花.json`（123,028 字节 / 36 条）覆写成 15 字节假书，
+`<userdata>/worlds/青梧与晚风.json`（123,028 字节 / 36 条）覆写成 15 字节假书，
 只靠端点自带的 `.bak-<ts>` 备份才恢复回来。⇒ 任何给本端点写用例的人**必须**用 `_wire`
 （它同时钉 `app.config.DATA_DIR` 与 `repo_meta._load_state`，指向同一个 tmp 状态桩，
 回退到旧实现或前进到属主实现都不会碰真实盘）。
@@ -38,7 +38,7 @@ from app.routers import artifacts as artifacts_router
 from app.services import repo_meta
 
 # 单卡作品：作品文件夹名 = 卡目录名（固化02 约定）⇒ 产物域去重后只有一个
-_CARD = "玫瑰与繁花"
+_CARD = "青梧与晚风"
 _REPO_ID = "r2"
 _BAK_RE = re.compile(rf"^{_CARD}\.json\.bak-\d+$")
 # tmp 工作区里允许出现的非产物项：卡目录 + 配置状态桩

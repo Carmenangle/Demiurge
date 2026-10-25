@@ -78,7 +78,7 @@ def test提示词Profile独立调用携带当前防拦截预设(monkeypatch, tmp
     monkeypatch.setattr(ai_text, "chat", fake_chat)
     result = ai_text.gen_profile_prompt(ai_text.ProfilePromptRequest(
         profile="anima_tags",
-        scene={"rating": "sfw", "actors": ["冷倾雪"]},
+        scene={"rating": "sfw", "actors": ["顾凝霜"]},
         preset_dir=str(tmp_path), preset_name="guard", user_name="我",
         base_url="b", api_key="k", model="m",
     ))

@@ -144,7 +144,7 @@ _READ_SUMMARY_MARK = "【分卷已读摘要】"
 _SCOPE_UNSET = object()
 
 # 2026-09-06 用户定案 A+B：内容类参数敏感词拦截（网关 400 兜底）。
-# 背景：NSFW 小说转卡时模型在卡纲/条目输出里带露骨词汇 → xtoken 网关
+# 背景：NSFW 小说转卡时模型在卡纲/条目输出里带露骨词汇 → 中转网关 网关
 # 400 LITELLM_ERROR「输入或生成内容可能包含不安全或敏感内容」，fabric.retry
 # 重试仍败（22:53 换输出成功=输出侧触发、23:00 重试仍败=输入侧叠加）。
 # 代码层兜底：写内容能力执行前检查 params 字符串字段，命中即不执行、
@@ -716,7 +716,7 @@ def run_loop(*, intent: str, history: str = "", capabilities: list[dict] | None 
         messages.append({"role": "user", "content": history})
     outcome = FabricOutcome()
     # 2026-09-09：记录本 run 开始时间——产物卡只收本轮实际写入的产物（collect since 过滤），
-    # 避免上一轮/历史作品的产物串到本轮（实锤：御仙任务显示玫瑰与繁花）。
+    # 避免上一轮/历史作品的产物串到本轮（实锤：驭云录任务显示青梧与晚风）。
     setattr(outcome, "_started_at", time.time())
     call_kwargs: dict[str, Any] = {"temperature": temperature, "max_tokens": 16000,
                                    **(proxy_kwargs or {}), "on_usage": _usage_sink(trace, chat_model)}
@@ -819,7 +819,7 @@ def run_loop(*, intent: str, history: str = "", capabilities: list[dict] | None 
                         # 2026-09-14 治本：只内嵌「本作品归属的卡」。归属判定走单一属主
                         # character_store.owned_card_dirs（`_work.json` 标记优先 / 卡目录名
                         # == 作品名回退，都不匹配则跳过）。旧实现 glob("*/card.json") 扫的是
-                        # **作品库根下每个作品的卡**（实盘 pictures/ 下 妈妈娼馆/御仙/玫瑰与繁花
+                        # **作品库根下每个作品的卡**（实盘 pictures/ 下 旧巷当铺/驭云录/青梧与晚风
                         # 三卡并列），会把本作品世界书整体写进别的作品的卡——ARCHITECTURE #17
                         # 红线「禁止 glob 全库 */card.json」。
                         _card_files = [d / "card.json"
@@ -842,7 +842,7 @@ def run_loop(*, intent: str, history: str = "", capabilities: list[dict] | None 
                 except Exception as exc:  # noqa: BLE001 [EXC-留痕] 内嵌兜底失败不阻断 done，但主卡静默缺世界书条目
                     _LOG.warning("世界书条目自动内嵌主卡失败（done 继续，但主卡缺该批条目）: %s", exc)
             # 2026-09-09 条目数闸门（固化02 §4 下限 40 + 全项目 18 卡实测）：
-            # check_density 只查「每条字数」不查「条目数」——26 条全达标也能 done（玫瑰与繁花实锤）。
+            # check_density 只查「每条字数」不查「条目数」——26 条全达标也能 done（青梧与晚风实锤）。
             # 写了条目的合集卡任务，快照条目数 <40 一律拒绝 done，自动回填「继续补写」指令，
             # 循环内继续跑（这就是 harness 自动化：未达标不结束，自动再次发起补写请求）。
             if _wrote_entries and output_dir and repo_id:
@@ -1119,8 +1119,8 @@ def run_loop(*, intent: str, history: str = "", capabilities: list[dict] | None 
         if operation == "plan.instantiate_recipe" and not str(params.get("output_dir") or "").strip():
             params["output_dir"] = output_dir or ""
         # 落盘/执行类参数一律环境归一，**不是「缺省才注入」**（2026-09-07 治本）：
-        # 实锤模型把作品名/卡目录当 repo_id 传（base=pictures\玫瑰与繁花、
-        # repo_id=玫瑰与繁花），缺省才兜底会让新条目写到 <作品名>/worldbook.json
+        # 实锤模型把作品名/卡目录当 repo_id 传（base=pictures\青梧与晚风、
+        # repo_id=青梧与晚风），缺省才兜底会让新条目写到 <作品名>/worldbook.json
         # 与真实快照 <repo_id>/worldbook.json 分叉。清单单一属主 =
         # capability_registry.ENV_INJECTED_OPS（含 base/repo_id/cwd/output_dir）：
         # - base = output_dir（作品根，doc 落 docs/、卡落 <卡名>/、书落 <repo_id>/）
@@ -1135,7 +1135,7 @@ def run_loop(*, intent: str, history: str = "", capabilities: list[dict] | None 
             chat_base=chat_base or "", chat_key=chat_key or "",
             chat_model=chat_model or "")
         # 2026-09-07 治本（用户定案「按原文关键词扩写，防偏差」）：素材已读门禁——
-        # 实锤：模型反复凭记忆重写短版（22:24 一轮跑完零 read_text，戴茂 949/1424/1453
+        # 实锤：模型反复凭记忆重写短版（22:24 一轮跑完零 read_text，裴肃 949/1424/1453
         # 全不到 2200），指令层纪律拦不住。代码层强制：worldbook.upsert_repo 前
         # 检查本 run 是否读过对应 _prep/charfacts 素材；没读 → 拒绝并回填「先读素材」，
         # 让模型带着原文细节去写，而不是凭空重写。

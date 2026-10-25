@@ -121,23 +121,23 @@ def test_curator上下文优先包含本轮命中的角色条目(tmp_path):
     repo_id = "work"
     book = {"entries": [
         {"comment": "超长机制", "content": "无关机制" * 500, "keys": ["机制"]},
-        {"comment": "角色卡·冷倾雪", "content": "【角色卡·冷倾雪】\n【外貌】漆黑墨发与紫玉金髻",
-         "keys": ["冷倾雪", "紫冷玄女"]},
+        {"comment": "角色卡·顾凝霜", "content": "【角色卡·顾凝霜】\n【外貌】漆黑墨发与紫玉金髻",
+         "keys": ["顾凝霜", "紫冷玄女"]},
     ]}
     worldbook_store.ensure_repo_snapshot(str(tmp_path), repo_id, [book])
 
     context = worldbook_store.repo_snapshot_context(
-        str(tmp_path), repo_id, query="冷倾雪在第四日清晨醒来", max_chars=300,
+        str(tmp_path), repo_id, query="顾凝霜在第四日清晨醒来", max_chars=300,
     )
 
-    assert "角色卡·冷倾雪" in context
+    assert "角色卡·顾凝霜" in context
     assert '"index":1' in context
 
 
 def test_curator上下文只包含主剧情实际注入的条目(tmp_path):
     repo_id = "work"
     worldbook_store.ensure_repo_snapshot(str(tmp_path), repo_id, [{"entries": [
-        {"comment": "角色卡·冷倾雪", "content": "冷倾雪本轮出场"},
+        {"comment": "角色卡·顾凝霜", "content": "顾凝霜本轮出场"},
         {"comment": "角色卡·旁人", "content": "旁人未出场"},
         {"comment": "机制", "content": "未参与本轮的机制"},
     ]}])
@@ -173,11 +173,11 @@ def test_curator写回拒绝未注入索引但仍允许新增(tmp_path):
 def test_角色条目动态更新保留基础设定并替换旧动态(tmp_path):
     repo_id = "work"
     original = (
-        "【角色卡·冷倾雪】\n【外貌】漆黑墨发扎成发团、插紫玉金髻\n"
+        "【角色卡·顾凝霜】\n【外貌】漆黑墨发扎成发团、插紫玉金髻\n"
         "【性格】清冷孤高\n\n【剧情进展·动态】\n第三日仍在昏睡"
     )
     worldbook_store.ensure_repo_snapshot(str(tmp_path), repo_id, [{"entries": [{
-        "comment": "角色卡·冷倾雪", "content": original, "keys": ["冷倾雪"],
+        "comment": "角色卡·顾凝霜", "content": original, "keys": ["顾凝霜"],
     }]}])
 
     applied = worldbook_store.apply_repo_ops(str(tmp_path), repo_id, [{
@@ -215,8 +215,8 @@ def test_导入路由缺entries报400(tmp_path):
 def _repo_book() -> dict:
     return {"entries": [
         {"content": "普通条目", "comment": "设定", "keys": ["设定"], "uid": 1},
-        {"content": "【角色卡·舞柔·乳母恋娘】【外貌】绝色美母【剧情进展·动态】旧动态",
-         "comment": "角色卡·舞柔", "keys": ["舞柔"], "uid": 2},
+        {"content": "【角色卡·绮柔·乳母恋娘】【外貌】绝色美母【剧情进展·动态】旧动态",
+         "comment": "角色卡·绮柔", "keys": ["绮柔"], "uid": 2},
     ]}
 
 
@@ -243,7 +243,7 @@ def test_角色卡条目只允许改正文动态段(tmp_path):
     applied = worldbook_store.apply_repo_ops(
         base, "repo",
         [{"op": "worldbook_update", "index": 1, "text": "新动态", "evidence": "正文",
-          "title": "角色卡·舞姬恋", "keys": ["舞姬恋"]}],
+          "title": "角色卡·星织恋", "keys": ["星织恋"]}],
         rejections=rejections,
     )
     assert applied == 1
@@ -253,8 +253,8 @@ def test_角色卡条目只允许改正文动态段(tmp_path):
         "fields": ["comment", "keys"],
     }]
     entry = worldbook_edit.list_entries(worldbook_store.read_repo_snapshot(base, "repo"))[1]
-    assert entry["comment"] == "角色卡·舞柔"
-    assert entry["keys"] == ["舞柔"]
+    assert entry["comment"] == "角色卡·绮柔"
+    assert entry["keys"] == ["绮柔"]
     assert "新动态" in entry["content"]
     assert "【外貌】绝色美母" in entry["content"]
 
@@ -446,8 +446,8 @@ def test_新增条目拒绝机制层标题前缀并上报(tmp_path):
     """C 约束之一：`全局机制·` / `系统判定机制·` / `局部机制·` 是**建卡时由用户设计**的层，
     运行时 curator 不得自造同名层条目。
 
-    真机实锤（2026-09-23）：curator 把凌若冰的身体状态写进了「全局机制·{{user}}(少宗主)」
-    （175 字符）、把「舞姬恋…往返抚弄其经脉」写进「全局机制·龙阳决与双修」（仅 39 字符），
+    真机实锤（2026-09-23）：curator 把谢若冰的身体状态写进了「全局机制·{{user}}(少宗主)」
+    （175 字符）、把「星织恋…往返抚弄其经脉」写进「全局机制·龙阳决与双修」（仅 39 字符），
     而这几条常年 `constant=True` ⇒ 全程恒开、全文注入、永不截断 ⇒ 「经脉」每轮无条件注入。
     处理策略＝**拒收而非改名**：改名等价于替用户决定分层，宁可漏记也不污染设定。
     """
@@ -609,8 +609,8 @@ def test_外貌提取跳过动态段及其中性子标题(tmp_path):
     """真机实锤：`【命定危机·详版】` 下的 `【第一次是怎么被迫的】` 不含任何动态关键词，
     若按标题各自判定就会把正文里的「红发／蕾丝眼罩」当成稳定外貌收进画像。"""
     entries = [{
-        "comment": "角色卡·花见怜",
-        "keys": ["花见怜"],
+        "comment": "角色卡·白见怜",
+        "keys": ["白见怜"],
         "content": (
             "【外貌】高挑妖娆的倾城御姐，金色眼眸，涂红色唇釉。\n"
             "【命定危机·详版】\n"
@@ -620,7 +620,7 @@ def test_外貌提取跳过动态段及其中性子标题(tmp_path):
         ),
     }]
 
-    profiles = _visual_profiles(tmp_path, entries, "花见怜")
+    profiles = _visual_profiles(tmp_path, entries, "白见怜")
 
     assert "金色眼眸" in profiles and "倾城御姐" in profiles
     for leak in ("红发", "蕾丝眼罩", "拍卖行", "冷酷"):
@@ -630,15 +630,15 @@ def test_外貌提取跳过动态段及其中性子标题(tmp_path):
 def test_动态段之后的外貌标题仍要重新放行(tmp_path):
     """sticky 拒绝态只沿中性标题向下传；遇到 `【外貌】` 这类画像标题必须恢复收录。"""
     entries = [{
-        "comment": "角色卡·花见怜",
-        "keys": ["花见怜"],
+        "comment": "角色卡·白见怜",
+        "keys": ["白见怜"],
         "content": (
             "【命定危机】她被红发妖姬戴上蕾丝眼罩。\n"
             "【外貌】银发金眼，黑色长裙。\n"
         ),
     }]
 
-    profiles = _visual_profiles(tmp_path, entries, "花见怜")
+    profiles = _visual_profiles(tmp_path, entries, "白见怜")
 
     assert "银发" in profiles and "黑色长裙" in profiles
     assert "蕾丝眼罩" not in profiles
@@ -648,29 +648,29 @@ def test_事件系统势力条目不会因顺带提外貌混入(tmp_path):
     """非角色条目的正文常顺带提到某人发色/「角色条目」，标题级门必须先于正文启发式生效。"""
     entries = [
         {
-            "comment": "15. 大事件·天魔教花见怜的暗局",
-            "keys": ["花见怜"],
-            "content": "天魔教红发妖姬花见怜潜伏商会，她以千金令换一个要求。",
+            "comment": "15. 大事件·天魔教白见怜的暗局",
+            "keys": ["白见怜"],
+            "content": "天魔教红发妖姬白见怜潜伏商会，她以千金令换一个要求。",
         },
         {
             "comment": "系统判定机制·AI叙事核心指令",
             "keys": ["系统"],
             "content": (
                 "【角色条目规则】不得捏造世界书里不存在的人物。\n"
-                "金发女战士炽姬（碧眼、白丝长腿）。"
+                "金发女战士曜姬（碧眼、白丝长腿）。"
             ),
         },
         {
             "comment": "1. 势力与种族·中土宗门",
             "keys": ["势力"],
-            "content": "掌门之妹天狐剑仙妲千沁（银狐、白丝长腿、佩眼罩）。",
+            "content": "掌门之妹天狐剑仙沈映澜（银狐、白丝长腿、佩眼罩）。",
         },
     ]
     worldbook_store.ensure_repo_snapshot(
         str(tmp_path), "work", [{"entries": entries}],
     )
 
-    for query in ("花见怜", "系统", "势力"):
+    for query in ("白见怜", "系统", "势力"):
         assert worldbook_store.repo_visual_profiles(str(tmp_path), "work", query) == ""
 
 

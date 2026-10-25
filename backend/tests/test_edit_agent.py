@@ -12,7 +12,7 @@ def test_校验工具读取真实作品文件并记录结果(monkeypatch, tmp_pa
         lambda _ctx, event, **data: events.append((event, data)),
     )
     project_files.write_text(tmp_path, "角色卡/院长/card.json", json.dumps({
-        "spec": "chara_card_v2", "name": "塞西莉亚",
+        "spec": "chara_card_v2", "name": "卡蜜莉亚",
     }, ensure_ascii=False))
     tools = {item.name: item for item in edit_agent._tools({}, tmp_path)}
 
@@ -21,7 +21,7 @@ def test_校验工具读取真实作品文件并记录结果(monkeypatch, tmp_pa
     }))
 
     assert result["valid"] is True
-    assert result["name"] == "塞西莉亚"
+    assert result["name"] == "卡蜜莉亚"
     assert any(event == "edit.validation_succeeded" for event, _ in events)
 
 
@@ -32,7 +32,7 @@ def test_外部迁移工具写入Demiurge角色卡且默认不覆盖(monkeypatch
         lambda _ctx, event, **data: events.append((event, data)),
     )
     project_files.write_text(tmp_path, "待迁移/角色.json", json.dumps({
-        "spec": "chara_card_v2", "data": {"name": "塞西莉亚", "description": "院长"},
+        "spec": "chara_card_v2", "data": {"name": "卡蜜莉亚", "description": "院长"},
     }, ensure_ascii=False))
     tools = {item.name: item for item in edit_agent._tools({}, tmp_path)}
 
@@ -46,10 +46,10 @@ def test_外部迁移工具写入Demiurge角色卡且默认不覆盖(monkeypatch
     }))
 
     assert first["converted"] is True
-    assert project_files.file_exists(tmp_path, "转换结果/角色卡/塞西莉亚/card.json")
+    assert project_files.file_exists(tmp_path, "转换结果/角色卡/卡蜜莉亚/card.json")
     assert second == {
         "converted": False, "reason": "target_exists",
-        "paths": ["转换结果/角色卡/塞西莉亚/card.json"],
+        "paths": ["转换结果/角色卡/卡蜜莉亚/card.json"],
     }
     assert any(event == "edit.import_converted" for event, _ in events)
 

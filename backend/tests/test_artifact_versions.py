@@ -12,12 +12,12 @@ from app.services import collection_artifacts
 
 @pytest.fixture()
 def sample_works(tmp_path: Path) -> Path:
-    """作品根：<根>/玫瑰与繁花/card.json + worldbook.json（模拟刚落盘的合集卡）。"""
+    """作品根：<根>/青梧与晚风/card.json + worldbook.json（模拟刚落盘的合集卡）。"""
     root = tmp_path / "works"
-    work = root / "玫瑰与繁花"
+    work = root / "青梧与晚风"
     work.mkdir(parents=True)
     (work / "card.json").write_text(
-        json.dumps({"name": "玫瑰与繁花", "character_book": {"entries": [{"key": "机制"}]}},
+        json.dumps({"name": "青梧与晚风", "character_book": {"entries": [{"key": "机制"}]}},
                    ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
@@ -35,19 +35,19 @@ def _snapshot(root: Path, trigger: str = "done", summary: str = "") -> dict:
 
 class TestSnapshot:
     def test_首次快照创建版本目录与meta(self, sample_works: Path):
-        res = _snapshot(sample_works, summary="《玫瑰与繁花》合集卡已完成")
+        res = _snapshot(sample_works, summary="《青梧与晚风》合集卡已完成")
         assert res["saved"] is True
         meta = res["version"]
         assert meta["seq"] == 1
-        assert meta["summary"].startswith("《玫瑰与繁花》")
+        assert meta["summary"].startswith("《青梧与晚风》")
         assert len(meta["files"]) == 2
         names = {f["rel"].rsplit("/", 1)[-1] for f in meta["files"]}
         assert names == {"card.json", "worldbook.json"}
         vdir = sample_works / "_versions" / meta["version_id"]
         assert vdir.is_dir()
         # 2026-09-10 起版本内按相对作品根的结构落盘（避免不同目录同名文件互相覆盖）
-        assert (vdir / "玫瑰与繁花" / "card.json").is_file()
-        assert (vdir / "玫瑰与繁花" / "worldbook.json").is_file()
+        assert (vdir / "青梧与晚风" / "card.json").is_file()
+        assert (vdir / "青梧与晚风" / "worldbook.json").is_file()
         assert (vdir / "meta.json").is_file()
 
     def test_内容未变再次快照去重(self, sample_works: Path):
@@ -58,7 +58,7 @@ class TestSnapshot:
 
     def test_内容变化后生成新版本且序号递增(self, sample_works: Path):
         _snapshot(sample_works)
-        card = sample_works / "玫瑰与繁花" / "card.json"
+        card = sample_works / "青梧与晚风" / "card.json"
         card.write_text(card.read_text(encoding="utf-8") + "\n// 补写内容", encoding="utf-8")
         res = _snapshot(sample_works)
         assert res["saved"] is True
@@ -89,10 +89,10 @@ class TestList:
 
     def test_多个版本按新到旧排序(self, sample_works: Path):
         _snapshot(sample_works, summary="v1")
-        card = sample_works / "玫瑰与繁花" / "card.json"
+        card = sample_works / "青梧与晚风" / "card.json"
         card.write_text("{}", encoding="utf-8")
         _snapshot(sample_works, summary="v2")
-        wb = sample_works / "玫瑰与繁花" / "worldbook.json"
+        wb = sample_works / "青梧与晚风" / "worldbook.json"
         wb.write_text('{"entries":[]}', encoding="utf-8")
         _snapshot(sample_works, summary="v3")
         versions = av.list_versions(str(sample_works))
@@ -110,15 +110,15 @@ class TestList:
 class TestRestore:
     def test_回档恢复内容且先自动存档当前状态(self, sample_works: Path):
         _snapshot(sample_works, summary="v1")
-        good_card = (sample_works / "玫瑰与繁花" / "card.json").read_text(encoding="utf-8")
+        good_card = (sample_works / "青梧与晚风" / "card.json").read_text(encoding="utf-8")
         # 改坏当前产物（模拟一次不满意的手工修改/落盘）
-        (sample_works / "玫瑰与繁花" / "card.json").write_text(
+        (sample_works / "青梧与晚风" / "card.json").write_text(
             '{"broken": true}', encoding="utf-8")
         versions = av.list_versions(str(sample_works))
         v1 = versions[-1]  # seq=1（旧版）
         res = av.restore_version(str(sample_works), v1["version_id"])
         assert len(res["restored"]) == 2
-        assert (sample_works / "玫瑰与繁花" / "card.json").read_text(encoding="utf-8") == good_card
+        assert (sample_works / "青梧与晚风" / "card.json").read_text(encoding="utf-8") == good_card
         # 回档前版本被自动存档为 pre_restore（可逆，不破坏现状）
         after = av.list_versions(str(sample_works))
         assert any(v["trigger"] == "pre_restore" for v in after)
@@ -133,7 +133,7 @@ class TestRestore:
 class TestDelete:
     def test_删除版本后列表减少(self, sample_works: Path):
         _snapshot(sample_works, summary="keep")
-        card = sample_works / "玫瑰与繁花" / "card.json"
+        card = sample_works / "青梧与晚风" / "card.json"
         card.write_text("{}", encoding="utf-8")
         _snapshot(sample_works, summary="remove")
         versions = av.list_versions(str(sample_works))
@@ -157,8 +157,8 @@ class TestResolveVersionFile:
         res = _snapshot(sample_works)
         vdir = sample_works / "_versions" / res["version"]["version_id"]
         # 按 rel 解析（与 meta 同形）
-        p = av.resolve_version_file(sample_works, res["version"]["version_id"], "玫瑰与繁花/card.json")
-        assert p == (vdir / "玫瑰与繁花" / "card.json").resolve()
+        p = av.resolve_version_file(sample_works, res["version"]["version_id"], "青梧与晚风/card.json")
+        assert p == (vdir / "青梧与晚风" / "card.json").resolve()
         # 兼容旧版平铺：裸文件名按 meta 的 name 兜底匹配
         p2 = av.resolve_version_file(sample_works, res["version"]["version_id"], "card.json")
         assert p2 == p
@@ -199,12 +199,12 @@ class TestRouter:
         res = av.snapshot_current(str(sample_works), trigger="done", summary="v1")
         vid = res["version"]["version_id"]
         # 快照后再改当前文件：版本副本仍应保持快照时的内容
-        (sample_works / "玫瑰与繁花" / "card.json").write_text('{"cur":2}', encoding="utf-8")
+        (sample_works / "青梧与晚风" / "card.json").write_text('{"cur":2}', encoding="utf-8")
         from app.routers.artifacts import artifact_version_file
         got = artifact_version_file(output_dir=str(sample_works), version_id=vid,
-                                    rel="玫瑰与繁花/card.json", repo_id="")
+                                    rel="青梧与晚风/card.json", repo_id="")
         assert got["ok"] is True and got["kind"] == "card" and got["name"] == "card.json"
-        assert json.loads(got["text"])["name"] == "玫瑰与繁花"   # ← 副本内容，不是 {"cur":2}
+        assert json.loads(got["text"])["name"] == "青梧与晚风"   # ← 副本内容，不是 {"cur":2}
         assert "cur" not in got["text"]
         # meta.json 未声明的文件路径 → 404（不接受任意路径）
         from fastapi import HTTPException
@@ -215,7 +215,7 @@ class TestRouter:
         # 非法版本号 → 400
         with pytest.raises(HTTPException) as ei2:
             artifact_version_file(output_dir=str(sample_works), version_id="../evil",
-                                  rel="玫瑰与繁花/card.json", repo_id="")
+                                  rel="青梧与晚风/card.json", repo_id="")
         assert ei2.value.status_code == 400
 
     def test_restore_与_delete_端点真实路径(self, sample_works: Path, monkeypatch):
@@ -224,7 +224,7 @@ class TestRouter:
         res = av.snapshot_current(str(sample_works), trigger="done", summary="v1")
         vid = res["version"]["version_id"]
         from app.routers.artifacts import artifact_version_restore, artifact_version_delete
-        (sample_works / "玫瑰与繁花" / "card.json").write_text('{"broken":1}', encoding="utf-8")
+        (sample_works / "青梧与晚风" / "card.json").write_text('{"broken":1}', encoding="utf-8")
         from app.routers.artifacts import VersionRequest
         r1 = artifact_version_restore(VersionRequest(
             output_dir=str(sample_works), version_id=vid))
@@ -279,13 +279,13 @@ class TestDocArtifactsInVersions:
 
     def test_卡与文档并存时都会被存档(self, tmp_path: Path):
         root = self._docs_only(tmp_path)
-        work = root / "玫瑰与繁花"
+        work = root / "青梧与晚风"
         work.mkdir()
-        (work / "card.json").write_text('{"name":"玫瑰与繁花"}', encoding="utf-8")
+        (work / "card.json").write_text('{"name":"青梧与晚风"}', encoding="utf-8")
         res = _snapshot(root)
         assert res["saved"] is True
         rels = sorted(f["rel"] for f in res["version"]["files"])
-        assert rels == ["docs/设定总集.md", "玫瑰与繁花/card.json"]
+        assert rels == ["docs/设定总集.md", "青梧与晚风/card.json"]
 
     def test_版本内文档可按rel解析(self, tmp_path: Path):
         root = self._docs_only(tmp_path)
@@ -310,7 +310,7 @@ class TestDocArtifactsInVersions:
         """兼容性回归：2026-09-10 之前的版本目录是平铺存放（版本根下直接 card.json），
         新代码必须仍能回档它们，不能让用户既有版本历史失效。"""
         root = tmp_path / "works"
-        work = root / "玫瑰与繁花"
+        work = root / "青梧与晚风"
         work.mkdir(parents=True)
         (work / "card.json").write_text('{"cur":1}', encoding="utf-8")
         # 手工造一个旧式（平铺）版本目录
@@ -320,7 +320,7 @@ class TestDocArtifactsInVersions:
         (vdir / "meta.json").write_text(json.dumps({
             "version_id": vdir.name, "seq": 1, "ts": "2026-09-09T10:30:00",
             "trigger": "done", "summary": "旧版平铺存档",
-            "files": [{"rel": "玫瑰与繁花/card.json", "name": "card.json",
+            "files": [{"rel": "青梧与晚风/card.json", "name": "card.json",
                        "size": 9, "mtime": 0}],
             "total_size": 9,
         }, ensure_ascii=False), encoding="utf-8")
@@ -335,7 +335,7 @@ class TestCollectExcludesVersions:
         """2026-09-09 关键回归：版本快照目录含 card.json/worldbook.json，
         collect_artifacts 若扫到它会把「最新版本」当成「最新产物」。"""
         # 先造一个真实作品产物（mtime 最新），再造更晚的 _versions 伪目录
-        real = sample_works / "玫瑰与繁花"
+        real = sample_works / "青梧与晚风"
         (real / "card.json").touch()
         vdir = sample_works / "_versions" / "001-20990101000000"
         vdir.mkdir(parents=True)
@@ -346,7 +346,7 @@ class TestCollectExcludesVersions:
         import time as _time
         now = _time.time()
         _os.utime(vdir / "card.json", (now + 1, now + 1))
-        _os.utime(sample_works / "玫瑰与繁花" / "card.json", (now, now))
+        _os.utime(sample_works / "青梧与晚风" / "card.json", (now, now))
         items = collection_artifacts.collect_artifacts(str(sample_works))
         assert items, "真实作品产物应在"
         for item in items:

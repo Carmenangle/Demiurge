@@ -137,7 +137,7 @@ def test_插画JSON被模型续写think打断时可恢复():
         "<content>正文高潮。</content>"
         '<illustration>{"anchor":"正文高潮。","camera":"low-angle medium close-up",'
         '"composition":"diagonal composition","aspect_ratio":"2:3",'
-        '"subjects":[{"name":"虞妙玥","description":"voluptuous mature woman, '
+        '"subjects":[{"name":"苏映晚","description":"voluptuous mature woman, '
         'ink-black hair, narrow dark-red eyes","weight":2.0}],'
         '"prompt":"lying on cold stone, amber side light",'
         '"profile_prompt":"The stone floor shows moisture'
@@ -148,7 +148,7 @@ def test_插画JSON被模型续写think打断时可恢复():
     clean, plan = ipe.extract_illustration_plan(reply)
 
     assert clean == "<content>正文高潮。</content>"
-    assert plan["actors"] == ["虞妙玥"]
+    assert plan["actors"] == ["苏映晚"]
     assert plan["profile_prompt"] == "The stone floor shows moisture and fluid stains."
     assert "dark-red eyes" in plan["prompt"]
 
@@ -203,13 +203,13 @@ def test_普通剧情高潮兜底不会生成成人提示词():
 def test_可见剧情提取排除隐藏思考和控制块():
     reply = (
         "<think>自检时列举做爱、性交、色情等敏感词。</think>\n"
-        "<content>塞西莉亚接受了拒绝，将徽章留在长凳上。</content>\n"
+        "<content>卡蜜莉亚接受了拒绝，将徽章留在长凳上。</content>\n"
         "<status>内部状态</status>"
     )
 
     visible = ipe.visible_narrative_text(reply)
 
-    assert visible == "塞西莉亚接受了拒绝，将徽章留在长凳上。"
+    assert visible == "卡蜜莉亚接受了拒绝，将徽章留在长凳上。"
     assert ipe.build_fallback_content_tags(reply).startswith("dramatic scene")
     assert "explicit" not in ipe.build_fallback_content_tags(reply)
     assert ipe.visible_narrative_text(
@@ -223,8 +223,8 @@ def test_未闭合隐藏思考不能成为插画剧情():
     assert ipe.visible_narrative_text(reply) == ""
     assert "explicit" not in ipe.build_fallback_content_tags(reply)
     assert ipe.visible_narrative_text(
-        "<think>未闭合推理里的裸露词<content>塞西莉亚把徽章留在长凳上。"
-    ) == "塞西莉亚把徽章留在长凳上。"
+        "<think>未闭合推理里的裸露词<content>卡蜜莉亚把徽章留在长凳上。"
+    ) == "卡蜜莉亚把徽章留在长凳上。"
 
 
 def test_插画计划非法画幅比例回退竖图():
@@ -291,7 +291,7 @@ def test_解析保留主模型同轮生成的模式提示词():
     reply = (
         "正文高潮。\n"
         '<illustration>{"anchor":"正文高潮。","camera":"low angle",'
-        '"composition":"center composition","subjects":[{"name":"冷倾雪",'
+        '"composition":"center composition","subjects":[{"name":"顾凝霜",'
         '"description":"1girl","weight":1.2}],"prompt":"rim light",'
         '"profile_prompt":"主模型生成的 Krea2 最终提示词。","motion":1}</illustration>'
     )

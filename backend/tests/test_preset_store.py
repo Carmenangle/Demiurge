@@ -87,13 +87,13 @@ def test_宏替换char_user():
         [("a", True)],
         [{"identifier": "a", "content": "以{{char}}身份回应{{user}}", "marker": False}],
     )
-    out = preset_store.assemble_system(preset, {"char_name": "塞西莉亚", "user_name": "主角"})
-    assert out == "以塞西莉亚身份回应主角"
+    out = preset_store.assemble_system(preset, {"char_name": "卡蜜莉亚", "user_name": "主角"})
+    assert out == "以卡蜜莉亚身份回应主角"
 
 
 def test_宏替换user缺省回退我():
     # user_name 空 → {{user}} 替换成「我」，不留字面宏
-    assert preset_store.substitute_macros("你好{{user}}", {"char_name": "塞西莉亚"}) == "你好我"
+    assert preset_store.substitute_macros("你好{{user}}", {"char_name": "卡蜜莉亚"}) == "你好我"
     assert preset_store.substitute_macros("你好{{user}}", {"user_name": ""}) == "你好我"
 
 

@@ -275,11 +275,11 @@ def test_audio_slot_meta_读取槽位角色与序号(monkeypatch, tmp_path):
     generation_store.chat_snapshot.save("thread", [{
         "id": "bot1", "role": "assistant", "text": "t", "parts": [
             {"type": "media-slot", "slotId": "audio-bot1-0", "kind": "audio",
-             "speaker": "虞妙玥", "seq": 2, "total": 3},
+             "speaker": "苏映晚", "seq": 2, "total": 3},
         ],
     }])
     meta = generation_store._audio_slot_meta("thread", "bot1", "audio-bot1-0")
-    assert meta["speaker"] == "虞妙玥"
+    assert meta["speaker"] == "苏映晚"
     assert meta["seq"] == 2
     # 槽位不存在 → 空元数据
     assert generation_store._audio_slot_meta("thread", "bot1", "nope") == {"speaker": "", "seq": 0}
@@ -310,15 +310,15 @@ def test_save_audio_local_存voices并自定义命名(monkeypatch, tmp_path):
     p1 = generation_store.image_store.save_audio_local(
         str(out), "repo",
         filename="workflow_abc.flac", subfolder="", type="output",
-        url="http://comfy", dest_stem="虞妙玥_3_2",
+        url="http://comfy", dest_stem="苏映晚_3_2",
     )
-    assert Path(p1).name == "虞妙玥_3_2.flac"
+    assert Path(p1).name == "苏映晚_3_2.flac"
     assert str(Path(p1).parent).endswith("voices")
     # 幂等：同名已存在直接返回旧路径，不重复取字节
     p2 = generation_store.image_store.save_audio_local(
         str(out), "repo",
         filename="workflow_abc.flac", subfolder="", type="output",
-        url="http://comfy", dest_stem="虞妙玥_3_2",
+        url="http://comfy", dest_stem="苏映晚_3_2",
     )
     assert p2 == p1
 
@@ -331,11 +331,11 @@ def test_audio_finalize_按角色轮次句号命名落voices(monkeypatch, tmp_pa
          "parts": [{"type": "audio", "slotId": "x", "url": "u"}]},
         {"id": "bot", "role": "assistant", "text": "b",
          "parts": [{"type": "media-slot", "slotId": "audio-bot-0", "kind": "audio",
-                    "speaker": "冷倾雪", "seq": 2, "total": 3}]},
+                    "speaker": "顾凝霜", "seq": 2, "total": 3}]},
     ])
     calls = []
     monkeypatch.setattr(generation_store.image_store, "save_audio_local",
-                        lambda *a, **k: calls.append(k) or "C:/out/voices/冷倾雪_2_2.flac")
+                        lambda *a, **k: calls.append(k) or "C:/out/voices/顾凝霜_2_2.flac")
     monkeypatch.setattr(generation_store.chat_snapshot, "resolve_media_slot", lambda *a, **k: True)
     monkeypatch.setattr(generation_store.chat_memory, "append_message", lambda *a, **k: None)
     generation_store._MEMORY_DONE.clear()
@@ -347,7 +347,7 @@ def test_audio_finalize_按角色轮次句号命名落voices(monkeypatch, tmp_pa
 
     assert calls, "应走 save_audio_local"
     # 第 2 轮（m1 含配音 + bot 自身）里的第 2 句
-    assert calls[0]["dest_stem"] == "冷倾雪_2_2"
+    assert calls[0]["dest_stem"] == "顾凝霜_2_2"
     assert calls[0]["subfolder"] == ""
 
 def test_image_turn_按含图片消息计数轮次(monkeypatch, tmp_path):
@@ -376,14 +376,14 @@ def test_save_image_named_角色lora命名并覆盖(monkeypatch, tmp_path):
     out = tmp_path / "out"
     p1 = generation_store.image_store.save_image_named(
         str(out), "repo", filename="workflow_a.png", url="http://comfy",
-        dest_stem="虞妙玥_2_1",
+        dest_stem="苏映晚_2_1",
     )
-    assert Path(p1).name == "虞妙玥_2_1.png"
+    assert Path(p1).name == "苏映晚_2_1.png"
     assert str(Path(p1).parent).endswith("pictures")  # 2026-10-17：生图归入 <repo>/pictures/
     # 同名覆盖：内容更新，路径不变
     p2 = generation_store.image_store.save_image_named(
         str(out), "repo", filename="workflow_b.png", url="http://comfy",
-        dest_stem="虞妙玥_2_1",
+        dest_stem="苏映晚_2_1",
     )
     assert p2 == p1
     assert Path(p1).read_bytes() == b"bytes-2"
@@ -400,7 +400,7 @@ def test_image_finalize_角色lora命名_非角色lora时间戳(monkeypatch, tmp
     ])
     named = []
     monkeypatch.setattr(generation_store.image_store, "save_image_named",
-                        lambda *a, **k: named.append(k) or "C:/out/虞妙玥_2_1.png")
+                        lambda *a, **k: named.append(k) or "C:/out/苏映晚_2_1.png")
     monkeypatch.setattr(generation_store, "_index_with_retry", lambda *a, **k: True)
     monkeypatch.setattr(generation_store.chat_memory, "append_message", lambda *a, **k: None)
     monkeypatch.setattr(generation_store.chat_snapshot, "upsert", lambda *a, **k: None)
@@ -409,11 +409,11 @@ def test_image_finalize_角色lora命名_非角色lora时间戳(monkeypatch, tmp
         images=[{"filename": "a.png", "subfolder": "", "type": "output"}],
         regeneration={"kind": "template", "templateId": "t", "values": {},
                       "comfyuiUrl": "http://comfy", "outputNodeIds": [], "prompt": "",
-                      "characterLoraActor": "虞妙玥"},
+                      "characterLoraActor": "苏映晚"},
         target_message_id="bot", target_slot_id="img-bot-0",
     ))
     assert named, "角色 LoRA 生图应走 save_image_named"
-    assert named[0]["dest_stem"] == "虞妙玥_2_1"  # 第 2 次带插画对话第 1 张
+    assert named[0]["dest_stem"] == "苏映晚_2_1"  # 第 2 次带插画对话第 1 张
 
     # 非角色 lora（兜底）：回退 save_local
     called = []
@@ -434,7 +434,7 @@ def test_角色lora落盘轮次取槽id真实回合号_相邻两轮不撞名(mon
 
     真机：第 45 轮槽 `illo-req-…-45`、第 46 轮槽 `illo-req-…-46`，但两轮 finalize 时
     `_image_turn` 都返回 33（本槽在快照里还是 media-slot、计数不含自己）⇒ 第 46 轮把
-    第 45 轮的 `妲千沁_33_1.png` 覆盖掉；两槽共享同一 URL ⇒ 刷新后第 45 轮的槽显示
+    第 45 轮的 `沈映澜_33_1.png` 覆盖掉；两槽共享同一 URL ⇒ 刷新后第 45 轮的槽显示
     第 46 轮的图、第 45 轮的资产条目消失。
 
     修法：轮次取**槽 id 里的 `draft.turn`**（生成时就已确定）⇒ 相邻两轮必然不同。
@@ -454,7 +454,7 @@ def test_角色lora落盘轮次取槽id真实回合号_相邻两轮不撞名(mon
     monkeypatch.setattr(generation_store.chat_snapshot, "upsert", lambda *a, **k: None)
     regen = {"kind": "template", "templateId": "t", "values": {},
              "comfyuiUrl": "http://comfy", "outputNodeIds": [], "prompt": "",
-             "characterLoraActor": "妲千沁"}
+             "characterLoraActor": "沈映澜"}
     imgs = [{"filename": "a.png", "subfolder": "", "type": "output"}]
 
     generation_store.finalize_workflow_batch(**_args(
@@ -465,7 +465,7 @@ def test_角色lora落盘轮次取槽id真实回合号_相邻两轮不撞名(mon
         images=imgs, regeneration=regen,
         target_message_id="bot", target_slot_id="illo-req-repo-46",
     ))
-    assert [k["dest_stem"] for k in named] == ["妲千沁_45_1", "妲千沁_46_1"]
+    assert [k["dest_stem"] for k in named] == ["沈映澜_45_1", "沈映澜_46_1"]
 
 
 def test_角色lora落盘首尾帧副槽不撞名_槽id解析不出回落旧计数(monkeypatch, tmp_path):
@@ -491,7 +491,7 @@ def test_角色lora落盘首尾帧副槽不撞名_槽id解析不出回落旧计�
     monkeypatch.setattr(generation_store.chat_snapshot, "upsert", lambda *a, **k: None)
     regen = {"kind": "template", "templateId": "t", "values": {},
              "comfyuiUrl": "http://comfy", "outputNodeIds": [], "prompt": "",
-             "characterLoraActor": "虞妙玥"}
+             "characterLoraActor": "苏映晚"}
     imgs = [{"filename": "a.png", "subfolder": "", "type": "output"}]
 
     for slot in ("illo-req-repo-46:first", "illo-req-repo-46:last"):
@@ -499,14 +499,14 @@ def test_角色lora落盘首尾帧副槽不撞名_槽id解析不出回落旧计�
             images=imgs, regeneration=regen,
             target_message_id="bot", target_slot_id=slot,
         ))
-    assert [k["dest_stem"] for k in named] == ["虞妙玥_46_first_1", "虞妙玥_46_last_1"]
+    assert [k["dest_stem"] for k in named] == ["苏映晚_46_first_1", "苏映晚_46_last_1"]
 
     named.clear()
     generation_store.finalize_workflow_batch(**_args(
         images=imgs, regeneration=regen,
         target_message_id="bot", target_slot_id="img-bot-0",
     ))
-    assert [k["dest_stem"] for k in named] == ["虞妙玥_2_1"]  # 旧口径
+    assert [k["dest_stem"] for k in named] == ["苏映晚_2_1"]  # 旧口径
 
 
 def test_persist_text_interrupted_appends_marker(monkeypatch):
@@ -690,7 +690,7 @@ def test_最近灵感卡注入讨论上下文(monkeypatch):
     cards = [
         {"title": "更旧卡", "content": "最早的内容", "selected": []},
         {"title": "旧卡", "content": "上一轮的资料", "selected": ["https://a.test/old.jpg"]},
-        {"title": "月见八千代外貌", "content": "银色至粉色渐变双马尾，环形辫内层挑染，上粉下青渐变瞳",
+        {"title": "雪村八千代外貌", "content": "银色至粉色渐变双马尾，环形辫内层挑染，上粉下青渐变瞳",
          "selected": ["https://cdn.test/p1.jpg", "https://cdn.test/p2.jpg"]},
     ]
     items = [{"id": f"m{i}", "role": "assistant", "text": "", "inspiration": c}
@@ -699,7 +699,7 @@ def test_最近灵感卡注入讨论上下文(monkeypatch):
 
     ctx = {"thread_id": "Anima/原创"}
     block = agent_graph._recent_inspiration_blocks(ctx)
-    assert "月见八千代外貌" in block and "环形辫内层挑染" in block
+    assert "雪村八千代外貌" in block and "环形辫内层挑染" in block
     assert "更旧卡" not in block                                   # 只取最近 2 张，最旧淘汰
     assert "https://cdn.test/p1.jpg" in block                      # 勾选图 URL 随卡注入
     # 空线程不炸
@@ -951,7 +951,7 @@ def test_音频批次槽回填失败记错误不抛(monkeypatch):
                         lambda *a, **k: "C:/out/voices/v.flac")
     monkeypatch.setattr(generation_store.image_store, "save_local", lambda *a, **k: "C:/out/v.flac")
     monkeypatch.setattr(generation_store, "_audio_slot_meta",
-                        lambda *a, **k: {"speaker": "冷倾雪", "seq": 1})
+                        lambda *a, **k: {"speaker": "顾凝霜", "seq": 1})
     monkeypatch.setattr(generation_store, "_audio_turn", lambda *a, **k: 2)
     monkeypatch.setattr(generation_store.chat_memory, "append_message", lambda *a: None)
     audios = [{"filename": "a.flac", "subfolder": "", "type": "output"}]
@@ -1227,9 +1227,9 @@ def test_persist_audio_slot_落盘与失败留痕(monkeypatch):
     got: list = []
     monkeypatch.setattr(generation_store.chat_snapshot, "append_media_slot",
                         lambda *a, **k: got.append((a, k)))
-    generation_store.persist_audio_slot("t1", "m1", "audio-1", speaker="冷倾雪", seq=2, total=3)
+    generation_store.persist_audio_slot("t1", "m1", "audio-1", speaker="顾凝霜", seq=2, total=3)
     assert got == [(("t1", "m1", "audio-1"),
-                    {"kind": "audio", "speaker": "冷倾雪", "seq": 2, "total": 3})]
+                    {"kind": "audio", "speaker": "顾凝霜", "seq": 2, "total": 3})]
     monkeypatch.setattr(generation_store.chat_snapshot, "append_media_slot",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("锁冲突")))
     generation_store.persist_audio_slot("t1", "m1", "audio-1")

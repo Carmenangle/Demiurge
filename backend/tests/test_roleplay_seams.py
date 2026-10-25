@@ -210,7 +210,7 @@ def test_append_static_blocks等价矩阵(monkeypatch):
 
 def test_substitute_macros等价矩阵():
     """两段宏替换的等价性（缺省回退 / 空白裁剪 / 动态块过滤空段）。"""
-    names = (None, "", "   ", "沈糯", " 沈糯 ")
+    names = (None, "", "   ", "庄听澜", " 庄听澜 ")
     bases = ("", "对{{user}}态度", "{{char}} 与 {{user}}", "无宏")
     dyns = ([], [""], ["   "], ["有 {{user}}"], ["", "动态 {{char}}"], ["  ", "x"])
     checked = 0

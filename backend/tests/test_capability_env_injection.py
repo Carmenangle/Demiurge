@@ -7,7 +7,7 @@ character.embed_worldbook / workspace.export_to_library 漏加后：计划能编
 任务停在 partial，用户看不到产物（实锤）。
 
 根因 ②：这两个能力 glob 全库「*/card.json」。base 是作品库根时（实锤 pictures 下
-有妈妈娼馆/玫瑰与繁花/御仙）会把当前作品的世界书写进别的作品的卡——数据污染。
+有旧巷当铺/青梧与晚风/驭云录）会把当前作品的世界书写进别的作品的卡——数据污染。
 
 覆盖：① 注册表清单与 handler 真实签名一致（防未来漏加）；② 执行层按签名兜底；
 ③ 卡归属判定（标记优先、卡名=作品名回退、都不匹配则跳过）。
@@ -86,11 +86,11 @@ class TestEmbedScope:
         other = _mk_card(base / "别人的卡", "别人的卡",
                          [{"comment": "别人的条目", "content": "原样"}])
         other_before = (other / "card.json").read_text(encoding="utf-8")
-        mine = _mk_card(base / "御仙", "御仙")
-        character_store.write_work_marker(str(base), "御仙", repo_id)
+        mine = _mk_card(base / "驭云录", "驭云录")
+        character_store.write_work_marker(str(base), "驭云录", repo_id)
         _snapshot(base, repo_id)
         out = character_embed_worldbook(str(base), repo_id)
-        assert [item["card"] for item in out["embedded"]] == ["御仙"]
+        assert [item["card"] for item in out["embedded"]] == ["驭云录"]
         embedded = json.loads((mine / "card.json").read_text(encoding="utf-8"))
         assert embedded["character_book"]["entries"][0]["content"] == "新内容"
         assert (other / "card.json").read_text(encoding="utf-8") == other_before
@@ -142,8 +142,8 @@ def test_migrate_mechanical落卡写归属标记(tmp_path: Path):
     from app.services import character_card
     from app.services.capability_handlers import migrate_mechanical
 
-    card = {"name": "御仙", "spec": "chara_card_v3", "spec_version": "3.0",
-            "data": {"name": "御仙", "first_mes": "开场",
+    card = {"name": "驭云录", "spec": "chara_card_v3", "spec_version": "3.0",
+            "data": {"name": "驭云录", "first_mes": "开场",
                      "character_book": {"entries": [
                          {"comment": "系统判定机制·A", "content": "正文", "keys": ["a"]}]}}}
     png = tmp_path / "card.png"
@@ -151,4 +151,4 @@ def test_migrate_mechanical落卡写归属标记(tmp_path: Path):
     base = tmp_path / "works"
     res = migrate_mechanical(str(png), str(base), "repo1")
     assert res["entries"] == 1
-    assert character_store.read_work_marker(str(base), "御仙") == "repo1"
+    assert character_store.read_work_marker(str(base), "驭云录") == "repo1"

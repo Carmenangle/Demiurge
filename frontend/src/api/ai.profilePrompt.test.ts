@@ -24,7 +24,7 @@ describe("profile prompt fallback request", () => {
 
     await genProfilePrompt("anima_tags", {
       narrative: "scene", draft_prompt: "", wardrobe: "", locale: "",
-      actors: ["冷倾雪"], rating: "nsfw",
+      actors: ["顾凝霜"], rating: "nsfw",
     }, { baseUrl: "chat", apiKey: "key", modelName: "model" }, {
       presetDir: "D:/presets", presetName: "GrayWill", userName: "我",
     });

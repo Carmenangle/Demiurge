@@ -9,7 +9,7 @@ from app.services import prompt_clean
 
 def test_restore_paren_wrap():
     assert prompt_clean.restore_jailbreak("面@(馆)@") == "面馆"
-    assert prompt_clean.restore_jailbreak("温知夏(米@(色)@针织开衫)") == "温知夏(米色针织开衫)"
+    assert prompt_clean.restore_jailbreak("纪含章(米@(色)@针织开衫)") == "纪含章(米色针织开衫)"
 
 
 def test_restore_bare_at_deleted():
@@ -35,7 +35,7 @@ def test_restore_with_offsets():
 def test_clean_spec_text_fields_restores_all():
     spec = {
         "narrative": "三@(人)@举杯同框",
-        "appearance": "温知夏(米@(色)@针织开衫)",
+        "appearance": "纪含章(米@(色)@针织开衫)",
         "wardrobe": "全员日常私服",  # 无标记原样保留
         "locale": "面@(馆)@内景",
         "camera": "摇臂俯拍",
@@ -44,7 +44,7 @@ def test_clean_spec_text_fields_restores_all():
     }
     cleaned = prompt_clean.clean_spec_text_fields(spec)
     assert cleaned["narrative"] == "三人举杯同框"
-    assert cleaned["appearance"] == "温知夏(米色针织开衫)"
+    assert cleaned["appearance"] == "纪含章(米色针织开衫)"
     assert cleaned["wardrobe"] == "全员日常私服"
     assert cleaned["locale"] == "面馆内景"
     assert cleaned["first_frame_desc"] == "雨夜门口"
@@ -71,7 +71,7 @@ def test_sanitize_table_text_兼容包裹式与空值():
 
 
 # ── 正文元话语泄漏清洗 ──────────────────────────────────────────────
-# 2026-09-13 用户实锤：神权大陆最新一轮把「输出纪律」清单抄进了 <content>——
+# 2026-09-13 用户实锤：神恩大陆最新一轮把「输出纪律」清单抄进了 <content>——
 # 首行「质量检查：满足1000-8000字；状态栏更新收养线与目的地；」、
 # 末行「【系统提示：以下为推演输出尾部标注，非正文内容】」。
 # 注意：<think> 里的「质量检查」是预设思维链9 的设计产物，**不是泄漏**，

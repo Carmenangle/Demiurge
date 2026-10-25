@@ -23,8 +23,8 @@ import pytest
 from app.services import image_prompt_profiles as profiles
 
 # 用户实锤的兜底场景原文（`_tmp/item25/final_prompts.txt` 情况①）
-_情况一 = "世熙跪在床边，把双手贴在臀肉上掰开屁股。我紧捏着世熙的臀部。宥夏在旁边看着。"
-_情况一角色 = ["世熙", "宥夏"]
+_情况一 = "明澜跪在床边，把双手贴在臀肉上掰开屁股。我紧捏着明澜的臀部。清夏在旁边看着。"
+_情况一角色 = ["明澜", "清夏"]
 
 
 def _场景(narrative: str, actors, **extra) -> dict:
@@ -54,7 +54,7 @@ def test_跪姿展示臀部补出弯腰抬臀体态():
 def test_体态规则不凭空触发():
     """反向锁：正文没有跪姿展示臀部时，体态串一条都不许出现。"""
     tags = profiles._scene_action_tags(
-        _场景("她安静地站在窗边，看着外面下雨。", ["世熙", "宥夏"])
+        _场景("她安静地站在窗边，看着外面下雨。", ["明澜", "清夏"])
     )
 
     assert "bending forward with her buttocks raised" not in tags
@@ -63,7 +63,7 @@ def test_体态规则不凭空触发():
 def test_体态规则不跨句串味():
     """⚠ 第 21 刀同族：跪在上一句、展示臀部在下一句 ⇒ 不得拼出体态。"""
     tags = profiles._scene_action_tags(
-        _场景("世熙跪在床边，喘着气。宥夏掰开臀肉，露出小穴。", ["世熙", "宥夏"])
+        _场景("明澜跪在床边，喘着气。清夏掰开臀肉，露出小穴。", ["明澜", "清夏"])
     )
 
     assert "bending forward with her buttocks raised" not in tags
@@ -94,7 +94,7 @@ def test_四档兜底都写出体态与旁观描述(profile):
 
 def test_anima文段不把动作片段写成depicted_with病句():
     """`depicted with ` 后面只能接名词短语/独立主格；接动名词会产出病句。"""
-    scene = _场景("我悄悄抽出了正在抚弄阴阜的手指。", ["世熙"])
+    scene = _场景("我悄悄抽出了正在抚弄阴阜的手指。", ["明澜"])
     prompt = chr(10).join((
         "masterpiece, best quality, 1girl, warm directional light",
         "A lone adult woman stands still in a warm room under directional light.",
@@ -148,7 +148,7 @@ def test_krea2补全不得在句号后接小写片段():
       ✗ 首字母大写 ⇒ 破字段验收的**逐字**锁（`bedchamber` / `a glowing spiral object …`，实测 3 例红灯）；
       ✗ 加引导句 ⇒ 与「砍掉模板尾巴」的用户口径相反。
     """
-    scene = _场景("我悄悄抽出了正在抚弄阴阜的手指。", ["世熙"])
+    scene = _场景("我悄悄抽出了正在抚弄阴阜的手指。", ["明澜"])
     seed = "An adult woman stands still in the room."
 
     repaired, _ledger = profiles.complete_field_coverage("krea2", seed, scene)
@@ -161,7 +161,7 @@ def test_krea2补全不得在句号后接小写片段():
 
 def test_krea2补全只改标点不改字():
     """反向锁（对应上一条）：事实片段必须**逐字**保留——大写 / 改写 / 丢词都是回归。"""
-    scene = _场景("我悄悄抽出了正在抚弄阴阜的手指。", ["世熙"])
+    scene = _场景("我悄悄抽出了正在抚弄阴阜的手指。", ["明澜"])
     seed = "An adult woman stands still in the room."
 
     repaired, _ledger = profiles.complete_field_coverage("krea2", seed, scene)
@@ -220,13 +220,13 @@ _真机L3模型稿_niji = chr(10).join((
     "low-angle medium shot, dim intimate room",
     "--ar 4:3 --niji 6",
 ))
-_动作事实场景narrative = "世熙跪在床边，把双手贴在臀肉上掰开屁股。我悄悄抽出了正在抚弄的手指。她的臀部轻轻晃着。"
+_动作事实场景narrative = "明澜跪在床边，把双手贴在臀肉上掰开屁股。我悄悄抽出了正在抚弄的手指。她的臀部轻轻晃着。"
 
 
 def test_冲突闸前置证据_两条动作事实确实在账本里():
     """第 31 刀后：掰开臀部只剩**一条**具体串（`both hands spreading her buttocks apart`），
     原「双掌贴臀」支已删 ⇒ 这里同时钉住「新串在」与「旧串不在」两个方向。"""
-    scene = _场景(_动作事实场景narrative, ["世熙", "宥夏"])
+    scene = _场景(_动作事实场景narrative, ["明澜", "清夏"])
 
     tags = profiles._scene_action_tags(scene)
     assert "withdrawing the fingers" in tags
@@ -236,7 +236,7 @@ def test_冲突闸前置证据_两条动作事实确实在账本里():
 
 
 def test_anima同部位已写过动作则不再追加裸动作串与depicted_with病句():
-    scene = _场景(_动作事实场景narrative, ["世熙", "宥夏"], appearance="narrow dark-red eyes")
+    scene = _场景(_动作事实场景narrative, ["明澜", "清夏"], appearance="narrow dark-red eyes")
 
     repaired, _ledger = profiles.complete_field_coverage(
         "anima_tags", _真机L3模型稿_anima, scene,
@@ -254,7 +254,7 @@ def test_anima同部位已写过动作则不再追加裸动作串与depicted_wit
 
 
 def test_niji段尾不再追加与模型动作互斥的动作事实():
-    scene = _场景(_动作事实场景narrative, ["世熙", "宥夏"])
+    scene = _场景(_动作事实场景narrative, ["明澜", "清夏"])
 
     repaired, _ledger = profiles.complete_field_coverage(
         "niji_sections", _真机L3模型稿_niji, scene,
@@ -270,7 +270,7 @@ def test_niji段尾不再追加与模型动作互斥的动作事实():
 
 def test_无同部位动作时动作事实照旧追加():
     """反向锁：模型稿没有任何「身体部位＋动作」⇒ 冲突闸必须放行（零回归）。"""
-    scene = _场景(_动作事实场景narrative, ["世熙", "宥夏"])
+    scene = _场景(_动作事实场景narrative, ["明澜", "清夏"])
     seed = "An adult woman stands still in the room under soft directional light."
 
     for profile in ("krea2", "natural_language"):
@@ -281,7 +281,7 @@ def test_无同部位动作时动作事实照旧追加():
 def test_抽不出部位的动作事实不受冲突闸影响():
     """反向锁：`penetrative intercourse` 这类**没有部位词**的事实逐字节不受管
     （合同锁要求它逐字出现在成稿里）。"""
-    scene = _场景("他重新推进去了，高潮骤然袭来。她掰开臀肉，露出小穴。", ["世熙", "宥夏"])
+    scene = _场景("他重新推进去了，高潮骤然袭来。她掰开臀肉，露出小穴。", ["明澜", "清夏"])
     assert "penetrative intercourse" in profiles._scene_action_tags(scene)
     assert profiles._action_fact_conflicts(_真机L3模型稿_niji, "penetrative intercourse") is False
     assert profiles._action_fact_conflicts(_真机L3模型稿_niji, "swaying her hips") is True

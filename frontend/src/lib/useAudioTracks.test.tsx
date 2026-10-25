@@ -58,7 +58,7 @@ const TEXT_MSG = { id: "m1", role: "assistant", text: "正文" } as ChatMessage;
 const DONE_AUDIO_MSG = {
   id: "m1", role: "assistant", text: "正文", parts: [
     { type: "text", text: "正文" },
-    { type: "audio", url: "u1", slotId: "audio-m1-0", status: "ready", kind: "audio", speaker: "沈糯" },
+    { type: "audio", url: "u1", slotId: "audio-m1-0", status: "ready", kind: "audio", speaker: "庄听澜" },
     { type: "audio", url: "u2", slotId: "audio-m1-1", status: "ready", kind: "audio", speaker: "顾小" },
   ],
 } as ChatMessage;
@@ -97,7 +97,7 @@ function makeDeps(over: DepsOver = {}) {
   const onNotify = vi.fn();
   const mediaInsert = over.preset === null
     ? {}
-    : { r1: over.preset ?? { audioTemplateId: "tpl-audio", characterVoices: { 沈糯: { voiceRef: "voices/wan.wav" } } } };
+    : { r1: over.preset ?? { audioTemplateId: "tpl-audio", characterVoices: { 庄听澜: { voiceRef: "voices/wan.wav" } } } };
   const deps = {
     settings: { comfyuiUrl: "http://127.0.0.1:8188", outputDir: "D:/out", mediaInsert } as never,
     repo: { id: "r1" } as never,
@@ -164,8 +164,8 @@ beforeEach(() => {
 // ───────────── submitAudio 行为网 ─────────────
 describe("submitAudio 行为网", () => {
   it("未配置音频模板 ⇒ 静默返回（不上传、不提交、不提示）", async () => {
-    const rig = makeDeps({ preset: { characterVoices: { 沈糯: { voiceRef: "voices/wan.wav" } } } });
-    await callSubmit(rig, [{ speaker: "沈糯", text: "第一句" }]);
+    const rig = makeDeps({ preset: { characterVoices: { 庄听澜: { voiceRef: "voices/wan.wav" } } } });
+    await callSubmit(rig, [{ speaker: "庄听澜", text: "第一句" }]);
     expect(uploadImage).not.toHaveBeenCalled();
     expect(submitWorkflow).not.toHaveBeenCalled();
     expect(rig.onNotify).not.toHaveBeenCalled();
@@ -173,8 +173,8 @@ describe("submitAudio 行为网", () => {
   });
 
   it("模板不存在（audioTemplateId 指向陌生 id）⇒ 静默返回", async () => {
-    const rig = makeDeps({ preset: { audioTemplateId: "gone", characterVoices: { 沈糯: { voiceRef: "v.wav" } } } });
-    await callSubmit(rig, [{ speaker: "沈糯", text: "第一句" }]);
+    const rig = makeDeps({ preset: { audioTemplateId: "gone", characterVoices: { 庄听澜: { voiceRef: "v.wav" } } } });
+    await callSubmit(rig, [{ speaker: "庄听澜", text: "第一句" }]);
     expect(submitWorkflow).not.toHaveBeenCalled();
     expect(rig.setMessages).not.toHaveBeenCalled();
   });
@@ -182,19 +182,19 @@ describe("submitAudio 行为网", () => {
   it("部分角色未配音轨 ⇒ 提示一次（列跳过角色与已配置），已配角色照常提交", async () => {
     const rig = makeDeps({ messages: [TEXT_MSG] });
     await callSubmit(rig, [
-      { speaker: "沈糯", text: "第一句" },
+      { speaker: "庄听澜", text: "第一句" },
       { speaker: "路人甲", text: "第二句" },
     ]);
     expect(rig.onNotify).toHaveBeenCalledTimes(1);
     expect(rig.onNotify.mock.calls[0][0]).toContain("路人甲");
-    expect(rig.onNotify.mock.calls[0][0]).toContain("沈糯"); // 「已配置」清单
-    // 可配行只有沈糯一条 ⇒ 只提交一次
+    expect(rig.onNotify.mock.calls[0][0]).toContain("庄听澜"); // 「已配置」清单
+    // 可配行只有庄听澜一条 ⇒ 只提交一次
     expect(submitWorkflow).toHaveBeenCalledTimes(1);
   });
 
   it("全部行不可配（无任何音轨绑定）⇒ 提示跳过且不提交、不插槽", async () => {
     const rig = makeDeps({ preset: { audioTemplateId: "tpl-audio", characterVoices: {} } });
-    await callSubmit(rig, [{ speaker: "沈糯", text: "第一句" }]);
+    await callSubmit(rig, [{ speaker: "庄听澜", text: "第一句" }]);
     expect(rig.onNotify).toHaveBeenCalledTimes(1);
     expect(submitWorkflow).not.toHaveBeenCalled();
     expect(rig.setMessages).not.toHaveBeenCalled();
@@ -203,8 +203,8 @@ describe("submitAudio 行为网", () => {
   it("正常两行 ⇒ 逐行插槽(seq/total) + 补快照 + 提交 + 上屏日志 + pollResult 显式 audio/background", async () => {
     const rig = makeDeps({ messages: [TEXT_MSG] });
     await callSubmit(rig, [
-      { speaker: "沈糯", text: "第一句", emotion: { happy: 0.8 } },
-      { speaker: "沈糯", text: "第二句" },
+      { speaker: "庄听澜", text: "第一句", emotion: { happy: 0.8 } },
+      { speaker: "庄听澜", text: "第二句" },
     ]);
     // 音轨上传：localViewUrl → fetch → File → uploadImage
     expect(uploadImage).toHaveBeenCalledTimes(2);
@@ -220,14 +220,14 @@ describe("submitAudio 行为网", () => {
     // 槽位：终态两个 media-slot，seq 1/2 与 2/2，slotId 按 index 编号
     const slots = (rig.state.messages[0].parts || []).filter((p) => p.type === "media-slot");
     expect(slots).toHaveLength(2);
-    expect(slots[0]).toMatchObject({ slotId: "audio-m1-0", speaker: "沈糯", seq: 1, total: 2, status: "pending", kind: "audio" });
+    expect(slots[0]).toMatchObject({ slotId: "audio-m1-0", speaker: "庄听澜", seq: 1, total: 2, status: "pending", kind: "audio" });
     expect(slots[1]).toMatchObject({ slotId: "audio-m1-1", seq: 2, total: 2 });
     // 非 home 线程：每条补写一次后端快照槽
     expect(ensureAudioSlot).toHaveBeenCalledTimes(2);
-    expect(vi.mocked(ensureAudioSlot).mock.calls[0][0]).toMatchObject({ threadId: "r1", messageId: "m1", slotId: "audio-m1-0", speaker: "沈糯", seq: 1, total: 2 });
+    expect(vi.mocked(ensureAudioSlot).mock.calls[0][0]).toMatchObject({ threadId: "r1", messageId: "m1", slotId: "audio-m1-0", speaker: "庄听澜", seq: 1, total: 2 });
     // 上屏日志 + 轮询接线：第 4 参后台 target、第 6 参显式 audio
     expect(reportAudioSubmission).toHaveBeenCalledTimes(2);
-    expect(vi.mocked(reportAudioSubmission).mock.calls[0][0]).toMatchObject({ threadId: "r1", repoId: "r1", messageId: "m1", slotId: "audio-m1-0", speaker: "沈糯", promptId: "pid-1" });
+    expect(vi.mocked(reportAudioSubmission).mock.calls[0][0]).toMatchObject({ threadId: "r1", repoId: "r1", messageId: "m1", slotId: "audio-m1-0", speaker: "庄听澜", promptId: "pid-1" });
     expect(rig.pollResult).toHaveBeenCalledTimes(2);
     expect(rig.pollResult.mock.calls[0]).toEqual([
       "pid-1", ["9"], undefined, { messageId: "m1", slotId: "audio-m1-0", background: true }, "第一句", "audio",
@@ -239,7 +239,7 @@ describe("submitAudio 行为网", () => {
       templates: [{ ...AUDIO_TPL_RAW, primary_output_node_id: undefined } as never],
       messages: [TEXT_MSG],
     });
-    await callSubmit(rig, [{ speaker: "沈糯", text: "第一句" }]);
+    await callSubmit(rig, [{ speaker: "庄听澜", text: "第一句" }]);
     expect(rig.pollResult.mock.calls[0][1]).toEqual([]);
   });
 
@@ -247,8 +247,8 @@ describe("submitAudio 行为网", () => {
     const rig = makeDeps({ messages: [TEXT_MSG] });
     vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("net down"); }));
     await callSubmit(rig, [
-      { speaker: "沈糯", text: "第一句" },
-      { speaker: "沈糯", text: "第二句" },
+      { speaker: "庄听澜", text: "第一句" },
+      { speaker: "庄听澜", text: "第二句" },
     ]);
     // 两行都上传失败（同一 fetch mock）⇒ 零提交、零插槽
     expect(submitWorkflow).not.toHaveBeenCalled();
@@ -258,7 +258,7 @@ describe("submitAudio 行为网", () => {
   it("提交返回无 prompt_id ⇒ dropMediaSlot 摘槽、不轮询、不上屏日志", async () => {
     const rig = makeDeps({ messages: [TEXT_MSG] });
     vi.mocked(submitWorkflow).mockResolvedValue({ node_count: 1 } as never);
-    await callSubmit(rig, [{ speaker: "沈糯", text: "第一句" }]);
+    await callSubmit(rig, [{ speaker: "庄听澜", text: "第一句" }]);
     // 先 append 后 drop ⇒ 终态不残留 media-slot（text part 不受影响）
     const slots = (rig.state.messages[0].parts || []).filter((p) => p.type === "media-slot");
     expect(slots).toHaveLength(0);
@@ -269,7 +269,7 @@ describe("submitAudio 行为网", () => {
   it("提交抛错 ⇒ dropMediaSlot 摘槽（异常不冒泡）", async () => {
     const rig = makeDeps({ messages: [TEXT_MSG] });
     vi.mocked(submitWorkflow).mockRejectedValue(new Error("submit boom"));
-    await callSubmit(rig, [{ speaker: "沈糯", text: "第一句" }]);
+    await callSubmit(rig, [{ speaker: "庄听澜", text: "第一句" }]);
     const slots = (rig.state.messages[0].parts || []).filter((p) => p.type === "media-slot");
     expect(slots).toHaveLength(0);
     expect(rig.pollResult).not.toHaveBeenCalled();
@@ -277,7 +277,7 @@ describe("submitAudio 行为网", () => {
 
   it("home 线程 ⇒ 不补写后端快照槽，其余链路照常", async () => {
     const rig = makeDeps({ threadId: "home", messages: [TEXT_MSG] });
-    await callSubmit(rig, [{ speaker: "沈糯", text: "第一句" }]);
+    await callSubmit(rig, [{ speaker: "庄听澜", text: "第一句" }]);
     expect(ensureAudioSlot).not.toHaveBeenCalled();
     expect(submitWorkflow).toHaveBeenCalledTimes(1);
     expect(rig.pollResult).toHaveBeenCalledTimes(1);
@@ -296,7 +296,7 @@ describe("mergeAudioTracks 行为网", () => {
   it("分条音频不足 2 条 ⇒ 不请求拼接、静默返回", async () => {
     const rig = makeDeps({ messages: [{
       id: "m1", role: "assistant", text: "正文", parts: [
-        { type: "audio", url: "u1", slotId: "audio-m1-0", status: "ready", kind: "audio", speaker: "沈糯" },
+        { type: "audio", url: "u1", slotId: "audio-m1-0", status: "ready", kind: "audio", speaker: "庄听澜" },
       ],
     } as ChatMessage] });
     await callMerge(rig);

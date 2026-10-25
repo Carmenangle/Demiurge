@@ -65,7 +65,7 @@ export function openArtifactFolder(outputDir: string, path: string, select = tru
 
 /** 产物版本历史：每次智能编造完成自动存档（_versions/<序号>-<时间戳>/）。 */
 export interface ArtifactVersionFile {
-  rel: string;      // 相对作品根的路径，如 玫瑰与繁花/card.json
+  rel: string;      // 相对作品根的路径，如 青梧与晚风/card.json
   name: string;     // card.json | worldbook.json（与产物白名单一致，可直接预览）
   size: number;
   mtime: number;

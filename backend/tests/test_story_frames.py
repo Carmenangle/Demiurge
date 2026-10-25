@@ -9,7 +9,7 @@ def test_empty_returns_empty():
 
 
 def test_single_paragraph_opening_equals_closing():
-    f = story_frames.extract_story_frames("温知夏站在面馆门口，暖黄灯光照亮她的侧脸。")
+    f = story_frames.extract_story_frames("纪含章站在面馆门口，暖黄灯光照亮她的侧脸。")
     assert f.opening == f.closing
     assert f.evidence == "single_paragraph"
 
@@ -17,7 +17,7 @@ def test_single_paragraph_opening_equals_closing():
 def test_multi_paragraph_first_last():
     text = (
         "雨夜，面馆门口挂起暖黄的灯笼，水珠顺着门帘滴落。\n\n"
-        "温知夏推门而入，沈糯已经坐定，朝她招手。\n\n"
+        "纪含章推门而入，庄听澜已经坐定，朝她招手。\n\n"
         "三人举杯同框，笑声在暖光里散开。"
     )
     f = story_frames.extract_story_frames(text)
@@ -30,8 +30,8 @@ def test_pure_dialogue_head_borrows_next_visual():
     # 首段纯对白 → 借相邻有画面段，保持「开头」位置语义
     text = (
         "「你迟到了。」\n\n"
-        "沈糯抬眼，放下筷子，朝门口笑了笑。\n\n"
-        "温知夏脱下围巾，水汽在暖光里升腾。"
+        "庄听澜抬眼，放下筷子，朝门口笑了笑。\n\n"
+        "纪含章脱下围巾，水汽在暖光里升腾。"
     )
     f = story_frames.extract_story_frames(text)
     assert "筷子" in f.opening  # 借到了第二段画面，而非纯对白首段
@@ -66,7 +66,7 @@ def test_引号内的动词不算画面词():
     """形态缺陷回归锁：`_VISUAL_TERMS` 含「坐/看/走/站」等动作词 ⇒
     纯对白「…这样坐就行吗？」被判成「有画面」⇒ 借段闸被绕过。
     画面词只算**引号外**的叙述文本。"""
-    assert story_frames._has_visual("宥夏坐在沙发边缘。") is True
+    assert story_frames._has_visual("清夏坐在沙发边缘。") is True
     assert story_frames._has_visual("“这样坐就行吗？”") is False
     # 引号外仍有叙述 ⇒ 照旧算有画面（不把整段判死）
     assert story_frames._has_visual("“走吧。”她转身推开门。") is True
@@ -78,7 +78,7 @@ def test_长纯对白首段仍取到开头部分叙述():
     新口径：开头部分＝首段起**连续累计**（不跳段），必然带上后文的叙述。"""
     text = (
         "“这、这样坐就行吗……？泰宇老师？”\n\n"
-        "宥夏抬起眼，指尖攥紧了裙摆，膝盖并拢坐在沙发边缘。"
+        "清夏抬起眼，指尖攥紧了裙摆，膝盖并拢坐在沙发边缘。"
     )
     f = story_frames.extract_story_frames(text)
     assert f.opening.startswith("“这、这样坐就行吗")
@@ -88,7 +88,7 @@ def test_长纯对白首段仍取到开头部分叙述():
 def test_结尾纯对白向前连续累计到有画面段():
     text = (
         "雨夜，面馆门口挂起暖黄的灯笼。\n\n"
-        "温知夏推门而入，沈糯已经坐定。\n\n"
+        "纪含章推门而入，庄听澜已经坐定。\n\n"
         "「明天见。」\n\n"
         "“路上小心。”"
     )
@@ -101,7 +101,7 @@ def test_结尾纯对白向前连续累计到有画面段():
 def test_前尾部分不跳段且各自从边界起():
     text = (
         "雨夜，面馆门口挂起暖黄的灯笼。\n\n"
-        "温知夏推门而入。\n\n"
+        "纪含章推门而入。\n\n"
         "三人举杯同框，笑声在暖光里散开。"
     )
     f = story_frames.extract_story_frames(text)
@@ -122,7 +122,7 @@ def test_复用判定只看curr首段_宽窗口后段切换词不误判():
     后段的「后来/离开」会把本来能接上的首帧误判成 regenerate。只取首段。"""
     d = story_frames.judge_frame_reuse(
         "三人围坐面馆，举杯同框。",
-        "面馆里的暖光依旧，沈糯抿了口汤。\n\n她后来离开面馆，走到街上。",
+        "面馆里的暖光依旧，庄听澜抿了口汤。\n\n她后来离开面馆，走到街上。",
     )
     assert d.decision == "reuse"
     assert d.evidence == "shared_locale:面馆"
@@ -143,7 +143,7 @@ def test_复用判定只看prev末段():
 def test_reuse_shared_locale_same_scene():
     # 两段共享具体地点词且无切换信号 → reuse
     d = story_frames.judge_frame_reuse(
-        "三人围坐面馆，举杯同框。", "面馆里的暖光依旧，沈糯抿了口汤。",
+        "三人围坐面馆，举杯同框。", "面馆里的暖光依旧，庄听澜抿了口汤。",
     )
     assert d.decision == "reuse"
     assert d.evidence == "shared_locale:面馆"
@@ -152,7 +152,7 @@ def test_reuse_shared_locale_same_scene():
 def test_regenerate_time_jump():
     # N+1 首段含日期跳跃词 → regenerate
     d = story_frames.judge_frame_reuse(
-        "三人围坐面馆，举杯同框。", "次日清晨，温知夏在车站送别。",
+        "三人围坐面馆，举杯同框。", "次日清晨，纪含章在车站送别。",
     )
     assert d.decision == "regenerate"
     assert d.evidence.startswith("time_jump:")
@@ -204,7 +204,7 @@ def test_scene_internal_motion_not_regenerate():
 def test_merge_l0_reuse_wins_over_l1():
     # L0 确定 reuse（共享地点词）→ 忽略 <transition> regenerate
     d = story_frames.merge_frame_reuse(
-        "三人围坐面馆，举杯同框。", "面馆里的暖光依旧，沈糯抿了口汤。", "regenerate",
+        "三人围坐面馆，举杯同框。", "面馆里的暖光依旧，庄听澜抿了口汤。", "regenerate",
     )
     assert d.decision == "reuse"
     assert d.evidence.startswith("shared_locale:")

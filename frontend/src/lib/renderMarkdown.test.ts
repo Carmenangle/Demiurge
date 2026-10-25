@@ -7,7 +7,7 @@ import { hardenAnchors, renderMarkdown } from "./renderMarkdown";
 
 describe("renderMarkdown 外链加固（C3）", () => {
   it("http(s) 外链自动新窗口打开并断开 opener", () => {
-    const html = renderMarkdown("参考 [月见八千代](https://example.com/yachiyo?a=1) 的资料");
+    const html = renderMarkdown("参考 [雪村八千代](https://example.com/yachiyo?a=1) 的资料");
     expect(html).toContain('href="https://example.com/yachiyo?a=1"');
     expect(html).toContain('target="_blank"');
     expect(html).toContain('rel="noopener noreferrer"');

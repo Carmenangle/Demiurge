@@ -8,7 +8,7 @@
   * `narrator` 只从用户设置（人设名）取，`backend/data/user_state.json` 里 `userName` 为空
     ⇒ 第 37 刀四条数据层闸（`filter_anchor_subjects` / `_strip_narrator_from_model_view` /
     `_contract_subject_names` / 性别注入闸）**集体空转**；
-  * 真机 `illustration.anchor_intent.subjects=["凌渊","妲千沁"]` ⇒ 叙事者占了主体名额 ⇒
+  * 真机 `illustration.anchor_intent.subjects=["洛渊","沈映澜"]` ⇒ 叙事者占了主体名额 ⇒
     多人契约按两人成稿 ⇒ 成稿含 `adult man`，女主服装被绑到他身上。
 
 本探针验证两件事（均**直连 LLM**，读 `backend/data/user_state.json`，不需要起后端）：

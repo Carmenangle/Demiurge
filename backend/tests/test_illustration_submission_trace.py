@@ -21,7 +21,7 @@ def test_成功提交记录最终comfy参数(monkeypatch):
     )
     req = ai_agent.IllustrationSubmissionRequest(
         thread_id="SAVE01",
-        repo_id="神权大陆",
+        repo_id="神恩大陆",
         turn_id="turn-1",
         message_id="bot-1",
         slot_id="slot-1",
@@ -39,7 +39,7 @@ def test_成功提交记录最终comfy参数(monkeypatch):
     assert ai_agent.illustration_submission(req) == {"ok": True}
     ctx, event, data = captured[0]
     assert event == "illustration.submitted"
-    assert ctx == {"thread_id": "SAVE01", "repo_id": "神权大陆", "turn_id": "turn-1"}
+    assert ctx == {"thread_id": "SAVE01", "repo_id": "神恩大陆", "turn_id": "turn-1"}
     assert data["prompt"] == "触发词\n最终提示词"
     assert data["prompt_chars"] == len(req.prompt)
     assert data["lora_weight"] == 0.8

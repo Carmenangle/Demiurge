@@ -68,7 +68,7 @@ def strip_think(reply: str) -> str:
 _THINK_OPEN_TAG_RE = re.compile(r"<think\b[^>]*>", re.IGNORECASE)
 _THINK_CLOSE_TAG_RE = re.compile(r"</think\s*>", re.IGNORECASE)
 # 孤立 </think> 前紧邻的全角括号规划注释（模型漏写 <think> 开标签时，闭标签前
-# 常挂着写给自己的元指令，如「（正文到此，继续往后续写一点：凌渊的应对，以及
+# 常挂着写给自己的元指令，如「（正文到此，继续往后续写一点：洛渊的应对，以及
 # 本轮的收束和下一轮的钩子）」）。须含至少一个规划动词才认，防误伤正文括注。
 _ORPHAN_NOTE_RE = re.compile(r"（[^（）\n]{2,200}）\Z")
 _ORPHAN_NOTE_KEYWORDS = ("续写", "接着写", "补写", "继续写", "正文到此", "收束", "钩子")

@@ -54,9 +54,9 @@ def test_新角色登场独立触发普通场景():
 def test_组装拼接顺序与非空过滤():
     r = si.build_scene_request(
         paragraph="她俯身贴近", appearance="银发红瞳", wardrobe="", locale="舞会大厅",
-        actors=["埃斯托利亚"], reason=si.TRIGGER_CROSS_TIER, fmt=si.FMT_GPT_IMAGE)
+        actors=["奥瑞利亚"], reason=si.TRIGGER_CROSS_TIER, fmt=si.FMT_GPT_IMAGE)
     assert r.prompt == "她俯身贴近，银发红瞳，舞会大厅"  # 空 wardrobe 被过滤
-    assert r.actors == ["埃斯托利亚"] and r.fmt == si.FMT_GPT_IMAGE
+    assert r.actors == ["奥瑞利亚"] and r.fmt == si.FMT_GPT_IMAGE
 
 
 def test_全空段落prompt为空():
@@ -143,7 +143,7 @@ def test_指定锚点完全无效时按视觉高潮评分选段绝不返回None(
     assert text[offset - 5:offset] == "高潮动作。"  # 评分选中的视觉高潮段，不是收束段
 def test_首轮普通剧情兜底选择动作视觉段而不是结尾收束段():
     text = (
-        "塞西莉亚终于笑了。她俯下身，猩红竖瞳与少年平视，"
+        "卡蜜莉亚终于笑了。她俯下身，猩红竖瞳与少年平视，"
         "抬起的手指悬在他的额前。\n\n"
         "她脚下的暗影忽然翻涌，吐出一只边角泛金的黑匣。\n\n"
         "院长站在门后，低声安排起余下的事务。"
@@ -152,7 +152,7 @@ def test_首轮普通剧情兜底选择动作视觉段而不是结尾收束段()
     anchor = si.fallback_illustration_anchor(text)
     offset = si.illustration_anchor_offset(text, anchor)
 
-    assert anchor.startswith("塞西莉亚终于笑了")
+    assert anchor.startswith("卡蜜莉亚终于笑了")
     assert offset == text.index("\n\n")
     assert offset < len(text)
 
@@ -172,7 +172,7 @@ def test_兜底锚点优先选择改变剧情状态的信笺动作而非静态�
 
 def test_主计划误选结尾钩子时纠正为正文视觉高潮():
     text = (
-        "冷倾雪在湿布擦过锁骨时骤然绷紧，汗水沿肩颈滑落，随后全身剧烈颤抖。\n\n"
+        "顾凝霜在湿布擦过锁骨时骤然绷紧，汗水沿肩颈滑落，随后全身剧烈颤抖。\n\n"
         "我背着包裹沿山道离开。\n\n"
         "台下两个值夜弟子正在交班，远处红衣在雾中鲜艳。"
     )
@@ -181,7 +181,7 @@ def test_主计划误选结尾钩子时纠正为正文视觉高潮():
         text, "台下两个值夜弟子正在交班，远处红衣在雾中鲜艳。",
     )
 
-    assert anchor.startswith("冷倾雪在湿布擦过锁骨")
+    assert anchor.startswith("顾凝霜在湿布擦过锁骨")
 
 
 def test_兜底锚点只在content正文中选择并忽略think与残缺控制块():
@@ -426,11 +426,11 @@ def test_新角色登场提取前一段外貌锚点与角色名():
     text = (
         "<think>关于<encounter>块的内部规划，不得被解析。</think>\n"
         "<content>骡子拉的平板车停在孤儿院门口，赶车人跳下来时带起一阵尘土。\n\n"
-        "<encounter>\n[WHO] 方葛（伪装药材商贩）\n"
+        "<encounter>\n[WHO] 岑葛（伪装药材商贩）\n"
         "[WHERE] 边地孤儿院门口\n[MOOD] 风尘仆仆的爽朗热络\n</encounter>\n\n"
         "方脸，浓眉，宽肩厚背，褐色短褂袖口挽到肘弯，露出结实小臂和掌心厚茧，"
         "咧嘴一笑时露出小虎牙。\n\n"
-        "方葛把第一口药材木箱搬到门前石台上，招呼仍然不安的院长查看黄芪。\n"
+        "岑葛把第一口药材木箱搬到门前石台上，招呼仍然不安的院长查看黄芪。\n"
         "</content>"
     )
 
@@ -440,12 +440,12 @@ def test_新角色登场提取前一段外貌锚点与角色名():
         "方脸，浓眉，宽肩厚背，褐色短褂袖口挽到肘弯，露出结实小臂和掌心厚茧，"
         "咧嘴一笑时露出小虎牙。"
     )
-    assert actors == ["方葛"]
+    assert actors == ["岑葛"]
     assert "骡子拉的平板车" in narrative
-    assert "方葛把第一口药材木箱搬到门前石台上" in narrative
+    assert "岑葛把第一口药材木箱搬到门前石台上" in narrative
     assert "内部规划" not in narrative
     assert facts == {
-        "who": "方葛（伪装药材商贩）",
+        "who": "岑葛（伪装药材商贩）",
         "where": "边地孤儿院门口",
         "mood": "风尘仆仆的爽朗热络",
     }
@@ -453,7 +453,7 @@ def test_新角色登场提取前一段外貌锚点与角色名():
 
 def test_残缺或无角色名的encounter不触发生图():
     assert si.encounter_illustration_context(
-        "<content>庭院里风声渐紧。\n\n<encounter>[WHO] 方葛"
+        "<content>庭院里风声渐紧。\n\n<encounter>[WHO] 岑葛"
     ) == ("", "", [], {})
 
 
@@ -575,9 +575,9 @@ def test_未闭合think吞全文时锚点无正文可落():
 
 def test_世界书锚失配时从重要角色表补外貌与穿着():
     tables = [{"name": "重要角色表", "columns": ["姓名", "外貌特征", "穿着打扮"],
-               "rows": [["舞姬恋", "丰腴雌艳的绝色美母", "藕荷色束腰长裙"]]}]
-    out = si.supplement_actor_table_appearance("", ["舞姬恋"], tables)
-    assert "舞姬恋：" in out
+               "rows": [["星织恋", "丰腴雌艳的绝色美母", "藕荷色束腰长裙"]]}]
+    out = si.supplement_actor_table_appearance("", ["星织恋"], tables)
+    assert "星织恋：" in out
     assert "【外貌】丰腴雌艳的绝色美母" in out
     assert "【穿着】藕荷色束腰长裙" in out
 
@@ -585,10 +585,10 @@ def test_世界书锚失配时从重要角色表补外貌与穿着():
 def test_表格里没有的角色不动且原有段落保留():
     # ⚠ 第 36 刀改了「两边都有」的语义（改为融合），本用例只覆盖「表格里没有该角色」
     # 那一支 ⇒ 断言不变；融合面见下面的第 36 刀用例。
-    tables = [{"name": "重要角色表", "columns": ["姓名", "外貌特征"], "rows": [["舞姬恋", "美母"]]}]
-    out = si.supplement_actor_table_appearance("凌若冰：冰肌玉骨", ["凌若冰", "舞姬恋"], tables)
-    assert out.startswith("凌若冰：")
-    assert "舞姬恋：" in out
+    tables = [{"name": "重要角色表", "columns": ["姓名", "外貌特征"], "rows": [["星织恋", "美母"]]}]
+    out = si.supplement_actor_table_appearance("谢若冰：冰肌玉骨", ["谢若冰", "星织恋"], tables)
+    assert out.startswith("谢若冰：")
+    assert "星织恋：" in out
 
 
 def test_表格查无此角色时原样返回():
@@ -598,9 +598,9 @@ def test_表格查无此角色时原样返回():
 def test_支持tables包裹形状并跳过无姓名列表():
     wrapped = {"tables": [
         {"name": "杂项", "columns": ["条目", "内容"], "rows": [["x", "y"]]},
-        {"name": "重要角色表", "columns": ["姓名", "外貌特征"], "rows": [["舞姬恋", "美母"]]},
+        {"name": "重要角色表", "columns": ["姓名", "外貌特征"], "rows": [["星织恋", "美母"]]},
     ]}
-    out = si.supplement_actor_table_appearance("", ["舞姬恋"], wrapped)
+    out = si.supplement_actor_table_appearance("", ["星织恋"], wrapped)
     assert "【外貌】美母" in out
     assert "【穿着】" not in out
 
@@ -615,7 +615,7 @@ def _冰表格() -> list[dict]:
         "name": "重要角色表",
         "columns": ["姓名", "外貌特征", "穿着打扮"],
         "rows": [[
-            "凌若冰",
+            "谢若冰",
             "凤眸冷艳，耳根残红未褪；仙裙滑落半肩又拢好",
             "宗主仙裙半褪后重新拢好，肩头衣料微湿",
         ]],
@@ -623,8 +623,8 @@ def _冰表格() -> list[dict]:
 
 
 def test_第36刀_条目与表格同时存在时融合而非整行跳过():
-    entry = "凌若冰：【外貌】冷艳高华的绝世美妇，一头乌黑长发；【身材】媚软纤腰；【穿着】素雅华贵的宗主仙裙"
-    out = si.supplement_actor_table_appearance(entry, ["凌若冰"], _冰表格())
+    entry = "谢若冰：【外貌】冷艳高华的绝世美妇，一头乌黑长发；【身材】媚软纤腰；【穿着】素雅华贵的宗主仙裙"
+    out = si.supplement_actor_table_appearance(entry, ["谢若冰"], _冰表格())
 
     assert out != entry                       # 不再是「已点名就跳过」
     assert "一头乌黑长发" in out                 # 条目＝最初设定，保留
@@ -634,71 +634,71 @@ def test_第36刀_条目与表格同时存在时融合而非整行跳过():
 
 
 def test_第36刀_条目在前表格在后即最新状态落在最后():
-    entry = "凌若冰：【外貌】乌黑长发；【穿着】宗主仙裙"
-    out = si.supplement_actor_table_appearance(entry, ["凌若冰"], _冰表格())
+    entry = "谢若冰：【外貌】乌黑长发；【穿着】宗主仙裙"
+    out = si.supplement_actor_table_appearance(entry, ["谢若冰"], _冰表格())
 
     assert out.index("乌黑长发") < out.index("耳根残红未褪")
     assert out.index("宗主仙裙") < out.index("宗主仙裙半褪后重新拢好")
     # 两个桶都留在原位，没有新起第二段
-    assert out.count("凌若冰：") == 1
+    assert out.count("谢若冰：") == 1
     assert "【身材】" not in out
 
 
 def test_第36刀_表格分句与条目逐字重复时不重写():
     tables = [{"name": "重要角色表", "columns": ["姓名", "外貌特征"],
-               "rows": [["凌若冰", "冰肌玉骨"]]}]
-    entry = "凌若冰：【外貌】冰肌玉骨，乌黑长发"
+               "rows": [["谢若冰", "冰肌玉骨"]]}]
+    entry = "谢若冰：【外貌】冰肌玉骨，乌黑长发"
 
-    assert si.supplement_actor_table_appearance(entry, ["凌若冰"], tables) == entry
+    assert si.supplement_actor_table_appearance(entry, ["谢若冰"], tables) == entry
 
 
 def test_第36刀_表格缺该属性桶时在块尾新起桶():
     tables = [{"name": "重要角色表", "columns": ["姓名", "外貌特征"],
-               "rows": [["凌若冰", "凤眸冷艳"]]}]
-    entry = "凌若冰：【穿着】宗主仙裙"
-    out = si.supplement_actor_table_appearance(entry, ["凌若冰"], tables)
+               "rows": [["谢若冰", "凤眸冷艳"]]}]
+    entry = "谢若冰：【穿着】宗主仙裙"
+    out = si.supplement_actor_table_appearance(entry, ["谢若冰"], tables)
 
     assert "【外貌】凤眸冷艳" in out
     assert out.index("【穿着】") < out.index("【外貌】")
 
 
 def test_第36刀_表格里没有该角色时逐字节不变():
-    entry = "凌若冰：【外貌】冰肌玉骨"
+    entry = "谢若冰：【外貌】冰肌玉骨"
     tables = [{"name": "重要角色表", "columns": ["姓名", "外貌特征"],
-               "rows": [["舞姬恋", "美母"]]}]
+               "rows": [["星织恋", "美母"]]}]
 
-    assert si.supplement_actor_table_appearance(entry, ["凌若冰"], tables) == entry
+    assert si.supplement_actor_table_appearance(entry, ["谢若冰"], tables) == entry
 
 
 def test_第36刀_无表或空主体时逐字节不变():
-    entry = "凌若冰：【外貌】冰肌玉骨"
+    entry = "谢若冰：【外貌】冰肌玉骨"
 
-    assert si.supplement_actor_table_appearance(entry, ["凌若冰"], []) == entry
+    assert si.supplement_actor_table_appearance(entry, ["谢若冰"], []) == entry
     assert si.supplement_actor_table_appearance(entry, [], _冰表格()) == entry
 
 
 def test_第36刀_条目没有该角色时仍按旧形态新起一行():
     out = si.supplement_actor_table_appearance(
-        "凌若冰：冰肌玉骨", ["凌若冰", "舞姬恋"],
+        "谢若冰：冰肌玉骨", ["谢若冰", "星织恋"],
         [{"name": "重要角色表", "columns": ["姓名", "外貌特征"],
-          "rows": [["舞姬恋", "美母"]]}],
+          "rows": [["星织恋", "美母"]]}],
     )
 
-    assert out.startswith("凌若冰：冰肌玉骨\n")
-    assert "舞姬恋：【外貌】美母" in out
+    assert out.startswith("谢若冰：冰肌玉骨\n")
+    assert "星织恋：【外貌】美母" in out
 
 
 def test_第36刀_诊断逐角色报外观事实来源():
-    entry = "凌若冰：【外貌】冰肌玉骨\n舞姬恋：藕荷色长裙"
+    entry = "谢若冰：【外貌】冰肌玉骨\n星织恋：藕荷色长裙"
     tables = [{"name": "重要角色表", "columns": ["姓名", "外貌特征"],
-               "rows": [["凌若冰", "耳根残红未褪"], ["路人甲", "魁梧"]]}]
+               "rows": [["谢若冰", "耳根残红未褪"], ["路人甲", "魁梧"]]}]
 
     sources = si.actor_appearance_sources(
-        entry, ["凌若冰", "舞姬恋", "丁", "路人甲"], tables,
+        entry, ["谢若冰", "星织恋", "丁", "路人甲"], tables,
     )
 
-    assert sources["凌若冰"] == "merged"   # 条目＋表格都供了事实
-    assert sources["舞姬恋"] == "entry"    # 只有条目
+    assert sources["谢若冰"] == "merged"   # 条目＋表格都供了事实
+    assert sources["星织恋"] == "entry"    # 只有条目
     assert sources["路人甲"] == "table"    # 只有表格（条目缺粮那一支）
     assert sources["丁"] == "none"        # 两边都没有
     assert si.actor_appearance_sources(entry, [], tables) == {}
@@ -710,8 +710,8 @@ def test_第36刀_诊断逐角色报外观事实来源():
 
 
 def test_第36刀_同一套服装的新状态仍融合():
-    entry = "凌若冰：【穿着】素雅华贵的宗主仙裙配黑色蕾丝长丝袜与金绑带高跟"
-    out = si.supplement_actor_table_appearance(entry, ["凌若冰"], _冰表格())
+    entry = "谢若冰：【穿着】素雅华贵的宗主仙裙配黑色蕾丝长丝袜与金绑带高跟"
+    out = si.supplement_actor_table_appearance(entry, ["谢若冰"], _冰表格())
 
     assert "素雅华贵的宗主仙裙" in out          # 同物（共享「宗主仙裙」）⇒ 基础款保留
     assert "黑色蕾丝长丝袜" in out
@@ -721,9 +721,9 @@ def test_第36刀_同一套服装的新状态仍融合():
 
 def test_第36刀_两套互斥服装不并存按优先级覆盖():
     tables = [{"name": "重要角色表", "columns": ["姓名", "穿着打扮"],
-               "rows": [["凌若冰", "曳地白色婚纱"]]}]
-    entry = "凌若冰：【穿着】黑色兔女郎紧身衣、兔耳发箍"
-    out = si.supplement_actor_table_appearance(entry, ["凌若冰"], tables)
+               "rows": [["谢若冰", "曳地白色婚纱"]]}]
+    entry = "谢若冰：【穿着】黑色兔女郎紧身衣、兔耳发箍"
+    out = si.supplement_actor_table_appearance(entry, ["谢若冰"], tables)
 
     assert "婚纱" in out            # 表格＝上轮信息，优先级高于条目
     assert "兔女郎" not in out       # 互斥 ⇒ 旧的整套丢掉，**不并存**
@@ -731,9 +731,9 @@ def test_第36刀_两套互斥服装不并存按优先级覆盖():
 
 def test_第36刀_穿着互斥只覆盖穿着桶不动可叠加属性():
     tables = [{"name": "重要角色表", "columns": ["姓名", "外貌特征", "穿着打扮"],
-               "rows": [["凌若冰", "凤眸冷艳", "曳地白色婚纱"]]}]
-    entry = "凌若冰：【外貌】冷艳高华的绝世美妇；【身材】媚软纤腰；【穿着】黑色兔女郎紧身衣"
-    out = si.supplement_actor_table_appearance(entry, ["凌若冰"], tables)
+               "rows": [["谢若冰", "凤眸冷艳", "曳地白色婚纱"]]}]
+    entry = "谢若冰：【外貌】冷艳高华的绝世美妇；【身材】媚软纤腰；【穿着】黑色兔女郎紧身衣"
+    out = si.supplement_actor_table_appearance(entry, ["谢若冰"], tables)
 
     assert "冷艳高华的绝世美妇" in out and "媚软纤腰" in out   # 外貌／身材照旧融合
     assert "凤眸冷艳" in out
@@ -741,26 +741,26 @@ def test_第36刀_穿着互斥只覆盖穿着桶不动可叠加属性():
 
 
 def test_第36刀_表格空值占位不当事实并入():
-    # 真机数据实测：虞莹纱的「外貌特征」「穿着打扮」两列字面写的就是「未提及」。
+    # 真机数据实测：陆莹纱的「外貌特征」「穿着打扮」两列字面写的就是「未提及」。
     tables = [{"name": "重要角色表", "columns": ["姓名", "外貌特征", "穿着打扮"],
-               "rows": [["虞莹纱", "未提及", "未提及"]]}]
-    entry = "虞莹纱：【外貌】红绸束发、粉雕玉琢"
+               "rows": [["陆莹纱", "未提及", "未提及"]]}]
+    entry = "陆莹纱：【外貌】红绸束发、粉雕玉琢"
 
-    assert si.supplement_actor_table_appearance(entry, ["虞莹纱"], tables) == entry
-    assert si.actor_appearance_sources(entry, ["虞莹纱"], tables) == {"虞莹纱": "entry"}
+    assert si.supplement_actor_table_appearance(entry, ["陆莹纱"], tables) == entry
+    assert si.actor_appearance_sources(entry, ["陆莹纱"], tables) == {"陆莹纱": "entry"}
 
 
 def test_第36刀_互斥覆盖保留桶内换行不粘连下一个标签():
     # 条目是**整卡正文**（【外貌】…\n【穿着】…\n【绑定世界书】…）；覆盖穿着桶时
     # 若吞掉桶内换行，会把下一个标签粘进穿着内容（真机实测到「未着衣【绑定世界书】」）。
     tables = [{"name": "重要角色表", "columns": ["姓名", "穿着打扮"],
-               "rows": [["凌若冰", "灌顶施术中浸泡浮花泉，未着衣"]]}]
+               "rows": [["谢若冰", "灌顶施术中浸泡浮花泉，未着衣"]]}]
     entry = (
-        "凌若冰：【外貌】冷艳高华\n"
+        "谢若冰：【外貌】冷艳高华\n"
         "【穿着】素雅华贵的宗主仙裙配黑色蕾丝长丝袜\n"
-        "【绑定世界书】凌霄仙母录"
+        "【绑定世界书】苍梧仙闻录"
     )
-    out = si.supplement_actor_table_appearance(entry, ["凌若冰"], tables)
+    out = si.supplement_actor_table_appearance(entry, ["谢若冰"], tables)
 
     assert "未着衣\n【绑定世界书】" in out
     assert "未着衣【绑定世界书】" not in out
@@ -784,7 +784,7 @@ def _nsfw_single_fixture() -> str:
         "我在她耳边轻声说道：这里是教室，叫小声点。",
         "噗叽噗叽噗叽噗叽♡",
         "我紧紧抓住她的臀部，用力挺腰！",
-        "我连可爱宥夏小穴里剩下的最后一滴都要榨干，继续射精。",
+        "我连可爱清夏小穴里剩下的最后一滴都要榨干，继续射精。",
     ])
 
 
@@ -804,7 +804,7 @@ def test_射精类结果句锚点仍能取回前面动作链():
     片段退化成单段（实测 26 字）。修复后必须向前取回动作链。"""
     text = _nsfw_single_fixture()
     excerpt = si.illustration_scene_excerpt(
-        text, "我连可爱宥夏小穴里剩下的最后一滴都要榨干，继续射精。",
+        text, "我连可爱清夏小穴里剩下的最后一滴都要榨干，继续射精。",
     )
     assert "捅到了底" in excerpt
     assert len(excerpt) > 100
@@ -829,13 +829,13 @@ def test_比喻性的消失不算状态变化动作():
 def test_判据解析容忍think前缀与代码围栏():
     raw = (
         "<think>先判断呈现度</think>\n```json\n"
-        '{"anchor": "浑身无力的宥夏靠在公告栏上。", "composition": "中景", '
-        '"subjects": ["宥夏"], "reason": "事后定型态"}\n```'
+        '{"anchor": "浑身无力的清夏靠在公告栏上。", "composition": "中景", '
+        '"subjects": ["清夏"], "reason": "事后定型态"}\n```'
     )
     parsed = si.parse_anchor_intent(raw)
-    assert parsed["anchor"] == "浑身无力的宥夏靠在公告栏上。"
+    assert parsed["anchor"] == "浑身无力的清夏靠在公告栏上。"
     assert parsed["composition"] == "中景"
-    assert parsed["subjects"] == ["宥夏"]
+    assert parsed["subjects"] == ["清夏"]
 
 
 def test_判据解析容忍全角引号分隔符():
@@ -866,9 +866,9 @@ def test_判据解析全字段缺失返回None():
 
 
 def test_判据anchor必须逐字落文():
-    text = "前文。\n\n浑身无力的宥夏靠在公告栏上。\n\n后文。"
-    anchor, detail = si.resolve_anchor_intent(text, '{"anchor": "浑身无力的宥夏靠在公告栏上。"}')
-    assert anchor == "浑身无力的宥夏靠在公告栏上。"
+    text = "前文。\n\n浑身无力的清夏靠在公告栏上。\n\n后文。"
+    anchor, detail = si.resolve_anchor_intent(text, '{"anchor": "浑身无力的清夏靠在公告栏上。"}')
+    assert anchor == "浑身无力的清夏靠在公告栏上。"
     assert detail["anchor"] == anchor
     bad, _ = si.resolve_anchor_intent(text, '{"anchor": "她心满意足地笑了。"}')
     assert bad == ""
@@ -882,8 +882,8 @@ def test_判据anchor归一化忽略空白与各类引号():
 
 def test_判据不做模糊匹配():
     """evidence 是硬校验：换个说法（不逐字）必须判无效——模糊匹配会让编造句通过。"""
-    text = "前文。\n\n浑身无力的宥夏靠在公告栏上。\n\n后文。"
-    assert si.anchor_evidence_in_text(text, "宥夏浑身无力地靠着公告栏") is False
+    text = "前文。\n\n浑身无力的清夏靠在公告栏上。\n\n后文。"
+    assert si.anchor_evidence_in_text(text, "清夏浑身无力地靠着公告栏") is False
     assert si.anchor_evidence_in_text(text, "") is False
 
 
@@ -906,9 +906,9 @@ def test_判据跨段锚点收敛到首段():
 
 def test_判据单段锚点不带收敛痕迹():
     """单段锚点不得因收敛逻辑产生任何额外字段或改写。"""
-    text = "前文。\n\n浑身无力的宥夏靠在公告栏上。\n\n后文。"
-    anchor, detail = si.resolve_anchor_intent(text, '{"anchor": "浑身无力的宥夏靠在公告栏上。"}')
-    assert anchor == "浑身无力的宥夏靠在公告栏上。"
+    text = "前文。\n\n浑身无力的清夏靠在公告栏上。\n\n后文。"
+    anchor, detail = si.resolve_anchor_intent(text, '{"anchor": "浑身无力的清夏靠在公告栏上。"}')
+    assert anchor == "浑身无力的清夏靠在公告栏上。"
     assert "anchor_raw" not in detail
 
 
@@ -1010,17 +1010,17 @@ def test_造词回退规则通用不依赖任何专有词():
 
 _L3_LIKE_TEXT = "\n\n".join([
     "---",
-    "世熙把双手贴到墙上，把重心压得很低。",
+    "明澜把双手贴到墙上，把重心压得很低。",
     "房间里只剩下压抑的呼吸声。",
-    "宥夏也把重心压低，贴住墙面上前。",
+    "清夏也把重心压低，贴住墙面上前。",
     "那么，我该选哪一边呢？",
 ])
 _L3_LIKE_ANCHOR = "那么，我该选哪一边呢？"
-_L3_LIKE_SUBJECTS = ["世熙", "宥夏"]
+_L3_LIKE_SUBJECTS = ["明澜", "清夏"]
 _L3_LIKE_WINDOW = "\n\n".join([
-    "世熙把双手贴到墙上，把重心压得很低。",
+    "明澜把双手贴到墙上，把重心压得很低。",
     "房间里只剩下压抑的呼吸声。",
-    "宥夏也把重心压低，贴住墙面上前。",
+    "清夏也把重心压低，贴住墙面上前。",
     "那么，我该选哪一边呢？",
 ])
 
@@ -1068,8 +1068,8 @@ def test_锚点句不含主体名时向前取到场景边界窗口():
     )
 
     assert excerpt == _L3_LIKE_WINDOW
-    assert "世熙把双手贴到墙上" in excerpt      # 场景边界之后的第一段
-    assert "宥夏也把重心压低" in excerpt        # 另一名主体也在窗口内
+    assert "明澜把双手贴到墙上" in excerpt      # 场景边界之后的第一段
+    assert "清夏也把重心压低" in excerpt        # 另一名主体也在窗口内
     assert "---" not in excerpt                 # 边界段自身不进窗口
     assert excerpt.endswith(_L3_LIKE_ANCHOR)    # 锚点＝窗口收口位置
 
@@ -1082,23 +1082,23 @@ def test_词表档与判据档的主体名口径各锁一条():
     """
     text = "\n\n".join([
         "---",
-        "世熙把双手贴到墙上。",
+        "明澜把双手贴到墙上。",
         "泰宇老师把重心压低。",
         "泰宇老师低声问了一句。",
     ])
     anchor = "泰宇老师低声问了一句。"
 
-    judged = si.illustration_scene_excerpt(text, anchor, subjects=["世熙"])
-    assert "世熙把双手贴到墙上" in judged
+    judged = si.illustration_scene_excerpt(text, anchor, subjects=["明澜"])
+    assert "明澜把双手贴到墙上" in judged
     assert "泰宇老师把重心压低" in judged
 
     keyword = si.illustration_scene_excerpt(
-        text, anchor, subjects=["世熙", "泰宇老师"],
+        text, anchor, subjects=["明澜", "泰宇老师"],
     )
-    # 口径差：锚点句含主体名 ⇒ **A′ 不触发** ⇒ 不会把「世熙把双手贴到墙上」收进来
+    # 口径差：锚点句含主体名 ⇒ **A′ 不触发** ⇒ 不会把「明澜把双手贴到墙上」收进来
     # （第 15 刀起同主体向前补足会收进「泰宇老师把重心压低」，那是**同主体事实**，
-    #  与本条要锁的「S 口径差」无关，故断言只看世熙那句在不在。）
-    assert "世熙把双手贴到墙上" not in keyword
+    #  与本条要锁的「S 口径差」无关，故断言只看明澜那句在不在。）
+    assert "明澜把双手贴到墙上" not in keyword
     assert anchor in keyword
 
 
@@ -1136,7 +1136,7 @@ def test_扩窗剔除UI占位串():
     """
     text = "\n\n".join([
         "---",
-        "世熙把双手贴到墙上，把重心压得很低。",
+        "明澜把双手贴到墙上，把重心压得很低。",
         "图片加载中...",
         "那么，我该选哪一边呢？",
     ])
@@ -1146,14 +1146,14 @@ def test_扩窗剔除UI占位串():
     )
 
     assert "图片加载中" not in excerpt
-    assert "世熙把双手贴到墙上" in excerpt
+    assert "明澜把双手贴到墙上" in excerpt
 
 
 def test_占位串在既有高潮分支窗口内也被剔除():
     """占位串过滤与 A′ 无关：分支① 的既有扩窗同样不得把它带进窗口。"""
     text = "\n\n".join([
         "---",
-        "世熙把双手贴到墙上。",
+        "明澜把双手贴到墙上。",
         "图片加载中...",
         "他猛然高潮袭来。",
     ])
@@ -1161,12 +1161,12 @@ def test_占位串在既有高潮分支窗口内也被剔除():
     excerpt = si.illustration_scene_excerpt(text, "他猛然高潮袭来。")
 
     assert "图片加载中" not in excerpt
-    assert "世熙把双手贴到墙上。" in excerpt
+    assert "明澜把双手贴到墙上。" in excerpt
 
 
 def test_占位串不得充当取材锚点段():
     text = "\n\n".join([
-        "世熙把双手贴到墙上，把重心压得很低。",
+        "明澜把双手贴到墙上，把重心压得很低。",
         "图片加载中...",
     ])
 
@@ -1253,7 +1253,7 @@ def test_取材层选址阈值与判据层回退同源():
 
 # ── 取材层窗口：「上下文事实增益」分支（2026-09-19，用户判定 L1 状态丢失）──────
 # 缺口：`_visual_action_context` 的三条扩窗分支**都以「锚点句自身」为入口**（含高潮/结果词、
-# 含动作词、不含主体名）。**定格结果句**（如「浑身无力的宥夏靠在公告栏上。」）句内无动作、
+# 含动作词、不含主体名）。**定格结果句**（如「浑身无力的清夏靠在公告栏上。」）句内无动作、
 # 无高潮/结果词，又含主体名 ⇒ 三条全不命中 ⇒ 窗口退化成锚点单句 ⇒ 前文承载的躯体状态
 # （体液 / 裸露 / 身体部位）整体丢失。真机实测：窗口 14 字，而「我把肉棒抽了出来」
 # 「满满含着的精液吧嗒嗒地滴落」「從小穴里吐出精液的样子」都在锚点前 1–4 段。
@@ -1321,7 +1321,7 @@ def test_锚点句不含主体名时仍走场景边界而非回扫窗口():
     ])
 
     excerpt = si.illustration_scene_excerpt(
-        text, "那么，我该选哪一边呢？", subjects=["世熙"],
+        text, "那么，我该选哪一边呢？", subjects=["明澜"],
     )
 
     assert "她把双手贴到墙上" in excerpt     # 场景边界之后的第一段
@@ -1461,33 +1461,33 @@ def test_锚点未点名的角色被收敛出局():
 
 
 def test_叙事者不在锚点画面时被锚点收敛自动出局():
-    """L1 形态：第一人称叙事者（泰宇老师）被判据列进 subjects，但锚点句只画宥夏
+    """L1 形态：第一人称叙事者（泰宇老师）被判据列进 subjects，但锚点句只画清夏
     ⇒ 叙事者不占画面由锚点收敛机械达成，无需识别谁是「我」。"""
     subjects = si.filter_anchor_subjects(
-        ["宥夏", "泰宇老师"], "宥夏趴在课桌上，肩膀微微发抖。", ["宥夏", "泰宇老师"],
+        ["清夏", "泰宇老师"], "清夏趴在课桌上，肩膀微微发抖。", ["清夏", "泰宇老师"],
     )
 
-    assert subjects == ["宥夏"]
+    assert subjects == ["清夏"]
 
 
 def test_锚点未点名时保留吸附补全的全名():
     """L3 形态：真多人帧锚点用代称不点名 ⇒ 不收敛（保留全部）；判据漏写的
     「老师」后缀由名字吸附补全（真机实锤：判据输出「泰宇」、角色表是「泰宇老师」）。"""
     subjects = si.filter_anchor_subjects(
-        ["世熙", "泰宇"], "两人几乎同时到达了顶点。", ["世熙", "宥夏", "泰宇老师"],
+        ["明澜", "泰宇"], "两人几乎同时到达了顶点。", ["明澜", "清夏", "泰宇老师"],
     )
 
-    assert subjects == ["世熙", "泰宇老师"]
+    assert subjects == ["明澜", "泰宇老师"]
 
 
 def test_字面我被滤除且不参与锚点收敛():
     """第一人称叙事者字面「我」不占画面；必须在收敛之前滤——否则锚点句里的
     「我」字会把 subjects 收敛成只剩「我」。"""
     subjects = si.filter_anchor_subjects(
-        ["我", "宥夏"], "我再也忍不住了。", ["宥夏"],
+        ["我", "清夏"], "我再也忍不住了。", ["清夏"],
     )
 
-    assert subjects == ["宥夏"]
+    assert subjects == ["清夏"]
 
 
 def test_名字吸附歧义时不猜保留原样():
@@ -1517,10 +1517,10 @@ def test_第一人称视角下主角本名不占画面():
     锚点句**不点名**任何角色（真机第 11 刀形态：拟声/心理句）⇒ 第③步收敛无从触发，
     剔除只能靠第②步。旧实现此时返回两人 ⇒ 多人契约误触发（用户实锤）。"""
     subjects = si.filter_anchor_subjects(
-        ["甲", "宥夏"], "我再也忍不住了。", ["甲", "宥夏"], narrator="甲",
+        ["甲", "清夏"], "我再也忍不住了。", ["甲", "清夏"], narrator="甲",
     )
 
-    assert subjects == ["宥夏"]
+    assert subjects == ["清夏"]
 
 
 def test_第三人称视角下主角本名算一个主体():
@@ -1529,18 +1529,18 @@ def test_第三人称视角下主角本名算一个主体():
     锚点用第三人称代词（第三人称**正向证据**）、且不点名任何角色 ⇒ 收敛不介入，
     正好照出第②步**没有**多剔（防止收紧过头杀掉真双人帧）。"""
     subjects = si.filter_anchor_subjects(
-        ["甲", "宥夏"], "他们几乎同时到达了顶点。", ["甲", "宥夏"], narrator="甲",
+        ["甲", "清夏"], "他们几乎同时到达了顶点。", ["甲", "清夏"], narrator="甲",
     )
 
-    assert subjects == ["甲", "宥夏"]
+    assert subjects == ["甲", "清夏"]
 
 
 def test_叙事者别名全集被滤除():
     """真机实锤的误判形态：判据把「你/玩家/主角」当角色名写进 subjects ⇒ 被算成一个人。"""
     for alias in ("你", "玩家", "主角", "宿主", "用户"):
         assert si.filter_anchor_subjects(
-            [alias, "宥夏"], "两人几乎同时到达了顶点。", ["宥夏"],
-        ) == ["宥夏"], alias
+            [alias, "清夏"], "两人几乎同时到达了顶点。", ["清夏"],
+        ) == ["清夏"], alias
 
 
 def test_帧人称只看锚点段不看全文():
@@ -1553,10 +1553,10 @@ def test_帧人称只看锚点段不看全文():
 def test_人称缺省参数逐字节等于旧行为():
     """零回归锁：不传 narrator 时，`narrator` 分支空转 ⇒ 与旧实现逐字节一致。"""
     subjects = si.filter_anchor_subjects(
-        ["宥夏", "泰宇老师"], "宥夏趴在课桌上，肩膀微微发抖。", ["宥夏", "泰宇老师"],
+        ["清夏", "泰宇老师"], "清夏趴在课桌上，肩膀微微发抖。", ["清夏", "泰宇老师"],
     )
 
-    assert subjects == ["宥夏"]
+    assert subjects == ["清夏"]
 
 
 def test_自动判定无信号时默认第一人称():
@@ -1596,26 +1596,26 @@ def test_第三人称正向证据才算第三人称_否则默认第一人称():
     """真机实锤（2026-09-20 第 14 刀）：只判「锚点段有没有『我』」会把第一人称叙事的帧判成
     第三人称——三份语料全是第一人称，但判据抽到的锚点是拟声词/心理句/触感句，句中都没有「我」。
     改成**有第三人称正向证据才算第三人称**（第三人称代词 / 角色表点名），否则无信号 ⇒ 默认第一人称。"""
-    known = ["宥夏", "泰宇老师"]
+    known = ["清夏", "泰宇老师"]
 
     # 拟声词锚点（L1 真机形态）：无任何人称信号 ⇒ 默认第一人称
-    assert si.frame_viewpoint("啵叽叽叽……！！啵嗯…！", "我抓住宥夏的手腕。", known=known) == "first_person"
+    assert si.frame_viewpoint("啵叽叽叽……！！啵嗯…！", "我抓住清夏的手腕。", known=known) == "first_person"
     # 触感句锚点（L3 真机形态）：句中有「我」⇒ 第一人称
     assert si.frame_viewpoint("突然感觉两侧有人在拉我的胳膊。", "", known=known) == "first_person"
     # 角色表点名 ⇒ 第三人称正向证据
-    assert si.frame_viewpoint("宥夏趴在课桌上。", "", known=known) == "third_person"
+    assert si.frame_viewpoint("清夏趴在课桌上。", "", known=known) == "third_person"
     # 第三人称代词 ⇒ 第三人称正向证据
     assert si.frame_viewpoint("她推开门。", "", known=known) == "third_person"
     # 锚点段无信号 ⇒ 退回正文首段判
     assert si.frame_viewpoint("啵嗯…！", "她推开门。", known=known) == "third_person"
-    assert si.frame_viewpoint("啵嗯…！", "我抓住宥夏的手腕。", known=known) == "first_person"
+    assert si.frame_viewpoint("啵嗯…！", "我抓住清夏的手腕。", known=known) == "first_person"
 
 
 def test_viewpoint_scope_单一真源接缝():
     """第 51 刀：viewpoint_scope 算一次、打包 mode/narrator/narrator_source/detail。
 
     下游 6 处消费点一律消费本结果，`filter_anchor_subjects` 不得再自判（修 D1）。"""
-    scope = si.viewpoint_scope("我推开门。", ["宥夏"], override="")
+    scope = si.viewpoint_scope("我推开门。", ["清夏"], override="")
     assert scope.mode == "first_person"
     assert scope.narrator == ""
     assert scope.narrator_source == ""
@@ -1623,7 +1623,7 @@ def test_viewpoint_scope_单一真源接缝():
 
     # 手选优先 + 三段姓名（narrator/narrator_source 由上游算好传入）
     scope2 = si.viewpoint_scope(
-        "她推开门。", ["宥夏"], override="first_person",
+        "她推开门。", ["清夏"], override="first_person",
         narrator="甲", narrator_source="user_name",
     )
     assert scope2.mode == "first_person"
@@ -1642,27 +1642,27 @@ def test_手选人称同样作用于主体后滤():
 
     否则会出现「场景下传 third_person、主体后滤却按自动判成 first_person 剔掉主人公」
     的自相矛盾：画面认定主人公算一个，主体表里却已经把他剔掉了。"""
-    known = ["甲", "宥夏"]
+    known = ["甲", "清夏"]
     anchor = "他们几乎同时到达了顶点。"      # 第三人称代词 ⇒ 自动判第三人称
-    assert si.filter_anchor_subjects(["甲", "宥夏"], anchor, known, narrator="甲") == ["甲", "宥夏"]
+    assert si.filter_anchor_subjects(["甲", "清夏"], anchor, known, narrator="甲") == ["甲", "清夏"]
     # 手选第一人称 ⇒ 主人公被剔（即使自动判成第三人称）
     assert si.filter_anchor_subjects(
-        ["甲", "宥夏"], anchor, known, narrator="甲", viewpoint="first_person",
-    ) == ["宥夏"]
+        ["甲", "清夏"], anchor, known, narrator="甲", viewpoint="first_person",
+    ) == ["清夏"]
     # 手选第三人称 ⇒ 主人公保留（即使锚点段是第一人称）
     assert si.filter_anchor_subjects(
-        ["甲", "宥夏"], "我再也忍不住了。", known, narrator="甲", viewpoint="third_person",
-    ) == ["甲", "宥夏"]
+        ["甲", "清夏"], "我再也忍不住了。", known, narrator="甲", viewpoint="third_person",
+    ) == ["甲", "清夏"]
 
 
 def test_手选人称缺省参数逐字节等于旧行为():
     """零回归锁：不传 override 时与旧实现逐字节一致（自动判定）。"""
-    known = ["甲", "宥夏"]
+    known = ["甲", "清夏"]
     assert si.filter_anchor_subjects(
-        ["甲", "宥夏"], "我再也忍不住了。", known, narrator="甲",
+        ["甲", "清夏"], "我再也忍不住了。", known, narrator="甲",
     ) == si.filter_anchor_subjects(
-        ["甲", "宥夏"], "我再也忍不住了。", known, narrator="甲", viewpoint="",
-    ) == ["宥夏"]
+        ["甲", "清夏"], "我再也忍不住了。", known, narrator="甲", viewpoint="",
+    ) == ["清夏"]
 
 
 # ── 第 42 刀·B（2026-09-22 用户实锤「手选第一人称，主人公仍在画面内」）──
@@ -2007,17 +2007,17 @@ def test_第57刀_旧单条形态逐字维持旧行为():
     这是「用户手上那份判据不必改也能继续用」的保证（合同变了但解析兼容）。
     """
     raw = (
-        '{"anchor": "浑身无力的宥夏靠在公告栏上。", "composition": "中景", '
-        '"subjects": ["宥夏"], "reason": "事后定型态"}'
+        '{"anchor": "浑身无力的清夏靠在公告栏上。", "composition": "中景", '
+        '"subjects": ["清夏"], "reason": "事后定型态"}'
     )
 
     items = si.parse_anchor_intents(raw)
 
     assert len(items) == 1
-    assert items[0]["anchor"] == "浑身无力的宥夏靠在公告栏上。"
+    assert items[0]["anchor"] == "浑身无力的清夏靠在公告栏上。"
     assert items[0]["score"] == 0                              # 缺 score ⇒ 0，**不判死**
     # 单条兼容函数逐字等价
-    assert si.parse_anchor_intent(raw)["anchor"] == "浑身无力的宥夏靠在公告栏上。"
+    assert si.parse_anchor_intent(raw)["anchor"] == "浑身无力的清夏靠在公告栏上。"
 
 
 def test_第57刀_顶层裸数组也认():

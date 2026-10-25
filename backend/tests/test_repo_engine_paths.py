@@ -2,7 +2,7 @@
 """③ 引擎路径统一（2026-09-18）：引擎域（state/tables/chronicle/事实/认知/世界观快照…）
 
 历史错轨：引擎族用 `Path(base)/safe_seg(repo_id)`（UUID 目录），chat/图/文档/画布/卡走
-`repo_meta.folder_name()`（仓库名目录）⇒ 同一仓库两套落点，实测 `凌霄仙母录` 下 state.json
+`repo_meta.folder_name()`（仓库名目录）⇒ 同一仓库两套落点，实测 `苍梧仙闻录` 下 state.json
 分裂成 turn=36（引擎处）与 turn=21（repo_meta 处）两份。
 
 本刀：新增 `repo_meta.engine_repo_dir(output_dir, repo_id)` 作为引擎域**唯一路径属主**，
@@ -39,19 +39,19 @@ def _repo(repo_id: str, name: str, parent_id: str = ""):
 
 def test_engine_repo_dir_中文仓库名用safe_dir目录(tmp_path, monkeypatch):
     """named repo → 与 chat/图/文档同域（仓库名文件夹，保中文）。"""
-    _write_state(tmp_path, monkeypatch, [_repo("uuid-1", "凌霄仙母录")])
+    _write_state(tmp_path, monkeypatch, [_repo("uuid-1", "苍梧仙闻录")])
     got = repo_meta.engine_repo_dir(str(tmp_path / "works"), "uuid-1")
-    assert got == Path(str(tmp_path / "works")) / "凌霄仙母录"
+    assert got == Path(str(tmp_path / "works")) / "苍梧仙闻录"
 
 
 def test_engine_repo_dir_子仓库嵌父作品文件夹(tmp_path, monkeypatch):
     """子仓库 → <父名>/<子名>（与 repo_folder_path 口径一致，防同名子仓库互撞）。"""
     _write_state(tmp_path, monkeypatch, [
-        _repo("p-1", "凌霄仙母录"),
+        _repo("p-1", "苍梧仙闻录"),
         _repo("c-1", "SAVE01", parent_id="p-1"),
     ])
     got = repo_meta.engine_repo_dir(str(tmp_path / "works"), "c-1")
-    assert got == Path(str(tmp_path / "works")) / "凌霄仙母录" / "SAVE01"
+    assert got == Path(str(tmp_path / "works")) / "苍梧仙闻录" / "SAVE01"
 
 
 def test_engine_repo_dir_home与无记录退回UUID段(tmp_path, monkeypatch):
@@ -69,14 +69,14 @@ def test_engine_repo_dir_空base或空repo原样返回(tmp_path):
 
 def test_engine_repo_dir_有仓库名但无base退回当前目录段(tmp_path, monkeypatch):
     """无 base（未配置作品库根）时不得拼出绝对/相对混淆路径——退回 repo_id 段。"""
-    _write_state(tmp_path, monkeypatch, [_repo("uuid-1", "凌霄仙母录")])
+    _write_state(tmp_path, monkeypatch, [_repo("uuid-1", "苍梧仙闻录")])
     assert repo_meta.engine_repo_dir("", "uuid-1") == Path(safe_seg("uuid-1"))
 
 
 # ── 迁移：旧 UUID 目录 → 新仓库名目录 ──────────────────────────────────────
 
 def test_migrate_engine_dir_旧目录有数据新目录无_整目录搬运(tmp_path, monkeypatch):
-    _write_state(tmp_path, monkeypatch, [_repo("uuid-1", "凌霄仙母录")])
+    _write_state(tmp_path, monkeypatch, [_repo("uuid-1", "苍梧仙闻录")])
     root = tmp_path / "works"
     old = root / safe_seg("uuid-1")
     old.mkdir(parents=True)
@@ -84,7 +84,7 @@ def test_migrate_engine_dir_旧目录有数据新目录无_整目录搬运(tmp_p
     (old / "chronicle.db").write_bytes(b"SQLite format 3\x00")
 
     got = repo_meta.engine_repo_dir(str(root), "uuid-1")
-    assert got == root / "凌霄仙母录"
+    assert got == root / "苍梧仙闻录"
     assert (got / "state.json").read_text(encoding="utf-8") == '{"快照":{"turn":36}}'
     assert (got / "chronicle.db").read_bytes() == b"SQLite format 3\x00"
     assert not old.exists(), "旧目录应已让位（整体 rename），不留半份分叉"
@@ -93,9 +93,9 @@ def test_migrate_engine_dir_旧目录有数据新目录无_整目录搬运(tmp_p
 def test_migrate_engine_dir_新目录已有数据_旧数据不覆盖且留档(tmp_path, monkeypatch):
     """新路径已有文件（另一分支写过的陈旧副本）：**不得覆盖**，把旧目录整体挪到
     `<新目录>/.engine_legacy_<旧段>/` 留档，避免静默丢弃。"""
-    _write_state(tmp_path, monkeypatch, [_repo("uuid-1", "凌霄仙母录")])
+    _write_state(tmp_path, monkeypatch, [_repo("uuid-1", "苍梧仙闻录")])
     root = tmp_path / "works"
-    new = root / "凌霄仙母录"
+    new = root / "苍梧仙闻录"
     new.mkdir(parents=True)
     (new / "state.json").write_text('{"快照":{"turn":21}}', encoding="utf-8")
     old = root / safe_seg("uuid-1")
@@ -109,9 +109,9 @@ def test_migrate_engine_dir_新目录已有数据_旧数据不覆盖且留档(tm
 
 
 def test_migrate_engine_dir_新位置已有同名备份目录_不重复搬且不抛(tmp_path, monkeypatch):
-    _write_state(tmp_path, monkeypatch, [_repo("uuid-1", "凌霄仙母录")])
+    _write_state(tmp_path, monkeypatch, [_repo("uuid-1", "苍梧仙闻录")])
     root = tmp_path / "works"
-    new = root / "凌霄仙母录"
+    new = root / "苍梧仙闻录"
     new.mkdir(parents=True)
     (new / "state.json").write_text("{}", encoding="utf-8")
     keeper = new / f".engine_legacy_{safe_seg('uuid-1')}"
@@ -128,7 +128,7 @@ def test_migrate_engine_dir_新位置已有同名备份目录_不重复搬且不
 
 
 def test_migrate_engine_dir_幂等_重复调用无副作用(tmp_path, monkeypatch):
-    _write_state(tmp_path, monkeypatch, [_repo("uuid-1", "凌霄仙母录")])
+    _write_state(tmp_path, monkeypatch, [_repo("uuid-1", "苍梧仙闻录")])
     root = tmp_path / "works"
     old = root / safe_seg("uuid-1")
     old.mkdir(parents=True)
@@ -168,7 +168,7 @@ def test_engine_repo_dir_老口径与新口径重合时不迁移(tmp_path, monke
 def test_引擎族落点与repo_meta同域(tmp_path, monkeypatch, module_name, file_name):
     """每个引擎模块的落点必须 = engine_repo_dir(base, repo_id) 之下。
     覆盖有独立路径函数的 5 个属主（其余 3 个 DB 模块只有 _connect，见下一测）。"""
-    _write_state(tmp_path, monkeypatch, [_repo("uuid-1", "凌霄仙母录")])
+    _write_state(tmp_path, monkeypatch, [_repo("uuid-1", "苍梧仙闻录")])
     root = str(tmp_path / "works")
     mod = __import__(f"app.services.{module_name}", fromlist=["_"])
     want = repo_meta.engine_repo_dir(root, "uuid-1") / file_name
@@ -192,7 +192,7 @@ def test_引擎族落点与repo_meta同域(tmp_path, monkeypatch, module_name, f
 def test_单库模块落点与repo_meta同域(tmp_path, monkeypatch, module_name, file_name):
     """只有 `_connect`（无独立路径函数）的 DB 模块：实际建库位置必须落在引擎域。
     通过真建一次连接后检查落盘文件位置来验证（而非猜内部函数名）。"""
-    _write_state(tmp_path, monkeypatch, [_repo("uuid-1", "凌霄仙母录")])
+    _write_state(tmp_path, monkeypatch, [_repo("uuid-1", "苍梧仙闻录")])
     root = str(tmp_path / "works")
     mod = __import__(f"app.services.{module_name}", fromlist=["_"])
     conn = mod._connect(root, "uuid-1")
@@ -206,7 +206,7 @@ def test_单库模块落点与repo_meta同域(tmp_path, monkeypatch, module_name
 def test_visual_preference读visual_ci同域(tmp_path, monkeypatch):
     """visual_preference 的 red 资产读取（不走 _connect）也必须与引擎域同源。"""
     import sqlite3
-    _write_state(tmp_path, monkeypatch, [_repo("uuid-1", "凌霄仙母录")])
+    _write_state(tmp_path, monkeypatch, [_repo("uuid-1", "苍梧仙闻录")])
     root = tmp_path / "works"
     d = repo_meta.engine_repo_dir(str(root), "uuid-1")
     d.mkdir(parents=True)
@@ -220,7 +220,7 @@ def test_visual_preference读visual_ci同域(tmp_path, monkeypatch):
 
 
 def test_agent_context_assembly世界书会话与repo_meta同域(tmp_path, monkeypatch):
-    _write_state(tmp_path, monkeypatch, [_repo("uuid-1", "凌霄仙母录")])
+    _write_state(tmp_path, monkeypatch, [_repo("uuid-1", "苍梧仙闻录")])
     root = str(tmp_path / "works")
     from app.services import agent_context_assembly as aca
     got = aca._worldbook_session_state_path({"output_dir": root, "repo_id": "uuid-1"})
@@ -246,16 +246,16 @@ def test_引擎族不再出现裸safe_seg拼路径(tmp_path):
 # ── 2026-09-20 实锤：新位置只被「非引擎产物」占住时，引擎数据不得被留档留到看不见 ──
 
 def test_migrate_engine_dir_新目录只有会话产物_引擎文件必须并入(tmp_path, monkeypatch):
-    """凌霄仙母录实测事故：新路径只因 `chat.json`/图片存在，就被判成「已有数据」⇒ 旧引擎目录
+    """苍梧仙闻录实测事故：新路径只因 `chat.json`/图片存在，就被判成「已有数据」⇒ 旧引擎目录
     被整体 rename 进 `.engine_legacy_*` 留档 ⇒ **活跃路径从此没有 tables.json/state.json**，
     UI 上表现为「数据表内容全部丢失」。
 
     口径修正：「新位置已有数据」必须指**已有引擎文件**；只有会话/图片等非引擎产物时，
     要先把旧目录里的引擎文件**并入**活跃路径，再把旧目录留档。
     """
-    _write_state(tmp_path, monkeypatch, [_repo("uuid-1", "凌霄仙母录")])
+    _write_state(tmp_path, monkeypatch, [_repo("uuid-1", "苍梧仙闻录")])
     root = tmp_path / "works"
-    new = root / "凌霄仙母录"
+    new = root / "苍梧仙闻录"
     new.mkdir(parents=True)
     (new / "chat.json").write_text('{"messages":[]}', encoding="utf-8")  # 非引擎产物
     (new / "封面.png").write_bytes(b"\x89PNG\r\n\x1a\n")
@@ -278,9 +278,9 @@ def test_migrate_engine_dir_新目录只有会话产物_引擎文件必须并入
 
 def test_migrate_engine_dir_新目录只有会话产物_已并入后幂等(tmp_path, monkeypatch):
     """并入完成后再调一次：不得重复复制、不得覆盖、不得再搬。"""
-    _write_state(tmp_path, monkeypatch, [_repo("uuid-1", "凌霄仙母录")])
+    _write_state(tmp_path, monkeypatch, [_repo("uuid-1", "苍梧仙闻录")])
     root = tmp_path / "works"
-    new = root / "凌霄仙母录"
+    new = root / "苍梧仙闻录"
     new.mkdir(parents=True)
     (new / "chat.json").write_text("{}", encoding="utf-8")
     old = root / safe_seg("uuid-1")
@@ -300,16 +300,16 @@ def test_migrate_engine_dir_新目录只有会话产物_已并入后幂等(tmp_p
 
 def test_migrate_engine_dir_子仓库老布局嵌父作品文件夹_也能找到(tmp_path, monkeypatch):
     """子仓库的老引擎目录有两种历史布局：`<根>/<uuid>` 与 `<根>/<父名>/<uuid>`。
-    凌霄仙母录实测是后者（`pictures/凌霄仙母录/09f79e6f-…`）⇒ 两种都必须能找到。"""
+    苍梧仙闻录实测是后者（`pictures/苍梧仙闻录/09f79e6f-…`）⇒ 两种都必须能找到。"""
     _write_state(tmp_path, monkeypatch, [
-        _repo("p-1", "凌霄仙母录"),
+        _repo("p-1", "苍梧仙闻录"),
         _repo("c-1", "SAVE01", parent_id="p-1"),
     ])
     root = tmp_path / "works"
-    new = root / "凌霄仙母录" / "SAVE01"
+    new = root / "苍梧仙闻录" / "SAVE01"
     new.mkdir(parents=True)
     (new / "chat.json").write_text("{}", encoding="utf-8")
-    old = root / "凌霄仙母录" / safe_seg("c-1")
+    old = root / "苍梧仙闻录" / safe_seg("c-1")
     old.mkdir(parents=True)
     (old / "tables.json").write_text('{"tables":[1]}', encoding="utf-8")
 

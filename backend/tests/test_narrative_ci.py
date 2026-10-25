@@ -3,10 +3,10 @@ from app.services import narrative_ci
 
 def test_ci发现有效事实冲突和正文直接否定():
     facts = [
-        {"subject": "塞西莉亚", "predicate": "身份", "object": "院长", "evidence": "任命书"},
-        {"subject": "塞西莉亚", "predicate": "身份", "object": "商人", "evidence": "伪造文件"},
+        {"subject": "卡蜜莉亚", "predicate": "身份", "object": "院长", "evidence": "任命书"},
+        {"subject": "卡蜜莉亚", "predicate": "身份", "object": "商人", "evidence": "伪造文件"},
     ]
-    found = narrative_ci.evaluate("塞西莉亚并非院长。", turn=8, facts=facts)
+    found = narrative_ci.evaluate("卡蜜莉亚并非院长。", turn=8, facts=facts)
     codes = {item["code"] for item in found}
     assert {"active_fact_conflict", "fact_contradiction"} <= codes
 

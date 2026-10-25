@@ -12,15 +12,15 @@ function props(portrait: { name: string; url: string } | null) {
 
 describe("assistantMessagePropsEqual", () => {
   it("keeps an unchanged rendered message stable when portrait resolution returns an equivalent object", () => {
-    const previous = props({ name: "冷倾雪", url: "/portrait.png" });
-    const next = { ...previous, portrait: { name: "冷倾雪", url: "/portrait.png" } };
+    const previous = props({ name: "顾凝霜", url: "/portrait.png" });
+    const next = { ...previous, portrait: { name: "顾凝霜", url: "/portrait.png" } };
 
     expect(assistantMessagePropsEqual(previous, next)).toBe(true);
   });
 
   it("rerenders when the visible portrait changes", () => {
-    const previous = props({ name: "冷倾雪", url: "/neutral.png" });
-    const next = { ...previous, portrait: { name: "冷倾雪", url: "/angry.png" } };
+    const previous = props({ name: "顾凝霜", url: "/neutral.png" });
+    const next = { ...previous, portrait: { name: "顾凝霜", url: "/angry.png" } };
 
     expect(assistantMessagePropsEqual(previous, next)).toBe(false);
   });

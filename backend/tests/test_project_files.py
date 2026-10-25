@@ -39,12 +39,12 @@ def test_源库目录只从后端状态读取(monkeypatch):
 def test_utf8文件可创建读取列出和精确替换(tmp_path):
     root = tmp_path.resolve()
 
-    assert project_files.write_text(root, "角色/塞西莉亚.json", '{"name":"塞西莉亚"}\n') > 0
-    assert project_files.read_text(root, "角色/塞西莉亚.json") == '{"name":"塞西莉亚"}\n'
-    assert project_files.file_exists(root, "角色/塞西莉亚.json") is True
-    assert project_files.list_files(root) == ["角色/塞西莉亚.json"]
-    assert project_files.replace_text(root, "角色/塞西莉亚.json", "塞西莉亚", "院长") == 1
-    assert project_files.read_text(root, "角色/塞西莉亚.json") == '{"name":"院长"}\n'
+    assert project_files.write_text(root, "角色/卡蜜莉亚.json", '{"name":"卡蜜莉亚"}\n') > 0
+    assert project_files.read_text(root, "角色/卡蜜莉亚.json") == '{"name":"卡蜜莉亚"}\n'
+    assert project_files.file_exists(root, "角色/卡蜜莉亚.json") is True
+    assert project_files.list_files(root) == ["角色/卡蜜莉亚.json"]
+    assert project_files.replace_text(root, "角色/卡蜜莉亚.json", "卡蜜莉亚", "院长") == 1
+    assert project_files.read_text(root, "角色/卡蜜莉亚.json") == '{"name":"院长"}\n'
 
 
 @pytest.mark.parametrize("path", ["../outside.txt", "角色/../../outside.txt", "C:/outside.txt"])
@@ -105,7 +105,7 @@ def test_重复文本默认拒绝模糊替换(tmp_path):
 
 def test_PNG附件可原子写入读取且拒绝伪图片(tmp_path):
     png = project_files.PNG_SIGNATURE + b"payload"
-    assert project_files.write_png(tmp_path, "角色卡/塞西莉亚/avatar.png", png) == len(png)
-    assert project_files.read_png(tmp_path, "角色卡/塞西莉亚/avatar.png") == png
+    assert project_files.write_png(tmp_path, "角色卡/卡蜜莉亚/avatar.png", png) == len(png)
+    assert project_files.read_png(tmp_path, "角色卡/卡蜜莉亚/avatar.png") == png
     with pytest.raises(project_files.ProjectFileError, match="有效的 PNG"):
         project_files.write_png(tmp_path, "bad.png", b"not-png")

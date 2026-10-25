@@ -25,12 +25,12 @@ describe("repo presentation", () => {
 
   it("后台活动用父仓库与作品名区分同名 SAVE01", () => {
     const items = [
-      repo("parent-a", { name: "白给谷" }),
+      repo("parent-a", { name: "白露谷" }),
       repo("work-a", { name: "SAVE01", parentId: "parent-a" }),
       repo("parent-b", { name: "Anima" }),
       repo("work-b", { name: "SAVE01", parentId: "parent-b" }),
     ];
-    expect(repoActivityLabel(items, "work-a")).toBe("白给谷 · SAVE01");
+    expect(repoActivityLabel(items, "work-a")).toBe("白露谷 · SAVE01");
     expect(repoActivityLabel(items, "work-b")).toBe("Anima · SAVE01");
   });
 });

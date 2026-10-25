@@ -99,11 +99,11 @@ def test_coverage_台账上线前条目进unregistered(tmp_path):
 def test_coverage_已删条目进stale(tmp_path):
     base, repo_id = _setup(tmp_path)
     ch.upsert_repo_worldbook(base, repo_id, [
-        _entry("角色卡·苏晚晚", ["苏晚晚"]), _entry("角色卡·沈糯", ["沈糯"]),
+        _entry("角色卡·苏晚晚", ["苏晚晚"]), _entry("角色卡·庄听澜", ["庄听澜"]),
     ], source_chapters=[1])
-    ch.delete_repo_entries(base, repo_id, comments=["角色卡·沈糯"])
+    ch.delete_repo_entries(base, repo_id, comments=["角色卡·庄听澜"])
     rep = ch.coverage_report(base, repo_id)
-    assert "角色卡·沈糯" not in [a["comment"] for a in rep["affected"]]
+    assert "角色卡·庄听澜" not in [a["comment"] for a in rep["affected"]]
     assert rep["stale"] == []
 
 
@@ -151,13 +151,13 @@ def test_delete_entries_按keys删(tmp_path):
     base, repo_id = _setup(tmp_path)
     ch.upsert_repo_worldbook(base, repo_id, [
         _entry("世界背景·1. 南境", ["南境", "王都"]),
-        _entry("角色卡·沈糯", ["沈糯"]),
+        _entry("角色卡·庄听澜", ["庄听澜"]),
     ])
     res = ch.delete_repo_entries(base, repo_id, keys=["南境"])
     assert res["deleted"] == 1
     snap = worldbook_store.read_repo_snapshot(base, repo_id) or {}
     comments = [e.get("comment") for e in snap.get("entries") or []]
-    assert comments == ["角色卡·沈糯"]
+    assert comments == ["角色卡·庄听澜"]
 
 
 def test_delete_entries_无参数报错(tmp_path):

@@ -7,7 +7,7 @@ from app.services import agency
 
 
 def _prop(**kw) -> agency.Proposal:
-    d = dict(actor="埃斯托利亚", intent="在酒里下药", difficulty=50,
+    d = dict(actor="奥瑞利亚", intent="在酒里下药", difficulty=50,
              min_affinity=20.0, basis="[从舌头开始]")
     d.update(kw)
     return agency.Proposal(**d)

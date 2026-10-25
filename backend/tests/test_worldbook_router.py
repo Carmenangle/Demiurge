@@ -29,7 +29,7 @@ from app.routers import worldbook as worldbook_router
 from app.services import character_store, worldbook_store
 from app.services.pathnames import safe_dir
 
-CARD = "塞西莉亚"
+CARD = "卡蜜莉亚"
 BOOK = "测试书"
 
 

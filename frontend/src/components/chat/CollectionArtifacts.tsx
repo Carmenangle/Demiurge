@@ -61,7 +61,7 @@ function fileBasename(path: string): string {
   return parts[parts.length - 1] || path;
 }
 
-/** 产物标题 = 作品名（产物所在目录名，如「玫瑰与繁花」），而非磁盘文件名 card/world。
+/** 产物标题 = 作品名（产物所在目录名，如「青梧与晚风」），而非磁盘文件名 card/world。
  * UUID 形态的快照目录（如 8fed7f23-…）回退用后端下发的可读名。 */
 function artifactTitle(art: ArtifactMeta): string {
   const parts = art.path.split(/[\\/]/).filter(Boolean);

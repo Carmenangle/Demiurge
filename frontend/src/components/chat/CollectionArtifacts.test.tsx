@@ -11,10 +11,10 @@ import { CollectionArtifacts } from "./CollectionArtifacts";
 
 const version1 = {
   version_id: "001-20260909103000", seq: 1, ts: "2026-09-09T10:30:00",
-  trigger: "done", summary: "《玫瑰与繁花》合集卡已完成",
+  trigger: "done", summary: "《青梧与晚风》合集卡已完成",
   files: [
-    { rel: "玫瑰与繁花/card.json", name: "card.json", size: 85764, mtime: 1, path: "D:/w/玫瑰与繁花/card.json" },
-    { rel: "玫瑰与繁花/worldbook.json", name: "worldbook.json", size: 82474, mtime: 1, path: "D:/w/玫瑰与繁花/worldbook.json" },
+    { rel: "青梧与晚风/card.json", name: "card.json", size: 85764, mtime: 1, path: "D:/w/青梧与晚风/card.json" },
+    { rel: "青梧与晚风/worldbook.json", name: "worldbook.json", size: 82474, mtime: 1, path: "D:/w/青梧与晚风/worldbook.json" },
   ],
   total_size: 168238,
 };
@@ -22,7 +22,7 @@ const version2 = {
   version_id: "002-20260909120000", seq: 2, ts: "2026-09-09T12:00:00",
   trigger: "done", summary: "补写完成并通过密度验收",
   files: [
-    { rel: "玫瑰与繁花/card.json", name: "card.json", size: 90000, mtime: 1, path: "D:/w/玫瑰与繁花/card.json" },
+    { rel: "青梧与晚风/card.json", name: "card.json", size: 90000, mtime: 1, path: "D:/w/青梧与晚风/card.json" },
   ],
   total_size: 90000,
 };
@@ -30,7 +30,7 @@ const version2 = {
 vi.mock("../../api/artifacts", () => ({
   previewArtifact: vi.fn(async () => ({
     ok: true, name: "card.json", size: 100, kind: "card",
-    text: '{"name":"玫瑰与繁花","character_book":{"entries":[]}}',
+    text: '{"name":"青梧与晚风","character_book":{"entries":[]}}',
     truncated: false,
   })),
   // 版本副本预览（B5）：返回与当前文件不同的内容，便于断言「看的是副本」
@@ -43,9 +43,9 @@ vi.mock("../../api/artifacts", () => ({
   openArtifactFolder: vi.fn(async () => ({ ok: true, path: "D:/w/card.json" })),
   listArtifacts: vi.fn(async (_o: string, _r?: string) => ({ ok: true, items: arts })),
   listVersions: vi.fn(async () => ({ ok: true, versions: [version2, version1] })),
-  restoreVersion: vi.fn(async () => ({ ok: true, restored: ["D:/w/玫瑰与繁花/card.json"] })),
+  restoreVersion: vi.fn(async () => ({ ok: true, restored: ["D:/w/青梧与晚风/card.json"] })),
   deleteVersion: vi.fn(async () => ({ ok: true })),
-  syncWorldbook: vi.fn(async () => ({ ok: true, dest: "D:/worlds/玫瑰与繁花.json", entries: 40 })),
+  syncWorldbook: vi.fn(async () => ({ ok: true, dest: "D:/worlds/青梧与晚风.json", entries: 40 })),
 }));
 
 import {
@@ -54,8 +54,8 @@ import {
 } from "../../api/artifacts";
 
 const arts: ArtifactMeta[] = [
-  { kind: "card", name: "角色主卡 · 玫瑰与繁花", path: "D:/w/玫瑰与繁花/card.json", size: 85764 },
-  { kind: "worldbook", name: "世界书 · 玫瑰与繁花", path: "D:/w/玫瑰与繁花/worldbook.json", size: 82474 },
+  { kind: "card", name: "角色主卡 · 青梧与晚风", path: "D:/w/青梧与晚风/card.json", size: 85764 },
+  { kind: "worldbook", name: "世界书 · 青梧与晚风", path: "D:/w/青梧与晚风/worldbook.json", size: 82474 },
 ];
 
 let container: HTMLDivElement;
@@ -83,7 +83,7 @@ describe("CollectionArtifacts 交付产物卡（Claude 式）", () => {
     // 拉取后渲染卡片（快照里没有产物信息，靠 listArtifacts 回填）
     expect(listArtifacts).toHaveBeenCalledWith("D:/w", "repo-1");
     const text = container.textContent || "";
-    expect(text).toContain("玫瑰与繁花");
+    expect(text).toContain("青梧与晚风");
     expect(text).toContain("Card·JSON");
   });
 
@@ -101,7 +101,7 @@ describe("CollectionArtifacts 交付产物卡（Claude 式）", () => {
     const text = container.textContent || "";
     expect(text).toContain("交付产物");
     // 标题 = 作品名（目录名），不是磁盘文件名 card/world
-    expect(text).toContain("玫瑰与繁花");
+    expect(text).toContain("青梧与晚风");
     expect(text).toContain("角色主卡");
     expect(text).toContain("世界书");
     // 85764 B = 83.75 KB，整数显示 84 KB
@@ -131,11 +131,11 @@ describe("CollectionArtifacts 交付产物卡（Claude 式）", () => {
     await mount(<CollectionArtifacts artifacts={arts} outputDir="D:/w" />);
     const card = container.querySelector(".artifact-tile") as HTMLButtonElement;
     await act(async () => { card.click(); });
-    expect(previewArtifact).toHaveBeenCalledWith("D:/w", "D:/w/玫瑰与繁花/card.json", "");
+    expect(previewArtifact).toHaveBeenCalledWith("D:/w", "D:/w/青梧与晚风/card.json", "");
     // 预览弹层出现：路径 + 美化后的 JSON 字段 + 两个操作按钮
     const text = container.textContent || "";
-    expect(text).toContain("D:/w/玫瑰与繁花/card.json");
-    expect(text).toContain('"name": "玫瑰与繁花"');
+    expect(text).toContain("D:/w/青梧与晚风/card.json");
+    expect(text).toContain('"name": "青梧与晚风"');
     expect(text).toContain("打开文件位置");
     expect(text).toContain("下载");
   });
@@ -145,7 +145,7 @@ describe("CollectionArtifacts 交付产物卡（Claude 式）", () => {
     await act(async () => { (container.querySelector(".artifact-tile") as HTMLButtonElement).click(); });
     const openBtn = Array.from(container.querySelectorAll("button")).find((b) => (b.textContent || "").includes("打开文件位置"));
     await act(async () => { openBtn?.click(); });
-    expect(openArtifactFolder).toHaveBeenCalledWith("D:/w", "D:/w/玫瑰与繁花/card.json", true, "");
+    expect(openArtifactFolder).toHaveBeenCalledWith("D:/w", "D:/w/青梧与晚风/card.json", true, "");
     expect(container.textContent).toContain("已在资源管理器中定位该文件");
   });
 
@@ -153,8 +153,8 @@ describe("CollectionArtifacts 交付产物卡（Claude 式）", () => {
     await mount(<CollectionArtifacts artifacts={arts} outputDir="D:/w" />);
     await act(async () => { (container.querySelector(".artifact-tile") as HTMLButtonElement).click(); });
     // mock 返回 http://x/download?path=…，校验下载路径携带 path（真实实现经 apiUrl 拼 /api/artifacts/download）
-    expect(artifactDownloadUrl("D:/w", "D:/w/玫瑰与繁花/card.json")).toContain("download?");
-    expect(artifactDownloadUrl("D:/w", "D:/w/玫瑰与繁花/card.json")).toContain(encodeURIComponent("D:/w/玫瑰与繁花/card.json"));
+    expect(artifactDownloadUrl("D:/w", "D:/w/青梧与晚风/card.json")).toContain("download?");
+    expect(artifactDownloadUrl("D:/w", "D:/w/青梧与晚风/card.json")).toContain(encodeURIComponent("D:/w/青梧与晚风/card.json"));
   });
 });
 
@@ -183,7 +183,7 @@ describe("CollectionArtifacts 产物版本历史", () => {
     const viewBtns = Array.from(container.querySelectorAll(".artifact-version-btn"))
       .filter((b) => (b.textContent || "").includes("查看"));
     await act(async () => { (viewBtns[1] as HTMLButtonElement).click(); });
-    expect(previewVersionFile).toHaveBeenCalledWith("D:/w", "002-20260909120000", "玫瑰与繁花/card.json", "");
+    expect(previewVersionFile).toHaveBeenCalledWith("D:/w", "002-20260909120000", "青梧与晚风/card.json", "");
     expect(previewArtifact).toHaveBeenCalledTimes(1);        // 首屏那次当前产物预览，未被版本复用
     expect(container.textContent).toContain("版本 #2 存档副本");
     expect(container.textContent).toContain('"from": "002-20260909120000"');
@@ -281,7 +281,7 @@ describe("CollectionArtifacts 同步到资产库（手动同步按钮）", () =>
     await act(async () => { btn.click(); });
     expect(confirmSpy).toHaveBeenCalled();
     // 优先用世界书产物路径同步
-    expect(syncWorldbook).toHaveBeenCalledWith("D:/w", "D:/w/玫瑰与繁花/worldbook.json", "");
+    expect(syncWorldbook).toHaveBeenCalledWith("D:/w", "D:/w/青梧与晚风/worldbook.json", "");
     expect(alertSpy).toHaveBeenCalled();
     expect(String(alertSpy.mock.calls[0][0])).toContain("40");
     confirmSpy.mockRestore();
@@ -351,21 +351,21 @@ describe("CollectionArtifacts repoId 透传（2026-09-10 B3/A）", () => {
 
     // 1) 打开预览弹层 → 当前产物预览 + 版本列表
     await act(async () => { (container.querySelector(".artifact-tile") as HTMLButtonElement).click(); });
-    expect(previewArtifact).toHaveBeenCalledWith("D:/w", "D:/w/玫瑰与繁花/card.json", "repo-1");
+    expect(previewArtifact).toHaveBeenCalledWith("D:/w", "D:/w/青梧与晚风/card.json", "repo-1");
     expect(listVersions).toHaveBeenCalledWith("D:/w", "repo-1");
 
     // 2) 弹层「打开文件位置」
     const openBtn = Array.from(container.querySelectorAll("button"))
       .find((b) => (b.textContent || "").includes("打开文件位置"));
     await act(async () => { openBtn?.click(); });
-    expect(openArtifactFolder).toHaveBeenCalledWith("D:/w", "D:/w/玫瑰与繁花/card.json", true, "repo-1");
+    expect(openArtifactFolder).toHaveBeenCalledWith("D:/w", "D:/w/青梧与晚风/card.json", true, "repo-1");
 
     // 3) 版本「查看」→ 版本副本端点
     const viewBtns = Array.from(container.querySelectorAll(".artifact-version-btn"))
       .filter((b) => (b.textContent || "").includes("查看"));
     await act(async () => { (viewBtns[1] as HTMLButtonElement).click(); });
     expect(previewVersionFile).toHaveBeenCalledWith(
-      "D:/w", "002-20260909120000", "玫瑰与繁花/card.json", "repo-1");
+      "D:/w", "002-20260909120000", "青梧与晚风/card.json", "repo-1");
 
     // 4) 回档（先切回当前行再点版本 #2 的「回档」）
     await act(async () => { (viewBtns[0] as HTMLButtonElement).click(); });
@@ -389,7 +389,7 @@ describe("CollectionArtifacts repoId 透传（2026-09-10 B3/A）", () => {
     const syncBtn = Array.from(container.querySelectorAll("button"))
       .find((b) => (b.textContent || "").includes("同步到资产库")) as HTMLButtonElement;
     await act(async () => { syncBtn.click(); });
-    expect(syncWorldbook).toHaveBeenCalledWith("D:/w", "D:/w/玫瑰与繁花/worldbook.json", "repo-1");
+    expect(syncWorldbook).toHaveBeenCalledWith("D:/w", "D:/w/青梧与晚风/worldbook.json", "repo-1");
 
     confirmSpy.mockRestore();
     alertSpy.mockRestore();

@@ -45,14 +45,14 @@ describe("chat stream protocol", () => {
   it("decodes artifacts delivery payloads (2026-09-08)", () => {
     expect(decodeChatStreamEvent(event("artifacts", {
       items: [
-        { kind: "card", name: "角色主卡 · 玫瑰与繁花", path: "D:/w/玫瑰与繁花/card.json", size: 85764, mtime: 1234.5 },
-        { kind: "worldbook", name: "世界书 · 玫瑰与繁花", path: "D:/w/玫瑰与繁花/worldbook.json", size: 82474, mtime: 1234.6 },
+        { kind: "card", name: "角色主卡 · 青梧与晚风", path: "D:/w/青梧与晚风/card.json", size: 85764, mtime: 1234.5 },
+        { kind: "worldbook", name: "世界书 · 青梧与晚风", path: "D:/w/青梧与晚风/worldbook.json", size: 82474, mtime: 1234.6 },
       ],
     }))).toEqual({
       type: "artifacts",
       items: [
-        { kind: "card", name: "角色主卡 · 玫瑰与繁花", path: "D:/w/玫瑰与繁花/card.json", size: 85764, mtime: 1234.5 },
-        { kind: "worldbook", name: "世界书 · 玫瑰与繁花", path: "D:/w/玫瑰与繁花/worldbook.json", size: 82474, mtime: 1234.6 },
+        { kind: "card", name: "角色主卡 · 青梧与晚风", path: "D:/w/青梧与晚风/card.json", size: 85764, mtime: 1234.5 },
+        { kind: "worldbook", name: "世界书 · 青梧与晚风", path: "D:/w/青梧与晚风/worldbook.json", size: 82474, mtime: 1234.6 },
       ],
     });
     // 无 path 的条目丢弃（后端规范外数据宽松兼容）

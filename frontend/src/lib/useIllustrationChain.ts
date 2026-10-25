@@ -450,7 +450,7 @@ export function useIllustrationChain({
         failSlot("image_required", "首尾帧生图缺少画面：既无上尾帧图可复用，也无首帧/尾帧画面描述");
         return;
       }
-      // 逐帧 LoRA（2026-08-30 用户反馈实锤：首帧画面是凌若冰、尾帧是舞姬恋，
+      // 逐帧 LoRA（2026-08-30 用户反馈实锤：首帧画面是谢若冰、尾帧是星织恋，
       // 却整单都挂了状态栏在场角色的 LoRA）。一轮请求只解析一次 actors，但首/尾帧
       // 画面可能各是不同角色——按帧描述原文逐帧命中已配置角色；未命中回退请求级 actors。
       const frameMediaFor = (desc: string) => {

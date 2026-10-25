@@ -99,7 +99,7 @@ def _table_recall_text(ctx: CtxLike, repo_id: str, query: str, k: int = 5) -> st
 def _repo_tables_for_facts(ctx: CtxLike, repo_id: str) -> list:
     """插画视觉事实兜底读通道：整读 通用表（含 重要角色表），不检索、不分配额。
 
-    世界书视觉锚按条目名匹配，剧情常用名/道号可能连不上（舞姬恋↔角色卡·舞柔）；
+    世界书视觉锚按条目名匹配，剧情常用名/道号可能连不上（星织恋↔角色卡·绮柔）；
     表格按剧情进度维护、姓名与正文一致，作为未命中角色的【外貌】/【穿着】真源。
     读失败静默空表——事实兜底缺失不阻断出图，由 illustration.profile 的
     appearance_missing_actors 告警暴露。
@@ -116,7 +116,7 @@ def _repo_tables_for_facts(ctx: CtxLike, repo_id: str) -> list:
 def _repo_table_absent_actors(ctx: CtxLike, repo_id: str, known: list[str]) -> set:
     """表格在场状态里明确「不在场」的绑定角色——点名提及不等于画面在场。
 
-    2026-09-01 用户实锤：高潮段只有凌若冰（浮花泉封域内），舞姬恋在封域外石廊
+    2026-09-01 用户实锤：高潮段只有谢若冰（浮花泉封域内），星织恋在封域外石廊
     （表格在场状态=不在场），但正文/状态栏都点名了她 → request_actors 把两人
     都列入，提示词写成 2girls。姓名+在场状态列是剧情进度维护的真源，优先于点名。
     """

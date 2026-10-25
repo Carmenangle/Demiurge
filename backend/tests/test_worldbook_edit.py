@@ -80,30 +80,30 @@ def test_删除条目_越界返回False():
 
 
 # ── L1 写入闸：新增条目的重复检测（2026-10-22）────────────────────────────────
-# 判据经真实世界书校准（堕落魔戒 69 条）：
+# 判据经真实世界书校准（幽蚀魔戒 69 条）：
 #   ① 内容精确相同（归一化后）—— 逐字重复
-#   ② 归一化共同前缀 ≥ 14 字 —— 同开头改写（韦尔纳真案例：16 字；合法对 0~6 字，全库仅 2 对 ≥12，
+#   ② 归一化共同前缀 ≥ 14 字 —— 同开头改写（雷纳真案例：16 字；合法对 0~6 字，全库仅 2 对 ≥12，
 #      其中 12 字那对是边界假阳性 ⇒ 阈值取 14）
 #   ③ comment 归一化后同名 —— 同标题重加
 # ⛔ 不用字符相似度：真重复对 difflib=0.239 < 合法机制对 0.272（反序，校准否决）
 # ⛔ 不用 keys[0] 单独作判据：角色卡与其事件条目共享身份 key 是设计常态
 
 def _weierner_pair():
-    a = ("铁血总部督军府后勤支系的巡察使，名字叫韦尔纳。此人掌着物资调拨的实权，为人精明，"
+    a = ("铁血总部督军府后勤支系的巡察使，名字叫雷纳。此人掌着物资调拨的实权，为人精明，"
          "胃口极大，风格是「公干之外顺手揩油」。")
     b = ("铁血总部督军府后勤支系的巡察使，专管港区物资与账目稽查。身材矮，常穿驼色大衣、"
          "麂皮手套，配夹鼻眼镜；举止不急不躁，先看环境再开口。")
     return a, b
 
 
-def test_新增_同开头改写被拒_韦尔纳真案例():
+def test_新增_同开头改写被拒_雷纳真案例():
     a, b = _weierner_pair()
-    book = {"entries": [{"content": a, "comment": "韦尔纳（铁血督军府巡察使）", "keys": ["韦尔纳"]}]}
+    book = {"entries": [{"content": a, "comment": "雷纳（铁血督军府巡察使）", "keys": ["雷纳"]}]}
     with pytest.raises(we.DuplicateEntryError) as exc:
-        we.add_entry(book, {"content": b, "comment": "人物·韦尔纳（督军府后勤支系巡察使）", "keys": []})
+        we.add_entry(book, {"content": b, "comment": "人物·雷纳（督军府后勤支系巡察使）", "keys": []})
     assert exc.value.reason == "same_opening"
     assert exc.value.prefix_chars >= we.DUP_PREFIX_CHARS
-    assert exc.value.existing_comment == "韦尔纳（铁血督军府巡察使）"
+    assert exc.value.existing_comment == "雷纳（铁血督军府巡察使）"
 
 
 def test_新增_共同前缀12字不拦_阈值边界():

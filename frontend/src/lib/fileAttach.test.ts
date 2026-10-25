@@ -5,7 +5,7 @@ import {
 
 describe("file attach", () => {
   it("文本文件按扩展名与 MIME 判定", () => {
-    expect(isTextFile({ name: "形象提示词-唐柚.md", type: "" })).toBe(true);
+    expect(isTextFile({ name: "形象提示词-阮秋白.md", type: "" })).toBe(true);
     expect(isTextFile({ name: "a.txt", type: "" })).toBe(true);
     expect(isTextFile({ name: "data", type: "application/json" })).toBe(true);
     expect(isTextFile({ name: "notes", type: "text/plain" })).toBe(true);
@@ -13,11 +13,11 @@ describe("file attach", () => {
   });
 
   it("附件块带身份标记与字数", () => {
-    const text = buildFileAttachmentText("唐柚.md", "套装一提示词");
-    expect(text).toContain("【文件参考：唐柚.md】");
+    const text = buildFileAttachmentText("阮秋白.md", "套装一提示词");
+    expect(text).toContain("【文件参考：阮秋白.md】");
     expect(text).toContain("（共 6 字）");
     expect(text).toContain("套装一提示词");
-    expect(text.endsWith("【文件参考结束：唐柚.md】")).toBe(true);
+    expect(text.endsWith("【文件参考结束：阮秋白.md】")).toBe(true);
   });
 
   it("超长内容截断并注明", () => {

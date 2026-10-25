@@ -28,7 +28,7 @@ def _seed(base: str, repo: str, card: str) -> None:
 
 
 def test_级联封口三存储且重生成可重新抽取(tmp_path):
-    base, repo, card = str(tmp_path), "r1", "埃斯托利亚"
+    base, repo, card = str(tmp_path), "r1", "奥瑞利亚"
     _seed(base, repo, card)
 
     result = memory_rollback.seal_turns(base, repo, card_name=card, turns=[5])

@@ -92,7 +92,7 @@ def evaluate(text: str, *, turn: int, facts: Iterable[dict] = (),
         style_exclude：上述检测要豁免的合法高频词（角色名/称呼等）。默认空。
         style_setting：设定存量来源（世界书设定条目 + 角色卡静态底座）。传了就按
             「用量/存量」重排并把两个数打进 message，用来把「设定支撑的高频」
-            （如 天狐宫）与「无锚点膨胀」（如 经脉）分开。默认空 ⇒ message 逐字不变。
+            （如 霜月宫）与「无锚点膨胀」（如 经脉）分开。默认空 ⇒ message 逐字不变。
     """
     body = text or ""
     diagnostics: list[dict] = []

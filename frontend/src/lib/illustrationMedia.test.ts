@@ -48,7 +48,7 @@ describe("illustration LoRA modes", () => {
 
   it("世界书模式只上报角色 LoRA 绑定名，不把作品卡名当成角色", () => {
     expect(illustrationRequestMedia(
-      { ...preset, appearanceSource: "worldbook" }, ["白给谷"],
+      { ...preset, appearanceSource: "worldbook" }, ["白露谷"],
     )).toMatchObject({ illustrationActorNames: ["甲", "乙", "丙"] });
   });
 
@@ -110,40 +110,40 @@ describe("illustration LoRA modes", () => {
       });
   });
 
-  it("冷倾雪与虞妙玥同场加载默认风格、柳世熙与蔡秀晶", () => {
+  it("顾凝霜与苏映晚同场加载默认风格、沈明澜与何舒野", () => {
     const result = illustrationWorkflowMedia({
       templateId: "tpl",
       loraMode: "multi",
       appearanceSource: "worldbook",
       characterLoras: {
-        冷倾雪: { loraName: "krea2_柳世熙.safetensors", loraWeight: 1 },
-        虞妙玥: { loraName: "krea2_蔡秀晶.safetensors", loraWeight: 1 },
+        顾凝霜: { loraName: "krea2_沈明澜.safetensors", loraWeight: 1 },
+        苏映晚: { loraName: "krea2_何舒野.safetensors", loraWeight: 1 },
       },
       styleLora: "Krea2-Ogipote style-手绘风.safetensors",
       styleLoraWeight: 1,
-    }, ["冷倾雪", "虞妙玥"], ["白给谷"]);
+    }, ["顾凝霜", "苏映晚"], ["白露谷"]);
 
     expect(result.loras).toEqual([
       { name: "Krea2-Ogipote style-手绘风.safetensors", weight: 1, character: false },
-      { name: "krea2_柳世熙.safetensors", weight: 1, character: true },
-      { name: "krea2_蔡秀晶.safetensors", weight: 1, character: true },
+      { name: "krea2_沈明澜.safetensors", weight: 1, character: true },
+      { name: "krea2_何舒野.safetensors", weight: 1, character: true },
     ]);
   });
 
-  it("冷倾雪单 LoRA 命中柳世熙且不加载 Ogipote", () => {
+  it("顾凝霜单 LoRA 命中沈明澜且不加载 Ogipote", () => {
     const result = illustrationWorkflowMedia({
       templateId: "tpl",
       loraMode: "single",
       appearanceSource: "worldbook",
       characterLoras: {
-        冷倾雪: { loraName: "krea2_柳世熙.safetensors", loraWeight: 1 },
+        顾凝霜: { loraName: "krea2_沈明澜.safetensors", loraWeight: 1 },
       },
       styleLora: "Krea2-Ogipote style-手绘风.safetensors",
       styleLoraWeight: 1,
-    }, ["冷倾雪"], ["白给谷"]);
+    }, ["顾凝霜"], ["白露谷"]);
 
     expect(result.loras).toEqual([
-      { name: "krea2_柳世熙.safetensors", weight: 1, character: true },
+      { name: "krea2_沈明澜.safetensors", weight: 1, character: true },
     ]);
   });
 
@@ -152,7 +152,7 @@ describe("illustration LoRA modes", () => {
       .toMatchObject({ loras: [], loraName: "", baseImage: "a.png" });
   });
 
-  it.each(["冷倾雪", "虞妙玥", "任意角色"])(
+  it.each(["顾凝霜", "苏映晚", "任意角色"])(
     "事件角色丢失时从场景主体恢复任意角色绑定：%s",
     (actor) => {
       expect(resolveIllustrationActors(
@@ -162,8 +162,8 @@ describe("illustration LoRA modes", () => {
   );
 
   it.each([
-    ["冷倾雪", "krea2_柳世熙.safetensors"],
-    ["虞妙玥", "krea2_蔡秀晶.safetensors"],
+    ["顾凝霜", "krea2_沈明澜.safetensors"],
+    ["苏映晚", "krea2_何舒野.safetensors"],
     ["任意角色", "future-character.safetensors"],
   ])("从场景主体恢复后单 LoRA 精确选择绑定：%s", (actor, loraName) => {
     const config = {
@@ -178,13 +178,13 @@ describe("illustration LoRA modes", () => {
 
   it("世界书单 LoRA 无角色命中且无兜底时拒绝偷偷使用模板残留 LoRA", () => {
     const config = { ...preset, loraMode: "single" as const, styleLora: "" };
-    const media = illustrationWorkflowMedia(config, ["丁"], ["白给谷"]);
+    const media = illustrationWorkflowMedia(config, ["丁"], ["白露谷"]);
     expect(illustrationLoraConfigurationError(config, media)).toContain("未命中角色 LoRA");
   });
 
   it("世界书多 LoRA 缺少默认风格时明确拒绝提交", () => {
     const config = { ...preset, loraMode: "multi" as const, styleLora: "" };
-    const media = illustrationWorkflowMedia(config, ["甲"], ["白给谷"]);
+    const media = illustrationWorkflowMedia(config, ["甲"], ["白露谷"]);
     expect(illustrationLoraConfigurationError(config, media)).toContain("默认风格 LoRA");
   });
 });

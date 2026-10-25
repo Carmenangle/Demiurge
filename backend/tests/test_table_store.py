@@ -222,7 +222,7 @@ def test_叙事列禁为动作追加名目_术语棘轮写入侧闸():
 def test_叙事列施受方向必须忠实_方向反转写入闸():
     """2026-09-23 用户定案（「剧情生成的还是不对」）。
 
-    真机实锤：turn47 模型自创「妲千沁给凌渊捋经脉/按肩井」（用户输入只说
+    真机实锤：turn47 模型自创「沈映澜给洛渊捋经脉/按肩井」（用户输入只说
     「我装睡后动手脚」，user 侧「捋/肩井」全程 0 次），写进表格后每轮整表注入
     （召回块 26150 字符 vs 用户输入 58 字符 ≈ 450:1）；turn52 用户要「用昨晚
     我摸她的事调戏她」，模型为保住表格事实把施受整个对调——
@@ -247,8 +247,8 @@ def test_叙事列施受方向必须忠实_方向反转写入闸():
 def test_设定列禁写角色关系与往来经历_世界规则复发闸():
     """2026-09-23 二次复发闸。
 
-    09-23 早刚把凌若冰个人体质从「世界规则」格拆走，当晚又复发成
-    「妲千沁曾在双修中半推半就交出初次」——纯幻觉（assistant 正文「初次」0 次）
+    09-23 早刚把谢若冰个人体质从「世界规则」格拆走，当晚又复发成
+    「沈映澜曾在双修中半推半就交出初次」——纯幻觉（assistant 正文「初次」0 次）
     且是**角色个人经历**，却被写进 alwaysFill 的世界规则格。
     ⇒ 设定列口径必须显式覆盖「关系与人际往来经历」。
     """
@@ -267,7 +267,7 @@ def test_设定列禁升格个人体质与自造机制_世界规则写入口径�
     """2026-09-23 用户定案「彻底拆解」（续「对经脉执着」）。
 
     真机实测：`全局数据表·世界规则`（alwaysFill，每轮注入）被写成 734 字符大杂烩——
-    ① 把凌若冰的**个人体质**「冰凤经脉感知」升格为全局规则并绑性场景
+    ① 把谢若冰的**个人体质**「冰凤经脉感知」升格为全局规则并绑性场景
     ② 混入模型自造的临时机制（「碾磨方向翻转会导致掌控权丧失」「不应期敏感度翻三倍」）
     ③ 复述用户本轮输入（「敏感部位需循序渐进」）
     ⇒ 模型每轮读到「经脉感知＝性刺激传导机制」，任何场景都能顺手挂「经脉」。
@@ -297,14 +297,14 @@ def test_检索表身份列精确优先且无嵌入也可召回():
     tables = ts.default_tables()
     chars = next(table for table in tables if table["name"] == "重要角色表")
     chars["rows"] = [
-        ["冷倾雪", "女", "成年", "剑客", "黑发", "白衣", "山门", "在场", "同伴", "", "脱困"],
-        ["虞妙玥", "女", "成年", "医师", "银发", "青衣", "药房", "离场", "盟友", "", "配药"],
+        ["顾凝霜", "女", "成年", "剑客", "黑发", "白衣", "山门", "在场", "同伴", "", "脱困"],
+        ["苏映晚", "女", "成年", "医师", "银发", "青衣", "药房", "离场", "盟友", "", "配药"],
     ]
 
-    rows = ts.recall_retrieval_rows(tables, "冷倾雪回到山门", k=1)
+    rows = ts.recall_retrieval_rows(tables, "顾凝霜回到山门", k=1)
 
     assert len(rows) == 1
-    assert "冷倾雪" in rows[0]
+    assert "顾凝霜" in rows[0]
 
 
 def test_存量全局与选项结构迁移为单卡(tmp_path):
@@ -423,15 +423,15 @@ def test_parse_maintenance_payload_对象协议全量():
     raw = json.dumps({
         "ops": [{"op": "update", "table": "背包物品表", "row": 0, "values": {"数量": 2}}],
         "state_deltas": [
-            {"field": "数值/凌若冰·好感度", "op": "add", "value": 2, "evidence": "@她@红了脸"},
+            {"field": "数值/谢若冰·好感度", "op": "add", "value": 2, "evidence": "@她@红了脸"},
             "bad-item",
         ],
-        "status_snapshot": "[第38轮] 夜谈\n[好感] 凌若冰=42",
+        "status_snapshot": "[第38轮] 夜谈\n[好感] 谢若冰=42",
     }, ensure_ascii=False)
     ops, deltas, snapshot = tu.parse_maintenance_payload(raw)
     assert ops and ops[0]["table"] == "背包物品表"
     assert len(deltas) == 1 and deltas[0]["evidence"] == "她红了脸"
-    assert deltas[0]["field"] == "数值/凌若冰·好感度"
+    assert deltas[0]["field"] == "数值/谢若冰·好感度"
     assert snapshot.startswith("[第38轮]")
 
 
@@ -454,8 +454,8 @@ def test_parse_maintenance_payload_坏格式与顶层标量返回None():
 
 def test_parse_maintenance_payload_对象ops非法仍取状态字段():
     ops, deltas, snapshot = tu.parse_maintenance_payload(
-        '{"ops": "not-a-list", "state_deltas": [], "status_snapshot": "[好感] 凌若冰=1"}')
-    assert ops == [] and snapshot == "[好感] 凌若冰=1"
+        '{"ops": "not-a-list", "state_deltas": [], "status_snapshot": "[好感] 谢若冰=1"}')
+    assert ops == [] and snapshot == "[好感] 谢若冰=1"
 
 
 # ── 维护提示词：抽取模式扩展（旧协议文案逐字不变）──
@@ -558,20 +558,20 @@ def test_apply_ops_按身份列定位():
     tables: list = []
     ts.create_table(tables, "好感", ["角色名", "好感度"], key_col="角色名")
     ts.apply_ops(tables, [
-        {"op": "insert", "table": "好感", "values": {"角色名": "塞西莉亚", "好感度": "15"}},
+        {"op": "insert", "table": "好感", "values": {"角色名": "卡蜜莉亚", "好感度": "15"}},
         {"op": "insert", "table": "好感", "values": {"角色名": "艾莉丝", "好感度": "5"}},
     ])
     # 按 key 更新（不靠行号）
-    n = ts.apply_ops(tables, [{"op": "update", "table": "好感", "key": "塞西莉亚", "values": {"好感度": "25"}}])
+    n = ts.apply_ops(tables, [{"op": "update", "table": "好感", "key": "卡蜜莉亚", "values": {"好感度": "25"}}])
     assert n == 1
-    assert tables[0]["rows"][0] == ["塞西莉亚", "25"]
+    assert tables[0]["rows"][0] == ["卡蜜莉亚", "25"]
     # 按 values[keyCol] 也能定位删除
     ts.apply_ops(tables, [{"op": "delete", "table": "好感", "values": {"角色名": "艾莉丝"}}])
     assert len(tables[0]["rows"]) == 1
     # 指名身份列值但不存在 → 不误伤
     n = ts.apply_ops(tables, [{"op": "update", "table": "好感", "key": "查无此人", "values": {"好感度": "0"}}])
     assert n == 0
-    assert tables[0]["rows"][0] == ["塞西莉亚", "25"]
+    assert tables[0]["rows"][0] == ["卡蜜莉亚", "25"]
 
 
 def test_parse_template_从ddl_unique取身份列():
@@ -659,12 +659,12 @@ def test_角色状态表singleton插入不抹掉未提供列():
     tables = ts.default_tables()
     ts.apply_ops(tables, [
         {"op": "insert", "table": "主角信息表", "values": {
-            "姓名": "凌渊", "性别": "男", "当前状态": "修炼中",
+            "姓名": "洛渊", "性别": "男", "当前状态": "修炼中",
         }},
     ])
     protagonist = next(table for table in tables if table["name"] == "主角信息表")
     row = protagonist["rows"][0]
-    assert row[0] == "凌渊" and row[1] == "男" and row[7] == "修炼中"  # 当前状态在第 8 列
+    assert row[0] == "洛渊" and row[1] == "男" and row[7] == "修炼中"  # 当前状态在第 8 列
     # 未提供的列保留旧值（默认空串）
     assert row[2] == "" and row[3] == ""
 

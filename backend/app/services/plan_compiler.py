@@ -230,7 +230,7 @@ def _manifest_lines(capabilities: list[dict]) -> str:
 def _attachment_brief(text: str, limit: int = 80_000) -> str:
     """编译期给模型**全文**参考文档（P4：模型判断，代码保真）。
 
-    唐柚类文档（43KB）全文进上下文，模型才有语义判断「哪些是套装/哪些是规则」的依据；
+    阮秋白类文档（43KB）全文进上下文，模型才有语义判断「哪些是套装/哪些是规则」的依据；
     只有极端超长文档才退化为骨架（标题清单），此时模型可写 prompt_section 引用由
     fill_prompt_sections 机械回填兜底。
     """

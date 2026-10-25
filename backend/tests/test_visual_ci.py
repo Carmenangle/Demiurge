@@ -69,7 +69,7 @@ def test_init_field_ledger_from_scene_spec():
     _init_field_ledger(diag, {
         "draft_prompt": "a woman walking",
         "narrative": "she walks in the forest and reaches for the door",
-        "actors": ["冷倾雪"],
+        "actors": ["顾凝霜"],
     })
     names = {f.name for f in diag.field_ledger}
     assert names == {
@@ -97,17 +97,17 @@ def test_probe_trace_rebuilds_loras_from_lora_names(monkeypatch):
     import app.services.run_trace as run_trace
     monkeypatch.setattr(run_trace, "read_recent", lambda repo_id, limit=50: [
         {"event": "illustration.submitted", "data": {
-            "lora_name": "krea2_蔡秀晶.safetensors",
+            "lora_name": "krea2_何舒野.safetensors",
             "lora_weight": 1.0,
             "lora_mode": "single",
-            "lora_names": ["krea2_蔡秀晶.safetensors"],
+            "lora_names": ["krea2_何舒野.safetensors"],
             "latent": {"width": 704, "height": 1024},
             "prompt_chars": 226,
         }},
     ])
     diag = VisualCIDiagnostic(id="d", generation_id="g")
     visual_ci._probe_visual_ci_trace(diag, "repo", "g")
-    assert diag.mechanical.loras == [{"lora_name": "krea2_蔡秀晶.safetensors", "weight": 1.0}]
+    assert diag.mechanical.loras == [{"lora_name": "krea2_何舒野.safetensors", "weight": 1.0}]
     assert diag.mechanical.width == 704
     assert diag.mechanical.height == 1024
     assert diag.evidence["trace_source"] == "illustration.submitted"
@@ -239,7 +239,7 @@ def test_run_diagnostic_no_vlm(tmp_path):
         scene_spec={
             "draft_prompt": "a woman walking in a forest",
             "narrative": "她走进森林",
-            "actors": ["冷倾雪"],
+            "actors": ["顾凝霜"],
         },
         # 不配置 VLM → 跳过语义审计，只有机械账本
         vlm_base="", vlm_key="", vlm_model="",
@@ -259,7 +259,7 @@ def test_run_diagnostic_missing_trace_marks_amber(tmp_path):
     diag = run_diagnostic(
         generation_id="g_notrace", turn_id="t9", repo_id="repo_y",
         output_dir=str(tmp_path),
-        scene_spec={"actors": ["虞妙玥"]},
+        scene_spec={"actors": ["苏映晚"]},
     )
     assert diag is not None
     assert diag.evidence.get("trace_source") == "no_submitted_event_found"

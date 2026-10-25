@@ -91,18 +91,18 @@ test("上传 .md 附件 + 文本 → 发送后用户消息体渲染 file-attach-
   // 注入 .md 附件（与用户路径一致：文件选择器）
   const richInput = page.locator('input[type=file][accept*=".md"]');
   await richInput.setInputFiles({
-    name: "形象提示词-唐柚.md",
+    name: "形象提示词-阮秋白.md",
     mimeType: "text/markdown",
-    buffer: Buffer.from("# 形象提示词\n\n唐柚穿搭套系定义：\n\n".repeat(20), "utf-8"),
+    buffer: Buffer.from("# 形象提示词\n\n阮秋白穿搭套系定义：\n\n".repeat(20), "utf-8"),
   });
 
   // 等待上传完成 + 占位卡替换为真实 meta（fileId 真源，非 pending-）
-  const filebarCard = page.locator(".rich-filebar-item", { hasText: "形象提示词-唐柚.md" });
+  const filebarCard = page.locator(".rich-filebar-item", { hasText: "形象提示词-阮秋白.md" });
   await expect(filebarCard).toBeVisible();
   await expect(filebarCard).not.toContainText("上传中");
 
   // 输入文本（指令）+ Enter 发送
-  await page.locator("textarea.rich-input").fill("读取文档,生成唐柚的第一套穿搭参考图");
+  await page.locator("textarea.rich-input").fill("读取文档,生成阮秋白的第一套穿搭参考图");
   await page.keyboard.press("Enter");
 
   // 关键断言：用户消息气泡内出现 .file-attach-chip（FileAttachmentChip 渲染的根 selector），
@@ -111,7 +111,7 @@ test("上传 .md 附件 + 文本 → 发送后用户消息体渲染 file-attach-
   await expect(userBubble).toBeVisible();
   const fileChip = userBubble.locator(".file-attach-chip");
   await expect(fileChip).toBeVisible();
-  await expect(fileChip).toContainText("形象提示词-唐柚.md");
+  await expect(fileChip).toContainText("形象提示词-阮秋白.md");
   await expect(fileChip.locator(".file-attach-chip-size")).toBeVisible();
   await expect(fileChip.locator(".file-attach-chip-size")).not.toContainText("0 B"); // 真实文件大小已上传
 

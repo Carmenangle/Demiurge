@@ -17,7 +17,7 @@ describe("buildSubmitParts（D1 历史回放关键：attachments 必须进 parts
   it("附件 + 文本：attachments 必须转成 type=file part（修复点）", () => {
     // 复现用户报告：发送「读取文档…」+ 一个 .md 文档附件，消息体必须显示文件名+大小
     const attachments: FileAttachmentMeta[] = [{
-      fileId: "a".repeat(32), name: "形象提示词-唐柚.md", mime: "text/markdown", size: 45_800,
+      fileId: "a".repeat(32), name: "形象提示词-阮秋白.md", mime: "text/markdown", size: 45_800,
     }];
     const parts = buildSubmitParts({
       text: "读取文档,调用krea2文生图模版",
@@ -30,7 +30,7 @@ describe("buildSubmitParts（D1 历史回放关键：attachments 必须进 parts
     expect(filePart).toMatchObject({
       type: "file",
       fileId: "a".repeat(32),
-      name: "形象提示词-唐柚.md",
+      name: "形象提示词-阮秋白.md",
       mime: "text/markdown",
       size: 45_800,
     });

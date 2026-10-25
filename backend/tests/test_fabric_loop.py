@@ -256,7 +256,7 @@ def test_写内容能力敏感词拦截回填重写(tmp_path):
             if idx == 0:
                 return _json.dumps({"tool": "doc.create_repo",
                                     "params": {"base": str(tmp_path), "rel_path": "卡纲.md",
-                                               "content": "角色黛绮丝与戴茂肉棒交合"}})
+                                               "content": "角色蓝晴丝与裴肃肉棒交合"}})
             return _json.dumps({"done": True, "reply": "卡纲已改写为设定化条目"})
         outcome = fabric_loop.run_loop(
             intent="写卡纲", configured_models={"chat", "image"},
@@ -281,7 +281,7 @@ def test_写内容敏感词路由本地改写成功放行(tmp_path, monkeypatch)
 
     # 本地改写成功：把露骨内容转成设定化条目
     def fake_local_rewrite(text, local=None):
-        return "角色黛绮丝与戴茂存在主仆契约与肉体关系（设定化描述，机制条目见全局机制层）"
+        return "角色蓝晴丝与裴肃存在主仆契约与肉体关系（设定化描述，机制条目见全局机制层）"
     monkeypatch.setattr(fabric_loop, "_local_rewrite", fake_local_rewrite)
 
     lease = _sb.grant("fabric:nsfw-mix", [], mode=_sb.ACCESS_FULL)
@@ -294,7 +294,7 @@ def test_写内容敏感词路由本地改写成功放行(tmp_path, monkeypatch)
             if idx == 0:
                 return _json.dumps({"tool": "doc.create_repo",
                                     "params": {"base": str(tmp_path), "rel_path": "卡纲.md",
-                                               "content": "角色黛绮丝与戴茂肉棒交合"}})
+                                               "content": "角色蓝晴丝与裴肃肉棒交合"}})
             return _json.dumps({"done": True, "reply": "完成"})
         outcome = fabric_loop.run_loop(
             intent="写卡纲", configured_models={"chat", "image"},
@@ -479,7 +479,7 @@ def test_带图自由循环读穿搭文档落盘套装文档(tmp_path):
         # 2026-09-10（A2）：doc.create_repo 的 rel_path 只收**文件名**（文档一律平铺在
         # docs/ 下，带目录会被拒——白名单只认恰一层 docs/*.md）。
         {"tool": "doc.create_repo", "params": {
-            "base": str(tmp_path), "rel_path": "唐柚-四季穿搭.md",
+            "base": str(tmp_path), "rel_path": "阮秋白-四季穿搭.md",
             "content": "# 四季套装\n春·套一：风衣配长裙"}},
         {"done": True, "reply": "套装文档已生成"},
     ]
@@ -500,7 +500,7 @@ def test_带图自由循环读穿搭文档落盘套装文档(tmp_path):
     )
     assert outcome.status == "done"
     assert len(outcome.steps) == 2 and all(s["ok"] for s in outcome.steps)
-    written = tmp_path / "docs" / "唐柚-四季穿搭.md"
+    written = tmp_path / "docs" / "阮秋白-四季穿搭.md"
     assert written.is_file()
     assert "风衣配长裙" in written.read_text(encoding="utf-8")
     capability_sandbox.revoke(lease["id"])
@@ -552,8 +552,8 @@ def test_落盘域强制归一_模型传错base_repo_id被覆盖(tmp_path):
 def test_done前auto_embed只内嵌本作品归属的卡(tmp_path):
     """2026-09-14 治本回归：done 前的世界书内嵌兜底只处理**本作品归属的卡**。
 
-    实盘反例（`userdata/pictures/`）：作品库根下并列 妈妈娼馆 / 御仙 / 玫瑰与繁花 三张卡，
-    只有 `御仙` 属作品「原创」（`_work.json`）。旧实现 `glob("*/card.json")` 会把原创的
+    实盘反例（`userdata/pictures/`）：作品库根下并列 旧巷当铺 / 驭云录 / 青梧与晚风 三张卡，
+    只有 `驭云录` 属作品「原创」（`_work.json`）。旧实现 `glob("*/card.json")` 会把原创的
     世界书整体写进另外两张卡（40 / 36 条 < 快照 59 条 ⇒ 真触发覆盖）——数据污染。
     修后集合 = `character_store.owned_card_dirs`，归属不符的一律不动。
     """
@@ -571,13 +571,13 @@ def test_done前auto_embed只内嵌本作品归属的卡(tmp_path):
     alien_before = (alien / "card.json").read_text(encoding="utf-8")
 
     # 本作品的卡：A 态骨架（0 条）+ 归属标记 = repo_id
-    mine = tmp_path / "御仙"
+    mine = tmp_path / "驭云录"
     mine.mkdir()
     (mine / "card.json").write_text(json.dumps({
-        "name": "御仙", "description": "d", "first_mes": "hi",
+        "name": "驭云录", "description": "d", "first_mes": "hi",
         "character_book": {"entries": []},
     }, ensure_ascii=False), encoding="utf-8")
-    character_store.write_work_marker(str(tmp_path), "御仙", repo_id)
+    character_store.write_work_marker(str(tmp_path), "驭云录", repo_id)
 
     # 夹具自证：旧写法 `glob("*/card.json")` 会同时命中别人的卡（回归价值所在）
     assert len(list(tmp_path.glob("*/card.json"))) == 2

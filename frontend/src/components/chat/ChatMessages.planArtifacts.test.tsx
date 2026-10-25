@@ -6,8 +6,8 @@ import { createRoot, type Root } from "react-dom/client";
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const arts = [
-  { kind: "card", name: "角色主卡 · 御仙", path: "D:/w/御仙/card.json", size: 146172 },
-  { kind: "worldbook", name: "世界书 · 御仙", path: "D:/w/御仙/worldbook.json", size: 129483 },
+  { kind: "card", name: "角色主卡 · 驭云录", path: "D:/w/驭云录/card.json", size: 146172 },
+  { kind: "worldbook", name: "世界书 · 驭云录", path: "D:/w/驭云录/worldbook.json", size: 129483 },
 ];
 
 vi.mock("dompurify", () => ({ default: { sanitize: (html: string) => html } }));
@@ -62,7 +62,7 @@ describe("计划任务终态产物卡（2026-09-09 实锤：批准执行后对�
     expect(listArtifacts).toHaveBeenCalledWith("D:/w", "repo-1");
     const text = container.textContent || "";
     expect(text).toContain("交付产物");
-    expect(text).toContain("御仙");
+    expect(text).toContain("驭云录");
   });
 
   it("任务未完成（awaiting_approval）时不渲染产物卡、不拉产物", async () => {

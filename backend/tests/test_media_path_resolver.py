@@ -24,7 +24,7 @@ def _local_view_url(path) -> str:
 
 def test_resolver_falls_back_to_kind_dirs(tmp_path):
     """老形态 URL（<仓库>/<name>）⇒ 解析到 <仓库>/pictures/<name>。"""
-    repo = tmp_path / "Anima" / "金狮"
+    repo = tmp_path / "Anima" / "雪松岭"
     (repo / "pictures").mkdir(parents=True)
     actual = repo / "pictures" / "a.png"
     actual.write_bytes(b"png")

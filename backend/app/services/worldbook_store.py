@@ -902,7 +902,7 @@ def apply_repo_ops(base: str, repo_id: str, ops: list[dict[str, Any]], *,
     （_merge_character_dynamic：保留原文底座 + 替换/追加唯一的【剧情进展·动态】区）；
     身份键（comment/keys/constant/enabled）不随 ops 变更并上报 rejections，理由是 comment
     仍是角色名单/主角识别与视觉画像**命名**锚点，改名会让角色识别与画像段落名失配
-    （2026-08-31 实锤：舞姬恋↔舞柔条目连不上 → 空泛提示词；2026-10-23 起外貌提取本身
+    （2026-08-31 实锤：星织恋↔绮柔条目连不上 → 空泛提示词；2026-10-23 起外貌提取本身
     不再依赖「角色卡·」前缀，但画像名字仍取 comment 前缀）。
 
     ⚠ 2026-09-12 修：底座保护原先只对「comment 含『角色卡·』」的条目生效，非角色卡条目走

@@ -1,6 +1,6 @@
 """待建好感度字段清单：状态表里有其他状态、却始终没有被播种好感度的已登场角色。
 
-2026-09-23 用户口径（真机实锤）：骆姑姑在「重要角色表」里有行、状态表里有 4 条叙事字段
+2026-09-23 用户口径（真机实锤）：苏姑姑在「重要角色表」里有行、状态表里有 4 条叙事字段
 （所在/身体状态/在场状态/当前目标），却**始终没有**好感度字段 ⇒ 「角色状态表（好感度/状态）」
 里她的卡片只有状态、没有好感度。规则（`state_instruction`）只说「字段不存在时要 set 播种」，
 但**模型看不到"谁缺字段"** ⇒ 只靠它自查必然漏。
@@ -28,15 +28,15 @@ def _characters_table(names: list[str]) -> list[dict]:
 # ── 1. 纯逻辑：缺字段清单 ──
 
 def test_缺好感度清单只收候选里缺字段的角色():
-    st = cs.CharacterState(card_name="凌霄仙母录", repo_id="r")
-    st.数值["妲千沁·好感度"] = cs.NumericField(13.0, turn=51)
-    st.叙事["妲千沁·心情"] = cs.NarrativeField("口硬发痒", turn=51)
-    st.叙事["骆姑姑·所在"] = cs.NarrativeField("已离场", turn=47)
+    st = cs.CharacterState(card_name="苍梧仙闻录", repo_id="r")
+    st.数值["沈映澜·好感度"] = cs.NumericField(13.0, turn=51)
+    st.叙事["沈映澜·心情"] = cs.NarrativeField("口硬发痒", turn=51)
+    st.叙事["苏姑姑·所在"] = cs.NarrativeField("已离场", turn=47)
     st.叙事["师徒名分"] = cs.NarrativeField("濒临破裂", turn=46)  # 无属主裸键，不是角色
 
-    got = cs.missing_affinity_owners(st, ["妲千沁", "骆姑姑", "路人甲"])
-    # 有字段的不报（妲千沁）；候选里有、状态表完全没字段的照样要建（新角色也要有初值）
-    assert got == ["骆姑姑", "路人甲"]
+    got = cs.missing_affinity_owners(st, ["沈映澜", "苏姑姑", "路人甲"])
+    # 有字段的不报（沈映澜）；候选里有、状态表完全没字段的照样要建（新角色也要有初值）
+    assert got == ["苏姑姑", "路人甲"]
 
 
 def test_缺好感度清单排除主角与空名():
@@ -69,8 +69,8 @@ def test_无数值无叙事时清单为空():
 # ── 2. 纯逻辑：注入块文案 ──
 
 def test_待建好感度注入块文案自包含():
-    block = cs.render_missing_affinity_block(["骆姑姑", "路人甲"])
-    assert "骆姑姑" in block and "路人甲" in block
+    block = cs.render_missing_affinity_block(["苏姑姑", "路人甲"])
+    assert "苏姑姑" in block and "路人甲" in block
     assert 'op="set"' in block            # 明确动作：set 播种
     assert "禁止从 0 起算" in block        # 明确禁止项
     assert "好感度" in block
@@ -78,9 +78,9 @@ def test_待建好感度注入块文案自包含():
 
 
 def test_表格列取值去重保序():
-    tables = _characters_table(["妲千沁", "骆姑姑", "", "妲千沁"])
+    tables = _characters_table(["沈映澜", "苏姑姑", "", "沈映澜"])
     assert table_store.column_values(
-        tables, table_store.CHARACTERS_TABLE, "姓名") == ["妲千沁", "骆姑姑"]
+        tables, table_store.CHARACTERS_TABLE, "姓名") == ["沈映澜", "苏姑姑"]
     assert table_store.column_values(tables, "不存在的表", "姓名") == []
     assert table_store.column_values(tables, table_store.CHARACTERS_TABLE, "不存在列") == []
     assert table_store.column_values([], table_store.CHARACTERS_TABLE, "姓名") == []

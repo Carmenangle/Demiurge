@@ -57,7 +57,7 @@ class ArtifactMeta:
     """产物元数据（wire 字段即前端 ArtifactMeta，保持驼峰命名）。"""
 
     kind: str          # card | worldbook | file
-    name: str          # 人类可读名，如「角色主卡 · 玫瑰与繁花」
+    name: str          # 人类可读名，如「角色主卡 · 青梧与晚风」
     path: str          # 绝对路径（前端只展示+回传，不自行拼接）
     size: int          # 字节数
     mtime: float       # 修改时间 epoch 秒
@@ -210,7 +210,7 @@ def _collect_from_dir(root: Path, artifacts: list[ArtifactMeta], since: float = 
     """扫描单个目录的 card.json / worldbook.json（存在才收），按目录名归组。
 
     since>0 时只收 mtime ≥ since 的文件（= 本次运行实际写入的产物），避免把
-    上一轮/历史作品的产物当成本轮产物（2026-09-09 实锤：御仙任务显示玫瑰与繁花）。
+    上一轮/历史作品的产物当成本轮产物（2026-09-09 实锤：驭云录任务显示青梧与晚风）。
     """
     try:
         entries = sorted(root.iterdir())

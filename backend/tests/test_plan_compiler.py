@@ -91,13 +91,13 @@ def test_卡交付继续形态_优化类动词命中():
     """
     # 真实翻车指令：含「检查」但语义是制作任务的继续
     assert plan_compiler.is_doc_delegation_intent(
-        "基于《玫瑰与繁花》已有卡纲与已落盘条目，先做世界书密度检查找出不达标条目，"
+        "基于《青梧与晚风》已有卡纲与已落盘条目，先做世界书密度检查找出不达标条目，"
         "再针对性地补写丰富合集卡内容（不重新通读全文）。")
     # 优化类动词 + 卡名词（语序正反都命中：同句共现，不再依赖近邻窗口）
     assert plan_compiler.is_doc_delegation_intent(
-        "《玫瑰与繁花》合集卡内容不够丰富，基于已有产出补写，不要重读全文。")
+        "《青梧与晚风》合集卡内容不够丰富，基于已有产出补写，不要重读全文。")
     assert plan_compiler.is_doc_delegation_intent(
-        "角色卡太单薄了，重点补写戴茂、黛绮丝的条目到2200字以上。")
+        "角色卡太单薄了，重点补写裴肃、蓝晴丝的条目到2200字以上。")
     assert plan_compiler.is_doc_delegation_intent(
         "NSFW条目太少，按规范补到8-14条，每条400字以上。")
     assert plan_compiler.is_doc_delegation_intent("帮我把世界书里的蛇族条目细化一下")
@@ -272,7 +272,7 @@ def test_编译期先回填variants再归一预算(tmp_path):
     fake = _FakeStructured(lambda _c: payload)
     outcome = plan_compiler.compile_plan(
         intent="批量出图", repo_id="work", output_dir=str(tmp_path),
-        attachments=[{"name": "形象提示词-唐柚.md", "text": doc}],
+        attachments=[{"name": "形象提示词-阮秋白.md", "text": doc}],
         configured_models={"chat", "image"},
         chat_base="", chat_key="", chat_model="", chat_fn=lambda *a, **k: "", structured_chat_fn=fake)
     assert outcome.plan is not None, outcome.errors
@@ -380,7 +380,7 @@ def test_附件在场时系统提示强制段落引用(tmp_path):
     doc = "## 【春·套一】测试套装\nQRQ, masterpiece, " + "tag, " * 200
     outcome = plan_compiler.compile_plan(
         intent="读取文档套装提示词批量出图", output_dir=str(tmp_path),
-        attachments=[{"name": "形象提示词-柏言.md", "text": doc}],
+        attachments=[{"name": "形象提示词-邵允.md", "text": doc}],
         configured_models={"chat", "image"},
         chat_base="", chat_key="", chat_model="", chat_fn=lambda *a, **k: "",
         structured_chat_fn=_RecordingStructured())
@@ -538,7 +538,7 @@ def test_延续附件与系统提示():
     assert "逐字复制" in att["text"] and "套一" in att["text"]
 
 # ── 段落回填卫生：正文行中套名引用不是标题 / 目录附件不是提示词源 ─────────────
-# 真实失败（2026-09-02）：唐柚文档「使用说明」第 4 条含【运动·套一/套二】行中引用，
+# 真实失败（2026-09-02）：阮秋白文档「使用说明」第 4 条含【运动·套一/套二】行中引用，
 # 旧判定「任何含【】的行都是标题」把该行当成段落开头，吞掉第 5-9 条并延伸进拼接的
 # LoRA/模板目录附件（文件名含 masterpiece 通过质量过滤）→ 伪第 15 变体；目录里
 # 「禁止写 TO_BE_RESOLVED」字样又触发占位符校验被拒，整批任务无法投递。
@@ -574,7 +574,7 @@ def test_fill_prompt_sections_目录附件不参与抽取与回填():
                 "variants": ["【春·套一】测试套装", "【春·套二】测试套装"]})],
         approval_required=["workflow.submit_batch"])
     filled = plan_compiler.fill_prompt_sections(plan, [
-        {"name": "形象提示词-唐柚.md", "text": _套装文档()},
+        {"name": "形象提示词-阮秋白.md", "text": _套装文档()},
         {"name": plan_compiler.LORA_CATALOG_NAME,
          "text": "共 1 个：\n- anima-masterpiece.safetensors（触发词:masterpiece）\n"
                  "禁止写 TO_BE_RESOLVED、{{...}} 或任何占位符。"},
@@ -607,7 +607,7 @@ def test_fill_prompt_sections_模型直写数量不符时以标题抽取重建()
                 "variants": [{"name": "春·套一", "prompt": "模型只写了一套"}]})],
         approval_required=["workflow.submit_batch"])
     filled = plan_compiler.fill_prompt_sections(plan, [
-        {"name": "形象提示词-唐柚.md", "text": _套装文档()},
+        {"name": "形象提示词-阮秋白.md", "text": _套装文档()},
     ])
     variants = plan.steps[0].params["variants"]
     assert len(variants) == 2  # 文档真实段数

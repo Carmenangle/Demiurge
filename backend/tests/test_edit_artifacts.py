@@ -11,9 +11,9 @@ def _dump(value) -> str:
 
 def test_校验合法与缺名角色卡():
     result = edit_artifacts.validate("card.json", _dump({
-        "spec": "chara_card_v2", "name": "塞西莉亚", "description": "院长",
+        "spec": "chara_card_v2", "name": "卡蜜莉亚", "description": "院长",
     }), "character_card")
-    assert result["name"] == "塞西莉亚"
+    assert result["name"] == "卡蜜莉亚"
 
     with pytest.raises(edit_artifacts.ArtifactValidationError, match="缺少 name"):
         edit_artifacts.validate("card.json", _dump({"description": "院长"}),
@@ -23,28 +23,28 @@ def test_校验合法与缺名角色卡():
 def test_Demiurge角色卡拒绝ST包装和重复内嵌侧车():
     with pytest.raises(edit_artifacts.ArtifactValidationError, match="扁平格式"):
         edit_artifacts.validate("card.json", _dump({
-            "spec": "chara_card_v2", "data": {"name": "塞西莉亚"},
+            "spec": "chara_card_v2", "data": {"name": "卡蜜莉亚"},
         }), "character_card")
     with pytest.raises(edit_artifacts.ArtifactValidationError, match="worldbook.json"):
         edit_artifacts.validate("card.json", _dump({
-            "name": "塞西莉亚", "character_book": {"entries": []},
+            "name": "卡蜜莉亚", "character_book": {"entries": []},
         }), "character_card")
 
 
 def test_Demiurge角色卡与世界书侧车格式():
     card = {
-        "name": "塞西莉亚", "description": "孤儿院院长", "personality": "温和谨慎",
+        "name": "卡蜜莉亚", "description": "孤儿院院长", "personality": "温和谨慎",
         "scenario": "收养仪式前夜", "first_mes": "欢迎回来。", "spec": "chara_card_v2",
         "character_book": None, "regex_scripts": [], "extensions": {},
     }
-    assert edit_artifacts.validate("角色卡/塞西莉亚/card.json", _dump(card))["name"] == "塞西莉亚"
+    assert edit_artifacts.validate("角色卡/卡蜜莉亚/card.json", _dump(card))["name"] == "卡蜜莉亚"
 
     worldbook = {"entries": [{
-        "comment": "塞西莉亚", "keys": ["塞西莉亚", "院长"],
-        "content": "塞西莉亚是孤儿院院长。", "constant": False, "enabled": True,
+        "comment": "卡蜜莉亚", "keys": ["卡蜜莉亚", "院长"],
+        "content": "卡蜜莉亚是孤儿院院长。", "constant": False, "enabled": True,
     }]}
     result = edit_artifacts.validate(
-        "角色卡/塞西莉亚/worldbook.json", _dump(worldbook), "worldbook",
+        "角色卡/卡蜜莉亚/worldbook.json", _dump(worldbook), "worldbook",
     )
     assert result == {"type": "worldbook", "entries": 1}
 

@@ -641,7 +641,7 @@ describe("④ buildInspirationNodes：坐标透传 / 双击五类分派 / 卡动
   it("双击分派 ③/④/⑤：角色卡 / 预设 / 其余 → 各弹窗与本地编辑", () => {
     const rig = inspRig({
       inspirationCards: [
-        card({ id: "k1", kind: "character", sourceRef: "char:沈糯", content: "设定" }),
+        card({ id: "k1", kind: "character", sourceRef: "char:庄听澜", content: "设定" }),
         card({ id: "k2", kind: "preset" }),
         card({ id: "k3", kind: "table-row" }),
       ],
@@ -650,7 +650,7 @@ describe("④ buildInspirationNodes：坐标透传 / 双击五类分派 / 卡动
     rig.inspirationCardsRef.current = rig.inspirationCards;
 
     got[0].data.onOpen(got[0].data.node);
-    expect(rig.setCharModal).toHaveBeenCalledWith({ name: "沈糯", cardId: "k1", content: "设定" });
+    expect(rig.setCharModal).toHaveBeenCalledWith({ name: "庄听澜", cardId: "k1", content: "设定" });
     got[1].data.onOpen(got[1].data.node);
     expect(rig.setPresetModalOpen).toHaveBeenCalledWith(true);
     got[2].data.onOpen(got[2].data.node);

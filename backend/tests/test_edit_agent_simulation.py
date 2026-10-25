@@ -50,7 +50,7 @@ def test_模拟角色卡专家创建侧车并逐项校验(monkeypatch, tmp_path)
     def scenario(tools, _messages):
         assert json.loads(tools["list_project_files"].invoke({})) == []
         card = {
-            "name": "塞西莉亚",
+            "name": "卡蜜莉亚",
             "description": "孤儿院院长",
             "personality": "温和而谨慎",
             "first_mes": "欢迎回来。",
@@ -60,34 +60,34 @@ def test_模拟角色卡专家创建侧车并逐项校验(monkeypatch, tmp_path)
         book = {"entries": [{
             "comment": "孤儿院",
             "keys": ["孤儿院"],
-            "content": "塞西莉亚经营的孤儿院。",
+            "content": "卡蜜莉亚经营的孤儿院。",
             "constant": False,
             "enabled": True,
         }]}
         tools["write_project_file"].invoke({
-            "path": "角色卡/塞西莉亚/card.json", "content": _json(card),
+            "path": "角色卡/卡蜜莉亚/card.json", "content": _json(card),
         })
         tools["write_project_file"].invoke({
-            "path": "角色卡/塞西莉亚/worldbook.json", "content": _json(book),
+            "path": "角色卡/卡蜜莉亚/worldbook.json", "content": _json(book),
         })
-        assert "塞西莉亚" in tools["read_project_file"].invoke({
-            "path": "角色卡/塞西莉亚/card.json",
+        assert "卡蜜莉亚" in tools["read_project_file"].invoke({
+            "path": "角色卡/卡蜜莉亚/card.json",
         })
         card_result = json.loads(tools["validate_project_file"].invoke({
-            "path": "角色卡/塞西莉亚/card.json", "artifact_type": "character_card",
+            "path": "角色卡/卡蜜莉亚/card.json", "artifact_type": "character_card",
         }))
         book_result = json.loads(tools["validate_project_file"].invoke({
-            "path": "角色卡/塞西莉亚/worldbook.json", "artifact_type": "worldbook",
+            "path": "角色卡/卡蜜莉亚/worldbook.json", "artifact_type": "worldbook",
         }))
         assert card_result["valid"] and book_result["valid"]
         return "角色卡和世界书侧车已创建并校验"
 
     result, captured = _simulate(
-        monkeypatch, tmp_path, "制作塞西莉亚角色卡和配套世界书", scenario,
+        monkeypatch, tmp_path, "制作卡蜜莉亚角色卡和配套世界书", scenario,
     )
 
     assert result["result_text"] == "角色卡和世界书侧车已创建并校验"
-    assert project_files.file_exists(tmp_path, "角色卡/塞西莉亚/card.json")
+    assert project_files.file_exists(tmp_path, "角色卡/卡蜜莉亚/card.json")
     assert captured["events"][0][1]["specialist"] == "edit_character_card"
 
 
@@ -154,9 +154,9 @@ def test_模拟脚本专家创建可校验Python(monkeypatch, tmp_path):
 
 
 def test_模拟排错只读和明确修复两条路径(monkeypatch, tmp_path):
-    path = "角色卡/塞西莉亚/card.json"
+    path = "角色卡/卡蜜莉亚/card.json"
     project_files.write_text(tmp_path, path, _json({
-        "name": "塞西莉亚", "description": "旧描述", "spec": "chara_card_v2",
+        "name": "卡蜜莉亚", "description": "旧描述", "spec": "chara_card_v2",
     }))
 
     def inspect(tools, _messages):
@@ -281,7 +281,7 @@ def test_模拟附件保存为角色头像(monkeypatch, tmp_path):
     def scenario(tools, _messages):
         tools["list_project_files"].invoke({})
         saved = json.loads(tools["save_attachment_png"].invoke({
-            "path": "角色卡/塞西莉亚/avatar.png", "attachment_index": 0,
+            "path": "角色卡/卡蜜莉亚/avatar.png", "attachment_index": 0,
         }))
         assert saved["saved"]
         return "头像已保存"
@@ -289,14 +289,14 @@ def test_模拟附件保存为角色头像(monkeypatch, tmp_path):
     _simulate(
         monkeypatch, tmp_path, "保存附件作为角色头像", scenario, images=[image],
     )
-    assert project_files.read_png(tmp_path, "角色卡/塞西莉亚/avatar.png") == png
+    assert project_files.read_png(tmp_path, "角色卡/卡蜜莉亚/avatar.png") == png
 
 
 def test_模拟角色卡从作品快照受控发布到源库(monkeypatch, tmp_path):
     library = tmp_path / "角色卡源库"
-    path = "角色卡/塞西莉亚/card.json"
+    path = "角色卡/卡蜜莉亚/card.json"
     project_files.write_text(tmp_path, path, _json({
-        "name": "塞西莉亚", "description": "孤儿院院长",
+        "name": "卡蜜莉亚", "description": "孤儿院院长",
         "spec": "chara_card_v2", "character_book": None,
         "regex_scripts": [], "extensions": {},
     }))
@@ -309,13 +309,13 @@ def test_模拟角色卡从作品快照受控发布到源库(monkeypatch, tmp_pa
         assert path in json.loads(tools["list_project_files"].invoke({}))
         tools["read_project_file"].invoke({"path": path})
         result = json.loads(tools["publish_character_card"].invoke({
-            "name": "塞西莉亚",
+            "name": "卡蜜莉亚",
         }))
         assert result["published"]
         return "角色卡已发布"
 
-    _simulate(monkeypatch, tmp_path, "保存并发布塞西莉亚角色卡", scenario)
-    assert (library / "塞西莉亚" / "card.json").is_file()
+    _simulate(monkeypatch, tmp_path, "保存并发布卡蜜莉亚角色卡", scenario)
+    assert (library / "卡蜜莉亚" / "card.json").is_file()
 
 
 def test_模拟工具失败均进入Trace且不越过小仓库(monkeypatch, tmp_path):

@@ -359,7 +359,7 @@ def _keyword_hits(entries: list[Entry], query: str) -> list[str]:
     """SillyTavern 核心机制：非常驻条目的任一 key 出现在 query 里则激活（关键词触发）。
 
     这是命名实体（角色名/地名/势力名）稳定进注入的保证——语义检索可能因 query 被其它语义带偏而漏掉
-    直接点名的条目（如用户说「料理冷倾雪」，「冷倾雪」角色卡必须进）。保序返回命中条目 content。
+    直接点名的条目（如用户说「料理顾凝霜」，「顾凝霜」角色卡必须进）。保序返回命中条目 content。
     """
     if not query.strip():
         return []

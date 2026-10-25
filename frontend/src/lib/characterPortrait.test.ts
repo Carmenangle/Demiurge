@@ -97,12 +97,12 @@ describe("resolveCharacterPortrait", () => {
   it("prefers the longest non-overlapping character name", () => {
     const nested: Record<string, CharacterPortrait> = {
       莉亚: { name: "莉亚", avatar: "lia.png", expressions: {} },
-      塞西莉亚: { name: "塞西莉亚", avatar: "cecilia.png", expressions: {} },
+      卡蜜莉亚: { name: "卡蜜莉亚", avatar: "cecilia.png", expressions: {} },
     };
     expect(resolveCharacterPortrait(
-      "塞西莉亚回答：‘欢迎回来。’",
-      ["莉亚", "塞西莉亚"], "塞西莉亚", nested,
-    )).toEqual({ name: "塞西莉亚", url: "cecilia.png" });
+      "卡蜜莉亚回答：‘欢迎回来。’",
+      ["莉亚", "卡蜜莉亚"], "卡蜜莉亚", nested,
+    )).toEqual({ name: "卡蜜莉亚", url: "cecilia.png" });
   });
 
   it("keeps a non-opening actor across a pronoun-only continue turn", () => {

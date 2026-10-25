@@ -114,13 +114,13 @@ def test_survey_章节词频红线(tmp_path):
 
 
 def test_survey_候选名清洗_虚词碎片丢弃(tmp_path):
-    """2026-09-06 实锤修复：《玫瑰与繁花》name_counts 里「我知/或者/怎么/不知/
+    """2026-09-06 实锤修复：《青梧与晚风》name_counts 里「我知/或者/怎么/不知/
     她知/你知/你在/要知/谁知」全是「X+道/说」句式碎片，必须丢弃。"""
     txt = tmp_path / "noise.txt"
     txt.write_text(
         "我知道这件事。或者说换个说法。怎么说呢。她不知去向。你知我在。"
         "你在哪里。要知如此。谁知后来。也不知过了多久。他不知真相。"
-        "她也不知该如何。黛绮丝公主说：安苏娜小姐来了。",
+        "她也不知该如何。蓝晴丝公主说：蓝苏娜小姐来了。",
         encoding="utf-8",
     )
     res = nt.survey_fulltext(str(txt), top_names=20)
@@ -128,50 +128,50 @@ def test_survey_候选名清洗_虚词碎片丢弃(tmp_path):
     for noise in ("我知", "或者", "怎么", "不知", "她知", "你知", "你在", "要知",
                   "谁知", "也不知", "他不知", "她也不知", "知道", "不知道"):
         assert noise not in counts, f"{noise} 不应出现在候选名单"
-    assert "黛绮丝" in counts  # 真实名保留
-    assert "安苏娜" in counts
+    assert "蓝晴丝" in counts  # 真实名保留
+    assert "蓝苏娜" in counts
 
 
 def test_survey_候选名清洗_动词尾裁剪归并(tmp_path):
-    """「绮丝笑着说/戴茂笑着道」的 4 字候选被裁剪归并回真名「绮丝/戴茂」。"""
+    """「晴丝笑着说/裴肃笑着道」的 4 字候选被裁剪归并回真名「晴丝/裴肃」。"""
     txt = tmp_path / "clip.txt"
     txt.write_text(
-        "绮丝笑着说：今晚月色真好。戴茂笑着道：确实。绮丝看了看远方。"
-        "戴茂站在船头。绮丝回过身来。戴茂点了点头。",
+        "晴丝笑着说：今晚月色真好。裴肃笑着道：确实。晴丝看了看远方。"
+        "裴肃站在船头。晴丝回过身来。裴肃点了点头。",
         encoding="utf-8",
     )
     res = nt.survey_fulltext(str(txt), top_names=20)
     counts = dict(res["name_counts"])
-    assert "绮丝" in counts
-    assert "戴茂" in counts
-    assert "绮丝笑着" not in counts
-    assert "戴茂笑着" not in counts
-    assert "绮丝笑" not in counts
+    assert "晴丝" in counts
+    assert "裴肃" in counts
+    assert "晴丝笑着" not in counts
+    assert "裴肃笑着" not in counts
+    assert "晴丝笑" not in counts
 
 
 
 
 
 def test_survey_候选名清洗_二级虚词前缀与短语(tmp_path):
-    """2026-09-06 二级实锤：「是黛绮丝/对赫瑞拉/贵的公爵/茂忍不住/不敢相信/
+    """2026-09-06 二级实锤：「是蓝晴丝/对凯瑞拉/贵的公爵/茂忍不住/不敢相信/
     笑眯眯/准确/我的」等虚词前缀与动词短语残留。"""
     txt = tmp_path / "noise2.txt"
     txt.write_text(
-        "是黛绮丝说道：别怕。对赫瑞拉说：来吧。贵的公爵说道：退下。"
-        "茂忍不住说：等等。戴茂不敢相信道：什么？笑眯眯地开口。准确地说。"
-        "我的天。戴茂疑惑道：怎么。戴茂说道：走吧。",
+        "是蓝晴丝说道：别怕。对凯瑞拉说：来吧。贵的公爵说道：退下。"
+        "茂忍不住说：等等。裴肃不敢相信道：什么？笑眯眯地开口。准确地说。"
+        "我的天。裴肃疑惑道：怎么。裴肃说道：走吧。",
         encoding="utf-8",
     )
     res = nt.survey_fulltext(str(txt), top_names=30)
     counts = dict(res["name_counts"])
-    for noise in ("是黛绮丝", "对赫瑞拉", "贵的公爵", "茂忍不住", "戴茂疑惑",
+    for noise in ("是蓝晴丝", "对凯瑞拉", "贵的公爵", "茂忍不住", "裴肃疑惑",
                   "不敢相信", "笑眯眯", "准确", "我的", "高贵"):
         assert noise not in counts, f"{noise} 不应出现在候选名单"
     # 前缀裁剪归并回真名
-    assert "黛绮丝" in counts
-    assert "赫瑞拉" in counts
+    assert "蓝晴丝" in counts
+    assert "凯瑞拉" in counts
     assert "公爵" in counts
-    assert "戴茂" in counts
+    assert "裴肃" in counts
 
 
 
@@ -180,9 +180,9 @@ def test_survey_原生章节识别_标题与offset(tmp_path):
     chapter_count=1 实锤；现在识别「第X章·标题」，返回标题/字数/offset 供定向阅读。"""
     txt = tmp_path / "native.md"
     txt.write_text(
-        ("第一章·真正的金手指\n" + "戴茂获得金手指。" * 50 + "\n"
-         + "第二章·同行\n" + "安苏娜同行。" * 50 + "\n"
-         + "第三章·人类的残忍\n" + "没人相信戴茂。" * 50),
+        ("第一章·真正的金手指\n" + "裴肃获得金手指。" * 50 + "\n"
+         + "第二章·同行\n" + "蓝苏娜同行。" * 50 + "\n"
+         + "第三章·人类的残忍\n" + "没人相信裴肃。" * 50),
         encoding="utf-8",
     )
     res = nt.survey_fulltext(str(txt), top_names=5)
@@ -394,7 +394,7 @@ def test_check_entry_density_数字编号前缀纳入event分类_默认阈值600
         {"comment": "1. 地理·巷底粉门", "content": "密" * 650},   # ≥600 达标
         {"comment": "6. 大事件·命定时间线", "content": "短" * 300},  # <600 不达标
         {"comment": "世界背景·总纲", "content": "密" * 610},       # ≥600 达标
-        {"comment": "18. 妈妈娼馆·角色速览表", "content": "短" * 100},  # <600 不达标
+        {"comment": "18. 旧巷当铺·角色速览表", "content": "短" * 100},  # <600 不达标
     ]
     res = nt.check_entry_density(entries)
     assert res["event"] == 4, "数字前缀 + 世界背景· 都应计入编号层"
@@ -403,7 +403,7 @@ def test_check_entry_density_数字编号前缀纳入event分类_默认阈值600
     assert "1. 地理·巷底粉门" not in below
     assert "世界背景·总纲" not in below
     assert "6. 大事件·命定时间线" in below
-    assert "18. 妈妈娼馆·角色速览表" in below
+    assert "18. 旧巷当铺·角色速览表" in below
     # 阈值确认:610 ≥600 不 below,600 整也不 below
     exact = [{"comment": "6. 大事件·边界", "content": "密" * 600}]
     assert nt.check_entry_density(exact)["passed"] is True
@@ -463,7 +463,7 @@ def test_strip_meta_instructions_剥离AI渲染元指导保留设定():
     落盘前剥离元指导段，保留【爽点】等设定段；角色卡设定段原样保留。
     """
     sample = (
-        "【爽点】蛇后拉米娅以蛇尾盘绕的独特方式与戴茂相好。\n"
+        "【爽点】蛇后拉米娅以蛇尾盘绕的独特方式与裴肃相好。\n"
         "【写法】AI渲染拉米娅以蛇尾卷缠的氛围，动作强调「盘、绕、缚、吸」。\n"
         "【边界】本条目仅限成年玩家体验。\n"
         "【情境示例】月下蛇族营地，拉米娅卸下铠甲。\n"
@@ -480,7 +480,7 @@ def test_strip_meta_instructions_剥离AI渲染元指导保留设定():
     assert warnings, "清洗应记录 warning"
 
     # 角色卡设定段不受影响
-    role = "【人物设定】黛绮丝，半神之身。\n【性格】冷静睿智。"
+    role = "【人物设定】蓝晴丝，半神之身。\n【性格】冷静睿智。"
     assert ch._strip_meta_instructions(role, []) == role
 
 
@@ -514,24 +514,24 @@ def test_upsert_同名历史重复合并为一条(tmp_path):
 
 def test_upsert_覆盖保护_短版不能覆盖长版(tmp_path):
     """2026-09-07 用户定案「按原文关键词扩写，防偏差」：短版重写覆盖长版是退化
-    （22:08 实锤：戴茂 1945→949）。已有同名条目且新内容更短（<目标字数）→ 拒绝写入；
+    （22:08 实锤：裴肃 1945→949）。已有同名条目且新内容更短（<目标字数）→ 拒绝写入；
     无同名的新骨架允许先落盘（随后补密度）。"""
     work = tmp_path / "作品"
     work.mkdir()
     # 先写入一个达标长版
     ch.upsert_repo_worldbook(base=str(work), repo_id="w", entries=[
-        {"comment": "角色卡·戴茂", "keys": ["戴茂"],
-         "content": "【人物设定】戴茂穿越者。" + "细节" * 1200},  # 3600+ 字达标
+        {"comment": "角色卡·裴肃", "keys": ["裴肃"],
+         "content": "【人物设定】裴肃穿越者。" + "细节" * 1200},  # 3600+ 字达标
     ])
     # 短版想覆盖 → 拒绝
     out = ch.upsert_repo_worldbook(base=str(work), repo_id="w", entries=[
-        {"comment": "角色卡·戴茂", "keys": ["戴茂"], "content": "短版" * 300},  # 600 字 < 2200
+        {"comment": "角色卡·裴肃", "keys": ["裴肃"], "content": "短版" * 300},  # 600 字 < 2200
     ])
     assert out["applied"] == 0, "短版覆盖长版必须被拒绝"
     assert any("覆盖保护" in str(w) for w in out["warnings"]), "应回填覆盖保护提示"
     from app.services import worldbook_store
     book = worldbook_store.read_repo_snapshot(str(work), "w")
-    da = next(e for e in book["entries"] if str(e.get("comment") or "") == "角色卡·戴茂")
+    da = next(e for e in book["entries"] if str(e.get("comment") or "") == "角色卡·裴肃")
     assert "细节" in da["content"], "长版内容应保持不变"
 
 

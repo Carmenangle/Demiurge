@@ -29,7 +29,7 @@ export interface PlanTaskFeedDeps {
 export function usePlanTaskFeed({
   threadId, recoveryActiveRef, agentBusyRef, activeThreadRef, setMessages,
 }: PlanTaskFeedDeps) {
-  // 计划采集产物「逐张实时上屏」（2026-09-04 唐柚 14 套画像）：计划任务在本会话执行时，
+  // 计划采集产物「逐张实时上屏」（2026-09-04 阮秋白 14 套画像）：计划任务在本会话执行时，
   // 后端按图逐条把 plan_collect 消息（图片+套装名+完整提示词）写进对话快照。这里订阅本会话
   // 的计划任务活动，任务运行/终态扫尾期间周期增量拉快照，只把新增 id 的消息追加上屏——
   // 页内停留即「生成一张发一张」，无需刷新。绝不覆盖本地已有消息（不打扰流式正文/本地编辑），

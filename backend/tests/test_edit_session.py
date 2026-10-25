@@ -19,7 +19,7 @@ def test_明确执行类请求允许修改(message):
 
 
 def test_执行层要求先列目录且修改已有文件前先读(tmp_path):
-    project_files.write_text(tmp_path, "card.json", '{"name":"塞西莉亚"}')
+    project_files.write_text(tmp_path, "card.json", '{"name":"卡蜜莉亚"}')
     session = edit_session.EditSession(tmp_path, allow_mutation=True)
 
     with pytest.raises(project_files.ProjectFileError, match="list_project_files"):
@@ -42,6 +42,6 @@ def test_候选内容在写入前按文件类型校验(tmp_path):
     session = edit_session.EditSession(tmp_path, allow_mutation=True)
     with pytest.raises(edit_artifacts.ArtifactValidationError, match="扁平格式"):
         session.validate_candidate(
-            "角色卡/塞西莉亚/card.json",
-            '{"spec":"chara_card_v2","data":{"name":"塞西莉亚"}}',
+            "角色卡/卡蜜莉亚/card.json",
+            '{"spec":"chara_card_v2","data":{"name":"卡蜜莉亚"}}',
         )

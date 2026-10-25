@@ -30,7 +30,7 @@ describe("illustration submission trace", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await reportIllustrationSubmission({
-      threadId: "SAVE01", repoId: "神权大陆", turnId: "turn-1",
+      threadId: "SAVE01", repoId: "神恩大陆", turnId: "turn-1",
       messageId: "bot-1", slotId: "slot-1", templateId: "tpl-1",
       promptId: "comfy-1", prompt: "trigger\nfinal prompt",
       promptProfile: "anima_tags", loraName: "style.safetensors", loraWeight: 0.8,
@@ -43,7 +43,7 @@ describe("illustration submission trace", () => {
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     const body = JSON.parse(String(init.body));
     expect(body).toMatchObject({
-      thread_id: "SAVE01", repo_id: "神权大陆", turn_id: "turn-1",
+      thread_id: "SAVE01", repo_id: "神恩大陆", turn_id: "turn-1",
       prompt_id: "comfy-1", prompt: "trigger\nfinal prompt",
       lora_name: "style.safetensors", lora_weight: 0.8,
       lora_mode: "multi", lora_names: ["style.safetensors", "role.safetensors"],

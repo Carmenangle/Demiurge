@@ -2,7 +2,7 @@
 
 **为什么是集合而不是单根**（这是本轮最容易做错、也最容易回归的地方）：
 卡一律落 `<作品库根>/<卡名>/`（`character.upsert_repo` 的 base 注入是作品库根），而
-**卡目录名可以与作品文件夹名不同**——实锤仓库「原创」的卡在 `<作品库根>/御仙/`，
+**卡目录名可以与作品文件夹名不同**——实锤仓库「原创」的卡在 `<作品库根>/驭云录/`，
 归属只能靠该卡目录的 `_work.json`（= repo_id）判定。若把域收成单个「作品域」，
 这类作品的产物卡会在 fabric done 与历史消息补卡里**整批消失**，版本快照也会漏掉它。
 
@@ -74,17 +74,17 @@ def test_域收窄到作品文件夹(monkeypatch, tmp_path):
 
 
 def test_域并入本作品拥有的卡目录且不误伤别人(monkeypatch, tmp_path):
-    """卡名≠作品名（固化03 实锤）：卡在 `<库根>/御仙/`，作品文件夹是 `<库根>/Anima/原创/`。"""
+    """卡名≠作品名（固化03 实锤）：卡在 `<库根>/驭云录/`，作品文件夹是 `<库根>/Anima/原创/`。"""
     _patch_repos(monkeypatch, *_原创)
     (tmp_path / "Anima" / "原创").mkdir(parents=True)
     (tmp_path / "Anima" / "原创" / "chat.json").write_text("[]", encoding="utf-8")
-    mine = tmp_path / "御仙"
+    mine = tmp_path / "驭云录"
     mine.mkdir()
-    (mine / "card.json").write_text('{"name":"御仙"}', encoding="utf-8")
-    character_store.write_work_marker(str(tmp_path), "御仙", "r1")
-    other = tmp_path / "玫瑰与繁花"
+    (mine / "card.json").write_text('{"name":"驭云录"}', encoding="utf-8")
+    character_store.write_work_marker(str(tmp_path), "驭云录", "r1")
+    other = tmp_path / "青梧与晚风"
     other.mkdir()
-    (other / "card.json").write_text('{"name":"玫瑰与繁花"}', encoding="utf-8")
+    (other / "card.json").write_text('{"name":"青梧与晚风"}', encoding="utf-8")
 
     domains = repo_meta.artifact_domains(str(tmp_path), "r1")
     assert tmp_path / "Anima" / "原创" in domains      # 作品域（docs/_versions 的家）
@@ -94,10 +94,10 @@ def test_域并入本作品拥有的卡目录且不误伤别人(monkeypatch, tmp
 
 def test_作品文件夹名与卡名相同时域不重复(monkeypatch, tmp_path):
     """卡名=作品名（固化02 约定）：作品域本身就是卡目录，去重后只有一个域。"""
-    _patch_repos(monkeypatch, {"id": "r2", "name": "玫瑰与繁花"})
-    (tmp_path / "玫瑰与繁花").mkdir(parents=True)
-    (tmp_path / "玫瑰与繁花" / "card.json").write_text('{"name":"玫瑰与繁花"}', encoding="utf-8")
-    assert repo_meta.artifact_domains(str(tmp_path), "r2") == [tmp_path / "玫瑰与繁花"]
+    _patch_repos(monkeypatch, {"id": "r2", "name": "青梧与晚风"})
+    (tmp_path / "青梧与晚风").mkdir(parents=True)
+    (tmp_path / "青梧与晚风" / "card.json").write_text('{"name":"青梧与晚风"}', encoding="utf-8")
+    assert repo_meta.artifact_domains(str(tmp_path), "r2") == [tmp_path / "青梧与晚风"]
 
 
 def test_repo_id为空时路由层不给任何域(monkeypatch, tmp_path):
@@ -195,13 +195,13 @@ def test_域外卡按归属仍被收集并可在预览端点放行(monkeypatch, 
     _patch_repos(monkeypatch, *_原创)
     _patch_works_root(monkeypatch, tmp_path)
     (tmp_path / "Anima" / "原创").mkdir(parents=True)
-    mine = tmp_path / "御仙"
+    mine = tmp_path / "驭云录"
     mine.mkdir()
-    (mine / "card.json").write_text('{"name":"御仙"}', encoding="utf-8")
-    character_store.write_work_marker(str(tmp_path), "御仙", "r1")
-    other = tmp_path / "玫瑰与繁花"
+    (mine / "card.json").write_text('{"name":"驭云录"}', encoding="utf-8")
+    character_store.write_work_marker(str(tmp_path), "驭云录", "r1")
+    other = tmp_path / "青梧与晚风"
     other.mkdir()
-    (other / "card.json").write_text('{"name":"玫瑰与繁花"}', encoding="utf-8")
+    (other / "card.json").write_text('{"name":"青梧与晚风"}', encoding="utf-8")
 
     items = collection_artifacts.collect_artifacts(str(tmp_path), repo_id="r1")
     assert [Path(i["path"]) for i in items] == [mine / "card.json"]
@@ -209,7 +209,7 @@ def test_域外卡按归属仍被收集并可在预览端点放行(monkeypatch, 
     got = artifacts_router.artifact_preview(
         output_dir=str(tmp_path), path=str(mine / "card.json"), repo_id="r1")
     assert got["ok"] is True and got["kind"] == "card"
-    assert "御仙" in got["text"]
+    assert "驭云录" in got["text"]
 
     with pytest.raises(HTTPException) as ei:
         artifacts_router.artifact_preview(
@@ -224,27 +224,27 @@ def test_版本快照落作品域且域外卡原位回档(monkeypatch, tmp_path)
     _patch_repos(monkeypatch, *_原创)
     storage = tmp_path / "Anima" / "原创"
     storage.mkdir(parents=True)
-    card_dir = tmp_path / "御仙"
+    card_dir = tmp_path / "驭云录"
     card_dir.mkdir()
-    (card_dir / "card.json").write_text('{"name":"御仙"}', encoding="utf-8")
-    character_store.write_work_marker(str(tmp_path), "御仙", "r1")
+    (card_dir / "card.json").write_text('{"name":"驭云录"}', encoding="utf-8")
+    character_store.write_work_marker(str(tmp_path), "驭云录", "r1")
 
     res = artifact_versions.snapshot_current(
         str(tmp_path), trigger="done", summary="一次交付", repo_id="r1")
     assert res["saved"] is True
     meta = res["version"]
     entry = meta["files"][0]
-    assert entry["rel"] == "御仙/card.json"
+    assert entry["rel"] == "驭云录/card.json"
     assert entry["origin_dir"] == str(card_dir)
     # 版本库落作品域，**不**落作品库根（旧行为是库根下的全局单例）
-    assert (storage / "_versions" / meta["version_id"] / "御仙" / "card.json").is_file()
+    assert (storage / "_versions" / meta["version_id"] / "驭云录" / "card.json").is_file()
     assert not (tmp_path / "_versions").exists()
 
     (card_dir / "card.json").write_text('{"name":"改坏了"}', encoding="utf-8")
     out = artifact_versions.restore_version(str(tmp_path), meta["version_id"], repo_id="r1")
     assert out["restored"] == [str(card_dir / "card.json")]   # 原位，不搬进作品域
-    assert json.loads((card_dir / "card.json").read_text(encoding="utf-8"))["name"] == "御仙"
-    assert not (storage / "御仙").exists()
+    assert json.loads((card_dir / "card.json").read_text(encoding="utf-8"))["name"] == "驭云录"
+    assert not (storage / "驭云录").exists()
     # 回档前的自动存档同样落作品域
     assert len(artifact_versions.list_versions(str(tmp_path), repo_id="r1")) == 2
 
@@ -254,17 +254,17 @@ def test_版本列表的活文件路径域内取存储域域外取origin(monkeyp
     _patch_works_root(monkeypatch, tmp_path)
     storage = tmp_path / "Anima" / "原创"
     storage.mkdir(parents=True)
-    card_dir = tmp_path / "御仙"
+    card_dir = tmp_path / "驭云录"
     card_dir.mkdir()
-    (card_dir / "card.json").write_text('{"name":"御仙"}', encoding="utf-8")
-    character_store.write_work_marker(str(tmp_path), "御仙", "r1")
+    (card_dir / "card.json").write_text('{"name":"驭云录"}', encoding="utf-8")
+    character_store.write_work_marker(str(tmp_path), "驭云录", "r1")
     vid = artifact_versions.snapshot_current(
         str(tmp_path), trigger="done", repo_id="r1")["version"]["version_id"]
 
     got = artifacts_router.artifact_versions_list(output_dir=str(tmp_path), repo_id="r1")
     entry = got["versions"][0]["files"][0]
     assert Path(entry["path"]) == card_dir / "card.json"
-    # 版本副本预览走的是版本目录里的副本（B5），rel 用 meta 里的 `御仙/card.json`
+    # 版本副本预览走的是版本目录里的副本（B5），rel 用 meta 里的 `驭云录/card.json`
     body = artifacts_router.artifact_version_file(
         output_dir=str(tmp_path), version_id=vid, rel=entry["rel"], repo_id="r1")
     assert body["ok"] is True and body["kind"] == "card"

@@ -42,7 +42,7 @@ export interface MsgPart {
  * path 是后端发来的绝对路径：预览/下载/打开位置都把它原样回传后端校验。 */
 export interface ArtifactMeta {
   kind: "card" | "worldbook" | "doc" | "file";
-  name: string;    // 人类可读名，如「角色主卡 · 玫瑰与繁花」
+  name: string;    // 人类可读名，如「角色主卡 · 青梧与晚风」
   path: string;    // 后端产物绝对路径（wire 真源；为空时不可操作）
   size?: number;   // 字节数
   mtime?: number;  // 修改时间 epoch 秒

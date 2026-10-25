@@ -32,10 +32,10 @@ def test_过滤外貌已知名单之外的角色段不混入():
     # P3 回归：appearance 里出现 illustration_actor_names（known）之外的角色段时，
     # 旧实现只按 known 白名单匹配段落头，导致 unknown 角色段被当成选中角色的续行保留。
     # 修复后通用段落头识别，只保留 actors 里的角色段。
-    src = "虞妙玥：【外貌】墨发，暗红美眸。\n虞莹纱：【外貌】红绸束发，娇俏。"
-    out = ag._filter_illustration_appearance(src, ["虞妙玥"], ["虞妙玥"])
-    assert "虞妙玥" in out
-    assert "虞莹纱" not in out
+    src = "苏映晚：【外貌】墨发，暗红美眸。\n陆莹纱：【外貌】红绸束发，娇俏。"
+    out = ag._filter_illustration_appearance(src, ["苏映晚"], ["苏映晚"])
+    assert "苏映晚" in out
+    assert "陆莹纱" not in out
     assert "红绸束发" not in out
 
 
@@ -138,10 +138,10 @@ def test_多角色persona只发送本轮出场角色描述并按剧情选择生�
 def test_插画外貌查询从被长正文裁掉的最新状态栏恢复在场角色(tmp_path):
     repo_id = "work"
     book = {"entries": [{
-        "comment": "角色卡·冷倾雪",
-        "keys": ["冷倾雪"],
+        "comment": "角色卡·顾凝霜",
+        "keys": ["顾凝霜"],
         "content": (
-            "【角色卡·冷倾雪】\n"
+            "【角色卡·顾凝霜】\n"
             "【外貌】漆黑墨发扎成发团、插紫玉金髻，朱唇娇艳、脸颊红润，"
             "晶亮元润的美目透着久经历练的成熟风韵与干练。\n"
             "【身材】前凸后翘、曲线优美的丰腴熟躯。"
@@ -151,7 +151,7 @@ def test_插画外貌查询从被长正文裁掉的最新状态栏恢复在场�
     history = [{
         "role": "assistant",
         "content": (
-            "<status>\n[所在] 破木栏旁\n[在场] 冷倾雪\n</status>\n"
+            "<status>\n[所在] 破木栏旁\n[在场] 顾凝霜\n</status>\n"
             "<content>" + ("随后剧情继续推进。" * 400) + "</content>"
         ),
     }]
@@ -160,8 +160,8 @@ def test_插画外貌查询从被长正文裁掉的最新状态栏恢复在场�
     query = ag._illustration_visual_query(ctx, "继续")
     profiles = worldbook_store.repo_visual_profiles(str(tmp_path), repo_id, query)
 
-    assert "冷倾雪" not in agent_context.history_text(ctx)[-2000:]
-    assert "冷倾雪" in query
+    assert "顾凝霜" not in agent_context.history_text(ctx)[-2000:]
+    assert "顾凝霜" in query
     assert "朱唇娇艳" in profiles
     assert "晶亮元润的美目" in profiles
 
@@ -263,7 +263,7 @@ def test_本轮筛选角色卡分别保留预设字段(monkeypatch):
 def test_主剧情世界书选择范围贯通到curator读写与trace(monkeypatch, tmp_path):
     repo_id = "work"
     book = {"entries": [
-        {"content": "冷倾雪角色条目", "keys": ["冷倾雪"]},
+        {"content": "顾凝霜角色条目", "keys": ["顾凝霜"]},
         {"content": "未参与本轮的机制条目"},
     ]}
     worldbook_store.ensure_repo_snapshot(str(tmp_path), repo_id, [book])
@@ -276,11 +276,11 @@ def test_主剧情世界书选择范围贯通到curator读写与trace(monkeypatc
     )
     ctx = _ctx(output_dir=str(tmp_path), repo_id=repo_id, embed_model="embed")
 
-    injected = ag._resolve_worldbook(ctx, "冷倾雪醒来")
+    injected = ag._resolve_worldbook(ctx, "顾凝霜醒来")
     context_fn = ag._curator_worldbook_context_fn(ctx, repo_id)
     writer = ag._curator_worldbook_fn(ctx, repo_id)
 
-    assert "冷倾雪角色条目" in injected
+    assert "顾凝霜角色条目" in injected
     assert ctx["_selected_worldbook_indices"] == [0]
     curator_context = context_fn("任意正文")
     assert '"index":0' in curator_context
@@ -377,23 +377,23 @@ def test_包含关系角色名使用最长非重叠匹配(monkeypatch):
 
     cards = {
         "莉亚": {"description": "短名角色"},
-        "塞西莉亚": {"description": "完整名称角色"},
+        "卡蜜莉亚": {"description": "完整名称角色"},
     }
     monkeypatch.setattr(character_store, "read_card", lambda _base, name: cards.get(name))
     ctx = _ctx(
-        character_dir="cards", card_name="塞西莉亚", opening_card_name="塞西莉亚",
-        card_names=["莉亚", "塞西莉亚"],
+        character_dir="cards", card_name="卡蜜莉亚", opening_card_name="卡蜜莉亚",
+        card_names=["莉亚", "卡蜜莉亚"],
     )
 
-    only_long = ag._resolve_personas(ctx, "塞西莉亚走进房间")
-    both = ag._resolve_personas(ctx, "塞西莉亚让莉亚留在房间")
+    only_long = ag._resolve_personas(ctx, "卡蜜莉亚走进房间")
+    both = ag._resolve_personas(ctx, "卡蜜莉亚让莉亚留在房间")
 
     assert "完整名称角色" in only_long and "短名角色" not in only_long
     assert "完整名称角色" in both and "短名角色" in both
 
 
 def test_首次世界书索引立即发送非阻塞状态事件(monkeypatch):
-    book = {"entries": [{"content": "塞西莉亚角色条目", "keys": ["塞西莉亚"]}]}
+    book = {"entries": [{"content": "卡蜜莉亚角色条目", "keys": ["卡蜜莉亚"]}]}
     emitted = []
     traces = []
     monkeypatch.setattr(aga, "_repo_worldbook", lambda ctx: book)
@@ -415,7 +415,7 @@ def test_首次世界书索引立即发送非阻塞状态事件(monkeypatch):
         repo_id="new-work", embed_model="embed", stream_sink=emitted.append,
     )
 
-    assert ag._resolve_worldbook(ctx, "塞西莉亚") == "【世界设定】"
+    assert ag._resolve_worldbook(ctx, "卡蜜莉亚") == "【世界设定】"
     assert emitted == [{
         "rag_status": {"state": "start", "kind": "worldbook", "count": 1},
     }]
@@ -426,16 +426,16 @@ def test_首次世界书索引立即发送非阻塞状态事件(monkeypatch):
 
 def test_世界书激活窗口不扫描已离场的旧历史角色():
     ctx = _ctx(history=[
-        {"role": "user", "content": "很久以前冷倾雪出现"},
-        {"role": "assistant", "content": "冷倾雪随后离场"},
-        {"role": "user", "content": "现在只和虞妙玥说话"},
-        {"role": "assistant", "content": "虞妙玥正在配药"},
+        {"role": "user", "content": "很久以前顾凝霜出现"},
+        {"role": "assistant", "content": "顾凝霜随后离场"},
+        {"role": "user", "content": "现在只和苏映晚说话"},
+        {"role": "assistant", "content": "苏映晚正在配药"},
     ])
 
-    scan = ag._worldbook_scan_text(ctx, "继续观察虞妙玥")
+    scan = ag._worldbook_scan_text(ctx, "继续观察苏映晚")
 
-    assert "虞妙玥" in scan
-    assert "冷倾雪" not in scan
+    assert "苏映晚" in scan
+    assert "顾凝霜" not in scan
 
 
 def _decision(route: str, confidence: str = "high", alternatives=None) -> str:
@@ -1260,7 +1260,7 @@ def test_输出纪律尾注包含实测浪费源逐条禁令(monkeypatch, tmp_pa
     """2026-09-12 定稿：逐条禁令已按用户裁定移除（冗余根因在预设思考框架，另行治理）；
     尾注必须保留结构三步与思考预算原则（≤正文一半）。
     2026-09-13 泄漏修订：实现细节（前端折叠/1000-8000 字数区间）混入模型可见文本，
-    被模型照抄进正文（神权大陆 msg[4] 实证）→ 断言不得再出现，且必须带元话语硬禁令。"""
+    被模型照抄进正文（神恩大陆 msg[4] 实证）→ 断言不得再出现，且必须带元话语硬禁令。"""
     calls = []
     deps = ra.AgencyDeps(
         chat_fn=lambda *a, **k: "[]", rng=random.Random(0), state_base=str(tmp_path),
@@ -1319,26 +1319,26 @@ def test_世界agent收到本轮输入与召回后的npc条目(monkeypatch, tmp_
     def consult(current, **kwargs):
         captured.update(kwargs)
         return [agency.Verdict(
-            "塞西莉亚", agency.OUTCOME_ACCEPT, agency.DEGREE_PARTIAL, 20, 60, "普通成功",
+            "卡蜜莉亚", agency.OUTCOME_ACCEPT, agency.DEGREE_PARTIAL, 20, 60, "普通成功",
             intent="留下幽影徽章", goal="维持对主角的长期掌控",
         )]
 
     monkeypatch.setattr(ra, "consult_world", consult)
     ctx = _ctx(
         chat_base="base", chat_key="key", chat_model="model",
-        persona="合集空壳卡", history=[{"role": "assistant", "content": "[在场] 塞西莉亚"}],
+        persona="合集空壳卡", history=[{"role": "assistant", "content": "[在场] 卡蜜莉亚"}],
     )
 
     directive, _ = ag._agency_propose(
-        ctx, deps, None, "【角色卡·塞西莉亚】掌控欲极强", "委婉拒绝收养",
+        ctx, deps, None, "【角色卡·卡蜜莉亚】掌控欲极强", "委婉拒绝收养",
     )
 
-    assert "【角色卡·塞西莉亚】掌控欲极强" in captured["core"]
+    assert "【角色卡·卡蜜莉亚】掌控欲极强" in captured["core"]
     assert "委婉拒绝收养" in captured["scene"]
     assert captured["affinity"] is None
     assert "留下幽影徽章" in directive
     assert ctx["_agency_goal_deltas"] == [{
-        "field": "叙事/塞西莉亚·当前目标", "op": "set",
+        "field": "叙事/卡蜜莉亚·当前目标", "op": "set",
         "value": "维持对主角的长期掌控",
         "evidence": "World Agent依据在场角色core与本轮场景推导",
     }]
@@ -1366,24 +1366,24 @@ def test_comfy高潮提取失败时把中文正文作为Profile场景源而非�
 
     clean, images, request, _audio = ag._agency_writeback(
         _ctx(
-            repo_id="work", thread_id="work", card_name="白给谷", scene="nsfw",
+            repo_id="work", thread_id="work", card_name="白露谷", scene="nsfw",
             comfy_illustrate=True, persona="银发、蓝眼", history=[], proxy="",
         ),
         deps,
-        "白给谷站在窗边，回头看向镜头。",
+        "白露谷站在窗边，回头看向镜头。",
         turn=3,
         affinity=10.0,
         lost=False,
     )
 
-    assert clean == "白给谷站在窗边，回头看向镜头。"
+    assert clean == "白露谷站在窗边，回头看向镜头。"
     assert images == []
     assert request["prompt"] == ""
     assert request["scene_spec"]["profile"] == "anima_tags"  # 2026-08-31 默认协议切 Anima
     assert request["scene_spec"]["profile_prompt"].isascii()
-    assert "白给谷站在窗边，回头看向镜头" in request["scene_spec"]["narrative"]
+    assert "白露谷站在窗边，回头看向镜头" in request["scene_spec"]["narrative"]
     assert request["scene_spec"]["draft_prompt"].isascii()
-    assert "白给谷" not in request["scene_spec"]["draft_prompt"]
+    assert "白露谷" not in request["scene_spec"]["draft_prompt"]
     assert trace[-1][0] == "illustration.request"
     assert trace[-1][1]["status"] == "emitted"
 
@@ -1507,15 +1507,15 @@ def test_extract_video_action_plan_carries_guard_preset_and_refusal_retry(monkey
             '{"beat":"延伸","desc":"her wrists tug the chains"}],'
             '"subject_scene":"adult woman, black hair, stone prison corridor",'
             '"audio_design":{"music":"低沉鼓点","sfx":["铁链哗啦声"],'
-            '"lines":[{"speaker":"虞妙玥","text":"我不能满足你……"}],"sync":"卡重音"}}'
+            '"lines":[{"speaker":"苏映晚","text":"我不能满足你……"}],"sync":"卡重音"}}'
         )
 
     monkeypatch.setattr(ag._llm, "chat", fake_chat)
     spec = {
         "narrative": "她跪在石板上，手腕扯动锁链。",
         "protected_narrative": "她@(跪)@在石板上，手@(腕)@扯动锁链。",
-        "actors": ["虞妙玥"],
-        "appearance": "虞妙玥(墨发，暗红美眸)",
+        "actors": ["苏映晚"],
+        "appearance": "苏映晚(墨发，暗红美眸)",
         "locale": "机关天牢内层牢房",
     }
     ctx = _ctx(
@@ -1538,7 +1538,7 @@ def test_extract_video_action_plan_carries_guard_preset_and_refusal_retry(monkey
     assert plan["audio_design"]["sfx"] == ["铁链哗啦声"]
     # 台词原文不过滤（防误伤正常对白）
     assert plan["audio_design"]["lines"] == [
-        {"speaker": "虞妙玥", "text": "我不能满足你……"},
+        {"speaker": "苏映晚", "text": "我不能满足你……"},
     ]
 
 
@@ -1558,7 +1558,7 @@ def test_extract_video_action_plan_firstlast_lists_all_dialogue(monkeypatch, tmp
         return (
             '{"action_sequence":[{"beat":"开场","desc":"she kneels on the stone floor"}],'
             '"audio_design":{"music":"低沉鼓点","sfx":["铁链哗啦声"],'
-            '"lines":[{"speaker":"虞妙玥","text":"放开我。","at_s":2}],'
+            '"lines":[{"speaker":"苏映晚","text":"放开我。","at_s":2}],'
             '"sync":"卡重音"}}'
         )
 
@@ -1566,7 +1566,7 @@ def test_extract_video_action_plan_firstlast_lists_all_dialogue(monkeypatch, tmp
     spec = {
         "narrative": "她跪在石板上，手腕扯动锁链。",
         "protected_narrative": "她@(跪)@在石板上，手@(腕)@扯动锁链。",
-        "actors": ["虞妙玥"],
+        "actors": ["苏映晚"],
     }
     ctx = _ctx(
         chat_base="b", chat_key="k", chat_model="m",
@@ -1579,7 +1579,7 @@ def test_extract_video_action_plan_firstlast_lists_all_dialogue(monkeypatch, tmp
     assert "按剧情位置推算" in calls[0][0]
     assert "lines：一律留空数组" not in calls[0][0]
     assert plan["audio_design"]["lines"] == [
-        {"speaker": "虞妙玥", "text": "放开我。", "at_s": 2.0},
+        {"speaker": "苏映晚", "text": "放开我。", "at_s": 2.0},
     ]
 
 
@@ -1591,7 +1591,7 @@ def test_extract_video_action_plan_重试仍拒答则回退空(monkeypatch, tmp_
     monkeypatch.setattr(ag._llm, "chat", fake_chat)
     ctx = _ctx(chat_base="b", chat_key="k", chat_model="m")
     plan = ag._extract_video_action_plan(
-        ctx, {"narrative": "她跪在石板上。", "actors": ["虞妙玥"]},
+        ctx, {"narrative": "她跪在石板上。", "actors": ["苏映晚"]},
     )
     assert plan == {}
 
@@ -1610,12 +1610,12 @@ def test_writeback剥离transition块并透传判定_v1_5_w1(monkeypatch, tmp_pa
     monkeypatch.setattr(ra, "_narr", lambda *a, **k: "")
     reply = (
         "<content>雨夜，面馆门口挂起暖黄的灯笼，水珠顺着门帘滴落。\n\n"
-        "温知夏推门而入，沈糯已经坐定，朝她招手。</content>\n"
+        "纪含章推门而入，庄听澜已经坐定，朝她招手。</content>\n"
         "<transition>reuse</transition>"
     )
     clean, images, request, _audio = ag._agency_writeback(
         _ctx(
-            repo_id="work", thread_id="work", card_name="白给谷", scene="climax",
+            repo_id="work", thread_id="work", card_name="白露谷", scene="climax",
             comfy_illustrate=True, history=[],
         ),
         deps, reply, turn=3, affinity=10.0, lost=False,
@@ -1642,7 +1642,7 @@ def test_writeback无transition块时回退ambiguous_v1_5_w1(monkeypatch, tmp_pa
     monkeypatch.setattr(ra, "_narr", lambda *a, **k: "")
     clean, images, request, _audio = ag._agency_writeback(
         _ctx(
-            repo_id="work", thread_id="work", card_name="白给谷", scene="climax",
+            repo_id="work", thread_id="work", card_name="白露谷", scene="climax",
             comfy_illustrate=True, history=[],
         ),
         deps,
@@ -1667,12 +1667,12 @@ def test_writeback首帧复用合并_l0胜出忽略l1_v1_5_w2(monkeypatch, tmp_p
     monkeypatch.setattr(character_state, "load_state", lambda *a, **k: {})
     monkeypatch.setattr(ra, "_narr", lambda *a, **k: "")
     reply = (
-        "<content>面馆里的暖光依旧，沈糯抿了口汤。</content>\n"
+        "<content>面馆里的暖光依旧，庄听澜抿了口汤。</content>\n"
         "<transition>regenerate</transition>"
     )
     clean, images, request, _audio = ag._agency_writeback(
         _ctx(
-            repo_id="work", thread_id="work", card_name="白给谷", scene="climax",
+            repo_id="work", thread_id="work", card_name="白露谷", scene="climax",
             comfy_illustrate=True,
             history=[{"role": "assistant", "content": "三人围坐面馆，举杯同框。"}],
         ),
@@ -1695,12 +1695,12 @@ def test_writeback首帧复用合并_第一楼消费l1_v1_5_w2(monkeypatch, tmp_
     monkeypatch.setattr(character_state, "load_state", lambda *a, **k: {})
     monkeypatch.setattr(ra, "_narr", lambda *a, **k: "")
     reply = (
-        "<content>面馆里的暖光依旧，沈糯抿了口汤。</content>\n"
+        "<content>面馆里的暖光依旧，庄听澜抿了口汤。</content>\n"
         "<transition>regenerate</transition>"
     )
     clean, images, request, _audio = ag._agency_writeback(
         _ctx(
-            repo_id="work", thread_id="work", card_name="白给谷", scene="climax",
+            repo_id="work", thread_id="work", card_name="白露谷", scene="climax",
             comfy_illustrate=True, history=[],
         ),
         deps, reply, turn=4, affinity=10.0, lost=False,
@@ -1715,7 +1715,7 @@ def test_画面主体是用户时不得从状态栏借用在场角色LoRA(monkey
     deps = ra.AgencyDeps(
         chat_fn=lambda *a, **k: "[]", rng=random.Random(0), state_base=str(tmp_path),
     )
-    monkeypatch.setattr(ra, "extract_status_snapshot", lambda reply: "[在场] 虞妙玥")
+    monkeypatch.setattr(ra, "extract_status_snapshot", lambda reply: "[在场] 苏映晚")
     monkeypatch.setattr(ra, "parse_state_block", lambda reply: (reply, []))
     monkeypatch.setattr(ra, "writeback", lambda *a, **k: (10.0, 10.0))
     monkeypatch.setattr(character_state, "load_state", lambda *a, **k: {})
@@ -1737,10 +1737,10 @@ def test_画面主体是用户时不得从状态栏借用在场角色LoRA(monkey
     ctx = _ctx(
         repo_id="work", thread_id="work", card_name="作品名", scene="climax",
         comfy_illustrate=True, appearance_source="worldbook",
-        illustration_actor_names=["虞妙玥"], prompt_profile="krea2",
+        illustration_actor_names=["苏映晚"], prompt_profile="krea2",
         history=[],
     )
-    ctx["_illustration_visual_profiles"] = "虞妙玥：【外貌】墨发，暗红美眸。"
+    ctx["_illustration_visual_profiles"] = "苏映晚：【外貌】墨发，暗红美眸。"
 
     _, _, request, _audio = ag._agency_writeback(
         ctx, deps, reply, turn=8, affinity=10.0, lost=False,
@@ -1771,24 +1771,24 @@ def test_comfy首个用户回合即使已有开场白也兜底生成插画(monke
 
     clean, images, request, _audio = ag._agency_writeback(
         _ctx(
-            repo_id="work", thread_id="work", card_name="塞西莉亚",
+            repo_id="work", thread_id="work", card_name="卡蜜莉亚",
             scene="conflict", comfy_illustrate=True, comfy_video=True,
             persona="乌黑长发，猩红眼眸，成熟丰腴的幽影帝主",
             history=[{"role": "assistant", "content": "开场白"}], proxy="",
         ),
         deps,
-        "塞西莉亚站在孤儿院门前，猩红眼眸安静地注视着他。",
+        "卡蜜莉亚站在孤儿院门前，猩红眼眸安静地注视着他。",
         turn=2,
         affinity=10.0,
         lost=False,
         user_text="委婉拒绝收养。",
     )
 
-    assert clean.startswith("塞西莉亚")
+    assert clean.startswith("卡蜜莉亚")
     assert images == []
-    assert request["actors"] == ["塞西莉亚"]
+    assert request["actors"] == ["卡蜜莉亚"]
     assert request["scene_spec"]["rating"] == "sfw"
-    assert request["anchor"] == "塞西莉亚站在孤儿院门前，猩红眼眸安静地注视着他。"
+    assert request["anchor"] == "卡蜜莉亚站在孤儿院门前，猩红眼眸安静地注视着他。"
     # V1.5 默认开放：produce 时即 dry-run 组装视频参数，trace 记录视频提示词全文
     expected_video_prompt = request["video_request"]["submit"]["prompt"]
     assert trace[-1] == (
@@ -1796,7 +1796,7 @@ def test_comfy首个用户回合即使已有开场白也兜底生成插画(monke
         {
                 "status": "emitted", "reason": "first_story_reply",
                 "scene": "conflict", "inferred_scene": "conflict",
-                "actor_count": 1, "actors": ["塞西莉亚"],
+                "actor_count": 1, "actors": ["卡蜜莉亚"],
                 "actor_candidates": [], "status_actors": [],
                 "plan_retargeted": False,
                 "prompt_chars": len(request["prompt"]),
@@ -1851,19 +1851,19 @@ def test_comfy_video关闭时不编译视频且不调提取LLM(monkeypatch, tmp_
 
     clean, _images, request, _audio = ag._agency_writeback(
         _ctx(
-            repo_id="work", thread_id="work", card_name="塞西莉亚",
+            repo_id="work", thread_id="work", card_name="卡蜜莉亚",
             scene="conflict", comfy_illustrate=True, comfy_video=False,
             persona="乌黑长发，猩红眼眸，成熟丰腴的幽影帝主",
             history=[{"role": "assistant", "content": "开场白"}], proxy="",
         ),
         deps,
-        "塞西莉亚站在孤儿院门前，猩红眼眸安静地注视着他。",
+        "卡蜜莉亚站在孤儿院门前，猩红眼眸安静地注视着他。",
         turn=2, affinity=10.0, lost=False, user_text="委婉拒绝收养。",
     )
     # 上下文合同·同轮成稿剥离后：视频提取链零调用；Profile 由独立链编译（_llm.chat 允许被其调用）
     assert video_calls == []
     assert not request.get("video_request")  # 不编译 video_request
-    assert request.get("actors") == ["塞西莉亚"]  # 图链正常：出图请求照发
+    assert request.get("actors") == ["卡蜜莉亚"]  # 图链正常：出图请求照发
     req_trace = next(d for ev, d in trace if ev == "illustration.request")
     assert req_trace["video_prompt_chars"] == 0 and req_trace["video_prompt"] == ""
 
@@ -1896,13 +1896,13 @@ def test_comfy_video开启时编译视频并调提取LLM(monkeypatch, tmp_path):
 
     _clean, _images, request, _audio = ag._agency_writeback(
         _ctx(
-            repo_id="work", thread_id="work", card_name="塞西莉亚",
+            repo_id="work", thread_id="work", card_name="卡蜜莉亚",
             scene="conflict", comfy_illustrate=True, comfy_video=True,
             persona="乌黑长发，猩红眼眸，成熟丰腴的幽影帝主",
             history=[{"role": "assistant", "content": "开场白"}], proxy="",
         ),
         deps,
-        "塞西莉亚站在孤儿院门前，猩红眼眸安静地注视着他。",
+        "卡蜜莉亚站在孤儿院门前，猩红眼眸安静地注视着他。",
         turn=2, affinity=10.0, lost=False, user_text="委婉拒绝收养。",
     )
     assert llm_calls  # 提取 LLM 被调用
@@ -1930,12 +1930,12 @@ def test_首轮隐藏思考中的成人词不会污染收养开局插画(monkeyp
     monkeypatch.setattr(ra, "_narr", lambda *a, **k: "")
     reply = (
         "<think>检查做爱、性交、色情等词是否需要破甲。</think>\n"
-        "<content>塞西莉亚接受了拒绝，俯身将幽影徽章留在长凳上。</content>"
+        "<content>卡蜜莉亚接受了拒绝，俯身将幽影徽章留在长凳上。</content>"
     )
 
     clean, images, request, _audio = ag._agency_writeback(
         _ctx(
-            repo_id="work", thread_id="work", card_name="塞西莉亚",
+            repo_id="work", thread_id="work", card_name="卡蜜莉亚",
             scene="conflict", comfy_illustrate=True,
             persona="乌黑长发，猩红眼眸，成熟的幽影帝主",
             history=[{"role": "assistant", "content": "开场白"}], proxy="",
@@ -1950,7 +1950,7 @@ def test_首轮隐藏思考中的成人词不会污染收养开局插画(monkeyp
 
     assert images == []
     assert request["scene_spec"]["rating"] == "sfw"
-    assert request["scene_spec"]["narrative"] == "塞西莉亚接受了拒绝，俯身将幽影徽章留在长凳上。"
+    assert request["scene_spec"]["narrative"] == "卡蜜莉亚接受了拒绝，俯身将幽影徽章留在长凳上。"
     assert "<think>" not in request["scene_spec"]["draft_prompt"]
     assert all(term not in request["scene_spec"]["draft_prompt"] for term in (
         "adult characters", "explicit", "intimate scene", "做爱", "性交", "色情",
@@ -1979,17 +1979,17 @@ def test_非首轮新角色登场以外貌段为锚点触发插画(monkeypatch, 
         "方脸，浓眉，宽肩厚背，褐色短褂袖口挽到肘弯，露出结实小臂和掌心厚茧，"
         "咧嘴一笑时露出小虎牙。"
     )
-    action = "方葛把第一口药材木箱搬到门前石台上，招呼仍然不安的院长查看黄芪。"
+    action = "岑葛把第一口药材木箱搬到门前石台上，招呼仍然不安的院长查看黄芪。"
     reply = (
         "<content>院长压低声音结束了谈话。\n\n" + arrival + "\n\n"
-        "<encounter>\n[WHO] 方葛（伪装药材商贩）\n"
+        "<encounter>\n[WHO] 岑葛（伪装药材商贩）\n"
         "[WHERE] 边地孤儿院门口\n[MOOD] 风尘仆仆的爽朗热络\n</encounter>\n\n"
         + appearance + "\n\n" + action + "\n</content>"
     )
 
     _, images, request, _audio = ag._agency_writeback(
         _ctx(
-            repo_id="work", thread_id="work", card_name="神权大陆",
+            repo_id="work", thread_id="work", card_name="神恩大陆",
             scene="conflict", comfy_illustrate=True, persona="",
             history=[
                 {"role": "user", "content": "此前的对话"},
@@ -2005,12 +2005,12 @@ def test_非首轮新角色登场以外貌段为锚点触发插画(monkeypatch, 
     )
 
     assert images == []
-    assert request["actors"] == ["方葛"]
+    assert request["actors"] == ["岑葛"]
     assert request["anchor"] == appearance
     assert arrival in request["scene_spec"]["narrative"]
     assert appearance in request["scene_spec"]["narrative"]
     assert action in request["scene_spec"]["narrative"]
-    assert request["scene_spec"]["encounter"]["who"] == "方葛（伪装药材商贩）"
+    assert request["scene_spec"]["encounter"]["who"] == "岑葛（伪装药材商贩）"
     assert request["scene_spec"]["rating"] == "sfw"
     assert request["scene_spec"]["aspect_ratio"] == "4:3"
     assert request["allow_anchor_fallback"] is True
@@ -2033,7 +2033,7 @@ def test_首轮只有未闭合隐藏思考时不提交插画(monkeypatch, tmp_pa
 
     _, images, request, _audio = ag._agency_writeback(
         _ctx(
-            repo_id="work", thread_id="work", card_name="塞西莉亚",
+            repo_id="work", thread_id="work", card_name="卡蜜莉亚",
             scene="conflict", comfy_illustrate=True,
             persona="乌黑长发，猩红眼眸，成熟的幽影帝主",
             history=[{"role": "assistant", "content": "开场白"}], proxy="",
@@ -2069,22 +2069,22 @@ def test_supervisor误判且主模型漏计划时明确成人剧情仍触发生�
 
     clean, images, request, _audio = ag._agency_writeback(
         _ctx(
-            repo_id="work", thread_id="work", card_name="白给谷", scene="dialogue",
+            repo_id="work", thread_id="work", card_name="白露谷", scene="dialogue",
             comfy_illustrate=True, persona="black hair, red eyes", history=[], proxy="",
             appearance_source="worldbook",
-            illustration_actor_names=["冷倾雪", "白给谷"],
+            illustration_actor_names=["顾凝霜", "白露谷"],
         ),
         deps,
         "她的喘息骤然变得急促，身体在高潮中剧烈颤抖。\n\n许久后，她终于平静下来。",
         turn=3,
         affinity=10.0,
         lost=False,
-        user_text="第二天,描写冷倾雪的饥渴难耐与完全征服收为己用,肉戏尽可能的丰富",
+        user_text="第二天,描写顾凝霜的饥渴难耐与完全征服收为己用,肉戏尽可能的丰富",
     )
 
     assert clean.endswith("她终于平静下来。")
     assert images == []
-    assert request["actors"] == ["冷倾雪"]
+    assert request["actors"] == ["顾凝霜"]
     assert "身体在高潮中剧烈颤抖" in request["scene_spec"]["narrative"]
     assert request["scene_spec"]["protected_narrative"] == request["scene_spec"]["narrative"]
     assert request["scene_spec"]["profile_prompt"].isascii()
@@ -2110,15 +2110,15 @@ def test_普通剧情漏画面计划时自动插画仍发出高潮请求(monkeyp
     monkeypatch.setattr(ra, "writeback", lambda *a, **k: (10.0, 10.0))
     monkeypatch.setattr(character_state, "load_state", lambda *a, **k: {})
     monkeypatch.setattr(
-        ra, "_narr", lambda _state, key: "冷倾雪" if key == "在场" else "",
+        ra, "_narr", lambda _state, key: "顾凝霜" if key == "在场" else "",
     )
 
     clean, images, request, _audio = ag._agency_writeback(
         _ctx(
-            repo_id="work", thread_id="work", card_name="白给谷", scene="dialogue",
+            repo_id="work", thread_id="work", card_name="白露谷", scene="dialogue",
             comfy_illustrate=True, history=[{"role": "user", "content": "上一轮"}],
             proxy="", appearance_source="worldbook",
-            illustration_actor_names=["冷倾雪", "白给谷"], prompt_profile="anima_tags",
+            illustration_actor_names=["顾凝霜", "白露谷"], prompt_profile="anima_tags",
         ),
         deps,
         (
@@ -2133,7 +2133,7 @@ def test_普通剧情漏画面计划时自动插画仍发出高潮请求(monkeyp
 
     assert clean.endswith("</content>")
     assert images == []
-    assert request["actors"] == ["冷倾雪"]
+    assert request["actors"] == ["顾凝霜"]
     assert request["anchor"]
     assert request["scene_spec"]["narrative"]
     assert trace[-1][0] == "illustration.request"
@@ -2152,14 +2152,14 @@ def test_本地高潮降级从状态栏在场恢复角色并选择角色画幅(m
     monkeypatch.setattr(ra, "writeback", lambda *a, **k: (10.0, 10.0))
     monkeypatch.setattr(character_state, "load_state", lambda *a, **k: {})
     monkeypatch.setattr(
-        ra, "_narr", lambda _state, key: "冷倾雪" if key == "在场" else "",
+        ra, "_narr", lambda _state, key: "顾凝霜" if key == "在场" else "",
     )
 
     _, _, request, _audio = ag._agency_writeback(
         _ctx(
-            repo_id="work", thread_id="work", card_name="白给谷", scene="dialogue",
+            repo_id="work", thread_id="work", card_name="白露谷", scene="dialogue",
             comfy_illustrate=True, history=[], proxy="", appearance_source="worldbook",
-            illustration_actor_names=["冷倾雪", "虞妙玥", "白给谷"],
+            illustration_actor_names=["顾凝霜", "苏映晚", "白露谷"],
             prompt_profile="anima_tags",
         ),
         deps,
@@ -2170,7 +2170,7 @@ def test_本地高潮降级从状态栏在场恢复角色并选择角色画幅(m
         user_text="继续推进剧情",
     )
 
-    assert request["actors"] == ["冷倾雪"]
+    assert request["actors"] == ["顾凝霜"]
     assert request["scene_spec"]["aspect_ratio"] == "3:4"
     profile_prompt = request["scene_spec"]["profile_prompt"]
     assert len(profile_prompt.splitlines()) == 2
@@ -2194,19 +2194,19 @@ def test_comfy采用主生成高潮计划并保留指定锚点(monkeypatch, tmp_
         '<illustration>{"anchor":"披风在雷光中扬起。",'
         '"camera":"35mm low angle","composition":"triangular composition",'
         '"aspect_ratio":"3:2",'
-        '"subjects":[{"name":"白给谷","description":"silver-haired swordswoman","weight":1.4}],'
+        '"subjects":[{"name":"白露谷","description":"silver-haired swordswoman","weight":1.4}],'
         '"prompt":"lightning, ruined hall","motion":2}</illustration>'
     )
 
     clean, images, request, _audio = ag._agency_writeback(
-        _ctx(repo_id="work", card_name="白给谷", scene="dialogue", comfy_illustrate=True),
+        _ctx(repo_id="work", card_name="白露谷", scene="dialogue", comfy_illustrate=True),
         deps, reply, turn=2, affinity=10.0, lost=False,
     )
 
     assert clean == "她跃上高台，披风在雷光中扬起。\n\n人群终于安静下来。"
     assert images == []
     assert request["anchor"] == "披风在雷光中扬起。"
-    assert request["actors"] == ["白给谷"] and request["motion"] == 2
+    assert request["actors"] == ["白露谷"] and request["motion"] == 2
     assert request["scene_spec"]["aspect_ratio"] == "3:2"
     assert "她跃上高台，披风在雷光中扬起" in request["scene_spec"]["narrative"]
     assert "35mm low angle" in request["prompt"]
@@ -2226,20 +2226,20 @@ def test_anima缺少同轮成稿时本地编译且不再请求独立Profile(monk
     monkeypatch.setattr(ra, "maybe_summarize", lambda *a, **k: None)
     monkeypatch.setattr(ra, "maybe_curate", lambda *a, **k: 0)
     reply = (
-        "冷倾雪跃上高台，披风在雷光中扬起。"
-        '<illustration>{"anchor":"冷倾雪跃上高台，披风在雷光中扬起。",'
+        "顾凝霜跃上高台，披风在雷光中扬起。"
+        '<illustration>{"anchor":"顾凝霜跃上高台，披风在雷光中扬起。",'
         '"camera":"35mm low angle","composition":"triangular composition",'
         '"aspect_ratio":"3:2",'
-        '"subjects":[{"name":"冷倾雪","description":"silver-haired swordswoman"}],'
+        '"subjects":[{"name":"顾凝霜","description":"silver-haired swordswoman"}],'
         '"prompt":"adult woman, silver hair, jumping, flowing cape, lightning, ruined hall",'
         '"motion":2}</illustration>'
     )
 
     _, _, request, _audio = ag._agency_writeback(
         _ctx(
-            repo_id="work", card_name="白给谷", scene="climax", comfy_illustrate=True,
+            repo_id="work", card_name="白露谷", scene="climax", comfy_illustrate=True,
             prompt_profile="anima_tags", appearance_source="worldbook",
-            illustration_actor_names=["冷倾雪"],
+            illustration_actor_names=["顾凝霜"],
         ),
         deps, reply, turn=2, affinity=10.0, lost=False,
     )
@@ -2265,30 +2265,30 @@ def test_多人高潮已有一名合法角色时仍从正文补齐其余在场�
     monkeypatch.setattr(character_state, "load_state", lambda *a, **k: {})
     monkeypatch.setattr(ra, "_narr", lambda *a, **k: "")
     reply = (
-        "冷倾雪抓住虞妙玥的手腕，两人一同穿过殿门。"
-        '<illustration>{"anchor":"冷倾雪抓住虞妙玥的手腕，两人一同穿过殿门。",'
+        "顾凝霜抓住苏映晚的手腕，两人一同穿过殿门。"
+        '<illustration>{"anchor":"顾凝霜抓住苏映晚的手腕，两人一同穿过殿门。",'
         '"camera":"low angle","composition":"diagonal composition",'
-        '"subjects":[{"name":"冷倾雪","description":"black-haired swordswoman"}],'
+        '"subjects":[{"name":"顾凝霜","description":"black-haired swordswoman"}],'
         '"prompt":"2women, gripping wrist, walking through doorway","motion":1}</illustration>'
     )
 
     _, _, request, _audio = ag._agency_writeback(
         _ctx(
-            repo_id="work", card_name="白给谷", scene="climax", comfy_illustrate=True,
+            repo_id="work", card_name="白露谷", scene="climax", comfy_illustrate=True,
             appearance_source="worldbook",
-            illustration_actor_names=["冷倾雪", "虞妙玥", "白给谷"],
+            illustration_actor_names=["顾凝霜", "苏映晚", "白露谷"],
         ),
         deps, reply, turn=2, affinity=10.0, lost=False,
     )
 
-    assert request["actors"] == ["冷倾雪", "虞妙玥"]
+    assert request["actors"] == ["顾凝霜", "苏映晚"]
 
 
 @pytest.mark.parametrize(
     ("target", "other", "configured"),
     [
-        ("虞妙玥", "冷倾雪", ["冷倾雪", "虞妙玥"]),
-        ("冷倾雪", "虞妙玥", ["虞妙玥", "冷倾雪"]),
+        ("苏映晚", "顾凝霜", ["顾凝霜", "苏映晚"]),
+        ("顾凝霜", "苏映晚", ["苏映晚", "顾凝霜"]),
     ],
 )
 def test_主模型漏插画计划时外貌资料不得污染当前目标角色(
@@ -2338,22 +2338,22 @@ def test_高潮正文单人优先于用户旧角色并只保留该角色外貌(m
     monkeypatch.setattr(ra, "_narr", lambda *a, **k: "")
     ctx = _ctx(
         repo_id="work", card_name="作品名", scene="climax", comfy_illustrate=True,
-        appearance_source="worldbook", illustration_actor_names=["冷倾雪", "虞妙玥"],
+        appearance_source="worldbook", illustration_actor_names=["顾凝霜", "苏映晚"],
         prompt_profile="krea2",
     )
     ctx["_illustration_visual_profiles"] = (
-        "冷倾雪：【外貌】冷倾雪专属外貌锚点\n"
-        "虞妙玥：【外貌】虞妙玥专属外貌锚点"
+        "顾凝霜：【外貌】顾凝霜专属外貌锚点\n"
+        "苏映晚：【外貌】苏映晚专属外貌锚点"
     )
 
     _, _, request, _audio = ag._agency_writeback(
-        ctx, deps, "<content>高潮画面里，虞妙玥独自跪倒在石阶前。</content>",
-        turn=2, affinity=10.0, lost=False, user_text="冷倾雪刚才已经离开",
+        ctx, deps, "<content>高潮画面里，苏映晚独自跪倒在石阶前。</content>",
+        turn=2, affinity=10.0, lost=False, user_text="顾凝霜刚才已经离开",
     )
 
-    assert request["actors"] == ["虞妙玥"]
+    assert request["actors"] == ["苏映晚"]
     assert request["scene_spec"]["appearance"] == (
-        "虞妙玥：【外貌】虞妙玥专属外貌锚点"
+        "苏映晚：【外貌】苏映晚专属外貌锚点"
     )
 
 
@@ -2370,23 +2370,23 @@ def test_高潮正文双人保留两份外貌供多角色LoRA串联(monkeypatch,
     monkeypatch.setattr(ra, "_narr", lambda *a, **k: "")
     ctx = _ctx(
         repo_id="work", card_name="作品名", scene="climax", comfy_illustrate=True,
-        appearance_source="worldbook", illustration_actor_names=["虞妙玥", "冷倾雪"],
+        appearance_source="worldbook", illustration_actor_names=["苏映晚", "顾凝霜"],
         prompt_profile="krea2",
     )
     ctx["_illustration_visual_profiles"] = (
-        "虞妙玥：【外貌】虞妙玥专属外貌锚点\n"
-        "冷倾雪：【外貌】冷倾雪专属外貌锚点"
+        "苏映晚：【外貌】苏映晚专属外貌锚点\n"
+        "顾凝霜：【外貌】顾凝霜专属外貌锚点"
     )
 
     _, _, request, _audio = ag._agency_writeback(
         ctx, deps,
-        "<content>高潮画面里，冷倾雪扶住虞妙玥，两人一同跌坐在石阶前。</content>",
+        "<content>高潮画面里，顾凝霜扶住苏映晚，两人一同跌坐在石阶前。</content>",
         turn=2, affinity=10.0, lost=False, user_text="继续",
     )
 
-    assert request["actors"] == ["冷倾雪", "虞妙玥"]
-    assert "冷倾雪专属外貌锚点" in request["scene_spec"]["appearance"]
-    assert "虞妙玥专属外貌锚点" in request["scene_spec"]["appearance"]
+    assert request["actors"] == ["顾凝霜", "苏映晚"]
+    assert "顾凝霜专属外貌锚点" in request["scene_spec"]["appearance"]
+    assert "苏映晚专属外貌锚点" in request["scene_spec"]["appearance"]
 
 
 def test_中断续写把半成品正文作为预填而不是从头再来():
@@ -2439,29 +2439,29 @@ def test_视觉高潮段优先决定角色顺序防止LoRA用错():
     """2026-09-01 用户实锤：全文先提 A 后提 B，但画面主体是 B，single 模式加载了 A 的
     LoRA。无插画计划时，priority_text（高潮段原文）内的出现顺序优先于全文首现顺序。"""
     assert ag._resolve_illustration_request_actors(
-        ["凌若冰", "舞姬恋"],
+        ["谢若冰", "星织恋"],
         planned=[],
-        user_text="凌若冰与舞姬恋同框",
-        narrative="凌若冰先到泉边，舞姬恋随后入画。",
-        present="凌若冰、舞姬恋",
+        user_text="谢若冰与星织恋同框",
+        narrative="谢若冰先到泉边，星织恋随后入画。",
+        present="谢若冰、星织恋",
         encounter=[],
-        priority_text="舞姬恋的指尖挑开凌若冰的衣带，画面焦点锁在舞姬恋身上。",
-    ) == ["舞姬恋", "凌若冰"]
+        priority_text="星织恋的指尖挑开谢若冰的衣带，画面焦点锁在星织恋身上。",
+    ) == ["星织恋", "谢若冰"]
 
 
 def test_表格在场状态不在场的角色不进入插画演员():
-    """2026-09-01 用户实锤：高潮段只有凌若冰（封域内），舞姬恋在封域外被点名——
+    """2026-09-01 用户实锤：高潮段只有谢若冰（封域内），星织恋在封域外被点名——
     点名提及不等于画面在场。表格在场状态=不在场的角色必须从 request_actors 剔除，
     否则提示词写成 2girls、实际只有一个。"""
     assert ag._resolve_illustration_request_actors(
-        ["凌若冰", "舞姬恋"],
+        ["谢若冰", "星织恋"],
         planned=[],
         user_text="继续",
-        narrative="凌若冰在泉中施术，舞姬恋在封域外石廊打坐。",
-        present="凌若冰；舞姬恋",
+        narrative="谢若冰在泉中施术，星织恋在封域外石廊打坐。",
+        present="谢若冰；星织恋",
         encounter=[],
-        absent={"舞姬恋"},
-    ) == ["凌若冰"]
+        absent={"星织恋"},
+    ) == ["谢若冰"]
 
 
 
@@ -2478,18 +2478,18 @@ def test_高潮人物只取最终锚点片段而不带入前文离场角色(monk
     monkeypatch.setattr(ra, "_narr", lambda *a, **k: "")
     ctx = _ctx(
         repo_id="work", card_name="作品名", scene="climax", comfy_illustrate=True,
-        appearance_source="worldbook", illustration_actor_names=["冷倾雪", "虞妙玥"],
+        appearance_source="worldbook", illustration_actor_names=["顾凝霜", "苏映晚"],
         prompt_profile="krea2",
     )
     ctx["_illustration_visual_profiles"] = (
-        "冷倾雪：【外貌】冷倾雪专属外貌锚点\n"
-        "虞妙玥：【外貌】虞妙玥专属外貌锚点"
+        "顾凝霜：【外貌】顾凝霜专属外貌锚点\n"
+        "苏映晚：【外貌】苏映晚专属外貌锚点"
     )
     reply = (
-        "<content>冷倾雪转身离开石室。\n\n"
-        "虞妙玥在石阶前骤然失去平衡，独自跪倒。</content>"
-        '<illustration>{"anchor":"虞妙玥在石阶前骤然失去平衡，独自跪倒。",'
-        '"subjects":[{"name":"虞妙玥","description":"adult woman"}],'
+        "<content>顾凝霜转身离开石室。\n\n"
+        "苏映晚在石阶前骤然失去平衡，独自跪倒。</content>"
+        '<illustration>{"anchor":"苏映晚在石阶前骤然失去平衡，独自跪倒。",'
+        '"subjects":[{"name":"苏映晚","description":"adult woman"}],'
         '"prompt":"adult woman, kneeling on stone steps","motion":1}</illustration>'
     )
 
@@ -2497,10 +2497,10 @@ def test_高潮人物只取最终锚点片段而不带入前文离场角色(monk
         ctx, deps, reply, turn=2, affinity=10.0, lost=False, user_text="继续",
     )
 
-    assert request["actors"] == ["虞妙玥"]
-    assert "冷倾雪专属外貌锚点" not in request["scene_spec"]["appearance"]
+    assert request["actors"] == ["苏映晚"]
+    assert "顾凝霜专属外貌锚点" not in request["scene_spec"]["appearance"]
     assert request["scene_spec"]["subjects"] == [{
-        "name": "虞妙玥", "description": "adult woman", "weight": 1.0,
+        "name": "苏映晚", "description": "adult woman", "weight": 1.0,
     }]
 
 
@@ -2520,12 +2520,12 @@ def test_comfy拒绝无效中文内联提示词并从场景本地兜底(monkeypa
         '"hierarchy":"眼睛与倒影为第一视觉中心，房间逐渐概括",'
         '"palette_material":"冷蓝玻璃与暖金肤色",'
         '"lighting_logic":"窗外月光穿过玻璃照亮眼睛并把倒影压入冷色阴影",'
-        '"composition":"centered","subjects":[{"name":"白给谷","description":"1girl"}],'
+        '"composition":"centered","subjects":[{"name":"白露谷","description":"1girl"}],'
         '"prompt":"rim light","profile_prompt":"主模型直接生成的完整画面描述。","motion":0}</illustration>'
     )
 
     _, _, request, _audio = ag._agency_writeback(
-        _ctx(repo_id="work", card_name="白给谷", scene="dialogue", comfy_illustrate=True,
+        _ctx(repo_id="work", card_name="白露谷", scene="dialogue", comfy_illustrate=True,
              prompt_profile="krea2"),
         deps, reply, turn=2, affinity=10.0, lost=False,
     )
@@ -2557,13 +2557,13 @@ def test_主模型把动作峰值写成静态肖像时纠正锚点并本地重�
         "她把信笺对折，信笺化作黑色流光穿出帷幔。\n\n"
         "她靠回椅背，嘴角弯起极浅弧度。\n\n不急。"
         '<illustration>{"anchor":"她靠回椅背，嘴角弯起极浅弧度。","camera":"中近景",'
-        '"composition":"中心构图","subjects":[{"name":"塞西莉亚","description":"冷艳女性"}],'
-        '"prompt":"塞西莉亚靠在椅背上微笑","profile_prompt":"塞西莉亚靠在椅背上，嘴角带着浅笑的静态肖像。",'
+        '"composition":"中心构图","subjects":[{"name":"卡蜜莉亚","description":"冷艳女性"}],'
+        '"prompt":"卡蜜莉亚靠在椅背上微笑","profile_prompt":"卡蜜莉亚靠在椅背上，嘴角带着浅笑的静态肖像。",'
         '"motion":0}</illustration>'
     )
 
     _, _, request, _audio = ag._agency_writeback(
-        _ctx(repo_id="work", card_name="塞西莉亚", scene="dialogue", comfy_illustrate=True),
+        _ctx(repo_id="work", card_name="卡蜜莉亚", scene="dialogue", comfy_illustrate=True),
         deps, reply, turn=2, affinity=10.0, lost=False,
     )
 
@@ -2575,14 +2575,14 @@ def test_主模型把动作峰值写成静态肖像时纠正锚点并本地重�
     assert request["prompt"]
     assert request["scene_spec"]["draft_prompt"] in request["prompt"]
     assert request["scene_spec"]["subjects"] == [{
-        "name": "塞西莉亚", "description": "冷艳女性", "weight": 1.0,
+        "name": "卡蜜莉亚", "description": "冷艳女性", "weight": 1.0,
     }]
 
 
 def test_主模型误把结尾外部钩子当高潮时从真实状态快照恢复角色(tmp_path):
     deps = ra.AgencyDeps(chat_fn=lambda *a, **k: "[]", rng=random.Random(0), state_base=str(tmp_path))
     reply = (
-        "<status>\n[所在] 白给谷·破木栏旁\n[在场] 冷倾雪\n</status>\n"
+        "<status>\n[所在] 白露谷·破木栏旁\n[在场] 顾凝霜\n</status>\n"
         "<content>她在湿布擦过锁骨时骤然绷紧，汗水沿肩颈滑落，随后全身剧烈颤抖。\n\n"
         "我背着包裹沿山道离开。\n\n"
         "台下两个值夜弟子正在交班，远处红衣在雾中鲜艳。</content>"
@@ -2594,15 +2594,15 @@ def test_主模型误把结尾外部钩子当高潮时从真实状态快照恢�
 
     _, _, request, _audio = ag._agency_writeback(
         _ctx(
-            repo_id="work", thread_id="work", card_name="白给谷", scene="dialogue",
+            repo_id="work", thread_id="work", card_name="白露谷", scene="dialogue",
             comfy_illustrate=True, appearance_source="worldbook",
-            illustration_actor_names=["冷倾雪", "虞妙玥"], prompt_profile="anima_tags",
+            illustration_actor_names=["顾凝霜", "苏映晚"], prompt_profile="anima_tags",
         ),
         deps, reply, turn=5, affinity=10.0, lost=False, user_text="继续推进剧情",
     )
 
     assert request["anchor"].startswith("她在湿布擦过锁骨")
-    assert request["actors"] == ["冷倾雪"]
+    assert request["actors"] == ["顾凝霜"]
     assert "她在湿布擦过锁骨" in request["scene_spec"]["narrative"]
     assert "walking" not in request["prompt"]
     assert "walking" not in request["scene_spec"].get("profile_prompt", "")
@@ -2611,23 +2611,23 @@ def test_主模型误把结尾外部钩子当高潮时从真实状态快照恢�
 def test_高潮重定向后最终profile保留体位破损服装与状态地点(tmp_path):
     deps = ra.AgencyDeps(chat_fn=lambda *a, **k: "[]", rng=random.Random(0), state_base=str(tmp_path))
     reply = (
-        "<status>\n[所在] 缠蛇山·机关天牢内层牢房\n[在场] 虞妙玥\n</status>\n"
+        "<status>\n[所在] 缠蛇山·机关天牢内层牢房\n[在场] 苏映晚\n</status>\n"
         "<content>他把她翻成仰卧姿势。\n\n"
         "他把她的双腿压上肩膀，两人面对面。\n\n"
         "高潮袭来，她的大腿绷直，手腕扯动锁链。\n\n"
         "那旗还在那儿。</content>"
         '<illustration>{"anchor":"那旗还在那儿。","camera":"close-up",'
-        '"composition":"centered","subjects":[{"name":"虞妙玥",'
+        '"composition":"centered","subjects":[{"name":"苏映晚",'
         '"description":"ink-black hair, dark-red eyes; red lotus robe torn into remnants at her waist"}],'
         '"prompt":"static portrait","profile_prompt":"A generic portrait.","motion":0}</illustration>'
     )
     ctx = _ctx(
         repo_id="work", thread_id="work", card_name="作品名", scene="climax",
         comfy_illustrate=True, appearance_source="worldbook",
-        illustration_actor_names=["虞妙玥"], prompt_profile="krea2",
+        illustration_actor_names=["苏映晚"], prompt_profile="krea2",
     )
     ctx["_illustration_visual_profiles"] = (
-        "虞妙玥：【外貌】华贵墨发，狭长暗红美眸，丰腴熟躯；"
+        "苏映晚：【外貌】华贵墨发，狭长暗红美眸，丰腴熟躯；"
         "【穿着】红莲纹饰华袍。"
     )
 
@@ -2644,7 +2644,7 @@ def test_高潮重定向后最终profile保留体位破损服装与状态地点(
     assert request["scene_spec"]["field_ledger"]["action"]["covered"] is True
 
 
-@pytest.mark.parametrize("actor", ["冷倾雪", "虞妙玥", "任意角色"])
+@pytest.mark.parametrize("actor", ["顾凝霜", "苏映晚", "任意角色"])
 def test_高潮重定向保留主计划已验证角色而不依赖正文重复姓名(
     actor, monkeypatch, tmp_path,
 ):
@@ -2704,11 +2704,11 @@ def test_RunContext含NPC目标增量时仍剥离控制块并发出插画请求(
     monkeypatch.setattr(ra, "_narr", lambda *a, **k: "")
     ctx = RunContext(
         thread_id="work", message="委婉拒绝收养", output_dir=str(tmp_path), repo_id="work",
-        card_name="神权大陆", comfy_illustrate=True, prompt_profile="krea2",
+        card_name="神恩大陆", comfy_illustrate=True, prompt_profile="krea2",
     )
     ctx["scene"] = "conflict"
     ctx["_agency_goal_deltas"] = [{
-        "field": "叙事/塞西莉亚·当前目标", "op": "set", "value": "长期观察主角",
+        "field": "叙事/卡蜜莉亚·当前目标", "op": "set", "value": "长期观察主角",
         "evidence": "World Agent依据本轮场景推导",
     }]
     reply = (
@@ -2728,7 +2728,7 @@ def test_RunContext含NPC目标增量时仍剥离控制块并发出插画请求(
     assert request["scene_spec"]["profile_prompt"].isascii()
     assert request["anchor"] == "院长看向石凳上的黑色匣子。"
     assert captured["raw"] == [{
-        "field": "叙事/塞西莉亚·当前目标", "op": "set", "value": "长期观察主角",
+        "field": "叙事/卡蜜莉亚·当前目标", "op": "set", "value": "长期观察主角",
         "evidence": "World Agent依据本轮场景推导",
     }]
     assert "profile_prompt" not in clean
@@ -2776,7 +2776,7 @@ def test_插画JSON被模型截断时清除提示词并把降级图片锚定高�
         '<illustration>{"anchor":"院长从门后走出来询问情况。","camera":"中近景",'
         '"visual_thesis":"不应显示给用户的提示词","aspect_'
     )
-    ctx = _ctx(repo_id="work", card_name="神权大陆", comfy_illustrate=True)
+    ctx = _ctx(repo_id="work", card_name="神恩大陆", comfy_illustrate=True)
     ctx["history"] = []
 
     clean, images, request, _audio = ag._agency_writeback(
@@ -2811,12 +2811,12 @@ def test_krea2高潮按nsfw语言边界校验(monkeypatch, tmp_path):
     reply = (
         "高潮正文。"
         '<illustration>{"anchor":"高潮正文。","camera":"low angle",'
-        '"composition":"rule of thirds","subjects":[{"name":"白给谷","description":"1girl"}],'
+        '"composition":"rule of thirds","subjects":[{"name":"白露谷","description":"1girl"}],'
         f'"prompt":"rim light","profile_prompt":"{valid}","motion":0}}</illustration>'
     )
 
     _, _, request, _audio = ag._agency_writeback(
-        _ctx(repo_id="work", card_name="白给谷", scene="climax", comfy_illustrate=True,
+        _ctx(repo_id="work", card_name="白露谷", scene="climax", comfy_illustrate=True,
              prompt_profile="krea2"),
         deps, reply, turn=2, affinity=10.0, lost=False,
     )
@@ -2848,14 +2848,14 @@ def test_主剧情同轮Krea完整提示词隐藏并直接进入scene_spec(monke
     reply = (
         "<content>铺垫。\n\n她在破木栏旁猛然转身。</content>"
         '<illustration>{"anchor":"她在破木栏旁猛然转身。","camera":"low angle",'
-        '"composition":"foreground frame","subjects":[{"name":"冷倾雪",'
+        '"composition":"foreground frame","subjects":[{"name":"顾凝霜",'
         '"description":"adult woman with black hair and a torn purple robe"}],'
         f'"prompt":"turning, broken rail, dawn light","profile_prompt":"{profile}","motion":2}}</illustration>'
     )
 
     clean, _, request, _audio = ag._agency_writeback(
-        _ctx(repo_id="work", card_name="白给谷", scene="climax", comfy_illustrate=True,
-             prompt_profile="krea2", illustration_actor_names=["冷倾雪"]),
+        _ctx(repo_id="work", card_name="白露谷", scene="climax", comfy_illustrate=True,
+             prompt_profile="krea2", illustration_actor_names=["顾凝霜"]),
         deps, reply, turn=2, affinity=10.0, lost=False,
     )
 
@@ -2877,7 +2877,7 @@ def test_anima锚点纠正后保留带正文证据的Agent动作成稿(monkeypat
         "<content>她拔剑跃起，披风在雷光中扬起。\n\n"
         "战斗结束，她靠回墙边沉默。\n\n那道雷光仍留在空气里。</content>"
         '<illustration>{"anchor":"那道雷光仍留在空气里。","camera":"low angle",'
-        '"composition":"diagonal composition","subjects":[{"name":"冷倾雪",'
+        '"composition":"diagonal composition","subjects":[{"name":"顾凝霜",'
         '"description":"silver-haired swordswoman pulling a broken sword free"}],'
         '"visual_facts":[{"kind":"action","fact":"her hand pulling the broken sword free",'
         '"evidence":"她拔剑跃起，披风在雷光中扬起。"}],'
@@ -2887,8 +2887,8 @@ def test_anima锚点纠正后保留带正文证据的Agent动作成稿(monkeypat
     )
 
     _, _, request, _audio = ag._agency_writeback(
-        _ctx(repo_id="work", card_name="白给谷", scene="climax", comfy_illustrate=True,
-             prompt_profile="anima_tags", illustration_actor_names=["冷倾雪"]),
+        _ctx(repo_id="work", card_name="白露谷", scene="climax", comfy_illustrate=True,
+             prompt_profile="anima_tags", illustration_actor_names=["顾凝霜"]),
         deps, reply, turn=2, affinity=10.0, lost=False,
     )
 
@@ -2912,14 +2912,14 @@ def test_主剧情同轮Profile拒答时本地兜底且不把拒答交给前端(
     reply = (
         "<content>她在破木栏旁猛然转身。</content>"
         '<illustration>{"anchor":"她在破木栏旁猛然转身。","camera":"low angle",'
-        '"composition":"foreground frame","subjects":[{"name":"冷倾雪",'
+        '"composition":"foreground frame","subjects":[{"name":"顾凝霜",'
         '"description":"adult woman with black hair and a purple robe"}],'
         f'"prompt":"turning, broken rail, dawn light","profile_prompt":"{refusal}","motion":2}}</illustration>'
     )
 
     clean, _, request, _audio = ag._agency_writeback(
-        _ctx(repo_id="work", card_name="白给谷", scene="climax", comfy_illustrate=True,
-             prompt_profile="krea2", illustration_actor_names=["冷倾雪"]),
+        _ctx(repo_id="work", card_name="白露谷", scene="climax", comfy_illustrate=True,
+             prompt_profile="krea2", illustration_actor_names=["顾凝霜"]),
         deps, reply, turn=2, affinity=10.0, lost=False,
     )
 
@@ -2946,13 +2946,13 @@ def test_同轮Profile先经过与正文相同的AI输出正则(monkeypatch, tmp
     reply = (
         "<content>她在破木栏旁猛然转身。</content>"
         '<illustration>{"anchor":"她在破木栏旁猛然转身。","camera":"low angle",'
-        '"composition":"foreground frame","subjects":[{"name":"冷倾雪",'
+        '"composition":"foreground frame","subjects":[{"name":"顾凝霜",'
         '"description":"adult woman with black hair and a purple robe"}],'
         f'"prompt":"turning, broken rail, dawn light","profile_prompt":"{profile}","motion":2}}</illustration>'
     )
     ctx = _ctx(
-        repo_id="work", card_name="白给谷", scene="climax", comfy_illustrate=True,
-        prompt_profile="krea2", illustration_actor_names=["冷倾雪"],
+        repo_id="work", card_name="白露谷", scene="climax", comfy_illustrate=True,
+        prompt_profile="krea2", illustration_actor_names=["顾凝霜"],
     )
     ctx["_regex_scripts"] = [regex_engine.RegexScript(
         find_regex="/PRESET_TOKEN/g",
@@ -3111,14 +3111,14 @@ def test_插画事件无视频字段时保持原状_旧数据兼容():
 def test_插画事件未带video_request不下发视频提示词_正常链路():
     # 正常链路：未配置视频工作流（produce 层未编译 video_request）→ 事件不带视频字段
     events = ag._streamed_illustration_events([{
-        "id": "slot-1", "prompt": "p", "motion": 3, "actors": ["温知夏", "林屿"],
+        "id": "slot-1", "prompt": "p", "motion": 3, "actors": ["纪含章", "林屿"],
         "anchor_offset": 0,
         "scene_spec": {
-            "narrative": "温知夏猛地起身撞桌",
-            "appearance": "温知夏米色针织开衫",
+            "narrative": "纪含章猛地起身撞桌",
+            "appearance": "纪含章米色针织开衫",
             "wardrobe": "全员日常私服",
             "locale": "面馆内景",
-            "actors": ["温知夏", "林屿"],
+            "actors": ["纪含章", "林屿"],
             "rating": "sfw",
             "negative_prompt": "低质量；畸形手",
         },
@@ -3212,7 +3212,7 @@ def test_正文最终化即时通道补发音频对白请求():
         "result_text": "最终正文",
         "audio_recs": [{
             "id": "audio-req-work-3",
-            "lines": [{"speaker": "虞妙玥", "text": "我认输。",
+            "lines": [{"speaker": "苏映晚", "text": "我认输。",
                        "emotion": {"neutral": 1}}],
         }],
     }
@@ -3220,7 +3220,7 @@ def test_正文最终化即时通道补发音频对白请求():
     assert emitted == [
         {"replace": "最终正文"},
         {"audio_request": {
-            "lines": [{"speaker": "虞妙玥", "text": "我认输。", "emotion": {"neutral": 1}}],
+            "lines": [{"speaker": "苏映晚", "text": "我认输。", "emotion": {"neutral": 1}}],
         }, "id": "audio-req-work-3"},
     ]
 
@@ -3274,7 +3274,7 @@ def test_wb_apply_state_协议双缺失时置兜底抽取信号(monkeypatch, tmp
     ctx = _ctx(output_dir=str(tmp_path), repo_id="work", message="你好")
     _, raw, _, _, snapshot, _ = aag._wb_apply_state(
         ctx, _signal_deps(tmp_path), "她微微一笑。", turn=38, repo_id="work",
-        card_name="凌若冰")
+        card_name="谢若冰")
     assert snapshot == "" and raw == []
     assert ctx["_agency_state_fallback"] == (True, True)
 
@@ -3282,9 +3282,9 @@ def test_wb_apply_state_协议双缺失时置兜底抽取信号(monkeypatch, tmp
 def test_wb_apply_state_缺状态更新只置增量信号(monkeypatch, tmp_path):
     monkeypatch.setattr(aag.run_trace, "emit", lambda ctx, event, **data: None)
     ctx = _ctx(output_dir=str(tmp_path), repo_id="work", message="你好")
-    clean = "<status>\n[第38轮]\n[好感] 凌若冰=40\n</status>\n\n她微微一笑。"
+    clean = "<status>\n[第38轮]\n[好感] 谢若冰=40\n</status>\n\n她微微一笑。"
     aag._wb_apply_state(ctx, _signal_deps(tmp_path), clean, turn=38, repo_id="work",
-                        card_name="凌若冰")
+                        card_name="谢若冰")
     assert ctx["_agency_state_fallback"] == (True, False)
 
 
@@ -3292,19 +3292,19 @@ def test_wb_apply_state_缺status只置快照信号(monkeypatch, tmp_path):
     monkeypatch.setattr(aag.run_trace, "emit", lambda ctx, event, **data: None)
     ctx = _ctx(output_dir=str(tmp_path), repo_id="work", message="你好")
     clean = ('她微微一笑。\n<状态更新>'
-             '[{"field":"数值/凌若冰·好感度","op":"add","value":1,"evidence":"笑"}]</状态更新>')
+             '[{"field":"数值/谢若冰·好感度","op":"add","value":1,"evidence":"笑"}]</状态更新>')
     aag._wb_apply_state(ctx, _signal_deps(tmp_path), clean, turn=38, repo_id="work",
-                        card_name="凌若冰")
+                        card_name="谢若冰")
     assert ctx["_agency_state_fallback"] == (False, True)
 
 
 def test_wb_apply_state_协议齐全不置信号(monkeypatch, tmp_path):
     monkeypatch.setattr(aag.run_trace, "emit", lambda ctx, event, **data: None)
     ctx = _ctx(output_dir=str(tmp_path), repo_id="work", message="你好")
-    clean = ("<status>\n[第38轮]\n[好感] 凌若冰=40\n</status>\n\n她微微一笑。\n<状态更新>"
-             '[{"field":"数值/凌若冰·好感度","op":"add","value":1,"evidence":"笑"}]</状态更新>')
+    clean = ("<status>\n[第38轮]\n[好感] 谢若冰=40\n</status>\n\n她微微一笑。\n<状态更新>"
+             '[{"field":"数值/谢若冰·好感度","op":"add","value":1,"evidence":"笑"}]</状态更新>')
     aag._wb_apply_state(ctx, _signal_deps(tmp_path), clean, turn=38, repo_id="work",
-                        card_name="凌若冰")
+                        card_name="谢若冰")
     assert "_agency_state_fallback" not in ctx
 
 
@@ -3324,7 +3324,7 @@ def _preset_state(tmp_path, repo_id: str, card: str, *, value: float, turn: int)
 def test_独立表格维护兜底信号驱动状态补写回(monkeypatch, tmp_path):
     from app.services import character_state
 
-    repo_id, card = "work", "凌若冰"
+    repo_id, card = "work", "谢若冰"
     captured = {}
     traces = []
 
@@ -3332,9 +3332,9 @@ def test_独立表格维护兜底信号驱动状态补写回(monkeypatch, tmp_pa
         captured.update(system=system, user=user)
         return json.dumps({
             "ops": [],
-            "state_deltas": [{"field": "数值/凌若冰·好感度", "op": "add", "value": 2,
+            "state_deltas": [{"field": "数值/谢若冰·好感度", "op": "add", "value": 2,
                               "evidence": "她收下了信物"}],
-            "status_snapshot": "[第38轮] 夜谈\n[好感] 凌若冰=42",
+            "status_snapshot": "[第38轮] 夜谈\n[好感] 谢若冰=42",
         }, ensure_ascii=False)
 
     monkeypatch.setattr(aag._llm, "chat", maintain)
@@ -3348,9 +3348,9 @@ def test_独立表格维护兜底信号驱动状态补写回(monkeypatch, tmp_pa
     aag._table_maintenance(ctx, deps, repo_id, "她收下了信物，耳根微红。" * 5, turn=38)
 
     st2 = character_state.load_state(str(tmp_path), repo_id, card)
-    assert st2.数值["凌若冰·好感度"].value == 42.0
+    assert st2.数值["谢若冰·好感度"].value == 42.0
     assert st2.快照.turn == 38
-    assert "[好感] 凌若冰=42" in st2.快照.text  # 增量已先应用，对账后 42 与引擎现值一致
+    assert "[好感] 谢若冰=42" in st2.快照.text  # 增量已先应用，对账后 42 与引擎现值一致
     assert "【上轮状态栏】" in captured["user"] and "第37轮" in captured["user"]
     assert any(e == "agent.completed" and d.get("agent") == "table_maintenance"
                and d.get("state_fallback") for e, d in traces)
@@ -3359,7 +3359,7 @@ def test_独立表格维护兜底信号驱动状态补写回(monkeypatch, tmp_pa
 def test_独立表格维护兜底信号但模型回旧数组时只应用表格ops(monkeypatch, tmp_path):
     from app.services import character_state, table_store
 
-    repo_id, card = "work", "凌若冰"
+    repo_id, card = "work", "谢若冰"
     traces = []
     table_store.save(str(tmp_path), repo_id, table_store.default_tables())
 
@@ -3390,7 +3390,7 @@ def test_独立表格维护兜底信号但模型回旧数组时只应用表格op
 def test_独立表格维护快照兜底不重复应用增量(monkeypatch, tmp_path):
     from app.services import character_state
 
-    repo_id, card = "work", "凌若冰"
+    repo_id, card = "work", "谢若冰"
     captured = {}
     traces = []
 
@@ -3398,9 +3398,9 @@ def test_独立表格维护快照兜底不重复应用增量(monkeypatch, tmp_pa
         captured.update(system=system, user=user)
         return json.dumps({
             "ops": [],
-            "state_deltas": [{"field": "数值/凌若冰·好感度", "op": "add", "value": 2,
+            "state_deltas": [{"field": "数值/谢若冰·好感度", "op": "add", "value": 2,
                               "evidence": "模型抗命多给的增量"}],
-            "status_snapshot": "[第38轮] 夜谈\n[好感] 凌若冰=41",
+            "status_snapshot": "[第38轮] 夜谈\n[好感] 谢若冰=41",
         }, ensure_ascii=False)
 
     monkeypatch.setattr(aag._llm, "chat", maintain)
@@ -3414,9 +3414,9 @@ def test_独立表格维护快照兜底不重复应用增量(monkeypatch, tmp_pa
     aag._table_maintenance(ctx, deps, repo_id, "她收下了信物。" * 5, turn=38)
 
     st2 = character_state.load_state(str(tmp_path), repo_id, card)
-    assert st2.数值["凌若冰·好感度"].value == 40.0  # 主协议增量已应用过：维护增量不重复计
+    assert st2.数值["谢若冰·好感度"].value == 40.0  # 主协议增量已应用过：维护增量不重复计
     assert st2.快照.turn == 38
-    assert "[好感] 凌若冰=40" in st2.快照.text  # 快照对账到引擎现值
+    assert "[好感] 谢若冰=40" in st2.快照.text  # 快照对账到引擎现值
     assert "state_deltas 固定输出 []" in captured["system"]
     assert "【上轮状态栏】" in captured["user"]
 
@@ -3907,10 +3907,10 @@ def test_流式trace通知可携带明细_两参调用与旧线逐字节一致()
 # 判据档**常开**（用户定案去掉启用开关）：任何一步不成立都必须返回 ""，让调用方短路到
 # 现有中文词表。该短路是本层的**失败上界**——最坏情况就是回到词表档，不会中断出图。
 
-_ANCHOR_CLEAN = "前文第一段。\n\n浑身无力的宥夏靠在公告栏上。\n\n后文收束段。"
+_ANCHOR_CLEAN = "前文第一段。\n\n浑身无力的清夏靠在公告栏上。\n\n后文收束段。"
 _ANCHOR_OK_RAW = (
-    '{"anchor": "浑身无力的宥夏靠在公告栏上。", "composition": "中景", '
-    '"subjects": ["宥夏"], "reason": "事后定型态"}'
+    '{"anchor": "浑身无力的清夏靠在公告栏上。", "composition": "中景", '
+    '"subjects": ["清夏"], "reason": "事后定型态"}'
 )
 
 
@@ -3935,7 +3935,7 @@ def test_判据为空时零调用且短路回词表(monkeypatch):
     monkeypatch.setattr(aag._llm, "chat", lambda *a, **k: pytest.fail("无判据不得发起调用"))
     trace = _trace_capture(monkeypatch)
 
-    assert aag._illustration_anchor_intent(_ctx(), _ANCHOR_CLEAN, {"present": ["宥夏"]}) == ("", {})
+    assert aag._illustration_anchor_intent(_ctx(), _ANCHOR_CLEAN, {"present": ["清夏"]}) == ("", {})
     assert trace[-1][1]["status"] == "skipped"
     assert trace[-1][1]["reason"] == "rubric_empty"
 
@@ -4011,16 +4011,16 @@ def test_判据命中时带只读合同且必带超时(monkeypatch):
     trace = _trace_capture(monkeypatch)
 
     anchor, detail = aag._illustration_anchor_intent(
-        _ctx(), _ANCHOR_CLEAN, {"present": ["宥夏"]},
+        _ctx(), _ANCHOR_CLEAN, {"present": ["清夏"]},
     )
-    assert anchor == "浑身无力的宥夏靠在公告栏上。"
-    assert detail["subjects"] == ["宥夏"]
+    assert anchor == "浑身无力的清夏靠在公告栏上。"
+    assert detail["subjects"] == ["清夏"]
     assert captured["system"].startswith("用户判据")
     assert si.ANCHOR_INTENT_CONTRACT in captured["system"]
     assert captured["timeout"] is not None and captured["timeout"] > 0
-    assert "在场角色：宥夏" in captured["user"]
+    assert "在场角色：清夏" in captured["user"]
     data = trace[-1][1]
-    assert data["status"] == "ok" and data["subjects"] == ["宥夏"]
+    assert data["status"] == "ok" and data["subjects"] == ["清夏"]
 
 
 # ── 第 57 刀 · 多批生图：判据采集时同步落「去重 + 取前 N」列表 ──────────────────
@@ -4030,8 +4030,8 @@ def _anchor_multi_raw() -> str:
     """判据吐**多锚点数组**：同带相邻两条（应并成一处）+ 一条异带（应留）。"""
     return (
         '{"anchors": ['
-        '{"anchor": "浑身无力的宥夏靠在公告栏上。", "composition": "中景", '
-        '"subjects": ["宥夏"], "reason": "事后定型态", "score": 30},'
+        '{"anchor": "浑身无力的清夏靠在公告栏上。", "composition": "中景", '
+        '"subjects": ["清夏"], "reason": "事后定型态", "score": 30},'
         '{"anchor": "后文收束段。", "composition": "远景", '
         '"subjects": [], "reason": "收束", "score": 70}'
         "]}"
@@ -4039,8 +4039,8 @@ def _anchor_multi_raw() -> str:
 
 
 def _anchor_multi_clean() -> str:
-    # 段 0 环境 / 段 1 宥夏（无接触）/ 段 2 收束 —— 两条锚点带均为 `.` ⇒ 不并、各留一条。
-    return "前文第一段。\n\n浑身无力的宥夏靠在公告栏上。\n\n后文收束段。"
+    # 段 0 环境 / 段 1 清夏（无接触）/ 段 2 收束 —— 两条锚点带均为 `.` ⇒ 不并、各留一条。
+    return "前文第一段。\n\n浑身无力的清夏靠在公告栏上。\n\n后文收束段。"
 
 
 def test_第57刀_判据采集同步落去重后的锚点列表进ctx(monkeypatch):
@@ -4059,10 +4059,10 @@ def test_第57刀_判据采集同步落去重后的锚点列表进ctx(monkeypatc
     ctx = _ctx()
 
     anchor, _ = aag._illustration_anchor_intent(
-        ctx, _anchor_multi_clean(), {"present": ["宥夏"]},
+        ctx, _anchor_multi_clean(), {"present": ["清夏"]},
     )
 
-    # 单条路径：分最高那条（收束段 70 > 宥夏段 30）
+    # 单条路径：分最高那条（收束段 70 > 清夏段 30）
     assert anchor == "后文收束段。"
     items = ctx["illustration_anchor_intents"]
     # 默认数量 0 ⇒ 1 ⇒ 只留分最高那条 ⇒ 与单条路径**同源**
@@ -4081,12 +4081,12 @@ def test_第57刀_面板数量大于锚点数时全部出图(monkeypatch):
     _trace_capture(monkeypatch)
     ctx = _ctx(illustration_batch_count=5)
 
-    aag._illustration_anchor_intent(ctx, _anchor_multi_clean(), {"present": ["宥夏"]})
+    aag._illustration_anchor_intent(ctx, _anchor_multi_clean(), {"present": ["清夏"]})
 
     items = ctx["illustration_anchor_intents"]
-    # 正文序：宥夏段在前、收束段在后（不是按分数 70/30 排）
+    # 正文序：清夏段在前、收束段在后（不是按分数 70/30 排）
     assert [item["anchor"] for item in items] == [
-        "浑身无力的宥夏靠在公告栏上。", "后文收束段。",
+        "浑身无力的清夏靠在公告栏上。", "后文收束段。",
     ]
 
 
@@ -4101,7 +4101,7 @@ def test_第57刀_面板数量小于锚点数时按分取前N(monkeypatch):
     _trace_capture(monkeypatch)
     ctx = _ctx(illustration_batch_count=1)
 
-    aag._illustration_anchor_intent(ctx, _anchor_multi_clean(), {"present": ["宥夏"]})
+    aag._illustration_anchor_intent(ctx, _anchor_multi_clean(), {"present": ["清夏"]})
 
     assert [item["anchor"] for item in ctx["illustration_anchor_intents"]] == ["后文收束段。"]
 
@@ -4120,7 +4120,7 @@ def test_第57刀_锚点列表只在判据命中时落ctx(monkeypatch):
     ctx = _ctx()
 
     assert aag._illustration_anchor_intent(
-        ctx, _ANCHOR_CLEAN, {"present": ["宥夏"]},
+        ctx, _ANCHOR_CLEAN, {"present": ["清夏"]},
     ) == ("", {})
     assert "illustration_anchor_intents" not in ctx
 
@@ -4144,7 +4144,7 @@ def test_第57刀_指定锚点与判据档同一条链且不重复调判据(monk
     `anchor_override` 与「判据刚好给出同一锚点」**逐字节等价**（同一锚点 ⇒ 同一画面），
     且**不再调用判据 LLM** —— 多批的第 2..N 张若各花一次判据调用，N 张图就多 N-1 次成本。
     """
-    anchor = "浑身无力的宥夏靠在公告栏上。"
+    anchor = "浑身无力的清夏靠在公告栏上。"
     calls: list = []
     monkeypatch.setattr(
         asc, "_illustration_anchor_intent",
@@ -4154,13 +4154,13 @@ def test_第57刀_指定锚点与判据档同一条链且不重复调判据(monk
     via_override = aag._wb_comfy_scene_target(
         {}, "", {}, _ANCHOR_CLEAN, _anchor_sig(), _anchor_pool(),
         prompt_override="", motion=0, user_text="",
-        anchor_override=anchor, subjects_override=["宥夏"],
+        anchor_override=anchor, subjects_override=["清夏"],
     )
 
     assert calls == []                                   # 未调判据 LLM
     assert via_override["requested_anchor"] == anchor
     via_judge = _run_scene_target_ctx(
-        monkeypatch, _ANCHOR_CLEAN, (anchor, {"subjects": ["宥夏"]}), {},
+        monkeypatch, _ANCHOR_CLEAN, (anchor, {"subjects": ["清夏"]}), {},
     )
     assert via_override == via_judge                     # 与判据档逐字节等价
 
@@ -4309,16 +4309,16 @@ def test_第57刀_有序事件按偏移切正文且逐槽插入不丢字():
 
 # ── 第 57 刀 · 多批派发【集成】：真接线（判据真解析 → 落 ctx → 主链 → 额外链）───
 
-_MULTI_TEXT = "<content>虞妙玥跪倒在石阶前。\n\n她抬手拭去唇角血痕。</content>"
+_MULTI_TEXT = "<content>苏映晚跪倒在石阶前。\n\n她抬手拭去唇角血痕。</content>"
 _MULTI_ANCHOR_RAW = (
     '{"anchors": ['
-    '{"anchor": "虞妙玥跪倒在石阶前。", "composition": "中景", "subjects": ["虞妙玥"], '
+    '{"anchor": "苏映晚跪倒在石阶前。", "composition": "中景", "subjects": ["苏映晚"], '
     '"reason": "高潮动作", "score": 90},'
-    '{"anchor": "她抬手拭去唇角血痕。", "composition": "特写", "subjects": ["虞妙玥"], '
+    '{"anchor": "她抬手拭去唇角血痕。", "composition": "特写", "subjects": ["苏映晚"], '
     '"reason": "余韵", "score": 40}'
     "]}"
 )
-_MULTI_JUDGED_ANCHORS = {"虞妙玥跪倒在石阶前。", "她抬手拭去唇角血痕。"}
+_MULTI_JUDGED_ANCHORS = {"苏映晚跪倒在石阶前。", "她抬手拭去唇角血痕。"}
 
 
 def _run_multi_writeback(monkeypatch, tmp_path, ctx, text=_MULTI_TEXT):
@@ -4351,7 +4351,7 @@ def _run_multi_writeback(monkeypatch, tmp_path, ctx, text=_MULTI_TEXT):
 def _multi_ctx(**over) -> dict:
     ctx = _ctx(
         repo_id="work", card_name="作品名", scene="climax", comfy_illustrate=True,
-        appearance_source="worldbook", illustration_actor_names=["虞妙玥"],
+        appearance_source="worldbook", illustration_actor_names=["苏映晚"],
         prompt_profile="krea2",
     )
     ctx.update(over)
@@ -4416,8 +4416,8 @@ def test_第57刀_未手选人称时判据user消息逐字节不变(monkeypatch)
 
     # 不传人称键 / 传空串 —— 两者都必须与「旧格式」（在场角色 + 正文）一致
     for ctx in (_ctx(), _ctx(illustration_viewpoint="")):
-        aag._illustration_anchor_intent(ctx, _ANCHOR_CLEAN, {"present": ["宥夏"]})
-        assert captured["user"].split("\n\n")[0] == "在场角色：宥夏", captured["user"][:80]
+        aag._illustration_anchor_intent(ctx, _ANCHOR_CLEAN, {"present": ["清夏"]})
+        assert captured["user"].split("\n\n")[0] == "在场角色：清夏", captured["user"][:80]
         assert "画面人称" not in captured["user"]
 
 
@@ -4438,7 +4438,7 @@ def test_第57刀_手选第一人称时把画面人称告知判据(monkeypatch):
     _trace_capture(monkeypatch)
 
     aag._illustration_anchor_intent(
-        _ctx(illustration_viewpoint="first_person"), _ANCHOR_CLEAN, {"present": ["宥夏"]},
+        _ctx(illustration_viewpoint="first_person"), _ANCHOR_CLEAN, {"present": ["清夏"]},
     )
 
     assert "画面人称：第一人称" in captured["user"]
@@ -4576,7 +4576,7 @@ def test_第57刀_仲裁后同位只出一张(monkeypatch):
 
 def _anchor_sig(**over) -> dict:
     sig = {
-        "visible_story": _ANCHOR_CLEAN, "present": ["宥夏"], "at_climax": True,
+        "visible_story": _ANCHOR_CLEAN, "present": ["清夏"], "at_climax": True,
         "character_encounter": False, "encounter_anchor": "",
         "encounter_narrative": "", "encounter_actors": [],
         "local_scene_fallback": False, "missing_plan_fallback": True,
@@ -4615,8 +4615,8 @@ def test_缺块路径判据返回空时锚点仍是词表结果(monkeypatch):
 
 
 def test_缺块路径判据命中时优先于词表(monkeypatch):
-    out, keyword = _run_scene_target(monkeypatch, "浑身无力的宥夏靠在公告栏上。")
-    assert out["requested_anchor"] == "浑身无力的宥夏靠在公告栏上。"
+    out, keyword = _run_scene_target(monkeypatch, "浑身无力的清夏靠在公告栏上。")
+    assert out["requested_anchor"] == "浑身无力的清夏靠在公告栏上。"
     assert out["requested_anchor"] != keyword  # 词表本来选的是别的段
 
 
@@ -4669,7 +4669,7 @@ def test_初遇锚点不过仲裁机(monkeypatch):
     out, _ = _run_scene_target_on(
         monkeypatch, _ARB_TEXT, "",
         character_encounter=True, encounter_anchor=_ARB_JUDGE,
-        encounter_narrative=_ARB_TEXT, encounter_actors=["宥夏"],
+        encounter_narrative=_ARB_TEXT, encounter_actors=["清夏"],
     )
     assert out["requested_anchor"] == _ARB_JUDGE
     assert out["requested_anchor"] != _ARB_KEYWORD
@@ -4765,8 +4765,8 @@ def test_第48刀_收窄只作用于契约主体_取材仍按未收窄的判据�
 
 # ── 第 49 刀 · A2（2026-09-22 用户定案「先 B 再 A2」）：把「收窄」从**有条件**（锚点被推翻）
 # 升级为**无条件** —— 只要判据主体里有 ∉ 在场角色的名字就剔。真机（轮 A · 09:54 · thread
-# `09f79e6f`）：判据 `subjects=['妲千沁','凌渊']`（把不入画的主人公算进画面主体）、
-# `actors=['妲千沁']` ⇒ 旧行为 `frame_subjects` 保持 2 人 ⇒ 契约判成双人帧 ⇒ 成稿
+# `09f79e6f`）：判据 `subjects=['沈映澜','洛渊']`（把不入画的主人公算进画面主体）、
+# `actors=['沈映澜']` ⇒ 旧行为 `frame_subjects` 保持 2 人 ⇒ 契约判成双人帧 ⇒ 成稿
 # `2girls, adult woman, adult man`（多画一个人）。
 # 零 LLM 量测（同 thread 三轮）：生效 **1/3 格**（轮 A）、零误伤（轮 B 逐字节不变、轮 C
 # 交集空 ⇒ 回落 `actors` ＝旧行为）。
@@ -4797,8 +4797,8 @@ def _run_scene_target_no_arb(monkeypatch, judge_result, *, ctx=None, pool=None,
 def test_第49刀_锚点未被推翻时主体也收窄到在场角色(monkeypatch):
     """A2 正例：收窄**不再以「锚点被推翻」为条件** —— 判据把不在场者算进画面主体时无条件剔掉。
 
-    真机轮 A（09:54）：判据 `subjects=['妲千沁','凌渊']`（主人公不入画却算成主体）、
-    `actors=['妲千沁']` ⇒ 旧行为保持 2 人 ⇒ 契约判双人帧 ⇒ 成稿多画一个人。
+    真机轮 A（09:54）：判据 `subjects=['沈映澜','洛渊']`（主人公不入画却算成主体）、
+    `actors=['沈映澜']` ⇒ 旧行为保持 2 人 ⇒ 契约判双人帧 ⇒ 成稿多画一个人。
     ⚠ 构造上刻意让「不在场者」也在 `known` 里 ⇒ 「第 42 刀 B（∉ `known` 剔）」**测不出来**，
     **只有 A2（∉ 在场角色剔）能修** —— 真机上 `known` 可能为空（未绑卡）⇒ 那条闸整体空转
     （见技能 `demiurge-viewpoint-subject-scope` §8 的元教训）。
@@ -4840,9 +4840,9 @@ def test_第49刀_在场角色取不到时不收窄(monkeypatch):
 # 判据锚点句里的**名字**未必是本帧主体 —— 第一人称下它常是「镜头」（被看向／被亲吻的
 # 主人公）。而收敛（`filter_anchor_subjects` 第③步）**只认字面名字** ⇒ 锚点句用**代词**
 # 写主体、用**名字**写镜头时，收敛会把**主体丢掉、只留下镜头**。
-# 真机轮 C（thread `09f79e6f`，12:28）：判据 `subjects=['妲千沁','凌渊']`、锚点句
-# 「**她**掖完被子，把视线从墙上收回来，落到**凌渊**脸上。」⇒ 收敛成 `['凌渊']`
-# （＝镜头；演员表 `actors=['凌若冰','妲千沁']` 里并不含他）⇒ 与在场角色**无交集**
+# 真机轮 C（thread `09f79e6f`，12:28）：判据 `subjects=['沈映澜','洛渊']`、锚点句
+# 「**她**掖完被子，把视线从墙上收回来，落到**洛渊**脸上。」⇒ 收敛成 `['洛渊']`
+# （＝镜头；演员表 `actors=['谢若冰','沈映澜']` 里并不含他）⇒ 与在场角色**无交集**
 # ⇒ 第 49 刀 A2 把它收成空表 ⇒ 契约退回 `actors` ⇒ 单人帧被画成 `2girls`（多画一个人）。
 # 修法：收敛结果与在场角色**无交集** ⇒ 视为收敛失败 ⇒ 回退到**未收敛的判据主体**再按
 # 在场收窄（同一份判据，只是跳过收敛这一步；正确画面＝她一人 ＋ 视线朝镜头）。
@@ -5000,31 +5000,31 @@ def test_缺块路径判据档主体名驱动取材扩窗(monkeypatch):
     """
     text = "\n\n".join([
         "---",
-        "世熙把双手贴到墙上，把重心压得很低。",
-        "宥夏也把重心压低，贴住墙面上前。",
+        "明澜把双手贴到墙上，把重心压得很低。",
+        "清夏也把重心压低，贴住墙面上前。",
         "那么，我该选哪一边呢？",
     ])
-    judged = ("那么，我该选哪一边呢？", {"subjects": ["世熙", "宥夏"], "composition": "双人同框"})
+    judged = ("那么，我该选哪一边呢？", {"subjects": ["明澜", "清夏"], "composition": "双人同框"})
 
     out, _ = _run_scene_target_on(
-        monkeypatch, text, judged, present=["世熙", "宥夏"],
+        monkeypatch, text, judged, present=["明澜", "清夏"],
     )
 
     assert out["requested_anchor"] == judged[0]
-    assert "世熙把双手贴到墙上" in out["scene_narrative"]
-    assert "宥夏也把重心压低" in out["scene_narrative"]
+    assert "明澜把双手贴到墙上" in out["scene_narrative"]
+    assert "清夏也把重心压低" in out["scene_narrative"]
 
 
 def test_缺块路径判据档无主体名时取材维持旧行为(monkeypatch):
     """判据档只回 anchor、`subjects` 为空 ⇒ 取材层无信号 ⇒ 与接入 A′ 之前逐字一致。"""
     text = "\n\n".join([
         "---",
-        "世熙把双手贴到墙上，把重心压得很低。",
+        "明澜把双手贴到墙上，把重心压得很低。",
         "那么，我该选哪一边呢？",
     ])
 
     out, _ = _run_scene_target_on(
-        monkeypatch, text, ("那么，我该选哪一边呢？", {}), present=["世熙"],
+        monkeypatch, text, ("那么，我该选哪一边呢？", {}), present=["明澜"],
     )
 
     assert out["requested_anchor"] == "那么，我该选哪一边呢？"
@@ -5038,16 +5038,16 @@ def test_缺块路径词表档用在场角色全集驱动扩窗(monkeypatch):
     """
     text = "\n\n".join([
         "---",
-        "世熙把双手贴到墙上，把重心压得很低。",
+        "明澜把双手贴到墙上，把重心压得很低。",
         "她缓缓转身回眸。",
     ])
 
     out, _ = _run_scene_target_on(
-        monkeypatch, text, "", present=["世熙", "宥夏"],
+        monkeypatch, text, "", present=["明澜", "清夏"],
     )
 
     assert out["requested_anchor"] == "她缓缓转身回眸。"
-    assert "世熙把双手贴到墙上" in out["scene_narrative"]
+    assert "明澜把双手贴到墙上" in out["scene_narrative"]
 
 
 def _run_scene_target_ctx(monkeypatch, text, judge_result, ctx, pool=None, **sig_over):
@@ -5131,9 +5131,9 @@ def test_主人公性别注入到外观段(monkeypatch):
 def test_curator可写集剔除机制层并补回在场角色卡(tmp_path):
     """A 治本（真机根因）：原先 allowed 直接取本轮召回集 `_selected_worldbook_indices`，
     而 `constant=True` 条目「全程恒开、全文注入」⇒ **永远落在可写集里**；角色卡
-    （constant=False）只有被召回时才在 ⇒ curator 想记「凌若冰的最新状态」时无处可写，
+    （constant=False）只有被召回时才在 ⇒ curator 想记「谢若冰的最新状态」时无处可写，
     只能灌进伪机制条目。真机实锤：`id=1 全局机制·{{user}}(少宗主)`（175 字符）**通篇是
-    凌若冰的身体状态**、`id=2 全局机制·龙阳决与双修`（39 字符）写「舞姬恋…往返抚弄其经脉」。
+    谢若冰的身体状态**、`id=2 全局机制·龙阳决与双修`（39 字符）写「星织恋…往返抚弄其经脉」。
 
     现口径＝召回集**剔除机制层** ＋ **补上在场角色的角色卡**（与 `CURATOR_SYSTEM`
     「机制、规则、历史背景、地点常识等条目默认只读；角色条目中的长期剧情动态是最主要的
@@ -5142,13 +5142,13 @@ def test_curator可写集剔除机制层并补回在场角色卡(tmp_path):
     repo_id = "work"
     worldbook_store.ensure_repo_snapshot(str(tmp_path), repo_id, [{"entries": [
         {"comment": "全局机制·龙阳决与双修", "content": "机制正文", "constant": True},
-        {"comment": "角色卡·凌若冰", "content": "【角色卡·凌若冰】底座", "keys": ["凌若冰"]},
+        {"comment": "角色卡·谢若冰", "content": "【角色卡·谢若冰】底座", "keys": ["谢若冰"]},
         {"comment": "角色卡·旁人", "content": "【角色卡·旁人】底座", "keys": ["旁人"]},
     ]}])
     ctx = {
         "output_dir": str(tmp_path), "repo_id": repo_id,
         "_selected_worldbook_indices": [0],        # 机制条目被召回（constant ⇒ 恒开）
-        "_worldbook_character_names": ["凌若冰"],   # 本轮在场角色
+        "_worldbook_character_names": ["谢若冰"],   # 本轮在场角色
     }
 
     allowed = aga._curator_writable_indices(ctx, repo_id)
