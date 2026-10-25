@@ -215,9 +215,10 @@
    不钉住则每次补帧都把相位推一格（「明明暂停了，改个预设背景却闪成另一个姿态」）。宿主补帧通道 `recover()` →
    `dsh-recover-renderer` 由垫片拦截，**只在 `gl.isContextLost()` 为真时**放行上游重建，否则「为补帧发的消息」
    会被读成「渲染器坏了」。
-   **诚实边界**：`3346715292` 的 52 条非广告 WE 属性里当前**只有 6 条**被渲染器消费
+   **诚实边界**：`3346715292` 的 52 条非广告 WE 属性里当时**只有 6 条**被渲染器消费
    （`display`/`hrbigb`/`hrbigbbreath`/`newproperty2`/`x9`/`y9`），面板因此只摆 6 个；日/夜两侧还各缺
    solidlayer 覆盖、粒子与时钟/日期文字对象。扩大覆盖面要动渲染器，**不是放宽面板**。
+   （2026-10-24 第五刀后已扩到 **41 条消费 / 面板 37 行**，见条 60 的「覆盖面实测」；本条保留当日事实。）
    **验证**：真浏览器四个 spec 共 6 例序列全绿（`6 passed 1.6m`；`cameraparallax:false` 时移动鼠标**任何图层矩阵都不许变**、
    播放时蒙皮顶点逐帧变且头发跟转头、预设面板只摆生效键 + 切晨夜白天比夜晚亮 20 以上 + 换预设不重下载包 +
    写回的是差集 `{display:"0", hrbigb:"2"}` + console 错误恒 `[]`）。暂停态取样只走产品自己的补帧通道
@@ -231,6 +232,35 @@
    monkeypatch 打不进去），本次零改动且单跑同样红。文档落点：`frontend/src/lib/scene/README.md`、
    `vendor/NOTICE.md`（改动⑤⑥ + 新 SHA-256）、手册 `F/11`（能力边界 / 视差门控 / 暂停＝定格 / WE 预设部署 / 回归清单）、
    `G/16` §3.5 scene 节 + 红线 16。
+   **2026-10-25 补刀（视频纹理）**：用户实锤「背景还是没显示，WE 里是完整插画，应用里只剩日期/时钟」——
+   `3723257973` 唯一美术层是 TEXB0004 视频纹理（内嵌 H.264 MP4，TEX 67,326,945 B / MP4 从字节 91 起
+   67,326,854 B 与 `art.mp4` 逐字节相同），旧链 `extractSceneResourceVia` 把解不出的 TEX 原样返回、
+   `mimeOf` 按后缀标 `image/png` ⇒ `<img>` 失败 ⇒ `!texRec.loaded` 静默跳过整层。修法：manifest 交
+   **裸 MP4**、产品侧标注 `videoTex`、blob 按字节标 `video/mp4`、播放器 `<video>` 逐帧上传纹理
+   （NPOT 先 CLAMP、暂停真 `pause()`、prune 认 `|video` 键）。真机探针截图与 WE 参考同内容、
+   `currentTime` 推进/暂停/恢复、`glError=0`；门禁 scene vitest **107 例**、前端全量 1858、tsc/build 0、
+   e2e 七 spec **13 例**全绿。细则见条 60 的 2026-10-25 增补。
+   **2026-10-25 再补刀（竖排日期/星期布局）**：用户实锤「日期的摆法和原壁纸不一样、不够美观」——`3723257973` 的
+   WE 参考是 Date 竖排三段（`2/5 ↕ O/C/T ↕ 2/0/2/6`，在左、字号 25.2）、右侧大号竖排 `S/U/N`（终稿 82.155）、
+   时钟 `HH:MM`（56.71）。三个根因：① 日期脚本此前只认 A 族水平拼接，B 族（`delimiterValue=['\n\n']` +
+   月名表/补零日号表/年份拆分）被整条跳过 ⇒ 日期不竖排；② 字号误乘了父链 scale ⇒ Date 位图小到看不清
+   （终稿规则见下方三补）；③ 行距写死 1.25em，而 Quicksand 实测 1.17em、spincycle 1.22em ⇒ 竖排行距不匀。修法：manifest 侧对日期脚本做
+   **静态求值**（`scanIfBlocks`/`condHolds`/`varValueOf`，认不出的 `return` 项整条跳过、fail-closed）并输出
+   `{dayTable}\n\n{month}\n\n{year}` 模板；播放器行距改用
+   `fontBoundingBoxAscent + fontBoundingBoxDescent`。回归：scene vitest **113 例** +
+   `e2e-manual/wallpaper-scene-text-layout.spec.ts` 一例（模板/坐标/字号/逐行 `fillText`/字体 `loaded`，后扩到五族）+
+   场景 A 文字 e2e 两例全绿；截图与 WE 参考同布局。作者其余任意 `update()` 脚本仍不执行。
+   **同日生产态补刀**：开发 vite 不发 CSP，生产页却由后端 `_csp_document_header` 送达；`font-src 'self' data:` 缺 `blob:`
+   ⇒ 三条 blob FontFace 全 `error`、退系统字（`SUN` 失 3D 中空字形，回退行距更短把星期块压进时钟）。修法＝`font-src` 加
+   `blob:`，回归 `backend/tests/test_csp_header.py::test_font_src放行blob_scene文字字体`；生产路径以相对 API 基址临时构建 +
+   隔离后端验证三面 `loaded`、截图与 WE 同布局。e2e 经 dev 页面跑，**看不见 CSP 这层**。
+   **2026-10-25 三补（问候语/帧率 + 字号终稿）**：左上角 `Morning` 与 `fps: 60` 此前整层缺席。仍不执行脚本，
+   改为静态抠问候语（小时阈值表 + 8 档标签表）与帧率（label/refreshInterval/active/烘焙初值）；
+   播放器按墙钟选词（10:46→Morning、12:34→Noon），按 rAF 实测帧率按刷新窗口出 `label + 整数`，暂停冻住。
+   同时按 WE 参考图逐字测量把字号规则修成**`pointsize × 自身与中间父组 scale`，最外层「组件」根组只挪位置**：
+   问候语 32×0.23025×3.125=23.025、帧率 24×0.948=22.752、SUN 96.653×0.85=82.155，与日期 25.2 / 时钟 56.71
+   的比例（SUN/日期 3.26、时钟/日期 2.25）和参考图一致；只吃自身 scale 会让问候语只剩 7.37 的小糊点。
+   回归：scene vitest **113 例**、前端全量 **1864 例**、build 0，e2e 一例扩到五段文字（清单/坐标/字号/光栅/字体）全绿。
 
 55. **出站建连 IP 钉扎：url_guard TOCTOU 关窗（已完成 · 2026-10-24）**：全库安全审计建议第 3 项
    （SVG 加固文档 §1.6 #6 登记的另立刀）。**根因**：`validate_media_url` 校验时解析一次 DNS，
@@ -1006,3 +1036,18 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
    404、内置字体加载失败连锁；**e2e 的 API 面有新路由时必须指向新代码后端**（e2e mock 只盖 `/api/user-state`
    写档面，盖不住新增读路由）。NOTICE 改动⑦⑧⑨ + 播放器 6–9 + 双 SHA-256 同步（`vendorNotice.test.ts` 哈希锁）。
    手册 `F/11` scene 节（文字图层/粒子/效果）、`G/16` 红线 16；memory `topic-frontend.md`「壁纸第五刀」。
+   **2026-10-25 增补（视频纹理，用户实锤「背景没显示」）**：第四扩。`3723257973` 的美术层是
+   **TEXB0004 视频纹理**——`parseTexInternal` 认 v4 视频标记 / 首 8 字节 `ftyp`，载荷是内嵌 H.264 MP4
+   （TEX 67,326,945 B；MP4 从字节 91 起、67,326,854 B，与手工抽出的 `art.mp4` 逐字节相同；容器长度字段
+   不可信，按 `ftyp` 前 4KB 扫描切片）。失败链是**静默**的：旧 `extractSceneResourceVia` 的
+   `catch { return file.bytes; }` 把原始 TEX 当资源返回 → `sceneBackdrop.mimeOf` 按后缀标 `image/png`
+   → blob 不是合法 PNG → `<img>` 失败 → `if (!texRec.loaded) continue;` 跳过唯一美术层（8 个 canvas
+   文字层照画，用户看到「只剩日期」）。**分层落点**：manifest 交裸 MP4（不猜语义）/ 产品侧
+   `readScenePackage` 用 `isMp4Bytes` 反查并 `markSceneVideoLayers` 标 `videoTex` / blob MIME 按字节嗅探 /
+   播放器 `<video muted loop playsInline>` + `requestVideoFrameCallback` 逐帧 `texImage2D`，缓存键 `|video`。
+   🔴 NPOT 必须 `CLAMP_TO_EDGE`（3840×2160，REPEAT ⇒ incomplete 纹理 ⇒ 取样 `(0,0,0,1)` 画黑，
+   与 waterflow 同一条陷阱）；暂停必须真 `pause()`；`pruneTextures` 必须拆 `<video>`（清 `src` + `load()`）。
+   真机：1600×900 截图与 WE 同内容，`readyState=4`、`currentTime` 0.078→2.591 s，暂停钉 5.876 s、恢复 7.079 s，
+   `glError=0`。门禁：scene vitest **107 例**（52/22/20/11/2）、前端全量 **1858**、tsc 0、`vite build` 0、
+   e2e 七 spec **13 例**（隔离 5198→8011，`--workers=1`）；NOTICE 改动⑩ + 播放器 10 + 双 SHA-256 已同步。
+   `F/11` §3.8、`frontend/src/lib/scene/README.md`、`G/16` 红线 16 同步。

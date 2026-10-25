@@ -5,11 +5,11 @@
  * foliagesway, tint), and GPU/CPU particle systems (shooting stars, fireflies).
  *
  * Vendored verbatim from dsh-plugin-wallpaper-engine v0.6.8 (MIT,
- * github.com/elysia395/dsh-wallpaper-engine) as lib/scene-player.js — this file
- * is the only one of the two vendored modules with no change below this header.
+ * github.com/elysia395/dsh-wallpaper-engine) as lib/scene-player.js.
  * Demiurge mounts it as an isolated same-origin blob: document iframe and feeds it a
  * blob: manifest (see ../scenePlayer.ts); the resource URLs it would otherwise fetch are
- * already rewritten to blob: URLs by ../decodeScenePackage.ts. See NOTICE.md.
+ * already rewritten to blob: URLs by ../decodeScenePackage.ts. Local changes
+ * (layer parallax, puppet mesh drawing) are listed verbatim in NOTICE.md.
  */
 
 export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
@@ -48,15 +48,23 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
   if (!gl) return;
 
   let sceneData = null;
+  let manifestOverridden = false;
   let isPaused = false;
   let contextLost = false;
   let fitMode = 'cover';
   let startTime = performance.now();
   let lastTime = performance.now();
+  let animTime = 0;
+  // 时钟/日期文字读的是墙上时间，但必须与 animTime 一样服从暂停：暂停后不再推进，
+  // 画面里的时间停在暂停那一刻（WE 停掉脚本更新就是这个表现）。
+  let wallClock = Date.now();
+  let frameSeq = 0;
   let textureCache = new Map();
   let activeParticles = [];
   let mouseX = 0.5, mouseY = 0.5;
   let curRotX = 0, curRotY = 0;
+  const puppetRuntimeCache = new Map();
+  const poseCache = new Map();
 
   window.addEventListener('mousemove', (e) => {
     mouseX = e.clientX / window.innerWidth;
@@ -536,6 +544,37 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
     }
   \`;
 
+  // WE 的 waterflow 效果（本包＝白天/夜晚的云层流动）：单张内容图按流场遮罩的方向做
+  // **像素级**扰动，相位图决定各点振动相位（取不到时是常量白＝全场同相）。u_amp 由 CPU 侧
+  // 按 strength / 内容贴图宽换算成 UV，所以它是「占画面的比例」而不是 strength 原值。
+  // 与 fsBasic 同色处理（tint/bright/power/alpha），否则开关一拨天空就跟着变明暗。
+  const fsWaterflow = \`
+    precision mediump float;
+    varying vec2 v_uv;
+    uniform sampler2D u_tex;
+    uniform sampler2D u_mask;
+    uniform sampler2D u_phase;
+    uniform vec3 u_tint;
+    uniform float u_bright;
+    uniform float u_power;
+    uniform float u_alpha;
+    uniform float u_time;
+    uniform float u_speed;
+    uniform float u_amp;
+    uniform float u_phasescale;
+    void main() {
+      vec2 dir = (texture2D(u_mask, v_uv).rg - vec2(0.5, 0.5)) * 2.0;
+      float phase = texture2D(u_phase, v_uv).r;
+      float wave = sin((phase * u_phasescale + u_time * u_speed) * 6.2831853);
+      vec4 col = texture2D(u_tex, fract(v_uv + dir * (u_amp * wave)));
+      col.rgb *= u_tint;
+      col.rgb *= u_bright;
+      col.rgb = pow(col.rgb, vec3(u_power));
+      col.a *= u_alpha;
+      gl_FragColor = col;
+    }
+  \`;
+
   function createShader(type, src) {
     const s = gl.createShader(type);
     gl.shaderSource(s, src);
@@ -561,6 +600,7 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
   const progReflection = createProgram(vsBasic, fsReflection);
   const progParticle = createProgram(vsBasic, fsParticle);
   const progFlow = createProgram(vsBasic, fsFlow);
+  const progWaterflow = createProgram(vsBasic, fsWaterflow);
   const progFlag = createProgram(vsBasic, fsFlag);
   const prog3D = createProgram(vs3D, fs3D);
 
@@ -756,6 +796,21 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
   \`;
   const progCloudsBg = createProgram(vsCloudsBg, fsCloudsBg);
 
+  // Demiurge 改动②：层内视差。WE 的 parallaxDepth 是"该层相对画布的位移系数"（vec2，x/y 分轴）。
+  // sceneW/sceneH 是 renderFrame 的局部量，因此由调用点显式传入。
+  // WE 的相机视差是场景级开关：general.cameraparallax=false 时鼠标必须完全
+  // 不影响画面（3346715292 就是这种"纯自动播放"壁纸）。
+  const PARALLAX_RATIO = 0.06; // 满深度时的最大位移，占画布宽/高的比例
+  function cameraParallaxEnabled() {
+    return !sceneData || sceneData.cameraParallax !== false;
+  }
+  function layerOrigin(layer, sceneW, sceneH) {
+    const d = layer.depth;
+    if (!cameraParallaxEnabled() || !d || (!d[0] && !d[1])) return [layer.x, layer.y];
+    return [ layer.x + (mouseX - 0.5) * d[0] * PARALLAX_RATIO * sceneW,
+             layer.y + (mouseY - 0.5) * d[1] * PARALLAX_RATIO * sceneH ];
+  }
+
   function drawCloudsBgLayer(layer, elapsed, width, height) {
     gl.useProgram(progCloudsBg);
     // A previous program may have left other vertex attribute arrays enabled but
@@ -870,6 +925,98 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
     }
   }
 
+  // WE 粒子系统的 2D 通道（雾 / 光束 / 鸟 / 星星）。清单里同一份 particles3d 现在带齐
+  // 2D 语义：逐轴尺寸与扩散、混合模式、逐粒子 alpha、旋转、淡入淡出、闪烁、吸引点、
+  // 序列帧。3D 通道继续用它自己的 updateParticles3d，两边状态分开，同一份参数不会被
+  // 两条链互相踩。
+  // 状态按系统对象存：改一次属性清单就整体重建，sys 是新对象 ⇒ 用 Map 会把每份旧清单的
+  // 键永久留住（滑块每拖一格泄漏一组粒子），WeakMap 让旧状态随旧清单一起回收。
+  const particles2dState = new WeakMap();
+  let particles2dSteps = 0;
+  const nz = (v, d) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
+  function getParticles2d(sys) {
+    let st = particles2dState.get(sys);
+    if (!st) {
+      st = { list: [], acc: 0, warm: false };
+      particles2dState.set(sys, st);
+    }
+    return st;
+  }
+  function spawnParticle2d(sys) {
+    const rnd = (a, b) => a + Math.random() * (b - a);
+    const dirs = sys.directions || [1, 1, 1];
+    let ox;
+    let oy;
+    if (sys.box) {
+      // boxrandom：distancemax 是各轴半宽，均匀取点。
+      ox = (Math.random() * 2 - 1) * Math.abs(sys.box[0]);
+      oy = (Math.random() * 2 - 1) * Math.abs(sys.box[1]);
+    } else {
+      // sphererandom：半径壳上取点，directions 当各轴比例（官方雾预设靠它把球压成扁带），
+      // 半径与精灵尺寸同源——都是对象局部空间，一起乘 sizeScale 映射到场景空间。
+      const th = Math.random() * Math.PI * 2;
+      const lo = nz(sys.distMin, 0);
+      const hi = Math.max(lo, nz(sys.distMax, 0));
+      const r = lo + Math.random() * (hi - lo);
+      const sc = sys.sizeScale || [1, 1];
+      ox = Math.cos(th) * r * nz(sc[0], 1) * nz(dirs[0], 1);
+      oy = Math.sin(th) * r * nz(sc[1], 1) * nz(dirs[1], 1);
+    }
+    const vmin = sys.velMin || [0, 0];
+    const vmax = sys.velMax || [0, 0];
+    const cmin = sys.colorMin || [1, 1, 1];
+    const cmax = sys.colorMax || [1, 1, 1];
+    const life = Math.max(0.1, rnd(nz(sys.lifeMin, 2), nz(sys.lifeMax, 4)));
+    return {
+      x: nz(sys.origin && sys.origin[0], 0) + ox,
+      y: nz(sys.origin && sys.origin[1], 0) + oy,
+      vx: rnd(vmin[0], vmax[0]),
+      vy: rnd(vmin[1], vmax[1]),
+      size: rnd(nz(sys.sizeMin, 32), nz(sys.sizeMax, 32)),
+      life: 0,
+      maxLife: life,
+      color: [rnd(cmin[0], cmax[0]), rnd(cmin[1], cmax[1]), rnd(cmin[2], cmax[2])],
+      alpha: rnd(nz(sys.alphaMin, 1), nz(sys.alphaMax, 1)),
+      rot: rnd(nz(sys.rotMin, 0), nz(sys.rotMax, 0)),
+      // 序列帧与闪烁都给一个随机起点：鸟群才不会齐刷刷新翅膀，星星才不会同明同灭。
+      phase: Math.random(),
+      osc: 0.5 + Math.random(),
+    };
+  }
+  function updateParticles2d(sys, st, dt) {
+    st.acc += nz(sys.rate, 0) * dt;
+    const maxCount = Math.max(1, Math.floor(nz(sys.maxCount, 128)));
+    while (st.acc >= 1) {
+      st.acc -= 1;
+      if (st.list.length < maxCount) st.list.push(spawnParticle2d(sys));
+    }
+    st.acc = Math.min(st.acc, 4);
+    const grav = sys.gravity || [0, 0];
+    const drag = nz(sys.drag, 0);
+    const damp = drag > 0 ? 1 / (1 + drag * dt) : 1;
+    const attrs = sys.attractions || [];
+    for (let i = st.list.length - 1; i >= 0; i--) {
+      const p = st.list[i];
+      p.life += dt;
+      if (p.life >= p.maxLife) { st.list.splice(i, 1); continue; }
+      for (const a of attrs) {
+        const dx = nz(a.x, 0) - p.x;
+        const dy = nz(a.y, 0) - p.y;
+        const th = nz(a.threshold, 1024);
+        const d2 = dx * dx + dy * dy;
+        if (d2 > th * th || d2 < 1) continue;
+        const d = Math.sqrt(d2);
+        const pull = nz(a.scale, 128) * (1 - d / th);
+        p.vx += (dx / d) * pull * dt;
+        p.vy += (dy / d) * pull * dt;
+      }
+      p.vx = (p.vx + nz(grav[0], 0) * dt) * damp;
+      p.vy = (p.vy + nz(grav[1], 0) * dt) * damp;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+    }
+  }
+
   // Shared unit quad geometry (-0.5 to 0.5)
   const quadBuf = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
@@ -880,8 +1027,8 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
      0.5,  0.5, 1.0, 0.0,
   ]), gl.STATIC_DRAW);
 
-  function loadTexture(url, repeat) {
-    const key = repeat ? url + '|repeat' : url;
+  function loadTexture(url, repeat, video) {
+    const key = (repeat ? url + '|repeat' : url) + (video ? '|video' : '');
     if (textureCache.has(key)) return textureCache.get(key);
     const tex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, tex);
@@ -889,9 +1036,68 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
     const record = { texture: tex, loaded: false, width: 1, height: 1 };
     textureCache.set(key, record);
 
+    if (video) {
+      // 视频纹理：WE 把 MP4 塞在 .tex 里，清单侧已切成裸 MP4，这里逐帧把
+      // <video> 重传成纹理。NPOT（3840×2160 这类）必须先设 CLAMP_TO_EDGE：
+      // loadTexture 默认停在 REPEAT，NPOT + REPEAT 是 incomplete 纹理 ⇒ 采样恒黑。
+      const el = document.createElement('video');
+      el.muted = true;
+      el.loop = true;
+      el.playsInline = true;
+      el.setAttribute('playsinline', '');
+      el.preload = 'auto';
+      el.style.position = 'absolute';
+      el.style.left = '-1px';
+      el.style.top = '-1px';
+      el.style.width = '1px';
+      el.style.height = '1px';
+      el.style.opacity = '0';
+      el.style.pointerEvents = 'none';
+      document.body.appendChild(el);
+      record.video = el;
+
+      const upload = () => {
+        if (record.disposed || el.readyState < 2 || !el.videoWidth || !el.videoHeight) return;
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, el);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        record.width = el.videoWidth;
+        record.height = el.videoHeight;
+        record.loaded = true;
+        record.videoTime = el.currentTime;
+      };
+      record.uploadVideo = upload;
+      el.addEventListener('loadeddata', upload);
+      el.addEventListener('seeked', upload);
+      if (typeof el.requestVideoFrameCallback === 'function') {
+        const pump = () => {
+          if (record.disposed) return;
+          upload();
+          el.requestVideoFrameCallback(pump);
+        };
+        el.requestVideoFrameCallback(pump);
+      } else {
+        el.addEventListener('timeupdate', upload);
+      }
+      el.src = url;
+      if (isPaused) {
+        el.pause();
+      } else {
+        const started = el.play();
+        if (started && typeof started.catch === 'function') started.catch(function () {});
+      }
+      return record;
+    }
+
     const img = new Image();
     img.crossOrigin = 'anonymous';
     img.onload = () => {
+      if (record.disposed) return;
       gl.bindTexture(gl.TEXTURE_2D, tex);
       gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
@@ -906,6 +1112,223 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
     };
     img.src = url;
     return record;
+  }
+
+  // WE 内置的 \`util/white\` 不在包里（也不在磁盘上），相位槽拿不到图时用这张 1×1 白图：
+  // 相位恒为 1 ⇒ 全场同相，正是这张包在 WE 里的实际表现。
+  let whiteTexture = null;
+  function whiteTex() {
+    if (!whiteTexture) {
+      whiteTexture = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, whiteTexture);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE,
+        new Uint8Array([255, 255, 255, 255]));
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    }
+    return whiteTexture;
+  }
+
+  // ---- 文字图层 --------------------------------------------------------------
+  // WE 的文字不是贴图：CText 用 FreeType 把字形光栅化成位图，再按对象变换贴一张以原点
+  // 为中心的 quad。这里等价地用 2D canvas + FontFace 生成位图，上传后走同一个 progBasic，
+  // 于是视差、旋转、混合与图像图层共用一条路径。字形按白色光栅化、颜色交给 u_tint：
+  // 同一句话在白天/夜晚两套颜色下复用同一张位图，换色不必重新光栅化。
+  const TEXT_SUPERSAMPLE = 2;
+  const TEXT_CACHE_LIMIT = 48;
+  const textBitmapCache = new Map();
+  const fontFaceCache = new Map();
+
+  function clearTextBitmaps() {
+    for (const rec of textBitmapCache.values()) gl.deleteTexture(rec.texture);
+    textBitmapCache.clear();
+  }
+
+  /** 字体是异步的：未就位期间先用系统字栈出字，就位后整张位图缓存作废重建（不留旧字形）。 */
+  function fontFaceOf(url) {
+    if (!url) return { family: 'sans-serif', state: 'fallback' };
+    const hit = fontFaceCache.get(url);
+    if (hit) return hit;
+    const rec = { family: 'we-scene-font-' + (fontFaceCache.size + 1), state: 'fallback' };
+    fontFaceCache.set(url, rec);
+    let face = null;
+    try {
+      face = new FontFace(rec.family, 'url(' + url + ')');
+    } catch (e) {
+      face = null;
+    }
+    if (!face) return rec;
+    rec.state = 'loading';
+    try {
+      document.fonts.add(face);
+      face.load().then(function () { rec.state = 'ready'; clearTextBitmaps(); })
+        .catch(function () { rec.state = 'fallback'; clearTextBitmaps(); });
+    } catch (e) {
+      rec.state = 'fallback';
+    }
+    return rec;
+  }
+
+  const pad2 = (n) => (n < 10 ? '0' : '') + n;
+
+  /**
+   * 文字图层当前要显示的那句话。
+   *
+   * 时钟/日期不执行 WE 的脚本，而是按清单里抠出的档位与表本地拼接。日期脚本的写法因
+   * 作者而异（竖排月名按字符换行、组间空行、日号补零表、年份逐字拆开、只显示星期），
+   * 所以清单给的是带占位符的 format 模板，这里只做查表替换；暂停时播放器不推进
+   * wallClock，画面里的时间就停在暂停那一刻——与 WE 停掉脚本更新的表现一致。
+   */
+  function textLineOf(layer, wallMs) {
+    if (!layer.time) return layer.text == null ? '' : String(layer.text);
+    const d = new Date(wallMs);
+    if (layer.time === 'clock') {
+      const sep = layer.delimiter == null ? ':' : String(layer.delimiter);
+      let h = d.getHours();
+      if (layer.hour24 === false) {
+        h = h % 12;
+        if (h === 0) h = 12;
+      }
+      let out = pad2(h) + sep + pad2(d.getMinutes());
+      if (layer.seconds) out += sep + pad2(d.getSeconds());
+      return out;
+    }
+    if (layer.time === 'date') {
+      const months = layer.months || [];
+      const days = layer.days || [];
+      const dayTable = layer.dayTable || [];
+      const month = months[d.getMonth()] != null ? String(months[d.getMonth()]) : String(d.getMonth() + 1);
+      const year = String(d.getFullYear());
+      const values = {
+        month: month,
+        weekday: days[d.getDay()] != null ? String(days[d.getDay()]) : '',
+        day: String(d.getDate()),
+        // 脚本里 dtt[date.getDate()] 是作者的补零/竖排日号表；没有表就用裸日号。
+        dayTable: dayTable[d.getDate()] != null ? String(dayTable[d.getDate()]) : String(d.getDate()),
+        year: layer.yearSplit ? year.split('').join(String(layer.yearSplit)) : year,
+      };
+      return String(layer.format || '').replace(/\{(month|weekday|dayTable|day|year)\}/g, function (all, key) {
+        return values[key] != null ? values[key] : all;
+      });
+    }
+    if (layer.time === 'greeting') {
+      const labels = Array.isArray(layer.labels) ? layer.labels : [];
+      const thresholds = Array.isArray(layer.thresholds) ? layer.thresholds : [];
+      let index = 0;
+      const hour = d.getHours();
+      while (index < thresholds.length && hour >= Number(thresholds[index])) index += 1;
+      return labels[index] == null ? '' : String(labels[index]);
+    }
+    // 清单里出现没见过的 time 档位：宁可不画，也不猜一个格式糊上去。
+    return '';
+  }
+
+  // 帧率层的状态：WE 的 FPS 脚本按相邻帧间隔累计平均，每 refreshInterval 毫秒改写一次。
+  // 这里也只数真正画出来的帧；暂停时不推进，恢复时清空重算，免得把暂停时长算成一帧。
+  const fpsState = new Map();
+  function fpsTextOf(layer, nowMs) {
+    const label = layer.label == null ? 'fps:' : String(layer.label);
+    const interval = typeof layer.refreshMs === 'number' && layer.refreshMs >= 0 ? layer.refreshMs : 500;
+    const initial = layer.text == null ? label : String(layer.text);
+    let state = fpsState.get(layer);
+    if (!state) {
+      state = { last: 0, start: 0, sum: 0, count: 0, text: initial };
+      fpsState.set(layer, state);
+    }
+    if (isPaused) return state.text;
+    if (!state.last) {
+      state.last = nowMs;
+      state.start = nowMs;
+      return state.text;
+    }
+    const delta = nowMs - state.last;
+    if (delta <= 0) return state.text;
+    state.last = nowMs;
+    state.sum += 1000 / delta;
+    state.count += 1;
+    if (nowMs - state.start >= interval) {
+      state.text = label + ' ' + Math.round(state.sum / state.count);
+      state.start = nowMs;
+      state.sum = 0;
+      state.count = 0;
+    }
+    return state.text;
+  }
+
+  function textBitmapOf(family, emPx, line) {
+    const key = family + '|' + emPx + '|' + line;
+    const hit = textBitmapCache.get(key);
+    if (hit) return hit;
+    const lines = line.split('\\n');
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    const font = emPx + 'px ' + family;
+    ctx.font = font;
+    // 行距吃字体自身的 ascent+descent，而不是固定 1.25em：真机 3723257973 的 WE
+    // 参考图里 Quicksand 日期列行距 ≈1.16em、spincycle 的竖排 SUN ≈1.1em，固定
+    // 1.25 会把三行 SUN 撑高约 30%，压到下方的时钟上。字体未就位时量到的是系统
+    // 字栈，fontFaceOf 加载完成后会清掉位图缓存按真字体重量。
+    const metrics = ctx.measureText('Mg');
+    const metricPx = (metrics.fontBoundingBoxAscent || 0) + (metrics.fontBoundingBoxDescent || 0);
+    const lineHeight = Math.max(1, Math.round(metricPx > 0 ? metricPx : emPx * 1.25));
+    let widest = 1;
+    for (const one of lines) widest = Math.max(widest, ctx.measureText(one).width);
+    canvas.width = Math.max(1, Math.ceil(widest) + 2);
+    canvas.height = Math.max(1, lineHeight * lines.length + 2);
+    // 改画布尺寸会重置上下文状态，字体与对齐必须重设。
+    ctx.font = font;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#ffffff';
+    for (let i = 0; i < lines.length; i++) {
+      ctx.fillText(lines[i], canvas.width / 2, lineHeight * (i + 0.5) + 1);
+    }
+    const texture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    const rec = { texture: texture, width: canvas.width, height: canvas.height };
+    textBitmapCache.set(key, rec);
+    // 带秒的时钟每 tick 换一句话：按插入序淘汰，纹理数与位图数都有上界。
+    if (textBitmapCache.size > TEXT_CACHE_LIMIT) {
+      const oldest = textBitmapCache.keys().next().value;
+      gl.deleteTexture(textBitmapCache.get(oldest).texture);
+      textBitmapCache.delete(oldest);
+    }
+    return rec;
+  }
+
+  function drawTextLayer(layer, aPos, aUv, sceneW, sceneH, wallMs, nowMs, proj) {
+    const line = layer.time === 'fps' ? fpsTextOf(layer, nowMs) : textLineOf(layer, wallMs);
+    if (!line) return;
+    const face = fontFaceOf(layer.font);
+    const emPx = Math.max(1, Math.round((layer.fontSize || 0) * TEXT_SUPERSAMPLE));
+    const rec = textBitmapOf(face.family, emPx, line);
+    const frame = layerFrame(layer, sceneW, sceneH);
+    const model = mat4Transform2D(frame[0], frame[1],
+      rec.width / TEXT_SUPERSAMPLE, rec.height / TEXT_SUPERSAMPLE, frame[2]);
+    gl.useProgram(progBasic);
+    gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+    gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 16, 0);
+    gl.vertexAttribPointer(aUv, 2, gl.FLOAT, false, 16, 8);
+    gl.uniformMatrix4fv(gl.getUniformLocation(progBasic, 'u_proj'), false, proj);
+    gl.uniformMatrix4fv(gl.getUniformLocation(progBasic, 'u_model'), false, model);
+    gl.uniform4f(gl.getUniformLocation(progBasic, 'u_uvRect'), 0, 0, 1, 1);
+    gl.uniform1f(gl.getUniformLocation(progBasic, 'u_alpha'), layer.alpha != null ? layer.alpha : 1);
+    const tint = layer.color || [1, 1, 1];
+    gl.uniform3f(gl.getUniformLocation(progBasic, 'u_tint'), tint[0], tint[1], tint[2]);
+    gl.uniform1f(gl.getUniformLocation(progBasic, 'u_bright'), 1);
+    gl.uniform1f(gl.getUniformLocation(progBasic, 'u_power'), 1);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, rec.texture);
+    gl.uniform1i(gl.getUniformLocation(progBasic, 'u_tex'), 0);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
 
   // FBO setup for reflection passes
@@ -1013,8 +1436,14 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
   }
 
   const modelGpuCache = new Map();
+  // Preset hot-swaps rebuild the manifest objects but keep the mesh topology, so
+  // geometry buffers are keyed by the stable meshKey instead of object identity.
+  function meshCacheKey(mesh) {
+    return (mesh && typeof mesh.meshKey === 'string' && mesh.meshKey) ? mesh.meshKey : mesh;
+  }
   function getGpuMesh(mesh) {
-    if (modelGpuCache.has(mesh)) return modelGpuCache.get(mesh);
+    const cacheKey = meshCacheKey(mesh);
+    if (modelGpuCache.has(cacheKey)) return modelGpuCache.get(cacheKey);
     
     function b64ToF32(b64) {
       const bin = atob(b64);
@@ -1038,9 +1467,11 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
     // WebGL1 only exposes via OES_element_index_uint.
     const uintIndexExt = gl.getExtension('OES_element_index_uint');
 
+    const basePos = b64ToF32(mesh.posB64);
+    const skinned = Boolean(mesh.skinIndicesB64 && mesh.skinWeightsB64);
     const posBuf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
-    gl.bufferData(gl.ARRAY_BUFFER, b64ToF32(mesh.posB64), gl.STATIC_DRAW);
+    gl.bufferData(gl.ARRAY_BUFFER, basePos, skinned ? gl.DYNAMIC_DRAW : gl.STATIC_DRAW);
 
     const normBuf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, normBuf);
@@ -1055,9 +1486,98 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
     const idx32 = Boolean(mesh.idx32) && uintIndexExt;
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx32 ? b64ToU32(mesh.indicesB64) : b64ToU16(mesh.indicesB64), gl.STATIC_DRAW);
 
-    const gpu = { posBuf, normBuf, uvBuf, idxBuf, iCount: mesh.iCount, idxType: idx32 ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT };
-    modelGpuCache.set(mesh, gpu);
+    const gpu = {
+      posBuf, normBuf, uvBuf, idxBuf,
+      iCount: mesh.iCount,
+      idxType: idx32 ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT,
+      basePos,
+      skinned,
+      vCount: basePos.length / 3,
+      skinIndices: skinned ? b64ToU16(mesh.skinIndicesB64) : null,
+      skinWeights: skinned ? b64ToF32(mesh.skinWeightsB64) : null,
+      skinnedPos: skinned ? new Float32Array(basePos.length) : null,
+    };
+    modelGpuCache.set(cacheKey, gpu);
     return gpu;
+  }
+
+  /* ---------------- preset hot-swap ---------------- */
+  // A preset rebuild produces a new manifest for the same package: layer
+  // placement/material values change, mesh topology does not. Keep GPU meshes
+  // and live textures, drop everything the new manifest stopped referencing.
+  function collectLiveMeshKeys(data, out) {
+    for (const layer of data.layers || []) {
+      if (layer && layer.mesh) out.add(meshCacheKey(layer.mesh));
+    }
+    for (const model of data.models || []) {
+      for (const mesh of model.meshes || []) {
+        if (mesh) out.add(meshCacheKey(mesh));
+      }
+    }
+    return out;
+  }
+  function pruneGpuMeshes(liveKeys) {
+    for (const [key, gpu] of modelGpuCache) {
+      if (liveKeys.has(key)) continue;
+      gl.deleteBuffer(gpu.posBuf);
+      gl.deleteBuffer(gpu.normBuf);
+      gl.deleteBuffer(gpu.uvBuf);
+      gl.deleteBuffer(gpu.idxBuf);
+      modelGpuCache.delete(key);
+    }
+  }
+  function collectLiveTextureUrls(node, out, depth) {
+    if (node == null || depth > 16) return;
+    if (typeof node === 'string') {
+      if (node.lastIndexOf('blob:', 0) === 0) out.add(node);
+      return;
+    }
+    if (Array.isArray(node)) {
+      for (const item of node) collectLiveTextureUrls(item, out, depth + 1);
+      return;
+    }
+    if (typeof node === 'object') {
+      for (const key in node) {
+        if (Object.prototype.hasOwnProperty.call(node, key)) {
+          collectLiveTextureUrls(node[key], out, depth + 1);
+        }
+      }
+    }
+  }
+  function pruneTextures(liveUrls) {
+    for (const [key, record] of textureCache) {
+      let url = key;
+      if (url.endsWith('|video')) url = url.slice(0, -6);
+      if (url.endsWith('|repeat')) url = url.slice(0, -7);
+      if (liveUrls.has(url)) continue;
+      // An in-flight Image may still fire onload; its record must not touch the
+      // deleted texture object afterwards.
+      record.disposed = true;
+      if (record.video) {
+        // 换预设后不再被引用的视频必须停播并卸掉：留着会持续解码 4K 帧。
+        try {
+          record.video.pause();
+          record.video.removeAttribute('src');
+          record.video.load();
+        } catch (e) {}
+        if (record.video.parentNode) record.video.parentNode.removeChild(record.video);
+      }
+      gl.deleteTexture(record.texture);
+      textureCache.delete(key);
+    }
+  }
+  function swapSceneManifest(next) {
+    if (!next || typeof next !== 'object') return;
+    sceneData = next;
+    pruneGpuMeshes(collectLiveMeshKeys(next, new Set()));
+    const liveUrls = new Set();
+    collectLiveTextureUrls(next, liveUrls, 0);
+    pruneTextures(liveUrls);
+    activeParticles = activeParticles.filter((p) => !p.system.texUrl || liveUrls.has(p.system.texUrl));
+    // Bone/clip arrays are decoded from this manifest's puppet payloads.
+    puppetRuntimeCache.clear();
+    poseCache.clear();
+    fpsState.clear();
   }
 
   function mat4Transform2D(x, y, w, h, angleRad) {
@@ -1069,6 +1589,272 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
       0,      0,      1, 0,
       x,      y,      0, 1
     ]);
+  }
+
+  /* ---------------- puppet skinning + MDLA clips ---------------- */
+  // Manifest payloads carry pose data only; the player still owns the clock.
+  // Clips are sampled in frames: base clips write the pose directly, additive
+  // clips (blink / breath) add key(t) - key(0) on top and loop independently.
+  function decodeB64(b64) {
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  }
+  function b64ToF32(b64) {
+    return new Float32Array(decodeB64(b64).buffer);
+  }
+  function b64ToU16(b64) {
+    return new Uint16Array(decodeB64(b64).buffer);
+  }
+  function mat4MultiplyOut(out, o, a, ao, b, bo) {
+    for (let col = 0; col < 4; col++) {
+      const b0 = b[bo + col * 4], b1 = b[bo + col * 4 + 1];
+      const b2 = b[bo + col * 4 + 2], b3 = b[bo + col * 4 + 3];
+      for (let row = 0; row < 4; row++) {
+        out[o + col * 4 + row] =
+          a[ao + row] * b0 + a[ao + 4 + row] * b1 +
+          a[ao + 8 + row] * b2 + a[ao + 12 + row] * b3;
+      }
+    }
+  }
+  // Same Euler convention as mat4Transform3D (R = Rx * Ry * Rz), radians.
+  function mat4ComposeTrs(out, o, trs, at) {
+    const rx = trs[at + 3], ry = trs[at + 4], rz = trs[at + 5];
+    const sx = trs[at + 6], sy = trs[at + 7], sz = trs[at + 8];
+    const cx = Math.cos(rx), sxn = Math.sin(rx);
+    const cy = Math.cos(ry), syn = Math.sin(ry);
+    const cz = Math.cos(rz), szn = Math.sin(rz);
+    out[o]      = (cy * cz) * sx;
+    out[o + 1]  = (cx * szn + sxn * syn * cz) * sx;
+    out[o + 2]  = (sxn * szn - cx * syn * cz) * sx;
+    out[o + 4]  = (-cy * szn) * sy;
+    out[o + 5]  = (cx * cz - sxn * syn * szn) * sy;
+    out[o + 6]  = (sxn * cz + cx * syn * szn) * sy;
+    out[o + 8]  = syn * sz;
+    out[o + 9]  = (-sxn * cy) * sz;
+    out[o + 10] = (cx * cy) * sz;
+    out[o + 3] = out[o + 7] = out[o + 11] = 0;
+    out[o + 12] = trs[at];
+    out[o + 13] = trs[at + 1];
+    out[o + 14] = trs[at + 2];
+    out[o + 15] = 1;
+  }
+  function puppetRuntime(puppetId) {
+    if (puppetRuntimeCache.has(puppetId)) return puppetRuntimeCache.get(puppetId);
+    const payload = sceneData.puppets && sceneData.puppets[puppetId];
+    let runtime = null;
+    if (payload && payload.boneCount > 0) {
+      runtime = {
+        id: puppetId,
+        payload,
+        boneCount: payload.boneCount,
+        parents: payload.parents || [],
+        inverseBind: b64ToF32(payload.inverseBindB64),
+        bindTrs: b64ToF32(payload.bindTrsB64),
+        clips: new Map(),
+        local: new Float32Array(payload.boneCount * 9),
+        tmp: new Float32Array(16),
+        state: new Uint8Array(payload.boneCount),
+      };
+    }
+    puppetRuntimeCache.set(puppetId, runtime);
+    return runtime;
+  }
+  function clipTracks(runtime, clip) {
+    if (runtime.clips.has(clip.id)) return runtime.clips.get(clip.id);
+    const tracks = clip.tracks.map((track) => ({ bone: track.bone, keys: b64ToF32(track.keysB64) }));
+    runtime.clips.set(clip.id, tracks);
+    return tracks;
+  }
+  function animationSignature(animation) {
+    if (!animation || animation.length === 0) return '';
+    return animation.map((a) =>
+      a.id + ':' + (a.additive ? 1 : 0) + ':' + a.offset + ':' + a.rate + ':' + a.blend).join(',');
+  }
+  function buildPoseLocal(runtime, animation) {
+    const local = runtime.local;
+    local.set(runtime.bindTrs);
+    if (!animation || animation.length === 0) return;
+    const v0 = new Float32Array(9);
+    const v1 = new Float32Array(9);
+    for (const entry of animation) {
+      const clip = runtime.payload.clips[entry.id];
+      if (!clip) continue;
+      const frames = Math.max(1, clip.frameCount);
+      const loops = animTime * (entry.rate || 1) * (clip.fps || 30) / frames;
+      const phase = (((entry.offset || 0) + loops) % 1 + 1) % 1;
+      const at = phase * frames;
+      const i0 = Math.min(frames - 1, Math.floor(at));
+      const i1 = Math.min(frames, i0 + 1);
+      const t = at - i0;
+      const blend = entry.blend == null ? 1 : entry.blend;
+      for (const track of clipTracks(runtime, clip)) {
+        const keys = track.keys;
+        const o = track.bone * 9;
+        if (o < 0 || o + 9 > local.length) continue;
+        for (let k = 0; k < 9; k++) {
+          const a = keys[i0 * 9 + k];
+          v1[k] = a + (keys[i1 * 9 + k] - a) * t;
+        }
+        if (!entry.additive) {
+          for (let k = 0; k < 9; k++) local[o + k] = v1[k];
+          continue;
+        }
+        for (let k = 0; k < 9; k++) v0[k] = keys[k];
+        for (let k = 0; k < 6; k++) local[o + k] += (v1[k] - v0[k]) * blend;
+        for (let k = 6; k < 9; k++) {
+          const ratio = v0[k] ? v1[k] / v0[k] : 1;
+          local[o + k] *= 1 + (ratio - 1) * blend;
+        }
+      }
+    }
+  }
+  function puppetWorld(runtime, out) {
+    const n = runtime.boneCount;
+    const parents = runtime.parents;
+    const state = runtime.state;
+    state.fill(0);
+    const build = (i, depth) => {
+      if (i < 0 || i >= n || state[i] === 2 || state[i] === 1 || depth > 64) return;
+      state[i] = 1;
+      const p = parents[i];
+      const hasParent = p != null && p >= 0 && p < n;
+      if (hasParent) build(p, depth + 1);
+      mat4ComposeTrs(out, i * 16, runtime.local, i * 9);
+      if (hasParent && state[p] === 2) {
+        runtime.tmp.set(out.subarray(i * 16, i * 16 + 16));
+        mat4MultiplyOut(out, i * 16, out, p * 16, runtime.tmp, 0);
+      }
+      state[i] = 2;
+    };
+    for (let i = 0; i < n; i++) build(i, 0);
+  }
+  function puppetPose(puppetId, animation) {
+    const runtime = puppetRuntime(puppetId);
+    if (!runtime) return null;
+    const key = puppetId + '|' + animationSignature(animation);
+    let pose = poseCache.get(key);
+    if (!pose) {
+      pose = {
+        runtime,
+        world: new Float32Array(runtime.boneCount * 16),
+        skin: new Float32Array(runtime.boneCount * 16),
+      };
+      poseCache.set(key, pose);
+    }
+    if (pose.frame === frameSeq) return pose;
+    pose.frame = frameSeq;
+    buildPoseLocal(runtime, animation);
+    puppetWorld(runtime, pose.world);
+    for (let i = 0; i < runtime.boneCount; i++) {
+      mat4MultiplyOut(pose.skin, i * 16, pose.world, i * 16, runtime.inverseBind, i * 16);
+    }
+    return pose;
+  }
+  function skinGpuMesh(gpu, pose) {
+    const base = gpu.basePos, out = gpu.skinnedPos;
+    const indices = gpu.skinIndices, weights = gpu.skinWeights;
+    const skin = pose.skin;
+    for (let v = 0, o = 0; v < gpu.vCount; v++, o += 3) {
+      const x = base[o], y = base[o + 1], z = base[o + 2];
+      let rx = 0, ry = 0, rz = 0;
+      for (let k = 0; k < 4; k++) {
+        const w = weights[v * 4 + k];
+        if (!w) continue;
+        const b = indices[v * 4 + k] * 16;
+        rx += w * (skin[b] * x + skin[b + 4] * y + skin[b + 8] * z + skin[b + 12]);
+        ry += w * (skin[b + 1] * x + skin[b + 5] * y + skin[b + 9] * z + skin[b + 13]);
+        rz += w * (skin[b + 2] * x + skin[b + 6] * y + skin[b + 10] * z + skin[b + 14]);
+      }
+      out[o] = rx;
+      out[o + 1] = ry;
+      out[o + 2] = rz;
+    }
+    gl.bindBuffer(gl.ARRAY_BUFFER, gpu.posBuf);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, out);
+  }
+  // Rigid subtree delta of an attachment (hair follows the animated head
+  // bone): rotate around the bind socket's screen point, then translate.
+  function followDelta(follow) {
+    if (!follow) return null;
+    const pose = puppetPose(follow.puppetId, window.__weDebugAnim || follow.animation);
+    if (!pose) return null;
+    const b = follow.bone * 16;
+    const w = pose.world;
+    const l = follow.local;
+    const a00 = w[b] * l[0] + w[b + 4] * l[1] + w[b + 8] * l[2];
+    const a10 = w[b + 1] * l[0] + w[b + 5] * l[1] + w[b + 9] * l[2];
+    const tx = w[b] * l[12] + w[b + 4] * l[13] + w[b + 8] * l[14] + w[b + 12];
+    const ty = w[b + 1] * l[12] + w[b + 5] * l[13] + w[b + 9] * l[14] + w[b + 13];
+    const angle = Math.atan2(a10, a00) - follow.bindAngle;
+    const m = follow.screenMap;
+    const bs = follow.bindSocket;
+    const so = follow.screenOrigin;
+    const dx = tx - bs[0];
+    const dy = ty - bs[1];
+    return {
+      sx: so[0] + bs[0] * m[0] + bs[1] * m[2],
+      sy: so[1] + bs[0] * m[1] + bs[1] * m[3],
+      dx: dx * m[0] + dy * m[2],
+      dy: dx * m[1] + dy * m[3],
+      angle,
+    };
+  }
+  function layerFrame(layer, sceneW, sceneH) {
+    const origin = layerOrigin(layer, sceneW, sceneH);
+    let x = origin[0], y = origin[1];
+    let angle = layer.angle || 0;
+    const delta = followDelta(layer.follow);
+    if (delta) {
+      const rx = x - delta.sx;
+      const ry = y - delta.sy;
+      const c = Math.cos(delta.angle), s = Math.sin(delta.angle);
+      x = delta.sx + rx * c - ry * s + delta.dx;
+      y = delta.sy + rx * s + ry * c + delta.dy;
+      angle += delta.angle;
+    }
+    return [x, y, angle];
+  }
+
+  // Puppet layer: MDLV vertices are already in model units, so w/h are a
+  // per-unit scale (not a quad width). UVs come from the mesh (atlas space).
+  function drawBasicMeshLayer(layer, aPos, aUv, sceneW, sceneH, elapsed, proj) {
+    const gpu = getGpuMesh(layer.mesh);
+    if (gpu.skinned && layer.puppetId) {
+      const pose = puppetPose(layer.puppetId, window.__weDebugAnim || layer.animation);
+      if (pose) skinGpuMesh(gpu, pose);
+    }
+    gl.bindBuffer(gl.ARRAY_BUFFER, gpu.posBuf);
+    gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 12, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, gpu.uvBuf);
+    gl.vertexAttribPointer(aUv, 2, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, gpu.idxBuf);
+
+    const origin = layerFrame(layer, sceneW, sceneH);
+    const meshScale = layer.meshScale || [1, 1];
+    const model = mat4Transform2D(origin[0], origin[1], meshScale[0], meshScale[1], origin[2]);
+    gl.uniformMatrix4fv(gl.getUniformLocation(progBasic, 'u_proj'), false, proj);
+    gl.uniformMatrix4fv(gl.getUniformLocation(progBasic, 'u_model'), false, model);
+    gl.uniform4f(gl.getUniformLocation(progBasic, 'u_uvRect'), 0, 0, 1, 1);
+    gl.uniform1f(gl.getUniformLocation(progBasic, 'u_time'), elapsed);
+    gl.uniform1f(gl.getUniformLocation(progBasic, 'u_alpha'), layer.alpha != null ? layer.alpha : 1.0);
+    gl.uniform3f(gl.getUniformLocation(progBasic, 'u_tint'), 1, 1, 1);
+    gl.uniform1f(gl.getUniformLocation(progBasic, 'u_sway'), 0);
+    gl.uniform1f(gl.getUniformLocation(progBasic, 'u_sway_speed'), 1);
+
+    const texRec = loadTexture(layer.texUrl);
+    if (texRec.loaded) {
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, texRec.texture);
+      gl.uniform1i(gl.getUniformLocation(progBasic, 'u_tex'), 0);
+    }
+    gl.drawElements(gl.TRIANGLES, gpu.iCount, gpu.idxType, 0);
+
+    // Every quad draw after this one relies on the shared quad layout.
+    gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+    gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 16, 0);
+    gl.vertexAttribPointer(aUv, 2, gl.FLOAT, false, 16, 8);
   }
 
   function spawnParticle(emitter, system) {
@@ -1163,8 +1949,13 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
     const dt = Math.min((now - lastTime) / 1000, 0.1);
     lastTime = now;
     const elapsed = (now - startTime) / 1000;
+    frameSeq++;
 
     if (!isPaused) {
+      // Puppet animations run on their own clock so pause freezes the pose.
+      animTime += dt;
+      wallClock = Date.now();
+      if (typeof window.__weDebugTime === 'number') animTime = window.__weDebugTime;
       // Spawn particles periodically
       if (sceneData.hasMeteors && Math.random() < dt * 1.8) {
         spawnParticle({}, { type: 'meteor', lifeMin: 1.2, lifeMax: 2.2, size: 28, color: [1, 0.95, 0.85, 1], texUrl: sceneData.meteorTex });
@@ -1229,9 +2020,10 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
         center = [cx, cy, cz];
         upVec = [0, 1, 0];
       }
-      // Mouse parallax
-      const targetYaw = (mouseX - 0.5) * 0.6;
-      const targetPitch = (mouseY - 0.5) * 0.3;
+      // Mouse parallax (only when the scene enables camera parallax)
+      const parallaxOn = cameraParallaxEnabled();
+      const targetYaw = parallaxOn ? (mouseX - 0.5) * 0.6 : 0;
+      const targetPitch = parallaxOn ? (mouseY - 0.5) * 0.3 : 0;
       curRotY += (targetYaw - curRotY) * 0.04;
       curRotX += (targetPitch - curRotX) * 0.04;
       eye[0] += curRotY * 0.5;
@@ -1649,10 +2441,17 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
     // Render sky & upper layers into FBO
     for (const layer of sceneData.layers) {
       if (layer.isGround || layer.isReflection) continue;
-      const texRec = loadTexture(layer.texUrl);
+      // 文字只进屏幕通道：水面反射里叠一份时钟不是这场景的表现。
+      if (layer.kind === 'text') continue;
+      if (layer.mesh) {
+        drawBasicMeshLayer(layer, aPos, aUv, sceneW, sceneH, elapsed, proj);
+        continue;
+      }
+      const texRec = loadTexture(layer.texUrl, false, !!layer.videoTex);
       if (!texRec.loaded) continue;
 
-      const model = mat4Transform2D(layer.x, layer.y, layer.w, layer.h, layer.angle || 0);
+      const origin = layerFrame(layer, sceneW, sceneH);
+      const model = mat4Transform2D(origin[0], origin[1], layer.w, layer.h, origin[2]);
       gl.uniformMatrix4fv(gl.getUniformLocation(progBasic, 'u_model'), false, model);
       gl.uniform1f(gl.getUniformLocation(progBasic, 'u_alpha'), layer.alpha != null ? layer.alpha : 1.0);
       gl.uniform3f(gl.getUniformLocation(progBasic, 'u_tint'), 1, 1, 1);
@@ -1689,7 +2488,8 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
 
         // Draw the reflection quad at the layer's own rect (fullscreen for
         // legacy scene-wide reflection layers).
-        const model = mat4Transform2D(layer.x, layer.y, layer.w, layer.h, layer.angle || 0);
+        const rFrame = layerFrame(layer, sceneW, sceneH);
+        const model = mat4Transform2D(rFrame[0], rFrame[1], layer.w, layer.h, rFrame[2]);
         gl.uniformMatrix4fv(gl.getUniformLocation(progReflection, 'u_proj'), false, proj);
         gl.uniformMatrix4fv(gl.getUniformLocation(progReflection, 'u_model'), false, model);
         gl.uniform4f(gl.getUniformLocation(progReflection, 'u_uvRect'), 0, 0, 1, 1);
@@ -1737,7 +2537,8 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
         gl.enableVertexAttribArray(fUv);
         gl.vertexAttribPointer(fPos, 2, gl.FLOAT, false, 16, 0);
         gl.vertexAttribPointer(fUv, 2, gl.FLOAT, false, 16, 8);
-        const model = mat4Transform2D(layer.x, layer.y, layer.w, layer.h, layer.angle || 0);
+        const origin = layerFrame(layer, sceneW, sceneH);
+        const model = mat4Transform2D(origin[0], origin[1], layer.w, layer.h, origin[2]);
         gl.uniformMatrix4fv(gl.getUniformLocation(progFlow, 'u_proj'), false, proj);
         gl.uniformMatrix4fv(gl.getUniformLocation(progFlow, 'u_model'), false, model);
         const fcrop = layer.uvCrop || [0, 0, 1, 1];
@@ -1772,7 +2573,8 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
         gl.enableVertexAttribArray(flUv);
         gl.vertexAttribPointer(flPos, 2, gl.FLOAT, false, 16, 0);
         gl.vertexAttribPointer(flUv, 2, gl.FLOAT, false, 16, 8);
-        const model = mat4Transform2D(layer.x, layer.y, layer.w, layer.h, layer.angle || 0);
+        const origin = layerFrame(layer, sceneW, sceneH);
+        const model = mat4Transform2D(origin[0], origin[1], layer.w, layer.h, origin[2]);
         gl.uniformMatrix4fv(gl.getUniformLocation(progFlag, 'u_proj'), false, proj);
         gl.uniformMatrix4fv(gl.getUniformLocation(progFlag, 'u_model'), false, model);
         const flcrop = layer.uvCrop || [0, 0, 1, 1];
@@ -1800,8 +2602,74 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
         continue;
       }
 
+      // Puppet mesh layer (rigged character): MDLV triangles over the atlas.
+      if (layer.mesh) {
+        gl.useProgram(progBasic);
+        if (!loadTexture(layer.texUrl).loaded) continue;
+        drawBasicMeshLayer(layer, aPos, aUv, sceneW, sceneH, elapsed, proj);
+        continue;
+      }
+
+      // 文字图层：清单里已带 fontSize / color / time，就地光栅化后走同一套 progBasic。
+      if (layer.kind === 'text') {
+        drawTextLayer(layer, aPos, aUv, sceneW, sceneH, wallClock, now, proj);
+        continue;
+      }
+
+      // WE 的 waterflow 效果（本包＝白天/夜晚的云层流动）：单张内容图 + 流场遮罩 + 相位图。
+      // 位移量按「strength 像素 / 内容贴图宽」归一到 UV——strength 是 WE 编辑器里的像素档，
+      // 直接当 UV 用会把天空抹成一片（真机实锤：progFlow 的 amp·0.1·cycle 让 5 变成半屏位移）。
+      // 环绕在着色器里用 fract 做：WebGL1 的 NPOT 贴图设成 REPEAT 会让整张纹理变成
+      // incomplete，取样恒返回 (0,0,0,1) ⇒ 天空被画成一块不透明白痴黑（真机截图实锤，
+      // 本包天空是 4200x2500，非 2 的幂）。纹理按 CLAMP 上传，越界部分由 fract 折回对边。
+      // 遮罩或本层贴图没到位就落回标准绘制——少一次扰动，但天还在。
+      if (layer.flow && layer.flow.enabled !== false) {
+        const flowContent = loadTexture(layer.texUrl, false, !!layer.videoTex);
+        const flowMask = loadTexture(layer.flow.maskUrl);
+        if (flowContent.loaded && flowMask.loaded) {
+          const flowPhase = layer.flow.phaseUrl ? loadTexture(layer.flow.phaseUrl) : null;
+          gl.useProgram(progWaterflow);
+          gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+          const fwPos = gl.getAttribLocation(progWaterflow, 'a_pos');
+          const fwUv = gl.getAttribLocation(progWaterflow, 'a_uv');
+          gl.enableVertexAttribArray(fwPos);
+          gl.enableVertexAttribArray(fwUv);
+          gl.vertexAttribPointer(fwPos, 2, gl.FLOAT, false, 16, 0);
+          gl.vertexAttribPointer(fwUv, 2, gl.FLOAT, false, 16, 8);
+          const flowOrigin = layerFrame(layer, sceneW, sceneH);
+          const flowModel = mat4Transform2D(flowOrigin[0], flowOrigin[1], layer.w, layer.h, flowOrigin[2]);
+          gl.uniformMatrix4fv(gl.getUniformLocation(progWaterflow, 'u_proj'), false, proj);
+          gl.uniformMatrix4fv(gl.getUniformLocation(progWaterflow, 'u_model'), false, flowModel);
+          const flowCrop = layer.uvCrop || [0, 0, 1, 1];
+          gl.uniform4f(gl.getUniformLocation(progWaterflow, 'u_uvRect'), flowCrop[0], flowCrop[1], flowCrop[2], flowCrop[3]);
+          const fwNums = layer.nums || {};
+          const flowAmp = (layer.flow.strength || 1) / Math.max(1, flowContent.width);
+          gl.uniform1f(gl.getUniformLocation(progWaterflow, 'u_time'), elapsed);
+          gl.uniform1f(gl.getUniformLocation(progWaterflow, 'u_speed'), layer.flow.speed || 0.03);
+          gl.uniform1f(gl.getUniformLocation(progWaterflow, 'u_amp'), flowAmp);
+          gl.uniform1f(gl.getUniformLocation(progWaterflow, 'u_phasescale'), layer.flow.phasescale || 1);
+          gl.uniform3f(gl.getUniformLocation(progWaterflow, 'u_tint'), 1, 1, 1);
+          gl.uniform1f(gl.getUniformLocation(progWaterflow, 'u_bright'), fwNums.Bright ?? 1);
+          gl.uniform1f(gl.getUniformLocation(progWaterflow, 'u_power'), fwNums.Power ?? 1);
+          gl.uniform1f(gl.getUniformLocation(progWaterflow, 'u_alpha'), layer.alpha != null ? layer.alpha : 1.0);
+          gl.activeTexture(gl.TEXTURE0);
+          gl.bindTexture(gl.TEXTURE_2D, flowContent.texture);
+          gl.uniform1i(gl.getUniformLocation(progWaterflow, 'u_tex'), 0);
+          gl.activeTexture(gl.TEXTURE1);
+          gl.bindTexture(gl.TEXTURE_2D, flowMask.texture);
+          gl.uniform1i(gl.getUniformLocation(progWaterflow, 'u_mask'), 1);
+          gl.activeTexture(gl.TEXTURE2);
+          gl.bindTexture(gl.TEXTURE_2D, flowPhase && flowPhase.loaded ? flowPhase.texture : whiteTex());
+          gl.uniform1i(gl.getUniformLocation(progWaterflow, 'u_phase'), 2);
+          gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+          gl.activeTexture(gl.TEXTURE0);
+          continue;
+        }
+      }
+
       // Standard Layer
-      const texRec = loadTexture(layer.texUrl);
+      const texRec = loadTexture(layer.texUrl, false, !!layer.videoTex);
       if (!texRec.loaded) continue;
 
       gl.useProgram(progBasic);
@@ -1815,7 +2683,8 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
       gl.uniform1f(gl.getUniformLocation(progBasic, 'u_bright'), lnums.Bright ?? 1);
       gl.uniform1f(gl.getUniformLocation(progBasic, 'u_power'), lnums.Power ?? 1);
 
-      const model = mat4Transform2D(layer.x, layer.y, layer.w, layer.h, layer.angle || 0);
+      const origin = layerFrame(layer, sceneW, sceneH);
+      const model = mat4Transform2D(origin[0], origin[1], layer.w, layer.h, origin[2]);
       gl.uniformMatrix4fv(gl.getUniformLocation(progBasic, 'u_proj'), false, proj);
       gl.uniformMatrix4fv(gl.getUniformLocation(progBasic, 'u_model'), false, model);
       gl.uniform1f(gl.getUniformLocation(progBasic, 'u_time'), elapsed);
@@ -1876,6 +2745,113 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     }
 
+    // WE 粒子系统（雾 / 光束 / 鸟 / 星星）：走 2D 正交通道，画在图层与程序化流星之上。
+    // 混合场景（3D 且有模型）不在这里画：上面 3D 分支已经用同一份 particles3d 跑过
+    // updateParticles3d，两条通道都画会变成双倍数量 + 一份贴平面的雾。
+    const drewParticles3d = sceneData.is3D && sceneData.models && sceneData.models.length > 0;
+    const weSystems = drewParticles3d ? [] : (sceneData.particles3d || []);
+    // 观测现场（不参与任何渲染判定）：每帧汇总各系统存活数、绘制的 quad 数与推进过的模拟帧。
+    const particles2dLive = {};
+    let particles2dQuads = 0;
+    if (weSystems.length > 0) {
+      gl.useProgram(progParticle);
+      gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+      const wPos = gl.getAttribLocation(progParticle, 'a_pos');
+      const wUv = gl.getAttribLocation(progParticle, 'a_uv');
+      gl.enableVertexAttribArray(wPos);
+      gl.enableVertexAttribArray(wUv);
+      gl.vertexAttribPointer(wPos, 2, gl.FLOAT, false, 16, 0);
+      gl.vertexAttribPointer(wUv, 2, gl.FLOAT, false, 16, 8);
+      gl.uniformMatrix4fv(gl.getUniformLocation(progParticle, 'u_proj'), false, proj);
+      const wTex = gl.getUniformLocation(progParticle, 'u_tex');
+      const wRect = gl.getUniformLocation(progParticle, 'u_uvRect');
+      const wColor = gl.getUniformLocation(progParticle, 'u_color');
+      const wModel = gl.getUniformLocation(progParticle, 'u_model');
+      gl.activeTexture(gl.TEXTURE0);
+      for (const sys of weSystems) {
+        const rec = sys.texUrl ? loadTexture(sys.texUrl) : null;
+        // 贴图缺席（没装 WE、内置资产取不到）就整条系统跳过：清单里的键已由主线程
+        // 按 builtInAssetKeys 撤掉，这里不额外画东西。
+        if (!rec || !rec.loaded) continue;
+        const st = getParticles2d(sys);
+        if (!st.warm) {
+          // 首帧预热到稳态：WE 的桌面里雾与光束从来不是一片空。
+          // 步数按「活满一整个生命周期 + 至少生出第一只」算——光束速率 0.3/s、寿命 8~20 s，
+          // 固定 3 秒预热连一只都生不出来（预热不足实测 live=0，画面上没有光束）。
+          st.warm = true;
+          const warmRate = Math.max(0.01, nz(sys.rate, 0));
+          const warmSeconds = Math.min(40, Math.max(3, nz(sys.lifeMax, 4) + 1 / warmRate + 0.5));
+          for (let i = 0; i < Math.ceil(warmSeconds * 30); i++) updateParticles2d(sys, st, 1 / 30);
+        }
+        if (!isPaused) updateParticles2d(sys, st, dt);
+        particles2dLive[sys.name] = st.list.length;
+        if (st.list.length === 0) continue;
+        gl.bindTexture(gl.TEXTURE_2D, rec.texture);
+        gl.uniform1i(wTex, 0);
+        if (sys.blend === 'translucent') gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        else gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+        const sc = sys.sizeScale || [1, 1];
+        const fr = sys.frames;
+        const cols = fr && fr.w > 0 ? Math.max(1, Math.floor(rec.width / fr.w)) : 1;
+        const rows = fr && fr.h > 0 ? Math.max(1, Math.floor(rec.height / fr.h)) : 1;
+        // 贴图长宽比：有序列帧按「一格」算，否则按整张（对应 WE 的 textureRatio）。
+        const ratio = fr && fr.w > 0 && fr.h > 0
+          ? fr.h / fr.w
+          : rec.height / Math.max(1, rec.width);
+        const fadeInDef = 0.1, fadeOutDef = 0.1;
+        for (const p of st.list) {
+          let k = 1;
+          const fi = sys.fadeIn !== undefined ? sys.fadeIn : fadeInDef * p.maxLife;
+          const fo = sys.fadeOut !== undefined ? sys.fadeOut : fadeOutDef * p.maxLife;
+          if (fi > 0) k = Math.min(k, p.life / fi);
+          if (fo > 0) k = Math.min(k, (p.maxLife - p.life) / fo);
+          if (sys.oscFreq) {
+            const lo = nz(sys.oscMin, 0);
+            const wave = 0.5 + 0.5 * Math.sin((elapsed * nz(sys.oscFreq, 1) + p.osc) * 6.28318);
+            k *= lo + (1 - lo) * wave;
+          }
+          const a = Math.min(1, Math.max(0, p.alpha * k));
+          if (a <= 0) continue;
+          // WE 的精灵是「宽 = size、高 = size × 贴图长宽比」的等比四边形（几何着色器里
+          // textureRatio 乘在 up 上），对象缩放再各轴乘一遍；不做画布封顶——
+          // 官方雾预设就是比画面还大的软团，封顶会把它压成一块带硬边的屏斑。
+          const w = p.size * nz(sc[0], 1);
+          const h = p.size * nz(sc[1], 1) * ratio;
+          let u0 = 0, v0 = 0, u1 = 1, v1 = 1;
+          if (fr && fr.count > 1) {
+            // 序列帧按「粒子年龄」推进（WE 传进着色器的就是 frac(lifetime) × 帧数），
+            // 起点再按 phase 错开，一群鸟才不会齐刷刷新翅膀。
+            const idx = Math.floor(p.phase * fr.count + p.life * fr.count) % fr.count;
+            const cx = idx % cols;
+            const cy = Math.floor(idx / cols) % rows;
+            u0 = (cx * fr.w) / rec.width;
+            v0 = (cy * fr.h) / rec.height;
+            u1 = ((cx + 1) * fr.w) / rec.width;
+            v1 = ((cy + 1) * fr.h) / rec.height;
+          }
+          // 镜像靠交换 uv 边界做：vsBasic 算的是 xy + a_uv*(zw − xy)，负跨度即翻采样。
+          // 真机 day2 的鸟群 scale.x = −1，作者用它把朝左的贴图翻成与飞行方向一致。
+          gl.uniform4f(wRect,
+            sys.flipX ? u1 : u0, sys.flipY ? v1 : v0,
+            sys.flipX ? u0 : u1, sys.flipY ? v0 : v1);
+          gl.uniformMatrix4fv(wModel, false,
+            mat4Transform2D(p.x, p.y, w, h, nz(sys.angle, 0) + p.rot));
+          gl.uniform4f(wColor, p.color[0], p.color[1], p.color[2], a);
+          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+          particles2dQuads += 1;
+        }
+      }
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      if (!isPaused) particles2dSteps += 1;
+    }
+    // 观测现场（不参与任何渲染判定）：区分「没发射」「贴图没加载上」「模拟没推进」三层。
+    window.__weParticles = {
+      systems: weSystems.length,
+      live: particles2dLive,
+      quads: particles2dQuads,
+      steps: particles2dSteps,
+    };
+
     requestAnimationFrame(render);
   }
 
@@ -1910,7 +2886,9 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
     .then(res => res.json())
     .then(data => {
       if (data.ok && data.manifest) {
-        sceneData = data.manifest;
+        // A hot-swapped preset that arrived while this fetch was in flight wins:
+        // it already reflects the user's current (newer) values.
+        if (!manifestOverridden) sceneData = data.manifest;
       } else {
         // Manifest could not be built: let the embedding parent degrade to the
         // wallpaper's static frame instead of showing a blank canvas.
@@ -1931,7 +2909,22 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
     if (msg.type === 'dsh-set-fit' && msg.fit) {
       fitMode = msg.fit;
     } else if (msg.type === 'dsh-set-pause') {
+      const wasPaused = isPaused;
       isPaused = !!msg.paused;
+      if (wasPaused && !isPaused) fpsState.clear();
+      // 暂停必须真的停掉视频解码，否则「已暂停」的壁纸仍在后台吃 CPU/GPU。
+      for (const rec of textureCache.values()) {
+        if (!rec.video) continue;
+        if (isPaused) {
+          rec.video.pause();
+        } else {
+          const started = rec.video.play();
+          if (started && typeof started.catch === 'function') started.catch(function () {});
+        }
+      }
+    } else if (msg.type === 'dsh-set-manifest' && msg.manifest && typeof msg.manifest === 'object') {
+      manifestOverridden = true;
+      swapSceneManifest(msg.manifest);
     } else if (msg.type === 'dsh-recover-renderer') {
       if (gl.isContextLost()) {
         const ext = gl.getExtension('WEBGL_lose_context');

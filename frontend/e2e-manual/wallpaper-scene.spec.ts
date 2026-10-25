@@ -14,6 +14,12 @@ import { resolve } from "node:path";
  */
 
 const SHOT_DIR = resolve(process.cwd(), "..", "_tmp", "wallpaper-scene");
+// 桌面壳的 dev vite(5173) 把 VITE_API_BASE 指到壳自己拉起的后端(8011)；壳没跑时那条链路
+// 必然 Failed to fetch。需要单独验壁纸时，另起一个指向隔离后端(8011)的临时 vite(5198)，
+// 用 E2E_APP_URL 指过去，并串行跑（多 worker 会抢同一批截图目录与 WebGL 预算）：
+//   E2E_APP_URL=http://127.0.0.1:5198/ npx playwright test \
+//     --config playwright.e2e-manual.config.ts e2e-manual/wallpaper-scene.spec.ts --workers=1
+const APP_URL = process.env.E2E_APP_URL || "/";
 const SCENE_ID = "2797363351";
 const SCENE_PREVIEW = String.raw`D:\SteamLibrary\steamapps\workshop\content\431960\2797363351\preview.jpg`;
 // scene.pkg 在，但包里没有可用的场景结构：必须回落静态预览，不能白屏。
@@ -89,11 +95,18 @@ const armMessageSpy = (page: Page) => page.evaluate(() => {
   });
 });
 
-/** 宿主 → 播放器的全部控制消息（fit / pause），顺序即行为。 */
-const readMessages = (page: Page) => page.evaluate(() => {
+/**
+ * 宿主 → 播放器的「填充方式」消息，顺序即行为。
+ * 只挑 fit：鼠标视差是另一条独立通道（随指针移动持续发送），而 `dsh-set-pause` 会被
+ * 「滚动/点击期间暂停渲染」这道守卫合法地反复翻转（见 useWallpaperInteraction），
+ * 两者都不参与本用例对 fit 传递的断言。
+ */
+const readFitMessages = (page: Page) => page.evaluate(() => {
   const frame = document.querySelector<HTMLIFrameElement>(".app-backdrop-scene");
   const win = frame?.contentWindow as (Window & { __e2eMsgs?: Record<string, unknown>[] }) | null;
-  return (win?.__e2eMsgs || []).map((m) => (m.type === "dsh-set-fit" ? m.fit : m));
+  return (win?.__e2eMsgs || [])
+    .filter((m) => m.type === "dsh-set-fit")
+    .map((m) => m.fit);
 });
 
 const clip = { x: 80, y: 80, width: 620, height: 620 };
@@ -115,7 +128,7 @@ test("scene 作品实时渲染：画布真有像素，填充方式真的传到�
   });
 
   const started = Date.now();
-  await page.goto("/");
+  await page.goto(APP_URL);
   await expect(page.locator(".app-backdrop-scene-host"))
     .toHaveAttribute("data-scene-status", "ready", { timeout: 60_000 });
   expect(Date.now() - started).toBeLessThan(45_000);
@@ -154,7 +167,7 @@ test("scene 作品实时渲染：画布真有像素，填充方式真的传到�
 
   await page.getByRole("button", { name: "完整", exact: true }).click();
   await page.waitForTimeout(600);
-  expect(await readMessages(page), "宿主没把 contain 送进播放器").toEqual(["contain"]);
+  expect(await readFitMessages(page), "宿主没把 contain 送进播放器").toEqual(["contain"]);
   await page.screenshot({ path: resolve(SHOT_DIR, "fit-contain.png") });
   await setIsolate(page, true);
   const contained = await page.screenshot({ clip });
@@ -166,7 +179,7 @@ test("scene 作品实时渲染：画布真有像素，填充方式真的传到�
   await page.waitForTimeout(600);
   await page.screenshot({ path: resolve(SHOT_DIR, "fit-center-mapped.png") });
 
-  expect(await readMessages(page)).toEqual(["contain", "cover"]);
+  expect(await readFitMessages(page)).toEqual(["contain", "cover"]);
   expect(errors, errors.join("\n")).toEqual([]);
 });
 
@@ -185,7 +198,7 @@ test("包里取不到场景结构时回落静态预览，不白屏", async ({ pa
     scenePkg: true,
   });
 
-  await page.goto("/");
+  await page.goto(APP_URL);
   await expect(page.locator(".app-backdrop-scene-host"))
     .toHaveAttribute("data-scene-status", "fallback", { timeout: 60_000 });
   await expect(page.locator("img.app-backdrop-media")).toBeVisible();
@@ -205,7 +218,7 @@ test("实时渲染真的在动：同一机位两帧之间画面必须变化", as
     scenePkg: true,
   });
 
-  await page.goto("/");
+  await page.goto(APP_URL);
   await expect(page.locator(".app-backdrop-scene-host"))
     .toHaveAttribute("data-scene-status", "ready", { timeout: 60_000 });
 

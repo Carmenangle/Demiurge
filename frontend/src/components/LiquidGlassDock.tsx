@@ -1,15 +1,23 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  ImagePlus, Images, Play, Pause, RefreshCw, Trash2, X,
+  ImagePlus, Images, Play, Pause, RefreshCw, RotateCcw, Trash2, X,
 } from "lucide-react";
 import {
   getWallpaperStore, migrateWallpaperStore, scanWorkshopWallpapers, uploadWallpaper,
-  wallpaperThumbUrl, type WallpaperStoreInfo, type WallpaperWorkshopPage,
+  wallpaperThumbUrl,
+  type ScenePropertyItem, type ScenePropertyValue, type ScenePropertyValues,
+  type WallpaperStoreInfo, type WallpaperWorkshopPage,
 } from "../api/userState";
 import { localViewUrl } from "../api/comfyui";
 import { LIQUID_GLASS_REFRESH_EVENT } from "../lib/liquidGlass";
+import { useSceneBindings } from "../lib/scene/sceneBindings";
 import {
-  DEFAULT_LIQUID_GLASS, liquidGlassWallpaperKind,
+  filterScenePresetItems, hexToSceneColor, loadScenePresets, roundSceneNumber,
+  sceneColorToHex, scenePresetDeviation, scenePresetValues,
+  type ScenePresetSnapshot,
+} from "../lib/scene/scenePresets";
+import {
+  DEFAULT_LIQUID_GLASS, liquidGlassSceneSource, liquidGlassWallpaperKind,
   type LiquidGlassRopeForm, type LiquidGlassSettings, type LiquidGlassWallpaper,
 } from "../stores/settings";
 import { LiquidGlassWallpaperLibrary } from "./LiquidGlassWallpaperLibrary";
@@ -87,7 +95,7 @@ function ColorRow(props: {
 }) {
   return (
     <div className="lg-field">
-      <span className="lg-field__label">{props.label}<b>{props.value || "跟随玻璃"}</b></span>
+      <span className="lg-field__label">{props.label}<b>{props.value || "默认深色"}</b></span>
       <div className="lg-color-row">
         <input
           type="color"
@@ -109,7 +117,7 @@ function ColorRow(props: {
           <button
             type="button"
             className={`lg-swatch lg-swatch--none${props.value ? "" : " active"}`}
-            title="跟随玻璃基色"
+            title="还原默认深色内容面"
             onClick={() => props.onChange("")}
           >
             <X size={12} />
@@ -117,6 +125,175 @@ function ColorRow(props: {
         )}
       </div>
     </div>
+  );
+}
+
+function ScenePresetRow(props: {
+  item: ScenePropertyItem;
+  value: ScenePropertyValue;
+  onChange: (value: ScenePropertyValue) => void;
+}) {
+  const { item, value } = props;
+  if (item.type === "bool") {
+    return (
+      <SwitchRow
+        label={item.label}
+        checked={value === true || value === 1 || value === "1"}
+        onChange={props.onChange}
+      />
+    );
+  }
+  if (item.type === "combo") {
+    const options = item.options || [];
+    const current = String(value ?? "");
+    const picked = options.find((o) => o.value === current);
+    return (
+      <div className="lg-field">
+        <span className="lg-field__label">
+          {item.label}
+          <b>{picked?.label || current || "-"}</b>
+        </span>
+        <select
+          className="lg-select"
+          value={current}
+          onChange={(e) => props.onChange(e.target.value)}
+        >
+          {options.map((o) => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </select>
+      </div>
+    );
+  }
+  if (item.type === "textinput") {
+    // 文字内容（「可自定义文字」的正文）：单行输入，值原样进预设差集。
+    return (
+      <div className="lg-field">
+        <span className="lg-field__label">{item.label}</span>
+        <input
+          className="lg-input"
+          type="text"
+          value={typeof value === "string" ? value : String(value ?? "")}
+          onChange={(e) => props.onChange(e.target.value)}
+        />
+      </div>
+    );
+  }
+  if (item.type === "color") {
+    return (
+      <ColorRow
+        label={item.label}
+        value={sceneColorToHex(value)}
+        presets={[]}
+        // 参照值带上：WE 里 tint 用 0~1、粒子色用 0~255，回写必须按原刻度，否则语义翻转
+        onChange={(hex) => props.onChange(hexToSceneColor(hex, value))}
+      />
+    );
+  }
+  const current = Number.isFinite(Number(value)) ? Number(value) : Number(item.default) || 0;
+  const lo = Number.isFinite(item.min) ? Math.min(Number(item.min), current) : Math.min(0, current);
+  const hi = Number.isFinite(item.max) ? Math.max(Number(item.max), current) : Math.max(1, current);
+  const step = Number(item.step) > 0 ? Number(item.step) : 1;
+  return (
+    <RangeRow
+      label={item.label}
+      value={current}
+      min={lo}
+      max={hi}
+      step={step}
+      onChange={(v) => props.onChange(roundSceneNumber(item, v))}
+    />
+  );
+}
+
+/**
+ * 当前壁纸在 Wallpaper Engine 里的预设面板。
+ *
+ * 两道收窄缺一不可：`items` 来自作品 project.json（作者留下的全部属性，含渲染器不消费的），
+ * `bindings` 来自解码清单的 userBindings（改了真的会改变画面的键）。只摆交集——
+ * 用户改每一项都能立刻在背景上看到效果，这才是「选项」应然的样子。
+ */
+export function ScenePresetPanel(props: {
+  wallpaper: LiquidGlassWallpaper;
+  onChange: (preset: ScenePropertyValues) => void;
+}) {
+  const source = liquidGlassSceneSource(props.wallpaper);
+  const bindings = useSceneBindings(source);
+  const [snapshot, setSnapshot] = useState<ScenePresetSnapshot | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!source) return undefined;
+    let alive = true;
+    setError("");
+    loadScenePresets(source)
+      .then((next) => { if (alive) setSnapshot(next); })
+      .catch((err: unknown) => {
+        if (!alive) return;
+        setSnapshot(null);
+        setError(err instanceof Error ? err.message : String(err));
+      });
+    return () => { alive = false; };
+  }, [source]);
+
+  const deviations = props.wallpaper.preset || {};
+  const values = snapshot ? scenePresetValues(snapshot.base, deviations) : deviations;
+  const rows = filterScenePresetItems(snapshot?.items || [], bindings, values);
+
+  const reload = () => {
+    if (!source) return;
+    setError("");
+    loadScenePresets(source, { force: true })
+      .then(setSnapshot)
+      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
+  };
+
+  const setRow = (item: ScenePropertyItem, next: ScenePropertyValue) => {
+    props.onChange(scenePresetDeviation(deviations, item, next, snapshot?.base || {}));
+  };
+
+  return (
+    <section className="lg-section lg-preset">
+      <h4>壁纸预设 <span>{rows.length}</span></h4>
+      <p className="lg-empty">
+        这些是当前壁纸在 Wallpaper Engine 里的选项，初值取你在 WE 中的设置
+        {Object.keys(deviations).length > 0 ? "，已含应用内的改动" : ""}。
+      </p>
+      {error && (
+        <div className="lg-preset__error">
+          <p className="lg-error">预设读取失败：{error}</p>
+          <button type="button" className="lg-btn lg-btn--tiny" onClick={reload}>
+            <RefreshCw size={13} />重试
+          </button>
+        </div>
+      )}
+      {!error && !snapshot && <p className="lg-empty">正在读取该作品的预设…</p>}
+      {!error && snapshot && bindings === null && (
+        <p className="lg-empty">场景实时渲染就绪后，这里只显示这份作品真正能改的选项。</p>
+      )}
+      {!error && snapshot && bindings !== null && rows.length === 0 && (
+        <p className="lg-empty">
+          {snapshot.items.length === 0
+            ? "这份作品没有自带可调整的预设。"
+            : "这份作品的预设项当前渲染器都不消费（文本 / 音频 / 鼠标特效等），改动不会反映到画面上。"}
+        </p>
+      )}
+      {rows.map((item) => (
+        <ScenePresetRow
+          key={item.key}
+          item={item}
+          value={values[item.key] ?? item.value}
+          onChange={(v) => setRow(item, v)}
+        />
+      ))}
+      {Object.keys(deviations).length > 0 && (
+        <div className="lg-btn-row">
+          <button type="button" className="lg-btn lg-btn--tiny" onClick={() => props.onChange({})}>
+            <RotateCcw size={13} />还原 WE 原样
+          </button>
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -394,6 +571,11 @@ export function LiquidGlassDock({
   const closeWallpaper = () => update({ activeWallpaperId: "", wallpaperPaused: false });
   const isVideo = active?.kind === "video";
 
+  // 预设按壁纸各自存：切作品各用各的，删作品跟着走（持久化在 wallpapers[].preset）
+  const updateWallpaperPreset = (id: string, preset: ScenePropertyValues) => {
+    update({ wallpapers: lg.wallpapers.map((w) => (w.id === id ? { ...w, preset } : w)) });
+  };
+
   if (!lg.ropeShown && !open) {
     return (
       <button
@@ -664,6 +846,14 @@ export function LiquidGlassDock({
                       </button>
                     </div>
                   </section>
+
+                  {active && liquidGlassSceneSource(active) && (
+                    <ScenePresetPanel
+                      key={active.id}
+                      wallpaper={active}
+                      onChange={(preset) => updateWallpaperPreset(active.id, preset)}
+                    />
+                  )}
 
                   <section className="lg-section">
                     <h4>壁纸列表 <span>{lg.wallpapers.length}</span></h4>

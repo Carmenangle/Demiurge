@@ -38,8 +38,9 @@
  *
  * Vendored from dsh-plugin-wallpaper-engine v0.6.8 (MIT,
  * github.com/elysia395/dsh-wallpaper-engine) as lib/scene-manifest.js.
- * The only change is the import block below: `node:*` specifiers are
- * retargeted to ../shims/* so the module runs in a Web Worker. See NOTICE.md.
+ * Demiurge changes (shim imports, parallax depth + cameraparallax switch,
+ * puppet rig/mesh/skin/animationlayers, ancestor visibility, UTF-8 MDL strings,
+ * user property bindings -> manifest.userBindings) are listed verbatim in NOTICE.md.
  */
 import { Buffer } from '../shims/nodeBuffer';
 import { lstatSync, readdirSync, readFileSync, realpathSync, statSync } from '../shims/nodeFs';
@@ -773,16 +774,23 @@ export function decodeTex(data) {
     if (parsed.isVideoMp4) {
         throw new Error('tex: video mp4 textures cannot be decoded to a static frame');
     }
+    // TEXS 帧表原样带出去：官方雾贴图是一张 8×8 的序列页，主线程要靠它才知道
+    // 「一格多大、一共几格」——包内纹理有文件名约定（birds_128x120x16），内置资产没有。
+    const withSheet = (result) => {
+        if (Array.isArray(parsed.frames) && parsed.frames.length > 0)
+            result.frames = parsed.frames;
+        return result;
+    };
     const mip = parsed.mipmaps[0];
     if (isPngBuffer(mip.bytes)) {
-        return decodePngToRgba(mip.bytes);
+        return withSheet(decodePngToRgba(mip.bytes));
     }
     // FreeImage-embedded JPEG mipmaps (FF D8): decode through the pure-JS
     // jpeg-js decoder; cropToImageRect below trims any power-of-two padding (#756).
     if (mip.bytes[0] === 0xff && mip.bytes[1] === 0xd8) {
         const jpeg = decodeJpeg(Buffer.from(mip.bytes), { useTArray: true });
         const rgba = jpeg.data;
-        return cropToImageRect({ width: jpeg.width, height: jpeg.height, rgba }, parsed.width, parsed.height);
+        return withSheet(cropToImageRect({ width: jpeg.width, height: jpeg.height, rgba }, parsed.width, parsed.height));
     }
     const { width, height, bytes } = mip;
     let decoded;
@@ -794,15 +802,19 @@ export function decodeTex(data) {
             decoded = { width, height, rgba: bytes.slice(0, width * height * 4) };
             break;
         }
+        // WE 的着色器在采样 albedo 前做一次通道换算：R8 取「白底 + 通道值作透明度」，
+        // RG88 取「R 作灰度颜色 + G 作透明度」。贴图容器里这两个格式没有 alpha，
+        // 若按 (v,v,v,255) / (R,G,0,255) 直解，雾与光束这类内置贴图就会从
+        // 「半透明软团」变成「整块不透明的红绿斑」——加色混合下整屏被刷花。
         case TexFormat.R8: {
             if (bytes.length < width * height)
                 throw new Error('tex: mipmap size mismatch for R8');
             const rgba = new Uint8Array(width * height * 4);
             for (let i = 0; i < width * height; i++) {
-                rgba[i * 4] = bytes[i];
-                rgba[i * 4 + 1] = bytes[i];
-                rgba[i * 4 + 2] = bytes[i];
-                rgba[i * 4 + 3] = 255;
+                rgba[i * 4] = 255;
+                rgba[i * 4 + 1] = 255;
+                rgba[i * 4 + 2] = 255;
+                rgba[i * 4 + 3] = bytes[i];
             }
             decoded = { width, height, rgba };
             break;
@@ -813,9 +825,9 @@ export function decodeTex(data) {
             const rgba = new Uint8Array(width * height * 4);
             for (let i = 0; i < width * height; i++) {
                 rgba[i * 4] = bytes[i * 2];
-                rgba[i * 4 + 1] = bytes[i * 2 + 1];
-                rgba[i * 4 + 2] = 0;
-                rgba[i * 4 + 3] = 255;
+                rgba[i * 4 + 1] = bytes[i * 2];
+                rgba[i * 4 + 2] = bytes[i * 2];
+                rgba[i * 4 + 3] = bytes[i * 2 + 1];
             }
             decoded = { width, height, rgba };
             break;
@@ -844,7 +856,8 @@ export function decodeTex(data) {
         default:
             throw new TexUnsupportedError(parsed.format, TEX_FORMAT_NAMES[parsed.format] ?? 'unknown(' + parsed.format + ')', parsed.width, parsed.height);
     }
-    return cropToImageRect(decoded, parsed.width, parsed.height);
+    const cropped = cropToImageRect(decoded, parsed.width, parsed.height);
+    return withSheet(cropped);
 }
 const CRC_TABLE = (() => {
     const table = new Uint32Array(256);
@@ -969,6 +982,7 @@ function pkgSceneAccess(pkgData) {
             }
         },
         readFile,
+        hasFile: (path) => byPath.has(path.toLowerCase()),
         listTexPaths: () => entries.filter((entry) => entry.path.toLowerCase().endsWith('.tex')).map((entry) => entry.path),
     };
 }
@@ -1053,6 +1067,19 @@ function dirSceneAccess(dir) {
             }
         },
         readFile,
+        // 只答「工程目录里有没有这个文件」，不读字节：文字图层要据此区分工程自带字体
+        // 与 Wallpaper Engine 内置字体，前者走包内资源、后者走内置资产路由。
+        hasFile: (path) => {
+            const abs = resolvePath(normDir, path);
+            if (abs !== normDir && !abs.startsWith(normDir + sep))
+                return false;
+            try {
+                return statSync(abs).isFile();
+            }
+            catch {
+                return false;
+            }
+        },
         listTexPaths,
     };
 }
@@ -1733,10 +1760,9 @@ function readMdlCString(buf, p) {
         end++;
     if (end >= buf.length)
         return null;
-    let str = '';
-    for (let i = p; i < end; i++)
-        str += String.fromCharCode(buf[i]);
-    return { str, next: end + 1 };
+    // Paths and attachment names are UTF-8 (Chinese asset names are common);
+    // decoding byte-by-byte breaks MDAT bone-name lookups.
+    return { str: textDecoder.decode(buf.subarray(p, end)), next: end + 1 };
 }
 /**
  * Parse a Wallpaper Engine MDLV .mdl file into renderable meshes.
@@ -1806,6 +1832,10 @@ export function parseMdl(buf) {
         const uv = new Float32Array(vCount * 2);
         const hasNorm = (meshFlag & MDL_FLAG_NORMAL) !== 0;
         const hasUv = (meshFlag & (MDL_FLAG_UV | MDL_FLAG_UV2)) !== 0;
+        const hasSkinBlend = (meshFlag & MDL_FLAG_SKIN_BLEND) !== 0;
+        const hasSkinWeight = (meshFlag & MDL_FLAG_SKIN_WEIGHT) !== 0;
+        const skinIndices = hasSkinBlend ? new Uint16Array(vCount * 4) : null;
+        const skinWeights = hasSkinWeight ? new Float32Array(vCount * 4) : null;
         for (let v = 0; v < vCount; v++) {
             // Attribute order in the file: pos, normal, tangent, extra4,
             // blend_indices (4 x u32), blend_weights (4 x f32), uv, uv2.
@@ -1826,10 +1856,16 @@ export function parseMdl(buf) {
                 p += 16;
             if (meshFlag & MDL_FLAG_EXTRA4)
                 p += 4;
-            if (meshFlag & MDL_FLAG_SKIN_BLEND)
+            if (hasSkinBlend) {
+                for (let k = 0; k < 4; k++)
+                    skinIndices[v * 4 + k] = dv.getUint32(p + k * 4, true);
                 p += 16;
-            if (meshFlag & MDL_FLAG_SKIN_WEIGHT)
+            }
+            if (hasSkinWeight) {
+                for (let k = 0; k < 4; k++)
+                    skinWeights[v * 4 + k] = dv.getFloat32(p + k * 4, true);
                 p += 16;
+            }
             if (hasUv) {
                 uv[v * 2] = dv.getFloat32(p, true);
                 uv[v * 2 + 1] = dv.getFloat32(p + 4, true);
@@ -1861,9 +1897,265 @@ export function parseMdl(buf) {
             indices = arr;
         }
         p += iBytes;
-        meshes.push({ vCount, iCount, pos, norm, uv, indices, materialPath: materials[0] });
+        meshes.push({
+            vCount,
+            iCount,
+            pos,
+            norm,
+            uv,
+            indices,
+            materialPath: materials[0],
+            skinIndices,
+            skinWeights,
+        });
     }
     return meshes;
+}
+/** 4x4 column-major matrix product (a applied after b). */
+function mat4Multiply(a, b) {
+    const out = new Float32Array(16);
+    for (let col = 0; col < 4; col++) {
+        for (let row = 0; row < 4; row++) {
+            out[col * 4 + row] =
+                a[row] * b[col * 4] +
+                    a[4 + row] * b[col * 4 + 1] +
+                    a[8 + row] * b[col * 4 + 2] +
+                    a[12 + row] * b[col * 4 + 3];
+        }
+    }
+    return out;
+}
+/** Invert an affine 4x4 (rotation/scale + translation), column-major. */
+function mat4Invert(m) {
+    const a00 = m[0], a10 = m[1], a20 = m[2];
+    const a01 = m[4], a11 = m[5], a21 = m[6];
+    const a02 = m[8], a12 = m[9], a22 = m[10];
+    const b01 = a22 * a11 - a12 * a21;
+    const b11 = -a22 * a10 + a12 * a20;
+    const b21 = a21 * a10 - a11 * a20;
+    const det = a00 * b01 + a01 * b11 + a02 * b21;
+    if (!Number.isFinite(det) || Math.abs(det) < 1e-9) {
+        return new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+    }
+    const inv = 1 / det;
+    const i00 = b01 * inv;
+    const i01 = (-a22 * a01 + a02 * a21) * inv;
+    const i02 = (a12 * a01 - a02 * a11) * inv;
+    const i10 = b11 * inv;
+    const i11 = (a22 * a00 - a02 * a20) * inv;
+    const i12 = (-a12 * a00 + a02 * a10) * inv;
+    const i20 = b21 * inv;
+    const i21 = (-a21 * a00 + a01 * a20) * inv;
+    const i22 = (a11 * a00 - a01 * a10) * inv;
+    const tx = m[12], ty = m[13], tz = m[14];
+    return new Float32Array([
+        i00, i10, i20, 0,
+        i01, i11, i21, 0,
+        i02, i12, i22, 0,
+        -(i00 * tx + i01 * ty + i02 * tz),
+        -(i10 * tx + i11 * ty + i12 * tz),
+        -(i20 * tx + i21 * ty + i22 * tz),
+        1,
+    ]);
+}
+/**
+ * Decompose a bone's local bind matrix into TRS using the player's Euler
+ * convention (R = Rx * Ry * Rz, radians). Bones in real puppet files carry
+ * bind rotations, so "bind pose = identity" would twist the skin.
+ */
+function decomposeMdlTrs(m) {
+    const sx = Math.hypot(m[0], m[1], m[2]) || 1;
+    const sy = Math.hypot(m[4], m[5], m[6]) || 1;
+    const sz = Math.hypot(m[8], m[9], m[10]) || 1;
+    const ry = Math.asin(Math.max(-1, Math.min(1, m[8] / sz)));
+    const rx = Math.atan2(-m[9] / sz, m[10] / sz);
+    const rz = Math.atan2(-m[4] / sy, m[0] / sx);
+    return [m[12], m[13], m[14], rx, ry, rz, sx, sy, sz];
+}
+function findMdlBlock(buf, tag, from) {
+    const t0 = tag.charCodeAt(0);
+    const t1 = tag.charCodeAt(1);
+    const t2 = tag.charCodeAt(2);
+    const t3 = tag.charCodeAt(3);
+    for (let p = from; p + 9 <= buf.length; p++) {
+        if (buf[p] !== t0 || buf[p + 1] !== t1 || buf[p + 2] !== t2 || buf[p + 3] !== t3)
+            continue;
+        let versionOk = true;
+        for (let i = 4; i < 8; i++) {
+            if (buf[p + i] < 0x30 || buf[p + i] > 0x39)
+                versionOk = false;
+        }
+        if (versionOk && buf[p + 8] === 0)
+            return p;
+    }
+    return -1;
+}
+/**
+ * Parse MDLA puppet animation clips. A clip stores (frameCount + 1) keys per
+ * bone; each key is 9 f32: translation xyz, Euler xyz (radians), scale xyz.
+ * Every bone track is followed by an 8-byte footer, and the clip ends with a
+ * 27-byte trailer.
+ */
+function parseMdlClips(buf, dv, from) {
+    const at = findMdlBlock(buf, 'MDLA', from);
+    if (at < 0)
+        return [];
+    const count = dv.getUint32(at + 13, true);
+    if (count < 1 || count > 256)
+        return [];
+    const clips = [];
+    let p = at + 17;
+    for (let i = 0; i < count; i++) {
+        if (p + 12 > buf.length)
+            break;
+        const id = dv.getUint32(p, true);
+        p += 8;
+        const nameC = readMdlCString(buf, p);
+        if (!nameC)
+            break;
+        p = nameC.next;
+        const typeC = readMdlCString(buf, p);
+        if (!typeC)
+            break;
+        p = typeC.next;
+        if (p + 20 > buf.length)
+            break;
+        const fps = dv.getFloat32(p, true);
+        p += 4;
+        const frameCount = dv.getUint32(p, true);
+        p += 4;
+        p += 4;
+        const boneCount = dv.getUint32(p, true);
+        p += 4;
+        p += 4;
+        const trackBytes = dv.getUint32(p, true);
+        p += 4;
+        if (frameCount < 1 || frameCount > 20000 || boneCount < 1 || boneCount > 512)
+            break;
+        if (trackBytes !== (frameCount + 1) * 36)
+            break;
+        if (p + boneCount * (trackBytes + 8) + 27 > buf.length)
+            break;
+        const stride = (frameCount + 1) * 9;
+        const tracks = new Array(boneCount);
+        for (let b = 0; b < boneCount; b++) {
+            const keys = new Float32Array(stride);
+            for (let k = 0; k < stride; k++)
+                keys[k] = dv.getFloat32(p + k * 4, true);
+            tracks[b] = keys;
+            p += trackBytes + 8;
+        }
+        p += 27;
+        clips.push({
+            id,
+            name: nameC.str,
+            type: typeC.str,
+            fps: Number.isFinite(fps) && fps > 0 ? fps : 30,
+            frameCount,
+            tracks,
+        });
+    }
+    return clips;
+}
+/**
+ * Parse a puppet MDL's rig: MDLS bones (local 4x4 matrices), MDAT attachment
+ * sockets (bone index + name + 4x4 matrix) and MDLA animation clips.
+ *
+ * World matrices are pre-multiplied parent→child and each socket is folded
+ * onto its bone, so an attachment's `socket` already maps attachment-local
+ * points into the puppet model space. `bones[i].matrix` is the bind local,
+ * `bones[i].world` the bind world used for inverse-bind skinning.
+ */
+export function parseMdlRig(buf) {
+    const empty = { boneCount: 0, attachments: [], bones: [], clips: [] };
+    if (!buf || buf.length < 17)
+        return empty;
+    const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    const ls = findMdlBlock(buf, 'MDLS', 9);
+    if (ls < 0)
+        return empty;
+    const boneCount = dv.getUint32(ls + 13, true);
+    if (boneCount < 1 || boneCount > 512)
+        return empty;
+    const nextOffset = dv.getUint32(ls + 9, true);
+    const bones = [];
+    let p = ls + 17;
+    for (let i = 0; i < boneCount; i++) {
+        if (p + 13 > buf.length)
+            return empty;
+        const parent = dv.getInt32(p + 5, true);
+        const matrixBytes = dv.getUint32(p + 9, true);
+        if (matrixBytes < 64 || p + 13 + matrixBytes > buf.length)
+            return empty;
+        const matrix = new Float32Array(16);
+        for (let k = 0; k < 16; k++)
+            matrix[k] = dv.getFloat32(p + 13 + k * 4, true);
+        p += 13 + matrixBytes;
+        const cstr = readMdlCString(buf, p);
+        if (!cstr)
+            return empty;
+        p = cstr.next;
+        bones.push({ parent, matrix });
+    }
+    const world = new Array(boneCount);
+    const state = new Uint8Array(boneCount);
+    const worldOf = (i) => {
+        if (i < 0 || i >= boneCount)
+            return null;
+        if (world[i])
+            return world[i];
+        if (state[i] === 1)
+            return bones[i].matrix;
+        state[i] = 1;
+        const parentWorld = worldOf(bones[i].parent);
+        world[i] = parentWorld ? mat4Multiply(parentWorld, bones[i].matrix) : bones[i].matrix;
+        state[i] = 2;
+        return world[i];
+    };
+    for (let i = 0; i < boneCount; i++)
+        worldOf(i);
+    let at = nextOffset;
+    if (at < 9 || at + 15 > buf.length || findMdlBlock(buf, 'MDAT', at) !== at) {
+        at = findMdlBlock(buf, 'MDAT', p);
+    }
+    let attachments = [];
+    let q = p;
+    if (at >= 0) {
+        const count = dv.getUint16(at + 13, true);
+        q = at + 15;
+        for (let i = 0; i < count && i < 4096; i++) {
+            if (q + 2 > buf.length)
+                break;
+            const boneIndex = dv.getUint16(q, true);
+            q += 2;
+            const cstr = readMdlCString(buf, q);
+            if (!cstr)
+                break;
+            q = cstr.next;
+            if (q + 64 > buf.length)
+                break;
+            if (boneIndex >= boneCount) {
+                q += 64;
+                continue;
+            }
+            const local = new Float32Array(16);
+            for (let k = 0; k < 16; k++)
+                local[k] = dv.getFloat32(q + k * 4, true);
+            q += 64;
+            attachments.push({
+                name: cstr.str,
+                boneIndex,
+                local,
+                socket: mat4Multiply(world[boneIndex], local),
+            });
+        }
+    }
+    return {
+        boneCount,
+        bones: bones.map((bone, i) => ({ parent: bone.parent, matrix: bone.matrix, world: world[i] })),
+        attachments,
+        clips: parseMdlClips(buf, dv, q),
+    };
 }
 function containsEmbeddedScript(value, seen = new Set()) {
     if (value === null || typeof value !== 'object')
@@ -1878,7 +2170,7 @@ function containsEmbeddedScript(value, seen = new Set()) {
     }
     return Object.values(value).some(child => containsEmbeddedScript(child, seen));
 }
-function buildSceneManifestVia(access, token) {
+function buildSceneManifestVia(access, token, userProperties) {
     let scene = access.readJson('scene.json');
     const project = access.readJson('project.json');
     if (!scene && project && typeof project.file === 'string' && project.file.endsWith('.json')) {
@@ -1886,6 +2178,110 @@ function buildSceneManifestVia(access, token) {
     }
     if (!scene || !Array.isArray(scene.objects))
         return null;
+    const props = project?.general?.properties;
+    const userValues = userProperties && typeof userProperties === 'object' ? userProperties : null;
+    const usedBindings = new Set();
+    // Only keys that actually reach a rendered layer belong in `manifest.userBindings`:
+    // the dock shows exactly these controls, so text/audio/mouse-trail options that this
+    // renderer cannot draw must not masquerade as working toggles.
+    let bindingSink = null;
+    let stagedBindings = null;
+    let suppressNotes = 0;
+    const noteBinding = (name) => {
+        if (suppressNotes > 0 || typeof name !== 'string' || name === '')
+            return;
+        if (bindingSink)
+            bindingSink.add(name);
+        else if (stagedBindings)
+            stagedBindings.add(name);
+    };
+    const commitStagedBindings = () => {
+        if (!stagedBindings)
+            return;
+        for (const name of stagedBindings)
+            usedBindings.add(name);
+    };
+    const withoutBindings = (run) => {
+        suppressNotes += 1;
+        try {
+            return run();
+        }
+        finally {
+            suppressNotes -= 1;
+        }
+    };
+    const collectBindings = (sink, run) => {
+        const prev = bindingSink;
+        bindingSink = sink;
+        try {
+            return run();
+        }
+        finally {
+            bindingSink = prev;
+        }
+    };
+    const propertyValue = (name) => {
+        if (userValues && Object.prototype.hasOwnProperty.call(userValues, name))
+            return userValues[name];
+        const def = props ? props[name] : undefined;
+        if (def && def.value !== undefined && def.value !== null)
+            return def.value;
+        return undefined;
+    };
+    const valuesEqual = (a, b) => {
+        if (Object.is(a, b))
+            return true;
+        if (a === undefined || a === null || b === undefined || b === null)
+            return false;
+        const na = Number(a);
+        const nb = Number(b);
+        if (Number.isFinite(na) && Number.isFinite(nb))
+            return Math.abs(na - nb) < 1e-6;
+        return String(a).toLowerCase() === String(b).toLowerCase();
+    };
+    // WE 的用户绑定两种形态（webwallgl resolveUserValue）：
+    //   {user:{name, condition}, value} → 条件组合框：当前值等于 condition 时为 true（不看 value）
+    //   {user:'key', value}            → 普通属性：用户值优先；类型形状不同时回退到 value
+    // 标量属性绑到向量字段（人物比例 scale、视差 parallaxDepth）时按分量广播。
+    const resolveBinding = (node) => {
+        if (!node || typeof node !== 'object' || Array.isArray(node))
+            return node;
+        const user = node.user;
+        if (user === undefined)
+            return node.value !== undefined ? node.value : node;
+        if (user && typeof user === 'object' && typeof user.name === 'string') {
+            noteBinding(user.name);
+            const current = propertyValue(user.name);
+            if (current === undefined || current === null)
+                return node.value;
+            if (!Object.prototype.hasOwnProperty.call(user, 'condition'))
+                return current;
+            return valuesEqual(current, user.condition);
+        }
+        if (typeof user !== 'string')
+            return node;
+        noteBinding(user);
+        const current = propertyValue(user);
+        if (current === undefined || current === null)
+            return node.value;
+        if (typeof current === 'number' && typeof node.value === 'string') {
+            const parts = node.value.trim().split(/\s+/).filter(Boolean);
+            if (parts.length >= 2)
+                return parts.map(() => current).join(' ');
+        }
+        return current;
+    };
+    // scene.json 的位置/尺寸/透明度既可能是字面量，也可能是用户绑定或脚本节点。
+    // 折叠成当前生效值后再交给各解析器；对象既无 user 也无 script 时保留 value。
+    const bindingValueOf = (val) => {
+        if (!val || typeof val !== 'object' || Array.isArray(val))
+            return val;
+        if (val.user !== undefined || typeof val.script === 'string')
+            return resolveBinding(val);
+        if (val.value !== undefined)
+            return val.value;
+        return val;
+    };
     const general = scene.general;
     const projW = general?.orthogonalprojection?.width;
     const projH = general?.orthogonalprojection?.height;
@@ -1894,16 +2290,58 @@ function buildSceneManifestVia(access, token) {
     const width = typeof projW === 'number' && Number.isFinite(projW) && projW > 0 ? Math.floor(projW) : 3840;
     const height = typeof projH === 'number' && Number.isFinite(projH) && projH > 0 ? Math.floor(projH) : 2160;
     const resourceBase = '/wallpaper-engine/scene-resource/' + token + '/';
+    // 清单里以该前缀引用的资源不在 scene.pkg 内，而是 Wallpaper Engine 安装目录的
+    // 内置资产（文字用的中文字体、粒子用的雾/光束/星光贴图）。
+    const WE_BUILT_IN_PREFIX = 'we-asset/';
     const manifest = {
         width,
         height,
         hasMeteors: false,
         hasFireflies: false,
         scripted: containsEmbeddedScript(scene),
+        // WE camera parallax is a scene-wide switch. Layers keep their
+        // parallaxDepth, but all of them must stay pinned unless the scene
+        // explicitly enables the camera effect (3346715292 declares false).
+        cameraParallax: general?.cameraparallax !== false,
         layers: [],
     };
     const allTex = access.listTexPaths();
+    // WE 唯一的位置脚本惯用法：value.x/y 由用户在画布上的百分比属性驱动。
+    //   value.x = scriptProperties.x * engine.canvasSize.x; value.y = ...
+    // baked value 只是编辑器快照，换分辨率或改用户值后必须按画布尺寸重算。
+    const CANVAS_ORIGIN_X = 'value.x=scriptproperties.x*engine.canvassize.x';
+    const CANVAS_ORIGIN_Y = 'value.y=scriptproperties.y*engine.canvassize.y';
+    const canvasOriginValue = (node) => {
+        if (!node || typeof node !== 'object' || Array.isArray(node))
+            return undefined;
+        if (typeof node.script !== 'string' || !node.scriptproperties || typeof node.scriptproperties !== 'object')
+            return undefined;
+        const script = node.script.replace(/\s+/g, '').toLowerCase();
+        if (!script.includes(CANVAS_ORIGIN_X) || !script.includes(CANVAS_ORIGIN_Y))
+            return undefined;
+        const part = (name) => {
+            const entry = node.scriptproperties[name];
+            if (!entry || typeof entry !== 'object')
+                return undefined;
+            const n = Number(resolveBinding(entry));
+            return Number.isFinite(n) ? n : undefined;
+        };
+        const nx = part('x');
+        const ny = part('y');
+        if (nx === undefined || ny === undefined)
+            return undefined;
+        const baked = typeof node.value === 'string' ? node.value.trim().split(/\s+/).map(parseFloat) : [];
+        const z = baked.length >= 3 && Number.isFinite(baked[2]) ? baked[2] : 0;
+        return [nx * width, ny * height, z];
+    };
     const parseVec3 = (val, def) => {
+        // Scripted / user-bound vectors keep their last resolved value here:
+        // { script, scriptproperties, value: "x y z" }. Treating them as
+        // "missing" shifts every descendant (group origins included).
+        const canvasOrigin = canvasOriginValue(val);
+        if (canvasOrigin)
+            return canvasOrigin;
+        val = bindingValueOf(val);
         if (typeof val === 'string') {
             const parts = val.trim().split(/\s+/).map(parseFloat);
             if (parts.length >= 3 && !parts.some(isNaN))
@@ -1911,7 +2349,26 @@ function buildSceneManifestVia(access, token) {
         }
         return def;
     };
-    const props = project?.general?.properties;
+    const parseVec2 = (val, def) => {
+        val = bindingValueOf(val);
+        if (typeof val === 'number' && Number.isFinite(val))
+            return [val, val];
+        if (typeof val === 'string') {
+            const parts = val.trim().split(/\s+/).map(parseFloat);
+            if (parts.length >= 2 && !parts.some(isNaN))
+                return [parts[0], parts[1]];
+        }
+        return def;
+    };
+    const shaderPropertyValue = (key) => {
+        const known = (props && Object.prototype.hasOwnProperty.call(props, key)) ||
+            (userValues && Object.prototype.hasOwnProperty.call(userValues, key));
+        if (!known)
+            return undefined;
+        noteBinding(key);
+        return propertyValue(key);
+    };
+    // scene.json general.clearcolor is WE's actual scene clear color and —
     // scene.json general.clearcolor is WE's actual scene clear color and —
     // unlike the schemecolor user property — lives INSIDE scene.pkg
     // (project.json only exists in loose project dirs).
@@ -1928,6 +2385,237 @@ function buildSceneManifestVia(access, token) {
         manifest.carStripesColor = parseVec3(props.carstripescolor.value, [0, 0, 0]);
     }
     const is3D = Boolean(scene.camera) || scene.objects.some((o) => typeof o.model === 'string' && o.model.endsWith('.mdl'));
+    const sceneObjects = scene.objects;
+    // `visible` 在 WE 里既可以是布尔，也可以是用户绑定或条件组合框；
+    // 隐藏分组的子对象仍保留 visible=true，必须沿祖先链逐级解析。
+    // 声明在 3D/粒子分支之前：粒子开关（光 / 雾 / 鸟）走的是同一条纪律。
+    const visibleFlag = (node) => {
+        if (node === undefined || node === null || node === true)
+            return true;
+        if (typeof node === 'boolean')
+            return node;
+        if (typeof node === 'number')
+            return node !== 0;
+        if (typeof node === 'string')
+            return !(node === '0' || node.toLowerCase() === 'false');
+        if (typeof node === 'object' && !Array.isArray(node)) {
+            const next = bindingValueOf(node);
+            if (next === node)
+                return true;
+            return visibleFlag(next);
+        }
+        return true;
+    };
+    // Visibility applies to a whole subtree: scene.json keeps visible.value=true
+    // on the children of a hidden group (dual day/night scenes do exactly this),
+    // so looking at the object alone renders both copies at once.
+    const isObjectVisible = (obj) => {
+        const seen = new Set();
+        let cur = obj;
+        for (let depth = 0; cur && depth <= 32; depth++) {
+            if (seen.has(cur))
+                break;
+            seen.add(cur);
+            if (!visibleFlag(cur.visible))
+                return false;
+            if (cur.parent == null)
+                break;
+            cur = sceneObjects.find((o) => o.id === cur.parent);
+        }
+        return true;
+    };
+    // WE 粒子系统与 2D 正交通道同源：带相机的混合场景和纯 2D 场景都得发射，
+    // 所以这条循环排在 is3D 分支之外，而不是藏在 3D 遍历里（否则 2D 壁纸的雾 / 光束永远不出现）。
+    for (const obj of sceneObjects) {
+        if (typeof obj.particle !== 'string')
+            continue;
+            stagedBindings = new Set();
+            const pj = access.readJson(obj.particle);
+            if (!pj)
+                continue;
+            const rendererName = String(Array.isArray(pj.renderer) ? pj.renderer[0]?.name ?? '' : '')
+                .toLowerCase() || 'sprite';
+            // 只模拟「贴图精灵」。rope / ropetrail 要逐帧连线 + eventfollow 子系统，
+            // 这里没实现 ⇒ 鼠标尾迹一族（shu / newproperty16 / newproperty17 / hrbigbmousetrail）
+            // 继续不进面板——判渲染器必须排在可见性之前，否则「尾迹当前是关的」也会
+            // 把 shu 当成生效键交出去。
+            if (rendererName !== 'sprite')
+                continue;
+            // 与图层 / 文字同一条纪律：隐藏系统只交出「此刻为什么看不见」那个键，
+            // 参数细节键等到真出系统时才提交。
+            if (!isObjectVisible(obj)) {
+                commitStagedBindings();
+                continue;
+            }
+            const emitter = Array.isArray(pj.emitter) ? pj.emitter[0] : undefined;
+            const init = Array.isArray(pj.initializer) ? pj.initializer : [];
+            const ops = Array.isArray(pj.operator) ? pj.operator : [];
+            const byName = (n) => init.find((i) => i?.name === n);
+            const opByName = (n) => ops.find((o) => o?.name === n);
+            const life = byName('lifetimerandom');
+            const size = byName('sizerandom');
+            const vel = byName('velocityrandom');
+            const col = byName('colorrandom');
+            const alphaInit = byName('alpharandom');
+            const rotInit = byName('rotationrandom');
+            const fadeOp = opByName('alphafade');
+            const moveOp = opByName('movement');
+            const oscOp = opByName('oscillatealpha');
+            const num = (v, d) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
+            // 材质给出贴图引用与混合模式：additive 加色（雾 / 光束 / 流光），
+            // translucent 常规 alpha（鸟 / 星星这类实心精灵）。
+            let texRef = '';
+            let blending = 'additive';
+            if (typeof pj.material === 'string') {
+                const matJson = access.readJson(pj.material);
+                const pass0 = Array.isArray(matJson?.passes) ? matJson.passes[0] : undefined;
+                texRef = Array.isArray(pass0?.textures) ? String(pass0.textures[0] ?? '') : '';
+                const blend = typeof pass0?.blending === 'string'
+                    ? pass0.blending
+                    : typeof matJson?.blending === 'string'
+                        ? matJson.blending
+                        : '';
+                if (blend)
+                    blending = blend.toLowerCase();
+            }
+            if (!texRef)
+                continue;
+            const want = texRef.toLowerCase().replace(/\.tex$/i, '');
+            const texPath = allTex.find((p) => {
+                const lower = p.toLowerCase().replace(/\.tex$/i, '');
+                return lower === want || lower === 'materials/' + want || lower.endsWith('/' + want);
+            });
+            // 包里没有 ⇒ WE 安装目录的内置贴图（官方雾 / 光束 / 星光预设都这样）。
+            // URL 与包内纹理同一个前缀（否则主线程的 blob 重写认不出，贴图永远加载不上），
+            // 闸门表却按裸资源键索引——那是 blob 表的键空间。
+            const builtInRel = WE_BUILT_IN_PREFIX + 'materials/' + texRef.replace(/\.tex$/i, '') + '.tex';
+            const texUrl = texPath ? resourceBase + texPath : resourceBase + builtInRel;
+            // 粒子活在对象的局部空间：局部偏移与精灵尺寸按 scale 逐轴映射（负值只镜像）。
+            // 速度与重力保留预设原值，见下面的 gravity 注释。
+            const objOrigin = parseVec3(obj.origin, [0, 0, 0]);
+            const objScale = parseVec3(obj.scale, [1, 1, 1]);
+            const emitterOrigin = parseVec3(emitter?.origin, [0, 0, 0]);
+            const scaleX = objScale[0] || 1;
+            const scaleY = objScale[1] || 1;
+            const scaleZ = objScale[2] || 1;
+            // boxrandom 的 distancemax 是 vec3（各轴半宽），sphererandom 是标量半径。
+            const distVec = parseVec3(emitter?.distancemax, null);
+            const distMax = distVec
+                ? Math.max(...distVec.map(Math.abs))
+                : num(emitter?.distancemax, 10);
+            const distMin = num(emitter?.distancemin, 0);
+            // instanceoverride：作者在同一份预设上做的逐实例微调（数量 / 速率 /
+            // 尺寸 / 透明度 / 染色），值本身也可能是用户绑定，所以走 bindingValueOf。
+            const ovr = obj.instanceoverride && typeof obj.instanceoverride === 'object'
+                ? obj.instanceoverride
+                : {};
+            const ovrNum = (key, d) => num(bindingValueOf(ovr[key]), d);
+            const maxCountRaw = num(pj.maxcount, 128);
+            // `count` 只在作者真写了的时候才生效：<1 当比例，≥1 当绝对上限
+            // （绝不放大预设自带的数量上限）。官方 Stars 写的就是 5。
+            const countRaw = bindingValueOf(ovr.count);
+            const maxCount = typeof countRaw !== 'number' || !Number.isFinite(countRaw)
+                ? Math.max(1, Math.round(maxCountRaw))
+                : Math.max(1, Math.round(countRaw < 1 ? maxCountRaw * countRaw : Math.min(countRaw, maxCountRaw)));
+            const tint = parseVec3(bindingValueOf(ovr.colorn), null);
+            const alphaMul = ovrNum('alpha', 1);
+            const objAlphaNum = Number(bindingValueOf(obj.alpha));
+            const objAlpha = Number.isFinite(objAlphaNum) ? Math.min(1, Math.max(0, objAlphaNum)) : 1;
+            const sizeMul = ovrNum('size', 1);
+            const rateMul = ovrNum('rate', 1);
+            const colorOf = (node, dflt) => {
+                const rgb = parseVec3(node, dflt).map((c) => Math.min(1, Math.max(0, c / 255)));
+                return tint ? rgb.map((c, i) => c * (tint[i] ?? 1)) : rgb;
+            };
+            const grav = parseVec3(moveOp?.gravity, [0, 0, 0]);
+            // 序列帧：WE 官方把尺寸编进文件名（birds_128x120x16 ⇒ 128×120 一格、16 帧），
+            // 列数由播放器按已加载纹理的实际宽度换算。内置资产没有这个约定，
+            // 帧表在 .tex 的 TEXS 段里，由主线程取到字节后补上（见 sceneBackdrop）。
+            const sheet = /(\d+)x(\d+)x(\d+)$/i.exec(texRef.replace(/\.tex$/i, ''));
+            // 吸引点：controlpointattract 按 operator.controlpoint 序号去 instanceoverride
+            // 里取作者写的绝对坐标（鸟群飞越天空靠它收尾）。
+            const attractions = [];
+            for (const op of ops) {
+                if (op?.name !== 'controlpointattract')
+                    continue;
+                const idx = num(op.controlpoint, 0);
+                const raw = bindingValueOf(ovr['controlpoint' + idx]);
+                const point = typeof raw === 'string' ? parseVec3(raw, null) : null;
+                if (!point)
+                    continue;
+                attractions.push({
+                    x: point[0],
+                    y: point[1],
+                    scale: num(op.scale, 128),
+                    threshold: num(op.threshold, 1024),
+                });
+            }
+            const system = {
+                name: typeof obj.name === 'string' ? obj.name : 'particles',
+                texUrl,
+                origin: [
+                    objOrigin[0] + emitterOrigin[0] * scaleX,
+                    objOrigin[1] + emitterOrigin[1] * scaleY,
+                    objOrigin[2] + emitterOrigin[2] * scaleZ,
+                ],
+                rate: Math.max(0, num(emitter?.rate, 30) * rateMul),
+                maxCount,
+                lifeMin: num(life?.min, 2),
+                lifeMax: num(life?.max, 4),
+                sizeMin: num(size?.min, 0.1) * sizeMul,
+                sizeMax: num(size?.max, 0.15) * sizeMul,
+                distMin,
+                distMax,
+                velMin: parseVec3(vel?.min, [0, 0, -10]),
+                velMax: parseVec3(vel?.max, [0, 0, -20]),
+                colorMin: colorOf(col?.min, [200, 200, 200]),
+                colorMax: colorOf(col?.max, [255, 255, 255]),
+                // ---- 2D 通道额外字段（3D 通道读不到也不影响）----
+                blend: blending === 'translucent' ? 'translucent' : 'additive',
+                angle: parseVec3(obj.angles, [0, 0, 0])[2],
+                sizeScale: [Math.abs(scaleX), Math.abs(scaleY)],
+                // 负 scale 是作者做的镜像（真机 day2 的 scale.x = −1：鸟群贴图朝左，
+                // 镜像后才与 +X 的飞行方向一致）。只翻纹理采样，不翻位置偏移。
+                flipX: scaleX < 0,
+                flipY: scaleY < 0,
+                box: distVec
+                    ? [Math.abs(distVec[0] * scaleX), Math.abs(distVec[1] * scaleY)]
+                    : undefined,
+                directions: parseVec3(emitter?.directions, [1, 1, 1]),
+                // 速度与重力交预设原值（场景像素/秒），不随对象 scale 放大：官方雾预设的
+                // scale 是 10 倍，跟着放大会把 25~80 px/s 的缓漂变成 800 px/s 的急流。
+                // WE 的模拟在对象局部空间跑、再由模型矩阵映射，严格讲应当放大；这里按
+                // 「作者给的是肉眼调过的漂移速度」取原值，是一处已知的解释性偏差。
+                gravity: [grav[0], grav[1]],
+                drag: num(moveOp?.drag, 0),
+                alphaMin: num(alphaInit?.min, 1) * alphaMul * objAlpha,
+                alphaMax: num(alphaInit?.max, 1) * alphaMul * objAlpha,
+                rotMin: num(rotInit?.min, 0),
+                rotMax: num(rotInit?.max, 0),
+                fadeIn: fadeOp && fadeOp.fadeintime !== undefined ? num(fadeOp.fadeintime, 0) : undefined,
+                fadeOut: fadeOp && fadeOp.fadeouttime !== undefined ? num(fadeOp.fadeouttime, 0) : undefined,
+                oscFreq: oscOp ? num(oscOp.frequencymax, 1) : undefined,
+                oscMin: oscOp ? num(oscOp.scalemin, 0) : undefined,
+                frames: sheet
+                    ? { w: Number(sheet[1]), h: Number(sheet[2]), count: Number(sheet[3]) }
+                    : undefined,
+                attractions: attractions.length > 0 ? attractions : undefined,
+            };
+            manifest.particles3d = manifest.particles3d ?? [];
+            manifest.particles3d.push(system);
+            // 内置贴图取不到（没装 WE）⇒ 主线程按这张表撤掉本系统的键，
+            // 面板不会出现「拨了开关但画面上没有任何东西消费它」。
+            if (!texPath) {
+                const gate = manifest.builtInAssetKeys ?? (manifest.builtInAssetKeys = {});
+                const keys = gate[builtInRel] ?? (gate[builtInRel] = []);
+                for (const name of stagedBindings) {
+                    if (!keys.includes(name))
+                        keys.push(name);
+                }
+            }
+            commitStagedBindings();
+    }
+
     if (is3D) {
         manifest.is3D = true;
         const cam = scene.camera;
@@ -1989,6 +2677,7 @@ function buildSceneManifestVia(access, token) {
             const decodedMeshes = parseMdl(mdlFile.bytes);
             if (decodedMeshes.length === 0)
                 continue;
+            stagedBindings = new Set();
             const baseName = obj.model.split('/').pop()?.replace(/\.mdl$/i, '');
             // Resolve a WE material texture reference ('ricepod/jet') to a tex path.
             const resolveTexRef = (ref) => {
@@ -1998,7 +2687,7 @@ function buildSceneManifestVia(access, token) {
                     return lower === want || lower === 'materials/' + want || lower.endsWith('/' + want);
                 });
             };
-            const meshes = decodedMeshes.map((m) => {
+            const meshes = decodedMeshes.map((m, meshIndex) => {
                 let subTex;
                 let shader;
                 let additive;
@@ -2047,8 +2736,7 @@ function buildSceneManifestVia(access, token) {
                                 for (const [key, uniformName] of Object.entries(usv)) {
                                     if (typeof uniformName !== 'string')
                                         continue;
-                                    const propDef = props?.[key];
-                                    const pv = propDef?.value;
+                                    const pv = shaderPropertyValue(key);
                                     if (typeof pv === 'string') {
                                         const col = parseVec3(pv, [1, 1, 1]);
                                         if (uniformName === 'tint')
@@ -2093,6 +2781,8 @@ function buildSceneManifestVia(access, token) {
                     subTex = allTex.find((p) => p.toLowerCase().includes(baseName.toLowerCase()) && !p.toLowerCase().includes('normal') && !p.toLowerCase().includes('mask'));
                 }
                 return {
+                    // 稳定网格标识：同场景切换预设时播放器按它复用已上传的 GPU 缓冲。
+                    meshKey: `${typeof obj.id === 'number' || typeof obj.id === 'string' ? obj.id : (typeof obj.name === 'string' ? obj.name : 'model')}:${meshIndex}`,
                     vCount: m.vCount,
                     iCount: m.iCount,
                     posB64: Buffer.from(m.pos.buffer, m.pos.byteOffset, m.pos.byteLength).toString('base64'),
@@ -2122,6 +2812,7 @@ function buildSceneManifestVia(access, token) {
                 scale: parseVec3(obj.scale, [1, 1, 1]),
                 meshes,
             });
+            commitStagedBindings();
         }
         // Sprite objects (billboard glows like the sun) and 3D particle systems
         // (starfield streaks) ride along with the 3D scene.
@@ -2136,6 +2827,7 @@ function buildSceneManifestVia(access, token) {
                         ? matJson.passes[0]
                         : undefined;
                     if (pass0) {
+                        stagedBindings = new Set();
                         let texPath;
                         if (Array.isArray(pass0.textures)) {
                             for (const t of pass0.textures) {
@@ -2158,7 +2850,7 @@ function buildSceneManifestVia(access, token) {
                             for (const [key, uniformName] of Object.entries(usv)) {
                                 if (typeof uniformName !== 'string')
                                     continue;
-                                const pv = props?.[key]?.value;
+                                const pv = shaderPropertyValue(key);
                                 if (typeof pv === 'string')
                                     userColors[uniformName] = parseVec3(pv, [1, 1, 1]);
                                 else if (typeof pv === 'number' && Number.isFinite(pv))
@@ -2173,11 +2865,13 @@ function buildSceneManifestVia(access, token) {
                             userColors: Object.keys(userColors).length > 0 ? userColors : undefined,
                             userNums: Object.keys(userNums).length > 0 ? userNums : undefined,
                         });
+                        commitStagedBindings();
                     }
                     continue;
                 }
             }
             if (typeof obj.sprite === 'string') {
+                stagedBindings = new Set();
                 const spriteJson = access.readJson(obj.sprite);
                 const pass0 = Array.isArray(spriteJson?.passes)
                     ? spriteJson.passes[0]
@@ -2198,59 +2892,12 @@ function buildSceneManifestVia(access, token) {
                     origin: parseVec3(obj.origin, [0, 0, 0]),
                     scale: parseVec3(obj.scale, [1, 1, 1]),
                 });
-            }
-            if (typeof obj.particle === 'string') {
-                const pj = access.readJson(obj.particle);
-                if (!pj)
-                    continue;
-                const emitter = Array.isArray(pj.emitter) ? pj.emitter[0] : undefined;
-                const init = Array.isArray(pj.initializer) ? pj.initializer : [];
-                const byName = (n) => init.find((i) => i.name === n);
-                const life = byName('lifetimerandom');
-                const size = byName('sizerandom');
-                const vel = byName('velocityrandom');
-                const col = byName('colorrandom');
-                let texPath;
-                if (typeof pj.material === 'string') {
-                    const matJson = access.readJson(pj.material);
-                    const pass0 = Array.isArray(matJson?.passes) ? matJson.passes[0] : undefined;
-                    const texRef = Array.isArray(pass0?.textures) ? String(pass0.textures[0] ?? '') : '';
-                    if (texRef) {
-                        const want = texRef.toLowerCase().replace(/\.tex$/i, '');
-                        texPath = allTex.find((p) => {
-                            const lower = p.toLowerCase().replace(/\.tex$/i, '');
-                            return lower === want || lower === 'materials/' + want || lower.endsWith('/' + want);
-                        });
-                    }
-                }
-                const num = (v, d) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
-                const objOrigin = parseVec3(obj.origin, [0, 0, 0]);
-                const emitterOrigin = parseVec3(emitter?.origin, [0, 0, 0]);
-                manifest.particles3d = manifest.particles3d ?? [];
-                manifest.particles3d.push({
-                    name: typeof obj.name === 'string' ? obj.name : 'particles',
-                    texUrl: texPath ? resourceBase + texPath : undefined,
-                    origin: [
-                        objOrigin[0] + emitterOrigin[0],
-                        objOrigin[1] + emitterOrigin[1],
-                        objOrigin[2] + emitterOrigin[2],
-                    ],
-                    rate: num(emitter?.rate, 30),
-                    maxCount: num(pj.maxcount, 128),
-                    lifeMin: num(life?.min, 2),
-                    lifeMax: num(life?.max, 4),
-                    sizeMin: num(size?.min, 0.1),
-                    sizeMax: num(size?.max, 0.15),
-                    distMin: num(emitter?.distancemin, 2),
-                    distMax: num(emitter?.distancemax, 10),
-                    velMin: parseVec3(vel?.min, [0, 0, -10]),
-                    velMax: parseVec3(vel?.max, [0, 0, -20]),
-                    colorMin: parseVec3(col?.min, [200, 200, 200]).map((c) => c / 255),
-                    colorMax: parseVec3(col?.max, [255, 255, 255]).map((c) => c / 255),
-                });
+                commitStagedBindings();
             }
         }
         if (manifest.models.length > 0) {
+            if (usedBindings.size > 0)
+                manifest.userBindings = Array.from(usedBindings).sort();
             return manifest;
         }
     }
@@ -2269,7 +2916,206 @@ function buildSceneManifestVia(access, token) {
     const sparkleTexPath = allTex.find((p) => p.toLowerCase().includes('sparkle') || p.toLowerCase().includes('halo') || p.toLowerCase().includes('star'));
     if (sparkleTexPath)
         manifest.sparkleTex = resourceBase + sparkleTexPath;
-    const sceneObjects = scene.objects;
+    // Puppet rigs are read once per host object; attachment names resolve to
+    // bind-pose sockets in that puppet's model space.
+    const puppetRigCache = new Map();
+    const puppetRigOf = (obj) => {
+        if (!obj || typeof obj.image !== 'string')
+            return null;
+        if (puppetRigCache.has(obj))
+            return puppetRigCache.get(obj);
+        let rig = null;
+        const modelJson = access.readJson(obj.image);
+        if (modelJson && typeof modelJson.puppet === 'string') {
+            const file = access.readFile(modelJson.puppet);
+            if (file) {
+                const parsed = parseMdlRig(file.bytes);
+                if (parsed.boneCount > 0) {
+                    rig = parsed;
+                    rig.byName = new Map(parsed.attachments.map((a) => [a.name, a]));
+                }
+            }
+        }
+        puppetRigCache.set(obj, rig);
+        return rig;
+    };
+    const encodeF32 = (typed) => Buffer.from(typed.buffer, typed.byteOffset, typed.byteLength).toString('base64');
+    // The player needs compact bind data + only the tracks that actually move.
+    // Constant tracks that differ from bind stay: base clips may hold an
+    // explicit static pose, while additive clips turn them into zero deltas.
+    const buildPuppetPayload = (rig, id) => {
+        const boneCount = rig.boneCount;
+        const inverseBind = new Float32Array(boneCount * 16);
+        const bindTrs = new Float32Array(boneCount * 9);
+        rig.bones.forEach((bone, i) => {
+            inverseBind.set(mat4Invert(bone.world), i * 16);
+            bindTrs.set(decomposeMdlTrs(bone.matrix), i * 9);
+        });
+        const clips = {};
+        for (const clip of rig.clips) {
+            if (clip.type !== 'loop')
+                continue;
+            const tracks = [];
+            for (let b = 0; b < clip.tracks.length && b < boneCount; b++) {
+                const keys = clip.tracks[b];
+                let varying = false;
+                for (let f = 1; f <= clip.frameCount && !varying; f++) {
+                    for (let k = 0; k < 9; k++) {
+                        if (Math.abs(keys[f * 9 + k] - keys[k]) > 1e-4) {
+                            varying = true;
+                            break;
+                        }
+                    }
+                }
+                let overridesBind = false;
+                for (let k = 0; k < 9; k++) {
+                    if (Math.abs(keys[k] - bindTrs[b * 9 + k]) > 1e-3) {
+                        overridesBind = true;
+                        break;
+                    }
+                }
+                if (!varying && !overridesBind)
+                    continue;
+                tracks.push({ bone: b, keysB64: encodeF32(keys) });
+            }
+            clips[clip.id] = {
+                id: clip.id,
+                fps: clip.fps,
+                frameCount: clip.frameCount,
+                loop: true,
+                tracks,
+            };
+        }
+        return {
+            id,
+            boneCount,
+            parents: rig.bones.map((bone) => bone.parent),
+            inverseBindB64: encodeF32(inverseBind),
+            bindTrsB64: encodeF32(bindTrs),
+            clips,
+        };
+    };
+    const puppetPayloadCache = new Map();
+    const puppetPayloadOf = (hostObj) => {
+        const modelJson = hostObj && typeof hostObj.image === 'string' ? access.readJson(hostObj.image) : null;
+        if (!modelJson || typeof modelJson.puppet !== 'string')
+            return null;
+        const id = modelJson.puppet;
+        if (puppetPayloadCache.has(id))
+            return puppetPayloadCache.get(id);
+        const rig = puppetRigOf(hostObj);
+        let payload = null;
+        if (rig && rig.boneCount > 0) {
+            payload = buildPuppetPayload(rig, id);
+            manifest.puppets = manifest.puppets ?? {};
+            manifest.puppets[id] = payload;
+        }
+        puppetPayloadCache.set(id, payload);
+        return payload;
+    };
+    // scene.animationlayers: the first normal layer is the base pose; additive
+    // loops (blink, breathing, weight shift) ride on top. A single-shot clip is
+    // script-triggered (click), so it must not autoplay.
+    const animationCache = new Map();
+    const animationOf = (obj, payload) => {
+        if (!payload)
+            return undefined;
+        const cached = animationCache.get(obj);
+        if (cached) {
+            for (const name of cached.bindings)
+                noteBinding(name);
+            return cached.entries;
+        }
+        const entries = [];
+        const bindings = new Set();
+        const listed = Array.isArray(obj.animationlayers) ? obj.animationlayers : [];
+        for (const layer of listed) {
+            if (!layer || typeof layer !== 'object')
+                continue;
+            const clip = payload.clips[layer.animation];
+            if (!clip)
+                continue;
+            const additive = layer.additive === true;
+            if (additive && !clip.loop)
+                continue;
+            const visibleNode = layer.visible;
+            const scriptProps = visibleNode && typeof visibleNode === 'object' ? visibleNode.scriptproperties : null;
+            const pctEntry = scriptProps ? scriptProps.percentage : null;
+            const pct = collectBindings(bindings, () => bindingValueOf(pctEntry));
+            const rateVal = collectBindings(bindings, () => bindingValueOf(layer.rate));
+            // 隐藏只跳过播放，不跳过绑定收集：用户随时可能把开关打开。
+            const visible = collectBindings(bindings, () => visibleFlag(visibleNode));
+            if (!visible)
+                continue;
+            const offset = typeof pct === 'number' && Number.isFinite(pct) ? Math.min(1, Math.max(0, pct)) : 0;
+            const rate = typeof rateVal === 'number' && Number.isFinite(rateVal) && rateVal > 0 ? rateVal : 1;
+            const blend = typeof layer.blend === 'number' && Number.isFinite(layer.blend) ? Math.min(1, Math.max(0, layer.blend)) : 1;
+            entries.push({ id: layer.animation, additive, offset, rate, blend });
+        }
+        animationCache.set(obj, { entries, bindings });
+        for (const name of bindings)
+            noteBinding(name);
+        return entries;
+    };
+    // Follow the nearest attachment ancestor as a rigid subtree: the socket
+    // changes by Δp/Δθ and every descendant layer rotates around the attachment
+    // pivot by the same Δθ. Without this the body idles while hair stays put.
+    const attachmentFollowCache = new Map();
+    const followOf = (obj) => {
+        let attached = null;
+        for (let cur = obj, depth = 0; cur && depth <= 32; depth++) {
+            if (typeof cur.attachment === 'string' && cur.parent != null) {
+                attached = cur;
+                break;
+            }
+            cur = sceneObjects.find((o) => o.id === cur.parent);
+        }
+        if (!attached)
+            return undefined;
+        const cached = attachmentFollowCache.get(attached);
+        if (cached) {
+            for (const name of cached.bindings)
+                noteBinding(name);
+            return cached.follow;
+        }
+        const bindings = new Set();
+        let follow = null;
+        const host = sceneObjects.find((o) => o.id === attached.parent);
+        if (host) {
+            const rig = puppetRigOf(host);
+            const payload = puppetPayloadOf(host);
+            const attachment = rig && rig.byName.get(attached.attachment);
+            if (rig && payload && attachment) {
+                const hostTf = collectBindings(bindings, () => resolveObjectTransform(host));
+                const socket = attachment.socket;
+                const c = Math.cos(hostTf.angle);
+                const s = Math.sin(hostTf.angle);
+                // Rigid subtree delta of an attachment: bind socket B and
+                // animated socket A give x' = R(Δθ)(x - tB) + tA. The player
+                // therefore rotates every descendant layer around the bind
+                // socket's screen point and translates by S(tA - tB).
+                follow = {
+                    puppetId: payload.id,
+                    animation: animationOf(host, payload) || [],
+                    bone: attachment.boneIndex,
+                    local: Array.from(attachment.local),
+                    bindSocket: [socket[12], socket[13]],
+                    bindAngle: Math.atan2(socket[1], socket[0]),
+                    screenOrigin: [hostTf.origin[0], hostTf.origin[1]],
+                    screenMap: [
+                        hostTf.scale[0] * c,
+                        hostTf.scale[0] * s,
+                        -hostTf.scale[1] * s,
+                        hostTf.scale[1] * c,
+                    ],
+                };
+            }
+        }
+        attachmentFollowCache.set(attached, { follow, bindings });
+        for (const name of bindings)
+            noteBinding(name);
+        return follow;
+    };
     // Fold the parent transform chain (linux-wallpaperengine CImage::resolveTransform):
     // a child's origin/scale/angles are relative to the already-resolved parent, so
     // grouped objects (props like utility poles) only land correctly after folding.
@@ -2289,10 +3135,32 @@ function buildSceneManifestVia(access, token) {
         let origin = parseVec3(root.origin, [width / 2, height / 2, 0]);
         let scale = parseVec3(root.scale, [1, 1, 1]);
         let angle = parseVec3(root.angles, [0, 0, 0])[2];
+        // 文字字号吃的 scale 与位置不同：对象自身与中间父组都算，但最外层容器
+        // （场景里的「组件」根组）只挪位置、不放大字形。真机 3723257973 的 WE 参考图
+        // 三处独立锚点：问候语 32×0.23025×3.125≈23 与帧率 24×0.948≈22.8 字高相当；
+        // 竖排 SUN 与日期字高比≈3.2 ≈ 96.653×0.85 / (140×0.18)；把根组的 0.28 也乘进去
+        // 会让问候语只剩 6.45、SUN 只剩 23，与参考图完全对不上。
+        let innerScale = chain.length === 1 ? parseVec3(obj.scale, [1, 1, 1]) : [1, 1, 1];
         for (let i = chain.length - 2; i >= 0; i--) {
-            const localOrigin = parseVec3(chain[i].origin, [0, 0, 0]);
             const localScale = parseVec3(chain[i].scale, [1, 1, 1]);
+            innerScale = [innerScale[0] * localScale[0], innerScale[1] * localScale[1], innerScale[2] * localScale[2]];
             const localAngle = parseVec3(chain[i].angles, [0, 0, 0])[2];
+            let localOrigin = parseVec3(chain[i].origin, [0, 0, 0]);
+            // An attachment's origin lives in the host puppet's bone space
+            // (bone world matrix × MDAT socket), not in the host object origin
+            // space used by plain children.
+            if (typeof chain[i].attachment === 'string') {
+                const rig = puppetRigOf(chain[i + 1]);
+                const attachment = rig && rig.byName.get(chain[i].attachment);
+                const socket = attachment && attachment.socket;
+                if (socket) {
+                    localOrigin = [
+                        socket[0] * localOrigin[0] + socket[4] * localOrigin[1] + socket[12],
+                        socket[1] * localOrigin[0] + socket[5] * localOrigin[1] + socket[13],
+                        socket[2] * localOrigin[0] + socket[6] * localOrigin[1] + socket[14],
+                    ];
+                }
+            }
             const c = Math.cos(angle);
             const s = Math.sin(angle);
             origin = [
@@ -2303,13 +3171,573 @@ function buildSceneManifestVia(access, token) {
             scale = [scale[0] * localScale[0], scale[1] * localScale[1], scale[2] * localScale[2]];
             angle += localAngle;
         }
-        return { origin, scale, angle };
+        return { origin, scale, angle, innerScale };
     };
     // In real WE scenes the water reflection is an object effect
     // (effects/reflection/effect.json), not only a conventionally named object.
     const hasReflectionEffect = (obj) => (Array.isArray(obj.effects) ? obj.effects : []).some((e) => typeof e?.file === 'string' &&
         e.file.toLowerCase().includes('effects/reflection'));
+    // WE 的「云层流动」不是贴图动画，而是挂在图像对象上的 effects/waterflow 效果：
+    // 用一张流场遮罩（g_Texture1，rg 编码方向）把对象自身的图按时间扰动 UV，g_Texture2 是
+    // 相位图（本包天空填的是 WE 内置 `util/white`，即全场同相）。scene.json 的 effects 条目
+    // 里带着参数覆盖——可见性绑到 newproperty9、速度绑到 newproperty10、strength 是字面量
+    // （effect.json 只是模板，里面没有这些）。
+    //
+    // ⚠ 不要复用上游 MIT 的 progFlow：那是 WE `flowimage`（三张星云图各自漂移 + 乒乓交叉淡入，
+    // u_amp 直接是 UV 位移量）的程序，拿它画单张 waterflow 会把 strength=5 当成 0.5 屏位移，
+    // 天空被抹平、星点整片消失（真机截图实锤，见播放器侧 fsWaterflow）。
+    //
+    // 诚实闸门：遮罩在包里取不到就整条不发、也不提交任何键——开关必须对应真实位移。
+    // 作者硬关掉的效果（visible 是字面量 false，本包 day4/night4 即如此）同样不发：
+    // 没有开关，也没有可画的位移。只有「用户能改」时（visible 带绑定）才把描述符留下，
+    // 因为关掉它正是这一层不动的原因，换回 true 就动。
+    const waterflowOf = (obj, resolveTexRef) => {
+        for (const effect of Array.isArray(obj.effects) ? obj.effects : []) {
+            if (typeof effect?.file !== 'string' || !effect.file.toLowerCase().includes('effects/waterflow'))
+                continue;
+            const pass = Array.isArray(effect.passes) ? effect.passes[0] : null;
+            // 槽位顺序即 g_Texture0/1/2：0=对象自身的图（渲染期已知），1=流场遮罩，2=相位图。
+            const maskRef = String(pass?.textures?.[1] ?? '');
+            if (!maskRef || maskRef.startsWith('_rt_'))
+                continue;
+            const maskPath = resolveTexRef(maskRef);
+            if (!maskPath || !access.readFile(maskPath))
+                continue;
+            const csv = pass?.constantshadervalues ?? {};
+            const visibleNode = effect.visible;
+            const hasBinding = Boolean(visibleNode) && typeof visibleNode === 'object' && visibleNode.user !== undefined;
+            const enabled = bindingValueOf(visibleNode) !== false;
+            if (!enabled && !hasBinding)
+                continue;
+            // 速度/强度要在这道闸门之后才解析：它们也带绑定，提前折叠就会把
+            // 「作者硬关的效果」那把没人消费的键漏进面板。
+            const speed = Number(bindingValueOf(csv.speed));
+            const strength = Number(bindingValueOf(csv.strength));
+            const phasescale = Number(bindingValueOf(csv.phasescale));
+            // 相位图取不到不判死：WE 自己在这张包上用的就是常量白图，播放器有 1×1 白兜底。
+            const phaseRef = String(pass?.textures?.[2] ?? '');
+            const phasePath = phaseRef && !phaseRef.startsWith('_rt_') ? resolveTexRef(phaseRef) : '';
+            return {
+                maskUrl: resourceBase + maskPath,
+                phaseUrl: phasePath && access.readFile(phasePath) ? resourceBase + phasePath : '',
+                speed: Number.isFinite(speed) && speed > 0 ? speed : 0.03,
+                strength: Number.isFinite(strength) && strength > 0 ? strength : 1,
+                phasescale: Number.isFinite(phasescale) && phasescale > 0 ? phasescale : 1,
+                enabled,
+            };
+        }
+        return null;
+    };
+    // 视差关掉时深度不再参与渲染，绑定也不应伪装成可调项。
+    const depthOf = (obj) => manifest.cameraParallax
+        ? parseVec2(obj.parallaxDepth, [0, 0])
+        : withoutBindings(() => parseVec2(obj.parallaxDepth, [0, 0]));
+    // ---- 文字对象（WE 的 TextObject）-------------------------------------------
+    // 上游只认 `image`，文字落在「无 image ⇒ 非图层」那条判断里被整条丢弃，于是自定义
+    // 文字 / 时钟 / 日期这一层在页面上彻底消失，连带它们的字号、透明度、字体选择开关
+    // 一起进不了面板。这里按 CText 的实际语义补发射：字形 quad 居中于对象原点，字号吃
+    // 对象自身与中间父组的 scale、不吃最外层组件根组（真机依据见 textLayerOf 的 sizeMul），
+    // size / horizontalalign / padding 三个字段渲染器根本不读。
+    //
+    // 诚实闸门不变：脚本化文本不执行 JS，只认 Clock / Date / 问候语 / 帧率计四类
+    // 可静态求值的脚本形状，并把脚本里烘焙的表按当前档位抠出来交给播放器本地驱动。
+    // 认不出来的一律跳过、不提交任何键——宁可少一个开关，也不给一个拖了没反应的假开关。
+    const unescapeJsString = (raw) => raw
+        .replace(/\\n/g, '\n')
+        .replace(/\\t/g, '\t')
+        .replace(/\\r/g, '\r')
+        .replace(/\\'/g, "'")
+        .replace(/\\\\/g, '\\');
+    // scriptproperties 的条目既可能是字面量，也可能是用户绑定（官方示例两处都有）。
+    const spValue = (node, name) => {
+        const entry = node.scriptproperties ? node.scriptproperties[name] : undefined;
+        return entry === undefined ? undefined : bindingValueOf(entry);
+    };
+    const spFlag = (node, name, def) => {
+        const v = spValue(node, name);
+        return v === undefined ? def : visibleFlag(v);
+    };
+    const spText = (node, name, def) => {
+        const v = spValue(node, name);
+        return v === undefined || v === null ? def : String(v);
+    };
+    // ---- 日期脚本的静态求值 ----------------------------------------------------
+    // 官方示例的日期脚本不是格式串：作者用字符串拼接写竖排表（'O' + newLine + 'C' +
+    // newLine + 'T'）、用单元素数组当分隔符（delimiterValue = ['\n\n']）、把日号做成
+    // 补零表 dtt、把年份按字符拆开。只抠字面量会把它们压成互不相干的字母——真机
+    // 3723257973 的竖排日期一度被拼成 "25 A 2026"、星期只剩一个 "S"。这里按当前档位把
+    // 赋值与 return 表达式静态求值（仍然不执行脚本）；任何一环认不出来就整条缺席。
+    const scanIfBlocks = (src) => {
+        const blocks = [];
+        const skipString = (at) => {
+            const quote = src[at];
+            let i = at + 1;
+            while (i < src.length) {
+                if (src[i] === '\\') {
+                    i += 2;
+                    continue;
+                }
+                if (src[i] === quote)
+                    return i + 1;
+                i += 1;
+            }
+            return i;
+        };
+        const braceEnd = (open) => {
+            let depth = 0;
+            for (let i = open; i < src.length; i += 1) {
+                const ch = src[i];
+                if (ch === "'" || ch === '"' || ch === '`') {
+                    i = skipString(i) - 1;
+                    continue;
+                }
+                if (ch === '/' && src[i + 1] === '/') {
+                    while (i < src.length && src[i] !== '\n') i += 1;
+                    continue;
+                }
+                if (ch === '/' && src[i + 1] === '*') {
+                    const end = src.indexOf('*/', i + 2);
+                    i = end < 0 ? src.length : end + 1;
+                    continue;
+                }
+                if (ch === '{') {
+                    depth += 1;
+                }
+                else if (ch === '}') {
+                    depth -= 1;
+                    if (depth === 0)
+                        return i;
+                }
+            }
+            return src.length;
+        };
+        for (let i = 0; i < src.length; i += 1) {
+            const ch = src[i];
+            if (ch === "'" || ch === '"' || ch === '`') {
+                i = skipString(i) - 1;
+                continue;
+            }
+            if (ch === '/' && src[i + 1] === '/') {
+                while (i < src.length && src[i] !== '\n') i += 1;
+                continue;
+            }
+            if (ch === '/' && src[i + 1] === '*') {
+                const end = src.indexOf('*/', i + 2);
+                i = end < 0 ? src.length : end + 1;
+                continue;
+            }
+            if (ch !== 'i' || !src.startsWith('if', i) || /[\w$.]/.test(src[i - 1] || '') || /[\w$]/.test(src[i + 2] || ''))
+                continue;
+            let open = i + 2;
+            while (open < src.length && /\s/.test(src[open])) open += 1;
+            if (src[open] !== '(')
+                continue;
+            let depth = 0;
+            let close = open;
+            for (; close < src.length; close += 1) {
+                if (src[close] === '(')
+                    depth += 1;
+                else if (src[close] === ')' && --depth === 0)
+                    break;
+            }
+            let body = close + 1;
+            while (body < src.length && /\s/.test(src[body])) body += 1;
+            if (src[body] !== '{')
+                continue;
+            blocks.push({ start: body, end: braceEnd(body), cond: src.slice(open + 1, close).trim() });
+        }
+        return blocks;
+    };
+    const normFlag = (value) => {
+        if (value === true || value === 'true' || value === 1 || value === '1')
+            return 'true';
+        if (value === false || value === 'false' || value === 0 || value === '0')
+            return 'false';
+        return String(value);
+    };
+    // 条件只支持 `scriptProperties.<key> ==/!= <字面量>` 的 && / || 组合；其余形状一律
+    // 当不成立（认不出就不该假装这个分支生效）。
+    const condHolds = (node, cond) => cond.split('||').some((orPart) => orPart.split('&&').every((andPart) => {
+        const m = andPart.trim().match(/^scriptProperties\.(\w+)\s*(==|!=)\s*(.+)$/);
+        if (!m)
+            return false;
+        const actual = spValue(node, m[1]);
+        if (actual === undefined)
+            return false;
+        const want = m[3].trim().replace(/^['"]|['"]$/g, '');
+        return (m[2] === '==') === (normFlag(actual) === normFlag(want));
+    }));
+    const activeAt = (node, blocks, at) => blocks.every((block) => block.start >= at || block.end <= at || condHolds(node, block.cond));
+    const literalOf = (expr) => {
+        const s = String(expr).trim();
+        const one = s.match(/^'((?:[^'\\]|\\.)*)'$/);
+        if (one)
+            return unescapeJsString(one[1]);
+        const two = s.match(/^"((?:[^"\\]|\\.)*)"$/);
+        if (two)
+            return unescapeJsString(two[1]);
+        const arr = s.match(/^\[\s*('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")\s*\]$/);
+        return arr ? literalOf(arr[1]) : null;
+    };
+    // 取该变量在当前档位下最后一次生效的赋值表达式（后写覆盖前写）。
+    const varExprs = (src, node, blocks, name) => {
+        const re = new RegExp('(?:^|[^\\w$.])' + name + '\\s*=(?!=)', 'g');
+        const out = [];
+        let m;
+        while ((m = re.exec(src))) {
+            if (!activeAt(node, blocks, m.index))
+                continue;
+            let end = m.index + m[0].length;
+            while (end < src.length && src[end] !== ';' && src[end] !== '}')
+                end += 1;
+            out.push(src.slice(m.index + m[0].length, end).trim());
+        }
+        return out;
+    };
+    const varValueOf = (src, node, blocks, name) => {
+        const exprs = varExprs(src, node, blocks, name);
+        if (!exprs.length)
+            return null;
+        const expr = exprs[exprs.length - 1];
+        const bound = expr.match(/^scriptProperties\.(\w+)$/);
+        if (!bound)
+            return literalOf(expr);
+        const value = spValue(node, bound[1]);
+        return value === undefined || value === null ? null : String(value);
+    };
+    const splitTopLevel = (expr, sep) => {
+        const out = [];
+        let start = 0;
+        let depth = 0;
+        for (let i = 0; i < expr.length; i += 1) {
+            const ch = expr[i];
+            if (ch === "'" || ch === '"') {
+                const quote = ch;
+                i += 1;
+                while (i < expr.length && expr[i] !== quote) {
+                    if (expr[i] === '\\')
+                        i += 1;
+                    i += 1;
+                }
+                continue;
+            }
+            if (ch === '(' || ch === '[')
+                depth += 1;
+            else if (ch === ')' || ch === ']')
+                depth -= 1;
+            else if (ch === sep && depth === 0) {
+                out.push(expr.slice(start, i));
+                start = i + 1;
+            }
+        }
+        out.push(expr.slice(start));
+        return out.map((part) => part.trim()).filter((part) => part.length > 0);
+    };
+    // 表项按当前档位求值：'O' + newLine + 'C' + newLine + 'T' 因此真的变成三行。
+    const scriptArray = (src, node, blocks, name) => {
+        const exprs = varExprs(src, node, blocks, name);
+        if (!exprs.length)
+            return null;
+        const expr = exprs[exprs.length - 1];
+        if (expr[0] !== '[' || expr[expr.length - 1] !== ']')
+            return null;
+        const items = splitTopLevel(expr.slice(1, -1), ',').map((entry) => {
+            let text = '';
+            for (const term of splitTopLevel(entry, '+')) {
+                const literal = literalOf(term);
+                if (literal != null) {
+                    text += literal;
+                    continue;
+                }
+                if (term === 'newLine' || term === 'nl') {
+                    const nl = varValueOf(src, node, blocks, term);
+                    if (nl == null)
+                        return null;
+                    text += nl;
+                    continue;
+                }
+                return null;
+            }
+            return text;
+        });
+        if (!items.length || items.some((item) => item == null))
+            return null;
+        return items;
+    };
+    const SCRIPT_SLOTS = ['month', 'weekday', 'dayTable', 'day', 'year'];
+    // 把当前 showDay 档位的 return 表达式翻成占位符模板；不认识的写法返回 null。
+    const dateFormatOf = (src, node, blocks) => {
+        const returns = [];
+        for (const block of blocks) {
+            if (!/showDay/.test(block.cond) || !condHolds(node, block.cond))
+                continue;
+            const ret = src.slice(block.start, block.end).match(/return\s+([^;}\n]+)/);
+            if (ret)
+                returns.push(ret[1]);
+        }
+        if (returns.length !== 1)
+            return null;
+        let format = '';
+        for (const term of splitTopLevel(returns[0], '+')) {
+            const literal = literalOf(term);
+            if (literal != null) {
+                if (SCRIPT_SLOTS.some((slot) => literal.includes('{' + slot + '}')))
+                    return null;
+                format += literal;
+                continue;
+            }
+            if (term === 'newLine' || term === 'nl' || term === 'delimiterValue') {
+                const value = varValueOf(src, node, blocks, term);
+                if (value == null)
+                    return null;
+                format += value;
+                continue;
+            }
+            if (/^months\[date\.getMonth\(\)\]$/.test(term)) {
+                format += '{month}';
+                continue;
+            }
+            if (/^day\[date\.getDay\(\)\]$/.test(term)) {
+                format += '{weekday}';
+                continue;
+            }
+            if (/^dtt\[date\.getDate\(\)\]$/.test(term)) {
+                format += '{dayTable}';
+                continue;
+            }
+            if (/^date\.getDate\(\)$/.test(term)) {
+                format += '{day}';
+                continue;
+            }
+            if (term === 'year' || /^date\.getFullYear\(\)$/.test(term)) {
+                format += '{year}';
+                continue;
+            }
+            return null;
+        }
+        return format || null;
+    };
+    // ---- 问候语 / 帧率脚本 -----------------------------------------------------
+    // 另一族常见的作者脚本：按小时把 0~23 映射成若干段问候（早/中/晚），以及把
+    // 「1000 / 相邻帧间隔」的滑动平均写进文本的帧率计。两者都没有用户输入、没有副作用，
+    // 可以沿用 Clock / Date 的纪律：只做静态求值，把档位表交给播放器本地驱动，仍然
+    // 不执行作者 JS。认不出完整形状就整条缺席。
+    const escapeRe = (name) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const greetingSpecOf = (src) => {
+        // 小时来源必须是 `let hour = new Date().getHours()`；拿不到变量名就没法对齐三元式。
+        const hourDecl = /(?:let|var|const)\s+([A-Za-z_$][\w$]*)\s*=\s*new\s+Date\s*\(\s*\)\s*\.\s*getHours\s*\(\s*\)/.exec(src);
+        if (!hourDecl)
+            return null;
+        const hourName = escapeRe(hourDecl[1]);
+        // 作者把 8 段文案写成对象表（数字键），switch 再把标签名映射到表项。
+        const tables = new Map();
+        const objectRe = /(?:let|var|const)\s+([A-Za-z_$][\w$]*)\s*=\s*\{([^{}]*)\}/g;
+        let objectMatch;
+        while ((objectMatch = objectRe.exec(src))) {
+            const entries = new Map();
+            const entryRe = /['"]?([A-Za-z0-9_$]+)['"]?\s*:\s*(?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)")/g;
+            let entryMatch;
+            while ((entryMatch = entryRe.exec(objectMatch[2])))
+                entries.set(entryMatch[1], unescapeJsString(entryMatch[2] !== undefined ? entryMatch[2] : entryMatch[3]));
+            if (entries.size >= 2)
+                tables.set(objectMatch[1], entries);
+        }
+        if (!tables.size)
+            return null;
+        const switchMatch = /switch\s*\(\s*([A-Za-z_$][\w$]*)\s*\)\s*\{([\s\S]*?)\}/.exec(src);
+        if (!switchMatch)
+            return null;
+        const cases = new Map();
+        let tableName = null;
+        const caseRe = /case\s+(['"])([A-Za-z0-9_$]+)\1\s*:\s*[A-Za-z_$][\w$]*\s*=\s*([A-Za-z_$][\w$]*)\s*\[\s*(\d+)\s*\]/g;
+        let caseMatch;
+        while ((caseMatch = caseRe.exec(switchMatch[2]))) {
+            if (tableName && tableName !== caseMatch[3])
+                return null;
+            tableName = caseMatch[3];
+            cases.set(caseMatch[2], Number(caseMatch[4]));
+        }
+        const table = tableName ? tables.get(tableName) : null;
+        if (!table || !cases.size)
+            return null;
+        const ternaryRe = new RegExp('(?:let|var|const)\\s+' + escapeRe(switchMatch[1]) +
+            '\\s*=\\s*(' + hourName + '\\s*<[\\s\\S]*?);');
+        const ternary = ternaryRe.exec(src);
+        if (!ternary)
+            return null;
+        const expr = ternary[1];
+        const bands = [];
+        const thresholdRe = new RegExp(hourName + "\\s*<\\s*(\\d+)\\s*\\?\\s*(['\"])" +
+            '([A-Za-z0-9_$]+)\\2', 'g');
+        let thresholdMatch;
+        while ((thresholdMatch = thresholdRe.exec(expr)))
+            bands.push({ limit: Number(thresholdMatch[1]), tag: thresholdMatch[3] });
+        const tail = /:\s*(['"])([A-Za-z0-9_$]+)\1\s*$/.exec(expr);
+        if (!tail || !bands.length)
+            return null;
+        bands.push({ limit: null, tag: tail[2] });
+        let previous = -1;
+        const labels = [];
+        for (const band of bands) {
+            if (band.limit !== null) {
+                if (!Number.isFinite(band.limit) || band.limit <= previous || band.limit > 24)
+                    return null;
+                previous = band.limit;
+            }
+            const index = cases.get(band.tag);
+            const label = index == null ? undefined : table.get(String(index));
+            if (label == null || label === '')
+                return null;
+            labels.push(label);
+        }
+        return {
+            time: 'greeting',
+            labels,
+            thresholds: bands.slice(0, -1).map((band) => band.limit),
+        };
+    };
+    const fpsSpecOf = (src, node) => {
+        // 只认「按帧间隔求瞬时帧率、按 refreshInterval 求平均、Math.round 后拼 label」的形状。
+        if (!/Math\.round/.test(src) || !/1000\s*\/\s*\(/.test(src) ||
+            !/scriptProperties\.refreshInterval/.test(src) || !/scriptProperties\.label/.test(src))
+            return null;
+        // active=false 时 WE 的 update 返回 undefined，文本不刷新；这时不发射图层，
+        // 免得我们还在数帧而作者已经把计数器关了。
+        if (/scriptProperties\.active/.test(src)) {
+            const active = spValue(node, 'active');
+            if (active !== undefined && !visibleFlag(active))
+                return null;
+        }
+        const refreshRaw = Number(spValue(node, 'refreshInterval'));
+        const refreshMs = Number.isFinite(refreshRaw) && refreshRaw >= 0 && refreshRaw <= 60000
+            ? refreshRaw
+            : 500;
+        const label = spText(node, 'label', 'fps:');
+        return {
+            time: 'fps',
+            label,
+            refreshMs,
+            // 首个刷新窗口之前 WE 原样返回烘焙值（本包是 "fps：60"）。
+            text: typeof node.value === 'string' && node.value.trim() !== '' ? node.value : label,
+        };
+    };
+    const textSpecOf = (node) => {
+        if (typeof node === 'string')
+            return { text: node };
+        if (!node || typeof node !== 'object' || Array.isArray(node))
+            return null;
+        if (typeof node.script !== 'string') {
+            const value = bindingValueOf(node);
+            if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean')
+                return { text: String(value) };
+            return null;
+        }
+        const src = node.script;
+        const fps = fpsSpecOf(src, node);
+        if (fps)
+            return fps;
+        const greeting = greetingSpecOf(src);
+        if (greeting)
+            return greeting;
+        if (src.includes('getHours') && src.includes('getMinutes')) {
+            return {
+                time: 'clock',
+                hour24: spFlag(node, 'use24hFormat', true),
+                seconds: spFlag(node, 'showSeconds', false),
+                delimiter: spText(node, 'delimiter', ':'),
+            };
+        }
+        if (src.includes('getFullYear') && src.includes('getMonth') && src.includes('getDate')) {
+            const blocks = scanIfBlocks(src);
+            const format = dateFormatOf(src, node, blocks);
+            if (!format)
+                return null;
+            const spec = { time: 'date', format };
+            if (format.includes('{month}')) {
+                const months = scriptArray(src, node, blocks, 'months');
+                if (!months)
+                    return null;
+                spec.months = months;
+            }
+            if (format.includes('{weekday}')) {
+                const days = scriptArray(src, node, blocks, 'day');
+                if (!days)
+                    return null;
+                spec.days = days;
+            }
+            if (format.includes('{dayTable}')) {
+                const dayTable = scriptArray(src, node, blocks, 'dtt');
+                if (!dayTable)
+                    return null;
+                spec.dayTable = dayTable;
+            }
+            // 年份按字符拆开的脚本（year = yearnew[0] + newLine + ...）：对齐方式同时决定
+            // 年是否竖排，所以把拼接符一起带出去，播放器按字符 join。
+            if (format.includes('{year}') && /split\(\s*''\s*\)/.test(src)) {
+                const yearSplit = varValueOf(src, node, blocks, 'newLine');
+                if (yearSplit == null)
+                    return null;
+                spec.yearSplit = yearSplit;
+            }
+            return spec;
+        }
+        return null;
+    };
+    const textLayerOf = (obj) => {
+        const spec = textSpecOf(obj.text);
+        if (!spec)
+            return null;
+        const pointSize = Number(bindingValueOf(obj.pointsize));
+        if (!Number.isFinite(pointSize) || pointSize <= 0)
+            return null;
+        const transform = resolveObjectTransform(obj);
+        // 字号吃对象自身 + 中间父组的 scale；最外层「组件」根组只挪位置（见
+        // resolveObjectTransform 的 innerScale）。旧实现只吃自身 scale，真机 3723257973
+        // 的问候语因此只剩 7.37（参考图里与帧率同高）、竖排 SUN 比日期大 3.8 倍
+        // （参考图约 3.2 倍）。
+        const sizeScale = transform.innerScale;
+        const sizeMul = (Math.abs(sizeScale[0]) + Math.abs(sizeScale[1])) * 0.5 || 1;
+        const fontRaw = bindingValueOf(obj.font);
+        const fontPath = typeof fontRaw === 'string' ? fontRaw.trim().replace(/\\/g, '/') : '';
+        // 工程自带字体走包内资源；Wallpaper Engine 内置字体不在包里，交给内置资产通道，
+        // 两者共用同一套资源路径命名空间，由解码侧决定从哪取字节。
+        const font = fontPath
+            ? resourceBase + (access.hasFile(fontPath) ? fontPath : WE_BUILT_IN_PREFIX + fontPath)
+            : undefined;
+        const alphaRaw = bindingValueOf(obj.alpha);
+        const alphaNum = alphaRaw === undefined || alphaRaw === null ? NaN : Number(alphaRaw);
+        return {
+            name: typeof obj.name === 'string' ? obj.name : 'text',
+            kind: 'text',
+            x: transform.origin[0],
+            y: transform.origin[1],
+            fontSize: pointSize * sizeMul,
+            color: parseVec3(obj.color, [1, 1, 1]),
+            alpha: Number.isFinite(alphaNum) ? Math.min(1, Math.max(0, alphaNum)) : 1,
+            angle: transform.angle || 0,
+            depth: depthOf(obj),
+            font,
+            ...spec,
+        };
+    };
     for (const obj of sceneObjects) {
+        // 文字没有 image，必须走在「无 image ⇒ 非图层」之前才会被看见；也正因为排在
+        // 图像名黑名单之前，day7 / Clock / D a y 这些名字不会被 black|len|util 误杀。
+        if (typeof obj.text !== 'undefined' && typeof obj.image !== 'string') {
+            stagedBindings = new Set();
+            // 与图像分支同一条纪律：隐藏对象只交出可见性绑定（那正是它此刻缺席的原因），
+            // 字号 / 透明度这类细节键等到真出图层时才提交。
+            if (!isObjectVisible(obj)) {
+                commitStagedBindings();
+                continue;
+            }
+            const textLayer = textLayerOf(obj);
+            if (textLayer) {
+                manifest.layers.push(textLayer);
+                commitStagedBindings();
+            }
+            continue;
+        }
         if (!obj.image || typeof obj.image !== 'string' || obj.image.startsWith('models/util/')) {
             if ((typeof obj.name === 'string' && obj.name.toLowerCase() === 'reflection') || hasReflectionEffect(obj)) {
                 const reflTex = allTex.find((p) => p.toLowerCase().includes('reflection_mask'));
@@ -2329,10 +3757,6 @@ function buildSceneManifestVia(access, token) {
             }
             continue;
         }
-        if (obj.visible === false)
-            continue;
-        if (obj.visible && typeof obj.visible === 'object' && obj.visible.value === false)
-            continue;
         const nameLower = (typeof obj.name === 'string' ? obj.name : '').toLowerCase();
         if (nameLower.includes('black') ||
             nameLower.includes('len') ||
@@ -2341,6 +3765,14 @@ function buildSceneManifestVia(access, token) {
             nameLower.includes('blend') ||
             nameLower === 'sun' ||
             nameLower === 'sun2') {
+            continue;
+        }
+        stagedBindings = new Set();
+        // 隐藏对象也要把可见性绑定交给 UI（切回白天 / 显示人物）；这些键正是
+        // 当前图层缺席的原因。若对象之后因缺纹理被跳过，则提交必须留到真正
+        // 出层时——否则面板会多出对渲染毫无影响的开关。
+        if (!isObjectVisible(obj)) {
+            commitStagedBindings();
             continue;
         }
         const modelJson = access.readJson(obj.image);
@@ -2392,19 +3824,25 @@ function buildSceneManifestVia(access, token) {
             for (const [key, uniformName] of Object.entries(lusv)) {
                 if (typeof uniformName !== 'string')
                     continue;
-                const pv = props?.[key]?.value;
+                const pv = shaderPropertyValue(key);
                 if (typeof pv === 'string') {
                     layerUserColors = layerUserColors ?? {};
                     layerUserColors[uniformName] = parseVec3(pv, [1, 1, 1]);
                 }
             }
         }
+        // 纹理解码只为「未声明尺寸 / 需要按原图尺寸算 UV 裁剪」兜底。
+        // 每个预设重建都解一遍 4K TEX 会让滑杆拖动明显卡顿。
+        const hasDeclaredSize = typeof modelJson.width === 'number' && typeof modelJson.height === 'number';
+        const needsDecoded = !hasDeclaredSize || typeof modelJson.cropoffset === 'string';
         let decoded = null;
-        try {
-            decoded = decodeTex(file.bytes);
-        }
-        catch {
-            decoded = null;
+        if (needsDecoded) {
+            try {
+                decoded = decodeTex(file.bytes);
+            }
+            catch {
+                decoded = null;
+            }
         }
         // Layer geometry follows the scene object (open-wallpaper-engine
         // ImageObject::FromJson): size comes from the image json width/height,
@@ -2468,9 +3906,9 @@ function buildSceneManifestVia(access, token) {
             ox = parseFloat(parts[0]) || 0;
             oy = parseFloat(parts[1]) || 0;
         }
-        const alpha = typeof obj.alpha === 'number' && Number.isFinite(obj.alpha)
-            ? Math.min(1, Math.max(0, obj.alpha))
-            : 1;
+        const alphaRaw = bindingValueOf(obj.alpha);
+        const alphaNum = alphaRaw === undefined || alphaRaw === null ? NaN : Number(alphaRaw);
+        const alpha = Number.isFinite(alphaNum) ? Math.min(1, Math.max(0, alphaNum)) : 1;
         // decodeTex already crops power-of-two padding to the TEXI image rect,
         // so only an explicit cropoffset produces a sampled sub-rect here.
         // Verified by render probe: texture v=0 is the first uploaded PNG row
@@ -2495,6 +3933,63 @@ function buildSceneManifestVia(access, token) {
             nameLower.includes('fence');
         const layerX = objOrigin[0] + alignDx;
         const layerY = objOrigin[1] + alignDy;
+        // Puppet image objects (WE's rigged 2D characters) must be drawn from
+        // the MDLV mesh, not as one quad over the whole atlas. The atlas is a
+        // scattered set of parts, so the quad shows exactly that scattering.
+        if (typeof modelJson.puppet === 'string') {
+            const puppetFile = access.readFile(modelJson.puppet);
+            const puppetMeshes = puppetFile ? parseMdl(puppetFile.bytes) : [];
+            if (puppetMeshes.length > 0) {
+                const encode = (typed) => Buffer.from(typed.buffer, typed.byteOffset, typed.byteLength).toString('base64');
+                const puppetPayload = puppetPayloadOf(obj);
+                const puppetAnimation = puppetPayload ? animationOf(obj, puppetPayload) : undefined;
+                const layerFollow = followOf(obj);
+                for (const [meshIndex, mesh] of puppetMeshes.entries()) {
+                    let meshTexPath = texPath;
+                    if (mesh.materialPath) {
+                        const meshMat = access.readJson(mesh.materialPath);
+                        const meshPass = Array.isArray(meshMat?.passes) ? meshMat.passes[0] : null;
+                        const meshRef = Array.isArray(meshPass?.textures) ? String(meshPass.textures[0] ?? '') : '';
+                        const resolved = meshRef ? resolveLayerTex(meshRef) : null;
+                        if (resolved)
+                            meshTexPath = resolved;
+                    }
+                    manifest.layers.push({
+                        name: typeof obj.name === 'string' ? obj.name : 'puppet',
+                        texUrl: resourceBase + meshTexPath,
+                        meshKey: `${typeof obj.id === 'number' || typeof obj.id === 'string' ? obj.id : (typeof obj.name === 'string' ? obj.name : 'puppet')}:${meshIndex}`,
+                        // Mesh vertices stay in raw MDLV model space; WE places
+                        // them at the object origin (linux-wallpaperengine
+                        // CImage draws origin ± size/2 without recentring).
+                        x: objOrigin[0],
+                        y: objOrigin[1],
+                        alpha,
+                        angle: objAngles[2] || 0,
+                        mesh: {
+                            posB64: encode(mesh.pos),
+                            normB64: encode(mesh.norm),
+                            uvB64: encode(mesh.uv),
+                            indicesB64: encode(mesh.indices),
+                            iCount: mesh.iCount,
+                            idx32: mesh.indices instanceof Uint32Array || undefined,
+                            skinIndicesB64: mesh.skinIndices ? encode(mesh.skinIndices) : undefined,
+                            skinWeightsB64: mesh.skinWeights ? encode(mesh.skinWeights) : undefined,
+                        },
+                        meshScale: [objScale[0], objScale[1]],
+                        shader: layerShader,
+                        isGround: false,
+                        sway: 0,
+                        swaySpeed: 1.5,
+                        depth: depthOf(obj),
+                        puppetId: puppetPayload ? puppetPayload.id : undefined,
+                        animation: puppetAnimation && puppetAnimation.length > 0 ? puppetAnimation : undefined,
+                        follow: layerFollow,
+                    });
+                }
+                commitStagedBindings();
+                continue;
+            }
+        }
         // Reflection carried as an object effect (effects/reflection/effect.json):
         // emit the reflection layer anchored to this object's own rect with the
         // water line at its top edge (screen v, 0 at the top). The object itself
@@ -2511,9 +4006,13 @@ function buildSceneManifestVia(access, token) {
                     w: lw,
                     h: lh,
                     waterLine: Math.min(1, Math.max(0, 1 - (layerY + lh / 2) / height)),
+                    follow: followOf(obj),
                 });
             }
         }
+        // 这一层交给水flow 程序画：它与标准程序共用同一张顶点着色器与同一套颜色 uniform
+        // （tint/bright/power/alpha 逐个对齐），所以透明度、裁剪与视差都不必留在标准路径里补。
+        const layerFlow = waterflowOf(obj, resolveLayerTex);
         manifest.layers.push({
             name: typeof obj.name === 'string' ? obj.name : 'layer',
             texUrl: resourceBase + texPath,
@@ -2535,11 +4034,41 @@ function buildSceneManifestVia(access, token) {
             isGround,
             sway: 0,
             swaySpeed: 1.5,
+            // Demiurge 改动①：保留 WE 的视差深度（vec2 "x y"；0=贴死画布，1=跟鼠标同步）。
+            // 上游整条丢弃此字段，导致多部件场景前景/人物与背景零视差差、叠在一起。
+            depth: depthOf(obj),
+            follow: followOf(obj),
+            flow: layerFlow || undefined,
         });
+        commitStagedBindings();
     }
     if (manifest.layers.length === 0)
         return null;
+    if (usedBindings.size > 0)
+        manifest.userBindings = Array.from(usedBindings).sort();
     return manifest;
+}
+// Video-backed textures (TEXB0004 + video flag) store an MP4 as the mipmap payload.
+// decodeTex rejects them by design, so this channel has to hand the player the raw
+// MP4 instead of the whole TEX container. The MP4 does not always start at byte 0
+// (WE writes its own preamble and may not size the payload correctly — the real
+// 3723257973 artwork starts at byte 91), so scan the first few KiB for the `ftyp`
+// box and slice from its length field, same rule as extractSceneVideoVia.
+function sliceMp4Payload(raw, mip0) {
+    const candidates = [];
+    if (mip0 && mip0.bytes && mip0.bytes.length >= 8)
+        candidates.push(mip0.bytes);
+    if (raw && raw.length >= 8)
+        candidates.push(raw);
+    for (const bytes of candidates) {
+        const limit = Math.min(bytes.length - 8, 4096);
+        for (let at = 0; at <= limit; at++) {
+            if (bytes[at + 4] === 0x66 && bytes[at + 5] === 0x74 && bytes[at + 6] === 0x79 && bytes[at + 7] === 0x70) {
+                return bytes.subarray(at);
+            }
+        }
+    }
+    return null;
 }
 function extractSceneResourceVia(access, subpath) {
     const norm = subpath.replace(/\\/g, '/');
@@ -2550,6 +4079,11 @@ function extractSceneResourceVia(access, subpath) {
         return null;
     try {
         const parsed = parseTexInternal(file.bytes);
+        if (parsed.isVideoMp4) {
+            const mp4 = sliceMp4Payload(file.bytes, parsed.mipmaps[0]);
+            if (mp4)
+                return Buffer.from(mp4);
+        }
         const mip0 = parsed.mipmaps[0];
         if (isPngBuffer(mip0.bytes)) {
             return Buffer.from(mip0.bytes);
@@ -2561,11 +4095,11 @@ function extractSceneResourceVia(access, subpath) {
         return file.bytes;
     }
 }
-export function buildSceneManifest(pkgData, token) {
-    return buildSceneManifestVia(pkgSceneAccess(pkgData), token);
+export function buildSceneManifest(pkgData, token, userProperties) {
+    return buildSceneManifestVia(pkgSceneAccess(pkgData), token, userProperties);
 }
-export function buildSceneManifestFromDir(dir, token) {
-    return buildSceneManifestVia(dirSceneAccess(dir), token);
+export function buildSceneManifestFromDir(dir, token, userProperties) {
+    return buildSceneManifestVia(dirSceneAccess(dir), token, userProperties);
 }
 export function extractSceneResource(pkgData, subpath) {
     return extractSceneResourceVia(pkgSceneAccess(pkgData), subpath);
