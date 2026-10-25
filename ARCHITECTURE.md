@@ -375,7 +375,7 @@
    HTTP 23 项断言全绿——素材 4/4 从 LAN 地址取回且 wire 上零绝对回环、存量绝对 URL 出口收敛而**落盘仍是
    旧形态**、参考图回写 `/comfyui/save-local` 在根相对 `src` 下 200 且产物可从 LAN 取回；真浏览器 390×844
    拦 `**://127.0.0.1:*/**` 全程 **0 条**、渲染图零挂、零 ≥400。副作用取证＝改前改后 `userdata/pictures`
-   17447 文件差集为空（上一轮只隔离 `LAF_DATA_DIR` 未隔离 `outputDir`，曾把真实 `神权大陆/SAVE01/chat.json`
+   17447 文件差集为空（上一轮只隔离 `LAF_DATA_DIR` 未隔离 `outputDir`，曾把真实 `神恩大陆/SAVE01/chat.json`
    重写一遍）。⚠ 环境陷阱：沙箱 Bash 内 `127.0.0.1`/`localhost` 的**任意端口**被 harness 端口映射接管
    （实测 uvicorn 已停，`http://127.0.0.1:8013/api/health` 仍回 `Server: SimpleHTTP/0.6` 404）⇒ 自取图
    只能注入 LAN origin 才验得动，用户真实进程不受影响。
@@ -410,7 +410,7 @@ services/  深模块层。业务逻辑全在这。彼此可依赖，但不 impor
 | `edit_import_adapter` | 外部 JSON 资源到 Demiurge 的确定性转换：纯角色卡只生成扁平 card，内嵌内容拆为 worldbook/regex 侧车；独立世界书统一 entries/key/enabled；预设剥离连接鉴权并补项目扩展；正则补 ID 和运行字段后编译校验 | 只读当前小仓库内源 JSON，默认拒绝覆盖目标且不删除源文件；PNG 卡必须走现有角色卡导入入口保留头像与元数据 |
 | `edit_artifacts` | 编辑产物机械校验：Demiurge 归一化角色卡、世界书侧车、预设 identifier/order、注入字段、`thinking_chains`、三层正则字段与编译、Python 语法及基础 JSON | 自动推断必须先按项目文件名和归一化卡字段识别，禁止因 `card.json.regex_scripts` 把整卡误判为正则；格式失败写 Trace，禁止把模型自述当验证结果 |
 | `project_files` | 当前小仓库文件权限单一属主：根由 `repo_meta.output_dir_from_state()` + `repo_folder(repo_id)` 后端解析；提供列出、UTF-8 读取、原子写入、精确替换 | 拒绝绝对路径、`.`/`..`、符号链接逃逸、二进制/非 UTF-8、目录和超过 1 MiB 的文件；不提供删除；模型/前端不能指定根目录 |
-| `agent_graph.roleplay_node` | 酒馆 Agent（剧情扮演节点）：作品可绑定多张角色卡，并由 `opening_card_name` 决定空会话第一句及首个真实剧情回复唯一可注入的角色描述；后续在世界书检索后，只把本轮输入直接角色名与本轮输入精确触发的世界书 key 当作角色出场证据，均未命中时才回退最近一条 AI 剧情。历史回退按角色最后出现分句识别离开/离场/不在、否定离场及重新入场；角色名采用最长非重叠实体匹配，避免“莉亚/塞西莉亚”串卡。`constant`、Dense、BM25 条目可以提供设定但不得激活角色卡。`_resolve_personas` 只发送选中卡的非空字段，并把 `description/personality/scenario/mes_example` 分别送入对应预设 marker；禁止因已绑定而全量发送或把四类字段折叠成描述。后续叠世界书/表格记忆。模型漏 `<status>` 时沿用已持久化快照；未闭合 `<状态更新>` 或 `<illustration>` 仍按尾部控制块剥离；本地高潮兜底锚点被输出正则改写后，只能在最终显示正文重新定位。状态/表格/插画后处理异常时必须用结构化解析器返回干净可见正文，禁止把原始控制块或提示词回退给前端 | 单卡 `card_name` 仅为开场卡兼容别名；其他绑定卡不得出现在开场；同轮多卡仅在本轮均有直接/精确证据时注入；空描述不注入；有卡作品的通用对话统一并入 roleplay |
+| `agent_graph.roleplay_node` | 酒馆 Agent（剧情扮演节点）：作品可绑定多张角色卡，并由 `opening_card_name` 决定空会话第一句及首个真实剧情回复唯一可注入的角色描述；后续在世界书检索后，只把本轮输入直接角色名与本轮输入精确触发的世界书 key 当作角色出场证据，均未命中时才回退最近一条 AI 剧情。历史回退按角色最后出现分句识别离开/离场/不在、否定离场及重新入场；角色名采用最长非重叠实体匹配，避免“莉亚/卡蜜莉亚”串卡。`constant`、Dense、BM25 条目可以提供设定但不得激活角色卡。`_resolve_personas` 只发送选中卡的非空字段，并把 `description/personality/scenario/mes_example` 分别送入对应预设 marker；禁止因已绑定而全量发送或把四类字段折叠成描述。后续叠世界书/表格记忆。模型漏 `<status>` 时沿用已持久化快照；未闭合 `<状态更新>` 或 `<illustration>` 仍按尾部控制块剥离；本地高潮兜底锚点被输出正则改写后，只能在最终显示正文重新定位。状态/表格/插画后处理异常时必须用结构化解析器返回干净可见正文，禁止把原始控制块或提示词回退给前端 | 单卡 `card_name` 仅为开场卡兼容别名；其他绑定卡不得出现在开场；同轮多卡仅在本轮均有直接/精确证据时注入；空描述不注入；有卡作品的通用对话统一并入 roleplay |
 | `agent_context` | Agent 上下文窗口：各取 6 条、token 预算、历史文本与依赖上文的执行提示词整理。生成历史按 **前端显式可见历史 → 已存在的聊天快照 → 仅快照文件不存在时才回退 checkpoint** 取值；显式 `[]` 和空快照都表示历史已清空，禁止旧 checkpoint 复活已删消息 | 改上下文选择/裁剪 → 这里；`agent_graph` 不内联 token 算法。任何新入口都必须遵守同一历史优先级 |
 | `task_session_store` | 任务会话登记单一属主（上下文合同 P1，2026-09-11）：讨论/委派型任务**首次命中即登记**，接续轮先查登记（显式状态，不从对话猜词）；材料（附件 fileId / 首链任务句 `created_intent` / 产物路径 `product_paths`）每轮从登记重建。TTL 6h、一线程一活跃任务、上限 50 条，存储复用 `task_progress_store` | 改接续判定或材料重建 → 这里；**禁止并入 `fabric_checkpoints` / `recipe_offers` 命名空间**（会让对话里的「批准」被当成别的语义授权）；登记失败不得阻断主流程 |
 | `prompt_compiler` | 最终消息编译接缝：OpenAI 兼容档保留历史后 system 原位；Claude 兼容档把历史后约束编译为贴近末轮 user 的本轮执行合同，不得全部前移到 system 头。Roleplay 启用自动插画时，完整插画说明仍在头部事实上下文，但还必须把短 `near_generation_contract` 作为最后一条生成近端 system 放在当前 user 前，避免长预设、世界书及“全部中文”等宽泛规则稀释当前 Profile 格式与事实覆盖要求。输出最终 messages、provider profile 与逐段位置 manifest | `provider_profile` 描述接口 wire，不描述模型家族；OpenAI Chat Completions 代理即使承载 Claude 模型仍选 OpenAI 兼容。旧设置统一迁到 OpenAI 档，只有 v2 后用户明确选择才保留 Claude 档；Roleplay 禁止按模型名猜供应商。Compiler 只拥有消息位置，不拥有预设、世界书或表格内容 |
@@ -429,7 +429,7 @@ services/  深模块层。业务逻辑全在这。彼此可依赖，但不 impor
 | `prose_style` | 剧情正文去 AI 味词表单一属主（**一份两用**）：`lint` 纯函数确定性检测（固定搭配/标点密度/句式模板/自问自答/句长节拍器/跨轮开场趋同），检测前 `restore_jailbreak` 只读还原拆字；`effective_phrases` 合成内置词表+用户增−删（`data/prose_style.json`）；`style_prompt_segment` 供 roleplay system 生成侧预防（enabled=False 时 system 逐字节不变）。文风诊断码属主在本模块，narrative_ci 并流复用 | 词表增删/新检测规则 → 这里，lint 与生成侧注入共用同一属主，两处各自维护即漂移；**检测不涂改**：只产出诊断，禁止自动改写正文真源 |
 | `style_review` | S2 LLM 活人感通审：采样闸门（`review_every` 每轮 N 一次，0=关，正文≥120 字）→ `structured_output` 结构化判定 → `style_living_review` 诊断入 Narrative CI 诊断流（info 级，处置走既有 RESOLUTIONS 生命周期）。走 `_agency_maintenance` 维护通道，不新开并行通道 | 调采样频率/判定维度 → 这里；失败静默降级只记 trace，永不阻断正文或维护 |
 | `image_gen` | 云端文生图 `/images/generations` 与带参考图 `/images/edits`，统一超时、质量参数和 64–3840px 尺寸边界；`_load_image_bytes` 支持 data-uri/http(s)/**本地文件路径**(角色底图,桌面单机后端直读同机文件)，并对 `/comfyui/local-view` 回环 URL 剥离显式代理（系统代理无法转发 localhost → 502），外部 URL 代理行为不变 | 新增图像供应商请求规则 → 这里，调用方不拼 payload |
-| `image_prompt_profiles` | 多元数据插入提示词协议单一属主，三层顺序固定：①剧情事实底座 ②跨模型艺术决策 ③转换为 Krea2、Anima、GPT Image/Banana 或 Niji。视觉编译采用三层合同：已明确画面事实直接采用且禁止改写；生成完整画面所需的当前服装、动作/姿态、地点环境、人物位置、镜头、构图、光影和背景任一缺失时，同轮 Agent 必须依据上下文补出具体答案，禁止留空、占位语或通用模板；补全必须可由时间、地点、天气、情绪、人物处境和视觉因果解释，且不得引入重要新人物、关键道具、新事件或改变剧情结果。角色姓名只作“高潮人物→外貌条目→LoRA 配置”的本地关联键，四 Profile 最终正文移除原姓名；多角色分别落实外貌、服装、位置与动作。正常路径以同轮 Agent 输出的开放 `visual_facts[{kind,fact,evidence}]` 为通用视觉事实合同：kind 不限枚举，fact 是英文可画事实，evidence 必须逐字存在于本轮高潮正文；四 Profile 逐条验收 fact。Krea2 的具体人物、当前服装、动作、道具、地点和空间关系必须构成段落主体，质量描述只作收尾；Anima 固定两行：首行把作品固定质量 tags 与全部具体内容 tags 连成同一逗号序列并以逗号收尾，次行只写解释同一事实的一至三句连续英文自然语言；不得把 tags 与文段混在第二行，也不得输出 `Her body:`、`Bound:`、`Position:` 等标题式冒号小段。归一器必须幂等，重复编译不得丢内容 tags；若 Agent 误写成“首行环境 tags＋次行分号人物/动作描述”，只把其中具体英文画面事实确定性复制到首行并把次行改成句子，抽象艺术分析、权重主体和拒答仍不得进入成稿。字段账本对英文稳定外貌与当前服装逐项验收，同义描述可保留 Agent 动作方案，但精确条目事实必须补入两行。前端最终提交只能替换已知识别的质量 tags，不能整行覆盖内容 tags；二次元媒介 tags 也只能追加在首行，第二行文段保持不变。任何没有可靠英文专业名词的剧情物件均由同轮 `visual_facts` 按“材质→几何外形与尺度→可见结构/运动→当前功能→实际交互”建立可画身份，只填写正文证据支持的维度；禁止音译、照抄专名、写 `unknown object`，也禁止为某个物件建立固定场景 fallback。后续缺陷必须修正高潮规划、证据提取、通用事实协议或模板编译整体合同。坏 JSON、拒答或漏项时只能保留通用规则已经确认的事实，宁可明确缺失也不得猜测或注入特定内容。`inline_generation_instruction` 是头部完整合同，`near_generation_contract` 是生成近端短合同；两者仍属于同一次主模型调用，不触发第二次模型调用。Profile 完成后 LoRA 元数据阶段才机械注入精确触发词和作者质量建议 | 新增模型提示词协议或格式约束 → 只改这里和对应测试；开放事实必须有正文证据；负面词禁止混入正向文本 |
+| `image_prompt_profiles` | 多元数据插入提示词协议单一属主，三层顺序固定：①剧情事实底座 ②跨模型艺术决策 ③转换为 Krea2、Anima、GPT Image/Banana 或 Niji。视觉编译采用三层合同：已明确画面事实直接采用且禁止改写；生成完整画面所需的当前服装、动作/姿态、地点环境、人物位置、镜头、构图、光影和背景任一缺失时，同轮 Agent 必须依据上下文补出具体答案，禁止留空、占位语或通用模板；补全必须可由时间、地点、天气、情绪、人物处境和视觉因果解释，且不得引入重要新人物、关键道具、新事件或改变剧情结果。角色姓名只作“高潮人物→外貌条目→LoRA 配置”的本地关联键，四 Profile 最终正文移除原姓名；多角色分别落实外貌、服装、位置与动作。正常路径以同轮 Agent 输出的开放 `visual_facts[{kind,fact,evidence}]` 为通用视觉事实合同：kind 不限枚举，fact 是英文可画事实，evidence 必须逐字存在于本轮高潮正文；四 Profile 逐条验收 fact。Krea2 的具体人物、当前服装、动作、道具、地点和空间关系必须构成段落主体，质量描述只作收尾；Anima 固定两行：首行把作品固定质量 tags 与全部具体内容 tags 连成同一逗号序列并以逗号收尾，次行只写解释同一事实的一至三句连续英文自然语言；不得把 tags 与文段混在第二行，也不得输出 `Her body:`、`Bound:`、`Position:` 等标题式冒号小段。归一器必须幂等，重复编译不得丢内容 tags；若 Agent 误写成“首行环境 tags＋次行分号人物/动作描述”，只把其中具体英文画面事实确定性复制到首行并把次行改成句子，抽象艺术分析、权重主体和拒答仍不得进入成稿。字段账本对英文稳定外貌与当前服装逐项验收，同义描述可保留 Agent 动作方案，但精确条目事实必须补入两行。前端最终提交只能替换已知识别的质量 tags，不能整行覆盖内容 tags；二次元媒介 tags 也只能追加在首行，第二行文段保持不变。任何没有可靠英文专业名词的剧情物件均由同轮 `visual_facts` 按“材质→几何外形与尺度→可见结构/运动→当前功能→实际交互”建立可画身份，只填写正文证据支持的维度；禁止音译、照抄专名、写 `unknown object`，也禁止为某个物件建立固定场景 fallback。后续缺陷必须修正高潮规划、证据提取、通用事实协议或模板编译整体合同。坏 JSON、拒答或漏项时只能保留通用规则已经确认的事实，宁可明确缺失也不得猜测或注入特定内容。`inline_generation_instruction` 是头部完整合同，`near_generation_contract` 是生成近端短合同；两者仍属于同一次主模型调用，不触发第二次模型调用。Profile 完成后 LoRA 元数据阶段才机械注入精确触发词和作者质量建议。**2026-10-25 提示词模版层（跨层决策，展开见 `A/03` §3.8b）**：`prompt_profile` 取值域扩展为 `custom:<hex32>`（用户自定义模版）；协议族（kind=anima_tags/natural_language/niji_sections + video_climax/video_firstlast/video_transition）决定本表的校验/归一化/兜底与输出结构，**内置不可改**；数据层（指令全文、追加段、质量/负面词、视频区块标题/顺序/per-band 运镜/节奏名/默认时长）归 `prompt_template_store`（`DATA_DIR/prompt_templates/`，内置不落盘由代码常量现算）。`custom:<id>` 的解析只发生在编排层（`agency_scene_comfy` / `ai_text` 路由）：scene_spec["profile"] 与纯函数入参**只落内置 kind**，模版数据经 `system_override`/`quality_override`/`negative_override`（生图）与 `VideoSkeleton`（视频）传入；解析失败按请求侧 `prompt_profile_kind` 降级内置并记 trace（`prompt_template_id`/`template_missing`），禁抛错或静默空稿。红线条款锁（多人分述/纯英文覆盖/事实边界/画面自洽四段锚文本，保存时逐字校验）默认开，关锁需二次确认并留痕 | 新增模型提示词协议或格式约束 → 只改这里和对应测试；开放事实必须有正文证据；负面词禁止混入正向文本；`custom:` 不得直达纯函数层（`G/10` 红线 14） |
 | `lora_index` | LoRA 数据保存单一属主：按完整文件名保存触发词、作者建议提示词和建议权重；建议权重归一到 0–2，自动元数据同步不得覆盖手填值 | LoRA 选择器只采用当前选中模型的建议权重；编辑弹窗可把作者示例提炼并回填为质量/风格/光影/材质/作者标签。自动插画与工作流卡只读取当前实际生效 LoRA，排除分级词、人物外貌、服装、动作、关系、场景事实及 `close-up/wide angle/shot/composition/perspective` 等镜头控制。工作流“选择完毕”检测最终 API 图，有精确记录时先询问是否覆盖；同意后才覆盖权重，把触发词放正向 CLIP 第一行、去重质量词放第二行开头，负向 CLIP 不改。`/s` 只提交已确认图，不得再次覆盖用户值；禁止回退旧记录 |
 | `rag_backend` | RAG 基础设施 Adapter；`EmbedConfig`、OpenAI/Ollama/本地嵌入兼容、嵌入模型缓存与 Chroma 单例缓存；localhost/127.0.0.1/::1 回环端点强制直连，显式代理也不得介入 | 新增嵌入后端或修改缓存键 → 只改这里；上层不直接创建 Chroma/Embedding |
 | `rag_store` | 普通知识库与生成资产索引：系统资料、仓库文档、generation 元数据、Hybrid 检索入口；`include_system` 控制是否并入全局系统库，剧情召回固定 `False` 只读当前作品 | 新增普通知识库操作 → 加到这里，签名收 `EmbedConfig`；不得再放节点索引逻辑 |
@@ -659,7 +659,7 @@ cd backend
 
 ## 发布架构
 
-源码上传与终端用户 Runtime 是两条独立发布链。`scripts/release_preflight.py` 是源码上传边界的单一检查入口：它检查 Git 已追踪文件和未忽略的未追踪文件，阻断密钥、私钥、运行数据库、模型权重、超大文件及误纳入的用户目录，同时验证 `styles.css` 引用的主题资产存在且未被忽略。脚本只读，不暂存、不提交、不推送。
+源码上传与终端用户 Runtime 是两条独立发布链。`scripts/release_preflight.py` 是源码上传边界的单一检查入口：它检查 Git 已追踪文件和未忽略的未追踪文件，阻断密钥、私钥、运行数据库、模型权重、超大文件及误纳入的用户目录，按被 Git 忽略的 `backend/data/privacy_denylist.txt`（用户真实作品与角色专名表，清单本身禁止入库）反查上传面文本并阻断命中项，同时验证 `styles.css` 引用的主题资产存在且未被忽略。脚本只读，不暂存、不提交、不推送。
 
 源码必须包含 `backend/app`、`frontend/src`、`desktop/` 桌面壳源码、测试、依赖清单、`frontend/public` 主题资产和 `comfyui-ext` 扩展源码。源码禁止包含 `backend/data`、`userdata`、未清洗的 `presets`、`docs/memory`、会话、角色卡、世界书、生成图片、RAG 索引、模型/LoRA 权重、日志、环境目录和构建产物（含 `desktop/bin`、`desktop/obj`、`desktop/publish`）。唯一允许的预设目录是由 `build_resource_pack.py` 生成的 `presets/Demiurge-presets-regex`。详细清单见 `docs/RELEASE.md`。
 
@@ -832,7 +832,7 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
 
 多元数据插入顶部的“角色外貌来源”是互斥合同：`条目模式(worldbook)` 只读取当前小仓库世界书中本轮命中的 `角色卡·` 视觉条目，并允许按角色配置 LoRA/底图与兜底图片；`角色卡模式(character_card)` 只读取当前小仓库绑定角色卡的 `description`，按本轮出现卡名筛选，未点名时回退开场卡，同时禁止消费角色 LoRA、角色底图和兜底图片，旧预设残留也必须忽略，仅保留可选全局风格 LoRA。新请求不得在两种来源间隐式降级；缺字段的旧调用保留旧兼容回退。LoRA 选择器以 `/loras/available` 的磁盘扫描为真源；请求加载、瞬时失败或后端重启期间必须继续显示并保留作品已保存的绑定，自动重试后仍失败才展示错误与手动重试，禁止把“列表暂不可用”伪装成“无角色 LoRA”。
 
-自动插画 LoRA 采用三态合同，旧预设缺字段时迁移为 `single`：`none` 只消费角色/风格底图，提交前把工作流内标准 LoRA 加载器权重归零；`single` 按高潮画面人物顺序串联全部已配置角色 LoRA，命中至少一个角色时严禁注入风格 LoRA 及其触发词，全部未命中才使用风格兜底；`multi` 固定先加载默认风格 LoRA，再按高潮人物顺序叠加每个角色 LoRA，完整文件名去重。冷倾雪＋虞妙玥的 multi 栈必须包含 Ogipote 默认风格、柳世熙与蔡秀晶，single 栈则只含柳世熙与蔡秀晶。角色配置全集只用于校验，禁止整体并入 `actors`；人物名单优先取最终高潮正文，正文未显式写名时再回退合法 subjects、本轮输入与状态 `[在场]`。外貌资料只按最终人物名单裁切，绝不能作为出场证据。主 Roleplay 的 `<illustration>.subjects` 必须列出高潮画面中每一名实际可见角色并使用配置中的精确名称；后端再以高潮正文校正并过滤 subjects。`<status>` 整体仍是不透明显示快照，但角色兜底必须确定性读取其中精确的 `[在场]` 单行；不能只读 `character_state.叙事[在场]`，因为真实预设通常只维护快照而不生成同名叙事 delta。相关回归必须走真实 `extract_status_snapshot → writeback → load_state`，禁止 mock `_narr` 伪造在场人物。`illustration.request` Trace 必须同时记录 `actor_candidates/status_actors/actors`，便于区分配置丢失、状态恢复失败和后续协议丢失。多人 LoRA 不新增 Agent 调用：`workflow_injector` 复用模板已标注的 `LoraLoaderModelOnly` 或 `LoraLoader` 为链首，动态复制后续加载器，串联 MODEL（完整加载器同时串联 CLIP），并把原下游统一重接到链尾。重生成快照必须保存 LoRA 栈和模式。Anima 使用风格 LoRA 时，内容行还必须机械加入手绘二次元媒介锁定词，避免只有触发词但基础模型仍落入真人域。
+自动插画 LoRA 采用三态合同，旧预设缺字段时迁移为 `single`：`none` 只消费角色/风格底图，提交前把工作流内标准 LoRA 加载器权重归零；`single` 按高潮画面人物顺序串联全部已配置角色 LoRA，命中至少一个角色时严禁注入风格 LoRA 及其触发词，全部未命中才使用风格兜底；`multi` 固定先加载默认风格 LoRA，再按高潮人物顺序叠加每个角色 LoRA，完整文件名去重。顾凝霜＋苏映晚的 multi 栈必须包含 Ogipote 默认风格、沈明澜与何舒野，single 栈则只含沈明澜与何舒野。角色配置全集只用于校验，禁止整体并入 `actors`；人物名单优先取最终高潮正文，正文未显式写名时再回退合法 subjects、本轮输入与状态 `[在场]`。外貌资料只按最终人物名单裁切，绝不能作为出场证据。主 Roleplay 的 `<illustration>.subjects` 必须列出高潮画面中每一名实际可见角色并使用配置中的精确名称；后端再以高潮正文校正并过滤 subjects。`<status>` 整体仍是不透明显示快照，但角色兜底必须确定性读取其中精确的 `[在场]` 单行；不能只读 `character_state.叙事[在场]`，因为真实预设通常只维护快照而不生成同名叙事 delta。相关回归必须走真实 `extract_status_snapshot → writeback → load_state`，禁止 mock `_narr` 伪造在场人物。`illustration.request` Trace 必须同时记录 `actor_candidates/status_actors/actors`，便于区分配置丢失、状态恢复失败和后续协议丢失。多人 LoRA 不新增 Agent 调用：`workflow_injector` 复用模板已标注的 `LoraLoaderModelOnly` 或 `LoraLoader` 为链首，动态复制后续加载器，串联 MODEL（完整加载器同时串联 CLIP），并把原下游统一重接到链尾。重生成快照必须保存 LoRA 栈和模式。Anima 使用风格 LoRA 时，内容行还必须机械加入手绘二次元媒介锁定词，避免只有触发词但基础模型仍落入真人域。
 
 **纪要 vs 角色条目（两种数据，非二选一）**：`character_state` 记「结构化活状态」（好感度数值+态度/心情/所在），同一人物按身份替换字段值；`narrative_store`/`narrative_memory` 记「事件叙事」（概览+详细纪要+重要对白+出场人物），以完整会话快照计算回合，每到填表频率永久新建一条独立索引卡，自动流程只增不改且不压缩删除。展示编号固定为 `T<层级>-<rowid>`（如 `T1-1/T1-2`），回合区间只作副标题，编辑正文不得改变卡身份；按 trigram/人物相关性召回，主 Roleplay 只读最多 10 条概览。抽取失败跳过且旧纪要不动；用户显式手动重填时才允许按相交消息范围局部替换。FTS5 trigram 旁路召回（中文免分词）与世界书 Chroma 语义检索互补。
 
@@ -986,7 +986,7 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
 
    **实测**（69 条 / 25 轮 / 89,152 字）：规则型 11 条 freq 全低但 constant 正确；内容型 58 条 = 高频 11 条/9,787 字 + 中频 13 条/11,336 字 + 低频 7 条/9,016 字 + **零命中 27 条/48,252 字**；`seq=29` 里角色卡仅 4 张且全 constant ⇒ 其余 17 张只能靠语义召回进注入。**分工修正**：内容型「稳定开启」应交 keyword 通道，`constant` 只留规则型 11 条；杠杆 A 晋升的 3 张卡 L2 freq=0% 但 L4 在 `seq` ⇒ constant 有行为依据，可考虑退回非常驻（省 7,069 字）。
 
-   **数据层工具**：`_tmp/wb_smart_recall.py`（`--mode tiered` 默认 / `--mode l2` 激进 / `--apply` 带备份 / 规则型前缀硬保护），tiered 候选 **28 条 / 46,626 字**、l2 候选 **30 条 / 49,893 字**（均未 apply）。⚠ L2/L4 是**当前剧情线**统计，换线会反转 ⇒ 不能钉死，新长篇重跑 audit。**顺带脏数据**：4 条 `uid=None`；`人物·韦尔纳(305字)` keys 空且与 190 字那条重复 ⇒ 永不被 keyword 命中（工具不自动踢 keys=0，交人工）。
+   **数据层工具**：`_tmp/wb_smart_recall.py`（`--mode tiered` 默认 / `--mode l2` 激进 / `--apply` 带备份 / 规则型前缀硬保护），tiered 候选 **28 条 / 46,626 字**、l2 候选 **30 条 / 49,893 字**（均未 apply）。⚠ L2/L4 是**当前剧情线**统计，换线会反转 ⇒ 不能钉死，新长篇重跑 audit。**顺带脏数据**：4 条 `uid=None`；`人物·雷纳(305字)` keys 空且与 190 字那条重复 ⇒ 永不被 keyword 命中（工具不自动踢 keys=0，交人工）。
 
    **漏选实测（2026-10-22 16:30，回答「宁可多选不能漏选」）**：🔴 `worldbook_session.json` **不能作激活证据**——`seq` 只登记锚点（keyword/constant），语义召回从不进 seq；文件 mtime 还早于 worldbook/chat ⇒ 漏选判定改用**重放对话 + 逐轮调线上真身 `assemble_selection_stable`**（`_tmp/wb_ab_stable.py`，每臂 session/state 隔离；dense 本机为空 ⇒ 语义=BM25）。实测（12 用户轮）：base 无关注入 **33%**（72,131/220,892 字）⇒ **l2 激进档 −62% 但新造 1 例漏选**，**tiered 分层档零漏选、−20%**，还治好 5 对既有漏选。**唯一红线 = 角色卡·埃姆登 轮23**：名字在 3,626 字消息第 227 字、扫描窗口只取尾 1,800 字 ⇒ keyword 永不可见，BM25 top-4 是唯一通道；她是 BM25 磁石（12 轮注入 11 轮、10 轮噪声）⇒ 按条目踢治不了，正是**阈值闸（RRF min_score）**标的。**L2 迟登场偏差修正**：弱涉及条目 `keys[0]` 在任意消息出现过就不踢（tiered 档；埃姆登卡/E3 埃姆登因此保留，奇尔沙治卡等 5 条身份 key 从不出现故踢）。既有漏选根因（与白名单无关）：窗口 1,800 字尾截断 / top-8 被高频旧卡占据 / keyword 只看最近 2 条。
 
@@ -994,7 +994,7 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
 
    **回归**：`test_worldbook.py` +9 例（42 passed）、worldbook 相关 6 文件 127 passed、全量 **4162 passed**（3 个既有失败在 `test_thumbnail_store.py` 的 `tests.test_asset_search` 导入，stash 对照验证与本次无关）。手册 `A/02` §3.7 新增小节。
 
-46. **世界书新增条目重复闸 `DuplicateEntryError`（2026-10-22 L1，未提交）**：起因是韦尔纳占两条（190 字有 keys + 305 字 keys=[]），真机轮两条并注 ≈495 字/轮；三条写入路径（UI/curator `add_entry`、卡导入、独立书导入）此前**零重复检查**。判据经真实世界书 69 条校准，任一命中即拒：① 内容归一化后完全相同；② 归一化**共同前缀 ≥ 14 字**（真案例 16 字 / 合法对 0~6 字 / 全库仅 2 对 ≥12，12 字那对为边界假阳性 ⇒ 阈值 14）；③ comment 归一化后同名。🔴 **不用 difflib 相似度——校准实测反序**（真重复 0.239 < 合法机制对 0.272，中文叙述+模板化机制文本上判据不可用）；🔴 **不用 keys 判重**（角色卡与其 E 事件条目共享身份 key 是设计常态）。接线四处：`apply_repo_ops` 记 `rejections[reason=duplicate_entry]` 不中断同批、两个 router 转 409、导入路径 skipped+warnings；空内容不参与判重。测试 +10（edit 8 / router 1 / store 1）。
+46. **世界书新增条目重复闸 `DuplicateEntryError`（2026-10-22 L1，未提交）**：起因是雷纳占两条（190 字有 keys + 305 字 keys=[]），真机轮两条并注 ≈495 字/轮；三条写入路径（UI/curator `add_entry`、卡导入、独立书导入）此前**零重复检查**。判据经真实世界书 69 条校准，任一命中即拒：① 内容归一化后完全相同；② 归一化**共同前缀 ≥ 14 字**（真案例 16 字 / 合法对 0~6 字 / 全库仅 2 对 ≥12，12 字那对为边界假阳性 ⇒ 阈值 14）；③ comment 归一化后同名。🔴 **不用 difflib 相似度——校准实测反序**（真重复 0.239 < 合法机制对 0.272，中文叙述+模板化机制文本上判据不可用）；🔴 **不用 keys 判重**（角色卡与其 E 事件条目共享身份 key 是设计常态）。接线四处：`apply_repo_ops` 记 `rejections[reason=duplicate_entry]` 不中断同批、两个 router 转 409、导入路径 skipped+warnings；空内容不参与判重。测试 +10（edit 8 / router 1 / store 1）。
 
 50. **本地 API 入站网络面加固：三道闸统一裁决 `request_guard`（2026-10-24）**：全库审计（`docs/security-hardening-origin-guard-and-svg-2026-10-24.md`）实锤回环门禁（`main._loopback_only`）只看 TCP 对端地址，挡不住浏览器中介——本机浏览器发起的跨站请求对端同样是 127.0.0.1。**主修复动因是 DNS rebinding 读密钥**：恶意域名 rebind 到 127.0.0.1 后页面 fetch 属同源、GET 不带 Origin、CORS 不拦，`GET /api/user-state`（含各模型 apiKey）可被攻击者页面读走（Host 头仍是攻击者域名 ⇒ Host 闸拦）。**drive-by 面经真实探针收敛**（FastAPI 0.140.13 `strict_content_type` 默认开启：无 Content-Type/form 编码体对 JSON Pydantic 模型端点一律 422 不解析，`POST /api/node-manager/install-tracked` 这类「表单打扁平模型 ⇒ clone+pip RCE」链条**在该版本上不成立**，设计稿 §1.1 初稿判断过重、已按实探修正）；**仍可达**的跨站 POST 是 multipart 端点（`/api/comfyui/upload`、`/api/user-state/wallpapers/upload`）与无 body POST（AST 全量枚举确认），Origin 闸整类拦死、且把防线从「FastAPI 版本行为」自有化为合同。**修法**：三道闸（client-IP → Origin → Host）收口为单一属主 `app/services/request_guard.inbound_verdict`（放行 `None`、否则 403 detail），`main._loopback_only` 只剩 6 行接线；client-IP 门语义与文案逐字节保留。**红线**：① Origin 判定只认**主机回环、端口不限**（端口由 `DEMIURGE_PORT`/`LAF_RUNTIME_PORT` 协商，锁端口＝第二份端口真源且挡掉 e2e :15173）；② `Origin: null`（sandboxed iframe）必须拒绝；③ Host 白名单含 `testserver`（Starlette TestClient 默认，浏览器永不发送，能伪造 Host 的本机进程本就在信任面内）——删了全测试生态 403；④ 三道闸与 `LAF_ALLOW_REMOTE=1` **同步跳过**（远端模式语义保持「显式自担风险全放开」）；⑤ `_host_of` 对 Origin 走 `urlparse().hostname`、对 Host 头按方括号取裸 IPv6，**IPv6 内含冒号不得按 `:` 切端口**（首版实现 bug，红检抓获）；⑥ 不加 token/会话鉴权（与单机无鉴权设计决定冲突），残留边界＝本机进程信任面，明示不假装解决。**记忆修正**：`topic-release-audit-test.md` 早前「单机 loopback 场景风险低」结论的前提（loopback 门禁挡住外部）被浏览器中介向量推翻，已按 AGENTS 规则在该 topic 追加更新条目、不删原文。回归 `backend/tests/test_request_guard.py` **18 例**（纯判定 10 + 中间件接线 8，含 multipart/表单两条真实失败路径、`test_默认TestClient地址仍被client门拦截且文案不变` 既有语义锁；⚠ 该文件是 tests/ 唯一 import `app.main` 者，import 前必须置 `LAF_COMFY_AUTOSTART=0`，第二个 app.main 导入方出现前先抽公共 fixture）。门禁：定向 18/0F、`ruff check app tests` 0、`lint-imports` 17 kept 0 broken、`mypy app/services/request_guard.py` + `app/main.py` 均 Success（两文件不在 `mypy_files.txt`，按条目 35 先例单跑核对、不扩清单）。手册 `G/10` §2 覆盖表 + §3.1 新增模块块与红线 1-5。
 
@@ -1093,3 +1093,50 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
    `mypy @mypy_files.txt` **269 文件 Success** / `check_hardcode` 通过；ignore 规则经
    `git check-ignore -v` 双向验证（产物三命中、源料六不命中）。手册 `C/04` §4.3 表行与红线 10 扩到
    代理路由、`G/10` §3.1 url_guard 链清单；memory `topic-release-audit-test.md`「2026-10-25 · 安全审计补刀」。
+
+62. **移动端独立模式本机令牌鉴权 + 壳层加固（M4 安全子包，已完成 · 2026-10-25）**：
+   Android 上回环不是信任边界（任意应用都能连 `127.0.0.1:<port>`）。令牌真源＝Java 壳 `SecureRandom`
+   32 字节 → Base64URL（无填充）存 app 私有 prefs `demiurge_auth/local_api_token`；`mobile_server.start()`
+   **必填**令牌（空即 `ValueError`，绝不降级无鉴权），`_prepare` 写 `LAF_LOCAL_TOKEN` 并
+   `os.environ.pop("LAF_ALLOW_REMOTE")`（`request_guard` 三道闸保持默认开）。鉴权单一属主
+   `backend/app/services/local_auth.py`：`LAF_LOCAL_TOKEN` 未设 ⇒ 完全 no-op（PC 行为零变化）；设置后
+   **除引导端点外所有路径**（含 `/` 静态前端与 `/api/health`）要求 `X-Demiurge-Token` 头或
+   `demiurge_token` cookie，`hmac.compare_digest` **先编码 bytes**（含非 ASCII 的 str 会抛 TypeError ⇒
+   任意本机应用可把中间件打成 500）。引导 `GET /__auth?token=…&next=/` 校验后下发
+   `HttpOnly; SameSite=Strict` cookie 并 303，`next` 只收单 `/` 开头的站内路径；引导/探针路由必须
+   `routes.insert(0, routes.pop())`（`app.main` import 期已把 StaticFiles 挂 `/`）。
+   自取图四链（`generation_store`/`image_gen`/`image_store`/`visual_ci`）对回环目标带
+   `local_auth.outbound_headers()`。端口：8010 空闲用 8010，否则 18010–18099 `SystemRandom` 随机、
+   外部不可指定，壳层经 `get_port()` 读实际值。Java WebView：禁 file/content 访问与 file-URL 跨源、
+   禁第三方 cookie、禁多窗口、`MIXED_CONTENT_NEVER_ALLOW`、只放行 `http`+host `127.0.0.1`；
+   `network_security_config` 基础禁明文、仅 127.0.0.1/localhost 放行（**只约束 Java/WebView 栈，
+   Python socket 不受约束** ⇒ M7 LAN ComfyUI 明文仍可行，风险另标）。uvicorn `access_log=False`
+   （令牌在引导 URL query 里），`/api/mobile/info` 只报鉴权形态不回显令牌。构建期 `verifyApkPrivacy`
+   扫 APK + 嵌套 `frontend.zip` + `app.imy`（`presets/`/`userdata/`/`backend/data/`/`user_state.json`），
+   交付物复验 `mobile/spike/verify-apk-security.sh`（0.4.2 起 14 项）与 PC 等价链路
+   `verify-pc-token.sh`（17 项）。
+   验证：新单测 25 例、后端全量 **4509 passed（0F/0E/0S）**、`lint-imports` 18 kept、`mypy` 272 文件、
+   APK 0.4.1 = 217,616,768 B / sha256 `71891e53…`。手册 `F/11` §3.11.2、`G/16` §4.1；
+   方案与执行记录 `docs/PLAN-MOBILE-STANDALONE-2026-10-25.md` §15.3；细则 `topic-release-audit-test.md`
+   「2026-10-25 · 移动端 M4 安全」。
+
+62a. **M4 安全加固轮（0.4.2 · 2026-10-25）**：条 62 的四条收口，不改变合同方向。
+   ① **令牌不进会话历史**：引导落地（`onPageFinished` 且 URL 不含 `/__auth`）即 `clearHistory()` +
+   `CookieManager.flush()`；后续启动先读持久化 cookie（比对 `demiurge_token=<prefs 令牌>`）直连 `/`，
+   主帧 401 时只回落引导一次（`authRetryDone` 防循环）——令牌只在**首次**启动进过一次 URL。
+   ② **路由插队接口化**：`mobile_server.prepend_route(app)` 成为唯一写法（M2 探针、M4 引导各踩过
+   一次「被 `app.main` 的 `/` StaticFiles 吞成 404」），新增诊断路由不再手写 `insert/pop`。
+   ③ **回环自取必带令牌头**升格为边界句 + 静态扫描测试：凡引用 `view_urls.fetchable(` 或
+   `is_local_view_url` 的模块必须同时引用 `local_auth.outbound_headers`（属主 `view_urls.py` /
+   `url_guard.py` 除外），否则新增链路只在真机 401。
+   ④ **并发写假红固化为判据**：`backend/scripts/full_gate_pytest.py` 跑前/跑后快照 `app`+`tests`+`scripts`
+   全部 `.py` 与三个配置的 sha256，跑批期间被改写即退出码 2 判本轮结论作废（全量门禁标准入口）。
+   `scripts/` 必须在面内：有用例按路径加载它（`test_hardcode_guard` / `test_check_silent_except` /
+   `test_installer_release`），漏盯＝留一扇「能改结果却查不出」的门；取舍＝宁过宽不误窄。
+   验证：定向 27 例、全量 **4516 passed / failures=0 / errors=0 / skipped=0**（守卫 exit 0，
+   2026-10-26 补齐，该入口首次实战）、`verify-pc-token.sh` 17 项、`verify-apk-security.sh` 14 项
+   （新增两条 dex 常量池检查，证明加固编进交付包）、APK 0.4.2 = 217,616,768 B / sha256 `ed1d93ff…`（versionCode 13）。
+   ⚠ **交付物身份只认 sha256 + dex 常量池 grep，不认字节数**：0.4.1 与 0.4.2 总字节完全相同
+   （对齐 padding 吸收了增量）。体积归因账本（大头＝前端媒体 103 M / cargo `debug` profile 的
+   230 M Rust `.so`，而非 dex 或 `lib/`）见 `PLAN-MOBILE-STANDALONE-2026-10-25.md` §15.5.1；
+   执行记录 `PLAN-MOBILE-STANDALONE-2026-10-25.md` §15.4。
