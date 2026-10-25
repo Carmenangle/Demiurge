@@ -85,32 +85,72 @@ jobs:
 
   desktop-shell:
     if: startsWith(github.ref, 'refs/tags/')
+    needs: [plan]
     runs-on: windows-2025
+    env:
+      # 生产更新密钥只放仓库 Secrets；未配置时构建脚本自动关闭更新产物，
+      # 安装器仍可产出，但不会生成 latest.json。
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-python@v5
         with:
-          dotnet-version: "8.0.x"
-      - name: 构建桌面壳
+          python-version: "3.13.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: 写入运行时交付 pin
         shell: pwsh
         run: >-
-          dotnet publish desktop/Demiurge.Desktop -c Release -r win-x64
-          --self-contained false -o desktop/publish
+          python scripts/runtime_delivery.py pin
+          --tag "${{ needs.plan.outputs.version }}"
+          --repository "${{ github.repository }}"
+      - name: 预置安装器依赖
+        run: python scripts/stage_installer_dependencies.py
+      - name: 构建两套 NSIS 安装器并核验
+        run: >-
+          python scripts/build_installers.py --skip-stage
+          --version "${{ needs.plan.outputs.version }}"
+      - name: 生成自动更新清单
+        if: env.TAURI_SIGNING_PRIVATE_KEY != ''
+        run: >-
+          python scripts/updater_manifest.py
+          --version "${{ needs.plan.outputs.version }}"
+          --tag "${{ needs.plan.outputs.version }}"
+          --repository "${{ github.repository }}"
+          --output "release-output/installers/latest.json"
       - name: 自检桌面壳
         shell: pwsh
         run: |
           $env:DEMIURGE_SHELL_HOME = Join-Path $env:RUNNER_TEMP "demiurge-shell"
-          & desktop/publish/Demiurge.exe --self-test
+          & desktop/tauri/target/release/Demiurge.exe --self-test
           if ($LASTEXITCODE -ne 0) { throw "desktop shell self-test failed" }
-      - name: 归档桌面壳产物
+      - name: 整形便携壳产物
         shell: pwsh
         run: |
-          Compress-Archive -Path desktop/publish/* -DestinationPath Demiurge-desktop-windows-x64.zip
+          $release = "desktop/tauri/target/release"
+          New-Item -ItemType Directory -Force shell-package | Out-Null
+          Copy-Item "$release/Demiurge.exe" shell-package/
+          if (Test-Path "$release/WebView2Loader.dll") {
+            Copy-Item "$release/WebView2Loader.dll" shell-package/
+          }
+          if (Test-Path "$release/runtimes") {
+            Copy-Item -Recurse "$release/runtimes" shell-package/
+          }
+          Compress-Archive -Path shell-package/* -DestinationPath Demiurge-desktop-windows-x64.zip
           if (-not (Test-Path Demiurge-desktop-windows-x64.zip)) { throw "桌面壳压缩包生成失败" }
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-shell
           path: Demiurge-desktop-windows-x64.zip
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installers
+          path: release-output/installers/*
           if-no-files-found: error
           retention-days: 7
 

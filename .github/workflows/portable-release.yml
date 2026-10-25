@@ -59,10 +59,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           # 兼容 draft：按 tag 名从全量 releases 列表过滤，而不是 /releases/tags/{tag}（draft 查不到会 404）
+          # 🔴 Windows 层的 base/application/rag/update 必须保留：安装版壳首次启动按这些资产在线下载。
+          # 只清理 mac/linux 的分层中间产物，以及 join-runtime 辅助脚本。
           ids="$(gh api "repos/${{ github.repository }}/releases" \
-            --jq '.[] | select(.tag_name == "${{ inputs.version }}") | .assets[] | select(.name | test("^(Demiurge-base-|Demiurge-application-|Demiurge-rag-|Demiurge-update-|join-runtime\\.|Demiurge-00-USER-DOWNLOAD-)")) | .id')"
+            --jq '.[] | select(.tag_name == "${{ inputs.version }}") | .assets[] | select(.name | test("^(Demiurge-(base|application|rag|update)-.*-(macos-arm64-full-rag|linux-x64-full-rag)|join-runtime\\.|Demiurge-00-USER-DOWNLOAD-)")) | .id')"
           for id in $ids; do gh api -X DELETE "repos/${{ github.repository }}/releases/assets/$id"; done
-          echo "已清理中间产物，保留用户一键包"
+          echo "已清理 mac/linux 分层中间产物；保留 Windows 运行时层（安装版在线交付依赖）与用户一键包"
 
   notes:
     needs: [package, cleanup]

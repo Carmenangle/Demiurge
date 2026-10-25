@@ -45,13 +45,15 @@ pub fn webview_data_dir() -> PathBuf {
 
 pub const SINGLE_INSTANCE_MUTEX: &str = "Local\\Demiurge.Desktop.SingleInstance";
 
-/// 便携包布局。字段名与 WPF 的 `PackageLayout` 一一对应。
+/// 便携包 / 安装版布局。字段名与 WPF 的 `PackageLayout` 一一对应；
+/// `pid_path` 是 Tauri 侧新增（安装版把 pid 落在 home，便携版落在 runtime_root）。
 pub struct PackageLayout {
     pub package_root: PathBuf,
     pub runtime_root: PathBuf,
     pub state_path: PathBuf,
     pub runtime_exe: PathBuf,
     pub data_dir: PathBuf,
+    pub pid_path: PathBuf,
 }
 
 /// 仓库布局（开发模式）。
@@ -84,10 +86,63 @@ pub fn resolve_package(start: &Path) -> Option<PackageLayout> {
     Some(PackageLayout {
         runtime_exe: runtime_root.join("base").join(&base_id).join("Demiurge-Runtime.exe"),
         data_dir: root.join("data").join("userdata"),
+        pid_path: runtime_root.join("runtime.pid"),
         package_root: root,
         runtime_root,
         state_path,
     })
+}
+
+/// 安装版的运行时层：程序在安装目录（可能只读），运行时与数据都在 `home()`。
+pub fn installed_runtime_root() -> PathBuf {
+    home().join("runtime")
+}
+
+/// 是不是安装版壳（即使运行时还没部署）。安装目录只有壳与 `dependencies/`，没有 `data/runtime`。
+pub fn looks_installed(install_dir: &Path) -> bool {
+    install_dir.join("dependencies").join("MANIFEST.json").is_file()
+        || install_dir.join("uninstall.exe").is_file()
+}
+
+/// 安装版布局：`install_dir` 放壳与依赖，`home/runtime` 放运行时，`home/userdata` 放数据。
+/// 只有 `home/runtime/current.json` 存在时才认（首次安装、运行时还没落地时返回 None）。
+pub fn resolve_installed(install_dir: &Path) -> Option<PackageLayout> {
+    resolve_installed_in(&home(), install_dir)
+}
+
+pub(crate) fn resolve_installed_in(home_dir: &Path, install_dir: &Path) -> Option<PackageLayout> {
+    let runtime_root = home_dir.join("runtime");
+    let state_path = runtime_root.join("current.json");
+    let base_id = read_base_id(&state_path)?;
+    if base_id.trim().is_empty() {
+        return None;
+    }
+    Some(PackageLayout {
+        runtime_exe: runtime_root.join("base").join(&base_id).join("Demiurge-Runtime.exe"),
+        data_dir: home_dir.join("userdata"),
+        pid_path: home_dir.join("runtime.pid"),
+        package_root: install_dir.to_path_buf(),
+        runtime_root,
+        state_path,
+    })
+}
+
+/// 壳自带的依赖目录（安装目录与运行时层都看），要前置进运行时子进程的 PATH。
+/// 现在有 MinGit（`dependencies/git/cmd`）与可选的 ffmpeg（`dependencies/ffmpeg/bin`）。
+pub fn dependency_bin_dirs(layout: &PackageLayout) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    for root in [&layout.package_root, &layout.runtime_root] {
+        let dependencies = root.join("dependencies");
+        for candidate in [
+            dependencies.join("git").join("cmd"),
+            dependencies.join("ffmpeg").join("bin"),
+        ] {
+            if candidate.is_dir() && !dirs.contains(&candidate) {
+                dirs.push(candidate);
+            }
+        }
+    }
+    dirs
 }
 
 pub fn find_repo(start: &Path) -> Option<RepoLayout> {

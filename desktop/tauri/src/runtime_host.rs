@@ -80,6 +80,7 @@ pub struct RuntimeHost {
     pid_path: Option<PathBuf>,
     mode: Option<RuntimeMode>,
     reused_external: bool,
+    early_exit: Option<i32>,
 }
 
 impl RuntimeHost {
@@ -91,6 +92,7 @@ impl RuntimeHost {
             pid_path: None,
             mode: None,
             reused_external: false,
+            early_exit: None,
         }
     }
 
@@ -139,14 +141,42 @@ impl RuntimeHost {
             )));
         }
 
-        let launch = self.build_launch()?;
+        let launch = match self.build_launch() {
+            Ok(launch) => launch,
+            Err(original) => {
+                // 安装版刚装好时 home/runtime 还是空的：先按 pin 交付运行时，再重新解析布局。
+                if self.try_install_runtime(&mut progress)? {
+                    self.build_launch()?
+                } else {
+                    return Err(original);
+                }
+            }
+        };
         self.mode = Some(launch.mode);
+        self.early_exit = None;
         self.spawn(launch)?;
         progress(match self.mode {
             Some(RuntimeMode::Packaged) => "启动内置运行时…",
             _ => "启动后端（Python / uvicorn）…",
         });
-        self.wait_until_ready(&mut progress)
+        match self.wait_until_ready(&mut progress) {
+            Ok(()) => Ok(()),
+            Err(first) if self.early_exit.is_some() => {
+                // Python 在 Windows 上偶发启动瞬间崩溃（0xC0000005），重试一次通常就好；
+                // 超时不重试：那多半是配置/依赖问题，重试只会把等待时间翻倍。
+                crate::shell_log::warn(&format!("运行时首次启动异常退出，自动重试一次：{first}"));
+                progress("后端异常退出，正在重试…");
+                self.stop();
+                wait_port_closed(self.port, Duration::from_secs(5));
+                let launch = self.build_launch()?;
+                self.mode = Some(launch.mode);
+                self.early_exit = None;
+                self.spawn(launch)?;
+                progress("重新启动后端（Python / uvicorn）…");
+                self.wait_until_ready(&mut progress)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     pub fn stop(&mut self) {
@@ -191,9 +221,7 @@ impl RuntimeHost {
     }
 
     fn is_port_open(&self) -> bool {
-        use std::net::{SocketAddr, TcpStream};
-        let address: SocketAddr = ([127, 0, 0, 1], self.port).into();
-        TcpStream::connect_timeout(&address, Duration::from_millis(600)).is_ok()
+        port_open(self.port)
     }
 
     // ── 拉起 ────────────────────────────────────────────────────────────────
@@ -207,15 +235,64 @@ impl RuntimeHost {
         if let Some(package) = paths::resolve_package(&exe_dir).or_else(|| paths::resolve_package(&cwd)) {
             return self.packaged_launch(package);
         }
+        // 仓库优先于安装版：开发时把便携壳放进仓库根仍应使用 `.venv`，而不是误用本机装的那份运行时。
         let repo = paths::find_repo(&exe_dir).or_else(|| paths::find_repo(&cwd));
-        match repo {
-            Some(repo) => self.development_launch(repo),
-            None => Err(RuntimeStartupError(
-                "未找到 Demiurge 运行时。\n\n\
-                 请把桌面壳放在便携包根目录（含 data/runtime/current.json），或在仓库内运行。"
-                    .to_string(),
-            )),
+        if let Some(repo) = repo {
+            return self.development_launch(repo);
         }
+        if let Some(installed) = paths::resolve_installed(&exe_dir) {
+            return self.packaged_launch(installed);
+        }
+        Err(RuntimeStartupError(format!(
+            "未找到 Demiurge 运行时。\n\n\
+             请把桌面壳放在便携包根目录（含 data/runtime/current.json）、在仓库内运行，\
+             或先完成安装版的运行时部署（{}）。",
+            paths::installed_runtime_root().join("current.json").display()
+        )))
+    }
+
+    /// 安装版首次启动：自动部署 base + application（RAG 可选，走 `--install-runtime --with-rag`）。
+    /// 便携包 / 仓库布局不适用，返回 false 让原始错误照常抛出。
+    fn try_install_runtime(&self, progress: &mut dyn FnMut(&str)) -> StartupResult<bool> {
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(|dir| dir.to_path_buf()))
+            .unwrap_or_else(|| PathBuf::from("."));
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        if paths::resolve_package(&exe_dir).is_some()
+            || paths::resolve_package(&cwd).is_some()
+            || paths::find_repo(&exe_dir).is_some()
+            || paths::find_repo(&cwd).is_some()
+            || !paths::looks_installed(&exe_dir)
+        {
+            return Ok(false);
+        }
+        progress("首次启动：准备下载运行时…");
+        crate::shell_log::info("安装版缺少运行时，开始按交付 pin 部署");
+        let report = crate::runtime_delivery::ensure_installed_runtime(&exe_dir, false, progress)
+            .map_err(|err| {
+                RuntimeStartupError(format!(
+                    "运行时尚未部署，自动下载失败：{err}\n\n\
+                     也可以手动把运行时发布资产（更新清单 + 分件）放到以下任一目录后重试：\n\
+                     - {}\n- {}",
+                    exe_dir.join("runtime-pack").display(),
+                    paths::home().join("downloads").display()
+                ))
+            })?;
+        crate::shell_log::info(&format!(
+            "运行时部署完成：base={} application={} rag={}",
+            report.base_id,
+            report.application_id,
+            if report.rag_id.is_empty() {
+                "未安装"
+            } else {
+                report.rag_id.as_str()
+            }
+        ));
+        if report.rag_available && report.rag_id.is_empty() {
+            progress("提示：未安装可选的 RAG 增强层（可用 Demiurge.exe --install-runtime --with-rag 追加）");
+        }
+        Ok(true)
     }
 
     fn packaged_launch(&self, package: PackageLayout) -> StartupResult<LaunchSpec> {
@@ -233,10 +310,11 @@ impl RuntimeHost {
             .env("LAF_DATA_DIR", &package.data_dir)
             .env("LAF_NO_BROWSER", "1")
             .env("LAF_RUNTIME_PORT", self.port.to_string());
+        inject_dependency_path(&mut command, &package);
         Ok(LaunchSpec {
             mode: RuntimeMode::Packaged,
             command,
-            pid_path: Some(package.runtime_root.join("runtime.pid")),
+            pid_path: Some(package.pid_path),
             header: package.runtime_exe.display().to_string(),
         })
     }
@@ -273,6 +351,9 @@ impl RuntimeHost {
             ])
             .env("PYTHONUTF8", "1")
             .env("PYTHONIOENCODING", "utf-8")
+            // 段错误时把 Python 栈打到 stderr；崩溃后日志里才不是一片空白。
+            .env("PYTHONFAULTHANDLER", "1")
+            .env("PYTHONUNBUFFERED", "1")
             .env("LAF_NO_BROWSER", "1")
             .env("LAF_FRONTEND_DIST", &frontend_dist)
             // 壳的端口是唯一真源：清掉继承来的层目录，避免误用旧便携包。
@@ -348,9 +429,11 @@ impl RuntimeHost {
         while Instant::now() < deadline {
             if let Some(child) = self.child.as_mut() {
                 if let Ok(Some(status)) = child.try_wait() {
+                    let code = status.code().unwrap_or(-1);
+                    self.early_exit = Some(code);
                     return Err(RuntimeStartupError(format!(
-                        "运行时启动失败，退出码 {}。{}",
-                        status.code().unwrap_or(-1),
+                        "运行时启动失败，退出码 {code}（0x{:08X}）。{}",
+                        code as u32,
                         self.log_hint()
                     )));
                 }
@@ -421,6 +504,31 @@ struct LaunchSpec {
     header: String,
 }
 
+/// 把壳自带依赖（MinGit / 可选 ffmpeg）前置到运行时 PATH。
+/// 干净机器上没有系统 git，节点管理这类能力会直接失效；前置也能让自带版本优先于系统版本。
+fn inject_dependency_path(command: &mut Command, package: &PackageLayout) {
+    let dirs = paths::dependency_bin_dirs(package);
+    if dirs.is_empty() {
+        return;
+    }
+    let mut merged = dirs.clone();
+    if let Some(existing) = std::env::var_os("PATH") {
+        merged.extend(std::env::split_paths(&existing));
+    }
+    match std::env::join_paths(&merged) {
+        Ok(value) => {
+            command.env("PATH", value);
+            let shown = dirs
+                .iter()
+                .map(|dir| dir.display().to_string())
+                .collect::<Vec<_>>()
+                .join(";");
+            crate::shell_log::info(&format!("运行时 PATH 前置：{shown}"));
+        }
+        Err(err) => crate::shell_log::warn(&format!("拼接运行时 PATH 失败：{err}")),
+    }
+}
+
 fn ready_timeout() -> Duration {
     match std::env::var("DEMIURGE_READY_TIMEOUT_SECONDS")
         .ok()
@@ -429,6 +537,23 @@ fn ready_timeout() -> Duration {
         Some(seconds) if (5..=900).contains(&seconds) => Duration::from_secs(seconds as u64),
         _ => Duration::from_secs(180),
     }
+}
+
+fn port_open(port: u16) -> bool {
+    use std::net::{SocketAddr, TcpStream};
+    let address: SocketAddr = ([127, 0, 0, 1], port).into();
+    TcpStream::connect_timeout(&address, Duration::from_millis(600)).is_ok()
+}
+
+fn wait_port_closed(port: u16, limit: Duration) -> bool {
+    let deadline = Instant::now() + limit;
+    while Instant::now() < deadline {
+        if !port_open(port) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    false
 }
 
 fn taskkill(pid: u32, force: bool) -> bool {

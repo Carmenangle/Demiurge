@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "tag": "v0.1.0",
+  "version": "0.1.0",
+  "target": "windows-x64-full-rag",
+  "release_base": "https://github.com/Carmenangle/Demiurge/releases/download/v0.1.0",
+  "manifest": "Demiurge-update-v0.1.0-windows-x64-full-rag.json",
+  "required_layers": [
+    "base",
+    "application"
+  ],
+  "optional_layers": [
+    "rag"
+  ],
+  "mirrors": []
+}

@@ -45,6 +45,29 @@ Windows 原生壳需要 **.NET 8 Desktop Runtime** 与 **Microsoft Edge WebView2
 想继续用浏览器：运行 `start-dev.bat` / `stop-dev.bat`（同一端口，二者只能有一个在跑）；
 `install-shortcut.bat` 会为桌面与开始菜单生成 `Demiurge` 快捷方式。
 
+### Windows 首次安装：SmartScreen 提示与文件校验
+
+安装包**未购买商业代码签名**（开源项目的常见选择），首次运行 Windows SmartScreen 可能拦截：
+
+> 「Windows 已保护你的电脑」→ 点 **更多信息** → 点 **仍要运行**。
+
+想确认下载完整、未被篡改：Release 每次发布都附带 `SHA256SUMS.txt`、其 minisign 签名
+`SHA256SUMS.txt.sig` 与公钥 `SHA256SUMS.pub`（与自动更新验签**同一把钥匙**）。两种验法：
+
+```bat
+:: 简单校验：对照 SHA256SUMS.txt 里对应行的哈希值
+certutil -hashfile Demiurge-Setup-User-0.1.0.exe SHA256
+
+:: 严格验签（需 minisign：github.com/jedisct1/minisign 的 Windows 版）
+:: .sig 是 base64 信封，先解开再用公钥验：
+certutil -decode SHA256SUMS.txt.sig SHA256SUMS.minisign
+minisign -V -p SHA256SUMS.pub -m SHA256SUMS.txt -x SHA256SUMS.minisign
+```
+
+若杀毒软件报毒：这是「无签名 + 拉起本地 Python/Git」的启发式误报（本项目零遥测、
+只跑本机），请走杀软的误报提交通道反馈，或先在 [VirusTotal](https://www.virustotal.com)
+上传安装包核对多引擎结果再决定。
+
 **四步跑到第一张图**（完整图文步骤见 [图解快速开始](docs/guide/quick-start.md)（10 步配图）；详细文字说明见 [教程 01 · 快速开始](docs/tutorials/01-quick-start.md)）：
 
 1. 解压后启动（Windows 双击 `Demiurge.exe`，其他平台运行启动脚本），界面即 `http://127.0.0.1:8010`。

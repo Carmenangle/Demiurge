@@ -64,6 +64,7 @@ fn append_to(dir: &Path, name: &str, line: &str) -> bool {
     if std::fs::create_dir_all(dir).is_err() {
         return false;
     }
+    rotate_if_large(dir, name);
     match std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -72,6 +73,23 @@ fn append_to(dir: &Path, name: &str, line: &str) -> bool {
         Ok(mut file) => file.write_all(line.as_bytes()).is_ok(),
         Err(_) => false,
     }
+}
+
+/// 单文件上限：超过即滚到 `<name>.1`（顶掉旧 .1）。5MB ≈ 数月壳日志量；
+/// 只保留一代历史——日志是诊断手段不是存档，无界增长反而稀释 tail 读速。
+const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
+
+fn rotate_if_large(dir: &Path, name: &str) {
+    let path = dir.join(name);
+    let Ok(meta) = std::fs::metadata(&path) else {
+        return; // 还不存在：无需轮转
+    };
+    if meta.len() < MAX_LOG_BYTES {
+        return;
+    }
+    let backup = dir.join(format!("{name}.1"));
+    let _ = std::fs::remove_file(&backup);
+    let _ = std::fs::rename(&path, backup); // 失败（如被占用）⇒ 本轮照常追加，下轮再试
 }
 
 /// 日志目录（供其它模块定位同一份日志）。
@@ -91,6 +109,7 @@ pub fn append_runtime_line(line: &str) {
     }
     let dir = log_dir();
     let _ = std::fs::create_dir_all(&dir);
+    rotate_if_large(&dir, "runtime.log");
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -124,4 +143,44 @@ fn chrono_like_now() -> String {
         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
         st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn small_file_not_rotated() {
+        let dir = std::env::temp_dir().join(format!("dsh-log-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(append_to(&dir, "test.log", "hello\n"));
+        assert!(dir.join("test.log").exists());
+        assert!(!dir.join("test.log.1").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn large_file_rotates_to_dot1() {
+        let dir = std::env::temp_dir().join(format!("dsh-log-test-big-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+        // 直接灌一个超上限的文件（5MB+1），触发轮转
+        let big = dir.join("big.log");
+        std::fs::write(&big, vec![b'x'; MAX_LOG_BYTES as usize + 1]).unwrap();
+        assert!(append_to(&dir, "big.log", "after-rotate\n"));
+        let rotated = dir.join("big.log.1");
+        assert!(rotated.exists(), "超限文件应滚到 .1");
+        assert_eq!(std::fs::metadata(&rotated).unwrap().len(), MAX_LOG_BYTES + 1);
+        // 当前文件只含新行
+        assert_eq!(std::fs::read_to_string(&big).unwrap(), "after-rotate\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_file_is_noop() {
+        let dir = std::env::temp_dir().join(format!("dsh-log-test-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        rotate_if_large(&dir, "absent.log"); // 不应 panic
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -3,6 +3,11 @@
 <head>
   <meta charset="utf-8" />
   <title>Demiurge</title>
+  <!-- 兜底启动页自持 CSP（2026-10-24）：本页由 tauri 协议送达，tauri.conf 的 csp 罩不到
+       远程 http 应用页（那由后端 main.py 的 _csp_document_header 属主），这里自治。
+       本页只有内联脚本/样式、零网络调用；壳注入走 WebView2 ExecuteScript，不受 CSP 约束。 -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; object-src 'none'; base-uri 'self'; form-action 'self'" />
   <style>
     html, body { height: 100%; margin: 0; }
     body {
@@ -36,7 +41,7 @@
     <div class="brand">DEMIURGE</div>
     <div class="step" id="step">正在启动…</div>
     <div class="bar" id="bar"></div>
-    <div class="hint" id="hint">关窗会隐藏到托盘；要退出请用托盘菜单</div>
+    <div class="hint" id="hint">关窗时可选择隐藏到托盘或彻底关闭；彻底关闭会同时停止后端</div>
     <div class="error" id="error"></div>
   </div>
   <script>
