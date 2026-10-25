@@ -1061,3 +1061,35 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
    `glError=0`。门禁：scene vitest **107 例**（52/22/20/11/2）、前端全量 **1858**、tsc 0、`vite build` 0、
    e2e 七 spec **13 例**（隔离 5198→8011，`--workers=1`）；NOTICE 改动⑩ + 播放器 10 + 双 SHA-256 已同步。
    `F/11` §3.8、`frontend/src/lib/scene/README.md`、`G/16` 红线 16 同步。
+
+61. **安全审计补刀：代理 svg 响应头 + web_search 抓取入 url_guard + spike 产物 ignore 盲区（已完成 · 2026-10-25）**：
+   2026-10-25 全库安全复查（对照 10-24 已落地六件套逐项核实通过后）发现的三个新开口，同日收口。
+   ① **代理路由 svg 同源 XSS 直航**：条 53 的 svg 加固只落在 local-view——`GET /api/ai/image-proxy`
+   与 `GET /api/comfyui/web-materials/proxy-image` 裸回 `Response`，而 `fetch_remote_image` 只查
+   `image/*` 前缀放行 `image/svg+xml` ⇒ 直航一个公网恶意 svg 的代理 URL＝脚本在应用同源执行
+   （与条 53 修掉的 local-view 问题同源，是漏掉的另一半；条 53 登记的取舍是「不拒 svg 保预览」，
+   加响应头不破坏预览，故属遗漏非取舍）。修法＝**响应形态单一属主**
+   `image_proxy.proxied_image_response(ctype)`：nosniff 全量 + svg 另加 `CSP sandbox` +
+   非标准 `image/svg` 归一 `image/svg+xml`（与 `local_media._media_type` 同口径）；两个代理路由
+   都必须经它取 `(media_type, headers)`，web-materials 的 1h 缓存头在该属主之上叠加。
+   ② **web_search 正文抓取绕过 url_guard（SSRF）**：`fetch_page_text_and_images` 抓 SERP 结果 URL
+   （外部输入），旧实现零校验 + `follow_redirects=True`——公网页 302 到内网/metadata 时代理照抓、
+   正文回流对话上下文。修法＝与 image_proxy 同口径的**逐跳「校验+钉扎→建连」**（`pinned_media_url`
+   每跳进 with、`follow_redirects=False`、5 跳上限、Location 相对解析用已验证 URL join）；校验拒绝
+   （ValueError）走既有「单页失败跳过」兜底语义，不因攻击 URL 阻断语料组装。url_guard 模块
+   docstring 的出站链清单补第 6 条。③ **mobile/spike ignore 盲区**：`src/`（M1 上游 sdist 解压树）、
+   `repack/`（重打包输入 wheel + PC 冒烟环境）、`audit-*.png`（0.3.x 审计截图）未忽略——仓库 public，
+   一次 `git add -A` 即卷入产物。🔴 **gitignore 教训：目录规则必须锚定根（`/src/`）**——裸 `src/`
+   匹配任意深度同名目录，首轮即误伤 `android-spike/app/src/` 整棵 Android 源码树（mobile_server.py、
+   python/app 消失于 untracked 列表才暴露）；构建配方（android-lock/requirements/constraints.txt、
+   make_*.py、mobile_server.py、python/app 拷贝树）是待提交源料，**刻意不忽略**。
+   **登记不改**（既有设计取舍，非本刀范围）：`LAF_ALLOW_REMOTE=1` 零鉴权、local-view 任意媒体
+   路径、Autopilot 文件/Shell 能力靠审批闸门、`/api/ai/model-probe` 任意 baseUrl（产品语义）。
+   **验证**：定向 6 套件 **150 例全绿**（test_proxy_image_routes 新 5 例锁两路由接线——svg 带头/位图
+   无 CSP/非标准归一/缓存头保留；test_web_search 新 4 例——私网/metadata 目标零建连、302→私网
+   不发第二跳、公网重定向照常跟随、循环超限判失败；test_url_guard 新 1 例毒化 DNS 端到端——正文
+   标记「来自127.0.0.1」证明连接落已验证 IP，loopback_servers 夹具 12 字节 body 过不了 ≥200 字
+   反爬判据故自起同端口文本服务对）；`ruff app tests` 0 / `lint-imports` **18 kept** /
+   `mypy @mypy_files.txt` **269 文件 Success** / `check_hardcode` 通过；ignore 规则经
+   `git check-ignore -v` 双向验证（产物三命中、源料六不命中）。手册 `C/04` §4.3 表行与红线 10 扩到
+   代理路由、`G/10` §3.1 url_guard 链清单；memory `topic-release-audit-test.md`「2026-10-25 · 安全审计补刀」。

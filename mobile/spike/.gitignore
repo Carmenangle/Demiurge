@@ -1,8 +1,14 @@
 # Spike build artifacts and downloaded toolchain pieces (sources stay tracked)
 # 上游 crate 解压件（make_wheel.py 下载后解压，非本仓库源码）
 pydantic_core-2.46.4/
+# M1 自编轮子的上游 sdist 解压树（make_m1_wheels.py 下载解包，产物进 wheelhouse）。
+# ⚠ 必须锚定 /src/：不带斜杠会匹配任意深度的 src 目录，误伤 android-spike/app/src/ 源码树。
+/src/
+# 元数据重打包的上游 wheel 与 PC 冒烟环境（make_repacked_wheels.py 的输入，可再取）
+/repack/
 # 真机/模拟器截图（390 宽适配参考，属产物不入库）
 shot-*.png
+audit-*.png
 android-spike/.gradle/
 android-spike/build/
 android-spike/app/build/
@@ -30,4 +36,6 @@ tools/
 vendor/
 android-spike/app/src/main/jniLibs/
 android-spike/app/src/main/assets/
+# 内嵌后端由 Gradle preBuild 从 backend/app 同步，不入库
+android-spike/app/src/main/python/app/
 frontend-mobile-dist/

@@ -225,3 +225,26 @@ def test_拒绝重定向到内网(monkeypatch):
     with pytest.raises(ImageProxyError, match="重定向目标被拒"):
         fetch_remote_image("https://safe-cdn.com/redirect-to-internal")
     assert calls == ["https://safe-cdn.com/redirect-to-internal"]
+
+
+def test_响应形态_nosniff全量_svg另加CSP_sandbox():
+    """2026-10-25 审计补刀：代理响应形态单一属主 proxied_image_response。
+
+    svg 可过 fetch 的 image/* 检查；没有 nosniff + CSP sandbox 时直航代理 URL
+    即同源执行脚本（与 local_media 的 local-view 加固同口径，两端必须同形）。
+    """
+    from app.services.image_proxy import proxied_image_response
+
+    ctype, headers = proxied_image_response("image/png")
+    assert ctype == "image/png"
+    assert headers == {"X-Content-Type-Options": "nosniff"}
+
+    ctype, headers = proxied_image_response("image/svg+xml")
+    assert ctype == "image/svg+xml"
+    assert headers["X-Content-Type-Options"] == "nosniff"
+    assert headers["Content-Security-Policy"] == "sandbox"
+
+    # 非标准 image/svg（无 +xml）归一——未注册类型会诱使浏览器内容嗅探
+    ctype, headers = proxied_image_response("image/svg")
+    assert ctype == "image/svg+xml"
+    assert headers["Content-Security-Policy"] == "sandbox"

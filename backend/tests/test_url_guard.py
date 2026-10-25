@@ -236,7 +236,7 @@ class TestPinnedMediaUrl:
 
 
 class TestPinnedChainE2E:
-    """四条出站链的 TOCTOU 端到端：毒化 DNS 后连接必须落在已验证 IP。"""
+    """各出站 fetch 链的 TOCTOU 端到端：毒化 DNS 后连接必须落在已验证 IP。"""
 
     def test_image_proxy_毒化DNS仍连已验证IP(self, fake_dns, loopback_servers, allow_loopback_as_public):
         import httpx
@@ -294,3 +294,50 @@ class TestPinnedChainE2E:
         )
         dest = tmp_path / "checkpoints" / "file.safetensors"
         assert dest.read_bytes() == b"legit-bytes"
+
+    def test_web_search抓取链_毒化DNS仍连已验证IP(self, fake_dns, allow_loopback_as_public):
+        """正文抓取（SERP 结果页）2026-10-25 起接入钉扎：毒化后必须仍落在已验证 IP。
+
+        loopback_servers 夹具的 12 字节 body 过不了 fetch_page 的 ≥200 字反爬判据，
+        故本用例自起一对同端口文本服务，正文里带来源标记区分连接落点。
+        """
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        from app.services import web_search
+
+        filler = "正文填充" * 100  # ≥200 字，过反爬空壳页判据
+
+        def _handler(body_ip: str):
+            class Handler(BaseHTTPRequestHandler):
+                # 类属性定格本轮文本（晚绑定闭包会让两个服务都吐最后一轮，见 conftest 注）
+                page_text = f"<html><body>{filler}来自{body_ip}</body></html>".encode("utf-8")
+
+                def do_GET(self):
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(self.page_text)))
+                    self.end_headers()
+                    self.wfile.write(self.page_text)
+
+                def log_message(self, *args):
+                    pass
+            return Handler
+
+        started = []
+        port = 0
+        for ip in ("127.0.0.1", "127.0.0.2"):
+            srv = ThreadingHTTPServer((ip, port), _handler(ip))
+            if port == 0:
+                port = srv.server_address[1]  # 两个地址绑同一端口（毒化只换 IP 不换端口）
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            started.append(srv)
+        try:
+            fake_dns["evil.test"] = ["127.0.0.1", "127.0.0.2"]
+            text, _imgs = web_search.fetch_page_text_and_images(
+                f"http://evil.test:{port}/page")
+            assert "来自127.0.0.1" in text  # 落在已验证 IP，不是毒化的 127.0.0.2
+        finally:
+            for srv in started:
+                srv.shutdown()
+                srv.server_close()

@@ -13,8 +13,8 @@
   可把已验证的公网域名换到私网/metadata IP，校验即被绕过。pinned_media_url /
   pinned_host 把「校验时解析到的 IP」钉给 with 块内的建连：校验与建连共用同一批 IP，
   Host/SNI 仍是原域名（TLS 校验不受影响）。所有「validate 后再 fetch」的出站链
-  （image_proxy / image_store 保存 / visual_ci 取图 / model_downloader / material_sources
-  httpx 兜底）都必须包进对应上下文。
+  （image_proxy / image_store 保存 / visual_ci 取图 / model_downloader /
+  material_sources httpx 兜底 / web_search 正文抓取）都必须包进对应上下文。
 """
 from __future__ import annotations
 

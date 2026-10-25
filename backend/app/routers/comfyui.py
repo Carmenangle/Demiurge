@@ -555,6 +555,7 @@ def web_material_proxy_image(url: str, proxy: str = ""):
     from fastapi import Response
 
     from app.services import material_sources
+    from app.services.image_proxy import proxied_image_response
     from app.services.repo_meta import setting_str_from_state
 
     if not url.strip():
@@ -565,8 +566,11 @@ def web_material_proxy_image(url: str, proxy: str = ""):
         data, ctype = material_sources.fetch_image_bytes(url.strip(), proxy=px)
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    return Response(content=data, media_type=ctype,
-                    headers={"Cache-Control": "public, max-age=3600"})
+    # 响应形态（nosniff / svg CSP sandbox / svg 类型归一）与 image-proxy 同一属主
+    # image_proxy.proxied_image_response——白名单 host 只是收窄面，不是替代。
+    ctype, headers = proxied_image_response(ctype)
+    headers["Cache-Control"] = "public, max-age=3600"
+    return Response(content=data, media_type=ctype, headers=headers)
 
 
 @router.post("/web-materials/delete")

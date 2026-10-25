@@ -740,8 +740,10 @@ def test_filter_relevant_images_无token查询不过滤():
 
 
 class _FakePageResponse:
-    def __init__(self, text):
+    def __init__(self, text, status_code=200, headers=None):
         self.text = text
+        self.status_code = status_code
+        self.headers = headers or {}
 
     def raise_for_status(self):
         pass
@@ -956,3 +958,109 @@ def test_web_search_链上bing垃圾回落到moegirl(monkeypatch):
     assert len(results) == 1
     assert results[0]["title"] == "月见八千代"
     assert results[0]["url"].startswith("https://zh.moegirl.org.cn/")
+
+
+# ── 正文抓取的 SSRF 防线（2026-10-25 审计补刀） ──────────────────
+# 旧实现 fetch_page_text_and_images 零校验 + follow_redirects=True：SERP 结果 URL
+# （外部输入）直连私网/metadata，或公网页 302 到内网地址时代理照抓、正文回流对话
+# 上下文。新实现每跳「校验+钉扎→建连」（pinned_media_url），拒绝＝单页失败跳过。
+
+class _NoFetchClient:
+    """get 被调用即失败——校验必须在建连前拒绝。"""
+
+    def __init__(self, **kwargs):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        pass
+
+    def get(self, url, headers=None, params=None):
+        raise AssertionError(f"未校验的 URL 被请求：{url}")
+
+
+def test_fetch_page_text_私网目标不发请求(monkeypatch):
+    """直接指向私网/metadata 的 SERP 结果：校验层拒绝，零建连。"""
+    import httpx
+    monkeypatch.setattr(httpx, "Client", _NoFetchClient)
+    assert ws.fetch_page_text("http://192.168.1.1/admin") == ""
+    assert ws.fetch_page_text("http://10.0.0.5/intranet") == ""
+    assert ws.fetch_page_text("http://169.254.169.254/latest/meta-data/") == ""
+    assert ws.fetch_page_text("http://localhost:8010/api/user-state") == ""
+
+
+def test_fetch_page_text_重定向到私网不发第二跳(monkeypatch):
+    """公网首跳 302 → 私网目标：第二跳在校验层被拒，绝不发请求（TOCTOU 同口径）。"""
+    import httpx
+
+    calls: list[str] = []
+
+    class RedirectClient:
+        def __init__(self, **kwargs):
+            assert kwargs.get("follow_redirects") is False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def get(self, url, headers=None, params=None):
+            calls.append(url)
+            return _FakePageResponse("", status_code=302,
+                                     headers={"location": "http://192.168.1.1/evil"})
+
+    monkeypatch.setattr(httpx, "Client", RedirectClient)
+    assert ws.fetch_page_text("https://safe-article.test/page") == ""
+    assert calls == ["https://safe-article.test/page"]  # 只有已验证的首跳
+
+
+def test_fetch_page_text_公网重定向继续抓(monkeypatch):
+    """公网 → 公网重定向照常跟随（防 SSRF 不等于砍功能）。"""
+    import httpx
+
+    long_page = "<html><body>" + "正文填充" * 100 + "</body></html>"
+
+    class RedirectClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def get(self, url, headers=None, params=None):
+            if url == "https://a.test/old":
+                return _FakePageResponse("", status_code=302,
+                                         headers={"location": "https://b.test/new"})
+            return _FakePageResponse(long_page)
+
+    monkeypatch.setattr(httpx, "Client", RedirectClient)
+    text = ws.fetch_page_text("https://a.test/old")
+    assert "正文填充" in text
+
+
+def test_fetch_page_text_重定向循环超限判失败(monkeypatch):
+    """自重定向循环 5 跳后判失败返回空，不悬挂。"""
+    import httpx
+
+    class LoopClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def get(self, url, headers=None, params=None):
+            return _FakePageResponse("", status_code=302,
+                                     headers={"location": "https://loop.test/next"})
+
+    monkeypatch.setattr(httpx, "Client", LoopClient)
+    assert ws.fetch_page_text("https://loop.test/start") == ""

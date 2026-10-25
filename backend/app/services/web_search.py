@@ -26,6 +26,8 @@ from typing import Protocol, runtime_checkable
 
 import httpx
 
+from app.services.url_guard import pinned_media_url
+
 import logging
 
 _LOG = logging.getLogger("uvicorn.error")
@@ -155,15 +157,34 @@ def fetch_page_text_and_images(url: str, proxy: str = "", timeout: float = 8.0,
     if not (url or "").startswith(("http://", "https://")):
         return "", []
     try:
-        client_kw: dict = {"timeout": timeout, "follow_redirects": True, "trust_env": False}
+        # SSRF 防线（2026-10-25 审计补刀）：SERP 结果 URL 是外部输入，抓取前必须过
+        # url_guard（拒私网/metadata/内嵌凭据），且每跳「校验+钉扎→建连」一次完成
+        # （DNS rebinding TOCTOU 关窗，与 image_proxy 同口径）。旧实现
+        # follow_redirects=True 且零校验：公网页 302 到内网地址时后端会代抓，
+        # 正文回流进对话上下文。校验失败（ValueError）走下方兜底 except，等同单页
+        # 抓取失败跳过——不因攻击 URL 阻断语料组装。
+        client_kw: dict = {"timeout": timeout, "follow_redirects": False, "trust_env": False}
         if proxy and proxy.strip():
             client_kw["proxy"] = proxy.strip()
+        page = ""
+        current = url
         with httpx.Client(**client_kw) as c:
-            r = c.get(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                                  "AppleWebKit/537.36 Chrome/126.0 Safari/537.36"})
-            r.raise_for_status()
-            page = r.text
-    except Exception:  # noqa: BLE001 - 单页失败不阻断语料组装
+            for _hop in range(5):
+                with pinned_media_url(current) as pinned:
+                    r = c.get(pinned, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                                            "AppleWebKit/537.36 Chrome/126.0 Safari/537.36"})
+                if r.status_code in (301, 302, 303, 307, 308):
+                    location = (r.headers.get("location") or "").strip()
+                    if not location:
+                        return "", []
+                    current = str(httpx.URL(pinned).join(location))
+                    continue
+                r.raise_for_status()
+                page = r.text
+                break
+            else:
+                return "", []  # 重定向跳数过多（>5）
+    except Exception:  # noqa: BLE001 - 单页失败不阻断语料组装（含 url_guard 拒绝私网目标）
         return "", []
     # 剥脚本/样式块，再走与 SERP 摘要同一套剥标签口径。
     # ⚠ 只剥 script/style/noscript（2026-09-11 晚实锤）：带上 svg|template 后，

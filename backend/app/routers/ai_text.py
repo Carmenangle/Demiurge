@@ -265,13 +265,18 @@ def inspiration_select(req: InspirationSelectRequest) -> dict[str, object]:
 @router.get("/image-proxy")
 def image_proxy(url: str, proxy: str = ""):
     """外网图片代理：中转灵感卡缩略图/原图。限 http(s) 与 5MB，防被当开放代理滥用。"""
-    from app.services.image_proxy import ImageProxyError, fetch_remote_image
+    from app.services.image_proxy import (
+        ImageProxyError,
+        fetch_remote_image,
+        proxied_image_response,
+    )
     try:
         data, ctype = fetch_remote_image(url, proxy=proxy)
     except ImageProxyError as e:
-        raise HTTPException(status_code=e.status, detail=e.detail)
+        raise HTTPException(status_code=e.status, detail=e.detail) from e
     from fastapi.responses import Response
-    return Response(content=data, media_type=ctype)
+    ctype, headers = proxied_image_response(ctype)
+    return Response(content=data, media_type=ctype, headers=headers)
 
 
 class DescribeImageRequest(ChatModelReq):

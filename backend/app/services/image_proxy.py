@@ -7,6 +7,8 @@
   的 IP，rebinding 在校验与建连之间换 IP 无效（见 url_guard 模块 docstring）。
 - 流式读取并限制响应大小（默认 5MB），防被当开放代理滥用/内存撑爆。
 - Content-Type 必须是 image/*（防拉回 HTML/JS）。
+- 响应形态（media_type + nosniff/svg-CSP 头）单一属主 `proxied_image_response`：
+  两个代理路由都必须经它构造 Response（2026-10-25 审计补刀，防 svg 同源直航）。
 - 代理地址与灵感搜索同源：显式 proxy（trust_env=False），空则直连。
 """
 from __future__ import annotations
@@ -23,6 +25,29 @@ class ImageProxyError(ValueError):
         super().__init__(detail)
         self.status = status
         self.detail = detail
+
+
+def proxied_image_response(content_type: str) -> tuple[str, dict[str, str]]:
+    """后端中转的远程图片「响应形态」单一属主：返回 (media_type, 安全响应头)。
+
+    2026-10-25 审计补刀：fetch 只查 `image/*` 前缀放行 `image/svg+xml`，而 10-24 的
+    svg 加固只落在 local-view（local_media.LocalMedia.headers）——直接导航到一个恶意
+    svg 的代理 URL ＝ 脚本在应用同源（回环端口）执行。两个代理路由
+    （ai_text image-proxy、comfyui web-materials/proxy-image）都必须经本函数取
+    (media_type, headers)，缺一边就是同源 XSS 直航入口。
+    - nosniff 全量：杜绝浏览器对代理响应做内容嗅探（与 local-view 同口径）。
+    - svg 另加 CSP sandbox：直航时禁脚本/表单，静态图形照常渲染；`<img>`/`<video>`
+      引用不受影响（媒体元素上下文本就不执行脚本）。
+    - `image/svg`（非标准、无 +xml）归一为 `image/svg+xml`：未注册类型会诱使浏览器
+      嗅探，与 local_media._media_type 对 svg 的显式映射同口径。
+    """
+    ctype = (content_type or "").strip().lower()
+    if ctype == "image/svg":
+        ctype = "image/svg+xml"
+    headers = {"X-Content-Type-Options": "nosniff"}
+    if ctype == "image/svg+xml":
+        headers["Content-Security-Policy"] = "sandbox"
+    return ctype, headers
 
 
 def fetch_remote_image(url: str, proxy: str = "",
