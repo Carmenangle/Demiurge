@@ -41,4 +41,3 @@ class AgentState(TypedDict, total=False):
     _streamed_result: bool         # 节点正文已实时发送；完成时只发最终替换，不重复 delta
     # 下方是执行上下文（构图时注入，专家节点用）
     _ctx: RunContext
-

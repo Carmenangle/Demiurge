@@ -367,4 +367,3 @@ def _wb_illustration_reason(*, illustrate_req, plan_retargeted, illustration_pla
             "missing_plan_fallback" if missing_plan_fallback and illustrate_req else
             prompt_source if illustrate_req else
             "scene_not_triggered" if not at_climax else "empty_prompt")
-

@@ -837,4 +837,3 @@ def roleplay_node(state: AgentState) -> dict:
         # 失败收尾下沉接缝（2026-10-20）：错误留痕 + 已收半成品按中断语义落库，
         # 让下一轮 `_resume_interrupted_messages` 能接着写（不是从头再来）。
         return _roleplay_failure_result(ctx, trace, streamed, e)
-

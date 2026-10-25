@@ -656,28 +656,3 @@ def _build_renderer(ctx: CtxLike):
         style_base_image=ctx.get("style_base_image") or "",
         proxy=ctx.get("gen_proxy", ""))
     return scene_renderers.cloud_renderer(cfg)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

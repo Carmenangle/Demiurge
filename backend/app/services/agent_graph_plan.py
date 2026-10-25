@@ -573,4 +573,3 @@ def plan_compiler_node(state: AgentState) -> dict:
         ctx, state, text=text, intent_text=intent_text, judge_text=_fabric_judge,
         trace=trace, output_dir=output_dir, configured=configured,
         attachments=attachments, compile_text=compile_text, prev_batch=prev_batch)
-

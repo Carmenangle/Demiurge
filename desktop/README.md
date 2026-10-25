@@ -302,4 +302,3 @@ WPF 壳保持旧行为（关窗即退出并回收），决策只在新壳落地�
   仍未在 `Program Files` 做破坏性写入实测。
 - 门禁：`test_installer_release.py` **23/23**、`cargo test --release` 6/6、`ruff check` 干净。
 - **未验证**：生产密钥轮换、真实下载与安装的端到端回放、tag/Release 端到端（本轮按定案全部推迟）。
-

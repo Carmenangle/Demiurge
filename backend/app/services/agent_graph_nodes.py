@@ -222,4 +222,3 @@ def answer_node(state: AgentState) -> dict:
 
 def clarify_node(state: AgentState) -> dict:
     return {"result_text": "本次意图有多种合理理解，请选择要执行的功能。"}
-

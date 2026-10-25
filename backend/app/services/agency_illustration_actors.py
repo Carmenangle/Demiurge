@@ -419,4 +419,3 @@ def _build_image_prompt(ctx: CtxLike, *, paragraph: str, appearance: str,
     )
     prompt = _apply_regex(ctx, request.prompt, Placement.IMAGE_PROMPT, is_prompt=True)
     return prompt.strip(), ipe.infer_motion(paragraph), request.actors
-

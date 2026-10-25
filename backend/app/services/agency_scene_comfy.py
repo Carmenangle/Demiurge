@@ -1016,4 +1016,3 @@ def _wb_comfy_extra_requests(ctx: CtxLike, repo_id: str, plan, clean: str, sig: 
             _prev_pic = _own_pic
         extras.append(request)
     return extras
-

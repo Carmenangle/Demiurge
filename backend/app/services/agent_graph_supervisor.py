@@ -241,4 +241,3 @@ def supervisor_node(state: AgentState) -> dict:
                    forced=bool(forced_route), scene=ctx.get("scene") or "")
     trace = state.get("trace", []) + [f"🧭 主管分派 → {label}"]
     return {"route": route, "trace": trace}
-

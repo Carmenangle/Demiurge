@@ -300,4 +300,3 @@ def maintenance_snapshot() -> list[dict]:
             }
             for key, entry in _MAINTENANCE_RUNS.items()
         ]
-
