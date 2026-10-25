@@ -1,0 +1,33 @@
+# Spike build artifacts and downloaded toolchain pieces (sources stay tracked)
+# 上游 crate 解压件（make_wheel.py 下载后解压，非本仓库源码）
+pydantic_core-2.46.4/
+# 真机/模拟器截图（390 宽适配参考，属产物不入库）
+shot-*.png
+android-spike/.gradle/
+android-spike/build/
+android-spike/app/build/
+android-spike/local.properties
+pydantic_core-2.46.4/target/
+target-arm64/
+target-x86_64/
+pyrt-arm64/
+pyrt-x86_64/
+stdlib/
+numpy-check/
+plugin-classes/
+chromadb-1.5.9/
+chromadb-target/
+wheelhouse/
+dist/
+downloads/
+*.log
+*.zip
+*.tar.gz
+*.whl
+*.json
+gradle-plugin.jar
+tools/
+vendor/
+android-spike/app/src/main/jniLibs/
+android-spike/app/src/main/assets/
+frontend-mobile-dist/

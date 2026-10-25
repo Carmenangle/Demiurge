@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Demiurge</string>
+    <string name="shortcut_server">修改服务器地址</string>
+    <string name="connect_title">连接 Demiurge 桌面端</string>
+    <string name="connect_hint">填电脑上运行的后端地址。\n\n模拟器（USB/adb）：先在电脑执行\nadb reverse tcp:8010 tcp:8010\n然后填 http://127.0.0.1:8010/\n\n局域网/虚拟机：填 http://电脑IP:8010/ ，并让后端绑定 0.0.0.0 且设 LAF_ALLOW_REMOTE=1。\n\n连上后长按桌面图标可再次修改地址。</string>
+    <string name="connect_button">连接</string>
+    <string name="connect_invalid">地址无效，请填 http://主机:端口/</string>
+    <string name="connect_failed">无法连接，请检查地址与后端是否在运行</string>
+    <string name="change_server">修改服务器地址</string>
+    <string name="retry">重试</string>
+</resources>
