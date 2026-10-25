@@ -22,7 +22,7 @@ Demiurge 的 scene 壁纸实时渲染用的两个文件是从第三方 MIT 插�
 文字与时钟 / 日期脚本模板 / 问候语与帧率脚本 / 字号自身+中间父组 scale / 2D 粒子 / 云层流动 / 视频纹理 补丁）：
 
 - `we-scene-manifest.js` — `b76f3f7ea2389b6adccfa00e886e08c8085f91fc6d934ee49e6a9e2c388a653e`
-- `we-scene-player-html.js` — `0293083295d419672cca0caa07d7addd0b7b25344214b1da1e5c122f304de977`
+- `we-scene-player-html.js` — `af5cc049f30f6c649f6700db5f0a3f48bd48719ab5479cbba9bda9d647b67bee`
 
 ## 改动清单（全部改动，逐字）
 
@@ -404,7 +404,10 @@ puppet 嵌套未实现；脚本引擎仍不执行（`scripted:true` 场景渲染
       所以数字会贴近显示器刷新率（常见 60）而不是 WE 截图里的 20~30；后台标签页降频时
       数字也会跟着掉。这是「诚实的实测帧率」，不是伪造 WE 的读数。
 
-除上述 12 项外模板字符串本体未改（`<script>` 数量与垫片插入点保持不变）。
+13. **提交卫生：3 行行尾空格清理**（2026-10-25，`git diff --check` 口径）。仅删除空白行的
+    行尾空格，模板字符串与代码逐字未变；EOL 仍为纯 CRLF。
+
+除上述 13 项外模板字符串本体未改（`<script>` 数量与垫片插入点保持不变）。
 
 播放器文档用 `blob:` URL 装载而**不是 `srcdoc`**：`about:srcdoc` 文档里
 `window.location.origin` 读到的是字符串 `'null'`，而上游播放器两头都拿它做校验
