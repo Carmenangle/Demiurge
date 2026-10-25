@@ -124,7 +124,7 @@ describe("MediaInsertModal LoRA suggested weights", () => {
         preset={{
           templateId: "", loraMode: "single", appearanceSource: "worldbook",
           characterLoras: {
-            冷倾雪: { loraName: "krea2_柳世熙.safetensors", loraWeight: 1 },
+            顾凝霜: { loraName: "krea2_沈明澜.safetensors", loraWeight: 1 },
           },
           styleLora: "Krea2-Ogipote style-手绘风.safetensors",
         }}
@@ -133,7 +133,7 @@ describe("MediaInsertModal LoRA suggested weights", () => {
       />,
     );
 
-    expect(html).toContain("krea2_柳世熙.safetensors（当前绑定，目录列表未包含）");
+    expect(html).toContain("krea2_沈明澜.safetensors（当前绑定，目录列表未包含）");
     expect(html).toContain("Krea2-Ogipote style-手绘风.safetensors（当前绑定，目录列表未包含）");
   });
 });
@@ -258,5 +258,63 @@ describe("MediaInsertModal 批量生图数目（第 57 刀）", () => {
     );
 
     expect(html).toContain('value="1"');
+  });
+});
+
+// ===== 2026-10-25 提示词模版：生图/视频提示词模式 =====
+describe("MediaInsertModal prompt templates", () => {
+  const customImage = {
+    id: "a".repeat(32), builtin: false, kind: "anima_tags" as const, name: "我的Anima",
+    base_id: "builtin:anima_tags", base_hash: "x", redline_lock: true, redline_lock_off_at: 0,
+    system_text: "SYS", extra_instructions: "追加", quality_tags: "Q", negative_tags: "N",
+    section_titles: {}, section_order: [], camera_band_overrides: {},
+    beat_labels: [], default_duration: 0, negative_extra: "", meta_note: "",
+  };
+  const customVideo = {
+    ...customImage, id: "b".repeat(32), kind: "video_climax" as const, name: "我的高潮",
+    base_id: "builtin:video_climax",
+  };
+
+  it("「提示词模式」改名「生图提示词模式」，自定义模版进「我的模版」组", () => {
+    const html = renderToStaticMarkup(
+      <MediaInsertModal templates={[]} modelsDir=""
+        preset={{ templateId: "", promptProfile: `custom:${"a".repeat(32)}` }}
+        promptTemplateBuiltins={[]}
+        promptTemplateItems={[customImage, customVideo]}
+        onSave={() => {}} onClose={() => {}} />,
+    );
+    expect(html).toContain("生图提示词模式");
+    expect(html).not.toContain(">提示词模式<");
+    expect(html).toContain("我的模版（提示词模版工作台）");
+    expect(html).toContain("★ 我的Anima");
+    // custom anima 模版也显示固定质量/负面词（anima 家族）
+    expect(html).toContain("固定质量提示词");
+  });
+
+  it("视频分区新增「视频提示词模式」，高潮点只列 climax 模版", () => {
+    const html = renderToStaticMarkup(
+      <MediaInsertModal templates={[]} modelsDir=""
+        preset={{ templateId: "", enableVideo: true, videoTemplateId: "" }}
+        promptTemplateBuiltins={[]}
+        promptTemplateItems={[customImage, customVideo]}
+        onSave={() => {}} onClose={() => {}} />,
+    );
+    expect(html).toContain("视频提示词模式");
+    expect(html).toContain("内置默认（六段式骨架）");
+    expect(html).toContain("★ 我的高潮");
+    // 生图自定义模版不混进视频选择器
+    const videoBlock = html.slice(html.indexOf("视频提示词模式"));
+    expect(videoBlock).not.toContain("★ 我的Anima");
+  });
+
+  it("首尾帧模式下视频选择器含段桥说明", () => {
+    const html = renderToStaticMarkup(
+      <MediaInsertModal templates={[]} modelsDir=""
+        preset={{ templateId: "", enableVideo: true, firstlast: true }}
+        promptTemplateBuiltins={[]}
+        promptTemplateItems={[customVideo]}
+        onSave={() => {}} onClose={() => {}} />,
+    );
+    expect(html).toContain("转场短桥段");
   });
 });

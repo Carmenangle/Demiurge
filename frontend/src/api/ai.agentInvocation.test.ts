@@ -94,4 +94,27 @@ describe("agent invocation wire contract", () => {
       ...invocation(), illustrationBatchCount: Number.NaN,
     }).illustration_batch_count).toBe(0);
   });
+
+  it("promptProfile 死默认修复：falsy 时送 anima_tags（旧值是已下线的 krea2）", () => {
+    expect(agentInvocationBody(invocation()).prompt_profile).toBe("anima_tags");
+    expect(agentInvocationBody({ ...invocation(), promptProfile: "" }).prompt_profile).toBe("anima_tags");
+    expect(agentInvocationBody({
+      ...invocation(), promptProfile: `custom:${"a".repeat(32)}`,
+    }).prompt_profile).toBe(`custom:${"a".repeat(32)}`);
+  });
+
+  it("提示词模版字段进 wire：协议族兜底 + 视频模版 id", () => {
+    const body = agentInvocationBody({
+      ...invocation(),
+      promptProfile: `custom:${"b".repeat(32)}`,
+      promptProfileKind: "natural_language",
+      videoPromptTemplateId: `custom:${"c".repeat(32)}`,
+    });
+    expect(body.prompt_profile_kind).toBe("natural_language");
+    expect(body.video_prompt_template_id).toBe(`custom:${"c".repeat(32)}`);
+    // 未配 ⇒ 空串（后端按内置默认行为）
+    const bare = agentInvocationBody(invocation());
+    expect(bare.prompt_profile_kind).toBe("");
+    expect(bare.video_prompt_template_id).toBe("");
+  });
 });

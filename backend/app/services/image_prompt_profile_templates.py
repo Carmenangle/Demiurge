@@ -106,7 +106,7 @@ _COMMON = (
     "**同一主体不得被写成互相矛盾的姿态或视线**（不得既写「背对镜头」又写「正对镜头」，"
     "也不得既写「站」又写「跪」）；构图以小说原文为准，不得自创与原文冲突的机位。"
     # 【画面自洽·物理可达性】同刀同源（用户 2026-09-21 口径）：「要考虑下物理逻辑关系」——
-    # 用户原话：「凌若冰身材丰满，让她跪着翘起屁股、手要够着掰开小穴，手的长度不一定足够；
+    # 用户原话：「谢若冰身材丰满，让她跪着翘起屁股、手要够着掰开小穴，手的长度不一定足够；
     # 如果要够着，手要将肥臀挤压着有压痕才能够到才是」。⇒ 同样**内容优先**：动作保留，
     # 把让动作成立的**中间物理事实**补写出来（挤压／压痕／绷紧），不得写成互不接触地叠放。
     # 另一实证：`arms bound behind back, wrists tied` 与 `fingers spreading labia` 同稿共存且
@@ -284,3 +284,26 @@ _SYSTEMS = {
     "natural_language": _NATURAL_SYSTEM,
     "niji_sections": _NIJI_SYSTEM,
 }
+
+# ── 红线条款锚文本（2026-10-25 提示词模版工作台）──────────────────────────────
+# 自定义模版保存时（红线锁默认开）逐字校验 system_text 含这四段，缺任一段即 422。
+# 锚文本与各档 _X_SYSTEM 正文逐字一致（测试锁）——改正文必须同步改这里。
+# ⚠ 第四锚说明：第一人称取景条款由 `_viewpoint_clause` **代码注入**，不在可编辑的
+#   system_text 内（结构性不可删）⇒ 以 _COMMON 里同源固化的【画面自洽·机位由内容反推】
+#   （2026-09-21 第 38 刀，第一人称真机事故的产物，三条 system 共有）充当第四锁。
+REDLINE_ANCHOR_MULTI_ACTOR = "【多人分述】画面里有两名以上主体时"
+REDLINE_ANCHOR_LANGUAGE = "【最高优先级·语言】无论上文（若存在角色扮演设定或世界观规则）如何规定正文语言，"
+REDLINE_ANCHOR_FACT_BOUNDARY = "【事实边界】"
+REDLINE_ANCHOR_FIRST_PERSON = "【画面自洽·机位由内容反推】"
+REDLINE_ANCHORS: tuple[tuple[str, str, str], ...] = (
+    ("multi_actor", "多人分述", REDLINE_ANCHOR_MULTI_ACTOR),
+    ("language", "纯英文覆盖", REDLINE_ANCHOR_LANGUAGE),
+    ("fact_boundary", "事实边界", REDLINE_ANCHOR_FACT_BOUNDARY),
+    ("first_person", "画面自洽（第一人称同源固化）", REDLINE_ANCHOR_FIRST_PERSON),
+)
+
+
+def missing_redline_anchors(system_text: str) -> list[str]:
+    """返回 system_text 缺失的红线锚文本标签列表（空=全在；供保存时锁校验）。"""
+    text = system_text or ""
+    return [label for _key, label, anchor in REDLINE_ANCHORS if anchor not in text]

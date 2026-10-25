@@ -44,13 +44,44 @@ class ProfilePromptRequest(ChatModelReq):
     user_name: str = ""
 
 
+def _image_template_overrides(kind: str, record: dict | None) -> dict:
+    """自定义生图模版 ⇒ generate()/generate_result() 的 override kwargs。"""
+    from app.services import prompt_template_store
+
+    return prompt_template_store.image_overrides(kind, record)
+
+
+def _resolve_image_template(profile: str) -> tuple[str, dict | None, str]:
+    """profile 取值 ⇒ (内置 kind, 自定义模版记录|None, 模版 id 供 trace)。
+
+    2026-10-25 提示词模版：手动插入/首尾帧端点同样接受 custom:<id>；解析失败
+    （模版缺失/坏文件）降级内置 anima_tags（与前端 normalizePromptProfile 的
+    降级口径一致），不抛错、不 500。
+    """
+    from app.services import prompt_template_store
+
+    kind, record = prompt_template_store.resolve_profile(profile)
+    if not kind:
+        kind = "anima_tags"
+    return kind, record, (f"custom:{record['id']}" if record else "")
+
+
 @router.get("/prompt/profile/defaults")
 def profile_prompt_defaults(profile: str, rating: str = "nsfw") -> dict[str, str]:
-    """设置页读取后端协议默认值，避免前端复制质量词真源。"""
+    """设置页读取后端协议默认值，避免前端复制质量词真源。
+
+    profile 可为 custom:<id>：返回该模版的质量/负面词（anima 档）。
+    """
     from app.services import image_prompt_profiles
 
+    kind, record, _tid = _resolve_image_template(profile)
+    if record is not None and kind == "anima_tags":
+        return {
+            "quality_prompt": str(record.get("quality_tags") or ""),
+            "negative_prompt": str(record.get("negative_tags") or ""),
+        }
     try:
-        return image_prompt_profiles.profile_defaults(profile, rating)
+        return image_prompt_profiles.profile_defaults(kind, rating)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -60,9 +91,11 @@ def gen_profile_prompt(req: ProfilePromptRequest) -> dict[str, object]:
     """按多元数据插入选择的模型协议生成最终生图提示词。"""
     from app.services import image_prompt_profiles
 
+    kind, record, template_id = _resolve_image_template(req.profile)
+    overrides = _image_template_overrides(kind, record)
     try:
         result = image_prompt_profiles.generate_result(
-            req.profile,
+            kind,
             req.scene,
             lambda system, user: chat(
                 req.base_url, req.api_key, req.model,
@@ -75,6 +108,7 @@ def gen_profile_prompt(req: ProfilePromptRequest) -> dict[str, object]:
                 user,
                 temperature=0.3, proxy=req.proxy,
             ),
+            **overrides,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -88,7 +122,8 @@ def gen_profile_prompt(req: ProfilePromptRequest) -> dict[str, object]:
                 "repo_id": str(req.scene.get("repo_id") or ""),
             },
             "illustration.profile",
-            profile=req.profile,
+            profile=kind,
+            prompt_template_id=template_id,
             strategy=result.get("strategy", "direct"),
             validation_errors=result.get("validation_errors", []),
             # 2026-10-20：前端报「智能提示词结果为空」，而后端 generate 实测拒答也回退
@@ -98,7 +133,7 @@ def gen_profile_prompt(req: ProfilePromptRequest) -> dict[str, object]:
         )
     except Exception:  # noqa: BLE001 [EXC-保留] 遥测发射 best-effort：Trace 不得阻断提示词生成
         pass
-    return {**result, "profile": req.profile}
+    return {**result, "profile": kind}
 
 
 class FramePromptsRequest(ChatModelReq):
@@ -115,10 +150,12 @@ def gen_frame_prompts(req: FramePromptsRequest) -> dict[str, object]:
     """首尾帧提示词：时点提取+同一 Profile 编译器，与高潮点生图同构。"""
     from app.services import image_prompt_profiles
 
+    kind, record, template_id = _resolve_image_template(req.profile)
+    overrides = _image_template_overrides(kind, record)
     try:
         diagnostics: dict[str, object] = {}
         frames = image_prompt_profiles.generate_frame_prompts(
-            req.profile,
+            kind,
             req.scene,
             req.frames,
             lambda system, user: chat(
@@ -133,6 +170,7 @@ def gen_frame_prompts(req: FramePromptsRequest) -> dict[str, object]:
                 temperature=0.3, proxy=req.proxy,
             ),
             diagnostics=diagnostics,
+            **overrides,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -148,7 +186,8 @@ def gen_frame_prompts(req: FramePromptsRequest) -> dict[str, object]:
                     "repo_id": str(req.scene.get("repo_id") or ""),
                 },
                 "illustration.profile",
-                profile=req.profile,
+                profile=kind,
+                prompt_template_id=template_id,
                 frame=frame,
                 strategy=item.get("strategy", "direct"),
                 validation_errors=item.get("validation_errors", []),
@@ -167,7 +206,7 @@ def gen_frame_prompts(req: FramePromptsRequest) -> dict[str, object]:
             )
     except Exception:  # noqa: BLE001 [EXC-保留] 遥测发射 best-effort：Trace 不得阻断提示词生成
         pass
-    return {"frames": frames, "profile": req.profile}
+    return {"frames": frames, "profile": kind}
 
 
 class ClimaxAnchorPromptConfig(BaseModel):

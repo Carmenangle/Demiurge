@@ -2,6 +2,11 @@ import type { VideoMode } from "./illustrationMedia";
 
 export type PromptProfileId = "anima_tags" | "natural_language" | "niji_sections";
 
+/** 用户自定义提示词模版（2026-10-25）：`custom:<32位hex>`，后端 prompt_template_store 解析；
+ *  协议族（校验/归一化/兜底）仍走内置 kind，模版被删时后端按 promptProfileKind 降级。 */
+export type CustomProfileId = `custom:${string}`;
+export type PromptProfileValue = PromptProfileId | CustomProfileId;
+
 export const PROMPT_PROFILE_OPTIONS: readonly { id: PromptProfileId; label: string }[] = [
   { id: "anima_tags", label: "Anima（质量行 + 内容 tags / 英文描述）" },
   { id: "natural_language", label: "自然语言（GPT Image / Banana）" },
@@ -9,10 +14,18 @@ export const PROMPT_PROFILE_OPTIONS: readonly { id: PromptProfileId; label: stri
 ];
 
 const IDS = new Set(PROMPT_PROFILE_OPTIONS.map((item) => item.id));
+const CUSTOM_PROFILE_RE = /^custom:[a-f0-9]{32}$/;
 
-export function normalizePromptProfile(value: unknown): PromptProfileId {
+/** 是否为自定义提示词模版 id（custom:<32位hex>）。坏形态一律不算——降级内置。 */
+export function isCustomPromptProfile(value: unknown): value is CustomProfileId {
+  return typeof value === "string" && CUSTOM_PROFILE_RE.test(value);
+}
+
+export function normalizePromptProfile(value: unknown): PromptProfileValue {
   // krea2 模版已下线（2026-08-31 用户定案：不如 Anima）：旧多元插入预设里存的
   // "krea2" 一律降级为 anima_tags，未知名值同样回退 Anima。
+  // 2026-10-25：custom:<32位hex> 直通（后端按模版记录解析到内置 kind）。
+  if (isCustomPromptProfile(value)) return value;
   return typeof value === "string" && IDS.has(value as PromptProfileId)
     ? value as PromptProfileId
     : "anima_tags";
@@ -31,9 +44,10 @@ export function prependLoraTriggers(prompt: string, triggers: readonly string[])
   return `${words.join(", ")}, ${prompt.slice(0, newline)}${prompt.slice(newline)}`;
 }
 
+// 触发词前置与档位无关（内置档与自定义模版同一机械规则）；profile 仅作语义标记。
 export function applyProfileLoraTriggers(
   prompt: string,
-  _profile: PromptProfileId,
+  _profile: PromptProfileValue | string,
   triggers: readonly string[],
 ): string {
   return prependLoraTriggers(prompt, triggers);

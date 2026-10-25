@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  applyProfileLoraTriggers, ensureAnimaIllustrationStyle, illustrationTemplateValues, normalizePromptProfile,
+  applyProfileLoraTriggers, ensureAnimaIllustrationStyle, illustrationTemplateValues,
+  isCustomPromptProfile, normalizePromptProfile,
   PROMPT_PROFILE_OPTIONS, replacePromptQualityLine, latentSizeFor,
 } from "./imagePromptProfiles";
 
@@ -14,6 +15,20 @@ describe("image prompt profiles", () => {
     expect(normalizePromptProfile("unknown")).toBe("anima_tags");
     expect(normalizePromptProfile("krea2")).toBe("anima_tags");  // 旧 krea2 预设降级
     expect(normalizePromptProfile("anima_tags")).toBe("anima_tags");
+  });
+
+  it("custom:<32位hex> 直通（用户提示词模版），坏形态仍降级 Anima", () => {
+    const custom = `custom:${"a".repeat(32)}`;
+    expect(isCustomPromptProfile(custom)).toBe(true);
+    expect(normalizePromptProfile(custom)).toBe(custom);
+    // 坏形态：非 hex / 超长 / 少位 / 大小写 / 缺前缀 ⇒ 一律降级（不被静默当成模版）
+    expect(normalizePromptProfile(`custom:${"A".repeat(32)}`)).toBe("anima_tags");
+    expect(normalizePromptProfile(`custom:${"a".repeat(31)}`)).toBe("anima_tags");
+    expect(normalizePromptProfile(`custom:${"a".repeat(33)}`)).toBe("anima_tags");
+    expect(normalizePromptProfile(`custom:${"g".repeat(32)}`)).toBe("anima_tags");
+    expect(normalizePromptProfile("custom:")).toBe("anima_tags");
+    expect(normalizePromptProfile("preset:x")).toBe("anima_tags");
+    expect(isCustomPromptProfile(undefined)).toBe(false);
   });
 
   it("Anima把当前LoRA触发词放在质量行最前", () => {

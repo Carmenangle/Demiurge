@@ -83,6 +83,11 @@ class MultiAgentRequest(ImageAgentRequest):
     comfy_video: bool = False  # 前端已预设视频模板：开=高潮点编译 video_request；关=零 token
     video_mode: Literal["", "climax", "firstlast"] = ""  # 视频模式（缺省 climax），前端 preset.videoMode 透传；produce 层据此编译正片/转场 video_request
     prompt_profile: str = "anima_tags"
+    # 2026-10-25 提示词模版：prompt_profile 为 custom:<id> 时同时报送其内置协议族
+    # （模版被删时后端按该 kind 降级内置，不抛错）；空=按默认 anima_tags。
+    prompt_profile_kind: str = ""
+    # 视频提示词模版 id（builtin:<kind> / custom:<hex> / 空=内置默认骨架）
+    video_prompt_template_id: str = ""
     appearance_source: Literal["worldbook", "character_card"] = "worldbook"
     illustration_viewpoint: Literal["", "first_person", "third_person"] = ""  # 画面人称手选（「多元数据插入」面板按钮组；空=按锚点段自动判定）
     illustration_batch_count: int = Field(default=0, ge=0)  # 高潮点模式批量生图数目（0/缺省=1 张；面板最小 1、无上限）

@@ -72,6 +72,11 @@ export interface AgentInvocation {
   comfyVideo: boolean;
   videoMode?: "climax" | "firstlast";
   promptProfile: string;
+  // 2026-10-25 提示词模版：promptProfile 为 custom:<id> 时同时报送其内置协议族
+  //（模版被删时后端按该 kind 降级内置）；空=后端按默认 anima_tags。
+  promptProfileKind?: string;
+  // 视频提示词模版 id（builtin:<kind> / custom:<hex> / 空=内置默认骨架）
+  videoPromptTemplateId?: string;
   appearanceSource: "worldbook" | "character_card";
   illustrationViewpoint?: "" | "first_person" | "third_person";
   illustrationBatchCount?: number;
@@ -144,7 +149,11 @@ export function agentInvocationBody(request: AgentInvocation): AgentInvocationWi
     comfy_audio: request.comfyAudio,
     comfy_video: request.comfyVideo,
     video_mode: request.videoMode || "",
-    prompt_profile: request.promptProfile || "krea2",
+    // 2026-10-25：falsy 时送 anima_tags（与后端 from_payload 默认一致）；
+    // 旧值曾是已下线的 "krea2"（死默认，见提交说明）。
+    prompt_profile: request.promptProfile || "anima_tags",
+    prompt_profile_kind: request.promptProfileKind || "",
+    video_prompt_template_id: request.videoPromptTemplateId || "",
     appearance_source: request.appearanceSource,
     illustration_viewpoint: request.illustrationViewpoint || "",
     illustration_batch_count: request.illustrationBatchCount || 0,

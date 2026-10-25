@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import math
 import re
+from dataclasses import dataclass, field
 from typing import Any
 
 from app.services import prompt_clean
@@ -84,16 +85,147 @@ _CAMERA_SHIFT_SLOW = "遮挡揭示转场：镜头被前景遮挡后移开，揭�
 _CAMERA_SHIFT_FAST = "甩镜头转场：镜头快速切换，伴有强烈的运动模糊效果"
 _IDENTITY_LOCK = "人物身份和五官不能发生变化"
 
+# ── 六段式区块键（2026-10-25 提示词模版骨架；顺序/标题可被模版覆盖）────────────
+SECTION_META = "meta"
+SECTION_BINDING = "binding"
+SECTION_SUBJECT = "subject"
+SECTION_SEGMENTS = "segments"
+SECTION_AUDIO = "audio"
+SECTION_NEGATIVE = "negative"
+SECTION_KEYS: tuple[str, ...] = (
+    SECTION_META, SECTION_BINDING, SECTION_SUBJECT,
+    SECTION_SEGMENTS, SECTION_AUDIO, SECTION_NEGATIVE,
+)
+# 内置默认标题（climax/firstlast 的 ④ 段叫「时间分镜」，transition 叫「转场分镜」）
+_DEFAULT_SECTION_TITLES: dict[str, str] = {
+    SECTION_META: "元信息",
+    SECTION_BINDING: "参考绑定",
+    SECTION_SUBJECT: "主体/场景",
+    SECTION_SEGMENTS: "时间分镜",
+    SECTION_AUDIO: "音频",
+    SECTION_NEGATIVE: "负面约束",
+}
+# firstlast 三段式节奏名的内置默认（与 _time_segments 内联标签一致）
+_DEFAULT_BEAT_LABELS: tuple[str, str, str] = ("开场定格", "剧情演变", "收尾定格")
+
+
+@dataclass(frozen=True)
+class VideoSkeleton:
+    """视频提示词骨架覆盖（提示词模版数据层；缺省 None = 逐字现行为）。
+
+    只覆盖**文案与默认值**，不改分镜/参考绑定/缺图守卫/画幅派生等确定性逻辑：
+    - section_titles：区块键 → 标题（不含 []）；缺键回落内置默认；
+    - section_order：区块键的排列（必须是 SECTION_KEYS 的排列，防乱序破坏六段语义）；
+    - camera_band_overrides：motion 档位(0/1/2/3) → 单句运镜文案（≤120 字）；
+    - beat_labels：firstlast 的开场/中段/收尾节奏名；
+    - default_duration：duration_hint 为空时的兜底秒数（转场形态同样只在显式提供时写）；
+    - negative_extra / meta_note：负面约束追加项 / 元信息追加文案。
+    """
+
+    section_titles: dict[str, str] = field(default_factory=dict)
+    section_order: tuple[str, ...] | None = None
+    camera_band_overrides: dict[int, str] = field(default_factory=dict)
+    beat_labels: tuple[str, ...] | None = None
+    default_duration: int | None = None
+    negative_extra: str = ""
+    meta_note: str = ""
+
+    @classmethod
+    def from_data(cls, data: object) -> "VideoSkeleton | None":
+        """防御性解析（store 保存/加载时已校验；此处再兜底：坏形状一律忽略该字段）。
+
+        data 为空/非映射 ⇒ None（调用方走「无骨架」现行为路径）。
+        """
+        if not isinstance(data, dict):
+            return None
+        titles: dict[str, str] = {}
+        raw_titles = data.get("section_titles")
+        if isinstance(raw_titles, dict):
+            for key, value in raw_titles.items():
+                k = str(key or "").strip()
+                v = str(value or "").strip().rstrip("：:")
+                if k in SECTION_KEYS and v:
+                    titles[k] = v[:200]
+        order: tuple[str, ...] | None = None
+        raw_order = data.get("section_order")
+        if isinstance(raw_order, list):
+            keys = tuple(str(item or "").strip() for item in raw_order)
+            if keys and sorted(keys) == sorted(SECTION_KEYS) and len(set(keys)) == len(SECTION_KEYS):
+                order = keys
+        bands: dict[int, str] = {}
+        raw_bands = data.get("camera_band_overrides")
+        if isinstance(raw_bands, dict):
+            for key, value in raw_bands.items():
+                try:
+                    band = int(str(key).strip())
+                except ValueError:
+                    continue
+                v = str(value or "").strip()
+                if band in (0, 1, 2, 3) and v:
+                    bands[band] = v[:120]
+        beats: tuple[str, ...] | None = None
+        raw_beats = data.get("beat_labels")
+        if isinstance(raw_beats, list):
+            labels = tuple(str(item or "").strip()[:50] for item in raw_beats if str(item or "").strip())
+            if labels:
+                beats = labels[:6]
+        duration: int | None = None
+        raw_duration = data.get("default_duration")
+        if isinstance(raw_duration, int) and not isinstance(raw_duration, bool) and 2 <= raw_duration <= 20:
+            duration = raw_duration
+        negative_extra = str(data.get("negative_extra") or "").strip()[:1000]
+        meta_note = str(data.get("meta_note") or "").strip()[:500]
+        return cls(
+            section_titles=titles, section_order=order, camera_band_overrides=bands,
+            beat_labels=beats, default_duration=duration,
+            negative_extra=negative_extra, meta_note=meta_note,
+        )
+
+    def title(self, key: str, default: str) -> str:
+        return self.section_titles.get(key) or default
+
+    def order(self) -> tuple[str, ...]:
+        return self.section_order or SECTION_KEYS
+
+    def beat_label(self, idx: int, default: str) -> str:
+        if self.beat_labels and idx < len(self.beat_labels):
+            return self.beat_labels[idx]
+        return default
+
+
+def default_skeleton_data(mode: str) -> dict[str, Any]:
+    """内置骨架数据投影（供提示词模版工作台展示/克隆；纯数据，不参与编译）。"""
+    segments_title = "转场分镜" if mode == "transition" else "时间分镜"
+    titles = dict(_DEFAULT_SECTION_TITLES)
+    titles[SECTION_SEGMENTS] = segments_title
+    return {
+        "section_titles": titles,
+        "section_order": list(SECTION_KEYS),
+        # per-band 代表句（_CAMERA_SOLO）：单拍形态的档位文案，供 UI 预览默认值
+        "camera_band_overrides": {str(band): _CAMERA_SOLO[band] for band in (0, 2, 3)},
+        "beat_labels": list(_DEFAULT_BEAT_LABELS),
+        "default_duration": _DEFAULT_DURATION,
+        "negative_extra": "",
+        "meta_note": "",
+    }
+
 
 def _camera_band(motion: int) -> int:
     """motion 强度 → 词汇表档位（0 慢 / 2 中 / 3 快）。"""
     return 3 if motion >= 3 else (2 if motion == 2 else 0)
 
 
-def _beat_camera(motion: int, idx: int, total: int, desc: str = "") -> str:
+def _beat_camera(motion: int, idx: int, total: int, desc: str = "",
+                 band_overrides: dict[int, str] | None = None) -> str:
     """第 idx/total 拍的运镜：开场定场、收尾收束、中段按档位循环换镜；
-    单拍用档位代表句；句子带场景切换提示时改用转场型运镜。"""
+    单拍用档位代表句；句子带场景切换提示时改用转场型运镜。
+
+    band_overrides（提示词模版骨架）：该档有覆盖文案时，全档位统一用它
+    （用户显式选择「这一档就用这句」）；缺键回落内置词汇表。
+    """
     band = _camera_band(motion)
+    if band_overrides and band in band_overrides:
+        return band_overrides[band]
     if total <= 1:
         return _CAMERA_SOLO[band]
     if idx == 0:
@@ -152,10 +284,10 @@ def _subject_scene(spec: dict[str, Any]) -> str:
     return "，".join(parts)
 
 
-def _negative(spec: dict[str, Any], preset_negative: str) -> str:
-    """⑦ 负面约束：preset + scene_spec，按分隔词拆项保序去重（R7）。"""
+def _negative(spec: dict[str, Any], preset_negative: str, extra: str = "") -> str:
+    """⑦ 负面约束：preset + scene_spec（+ 模版 negative_extra），按分隔词拆项保序去重（R7）。"""
     raw: list[str] = []
-    for src in (preset_negative, str(spec.get("negative_prompt") or "")):
+    for src in (preset_negative, extra, str(spec.get("negative_prompt") or "")):
         if not src:
             continue
         for item in re.split(r"[；;/／]+", str(src)):
@@ -316,9 +448,15 @@ def _reference_binding_transition(prev_tail_desc: str, first_frame_desc: str,
     return "；".join(lines)
 
 
-def _meta(duration_hint: int, camera: str, model_name: str = "", size: str = "") -> str:
-    """① 元信息：模型名（透传不硬编码）+ 时长 + 画幅 + 运镜（R3 补三件套）。"""
-    dur = int(duration_hint) if duration_hint else _DEFAULT_DURATION
+def _meta(duration_hint: int, camera: str, model_name: str = "", size: str = "",
+          default_duration: int | None = None) -> str:
+    """① 元信息：模型名（透传不硬编码）+ 时长 + 画幅 + 运镜（R3 补三件套）。
+
+    default_duration（提示词模版骨架）：duration_hint 为空时的兜底秒数；
+    None/0 ⇒ 仍走内置 _DEFAULT_DURATION（逐字现行为）。
+    """
+    fallback = default_duration if default_duration else _DEFAULT_DURATION
+    dur = int(duration_hint) if duration_hint else fallback
     parts: list[str] = []
     if model_name and str(model_name).strip():
         parts.append(str(model_name).strip())
@@ -332,18 +470,23 @@ def _meta(duration_hint: int, camera: str, model_name: str = "", size: str = "")
 
 
 def _meta_transition(duration_hint: int, camera: str,
-                     model_name: str = "", size: str = "") -> str:
+                     model_name: str = "", size: str = "",
+                     default_duration: int | None = None) -> str:
     """① 元信息（转场形态，坑G）：不硬控时长。
 
     转场时长不预设死值（用户定调）：duration_hint=0 → 不写秒数（交视频模型/模板
     默认），绝不兑底 _DEFAULT_DURATION；前端提交侧有转场时长（transitionDurationHint）
     才写具体秒数。正片（climax/firstlast）仍走 _meta 的 videoDurationHint。
+    default_duration（提示词模版骨架）：仅当模版显式提供时才写（用户选择即为意图）。
     """
     parts: list[str] = []
     if model_name and str(model_name).strip():
         parts.append(str(model_name).strip())
-    if int(duration_hint or 0) > 0:
-        parts.append(f"{int(duration_hint)} seconds")
+    dur = int(duration_hint or 0)
+    if dur <= 0 and default_duration:
+        dur = int(default_duration)
+    if dur > 0:
+        parts.append(f"{dur} seconds")
     else:
         parts.append("时长=视频模型默认（短桥段）")
     aspect = _aspect_from_size(size)
@@ -406,15 +549,20 @@ def _split_narrative_beats(narrative: str) -> list[str]:
 def _time_segments(spec: dict[str, Any], duration_hint: int,
                    first_frame_desc: str, last_frame_desc: str,
                    prev_tail_desc: str,
-                   has_first: bool = True, has_last: bool = True) -> str:
+                   has_first: bool = True, has_last: bool = True,
+                   skeleton: "VideoSkeleton | None" = None) -> str:
     """⑤ 时间分镜（firstlast 核心）：首帧→剧情逐句成拍→尾帧，覆盖整段桥段。
 
     - 首帧段带「上楼层尾帧」衔接上下文（转场判断融入生成，不单独判定）；
     - 中段把 narrative 按句子切拍：每个事件/每句对白各占一拍（引语拍标台词同步）；
     - 尾帧段收尾定格 + 拉镜头收束；缺图时诚实标注（R2）。
     - 运镜取自镜头语言词汇表，按拍位分配（定场→换镜→收束），不再全程同一「极缓推进」。
+    - skeleton（提示词模版骨架）：beat_labels 覆盖三段节奏名、camera_band_overrides
+      覆盖运镜档位文案、default_duration 覆盖时长兜底；None = 逐字现行为。
     """
-    dur = int(duration_hint) if duration_hint else _DEFAULT_DURATION
+    sk = skeleton or VideoSkeleton()
+    fallback_dur = sk.default_duration if sk.default_duration else _DEFAULT_DURATION
+    dur = int(duration_hint) if duration_hint else fallback_dur
     narrative = str(spec.get("narrative") or "").strip()
     motion_raw = spec.get("motion")
     motion = int(motion_raw) if isinstance(motion_raw, (int, float)) else 0
@@ -446,17 +594,18 @@ def _time_segments(spec: dict[str, Any], duration_hint: int,
     close_content = f"收尾定格于尾帧画面：{l_close}" if has_last else f"以文字尾帧收尾：{l_close}"
     close_extra = "动作自然收束、神态定格，为下一镜头衔接留出自然过渡点"
 
-    beats: list[tuple[str, str, str]] = [(open_content, open_extra, "开场定格")]
+    beats: list[tuple[str, str, str]] = [(open_content, open_extra, sk.beat_label(0, "开场定格"))]
     for content, extra in mid_beats:
-        beats.append((content, extra, "剧情演变"))
-    beats.append((close_content, close_extra, "收尾定格"))
+        beats.append((content, extra, sk.beat_label(1, "剧情演变")))
+    beats.append((close_content, close_extra, sk.beat_label(2, "收尾定格")))
 
     lines: list[str] = []
     n = len(beats)
     for idx, (content, extra, label) in enumerate(beats):
         start = dur * idx // n
         end = dur * (idx + 1) // n
-        cam = model_cam or _beat_camera(int(motion), idx, n, content)
+        cam = model_cam or _beat_camera(
+            int(motion), idx, n, content, sk.camera_band_overrides or None)
         tail = f"（{extra}）" if extra else ""
         lines.append(f"[{start}s–{end}s｜{label}]：{cam}；{content}{tail}")
     return "\n".join(lines)
@@ -464,15 +613,19 @@ def _time_segments(spec: dict[str, Any], duration_hint: int,
 
 def _transition_segments(spec: dict[str, Any],
                          prev_tail_desc: str, first_frame_desc: str,
-                         has_prev_tail: bool = True, has_first: bool = True) -> str:
+                         has_prev_tail: bool = True, has_first: bool = True,
+                         skeleton: "VideoSkeleton | None" = None) -> str:
     """⑤ 转场分镜（短桥段）：上一楼层尾帧定格 → 自然过渡 → 当前楼层首帧定格。
 
     短桥段不套正片时长分段（9.5 时长分档）：无时间轴，交模型按短桥段默认节奏。
     缺图时诚实标注「以文字为准」（R2 同套路），不假装有图。
+    skeleton：camera_band_overrides 的 0 档覆盖 [过渡] 拍的运镜文案。
     """
     pt = (prev_tail_desc or "").strip() or "上一楼层尾帧画面"
     ff = (first_frame_desc or "").strip() or "当前楼层首帧画面"
-    cam_hint = str(spec.get("camera") or "").strip() or _CAMERA_SOLO[0]
+    sk = skeleton or VideoSkeleton()
+    band0 = sk.camera_band_overrides.get(0) if sk.camera_band_overrides else None
+    cam_hint = str(spec.get("camera") or "").strip() or band0 or _CAMERA_SOLO[0]
     lines = [
         f"[转场起点]：{('定格于上一楼层尾帧画面：' + pt) if has_prev_tail else ('以文字重现上一楼层尾帧：' + pt + '（无参考图，以文字为准）')}",
         f"[过渡]：{cam_hint}自然过渡到当前楼层首帧，机位运动连贯、光影衔接、人物状态延续，无突兀跳切",
@@ -629,7 +782,8 @@ def _climax_beat_sync(motion: int) -> str:
     return "按自然节奏推进"
 
 
-def _climax_time_segments(spec: dict[str, Any], duration_hint: int) -> str:
+def _climax_time_segments(spec: dict[str, Any], duration_hint: int,
+                          skeleton: "VideoSkeleton | None" = None) -> str:
     """⑤ 时间分镜（climax）：把高潮动作切成 0–Xs / X–Ys / … 逐拍段，
     每段 = 节奏名 + 运镜 + 主体动作 + 特效 + 节拍同步。
 
@@ -639,8 +793,11 @@ def _climax_time_segments(spec: dict[str, Any], duration_hint: int) -> str:
 
     优先 action_sequence（定格起点/延伸/收尾的完整动作，与图片提示词同源）；
     缺失回退单一动作瞬间（画面级要素或 narrative）。每段按总时长均分。
+    skeleton：default_duration 覆盖时长兜底、camera_band_overrides 覆盖运镜档位。
     """
-    dur = int(duration_hint) if duration_hint else _DEFAULT_DURATION
+    sk = skeleton or VideoSkeleton()
+    fallback_dur = sk.default_duration if sk.default_duration else _DEFAULT_DURATION
+    dur = int(duration_hint) if duration_hint else fallback_dur
     motion = int(spec.get("motion") or 0)
     model_cam = str(spec.get("camera") or "").strip()
     fx = _climax_fx(motion)
@@ -664,10 +821,17 @@ def _climax_time_segments(spec: dict[str, Any], duration_hint: int) -> str:
     for idx, (beat, action) in enumerate(beats):
         start = dur * idx // n
         end = dur * (idx + 1) // n
-        cam = model_cam or _beat_camera(motion, idx, n, action)
+        cam = model_cam or _beat_camera(
+            motion, idx, n, action, sk.camera_band_overrides or None)
         parts = [p for p in (cam, action, fx, sync) if p]
         lines.append(f"{start}–{end}s｜{beat}：{'；'.join(parts)}")
     return "\n".join(lines)
+
+
+def _assemble_blocks(blocks: dict[str, str], skeleton: "VideoSkeleton | None") -> str:
+    """按骨架顺序拼接区块；无骨架 = 既有固定顺序（逐字现行为）。"""
+    order = (skeleton or VideoSkeleton()).order()
+    return "\n\n".join(blocks[key] for key in order if blocks.get(key))
 
 
 def compile_climax_video_prompt(
@@ -682,31 +846,39 @@ def compile_climax_video_prompt(
     first_frame_desc: str = "",
     audio_lines: list | None = None,
     has_frame: bool = False,
+    skeleton: "VideoSkeleton | None" = None,
 ) -> str:
     """高潮点·六段式（用户定稿 2026-08-28）：① 元信息 ② 参考绑定 ③ 主体/场景
     ④ 时间分镜 ⑤ 音频 ⑥ 负面约束。风格声明已停用（有参考图定调，style_prefix 仅兼容）。
 
     动作段用 [时间分镜] 逐拍切段（0–Xs / X–Ys / …），不再用「定格起点/延伸/收尾」
     长句。has_frame=True 时在元信息标注「使用输入图片作为准确起始帧」（I2V）。
+    skeleton（提示词模版骨架）：区块标题/顺序、meta_note、negative_extra、
+    default_duration；None = 逐字现行为。
     """
-    blocks: list[str] = []
-    meta = _meta(duration_hint, camera, model_name, size)
+    sk = skeleton or VideoSkeleton()
+    blocks: dict[str, str] = {}
+    meta = _meta(duration_hint, camera, model_name, size, sk.default_duration)
     frame_note = "；使用输入图片作为准确起始帧" if has_frame else ""
-    blocks.append(f"[元信息]：{meta}{frame_note}")
-    blocks.append(
-        f"[参考绑定]：{_reference_binding_climax(first_frame_desc, spec)}"
+    note = f"；{sk.meta_note}" if sk.meta_note else ""
+    blocks[SECTION_META] = f"[{sk.title(SECTION_META, '元信息')}]：{meta}{frame_note}{note}"
+    blocks[SECTION_BINDING] = (
+        f"[{sk.title(SECTION_BINDING, '参考绑定')}]：{_reference_binding_climax(first_frame_desc, spec)}"
     )
     subject = _subject_scene(spec)
     if subject:
-        blocks.append(f"[主体/场景]：{subject}")
-    blocks.append("[时间分镜]：\n" + _climax_time_segments(spec, duration_hint))
+        blocks[SECTION_SUBJECT] = f"[{sk.title(SECTION_SUBJECT, '主体/场景')}]：{subject}"
+    blocks[SECTION_SEGMENTS] = (
+        f"[{sk.title(SECTION_SEGMENTS, '时间分镜')}]：\n"
+        + _climax_time_segments(spec, duration_hint, sk)
+    )
     # climax：高潮定格时刻对白通常已说完（用户定稿 2026-08-28）——动作窗口不带台词，
     # 无论来源（audio_design.lines / comfy_audio 兜底）一律不列。
-    blocks.append(f"[音频]：{_audio_hint(spec, audio_lines, include_lines=False)}")
-    neg = _negative(spec, negative)
+    blocks[SECTION_AUDIO] = f"[{sk.title(SECTION_AUDIO, '音频')}]：{_audio_hint(spec, audio_lines, include_lines=False)}"
+    neg = _negative(spec, negative, sk.negative_extra)
     if neg:
-        blocks.append(f"[负面约束]：{neg}")
-    return "\n\n".join(blocks)
+        blocks[SECTION_NEGATIVE] = f"[{sk.title(SECTION_NEGATIVE, '负面约束')}]：{neg}"
+    return _assemble_blocks(blocks, sk)
 
 
 def compile_firstlast_video_prompt(
@@ -724,30 +896,39 @@ def compile_firstlast_video_prompt(
     has_first: bool = True,
     has_last: bool = True,
     audio_lines: list | None = None,
+    skeleton: "VideoSkeleton | None" = None,
 ) -> str:
     """首尾帧·剧情影片：六段式（H3 骨架）。
 
     区块：① 元信息 ② 双图绑定 ③ 主体/场景 ④ 时间分镜 ⑤ 音频 ⑥ 负面约束。
     风格声明已停用（有参考图定调）。has_first/has_last 标识是否真的提供了首/尾帧图（R2 缺图守卫）。
+    skeleton（提示词模版骨架）：区块标题/顺序、beat_labels、camera_band_overrides、
+    default_duration、negative_extra、meta_note；None = 逐字现行为。
     """
-    blocks: list[str] = []
-    blocks.append(f"[元信息]：{_meta(duration_hint, camera, model_name, size)}")
-    blocks.append(
-        f"[参考绑定]：{_reference_binding_firstlast(first_frame_desc, last_frame_desc, spec, has_first, has_last)}"
+    sk = skeleton or VideoSkeleton()
+    blocks: dict[str, str] = {}
+    note = f"；{sk.meta_note}" if sk.meta_note else ""
+    blocks[SECTION_META] = (
+        f"[{sk.title(SECTION_META, '元信息')}]："
+        f"{_meta(duration_hint, camera, model_name, size, sk.default_duration)}{note}"
+    )
+    blocks[SECTION_BINDING] = (
+        f"[{sk.title(SECTION_BINDING, '参考绑定')}]："
+        f"{_reference_binding_firstlast(first_frame_desc, last_frame_desc, spec, has_first, has_last)}"
     )
     subject = _subject_scene(spec)
     if subject:
-        blocks.append(f"[主体/场景]：{subject}")
-    blocks.append(
-        "[时间分镜]：\n"
+        blocks[SECTION_SUBJECT] = f"[{sk.title(SECTION_SUBJECT, '主体/场景')}]：{subject}"
+    blocks[SECTION_SEGMENTS] = (
+        f"[{sk.title(SECTION_SEGMENTS, '时间分镜')}]：\n"
         + _time_segments(spec, duration_hint, first_frame_desc, last_frame_desc,
-                         prev_tail_desc, has_first, has_last)
+                         prev_tail_desc, has_first, has_last, sk)
     )
-    blocks.append(f"[音频]：{_audio_hint(spec, audio_lines)}")
-    neg = _negative(spec, negative)
+    blocks[SECTION_AUDIO] = f"[{sk.title(SECTION_AUDIO, '音频')}]：{_audio_hint(spec, audio_lines)}"
+    neg = _negative(spec, negative, sk.negative_extra)
     if neg:
-        blocks.append(f"[负面约束]：{neg}")
-    return "\n\n".join(blocks)
+        blocks[SECTION_NEGATIVE] = f"[{sk.title(SECTION_NEGATIVE, '负面约束')}]：{neg}"
+    return _assemble_blocks(blocks, sk)
 
 
 def compile_transition_video_prompt(
@@ -763,6 +944,7 @@ def compile_transition_video_prompt(
     first_frame_desc: str = "",
     has_prev_tail: bool = True,
     has_first: bool = True,
+    skeleton: "VideoSkeleton | None" = None,
 ) -> str:
     """转场视频·短桥段：上一楼层尾帧 → 当前楼层首帧 的自然过渡。
 
@@ -771,27 +953,34 @@ def compile_transition_video_prompt(
 
     坑G：时长不预设死值——duration_hint=0 时不写秒数（_meta_transition 交视频模型
     默认），不兑底 _DEFAULT_DURATION；前端提交侧有转场时长才写。
+    skeleton（提示词模版骨架）：default_duration 仅显式提供时才写（用户选择即为意图）。
 
     has_prev_tail/has_first 标识是否真的提供了上尾帧图/当前首帧图（R2 缺图守卫）。
     """
-    blocks: list[str] = []
-    blocks.append(f"[元信息]：{_meta_transition(duration_hint, camera, model_name, size)}")
-    blocks.append(
-        f"[参考绑定]：{_reference_binding_transition(prev_tail_desc, first_frame_desc, spec, has_prev_tail, has_first)}"
+    sk = skeleton or VideoSkeleton()
+    blocks: dict[str, str] = {}
+    note = f"；{sk.meta_note}" if sk.meta_note else ""
+    blocks[SECTION_META] = (
+        f"[{sk.title(SECTION_META, '元信息')}]："
+        f"{_meta_transition(duration_hint, camera, model_name, size, sk.default_duration)}{note}"
+    )
+    blocks[SECTION_BINDING] = (
+        f"[{sk.title(SECTION_BINDING, '参考绑定')}]："
+        f"{_reference_binding_transition(prev_tail_desc, first_frame_desc, spec, has_prev_tail, has_first)}"
     )
     subject = _subject_scene(spec)
     if subject:
-        blocks.append(f"[主体/场景]：{subject}")
-    blocks.append(
-        "[转场分镜]：\n"
+        blocks[SECTION_SUBJECT] = f"[{sk.title(SECTION_SUBJECT, '主体/场景')}]：{subject}"
+    blocks[SECTION_SEGMENTS] = (
+        f"[{sk.title(SECTION_SEGMENTS, '转场分镜')}]：\n"
         + _transition_segments(spec, prev_tail_desc, first_frame_desc,
-                               has_prev_tail, has_first)
+                               has_prev_tail, has_first, sk)
     )
-    blocks.append(f"[音频]：{_audio_hint(spec, None)}")
-    neg = _negative(spec, negative)
+    blocks[SECTION_AUDIO] = f"[{sk.title(SECTION_AUDIO, '音频')}]：{_audio_hint(spec, None)}"
+    neg = _negative(spec, negative, sk.negative_extra)
     if neg:
-        blocks.append(f"[负面约束]：{neg}")
-    return "\n\n".join(blocks)
+        blocks[SECTION_NEGATIVE] = f"[{sk.title(SECTION_NEGATIVE, '负面约束')}]：{neg}"
+    return _assemble_blocks(blocks, sk)
 
 
 def _clean_spec(spec: dict[str, Any]) -> dict[str, Any]:
@@ -818,6 +1007,7 @@ def build_video_request(
     last_frame_desc: str = "",
     prev_tail_desc: str = "",
     audio_lines: list | None = None,
+    skeleton: "VideoSkeleton | None" = None,
 ) -> dict[str, Any]:
     """组装「上交给视频模型的参数」（dry-run，不提交）。
 
@@ -839,6 +1029,8 @@ def build_video_request(
       「图片1=上尾帧、图片2=当前首帧」；
     - 转场时长走 preset.transitionDurationHint（坑G：不预设死值，缺省交模型默认），
       正片（climax/firstlast）仍走 videoDurationHint。
+    - skeleton（提示词模版骨架）：自定义视频模版的区块标题/顺序/per-band 运镜/
+      节奏名/默认时长/负面追加；None = 逐字现行为（既有调用方零改动）。
     """
     preset = preset or {}
     spec = _clean_spec(spec or {})
@@ -864,6 +1056,7 @@ def build_video_request(
             last_frame_desc=last_frame_desc or "尾帧/楼层结尾画面",
             prev_tail_desc=prev_tail_desc,
             has_first=has_first, has_last=has_last, audio_lines=audio_lines,
+            skeleton=skeleton,
         )
         images = [img for img in (first_frame, last_frame) if img]
         binding = {
@@ -881,6 +1074,7 @@ def build_video_request(
             prev_tail_desc=prev_tail_desc or "上一楼层尾帧画面",
             first_frame_desc=first_frame_desc or "当前楼层首帧画面",
             has_prev_tail=has_prev_tail, has_first=has_first,
+            skeleton=skeleton,
         )
         images = [img for img in (first_frame, last_frame) if img]
         binding = {
@@ -895,6 +1089,7 @@ def build_video_request(
             spec, style_prefix=style_prefix, negative=negative,
             duration_hint=duration_hint, camera=camera, model_name=model, size=size,
             first_frame_desc=desc, audio_lines=audio_lines, has_frame=bool(first_frame),
+            skeleton=skeleton,
         )
         images = [first_frame] if first_frame else []
         actors = [str(a).strip() for a in (spec.get("actors") or []) if str(a).strip()]
@@ -917,7 +1112,7 @@ def build_video_request(
             "content_type": "multipart/form-data" if images else "application/json",
         },
         "reference_binding": binding,
-        "prompt_sections": _section_names(mode),
+        "prompt_sections": _section_names(mode, skeleton),
         "warnings": warnings,
     }
 
@@ -953,8 +1148,18 @@ def _binding_entry(role: str, source: str) -> str:
     return f"{role} → （未提供图地址，将退化为文生或由上游补图）"
 
 
-def _section_names(mode: str) -> list[str]:
-    """提示词含哪些区块（供人核对完整性）。风格声明已停用（有参考图定调）。"""
+def _section_names(mode: str, skeleton: "VideoSkeleton | None" = None) -> list[str]:
+    """提示词含哪些区块（供人核对完整性）。风格声明已停用（有参考图定调）。
+
+    skeleton（提示词模版骨架）：按自定义标题/顺序重排编号；None = 内置固定名。
+    """
+    if skeleton is not None and (skeleton.section_titles or skeleton.section_order):
+        default_segments = "转场分镜" if mode == "transition" else "时间分镜"
+        out: list[str] = []
+        for num, key in enumerate(skeleton.order(), 1):
+            fallback = default_segments if key == SECTION_SEGMENTS else _DEFAULT_SECTION_TITLES[key]
+            out.append(f"{'①②③④⑤⑥'[num - 1]}{skeleton.title(key, fallback)}")
+        return out
     if mode == "firstlast":
         return ["①元信息", "②参考绑定", "③主体/场景", "④时间分镜", "⑤音频", "⑥负面约束"]
     if mode == "transition":

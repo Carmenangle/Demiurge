@@ -231,7 +231,12 @@ def _resolve_personas(
     return selection + "\n\n" + "\n\n".join(profiles)
 
 
-def _profile_llm_fallback(ctx: CtxLike, scene_spec: dict[str, Any]) -> tuple[str, str]:
+def _profile_llm_fallback(
+    ctx: CtxLike, scene_spec: dict[str, Any],
+    *,
+    system_override: str | None = None,
+    quality_override: str | None = None,
+) -> tuple[str, str]:
     """同轮成稿被清空（锚点重定向且无存活视觉事实）时，补一次携带当前防拦截预设的
     LLM 调用，按纠正后正文重写图像 Profile（Krea2 英文画面）。
 
@@ -241,6 +246,9 @@ def _profile_llm_fallback(ctx: CtxLike, scene_spec: dict[str, Any]) -> tuple[str
     scene_spec 里的 protected_narrative（防拦截原文）经 _scene_for_model 作为模型输入，
     本地校验则用 _scene_for_facts 的还原事实，两层各司其职。
     返回 (compiled_profile, strategy)；失败返回 ("", "")，调用方回退本地事实兜底。
+
+    system_override / quality_override（2026-10-25 用户提示词模版）：非空即优先于
+    内置 _SYSTEMS / 内置质量行；None = 内置现行为。
     """
     profile = str(scene_spec.get("profile") or "anima_tags")
     # 插桩（2026-09-18）：静默早退此前在 trace 上完全不可见——排查「提示词为什么
@@ -308,6 +316,8 @@ def _profile_llm_fallback(ctx: CtxLike, scene_spec: dict[str, Any]) -> tuple[str
             # 记着 **2026-09-01 用户确认**：单次不重写会让提示词**明显简略**，必须保留这一次带因重写。
             # 用户同期口径也是「只要结果是好的就没问题」⇒ 质量优先，不砍这一轮。
             allow_repair=True,
+            system_override=system_override,
+            quality_override=quality_override,
         )
     except Exception as exc:  # noqa: BLE001
         # 插桩（2026-09-18）：此前只记 status=error，全量 trace 里 700+ 条 error
@@ -641,10 +651,10 @@ def _curator_writable_indices(ctx: CtxLike, repo_id: str) -> frozenset[int]:
 
     2026-09-23 根因修复。原先直接用 `_selected_worldbook_indices`，而 `constant=True` 的条目
     「全程恒开、全文注入」⇒ **永远落在可写集里**；角色卡（constant=False）只有被召回时才在。
-    ⇒ curator 要记录「凌若冰的最新状态」时，凌若冰角色卡不可写、而伪机制条目永远可写
+    ⇒ curator 要记录「谢若冰的最新状态」时，谢若冰角色卡不可写、而伪机制条目永远可写
     ⇒ 状态只能灌进「全局机制·{{user}}(少宗主)」。真机实锤：那条 175 字符的正文**通篇是
-    凌若冰的身体状态**（「凌若冰数日夜被凌渊以龟头碾磨宫口，身体渐次贪欢上瘾…」），
-    标题却叫「全局机制」；另一条 39 字符的「龙阳决与双修」写的是「舞姬恋…往返抚弄其经脉」
+    谢若冰的身体状态**（「谢若冰数日夜被洛渊以龟头碾磨宫口，身体渐次贪欢上瘾…」），
+    标题却叫「全局机制」；另一条 39 字符的「龙阳决与双修」写的是「星织恋…往返抚弄其经脉」
     ⇒ 「经脉」于是**每轮无条件注入**。curator prompt 本就写着「机制条目默认只读／角色条目
     是最主要的 worldbook_update 对象」，是**可写集与 prompt 不一致**才逼它写错地方。
 

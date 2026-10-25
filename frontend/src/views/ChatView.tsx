@@ -44,8 +44,13 @@ import { deletedMessageTombstones } from "../lib/deletedMessageTombstones";
 import { inspirationToAttachment, consumePendingInspirationAttachments, CHAT_INSPIRATION_EVENT } from "../lib/inspirationInsert";
 import { ConfirmModal } from "../components/Modal";
 import { MaskEditorModal, type MaskEditorResult } from "../components/MaskEditorModal";
-import { StylePresetModal } from "../components/StylePresetModal";
 import { MediaInsertModal } from "../components/MediaInsertModal";
+import { PromptTemplateModal } from "../components/PromptTemplateModal";
+import {
+  createPromptTemplate, listPromptTemplates,
+  type PromptTemplate,
+} from "../api/ai/promptTemplates";
+import { templateSelectorOptions } from "../lib/promptTemplates";
 import { subscribePlanTaskActivities, approvePlanTask, cancelPlanTask, type PlanTaskActivity } from "../lib/planTaskActivity";
 import { UserMessage, AssistantMessage, InspirationCard, PortsPlanCard } from "../components/chat/ChatMessages";
 import { ModelSwitcher, SizeSwitcher } from "../components/chat/ChatControls";
@@ -151,7 +156,9 @@ export function ChatView({
     settings.activeChatModelId || settings.chatModels[0]?.id || "",
   );
   const generationPreferences = useGenerationPreferences(threadId);
-  const [showStylePresets, setShowStylePresets] = useState(false);  // 风格存档管理弹窗
+  const [showPromptTemplates, setShowPromptTemplates] = useState(false);  // 提示词模版工作台弹窗
+  const [promptTemplateItems, setPromptTemplateItems] = useState<PromptTemplate[]>([]);
+  const [promptTemplateBuiltins, setPromptTemplateBuiltins] = useState<PromptTemplate[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);  // 多 Agent 列表（对话切换用）
   useEffect(() => { listAgents().then((a) => setAgents(a.filter((x) => x.enabled))).catch(() => {}); }, []);
   const activeChat = settings.chatModels.find((m) => m.id === chatModelId) || settings.chatModels[0];
@@ -376,6 +383,7 @@ export function ChatView({
     repo, settings, setGeneratedCover, chat, genModel, videoModel, workMode,
     size: resolvedImageSize.size,
     imageQuality: generationPreferences.quality, templates, setShowPicker, atBottomRef,
+    promptTemplates: promptTemplateItems,
     onNotify: showToast,
   });
   const {
@@ -531,6 +539,60 @@ export function ChatView({
   useEffect(() => {
     listTemplates().then((r) => setTemplates(r.items)).catch(() => {});
   }, []);
+
+  // 提示词模版（2026-10-25）：内置只读 + 我的模版；工作台/选择器共用同一份。
+  const reloadPromptTemplates = useCallback(() => {
+    return listPromptTemplates()
+      .then((r) => { setPromptTemplateItems(r.items); setPromptTemplateBuiltins(r.builtins); })
+      .catch(() => {});
+  }, []);
+  useEffect(() => { void reloadPromptTemplates(); }, [reloadPromptTemplates]);
+
+  // 旧「生图风格存档」一次性迁移（2026-10-25）：内容原样搬进自定义模版的追加段，
+  // 选中关系跟着搬；失败保留旧数据下轮再试（不丢用户资产）。
+  // ⚠ ref 闸：update 身份随渲染变化，异步窗口内重入会建出重复模版——先置闸再跑。
+  const migrateAttempted = useRef(false);
+  useEffect(() => {
+    if (settings.promptTemplatesMigrated || migrateAttempted.current) return;
+    const legacy = settings.stylePresets || [];
+    migrateAttempted.current = true;
+    if (!legacy.length) {
+      update({ promptTemplatesMigrated: true });
+      return;
+    }
+    let alive = true;
+    (async () => {
+      try {
+        const { builtins } = await listPromptTemplates("anima_tags");
+        const systemText = builtins.find((b) => b.kind === "anima_tags")?.system_text || "";
+        const mapping: Record<string, string> = {};
+        for (const p of legacy) {
+          const created = await createPromptTemplate({
+            kind: "anima_tags",
+            name: p.name || "旧风格存档",
+            system_text: systemText,
+            extra_instructions: p.content || "",
+          });
+          mapping[p.id] = created.id;
+        }
+        if (!alive) return;
+        const patch: Record<string, unknown> = {
+          promptTemplatesMigrated: true,
+          stylePresets: [],
+          imageStyle: "",
+        };
+        const old = settings.imageStyle || "";
+        if (old.startsWith("preset:") && mapping[old.slice("preset:".length)]) {
+          patch.promptTemplateId = `custom:${mapping[old.slice("preset:".length)]}`;
+        }
+        update(patch);
+        void reloadPromptTemplates();
+      } catch {
+        // 后端不可用/写入失败：保留旧数据与旧 UI 语义，下次进入再试
+      }
+    })();
+    return () => { alive = false; };
+  }, [settings.promptTemplatesMigrated, settings.stylePresets, settings.imageStyle, update, reloadPromptTemplates]);
 
   // 面板打开时轮询 ComfyUI 状态
   useEffect(() => {
@@ -1193,17 +1255,18 @@ export function ChatView({
           />
           <ModelSwitcher
             icon={<Palette size={18} />}
-            label="提示词风格"
+            label="提示词模版"
             items={[
               { id: "none", name: "不启用（原样直出）" },
-              ...(settings.stylePresets || []).map((p) => ({ id: `preset:${p.id}`, name: `★ ${p.name || "未命名存档"}` })),
-              { id: "__manage__", name: "＋ 管理风格存档…" },
+              ...templateSelectorOptions(promptTemplateBuiltins, promptTemplateItems, "image")
+                .map((o) => ({ id: o.id, name: o.builtin ? `${o.name}（默认）` : o.name })),
+              { id: "__manage__", name: "＋ 管理提示词模版…" },
             ]}
-            activeId={settings.imageStyle && settings.imageStyle.startsWith("preset:") ? settings.imageStyle : "none"}
-            emptyHint="提示词风格"
+            activeId={settings.promptTemplateId || "none"}
+            emptyHint="提示词模版"
             onPick={(id) => {
-              if (id === "__manage__") { setShowStylePresets(true); return; }
-              update({ imageStyle: id === "none" ? "" : id });
+              if (id === "__manage__") { setShowPromptTemplates(true); return; }
+              update({ promptTemplateId: id === "none" ? "" : id });
             }}
           />
           {agents.length > 0 && (
@@ -1348,13 +1411,12 @@ export function ChatView({
           onCancel={() => confirmReq.resolve(false)}
         />
       )}
-      {showStylePresets && (
-        <StylePresetModal
-          presets={settings.stylePresets || []}
-          onAdd={presets.addStylePreset}
-          onUpdate={presets.updateStylePreset}
-          onRemove={presets.removeStylePreset}
-          onClose={() => setShowStylePresets(false)}
+      {showPromptTemplates && (
+        <PromptTemplateModal
+          builtins={promptTemplateBuiltins}
+          customs={promptTemplateItems}
+          onChanged={reloadPromptTemplates}
+          onClose={() => setShowPromptTemplates(false)}
         />
       )}
       {showMediaInsert && (
@@ -1366,6 +1428,8 @@ export function ChatView({
           repoId={repo?.id || ""}
           outputDir={settings.outputDir || ""}
           preset={settings.mediaInsert?.[repo?.id || ""]}
+          promptTemplateBuiltins={promptTemplateBuiltins}
+          promptTemplateItems={promptTemplateItems}
           onSave={(preset) => {
             const key = repo?.id || "";
             update({

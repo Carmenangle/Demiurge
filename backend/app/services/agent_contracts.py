@@ -85,7 +85,12 @@ class RunContext:
     comfy_video: bool = False    # 前端已预设视频模板：开=高潮点编译 video_request（含提取 LLM 调用）；关=不调 LLM 不编译，零 token
     video_mode: str = ""        # 视频模式（""=缺省 climax / climax / firstlast），前端 preset.videoMode 透传；
                                 # produce 层据此编译正片/转场 video_request（W3 前端 2 任务排队前置）
-    prompt_profile: str = "anima_tags"  # 当前作品自动插画提示词模式，由主 Roleplay 同轮生成最终提示词（2026-08-31 默认切换自 krea2）
+    prompt_profile: str = "anima_tags"  # 当前作品自动插画提示词模式，由主 Roleplay 同轮生成最终提示词（2026-08-31 默认切换自 krea2）；2026-10-25 起可为 custom:<id>（用户提示词模版）
+    # 2026-10-25 提示词模版：prompt_profile 为 custom:<id> 时的内置协议族兜底
+    # （模版缺失/坏文件 ⇒ 按该 kind 降级内置；空=anima_tags）。选择器侧与 prompt_profile 同步存。
+    prompt_profile_kind: str = ""
+    # 视频提示词模版 id（builtin:<kind> / custom:<hex> / 空=内置默认骨架）
+    video_prompt_template_id: str = ""
     appearance_source: str = "worldbook"  # worldbook / character_card
     # 画面人称手选（2026-09-20，UI＝多元数据插入面板按钮组）："" = 自动判定（按锚点段），
     # first_person / third_person = 用户手选优先（`scene_illustration.frame_viewpoint` 的 override）。
@@ -160,6 +165,8 @@ class RunContext:
             "comfy_audio": self.comfy_audio, "comfy_video": self.comfy_video,
             "video_mode": self.video_mode,
             "prompt_profile": self.prompt_profile,
+            "prompt_profile_kind": self.prompt_profile_kind,
+            "video_prompt_template_id": self.video_prompt_template_id,
             "appearance_source": self.appearance_source,
             "illustration_viewpoint": self.illustration_viewpoint,
             "illustration_batch_count": self.illustration_batch_count,

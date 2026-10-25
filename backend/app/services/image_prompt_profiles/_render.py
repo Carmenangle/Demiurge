@@ -91,7 +91,15 @@ from app.services.image_prompt_profiles.natural import (
 )
 
 
-def negative_prompt(profile: str, _scene: Mapping[str, object] | None = None) -> str:
+def negative_prompt(
+    profile: str,
+    _scene: Mapping[str, object] | None = None,
+    negative_override: str | None = None,
+) -> str:
+    """负面提示词。negative_override（用户提示词模版的 negative_tags）非空即优先；
+    否则 anima 用内置常量，其余档为空。"""
+    if negative_override is not None and negative_override.strip():
+        return negative_override
     return ANIMA_NEGATIVE_TAGS if profile == "anima_tags" else ""
 
 
@@ -167,6 +175,7 @@ def system_with_preset(
 
 def _normalize(
     profile: str, raw: str, scene: Mapping[str, object] | None = None,
+    *, quality_override: str | None = None,
 ) -> str:
     if profile == "krea2":
         # 第 64 刀：krea2 与 anima **同构**（首行 tags ＋ 散文）⇒ 首行也走第一人称收口
@@ -287,9 +296,12 @@ def _normalize(
         # （`the camera is the narrator's eyes` 这类；零命中即逐字节返回）。
         prose = _first_person_prose_meta_guard(prose, scene or {})
         rating = str((scene or {}).get("rating") or "sfw")
+        # quality_override（用户提示词模版的 quality_tags）非空即优先；否则内置
+        # anima_quality_tags(rating)（含 sfw 时的显式词剔除，口径不变）。
+        quality = quality_override or anima_quality_tags(rating)
         # 第 31 刀①②：**先拼质量行、再整行归一**——去重必须横跨「程序前置的质量行」与
         # 「模型自带的内容 tags」两个来源（真机首行这两块整段重复），人数词归一同样要看全行。
-        head = _resolve_subject_counts(f"{anima_quality_tags(rating)}, {tag_head}")
+        head = _resolve_subject_counts(f"{quality}, {tag_head}")
         # 第 40 刀：族内归一之后再查**跨族**——girls 族已占满画面主体名额时，多出来的 boys 族
         # 计数词是孤儿（真机：第一人称下模型把**不入画的叙事者**写成了 `1boy`）。
         # 画面主体按 37 刀口径（已剔叙事者）⇒ 第三人称下叙事者占一个名额，`1boy` 自然保留。
@@ -347,16 +359,22 @@ def _normalize(
     raise ValueError(f"未知提示词模式：{profile}")
 
 
-def normalize_inline(profile: str, raw: str, scene: Mapping[str, object] | None = None) -> str:
-    """归一已有提示词或本地编译结果；不调用第二个模型。"""
+def normalize_inline(
+    profile: str, raw: str, scene: Mapping[str, object] | None = None,
+    *, quality_override: str | None = None,
+) -> str:
+    """归一已有提示词或本地编译结果；不调用第二个模型。
+
+    quality_override（用户提示词模版的 quality_tags）非空即优先于内置质量行。
+    """
     if profile not in PROFILE_IDS:
         profile = "anima_tags"  # 2026-08-31 默认协议切 Anima（krea2 模版不再默认）
     raw = _strip_refusal_suffix(raw)
     if profile == "niji_sections":
         text = _strip_wrapping(raw)
-        prompt = _normalize(profile, text, scene) if text.lstrip().startswith("{") else text
+        prompt = _normalize(profile, text, scene, quality_override=quality_override) if text.lstrip().startswith("{") else text
     else:
-        prompt = _normalize(profile, raw, scene)
+        prompt = _normalize(profile, raw, scene, quality_override=quality_override)
     if profile == "krea2":
         if not _inline_krea_errors(prompt, scene or {}):
             return prompt
@@ -428,7 +446,16 @@ def _body_errors(profile: str, prompt: str) -> list[str]:
     return errors
 
 
-def _system(profile: str, scene: Mapping[str, object]) -> str:
+def _system(
+    profile: str, scene: Mapping[str, object], system_override: str | None = None,
+) -> str:
+    """取生成侧 system。
+
+    system_override（用户提示词模版的 system_text + extra_instructions）非空即优先，
+    视角条款仍由代码注入（不属于可编辑文本）；None/空 = 内置 _SYSTEMS 现行为。
+    """
+    if system_override and system_override.strip():
+        return system_override + _viewpoint_clause(scene)
     if profile == "krea2":
         if scene.get("character_lora"):
             return _KREA_SYSTEM + (
@@ -662,11 +689,17 @@ def generate(
     diagnostics: dict[str, object] | None = None,
     *,
     allow_repair: bool = True,
+    system_override: str | None = None,
+    quality_override: str | None = None,
 ) -> str:
     """调用文本模型并验证目标协议；语义格式错误时携带原因重写一次。
 
     allow_repair=False（插画链同轮兜底用）：第一次不通过直接本地确定性兜底，
-    不再花第二次 LLM 调用——正文已生成完，用户不该为提示词重写干等。"""
+    不再花第二次 LLM 调用——正文已生成完，用户不该为提示词重写干等。
+
+    system_override / quality_override（2026-10-25 用户提示词模版）：非空即优先于
+    内置 _SYSTEMS / 内置质量行；None = 内置现行为（逐字节不变）。
+    """
     if profile not in PROFILE_IDS:
         raise ValueError(f"未知提示词模式：{profile}")
     report = diagnostics if diagnostics is not None else {}
@@ -674,7 +707,7 @@ def generate(
     report.update({"strategy": "direct", "first_errors": [], "repair_errors": []})
     fact_scene = _scene_for_facts(scene)
     model_scene = _scene_for_model(scene)
-    system = _system(profile, fact_scene)
+    system = _system(profile, fact_scene, system_override)
     source = json.dumps(model_scene, ensure_ascii=False, separators=(",", ":"))
     first_raw = generate_text(system, source)
     raw = _strip_refusal_suffix(_strip_think(first_raw))
@@ -685,7 +718,7 @@ def generate(
     report["first_refusal"] = bool(
         _REFUSAL_RE.search(image_prompt_extract.restore_jailbreak(first_raw or ""))
     )
-    prompt = _normalize(profile, raw, fact_scene)
+    prompt = _normalize(profile, raw, fact_scene, quality_override=quality_override)
     errors, length_warnings = _split_length_warnings(_errors(profile, prompt, fact_scene))
     if length_warnings:
         report["warnings"] = length_warnings
@@ -750,7 +783,7 @@ def generate(
     report["repair_refusal"] = bool(
         _REFUSAL_RE.search(image_prompt_extract.restore_jailbreak(second_raw or ""))
     )
-    prompt = _normalize(profile, repaired_raw, fact_scene)
+    prompt = _normalize(profile, repaired_raw, fact_scene, quality_override=quality_override)
     errors, _extra_warnings = _split_length_warnings(_errors(profile, prompt, fact_scene))
     prior_warnings = report.get("warnings")
     if _extra_warnings and isinstance(prior_warnings, list):
@@ -831,16 +864,23 @@ def generate_result(
     profile: str,
     scene: Mapping[str, object],
     generate_text: Callable[[str, str], str],
+    *,
+    system_override: str | None = None,
+    quality_override: str | None = None,
+    negative_override: str | None = None,
 ) -> dict[str, object]:
     diagnostics: dict[str, object] = {}
-    prompt = generate(profile, scene, generate_text, diagnostics)
+    prompt = generate(
+        profile, scene, generate_text, diagnostics,
+        system_override=system_override, quality_override=quality_override,
+    )
     first_errors = diagnostics.get("first_errors")
     repair_errors = diagnostics.get("repair_errors")
     first_items = first_errors if isinstance(first_errors, list) else []
     repair_items = repair_errors if isinstance(repair_errors, list) else []
     result: dict[str, object] = {
         "prompt": prompt,
-        "negative_prompt": negative_prompt(profile, scene),
+        "negative_prompt": negative_prompt(profile, scene, negative_override),
         "strategy": str(diagnostics.get("strategy") or "direct"),
         "validation_errors": list(dict.fromkeys([
             *[str(item) for item in first_items],
@@ -1004,6 +1044,10 @@ def generate_frame_prompts(
     frame_descs: Mapping[str, str],
     generate_text: Callable[[str, str], str],
     diagnostics: dict[str, object] | None = None,
+    *,
+    system_override: str | None = None,
+    quality_override: str | None = None,
+    negative_override: str | None = None,
 ) -> dict[str, dict[str, object]]:
     """首尾帧提示词：与高潮点同构——先提取帧时点结构化事实，再走同一编译器。
 
@@ -1086,7 +1130,10 @@ def generate_frame_prompts(
         # 240s 前端超时易打满），但 `03-backend-illustration-pipeline.md:343-345` 记着
         # **2026-09-01 用户确认**：单次不重写会让提示词明显简略。用户口径「只要结果好就没问题」
         # ⇒ 质量优先，帧编译同样保留这次带因重写。
-        prompt = generate(profile, frame_scene, generate_text, frame_diag)
+        prompt = generate(
+            profile, frame_scene, generate_text, frame_diag,
+            system_override=system_override, quality_override=quality_override,
+        )
         # 观测（2026-09-23 甲）：本帧实际喂进编译器的字段账本 + 场景键 + 成品。
         # 关键怀疑点：两帧的 camera/composition 不是继承来的（scene_spec 本就没有这两个键），
         # 而是编译器从各自 ≤500 字的帧描述里推的 ⇒ 需要账本与成品来判「谁抹平的」。
@@ -1096,7 +1143,7 @@ def generate_frame_prompts(
         report[f"{frame}_prompt_chars"] = len(prompt)
         results[frame] = {
             "prompt": prompt,
-            "negative_prompt": negative_prompt(profile, frame_scene),
+            "negative_prompt": negative_prompt(profile, frame_scene, negative_override),
             "strategy": str(frame_diag.get("strategy") or "direct"),
             "validation_errors": list(dict.fromkeys([
                 *[str(item) for item in _diag_list(frame_diag, "first_errors")],

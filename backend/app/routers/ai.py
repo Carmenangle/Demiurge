@@ -3,7 +3,14 @@
 """
 from fastapi import APIRouter
 
-from app.routers import ai_agent, ai_chat, ai_model_probe, ai_text, ai_workflow_builder
+from app.routers import (
+    ai_agent,
+    ai_chat,
+    ai_model_probe,
+    ai_prompt_templates,
+    ai_text,
+    ai_workflow_builder,
+)
 
 router = APIRouter()
 
@@ -18,3 +25,4 @@ router.include_router(ai_agent.router)
 router.include_router(ai_chat.router)
 router.include_router(ai_model_probe.router)
 router.include_router(ai_workflow_builder.router)
+router.include_router(ai_prompt_templates.router)

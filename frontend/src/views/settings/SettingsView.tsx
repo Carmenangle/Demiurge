@@ -36,7 +36,7 @@ const NAV: { group: string; items: { id: NavId; label: string; icon: typeof Pale
   ] },
   { group: "模型与服务", items: [
     { id: "models", label: "模型", icon: BrainCircuit },
-    { id: "style", label: "生图风格", icon: Sparkles },
+    { id: "style", label: "提示词模版", icon: Sparkles },
   ] },
   { group: "扩展", items: [
     { id: "mcp", label: "MCP 服务器", icon: Blocks },

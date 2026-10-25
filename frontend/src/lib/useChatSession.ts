@@ -6,10 +6,12 @@ import { type MutableRefObject, useEffect, useReducer, useRef, useState } from "
 import type { AgentRoute, ChatMessage, MsgPart, PromptApproval, RegenerationSnapshot, RouteChoice, WorkflowRegeneration } from "../types/chat";
 import type { Repo } from "../stores/repos";
 import type { useSettings } from "../stores/settings";
-import { activeStyleTemplate, activeUserPersona } from "../stores/settings";
+import { activeUserPersona } from "../stores/settings";
 import type { RichContent } from "../components/RichInput";
 import { emitRagStatus } from "../components/RagToast";
 import type { Template } from "../api/workflows";
+import type { PromptTemplate } from "../api/ai/promptTemplates";
+import { promptTemplateInstructions } from "./promptTemplates";
 import {
   comfyStatus, startComfy, submitGraph, submitWorkflow, interruptComfy,
   finalizeGeneration as persistWorkflowGeneration,
@@ -51,6 +53,7 @@ import {
 import {
   applyProfileLoraTriggers, ensureAnimaIllustrationStyle, illustrationTemplateValues, normalizePromptProfile,
   replacePromptQualityLine, latentSizeFor, workflowFieldBinding,
+  isCustomPromptProfile,
 } from "./imagePromptProfiles";
 import {
   illustrationLoraConfigurationError, illustrationRequestMedia, illustrationWorkflowMedia,
@@ -114,6 +117,9 @@ export interface ChatSessionDeps {
   size: string;                                  // 生图尺寸 "宽x高"
   imageQuality: ImageQuality;                    // GPT Image 质量档；不支持的模型由后端省略
   templates: Template[];
+  // 2026-10-25 提示词模版：全局选中的生图模版决定 styleTemplate（自定义=追加段）；
+  // 与工作流模板同款——由 ChatView 加载后注入，本 hook 不自己拉。
+  promptTemplates?: PromptTemplate[];
   setShowPicker: (v: boolean) => void;           // 与 /w 选择浮层共享
   atBottomRef: MutableRefObject<boolean>;        // 与滚动跟随 UI 共享
   onNotify?: (msg: string, kind?: "info" | "error" | "success") => void; // 轻提示（对齐 WorkflowCard onNotify）
@@ -158,6 +164,7 @@ export function useChatSession(deps: ChatSessionDeps) {
   const {
     repo, settings, setGeneratedCover, chat, genModel, videoModel, workMode, size, imageQuality,
     templates, setShowPicker, atBottomRef, onNotify,
+    promptTemplates = [],
   } = deps;
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -187,6 +194,14 @@ export function useChatSession(deps: ChatSessionDeps) {
   // 未配模板（mediaPreset 无 videoTemplateId）→ 不发请求、不调 LLM，零 token（与图/音链同构）。
   const comfyVideo = !!(settings.illustrate && mediaPreset?.videoTemplateId);
   const promptProfile = normalizePromptProfile(mediaPreset?.promptProfile);
+  // 2026-10-25 提示词模版：custom 模版的内置协议族（模版被删时后端按它降级）。
+  // 选择时随预设落盘（promptProfileKind）；已加载列表里能查到就以后者为准。
+  const promptProfileKind = isCustomPromptProfile(promptProfile)
+    ? (promptTemplates.find((t) => `custom:${t.id}` === promptProfile)?.kind
+       || mediaPreset?.promptProfileKind || "")
+    : "";
+  // 视频提示词模版（按模式派发：kind 不匹配 ⇒ 后端用内置默认骨架）
+  const videoPromptTemplateId = mediaPreset?.videoPromptTemplateId || "";
   const cardNames = repo?.cardNames?.length ? repo.cardNames : (repo?.cardName ? [repo.cardName] : []);
   const openingCardName = repo?.openingCardName || repo?.cardName || cardNames[0] || "";
   const appearanceSource = mediaPreset?.appearanceSource === "character_card" ? "character_card" : "worldbook";
@@ -268,7 +283,9 @@ export function useChatSession(deps: ChatSessionDeps) {
     proxyUrl: effectiveGlobalProxyUrl(settings),
     ...modelProxies,
     searchProvider: searchProviderWireValue(settings.searchProvider),
-    styleTemplate: activeStyleTemplate(settings),
+    // 2026-10-25：旧「风格存档」由提示词模版接管——选中自定义模版时其追加段作为
+    // styleTemplate 透传（AI 模仿其组织形态）；内置/未选 = 空（按模型家族自动判）。
+    styleTemplate: promptTemplateInstructions(settings.promptTemplateId || "", promptTemplates),
     agentId: settings.activeAgentId || "",
     streamOutput: settings.streamOutput,
     contextMaxTokens: settings.contextMaxTokens,
@@ -302,6 +319,8 @@ export function useChatSession(deps: ChatSessionDeps) {
     // 视频模式由「首尾帧生成」选项推导（用户定稿 2026-08-28）；旧预设无该字段时退 videoMode
     videoMode: mediaPreset?.firstlast ? "firstlast" : mediaPreset?.videoMode,
     promptProfile,
+    promptProfileKind,
+    videoPromptTemplateId,
     appearanceSource,
     illustrationViewpoint,
     illustrationBatchCount,
@@ -558,7 +577,7 @@ export function useChatSession(deps: ChatSessionDeps) {
         }
         // 自动插画落库后触发 Visual CI 验收诊断（非阻断，fire-and-forget）
         if (firstGen && result.target.media_type === "image" && owner.repoId !== "home") {
-          // 角色回归参考图：取当前作品角色底图的第一张作为相似度基准（冷倾雪/虞妙玥等）
+          // 角色回归参考图：取当前作品角色底图的第一张作为相似度基准（顾凝霜/苏映晚等）
           const referenceImageForCi =
             (Object.values(characterBaseImages || {}).find((url) => !!url) as string) || "";
           // VLM 用设置中的「视觉大模型」配置；未配置时跳过 VLM 检测（仅机械检查）
@@ -1273,7 +1292,8 @@ export function useChatSession(deps: ChatSessionDeps) {
   const { findWorkflowCardByName, planWorkflowOps, applyWorkflowOps, ignoreWorkflowOps, editWorkflowOp } =
     useWorkflowOrchestration({
       messages, setMessages, templates, chat,
-      comfyuiUrl: settings.comfyuiUrl, imageStyle: "", styleTemplate: activeStyleTemplate(settings),
+      comfyuiUrl: settings.comfyuiUrl, imageStyle: "",
+      styleTemplate: promptTemplateInstructions(settings.promptTemplateId || "", promptTemplates),
       repoId: threadId, pushBot, runFreeText,
     });
 

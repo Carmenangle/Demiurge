@@ -12,8 +12,10 @@ import { uploadChatBg, uploadVoice } from "../api/userState";
 import { localViewUrl } from "../api/comfyui";
 import type { MediaInsertPreset, CharacterLoraBinding, CharacterVoiceBinding } from "../stores/settings";
 import {
-  normalizePromptProfile, PROMPT_PROFILE_OPTIONS, workflowFieldBinding,
+  isCustomPromptProfile, normalizePromptProfile, PROMPT_PROFILE_OPTIONS, workflowFieldBinding,
 } from "../lib/imagePromptProfiles";
+import { videoTemplatesForMode } from "../lib/promptTemplates";
+import type { PromptTemplate } from "../api/ai/promptTemplates";
 import { IllustrationPromptModal } from "./IllustrationPromptModal";
 
 interface Props {
@@ -24,6 +26,9 @@ interface Props {
   repoId?: string;     // 本作品 id，音轨落 <repo>/voices/
   outputDir?: string;  // 仓库文件夹根，音轨落 <outputDir>/<作品>/voices/
   preset?: MediaInsertPreset;
+  // 2026-10-25 提示词模版：内置只读 + 我的模版（生图模式/视频模式两个选择器共用）
+  promptTemplateBuiltins?: PromptTemplate[];
+  promptTemplateItems?: PromptTemplate[];
   onSave: (preset: MediaInsertPreset) => void;
   onClose: () => void;
 }
@@ -73,7 +78,7 @@ function initialVoiceRows(preset?: MediaInsertPreset, _cardNames: string[] = [])
 
 // 多元数据插入：为本作品预设剧情高潮点异步出图用的 ComfyUI 工作流模板 + 按角色 LoRA/底图。
 // 提示词由后端高潮点提取，运行时按在场角色取该角色 LoRA/底图，无则回退风格 LoRA + 风格底图。
-export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDir, repoId = "", outputDir = "", preset, onSave, onClose }: Props) {
+export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDir, repoId = "", outputDir = "", preset, promptTemplateBuiltins = [], promptTemplateItems = [], onSave, onClose }: Props) {
   // 三开关：剧情自动生成时按勾选类型分发。旧预设无 enable 字段 → 默认按已有配置回填。
   const [enableImage, setEnableImage] = useState(preset?.enableImage ?? true);
   const [enableVideo, setEnableVideo] = useState(preset?.enableVideo ?? !!preset?.videoTemplateId);
@@ -109,6 +114,8 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
   const [styleBaseImage, setStyleBaseImage] = useState(preset?.styleBaseImage || "");
   const [videoTemplateId, setVideoTemplateId] = useState(preset?.videoTemplateId || "");
   const [smartVideo, setSmartVideo] = useState(preset?.smartVideo ?? false);
+  // 2026-10-25 视频提示词模版（按当前视频模式派发：高潮点/首尾帧各显示对应 kind）
+  const [videoPromptTemplateId, setVideoPromptTemplateId] = useState(preset?.videoPromptTemplateId || "");
   // 首尾帧生成（用户定稿 2026-08-28）：旧预设按 videoMode === "firstlast" 回填
   const [firstlast, setFirstlast] = useState(preset?.firstlast ?? preset?.videoMode === "firstlast");
   const [audioTemplateId, setAudioTemplateId] = useState(preset?.audioTemplateId || "");
@@ -169,12 +176,25 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
   }, [modelsDir, loraReloadKey]);
 
   useEffect(() => {
-    if (promptProfile !== "anima_tags" || (qualityPrompt && negativePrompt)) return;
+    // 2026-10-25：anima 内置档 + 自定义 anima 模版都预填质量/负面词
+    // （自定义模版的值经 /ai/prompt/templates 详情端点取，见 getProfilePromptDefaults）
+    const customKind = isCustomPromptProfile(promptProfile)
+      ? promptTemplateItems.find((t) => `custom:${t.id}` === promptProfile)?.kind
+      : undefined;
+    const animaFamily = promptProfile === "anima_tags" || customKind === "anima_tags";
+    if (!animaFamily || (qualityPrompt && negativePrompt)) return;
     getProfilePromptDefaults(promptProfile).then((defaults) => {
       setQualityPrompt((current) => current || defaults.quality_prompt);
       setNegativePrompt((current) => current || defaults.negative_prompt);
     }).catch(() => {});
-  }, [promptProfile, qualityPrompt, negativePrompt]);
+  }, [promptProfile, promptTemplateItems, qualityPrompt, negativePrompt]);
+
+  // 2026-10-25 提示词模版：选中项的内置协议族（custom 模版被删时后端按它降级）；
+  // anima 家族（内置 anima + 自定义 anima 模版）才显示/保存质量与负面词。
+  const selectedCustomKind = isCustomPromptProfile(promptProfile)
+    ? promptTemplateItems.find((t) => `custom:${t.id}` === promptProfile)?.kind
+    : undefined;
+  const animaFamily = promptProfile === "anima_tags" || selectedCustomKind === "anima_tags";
 
   const tpl = templates.find((t) => t.id === templateId);
   const hasPrompt = !!tpl?.exposed.some((f) => workflowFieldBinding(f) === SEMANTIC_PROMPT);
@@ -261,6 +281,7 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
       if (!name || !r.voiceRef) continue;  // 音轨必须已选文件才算有效绑定
       characterVoices[name] = { voiceRef: r.voiceRef };
     }
+    // 2026-10-25：custom 模版的内置协议族（模版被删时后端按它降级，悬空引用防护）
     onSave({
       enableImage, enableVideo, enableAudio,
       // 图片分区（未勾选则不保留，运行时按 enable 位分发）
@@ -270,8 +291,9 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
       viewpoint: enableImage && viewpoint ? viewpoint : undefined,
       batchImageCount: enableImage && batchImageCount > 1 ? batchImageCount : undefined,
       promptProfile: enableImage ? promptProfile : undefined,
-      qualityPrompt: enableImage && promptProfile === "anima_tags" ? qualityPrompt.trim() : undefined,
-      negativePrompt: enableImage && promptProfile === "anima_tags" ? negativePrompt.trim() : undefined,
+      promptProfileKind: enableImage && selectedCustomKind ? selectedCustomKind : undefined,
+      qualityPrompt: enableImage && animaFamily ? qualityPrompt.trim() : undefined,
+      negativePrompt: enableImage && animaFamily ? negativePrompt.trim() : undefined,
       latentLongEdge: enableImage ? latentLongEdge : undefined,
       characterLoras: enableImage && Object.keys(characterLoras).length ? characterLoras : undefined,
       styleLora: enableImage && loraMode !== "none" ? styleLora || undefined : undefined,
@@ -282,6 +304,8 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
       videoMode: enableImage && firstlast ? "firstlast" : undefined,  // 新预设只存 firstlast 选项
       videoTemplateId: enableVideo ? videoTemplateId : undefined,
       smartVideo: enableVideo ? smartVideo : undefined,
+      // 2026-10-25 视频提示词模版（按模式派发；空=内置默认骨架）
+      videoPromptTemplateId: enableVideo && videoPromptTemplateId ? videoPromptTemplateId : undefined,
       // 音频分区
       audioTemplateId: enableAudio ? audioTemplateId : undefined,
       characterVoices: enableAudio && Object.keys(characterVoices).length ? characterVoices : undefined,
@@ -441,18 +465,30 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
           </p>
         </div>
         <label style={{ display: "block", marginBottom: 12 }}>
-          <span style={{ display: "block", marginBottom: 4, fontSize: 13 }}>提示词模式</span>
+          <span style={{ display: "block", marginBottom: 4, fontSize: 13 }}>生图提示词模式</span>
           <select
             value={promptProfile}
             onChange={(event) => setPromptProfile(normalizePromptProfile(event.target.value))}
             style={{ width: "100%" }}
           >
-            {PROMPT_PROFILE_OPTIONS.map((option) => (
-              <option key={option.id} value={option.id}>{option.label}</option>
-            ))}
+            <optgroup label="内置默认">
+              {PROMPT_PROFILE_OPTIONS.map((option) => (
+                <option key={option.id} value={option.id}>{option.label}</option>
+              ))}
+            </optgroup>
+            {promptTemplateItems.filter((t) => !t.kind.startsWith("video_")).length > 0 && (
+              <optgroup label="我的模版（提示词模版工作台）">
+                {promptTemplateItems.filter((t) => !t.kind.startsWith("video_")).map((t) => (
+                  <option key={t.id} value={`custom:${t.id}`}>★ {t.name || "未命名模版"}</option>
+                ))}
+              </optgroup>
+            )}
           </select>
         </label>
-        {promptProfile === "anima_tags" && (
+        <p className="bind-hint" style={{ marginTop: -8, marginBottom: 12 }}>
+          内置三种输出结构（Anima 两行 / 自然语言 / Niji 四段）；「我的模版」在提示词模版工作台里克隆内置后自定义。模版被删时自动回退对应内置结构。
+        </p>
+        {(promptProfile === "anima_tags" || selectedCustomKind === "anima_tags") && (
           <>
             <label style={{ display: "block", marginBottom: 12 }}>
               <span style={{ display: "block", marginBottom: 4, fontSize: 13 }}>固定质量提示词</span>
@@ -488,7 +524,7 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
             该模板未标注「提示词」字段，无法注入剧情提示词。请先到「工作流模板」编辑并标注。
           </p>
         )}
-        {templateId && promptProfile === "anima_tags" && negativePrompt && !hasNegativePrompt && (
+        {templateId && animaFamily && negativePrompt && !hasNegativePrompt && (
           <p style={{ color: "#c98a1a", fontSize: 12, marginTop: -6 }}>
             该模板未标注有效的「负面提示词」字段，固定负面提示词不会参与采样。
           </p>
@@ -654,6 +690,24 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
           </label>
           <p className="bind-hint" style={{ marginTop: -8, marginBottom: 12 }}>
             每名角色的参考图 = 生成图片分区中该角色的「底图」，作为视频首帧锁定角色一致性。
+          </p>
+          <label style={{ display: "block", marginBottom: 12 }}>
+            <span style={{ display: "block", marginBottom: 4, fontSize: 13 }}>视频提示词模式</span>
+            <select
+              value={videoPromptTemplateId}
+              onChange={(e) => setVideoPromptTemplateId(e.target.value)}
+              style={{ width: "100%" }}
+            >
+              <option value="">内置默认（六段式骨架）</option>
+              {videoTemplatesForMode(promptTemplateBuiltins, promptTemplateItems,
+                firstlast ? "firstlast" : "climax").map((option) => (
+                <option key={option.id} value={option.id}>{option.name}</option>
+              ))}
+            </select>
+          </label>
+          <p className="bind-hint" style={{ marginTop: -8, marginBottom: 12 }}>
+            定义视频提示词的区块标题/顺序、运镜文案、节奏名与默认时长（输出结构与分镜逻辑不可改）。
+            {firstlast ? "首尾帧模式含段桥转场：选「转场短桥段」模版即用于转场段。" : ""}
           </p>
           {videoTemplateId && (
             <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, fontSize: 13 }}>

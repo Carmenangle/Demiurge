@@ -31,6 +31,66 @@ from app.services.agency_scene_state import _wb_illustration_reason
 _LOG = logging.getLogger("uvicorn.error")
 
 
+def _resolve_prompt_template(ctx: CtxLike) -> tuple[str, dict | None, bool]:
+    """解析 ctx.prompt_profile ⇒ (内置 kind, 自定义模版记录|None, 是否缺失降级)。
+
+    - 内置 id（含已下线 krea2）⇒ 原样透传，下游行为逐字不变；
+    - `custom:<id>` 且模版存在 ⇒ (模版 kind, 记录)——scene_spec["profile"] 仍落
+      **内置 kind**（校验器/归一化/兜底全链零改动），模版数据由调用方作 override 带入；
+    - `custom:<id>` 解析失败（模版被删/坏文件）⇒ 按 ctx.prompt_profile_kind
+      （选择器侧与 prompt_profile 同步存）降级内置，不抛错；缺 kind 时降级 anima_tags。
+    """
+    from app.services import prompt_template_store
+
+    raw = str(ctx.get("prompt_profile") or "anima_tags")
+    kind, record = prompt_template_store.resolve_profile(raw)
+    if kind:
+        return kind, record, False
+    fallback = str(ctx.get("prompt_profile_kind") or "").strip()
+    kind = fallback if fallback in prompt_template_store.IMAGE_KINDS else "anima_tags"
+    return kind, None, True
+
+
+def _template_overrides(kind: str, record: dict | None) -> dict[str, Any]:
+    """从自定义模版记录取生成侧 override（生图三档；仅 anima 消费质量/负面词）。
+
+    真源在 prompt_template_store.image_overrides（编排层/路由层共用一份）。
+    """
+    from app.services import prompt_template_store
+
+    return prompt_template_store.image_overrides(kind, record)
+
+
+def _video_skeleton_for(ctx: CtxLike, mode: str):
+    """按当前视频模式取自定义模版骨架（video_prompt.VideoSkeleton|None）。
+
+    - 未配/内置/空 ⇒ None（内置默认骨架，逐字现行为）；
+    - custom:<id> 且 kind 匹配当前 mode ⇒ 骨架数据；
+    - custom:<id> 缺失/坏文件/kind 不匹配 ⇒ None + trace（不抛错、不阻断出视频）。
+    纯函数模块不 import store：解析在本编排层完成，骨架以参数传入 build_video_request。
+    """
+    from app.services import prompt_template_store
+    from app.services.video_prompt import VideoSkeleton
+
+    raw = str(ctx.get("video_prompt_template_id") or "").strip()
+    if not raw.startswith("custom:"):
+        return None
+    record = prompt_template_store.get_template(raw)
+    data = prompt_template_store.resolve_video_skeleton(raw, mode)
+    if data is None:
+        run_trace.emit(
+            ctx, "illustration.video_template",
+            template_id=raw, mode=mode, resolved=False,
+            reason="missing" if record is None else "kind_mismatch",
+        )
+        return None
+    run_trace.emit(
+        ctx, "illustration.video_template",
+        template_id=raw, mode=mode, resolved=True,
+    )
+    return VideoSkeleton.from_data(data)
+
+
 def _extract_video_action_plan(
     ctx: CtxLike, spec: dict[str, Any], video_mode: str = "climax",
 ) -> dict[str, Any]:
@@ -268,7 +328,7 @@ def _wb_comfy_scene_target(ctx: CtxLike, repo_id: str, plan, clean: str, sig: di
     # 原始主体名。锚点句点名收敛**只看字面名字**，而锚点句常用**代词**指代真正的主体（"她…"）、
     # 用**名字**指代镜头（被看向/被亲吻的主人公）⇒ 收敛会把「镜头」误当成本帧唯一主体。
     # 真机轮 C（thread `09f79e6f`，12:28）：锚点句「**她**掖完被子，把视线从墙上收回来，
-    # 落到**凌渊**脸上。」⇒ 收敛成 `['凌渊']`（凌渊＝镜头、根本不在场）⇒ 画面被读成
+    # 落到**洛渊**脸上。」⇒ 收敛成 `['洛渊']`（洛渊＝镜头、根本不在场）⇒ 画面被读成
     # 「画主人公一个人」。⇒ 当收敛结果与本帧在场角色**无交集**时，必须能回退到这一份。
     judge_subjects: list[str] = []
     # 缺块路径的锚点必须与「同轮有计划」那条支路一样过**既有仲裁机**
@@ -391,8 +451,8 @@ def _wb_comfy_scene_target(ctx: CtxLike, repo_id: str, plan, clean: str, sig: di
         request_actors = final_actors
     # 第 48 刀 · B2（2026-09-22）＋ 第 49 刀 · A2（2026-09-22 用户定案「先 B 再 A2」）：
     # 画面主体（契约/分述/人数词看到的）**只能是「在场角色」的子集** —— 判据 `subjects` 里若混进
-    # 了不在场的名字，一律剔出。真机轮 A（thread `09f79e6f`，09:54）：判据 `['妲千沁','凌渊']`
-    # 把**不入画的主人公**算成画面主体，而 `actors=['妲千沁']` ⇒ 契约判成双人帧 ⇒
+    # 了不在场的名字，一律剔出。真机轮 A（thread `09f79e6f`，09:54）：判据 `['沈映澜','洛渊']`
+    # 把**不入画的主人公**算成画面主体，而 `actors=['沈映澜']` ⇒ 契约判成双人帧 ⇒
     # 成稿 `2girls, adult woman, adult man`（多画一个人）。
     #  B2（第 48 刀）：**判据锚点被仲裁机推翻**时（画面已换段 ⇒ 判据 `subjects` 不再逐字描述
     #    这一帧）**收窄**，而不是整条撤回、退回「在场全集 `actors`」——旧行为会把
@@ -411,10 +471,10 @@ def _wb_comfy_scene_target(ctx: CtxLike, repo_id: str, plan, clean: str, sig: di
     # 判据锚点句里的**名字**未必是本帧主体 —— 第一人称下它常是「镜头」（被看向/被亲吻的
     # 主人公）。而收敛只认字面名字 ⇒ 锚点句用**代词**写主体、用**名字**写镜头时，收敛会把
     # **主体丢掉、只留下镜头**。真机轮 C（thread `09f79e6f`，12:28）锚点句「**她**掖完被子，
-    # 把视线从墙上收回来，落到**凌渊**脸上。」⇒ 收敛成 `['凌渊']`（＝镜头，且不在场）
+    # 把视线从墙上收回来，落到**洛渊**脸上。」⇒ 收敛成 `['洛渊']`（＝镜头，且不在场）
     # ⇒ 与在场角色无交集 ⇒ 契约退回在场全集 ⇒ 成稿把单人帧画成 `2girls`（多画一个人）。
     # ⇒ 收敛结果与在场角色**无交集**时视为收敛失败：回退到**未收敛的判据主体**再按在场收窄
-    #    （同一份判据，只是跳过收敛这一步；正确画面＝主体 [妲千沁] + 视线朝镜头）。
+    #    （同一份判据，只是跳过收敛这一步；正确画面＝主体 [沈映澜] + 视线朝镜头）。
     # ⚠ 只在「无交集」这一种确定坏掉的情形回退（有交集就尊重收敛结论）；回退结果仍 ⊂ 在场角色。
     if judge_subjects and frame_subjects and in_scene:
         restored = [name for name in judge_subjects if name in in_scene]
@@ -560,7 +620,9 @@ def _wb_comfy_scene_spec(ctx: CtxLike, repo_id: str, plan, clean: str, sig: dict
                 pool["scene_text"], request_actors,
             )
         ),
-        "profile": ctx.get("prompt_profile") or "anima_tags",
+        # 2026-10-25 提示词模版：custom:<id> 在此解析为内置 kind（校验/归一化/兜底
+        # 全链只认内置 kind），模版数据由 _wb_comfy_profile 作 override 带入。
+        "profile": _resolve_prompt_template(ctx)[0],
     }
     if ctx.get("appearance_source") in {"worldbook", "character_card"}:
         scene_spec["appearance_source"] = ctx.get("appearance_source")
@@ -643,6 +705,11 @@ def _wb_comfy_profile(ctx: CtxLike, plan, scene_spec: dict, plan_retargeted: boo
     # illustration JSON 已在解析前复用正文的 AI_OUTPUT 正则；成稿再叠加
     # IMAGE_PROMPT 专用清洗。
     # 高潮锚点被纠正时，旧成稿描述的是错误桥段，必须丢弃并从纠正后的事实本地编译。
+    # 2026-10-25 提示词模版：解析 custom:<id> → (kind, 记录)；scene_spec["profile"]
+    # 在组装处已落内置 kind，这里只取模版数据作 override（缺失时降级+trace）。
+    profile_kind, tpl_record, template_missing = _resolve_prompt_template(ctx)
+    overrides = _template_overrides(profile_kind, tpl_record)
+    template_id = f"custom:{tpl_record['id']}" if tpl_record else ""
     inline_profile = ""
     if plan and (
         not plan_retargeted or bool(scene_spec.get("visual_facts"))
@@ -655,13 +722,18 @@ def _wb_comfy_profile(ctx: CtxLike, plan, scene_spec: dict, plan_retargeted: boo
         )
     compiled_profile = image_prompt_profiles.normalize_inline(
         scene_spec["profile"], inline_profile, scene_spec,
+        quality_override=overrides["quality_override"],
     )
     profile_strategy = "same_turn" if plan else "independent_chain"
     if not compiled_profile:
         # 同轮成稿被清空，或同轮义务剥离后主模型本就没带 illustration 块：
         # 全走一次携带当前防拦截预设的独立 LLM 调用（image_prompt_profiles.generate 链，
         # 已实证 status=ok），让模型按当前正文重写英文画面；失败才回退本地事实兜底。
-        compiled_profile, profile_strategy = _profile_llm_fallback(ctx, scene_spec)
+        compiled_profile, profile_strategy = _profile_llm_fallback(
+            ctx, scene_spec,
+            system_override=overrides["system_override"],
+            quality_override=overrides["quality_override"],
+        )
     if not compiled_profile:
         local_profile = image_prompt_profiles.deterministic_fallback(
             scene_spec["profile"], scene_spec,
@@ -693,6 +765,10 @@ def _wb_comfy_profile(ctx: CtxLike, plan, scene_spec: dict, plan_retargeted: boo
         output_chars=len(compiled_profile), plan_retargeted=plan_retargeted,
         field_ledger=field_ledger, missing_fields=missing_fields,
         appearance_missing_actors=appearance_missing_actors,
+        # 2026-10-25 提示词模版：本稿实际使用的模版 id（custom:<hex>；内置/缺失=空串）
+        # 与缺失降级标记——trace 据此复现「当时用的是哪一版」。
+        prompt_template_id=template_id,
+        template_missing=template_missing,
         # 第 36 刀：逐角色外观来源（entry/table/merged/none）——确定性、可被探针直接判读。
         appearance_sources=scene_spec.get("appearance_sources") or {},
         # 第 66 刀（2026-09-28 · 防呆登记）：第一人称下该 profile **有没有 POV 机械保证**。
@@ -704,7 +780,8 @@ def _wb_comfy_profile(ctx: CtxLike, plan, scene_spec: dict, plan_retargeted: boo
         ),
     )
     profile_negative = image_prompt_profiles.negative_prompt(
-        ctx.get("prompt_profile") or "anima_tags", scene_spec,
+        scene_spec["profile"], scene_spec,
+        negative_override=overrides["negative_override"],
     )
     if profile_negative:
         scene_spec["negative_prompt"] = profile_negative
@@ -807,12 +884,14 @@ def _wb_frames_and_video(ctx: CtxLike, illustrate_req: dict, scene_spec: dict,
                 _merged_spec["audio_design"] = _vp_plan["audio_design"]
             illustrate_req["video_mode"] = _video_mode
             _vcfg = illustrate_req.get("video_config") or {}
+            _vsk = _video_skeleton_for(ctx, _video_mode)
             if _video_mode == "firstlast":
                 illustrate_req["video_request"] = _vp_mod.build_video_request(
                     mode="firstlast", spec=_merged_spec, video_config=_vcfg,
                     first_frame_desc=illustrate_req.get("first_frame_desc") or "",
                     last_frame_desc=illustrate_req.get("last_frame_desc") or "",
                     prev_tail_desc=illustrate_req.get("prev_tail_desc") or "",
+                    skeleton=_vsk,
                 )
             else:
                 illustrate_req["video_request"] = _vp_mod.build_video_request(
@@ -820,6 +899,7 @@ def _wb_frames_and_video(ctx: CtxLike, illustrate_req: dict, scene_spec: dict,
                     # first_frame_desc 留空：图职责描述由 video_prompt 用画面级
                     # 动作瞬间（subjects/visual_facts/composition）兜底，与 [动作]
                     # 同源，避免把围绕锚点截取的可能陈旧 narrative 写进 [参考绑定]。
+                    skeleton=_vsk,
                 )
             video_prompt_text = str(
                 (illustrate_req["video_request"].get("submit") or {}).get("prompt") or ""
@@ -834,6 +914,7 @@ def _wb_frames_and_video(ctx: CtxLike, illustrate_req: dict, scene_spec: dict,
                     # prev_tail_desc=上尾帧描述（起点）；last_frame_desc 该分支不使用。
                     first_frame_desc=illustrate_req.get("first_frame_desc") or "",
                     prev_tail_desc=illustrate_req.get("prev_tail_desc") or "",
+                    skeleton=_video_skeleton_for(ctx, "transition"),
                 )
         except Exception as exc:
             _LOG.debug("agency_scene_comfy::_wb_frames_and_video 兜底异常: %s", exc)
@@ -1010,6 +1091,7 @@ def _wb_comfy_extra_requests(ctx: CtxLike, repo_id: str, plan, clean: str, sig: 
                     video_config=request.get("video_config") or {},
                     first_frame_desc=request["first_frame_desc"],
                     prev_tail_desc=request["prev_tail_desc"],
+                    skeleton=_video_skeleton_for(ctx, "transition"),
                 )
             except Exception:  # noqa: BLE001
                 pass   # 桥编译失败 ⇒ 前端退高潮延续（该槽按普通图出）

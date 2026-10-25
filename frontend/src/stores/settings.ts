@@ -137,7 +137,13 @@ export interface MediaInsertPreset {
   // 高潮点模式「批量生图数目」（2026-09-24）：仅高潮点模式出现，最小 1、无上限。
   // 未设/0 = 1 张（单张路径逐字不变）；≥ 锚点数 ⇒ 全出，< 锚点数 ⇒ 按判据 score 降序取前 N。
   batchImageCount?: number;
-  promptProfile?: string; // 存储原样（旧数据可能是已下线的 krea2）；使用处经 normalizePromptProfile 归一
+  promptProfile?: string; // 存储原样（旧数据可能是已下线的 krea2；2026-10-25 起可为 custom:<id>）；使用处经 normalizePromptProfile 归一
+  // 2026-10-25 提示词模版：promptProfile 为 custom:<id> 时同时存其内置协议族；
+  // 模版被删时后端按该 kind 降级内置（悬空引用防护）。
+  promptProfileKind?: string;
+  // 视频提示词模版 id（builtin:<kind> / custom:<hex> / 空=内置默认骨架）；
+  // 按当前视频模式派发（kind 不匹配 ⇒ 后端用内置，不报错）。
+  videoPromptTemplateId?: string;
   qualityPrompt?: string;   // Anima 固定质量行；空则使用后端 profile 默认值
   negativePrompt?: string;  // 独立负面提示词；仅模板暴露 negative_prompt 时注入
   latentLongEdge?: 1024 | 2048 | 4096; // 用户只定最长边；Agent 决定画幅比例
@@ -419,8 +425,12 @@ export interface Settings {
   activeImageModelId?: string;
   videoModels: VideoModel[];
   activeVideoModelId?: string;
-  imageStyle?: string;  // 生图提示词风格：""(自动)/sd/gpt/banana，或 "preset:<id>" 指向自定义存档
-  stylePresets?: StylePreset[];  // 用户自定义风格存档
+  imageStyle?: string;  // [旧·兼容] 生图提示词风格：""(自动)/sd/gpt/banana，或 "preset:<id>" 指向自定义存档；2026-10-25 起由「提示词模版」接管（见 promptTemplateId），旧数据一次性迁移后不再写
+  stylePresets?: StylePreset[];  // [旧·兼容] 用户自定义风格存档；已迁移进提示词模版（promptTemplatesMigrated 后清空）
+  // 2026-10-25 提示词模版：全局选中的生图提示词模版（builtin:<kind> / custom:<hex> / 空=不启用）。
+  // 选中自定义模版时其「追加指令」作为 styleTemplate 透传后端（替代旧风格存档）。
+  promptTemplateId?: string;
+  promptTemplatesMigrated?: boolean;  // 旧风格存档一次性迁移完成标记（失败保留旧数据下轮再试）
   workflowDir: string; // 工作流默认读取路径（后端扫描该目录及子目录的 .json）
   outputDir: string; // 仓库文件夹：作品私有产物（图片+会话记录+好感度+往事+参考图）落 <此>/<作品名>/
   characterDir: string; // 角色卡文件夹：导入的卡按「小仓库」落此目录（含卡本体+内嵌世界书/正则+对话）
@@ -548,6 +558,8 @@ const DEFAULT: Settings = {
   videoModels: [],
   imageStyle: "",
   stylePresets: [],
+  promptTemplateId: "",
+  promptTemplatesMigrated: false,
   workflowDir: "",
   outputDir: "",
   characterDir: "",
@@ -949,6 +961,8 @@ export function importSettings(json: string): Settings {
 }
 
 // 从 imageStyle 取选中存档的 content（内置风格返回空串）。供生图链路透传给后端。
+// ⚠ 2026-10-25 起「提示词模版」接管：新链路用 lib/promptTemplates.promptTemplateInstructions
+//   （选中自定义模版的追加段）；本函数仅保留给旧数据/回归对照，不再有新调用点。
 export function activeStyleTemplate(s: Settings): string {
   const v = s.imageStyle || "";
   if (!v.startsWith("preset:")) return "";

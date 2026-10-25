@@ -5,6 +5,7 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = Path(os.environ.get("LAF_DATA_DIR", str(BASE_DIR / "data"))).expanduser().resolve()
 WORKFLOWS_DIR = DATA_DIR / "workflows"
 TEMPLATES_DIR = DATA_DIR / "templates"
+PROMPT_TEMPLATES_DIR = DATA_DIR / "prompt_templates"  # 提示词模版（2026-10-25）：自定义模版 JSON，内置不落盘
 ASSETS_DIR = DATA_DIR / "assets"
 THUMBS_DIR = DATA_DIR / "thumbs"
 DB_PATH = DATA_DIR / "app.db"
