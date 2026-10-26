@@ -196,15 +196,37 @@ def repo_sync_fix(output_dir: str, cfg, *, do_index: bool = True, do_prune: bool
                         break
                     p = Path(path)
                     kind = media_kind_of(p) or "image"
+                    # 2026-10-27 真机实锤（手机 57 仓库/890MB 图「生成内容」恒空）：补录原来
+                    # 只调 rag_store.index_generation（Chroma 域）——手机上嵌入 cfg 不可用
+                    # 时全跳过，且即便写进 Chroma，读取域（主表，asset_db_empty 判定）也
+                    # 看不见 ⇒「一键修复」空转。改为主表 upsert **优先且独立成账**（doc_id
+                    # 沿用 generation_doc_id 单一公式，后续 index/delete 天然同 id）；
+                    # Chroma 语义索引降为可选增强，失败只留痕、不阻断也不影响列表可见性。
+                    image_url = view_urls.local_view(str(p))
+                    doc_id = rag_store.generation_doc_id(repo["repo_id"], image_url)
                     try:
-                        rag_store.index_generation(
-                            repo["repo_id"], cfg, prompt="",
-                            image_url=view_urls.local_view(str(p)), media_type=kind,
-                        )
+                        created = int(p.stat().st_mtime * 1000)
+                    except OSError:
+                        created = 0
+                    metadata = {
+                        "kind": "generation", "media_type": kind,
+                        "image_url": image_url, "repo_id": repo["repo_id"],
+                        "created_at": created,
+                    }
+                    try:
+                        asset_store.upsert_from_generation(repo["repo_id"], metadata, doc_id)
                         indexed += 1
                         jobs.tick(job.id)
                     except Exception as exc:  # noqa: BLE001 [EXC-留痕] 单文件失败不阻断
-                        _log.warning("补录失败 %s: %s", path, exc)
+                        _log.warning("补录主表失败 %s: %s", path, exc)
+                        continue
+                    try:
+                        rag_store.index_generation(
+                            repo["repo_id"], cfg, prompt="",
+                            image_url=image_url, media_type=kind,
+                        )
+                    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 语义索引可选
+                        _log.info("语义索引跳过（嵌入配置不可用/失败）%s: %s", path, exc)
         if do_prune:
             for repo in report["repos"]:
                 if jobs.should_cancel(job.id):
