@@ -19,7 +19,7 @@
 
 > **1–44 条已归档** → `docs/architecture-log/deepening-log-2026-08_10.md`（2026-10-24 瘦身刀；条目正文逐字未动，检索关键词请去归档）。近期条目如下。
 
-45. **ComfyUI 启动链上下文归位：AlekPet 600 秒文件锁 + 同装单实例 + 受限快速失败（2026-10-23）**：用户实锤同一安装（`ComfyUI_aaaki\ComfyUI`）TE 启动器 **82 秒**起、`start-dev` 要 **近 9 分钟**。**根因不是 Manager**（`FETCH ComfyRegistry` 在 `Starting server` 之后的后台线程）；是 AlekPet 节点 `__init__.py:297` 模块级 `installNodes()` → `FileLock(.install.lock, timeout=600)`（`:247`），`filelock 3.29` 的 Windows 实现把 `os.open`/`msvcrt.locking` 的 EACCES(errno 13) 当「锁被占用」（`filelock/_windows.py:76/83`）静默轮询到超时；自定义节点 import 在绑定 8188 之前 ⇒ 端口全程不监听（Demiurge 日志 238 次 boot 里 9 次 `600.1 seconds (IMPORT FAILED)`、22 次 `could not be acquired`、10 次 asset DB 锁警告；TE 同安装实例 AlekPet import 仅 3.8 秒）。两族触发并存：① 后端低完整性（41 条）子进程写不了安装树；② 多实例（后端 autostart / start-dev 的 POST / 前端懒拉起 + `--reload` 后 `_proc` 归零 + 外部启动器）互抢 `.install.lock` 与 `comfyui.db`。**五修复**：① **spawn 规格唯一属主** `_build_spec()`（start / launch_detached 共用 argv/env/cwd/日志路径）；② **同装单实例** `find_install_processes()` / `_match_install_pids()` 按命令行识别（launcher 子进程命令行**不含安装目录** ⇒ 解释器路径也算；按路径边界匹配，`...\ComfyUI` 不误伤 `...\ComfyUI_TE`），`start()` 幂等判据变为 `is_up OR is_managed OR 同装 pid`；③ **受限上下文快速失败** `install_tree_writable()` 双探针（新建 + **打开已存在 `main.py`**；低进程能新建低标签文件却打不开中标签文件）⇒ `LaunchError(503)` + 可操作指引，不再让人等 600 秒；④ **开发链路换上下文**：`LAF_COMFY_AUTOSTART=0`（`main.py` 尊重）+ `scripts/start_comfy.py`（`launch_detached`，不接管 `_proc`）+ `scripts/stop-dev.ps1` 与 `stop(url, path, python_path)` 同口径按命令行清「启动中未监听」实例（默认 `python_path` 为空时按 `find_python` 解析同装解释器）再按端口兜底；⑤ **规划/执行拆分（同日二次实锤；2026-10-24 机制纠正）**：降级来自**工作区目录 `D:\tool\Demiurge` 的 Low 强制性标签**（文件继承），进程完整性取 min(父,映像) ⇒ 后端与 venv python 都在工作区内、必为 Low，且 Low 后端起工作区外的 ComfyUI python **仍 Low**（实测 0x1000，同一 `whoami.exe` 内外对照证明的只是文件标签）；此前「用户身份下跑 `start_comfy.py`」仍被降级、用户两次实跑「还是失败」。改为 `build_plan()` 只出 JSON（不 spawn、不判可写），`start-dev.ps1`（`System32` ⇒ Medium）用 ComfyUI 自带解释器 spawn，并用**同一解释器**跑 `comfy_probe_write.py` 双探针后才拉起；旧的 POST 回退删除。**验证**：受限 shell 跑 `start_comfy.py` → 退出码 1 且指向「安装树不可写」；拆分后 `start-dev.ps1` 直跑 → ComfyUI 令牌 **Medium**、8188 **~117 秒**起、`system_stats` 200，该 boot 无 600.1 秒锁（TE 基线 82 秒）；`test_comfy_launcher.py` **29 例**通过（同装不叠加 / 503 不 Popen / stop 按 pid / stop 未配置解释器时解析同装解释器 / launch_detached 不接管 / build_plan 不判可写不 spawn）。**根治（2026-10-24）**：解除工作区 Low 标签后整链 Medium、autostart 恢复（条 50）；在此之前应用不提升任何进程权限、不绕过沙箱，后端保持 Low 并走 503 快速失败。手册 `C/04` §3.7 / §3.9 / §3.11 + 红线 16/18。
+45. **ComfyUI 启动链上下文归位：AlekPet 600 秒文件锁 + 同装单实例 + 受限快速失败（2026-10-23）**：用户实锤同一安装（`ComfyUI_aaaki\ComfyUI`）TE 启动器 **82 秒**起、`start-dev` 要 **近 9 分钟**。**根因不是 Manager**（`FETCH ComfyRegistry` 在 `Starting server` 之后的后台线程）；是 AlekPet 节点 `__init__.py:297` 模块级 `installNodes()` → `FileLock(.install.lock, timeout=600)`（`:247`），`filelock 3.29` 的 Windows 实现把 `os.open`/`msvcrt.locking` 的 EACCES(errno 13) 当「锁被占用」（`filelock/_windows.py:76/83`）静默轮询到超时；自定义节点 import 在绑定 8188 之前 ⇒ 端口全程不监听（Demiurge 日志 238 次 boot 里 9 次 `600.1 seconds (IMPORT FAILED)`、22 次 `could not be acquired`、10 次 asset DB 锁警告；TE 同安装实例 AlekPet import 仅 3.8 秒）。两族触发并存：① 后端低完整性（41 条）子进程写不了安装树；② 多实例（后端 autostart / start-dev 的 POST / 前端懒拉起 + `--reload` 后 `_proc` 归零 + 外部启动器）互抢 `.install.lock` 与 `comfyui.db`。**五修复**：① **spawn 规格唯一属主** `_build_spec()`（start / launch_detached 共用 argv/env/cwd/日志路径）；② **同装单实例** `find_install_processes()` / `_match_install_pids()` 按命令行识别（launcher 子进程命令行**不含安装目录** ⇒ 解释器路径也算；按路径边界匹配，`...\ComfyUI` 不误伤 `...\ComfyUI_TE`），`start()` 幂等判据变为 `is_up OR is_managed OR 同装 pid`；③ **受限上下文快速失败** `install_tree_writable()` 双探针（新建 + **打开已存在 `main.py`**；低进程能新建低标签文件却打不开中标签文件）⇒ `LaunchError(503)` + 可操作指引，不再让人等 600 秒；④ **开发链路换上下文**：`LAF_COMFY_AUTOSTART=0`（`main.py` 尊重）+ `scripts/start_comfy.py`（`launch_detached`，不接管 `_proc`）+ `scripts/stop-dev.ps1` 与 `stop(url, path, python_path)` 同口径按命令行清「启动中未监听」实例（默认 `python_path` 为空时按 `find_python` 解析同装解释器）再按端口兜底；⑤ **规划/执行拆分（同日二次实锤；2026-10-24 机制纠正）**：降级来自**工作区目录本身的 Low 强制性标签**（文件继承），进程完整性取 min(父,映像) ⇒ 后端与 venv python 都在工作区内、必为 Low，且 Low 后端起工作区外的 ComfyUI python **仍 Low**（实测 0x1000，同一 `whoami.exe` 内外对照证明的只是文件标签）；此前「用户身份下跑 `start_comfy.py`」仍被降级、用户两次实跑「还是失败」。改为 `build_plan()` 只出 JSON（不 spawn、不判可写），`start-dev.ps1`（`System32` ⇒ Medium）用 ComfyUI 自带解释器 spawn，并用**同一解释器**跑 `comfy_probe_write.py` 双探针后才拉起；旧的 POST 回退删除。**验证**：受限 shell 跑 `start_comfy.py` → 退出码 1 且指向「安装树不可写」；拆分后 `start-dev.ps1` 直跑 → ComfyUI 令牌 **Medium**、8188 **~117 秒**起、`system_stats` 200，该 boot 无 600.1 秒锁（TE 基线 82 秒）；`test_comfy_launcher.py` **29 例**通过（同装不叠加 / 503 不 Popen / stop 按 pid / stop 未配置解释器时解析同装解释器 / launch_detached 不接管 / build_plan 不判可写不 spawn）。**根治（2026-10-24）**：解除工作区 Low 标签后整链 Medium、autostart 恢复（条 50）；在此之前应用不提升任何进程权限、不绕过沙箱，后端保持 Low 并走 503 快速失败。手册 `C/04` §3.7 / §3.9 / §3.11 + 红线 16/18。
 
 
 47. **编排域按簇拆分为独立属主（已完成 · 2026-10-23，方案 B 再拆）**：
@@ -99,12 +99,12 @@
    命中上一轮遗留在 `_tmp/bt/**` 的夹具，把 `test_find_ffmpeg_无配置返回None` 判红——TEMP/basetemp 必须放仓库外。
 
 50. **工作区 Low 标签解除 + 旧 chunk 404 自愈（已完成 · 2026-10-24）**：两处「重启后才暴露」的缺陷。
-   **① ComfyUI autostart 失败（当前进程处于受限上下文）**：根因是 `D:\tool\Demiurge` **目录本身带 Low 强制性标签**
+   **① ComfyUI autostart 失败（当前进程处于受限上下文）**：根因是**工作区目录本身带 Low 强制性标签**
    （`icacls` 可见 `Mandatory Label\Low Mandatory Level:(OI)(CI)(NW)`，`CodexSandboxUsers` 沙箱遗留；同级 `D:\tool`、
    `D:\tool\ComfyUI` 无标签），文件继承该标签 ⇒ Explorer(Medium) 双击低标签的 `Demiurge.exe` 得到 **Low** 壳，
    venv python 与 ComfyUI 全链 Low。🔴 **合同：进程完整性 = min(父令牌, 映像文件标签)，子进程永不高过父**——
    「Low 后端改用工作区外的 ComfyUI python 复探」已被实测否决（仍 `0x1000`），Medium PowerShell 起同一解释器才是 `0x2000`。
-   修复（环境，用户批准）：`icacls D:\tool\Demiurge /setintegritylevel Medium`、`Demiurge.exe`、`backend\.venv\Scripts\python.exe`
+   修复（环境，用户批准）：`icacls <仓库根> /setintegritylevel Medium`、`Demiurge.exe`、`backend\.venv\Scripts\python.exe`
    与 `pythonw.exe` 同改（不加 `/T`，旧文件保持 Low 仍可被 Medium 进程读写），随后重启应用。真机：壳/后端/ComfyUI 全 `0x2000`、
    `install_tree_writable()` True、autostart 自动拉起、8188 **~130 秒**就绪、`/api/comfyui/status`=`{running:true,managed:true}`；
    后端全量 **4297 passed / 0F / 0E**（此前 `test_node_update` 的 7 例 git-clone 错误随 Medium 一并消失）。
@@ -1140,3 +1140,257 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
    （对齐 padding 吸收了增量）。体积归因账本（大头＝前端媒体 103 M / cargo `debug` profile 的
    230 M Rust `.so`，而非 dex 或 `lib/`）见 `PLAN-MOBILE-STANDALONE-2026-10-25.md` §15.5.1；
    执行记录 `PLAN-MOBILE-STANDALONE-2026-10-25.md` §15.4。
+
+63. **L2 联机同库安全地基（2026-10-26）**：`LAF_ALLOW_REMOTE` 只放开网络可达性，不开能力面。新
+   `services/remote_gate.py` 单一属主：**三件套互锁**（`LAF_ALLOW_REMOTE=1` 且未设 `LAF_LOCAL_TOKEN`
+   ⇒ 远端一律 403，宁可拒服务不裸奔）；**DENY 路由类**（comfyui start/stop/restart/config、
+   node-manager、models、gguf、visual-ci＝PC 独占）；**SCOPE 路径域**（`local-view` 读 /
+   `save-local` 写收敛到 `DATA_DIR`＋已配置作品根——PC 本机「读任意路径」设计红线不变，jail 只在
+   远程分支）。中间件挂在 `app.main`（回环对端逐字不变）。**WS 升级不经过 http 中间件**：
+   `/api/comfyui/ws` 按同一判据在 `relay()` 内自做（裸 `LAF_ALLOW_REMOTE` 的远端一律 4403，
+   且在建连上游之前关闭；见条 65①）。配套跨层决策：前端 `client.ts` 的
+   `API_BASE` 生产默认从绝对回环改为**同源相对 `/api`**（dev 与 VITE_API_BASE 语义不变）——origin
+   不烧进产物，与 `view_urls` 根相对同一条教义；这是 LAN 浏览器与手机联机访问 PC 的前提。
+   完整联机形态（WebView 加载 PC 前端 + Tailscale Serve）仍按 PLAN 排在 M8 后。
+
+64. **移动端体积刀 1 落刀 + 「装得下吗」用数据定口径（0.4.3 · 已完成 · 2026-10-26）**：
+   ① **体积线达标**：`chromadb_rust_bindings` 改走 `[profile.mobile]`（补丁 #7：`opt-level=2 / debug=0 /
+   strip="symbols" / lto=false / codegen-units=16`），`.so` 230,688,256 → **23,178,408 B**；
+   APK 217,616,768 → **189,858,276 B**（sha256 `9e50aa42…`，versionCode 14 / 0.4.3）＝§11 的 ≤190 MB
+   **达标但只剩 141,724 B 余量** ⇒ D4「前端与 PC 完全一致」的**素材面不砍**（onboarding 45.2 M 保留），
+   今后**任何** wheel 或前端媒体新增都会破线，必须先读账本再动刀。
+   ② **两条「绿着但没生效」的假信号，已固化为 exit-code 判据**（属主 `mobile/spike/apk_size_ledger.py`）：
+   **换 wheel ≠ 换包**——同名同版本只换内容的 whl，`:app:installDebugPythonRequirements` 仍 UP-TO-DATE，
+   imy 里还是旧 `.so`（判据只认 APK 内 imy 的 `.so` 原始大小 <30 MiB）；
+   **增量打包会留白**——AGP 只重写变化成员、不压实空闲区，本轮 imy 瘦 27.7 M 后文件字节仍是 217.6 M，
+   中间空洞 27,755,243 B（判据：`文件字节 − Σ(成员压缩字节)` ≈ 结构开销，实测 187,426 B；空洞 >1 MiB ⇒ 必须
+   `:app:clean` 重打）。这是条 62a「字节数≠身份」红线的加强版：**同尺寸既可能是内容变了被 padding 吸收，
+   也可能是变的内容根本没进来**。
+   ③ **口径修正**：「APK 成员全 STORED」只在**顶层**成立，`.imy`/`frontend.zip` **内部是 DEFLATED** ⇒
+   顶层线性可加成立，但换 wheel 的收益按 imy 内压缩尺寸算（原始 −207.5 M，APK 只 −27.76 M）。
+   ④ **运行时数据实测定了同步面**（`demiurge-standalone-check`：空 `LAF_DATA_DIR` + 隔离端口 + 真令牌，
+   不碰真机）：程序侧自足（起后端 4.29 s、无令牌 401、生文/RAG 建库入库检索/5 轮 SSE 全 200，
+   工作集 136.1→210.9 MiB，**零本地模型**，整链跑完 DATA_DIR 仅 +2,408,588 B）；
+   可见历史 `chat.json` 23 文件/412 条/**2.9 MiB**，而模型历史 `checkpoints.db` 有效 **3.20 GiB**
+   （单 thread 3,059.6 MB）⇒ **同步引擎 JSON+DB（实测 13.7 MiB/331 个，内含 1.0 MiB `.bak-*` 不该带上），
+   不同步 `checkpoints.db`，媒体按需**（D6，待用户拍板）。
+   ⑤ **膨胀机理解到对象层**（不是猜）：最大快照 58,883,666 B 里 **99.5 % 是 13 个 `data:image/png;base64`
+   内联块**，同快照另外 120 个走 `/api/comfyui/local-view` 的图片块合计仅 20,748 B ⇒ 每个 superstep 存全量
+   state 快照 × 历史累计内联 base64 ＝平方级；**把附件统一成 local-view 可让 checkpoint 掉 ≈99 %**
+   （属 PC 生文链路的候选修复，条 58 同源，**另线拍板，本刀不动**）。
+   ⑥ **交付包身份的可复现边界**：Gradle `syncBackendPython` 每次 preBuild 把**工作区**的 `backend/app`
+   单向同步进包 ⇒ 包内后端＝当时磁盘状态，**不等于 HEAD + 本线改动**。边界按**包内字节码标记**定，不靠 mtime 猜：
+   0.4.3 落盘 01:36:54，解包内 `.imy` 的 `app/**.pyc` 做字节 grep ⇒ **在包内** `comfyui_ws_proxy` / `verify_supplied` /
+   `prepend_route`；**不在包内** `register_comfyui_host` / `comfy_extra_hosts` / `/api/mobile/comfy-host` /
+   `pause_if_idle` / `restart_uvicorn` / `running_generation_count` / `running_jobs`（`url_guard.py` 最后写盘 01:36:57，
+   **比包晚 3 秒**，与 grep 一致）；`assets/frontend.zip` 与 0.4.2 那份逐字节相同
+   （103,322,546 B / sha `4bd25e309ac9bf2e`）⇒ **两条线的前端改动一项都没进包**。
+   故 **0.4.3 的 sha 不可由 HEAD 复现**；要可复现的交付包必须等四条线**分次落 git** 后重出。
+   报 sha 时必须同时报这条边界（「四线混载」的实际后果）。
+   验证：`verify-apk-security.sh` 14 项对 **0.4.3 产物**重跑 PASS、`:app:verifyApkPrivacy` PASS、
+   `apk_size_ledger.py` exit 0；**PC 产物链未动**（本轮只改 `build.gradle.kts` 版本号 + 新增 spike 脚本，
+   `backend/`、`frontend/` 零改动，故未重跑 PC 全量门禁）。⚠ **性能未验证**：A/B 计时
+   （mobile profile vs G1 dev 基线 create 11.3 ms / add 29.7 ms）仍挂 #61，本条不声称变快或变慢。
+   账本与红线 `PLAN-MOBILE-STANDALONE-2026-10-25.md` §15.5.2 与 §11 分项表；
+   运行时足迹 §15.6；决策面 §14（D4 修订、D6 建议、D7 预算线唯一化）。
+
+65. **手机端联机与运行时合同（M7 中继 / M4 生命周期 / 运行时白名单 / 出包身份，2026-10-26）**：
+   ① **进度 WS 中继**（`services/comfyui_ws_proxy.py`，路由 `/api/comfyui/ws`）：手机端直连 LAN
+   ComfyUI 的进度流被 **CSP `connect-src`（只放行回环 WS，条 50 取舍）** 与 **Android 网安配置
+   （明文只放行回环，且只约束 Java/WebView 栈）** 双重阻断，后端 Python socket 两者都不受限 ⇒ 改由
+   后端中继。目标地址与全部 `/api/comfyui` 端点同口径过 `url_guard.validate_comfyui_url`；**WS 升级
+   不经过任何 `@app.middleware("http")`** ⇒ ①令牌在端点内自做（`local_auth.verify_supplied`，读头或
+   同源 cookie，**不收 query**，4401）②远程能力闸也在端点内自做（`remote_gate`：裸
+   `LAF_ALLOW_REMOTE`＋未设令牌的远端一律 **4403，且在建连上游之前关闭**，与条 63 同判据）③出站
+   **绝不携带**本机令牌。一条客户端连接⇋一条上游连接、代理内不重连（重连是前端 `subscribeProgress`
+   的一次性职责，完成判定另有 `/history` 轮询兜底）、空闲 600 s 收尾、上游建连失败 1011。前端构建期
+   开关 `VITE_COMFY_PROGRESS_PROXY=1`，PC 不设 ⇒ 直连行为逐字不变。
+   ② **M4 运行时四件套**（`MainActivity` + `GenerationForegroundService`）：`specialUse` 前台服务
+   （targetSdk 34 缺类型声明 `startForeground` 直接抛异常）；退后台 30 s → `mobile_server.pause_if_idle()`
+   （在途计数 >0 保活，否则 uvicorn 线程优雅退出、解释器与 app 状态保活，`resume()` 同端口秒级重拉）；
+   健康监控 5 s 一拍、3 连败 → `restart_uvicorn()`（**只重启 uvicorn 线程，不重启解释器**）；
+   `backend.log` 轮转 2×2 MB。计数真源＝`comfy_pending`（提交登记/终态删除/30 min TTL），`/api/health`
+   增 `running_jobs`（加法字段，PC 诊断面同样可读）。红线：**绝不在 running>0 时暂停**；暂停后监控线程
+   退出（防把暂停误判成连败）；不做「关机后继续生成」承诺。
+   ③ **运行时 ComfyUI 主机白名单**：单一真源＝前端设置页 `comfyuiUrl`（壳层/Java 零改动）——保存时
+   `POST /api/mobile/comfy-host` → `url_guard.register_comfyui_host`（与 `COMFYUI_ALLOWED_HOSTS` 同一
+   列表，只收裸主机名/IPv4、上限 8 条、回环免登记）＋落盘 `<LAF_DATA_DIR>/comfy_hosts.json`；开机由
+   `mobile_server._seed_comfy_hosts()` 复播（坏条目跳过、不挡启动）。`comfy_hosts.json` 是**设备本机
+   安全名单**：不进 D6 同步面，也不进 APK 隐私白名单的允许项。
+   ④ **出包身份＝内容 sha，不是手写版本号**（0.4.3 实锤：`assets/frontend.zip` 与 0.4.2 逐字节相同，
+   M7/M4 的前端改动一项没进包，而「只自检 dist」的构建全绿）：`mobile/spike/build-frontend-mobile.sh`
+   是唯一入口（重建 dist → 自检含负例（`/api/comfyui/ws` 字面量、无 `develop/Git`）→ 打 zip：成员相对
+   dist 根、全 DEFLATE → 打印 sha256/字节数）；`build.gradle.kts` 在配置期实算 `FRONTEND_SHA` 并经
+   `buildConfigField` 交给壳层；`MainActivity` 的 `.version` 解压缓存键**只认该 sha**（换 zip 必换键，
+   「忘改常量」的漏改面消失）；`apk_size_ledger.py` 断言「APK 内 `assets/frontend.zip` 的 sha == 源
+   zip 的 sha」；`verify-apk-security.sh` 扩到 16 项，新增「dex 常量池含包内 zip 的 sha」与「源码无手写
+   `FRONTEND_VERSION`」。别名口径：**X 换没换进包，只看包内字节内容，不看字节数、不看构建成功**。
+   ⑤ **可复现边界**（沿条 64 ⑥）：Gradle `syncBackendPython` 每次 preBuild 从**工作区**单向同步
+   `backend/app` ⇒ 交付包只代表当时磁盘状态；报 sha 必须同时报「由哪几条未落 git 的线混载」。
+   ⑥ **真机调试四修（0.30.0-beta 首包 + 两轮重出包，HONOR 90 Pro / Android 15）**：㈠ `mobile_server.start()`
+   **幂等**——Activity 重建会在同一解释器里二次 start，旧实现重跑 `_prepare`/`_choose_port`，
+   自己占着 8010 ⇒ 选回落端口并覆盖 `_info.port`，壳层轮询死端口（按返回键再进的**黑屏卡死**）；
+   现在复用 `get_port()`，服务已停（后台暂停）则同端口重拉。㈡ `backend.log` **写不进启动/请求日志**：
+   uvicorn 默认 `log_config` 会 `dictConfig` 清掉预挂 handler，而 app 内 70 余模块都走
+   `uvicorn.error` ⇒ 首包实测文件 0 字节、重建进程只在退出时落下重复的 shutdown 两行；改
+   `uvicorn.Config(log_config=None)` + `RotatingFileHandler` **只挂 root**（不双写）。㈢ **路径播种按空键补齐**：旧逻辑仅首启写 `outputDir`，0.4.3→0.30.0 升级后五路径
+   全空且手机无目录选择器 ⇒ 卡片/世界书/预设/作品不可用；现写
+   `outputDir/characterDir/worldbookDir/presetDir/workflowDir` 并 mkdir，保留既有
+   `settings`/`repos`，状态文件损坏时不覆盖。㈣ **前台可见时禁止暂停**：BACK 退出会换一个
+   Activity 实例，旧实例 `onPause` 里 post 的 30 s 暂停定时器不会被新实例 `onResume` 的
+   `removeCallbacks` 清掉（handler 不是同一个）⇒ 真机复现「BACK→2 s 重开→30 s 后旧定时器仍
+   把后端停掉，supervisor 10 s 后才重拉」。修法＝进程级 `static volatile appVisible`（onResume
+   置真/onPause 置假），暂停线程入口先查、`pause_if_idle` 返回后再查一次，若已回前台立刻
+   `resume()` 并放弃 `backendPaused`。真机判据：BACK→2 s 重开→静置 42 s，health 全程 200 且
+   日志无新的 `Shutting down`；真退后台 40 s 仍须暂停、回前台同端口重拉（两条不可互相顶掉）。
+   回归：`test_comfyui_ws_proxy.py` 10 例（含远端 4403 且零上游拨号 / 三件套齐备放行 / 回环不变）、
+   `test_mobile_runtime.py` 10 例（含日志不被 `dictConfig` 清空）、`test_mobile_launcher.py` 14 例
+   （含二次 start 复用端口/停后同端口重拉、播种四例）、`test_comfy_host_register.py`、
+   `test_remote_gate.py` 11 例；
+   出包链 `build-frontend-mobile.sh` + `apk_size_ledger.py` + `verify-apk-security.sh` 三道。
+   文档展开：`C/04` §4.7、`F/11` §3.11.5/§3.11.6、`G/16` §5 红线 20。
+
+66. **PC ↔ 手机两条通路（离线资源同步包 / 联机同库反向代理，0.30.0-beta · 2026-10-26）**：
+   ① **离线资源同步包**（`services/config_bundle.py` + `routers/config_transfer.py`，`/api/config/export|export/save|reveal|import`）：
+   包格式 **v3**＝`__config/meta.json` + `settings.json` + `assets/{characters,worldbooks,presets,workflows,prompt_templates}/…`
+   + `repos.json`/`repos/<index>/…` + `regex.json` + `web_materials/…` + **`assets.json`（资产元数据账本）**。
+   v2 只少 `assets.json`，导入端两者都认（`FORMAT_VERSION` 是上限闸，成员缺失记 `asset_index.present=false`）。
+   资源范围＝设置、角色卡/世界书/预设/工作流/
+   提示词模版、**作品仓库**（会话与图片随作品走）、**全局正则**、**上网素材**（含 `.provenance.json`）、**资产账本**。
+   **默认不含密钥**（`SECRET_KEYS` 递归**移除**而非置空，导入方不会拿空串覆盖本机密钥）；**设备路径与网络键始终
+   保留本机值**（`PRESERVE_KEYS`：五个目录、ComfyUI 路径/解释器/模型目录、`comfyuiUrl`/代理设置）；模型数组按 `id`
+   合并且 **incoming 未带 apiKey 时保留本机值**；素材/上网素材/正则默认**跳过同名**（可选 `overwrite=true`）。
+   **作品仓库导入复用 `repo_transfer` 的 id/目录冲突规则**：冲突换新 uuid、展示名不覆盖既有目录、子仓库按
+   `parentId` 重映射后嵌回父作品新目录；父仓库导出时跳过子仓库目录，避免同一份内容重复打包。`_parse_members`
+   对伪造包/未知成员/`..` 或反斜杠越界一律拒绝且**不落盘**；导入 multipart 临时包必删。**本机清单**：
+   `GET /api/config/inventory` 按各资源页列表同口径返回八类计数（角色卡=含 `card.json` 的目录、世界书/预设=
+   可解析项、仓库=`user_state.repos`、上网素材不含 provenance），前端「本机现有资源」直接展示；导入上传
+   按 1 MiB 分块落盘（含作品仓库的大包不得整包读进内存）。**导入的解包+复制是数百 MB 的同步重 IO，必须
+   `run_in_threadpool`**：留在 `async def` 里会饿死 `/api/health`，而手机壳层 supervisor「5 s 一跳、连三跳就
+   `restart_uvicorn`」会把请求半途打死——`import_bundle` 内部素材先、仓库后，于是现象永远是「只有素材进来了」
+   （同族 `export`/`export_save`/`inventory` 都是 sync `def`，FastAPI 自动线程池，故从没暴露过这条）。**导出双通道**：手机端
+   走真实 GET 附件 URL 且**必须是绝对 URL**（相对地址在 WebView `DownloadListener` 里 host 为空会被静默丢弃）；
+   PC 桌面壳没有下载处理器，走 `/export/save` 直接存进系统下载目录，`/reveal` **只允许定位该目录内**的文件。
+   **PC 远端能力面**：`remote_gate` 把 `/api/config` 列入 DENY——远端不能导出含密钥/作品/素材的 PC 资源包。
+   **资产账本 `assets.json`（v3 新增，治 2026-10-26 21:28 真机「生成内容」空态）**：列表页读的是 SQLite 主表
+   （`asset_library.list_generations_page`：主表非空即以其为准，空/异常才回退 Chroma），而包里没有主表也没有向量库
+   ⇒ 设备侧「图全在盘上、页面恒空」（实测 57 仓库 / 890 MB 图片已落 `files/pictures`，UI 仍显示空态）。合同四条：
+   ① 条目＝`_ASSET_CARRY_KEYS` 的「写入形状」元数据（与 `asset_store.upsert_asset` 入参逐键同形，往返不丢字段）
+   ＋ `folder`/`rel` 两段落点 ＋ 导出端 `id`（仅作对账留痕）；**绝对路径与 `local-view` 地址不进包**（与
+   `PRESERVE_KEYS` 同纪律），`thumb_url`（本机派生层）与回收站行（`deleted_at is not null`）也不进包。
+   ② 取数**必须复用列表页同一个谓词** `asset_db_empty()`：主表非空走 `asset_store.iter_export_rows`，否则走
+   `rag_store.iter_export_rows`（只读 metadata、不构造 langchain Chroma、不碰嵌入；取值条件与
+   `scripts/backfill_asset_db.py` 一致，两处漂移就会出现「回填有条目、导出没有」）——本机现状正是主表 0 行、
+   账本在 Chroma，只认主表会导出空。
+   ③ 导入端只用 `_import_repos` 返回的两张表重定位（`id_map` 旧→新 id、`folder_map` 旧→新夹，**没有第三条寻址
+   路径**），拼出本机 `outputDir` 下的新绝对路径后 **id 必须重算**（`id = sha1(repo_id|image_url)`，两个输入都换
+   了；沿用旧 id 则与本机后续写入/删除算出的 id 对不上——同 id 覆盖不成、删不掉），落库走
+   `asset_store.upsert_asset` 纯 SQLite ⇒ **零嵌入调用**；不用 `repo_sync_fix` 补录，那条路每图一次嵌入（880 张＝
+   880 次远程调用）且手机上常未配嵌入模型。
+   ④ 闸序：`rel` 先过 `_safe_member` **再**查映射（恶意 rel 不能因为「这条本来就要 skip」而放行），解析后仍须落在
+   `outputDir` 内；单条写坏只计 `failed`，不阻断整包（57 仓库量级坏一条就回滚＝白同步）。
+   **后果（设计取舍，不是缺漏）**：主表一旦有行就不再回退向量库 ⇒ 设备侧是「账本＋图片」而非全量语义库，语义
+   搜索/视觉索引需在目标机单独构建。前端配套：资产库空态自带「同步体检」入口（整条工具栏挂在
+   `items.length > 0` 上，否则空态是没有出口的死页面）。
+   ② **联机同库**（`services/mobile_remote.py` + `routers/mobile_remote.py`，**仅 `LAF_MOBILE_REMOTE=1` 注册与安装**）：
+   手机本机后端把 `/api/*`（**除 `/api/mobile*` 与 `/api/health`**）反向代理到同一 Wi‑Fi 的 PC 后端，并附加
+   PC 的 `LAF_LOCAL_TOKEN`。**数据真源在 PC**：`/api/user-state` 也走代理，手机看到 PC 的设置/会话/作品；
+   断开联机立即回本机，**手机本机 `user_state.json` 不被改写**。**中间件顺序是安全合同**：`local_auth` 最后
+   安装 ⇒ 最外层（手机令牌对所有路径含代理生效），代理装在其**内侧**；出站剥掉手机 cookie/令牌/`Origin`/
+   `Referer`/`Host`，只带 PC 令牌。PC 的能力收敛**不复制**——仍由 `remote_gate` 按「对端是否回环」判定。
+   PC 不可达时业务请求 **502 + 可行动中文文案**（指向「设置 → 离线资源同步」断开），本机 health 不受影响。
+   WS `/api/comfyui/ws` 单独中继（WS 升级不过 http 中间件）：先按手机令牌自检（头/同源 cookie，**4401**），
+   再带 PC 令牌连上游；双向泵 `FIRST_COMPLETED` 收尾，上游失败 1011，`proxy=None` 绕系统代理。
+   配置落 `data/remote_backend.json`（**设备本地**，不进资源包）：原子写、令牌只报 `token_set` 不回传、
+   `base_url` 拒绝回环/账号/路径/参数（127.0.0.1 在手机上指手机自己）。
+   ③ **PC 启动脚本**（`scripts/start-lan.ps1` / 根 `start-lan.bat`，`-DryRun`/`-Port`/`-Token`/`-NewToken`/`-OpenFirewall`）：
+   三件套＝`--host 0.0.0.0` ＋ `LAF_ALLOW_REMOTE=1` ＋ `LAF_LOCAL_TOKEN`；令牌默认复用
+   `backend/data/lan_token.txt`（已忽略的运行态文件），`-NewToken` 轮换；**端口被占即退出，绝不结束**
+   桌面端/开发环境的后端；打印带网卡名的局域网地址、令牌与防火墙提示，`-OpenFirewall` 只加「专用网络」入站规则。
+   ④ **前端**：设置 →「离线资源同步」在 PC 与手机形态都提供「导出配置包 / 导入配置包」（不再限定哪台设备
+   导出/导入）；手机形态（`MOBILE_PROFILE`）另增「联机同库」（地址/令牌/保存并连接/测试连接/断开），切换后提示
+   刷新；**联机中隐藏离线资源同步区**（其请求会被 PC `remote_gate` 拒绝）。PC 导出成功后弹窗给出保存路径与
+   「打开所在文件夹」；手机导出提示系统下载管理器已接管。**手机可见性（2026-10-26 下午修）**：设置导航由单行
+   横滚改为**换行排布**，「离线资源同步」不再被藏到屏外；同步页**隐藏旧「保留密钥/导出设置/导入设置」**（仅设置
+   JSON）并在文案注明与完整资源包的区别，避免被误认成同一个功能。导入后的角色卡封面/表情 URL 有两个必须条件：
+   路径分隔符统一用 `/`（安卓不认 `\`，Windows 两种都认），路由必须是 `/api/comfyui/local-view`（本地文件读取
+   挂在 comfyui 路由器下，根相对 `/api/local-view` 直接 404）——任一不对都是**卡已在盘上却显示裂图**。**触屏交互
+   口径**：资产卡封面一律**单击即开**（`onClick`），不依赖双击——手机双击不灵敏，用户实测「单点一次和慢慢点两次
+   都没反应、要快速点两次才进」；角色卡页原 `onDoubleClick` 已改 `onClick`，空态提示与 `title` 文案同步改「点击」。
+   ⑤ **边界（登记，不假装支持）**：联机下 ComfyUI 画布/预览 iframe 仍指向 PC 的 `comfyuiUrl`（多为回环）⇒ 手机
+   不可用，生成请求本身仍由 PC 执行且需 PC 先启动 ComfyUI；资源包**不含**向量库、`remote_backend.json` 与设备/
+   网络配置，作品仓库含会话与图片故包体积可能很大；`LAF_ALLOW_REMOTE` 只放开来源闸，身份仍由令牌强制；允许根
+   SCOPE 与 DENY 类表见 `remote_gate`。
+   ⑥ **验证**：`test_config_bundle.py` 29 例（含仓库嵌套/冲突换新/正则与上网素材合并/save+reveal/zip-slip/
+   本机清单口径，以及「导入期间事件循环仍活着」的心跳例：打成 `time.sleep(0.3)` 后用
+   `httpx.AsyncClient(ASGITransport)` 走真实上传，同进程 0.01 s 心跳计数 ≥10——旧写法实测 **ticks=0**；
+   资产账本另九例＝导出只用 `folder`+`rel`（断言包内既无 `local-view` 也无作品根目录名）、子仓库文件归子仓库
+   （最长匹配）、远程图/原文件已删/库根外**跳过且不整包失败**、回收站行不进包、主表空时账本走向量库（用假
+   `rag_store.iter_export_rows` 固定路由，不依赖真 Chroma）、导入后 id 按新 `repo_id|image_url` 重算且
+   `list_generations_page` 直接读到、v2 包缺成员照常导入、`rel` 越界必拒、单条写坏计 `failed` 不阻断
+   ⚠ 单条写坏例用**假 upsert** 精确制造第二次抛错，而不是构造畸形条目——要锁的是循环的错误隔离；且假函数里
+   必须调**先捕获的** `real_upsert`，写成 `asset_store.upsert_asset(row)` 会自招回环），`test_mobile_remote.py` 14 例（令牌隔离/代理旁路/无手机令牌不触上游/502 文案/WS 中继）、前端
+   `configTransfer.test.tsx` 6 例 + `mobileRemote.test.tsx` 3 例 + `characters.test.ts` 4 例（封面 URL 的
+   **`/comfyui/local-view` 路由**与跨平台路径分隔符；断言用 `pathname` 而非只查 query，否则 404 路由查不出来）
+   + `CharacterCards.test.tsx` 1 例（jsdom 下单击封面即渲染预览弹窗；把绑定临时改回 `onDoubleClick` 复跑即红 ⇒ 用例真吃这条修复）
+   + `RepoGallery.emptyState.test.ts` 2 例（源码形式锁：空态分支必须自带「同步体检」入口，且工具栏仍挂 `items.length > 0`）
+   + e2e-manual `character-card-single-tap.spec.ts`（真 vite:5173 + 真后端:8010 只读链路，走「资产管理 → 角色卡」后**只点一次**封面，断言预览弹窗出现）；前端全量 **166 文件 / 1919 用例**、`vite build` 绿；
+   另有**双进程真后端联机验证**（PC 0.0.0.0:18080 +
+   手机端 127.0.0.1:18081，隔离数据目录）：本机→PC 数据切换、无手机令牌 401、手机 health 不走代理、
+   `/api/config` 经代理 403、断开回本机、PC 掉线 502 且 health 200 全过。
+   **真机验收（2026-10-26，HONOR 90 Pro / Android 15，实证）**：v2 包经手机本地后端导入后五类素材、
+   嵌套仓库（`parentId` 重映射，文件数父 3/子 2）、正则、上网素材+provenance、设置合并全部落对；
+   导回 16 成员且父仓库跳过子目录。真实 UI「导出配置包」经 DownloadManager 落
+   `/sdcard/Download/demiurge-config-20261026-1518.demicfg.zip`（4298 B）——相对 URL 静默丢弃的
+   老缺陷真机闭环；UI「导入配置包」选包后 toast 正则 1 条，`/api/regex/` 读回。联机同库在同一
+   热点网段真机连通（PC `0.0.0.0:8011`，探针 119 ms / UI 39 ms），代理后的 `/api/user-state` 返回
+   PC 仓库，`/api/config/export` 403（remote_gate）；断开并删 `remote_backend.json` 后回本机，
+   `user_state.json` 本机值未改。**注意端口回落**：手机 `force-stop` 后 8010 可能处于 TIME_WAIT，
+   launcher 判占后回落 18010–18099（探针/forward 须以 `backend.log` 为准）。
+   **真机可见性复核（2026-10-26 16:00，同一设备）**：用户反馈「资产没同步」后复现——PC 实导 150 个素材
+   （64 卡/37 世界书/11 预设/26 工作流）经手机本地后端导入，手机 API 报 34 卡/35 书/2 预设；角色卡页与
+   世界书页均可见真实条目。此前验收只到**文件/API 层**，未验 UI 可发现性：手机导航单行横滚把「离线资源同步」
+   藏在屏外、旧设置导入导出并排、面板无本机清单，叠加导入卡封面裂图。**裂图定因走了一次弯路**：先按反斜杠修，
+   真机复验仍裂；直接探两条路由才定死——`/api/local-view` **404**、`/api/comfyui/local-view` **200 image/png**，
+   即根相对路径解析不到 comfyui 挂载点。修路由后 r5 真机截图确认封面正常渲染，同步页「本机现有资源」读数与
+   各页一致（角色卡 34 / 世界书 35 / 预设 2 / 工作流 28——此处原写「仓库 28」是笔误，当时 `repos` 仍是 0）。
+   另：PC 8010 活后端启动早于
+   `config_bundle` 扩展代码，它导出的包只有素材、缺仓库/正则/上网素材——**需重启该后端**才能导出完整包。
+   **仓库阶段真机闭环（2026-10-26 21:12 装机 → 21:14 导入）**：含密钥 v2 包（908,453,423 B，`secrets_included:
+   true`）经 `adb forward tcp:18100`＋`X-Demiurge-Token` 推到手机本机后端，HTTP 200 / 总耗时 **52 s**、期间
+   1 s 一跳的 `/api/health` 共 **36 跳、最慢 0.68 s、≥3 s 的跳 0 个**（旧写法这一段会被看门狗打死）⇒
+   `repos imported 57 / skipped 0`，落设备自己的 `files/pictures`（实测 890 MB，`/data` 净增约 1.04 GB），
+   收尾 `files/data/transfer` 仅剩 3.5 K；`/api/config/inventory` 读回 repos 57 / 正则 24 / 上网素材 9。
+   同轮素材 **全部 skipped**（`overwrite=false` 且 15:52 已落地同名），故「设置更新成功」不等于「素材刷新」；
+   页面上下文 `fetch('/api/user-state')` 读回 repos 57、chatModels 8 条全带 key、预设 `GrayWill-0.46-demiurge`。
+   文档展开：`F/11` §3.11.7／§3.11.8（资产账本落点）、`G/10`「离线资源包与联机代理」、`G/16` §3 门禁清单；
+   窄屏对话页布局另见条目 67（`F/11` §3.11.8 后半）。
+
+67. **窄屏对话页布局合同（390×844 · 2026-10-26 晚用户实锤「对话设置把对话遮挡了」）**：
+   ① **合同**：窄屏（`max-width: 720px`）下对话正文 `.chat-stream` 必须拿到 **≥45 % 视口高度**、浮层不得越出视口、
+   气泡内不得出现横向溢出。立项时的实测分解（`styles.css` 最后一段 `@media` 之前）：顶栏 75 + 功能栏 169 +
+   输入卡 264 + 底栏 57 ⇒ `.chat-stream` 只剩 **224 px（26 %）**；「对话设置」浮层 `.nci-body` 左边界 **−208 px**
+   （整块在屏外，看不见也点不到）。修复后：409 px（48 %）／ `.chat-view-head` 75 px 两行 ／ `.chat-actions`
+   单行 33 px ／ `.chat-input-wrap` 173 px ／ `.nci-body` x=12..378、y=135..523 且开关仍可点、横向溢出清单为空。
+   ② **红线：窄屏只能「压扁」，不能「横滚」**。`.chat-view-head` / `.chat-actions` 的弹层（`.nci-body`、
+   `.model-switch-menu`）是**绝对定位子元素**，给这两条栏加 `overflow-x: auto` 会把弹层裁掉——已由
+   `chatMobileLayout.contract.test.ts` 的形式锁固定（断言这两条窄屏段里**不得**出现 `overflow-x: (auto|scroll)`）。
+   压缩手段全部是尺寸收敛：图标钮 `32px !important` 五件套（width/min-width/height/min-height/margin-left）、
+   字号/间距收口、`.nci-body` 改 `position: fixed` + 左右 12 px 自定位。
+   ③ **横向溢出的真根因（诚实记账，含被撤的候选）**：真机数据里撑破气泡的是失败插画槽那串不可断的错误文案
+   （`ComfyUI 节点名 / 绝对路径`）——`overflow-wrap: anywhere` 关掉即 `.bot-content` 256→722、`.bot-rich-parts`
+   228→708、槽 510→608；而 `minmax(0,1fr)` 只能把槽身收回 226、内容仍溢出 466 ⇒ **轨道护栏不是这行的替代品**。
+   第二条 `.bot-html pre { max-width:100%; overflow-x:auto }` 由注入单独证明（UA 默认 `white-space: pre` ⇒
+   min-content＝整行，390×844 注入实测 256→3330）。两条**结构性**候选（`.bot-content{min-width:0}`、
+   `.bot-rich-parts{grid-template-columns:minmax(0,1fr)}`）经「逐个关掉量一遍」的矩阵实测**冗余**并已撤回：
+   `.bot-content` 有 `max-width` 后已有确定宽度，grid `auto` 轨道自然被容器夹紧。教训＝改 CSS 先跑矩阵，别把
+   候选当结论；每条留下的声明都要能指出「关掉它哪一项变红」。
+   ④ **验证**：e2e-manual `chat-mobile-layout.spec.ts`（真 vite:5173 + 真后端:8010 + 系统 Edge，390×844）断言
+   正文高度、浮层在视口内、气泡内无横向溢出；其溢出断言吃的是**当前会话真实数据**（10 个失败槽），护栏一关即红、
+   无需注入 fixture。`src/lib/chatMobileLayout.contract.test.ts`（4 例）从磁盘读 `styles.css` 做 CSS 形式锁；
+   ⚠ 本仓库有**五处** `@media (max-width: 720px)`，必须按「含 `.nci-body` 的那一段」定位，否则会锁到桌面段
+   （首轮就是这么假红了 3/4：`找不到规则 .chat-actions`）。两处受控红检：关 `.media-slot-failed` 那行 ⇒ e2e 红；
+   把形式锁指回第一个 `@media` 段 ⇒ 3/4 红。
+   ⑤ **状态**：已验＝真浏览器 390×844；**真机复验未完成**（本轮 adb 枚举不到设备）。用户手机上要看到本条与
+   条目 66 的资产账本修复，都必须装新 APK（前端进 `frontend.zip`、后端 `config_bundle` 进 Chaquopy 侧），
+   资产账本还需装新包后在 PC 重导一次、再推到手机重导。

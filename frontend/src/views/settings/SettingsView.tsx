@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { Palette, FolderCog, BrainCircuit, Sparkles, Blocks, Puzzle, KeyRound, Bot, Settings2 } from "lucide-react";
+import { Palette, FolderCog, BrainCircuit, Sparkles, Blocks, Puzzle, KeyRound, Bot, Settings2, ArrowLeftRight } from "lucide-react";
 import { useRef } from "react";
 import { applyTheme, exportSettings, importSettings, type Settings } from "../../stores/settings";
 import { saveComfyConfig } from "../../api/comfyui";
+import { syncMobileComfyHost } from "../../lib/mobileProfile";
 import {
   auditOutputPath, migrateOutputPath, type OutputPathAudit,
 } from "../../api/assets";
@@ -16,6 +17,7 @@ import { SkillsPanel } from "./SkillsPanel";
 import { TokensPanel } from "./TokensPanel";
 import { AgentPanel } from "./AgentPanel";
 import { MiscPanel } from "./MiscPanel";
+import { DeviceSyncPanel } from "./DeviceSyncPanel";
 
 interface Props {
   settings: Settings;
@@ -26,13 +28,14 @@ interface Props {
 }
 
 // 左侧导航项：分组 + 图标。id 对应右侧渲染的面板。
-type NavId = "general" | "agent" | "paths" | "models" | "style" | "mcp" | "skills" | "tokens" | "misc";
+type NavId = "general" | "agent" | "paths" | "misc" | "sync" | "models" | "style" | "mcp" | "skills" | "tokens";
 const NAV: { group: string; items: { id: NavId; label: string; icon: typeof Palette }[] }[] = [
   { group: "常规", items: [
     { id: "general", label: "外观", icon: Palette },
     { id: "agent", label: "智能体", icon: Bot },
     { id: "paths", label: "路径与代理", icon: FolderCog },
     { id: "misc", label: "通用", icon: Settings2 },
+    { id: "sync", label: "离线资源同步", icon: ArrowLeftRight },
   ] },
   { group: "模型与服务", items: [
     { id: "models", label: "模型", icon: BrainCircuit },
@@ -104,6 +107,7 @@ export function SettingsView({ settings, update, initialSection, onOutputPathMig
     update(next);
     // 同步 ComfyUI 路径/地址到后端，供 start-dev 脚本读取
     saveComfyConfig(next.comfyuiPath, next.comfyuiUrl, next.comfyuiPython).catch(() => {});
+    syncMobileComfyHost(next.comfyuiUrl);  // 手机端联机：登记 PC 主机进后端白名单（PC 构建直通）
     setSaved(true);
     setTimeout(() => setSaved(false), 1800);
   };
@@ -200,15 +204,20 @@ export function SettingsView({ settings, update, initialSection, onOutputPathMig
           {active === "skills" && <SkillsPanel />}
           {active === "tokens" && <TokensPanel draft={draft} setDraft={setDraft} />}
           {active === "misc" && <MiscPanel draft={draft} setDraft={setDraft} />}
+          {active === "sync" && <DeviceSyncPanel />}
         </div>
         <div className="settings-footer">
-          <label className="settings-export-opt" title="勾选后导出文件包含 API 密钥与下载令牌明文，请仅在可信环境保存">
-            <input type="checkbox" checked={exportKeys} onChange={(e) => setExportKeys(e.target.checked)} />
-            保留密钥
-          </label>
-          <button className="btn" onClick={onExport} title="导出设置为 JSON 文件">导出设置</button>
-          <button className="btn" onClick={() => fileRef.current?.click()} title="从 JSON 文件回填设置（回填到草稿，需再点保存）">导入设置</button>
-          <input ref={fileRef} type="file" accept="application/json,.json" hidden onChange={onImportFile} />
+          {active !== "sync" && (
+            <>
+              <label className="settings-export-opt" title="勾选后导出文件包含 API 密钥与下载令牌明文，请仅在可信环境保存">
+                <input type="checkbox" checked={exportKeys} onChange={(e) => setExportKeys(e.target.checked)} />
+                保留密钥
+              </label>
+              <button className="btn" onClick={onExport} title="仅导出设置为 JSON 文件，不含角色卡/世界书/预设等资源">导出设置</button>
+              <button className="btn" onClick={() => fileRef.current?.click()} title="仅从 JSON 文件回填设置（回填到草稿，需再点保存）">导入设置</button>
+              <input ref={fileRef} type="file" accept="application/json,.json" hidden onChange={onImportFile} />
+            </>
+          )}
           {dirty && <span className="settings-dirty">有未保存的更改</span>}
           {saved && <span className="settings-saved">已保存</span>}
           <button className="btn" disabled={!dirty || busy} onClick={onSave}>

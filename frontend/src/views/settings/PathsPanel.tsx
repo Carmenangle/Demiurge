@@ -4,6 +4,7 @@ import { fetchProxyStatus, type ProxyStatus } from "../../api/userState";
 import { normalizeSearchProvider, SEARCH_PROVIDER_OPTIONS, type SearchProvider } from "../../lib/searchSource";
 import type { UserPersona } from "../../stores/settings";
 import type { PanelProps } from "./GeneralPanel";
+import { MOBILE_PROFILE } from "../../lib/mobileProfile";
 
 // 生效来源 → 界面用词（后端 system=Windows 系统代理、env=环境变量、manual=手填兜底）
 const PROXY_SOURCE_LABEL: Record<string, string> = {
@@ -217,6 +218,12 @@ export function PathsPanel({ draft, setDraft }: PanelProps) {
           onChange={(e) => setDraft((d) => ({ ...d, comfyuiUrl: e.target.value }))}
           placeholder="http://127.0.0.1:8188"
         />
+        {MOBILE_PROFILE && (
+          <p className="field-hint">
+            手机端：填 PC 的地址（如 http://192.168.x.x:8188 或 Tailscale 名称）。局域网明文
+            可被同网段嗅探，推荐 Tailscale；保存时自动登记进后端白名单。
+          </p>
+        )}
       </div>
       <div className="field">
         <label>ComfyUI Python（可选）</label>
