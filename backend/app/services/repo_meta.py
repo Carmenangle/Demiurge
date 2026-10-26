@@ -10,6 +10,7 @@ from typing import Any, cast
 
 import logging
 import json
+from uuid import uuid4
 import os
 from pathlib import Path
 from urllib.parse import quote
@@ -40,6 +41,23 @@ def _load_state() -> dict:
 def user_state_path() -> Path:
     """user_state.json 唯一路径属主（调用期查模块属性 DATA_DIR ⇒ monkeypatch(repo_meta, "DATA_DIR") 即注入）。"""
     return DATA_DIR / "user_state.json"
+
+
+def save_user_state(payload: dict) -> None:
+    """原子写 user_state.json（repos + settings 单一属主的写半边）。
+
+    ⚠ 既有写点 routers/user_state.set_state 仍是内联写——收敛它属后续重构，改形态
+    必须两处同改；新代码（repo_transfer 导入登记）一律走这里。
+    """
+    p = user_state_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    temp = p.with_name(f"{p.name}.{uuid4().hex}.tmp")
+    try:
+        temp.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        temp.replace(p)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def load_user_state() -> dict:
@@ -376,6 +394,19 @@ def _collision_safe_path(candidate: Path, repo_id: str) -> Path:
     if not isolated_owner or isolated_owner == repo_id:
         return isolated
     return candidate.with_name(f"{candidate.name} [{safe_seg(repo_id, 'repo', strip=False)}]")
+
+
+def find_repo_folder(output_dir: str, repo_id: str) -> Path | None:
+    """定位仓库现有输出文件夹（**不创建、不迁移**）；导出等只读场景用。
+
+    先试规范位置（repo_folder_path），再按 _repo.json 标记全根找回（改名前遗留）。
+    """
+    if not output_dir:
+        return None
+    candidate = repo_folder_path(output_dir, repo_id)
+    if candidate.is_dir():
+        return candidate
+    return _find_marked_folder(Path(output_dir), repo_id)
 
 
 def _find_marked_folder(output_dir: Path, repo_id: str) -> Path | None:
