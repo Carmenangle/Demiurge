@@ -43,4 +43,6 @@ export GIT_CONFIG_VALUE_0='https://github.com/'
 # 这份 zip 从首次 dev 编译的 OUT_DIR 缓存里取出（target/aarch64-linux-android/debug/build/
 # utoipa-swagger-ui-*/out/v5.17.14.zip），⇒ 与 G1 产物用的是同一份资源（补丁 #8）。
 # 路径写 Windows 绝对形式：url crate 的 to_file_path 只在 "<盘符>:/" 形态下才认驱动器。
-export SWAGGER_UI_DOWNLOAD_URL="file:///D:/tool/Demiurge/mobile/spike/vendor/v5.17.14.zip"
+# 按脚本位置解析仓库根（MSYS 的 pwd -W 给 D:/...；非 MSYS 回退原样）。
+REPO_ROOT="$(cd "$SPIKE_ROOT/../.." && { pwd -W 2>/dev/null || pwd; })"
+export SWAGGER_UI_DOWNLOAD_URL="file:///$REPO_ROOT/mobile/spike/vendor/v5.17.14.zip"

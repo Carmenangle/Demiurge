@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
 import shutil
 import zipfile
 from pathlib import Path
@@ -10,7 +11,9 @@ from pathlib import Path
 SPIKE = Path(__file__).resolve().parent
 SRC = SPIKE / "src"
 OUT = SPIKE / "wheelhouse"
-SITE = Path("D:/tool/Demiurge/backend/.venv/Lib/site-packages")
+# PC 侧 venv 的 site-packages 是取源码的源；按本仓库位置解析，允许环境变量指到别处。
+REPO = SPIKE.parents[1]
+SITE = Path(os.environ.get("DEMIURGE_SITE_PACKAGES") or REPO / "backend/.venv/Lib/site-packages")
 
 PLATFORM_TAG = "android_24_arm64_v8a"
 MULTIARCH = "aarch64-linux-android"

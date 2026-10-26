@@ -77,6 +77,22 @@ if grep -aq "demiurge_token" "$DEX_TMP"/classes*.dex; then
 else
     fail "dex 缺 demiurge_token，二次启动无法直连"
 fi
+
+# 前端解压缓存键（0.4.4 F3）：必须是「包内 zip 的实算 sha」而不是手写版本号。
+# 判据两头都查：① dex 里的常量 == APK 内 assets/frontend.zip 的 sha256（内容身份）；
+# ② 源码里不再有手写 FRONTEND_VERSION 常量（漏改面必须消失，而不是靠人记得改）。
+FE_SHA="$(unzip -p "$APK" assets/frontend.zip 2>/dev/null | sha256sum | cut -d' ' -f1)"
+if [ -n "$FE_SHA" ] && grep -aq "$FE_SHA" "$DEX_TMP"/classes*.dex; then
+    pass "dex 的 FRONTEND_SHA == 包内 frontend.zip 的 sha256（${FE_SHA:0:16}…）"
+else
+    fail "dex 缺包内 frontend.zip 的 sha256（解压缓存键不是内容身份，升级会跑旧前端）"
+fi
+if grep -qE 'FRONTEND_VERSION[[:space:]]*=' \
+    "$ROOT/mobile/spike/android-spike/app/src/main/java/dev/demiurge/spike/MainActivity.java"; then
+    fail "MainActivity 仍有手写 FRONTEND_VERSION 常量"
+else
+    pass "壳层不再手写前端版本常量（缓存键由 BuildConfig 生成）"
+fi
 rm -rf "$DEX_TMP"
 
 echo "---"
