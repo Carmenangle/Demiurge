@@ -81,7 +81,7 @@ export function RepoGrid({
         return (
         <div className="repo-card" key={r.id}>
           <div className="repo-cover-wrap">
-            <div className="repo-cover" onDoubleClick={() => onOpen(r)} title="双击打开">
+            <div className="repo-cover" onClick={() => onOpen(r)} title="点击打开">
               <RepoCover src={cover} name={r.name} />
             </div>
             <div className="repo-tools">

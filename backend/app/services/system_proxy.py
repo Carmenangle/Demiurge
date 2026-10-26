@@ -104,6 +104,16 @@ def _tcp_probe(address: str, timeout: float = _TCP_TIMEOUT) -> bool:
         return False
 
 
+def alive(address: str) -> bool:
+    """公开探活：地址非空且 TCP 可连。
+
+    素材等直接读 user_state 代理地址的链路用它兜底——地址不监听（典型：PC 的
+    Clash 地址同步进了手机、而手机 VPN 模式代理根本不监听端口）时降级直连，
+    让 VPN(tun) 模式接管流量，而不是死在 Connection refused。
+    """
+    return bool(address.strip()) and _tcp_probe(address)
+
+
 def check_search(proxy: str = "") -> tuple[bool, str]:
     """真跑一次最小联网搜索，回答「现在能不能搜到东西」（空 proxy=直连）。
 

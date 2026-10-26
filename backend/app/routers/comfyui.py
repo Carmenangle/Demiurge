@@ -8,6 +8,7 @@ from app.services import (
     comfy_watchdog,
 )
 from app.services.url_guard import validate_comfyui_url
+from app.services import system_proxy
 from app.services import remote_gate
 from app.services.comfyui_client import ComfyError
 from app.services.comfy_launcher import LaunchError
@@ -15,6 +16,22 @@ from app.services.comfy_launcher import LaunchError
 router = APIRouter()
 
 _is_up = comfyui_client.is_up
+
+
+def _state_proxy(req_proxy: str = "") -> str:
+    """外网素材链路的代理解析：显式传入 > user_state 配置地址（探活）> 直连。
+
+    ⚠ 2026-10-27 真机实锤：PC 的 Clash 地址（127.0.0.1:7897）随 user_state 进了手机，
+    手机 VPN 模式代理不监听端口 ⇒ 原来直接把配置地址交给 requests 必然 Connection
+    refused。探活不存活即降级直连——VPN(tun) 模式下直连流量由代理 App 在网络层接管。
+    """
+    from app.services.repo_meta import setting_str_from_state
+
+    proxy = req_proxy.strip() or (setting_str_from_state("systemProxyUrl")
+                                  or setting_str_from_state("proxyUrl"))
+    return proxy if system_proxy.alive(proxy) else ""
+
+
 
 
 @router.get("/")
@@ -443,8 +460,7 @@ def web_material_save_series(req: WebMaterialSaveSeriesRequest) -> dict[str, obj
     """pixiv 多页作品整册保存：后端一次性拉全页 + 逐页落盘（前端崩溃/断连不影响，服务端继续写完）。"""
     from app.services.repo_meta import setting_str_from_state
 
-    px = req.proxy.strip() or (setting_str_from_state("systemProxyUrl")
-                               or setting_str_from_state("proxyUrl"))
+    px = _state_proxy(req.proxy)
     try:
         return image_store.save_web_series(
             req.output_dir, req.illust_id, req.source_url, req.title,
@@ -481,8 +497,7 @@ def web_material_search(req: WebMaterialSearchRequest) -> dict[str, object]:
     from app.services import material_sources
     from app.services.repo_meta import setting_str_from_state
 
-    proxy = req.proxy.strip() or (setting_str_from_state("systemProxyUrl")
-                                  or setting_str_from_state("proxyUrl"))
+    proxy = _state_proxy(req.proxy)
     return material_sources.search(
         req.source, req.query, max(1, min(req.limit, 50)),
         pixiv_token=setting_str_from_state("pixivRefreshToken"),
@@ -508,8 +523,7 @@ def web_material_favorite(req: WebMaterialFavoriteRequest) -> dict[str, object]:
     from app.services import material_sources
     from app.services.repo_meta import setting_str_from_state
 
-    proxy = req.proxy.strip() or (setting_str_from_state("systemProxyUrl")
-                                  or setting_str_from_state("proxyUrl"))
+    proxy = _state_proxy(req.proxy)
     if (req.source or "danbooru").strip().lower() == "pixiv":
         fn = material_sources.unfavorite_pixiv if req.remove else material_sources.favorite_pixiv
         return fn(
@@ -534,8 +548,7 @@ def web_material_pixiv_following(proxy: str = "", page: int = 1) -> dict[str, ob
     from app.services import material_sources
     from app.services.repo_meta import setting_str_from_state
 
-    px = proxy.strip() or (setting_str_from_state("systemProxyUrl")
-                           or setting_str_from_state("proxyUrl"))
+    px = _state_proxy(proxy)
     return material_sources.pixiv_following(
         setting_str_from_state("pixivRefreshToken"), proxy=px, page=page,
     )
@@ -552,8 +565,7 @@ def web_material_pixiv_pages(req: PixivPagesRequest) -> dict[str, object]:
     from app.services import material_sources
     from app.services.repo_meta import setting_str_from_state
 
-    px = req.proxy.strip() or (setting_str_from_state("systemProxyUrl")
-                               or setting_str_from_state("proxyUrl"))
+    px = _state_proxy(req.proxy)
     return material_sources.pixiv_pages(
         req.illust_id, refresh_token=setting_str_from_state("pixivRefreshToken"), proxy=px,
     )
@@ -569,12 +581,10 @@ def web_material_proxy_image(url: str, proxy: str = ""):
 
     from app.services import material_sources
     from app.services.image_proxy import proxied_image_response
-    from app.services.repo_meta import setting_str_from_state
 
     if not url.strip():
         raise HTTPException(status_code=400, detail="缺少 url")
-    px = proxy.strip() or (setting_str_from_state("systemProxyUrl")
-                           or setting_str_from_state("proxyUrl"))
+    px = _state_proxy(proxy)
     try:
         data, ctype = material_sources.fetch_image_bytes(url.strip(), proxy=px)
     except RuntimeError as exc:

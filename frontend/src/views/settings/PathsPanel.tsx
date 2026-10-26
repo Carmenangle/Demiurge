@@ -238,6 +238,13 @@ export function PathsPanel({ draft, setDraft }: PanelProps) {
       </div>
       <div className="field">
         <label>全局代理（继承本机系统代理）</label>
+        {MOBILE_PROFILE && (
+          <p className="field-hint">
+            手机端：Clash 等代理 App 用「VPN 模式」时**无需配置代理地址**，直连流量即被
+            接管；只有代理 App 开「仅代理/允许局域网」模式才需要填端口。PC 上配置的
+            代理地址不会在手机上生效（已自动探活降级直连）。
+          </p>
+        )}
         <input
           value={draft.proxyUrl}
           onChange={(e) => setDraft((d) => ({ ...d, proxyUrl: e.target.value }))}
