@@ -8,7 +8,9 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import sys
 import tempfile
+import types
 from pathlib import Path
 
 import pytest
@@ -161,3 +163,131 @@ def test_start只绑回环且关闭访问日志(launcher, tmp_path, env_snapshot
     assert captured["access_log"] is False
     assert served["run"] is True
     assert info["auth"]["enabled"] is True
+
+
+# ---------------------------------------------------------------------------
+# Activity 重建：二次 start 必须复用原端口（真机黑屏回归）
+# ---------------------------------------------------------------------------
+
+
+def test_二次start复用原端口不重选不重跑prepare(launcher, tmp_path, monkeypatch):
+    """按返回键退出后重开 ⇒ Activity 重建会再调 start()。
+
+    旧实现重跑 _prepare + _choose_port：8010 被自己占着 ⇒ 选回落端口并覆盖
+    _info.port，随后因 _started 提前返回，壳层去轮询没人监听的端口 ⇒ 黑屏。
+    """
+    launcher._started = True
+    launcher._info = {"port": 18042, "phase": "serving"}
+    launcher._server = types.SimpleNamespace(should_exit=False)
+    launcher._server_thread = types.SimpleNamespace(is_alive=lambda: True)
+    calls = {"prepare": 0, "choose": 0}
+
+    def _no_prepare(*args, **kwargs):
+        calls["prepare"] += 1
+        return {}
+
+    def _no_choose(port):
+        calls["choose"] += 1
+        return 18099
+
+    monkeypatch.setattr(launcher, "_prepare", _no_prepare)
+    monkeypatch.setattr(launcher, "_choose_port", _no_choose)
+    try:
+        info = launcher.start(str(tmp_path), "", "tok", port=8010)
+    finally:
+        launcher._started = False
+        launcher._info = {}
+        launcher._server = None
+        launcher._server_thread = None
+
+    assert calls == {"prepare": 0, "choose": 0}
+    assert info["port"] == 18042
+    assert info["phase"] == "serving"
+
+
+def test_二次start在服务已停时同端口重拉(launcher, tmp_path, monkeypatch):
+    """后台暂停（uvicorn 已退出）后重开 App：解释器仍在，必须同端口 resume。"""
+    import app as app_pkg
+
+    fake_backend = types.ModuleType("app.main")
+    fake_backend.app = object()
+    monkeypatch.setitem(sys.modules, "app.main", fake_backend)
+    monkeypatch.setattr(app_pkg, "main", fake_backend, raising=False)
+
+    launcher._started = True
+    launcher._info = {"port": 18042, "phase": "paused"}
+    launcher._server = types.SimpleNamespace(should_exit=True)
+    launcher._server_thread = types.SimpleNamespace(
+        is_alive=lambda: False, join=lambda timeout=None: None)
+    served: dict = {}
+    monkeypatch.setattr(launcher, "_serve", lambda app_obj, port: served.update(
+        {"app": app_obj, "port": port}))
+    try:
+        info = launcher.start(str(tmp_path), "", "tok", port=8010)
+    finally:
+        launcher._started = False
+        launcher._info = {}
+        launcher._server = None
+        launcher._server_thread = None
+
+    assert served == {"app": fake_backend.app, "port": 18042}
+    assert info["port"] == 18042
+    assert info["phase"] == "serving"
+
+
+# ---------------------------------------------------------------------------
+# 路径播种（覆盖安装时 user_state 已存在但路径全空）
+# ---------------------------------------------------------------------------
+
+
+def _write_state(root: Path, payload: dict) -> Path:
+    state_path = root / "data" / "user_state.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return state_path
+
+
+def test_首启播种五个路径且建目录(launcher, tmp_path):
+    result = launcher._seed_mobile_defaults(tmp_path)
+    assert result["seeded"] is True
+    assert set(result["keys"]) == {
+        "outputDir", "characterDir", "worldbookDir", "presetDir", "workflowDir"}
+    settings = json.loads((tmp_path / "data" / "user_state.json").read_text(encoding="utf-8"))["settings"]
+    for key in result["keys"]:
+        assert Path(settings[key]).is_dir()
+
+
+def test_升级安装只补空路径并保留用户值与repos(launcher, tmp_path):
+    state_path = _write_state(tmp_path, {
+        "repos": [{"id": "repo-1"}],
+        "settings": {"outputDir": "/user/chosen", "characterDir": "  "},
+    })
+    result = launcher._seed_mobile_defaults(tmp_path)
+    data = json.loads(state_path.read_text(encoding="utf-8"))
+    assert data["repos"] == [{"id": "repo-1"}]
+    assert data["settings"]["outputDir"] == "/user/chosen"
+    assert Path(data["settings"]["characterDir"]).name == "characters"
+    assert set(result["keys"]) == {
+        "characterDir", "worldbookDir", "presetDir", "workflowDir"}
+    assert result["seeded"] is True
+
+
+def test_全部已配置时不改写(launcher, tmp_path):
+    settings = {
+        "outputDir": "/a", "characterDir": "/b", "worldbookDir": "/c",
+        "presetDir": "/d", "workflowDir": "/e",
+    }
+    state_path = _write_state(tmp_path, {"repos": [], "settings": settings})
+    before = state_path.read_text(encoding="utf-8")
+    result = launcher._seed_mobile_defaults(tmp_path)
+    assert result == {"seeded": False, "keys": []}
+    assert state_path.read_text(encoding="utf-8") == before
+
+
+def test_状态文件损坏时不覆盖(launcher, tmp_path):
+    state_path = tmp_path / "data" / "user_state.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text("{not-json", encoding="utf-8")
+    result = launcher._seed_mobile_defaults(tmp_path)
+    assert result["error"] == "state-unreadable"
+    assert state_path.read_text(encoding="utf-8") == "{not-json"

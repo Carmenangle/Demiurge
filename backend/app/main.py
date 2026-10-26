@@ -15,12 +15,12 @@ from app.asyncio_quiet import install_connection_reset_filter
 from app.db import init_db
 from app.services import comfy_launcher
 from app.services import comfy_watchdog
-from app.services import local_auth
+from app.services import local_auth, remote_gate
 from app.services import request_guard
 from app.services.workflow_build_tasks import start_worker as start_workflow_build_worker
 from app.services.chat_agent_queue import start_worker as start_chat_agent_queue_worker
 from app.services.plan_tasks import start_worker as start_plan_task_worker
-from app.routers import ai, ai_providers, agents, artifacts, assets, attachments, characters, comfyui, docs, gif_sprite, gguf_importer, image_resize, jobs, loras, mcp, models, narrative, node_manager, palette, plans, preset, procedures, rag, regex, runs, scenario, skills, state, table, user_state, visual_ci, workflows, worldbook, activity
+from app.routers import ai, ai_providers, agents, artifacts, assets, attachments, characters, comfyui, docs, gif_sprite, gguf_importer, image_resize, jobs, loras, mcp, models, narrative, node_manager, palette, plans, preset, procedures, rag, regex, runs, scenario, skills, state, table, user_state, visual_ci, workflows, worldbook, activity, transfer, config_transfer
 
 _LOG = logging.getLogger("uvicorn.error")
 
@@ -89,6 +89,24 @@ async def _loopback_only(request: Request, call_next):
     )
     if verdict is not None:
         return JSONResponse(status_code=403, content={"detail": verdict})
+    return await call_next(request)
+
+
+# L2 联机同库：远程客户端能力闸（2026-10-26）。LAF_ALLOW_REMOTE 只放开可达性；
+# 远端（非回环对端）还要过 remote_gate 的路由类表与「裸远端无令牌一律拒」互锁。
+# PC 本机（回环对端）零变化。
+@app.middleware("http")
+async def _remote_capability_gate(request: Request, call_next):
+    if _ALLOW_REMOTE and request.client:
+        host = request.client.host or ""
+        if remote_gate.is_remote(host):
+            detail = remote_gate.verdict(
+                request.url.path,
+                request.query_params.get("path") if request.url.path == remote_gate.SCOPED_READ else None,
+                token_enabled=bool(local_auth.env_token()),
+            )
+            if detail is not None:
+                return JSONResponse(status_code=403, content={"detail": detail})
     return await call_next(request)
 
 
@@ -200,11 +218,26 @@ app.include_router(scenario.router, prefix="/api/scenario", tags=["scenario"])
 app.include_router(procedures.router, prefix="/api/procedures", tags=["procedures"])
 app.include_router(docs.router, prefix="/api/docs", tags=["docs"])
 app.include_router(artifacts.router, prefix="/api/artifacts", tags=["artifacts"])
+app.include_router(transfer.router, prefix="/api/transfer", tags=["transfer"])
+app.include_router(config_transfer.router, prefix="/api/config", tags=["config"])
+
+# 手机独立模式（壳层设 LAF_MOBILE_REMOTE=1）：联机同库配置端点 + 反向代理。
+# PC 后端不设该变量 ⇒ 不注册、不装中间件，行为与既有完全一致。
+_MOBILE_REMOTE = os.environ.get("LAF_MOBILE_REMOTE", "") == "1"
+if _MOBILE_REMOTE:
+    from app.routers import mobile_remote as mobile_remote_api
+
+    app.include_router(mobile_remote_api.router, prefix="/api/mobile", tags=["mobile"])
 
 
 @app.get("/api/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+def health() -> dict[str, object]:
+    # running_jobs＝在途 ComfyUI 生成数（comfy_pending 是服务端真源：提交登记、终态
+    # 删除、30 分钟 TTL 兜底）。手机壳层用它在「退后台 30s 暂停」与「前台服务保活」
+    # 之间做闸（PLAN §7）；PC 诊断面同样可读。
+    from app.services import comfy_pending
+
+    return {"status": "ok", "running_jobs": len(comfy_pending.snapshot())}
 
 
 # 新人引导「独立文档页」正文里的相对图片（如 ../assets/guide/x.png）指向仓库 docs/assets，
@@ -216,6 +249,13 @@ if _DOCS_ASSETS.is_dir():
 _FRONTEND_DIST = Path(os.environ.get("LAF_FRONTEND_DIST", "")).expanduser()
 if str(_FRONTEND_DIST) not in {"", "."} and (_FRONTEND_DIST / "index.html").is_file():
     app.mount("/", StaticFiles(directory=_FRONTEND_DIST, html=True), name="frontend")
+
+# 联机同库反向代理必须装在 local_auth 内侧（add_middleware 后加者在外层）：
+# 手机令牌闸始终最外层，代理只负责出站，绝不让未认证的本机调用借道打到 PC。
+if _MOBILE_REMOTE:
+    from app.services import mobile_remote
+
+    mobile_remote.install(app)
 
 # 移动端独立模式：壳层设了 LAF_LOCAL_TOKEN 才安装（未设为 no-op，PC 行为不变）。
 # 放在静态挂载之后：install() 会把引导端点插到路由表最前，挂载不会吞掉它。

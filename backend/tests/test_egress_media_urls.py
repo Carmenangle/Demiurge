@@ -61,4 +61,4 @@ def test_health_endpoint_still_ok_after_rebuild():
     """无一命中的 JSON 也要能原样重建返回（重建路径不能吞背景与状态）。"""
     r = _client().get("/api/health")
     assert r.status_code == 200
-    assert r.json() == {"status": "ok"}
+    assert r.json() == {"status": "ok", "running_jobs": 0}  # running_jobs＝comfy_pending 在途计数（M4 运行时）

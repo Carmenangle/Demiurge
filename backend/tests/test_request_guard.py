@@ -121,7 +121,7 @@ def test_健康检查默认流量放行():
     client = TestClient(app, client=_LOOPBACK_CLIENT)
     resp = client.get("/api/health")
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ok"}
+    assert resp.json() == {"status": "ok", "running_jobs": 0}  # running_jobs＝comfy_pending 在途计数（M4 运行时）
 
 
 def test_浏览器合法Origin放行():
