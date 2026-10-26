@@ -23,6 +23,9 @@ export function WorldBook({ characterDir, worldbookDir }: { characterDir: string
   const [pending, setPending] = useState<{ file: File; conflict: WorldbookConflict } | null>(null);
   const [busy, setBusy] = useState(false);
   const [dragOver, setDragOver] = useState(false);  // 拖拽文件到页面：显示高亮反馈
+  // 窄屏：条目面板改为盖在书单上的底部弹窗（内部滚动），避免翻完整个书单才看到条目
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const contentRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const entryRefs = useRef<Record<number, HTMLDivElement | null>>({}); // 条目 index → DOM，供右栏导航滚动定位
   const scrollToEntry = (index: number) => {
@@ -67,13 +70,24 @@ export function WorldBook({ characterDir, worldbookDir }: { characterDir: string
 
   const openCard = (name: string) => {
     const sel: Selection = { kind: "card", name };
-    setSelected(sel); reloadEntries(sel);
+    setSelected(sel); reloadEntries(sel); setSheetOpen(true);
   };
 
   const openBook = (name: string) => {
     const sel: Selection = { kind: "standalone", name };
-    setSelected(sel); reloadEntries(sel);
+    setSelected(sel); reloadEntries(sel); setSheetOpen(true);
   };
+
+  useEffect(() => {
+    if (sheetOpen) contentRef.current?.scrollTo({ top: 0 });
+  }, [sheetOpen, selected]);
+
+  useEffect(() => {
+    if (!sheetOpen) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setSheetOpen(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [sheetOpen]);
 
   // 条目增删改
   const startAdd = () => { setDraft(EMPTY_ENTRY); setEditIdx("new"); };
@@ -166,7 +180,7 @@ export function WorldBook({ characterDir, worldbookDir }: { characterDir: string
 
   const removeBook = (name: string) => {
     deleteWorldbook(worldbookDir, name).then(() => {
-      if (selected?.kind === "standalone" && selected.name === name) { setSelected(null); setEntries([]); }
+      if (selected?.kind === "standalone" && selected.name === name) { setSelected(null); setEntries([]); setSheetOpen(false); }
       reloadBooks();
     }).catch((e) => setErr(String(e.message || e)));
   };
@@ -252,8 +266,26 @@ export function WorldBook({ characterDir, worldbookDir }: { characterDir: string
               </button>
             ))}
           </div>
-          <div className="worldbook-content">
+          {selected && (
+            <button
+              className={`worldbook-sheet-mask ${sheetOpen ? "is-open" : ""}`}
+              aria-label="关闭条目面板"
+              onClick={() => setSheetOpen(false)}
+            />
+          )}
+          <div ref={contentRef} className={`worldbook-content ${sheetOpen ? "is-sheet-open" : ""}`}>
             {!selected && <p style={{ color: "var(--text-muted)" }}>选择左侧世界书查看条目。</p>}
+            {selected && (
+              <div className="worldbook-sheet-head">
+                <div className="worldbook-sheet-title">
+                  <span>{selected.name}</span>
+                  <span className="worldbook-sheet-count">{entries.length} 条</span>
+                </div>
+                <button className="btn" aria-label="关闭条目面板" onClick={() => setSheetOpen(false)}>
+                  <X size={16} />
+                </button>
+              </div>
+            )}
             {selected && (
               <div style={{ marginBottom: 10 }}>
                 <button className="btn" disabled={busy} onClick={startAdd}>

@@ -3,7 +3,7 @@ import { Images, Play, Save, X } from "lucide-react";
 import { characterDetail, updateCharacter, avatarUrl } from "../api/characters";
 import { CharacterMediaModal } from "./CharacterMediaModal";
 
-// 角色卡预览弹窗：资产库里双击卡片打开，展示卡内容（像世界书那样"预览格式"）。
+// 角色卡预览弹窗：资产库里点卡片打开（手机单击即开），展示卡内容（像世界书那样"预览格式"）。
 // 只展示卡本身的信息——标签、创作者注释、角色描述、开场白。内嵌世界书导入时已拆分入库，
 // 不在卡预览里重复展示（其条目数在卡内也不可靠）。底部"用此卡新建作品"才进对话。
 export function CardPreviewModal({ base, folder, name, onClose, onNewWork, onChanged }: {

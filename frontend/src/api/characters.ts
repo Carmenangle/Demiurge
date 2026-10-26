@@ -162,12 +162,18 @@ export function characterRegex(base: string, name: string) {
 }
 
 // PNG 卡原图 URL（走 local-view 读盘），无原图返回空
+// 一律归一成 `/`：安卓的本地路径不认 `\`，Windows 对 `/` 同样兼容。
+function localCardPath(base: string, ...parts: string[]): string {
+  const root = base.replace(/\\/g, "/").replace(/\/+$/, "");
+  return [root, ...parts].join("/");
+}
+
 export function avatarUrl(base: string, folder: string): string {
-  return apiUrl(`/local-view?path=${encodeURIComponent(`${base}\\${folder}\\avatar.png`)}`);
+  return apiUrl(`/comfyui/local-view?path=${encodeURIComponent(localCardPath(base, folder, "avatar.png"))}`);
 }
 
 export function expressionUrl(base: string, folder: string, file: string): string {
-  return apiUrl(`/local-view?path=${encodeURIComponent(`${base}\\${folder}\\expressions\\${file}`)}`);
+  return apiUrl(`/comfyui/local-view?path=${encodeURIComponent(localCardPath(base, folder, "expressions", file))}`);
 }
 
 async function extractDetail(resp: Response): Promise<string> {

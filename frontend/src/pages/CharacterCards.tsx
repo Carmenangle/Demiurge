@@ -166,7 +166,7 @@ export function CharacterCards({ characterDir, outputDir, worldbookDir, persona,
       {characterDir && cards.length === 0 && !err && (
         <p style={{ color: "var(--text-muted)" }}>
           还没有角色卡。这里是角色卡源库，供浏览与预览；点「导入角色卡」选 .json/.png，或直接把卡文件
-          拖到本页 / 放进角色卡文件夹后刷新——都会自动解出内嵌世界书与正则。双击卡片可预览，用「新建作品」进对话
+          拖到本页 / 放进角色卡文件夹后刷新——都会自动解出内嵌世界书与正则。点击卡片可预览，用「新建作品」进对话
           （作品会各自保存卡与世界书快照，改源卡不影响已建作品）。
         </p>
       )}
@@ -231,7 +231,7 @@ function CardGrid({ base, cards, onDelete, onExport, onOpen }: {
     <div className="repo-grid">
       {cards.map((c) => (
         <div className="repo-card" key={c.folder}>
-          <div className="repo-cover" onDoubleClick={() => onOpen(c)} title="双击预览角色卡">
+          <div className="repo-cover" onClick={() => onOpen(c)} title="点击预览角色卡">
             {c.has_avatar
               ? <img src={avatarUrl(base, c.folder)} alt={c.name} loading="lazy" />
               : <>暂无立绘</>}
