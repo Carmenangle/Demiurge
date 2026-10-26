@@ -1,7 +1,31 @@
 // 顶层 import 必须在 plugins 之前；`java` 在脚本里被 JavaPluginExtension 遮蔽，
 // 全限定 java.util.zip.* 会解析成扩展的成员（AGP 8.7 + Kotlin DSL 实测 10 个错）。
+import java.security.MessageDigest
 import java.util.zip.ZipFile
 import java.util.zip.ZipInputStream
+
+// 前端解压缓存的键＝assets/frontend.zip 的**内容 sha256**（0.4.4 F3）。
+// 手写常量（旧 `FRONTEND_VERSION = "0.3.5"`）漏改一次，升级后的手机就继续跑旧前端
+// （`.version` 相同 ⇒ 跳过解压），而干净安装却是新的——典型「升级才复现」。
+// 配置缓存未启用（gradle.properties 无 org.gradle.configuration-cache）⇒ 配置期读文件安全；
+// 若将来启用，必须改成 Provider/ValueSource，否则 sha 会冻在缓存里。
+fun sha256Hex(file: File): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    file.inputStream().use { input ->
+        val buf = ByteArray(1 shl 16)
+        while (true) {
+            val n = input.read(buf)
+            if (n < 0) break
+            digest.update(buf, 0, n)
+        }
+    }
+    return digest.digest().joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
+}
+
+// 缺文件时不在这里炸：构建期自会因缺资产失败，此值只用于把错误显式化
+val frontendSha = file("src/main/assets/frontend.zip")
+    .takeIf { it.isFile }?.let(::sha256Hex) ?: "missing-frontend-zip"
+
 
 plugins {
     id("com.android.application")
@@ -16,12 +40,20 @@ android {
         applicationId = "dev.demiurge.spike"
         minSdk = 24
         targetSdk = 34
-        versionCode = 13
-        versionName = "0.4.2"
+        versionCode = 15
+        versionName = "0.30.0-beta"
+
+        // 壳层据此判「离线前端要不要重解压」；由上面的 zip 实算，禁止手写
+        buildConfigField("String", "FRONTEND_SHA", "\"$frontendSha\"")
 
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
+    }
+
+    // AGP 8 默认关 BuildConfig；只为了把 FRONTEND_SHA 带进壳层常量池
+    buildFeatures {
+        buildConfig = true
     }
 
     buildTypes {

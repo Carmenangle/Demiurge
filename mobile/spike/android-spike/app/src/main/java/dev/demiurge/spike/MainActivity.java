@@ -1,11 +1,15 @@
 package dev.demiurge.spike;
 
 import android.app.Activity;
+import android.app.DownloadManager;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.res.AssetManager;
 import android.graphics.Color;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Base64;
@@ -14,6 +18,9 @@ import android.view.ViewGroup;
 import android.webkit.CookieManager;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
+import android.webkit.URLUtil;
+import android.webkit.ValueCallback;
+import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -37,7 +44,6 @@ import java.util.zip.ZipInputStream;
 
 public class MainActivity extends Activity {
     private static final String TAG = "DemiurgeSpike";
-    private static final String FRONTEND_VERSION = "0.3.5";
     private static final int LOG_HEIGHT_DP = 260;
 
     // M4 安全：令牌只存 app 私有 SharedPreferences（allowBackup=false 已在 Manifest 关闭备份），
@@ -63,6 +69,22 @@ public class MainActivity extends Activity {
     private String baseUrl = "";
     private boolean bootstrapLoaded = false;
     private boolean authRetryDone = false;
+    // M4 运行时：健康监控 + 前台服务 + 退后台暂停（PLAN §7）
+    private static final long PAUSE_DELAY_MS = 30_000;
+    private static final int HEALTH_INTERVAL_MS = 5_000;
+    private static final int HEALTH_FAILS_TO_RESTART = 3;
+    private Thread supervisor;
+    private volatile boolean backendPaused = false;
+    // 进程级前台可见性：BACK 退出会换一个 Activity 实例，旧实例 onPause 里 post 的
+    // 30s 暂停定时器不会被新实例 onResume 的 removeCallbacks 清掉（handler 不是同一个）
+    // ⇒ 回前台 30s 后仍会误暂停。暂停前必须再问一次「进程现在可见吗」。
+    private static volatile boolean appVisible = false;
+    private volatile boolean restartInFlight = false;
+    private int fgsRunning = -1;   // -1=未起服；>0=通知里的任务数
+    private final Runnable pauseRunnable = this::maybePauseBackend;
+    // M5 文件桥：<input type=file> 走系统选件器；导出下载走 DownloadManager
+    private static final int FILE_CHOOSER_REQUEST = 7001;
+    private ValueCallback<Uri[]> filePathCallback;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -94,6 +116,11 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(LOG_HEIGHT_DP)));
 
         setContentView(root);
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(
+                "android.permission.POST_NOTIFICATIONS")
+                != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 1001);
+        }
         stamp("app started, python not yet");
         new Thread(this::boot, "boot").start();
     }
@@ -113,6 +140,52 @@ public class MainActivity extends Activity {
         CookieManager cookies = CookieManager.getInstance();
         cookies.setAcceptCookie(true);
         cookies.setAcceptThirdPartyCookies(webView, false);
+        // M5：导出下载走 DownloadManager（fetch blob 它接不住，故后端导出故意做成
+        // GET 附件 URL）。DownloadManager 带不上 HttpOnly cookie ⇒ 补令牌头；
+        // 只放行本机后端源，外部 URL 不经此通道。
+        webView.setDownloadListener((url, userAgent, contentDisposition,
+                                     mimetype, contentLength) -> {
+            Uri uri = Uri.parse(url);
+            if (!"127.0.0.1".equals(uri.getHost())) {
+                Log.w(TAG, "blocked download from non-local host: " + uri.getHost());
+                return;
+            }
+            try {
+                DownloadManager.Request req = new DownloadManager.Request(uri);
+                req.setMimeType(mimetype);
+                req.addRequestHeader(HEADER_NAME, token);
+                String name = URLUtil.guessFileName(url, contentDisposition, mimetype);
+                req.setDestinationInExternalPublicDir(
+                        Environment.DIRECTORY_DOWNLOADS, name);
+                req.setNotificationVisibility(
+                        DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+                ((DownloadManager) getSystemService(DOWNLOAD_SERVICE)).enqueue(req);
+                stamp("download started: " + name);
+            } catch (Throwable t) {
+                append("download failed: " + Log.getStackTraceString(t));
+            }
+        });
+        // M5：<input type=file> 的系统选件桥（导入作品包上传）
+        webView.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback,
+                                             FileChooserParams params) {
+                if (filePathCallback != null) {
+                    filePathCallback.onReceiveValue(null);
+                }
+                filePathCallback = callback;
+                try {
+                    Intent intent = params.createIntent();
+                    intent.addCategory(Intent.CATEGORY_OPENABLE);
+                    startActivityForResult(intent, FILE_CHOOSER_REQUEST);
+                    return true;
+                } catch (Throwable t) {
+                    filePathCallback = null;
+                    Log.w(TAG, "file chooser unavailable: " + t);
+                    return false;
+                }
+            }
+        });
         // 只允许停留在本机后端：任何外部 scheme（intent://、market://…）与外部主机一律拦掉
         webView.setWebViewClient(new WebViewClient() {
             @Override
@@ -234,6 +307,7 @@ public class MainActivity extends Activity {
                         }
                         setLogOpen(false);
                     });
+                    startSupervisor();
                     return;
                 }
                 if (i % 10 == 0) {
@@ -251,7 +325,9 @@ public class MainActivity extends Activity {
     private File ensureFrontend() throws Exception {
         File dir = new File(getFilesDir(), "frontend");
         File stamp = new File(dir, ".version");
-        if (stamp.isFile() && FRONTEND_VERSION.equals(readText(stamp))) {
+        // 缓存键＝构建期从 assets/frontend.zip 实算的 sha256（BuildConfig.FRONTEND_SHA）：
+        // 换 zip 必然换键，不存在「忘了改版本常量 ⇒ 升级继续跑旧前端」的漏改面。
+        if (stamp.isFile() && BuildConfig.FRONTEND_SHA.equals(readText(stamp))) {
             stamp("frontend present: " + dir);
             return dir;
         }
@@ -291,7 +367,7 @@ public class MainActivity extends Activity {
             }
         }
         try (FileOutputStream fos = new FileOutputStream(stamp)) {
-            fos.write(FRONTEND_VERSION.getBytes("UTF-8"));
+            fos.write(BuildConfig.FRONTEND_SHA.getBytes("UTF-8"));
         }
         stamp("frontend extracted: " + files + " files, " + (bytes >> 20) + " MB in "
                 + (System.currentTimeMillis() - t) + " ms");
@@ -332,6 +408,160 @@ public class MainActivity extends Activity {
         toggle.setText(open ? "收起日志" : "展开日志");
     }
 
+    @Override
+    protected void onResume() {
+        super.onResume();
+        appVisible = true;
+        ui.removeCallbacks(pauseRunnable);
+        if (backendPaused) {
+            backendPaused = false;
+            new Thread(() -> {
+                try {
+                    Object r = Python.getInstance().getModule("mobile_server")
+                            .callAttr("resume");
+                    stamp("backend resumed: " + r);
+                } catch (Throwable t) {
+                    append("backend resume failed: " + Log.getStackTraceString(t));
+                }
+                startSupervisor();
+            }, "resume").start();
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        appVisible = false;
+        // 退后台 30s 后若无在途生成则暂停 uvicorn 线程（解释器保活，回前台秒级恢复）
+        ui.postDelayed(pauseRunnable, PAUSE_DELAY_MS);
+    }
+
+    private void maybePauseBackend() {
+        new Thread(() -> {
+            if (appVisible) {
+                stamp("pause skipped (activity visible)");
+                return;
+            }
+            try {
+                Object r = Python.getInstance().getModule("mobile_server")
+                        .callAttr("pause_if_idle");
+                String text = String.valueOf(r);
+                if (text.contains("True") || text.contains("'paused': True")) {
+                    if (appVisible) {
+                        // 决定暂停与回前台只差几毫秒：立刻拉回，不把用户留在死后端上
+                        Python.getInstance().getModule("mobile_server").callAttr("resume");
+                        stamp("pause reverted (foreground race)");
+                        return;
+                    }
+                    backendPaused = true;
+                    stamp("backend paused (idle in background)");
+                } else {
+                    stamp("backend kept alive: " + text);
+                }
+            } catch (Throwable t) {
+                append("pause_if_idle failed: " + Log.getStackTraceString(t));
+            }
+        }, "pause-if-idle").start();
+    }
+
+    /** 健康监控：5s 一拍；3 连败只重启 uvicorn 线程；running_jobs 驱动前台服务起停。 */
+    private void startSupervisor() {
+        if (supervisor != null && supervisor.isAlive()) {
+            return;
+        }
+        supervisor = new Thread(() -> {
+            int fails = 0;
+            while (!backendPaused) {
+                try {
+                    String body = httpGet(baseUrl + "/api/health", 3000);
+                    if (body.contains("\"status\":\"ok\"") || body.contains("\"status\": \"ok\"")) {
+                        fails = 0;
+                        syncForegroundService(parseRunningJobs(body));
+                    } else {
+                        fails++;
+                    }
+                } catch (Throwable t) {
+                    fails++;
+                }
+                if (fails >= HEALTH_FAILS_TO_RESTART && !restartInFlight) {
+                    restartInFlight = true;
+                    new Thread(() -> {
+                        try {
+                            Object r = Python.getInstance().getModule("mobile_server")
+                                    .callAttr("restart_uvicorn");
+                            append("[supervisor] uvicorn restarted: " + r);
+                        } catch (Throwable t) {
+                            append("[supervisor] restart failed: "
+                                    + Log.getStackTraceString(t));
+                        } finally {
+                            restartInFlight = false;
+                        }
+                    }, "uvicorn-restart").start();
+                    fails = 0;
+                    sleepQuiet(8000);  // 等重拉的端口就绪，别把重启后的慢启动误判成连败
+                }
+                sleepQuiet(HEALTH_INTERVAL_MS);
+            }
+            // 暂停路径退出前收掉前台服务（能暂停必然 running=0，服务本就不该在）
+            stopForegroundService();
+        }, "health-supervisor");
+        supervisor.start();
+        stamp("supervisor started (5s health, 3-fail restart, fgs on running)");
+    }
+
+    private static void sleepQuiet(long ms) {
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private static int parseRunningJobs(String body) {
+        int idx = body.indexOf("\"running_jobs\":");
+        if (idx < 0) {
+            return 0;
+        }
+        int i = idx + "\"running_jobs\":".length();
+        int end = i;
+        while (end < body.length() && Character.isDigit(body.charAt(end))) {
+            end++;
+        }
+        try {
+            return Integer.parseInt(body.substring(i, end));
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
+    private void syncForegroundService(int running) {
+        if (running > 0) {
+            if (fgsRunning != running) {
+                Intent intent = new Intent(this, GenerationForegroundService.class);
+                intent.putExtra("running", running);
+                if (Build.VERSION.SDK_INT >= 26) {
+                    startForegroundService(intent);
+                } else {
+                    startService(intent);
+                }
+                if (fgsRunning <= 0) {
+                    stamp("foreground service started (running=" + running + ")");
+                }
+                fgsRunning = running;
+            }
+        } else if (fgsRunning > 0) {
+            stopForegroundService();
+            stamp("foreground service stopped (running=0)");
+        }
+    }
+
+    private void stopForegroundService() {
+        if (fgsRunning > 0) {
+            stopService(new Intent(this, GenerationForegroundService.class));
+            fgsRunning = -1;
+        }
+    }
+
     private String httpGet(String spec) throws Exception {
         return httpGet(spec, 2000);
     }
@@ -364,6 +594,19 @@ public class MainActivity extends Activity {
 
     private void stamp(String line) {
         append("[+" + (System.currentTimeMillis() - t0) + " ms] " + line);
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        if (requestCode == FILE_CHOOSER_REQUEST) {
+            if (filePathCallback != null) {
+                filePathCallback.onReceiveValue(
+                        WebChromeClient.FileChooserParams.parseResult(resultCode, data));
+                filePathCallback = null;
+            }
+            return;
+        }
+        super.onActivityResult(requestCode, resultCode, data);
     }
 
     @Override
