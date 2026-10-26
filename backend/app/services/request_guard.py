@@ -69,6 +69,11 @@ def _is_loopback_host(host: str) -> bool:
         return False
 
 
+def is_loopback_client(host: str) -> bool:
+    """客户端地址是否回环（remote_gate 等远程能力闸复用；与 inbound_verdict 同一判定源）。"""
+    return _is_loopback_host(_host_of(host))
+
+
 def origin_allowed(origin: str) -> bool:
     """Origin 头值是否放行：host 为回环（端口不限）；缺失由调用方短路，字面量 null 拒绝。"""
     value = (origin or "").strip()

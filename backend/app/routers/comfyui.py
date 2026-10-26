@@ -1,13 +1,14 @@
-from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile, WebSocket
 from pydantic import BaseModel
 
 from app.config import COMFYUI_BASE_URL
 from app.services import (
-    comfy_pending, comfyui_client, comfy_launcher, generation_store, image_store,
-    inspiration_store, local_media, repo_meta, workflow_submission,
+    comfy_pending, comfyui_client, comfyui_ws_proxy, comfy_launcher, generation_store,
+    image_store, inspiration_store, local_media, repo_meta, workflow_submission,
     comfy_watchdog,
 )
 from app.services.url_guard import validate_comfyui_url
+from app.services import remote_gate
 from app.services.comfyui_client import ComfyError
 from app.services.comfy_launcher import LaunchError
 
@@ -285,6 +286,12 @@ def interrupt(req: InterruptRequest) -> dict[str, object]:
     return {"ok": True, **res}
 
 
+@router.websocket("/ws")
+async def comfyui_ws(websocket: WebSocket, clientId: str = "", url: str = "") -> None:
+    """进度 WS 中继（薄路由；安全合同与生命周期见 comfyui_ws_proxy 模块 docstring）。"""
+    await comfyui_ws_proxy.relay(websocket, url=url, client_id=clientId)
+
+
 @router.get("/view")
 def view(filename: str, type: str = "output", subfolder: str = "", url: str = COMFYUI_BASE_URL):
     """代理 ComfyUI 的 /view，返回图片二进制（避免前端跨域直连 ComfyUI 端口）。"""
@@ -312,7 +319,7 @@ class SaveLocalRequest(BaseModel):
 
 
 @router.post("/save-local")
-def save_local(req: SaveLocalRequest) -> dict[str, object]:
+def save_local(req: SaveLocalRequest, request: Request) -> dict[str, object]:
     """把原图存到设置的 outputDir（全分辨率，不降质），返回本地访问 URL。
 
     两种来源：
@@ -320,6 +327,12 @@ def save_local(req: SaveLocalRequest) -> dict[str, object]:
     - 通用模式：给 src（http(s) URL 或 data:image/...;base64,...），直接下载/解码（云端生图）。
     ComfyUI 未起/清理 output 后仍可显示与「再改进」，且不依赖在线。
     """
+    # L2：远程客户端的写路径收敛（PC 本机 no-op；令牌互锁由 remote_gate 中间件先行）
+    try:
+        remote_gate.ensure_write_scope(
+            request.client.host if request.client else "", req.output_dir)
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
     try:
         path = image_store.save_local(
             req.output_dir,

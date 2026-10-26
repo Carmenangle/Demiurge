@@ -1,4 +1,8 @@
-export const API_BASE = (import.meta.env.VITE_API_BASE || "http://127.0.0.1:8010/api").replace(/\/$/, "");
+// 生产默认同源相对 "/api"（L2 联机同库 + LAN 浏览器访问 PC 的前提：origin 不烧进产物，
+// 与 view_urls 根相对同一条教义）；dev（vite 5173 站点）保持绝对回环（vite 代理也配了
+// /api 双保险）；手机端构建仍由 VITE_API_BASE=/api 显式覆盖（build-frontend-mobile.sh）。
+export const API_BASE = (import.meta.env.VITE_API_BASE
+  || (import.meta.env.DEV ? "http://127.0.0.1:8010/api" : "/api")).replace(/\/$/, "");
 
 export function apiUrl(path: string): string {
   return `${API_BASE}${path}`;

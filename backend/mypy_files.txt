@@ -21,6 +21,7 @@ app/routers/assets.py
 app/routers/attachments.py
 app/routers/characters.py
 app/routers/comfyui.py
+app/routers/config_transfer.py
 app/routers/docs.py
 app/routers/gguf_importer.py
 app/routers/gif_sprite.py
@@ -28,6 +29,7 @@ app/routers/image_resize.py
 app/routers/jobs.py
 app/routers/loras.py
 app/routers/mcp.py
+app/routers/mobile_remote.py
 app/routers/models.py
 app/routers/narrative.py
 app/routers/node_manager.py
@@ -110,6 +112,8 @@ app/services/comfy_manager.py
 app/services/comfy_pending.py
 app/services/comfy_watchdog.py
 app/services/comfyui_client.py
+app/services/comfyui_ws_proxy.py
+app/services/config_bundle.py
 app/services/context_gate.py
 app/services/continuity_compiler.py
 app/services/doc_library.py
@@ -164,6 +168,7 @@ app/services/mcp_client.py
 app/services/mcp_store.py
 app/services/memory_rollback.py
 app/services/message_images.py
+app/services/mobile_remote.py
 app/services/model_browser.py
 app/services/model_downloader.py
 app/services/model_lease.py
@@ -203,6 +208,7 @@ app/services/recipe_match.py
 app/services/recipe_offer_store.py
 app/services/regex_engine.py
 app/services/regex_store.py
+app/services/remote_gate.py
 app/services/repo_meta.py
 app/services/repo_sync.py
 app/services/request_guard.py

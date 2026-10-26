@@ -118,6 +118,40 @@ def validate_comfyui_url(url: str) -> str:
     )
 
 
+# 主机名/IPv4 形态（IPv6 带冒号不进这条路径——移动联机 v1 不开 IPv6 直填，登记后再议）
+_HOSTNAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$", re.IGNORECASE)
+MAX_EXTRA_HOSTS = 8
+
+
+def comfy_extra_hosts() -> tuple[str, ...]:
+    """当前白名单快照（诊断/路由展示用，不含回环）。"""
+    return tuple(_COMFYUI_EXTRA)
+
+
+def register_comfyui_host(host: str) -> str:
+    """运行时把一台主机加入 ComfyUI 白名单（移动端联机：设置页保存 PC 地址时调用）。
+
+    与环境变量 COMFYUI_ALLOWED_HOSTS 是同一列表、同一判定；只收**裸主机名/IPv4**
+    （调用方先 urlparse.hostname），形态不合法即 ValueError，绝不静默吞。
+    回环无需注册（恒放行，返回 "loopback"）。上限 MAX_EXTRA_HOSTS 条防膨胀。
+    """
+    name = (host or "").strip().lower().rstrip(".")
+    if not name:
+        raise ValueError("主机名不能为空")
+    try:
+        if ipaddress.ip_address(name).is_loopback:
+            return "loopback"
+    except ValueError:
+        pass
+    if len(name) > 253 or not _HOSTNAME_RE.match(name):
+        raise ValueError(f"主机名形态不合法：{host!r}")
+    if name not in _COMFYUI_EXTRA:
+        if len(_COMFYUI_EXTRA) >= MAX_EXTRA_HOSTS:
+            raise ValueError(f"ComfyUI 白名单已达上限 {MAX_EXTRA_HOSTS} 条")
+        _COMFYUI_EXTRA.append(name)
+    return name
+
+
 def _validate_media_url_core(url: str) -> tuple[str, str, list[str]]:
     """媒体 URL 校验本体，返回 (url, hostname, 校验解析到的 IP)。
 

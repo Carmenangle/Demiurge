@@ -17,8 +17,20 @@ export function comfyClientId(): string {
   return cachedClientId;
 }
 
-// 把 http(s):// 的 ComfyUI 地址转成 ws(s):// 的 /ws 地址
-function wsUrl(comfyUrl: string, clientId: string): string {
+// 手机端联机（M7）：进度 WS 改走同源后端代理。CSP connect-src 仅放行回环 WS、Android
+// 明文仅回环且只约束 WebView 栈——前端直连 LAN PC 的 ComfyUI 进度流被双重阻断；后端
+// Python socket 不受限（代理实现：backend/app/services/comfyui_ws_proxy.py）。PC 构建
+// 不设 VITE_COMFY_PROGRESS_PROXY，直连行为逐字不变。
+const PROGRESS_PROXY = import.meta.env.VITE_COMFY_PROGRESS_PROXY === "1";
+
+// 把 http(s):// 的 ComfyUI 地址转成 ws(s):// 的 /ws 地址（代理模式下转同源后端端点，
+// 目标 ComfyUI 地址以 url 参数携带，由后端按白名单校验后中继）
+export function wsUrl(comfyUrl: string, clientId: string): string {
+  if (PROGRESS_PROXY) {
+    const self = location.origin.replace(/^http/i, "ws");
+    return `${self}/api/comfyui/ws?clientId=${encodeURIComponent(clientId)}`
+      + `&url=${encodeURIComponent(comfyUrl.trim())}`;
+  }
   let u = comfyUrl.trim();
   if (!/^https?:\/\//i.test(u)) u = "http://" + u;
   u = u.replace(/\/$/, "");

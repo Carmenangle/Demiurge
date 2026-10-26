@@ -46,6 +46,17 @@ def outbound_headers() -> dict[str, str]:
     return {HEADER_NAME: token} if token else {}
 
 
+def verify_supplied(supplied: str) -> bool:
+    """校验一次外来的令牌供给（头或 cookie 的值）。
+
+    未启用令牌时恒 True——与 http 中间件的 no-op 语义一致；供 http 中间件罩不到的
+    通道（WebSocket 升级不经过 @app.middleware("http")）在端点内自查复用，
+    比对逻辑不得两处漂移。
+    """
+    token = env_token()
+    return True if not token else _matches(supplied, token)
+
+
 def _bootstrap(request: Request, expected: str) -> Response:
     supplied = request.query_params.get("token", "")
     if not _matches(supplied, expected):
