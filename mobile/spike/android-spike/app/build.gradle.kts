@@ -40,8 +40,8 @@ android {
         applicationId = "dev.demiurge.spike"
         minSdk = 24
         targetSdk = 34
-        versionCode = 19
-        versionName = "0.30.4-beta"
+        versionCode = 20
+        versionName = "0.30.5-beta"
 
         // 壳层据此判「离线前端要不要重解压」；由上面的 zip 实算，禁止手写
         buildConfigField("String", "FRONTEND_SHA", "\"$frontendSha\"")
