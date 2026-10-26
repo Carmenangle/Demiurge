@@ -170,7 +170,7 @@ if (Test-PortOpen $comfyPort) {
 } elseif (-not (Test-PortOpen 8010)) {
   Write-Host "后端尚未就绪，跳过 ComfyUI 启动（稍后可在界面手动启动）。" -ForegroundColor Yellow
 } else {
-  # 降级来自**工作区目录的 Low 强制性标签**（D:\tool\Demiurge，文件继承）：进程完整性取
+  # 降级来自**工作区目录的 Low 强制性标签**（文件继承）：进程完整性取
   # min(父令牌, 映像文件标签)，子进程永不高过父，所以工作区内的后端/venv python 起的
   # ComfyUI 必为 Low、写不动安装树（2026-10-24 实测：Low 后端起工作区外解释器仍 Low）。
   # 工作区标签已在 2026-10-24 改为 Medium（icacls /setintegritylevel），本链路保留为

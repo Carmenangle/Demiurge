@@ -154,11 +154,11 @@ def _isolate_library_root(tmp_path, monkeypatch):
 
     **向量（2026-09-17 实测）**：`chat_snapshot._path()` 第一件事就是问属主
     `repo_meta.output_dir_from_state()`。真实 `backend/data/user_state.json` 里
-    `settings.outputDir` 一旦配了（本机 = `D:/tool/Demiurge/userdata/pictures`），
+    `settings.outputDir` 一旦配了（本机 = `<仓库根>/userdata/pictures`），
     `_path("<任意 thread_id>")` 就解析成 `<库根>/<thread_id>/chat.json` ——
     上面 `_isolate_chat_snapshot` 只盖住 `SNAP_DIR` 那条**回退**分支，挡不住这个：
     output_dir 非空时压根不走 SNAP_DIR。实测（`_path('probe-leak-check')`）确为
-    `D:\\tool\\Demiurge\\userdata\\pictures\\probe-leak-check\\chat.json`。
+    `<仓库根>\\userdata\\pictures\\probe-leak-check\\chat.json`。
     后果：任何碰 `chat_snapshot` 却没自行 patch 的用例，都会在用户真实图库里留下
     以 thread_id 命名的夹具目录（库根现存 `thread/`、`t1/`、`x/`、`work/`、
     `t-claim/`、`zzz-insp-diag/`、`SAVE01 [09f79e6f]/` 等即此残留）。

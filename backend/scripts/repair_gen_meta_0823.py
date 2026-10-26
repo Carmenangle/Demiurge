@@ -102,7 +102,9 @@ for created, img in records:
     print("repaired:", created)
 
 # 验证
-client = chromadb.PersistentClient(path=r"D:\tool\Demiurge\backend\data\chroma")
+client = chromadb.PersistentClient(
+    path=str(pathlib.Path(__file__).resolve().parents[1] / "data" / "chroma")
+)
 col = client.get_collection(f"repo_{REPO}")
 r2 = col.get(include=["metadatas"], limit=10000)
 for m in r2["metadatas"]:

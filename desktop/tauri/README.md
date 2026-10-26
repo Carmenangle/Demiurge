@@ -116,10 +116,11 @@ python scripts/build_installers.py --version v0.15 # 覆盖 tauri.conf 版本并
 单独重放核验（脚本内同一段逻辑）：
 
 ```powershell
-.\release-output\installers\Demiurge-Setup-User-0.1.0.exe /S "/D=D:\tool\Demiurge\.installer-work\evidence\app"
-.\.installer-work\evidence\app\Demiurge.exe --self-test      # 隔离 DEMIURGE_SHELL_HOME 后 18/18
-.\.installer-work\evidence\app\dependencies\git\cmd\git.exe --version
-.\.installer-work\evidence\app\uninstall.exe /S
+$evi = "$env:TEMP\demiurge-installer-evidence"
+.\release-output\installers\Demiurge-Setup-User-0.1.0.exe /S "/D=$evi\app"
+& "$evi\app\Demiurge.exe" --self-test      # 隔离 DEMIURGE_SHELL_HOME 后 18/18
+& "$evi\app\dependencies\git\cmd\git.exe" --version
+& "$evi\app\uninstall.exe" /S
 ```
 
 ### 本机踩坑（装一次就会遇到）

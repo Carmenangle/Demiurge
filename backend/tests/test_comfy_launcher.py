@@ -359,7 +359,7 @@ def test_match_install_pids_解释器路径与安装目录都算且不误伤相�
     rows = [
         (11, f'"{py}" main.py --extra-model-paths-config x'),
         (12, r'"D:\tool\ComfyUI\ComfyUI_TE\python\python.exe" main.py'),
-        (13, r'"D:\tool\Demiurge\backend\.venv\Scripts\python.exe" -m uvicorn app.main:app'),
+        (13, r'"C:\Demiurge\backend\.venv\Scripts\python.exe" -m uvicorn app.main:app'),
     ]
     assert comfy_launcher._match_install_pids(rows, base, py) == [11]
     # 仅凭安装目录（绝对 main.py 启动的实例）也能命中
@@ -416,7 +416,7 @@ def test_start_安装树不可写快速失败503(tmp_path, monkeypatch):
 
 def test_build_plan_不做可写性判断且只带覆盖环境变量(tmp_path, monkeypatch):
     """规划与执行必须拆开（2026-10-23 真机实锤；2026-10-24 机制纠正）：
-    降级来自工作区目录（D:\\tool\\Demiurge）的 Low 强制性标签，进程完整性取
+    降级来自工作区目录的 Low 强制性标签，进程完整性取
     min(父,映像)、子进程永不高过父 ⇒ 工作区内的后端/venv python 起的 ComfyUI 必 Low。
     实际 spawn 由 PowerShell 用 ComfyUI 的解释器完成；规划者可能正是那个 Low 进程
     ⇒ build_plan 不得代判可写性、不得 spawn，也不能把整个宿主环境塞进 JSON。"""
