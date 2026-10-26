@@ -334,6 +334,18 @@ def _save_provenance(d: Path, provenance: dict) -> None:
             pass
 
 
+def load_web_material_provenance(output_dir: str) -> dict:
+    """读 _web_materials/.provenance.json（离线资源包合并用；缺失/损坏返回空）。"""
+    return _load_provenance(web_materials_dir(output_dir))
+
+
+def save_web_material_provenance(output_dir: str, provenance: dict) -> None:
+    """写回 _web_materials/.provenance.json（provenance 属主仍在本模块）。"""
+    target = web_materials_dir(output_dir)
+    target.mkdir(parents=True, exist_ok=True)
+    _save_provenance(target, provenance)
+
+
 def _check_domain_allowlist(url: str) -> None:
     """域名策略（M1.3）：默认仅 https 可配白名单。
 

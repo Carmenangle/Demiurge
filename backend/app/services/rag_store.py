@@ -130,6 +130,52 @@ def generation_doc_id(repo_id: str, image_url: str) -> str:
             if img else str(uuid.uuid4()))
 
 
+def iter_export_rows() -> list[dict]:
+    """向量库侧资产元数据全量，键与 `asset_store.iter_export_rows` 逐一对齐。
+
+    只读 metadata、不碰嵌入：构造 langchain Chroma 需要 EmbedConfig，而未配置嵌入
+    模型的机器（手机首启）照样要能导出账本 ⇒ 直连 chromadb 原生客户端。
+    取值条件与 scripts/backfill_asset_db.py 一致（kind=generation 且有 image_url），
+    两处若漂移会出现「回填有条目、导出没有」。
+    """
+    import chromadb
+
+    from app.config import CHROMA_DIR
+    if not Path(CHROMA_DIR).is_dir():
+        return []
+    client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+    out: list[dict] = []
+    for coll in client.list_collections():
+        if not coll.name.startswith("repo_"):
+            continue
+        got = client.get_collection(coll.name).get(include=["metadatas"])
+        for doc_id, meta in zip(got.get("ids") or [], got.get("metadatas") or []):
+            meta = meta or {}
+            if meta.get("kind") != "generation" or not meta.get("image_url"):
+                continue
+            repo_id = str(meta.get("repo_id") or coll.name[len("repo_"):])
+            stamp = meta.get("created_at")
+            out.append({
+                "id": str(doc_id),
+                "repo_id": repo_id,
+                "kind": "generation",
+                "media_type": meta.get("media_type") or "image",
+                "source": meta.get("source") or "",
+                "image_url": meta.get("image_url") or "",
+                "prompt": meta.get("prompt") or "",
+                "description": meta.get("description") or "",
+                "tags": str(meta.get("tags") or ""),
+                "template_name": meta.get("template_name") or "",
+                "model_name": meta.get("model_name") or "",
+                "lora_names": meta.get("lora_names") or "",
+                "created_at": int(stamp) if isinstance(stamp, (int, float)) else 0,
+                "source_url": meta.get("source_url") or "",
+                "source_meta": meta.get("source_meta") or "",
+                "derived_from": meta.get("derived_from") or "[]",
+            })
+    return out
+
+
 def _inherit_existing_fields(store, doc_id: str, prompt: str, tags: str,
                              description: str) -> tuple[str, str, str]:
     """同 id 已入库时，本次缺省的 prompt / tags / description 沿用既有非空值。

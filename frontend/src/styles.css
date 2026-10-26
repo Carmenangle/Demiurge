@@ -2878,6 +2878,28 @@ textarea.text-tool-short-input { height: auto; min-height: 0; resize: none; over
   font-weight: 700;
 }
 
+/* 离线资源同步：本机现有资源计数 */
+.sync-inventory {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  gap: 8px;
+}
+.sync-inventory-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.sync-inventory-item b {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
 .theme-picker {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -3569,6 +3591,10 @@ textarea.state-value { min-height: 58px; }
 .bot-html { white-space: normal; }
 .bot-html img { max-width: 100%; height: auto; }
 .bot-html div, .bot-html table { max-width: 100%; }
+/* 代码块：浏览器默认 white-space:pre ⇒ 一行长 JSON / 长提示词不会折行，直接把气泡撑破
+   （390×844 注入实测 .bot-content scrollWidth 256→3330，关掉本行即复现）。
+   overflow-x:auto 让代码块自带横向滚动条，气泡宽度保持不动。 */
+.bot-html pre { max-width: 100%; overflow-x: auto; }
 
 .prompt-approval-card {
   width: min(560px, 100%);
@@ -3914,6 +3940,12 @@ textarea.state-value { min-height: 58px; }
   aspect-ratio: auto;
   min-height: 72px;
   color: var(--danger, #c84b4b);
+  /* 失败文案常是一长串不可断字符（ComfyUI 节点名 / 绝对路径）。关掉这行，真机数据实测
+     .bot-content 256→722、.bot-rich-parts 228→708、槽 510→608；给轨道加 minmax(0,1fr)
+     只能把槽身收回 226、内容仍溢出 466 ⇒ 轨道护栏不是这行的替代品。
+     anywhere 同时压低 min-content，长串才能在槽内换行。 */
+  overflow-wrap: anywhere;
+  text-align: center;
 }
 
 .media-slot-generating {
@@ -7634,6 +7666,9 @@ html:is([data-theme="bright"], [data-theme="night"], [data-theme="green"], [data
 }
 .worldbook-content { min-width: 0; }
 .worldbook-index.is-empty { visibility: hidden; }
+/* 条目面板的弹层外壳只在窄屏出现（≤720px），桌面保持原有三栏 */
+.worldbook-sheet-mask,
+.worldbook-sheet-head { display: none; }
 
 /* 设置 → 模型：四类能力以状态卡呈现，模型的高级字段默认折叠。 */
 .model-capability-grid {
@@ -9831,14 +9866,17 @@ html[data-theme="liquid-glass"] .btn.primary:hover:not(:disabled) {
     height: auto;
     min-height: 52px;
     padding: 8px 12px;
-    gap: 6px 10px;
+    gap: 6px 8px;
     flex-wrap: wrap;
   }
   .app-topbar .topbar-title { font-size: 15px; }
-  .app-topbar .repo-picker { font-size: 12px; gap: 6px; white-space: nowrap; }
+  .app-topbar .repo-picker { font-size: 12px; gap: 5px; white-space: nowrap; }
+  /* 三个选择器（仓库/作品/我）+ 标题 + 预设/正则要在 390px 里落两行：
+     旧口径 max-width:46vw 让单个选择器就吃掉近半屏，实测挤成三行 75px，
+     和下面的功能栏一起把对话正文压到 26% 视口高。 */
   .app-topbar .repo-picker select {
     min-width: 0;
-    max-width: 46vw;
+    max-width: 26vw;
     padding: 4px 6px;
     font-size: 12px;
   }
@@ -9930,24 +9968,22 @@ html[data-theme="liquid-glass"] .btn.primary:hover:not(:disabled) {
   .modal-split-list { width: 100% !important; max-height: 30dvh; flex-shrink: 0; }
   .modal-split-editor { flex: 1 0 auto; overflow: visible; }
 
-  /* ---- 设置中心：240px 左栏 → 顶部横滚 chip 条 ---- */
+  /* ---- 设置中心：240px 左栏 → 顶部 chip 条（换行排布，避免「离线资源同步」被横滚藏到屏外） ---- */
   .settings-page { flex-direction: column; }
   .settings-nav {
     width: 100%;
     display: flex;
     flex-direction: row;
-    align-items: center;
+    flex-wrap: wrap;
+    align-items: flex-start;
     gap: 6px;
     padding: 8px 10px;
     border-right: 0;
     border-bottom: 1px solid var(--border);
-    overflow-x: auto;
-    overflow-y: hidden;
-    scrollbar-width: none;
+    overflow: visible;
     flex-shrink: 0;
   }
-  .settings-nav::-webkit-scrollbar { display: none; }
-  .settings-nav-group { display: flex; flex-direction: row; gap: 6px; margin-bottom: 0; }
+  .settings-nav-group { display: flex; flex-direction: row; flex-wrap: wrap; gap: 6px; margin-bottom: 0; }
   .settings-nav-title { display: none; }
   .settings-nav-item {
     width: auto;
@@ -10032,16 +10068,94 @@ html[data-theme="liquid-glass"] .btn.primary:hover:not(:disabled) {
   .worldbook-index { position: static; max-height: none; overflow: visible; }
   /* 条目导航是给宽屏右栏用的，窄屏上它在正文下方白占一屏，直接收起 */
   .worldbook-index { display: none; }
+  /* 条目面板改成盖在书单上的底部弹窗：点书即开，面板内滚动，关掉回到书单 */
+  .worldbook-content { display: none; }
+  .worldbook-content.is-sheet-open {
+    display: block;
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 1001;
+    height: 86dvh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    border-radius: 18px 18px 0 0;
+    padding: 0 14px calc(18px + env(safe-area-inset-bottom, 0px));
+    box-shadow: 0 -10px 32px rgba(0, 0, 0, 0.45);
+  }
+  .worldbook-sheet-mask.is-open {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    padding: 0;
+    border: 0;
+    background: rgba(0, 0, 0, 0.45);
+    touch-action: none;
+  }
+  .worldbook-sheet-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    margin-bottom: 8px;
+    padding: 14px 0 10px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+  }
+  .worldbook-sheet-title { display: flex; align-items: baseline; gap: 8px; min-width: 0; font-size: 15px; font-weight: 600; }
+  .worldbook-sheet-title > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .worldbook-sheet-count { flex-shrink: 0; font-size: 11px; font-weight: 400; color: var(--text-muted); }
 
   /* ---- 对话页：桌面 60% 的气泡在手机上只剩 215px，正文近乎竖排 ---- */
-  .chat-stream { padding: 12px 2px; }
+  /* 右侧预留 32px 通道：角色卡「吊绳」浮标 .lg-rope（实测 x=338..390，可上下拖）
+     原本压在气泡正文右缘上（气泡到 360）⇒ 正文列收到 330 为止。 */
+  .chat-stream { padding: 12px 32px 12px 2px; }
   .bubble-user { max-width: 88%; }
   .bot-content { max-width: calc(100% - 42px); }
-  /* 高度拖拽把手只监听鼠标事件（触屏拖不动），留着只会误导；输入框回到 rows=4 自适应 */
+  /* 高度拖拽把手只监听鼠标事件（触屏拖不动），留着只会误导；输入框回到自适应高度 */
   .chat-input-resize-handle { display: none; }
-  .chat-input-bar .rich-input { height: auto !important; min-height: 76px; max-height: 140px; padding-right: 44px; }
+  .chat-input-bar { padding: 8px 10px; }
+  .chat-input-bar .rich-input { height: auto !important; min-height: 44px; max-height: 72px; padding-right: 44px; }
+  .rich-imgbar { margin-bottom: 4px; }
+  .rich-imgbar-add { width: 36px; height: 36px; }
+  /* 顶部功能栏与输入卡工具条：换行会把一行按钮撑成三四行（390×844 实测
+     `.chat-view-head` 14 项 = 3 行 149px、`.chat-actions` 6 切换器 + 发送 = 2 行 60px），
+     对话正文只剩 224px（26% 视口）⇒ 被用户报为「设置把对话遮挡了」。
+     ⚠ 不能用 overflow-x:auto 收成一屏：`.nci-body`／`.model-switch-menu` 都是
+     position:absolute 的子层，滚动容器会把它裁掉 ⇒ 这里只做「缩小到放得下」。 */
+  .chat-view-head { gap: 4px; padding-bottom: 6px; }
+  .chat-view-head h1 { font-size: 14px; }
+  /* PC 那套 44×44 里 min-height 带 !important，这里只能同级压回；
+     首个按钮（压缩上下文）行内写了 margin-left:auto，手机上会把第一行拉开一个大洞。 */
+  .chat-view-head .btn.icon-only {
+    width: 32px !important; min-width: 32px !important;
+    height: 32px !important; min-height: 32px !important;
+    padding: 0 !important; margin-left: 0 !important;
+  }
+  .chat-view-head .btn.icon-only > svg { width: 16px; height: 16px; }
+  /* 「对话设置」浮层：桌面 420px + right:0 锚在触发钮（实测 x=168..212）上
+     ⇒ 左边界落到 -208px，面板被 body 的 overflow-x:hidden 静默裁掉，手机上根本看不到内容。
+     改视口锚定：左右各留 12px，纵向走静态位置（= 触发钮顶）再下移一个按钮高，
+     这样面板盖住的是下面那排按钮，触发钮本身仍可点（否则打不开也关不掉）。 */
+  .nci-body {
+    position: fixed;
+    top: auto; right: auto; left: 12px;
+    width: auto; margin-top: 36px; margin-right: 12px;
+    max-height: 46vh;
+  }
   /* 右下两个浮标（后台活动 / 快捷工具）默认压在发送键上：给它们让出右侧 48px 通道 */
-  .chat-actions { padding-right: 48px; gap: 6px; }
+  .chat-actions { padding-right: 48px; gap: 4px; margin-top: 6px; }
+  .chat-actions .model-switch-btn { width: 30px; height: 30px; }
+  .chat-actions .model-switch-btn > svg { width: 15px; height: 15px; }
+  .chat-send-btn { white-space: nowrap; padding: 5px 9px; }
+  .chat-send-btn > svg { margin-right: 3px !important; }
 
   /* 设置页/弹窗打开时，右下两个圆钮会盖住保存按钮与正文 ⇒ 手机上让位 */
   .app:has(.settings-page) .support-fab,

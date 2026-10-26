@@ -1344,7 +1344,19 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
       ) : items.length === 0 ? (
         <div className="empty-state">
           <Images size={32} strokeWidth={1.4} style={{ opacity: 0.5 }} />
-          <p style={{ margin: 0 }}>该仓库还没有生成记录。出图后会自动出现在这里。</p>
+          <p style={{ margin: 0 }}>还没有生成记录。出图后会自动出现在这里。</p>
+          {/* 整条工具栏（含「同步体检」）挂在 items.length > 0 上 ⇒ 空态是个死页面。
+              离线同步过来的仓库最容易撞到这里：图已在磁盘、索引里没有，而用户在这个
+              页面上连自救的入口都找不到（2026-10-26 手机端「生成内容」空态实锤）。 */}
+          {enhanced && (
+            <>
+              <p style={{ margin: 0, fontSize: 12.5 }}>图片已在文件夹里、这里却为空＝索引没跟上，可对账补录。</p>
+              <button className="btn" onClick={() => setShowSync(true)}
+                title="对账「注册表/磁盘/索引」——补录丢进文件夹但没入库的文件、清理磁盘已没了的裂图/孤儿">
+                同步体检
+              </button>
+            </>
+          )}
         </div>
       ) : filtered.length === 0 ? (
         <div className="empty-state">

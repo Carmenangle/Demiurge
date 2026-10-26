@@ -35,6 +35,21 @@ def asset_db_empty() -> bool:
         return True
 
 
+def export_asset_records() -> list[dict]:
+    """资产元数据全量（跨设备导出）：主表非空走 SQLite，否则走 Chroma。
+
+    判定必须复用 `asset_db_empty`——它就是列表页 `list_generations_page` 用的同一口径；
+    各写一份会漂移，而本机现状正是「主表 0 行、账本全在 Chroma」（只读主表就导出为空）。
+    向量库不可用（chromadb 缺失/目录损坏）⇒ 空账本：导出照常成功，不阻断整包。
+    """
+    if not asset_db_empty():
+        return asset_store.iter_export_rows()
+    try:
+        return rag_store.iter_export_rows()
+    except Exception:  # noqa: BLE001 [EXC-保留] 读不到向量库时导出空资产，不抛给用户
+        return []
+
+
 # 画师标记 `@//画师名/`（ComfyUI「反推动漫」工作流里 DanbooruGallery 的画师串写法）
 _ARTIST_MARK = re.compile(r"^@//(.+?)/+$")
 

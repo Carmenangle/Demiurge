@@ -425,6 +425,36 @@ def get_row(doc_id: str) -> dict | None:
         conn.close()
 
 
+_EXPORT_COLUMNS = (
+    "id", "repo_id", "kind", "media_type", "source", "image_url", "prompt",
+    "description", "tags_json", "template_name", "model_name", "lora_names",
+    "created_at", "source_url", "source_meta", "derived_from",
+)
+
+
+def iter_export_rows() -> list[dict]:
+    """全量存活行的**写入形状**记录（键 == `upsert_asset` 入参），供跨设备导出。
+
+    与 `list_assets` 的 camel 读侧契约刻意不同形：导出目标是「导入端能直接 upsert」，
+    两侧同形才不会在往返里丢字段。不带 `thumb_url`（派生层属本机，导入端自己发现）、
+    不带 `deleted_at`（回收站不进包，见 `_write_asset_index`）。
+    """
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            f"select {', '.join(_EXPORT_COLUMNS)} from assets"
+            " where deleted_at is null order by created_at desc"
+        ).fetchall()
+    finally:
+        conn.close()
+    out: list[dict] = []
+    for row in rows:
+        item = dict(row)
+        item["tags"] = _json_list(item.pop("tags_json"))
+        out.append(item)
+    return out
+
+
 def count_assets(repo_ids: list[str] | None = None, *, deleted: bool | None = None,
                  media_type: str = "") -> int:
     """计数（deleted=None ⇒ 全部，含回收站）。读路径回退判定用（0 = 未回填）。
