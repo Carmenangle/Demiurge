@@ -103,14 +103,15 @@ export function MaterialMarketModal({
   const [followingErr, setFollowingErr] = useState("");
   const [followingPage, setFollowingPage] = useState(1);
 
-  // 缩略图地址：pixiv 走后端代理（i.pximg.net 需 pixiv Referer + 代理）；danbooru 直连 CDN 即可
+  // 缩略图地址：两个源**都走后端代理**（同源）——i.pximg.net 需 pixiv Referer；
+  // cdn.donmai.us 直连会被应用页 CSP img-src 拦死（img-src 仅同源+data:/blob:，2026-10-27
+  // 真机实锤：danbooru 列表缩略图全裂而大图正常——大图本就走代理）＋代理同时规避防盗链
   // 前端构建标记：用于排查「标签页是否还在跑旧 JS」。改前端时递增；刷新后这里若仍是旧值
   // ⇒ 标签页没真正重载（HMR 断连/缓存），需关掉标签页重开或清缓存刷新。
   const UI_BUILD = BUILD_TAG;
 
   const thumbSrc = (m: WebMaterialSearchItem) =>
-    source === "pixiv" ? marketImageProxyUrl(m.thumb_url || m.full_url, proxy)
-                       : (m.thumb_url || m.full_url);
+    marketImageProxyUrl(m.thumb_url || m.full_url, proxy);
 
   const label = source === "pixiv" ? "pixiv 市场" : "danbooru 市场";
   const isDanbooru = source === "danbooru";
