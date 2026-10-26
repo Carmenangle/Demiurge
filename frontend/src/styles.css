@@ -3084,6 +3084,10 @@ textarea.text-tool-short-input { height: auto; min-height: 0; resize: none; over
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
+/* 会话工具组包装层（2026-10-27）：桌面 display:contents 完全透明、布局与无包装时逐字一致；
+   手机（≤720px 文件尾段）收进浮标点开的浮层 */
+.head-tools { display: contents; }
+.head-tools-toggle { display: none; }
 
 /* 工具栏图标按钮：只留图标，悬停靠 title 提示（对话区去中文腾空间） */
 .chat-view-head .btn.icon-only {
@@ -10166,4 +10170,82 @@ html[data-theme="liquid-glass"] .btn.primary:hover:not(:disabled) {
   .app:has(.modal-mask) .support-handle,
   .app:has(.modal-mask) .quick-tools-fab,
   .app:has(.modal-mask) .quick-tools-handle { display: none; }
+}
+
+/* ============================================================
+   手机竖屏第二轮（2026-10-27 真机 0.30.1-beta 截图反馈）：
+   - 对话页功能按钮组收进浮标（点开浮层），纵向空间还给对话
+   - 顶栏三行压两行（创作+仓库+作品 / 我+预设·正则）
+   - 消息区吃满宽度（桌面 24/28 padding 收敛）
+   - TableModal 全屏化：表选择横滑 chips 一行，内容区占剩余全部
+   全部限定 ≤720px，桌面零影响。
+   ============================================================ */
+@media (max-width: 720px) {
+  /* ---- 对话容器与头部 ---- */
+  .chat-view { padding: 8px 10px; }
+  .chat-view-head { gap: 8px; padding-bottom: 8px; }
+  .chat-view-head .head-tools { display: none; }
+  .chat-view-head .head-tools.open {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 6px 4px;
+    justify-items: center;
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    right: 0;
+    z-index: 90;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 10px 8px;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+  }
+  .chat-view-head .head-tools-toggle { display: inline-flex; }
+  .chat-view-head .head-tools.open .btn.icon-only { padding: 8px 10px; }
+
+  /* ---- 顶栏三行压两行（grid-areas 显式断行；methods 的 inline marginLeft 在 grid 里失效化） ---- */
+  .app-topbar {
+    display: grid;
+    grid-template-columns: auto 1fr 1fr;
+    grid-template-areas:
+      "title repo work"
+      "persona methods methods";
+    gap: 6px 8px;
+    align-items: center;
+    height: auto;
+    padding: 8px 12px;
+  }
+  .app-topbar .topbar-title { grid-area: title; }
+  .app-topbar label.repo-picker:nth-of-type(1) { grid-area: repo; }
+  .app-topbar label.repo-picker:nth-of-type(2) { grid-area: work; }
+  .app-topbar label.repo-picker:nth-of-type(3) { grid-area: persona; }
+  .app-topbar .repo-picker select { min-width: 0; max-width: 30vw; width: 100%; }
+  .app-topbar .topbar-methods { grid-area: methods; justify-self: end; margin-left: 0 !important; }
+
+  /* ---- 数据表弹窗：全屏 + 表选择横滑 chips + 内容区占满 ---- */
+  .table-modal {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    max-width: 100vw;
+    height: 100dvh;
+    max-height: 100dvh;
+    border-radius: 0;
+  }
+  .table-modal-body { flex-direction: column; gap: 8px; }
+  .table-list {
+    width: 100%;
+    flex-direction: row;
+    align-items: center;
+    overflow-x: auto;
+    overflow-y: hidden;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    padding: 0 0 8px;
+    flex-shrink: 0;
+    gap: 6px;
+  }
+  .table-list .table-list-item { white-space: nowrap; flex-shrink: 0; }
+  .table-modal-content { flex: 1; min-height: 0; }
 }

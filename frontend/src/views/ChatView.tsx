@@ -24,8 +24,7 @@ import {
   X,
   Minimize2,
   MessageSquarePlus,
-  FileText,
-} from "lucide-react";
+  FileText, MoreHorizontal } from "lucide-react";
 import { type Repo, type RepoBinding } from "../stores/repos";
 import { type WorkMode } from "../lib/viewRouting";
 import { modelDisplayName, resolvedEmbedModel, useSettings, activeUserPersona } from "../stores/settings";
@@ -517,6 +516,8 @@ export function ChatView({
     onBranchRef.current(repoBindingRef.current, selected, selected.length === messageCountRef.current);
   }, []);
   const [showTables, setShowTables] = useState(false);
+  // 手机端会话工具浮层（≤720px 时功能按钮组收进浮标；桌面 display:contents 布局不变）
+  const [headToolsOpen, setHeadToolsOpen] = useState(false);
   const [showMediaInsert, setShowMediaInsert] = useState(false);
   const [chatDragOver, setChatDragOver] = useState(false);  // 拖拽文件到对话页面：显示高亮反馈（图片/媒体/任意文件都会进 RichInput）
   const handleSetCover = useCallback((url: string) => {
@@ -697,7 +698,8 @@ export function ChatView({
           </button>
         ) : (
           <>
-            <button
+            <div className={`head-tools${headToolsOpen ? " open" : ""}`}>
+                        <button
               className="btn icon-only"
               style={{ marginLeft: "auto" }}
               onClick={compact}
@@ -784,6 +786,7 @@ export function ChatView({
             >
               <Trash2 size={15} />
             </button>
+            </div>
           </>
         )}
         <button
@@ -801,6 +804,14 @@ export function ChatView({
         >
           <PanelRight size={15} />
         </button>
+            <button
+              className="btn icon-only head-tools-toggle"
+              aria-expanded={headToolsOpen}
+              title="会话工具（压缩/数据表/自动生成/导入导出等）"
+              onClick={() => setHeadToolsOpen((s) => !s)}
+            >
+              <MoreHorizontal size={16} />
+            </button>
       </div>
 
       {pendingPlan && (

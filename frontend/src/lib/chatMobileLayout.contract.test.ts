@@ -81,3 +81,38 @@ describe("窄屏对话页版式合同（2026-10-26 用户报「对话设置把�
     }
   });
 });
+
+describe("窄屏对话页第二轮合同（2026-10-27 真机：功能栏浮标化/顶栏两行/TableModal 全屏）", () => {
+  const mobile2 = media720Blocks().find((b) => b.includes(".head-tools.open"));
+  if (!mobile2) throw new Error("第二轮手机段被搬走或改名了（含 .head-tools.open 的 @media）");
+
+  it("桌面布局零影响：工具组包装层 display:contents、浮标在桌面隐藏", () => {
+    expect(blockOf(css, ".head-tools")).toContain("display: contents");
+    expect(blockOf(css, ".head-tools-toggle")).toContain("display: none");
+  });
+
+  it("手机端工具组默认隐藏，浮标点开为 grid 浮层（不再两排按钮吃掉纵向空间）", () => {
+    const hidden = blockOf(mobile2, ".chat-view-head .head-tools");
+    expect(hidden).toContain("display: none");
+    const open = blockOf(mobile2, ".chat-view-head .head-tools.open");
+    expect(open).toContain("display: grid");
+    expect(open).toContain("position: absolute");
+    expect(blockOf(mobile2, ".chat-view-head .head-tools-toggle")).toContain("display: inline-flex");
+  });
+
+  it("顶栏三行压两行：grid-areas 显式断行，methods 不再独占一行", () => {
+    const bar = blockOf(mobile2, ".app-topbar");
+    expect(bar).toContain("grid-template-areas:");
+    expect(bar.split("grid-template-areas:")[1]).toMatch(/"\w+ \w+ \w+"\s*"\w+ \w+ \w+"/);
+  });
+
+  it("TableModal 全屏化 + 表选择横滑 chips（弹窗不再贴顶/左右分栏各半）", () => {
+    const modal = blockOf(mobile2, ".table-modal");
+    expect(modal).toContain("position: fixed");
+    expect(modal).toContain("inset: 0");
+    expect(blockOf(mobile2, ".table-modal-body")).toContain("flex-direction: column");
+    const list = blockOf(mobile2, ".table-list");
+    expect(list).toContain("flex-direction: row");
+    expect(list).toContain("overflow-x: auto");
+  });
+});
