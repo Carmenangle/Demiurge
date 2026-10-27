@@ -30,6 +30,8 @@ export interface AppBodyProps {
   settingsOpen: boolean;
   /** 打开设置时要落的左侧导航项 id（空串 = SettingsView 默认「外观」）。P15 引导弹窗用。 */
   settingsSection: string;
+  /** 设置左侧导航切换：由 App 写进 #/settings/<panel>，返回键才退得出单个小节 */
+  onSettingsSection: (panel: string) => void;
   section: NavSection;
   subView: string | null;
   workMode: WorkMode;
@@ -90,7 +92,7 @@ export function AppBody(props: AppBodyProps) {
   };
   if (props.settingsOpen) {
     return <SettingsView settings={settings} update={settingsStore.update}
-      initialSection={props.settingsSection}
+      initialSection={props.settingsSection} onSectionChange={props.onSettingsSection}
       onOutputPathMigrated={props.relocateOutputPath} />;
   }
 

@@ -24,6 +24,8 @@ interface Props {
   update: (patch: Partial<Settings>) => void;
   /** 打开时要落的左侧导航项 id（空串/未识别 = 默认「外观」）。P15：未配置仓库文件夹的引导弹窗直达「paths」。 */
   initialSection?: string;
+  /** 小节切换回写路由（#/settings/<panel>）；缺省时只改本页状态。返回键退小节靠它。 */
+  onSectionChange?: (panel: string) => void;
   onOutputPathMigrated?: (oldDir: string, newDir: string) => void;
 }
 
@@ -55,12 +57,21 @@ function sizeText(bytes: number) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-export function SettingsView({ settings, update, initialSection, onOutputPathMigrated }: Props) {
+function isNavId(value: string | undefined): value is NavId {
+  return NAV.some((g) => g.items.some((item) => item.id === value));
+}
+
+export function SettingsView({ settings, update, initialSection, onSectionChange, onOutputPathMigrated }: Props) {
   // 草稿：编辑都改这里，保存才写回，取消则丢弃（与原 Modal 一致）
   const [draft, setDraft] = useState<Settings>(settings);
   // 初始面板：P15 引导弹窗可指定「paths」直达；未指定或值非法时退回「外观」（与改前一致）
   const [active, setActive] = useState<NavId>(() =>
-    NAV.some((g) => g.items.some((i) => i.id === initialSection)) ? (initialSection as NavId) : "general");
+    isNavId(initialSection) ? initialSection : "general");
+  // 小节现在也是路由（#/settings/<panel>）：返回键/前进把 initialSection 改回去时，
+  // 本页必须跟着换面板，否则「退了一格但画面不动」——正是这次要修的病。
+  useEffect(() => {
+    if (isNavId(initialSection)) setActive(initialSection);
+  }, [initialSection]);
   const [saved, setSaved] = useState(false);
   const [busy, setBusy] = useState(false);
   const [pathReview, setPathReview] = useState<{
@@ -106,7 +117,12 @@ export function SettingsView({ settings, update, initialSection, onOutputPathMig
     if (migrated) onOutputPathMigrated?.(migrated.oldDir, migrated.newDir);
     update(next);
     // 同步 ComfyUI 路径/地址到后端，供 start-dev 脚本读取
-    saveComfyConfig(next.comfyuiPath, next.comfyuiUrl, next.comfyuiPython).catch(() => {});
+    // 登记白名单失败不打断保存，但要提示——否则用户只会在提交时撞见「不在允许范围内」。
+    saveComfyConfig(next.comfyuiPath, next.comfyuiUrl, next.comfyuiPython)
+      .then((res) => {
+        if (res.register_error) setError(`ComfyUI 地址已保存，但没能登记进白名单：${res.register_error}`);
+      })
+      .catch(() => {});
     syncMobileComfyHost(next.comfyuiUrl);  // 手机端联机：登记 PC 主机进后端白名单（PC 构建直通）
     setSaved(true);
     setTimeout(() => setSaved(false), 1800);
@@ -184,7 +200,7 @@ export function SettingsView({ settings, update, initialSection, onOutputPathMig
               <button
                 key={it.id}
                 className={active === it.id ? "settings-nav-item active" : "settings-nav-item"}
-                onClick={() => setActive(it.id)}
+                onClick={() => { setActive(it.id); onSectionChange?.(it.id); }}
               >
                 <it.icon size={16} /> {it.label}
               </button>

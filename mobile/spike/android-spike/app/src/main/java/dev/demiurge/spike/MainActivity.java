@@ -28,6 +28,7 @@ import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import com.chaquo.python.Python;
 import com.chaquo.python.android.AndroidPlatform;
@@ -45,6 +46,8 @@ import java.util.zip.ZipInputStream;
 public class MainActivity extends Activity {
     private static final String TAG = "DemiurgeSpike";
     private static final int LOG_HEIGHT_DP = 260;
+    // 根页面「再按一次退出」的判定窗口：超过它就当第一次按键，只提示不退出
+    private static final long DOUBLE_BACK_MS = 2_000L;
 
     // M4 安全：令牌只存 app 私有 SharedPreferences（allowBackup=false 已在 Manifest 关闭备份），
     // 每次请求走 X-Demiurge-Token；WebView 首跳经 /__auth 换 HttpOnly + SameSite=Strict cookie，
@@ -406,6 +409,28 @@ public class MainActivity extends Activity {
         lp.height = open ? dp(LOG_HEIGHT_DP) : 0;
         logScroller.setLayoutParams(lp);
         toggle.setText(open ? "收起日志" : "展开日志");
+    }
+
+    private long lastBackAt = 0L;
+
+    @Override
+    public void onBackPressed() {
+        // 返回键先交回页面历史：前端每个导航项都写 hash（#/settings、#/assets/works/repo/<id>、
+        // #/story…），WebView 后退一步就是「回上一屏」。缺这一层时系统默认 finish() ⇒ 一按就退出。
+        // 前端那边对应的是 popstate/hashchange 监听——后退只改 URL，不监听就是「按了没反应」。
+        WebView view = webView;
+        if (view != null && view.canGoBack()) {
+            view.goBack();
+            lastBackAt = 0L;
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (now - lastBackAt < DOUBLE_BACK_MS) {
+            super.onBackPressed();
+            return;
+        }
+        lastBackAt = now;
+        Toast.makeText(this, "再按一次退出 Demiurge", Toast.LENGTH_SHORT).show();
     }
 
     @Override

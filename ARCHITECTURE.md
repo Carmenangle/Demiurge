@@ -1394,3 +1394,82 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
    ⑤ **状态**：已验＝真浏览器 390×844；**真机复验未完成**（本轮 adb 枚举不到设备）。用户手机上要看到本条与
    条目 66 的资产账本修复，都必须装新 APK（前端进 `frontend.zip`、后端 `config_bundle` 进 Chaquopy 侧），
    资产账本还需装新包后在 PC 重导一次、再推到手机重导。
+
+73. **手机返回链 = 壳层 `goBack()` + 前端 hash 单向真源；前端产物缓存三档口径（2026-10-27 用户两条报障）**：
+   ① **需求口径**（用户原话）：「返回是直接退出而不是返回上一页（这其实是因为我们没有为每个选项绑定好对应的标签页的原因）」
+   与「会出现渲染出错的问题」（降级卡 `Failed to fetch dynamically imported module: …/RepoViews-ClPMpCoF.js`）。
+   两条都是**手机端**缺陷，但 2a 的修法落在 PC 与手机**共用**的静态挂载上——用户明确接受这个同源性。
+   ② **返回链必须两半同时存在，缺一半表现为「按了没反应，再按才退出」**：
+   **(a) 壳层**`MainActivity.onBackPressed()` 缺省＝`finish()`，必须先 `WebView.canGoBack()→goBack()`，
+   链退到根才谈退出；退出用**双击 + Toast「再按一次退出 Demiurge」**（用户定案 D2），窗口 2 s。
+   **(b) 前端**必须真的在历史里留位并**监听**历史事件：写 `location.hash` 会产生同文档历史条目，但改前
+   只在挂载时读一次 hash，`popstate`/`hashchange` 无人接 ⇒ 返回键改了 URL 而画面不动。
+   现在 `App.tsx` 装一个 `applyRoute()`（`popstate`+`hashchange` 双监听，卸载时成对摘掉），解析唯一入口
+   ＝`lib/viewRouting.parseRouteHash()` 返回**判别联合** `RouteIntent`（`mode`/`section`/`home`/`settings`/`unknown`）。
+   🔴 **开屏那一次 hash 落地必须 `replaceState` 而不是赋值**（`lib/viewRouting.normalizeBootHash`，2026-10-27 真机才暴露）：
+   文档根本身是一格「无 hash」历史，`location.hash = "#/story"` 是在它**之上再加一格** ⇒ 手机返回键第一下退到
+   那条画面一模一样的记录，用户看到「首页按了没反应」（改前壳层没拦截时表现为直接退出，所以看不见这一格）。
+   判据只能用 CDP `Page.getNavigationHistory` 的 `currentIndex === 0`：`history.length` 是**整个会话**的格数，
+   用它判「能不能退」必然假绿。
+   🔴 **单向真源纪律**：解析器**只认规范形**，历史里非规范形（旧包写的 `#/assets` 无子项）在返回时解成
+   `unknown` ⇒ **故意 no-op 保持画面**，不做「旧形态回落」——因为同值 `setState` 会被 React bail，
+   **不会**再触发一次 hash 写，链不会成环。**禁止**给 `unknown` 加兜底跳转（那会把用户从当前区弹走）。
+   ③ **凡「用户认为是一页」的入口都必须写 hash，否则那一格返回是空的**：本轮收口三类——
+   设置（`#/settings[/<panel>]`，含 `SettingsView.onSectionChange` 换小节）、资产·作品两级下钻
+   （`#/assets/works/repo/<id>`，`browseWorksRepo`）、进作品（`enterWork` 写 `#/<mode>`）。
+   ⚠ 与 `workId` 恢复副作用**必须互相让路**：该 effect 现在先 `parseRouteHash` 判当前路由，**只有**
+   `home`/`mode` 才写 hash 并切区；深链停在管理区时只换模式、不把用户拽回首页（改前那种「hash 被覆但画面不动」
+   现在有人监听，会当场把用户跳走）。🔴 弹窗纳入返回链**尚未做**（用户定案 D4「弹窗随后」）：
+   Lightbox / TableModal / RegexModal / PresetModal / SendToChatModal / 素材详情 / NodePicker / Describe /
+   WorkflowTool / MaskEditor / BindRepo / 新建·改名·删除 仍**退不出**，是下一刀的已知欠账，不得写成已完成。
+   ④ **降级卡自愈分两层，互补不冗余**——但🔴 **归因已改口**：2026-10-27 真机把 0.30.8-beta 升到
+   0.30.13-beta（**一次真实换包**）**没有**出卡——文档响应头已是 `no-store`、新 chunk 全部 200、
+   `card: false`（`_tmp/rc-device/phase1.json` / `phase2.json`）。所以「WebView 缓存里那份旧
+   `index.html`」这条链**从未被真实观测到**，它只是 2a 的正确性理由，**不是**用户那张截图的证明结论。
+   同一句 `Failed to fetch dynamically imported module` 至少两类原因（字符串分不开）：① 旧页面引用已
+   被替换的 chunk；② origin 那一瞬间不可达（息屏 30 s 壳层暂停 uvicorn / 升级重启窗口）——② 是更贴合
+   「装完包第一次点开就报错」的解释，但🔴 **回前台窗口探针未跑完**（`_tmp/rc-pause-repro.mjs` 往返太慢、
+   v2 无产物），**尚未在真机复现**，因此只算头号候选、不得写成已证。两层修法保留：**2a 防再发**（① 的
+   根闸）、**2b 治已中**（两类都靠重载处置）；🔴 卡片文案已改为**并列两类原因**（`ErrorBoundary` 里
+   「资源版本不一致」与「本地服务此刻不可达」同时出现，`ErrorBoundary.test.tsx` 锁住），不再单断一种。
+   ⑤ **静态缓存三档（单一属主 `app/main.py._static_cache_control`）**：`StaticFiles` 本身**不发** `Cache-Control`
+   ⇒ 浏览器走启发式新鲜度，换包后旧 index 可被长期复用。口径：`index.html` 与 dist 根目录＝`no-store`；
+   `assets/*`（Vite 内容哈希）＝`public, max-age=31536000, immutable`；其余（`onboarding/`、`backgrounds/` 等静态媒体）
+   ＝`public, max-age=3600`。🔴 分类必须吃 **OS 归一后的相对路径**：Starlette `get_path()` 把根打成 `"."`、
+   Windows 分隔符是 `\` ⇒ 不先 `replace("\\", "/")` 且不合 `"."` 档，根命中会掉进 3600 档（踩过，2 条用例当场红）。
+   ⑥ **重载一律带查询串绕缓存**：`lib/staleChunk.cacheBustedUrl(href, now)` 置 `_r=<ts>`，
+   `location.replace`（不是 `assign`：坏页面不该在返回链里留坑位）**且保住 hash**（手机刷新后靠 hash 回当前视图，
+   与 ② 的监听闭环）。🔴 **不用 `location.reload()`** 的理由是「`reload` 的缓存语义在各家 WebView 上不一致、
+   不能保证绕开」，**不是**「真机观测到 `reload()` 端回旧 index」——后者从未被证明；真机证明的是
+   **带 `_r` 的 `replace` 能恢复**（解除掐链后点按钮出了仓库列表）。手动「重新加载」按钮与自动重载**共用**
+   `forceCacheBustedReload()`，但**不过 30 s 限频守卫**——用户主动点击不该被冷却挡住。
+   ⑦ **红线**：壳层 `view.clearHistory()`（令牌引导用，故意保留）**不得**与返回链同时改——它清空历史，
+   改这一刻返回键必然直接落退出分支；`_DistStaticFiles` 不得退回裸 `StaticFiles`（源码形状断言锁住）；
+   `PC 客户端功能不得因手机侧改动回退`——主导航本来就写 hash，本轮只补「监听」，PC 行为等价；
+   `#/settings` 在 PC 上改前解成 no-op、现在打开设置，属**改进**不是破坏。
+   ⑧ **验证**：后端 `tests/test_static_cache_headers.py` 4 例（纯函数分类含 `"."` 与反斜杠 / mini-app 三档头 /
+   源码形状锁）；前端 `viewRouting.test.ts` +8（mode 意图、空 hash、非法 subView 回落、works 下钻往返、
+   settings 带与不带 panel、`#/repo/abc`·`#/chat/abc`·`#/nonsense`·`%zz` 畸形百分号**必须不抛**）、
+   `bootHashNormalization.test.ts` +2（首帧只 `replaceState` 不赋值 / 已有 hash 才赋值，🔴 该文件必须自带
+   `// @vitest-environment jsdom`——`viewRouting.test.ts` 是 node 环境，DOM 用例塞进去当场 `window is not defined`）、
+   `staleChunk.test.ts` +2（保 path/query/hash、已有 `_r` 替换不叠加）、`ErrorBoundary.test.tsx` +1
+   （点按钮断言 `replace` 收到 `_r=` 且 `reload()` **零调用**）＝前端 172 文件 / **1979 例**、后端全量
+   **4669 / 2 failed / 0 errors / 0 skipped**（守卫判「跑批期间源码未变 ⇒ 结论有效」，两条红＝既有
+   `test_material_sources.py` 代理真 TCP 探活 pair，见条 71 记录）。**真浏览器**
+   `frontend/e2e-manual/mobile-return-chain.spec.ts` 4 例跑 **APK 里那份包**（空 `LAF_DATA_DIR` 隔离实例 18097，
+   🔴 环境变量名是 `LAF_DATA_DIR` 不是 `DATA_DIR`，写错会直接挂上用户真实数据）：主导航逐格退、设置逐格退并关闭、
+   两级下钻各占一格、深链带 `_r` 重载仍停在当前视图；截图 `_tmp/return-chain-browser/0{0..8}-*.png`。
+   **真机（0.30.13-beta，荣耀 REP-AN00）** 13 项全过：起点 `#/story` `index=0`、资产/下钻/设置/小节逐格进、
+   BACK1–4 每次只退一级、首页第一下原地不动且进程仍在前台（Toast 见 `_tmp/rc-device/shots/e1-first-back-toast.png`）、
+   2 s 内第二下真退出。降级卡另用 CDP `Network.setBlockedURLs` 掐掉真机自己请求的
+   `RepoViews-BzsmYfkc.js` 复现：报错文案与用户截图同形，自动重载 URL 带 `?_r=`、限频窗口内**只有 1 次**带 `_r`
+   的文档请求（不无限刷新）、停在可见卡片，解除掐链后点「重新加载」恢复出仓库列表；同轮用 `page.on("response")`
+   读到真机实际响应头＝根 `no-store` / `assets/*` `immutable`。日志与截图 `_tmp/rc-device/`。
+   🔴 **真实换包对照（2026-10-27 同一轮补做）**：0.30.8-beta（`phase1.json`，引用 `RepoViews-BniQ1LwD.js`）
+   升到 0.30.13-beta 后 `phase2.json`＝文档 200 + `cc: no-store`、磁盘新 chunk 全 200、`card: false`——
+   **换包本身不出卡**，这是 ④ 归因改口的直接证据。回前台暂停窗口的时序探针（`_tmp/rc-pause-repro{,2}.mjs`）
+   未产出结论文件 ⇒ ② 类原因**仍未复现**，本条只记「候选」不记「已证」。
+   ⑨ **出包身份**：APK **0.30.13-beta·versionCode 28** ＝ 189,993,764 B（账本 ✅，余量 6,236 B）、
+   `frontend.zip` 103,342,099 B / `33def705…` 与包内逐字相同（`apk_size_ledger.py` exit 0）、隐私闸 PASS。
+   前一轮 0.30.12-beta·27 只含返回链两半，真机一验才暴露 ② 的开屏空白格 ⇒ **换包判据只认 sha256，不认字节数**。
+   ⇒ 手册 `F/11` §3.2/§3.6/§4.1/§5/§6 与 §3.11.15（壳层返回栈 + 静态缓存三档），`G/10` 回归行。

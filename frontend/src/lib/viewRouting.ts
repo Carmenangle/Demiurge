@@ -104,6 +104,65 @@ export const SECTION_SUBNAV: Record<Exclude<NavSection, "home">, { id: string; l
   ],
 };
 
+// ── 返回链：hash → 视图意图（纯函数，App 只负责把意图落成 setState） ──
+// 为什么必须有这一层：壳层的 Android 返回键与浏览器后退**只会改 URL，不会改 React 状态**。
+// 各导航点早就在写 hash，但只有挂载时读一次 ⇒ 按返回「看着没反应」，历史耗尽后直接退出
+// （2026-10-27 手机端实锤）。意图解析放这里是为了脱离组件即可单测。
+export type RouteIntent =
+  | { kind: "mode"; mode: WorkMode }
+  /** browseRepoId：作品仓库两级的下钻位，只有 assets/works 用得上 */
+  | { kind: "section"; section: Exclude<NavSection, "home">; subView: string; browseRepoId: string | null }
+  | { kind: "home" }
+  | { kind: "settings"; panel: string }
+  /** 认不出的 hash（旧 `#/repo/<id>`、手输的乱串）：保持现状，不擅自跳页 */
+  | { kind: "unknown" };
+
+export function parseRouteHash(hash: string): RouteIntent {
+  let raw = hash.replace(/^#\/?/, "");
+  try {
+    raw = decodeURIComponent(raw);
+  } catch {
+    // 畸形百分号转义：按原文继续判，绝不让监听器抛（抛了等于返回键失效）
+  }
+  const [seg, second, ...rest] = raw.split("/");
+  if (!seg) return { kind: "home" };
+  if (seg === "settings") return { kind: "settings", panel: second ?? "" };
+  if (isWorkMode(seg)) return { kind: "mode", mode: seg };
+  if (!isNavSection(seg) || seg === "home") return { kind: "unknown" };
+  const items = SECTION_SUBNAV[seg];
+  const subView = second && items.some((item) => item.id === second) ? second : items[0].id;
+  // 下钻位只对「资产·作品」两级有意义；其余多段（如 guide 的 /doc/<路径>）忽略由页面自己监听
+  const browseRepoId = seg === "assets" && subView === "works" && rest[0] === "repo" && rest[1]
+    ? rest[1]
+    : null;
+  return { kind: "section", section: seg, subView, browseRepoId };
+}
+
+export function buildSettingsHash(panel = ""): string {
+  return panel ? `#/settings/${panel}` : "#/settings";
+}
+
+export function buildWorksBrowseHash(repoId: string | null): string {
+  return repoId ? `#/assets/works/repo/${encodeURIComponent(repoId)}` : "#/assets/works";
+}
+
+/** 该作品记忆的功能栏（无记录退回剧情模式）。写处在 goMode，读处在开作品与开屏恢复。 */
+export function readWorkMode(workId: string): WorkMode {
+  let saved = "";
+  try { saved = localStorage.getItem(`laf_mode_${workId}`) || ""; } catch { /* 受限上下文没有 storage */ }
+  return isWorkMode(saved) ? saved : "story";
+}
+
+/** 开屏那一次 hash 落地必须就地改写，不能用赋值。
+ *  赋值会在「无 hash 的文档根」之外**多出一格历史**：手机返回键于是先退回一条画面
+ *  一模一样的记录，用户看到的是「首页按第一下没反应」（2026-10-27 真机实测）。
+ *  replaceState 只改当前那一条（就是文档根自己），前一站的记录不受影响；
+ *  它不触发 popstate/hashchange，而这一刻的状态本来就是代码自己置的，无需回灌。 */
+export function normalizeBootHash(hash: string): void {
+  if (!window.location.hash) window.history.replaceState(null, "", hash);
+  else window.location.hash = hash;
+}
+
 // URL hash <-> 视图状态：刷新后停留在当前页面
 export function parseHash(): { view: View; repoId: string | null } {
   const h = decodeURIComponent(window.location.hash.replace(/^#\/?/, ""));

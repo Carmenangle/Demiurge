@@ -1,5 +1,5 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
-import { isStaleChunkError, reloadForStaleChunk } from "../lib/staleChunk";
+import { isStaleChunkError, forceCacheBustedReload, reloadForStaleChunk } from "../lib/staleChunk";
 
 interface Props {
   children: ReactNode;
@@ -23,7 +23,7 @@ export class ErrorBoundary extends Component<Props, State> {
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
     // 保留组件栈（React 16+ 渲染期错误默认会向上抛，此处仅记录，不吞错误）
-    // 重新打包后旧页面引用已被替换的 chunk ⇒ 自动重载一次拿新 index.html；
+    // 动态 import 失败 ⇒ 自动重载一次（原因见 staleChunk 头注释：换包 / origin 短暂不可达两类）；
     // 限频由 staleChunk 负责，资源真缺失时回落到错误卡片而不是无限刷新。
     this.setState({
       stack: info.componentStack || "",
@@ -33,7 +33,7 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   private handleReload = () => {
-    window.location.reload();
+    forceCacheBustedReload();
   };
 
   render(): ReactNode {
@@ -95,7 +95,7 @@ export class ErrorBoundary extends Component<Props, State> {
           </div>
           <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 12 }}>
             {stale
-              ? "检测到前端资源版本不一致（旧页面引用了已被替换的文件）。已自动刷新一次；若仍出现，请点下方按钮重新加载。"
+              ? "取不到页面需要的模块文件（资源加载失败）：可能是前端已换包、旧页面还引用着已被替换的文件（资源版本不一致），也可能是本地服务此刻不可达（手机端息屏 30 秒会暂停后端）。已自动刷新一次；若仍出现，请点下方按钮重新加载。"
               : "这是 React 渲染期异常。请把下方错误信息截图发给开发者定位；也可先点「重新加载」恢复界面。"}
           </div>
           <pre

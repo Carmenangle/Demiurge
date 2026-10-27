@@ -1,8 +1,9 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import {
-  WORK_MODES, type WorkMode, isWorkMode,
-  NAV_SECTIONS, type NavSection, isNavSection,
+  WORK_MODES, type WorkMode,
+  NAV_SECTIONS, type NavSection,
   SECTION_SUBNAV,
+  parseRouteHash, buildSettingsHash, buildWorksBrowseHash, readWorkMode, normalizeBootHash,
   resolveActivityChatTarget,
 } from "./lib/viewRouting";
 import { useSettings, activeChatModel, resolvedEmbedModel, activeLiquidGlassWallpaper } from "./stores/settings";
@@ -180,20 +181,48 @@ export function App() {
     if (id) touchRepo(id);
   };
 
-  // 刷新后停留：hash = #/section 或 #/section/sub 或 #/workMode
+  // 返回链：hash = #/section 或 #/section/sub 或 #/workMode 或 #/settings[/panel]。
+  // 挂载时读一次负责「刷新后停留」，popstate/hashchange 负责「后退键真的回上一屏」——
+  // 壳层返回键与浏览器后退只改 URL，不监听就等于按了没反应（2026-10-27 手机端实锤）。
+  // 点击处仍是「先写 hash 再置状态」，这里同值 setState 被 React 短路，不构成回环。
   useEffect(() => {
-    const [seg, sub] = window.location.hash.replace(/^#\/?/, "").split("/");
-    if (isNavSection(seg)) {
-      setSection(seg);
-      if (seg !== "home") {
-        // 子项有效性校验：无效/已迁移的旧子项（如 #/system/newcomer-guide）回退该区第一项
-        const items = SECTION_SUBNAV[seg];
-        setSubView(sub && items.some((item) => item.id === sub) ? sub : items[0].id);
+    const apply = () => {
+      const route = parseRouteHash(window.location.hash);
+      switch (route.kind) {
+        case "mode":
+          setWorkMode(route.mode);
+          setSection("home");
+          setSubView(null);
+          setSettingsOpen(false);
+          setBrowseRepoId(null);
+          break;
+        case "section":
+          setSection(route.section);
+          setSubView(route.subView);
+          setBrowseRepoId(route.browseRepoId);
+          setSettingsOpen(false);
+          break;
+        case "settings":
+          setSettingsOpen(true);
+          setSettingsSection(route.panel);
+          break;
+        case "home":
+          setSection("home");
+          setSubView(null);
+          setSettingsOpen(false);
+          setBrowseRepoId(null);
+          break;
+        default:
+          break;
       }
-    } else if (isWorkMode(seg)) {
-      setWorkMode(seg);
-      setSection("home");
-    }
+    };
+    apply();
+    window.addEventListener("popstate", apply);
+    window.addEventListener("hashchange", apply);
+    return () => {
+      window.removeEventListener("popstate", apply);
+      window.removeEventListener("hashchange", apply);
+    };
   }, []);
 
   // 未配置「仓库文件夹」→ 引导弹窗（P15：后端把作品根校验统一为「未配置即拒绝」，前端半场负责
@@ -225,14 +254,18 @@ export function App() {
   useEffect(() => {
     if (!workId || workId === lastModeWorkRef.current) return;
     lastModeWorkRef.current = workId;
-    let saved = "";
-    try { saved = localStorage.getItem(`laf_mode_${workId}`) || ""; } catch {}
-    const mode = isWorkMode(saved) ? saved : "story";
+    const mode = readWorkMode(workId);
     setWorkMode(mode);
-    setSection("home");
-    setSettingsOpen(false);
-    setSubView(null);
-    window.location.hash = `#/${mode}`;
+    // 用户主动开作品已由 enterWork 自己写 hash；跑到这里只剩「开屏恢复」与「后端
+    // 选择校正」。深链停在非首页时只换模式，不把用户从当前区拽回首页——现在有人监听
+    // hash 了，写 hash 就是真跳转，改前那种「hash 被覆但画面不动」会当场破刷新停留。
+    const route = parseRouteHash(window.location.hash);
+    if (route.kind === "home" || route.kind === "mode") {
+      setSection("home");
+      setSettingsOpen(false);
+      setSubView(null);
+      normalizeBootHash(`#/${mode}`);
+    }
   }, [workId]);
 
   const goSection = (s: NavSection) => {
@@ -249,6 +282,32 @@ export function App() {
     }
   };
 
+  // 进作品会话：状态与 hash 一起落，不再让 workId 副作用代写（那条只管开屏恢复/选择校正，
+  // 深链时故意不跳页）。mode 取该作品记忆值，与改前行为一致。
+  const enterWork = (rid: string | null, wid: string) => {
+    const mode = readWorkMode(wid);
+    setRepoId(rid);
+    setWorkId(wid);
+    setWorkMode(mode);
+    setSection("home");
+    setSettingsOpen(false);
+    setSubView(null);
+    window.location.hash = `#/${mode}`;
+  };
+
+  // 设置是整页路由（#/settings[/panel]）：手机返回键退得出设置，刷新停在设置。
+  const openSettings = (panel: string) => {
+    setSettingsSection(panel);
+    setSettingsOpen(true);
+    window.location.hash = buildSettingsHash(panel);
+  };
+
+  /** 资产·作品 两级下钻位进 hash，返回键才能一层层退回去。 */
+  const browseWorksRepo = (id: string | null) => {
+    setBrowseRepoId(id);
+    window.location.hash = buildWorksBrowseHash(id);
+  };
+
   const openBackgroundChat = (threadId: string) => {
     // 首页画布（未绑小仓库）没有可解析的会话目标，但它的出图同样进后台活动面板：
     // 点击应回首页，而不是像以前那样静默无反应（2026-10-19）。
@@ -257,16 +316,12 @@ export function App() {
       setSection("home");
       setSettingsOpen(false);
       setSubView(null);
+      window.location.hash = `#/${workMode}`;
       return;
     }
     const target = resolveActivityChatTarget(repos, threadId);
     if (!target) return;
-    setRepoId(target.repoId);
-    setWorkId(target.workId);
-    setSection("home");
-    setSettingsOpen(false);
-    setSubView(null);
-    // 模式由 workId effect 恢复该作品记忆值（含 hash）
+    enterWork(target.repoId, target.workId);
   };
 
   /** 后台活动里下载/节点/LoRA 条目 → 设置对应子视图。 */
@@ -315,7 +370,7 @@ export function App() {
         <button
           type="button"
           className={`nav-item nav-settings ${settingsOpen ? "active" : ""}`}
-          onClick={() => { setSettingsSection(""); setSettingsOpen(true); }}
+          onClick={() => openSettings("")}
         >
           ⚙ 设置
         </button>
@@ -361,22 +416,15 @@ export function App() {
             childrenOf={childrenOf}
             coverOf={coverOf}
             browseRepoId={browseRepoId}
-            setBrowseRepoId={setBrowseRepoId}
+            setBrowseRepoId={browseWorksRepo}
             onNewRepo={() => setCreating(true)}
             onNewSub={(id) => setCreatingSubFor(id)}
             onRename={setRenaming}
             onBind={setBinding}
             onDelete={setDeleting}
-            onOpenWork={(rid, wid) => {
-              setRepoId(rid);
-              setWorkId(wid);
-              touchRepo(wid);
-              setSection("home");
-              setSettingsOpen(false);
-              setSubView(null);
-              // 模式由 workId effect 恢复该作品记忆值（含 hash）
-            }}
+            onOpenWork={(rid, wid) => { touchRepo(wid); enterWork(rid, wid); }}
             onClearRepo={() => { setRepoId(null); setWorkId(null); }}
+            onSettingsSection={openSettings}
             onGoSection={(section, subView) => {
               setSection(section);
               setSettingsOpen(false);
@@ -422,8 +470,7 @@ export function App() {
               onClick: () => {
                 // 直达「设置 → 路径与代理」；仓库文件夹为空时 PathsPanel 会自动定位并高亮该输入框
                 setWorksRootAlert(null);
-                setSettingsSection("paths");
-                setSettingsOpen(true);
+                openSettings("paths");
               },
             },
           ]}

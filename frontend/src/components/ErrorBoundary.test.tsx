@@ -79,7 +79,7 @@ describe("ErrorBoundary", () => {
     }
   });
 
-  it("重载限频窗口内再次失败 ⇒ 停卡片并说明版本不一致（防无限刷新）", async () => {
+  it("重载限频窗口内再次失败 ⇒ 停卡片，文案并列两类原因（不许把未证明的归因写成事实）", async () => {
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       window.sessionStorage.setItem(
@@ -93,9 +93,52 @@ describe("ErrorBoundary", () => {
       const text = container.textContent || "";
       expect(text).toContain("界面渲染出错");
       expect(text).toContain("资源版本不一致");
+      // 真机 0.30.8→0.30.13 真实换包**没有**出卡（根 index.html 已 no-store），
+      // 所以「缓存里那份旧 index」只是候选原因之一；origin 短暂不可达必须同时出现在文案里。
+      expect(text).toContain("本地服务此刻不可达");
     } finally {
       spy.mockRestore();
       window.sessionStorage.removeItem("demiurge:stale-chunk-reload-at");
+    }
+  });
+
+  it("「重新加载」按钮走 cache-busted 跳转，不用 location.reload()", async () => {
+    // 带 `_r` 的 `replace` 是**已证明能恢复**的那条路（2026-10-27 真机解除掐链后点按钮出了列表）；
+    // `location.reload()` 的缓存在各家 WebView 上语义不一致，不能保证绕开，故不用它。
+    // 手动按钮必须和自动重载同一条路（同一个 forceCacheBustedReload）。
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const href = "http://127.0.0.1:8010/index.html#/assets/works/repo/r1";
+    let replaced = "";
+    let reloads = 0;
+    const descriptor = Object.getOwnPropertyDescriptor(window, "location")!;
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: {
+        href,
+        replace: (url: string) => {
+          replaced = url;
+        },
+        reload: () => {
+          reloads += 1;
+        },
+      },
+    });
+    try {
+      const Boom = () => {
+        throw new Error("boom-手动重载");
+      };
+      await mount(<ErrorBoundary><Boom /></ErrorBoundary>);
+      const button = container.querySelector<HTMLButtonElement>('button[type="button"]')!;
+      await act(async () => {
+        button.click();
+      });
+      expect(reloads).toBe(0);
+      expect(replaced.startsWith("http://127.0.0.1:8010/index.html?_r=")).toBe(true);
+      // hash 保住：手机端重载后靠它回到当前视图
+      expect(replaced).toContain("#/assets/works/repo/r1");
+    } finally {
+      Object.defineProperty(window, "location", descriptor);
+      spy.mockRestore();
     }
   });
 

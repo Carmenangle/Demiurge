@@ -10,6 +10,8 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.responses import Response
+from starlette.types import Scope
 
 from app.asyncio_quiet import install_connection_reset_filter
 from app.db import init_db
@@ -247,8 +249,36 @@ if _DOCS_ASSETS.is_dir():
     app.mount("/docs-assets", StaticFiles(directory=_DOCS_ASSETS), name="docs-assets")
 
 _FRONTEND_DIST = Path(os.environ.get("LAF_FRONTEND_DIST", "")).expanduser()
+
+
+# 前端 dist 的缓存口径只有一个属主（2026-10-27 手机降级卡那轮补上）：`StaticFiles` 默认不发
+# `Cache-Control` ⇒ 浏览器走启发式新鲜度，理论上能把换包前的 `index.html` 复用很久，而它引用的
+# 旧 chunk 名已不在磁盘上 ⇒ 动态导入失败、页面掉进降级卡。文档禁缓存是这条链的根闸。
+# 🔴 但这条链**不是**用户那张截图已证的归因：真机 0.30.8→0.30.13 真实换包**没有**出卡
+# （见 `ARCHITECTURE.md` 条 73 ④）；这里按「正确性 + 纵深防御」保留，PC 与手机共用同一条路。
+# assets/* 的文件名带内容 hash，永不冲突 ⇒ 给满一年 immutable。
+def _static_cache_control(path: str) -> str:
+    # StaticFiles 递进来的是 OS 归一后的相对路径：根是 "."，Windows 分隔符是 "\"，
+    # ".."/"." 组件已被抹掉——口径按首段判，与平台无关。
+    head = path.replace("\\", "/").strip("/").partition("/")[0]
+    if not head or head == "." or head.endswith(".html"):
+        return "no-store"
+    if head == "assets":
+        return "public, max-age=31536000, immutable"
+    # 其余是 dist 根下的非哈希媒体（onboarding/textures/…，合起来约 100 MB）：
+    # 文件名不换内容换，缓存要有限期；StaticFiles 自带 ETag，过期走 304 不重传字节。
+    return "public, max-age=3600"
+
+
+class _DistStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = _static_cache_control(path)
+        return response
+
+
 if str(_FRONTEND_DIST) not in {"", "."} and (_FRONTEND_DIST / "index.html").is_file():
-    app.mount("/", StaticFiles(directory=_FRONTEND_DIST, html=True), name="frontend")
+    app.mount("/", _DistStaticFiles(directory=_FRONTEND_DIST, html=True), name="frontend")
 
 # 联机同库反向代理必须装在 local_auth 内侧（add_middleware 后加者在外层）：
 # 手机令牌闸始终最外层，代理只负责出站，绝不让未认证的本机调用借道打到 PC。

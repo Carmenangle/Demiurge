@@ -4,6 +4,7 @@ import {
   normalizeCustomDimension, resolveHomeWorkspace, resolveImageSize,
   resolveActivityChatTarget, resolveOpenedWorkRoute,
   NAV_SECTIONS, SECTION_SUBNAV, WORK_MODES, workspaceModeForWire,
+  parseRouteHash, buildSettingsHash, buildWorksBrowseHash,
 } from "./viewRouting";
 import type { Repo } from "../stores/repos";
 
@@ -22,6 +23,69 @@ describe("home workspace", () => {
 describe("opening a work from assets", () => {
   it.each(["story", "generate", "code"] as const)("keeps %s mode", (mode) => {
     expect(resolveOpenedWorkRoute(mode)).toEqual({ workMode: mode, hash: `#/${mode}` });
+  });
+});
+
+describe("parseRouteHash 返回链解析", () => {
+  it("首页三模式各自成一条意图（返回键的落点）", () => {
+    expect(parseRouteHash("#/story")).toEqual({ kind: "mode", mode: "story" });
+    expect(parseRouteHash("#/generate")).toEqual({ kind: "mode", mode: "generate" });
+    expect(parseRouteHash("#/code")).toEqual({ kind: "mode", mode: "code" });
+  });
+
+  it("空 hash 与 #/ 都算首页", () => {
+    expect(parseRouteHash("")).toEqual({ kind: "home" });
+    expect(parseRouteHash("#/")).toEqual({ kind: "home" });
+    expect(parseRouteHash("#")).toEqual({ kind: "home" });
+  });
+
+  it("管理区带子项；无效/已迁移的子项回退该区第一项", () => {
+    expect(parseRouteHash("#/assets/generations")).toEqual(
+      { kind: "section", section: "assets", subView: "generations", browseRepoId: null },
+    );
+    expect(parseRouteHash("#/system/newcomer-guide")).toEqual(
+      { kind: "section", section: "system", subView: SECTION_SUBNAV.system[0].id, browseRepoId: null },
+    );
+  });
+
+  it("作品仓库下钻位编进/解出 hash（返回键能一层层退）", () => {
+    expect(parseRouteHash(buildWorksBrowseHash("r-9")))
+      .toEqual({ kind: "section", section: "assets", subView: "works", browseRepoId: "r-9" });
+    expect(buildWorksBrowseHash(null)).toBe("#/assets/works");
+    expect(parseRouteHash("#/assets/works")).toEqual(
+      { kind: "section", section: "assets", subView: "works", browseRepoId: null },
+    );
+    expect(buildSettingsHash("paths")).toBe("#/settings/paths");
+    expect(buildSettingsHash()).toBe("#/settings");
+  });
+
+  it("下钻位只对 assets/works 生效，别的区的多段留给页面自己管", () => {
+    expect(parseRouteHash("#/workflows/templates/repo/x")).toEqual(
+      { kind: "section", section: "workflows", subView: "templates", browseRepoId: null },
+    );
+    // 新手指引的文档深链：多段不报错，子项仍解析对（docPath 由该页自己的 hashchange 监听取）
+    expect(parseRouteHash("#/guide/quick-start/doc/docs/guide/demo.md")).toEqual(
+      { kind: "section", section: "guide", subView: "quick-start", browseRepoId: null },
+    );
+  });
+
+  it("设置整页：带小节与不带小节", () => {
+    expect(parseRouteHash("#/settings")).toEqual({ kind: "settings", panel: "" });
+    expect(parseRouteHash("#/settings/models")).toEqual({ kind: "settings", panel: "models" });
+  });
+
+  it("认不出的 hash 判 unknown：不擅自把用户跳到首页", () => {
+    for (const h of ["#/repo/abc", "#/chat/abc", "#/nonsense", "#/home/x"]) {
+      expect(parseRouteHash(h)).toEqual({ kind: "unknown" });
+    }
+  });
+
+  it("畸形百分号不抛（抛了等于返回键失效）", () => {
+    expect(() => parseRouteHash("#/assets/%E4%B8%AD")).not.toThrow();
+    expect(() => parseRouteHash("#/assets/%zz")).not.toThrow();
+    expect(parseRouteHash("#/assets/%zz")).toEqual(
+      { kind: "section", section: "assets", subView: SECTION_SUBNAV.assets[0].id, browseRepoId: null },
+    );
   });
 });
 

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   STALE_CHUNK_RELOAD_GUARD_MS,
+  cacheBustedUrl,
   isStaleChunkError,
   shouldAutoReload,
   type KeyValueStorage,
@@ -59,5 +60,18 @@ describe("staleChunk 重载限频", () => {
       setItem: () => undefined,
     };
     expect(shouldAutoReload(1_000, broken)).toBe(false);
+  });
+});
+
+describe("staleChunk 重载绕过缓存", () => {
+  it("换查询串才是真绕过：路径与 hash 都保住", () => {
+    const next = cacheBustedUrl("http://127.0.0.1:8010/?x=1#/assets/works", 1_700_000_000_000);
+    expect(next).toBe(
+      "http://127.0.0.1:8010/?x=1&_r=1700000000000#/assets/works",
+    );
+  });
+
+  it("已有 _r 时改写而不是叠加（多次自救不会把 URL 越滚越长）", () => {
+    expect(cacheBustedUrl("http://127.0.0.1:8010/?_r=1", 2)).toBe("http://127.0.0.1:8010/?_r=2");
   });
 });
