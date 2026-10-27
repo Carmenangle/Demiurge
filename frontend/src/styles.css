@@ -10155,11 +10155,19 @@ html[data-theme="liquid-glass"] .btn.primary:hover:not(:disabled) {
     max-height: 46vh;
   }
   /* 右下两个浮标（后台活动 / 快捷工具）默认压在发送键上：给它们让出右侧 48px 通道 */
-  .chat-actions { padding-right: 48px; gap: 4px; margin-top: 6px; }
+  .chat-actions { padding-right: 48px; gap: 4px; margin-top: 6px; flex-wrap: wrap; }
   .chat-actions .model-switch-btn { width: 30px; height: 30px; }
   .chat-actions .model-switch-btn > svg { width: 15px; height: 15px; }
   .chat-send-btn { white-space: nowrap; padding: 5px 9px; }
   .chat-send-btn > svg { margin-right: 3px !important; }
+  /* 「生成中」态多一颗停止键 ⇒ 这一态静止版式测试全绿也测不到（2026-10-27 23:35 真机截图）。
+     `.btn` 默认 padding 8px 16px 且文字可断行，被 flex 压窄后「停止」断成三行、按钮高 81px
+     （静止态 33px）把输入卡顶高；只加 nowrap 又会把最左的切换器顶出卡外（实测 x=-6）。
+     收口：动作键统一紧凑不换行 + 停止键只留图标（红色 × 自解释，title 兜底），
+     5 切换器场景单行放得下；配了智能体（6 个）时 flex-wrap 兜底换第二行，绝不越界。 */
+  .chat-actions .btn { white-space: nowrap; padding: 5px 9px; }
+  .chat-actions .chat-stop-btn { font-size: 0; padding: 5px 8px; }
+  .chat-actions .chat-stop-btn > svg { margin-right: 0 !important; }
 
   /* 设置页/弹窗打开时，右下两个圆钮会盖住保存按钮与正文 ⇒ 手机上让位 */
   .app:has(.settings-page) .support-fab,

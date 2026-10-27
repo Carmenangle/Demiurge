@@ -1314,7 +1314,7 @@ export function ChatView({
                 <Send size={16} style={{ marginRight: 6, verticalAlign: "-2px" }} />
                 发送
               </button>
-              <button className="btn danger" title="仅停止当前生成，不发送" onClick={stopGenerating}>
+              <button className="btn danger chat-stop-btn" title="仅停止当前生成，不发送" onClick={stopGenerating}>
                 <X size={16} style={{ marginRight: 6, verticalAlign: "-2px" }} />
                 停止
               </button>
