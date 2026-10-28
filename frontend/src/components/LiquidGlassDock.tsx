@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   ImagePlus, Images, Play, Pause, RefreshCw, RotateCcw, Trash2, X,
 } from "lucide-react";
@@ -626,7 +627,9 @@ export function LiquidGlassDock({
         </div>
       )}
 
-      {open && (
+      {/* 浮层必须挂到 body：桌面 .app-dock 是 position:fixed，Blink 视其为层叠上下文，
+         面板留在里面时 z-index 再高（1260/1300）也会被输入区（.chat-input-wrap z-2）压住。 */}
+      {open && createPortal(
         <>
           <div className="lg-dock-scrim" onClick={() => setOpen(false)} />
           <aside className="lg-panel" aria-label="液态玻璃控制台">
@@ -1001,15 +1004,17 @@ export function LiquidGlassDock({
               )}
             </div>
           </aside>
-        </>
+        </>,
+        document.body,
       )}
 
-      {libOpen && (
+      {libOpen && createPortal(
         <LiquidGlassWallpaperLibrary
           lg={lg}
           update={update}
           onClose={() => setLibOpen(false)}
-        />
+        />,
+        document.body,
       )}
     </>
   );

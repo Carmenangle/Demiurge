@@ -1912,3 +1912,15 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
    `mock-api.mjs`，兜底 `{}` 让 ChatView 的 `builtins` 变 undefined → 渲染期 `.filter` 崩溃（错误边界显示
    「界面渲染出错」）。补 mock 端点后 **9/9 绿**。🔴 教训：新接口必须同步 e2e mock，否则整页在 mock 下就崩，
    测试全红却指向一个与断言无关的错误。
+
+77. **液态玻璃控制台浮层必须 portal 到 `document.body`（2026-10-28 用户截图：拉绳控制台被输入框压住、底部参数不可点）**：
+   `.lg-panel`（z-1260）/ `.lg-dock-scrim`（z-1250）/ 壁纸库 `.lg-lib-scrim`（z-1300）原本渲染在 `.app-dock` 里。
+   手机端 `.app-dock` 是 `display: contents`，面板直接参与 `.app` 层叠上下文 ⇒ 正常；**桌面（≥721px 且 pointer:fine）
+   的 `.app-dock` 是 `position: fixed`，Blink 把它当作层叠上下文** ⇒ 面板的 1260 只在 dock 内部比较，整个 dock
+   以 z-auto 参与父上下文，被 `.chat-input-wrap`（`z-index: 2`）压在下面（实测 1280×800：发送键命中点在面板矩形内
+   却命中 `button.chat-send-btn`；把 dock 设 `z-index: 3` 或改 `position: absolute` 都能翻转，证明是 fixed 层叠上下文所致）。
+   修法＝控制台打开时用 `createPortal(..., document.body)` 把面板＋遮罩（含壁纸库）挂到 body（与 `Modal.tsx` 同一做法），
+   拉绳按钮仍留在 dock 里负责唤起。🔴 **不得改成给 `.app-dock` 调高 z-index**：dock 里还有 support/quick-tools 浮窗
+   （z-50），整层抬高会把它们一起顶到 `.modal-mask`(1000) 之上。回归：`LiquidGlassDock.portal.test.tsx`（挂点复刻
+   `.app-dock`，断言 panel/scrim 的 `parentElement === document.body`）；真浏览器实测 1280×800 面板压过输入区、
+   390×844 不回归、壁纸库 z-1300 仍在面板上、Esc 可关。⇒ 手册 `F/11` §3.11.18。
