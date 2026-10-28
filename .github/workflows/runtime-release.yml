@@ -142,8 +142,22 @@ jobs:
         shell: pwsh
         run: |
           $env:DEMIURGE_SHELL_HOME = Join-Path $env:RUNNER_TEMP "demiurge-shell"
-          & desktop/tauri/target/release/Demiurge.exe --self-test
-          if ($LASTEXITCODE -ne 0) { throw "desktop shell self-test failed" }
+          $log = Join-Path $env:RUNNER_TEMP "shell-self-test.log"
+          $errorLog = "$log.err"
+          # Demiurge.exe 是 GUI 子系统程序（Tauri）：用 `&` 调用时 PowerShell 不等待进程退出、
+          # $LASTEXITCODE 保持 $null ⇒ 0.6s 内假红且无任何输出。必须 Start-Process -Wait 拿退出码。
+          $proc = Start-Process -FilePath "desktop/tauri/target/release/Demiurge.exe" `
+            -ArgumentList "--self-test" -Wait -PassThru `
+            -RedirectStandardOutput $log -RedirectStandardError $errorLog
+          if (Test-Path $log) { Get-Content $log }
+          if ((Test-Path $errorLog) -and (Get-Item $errorLog).Length -gt 0) { Get-Content $errorLog }
+          if (
+            -not (Test-Path $log) -or
+            -not (Select-String -Path $log -Pattern "self-test: \d+ passed, 0 failed" -Quiet)
+          ) {
+            throw "desktop shell self-test 未输出通过汇总（exit $($proc.ExitCode)）"
+          }
+          if ($proc.ExitCode -ne 0) { throw "desktop shell self-test failed (exit $($proc.ExitCode))" }
       - name: 整形便携壳产物
         shell: pwsh
         run: |

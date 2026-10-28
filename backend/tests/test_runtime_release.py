@@ -252,6 +252,24 @@ def test_runtime_targets_do_not_pin_or_download_model_weights():
     assert "缓存完整 RAG 权重" not in workflow
 
 
+def test_desktop_shell_self_test_waits_for_gui_subsystem_process():
+    workflow = (ROOT / ".github" / "workflows" / "runtime-release.yml").read_text(
+        encoding="utf-8"
+    )
+    start = workflow.index("- name: 自检桌面壳")
+    end = workflow.index("- name:", start + 1)
+    step = workflow[start:end]
+
+    # Demiurge.exe 是 GUI 子系统程序：`&` 调用时 PowerShell 不等待进程退出、$LASTEXITCODE
+    # 保持 $null ⇒ 自检实际 18/18 通过而 CI 在 0.6s 内无输出地假红。必须 Start-Process -Wait。
+    assert "Start-Process" in step
+    assert "-Wait" in step
+    assert "-PassThru" in step
+    assert "ExitCode" in step
+    assert "& desktop/tauri/target/release/Demiurge.exe --self-test" not in step
+    assert r"self-test: \d+ passed, 0 failed" in step
+
+
 def test_split_asset_writes_reassembly_manifest(tmp_path):
     archive = tmp_path / "runtime.zip"
     archive.write_bytes(b"0123456789")
