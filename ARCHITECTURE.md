@@ -1912,6 +1912,15 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
    `mock-api.mjs`，兜底 `{}` 让 ChatView 的 `builtins` 变 undefined → 渲染期 `.filter` 崩溃（错误边界显示
    「界面渲染出错」）。补 mock 端点后 **9/9 绿**。🔴 教训：新接口必须同步 e2e mock，否则整页在 mock 下就崩，
    测试全红却指向一个与断言无关的错误。
+   ⑩ **GUI 子系统程序不能靠 PowerShell 的 `$LASTEXITCODE` 判红**：`desktop-shell` 里
+   `& desktop/tauri/target/release/Demiurge.exe --self-test` 在同一台机器上 0.6 s 内无任何输出地判红，
+   而安装器步骤对同一个 exe 的 `--self-test` 是 **18/18**。定因：Tauri 产物是 **GUI 子系统**（PE Subsystem=2），
+   PowerShell 用 `&` 调 GUI 程序**不等待进程退出、也不设置 `$LASTEXITCODE`**，新开的 pwsh 里该变量是 `$null`，
+   `$null -ne 0` 恒真 ⇒ 必然抛错。本地用 Windows PowerShell 5.1 复现同上，且 `DEMIURGE_SHELL_HOME/logs/self-test.log`
+   里写着 `self-test: 18 passed, 0 failed`（真跑了，只是没人等）。修法＝`Start-Process -Wait -PassThru` 取
+   `ExitCode`，stdout/stderr 重定向到文件回显，并断言输出含 `self-test: N passed, 0 failed`；`test_runtime_release.py`
+   加 workflow 契约锁（禁 `& … --self-test` 写法、必须 Start-Process/-Wait/-PassThru/ExitCode）。
+   ⇒ 手册 `G/16`「构建与验收编排」。
 
 77. **液态玻璃控制台浮层必须 portal 到 `document.body`（2026-10-28 用户截图：拉绳控制台被输入框压住、底部参数不可点）**：
    `.lg-panel`（z-1260）/ `.lg-dock-scrim`（z-1250）/ 壁纸库 `.lg-lib-scrim`（z-1300）原本渲染在 `.app-dock` 里。
