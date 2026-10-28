@@ -55,6 +55,22 @@ def test_release_preflight_detects_secret_candidate(tmp_path):
     assert preflight._contains_secret(paths[0])
 
 
+def test_bin_ban_spares_tracked_shell_fixture(tmp_path):
+    """.bin 禁令针对模型权重；桌面壳签名夹具例外，但其它 .bin 仍必须被拦。"""
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    fixture = tmp_path / "desktop" / "tauri" / "testdata" / "updater-fixture.bin"
+    fixture.parent.mkdir(parents=True)
+    fixture.write_bytes(b"fixture\n")
+    stray = tmp_path / "models" / "weights.bin"
+    stray.parent.mkdir(parents=True)
+    stray.write_bytes(b"weights")
+
+    errors = preflight.validate(tmp_path)
+
+    assert "禁止上传的运行文件: models/weights.bin" in errors
+    assert not [e for e in errors if "updater-fixture.bin" in e]
+
+
 def test_private_name_denylist_is_ignored(tmp_path):
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     (tmp_path / ".gitignore").write_text("backend/data/\n", encoding="utf-8")

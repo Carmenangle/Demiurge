@@ -1906,3 +1906,9 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
    `.gitignore` 的 `*.bin`，文件从未入库 ⇒ tag 构建必失败（自 2026-10-24 起潜伏，直到这次真跑才发现）。
    现加例外 `!desktop/tauri/testdata/updater-fixture.bin` 并标 `binary`（载荷 38 B 末尾是 LF，任何换行转换都会
    让 minisign 验签失败）。教训：`include_bytes!/include_str!` 的路径必须被 tracking 检查覆盖，否则本地全绿、CI 必红。
+   ⑨ **e2e 套件腐化与 mock 契约**：`release_preflight.py` 的 `.bin` 禁令把上述夹具也拦了（它针对模型权重）⇒
+   加单路径白名单 `ALLOWED_FORBIDDEN_SUFFIX_PATHS`（不放开目录），并有回归测试锁「其它 .bin 仍被拦」。
+   同时 `frontend/e2e` **9 例里 8 例在本地（Windows）也红**：新增的 `GET /api/ai/prompt/templates` 没进
+   `mock-api.mjs`，兜底 `{}` 让 ChatView 的 `builtins` 变 undefined → 渲染期 `.filter` 崩溃（错误边界显示
+   「界面渲染出错」）。补 mock 端点后 **9/9 绿**。🔴 教训：新接口必须同步 e2e mock，否则整页在 mock 下就崩，
+   测试全红却指向一个与断言无关的错误。

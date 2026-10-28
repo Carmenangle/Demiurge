@@ -78,6 +78,11 @@ createServer((request, response) => {
   if (url.pathname === "/api/agents") return send(response, []);
   if (url.pathname === "/api/workflows/templates") return send(response, { items: [] });
   if (url.pathname === "/api/generations") return send(response, { items: [] });
+  // 提示词模版（2026-10-25 新增接口）：ChatView 首次渲染就要 builtins/items，
+  // 落到兜底 `{}` 会让 builtins 为 undefined → 渲染期 `.filter` 崩溃（整树黑屏）。
+  if (url.pathname === "/api/ai/prompt/templates") {
+    return send(response, { items: [], builtins: [] });
+  }
   // 附件上传/下载（与真实后端同构：snake_case 响应，正好验证前端 uploadAttachment 的 camelCase 映射）
   if (url.pathname === "/api/attachments/upload" && request.method === "POST") {
     const chunks = [];

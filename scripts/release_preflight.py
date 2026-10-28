@@ -21,6 +21,8 @@ FORBIDDEN_PREFIXES = (
     "handoff-",
 )
 ALLOWED_PRESET_PREFIX = "presets/Demiurge-presets-regex/"
+# .bin 禁令针对模型权重；桌面壳自检夹具是 38 B 的签名载荷，必须随源码树进 tag
+ALLOWED_FORBIDDEN_SUFFIX_PATHS = {"desktop/tauri/testdata/updater-fixture.bin"}
 FORBIDDEN_SUFFIXES = (
     ".safetensors",
     ".ckpt",
@@ -180,7 +182,10 @@ def validate(root: Path) -> list[str]:
             ALLOWED_PRESET_PREFIX.lower()
         ):
             errors.append(f"禁止上传的未清洗预设: {rel}")
-        if lowered.endswith(FORBIDDEN_SUFFIXES) or Path(lowered).name in {
+        if (
+            lowered.endswith(FORBIDDEN_SUFFIXES)
+            and lowered not in ALLOWED_FORBIDDEN_SUFFIX_PATHS
+        ) or Path(lowered).name in {
             ".env",
             "user_state.json",
         }:
