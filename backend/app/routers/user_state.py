@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 from app.config import DATA_DIR
 from app.services import repo_meta
+from app.services.secret_fields import SECRET_KEYS
 
 router = APIRouter()
 @router.get("/proxy-status")
@@ -55,6 +56,43 @@ def get_state() -> UserState:
     )
 
 
+def _keep_stored_secrets(incoming: object, stored: object, key: str = "") -> object:
+    """空密钥不覆盖盘上非空值（多客户端整对象覆盖写的写侧护栏）。
+
+    localStorage 副本按 `stripSecrets` 清空了密钥，客户端启动回填一旦失败（后端忙/中继
+    502）就会把这份空副本整份推回来；没有这层护栏，一次离线启动就能把盘上真 key 抹成
+    空串（2026-10-28 实测：8 个模型 + embed + 各 token 全空，之后每轮生成 401）。
+    非空值照常覆盖（换 key 生效）；模型条目按 id 对齐，被删掉的条目不会因此复活。
+    密钥字段清单单一属主＝services/secret_fields（与配置包导出共用）。
+    """
+    if isinstance(incoming, dict):
+        base = stored if isinstance(stored, dict) else {}
+        merged = {k: _keep_stored_secrets(v, base.get(k), k) for k, v in incoming.items()}
+        # 旧 APK / 旧前端的 Settings 可能还没有某个密钥字段：缺席也按「空」处理，
+        # 否则换端升级期一次整份上传就会把新字段从盘上删掉。
+        for name in SECRET_KEYS:
+            old = base.get(name)
+            if name not in merged and isinstance(old, str) and old.strip():
+                merged[name] = old
+        return merged
+    if isinstance(incoming, list):
+        pool = stored if isinstance(stored, list) else []
+        by_id = {it["id"]: it for it in pool if isinstance(it, dict) and isinstance(it.get("id"), str)}
+        kept = []
+        for index, item in enumerate(incoming):
+            key_of = item.get("id") if isinstance(item, dict) else None
+            if isinstance(key_of, str):
+                ref = by_id.get(key_of)
+            else:
+                ref = pool[index] if index < len(pool) else None
+            kept.append(_keep_stored_secrets(item, ref, key))
+        return kept
+    if key in SECRET_KEYS and isinstance(stored, str) and stored.strip():
+        if incoming is None or (isinstance(incoming, str) and not incoming.strip()):
+            return stored
+    return incoming
+
+
 @router.post("")
 def set_state(state: UserState) -> dict[str, bool]:
     """保存用户存档到 data/user_state.json。整体覆盖写。
@@ -62,9 +100,17 @@ def set_state(state: UserState) -> dict[str, bool]:
     `selection` 未出现在请求里时沿用盘上旧值：启动早期 repos/settings 的合并上传
     不该把已记住的作品选择抹掉（旧前端也不带这个字段）。盘上旧值经读侧属主
     repo_meta.load_user_state 取（缺失/损坏即无旧值可保）。
+
+    密钥同理「缺席≠删除」：空密钥不清空盘上非空值（见 _keep_stored_secrets），
+    整个 settings 缺席时沿用盘上旧值。
     """
     existing = repo_meta.load_user_state()
-    payload: dict = {"repos": state.repos, "settings": state.settings}
+    settings: object = state.settings
+    if settings is None:
+        settings = existing.get("settings")
+    elif isinstance(settings, dict) and isinstance(existing.get("settings"), dict):
+        settings = _keep_stored_secrets(settings, existing["settings"])
+    payload: dict = {"repos": state.repos, "settings": settings}
     if "selection" in state.model_fields_set:
         payload["selection"] = state.selection
     elif "selection" in existing:

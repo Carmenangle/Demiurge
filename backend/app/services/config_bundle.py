@@ -42,6 +42,7 @@ from app.services import (
     rag_store, regex_store, repo_meta, repo_transfer, thumbnail_store,
     view_urls, worldbook_store,
 )
+from app.services.secret_fields import MODEL_LIST_KEYS, MODEL_OBJ_KEYS, SECRET_KEYS
 
 BUNDLE_META = "__config/meta.json"
 SETTINGS_MEMBER = "settings.json"
@@ -77,19 +78,9 @@ NETWORK_KEYS = (
 )
 PRESERVE_KEYS = DEVICE_KEYS + NETWORK_KEYS
 
-# 密钥字段清单（前端 stripSecrets 的后端投影；递归按字段名剥离，覆盖模型数组）。
-# 只用于「默认不进包」，不进包时是**省略字段**而非清空——导入合并得以保留本机已有密钥。
-SECRET_KEYS = frozenset({
-    "apiKey",
-    "hfToken",
-    "civitaiToken",
-    "smitheryKey",
-    "pixivRefreshToken",
-    "danbooruLogin",
-    "danbooruApiKey",
-})
-MODEL_LIST_KEYS = ("chatModels", "imageModels", "videoModels")
-MODEL_OBJ_KEYS = ("embedModel", "vlmModel")
+# 密钥字段清单见 services/secret_fields（与 user-state 写侧护栏共用，禁止各抄一份）。
+# 这里的用法：递归按字段名剥离，覆盖模型数组；只用于「默认不进包」，
+# 不进包时是**省略字段**而非清空——导入合并得以保留本机已有密钥。
 
 # 素材分类：包内目录名 -> 设置里的目录键。提示词模版落在 DATA_DIR，单列。
 ASSET_DIRS = (
