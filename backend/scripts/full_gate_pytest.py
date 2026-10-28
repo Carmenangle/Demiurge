@@ -13,6 +13,9 @@
   .venv/Scripts/python.exe scripts/full_gate_pytest.py [--junit ../_tmp/junit-full.xml]
       [--timeout 7200] [-- 透传给 pytest 的参数]
  junit 默认落在仓库根 `_tmp/`（已 gitignore），不往工作树里丢产物。
+
+另：跑前会列一遍 watched 目录下的**非 `.py` 文件**——它们不在快照面里，跑批期间被改写
+不会被判废。只提示、不判红、不扩面（今日 3 个：两份 JSON 清单 + 一份基线）。
 """
 from __future__ import annotations
 
@@ -31,6 +34,38 @@ BACKEND = Path(__file__).resolve().parents[1]
 # 「能改结果却查不出」的门。宁可过宽：误作废只赔一轮重跑，漏作废赔一个假绿。
 WATCHED_DIRS = ("app", "tests", "scripts")
 WATCHED_FILES = ("pytest.ini", "pyproject.toml", "mypy_files.txt")
+_CACHE_DIRS = frozenset({"__pycache__", ".pytest_cache"})
+
+
+def non_python_files(limit: int = 5) -> tuple[int, list[str]]:
+    """watched 目录下不在快照面里的文件（总数, 前 limit 个相对路径）。
+
+    快照只收 `*.py`：将来出现 `tests/fixtures/*.json` 这类参数化数据时，「跑批期间
+    被改写」这道保险对它们不成立——把它们摆到台面上，是让那个漏口可见而不是补上。
+    """
+    hits: list[str] = []
+    for name in WATCHED_DIRS:
+        root = BACKEND / name
+        if not root.is_dir():
+            continue
+        for path in sorted(root.rglob("*")):
+            if not path.is_file() or path.suffix == ".py":
+                continue
+            if _CACHE_DIRS.intersection(path.parts):
+                continue
+            hits.append(path.relative_to(BACKEND).as_posix())
+    return len(hits), hits[:limit]
+
+
+def non_python_hint(limit: int = 5) -> str:
+    count, sample = non_python_files(limit)
+    if count == 0:
+        return ""
+    more = "" if count <= len(sample) else " …"
+    return (
+        f"[gate] ⚠ {count} 个非 .py 文件不在快照面（跑批期间被改写不会被判废）："
+        f"{', '.join(sample)}{more}"
+    )
 
 
 def snapshot() -> dict[str, str]:
@@ -71,6 +106,9 @@ def junit_summary(path: Path) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # 重定向到文件/管道时 Windows 的 stdout 是 locale 编码（GBK），⚠/🔴 会直接
+    # UnicodeEncodeError 把门禁打死；控制台本来就是 UTF-8，这里统一成 UTF-8。
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--junit", default="../_tmp/junit-full.xml")
     parser.add_argument("--timeout", type=int, default=7200)
@@ -79,6 +117,9 @@ def main(argv: list[str] | None = None) -> int:
 
     junit = (BACKEND / args.junit).resolve()
     junit.parent.mkdir(parents=True, exist_ok=True)
+    hint = non_python_hint()
+    if hint:
+        print(hint, flush=True)
     before = snapshot()
     print(f"[gate] 快照 {len(before)} 个文件，开始 pytest（junit→{junit}）", flush=True)
 
