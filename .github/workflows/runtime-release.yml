@@ -19,7 +19,7 @@ env:
 
 jobs:
   plan:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       version: ${{ steps.version.outputs.version }}
@@ -39,7 +39,7 @@ jobs:
         run: echo "version=${INPUT_VERSION:-$REF_NAME}" >> "$GITHUB_OUTPUT"
 
   quality:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: backend
@@ -57,7 +57,7 @@ jobs:
       - name: 后端门禁
         run: |
           python -m pip install -r requirements-dev.txt
-          ruff check app
+          ruff check app tests
           lint-imports
           python -m mypy @mypy_files.txt
           python scripts/check_hardcode.py
@@ -193,7 +193,7 @@ jobs:
   publish:
     if: startsWith(github.ref, 'refs/tags/')
     needs: [plan, build, desktop-shell]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4

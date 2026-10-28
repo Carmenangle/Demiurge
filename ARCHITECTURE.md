@@ -1889,4 +1889,7 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
    ⚠ 条 75⑥ 的「APK 未重出」由本条闭环（已重出并验静态身份）；**真机重装与联机复验仍待用户操作**。
    ⑤ **CI 教训**：ruff 门禁口径是 `ruff check app tests`——两处 py3.12+ 才合法的写法（f-string 表达式复用外层引号）
    与 2026-10-27 遗留的未用导入（`test_repo_sync.py` 的 `hashlib`）只在 CI 红；本地 `ruff check app` 与 py3.13
-   pytest 都看不见。`setup-python` 钉 3.13.11 曾瞬时失败（该版本仍在清单中），重跑即可，不是配置问题。
+   pytest 都看不见。⑥ **`ubuntu-latest` 迁到 Ubuntu 26.04 后 `setup-python` 钉的 3.13.11 在清单里找不到**
+   （两次连红同一处，第一次误判瞬时）：release 侧的 `plan`/`quality`/`publish` 与 `portable-release` 三个 job 一律
+   显式 `runs-on: ubuntu-24.04`（与 `release/runtime-targets.json` 的 linux runner 对齐），不再跟浮动标签；
+   `quality` 的 ruff 同步补成 `app tests`，与 ci.yml 口径一致（发布门禁不得比 ci 松）。

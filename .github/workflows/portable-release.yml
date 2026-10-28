@@ -20,7 +20,7 @@ jobs:
           - windows-x64-full-rag
           - macos-arm64-full-rag
           - linux-x64-full-rag
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: 下载已验证的本平台分层资产
@@ -52,7 +52,7 @@ jobs:
 
   cleanup:
     needs: [package]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: 清理分层中间产物，Release 只保留用户一键包
         env:
@@ -68,7 +68,7 @@ jobs:
 
   notes:
     needs: [package, cleanup]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: 更新下载说明
