@@ -16,11 +16,18 @@ function mediaBlock(condition: string): string {
   return blockFrom(open);
 }
 
-/** 同上，但取**最后**一段（同条件的窄屏段有多份，本轮新增的追加在文件末尾）。 */
-function lastMediaBlock(condition: string): string {
-  const open = css.lastIndexOf(`${condition} {`);
-  expect(open, `找不到 @media ${condition}`).toBeGreaterThanOrEqual(0);
-  return blockFrom(open);
+/** 取**含指定内容**的那一段同条件窄屏段。
+ *  ⚠ 别再用「最后一段」：后续每一轮都会往文件尾追加新的手机段，「最后一段」会跟着轮次漂移，
+ *  把上一轮钉住的规则顶掉（第③刀就因此误报「生成详情堆叠规则被搬走」）。
+ *  合同要保的是「这条规则只在手机断点里生效」，与它落在哪一段无关。 */
+function mediaBlockWith(condition: string, needle: string): string {
+  const blocks: string[] = [];
+  for (let at = css.indexOf(`${condition} {`); at >= 0; at = css.indexOf(`${condition} {`, at + 1)) {
+    blocks.push(blockFrom(at));
+  }
+  const hit = blocks.find((b) => b.includes(needle));
+  expect(hit, `${blocks.length} 段手机断点里都没有「${needle}」`).toBeTruthy();
+  return hit as string;
 }
 
 /** 从 at 处的规则/媒体块起始位置，返回到配对 `}` 为止的整段文本。 */
@@ -120,8 +127,9 @@ describe("手机内容弹窗全屏（2026-10-27 问题7：顶部空出一大片�
     expect(css).toContain("height: 86dvh; max-height: 86dvh !important;");
   });
   it("生成详情在竖屏改上下堆叠（左右分栏把图压到 190px）、横屏改回左右", () => {
-    const phone = lastMediaBlock(
+    const phone = mediaBlockWith(
       "@media (max-width: 720px), (pointer: coarse) and (hover: none) and (max-width: 1024px)",
+      ".modal.asset-detail-modal .asset-detail-body { flex-direction: column; gap: 10px; }",
     );
     expect(gallery).toContain('className="asset-detail-body"');
     expect(phone).toContain(

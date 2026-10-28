@@ -24,6 +24,7 @@ import {
   X,
   Minimize2,
   MessageSquarePlus,
+  Plus,
   FileText, MoreHorizontal } from "lucide-react";
 import { type Repo, type RepoBinding } from "../stores/repos";
 import { type WorkMode } from "../lib/viewRouting";
@@ -55,6 +56,7 @@ import { templateSelectorOptions } from "../lib/promptTemplates";
 import { subscribePlanTaskActivities, approvePlanTask, cancelPlanTask, type PlanTaskActivity } from "../lib/planTaskActivity";
 import { UserMessage, AssistantMessage, InspirationCard, PortsPlanCard } from "../components/chat/ChatMessages";
 import { ModelSwitcher, SizeSwitcher } from "../components/chat/ChatControls";
+import { useMobileViewport } from "../lib/useMobileViewport";
 import { comfyStatus, startComfy, localViewUrl } from "../api/comfyui";
 import { listAgents, type Agent } from "../api/agents";
 import { listTemplates, type Template } from "../api/workflows";
@@ -112,11 +114,19 @@ export function ChatView({
     settings.presetDir, resolvedPresetName,
   );
   // 三模式输入框提示各异
-  const inputPlaceholder = {
-    story: "推进剧情、描写行动或对话；剧情高潮点会自动生成插画内嵌。Enter 发送，图片用上方 + 添加或直接粘贴，文本文件（md/txt 等）可拖进输入框供 Agent 参考",
-    generate: "说出你想要的：描述画面直接生图、贴图让它反推或改图、提问绘画；/w 可选专业工作流。Enter 发送，图片用上方 + 添加或直接粘贴，文本文件（md/txt 等）可拖进输入框供 Agent 参考",
-    code: "创建或检查角色卡、编写作品脚本、读取当前作品文件排错。Enter 发送",
-  }[workMode];
+  const isMobileViewport = useMobileViewport();
+  // 手机端占位只留一句动作提示；完整用法（Enter 发送、粘贴图片、拖入文件）在「新手引导 → 剧情扮演 → 开始剧情对话」。
+  const inputPlaceholder = isMobileViewport
+    ? {
+      story: "输入剧情、行动或对话…",
+      generate: "描述画面、贴图改图，或直接提问…",
+      code: "描述要创建或检查的内容…",
+    }[workMode]
+    : {
+      story: "推进剧情、描写行动或对话；剧情高潮点会自动生成插画内嵌。Enter 发送，图片用上方 + 添加或直接粘贴，文本文件（md/txt 等）可拖进输入框供 Agent 参考",
+      generate: "说出你想要的：描述画面直接生图、贴图让它反推或改图、提问绘画；/w 可选专业工作流。Enter 发送，图片用上方 + 添加或直接粘贴，文本文件（md/txt 等）可拖进输入框供 Agent 参考",
+      code: "创建或检查角色卡、编写作品脚本、读取当前作品文件排错。Enter 发送",
+    }[workMode];
   // 显示层宏：{{char}}→角色卡名、{{user}}→选中人设名(缺省「我」)。传给消息组件在渲染处统一替换。
   // useMemo 稳定引用，避免每次渲染新建对象打破消息组件 memo。
   const personaName = activeUserPersona(settings).name || "";
@@ -700,27 +710,20 @@ export function ChatView({
           </button>
         ) : (
           <>
+            {/* 三组化（2026-10-28 P1-5）：工作方式 / 生成开关 / 会话维护。
+                宽屏（≥1280px）关键项「图标＋短文字」，1280 以下退回纯图标；激活色只给真正的开启态。 */}
             <div className={`head-tools${headToolsOpen ? " open" : ""}`}>
-                        <button
-              className="btn icon-only"
-              style={{ marginLeft: "auto" }}
-              onClick={compact}
-              disabled={compacting || !!streamingId || wfRunning}
-              title="压缩上下文：总结从第一条到最后一条的完整会话，并保留最后成果图；不受普通 Agent 最近 6+6 条读取范围限制"
-            >
-              <Archive size={15} />
-            </button>
-            {/* Narrative CI：剧情一致性诊断（非阻断，图标 + 待处置徽标，点击展开浮层） */}
-            {repo && <NarrativeCiPanel outputDir={settings.outputDir} repoId={repo.id} />}
+            <div className="head-tool-group" style={{ marginLeft: "auto" }} role="group" aria-label="工作方式">
             {/* 对话/画布视图切换（功能栏同款 icon-only，-><- 图标） */}
             <button
-              className={`btn icon-only ${contentView === "canvas" ? "primary" : ""}`}
+              className="btn icon-only head-tool-labeled"
               onClick={() => switchContentView(contentView === "canvas" ? "chat" : "canvas")}
               title={contentView === "canvas"
                 ? "当前为画布视图，点击切回对话"
                 : "当前为对话视图，点击切换画布（节点化浏览生成记录）"}
             >
               <GitCompareArrows size={15} />
+              <span className="head-tool-text">{contentView === "canvas" ? "对话" : "画布"}</span>
             </button>
             {cardName && (
               <button
@@ -729,44 +732,78 @@ export function ChatView({
                 title="数据表：好感度/态度接状态引擎、往事纪要接 RAG（可编辑），及背包/技能/任务/角色等通用表（AI 每轮自动填，可手动改）"
               >
                 <Table size={15} />
+                <span className="head-tool-text">数据表</span>
               </button>
             )}
+            <button
+              className="btn icon-only"
+              onClick={() => setShowKnowledge(true)}
+              title="知识库：录入角色设定、画风说明等，AI 对话自动检索"
+            >
+              <Boxes size={15} />
+              <span className="head-tool-text">知识库</span>
+            </button>
+            <button
+              className={`btn icon-only ${showComfy ? "primary is-selected" : ""}`}
+              aria-pressed={showComfy}
+              onClick={() => setShowComfy((s) => !s)}
+              title="ComfyUI 节点面板"
+            >
+              <PanelRight size={15} />
+              <span className="head-tool-text">节点面板</span>
+            </button>
+            </div>
             {cardName && (
-              <button
-                className={`btn icon-only ${settings.illustrate ? "primary" : ""}`}
-                aria-pressed={settings.illustrate}
-                onClick={() => update({ illustrate: !settings.illustrate })}
-                title={`剧情自动生成${settings.illustrate ? "（开）" : "（关）"}：开启后在剧情高潮点（好感度跨档/失控/每段兜底）按多元数据插入勾选的类型自动生成图片/视频/音频。异步后台进行，可在右侧徽记查看进度`}
-              >
-                <ImageIcon size={15} />
-              </button>
+            <div className="head-tool-group" role="group" aria-label="生成开关">
+            <button
+              className={`btn icon-only head-tool-labeled ${settings.illustrate ? "primary" : ""}`}
+              aria-pressed={settings.illustrate}
+              onClick={() => update({ illustrate: !settings.illustrate })}
+              title={`剧情自动生成${settings.illustrate ? "（开）" : "（关）"}：开启后在剧情高潮点（好感度跨档/失控/每段兜底）按多元数据插入勾选的类型自动生成图片/视频/音频。异步后台进行，可在右侧徽记查看进度`}
+            >
+              <ImageIcon size={15} />
+              <span className="head-tool-text">自动插画</span>
+            </button>
+            <button
+              className={`btn icon-only head-tool-labeled ${settings.promptOnlyGeneration ? "primary" : ""}`}
+              aria-pressed={settings.promptOnlyGeneration}
+              onClick={() => update({ promptOnlyGeneration: !settings.promptOnlyGeneration })}
+              title={`试跑（只生成提示词）${settings.promptOnlyGeneration ? "（开）" : "（关）"}：开后提示词照常完整编译，但不提交 ComfyUI——图片与视频都不出图，成稿只落 trace 供审查（ illustration.submitted ），用于批量对照提示词`}
+            >
+              <FileText size={15} />
+              <span className="head-tool-text">试跑</span>
+            </button>
+            <button
+              className={`btn icon-only head-tool-labeled ${mediaInsertOn ? "primary" : ""}`}
+              aria-pressed={mediaInsertOn}
+              onClick={() => setShowMediaInsert(true)}
+              title={`多元数据插入${mediaInsertOn ? "（开）" : "（关）"}：勾选随剧情自动生成的内容类型（图片/视频/音频），并分别预设 ComfyUI 工作流模板 + 按角色参数（LoRA/底图/参考音轨）。保存预设会自动开启剧情自动生成`}
+            >
+              <Clapperboard size={15} />
+              <span className="head-tool-text">多元数据</span>
+            </button>
+            </div>
             )}
-            {cardName && (
-              <button
-                className={`btn icon-only ${settings.promptOnlyGeneration ? "primary" : ""}`}
-                aria-pressed={settings.promptOnlyGeneration}
-                onClick={() => update({ promptOnlyGeneration: !settings.promptOnlyGeneration })}
-                title={`试跑（只生成提示词）${settings.promptOnlyGeneration ? "（开）" : "（关）"}：开后提示词照常完整编译，但不提交 ComfyUI——图片与视频都不出图，成稿只落 trace 供审查（ illustration.submitted ），用于批量对照提示词`}
-              >
-                <FileText size={15} />
-              </button>
-            )}
-            {cardName && (
-              <button
-                className={`btn icon-only ${mediaInsertOn ? "primary" : ""}`}
-                aria-pressed={mediaInsertOn}
-                onClick={() => setShowMediaInsert(true)}
-                title={`多元数据插入${mediaInsertOn ? "（开）" : "（关）"}：勾选随剧情自动生成的内容类型（图片/视频/音频），并分别预设 ComfyUI 工作流模板 + 按角色参数（LoRA/底图/参考音轨）。保存预设会自动开启剧情自动生成`}
-              >
-                <Clapperboard size={15} />
-              </button>
-            )}
+            {/* 会话维护组：宽屏扁平铺开，窄屏收进「更多」浮层（压缩/诊断/导入导出/清除） */}
+            <div className="head-tool-group head-tools-more" role="group" aria-label="会话维护">
+            <button
+              className="btn icon-only"
+              onClick={compact}
+              disabled={compacting || !!streamingId || wfRunning}
+              title="压缩上下文：总结从第一条到最后一条的完整会话，并保留最后成果图；不受普通 Agent 最近 6+6 条读取范围限制"
+            >
+              <Archive size={15} />
+              <span className="head-tool-text">压缩</span>
+            </button>
+            {/* Narrative CI：剧情一致性诊断（非阻断，图标 + 待处置徽标，点击展开浮层） */}
+            {repo && <NarrativeCiPanel outputDir={settings.outputDir} repoId={repo.id} />}
             <button
               className="btn icon-only"
               onClick={handleExportChat}
               title="导出会话：把本作品的完整会话记录导出为 JSON（备份或搬到别处）"
             >
               <Download size={15} />
+              <span className="head-tool-text">导出</span>
             </button>
             <button
               className="btn icon-only"
@@ -775,6 +812,7 @@ export function ChatView({
               title="导入会话：导入 JSON 会话记录，整体覆盖本作品当前会话"
             >
               <Upload size={15} />
+              <span className="head-tool-text">导入</span>
             </button>
             <input
               ref={snapshotFileRef} type="file" accept="application/json,.json"
@@ -787,33 +825,20 @@ export function ChatView({
               title="清除缓存：清空当前对话内容并删除本仓库上传的参考图（reference 文件夹）；资产库与知识库保留"
             >
               <Trash2 size={15} />
+              <span className="head-tool-text">清缓存</span>
             </button>
+            </div>
             </div>
           </>
         )}
         <button
-          className="btn icon-only"
-          onClick={() => setShowKnowledge(true)}
-          title="知识库：录入角色设定、画风说明等，AI 对话自动检索"
+          className="btn icon-only head-tools-toggle"
+          aria-expanded={headToolsOpen}
+          title="会话工具（压缩/数据表/自动生成/导入导出等）"
+          onClick={() => setHeadToolsOpen((s) => !s)}
         >
-          <Boxes size={15} />
+          <MoreHorizontal size={16} />
         </button>
-        <button
-          className={`btn icon-only ${showComfy ? "primary is-selected" : ""}`}
-          aria-pressed={showComfy}
-          onClick={() => setShowComfy((s) => !s)}
-          title="ComfyUI 节点面板"
-        >
-          <PanelRight size={15} />
-        </button>
-            <button
-              className="btn icon-only head-tools-toggle"
-              aria-expanded={headToolsOpen}
-              title="会话工具（压缩/数据表/自动生成/导入导出等）"
-              onClick={() => setHeadToolsOpen((s) => !s)}
-            >
-              <MoreHorizontal size={16} />
-            </button>
       </div>
 
       {pendingPlan && (
@@ -1155,11 +1180,12 @@ export function ChatView({
               aria-valuemax={360}
               aria-valuenow={chatInput.height}
               tabIndex={0}
-              title="上下拖动调整输入框高度"
+              title="上下拖动调整输入框高度；双击恢复默认"
               onMouseDown={(e) => {
                 e.preventDefault();
                 chatInput.beginResize(e.clientY);
               }}
+              onDoubleClick={chatInput.resetHeight}
               onKeyDown={(e) => {
                 if (chatInput.resizeByKey(e.key)) e.preventDefault();
               }}
@@ -1212,6 +1238,15 @@ export function ChatView({
             : inputPlaceholder}
         />
         <div className="chat-actions">
+          {/* 上传入口：附件空态不再常驻一整行，收进操作条最左 */}
+          <button
+            className="btn icon-only chat-upload-btn"
+            type="button"
+            title="上传图片/文件（也可直接粘贴或拖进输入框）"
+            onClick={() => richRef.current?.openFilePicker()}
+          >
+            <Plus size={18} />
+          </button>
           {/* 画布工作流运转进度条（展开态）：与对话模式一致，嵌入工具栏行、
               位于模型切换器等功能按钮左侧（margin-right:auto 占满左侧空余）。
               折叠为小球时由 wrap 外的 .canvas-wf-runs 浮条兜底显示。 */}
@@ -1383,6 +1418,8 @@ export function ChatView({
               <MobileCanvasNotice
                 title="ComfyUI 节点面板（手机端不提供画布）"
                 hint="节点面板要直连 ComfyUI 页面；手机上无论联机同库还是云端地址都连不到，故不渲染画布。"
+                onClose={() => setShowComfy(false)}
+                closeLabel="返回对话"
               />
             ) : comfyRunning ? (
               <iframe className="comfy-frame" src={settings.comfyuiUrl} title="ComfyUI" />

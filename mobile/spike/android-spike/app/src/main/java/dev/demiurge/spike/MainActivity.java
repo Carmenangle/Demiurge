@@ -14,6 +14,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.Base64;
 import android.util.Log;
+import android.view.View;
 import android.view.ViewGroup;
 import android.webkit.CookieManager;
 import android.webkit.WebResourceRequest;
@@ -117,6 +118,17 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         root.addView(logScroller, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(LOG_HEIGHT_DP)));
+
+        // P1-7（2026-10-28 真机审查第④刀）：调试日志条默认不出现在任何包。
+        // 装在手机上的一直是 **debug** APK（出包口径见 docs/memory/topic-index-by-date.md
+        // 2026-10-28：`:app:assembleDebug` → dist/*-debug.apk），所以按 BuildConfig.DEBUG
+        // 收口等于没收口 ⇒ 改成显式开关：出问题时 `-Pdemiurge.showDebugLog=true` 重出包。
+        // 日志本身照旧进 logView 与 Logcat，只是不占屏；
+        // adb logcat -s DemiurgeSpike 随时能看到全部 stamp，不需要这条 UI。
+        if (!BuildConfig.SHOW_DEBUG_LOG) {
+            toggle.setVisibility(View.GONE);
+            logScroller.setVisibility(View.GONE);
+        }
 
         setContentView(root);
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(

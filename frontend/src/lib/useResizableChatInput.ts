@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  DEFAULT_CHAT_INPUT_HEIGHT,
   clampChatInputHeight,
   loadChatInputHeight,
   saveChatInputHeight,
@@ -73,5 +74,11 @@ export function useResizableChatInput(storage: StorageLike = localStorage) {
     return true;
   }, [height, storage]);
 
-  return { height, beginResize, resizeByKey };
+  // 双击手柄回默认高度（不新增设置项）：清掉 localStorage 里的历史拖拽值。
+  const resetHeight = useCallback(() => {
+    setHeight(DEFAULT_CHAT_INPUT_HEIGHT);
+    try { saveChatInputHeight(storage, DEFAULT_CHAT_INPUT_HEIGHT); } catch { /* ignore */ }
+  }, [storage]);
+
+  return { height, beginResize, resizeByKey, resetHeight };
 }

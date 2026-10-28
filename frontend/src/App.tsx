@@ -7,8 +7,10 @@ import {
   resolveActivityChatTarget,
 } from "./lib/viewRouting";
 import { useSettings, activeChatModel, resolvedEmbedModel, activeLiquidGlassWallpaper } from "./stores/settings";
+import { overlayIdsOf, stripOverlaySegments, useOverlayRoute } from "./lib/overlayRoute";
 import { liquidGlassCssVars, nextLiquidGlassWallpaper } from "./lib/liquidGlass";
 import { LiquidGlassBackdrop } from "./components/LiquidGlassBackdrop";
+import { watchMobileKeyboard } from "./lib/mobileViewport";
 import { useRepos, type Repo } from "./stores/repos";
 import {
   parseSelection, pickSelection, readLocalSelection, reconcileSelection,
@@ -29,6 +31,7 @@ import { deleteRepoFolder } from "./api/userState";
 import { AppBody } from "./AppBody";
 import { WORKS_ROOT_UNCONFIGURED_EVENT } from "./api/client";
 import { recentWorks as selectRecentWorks } from "./lib/repoPresentation";
+import { MOBILE_PROFILE } from "./lib/mobileProfile";
 import { hasPendingComfyGeneration, hasServerPendingComfyGeneration } from "./lib/comfyBackgroundActivity";
 
 // 页面边界按需加载；应用壳、后台活动和快捷工具保持常驻。
@@ -52,6 +55,9 @@ export function App() {
     root.dataset.lgSidebar = lg.sidebarGlass ? "on" : "off";
     root.dataset.lgSettings = lg.glassWindow ? "on" : "off";
   }, [lg]);
+
+  // 手机键盘：visualViewport 塌陷 ⇒ html[data-kb-open]，CSS 收起底栏与会话头。
+  useEffect(() => watchMobileKeyboard(), []);
 
   // 自动轮换：只在液态玻璃主题下运行，参数变化后从当前壁纸重新计时。
   const lgRef = useRef(lg);
@@ -158,6 +164,15 @@ export function App() {
   const [regexOpen, setRegexOpen] = useState(false);  // 方法功能栏「正则」弹层（全局作用）
   const [presetOpen, setPresetOpen] = useState(false); // 方法功能栏「预设」弹层（仅剧情模式）
 
+  // 仓库增删改与两类提示弹窗（#95）：开/关各记一段历史，手机返回键先关弹窗、再退页面。
+  useOverlayRoute(creating ? "repo-create" : null, () => setCreating(false));
+  useOverlayRoute(creatingSubFor ? "repo-create-sub" : null, () => setCreatingSubFor(null));
+  useOverlayRoute(renaming ? "repo-rename" : null, () => setRenaming(null));
+  useOverlayRoute(deleting ? "repo-delete" : null, () => setDeleting(null));
+  useOverlayRoute(worksRootAlert ? "works-root-alert" : null, () => setWorksRootAlert(null));
+  useOverlayRoute(delBlocked ? "delete-blocked" : null, () => setDelBlocked(null));
+  useOverlayRoute(nameErr ? "name-error" : null, () => setNameErr(null));
+
   const topRepos = childrenOf(undefined);          // 顶层 = 大仓库
   const works = childrenOf(repoId ?? undefined);    // 选中大仓库下 = 作品
   const activeWorkRaw = workId ? repos.find((r) => r.id === workId) ?? null : null;
@@ -187,6 +202,11 @@ export function App() {
   // 壳层返回键与浏览器后退只改 URL，不监听就等于按了没反应（2026-10-27 手机端实锤）。
   // 点击处仍是「先写 hash 再置状态」，这里同值 setState 被 React 短路，不构成回环。
   useEffect(() => {
+    // 弹窗状态不由 hash 恢复（没有可回灌的弹窗状态）：开屏先摘掉残留的弹窗段，
+    // 否则返回键会先吞掉一条「看着没反应」的记录。
+    if (overlayIdsOf(window.location.hash).length > 0) {
+      window.history.replaceState(window.history.state, "", stripOverlaySegments(window.location.hash));
+    }
     const apply = () => {
       const route = parseRouteHash(window.location.hash);
       switch (route.kind) {
@@ -443,22 +463,31 @@ export function App() {
             />
           </Suspense>
         </main>
-        <Suspense fallback={null}>
-          <SupportWidget
-            chat={activeChatModel(settings)}
-            embed={resolvedEmbedModel(settings)}
-            repoId={workId || repoId || "home"}
-            onOpenChat={openBackgroundChat}
-            onOpenSettings={openSettingsSubview}
-          />
-          <QuickToolsWidget onOpenFull={() => {
-            setSection("system");
-            setSubView("tools");
-            setSettingsOpen(false);
-            setBrowseRepoId(null);
-            window.location.hash = "#/system/tools";
-          }} />
-        </Suspense>
+        {/* 右侧浮钮 Dock（2026-10-28）：玻璃控制台 / 快捷工具 / 后台活动固定顺序竖排，
+            桌面（≥721px 鼠标）落在这条 56px 竖列里，页面各容器预留右侧安全区。
+            手机沿用同一批浮钮（可拖动 / 长按隐藏），不再另设「工具」抽屉入口——
+            2026-10-28 用户定案：抽屉没有额外作用，还难看。 */}
+        <div className="app-dock">
+          <Suspense fallback={null}>
+            {settings.theme === "liquid-glass" && !settingsOpen && (
+              <LiquidGlassDock lg={lg} update={settingsStore.updateLiquidGlass} />
+            )}
+            <QuickToolsWidget onOpenFull={() => {
+              setSection("system");
+              setSubView("tools");
+              setSettingsOpen(false);
+              setBrowseRepoId(null);
+              window.location.hash = "#/system/tools";
+            }} />
+            <SupportWidget
+              chat={activeChatModel(settings)}
+              embed={resolvedEmbedModel(settings)}
+              repoId={workId || repoId || "home"}
+              onOpenChat={openBackgroundChat}
+              onOpenSettings={openSettingsSubview}
+            />
+          </Suspense>
+        </div>
       </div>
 
       {worksRootAlert && (
@@ -601,11 +630,6 @@ export function App() {
           onClose={() => setPresetOpen(false)}
         />
       )}
-      {settings.theme === "liquid-glass" && !settingsOpen && (
-        <Suspense fallback={null}>
-          <LiquidGlassDock lg={lg} update={settingsStore.updateLiquidGlass} />
-        </Suspense>
-      )}
     </div>
   );
 }
@@ -704,7 +728,7 @@ function Topbar(props: {
   if (props.settingsOpen) return <header className="app-topbar topbar-settings"><span className="topbar-title">设置</span></header>;
   if (props.section === "home") {
     return (
-      <header className="app-topbar">
+      <header className="app-topbar topbar-home">
         <span className="topbar-title">创作</span>
         <label className="repo-picker">
           仓库
@@ -744,5 +768,8 @@ function Topbar(props: {
     ? (SECTION_SUBNAV[props.section].find((s) => s.id === props.subView)?.label ?? "")
     : "";
   const secLabel = NAV_SECTIONS.find((s) => s.id === props.section)?.label ?? "";
-  return <header className="app-topbar"><span className="topbar-title">{secLabel}{subLabel ? ` · ${subLabel}` : ""}</span></header>;
+  // P1-2（2026-10-28 真机审查）：手机端钻取页顶栏写「资产管理 · 角色卡」，正文紧跟同一个
+  // H1「角色卡」⇒ 同屏两句重复标题，白占一行。手机端顶栏只留上级栏目名（面包屑），
+  // 页面名由正文 H1 独占；桌面宽度够，维持「栏目 · 子页」原样。
+  return <header className="app-topbar"><span className="topbar-title">{secLabel}{subLabel && !MOBILE_PROFILE ? ` · ${subLabel}` : ""}</span></header>;
 }

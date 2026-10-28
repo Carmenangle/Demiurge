@@ -161,6 +161,39 @@ describe("发送后作废", () => {
   });
 });
 
+// 2026-10-28：空态附件栏常驻 52px + 8px 间距，1024×576 上把正文挤到 120px。
+// 结构改成「有附件才渲染缩略图栏」，上传入口移到操作条（openFilePicker 由 ChatView 调用）。
+describe("附件缩略图栏只在有附件时占位", () => {
+  it("空态不渲染 .rich-imgbar；插入图片后出现", () => {
+    const h = mount("r1");
+    expect(container.querySelector(".rich-imgbar")).toBeNull();
+
+    act(() => { h.ref.current!.insertImage("data:image/png;base64,IMG"); });
+
+    expect(container.querySelectorAll(".rich-imgbar-item img")).toHaveLength(1);
+  });
+
+  it("删掉最后一张图 ⇒ 缩略图栏重新收起", () => {
+    const h = mount("r1");
+    act(() => { h.ref.current!.insertImage("data:image/png;base64,IMG"); });
+
+    act(() => { (container.querySelector(".rich-imgbar-del") as HTMLButtonElement).click(); });
+
+    expect(container.querySelector(".rich-imgbar")).toBeNull();
+  });
+
+  it("openFilePicker 打开隐藏的 file input（操作条上传按钮的唯一入口）", () => {
+    const h = mount("r1");
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    expect(input).toBeTruthy();
+    expect(input.accept).toContain("image/*");
+
+    const click = vi.spyOn(input, "click").mockImplementation(() => {});
+    act(() => { h.ref.current!.openFilePicker(); });
+    expect(click).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("首页（home）= 临时草稿区，不落 localStorage", () => {
   it("home 既不回填也不落盘（刷新即空是既有约定）", async () => {
     const h = mount("home");

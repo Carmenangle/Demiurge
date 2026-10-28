@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import { useOverlayRoute } from "../lib/overlayRoute";
+import { useMobileViewport } from "../lib/useMobileViewport";
 import { X, Upload, Plus, Trash2, RefreshCw, ListChecks, TableProperties, Settings } from "lucide-react";
 import {
   listTables, importTableTemplate, addTableRow, updateTableRow, deleteTableRow,
@@ -32,6 +34,7 @@ const SETTINGS_VIEW = "\u0000settings";  // 左下角设置面板（非真实表
 const LAYER_LABEL: Record<number, string> = { 0: "细", 1: "中", 2: "粗" };
 
 export function TableModal({ outputDir, repoId, cardName, chat, onClose }: Props) {
+  useOverlayRoute("table", onClose);
   const [tables, setTables] = useState<DataTable[]>([]);
   const [state, setState] = useState<CharacterStateDto | null>(null);
   const [chron, setChron] = useState<ChronicleEntry[]>([]);
@@ -215,6 +218,7 @@ function TablePane({
   openManualFill: () => void;
   onDropped: (firstName: string) => void;
 }) {
+  const isMobileViewport = useMobileViewport();
   if (sel === STATE_TABLE) {
     return <StatePane state={state} outputDir={outputDir} repoId={repoId} cardName={cardName}
       busy={busy} setBusy={setBusy} setErr={setErr} setState={setState} />;
@@ -233,7 +237,7 @@ function TablePane({
       busy={busy} setBusy={setBusy} setErr={setErr} />;
   }
   const table = tables.find((t) => t.name === sel);
-  if (!table) return <p style={{ color: "var(--text-muted)" }}>选择左侧的表查看内容，或点「新建表」加一张自定义表。</p>;
+  if (!table) return <p style={{ color: "var(--text-muted)" }}>选择{isMobileViewport ? "上方" : "左侧"}的表查看内容，或点「新建表」加一张自定义表。</p>;
   return <GenericPane table={table} outputDir={outputDir} repoId={repoId}
     busy={busy} setBusy={setBusy} setErr={setErr} setTables={setTables} onDropped={onDropped} />;
 }

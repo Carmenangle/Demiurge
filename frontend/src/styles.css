@@ -1,5 +1,10 @@
 :root {
   font-family: Inter, "Source Han Sans SC", "Noto Sans CJK SC", "Microsoft YaHei", Arial, sans-serif;
+  /* 间距梯度：导航/卡片/工具栏统一走 4 的倍数，避免各写各的 5/6/7/10 */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
 }
 
 /* 明亮：日光柔白、瓷白斜纹、石墨紫灰与矢车菊蓝结构线 */
@@ -9,6 +14,7 @@ html[data-theme="bright"] {
   --bg: #f8f7fa;
   --surface: #ffffff;
   --surface-2: #f1eef3;
+  --surface-solid: #ffffff;
   --text: #2e2b35;
   --text-muted: #6d6876;
   --border: #d6d0da;
@@ -30,6 +36,7 @@ html[data-theme="night"] {
   --bg: #081214;
   --surface: #111a1b;
   --surface-2: #1c282a;
+  --surface-solid: #111a1b;
   --text: #e8e2d6;
   --text-muted: #9aa8a6;
   --border: #405557;
@@ -51,6 +58,7 @@ html[data-theme="eye-care"] {
   --bg: #f3eedc;
   --surface: #faf7ea;
   --surface-2: #e5e8d6;
+  --surface-solid: #faf7ea;
   --text: #303229;
   --text-muted: #6b6e5f;
   --border: #c9c7ad;
@@ -72,6 +80,7 @@ html[data-theme="green"] {
   --bg: #e9f5e9;
   --surface: #e9f5e9;
   --surface-2: #d9ead9;
+  --surface-solid: #e9f5e9;
   --text: #395932;
   --text-muted: #71806d;
   --border: #b8cfb8;
@@ -93,6 +102,7 @@ html[data-theme="gray"] {
   --bg: #d6d0d0;
   --surface: #e3dede;
   --surface-2: #ece7e7;
+  --surface-solid: #e3dede;
   --text: #29262b;
   --text-muted: #686166;
   --border: #aaa2a5;
@@ -136,6 +146,7 @@ html[data-theme="liquid-glass"] {
   --bg: #070b16;
   --surface: rgba(17, 25, 46, 0.68);
   --surface-2: rgba(255, 255, 255, 0.10);
+  --surface-solid: #0d1524;
   --text: #f2f5ff;
   --text-muted: rgba(226, 232, 255, 0.66);
   --border: var(--lg-glass-border);
@@ -157,6 +168,7 @@ html[data-theme="high-contrast"] {
   --bg: #000000;
   --surface: #000000;
   --surface-2: #1a1a1a;
+  --surface-solid: #000000;
   --text: #ffffff;
   --text-muted: #d0d0d0;
   --border: #ffffff;
@@ -332,7 +344,18 @@ select option {
   justify-content: flex-end;
   align-items: center;
   gap: 8px;
-  margin-top: 8px;
+  margin-top: 4px;
+}
+
+/* 输入区收回无效空白：操作条按钮压到 30px 高（桌面），让默认总高落在 144–160px */
+.chat-actions .btn {
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
+
+/* 上传入口从空态附件栏收进操作条最左 */
+.chat-upload-btn {
+  margin-right: auto;
 }
 
 .model-select {
@@ -558,6 +581,16 @@ select option {
   align-items: center;
   gap: 12px;
   min-width: 0;
+}
+
+/* 页标题的说明性副名（2026-10-28 P1-7）：主名称只留一个，另一个降为浅色小字，
+   不再让顶栏「资产管理 · 生成内容」/页内「资产库」/侧栏「生成内容」三种叫法同层竞争。 */
+.page-title-hint {
+  margin-left: 10px;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text-muted);
+  vertical-align: 2px;
 }
 
 /* 页头右侧操作区：按钮组横排 */
@@ -1445,20 +1478,24 @@ textarea.text-tool-short-input { height: auto; min-height: 0; resize: none; over
 }
 .ca-src-name { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* 作品卡（2026-10-28 P1-8）：原先固定 5 列 + 1:1 封面 ⇒ 无封面留大白块、标题换行后
+   同排底部不齐。改成 220px 起的自适应网格、4:3 封面、标题固定两行高度。 */
 .repo-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 18px;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: var(--sp-4);
 }
 
 .repo-card {
   position: relative;
+  display: flex;
+  flex-direction: column;
 }
 
 .repo-cover-wrap { position: relative; }
 
 .repo-cover {
-  aspect-ratio: 1 / 1;
+  aspect-ratio: 4 / 3;
   width: 100%;
   border-radius: var(--radius);
   overflow: hidden;
@@ -1473,6 +1510,17 @@ textarea.text-tool-short-input { height: auto; min-height: 0; resize: none; over
   transition: transform 0.15s, box-shadow 0.15s;
 }
 
+/* 无封面占位：轻量图形 + 一行浅字，不再只甩「暂无图片」四个字 */
+.repo-cover-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+  opacity: 0.85;
+}
+
 .repo-cover:hover {
   transform: translateY(-2px);
   box-shadow: var(--shadow-card);
@@ -1485,15 +1533,21 @@ textarea.text-tool-short-input { height: auto; min-height: 0; resize: none; over
 }
 
 .repo-name {
-  margin: 8px 2px 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin: var(--sp-2) 2px 0;
   font-weight: 600;
   font-size: 14px;
+  line-height: 1.35;
+  min-height: 2.7em;   /* 两行定高：一行的名字也占满两行，同排元数据从同一高度起步 */
 }
 
 .repo-card-meta {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 3px 8px;
+  gap: 3px var(--sp-2);
   margin: 6px 2px 0;
   color: var(--text-muted);
   font-size: 11px;
@@ -1563,6 +1617,44 @@ textarea.text-tool-short-input { height: auto; min-height: 0; resize: none; over
   bottom: 8px;
   display: flex;
   gap: 6px;
+}
+
+/* 卡片「⋯」：重命名 / 删除收进菜单，封面点击仍是唯一主操作 */
+.repo-card-more { position: relative; display: flex; }
+.repo-card-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 20;
+  min-width: 128px;
+  display: flex;
+  flex-direction: column;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+}
+.repo-card-menu > button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.repo-card-menu > button:hover { background: var(--surface-2); }
+.repo-card-menu > button.danger { color: var(--danger); }
+html[data-theme="liquid-glass"] .repo-card-menu {
+  background: rgba(13, 21, 36, 0.94);
+  backdrop-filter: blur(12px) saturate(1.3);
+  -webkit-backdrop-filter: blur(12px) saturate(1.3);
 }
 
 .icon-btn {
@@ -2642,10 +2734,10 @@ textarea.text-tool-short-input { height: auto; min-height: 0; resize: none; over
 }
 
 .settings-nav {
-  width: 240px;
+  width: 208px;
   flex-shrink: 0;
   border-right: 1px solid var(--border);
-  padding: 24px 14px;
+  padding: 24px var(--sp-4);
   overflow-y: auto;
 }
 
@@ -2656,7 +2748,7 @@ textarea.text-tool-short-input { height: auto; min-height: 0; resize: none; over
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.5px;
-  padding: 0 12px 8px;
+  padding: 0 var(--sp-3) var(--sp-2);
 }
 
 .settings-nav-item {
@@ -2902,7 +2994,8 @@ textarea.text-tool-short-input { height: auto; min-height: 0; resize: none; over
 
 .theme-picker {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  /* 2026-10-28 P2：固定三列在 1280 下把说明文字挤碎，改为自适应两/三列 */
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
   gap: 10px;
 }
 
@@ -3087,7 +3180,36 @@ textarea.text-tool-short-input { height: auto; min-height: 0; resize: none; over
 /* 会话工具组包装层（2026-10-27）：桌面 display:contents 完全透明、布局与无包装时逐字一致；
    手机（≤720px 文件尾段）收进浮标点开的浮层 */
 .head-tools { display: contents; }
-.head-tools-toggle { display: none; }
+/* 会话工具三组（2026-10-28 P1-5）：工作方式 / 生成开关 / 会话维护。
+   组包装在窄屏（≤1199px 与手机）由各自的矩阵/浮层规则接管；宽屏用极细分隔线分组。
+   关键项宽屏（≥1280px）图标＋短文字，1280 以下退回纯图标。 */
+.head-tool-group { display: flex; align-items: center; gap: var(--sp-1); min-width: 0; }
+.head-tool-group + .head-tool-group {
+  margin-left: 2px;
+  padding-left: 10px;
+  border-left: 1px solid var(--border);
+}
+.head-tool-text { display: none; }
+@media (min-width: 1280px) and (pointer: fine) {
+  /* 组内按钮一律不压缩：flex 容器默认可收缩，一旦被挤会「文字压到图标上」（实测 1280×720） */
+  .chat-view-head .head-tool-group { flex: 0 0 auto; }
+  .chat-view-head .head-tool-group > * { flex: 0 0 auto; }
+  .chat-view-head h1 { max-width: 260px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* 44px 方形图标按钮（7590 段）靠 width + padding:0!important 钉死；
+     带文字的变体必须在这里显式放开宽度与内边距，否则文字溢出按钮压到图标上。 */
+  .chat-view-head .btn.icon-only.head-tool-labeled {
+    width: auto;
+    min-width: 0;
+    padding: 6px 10px !important;
+    gap: 6px;
+  }
+  .chat-view-head .head-tool-labeled .head-tool-text {
+    display: inline;
+    font-size: 13px;
+    line-height: 1;
+    white-space: nowrap;
+  }
+}
 
 /* 工具栏图标按钮：只留图标，悬停靠 title 提示（对话区去中文腾空间） */
 .chat-view-head .btn.icon-only {
@@ -3096,6 +3218,12 @@ textarea.text-tool-short-input { height: auto; min-height: 0; resize: none; over
   align-items: center;
   justify-content: center;
 }
+
+/* 「更多」浮标只在窄屏出现。必须排在上面那条之后且特异性不低于它：
+   触发器同时带 btn/icon-only/head-tools-toggle 三个类，`.head-tools-toggle`（0,2,0）
+   仍被 `.chat-view-head .btn.icon-only`（0,3,0）压过 ⇒ 桌面也冒出一个「…」（实测 1600×900 可见）。
+   这里写到相等的 0,3,0 并靠顺序取胜；手机/小型桌面段用同一条选择器再点亮。 */
+.chat-view-head .btn.head-tools-toggle { display: none; }
 
 .chat-view-head h1 {
   margin: 0;
@@ -3137,7 +3265,8 @@ textarea.text-tool-short-input { height: auto; min-height: 0; resize: none; over
   color: var(--accent-text);
   padding: 10px 14px;
   border-radius: 16px 16px 4px 16px;
-  max-width: 60%;
+  /* 2026-10-28 P2：60% 在 2K/4K 上会拉出过长行；加 920px 阅读宽度上限 */
+  max-width: min(60%, 920px);
 }
 
 .user-message-text {
@@ -3198,7 +3327,8 @@ textarea.text-tool-short-input { height: auto; min-height: 0; resize: none; over
   border: 1px solid var(--border);
   border-radius: 14px;
   padding: 14px;
-  max-width: 60%;
+  /* 2026-10-28 P2：与用户气泡同一阅读宽度上限，2K/4K 不再无限拉宽 */
+  max-width: min(60%, 920px);
 }
 
 /* 工作流编辑器左栏（plain 模式）：节点画布必须撑满左栏宽度。
@@ -4399,7 +4529,7 @@ textarea.state-value { min-height: 58px; }
   background: color-mix(in srgb, var(--surface) 80%, transparent);
   backdrop-filter: blur(12px) saturate(1.08);
   -webkit-backdrop-filter: blur(12px) saturate(1.08);
-  padding: 12px 14px;
+  padding: 10px 12px 6px;
   box-shadow: var(--shadow-card);
 }
 
@@ -4472,6 +4602,7 @@ textarea.state-value { min-height: 58px; }
 /* 富文本输入：contenteditable，可图文混排 */
 .chat-input-bar .rich-input {
   width: 100%;
+  display: block;
   border: none;
   outline: none;
   background: transparent;
@@ -4479,7 +4610,9 @@ textarea.state-value { min-height: 58px; }
   font: inherit;
   box-sizing: border-box;
   min-height: 72px;
-  max-height: min(360px, 45vh);
+  /* 拖高上限同时受视口约束：正文区至少留 220px（1024×576 实拖 360 时正文只剩 80px）。
+     470 ≈ 顶栏 60 + 会话头 53 + 输入条非正文部分 ~130 + 底栏留白。 */
+  max-height: max(100px, min(360px, calc(100vh - 470px)));
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
@@ -4489,7 +4622,7 @@ textarea.state-value { min-height: 58px; }
 
 .chat-input-resize-handle {
   height: 16px;
-  margin: -10px 0 4px;
+  margin: -12px 0 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -4516,23 +4649,6 @@ textarea.state-value { min-height: 58px; }
   gap: 8px;
   flex-wrap: wrap;
   margin-bottom: 8px;
-}
-.rich-imgbar-add {
-  flex: 0 0 auto;
-  width: 52px;
-  height: 52px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--surface);
-  color: var(--text);
-  cursor: pointer;
-}
-.rich-imgbar-add:hover {
-  border-color: var(--accent, #4a90d9);
-  color: var(--accent, #4a90d9);
 }
 .rich-imgbar-item {
   position: relative;
@@ -5205,6 +5321,42 @@ html[data-theme="eye-care"] .chat-new-message-btn {
   z-index: 60;
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.25);
   padding: 10px 22px;
+}
+
+/* 已保存模板行：名称为主信息，节点数/暴露字段做轻量标签，磁盘路径单行省略（悬停看全文） */
+.template-row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.template-row-name {
+  font-weight: 600;
+  font-size: 14px;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.template-row-tags { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.template-meta-tag {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+  color: var(--text-muted);
+}
+.template-path {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* 画布模式右侧：已选节点列表 */
@@ -6996,16 +7148,8 @@ html:is([data-theme="bright"], [data-theme="night"], [data-theme="green"], [data
 
 /* ===== Responsive application shell ===== */
 @media (max-width: 1200px) {
-  .repo-grid {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-  }
-
   .gallery-grid {
     grid-template-columns: repeat(6, minmax(0, 1fr));
-  }
-
-  .settings-nav {
-    width: 210px;
   }
 
   .settings-content-body {
@@ -7730,6 +7874,124 @@ html:is([data-theme="bright"], [data-theme="night"], [data-theme="green"], [data
   .repo-picker select { min-width: 104px; max-width: 150px; }
   .chat-view { padding: 18px 20px; }
   .worldbook-layout { grid-template-columns: 190px minmax(320px, 1fr) 190px; gap: 14px; }
+}
+
+/* ===== 小型桌面断点（721–1199px，鼠标）=====
+   720 及触屏 1024 仍走文件尾的手机形态（(pointer: coarse) 那条），这里只补「鼠标小窗」：
+   - 顶栏：隐冗余「创作」标题；选择器按 minmax(120px,1fr) 摊开、按钮禁换行
+     （实测 1024×576：标题 33×48 竖排、预设/正则各自折成两行）
+   - 会话头：压缩/诊断/导入导出/清除收进「更多」；对话·画布、数据表、自动插画、试跑、
+     多元数据、知识库、ComfyUI 保持一键可达（实测 1024 下头部 113px、正文只剩 120px） */
+@media (min-width: 721px) and (max-width: 1199px) and (pointer: fine) {
+  .app-topbar { gap: 10px; padding-inline: 16px; }
+  .app-topbar.topbar-home .topbar-title { display: none; }
+  .app-topbar .repo-picker {
+    flex: 1 1 120px;
+    min-width: 0;
+    gap: 5px;
+    white-space: nowrap;
+  }
+  .app-topbar .repo-picker select {
+    flex: 1 1 auto;
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+  }
+  .app-topbar .topbar-methods {
+    flex: 0 0 auto;
+    margin-left: 0 !important;
+    gap: 6px !important;
+  }
+  .app-topbar .topbar-methods .btn { flex: 0 0 auto; white-space: nowrap; }
+
+  .chat-view-head {
+    position: relative;
+    gap: 8px;
+    padding-bottom: 8px;
+  }
+  .chat-view-head h1 {
+    max-width: 160px;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 16px;
+  }
+  .chat-view-head .btn.icon-only.head-tools-toggle { display: inline-flex; }
+  .chat-view-head .head-tools-more { display: none; }
+  .chat-view-head .head-tools.open .head-tools-more {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 6px 4px;
+    justify-items: center;
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 90;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 10px 8px;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+  }
+  /* 浮层里 .head-tools-more 本身就是第三组：取消组间分隔线，回到纯网格 */
+  .chat-view-head .head-tools.open .head-tools-more {
+    margin-left: 0;
+    padding: 10px 8px;
+    border-left: 0;
+  }
+}
+
+/* 右侧浮钮 Dock（基础：手机/触屏容器透明占位，各浮钮仍走自己的贴边规则） */
+.app-dock { display: contents; }
+
+/* 2026-10-28 P0-4：三个浮钮统一收进右侧固定竖列（玻璃控制台 / 快捷工具 / 后台活动），
+   固定顺序、不再各自拖位；页面内容面各自留出右侧安全区。
+   几何：Dock 占 vw-60…vw-4（right:4 + 56px 宽），内容一律收在 vw-68 以内。 */
+@media (min-width: 721px) and (pointer: fine) {
+  .app-dock {
+    position: fixed;
+    right: 4px;
+    top: 0;
+    bottom: 0;
+    width: 56px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    justify-content: center;
+    gap: 10px;
+    pointer-events: none;
+  }
+  .app-dock > * { pointer-events: auto; }
+  .app-dock .support-fab,
+  .app-dock .support-handle,
+  .app-dock .quick-tools-fab,
+  .app-dock .quick-tools-handle,
+  .app-dock .lg-rope,
+  .app-dock .lg-rope-mini {
+    position: static !important;
+    top: auto !important;
+    right: auto !important;
+    bottom: auto !important;
+    left: auto !important;
+  }
+  /* 拉绳进竖列后四角都要圆（原来只圆左侧、贴边用） */
+  .app-dock .lg-rope {
+    transform: scale(var(--lg-rope-scale, 1));
+    border-radius: 16px;
+    border-right: 1px solid var(--lg-glass-border, rgba(255, 255, 255, 0.2));
+  }
+  .app-dock .lg-rope-mini,
+  .app-dock .support-handle { transform: none; }
+  /* 悬停位移在竖列里会撞到相邻浮钮 */
+  .app-dock .support-fab:hover,
+  .app-dock .quick-tools-fab:hover { transform: none; }
+
+  /* —— 预留右侧安全区（任何视口下浮钮不压发送、分页、卡片主操作） —— */
+  .page { padding-right: 68px; }
+  .settings-page { padding-right: 68px; }
+  .chat-stream { padding-right: 48px; }      /* 叠在 .chat-view 的 28px 上 ⇒ 距右缘 76px */
+  .chat-input-wrap { padding-right: 48px; }  /* 同上 ⇒ 输入条距右缘 76px */
 }
 
 .lora-mode-switch {
@@ -8516,6 +8778,7 @@ html[data-theme="liquid-glass"] .bubble-user {
       color-mix(in srgb, var(--lg-accent) 18%, rgba(5, 10, 20, 0.82)));
   border: 1px solid color-mix(in srgb, var(--lg-accent) 46%, transparent);
   color: #f7faff;
+  line-height: 1.7;
   backdrop-filter: blur(var(--lg-glass-blur)) saturate(1.45) brightness(1.04);
   -webkit-backdrop-filter: blur(var(--lg-glass-blur)) saturate(1.45) brightness(1.04);
   box-shadow:
@@ -8526,15 +8789,17 @@ html[data-theme="liquid-glass"] .bubble-user .user-msg-act {
   border-color: rgba(255, 255, 255, 0.30);
 }
 
+/* AI 正文卡：稳定阅读面。原先是白 14%→6% 叠深色 20%（合计约 30%），
+   壁纸人脸/发色直接穿过正文（实测长剧情明显疲劳）。底色提到 84% 不透明，
+   保留顶部一点高光维持玻璃质感；不再需要 24px 背板模糊（正文不再依赖背后像素）。 */
 html[data-theme="liquid-glass"] .bot-content {
   background:
-    linear-gradient(180deg, var(--lg-glass-top), var(--lg-glass-bottom)),
-    rgba(6, 11, 24, 0.20);
+    linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.015)),
+    rgba(7, 12, 24, 0.84);
   border: 1px solid var(--lg-glass-border);
-  backdrop-filter: blur(var(--lg-glass-blur)) saturate(1.6) brightness(1.05);
-  -webkit-backdrop-filter: blur(var(--lg-glass-blur)) saturate(1.6) brightness(1.05);
+  line-height: 1.72;
   box-shadow:
-    inset 0 1px 0 var(--lg-glass-highlight),
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
     inset 0 -1px 0 rgba(255, 255, 255, 0.04),
     0 16px 40px rgba(2, 6, 18, 0.38);
 }
@@ -8628,6 +8893,16 @@ html[data-theme="liquid-glass"] .comfy-monitor--up {
 html[data-theme="liquid-glass"] .comfy-monitor__close:hover {
   background: rgba(255, 255, 255, 0.14);
   color: #f7faff;
+}
+
+/* 管理页（资产/工作流/系统/新手指引）内容面：壁纸只留在侧栏与页面边缘，
+   列表、路径与工具栏文字落在稳定深色面上；不透明度高于设置内容面（0.665/0.560）。
+   min-height:100% 让短页面的内容面也铺满滚动区，避免下半屏又透出壁纸。 */
+html[data-theme="liquid-glass"] .page:not(.settings-page) {
+  min-height: 100%;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.008)),
+    rgba(9, 15, 28, 0.86);
 }
 
 /* —— 设置窗口 —— */
@@ -8764,6 +9039,7 @@ html[data-theme="liquid-glass"] .btn.primary:hover:not(:disabled) {
   touch-action: none;
   user-select: none;
   transform-origin: right center;
+  transform: translateY(-50%) scale(var(--lg-rope-scale, 1));
 }
 .lg-rope:active { cursor: grabbing; }
 .lg-rope:hover {
@@ -10135,7 +10411,6 @@ html[data-theme="liquid-glass"] .btn.primary:hover:not(:disabled) {
   .chat-input-bar { padding: 8px 10px; }
   .chat-input-bar .rich-input { height: auto !important; min-height: 44px; max-height: 72px; padding-right: 44px; }
   .rich-imgbar { margin-bottom: 4px; }
-  .rich-imgbar-add { width: 36px; height: 36px; }
   /* 顶部功能栏与输入卡工具条：换行会把一行按钮撑成三四行（390×844 实测
      `.chat-view-head` 14 项 = 3 行 149px、`.chat-actions` 6 切换器 + 发送 = 2 行 60px），
      对话正文只剩 224px（26% 视口）⇒ 被用户报为「设置把对话遮挡了」。
@@ -10176,15 +10451,19 @@ html[data-theme="liquid-glass"] .btn.primary:hover:not(:disabled) {
   .chat-actions .chat-stop-btn { font-size: 0; padding: 5px 8px; }
   .chat-actions .chat-stop-btn > svg { margin-right: 0 !important; }
 
-  /* 设置页/弹窗打开时，右下两个圆钮会盖住保存按钮与正文 ⇒ 手机上让位 */
+  /* 设置页/弹窗打开时，右下浮钮会盖住保存按钮与正文 ⇒ 手机上让位。
+     `.lg-rope`（液态玻璃拉绳）z-index 1260 比 `.modal-mask`(1000) 还高，
+     实测全屏弹窗里它仍浮在右侧（v10f 红底复验）⇒ 一并收进来。 */
   .app:has(.settings-page) .support-fab,
   .app:has(.settings-page) .support-handle,
   .app:has(.settings-page) .quick-tools-fab,
   .app:has(.settings-page) .quick-tools-handle,
+  .app:has(.settings-page) :is(.lg-rope, .lg-rope-mini),
   .app:has(.modal-mask) .support-fab,
   .app:has(.modal-mask) .support-handle,
   .app:has(.modal-mask) .quick-tools-fab,
-  .app:has(.modal-mask) .quick-tools-handle { display: none; }
+  .app:has(.modal-mask) .quick-tools-handle,
+  .app:has(.modal-mask) :is(.lg-rope, .lg-rope-mini) { display: none; }
 }
 
 /* ============================================================
@@ -10200,24 +10479,50 @@ html[data-theme="liquid-glass"] .btn.primary:hover:not(:disabled) {
   .chat-view { padding: 8px 10px; }
   .chat-view-head { gap: 8px; padding-bottom: 8px; }
   .chat-view-head .head-tools { display: none; }
+  /* P1-3（2026-10-28 真机审查）：触屏没有 hover，纯图标浮层等于盲选——每个入口
+     摊成「图标在上 + 短标签在下」的格子，一屏三列；底色改 96% 实底，
+     不再把底下的正文透上来（与 P1-4 同口径）。 */
   .chat-view-head .head-tools.open {
     display: grid;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
-    gap: 6px 4px;
-    justify-items: center;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px 6px;
+    justify-items: stretch;
+    align-items: start;
     position: absolute;
     top: calc(100% + 6px);
     left: 0;
     right: 0;
     z-index: 90;
-    background: var(--surface);
+    background: color-mix(in srgb, var(--surface-solid) 96%, transparent);
     border: 1px solid var(--border);
     border-radius: 12px;
     padding: 10px 8px;
     box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
   }
-  .chat-view-head .head-tools-toggle { display: inline-flex; }
-  .chat-view-head .head-tools.open .btn.icon-only { padding: 8px 10px; }
+  .chat-view-head .btn.head-tools-toggle { display: inline-flex; }
+  /* 32px 方形图标钮那条规则带 !important（见上方），这里必须同级带 !important 才改得动 */
+  .chat-view-head .head-tools.open .btn.icon-only {
+    width: auto !important;
+    min-width: 0 !important;
+    height: auto !important;
+    min-height: 54px !important;
+    padding: 8px 4px 6px !important;
+    margin-left: 0 !important;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .chat-view-head .head-tools.open .head-tool-text {
+    display: block;
+    font-size: 10.5px;
+    line-height: 1.25;
+    white-space: nowrap;
+  }
+  /* 诊断入口外面包了一层 .nci-panel（浮层自己绝对定位），让它占满整格 */
+  .chat-view-head .head-tools.open .nci-panel { display: flex; }
+  .chat-view-head .head-tools.open .nci-panel .nci-toggle { flex: 1 1 auto; }
+  /* 三组化（2026-10-28）：手机浮层里组包装继续透明，组间分隔线取消 */
+  .chat-view-head .head-tools > .head-tool-group { display: contents; }
+  .chat-view-head .head-tool-group + .head-tool-group { margin: 0; padding: 0; border: 0; }
 
   /* ---- 顶栏三行压两行（grid-areas 显式断行；methods 的 inline marginLeft 在 grid 里失效化） ---- */
   .app-topbar {
@@ -10268,7 +10573,7 @@ html[data-theme="liquid-glass"] .btn.primary:hover:not(:disabled) {
 /* ---- 2026-10-27 第三轮真机反馈：仓库卡片（0.30.1-beta 截图） ---- */
 @media (max-width: 720px), (pointer: coarse) and (hover: none) and (max-width: 1024px) {
   /* 5 列在 390px 下每列 ~66px：按钮组(≈102px)溢出卡片漂到邻卡；2 列才放得下内容 */
-  .repo-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .repo-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
   /* 操作按钮回流到封面下方右侧一排（触屏无 hover，常显合理；absolute 溢出根除） */
   .repo-tools { position: static; justify-content: flex-end; margin-top: 6px; }
 }
@@ -10393,14 +10698,111 @@ html[data-theme="liquid-glass"] .btn.primary:hover:not(:disabled) {
     flex: 0 0 auto;
     width: max-content;
     margin: 0 auto;
-    gap: 6px;
+    gap: 4px;
   }
-  .pager-dock .page-btn { min-width: 28px; height: 28px; padding: 0 6px; font-size: 12px; }
+  /* 26px 档：滚到底翻出第 3 页窗口时整条 10 钮 ≈ 306px，仍 < 342px 可用宽 ⇒
+     不必靠吸底条横滑去够「末页」（第③刀实测滚到底 sw 396 > cw 362 会悄悄裁掉一钮）。 */
+  .pager-dock .page-btn { min-width: 26px; height: 28px; padding: 0 5px; font-size: 12px; }
   /* 390px 下 12 个按钮 + 页码输入框 = 428px，仍差 66px：手机上收掉输入框
      （任意页仍可达：页码窗口 ±2 + 首页/末页/上一下一），390 下整条 338px 正好不滚；
      更窄的屏仍由上面的 overflow-x 兜底，页面依旧不横滚。 */
   .pager-dock .page-jump { display: none; }
 }
+
+/* ===== 资产库工具栏（2026-10-28 P1-6）：查找—筛选—维护 两行 + 吸顶 + 结果摘要 =====
+   原先是 14 个同权重按钮的单一按钮流（搜索框孤零零浮在上面），资产越多越难找；
+   现在行1 只放查找（弹性搜索 / 全部·图片·视频·音频分段 / 语义搜索），
+   行2 放筛选与维护（批量选择 / 标签统计 / 回收站 / 维护下拉），并补一行结果计数。
+   吸顶用稳定底色：壁纸主题下滚过长剧情/大图时工具栏不再透出人物。 */
+.asset-toolbar-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 26;                 /* 低于吸底分页条 30，高于网格与卡片 */
+  margin: -6px 0 var(--sp-3);
+  padding: var(--sp-2) 0 6px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+html[data-theme="liquid-glass"] .asset-toolbar-sticky {
+  /* 管理页内容面本身是 86% 深色；吸顶条再垫 94% ⇒ 与内容面同色，不叠出第二条色带 */
+  background: color-mix(in srgb, var(--bg) 94%, transparent);
+  backdrop-filter: blur(10px) saturate(1.2);
+  -webkit-backdrop-filter: blur(10px) saturate(1.2);
+}
+.asset-toolbar-sticky .asset-toolbar {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--sp-2);
+  flex-wrap: nowrap;
+  margin-bottom: 0;
+}
+.asset-toolbar-row { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; min-width: 0; }
+.asset-toolbar-find { flex-wrap: nowrap; }
+.asset-search { position: relative; flex: 1 1 220px; min-width: 140px; max-width: 520px; }
+.asset-search-icon {
+  position: absolute;
+  left: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-muted);
+  pointer-events: none;
+}
+.asset-search-input { width: 100%; padding-left: 28px; box-sizing: border-box; }
+/* 媒体类型分段控件：一个外框、内部只隔细线，激活项用主色实心 */
+.asset-seg {
+  display: inline-flex;
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.asset-seg .btn { border: 0; border-radius: 0; padding: 6px 12px; background: transparent; }
+.asset-seg .btn + .btn { border-left: 1px solid var(--border); }
+.asset-seg .btn.primary { background: var(--accent); color: var(--accent-text); }
+/* 维护下拉：同步体检 / 自动描述 / 视觉索引 / 缩略图 / 裂图 / 孤儿仓库 */
+.asset-maint { position: relative; margin-left: auto; flex: 0 0 auto; }
+.asset-maint-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 40;
+  min-width: 208px;
+  display: flex;
+  flex-direction: column;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+}
+html[data-theme="liquid-glass"] .asset-maint-menu {
+  background: rgba(13, 21, 36, 0.94);
+  backdrop-filter: blur(14px) saturate(1.3);
+  -webkit-backdrop-filter: blur(14px) saturate(1.3);
+}
+.asset-maint-menu > button {
+  text-align: left;
+  padding: var(--sp-2) 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.asset-maint-menu > button:hover:not(:disabled) { background: var(--surface-2); }
+.asset-maint-menu > button:disabled { opacity: 0.5; cursor: not-allowed; }
+.asset-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1) var(--sp-3);
+  padding: 6px 2px 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.asset-summary-filter { color: var(--text); }
 
 /* ============================================================
    手机「生成内容」页 + 内容弹窗（2026-10-27 真机反馈 问题5/7）
@@ -10453,6 +10855,39 @@ html[data-theme="liquid-glass"] .btn.primary:hover:not(:disabled) {
     min-height: 30px;
   }
 
+  /* P1-6（2026-10-28）：工具栏改成显式两行。手机不再用列优先网格（组包装会打乱列），
+     每行自己横滑；维护菜单锚到吸顶容器（.asset-maint 改 static）以免被行的 overflow 裁掉。 */
+  .asset-toolbar-sticky {
+    margin: 0 0 8px;
+    padding: 4px 0;
+    border-bottom: 0;
+  }
+  .asset-toolbar-sticky .page-toolbar.asset-toolbar {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+    overflow: visible;
+  }
+  /* P1-1（2026-10-28 真机审查第③刀）：行内不再横滑。横滑＝「看不见的第二屏」，
+     用户只会以为按钮不存在——实测 390px 下 语义搜索 右缘 393 > 视口 390，直接被裁。
+     改成一屏放得下就单行、放不下时**可见换行**：搜索框给到可收缩下限，
+     分段/按钮同档尺寸，行高仍 30px（竖屏两行合计 <100px）。 */
+  .asset-toolbar-row {
+    flex-wrap: wrap;
+    gap: 6px;
+    overflow: visible;
+  }
+  .asset-search { flex: 1 1 120px; min-width: 96px; max-width: none; }
+  /* 查找行不换行（换行会把吸顶条顶到 143px，正文又没了——实测）：
+     搜索框收缩到 96px 下限，分段/语义按 3px 8px 紧凑档，390px 下正好单行放得下。 */
+  .asset-toolbar-find { flex-wrap: nowrap; }
+  .asset-seg .btn,
+  html[data-theme] .asset-seg .btn { padding: 3px 8px; min-height: 30px; font-size: 12.5px; }
+  .asset-maint { position: static; margin-left: 0; }
+  .asset-maint-menu { top: calc(100% + 4px); right: 0; left: auto; }
+  .asset-summary { padding-top: 4px; font-size: 11.5px; gap: 2px 10px; }
+
   /* 缩略图放大：列数 6 → 2（390px 下 ~177px/格，是原 50px 的 3.5 倍），间距一并收窄 */
   .gallery-masonry { gap: 8px; }
   .gallery-masonry-col { gap: 8px; }
@@ -10483,6 +10918,15 @@ html[data-theme="liquid-glass"] .btn.primary:hover:not(:disabled) {
     border-radius: 0;
     box-shadow: none;
     padding: calc(10px + env(safe-area-inset-top, 0px)) 12px calc(8px + env(safe-area-inset-bottom, 0px));
+  }
+
+  /* ---- P1-4（2026-10-28 第④刀）：手机上弹窗一律 95% 实底 ----
+     `.modal` 的底色是 `var(--surface)`（≈70% 半透明，桌面靠它透出毛玻璃），
+     手机上铺满整屏后底下的正文原样透上来，用户读作「弹窗没盖住、字在动」。
+     主题皮肤只钉了 position/border-radius，没钉 background ⇒ 带 html[data-theme]
+     前缀即可压住基础 `.modal`（0,1,0）。 */
+  html[data-theme] .modal {
+    background: color-mix(in srgb, var(--surface-solid) 95%, transparent);
   }
 }
 
@@ -10544,4 +10988,199 @@ html[data-theme="liquid-glass"] .btn.primary:hover:not(:disabled) {
   /* 生成详情在竖屏是上下堆叠（图区 300px 高会吃掉大半屏）；横屏 844px 宽左右分栏更合适 ⇒ 改回 row */
   .modal.asset-detail-modal .asset-detail-body { flex-direction: row; gap: 12px; }
   .modal.asset-detail-modal .asset-detail-body > div:first-child { flex: 0 0 42% !important; }
+}
+
+/* ============================================================
+   手机第三轮（2026-10-28 真机审查 0.30.16-beta）：P0-1 横屏对话＋键盘。
+   实测基线（390×844 / 844×390，_tmp/mobile-audit/report.jsonl）：
+   - 输入条固定 130px 高 + 顶栏/会话头/底栏全占位 ⇒ 横屏正文只剩 122px，
+     键盘弹起后只剩 24px；
+   - 输入区改成「单行起、按需长高」，聚焦或键盘弹起时把 chrome 全部让给正文。
+   右下浮钮保持桌面那三个（玻璃 / 快捷工具 / 后台活动）——2026-10-28 用户定案
+   撤掉「工具」抽屉：它与三个浮钮重复、点开还要多一跳，且样式难看。
+   ============================================================ */
+
+@media (max-width: 720px), (pointer: coarse) and (hover: none) and (max-width: 1024px) {
+  /* ---- P0-1：输入区单行起、按需长高（最多三行），横屏更矮 ---- */
+  .chat-input-bar { padding: 8px 10px 6px; }
+  .chat-input-bar .rich-input {
+    field-sizing: content;      /* Chromium 123+：空=一行，打字才长高 */
+    height: auto !important;    /* 覆盖 RichInput 行内 height（桌面拖拽记忆的像素值） */
+    min-height: 44px;
+    max-height: 72px;
+  }
+  /* 发送/pager 等右下操作给浮钮让出 48px 通道（后台活动 / 快捷工具 / 玻璃拉绳贴右边） */
+  .chat-actions { padding-right: 48px; }
+
+  /* 聚焦输入框或键盘弹起 ⇒ 顶栏 / 会话头 / 底部标签栏全部退场，正文与输入框贴住键盘 */
+  html[data-theme] .app:has(.chat-input-bar textarea:focus) .app-nav.sidebar,
+  html[data-theme] .app:has(.chat-input-bar textarea:focus) .app-topbar,
+  html[data-theme] .app:has(.chat-input-bar textarea:focus) .chat-view-head,
+  html[data-theme][data-kb-open] .app-nav.sidebar,
+  html[data-theme][data-kb-open] .app-topbar,
+  html[data-theme][data-kb-open] .chat-view-head { display: none; }
+  .app:has(.chat-input-bar textarea:focus) .app-body,
+  html[data-kb-open] .app-body { padding-bottom: 0; }
+
+  /* ---- 抽屉打开后的落点：后台活动 / 快捷工具在手机上改成贴底实底抽屉 ----
+     旧的 320×420 浮窗（right:24 bottom:92）在 390×844 只剩半屏、横屏 390px 高下
+     直接跑到 y=-122（实测）⇒ 统一收到 nav 之上、95% 实底、上限 68dvh。 */
+  .support-panel,
+  .quick-tools-panel {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: calc(56px + env(safe-area-inset-bottom, 0px));
+    width: auto;
+    height: auto;
+    max-height: 68dvh;
+    border: 1px solid var(--border);
+    border-left: 0;
+    border-right: 0;
+    border-bottom: 0;
+    border-radius: 18px 18px 0 0;
+    background: color-mix(in srgb, var(--surface-solid) 95%, transparent);
+    box-shadow: 0 -12px 34px rgba(0, 0, 0, 0.45);
+    z-index: 960;
+  }
+}
+
+/* 横屏（触屏、高 ≤520px）：输入区强制单行起、上限 30dvh */
+@media (pointer: coarse) and (hover: none) and (max-height: 520px) {
+  .chat-input-bar { padding: 6px 8px 5px; border-radius: 16px; }
+  .chat-input-bar .rich-input { min-height: 32px; max-height: 30dvh; padding-right: 40px; }
+  .chat-actions { margin-top: 4px; gap: 3px; }
+  .chat-actions .btn { padding: 4px 8px; }
+  .chat-actions .model-switch-btn { width: 28px; height: 28px; }
+}
+
+/* ============================================================
+   手机第三轮续（2026-10-28 真机审查）：P0-3 画布降级页、P0-4 电脑独占入口。
+   实测（_tmp/mobile-audit/probe5.js）：竖屏点「ComfyUI 节点面板」后
+   `.comfy-panel`（min-width:380px）把对话列压到 w=0、textarea 只剩 46px，
+   说明文字右缘裁到 x=405（视口 390）⇒ 桌面分栏骨架在手机上必须换成全宽抽屉。
+   ============================================================ */
+@media (max-width: 720px), (pointer: coarse) and (hover: none) and (max-width: 1024px) {
+  /* 节点面板离开 .chat-layout 的横向流：对话列恢复整幅，面板自己盖在下方 */
+  .chat-layout { gap: 0; }
+  .comfy-panel {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: calc(56px + env(safe-area-inset-bottom, 0px));
+    z-index: 960;
+    width: auto;
+    min-width: 0;
+    max-height: 62dvh;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-left: 0;
+    border-right: 0;
+    border-bottom: 0;
+    border-radius: 18px 18px 0 0;
+    /* 96% 实底：半透明玻璃在手机上会把底下的正文透上来（P1-4 同口径） */
+    background: color-mix(in srgb, var(--surface-solid) 96%, transparent);
+    box-shadow: 0 -12px 34px rgba(0, 0, 0, 0.45);
+  }
+  .comfy-panel-head {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: color-mix(in srgb, var(--surface-solid) 96%, transparent);
+  }
+  .mobile-canvas-notice { background: transparent; }
+  .mobile-canvas-notice-back { margin-top: 12px; width: 100%; justify-content: center; }
+
+  /* 电脑独占功能说明：一屏讲清「为什么不能 / 还能做什么 / 去哪做」，不再露表单与网关报错 */
+  .pc-only-notice {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    max-width: 560px;
+    margin: 0 auto;
+    padding: 22px 18px 26px;
+    text-align: center;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: color-mix(in srgb, var(--surface-solid) 96%, transparent);
+  }
+  .pc-only-notice > svg { color: var(--accent); }
+  .pc-only-notice h2 { margin: 0; font-size: 17px; }
+  .pc-only-tag {
+    margin: 0;
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    background: var(--accent);
+    color: var(--accent-text);
+  }
+  .pc-only-reason,
+  .pc-only-keep,
+  .pc-only-how {
+    margin: 0;
+    font-size: 13px;
+    line-height: 1.75;
+    text-align: left;
+    color: var(--text-muted);
+  }
+  .pc-only-keep { color: var(--text); }
+}
+
+/* 横屏：节点面板抽屉贴着 42px 底栏，高度上限收到 56dvh（390px 高下别吃掉整屏） */
+@media (pointer: coarse) and (hover: none) and (max-height: 520px) {
+  .comfy-panel {
+    bottom: calc(42px + env(safe-area-inset-bottom, 0px));
+    max-height: 56dvh;
+  }
+  .support-panel,
+  .quick-tools-panel {
+    bottom: calc(42px + env(safe-area-inset-bottom, 0px));
+    max-height: 62dvh;
+  }
+  /* 横屏只有 390px 高：会话「更多」浮层 3 列 = 4 行 234px，把正文全盖住 ⇒ 改 4 列 3 行 */
+  .chat-view-head .head-tools.open {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 6px 5px;
+    padding: 8px 6px;
+  }
+
+  /* P1-5（2026-10-28 第④刀）：横屏设置页分类导航。竖屏段是 5×2 图标网格（实测 123px 高），
+     在 390px 高的横屏里先吃掉近 1/3 正文面 ⇒ 横屏改「单行 chip + 导航自己横向滚动」。
+     ⚠ 竖屏生效的是 **grid**（`.settings-nav` 后出现的那段，不是更早的 flex 段），
+     所以这里必须显式换回 flex，光写 flex-wrap 会打在 grid 上完全无效。
+     与问题8 同口径：滚动发生在控件自己身上，overscroll-behavior-x: contain 防止带跑整页。 */
+  .settings-nav {
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+  .settings-nav-item {
+    width: auto;
+    flex: 0 0 auto;
+    flex-direction: row;
+    justify-content: flex-start;
+    min-height: 38px;
+    padding: 6px 12px;
+    font-size: 12.5px;
+    white-space: nowrap;
+    text-align: left;
+    border-radius: 999px;
+  }
+}
+
+/* ============================================================
+   手机第三轮续2（2026-10-28 真机审查第③刀）：卡片细节收口。
+   实测（_tmp/mobile-audit/probe8.js）：390px 下工作流模板卡的
+   `.template-path` = 「D:\tool\ComfyUI\ComfyUI_aaaki\ComfyUI\user\default\workflows」
+   宽 214px 且 scrollWidth>clientWidth ⇒ 被省略号裁断，既不报文件名也白撑一行。
+   口径：目录段只给桌面/详情用，手机上留文件名（完整路径仍在 title 与编辑器里）。
+   ============================================================ */
+@media (max-width: 720px), (pointer: coarse) and (hover: none) and (max-width: 1024px) {
+  .template-path-dir { display: none; }
 }

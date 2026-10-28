@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useOverlayRoute } from "../lib/overlayRoute";
 import {
   Brush,
   Check,
@@ -84,6 +85,7 @@ function fullBounds(width: number, height: number): MaskBounds {
 }
 
 export function MaskEditorModal({ imageUrl, onCancel, onComplete }: Props) {
+  useOverlayRoute("mask-editor", onCancel);
   const stageRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const sourceRef = useRef<ImageSource | null>(null);

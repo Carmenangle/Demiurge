@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link2 } from "lucide-react";
+import { useOverlayRoute } from "../lib/overlayRoute";
 import { listCharacters, snapshotCardsToRepo, type CardSummary } from "../api/characters";
 import { listWorldbooks, type WorldbookSummary } from "../api/worldbook";
 import { listPresets, type PresetSummary } from "../api/preset";
@@ -20,6 +21,7 @@ export function BindRepoModal({
   onSave: (patch: Partial<RepoBinding>) => void;
   onClose: () => void;
 }) {
+  useOverlayRoute("bind-repo", onClose);
   const [cards, setCards] = useState<CardSummary[]>([]);
   const [books, setBooks] = useState<WorldbookSummary[]>([]);
   const [presets, setPresets] = useState<PresetSummary[]>([]);

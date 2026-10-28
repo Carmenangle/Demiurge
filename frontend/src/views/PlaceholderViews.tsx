@@ -19,7 +19,7 @@ export function AssetsView({ onSendToChat, onSendAsRecipe, onBatchSendToCanvas }
   const repoIds = repos.map((r) => r.id);
   const repoNames = Object.fromEntries(repos.map((r) => [r.id, r.name]));
   return (
-    <PageShell title="资产库">
+    <PageShell title={<>生成内容<span className="page-title-hint">资产库</span></>}>
       {/* 空态只看真实仓库（repoIds 即全部真实仓库） */}
       {repos.length === 0 ? (
         <EmptyState>还没有任何仓库，生成的图片会自动出现在这里。</EmptyState>

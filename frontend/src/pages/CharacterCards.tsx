@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Plus, Trash2, Download, BookOpen, Regex as RegexIcon } from "lucide-react";
+import { Plus, Trash2, Download, BookOpen, Images, Regex as RegexIcon } from "lucide-react";
 import { PageShell } from "../components/layout/PageShell";
 import { ConfirmModal } from "../components/Modal";
 import { CardPreviewModal } from "../components/CardPreviewModal";
@@ -233,7 +233,7 @@ function CardGrid({ base, cards, onDelete, onExport, onOpen }: {
         <div className="repo-card" key={c.folder}>
           <div className="repo-cover" onClick={() => onOpen(c)} title="点击预览角色卡">
             {c.has_avatar
-              ? <img src={avatarUrl(base, c.folder)} alt={c.name} loading="lazy" />
+              ? <CardCover src={avatarUrl(base, c.folder)} name={c.name} />
               : <>暂无立绘</>}
           </div>
           <div className="repo-tools">
@@ -255,4 +255,20 @@ function CardGrid({ base, cards, onDelete, onExport, onOpen }: {
       ))}
     </div>
   );
+}
+
+/** 立绘加载失败（本地文件被删 / 联机同库直链失效）时回退占位，不显示破图＋alt。
+ *  与 RepoViews.RepoCover 同款：地址变了要重置失败态，否则换卡后一直显示占位。 */
+function CardCover({ src, name }: { src: string; name: string }) {
+  const [failed, setFailed] = useState(false);
+  useEffect(() => { setFailed(false); }, [src]);
+  if (failed) {
+    return (
+      <span className="repo-cover-empty">
+        <Images size={22} strokeWidth={1.4} />
+        <span>立绘读不出</span>
+      </span>
+    );
+  }
+  return <img src={src} alt="" aria-label={`${name}立绘`} loading="lazy" onError={() => setFailed(true)} />;
 }

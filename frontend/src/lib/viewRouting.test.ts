@@ -74,6 +74,15 @@ describe("parseRouteHash 返回链解析", () => {
     expect(parseRouteHash("#/settings/models")).toEqual({ kind: "settings", panel: "models" });
   });
 
+  it("弹窗段 @id 不参与视图解析（叠在设置页上也不顶掉 panel）", () => {
+    expect(parseRouteHash("#/settings/@regex")).toEqual({ kind: "settings", panel: "" });
+    expect(parseRouteHash("#/settings/paths/@preset")).toEqual({ kind: "settings", panel: "paths" });
+    expect(parseRouteHash("#/assets/works/@asset-detail")).toEqual(
+      { kind: "section", section: "assets", subView: "works", browseRepoId: null },
+    );
+    expect(parseRouteHash("#/@lightbox")).toEqual({ kind: "home" });
+  });
+
   it("认不出的 hash 判 unknown：不擅自把用户跳到首页", () => {
     for (const h of ["#/repo/abc", "#/chat/abc", "#/nonsense", "#/home/x"]) {
       expect(parseRouteHash(h)).toEqual({ kind: "unknown" });

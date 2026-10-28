@@ -40,18 +40,24 @@ android {
         applicationId = "dev.demiurge.spike"
         minSdk = 24
         targetSdk = 34
-        versionCode = 30
-        versionName = "0.30.15-beta"
+        versionCode = 31
+        versionName = "0.30.16-beta"
 
         // 壳层据此判「离线前端要不要重解压」；由上面的 zip 实算，禁止手写
         buildConfigField("String", "FRONTEND_SHA", "\"$frontendSha\"")
+
+        // 调试日志条（顶部全宽「展开/收起日志」+ 260dp 日志窗）默认关闭：
+        // 出包用的是 debug 构建，按 BuildConfig.DEBUG 收口收不掉，只能显式开。
+        // 现场诊断：gradle -Pdemiurge.showDebugLog=true :app:assembleDebug
+        val showDebugLog = findProperty("demiurge.showDebugLog")?.toString()?.toBoolean() ?: false
+        buildConfigField("boolean", "SHOW_DEBUG_LOG", showDebugLog.toString())
 
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
     }
 
-    // AGP 8 默认关 BuildConfig；只为了把 FRONTEND_SHA 带进壳层常量池
+    // AGP 8 默认关 BuildConfig；只为把 FRONTEND_SHA / SHOW_DEBUG_LOG 带进壳层常量池
     buildFeatures {
         buildConfig = true
     }

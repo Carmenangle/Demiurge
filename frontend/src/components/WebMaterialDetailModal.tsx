@@ -3,6 +3,7 @@
 // 图片点击 → 共享 Lightbox 全屏（可滚轮缩放）；标签点击 → 复制。
 // 2026-10-18：补标题栏 X + ESC 关闭（应用口径「关闭走 X/ESC」；此前只有底部「关闭」）。
 import { useEffect } from "react";
+import { useOverlayRoute } from "../lib/overlayRoute";
 import { Copy, Trash2, ExternalLink, Send, X } from "lucide-react";
 
 import { openLightbox } from "./Lightbox";
@@ -55,6 +56,7 @@ export function WebMaterialDetailModal({
   onDescribe?: (item: WebMaterial) => void;
   describing?: boolean;
 }) {
+  useOverlayRoute("web-material-detail", onClose);
   const tags = item.tags || [];
 
   // ESC 关闭（与市场弹窗/资产库详情同口径；点遮罩仍不关闭，复制粘贴友好）

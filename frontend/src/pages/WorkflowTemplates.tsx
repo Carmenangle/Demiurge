@@ -112,13 +112,22 @@ export function WorkflowTemplates({ settings }: { settings: Settings }) {
             <div className="list" style={{ marginTop: 8 }}>
               {templates.map((t) => (
                 <div className="row" key={t.id}>
-                  <div>
-                    <strong>{t.name}</strong>
-                    <p style={{ margin: "4px 0 0", color: "var(--text-muted)", fontSize: 12 }}>
-                      {(t.node_order?.length ?? 0)} 个节点
-                      {t.exposed.length > 0 ? ` · ${t.exposed.length} 个暴露字段` : ""}
-                      {t.source_path ? ` · ${t.source_path}` : "（无原始路径）"}
-                    </p>
+                  <div className="template-row-main">
+                    <strong className="template-row-name" title={t.name}>{t.name}</strong>
+                    <div className="template-row-tags">
+                      <span className="template-meta-tag">{t.node_order?.length ?? 0} 个节点</span>
+                      <span className="template-meta-tag">{t.exposed.length} 个暴露字段</span>
+                    </div>
+                    {t.source_path ? (
+                      // 手机上只留文件名：整条 Windows 路径在 390px 下被省略号吃掉，
+                      // 读不出信息还把卡片撑高（完整路径仍在 title 与编辑器详情里）。
+                      <span className="template-path" title={t.source_path}>
+                        <span className="template-path-dir">{t.source_path.replace(/[\\/][^\\/]*$/, "")}</span>
+                        <span className="template-path-file">{t.source_path.split(/[\\/]/).pop()}</span>
+                      </span>
+                    ) : (
+                      <span className="template-path">（无原始路径）</span>
+                    )}
                   </div>
                   <div style={{ display: "flex", gap: 6 }}>
                     <button className="icon-btn" title="编辑" onClick={() => onEditTemplate(t)}>

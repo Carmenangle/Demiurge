@@ -1,6 +1,8 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Wrench } from "lucide-react";
-import { announceFloatingPanel, subscribeFloatingPanels } from "../lib/floatingPanels";
+import {
+  announceFloatingPanel, subscribeFloatingPanels,
+} from "../lib/floatingPanels";
 
 const QuickToolsPanel = lazy(() => import("./QuickToolsPanel").then((m) => ({ default: m.QuickToolsPanel })));
 const FAB_TOP_KEY = "laf_quick_tools_fab_top";

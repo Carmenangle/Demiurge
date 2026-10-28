@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useOverlayRoute } from "../lib/overlayRoute";
 import { RotateCcw } from "lucide-react";
 import { rawWorkflowByPath } from "../api/workflows";
 import { lockUrl, postToFrame, isLafMessageFromStrict } from "../lib/lafLock";
@@ -15,6 +16,7 @@ interface Props {
 
 // 在真实 ComfyUI 画布里长按选择一个节点作为输入口；选中后弹确认。
 export function NodePickerModal({ title, comfyUrl, sourcePath, onPick, onCancel }: Props) {
+  useOverlayRoute("node-picker", onCancel);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const [hint, setHint] = useState("");
   const [pending, setPending] = useState<{ id: string; title: string } | null>(null);

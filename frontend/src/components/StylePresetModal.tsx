@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { X, Plus, Trash2 } from "lucide-react";
 import type { StylePreset } from "../stores/settings";
+import { useMobileViewport } from "../lib/useMobileViewport";
 import { ConfirmModal } from "./Modal";
 
 // 提示词风格存档管理：左侧存档列表（选中/新建/删除），右侧编辑名称与整段模板内容。
@@ -16,6 +17,7 @@ export function StylePresetModal({
 }) {
   const [activeId, setActiveId] = useState<string | null>(presets[0]?.id ?? null);
   const [confirmDel, setConfirmDel] = useState(false);  // 删除确认框开关
+  const isMobileViewport = useMobileViewport();
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
@@ -88,7 +90,7 @@ export function StylePresetModal({
               </>
             ) : (
               <div style={{ color: "var(--text-muted)", fontSize: 13, margin: "auto" }}>
-                选择左侧存档编辑，或新建一个。
+                选择{isMobileViewport ? "上方" : "左侧"}存档编辑，或新建一个。
               </div>
             )}
           </div>

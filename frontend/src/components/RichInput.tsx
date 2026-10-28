@@ -7,7 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { File as FileIcon, Film, Music, Plus, X } from "lucide-react";
+import { File as FileIcon, Film, Music, X } from "lucide-react";
 import { clampSelectionScroll } from "../lib/contextManagement";
 import { classifyClipboardPaste } from "../lib/richPaste";
 import { uploadAttachment, type FileAttachmentMeta } from "../api/ai";
@@ -51,6 +51,7 @@ export interface RichInputHandle {
   replaceContent: (content: RichContent) => void;  // 用一份完整图文内容替换当前草稿
   /** 由外部拖拽文件到对话页面时调用：图片→图片栏、视频/音频→媒体栏、其他→通用文件栏（与组件内 applyFile 同源） */
   addFile: (file: File) => Promise<void>;
+  openFilePicker: () => void;          // 打开上传选择框（操作条的上传按钮用）
   submit: () => void;                  // 触发提交（外部发送按钮用）
   focus: () => void;
 }
@@ -268,6 +269,7 @@ export const RichInput = forwardRef<RichInputHandle, Props>(
         });
       },
       addFile: (file: File) => applyFileRef.current(file),
+      openFilePicker: () => fileRef.current?.click(),
       submit: () => doSubmitRef.current(),
       focus: () => taRef.current?.focus(),
     }));
@@ -508,24 +510,18 @@ export const RichInput = forwardRef<RichInputHandle, Props>(
             ))}
           </div>
         )}
-        {/* 上方图片栏：+ 按钮固定最左，图片从左到右横排，各带删除 */}
+        {/* 附件缩略图栏：只在真有附件时占位。空态上传入口在操作条（.chat-upload-btn），
+            否则 52px 空栏 + 间距常驻，短屏上白吃掉一行正文。 */}
+        <input
+          ref={fileRef}
+          type="file"
+          accept="image/*,video/*,audio/*,.md,.txt,.json,.csv,.log,.yaml,.yml,.xml,.html,.ts,.py,.srt,.ass,.pdf,.docx,.xlsx,.zip,.safetensors,.bin,.ckpt"
+          multiple
+          style={{ display: "none" }}
+          onChange={(e) => { onPickFiles(e.target.files); e.target.value = ""; }}
+        />
+        {(images.length > 0 || inspCards.length > 0 || !!maskedImage) && (
         <div className="rich-imgbar">
-          <input
-            ref={fileRef}
-            type="file"
-            accept="image/*,video/*,audio/*,.md,.txt,.json,.csv,.log,.yaml,.yml,.xml,.html,.ts,.py,.srt,.ass,.pdf,.docx,.xlsx,.zip,.safetensors,.bin,.ckpt"
-            multiple
-            style={{ display: "none" }}
-            onChange={(e) => { onPickFiles(e.target.files); e.target.value = ""; }}
-          />
-          <button
-            type="button"
-            className="rich-imgbar-add"
-            title="上传图片"
-            onClick={() => fileRef.current?.click()}
-          >
-            <Plus size={22} />
-          </button>
           {images.map((url, idx) => (
             <span
               key={url}
@@ -605,6 +601,7 @@ export const RichInput = forwardRef<RichInputHandle, Props>(
             </span>
           )}
         </div>
+        )}
         {/* 媒体栏（A1 第二栏）：视频/音频附件卡。上传中显示占位，完成后持 file_id 元信息随消息透传 */}
         {media.length > 0 && (
           <div className="rich-filebar">

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useOverlayRoute } from "../lib/overlayRoute";
 import { X, Plus, Trash2, Upload, Download, GripVertical } from "lucide-react";
 import { ConfirmModal } from "./Modal";
 import { downloadJson } from "../lib/download";
@@ -54,6 +55,7 @@ export function RegexModal({ onClose, cardName, characterDir, presetName, preset
   onClose: () => void; cardName?: string; characterDir?: string;
   presetName?: string; presetDir?: string;
 }) {
+  useOverlayRoute("regex", onClose);
   const hasPreset = !!(presetName && presetDir);
   const [scope, setScope] = useState<Scope>("global");
   const [scripts, setScripts] = useState<RegexScript[]>([]);

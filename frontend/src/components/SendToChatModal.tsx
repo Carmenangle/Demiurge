@@ -3,6 +3,7 @@
 // 「同时创建画布节点」默认开启：把图片作为 generation 入库目标作品（index-generation 幂等），
 // 目标作品的画布随即出现对应节点；对话消息与画布节点同步创建。
 import { useEffect, useState } from "react";
+import { useOverlayRoute } from "../lib/overlayRoute";
 import { useRepos, type Repo } from "../stores/repos";
 import { chatAppend, indexGeneration } from "../api/ai";
 import { resolvedEmbedModel, useSettings } from "../stores/settings";
@@ -27,6 +28,7 @@ export function SendToChatModal({
   /** 插入输入框模式：选作品后不落盘，回调由父级 push 到输入框并跳转（灵感卡「发送对话框」→「插入输入框」）。 */
   insertInput?: boolean;
 }) {
+  useOverlayRoute("send-to-chat", onCancel);
   const { repos } = useRepos();
   const { settings } = useSettings();
   const embed = resolvedEmbedModel(settings);

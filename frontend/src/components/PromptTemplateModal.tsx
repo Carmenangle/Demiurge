@@ -11,6 +11,7 @@ import {
   type TemplateForm, type TemplateGroup,
 } from "../lib/promptTemplates";
 import { ConfirmModal } from "./Modal";
+import { useMobileViewport } from "../lib/useMobileViewport";
 
 interface Props {
   builtins: PromptTemplate[];
@@ -66,6 +67,7 @@ export function PromptTemplateModal({
   const [busy, setBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmUnlock, setConfirmUnlock] = useState(false);
+  const isMobileViewport = useMobileViewport();
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -237,7 +239,7 @@ export function PromptTemplateModal({
 
           {/* 右：详情 / 编辑器 */}
           <div className="modal-split-editor" style={{ display: "flex", flexDirection: "column", gap: 8, overflowY: "auto" }}>
-            {!active && !form && <div style={{ color: "var(--text-muted)", fontSize: 13, margin: "auto" }}>选择左侧模版查看</div>}
+            {!active && !form && <div style={{ color: "var(--text-muted)", fontSize: 13, margin: "auto" }}>选择{isMobileViewport ? "上方" : "左侧"}模版查看</div>}
 
             {!form && (
               <div style={{ display: "flex", gap: 8, marginBottom: 4 }}>

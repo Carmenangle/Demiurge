@@ -91,7 +91,9 @@ describe("窄屏对话页第二轮合同（2026-10-27 真机：功能栏浮标�
 
   it("桌面布局零影响：工具组包装层 display:contents、浮标在桌面隐藏", () => {
     expect(blockOf(css, ".head-tools")).toContain("display: contents");
-    expect(blockOf(css, ".head-tools-toggle")).toContain("display: none");
+    // 触发器同时带 .btn.icon-only（0,3,0）：隐藏规则必须写到同特异性并靠顺序取胜，
+    // 否则桌面也露出「…」（2026-10-28 实测 1600×900 可见）。
+    expect(blockOf(css, ".chat-view-head .btn.head-tools-toggle")).toContain("display: none");
   });
 
   it("手机端工具组默认隐藏，浮标点开为 grid 浮层（不再两排按钮吃掉纵向空间）", () => {
@@ -100,7 +102,7 @@ describe("窄屏对话页第二轮合同（2026-10-27 真机：功能栏浮标�
     const open = blockOf(mobile2, ".chat-view-head .head-tools.open");
     expect(open).toContain("display: grid");
     expect(open).toContain("position: absolute");
-    expect(blockOf(mobile2, ".chat-view-head .head-tools-toggle")).toContain("display: inline-flex");
+    expect(blockOf(mobile2, ".chat-view-head .btn.head-tools-toggle")).toContain("display: inline-flex");
   });
 
   it("顶栏三行压两行：grid-areas 显式断行，methods 不再独占一行", () => {
@@ -117,5 +119,34 @@ describe("窄屏对话页第二轮合同（2026-10-27 真机：功能栏浮标�
     const list = blockOf(mobile2, ".table-list");
     expect(list).toContain("flex-direction: row");
     expect(list).toContain("overflow-x: auto");
+  });
+});
+
+// 2026-10-28 实测（1024×576）：输入区 247px + 会话头 113px ⇒ 正文只剩 120px；
+// 液态玻璃主题下 .chat-stream 全透明、AI 卡只有约 30% 深色，壁纸直接穿过正文。
+describe("输入区高度与正文阅读面合同（2026-10-28 实测 1024×576）", () => {
+  it("输入区收回无效空白：紧凑内边距 + 上传入口进操作条（空态附件栏不再常驻）", () => {
+    expect(blockOf(css, ".chat-input-bar")).toContain("padding: 10px 12px 6px");
+    // 空态附件栏由 RichInput 条件渲染（见 RichInput.draft.test.tsx），入口改在操作条最左
+    expect(blockOf(css, ".chat-upload-btn")).toContain("margin-right: auto");
+    expect(blockOf(css, ".chat-actions")).toContain("margin-top: 4px");
+  });
+
+  it("拖高上限受视口约束：正文区至少保留 220px（原先 1024×576 实拖只剩 80px）", () => {
+    expect(blockOf(css, ".chat-input-bar .rich-input")).toContain("calc(100vh - 470px)");
+  });
+
+  it("AI 正文卡：稳定深色阅读面（约 84%），不靠背板模糊、行高 1.72", () => {
+    const bot = blockOf(css, 'html[data-theme="liquid-glass"] .bot-content');
+    expect(bot).toContain("rgba(7, 12, 24, 0.84)");
+    expect(bot).not.toContain("backdrop-filter");
+    expect(bot).toContain("line-height: 1.72");
+  });
+
+  it("管理页内容面不再直透壁纸；设置页保留自己的玻璃内容面", () => {
+    expect(blockOf(css, 'html[data-theme="liquid-glass"] .page:not(.settings-page)'))
+      .toContain("rgba(9, 15, 28, 0.86)");
+    expect(blockOf(css, 'html[data-theme="liquid-glass"] .settings-page'))
+      .toContain("background: transparent");
   });
 });

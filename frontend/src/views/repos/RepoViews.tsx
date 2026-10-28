@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Boxes, Link2, Pencil, Plus, Search, Trash2 } from "lucide-react";
+import { Boxes, Images, Link2, MoreHorizontal, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import { type Repo } from "../../stores/repos";
 import { useSettings } from "../../stores/settings";
 import { Pager } from "../../components/Pager";
@@ -37,7 +37,14 @@ function useAssetCounts(repos: Repo[], childrenOf: ChildrenOf, settings: Setting
 export function RepoCover({ src, name }: { src?: string; name: string }) {
   const [failed, setFailed] = useState(false);
   useEffect(() => { setFailed(false); }, [src]);  // 换封面地址后重置
-  if (!src || failed) return <>暂无图片</>;
+  if (!src || failed) {
+    return (
+      <span className="repo-cover-empty">
+        <Images size={22} strokeWidth={1.4} />
+        <span>暂无封面</span>
+      </span>
+    );
+  }
   return <img src={src} alt="" aria-label={`${name}封面`} loading="lazy" onError={() => setFailed(true)} />;
 }
 
@@ -64,6 +71,21 @@ export function RepoGrid({
   assetCounts: ReadonlyMap<string, number>;
   displayNameOf?: (repo: Repo) => string;
 }) {
+  // P1-8（2026-10-28）：卡片「⋯」菜单同一时刻只开一张，点外部/Esc 关闭
+  const [menuId, setMenuId] = useState<string | null>(null);
+  useEffect(() => {
+    if (!menuId) return;
+    const onDown = (e: MouseEvent) => {
+      if (!(e.target as Element)?.closest?.(".repo-card-more")) setMenuId(null);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setMenuId(null); };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [menuId]);
   if (repos.length === 0) {
     return (
       <div className="empty-state">
@@ -84,6 +106,7 @@ export function RepoGrid({
             <div className="repo-cover" onClick={() => onOpen(r)} title="点击打开">
               <RepoCover src={cover} name={r.name} />
             </div>
+            {/* 主操作＝点封面打开；绑定常驻，重命名/删除低频且危险 ⇒ 收进「⋯」菜单 */}
             <div className="repo-tools">
             <button
               className={`icon-btn ${r.cardName || r.worldbookName || r.personaId || r.presetName ? "is-bound" : ""}`}
@@ -94,12 +117,23 @@ export function RepoGrid({
             >
               <Link2 size={15} />
             </button>
-            <button className="icon-btn" title="重命名" onClick={() => onRename(r)}>
-              <Pencil size={15} />
-            </button>
-            <button className="icon-btn" title="删除" onClick={() => onDelete(r)}>
-              <Trash2 size={15} />
-            </button>
+            <div className="repo-card-more">
+              <button className="icon-btn" title="更多操作（重命名 / 删除）"
+                aria-haspopup="menu" aria-expanded={menuId === r.id}
+                onClick={() => setMenuId((cur) => (cur === r.id ? null : r.id))}>
+                <MoreHorizontal size={15} />
+              </button>
+              {menuId === r.id && (
+                <div className="repo-card-menu" role="menu" aria-label={`${r.name} 操作`}>
+                  <button role="menuitem" onClick={() => { setMenuId(null); onRename(r); }}>
+                    <Pencil size={14} />重命名
+                  </button>
+                  <button role="menuitem" className="danger" onClick={() => { setMenuId(null); onDelete(r); }}>
+                    <Trash2 size={14} />删除
+                  </button>
+                </div>
+              )}
+            </div>
             </div>
           </div>
           <div className="repo-name">{displayNameOf?.(r) || r.name}</div>

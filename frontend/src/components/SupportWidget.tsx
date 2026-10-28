@@ -10,7 +10,9 @@ import {
   visiblePlanActivities,
   type PlanTaskActivity,
 } from "../lib/planTaskActivity";
-import { announceFloatingPanel, subscribeFloatingPanels } from "../lib/floatingPanels";
+import {
+  announceFloatingPanel, subscribeFloatingPanels,
+} from "../lib/floatingPanels";
 
 const FAB_TOP_KEY = "laf_support_fab_top";
 const STATUS_LABEL: Record<string, string> = {

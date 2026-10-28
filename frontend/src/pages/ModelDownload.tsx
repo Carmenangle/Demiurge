@@ -8,6 +8,8 @@ import {
 } from "../api/models";
 import { translateText } from "../api/ai";
 import { PageShell } from "../components/layout/PageShell";
+import { PcOnlyNotice } from "../components/PcOnlyNotice";
+import { MOBILE_PROFILE } from "../lib/mobileProfile";
 import { CivitaiBrowseTab } from "./modelDownload/CivitaiBrowseTab";
 import { CivArchiveTab } from "./modelDownload/CivArchiveTab";
 import { HuggingFaceTab } from "./modelDownload/HuggingFaceTab";
@@ -15,7 +17,26 @@ import { DownloadsPanel } from "./modelDownload/DownloadsPanel";
 
 // 多源模型市场外壳：tab 切数据源。OpenModelDB 不做。
 type MdTab = "civitai" | "civarchive" | "huggingface" | "link";
+
+// 手机端：图站搜索/断点续传/落盘都指向电脑上的 ComfyUI models 目录，手机上既没那个目录
+// 也会被后端远端闸门挡下（实测只余一条红色连接被拒报错）⇒ 整页换成一句能力说明。
 export function ModelDownload({ settings }: { settings: Settings }) {
+  if (MOBILE_PROFILE) {
+    return (
+      <PageShell title="模型下载">
+        <PcOnlyNotice
+          title="模型下载"
+          reason="CivitAI / CivArchive / Hugging Face 的搜索、断点续传与写入都落在电脑上的 ComfyUI models 目录；手机上没有那个目录，请求也会被后端远端闸门挡下，所以这里不再渲染搜索与下载表单。"
+          stillWorks="出图照常可用：手机走「联机同库」时用的就是电脑上 ComfyUI 的模型目录，LoRA / 底图 / 反推都不用在手机再存一份。"
+          howTo="在电脑的 Demiurge「模型下载」里取回模型，手机上直接选用即可。"
+        />
+      </PageShell>
+    );
+  }
+  return <ModelDownloadDesktop settings={settings} />;
+}
+
+function ModelDownloadDesktop({ settings }: { settings: Settings }) {
   const [tab, setTab] = useState<MdTab>("civitai");
   const dir = settings.modelsDir.trim()
     || (settings.comfyuiPath.trim() ? settings.comfyuiPath.replace(/[\\/]+$/, "") + "\\models" : "");

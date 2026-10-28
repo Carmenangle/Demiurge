@@ -14,6 +14,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Sparkles, X } from "lucide-react";
+import { useOverlayRoute } from "../lib/overlayRoute";
 import { WorkflowCard } from "./WorkflowCard";
 import { getTemplateRaw } from "../api/workflows";
 import { workflowPorts, type PortOp, type PortsPlan } from "../api/ai";
@@ -48,6 +49,7 @@ interface ChatMsg {
 }
 
 export function WorkflowToolModal({ node: nodeProp, repoId, settings, onClose, onUpdate, onNotify, onGenerated, onFinalizeWorkflow, autoConfirm = false }: Props) {
+  useOverlayRoute("workflow-tool", onClose);
   // P17（2026-09-15）：runtime 的线程键统一走 `threadKey`。本组件的 `repoId` prop 由画布透传
   // （`ChatView` 传 `repo?.id || ""`），首页会是 `""`，而约定键是 `"home"` ⇒ 否则弹窗在首页运转的任务
   // 会落在 `getRuntime("")` 这个孤立实例上（与画布/对话的判重域分裂，同一任务可被归档两次）。

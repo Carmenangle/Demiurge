@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import { useOverlayRoute } from "../lib/overlayRoute";
+import { useMobileViewport } from "../lib/useMobileViewport";
 import { X, Upload, Download, Trash2, Check, GripVertical } from "lucide-react";
 import { ConfirmModal } from "./Modal";
 import { downloadJson } from "../lib/download";
@@ -18,6 +20,9 @@ export function PresetModal({
   onSelectActive: (name: string) => void;
   onClose: () => void;
 }) {
+  useOverlayRoute("preset", onClose);
+  // 手机上 .modal-split-body 改成上下堆叠（列表在上方），提示词的方位词跟着变
+  const isMobileViewport = useMobileViewport();
   const [list, setList] = useState<PresetSummary[]>([]);
   const [selName, setSelName] = useState<string | null>(null);
   const [detail, setDetail] = useState<PresetData | null>(null);
@@ -173,7 +178,7 @@ export function PresetModal({
             </div>
             {/* 右：片段列表 + 开关 */}
             <div className="modal-split-editor">
-              {!detail && <p style={{ color: "var(--text-muted)" }}>选择左侧预设查看/编辑片段；可改名称、角色、内容并勾选启用/停用，拖左上角把手调顺序（越靠后越接近生成点、遵守越强；排到「聊天历史」占位之后遵守最严），改完点「保存修改」落盘（占位片段由卡字段/世界书自动填充，不可编辑内容）。</p>}
+              {!detail && <p style={{ color: "var(--text-muted)" }}>选择{isMobileViewport ? "上方" : "左侧"}预设查看/编辑片段；可改名称、角色、内容并勾选启用/停用，拖左上角把手调顺序（越靠后越接近生成点、遵守越强；排到「聊天历史」占位之后遵守最严），改完点「保存修改」落盘（占位片段由卡字段/世界书自动填充，不可编辑内容）。</p>}
               {detail && (
                 <>
                   <div className="preset-action-bar">

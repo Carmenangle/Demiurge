@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useOverlayRoute } from "../lib/overlayRoute";
 import { describeWorkflow, polishDescription } from "../api/ai";
 import type { ChatModel } from "../stores/settings";
 import { NodePickerModal } from "./NodePickerModal";
@@ -26,6 +27,7 @@ interface Props {
 
 // 模板能力描述弹窗：点击遮罩不关闭，只有「取消」「确定」能关闭。
 export function DescribeModal({ workflowName, nodes, chat, initial, comfyUrl, sourcePath, onConfirm, onCancel }: Props) {
+  useOverlayRoute("describe", onCancel);
   const [desc, setDesc] = useState(initial.description);
   const [inputIds, setInputIds] = useState<string[]>(initial.input_node_ids || []);
   const [outputIds, setOutputIds] = useState<string[]>(initial.output_node_ids || []);

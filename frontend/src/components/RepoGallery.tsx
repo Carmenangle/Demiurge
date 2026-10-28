@@ -12,6 +12,7 @@ import {
   describeMissingAssets,
 } from "../api/ai";
 import { parseAssetQuery, removeTagFromQuery } from "../lib/assetQuery";
+import { useOverlayRoute } from "../lib/overlayRoute";
 import { distributeMasonry, masonryColumnCount } from "../lib/masonry";
 import { shouldLoadMore } from "../lib/infiniteScroll";
 import { subscribeJobActivities } from "../lib/jobActivity";
@@ -241,6 +242,8 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
   const [items, setItems] = useState<GenWithRepo[]>([]);
   const [loading, setLoading] = useState(true);
   const [active, setActive] = useState<GenWithRepo | null>(null);
+  // 素材详情开着就占一段历史：手机返回键先关详情，而不是退掉资产库（#95）。
+  useOverlayRoute(active ? "asset-detail" : null, () => setActive(null));
   // 详情面板的图片实际像素尺寸（图片加载后读 naturalWidth/Height；与画布详情同款做法）
   const [detailImgSize, setDetailImgSize] = useState<{ w: number; h: number } | null>(null);
   const [page, setPage] = useState(1);
@@ -297,6 +300,23 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
   const [restoringId, setRestoringId] = useState("");
   const [clearConfirm, setClearConfirm] = useState(false);
   const [showTagCloud, setShowTagCloud] = useState(false);  // 标签统计面板
+  // P1-6（2026-10-28）：维护类动作（同步体检/描述/索引/缩略图/清理裂图/孤儿仓库）
+  // 从工具栏按钮流收进「维护」下拉，工具栏只留查找—筛选—维护三层。
+  const [maintOpen, setMaintOpen] = useState(false);
+  const maintRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!maintOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (!maintRef.current?.contains(e.target as Node)) setMaintOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setMaintOpen(false); };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [maintOpen]);
   const [allTags, setAllTags] = useState<{ tag: string; count: number }[]>([]);  // 后端全量标签统计
   const [semanticMode, setSemanticMode] = useState(false);
   const [semanticItems, setSemanticItems] = useState<GenWithRepo[]>([]);
@@ -1182,38 +1202,21 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
     setPage(1);
   };
 
+  const maintBusy = !!describeJobId || visualIndexing || thumbnailing || pruning || orphanPruning;
+  // 结果计数：服务端给了 total 且没有客户端筛选时用 total（无限滚动下已加载 < 总数）；
+  // 搜索/回收站/客户端筛选的结果集在内存里，直接数 sorted。
+  const matchTotal = trashMode ? trashItems.length
+    : (!serverSearch && !clientFiltering && totalCount > 0) ? totalCount : sorted.length;
+  const filterBits = [
+    trashMode ? "回收站" : "",
+    mediaFilter !== "all" ? ({ all: "全部", image: "图片", video: "视频", audio: "音频" } as const)[mediaFilter] : "",
+    structured.tags.length ? `标签 ${structured.tags.map((t) => `#${t}`).join(" ")}` : "",
+    semanticMode ? "语义搜索" : "",
+  ].filter(Boolean);
+
   return (
     <div style={{ marginTop: hideTitle ? 0 : 28 }}>
-      {!hideTitle && <h3 style={{ margin: "4px 0 12px", fontSize: 15 }}>资产库</h3>}
-      {items.length > 0 && (
-        <div style={{ position: "relative", marginBottom: 12, maxWidth: 320 }}>
-          <Search size={14} style={{ position: "absolute", left: 9, top: 9, color: "var(--text-muted)" }} />
-          <input
-            style={{ width: "100%", paddingLeft: 28, boxSizing: "border-box" }}
-            placeholder={semanticMode ? "按画面语义搜索，例如：雨夜里穿红裙的角色…"
-              : repoNames ? "按标签或仓库名搜索（tag:xxx 精确标签筛）…" : "按标签搜索（回车确认一个标签后自动补「，」接着输下一个）…"}
-            value={tagQuery}
-            onChange={(e) => { setTagQuery(e.target.value); setPage(1); }}
-            onKeyDown={(e) => {
-              // 回车确认当前标签：末尾补「，」分隔，方便接着输下一个（已是分隔符结尾则不重复补）
-              if (e.key === "Enter" && !semanticMode) {
-                e.preventDefault();
-                setTagQuery((q) => (q.trim() && !/[,，;；]\s*$/.test(q) ? q.trimEnd() + "，" : q));
-              }
-            }}
-          />
-          {tagSuggest.length > 0 && (
-            <div className="tag-suggest-pop">
-              {tagSuggest.map(([t, n]) => (
-                <button key={t} className="tag-suggest-item" onMouseDown={(e) => { e.preventDefault(); pickSuggest(t); }}>
-                  <span>{t}</span>
-                  <span className="tag-suggest-count">{n}</span>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
+      {!hideTitle && <h3 style={{ margin: "4px 0 12px", fontSize: 15 }}>生成内容</h3>}
       {/* P1-3：已选标签 chips（tag: 语法解析结果，点 ✕ 移除该项） */}
       {structured.tags.length > 0 && (
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginBottom: 10 }}>
@@ -1228,94 +1231,154 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
         </div>
       )}
       {enhanced && items.length > 0 && (
-        <div className="page-toolbar asset-toolbar" style={{ marginBottom: 12 }}>
-          <button className="btn" onClick={() => { setSelMode((v) => !v); setSelected(new Set()); }}>
-            {selMode ? "退出多选" : "批量选择"}
-          </button>
-          {selMode && (
-            <>
-              <button className="btn danger" disabled={selected.size === 0} onClick={() => setBatchDel(true)}>
-                <Trash2 size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />删除所选（{selected.size}）
+        <div className="asset-toolbar-sticky">
+          <div className="page-toolbar asset-toolbar">
+            {/* 第一行 · 查找：弹性搜索框 / 全部·图片·视频·音频分段 / 语义搜索 */}
+            <div className="asset-toolbar-row asset-toolbar-find">
+              <div className="asset-search">
+                <Search size={14} className="asset-search-icon" />
+                <input
+                  className="asset-search-input"
+                  placeholder={semanticMode ? "按画面语义搜索，例如：雨夜里穿红裙的角色…"
+                    : repoNames ? "按标签或仓库名搜索（tag:xxx 精确标签筛）…" : "按标签搜索（回车确认一个标签后自动补「，」接着输下一个）…"}
+                  value={tagQuery}
+                  onChange={(e) => { setTagQuery(e.target.value); setPage(1); }}
+                  onKeyDown={(e) => {
+                    // 回车确认当前标签：末尾补「，」分隔，方便接着输下一个（已是分隔符结尾则不重复补）
+                    if (e.key === "Enter" && !semanticMode) {
+                      e.preventDefault();
+                      setTagQuery((q) => (q.trim() && !/[,，;；]\s*$/.test(q) ? q.trimEnd() + "，" : q));
+                    }
+                  }}
+                />
+                {tagSuggest.length > 0 && (
+                  <div className="tag-suggest-pop">
+                    {tagSuggest.map(([t, n]) => (
+                      <button key={t} className="tag-suggest-item" onMouseDown={(e) => { e.preventDefault(); pickSuggest(t); }}>
+                        <span>{t}</span>
+                        <span className="tag-suggest-count">{n}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div className="asset-seg" role="group" aria-label="媒体类型">
+                {(["all", "image", "video", "audio"] as const).map((m) => (
+                  <button
+                    key={m}
+                    className={`btn ${mediaFilter === m ? "primary" : ""}`}
+                    aria-pressed={mediaFilter === m}
+                    onClick={() => { setMediaFilter(m); setPage(1); }}
+                  >
+                    {m === "all" ? "全部" : m === "image" ? "图片" : m === "video" ? "视频" : "音频"}
+                  </button>
+                ))}
+              </div>
+              <button className={`btn ${semanticMode ? "primary" : ""}`} aria-pressed={semanticMode}
+                onClick={() => { setSemanticMode((value) => !value); setPage(1); }}>
+                {semanticMode ? "语义搜索：开" : "语义搜索"}
               </button>
-              {onBatchSendToCanvas && (
-                <button className="btn" disabled={selected.size === 0}
-                  onClick={() => {
-                    const ids = new Set(selected);
-                    onBatchSendToCanvas(items.filter((g) => ids.has(g.id)));
-                  }}>
-                  <Send size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />发送至画布（{selected.size}）
+            </div>
+            {/* 第二行 · 筛选与维护：批量选择 / 标签统计 / 回收站 / 维护菜单 */}
+            <div className="asset-toolbar-row asset-toolbar-manage">
+              <button className="btn" onClick={() => { setSelMode((v) => !v); setSelected(new Set()); }}>
+                {selMode ? "退出多选" : "批量选择"}
+              </button>
+              {selMode && (
+                <>
+                  <button className="btn danger" disabled={selected.size === 0} onClick={() => setBatchDel(true)}>
+                    <Trash2 size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />删除所选（{selected.size}）
+                  </button>
+                  {onBatchSendToCanvas && (
+                    <button className="btn" disabled={selected.size === 0}
+                      onClick={() => {
+                        const ids = new Set(selected);
+                        onBatchSendToCanvas(items.filter((g) => ids.has(g.id)));
+                      }}>
+                      <Send size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />发送至画布（{selected.size}）
+                    </button>
+                  )}
+                  <button className="btn" disabled={selected.size === 0} onClick={runTagBatch}
+                    title={`按当前反推模式（${tagModeLabel(tagMode)}）反推选中的图片；并发 3，进度显示在右下「后台活动」`}>
+                    <Tag size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />反推所选（{selected.size}）
+                  </button>
+                  <button className="btn" onClick={() => setSelected(new Set(shown.map((g) => g.id)))}>选本页</button>
+                  <button className="btn" disabled={selected.size === 0} onClick={() => setSelected(new Set())}>清除</button>
+                </>
+              )}
+              <button className="btn" onClick={() => setShowTagCloud((v) => !v)}>
+                标签统计（{tagCounts.length}）
+              </button>
+              {items.some((g) => brokenIds.has(g.id)) && (
+                <button className="btn danger"
+                  onClick={() => { setSelected(new Set(brokenIds)); setBatchDel(true); }}
+                  title="删除当前列表中**浏览器检测到**的裂图记录（缩略图与原图都加载失败，如云端过期直链）；走批量删除确认，本机文件按设置处理">
+                  <Trash2 size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />
+                  删除 {items.filter((g) => brokenIds.has(g.id)).length} 条裂图记录
                 </button>
               )}
-              <button className="btn" disabled={selected.size === 0} onClick={runTagBatch}
-                title={`按当前反推模式（${tagModeLabel(tagMode)}）反推选中的图片；并发 3，进度显示在右下「后台活动」`}>
-                <Tag size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />反推所选（{selected.size}）
+              {/* P1-2 回收站（2026-10-18）：删除改软删，回收站里可恢复 / 彻底删除 / 清空 */}
+              <button className={`btn ${trashMode ? "primary" : ""}`} aria-pressed={trashMode}
+                onClick={() => { setTrashMode((v) => !v); setSelMode(false); setSelected(new Set()); }}
+                title="回收站：删除的资产先放这里，可恢复或彻底删除">
+                <RotateCcw size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />
+                {trashMode ? "退出回收站" : "回收站"}
               </button>
-              <button className="btn" onClick={() => setSelected(new Set(shown.map((g) => g.id)))}>选本页</button>
-              <button className="btn" disabled={selected.size === 0} onClick={() => setSelected(new Set())}>清除</button>
-            </>
-          )}
-          <button className="btn" onClick={() => setShowTagCloud((v) => !v)}>
-            标签统计（{tagCounts.length}）
-          </button>
-          <button className="btn" disabled={orphanPruning} onClick={doOrphanPrune}
-            title="清理「孤儿仓库」的失效记录：有资产记录但已不在仓库注册表里的仓库（如删了文件夹），其裂图记录平时扫不到，这里统一清掉">
-            {orphanPruning ? "清理中…" : "清理孤儿仓库"}
-          </button>
-          <button className="btn" onClick={() => setShowSync(true)}
-            title="仓库同步体检：对账「注册表/磁盘/索引」三方——补录丢进文件夹但没入库的文件、清理磁盘已没了的裂图/孤儿">
-            同步体检
-          </button>
-          <div className="lora-mode-switch" role="group" aria-label="媒体类型" style={{ display: "inline-flex", gap: 4 }}>
-            {(["all", "image", "video", "audio"] as const).map((m) => (
-              <button
-                key={m}
-                className={`btn ${mediaFilter === m ? "primary" : ""}`}
-                onClick={() => { setMediaFilter(m); setPage(1); }}
-              >
-                {m === "all" ? "全部" : m === "image" ? "图片" : m === "video" ? "视频" : "音频"}
-              </button>
-            ))}
+              {trashMode && trashItems.length > 0 && (
+                <button className="btn danger" onClick={() => setClearConfirm(true)}>
+                  <Trash2 size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />清空回收站（{trashItems.length}）
+                </button>
+              )}
+              <div className="asset-maint" ref={maintRef}>
+                <button className="btn" aria-haspopup="menu" aria-expanded={maintOpen}
+                  onClick={() => setMaintOpen((v) => !v)}
+                  title="维护：同步体检 / 自动描述 / 视觉索引 / 补缩略图 / 清理裂图 / 清理孤儿仓库">
+                  维护{maintBusy ? "（进行中）" : ""}
+                  <ChevronDown size={14} style={{ verticalAlign: "-2px", marginLeft: 4 }} />
+                </button>
+                {maintOpen && (
+                  <div className="asset-maint-menu" role="menu" aria-label="资产库维护">
+                    <button role="menuitem" onClick={() => { setMaintOpen(false); setShowSync(true); }}
+                      title="仓库同步体检：对账「注册表/磁盘/索引」三方——补录丢进文件夹但没入库的文件、清理磁盘已没了的裂图/孤儿">
+                      同步体检
+                    </button>
+                    <button role="menuitem" disabled={describeJobId !== ""}
+                      onClick={() => { setMaintOpen(false); void describeMissing(); }}
+                      title="用视觉模型并发描述【当前视图的全部仓库】内缺描述的图片——不看已加载页、后端跑、切页也不中断。在「资产库」总页点＝补全库；在子仓库页点＝只补该仓库">
+                      {describeJobId ? "自动描述缺失资产（进行中）" : "自动描述缺失资产"}
+                    </button>
+                    <button role="menuitem" disabled={visualIndexing}
+                      onClick={() => { setMaintOpen(false); buildVisualIndex(); }}
+                      title="把图片画面编码成向量，供「语义搜索按图匹配」用——不生成描述文字。要生成描述请点「自动描述缺失资产」">
+                      {visualIndexing ? "构建视觉索引（进行中）" : "构建视觉索引"}
+                    </button>
+                    <button role="menuitem" disabled={thumbnailing}
+                      onClick={() => { setMaintOpen(false); buildThumbs(); }}
+                      title="为本仓库历史图片补生成缩略图（长边 512，网格加载更快；新图入库时已自动生成）">
+                      {thumbnailing ? "补缩略图（进行中）" : "补缩略图"}
+                    </button>
+                    <button role="menuitem" disabled={pruning}
+                      onClick={() => { setMaintOpen(false); doPrune(); }}
+                      title="删除指向本机图但磁盘文件已不存在的裂图记录（多因手动删文件留下）">
+                      {pruning ? "清理裂图（进行中）" : "清理裂图"}
+                    </button>
+                    <button role="menuitem" disabled={orphanPruning}
+                      onClick={() => { setMaintOpen(false); doOrphanPrune(); }}
+                      title="清理「孤儿仓库」的失效记录：有资产记录但已不在仓库注册表里的仓库（如删了文件夹），其裂图记录平时扫不到，这里统一清掉">
+                      {orphanPruning ? "清理孤儿仓库（进行中）" : "清理孤儿仓库"}
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
-          <button className={`btn ${semanticMode ? "active" : ""}`}
-            onClick={() => { setSemanticMode((value) => !value); setPage(1); }}>
-            {semanticMode ? "语义搜索：开" : "语义搜索"}
-          </button>
-          <button className="btn" onClick={() => void describeMissing()} disabled={describeJobId !== ""}
-            title="用视觉模型并发描述【当前视图的全部仓库】内缺描述的图片——不看已加载页、后端跑、切页也不中断。在「资产库」总页点＝补全库；在子仓库页点＝只补该仓库">
-            {describeJobId ? "描述中（见后台活动）" : "自动描述缺失资产"}
-          </button>
-          <button className="btn" onClick={buildVisualIndex} disabled={visualIndexing}
-            title="把图片画面编码成向量，供「语义搜索按图匹配」用——不生成描述文字。要生成描述请点「自动描述缺失资产」">
-            {visualIndexing ? "视觉索引中…" : "构建视觉索引"}
-          </button>
-          <button className="btn" onClick={buildThumbs} disabled={thumbnailing}
-            title="为本仓库历史图片补生成缩略图（长边 512，网格加载更快；新图入库时已自动生成）">
-            {thumbnailing ? "补生成中…" : "补缩略图"}
-          </button>
-          <button className="btn" onClick={doPrune} disabled={pruning}
-            title="删除指向本机图但磁盘文件已不存在的裂图记录（多因手动删文件留下）">
-            {pruning ? "清理中…" : "清理裂图"}
-          </button>
-          {items.some((g) => brokenIds.has(g.id)) && (
-            <button className="btn danger"
-              onClick={() => { setSelected(new Set(brokenIds)); setBatchDel(true); }}
-              title="删除当前列表中**浏览器检测到**的裂图记录（缩略图与原图都加载失败，如云端过期直链）；走批量删除确认，本机文件按设置处理">
-              <Trash2 size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />
-              删除 {items.filter((g) => brokenIds.has(g.id)).length} 条裂图记录
-            </button>
-          )}
-          {/* P1-2 回收站（2026-10-18）：删除改软删，回收站里可恢复 / 彻底删除 / 清空 */}
-          <button className={`btn ${trashMode ? "primary" : ""}`}
-            onClick={() => { setTrashMode((v) => !v); setSelMode(false); setSelected(new Set()); }}
-            title="回收站：删除的资产先放这里，可恢复或彻底删除">
-            <RotateCcw size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />
-            {trashMode ? "退出回收站" : "回收站"}
-          </button>
-          {trashMode && trashItems.length > 0 && (
-            <button className="btn danger" onClick={() => setClearConfirm(true)}>
-              <Trash2 size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />清空回收站（{trashItems.length}）
-            </button>
-          )}
+          {/* 结果计数 / 筛选摘要 */}
+          <div className="asset-summary">
+            <span>共 {matchTotal} 条</span>
+            {shown.length !== matchTotal && <span>已显示 {shown.length} 条</span>}
+            {filterBits.length > 0 && <span className="asset-summary-filter">筛选：{filterBits.join(" · ")}</span>}
+            {searching && <span>搜索中…</span>}
+          </div>
         </div>
       )}
       {enhanced && showTagCloud && (

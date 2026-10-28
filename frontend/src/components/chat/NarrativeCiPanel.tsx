@@ -79,6 +79,7 @@ export function NarrativeCiPanel({ outputDir, repoId }: NarrativeCiPanelProps) {
         title="剧情一致性诊断（非阻断）：每回合检查正文矛盾/伏笔断裂/设定漂移，可标记已修复/伏笔/设定变更/接受"
       >
         <ShieldCheck size={15} />
+        <span className="head-tool-text">诊断</span>
         {openCount > 0 && <span className="nci-count">{openCount}</span>}
       </button>
 

@@ -1,4 +1,4 @@
-export type FloatingPanelId = "support" | "quick-tools";
+export type FloatingPanelId = "support" | "quick-tools" | "glass";
 
 const EVENT_NAME = "laf-floating-panel-open";
 

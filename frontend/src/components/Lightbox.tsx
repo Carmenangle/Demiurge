@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useOverlayRoute } from "../lib/overlayRoute";
 
 // 全屏看图：点击任意缩略图触发 'lightbox' 事件，由根部的 Lightbox 监听显示。
 // 2026-10-16：加滚轮缩放（以鼠标为焦点）/ 放大后拖拽平移 / 双击复位，与市场大图交互一致。
@@ -15,6 +16,8 @@ export function Lightbox() {
   const maskRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<{ sx: number; sy: number; vx: number; vy: number } | null>(null);
   const movedRef = useRef(false);
+  // 开着大图就占一段历史：手机返回键先关大图，而不是退掉底下的页面。
+  useOverlayRoute(url ? "lightbox" : null, () => setUrl(null));
 
   useEffect(() => {
     const h = (e: Event) => {

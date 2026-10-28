@@ -124,7 +124,8 @@ export function parseRouteHash(hash: string): RouteIntent {
   } catch {
     // 畸形百分号转义：按原文继续判，绝不让监听器抛（抛了等于返回键失效）
   }
-  const [seg, second, ...rest] = raw.split("/");
+  // 弹窗段 `@id`（lib/overlayRoute.ts）不参与视图解析：`#/settings/@regex` 的 panel 仍是空串。
+  const [seg, second, ...rest] = raw.split("/").filter((part) => !part.startsWith("@"));
   if (!seg) return { kind: "home" };
   if (seg === "settings") return { kind: "settings", panel: second ?? "" };
   if (isWorkMode(seg)) return { kind: "mode", mode: seg };

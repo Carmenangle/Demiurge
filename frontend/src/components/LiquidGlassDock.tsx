@@ -10,6 +10,9 @@ import {
 } from "../api/userState";
 import { localViewUrl } from "../api/comfyui";
 import { LIQUID_GLASS_REFRESH_EVENT } from "../lib/liquidGlass";
+import {
+  subscribeFloatingPanels,
+} from "../lib/floatingPanels";
 import { useSceneBindings } from "../lib/scene/sceneBindings";
 import {
   filterScenePresetItems, hexToSceneColor, loadScenePresets, roundSceneNumber,
@@ -410,6 +413,8 @@ export function LiquidGlassDock({
 
   const active = lg.wallpapers.find((w) => w.id === lg.activeWallpaperId) || null;
 
+  useEffect(() => subscribeFloatingPanels("glass", () => setOpen(false)), []);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
@@ -595,11 +600,11 @@ export function LiquidGlassDock({
       {!open && (
         <div
           className="lg-rope"
-          style={{ top: `${pos}%`, transform: `translateY(-50%) scale(${lg.ropeScale})` }}
+          style={{ top: `${pos}%`, "--lg-rope-scale": lg.ropeScale } as React.CSSProperties}
           role="button"
           tabIndex={0}
-          aria-label="液态玻璃控制台拉绳：上下拖动移动，向左拉或点击打开参数面板"
-          title="液态玻璃控制台 · 上下拖动 / 向左拉打开"
+          aria-label="液态玻璃控制台拉绳：点击或向左拉打开参数面板"
+          title="液态玻璃控制台 · 点击或向左拉打开"
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
@@ -914,7 +919,7 @@ export function LiquidGlassDock({
                 <>
                   <section className="lg-section">
                     <h4>壁纸</h4>
-                    <RangeRow label="暗化" value={lg.scrim} min={0} max={100} suffix="%" hint="提高暗化可压低花哨壁纸，保证文字可读" onChange={(v) => update({ scrim: v })} />
+                    <RangeRow label="暗化" value={lg.scrim} min={0} max={100} suffix="%" hint="提高暗化可压低花哨壁纸，保证文字可读；实时渲染场景按作品原样，不受此项影响" onChange={(v) => update({ scrim: v })} />
                     <RangeRow label="模糊" value={lg.wallpaperBlur} min={0} max={60} suffix="px" onChange={(v) => update({ wallpaperBlur: v })} />
                     <RangeRow label="亮度" value={lg.wallpaperBrightness} min={20} max={160} suffix="%" onChange={(v) => update({ wallpaperBrightness: v })} />
                     <RangeRow label="对比度" value={lg.wallpaperContrast} min={20} max={160} suffix="%" onChange={(v) => update({ wallpaperContrast: v })} />
