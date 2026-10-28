@@ -539,7 +539,10 @@ export function useChatSession(deps: ChatSessionDeps) {
       const regeneration = savedRegeneration?.kind === "workflow" || savedRegeneration?.kind === "template"
         ? { ...savedRegeneration, prompt: generationPrompt }
         : savedRegeneration;
-      const comfyuiUrl = comfyRegenerationUrl(regeneration) || settings.comfyuiUrl;
+      // 归档要回**提交那台机**取产物（`pendingItem.comfyuiUrl` 为提交时固化）；
+      // 旧 pending / 画布路径没有该字段 → 退回快照地址、再退回入口 0。
+      const comfyuiUrl = pendingItem?.comfyuiUrl
+        || comfyRegenerationUrl(regeneration) || settings.comfyuiUrl;
       const result = await persistWorkflowGeneration({
         threadId: owner.threadId,
         repoId: owner.repoId,
@@ -702,7 +705,8 @@ export function useChatSession(deps: ChatSessionDeps) {
           const nextId = left.head!;
           const nextPending = workflowRuntime.list().find(p => p.prompt_id === nextId);
           if (nextPending) {
-            const nextUrl = comfyRegenerationUrl(nextPending.regeneration) || settings.comfyuiUrl;
+            const nextUrl = nextPending.comfyuiUrl
+              || comfyRegenerationUrl(nextPending.regeneration) || settings.comfyuiUrl;
             const nextGraph = nextPending.regeneration?.kind === "workflow"
               ? (nextPending.regeneration as WorkflowRegeneration).graph : null;
             const nextLabel = (nid: string): string => {
@@ -789,8 +793,11 @@ export function useChatSession(deps: ChatSessionDeps) {
     prompt = "",
     mediaType: "image" | "video" | "audio" = "image",
     baseSlotRef?: PendingGeneration["baseSlotRef"],
+    // 地址簿按模态选机后，过渡视频 / 配音这两条**没有 regeneration 快照可推导**地址；
+    // 不显式传就是入口 0 那台，轮询会去问错机器（永远拿不到结果）。
+    comfyuiUrlOverride?: string,
   ) => {
-    const comfyuiUrl = comfyRegenerationUrl(regeneration) || settings.comfyuiUrl;
+    const comfyuiUrl = comfyuiUrlOverride || comfyRegenerationUrl(regeneration) || settings.comfyuiUrl;
     if (!target?.background) dispatch({ t: "workflowStart", promptId });
     // 节点 id → 类型名映射（用 capturedGraph，API 格式 {id:{class_type,inputs}}）
     const graph = regeneration?.kind === "workflow" ? regeneration.graph : null;
@@ -1320,11 +1327,20 @@ export function useChatSession(deps: ChatSessionDeps) {
     }
   };
 
+  // 中断必须打在**提交那台机**上：地址簿按模态选机后，`settings.comfyuiUrl` 可能已换机，
+  // 且过渡视频 / 配音本就不带 regeneration 快照 —— 打在入口 0 上等于没停（那边仍在跑）。
+  // 在途登记里没有该 prompt（如文本生成的 promptId）时退回旧口径，中断失败照旧忽略。
+  const comfyUrlForPrompt = (promptId: string): string => {
+    const pending = workflowRuntime.list().find((p) => p.prompt_id === promptId);
+    return pending?.comfyuiUrl
+      || comfyRegenerationUrl(pending?.regeneration) || settings.comfyuiUrl;
+  };
+
   // 真正停止后台生成
   const hardCancel = async (promptId: string | null): Promise<void> => {
     try { await cancelAgent(threadId); } catch { /* 后端未起忽略 */ }
     if (promptId) {
-      try { await interruptComfy(settings.comfyuiUrl, promptId); } catch { /* 忽略 */ }
+      try { await interruptComfy(comfyUrlForPrompt(promptId), promptId); } catch { /* 忽略 */ }
     }
     abortRef.current = releaseAgentStream(abortRef.current, "stop");
     // 2026-10-14：后端 `request_cancel` 只置取消事件、不释放准入（release 等 worker
@@ -1374,7 +1390,7 @@ export function useChatSession(deps: ChatSessionDeps) {
     if (promptId) {
       // P22：同 `stopGenerating` —— 取消必须出队（该槽的 prompt 可能正是前台首任务）
       cancelForegroundRun(promptId);
-      try { await interruptComfy(settings.comfyuiUrl, promptId); } catch { /* 中断失败忽略，槽位照常标停 */ }
+      try { await interruptComfy(comfyUrlForPrompt(promptId), promptId); } catch { /* 中断失败忽略，槽位照常标停 */ }
     }
     setMessages((current) => failMediaSlot(current, messageId, slotId, "已停止生成"));
     refreshChatBackgroundActivities();

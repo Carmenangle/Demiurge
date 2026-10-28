@@ -3,7 +3,7 @@ from pydantic import BaseModel
 
 from app.config import COMFYUI_BASE_URL
 from app.services import (
-    comfy_pending, comfyui_client, comfyui_ws_proxy, comfy_launcher, generation_store,
+    comfy_hosts, comfy_pending, comfyui_client, comfyui_ws_proxy, comfy_launcher, generation_store,
     image_store, inspiration_store, local_media, repo_meta, workflow_submission,
     comfy_watchdog,
 )
@@ -63,6 +63,13 @@ class ComfyConfig(BaseModel):
     python_path: str = ""
 
 
+class ComfyConfigResult(ComfyConfig):
+    """保存结果 + 白名单登记回执（登记失败不打断保存，但必须让用户看见原因）。"""
+
+    registered: str = ""        # "loopback" / 主机名 / 空（未登记）
+    register_error: str = ""    # 未登记的原因（上限已满、主机形态不合法……）
+
+
 @router.get("/config")
 def get_config() -> ComfyConfig:
     """读 ComfyUI 路径/地址配置（供 start-dev 脚本等读取）。"""
@@ -70,9 +77,54 @@ def get_config() -> ComfyConfig:
 
 
 @router.post("/config")
-def set_config(cfg: ComfyConfig) -> ComfyConfig:
-    """保存 ComfyUI 路径/地址，落盘到 data/comfy_config.json（ps1 脚本据此启动）。"""
-    return ComfyConfig(**comfy_launcher.save_config(cfg.path, cfg.url, cfg.python_path))
+def set_config(cfg: ComfyConfig) -> ComfyConfigResult:
+    """保存 ComfyUI 路径/地址，落盘到 data/comfy_config.json（ps1 脚本据此启动）。
+
+    顺带把地址里的主机登记进 url_guard 白名单并落盘（2026-10-27）：PC 此前只能靠
+    导入期读一次的 COMFYUI_ALLOWED_HOSTS 环境变量，加一台云端/局域网 ComfyUI 就得改环境
+    重启。登记失败**不影响保存成功**，原因通过 register_error 回给前端显示。
+    """
+    saved = comfy_launcher.save_config(cfg.path, cfg.url, cfg.python_path)
+    try:
+        return ComfyConfigResult(**saved, registered=comfy_hosts.register_from_url(cfg.url))
+    except ValueError as exc:
+        return ComfyConfigResult(**saved, register_error=str(exc))
+
+
+@router.get("/hosts")
+def list_hosts() -> dict[str, object]:
+    """ComfyUI 白名单主机簿（运行期判定面 + 落盘真源 + 上限）。
+
+    PC 独占：登记主机＝放宽 SSRF 白名单，这一面不能让远程客户端读（判定在
+    remote_gate._DENY_PREFIXES，改这里要同步改那边）。
+    """
+    return comfy_hosts.snapshot()
+
+
+class HostBody(BaseModel):
+    url: str
+
+
+@router.post("/hosts")
+def add_host(body: HostBody) -> dict[str, object]:
+    """登记一台额外的 ComfyUI 主机（地址簿「新增机台」）。
+
+    与 `POST /config` 的分工：那条**同时改默认地址**（`comfy_config.json`，ps1 脚本据此
+    启动），这条只放宽白名单 ⇒ 加第二、第三台机不会把当前默认机顶掉。
+    """
+    try:
+        return {"registered": comfy_hosts.register_from_url(body.url)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/hosts")
+def delete_host(url: str) -> dict[str, object]:
+    """注销一台主机（地址簿删条目）。幂等：不在簿子里也返回 200。"""
+    try:
+        return {"removed": comfy_hosts.remove_from_url(url)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/start")

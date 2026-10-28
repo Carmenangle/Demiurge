@@ -79,6 +79,7 @@ interface DepsOver {
   templates?: unknown[];
   threadId?: string;
   messages?: ChatMessage[];
+  settings?: Record<string, unknown>;
 }
 
 function makeDeps(over: DepsOver = {}) {
@@ -99,7 +100,7 @@ function makeDeps(over: DepsOver = {}) {
     ? {}
     : { r1: over.preset ?? { audioTemplateId: "tpl-audio", characterVoices: { 庄听澜: { voiceRef: "voices/wan.wav" } } } };
   const deps = {
-    settings: { comfyuiUrl: "http://127.0.0.1:8188", outputDir: "D:/out", mediaInsert } as never,
+    settings: { comfyuiUrl: "http://127.0.0.1:8188", outputDir: "D:/out", mediaInsert, ...over.settings } as never,
     repo: { id: "r1" } as never,
     templates: over.templates ?? [AUDIO_TPL] as never,
     onNotify,
@@ -231,7 +232,23 @@ describe("submitAudio 行为网", () => {
     expect(rig.pollResult).toHaveBeenCalledTimes(2);
     expect(rig.pollResult.mock.calls[0]).toEqual([
       "pid-1", ["9"], undefined, { messageId: "m1", slotId: "audio-m1-0", background: true }, "第一句", "audio",
+      undefined, "http://127.0.0.1:8188",
     ]);
+  });
+
+  it("地址簿音频路由 ⇒ 上传音轨/提交/轮询三处都走路由那台机（B 段）", async () => {
+    const rig = makeDeps({
+      messages: [TEXT_MSG],
+      settings: {
+        comfyExtra: [{ id: "tts", name: "配音机", url: "http://tts:8188" }],
+        comfyRoute: { audio: "tts" },
+      },
+    });
+    await callSubmit(rig, [{ speaker: "庄听澜", text: "第一句" }]);
+    expect(vi.mocked(uploadImage).mock.calls[0][1]).toBe("http://tts:8188");
+    expect(vi.mocked(submitWorkflow).mock.calls[0][2]).toBe("http://tts:8188");
+    // 第 8 参显式带机台地址：否则轮询会回落入口 0 那台，永远拿不到结果
+    expect(rig.pollResult.mock.calls[0][7]).toBe("http://tts:8188");
   });
 
   it("模板无 primary_output_node_id ⇒ pollResult 第 2 参为空数组", async () => {
@@ -378,10 +395,10 @@ describe("T2.2-C1 逐字搬移锁", () => {
     const needles = [
       "const slotId = `audio-${messageId}-${index}`;",
       "const voiceRef = voiceReferenceFor(preset, line.speaker)!;",
-      "uploadedRef = (await uploadImage(file, settings.comfyuiUrl)).name;",
+      "uploadedRef = (await uploadImage(file, comfyAudioUrl)).name;",
       "const values = audioTemplateValues(tpl.exposed, {",
-      "const r = await submitWorkflow(audioTemplateId, values, settings.comfyuiUrl, line.text, [], \"none\");",
-      "pollResult(r.prompt_id, outputNodeIds, undefined, { messageId, slotId, background: true }, line.text, \"audio\");",
+      "const r = await submitWorkflow(audioTemplateId, values, comfyAudioUrl, line.text, [], \"none\");",
+      "pollResult(r.prompt_id, outputNodeIds, undefined, { messageId, slotId, background: true }, line.text, \"audio\", undefined, comfyAudioUrl);",
       "const r = await mergeAudio({ threadId, messageId, force: hasMerged });",
       "slotId: `merged-${messageId}`,",
     ];

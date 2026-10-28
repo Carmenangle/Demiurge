@@ -117,9 +117,12 @@ describe("R8 超时合同接线：工作流出图的 mediaType 必须推导（�
     );
   });
 
-  it("帧路径保持显式 image（首尾帧出的确定是帧图，不该改推导）", () => {
-    const framePolls = [...chainCode.matchAll(/await pollWorkflowResult\(r\.prompt_id, settings\.comfyuiUrl, "image"\)/g)];
+  it("帧路径保持显式 image（首尾帧出的确定是帧图，不该改推导），且轮询打在**图片机**上", () => {
+    // 地址簿按模态选机后地址不再是 settings.comfyuiUrl ⇒ 锁「图片机解析值」这个具名常量，
+    // 同时反向锁住「不得退回 settings.comfyuiUrl」（否则配了路由就问到别的机器上）。
+    const framePolls = [...chainCode.matchAll(/await pollWorkflowResult\(r\.prompt_id, comfyImageUrl, "image"\)/g)];
     expect(framePolls).toHaveLength(2);   // 首次提交 + 停顿自愈重提
+    expect(chainCode).not.toMatch(/await pollWorkflowResult\(r\.prompt_id, settings\.comfyuiUrl/);
   });
 });
 
@@ -267,9 +270,9 @@ describe("P5 pollResult 调用点接线锁：10 点全锁（本组 8 + R8 组 2�
     expect(chainCode).not.toMatch(/pollResult\(frame(?:First|Last)PromptId[\s\S]{0,200}?deriveWorkflowMediaType/);
   });
 
-  it("转场调用点显式 \"video\" + 后台 target（转场是视频，不许吃图片超时）", () => {
+  it("转场调用点显式 \"video\" + 后台 target + 第 8 参=视频机（转场是视频，不许吃图片超时）", () => {
     expect(chainCode).toMatch(
-      /pollResult\(rt\.prompt_id, transitionOutputNodeIds, undefined,\s*\{ messageId, slotId: transitionSlotId, background: true as const \},\s*transitionVideoPrompt, "video"\)/,
+      /pollResult\(rt\.prompt_id, transitionOutputNodeIds, undefined,\s*\{ messageId, slotId: transitionSlotId, background: true as const \},\s*transitionVideoPrompt, "video", undefined, comfyVideoUrl\)/,
     );
   });
 
@@ -283,13 +286,14 @@ describe("P5 pollResult 调用点接线锁：10 点全锁（本组 8 + R8 组 2�
     );
   });
 
-  it("音频调用点显式 \"audio\"（IndexTTS 配音不受图片 20 分钟上限约束）", () => {
+  it("音频调用点显式 \"audio\" + 第 8 参=配音机（IndexTTS 配音不受图片 20 分钟上限约束）", () => {
     // T2.2-C1：音频链外移 → useAudioTracks.ts；锁定面改指新属主并加严（视图不得回潮）。
+    // 第 8 参是地址簿「按模态选机」的落点：没有 regeneration 快照可推导，不传就问错机器。
     expect(audioCode).toMatch(
-      /pollResult\(r\.prompt_id, outputNodeIds, undefined, \{ messageId, slotId, background: true \}, line\.text, "audio"\)/,
+      /pollResult\(r\.prompt_id, outputNodeIds, undefined, \{ messageId, slotId, background: true \}, line\.text, "audio", undefined, comfyAudioUrl\)/,
     );
     expect(code).not.toMatch(
-      /pollResult\(r\.prompt_id, outputNodeIds, undefined, \{ messageId, slotId, background: true \}, line\.text, "audio"\)/,
+      /pollResult\(r\.prompt_id, outputNodeIds, undefined, \{ messageId, slotId, background: true \}, line\.text, "audio"/,
     );
   });
 });

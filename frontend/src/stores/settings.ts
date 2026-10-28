@@ -413,6 +413,20 @@ export function liquidGlassSceneSource(w: LiquidGlassWallpaper | null | undefine
 }
 
 
+/** ComfyUI 地址簿里的一台额外机台。`id` 稳定（路由引用它），`name` 只作显示。 */
+export interface ComfyMachine {
+  id: string;
+  name: string;
+  url: string;
+}
+
+/** 按模态选机：值是 `ComfyMachine.id`；缺省＝条目 0（`comfyuiUrl`）。 */
+export interface ComfyRoute {
+  image?: string;
+  video?: string;
+  audio?: string;
+}
+
 export interface Settings {
   theme: Theme;
   liquidGlass: LiquidGlassSettings; // 液态玻璃独立主题的全套外观配置（其他主题忽略）
@@ -447,6 +461,11 @@ export interface Settings {
   comfyuiPath: string; // ComfyUI 本体目录（含 main.py），用于后端启动
   comfyuiPython: string; // ComfyUI 自己的 Python；禁止使用本工具 Runtime 代替
   comfyuiUrl: string; // ComfyUI 访问地址，iframe 嵌入与 API 调用
+  /** ComfyUI 额外机台（条目 0 就是 comfyuiUrl 本身，不在这里重复）。
+   *  name 只是标签，**URL 才是真值**——历史/重新生成记的是 URL，改名不断历史。 */
+  comfyExtra?: ComfyMachine[];
+  /** 各模态用哪台机（值是 comfyExtra 的 id；省略＝跟随条目 0）。 */
+  comfyRoute?: ComfyRoute;
   modelsDir: string; // ComfyUI models 目录（模型下载落盘，留空则用 comfyuiPath/models）
   hfToken: string; // HuggingFace token（下载鉴权模型用）
   civitaiToken: string; // Civitai API key（下载鉴权模型用）
@@ -575,6 +594,8 @@ const DEFAULT: Settings = {
   comfyuiPath: "",
   comfyuiPython: "",
   comfyuiUrl: "http://127.0.0.1:8188",
+  comfyExtra: [],
+  comfyRoute: {},
   modelsDir: "",
   hfToken: "",
   civitaiToken: "",

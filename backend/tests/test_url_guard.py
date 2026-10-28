@@ -20,7 +20,18 @@ class TestComfyuiUrl:
 
     def test_wrong_scheme_rejected(self):
         with pytest.raises(ValueError, match="协议"):
-            validate_comfyui_url("https://127.0.0.1:8188")
+            validate_comfyui_url("ftp://127.0.0.1:8188")
+
+    def test_https_loopback_allowed(self):
+        # 2026-10-27 云端 ComfyUI：协议不再限 http/ws；边界是主机白名单
+        assert validate_comfyui_url("https://127.0.0.1:8188/") == "https://127.0.0.1:8188"
+
+    def test_wss_scheme_allowed_for_loopback(self):
+        assert validate_comfyui_url("wss://127.0.0.1:8188")
+
+    def test_https_public_host_still_needs_whitelist(self):
+        with pytest.raises(ValueError, match="不在允许范围"):
+            validate_comfyui_url("https://comfy.example.com")
 
     def test_file_scheme_rejected(self):
         with pytest.raises(ValueError):

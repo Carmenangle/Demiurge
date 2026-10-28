@@ -2,7 +2,8 @@
 
 两类接入：
   validate_comfyui_url(url)  —— 本机 ComfyUI 地址，只允许 localhost/127.x/::1，
-                                 以及用户在 COMFYUI_ALLOWED_HOSTS 环境变量里明确配置的局域网地址。
+                                 以及白名单里的地址（COMFYUI_ALLOWED_HOSTS 环境变量，或手机端
+                                 设置页保存过的 PC / 云端 ComfyUI 主机）。协议收 http/https。
   validate_media_url(url)    —— 公网媒体 URL（外部图片/视频保存），允许 http/https，
                                  但阻止指向私网/metadata/localhost 的地址，防 SSRF。
 
@@ -30,6 +31,8 @@ from urllib.parse import urlparse
 # ---- 可配置白名单 ---- #
 _ENV_ALLOWED = os.environ.get("COMFYUI_ALLOWED_HOSTS", "")
 _COMFYUI_EXTRA: list[str] = [h.strip().lower() for h in _ENV_ALLOWED.split(",") if h.strip()]
+# 启动环境声明的那批（地址簿注销时拒绝改动它们：属主是环境，不是运行期簿子）。
+_ENV_HOSTS = frozenset(_COMFYUI_EXTRA)
 
 _LOOPBACK_NAMES = {"localhost", "127.0.0.1", "::1"}
 
@@ -93,12 +96,17 @@ def _resolve_and_check(hostname: str) -> list[str]:
 
 
 def validate_comfyui_url(url: str) -> str:
-    """校验 ComfyUI 地址：只允许本机 localhost/127.x/::1 及环境变量白名单里的主机。"""
+    """校验 ComfyUI 地址：只允许本机 localhost/127.x/::1 及白名单里的主机。
+
+    协议收 http/https（2026-10-27 云端 ComfyUI）：公网 ComfyUI 基本只以 https 暴露，
+    而安全边界是**主机白名单**不是协议——https 反而比 http 多一层传输加密，放行不放宽
+    SSRF 面（ws/wss 也接受：WS 中继的 url 参数允许直接填 ws(s) 形态）。
+    """
     if not url or not url.strip():
         raise ValueError("ComfyUI URL 不能为空")
     parsed = urlparse(url.strip())
-    if parsed.scheme not in ("http", "ws"):
-        raise ValueError("ComfyUI URL 只支持 http/ws 协议")
+    if parsed.scheme not in ("http", "https", "ws", "wss"):
+        raise ValueError("ComfyUI URL 只支持 http/https/ws/wss 协议")
     if parsed.username or parsed.password:
         raise ValueError("ComfyUI URL 不允许内嵌凭据")
     hostname = (parsed.hostname or "").lower()
@@ -113,8 +121,9 @@ def validate_comfyui_url(url: str) -> str:
     except ValueError:
         pass
     raise ValueError(
-        f"ComfyUI URL 主机名 {hostname!r} 不在允许范围内（仅限 localhost/127.x/::1，"
-        "或在环境变量 COMFYUI_ALLOWED_HOSTS 里配置额外主机）"
+        f"ComfyUI URL 主机名 {hostname!r} 不在允许范围内（仅限 localhost/127.x/::1；"
+        "其他主机需先在本机设置页保存该 ComfyUI 地址，或在环境变量 "
+        "COMFYUI_ALLOWED_HOSTS 里配置）"
     )
 
 
@@ -129,11 +138,12 @@ def comfy_extra_hosts() -> tuple[str, ...]:
 
 
 def register_comfyui_host(host: str) -> str:
-    """运行时把一台主机加入 ComfyUI 白名单（移动端联机：设置页保存 PC 地址时调用）。
+    """运行时把一台主机加入 ComfyUI 白名单（桌面直连 LAN、手机联机同库与云端地址共用）。
 
     与环境变量 COMFYUI_ALLOWED_HOSTS 是同一列表、同一判定；只收**裸主机名/IPv4**
     （调用方先 urlparse.hostname），形态不合法即 ValueError，绝不静默吞。
-    回环无需注册（恒放行，返回 "loopback"）。上限 MAX_EXTRA_HOSTS 条防膨胀。
+    公网域名同样可登记（云端 ComfyUI）；安全边界是「用户显式保存过这台主机」，
+    不按私网/公网区分——回环无需注册（恒放行，返回 "loopback"）。上限 MAX_EXTRA_HOSTS 条防膨胀。
     """
     name = (host or "").strip().lower().rstrip(".")
     if not name:
@@ -150,6 +160,34 @@ def register_comfyui_host(host: str) -> str:
             raise ValueError(f"ComfyUI 白名单已达上限 {MAX_EXTRA_HOSTS} 条")
         _COMFYUI_EXTRA.append(name)
     return name
+
+
+def unregister_comfyui_host(host: str) -> str:
+    """运行期把一台主机移出 ComfyUI 白名单（地址簿删条目用）。
+
+    返回：`"loopback"`（恒放行，簿子里本就没有它）/ `"removed"` / `"absent"`
+    （不在表里——删除幂等，重复点不报错）。
+
+    `COMFYUI_ALLOWED_HOSTS` 声明的主机抛 ValueError：那份清单的属主是启动环境，
+    运行期簿子不许改不属于自己的条目。静默删掉再重启复活，只会骗用户一次。
+    """
+    name = (host or "").strip().lower().rstrip(".")
+    if not name:
+        raise ValueError("主机名不能为空")
+    try:
+        if ipaddress.ip_address(name).is_loopback:
+            return "loopback"
+    except ValueError:
+        pass
+    if name in _LOOPBACK_NAMES:
+        return "loopback"
+    if name in _ENV_HOSTS:
+        raise ValueError(
+            f"主机 {name!r} 来自环境变量 COMFYUI_ALLOWED_HOSTS，不能在运行期注销")
+    if name in _COMFYUI_EXTRA:
+        _COMFYUI_EXTRA.remove(name)
+        return "removed"
+    return "absent"
 
 
 def _validate_media_url_core(url: str) -> tuple[str, str, list[str]]:

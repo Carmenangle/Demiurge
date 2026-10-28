@@ -39,6 +39,15 @@ def test_登记Tailscale域名与大小写归一():
     assert url_guard.validate_comfyui_url("http://pc-tail.tail5cfc8.ts.net:8188")
 
 
+def test_云端https主机_登记后放行_未登记拒绝():
+    # 云端 ComfyUI（2026-10-27）：公网域名 + https，登记后 HTTP 与 WS 中继都过白名单
+    assert url_guard.register_comfyui_host("Comfy.Example.COM") == "comfy.example.com"
+    assert url_guard.validate_comfyui_url("https://comfy.example.com/") == "https://comfy.example.com"
+    assert url_guard.validate_comfyui_url("wss://comfy.example.com")
+    with pytest.raises(ValueError, match="不在允许范围"):
+        url_guard.validate_comfyui_url("https://other.example.com")
+
+
 def test_回环无需登记():
     assert url_guard.register_comfyui_host("127.0.0.1") == "loopback"
     assert "127.0.0.1" not in url_guard.comfy_extra_hosts()
@@ -95,6 +104,18 @@ def test_路由登记主机_落盘_列表可见(route_client: TestClient, tmp_pa
     assert listed["seeded"] == ["192.168.1.9"]
     # 登记后真正的提交地址过白名单
     assert url_guard.validate_comfyui_url("http://192.168.1.9:8188")
+
+
+def test_路由登记云端主机_https地址落盘并播种(route_client: TestClient, launcher, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    res = route_client.post(
+        "/api/mobile/comfy-host", json={"url": "https://Comfy.Example.com:443/"})
+    assert res.json() == {"ok": True, "host": "comfy.example.com"}
+    saved = json.loads((tmp_path / "comfy_hosts.json").read_text(encoding="utf-8"))
+    assert saved == {"hosts": ["comfy.example.com"]}
+    url_guard._COMFYUI_EXTRA.clear()
+    monkeypatch.setenv("LAF_DATA_DIR", str(tmp_path))
+    assert launcher._seed_comfy_hosts() == ["comfy.example.com"]
+    assert url_guard.validate_comfyui_url("https://comfy.example.com")
 
 
 def test_路由兼容裸host端口与坏输入(route_client: TestClient, tmp_path: Path):

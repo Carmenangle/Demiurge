@@ -1,4 +1,4 @@
-import { apiGet, apiPost, apiUrl } from "./client";
+import { apiDelete, apiGet, apiPost, apiUrl } from "./client";
 import { comfyClientId } from "../lib/comfyProgress";
 import type { RegenerationSnapshot } from "../types/chat";
 
@@ -38,11 +38,28 @@ export function restartComfy(path: string, url: string, pythonPath = "") {
   });
 }
 
-// 把 ComfyUI 路径/地址落盘到后端，供 start-dev 脚本读取
+// 把 ComfyUI 路径/地址落盘到后端，供 start-dev 脚本读取；后端顺带把该主机登记进白名单
 export function saveComfyConfig(path: string, url: string, pythonPath = "") {
-  return apiPost<{ path: string; url: string; python_path: string }>("/comfyui/config", {
+  return apiPost<{
+    path: string;
+    url: string;
+    python_path: string;
+    registered: string;       // "loopback" / 主机名 / "" = 未登记
+    register_error: string;   // 未登记的原因（保存仍成功）
+  }>("/comfyui/config", {
     path, url, python_path: pythonPath,
   });
+}
+
+// 地址簿「新增机台」：只放宽 SSRF 白名单，**不改默认地址**（与 /config 的分工）。
+// 默认地址那条由 saveComfyConfig 顺带登记；这条让第二、第三台机不必顶掉当前默认机。
+export function registerComfyHost(url: string) {
+  return apiPost<{ registered: string }>("/comfyui/hosts", { url });
+}
+
+// 地址簿删条目：幂等（不在簿子里也 200）；环境变量声明的机台会 400，调用方静默忽略。
+export function unregisterComfyHost(url: string) {
+  return apiDelete<{ removed: boolean }>(`/comfyui/hosts?url=${encodeURIComponent(url)}`);
 }
 
 export interface SubmitResult {

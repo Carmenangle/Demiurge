@@ -1,10 +1,20 @@
 import { Plus, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { fetchProxyStatus, type ProxyStatus } from "../../api/userState";
+import { comfyStatus } from "../../api/comfyui";
+import { loadMobileRemote } from "../../api/mobileRemote";
 import { normalizeSearchProvider, SEARCH_PROVIDER_OPTIONS, type SearchProvider } from "../../lib/searchSource";
-import type { UserPersona } from "../../stores/settings";
+import { DEFAULT_MACHINE_ID, isLoopbackComfyUrl, listMachines } from "../../lib/comfyMachines";
+import type { ComfyMachine, ComfyRoute, UserPersona } from "../../stores/settings";
 import type { PanelProps } from "./GeneralPanel";
 import { MOBILE_PROFILE } from "../../lib/mobileProfile";
+
+// 按模态选机的三个下拉（地址簿面板）。label 是玩家视角的产物名。
+const ROUTE_ROWS: { key: keyof ComfyRoute; label: string }[] = [
+  { key: "image", label: "图片" },
+  { key: "video", label: "视频" },
+  { key: "audio", label: "配音" },
+];
 
 // 生效来源 → 界面用词（后端 system=Windows 系统代理、env=环境变量、manual=手填兜底）
 const PROXY_SOURCE_LABEL: Record<string, string> = {
@@ -67,6 +77,49 @@ export function PathsPanel({ draft, setDraft }: PanelProps) {
     }
   };
   useEffect(() => { void probeProxy(); /* eslint-disable-line react-hooks/exhaustive-deps */ }, []);
+  // 联机同库时地址簿真源在电脑上：本机这份只是镜像，改了既会被下次同步覆盖，
+  // 登记端点（/comfyui/hosts）也是 PC 独占、代理过去只会 403 ⇒ 只读。
+  // null＝还没读到：先按只读渲染，宁可慢一拍也不让人改一个保存必 403 的表。
+  const [mobileRemoteActive, setMobileRemoteActive] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (!MOBILE_PROFILE) return;  // PC 后端不注册 /mobile/remote，别去撞 404
+    let alive = true;
+    let timer: number | undefined;
+    const load = async (attempt: number): Promise<void> => {
+      try {
+        const cfg = await loadMobileRemote();
+        if (alive) setMobileRemoteActive(cfg.active);
+      } catch {
+        if (!alive) return;
+        // 本机后端自己答的端点，失败多为开机瞬间的抖动 ⇒ 重试两次再回落到可编辑
+        if (attempt < 2) {
+          timer = window.setTimeout(() => { void load(attempt + 1); }, 1200);
+        } else {
+          setMobileRemoteActive(false);
+        }
+      }
+    };
+    void load(0);
+    return () => { alive = false; if (timer !== undefined) window.clearTimeout(timer); };
+  }, []);
+  const machinesReadOnly = MOBILE_PROFILE && mobileRemoteActive !== false;
+  // 额外机台的连通性探测结果（id → 状态）。探测走 /comfyui/status，不需要先进白名单。
+  const [machineProbe, setMachineProbe] = useState<
+    Record<string, { checking: boolean; running?: boolean; detail?: string }>
+  >({});
+  const probeMachine = async (id: string, url: string) => {
+    const target = url.trim();
+    if (!target) return;
+    setMachineProbe((p) => ({ ...p, [id]: { checking: true } }));
+    try {
+      const st = await comfyStatus(target);
+      setMachineProbe((p) => ({ ...p, [id]: { checking: false, running: st.running } }));
+    } catch (reason) {
+      setMachineProbe((p) => ({
+        ...p, [id]: { checking: false, running: false, detail: (reason as Error).message },
+      }));
+    }
+  };
   const personas = draft.userPersonas || [];
   const addPersona = () => {
     const id = crypto.randomUUID();
@@ -87,6 +140,46 @@ export function PathsPanel({ draft, setDraft }: PanelProps) {
       userPersonas: (d.userPersonas || []).filter((p) => p.id !== id),
       activeUserPersonaId: d.activeUserPersonaId === id ? undefined : d.activeUserPersonaId,
     }));
+  // ---- ComfyUI 地址簿（条目 0 就是上面那个「访问地址」，这里只管额外机台）----
+  const extras = draft.comfyExtra || [];
+  const route = draft.comfyRoute || {};
+  const machines = listMachines(draft);
+  const addMachine = () => {
+    const id = crypto.randomUUID();
+    setDraft((d) => ({ ...d, comfyExtra: [...(d.comfyExtra || []), { id, name: "", url: "" }] }));
+  };
+  const updateMachine = (id: string, patch: Partial<ComfyMachine>) =>
+    setDraft((d) => ({
+      ...d,
+      comfyExtra: (d.comfyExtra || []).map((m) => (m.id === id ? { ...m, ...patch } : m)),
+    }));
+  const removeMachine = (id: string) => {
+    setDraft((d) => {
+      // 路由指着这台机的话一并清掉：留死引用会让下拉显示成「默认」，与实际解析不符
+      const nextRoute: ComfyRoute = { ...(d.comfyRoute || {}) };
+      for (const row of ROUTE_ROWS) {
+        if (nextRoute[row.key] === id) delete nextRoute[row.key];
+      }
+      return {
+        ...d,
+        comfyExtra: (d.comfyExtra || []).filter((m) => m.id !== id),
+        comfyRoute: nextRoute,
+      };
+    });
+    setMachineProbe((p) => {
+      const next = { ...p };
+      delete next[id];
+      return next;
+    });
+  };
+  const setRoute = (key: keyof ComfyRoute, value: string) =>
+    setDraft((d) => {
+      // 选「默认」就删键（不落 "default" 值）：设置文件保持干净，语义与「省略＝跟随条目 0」一致
+      const nextRoute: ComfyRoute = { ...(d.comfyRoute || {}) };
+      if (value === DEFAULT_MACHINE_ID) delete nextRoute[key];
+      else nextRoute[key] = value;
+      return { ...d, comfyRoute: nextRoute };
+    });
   return (
     <div className="settings-section">
       <h4>路径</h4>
@@ -132,7 +225,7 @@ export function PathsPanel({ draft, setDraft }: PanelProps) {
         </p>
       </div>
       <div className="field">
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div className="settings-actions-head" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <label style={{ margin: 0 }}>用户人设（可多档，选中的注入剧情）</label>
           <button className="btn" onClick={addPersona}>
             <Plus size={15} style={{ verticalAlign: "-2px", marginRight: 4 }} />新增人设
@@ -218,12 +311,131 @@ export function PathsPanel({ draft, setDraft }: PanelProps) {
           onChange={(e) => setDraft((d) => ({ ...d, comfyuiUrl: e.target.value }))}
           placeholder="http://127.0.0.1:8188"
         />
-        {MOBILE_PROFILE && (
+        {MOBILE_PROFILE ? (
           <p className="field-hint">
-            手机端：填 PC 的地址（如 http://192.168.x.x:8188 或 Tailscale 名称）。局域网明文
-            可被同网段嗅探，推荐 Tailscale；保存时自动登记进后端白名单。
+            手机端两种填法：① 联机同库时一般不用改（地址随电脑数据走，生成由电脑上的
+            ComfyUI 执行）；② 不联机直连：填电脑的局域网/Tailscale 地址
+            （http://电脑IP:8188），或一台可公网访问的云端 ComfyUI（https://…，推荐 https）。
+            保存时自动登记进本机后端白名单；未登记的地址提交会被拒绝。
+          </p>
+        ) : (
+          <p className="field-hint">
+            非本机地址（局域网 / Tailscale / 云端 https）保存时会自动登记进本机后端
+            白名单并落盘，重启后仍生效；白名单上限 8 台，登记失败时保存照常成功但
+            提交会被拒绝（原因会提示）。
           </p>
         )}
+        {!isLoopbackComfyUrl(draft.comfyuiUrl) && (
+          <p className="field-hint" style={{ color: "var(--warning, #b45309)" }}>
+            当前默认地址不在本机：<strong>原生画布不可用</strong>（画布只嵌本机
+            ComfyUI，非回环地址会被浏览器安全策略挡白）。对话里出图 / 视频 / 配音
+            不受影响；要用画布或手动运转工作流，请把默认地址填回
+            <code> http://127.0.0.1:8188</code>，其他机台放到下面的地址簿里。
+          </p>
+        )}
+      </div>
+      <div className="field">
+        <div
+          className="settings-actions-head"
+          style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}
+        >
+          <label style={{ margin: 0 }}>ComfyUI 机台（地址簿）</label>
+          <button className="btn" onClick={addMachine} disabled={machinesReadOnly}>
+            <Plus size={15} style={{ verticalAlign: "-2px", marginRight: 4 }} />新增机台
+          </button>
+        </div>
+        <p className="field-hint">
+          上面那个「访问地址」就是默认机台。这里加额外机台：
+          <strong>名字只是标签，地址才是真值</strong>——历史和重新生成记的是地址，
+          改名不会断历史。保存时自动登记进本机后端白名单。
+        </p>
+        {mobileRemoteActive === true && (
+          <p className="field-hint" style={{ color: "var(--warning, #b45309)" }}>
+            联机中：地址簿的真源在电脑上，请到电脑端修改（本机这份会被同步覆盖）。
+          </p>
+        )}
+        {extras.length === 0 && (
+          <p className="field-hint" style={{ opacity: 0.7 }}>还没有额外机台。</p>
+        )}
+        {extras.map((m) => {
+          const probe = machineProbe[m.id];
+          return (
+            <div
+              key={m.id}
+              style={{ border: "1px solid var(--border, #ccc)", borderRadius: 8, padding: 10, marginTop: 8 }}
+            >
+              <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6 }}>
+                <input
+                  style={{ flex: 1 }}
+                  value={m.name}
+                  onChange={(e) => updateMachine(m.id, { name: e.target.value })}
+                  placeholder="机台名（如 云端 A100）"
+                  disabled={machinesReadOnly}
+                />
+                <button
+                  className="btn"
+                  onClick={() => void probeMachine(m.id, m.url)}
+                  disabled={machinesReadOnly || !m.url.trim() || !!probe?.checking}
+                >
+                  {probe?.checking ? "探测中…" : "探测"}
+                </button>
+                <button
+                  className="btn"
+                  onClick={() => removeMachine(m.id)}
+                  disabled={machinesReadOnly}
+                  title="删除这台机台（保存后同时注销白名单）"
+                >
+                  <Trash2 size={15} />
+                </button>
+              </div>
+              <input
+                style={{ width: "100%" }}
+                value={m.url}
+                onChange={(e) => updateMachine(m.id, { url: e.target.value })}
+                placeholder="http://192.168.1.9:8188 或 https://…"
+                disabled={machinesReadOnly}
+              />
+              {probe && !probe.checking && (
+                <p className="field-hint">
+                  {probe.running
+                    ? "已连通：这台机的 ComfyUI 在运行。"
+                    : `连不上：${probe.detail || "地址不通或 ComfyUI 未启动"}`}
+                </p>
+              )}
+            </div>
+          );
+        })}
+        <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginTop: 10 }}>
+          {ROUTE_ROWS.map((row) => {
+            const raw = route[row.key] || "";
+            // 手改过设置里可能出现指向已删机台的 id：显示层收敛到「默认」，与实际解析一致
+            const selected = machines.some((m) => m.id === raw) ? raw : DEFAULT_MACHINE_ID;
+            return (
+              <label key={row.key} style={{ display: "flex", alignItems: "center", gap: 6, margin: 0 }}>
+                {row.label}
+                <select
+                  aria-label={`${row.label}机台`}
+                  value={selected}
+                  onChange={(e) => setRoute(row.key, e.target.value)}
+                  disabled={machinesReadOnly}
+                >
+                  {machines.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.id === DEFAULT_MACHINE_ID
+                        ? `默认（${m.url || "未填写"}）`
+                        : `${m.name}（${m.url}）`}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            );
+          })}
+        </div>
+        <p className="field-hint">
+          对话里按模态选机：图片 / 视频 / 配音可分别用不同机台，省略＝默认机台。
+          跨机协作时帧图会由本工具在机台之间搬运（视频机无需能访问图片机）。
+          画布与手动运转工作流永远只走默认机台。
+        </p>
       </div>
       <div className="field">
         <label>ComfyUI Python（可选）</label>

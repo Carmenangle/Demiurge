@@ -27,6 +27,7 @@ import {
   audioTemplateValues, resolvableAudioLines, skippedAudioSpeakers, voiceReferenceFor,
 } from "./audioGeneration";
 import { appendAudioSlot, dropMediaSlot } from "./chatSessionEvents";
+import { resolveComfyUrl } from "./comfyMachines";
 import { type PendingGeneration } from "./workflowGenerationRuntime";
 
 /** 音频链的 hook 闭包依赖（T2.2-C1 同名 deps 注入；类型逐字抄 useChatSession 内声明）。 */
@@ -46,6 +47,7 @@ export interface AudioTracksDeps {
     prompt?: string,
     mediaType?: "image" | "video" | "audio",
     baseSlotRef?: PendingGeneration["baseSlotRef"],
+    comfyuiUrlOverride?: string,
   ) => void;
 }
 
@@ -86,6 +88,9 @@ export function useAudioTracks({
       return;
     }
     const outputNodeIds = tpl.primary_output_node_id ? [tpl.primary_output_node_id] : [];
+    // 地址簿按模态选机（B 段）：上传音轨 / 提交 / 轮询三处必须是**同一台机**，
+    // 未配路由时与 `settings.comfyuiUrl` 同值。
+    const comfyAudioUrl = resolveComfyUrl(settings, "audio");
 
     let index = 0;
     for (const line of resolvable) {
@@ -101,7 +106,7 @@ export function useAudioTracks({
           [blob], voiceRef.split(/[\\/]/).pop() || "voice.wav",
           { type: blob.type || "audio/wav" },
         );
-        uploadedRef = (await uploadImage(file, settings.comfyuiUrl)).name;
+        uploadedRef = (await uploadImage(file, comfyAudioUrl)).name;
       } catch {
         console.error("[auto-audio]", { threadId, messageId, stage: "upload_voice", speaker: line.speaker, voiceRef });
         continue; // 单角色音轨上传失败不阻断其它角色
@@ -122,7 +127,7 @@ export function useAudioTracks({
         }).catch(() => undefined);
       }
       try {
-        const r = await submitWorkflow(audioTemplateId, values, settings.comfyuiUrl, line.text, [], "none");
+        const r = await submitWorkflow(audioTemplateId, values, comfyAudioUrl, line.text, [], "none");
         if (r.prompt_id) {
           console.info("[auto-audio]", {
             threadId, messageId, slotId, speaker: line.speaker,
@@ -135,7 +140,7 @@ export function useAudioTracks({
             templateId: audioTemplateId, promptId: r.prompt_id,
             emotion: line.emotion, valueKeys: Object.keys(values).sort(),
           }).catch(() => undefined);
-          pollResult(r.prompt_id, outputNodeIds, undefined, { messageId, slotId, background: true }, line.text, "audio");
+          pollResult(r.prompt_id, outputNodeIds, undefined, { messageId, slotId, background: true }, line.text, "audio", undefined, comfyAudioUrl);
         } else {
           console.error("[auto-audio]", { threadId, messageId, stage: "submit", speaker: line.speaker, error: "ComfyUI 没有返回任务 ID" });
           setMessages((current) => dropMediaSlot(current, messageId, slotId));

@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { Palette, FolderCog, BrainCircuit, Sparkles, Blocks, Puzzle, KeyRound, Bot, Settings2, ArrowLeftRight } from "lucide-react";
 import { useRef } from "react";
 import { applyTheme, exportSettings, importSettings, type Settings } from "../../stores/settings";
-import { saveComfyConfig } from "../../api/comfyui";
+import { registerComfyHost, saveComfyConfig, unregisterComfyHost } from "../../api/comfyui";
+import { diffComfyHosts } from "../../lib/comfyMachines";
 import { syncMobileComfyHost } from "../../lib/mobileProfile";
 import {
   auditOutputPath, migrateOutputPath, type OutputPathAudit,
@@ -113,16 +114,36 @@ export function SettingsView({ settings, update, initialSection, onSectionChange
     return () => applyTheme(settings.theme);
   }, [draft.theme, settings.theme]);
 
+  // 保存后同步后端（尽力而为，失败不打断保存）：① 配置文件落盘 + 默认地址进白名单；
+  // ② 地址簿额外机台的增减与白名单对账。失败合成一条提示——否则用户只会在提交生成时
+  // 撞见「不在允许范围内」。
+  const syncComfyHosts = (prev: Settings, next: Settings) => {
+    const { added, removed } = diffComfyHosts(prev, next);
+    void (async () => {
+      const problems: string[] = [];
+      try {
+        const res = await saveComfyConfig(next.comfyuiPath, next.comfyuiUrl, next.comfyuiPython);
+        if (res.register_error) problems.push(`默认地址：${res.register_error}`);
+      } catch { /* 配置落盘失败不影响下面的白名单对账 */ }
+      for (const url of added) {
+        try {
+          await registerComfyHost(url);
+        } catch (reason) {
+          problems.push(`${url}：${(reason as Error).message}`);
+          break;  // 通常是格式或上限问题，后面的多半同样失败，不再连打
+        }
+      }
+      for (const url of removed) await unregisterComfyHost(url).catch(() => {});
+      if (problems.length > 0) {
+        setError(`设置已保存，但 ComfyUI 地址没能全部登记进白名单（走这些地址生成会被拒绝，请修正后重新保存）：${problems.join("；")}`);
+      }
+    })();
+  };
+
   const commitSave = (next: Settings, migrated?: { oldDir: string; newDir: string }) => {
     if (migrated) onOutputPathMigrated?.(migrated.oldDir, migrated.newDir);
     update(next);
-    // 同步 ComfyUI 路径/地址到后端，供 start-dev 脚本读取
-    // 登记白名单失败不打断保存，但要提示——否则用户只会在提交时撞见「不在允许范围内」。
-    saveComfyConfig(next.comfyuiPath, next.comfyuiUrl, next.comfyuiPython)
-      .then((res) => {
-        if (res.register_error) setError(`ComfyUI 地址已保存，但没能登记进白名单：${res.register_error}`);
-      })
-      .catch(() => {});
+    syncComfyHosts(settings, next);
     syncMobileComfyHost(next.comfyuiUrl);  // 手机端联机：登记 PC 主机进后端白名单（PC 构建直通）
     setSaved(true);
     setTimeout(() => setSaved(false), 1800);

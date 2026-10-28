@@ -24,6 +24,9 @@ export interface PendingGeneration {
   mediaType?: "image" | "video" | "audio";
   /** M2.1：视频首帧底图来源槽引用（供 derived_from 记录） */
   baseSlotRef?: { messageId: string; slotId: string };
+  /** 提交时那台机的地址：地址簿按模态选机后，设置可能在任务在途期间被改，
+   *  取产物/中断/恢复都必须回到**同一台机**（缺省＝旧数据，沿用调用方给的地址）。 */
+  comfyuiUrl?: string;
 }
 
 export interface WorkflowWatchInput {
@@ -94,7 +97,7 @@ function registerPending(
   outputNodeIds: string[] = [], regeneration?: RegenerationSnapshot,
   target?: PendingGeneration["target"], prompt = "", owner?: PendingGeneration["owner"],
   mediaType?: PendingGeneration["mediaType"], baseSlotRef?: PendingGeneration["baseSlotRef"],
-  runId?: string,
+  runId?: string, comfyuiUrl?: string,
 ): PendingGeneration[] {
   return [
     ...pending.filter((item) => item.prompt_id !== promptId),
@@ -108,6 +111,7 @@ function registerPending(
       ...(mediaType ? { mediaType } : {}),
       ...(baseSlotRef ? { baseSlotRef } : {}),
       ...(runId ? { runId } : {}),
+      ...(comfyuiUrl ? { comfyuiUrl } : {}),
     },
   ];
 }
@@ -431,7 +435,7 @@ export class WorkflowGenerationRuntime {
     const next = registerPending(
       this.list(), input.promptId, this.now(), input.outputNodeIds,
       input.regeneration, input.target, input.prompt, input.owner, input.mediaType,
-      input.baseSlotRef, input.runId,
+      input.baseSlotRef, input.runId, input.comfyuiUrl,
     );
     this.write(next);
     const entry = next.find((item) => item.prompt_id === input.promptId)!;
@@ -477,6 +481,8 @@ export class WorkflowGenerationRuntime {
    */
   start(input: WorkflowWatchInput, observer: WorkflowWatchObserver, initialDelayMs = 1500): void {
     const pending = this.track(input);
+    // 在途任务认自己那台机：恢复/刷新后 settings 可能已换机，轮询必须回到提交时那台。
+    const taskUrl = pending.comfyuiUrl || input.comfyuiUrl;
     const stallTimeoutMs = input.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS;
     const tickContext = (): WorkflowTickContext => ({
       now: this.now(), mediaType: pending.mediaType, stallWindowMs: stallTimeoutMs,
@@ -489,7 +495,7 @@ export class WorkflowGenerationRuntime {
       try {
         try {
           result = await this.fetchResult(
-            pending.prompt_id, input.comfyuiUrl, pending.outputNodeIds || [],
+            pending.prompt_id, taskUrl, pending.outputNodeIds || [],
           );
           observation = { ok: true, status: result.status, error: result.error, queueBusy: result.queue_busy };
         } catch {
@@ -541,8 +547,10 @@ export class WorkflowGenerationRuntime {
     comfyuiUrl: string,
     observer: WorkflowWatchObserver,
   ): Promise<"complete" | "failed" | "watching"> {
+    // 恢复期同样认任务自带的地址：调用方传的是**当前**设置，换过机就不是同一台了。
+    const taskUrl = item.comfyuiUrl || comfyuiUrl;
     try {
-      const result = await this.fetchResult(item.prompt_id, comfyuiUrl, item.outputNodeIds || []);
+      const result = await this.fetchResult(item.prompt_id, taskUrl, item.outputNodeIds || []);
       const action = generationResultAction(result.status);
       if (action === "complete") {
         const produced = await this.finalize(result, item, observer);
@@ -559,7 +567,7 @@ export class WorkflowGenerationRuntime {
       // A failed inspection resumes the durable watcher below.
     }
     this.start({
-      promptId: item.prompt_id, comfyuiUrl, outputNodeIds: item.outputNodeIds,
+      promptId: item.prompt_id, comfyuiUrl: taskUrl, outputNodeIds: item.outputNodeIds,
       regeneration: item.regeneration, target: item.target, prompt: item.prompt,
       owner: item.owner,
       // 2026-09-15（C4-A Step 2）：`start` 会 `track` 重写这条 pending，

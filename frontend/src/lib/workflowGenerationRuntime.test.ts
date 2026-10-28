@@ -33,11 +33,33 @@ describe("workflow generation runtime", () => {
       schedule: (callback) => scheduled.push(callback),
     });
     runtime.start({ promptId: "p1", comfyuiUrl: "http://comfy" }, watch);
-    expect(runtime.list()).toEqual([{ prompt_id: "p1", createdAt: 10 }]);
+    expect(runtime.list()).toEqual([{ prompt_id: "p1", createdAt: 10, comfyuiUrl: "http://comfy" }]);
     await scheduled.shift()!();
     expect(watch.finalize).toHaveBeenCalledOnce();
     expect(watch.completed).toHaveBeenCalledOnce();
     expect(runtime.list()).toEqual([]);
+  });
+
+  it("在途任务认自己那台机：恢复用任务自带的地址，不随当前设置换机", async () => {
+    // 后台守望：轮询走 start 时登记的 comfyuiUrl
+    const scheduled: Array<() => void> = [];
+    const liveFetch = vi.fn(async (_pid: string, _url: string) => completed);
+    const live = new WorkflowGenerationRuntime("follow-live", {
+      storage: memoryStorage(), now: () => 10, fetchResult: liveFetch,
+      schedule: (callback) => scheduled.push(callback),
+    });
+    live.start({ promptId: "p1", comfyuiUrl: "http://image-box:8188" }, observer());
+    await scheduled.shift()!();
+    expect(liveFetch.mock.calls[0][1]).toBe("http://image-box:8188");
+
+    // 刷新后恢复：调用方传的是**当前**设置（video-box），任务仍回 image-box 取产物
+    const recoveryFetch = vi.fn(async (_pid: string, _url: string) => completed);
+    const recovered = new WorkflowGenerationRuntime("follow-recover", {
+      storage: memoryStorage(), now: () => 10, fetchResult: recoveryFetch, schedule: () => 0,
+    });
+    const item = recovered.track({ promptId: "p2", comfyuiUrl: "http://image-box:8188" });
+    await recovered.inspect(item, "http://video-box:8188", observer());
+    expect(recoveryFetch.mock.calls[0][1]).toBe("http://image-box:8188");
   });
 
   it("tracks multiple ComfyUI queue entries without one replacing another", async () => {
@@ -895,19 +917,21 @@ describe("P14 · 公开门面等价网（导出面收窄前先钉行为）", () 
     clock = 3;
     runtime.track({ promptId: "p1", comfyuiUrl: "http://comfy" });
     expect(runtime.list()).toEqual([
-      { prompt_id: "p2", createdAt: 2 },
-      { prompt_id: "p1", createdAt: 3 },
+      { prompt_id: "p2", createdAt: 2, comfyuiUrl: "http://comfy" },
+      { prompt_id: "p1", createdAt: 3, comfyuiUrl: "http://comfy" },
     ]);
   });
 
   it("track：outputNodeIds 非空才落键（空数组省略该键，不是 undefined 占位）", () => {
     const { runtime } = make("p14-track-nodes", () => 1);
     const withNodes = runtime.track({ promptId: "p1", comfyuiUrl: "http://comfy", outputNodeIds: ["47"] });
-    expect(withNodes).toEqual({ prompt_id: "p1", createdAt: 1, outputNodeIds: ["47"] });
+    expect(withNodes).toEqual({
+      prompt_id: "p1", createdAt: 1, outputNodeIds: ["47"], comfyuiUrl: "http://comfy",
+    });
     expect(Object.keys(withNodes)).toContain("outputNodeIds");
 
     const bare = runtime.track({ promptId: "p2", comfyuiUrl: "http://comfy", outputNodeIds: [] });
-    expect(bare).toEqual({ prompt_id: "p2", createdAt: 1 });
+    expect(bare).toEqual({ prompt_id: "p2", createdAt: 1, comfyuiUrl: "http://comfy" });
     expect(Object.keys(bare)).not.toContain("outputNodeIds");   // ★ 键省略
   });
 
@@ -927,13 +951,14 @@ describe("P14 · 公开门面等价网（导出面收窄前先钉行为）", () 
       prompt_id: "p1", createdAt: 1, outputNodeIds: ["45"], regeneration,
       target: { messageId: "bot-1", slotId: "slot-1", background: true },
       prompt: "masterpiece\n1girl, climax action",
+      comfyuiUrl: "http://comfy",
     });
   });
 
   it("track：owner / mediaType / baseSlotRef / runId 有条件固化（缺省时不落 undefined 键）", () => {
     const { runtime } = make("p14-track-optional", () => 1);
     const bare = runtime.track({ promptId: "p1", comfyuiUrl: "http://comfy" });
-    expect(Object.keys(bare)).toEqual(["prompt_id", "createdAt"]);   // ★ 键序 = 拼装顺序
+    expect(Object.keys(bare)).toEqual(["prompt_id", "createdAt", "comfyuiUrl"]);   // ★ 键序 = 拼装顺序
 
     const full = runtime.track({
       promptId: "p2", comfyuiUrl: "http://comfy", mediaType: "video", runId: "run-9",
@@ -944,6 +969,7 @@ describe("P14 · 公开门面等价网（导出面收窄前先钉行为）", () 
       prompt_id: "p2", createdAt: 1, mediaType: "video", runId: "run-9",
       owner: { threadId: "repo-1", repoId: "repo-1", outputDir: "out" },
       baseSlotRef: { messageId: "m1", slotId: "s1" },
+      comfyuiUrl: "http://comfy",
     });
   });
 
@@ -954,9 +980,9 @@ describe("P14 · 公开门面等价网（导出面收窄前先钉行为）", () 
     clock = 2;
     runtime.track({ promptId: "p2", comfyuiUrl: "http://comfy" });
     runtime.remove("p1");
-    expect(runtime.list()).toEqual([{ prompt_id: "p2", createdAt: 2 }]);
+    expect(runtime.list()).toEqual([{ prompt_id: "p2", createdAt: 2, comfyuiUrl: "http://comfy" }]);
     runtime.remove("missing");
-    expect(runtime.list()).toEqual([{ prompt_id: "p2", createdAt: 2 }]);
+    expect(runtime.list()).toEqual([{ prompt_id: "p2", createdAt: 2, comfyuiUrl: "http://comfy" }]);
   });
 
   it("recoveryAction：已处理 → skip；6 小时边界（含端点）→ inspect / expire", () => {

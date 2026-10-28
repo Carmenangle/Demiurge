@@ -1,6 +1,6 @@
 import json
 
-from app.services import comfyui_client
+from app.services import comfyui_client, url_guard
 
 
 class _FakeResp:
@@ -371,3 +371,51 @@ def test_宽限窗口用尽仍未接单判失败(monkeypatch):
     monkeypatch.setattr(comfyui_client, "PROMPT_ACCEPT_GRACE_SECONDS", 0.05)
 
     assert comfyui_client._await_prompt_accepted("http://127.0.0.1:8188", "pid") is False
+
+
+class TestIsUpDefaultPort:
+    """云端 ComfyUI（2026-10-27）：https 缺省端口是 443，不是 8188。"""
+
+    def _probe(self, monkeypatch, url: str) -> tuple[str, int]:
+        seen: dict[str, tuple] = {}
+
+        def fake_conn(address, timeout=None):
+            seen["address"] = address
+            raise OSError("closed")
+
+        def fake_urlopen(*args, **kwargs):
+            raise OSError("down")
+
+        monkeypatch.setattr(comfyui_client.socket, "create_connection", fake_conn)
+        monkeypatch.setattr(comfyui_client, "urlopen", fake_urlopen)
+        assert comfyui_client.is_up(url) is False
+        return seen["address"]
+
+    def test_https_缺省端口探443(self, monkeypatch):
+        monkeypatch.setattr(url_guard, "_COMFYUI_EXTRA", ["comfy.example.com"])
+        assert self._probe(monkeypatch, "https://comfy.example.com") == ("comfy.example.com", 443)
+
+    def test_http_缺省端口仍探8188(self, monkeypatch):
+        assert self._probe(monkeypatch, "http://127.0.0.1") == ("127.0.0.1", 8188)
+
+    def test_显式端口优先于协议缺省(self, monkeypatch):
+        monkeypatch.setattr(url_guard, "_COMFYUI_EXTRA", ["comfy.example.com"])
+        assert self._probe(monkeypatch, "https://comfy.example.com:8443") == (
+            "comfy.example.com", 8443)
+
+    def test_tcp_能连即视为已启动(self, monkeypatch):
+        class _Sock:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        monkeypatch.setattr(
+            comfyui_client.socket, "create_connection", lambda *a, **k: _Sock())
+
+        def boom(*args, **kwargs):
+            raise AssertionError("TCP 已通不应再走 HTTP 探测")
+
+        monkeypatch.setattr(comfyui_client, "urlopen", boom)
+        assert comfyui_client.is_up("http://127.0.0.1:8188") is True

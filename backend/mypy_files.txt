@@ -107,6 +107,7 @@ app/services/chat_memory.py
 app/services/chat_snapshot.py
 app/services/chat_stream_protocol.py
 app/services/collection_artifacts.py
+app/services/comfy_hosts.py
 app/services/comfy_launcher.py
 app/services/comfy_manager.py
 app/services/comfy_pending.py

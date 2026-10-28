@@ -63,7 +63,9 @@ def is_up(url: str, timeout: float = 5.0) -> bool:
         return False
     parsed = urlparse(normalized)
     host = parsed.hostname or "127.0.0.1"
-    port = parsed.port or COMFYUI_DEFAULT_PORT
+    # https/wss 的缺省端口是 443（云端 ComfyUI 常省略端口）：沿用 ComfyUI 默认端口
+    # 会先白等一次必然失败的 TCP 探测，再退回 HTTP 探测才通。
+    port = parsed.port or (443 if parsed.scheme in ("https", "wss") else COMFYUI_DEFAULT_PORT)
     try:
         with socket.create_connection((host, port), timeout=min(timeout, 3.0)):
             return True

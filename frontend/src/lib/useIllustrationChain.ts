@@ -21,7 +21,7 @@ import { activeUserPersona } from "../stores/settings";
 import type { Template } from "../api/workflows";
 import type { Model, IllustrationSubmit } from "./useChatSession";
 import {
-  comfyStatus, submitWorkflow, interruptComfy, uploadImage, localViewUrl,
+  comfyStatus, submitWorkflow, interruptComfy, uploadImage, localViewUrl, viewUrl,
   moveComfyOutputToInput, uploadRemoteImageToInput,
 } from "../api/comfyui";
 import { listLoras } from "../api/loras";
@@ -43,6 +43,7 @@ import {
   resolveLoraPromptMetadata, resolveVideoBaseImageRef, resolveTransitionBaseImage, resolvePrevTailDesc,
 } from "./chatGeneration";
 import { templateRegenerationSnapshot } from "./regeneration";
+import { resolveComfyUrl, sameComfyUrl } from "./comfyMachines";
 import { pollWorkflowResult, type PendingGeneration } from "./workflowGenerationRuntime";
 import { appendImageSlot, appendTransitionSlot, bindMediaSlotPrompt, markMediaSlotFailed, resolveMediaSlot } from "./chatSessionEvents";
 
@@ -68,6 +69,7 @@ export interface IllustrationChainDeps {
     prompt?: string,
     mediaType?: "image" | "video" | "audio",
     baseSlotRef?: PendingGeneration["baseSlotRef"],
+    comfyuiUrlOverride?: string,
   ) => void;
   discardFailedIllustration: (
     messageId: string, slotId: string, stage: string, error: string, promptId?: string, retryArgs?: unknown,
@@ -199,6 +201,11 @@ export function useIllustrationChain({
       failSlot("configuration", "已保存的工作流模板不存在，请重新选择模板");
       return;
     }
+    // 地址簿按模态解析到具体机台（未配路由时与 settings.comfyuiUrl 同值）：
+    // 帧任务/尾帧图都是图片模板 ⇒ 图片机台；主提交与转场沿用主模板所属模态。
+    const comfyImageUrl = resolveComfyUrl(settings, "image");
+    const comfyVideoUrl = resolveComfyUrl(settings, "video");
+    const comfyMainUrl = mainIsVideo ? comfyVideoUrl : comfyImageUrl;
     // ⑥ 按高潮真实角色挑 LoRA/底图。single 命中时串联角色 LoRA，无命中才回退风格；
     // multi 固定加载默认风格并叠加全部在场角色 LoRA。旧 preset.loraName 只作风格兼容值。
     const knownActorNames = preset.appearanceSource === "character_card"
@@ -376,7 +383,7 @@ export function useIllustrationChain({
       try {
         const blob = await (await fetch(localViewUrl(baseImageForUse))).blob();
         const file = new File([blob], baseImageForUse.split(/[\\/]/).pop() || "base.png", { type: blob.type || "image/png" });
-        uploadedImage = (await uploadImage(file, settings.comfyuiUrl)).name;
+        uploadedImage = (await uploadImage(file, comfyMainUrl)).name;
         mark("upload", "ok");
       } catch {
         // 底图上传失败：图片分支退化为纯文生图；视频分支按文档终态失败（不重试乘法）
@@ -393,7 +400,7 @@ export function useIllustrationChain({
       try {
         const blob = await (await fetch(localViewUrl(lastFrameUrl))).blob();
         const file = new File([blob], lastFrameUrl.split(/[\\/]/).pop() || "last.png", { type: blob.type || "image/png" });
-        uploadedLastFrameImage = (await uploadImage(file, settings.comfyuiUrl)).name;
+        uploadedLastFrameImage = (await uploadImage(file, comfyVideoUrl)).name;
       } catch {
         uploadedLastFrameImage = "";
       }
@@ -533,7 +540,7 @@ export function useIllustrationChain({
           };
           const runOnce = async (): Promise<{ prompt_id: string }> => {
             const res = await submitWorkflow(
-              preset.templateId, frameValues, settings.comfyuiUrl,
+              preset.templateId, frameValues, comfyImageUrl,
               framePrompt, frameLoras, preset.loraMode || "single",
             );
             const pid = res.prompt_id;
@@ -548,22 +555,28 @@ export function useIllustrationChain({
           try {
             r = await runOnce();
           } catch {
-            await interruptComfy(settings.comfyuiUrl).catch(() => undefined);
+            await interruptComfy(comfyImageUrl).catch(() => undefined);
             r = await runOnce();
           }
-          let outcome = await pollWorkflowResult(r.prompt_id, settings.comfyuiUrl, "image");
+          let outcome = await pollWorkflowResult(r.prompt_id, comfyImageUrl, "image");
           if (outcome.kind === "stalled") {
             // 卡死自愈（2026-08-29 用户需求）：队列无节点运转 → 删除坏死任务（清队列+中断），
             // 自动重新提交一次；再卡死才按失败处理。上限 1 次防循环。
-            await interruptComfy(settings.comfyuiUrl, r.prompt_id).catch(() => undefined);
+            await interruptComfy(comfyImageUrl, r.prompt_id).catch(() => undefined);
             r = await runOnce();
-            outcome = await pollWorkflowResult(r.prompt_id, settings.comfyuiUrl, "image");
+            outcome = await pollWorkflowResult(r.prompt_id, comfyImageUrl, "image");
           }
           if (outcome.kind !== "complete" || !outcome.result.images[0]) {
             throw new Error(outcome.kind === "failed" || outcome.kind === "stalled"
               ? outcome.error : "生图未产出图像");
           }
-          const inputName = await moveComfyOutputToInput(outcome.result.images[0], settings.comfyuiUrl);
+          const outputImg = outcome.result.images[0];
+          // 帧图由**图片机**产出、由**视频机**引用（正片首尾帧 / 段桥转场的「图片1」）。
+          // 两台同一台 ⇒ 沿用原路（产物图挪进本机 input）；不同机 ⇒ 这个名字在视频机上不存在，
+          // 必须把字节经后端代理取回、再上传到视频机的 input，否则正片/转场取不到首尾帧。
+          const inputName = useVideo && !sameComfyUrl(comfyImageUrl, comfyVideoUrl)
+            ? await uploadRemoteImageToInput(viewUrl(outputImg, comfyImageUrl), comfyVideoUrl)
+            : await moveComfyOutputToInput(outputImg, comfyImageUrl);
           if (isFirst) { frameFirstImage = inputName; firstFrameGenerated = true; }
           else frameLastImage = inputName;
         } catch (error) {
@@ -604,7 +617,7 @@ export function useIllustrationChain({
         ) => templateRegenerationSnapshot(
           preset.templateId,
           buildFrameValues(framePrompt, media ?? workflowMedia),
-          settings.comfyuiUrl,
+          comfyImageUrl,
           frameOutputNodeIds,
           framePrompt,
           (media ?? workflowMedia).loras.map(({ name, weight }) => ({ name, weight })),
@@ -678,7 +691,7 @@ export function useIllustrationChain({
       } else if (prevTailRef?.lastFrameUrl) {
         try {
           prevTailInput = await uploadRemoteImageToInput(
-            localViewUrl(prevTailRef.lastFrameUrl), settings.comfyuiUrl,
+            localViewUrl(prevTailRef.lastFrameUrl), comfyVideoUrl,
           );
         } catch (error) {
           console.warn("[auto-video] 上尾帧图上传失败，转场降级文字转场", error);
@@ -702,7 +715,7 @@ export function useIllustrationChain({
       );
       try {
         const rt = await submitWorkflow(
-          preset.videoTemplateId!, transitionValues, settings.comfyuiUrl,
+          preset.videoTemplateId!, transitionValues, comfyVideoUrl,
           transitionVideoPrompt, loras.map(({ name, weight }) => ({ name, weight })),
           preset.loraMode || "single",
         );
@@ -714,7 +727,7 @@ export function useIllustrationChain({
             ? [tpl.primary_output_node_id] : [];
           pollResult(rt.prompt_id, transitionOutputNodeIds, undefined,
             { messageId, slotId: transitionSlotId, background: true as const },
-            transitionVideoPrompt, "video");
+            transitionVideoPrompt, "video", undefined, comfyVideoUrl);
         }
       } catch (error) {
         discardFailedIllustration(messageId, transitionSlotId, "transition",
@@ -768,13 +781,13 @@ export function useIllustrationChain({
       }
       // submit 计时段含 ComfyUI 探活 + 队列等待：这段正是历史上「卡 4 分钟」的嫌疑区。
       mark("submit", "start");
-      const st = await comfyStatus(settings.comfyuiUrl);
+      const st = await comfyStatus(comfyMainUrl);
       if (!st.running) {
         failSlot("comfyui_status", "ComfyUI 尚未启动");
         return;
       }
       const r = await enqueueSubmit(() => submitWorkflow(
-        chosenId, values, settings.comfyuiUrl, prompt, loraStack, loraMode,
+        chosenId, values, comfyMainUrl, prompt, loraStack, loraMode,
       ));
       mark("submit", "ok", chosenId);
       if (r.prompt_id) {
@@ -789,7 +802,7 @@ export function useIllustrationChain({
         const outputNodeIds = tpl.primary_output_node_id ? [tpl.primary_output_node_id] : [];
         const target = { messageId, slotId, background: true as const };
         const regeneration = templateRegenerationSnapshot(
-          chosenId, values, settings.comfyuiUrl, outputNodeIds, prompt, loraStack, loraMode,
+          chosenId, values, comfyMainUrl, outputNodeIds, prompt, loraStack, loraMode,
           characterLoraActor,
         );
         setMessages((current) => bindMediaSlotPrompt(current, messageId, slotId, r.prompt_id!));

@@ -15,7 +15,7 @@ from starlette.types import Scope
 
 from app.asyncio_quiet import install_connection_reset_filter
 from app.db import init_db
-from app.services import comfy_launcher
+from app.services import comfy_hosts, comfy_launcher
 from app.services import comfy_watchdog
 from app.services import local_auth, remote_gate
 from app.services import request_guard
@@ -57,7 +57,13 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
       把 start_worker 换成 no-op；lifespan 在测试里即使被触发也拉不起真 worker。
     - ComfyUI 看门狗：托管进程死亡后按已存配置自动重启（防重启风暴 + 面板留痕）；
       未配置/外部实例时全程 no-op。
+    - ComfyUI 主机簿播种（2026-10-27）：把 `data/comfy_hosts.json` 里保存过的主机重新
+      登记进 url_guard 白名单，重启后非回环地址仍能提交（登记时机＝设置页保存 ComfyUI
+      地址，见 routers/comfyui.py::set_config）。
     """
+    seeded = comfy_hosts.seed_runtime()
+    if seeded:
+        _LOG.info("ComfyUI 白名单已播种 %d 台主机：%s", len(seeded), ", ".join(seeded))
     start_workflow_build_worker()
     start_chat_agent_queue_worker()
     start_plan_task_worker()

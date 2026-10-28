@@ -340,6 +340,22 @@ describe("真恢复派发（jsdom：挂载 Host + fake timer 推进等加载）"
     await h.unmount();
   });
 
+  it("在途任务认自己那台机：pending 固化的 comfyuiUrl 优先于快照与 settings（C 段）", async () => {
+    H.list = [
+      { prompt_id: "p1", regeneration: "regen1", comfyuiUrl: "http://submitted" },
+      { prompt_id: "p2", regeneration: "regen2" },
+    ];
+    H.actions = { p1: "inspect", p2: "inspect" };
+    H.urls = { regen1: "http://regen" };
+    const d = makeDeps();
+    const h = await mount(d.deps);
+    await flush();
+    // 提交那台机优先；旧数据（无该字段）仍按旧口径推导
+    expect(H.calls).toContain("inspect:p1@http://submitted");
+    expect(H.calls).toContain("inspect:p2@http://s");
+    await h.unmount();
+  });
+
   it("卸载闸①：等加载期间卸载 ⇒ 放行后不再读队列", async () => {
     const d = makeDeps();
     d.loadedRef.current = false;
@@ -499,7 +515,7 @@ describe("源码形态锁：搬移逐字 + 视图不再自持恢复链", () => {
       "const action = workflowRuntime.recoveryAction(p, resumedRef.current);",
       "if (action === \"skip\") continue;",
       "resumedRef.current.add(p.prompt_id);",
-      "const comfyuiUrl = comfyRegenerationUrl(p.regeneration) || settings.comfyuiUrl;",
+      "const comfyuiUrl = p.comfyuiUrl || comfyRegenerationUrl(p.regeneration) || settings.comfyuiUrl;",
       "const outcome = await workflowRuntime.inspect(p, comfyuiUrl, workflowObserver);",
       "if (outcome !== \"watching\") continue;",
       "cancelForegroundRun(p.prompt_id);",

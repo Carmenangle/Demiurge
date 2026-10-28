@@ -45,7 +45,9 @@ export function useWorkflowResume({
         const action = workflowRuntime.recoveryAction(p, resumedRef.current);
         if (action === "skip") continue;  // 本会话已处理过，不重复
         resumedRef.current.add(p.prompt_id);
-        const comfyuiUrl = comfyRegenerationUrl(p.regeneration) || settings.comfyuiUrl;
+        // 恢复必须回到**提交那台机**：`p.comfyuiUrl` 由提交时固化（地址簿按模态选机后，
+        // 期间设置可能已换机）；旧数据没有该字段 → 退回快照地址、再退回入口 0。
+        const comfyuiUrl = p.comfyuiUrl || comfyRegenerationUrl(p.regeneration) || settings.comfyuiUrl;
         if (action === "expire") {
           // 超过 30 分钟的遗留任务先查一次 ComfyUI history：任务其实已完成时
           // 直接归档回填（2026-08-30 21:25 轮实锤：图 3 分钟就出完了，页面回来

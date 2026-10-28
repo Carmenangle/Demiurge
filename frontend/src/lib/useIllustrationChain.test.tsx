@@ -22,6 +22,7 @@ vi.mock("../api/comfyui", () => ({
   moveComfyOutputToInput: vi.fn(async () => "moved.png"),
   uploadRemoteImageToInput: vi.fn(async () => "remote.png"),
   localViewUrl: (p: string) => `local:${p}`,
+  viewUrl: (img: { filename: string }, url: string) => `view:${img.filename}@${url}`,
   pollWorkflowResult: vi.fn(async () => ({ kind: "complete", result: { images: ["frame.png"] } })),
   // pollWorkflowResult 真源在 lib/workflowGenerationRuntime，它内部调 getResult；
   // 帧路径跑到轮询才会用到（此前用例都在更早处就 failSlot 了）。
@@ -49,7 +50,7 @@ vi.mock("../api/loras", () => ({
 }));
 
 import {
-  comfyStatus, submitWorkflow,
+  comfyStatus, moveComfyOutputToInput, submitWorkflow, uploadRemoteImageToInput,
 } from "../api/comfyui";
 import {
   claimIllustrationSubmission, genFramePrompts, genProfilePrompt, reportIllustrationSubmission,
@@ -395,6 +396,37 @@ describe("useIllustrationChain 行为网", () => {
     expect(firstCall[2]).not.toBe(lastCall[2]);
   });
 
+  it("跨机首帧：图片机出帧、视频机取片 ⇒ 帧图改上传到视频机（同机才走 move 原路）", async () => {
+    vi.mocked(genFramePrompts).mockResolvedValue({
+      frames: { first: { prompt: "编译首帧P" }, last: { prompt: "编译尾帧P" } },
+    } as never);
+    const preset = {
+      templateId: "tpl1", firstlast: true, videoTemplateId: "vid1", smartVideo: true,
+      negativePrompt: "", appearanceSource: "character_card", loraMode: "single",
+    };
+    const md0 = makeDeps({
+      preset,
+      settings: {
+        comfyExtra: [{ id: "vid", name: "视频机", url: "http://video:8188" }],
+        comfyRoute: { video: "vid" },
+      },
+    });
+    await submitChain(md0.deps, {
+      ...baseInput, source: "automatic", motion: 3,
+      sceneSpec: { narrative: "剧情N", profile: "krea2" },
+      firstFrameDesc: "首帧画面", lastFrameDesc: "尾帧画面",
+    });
+    // 帧图在图片机（127.0.0.1）产出的文件名在视频机上不存在 ⇒ 必须取回字节再上传到视频机，
+    // 否则正片模板的 first_frame_image/last_frame_image 引用不到文件。
+    expect(vi.mocked(uploadRemoteImageToInput)).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(uploadRemoteImageToInput).mock.calls[0][1]).toBe("http://video:8188");
+    expect(vi.mocked(moveComfyOutputToInput)).not.toHaveBeenCalled();
+    // 正片提交到视频机（而不是帧图所在的图片机）
+    expect(submitWorkflow).toHaveBeenCalledWith(
+      "vid1", expect.anything(), "http://video:8188", expect.anything(), [], "none",
+    );
+  });
+
   it("失败槽快照：retryArgs 携带原始入参（source 为原值）", async () => {
     vi.mocked(submitWorkflow).mockResolvedValue({} as never);
     const md0 = makeDeps();
@@ -562,7 +594,7 @@ describe("逐字搬移锁（T2.2-A 插画链）", () => {
     ["const useFirstlastImages = videoMode === \"firstlast\" && !!preset.templateId;", 1],
     ["throw new Error(`实际加载的 LoRA 没有精确元数据记录：${lora.name}`);", 1],
     ["prompt = withLoraTriggers(prompt);", 1],
-    ["const st = await comfyStatus(settings.comfyuiUrl);", 1],
+    ["const st = await comfyStatus(comfyMainUrl);", 1],
     ["failSlot(\"submit\", \"ComfyUI 没有返回任务 ID\");", 1],
     ["pollResult(r.prompt_id, outputNodeIds, regeneration, target, prompt, mainIsVideo ? \"video\" : \"image\", baseSlotRef);", 1],
   ];
