@@ -38,8 +38,11 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
         run: echo "version=${INPUT_VERSION:-$REF_NAME}" >> "$GITHUB_OUTPUT"
 
-  quality:
-    runs-on: ubuntu-24.04
+  # 后端门禁跑 Windows：工程含 WinINET/注册表/路径清洗/完整性标签等 Windows 专属面，
+  # ubuntu 上会出与本地无关的红（mypy 直接判 winreg / subprocess.CREATE_NO_WINDOW 缺属性）。
+  # 与 ci.yml 的 backend job 同平台同口径，发布门禁不得比 ci 松。
+  quality-backend:
+    runs-on: windows-2025
     defaults:
       run:
         working-directory: backend
@@ -49,25 +52,39 @@ jobs:
         with:
           python-version: "3.13.11"
           cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+      - name: 后端门禁
+        run: |
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+          ruff check app tests
+          lint-imports
+          python -m mypy "@mypy_files.txt"
+          python scripts/check_hardcode.py
+          python ../scripts/generate_wire_contracts.py --check
+          python ../scripts/generate_capability_manifest.py --check
+      - name: pytest 全量
+        env:
+          TMP: ${{ runner.temp }}
+          TEMP: ${{ runner.temp }}
+        run: python -m pytest -q
+
+  quality-frontend:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-      - name: 后端门禁
-        run: |
-          python -m pip install -r requirements-dev.txt
-          ruff check app tests
-          lint-imports
-          python -m mypy @mypy_files.txt
-          python scripts/check_hardcode.py
-          python -m pytest -q
       - name: 前端门禁
-        working-directory: frontend
         run: |
           npm ci
-          npm run check:wire
-          npm run check:manifest
           npm test
           npm run build
           npx playwright install --with-deps chromium
@@ -155,7 +172,7 @@ jobs:
           retention-days: 7
 
   build:
-    needs: [plan, quality, vendor-closure]
+    needs: [plan, quality-backend, quality-frontend, vendor-closure]
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
