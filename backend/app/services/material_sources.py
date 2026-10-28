@@ -304,8 +304,9 @@ def search_pixiv(query: str = "", limit: int = 20, refresh_token: str = "",
                                       search_target="partial_match_for_tags",
                                       sort="popular_desc", offset=offset)
     except Exception as e:  # noqa: BLE001 鉴权失败/网络不可达统一转可读错误
+        how = f"代理 {proxy}，已探活" if proxy else "直连"
         return {"ok": False, "items": [], "provider": "pixiv",
-                "error": f"pixiv 请求失败（{"代理 " + proxy + "，已探活" if proxy else "直连"}）：{e}。提示：VPN 模式代理（Clash 等）无需配置代理地址，直连即被接管；若配置了地址请确认端口正在监听（设置 → 路径与代理）"}
+                "error": f"pixiv 请求失败（{how}）：{e}。提示：VPN 模式代理（Clash 等）无需配置代理地址，直连即被接管；若配置了地址请确认端口正在监听（设置 → 路径与代理）"}
 
     items = _pixiv_illusts_to_items(getattr(result, "illusts", None) or [])
     if not items:
