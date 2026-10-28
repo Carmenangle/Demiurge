@@ -96,8 +96,6 @@ def test_repo_sync_fix_writes_main_table_and_list_revives(tmp_path, monkeypatch)
     手机场景 = 嵌入 cfg 不可用（index_generation 必抛）——修复后主表仍写入，
     list_generations_page（asset_db_empty 判定走主表）即刻可见。
     """
-    import hashlib
-
     from app.services import asset_store, rag_store
 
     folder = tmp_path / "repo"
