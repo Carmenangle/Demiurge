@@ -2426,20 +2426,23 @@ function buildSceneManifestVia(access, token, userProperties) {
     };
     // WE 粒子系统与 2D 正交通道同源：带相机的混合场景和纯 2D 场景都得发射，
     // 所以这条循环排在 is3D 分支之外，而不是藏在 3D 遍历里（否则 2D 壁纸的雾 / 光束永远不出现）。
-    for (const obj of sceneObjects) {
+    // order = 场景对象序号：WE 按对象顺序把粒子与图层交错合成（EVA 的玻璃雨在人物与
+    // 窗框之下），播放器靠它与 layers[].order 做绘制顺序还原。
+    for (let objIndex = 0; objIndex < sceneObjects.length; objIndex++) {
+        const obj = sceneObjects[objIndex];
         if (typeof obj.particle !== 'string')
             continue;
             stagedBindings = new Set();
             const pj = access.readJson(obj.particle);
             if (!pj)
                 continue;
-            const rendererName = String(Array.isArray(pj.renderer) ? pj.renderer[0]?.name ?? '' : '')
-                .toLowerCase() || 'sprite';
-            // 只模拟「贴图精灵」。rope / ropetrail 要逐帧连线 + eventfollow 子系统，
-            // 这里没实现 ⇒ 鼠标尾迹一族（shu / newproperty16 / newproperty17 / hrbigbmousetrail）
-            // 继续不进面板——判渲染器必须排在可见性之前，否则「尾迹当前是关的」也会
-            // 把 shu 当成生效键交出去。
-            if (rendererName !== 'sprite')
+            const rendererSpec = Array.isArray(pj.renderer) ? pj.renderer[0] : undefined;
+            const rendererName = String(rendererSpec?.name ?? '').toLowerCase() || 'sprite';
+            // 只模拟「贴图精灵」与其速度拖尾变体。rope / ropetrail 要逐帧连线 + eventfollow
+            // 子系统，这里没实现 ⇒ 鼠标尾迹一族（shu / newproperty16 / newproperty17 /
+            // hrbigbmousetrail）继续不进面板——判渲染器必须排在可见性之前，否则
+            // 「尾迹当前是关的」也会把 shu 当成生效键交出去。
+            if (rendererName !== 'sprite' && rendererName !== 'spritetrail')
                 continue;
             // 与图层 / 文字同一条纪律：隐藏系统只交出「此刻为什么看不见」那个键，
             // 参数细节键等到真出系统时才提交。
@@ -2460,15 +2463,18 @@ function buildSceneManifestVia(access, token, userProperties) {
             const rotInit = byName('rotationrandom');
             const fadeOp = opByName('alphafade');
             const moveOp = opByName('movement');
+            const sizeOp = opByName('sizechange');
             const oscOp = opByName('oscillatealpha');
             const num = (v, d) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
             // 材质给出贴图引用与混合模式：additive 加色（雾 / 光束 / 流光），
             // translucent 常规 alpha（鸟 / 星星这类实心精灵）。
             let texRef = '';
             let blending = 'additive';
+            let matPass = undefined;
             if (typeof pj.material === 'string') {
                 const matJson = access.readJson(pj.material);
                 const pass0 = Array.isArray(matJson?.passes) ? matJson.passes[0] : undefined;
+                matPass = pass0;
                 texRef = Array.isArray(pass0?.textures) ? String(pass0.textures[0] ?? '') : '';
                 const blend = typeof pass0?.blending === 'string'
                     ? pass0.blending
@@ -2490,6 +2496,25 @@ function buildSceneManifestVia(access, token, userProperties) {
             // 闸门表却按裸资源键索引——那是 blob 表的键空间。
             const builtInRel = WE_BUILT_IN_PREFIX + 'materials/' + texRef.replace(/\.tex$/i, '') + '.tex';
             const texUrl = texPath ? resourceBase + texPath : resourceBase + builtInRel;
+            // REFRACT 材质（genericparticle + combos.REFRACT）：WE 不画反照率，而是拿
+            // 法线贴图扭曲 _rt_FullFrameBuffer 的屏幕采样再乘回来。EVA 的两套雨
+            // （halo_16 玻璃拖尾 / halo_50 白底 sprite）都是这种材质——直接画 albedo
+            // 会变成盖住人物与窗框的白色长条（真机实锤）。除了 combos，还要把
+            // textures[1] 的法线贴图与 overbright 一起带出去。
+            const combos = matPass?.combos && typeof matPass.combos === 'object' ? matPass.combos : {};
+            const refract = combos.REFRACT === 1 || combos.REFRACT === true;
+            let normalTexUrl;
+            if (refract && Array.isArray(matPass?.textures) && typeof matPass.textures[1] === 'string' && matPass.textures[1]) {
+                const nRef = String(matPass.textures[1]);
+                const nWant = nRef.toLowerCase().replace(/\.tex$/i, '');
+                const nPath = allTex.find((p) => {
+                    const lower = p.toLowerCase().replace(/\.tex$/i, '');
+                    return lower === nWant || lower === 'materials/' + nWant || lower.endsWith('/' + nWant);
+                });
+                normalTexUrl = nPath
+                    ? resourceBase + nPath
+                    : resourceBase + WE_BUILT_IN_PREFIX + 'materials/' + nRef.replace(/\.tex$/i, '') + '.tex';
+            }
             // 粒子活在对象的局部空间：局部偏移与精灵尺寸按 scale 逐轴映射（负值只镜像）。
             // 速度与重力保留预设原值，见下面的 gravity 注释。
             const objOrigin = parseVec3(obj.origin, [0, 0, 0]);
@@ -2553,6 +2578,8 @@ function buildSceneManifestVia(access, token, userProperties) {
             const system = {
                 name: typeof obj.name === 'string' ? obj.name : 'particles',
                 texUrl,
+                // 场景对象序号：播放器按它把粒子与图层交错绘制（WE 的合成顺序就是对象顺序）。
+                order: objIndex,
                 origin: [
                     objOrigin[0] + emitterOrigin[0] * scaleX,
                     objOrigin[1] + emitterOrigin[1] * scaleY,
@@ -2598,6 +2625,22 @@ function buildSceneManifestVia(access, token, userProperties) {
                 oscMin: oscOp ? num(oscOp.scalemin, 0) : undefined,
                 frames: sheet
                     ? { w: Number(sheet[1]), h: Number(sheet[2]), count: Number(sheet[3]) }
+                    : undefined,
+                // spritetrail 把每个粒子拉成沿速度方向的条带：长度 = clamp(|v| × length, 0, maxlength)。
+                // length 缺省 0.005 是 WE 原厂值（rainperspective 正是 3000 px/s × 0.005 = 15 px 雨丝）；
+                // maxlength 缺省 0 表示不封顶。sprite 不带这两个键，播放器走原分支。
+                renderer: rendererName === 'spritetrail' ? 'spritetrail' : 'sprite',
+                trailLength: rendererName === 'spritetrail' ? num(rendererSpec?.length, 0.005) : undefined,
+                trailMax: rendererName === 'spritetrail' ? num(rendererSpec?.maxlength, 0) : undefined,
+                // genericparticle 的 REFRACT 组合：反照率只当颜色系数，真正的画面来自
+                // 法线贴图扭曲后的背景采样。缺法线贴图就没法还原，播放器会整条跳过。
+                refract: refract || undefined,
+                normalTexUrl,
+                overbright: refract ? num(matPass?.constantshadervalues?.ui_editor_properties_overbright, 1) : undefined,
+                // sizechange：WE 在粒子生命期内把 size 从 startvalue 插值到 endvalue
+                // （玻璃雨 0.1→1，水滴从极小长到全尺寸）。
+                sizeGrow: sizeOp
+                    ? [num(sizeOp.startvalue, 1), num(sizeOp.endvalue, 1)]
                     : undefined,
                 attractions: attractions.length > 0 ? attractions : undefined,
             };
@@ -3135,15 +3178,15 @@ function buildSceneManifestVia(access, token, userProperties) {
         let origin = parseVec3(root.origin, [width / 2, height / 2, 0]);
         let scale = parseVec3(root.scale, [1, 1, 1]);
         let angle = parseVec3(root.angles, [0, 0, 0])[2];
-        // 文字字号吃的 scale 与位置不同：对象自身与中间父组都算，但最外层容器
-        // （场景里的「组件」根组）只挪位置、不放大字形。真机 3723257973 的 WE 参考图
-        // 三处独立锚点：问候语 32×0.23025×3.125≈23 与帧率 24×0.948≈22.8 字高相当；
-        // 竖排 SUN 与日期字高比≈3.2 ≈ 96.653×0.85 / (140×0.18)；把根组的 0.28 也乘进去
-        // 会让问候语只剩 6.45、SUN 只剩 23，与参考图完全对不上。
-        let innerScale = chain.length === 1 ? parseVec3(obj.scale, [1, 1, 1]) : [1, 1, 1];
+        // 字形与位置吃同一条父链的 scale（含最外层「组件」根组）：WE 的文字活在对象
+        // 自己的变换空间里，根组的 0.28 一样缩字号。真机 3723257973 的 WE 参考图
+        // （3840×2160 场景，桌面 2560×1440）用 IoU 字形拟合：时钟 em=40、日期 em≈18、
+        // 星期 em=58 屏幕像素，与「整链 scale × 10/3 × 2/3」预测的 35.3 / 15.7 / 51.1
+        // 只差同一个 1.13 倍——那是 WE 音频响应脚本（clock/date/day 存 0.9–1.1）在
+        // 截图那一刻的取值，三者的相对比例与整链模型相差 <1%。只吃自身+中间父组会把
+        // 整组放大 1/0.28≈3.57 倍（应用内实测文字糊成一团），故根组必须进来。
         for (let i = chain.length - 2; i >= 0; i--) {
             const localScale = parseVec3(chain[i].scale, [1, 1, 1]);
-            innerScale = [innerScale[0] * localScale[0], innerScale[1] * localScale[1], innerScale[2] * localScale[2]];
             const localAngle = parseVec3(chain[i].angles, [0, 0, 0])[2];
             let localOrigin = parseVec3(chain[i].origin, [0, 0, 0]);
             // An attachment's origin lives in the host puppet's bone space
@@ -3171,7 +3214,7 @@ function buildSceneManifestVia(access, token, userProperties) {
             scale = [scale[0] * localScale[0], scale[1] * localScale[1], scale[2] * localScale[2]];
             angle += localAngle;
         }
-        return { origin, scale, angle, innerScale };
+        return { origin, scale, angle };
     };
     // In real WE scenes the water reflection is an object effect
     // (effects/reflection/effect.json), not only a conventionally named object.
@@ -3236,8 +3279,8 @@ function buildSceneManifestVia(access, token, userProperties) {
     // 上游只认 `image`，文字落在「无 image ⇒ 非图层」那条判断里被整条丢弃，于是自定义
     // 文字 / 时钟 / 日期这一层在页面上彻底消失，连带它们的字号、透明度、字体选择开关
     // 一起进不了面板。这里按 CText 的实际语义补发射：字形 quad 居中于对象原点，字号吃
-    // 对象自身与中间父组的 scale、不吃最外层组件根组（真机依据见 textLayerOf 的 sizeMul），
-    // size / horizontalalign / padding 三个字段渲染器根本不读。
+    // 整条父链的 scale（含最外层组件根组，依据见 resolveObjectTransform / textLayerOf 的
+    // sizeMul），size / horizontalalign / padding 三个字段渲染器根本不读。
     //
     // 诚实闸门不变：脚本化文本不执行 JS，只认 Clock / Date / 问候语 / 帧率计四类
     // 可静态求值的脚本形状，并把脚本里烘焙的表按当前档位抠出来交给播放器本地驱动。
@@ -3621,6 +3664,97 @@ function buildSceneManifestVia(access, token, userProperties) {
             text: typeof node.value === 'string' && node.value.trim() !== '' ? node.value : label,
         };
     };
+    // ---- 格式串脚本族（Time and Date）----------------------------------------
+    // scriptProperties.format 里写 y/M/d/h/m/s/S/W/a 占位符，update() 逐个 replace 后返回。
+    // format 取 scene.json 保存的 scriptproperties 快照，脚本声明的默认值只在快照缺键时兜底，
+    // 原因见 formatSpecOf 的注释。
+    const addPropBody = (src, type, name) => {
+        const call = 'add' + type + '(';
+        const nameRe = new RegExp("name:\\s*['\"]" + escapeRe(name) + "['\"]");
+        let from = 0;
+        while (from < src.length) {
+            const at = src.indexOf(call, from);
+            if (at < 0)
+                return '';
+            const open = src.indexOf('{', at);
+            if (open < 0)
+                return '';
+            let depth = 0;
+            let end = -1;
+            let i = open;
+            while (i < src.length) {
+                const ch = src[i];
+                if (ch === "'" || ch === '"') {
+                    const quote = ch;
+                    i += 1;
+                    while (i < src.length && src[i] !== quote)
+                        i += src[i] === '\\' ? 2 : 1;
+                } else if (ch === '{') {
+                    depth += 1;
+                } else if (ch === '}') {
+                    depth -= 1;
+                    if (depth === 0) {
+                        end = i;
+                        break;
+                    }
+                }
+                i += 1;
+            }
+            if (end < 0)
+                return '';
+            const body = src.slice(open, end + 1);
+            if (nameRe.test(body))
+                return body;
+            from = end + 1;
+        }
+        return '';
+    };
+    const quoteLiteralIn = (body, key) => {
+        const m = new RegExp(key + ":\\s*'((?:[^'\\\\]|\\\\.)*)'").exec(body)
+            || new RegExp(key + ':\\s*"((?:[^"\\\\]|\\\\.)*)"').exec(body);
+        return m ? unescapeJsString(m[1]) : '';
+    };
+    const boolLiteralIn = (body, key) => {
+        const m = new RegExp(key + ':\\s*(true|false)').exec(body);
+        return m ? m[1] === 'true' : undefined;
+    };
+    const comboDefaultOf = (src, name) => {
+        const body = addPropBody(src, 'Combo', name);
+        const m = body ? /options:\s*\[\s*\{[^}]*?value:\s*'([^']*)'/.exec(body) : null;
+        return m ? m[1] : '';
+    };
+    const checkDefaultOf = (src, name) => {
+        const body = addPropBody(src, 'Checkbox', name);
+        return body ? boolLiteralIn(body, 'value') : undefined;
+    };
+    // scene.json 里的 scriptproperties 就是 WE 实际渲染的档位：编辑器把作者当前的属性选择
+    // 写进场景文件，脚本声明的默认值只在属性缺失时才生效（{user:...} 绑定另走 config.json
+    // 的用户属性）。真机 2587542891 实测：保存值 "yyyyMMdhh:mm" → "2026102814:41"，WE 实拍
+    // 里时钟正是 13 字（字形簇宽 11–12 px、间距 ~14 px、墨高 18 px ⇒ em ≈ 22 屏幕像素），
+    // 且 13 字 × 0.625 em × 39 场景单位 ≈ 325，正好填满文本框内容宽（390 − 2×32 = 326）。
+    // 声明默认 "yyyy/MM/dd hh:mm:ss" 是 19 字，按 39 em 要 464 单位——放不进框，也不是实拍
+    // 的形态。
+    const formatSpecOf = (src, node) => {
+        if (!/scriptProperties\.format/.test(src) || !/replace\(\s*\/y\+\//.test(src))
+            return null;
+        if (!/getHours/.test(src) || !/getMinutes/.test(src))
+            return null;
+        const declared = addPropBody(src, 'Text', 'format');
+        const defaultFormat = declared ? quoteLiteralIn(declared, 'value') : '';
+        if (!defaultFormat || !/[yMd]/.test(defaultFormat))
+            return null;
+        const saved = (name, fallback) => {
+            const value = spValue(node, name);
+            return value === undefined || value === null || value === '' ? fallback : value;
+        };
+        return {
+            time: 'format',
+            format: String(saved('format', defaultFormat)),
+            language: String(saved('language', comboDefaultOf(src, 'language') || 'en-US')),
+            week: String(saved('week', comboDefaultOf(src, 'week') || 'short')),
+            twelve: visibleFlag(saved('twelve', checkDefaultOf(src, 'twelve') === true)),
+        };
+    };
     const textSpecOf = (node) => {
         if (typeof node === 'string')
             return { text: node };
@@ -3639,6 +3773,10 @@ function buildSceneManifestVia(access, token, userProperties) {
         const greeting = greetingSpecOf(src);
         if (greeting)
             return greeting;
+        // 格式串族也含 getHours/getMinutes，必须排在官方 Clock 档位之前。
+        const formatSpec = formatSpecOf(src, node);
+        if (formatSpec)
+            return formatSpec;
         if (src.includes('getHours') && src.includes('getMinutes')) {
             return {
                 time: 'clock',
@@ -3691,12 +3829,19 @@ function buildSceneManifestVia(access, token, userProperties) {
         if (!Number.isFinite(pointSize) || pointSize <= 0)
             return null;
         const transform = resolveObjectTransform(obj);
-        // 字号吃对象自身 + 中间父组的 scale；最外层「组件」根组只挪位置（见
-        // resolveObjectTransform 的 innerScale）。旧实现只吃自身 scale，真机 3723257973
-        // 的问候语因此只剩 7.37（参考图里与帧率同高）、竖排 SUN 比日期大 3.8 倍
-        // （参考图约 3.2 倍）。
-        const sizeScale = transform.innerScale;
+        // 字号与位置一样吃整条父链的 scale（含最外层「组件」根组），依据见
+        // resolveObjectTransform 的注释。旧实现把根组排除在外，真机 3723257973 整组
+        // 文字被放大 3.57 倍糊成一团。
+        const sizeScale = transform.scale;
         const sizeMul = (Math.abs(sizeScale[0]) + Math.abs(sizeScale[1])) * 0.5 || 1;
+        // pointsize 不是场景像素，而是「1080p 基准画布上的点」：WE 按 1 pt = 4/3 px 栅格化，
+        // 再整体缩放到场景高度；实拍还要再乘 1.25（WE 的时间文字按 120 DPI 档出字）。
+        // 证据（2587542891，pointsize 10，画布 5000×2571，用户 2560×1440 桌面 cover 0.56）：
+        //   ① 字形墨高 18 px、墨簇宽 11–12 px ⇒ em ≈ 22 屏幕 px ÷ 0.56 ≈ 39 场景单位
+        //      = 10 × (2571/1080) × (4/3) × 1.25；少了 1.25 只有 17.8 px，量不出这么高的墨。
+        //   ② 该对象的格式串 "yyyyMMdhh:mm" 13 字 × 0.625 em × 39 ≈ 325，正好等于文本框内容宽
+        //      390 − 2×32 = 326，实拍里文字也是左右顶满框——两处独立量出来的 em 一致。
+        const emScale = (height / 1080) * (4 / 3) * 1.25;
         const fontRaw = bindingValueOf(obj.font);
         const fontPath = typeof fontRaw === 'string' ? fontRaw.trim().replace(/\\/g, '/') : '';
         // 工程自带字体走包内资源；Wallpaper Engine 内置字体不在包里，交给内置资产通道，
@@ -3711,7 +3856,7 @@ function buildSceneManifestVia(access, token, userProperties) {
             kind: 'text',
             x: transform.origin[0],
             y: transform.origin[1],
-            fontSize: pointSize * sizeMul,
+            fontSize: pointSize * sizeMul * emScale,
             color: parseVec3(obj.color, [1, 1, 1]),
             alpha: Number.isFinite(alphaNum) ? Math.min(1, Math.max(0, alphaNum)) : 1,
             angle: transform.angle || 0,
@@ -3720,7 +3865,8 @@ function buildSceneManifestVia(access, token, userProperties) {
             ...spec,
         };
     };
-    for (const obj of sceneObjects) {
+    for (let objIndex = 0; objIndex < sceneObjects.length; objIndex++) {
+        const obj = sceneObjects[objIndex];
         // 文字没有 image，必须走在「无 image ⇒ 非图层」之前才会被看见；也正因为排在
         // 图像名黑名单之前，day7 / Clock / D a y 这些名字不会被 black|len|util 误杀。
         if (typeof obj.text !== 'undefined' && typeof obj.image !== 'string') {
@@ -3733,6 +3879,8 @@ function buildSceneManifestVia(access, token, userProperties) {
             }
             const textLayer = textLayerOf(obj);
             if (textLayer) {
+                // order 供播放器与粒子系统交错绘制（场景对象顺序 = WE 合成顺序）。
+                textLayer.order = objIndex;
                 manifest.layers.push(textLayer);
                 commitStagedBindings();
             }
@@ -3752,6 +3900,7 @@ function buildSceneManifestVia(access, token, userProperties) {
                         y: height / 2,
                         w: width,
                         h: height,
+                        order: objIndex,
                     });
                 }
             }
@@ -3981,6 +4130,7 @@ function buildSceneManifestVia(access, token, userProperties) {
                         sway: 0,
                         swaySpeed: 1.5,
                         depth: depthOf(obj),
+                        order: objIndex,
                         puppetId: puppetPayload ? puppetPayload.id : undefined,
                         animation: puppetAnimation && puppetAnimation.length > 0 ? puppetAnimation : undefined,
                         follow: layerFollow,
@@ -4007,6 +4157,7 @@ function buildSceneManifestVia(access, token, userProperties) {
                     h: lh,
                     waterLine: Math.min(1, Math.max(0, 1 - (layerY + lh / 2) / height)),
                     follow: followOf(obj),
+                    order: objIndex,
                 });
             }
         }
@@ -4039,6 +4190,7 @@ function buildSceneManifestVia(access, token, userProperties) {
             depth: depthOf(obj),
             follow: followOf(obj),
             flow: layerFlow || undefined,
+            order: objIndex,
         });
         commitStagedBindings();
     }

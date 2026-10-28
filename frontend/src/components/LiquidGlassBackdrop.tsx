@@ -274,7 +274,10 @@ export function LiquidGlassBackdrop({
   const sceneCovered = Boolean(sceneSource) && sceneStatus === "ready";
 
   return (
-    <div className={`app-backdrop${interacting ? " is-interacting" : ""}`} aria-hidden="true">
+    <div
+      className={`app-backdrop${interacting ? " is-interacting" : ""}${sceneCovered ? " has-scene" : ""}`}
+      aria-hidden="true"
+    >
       {!auroraCovered && <div className="app-backdrop-aurora" />}
       {wallpaper && !failed && !sceneCovered && (
         wallpaper.kind === "video" ? (

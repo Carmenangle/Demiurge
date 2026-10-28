@@ -85,6 +85,16 @@ export type WeSceneParticleSystem = {
   oscMin?: number;
   /** 序列帧（一格多大、一共几格）；包内纹理的尺寸来自文件名，内置资产来自 TEXS 帧表。 */
   frames?: { w: number; h: number; count: number };
+  /** 场景对象序号：播放器按它把粒子与图层交错绘制（WE 的合成顺序就是对象顺序）。 */
+  order?: number;
+  /** REFRACT 组合：反照率只当颜色系数，画面来自法线贴图扭曲后的背景采样。 */
+  refract?: boolean;
+  /** REFRACT 的法线贴图（materials.passes[0].textures[1]），缺它就无法还原。 */
+  normalTexUrl?: string;
+  /** REFRACT 的亮度倍率（constantshadervalues.ui_editor_properties_overbright）。 */
+  overbright?: number;
+  /** sizechange：粒子生命期内的 [起始, 结束] 尺寸倍率。 */
+  sizeGrow?: number[];
   /** controlpointattract 吸引点（绝对场景坐标）。 */
   attractions?: Array<{ x: number; y: number; scale: number; threshold: number }>;
 };

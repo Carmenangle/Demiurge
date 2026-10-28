@@ -135,9 +135,11 @@ WE 的文字对象（`font` + `pointsize`）在清单里发射成 `kind:"text"` 
   `{month}|{weekday}|{dayTable}|{day}|{year}` 占位符的模板（可含真实换行），月名/星期/补零日号/
   年份拆分都用作者工程里的原文。已覆盖三族真实写法：横排月名 + 分隔符、竖排空行 + 逐字年份、
   只输出星期名（NOTICE 改动⑪）；认不出的脚本返回 null ⇒ 该层不发射，不猜格式。
-- **字号 = `pointsize × 对象自身与中间父组 scale`**（镜像取绝对值），最外层「组件」根组的 scale
-  只经 transform 折叠挪位置，不乘进字形（NOTICE 改动⑫）。只吃自身 scale 会把问候语压成 7.37
-  的小糊点；把根组 0.28 也乘进来则整组文字小到看不见。
+- **字号 = `pointsize × 整条父链 scale`**（含最外层「组件」根组，镜像取绝对值），再乘
+  `(4/3) × (场景高/1080) × 1.25`（NOTICE 改动⑫/⑮）。根组必须进来：排除它整组字放大
+  1/0.28≈3.57 倍（应用内实测五段文字糊成一团）。3723257973 的 WE 原生参考图用 IoU 字形拟合
+  定标（时钟 em=40、日期≈18、星期=58 屏幕 px），整链模型预测 35.3/15.7/51.1，三者只差同一个
+  1.13 倍——WE 音频响应脚本（clock/date/day 存 0.9–1.1）在截图瞬间的取值，相对比例 <1%。
 - **问候语**：`{time:'greeting', labels, thresholds}`，静态抠出作者的小时阈值表（≥2 张全字符串
   标签表 + `switch` 映射 + 递增阈值），播放器按当前小时取词（10:46 → "Morning"、12:34 → "Noon"）。
 - **帧率**：`{time:'fps', label, refreshMs, text}`，`active=false` 整层缺席；播放器按 rAF 实测帧间隔
@@ -151,8 +153,27 @@ WE 的文字对象（`font` + `pointsize`）在清单里发射成 `kind:"text"` 
   `_DOCUMENT_CSP`）：三条 FontFace 全走 blob，缺了会在生产态静默退系统字（3D `SUN` 变实心、
   行距变短压住时钟）；dev vite 不发 CSP，e2e 看不见这层，回归在 `backend/tests/test_csp_header.py`。
 - 真机样张 `3723257973`（NOTICE 改动⑪/⑫/⑬）：日期列 `2 5 / O C T / 2 0 2 6`、竖排 `S U N`、
-  右下时钟、左上问候语与帧率，字号 25.2 / 82.155 / 56.71 / 23.025 / 22.752；`e2e-manual/wallpaper-scene-text-layout.spec.ts`
+  右下时钟、左上问候语与帧率，场景字号 23.52 / 76.68 / 52.93 / 21.49 / 21.24（含根组 0.28）；`e2e-manual/wallpaper-scene-text-layout.spec.ts`
   同时钉住清单模板、坐标、逐行光栅与字体加载。
+
+## 粒子与 REFRACT 合成
+
+粒子系统按 `renderer` 分支：`sprite` 画轴对齐四边形；`spritetrail` 沿速度拉长（WE
+`ComputeParticleTrailTangents`）——`stretch = min(|v| × trailLength, trailMax)`、长轴 =
+`size × 贴图长宽比 × stretch`、`rot = atan2(vy,vx) + π/2`，**中心仍是粒子位置**（不是单侧尾巴），
+`sprite` 不带 `trailLength/trailMax`。EVA 雨（`2587542891`）的 12 份雨全走 spritetrail，缺了这条
+就从「满屏雨点」退化成「零星静态雪粒」。
+
+- **REFRACT（`combos.REFRACT` + `genericparticle`）**：WE 在这种组合下**不画反照率**，只是把身后的
+  画面折一下——`color.rgb *= texSample2D(_rt_FullFrameBuffer, screenUv + offset).rgb`，`offset` 由
+  法线贴图（`n.x = alpha`、`n.y = green`、`mask = red`）× `0.05`（`g_RefractAmount` 缺省）× `color.a`
+  决定，最后乘 `overbright`。播放器用 `copyTexImage2D` 把当前画布抄进 `u_bg`（**每个粒子批次一次**：
+  批次之间画了别的图层，旧快照会让折射采样到过期画面），`progParticleRefract` 照上式出图。
+  🔴 **法线贴图缺失时整条系统跳过，绝不退回「直接画反照率」**——雨滴底图是纯白 × 透明轮廓，
+  直接画就是盖住人物与窗框的白色长条（2026-10-28 真机实锤）。
+- **交错绘制**：清单的 `layers[].order` 与 `particles3d[].order` 都是 `scene.objects` 序号（WE 的
+  合成顺序）。播放器画每层前调 `flushWeBefore(layer.order)`，把序号更小的粒子先落画——EVA 的玻璃雨
+  因此压在人物与窗框之下；没有 `order` 的层（旧清单 / 合成层）不触发，粒子留到层循环末尾。
 
 ## 来源标识
 

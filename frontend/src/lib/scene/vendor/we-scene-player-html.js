@@ -506,6 +506,39 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
     }
   \`;
 
+  // REFRACT 粒子（WE genericparticle + combos.REFRACT，common_particles.h /
+  // common_fragment.h 的移植）：反照率只当颜色系数，画面来自「法线扭曲后的背景
+  // 采样」——WE 里这类粒子从不直接加白，只是把身后的画面折一下。
+  //   normal.x = 贴图 alpha（DXT5nm 的 x 存在 w 通道）
+  //   normal.y = 贴图 green，遮罩 / 折射强度 = 贴图 red
+  //   offset = (right×n.x + up×n.y) × 0.05 × mask × color.a，GL 下 y 再取反
+  const fsParticleRefract = \`
+    precision mediump float;
+    varying vec2 v_uv;
+    uniform sampler2D u_tex;
+    uniform sampler2D u_normal;
+    uniform sampler2D u_bg;
+    uniform vec4 u_color;
+    uniform vec2 u_right;
+    uniform vec2 u_up;
+    uniform vec2 u_res;
+    uniform float u_overbright;
+    uniform float u_refract;
+    void main() {
+      vec4 albedo = texture2D(u_tex, v_uv);
+      vec4 nrm = texture2D(u_normal, v_uv);
+      vec2 n = vec2(nrm.a, nrm.g) * 2.0 - 1.0;
+      float mask = nrm.r;
+      vec2 offset = vec2(u_right.x * n.x + u_up.x * n.y,
+                         -(u_right.y * n.x + u_up.y * n.y));
+      offset *= u_refract * mask * u_color.a;
+      vec2 uv = gl_FragCoord.xy / u_res + offset;
+      vec3 bg = texture2D(u_bg, clamp(uv, 0.0, 1.0)).rgb;
+      gl_FragColor = vec4(albedo.rgb * u_color.rgb * bg * u_overbright,
+                          albedo.a * u_color.a);
+    }
+  \`;
+
   // WE flowimage shader: 3 content layers cross-faded while their UVs drift
   // along the flow mask (deep_space nebula background).
   const fsFlow = \`
@@ -602,6 +635,7 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
   const progBasic = createProgram(vsBasic, fsBasic);
   const progReflection = createProgram(vsBasic, fsReflection);
   const progParticle = createProgram(vsBasic, fsParticle);
+  const progParticleRefract = createProgram(vsBasic, fsParticleRefract);
   const progFlow = createProgram(vsBasic, fsFlow);
   const progWaterflow = createProgram(vsBasic, fsWaterflow);
   const progFlag = createProgram(vsBasic, fsFlag);
@@ -1187,6 +1221,8 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
   function textLineOf(layer, wallMs) {
     if (!layer.time) return layer.text == null ? '' : String(layer.text);
     const d = new Date(wallMs);
+    if (layer.time === 'format')
+      return formatTextOf(layer, d);
     if (layer.time === 'clock') {
       const sep = layer.delimiter == null ? ':' : String(layer.delimiter);
       let h = d.getHours();
@@ -1227,6 +1263,71 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
     // 清单里出现没见过的 time 档位：宁可不画，也不猜一个格式糊上去。
     return '';
   }
+
+  // 「Time and Date」格式脚本族：update() 把 format 里的占位符按 y → M → d → h → m → s →
+  // S → a → W 的顺序各 replace 第一次出现的 run。取值口径照抄脚本（12 小时制在 12 点整仍
+  // 显示 12、0 点不回绕，AM/PM 以 12 点为界），免得和 WE 差一小时。
+  const WEEKDAY_TABLE = {
+    'en-US': {
+      narrow: ['S', 'M', 'T', 'W', 'T', 'F', 'S'],
+      short: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'],
+      long: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'],
+    },
+    'zh-TW': {
+      narrow: ['日', '一', '二', '三', '四', '五', '六'],
+      short: ['週日', '週一', '週二', '週三', '週四', '週五', '週六'],
+      long: ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'],
+    },
+    'ja-JP': {
+      short: ['日曜', '月曜', '火曜', '水曜', '木曜', '金曜', '土曜'],
+      long: ['日曜日', '月曜日', '火曜日', '水曜日', '木曜日', '金曜日', '土曜日'],
+    },
+  };
+  const AMPM_TABLE = { 'en-US': ['AM', 'PM'], 'zh-TW': ['上午', '下午'], 'ja-JP': ['午前', '午後'] };
+
+  function formatTextOf(layer, d) {
+    const fmt = String(layer.format || '');
+    if (!fmt) return '';
+    const language = String(layer.language || 'en-US');
+    const table = WEEKDAY_TABLE[language] || WEEKDAY_TABLE['en-US'];
+    const weekType = String(layer.week || 'short');
+    const weekday = (table[weekType] || table.long || [])[d.getDay()] || '';
+    const hours = d.getHours();
+    const twelve = layer.twelve === true;
+    const hour12 = hours > 12 ? hours - 12 : hours;
+    const ampm = (AMPM_TABLE[language] || AMPM_TABLE['en-US'])[hours > 12 ? 1 : 0];
+    const values = {
+      y: String(d.getFullYear()),
+      M: String(d.getMonth() + 1),
+      d: String(d.getDate()),
+      W: weekday,
+      h: String(twelve ? hour12 : hours),
+      m: String(d.getMinutes()),
+      s: String(d.getSeconds()),
+      S: String(d.getMilliseconds()),
+      a: twelve ? ampm : '',
+    };
+    let out = fmt;
+    for (const token of ['y', 'M', 'd', 'h', 'm', 's', 'S', 'a', 'W'])
+      out = out.replace(new RegExp(token + '+'), function (run) {
+        const value = values[token];
+        if (token === 'y')
+          return run.length === 2 ? value.slice(-2) : value;
+        if (token === 'W' || token === 'a')
+          return run.length === 1 ? value : run;
+        // 两位 token（MM/dd/hh/mm/ss/S S S）补零；脚本对更长的 run 原样退回 token。
+        if (run.length === 1)
+          return value;
+        if (run.length > (token === 'S' ? 3 : 2))
+          return run;
+        return ('00' + value).slice(-run.length);
+      });
+    return out;
+  }
+
+  // WE 的文本框（size / padding）只管对齐与锚点，不截断文字：2587542891 的时钟用的是场景
+  // 保存的 13 字格式 "yyyyMMdhh:mm"，按实测 em 恰好填满框宽，没有溢出可截。
+  // 作者写了 \\n 的多行文本也原样换行。
 
   // 帧率层的状态：WE 的 FPS 脚本按相邻帧间隔累计平均，每 refreshInterval 毫秒改写一次。
   // 这里也只数真正画出来的帧；暂停时不推进，恢复时清空重算，免得把暂停时长算成一帧。
@@ -2509,8 +2610,203 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
     gl.clearColor(0, 0, 0, 0);
     gl.clear(gl.COLOR_BUFFER_BIT);
 
+    // ---- WE 2D 通道粒子：先推进全部系统，再按场景对象序号与图层交错绘制 ----
+    // 混合场景（3D 且有模型）不走这条通道：上面 3D 分支已经用同一份 particles3d
+    // 跑过 updateParticles3d，两边都画会变成双倍数量 + 一份贴平面的雾。
+    const drewParticles3d = sceneData.is3D && sceneData.models && sceneData.models.length > 0;
+    const weSystems = drewParticles3d ? [] : (sceneData.particles3d || []);
+    // 观测现场（不参与任何渲染判定）：每帧汇总各系统存活数、绘制的 quad 数与推进过的模拟帧。
+    const particles2dLive = {};
+    let particles2dQuads = 0;
+    let nextWe = 0;
+    let bgSnapValid = false;
+    const bgSnap = { tex: null, w: 0, h: 0 };
+
+    for (const sys of weSystems) {
+      const st = getParticles2d(sys);
+      if (!st.warm) {
+        // 首帧预热到稳态：WE 的桌面里雾与光束从来不是一片空。
+        // 步数按「活满一整个生命周期 + 至少生出第一只」算——光束速率 0.3/s、寿命 8~20 s，
+        // 固定 3 秒预热连一只都生不出来（预热不足实测 live=0，画面上没有光束）。
+        st.warm = true;
+        const warmRate = Math.max(0.01, nz(sys.rate, 0));
+        const warmSeconds = Math.min(40, Math.max(3, nz(sys.lifeMax, 4) + 1 / warmRate + 0.5));
+        for (let i = 0; i < Math.ceil(warmSeconds * 30); i++) updateParticles2d(sys, st, 1 / 30);
+      }
+      if (!isPaused) updateParticles2d(sys, st, dt);
+      particles2dLive[sys.name] = st.list.length;
+    }
+
+    // REFRACT 的输入是 _rt_FullFrameBuffer（WE 的整帧缓冲）：这里用拷贝画布快照还原，
+    // 每个「粒子批次」取一次（批次之间画了别的图层，旧快照会让扭曲采样到过期画面）。
+    function snapshotBackground() {
+      const w = gl.drawingBufferWidth;
+      const h = gl.drawingBufferHeight;
+      if (!bgSnap.tex) bgSnap.tex = gl.createTexture();
+      gl.activeTexture(gl.TEXTURE2);
+      gl.bindTexture(gl.TEXTURE_2D, bgSnap.tex);
+      gl.copyTexImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 0, 0, w, h, 0);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      bgSnap.w = w;
+      bgSnap.h = h;
+      gl.activeTexture(gl.TEXTURE0);
+    }
+
+    function drawWeSystem(sys) {
+      const rec = sys.texUrl ? loadTexture(sys.texUrl) : null;
+      // 贴图缺席（没装 WE、内置资产取不到）就整条系统跳过：清单里的键已由主线程
+      // 按 builtInAssetKeys 撤掉，这里不额外画东西。
+      if (!rec || !rec.loaded) return false;
+      const st = getParticles2d(sys);
+      if (st.list.length === 0) return false;
+      // REFRACT 少了法线贴图就还原不了折射：整条跳过，绝不退回「直接画反照率」——
+      // 那正是白色长条（雨滴底图是纯白 × 透明轮廓）盖住人物与窗框的来源。
+      let nrec = null;
+      if (sys.refract) {
+        nrec = sys.normalTexUrl ? loadTexture(sys.normalTexUrl) : null;
+        if (!nrec || !nrec.loaded) return false;
+      }
+      const prog = nrec ? progParticleRefract : progParticle;
+      gl.useProgram(prog);
+      gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+      const wPos = gl.getAttribLocation(prog, 'a_pos');
+      const wUv = gl.getAttribLocation(prog, 'a_uv');
+      gl.enableVertexAttribArray(wPos);
+      gl.enableVertexAttribArray(wUv);
+      gl.vertexAttribPointer(wPos, 2, gl.FLOAT, false, 16, 0);
+      gl.vertexAttribPointer(wUv, 2, gl.FLOAT, false, 16, 8);
+      gl.uniformMatrix4fv(gl.getUniformLocation(prog, 'u_proj'), false, proj);
+      gl.uniform4f(gl.getUniformLocation(prog, 'u_uvRect'), 0, 0, 1, 1);
+      const wTex = gl.getUniformLocation(prog, 'u_tex');
+      const wRect = gl.getUniformLocation(prog, 'u_uvRect');
+      const wColor = gl.getUniformLocation(prog, 'u_color');
+      const wModel = gl.getUniformLocation(prog, 'u_model');
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, rec.texture);
+      gl.uniform1i(wTex, 0);
+      if (nrec) {
+        if (!bgSnapValid) { snapshotBackground(); bgSnapValid = true; }
+        gl.activeTexture(gl.TEXTURE1);
+        gl.bindTexture(gl.TEXTURE_2D, nrec.texture);
+        gl.uniform1i(gl.getUniformLocation(prog, 'u_normal'), 1);
+        gl.activeTexture(gl.TEXTURE2);
+        gl.bindTexture(gl.TEXTURE_2D, bgSnap.tex);
+        gl.uniform1i(gl.getUniformLocation(prog, 'u_bg'), 2);
+        gl.uniform2f(gl.getUniformLocation(prog, 'u_res'), bgSnap.w, bgSnap.h);
+        gl.uniform1f(gl.getUniformLocation(prog, 'u_overbright'), nz(sys.overbright, 1));
+        // g_RefractAmount 的 WE 缺省值（ui_editor_properties_refract_amount = 0.05）。
+        gl.uniform1f(gl.getUniformLocation(prog, 'u_refract'), 0.05);
+        gl.activeTexture(gl.TEXTURE0);
+      }
+      if (sys.blend === 'translucent') gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      else gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+      const sc = sys.sizeScale || [1, 1];
+      const fr = sys.frames;
+      const cols = fr && fr.w > 0 ? Math.max(1, Math.floor(rec.width / fr.w)) : 1;
+      const rows = fr && fr.h > 0 ? Math.max(1, Math.floor(rec.height / fr.h)) : 1;
+      // 贴图长宽比：有序列帧按「一格」算，否则按整张（对应 WE 的 textureRatio）。
+      const ratio = fr && fr.w > 0 && fr.h > 0
+        ? fr.h / fr.w
+        : rec.height / Math.max(1, rec.width);
+      const fadeInDef = 0.1, fadeOutDef = 0.1;
+      for (const p of st.list) {
+        let k = 1;
+        const fi = sys.fadeIn !== undefined ? sys.fadeIn : fadeInDef * p.maxLife;
+        const fo = sys.fadeOut !== undefined ? sys.fadeOut : fadeOutDef * p.maxLife;
+        if (fi > 0) k = Math.min(k, p.life / fi);
+        if (fo > 0) k = Math.min(k, (p.maxLife - p.life) / fo);
+        if (sys.oscFreq) {
+          const lo = nz(sys.oscMin, 0);
+          const wave = 0.5 + 0.5 * Math.sin((elapsed * nz(sys.oscFreq, 1) + p.osc) * 6.28318);
+          k *= lo + (1 - lo) * wave;
+        }
+        const a = Math.min(1, Math.max(0, p.alpha * k));
+        if (a <= 0) continue;
+        // sizechange：WE 在生命期内把 size 从 startvalue 插到 endvalue。
+        let sizeK = 1;
+        if (sys.sizeGrow) {
+          const t = p.maxLife > 0 ? Math.min(1, Math.max(0, p.life / p.maxLife)) : 1;
+          sizeK = nz(sys.sizeGrow[0], 1) + (nz(sys.sizeGrow[1], 1) - nz(sys.sizeGrow[0], 1)) * t;
+        }
+        // WE 的精灵是「宽 = size、高 = size × 贴图长宽比」的等比四边形（几何着色器里
+        // textureRatio 乘在 up 上），对象缩放再各轴乘一遍；不做画布封顶——
+        // 官方雾预设就是比画面还大的软团，封顶会把它压成一块带硬边的屏斑。
+        let w = p.size * sizeK * nz(sc[0], 1);
+        let h = p.size * sizeK * nz(sc[1], 1) * ratio;
+        let rot = nz(sys.angle, 0) + p.rot;
+        const speed = Math.hypot(p.vx, p.vy);
+        if (sys.renderer === 'spritetrail') {
+          // spritetrail 的几何直接照 WE 自带 genericparticle 的 ComputeParticleTrailTangents：
+          //   up = normalize(v) × max(minlength, min(|v| × length, maxlength))
+          //   pos = center + size×right×(u−0.5) − size×up×textureRatio×(v−0.5)
+          // ⇒ 长轴沿速度、全长为 size × 贴图长宽比 × 该倍率，纹理竖直（32×128 的雨丝），
+          // 中心就是粒子位置（不是「头在前、尾在后」的单侧延伸）。
+          const cap = nz(sys.trailMax, 0);
+          const stretch = Math.max(0, Math.min(speed * nz(sys.trailLength, 0.005), cap > 0 ? cap : Infinity));
+          h = p.size * sizeK * nz(sc[1], 1) * ratio * stretch;
+          rot = speed > 1e-4 ? Math.atan2(p.vy, p.vx) + Math.PI / 2 : 0;
+        }
+        let u0 = 0, v0 = 0, u1 = 1, v1 = 1;
+        if (fr && fr.count > 1) {
+          // 序列帧按「粒子年龄」推进（WE 传进着色器的就是 frac(lifetime) × 帧数），
+          // 起点再按 phase 错开，一群鸟才不会齐刷刷新翅膀。
+          const idx = Math.floor(p.phase * fr.count + p.life * fr.count) % fr.count;
+          const cx = idx % cols;
+          const cy = Math.floor(idx / cols) % rows;
+          u0 = (cx * fr.w) / rec.width;
+          v0 = (cy * fr.h) / rec.height;
+          u1 = ((cx + 1) * fr.w) / rec.width;
+          v1 = ((cy + 1) * fr.h) / rec.height;
+        }
+        // 镜像靠交换 uv 边界做：vsBasic 算的是 xy + a_uv*(zw − xy)，负跨度即翻采样。
+        // 真机 day2 的鸟群 scale.x = −1，作者用它把朝左的贴图翻成与飞行方向一致。
+        gl.uniform4f(wRect,
+          sys.flipX ? u1 : u0, sys.flipY ? v1 : v0,
+          sys.flipX ? u0 : u1, sys.flipY ? v0 : v1);
+        if (h <= 0) continue;
+        gl.uniformMatrix4fv(wModel, false,
+          mat4Transform2D(p.x, p.y, w, h, rot));
+        gl.uniform4f(wColor, p.color[0], p.color[1], p.color[2], a);
+        if (nrec) {
+          // 折射方向基（WE ComputeParticleTangents / ComputeParticleTrailTangents，
+          // g_Orientation = 屏幕轴）：拖尾用「right ⟂ v、up ∥ v」，精灵用旋转后的两轴。
+          let rx = Math.cos(rot), ry = Math.sin(rot);
+          let ux = -Math.sin(rot), uy = Math.cos(rot);
+          if (sys.renderer === 'spritetrail') {
+            if (speed > 1e-4) {
+              rx = p.vy / speed; ry = -p.vx / speed;
+              ux = p.vx / speed; uy = p.vy / speed;
+            } else {
+              rx = 1; ry = 0; ux = 0; uy = 1;
+            }
+          }
+          gl.uniform2f(gl.getUniformLocation(prog, 'u_right'), rx, ry);
+          gl.uniform2f(gl.getUniformLocation(prog, 'u_up'), ux, uy);
+        }
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        particles2dQuads += 1;
+      }
+      return true;
+    }
+
+    // 交错绘制：清单里两边的 order 都按场景对象顺序递增，指针只前进不回退。
+    function flushWeBefore(order) {
+      bgSnapValid = false;
+      while (nextWe < weSystems.length && nz(weSystems[nextWe].order, Infinity) < order) {
+        drawWeSystem(weSystems[nextWe]);
+        nextWe += 1;
+      }
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    }
+
     // Render all layers (Sky -> Ground -> Reflection -> Particles)
     for (const layer of sceneData.layers) {
+      // 本层之前入场的粒子先画：WE 按场景对象序号合成，玻璃雨在窗框与人物之下。
+      // 没有 order 的层（旧清单 / 合成层）不触发提前落画，粒子留到循环末尾。
+      if (layer.order !== undefined) flushWeBefore(nz(layer.order, Infinity));
       if (layer.isReflection) {
         // Water Reflection Pass
         const maskRec = loadTexture(layer.texUrl);
@@ -2784,105 +3080,9 @@ export const WE_SCENE_PLAYER_HTML = `<!DOCTYPE html>
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     }
 
-    // WE 粒子系统（雾 / 光束 / 鸟 / 星星）：走 2D 正交通道，画在图层与程序化流星之上。
-    // 混合场景（3D 且有模型）不在这里画：上面 3D 分支已经用同一份 particles3d 跑过
-    // updateParticles3d，两条通道都画会变成双倍数量 + 一份贴平面的雾。
-    const drewParticles3d = sceneData.is3D && sceneData.models && sceneData.models.length > 0;
-    const weSystems = drewParticles3d ? [] : (sceneData.particles3d || []);
-    // 观测现场（不参与任何渲染判定）：每帧汇总各系统存活数、绘制的 quad 数与推进过的模拟帧。
-    const particles2dLive = {};
-    let particles2dQuads = 0;
-    if (weSystems.length > 0) {
-      gl.useProgram(progParticle);
-      gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
-      const wPos = gl.getAttribLocation(progParticle, 'a_pos');
-      const wUv = gl.getAttribLocation(progParticle, 'a_uv');
-      gl.enableVertexAttribArray(wPos);
-      gl.enableVertexAttribArray(wUv);
-      gl.vertexAttribPointer(wPos, 2, gl.FLOAT, false, 16, 0);
-      gl.vertexAttribPointer(wUv, 2, gl.FLOAT, false, 16, 8);
-      gl.uniformMatrix4fv(gl.getUniformLocation(progParticle, 'u_proj'), false, proj);
-      const wTex = gl.getUniformLocation(progParticle, 'u_tex');
-      const wRect = gl.getUniformLocation(progParticle, 'u_uvRect');
-      const wColor = gl.getUniformLocation(progParticle, 'u_color');
-      const wModel = gl.getUniformLocation(progParticle, 'u_model');
-      gl.activeTexture(gl.TEXTURE0);
-      for (const sys of weSystems) {
-        const rec = sys.texUrl ? loadTexture(sys.texUrl) : null;
-        // 贴图缺席（没装 WE、内置资产取不到）就整条系统跳过：清单里的键已由主线程
-        // 按 builtInAssetKeys 撤掉，这里不额外画东西。
-        if (!rec || !rec.loaded) continue;
-        const st = getParticles2d(sys);
-        if (!st.warm) {
-          // 首帧预热到稳态：WE 的桌面里雾与光束从来不是一片空。
-          // 步数按「活满一整个生命周期 + 至少生出第一只」算——光束速率 0.3/s、寿命 8~20 s，
-          // 固定 3 秒预热连一只都生不出来（预热不足实测 live=0，画面上没有光束）。
-          st.warm = true;
-          const warmRate = Math.max(0.01, nz(sys.rate, 0));
-          const warmSeconds = Math.min(40, Math.max(3, nz(sys.lifeMax, 4) + 1 / warmRate + 0.5));
-          for (let i = 0; i < Math.ceil(warmSeconds * 30); i++) updateParticles2d(sys, st, 1 / 30);
-        }
-        if (!isPaused) updateParticles2d(sys, st, dt);
-        particles2dLive[sys.name] = st.list.length;
-        if (st.list.length === 0) continue;
-        gl.bindTexture(gl.TEXTURE_2D, rec.texture);
-        gl.uniform1i(wTex, 0);
-        if (sys.blend === 'translucent') gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-        else gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
-        const sc = sys.sizeScale || [1, 1];
-        const fr = sys.frames;
-        const cols = fr && fr.w > 0 ? Math.max(1, Math.floor(rec.width / fr.w)) : 1;
-        const rows = fr && fr.h > 0 ? Math.max(1, Math.floor(rec.height / fr.h)) : 1;
-        // 贴图长宽比：有序列帧按「一格」算，否则按整张（对应 WE 的 textureRatio）。
-        const ratio = fr && fr.w > 0 && fr.h > 0
-          ? fr.h / fr.w
-          : rec.height / Math.max(1, rec.width);
-        const fadeInDef = 0.1, fadeOutDef = 0.1;
-        for (const p of st.list) {
-          let k = 1;
-          const fi = sys.fadeIn !== undefined ? sys.fadeIn : fadeInDef * p.maxLife;
-          const fo = sys.fadeOut !== undefined ? sys.fadeOut : fadeOutDef * p.maxLife;
-          if (fi > 0) k = Math.min(k, p.life / fi);
-          if (fo > 0) k = Math.min(k, (p.maxLife - p.life) / fo);
-          if (sys.oscFreq) {
-            const lo = nz(sys.oscMin, 0);
-            const wave = 0.5 + 0.5 * Math.sin((elapsed * nz(sys.oscFreq, 1) + p.osc) * 6.28318);
-            k *= lo + (1 - lo) * wave;
-          }
-          const a = Math.min(1, Math.max(0, p.alpha * k));
-          if (a <= 0) continue;
-          // WE 的精灵是「宽 = size、高 = size × 贴图长宽比」的等比四边形（几何着色器里
-          // textureRatio 乘在 up 上），对象缩放再各轴乘一遍；不做画布封顶——
-          // 官方雾预设就是比画面还大的软团，封顶会把它压成一块带硬边的屏斑。
-          const w = p.size * nz(sc[0], 1);
-          const h = p.size * nz(sc[1], 1) * ratio;
-          let u0 = 0, v0 = 0, u1 = 1, v1 = 1;
-          if (fr && fr.count > 1) {
-            // 序列帧按「粒子年龄」推进（WE 传进着色器的就是 frac(lifetime) × 帧数），
-            // 起点再按 phase 错开，一群鸟才不会齐刷刷新翅膀。
-            const idx = Math.floor(p.phase * fr.count + p.life * fr.count) % fr.count;
-            const cx = idx % cols;
-            const cy = Math.floor(idx / cols) % rows;
-            u0 = (cx * fr.w) / rec.width;
-            v0 = (cy * fr.h) / rec.height;
-            u1 = ((cx + 1) * fr.w) / rec.width;
-            v1 = ((cy + 1) * fr.h) / rec.height;
-          }
-          // 镜像靠交换 uv 边界做：vsBasic 算的是 xy + a_uv*(zw − xy)，负跨度即翻采样。
-          // 真机 day2 的鸟群 scale.x = −1，作者用它把朝左的贴图翻成与飞行方向一致。
-          gl.uniform4f(wRect,
-            sys.flipX ? u1 : u0, sys.flipY ? v1 : v0,
-            sys.flipX ? u0 : u1, sys.flipY ? v0 : v1);
-          gl.uniformMatrix4fv(wModel, false,
-            mat4Transform2D(p.x, p.y, w, h, nz(sys.angle, 0) + p.rot));
-          gl.uniform4f(wColor, p.color[0], p.color[1], p.color[2], a);
-          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-          particles2dQuads += 1;
-        }
-      }
-      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-      if (!isPaused) particles2dSteps += 1;
-    }
+    // 场景图层放完 ⇒ 剩下的粒子（order 大于所有图层，或旧清单没有 order）一起落画。
+    flushWeBefore(Infinity);
+    if (weSystems.length > 0 && !isPaused) particles2dSteps += 1;
     // 观测现场（不参与任何渲染判定）：区分「没发射」「贴图没加载上」「模拟没推进」三层。
     window.__weParticles = {
       systems: weSystems.length,

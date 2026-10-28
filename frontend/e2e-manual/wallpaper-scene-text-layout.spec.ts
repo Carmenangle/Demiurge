@@ -10,8 +10,8 @@ import { resolve } from "node:path";
  * 本用例锁五件事：
  *   ① 清单：Date 的 format 模板 + 竖排月名/补零日表/逐字年份；Day 只有 {weekday}；
  *      问候语的 8 档小时阈值表与帧率层的 label/刷新窗口/烘焙初值；
- *      字号 = pointsize × 自身与中间父组 scale、不吃最外层组件根组
- *      （25.2 / 82.155 / 56.71 / 23.025 / 22.752），父链整体 scale 只挪位置；
+ *      字号 = pointsize × 整条父链 scale（含最外层组件根组 0.28）× (4/3) × 1.25 × (场景高/1080)
+ *      （23.52 / 76.68 / 52.93 / 21.49 / 21.24，场景 2160 高 ⇒ ×10/3）；父链 scale 同时挪位置；
  *   ② 摆法：Date 在左、Day 在右且更靠上、Clock 在两者下方，问候语与帧率在日期上方；
  *   ③ 光栅：播放器 iframe 的 fillText 真的按「日号两行 + 空行 + 月名三行 + 空行 + 年份四行」
  *      逐行出字，星期三行，时钟一行；问候语命中当前时段的标签，帧率在第一个刷新窗口后变成
@@ -321,15 +321,17 @@ test("竖排日期：清单格式/字号/坐标与 WE 一致，逐行光栅成�
   expect(fps!.refreshMs, "帧率刷新窗口不对").toBe(500);
   expect(fps!.text, "帧率烘焙初值不对").toBe("fps：60");
 
-  // ② 字号 = pointsize × 自身与中间父组 scale、不吃最外层组件根组：
-  //    140×0.18 / 96.653×0.85 / 202.26×0.28038 / 32×0.23025×3.125 / 24×0.948。
-  //    只吃自身 scale 会把问候语压成 7.37 的小糊点（参考图里它与帧率同高）；
-  //    把根组 0.28 也乘进来则会让整组文字小到看不见。
-  expect(date!.fontSize, "日期字号不对（父组 scale 为 1，根组不该进来）").toBeCloseTo(25.2, 2);
-  expect(day!.fontSize, "星期字号没吃到父组 0.85").toBeCloseTo(82.155, 2);
-  expect(clock!.fontSize, "时钟字号不对").toBeCloseTo(56.7102, 2);
-  expect(greeting!.fontSize, "问候语字号没吃到父组 3.125").toBeCloseTo(23.025, 3);
-  expect(fps!.fontSize, "帧率字号没吃到父组 0.948").toBeCloseTo(22.752, 3);
+  // ② 字号 = pointsize × 整条父链 scale（含最外层组件根组 0.28）× (4/3) × 1.25 × (场景高/1080)：
+  //    140×0.18 / 96.653×0.85 / 202.26×0.28038 / 32×0.23025×3.125 / 24×0.948，再 ×0.28 ×10/3。
+  //    根组必须进来：排除它整组字会放大 1/0.28≈3.57 倍（应用内实测五段糊成一团）；
+  //    只吃自身 scale 会把问候语压成 6.45 的小糊点；漏掉 1080p 基准系数则整体只有 WE 的 3/8，
+  //    漏掉 1.25 则整体比 WE 实拍小一圈（2587542891 的时钟实拍 em ≈ 39 场景单位）。
+  const emScale = (10 / 3) * 0.28;
+  expect(date!.fontSize, "日期字号不对（应含根组 0.28）").toBeCloseTo(140 * 0.18 * emScale, 2);
+  expect(day!.fontSize, "星期字号没吃到父组 0.85").toBeCloseTo(96.653 * 0.85 * emScale, 2);
+  expect(clock!.fontSize, "时钟字号不对").toBeCloseTo(202.26 * 0.28038 * emScale, 2);
+  expect(greeting!.fontSize, "问候语字号没吃到父组 3.125").toBeCloseTo(32 * 0.23025 * 3.125 * emScale, 3);
+  expect(fps!.fontSize, "帧率字号没吃到父组 0.948").toBeCloseTo(24 * 0.948 * emScale, 3);
 
   // ③ 摆法：日期在左、星期在右且更靠上、时钟在两者下方；问候语与帧率在日期/星期上方
   //    （问候语在左、帧率在右）；字级 星期 > 时钟 > 日期。
@@ -390,13 +392,13 @@ test("竖排日期：清单格式/字号/坐标与 WE 一致，逐行光栅成�
   const greetingGroup = groups.find((group) => group.lines.some((line) => greetingTexts.has(line)))!;
   const fpsGroup = groups.find((group) => group.lines.some((line) => fpsPattern.test(line)))!;
 
-  // 字号经 2× 超采样进画布：25.2→50px、82.155→164px、56.71→113px、23.025→46px、22.752→46px。
+  // 字号经 2× 超采样进画布：23.52→47px、76.68→153px、52.93→106px、21.49→43px、21.24→42px。
   // 同时这也说明绘制统一走 we-scene-font-*（FontFace 家族），没有退系统字栈。
-  expect(fontOf(dateGroup.font).size, "日期位图字号不是 25.2×2").toBe(50);
-  expect(fontOf(dayGroup.font).size, "星期位图字号不是 82.155×2").toBe(164);
-  expect(fontOf(clockGroup.font).size, "时钟位图字号不是 56.71×2").toBe(113);
-  expect(fontOf(greetingGroup.font).size, "问候语位图字号不是 23.025×2").toBe(46);
-  expect(fontOf(fpsGroup.font).size, "帧率位图字号不是 22.752×2").toBe(46);
+  expect(fontOf(dateGroup.font).size, "日期位图字号不是 23.52×2").toBe(47);
+  expect(fontOf(dayGroup.font).size, "星期位图字号不是 76.68×2").toBe(153);
+  expect(fontOf(clockGroup.font).size, "时钟位图字号不是 52.93×2").toBe(106);
+  expect(fontOf(greetingGroup.font).size, "问候语位图字号不是 21.49×2").toBe(43);
+  expect(fontOf(fpsGroup.font).size, "帧率位图字号不是 21.24×2").toBe(42);
   for (const group of [dateGroup, dayGroup, clockGroup, greetingGroup, fpsGroup]) {
     expect(fontOf(group.font).family, `位图没吃到加载好的字体：${group.font}`)
       .toMatch(/^we-scene-font-/);
@@ -406,9 +408,9 @@ test("竖排日期：清单格式/字号/坐标与 WE 一致，逐行光栅成�
   }
   expect(Number(dateGroup.canvas.split("x")[1]), "日期位图不像 11 行竖排").toBeGreaterThan(400);
   expect(Number(dayGroup.canvas.split("x")[1]), "星期位图不像 3 行竖排").toBeGreaterThan(300);
-  expect(Number(clockGroup.canvas.split("x")[1]), "时钟位图不该是多行").toBeLessThan(250);
-  expect(Number(greetingGroup.canvas.split("x")[1]), "问候语位图不该是多行").toBeLessThan(100);
-  expect(Number(fpsGroup.canvas.split("x")[1]), "帧率位图不该是多行").toBeLessThan(100);
+  expect(Number(clockGroup.canvas.split("x")[1]), "时钟位图不该是多行").toBeLessThan(300);
+  expect(Number(greetingGroup.canvas.split("x")[1]), "问候语位图不该是多行").toBeLessThan(150);
+  expect(Number(fpsGroup.canvas.split("x")[1]), "帧率位图不该是多行").toBeLessThan(150);
 
   // 字形位图确实进了 GPU：每个「字体+字号+句子」组合一次 texImage2D(canvas)。
   const rec = await readScene(page);

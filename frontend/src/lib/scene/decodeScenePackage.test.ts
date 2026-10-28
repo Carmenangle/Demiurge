@@ -1124,7 +1124,10 @@ describe("文字图层（WE TextObject）", () => {
       { id: 2, name: "clock", font: "fonts/Blackout 2 AM.ttf", pointsize: 100, origin: "300 400 0", text: "12:34" },
     ], { newproperty55: { type: "textinput", value: "夜莺" } }, [fontEntry]);
     const [own, builtIn] = layersOf(bytes);
-    expect(own).toMatchObject({ kind: "text", x: 100, y: 200, text: "夜莺", fontSize: 34.8, color: [0.1, 0.2, 0.3] });
+    // 字号 = pointsize × 对象/父组 scale × (4/3) × 1.25 × (场景高/1080)：pointsize 是
+    // 1080p 基准画布上的点，本包 2160 高 ⇒ ×10/3。
+    expect(own).toMatchObject({ kind: "text", x: 100, y: 200, text: "夜莺", color: [0.1, 0.2, 0.3] });
+    expect(own.fontSize).toBeCloseTo(34.8 * (10 / 3), 6);
     expect(own.font).toBe(SCENE_RESOURCE_PREFIX + "fonts/2.ttf");
     expect(builtIn.font).toBe(SCENE_RESOURCE_PREFIX + "we-asset/fonts/Blackout 2 AM.ttf");
     // textinput 的内容键不是可渲染事实，只登记真正影响画面的键。
@@ -1135,7 +1138,7 @@ describe("文字图层（WE TextObject）", () => {
     expect(Object.keys(bundle.resources)).toEqual(["fonts/2.ttf"]);
   });
 
-  it("字号吃自身与中间父组 scale，最外层组件根组只挪位置（真机 3723257973）", () => {
+  it("字号吃整条父链 scale（含最外层组件根组），镜像取绝对值（真机 3723257973）", () => {
     const bytes = textPkg([
       { id: 1, name: "组件", scale: "0.28 0.28 1", origin: "100 200 0" },
       { id: 2, name: "组", parent: 1, scale: "2 2 1", origin: "10 20 0" },
@@ -1143,10 +1146,11 @@ describe("文字图层（WE TextObject）", () => {
       { id: 4, name: "m", parent: 2, font: "fonts/2.ttf", pointsize: 10, scale: "-1 -1 1", origin: "0 0 0", text: "B" },
     ], {}, [fontEntry]);
     const [t, mirrored] = layersOf(bytes);
-    // 真机参考图三处锚点：问候语 32×0.23025×3.125≈23 与帧率 24×0.948≈22.8 字高相当；
-    // 竖排 SUN 与日期字高比≈3.2 ≈ 96.653×0.85 / (140×0.18)。根组 0.28 只缩放位置。
-    expect(t.fontSize).toBeCloseTo(10);
-    expect(mirrored.fontSize).toBeCloseTo(20);
+    // 真机 3723257973 的 WE 参考图（IoU 字形拟合）：时钟 em=40、日期≈18、星期=58 屏幕 px，
+    // 正是整链 scale（0.28×1×0.28038 等）×10/3×2/3 再加音频响应脚本那一刻的 1.13 倍；
+    // 只吃自身+中间父组会把整组放大 1/0.28≈3.57 倍。
+    expect(t.fontSize).toBeCloseTo(10 * 0.28 * (10 / 3));
+    expect(mirrored.fontSize).toBeCloseTo(10 * 0.28 * 2 * (10 / 3));
     // 位置仍折叠整条父链：100 + 10×0.28 + 10×0.56 = 108.4，200 + 20×0.28 + 20×0.56 = 216.8。
     expect(t.x).toBeCloseTo(108.4);
     expect(t.y).toBeCloseTo(216.8);
@@ -1272,6 +1276,88 @@ describe("文字图层（WE TextObject）", () => {
     expect(flat.days).toBeUndefined();
   });
 
+  // 脚本族 D（真机 2587542891 的 Time）：Time and Date 格式串族。WE 按
+  // y → M → d → h → m → s → S → a → W 的顺序各替换第一次出现的连续 token；
+  // 声明处默认 'yyyy/MM/dd hh:mm:ss'，formatInfo 只是给作者看的占位符说明。
+  const formatScript = [
+    "export var scriptProperties = createScriptProperties()",
+    "  .addCombo({ name: 'language', options: [{value:'en-US'},{value:'zh-TW'},{value:'ja-JP'}] })",
+    "  .addCombo({ name: 'week', options: [{value:'narrow'},{value:'short'},{value:'long'}] })",
+    "  .addCheckbox({ name: 'twelve', value: false })",
+    "  .addText({ name: 'format', value: 'yyyy/MM/dd hh:mm:ss' })",
+    "  .addText({ name: 'formatInfo', value: ' - Year\\nyy: 2-digit year' })",
+    "  .finish();",
+    "export function update(value) {",
+    "  const now = new Date();",
+    "  let output = scriptProperties.format;",
+    "  output = output.replace(/y+/, now.getFullYear());",
+    "  output = output.replace(/M+/, now.getMonth() + 1);",
+    "  output = output.replace(/d+/, now.getDate());",
+    "  output = output.replace(/h+/, now.getHours());",
+    "  output = output.replace(/m+/, now.getMinutes());",
+    "  return output;",
+    "}",
+  ].join("\n");
+
+  it("Time and Date 族出 time:'format'：format 取 scene.json 保存的 scriptproperties", () => {
+    const bytes = textPkg([
+      {
+        id: 1, name: "Time", font: "fonts/2.ttf", pointsize: 11.90278, origin: "0 0 0",
+        size: "390 117 0", padding: 32,
+        text: {
+          script: formatScript,
+          // 真机 2587542891：WE 实拍画的是保存快照 "yyyyMMdhh:mm" 的 13 字形态（字形簇宽
+          // 11–12 px、墨高 18 px ⇒ em ≈ 22 屏幕 px），不是脚本声明默认的 19 字斜杠格式。
+          // 编辑器把作者的属性选择写进 scene.json，WE 渲染的就是这份快照；声明默认只在
+          // 属性缺失时兜底，{user:…} 绑定另走用户属性。
+          scriptproperties: { format: "yyyyMMdhh:mm", language: "zh-TW", week: "long", twelve: false },
+          value: "2026/10/28 14:41",
+        },
+      },
+    ], {}, [fontEntry]);
+    const [clock] = layersOf(bytes);
+    expect(clock).toMatchObject({
+      time: "format",
+      format: "yyyyMMdhh:mm",
+      language: "zh-TW",
+      week: "long",
+      twelve: false,
+    });
+    // 文本框 size/padding 只决定对齐与锚点，不截断文字，也不是可渲染开关 ⇒ 不进清单。
+    expect(clock.boxWidth).toBeUndefined();
+    expect(clock.padding).toBeUndefined();
+    // 字高基准同其它文字层：pointsize 是 1080p 画布上的点，2160 高场景 ×10/3。
+    expect(clock.fontSize).toBeCloseTo(11.90278 * (10 / 3));
+  });
+
+  it("format/twelve 被用户属性绑定时按绑定值走，且只有绑定项进面板", () => {
+    const bytes = textPkg([
+      {
+        id: 1, name: "Time", font: "fonts/2.ttf", pointsize: 10, origin: "0 0 0",
+        size: "390 117 0", padding: 32,
+        text: {
+          script: formatScript,
+          scriptproperties: {
+            format: { user: "newproperty1", value: "yyyy-MM-dd" },
+            twelve: { user: "newproperty2", value: true },
+          },
+          value: "x",
+        },
+      },
+    ], {
+      newproperty1: { type: "textinput", value: "MM/dd yyyy" },
+      newproperty2: { type: "checkbox", value: true },
+    }, [fontEntry]);
+    const [clock] = layersOf(bytes);
+    expect(clock.format).toBe("MM/dd yyyy");
+    expect(clock.twelve).toBe(true);
+    // language / week 没绑定 ⇒ 取脚本声明默认（combo 第一项），不登记键；
+    // size/padding 也不是可渲染开关，不得混进面板。
+    expect(clock.language).toBe("en-US");
+    expect(clock.week).toBe("narrow");
+    expect(readScenePackage(bytes).manifest.userBindings).toEqual(["newproperty1", "newproperty2"]);
+  });
+
   it("日期脚本里认不出的 return 项整条跳过，不把半懂的表发出去", () => {
     const bytes = textPkg([
       { id: 1, name: "ok", font: "fonts/2.ttf", pointsize: 10, origin: "0 0 0", text: "正常" },
@@ -1392,9 +1478,10 @@ describe("文字图层（WE TextObject）", () => {
       time: "greeting",
       labels: ["Before dawn", "At night", "Morning", "Morning", "Noon", "Afternoon", "Evening", "Night"],
       thresholds: [2, 6, 8, 11, 13, 17, 20],
-      // 字号吃中间父组的 3.125（参考图里与帧率同高），不吃最外层组件的 0.28。
-      fontSize: 32 * 0.23025 * 3.125,
     });
+    // 字号吃整条父链（中间父组 3.125 × 最外层组件 0.28），再乘 1080p 基准画布的
+    // 4/3 × 1.25 × 2160/1080 = 10/3；根组必须进来，依据见 resolveObjectTransform。
+    expect(layers[0].fontSize).toBeCloseTo(32 * 0.23025 * 3.125 * 0.28 * (10 / 3), 6);
     // 隐藏的中文变体只贡献「它为什么看不见」那个键；标签/脚本属性都不是可渲染事实。
     expect(bundle.manifest.userBindings).toEqual(["newproperty54", "newproperty59"]);
   });
@@ -1476,6 +1563,32 @@ describe("WE 粒子系统（2D 通道）", () => {
     operator: [{ name: "movement", drag: 0 }, { name: "alphafade", fadeintime: 0.1, fadeouttime: 0.1 }],
     renderer: [{ name: "rope", length: 3 }],
   };
+  // 逐字段抄真机 2587542891 的两份雨：主雨用 3000 px/s 的竖直速度把每个粒子拉成
+  // 0.5 s 的雨丝（spritetrail 的 length = 0.005、maxlength = 100），玻璃雨不写 length。
+  const rainPreset = {
+    maxcount: 512,
+    material: "rain.material.json",
+    emitter: [{ name: "sphererandom", rate: 400, origin: "0 768 0", distancemin: 0, distancemax: 1024, directions: "1 0.25 1" }],
+    initializer: [
+      { name: "lifetimerandom", min: 0.5, max: 0.5 },
+      { name: "sizerandom", min: 1, max: 5 },
+      { name: "velocityrandom", min: "0 -3000 0", max: "0 -3000 0" },
+      { name: "alpharandom", min: 0.05, max: 0.3 },
+    ],
+    operator: [{ name: "movement" }],
+    renderer: [{ name: "spritetrail", length: 0.005, maxlength: 100 }],
+  };
+  const glassPreset = {
+    maxcount: 100,
+    material: "rain.material.json",
+    emitter: [{ name: "boxrandom", rate: 50, distancemax: "1000 1000 0" }],
+    initializer: [
+      { name: "lifetimerandom", min: 1, max: 3 },
+      { name: "velocityrandom", min: "0 -300 0", max: "0 -300 0" },
+    ],
+    operator: [{ name: "movement" }],
+    renderer: [{ name: "spritetrail", maxlength: 6 }],
+  };
   const particlePkg = (
     objects: Array<Record<string, unknown>>,
     properties: Record<string, unknown> = {},
@@ -1501,6 +1614,11 @@ describe("WE 粒子系统（2D 通道）", () => {
     jsonEntry("trail.json", ropePreset),
     jsonEntry("trail.material.json", {
       passes: [{ blending: "additive", shader: "genericparticle", textures: ["particle/meteor"] }],
+    }),
+    jsonEntry("rain.json", rainPreset),
+    jsonEntry("glass.json", glassPreset),
+    jsonEntry("rain.material.json", {
+      passes: [{ blending: "additive", shader: "genericparticle", textures: ["particle/drop"] }],
     }),
     { path: "materials/bg.tex", bytes: new Uint8Array(encodePng(4, 4, new Uint8Array(4 * 4 * 4))) },
     { path: "bird/birds_128x120x16.tex", bytes: new Uint8Array(encodePng(4, 4, new Uint8Array(4 * 4 * 4))) },
@@ -1584,6 +1702,101 @@ describe("WE 粒子系统（2D 通道）", () => {
     expect(systemsOf(bytes)).toEqual([]);
     expect(readScenePackage(bytes).manifest.userBindings).toEqual(["hrbigbfog"]);
     expect(systemsOf(bytes, { hrbigbfog: true }).map((s) => s.name)).toEqual(["雾 1"]);
+  });
+
+  it("真实机 2587542891 的两份雨：spritetrail 透传 length/maxlength，缺省 length 取原厂 0.005", () => {
+    const bytes = particlePkg([
+      { id: 8, name: "rain", particle: "rain.json" },
+      { id: 9, name: "glass", particle: "glass.json" },
+    ]);
+    const [rain, glass] = systemsOf(bytes);
+    expect(rain).toMatchObject({
+      name: "rain",
+      renderer: "spritetrail",
+      trailLength: 0.005,
+      trailMax: 100,
+      maxCount: 512,
+      rate: 400,
+      lifeMin: 0.5,
+      lifeMax: 0.5,
+      sizeMin: 1,
+      sizeMax: 5,
+      velMin: [0, -3000, 0],
+      velMax: [0, -3000, 0],
+      alphaMin: 0.05,
+      alphaMax: 0.3,
+      distMin: 0,
+      distMax: 1024,
+      origin: [0, 768, 0],
+    });
+    // 包外内置贴图走 we-asset 通道：雨丝贴图就是 WE 自带的 32×128 drop.tex。
+    expect(rain.texUrl).toBe(SCENE_RESOURCE_PREFIX + "we-asset/materials/particle/drop.tex");
+    // 没写 length ⇒ WE 原厂 0.005（300 px/s 的玻璃雨拉 0.3 倍尺寸）；maxlength 6 封顶。
+    expect(glass).toMatchObject({ renderer: "spritetrail", trailLength: 0.005, trailMax: 6 });
+    // 普通精灵不带拖尾键，播放器走原分支（否则鸟群也会被按速度拉伸）。
+    const [bird] = systemsOf(particlePkg([{ id: 2, name: "day2", particle: "birds.json" }]));
+    expect(bird.renderer).toBe("sprite");
+    expect(bird.trailLength).toBeUndefined();
+    expect(bird.trailMax).toBeUndefined();
+  });
+
+  it("REFRACT 材质带法线贴图 / overbright / sizechange，粒子与图层都带场景对象序号", () => {
+    const glassRefract = {
+      ...glassPreset,
+      material: "glass.material.json",
+      operator: [
+        { name: "movement", drag: 0.05, gravity: "0 -400 0" },
+        { name: "alphafade" },
+        { name: "sizechange", startvalue: 0.1, endvalue: 1 },
+      ],
+    };
+    const bytes = buildPkg([
+      jsonEntry("project.json", { type: "scene", file: "scene.json", general: { properties: {} } }),
+      jsonEntry("scene.json", {
+        general: { orthogonalprojection: { width: 1920, height: 1080 } },
+        objects: [
+          { name: "bg", image: "bg.image.json", origin: "960 540 0", size: "1920 1080 0" },
+          { id: 8, name: "glass", particle: "glass.json" },
+          { id: 9, name: "rain", particle: "rain.json" },
+          { name: "frame", image: "bg.image.json", origin: "960 540 0", size: "1920 1080 0" },
+        ],
+      }),
+      jsonEntry("bg.image.json", { material: "bg.material.json", width: 1920, height: 1080 }),
+      jsonEntry("bg.material.json", { passes: [{ shader: "genericimage2", textures: ["bg"] }] }),
+      jsonEntry("glass.json", glassRefract),
+      jsonEntry("glass.material.json", {
+        passes: [{
+          blending: "translucent",
+          combos: { REFRACT: 1 },
+          constantshadervalues: { ui_editor_properties_overbright: 1 },
+          shader: "genericparticle",
+          textures: ["particle/drop", "particle/drop_normal"],
+        }],
+      }),
+      jsonEntry("rain.json", rainPreset),
+      jsonEntry("rain.material.json", {
+        passes: [{ blending: "additive", shader: "genericparticle", textures: ["particle/drop"] }],
+      }),
+      { path: "materials/bg.tex", bytes: new Uint8Array(encodePng(4, 4, new Uint8Array(4 * 4 * 4))) },
+    ]);
+    const bundle = readScenePackage(bytes);
+    const manifest = bundle.manifest as { particles3d: System[]; layers: System[] };
+    const [glass, rain] = manifest.particles3d;
+    expect(glass).toMatchObject({
+      refract: true,
+      // 法线贴图不在包里 ⇒ 与反照率同一条 we-asset 通道（主线程去 WE 安装目录取字节）。
+      normalTexUrl: SCENE_RESOURCE_PREFIX + "we-asset/materials/particle/drop_normal.tex",
+      overbright: 1,
+      sizeGrow: [0.1, 1],
+      order: 1,
+    });
+    // 非 REFRACT 的雨只带序号：播放器不得把它当折射画（否则雨丝整批消失）。
+    expect(rain.refract).toBeUndefined();
+    expect(rain.normalTexUrl).toBeUndefined();
+    expect(rain.order).toBe(2);
+    // 图层序号 = scene.objects 序号（bg=0、frame=3），播放器据此把玻璃雨压在帧层之下。
+    expect(manifest.layers.map((l) => l.order)).toEqual([0, 3]);
+    expect(bundle.paths).toContain("we-asset/materials/particle/drop_normal.tex");
   });
 
   it("没实现的渲染器（rope / ropetrail）整条不出现，连可见性键都不交", () => {

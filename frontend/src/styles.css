@@ -8399,6 +8399,13 @@ html[data-theme="liquid-glass"] .app-backdrop-scrim {
     rgba(2, 6, 16, var(--lg-scrim, 0.25));
 }
 
+/* 实时场景就绪＝作品原样输出，不叠暗化：2026-10-28 用户拿 WE 桌面截图对照，
+   应用里整幅被压到原图 0.5–0.7 倍，而同场景播放器独跑与原图逐区域比 1.00。
+   照片/视频壁纸仍走上面的「暗化」滑杆——它们的阅读面兜底不变。 */
+html[data-theme="liquid-glass"] .app-backdrop.has-scene .app-backdrop-scrim {
+  background: none;
+}
+
 @keyframes lg-aurora-drift {
   from { transform: translate3d(-3%, -2%, 0) scale(1.02) rotate(-2deg); }
   to { transform: translate3d(4%, 3%, 0) scale(1.12) rotate(3deg); }

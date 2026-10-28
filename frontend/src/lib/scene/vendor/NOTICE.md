@@ -19,11 +19,12 @@ Demiurge 的 scene 壁纸实时渲染用的两个文件是从第三方 MIT 插�
 - `lib/scene-player.js` — `df8d4eb0f6c6f489a16a46683591a8968f01fef7140b96c6bbff2edf8a057a36`
 
 本仓库内拷贝的 SHA-256（当前改动后，含 Demiurge 视差 / puppet 蒙皮动画 / 用户预设 /
-文字与时钟 / 日期脚本模板 / 问候语与帧率脚本 / 字号自身+中间父组 scale / 2D 粒子 / 云层流动 /
-视频纹理 / 视频纹理逐帧重采 补丁）：
+文字与时钟 / 日期脚本模板 / 问候语与帧率脚本 / 字号整条父链 scale（含根组）/ 2D 粒子 / 云层流动 /
+视频纹理 / 视频纹理逐帧重采 / 雨丝 spritetrail / 格式串时钟（保存态 scriptproperties、
+不按框宽截断、字号 ×1.25）/ 场景对象顺序（order）/ REFRACT 折射粒子补丁）：
 
-- `we-scene-manifest.js` — `b76f3f7ea2389b6adccfa00e886e08c8085f91fc6d934ee49e6a9e2c388a653e`
-- `we-scene-player-html.js` — `c9bbd319ef02da77693e461fe0e23e2e776169db7d7bd77e5e0d2189afeabb5e`
+- `we-scene-manifest.js` — `dda2d3126acb56d61c258ce201aa19567450a3e496c45c16ca76c9b86e272e13`
+- `we-scene-player-html.js` — `04fb3941a0378526b0a45c371780cefc5882b634d1fa35e6a2cc3a69e5dcf18a`
 
 ## 改动清单（全部改动，逐字）
 
@@ -144,9 +145,9 @@ Demiurge 的 scene 壁纸实时渲染用的两个文件是从第三方 MIT 插�
 8. **Demiurge 改动⑧：WE 粒子系统发射为 2D 精灵。**（2026-10-24，同作品的雾 / 光束 / 鸟群）
    发射循环排在 `is3D` 分支**之外**——纯 2D 壁纸也要有雾与光束，藏在 3D 遍历里它们永远不出现。
 
-   - **只模拟渲染器为 `sprite` 的系统**；`rope` / `ropetrail`（鼠标尾迹一族）要逐帧连线 +
+   - **只模拟渲染器为 `sprite` / `spritetrail` 的系统**；`rope` / `ropetrail`（鼠标尾迹一族）要逐帧连线 +
      `eventfollow` 子系统，本实现不跑 ⇒ 判渲染器必须排在判可见性**之前**，否则「尾迹当前是关的」
-     会把 `shu` 当成生效键交出去。
+     会把 `shu` 当成生效键交出去。（`spritetrail` 见第 15 项）
    - 混合模式读材质：`additive`（雾 / 光束）与 `translucent`（鸟 / 星星）两条通道。
    - 参数按 WE 的 initializer / operator 名字取：`lifetimerandom` `sizerandom` `velocityrandom`
      `colorrandom` `alpharandom` `rotationrandom`，算子 `alphafade` `movement`（重力）
@@ -214,17 +215,19 @@ Demiurge 的 scene 壁纸实时渲染用的两个文件是从第三方 MIT 插�
       竖排 + 空行分隔 + 逐字年份、只输出星期名；外加「脚本返回未知表 ⇒ 该层不发射」的
       fail-closed 用例。
 
-12. **Demiurge 改动⑫：文字字号吃自身与中间父组 scale，不吃最外层组件根组。**（2026-10-25，
-    两轮修正）第一轮把父链折叠后的 `sizeMul` 全乘进 `fontSize`，日期被放大、星期缩成小 "S"；
-    第二轮改成只吃对象自身 scale，结果问候语只剩 7.37、竖排 SUN 比日期大 3.8 倍。最终按 WE
-    参考图逐字测量定规则：**对象自身 + 中间父组的 scale 连乘，最外层「组件」根组的 scale 只
-    折叠进 origin**（根组是整块组件的摆放缩放，字形不吃）。真机 `3723257973` 五处锚点
-    （应用截图与 WE 参考图按坐标距离归一后逐项对字高）：问候语 32×0.23025×3.125=**23.025**
-    与帧率 24×0.948=**22.752** 同高；竖排 SUN 96.653×0.85=**82.155** 与日期 140×0.18=**25.2**
-    的比≈3.26（参考图 3.2）；时钟 202.26×0.28038=**56.71** 与日期比 2.25（参考图 2.24）。
-    `resolveObjectTransform` 额外回传 `innerScale`（自身到中间父组的乘积），
-    `sizeMul = (|innerScale.x| + |innerScale.y|) / 2`（镜像取绝对值），
-    `fontSize = pointsize × sizeMul`；origin 仍折叠整条父链。
+12. **Demiurge 改动⑫：文字字号吃整条父链 scale（含最外层组件根组）。**（2026-10-25 初版，
+    2026-10-28 定版）初版按「比例对得上」把最外层「组件」根组的 scale 排除在字形之外、只折叠
+    进 origin，理由是五处锚点的相对字高比例吻合（问候语 32×0.23025×3.125=23.025 与帧率
+    24×0.948=22.752 同高；SUN 96.653×0.85=82.155 是日期 140×0.18=25.2 的 3.26 倍；时钟
+    202.26×0.28038=56.71 是日期的 2.25 倍）。但比例对不代表标尺对：**根组 0.28 一样缩字号**，
+    排除它会让整组文字放大 1/0.28≈3.57 倍（应用内实测五段文字互相重叠糊成一团，见
+    `_tmp/wallpaper-text-3723/`）。2026-10-28 用 IoU 字形拟合对 WE 原生 2560×1440 参考图
+    （`屏幕截图 2026-10-25 101059.png`）定标：时钟 em=40、日期 em≈18、星期 em=58 屏幕像素，
+    与「整链 scale × (4/3) × 1.25 × 2160/1080 × 2/3」预测的 35.3 / 15.7 / 51.1 只差同一个
+    1.13 倍——那是 WE 音频响应脚本（clock/date/day 存 0.9–1.1）在截图瞬间的取值，三者的
+    相对比例与整链模型相差 <1%。故 `resolveObjectTransform` **不再回传 `innerScale`**，
+    `sizeMul = (|transform.scale.x| + |transform.scale.y|) / 2`（镜像取绝对值，整链折叠），
+    `fontSize = pointsize × sizeMul × (4/3) × (场景高/1080) × 1.25`。
 
 13. **Demiurge 改动⑬：问候语与帧率脚本改为静态提取。**（2026-10-25，真机 `3723257973`
     左上角 "Morning" 与 "fps：60"）这两层此前落进 `textSpecOf` 的「认不出 ⇒ 不出层」分支，
@@ -245,18 +248,67 @@ Demiurge 的 scene 壁纸实时渲染用的两个文件是从第三方 MIT 插�
     - 顺序：`textSpecOf` 先试 FPS、再试问候语，最后才走时钟/日期惯用法——FPS 脚本里也有
       `new Date()`，不先拦住会被误判成时钟。
 
-14. 其余逻辑（PKGV 解析、LZ4、TEX/DXT、`extractSceneResource` 等）原样。
+14. **Demiurge 改动⑭：`spritetrail` 粒子（雨丝）放行，拖尾参数原样带出。**（2026-10-28，
+    真机 `2587542891` 的雨：用户在 WE 里看到满屏动态雨丝，应用里只剩像雪的静态点）
+    渲染器白名单从 `sprite` 扩到 `sprite | spritetrail`；判渲染器的位置不变（仍在可见性之前）。
+    清单多两个字段（只有 `spritetrail` 才有；`sprite` 不带键，播放器走原分支）：
+
+    - `trailLength` = 预设 `renderer[0].length`，缺省 **0.005**（WE 原厂值）；
+    - `trailMax` = 预设 `renderer[0].maxlength`，缺省 **0**（WE 语义：0＝不封顶）。
+
+    真机两份雨：`rainperspective.json` 是 `0.005 / 100`（3000 px/s ⇒ 每颗粒子拉 15 倍尺寸），
+    玻璃那张 `rain_on_the_glass_copy1.json` 只写 `maxlength: 6`、length 缺省。
+
+15. **Demiurge 改动⑮：文字字号补「1080p 基准画布 + 120 DPI」系数 + Time and Date 格式串族。**
+    （2026-10-28，真机 `2587542891` 的时钟：应用里比 WE 小 2.67 倍，且完全不显示；
+    同日二修：基准再乘 1.25、撤销框宽截断，见下）
+
+    - **字号基准**：`fontSize = pointsize × sizeMul × (4/3) × (场景高/1080) × 1.25`（`sizeMul`
+      吃整条父链含根组，见第 12 项）。pointsize
+      不是场景像素，而是「1080p 基准画布上按 96 DPI（1 pt = 4/3 px）栅格化的点」，WE 再整体
+      缩放到场景高度；实拍还要再乘 1.25（WE 的时间文字按 120 DPI 档出字）。三则证据
+      （2587542891，pointsize 10，画布 5000×2571，用户 2560×1440 cover 0.5602）：
+      ① 字形墨高 18 px、墨簇宽 11–12 px ⇒ em ≈ 22 屏幕 px ÷ 0.5602 ≈ 39 场景单位
+      = 10 × (2571/1080) × (4/3) × 1.25；少了 1.25 只有 17.8 屏幕 px，量不出这么高的墨；
+      ② 该对象的格式串 13 字 × 0.625 em × 39 ≈ 325，正好等于文本框内容宽 390 − 2×32 = 326，
+      实拍里文字也是左右顶满框——两处独立量出来的 em 一致；③ 高通滤波 + 模板匹配在
+      (em 21.8–22.5, x≈1025) 得分最高，16/17/19 字变体都更低（无意义起点 x≈987）。
+    - **格式串族**（Time and Date）：`scriptProperties.format` 里写 `y/M/d/h/m/s/S/W/a` 占位符，
+      `update()` 逐个 `replace(/y+/, …)`。`textSpecOf` 在官方 Clock 档位**之前**认这一族
+      （它也含 `getHours/getMinutes`），发 `{time:'format', format, language, week, twelve}`。
+      **format 取 scene.json 保存的 scriptproperties 快照，不取脚本声明的默认值**：WE 画的是
+      编辑器里保存的那份（本包 `yyyyMMdhh:mm` 13 字、无斜杠空格），脚本 `addText(...).value`
+      的 `yyyy/MM/dd hh:mm:ss` 只在属性缺席时兜底——实拍是 13 字 `2026102814:41`，不是 19 字。
+      language/week/twelve 同一规则：保存值优先，缺席才取声明第一项 / 复选框默认。
+    - **不截断**：`size` / `padding` 只管对齐与锚点，WE 不按框宽裁字（limit-width / 省略号是
+      编辑器可选项，本包没开）。清单不再带 `boxWidth` / `padding`，播放器也不再有
+      `clipLineToBox`；作者写了 `\n` 的多行文本仍原样换行。
+
+16. 其余逻辑（PKGV 解析、LZ4、TEX/DXT、`extractSceneResource` 等）原样。
+
+17. **Demiurge 改动⑯：场景对象顺序 + REFRACT 材质字段。**（2026-10-28，与播放器第 17 项配对）
+
+    - 粒子与图层两侧都带 `order`（= `scene.objects` 序号）：WE 按对象顺序把粒子与图层
+      **交错合成**（EVA 的玻璃雨在窗框与人物之下），没有这个字段播放器只能把粒子全画在最上层。
+      粒子在 `for (let objIndex = 0; …)` 的循环里 `order: objIndex`；图层的 5 个 push 点
+      （文字 / 无图反射 / puppet 网格 / 带图反射 / 标准层）同样带 `order`。
+    - 材质 pass0 的 `combos.REFRACT === 1` ⇒ 系统带 `refract: true`、`normalTexUrl`
+      （`textures[1]`：包内同名纹理优先，包外按 `we-asset/materials/…` 解析）与
+      `overbright`（`constantshadervalues.ui_editor_properties_overbright`，缺省 1）。
+      缺 `normalTexUrl` 的系统播放器整条跳过——绝不退回「直接画反照率」。
+    - `operator.sizechange` ⇒ `sizeGrow: [startvalue, endvalue]`（生命期内插值）。
 
 **已知限制（本刀范围）**：蒙皮权重固定 4 骨骼；附件跟随只走「最近祖先」的刚性子树，多级
 puppet 嵌套未实现；脚本引擎仍不执行（`scripted:true` 场景渲染静态结构 + `animationlayers`，
-但点击切姿势、`scriptproperties` 的动态求值不跑）。文字只认四族固定形状：§7 的时钟惯用法、
-§11 的日期模板族、本项的问候语阈值表与帧率计数；**其他形状的任意 `update()` 脚本**仍整层跳过
-（宁可少画，不猜内容）；
-`rope` / `ropetrail` 粒子不模拟（⇒ 鼠标尾迹一族的键不进面板）；音频感应属性不接（面板同样不摆）；
+但点击切姿势、`scriptproperties` 的动态求值不跑）。文字只认五族固定形状：§7 的时钟惯用法、
+§11 的日期模板族、§13 的问候语阈值表与帧率计数、§15 的 Time and Date 格式串；**其他形状的
+任意 `update()` 脚本**仍整层跳过（宁可少画，不猜内容）；
+`rope` / `ropetrail` 粒子不模拟（⇒ 鼠标尾迹一族的键不进面板；`spritetrail` 已支持，见 §14）；
+音频感应属性不接（面板同样不摆）；
 `effects/waterwaves` 与 `effects/foliagesway` 未实现 ⇒ 角色的「飘动效果」`bigbdriftingeffect`
 仍是未生效键，不进面板。
 
-除上述 14 项外**没有任何**逻辑改动。
+除上述 17 项外**没有任何**逻辑改动。
 
 ### `we-scene-player-html.js`（上游 `lib/scene-player.js`）
 
@@ -429,7 +481,47 @@ puppet 嵌套未实现；脚本引擎仍不执行（`scripted:true` 场景渲染
     修复后同一壳同一作品复验：`videoUploadsPerSec 15` 对 `rafPerSec 22.3`（媒体 30fps、rAF 约 22fps，
     比值 ≈0.5 是预期上限），且把宿主窗口节流到 1Hz 时纹理上传仍继续。
 
-除上述 14 项外模板字符串本体未改（`<script>` 数量与垫片插入点保持不变）。
+15. **Demiurge 改动⑭（播放器侧）：`spritetrail` 按速度方向拉条带。**（2026-10-28，与清单第 14 项配对）
+    2D 粒子绘制循环里每个粒子比普通精灵多一步几何（逐字照 WE 自带 `genericparticle` 的
+    `ComputeParticleTrailTangents` / `ComputeParticlePosition`）：
+
+    - `stretch = clamp(|v| × trailLength, 0, trailMax || ∞)`（`trailMax = 0` 表示不封顶，
+      不得当成「长度 0」）；
+    - 长轴沿速度：`h = size × sizeScale.y × textureRatio × stretch`，`rot = atan2(vy, vx) + π/2`；
+    - **四边形仍以粒子位置为中心**（WE 是 `center ± size×up×textureRatio×(v−0.5)`），不是
+      「头在前、尾在后」的单侧延伸；
+    - 宽度仍是 `size × sizeScale.x`，混合模式、染色、序列帧、淡入淡出与 sprite 共用同一条路径。
+
+    雨丝贴图是 WE 自带的 32×128 `particle/drop.tex`（走 `we-asset` 通道），竖直纹理 +
+    速度对齐 ⇒ 竖直雨点被拉成随速度倾斜的雨丝。
+
+16. **Demiurge 改动⑮（播放器侧）：格式串时钟。**（2026-10-28，与清单第 15 项配对）
+
+    - `textLineOf` 开头新增 `time === 'format'` 分支 → `formatTextOf(layer, d)`：按 WE 脚本的
+      替换顺序（y → M → d → h → m → s → S → a → W，每个 token 只替换**第一次**出现的连续 run）
+      填值；两位 token 补零、`yy` 取年份后两位、超过两位的 run 原样退回占位符、`W` 按
+      `WEEKDAY_TABLE`（en-US / zh-TW / ja-JP × narrow/short/long）、`a` 按 `AMPM_TABLE`。
+      **12 小时制的 WE 怪癖逐字照抄**：`hours > 12 ? hours − 12 : hours`（12 点整仍显示 12、
+      0 点不回绕），AM/PM 也以 12 点为界。
+    - `drawTextLayer` 直接光栅整行：WE 不按文本框裁字，原先的 `clipLineToBox` 已撤销。
+    - 字号的 2× 超采样不变（`emPx = Math.round(fontSize × TEXT_SUPERSAMPLE)`）。
+
+17. **Demiurge 改动⑯（播放器侧）：REFRACT 折射 + 场景顺序交错。**（2026-10-28，与清单第 17 项配对）
+
+    - 2D 粒子从「全部图层之后一次画完」改为**按 `order` 与图层交错**：pass 2 图层循环开头
+      `flushWeBefore(layer.order)`（没有 `order` 的层不触发），循环结束后 `flushWeBefore(Infinity)`
+      收尾；预热/推进循环移到 pass 2 之前（模拟与绘制解耦，交错不会重复推进）。
+    - 新增 `fsParticleRefract` / `progParticleRefract`，逐字移植 WE `genericparticle.frag` 的
+      REFRACT 分支：`normal = DecompressNormalWithMask`（x = 贴图 alpha、y = green、mask = red），
+      `offset = (right×n.x + up×n.y) × 0.05 × mask × v_Color.a`（GL 下 y 再取反），
+      `color.rgb = albedo.rgb × v_Color.rgb × 背景(screenUv+offset).rgb × overbright`。
+      背景用 `copyTexImage2D` 抓当前画布快照（**每个粒子批次一张**：批次之间画过别的图层，
+      旧快照会让扭曲采样到过期画面）。`right/up` 逐粒子按 WE 的 `ComputeParticleTangents` /
+      `ComputeParticleTrailTangents` 取（拖尾：right ⟂ v、up ∥ v；精灵：旋转后的两轴）。
+    - `sizeGrow` 在粒子生命期内插值 size。
+    - REFRACT 系统缺法线贴图 ⇒ 整条跳过（白底反照率直接画出来就是盖住人物的白色长条）。
+
+除上述 17 项外模板字符串本体未改（`<script>` 数量与垫片插入点保持不变）。
 
 播放器文档用 `blob:` URL 装载而**不是 `srcdoc`**：`about:srcdoc` 文档里
 `window.location.origin` 读到的是字符串 `'null'`，而上游播放器两头都拿它做校验
@@ -448,14 +540,19 @@ puppet 嵌套未实现；脚本引擎仍不执行（`scripted:true` 场景渲染
   蒙皮/动画搜 `MDL_FLAG_SKIN_BLEND`、`buildPuppetPayload`、`animationOf`、`followOf`，
   视差开关搜 `cameraParallax:`，用户预设搜 `noteBinding` / `manifest.userBindings`。
   文字补丁搜 `textSpecOf` / `textLayerOf` / `canvasOriginValue` / `scanIfBlocks` / `condHolds` /
-  `dateFormatOf`（日期模板求值），字号规则搜 `resolveObjectTransform` 回传的 `innerScale`
-  （**不要**把最外层根组 scale 折进字形），月名/日号表搜 `scriptArray` 与 `varValueOf`，
-  问候语搜 `greetingSpecOf`，帧率搜 `fpsSpecOf`，以及主循环里
+  `dateFormatOf`（日期模板求值），字号规则搜 `resolveObjectTransform` 回传的 `scale`
+  与 `const sizeScale = transform.scale`（**整条父链含最外层根组**，别再用 `innerScale`）
+  / `const emScale = (height / 1080) * (4 / 3) * 1.25`，
+  月名/日号表搜 `scriptArray` 与 `varValueOf`，
+  问候语搜 `greetingSpecOf`，帧率搜 `fpsSpecOf`，格式串时钟搜 `formatSpecOf` / `addPropBody`
+  / `spValue`（**保存态 scriptproperties 优先**；`boxWidth` / `padding` 已撤下，别再带出），
+  以及主循环里
   `typeof obj.text !== 'undefined' && typeof obj.image !== 'string'` 那个分支（**必须排在**
   `!obj.image ⇒ continue` 与图像名黑名单之前）；内置资产通道搜 `WE_BUILT_IN_PREFIX` /
   `builtInAssetKeys`；贴图格式搜 `TexFormat.RG88` 与 `TEXS000([1-3])`。
   粒子补丁搜 `if (typeof obj.particle !== 'string')`（循环排在 `is3D` 分支之外）与
-  `rendererName !== 'sprite'`；水flow 效果搜 `waterflowOf`（紧跟 `hasReflectionEffect`）、
+  `rendererName !== 'sprite' && rendererName !== 'spritetrail'`（白名单两档）以及
+  `trailLength:` / `trailMax:`（缺省 0.005 / 0）；水flow 效果搜 `waterflowOf`（紧跟 `hasReflectionEffect`）、
   描述符里的 `phaseUrl` / `phasescale`，与 push 里的 `flow: layerFlow || undefined`
   （**这道发射没有 alpha 闸门**）。
 - player：搜 `function drawCloudsBgLayer(` 插辅助函数；四处绘制原本搜
@@ -466,9 +563,13 @@ puppet 嵌套未实现；脚本引擎仍不执行（`scripted:true` 场景渲染
   与两处 `if (layer.mesh)`（FBO 循环与主循环各一，主循环那处必须在 `progBasic` 标准分支之前）。
   文字补丁搜 `function drawTextLayer(`、`function textBitmapOf(`、`function textLineOf(`、
   `fontBoundingBoxAscent`（行距锚点）、`let wallClock`；问候语搜 `layer.time === 'greeting'`，
+  格式串时钟搜 `function formatTextOf(` / `WEEKDAY_TABLE` / `AMPM_TABLE`（`clipLineToBox` 已撤销：
+  WE 不按框宽截断，`drawTextLayer` 直接光栅整行）；
   帧率搜 `function fpsTextOf(` 与 `const fpsState`（暂停恢复处的 `fpsState.clear()` 不能删：那是
   「冻结空档不被算进平均」的唯一防线）；
-  粒子补丁搜 `function updateParticles2d(`、`const particles2dState`、`window.__weParticles`；
+  粒子补丁搜 `function updateParticles2d(`、`const particles2dState`、`window.__weParticles`、
+  `sys.renderer === 'spritetrail'`（`stretch` 的 `trailMax > 0 ? trailMax : Infinity` 不能改成
+  `|| 某默认值`：0 在 WE 语义里是「不封顶」）；
   waterflow 分支搜 `if (layer.flow && layer.flow.enabled !== false)`（在主循环 `// Standard Layer`
   之前）、`const progWaterflow`、`const fsWaterflow`、`function whiteTex(`，分支里的
   `flowAmp = (layer.flow.strength || 1) / Math.max(1, flowContent.width)` **不能删**（那是像素→UV 的
@@ -476,7 +577,12 @@ puppet 嵌套未实现；脚本引擎仍不执行（`scripted:true` 场景渲染
   `fract(`（NPOT 贴图用 REPEAT 会整张失效）；热换清单搜 `function swapSceneManifest(` 与 `manifestOverridden`；
   视频泵搜 `function pumpVideoTextures(` 与 `renderFrame` 里的 `pumpVideoTextures(now)`（**必须排在
   `if (!sceneData)` 闸门之后、渲染循环内**，只在 `loadTexture` 里挂 rVFC 会定格）、
-  `videoTextures.add(record)` / `videoTextures.delete(record)` 与 `lastVideoPlayRetry`。
+  `videoTextures.add(record)` / `videoTextures.delete(record)` 与 `lastVideoPlayRetry`；
+  折射粒子与交错绘制搜 `const fsParticleRefract`、`function snapshotBackground(`、
+  `function drawWeSystem(`、`function flushWeBefore(` 与 pass 2 循环里的 `flushWeBefore(layer.order)`
+  （**两个 `flushWeBefore` 调用点缺一个都会让粒子回到「全画在最上层」或整批丢失**）；
+  清单侧搜 `combos.REFRACT === 1`、`sizeGrow`、`order: objIndex`（**粒子与图层两侧的 `order`
+  必须都取 `scene.objects` 序号**，任一侧换成数组下标就会错位）。
 
 整份替换上游文件后必须重新施加以上补丁，并更新本文件里的 SHA-256。
 
@@ -511,9 +617,15 @@ puppet 嵌套未实现；脚本引擎仍不执行（`scripted:true` 场景渲染
 - **puppet 已支持蒙皮与 `animationlayers`**：MDLV 网格 + MDAT 骨骼附件 + 4 骨骼线性混合蒙皮 +
   MDLA 关键帧剪辑，基础姿势 + additive 循环层（眨眼/呼吸/重心）自动播，附件子树（头发）跟随骨骼
   刚性旋转；**非循环单发 clip 视为点击触发，不自动播**。
-- **文字与 WE 粒子都已接入**（2026-10-24）：时钟/日期走§改动⑦、sprite 粒子走§改动⑧。
-  真机样张 `3346715292`：角色身体/裙摆/头发拼合且随呼吸摆动、头发跟随头部，时钟与日期文字按
-  真实墙钟走，雾/光束/鸟群三套 sprite 系统真发射。
+- **文字与 WE 粒子都已接入**（2026-10-24）：时钟/日期走§改动⑦、sprite 粒子走§改动⑧，
+  `spritetrail` 雨丝走§改动⑭。真机样张 `3346715292`：角色身体/裙摆/头发拼合且随呼吸摆动、
+  头发跟随头部，时钟与日期文字按真实墙钟走，雾/光束/鸟群三套 sprite 系统真发射。
+- **雨丝与格式串时钟已接入**（2026-10-28，真机 `2587542891` EVA 绫波丽 4K 雨景）：
+  12 份 `spritetrail` 雨系统按速度拉条带（此前被渲染器白名单丢掉，用户看到的「像雪、只有少数
+  在动」＝7 份 sprite 雨雾还在、12 份雨丝全没了）；右下时钟按 Time and Date 族画场景保存的
+  13 字格式 `2026102814:41`（WE 画的就是保存态、且不按框宽裁字），字号补上 1080p 基准 ×1.25
+  后与 WE 同大。雨丝贴图 `particle/drop.tex` 与时钟字体 `CursedTimerUlil-Aznm.ttf` 都来自 WE
+  安装目录，走 `we-asset` 通道（未装 WE ⇒ 对应键如实撤掉，不摆无效开关）。
 - **日期脚本的三族写法已覆盖**（2026-10-25）：横排月名 + 分隔符、竖排空行 + 逐字年份、只输出
   星期名（见§改动⑪/⑫）。真机样张 `3723257973`：日期列 `2 5 / O C T / 2 0 2 6`、大号竖排
   `S U N`、右下时钟，字号层级 82.155 / 56.71 / 25.2 与 WE 参考一致；e2e
