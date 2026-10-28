@@ -36,6 +36,8 @@ __pycache__/
 *.ckpt
 *.pt
 *.bin
+# 例外：桌面壳自检夹具（38 B，updater 签名链固定载荷），include_bytes! 必须在源码树里
+!desktop/tauri/testdata/updater-fixture.bin
 *.gguf
 chroma/
 *.chroma

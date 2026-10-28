@@ -1898,3 +1898,11 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
    lint-imports、mypy（`@mypy_files.txt` 必须带引号）、硬编码、wire/manifest 双合同、pytest 全量）
    与 `quality-frontend`（`ubuntu-24.04`，npm ci/test/build + playwright e2e）；`build.needs` 同步两段。
    wire/manifest 校验随之从「前端步骤蹭后端依赖」迁到后端 job，与 ci.yml 落点一致。
+   ⑧ **两处「只在 Linux 检出/从未进过 CI」的红**：① `vendorNotice.test.ts` 按**原始字节**锁 vendor 哈希，
+   NOTICE 登记的是 CRLF 形态，而 blob 是 LF ⇒ 只有 Windows（`core.autocrlf=true`）检出能过。现用
+   `.gitattributes` 对两个 vendor 文件钉 `text eol=crlf`，任何平台检出都是同一份字节（实测 CRLF 模拟哈希
+   = NOTICE 的 `dda2d312…` / `04fb3941…`）；🔴 不得改成 `-text`（会退化成 LF，锁立刻红）。
+   ② `desktop/tauri/src/updater.rs` 的 `include_bytes!("../testdata/updater-fixture.bin")` 指向被
+   `.gitignore` 的 `*.bin`，文件从未入库 ⇒ tag 构建必失败（自 2026-10-24 起潜伏，直到这次真跑才发现）。
+   现加例外 `!desktop/tauri/testdata/updater-fixture.bin` 并标 `binary`（载荷 38 B 末尾是 LF，任何换行转换都会
+   让 minisign 验签失败）。教训：`include_bytes!/include_str!` 的路径必须被 tracking 检查覆盖，否则本地全绿、CI 必红。

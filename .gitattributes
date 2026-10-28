@@ -1,0 +1,7 @@
+# vendor 完整性锁按「原始字节」算 SHA-256（NOTICE.md 登记的是 CRLF 形态）：
+# 钉死检出换行，保证 Linux 与 Windows 检出得到同一份字节，锁不因平台而红。
+frontend/src/lib/scene/vendor/we-scene-manifest.js text eol=crlf
+frontend/src/lib/scene/vendor/we-scene-player-html.js text eol=crlf
+
+# 签名夹具按字节验签（载荷末尾是 LF）：禁止任何换行转换，否则签名对不上
+desktop/tauri/testdata/updater-fixture.bin binary
