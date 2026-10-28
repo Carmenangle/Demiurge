@@ -24,8 +24,7 @@ from app.services.config_bundle import ConfigBundleError
 router = APIRouter()
 
 
-@router.get("/export")
-def export(include_secrets: bool = False):
+def _bundle_response(*, include_secrets: bool) -> FileResponse:
     try:
         zip_path, filename = config_bundle.export_bundle(include_secrets=include_secrets)
     except ConfigBundleError as exc:
@@ -34,6 +33,22 @@ def export(include_secrets: bool = False):
         zip_path, filename=filename, media_type="application/zip",
         background=BackgroundTask(config_bundle.cleanup_bundle_file, zip_path),
     )
+
+
+@router.get("/export")
+def export(include_secrets: bool = False):
+    return _bundle_response(include_secrets=include_secrets)
+
+
+@router.get("/pull")
+def pull():
+    """联机同库·在线同步的拉包口：远端客户端专用，**恒不含密钥**。
+
+    `/api/config` 前缀整体是 PC 独占能力（remote_gate DENY：导出会把模型密钥、作品与
+    素材一起打走）。本条是唯一精确放行的子路径，所以签名里**绝不接受** include_secrets
+    ——密钥只能由手机本机自备，不经局域网传输。
+    """
+    return _bundle_response(include_secrets=False)
 
 
 @router.post("/export/save")

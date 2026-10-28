@@ -19,6 +19,7 @@ import { pushSelection } from "./lib/userStateSync";
 import { Lightbox } from "./components/Lightbox";
 import { RagToast } from "./components/RagToast";
 import { ComfyStatusMonitor } from "./components/ComfyStatusMonitor";
+import { MobileOnlineWatch } from "./components/MobileOnlineWatch";
 import { ConfirmModal, PromptModal, AlertModal } from "./components/Modal";
 import { RegexModal } from "./components/RegexModal";
 import { PresetModal } from "./components/PresetModal";
@@ -396,6 +397,8 @@ export function App() {
           onPickPersona={(id) => settingsStore.update({ activeUserPersonaId: id || undefined })}
         />
         <ComfyStatusMonitor comfyuiUrl={settings.comfyuiUrl} />
+        {/* 手机端的对应物：横幅在手机上被隐藏，改为「断了才弹」的联机检测弹窗（PC 构建内部空转）。 */}
+        <MobileOnlineWatch />
         <main className="app-body main">
           <Suspense fallback={<div className="page-loading" role="status">正在载入…</div>}>
             <AppBody
@@ -697,7 +700,8 @@ function Topbar(props: {
   activePersonaId: string;
   onPickPersona: (id: string) => void;
 }) {
-  if (props.settingsOpen) return <header className="app-topbar"><span className="topbar-title">设置</span></header>;
+  // topbar-settings：手机端整条隐藏（底栏「设置」已表明位置，这条标题白占 ~52px）
+  if (props.settingsOpen) return <header className="app-topbar topbar-settings"><span className="topbar-title">设置</span></header>;
   if (props.section === "home") {
     return (
       <header className="app-topbar">

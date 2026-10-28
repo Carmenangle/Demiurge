@@ -13,11 +13,15 @@
 路由类表（单一真源；改这里必须同步 G/16 与 test_remote_gate）：
 - DENY（远程 403）：进程控制（comfyui start/stop/restart）、PC 路径配置
   （comfyui/config）、节点管理（node-manager，含 clone+pip 安装面）、模型下载
-  （models）、GGUF 导入（gguf）、visual-ci（PC 开发工具）。
+  （models）、GGUF 导入（gguf）、visual-ci（PC 开发工具）、离线资源包导出/导入
+  （config）。
+- ALLOW-EXACT（DENY 前缀里的唯一例外）：`config/pull`——联机同库的在线同步源。
+  路由体内恒 `include_secrets=False`，签名不接受 include_secrets，密钥不出 PC。
 - SCOPE（远程时收敛到数据根）：任意路径读写端点——`comfyui/local-view`（读，query
   参数 path，中间件可查）与 `comfyui/save-local`（写，body 的 output_dir，路由体内
   调 `ensure_write_scope`——中间件读不到 JSON body）。允许根＝`DATA_DIR` 与已配置的
-  作品根（user_state 的 outputDir）。PC 本机「读任意本地路径」的设计红线
+  作品根（`repo_meta.output_dir_from_state()`，即 user_state 的 settings.outputDir）。
+  PC 本机「读任意本地路径」的设计红线
   （local_view docstring）不受影响：jail 只发生在远程分支。
 - 其余端点（剧情/资产/预设/聊天/health/…）：远程可用——L2 的本意就是手机消费
   PC 数据真源。
@@ -43,6 +47,9 @@ _DENY_PREFIXES = (
     "/api/comfyui/stop",
     "/api/comfyui/restart",
     "/api/comfyui/config",
+    # 保存 ComfyUI 地址会顺带登记白名单主机＝放宽 SSRF 面；主机簿本身也不能给远程读。
+    # 闸按路径判、不分方法（config 的 GET/POST 与 hosts 的 GET/POST 一律 PC 独占）。
+    "/api/comfyui/hosts",
     "/api/node-manager",
     "/api/models",
     "/api/gguf",
@@ -50,6 +57,8 @@ _DENY_PREFIXES = (
     # 离线资源同步：导出会把 PC 的模型密钥、作品与素材打进 zip，属 PC 独占能力。
     "/api/config",
 )
+# DENY 前缀里的唯一例外：在线同步拉包（恒不含密钥）。精确匹配，不做前缀放行。
+ALLOW_EXACT = ("/api/config/pull",)
 SCOPED_READ = "/api/comfyui/local-view"
 _SCOPED_WRITE = "/api/comfyui/save-local"
 
@@ -59,15 +68,19 @@ def is_remote(host: str) -> bool:
 
 
 def _allowed_roots() -> list[Path]:
-    """SCOPE 允许根：DATA_DIR ＋ 已配置的作品根（未配置/读失败只剩 DATA_DIR）。"""
+    """SCOPE 允许根：DATA_DIR ＋ 已配置的作品根（未配置/读失败只剩 DATA_DIR）。
+
+    作品根只经 `repo_meta.output_dir_from_state()` 读——它才是 `settings.outputDir`
+    的属主读点；user_state.json 顶层没有 outputDir，绕过去读会把作品根漏掉，
+    远程 save-local 写作品根一律 403。
+    """
     roots = [Path(config.DATA_DIR)]
     try:
-        state = repo_meta.load_user_state()
-        raw = str(state.get("outputDir") or state.get("output_dir") or "").strip()
-        if raw:
-            roots.append(Path(raw))
+        raw = repo_meta.output_dir_from_state().strip()
     except Exception:  # noqa: BLE001 — user_state 缺失/坏 JSON：退 DATA_DIR，不挡判定
-        pass
+        raw = ""
+    if raw:
+        roots.append(Path(raw))
     return roots
 
 
@@ -91,6 +104,8 @@ def verdict(path: str, local_view_path: str | None, *, token_enabled: bool) -> s
     """
     if not token_enabled:
         return INTERLOCK_DETAIL
+    if path in ALLOW_EXACT:
+        return None
     if path.startswith(_DENY_PREFIXES):
         return f"端点 {path} 属 PC 独占能力，远程不可用（remote_gate）"
     if path == SCOPED_READ:

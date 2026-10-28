@@ -4,10 +4,10 @@
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Body, HTTPException
 from pydantic import BaseModel
 
-from app.services import mobile_remote
+from app.services import mobile_remote, mobile_sync
 
 router = APIRouter()
 
@@ -16,6 +16,10 @@ class RemoteConfigBody(BaseModel):
     base_url: str = ""
     token: str = ""
     enabled: bool = True
+
+
+class SyncBody(BaseModel):
+    overwrite: bool = False
 
 
 @router.get("/remote")
@@ -47,3 +51,35 @@ async def test_remote() -> dict:
     if not mobile_remote.is_active(cfg):
         raise HTTPException(status_code=400, detail="尚未启用联机同库（先保存电脑地址与令牌）")
     return await mobile_remote.probe(base_url=cfg["base_url"], token=cfg["token"])
+
+
+@router.get("/online-status")
+async def read_online_status() -> dict:
+    """联机体检聚合探针（手机「联机检测」弹窗的唯一数据源）。
+
+    未启用联机时不发任何请求，直接返回 `active: false`；启用后依次答「电脑可达吗」
+    「电脑的 ComfyUI 按它设置的地址开着吗」。本端点在 `/api/mobile` 前缀下，永不被
+    反向代理 ⇒ 电脑掉线时这条仍答得出原因。
+    """
+    return await mobile_remote.online_status()
+
+
+@router.get("/sync")
+def read_sync() -> dict:
+    """在线同步状态：面板轮询（idle/downloading/importing/done/error）。"""
+    return mobile_sync.status()
+
+
+@router.post("/sync")
+def start_sync(body: SyncBody | None = Body(default=None)) -> dict:
+    """从电脑拉一份资源包并导入本机（后台任务；进度看 GET /sync）。
+
+    目标地址与令牌只取本机 `remote_backend.json`，请求体只有 overwrite——不接受
+    前端指定源地址，避免把 PC 令牌发往任意主机。
+    """
+    try:
+        return mobile_sync.start(overwrite=bool(body and body.overwrite))
+    except mobile_sync.SyncBusy as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except mobile_sync.SyncError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

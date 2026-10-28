@@ -227,6 +227,15 @@ def test_导出默认剥离设备路径网络项与密钥(pc: dict):
     assert meta["assets"]["characters"]["files"] == 1
 
 
+def test_地址簿与按模态选机属于网络项_不进包():
+    """机台地址与本机网络绑定、路由又指向那些机台 id ⇒ 与 comfyuiUrl 同属网络项。
+
+    这条锁的是名单本身：漏加时「按 PRESERVE_KEYS 遍历」的通用断言不会报错。
+    """
+    assert "comfyExtra" in config_bundle.NETWORK_KEYS
+    assert "comfyRoute" in config_bundle.NETWORK_KEYS
+
+
 def test_本机资源清单与各资源页列表同口径(pc: dict):
     """同步面板的计数必须和用户点进资源页看到的一致（否则「同步了没」仍然说不清）。"""
     _seed_full_pc(pc)
@@ -513,6 +522,55 @@ def test_导入仓库_子仓库嵌到父作品且冲突换新身份(
     assert children[0]["parentId"] == parent["repo_id"]
     # 本机原有作品与原文件夹不动
     assert (works / "作品甲" / "chat.json").read_text(encoding="utf-8") == '{"phone":true}'
+
+
+def test_父仓库无自有文件时按空分组导入(pc: dict, monkeypatch: pytest.MonkeyPatch):
+    """父文件夹只剩子仓库（导出 files: 0、无 repos/<index>/ 成员）不应判死。
+
+    真机 2026-10-27：PC 某作品自身无文件、内容全在子仓库 SAVE01，
+    手机在线同步整链报「配置包缺少仓库文件分组」。
+    """
+    works = _seed_full_pc(pc)
+    (works / "作品甲" / "chat.json").unlink()
+    (works / "作品甲" / "docs" / "设定.md").unlink()
+    (works / "作品甲" / "docs").rmdir()
+    (works / "作品甲" / "_repo.json").unlink()
+    zip_path, _ = config_bundle.export_bundle()
+    with zipfile.ZipFile(zip_path) as zf:
+        items = {
+            item["folder"]: item for item in json.loads(
+                zf.read(config_bundle.REPOS_MEMBER))["items"]
+        }
+        names = set(zf.namelist())
+    assert items["作品甲"]["files"] == 0
+    assert not any(
+        name.startswith(f"repos/{items['作品甲']['index']}/") for name in names)
+
+    phone = _setup_phone(pc, monkeypatch)
+    result = config_bundle.import_bundle(zip_path)
+    assert result["repos"]["imported"] == 3
+    by_name = {item["name"]: item for item in result["repos"]["items"]}
+    parent = Path(by_name["作品甲"]["folder"])
+    assert parent.is_dir()
+    assert (parent / "SAVE01" / "chat.json").read_text(
+        encoding="utf-8") == '{"messages":[2]}'
+    assert not (parent / "chat.json").exists()
+    assert parent.is_relative_to(phone["dirs"]["works"])
+
+
+def test_声明有文件却缺分组仍判包损坏(pc: dict, monkeypatch: pytest.MonkeyPatch):
+    meta = {"app": "demiurge", "kind": "config", "version": 2}
+    bundle = _write_zip(pc["tmp"] / "truncated.zip", {
+        config_bundle.BUNDLE_META: json.dumps(meta).encode(),
+        config_bundle.SETTINGS_MEMBER: b"{}",
+        config_bundle.REPOS_MEMBER: json.dumps({"items": [{
+            "index": 0, "record": {"id": "r1", "name": "半截"},
+            "folder": "半截", "files": 2,
+        }]}).encode(),
+    })
+    _setup_phone(pc, monkeypatch)
+    with pytest.raises(config_bundle.ConfigBundleError, match="缺少仓库文件分组"):
+        config_bundle.import_bundle(bundle)
 
 
 def test_导入正则与上网素材_默认跳过同名(

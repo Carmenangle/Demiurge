@@ -22,6 +22,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app import config
+from app.routers import mobile_remote as mobile_remote_router
 from app.services import local_auth, mobile_remote
 
 PC_TOKEN = "pc-token-0123456789"
@@ -29,11 +30,19 @@ PHONE_TOKEN = "phone-token-0123456789"
 
 
 class FakePC:
-    """最小 PC 后端：记录收到的请求，/api/health 可切换令牌校验。"""
+    """最小 PC 后端：记录收到的请求，/api/health 可切换令牌校验。
+
+    除健康探针外还扮演两台联机体检要用到的电脑端点：`/api/user-state`（回一个
+    `settings.comfyuiUrl`）与 `/api/comfyui/status?url=`（回 `running`）。这两个开关
+    让测试能钉住「手机报的是电脑存的那个地址、按那个地址探的结果」。
+    """
 
     def __init__(self) -> None:
         self.requests: list[tuple[str, dict[str, str]]] = []
         self.require_token = True
+        self.comfyui_url = "http://192.0.2.9:8188"
+        self.comfy_running = True
+        self.user_state_status = 200
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -47,6 +56,15 @@ class FakePC:
                     return
                 if self.path.startswith("/api/health"):
                     body = b'{"status":"ok","running_jobs":0}'
+                elif self.path.startswith("/api/user-state"):
+                    if outer.user_state_status != 200:
+                        self._reply(outer.user_state_status, b'{"detail":"boom"}')
+                        return
+                    body = json.dumps(
+                        {"repos": [], "settings": {"comfyuiUrl": outer.comfyui_url}}).encode()
+                elif self.path.startswith("/api/comfyui/status"):
+                    body = json.dumps(
+                        {"running": outer.comfy_running, "managed": False}).encode()
                 else:
                     body = json.dumps({
                         "path": self.path,
@@ -78,6 +96,9 @@ class FakePC:
         self.httpd.shutdown()
         self.httpd.server_close()
         self._thread.join(timeout=3)
+
+    def paths(self) -> list[str]:
+        return [path for path, _headers in self.requests]
 
 
 class FakePCWS:
@@ -152,6 +173,19 @@ def _app() -> FastAPI:
     return app
 
 
+def _status_app() -> FastAPI:
+    """挂真路由（`/api/mobile/*`）+ 真代理中间件：验体检端点由本机应答、不被代理。"""
+    app = FastAPI()
+    app.include_router(mobile_remote_router.router, prefix="/api/mobile")
+
+    @app.get("/api/health")
+    def health() -> dict:
+        return {"status": "local", "running_jobs": 0}
+
+    mobile_remote.install(app)
+    return app
+
+
 @pytest.fixture()
 def fake_pc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
@@ -167,20 +201,20 @@ def fake_pc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 def test_配置保存与投影(fake_pc: dict):
     tmp = fake_pc["tmp"]
     saved = mobile_remote.save_config(
-        base_url="http://192.168.1.6:8010/", token=PC_TOKEN, enabled=True)
-    assert saved["base_url"] == "http://192.168.1.6:8010"
+        base_url="http://192.0.2.10:8010/", token=PC_TOKEN, enabled=True)
+    assert saved["base_url"] == "http://192.0.2.10:8010"
     public = mobile_remote.public_config()
     assert public["enabled"] and public["active"] and public["token_set"]
     assert "token" not in public and PC_TOKEN not in json.dumps(public)
     # 空 token = 保留现值
     saved = mobile_remote.save_config(
-        base_url="http://192.168.1.6:8010", token="", enabled=True)
+        base_url="http://192.0.2.10:8010", token="", enabled=True)
     assert saved["token"] == PC_TOKEN
     # 禁用保留地址与令牌，便于下次再连
     mobile_remote.save_config(
-        base_url="http://192.168.1.6:8010", token="", enabled=False)
+        base_url="http://192.0.2.10:8010", token="", enabled=False)
     cfg = mobile_remote.load_config()
-    assert cfg["enabled"] is False and cfg["base_url"] == "http://192.168.1.6:8010"
+    assert cfg["enabled"] is False and cfg["base_url"] == "http://192.0.2.10:8010"
     # 损坏文件 = 禁用态，不炸代理
     (tmp / mobile_remote.CONFIG_NAME).write_text("{", encoding="utf-8")
     assert mobile_remote.load_config()["enabled"] is False
@@ -189,10 +223,10 @@ def test_配置保存与投影(fake_pc: dict):
 @pytest.mark.parametrize("base_url,token,match", [
     ("http://127.0.0.1:8010", PC_TOKEN, "局域网地址"),
     ("http://localhost:8010", PC_TOKEN, "局域网地址"),
-    ("http://192.168.1.6:8010/api", PC_TOKEN, "不要带路径"),
-    ("ftp://192.168.1.6:8010", PC_TOKEN, "http"),
+    ("http://192.0.2.10:8010/api", PC_TOKEN, "不要带路径"),
+    ("ftp://192.0.2.10:8010", PC_TOKEN, "http"),
     ("", PC_TOKEN, "请填写电脑地址"),
-    ("http://192.168.1.6:8010", "short", "至少 8 位"),
+    ("http://192.0.2.10:8010", "short", "至少 8 位"),
 ])
 def test_启用时的地址与令牌校验(fake_pc: dict, base_url: str, token: str, match: str):
     with pytest.raises(mobile_remote.RemoteConfigError, match=match):
@@ -263,6 +297,80 @@ def test_探活成功_令牌错误与不可达(fake_pc: dict):
     assert down["reachable"] is False and "连不上电脑" in down["detail"]
 
 
+def test_联机体检_未启用联机时不发任何请求(fake_pc: dict):
+    pc = fake_pc["pc"]
+    base = f"http://127.0.0.1:{pc.port}"
+    _write_config(fake_pc["tmp"], base, enabled=False)
+    out = asyncio.run(mobile_remote.online_status())
+    assert out == {
+        "active": False, "base_url": base, "reachable": False, "latency_ms": None,
+        "comfyui_url": "", "comfyui_running": False, "detail": "",
+    }
+    assert pc.requests == []
+
+
+def test_联机体检_电脑不可达时只报一个断点(fake_pc: dict):
+    pc = fake_pc["pc"]
+    _write_config(fake_pc["tmp"], f"http://127.0.0.1:{_closed_port()}")
+    out = asyncio.run(mobile_remote.online_status())
+    assert out["active"] is True and out["reachable"] is False
+    assert "连不上电脑" in out["detail"]
+    # 电脑都没应答，就不再追问它的 ComfyUI（免得一次故障报两个原因）
+    assert out["comfyui_url"] == "" and out["comfyui_running"] is False
+    assert pc.requests == []
+
+
+def test_联机体检_按电脑存的地址探ComfyUI(fake_pc: dict):
+    pc = fake_pc["pc"]
+    pc.comfyui_url = "https://comfy.example.com"
+    pc.comfy_running = False
+    _write_config(fake_pc["tmp"], f"http://127.0.0.1:{pc.port}")
+    down = asyncio.run(mobile_remote.online_status())
+    assert down["reachable"] is True and down["comfyui_running"] is False
+    assert down["comfyui_url"] == "https://comfy.example.com"
+    assert "https://comfy.example.com" in down["detail"]
+    # 探的是电脑自己存的那个地址，且由电脑侧执行探活（手机不重复一份白名单判据）
+    assert any(path.startswith("/api/comfyui/status?url=https") for path in pc.paths())
+
+    pc.comfy_running = True
+    up = asyncio.run(mobile_remote.online_status())
+    assert up["comfyui_running"] is True and up["detail"] == ""
+
+
+def test_联机体检_电脑地址为空时如实报缺(fake_pc: dict):
+    pc = fake_pc["pc"]
+    pc.comfyui_url = ""
+    _write_config(fake_pc["tmp"], f"http://127.0.0.1:{pc.port}")
+    out = asyncio.run(mobile_remote.online_status())
+    assert out["reachable"] is True and out["comfyui_running"] is False
+    assert "没有填写 ComfyUI 地址" in out["detail"]
+
+
+def test_联机体检_读不到电脑设置也不炸(fake_pc: dict):
+    pc = fake_pc["pc"]
+    pc.user_state_status = 500
+    _write_config(fake_pc["tmp"], f"http://127.0.0.1:{pc.port}")
+    out = asyncio.run(mobile_remote.online_status())
+    assert out["reachable"] is True and out["comfyui_running"] is False
+    assert "读不到电脑的设置" in out["detail"]
+
+
+def test_联机体检端点由本机应答且不回传令牌(fake_pc: dict):
+    pc = fake_pc["pc"]
+    _write_config(fake_pc["tmp"], f"http://127.0.0.1:{pc.port}")
+    app = _status_app()
+    local_auth.install(app, PHONE_TOKEN)  # 后装 = 外层：手机令牌先于代理生效
+    client = TestClient(app, client=("127.0.0.1", 50000))
+    assert client.get("/api/mobile/online-status").status_code == 401
+    response = client.get("/api/mobile/online-status",
+                          headers={"X-Demiurge-Token": PHONE_TOKEN})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["active"] is True and body["comfyui_running"] is True
+    assert "/api/mobile/online-status" not in pc.paths()  # 永不被反向代理
+    assert "token" not in body and PC_TOKEN not in json.dumps(body)
+
+
 def test_WS中继带PC令牌(fake_pc: dict):
     ws_pc = FakePCWS()
     ws_pc.start()
@@ -290,4 +398,5 @@ def test_代理路径判定():
     assert not mobile_remote.should_proxy_path("/api/health")
     assert not mobile_remote.should_proxy_path("/api/mobile/remote")
     assert not mobile_remote.should_proxy_path("/api/mobile/comfy-host")
+    assert not mobile_remote.should_proxy_path("/api/mobile/online-status")
     assert not mobile_remote.should_proxy_path("/docs-assets/x.png")

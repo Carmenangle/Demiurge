@@ -97,7 +97,7 @@ def normalize_base_url(raw: str) -> str:
     """校验并规范化 PC 地址：http(s)、无路径/参数/账号，且不能是回环（否则代理打回自己）。"""
     value = (raw or "").strip().rstrip("/")
     if not value:
-        raise RemoteConfigError("请填写电脑地址（例如 http://192.168.1.6:<端口>）")
+        raise RemoteConfigError("请填写电脑地址（形如 http://电脑IP:端口）")
     parsed = urlparse(value)
     if parsed.scheme not in ("http", "https"):
         raise RemoteConfigError("电脑地址必须以 http:// 或 https:// 开头")
@@ -187,6 +187,73 @@ async def probe(*, base_url: str, token: str) -> dict:
     except ValueError:
         health = None
     return {"reachable": True, "detail": "", "latency_ms": latency, "health": health}
+
+
+_USER_STATE_PATH = "/api/user-state"
+_COMFY_STATUS_PATH = "/api/comfyui/status"
+
+
+async def comfyui_state(*, base_url: str, token: str) -> dict:
+    """电脑的 ComfyUI 有没有按它自己设置的地址开着（联机时地址真源在电脑）。
+
+    两步都由手机后端发 HTTP：读电脑 `user-state.settings.comfyuiUrl` ⇒ 让**电脑**按该
+    地址探活（`is_up` 与白名单都在电脑侧执行，手机不重复一份判据，也不受 WebView CSP 影响）。
+    任何一步失败只降级成 `running: False` + 可读原因，绝不抛出——弹窗的数据断不得因为
+    一次读取失败就永久沉默。
+    """
+    base = base_url.rstrip("/")
+    url = ""
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(6.0, connect=4.0), trust_env=False,
+        ) as client:
+            state = await client.get(f"{base}{_USER_STATE_PATH}",
+                                     headers={PC_TOKEN_HEADER: token})
+            if state.status_code != 200:
+                return {"url": "", "running": False,
+                        "detail": f"读不到电脑的设置（HTTP {state.status_code}）"}
+            settings = state.json().get("settings") or {}
+            url = str(settings.get("comfyuiUrl") or "").strip()
+            if not url:
+                return {"url": "", "running": False, "detail": "电脑端没有填写 ComfyUI 地址"}
+            status = await client.get(f"{base}{_COMFY_STATUS_PATH}", params={"url": url},
+                                      headers={PC_TOKEN_HEADER: token})
+            running = bool(status.status_code == 200 and (status.json() or {}).get("running"))
+    except (httpx.HTTPError, ValueError, AttributeError) as exc:
+        return {"url": url, "running": False,
+                "detail": f"问电脑 ComfyUI 状态失败（{exc.__class__.__name__}）"}
+    return {
+        "url": url,
+        "running": running,
+        "detail": "" if running else f"地址 {url} 上没有响应中的 ComfyUI",
+    }
+
+
+async def online_status() -> dict:
+    """联机体检聚合：手机是否开着联机、电脑是否可达、电脑的 ComfyUI 是否按地址开着。
+
+    这条走 `/api/mobile/*` ⇒ 永不被反向代理，所以电脑关机、换网、防火墙拦掉时它照样
+    答得出原因（此时前端其它 `/api/*` 只会拿到代理的 502，分不清是哪儿断了）。
+    返回值不含令牌本体，只有地址、延迟与原因。
+    """
+    cfg = load_config()
+    if not is_active(cfg):
+        return {
+            "active": False, "base_url": cfg.get("base_url", ""), "reachable": False,
+            "latency_ms": None, "comfyui_url": "", "comfyui_running": False, "detail": "",
+        }
+    result = await probe(base_url=cfg["base_url"], token=cfg["token"])
+    out = {
+        "active": True, "base_url": cfg["base_url"], "reachable": result["reachable"],
+        "latency_ms": result["latency_ms"], "comfyui_url": "", "comfyui_running": False,
+        "detail": result["detail"],
+    }
+    if not result["reachable"]:
+        return out
+    comfy = await comfyui_state(base_url=cfg["base_url"], token=cfg["token"])
+    out.update({"comfyui_url": comfy["url"], "comfyui_running": comfy["running"],
+                "detail": comfy["detail"]})
+    return out
 
 
 def _detail_of(resp: httpx.Response) -> str:

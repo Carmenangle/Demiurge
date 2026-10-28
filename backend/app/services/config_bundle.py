@@ -65,6 +65,11 @@ DEVICE_KEYS = (
 # 网络与代理：属于「当前这台机器怎么出网」，跨设备同步只会把另一台带进死角。
 NETWORK_KEYS = (
     "comfyuiUrl",
+    # ComfyUI 地址簿：条目 0 就是 comfyuiUrl 本身，这里是额外机台与「哪个模态用哪台」。
+    # 机台地址必然与本机网络环境绑定（回环/局域网/云端实例），路由又指向那些机台 id
+    # ⇒ 两者与 comfyuiUrl 同属网络项，都不进包。
+    "comfyExtra",
+    "comfyRoute",
     "proxyUrl",
     "proxyEnabled",
     "systemProxyUrl",
@@ -654,7 +659,11 @@ def _parse_repos_index(zf: zipfile.ZipFile) -> list[dict] | None:
         index = item.get("index", position)
         if not isinstance(index, int) or index < 0:
             raise ConfigBundleError("配置包的仓库分组序号不合法")
-        result.append({"record": record, "folder": folder, "index": index})
+        files = item.get("files")
+        if files is not None and (not isinstance(files, int) or files < 0):
+            raise ConfigBundleError("配置包的仓库条目文件数不合法")
+        result.append({
+            "record": record, "folder": folder, "index": index, "files": files})
     return result
 
 
@@ -788,8 +797,13 @@ def _import_repos(
         parent_folder = folder_map.get(parent_old)
         source = temp_root / "repos" / str(item["index"])
         if not source.is_dir():
-            raise ConfigBundleError(
-                f"配置包缺少仓库文件分组：{item['folder']}")
+            # 父作品只含子仓库（或本身是空作品）时导出端没有可打包文件，zip 里
+            # 不存在该分组目录；声明 files: 0 才按空目录导入，声明有文件仍判包损坏。
+            if item.get("files") == 0:
+                source.mkdir(parents=True, exist_ok=True)
+            else:
+                raise ConfigBundleError(
+                    f"配置包缺少仓库文件分组：{item['folder']}")
         try:
             result = repo_transfer.import_repo_folder(
                 source,

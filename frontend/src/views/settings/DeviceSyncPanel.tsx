@@ -6,8 +6,8 @@ import {
   type SavedConfigBundle,
 } from "../../api/configTransfer";
 import {
-  loadMobileRemote, saveMobileRemote, testMobileRemote,
-  type MobileRemoteConfig,
+  getOnlineSyncStatus, loadMobileRemote, saveMobileRemote, startOnlineSync,
+  testMobileRemote, type MobileRemoteConfig, type OnlineSyncStatus,
 } from "../../api/mobileRemote";
 import { MOBILE_PROFILE } from "../../lib/mobileProfile";
 
@@ -160,7 +160,7 @@ function RemoteLinkSection({ onActiveChange }: { onActiveChange: (active: boolea
             <input
               value={baseUrl}
               onChange={(e) => setBaseUrl(e.target.value)}
-              placeholder="http://192.168.1.6:8010"
+              placeholder="http://电脑IP:8010"
               inputMode="url"
               autoCapitalize="off"
               autoCorrect="off"
@@ -196,7 +196,9 @@ function RemoteLinkSection({ onActiveChange }: { onActiveChange: (active: boolea
         <p className="field-hint" style={{ margin: "12px 0 0", lineHeight: 1.7 }}>
           当前状态：{active ? `联机中（${config?.base_url}）` : "使用手机本机数据"}。
           联机模式下电脑端 ComfyUI 画布/预览不可用（地址在手机上指向手机自己），生成任务本身仍由电脑执行
-          （需先在电脑上启动 ComfyUI）；联机中「离线资源同步」隐藏，断开后回到本机导入/导出。
+          （需先在电脑上启动 ComfyUI）。联机中可点下方「在线同步到本机」把电脑资源拉一份到手机；
+          「离线资源同步」（导入/导出 zip）在联机中隐藏，断开后回到本机导入/导出。
+          联机断开、或电脑上的 ComfyUI 没按它保存的地址开着时，手机会自动跳出提示；连接正常时不打扰。
         </p>
       </div>
 
@@ -212,6 +214,99 @@ function RemoteLinkSection({ onActiveChange }: { onActiveChange: (active: boolea
       )}
       {error && <AlertModal title="联机设置未完成" message={error} onClose={() => setError(null)} />}
     </>
+  );
+}
+
+/** 手机端联机中：从电脑拉一份资源包导入本机（在线同步）。
+ *  「在线同步」与下面的「离线资源同步」是同一份包、同一条导入服务，区别只在包从哪来：
+ *  在线走 `/api/mobile/sync`（本机后端拉 PC 的 /api/config/pull，恒不含密钥）。 */
+export function OnlineSyncSection() {
+  const [overwrite, setOverwrite] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [job, setJob] = useState<OnlineSyncStatus | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const running = job?.state === "downloading" || job?.state === "importing";
+  useEffect(() => {
+    if (!running) return;
+    let alive = true;
+    const timer = window.setInterval(() => {
+      getOnlineSyncStatus()
+        .then((next) => { if (alive) setJob(next); })
+        .catch(() => { /* 轮询失败保持现状，下一跳再试 */ });
+    }, 800);
+    return () => { alive = false; window.clearInterval(timer); };
+  }, [running]);
+
+  const onStart = async () => {
+    if (busy || running) return;
+    setBusy(true);
+    setError(null);
+    try {
+      setJob(await startOnlineSync(overwrite));
+    } catch (reason) {
+      setError(`开始同步失败：${(reason as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const progress = (() => {
+    if (!job) return "";
+    if (job.state === "downloading") {
+      const done = sizeText(job.bytes || 0);
+      return job.total ? `正在下载 ${done} / ${sizeText(job.total)}` : `正在下载 ${done}…`;
+    }
+    if (job.state === "importing") return "正在导入到本机…";
+    if (job.state === "error") return `同步失败：${job.error || "未知错误"}`;
+    return "";
+  })();
+
+  return (
+    <div className="settings-section">
+      <h4>在线同步到本机</h4>
+      <p className="field-hint" style={{ margin: "0 0 12px", lineHeight: 1.7 }}>
+        从电脑拉一份资源包并导入本机：角色卡 / 世界书 / 预设 / 工作流 / 提示词模版 / 作品 /
+        正则 / 上网素材。包内<b>不含 API 密钥</b>，本机已有的密钥保持不变。同步完点「刷新页面」，
+        之后断开联机也能用这份离线数据。
+      </p>
+      <label style={{ display: "flex", alignItems: "flex-start", gap: 10, cursor: "pointer" }}>
+        <input
+          type="checkbox"
+          checked={overwrite}
+          disabled={!!running}
+          onChange={(e) => setOverwrite(e.target.checked)}
+        />
+        <span style={{ fontSize: 13, lineHeight: 1.6 }}>
+          覆盖本机同名素材（默认跳过）
+          <span style={{ display: "block", color: "var(--text-muted)", fontSize: 12 }}>
+            作品仓库始终以新身份导入；设备路径与代理设置保留本机值。
+          </span>
+        </span>
+      </label>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 14 }}>
+        <button className="btn primary" disabled={busy || running} onClick={() => { void onStart(); }}>
+          {running ? "同步中…" : "从电脑同步到本机"}
+        </button>
+        {job?.state === "done" && (
+          <button className="btn" onClick={() => window.location.reload()}>刷新页面</button>
+        )}
+      </div>
+      {progress && (
+        <p
+          className="field-hint"
+          style={{ margin: "12px 0 0", color: job?.state === "error" ? "#c94a4a" : undefined }}
+        >
+          {progress}
+        </p>
+      )}
+      {job?.state === "done" && job.result && (
+        <p className="field-hint" style={{ margin: "8px 0 0", whiteSpace: "pre-line" }}>
+          {resultText(job.result)}
+        </p>
+      )}
+      {error && <p className="field-hint" style={{ margin: "8px 0 0", color: "#c94a4a" }}>{error}</p>}
+    </div>
   );
 }
 
@@ -292,6 +387,8 @@ export function DeviceSyncPanel() {
   return (
     <>
       {MOBILE_PROFILE && <RemoteLinkSection onActiveChange={setRemoteActive} />}
+
+      {MOBILE_PROFILE && remoteActive && <OnlineSyncSection />}
 
       {!remoteActive && <div className="settings-section">
         <h4>离线资源同步</h4>

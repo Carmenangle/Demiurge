@@ -34,3 +34,46 @@ export function saveMobileRemote(
 export function testMobileRemote(): Promise<MobileRemoteProbe> {
   return apiPost("/mobile/remote/test", {});
 }
+
+/** 联机体检聚合（手机端「联机检测」弹窗的唯一数据源）。
+ *  端点在 `/api/mobile` 前缀下 ⇒ 电脑掉线时它仍答得出原因（其余 `/api/*` 那时只会拿到代理的 502）。 */
+export interface MobileOnlineStatus {
+  /** 已启用联机且地址/令牌齐全；false 时后端不探测，弹窗也不该出现。 */
+  active: boolean;
+  base_url: string;
+  /** 电脑后端可达（`/api/health` 有应答）。 */
+  reachable: boolean;
+  latency_ms: number | null;
+  /** 电脑里存的那个 ComfyUI 地址（联机时地址真源在电脑，不是手机自己那份）。 */
+  comfyui_url: string;
+  comfyui_running: boolean;
+  /** 断在哪、为什么；全绿时为空。 */
+  detail: string;
+}
+
+/** 轮询接口必须带超时：后端最坏三跳（health → user-state → comfyui/status）各 4~6 秒。 */
+export function getMobileOnlineStatus(): Promise<MobileOnlineStatus> {
+  return apiGet<MobileOnlineStatus>("/mobile/online-status", 15000);
+}
+
+/** 在线同步（联机同库）：从电脑拉一份资源包导入本机。
+ *  端点只在手机壳的本机后端注册（/api/mobile/* 永不被反向代理）。 */
+export interface OnlineSyncStatus {
+  state: "idle" | "downloading" | "importing" | "done" | "error";
+  stage?: string;
+  bytes?: number;
+  total?: number;
+  overwrite?: boolean;
+  result?: import("./configTransfer").ConfigImportResult | null;
+  error?: string;
+  started_at?: number;
+  finished_at?: number | null;
+}
+
+export function getOnlineSyncStatus(): Promise<OnlineSyncStatus> {
+  return apiGet<OnlineSyncStatus>("/mobile/sync");
+}
+
+export function startOnlineSync(overwrite: boolean): Promise<OnlineSyncStatus> {
+  return apiPost<OnlineSyncStatus>("/mobile/sync", { overwrite });
+}
