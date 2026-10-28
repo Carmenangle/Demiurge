@@ -75,7 +75,7 @@ export function StylePanel({ draft, setDraft }: PanelProps) {
         const groupCustoms = customs.filter((t) => templateKindGroup(t.kind) === group);
         return (
           <div className="settings-section" key={group}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+            <div className="settings-actions-head" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
               <h4 style={{ margin: 0 }}>{title}</h4>
               <button className="btn" onClick={() => setModal({ group, mode: "create" })}>
                 <Plus size={15} style={{ verticalAlign: "-2px", marginRight: 4 }} />新增模版

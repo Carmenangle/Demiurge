@@ -5,13 +5,16 @@ import { describe, expect, it } from "vitest";
 // 工作副本可能是 CRLF，先归一化换行，避免平台差异误报。
 const css = readFileSync(new URL("../styles.css", import.meta.url), "utf8").replace(/\r\n/g, "\n");
 
-/** 文件里 `@media (max-width: 720px)` 有多段（主题一段、页面一段…），全部取出来。 */
+/** 文件里 `@media (max-width: 720px)` 有多段（主题一段、页面一段…），全部取出来。
+ *  条件后面可能还挂着触屏横屏补语（`(pointer: coarse) and …`），所以只认前缀再找花括号。 */
 function media720Blocks(): string[] {
   const out: string[] = [];
-  const needle = "@media (max-width: 720px) {";
+  const needle = "@media (max-width: 720px)";
   for (let at = css.indexOf(needle); at >= 0; at = css.indexOf(needle, at + 1)) {
+    const open = css.indexOf("{", at + needle.length);
+    if (open < 0) continue;
     let depth = 0;
-    for (let i = at + needle.length - 1; i < css.length; i++) {
+    for (let i = open; i < css.length; i++) {
       if (css[i] === "{") depth++;
       else if (css[i] === "}" && --depth === 0) {
         out.push(css.slice(at, i + 1));

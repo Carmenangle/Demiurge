@@ -12,7 +12,7 @@ import {
   describeMissingAssets,
 } from "../api/ai";
 import { parseAssetQuery, removeTagFromQuery } from "../lib/assetQuery";
-import { distributeMasonry } from "../lib/masonry";
+import { distributeMasonry, masonryColumnCount } from "../lib/masonry";
 import { shouldLoadMore } from "../lib/infiniteScroll";
 import { subscribeJobActivities } from "../lib/jobActivity";
 import { createJob, tickJob, finishJob } from "../api/jobs";
@@ -1130,24 +1130,24 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
   // CSS columns 的硬伤：阅读顺序变成列优先 + 列底参差（暗色素材/超宽图混排时一排排空隙）。
   // 这里按「当前最矮的列」投放 ⇒ 列底齐平；宽高比在 img onLoad 时回填
   // （未知按 1 估，量到后批量重排一次）。
-  const gridRef = useRef<HTMLDivElement | null>(null);
   const ratioRef = useRef<Map<string, number>>(new Map());
   const ratioTimer = useRef<number | null>(null);
+  const [gridEl, setGridEl] = useState<HTMLDivElement | null>(null);
   const [colCount, setColCount] = useState(6);
   const [ratioTick, setRatioTick] = useState(0);
   useEffect(() => () => { if (ratioTimer.current) window.clearTimeout(ratioTimer.current); }, []);
-  // 列数跟随容器宽度（与旧 CSS 断点同口径：>900 → 6，>640 → 4，否则 3）
+  // 列数跟随容器宽度。⚠ 必须挂在「节点真的出现」上（回调 ref → state）：
+  // 瀑布流只在 items>0 时渲染，挂载首帧拿不到节点，`[]` 依赖的 effect 早已跑完并 return，
+  // 观察器永不接管 ⇒ 手机一直停在初始 6 列（390px 下每格 ~50px）。2026-10-27 真机反馈「图被压得很小」的真根因。
   useEffect(() => {
-    const el = gridRef.current;
-    if (!el || typeof ResizeObserver === "undefined") return;
+    if (!gridEl || typeof ResizeObserver === "undefined") return;
     const ro = new ResizeObserver((entries) => {
-      const w = entries[0]?.contentRect.width ?? 0;
-      const n = w > 0 && w <= 640 ? 3 : w > 0 && w <= 900 ? 4 : 6;
+      const n = masonryColumnCount(entries[0]?.contentRect.width ?? 0);
       setColCount((prev) => (prev === n ? prev : n));
     });
-    ro.observe(el);
+    ro.observe(gridEl);
     return () => ro.disconnect();
-  }, []);
+  }, [gridEl]);
   const noteRatio = (id: string, ratio: number) => {
     if (!(ratio > 0) || ratioRef.current.get(id) === ratio) return;
     ratioRef.current.set(id, ratio);
@@ -1228,7 +1228,7 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
         </div>
       )}
       {enhanced && items.length > 0 && (
-        <div className="page-toolbar" style={{ marginBottom: 12 }}>
+        <div className="page-toolbar asset-toolbar" style={{ marginBottom: 12 }}>
           <button className="btn" onClick={() => { setSelMode((v) => !v); setSelected(new Set()); }}>
             {selMode ? "退出多选" : "批量选择"}
           </button>
@@ -1367,7 +1367,7 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
         <>
           {/* JS 均列瀑布流：外层 flex 行 + 每列一个纵向 flex。
               单元格内容与旧实现完全一致（不裁剪、保留 hover 操作/角标/裂图回退）。 */}
-          <div className="gallery-masonry" ref={gridRef}>
+          <div className="gallery-masonry" ref={setGridEl}>
             {masonryCols.map((col, ci) => (
               <div className="gallery-masonry-col" key={ci}>
                 {col.map((g) => (
@@ -1529,7 +1529,7 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
       )}
       {active && (
         <div className="modal-mask">
-          <div className="modal" style={{
+          <div className="modal asset-detail-modal" style={{
             maxWidth: 1060, width: "95vw", maxHeight: "90vh",
             display: "flex", flexDirection: "column",
             // ⚠ 必须覆盖 `.modal` 基线的 `overflow-y: auto`：外层滚动会吃掉高度约束，
@@ -1543,8 +1543,9 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
               </button>
             </div>
             {/* 左图右信息（2026-10-16 重排，对齐画布模式 `CanvasDetailPanel` 的结构）
-                ⚠ 不要 flexWrap：换行会让容器高度需求翻倍 ⇒ 撑破 maxHeight、右栏失去滚动 */}
-            <div style={{ flex: 1, minHeight: 0, display: "flex", gap: 14, overflow: "hidden" }}>
+                ⚠ 不要 flexWrap：换行会让容器高度需求翻倍 ⇒ 撑破 maxHeight、右栏失去滚动
+                ⚠ 手机上由 `.asset-detail-body` 切成上下堆叠（390px 左右分栏会把图压到 ~190px） */}
+            <div className="asset-detail-body" style={{ flex: 1, minHeight: 0, display: "flex", gap: 14, overflow: "hidden" }}>
               {/* 左：完整图片 / 视频（点击进共享 Lightbox 全屏） */}
               <div style={{ flex: "0 0 52%", minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", gap: 8 }}>
                 <div style={{

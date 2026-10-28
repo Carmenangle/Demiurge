@@ -57,6 +57,10 @@ test.describe("chat mobile layout @390x844", () => {
     expect(overflowing).toEqual([]);
 
     // ④ 「对话设置」浮层：完整落在视口内，且不盖住自己的触发钮（盖住就打不开也关不掉）
+    //    触发钮在 .head-tools 里，而 2026-10-27「对话页纵向空间回收」起 head-tools 默认
+    //    display:none（点「···」才展开）⇒ 不先开抽屉就是 0×0，click 直接超时。
+    await page.locator(".chat-view-head .head-tools-toggle").click();
+    await page.waitForSelector(".chat-view-head .head-tools.open", { timeout: 5_000 });
     await page.locator(".chat-view-head .nci-toggle").click();
     await page.waitForSelector(".nci-body", { state: "visible", timeout: 5_000 });
     const nci = await box(".nci-body");

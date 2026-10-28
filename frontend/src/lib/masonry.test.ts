@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { columnSpread, distributeMasonry } from "./masonry";
+import { columnSpread, distributeMasonry, masonryColumnCount } from "./masonry";
 
 // 复刻真实库的宽高比谱：服设/原创里 0.56（竖长）～2.6（超宽）混排，
 // 还有一批 1:1 的暗色纹理/节点图集——正是 CSS columns 列底参差最严重的场景。
@@ -72,5 +72,33 @@ describe("distributeMasonry", () => {
   it("ratio 为 0/负数时也按 1 估（除零不会产出 Infinity 列高）", () => {
     const cols = distributeMasonry(["a", "b"], 2, (item) => (item === "a" ? 0 : -2));
     expect(cols.flat()).toEqual(["a", "b"]);
+  });
+});
+
+describe("masonryColumnCount（2026-10-27 用户报「手机上图被压得很小」）", () => {
+  it("断点与旧 CSS columns 同口径，另补 480px 以下的两列", () => {
+    expect(masonryColumnCount(390)).toBe(2);
+    expect(masonryColumnCount(480)).toBe(2);
+    expect(masonryColumnCount(481)).toBe(3);
+    expect(masonryColumnCount(640)).toBe(3);
+    expect(masonryColumnCount(641)).toBe(4);
+    expect(masonryColumnCount(900)).toBe(4);
+    expect(masonryColumnCount(901)).toBe(6);
+  });
+
+  it("宽度未知/非法（容器还没测量）退回桌面 6 列，不会把图放成两张巨图", () => {
+    expect(masonryColumnCount(0)).toBe(6);
+    expect(masonryColumnCount(Number.NaN)).toBe(6);
+    expect(masonryColumnCount(-1)).toBe(6);
+  });
+
+  it("390px 竖屏：6 列 50px → 2 列 177px，放大约 3.5 倍（用户要求 ≥2.5 倍）", () => {
+    // 实测容器宽 362（390 减去页面左右各 14），列间距桌面 12 / 手机 8
+    const cellAt = (cols: number, gap: number) => (362 - gap * (cols - 1)) / cols;
+    const before = cellAt(6, 12); // 旧行为恒 6 列（390px 下每格 50px）
+    const after = cellAt(masonryColumnCount(390), 8);
+    expect(before).toBeCloseTo(50.3, 1);
+    expect(after).toBeCloseTo(177, 0);
+    expect(after / before).toBeGreaterThan(2.5);
   });
 });

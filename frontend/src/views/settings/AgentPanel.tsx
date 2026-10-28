@@ -515,7 +515,7 @@ export function AgentPanel({ draft, setDraft }: PanelProps) {
       </div>
       <BuiltinAgentsSection />
       <ProseStyleSection />
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 16 }}>
+      <div className="settings-actions-head" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 16 }}>
         <h4 style={{ margin: 0 }}>自定义智能体（Agent 预设）</h4>
         <div style={{ display: "flex", gap: 8 }}>
           <button className="btn" onClick={add}><Plus size={15} style={{ verticalAlign: "-2px", marginRight: 4 }} />新建</button>

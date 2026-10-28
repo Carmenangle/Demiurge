@@ -28,6 +28,17 @@ export function distributeMasonry<T>(
   return cols;
 }
 
+/** 网格容器宽度 → 列数。
+ *  断点与旧 CSS columns 同口径（>900 → 6，>640 → 4，否则 3），另补手机两列：
+ *  390px 竖屏 2 列 ≈175px/格，比 6 列的 50px 大三倍以上（2026-10-27 真机反馈「图被压得很小」）。 */
+export function masonryColumnCount(width: number): number {
+  if (!(width > 0)) return 6;
+  if (width <= 480) return 2;
+  if (width <= 640) return 3;
+  if (width <= 900) return 4;
+  return 6;
+}
+
 /** 列高差（用于测试/自检）：最大列高 − 最小列高，越接近 0 越齐平。 */
 export function columnSpread(ratios: number[], colCount: number): number {
   const cols = distributeMasonry(ratios, colCount, (r) => r);

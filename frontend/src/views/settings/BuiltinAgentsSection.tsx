@@ -77,7 +77,7 @@ export function BuiltinAgentsSection() {
 
   return (
     <div className="settings-subsection">
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+      <div className="settings-actions-head" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <h4 style={{ margin: 0 }}>内置智能体（默认行为）</h4>
         <button className="btn primary" onClick={save} disabled={saving}>
           <Save size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />

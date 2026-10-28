@@ -51,7 +51,7 @@ export function McpPanel() {
 
   return (
     <div className="settings-section">
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+      <div className="settings-actions-head" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <h4 style={{ margin: 0 }}>MCP 服务器</h4>
         <div style={{ display: "flex", gap: 8 }}>
           <button className="btn" onClick={() => setBrowsing(true)}><Store size={15} style={{ verticalAlign: "-2px", marginRight: 4 }} />Smithery 市场</button>
