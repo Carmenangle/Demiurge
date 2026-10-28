@@ -1868,3 +1868,25 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
    🔴 **P1-7 只有编译证据**：本机无 Gradle（无 wrapper/dist），Java 侧用 JDK-17 `javac` + `android-34/android.jar`
    ＋手写 Chaquopy/BuildConfig stub 验过（需 `-encoding UTF-8`），**APK 未重出、未重装**。
    🔴 **并发跑两次 `npm test` 会造负载型假红**，串行复跑才是准。⇒ 手册 `F/11` §3.11.17（四刀全量与红线）。
+
+76. **0.30.0 联合发布：桌面 tag 与手机 APK 同版（2026-10-28）**：
+   ① **版本口径**：tag `v0.30` 过 `normalize_version` 后成为桌面安装器版本 **0.30.0**
+   （`Demiurge-Setup-User-0.30.0.exe` / `-Machine-0.30.0.exe`、`Demiurge-update-v0.30-windows-x64-full-rag.json`）；
+   手机沿用 0.30 家族的自有轨道 **0.30.16-beta / versionCode 31**（`demiurge-spike-0.30.16-beta-debug.apk`）。
+   🔴 两轨版本号不强行对齐：手机 `versionCode` 必须单调递增，把 0.30.16 改名 0.30.0 会在名称上制造回退。
+   发布正文取自 **tag 树里的 `RELEASE_NOTES.md`**（workflow `body_path`）⇒ 改正文必须进 tag，不能事后改 Release。
+   ② **tag 重指（2026-10-28 用户拍板）**：v0.30 首推后 CI 红——`material_sources.py` 的 f-string 在 ruff 的
+   py311 目标下非法。当时 Release 未生成、tag 下**零产物**、无资产/签名引用它 ⇒ 修好后把 v0.30 重指到修复提交。
+   `RELEASE.md` 的「tag 不可重写」以**产物已发布**为前提；一旦 Release 有资产，只能发新补丁号。
+   ③ **手机出包与体积线**：改过 `backend/app` 一律 `:app:clean` 全清构建（增量打包留白会破线）。
+   本包 APK **190,001,288 B**（sha256 `c258623c287f58c2…`）= 超 §11 旧线 ≤190 MB **1,288 B**。
+   按 D7（2026-10-27 用户拍板：功能优先）**明示放宽到 ≤191 MB**，留痕三条：增量归属＝前端代码增长
+   （`frontend.zip` 103,347,228 B，手机 UI 四刀入包；`app.imy` 2,483,216 B）；账本无空洞（结构开销 206,091 B）、
+   Rust 核心仍 23.2 M 瘦身版、包内 frontend.zip 与源逐字一致 ⇒ 属功能净增不是浪费。静默漂移依旧禁止。
+   ④ **身份核验（三重）**：`apk_size_ledger.py` exit 0；`verify-apk-security.sh` **16 项 PASS**
+   （含 `classes3.dex` 的 FRONTEND_SHA == 包内 `frontend.zip` sha256 `9f18c3fe…`）；`aapt2 dump badging`
+   versionCode 31 / versionName 0.30.16-beta，且 `classes3.dex` 同时含 `0.30.16-beta` 与 sha 常量。
+   ⚠ 条 75⑥ 的「APK 未重出」由本条闭环（已重出并验静态身份）；**真机重装与联机复验仍待用户操作**。
+   ⑤ **CI 教训**：ruff 门禁口径是 `ruff check app tests`——两处 py3.12+ 才合法的写法（f-string 表达式复用外层引号）
+   与 2026-10-27 遗留的未用导入（`test_repo_sync.py` 的 `hashlib`）只在 CI 红；本地 `ruff check app` 与 py3.13
+   pytest 都看不见。`setup-python` 钉 3.13.11 曾瞬时失败（该版本仍在清单中），重跑即可，不是配置问题。
