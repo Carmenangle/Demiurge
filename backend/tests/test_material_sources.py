@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.routers import comfyui as comfyui_router
-from app.services import material_sources, web_material_candidates
+from app.services import material_sources, system_proxy, web_material_candidates
 
 
 class _FakeResp:
@@ -230,6 +230,9 @@ def test_route_reads_credentials_from_settings(monkeypatch):
         return {"ok": True, "items": [], "error": "", "provider": source}
 
     monkeypatch.setattr(material_sources, "search", fake_search)
+    # 探活语义由 test_state_proxy_fallback.py 单独锁；本用例只验证凭证透传，
+    # 不真连 http://p:1（alive 会在端口不监听时把代理降级成直连）。
+    monkeypatch.setattr(system_proxy, "_tcp_probe", lambda a, timeout=1.0: True)  # noqa: ARG005
     monkeypatch.setattr("app.services.repo_meta.setting_str_from_state",
                         lambda key: {"pixivRefreshToken": "tok-1",
                                      "danbooruLogin": "user-1",
@@ -258,7 +261,10 @@ def test_danbooru_page_param_passed_through(monkeypatch):
 
 
 def test_route_proxy_falls_back_to_settings(monkeypatch):
-    """前端传空代理时后端兜底读设置（2026-10-16 实锤：前端探测值为空 → 直连超时）。"""
+    """前端传空代理时后端兜底读设置（2026-10-16 实锤：前端探测值为空 → 直连超时）。
+
+    兜底地址同样过探活（2026-10-27 真机：PC 的 Clash 地址进手机 ⇒ 不监听 ⇒ 降级直连）。
+    """
     calls: dict = {}
 
     def fake_search(source, query, limit, **kw):
@@ -266,6 +272,7 @@ def test_route_proxy_falls_back_to_settings(monkeypatch):
         return {"ok": True, "items": [], "error": "", "provider": source}
 
     monkeypatch.setattr(material_sources, "search", fake_search)
+    monkeypatch.setattr(system_proxy, "_tcp_probe", lambda a, timeout=1.0: True)  # noqa: ARG005
     monkeypatch.setattr("app.services.repo_meta.setting_str_from_state",
                         lambda key: {"systemProxyUrl": "http://127.0.0.1:7897",
                                      "proxyUrl": "http://127.0.0.1:9999"}.get(key, ""))
