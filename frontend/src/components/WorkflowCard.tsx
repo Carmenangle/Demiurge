@@ -14,6 +14,7 @@ import {
   buildWorkflowLoraProposal, workflowLoraNames, type WorkflowLoraProposal,
 } from "../lib/workflowLoraData";
 import { captureWorkflowApiPrompt, requestFrameMessage } from "../lib/workflowCapture";
+import { MOBILE_PROFILE } from "../lib/mobileProfile";
 import {
   NODE_VERIFY_GAPS_MS, isNodeSizeFor, isSoloNodeGraph,
 } from "../lib/workflowNodeGuard";
@@ -372,7 +373,7 @@ export function NodeCard({
   const frameUrl = lockUrl(comfyUrl);
 
   useEffect(() => {
-    if (comfyReady) return;
+    if (MOBILE_PROFILE || comfyReady) return;   // 手机端不渲染 iframe，无需探测
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const poll = async () => {
@@ -464,6 +465,18 @@ export function NodeCard({
   const frameStyle: React.CSSProperties = ratio
     ? { aspectRatio: String(ratio) }
     : { height: 220 };
+
+  // 手机端收口：iframe 直连 ComfyUI，手机（联机回环地址 / 云端被 CSP 拦）都加载不到，
+  // 原样渲染只会是一排白框。只留一行说明；生成与结果展示不走这里。
+  if (MOBILE_PROFILE) {
+    return (
+      <div style={{ marginBottom: 10 }}>
+        <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+          节点 {index + 1} · #{nodeId}（手机端不显示节点画布，生成与出图不受影响）
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={{ marginBottom: 10 }}>

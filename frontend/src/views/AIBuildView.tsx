@@ -13,6 +13,8 @@ import { fullUrl, postToFrame, isLafMessageFromStrict } from "../lib/lafLock";
 import { requestFrameMessage } from "../lib/workflowCapture";
 import { BuildWorkspaceRuntime } from "../lib/buildWorkspaceRuntime";
 import { confirmedPlanExecution } from "../lib/workflowBuildExecution";
+import { MOBILE_PROFILE } from "../lib/mobileProfile";
+import { MobileCanvasNotice } from "../components/MobileCanvasNotice";
 import {
   cancelWorkflowBuild, enqueueWorkflowBuild, subscribeWorkflowBuildActivities,
   type WorkflowBuildActivity,
@@ -24,7 +26,20 @@ interface Msg { id: string; role: "user" | "assistant"; text: string; pendingNee
 
 // AI 搭工作流（双栏）：左栏多轮对话与 AI 探讨，右栏完整功能 ComfyUI 画布。
 // AI 每轮读回右侧画布作上下文 → 输出完整 graph → 写入右侧；用户可在画布里手动接着改。
+// 手机端无画布（iframe 直连 ComfyUI，WebView 里连不到）：整页改为能力说明，
+// 不运行搭建钩子（发送按钮本就靠画布握手 ready 解锁，留着只会是个死页）。
 export function AIBuildView({ onInstallNode }: { onInstallNode?: (q: string) => void } = {}) {
+  if (MOBILE_PROFILE) {
+    return (
+      <PageShell title="AI 搭工作流">
+        <MobileCanvasNotice title="AI 搭工作流需要在电脑上使用" />
+      </PageShell>
+    );
+  }
+  return <AIBuildViewDesktop onInstallNode={onInstallNode} />;
+}
+
+function AIBuildViewDesktop({ onInstallNode }: { onInstallNode?: (q: string) => void } = {}) {
   const { settings } = useSettings();
   const chat = activeChatModel(settings);
   const [msgs, setMsgs] = useState<Msg[]>([]);

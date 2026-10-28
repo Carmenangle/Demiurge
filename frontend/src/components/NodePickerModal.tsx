@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { RotateCcw } from "lucide-react";
 import { rawWorkflowByPath } from "../api/workflows";
 import { lockUrl, postToFrame, isLafMessageFromStrict } from "../lib/lafLock";
+import { MOBILE_PROFILE } from "../lib/mobileProfile";
+import { MobileCanvasNotice } from "./MobileCanvasNotice";
 
 interface Props {
   title: string;            // 提示词输入口 / 图像输入口
@@ -114,13 +116,20 @@ export function NodePickerModal({ title, comfyUrl, sourcePath, onPick, onCancel 
         {hint && <p style={{ color: "#c98a1a", fontSize: 13 }}>{hint}</p>}
 
         <div className="lock-canvas" style={{ height: "min(60vh, 520px)" }}>
-          <iframe
-            key={`${sourcePath}::${reloadKey}`}
-            ref={iframeRef}
-            src={lockUrl(comfyUrl)}
-            title="选择节点"
-            className="lock-frame"
-          />
+          {MOBILE_PROFILE ? (
+            <MobileCanvasNotice
+              title="选节点需要在电脑上操作"
+              hint={`手机端不提供 ComfyUI 画布，无法长按「${title}」节点选取输入口。`}
+            />
+          ) : (
+            <iframe
+              key={`${sourcePath}::${reloadKey}`}
+              ref={iframeRef}
+              src={lockUrl(comfyUrl)}
+              title="选择节点"
+              className="lock-frame"
+            />
+          )}
         </div>
 
         {pending && (

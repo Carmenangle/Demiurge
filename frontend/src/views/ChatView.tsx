@@ -42,6 +42,8 @@ import { addWfRun, dropWfRun, upsertWfRun } from "../lib/wfRunList";
 import { deletedMessageTombstones } from "../lib/deletedMessageTombstones";
 import { inspirationToAttachment, consumePendingInspirationAttachments, CHAT_INSPIRATION_EVENT } from "../lib/inspirationInsert";
 import { ConfirmModal } from "../components/Modal";
+import { MobileCanvasNotice } from "../components/MobileCanvasNotice";
+import { MOBILE_PROFILE } from "../lib/mobileProfile";
 import { MaskEditorModal, type MaskEditorResult } from "../components/MaskEditorModal";
 import { MediaInsertModal } from "../components/MediaInsertModal";
 import { PromptTemplateModal } from "../components/PromptTemplateModal";
@@ -1376,7 +1378,13 @@ export function ChatView({
                 <X size={16} />
               </button>
             </div>
-            {comfyRunning ? (
+            {MOBILE_PROFILE ? (
+              // 手机端收口：iframe 只会白屏，「启动 ComfyUI」也是 PC 独占端点（远端 403）。
+              <MobileCanvasNotice
+                title="ComfyUI 节点面板（手机端不提供画布）"
+                hint="节点面板要直连 ComfyUI 页面；手机上无论联机同库还是云端地址都连不到，故不渲染画布。"
+              />
+            ) : comfyRunning ? (
               <iframe className="comfy-frame" src={settings.comfyuiUrl} title="ComfyUI" />
             ) : (
               <div className="comfy-empty">

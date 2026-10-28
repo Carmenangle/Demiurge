@@ -3,6 +3,8 @@ import { FileUp, FolderSearch, Workflow as WorkflowIcon, Trash2, Pencil, FileTex
 import { type Settings, activeChatModel } from "../stores/settings";
 import { comfyStatus } from "../api/comfyui";
 import { lockUrl, postToFrame, isLafMessageFromStrict } from "../lib/lafLock";
+import { MOBILE_PROFILE } from "../lib/mobileProfile";
+import { MobileCanvasNotice } from "../components/MobileCanvasNotice";
 import { useWorkflowTemplates } from "../lib/useWorkflowTemplates";
 import { DescribeModal, type DescribeValue } from "../components/DescribeModal";
 import { ConfirmModal, AlertModal, PromptModal } from "../components/Modal";
@@ -510,13 +512,20 @@ function NodeEditor({
       {viewMode === "comfy" && (
         <div className="template-canvas-layout">
           <div className="lock-canvas" style={{ height: 600, flex: 1 }}>
-            <iframe
-              key={`${sourcePath}::${reloadKey}`}
-              ref={iframeRef}
-              src={lockUrl(comfyUrl)}
-              title="ComfyUI 画布预览"
-              className="lock-frame"
-            />
+            {MOBILE_PROFILE ? (
+              <MobileCanvasNotice
+                title="工作流画布预览需要在电脑上使用"
+                hint="模板的节点选取与参数编辑依赖 ComfyUI 原生画布，手机端连不到这段画布。"
+              />
+            ) : (
+              <iframe
+                key={`${sourcePath}::${reloadKey}`}
+                ref={iframeRef}
+                src={lockUrl(comfyUrl)}
+                title="ComfyUI 画布预览"
+                className="lock-frame"
+              />
+            )}
           </div>
           <div className="picked-panel">
             <div className="picked-head">
