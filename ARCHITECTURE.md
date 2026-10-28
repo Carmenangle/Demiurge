@@ -1193,6 +1193,10 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
    （mobile profile vs G1 dev 基线 create 11.3 ms / add 29.7 ms）仍挂 #61，本条不声称变快或变慢。
    账本与红线 `PLAN-MOBILE-STANDALONE-2026-10-25.md` §15.5.2 与 §11 分项表；
    运行时足迹 §15.6；决策面 §14（D4 修订、D6 建议、D7 预算线唯一化）。
+   **2026-10-27 用户拍板（D7 修订：功能优先）**：体积线是治理工具不是交付目标——功能完整性与 D4
+   「与 PC 一致」优先于 ≤190 MB。功能改进带来的净增允许**明示放宽**：出包时 `apk_size_ledger.py`
+   账本记下增量归属与理由、新高线写进 PLAN §14 D7 行留痕，此后账本按新高线判定；纯浪费（dev 级
+   编译产物、重复/孤儿资源、可改按需交付的资产）仍然必须削。静默漂移（不记账、不换线地超线）依旧禁止。
 
 65. **手机端联机与运行时合同（M7 中继 / M4 生命周期 / 运行时白名单 / 出包身份，2026-10-26）**：
    ① **进度 WS 中继**（`services/comfyui_ws_proxy.py`，路由 `/api/comfyui/ws`）：手机端直连 LAN
@@ -1215,8 +1219,15 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
    ③ **运行时 ComfyUI 主机白名单**：单一真源＝前端设置页 `comfyuiUrl`（壳层/Java 零改动）——保存时
    `POST /api/mobile/comfy-host` → `url_guard.register_comfyui_host`（与 `COMFYUI_ALLOWED_HOSTS` 同一
    列表，只收裸主机名/IPv4、上限 8 条、回环免登记）＋落盘 `<LAF_DATA_DIR>/comfy_hosts.json`；开机由
-   `mobile_server._seed_comfy_hosts()` 复播（坏条目跳过、不挡启动）。`comfy_hosts.json` 是**设备本机
-   安全名单**：不进 D6 同步面，也不进 APK 隐私白名单的允许项。
+   `mobile_server._seed_comfy_hosts()` 复播（坏条目跳过、不挡启动）。**2026-10-27 起该池的登记／落盘／播种
+   属主下沉到 `services/comfy_hosts.py`，PC 侧 `POST /comfyui/config` 保存即登记（壳层薄封装暂共存未改委托），
+   详见条 71**。`comfy_hosts.json` 是**设备本机
+   安全名单**：不进 D6 同步面，也不进 APK 隐私白名单的允许项。**云端 ComfyUI（2026-10-27）**：地址协议
+   收 `http/https/ws/wss`——公网 ComfyUI 基本只以 https 暴露，安全边界是**主机白名单**不是协议，放行
+   https 反而多一层传输加密、不放宽 SSRF 面；`comfyui_client.is_up` 的 TCP 探测**缺省端口按协议**
+   （https/wss→443，http 仍走 `COMFYUI_DEFAULT_PORT`），写死默认端口会让 https 先白等一次必然失败的探测；
+   WS 中继 `_target_ws_url` 与前端 `wsUrl` 都由 `^http→ws` 派生，https→wss 天然成立。云端 = 手机不经
+   PC 后端、直接对公网 ComfyUI 提交/取图（仍过本机后端白名单），画布 iframe 同受 CSP `frame-src` 取舍。
    ④ **出包身份＝内容 sha，不是手写版本号**（0.4.3 实锤：`assets/frontend.zip` 与 0.4.2 逐字节相同，
    M7/M4 的前端改动一项没进包，而「只自检 dist」的构建全绿）：`mobile/spike/build-frontend-mobile.sh`
    是唯一入口（重建 dist → 自检含负例（`/api/comfyui/ws` 字面量、无 `develop/Git`）→ 打 zip：成员相对
@@ -1271,7 +1282,13 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
    （同族 `export`/`export_save`/`inventory` 都是 sync `def`，FastAPI 自动线程池，故从没暴露过这条）。**导出双通道**：手机端
    走真实 GET 附件 URL 且**必须是绝对 URL**（相对地址在 WebView `DownloadListener` 里 host 为空会被静默丢弃）；
    PC 桌面壳没有下载处理器，走 `/export/save` 直接存进系统下载目录，`/reveal` **只允许定位该目录内**的文件。
-   **PC 远端能力面**：`remote_gate` 把 `/api/config` 列入 DENY——远端不能导出含密钥/作品/素材的 PC 资源包。
+   **PC 远端能力面**：`remote_gate` 把 `/api/config` 列入 DENY——远端不能导出含密钥/作品/素材的 PC 资源包；
+   唯一**精确放行**的是 `GET /api/config/pull`（`ALLOW_EXACT`，不做前缀）——在线同步的拉包口，签名不收
+   `include_secrets`、恒 `False`，密钥不出 PC。手机 `services/mobile_sync.py` 只走这条口子（后台下载→
+   `import_bundle`→清临时 zip；状态 idle/downloading/importing/done/error；目标地址与令牌只取
+   `remote_backend.json`，不接受前端指定源）。SCOPE 允许根＝`DATA_DIR` ＋ **`settings.outputDir`**，
+   只能经属主读点 `repo_meta.output_dir_from_state()` 取——读顶层 `user_state["outputDir"]`（错层级）会让
+   作品根永远不在域内，远程 `save-local` 写作品根一律 403（2026-10-27 三进程 E2E A7 实锤后修正）。
    **资产账本 `assets.json`（v3 新增，治 2026-10-26 21:28 真机「生成内容」空态）**：列表页读的是 SQLite 主表
    （`asset_library.list_generations_page`：主表非空即以其为准，空/异常才回退 Chroma），而包里没有主表也没有向量库
    ⇒ 设备侧「图全在盘上、页面恒空」（实测 57 仓库 / 890 MB 图片已落 `files/pictures`，UI 仍显示空态）。合同四条：
@@ -1365,6 +1382,41 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
    页面上下文 `fetch('/api/user-state')` 读回 repos 57、chatModels 8 条全带 key、预设 `GrayWill-0.46-demiurge`。
    文档展开：`F/11` §3.11.7／§3.11.8（资产账本落点）、`G/10`「离线资源包与联机代理」、`G/16` §3 门禁清单；
    窄屏对话页布局另见条目 67（`F/11` §3.11.8 后半）。
+   ⑦ **2026-10-27 三件收口（联机生成全流程／在线同步／云端 ComfyUI 地址）**：
+   **画布收口**＝手机构建（`VITE_MOBILE_PROFILE=1`）一律不渲染 ComfyUI iframe（`NodeCard` 改一行说明、
+   `AIBuildView`/对话节点面板/模板页换 `MobileCanvasNotice`）：联机同库时 PC 的 `comfyuiUrl` 常是回环
+   （在手机里指手机自己），云端地址又被后端 CSP `frame-src` 拦死 ⇒ 任何 iframe 形态都只能白屏；生成本身仍由
+   PC 执行、进度/图片/资产回手机会话，不受影响。**在线同步**＝手机设置「离线资源同步」区新增入口，`POST
+   /api/mobile/sync` 起后台线程走 `GET /api/config/pull`（PC 侧 `ALLOW_EXACT` 精确放行、恒不含密钥），
+   状态机 idle/downloading/importing/done/error、并发 409、存储预检 `content-length×2 + 64 MB`、`finally`
+   清临时 zip；目标地址与令牌只取 `remote_backend.json`。**云端 ComfyUI**＝`validate_comfyui_url` 放
+   http/https/ws/wss，`is_up` 缺省端口按协议（https/wss→443），`_target_ws_url`/前端 `wsUrl` 由 `^http→ws`
+   派生 wss；主机白名单 `comfy_hosts.json` 落盘 + 开机播种，不进任何同步面。
+   **验证**：三进程真后端 E2E **36/36**（stub ComfyUI 0.0.0.0:8199 ＋ PC 0.0.0.0:8022 ＋ 手机 127.0.0.1:8021／
+   独立/云端 8023；覆盖 status/submit/result/view/WS 进度、PC 独占 403、未登记主机 400、SCOPE 读拦写放行、
+   在线同步真拉包→导入→密钥不外泄→临时包清理、云端登记/生成/重启播种）——其中 A7 暴露并修复了
+   `remote_gate._allowed_roots()` 读错层级（见 ① 末段）；`test_mobile_sync.py` 5 例、后端全量 **4639 例 /
+   2 failed（均为既有 `test_material_sources.py` 代理探活环境依赖红）/ 0 errors / 0 skipped**；前端全量
+   **169 文件 / 1949 例** + `tsc` + `vite build` 绿。APK **0.30.9-beta / versionCode 24**，189,972,848 B，
+   sha256 `911f10dce862a694…`（前端 zip 103,341,149 B == 源 `04492282…`），账本 exit 0、安全闸 16/16。
+   **真机验收（2026-10-27，HONOR 90 Pro / Android 15，0.30.9-beta(24) 装机）在线同步首轮即红**：
+   「同步失败：导入失败：配置包缺少仓库文件分组：<作品目录>」——契约缺口在**导出端**：父作品自身无自有文件
+   （内容全在子仓库 `SAVE01`）或本身就是空作品时，`_write_repos` 仍写 `repos.json` 条目（`files: 0`）却
+   不产出任何 `repos/<index>/` 成员，而导入端 `_import_repos` 硬要求分组目录 ⇒ 整包判损坏。修法＝
+   `_parse_repos_index` 透传并校验 `files`；`_import_repos` **仅当 `item["files"] == 0`** 时 `mkdir` 按空
+   作品导入，**声明有文件却缺组仍判包损坏**（防截断静默丢数据）。补两条回归＝「父仓库无自有文件时按空
+   分组导入」「声明有文件却缺分组仍判包损坏」，三文件 **50 例**绿；用真机实际拉到的失败包（5427 B）在
+   临时手机目录复现失败 → 修复后导入成功。**重出 0.30.10-beta / versionCode 25** 后真机全链通过：可见
+   「已同步设置 37 项 · 角色卡 1 · 世界书 1 · 预设 1 · 工作流…」、资产管理见 `PC验证作品A/B/C`、角色卡页见
+   `PC验证角色卡`；「断开联机」后回本机数据（联机面板地址/令牌清空、`remote_backend.json` 清除）。
+   **云端地址真机取证**：UI 保存 `https://comfy.example.com` → `user_state.json` 与 `comfy_hosts.json` 双
+   落盘、`/api/comfyui/status` 过白名单（running:false 是探活失败，不是拒绝）；未登记的 `other.example.com` /
+   `evil.example.net` 经 `POST /api/comfyui/interrupt` 均 **400**「主机名…不在允许范围内」；清空白名单重启后
+   同一 `comfy.example.com` 转 400、回环 `127.0.0.1:8188` 仍 200 ⇒ 白名单确由「用户保存过的地址」播种、
+   回环恒放行。APK **0.30.10-beta / versionCode 25**，189,972,848 B，sha256 `25fef82a96d02e7b…`（前端 zip
+   103,341,149 B == 源 `04492282…`），账本 exit 0、安全闸 16/16（**手机端修后端必须重出 APK**——`app.imy`
+   是 `backend/app` 的编译副本）。**已知未验**：联机生成（PC ComfyUI 真出图回手机）只验到接口/画布收口层，
+   未在真机跑一次完整出图（本轮设备侧无可用 PC 局域网后端配对）。
 
 67. **窄屏对话页布局合同（390×844 · 2026-10-26 晚用户实锤「对话设置把对话遮挡了」）**：
    ① **合同**：窄屏（`max-width: 720px`）下对话正文 `.chat-stream` 必须拿到 **≥45 % 视口高度**、浮层不得越出视口、
@@ -1388,12 +1440,227 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
    ④ **验证**：e2e-manual `chat-mobile-layout.spec.ts`（真 vite:5173 + 真后端:8010 + 系统 Edge，390×844）断言
    正文高度、浮层在视口内、气泡内无横向溢出；其溢出断言吃的是**当前会话真实数据**（10 个失败槽），护栏一关即红、
    无需注入 fixture。`src/lib/chatMobileLayout.contract.test.ts`（4 例）从磁盘读 `styles.css` 做 CSS 形式锁；
-   ⚠ 本仓库有**五处** `@media (max-width: 720px)`，必须按「含 `.nci-body` 的那一段」定位，否则会锁到桌面段
-   （首轮就是这么假红了 3/4：`找不到规则 .chat-actions`）。两处受控红检：关 `.media-slot-failed` 那行 ⇒ e2e 红；
+   ⚠ 本仓库有**十处** `@media (max-width: 720px)`（2026-10-27 问题 8 后；每条条件后面都追加了触屏横屏补语
+   `(pointer: coarse) and (hover: none) and (max-width: 1024px)`），必须按「含 `.nci-body` 的那一段」定位；
+   形式锁现在只认条件前缀、再自己找花括号（`"@media (max-width: 720px) {"` 这个字面量已不存在，见条目 68）。
+   定位错就会锁到别的那一段（首轮就是这么假红了 3/4：`找不到规则 .chat-actions`）。两处受控红检：关 `.media-slot-failed` 那行 ⇒ e2e 红；
    把形式锁指回第一个 `@media` 段 ⇒ 3/4 红。
    ⑤ **状态**：已验＝真浏览器 390×844；**真机复验未完成**（本轮 adb 枚举不到设备）。用户手机上要看到本条与
    条目 66 的资产账本修复，都必须装新 APK（前端进 `frontend.zip`、后端 `config_bundle` 进 Chaquopy 侧），
    资产账本还需装新包后在 PC 重导一次、再推到手机重导。
+
+68. **手机三处版式收口（2026-10-27 用户截图 问题 5·6·7：工具条太大/图太小、横屏回落电脑版式、弹窗顶部大片空白）**：
+   ① **合同**：手机（触屏 `pointer:coarse`+`hover:none`，含竖屏 ≤720px 与横屏 ≤1024px）下——
+   生成内容工具条高度必须 ≤80px（横滑而非换行）、缩略图每格 ≥150px（390px 竖向 2 列）、内容型弹窗
+   **顶部空隙 = 0**（`position:fixed; inset:0`）。桌面（真鼠标）必须**一条新规则都不命中**。
+   ② **工具条**：`.asset-toolbar` 窄屏改 `display:grid; grid-auto-flow:column; grid-template-rows:repeat(2,auto)`
+   的两行横滑条，按钮 `min-height:30px`。实测 290→69px（屏高占比 34%→8%）。两个坑：ⓐ 主题皮肤的
+   `html:is([data-theme=…]) .btn:not(.danger)` 给所有按钮钉了 `min-height:40px`，比 `.page-toolbar.asset-toolbar .btn`
+   更具体 ⇒ 必须带 `html[data-theme]` 前缀（否则两行仍各 40px，实测 88px）；ⓑ 自动排布里 `grid-row: span 2`
+   的项会从第 2 行起跨进隐式第 3 行 ⇒ 分段开关只能占一格、不能跨行。
+   ③ **缩略图**：列数由纯函数 `masonryColumnCount(容器宽)` 决定（≤480→2、≤640→3、≤900→4、否则 6；宽度未知→6），
+   390px 下每格 50→177px（3.5 倍，用户要求 ≥2.5 倍）。**真根因不是断点而是观察器从未接管**：瀑布流只在
+   `items.length>0` 时渲染，`[]` 依赖的 effect 在挂载首帧拿到 `null` 就 return ⇒ 永远停在初始 6 列；
+   改为回调 ref → state（`[gridEl]` 依赖）后再 observe。
+   ④ **横屏**：`@media (max-width: 720px)` 不命中 844×390 ⇒ 整页回落电脑版式（200px 侧栏 + 190px 工具条把
+   画廊推到 y=392，正好在 390px 视口之外＝「横屏只能看到按钮」）。修法＝全部窄屏段条件追加
+   `(pointer: coarse) and (hover: none) and (max-width: 1024px)`，再补一段低视口高
+   `(pointer: coarse) and (hover: none) and (max-height: 520px)`（顶栏压回一行、底栏 42px、仓库卡 3 列、
+   页头收一行）。**桌面零影响用真鼠标探针反证**：1440×900 与 800×600 下两条媒体查询均 `matches=false`，
+   工具栏仍 `display:flex`、仍 6/3 列、弹窗仍 `position:relative`。
+   ⑤ **内容弹窗**：左右分栏/大列表弹窗固定 `86dvh` ⇒ 顶部空 14%（竖屏 118px／横屏 63px）。改
+   `.modal:has(.modal-split-body)` + `.asset-detail-modal` / `.regex-modal` / `.preset-modal` / `.smithery-modal`
+   全屏（`position:fixed; inset:0; height:100dvh !important; border-radius:0`），小确认框仍走底部抽屉（不抢全屏）。
+   生成详情弹窗原先没有类名（只有内联 `95vw/90vh`），先补 `.asset-detail-modal` 才选得中。**同款特异性坑**：
+   主题皮肤 `html:is([data-theme=…]) .modal`（0,2,1）钉了 `position:relative; border-radius:8px`，`!important`
+   只写 height/max-height 量出来是「满屏但相对定位、圆角 8px」（实测 `topGapPct:0` 而 `position:relative`）⇒
+   每个类选择器都必须带 `html[data-theme]` 前缀，表单锁已逐条钉死。生成详情另补一处版式：竖屏左右分栏
+   把图压到 ~190px 宽、右栏标签全折行 ⇒ `.asset-detail-body` 在竖屏 `flex-direction: column`、图区
+   `flex: 0 0 min(300px, 42dvh)`（图 190→366px 宽，右栏 366px 全宽），横屏段再改回 `row`（42/58）。
+   ⑥ **验证**：`_tmp/mobile-probe/probe.cjs`（系统 Edge，390×844 / 844×390，`isMobile+hasTouch`）——
+   工具条 290→69 / 190→66、每格 50→177 / 87→199、画廊 y 459→236 / 392→192、弹窗顶部空隙 14%/16%→0%。
+   形式锁 `src/lib/assetsMobileLayout.contract.test.ts` 7 例（含「每条窄屏媒体查询都带触屏补语」）
+   + `masonry.test.ts` +3 例；前端全量 **168 文件 / 1939 例** + `tsc --noEmit` + `vite build` 绿。
+   **真机复验**：2026-10-27 已在 **0.30.6-beta/21** 抽检通过（工具条两排、瀑布流 2 列大图、生成详情全屏、横屏仍是
+   手机壳层，见 `F/11` §3.11.10）；横屏补语在 Android WebView 上的 `pointer/hover` 取值**已实测成立**。
+   🔴 抽检新发现（未修）：横屏 390px 高时聊天 composer 的动作行被裁到折叠线下且不可滚动 ⇒ 横屏不能发消息。
+
+69. **手机页面级横滚恒为 0（2026-10-27 用户真机截图 问题 8：「上面的功能可以横滑，下面画面不能拖动」）**：
+   ① **合同**：触屏窄屏下 `.app-body` 的 **scrollWidth 必须等于 clientWidth**（强行 `scrollLeft=200` 必须回弹 0）；
+   横向滚动**只允许**发生在控件自己的滚动容器上（`.asset-toolbar` 两行横滑、`.pager-dock` 吸底分页条）。
+   ② **真根因（不是工具条）**：390×844 实测 `.app-body` **432/390**（可横拖 42px），而 `.page-toolbar.asset-toolbar`
+   自身 sw955/cw362 是容器内横滑、不贡献页面宽度；撑宽的是**吸底分页条**——`.pager` 483px（12 钮 + 页码输入框）
+   且 `justify-content:center` ⇒ x=−52 / right=432，左右各溢出一截（**左侧连滚都够不到**）。改法：`.pager-dock`
+   手机段 `overflow-x:auto` + `overscroll-behavior-x:contain` 自滚，`.pager` 改 `width:max-content; margin:0 auto`
+   （放得下仍居中）；390px 下 12 钮＋输入框仍差 66px ⇒ 手机收掉 `.page-jump`（整条 298px 正好不滚，页码窗口 ±2 +
+   首页/末页/上一下一仍可达），更窄的屏由 dock 自滚兜底。
+   ⚠ **`overflow-x: visible` + `overflow-y: hidden` 会被计算成 `auto`**：红检时只删 `overflow-x` 页面仍不溢出
+   （dock 还在自滚），两条都删才复现 452/390——所以「哪一条在起作用」必须分别量。
+   ③ **同选择器的形式锁是跨会话耦合点**：`.page-toolbar.asset-toolbar` 的 `max-width:100%; min-width:0` 双保险
+   **并入条目 68 的那条规则**，不得另起一条同名规则——`assetsMobileLayout.contract.test.ts` 取的是**文件里第一条**
+   该选择器规则；同理新加的窄屏段必须排在 `lastMediaBlock` 所依赖的那段**之前**（它取**最后一段**同条件 @media），
+   追到文件末尾会把问题 7 的断言顶红。两处都是「按顺序取块」的启发式，新增块前先看同文件测试怎么定位。
+   ④ **e2e 路由通配坑**：`page.route("**/api/**", …)` 会连 Vite 模块 URL（`/src/api/client.ts`）一起拦掉 ⇒
+   模块 MIME 变 JSON、整页白屏。必须用 pathname 谓词 `page.route((url) => url.pathname.startsWith("/api/"), …)`。
+   ⑤ **验证**：探针 `_tmp/page-hscroll/{before,after2}.json`——整页 432→390、dock 418/362→362/362、pager 483@x−52
+   →298@x41；e2e `mobile-shell-r6.spec.ts` 问题 8（自造 fixture 32 项/352 总数，断言 bodySW==bodyCW、toolbar
+   sw>cw 且 right≤390、dock 不滚、forced scrollLeft==0）；形式锁 `mobileShellLayout.contract.test.ts` +2 例。
+   受控红检：还原输入框 + 去掉两条 overflow ⇒ e2e 红在 `整页不得有横向滚动`（452 vs 390）；按 sha1 逐字节还原后复绿。
+   **真机 0.30.7-beta/22 通过**（`_tmp/r6-device/34~36`）：图区横拖后 `uiautomator` 地标 bounds 逐项不变
+   （资产库 x43 / 首页 x76 / 末页 x1069 / 生成内容 x549），工具条横拖时只有工具条自身移动（全部 934→0、图片 1195→235）。
+
+70. **手机设置面板「标题 + 动作按钮」头行不得被压缩（2026-10-27 用户真机截图 问题 9：「技能扩展那行按钮」）**：
+   ① **合同**：触屏窄屏下这类头行的标题与按钮文案**永不断行**（`white-space: nowrap`），按钮不参与压缩
+   （`flex: 0 0 auto`）；一行放不下时**整排按钮落到标题下一行**，页面仍不得横滚（条目 69）。
+   ② **真根因**：头行是内联样式 `display:flex; justify-content:space-between`（技能扩展 / MCP 服务器 /
+   自定义智能体 / 内置智能体 / 提示词模版 / 用户人设 六处同型），标题 `h4` 与按钮组被一起压到 min-content；
+   `.btn` 无 `white-space` ⇒ 中文逐字折行；明亮主题按钮的 `border-image` 斜纹侧片还占两侧固定宽度，
+   压缩后内容宽只剩一两字 ⇒ `保存` 竖排。390×844 实测（`_tmp/probe/skills-head-before.json`）：标题 59×58
+   两行，Smithery 市场 132×58、新建 80×58、保存 79×58 全部两行。
+   ③ **修法**：六处头行加 `settings-actions-head` 类（**必须落在 TSX**——内联 display/justify-content 只能靠
+   `!important` 覆盖，类 + 媒体查询只动 `flex-wrap` / `row-gap` / `white-space` / 按钮 `flex` 与紧凑 padding，
+   桌面零影响）；改后标题 72×34 单行、三按钮 142/87/86×40 各单行整排换行，`bodySW==bodyCW==390`。
+   ④ **验证**：形式锁 `mobileShellLayout.contract.test.ts` +2 例（五条声明 + 六个 tsx 都挂类）；e2e
+   `mobile-settings-head.spec.ts` 2 例（技能扩展 / MCP 服务器，自足 `/api/` 桩，Range 逐文本节点数行数）。
+   受控红检：全表把 `.settings-actions-head` 改名 ⇒ 2 例红在「标题应单行」，sha1 还原后复绿。
+   全量 **168 文件 / 1941 例** + `tsc --noEmit` + `vite build` 绿。**真机 0.30.8-beta/23 通过**
+   （`_tmp/r6-device/51-q9-skills-head.png`、`52-q9-mcp-head.png`）。
+
+71. **ComfyUI 主机白名单的登记／落盘／播种只有一个属主，且写它的端点属 PC 独占（2026-10-27）**：
+   ① **合同**：任何「保存 ComfyUI 访问地址」的路径都必须经 `services/comfy_hosts.register_from_url`
+   （先过 `url_guard.register_comfyui_host` 判定、**后**写 `comfy_hosts.json`——顺序反了会在文件里积出
+   运行时不认的条目，播种时集体哑火）；router 不得直接摸 `url_guard._COMFYUI_EXTRA`。**能写这条池的端点
+   一律进 `remote_gate._DENY_PREFIXES`**（闸按前缀、不分方法）：`/api/comfyui/config` 与 `/api/comfyui/hosts`
+   都在内。登记失败**不打断保存**，但必须把原因回给用户（`registered` / `register_error`）。
+   ② **真根因（不对称）**：手机端壳层早就有 `POST /api/mobile/comfy-host`（保存即登记 + 落盘 + 开机复播），
+   PC 侧却**一条登记路径都没有**——`lib/mobileProfile.ts::syncMobileComfyHost` 在非 `MOBILE_PROFILE` 直接
+   return，`POST /comfyui/config` 只写 `comfy_config.json`。结果 PC 填局域网/公网 ComfyUI 只能在提交时撞
+   400「不在允许范围内」，或手设 `COMFYUI_ALLOWED_HOSTS`（导入期一次性读入，改完要重启）。
+   ③ **修法**：新增 `backend/app/services/comfy_hosts.py`（登记 + 落盘 + 播种 + `snapshot`，**文件名与 JSON
+   schema 与壳层那份相同**（`{"hosts": [...]}`）⇒ 两个写者共用一份 `comfy_hosts.json`、登记幂等）；`set_config` 保存后顺带登记并把
+   回执带进 `ComfyConfigResult`；`GET /hosts` 只读；`main._lifespan` 开机 `seed_runtime()`（坏条目跳过、
+   不挡启动，播种条数进日志）；前端 `commitSave` 把 `register_error` 升成可见提示、`PathsPanel` 补 PC 口径
+   （上限 8 台 / 重启仍生效 / 未登记提交会被拒）。**服务侧读 `config.DATA_DIR` 必须调用期**——写成导入期
+   常量，`monkeypatch.setattr(config, "DATA_DIR", tmp)` 会失效、测试直接落到真实 `backend/data`。
+   ④ **边界（本轮定案，不是遗漏）**：手机壳 `mobile_server.py` 的薄封装**保留未改成委托**（用户定案「壳先
+   共存」；改委托要重出 APK，不值这一刀）。`unregister_comfyui_host`（注销）与主机簿管理 UI **推到地址簿
+   那一步**（注销已随 A 段落地，见 ⑥；管理 UI 待 D 段）：第 1 步时 `url_guard` 只有登记没有注销，池满 8 台
+   后只能改环境变量或清文件。🔴 **联机模式下从手机
+   改地址的陷阱本轮没治**：值经代理写进 PC 的 user_state，而登记要走的 `/api/comfyui/config` 恰是 PC 独占
+   ⇒ 手机打过去 403；联机要用云端 ComfyUI 仍须在 PC 设置页保存该地址，或手机关掉联机单机跑。
+   ⑤ **验证**：`test_comfy_hosts_book.py` **18 例**（云端 https 双落盘 / 裸 host:port / 幂等 / 回环不污染
+   文件 / 畸形输入抛且不落盘 / 上限已满拒绝 / 脏条目与损坏文件播种跳过 / 路由层回执 / `GET /hosts` 三键 /
+   闸判定「PC 独占」与裸远端互锁 / **与壳层共存互读两例**——壳写的文件服务读得到并能播种、服务写的壳读得到，
+   锁住「同文件同 schema」这条定案的前提）；改路由类表按 `G/16` 的合同同步进 `test_remote_gate.py` 两处
+   （判定层 DENY 清单 + HTTP 层远端 403，都覆盖 `/api/comfyui/config` 与 `/api/comfyui/hosts`）；
+   隔离实例真机链：未登记 **400** → 保存该地址 → **502**（白名单已过、
+   DNS 失败）→ 重启仍 502 且日志「ComfyUI 白名单已播种 1 台主机：probe.invalid」；回环保存
+   `registered == "loopback"` 且**不写文件**。门禁：ruff（改动 5 文件）/ `lint-imports` 18 kept /
+   mypy 279 文件 / `check_hardcode` / `check_silent_except` 全过；前端 **169 文件 / 1949 例** + `tsc` +
+   `vite build` 绿；后端全量 **4665 例 / 2 failed / 0 errors / 0 skipped**（`full_gate_pytest.py`：「源码在跑批期间未变，
+   结论有效」）。两条红＝`test_material_sources.py::test_route_reads_credentials_from_settings` /
+   `test_route_proxy_falls_back_to_settings`，**与本改动无关且已定因**：`system_proxy.alive()` 做**真 TCP 探活**
+   （`f2a4c97` 引入的「代理不监听就降级直连」），而这两例断言的是假代理 `http://p:1`、`http://127.0.0.1:7897`
+   被原样透传——本机这两个端口不监听 ⇒ 兜底成空串。修法属素材链那条线（用例该桩 `_tcp_probe`），本刀不越界。⇒ 手册 `C-comfyui-media/04` §2 单元表／§4.3 路由表／
+   §5 红线 21／§6 回归，`G-contracts-release/10` §3.1（订正「白名单只有环境变量」的过期描述），
+   记忆 `topic-canvas-and-workflow.md`「2026-10-27」与项目记忆 `cloud-comfyui-executor-model.md`。
+   ⑥ **A 段补注销链路（2026-10-27，同一合同）**：`url_guard.unregister_comfyui_host`（此前只有登记没有
+   注销）返回三态 `loopback` / `removed` / `absent`（删除幂等，重复点不报错），**`COMFYUI_ALLOWED_HOSTS`
+   声明的主机抛 `ValueError` 拒绝运行期注销**——那份清单的属主是启动环境，静默删掉再重启复活只会骗用户
+   一次。`comfy_hosts.remove_from_url` 对称于 `register_from_url`：**内存与落盘各删一次、各自幂等**（内存面
+   可能因播种/环境变量与文件不一致，只删一层就留下「删了还在」的假象）。路由补 `POST /comfyui/hosts`
+   （**只放宽白名单、不动 `comfy_config.json` 默认地址**——`POST /config` 会顶掉默认机，加第二三台不能走
+   它）与 `DELETE /comfyui/hosts?url=`；三条方法同一前缀 ⇒ 一起被 `remote_gate._DENY_PREFIXES` 罩住。
+   地址簿本体字段 `settings.comfyExtra`（`{id,name,url}`，条目 0 即 `comfyuiUrl` 本身，**URL 才是真值、
+   name 只是标签**，改名不断历史）与 `settings.comfyRoute`（按模态指向 `comfyExtra.id`，省略＝跟随条目 0）
+   已进前端 store 与 `config_bundle.NETWORK_KEYS`（机台地址与本机网络绑定、路由又指向那些 id ⇒ 与
+   `comfyuiUrl` 同属网络项，不进跨设备包）。**解析属主／同机不变量／管理 UI 是 B/C/D 段**：本条只锁
+   「簿子能加能删、删得干净、端点 PC 独占」。
+   验证：`test_comfy_hosts_book.py` 18→**28 例**（新增 10 例注销链路：内存+落盘一起删／幂等／回环不碰文件／
+   只改一层时另一层也清／名额释放可再登记／环境变量主机拒注销／`POST /hosts` 不改默认地址／形态不合法
+   400／`DELETE /hosts` 幂等清两层／`DELETE` 环境变量主机 400）；`test_config_bundle.py` 加**名单本身**的
+   锁（漏加时「按 PRESERVE_KEYS 遍历」的通用断言不会报错）。后端定向 **60 例** + 路由类表 **98 例** /
+   ruff / mypy / `lint-imports` 18 kept / `check_hardcode` 全过；前端 `tsc --noEmit` 绿、全量 **172 文件 /
+   1979 例**绿。
+   ⑦ **B/C/D 段（2026-10-28，同一合同）：解析属主 / 同机不变量 / 管理 UI**。**(a) 解析属主**＝
+   `frontend/src/lib/comfyMachines.ts`：`listMachines`（条目 0＝`comfyuiUrl`；脏条目——缺 id / 空 url /
+   非字符串 / id 撞 `default`——过滤一次）、`resolveComfyUrl(settings, modality)`（路由 id 命中即其 URL，
+   **缺省/未知 id 一律回退条目 0** ⇒ 未配路由与改造前逐字等价）、`machineLabelOf`、`sameComfyUrl`
+   （只归尾斜杠/大小写）、`isLoopbackComfyUrl`、`diffComfyHosts`（保存时白名单增删集合）。消费点：
+   `useIllustrationChain`（帧图=图片机、正片/转场=视频机）、`useAudioTracks`（上传/提交/轮询三处同一个
+   `comfyAudioUrl`）、`useChatSession.pollResult(…, comfyuiUrlOverride)`——**过渡视频/配音没有
+   regeneration 快照可推导地址**，不显式传就会问错机器（永远拿不到结果）。**(b) 同机不变量**：
+   `PendingGeneration.comfyuiUrl` 提交时固化；归档取产物（`finalizeGeneration`）、观察者推进下一个 pending、
+   两处中断（`stopSlotGeneration` / `hardCancel`——打入口 0 等于没停）、`useWorkflowResume` 恢复轮询**五处都读它**，
+   缺字段的旧数据退回快照地址→条目 0。**(c) 跨机首帧**：帧图在图片机产出、视频机引用同一 input 文件名并不存在
+   ⇒ 图片机≠视频机时 `viewUrl(img, 图片机)` 取回字节 → `uploadRemoteImageToInput(..., 视频机)`；同机仍走
+   `moveComfyOutputToInput` 原路。**(d) 边界（设计内）**：原生画布 / iframe / 手动运转工作流永远只走条目 0
+   （画布只嵌本机 ComfyUI；非回环默认地址在设置页给黄字预警）；**不做自动故障转移**（用户定案）；
+   联机中手机侧地址簿**只读**（真源在电脑；`/comfyui/hosts` PC 独占，代理过去只会 403）。**(e) 白名单对账**＝
+   保存时 `diffComfyHosts(prev, next)`：新增登记、删除注销；**与默认地址同址的额外条目既不登记也不注销**
+   （删重复条目不能把默认机的白名单拆掉）；登记失败不打断保存，原因合成一条弹窗。**(f) 验证**：前端
+   `comfyMachines.test` 19 例（含 `diffComfyHosts` 4）、`PathsPanel.test` 9 例（jsdom：路由下拉写回 / 删机清路由 /
+   探测走 `/comfyui/status` / 非回环预警 / 联机只读）、`SettingsView.test` 3 例（保存→POST、删→DELETE、失败弹窗）、
+   消费点与契约锁（跨机首帧、音频三处同机、恢复/在途认提交机、三处 poll 形参）；`tsc --noEmit` 绿、前端全量
+   **175 文件 / 2014 例**绿、`npm run build` 绿。**真机未验**（需重出前端 zip + APK）。
+
+72. **手机「联机检测」弹窗：唯一的联机状态断言面，且只答电脑侧两件事（2026-10-27 用户定案）**：
+   ① **需求口径**：电脑端有 ComfyUI 状态横幅（`ComfyStatusMonitor`），手机端**没有横幅**——`.comfy-monitor`
+   在窄屏/触屏那段 `@media` 里被 `display:none !important` 摘掉（`styles.css` 的 `@media (max-width: 720px),
+   (pointer: coarse) …` 段）。用户要的是对应物：一个**只在中断时跳出**的联机检测弹窗，
+   前提是「填了电脑地址并开始联机」；连着就绝不出现，断了才出现，并回答「有没有连上电脑」「电脑的 ComfyUI
+   有没有按它设置的地址开着」。**不是**常驻状态条、**不是**每次打开应用都提示一次。
+   ② **数据面只有一个**：`GET /api/mobile/online-status`（`services/mobile_remote.online_status` +
+   `routers/mobile_remote.read_online_status`）。选服务端聚合而不是前端发两条请求，有两个硬理由：
+   **(a)** 电脑掉线时手机侧**每一条**被代理的 `/api/*` 都只剩 502 长文案，分不清是电脑关机、换网还是防火墙；
+   只有 `/api/mobile*`（`_EXCLUDE_PREFIXES`）永不被代理，能独立答出原因。**(b)** 电脑的 ComfyUI 地址真源是
+   **电脑那份** `user_state.settings.comfyuiUrl`——联机时手机 `settings` 由代理的 `/api/user-state` 覆盖，
+   前端读它有时序竞争；故由手机后端带 PC 令牌读 PC 的设置、再让**电脑**按该地址探活
+   （`GET /api/comfyui/status?url=<电脑存的地址>`），`is_up` 与主机白名单仍在电脑侧执行 ⇒ **判据不复制**，
+   也不受 WebView CSP 影响。`/api/comfyui/status` 的默认参数是配置常量不是用户设置，**不显式传 url 就等于
+   问错了对象**。返回体不含令牌本体（只有地址、延迟、原因）。
+   ③ **降级方向**：`comfyui_state` 任何一步失败（读设置非 200 / 电脑没填地址 / HTTP 异常）一律
+   `running:false` + 可读 `detail`，**绝不抛**——数据断不得因为一次读取失败就永久沉默；`online_status`
+   在未启用（`is_active`＝enabled+地址+令牌）时**零请求**直接返回 `active:false`。
+   ④ **判定属主**＝`frontend/src/lib/mobileOnlineWatch.ts`（纯 reducer，无 DOM 无 fetch）：相位
+   `checking/off/linked/pc_down/comfy_down`；`active:false ⇒ off`（前提不成立 ⇒ 永不弹）；可达且 ComfyUI
+   开着 ⇒ `linked` 并清空 `detail/target/dismissed`；**边沿触发**纪律照抄 PC 横幅——点「知道了」只压
+   **同一次**故障（`dismissed && 同一 phase` 才保持静默），断点换原因（电脑断了 → 只是 ComfyUI 断了）
+   算一次新故障重新提醒；`local-error`（连手机自己的探针都问不通）**原状返回**，不制造假警。
+   组件 `components/MobileOnlineWatch.tsx` 只做展示（`AlertModal`＝手机底部抽屉形态），5s `setTimeout` 链轮询
+   （上一轮响应完再排下一轮），挂在 `App.tsx` 的 `ComfyStatusMonitor` 之后；**`MOBILE_PROFILE` 双重自检**
+   （不轮询、不渲染），PC 构建零请求。轮询超时 15s（后端最坏三跳各 4~6s）。
+   ⑤ **红线**：本端点**不得进代理**（`should_proxy_path` 有判例锁）；`active:false` 与探针失败**都不得弹**；
+   前端**不得**把手机自己存的 `comfyuiUrl` 当判据；**不得**复用 `.comfy-monitor`（手机已隐藏，复用＝静默失效）；
+   弹窗文案必须点名电脑地址与 ComfyUI 地址，否则用户无从下手。**无持久化**（不写 localStorage），与横幅同纪律。
+   ⑥ **边界（登记，不假装支持）**：弹窗只答「电脑/它的 ComfyUI 在不在线上」，**不保证能生成**（生成还要
+   工作流、模型与 `remote_gate` 放行）；手机休眠 WebView 挂起时轮询停，回前台下一轮才弹（不上 wake lock，
+   不为一个提示抢前台电量）；不做自动重连，恢复靠下一轮探活自动静默。
+   ⑦ **验证**：`test_mobile_remote.py` **14 → 20 例**（未启用零请求、不可达只报一个断点、按电脑存的地址探活、
+   电脑地址为空如实报缺、读不到电脑设置不炸、端点本机应答且不回传令牌、代理路径判定补一条）；
+   `mobileOnlineWatch.test.ts` 7 例 + `MobileOnlineWatch.test.tsx` 9 例（jsdom 真挂载真计时器：全绿不弹、
+   两种断点文案、`active:false` 不弹、关闭只压同一次故障且恢复再断重新弹、原因切换复位、本地探针失败保持原状、
+   **PC profile 零请求**、源码守卫 `<MobileOnlineWatch` 仍在 `App.tsx`），`mobileRemote.test.tsx` **7 例**
+   （URL、GET、`signal` 超时）。⚠ 组件测试**不能用 `vi.useFakeTimers()`**：假计时器会卡住 React 异步 `act`
+   与 fetch 的微任务链，表现为「fetch 从没被调用」的假红——改真实计时器 + 每轮重读模块级可变 fixture。
+   **真实链路（非 mock）**＝`_tmp/online-watch-e2e.sh` 起「PC 后端 18090 + 手机后端 18091 + 假 ComfyUI 18092」
+   三实例，**22 条断言全绿**：未启用时电脑侧探针命中 1→1（零请求；同一次运行里后续确实记到 4 行 ⇒ 该判据不是
+   空断言）、全绿、电脑没填地址、电脑在线但 ComfyUI 断、电脑整体不可达（业务请求仍是可读 502、手机不炸）、
+   令牌错报「令牌不正确」而非「连不上」、改回正确令牌自动回全绿。手机 fixture 自己的 `comfyuiUrl` 故意指死端口，
+   应答里出现的始终是**电脑**存的地址 ⇒ ⑤ 那条红线被实测钉住。**真浏览器 390×844**＝
+   `e2e-manual/mobile-online-watch.spec.ts` 3 例（vite 带 `VITE_MOBILE_PROFILE=1`，`/api/` 自足打桩由用例翻转
+   状态）：连着不弹、ComfyUI 断弹底部抽屉并点名地址、「知道了」后同断点不再打扰、换断点重新弹、恢复自动静默、
+   整页零横向溢出，截图 `_tmp/mobile-online-watch/0{1..6}-*.png`。⚠ 静默类判据必须**切片真等**——
+   `toHaveCount(0)` 立即满足，直接 `await` 等于没等（踩过：轮询计数断言当场红）。
+   **真机（HONOR 90 Pro / APK 0.30.11-beta·versionCode 26）四态已验收**，截图 `_tmp/r8-device/`：连着不弹
+   `00-after-link`；面板如实显示联机中与电脑地址 `02-sync-panel`/`03-status-line`；只把电脑 ComfyUI 打停 ⇒
+   「电脑在线，但 ComfyUI 没开着」并点名电脑存的地址 `04-comfy-down`；点「知道了」后同断点 15 s 不再弹
+   `05-dismissed`/`06-still-broken-no-repop`，而换断点（整机打停）作为新一次故障重新弹「与电脑的联机中断了」
+   `07-pc-down`；电脑恢复后无人工动作自动静默 `08-recovered-silent`；删掉 `remote_backend.json`（前提不成立）
+   后即使电脑仍不可达也不弹 `09-unlinked-pc-down`。⚠ 荣耀机型每次插线会重举 ADB 接口的 `DeviceInterfaceGUID`，
+   原版 adb 看不见设备，须用 `_tmp/adb-8a4d/adb.exe -P 5041`；`uiautomator dump` 在 WebView 里只吐乱码，
+   界面判据一律走截图（1224×2700 与点击坐标 1:1）。
+   ⇒ 手册 `F/11` §3.11.14、`G/10`「联机体检聚合探针」，记忆 `topic-frontend.md`「2026-10-27 · 联机检测弹窗」。
 
 73. **手机返回链 = 壳层 `goBack()` + 前端 hash 单向真源；前端产物缓存三档口径（2026-10-27 用户两条报障）**：
    ① **需求口径**（用户原话）：「返回是直接退出而不是返回上一页（这其实是因为我们没有为每个选项绑定好对应的标签页的原因）」
