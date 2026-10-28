@@ -257,7 +257,8 @@
    **2026-10-25 三补（问候语/帧率 + 字号终稿）**：左上角 `Morning` 与 `fps: 60` 此前整层缺席。仍不执行脚本，
    改为静态抠问候语（小时阈值表 + 8 档标签表）与帧率（label/refreshInterval/active/烘焙初值）；
    播放器按墙钟选词（10:46→Morning、12:34→Noon），按 rAF 实测帧率按刷新窗口出 `label + 整数`，暂停冻住。
-   同时按 WE 参考图逐字测量把字号规则修成**`pointsize × 自身与中间父组 scale`，最外层「组件」根组只挪位置**：
+   同时按 WE 参考图逐字测量把字号规则修成**`pointsize × 自身与中间父组 scale`，最外层「组件」根组只挪位置**
+   （🔴 **2026-10-28 已推翻，见下方六补**：根组 0.28 必须乘进去，否则整组放大 3.57 倍）：
    问候语 32×0.23025×3.125=23.025、帧率 24×0.948=22.752、SUN 96.653×0.85=82.155，与日期 25.2 / 时钟 56.71
    的比例（SUN/日期 3.26、时钟/日期 2.25）和参考图一致；只吃自身 scale 会让问候语只剩 7.37 的小糊点。
    回归：scene vitest **113 例**、前端全量 **1864 例**、build 0，e2e 一例扩到五段文字（清单/坐标/字号/光栅/字体）全绿。
@@ -271,6 +272,49 @@
     draw call 照常 + 时钟照常推进 + `paused=false` 三项全绿仍会放过这个缺陷。回归：`decodeScenePackage.test.ts` 形态锁
     （受控红：只删那一行调用即红）+ 新 `e2e-manual/wallpaper-scene-reload.spec.ts` 三例（重载后仍在动 / 刷新 + 加载中滚动后
     恢复 / 逐帧重采比值），scene vitest **113 例**、前端全量 **1864 例**、tsc/build 0；vendor 播放器新 SHA 见 `NOTICE.md` 改动⑭。
+   **2026-10-28 五补（EVA 雨丝 + 格式串时钟 + 字号基准）**：用户对工坊 `2587542891`（EVA 绫波丽 4K 21:9 雨）报
+   「图1（WE 桌面）满屏雨点都在动，图2（应用）像静态雪景只有少数动；壁纸上有时间，但壁纸本身没有设置项」。三条根因：
+   ① 粒子白名单只放行 `sprite`，本作 **12 份雨全是 `spritetrail`** ⇒ 拖尾几何缺席、只剩零星点位；
+   ② 时钟是**格式串族**（`scriptProperties.format="yyyyMMdhh:mm"` + `update()` 逐个 `replace`），被旧 Clock 惯用法**吸收** ⇒
+   只发 `{time:'clock'}`（内容只有 `HH:MM`、日期段整个丢掉）；③ 字号基准漏了「pointsize 是 1080p 基准画布上的点」：
+   缺 `(4/3)×(场景高/1080)×1.25` ⇒ 该层 fontSize 只有 10 场景单位（正确值 39.68，1600 宽下 em ≈3.5 px，等于看不见）。
+   实测 HEAD 版清单对这一包只发 `{time:'clock', fontSize 10}` + 7 套粒子；修后 `{time:'format', format:'yyyyMMdhh:mm', fontSize 39.68}` + 19 套。
+   修法：manifest 放行 `spritetrail` 并交
+   `trailLength/trailMax`（预设 `renderer[0].length|maxlength`，缺省 0.005/0）→ 播放器照 WE `ComputeParticleTrailTangents`
+   把四边形沿速度拉长（长轴 = `size × 纹理长宽比 × min(|v|×length, maxlength)`，中心仍是粒子位置）；`formatSpecOf` 在
+   Clock 档位**之前**认格式串族、`format/language/week/twelve` 取**保存态** scriptproperties、**不按框宽裁字**；
+   字号补 1080p/120DPI 系数（三重独立证据：字形墨高 18px ⇒ em≈39 场景、格式串 13 字 ×0.625em ≈ 文本框内容宽 326、模板匹配）。
+   **同日六补（字号整链含根组，推翻上面 2026-10-25 的「根组只挪位置」）**：`3723257973` 应用截图五段文字糊成一团——
+   根组 0.28 只折叠进 origin 不进字形，整组放大 1/0.28≈**3.57 倍**。用 WE 原生 2560×1440 参考图做 IoU 字形拟合定标
+   （bias ≤1.3%）：时钟 em=40、日期≈18、星期=58 屏幕像素，与「整链 scale × 10/3 × 2/3」预测 35.3/15.7/51.1 只差同一个
+   **1.13 倍**——WE 音频响应脚本（clock/date/day 存 0.9–1.1）在截图瞬间的取值，三者相对比例差 **<1%**。终稿
+   `sizeMul=(|scale.x|+|scale.y|)/2` 吃**整条父链（含根组）**，`resolveObjectTransform` 不再回传 `innerScale`；
+   静态渲染取保存态 scale（带中值），不追音频调制。回归：`decodeScenePackage.test.ts` 字号形态锁 `10×0.28×10/3`、
+   问候语 `32×0.23025×3.125×0.28×10/3`；`wallpaper-scene-text-layout.spec.ts` 位图字号 47/153/106/43/42；scene vitest
+   **116 例**、前端全量 **2036/2039**（3 红全是用户既有 `SettingsView.test.tsx` 地址簿 D 段：单跑 3/3 全绿，跨文件
+   jsdom realm / 超时 flake，与本刀无关）、tsc/build 0；e2e 三条（3723 文字 7.7s、EVA 雨 18.5s、3346 puppet 18.0s）全绿。
+   NOTICE 改动⑭⑮、`frontend/src/lib/scene/README.md` 字号节、`F/11` §3.8、`G/16` 能力边界/回归落点同步。
+   **2026-10-28 七补（REFRACT 折射 + 场景对象序交错合成）**：五补后用户实锤「渲染更奇怪了」——满屏是**长亮白色竖条**，
+   盖住人物与窗框。两个根因：① 9 套玻璃雨的 `genericparticle` 材质带 `combos.REFRACT`（`matPass.textures[1]` 是法线贴图），
+   WE 的 `genericparticle.frag` 在这种组合下**不输出反照率**，而是拿法线扭曲 `_rt_FullFrameBuffer` 的背景采样再乘
+   `g_Overbright`；当成普通加法粒子画时，纯白的雨滴底图（`drop.tex` 是白 × 透明轮廓）就被整片点亮成长白条。
+   ② WE 按 `scene.objects` 顺序合成（玻璃雨在人物/窗框之下），播放器却把粒子全留到层循环末尾 ⇒ 雨盖在人上。
+   修法：manifest 对 REFRACT 系统交 `refract` / `normalTexUrl`（`textures[1]` 解析，缺省拼 WE 内置 `materials/<name>`）/
+   `overbright`（`ui_editor_properties_overbright`）/ `sizeGrow`（`sizechange` 起止值），并给**所有粒子系统与图层**加
+   `order = scene.objects 序号`；播放器新增 `fsParticleRefract`（`n.x=alpha`、`n.y=green`、`mask=red`，
+   `offset × 0.05 × mask × color.a`，GL 下 y 取反）、`snapshotBackground()`（`copyTexImage2D` 每个粒子批次快照一次）
+   与 `flushWeBefore(order)`（层循环前把序号更小的粒子先落画）。🔴 **法线贴图取不到就整条系统跳过，不得退回直接画反照率**
+   （那正是白条的来源）。回归：`decodeScenePackage.test.ts` 的 REFRACT/order 形态锁；`wallpaper-scene-rain.spec.ts`
+   真浏览器复跑绿（雨丝细短、人物遮雨、无白条），截图 `_tmp/wallpaper-rain-eva/scene-rain-eva.png`。
+   **2026-10-28 八补（实时场景不叠暗化）**：同作品用户拿 WE 桌面截图对照，应用里整幅被压到原图 **0.56–0.63 倍**
+   （右侧无 UI 竖条实测），而播放器独跑与原图逐区域比 **1.00**——暗化全部来自液态玻璃背景层的
+   `.app-backdrop-scrim`（默认 `--lg-scrim` 25% 平铺 + 上下渐变 10%→34% + 边缘径向 35%，自 `ce7ee85` 就在）。
+   修法：`sceneCovered`（有场景来源且播放器 ready）时给 `.app-backdrop` 挂 `has-scene`，CSS 把 scrim
+   `background: none`——**实时场景＝作品原样输出**；照片/视频壁纸的阅读面兜底不变，dock「暗化」提示补写
+   「实时渲染场景不受此项影响」。回归：`liquidGlassBackdrop.contract.test.ts` 锁 scrim 基础规则形态、
+   `has-scene` 清空规则与组件发射条件；`wallpaper-scene-fidelity.spec.ts` 真浏览器对照——同一画面把旧 scrim
+   注回去后三段条带亮度比为 1.44–1.50 / 1.69–1.82 / 2.11–2.74（上浅下深），修复后逐条带与原图比
+   0.998–1.012、整幅 **0.99–1.00**。
 
 55. **出站建连 IP 钉扎：url_guard TOCTOU 关窗（已完成 · 2026-10-24）**：全库安全审计建议第 3 项
    （SVG 加固文档 §1.6 #6 登记的另立刀）。**根因**：`validate_media_url` 校验时解析一次 DNS，
@@ -1133,13 +1177,22 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
    全部 `.py` 与三个配置的 sha256，跑批期间被改写即退出码 2 判本轮结论作废（全量门禁标准入口）。
    `scripts/` 必须在面内：有用例按路径加载它（`test_hardcode_guard` / `test_check_silent_except` /
    `test_installer_release`），漏盯＝留一扇「能改结果却查不出」的门；取舍＝宁过宽不误窄。
+   **2026-10-28 补哨兵与编码**：①快照只收 `*.py`，watched 目录里的非 `.py` 文件（今天 3 个：两份 JSON
+   清单 + 一份基线）**不在面内** ⇒ 跑前把它们列一行提示（只提示、不判红、不扩面；见
+   `non_python_hint`），将来 `tests/fixtures/*.json` 被中途改写至少是可见事件；②`main()` 先把 stdout
+   重配成 UTF-8——输出重定向到文件/管道时 Windows 是 locale 编码（GBK），`⚠`/`🔴` 会
+   `UnicodeEncodeError` 把门禁打死（本轮加提示行时才暴露的既有隐患，`🔴` 那行早就带着）
    验证：定向 27 例、全量 **4516 passed / failures=0 / errors=0 / skipped=0**（守卫 exit 0，
    2026-10-26 补齐，该入口首次实战）、`verify-pc-token.sh` 17 项、`verify-apk-security.sh` 14 项
    （新增两条 dex 常量池检查，证明加固编进交付包）、APK 0.4.2 = 217,616,768 B / sha256 `ed1d93ff…`（versionCode 13）。
    ⚠ **交付物身份只认 sha256 + dex 常量池 grep，不认字节数**：0.4.1 与 0.4.2 总字节完全相同
    （对齐 padding 吸收了增量）。体积归因账本（大头＝前端媒体 103 M / cargo `debug` profile 的
    230 M Rust `.so`，而非 dex 或 `lib/`）见 `PLAN-MOBILE-STANDALONE-2026-10-25.md` §15.5.1；
-   执行记录 `PLAN-MOBILE-STANDALONE-2026-10-25.md` §15.4。
+   执行记录 `PLAN-MOBILE-STANDALONE-2026-10-25.md` §15.4。**2026-10-28 升为三重判据**：① sha256
+   ② dex 常量池 grep ③ **`versionCode` 严格递增**——出交付包时用 `aapt2 dump badging` 读包内
+   `versionCode`，与上一交付包比（0.4.1→0.4.2 是 12→13，那次对了）。第三重补的是前两重管不到的
+   缺口：**换了内容却忘 bump versionCode** 的包照样 `install -r` 成功、真机上与原包同号，事后
+   分不出哪只手上的是新的（与条 65④「解压缓存键只认内容 sha」互补：那是给 App 用的，这是给人用的）。
 
 63. **L2 联机同库安全地基（2026-10-26）**：`LAF_ALLOW_REMOTE` 只放开网络可达性，不开能力面。新
    `services/remote_gate.py` 单一属主：**三件套互锁**（`LAF_ALLOW_REMOTE=1` 且未设 `LAF_LOCAL_TOKEN`
@@ -1686,9 +1739,19 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
    （`#/assets/works/repo/<id>`，`browseWorksRepo`）、进作品（`enterWork` 写 `#/<mode>`）。
    ⚠ 与 `workId` 恢复副作用**必须互相让路**：该 effect 现在先 `parseRouteHash` 判当前路由，**只有**
    `home`/`mode` 才写 hash 并切区；深链停在管理区时只换模式、不把用户拽回首页（改前那种「hash 被覆但画面不动」
-   现在有人监听，会当场把用户跳走）。🔴 弹窗纳入返回链**尚未做**（用户定案 D4「弹窗随后」）：
-   Lightbox / TableModal / RegexModal / PresetModal / SendToChatModal / 素材详情 / NodePicker / Describe /
-   WorkflowTool / MaskEditor / BindRepo / 新建·改名·删除 仍**退不出**，是下一刀的已知欠账，不得写成已完成。
+   现在有人监听，会当场把用户跳走）。**弹窗返回链（2026-10-28 补齐，用户定案 D4「弹窗随后」）**：
+   协议＝视图 hash 末尾**每开一个弹窗追加一段 `/@<id>`**（单一属主 `lib/overlayRoute.ts`，`overlayIdsOf`/
+   `stripOverlaySegments`/`withOverlaySegments` 三纯函数 + `useOverlayRoute(id, onClose)` 钩子）；
+   `parseRouteHash` 跳过 `@` 前缀段做视图解析（`#/settings/@regex` 的 panel 仍是空串），两边只共享「`@` 前缀」
+   一处约定。开＝`pushState` 追加本段；返回键/popstate 看见「本 id 不在了」⇒ 调 `onClose`（`popstate` 与
+   `hashchange` 会同帧双发，用 `fired` 旗标去重，只关一次）；**程序内关闭**走延迟 `scheduleRelease`：
+   自己是栈顶就 `history.back()` 退掉自压那格（不留幽灵格），父弹窗先关的异常次序只 `replaceState` 摘掉自己那段。
+   覆盖 Lightbox / TableModal / RegexModal / PresetModal / SendToChatModal / 素材详情 / NodePicker / Describe /
+   WorkflowTool / MaskEditor / BindRepo / 新建·改名·删除·名称冲突等 App 内确认框。🔴 刷新/深链落到带 `@` 段的
+   hash **不复活弹窗**：弹窗状态不可恢复，`App.tsx` 开屏 effect 用 `replaceState` 摘掉全部弹窗段（与
+   `normalizeBootHash` 同一条开屏路径），否则会多一格「画面一样」的历史。🔴 Android 软键盘（`autoFocus` 输入框）
+   会吞掉**第一下**返回键（IME 层拦截，不到 `onBackPressed`）——「先收键盘、再关弹窗」是平台惯例，不是缺陷；
+   真机判据要先读 `dumpsys input_method` 的 `mInputShown`。
    ④ **降级卡自愈分两层，互补不冗余**——但🔴 **归因已改口**：2026-10-27 真机把 0.30.8-beta 升到
    0.30.13-beta（**一次真实换包**）**没有**出卡——文档响应头已是 `no-store`、新 chunk 全部 200、
    `card: false`（`_tmp/rc-device/phase1.json` / `phase2.json`）。所以「WebView 缓存里那份旧
@@ -1740,3 +1803,68 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
    `frontend.zip` 103,342,099 B / `33def705…` 与包内逐字相同（`apk_size_ledger.py` exit 0）、隐私闸 PASS。
    前一轮 0.30.12-beta·27 只含返回链两半，真机一验才暴露 ② 的开屏空白格 ⇒ **换包判据只认 sha256，不认字节数**。
    ⇒ 手册 `F/11` §3.2/§3.6/§4.1/§5/§6 与 §3.11.15（壳层返回栈 + 静态缓存三档），`G/10` 回归行。
+
+74. **user-state 写侧密钥护栏：空密钥不覆盖盘上非空值（2026-10-28 用户实锤「key 怎么是空的」）**：
+   ① **故障链**：密钥真源＝后端 `backend/data/user_state.json`，前端 localStorage 的 settings 按
+   `stripSecrets` 清空全部密钥（条 56）；启动水合 `GET /api/user-state` 一旦失败/返回空，`useSettings`
+   的 `hydrated` 仍会在 `.finally()` 置真 ⇒ 紧接着的 settings effect 把**无密钥副本**整份
+   `POST /api/user-state`。写入是**整对象覆盖**（`payload={"repos","settings"}` 直接落盘）⇒ 一次离线
+   启动就把盘上 8 个模型 apiKey + embed/vlm + 6 个令牌全抹成 `""`。2026-10-28 实测 8010 实例的客户端
+   每 1–3 min 推一次无密钥快照（13:14:29、13:24 各抓到一次，写盘后仍 0 个非空密钥）⇒ **空态自我维持**，
+   用户重填也会被下一轮抹掉；真 `build_model` 路径 0.13 s 返 `401 … ****eded`（空 key 被填成 `"not-needed"`），
+   而裸测网络 DNS 50 ms / TCP 40 ms / TLS 194 ms ⇒ 网络通、只差 key。与 #109（多客户端快照后写覆盖）同族。
+   ② **修法（`routers/user_state._keep_stored_secrets`）**：写前把 incoming 与盘上旧 settings 递归合并，
+   只有**密钥字段**走特例——空值（`""`/纯空白/`null`）与**字段整体缺席**都**不覆盖**盘上非空值
+   （后者是换端升级期：旧 APK/旧前端的 Settings 还没有新字段，缺席不能按删除算）；非空值照常覆盖（换 key 即时生效）。
+   模型数组按条目 `id` 对齐（改序/改名不串 key），新 id **不继承**旧 key，盘上被删条目**不复活**；无 `id`
+   的列表条目按索引对齐；`settings` 整个缺席时沿用盘上旧值（与 `selection` 的「缺席≠删除」同一语义）。
+   ③ **字段清单单一属主 `services/secret_fields.py`**（`SECRET_KEYS` + `MODEL_LIST_KEYS` + `MODEL_OBJ_KEYS`）：
+   配置包导出 `config_bundle._strip_secrets` 与本护栏**共用同一张表**，config_bundle 内联的那份已删除；
+   清单独立成模块是因为单独 import `config_bundle` 要 2.41 s。前端投影仍是 `stores/settings.ts` 的
+   `stripSecrets`，改字段两边同步。
+   ④ **红线**：护栏只挡「空覆盖非空」，**不得**挡「非空覆盖非空」（轮换 key 必须生效）；**不得**改成
+   「客户端只写差异」（整对象 POST 是既有前端合同，多客户端并发下会丢更新）；盘上旧值必须同一请求内
+   读一次（`repo_meta.load_user_state`），不得各端点各读一份。
+   **已知取舍（有意）**：界面「清空密钥后保存」不生效（刷新即还原）——作废密钥走「删掉该模型条目」或直接改
+   `user_state.json`，并在上游吊销。**不采用**「客户端只要有任一非空密钥就信任它的空字段」的判别法：
+   那等于让「持有 1 个 key 的客户端」获得抹掉其余全部 key 的能力，正是本条要堵的故障类。
+   ⑤ **验证**：`tests/test_user_state_secrets.py` 7 例（无密钥副本不抹盘 / 非空仍可覆盖 / 新 model id 不继承 /
+   已删模型不复活 / `null` 视同空 / settings 缺席保留旧值 / **密钥字段整体缺席保留旧值**）；
+   ruff·lint-imports **18 kept 0 broken**·mypy **283 files Success**；定向 47 例绿。
+   **隔离实例 HTTP 探针 5/5**（`LAF_DATA_DIR` 在仓库外、不碰真实存档）：无密钥整份 POST（含换序 + `""`/`null`
+   混合）后盘上 key 全在 / 非空 key 轮换生效 / 新 id 不继承 / settings 缺席保留 / `git diff --check` 干净。
+   全量 pytest **4691 / 2 failed / 0 errors / 0 skipped**（守卫判「跑批期间源码未变 ⇒ 结论有效」；两条红＝既有
+   `test_material_sources.py` 代理真 TCP 探活 pair，见条 71/73⑧）。
+   ⇒ 手册 `E/07` §2 表 + §3.7、记忆 `topic-contracts-and-baselines.md`。
+
+75. **手机真机审查四刀：键盘让位链 / 电脑独占说明页 / 浮钮与弹层层序 / 壳层调试日志条默认关（2026-10-28，0.30.16-beta·versionCode 31 / 荣耀 REP-AN00；用户报障 P0-1..P0-4 + P1-1..P1-7）**：
+   ① **键盘让位只有一条探测链**：`lib/mobileViewport.ts::watchMobileKeyboard()` 按 `innerHeight −
+   visualViewport.height > 120` 给 `<html>` 打 `data-kb-open`（120px 阈值专门排除地址栏伸缩与横竖屏切换），
+   `App.tsx` 一处挂载；**CSS 是唯一消费方**（`:has(.chat-input-bar textarea:focus)` 覆盖「已聚焦但键盘还没弹」，
+   一起收起 `.app-nav.sidebar`/`.app-topbar`/`.chat-view-head`）。输入区 `field-sizing: content` ＋
+   🔴 `height: auto !important`（`RichInput` 带桌面拖拽记忆的内联像素 height，普通选择器打不过），
+   横屏上限 30dvh。运行时形态判定归 `lib/useMobileViewport.ts`，`matchMedia` 谓词**必须与 CSS 断点逐字同一份**，
+   🔴 且初值要带 `typeof window !== "undefined"` 守卫（`renderToStaticMarkup` 类 SSR 测试没有 window）。
+   ② **电脑独占能力面用构建期开关收口**：`MOBILE_PROFILE` 为真时 `ModelDownload` 整页换成
+   `components/PcOnlyNotice.tsx`（四段：这是什么 / 此功能需在电脑端操作 / 为什么不能 / 还能做什么、去哪做），
+   桌面实现拆成 `ModelDownloadDesktop`。🔴 **不用运行时 viewport 判定**：表单根本不渲染才既不会闪一屏搜索框，
+   也不会把后端远端闸门的 403/连接被拒露成用户可见红字——「不露内部端点与网关报错」是用户的验收条件。
+   ③ **手机上浮钮给弹窗让位**（`:has(.modal-mask)` / `:has(.settings-page)` ⇒ `display:none`）：
+   🔴 `.lg-rope` z-index **1260 > `.modal-mask` 1000**，只列 `.support-fab`/`.quick-tools-fab` 会漏掉液态玻璃拉绳
+   （底涂纯红复验才暴露），让位面必须含 `:is(.lg-rope, .lg-rope-mini)`。弹层实底一律
+   `color-mix(in srgb, var(--surface-solid) 95~96%, transparent)`，🔴 **与 `--surface` 混是同色相加、alpha 不降**（等于没做）；
+   92–96% 是用户定的区间，残留「透出正文」是 5% 混合而非层序问题（`position: fixed` 与红底对照已证）。
+   ④ **同条件 `@media` 段的文件顺序决定层叠**：横屏（`max-height: 520px`）与手机（`max-width: 720px`）在横屏**同时命中**；
+   竖屏生效的 `.settings-nav` 是**后出现的 grid 段**，🔴 横屏只补 `flex-wrap` 是彻底空转，必须显式 `display: flex`
+   ＋ chip 条目 ＋ `overflow-x: auto; overscroll-behavior-x: contain`（条 69 口径：**滚动只发生在控件自己身上**）。
+   ⑤ **壳层调试 UI 不得用 `BuildConfig.DEBUG` 收口**：交付包一直是 `:app:assembleDebug` 产物 ⇒ 按 DEBUG 判等于不判。
+   改成显式属性 `demiurge.showDebugLog` → `BuildConfig.SHOW_DEBUG_LOG`（**默认 false**），
+   `MainActivity` 在 `setContentView` 前置 `toggle`/`logScroller` 为 `GONE`；🔴 **日志本身照旧进 Logcat**
+   （`adb logcat -s DemiurgeSpike` 能看全部 stamp），UI 不占屏不等于失去可诊断性。
+   ⑥ **验证**：`npm test` **178 文件 / 2049 例**、`tsc --noEmit` 0、`npm run build` 绿；契约
+   `lib/mobileShellLayout.contract.test.ts` 15 例（本轮 +6，锁 P1-2/3/4/5/6/7 与浮钮让位）；
+   真浏览器测量 `_tmp/mobile-audit/probe*.js` → `report*.jsonl` + `v*.png`（关键数：横屏正文 122→键盘 24 的基线、
+   语义搜索右缘 393>390、设置导航 123px/2 行 → 51px/1 行、四类弹窗 computed `/ 0.95`、`rope: none`）。
+   🔴 **P1-7 只有编译证据**：本机无 Gradle（无 wrapper/dist），Java 侧用 JDK-17 `javac` + `android-34/android.jar`
+   ＋手写 Chaquopy/BuildConfig stub 验过（需 `-encoding UTF-8`），**APK 未重出、未重装**。
+   🔴 **并发跑两次 `npm test` 会造负载型假红**，串行复跑才是准。⇒ 手册 `F/11` §3.11.17（四刀全量与红线）。
