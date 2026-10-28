@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { getUserState, renameRepoFolder } from "../api/userState";
-import { pushRepos } from "../lib/userStateSync";
+import { pushRepos, USER_STATE_RECONNECT_EVENT, clearUserStateFallback, markUserStateFallback } from "../lib/userStateSync";
+import { remoteActiveOnce } from "../lib/mobileProfile";
 import { relocateLocalViewUrl } from "../lib/outputPathMigration";
 import {
   orderReposByLatestGeneration,
@@ -106,19 +107,37 @@ export function useRepos() {
   const [repos, setRepos] = useState<Repo[]>(load);
   const [hydrated, setHydrated] = useState(false); // 后端为准：拉取回填完成前，不把本地值回写后端
 
-  // 启动时拉后端存档，有数据则以后端为准覆盖本地（跨浏览器/换机恢复）
+  // 启动时拉后端存档，有数据则以后端为准覆盖本地（跨浏览器/换机恢复）。
+  // 联机同库开着却连不上电脑时保持「未水合」：界面跑本机缓存，但绝不把这份快照回写
+  // 电脑（后端 set_state 整体替换 repos，会抹掉电脑的作品列表）。恢复后由
+  // MobileOnlineWatch 广播 USER_STATE_RECONNECT_EVENT，这里重新水合一次。
   useEffect(() => {
     let alive = true;
-    getUserState()
-      .then((s) => {
-        if (alive && s.repos) {
+    const hydrate = async () => {
+      const remote = await remoteActiveOnce();
+      if (!alive) return;
+      try {
+        const s = await getUserState();
+        if (!alive) return;
+        if (s.repos) {
           setRepos(s.repos);
           save(s.repos);
         }
-      })
-      .catch(() => { /* 后端离线：沿用 localStorage */ })
-      .finally(() => { if (alive) setHydrated(true); });
-    return () => { alive = false; };
+        clearUserStateFallback();
+        setHydrated(true);
+      } catch {
+        if (!alive) return;
+        if (remote) { markUserStateFallback(); return; } // 电脑的真值还没拿到，禁止回写
+        setHydrated(true); // 电脑端/手机本机模式：后端离线沿用 localStorage（原行为）
+      }
+    };
+    void hydrate();
+    const onReconnect = () => { void hydrate(); };
+    window.addEventListener(USER_STATE_RECONNECT_EVENT, onReconnect);
+    return () => {
+      alive = false;
+      window.removeEventListener(USER_STATE_RECONNECT_EVENT, onReconnect);
+    };
   }, []);
 
   // 惰性迁移：①旧数据 cardName 上提到父；②子仓库空绑定从父下沉一份（快照式）。幂等，回填完成后跑到稳定。

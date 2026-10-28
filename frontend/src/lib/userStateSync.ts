@@ -17,6 +17,31 @@ let reposReady = false;
 let settingsReady = false;
 let timer: ReturnType<typeof setTimeout> | undefined;
 
+// 联机同库下电脑不可达（/api/user-state 被代理成 502）时，两 store 保持「未水合」：
+// 界面跑在本机缓存上，但绝不能把这份快照当成电脑的真值上传（后端 set_state 整体替换
+// repos，会把电脑的仓库/模型列表抹掉）。恢复后由 MobileOnlineWatch 播事件重新水合。
+let fellBack = false;
+
+export function markUserStateFallback() {
+  fellBack = true;
+}
+
+export function clearUserStateFallback() {
+  fellBack = false;
+}
+
+export function userStateFellBack() {
+  return fellBack;
+}
+
+export const USER_STATE_RECONNECT_EVENT = "laf-user-state-reconnect";
+
+/** 联机恢复（或退出联机）时广播：两个 store 各自重新拉一次后端存档。 */
+export function notifyUserStateReconnect() {
+  fellBack = false;
+  window.dispatchEvent(new Event(USER_STATE_RECONNECT_EVENT));
+}
+
 function flush() {
   // 两块都就绪才写，避免启动早期用半截数据覆盖后端
   if (!reposReady || !settingsReady || !latestSettings) return;

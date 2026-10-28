@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { fetchProxyStatus, getUserState, type ProxyStatus } from "../api/userState";
-import { pushSettings } from "../lib/userStateSync";
+import { pushSettings, USER_STATE_RECONNECT_EVENT, clearUserStateFallback, markUserStateFallback } from "../lib/userStateSync";
+import { remoteActiveOnce } from "../lib/mobileProfile";
 import {
   effectiveGlobalProxyUrl, globalProxyAddress, normalizeProxyMode, resolveEndpointProxy, resolveModelProxy, type ProxyMode,
 } from "../lib/modelProxy";
@@ -861,26 +862,42 @@ export function useSettings() {
   const [settings, setSettings] = useState<Settings>(loadPersistedSettings);
   const [hydrated, setHydrated] = useState(false); // 后端为准：回填完成前不回写后端
 
-  // 启动时拉后端存档，有则以后端为准覆盖本地（跨浏览器/换机恢复）
+  // 启动时拉后端存档，有则以后端为准覆盖本地（跨浏览器/换机恢复）。
+  // 联机同库开着却连不上电脑时：保持「未水合」——界面跑本机缓存，但绝不把这份快照
+  // 回写电脑（后端 set_state 整体替换 repos/settings）。电脑回来后由 MobileOnlineWatch
+  // 广播 USER_STATE_RECONNECT_EVENT，这里重新水合一次。
   useEffect(() => {
     let alive = true;
-    getUserState()
-      .then((s) => {
-        if (alive && s.settings) {
+    const hydrate = async () => {
+      const remote = await remoteActiveOnce();
+      if (!alive) return;
+      try {
+        const s = await getUserState();
+        if (!alive) return;
+        if (s.settings) {
           const migrated = migrate(s.settings as unknown as Record<string, unknown>);
           setSettings(migrated);
           persist(migrated); // localStorage 不落密钥（剥离见 stripSecrets）
         }
-      })
-      .catch(() => { /* 后端离线：沿用 localStorage */ })
-      .finally(() => {
-        if (alive) setHydrated(true);
-        // 启动时快速探测（不做出网验证，避免每次开机等网络超时）；完整验证在设置里手动触发。
-        fetchProxyStatus()
-          .then((st) => { if (alive) setSettings((p) => withProxyStatus(p, st)); })
-          .catch(() => { /* 后端离线保持现值 */ });
-      });
-    return () => { alive = false; };
+        clearUserStateFallback();
+        setHydrated(true);
+      } catch {
+        if (!alive) return;
+        if (remote) { markUserStateFallback(); return; } // 电脑的真值还没拿到，禁止回写
+        setHydrated(true); // 电脑端/手机本机模式：后端离线沿用 localStorage（原行为）
+      }
+      // 启动时快速探测（不做出网验证，避免每次开机等网络超时）；完整验证在设置里手动触发。
+      fetchProxyStatus()
+        .then((st) => { if (alive) setSettings((p) => withProxyStatus(p, st)); })
+        .catch(() => { /* 后端离线保持现值 */ });
+    };
+    void hydrate();
+    const onReconnect = () => { void hydrate(); };
+    window.addEventListener(USER_STATE_RECONNECT_EVENT, onReconnect);
+    return () => {
+      alive = false;
+      window.removeEventListener(USER_STATE_RECONNECT_EVENT, onReconnect);
+    };
   }, []);
 
   useEffect(() => {

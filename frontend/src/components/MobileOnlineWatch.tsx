@@ -6,6 +6,7 @@
 import { useEffect, useReducer } from "react";
 import { getMobileOnlineStatus } from "../api/mobileRemote";
 import { MOBILE_PROFILE } from "../lib/mobileProfile";
+import { notifyUserStateReconnect, userStateFellBack } from "../lib/userStateSync";
 import {
   INITIAL_ONLINE_WATCH,
   onlineWatchView,
@@ -25,7 +26,12 @@ export function MobileOnlineWatch({ pollMs = 5000 }: { pollMs?: number }) {
     const poll = async () => {
       try {
         const status = await getMobileOnlineStatus();
-        if (!cancelled) dispatch({ type: "probe", status });
+        if (!cancelled) {
+          dispatch({ type: "probe", status });
+          // 断线期间两 store 保持「未水合」（不回写电脑）。电脑回来、或用户退出联机改由
+          // 本机后端应答时，重新拉一次存档把界面换成真值。
+          if (userStateFellBack() && (!status.active || status.reachable)) notifyUserStateReconnect();
+        }
       } catch {
         if (!cancelled) dispatch({ type: "local-error" });
       }
