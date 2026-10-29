@@ -3,9 +3,23 @@
 本文件记录 Demiurge 面向用户与发布流程的变更。格式参考 Keep a Changelog，版本号与发布 tag 对齐；
 尚未发布的改动放在 `Unreleased` 下。
 
+## [0.30.2] - 2026-10-29
+
+安装器补丁版，只修一处发布缺陷，不新增功能。
+
+### Fixed
+
+- **安装版首次启动无法下载运行时**：桌面壳的 HTTPS 请求没有可用 TLS 后端——`ureq` 的 `native-tls` 特性只拉
+  依赖、不会成为默认后端，壳又没有在 `AgentBuilder` 上挂 `tls_connector`，于是首次启动补齐运行时与
+  `--install-runtime` 一律报 `cannot make HTTPS request because no TLS backend is configured`。现显式接上
+  系统 TLS（schannel，不引 OpenSSL），并补回归测试 `https_requests_reach_a_tls_backend`：先让本地 TCP 接住
+  再断开，逼出真实的 TLS 握手；端口关闭时 TCP 先失败，那样的用例测不出差别（已验证去掉接线后此测试必然变红）。
+- **v0.30 与 v0.30.1 的安装器都带着这个缺陷**，请改用 0.30.2 覆盖安装；已装好的旧版也可先把运行时层放进
+  安装目录 `runtime-pack\` 或 `%LOCALAPPDATA%\Demiurge\downloads\` 走离线入口照常使用。
+
 ## [0.30.1] - 2026-10-29
 
-安装器补丁版，只修两处缺陷，不新增功能。
+安装器补丁版，只修两处缺陷，不新增功能。⚠ 0.30.1 的安装器存在首次启动无法下载运行时的缺陷，已被 0.30.2 替代。
 
 ### Fixed
 

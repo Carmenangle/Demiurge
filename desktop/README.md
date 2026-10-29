@@ -163,7 +163,7 @@ WPF 壳的换壳实现，合同不变（同源 8010 + 无业务 IPC）。当前�
 修掉「便携包带了 MinGit 却没人挂上去、干净机器上 git 能力失效」的缺口。
 
 运行时交付（2026-10-24 第三步）：安装版首次启动发现 `runtime/current.json` 缺层时，按壳内嵌的
-`release/runtime-delivery.json` pin 补齐 `base+application`——在线走 `ureq` native-tls + Range 续传，
+`release/runtime-delivery.json` pin 补齐 `base+application`——在线走 `ureq` + 显式挂载的系统 TLS（schannel）+ Range 续传，
 离线认安装目录 `runtime-pack\` 与 `%LOCALAPPDATA%\Demiurge\downloads\` 两个入口；`rag` 仅
 `--install-runtime --with-rag` 显式追加。解压到 `.staging-<token>` 再改名部署，`current.json` 最后原子写，
 失败不留半套状态；进度走启动页文案，不新增业务 IPC。细节见 `desktop/tauri/README.md`。

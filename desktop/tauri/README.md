@@ -152,7 +152,7 @@ $evi = "$env:TEMP\demiurge-installer-evidence"
 
 **两条入口**：
 
-1. **在线**：`release_base` + 清单名拼 URL，`ureq`/native-tls；分卷 Range 续传（206 追加、200 截断重写、
+1. **在线**：`release_base` + 清单名拼 URL，`ureq` + 系统 TLS；分卷 Range 续传（206 追加、200 截断重写、
    416 视为已完成），失败按 `mirrors` 轮换，SHA256 不符删档重下。
 2. **离线**（双目录）：安装目录 `runtime-pack\` 与 `%LOCALAPPDATA%\Demiurge\downloads\`。同一个资产名
    先在这两处找，校验通过就不再联网；`release_base` 不可达也能装完（自检第 17 项就是拿
@@ -315,6 +315,6 @@ desktop\tauri\target\release\Demiurge.exe --self-test
 - `src/runtime_delivery.rs` — pin/清单校验、在线续传、离线双入口、分卷组装、安全解压与原子部署
 - `src/updater.rs` — 托盘更新入口、安装版适用面判定、minisign 验签夹具（测试公钥在 `testdata/`）
 - `scripts/updater_manifest.py` — `latest.json` 渲染与更新配置守卫（签名版本绑定、HTTPS、拒绝 `-Machine`）
-- `Cargo.toml` — `ureq`（native-tls）+ `zip`（deflate）+ `sha2` + `tauri-plugin-updater`（含 `minisign-verify`）；`windows-sys` 供磁盘空间/Job 等 Win32 调用
+- `Cargo.toml` — `ureq`（`native-tls` 特性）+ 直接依赖 `native-tls`（`Fetcher::new()` 里显式 `tls_connector` 接线，**漏接等于没有 TLS 后端**）+ `zip`（deflate）+ `sha2` + `tauri-plugin-updater`（含 `minisign-verify`）；`windows-sys` 供磁盘空间/Job 等 Win32 调用
 - `src/shell_log.rs` — 壳日志与日志尾巴（对应 `ShellLog.cs`）
 - `src/dialog.rs` — 关窗三选一与壳级提示（Win32 `MessageBoxW`，不引 Tauri dialog 插件）
