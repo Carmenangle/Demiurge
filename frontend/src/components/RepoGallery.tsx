@@ -225,6 +225,8 @@ function GalleryTags({
   );
 }
 
+const MEDIA_KIND_LABEL = { all: "全部", image: "图片", video: "视频", audio: "音频" } as const;
+
 // 仓库图片网格：拉取一组仓库的生成记录（图+提示词），点击看大图与生成参数。
 // repoIds 传多个时合并展示（顶层仓库聚合自身 + 所有子仓库的图）。
 // 支持：出图后自动刷新、超量折叠、删除资产索引（保留本机文件）。
@@ -1209,7 +1211,7 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
     : (!serverSearch && !clientFiltering && totalCount > 0) ? totalCount : sorted.length;
   const filterBits = [
     trashMode ? "回收站" : "",
-    mediaFilter !== "all" ? ({ all: "全部", image: "图片", video: "视频", audio: "音频" } as const)[mediaFilter] : "",
+    mediaFilter !== "all" ? MEDIA_KIND_LABEL[mediaFilter] : "",
     structured.tags.length ? `标签 ${structured.tags.map((t) => `#${t}`).join(" ")}` : "",
     semanticMode ? "语义搜索" : "",
   ].filter(Boolean);
@@ -1230,7 +1232,10 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
           {searching && <span style={{ fontSize: 12, color: "var(--text-muted)" }}>搜索中…</span>}
         </div>
       )}
-      {enhanced && items.length > 0 && (
+      {/* 工具栏常驻：曾经挂在 items.length > 0 上，于是切到「视频／音频」这种本来就没有
+          资产的分类时整条工具栏（含分类按钮本身）一起消失，用户被锁在空态里回不去
+          （2026-10-29 实锤）。空列表的可自救入口由空态自带，不由工具栏的显隐来兜。 */}
+      {enhanced && (
         <div className="asset-toolbar-sticky">
           <div className="page-toolbar asset-toolbar">
             {/* 第一行 · 查找：弹性搜索框 / 全部·图片·视频·音频分段 / 语义搜索 */}
@@ -1407,13 +1412,17 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
       ) : items.length === 0 ? (
         <div className="empty-state">
           <Images size={32} strokeWidth={1.4} style={{ opacity: 0.5 }} />
-          <p style={{ margin: 0 }}>还没有生成记录。出图后会自动出现在这里。</p>
-          {/* 整条工具栏（含「同步体检」）挂在 items.length > 0 上 ⇒ 空态是个死页面。
-              离线同步过来的仓库最容易撞到这里：图已在磁盘、索引里没有，而用户在这个
-              页面上连自救的入口都找不到（2026-10-26 手机端「生成内容」空态实锤）。 */}
+          <p style={{ margin: 0 }}>
+            {mediaFilter === "all"
+              ? "还没有生成记录。出图后会自动出现在这里。"
+              : `${MEDIA_KIND_LABEL[mediaFilter]}还没有资产。用上方「全部／图片」切换查看其它内容。`}
+          </p>
+          {/* 空态自带「同步体检」：离线同步过来的仓库最容易撞到这里——文件已在磁盘、索引里没有。
+              2026-10-26 手机端实锤时工具栏还挂在 items.length > 0 上，这里是唯一出口；
+              2026-10-29 工具栏改常驻后仍保留，省得让用户去右上角菜单里找。 */}
           {enhanced && (
             <>
-              <p style={{ margin: 0, fontSize: 12.5 }}>图片已在文件夹里、这里却为空＝索引没跟上，可对账补录。</p>
+              <p style={{ margin: 0, fontSize: 12.5 }}>资产已在文件夹里、这里却为空＝索引没跟上，可对账补录。</p>
               <button className="btn" onClick={() => setShowSync(true)}
                 title="对账「注册表/磁盘/索引」——补录丢进文件夹但没入库的文件、清理磁盘已没了的裂图/孤儿">
                 同步体检
