@@ -494,7 +494,7 @@ services/  深模块层。业务逻辑全在这。彼此可依赖，但不 impor
 | `generation_store` | 「生成提交/完成→留存→入库→写快照」后端管线。Agent 获得 thread 所有权后、调用任何模型前，必须按 `user_message_id` 先将用户文字与输入图片幂等写入权威快照；已有前端富消息时保持原样。Roleplay 发出最终 `replace`/`illustrate_request` 时再即时持久化正文与稳定媒体槽，禁止形成“助手回复存在、触发它的用户消息缺失”的孤儿回合。自动路径调用 ComfyUI 前必须通过 `claim_illustration_submission` 原子认领 `messageId + slotId`，同槽重复/迟到事件失败关闭；ComfyUI 返回 `prompt_id` 后再通过 `persist_illustration_submission` 绑定同槽；带目标槽的自动插画只原位回填，不追加对话轮、不写提示词历史；失败写 `illustration.failed` Trace 并删除快照槽 | 后端出图后的持久化 → 走 `persist_image`；不得依赖前端生成结束后的全量快照补写用户消息；不得先提交 ComfyUI、再用 `slot_bound=false` 事后发现目标无效；自动插画目标消息已删除、槽已完成或已认领时禁止提交第二个任务；generation RAG 是资产库成员与提示词真源，禁止扫描磁盘自动补录；普通资产删除只删 RAG、保留文件，裂图清理只删可确认已丢失的 RAG——local-view 条目按磁盘存在性判定，legacy remote-view 直链仅在 ComfyUI 明确 404 时删，ComfyUI 未起/探测异常（无法判定存在性）一律保留 |
 | `workflow_injector` | 纯注入（套值 + 提示词），无 I/O | 改注入规则 → 这里，可直接单测 |
 | `image_store` / `image_utils` | 端点存图（抛异常）/ agent 存图（回退原 url） | 注意两者错误语义不同，别合并 |
-| `chat_snapshot` | 会话显示与生成历史真源（前端完整消息流）。`to_prompt_history` 只提取快照里仍存在的 user/assistant 文本；`load_prompt_history` 在文件存在但为空或损坏时返回 `[]`，失败关闭，不能回退旧 checkpoint。前端完整保存带单调 `revision`，`save_if_newer` 拒绝较旧请求，并保留传入快照中同一槽的服务端 `submissionClaim`、`promptId` 或已完成媒体，防止旧前端状态把提交回滚成 pending；传入快照已删除的消息/槽仍尊重删除，禁止复活。`claim_media_slot_submission` 按 `messageId + slotId` 原子认领；`bind_media_slot_prompt` 持久化 ComfyUI prompt_id；`resolve_media_slot` 原位替换 pending 槽或已完成图片/视频；`remove_media_slot` 只在失败时删除 pending 槽并合并相邻正文。落点：配了"仓库文件夹"则随图片同落 `<仓库文件夹>/<作品名>/chat.json`，否则回退旧位置；`_path` 负责惰性迁移 | 路径解析在 `_path`；导入/导出走 `ai_chat`；服务端媒体状态只合并到前端仍保留的同槽，绝不能借此复活用户删除的数据 |
+| `chat_snapshot` | 会话显示与生成历史真源（前端完整消息流）。`to_prompt_history` 只提取快照里仍存在的 user/assistant 文本；`load_prompt_history` 在文件存在但为空或损坏时返回 `[]`，失败关闭，不能回退旧 checkpoint。前端完整保存带单调 `revision`，`save_if_newer` 拒绝三种写入：① `revision` 较旧；② 现有快照读不动（走 `load_strict`，损坏/IO 失败即拒绝，绝不把「读空」当「没历史」覆盖真源）；③ **整条替换**（现有非空、传入非空、消息 id 零交集＝前端三级兜底最后一级用 langgraph 历史重建的签名）。媒体保留是**双向**的：同槽以服务端已落定状态为准（`ready` 整块胜出、`media-slot` 补回 `submissionClaim`/`promptId`，防旧前端把提交回滚成 pending），且服务端已落定而这次传入**没提**的槽按「前面有几句正文」的段位锚插回原位（`_server_media_to_reattach` + `_reattach_missing_media`）——**位置可退让，媒体不静默丢**。删除语义粒度是**整条消息**：传入缺该消息 id ⇒ 连同媒体真的消失，永不复活；未提交的 pending 槽仍可被前端清理（前端没有单槽删除入口）。渲染层同口径兜底见 `lib/richMediaPlacement.ts`（哨兵被显示层正则吃掉时孤儿槽退到尾部）。`claim_media_slot_submission` 按 `messageId + slotId` 原子认领；`bind_media_slot_prompt` 持久化 ComfyUI prompt_id；`resolve_media_slot` 原位替换 pending 槽或已完成图片/视频；`remove_media_slot` 只在失败时删除 pending 槽并合并相邻正文。落点：配了"仓库文件夹"则随图片同落 `<仓库文件夹>/<作品名>/chat.json`，否则回退旧位置；`_path` 负责惰性迁移 | 路径解析在 `_path`；导入/导出走 `ai_chat`；「删除」只认消息 id 缺失，不得把「传入没提到某个已 ready 的槽」当用户删除（2026-10-29 某作品/SAVE01 四批插画即被此抹掉）；反过来也绝不能借媒体回灌复活用户删掉的那条消息 |
 | `repo_meta` | 仓库元信息 + "仓库文件夹"根解析：`output_dir_from_state()` 读 user_state.json 的 settings.outputDir(单一真源)；目录名可读但目录身份只认 `_repo.json.id`。当前名字对应目录被另一 UUID 占用时使用 UUID 后缀隔离；改名遗留目录按 marker 找回并惰性迁移，禁止新同名仓库复用旧 `chat.json`。仓库暂时不在 user_state 时，生成归档仍按 marker 找回原目录。`rename_folder` 改名迁移文件夹+重写快照/RAG 绝对路径(`snap_folder=dst` 定位随文件夹移动后的 chat.json) | 作品文件夹命名/改名迁移 → 这里；`_repo.json` 标记是迁移识别"作品文件夹"的依据，仓库名不是身份 |
 | `local_media` | 本地媒体白名单、MIME、Range 校验与分块读取 | `/local-view` 只做 FastAPI Response 适配；文件读取规则进这里 |
 | `pathnames` | `safe_seg` 文件名清洗单点 | 需要清路径片段 → 用它 |
@@ -800,7 +800,7 @@ generation 资产检索与剧情 `retrieve` 物理隔离：展示 prompt 永远�
 本次只做保持现有行为的深化，不机械拆 `agent_graph`，不改变剧情、NSFW、提示词 Profile、LoRA、ComfyUI 或资产检索协议。当前架构综合 **9.1/10**：边界与依赖 9.3、状态事务 9.3、结构化与 Trace 9.0、性能 9.0、测试与回归 9.6、前端职责 9.0、文档与领域语言 9.0。评分依据是可执行合同与失败路径测试，不以文件数量或界面是否可见代替。
 
 验收基线（**2026-08-11 当时快照，数字已过期，勿当当前基线引用**；当前口径见本文「测试」节与 `docs/tech-manual/G-contracts-release/17-regression-playbook.md`）：Ruff 通过；17/17 import-linter 合同保持；mypy 39 个契约文件通过；硬编码与 wire 门禁通过；后端 1212 项、前端 338 项、Playwright 3 项全通过；生产构建通过。
-**当前基线（2026-09-15 实测复核，以本行为准）**：ruff `All checks passed!`；`lint-imports` = `Contracts: 17 kept, 0 broken`；mypy `Success: no issues found in 48 source files`（`backend/mypy_files.txt`）；后端 pytest **2686 passed / 0 failed**（191 个 `tests/test_*.py`；判绿只认 `--junitxml` 的 `tests/failures/errors`）；前端 vitest **95 文件 / 855 例**；`check:wire` 与 `check:manifest` 通过；`tsc` 与 `vite build` 通过。OpenCC 字典仍形成约 516 KiB gzip 的按需 chunk，但不进入首屏，只有打开快捷/完整文本工具才加载，因此记录为可观察的非阻断性能边界，不为消除 warning 改变繁简转换语义。
+**当前基线（2026-10-29 实测复核，以本行为准；上一版 2026-09-15 的 `17 kept`/48 文件/2686 例/855 例全部作废）**：ruff `All checks passed!`（`check app tests`）；`lint-imports` = `Contracts: 18 kept, 0 broken`；mypy `Success: no issues found in 279 source files`（`backend/mypy_files.txt`）；后端 pytest **4702 passed / 0 failed / 0 error / 0 skipped**（267 个 `tests/test_*.py`，全量不带 `-x` 实测 626.88s；判绿只认 `--junitxml` 的 `tests/failures/errors/skipped` 四数）；前端 vitest **181 文件 / 2061 例 / 0 failed / 0 error / 0 skipped**；`check:wire` 与 `check:manifest` exit 0；`tsc --noEmit` 与 `vite build` 通过；专名闸 `scripts/release_preflight.py` 在 1642 个 Git 跟踪文件上 **0 命中**（闸的覆盖面＝Git 跟踪面，含代码注释；见 `MEMORY.md` §5 隐私红线）。OpenCC 字典仍形成约 516 KiB gzip 的按需 chunk，但不进入首屏，只有打开快捷/完整文本工具才加载，因此记录为可观察的非阻断性能边界，不为消除 warning 改变繁简转换语义。
 
 ### Theme Runtime Seam
 
@@ -1360,8 +1360,9 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
    ④ 闸序：`rel` 先过 `_safe_member` **再**查映射（恶意 rel 不能因为「这条本来就要 skip」而放行），解析后仍须落在
    `outputDir` 内；单条写坏只计 `failed`，不阻断整包（57 仓库量级坏一条就回滚＝白同步）。
    **后果（设计取舍，不是缺漏）**：主表一旦有行就不再回退向量库 ⇒ 设备侧是「账本＋图片」而非全量语义库，语义
-   搜索/视觉索引需在目标机单独构建。前端配套：资产库空态自带「同步体检」入口（整条工具栏挂在
-   `items.length > 0` 上，否则空态是没有出口的死页面）。
+   搜索/视觉索引需在目标机单独构建。前端配套：资产库工具栏**常驻**（不得挂在 `items.length > 0` 上——
+   2026-10-29 实锤：点进本来就没有资产的「视频／音频」分类，连分类按钮自己一起消失，用户回不去），
+   空态另自带「同步体检」入口（`F/11` §3.11.19 与 §5 红线 20）。
    ② **联机同库**（`services/mobile_remote.py` + `routers/mobile_remote.py`，**仅 `LAF_MOBILE_REMOTE=1` 注册与安装**）：
    手机本机后端把 `/api/*`（**除 `/api/mobile*` 与 `/api/health`**）反向代理到同一 Wi‑Fi 的 PC 后端，并附加
    PC 的 `LAF_LOCAL_TOKEN`。**数据真源在 PC**：`/api/user-state` 也走代理，手机看到 PC 的设置/会话/作品；
@@ -1403,7 +1404,8 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
    `configTransfer.test.tsx` 6 例 + `mobileRemote.test.tsx` 3 例 + `characters.test.ts` 4 例（封面 URL 的
    **`/comfyui/local-view` 路由**与跨平台路径分隔符；断言用 `pathname` 而非只查 query，否则 404 路由查不出来）
    + `CharacterCards.test.tsx` 1 例（jsdom 下单击封面即渲染预览弹窗；把绑定临时改回 `onDoubleClick` 复跑即红 ⇒ 用例真吃这条修复）
-   + `RepoGallery.emptyState.test.ts` 2 例（源码形式锁：空态分支必须自带「同步体检」入口，且工具栏仍挂 `items.length > 0`）
+   + `RepoGallery.emptyState.test.ts` 2 例（源码形式锁：空态分支必须自带「同步体检」入口）——2026-10-29 该文件扩到
+   4 例，第二条锁翻向：工具栏**只按 `enhanced` 门控**，源码里不得再出现 `items.length > 0 && (`（`F/11` §3.11.19）
    + e2e-manual `character-card-single-tap.spec.ts`（真 vite:5173 + 真后端:8010 只读链路，走「资产管理 → 角色卡」后**只点一次**封面，断言预览弹窗出现）；前端全量 **166 文件 / 1919 用例**、`vite build` 绿；
    另有**双进程真后端联机验证**（PC 0.0.0.0:18080 +
    手机端 127.0.0.1:18081，隔离数据目录）：本机→PC 数据切换、无手机令牌 401、手机 health 不走代理、
@@ -1933,3 +1935,27 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
    （z-50），整层抬高会把它们一起顶到 `.modal-mask`(1000) 之上。回归：`LiquidGlassDock.portal.test.tsx`（挂点复刻
    `.app-dock`，断言 panel/scrim 的 `parentElement === document.body`）；真浏览器实测 1280×800 面板压过输入区、
    390×844 不回归、壁纸库 z-1300 仍在面板上、Esc 可关。⇒ 手册 `F/11` §3.11.18。
+78. **会话快照的「已落定媒体」是双向保留，删除语义的粒度是整条消息而不是槽（2026-10-29 用户更正实锤：「那本作品是有生成几批插画的」）**：
+   症状＝剧情气泡里插画全没了、`.bot-rich-parts` 不出现，但资产台账与磁盘文件都在。三层真因各治一处，**口径必须一致**：
+   ① **合并层**（`services/chat_snapshot.py`）：`_preserve_server_media_state` 过去只遍历 incoming 的槽，服务端已 `ready`
+   而这次传入没提到的槽直接消失，旧文档把这条写成「尊重删除」。但**前端不存在单槽删除入口**（`chatSessionEvents.dropMediaSlot`
+   只清自动插画的 pending 槽，`pruneUnsubmittedMediaSlots` 只清未提交槽），所以「少提到一个 ready 槽」只可能是旧快照没看见它。
+   现在同槽仍服务端优先，另加**已落定媒体回插**：`_is_settled_server_media` 判 `ready` 媒体或带 `promptId`/`submissionClaim` 的槽，
+   `_server_media_to_reattach` + `_reattach_missing_media` 按「前面有几句正文」的段位锚插回原位，段位对不齐就落最后一段之后
+   ——**位置可以退让，媒体不许静默丢**；incoming 无 `parts` 键且正文与服务端逐字相同 ⇒ 整份采用服务端 parts（保留真实段间位置）。
+   ② **整条替换层**：`save_if_newer` 除旧 revision 外新增两道拒写——现有快照读不动就拒（`load_strict`，绝不把「读空」当「没历史」
+   覆盖真源）、传入与现有**消息 id 零交集**即拒（前端三级兜底最后一级用 langgraph 历史重建、id 走 `crypto.randomUUID()` 的签名）。
+   **删掉部分消息与清空对话（传入 `[]`）仍照常保存**，别把这两道闸写成「非空即拒」。
+   ③ **渲染层**：图文混排用私有哨兵 `\uE000LAF_MEDIA_<n>\uE001` 定位，而显示层正则与宏替换只看正文不认识哨兵，
+   哨兵被连带删掉时快照里 `ready` 的图在界面上一张都不出。定位逻辑抽成纯模块 `frontend/src/lib/richMediaPlacement.ts`
+   （`splitMediaChunks` / `orphanMediaIndexes`），`ChatMessages` 用 `typeof chunk === "number"` 判分（⚠ 不能奇偶＋真值：`0` 号槽是 falsy），
+   孤儿槽追加到 `.bot-rich-parts` 尾部。
+   🔴 **禁止**把这三处任何一处「简化」回单一方向：既不得让旧快照抹掉已落定媒体，也**不得**借媒体回灌复活用户删掉的那条消息
+   （消息 id 缺失＝真删，`deletedMessageTombstones.filterDeleted` 仍挂在所有回灌路径）。回归：`test_chat_snapshot` 43 例
+   （三种前端快照形态不能抹图 / 段间还原 / pending 可清 / id 零交集被拒 / 快照损坏拒写 / 整条删除不复活）＋
+   `richMediaPlacement.test.ts` 5 例 + 组件真渲染 `ChatMessages.richMedia.test.tsx` 4 例（注入一条命中私有区的
+   `markdownOnly` 显示正则，断言结构由 `TXT,IMG,TXT` 退让成 `TXT,IMG` 且卡片数不变；⚠ 单靠真浏览器 A/B 分不出这两条路径——
+   本会话那 4 条消息的图都在段尾，两种实现都渲染成 `TXT,IMG`，判据必须落在「交错位」上）；把兜底那行删掉做变异测试，
+   该文件立刻 2 failed（`expected 'TXT' to be 'TXT,IMG'`、卡片数 0）⇒ 不是同义反复。
+   真浏览器（Edge headless 打生产 dist）4 张回灌插画解码 4/4。⇒ 手册 `E/07` §3 与 §5 红线 2、
+   `F/12` §3.7 与 §5 红线 14、记忆 `topic-illustration-lifecycle.md`「2026-10-29」。

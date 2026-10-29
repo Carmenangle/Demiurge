@@ -15,6 +15,7 @@ import { pushInspirationsToCanvas, inspirationToCanvasPayload, inspirationCanvas
 import { normalizeMediaUrl } from "../../lib/canvasConversation";
 import { openArtifactFolder } from "../../api/artifacts";
 import { isBodyShotRatio } from "../../lib/inspirationAutoPick";
+import { orphanMediaIndexes, splitMediaChunks } from "../../lib/richMediaPlacement";
 import { approvePlanTask, cancelPlanTask, deleteRecipe, getPlanTask, keepRecipe, type PlanTask } from "../../lib/planTaskActivity";
 import type { RichContent } from "../RichInput";
 import { CopyButton } from "../CopyButton";
@@ -572,9 +573,11 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
   // 显示层宏替换：模型输出/历史里残留的字面 {{user}}/{{char}} 统一替成人设名/角色名（缺省 user→「我」），
   // 像全局宏一样在渲染处生效（不改存储，与开场白/提示词侧对齐）。
   const cleanText = macros ? substituteMacros(withRecipe, macros.char, macros.user) : withRecipe;
-  const orderedChunks = orderedMediaParts.length > 0
-    ? cleanText.split(/\uE000LAF_MEDIA_(\d+)\uE001/g)
-    : [];
+  // 哨兵可能被显示层正则/宏替换连带删掉，该槽就在 split 结果里拿不到位置。
+  // 口径与后端快照一致：位置可以退让到正文尾部，但已存在的媒体不许在渲染层静默消失。
+  const orderedChunks = splitMediaChunks(cleanText, orderedMediaParts.length);
+  const orphanMediaParts = orphanMediaIndexes(orderedChunks, orderedMediaParts.length)
+    .map((index) => ({ part: orderedMediaParts[index], index }));
   // 旧消息的顶层图片保持原渲染；parts 媒体统一在下方按槽位顺序渲染。
   const imgs: string[] = [];
   if (msg.image) imgs.push(msg.image);
@@ -1015,9 +1018,10 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
           </div>
         ) : orderedMediaParts.length > 0 ? (
           <div className="bot-rich-parts">
-            {orderedChunks.map((chunk, index) => index % 2 === 0
-              ? (chunk ? <MarkdownHtml key={`text-${index}`} className="bot-text bot-html" text={chunk} htmlRef={(el) => { stableDetailsRefs.current[index] = el; }} /> : null)
-              : renderMediaPart(orderedMediaParts[Number(chunk)], Number(chunk)))}
+            {orderedChunks.map((chunk, index) => typeof chunk === "number"
+              ? renderMediaPart(orderedMediaParts[chunk], chunk)
+              : (chunk ? <MarkdownHtml key={`text-${index}`} className="bot-text bot-html" text={chunk} htmlRef={(el) => { stableDetailsRefs.current[index] = el; }} /> : null))}
+            {orphanMediaParts.map(({ part, index }) => renderMediaPart(part, index))}
           </div>
         ) : cleanText ? (
           <MarkdownHtml className="bot-text bot-html" text={cleanText} htmlRef={(el) => { stableDetailsRefs.current[-1] = el; }} />

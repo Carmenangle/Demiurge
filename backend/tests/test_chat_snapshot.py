@@ -263,7 +263,218 @@ def test_前端旧快照不能清掉服务端插画认领或完成结果(monkeyp
 
     deleted = [{"id": "bot", "role": "assistant", "text": "正文", "parts": []}]
     assert chat_snapshot.save_if_newer("thread", deleted, revision=3)
-    assert chat_snapshot.load("thread")[0]["parts"] == []
+    # 空 parts 不再等于「删掉这张插画」：前后端都没有单槽删除入口（dropMediaSlot 只清
+    # 未提交的 pending 槽，且清空后写的是 parts:undefined），2026-10-29 某作品/SAVE01
+    # 三批插画就是这么被旧快照静默抹掉的。媒体按服务端布局回位（这条槽本来就在 index 0），
+    # 正文按客户端走。
+    assert chat_snapshot.load("thread")[0]["parts"] == [
+        {"type": "image", "url": "ready.png", "slotId": "slot-1", "status": "ready",
+         "regeneration": {"kind": "template"}},
+        {"type": "text", "text": "正文"},
+    ]
+
+
+def _server_with_illustration(chat_snapshot, monkeypatch, tmp_path, repo_meta):
+    monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
+    monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+    chat_snapshot._REVISIONS.clear()
+    chat_snapshot.save("thread", [{
+        "id": "bot", "role": "assistant", "text": "前文后文",
+        "parts": [
+            {"type": "text", "text": "前文"},
+            {"type": "image", "url": "local://pic/1.png", "slotId": "slot-1", "status": "ready"},
+            {"type": "text", "text": "后文"},
+        ],
+    }])
+
+
+def test_前端纯文本快照不能抹掉服务端已完成的插画(monkeypatch, tmp_path):
+    """真机事故复现：客户端内存态只有文本段 → 全量快照保存把插画删了。
+
+    2026-10-29 用户实锤「某作品/SAVE01 是有生成几批插画的」，但 chat.json 里
+    39 条消息的 parts 只剩文本；10-26 离线包同作品还有 3 个 ready 图片 part + 5 个槽。
+    """
+    from app.services import repo_meta
+    _server_with_illustration(chat_snapshot, monkeypatch, tmp_path, repo_meta)
+
+    stale = [{"id": "bot", "role": "assistant", "text": "前文后文",
+              "parts": [{"type": "text", "text": "前文"}, {"type": "text", "text": "后文"}]}]
+    assert chat_snapshot.save_if_newer("thread", stale, revision=1)
+    assert chat_snapshot.load("thread")[0]["parts"] == [
+        {"type": "text", "text": "前文"},
+        {"type": "image", "url": "local://pic/1.png", "slotId": "slot-1", "status": "ready"},
+        {"type": "text", "text": "后文"},
+    ]
+
+
+def test_多批插画的段间位置随正文一起还原(monkeypatch, tmp_path):
+    """某作品/SAVE01 的真实形状：一条正文里几张图分散在不同段落之后。"""
+    from app.services import repo_meta
+    monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
+    monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+    chat_snapshot._REVISIONS.clear()
+    server_parts = []
+    for index, title in enumerate(["第一段", "第二段", "第三段", "第四段"]):
+        server_parts.append({"type": "text", "text": title})
+        if index in (0, 2):
+            server_parts.append({
+                "type": "image", "url": f"local://pic/{index}.png",
+                "slotId": f"slot-{index}", "status": "ready",
+            })
+    chat_snapshot.save("thread", [{"id": "bot", "role": "assistant",
+                                   "text": "第一段第二段第三段第四段", "parts": server_parts}])
+
+    stale = [{"id": "bot", "role": "assistant", "text": "第一段第二段第三段第四段",
+              "parts": [{"type": "text", "text": "第一段"}, {"type": "text", "text": "第二段"},
+                        {"type": "text", "text": "第三段"}, {"type": "text", "text": "第四段"}]}]
+    assert chat_snapshot.save_if_newer("thread", stale, revision=1)
+    assert chat_snapshot.load("thread")[0]["parts"] == server_parts
+
+
+def test_前端消息没带parts时服务端插画原位保留(monkeypatch, tmp_path):
+    """同一条链的第二种形状：客户端消息压根没有 parts 键（纯 text 消息）。"""
+    from app.services import repo_meta
+    _server_with_illustration(chat_snapshot, monkeypatch, tmp_path, repo_meta)
+
+    assert chat_snapshot.save_if_newer(
+        "thread", [{"id": "bot", "role": "assistant", "text": "前文后文"}], revision=1)
+    assert chat_snapshot.load("thread")[0]["parts"] == [
+        {"type": "text", "text": "前文"},
+        {"type": "image", "url": "local://pic/1.png", "slotId": "slot-1", "status": "ready"},
+        {"type": "text", "text": "后文"},
+    ]
+
+
+def test_插画回到客户端改写过的正文尾部而不是消失(monkeypatch, tmp_path):
+    """文本段数对不齐（用户编辑过正文）时按尾部挂载：宁可位置退让，不静默丢图。"""
+    from app.services import repo_meta
+    _server_with_illustration(chat_snapshot, monkeypatch, tmp_path, repo_meta)
+
+    edited = [{"id": "bot", "role": "assistant", "text": "合成一段的新正文",
+               "parts": [{"type": "text", "text": "合成一段的新正文"}]}]
+    assert chat_snapshot.save_if_newer("thread", edited, revision=1)
+    parts = chat_snapshot.load("thread")[0]["parts"]
+    assert parts[0] == {"type": "text", "text": "合成一段的新正文"}
+    assert {"type": "image", "url": "local://pic/1.png", "slotId": "slot-1",
+            "status": "ready"} in parts
+
+
+def test_未提交pending槽仍可被前端清理已提交槽不丢(monkeypatch, tmp_path):
+    """pruneUnsubmittedMediaSlots 的合法清理面不能被扩大。"""
+    from app.services import repo_meta
+    monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
+    monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+    chat_snapshot._REVISIONS.clear()
+    server = [{"id": "bot", "role": "assistant", "text": "正文",
+               "parts": [
+                   {"type": "text", "text": "正文"},
+                   {"type": "media-slot", "slotId": "slot-1", "status": "pending"},
+                   {"type": "media-slot", "slotId": "slot-2", "status": "pending",
+                    "promptId": "prompt-2"},
+               ]}]
+    chat_snapshot.save("thread", server)
+
+    client = [{"id": "bot", "role": "assistant", "text": "正文",
+               "parts": [{"type": "text", "text": "正文"}]}]
+    assert chat_snapshot.save_if_newer("thread", client, revision=1)
+    parts = chat_snapshot.load("thread")[0]["parts"]
+    assert {"type": "media-slot", "slotId": "slot-2", "status": "pending",
+            "promptId": "prompt-2"} in parts
+    assert not any(part.get("slotId") == "slot-1" for part in parts)
+
+
+def test_快照读空后的历史重建列表不能整条覆盖会话(monkeypatch, tmp_path):
+    """真因层防护：重建列表 id 全是新造的，与既有会话零交集 ⇒ 一律拒绝落盘。
+
+    2026-10-29 某作品/SAVE01：包里的 27 个消息 id 与现文件 39 个 id 零交集，
+    现文件每条只剩 {id, role, text, parts:[文本段]}——正是 useSessionLoad 退回
+    langgraph 历史 + crypto.randomUUID 重建后的形状，插画与 trace 就是这么整条没的。
+    """
+    from app.services import repo_meta
+    monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
+    monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+    chat_snapshot._REVISIONS.clear()
+    original = [
+        {"id": "m-1", "role": "user", "text": "第一轮",
+         "parts": [{"type": "text", "text": "第一轮"}]},
+        {"id": "m-2", "role": "assistant", "text": "第二轮正文",
+         "parts": [
+             {"type": "text", "text": "第二轮正文"},
+             {"type": "image", "url": "local://pic/1.png", "slotId": "slot-1", "status": "ready"},
+         ]},
+    ]
+    chat_snapshot.save("thread", original)
+
+    rebuilt = [
+        {"id": "n-1", "role": "user", "text": "第一轮",
+         "parts": [{"type": "text", "text": "第一轮"}]},
+        {"id": "n-2", "role": "assistant", "text": "第二轮正文",
+         "parts": [{"type": "text", "text": "第二轮正文"}]},
+    ]
+    assert chat_snapshot.save_if_newer("thread", rebuilt, revision=1) is False
+    assert chat_snapshot.load("thread") == original
+
+
+def test_删掉部分消息与清空对话仍照常保存(monkeypatch, tmp_path):
+    """拒绝面只收「零交集」：真实删除仍有交集，清空传空列表，都不该被拦。"""
+    from app.services import repo_meta
+    monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
+    monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+    chat_snapshot._REVISIONS.clear()
+    chat_snapshot.save("thread", [
+        {"id": "m-1", "role": "user", "text": "第一轮"},
+        {"id": "m-2", "role": "assistant", "text": "第二轮"},
+        {"id": "m-3", "role": "user", "text": "第三轮"},
+    ])
+
+    assert chat_snapshot.save_if_newer(
+        "thread",
+        [{"id": "m-1", "role": "user", "text": "第一轮"},
+         {"id": "m-3", "role": "user", "text": "第三轮"}],
+        revision=1)
+    assert [item["id"] for item in chat_snapshot.load("thread")] == ["m-1", "m-3"]
+
+    assert chat_snapshot.save_if_newer("thread", [], revision=2)
+    assert chat_snapshot.load("thread") == []
+
+    assert chat_snapshot.save_if_newer(
+        "thread", [{"id": "m-9", "role": "user", "text": "重新开始"}], revision=3)
+    assert [item["id"] for item in chat_snapshot.load("thread")] == ["m-9"]
+
+
+def test_快照损坏时拒绝保存而不是覆盖真源(monkeypatch, tmp_path):
+    """损坏文件读不动 ≠ 没有历史：拿空 current 参与合并再回写等于二次毁数据。"""
+    from app.services import repo_meta
+    monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
+    monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+    chat_snapshot._REVISIONS.clear()
+    chat_snapshot.save("thread", [{"id": "m-1", "role": "user", "text": "第一轮"}])
+    target = tmp_path / "thread.json"
+    target.write_text("{ broken", encoding="utf-8")
+
+    assert chat_snapshot.save_if_newer(
+        "thread", [{"id": "m-1", "role": "user", "text": "改写"}], revision=1) is False
+    assert target.read_text(encoding="utf-8") == "{ broken"
+
+
+def test_整条消息删除后插画不复活(monkeypatch, tmp_path):
+    """用户删除的是消息本身：客户端不再提这条 id，服务端不得把它塞回来。"""
+    from app.services import repo_meta
+    _server_with_illustration(chat_snapshot, monkeypatch, tmp_path, repo_meta)
+    chat_snapshot.save("thread", chat_snapshot.load("thread") + [{
+        "id": "bot-2", "role": "assistant", "text": "第二段",
+        "parts": [
+            {"type": "text", "text": "第二段"},
+            {"type": "image", "url": "local://pic/2.png", "slotId": "slot-9", "status": "ready"},
+        ],
+    }])
+
+    assert chat_snapshot.save_if_newer(
+        "thread", [{"id": "bot", "role": "assistant", "text": "前文后文"}], revision=1)
+    items = chat_snapshot.load("thread")
+    assert [item["id"] for item in items] == ["bot"]
+    assert not any(part.get("slotId") == "slot-9"
+                   for item in items for part in (item.get("parts") or []))
 
 
 def test_重新生图按相同slot替换已有图片而不追加消息(monkeypatch, tmp_path):

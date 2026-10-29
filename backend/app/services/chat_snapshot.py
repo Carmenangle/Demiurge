@@ -129,10 +129,102 @@ def _preserve_server_text(current: list, incoming: list) -> list:
     return merged
 
 
-def _preserve_server_media_state(current: list, incoming: list) -> list:
-    """合并同槽的服务端提交状态，防止前端旧快照把认领/结果回滚成 pending。
+def _merge_slot_state(client_parts: list, server_parts: list) -> tuple[list, bool]:
+    """客户端仍提到的槽：以服务端已落定的状态为准，防旧快照把结果回滚成 pending。"""
+    server_by_slot = {
+        part.get("slotId"): part for part in server_parts if part.get("slotId")
+    }
+    next_parts: list = []
+    changed = False
+    for part in client_parts:
+        server_part = (
+            server_by_slot.get(part.get("slotId")) if isinstance(part, dict) else None
+        )
+        if not isinstance(server_part, dict) or not isinstance(part, dict):
+            next_parts.append(part)
+            continue
+        if (server_part.get("type") in ("image", "video", "audio")
+                and server_part.get("status") == "ready"):
+            next_parts.append(server_part)
+            changed = True
+            continue
+        if part.get("type") == "media-slot" and server_part.get("type") == "media-slot":
+            protected = {
+                key: server_part[key] for key in ("submissionClaim", "promptId")
+                if server_part.get(key)
+            }
+            if protected:
+                next_parts.append({**part, **protected})
+                changed = True
+                continue
+        next_parts.append(part)
+    return next_parts, changed
 
-    只处理传入快照仍保留的同一消息与同一槽；用户已经删除的消息或槽不会复活。
+
+def _is_settled_server_media(part: dict) -> bool:
+    """服务端这条槽已经「有东西」：成品媒体，或已提交给 ComfyUI 的在途槽。
+
+    未提交的 pending 槽不在内——前端恢复时的 pruneUnsubmittedMediaSlots 清它们是设计内的。
+    """
+    if not part.get("slotId"):
+        return False
+    if part.get("type") in ("image", "video", "audio"):
+        return part.get("status") == "ready"
+    if part.get("type") == "media-slot":
+        return bool(part.get("promptId") or part.get("submissionClaim"))
+    return False
+
+
+def _server_media_to_reattach(server_parts: list, known_slots: set) -> list:
+    """服务端该留、这次客户端却没提的槽：[(前面有几句正文, part)]，保持服务端顺序。"""
+    out: list = []
+    text_seen = 0
+    for part in server_parts:
+        if part.get("type") == "text":
+            text_seen += 1
+            continue
+        if _is_settled_server_media(part) and part.get("slotId") not in known_slots:
+            out.append((text_seen, part))
+    return out
+
+
+def _reattach_missing_media(parts: list, missing: list) -> list:
+    """把漏掉的媒体按「前面有几句正文」插回客户端布局，段数对不齐的落最后一段之后。
+
+    客户端编辑过正文时文本段数可能少于服务端，此时宁可让图退到尾部也不能丢图：
+    位置退看得到，静默消失看不到（2026-10-29 事故正是后者）。
+    """
+    cut_after_text: dict[int, int] = {}
+    text_seen = 0
+    for index, part in enumerate(parts):
+        if isinstance(part, dict) and part.get("type") == "text":
+            text_seen += 1
+            cut_after_text[text_seen] = index + 1
+    buckets: dict[int, list] = {}
+    for rank, part in missing:
+        target = 0 if rank == 0 else cut_after_text.get(min(rank, text_seen), len(parts))
+        buckets.setdefault(target, []).append(part)
+    merged: list = []
+    for index, part in enumerate(parts):
+        for extra in buckets.get(index, []):
+            merged.append(extra)
+        merged.append(part)
+    for extra in buckets.get(len(parts), []):
+        merged.append(extra)
+    return merged
+
+
+def _preserve_server_media_state(current: list, incoming: list) -> list:
+    """合并服务端媒体状态，防止前端旧快照把插画回滚成 pending 或整张抹掉。
+
+    两层保护各对应一起实锤事故：
+      - 客户端仍提到的槽：服务端已落定的状态优先（旧行为，防结果回滚成 pending）。
+      - 客户端漏掉的槽：成品媒体与已提交在途槽不得消失（2026-10-29 用户实锤
+        「某作品/SAVE01 是有生成几批插画的」——10-26 离线包里还有 3 个 ready 图片
+        part + 5 个槽，10-29 的 chat.json 只剩纯文本 parts）。前后端都没有「删单张
+        插画」的入口（dropMediaSlot 只清未提交 pending 槽），所以客户端少写一条媒体
+        只能解释为旧状态，不能解释为用户删除。
+    删除真源仍然成立：整条消息不在客户端列表里就不复活。
     """
     current_messages = {
         item.get("id"): item for item in current
@@ -144,35 +236,33 @@ def _preserve_server_media_state(current: list, incoming: list) -> list:
             merged.append(item)
             continue
         current_item = current_messages.get(item.get("id"))
-        if not isinstance(current_item, dict) or not isinstance(item.get("parts"), list):
+        if not isinstance(current_item, dict):
             merged.append(item)
             continue
-        current_parts = {
-            part.get("slotId"): part for part in (current_item.get("parts") or [])
-            if isinstance(part, dict) and part.get("slotId")
-        }
-        next_parts: list = []
-        changed = False
-        for part in item["parts"]:
-            server_part = current_parts.get(part.get("slotId")) if isinstance(part, dict) else None
-            if not isinstance(server_part, dict) or not isinstance(part, dict):
-                next_parts.append(part)
-                continue
-            if (server_part.get("type") in ("image", "video", "audio")
-                    and server_part.get("status") == "ready"):
-                next_parts.append(server_part)
-                changed = True
-                continue
-            if part.get("type") == "media-slot" and server_part.get("type") == "media-slot":
-                protected = {
-                    key: server_part[key] for key in ("submissionClaim", "promptId")
-                    if server_part.get(key)
-                }
-                if protected:
-                    next_parts.append({**part, **protected})
-                    changed = True
-                    continue
-            next_parts.append(part)
+        server_parts = [p for p in (current_item.get("parts") or []) if isinstance(p, dict)]
+        has_client_parts = isinstance(item.get("parts"), list)
+        client_parts = item["parts"] if has_client_parts else []
+        next_parts, changed = _merge_slot_state(client_parts, server_parts)
+        missing = _server_media_to_reattach(
+            server_parts,
+            {p.get("slotId") for p in client_parts
+             if isinstance(p, dict) and p.get("slotId")},
+        )
+        if missing:
+            # 客户端没交出任何布局（无 parts 键，或显式空数组）：正文逐字等于服务端文本段
+            # 拼接时整条布局按服务端原样还原（图在段落之间，不是堆到尾部）。
+            adopted = False
+            if not next_parts:
+                text = str(item.get("text") or "")
+                server_text = "".join(str(p.get("text") or "") for p in server_parts
+                                      if p.get("type") == "text")
+                if text == server_text:
+                    next_parts, adopted = list(server_parts), True
+                else:
+                    next_parts = [{"type": "text", "text": text}] if text else []
+            if not adopted:
+                next_parts = _reattach_missing_media(next_parts, missing)
+            changed = True
         merged.append({**item, "parts": next_parts} if changed else item)
     return merged
 
@@ -183,6 +273,22 @@ def save(thread_id: str, messages: list) -> None:
         _save_unlocked(thread_id, messages)
 
 
+def _is_wholesale_replacement(previous: list, messages: list) -> bool:
+    """新旧都非空、消息 id 却零交集 ⇒ 传入的不是「同一条会话的新状态」，而是重建列表。
+
+    2026-10-29 某作品/SAVE01 实锤：快照这次读出来是空的（或读失败被当成空），前端
+    useSessionLoad 就退回 langgraph 历史重建消息流——id 用 crypto.randomUUID() 现造，
+    形状只剩 {id, role, text, parts:[文本段]}。这份列表再走全量快照保存，就把整条真源
+    （插画 parts、route、agentTrace）抹平了：包里的 27 个 id 与现文件 39 个 id 零交集。
+    真实用户操作不会长这样：删消息是「少一批 id」（仍有交集），清空是「传空列表」。
+    """
+    old_ids = {item.get("id") for item in previous if isinstance(item, dict) and item.get("id")}
+    new_ids = {
+        item.get("id") for item in messages if isinstance(item, dict) and item.get("id")
+    }
+    return bool(old_ids) and bool(new_ids) and not (old_ids & new_ids)
+
+
 def save_if_newer(thread_id: str, messages: list, revision: int) -> bool:
     """仅接受同一前端会话中更新的完整快照，阻止较早异步请求晚到后覆盖删除结果。"""
     key = _safe(thread_id)
@@ -190,10 +296,24 @@ def save_if_newer(thread_id: str, messages: list, revision: int) -> bool:
         previous = _REVISIONS.get(key)
         if previous is not None and revision <= previous:
             return False
+        try:
+            # 严格读：损坏/读失败不能当成「还没有历史」——否则这份空 current 参与合并后
+            # 回写，等于把读不动的真源直接覆盖掉。
+            current = load_strict(thread_id)
+        except Exception as exc:
+            _LOG.error("chat_snapshot::save_if_newer 现有快照读不动，拒绝写入 thread=%s: %s",
+                       thread_id, exc)
+            return False
+        if _is_wholesale_replacement(current, messages):
+            _LOG.warning(
+                "chat_snapshot::save_if_newer 拒绝整条替换 thread=%s 现有=%d 传入=%d id 无交集",
+                thread_id, len(current), len(messages),
+            )
+            return False
         _save_unlocked(
             thread_id,
             _preserve_server_media_state(
-                load(thread_id), _preserve_server_text(load(thread_id), messages)),
+                current, _preserve_server_text(current, messages)),
         )
         _REVISIONS[key] = revision
         _persist_revisions(_REVISIONS)
