@@ -12,7 +12,11 @@ tauri = { version = "2", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # 运行时按需交付：HTTPS 下载走 Windows 原生 TLS（schannel），不引 OpenSSL 工具链。
+# ⚠ ureq 的 `native-tls` 特性只拉依赖、不把它设成默认后端（源码原话：never used by
+# `ureq::get`），必须在 AgentBuilder 上显式挂 tls_connector，否则 https 一律报
+# 「no TLS backend is configured」。这里直接依赖同一个 native-tls 版本给它接线。
 ureq = { version = "2.12", default-features = false, features = ["native-tls"] }
+native-tls = "0.2"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 sha2 = "0.10"
 windows-sys = { version = "0.59", features = [

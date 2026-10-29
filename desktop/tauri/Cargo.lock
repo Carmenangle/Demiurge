@@ -561,6 +561,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "minisign-verify",
+ "native-tls",
  "serde",
  "serde_json",
  "sha2",

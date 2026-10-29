@@ -577,11 +577,16 @@ struct Fetcher {
 
 impl Fetcher {
     fn new() -> Self {
-        let agent = ureq::AgentBuilder::new()
+        let mut builder = ureq::AgentBuilder::new()
             .timeout_connect(Duration::from_secs(30))
-            .timeout_read(Duration::from_secs(60))
-            .build();
-        Self { agent }
+            .timeout_read(Duration::from_secs(60));
+        // ureq 的 `native-tls` 只是可选依赖，不会成为默认后端；不显式挂上时 https
+        // 在建立连接前就返回 UnknownScheme（首次启动下载运行时会全量失败）。
+        match native_tls::TlsConnector::new() {
+            Ok(connector) => builder = builder.tls_connector(std::sync::Arc::new(connector)),
+            Err(err) => eprintln!("[runtime] 初始化系统 TLS 失败：{err}"),
+        }
+        Self { agent: builder.build() }
     }
 
     fn fetch(
@@ -1063,4 +1068,44 @@ fn unique_token() -> String {
         .map(|duration| duration.as_nanos())
         .unwrap_or(0);
     format!("{nanos:x}-{}", std::process::id())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 回归：https 必须真的走到 TLS 后端。
+    ///
+    /// ureq 在没挂 tls_connector 时会返回 UnknownScheme「no TLS backend」，
+    /// 安装版首次启动下载运行时会全量失败（v0.30 / v0.30.1 的安装器就是这么坏的）。
+    /// 要点是**先让 TCP 接住**：端口关着时 TCP 先失败，根本走不到 TLS，测不出差别。
+    #[test]
+    fn https_requests_reach_a_tls_backend() {
+        use std::io::Read;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("绑定临时端口");
+        let port = listener.local_addr().expect("取临时端口").port();
+        let server = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut head = [0u8; 32];
+                let _ = stream.read(&mut head);
+            }
+        });
+
+        let dir = std::env::temp_dir().join(format!("laf-tls-probe-{}", unique_token()));
+        std::fs::create_dir_all(&dir).expect("建临时目录");
+        let dest = dir.join("probe.bin");
+        let mut progress = |_: &str| {};
+        let err = Fetcher::new()
+            .fetch(&format!("https://127.0.0.1:{port}/"), &dest, &mut progress, "测试")
+            .expect_err("对端立即断开，TLS 握手必须失败");
+        let _ = server.join();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(
+            !err.0.contains("no TLS backend"),
+            "https 请求没有可用 TLS 后端：{}",
+            err.0
+        );
+    }
 }
