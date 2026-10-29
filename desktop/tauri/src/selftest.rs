@@ -328,10 +328,11 @@ fn delivery_test() -> Result<(), String> {
         let base_zip = root.join("base.zip");
         write_zip(&base_tree, &base_zip, "base-base-test")?;
         let base_bytes = std::fs::read(&base_zip).map_err(err_text)?;
-        let base_name = "Demiurge-base-base-test-windows-x64-full-rag.zip";
+        let base_stem = "Demiurge_base_windows_v0.1.0";
+        let base_name = format!("{base_stem}.zip");
         let split = base_bytes.len() / 2;
-        let part1 = format!("{base_name}.part01");
-        let part2 = format!("{base_name}.part02");
+        let part1 = format!("{base_stem}.part01");
+        let part2 = format!("{base_stem}.part02");
         write_fixture(&assets.join(&part1), &base_bytes[..split])?;
         write_fixture(&assets.join(&part2), &base_bytes[split..])?;
 
@@ -345,12 +346,12 @@ fn delivery_test() -> Result<(), String> {
             &app_tree.join("application-manifest.json"),
             br#"{"schema_version":1,"application_id":"app-test"}"#,
         )?;
-        let app_name = "Demiurge-application-0.1.0-windows-x64-full-rag.zip";
+        let app_name = "Demiurge_application_windows_v0.1.0.zip";
         let app_zip = assets.join(app_name);
         write_zip(&app_tree, &app_zip, "application-app-test")?;
         let app_bytes = std::fs::read(&app_zip).map_err(err_text)?;
 
-        let manifest_name = "Demiurge-update-v0.1.0-windows-x64-full-rag.json";
+        let manifest_name = "Demiurge_update_windows_v0.1.0.json";
         let manifest = json!({
             "schema_version": 2,
             "app_version": "0.1.0",
@@ -362,12 +363,12 @@ fn delivery_test() -> Result<(), String> {
             "layers": {
                 "base": {
                     "id": "base-test",
-                    "archive": base_name,
+                    "archive": &base_name,
                     "size": base_bytes.len(),
                     "sha256": sha256_bytes(&base_bytes),
                     "assets": [
-                        {"name": part1, "size": split, "sha256": sha256_bytes(&base_bytes[..split])},
-                        {"name": part2, "size": base_bytes.len() - split, "sha256": sha256_bytes(&base_bytes[split..])}
+                        {"name": &part1, "size": split, "sha256": sha256_bytes(&base_bytes[..split])},
+                        {"name": &part2, "size": base_bytes.len() - split, "sha256": sha256_bytes(&base_bytes[split..])}
                     ]
                 },
                 "application": {
@@ -503,7 +504,7 @@ fn delivery_test() -> Result<(), String> {
 
         // ⑥ pin 自身的清单名漂移必须拒绝。
         let mut drifted = serde_json::to_value(&pin).map_err(err_text)?;
-        drifted["manifest"] = json!("Demiurge-update-v9.9.9-windows-x64-full-rag.json");
+        drifted["manifest"] = json!("Demiurge_update_windows_v9.9.9.json");
         let drifted_pin: crate::runtime_delivery::DeliveryPin =
             serde_json::from_value(drifted).map_err(err_text)?;
         match crate::runtime_delivery::deliver(

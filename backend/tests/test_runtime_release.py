@@ -276,13 +276,26 @@ def test_split_asset_writes_reassembly_manifest(tmp_path):
 
     parts = runtime_release.split_asset(archive, max_part_bytes=4)
     manifest = json.loads(
-        (tmp_path / "runtime.zip.parts.json").read_text(encoding="utf-8")
+        (tmp_path / "runtime.parts.json").read_text(encoding="utf-8")
     )
 
+    # 分卷名去掉归档扩展名：`runtime.zip` ⇒ `runtime.part01`，与用户可见的
+    # `Demiurge_rag_windows_v0.30.part01` 同一约定；内容 ID 不进文件名。
+    assert [part.name for part in parts] == ["runtime.part01", "runtime.part02", "runtime.part03"]
     assert [part.read_bytes() for part in parts] == [b"0123", b"4567", b"89"]
     assert manifest["archive"] == "runtime.zip"
     assert manifest["parts"] == [part.name for part in parts]
     assert manifest["sha256"] == runtime_release.sha256_file(archive)
+
+
+def test_asset_names_carry_platform_and_version_but_no_content_id():
+    target = runtime_release.load_targets(
+        ROOT / "release" / "runtime-targets.json"
+    )["windows-x64-full-rag"]
+
+    assert runtime_release.asset_name("base", target, "v0.30") == "Demiurge_base_windows_v0.30"
+    assert runtime_release.asset_name("rag", target, "v0.30") == "Demiurge_rag_windows_v0.30"
+    assert runtime_release.archive_stem("Demiurge_rag_windows_v0.30.tar.gz") == "Demiurge_rag_windows_v0.30"
 
 
 def test_content_addressed_directory_promotion_retries_windows_lock(
@@ -439,8 +452,8 @@ def test_reusable_layers_require_matching_ids_and_verified_assets(tmp_path):
             "sha256": runtime_release.sha256_file(rag),
         }]},
     }
-    runtime_release.write_json(tmp_path / f"Demiurge-update-old-{target.id}.json", {
-        "base_id": "base-id", "rag_id": "rag-content", "layers": layers,
+    runtime_release.write_json(tmp_path / "Demiurge_update_windows_old.json", {
+        "target": target.id, "base_id": "base-id", "rag_id": "rag-content", "layers": layers,
     })
 
     assert runtime_release.reusable_layers(

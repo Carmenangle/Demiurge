@@ -306,8 +306,11 @@ def test_runtime_delivery_pin_render_rejects_unsafe_tag_and_repository():
     assert pin["release_base"] == (
         "https://github.com/Carmenangle/Demiurge/releases/download/v0.15"
     )
-    assert pin["manifest"] == "Demiurge-update-v0.15-windows-x64-full-rag.json"
+    assert pin["manifest"] == "Demiurge_update_windows_v0.15.json"
     assert pin["version"] == "0.15.0"
+
+    macos = delivery.render_pin("v0.15", "Carmenangle/Demiurge", target="macos-arm64-full-rag")
+    assert macos["manifest"] == "Demiurge_update_macos_v0.15.json"
 
     for tag in ("v0.15/../x", "v0.15.0.1", "v0.15-beta", ".."):
         with pytest.raises(ValueError):
@@ -337,9 +340,9 @@ def _manifest_fixture(pin: dict) -> dict:
         "application_id": "app-test",
         "rag_id": "rag-test",
         "layers": {
-            "base": layer(f"Demiurge-base-base-test-{target}.zip", 10),
-            "application": layer(f"Demiurge-application-app-test-{target}.zip", 20),
-            "rag": layer(f"Demiurge-rag-rag-test-{target}.zip", 30),
+            "base": layer(f"Demiurge_base_windows_{pin['tag']}.zip", 10),
+            "application": layer(f"Demiurge_application_windows_{pin['tag']}.zip", 20),
+            "rag": layer(f"Demiurge_rag_windows_{pin['tag']}.zip", 30),
         },
     }
 
@@ -388,12 +391,33 @@ def test_runtime_delivery_manifest_validation_rejects_drift():
         delivery.validate_manifest(missing_rag_id, pin)
 
 
+def test_runtime_delivery_split_parts_drop_archive_extension():
+    sha = "a" * 64
+    layer = {
+        "id": "rag-test",
+        "archive": "Demiurge_rag_windows_v0.30.zip",
+        "size": 20,
+        "sha256": sha,
+        "assets": [
+            {"name": "Demiurge_rag_windows_v0.30.part01", "size": 10, "sha256": sha},
+            {"name": "Demiurge_rag_windows_v0.30.part02", "size": 10, "sha256": sha},
+        ],
+    }
+    delivery.validate_layer("rag", layer)
+
+    # 分卷名从归档基名派生（去掉 .zip），用户看到的是 Demiurge_rag_windows_v0.30.part01，
+    # 不是 ...zip.part01；清单与壳两侧都按同一规则校验。
+    layer["assets"][0]["name"] = "Demiurge_rag_windows_v0.30.zip.part01"
+    with pytest.raises(ValueError, match="分卷名"):
+        delivery.validate_layer("rag", layer)
+
+
 def test_runtime_delivery_assets_must_not_enter_installer_staging(tmp_path):
     target = _clean_staging_tree(tmp_path)
     leaked = [
         target / "runtime-delivery.json",
-        target / "Demiurge-update-v0.1.0-windows-x64-full-rag.json",
-        target / "dependencies" / "Demiurge-base-base-test-windows-x64-full-rag.zip",
+        target / "Demiurge_update_windows_v0.1.0.json",
+        target / "dependencies" / "Demiurge_base_windows_v0.1.0.zip",
         target / "dependencies" / "runtime-pack",
     ]
     for path in leaked:
@@ -404,8 +428,8 @@ def test_runtime_delivery_assets_must_not_enter_installer_staging(tmp_path):
 
     errors = "\n".join(staging.audit_staging(target))
     assert "runtime-delivery.json" in errors
-    assert "Demiurge-update-v0.1.0-windows-x64-full-rag.json" in errors
-    assert "Demiurge-base-base-test-windows-x64-full-rag.zip" in errors
+    assert "Demiurge_update_windows_v0.1.0.json" in errors
+    assert "Demiurge_base_windows_v0.1.0.zip" in errors
     assert "runtime-pack" in errors
 
 

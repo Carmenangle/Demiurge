@@ -77,7 +77,7 @@ def _assets(tmp_path: Path, target: str, edition: str) -> Path:
         "rag_id": rag_id,
         "layers": layers,
     }
-    (assets / f"Demiurge-update-v0.15-{target}.json").write_text(
+    (assets / f"Demiurge_update_{target.split('-', 1)[0]}_v0.15.json").write_text(
         json.dumps(manifest), encoding="utf-8"
     )
     return assets

@@ -195,12 +195,13 @@ target\debug\demiurge-shell.exe --self-test    # 18 项：前 15 项与 WPF 同�
    预设/userdata/`backend/data`/`.env` 由三层机械守卫拦在安装资源之外。
 3. ✅ **运行时按需交付**（第三步，已落）：安装器只带壳 + MinGit；首次启动按嵌入 pin（`release/runtime-delivery.json`）
    补齐 `base+application`，在线下载与离线双入口（安装目录 `runtime-pack\`、`%LOCALAPPDATA%\Demiurge\downloads\`）并存；
-   `rag` 仅 `--install-runtime --with-rag` 显式追加。层体积/哈希只认 `Demiurge-update-*.json`，pin 不复制。
+   `rag` 仅 `--install-runtime --with-rag` 显式追加。层体积/哈希只认 `Demiurge_update_<平台>_<tag>.json`，pin 不复制；
    失败不写 `current.json`；自检第 17 项用纯 `file://` 夹具覆盖组装/复用/离线/坏档/磁盘不足/清单漂移。
 4. ✅ **CI 切换**（第四步，已落）：`desktop-shell` job 从 `dotnet publish` 切到 Tauri（Rust stable + Node 22 +
    Python 3.13.11），先渲染 pin，再装配依赖 → `build_installers.py --skip-stage --version <tag>` → 自检 →
    归档 `Demiurge-desktop-windows-x64.zip`，并上传两个安装器与 `SHA256SUMS.txt`。
-   `portable-release.yml` cleanup 收窄为只删 mac/linux 分层中间件，保留 Windows 分层资产供在线交付。
+   `portable-release.yml` cleanup 收窄为只删 mac/linux 分层中间件与桌面壳裸包 `Demiurge-desktop-windows-x64.zip`，
+   保留 Windows 分层资产供在线交付；重跑该 workflow 前需重新上传裸包。
 5. ✅ **自动更新骨架**（第五步，已落）：`tauri-plugin-updater` + 托盘「检查更新…」→ 下载 → minisign 验签 →
    停自启运行时 → NSIS `passive` 安装；`scripts/updater_manifest.py` 生成 `latest.json` 并守卫签名版本绑定/HTTPS/非
    `-Machine`；CI 预留签名 secrets。当前用一次性测试密钥，**生产公钥轮换与真实下载安装回放未做**。
@@ -268,7 +269,7 @@ WPF 壳保持旧行为（关窗即退出并回收），决策只在新壳落地�
 第五刀（运行时按需交付 + CI 切换，2026-10-24）：
 
 - `release/runtime-delivery.json`（pin，schema 1）+ `scripts/runtime_delivery.py pin|validate`，层的体积与
-  SHA256 仍只由 `Demiurge-update-<tag>-<target>.json` 提供；`backend/tests/test_installer_release.py` 增 4 条
+  SHA256 仍只由 `Demiurge_update_<平台>_<tag>.json` 提供；`backend/tests/test_installer_release.py` 增 4 条
   `runtime_delivery_*` 回归（pin 与发布合同一致、非法 tag/repository 被拒、清单漂移被拒、交付资产不得混入安装暂存树）。
 - `desktop/tauri/src/runtime_delivery.rs`（约 700 行）：pin/清单校验、`file://` 与 HTTPS 续传、分卷组装、
   安全解压（拒绝绝对路径与 `..`、剥单根）、原子部署 + 回滚、磁盘预检、`current.json` 最后写。

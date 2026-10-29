@@ -2,7 +2,7 @@
 //!
 //! 合同：
 //! - 只认 `release/runtime-delivery.json` 这一份 pin（构建时打进壳里）；哈希与大小以
-//!   `Demiurge-update-*.json` 清单为唯一真源，pin 不重复存哈希（否则 CI 要先有清单才能写 pin）。
+//!   `Demiurge_update_<平台>_<tag>.json` 清单为唯一真源，pin 不重复存哈希（否则 CI 要先有清单才能写 pin）。
 //! - 下载会先把**每个分件**校验一遍，再合并出归档并校验归档；任何一步不符就删掉坏文件重来，
 //!   绝不把「看起来下完了」的东西解压进运行时目录。
 //! - 落位是内容寻址：`runtime/base/<base_id>`、`runtime/apps/<application_id>`、`runtime/rag/<rag_id>`；
@@ -319,6 +319,21 @@ fn safe_base_url(url: &str) -> bool {
     url.starts_with("https://") || url.starts_with("file://")
 }
 
+/// 目标 ID 的平台段：`windows-x64-full-rag` ⇒ `windows`。
+fn platform_of(target: &str) -> &str {
+    target.split('-').next().unwrap_or("")
+}
+
+/// 归档基名（去掉 .zip/.tar.gz/.7z）；分卷名由它派生。
+fn archive_stem(name: &str) -> &str {
+    for suffix in [".tar.gz", ".zip", ".7z"] {
+        if let Some(stem) = name.strip_suffix(suffix) {
+            return stem;
+        }
+    }
+    name
+}
+
 fn validate_pin(pin: &DeliveryPin) -> Result<(), String> {
     if pin.schema_version != 1 {
         return Err(format!("交付 pin schema_version 必须是 1，实际 {}", pin.schema_version));
@@ -334,7 +349,7 @@ fn validate_pin(pin: &DeliveryPin) -> Result<(), String> {
     if pin.target.trim().is_empty() || pin.target.contains(['/', '\\', ':']) {
         return Err(format!("交付 pin 的 target 不合法：{}", pin.target));
     }
-    let expected_manifest = format!("Demiurge-update-{}-{}.json", pin.tag, pin.target);
+    let expected_manifest = format!("Demiurge_update_{}_{}.json", platform_of(&pin.target), pin.tag);
     if pin.manifest != expected_manifest {
         return Err(format!(
             "交付 pin 的清单名不是 {expected_manifest}：{}",
@@ -406,7 +421,7 @@ fn validate_layer(name: &str, layer: &Layer) -> Result<(), String> {
             ));
         }
     } else {
-        let prefix = format!("{}.part", layer.archive);
+        let prefix = format!("{}.part", archive_stem(&layer.archive));
         for asset in &layer.assets {
             if !asset.name.starts_with(&prefix) {
                 return Err(format!(
@@ -494,10 +509,11 @@ fn find_offline_manifest(pin: &DeliveryPin, dirs: &[PathBuf]) -> Result<Option<M
         let Ok(entries) = fs::read_dir(dir) else {
             continue;
         };
-        let suffix = format!("-{}.json", pin.target);
+        // 新命名不带 target（`Demiurge_update_windows_v0.30.json`），平台与版本由
+        // `manifest_matches` 逐项裁决；这里只做粗筛，避免误读无关 JSON。
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if !name.starts_with("Demiurge-update-") || !name.ends_with(&suffix) {
+            if !name.starts_with("Demiurge_update_") || !name.ends_with(".json") {
                 continue;
             }
             let path = entry.path();

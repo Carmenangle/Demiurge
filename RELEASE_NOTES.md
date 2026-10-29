@@ -3,59 +3,63 @@
 本地优先的多智能体交互叙事与 ComfyUI 创作工作台——剧情对话、角色/世界书、自动图文音、
 画布创作、AI 搭工作流，全部跑在你自己的机器上，数据不出本机。
 
-## 0.30.2 补丁（2026-10-29）
+## 0.30（2026-10-30 重发）
 
-- **修「安装版首次启动下载运行时失败」**：0.30 / 0.30.1 的安装器没有把 HTTPS 接到系统 TLS 后端，
-  首次启动补齐运行时（以及 `--install-runtime`）一律报 `no TLS backend is configured`。
-  **请用 0.30.2 替代 0.30 / 0.30.1 的安装器**；功能与 0.30.1 相同，两处修复都在内。
-- 已装好的旧版也能救：把运行时层放进安装目录 `runtime-pack\` 或 `%LOCALAPPDATA%\Demiurge\downloads\`
-  走离线入口，或直接覆盖安装 0.30.2。
-- 本次只发 Windows 安装器与配套运行时层，**未重发便携包与手机端 APK**（仍从 v0.30 下载）。
-  安装版首次启动会按内嵌清单下载 0.30.2 的应用层，基础层与 RAG 层沿用 v0.30 已发布资产。
+先前发布的 0.30 / 0.30.1 / 0.30.2 已全部撤下，**请以本页附件为准**。这一版修掉三处缺陷，不新增功能：
 
-## 0.30.1 补丁（2026-10-29）
+- **安装版首次启动无法下载运行时**：壳的 HTTPS 请求没有接上系统 TLS 后端，首次启动补齐运行时与
+  `--install-runtime` 一律报 `no TLS backend is configured`。现已显式接系统 TLS（schannel，不引 OpenSSL），
+  并补了能真正逼出 TLS 握手的回归测试。
+- 资产库切到没有素材的分类（视频／音频）时工具栏整条消失，连「全部／图片」都点不回去；空分类现在保留完整工具栏。
+- 剧情对话里已生成的插画会被旧窗口的过期快照抹掉；已落定媒体改为不可回滚，快照漏报的槽按原段位插回。
 
-> ⚠ 0.30.1 的安装器无法在线下载运行时，已被 0.30.2 替代，请勿再分发。
+## 附件是什么
 
-- 资产库切到「视频／音频」这类还没有素材的分类时，工具栏不再整条消失。
-- 剧情对话里已生成的插画不再被旧窗口的过期快照抹掉；漏报的插画按原段位补回，只有整条消息删除才算删除。
-- 本次只发 Windows 安装器与配套运行时层，**未重发便携包与手机端 APK**（仍从 v0.30 下载）。
-  安装版首次启动会按内嵌清单下载 0.30.1 的应用层，基础层与 RAG 层沿用 v0.30 已发布资产。
+| 附件 | 用途 |
+|---|---|
+| `Demiurge-Setup-User-0.30.0.exe` | **推荐**。用户级安装器：不需要管理员，装进当前用户目录，可自选路径 |
+| `Demiurge-Setup-Machine-0.30.0.exe` | 机器级安装器：需要管理员，装进 `Program Files`，本机所有用户可用 |
+| `SHA256SUMS.txt` / `SHA256SUMS.pub` | 安装器校验和清单与其 minisign 公钥 |
+| `Demiurge_windows_v0.30.7z` | Windows 便携版：解压即用，**运行时已内嵌（含 Full RAG 层）** |
+| `Demiurge_macos_v0.30.tar.gz` | macOS（Apple Silicon）便携版，含 Full RAG 层 |
+| `Demiurge_linux_v0.30.7z.001` / `.002` | Linux 便携版分卷，先合并再解压，含 Full RAG 层 |
+| `Demiurge_base_windows_v0.30.zip` | 安装版运行时·基础层（Python 运行时等） |
+| `Demiurge_application_windows_v0.30.zip` | 安装版运行时·应用层（后端 + 前端） |
+| `Demiurge_rag_windows_v0.30.part01` / `.part02`（附 `.parts.json` 分卷清单） | 安装版运行时·可选 Full RAG 层（分卷，约 1.9 GB/卷） |
+| `Demiurge_update_windows_v0.30.json` | 运行时清单：各层体积与 SHA-256 的唯一真源，壳按它校验 |
+
+- 安装版首次启动**只自动下载 base + application**，不会拉约 2 GB 的 RAG 层。需要 Full RAG 时执行
+  `Demiurge.exe --install-runtime --with-rag`，或把上面几个运行时附件（含 `Demiurge_update_windows_v0.30.json`）
+  放进安装目录 `runtime-pack\`，或放进 `%LOCALAPPDATA%\Demiurge\downloads\`，再启动即走离线安装。
+- 单独下载那几层 zip 是**离线导入用**的，不要手动解压到安装目录。
+- **便携版与安装版是同一程序的不同布局**：便携版把 base/application/rag 全部内嵌，装完即用；
+  安装版只带壳，首次启动按清单在线取层，RAG 仍为可选。
 
 ## 怎么装
 
 ### Windows · 安装版（推荐）
-
-| 包 | 适用 |
-|---|---|
-| `Demiurge-Setup-Machine-<版本>.exe` | 机器级：需要管理员，装进 `Program Files`，本机所有用户可用 |
-| `Demiurge-Setup-User-<版本>.exe` | 用户级：**不需要管理员**，装进当前用户目录，可自选安装路径 |
 
 - 壳是 Tauri 2（Rust），**不再需要 .NET 8 Desktop Runtime**；只依赖 Microsoft Edge WebView2
   Runtime（Win10/11 多数已自带，安装版缺失时会静默补装）。
 - **程序与数据分离**：程序体在安装目录，作品、预设、日志、下载与运行时一律在
   `%LOCALAPPDATA%\Demiurge`。卸载/升级不动你的数据；你的角色卡与对话也不会被写进安装目录。
 - 首次启动按交付清单**在线下载**运行时（base + application 两层），启动页逐条可见进度。
-  Full RAG 层是可选增强，需要时执行 `Demiurge.exe --install-runtime --with-rag` 追加。
-  离线机器：把 `runtime-pack\` 放到安装目录，或把下载件放进
-  `%LOCALAPPDATA%\Demiurge\downloads\`，再启动即可离线安装。
 
 ### Windows · 便携版
 
-`Demiurge_windows_<版本>.7z` —— 解压即用，运行时已内嵌，数据留在包内 `data\userdata\`。
+`Demiurge_windows_v0.30.7z` —— 解压即用，运行时（含 RAG）已内嵌，数据留在包内 `data\userdata\`。
 同样是 Tauri 2 壳（不需要 .NET 8，只需 WebView2 Runtime）。
 双击 `Demiurge.exe` 启动；`install-shortcut.bat` 生成桌面/开始菜单快捷方式；
 仍想用浏览器就 `start-dev.bat`，关闭用 `stop-dev.bat`（与原生窗口同端口，二者只能跑一个）。
 
 ### macOS / Linux · 便携版（浏览器界面，无原生壳）
 
-- `Demiurge_macos_<版本>.tar.gz` → 运行 `Start-Demiurge.command`
-- `Demiurge_linux_<版本>.7z.001`…（分卷）→ 先合并再运行 `start-demiurge.sh`
-- 分卷运行时资产用包内 `join-runtime.ps1` / `join-runtime.sh` 合并（校验 `parts.json` 里的 SHA-256）。
+- `Demiurge_macos_v0.30.tar.gz` → 运行 `Start-Demiurge.command`
+- `Demiurge_linux_v0.30.7z.001`…（分卷）→ 直接 `7z x Demiurge_linux_v0.30.7z.001` 解出整包，再运行 `start-demiurge.sh`
 
 ### Android · 手机端（beta）
 
-`demiurge-spike-0.30.16-beta-debug.apk` —— debug 签名的 beta 安装包，安装时需允许「未知来源」。
+手机端 APK 不在本 Release 附件里，另行分发；安装时需允许「未知来源」。
 
 - 手机端是完整工作台（对话、资产、画布、设置），后端内嵌在壳里，可独立运行；
   模型权重与 ComfyUI 仍在电脑或外部机器上，按设置里的地址连接。

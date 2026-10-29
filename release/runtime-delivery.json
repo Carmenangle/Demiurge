@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "target": "windows-x64-full-rag",
   "release_base": "https://github.com/Carmenangle/Demiurge/releases/download/v0.1.0",
-  "manifest": "Demiurge-update-v0.1.0-windows-x64-full-rag.json",
+  "manifest": "Demiurge_update_windows_v0.1.0.json",
   "required_layers": [
     "base",
     "application"

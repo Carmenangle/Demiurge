@@ -147,7 +147,7 @@ $evi = "$env:TEMP\demiurge-installer-evidence"
 | 件 | 职责 |
 | --- | --- |
 | `release/runtime-delivery.json` | 交付 pin：`tag`/`version`/`target`/`release_base`/`manifest`/`required_layers`/`optional_layers`/`mirrors`。用 `python scripts/runtime_delivery.py pin --tag v0.15 --repository <owner/repo>` 渲染，`validate` 自检 |
-| `Demiurge-update-<tag>-<target>.json` | 层清单（体积 + SHA256 + 分卷）**唯一真源**。pin 里不复制这些数字 |
+| `Demiurge_update_<平台>_<tag>.json` | 层清单（体积 + SHA256 + 分卷）**唯一真源**。pin 里不复制这些数字。层资产 `Demiurge_base/application/rag_<平台>_<tag>` 不带内容 ID，分卷名去掉归档扩展名（`..._v0.30.part01`） |
 | `src/runtime_delivery.rs` | `include_str!` 嵌入 pin；校验 pin/清单；本地校验 → 在线续传 → 分卷组装 → 安全解压 → 原子部署 |
 
 **两条入口**：

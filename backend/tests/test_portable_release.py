@@ -54,7 +54,7 @@ def test_standard_manifest_is_rejected_for_terminal_user_bundle(tmp_path):
         "rag_id": "",
         "layers": {"base": base, "application": application},
     }
-    (assets / "Demiurge-update-v0.15-windows-x64-standard.json").write_text(
+    (assets / "Demiurge_update_windows_v0.15.json").write_text(
         json.dumps(manifest), encoding="utf-8"
     )
     mingit = tmp_path / "mingit.zip"
@@ -86,7 +86,7 @@ def test_full_rag_portable_uses_single_7z_archive(monkeypatch, tmp_path):
         "rag_id": "rag-a",
         "layers": {"base": base, "application": application, "rag": rag},
     }
-    (assets / "Demiurge-update-v0.15-windows-x64-full-rag.json").write_text(
+    (assets / "Demiurge_update_windows_v0.15.json").write_text(
         json.dumps(manifest), encoding="utf-8"
     )
     mingit = tmp_path / "mingit.zip"
@@ -147,7 +147,7 @@ def _full_rag_assets(tmp_path):
     base = _layer(assets, "base.zip", "base-base-a", {"Demiurge-Runtime.exe": b"runtime"})
     application = _layer(assets, "application.zip", "application-app-a", {"backend/app/main.py": b""})
     rag = _layer(assets, "rag.zip", "rag-rag-a", {"site-packages/torch/__init__.py": b""})
-    (assets / "Demiurge-update-v0.15-windows-x64-full-rag.json").write_text(
+    (assets / "Demiurge_update_windows_v0.15.json").write_text(
         json.dumps({
             "schema_version": 2,
             "app_version": "v0.15",

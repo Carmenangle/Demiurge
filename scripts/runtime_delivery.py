@@ -1,7 +1,7 @@
 """运行时按需交付的 pin 与更新清单校验/渲染。
 
 pin 只回答三件事：去哪拿、拿哪份清单、哪些层必装。层的体积与 SHA256 仍以
-`runtime_release.py` 产出的 `Demiurge-update-*.json` 为唯一真源，不在 pin 里复制一份。
+`runtime_release.py` 产出的 `Demiurge_update_*.json` 为唯一真源，不在 pin 里复制一份。
 """
 from __future__ import annotations
 
@@ -24,6 +24,21 @@ TARGET_PATTERN = re.compile(r"^[0-9a-z][0-9a-z-]*$")
 REPOSITORY_PATTERN = re.compile(r"^[0-9A-Za-z_.-]+/[0-9A-Za-z_.-]+$")
 SAFE_NAME_PATTERN = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._+-]*$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+ARCHIVE_SUFFIXES = (".tar.gz", ".zip", ".7z")
+
+
+def platform_of(target: str) -> str:
+    """目标 ID 的平台段：`windows-x64-full-rag` ⇒ `windows`。"""
+    return target.split("-", 1)[0]
+
+
+def archive_stem(name: str) -> str:
+    """归档基名（去掉 .zip/.tar.gz/.7z）；分卷名由它派生。"""
+    lowered = name.lower()
+    for suffix in ARCHIVE_SUFFIXES:
+        if lowered.endswith(suffix):
+            return name[: -len(suffix)]
+    return Path(name).stem
 
 
 def normalize_version(raw: str) -> str:
@@ -40,7 +55,7 @@ def manifest_name(tag: str, target: str = DEFAULT_TARGET) -> str:
     safe_tag = str(tag).strip()
     if not SAFE_NAME_PATTERN.fullmatch(safe_tag):
         raise ValueError(f"tag 不合法：{tag}")
-    return f"Demiurge-update-{safe_tag}-{target}.json"
+    return f"Demiurge_update_{platform_of(target)}_{safe_tag}.json"
 
 
 def release_base(tag: str, repository: str) -> str:
@@ -159,9 +174,10 @@ def validate_layer(name: str, layer: object) -> dict:
         if names[0] != archive:
             raise ValueError(f"layers.{name} 单档资产名必须等于 archive：{archive}")
     else:
+        prefix = f"{archive_stem(archive)}.part"
         for asset_name in names:
-            if not asset_name.startswith(archive + ".part"):
-                raise ValueError(f"layers.{name} 分卷名必须以 {archive}.part 开头：{asset_name}")
+            if not asset_name.startswith(prefix):
+                raise ValueError(f"layers.{name} 分卷名必须以 {prefix} 开头：{asset_name}")
     return layer
 
 

@@ -26,6 +26,7 @@ RUNTIME_NAME = "Demiurge-Runtime"
 BASE_LAYOUT_VERSION = 2
 RAG_LAYOUT_VERSION = 2
 DEFAULT_PYPI_INDEX = "https://mirrors.aliyun.com/pypi/simple/"
+ARCHIVE_SUFFIXES = (".tar.gz", ".zip", ".7z")
 
 
 class RuntimeTarget(NamedTuple):
@@ -47,6 +48,23 @@ class RuntimeTarget(NamedTuple):
     @property
     def full_rag(self) -> bool:
         return self.edition == "full-rag"
+
+
+def archive_stem(name: str) -> str:
+    """归档基名（去掉 .zip/.tar.gz/.7z）；分卷与 .parts.json 都从它派生。"""
+    lowered = name.lower()
+    for suffix in ARCHIVE_SUFFIXES:
+        if lowered.endswith(suffix):
+            return name[: -len(suffix)]
+    return Path(name).stem
+
+
+def asset_name(kind: str, target: RuntimeTarget, version: str) -> str:
+    """发布资产名：`Demiurge_<种类>_<平台>_<版本>`。
+
+    内容 ID 只活在更新清单里，不进文件名——下载的人不必读哈希。
+    """
+    return f"{APP_NAME}_{kind}_{target.os}_{version}"
 
 
 def load_targets(path: Path) -> dict[str, RuntimeTarget]:
@@ -249,15 +267,16 @@ def create_archive(tree: Path, archive: Path, root_name: str) -> Path:
 def split_asset(archive: Path, max_part_bytes: int = GITHUB_ASSET_LIMIT) -> list[Path]:
     if archive.stat().st_size <= max_part_bytes:
         return [archive]
+    stem = archive_stem(archive.name)
     parts: list[Path] = []
     with archive.open("rb") as source:
         index = 1
         while block := source.read(max_part_bytes):
-            part = archive.with_name(f"{archive.name}.part{index:02d}")
+            part = archive.with_name(f"{stem}.part{index:02d}")
             part.write_bytes(block)
             parts.append(part)
             index += 1
-    write_json(archive.with_name(archive.name + ".parts.json"), {
+    write_json(archive.with_name(f"{stem}.parts.json"), {
         "schema_version": 1,
         "archive": archive.name,
         "size": archive.stat().st_size,
@@ -276,7 +295,7 @@ def package_layer(tree: Path, archive: Path, root_name: str, layer_id: str) -> t
     assets = [{"name": path.name, "size": path.stat().st_size, "sha256": sha256_file(path)} for path in downloadable]
     outputs = list(downloadable)
     if downloadable != [archive]:
-        parts_manifest = archive.with_name(archive.name + ".parts.json")
+        parts_manifest = archive.with_name(f"{archive_stem(archive.name)}.parts.json")
         outputs.append(parts_manifest)
         archive.unlink()
     return outputs, {
@@ -512,12 +531,13 @@ def reusable_layers(
 ) -> dict[str, dict]:
     """Load and verify content-addressed Base/RAG assets for an incremental build."""
     candidates = []
-    for path in assets_dir.glob(f"{APP_NAME}-update-*-{target.id}.json"):
+    for path in assets_dir.glob(f"{APP_NAME}_update_*.json"):
         payload = json.loads(path.read_text(encoding="utf-8"))
         layers = payload.get("layers", {})
         rag_layer = layers.get("rag", {}) if isinstance(layers, dict) else {}
         if (
-            payload.get("base_id") == expected_base_id
+            payload.get("target") == target.id
+            and payload.get("base_id") == expected_base_id
             and rag_layer.get("definition_id") == expected_rag_definition_id
         ):
             candidates.append(payload)
@@ -568,7 +588,7 @@ def build_runtime(
         }
         app_assets, app_layer = package_layer(
             final_app_tree,
-            output_dir / f"{APP_NAME}-application-{version}-{target.id}.zip",
+            output_dir / f"{asset_name('application', target, version)}.zip",
             f"application-{app_layer_id}", app_layer_id,
         )
         outputs = list(app_assets)
@@ -578,13 +598,13 @@ def build_runtime(
                 destination = output_dir / source.name
                 shutil.copy2(source, destination)
                 outputs.append(destination)
-            parts_manifest = reuse_layers_from.resolve() / f"{layer['archive']}.parts.json"
+            parts_manifest = reuse_layers_from.resolve() / f"{archive_stem(layer['archive'])}.parts.json"
             if parts_manifest.is_file():
                 destination = output_dir / parts_manifest.name
                 shutil.copy2(parts_manifest, destination)
                 outputs.append(destination)
         manifest = write_json(
-            output_dir / f"{APP_NAME}-update-{version}-{target.id}.json",
+            output_dir / f"{asset_name('update', target, version)}.json",
             {**state, "layers": {"base": reused["base"], "application": app_layer, "rag": reused["rag"]}},
         )
         outputs.append(manifest)
@@ -625,13 +645,13 @@ def build_runtime(
     outputs: list[Path] = []
     base_assets, base_layer = package_layer(
         base_tree,
-        output_dir / f"{APP_NAME}-base-{base_layer_id}-{target.id}{suffix}",
+        output_dir / f"{asset_name('base', target, version)}{suffix}",
         f"base-{base_layer_id}", base_layer_id,
     )
     outputs.extend(base_assets)
     app_assets, app_layer = package_layer(
         final_app_tree,
-        output_dir / f"{APP_NAME}-application-{version}-{target.id}.zip",
+        output_dir / f"{asset_name('application', target, version)}.zip",
         f"application-{app_layer_id}", app_layer_id,
     )
     outputs.extend(app_assets)
@@ -639,7 +659,7 @@ def build_runtime(
     if rag_tree is not None:
         rag_assets, rag_layer = package_layer(
             rag_tree,
-            output_dir / f"{APP_NAME}-rag-{rag_layer_id}-{target.id}{suffix}",
+            output_dir / f"{asset_name('rag', target, version)}{suffix}",
             f"rag-{rag_layer_id}", rag_layer_id,
         )
         rag_layer["definition_id"] = rag_id(root, target)
@@ -647,7 +667,7 @@ def build_runtime(
         layers["rag"] = rag_layer
 
     manifest = write_json(
-        output_dir / f"{APP_NAME}-update-{version}-{target.id}.json",
+        output_dir / f"{asset_name('update', target, version)}.json",
         {**state, "layers": layers},
     )
     outputs.append(manifest)

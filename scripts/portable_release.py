@@ -69,7 +69,7 @@ def extract_zip(archive: Path, destination: Path, *, strip_root: bool) -> None:
 
 def _manifest(assets_dir: Path, version: str, target: str) -> tuple[Path, dict]:
     matches = []
-    for path in assets_dir.glob(f"{APP_NAME}-update-*-{target}.json"):
+    for path in assets_dir.glob(f"{APP_NAME}_update_*.json"):
         payload = json.loads(path.read_text(encoding="utf-8"))
         if (
             payload.get("schema_version") == 2
