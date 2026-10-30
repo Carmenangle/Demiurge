@@ -14,16 +14,20 @@ from app.services import run_trace
 _LOG = logging.getLogger("uvicorn.error")
 
 def _embed_cfg(ctx: CtxLike):
-    """从 ctx 取嵌入配置 → EmbedConfig；缺 base/model → None（无法走语义检索/入库）。"""
-    embed_base = (ctx.get("embed_base") or "").strip()
-    embed_model = (ctx.get("embed_model") or "").strip()
-    if not (embed_base and embed_model):
-        return None
+    """从 ctx 取嵌入配置 → EmbedConfig。
+
+    请求里的嵌入配置不完整（手机默认「云端嵌入」未填完、或只在设置里配了本机嵌入）
+    ⇒ 退执行器自己的设置（`embed_resolution`）；两者都不可用 → None（无法走语义检索/入库）。
+    """
+    from app.services import embed_resolution
     from app.services.rag_backend import EmbedConfig
-    return EmbedConfig(
-        embed_base, ctx.get("embed_key", ""), embed_model,
+
+    requested = EmbedConfig(
+        (ctx.get("embed_base") or "").strip(), ctx.get("embed_key", ""),
+        (ctx.get("embed_model") or "").strip(),
         proxy=ctx.get("embed_proxy", ""),
     )
+    return embed_resolution.resolve(requested)
 
 
 def _history_embed_fn(ctx: dict):

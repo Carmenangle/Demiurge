@@ -20,8 +20,6 @@ from pathlib import Path
 import httpx
 from langchain_core.documents import Document
 
-from typing import Literal, cast
-
 from app.services import (
     asset_store, comfyui_client, rag_backend, rag_retrieval, reranker, repo_meta, thumbnail_store,
 )
@@ -307,23 +305,14 @@ def embed_config_from_state() -> EmbedConfig:
 
     为什么不用前端 wire 透传：/rag/* 端点由前端传三元组，但「保存素材即入库」是
     后端自发链（image_store 保存成功后直接调），没有请求上下文带 embed 字段
-    ⇒ 与 capability_handlers._embed_config_from_state 同源读运行态真源。
+    ⇒ 与 capability_handlers 同源读运行态真源；camelCase 字段映射收口
+    `embed_resolution.settings_embed`。
     ⚠ 已知局限：settings.embedModel.proxyUrl 是前端运行时解析值、通常不持久化
     ⇒ 需要代理的远程嵌入端点这里取不到代理（capability_handlers 同样局限）。
     """
-    st = repo_meta.load_user_state()  # 2026-10-24 收口：读点唯一属主
-    embed = (st.get("settings") or {}).get("embedModel") or {}
-    if not isinstance(embed, dict):
-        embed = {}
-    return EmbedConfig(
-        base_url=str(embed.get("baseUrl") or ""),
-        api_key=str(embed.get("apiKey") or ""),
-        embed_model=str(embed.get("modelName") or ""),
-        model_dir=str(embed.get("modelDir") or ""),
-        reranker_dir=str(embed.get("rerankerDir") or ""),
-        mode=cast("Literal['remote', 'local']", str(embed.get("mode") or "remote")),  # 非法值由消费侧按非 local 处理（原语义）
-        proxy=str(embed.get("proxyUrl") or ""),
-    )
+    from app.services import embed_resolution
+
+    return embed_resolution.settings_embed()
 
 
 def index_web_material_asset(image_url: str, provenance: dict,

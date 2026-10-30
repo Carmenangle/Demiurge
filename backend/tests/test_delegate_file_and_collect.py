@@ -434,12 +434,17 @@ def test_plans路由output_dir必须来自配置真源(monkeypatch, tmp_path):
     assert plans._trusted_output_dir(truth) == truth
 
 
-def test_collect嵌入配置来自user_state不经模型参数():
+def test_collect嵌入配置来自user_state不经模型参数(tmp_path, monkeypatch):
     # F1 回归：collect schema 不含 embed_* 参数（密钥不进计划文档）；配置从 user_state 读
     cap = capability_registry.get("media.collect_comfy_outputs")
     assert "embed_base" not in (cap.params_schema.get("properties") or {})
-    base, key, model = capability_handlers._embed_config_from_state()
-    assert isinstance(base, str) and isinstance(key, str) and isinstance(model, str)
+    monkeypatch.setattr(repo_meta, "DATA_DIR", tmp_path)
+    (tmp_path / "user_state.json").write_text(json.dumps({"settings": {"embedModel": {
+        "baseUrl": "https://embed.example.com/v1", "apiKey": "k", "modelName": "m",
+    }}}), encoding="utf-8")
+    cfg = capability_handlers._embed_config_from_state()
+    assert cfg.base_url == "https://embed.example.com/v1"
+    assert cfg.api_key == "k" and cfg.embed_model == "m"
 
 
 def _离线采集(store, monkeypatch):

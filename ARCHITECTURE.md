@@ -1829,7 +1829,7 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
    每 1–3 min 推一次无密钥快照（13:14:29、13:24 各抓到一次，写盘后仍 0 个非空密钥）⇒ **空态自我维持**，
    用户重填也会被下一轮抹掉；真 `build_model` 路径 0.13 s 返 `401 … ****eded`（空 key 被填成 `"not-needed"`），
    而裸测网络 DNS 50 ms / TCP 40 ms / TLS 194 ms ⇒ 网络通、只差 key。与 #109（多客户端快照后写覆盖）同族。
-   ② **修法（`routers/user_state._keep_stored_secrets`）**：写前把 incoming 与盘上旧 settings 递归合并，
+   ② **修法（`services/secret_fields.keep_stored_secrets`，2026-10-30 由 `routers/user_state._keep_stored_secrets` 下沉）**：写前把 incoming 与盘上旧 settings 递归合并，
    只有**密钥字段**走特例——空值（`""`/纯空白/`null`）与**字段整体缺席**都**不覆盖**盘上非空值
    （后者是换端升级期：旧 APK/旧前端的 Settings 还没有新字段，缺席不能按删除算）；非空值照常覆盖（换 key 即时生效）。
    模型数组按条目 `id` 对齐（改序/改名不串 key），新 id **不继承**旧 key，盘上被删条目**不复活**；无 `id`
@@ -1885,11 +1885,12 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
    ＋手写 Chaquopy/BuildConfig stub 验过（需 `-encoding UTF-8`），**APK 未重出、未重装**。
    🔴 **并发跑两次 `npm test` 会造负载型假红**，串行复跑才是准。⇒ 手册 `F/11` §3.11.17（四刀全量与红线）。
 
-76. **0.30.0 联合发布：桌面 tag 与手机 APK 同版（2026-10-28）**：
+76. **0.30.0 联合发布：桌面 tag 与手机 APK 同版（2026-10-28；手机包 2026-10-30 重出 0.30.17-beta/32）**：
    ① **版本口径**：tag `v0.30` 过 `normalize_version` 后成为桌面安装器版本 **0.30.0**
    （`Demiurge-Setup-User-0.30.0.exe` / `-Machine-0.30.0.exe`、`Demiurge_update_windows_v0.30.json`）；
-   手机沿用 0.30 家族的自有轨道 **0.30.16-beta / versionCode 31**（`demiurge-spike-0.30.16-beta-debug.apk`）。
-   🔴 两轨版本号不强行对齐：手机 `versionCode` 必须单调递增，把 0.30.16 改名 0.30.0 会在名称上制造回退。
+   手机沿用 0.30 家族的自有轨道 **0.30.17-beta / versionCode 32**（`demiurge-spike-0.30.17-beta-debug.apk`，
+   2026-10-30 重出，含联机模型所有权与云端链修复；上一轮 0.30.16-beta/31 仍在 Release，供回退）。
+   🔴 两轨版本号不强行对齐：手机 `versionCode` 必须单调递增，把 0.30.17 改名 0.30.0 会在名称上制造回退。
    发布正文取自 **tag 树里的 `RELEASE_NOTES.md`**（workflow `body_path`）⇒ 改正文必须进 tag，不能事后改 Release。
    ② **tag 重指（2026-10-28 用户拍板）**：v0.30 首推后 CI 红——`material_sources.py` 的 f-string 在 ruff 的
    py311 目标下非法。当时 Release 未生成、tag 下**零产物**、无资产/签名引用它 ⇒ 修好后把 v0.30 重指到修复提交。
@@ -1903,6 +1904,10 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
    （含 `classes3.dex` 的 FRONTEND_SHA == 包内 `frontend.zip` sha256 `9f18c3fe…`）；`aapt2 dump badging`
    versionCode 31 / versionName 0.30.16-beta，且 `classes3.dex` 同时含 `0.30.16-beta` 与 sha 常量。
    ⚠ 条 75⑥ 的「APK 未重出」由本条闭环（已重出并验静态身份）；**真机重装与联机复验仍待用户操作**。
+   2026-10-30 重出的 **0.30.17-beta / versionCode 32** 复核：`apk_size_ledger.py` exit 0（**190,025,788 B**、
+   结构开销 197,855 B、包内 `frontend.zip` sha256 `ec8c8d1f…` 与源逐字相同）；`verify-apk-security.sh` **16 项 PASS**
+   （含 dex FRONTEND_SHA == `ec8c8d1f…`）；`aapt2 dump badging` versionCode 32 / versionName 0.30.17-beta；
+   `classes3.dex` 含 `0.30.17-beta`；sha256 `6d710648…`。真机（荣耀 REP-AN00）已装包并验联机模型分流与嵌入回退。
    ⑤ **CI 教训**：ruff 门禁口径是 `ruff check app tests`——两处 py3.12+ 才合法的写法（f-string 表达式复用外层引号）
    与 2026-10-27 遗留的未用导入（`test_repo_sync.py` 的 `hashlib`）只在 CI 红；本地 `ruff check app` 与 py3.13
    pytest 都看不见。⑥ **`ubuntu-latest` 迁到 Ubuntu 26.04 后 `setup-python` 钉的 3.13.11 在清单里找不到**
@@ -1973,3 +1978,49 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
    该文件立刻 2 failed（`expected 'TXT' to be 'TXT,IMG'`、卡片数 0）⇒ 不是同义反复。
    真浏览器（Edge headless 打生产 dist）4 张回灌插画解码 4/4。⇒ 手册 `E/07` §3 与 §5 红线 2、
    `F/12` §3.7 与 §5 红线 14、记忆 `topic-illustration-lifecycle.md`「2026-10-29」。
+
+79. **联机同库的模型所有权：手机模型只存手机、随请求走；嵌入回退只看配置完整度且只由执行端判定（2026-10-30 用户定案）**：
+   ① **需求口径**（用户原话）：「那手机就默认是云端的嵌入和向量模型，如果没有可调用的，就用电脑那一套，然后现在
+   处理联机后电脑反代调用手机的对话模型、生图模型的流程（但意思是手机上操作，自然用的手机上的设置）」。
+   联机里 `/api/user-state` 仍由电脑应答，但**模型设置归手机**；执行请求的后端用**请求里带的**模型配置（对话/嵌入），
+   生图模型配置同理（此前已验证经 `ai_agent`/`image_gen`/`image_agent` 的 wire 透传，不需要新增通道）。
+   ComfyUI 宿主机仍只跑图，见条 71 ⑧(e)。
+   ② **手机本机模型端点**＝`services/mobile_local_models.py` + `GET/POST /api/mobile/local-models`（`/api/mobile*`
+   **永不被反向代理**）：GET 返回 `{models, lan_ip}`，POST 只**合并写**模型字段并返回写入后的快照。字段面
+   `MODEL_KEYS`＝`chatModels/imageModels/videoModels` + `activeChatModelId/activeImageModelId/activeVideoModelId`
+   + `embedModel/vlmModel`，清单属主仍是 `services/secret_fields`（`MODEL_LIST_KEYS`/`MODEL_OBJ_KEYS`；前端投影
+   `lib/mobileModelSettings.MODEL_SETTING_KEYS` 由契约测试逐字对齐）。写侧复用 `keep_stored_secrets`（空密钥不覆盖
+   本机非空值）；`lan_ip` 用 UDP connect 选取到电脑那块网卡的源地址，取不到返回空串。
+   ③ **电脑侧对偶护栏**：手机回写 `/api/user-state` 时会摘掉模型字段，而该写入是整对象覆盖 ⇒ `set_state` 在密钥护栏
+   **之前**先跑 `mobile_local_models.preserve_stored_models(incoming, stored)`：**缺席的模型字段沿用盘上旧值，显式
+   带上（哪怕空数组/空对象）仍照常覆盖**（与 `selection` 的「缺席≠删除」同一语义）。不跑这层，一次手机改主题就会
+   把电脑自己的模型列表/选中项抹掉。
+   ④ **前端水合与保存分流**：联机水合＝电脑快照 + `overlayModelSettings(settings, localModels)`（手机配置过的键赢，
+   没配过的继续跟电脑；本机端点取不到按「手机还没有自己的模型」处理、沿用电脑那份）。`userStateSync.markRemoteModelSync`
+   在水合末尾置分流开关与**基线**；联机 `flush()` 两条腿——`POST /api/user-state` 只发 `omitModelSettings(settings)`
+   （模型字段缺席 ⇒ 电脑侧 ③ 保留），模型改动只把 `changedModelSettings(settings, baseline)` 的差量发给本机端点，
+   成功后推进基线。只改主题不写本机模型；水合失败仍按「联机同库水合护栏」保持未水合、禁止回写。
+   ⑤ **执行端解析（#110 的收口）**＝`services/embed_resolution.py` 是「请求配置能不能用、不能用退谁」的**唯一判据属主**：
+   `settings_embed`（`embedModel` camelCase 映射单一属主）、`embed_from_settings`、`is_usable`/`endpoint_usable`
+   （remote：地址+模型必填，公网还须 key；local：目录存在）、`resolve`/`resolve_or`、`chat_from_settings`/`resolve_chat`
+   （`source ∈ {ollama, local}` 缺省在**执行器**上解析为 `http://localhost:11434/v1` + `ollama`）。已接入 `ai_common`、
+   `routers/rag.py`、`agent_retrieval`、`generation_store`（入库嵌入 + 标签抽取）、`workflow_build_tasks`、
+   `agent_context_assembly`、`capability_handlers`。**只按配置完整度回退，不做健康探测，绝不回写**请求或手机存档。
+   ⑥ **手机默认与模型页**：`MOBILE_PROFILE` 下 `DEFAULT.embedModel`＝云端 API **空档**（地址/key/模型全空，`proxyMode:"inherit"`），
+   电脑构建保持 Ollama `localhost` 默认；空档不是可用配置 ⇒ 由 ⑤ 回退电脑那份（「没有可调用的就用电脑那一套」）。
+   模型页联机横幅说明「模型设置只存手机 / 嵌入没填会回退电脑 / 127.0.0.1 指电脑自己」；`lib/loopbackUrl.replaceLoopbackHost`
+   **只换 host**（scheme/userinfo/port/path/query 全保留），按钮 `LoopbackFix` 需用户点击，`lan_ip` 为空不显示。
+   回环语义是**执行器相对**：手机自己的 Ollama 必须显式换成手机 LAN 地址，电脑才打得到。
+   ⑦ **红线**：手机模型/密钥**不得**写进电脑 `user_state.json`（③ 是唯一防线）；模型字段（含 `active*ModelId`）**不得**
+   混回 `/api/user-state` 通道（会改掉电脑配置）；`/api/mobile/local-models` **不得**被代理；前端**不得**复制「嵌入够不够用」
+   启发式（属主是 ⑤）；回退**不得**做成健康探测/自动回写；回环替换**不得**静默改用户 URL；本机写入**不得**顺手覆盖
+   repos/selection/其他设置。
+   ⑧ **验证**：后端定向 `test_mobile_local_models` + `test_mobile_remote` + `test_user_state_secrets` + `test_user_state_selection`
+   **40 例**、`test_embed_resolution` + `test_generation_store` **108 例**、嵌入波次（`test_rag_backend`/`test_rag_retrieval`/
+   `test_tag_embed_content`/`test_worldbook*`/`test_capability_env_injection`/`test_image_regeneration`/`test_user_state_ownership`
+   等）**213 例**；`test_user_state_models` 3 例（缺席模型字段沿用盘上值 / 显式空数组清空但缺席选中 id 保留 / settings 缺席保留）。
+   前端 `mobileModelSettings.test` + `.contract.test`（读后端源码对齐字段清单与护栏接线）、`userStateHydration.test.tsx` 联机
+   模型所有权 4 例、`settings.mobileDefaults.test` 2 例、`loopbackUrl.test` **17 例**、`ModelsPanel.mobile.test.tsx` 3 例；
+   `tsc --noEmit` 绿、`npm test` **188 文件 / 2118 例**绿、`npm run build` 绿；后端 ruff / 18 条 import-linter / mypy 279 文件 /
+   硬编码检查全 0、全量 pytest **4779 / 0F / 0E / 0S**（`677.27s`，junit 四数一致、exit 0）。⇒ 手册 `E/07` §3.7–§3.8 与红线 11、`D/05` §3.1b、`F/11` §3.11.20 与红线 21、
+   `G/10` mobile_local_models 段、记忆 `topic-frontend.md`「2026-10-30」与 `topic-contracts-and-baselines.md`。

@@ -7,7 +7,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app.services import asset_library, asset_store, rag_store
+from app.services import asset_library, asset_store, embed_resolution, rag_store
 from app.services.rag_backend import EmbedConfig
 
 router = APIRouter()
@@ -24,7 +24,7 @@ class _EmbedFields(BaseModel):
     proxy_url: str = ""
 
     def embed_cfg(self) -> EmbedConfig:
-        return EmbedConfig(
+        return embed_resolution.resolve_or(EmbedConfig(
             base_url=self.base_url,
             api_key=self.api_key,
             embed_model=self.embed_model,
@@ -32,7 +32,7 @@ class _EmbedFields(BaseModel):
             reranker_dir=self.reranker_model_dir,
             mode=self.embed_mode,
             proxy=self.proxy_url,
-        )
+        ))
 
 
 class IndexGenRequest(_EmbedFields):

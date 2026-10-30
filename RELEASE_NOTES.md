@@ -7,6 +7,9 @@
 
 先前发布的 0.30 / 0.30.1 / 0.30.2 已全部撤下，**请以本页附件为准**。
 
+2026-10-30：手机端 APK 重出为 **0.30.17-beta（versionCode 32）**，并入本 Release；上一轮
+`demiurge-spike-0.30.16-beta-debug.apk` 保留供回退。
+
 这一版只发 **Windows 安装版**：不再提供便携包，macOS / Linux 版以后再做。运行时改为
 **Full RAG 必装**——安装器只带壳与 MinGit，首次启动自动下载 base + application + rag 三层，
 装完即具备完整 RAG 能力；原来「RAG 可选、`--with-rag` 追加」的形态已取消。
@@ -39,7 +42,7 @@
 | `Demiurge_application_windows_v0.30.zip` | 运行时·应用层（后端 + 前端） |
 | `Demiurge_rag_windows_v0.30.part01` …（按 1.9 GB 分卷，附 `.parts.json` 清单） | 运行时·Full RAG 层（分卷） |
 | `Demiurge_update_windows_v0.30.json` | 运行时清单：各层体积与 SHA-256 的唯一真源，壳按它校验 |
-| `demiurge-spike-0.30.16-beta-debug.apk` | Android 手机端（beta，debug 签名），与电脑端同版配套 |
+| `demiurge-spike-0.30.17-beta-debug.apk` | Android 手机端（beta，debug 签名），与电脑端同版配套；推荐安装 |
 
 - 安装版首次启动**自动下载 base + application + rag 三层**，启动页逐条可见进度；三层齐了才拉起服务，
   RAG 检索开箱即用。
@@ -62,9 +65,10 @@
 
 ### Android · 手机端（beta）
 
-手机端 APK 随本 Release 提供：`demiurge-spike-0.30.16-beta-debug.apk`
-（versionCode 31，debug 签名，sha256 `c258623c287f58c2319e7b1c04ae4fca2ef1a6767a80b913194accb9230d628b`），
-安装时需允许「未知来源」。
+手机端 APK 随本 Release 提供：`demiurge-spike-0.30.17-beta-debug.apk`
+（versionCode 32，debug 签名，190,025,788 B，sha256 `6d710648df5770eb3696bcce3bf8976ee36c33c3dc2694305e4f07ac09fc1d13`），
+安装时需允许「未知来源」。上一轮 `demiurge-spike-0.30.16-beta-debug.apk`（versionCode 31）仍在附件中，
+可回退安装；`versionCode` 单调递增，安装新包会直接覆盖旧包。
 
 - 手机端是完整工作台（对话、资产、画布、设置），后端内嵌在壳里，可独立运行；
   模型权重与 ComfyUI 仍在电脑或外部机器上，按设置里的地址连接。
@@ -77,6 +81,9 @@
 **手机端（beta）**：WebView 壳内嵌 Python 后端，可与电脑「联机同库」读写同一份数据，也可独立运行；
 作品包导入/导出用于换机迁移；云端 ComfyUI 执行（地址簿 A/B/C/D 四段）；手机版式专项收口——
 弹窗走浏览器式返回链（返回键关最上层弹窗）、软键盘让位、浮钮收进 Dock、横屏与设置页头重排。
+联机同库时**模型设置归手机**：对话／生图／视频／嵌入配置只存手机、随请求交给执行端，电脑自己的
+模型配置不受影响；手机默认云端嵌入，没填可用配置时自动回退电脑那一套；模型页可把回环地址一键
+换成手机局域网地址。
 
 **桌面化**：WPF 壳换成 Tauri 2 壳（`Demiurge.exe --self-test` 共 18 项自检，前 15 项与 WPF 壳
 逐条对齐）；托盘常驻、关窗可隐藏到托盘、第二实例自动唤出；窗口几何/最大化/全屏与后端端口都会

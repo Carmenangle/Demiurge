@@ -5,9 +5,9 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Body, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from app.services import mobile_remote, mobile_sync
+from app.services import mobile_local_models, mobile_remote, mobile_sync
 
 router = APIRouter()
 
@@ -20,6 +20,10 @@ class RemoteConfigBody(BaseModel):
 
 class SyncBody(BaseModel):
     overwrite: bool = False
+
+
+class LocalModelsBody(BaseModel):
+    models: dict = Field(default_factory=dict)
 
 
 @router.get("/remote")
@@ -62,6 +66,29 @@ async def read_online_status() -> dict:
     反向代理 ⇒ 电脑掉线时这条仍答得出原因。
     """
     return await mobile_remote.online_status()
+
+
+@router.get("/local-models")
+def read_local_models() -> dict:
+    """手机本机模型设置（联机态下的唯一真源）＋ 手机局域网地址。
+
+    联机时其余用户态由电脑提供，只有模型字段留在手机；`lan_ip` 供模型页把
+    `127.0.0.1` 一键换成电脑可达的地址。
+    """
+    return {
+        "models": mobile_local_models.read_models(),
+        "lan_ip": mobile_local_models.lan_ip(),
+    }
+
+
+@router.post("/local-models")
+def write_local_models(body: LocalModelsBody) -> dict:
+    """只合并写模型字段；仓库、选中项与电脑负责的其他设置原样保留。"""
+    try:
+        models = mobile_local_models.write_models(body.models)
+    except mobile_local_models.LocalModelError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "models": models}
 
 
 @router.get("/sync")

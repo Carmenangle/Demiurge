@@ -33,10 +33,12 @@ const SERVER_REPOS = [{ id: "pc-repo", name: "电脑上的作品" }];
 
 let userStateDown = true;
 let posts: Array<Record<string, unknown>> = [];
+let localModels: Record<string, unknown> = {};
+let localPosts: Array<Record<string, unknown>> = [];
 let container: HTMLDivElement | null = null;
 let root: Root | null = null;
 let notifyReconnect: (() => void) | null = null;
-let api: { settings: { chatModels: Array<{ modelName: string; apiKey: string }> }; repos: Array<{ name: string }>; update: (p: Record<string, unknown>) => void; addRepo?: unknown } | null = null;
+let api: { settings: { chatModels: Array<{ modelName: string; apiKey: string }>; theme: string }; repos: Array<{ name: string }>; update: (p: Record<string, unknown>) => void; addRepo?: unknown } | null = null;
 
 function json(status: number, body: unknown) {
   return { ok: status >= 200 && status < 300, status, json: async () => body };
@@ -51,6 +53,13 @@ function stubFetch() {
         supported: true, enabled: true, active: true,
         base_url: "http://192.0.2.10:8012", token_set: true,
       });
+    }
+    if (u.startsWith("/api/mobile/local-models")) {
+      if (method === "POST") {
+        localPosts.push(JSON.parse(init?.body || "{}"));
+        return json(200, { ok: true, models: localModels });
+      }
+      return json(200, { models: localModels, lan_ip: "192.168.1.7" });
     }
     if (u.startsWith("/api/user-state/proxy-status")) {
       return json(200, {
@@ -117,6 +126,8 @@ afterEach(async () => {
   container = null;
   api = null;
   posts = [];
+  localModels = {};
+  localPosts = [];
   userStateDown = true;
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
@@ -145,5 +156,72 @@ describe("联机同库的水合与回写", () => {
     expect(api!.settings.chatModels[0].modelName).toBe("pc-model");
     expect(api!.settings.chatModels[0].apiKey).toHaveLength(35);
     expect(api!.repos.map((r) => r.name)).toContain("电脑上的作品");
+  });
+});
+
+describe("联机时的模型所有权（手机操作＝手机设置）", () => {
+  const PHONE_KEY = "p".repeat(32);
+  const phoneChat = {
+    id: "ph-1", modelName: "phone-model", baseUrl: "https://phone.example/v1",
+    apiKey: PHONE_KEY, proxyMode: "on",
+  };
+
+  it("手机本机模型覆盖电脑快照；回写电脑的 settings 摘掉模型字段", async () => {
+    userStateDown = false;
+    localModels = { chatModels: [phoneChat], activeChatModelId: "ph-1" };
+    await mountStores();
+    await settle(900);
+
+    expect(api!.settings.chatModels).toHaveLength(1);
+    expect(api!.settings.chatModels[0].modelName).toBe("phone-model");
+    expect(api!.settings.chatModels[0].apiKey).toBe(PHONE_KEY);
+
+    const pcPost = posts[posts.length - 1] as { settings: Record<string, unknown> };
+    expect(pcPost.settings).not.toHaveProperty("chatModels");
+    expect(pcPost.settings).not.toHaveProperty("activeChatModelId");
+    expect(pcPost.settings.theme).toBe("night"); // 电脑的非模型设置照常回写
+    expect(localPosts).toHaveLength(0); // 手机没改模型 ⇒ 不落本机
+  });
+
+  it("手机还没自己的模型时沿用电脑那份，不落本机", async () => {
+    userStateDown = false;
+    localModels = {};
+    await mountStores();
+    await settle(900);
+
+    expect(api!.settings.chatModels[0].modelName).toBe("pc-model");
+    expect(localPosts).toHaveLength(0);
+  });
+
+  it("手机上改模型只落本机端点，电脑那份不被覆盖", async () => {
+    userStateDown = false;
+    localModels = {};
+    await mountStores();
+    await settle(900);
+
+    await act(async () => {
+      api!.update({ chatModels: [phoneChat], activeChatModelId: "ph-1" });
+    });
+    await settle(900);
+
+    expect(localPosts).toHaveLength(1);
+    const patch = (localPosts[0] as { models: Record<string, unknown> }).models;
+    expect(Object.keys(patch).sort()).toEqual(["activeChatModelId", "chatModels"]);
+    const pcPost = posts[posts.length - 1] as { settings: Record<string, unknown> };
+    expect(pcPost.settings).not.toHaveProperty("chatModels");
+  });
+
+  it("只改主题不写本机模型", async () => {
+    userStateDown = false;
+    localModels = {};
+    await mountStores();
+    await settle(900);
+
+    await act(async () => { api!.update({ theme: "bright" }); });
+    await settle(900);
+
+    expect(localPosts).toHaveLength(0);
+    const pcPost = posts[posts.length - 1] as { settings: Record<string, unknown> };
+    expect(pcPost.settings.theme).toBe("bright");
   });
 });

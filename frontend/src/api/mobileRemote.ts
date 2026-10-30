@@ -1,6 +1,9 @@
 // 手机端联机同库（设置 → 离线资源同步）：配置手机本机后端的反向代理目标。
 // 这组端点在 PC 后端不存在（`LAF_MOBILE_REMOTE=1` 才注册），只能从手机独立模式调用。
 import { apiGet, apiPost } from "./client";
+import type {
+  ChatModel, EmbedModel, ImageModel, VideoModel, VlmModel,
+} from "../stores/settings";
 
 export interface MobileRemoteConfig {
   supported: boolean;
@@ -76,4 +79,35 @@ export function getOnlineSyncStatus(): Promise<OnlineSyncStatus> {
 
 export function startOnlineSync(overwrite: boolean): Promise<OnlineSyncStatus> {
   return apiPost<OnlineSyncStatus>("/mobile/sync", { overwrite });
+}
+
+/** 手机本机模型设置：联机态下这两类字段只存手机、只随请求发给执行后端。
+ *  字段面与后端 `services/mobile_local_models.MODEL_KEYS` 对齐（`lib/mobileModelSettings`
+ *  是前端投影，跨语言契约锁见 `mobileModelSettings.contract.test.ts`）。 */
+export interface MobileLocalModels {
+  chatModels?: ChatModel[];
+  activeChatModelId?: string;
+  imageModels?: ImageModel[];
+  activeImageModelId?: string;
+  videoModels?: VideoModel[];
+  activeVideoModelId?: string;
+  embedModel?: EmbedModel;
+  vlmModel?: VlmModel;
+}
+
+export interface MobileLocalModelsState {
+  /** 只含手机上改过的模型字段；空对象＝手机还没自己的模型配置（沿用电脑那份）。 */
+  models: MobileLocalModels;
+  /** 手机在当前 Wi‑Fi 的地址；模型 URL 里的 127.0.0.1 可一键换成它。空＝取不到。 */
+  lan_ip: string;
+}
+
+export function loadMobileLocalModels(): Promise<MobileLocalModelsState> {
+  return apiGet<MobileLocalModelsState>("/mobile/local-models", 5000);
+}
+
+export function saveMobileLocalModels(
+  models: MobileLocalModels,
+): Promise<{ ok: boolean; models: MobileLocalModels }> {
+  return apiPost("/mobile/local-models", { models });
 }

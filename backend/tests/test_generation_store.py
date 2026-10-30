@@ -4,7 +4,7 @@ import types
 
 import pytest
 
-from app.services import generation_store
+from app.services import generation_store, repo_meta
 
 
 def _args(**overrides):
@@ -1563,3 +1563,118 @@ def test_index_generation_reliable_forwards_metadata(monkeypatch):
         "r", rag_store.EmbedConfig("", "", ""), "p", "t", "u",
         template_name="T", model_name="M", lora_names="L")
     assert seen == {"template_name": "T", "model_name": "M", "lora_names": "L"}
+
+
+# ── #110：finalize 的嵌入/标签配置「请求不完整才回退执行器设置」 ─────────────────
+# 用户口径（2026-10-30）：手机默认云端嵌入没填完 ⇒ 用执行器（电脑）那一套；
+# 请求里带了可用配置则绝不改写（手机操作＝手机设置）。
+
+def _seed_user_state(tmp_path, settings: dict) -> None:
+    import json as _json
+
+    (tmp_path / "user_state.json").write_text(
+        _json.dumps({"settings": settings}, ensure_ascii=False), encoding="utf-8")
+
+
+def _stub_finalize_io(monkeypatch):
+    generation_store._MEMORY_DONE.clear()
+    monkeypatch.setattr(generation_store.image_store, "save_local", lambda *a, **k: "C:/out/a.png")
+    monkeypatch.setattr(generation_store.chat_snapshot, "upsert", lambda *a, **k: None)
+    monkeypatch.setattr(generation_store.chat_memory, "append_message", lambda *a, **k: None)
+
+
+def test_finalize_embed_请求不完整时回退执行器设置(monkeypatch, tmp_path):
+    _seed_user_state(tmp_path, {"embedModel": {
+        "baseUrl": "https://pc.example.com/v1", "apiKey": "pc-key", "modelName": "pc-embed",
+    }})
+    monkeypatch.setattr(repo_meta, "DATA_DIR", tmp_path)
+    _stub_finalize_io(monkeypatch)
+    monkeypatch.setattr(generation_store, "_extract_tags", lambda *a, **k: "")
+    captured = []
+    monkeypatch.setattr(
+        generation_store, "_index_with_retry",
+        lambda repo_id, cfg, *a, **k: captured.append(cfg) or True)
+
+    result = generation_store.finalize_workflow_batch(**_args(embed_base="", embed_model=""))
+
+    assert captured and captured[0].base_url == "https://pc.example.com/v1"
+    assert captured[0].embed_model == "pc-embed"
+    assert result["images"][0]["indexed"] is True
+
+
+def test_finalize_embed_请求完整时用请求的配置(monkeypatch, tmp_path):
+    _seed_user_state(tmp_path, {"embedModel": {
+        "baseUrl": "https://pc.example.com/v1", "apiKey": "pc-key", "modelName": "pc-embed",
+    }})
+    monkeypatch.setattr(repo_meta, "DATA_DIR", tmp_path)
+    _stub_finalize_io(monkeypatch)
+    monkeypatch.setattr(generation_store, "_extract_tags", lambda *a, **k: "")
+    captured = []
+    monkeypatch.setattr(
+        generation_store, "_index_with_retry",
+        lambda repo_id, cfg, *a, **k: captured.append(cfg) or True)
+
+    generation_store.finalize_workflow_batch(**_args(
+        embed_base="https://phone.example.com/v1", embed_key="phone-key",
+        embed_model="phone-embed"))
+
+    assert captured[0].base_url == "https://phone.example.com/v1"
+    assert captured[0].api_key == "phone-key"
+
+
+def test_finalize_embed_两侧都没有时跳过入库不打空转(monkeypatch, tmp_path):
+    _seed_user_state(tmp_path, {"embedModel": {}})
+    monkeypatch.setattr(repo_meta, "DATA_DIR", tmp_path)
+    _stub_finalize_io(monkeypatch)
+    monkeypatch.setattr(generation_store, "_extract_tags", lambda *a, **k: "")
+    calls = []
+    monkeypatch.setattr(
+        generation_store, "_index_with_retry",
+        lambda repo_id, cfg, *a, **k: bool(calls.append(cfg)))
+
+    result = generation_store.finalize_workflow_batch(**_args(embed_base="", embed_model=""))
+
+    assert calls == [None]
+    assert result["images"][0]["indexed"] is False
+
+
+def test_finalize_标签提取_请求对话配置不完整时回退执行器当前模型(monkeypatch, tmp_path):
+    _seed_user_state(tmp_path, {"chatModels": [{
+        "id": "pc", "baseUrl": "https://chat.example.com/v1",
+        "apiKey": "chat-key", "modelName": "pc-chat",
+    }], "activeChatModelId": "pc"})
+    monkeypatch.setattr(repo_meta, "DATA_DIR", tmp_path)
+    _stub_finalize_io(monkeypatch)
+    monkeypatch.setattr(generation_store, "_index_with_retry", lambda *a, **k: True)
+    seen: dict = {}
+    monkeypatch.setattr(
+        generation_store, "_extract_tags",
+        lambda prompt, base, key, model: seen.update(
+            base=base, key=key, model=model) or "")
+
+    generation_store.finalize_workflow_batch(**_args(chat_base="", chat_key="", chat_model=""))
+
+    assert seen == {
+        "base": "https://chat.example.com/v1", "key": "chat-key", "model": "pc-chat"}
+
+
+def test_finalize_标签提取_请求对话配置可用时优先(monkeypatch, tmp_path):
+    _seed_user_state(tmp_path, {"chatModels": [{
+        "id": "pc", "baseUrl": "https://chat.example.com/v1",
+        "apiKey": "chat-key", "modelName": "pc-chat",
+    }], "activeChatModelId": "pc"})
+    monkeypatch.setattr(repo_meta, "DATA_DIR", tmp_path)
+    _stub_finalize_io(monkeypatch)
+    monkeypatch.setattr(generation_store, "_index_with_retry", lambda *a, **k: True)
+    seen: dict = {}
+    monkeypatch.setattr(
+        generation_store, "_extract_tags",
+        lambda prompt, base, key, model: seen.update(
+            base=base, key=key, model=model) or "")
+
+    generation_store.finalize_workflow_batch(**_args(
+        chat_base="https://phone.example.com/v1", chat_key="phone-key",
+        chat_model="phone-chat"))
+
+    assert seen["base"] == "https://phone.example.com/v1"
+    assert seen["model"] == "phone-chat"

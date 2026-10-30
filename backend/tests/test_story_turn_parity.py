@@ -49,13 +49,13 @@ def test_历史嵌入缓存_同文本只嵌一次且换模型不串(monkeypatch)
     from app.services import rag_backend
     monkeypatch.setattr(rag_backend, "embeddings", lambda cfg: _FakeEmbeddings())
 
-    ctx = {"embed_base": "http://x", "embed_model": "m1"}
+    ctx = {"embed_base": "http://x", "embed_key": "k", "embed_model": "m1"}
     embed = ag._history_embed_fn(ctx)
     first = embed(["甲文本", "乙文本"])
     second = embed(["甲文本"])  # 命中缓存
     assert len(calls) == 1 and calls[0] == ["甲文本", "乙文本"]
     assert second == [first[0]]
 
-    other = ag._history_embed_fn({"embed_base": "http://x", "embed_model": "m2"})
+    other = ag._history_embed_fn({"embed_base": "http://x", "embed_key": "k", "embed_model": "m2"})
     other(["甲文本"])  # 换模型 → 重新嵌入，不串向量
     assert len(calls) == 2 and calls[1] == ["甲文本"]

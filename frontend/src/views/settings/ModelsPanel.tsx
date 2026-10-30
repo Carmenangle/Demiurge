@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   Database, Eye, Image, ListChecks, MessageSquare, Plus, Search, Trash2, Video, X,
 } from "lucide-react";
@@ -17,6 +17,9 @@ import { LocalGgufImport } from "../../components/LocalGgufImport";
 import {
   applyChatLocalImport, applyVlmLocalImport, newChatModel, switchEmbedSource, switchVlmSource,
 } from "../../lib/modelSources";
+import { MOBILE_PROFILE, remoteActiveOnce } from "../../lib/mobileProfile";
+import { loadMobileLocalModels } from "../../api/mobileRemote";
+import { isLoopbackUrl, replaceLoopbackHost } from "../../lib/loopbackUrl";
 
 // 三档来源（2026-10-30）：云端 API / 本机 Ollama / 本地模型文件。三者的字段与默认值互不混用。
 type RemoteSource = "api" | "ollama";
@@ -49,8 +52,26 @@ type CardModel = {
   supportsCustomSize?: boolean;
 };
 
+// 联机手机的回环地址警示：执行请求的是电脑，127.0.0.1 在电脑上指电脑自己。
+// 模型服务若跑在手机上，一键换成手机局域网地址（lanIp 取不到就只提示、不提供按钮）。
+function LoopbackFix({ baseUrl, lanIp, onPick }: {
+  baseUrl: string; lanIp: string; onPick: (url: string) => void;
+}) {
+  if (!lanIp || !isLoopbackUrl(baseUrl)) return null;
+  const fixed = replaceLoopbackHost(baseUrl, lanIp);
+  return (
+    <p className="field-hint" style={{ color: "#b26a00" }}>
+      回环地址由执行端（电脑）解释；模型服务跑在手机上时请改用
+      <code style={{ margin: "0 4px" }}>{fixed}</code>
+      <button className="btn" type="button" style={{ padding: "0 6px" }} onClick={() => onPick(fixed)}>
+        用这个地址
+      </button>
+    </p>
+  );
+}
+
 // 一张「模型卡」：来源不同，展示的必填项不同；API 卡保持原有全部字段（折叠在高级配置里）。
-function ModelCard({ model, kind, source, onChange, onRemove, customSizeSupported, onCustomSizeSupport, globalProxyUrl, globalProxyEnabled }: {
+function ModelCard({ model, kind, source, onChange, onRemove, customSizeSupported, onCustomSizeSupport, globalProxyUrl, globalProxyEnabled, lanIp = "" }: {
   model: CardModel;
   kind: Exclude<ModelProbeKind, "embedding-local" | "reranker-local" | "chat-local" | "vlm-local">;
   source?: ChatModelSource;
@@ -60,6 +81,8 @@ function ModelCard({ model, kind, source, onChange, onRemove, customSizeSupporte
   onCustomSizeSupport?: (enabled: boolean) => void;
   globalProxyUrl: string;
   globalProxyEnabled: boolean;
+  /** 联机时手机的局域网地址（回环地址一键替换用）；空＝不提供替换。 */
+  lanIp?: string;
 }) {
   const [models, setModels] = useState<string[]>([]);
   const [modelQuery, setModelQuery] = useState("");
@@ -150,6 +173,7 @@ function ModelCard({ model, kind, source, onChange, onRemove, customSizeSupporte
           baseUrl={model.baseUrl}
           modelName={model.modelName}
           apiKey={model.apiKey || "ollama"}
+          urlExtra={<LoopbackFix baseUrl={model.baseUrl} lanIp={lanIp} onPick={(url) => onChange({ baseUrl: url })} />}
           onPatch={(patch) => onChange({ ...patch, source: "ollama", apiKey: "ollama", proxyMode: "off" })}
         />
       )}
@@ -170,6 +194,7 @@ function ModelCard({ model, kind, source, onChange, onRemove, customSizeSupporte
             <div className="field">
               <label>API URL</label>
               <input value={model.baseUrl} onChange={(e) => onChange({ baseUrl: e.target.value })} placeholder="https://api.openai.com/v1" />
+              <LoopbackFix baseUrl={model.baseUrl} lanIp={lanIp} onPick={(url) => onChange({ baseUrl: url })} />
             </div>
             <div className="field">
               <label>API Key</label>
@@ -322,6 +347,7 @@ function ModelCard({ model, kind, source, onChange, onRemove, customSizeSupporte
             <div className="field">
               <label>API URL</label>
               <input value={model.baseUrl} onChange={(e) => onChange({ baseUrl: e.target.value })} placeholder="https://api.openai.com/v1" />
+              <LoopbackFix baseUrl={model.baseUrl} lanIp={lanIp} onPick={(url) => onChange({ baseUrl: url })} />
             </div>
             <div className="field">
               <label>API Key</label>
@@ -432,6 +458,22 @@ function SourceTabs({ label, value, onChange }: {
 export function ModelsPanel({ draft, setDraft }: PanelProps) {
   const [embedProbe, setEmbedProbe] = useState<{ testing?: boolean; result?: ModelProbeResult }>({});
   const [rerankerProbe, setRerankerProbe] = useState<{ testing?: boolean; result?: ModelProbeResult }>({});
+
+  // 联机手机：提示模型设置归手机，并取手机局域网地址用于回环地址一键替换
+  const [remotePeer, setRemotePeer] = useState(false);
+  const [lanIp, setLanIp] = useState("");
+  useEffect(() => {
+    if (!MOBILE_PROFILE) return;
+    let alive = true;
+    void remoteActiveOnce().then((active) => {
+      if (!alive || !active) return;
+      setRemotePeer(true);
+      loadMobileLocalModels()
+        .then((state) => { if (alive) setLanIp(state.lan_ip || ""); })
+        .catch(() => { /* 取不到就不提供一键替换 */ });
+    });
+    return () => { alive = false; };
+  }, []);
   const setEmbed = (patch: Partial<EmbedModel>) =>
     setDraft((d) => ({ ...d, embedModel: { ...d.embedModel, ...patch } }));
 
@@ -544,6 +586,18 @@ export function ModelsPanel({ draft, setDraft }: PanelProps) {
   })();
 
   return (
+    <>
+      {remotePeer && (
+        <div className="settings-section" style={{ marginBottom: 12 }}>
+          <p className="field-hint" style={{ margin: 0 }}>
+            <strong>联机中：这里的模型设置只存手机。</strong>
+            手机上的对话 / 生图 / 视频 / RAG 都用这份配置（随请求交给电脑执行），电脑自己的模型配置不受影响；
+            Embedding 没填可用配置时会自动改用电脑的嵌入设置。
+            地址里的回环地址由执行端（电脑）解释：127.0.0.1 指电脑自己；模型服务跑在手机上时，
+            点地址下方的「用这个地址」换成手机局域网地址。
+          </p>
+        </div>
+      )}
     <div className="model-capability-grid">
       <p className="field-hint model-probe-notice">
         模型测试只做无计费连接/模型目录探测；不会调用聊天、Embedding、图片或视频生成。填写本地目录时会执行一次本地最小推理。
@@ -575,6 +629,7 @@ export function ModelsPanel({ draft, setDraft }: PanelProps) {
               onRemove={() => removeChatModel(m.id!)}
               globalProxyUrl={globalProxyAddress(draft)}
               globalProxyEnabled={draft.proxyEnabled}
+              lanIp={lanIp}
             />
           ))}
         </div>
@@ -600,6 +655,7 @@ export function ModelsPanel({ draft, setDraft }: PanelProps) {
               onRemove={() => removeImageModel(m.id)}
               globalProxyUrl={globalProxyAddress(draft)}
               globalProxyEnabled={draft.proxyEnabled}
+              lanIp={lanIp}
             />
           ))}
         </div>
@@ -616,7 +672,7 @@ export function ModelsPanel({ draft, setDraft }: PanelProps) {
         <div style={{ marginTop: 12 }}>
           {(draft.videoModels || []).length === 0 && <p className="field-hint">还没有视频模型，点击「添加」。</p>}
           {(draft.videoModels || []).map((m) => (
-            <ModelCard key={m.id} model={m} kind="video" onChange={(p) => updateVideoModel(m.id, p as Partial<VideoModel>)} onRemove={() => removeVideoModel(m.id)} globalProxyUrl={globalProxyAddress(draft)} globalProxyEnabled={draft.proxyEnabled} />
+            <ModelCard key={m.id} model={m} kind="video" onChange={(p) => updateVideoModel(m.id, p as Partial<VideoModel>)} onRemove={() => removeVideoModel(m.id)} globalProxyUrl={globalProxyAddress(draft)} globalProxyEnabled={draft.proxyEnabled} lanIp={lanIp} />
           ))}
         </div>
       </div>
@@ -646,7 +702,9 @@ export function ModelsPanel({ draft, setDraft }: PanelProps) {
                 ))}
               </div>
               <p style={{ fontSize: 12, margin: "0 0 10px" }}>当前使用：<strong>{vlmProvider}</strong></p>
-              <div className="field"><label>API URL</label><input value={draft.vlmModel.baseUrl} onChange={(e) => setVlm({ baseUrl: e.target.value })} placeholder="https://open.bigmodel.cn/api/paas/v4" /></div>
+              <div className="field"><label>API URL</label><input value={draft.vlmModel.baseUrl} onChange={(e) => setVlm({ baseUrl: e.target.value })} placeholder="https://open.bigmodel.cn/api/paas/v4" />
+                <LoopbackFix baseUrl={draft.vlmModel.baseUrl} lanIp={lanIp} onPick={(url) => setVlm({ baseUrl: url })} />
+              </div>
               <div className="field"><label>API Key</label><input type="password" value={draft.vlmModel.apiKey} onChange={(e) => setVlm({ apiKey: e.target.value })} /></div>
               <div className="field">
                 <label>连接代理</label>
@@ -665,6 +723,7 @@ export function ModelsPanel({ draft, setDraft }: PanelProps) {
                 modelName={draft.vlmModel.modelName}
                 apiKey={draft.vlmModel.apiKey || "ollama"}
                 presets={VLM_OLLAMA_MODELS}
+                urlExtra={<LoopbackFix baseUrl={draft.vlmModel.baseUrl} lanIp={lanIp} onPick={(url) => setVlm({ baseUrl: url })} />}
                 onPatch={(patch) => setVlm({ mode: "remote", source: "ollama", apiKey: "ollama", proxyMode: "off", ...patch })}
               />
             </>}
@@ -714,7 +773,9 @@ export function ModelsPanel({ draft, setDraft }: PanelProps) {
                 ))}
               </div>
               <p style={{ fontSize: 12, margin: "0 0 10px" }}>当前使用：<strong>{embedProvider}</strong></p>
-              <div className="field"><label>API URL</label><input value={draft.embedModel.baseUrl} onChange={(e) => setEmbed({ baseUrl: e.target.value })} placeholder="https://open.bigmodel.cn/api/paas/v4" /></div>
+              <div className="field"><label>API URL</label><input value={draft.embedModel.baseUrl} onChange={(e) => setEmbed({ baseUrl: e.target.value })} placeholder="https://open.bigmodel.cn/api/paas/v4" />
+                <LoopbackFix baseUrl={draft.embedModel.baseUrl} lanIp={lanIp} onPick={(url) => setEmbed({ baseUrl: url })} />
+              </div>
               <div className="field"><label>API Key</label><input type="password" value={draft.embedModel.apiKey} onChange={(e) => setEmbed({ apiKey: e.target.value })} /></div>
               <div className="field">
                 <label>连接代理</label>
@@ -733,6 +794,7 @@ export function ModelsPanel({ draft, setDraft }: PanelProps) {
                 modelName={draft.embedModel.modelName}
                 apiKey={draft.embedModel.apiKey || "ollama"}
                 presets={EMBED_OLLAMA_MODELS}
+                urlExtra={<LoopbackFix baseUrl={draft.embedModel.baseUrl} lanIp={lanIp} onPick={(url) => setEmbed({ baseUrl: url })} />}
                 onPatch={(patch) => setEmbed({ mode: "remote", source: "ollama", apiKey: "ollama", proxyMode: "off", ...patch })}
               />
             </>}
@@ -772,5 +834,6 @@ export function ModelsPanel({ draft, setDraft }: PanelProps) {
         </details>
       </div>
     </div>
+    </>
   );
 }

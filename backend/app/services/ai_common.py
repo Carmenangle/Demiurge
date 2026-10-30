@@ -31,9 +31,14 @@ class EmbedModelReq(ChatModelReq):
     embed_proxy_url: str = ""       # 远程嵌入模型代理（空=直连）
 
     def embed_cfg(self):
-        """收成 rag_backend.EmbedConfig 单一属主对象（避免三元组散着传）。"""
+        """收成 rag_backend.EmbedConfig 单一属主对象（避免三元组散着传）。
+
+        请求里的嵌入配置不完整（手机默认云端占位 / 只配了本机嵌入目录）⇒ 退执行器
+        自己的设置；两者都不可用原样返回，保持各端点既有的报错语义。
+        """
+        from app.services import embed_resolution
         from app.services.rag_backend import EmbedConfig
-        return EmbedConfig(
+        return embed_resolution.resolve_or(EmbedConfig(
             base_url=self.embed_base_url,
             api_key=self.embed_api_key,
             embed_model=self.embed_model,
@@ -41,7 +46,7 @@ class EmbedModelReq(ChatModelReq):
             reranker_dir=self.reranker_model_dir,
             mode=self.embed_mode,
             proxy=self.embed_proxy_url,
-        )
+        ))
 
 
 def build_chat_model(base_url: str, api_key: str, model: str,

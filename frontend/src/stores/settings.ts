@@ -1,7 +1,12 @@
 import { useEffect, useState } from "react";
 import { fetchProxyStatus, getUserState, type ProxyStatus } from "../api/userState";
-import { pushSettings, USER_STATE_RECONNECT_EVENT, clearUserStateFallback, markUserStateFallback } from "../lib/userStateSync";
-import { remoteActiveOnce } from "../lib/mobileProfile";
+import { loadMobileLocalModels } from "../api/mobileRemote";
+import {
+  pushSettings, USER_STATE_RECONNECT_EVENT, clearUserStateFallback,
+  markRemoteModelSync, markUserStateFallback,
+} from "../lib/userStateSync";
+import { overlayModelSettings } from "../lib/mobileModelSettings";
+import { MOBILE_PROFILE, remoteActiveOnce } from "../lib/mobileProfile";
 import {
   effectiveGlobalProxyUrl, globalProxyAddress, normalizeProxyMode, resolveEndpointProxy, type ProxyMode,
 } from "../lib/modelProxy";
@@ -607,11 +612,20 @@ export function normalizeContextBudgets(reminder: unknown, max: unknown) {
 // 隔离 localStorage，避免两项目串数据（源项目模型配置/密钥漏进 Demiurge）。不迁移旧 key，干净起步。
 const KEY = "demiurge_settings";
 
+// 手机默认云端嵌入（2026-10-30 用户定案）：手机上不存在「本机 Ollama」，把回环默认值摆出来
+// 只会误导。默认给云端 API 空档（填地址/Key 即用）；没填可用配置时，执行请求的电脑会
+// 自动回退到它自己的嵌入设置（见后端 services/embed_resolution）。
+const MOBILE_DEFAULT_EMBED: EmbedModel = {
+  mode: "remote", source: "api", apiKey: "", baseUrl: "", modelName: "", proxyMode: "inherit",
+};
+
 const DEFAULT: Settings = {
   theme: "system",
   liquidGlass: DEFAULT_LIQUID_GLASS,
   chatModels: [],
-  embedModel: { mode: "remote", source: "ollama", apiKey: "ollama", baseUrl: OLLAMA_DEFAULT_BASE_URL, modelName: "qwen3-embedding:latest", proxyMode: "on" },
+  embedModel: MOBILE_PROFILE
+    ? MOBILE_DEFAULT_EMBED
+    : { mode: "remote", source: "ollama", apiKey: "ollama", baseUrl: OLLAMA_DEFAULT_BASE_URL, modelName: "qwen3-embedding:latest", proxyMode: "on" },
   vlmModel: { mode: "remote", source: "ollama", apiKey: "ollama", baseUrl: OLLAMA_DEFAULT_BASE_URL, modelName: "gemma4:latest", proxyMode: "on" },
   imageModels: [],
   videoModels: [],
@@ -924,6 +938,8 @@ export function useSettings() {
   // 联机同库开着却连不上电脑时：保持「未水合」——界面跑本机缓存，但绝不把这份快照
   // 回写电脑（后端 set_state 整体替换 repos/settings）。电脑回来后由 MobileOnlineWatch
   // 广播 USER_STATE_RECONNECT_EVENT，这里重新水合一次。
+  // 联机时模型设置归手机：电脑快照只提供非模型设置，再用手机本机模型覆盖其上
+  //（手机没配过的字段继续跟电脑，见 lib/mobileModelSettings）。
   useEffect(() => {
     let alive = true;
     const hydrate = async () => {
@@ -932,11 +948,21 @@ export function useSettings() {
       try {
         const s = await getUserState();
         if (!alive) return;
+        let hydrated: Settings | null = null;
         if (s.settings) {
-          const migrated = migrate(s.settings as unknown as Record<string, unknown>);
+          let migrated = migrate(s.settings as unknown as Record<string, unknown>);
+          if (remote) {
+            // 本机端点取不到（旧壳/本机后端离线）按「手机还没有自己的模型」处理：沿用电脑那份
+            const local = await loadMobileLocalModels().catch(() => null);
+            if (!alive) return;
+            migrated = overlayModelSettings(migrated, local?.models ?? null);
+          }
+          hydrated = migrated;
           setSettings(migrated);
           persist(migrated); // localStorage 不落密钥（剥离见 stripSecrets）
         }
+        // 分流保存开关与基线：联机才把模型字段另存手机本机（基线＝本次水合呈现的模型）
+        markRemoteModelSync(remote, hydrated);
         clearUserStateFallback();
         setHydrated(true);
       } catch {

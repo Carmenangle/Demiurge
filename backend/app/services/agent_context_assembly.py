@@ -449,17 +449,17 @@ def _resolve_worldbook(ctx: CtxLike, query: str) -> str:
     # 动态段（动态区外置）同样外带：锚点条目【剧情进展·动态】区 + 会话中途新锚点。
     ctx["_worldbook_dynamic_text"] = ""
     try:
-        from app.services import worldbook
+        from app.services import embed_resolution, worldbook
         from app.services.rag_backend import EmbedConfig
         book = _repo_worldbook(ctx)
         entries = worldbook.parse_entries(book)
         if not entries:
             return ""
-        cfg = EmbedConfig(
+        cfg = embed_resolution.resolve_or(EmbedConfig(
             ctx.get("embed_base", ""), ctx.get("embed_key", ""),
             ctx.get("embed_model", "") or "text-embedding-3-small",
             proxy=ctx.get("embed_proxy", ""),
-        )
+        ))
         def notify_initial_index(count: int) -> None:
             run_trace.emit(
                 ctx, "worldbook.index", status="started", initial=True, count=count,

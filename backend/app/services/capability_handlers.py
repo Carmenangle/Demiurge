@@ -9,10 +9,13 @@ import json
 import logging
 import re
 import uuid
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.services.collection_artifacts import DOC_ASSET_MAX_BYTES, DOC_ASSET_SUFFIXES
 from app.services.workflow_submission import WorkflowSubmissionError, submit_template
+
+if TYPE_CHECKING:
+    from app.services.rag_backend import EmbedConfig
 
 _LOG = logging.getLogger("uvicorn.error")
 
@@ -125,18 +128,16 @@ def read_text_file(path: str, max_chars: int = 20000, offset: int = 0) -> dict[s
     }
 
 
-def _embed_config_from_state() -> tuple[str, str, str]:
-    """从 user_state（gitignored 运行态真源）读嵌入配置；密钥不经模型产出参数。
+def _embed_config_from_state() -> EmbedConfig:
+    """执行器自己的嵌入配置（后端自发链没有请求上下文，只能读运行态真源）。
 
     2026-10-24 收口：读取走属主 `repo_meta.load_user_state`（缺失/损坏回空 dict，
-    容错语义已含原 OSError/JSONDecodeError 分支），本函数只做字段投影。
+    容错语义已含原 OSError/JSONDecodeError 分支）；字段映射收口
+    `embed_resolution.settings_embed`（mode/modelDir 一并带上，本机嵌入档不再丢）。
     """
-    from app.services import repo_meta
+    from app.services import embed_resolution
 
-    st = repo_meta.load_user_state()
-    embed = (st.get("settings") or {}).get("embedModel") or {}
-    return (str(embed.get("baseUrl") or ""), str(embed.get("apiKey") or ""),
-            str(embed.get("modelName") or ""))
+    return embed_resolution.settings_embed()
 
 
 def _ordered_submit_items(submit_result: dict[str, Any] | list[Any] | None) -> list[dict[str, Any]]:
@@ -201,10 +202,9 @@ def collect_comfy_outputs(prompt_ids: list[str] | None = None, comfyui_url: str 
     import time as _time
 
     from app.services import comfyui_client, repo_meta, view_urls
-    from app.services.rag_backend import EmbedConfig
     from app.services import rag_store
 
-    embed_base, embed_key, embed_model = _embed_config_from_state()
+    embed_cfg = _embed_config_from_state()
 
     # prompt_ids 可由 inputs_from 链接的 submit 产出推导；submit_result 兼容
     # submit_batch（results 数组）/ submit_template（顶层 prompt_id）/ 其列表三种形态
@@ -360,7 +360,7 @@ def collect_comfy_outputs(prompt_ids: list[str] | None = None, comfyui_url: str 
             _LOG.warning("计划采集快照追加失败（产物少一条留档）: %s", exc)
         try:
             rag_store.index_generation(
-                repo_id, EmbedConfig(embed_base, embed_key, embed_model),
+                repo_id, embed_cfg,
                 prompt=_prompt_text,
                 tags="智能编造计划", image_url=shown, media_type="image")
         except Exception as exc:  # noqa: BLE001 - 入库失败不丢文件

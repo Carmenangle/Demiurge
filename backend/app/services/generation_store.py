@@ -11,8 +11,8 @@ from pathlib import Path
 import httpx
 
 from app.services import (
-    chat_memory, chat_snapshot, image_store, local_auth, rag_store, repo_meta, run_trace,
-    view_urls,
+    chat_memory, chat_snapshot, embed_resolution, image_store, local_auth, rag_store,
+    repo_meta, run_trace, view_urls,
 )
 from app.services.rag_backend import EmbedConfig
 from app.services.pathnames import safe_seg
@@ -133,11 +133,13 @@ def _save_remote_image(url: str, output_dir: str, repo_id: str = "home",
         return url
 
 
-def _index_with_retry(repo_id: str, cfg: EmbedConfig, prompt: str,
+def _index_with_retry(repo_id: str, cfg: EmbedConfig | None, prompt: str,
                       tags: str = "", image_url: str = "",
                       template_name: str = "", model_name: str = "",
                       lora_names: str = "", media_type: str = "image",
                       derived_from: list | None = None) -> bool:
+    if cfg is None:
+        return False  # 没有可用嵌入配置（请求与执行器都没配完）：跳过，不打空转
     for attempt in range(3):
         try:
             rag_store.index_generation(repo_id, cfg, prompt, tags, image_url,
@@ -170,7 +172,8 @@ def persist_image(thread_id: str, repo_id: str, prompt: str, image_url: str,
     """
     shown = _save_remote_image(image_url, output_dir, repo_id, proxy=gen_proxy)
     mid = str(uuid.uuid4())
-    cfg = EmbedConfig(embed_base, embed_key, embed_model, proxy=embed_proxy)
+    cfg = embed_resolution.resolve(
+        EmbedConfig(embed_base, embed_key, embed_model, proxy=embed_proxy))
     _index_with_retry(repo_id, cfg, prompt, image_url=shown)
     if write_snapshot:
         try:
@@ -385,11 +388,12 @@ def finalize_workflow_batch(
         raise ValueError("生成结果没有图片、视频、音频或文字")
 
     durable = repo_id != "home"
-    cfg = EmbedConfig(embed_base, embed_key, embed_model)
+    cfg = embed_resolution.resolve(EmbedConfig(embed_base, embed_key, embed_model))
     # 标签提取仅服务图片/纯文字批次的入库检索；纯音频批次（自动配音）无图可索引，
     # 跳过以免同步 LLM 调用（超时可达 200s）阻塞 finalize，让音频槽位迟迟不填充。
     needs_tags = bool(images) or (not images and not videos and not audios and bool(prompt.strip()))
-    tags = _extract_tags(prompt, chat_base, chat_key, chat_model) if durable and needs_tags else ""
+    tags = (_extract_tags(prompt, *embed_resolution.resolve_chat(chat_base, chat_key, chat_model))
+            if durable and needs_tags else "")
     messages: list[dict] = []
     results: list[dict] = []
     inline_target = bool(target_message_id and target_slot_id)

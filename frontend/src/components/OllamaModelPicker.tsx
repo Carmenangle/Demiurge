@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { ListChecks, Search, X } from "lucide-react";
 import { discoverProviderModels } from "../api/aiProviders";
 import { filterModelNames } from "../lib/modelSearch";
@@ -9,7 +9,7 @@ import { filterModelNames } from "../lib/modelSearch";
  */
 export function OllamaModelPicker({
   baseUrl, modelName, apiKey = "ollama", urlPlaceholder = "http://localhost:11434/v1",
-  presets = [], onPatch,
+  presets = [], onPatch, urlExtra,
 }: {
   baseUrl: string;
   modelName: string;
@@ -17,6 +17,8 @@ export function OllamaModelPicker({
   urlPlaceholder?: string;
   /** 常用模型名快捷按钮（只是名字提示，不保证本机已安装）。 */
   presets?: string[];
+  /** 地址输入框下方的额外说明/操作（联机手机的回环地址警示用）。 */
+  urlExtra?: ReactNode;
   onPatch: (patch: { baseUrl?: string; modelName?: string }) => void;
 }) {
   const [models, setModels] = useState<string[]>([]);
@@ -49,6 +51,7 @@ export function OllamaModelPicker({
         placeholder={urlPlaceholder}
       />
       <p className="field-hint">本机 Ollama 默认 {urlPlaceholder}；局域网 Ollama 填对应 IP。回环地址会自动直连，不走全局代理。</p>
+      {urlExtra}
     </div>
     {presets.length > 0 && (
       <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>

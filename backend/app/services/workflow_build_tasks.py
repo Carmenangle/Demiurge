@@ -13,7 +13,7 @@ import time
 from uuid import uuid4
 
 from app.db import get_connection
-from app.services import build_session_store, llm, workflow_builder
+from app.services import build_session_store, embed_resolution, llm, workflow_builder
 from app.services.rag_backend import EmbedConfig
 
 _WAKE = threading.Condition()
@@ -231,14 +231,14 @@ def cleanup_finished() -> int:
 def _execute(payload: dict, cancel: threading.Event) -> dict:
     if cancel.is_set():
         raise RuntimeError("已停止")
-    cfg = EmbedConfig(
+    cfg = embed_resolution.resolve_or(EmbedConfig(
         base_url=payload.get("embed_base_url", ""),
         api_key=payload.get("embed_api_key", ""),
         embed_model=payload.get("embed_model", "embedding-3"),
         mode=payload.get("embed_mode", "remote"),
         model_dir=payload.get("embed_model_dir", ""),
         reranker_dir=payload.get("reranker_model_dir", ""),
-    )
+    ))
     common = dict(
         base_url=payload.get("base_url", ""), api_key=payload.get("api_key", ""),
         model=payload.get("model", ""), proxy=payload.get("proxy", ""),
