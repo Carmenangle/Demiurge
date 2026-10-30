@@ -287,17 +287,20 @@ def test_nsi_facts_read_the_active_install_mode_branch():
 
 def test_runtime_delivery_pin_matches_release_contract():
     pin = delivery.load_pin(ROOT / "release" / "runtime-delivery.json")
-    portable = json.loads((ROOT / "release" / "portable-windows.json").read_text(encoding="utf-8"))
+    targets = json.loads(
+        (ROOT / "release" / "runtime-targets.json").read_text(encoding="utf-8")
+    )
     tauri = json.loads(
         (ROOT / "desktop" / "tauri" / "tauri.conf.json").read_text(encoding="utf-8")
     )
 
-    assert pin["target"] in portable["targets"]
+    assert pin["target"] in {item["id"] for item in targets["targets"]}
     assert pin["version"] == delivery.normalize_version(tauri["version"])
     assert pin["manifest"] == delivery.manifest_name(pin["tag"], pin["target"])
     assert pin["release_base"].endswith(f"/download/{pin['tag']}")
-    assert pin["required_layers"] == ["base", "application"]
-    assert pin["optional_layers"] == ["rag"]
+    # 2026-10-30 定案：RAG 改必装，可选层清空（安装版首启即取全三层）。
+    assert pin["required_layers"] == ["base", "application", "rag"]
+    assert pin["optional_layers"] == []
 
 
 def test_runtime_delivery_pin_render_rejects_unsafe_tag_and_repository():
@@ -351,7 +354,11 @@ def test_runtime_delivery_manifest_validation_rejects_drift():
     pin = delivery.load_pin(ROOT / "release" / "runtime-delivery.json")
     manifest = _manifest_fixture(pin)
     delivery.validate_manifest(manifest, pin)
-    delivery.validate_manifest(manifest, pin, include_rag=True)
+
+    missing_rag = json.loads(json.dumps(manifest))
+    del missing_rag["layers"]["rag"]
+    with pytest.raises(ValueError, match="rag"):
+        delivery.validate_manifest(missing_rag, pin)
 
     wrong_target = json.loads(json.dumps(manifest))
     wrong_target["target"] = "windows-arm64-full-rag"

@@ -351,6 +351,18 @@ fn delivery_test() -> Result<(), String> {
         write_zip(&app_tree, &app_zip, "application-app-test")?;
         let app_bytes = std::fs::read(&app_zip).map_err(err_text)?;
 
+        // RAG 层：必装层，单档归档。
+        let rag_tree = root.join("trees").join("rag");
+        write_fixture(&rag_tree.join("site-packages").join("marker.txt"), b"fake-rag")?;
+        write_fixture(
+            &rag_tree.join("rag-manifest.json"),
+            br#"{"schema_version":1,"rag_id":"rag-test"}"#,
+        )?;
+        let rag_name = "Demiurge_rag_windows_v0.1.0.zip";
+        let rag_zip = assets.join(rag_name);
+        write_zip(&rag_tree, &rag_zip, "rag-rag-test")?;
+        let rag_bytes = std::fs::read(&rag_zip).map_err(err_text)?;
+
         let manifest_name = "Demiurge_update_windows_v0.1.0.json";
         let manifest = json!({
             "schema_version": 2,
@@ -359,7 +371,7 @@ fn delivery_test() -> Result<(), String> {
             "edition": "full-rag",
             "base_id": "base-test",
             "application_id": "app-test",
-            "rag_id": "",
+            "rag_id": "rag-test",
             "layers": {
                 "base": {
                     "id": "base-test",
@@ -379,6 +391,15 @@ fn delivery_test() -> Result<(), String> {
                     "assets": [
                         {"name": app_name, "size": app_bytes.len(), "sha256": sha256_bytes(&app_bytes)}
                     ]
+                },
+                "rag": {
+                    "id": "rag-test",
+                    "archive": rag_name,
+                    "size": rag_bytes.len(),
+                    "sha256": sha256_bytes(&rag_bytes),
+                    "assets": [
+                        {"name": rag_name, "size": rag_bytes.len(), "sha256": sha256_bytes(&rag_bytes)}
+                    ]
                 }
             }
         });
@@ -394,8 +415,8 @@ fn delivery_test() -> Result<(), String> {
             "target": "windows-x64-full-rag",
             "release_base": format!("file://{}", assets.display()).replace('\\', "/"),
             "manifest": manifest_name,
-            "required_layers": ["base", "application"],
-            "optional_layers": ["rag"],
+            "required_layers": ["base", "application", "rag"],
+            "optional_layers": [],
             "mirrors": []
         });
         let pin: crate::runtime_delivery::DeliveryPin =
@@ -405,14 +426,15 @@ fn delivery_test() -> Result<(), String> {
         std::fs::create_dir_all(&install).map_err(err_text)?;
         let mut quiet = |_: &str| {};
 
-        // ① 首次部署（file:// 下载 + 分卷合并）。
+        // ① 首次部署（file:// 下载 + 分卷合并），三层都必须落地。
         let home = root.join("home");
-        let report = crate::runtime_delivery::deliver(&pin, &home, &install, false, None, &mut quiet)
+        let report = crate::runtime_delivery::deliver(&pin, &home, &install, None, &mut quiet)
             .map_err(|err| format!("首次部署失败：{err}"))?;
         if report.reused
             || report.base_id != "base-test"
             || report.application_id != "app-test"
-            || !report.rag_id.is_empty()
+            || report.rag_id != "rag-test"
+            || report.downloaded_layers.len() != 3
         {
             return Err(format!("首次部署结果不符：{report:?}"));
         }
@@ -424,6 +446,12 @@ fn delivery_test() -> Result<(), String> {
                 .join("frontend")
                 .join("index.html")
                 .is_file()
+            || !runtime
+                .join("rag")
+                .join("rag-test")
+                .join("site-packages")
+                .join("marker.txt")
+                .is_file()
         {
             return Err("解压后的运行时文件缺失".to_string());
         }
@@ -432,13 +460,13 @@ fn delivery_test() -> Result<(), String> {
                 .map_err(err_text)?;
         if current.get("base_id").and_then(|value| value.as_str()) != Some("base-test")
             || current.get("application_id").and_then(|value| value.as_str()) != Some("app-test")
-            || current.get("rag_id").and_then(|value| value.as_str()) != Some("")
+            || current.get("rag_id").and_then(|value| value.as_str()) != Some("rag-test")
         {
             return Err(format!("current.json 内容不符：{current}"));
         }
 
         // ② 再跑一次必须复用，不重复解压。
-        let again = crate::runtime_delivery::deliver(&pin, &home, &install, false, None, &mut quiet)
+        let again = crate::runtime_delivery::deliver(&pin, &home, &install, None, &mut quiet)
             .map_err(|err| format!("重复部署失败：{err}"))?;
         if !again.reused || !again.downloaded_layers.is_empty() {
             return Err("重复部署没有走复用路径".to_string());
@@ -448,7 +476,7 @@ fn delivery_test() -> Result<(), String> {
         let offline_install = root.join("install-offline");
         let pack = offline_install.join("runtime-pack");
         std::fs::create_dir_all(&pack).map_err(err_text)?;
-        for name in [manifest_name, part1.as_str(), part2.as_str(), app_name] {
+        for name in [manifest_name, part1.as_str(), part2.as_str(), app_name, rag_name] {
             std::fs::copy(assets.join(name), pack.join(name)).map_err(err_text)?;
         }
         let mut offline_value = pin_value;
@@ -460,7 +488,6 @@ fn delivery_test() -> Result<(), String> {
             &offline_pin,
             &offline_home,
             &offline_install,
-            false,
             None,
             &mut quiet,
         )
@@ -482,7 +509,7 @@ fn delivery_test() -> Result<(), String> {
         corrupted[0] ^= 0xFF;
         write_fixture(&assets.join(&part2), &corrupted)?;
         let broken_home = root.join("home-broken");
-        match crate::runtime_delivery::deliver(&pin, &broken_home, &install, false, None, &mut quiet) {
+        match crate::runtime_delivery::deliver(&pin, &broken_home, &install, None, &mut quiet) {
             Ok(_) => return Err("坏分件没有被拒绝".to_string()),
             Err(err)
                 if !err.to_string().contains("哈希") && !err.to_string().contains("校验") =>
@@ -497,7 +524,7 @@ fn delivery_test() -> Result<(), String> {
 
         // ⑤ 空间不足在下载前就被拦住。
         let small_home = root.join("home-small");
-        match crate::runtime_delivery::deliver(&pin, &small_home, &install, false, Some(1), &mut quiet) {
+        match crate::runtime_delivery::deliver(&pin, &small_home, &install, Some(1), &mut quiet) {
             Err(err) if err.to_string().contains("磁盘空间不足") => {}
             other => return Err(format!("空间不足没有被拦截：{other:?}")),
         }
@@ -511,7 +538,6 @@ fn delivery_test() -> Result<(), String> {
             &drifted_pin,
             &root.join("home-drift"),
             &install,
-            false,
             Some(u64::MAX),
             &mut quiet,
         ) {

@@ -251,7 +251,7 @@ impl RuntimeHost {
         )))
     }
 
-    /// 安装版首次启动：自动部署 base + application（RAG 可选，走 `--install-runtime --with-rag`）。
+    /// 安装版首次启动：自动部署 base + application + rag。
     /// 便携包 / 仓库布局不适用，返回 false 让原始错误照常抛出。
     fn try_install_runtime(&self, progress: &mut dyn FnMut(&str)) -> StartupResult<bool> {
         let exe_dir = std::env::current_exe()
@@ -269,7 +269,7 @@ impl RuntimeHost {
         }
         progress("首次启动：准备下载运行时…");
         crate::shell_log::info("安装版缺少运行时，开始按交付 pin 部署");
-        let report = crate::runtime_delivery::ensure_installed_runtime(&exe_dir, false, progress)
+        let report = crate::runtime_delivery::ensure_installed_runtime(&exe_dir, progress)
             .map_err(|err| {
                 RuntimeStartupError(format!(
                     "运行时尚未部署，自动下载失败：{err}\n\n\
@@ -281,17 +281,8 @@ impl RuntimeHost {
             })?;
         crate::shell_log::info(&format!(
             "运行时部署完成：base={} application={} rag={}",
-            report.base_id,
-            report.application_id,
-            if report.rag_id.is_empty() {
-                "未安装"
-            } else {
-                report.rag_id.as_str()
-            }
+            report.base_id, report.application_id, report.rag_id
         ));
-        if report.rag_available && report.rag_id.is_empty() {
-            progress("提示：未安装可选的 RAG 增强层（可用 Demiurge.exe --install-runtime --with-rag 追加）");
-        }
         Ok(true)
     }
 

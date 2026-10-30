@@ -90,6 +90,17 @@ def load_targets(path: Path) -> dict[str, RuntimeTarget]:
     return targets
 
 
+def matrix_payload(targets: dict[str, RuntimeTarget], os_name: str = "windows") -> dict:
+    """CI 构建矩阵：2026-10-30 定案只发 Windows 安装版（mac / linux 以后再说）。
+
+    `release/runtime-targets.json` 保留三平台配置；本处只筛 CI 实际要构建的平台。
+    """
+    return {"include": [
+        {"target": item.id, "runner": item.runner, "python-version": item.python_version}
+        for item in targets.values() if item.os == os_name
+    ]}
+
+
 def runtime_environment(root: Path, edition: str) -> dict[str, str]:
     root = root.resolve()
     return {
@@ -696,10 +707,7 @@ def main() -> int:
     args = _parser().parse_args()
     targets = load_targets(args.targets)
     if args.command == "matrix":
-        print(json.dumps({"include": [
-            {"target": item.id, "runner": item.runner, "python-version": item.python_version}
-            for item in targets.values()
-        ]}, separators=(",", ":")))
+        print(json.dumps(matrix_payload(targets), separators=(",", ":")))
         return 0
     target = targets.get(args.target)
     if target is None:

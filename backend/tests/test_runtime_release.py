@@ -64,6 +64,21 @@ def test_runtime_target_matrix_only_publishes_full_rag_platforms():
     assert all(target.python_version == "3.13.11" for target in targets.values())
 
 
+def test_runtime_release_matrix_only_builds_windows():
+    """2026-10-30 定案：正式发行只发 Windows 安装版。
+
+    targets 配置保留 mac / linux（以后再做），但 CI 矩阵只能出现 Windows，
+    否则一次 tag 会同时触发两个用不上的平台构建并把它们当发布资产传上去。
+    """
+    targets = runtime_release.load_targets(ROOT / "release" / "runtime-targets.json")
+
+    payload = runtime_release.matrix_payload(targets)
+    ids = [item["target"] for item in payload["include"]]
+
+    assert ids == ["windows-x64-full-rag"]
+    assert all(item["runner"].startswith("windows") for item in payload["include"])
+
+
 def test_full_rag_keeps_application_outside_frozen_base(tmp_path):
     targets = runtime_release.load_targets(ROOT / "release" / "runtime-targets.json")
     full = runtime_release.pyinstaller_command(

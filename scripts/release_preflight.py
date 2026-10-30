@@ -53,7 +53,6 @@ REQUIRED_PATHS = (
     "scripts/runtime_entry.py",
     "scripts/runtime_release.py",
     ".github/workflows/runtime-release.yml",
-    ".github/workflows/portable-release.yml",
 )
 SECRET_PATTERNS = (
     re.compile(r"sk-[A-Za-z0-9_-]{20,}"),

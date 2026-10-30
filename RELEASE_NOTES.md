@@ -5,13 +5,28 @@
 
 ## 0.30（2026-10-30 重发）
 
-先前发布的 0.30 / 0.30.1 / 0.30.2 已全部撤下，**请以本页附件为准**。这一版修掉三处缺陷，不新增功能：
+先前发布的 0.30 / 0.30.1 / 0.30.2 已全部撤下，**请以本页附件为准**。
+
+这一版只发 **Windows 安装版**：不再提供便携包，macOS / Linux 版以后再做。运行时改为
+**Full RAG 必装**——安装器只带壳与 MinGit，首次启动自动下载 base + application + rag 三层，
+装完即具备完整 RAG 能力；原来「RAG 可选、`--with-rag` 追加」的形态已取消。
+
+**修复**
 
 - **安装版首次启动无法下载运行时**：壳的 HTTPS 请求没有接上系统 TLS 后端，首次启动补齐运行时与
   `--install-runtime` 一律报 `no TLS backend is configured`。现已显式接系统 TLS（schannel，不引 OpenSSL），
   并补了能真正逼出 TLS 握手的回归测试。
 - 资产库切到没有素材的分类（视频／音频）时工具栏整条消失，连「全部／图片」都点不回去；空分类现在保留完整工具栏。
 - 剧情对话里已生成的插画会被旧窗口的过期快照抹掉；已落定媒体改为不可回滚，快照漏报的槽按原段位插回。
+- 本机 Ollama / 本地模型卡走系统代理时连不上：回环端点（127.0.0.1 / localhost / ::1）现在强制直连，
+  对话、视觉与嵌入模型同一口径。
+
+**新增**
+
+- 生图提示词第 4 档 **MOSS-Image caption**：单段英文 caption，开头点明媒介，末句固定为 `Lighting: …`，
+  与 Anima 两行 / 自然语言 / Niji 四段并列，可在生图设置里选档；内置模版可在提示词模版工作台克隆后自定义。
+- **模型来源三档**：云端 API、本机 Ollama（读取已安装模型）、本地 GGUF（选文件一键导入 Ollama）；
+  对话、视觉、Embedding 三个区块用同一套来源，模型卡带来源徽标。
 
 ## 附件是什么
 
@@ -20,42 +35,29 @@
 | `Demiurge-Setup-User-0.30.0.exe` | **推荐**。用户级安装器：不需要管理员，装进当前用户目录，可自选路径 |
 | `Demiurge-Setup-Machine-0.30.0.exe` | 机器级安装器：需要管理员，装进 `Program Files`，本机所有用户可用 |
 | `SHA256SUMS.txt` / `SHA256SUMS.pub` | 安装器校验和清单与其 minisign 公钥 |
-| `Demiurge_windows_v0.30.7z` | Windows 便携版：解压即用，**运行时已内嵌（含 Full RAG 层）** |
-| `Demiurge_macos_v0.30.tar.gz` | macOS（Apple Silicon）便携版，含 Full RAG 层 |
-| `Demiurge_linux_v0.30.7z.001` / `.002` | Linux 便携版分卷，先合并再解压，含 Full RAG 层 |
-| `Demiurge_base_windows_v0.30.zip` | 安装版运行时·基础层（Python 运行时等） |
-| `Demiurge_application_windows_v0.30.zip` | 安装版运行时·应用层（后端 + 前端） |
-| `Demiurge_rag_windows_v0.30.part01` / `.part02`（附 `.parts.json` 分卷清单） | 安装版运行时·可选 Full RAG 层（分卷，约 1.9 GB/卷） |
+| `Demiurge_base_windows_v0.30.zip` | 运行时·基础层（Python 运行时等） |
+| `Demiurge_application_windows_v0.30.zip` | 运行时·应用层（后端 + 前端） |
+| `Demiurge_rag_windows_v0.30.part01` …（按 1.9 GB 分卷，附 `.parts.json` 清单） | 运行时·Full RAG 层（分卷） |
 | `Demiurge_update_windows_v0.30.json` | 运行时清单：各层体积与 SHA-256 的唯一真源，壳按它校验 |
 
-- 安装版首次启动**只自动下载 base + application**，不会拉约 2 GB 的 RAG 层。需要 Full RAG 时执行
-  `Demiurge.exe --install-runtime --with-rag`，或把上面几个运行时附件（含 `Demiurge_update_windows_v0.30.json`）
-  放进安装目录 `runtime-pack\`，或放进 `%LOCALAPPDATA%\Demiurge\downloads\`，再启动即走离线安装。
+- 安装版首次启动**自动下载 base + application + rag 三层**，启动页逐条可见进度；三层齐了才拉起服务，
+  RAG 检索开箱即用。
+- 网络不便时走离线导入：把上面几个运行时附件（含 `Demiurge_update_windows_v0.30.json`）放进安装目录
+  `runtime-pack\`，或放进 `%LOCALAPPDATA%\Demiurge\downloads\`，再启动即本地校验后装配。
 - 单独下载那几层 zip 是**离线导入用**的，不要手动解压到安装目录。
-- **便携版与安装版是同一程序的不同布局**：便携版把 base/application/rag 全部内嵌，装完即用；
-  安装版只带壳，首次启动按清单在线取层，RAG 仍为可选。
+- 两个安装器装出来是同一程序，只是安装位置与权限不同；更新只对用户级安装开放（见文末「检查更新」）。
 
 ## 怎么装
 
-### Windows · 安装版（推荐）
+### Windows · 安装版（唯一形态）
 
-- 壳是 Tauri 2（Rust），**不再需要 .NET 8 Desktop Runtime**；只依赖 Microsoft Edge WebView2
+- 壳是 Tauri 2（Rust），**不需要 .NET 8 Desktop Runtime**；只依赖 Microsoft Edge WebView2
   Runtime（Win10/11 多数已自带，安装版缺失时会静默补装）。
 - **程序与数据分离**：程序体在安装目录，作品、预设、日志、下载与运行时一律在
   `%LOCALAPPDATA%\Demiurge`。卸载/升级不动你的数据；你的角色卡与对话也不会被写进安装目录。
-- 首次启动按交付清单**在线下载**运行时（base + application 两层），启动页逐条可见进度。
-
-### Windows · 便携版
-
-`Demiurge_windows_v0.30.7z` —— 解压即用，运行时（含 RAG）已内嵌，数据留在包内 `data\userdata\`。
-同样是 Tauri 2 壳（不需要 .NET 8，只需 WebView2 Runtime）。
-双击 `Demiurge.exe` 启动；`install-shortcut.bat` 生成桌面/开始菜单快捷方式；
-仍想用浏览器就 `start-dev.bat`，关闭用 `stop-dev.bat`（与原生窗口同端口，二者只能跑一个）。
-
-### macOS / Linux · 便携版（浏览器界面，无原生壳）
-
-- `Demiurge_macos_v0.30.tar.gz` → 运行 `Start-Demiurge.command`
-- `Demiurge_linux_v0.30.7z.001`…（分卷）→ 直接 `7z x Demiurge_linux_v0.30.7z.001` 解出整包，再运行 `start-demiurge.sh`
+- 首次启动按交付清单**在线下载**运行时（base + application + rag），启动页逐条可见进度；
+  中断后续传，哈希不符的分卷会删档重下。
+- 安装目录只读（如装进 `Program Files`）不影响运行：运行时与用户数据都在 `%LOCALAPPDATA%\Demiurge`。
 
 ### Android · 手机端（beta）
 
@@ -75,8 +77,12 @@
 
 **桌面化**：WPF 壳换成 Tauri 2 壳（`Demiurge.exe --self-test` 共 18 项自检，前 15 项与 WPF 壳
 逐条对齐）；托盘常驻、关窗可隐藏到托盘、第二实例自动唤出；窗口几何/最大化/全屏与后端端口都会
-记住（含高 DPI 换算）；NSIS 机器级与用户级双安装器；运行时改为按需交付（在线下载 + 离线双
+记住（含高 DPI 换算）；NSIS 机器级与用户级双安装器；运行时按 RAG 必装交付（在线下载 + 离线双
 入口）；自动更新骨架与签名信任链。
+
+**生图提示词**：四档输出结构（Anima 两行 tags / 自然语言 / Niji 四段 / MOSS caption），
+模版工作台可克隆内置后自定义；插画按 `messageId + slotId` 原位回填在高潮段下方，后台运行不占
+前台聊天队列。
 
 **壁纸与场景**：内置 wallpaper-engine 场景播放器，场景来源泛化到本地工程；壁纸库扫描与工坊
 封面；文字图层（竖排日期/星期、问候语、帧率）、2D 粒子、云层与光雾参数；视频纹理改由渲染
@@ -106,9 +112,10 @@ UTF-8 口径）。
 ## 关于「检查更新」
 
 托盘里的「检查更新」需要仓库配置 updater 签名密钥后才会产出更新清单（`latest.json`）。
-该密钥尚未配置时，请手动下载新版安装包升级。
+该密钥尚未配置时，本页不会提供 `.exe.sig` 与 `latest.json`，请手动下载新版安装包升级。
+更新入口只对**用户级安装**开放；机器级安装请手动覆盖安装。
 
 ## 不包含什么
 
 模型权重、ComfyUI 本体与自定义节点、角色卡、预设、会话、图片与 RAG 索引**都不随包分发**。
-安装器与便携包都有守卫：用户预设与运行态数据不会被卷进发布产物。
+安装器有守卫：用户预设与运行态数据不会被卷进发布产物。

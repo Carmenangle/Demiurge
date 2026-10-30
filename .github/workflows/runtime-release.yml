@@ -158,26 +158,6 @@ jobs:
             throw "desktop shell self-test 未输出通过汇总（exit $($proc.ExitCode)）"
           }
           if ($proc.ExitCode -ne 0) { throw "desktop shell self-test failed (exit $($proc.ExitCode))" }
-      - name: 整形便携壳产物
-        shell: pwsh
-        run: |
-          $release = "desktop/tauri/target/release"
-          New-Item -ItemType Directory -Force shell-package | Out-Null
-          Copy-Item "$release/Demiurge.exe" shell-package/
-          if (Test-Path "$release/WebView2Loader.dll") {
-            Copy-Item "$release/WebView2Loader.dll" shell-package/
-          }
-          if (Test-Path "$release/runtimes") {
-            Copy-Item -Recurse "$release/runtimes" shell-package/
-          }
-          Compress-Archive -Path shell-package/* -DestinationPath Demiurge-desktop-windows-x64.zip
-          if (-not (Test-Path Demiurge-desktop-windows-x64.zip)) { throw "桌面壳压缩包生成失败" }
-      - uses: actions/upload-artifact@v4
-        with:
-          name: desktop-shell
-          path: Demiurge-desktop-windows-x64.zip
-          if-no-files-found: error
-          retention-days: 7
       - uses: actions/upload-artifact@v4
         with:
           name: windows-installers
@@ -231,23 +211,9 @@ jobs:
         with:
           path: release-assets
           merge-multiple: true
-      - name: 组装 Windows 便携支撑包
-        run: |
-          sudo apt-get update && sudo apt-get install -y p7zip-full
-          python -c "import zipfile; zipfile.ZipFile('release-assets/Demiurge-desktop-windows-x64.zip').extractall('desktop-shell')"
-          python scripts/portable_release.py build --target windows-x64-full-rag --version "${{ needs.plan.outputs.version }}" --assets-dir release-assets --output-dir release-assets --work-dir .portable-work --desktop-dir desktop-shell
-      - name: 附加分片合并工具
-        run: cp scripts/join-runtime.ps1 scripts/join-runtime.sh release-assets/
       - uses: softprops/action-gh-release@v2
         with:
           files: release-assets/*
           body_path: RELEASE_NOTES.md
           fail_on_unmatched_files: true
           overwrite_files: true
-      - name: 触发全平台用户一键包组装
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: >-
-          gh workflow run portable-release.yml
-          --ref "${{ github.ref_name }}"
-          -f version="${{ needs.plan.outputs.version }}"

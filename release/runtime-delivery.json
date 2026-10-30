@@ -7,10 +7,9 @@
   "manifest": "Demiurge_update_windows_v0.1.0.json",
   "required_layers": [
     "base",
-    "application"
-  ],
-  "optional_layers": [
+    "application",
     "rag"
   ],
+  "optional_layers": [],
   "mirrors": []
 }

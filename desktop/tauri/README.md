@@ -27,13 +27,13 @@ WPF 壳（`../Demiurge.Desktop`）的换壳实现。**合同不变**：
 | 单实例 + 激活既有窗口 | ✅ | 互斥量判唯一 + 命名事件 `Local\Demiurge.Desktop.Activate`；第二实例 SetEvent 后退出，第一个把窗口 show+置前 |
 | WebView2 数据目录 | ✅ 必做 | 见下：默认目录在本机建不出来 |
 | `--self-test` 18 项 | ✅ | 前 15 项与 WPF 同一份判据、同一串名字；第 16 项是 Tauri 独有的安装版布局，第 17 项是运行时交付，第 18 项是自动更新验签 |
-| 运行时按需交付 | ✅ | 首次启动发现安装版缺层 → 按嵌入 pin 在线下载或从 `runtime-pack`/`downloads` 离线装配；`base+application` 必装，`rag` 需 `--with-rag` |
-| 交付 CLI | ✅ | `Demiurge.exe --install-runtime [--with-rag]`；便携布局下拒绝执行（退出码 2） |
+| 运行时按需交付 | ✅ | 首次启动发现安装版缺层 → 按嵌入 pin 在线下载或从 `runtime-pack`/`downloads` 离线装配；`base+application+rag` 三层全部必装（2026-10-30 定案） |
+| 交付 CLI | ✅ | `Demiurge.exe --install-runtime`；便携布局下拒绝执行（退出码 2） |
 | 托盘 + 关窗询问 | ✅ | 托盘左键唤出，菜单「显示主窗口 / 重启后端 / 检查更新… / 彻底关闭」；关窗时询问「隐藏到托盘 / 彻底关闭 / 取消」，不再直接隐藏 |
 | 重启后端 | ✅ | 托盘菜单项：回收**自启**运行时 → 重新拉起 → 等健康 → 整页重载；端口上外部复用的服务明确拒绝，不误杀 |
 | 自动更新骨架 | ✅ 测试密钥 | 托盘「检查更新…」→ 检查 → 下载 → minisign 验签 → 停自启运行时 → NSIS `passive` 安装；**只对 currentUser 安装版开放** |
 | 更新清单 | ✅ | `scripts/updater_manifest.py` 把签名原文、版本、资产 URL 绑成 `latest.json`；拒绝签名版本漂移、HTTP 端点与 `-Machine` 变体 |
-| 打包装配 | ✅ | `portable_release.py --desktop-dir` 同时认 WPF `Demiurge.exe` 与 Tauri `demiurge-shell.exe`，包内一律落名 `Demiurge.exe` |
+| 打包装配 | ✅ 非发行 | `portable_release.py --desktop-dir` 同时认 WPF `Demiurge.exe` 与 Tauri `demiurge-shell.exe`，包内一律落名 `Demiurge.exe`；2026-10-30 起便携包退出正式发行，只作本地调试 |
 | NSIS 双安装器 | ✅ | `currentUser`（默认，不弹 UAC）+ `perMachine`（覆盖文件产出，需 UAC）；一套代码 `tauri build --config` 两次；装完包内 `--self-test` 18/18 |
 | 安装资源白名单 | ✅ 🔴 | `bundle.resources` 只允许 `installer-staging/dependencies → dependencies`；预设/userdata/`backend/data`/`.env` 有三层守卫（配置断言 → 暂存树审计 → 产物与安装目录扫描） |
 
@@ -158,8 +158,8 @@ $evi = "$env:TEMP\demiurge-installer-evidence"
    先在这两处找，校验通过就不再联网；`release_base` 不可达也能装完（自检第 17 项就是拿
    `file:///nonexistent-…` 证明的）。
 
-**层策略**：`base + application` 必装（运行时自检和前端都依赖）；`rag` 是可选大层，首次启动**不拉**，
-只有显式执行 `Demiurge.exe --install-runtime --with-rag` 才追加。若 pin 声明了 rag 而当前没装，启动日志/页会提示这条命令。
+**层策略**：`base + application + rag` 三层全部必装（2026-10-30 定案）。首次启动一次拉齐，RAG 分卷逐卷续传；
+`--with-rag` 与 `optional_layers` 已删除，清单缺 `rag` 层在 Python/Rust 两侧都直接判失败。
 
 **落盘顺序**（失败绝不写 `current.json`）：
 
@@ -241,9 +241,8 @@ cargo build --release
 # 自检（18 项：前 15 项与 WPF 壳同一份判据，第 16 项安装版布局，第 17 项运行时交付，第 18 项自动更新验签）
 .\target\debug\demiurge-shell.exe --self-test
 
-# 手动补运行时（安装版；rag 是可选大层）
+# 手动补运行时（安装版；base + application + rag 三层全装）
 .\target\debug\demiurge-shell.exe --install-runtime
-.\target\debug\demiurge-shell.exe --install-runtime --with-rag
 
 # 正常运行（在仓库内会自动用 backend\.venv 起开发运行时）
 .\target\debug\demiurge-shell.exe

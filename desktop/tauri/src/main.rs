@@ -47,35 +47,27 @@ fn main() {
         std::process::exit(selftest::run());
     }
     if args.iter().any(|arg| arg == "--install-runtime") {
-        std::process::exit(run_install_runtime(&args));
+        std::process::exit(run_install_runtime());
     }
     std::process::exit(run_app());
 }
 
-/// `Demiurge.exe --install-runtime [--with-rag]`：无界面部署运行时（安装版首启也会走同一模块）。
+/// `Demiurge.exe --install-runtime`：无界面部署运行时（安装版首启也会走同一模块）。
 /// 进度直接打 stdout；这是维护入口，不是业务 IPC。
-fn run_install_runtime(args: &[String]) -> i32 {
+fn run_install_runtime() -> i32 {
     selftest::attach_console();
-    let include_rag = args.iter().any(|arg| arg == "--with-rag");
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(|parent| parent.to_path_buf()))
         .unwrap_or_else(|| std::path::PathBuf::from("."));
-    println!(
-        "Demiurge 运行时安装：{}",
-        if include_rag {
-            "base + application + rag"
-        } else {
-            "base + application（rag 可选，加 --with-rag）"
-        }
-    );
+    println!("Demiurge 运行时安装：base + application + rag");
     println!("安装目录：{}", exe_dir.display());
     if runtime_delivery::is_portable_layout(&exe_dir) {
         println!("当前是便携包布局，运行时已随包提供，无需按需交付。");
         return 2;
     }
     let mut progress = |message: &str| println!("{message}");
-    match runtime_delivery::ensure_installed_runtime(&exe_dir, include_rag, &mut progress) {
+    match runtime_delivery::ensure_installed_runtime(&exe_dir, &mut progress) {
         Ok(report) => {
             if !report.reused {
                 println!("已部署层：{}", report.downloaded_layers.join("、"));

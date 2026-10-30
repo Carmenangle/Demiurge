@@ -17,8 +17,8 @@ DEFAULT_TAURI_CONF = ROOT / "desktop" / "tauri" / "tauri.conf.json"
 DEFAULT_TARGET = "windows-x64-full-rag"
 PIN_SCHEMA_VERSION = 1
 MANIFEST_SCHEMA_VERSION = 2
-REQUIRED_LAYERS = ("base", "application")
-OPTIONAL_LAYERS = ("rag",)
+REQUIRED_LAYERS = ("base", "application", "rag")
+OPTIONAL_LAYERS: tuple[str, ...] = ()
 VERSION_PATTERN = re.compile(r"^v?(\d+)\.(\d+)(?:\.(\d+))?$")
 TARGET_PATTERN = re.compile(r"^[0-9a-z][0-9a-z-]*$")
 REPOSITORY_PATTERN = re.compile(r"^[0-9A-Za-z_.-]+/[0-9A-Za-z_.-]+$")
@@ -125,8 +125,8 @@ def validate_pin(pin: dict, *, allow_file: bool = False) -> dict:
     optional = pin.get("optional_layers")
     if optional is None:
         optional = []
-    if not isinstance(optional, list) or tuple(optional) not in ((), OPTIONAL_LAYERS):
-        raise ValueError(f"pin.optional_layers 只能是 [] 或 {list(OPTIONAL_LAYERS)}")
+    if not isinstance(optional, list) or tuple(optional) != OPTIONAL_LAYERS:
+        raise ValueError(f"pin.optional_layers 只能是 {list(OPTIONAL_LAYERS)}")
     if set(required) & set(optional):
         raise ValueError("必装层与可选层不能重叠")
     return pin
@@ -181,7 +181,7 @@ def validate_layer(name: str, layer: object) -> dict:
     return layer
 
 
-def validate_manifest(manifest: dict, pin: dict, *, include_rag: bool = False) -> dict:
+def validate_manifest(manifest: dict, pin: dict) -> dict:
     manifest = _require_dict(manifest, "manifest")
     if manifest.get("schema_version") != MANIFEST_SCHEMA_VERSION:
         raise ValueError(f"manifest.schema_version 必须为 {MANIFEST_SCHEMA_VERSION}")
@@ -197,10 +197,7 @@ def validate_manifest(manifest: dict, pin: dict, *, include_rag: bool = False) -
             raise ValueError(f"manifest 缺少 {key}")
 
     layers = _require_dict(manifest.get("layers"), "manifest.layers")
-    required = list(pin["required_layers"])
-    if include_rag:
-        required.extend(pin.get("optional_layers") or [])
-    for name in required:
+    for name in pin["required_layers"]:
         if name not in layers:
             raise ValueError(f"manifest 缺少 {name} 层")
         validate_layer(name, layers[name])
@@ -217,7 +214,7 @@ def validate_manifest(manifest: dict, pin: dict, *, include_rag: bool = False) -
     return manifest
 
 
-def verify_layer_assets(manifest: dict, assets_dir: Path, *, include_rag: bool = False) -> None:
+def verify_layer_assets(manifest: dict, assets_dir: Path) -> None:
     """离线包预检：清单里每一层所需的分卷/单档必须在目录里且哈希一致。"""
     import hashlib
 
@@ -228,7 +225,7 @@ def verify_layer_assets(manifest: dict, assets_dir: Path, *, include_rag: bool =
                 value.update(block)
         return value.hexdigest()
 
-    for name in ("base", "application") + (("rag",) if include_rag else ()):
+    for name in REQUIRED_LAYERS:
         layer = manifest["layers"].get(name)
         if layer is None:
             continue
@@ -276,7 +273,6 @@ def main() -> int:
     validate = sub.add_parser("validate")
     validate.add_argument("--pin", type=Path, default=DEFAULT_PIN)
     validate.add_argument("--manifest", type=Path)
-    validate.add_argument("--include-rag", action="store_true")
 
     pin = sub.add_parser("pin")
     pin.add_argument("--tag", required=True)
@@ -301,8 +297,8 @@ def main() -> int:
     payload = load_pin(args.pin)
     if args.manifest is not None:
         manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
-        validate_manifest(manifest, payload, include_rag=args.include_rag)
-        verify_layer_assets(manifest, args.manifest.parent, include_rag=args.include_rag)
+        validate_manifest(manifest, payload)
+        verify_layer_assets(manifest, args.manifest.parent)
     print(f"pin OK：{payload['tag']} / {payload['target']} / 必装 {payload['required_layers']}")
     return 0
 

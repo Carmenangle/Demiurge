@@ -77,11 +77,10 @@ desktop\publish\Demiurge.exe --self-test
   便携包本身就是目录，平铺没有额外代价。
 - 框架依赖发布：目标机需要 .NET 8 Desktop Runtime；完全离线可改用 `--self-contained true`（体积更大）。
 - 目标机需要 WebView2 Runtime；后续可改为随包分发固定版本 WebView2。
-- **便携包装配已完成**：`python scripts/portable_release.py build --target windows-x64-full-rag ... --desktop-dir desktop/publish`
-  把上述产物平铺到包根（与 `data\` 同级），壳因此能识别 `data/runtime/current.json` 并接管 Runtime。`--desktop-dir` 必填，
-  缺 `Demiurge.exe`／目录不存在／与包内既有文件冲突一律构建失败。包根同时提供 `install-shortcut.bat`（在桌面与开始菜单建 `.lnk`）。
-- CI：`runtime-release.yml` 的 `desktop-shell` job 做发布 + `--self-test` + 归档 `Demiurge-desktop-windows-x64.zip`，
-  `publish` 与 `portable-release.yml` 都以该固定名产物作为 `--desktop-dir` 来源。
+- **便携包装配已退出正式发行（2026-10-30 定案）**：`scripts/portable_release.py build --target windows-x64-full-rag ... --desktop-dir desktop/publish`
+  仍可本地调试用（把产物平铺到包根，壳因此能识别 `data/runtime/current.json`），但不再由任何 CI 工作流调用。
+- CI：`runtime-release.yml` 的 `desktop-shell` job 做 Tauri 构建 + `--self-test` + 双 NSIS 安装器 + 安装器校验和；
+  不再归档 `Demiurge-desktop-windows-x64.zip` 裸包，也没有下游便携组装工作流。
 - 浏览器入口 `start-dev.bat` 继续保留，两种启动方式并存。
 
 构建备注：`desktop/NuGet.Config` 清空继承源并只保留 nuget.org，用于绕开本机已失效的 Visual Studio 离线回退目录。
@@ -113,15 +112,13 @@ desktop\publish\Demiurge.exe --self-test
 
 ## 唯一剩余待办（本机做不了）
 
-打 tag 时端到端跑一次 `.github/workflows/runtime-release.yml` + `portable-release.yml`，
+打 tag 时端到端跑一次 `.github/workflows/runtime-release.yml`，
 确认整条发布链在 CI（干净 runner、无本机 NSIS/Rust 缓存）里也成立：
 
-1. `desktop-shell` job 的 Tauri 构建 → 两个 NSIS 安装器 → 自检 → 固定名
-   `Demiurge-desktop-windows-x64.zip` 全部通过；
-2. `publish` 与 `portable-release` 两个下游都取到该产物，安装器与 `SHA256SUMS.txt` 成为 Release 资产；
-3. `portable-release.yml` cleanup 没有误删 Windows `base/application/rag/update` 分层资产
-   （它们是安装版在线交付的唯一来源）；
-4. 产出的包解开后，包根 `Demiurge.exe --self-test` 18/18。
+1. `desktop-shell` job 的 Tauri 构建 → 两个 NSIS 安装器 → 自检全部通过；
+2. `publish` 把两个安装器、`SHA256SUMS.txt/.pub` 与 Windows `base/application/rag/update`
+   分层资产一并放上 Release（分层资产是安装版首次启动的唯一来源，缺一层就装不起来）；
+3. 产出的安装器静默安装后，包内 `Demiurge.exe --self-test` 18/18。
 
 本机只能验到「构建 → 装配 → 自检」这条链（见下验证记录）；runner 差异只能由一次真实 tag 收口。
 
@@ -162,10 +159,10 @@ WPF 壳的换壳实现，合同不变（同源 8010 + 无业务 IPC）。当前�
 拉起运行时前把 `dependencies\git\cmd`（MinGit）与可选的 `dependencies\ffmpeg\bin` 前置进子进程 `PATH`，
 修掉「便携包带了 MinGit 却没人挂上去、干净机器上 git 能力失效」的缺口。
 
-运行时交付（2026-10-24 第三步）：安装版首次启动发现 `runtime/current.json` 缺层时，按壳内嵌的
-`release/runtime-delivery.json` pin 补齐 `base+application`——在线走 `ureq` + 显式挂载的系统 TLS（schannel）+ Range 续传，
-离线认安装目录 `runtime-pack\` 与 `%LOCALAPPDATA%\Demiurge\downloads\` 两个入口；`rag` 仅
-`--install-runtime --with-rag` 显式追加。解压到 `.staging-<token>` 再改名部署，`current.json` 最后原子写，
+运行时交付（2026-10-24 第三步；2026-10-30 改 RAG 必装）：安装版首次启动发现 `runtime/current.json` 缺层时，
+按壳内嵌的 `release/runtime-delivery.json` pin 一次补齐 `base+application+rag`——在线走 `ureq` + 显式挂载的
+系统 TLS（schannel）+ Range 续传，离线认安装目录 `runtime-pack\` 与 `%LOCALAPPDATA%\Demiurge\downloads\`
+两个入口。`--with-rag` 与可选层已删除。解压到 `.staging-<token>` 再改名部署，`current.json` 最后原子写，
 失败不留半套状态；进度走启动页文案，不新增业务 IPC。细节见 `desktop/tauri/README.md`。
 
 已含：托盘（左键唤出 / 菜单「显示主窗口 · 重启后端 · 检查更新… · 彻底关闭」）、关窗三选一（隐藏 / 彻底关闭 / 取消）、
@@ -193,15 +190,15 @@ target\debug\demiurge-shell.exe --self-test    # 18 项：前 15 项与 WPF 同�
    `tauri build --config` 覆盖同一份代码；WebView2 用 `embedBootstrapper`；语言 `SimpChinese`；自定义安装路径页。
    两个安装器各 29.6 MiB（含更新签名），装了 → 包内 `--self-test` 18/18 → 静默卸载清掉安装目录/开始菜单/「添加删除程序」登记项；
    预设/userdata/`backend/data`/`.env` 由三层机械守卫拦在安装资源之外。
-3. ✅ **运行时按需交付**（第三步，已落）：安装器只带壳 + MinGit；首次启动按嵌入 pin（`release/runtime-delivery.json`）
-   补齐 `base+application`，在线下载与离线双入口（安装目录 `runtime-pack\`、`%LOCALAPPDATA%\Demiurge\downloads\`）并存；
-   `rag` 仅 `--install-runtime --with-rag` 显式追加。层体积/哈希只认 `Demiurge_update_<平台>_<tag>.json`，pin 不复制；
-   失败不写 `current.json`；自检第 17 项用纯 `file://` 夹具覆盖组装/复用/离线/坏档/磁盘不足/清单漂移。
+3. ✅ **运行时按需交付**（第三步，已落；2026-10-30 改三层必装）：安装器只带壳 + MinGit；首次启动按嵌入 pin
+   （`release/runtime-delivery.json`）一次补齐 `base+application+rag`，在线下载与离线双入口（安装目录
+   `runtime-pack\`、`%LOCALAPPDATA%\Demiurge\downloads\`）并存。层体积/哈希只认
+   `Demiurge_update_<平台>_<tag>.json`，pin 不复制；失败不写 `current.json`；自检第 17 项用纯 `file://` 夹具覆盖
+   组装/复用/离线/坏档/磁盘不足/清单漂移。
 4. ✅ **CI 切换**（第四步，已落）：`desktop-shell` job 从 `dotnet publish` 切到 Tauri（Rust stable + Node 22 +
    Python 3.13.11），先渲染 pin，再装配依赖 → `build_installers.py --skip-stage --version <tag>` → 自检 →
-   归档 `Demiurge-desktop-windows-x64.zip`，并上传两个安装器与 `SHA256SUMS.txt`。
-   `portable-release.yml` cleanup 收窄为只删 mac/linux 分层中间件与桌面壳裸包 `Demiurge-desktop-windows-x64.zip`，
-   保留 Windows 分层资产供在线交付；重跑该 workflow 前需重新上传裸包。
+   上传两个安装器与 `SHA256SUMS.txt`。2026-10-30 起裸包归档与 `portable-release.yml` 下游组装整体删除，
+   `publish` 只原样上传各 artifact。
 5. ✅ **自动更新骨架**（第五步，已落）：`tauri-plugin-updater` + 托盘「检查更新…」→ 下载 → minisign 验签 →
    停自启运行时 → NSIS `passive` 安装；`scripts/updater_manifest.py` 生成 `latest.json` 并守卫签名版本绑定/HTTPS/非
    `-Machine`；CI 预留签名 secrets。当前用一次性测试密钥，**生产公钥轮换与真实下载安装回放未做**。

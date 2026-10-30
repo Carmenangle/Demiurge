@@ -15,6 +15,10 @@
 - **云端 ComfyUI**：执行交给另一台机器，存档留在本地；地址簿按 A/B/C/D 四段配置
   （本机 / 局域网 / 云端 / Tailscale）。
 - **提示词模版工作台**：自定义生图/视频提示词模版；协议族内置不可改，模版缺失按 kind 降级、不出空稿。
+- **MOSS-Image caption 第 4 档**：生图提示词新增单段英文 caption 输出结构（开头点明媒介、末句固定
+  `Lighting: …`、七步展开构图/主体/场景/光线/色调/画面内文字），与 Anima 两行、自然语言、Niji 四段并列。
+- **模型来源三档**：设置 → 模型支持云端 API、本机 Ollama、本地 GGUF（一键导入 Ollama）三种来源，
+  对话 / 视觉 / Embedding 区块同一套口径；本机与回环端点强制直连，不受系统代理影响。
 - **壁纸与场景**：内置 wallpaper-engine 场景播放器，场景来源泛化到本地工程；属性预设、鼠标视差、
   文字图层与 2D 粒子。
 - **Windows 安装器**：同一份 Tauri 壳产出 `currentUser`（默认，不弹 UAC）与 `perMachine`（需 UAC）两套
@@ -23,9 +27,8 @@
 - **自动更新**：托盘「检查更新…」读取 `latest.json`，minisign 验签后以 NSIS `passive` 模式安装；仅对
   `currentUser` 安装版开放，便携包、仓库开发壳与 `perMachine` 安装明确拒绝。清单生成器守卫签名版本绑定、
   HTTPS 端点与 `-Machine` 变体。
-- **运行时按需交付**：安装版首次启动按壳内嵌 pin 补齐 `base + application` 运行时层，支持在线 Range 续传
-  与离线导入；`rag` 仅由 `--install-runtime --with-rag` 显式追加。层先解压到暂存目录再原子部署，
-  `current.json` 最后写入，失败不留半套状态。
+- **运行时按需交付**：安装版首次启动按壳内嵌 pin 一次补齐 `base + application + rag` 三层（Full RAG 必装），
+  支持在线 Range 续传与离线导入。层先解压到暂存目录再原子部署，`current.json` 最后写入，失败不留半套状态。
 - **发布校验和信任链**：每次发布产出 `SHA256SUMS.txt`、其 minisign 签名 `SHA256SUMS.txt.sig` 与公钥
   `SHA256SUMS.pub`，与自动更新共用同一把钥匙；README 补充 SmartScreen 引导、`certutil` 哈希对照与
   `minisign -V` 严格验签方法。
@@ -37,6 +40,9 @@
 - 发布附件改为直白命名 `Demiurge_<种类>_<平台>_<版本>`（层资产 `Demiurge_base/application/rag_windows_v0.30`、
   清单 `Demiurge_update_windows_v0.30.json`、分卷 `Demiurge_rag_windows_v0.30.part01`），不再把内容 ID 写进文件名；
   ID 仍完整保存在更新清单里。桌面壳裸包不再随正式 Release 分发。
+- **正式发行只出 Windows 安装器，RAG 改为必装**：便携包（Windows 7z / macOS / Linux）整体退出 Release，
+  `portable-release.yml` 删除；macOS / Linux 版以后再做。`--with-rag` 与 `optional_layers` 取消，
+  安装版首次启动自动下载三层。
 - 手机端版式收口：弹窗接入浏览器式返回链（返回键关最上层弹窗）、软键盘让位、浮动按钮收进 Dock、
   横屏形态与设置页头重排；画布等重活改为「PC 端可用」说明卡，不再给白框。
 - 全量门禁输出统一 UTF-8，并对不在快照面的非 `.py` 文件给出可见提示。

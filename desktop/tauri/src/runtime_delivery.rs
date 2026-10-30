@@ -22,8 +22,8 @@ use sha2::{Digest, Sha256};
 /// 构建期嵌入的交付 pin。CI 在构建壳之前按 release tag 重写 `release/runtime-delivery.json`。
 pub const PIN_JSON: &str = include_str!("../../../release/runtime-delivery.json");
 
-const REQUIRED_LAYERS: [&str; 2] = ["base", "application"];
-const OPTIONAL_LAYERS: [&str; 1] = ["rag"];
+const REQUIRED_LAYERS: [&str; 3] = ["base", "application", "rag"];
+const OPTIONAL_LAYERS: [&str; 0] = [];
 const DOWNLOAD_CHUNK: usize = 256 * 1024;
 /// 解压体积估计：归档多为 PyInstaller/前端压缩产物，留 3 倍余量。
 const EXTRACT_FACTOR: u64 = 3;
@@ -120,10 +120,7 @@ struct Asset {
 pub struct DeliveryReport {
     pub base_id: String,
     pub application_id: String,
-    /// 实际落地的 RAG 层 id；空串表示未安装。
     pub rag_id: String,
-    /// 清单里存在可选 RAG 层（用于给出「可用 --with-rag 追加」的提示）。
-    pub rag_available: bool,
     pub downloaded_layers: Vec<String>,
     pub reused: bool,
 }
@@ -143,11 +140,10 @@ pub fn is_portable_layout(exe_dir: &Path) -> bool {
 
 pub fn ensure_installed_runtime(
     install_dir: &Path,
-    include_rag: bool,
     progress: &mut dyn FnMut(&str),
 ) -> Result<DeliveryReport, DeliveryError> {
     let pin = embedded_pin()?;
-    deliver(&pin, &crate::paths::home(), install_dir, include_rag, None, progress)
+    deliver(&pin, &crate::paths::home(), install_dir, None, progress)
 }
 
 /// 自检与单测入口：允许注入 pin / home / 可用磁盘空间。
@@ -155,7 +151,6 @@ pub(crate) fn deliver(
     pin: &DeliveryPin,
     home: &Path,
     install_dir: &Path,
-    include_rag: bool,
     free_bytes_override: Option<u64>,
     progress: &mut dyn FnMut(&str),
 ) -> Result<DeliveryReport, DeliveryError> {
@@ -172,7 +167,7 @@ pub(crate) fn deliver(
         Some(manifest) => manifest,
         None => fetch_manifest(pin, &downloads, progress)?,
     };
-    validate_manifest(pin, &manifest, include_rag).map_err(DeliveryError)?;
+    validate_manifest(pin, &manifest).map_err(DeliveryError)?;
 
     let mut needed: Vec<&str> = Vec::new();
     for name in REQUIRED_LAYERS {
@@ -183,21 +178,14 @@ pub(crate) fn deliver(
             needed.push(name);
         }
     }
-    if include_rag && manifest.layers.contains_key("rag") && !layer_installed("rag", &runtime_root, &manifest.rag_id) {
-        needed.push("rag");
-    }
-    let rag_installed = !manifest.rag_id.trim().is_empty()
-        && layer_installed("rag", &runtime_root, &manifest.rag_id);
 
     if needed.is_empty() {
-        let rag_id = if rag_installed { manifest.rag_id.clone() } else { String::new() };
-        write_current(&runtime_root, &manifest, &rag_id)?;
+        write_current(&runtime_root, &manifest, &manifest.rag_id)?;
         progress("运行时已就绪，无需重复部署");
         return Ok(DeliveryReport {
             base_id: manifest.base_id.clone(),
             application_id: manifest.application_id.clone(),
-            rag_id,
-            rag_available: manifest.layers.contains_key("rag"),
+            rag_id: manifest.rag_id.clone(),
             downloaded_layers: Vec::new(),
             reused: true,
         });
@@ -258,20 +246,12 @@ pub(crate) fn deliver(
             return Err(err);
         }
 
-        let rag_id = if !manifest.rag_id.trim().is_empty()
-            && layer_installed("rag", &runtime_root, &manifest.rag_id)
-        {
-            manifest.rag_id.clone()
-        } else {
-            String::new()
-        };
-        write_current(&runtime_root, &manifest, &rag_id)?;
+        write_current(&runtime_root, &manifest, &manifest.rag_id)?;
         progress("运行时部署完成");
         Ok(DeliveryReport {
             base_id: manifest.base_id.clone(),
             application_id: manifest.application_id.clone(),
-            rag_id,
-            rag_available: manifest.layers.contains_key("rag"),
+            rag_id: manifest.rag_id.clone(),
             downloaded_layers: needed.iter().map(|name| name.to_string()).collect(),
             reused: false,
         })
@@ -440,7 +420,7 @@ fn validate_layer(name: &str, layer: &Layer) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_manifest(pin: &DeliveryPin, manifest: &Manifest, include_rag: bool) -> Result<(), String> {
+fn validate_manifest(pin: &DeliveryPin, manifest: &Manifest) -> Result<(), String> {
     if manifest.schema_version != 2 {
         return Err(format!(
             "运行时清单 schema_version 必须是 2，实际 {}",
@@ -466,9 +446,6 @@ fn validate_manifest(pin: &DeliveryPin, manifest: &Manifest, include_rag: bool) 
         if !manifest.layers.contains_key(name) {
             return Err(format!("运行时清单缺少必需层：{name}"));
         }
-    }
-    if include_rag && !manifest.layers.contains_key("rag") {
-        return Err("清单里没有 rag 层，无法安装可选的 RAG 增强层".to_string());
     }
     if manifest.layers.contains_key("rag") && manifest.rag_id.trim().is_empty() {
         return Err("运行时清单有 rag 层但缺少 rag_id".to_string());
