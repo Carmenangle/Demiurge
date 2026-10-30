@@ -39,6 +39,7 @@
 | `Demiurge_application_windows_v0.30.zip` | 运行时·应用层（后端 + 前端） |
 | `Demiurge_rag_windows_v0.30.part01` …（按 1.9 GB 分卷，附 `.parts.json` 清单） | 运行时·Full RAG 层（分卷） |
 | `Demiurge_update_windows_v0.30.json` | 运行时清单：各层体积与 SHA-256 的唯一真源，壳按它校验 |
+| `demiurge-spike-0.30.16-beta-debug.apk` | Android 手机端（beta，debug 签名），与电脑端同版配套 |
 
 - 安装版首次启动**自动下载 base + application + rag 三层**，启动页逐条可见进度；三层齐了才拉起服务，
   RAG 检索开箱即用。
@@ -61,7 +62,9 @@
 
 ### Android · 手机端（beta）
 
-手机端 APK 不在本 Release 附件里，另行分发；安装时需允许「未知来源」。
+手机端 APK 随本 Release 提供：`demiurge-spike-0.30.16-beta-debug.apk`
+（versionCode 31，debug 签名，sha256 `c258623c287f58c2319e7b1c04ae4fca2ef1a6767a80b913194accb9230d628b`），
+安装时需允许「未知来源」。
 
 - 手机端是完整工作台（对话、资产、画布、设置），后端内嵌在壳里，可独立运行；
   模型权重与 ComfyUI 仍在电脑或外部机器上，按设置里的地址连接。
