@@ -430,6 +430,8 @@ def _scene_for_facts(scene: Mapping[str, object]) -> dict[str, object]:
     if isinstance(protected, str) and protected.strip():
         restored["narrative"] = image_prompt_extract.restore_jailbreak(protected)
     restored.pop("protected_narrative", None)
+    # 2026-10-30：校验/编译只认**画面主体自己的**外貌段（见 `_subject_scoped_appearance`）。
+    restored["appearance"] = _subject_scoped_appearance(restored)
     return restored
 
 
@@ -496,6 +498,9 @@ def _scene_for_model(scene: Mapping[str, object]) -> dict[str, object]:
     「有出处就按事实写具体」举的例子全是手/臀，器官类没有先例）。
     """
     result = _strip_narrator_from_model_view(scene)
+    # 2026-10-30：模型载荷同样只带**画面主体自己的**外貌段——否则同场景非主体的角色条目
+    # 会被模型当成主体形象写进画面（男指挥官吃到女角色外貌的直接来源之一）。
+    result["appearance"] = _subject_scoped_appearance(result)
     protected = result.pop("protected_narrative", None)
     if isinstance(protected, str) and protected.strip():
         result["narrative"] = protected
@@ -563,6 +568,22 @@ def _character_labels(count: int) -> list[str]:
         word = _CHARACTER_ORDINALS[offset] if offset < len(_CHARACTER_ORDINALS) else "additional"
         labels.append(f"the {word} adult character")
     return labels
+
+
+def _subject_label(scene: Mapping[str, object], name: str) -> str:
+    """角色名的**中性指代**，与 `_anonymize_prompt_names` 用同一张表（顺序也一致）。
+
+    本地补写句要按人归属，但姓名不得进成稿 ⇒ 复用匿名化映射；角色不在
+    `_character_names`（在场表缺项）时按**画面主体顺序**取同一套标签。
+    """
+    name = str(name or "").strip()
+    names = _character_names(scene)
+    if name in names:
+        return _character_labels(len(names))[names.index(name)]
+    subjects = [str(item).strip() for item in _contract_subject_names(scene)]
+    if name in subjects:
+        return _character_labels(len(subjects))[subjects.index(name)]
+    return "the adult character"
 
 
 def _anonymize_prompt_names(prompt: str, scene: Mapping[str, object]) -> str:
@@ -1029,8 +1050,119 @@ def _missing_event_facts(prompt: str, scene: Mapping[str, object]) -> list[str]:
     ))
 
 
+# ── 逐角色外貌绑定（2026-10-30 用户定案）─────────────────────────────────────
+# 真机/推演实锤：`appearance` 是**在场角色**的拼接文本（上游
+# `_filter_illustration_appearance` 按在场名过滤），本层却把它当成「画面主体的外貌」
+# ⇒ 单人帧的主体（如男指挥官）被补上同场景女角色的巨乳/肥臀事实
+# （`The primary adult woman is depicted with a very full bust, broad rounded hips.`）。
+# 用户口径：**条目外貌只属于条目本人；没有外貌条目的主体不拷贝别人的形象**。
+# 判据与上游生产者同口径：行首「名字[：:]」段落头；只做**词面归属**，不猜性别、不引词表。
+_APPEARANCE_HEAD_RE = re.compile(r"^\s*([^\s：:【]+)\s*[：:]")
+# 段落头位置常见**字段标签**（`外貌：…`／`穿着：…`），不是角色名 ⇒ 整块按单段处理（零回归）。
+_APPEARANCE_FIELD_LABELS = frozenset({
+    "外貌", "身材", "穿着", "服饰", "服装", "发型", "体型", "备注", "特征",
+    "当前穿着", "服装状态", "appearance", "outfit", "wardrobe", "body",
+})
+
+
+def _appearance_segments(appearance: str) -> list[tuple[str, str]] | None:
+    """按行首「名字[：:]」切段；无角色段落头 ⇒ None（单段自由文本，维持旧口径）。"""
+    lines = str(appearance or "").splitlines()
+    if not lines:
+        return None
+    has_header = any(
+        match and match.group(1).strip().lower() not in _APPEARANCE_FIELD_LABELS
+        for match in (_APPEARANCE_HEAD_RE.match(line) for line in lines)
+    )
+    if not has_header:
+        return None
+    segments: list[tuple[str, list[str]]] = []
+    owner = ""
+    body: list[str] = []
+    for line in lines:
+        match = _APPEARANCE_HEAD_RE.match(line)
+        name = match.group(1).strip() if match else ""
+        if name and name.lower() not in _APPEARANCE_FIELD_LABELS:
+            if body:
+                segments.append((owner, body))
+            owner, body = name, [line]
+        else:
+            body.append(line)
+    if body:
+        segments.append((owner, body))
+    return [(name, "\n".join(items)) for name, items in segments]
+
+
+def _same_character(left: str, right: str) -> bool:
+    """段落头名与主体名是否同一人：全等或**双向包含**（`甲某` ⊂ `甲某元帅`）。
+
+    世界书条目名常比判据给出的主体名长（条目「甲某元帅」/判据「甲某」），
+    只做全等会把她自己的条目判成「别人的」而整段丢掉。单字名不参与包含匹配，防误配。
+    """
+    left, right = str(left or "").strip(), str(right or "").strip()
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    return min(len(left), len(right)) >= 2 and (left in right or right in left)
+
+
+def _subject_scoped_appearance(scene: Mapping[str, object]) -> str:
+    """只保留**画面主体**自己的外观段；没有条目段的主体不借用他人外貌。
+
+    ⚠ 零回归锁：无角色段落头 / 无画面主体信号 ⇒ 原样返回（旧口径逐字节不变）。
+    """
+    raw = str(scene.get("appearance") or "")
+    if not raw.strip():
+        return ""
+    segments = _appearance_segments(raw)
+    if segments is None:
+        return raw
+    subjects = [str(name).strip() for name in _contract_subject_names(scene) if str(name).strip()]
+    if not subjects:
+        return raw
+    kept = [
+        text for owner, text in segments
+        if not owner or any(_same_character(owner, subject) for subject in subjects)
+    ]
+    return "\n".join(kept).strip()
+
+
+def _subject_appearance_fact_groups(scene: Mapping[str, object]) -> dict[str, list[str]]:
+    """每个**画面主体**自己的外观事实（供多人帧逐人分述）；无段落头 ⇒ 空表。"""
+    segments = _appearance_segments(str(scene.get("appearance") or ""))
+    if segments is None:
+        return {}
+    groups: dict[str, list[str]] = {}
+    for subject in _contract_subject_names(scene):
+        name = str(subject).strip()
+        blocks = [text for owner, text in segments if _same_character(owner, name)]
+        if not blocks:
+            continue
+        body_lines = [line for block in blocks for line in block.splitlines()]
+        # 段落头是**归属标记**、不是外观内容：ASCII 判定与词表映射都只看正文，
+        # 否则「中文名＋英文外貌」整段过不了 `isascii()`，英文事实永远进不了账本。
+        # ⚠ 条目常写成**一整行**（`名字：【外貌】…`）⇒ 只摘**行首前缀**，不能整行丢弃。
+        if body_lines:
+            body_lines[0] = _APPEARANCE_HEAD_RE.sub("", body_lines[0], count=1)
+        source = "\n".join(body_lines).strip()
+        if not source:
+            continue
+        facts = _mapped_facts_from(source)
+        if source.isascii():
+            facts.extend(
+                part.strip(" ,.;") for part in source.split(",")
+                if _FIELD_PATTERNS["appearance"].search(part)
+                and not _FIELD_PATTERNS["wardrobe"].search(part)
+            )
+        facts = list(dict.fromkeys(fact for fact in facts if fact.strip()))
+        if facts:
+            groups[name] = facts
+    return groups
+
+
 def _current_visual_source(scene: Mapping[str, object]) -> str:
-    appearance = str(scene.get("appearance") or "")
+    appearance = _subject_scoped_appearance(scene)
     wardrobe = str(scene.get("wardrobe") or "")
     narrative = str(scene.get("narrative") or "")
     clothing_changed = bool(wardrobe.strip() or re.search(
@@ -2852,7 +2984,7 @@ def _first_person_head_guards(head: str, scene: Mapping[str, object]) -> str:
 # （按各自输出结构落点）。下面这张表是**已知未覆盖**的 profile —— **白名单式**：
 # 只对它告警，不给空值/未知 profile 制造噪音。
 # ⚠ 将来新增 profile 时必须回来评估：做了机械层就不必登记，没做就在这里加一项。
-_FP_UNCOVERED_PROFILES = frozenset({"natural_language"})
+_FP_UNCOVERED_PROFILES = frozenset({"natural_language", "moss_caption"})
 
 
 def viewpoint_coverage_warning(profile: str, scene: Mapping[str, object]) -> str:
@@ -3093,7 +3225,9 @@ def _concrete_scene_facts(
     """统一事实底座：只收人物、当前服装、动作、道具、地点与空间关系。"""
     direct_facts: list[str] = []
     for key in ("appearance", "wardrobe"):
-        detail = " ".join(str(scene.get(key) or "").split()).strip(" ,.;")
+        value = _subject_scoped_appearance(scene) if key == "appearance" \
+            else str(scene.get(key) or "")
+        detail = " ".join(value.split()).strip(" ,.;")
         if detail and detail.isascii() and re.search(r"[A-Za-z]{3}", detail):
             direct_facts.append(detail)
     facts = [*direct_facts, *_mapped_visual_facts(scene), *_scene_action_tags(scene),
@@ -3120,7 +3254,8 @@ def _concrete_scene_facts(
     if include_draft_prompt:
         keys.insert(1, "draft_prompt")
     for key in keys:
-        raw_detail = str(scene.get(key) or "")
+        raw_detail = _subject_scoped_appearance(scene) if key == "appearance" \
+            else str(scene.get(key) or "")
         if key == "draft_prompt":
             # 同轮草稿常包含独立质量行；事实底座只取内容行，不能把质量词重复塞进正文。
             detail_lines = [line.strip() for line in raw_detail.splitlines() if line.strip()]
@@ -3343,7 +3478,15 @@ def prompt_field_ledger(prompt: str, scene: Mapping[str, object]) -> dict[str, d
         if fact not in _mapped_wardrobe_facts_from(appearance_source)
     ]
     wardrobe_expected = _mapped_wardrobe_facts_from(wardrobe_source)
-    if appearance_source.isascii():
+    # 2026-10-30：有角色段落头 ⇒ 英文外观事实**按主体条目**取（含「中文名＋英文外貌」
+    # 这种 `isascii()` 判假、旧实现整段漏掉的情形）；无段落头才走旧的整块拆分。
+    scoped_groups = _subject_appearance_fact_groups(fact_scene)
+    if scoped_groups:
+        appearance_expected.extend(
+            fact for facts in scoped_groups.values() for fact in facts
+            if fact not in _mapped_wardrobe_facts_from(fact)
+        )
+    elif appearance_source.isascii():
         appearance_expected.extend(
             part.strip(" ,.;") for part in appearance_source.split(",")
             if _FIELD_PATTERNS["appearance"].search(part)

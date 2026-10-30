@@ -21,7 +21,8 @@ const SECTIONS: {
   {
     group: "image",
     title: "生图提示词模版",
-    hint: "决定生图提示词的输出结构与文案：Anima 固定两行（质量行 + 英文描述）、自然语言整段、Niji 四段。"
+    hint: "决定生图提示词的输出结构与文案：Anima 固定两行（质量行 + 英文描述）、自然语言整段、Niji 四段、"
+      + "MOSS 200–300 词英文 caption（末句 Lighting 收束）。"
       + "对话框「提示词模版」下拉与「多元数据插入 → 生图提示词模式」都从这里取。",
   },
   {
@@ -58,7 +59,7 @@ export function StylePanel({ draft, setDraft }: PanelProps) {
         <h4 style={{ margin: 0 }}>提示词模版</h4>
         <p className="field-hint" style={{ marginTop: 8 }}>
           内置默认模版公开可读（内置协议族决定校验与兜底，只读不可改）；要自定义就点对应分组的
-          「新增模版」，在克隆出来的副本上改。当前自带 {builtins.length || 6} 个内置 ·
+          「新增模版」，在克隆出来的副本上改。当前自带 {builtins.length || 7} 个内置 ·
           我的 {customs.length} 个（生图 {customs.filter((t) => templateKindGroup(t.kind) === "image").length} /
           视频 {customs.filter((t) => templateKindGroup(t.kind) === "video").length}）。
         </p>

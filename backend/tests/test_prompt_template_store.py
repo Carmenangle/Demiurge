@@ -47,7 +47,7 @@ def client():
 # ── 内置投影 ─────────────────────────────────────────────────────────────────
 
 def test_builtin_projection_matches_code_constants():
-    """三档生图 system/质量/负面与视频骨架默认值与代码常量逐字一致。"""
+    """四档生图 system/质量/负面与视频骨架默认值与代码常量逐字一致。"""
     for kind in store.IMAGE_KINDS:
         view = store.builtin_view(kind)
         assert view["id"] == f"builtin:{kind}"
@@ -63,7 +63,7 @@ def test_builtin_projection_matches_code_constants():
         assert view["content_hash"] == view["content_hash"].strip() and len(view["content_hash"]) == 8
     # krea2 不进内置列表（已下线，代码常量保留）
     assert "krea2" not in store.KINDS
-    assert len(store.list_builtins()) == 6
+    assert len(store.list_builtins()) == 7
 
 
 def test_builtin_video_projection_matches_defaults():

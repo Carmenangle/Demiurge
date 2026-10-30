@@ -486,7 +486,7 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
           </select>
         </label>
         <p className="bind-hint" style={{ marginTop: -8, marginBottom: 12 }}>
-          内置三种输出结构（Anima 两行 / 自然语言 / Niji 四段）；「我的模版」在提示词模版工作台里克隆内置后自定义。模版被删时自动回退对应内置结构。
+          内置四种输出结构（Anima 两行 / 自然语言 / Niji 四段 / MOSS caption）；「我的模版」在提示词模版工作台里克隆内置后自定义。模版被删时自动回退对应内置结构。
         </p>
         {(promptProfile === "anima_tags" || selectedCustomKind === "anima_tags") && (
           <>

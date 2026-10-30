@@ -1,6 +1,7 @@
 import type { VideoMode } from "./illustrationMedia";
 
-export type PromptProfileId = "anima_tags" | "natural_language" | "niji_sections";
+export type PromptProfileId =
+  | "anima_tags" | "natural_language" | "niji_sections" | "moss_caption";
 
 /** 用户自定义提示词模版（2026-10-25）：`custom:<32位hex>`，后端 prompt_template_store 解析；
  *  协议族（校验/归一化/兜底）仍走内置 kind，模版被删时后端按 promptProfileKind 降级。 */
@@ -11,6 +12,7 @@ export const PROMPT_PROFILE_OPTIONS: readonly { id: PromptProfileId; label: stri
   { id: "anima_tags", label: "Anima（质量行 + 内容 tags / 英文描述）" },
   { id: "natural_language", label: "自然语言（GPT Image / Banana）" },
   { id: "niji_sections", label: "Niji（主体 / 风格 / 附加 / 后缀）" },
+  { id: "moss_caption", label: "MOSS（200–300 词英文 caption）" },
 ];
 
 const IDS = new Set(PROMPT_PROFILE_OPTIONS.map((item) => item.id));

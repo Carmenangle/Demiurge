@@ -308,6 +308,8 @@ def test_anima连续拒答时回退已有高潮tags而不阻断出图():
 def test_anima拒答兜底合并混合语言角色条目的具体英文外貌():
     scene = {
         **_scene("nsfw"),
+        # 外貌条目必须与在场角色同名，否则按「不继承他人外貌」被剔除（2026-10-30）。
+        "actors": ["顾凝霜"],
         "appearance": "顾凝霜: long black hair, straight bangs, narrow red eyes",
         "draft_prompt": (
             "two adult women, wrist held, pulling closer, rain-soaked railing, "
@@ -543,6 +545,7 @@ def test_自然语言与Niji拒答兜底也必须输出纯英文并保留英文�
     scene = {
         **_scene("nsfw"),
         "protected_narrative": "顾凝霜@(抓)@住同伴的@(手)@@(腕)@并将她拉近。",
+        "actors": ["顾凝霜"],
         "appearance": "顾凝霜: long black hair, straight bangs, narrow red eyes",
         "draft_prompt": "wrist held, pulling closer beside a rain-soaked railing",
     }
@@ -893,6 +896,7 @@ def test_krea2连续拒答时使用合规场景兜底():
 def test_krea2角色lora连续拒答时兜底使用具体外貌而非身份占位句():
     scene = {
         **_scene("nsfw"),
+        "actors": ["顾凝霜"],
         "wardrobe": "",
         "appearance": (
             "顾凝霜：【外貌】清秀动人却成熟色气的绝代美人，漆黑墨发扎成发团、插紫玉金髻，"
@@ -1081,6 +1085,136 @@ def test_字段账本不把无可验证期望的通用外貌词判为覆盖():
         "covered": False,
         "expected": [],
     }
+
+
+# ── 2026-10-30 用户口径：条目外貌只属于条目本人，没有条目的主体不拷贝别人的形象 ──────
+
+def _绑定场景(*, appearance, actors, subjects):
+    return {
+        "narrative": "画面里的人物各自保持着当下的姿态。",
+        "appearance": appearance,
+        "wardrobe": "",
+        "locale": "warehouse",
+        "actors": list(actors),
+        "frame_subjects": list(subjects),
+        "rating": "sfw",
+    }
+
+
+def test_主体没有外貌条目时不继承同场景他人的外貌():
+    """单人帧的主体（男指挥官）不得因为同场景有女角色而吃到她的外貌。
+
+    真机载荷：`appearance` 是在场角色的拼接文本，帧主体只有甲某时，
+    乙某条目的巨乳/肥臀事实曾被补进他的成稿。
+    """
+    scene = _绑定场景(
+        appearance="乙某：【外貌】暗黄色长发，一对木瓜般硕大盈满的挺拔巨乳，"
+                   "不堪一握的蜂腰与比肩宽得多的安产肥臀。",
+        actors=[],
+        subjects=["甲某"],
+    )
+    prompt = (
+        "1boy, adult man, warehouse, medium shot\n"
+        "The primary adult character stands in the warehouse and raises one hand against the light."
+    )
+
+    completed, ledger = profiles.complete_field_coverage("anima_tags", prompt, scene)
+
+    assert ledger["appearance"] == {"required": False, "covered": True, "expected": []}
+    assert "very full bust" not in completed
+    assert "broad rounded hips" not in completed
+    assert "甲某" not in completed
+    assert "very full bust" not in profiles.deterministic_fallback("anima_tags", scene)
+
+
+def test_模型载荷不含非画面主体的外貌段():
+    scene = _绑定场景(
+        appearance="乙某：【外貌】暗黄色长发，一对木瓜般硕大盈满的挺拔巨乳。",
+        actors=[],
+        subjects=["甲某"],
+    )
+    scene["aspect_ratio"] = "1:1"
+    seen: dict = {}
+
+    def generate(_system, user):
+        seen.update(json.loads(user))
+        return _anima_json(
+            "1boy, adult man, warehouse, medium shot\n"
+            "He stands in the warehouse doorway under hard side light."
+        )
+
+    profiles.generate("anima_tags", scene, generate)
+
+    payload = json.dumps(seen, ensure_ascii=False)
+    assert "乙某" not in payload
+    assert "巨乳" not in payload
+
+
+def test_多人帧外貌事实按各自条目分述():
+    scene = _绑定场景(
+        appearance=(
+            "甲某：long black hair, a very full bust\n"
+            "乙某：short silver hair, narrow waist"
+        ),
+        actors=["甲某", "乙某"],
+        subjects=["甲某", "乙某"],
+    )
+    prompt = (
+        "2girls, stone chamber, medium shot\n"
+        "The primary adult woman holds the wrist of the second adult character."
+    )
+
+    completed, _ledger = profiles.complete_field_coverage("anima_tags", prompt, scene)
+    prose = completed.splitlines()[1]
+
+    assert "The primary adult character is depicted with long black hair, a very full bust." in prose
+    assert "The second adult character is depicted with short silver hair, narrow waist." in prose
+    assert "very full bust" not in prose.split("The second adult character", 1)[1]
+
+
+def test_二人帧里没有条目的主体不被摊上他人外貌():
+    scene = _绑定场景(
+        appearance="甲某元帅：【外貌】一对木瓜般硕大盈满的挺拔巨乳，"
+                   "不堪一握的蜂腰与比肩宽得多的安产肥臀。",
+        actors=["甲某", "乙某"],
+        subjects=["甲某", "乙某"],
+    )
+    prompt = (
+        "1girl, 1boy, living room, medium shot\n"
+        "The primary adult woman stands in the living room while the second adult character watches."
+    )
+
+    completed, _ledger = profiles.complete_field_coverage("anima_tags", prompt, scene)
+    prose = completed.splitlines()[1]
+
+    assert "The primary adult character is depicted with a very full bust, broad rounded hips." in prose
+    assert "The two adult characters are depicted with a very full bust" not in prose
+
+
+def test_条目名与主体名前缀一致时仍归属本人():
+    scene = _绑定场景(
+        appearance="甲某元帅：【外貌】一对木瓜般硕大盈满的挺拔巨乳。",
+        actors=["甲某"],
+        subjects=["甲某"],
+    )
+
+    ledger = profiles.prompt_field_ledger("adult woman, medium shot.", scene)
+
+    assert ledger["appearance"]["required"] is True
+    assert "a very full bust" in ledger["appearance"]["expected"]
+
+
+def test_无角色段落头的外观仍按单角色旧口径处理():
+    scene = _绑定场景(
+        appearance="【外貌】漆黑墨发，一对木瓜般硕大盈满的挺拔巨乳。",
+        actors=["甲"],
+        subjects=["甲"],
+    )
+
+    ledger = profiles.prompt_field_ledger("adult woman, medium shot.", scene)
+
+    assert ledger["appearance"]["required"] is True
+    assert "a very full bust" in ledger["appearance"]["expected"]
 
 
 @pytest.mark.parametrize("profile", profiles.PROFILE_IDS)
@@ -1272,6 +1406,7 @@ def test_krea2拒答兜底仍保留高潮动作与角色条目英文外貌():
 def test_krea2兜底从混合语言appearance保留具体英文身份特征():
     scene = {
         **_scene("nsfw"),
+        "actors": ["顾凝霜"],
         "appearance": (
             "顾凝霜: long black hair, straight bangs, narrow red eyes, pale skin, "
             "slender figure, red dress"
@@ -3630,7 +3765,7 @@ def test_第38刀_画面自洽条款无条件适用且四档一致():
     这类**反因果**措辞**不存在**（首版写法）。
     """
     clauses: list[str] = []
-    end_marker = "（如「双手反绑在背后」与「用手指掰开」互斥；锚点只写了「探手到身后」⇒ 保留掰开，不写绑缚）。"
+    end_marker = "（如「双手背在身后」与「探手到身后」互斥；锚点只写了「探手到身后」⇒ 保留探手，不写背手）。"
     for profile in ("anima_tags", "natural_language", "niji_sections", "krea2"):
         system = profiles._system(profile, {"rating": "nsfw"})
         assert "【画面自洽·机位由内容反推】" in system, profile
@@ -3666,6 +3801,9 @@ def test_第39刀_两侧都有必须按细节动作分偏侧面():
     就比如双手掰开臀部，这就是背面偏侧面，双手托胸就是正面偏侧面……**不只是手部细节动作，
     可能还有别的细节动作**」⇒ 偏向由**动作自身的接触面**判定，**不限于手**。
 
+    ⚠ 模板文本脱敏（2026-10-30）：示例动作改用不敏感的等效写法（双手从背后环住／双手扶在胸前），
+    判据本身（接触面、不限于手）未变 ⇒ 本测试断言的是新示例。
+
     本测试同时是**零回归锁**：① 四档逐字一致；② 旧的「一句话机位」措辞必须已被移除
     （否则模型仍会退回「背后视角 ＋ 回头」的粗档）；③ 必须保留与【视角】块的衔接句
     「身体朝向仍以本轮画面事实为准」，避免模型为迎合「正面偏侧面」把背向式姿势改写成正面。
@@ -3685,7 +3823,7 @@ def test_第39刀_两侧都有必须按细节动作分偏侧面():
         "内容两侧都有时", "背面偏侧面", "正面偏侧面",
         "three-quarter back view", "three-quarter front view",
         "细节动作", "不限于手", "接触面",
-        "双手掰开臀部", "双手托胸",
+        "双手从背后环住", "双手扶在胸前",
         "head turned back over shoulder", "只取一侧",
     ):
         assert marker in clause, marker
@@ -4627,6 +4765,34 @@ def test_第33刀_niji内容段末尾统一补逗号而参数段不动():
     assert len(lines) == 4, lines
     assert lines[0].endswith(", ") and lines[1].endswith(", ") and lines[2].endswith(", ")
     assert lines[3] == "--ar 4:3 --niji 6"
+
+
+def test_niji参数段粘连时补空格并摘掉段首逗号():
+    """2026-10-30 用户口径：第四段以 `--` 起头、与前三段空白分隔，每个 `--` 前必须是空格。"""
+    raw = json.dumps({
+        "subject": "a woman standing",
+        "style": "anime illustration",
+        "additions": "rim light",
+        "suffix": ",--s 200--c 20 --no watermark, signature",
+    })
+    lines = profiles._normalize("niji_sections", raw, _scene()).splitlines()
+
+    assert len(lines) == 4, lines
+    assert lines[2].endswith(", "), lines[2]
+    assert lines[3] == "--s 200 --c 20 --no watermark, signature", lines[3]
+
+
+def test_niji档后缀参数口径写清默认值与推荐区间():
+    system = profiles._NIJI_SYSTEM
+    for probe in (
+        "--s（--stylize）风格化强度", "200–600 为最佳，默认 200",
+        "--c（--chaos）随机度", "建议 10–30，默认 20",
+        "--sref 视觉风格编号", "除非用户明确提供，否则不写",
+        "--sw 风格权重", "800–1000 强力锁定",
+        "--no 排除元素", "--style raw 关闭 AI 自动美学处理",
+        "每个 `--` 之前都必须是空格",
+    ):
+        assert probe in system, probe
 
 
 def test_第33刀_词表兜底的niji四段末尾同样补逗号():
@@ -7447,3 +7613,150 @@ def test_custom_路径不改内置行为_同输入同输出():
     a = profiles.normalize_inline("anima_tags", raw, scene)
     b = profiles.normalize_inline("anima_tags", raw, scene, quality_override=None)
     assert a == b
+
+
+# ── 第 4 档 moss_caption（2026-10-30）─────────────────────────────────────────
+# MOSS-Image 走单段 caption（200–300 词、末句 `Lighting: …`），处理链与
+# natural_language 同构（归一/判错/兜底/字段补全共用），差异只在 system 与末句约定。
+
+_MOSS_CAPTION = (
+    "A detailed anime illustration of a quiet bedchamber, where a lone adult woman turns toward "
+    "the window. She occupies about two thirds of the frame height in a medium shot from a "
+    "three-quarter front angle, her dark hair falling over one shoulder while her pale robe folds "
+    "with the turning motion and the hem trails across the stone floor. The window at the left "
+    "edge supplies soft daylight that rakes across her cheek and the fabric, and long shadows "
+    "stretch toward the lower right while the far pillars recede into layered depth. "
+    "Lighting: soft daylight from the window on the left, diffuse and cool, illuminating her face "
+    "and robe texture while shadows fall toward the lower right."
+)
+
+
+def _moss_scene():
+    return {
+        "narrative": "她在窗边转身。",
+        "draft_prompt": "",
+        "appearance": "",
+        "wardrobe": "",
+        "locale": "寝殿",
+        "actors": ["清夏"],
+        "rating": "nsfw",
+        "viewpoint": "third_person",
+    }
+
+
+def test_moss档内置模版满足红线四锚与caption输出契约():
+    from app.services.prompt_template_store import missing_redline_anchors
+
+    system = profiles._MOSS_SYSTEM
+
+    assert missing_redline_anchors(system) == []
+    # 语言声明必须属本档正文（_COMMON 之后），不是共用底座顺带一句。
+    assert _语言声明片段 in system[_COMMON_LEN:]
+    for marker in ("Lighting:", "200–300 词", "A detailed anime illustration of", "caption"):
+        assert marker in system, marker
+    # 末句光源同样受「具体化必须有出处」约束（否则写明火/台灯会被装置闸摘掉整个末句）。
+    assert "不得新增台灯、蜡烛、火炬" in system
+
+
+def test_moss档与三档共用同一多人分述与具体化出处条款():
+    def _multi(system):
+        start = system.index("【多人分述】")
+        end = system.index("不得只给动作而不给位置。", start) + len("不得只给动作而不给位置。")
+        return system[start:end]
+
+    def _concrete(system):
+        # 锚点必须带正文开头：MOSS 的写法段先提了一次条款名（`Lighting:` 句受它约束），
+        # 只搜 `【具体化必须有出处】` 会切到那句引用上。
+        start = system.index("【具体化必须有出处】画面事实分两级")
+        end = system.index("留白不写", start) + len("留白不写")
+        return system[start:end]
+
+    systems = [profiles._system(p, {"rating": "nsfw"}) for p in
+               ("anima_tags", "natural_language", "niji_sections", "moss_caption")]
+    first_multi, first_concrete = _multi(systems[0]), _concrete(systems[0])
+    for system in systems[1:]:
+        assert _multi(system) == first_multi
+        assert _concrete(system) == first_concrete
+
+
+def test_moss档caption按七步法顺序展开():
+    """⑦ MOSS-Image 的 caption 叙述顺序是参考实现的固定结构：是什么 → 构图与视角 → 主体 →
+    场景与背景 → 光线 → 色调画风与情绪 → 画面内的文字。顺序是结构本身，写反等于丢结构。"""
+    system = profiles._MOSS_SYSTEM
+    markers = [
+        "（1）是什么", "（2）构图与视角", "（3）主体", "（4）场景与背景",
+        "（5）光线", "（6）色调、画风与情绪", "（7）画面内的文字",
+    ]
+    positions = [system.index(marker) for marker in markers]
+
+    assert positions == sorted(positions), positions
+    # 本档只交付一段 caption、没有独立风格栏 ⇒ 画风与主色必须并进第（6）步。
+    # 「画风交给 style」是参考实现的原话，照抄会让画风在本档**无处落地**（没有 style 字段）。
+    assert "画风交给 style" not in system
+    assert "主色调、媒介与画法、线条与上色方式、材质质感、整体情绪" in system
+
+
+def test_moss档要求空间关系专门成句且不许只有几个词():
+    system = profiles._MOSS_SYSTEM
+
+    for probe in (
+        "【空间关系】",
+        "按从前到后专门交代空间关系",
+        "谁挡住谁的哪一部分",
+        "哪些贴着画面边缘或被边缘裁掉",
+        "【描述密度】",
+        "哪一步只剩几个词，就是那一步没写",
+        "同一个对象在全段里用词一致",
+    ):
+        assert probe in system, probe
+
+
+def test_moss档画面内文字fail_closed():
+    """输入没给原文就完全不写文字：招牌 / 书页 / 屏幕上的字只能来自输入，不得自造。"""
+    system = profiles._MOSS_SYSTEM
+
+    assert "【画面内的文字】" in system
+    assert "输入给了原文时，原文一个字不改放进双引号" in system
+    assert "输入没给原文就完全不写文字，不得自造" in system
+    assert "placeholder、some words" in system
+
+
+def test_moss档合格caption原样交付():
+    prompt, diagnostics = _补丁生成("moss_caption", _MOSS_CAPTION, _moss_scene())
+
+    assert diagnostics["strategy"] == "direct"
+    assert prompt == _MOSS_CAPTION
+    assert prompt.rstrip().endswith(".")
+    assert "Lighting:" in prompt
+
+
+def test_moss档中文稿判死走英文兜底():
+    prompt, diagnostics = _补丁生成(
+        "moss_caption", "这是一段中文描述，讲述寝殿里的女子转身走向窗边。", _moss_scene())
+
+    assert diagnostics["strategy"] == "fallback"
+    assert prompt.isascii()
+    assert profiles._errors("moss_caption", prompt, _moss_scene()) == []
+
+
+def test_moss档字段补全插在Lighting末句之前():
+    scene = {**_moss_scene(), "wardrobe": "红色长裙"}
+    prompt = (
+        "A detailed anime illustration of a quiet bedchamber, where a lone adult woman turns "
+        "toward the window. Lighting: soft daylight from the window on the left, diffuse and cool."
+    )
+
+    repaired, _ledger = profiles.complete_field_coverage("moss_caption", prompt, scene)
+
+    assert "a red long dress" in repaired
+    # 输出契约是**末句** `Lighting: …` ⇒ 补全句必须在它之前。
+    assert repaired.index("a red long dress") < repaired.index("Lighting:")
+    assert "diffuse and cool." in repaired
+
+
+def test_moss档第一人称进入未覆盖防呆登记():
+    msg = profiles.viewpoint_coverage_warning(
+        "moss_caption", {"viewpoint": "first_person", "narrator": "甲"})
+
+    assert "moss_caption" in msg
+    assert "红线 79" in msg

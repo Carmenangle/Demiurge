@@ -1,11 +1,27 @@
 """Niji 域：分段拼装、确定性兜底、第一人称 guard。2026-10-24 审计中期项拆域；函数体逐字节未改。"""
 from __future__ import annotations
+import re
 from collections.abc import Mapping
 from app.services.image_prompt_profiles._base import (
     _english_scene_details,
     _fallback_multi_actor_sentences,
     _first_person_head_guards,
 )
+
+
+_SUFFIX_LEAD_JUNK_RE = re.compile(r"^[\s,，]+")
+_GLUED_PARAM_RE = re.compile(r"(?<=\S)--")
+
+
+def _normalize_suffix_section(section: str) -> str:
+    """参数段规整（2026-10-30 用户口径）：去掉段首逗号/空白，`--` 前必须有空格。
+
+    只动分隔符，不改参数名与取值（`--no watermark, signature` 原样保留）。
+    """
+    text = _SUFFIX_LEAD_JUNK_RE.sub("", section).strip()
+    if not text:
+        return ""
+    return _GLUED_PARAM_RE.sub(" --", text)
 
 
 def _niji_sections_join(sections: list[str]) -> str:
@@ -15,9 +31,15 @@ def _niji_sections_join(sections: list[str]) -> str:
     保持良好的习惯」。理由＝段是逗号列表粒度，任何后续拼接／截取都不该缺分隔符。
     ⚠ **参数段（以 `--` 开头的那一段，如 `--ar 4:3 --niji 6`）不加** —— 它是 niji 参数串，
     不是关键词列表；加了会把参数语法写坏。空段保持空（`_errors` 会照旧判「四段」）。
+    ⚠ 2026-10-30：末段按参数段处理前先过 `_normalize_suffix_section`（段首逗号/空白摘除、
+    粘连的 `--` 补空格）；第四段与前段之间由换行分隔（空白）。
     """
     out: list[str] = []
-    for section in sections:
+    last = len(sections) - 1
+    for index, section in enumerate(sections):
+        if index == last and section.lstrip().startswith(("--", ",--", "，--")):
+            out.append(_normalize_suffix_section(section))
+            continue
         if not section:
             out.append("")
             continue

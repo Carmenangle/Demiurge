@@ -2,13 +2,13 @@
 // 后端真源 app/services/prompt_template_store.py；本文件只做 wire 序列化。
 import { apiDelete, apiGet, apiPost, apiPut } from "../client";
 
-/** 协议族六值：生图三档 + 视频三形态（krea2 已下线，不进列表）。 */
+/** 协议族七值：生图四档 + 视频三形态（krea2 已下线，不进列表）。 */
 export type PromptTemplateKind =
-  | "anima_tags" | "natural_language" | "niji_sections"
+  | "anima_tags" | "natural_language" | "niji_sections" | "moss_caption"
   | "video_climax" | "video_firstlast" | "video_transition";
 
 export const IMAGE_KINDS: readonly PromptTemplateKind[] = [
-  "anima_tags", "natural_language", "niji_sections",
+  "anima_tags", "natural_language", "niji_sections", "moss_caption",
 ];
 export const VIDEO_KINDS: readonly PromptTemplateKind[] = [
   "video_climax", "video_firstlast", "video_transition",
@@ -18,6 +18,7 @@ export const KIND_LABELS: Record<PromptTemplateKind, string> = {
   anima_tags: "Anima（质量行 + 内容 tags / 英文描述）",
   natural_language: "自然语言（GPT Image / Banana）",
   niji_sections: "Niji（主体 / 风格 / 附加 / 后缀）",
+  moss_caption: "MOSS（200–300 词英文 caption）",
   video_climax: "视频·高潮点动作代入",
   video_firstlast: "视频·首尾帧剧情影片",
   video_transition: "视频·转场短桥段",

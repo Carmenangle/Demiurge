@@ -16,6 +16,7 @@ from app.services.image_prompt_profile_templates import (  # noqa: F401  模板�
     _ART_DIRECTION,
     _COMMON,
     _KREA_SYSTEM,
+    _MOSS_SYSTEM,
     _NATURAL_SYSTEM,
     _NIJI_SYSTEM,
     _SYSTEMS,

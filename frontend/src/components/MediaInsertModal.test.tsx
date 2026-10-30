@@ -285,6 +285,8 @@ describe("MediaInsertModal prompt templates", () => {
     );
     expect(html).toContain("生图提示词模式");
     expect(html).not.toContain(">提示词模式<");
+    // 说明文案覆盖四档（2026-10-30 新增 MOSS）
+    expect(html).toContain("内置四种输出结构（Anima 两行 / 自然语言 / Niji 四段 / MOSS caption）");
     expect(html).toContain("我的模版（提示词模版工作台）");
     expect(html).toContain("★ 我的Anima");
     // custom anima 模版也显示固定质量/负面词（anima 家族）

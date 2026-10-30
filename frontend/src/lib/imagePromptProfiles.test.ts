@@ -7,9 +7,9 @@ import {
 } from "./imagePromptProfiles";
 
 describe("image prompt profiles", () => {
-  it("提供三种可选模式，旧 krea2 配置与未知值回退 Anima（krea2 已下线）", () => {
+  it("提供四种可选模式，旧 krea2 配置与未知值回退 Anima（krea2 已下线）", () => {
     expect(PROMPT_PROFILE_OPTIONS.map((item) => item.id)).toEqual([
-      "anima_tags", "natural_language", "niji_sections",
+      "anima_tags", "natural_language", "niji_sections", "moss_caption",
     ]);
     expect(normalizePromptProfile(undefined)).toBe("anima_tags");  // krea2 下线后回退 Anima
     expect(normalizePromptProfile("unknown")).toBe("anima_tags");

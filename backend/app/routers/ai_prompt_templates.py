@@ -17,7 +17,7 @@ from app.services import prompt_template_store as store
 router = APIRouter(prefix="/prompt/templates", tags=["ai"])
 
 TemplateKind = Literal[
-    "anima_tags", "natural_language", "niji_sections",
+    "anima_tags", "natural_language", "niji_sections", "moss_caption",
     "video_climax", "video_firstlast", "video_transition",
 ]
 

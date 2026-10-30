@@ -50,6 +50,9 @@ from app.services.image_prompt_profiles._base import (
     _strip_refusal_suffix,
     _strip_think,
     _strip_wrapping,
+    _subject_appearance_fact_groups,
+    _subject_label,
+    _subject_scoped_appearance,
     _unsourced_contact_errors,
     _unsourced_contact_hits,
     _unsourced_device_hits,
@@ -341,7 +344,7 @@ def _normalize(
         return _anonymize_prompt_names(
             f"{head},\n{prose}", scene or {},
         )
-    if profile == "natural_language":
+    if profile in ("natural_language", "moss_caption"):
         return _anonymize_prompt_names(
             _unwrap_stray_parentheses(_strip_wrapping(raw)), scene or {})
     if profile == "niji_sections":
@@ -406,7 +409,7 @@ def _errors(profile: str, prompt: str, scene: Mapping[str, object]) -> list[str]
             errors.append("第二行必须包含英文自然语言画面描述")
         if _scene_action_tags(scene) and not _ANIMA_ACTION_RE.search(prompt):
             errors.append("剧情存在明确动作，提示词必须保留具体动作或姿态")
-    elif profile == "natural_language":
+    elif profile in ("natural_language", "moss_caption"):
         if len(prompt) < 20:
             errors.append("自然语言描述过短")
         if _CJK_RE.search(prompt):
@@ -472,17 +475,55 @@ def _system(
 
 def deterministic_fallback(profile: str, scene: Mapping[str, object]) -> str:
     """仅用主生成已给出的场景事实组装提示词，不再调用文本模型。"""
+    # 2026-10-30：兜底同样只许用**画面主体自己的**外貌（见 `_subject_scoped_appearance`）。
+    scoped = _subject_scoped_appearance(scene)
+    if scoped != str(scene.get("appearance") or ""):
+        scene = {**scene, "appearance": scoped}
     if profile == "krea2":
         prompt = _krea_scene_fallback(scene)
     elif profile == "anima_tags":
         prompt = _anima_scene_fallback(scene)
-    elif profile == "natural_language":
+    elif profile in ("natural_language", "moss_caption"):
         prompt = _natural_scene_fallback(scene)
     elif profile == "niji_sections":
         prompt = _niji_scene_fallback(scene)
     else:
         raise ValueError(f"未知提示词模式：{profile}")
     return _anonymize_prompt_names(prompt, scene)
+
+
+def _attribute_state_facts(
+    scene: Mapping[str, object], facts: list[str], ledger: Mapping[str, object],
+) -> tuple[list[str], list[str]]:
+    """把**外貌事实**按角色条目归属成逐人句子；无法唯一归属的留在通用句里。
+
+    2026-10-30 用户口径：条目外貌只属于条目本人。多人帧里旧实现统一写
+    `The two adult characters are depicted with …` ⇒ 单人可见的外观事实被摊给所有主体
+    （男指挥官被写成 `a very full bust`）。这里只认**唯一归属**：一条事实同时出现在
+    两名主体条目里时宁可不归属，也不猜。
+    """
+    if not facts or len(_contract_subject_names(scene)) < 2:
+        return [], list(facts)
+    groups = _subject_appearance_fact_groups(scene)
+    if not groups:
+        return [], list(facts)
+    appearance_row = ledger.get("appearance")
+    expected_items = appearance_row.get("expected") if isinstance(appearance_row, Mapping) else None
+    expected = {str(fact) for fact in expected_items} if isinstance(expected_items, list) else set()
+    owned: dict[str, list[str]] = {}
+    rest: list[str] = []
+    for fact in facts:
+        owners = [name for name, items in groups.items() if fact in items]
+        if len(owners) == 1 and (not expected or fact in expected):
+            owned.setdefault(owners[0], []).append(fact)
+        else:
+            rest.append(fact)
+    sentences: list[str] = []
+    for name, items in owned.items():
+        sentence = f"{_subject_label(scene, name)} is depicted with {', '.join(items)}."
+        # 句首大写：标签本身以小写 `the` 开头，直接拼会接在上一句句号后。
+        sentences.append(sentence[:1].upper() + sentence[1:])
+    return sentences, rest
 
 
 def complete_field_coverage(
@@ -591,12 +632,18 @@ def complete_field_coverage(
         #      （`In this instant, the concrete action is …` / `The image also keeps …` 已因同理被削）。
         # ⇒ 定案＝**只改标点、不改字**：句号改逗号，让账本片段成为模型句的**分词状语 / 同位语续列**。
         repaired = prompt.rstrip(" .") + ", " + "; ".join(details) + "."
-    elif profile == "natural_language":
+    elif profile in ("natural_language", "moss_caption"):
         if not natural_sentence:
             # 事实片段补齐对散文无意义 ⇒ 不算补全（trace 也不再报 field_repair）
             ledger.pop("__field_repair__", None)
             return prompt, ledger
-        repaired = prompt.rstrip() + " " + natural_sentence
+        if profile == "moss_caption" and "Lighting:" in prompt:
+            # MOSS caption 的输出契约是**末句** `Lighting: …`：补事实必须插在它之前，
+            # 否则补一句就破坏了提交形态。
+            marker = prompt.rfind("Lighting:")
+            repaired = prompt[:marker].rstrip() + " " + natural_sentence + " " + prompt[marker:]
+        else:
+            repaired = prompt.rstrip() + " " + natural_sentence
     elif profile == "anima_tags":
         lines = prompt.splitlines()
         if len(lines) != 2:
@@ -609,10 +656,13 @@ def complete_field_coverage(
         # **不追加**任何尾巴——否则模型自己写好的文段会被接上 `The three adult characters are
         # depicted with withdrawing the fingers.` 这种病句（用户实锤）。
         prose_states = [fact for fact in prose_facts if not _is_action_fact(fact)]
-        tail = (
-            f" {_anima_content_description(scene, prose_states, include_actions=False)}"
-            if prose_states else ""
-        )
+        attributed, prose_states = _attribute_state_facts(scene, prose_states, ledger)
+        tail_parts = list(attributed)
+        if prose_states:
+            tail_parts.append(
+                _anima_content_description(scene, prose_states, include_actions=False)
+            )
+        tail = f" {' '.join(tail_parts)}" if tail_parts else ""
         repaired = (
             lines[0].rstrip(" ,") + ", " + ", ".join(tag_details) + ",\n"
             + lines[1].rstrip() + tail

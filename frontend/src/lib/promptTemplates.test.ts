@@ -53,9 +53,10 @@ describe("promptTemplates · id 与分组", () => {
   it("kind 分组成生图/视频两组", () => {
     expect(templateKindGroup("anima_tags")).toBe("image");
     expect(templateKindGroup("niji_sections")).toBe("image");
+    expect(templateKindGroup("moss_caption")).toBe("image");
     expect(templateKindGroup("video_climax")).toBe("video");
     expect(templateKindGroup("video_transition")).toBe("video");
-    expect(IMAGE_KINDS).toHaveLength(3);
+    expect(IMAGE_KINDS).toHaveLength(4);
     expect(VIDEO_KINDS).toHaveLength(3);
   });
 });

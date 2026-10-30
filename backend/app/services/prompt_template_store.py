@@ -6,8 +6,9 @@
 生图/视频纯函数模块**不 import 本 store**（保持零磁盘 IO、可独立单测）；模版数据
 由编排层（agency_scene_comfy / ai_text 路由）解析后以参数传入。
 
-协议族六值：
-- 生图 `anima_tags` / `natural_language` / `niji_sections`（krea2 已下线，不进内置列表）；
+协议族七值：
+- 生图 `anima_tags` / `natural_language` / `niji_sections` / `moss_caption`
+  （2026-10-30 新增 MOSS 档；krea2 已下线，不进内置列表）；
 - 视频 `video_climax` / `video_firstlast` / `video_transition`（transition 无用户选择器，
   由 firstlast 段桥派生，但仍可编辑模版）。
 
@@ -36,7 +37,9 @@ from app.services.image_prompt_profile_templates import (
 from app.services import video_prompt
 
 # ── 协议族 ────────────────────────────────────────────────────────────────────
-IMAGE_KINDS: tuple[str, ...] = ("anima_tags", "natural_language", "niji_sections")
+IMAGE_KINDS: tuple[str, ...] = (
+    "anima_tags", "natural_language", "niji_sections", "moss_caption",
+)
 VIDEO_KINDS: tuple[str, ...] = ("video_climax", "video_firstlast", "video_transition")
 KINDS: tuple[str, ...] = IMAGE_KINDS + VIDEO_KINDS
 
@@ -44,6 +47,7 @@ _KIND_NAMES: dict[str, str] = {
     "anima_tags": "Anima（质量行 + 内容 tags / 英文描述）",
     "natural_language": "自然语言（GPT Image / Banana）",
     "niji_sections": "Niji（主体 / 风格 / 附加 / 后缀）",
+    "moss_caption": "MOSS（200–300 词英文 caption）",
     "video_climax": "视频·高潮点动作代入",
     "video_firstlast": "视频·首尾帧剧情影片",
     "video_transition": "视频·转场短桥段",
