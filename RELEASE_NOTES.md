@@ -7,8 +7,8 @@
 
 先前发布的 0.30 / 0.30.1 / 0.30.2 已全部撤下，**请以本页附件为准**。
 
-2026-10-30：手机端 APK 重出为 **0.30.17-beta（versionCode 32）**，并入本 Release；上一轮
-`demiurge-spike-0.30.16-beta-debug.apk` 保留供回退。
+2026-10-30：手机端 APK 更新为 **0.30.17-beta（versionCode 32）**，并入本 Release；旧
+`demiurge-spike-0.30.16-beta-debug.apk` 已从本页撤下，请勿再使用先前下载的旧包。
 
 这一版只发 **Windows 安装版**：不再提供便携包，macOS / Linux 版以后再做。运行时改为
 **Full RAG 必装**——安装器只带壳与 MinGit，首次启动自动下载 base + application + rag 三层，
@@ -67,8 +67,7 @@
 
 手机端 APK 随本 Release 提供：`demiurge-spike-0.30.17-beta-debug.apk`
 （versionCode 32，debug 签名，190,025,788 B，sha256 `6d710648df5770eb3696bcce3bf8976ee36c33c3dc2694305e4f07ac09fc1d13`），
-安装时需允许「未知来源」。上一轮 `demiurge-spike-0.30.16-beta-debug.apk`（versionCode 31）仍在附件中，
-可回退安装；`versionCode` 单调递增，安装新包会直接覆盖旧包。
+安装时需允许「未知来源」；`versionCode` 单调递增（32 > 31），安装新包会直接覆盖旧包。
 
 - 手机端是完整工作台（对话、资产、画布、设置），后端内嵌在壳里，可独立运行；
   模型权重与 ComfyUI 仍在电脑或外部机器上，按设置里的地址连接。

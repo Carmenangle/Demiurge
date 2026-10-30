@@ -1889,7 +1889,7 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
    ① **版本口径**：tag `v0.30` 过 `normalize_version` 后成为桌面安装器版本 **0.30.0**
    （`Demiurge-Setup-User-0.30.0.exe` / `-Machine-0.30.0.exe`、`Demiurge_update_windows_v0.30.json`）；
    手机沿用 0.30 家族的自有轨道 **0.30.17-beta / versionCode 32**（`demiurge-spike-0.30.17-beta-debug.apk`，
-   2026-10-30 重出，含联机模型所有权与云端链修复；上一轮 0.30.16-beta/31 仍在 Release，供回退）。
+   2026-10-30 重出，含联机模型所有权与云端链修复；旧 0.30.16-beta/31 已从 Release 撤下）。
    🔴 两轨版本号不强行对齐：手机 `versionCode` 必须单调递增，把 0.30.17 改名 0.30.0 会在名称上制造回退。
    发布正文取自 **tag 树里的 `RELEASE_NOTES.md`**（workflow `body_path`）⇒ 改正文必须进 tag，不能事后改 Release。
    ② **tag 重指（2026-10-28 用户拍板）**：v0.30 首推后 CI 红——`material_sources.py` 的 f-string 在 ruff 的
