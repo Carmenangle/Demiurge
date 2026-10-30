@@ -187,6 +187,10 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - name: 构建固定 Runtime
         shell: pwsh
+        env:
+          # 阿里云镜像在 GitHub runner 上会把个别大 wheel 截断成固定字节数（IncompleteRead），
+          # pip 重试无效；CI 侧改走官方 PyPI，本地构建仍可用 DEMIURGE_PYPI_INDEX_URL 覆盖。
+          DEMIURGE_PYPI_INDEX_URL: https://pypi.org/simple/
         run: >-
           python scripts/runtime_release.py build
           --target "${{ matrix.target }}"
