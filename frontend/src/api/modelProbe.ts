@@ -1,6 +1,6 @@
 import { apiPost } from "./client";
 
-export type ModelProbeKind = "chat" | "image" | "video" | "embedding" | "embedding-local" | "reranker-local" | "vlm" | "vlm-local";
+export type ModelProbeKind = "chat" | "image" | "video" | "embedding" | "embedding-local" | "reranker-local" | "vlm" | "vlm-local" | "chat-local";
 
 export interface ModelProbeResult {
   status: "success" | "warning" | "error";

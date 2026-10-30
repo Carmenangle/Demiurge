@@ -3,7 +3,7 @@ import { fetchProxyStatus, getUserState, type ProxyStatus } from "../api/userSta
 import { pushSettings, USER_STATE_RECONNECT_EVENT, clearUserStateFallback, markUserStateFallback } from "../lib/userStateSync";
 import { remoteActiveOnce } from "../lib/mobileProfile";
 import {
-  effectiveGlobalProxyUrl, globalProxyAddress, normalizeProxyMode, resolveEndpointProxy, resolveModelProxy, type ProxyMode,
+  effectiveGlobalProxyUrl, globalProxyAddress, normalizeProxyMode, resolveEndpointProxy, type ProxyMode,
 } from "../lib/modelProxy";
 import { normalizeSearchProvider, type SearchProvider } from "../lib/searchSource";
 
@@ -19,15 +19,52 @@ const MANUAL_THEMES: readonly ManualTheme[] = [
   "liquid-glass",
 ];
 
+// 模型来源三分（2026-10-30 用户定案）：云端 API / 本机 Ollama / 本地模型文件，三者互不混称。
+// 对话的 local = 本机 GGUF 导入 Ollama（与视觉大模型同款链路，不新增推理运行时）。
+export type ChatModelSource = "api" | "ollama" | "local";
+export type RemoteModelSource = "api" | "ollama";
+
+export const OLLAMA_DEFAULT_BASE_URL = "http://localhost:11434/v1";
+
+/** 地址是否指向 Ollama。只用于旧数据归类与切换来源时的默认值，不参与运行时判定。 */
+export function isOllamaEndpoint(baseUrl: string): boolean {
+  const value = (baseUrl || "").toLowerCase();
+  return value.includes("11434") || value.includes("ollama");
+}
+
 export interface ChatModel {
   id?: string;        // 多模型列表里的唯一 id（单模型旧数据可无）
   displayName?: string;
+  source?: ChatModelSource; // 旧数据无此字段 ⇒ 按 baseUrl/ggufPath 推断
   apiKey: string;
   baseUrl: string;
   modelName: string;
   providerProfile?: "openai_compatible" | "claude_compatible";
   proxyMode?: ProxyMode;
   proxyUrl?: string; // 运行时解析值；不要求持久化
+  /** 本地模型（GGUF）主文件路径；仅 source=local 有意义。 */
+  ggufPath?: string;
+  /** 本地模型视觉投影文件；仅视觉模型需要。 */
+  mmprojPath?: string;
+  /** 导入 Ollama 后使用的模型名（source=local 时用于重导入/展示）。 */
+  ollamaName?: string;
+}
+
+/** 对话模型的有效来源：显式 source > ggufPath ⇒ local > Ollama 地址 ⇒ ollama > api。 */
+export function chatModelSource(
+  model: Pick<ChatModel, "source" | "baseUrl" | "ggufPath">,
+): ChatModelSource {
+  if (model.source === "local") return "local";
+  if (model.source === "ollama") return "ollama";
+  if (model.source === "api") return "api";
+  if ((model.ggufPath || "").trim()) return "local";
+  return isOllamaEndpoint(model.baseUrl) ? "ollama" : "api";
+}
+
+/** 远程模型（视觉/嵌入）的有效来源；source 缺失时按地址推断。 */
+export function remoteModelSource(model: { source?: RemoteModelSource; baseUrl: string }): RemoteModelSource {
+  if (model.source === "api" || model.source === "ollama") return model.source;
+  return isOllamaEndpoint(model.baseUrl) ? "ollama" : "api";
 }
 
 function normalizeProviderProfile(
@@ -46,6 +83,7 @@ export type EmbeddingMode = "remote" | "local";
 
 export interface EmbedModel {
   mode: EmbeddingMode;
+  source?: RemoteModelSource; // remote 模式下区分云端 API / 本机 Ollama（两档只影响界面与默认值）
   apiKey: string;
   baseUrl: string;
   modelName: string;
@@ -62,6 +100,7 @@ export type VlmMode = "remote" | "local";
 
 export interface VlmModel {
   mode: VlmMode;
+  source?: RemoteModelSource; // remote 模式下区分云端 API / 本机 Ollama
   apiKey: string;
   baseUrl: string;
   modelName: string;
@@ -572,8 +611,8 @@ const DEFAULT: Settings = {
   theme: "system",
   liquidGlass: DEFAULT_LIQUID_GLASS,
   chatModels: [],
-  embedModel: { mode: "remote", apiKey: "ollama", baseUrl: "http://localhost:11434/v1", modelName: "qwen3-embedding:latest", proxyMode: "on" },
-  vlmModel: { mode: "remote", apiKey: "ollama", baseUrl: "http://localhost:11434/v1", modelName: "gemma4:latest", proxyMode: "on" },
+  embedModel: { mode: "remote", source: "ollama", apiKey: "ollama", baseUrl: OLLAMA_DEFAULT_BASE_URL, modelName: "qwen3-embedding:latest", proxyMode: "on" },
+  vlmModel: { mode: "remote", source: "ollama", apiKey: "ollama", baseUrl: OLLAMA_DEFAULT_BASE_URL, modelName: "gemma4:latest", proxyMode: "on" },
   imageModels: [],
   videoModels: [],
   imageStyle: "",
@@ -640,6 +679,11 @@ function migrate(s: Record<string, unknown>): Settings {
     mode: savedEmbed.mode === "local" || savedEmbed.mode === "remote"
       ? savedEmbed.mode
       : savedEmbed.modelDir?.trim() ? "local" : "remote",
+    // 旧数据只有 baseUrl：按地址补来源（11434/ollama ⇒ Ollama），新数据保留用户显式选择。
+    source: remoteModelSource({
+      source: savedEmbed.source,
+      baseUrl: String(savedEmbed.baseUrl ?? DEFAULT.embedModel.baseUrl),
+    }),
     proxyMode: normalizeProxyMode(savedEmbed.proxyMode),
   };
   const savedVlm = (s.vlmModel || {}) as Partial<VlmModel>;
@@ -649,6 +693,10 @@ function migrate(s: Record<string, unknown>): Settings {
     mode: savedVlm.mode === "local" || savedVlm.mode === "remote"
       ? savedVlm.mode
       : (savedVlm.ggufPath?.trim() || savedVlm.mmprojPath?.trim()) ? "local" : "remote",
+    source: remoteModelSource({
+      source: savedVlm.source,
+      baseUrl: String(savedVlm.baseUrl ?? DEFAULT.vlmModel.baseUrl),
+    }),
     proxyMode: normalizeProxyMode(savedVlm.proxyMode),
   };
   const contextBudgets = normalizeContextBudgets(
@@ -684,6 +732,7 @@ function migrate(s: Record<string, unknown>): Settings {
   merged.chatModels = (merged.chatModels || []).map((m) => ({
     ...m, id: m.id || crypto.randomUUID(), proxyMode: normalizeProxyMode(m.proxyMode),
     providerProfile: normalizeProviderProfile(m.providerProfile, preserveProviderProfile),
+    source: chatModelSource(m),
   }));
   merged.providerProfileSemanticsVersion = 2;
   merged.imageModels = (merged.imageModels || []).map((m) => ({
@@ -760,7 +809,16 @@ export function activeChatModel(s: Settings): ChatModel {
     s.chatModels[0] ||
     { apiKey: "", baseUrl: "", modelName: "", proxyMode: "on" }
   );
-  return { ...model, proxyUrl: resolveModelProxy(model.proxyMode, globalProxyAddress(s), s.proxyEnabled) };
+  // 本地/Ollama 卡兜底到本机 Ollama：旧卡可能只存了模型名，没存地址。
+  const isLocalServer = model.source === "ollama" || model.source === "local";
+  const baseUrl = isLocalServer ? (model.baseUrl || OLLAMA_DEFAULT_BASE_URL) : model.baseUrl;
+  return {
+    ...model,
+    baseUrl,
+    apiKey: model.apiKey || (isLocalServer ? "ollama" : ""),
+    // 回环端点必须直连（与视觉/嵌入同一口径）：全局代理不应接管 127.0.0.1 的 Ollama。
+    proxyUrl: resolveEndpointProxy(baseUrl, model.proxyMode, globalProxyAddress(s), s.proxyEnabled),
+  };
 }
 
 export function resolvedEmbedModel(s: Settings): EmbedModel {

@@ -49,7 +49,7 @@ const BASE_SECTIONS: GuideSection[] = [
       },
       {
         title: "2. 配置模型（设置 → 模型）",
-        text: "在「⚙ 设置 → 模型」添加模型卡：填 API URL（如 https://api.openai.com/v1）、API Key、API 模型名称（可点「读取模型列表」直接选择）；按接口协议选 Provider Profile（OpenAI 兼容 / Claude 兼容，按协议选、不按模型名选），最后点「测试模型」确认连通。\n\n对话模型必配；生图、视频、嵌入模型按需分别添加（本地嵌入/GGUF 也可在对应卡片切 local 模式）。",
+        text: "在「⚙ 设置 → 模型」添加模型卡。模型来源分三档：云端 API（填 API URL、API Key、API 模型名称，可点「读取模型列表」直接选择，并按接口协议选 Provider Profile）；本机 Ollama（填服务地址后点「读取本机模型」选已安装模型）；本地模型（选本机 GGUF 文件，一键导入 Ollama 后即可对话/识图）。对话、视觉、Embedding 三个区块都用同一套三档来源，配好点「测试模型」确认连通。\n\n对话模型必配；生图、视频、嵌入模型按需分别添加。",
         image: "onboarding/quick-start-2.png",
       },
       {
@@ -160,7 +160,7 @@ const BASE_SECTIONS: GuideSection[] = [
     steps: [
         {
           title: "1. 前置：配好嵌入模型（设置 → 模型）",
-          text: "AI 搭工作流靠节点知识库做语义检索（RAG），检索质量取决于嵌入模型。先到「⚙ 设置 → 模型」最下方的 Embedding 区块配好嵌入模型：云端可选智谱 embedding-3、OpenAI text-embedding-3，本地可选 Ollama 的 qwen3-embedding（都有快捷预设可一键填入），填完点「测试嵌入模型」确认连通。\n\n强烈建议配置：不配嵌入模型的话，节点知识库没有向量化能力，RAG 检索会大打折扣，AI 搭工作流时就找不到（或找错）可用节点。",
+          text: "AI 搭工作流靠节点知识库做语义检索（RAG），检索质量取决于嵌入模型。先到「⚙ 设置 → 模型」最下方的 Embedding 区块配好嵌入模型，来源三档任选：云端 API（智谱 embedding-3、OpenAI text-embedding-3）、本机 Ollama（如 qwen3-embedding）或本地模型文件夹（SentenceTransformer 目录）；云端 / Ollama 都有快捷预设，填完点「测试嵌入模型」确认连通。\n\n强烈建议配置：不配嵌入模型的话，节点知识库没有向量化能力，RAG 检索会大打折扣，AI 搭工作流时就找不到（或找错）可用节点。",
           image: "onboarding/workflow-1.png",
         },
         {

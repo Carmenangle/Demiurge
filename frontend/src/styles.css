@@ -7837,6 +7837,7 @@ html:is([data-theme="bright"], [data-theme="night"], [data-theme="green"], [data
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  flex-wrap: wrap;
 }
 .model-capability-title {
   display: grid;
@@ -7863,6 +7864,24 @@ html:is([data-theme="bright"], [data-theme="night"], [data-theme="green"], [data
 .model-capability-status.idle { color: var(--text-muted); background: var(--surface-2); }
 .model-card-summary { display: flex; justify-content: space-between; gap: 8px; margin: 4px 0 10px; color: var(--text-muted); font-size: 11px; }
 .model-card-summary span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 模型卡标题行：名称 + 来源徽标（2026-10-30 来源三分：云端 API / 本机 Ollama / 本地 GGUF） */
+.model-card-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.model-card-title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-source-chip {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-muted);
+  background: var(--surface-2);
+}
+.model-source-chip.api { color: #2b6cb0; background: color-mix(in srgb, #2b6cb0 12%, transparent); }
+.model-source-chip.ollama { color: #238447; background: color-mix(in srgb, #238447 12%, transparent); }
+.model-source-chip.local { color: #8a5a00; background: color-mix(in srgb, #8a5a00 14%, transparent); }
+/* 三个「+ 来源」按钮：窄屏自动换行，避免撑破能力卡头 */
+.model-add-group { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.model-add-group .btn { flex: 0 0 auto; white-space: nowrap; }
 .model-advanced { border-top: 1px solid var(--border); }
 .model-advanced > summary { padding: 9px 0; color: var(--text-muted); font-size: 12px; cursor: pointer; }
 .model-advanced-body { padding-top: 4px; }

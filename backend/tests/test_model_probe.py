@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from app.services import model_probe
 
 
@@ -79,3 +81,62 @@ def test_local_reranker_probe先报告缺失权重(tmp_path):
 
     assert result["status"] == "error"
     assert "缺少文件" in result["message"]
+
+
+def _fake_gguf(path):
+    return SimpleNamespace(
+        kind="model", architecture="qwen3", parameters_b=8,
+        quant="Q4_K_M", is_vision=False, has_vision_encoder=False,
+    )
+
+
+def _stub_gguf(monkeypatch, meta=None):
+    from app.services import gguf_importer
+
+    monkeypatch.setattr(gguf_importer, "parse_gguf", lambda path: meta or _fake_gguf(path))
+    monkeypatch.setattr(gguf_importer, "fit_hardware", lambda _meta: {
+        "level": "ok", "total_needed_mib": 6144, "device": {"available_mib": 8192},
+    })
+
+
+def test_对话本地模型接受无视觉能力的GGUF(monkeypatch, tmp_path):
+    model = tmp_path / "Qwen3-8B-Q4_K_M.gguf"
+    model.write_bytes(b"GGUF")
+    _stub_gguf(monkeypatch)
+
+    result = model_probe.probe_local_chat(str(model))
+
+    assert result["status"] == "success"
+    assert "可用于对话推理" in result["message"]
+
+
+def test_视觉本地模型仍要求视觉能力(monkeypatch, tmp_path):
+    model = tmp_path / "Qwen3-8B-Q4_K_M.gguf"
+    model.write_bytes(b"GGUF")
+    _stub_gguf(monkeypatch)
+
+    result = model_probe.probe_local_vlm(str(model))
+
+    assert result["status"] == "warning"
+    assert "未检测到视觉能力" in result["message"]
+
+
+def test_本地对话模型文件缺失时报对话模型(tmp_path):
+    result = model_probe.probe_local_chat(str(tmp_path / "missing.gguf"))
+
+    assert result["status"] == "error"
+    assert "对话模型" in result["message"]
+
+
+def test_路由把chat_local分派到对话模型检测(monkeypatch):
+    from app.routers import ai_model_probe
+
+    monkeypatch.setattr(
+        model_probe, "probe_local_chat",
+        lambda path: {"status": "success", "message": path, "billable": False},
+    )
+    result = ai_model_probe.probe_model(
+        ai_model_probe.ModelProbeRequest(kind="chat-local", gguf_path="chat.gguf"),
+    )
+
+    assert result["message"] == "chat.gguf"

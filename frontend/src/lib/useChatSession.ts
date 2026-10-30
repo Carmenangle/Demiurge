@@ -215,7 +215,7 @@ export function useChatSession(deps: ChatSessionDeps) {
     && (mediaPreset?.batchImageCount as number) >= 1
     ? Math.floor(mediaPreset?.batchImageCount as number) : 0;
   const modelProxies = {
-    chatProxyUrl: resolveModelProxy(chat.proxyMode, globalProxyAddress(settings), settings.proxyEnabled),
+    chatProxyUrl: resolveEndpointProxy(chat.baseUrl, chat.proxyMode, globalProxyAddress(settings), settings.proxyEnabled),
     genProxyUrl: resolveModelProxy(genModel.proxyMode, globalProxyAddress(settings), settings.proxyEnabled),
     videoProxyUrl: resolveModelProxy(videoModel?.proxyMode, globalProxyAddress(settings), settings.proxyEnabled),
     embedProxyUrl: resolveEndpointProxy(
@@ -597,7 +597,8 @@ export function useChatSession(deps: ChatSessionDeps) {
                   base_url: vlm.baseUrl,
                   api_key: vlm.apiKey || "",
                   model: vlm.modelName,
-                  proxy: resolveModelProxy(vlm.proxyMode, globalProxyAddress(settings), settings.proxyEnabled),
+                  // 视觉大模型可选本机 Ollama：回环端点必须直连（与对话/嵌入同一口径）。
+                  proxy: resolveEndpointProxy(vlm.baseUrl, vlm.proxyMode, globalProxyAddress(settings), settings.proxyEnabled),
                 } : null)
           );
           void runVisualCiDiagnostic({

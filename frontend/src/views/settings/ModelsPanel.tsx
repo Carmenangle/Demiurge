@@ -1,32 +1,59 @@
 import { useState, type ReactNode } from "react";
-import { AlertTriangle, CheckCircle2, Database, Eye, Image, ListChecks, MessageSquare, Plus, Search, Trash2, Video, X, XCircle } from "lucide-react";
+import {
+  Database, Eye, Image, ListChecks, MessageSquare, Plus, Search, Trash2, Video, X,
+} from "lucide-react";
 import type { PanelProps } from "./GeneralPanel";
 import {
-  modelDisplayName,
-  type ChatModel, type ImageModel, type VideoModel, type EmbedModel, type VlmModel,
+  chatModelSource, modelDisplayName, remoteModelSource, OLLAMA_DEFAULT_BASE_URL,
+  type ChatModel, type ChatModelSource, type ImageModel, type VideoModel, type EmbedModel, type VlmModel,
 } from "../../stores/settings";
 import { discoverProviderModels } from "../../api/aiProviders";
 import { filterModelNames } from "../../lib/modelSearch";
 import { probeModel, type ModelProbeKind, type ModelProbeResult } from "../../api/modelProbe";
-import { globalProxyAddress, resolveEndpointProxy, resolveModelProxy } from "../../lib/modelProxy";
+import { globalProxyAddress, resolveEndpointProxy } from "../../lib/modelProxy";
+import { ProbeResultView } from "../../components/ModelProbeResultView";
+import { OllamaModelPicker } from "../../components/OllamaModelPicker";
+import { LocalGgufImport } from "../../components/LocalGgufImport";
+import {
+  applyChatLocalImport, applyVlmLocalImport, newChatModel, switchEmbedSource, switchVlmSource,
+} from "../../lib/modelSources";
 
-// 嵌入模型快捷预设
-const EMBED_PRESETS = [
-  { name: "Ollama 本地", baseUrl: "http://localhost:11434/v1", modelName: "qwen3-embedding:latest", apiKey: "ollama" },
-  { name: "智谱 云端", baseUrl: "https://open.bigmodel.cn/api/paas/v4", modelName: "embedding-3", apiKey: "" },
+// 三档来源（2026-10-30）：云端 API / 本机 Ollama / 本地模型文件。三者的字段与默认值互不混用。
+type RemoteSource = "api" | "ollama";
+type SourceTab = RemoteSource | "local";
+
+const EMBED_API_PRESETS = [
+  { name: "智谱 云端", baseUrl: "https://open.bigmodel.cn/api/paas/v4", modelName: "embedding-3" },
+  { name: "OpenAI 云端", baseUrl: "https://api.openai.com/v1", modelName: "text-embedding-3-small" },
 ];
-
-// 视觉大模型快捷预设（Visual CI 验收用）
-const VLM_PRESETS = [
-  { name: "Ollama 本地", baseUrl: "http://localhost:11434/v1", modelName: "qwen3vl:8b", apiKey: "ollama" },
-  { name: "Ollama gemma4", baseUrl: "http://localhost:11434/v1", modelName: "gemma4:latest", apiKey: "ollama" },
-  { name: "智谱 GLM-4V", baseUrl: "https://open.bigmodel.cn/api/paas/v4", modelName: "glm-4v-flash", apiKey: "" },
+const VLM_API_PRESETS = [
+  { name: "智谱 GLM-4V", baseUrl: "https://open.bigmodel.cn/api/paas/v4", modelName: "glm-4v-flash" },
+  { name: "OpenAI GPT-4o", baseUrl: "https://api.openai.com/v1", modelName: "gpt-4o" },
 ];
+const EMBED_OLLAMA_MODELS = ["qwen3-embedding:latest"];
+const VLM_OLLAMA_MODELS = ["qwen3vl:8b", "gemma4:latest"];
 
-// 一张「模型卡」：名称/Key/URL + 「读取模型列表」按钮（调 discover-models 拉列表供选）
-function ModelCard({ model, kind, onChange, onRemove, customSizeSupported, onCustomSizeSupport, globalProxyUrl, globalProxyEnabled }: {
-  model: { id?: string; displayName?: string; apiKey: string; baseUrl: string; modelName: string; proxyMode?: "on" | "off" | "inherit"; providerProfile?: "openai_compatible" | "claude_compatible" };
-  kind: Exclude<ModelProbeKind, "embedding-local" | "reranker-local">;
+type CardModel = {
+  id?: string;
+  displayName?: string;
+  source?: ChatModelSource;
+  apiKey: string;
+  baseUrl: string;
+  modelName: string;
+  providerProfile?: ChatModel["providerProfile"];
+  proxyMode?: ChatModel["proxyMode"];
+  proxyUrl?: string;
+  ggufPath?: string;
+  mmprojPath?: string;
+  ollamaName?: string;
+  supportsCustomSize?: boolean;
+};
+
+// 一张「模型卡」：来源不同，展示的必填项不同；API 卡保持原有全部字段（折叠在高级配置里）。
+function ModelCard({ model, kind, source, onChange, onRemove, customSizeSupported, onCustomSizeSupport, globalProxyUrl, globalProxyEnabled }: {
+  model: CardModel;
+  kind: Exclude<ModelProbeKind, "embedding-local" | "reranker-local" | "chat-local" | "vlm-local">;
+  source?: ChatModelSource;
   onChange: (patch: Partial<ChatModel>) => void;
   onRemove: () => void;
   customSizeSupported?: boolean;
@@ -39,6 +66,11 @@ function ModelCard({ model, kind, onChange, onRemove, customSizeSupported, onCus
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
   const [probe, setProbe] = useState<{ testing?: boolean; result?: ModelProbeResult }>({});
+
+  const isChat = kind === "chat";
+  const chatSource = isChat ? (source || chatModelSource(model)) : undefined;
+  const isOllama = chatSource === "ollama";
+  const isLocal = chatSource === "local";
 
   const discover = async () => {
     if (!model.baseUrl) { setErr("请先填 API URL"); return; }
@@ -66,7 +98,7 @@ function ModelCard({ model, kind, onChange, onRemove, customSizeSupported, onCus
         baseUrl: model.baseUrl,
         apiKey: model.apiKey,
         modelName: model.modelName,
-        proxyUrl: resolveModelProxy(model.proxyMode, globalProxyUrl, globalProxyEnabled),
+        proxyUrl: resolveEndpointProxy(model.baseUrl, model.proxyMode, globalProxyUrl, globalProxyEnabled),
       });
       setProbe({ result });
     } catch (error) {
@@ -77,124 +109,288 @@ function ModelCard({ model, kind, onChange, onRemove, customSizeSupported, onCus
   return (
     <div className="image-model-card">
       <div className="row-head">
-        <strong>{modelDisplayName(model)}</strong>
+        <div className="model-card-title">
+          <strong>{modelDisplayName(model)}</strong>
+          {isChat && (
+            <span className={`model-source-chip ${chatSource}`}>
+              {chatSource === "api" ? "云端 API" : chatSource === "ollama" ? "本机 Ollama" : "本地 GGUF"}
+            </span>
+          )}
+        </div>
         <button className="icon-btn" style={{ background: "#d23b3b" }} onClick={onRemove}>
           <Trash2 size={14} />
         </button>
       </div>
       <div className="model-card-summary">
-        <span>{model.modelName || "未填写模型名称"}</span>
-        <span>{model.baseUrl ? "接口已填写" : "接口未填写"}</span>
+        <span>{model.modelName || (isLocal ? "未导入" : "未填写模型名称")}</span>
+        <span>{isLocal
+          ? (model.ggufPath?.trim() ? "本地文件已选" : "未选择文件")
+          : model.baseUrl ? "接口已填写" : "接口未填写"}</span>
       </div>
-      <details className="model-advanced">
-        <summary>高级配置</summary>
-        <div className="model-advanced-body">
-      <div className="field">
-        <label>显示名称</label>
-        <input
-          value={model.displayName || ""}
-          onChange={(e) => onChange({ displayName: e.target.value })}
-          placeholder={model.modelName ? `例如：${model.modelName} · 4K令牌` : "例如：GPT Image 2 · 4K令牌"}
-        />
-        <p className="field-hint">仅用于界面区分，不会作为模型参数发送。</p>
-      </div>
-      <div className="field">
-        <label>API URL</label>
-        <input value={model.baseUrl} onChange={(e) => onChange({ baseUrl: e.target.value })} placeholder="https://api.openai.com/v1" />
-      </div>
-      <div className="field">
-        <label>API Key</label>
-        <input type="password" value={model.apiKey} onChange={(e) => onChange({ apiKey: e.target.value })} />
-      </div>
-      <div className="field">
-        <label>连接代理</label>
-        <select value={model.proxyMode || "on"} onChange={(e) => onChange({ proxyMode: e.target.value as "on" | "off" | "inherit" })}>
-          <option value="on">使用代理</option>
-          <option value="off">直连</option>
-          <option value="inherit">继承全局</option>
-        </select>
-        <p className="field-hint">使用代理：始终使用全局代理地址；继承全局：跟随全局代理开关。</p>
-      </div>
-      <div className="field">
-        <label>API 模型名称</label>
-        <div style={{ display: "flex", gap: 6 }}>
-          <input value={model.modelName} onChange={(e) => onChange({ modelName: e.target.value })} placeholder="gpt-4o" style={{ flex: 1 }} />
-          <button className="btn" onClick={discover} disabled={loading} title="从该供应商读取可用模型列表">
-            <ListChecks size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />
-            {loading ? "读取中…" : "读取列表"}
-          </button>
-        </div>
-        {err && <p className="field-hint" style={{ color: "#d23b3b" }}>{err}</p>}
-        {models.length > 0 && (
-          <div className="model-list-picker">
-            <div className="model-list-tools">
-              <div className="model-list-search">
-                <Search size={14} aria-hidden="true" />
-                <input
-                  value={modelQuery}
-                  onChange={(e) => setModelQuery(e.target.value)}
-                  placeholder="搜索模型名称…"
-                  aria-label="搜索模型名称"
-                />
-                {modelQuery && (
-                  <button type="button" onClick={() => setModelQuery("")} title="清空搜索" aria-label="清空模型搜索">
-                    <X size={14} />
-                  </button>
-                )}
-              </div>
-              <span>{filteredModels.length}/{models.length}</span>
-            </div>
-            <select
-              value=""
-              onChange={(e) => { if (e.target.value) onChange({ modelName: e.target.value }); }}
-            >
-              <option value="">
-                {filteredModels.length > 0 ? "— 选择模型 —" : "— 没有匹配的模型 —"}
-              </option>
-              {filteredModels.map((m) => <option key={m} value={m}>{m}</option>)}
-            </select>
-          </div>
-        )}
-      </div>
-      {kind === "chat" && <div className="field">
-        <label>Provider Profile</label>
-        <select value={model.providerProfile || "openai_compatible"}
-          onChange={(e) => onChange({ providerProfile: e.target.value as ChatModel["providerProfile"] })}>
-          <option value="openai_compatible">OpenAI 兼容</option>
-          <option value="claude_compatible">Claude 兼容</option>
-        </select>
-        <p className="field-hint">
-          按接口协议选择，不按模型名称选择；OpenAI 兼容代理即使运行 Claude 模型也选 OpenAI 兼容。
-        </p>
-      </div>}
-      {onCustomSizeSupport && (
-        <label className="model-capability-toggle">
-          <input
-            type="checkbox"
-            checked={customSizeSupported === true}
-            onChange={(event) => onCustomSizeSupport(event.target.checked)}
-          />
-          <span>上游支持任意图片尺寸</span>
-        </label>
-      )}
-        </div>
-      </details>
-      <div className="model-test-row">
-        <button className="btn" type="button" onClick={test} disabled={probe.testing}>
-          {probe.testing ? "测试中…" : "测试模型"}
-        </button>
-        {probe.result && <ProbeResultView result={probe.result} />}
-      </div>
-    </div>
-  );
-}
 
-function ProbeResultView({ result }: { result: ModelProbeResult }) {
-  const Icon = result.status === "success" ? CheckCircle2 : result.status === "warning" ? AlertTriangle : XCircle;
-  return (
-    <span className={`model-probe-result ${result.status}`} title={result.source || result.message}>
-      <Icon size={14} /> {result.message}
-    </span>
+      {isLocal && (
+        <>
+          <LocalGgufImport
+            ggufPath={model.ggufPath}
+            mmprojPath={model.mmprojPath}
+            ollamaName={model.ollamaName}
+            useVision={false}
+            onPatch={(patch) => onChange(patch)}
+            onImported={(name) => onChange(applyChatLocalImport(model, name))}
+          />
+          <p className="field-hint">
+            当前使用：<strong>本机 Ollama</strong>（{model.baseUrl || OLLAMA_DEFAULT_BASE_URL}）
+            {model.modelName ? `，模型 ${model.modelName}` : "；导入成功后自动填入模型名"}。
+          </p>
+        </>
+      )}
+
+      {isOllama && (
+        <OllamaModelPicker
+          baseUrl={model.baseUrl}
+          modelName={model.modelName}
+          apiKey={model.apiKey || "ollama"}
+          onPatch={(patch) => onChange({ ...patch, source: "ollama", apiKey: "ollama", proxyMode: "off" })}
+        />
+      )}
+
+      {isChat && !isOllama && !isLocal && (
+        <details className="model-advanced">
+          <summary>高级配置</summary>
+          <div className="model-advanced-body">
+            <div className="field">
+              <label>显示名称</label>
+              <input
+                value={model.displayName || ""}
+                onChange={(e) => onChange({ displayName: e.target.value })}
+                placeholder={model.modelName ? `例如：${model.modelName} · 4K令牌` : "例如：GPT Image 2 · 4K令牌"}
+              />
+              <p className="field-hint">仅用于界面区分，不会作为模型参数发送。</p>
+            </div>
+            <div className="field">
+              <label>API URL</label>
+              <input value={model.baseUrl} onChange={(e) => onChange({ baseUrl: e.target.value })} placeholder="https://api.openai.com/v1" />
+            </div>
+            <div className="field">
+              <label>API Key</label>
+              <input type="password" value={model.apiKey} onChange={(e) => onChange({ apiKey: e.target.value })} />
+            </div>
+            <div className="field">
+              <label>连接代理</label>
+              <select value={model.proxyMode || "on"} onChange={(e) => onChange({ proxyMode: e.target.value as "on" | "off" | "inherit" })}>
+                <option value="on">使用代理</option>
+                <option value="off">直连</option>
+                <option value="inherit">继承全局</option>
+              </select>
+              <p className="field-hint">使用代理：始终使用全局代理地址；继承全局：跟随全局代理开关。</p>
+            </div>
+            <div className="field">
+              <label>API 模型名称</label>
+              <div style={{ display: "flex", gap: 6 }}>
+                <input value={model.modelName} onChange={(e) => onChange({ modelName: e.target.value })} placeholder="gpt-4o" style={{ flex: 1 }} />
+                <button className="btn" onClick={discover} disabled={loading} title="从该供应商读取可用模型列表">
+                  <ListChecks size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />
+                  {loading ? "读取中…" : "读取列表"}
+                </button>
+              </div>
+              {err && <p className="field-hint" style={{ color: "#d23b3b" }}>{err}</p>}
+              {models.length > 0 && (
+                <div className="model-list-picker">
+                  <div className="model-list-tools">
+                    <div className="model-list-search">
+                      <Search size={14} aria-hidden="true" />
+                      <input
+                        value={modelQuery}
+                        onChange={(e) => setModelQuery(e.target.value)}
+                        placeholder="搜索模型名称…"
+                        aria-label="搜索模型名称"
+                      />
+                      {modelQuery && (
+                        <button type="button" onClick={() => setModelQuery("")} title="清空搜索" aria-label="清空模型搜索">
+                          <X size={14} />
+                        </button>
+                      )}
+                    </div>
+                    <span>{filteredModels.length}/{models.length}</span>
+                  </div>
+                  <select
+                    value=""
+                    onChange={(e) => { if (e.target.value) onChange({ modelName: e.target.value }); }}
+                  >
+                    <option value="">
+                      {filteredModels.length > 0 ? "— 选择模型 —" : "— 没有匹配的模型 —"}
+                    </option>
+                    {filteredModels.map((m) => <option key={m} value={m}>{m}</option>)}
+                  </select>
+                </div>
+              )}
+            </div>
+            <div className="field">
+              <label>Provider Profile</label>
+              <select value={model.providerProfile || "openai_compatible"}
+                onChange={(e) => onChange({ providerProfile: e.target.value as ChatModel["providerProfile"] })}>
+                <option value="openai_compatible">OpenAI 兼容</option>
+                <option value="claude_compatible">Claude 兼容</option>
+              </select>
+              <p className="field-hint">
+                按接口协议选择，不按模型名称选择；OpenAI 兼容代理即使运行 Claude 模型也选 OpenAI 兼容。
+              </p>
+            </div>
+          </div>
+        </details>
+      )}
+
+      {isOllama && (
+        <details className="model-advanced">
+          <summary>更多设置</summary>
+          <div className="model-advanced-body">
+            <div className="field">
+              <label>显示名称</label>
+              <input
+                value={model.displayName || ""}
+                onChange={(e) => onChange({ displayName: e.target.value })}
+                placeholder={model.modelName || "仅用于界面区分"}
+              />
+            </div>
+            <div className="field">
+              <label>连接代理</label>
+              <select value={model.proxyMode || "off"} onChange={(e) => onChange({ proxyMode: e.target.value as "on" | "off" | "inherit" })}>
+                <option value="off">直连</option>
+                <option value="on">使用代理</option>
+                <option value="inherit">继承全局</option>
+              </select>
+              <p className="field-hint">Ollama 在本机时请保持直连；回环地址无论如何都不会走全局代理。</p>
+            </div>
+          </div>
+        </details>
+      )}
+
+      {isLocal && (
+        <details className="model-advanced">
+          <summary>更多设置</summary>
+          <div className="model-advanced-body">
+            <div className="field">
+              <label>显示名称</label>
+              <input
+                value={model.displayName || ""}
+                onChange={(e) => onChange({ displayName: e.target.value })}
+                placeholder={model.modelName || "仅用于界面区分"}
+              />
+            </div>
+            <div className="field">
+              <label>Ollama 服务地址</label>
+              <input
+                value={model.baseUrl}
+                onChange={(e) => onChange({ baseUrl: e.target.value })}
+                placeholder={OLLAMA_DEFAULT_BASE_URL}
+              />
+            </div>
+          </div>
+        </details>
+      )}
+
+      {isLocal ? (
+        <div className="model-test-row">
+          <button className="btn" type="button" onClick={test} disabled={probe.testing || !model.modelName}>
+            {probe.testing ? "测试中…" : "测试模型"}
+          </button>
+          {!model.modelName && <span className="field-hint">导入到 Ollama 后即可测试。</span>}
+          {probe.result && <ProbeResultView result={probe.result} />}
+        </div>
+      ) : (
+        <div className="model-test-row">
+          <button className="btn" type="button" onClick={test} disabled={probe.testing}>
+            {probe.testing ? "测试中…" : "测试模型"}
+          </button>
+          {probe.result && <ProbeResultView result={probe.result} />}
+        </div>
+      )}
+
+      {!isChat && (
+        <details className="model-advanced">
+          <summary>高级配置</summary>
+          <div className="model-advanced-body">
+            <div className="field">
+              <label>显示名称</label>
+              <input
+                value={model.displayName || ""}
+                onChange={(e) => onChange({ displayName: e.target.value })}
+                placeholder={model.modelName ? `例如：${model.modelName} · 4K令牌` : "例如：GPT Image 2 · 4K令牌"}
+              />
+              <p className="field-hint">仅用于界面区分，不会作为模型参数发送。</p>
+            </div>
+            <div className="field">
+              <label>API URL</label>
+              <input value={model.baseUrl} onChange={(e) => onChange({ baseUrl: e.target.value })} placeholder="https://api.openai.com/v1" />
+            </div>
+            <div className="field">
+              <label>API Key</label>
+              <input type="password" value={model.apiKey} onChange={(e) => onChange({ apiKey: e.target.value })} />
+            </div>
+            <div className="field">
+              <label>连接代理</label>
+              <select value={model.proxyMode || "on"} onChange={(e) => onChange({ proxyMode: e.target.value as "on" | "off" | "inherit" })}>
+                <option value="on">使用代理</option>
+                <option value="off">直连</option>
+                <option value="inherit">继承全局</option>
+              </select>
+              <p className="field-hint">使用代理：始终使用全局代理地址；继承全局：跟随全局代理开关。</p>
+            </div>
+            <div className="field">
+              <label>API 模型名称</label>
+              <div style={{ display: "flex", gap: 6 }}>
+                <input value={model.modelName} onChange={(e) => onChange({ modelName: e.target.value })} placeholder="gpt-4o" style={{ flex: 1 }} />
+                <button className="btn" onClick={discover} disabled={loading} title="从该供应商读取可用模型列表">
+                  <ListChecks size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />
+                  {loading ? "读取中…" : "读取列表"}
+                </button>
+              </div>
+              {err && <p className="field-hint" style={{ color: "#d23b3b" }}>{err}</p>}
+              {models.length > 0 && (
+                <div className="model-list-picker">
+                  <div className="model-list-tools">
+                    <div className="model-list-search">
+                      <Search size={14} aria-hidden="true" />
+                      <input
+                        value={modelQuery}
+                        onChange={(e) => setModelQuery(e.target.value)}
+                        placeholder="搜索模型名称…"
+                        aria-label="搜索模型名称"
+                      />
+                      {modelQuery && (
+                        <button type="button" onClick={() => setModelQuery("")} title="清空搜索" aria-label="清空模型搜索">
+                          <X size={14} />
+                        </button>
+                      )}
+                    </div>
+                    <span>{filteredModels.length}/{models.length}</span>
+                  </div>
+                  <select
+                    value=""
+                    onChange={(e) => { if (e.target.value) onChange({ modelName: e.target.value }); }}
+                  >
+                    <option value="">
+                      {filteredModels.length > 0 ? "— 选择模型 —" : "— 没有匹配的模型 —"}
+                    </option>
+                    {filteredModels.map((m) => <option key={m} value={m}>{m}</option>)}
+                  </select>
+                </div>
+              )}
+            </div>
+            {onCustomSizeSupport && (
+              <label className="model-capability-toggle">
+                <input
+                  type="checkbox"
+                  checked={customSizeSupported === true}
+                  onChange={(event) => onCustomSizeSupport(event.target.checked)}
+                />
+                <span>上游支持任意图片尺寸</span>
+              </label>
+            )}
+          </div>
+        </details>
+      )}
+    </div>
   );
 }
 
@@ -210,14 +406,37 @@ function CapabilityTitle({ icon, title, count, configured }: {
   </div>;
 }
 
+function SourceTabs({ label, value, onChange }: {
+  label: string; value: SourceTab; onChange: (next: SourceTab) => void;
+}) {
+  const items: { id: SourceTab; text: string }[] = [
+    { id: "api", text: "API" },
+    { id: "ollama", text: "Ollama" },
+    { id: "local", text: "本地模型" },
+  ];
+  return (
+    <div className="embedding-mode-tabs" role="group" aria-label={label}>
+      {items.map((item) => (
+        <button
+          key={item.id}
+          type="button"
+          className={`btn${value === item.id ? " primary is-selected" : ""}`}
+          aria-pressed={value === item.id}
+          onClick={() => onChange(item.id)}
+        >{item.text}</button>
+      ))}
+    </div>
+  );
+}
+
 export function ModelsPanel({ draft, setDraft }: PanelProps) {
   const [embedProbe, setEmbedProbe] = useState<{ testing?: boolean; result?: ModelProbeResult }>({});
   const [rerankerProbe, setRerankerProbe] = useState<{ testing?: boolean; result?: ModelProbeResult }>({});
   const setEmbed = (patch: Partial<EmbedModel>) =>
     setDraft((d) => ({ ...d, embedModel: { ...d.embedModel, ...patch } }));
 
-  const addChatModel = () =>
-    setDraft((d) => ({ ...d, chatModels: [...d.chatModels, { id: crypto.randomUUID(), apiKey: "", baseUrl: "", modelName: "新模型", proxyMode: "on", providerProfile: "openai_compatible" }] }));
+  const addChatModel = (source: ChatModelSource) =>
+    setDraft((d) => ({ ...d, chatModels: [...d.chatModels, newChatModel(source)] }));
   const updateChatModel = (id: string, patch: Partial<ChatModel>) =>
     setDraft((d) => ({ ...d, chatModels: d.chatModels.map((m) => (m.id === id ? { ...m, ...patch } : m)) }));
   const removeChatModel = (id: string) =>
@@ -264,10 +483,17 @@ export function ModelsPanel({ draft, setDraft }: PanelProps) {
     }
   };
 
+  const embedSource = remoteModelSource(draft.embedModel);
+  const embedTab: SourceTab = draft.embedModel.mode === "local" ? "local" : embedSource;
+  const setEmbedTab = (tab: SourceTab) => {
+    if (tab === "local") { setEmbed({ mode: "local" }); return; }
+    setEmbed(switchEmbedSource(draft.embedModel, tab));
+  };
+
   const embedProvider = (() => {
     if (draft.embedModel.mode === "local") return "本地模型文件";
+    if (embedSource === "ollama") return "本机 Ollama";
     const u = (draft.embedModel.baseUrl || "").toLowerCase();
-    if (u.includes("11434") || u.includes("ollama")) return "本地 Ollama";
     if (u.includes("bigmodel.cn")) return "云端智谱";
     if (u.includes("openai.com")) return "云端 OpenAI";
     if (!u.trim()) return "未配置";
@@ -300,77 +526,22 @@ export function ModelsPanel({ draft, setDraft }: PanelProps) {
     }
   };
 
+  const vlmSource = remoteModelSource(draft.vlmModel);
+  const vlmTab: SourceTab = draft.vlmModel.mode === "local" ? "local" : vlmSource;
+  const setVlmTab = (tab: SourceTab) => {
+    if (tab === "local") { setVlm({ mode: "local" }); return; }
+    setVlm(switchVlmSource(draft.vlmModel, tab));
+  };
+
   const vlmProvider = (() => {
     if (draft.vlmModel.mode === "local") return "本地模型（GGUF，导入 Ollama）";
+    if (vlmSource === "ollama") return "本机 Ollama";
     const u = (draft.vlmModel.baseUrl || "").toLowerCase();
-    if (u.includes("11434") || u.includes("ollama")) return "本地 Ollama";
     if (u.includes("bigmodel.cn")) return "云端智谱";
     if (u.includes("openai.com")) return "云端 OpenAI";
     if (!u.trim()) return "未配置";
     return "自定义 / 中转";
   })();
-
-  const [vlmImporting, setVlmImporting] = useState(false);
-  const [vlmImportResult, setVlmImportResult] = useState<{ ok: boolean; message: string } | null>(null);
-  const [vlmScanDir, setVlmScanDir] = useState("");
-  const [vlmScanning, setVlmScanning] = useState(false);
-  const [vlmScanResult, setVlmScanResult] = useState<{ models: { path: string; filename: string; size_bytes: number; is_vision: boolean }[] } | null>(null);
-  const [vlmScanError, setVlmScanError] = useState("");
-
-  // 扫描目录中的 GGUF 主模型（视觉能力优先展示）
-  const scanVlmDir = async () => {
-    const dir = vlmScanDir.trim();
-    if (!dir) { setVlmScanError("请先填写 GGUF 目录"); return; }
-    setVlmScanning(true);
-    setVlmScanError("");
-    setVlmScanResult(null);
-    try {
-      const { ggufScan } = await import("../../api/ggufImporter");
-      const r = await ggufScan(dir, 30000);
-      if (r.error) { setVlmScanError(r.error); return; }
-      setVlmScanResult({
-        models: r.models.map((m) => ({
-          path: m.path, filename: m.filename,
-          size_bytes: m.size_bytes, is_vision: m.is_vision,
-        })),
-      });
-    } catch (error) {
-      setVlmScanError(`扫描失败：${(error as Error).message}`);
-    } finally {
-      setVlmScanning(false);
-    }
-  };
-
-  // 本地 GGUF → 导入 Ollama → 自动切回 remote 模式并填入模型名
-  const importLocalVlm = async () => {
-    const path = (draft.vlmModel.ggufPath || "").trim();
-    if (!path) { setVlmImportResult({ ok: false, message: "请先填写 GGUF 文件路径" }); return; }
-    setVlmImporting(true);
-    setVlmImportResult(null);
-    try {
-      const { ggufImport } = await import("../../api/ggufImporter");
-      const r = await ggufImport({
-        ggufPath: path,
-        modelName: (draft.vlmModel.ollamaName || "").trim(),
-        mmprojPath: (draft.vlmModel.mmprojPath || "").trim(),
-        registerProvider: true,
-      }, 900_000);
-      if (r.ok) {
-        setVlmImportResult({ ok: true, message: r.message });
-        // 导入成功：切回 remote 模式并填入 Ollama 模型名
-        const name = (draft.vlmModel.ollamaName || "").trim() || r.model_name || "";
-        if (name) {
-          setVlm({ mode: "remote", baseUrl: "http://localhost:11434/v1", apiKey: "ollama", modelName: name });
-        }
-      } else {
-        setVlmImportResult({ ok: false, message: r.message });
-      }
-    } catch (error) {
-      setVlmImportResult({ ok: false, message: `导入异常：${(error as Error).message}` });
-    } finally {
-      setVlmImporting(false);
-    }
-  };
 
   return (
     <div className="model-capability-grid">
@@ -382,13 +553,29 @@ export function ModelsPanel({ draft, setDraft }: PanelProps) {
         <div className="model-capability-head">
           <CapabilityTitle icon={<MessageSquare size={18} />} title="对话" count={draft.chatModels.length}
             configured={draft.chatModels.some((model) => Boolean(model.baseUrl && model.modelName))} />
-          <button className="btn" onClick={addChatModel}><Plus size={15} style={{ verticalAlign: "-2px", marginRight: 4 }} />添加</button>
+          <div className="model-add-group">
+            <button className="btn" onClick={() => addChatModel("api")}><Plus size={15} style={{ verticalAlign: "-2px", marginRight: 4 }} />API</button>
+            <button className="btn" onClick={() => addChatModel("ollama")}><Plus size={15} style={{ verticalAlign: "-2px", marginRight: 4 }} />Ollama</button>
+            <button className="btn" onClick={() => addChatModel("local")}><Plus size={15} style={{ verticalAlign: "-2px", marginRight: 4 }} />本地模型</button>
+          </div>
         </div>
-        <p className="field-hint" style={{ marginTop: 8 }}>智能体的大脑（也用于反推图片）。可配多个供应商，在对话框左下角图标处切换。</p>
+        <p className="field-hint" style={{ marginTop: 8 }}>
+          智能体的大脑（也用于反推图片）。来源三选一：<strong>云端 API</strong>、<strong>本机 Ollama</strong>、
+          <strong>本地 GGUF</strong>（导入本机 Ollama）。可配多个，在对话框左下角图标处切换。
+        </p>
         <div style={{ marginTop: 12 }}>
-          {draft.chatModels.length === 0 && <p className="field-hint">还没有对话模型，点击「添加」。</p>}
+          {draft.chatModels.length === 0 && <p className="field-hint">还没有对话模型：按来源点右上角「+ API / + Ollama / + 本地模型」。</p>}
           {draft.chatModels.map((m) => (
-            <ModelCard key={m.id} model={m} kind="chat" onChange={(p) => updateChatModel(m.id!, p)} onRemove={() => removeChatModel(m.id!)} globalProxyUrl={globalProxyAddress(draft)} globalProxyEnabled={draft.proxyEnabled} />
+            <ModelCard
+              key={m.id}
+              model={m}
+              kind="chat"
+              source={chatModelSource(m)}
+              onChange={(p) => updateChatModel(m.id!, p)}
+              onRemove={() => removeChatModel(m.id!)}
+              globalProxyUrl={globalProxyAddress(draft)}
+              globalProxyEnabled={draft.proxyEnabled}
+            />
           ))}
         </div>
       </div>
@@ -444,134 +631,64 @@ export function ModelsPanel({ draft, setDraft }: PanelProps) {
               ? Boolean(draft.vlmModel.ggufPath && draft.vlmModel.ollamaName)
               : Boolean(draft.vlmModel.baseUrl && draft.vlmModel.modelName)} />
         </div>
-        <p className="field-hint" style={{ margin: "0 0 10px" }}>用于 Visual CI 自动验收插画（检查人物/动作/场景/噪点）。需支持图片输入的多模态模型：API / Ollama（如 qwen3vl、gemma4、GLM-4V）或本地 GGUF 模型导入 Ollama。模型文件不随项目发布包提供。</p>
-        <p className="field-hint" style={{ margin: "0 0 10px", color: "#b45309" }}>
-          ⚠ 「本地模型」标签只是把 GGUF **导入 Ollama 的暂存区**，本身不能直接用；导入后请切到「**API / Ollama**」标签并填模型名（如 qwen3vl:8b）——那就是你**本机 Ollama 跑这个 GGUF，全程本地、不走云**，务必**点保存**才生效。
+        <p className="field-hint" style={{ margin: "0 0 10px" }}>
+          用于 Visual CI 自动验收插画（检查人物/动作/场景/噪点）。来源三选一：<strong>云端 API</strong>、
+          <strong>本机 Ollama</strong>、<strong>本地模型（GGUF）</strong>——本地文件会导入本机 Ollama 运行，全程不走云。
         </p>
-        <div className="embedding-mode-tabs" role="group" aria-label="视觉大模型来源">
-          <button
-            type="button"
-            className={`btn${draft.vlmModel.mode === "remote" ? " primary is-selected" : ""}`}
-            aria-pressed={draft.vlmModel.mode === "remote"}
-            onClick={() => setVlm({ mode: "remote" })}
-          >API / Ollama</button>
-          <button
-            type="button"
-            className={`btn${draft.vlmModel.mode === "local" ? " primary is-selected" : ""}`}
-            aria-pressed={draft.vlmModel.mode === "local"}
-            onClick={() => setVlm({ mode: "local" })}
-          >本地模型</button>
-        </div>
+        <SourceTabs label="视觉大模型来源" value={vlmTab} onChange={setVlmTab} />
         <details className="model-advanced embedding-advanced">
-          <summary>连接与本地模型配置</summary>
+          <summary>连接与模型配置</summary>
           <div className="model-advanced-body">
-        {draft.vlmModel.mode === "remote" && <>
-        <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
-          {VLM_PRESETS.map((p) => (
-            <button key={p.name} className="btn" onClick={() => setVlm({ mode: "remote", baseUrl: p.baseUrl, modelName: p.modelName, apiKey: p.apiKey })}>{p.name}</button>
-          ))}
-        </div>
-        <p style={{ fontSize: 12, margin: "0 0 10px" }}>当前使用：<strong>{vlmProvider}</strong></p>
-        <div className="field"><label>API URL</label><input value={draft.vlmModel.baseUrl} onChange={(e) => setVlm({ baseUrl: e.target.value })} placeholder="http://localhost:11434/v1" /></div>
-        <div className="field"><label>API Key</label><input type="password" value={draft.vlmModel.apiKey} onChange={(e) => setVlm({ apiKey: e.target.value })} /></div>
-        <div className="field">
-          <label>连接代理</label>
-          <select value={draft.vlmModel.proxyMode || "on"} onChange={(e) => setVlm({ proxyMode: e.target.value as "on" | "off" | "inherit" })}>
-            <option value="on">使用代理</option>
-            <option value="off">直连</option>
-            <option value="inherit">继承全局</option>
-          </select>
-        </div>
-        <div className="field"><label>模型名称</label><input value={draft.vlmModel.modelName} onChange={(e) => setVlm({ modelName: e.target.value })} placeholder="qwen3vl:8b / gemma4:latest / glm-4v-flash" /></div>
-        </>}
-        {draft.vlmModel.mode === "local" && <>
-        <div className="field">
-          <label>本地模型文件路径</label>
-          <input
-            value={draft.vlmModel.ggufPath || ""}
-            onChange={(e) => setVlm({ ggufPath: e.target.value })}
-            placeholder="D:\tool\ComfyUI\models\LLM\Qwen3VL-8B-...-Q6_K.gguf"
-          />
-          <p className="field-hint">支持加载 GGUF 量化模型（Q4_K_M / Q6_K / Q8_0 / F16 等）。本地 VLM 一般用 GGUF 格式（区别于 ComfyUI 常用的 .safetensors）；检测到视觉能力后可一键导入 Ollama 使用。</p>
-        </div>
-        <div className="field">
-          <label>扫描目录发现 GGUF（可选）</label>
-          <div style={{ display: "flex", gap: 8 }}>
-            <input
-              value={vlmScanDir}
-              onChange={(e) => setVlmScanDir(e.target.value)}
-              placeholder="D:\tool\ComfyUI\models\LLM"
-              style={{ flex: 1 }}
-            />
-            <button className="btn" type="button" onClick={scanVlmDir} disabled={vlmScanning}>
-              {vlmScanning ? "扫描中…" : "扫描"}
-            </button>
-          </div>
-          {vlmScanError && <p className="field-hint" style={{ color: "#c0392b" }}>{vlmScanError}</p>}
-          {vlmScanResult && vlmScanResult.models.length > 0 && (
-            <div style={{ marginTop: 6, maxHeight: 160, overflowY: "auto", border: "1px solid var(--border, #e5e5e5)", borderRadius: 8 }}>
-              {vlmScanResult.models.map((m) => (
-                <button
-                  key={m.path}
-                  type="button"
-                  className="model-preset-row"
-                  style={{ display: "flex", width: "100%", padding: "6px 8px", background: "none", border: "none", borderBottom: "1px solid var(--border, #eee)", cursor: "pointer", textAlign: "left", fontSize: 12 }}
-                  onClick={() => setVlm({ ggufPath: m.path })}
-                  title={m.path}
-                >
-                  <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {m.is_vision ? "🖼️ " : "📦 "}{m.filename}
-                  </span>
-                  <span style={{ marginLeft: 8, opacity: 0.7 }}>{m.is_vision ? "视觉" : "非视觉"} · {(m.size_bytes / 1073741824).toFixed(1)}GB</span>
+            {vlmTab === "api" && <>
+              <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+                {VLM_API_PRESETS.map((p) => (
+                  <button key={p.name} className="btn" onClick={() => setVlm({ mode: "remote", source: "api", baseUrl: p.baseUrl, modelName: p.modelName, apiKey: "", proxyMode: "inherit" })}>{p.name}</button>
+                ))}
+              </div>
+              <p style={{ fontSize: 12, margin: "0 0 10px" }}>当前使用：<strong>{vlmProvider}</strong></p>
+              <div className="field"><label>API URL</label><input value={draft.vlmModel.baseUrl} onChange={(e) => setVlm({ baseUrl: e.target.value })} placeholder="https://open.bigmodel.cn/api/paas/v4" /></div>
+              <div className="field"><label>API Key</label><input type="password" value={draft.vlmModel.apiKey} onChange={(e) => setVlm({ apiKey: e.target.value })} /></div>
+              <div className="field">
+                <label>连接代理</label>
+                <select value={draft.vlmModel.proxyMode || "on"} onChange={(e) => setVlm({ proxyMode: e.target.value as "on" | "off" | "inherit" })}>
+                  <option value="on">使用代理</option>
+                  <option value="off">直连</option>
+                  <option value="inherit">继承全局</option>
+                </select>
+              </div>
+              <div className="field"><label>模型名称</label><input value={draft.vlmModel.modelName} onChange={(e) => setVlm({ modelName: e.target.value })} placeholder="glm-4v-flash / gpt-4o" /></div>
+            </>}
+            {vlmTab === "ollama" && <>
+              <p style={{ fontSize: 12, margin: "0 0 10px" }}>当前使用：<strong>{vlmProvider}</strong></p>
+              <OllamaModelPicker
+                baseUrl={draft.vlmModel.baseUrl}
+                modelName={draft.vlmModel.modelName}
+                apiKey={draft.vlmModel.apiKey || "ollama"}
+                presets={VLM_OLLAMA_MODELS}
+                onPatch={(patch) => setVlm({ mode: "remote", source: "ollama", apiKey: "ollama", proxyMode: "off", ...patch })}
+              />
+            </>}
+            {vlmTab === "local" && <>
+              <LocalGgufImport
+                ggufPath={draft.vlmModel.ggufPath}
+                mmprojPath={draft.vlmModel.mmprojPath}
+                ollamaName={draft.vlmModel.ollamaName}
+                useVision
+                onPatch={(patch) => setVlm(patch)}
+                onImported={(name) => setVlm(applyVlmLocalImport(name))}
+              />
+              <p className="field-hint" style={{ marginTop: 6 }}>
+                「本地模型」只是 GGUF 文件入口：导入成功后会自动切到 Ollama 档并填好模型名，之后保存即可使用。
+              </p>
+            </>}
+            {vlmTab !== "local" && (
+              <div className="model-test-row">
+                <button className="btn" type="button" onClick={testVlm} disabled={vlmProbe.testing}>
+                  {vlmProbe.testing ? "检测中…" : "测试视觉模型"}
                 </button>
-              ))}
-            </div>
-          )}
-          {vlmScanResult && vlmScanResult.models.length === 0 && (
-            <p className="field-hint">该目录未发现 GGUF 主模型（mmproj 投影文件会单独列出）。</p>
-          )}
-        </div>
-        <div className="field">
-          <label>视觉投影 mmproj（可选，自动配对）</label>
-          <input
-            value={draft.vlmModel.mmprojPath || ""}
-            onChange={(e) => setVlm({ mmprojPath: e.target.value })}
-            placeholder="与主模型同目录的 *mmproj*.gguf；留空自动查找"
-          />
-        </div>
-        <div className="field">
-          <label>导入 Ollama 后的模型名</label>
-          <input
-            value={draft.vlmModel.ollamaName || ""}
-            onChange={(e) => setVlm({ ollamaName: e.target.value })}
-            placeholder="qwen3vl:8b（留空自动按文件名生成）"
-          />
-          <p className="field-hint">导入成功后自动切换到「API / Ollama」模式并填入该模型名。</p>
-        </div>
-        <div className="model-test-row">
-          <button className="btn" type="button" onClick={importLocalVlm} disabled={vlmImporting}>
-            {vlmImporting ? "导入中…" : "导入到 Ollama"}
-          </button>
-          {vlmImportResult && (
-            <span className={`model-probe-result ${vlmImportResult.ok ? "success" : "error"}`}>
-              {vlmImportResult.ok ? "✅ 导入成功" : vlmImportResult.message}
-            </span>
-          )}
-        </div>
-        </>}
-        <div className="model-test-row">
-          <button className="btn" type="button" onClick={testVlm} disabled={vlmProbe.testing}>
-            {vlmProbe.testing
-              ? "检测中…"
-              : draft.vlmModel.mode === "local" ? "检测本地模型" : "测试视觉模型"}
-          </button>
-          {vlmProbe.result && <ProbeResultView result={vlmProbe.result} />}
-        </div>
-        {vlmProbe.result && draft.vlmModel.mode === "local" && (
-          <p className="field-hint" style={{ marginTop: 6 }}>
-            检测包含：文件完整性 → 元数据解析 → 视觉能力 → 当前硬件适配（显存估算）。
-          </p>
-        )}
+                {vlmProbe.result && <ProbeResultView result={vlmProbe.result} />}
+              </div>
+            )}
           </div>
         </details>
       </div>
@@ -582,75 +699,75 @@ export function ModelsPanel({ draft, setDraft }: PanelProps) {
           <CapabilityTitle icon={<Database size={18} />} title="Embedding" count={1}
             configured={draft.embedModel.mode === "local" ? Boolean(draft.embedModel.modelDir) : Boolean(draft.embedModel.baseUrl && draft.embedModel.modelName)} />
         </div>
-        <p className="field-hint" style={{ margin: "0 0 10px" }}>用于把仓库资料/生成历史向量化检索。需支持 embeddings 接口，如智谱 embedding-3、OpenAI text-embedding-3、Ollama 本地向量模型。模型文件不随项目发布包提供。</p>
-        <div className="embedding-mode-tabs" role="group" aria-label="嵌入模型来源">
-          <button
-            type="button"
-            className={`btn${draft.embedModel.mode === "remote" ? " primary is-selected" : ""}`}
-            aria-pressed={draft.embedModel.mode === "remote"}
-            onClick={() => setEmbed({ mode: "remote" })}
-          >API / Ollama</button>
-          <button
-            type="button"
-            className={`btn${draft.embedModel.mode === "local" ? " primary is-selected" : ""}`}
-            aria-pressed={draft.embedModel.mode === "local"}
-            onClick={() => setEmbed({ mode: "local" })}
-          >本地模型文件</button>
-        </div>
+        <p className="field-hint" style={{ margin: "0 0 10px" }}>
+          用于把仓库资料/生成历史向量化检索。来源三选一：<strong>云端 API</strong>（智谱 embedding-3 / OpenAI text-embedding-3）、
+          <strong>本机 Ollama</strong>（如 qwen3-embedding）、<strong>本地模型文件</strong>（SentenceTransformer 目录）。
+        </p>
+        <SourceTabs label="嵌入模型来源" value={embedTab} onChange={setEmbedTab} />
         <details className="model-advanced embedding-advanced">
           <summary>连接、模型目录与 Reranker 高级配置</summary>
           <div className="model-advanced-body">
-        {draft.embedModel.mode === "remote" && <>
-        <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
-          {EMBED_PRESETS.map((p) => (
-            <button key={p.name} className="btn" onClick={() => setEmbed({ mode: "remote", baseUrl: p.baseUrl, modelName: p.modelName, apiKey: p.apiKey })}>{p.name}</button>
-          ))}
-        </div>
-        <p style={{ fontSize: 12, margin: "0 0 10px" }}>当前使用：<strong>{embedProvider}</strong></p>
-        <div className="field"><label>API URL</label><input value={draft.embedModel.baseUrl} onChange={(e) => setEmbed({ baseUrl: e.target.value })} placeholder="http://localhost:11434/v1" /></div>
-        <div className="field"><label>API Key</label><input type="password" value={draft.embedModel.apiKey} onChange={(e) => setEmbed({ apiKey: e.target.value })} /></div>
-        <div className="field">
-          <label>连接代理</label>
-          <select value={draft.embedModel.proxyMode || "on"} onChange={(e) => setEmbed({ proxyMode: e.target.value as "on" | "off" | "inherit" })}>
-            <option value="on">使用代理</option>
-            <option value="off">直连</option>
-            <option value="inherit">继承全局</option>
-          </select>
-        </div>
-        <div className="field"><label>模型名称</label><input value={draft.embedModel.modelName} onChange={(e) => setEmbed({ modelName: e.target.value })} placeholder="qwen3-embedding:latest" /></div>
-        </>}
-        {draft.embedModel.mode === "local" &&
-        <div className="field">
-          <label>本地嵌入模型文件夹</label>
-          <input
-            value={draft.embedModel.modelDir || ""}
-            onChange={(e) => setEmbed({ modelDir: e.target.value })}
-            placeholder="项目目录\\backend\\data\\models\\embedding"
-          />
-          <p className="field-hint">选择本地模式后只使用该目录，不会调用上方 API 配置。</p>
-        </div>
-        }
-        <div className="model-test-row">
-          <button className="btn" type="button" onClick={testEmbed} disabled={embedProbe.testing}>
-            {embedProbe.testing ? "测试中…" : "测试嵌入模型"}
-          </button>
-          {embedProbe.result && <ProbeResultView result={embedProbe.result} />}
-        </div>
-        <div className="field">
-          <label>Reranker 模型文件夹（可选）</label>
-          <input
-            value={draft.embedModel.rerankerDir || ""}
-            onChange={(e) => setEmbed({ rerankerDir: e.target.value })}
-            placeholder="完整 RAG 版留空使用内置模型；源码版填写本机模型目录"
-          />
-          <p className="field-hint">填写已下载的 Cross-Encoder 模型目录，推荐 Qwen3-Reranker-0.6B；模型不随 GitHub 发布包提供，首次使用需安装本地 RAG 可选依赖。NVIDIA 显卡需安装 CUDA 版 PyTorch，否则仅验证文件并自动回退混合检索。</p>
-        </div>
-        <div className="model-test-row">
-          <button className="btn" type="button" onClick={testReranker} disabled={rerankerProbe.testing}>
-            {rerankerProbe.testing ? "测试中…" : "测试 Reranker"}
-          </button>
-          {rerankerProbe.result && <ProbeResultView result={rerankerProbe.result} />}
-        </div>
+            {embedTab === "api" && <>
+              <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+                {EMBED_API_PRESETS.map((p) => (
+                  <button key={p.name} className="btn" onClick={() => setEmbed({ mode: "remote", source: "api", baseUrl: p.baseUrl, modelName: p.modelName, apiKey: "", proxyMode: "inherit" })}>{p.name}</button>
+                ))}
+              </div>
+              <p style={{ fontSize: 12, margin: "0 0 10px" }}>当前使用：<strong>{embedProvider}</strong></p>
+              <div className="field"><label>API URL</label><input value={draft.embedModel.baseUrl} onChange={(e) => setEmbed({ baseUrl: e.target.value })} placeholder="https://open.bigmodel.cn/api/paas/v4" /></div>
+              <div className="field"><label>API Key</label><input type="password" value={draft.embedModel.apiKey} onChange={(e) => setEmbed({ apiKey: e.target.value })} /></div>
+              <div className="field">
+                <label>连接代理</label>
+                <select value={draft.embedModel.proxyMode || "on"} onChange={(e) => setEmbed({ proxyMode: e.target.value as "on" | "off" | "inherit" })}>
+                  <option value="on">使用代理</option>
+                  <option value="off">直连</option>
+                  <option value="inherit">继承全局</option>
+                </select>
+              </div>
+              <div className="field"><label>模型名称</label><input value={draft.embedModel.modelName} onChange={(e) => setEmbed({ modelName: e.target.value })} placeholder="embedding-3" /></div>
+            </>}
+            {embedTab === "ollama" && <>
+              <p style={{ fontSize: 12, margin: "0 0 10px" }}>当前使用：<strong>{embedProvider}</strong></p>
+              <OllamaModelPicker
+                baseUrl={draft.embedModel.baseUrl}
+                modelName={draft.embedModel.modelName}
+                apiKey={draft.embedModel.apiKey || "ollama"}
+                presets={EMBED_OLLAMA_MODELS}
+                onPatch={(patch) => setEmbed({ mode: "remote", source: "ollama", apiKey: "ollama", proxyMode: "off", ...patch })}
+              />
+            </>}
+            {embedTab === "local" && (
+              <div className="field">
+                <label>本地嵌入模型文件夹</label>
+                <input
+                  value={draft.embedModel.modelDir || ""}
+                  onChange={(e) => setEmbed({ modelDir: e.target.value })}
+                  placeholder="项目目录\\backend\\data\\models\\embedding"
+                />
+                <p className="field-hint">本地模型文件直接由后端加载（SentenceTransformer 目录），不会调用上方 API 配置。</p>
+              </div>
+            )}
+            <div className="model-test-row">
+              <button className="btn" type="button" onClick={testEmbed} disabled={embedProbe.testing}>
+                {embedProbe.testing ? "测试中…" : "测试嵌入模型"}
+              </button>
+              {embedProbe.result && <ProbeResultView result={embedProbe.result} />}
+            </div>
+            <div className="field">
+              <label>Reranker 模型文件夹（可选）</label>
+              <input
+                value={draft.embedModel.rerankerDir || ""}
+                onChange={(e) => setEmbed({ rerankerDir: e.target.value })}
+                placeholder="完整 RAG 版留空使用内置模型；源码版填写本机模型目录"
+              />
+              <p className="field-hint">填写已下载的 Cross-Encoder 模型目录，推荐 Qwen3-Reranker-0.6B；模型不随 GitHub 发布包提供，首次使用需安装本地 RAG 可选依赖。NVIDIA 显卡需安装 CUDA 版 PyTorch，否则仅验证文件并自动回退混合检索。</p>
+            </div>
+            <div className="model-test-row">
+              <button className="btn" type="button" onClick={testReranker} disabled={rerankerProbe.testing}>
+                {rerankerProbe.testing ? "测试中…" : "测试 Reranker"}
+              </button>
+              {rerankerProbe.result && <ProbeResultView result={rerankerProbe.result} />}
+            </div>
           </div>
         </details>
       </div>

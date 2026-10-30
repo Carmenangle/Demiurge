@@ -10,7 +10,10 @@ router = APIRouter()
 
 
 class ModelProbeRequest(BaseModel):
-    kind: Literal["chat", "image", "video", "embedding", "embedding-local", "reranker-local", "vlm", "vlm-local"]
+    kind: Literal[
+        "chat", "image", "video", "embedding", "embedding-local", "reranker-local",
+        "vlm", "vlm-local", "chat-local",
+    ]
     base_url: str = ""
     api_key: str = ""
     model_name: str = ""
@@ -27,6 +30,8 @@ def probe_model(req: ModelProbeRequest) -> dict[str, object]:
         return model_probe.probe_local_reranker(req.model_dir)
     if req.kind == "vlm-local":
         return model_probe.probe_local_vlm(req.gguf_path)
+    if req.kind == "chat-local":
+        return model_probe.probe_local_chat(req.gguf_path)
     return model_probe.probe_remote(
         req.kind, req.base_url, req.api_key, req.model_name, proxy=req.proxy_url,
     )

@@ -28,8 +28,8 @@ import {
   FileText, MoreHorizontal } from "lucide-react";
 import { type Repo, type RepoBinding } from "../stores/repos";
 import { type WorkMode } from "../lib/viewRouting";
-import { modelDisplayName, resolvedEmbedModel, useSettings, activeUserPersona } from "../stores/settings";
-import { effectiveGlobalProxyUrl, globalProxyAddress, resolveModelProxy } from "../lib/modelProxy";
+import { modelDisplayName, resolvedEmbedModel, useSettings, activeUserPersona, OLLAMA_DEFAULT_BASE_URL } from "../stores/settings";
+import { effectiveGlobalProxyUrl, globalProxyAddress, resolveEndpointProxy } from "../lib/modelProxy";
 import { KnowledgeModal } from "../components/KnowledgeModal";
 import { NarrativeCiPanel } from "../components/chat/NarrativeCiPanel";
 import { TableModal } from "../components/TableModal";
@@ -173,13 +173,18 @@ export function ChatView({
   const [agents, setAgents] = useState<Agent[]>([]);  // 多 Agent 列表（对话切换用）
   useEffect(() => { listAgents().then((a) => setAgents(a.filter((x) => x.enabled))).catch(() => {}); }, []);
   const activeChat = settings.chatModels.find((m) => m.id === chatModelId) || settings.chatModels[0];
+  // 本地/Ollama 卡可能只存了模型名：地址兜底到本机 Ollama；回环端点强制直连（与视觉/嵌入同口径）。
+  const chatLocalServer = activeChat?.source === "ollama" || activeChat?.source === "local";
+  const chatBaseUrl = chatLocalServer
+    ? (activeChat?.baseUrl || OLLAMA_DEFAULT_BASE_URL)
+    : (activeChat?.baseUrl || "");
   const chat = {
-    baseUrl: activeChat?.baseUrl || "",
-    apiKey: activeChat?.apiKey || "",
+    baseUrl: chatBaseUrl,
+    apiKey: activeChat?.apiKey || (chatLocalServer ? "ollama" : ""),
     modelName: activeChat?.modelName || "",
     providerProfile: activeChat?.providerProfile || "openai_compatible",
     proxyMode: activeChat?.proxyMode,
-    proxyUrl: resolveModelProxy(activeChat?.proxyMode, globalProxyAddress(settings), settings.proxyEnabled),
+    proxyUrl: resolveEndpointProxy(chatBaseUrl, activeChat?.proxyMode, globalProxyAddress(settings), settings.proxyEnabled),
   };
   // 当前选中的生图模型（底部下拉），传给 agent 的生图工具
   const gm = settings.imageModels.find((m) => m.id === modelId) || settings.imageModels[0];

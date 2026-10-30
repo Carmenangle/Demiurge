@@ -105,23 +105,25 @@ def probe_local_reranker(model_dir: str) -> dict[str, object]:
     return _result("success" if ok else "error", message)
 
 
-def probe_local_vlm(gguf_path: str) -> dict[str, object]:
-    """本地视觉大模型：校验文件存在 + 可解析 + 具备视觉能力 + 硬件适配检测。
+def probe_local_gguf(gguf_path: str, *, require_vision: bool) -> dict[str, object]:
+    """本地 GGUF：校验文件存在 + 可解析 + 硬件适配；视觉模型额外要求视觉能力。
 
     不做推理（避免加载大模型），但会结合设备显存判断"能否可行"：
     显存足够 → ok；可部分卸载 → partial_offload；不足 → low / cpu_only。
+    对话模型（require_vision=False）不要求视觉编码器；这是「对话本地模型」与 VLM 的唯一差别。
     """
     from app.services import gguf_importer
 
+    label = "视觉模型" if require_vision else "对话模型"
     path = Path(gguf_path).expanduser() if gguf_path else None
     if path is None or not path.is_file():
-        return _result("error", f"本地模型文件不存在：{gguf_path or '未填写'}")
+        return _result("error", f"本地{label}文件不存在：{gguf_path or '未填写'}")
     meta = gguf_importer.parse_gguf(path)
     if meta is None:
         return _result("error", f"无法解析模型元数据：{path.name}")
     if meta.kind != "model":
         return _result("error", f"{path.name} 不是主模型（kind={meta.kind}），请选择主模型文件")
-    if not (meta.is_vision or meta.has_vision_encoder):
+    if require_vision and not (meta.is_vision or meta.has_vision_encoder):
         return _result(
             "warning",
             f"{path.name} 未检测到视觉能力（架构 {meta.architecture}）；VLM 需要支持图片输入的模型",
@@ -141,10 +143,19 @@ def probe_local_vlm(gguf_path: str) -> dict[str, object]:
     else:  # low
         status = "error"
         hint = "，当前硬件无法运行，请选择更小参数量或更低量化档"
+    capability = "具备视觉能力" if require_vision else "可用于对话推理"
     return _result(
         status,
-        f"模型有效：{meta.architecture} {meta.parameters_b}B {meta.quant}，具备视觉能力"
+        f"模型有效：{meta.architecture} {meta.parameters_b}B {meta.quant}，{capability}"
         + hint
         + f"；模型约需 {fit.get('total_needed_mib', 0) / 1024:.1f}GB 显存"
         + (f"（可用 {fit.get('device', {}).get('available_mib', 0) / 1024:.1f}GB）" if fit.get("device") else ""),
     )
+
+
+def probe_local_vlm(gguf_path: str) -> dict[str, object]:
+    return probe_local_gguf(gguf_path, require_vision=True)
+
+
+def probe_local_chat(gguf_path: str) -> dict[str, object]:
+    return probe_local_gguf(gguf_path, require_vision=False)

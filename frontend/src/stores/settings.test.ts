@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
-  activeChatModel, chatBgRenderOpacity, DEFAULT_LIQUID_GLASS, exportSettings, importSettings,
-  liquidGlassSceneSource, loadPersistedSettings, modelDisplayName, normalizeContextBudgets,
-  normalizeLiquidGlass, normalizeTheme, resolvedEmbedModel, resolveTheme, stripSecrets,
+  activeChatModel, chatBgRenderOpacity, chatModelSource, DEFAULT_LIQUID_GLASS, exportSettings,
+  importSettings, liquidGlassSceneSource, loadPersistedSettings, modelDisplayName,
+  normalizeContextBudgets, normalizeLiquidGlass, normalizeTheme, OLLAMA_DEFAULT_BASE_URL,
+  remoteModelSource, resolvedEmbedModel, resolveTheme, stripSecrets,
 } from "./settings";
 import type { Settings } from "./settings";
 
@@ -302,6 +303,71 @@ describe("model proxy migration", () => {
     }));
 
     expect(resolvedEmbedModel(settings).proxyUrl).toBe("");
+  });
+});
+
+describe("模型来源三分（2026-10-30）", () => {
+  it("旧对话模型缺 source：按 ggufPath / Ollama 地址推断", () => {
+    const settings = importSettings(JSON.stringify({
+      chatModels: [
+        { id: "ollama", baseUrl: "http://localhost:11434/v1", apiKey: "", modelName: "qwen3:8b" },
+        { id: "local", baseUrl: "", apiKey: "", modelName: "qwen3-8b", ggufPath: "D:/m.gguf" },
+        { id: "cloud", baseUrl: "https://api.openai.com/v1", apiKey: "", modelName: "gpt-4o" },
+      ],
+    }));
+
+    expect(settings.chatModels.map((m) => m.source)).toEqual(["ollama", "local", "api"]);
+    expect(chatModelSource({ source: "ollama", baseUrl: "https://api.test/v1" })).toBe("ollama");
+    expect(chatModelSource({ baseUrl: "https://api.test/v1", ggufPath: "D:/m.gguf" })).toBe("local");
+  });
+
+  it("旧嵌入/视觉配置缺 source：11434 归 Ollama，云端地址归 API", () => {
+    const settings = importSettings(JSON.stringify({
+      embedModel: { mode: "remote", baseUrl: "http://localhost:11434/v1", apiKey: "", modelName: "e" },
+      vlmModel: { mode: "remote", baseUrl: "https://open.bigmodel.cn/api/paas/v4", apiKey: "", modelName: "v" },
+    }));
+
+    expect(settings.embedModel.source).toBe("ollama");
+    expect(settings.vlmModel.source).toBe("api");
+    expect(remoteModelSource({ source: "api", baseUrl: OLLAMA_DEFAULT_BASE_URL })).toBe("api");
+  });
+
+  it("用户显式选择的来源不被地址推断覆盖", () => {
+    const settings = importSettings(JSON.stringify({
+      embedModel: { mode: "remote", source: "api", baseUrl: OLLAMA_DEFAULT_BASE_URL, apiKey: "", modelName: "e" },
+      vlmModel: { mode: "remote", source: "ollama", baseUrl: "", apiKey: "", modelName: "v" },
+    }));
+
+    expect(settings.embedModel.source).toBe("api");
+    expect(settings.vlmModel.source).toBe("ollama");
+  });
+
+  it("Ollama 对话卡缺地址/Key 时兜底本机默认，且回环端点强制直连", () => {
+    const settings = importSettings(JSON.stringify({
+      proxyEnabled: true,
+      proxyUrl: "http://127.0.0.1:7897",
+      activeChatModelId: "o",
+      chatModels: [{ id: "o", source: "ollama", baseUrl: "", apiKey: "", modelName: "qwen3:8b", proxyMode: "on" }],
+    }));
+
+    const model = activeChatModel(settings);
+    expect(model.baseUrl).toBe(OLLAMA_DEFAULT_BASE_URL);
+    expect(model.apiKey).toBe("ollama");
+    expect(model.proxyUrl).toBe("");
+  });
+
+  it("本地 GGUF 对话卡同样按本机 Ollama 直连，不受全局代理影响", () => {
+    const settings = importSettings(JSON.stringify({
+      proxyEnabled: true,
+      proxyUrl: "http://127.0.0.1:7897",
+      activeChatModelId: "l",
+      chatModels: [{
+        id: "l", source: "local", baseUrl: OLLAMA_DEFAULT_BASE_URL, apiKey: "ollama",
+        modelName: "qwen3-8b", ggufPath: "D:/m.gguf", proxyMode: "on",
+      }],
+    }));
+
+    expect(activeChatModel(settings).proxyUrl).toBe("");
   });
 });
 
