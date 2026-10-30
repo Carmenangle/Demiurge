@@ -18,11 +18,16 @@ from app.services.workflow_parser import PASSTHROUGH_TYPES, WIDGET_NAMES
 # 不进入 API 格式的隐藏/UI-only 控件名
 _HIDDEN_WIDGETS = {"control_after_generate"}
 
+# 拉目标机全量 /object_info 的等待上限。云端 ComfyUI 的 schema 常达数 MB（节点多、
+# 链路远），超时后会静默回落到内置 WIDGET_NAMES 表、widget 顺序可能与目标机不一致。
+# 与 Adapter 默认值对齐；结果有 120 s 缓存，正常提交不会重复付这份延迟。
+_OBJECT_INFO_TIMEOUT = 30.0
+
 
 def _object_info(comfy_url: str) -> dict:
     """经统一 ComfyUI HTTP Adapter 拉取，失败时保留转换降级语义。"""
     try:
-        return comfyui_client.fetch_object_info(comfy_url, timeout=5)
+        return comfyui_client.fetch_object_info(comfy_url, timeout=_OBJECT_INFO_TIMEOUT)
     except comfyui_client.ComfyError:
         return {}
 

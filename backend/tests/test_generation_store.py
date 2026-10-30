@@ -304,8 +304,12 @@ def test_audio_turn_按含配音消息计数轮次(monkeypatch, tmp_path):
 def test_save_audio_local_存voices并自定义命名(monkeypatch, tmp_path):
     """配音分条落 <repo>/voices/，文件名用 dest_stem（保留中文角色名），幂等。"""
     from pathlib import Path
-    monkeypatch.setattr(generation_store.image_store.comfyui_client, "fetch_view",
-                        lambda *a, **k: (b"audio-bytes", "audio/flac"))
+    def fake_fetch(url, filename, dest, *a, **k):
+        Path(dest).write_bytes(b"audio-bytes")
+        return "audio/flac"
+
+    monkeypatch.setattr(
+        generation_store.image_store.comfyui_client, "fetch_view_to_file", fake_fetch)
     out = tmp_path / "out"
     p1 = generation_store.image_store.save_audio_local(
         str(out), "repo",
@@ -369,10 +373,12 @@ def test_save_image_named_角色lora命名并覆盖(monkeypatch, tmp_path):
     """角色 LoRA 生图：<repo>/ 根目录 + 角色_轮次_序号.png + 同名覆盖写。"""
     from pathlib import Path
     calls = {"n": 0}
-    def fake_fetch(*a, **k):
+    def fake_fetch(url, filename, dest, *a, **k):
         calls["n"] += 1
-        return (f"bytes-{calls['n']}".encode(), "image/png")
-    monkeypatch.setattr(generation_store.image_store.comfyui_client, "fetch_view", fake_fetch)
+        Path(dest).write_bytes(f"bytes-{calls['n']}".encode())
+        return "image/png"
+    monkeypatch.setattr(
+        generation_store.image_store.comfyui_client, "fetch_view_to_file", fake_fetch)
     out = tmp_path / "out"
     p1 = generation_store.image_store.save_image_named(
         str(out), "repo", filename="workflow_a.png", url="http://comfy",

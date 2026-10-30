@@ -85,3 +85,29 @@ def test_new_combo_schema_is_treated_as_widget(monkeypatch):
     assert api["25"]["inputs"] == {
         "method": "mkl", "strength": 0.5, "multithread": True,
     }
+
+
+def test_object_info_超时必须覆盖云端大schema(monkeypatch):
+    """云端 /object_info 常达数 MB：5 s 超时会静默回落内置表、widget 顺序错位。
+    这里钉住「超时不得再调回秒级」的合同。"""
+    seen: dict[str, object] = {}
+
+    def fake_fetch(url, **kwargs):
+        seen.update(kwargs)
+        seen["url"] = url
+        return {}
+
+    monkeypatch.setattr(workflow_convert.comfyui_client, "fetch_object_info", fake_fetch)
+
+    assert workflow_convert._object_info("https://comfy.example.com") == {}
+    assert isinstance(seen["timeout"], (int, float))
+    assert seen["timeout"] >= 30
+
+
+def test_object_info_失败仍保留转换降级语义(monkeypatch):
+    def boom(*args, **kwargs):
+        raise workflow_convert.comfyui_client.ComfyError("timed out", 502)
+
+    monkeypatch.setattr(workflow_convert.comfyui_client, "fetch_object_info", boom)
+
+    assert workflow_convert._object_info("http://127.0.0.1:8188") == {}

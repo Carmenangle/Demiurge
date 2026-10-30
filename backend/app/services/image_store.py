@@ -206,15 +206,12 @@ def save_local(
         existing = base / f"workflow_{suffix}.{safe_seg(ext) or 'png'}"
         if existing.exists():
             return str(existing)
+    data = b""
     if src:
         data, ext = _from_src(src)
     else:
         if not filename:
             raise ComfyError("缺少 filename 或 src", 400)
-        try:
-            data, _ctype = comfyui_client.fetch_view(url, filename, type, subfolder, timeout=30)
-        except ComfyError:
-            raise ComfyError("取原图失败", 502)
         fn = Path(filename).name
         ext = fn.rsplit(".", 1)[1] if "." in fn else "png"
     # 上传的参考图落 reference/ 子夹，与生成图（根目录）分开。子夹名做安全化防路径穿越。
@@ -225,16 +222,19 @@ def save_local(
         dest = base / f"workflow_{suffix}.{safe_seg(ext) or 'png'}"
         if dest.exists():
             return str(dest)
-        tmp = base / f".{dest.name}.{uuid4().hex}.tmp"
-        tmp.write_bytes(data)
-        try:
-            os.replace(tmp, dest)
-        finally:
-            if tmp.exists():
-                tmp.unlink()
     else:
         dest = base / _next_seq_name(base, ext)
-        dest.write_bytes(data)
+    tmp = base / f".{dest.name}.{uuid4().hex}.tmp"
+    try:
+        if src:
+            tmp.write_bytes(data)
+        else:
+            # 流式落盘：云端视频动辄数百 MB，整块读进内存会顶爆 RSS
+            comfyui_client.fetch_view_to_file(url, filename, str(tmp), type, subfolder)
+        os.replace(tmp, dest)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
     return str(dest)
 
 
@@ -254,13 +254,9 @@ def save_image_named(output_dir: str, repo_id: str, *,
     ext = fn.rsplit(".", 1)[1] if "." in fn else "png"
     stem = safe_dir(dest_stem) or "image"
     dest = base / f"{stem}.{safe_dir(ext) or 'png'}"
-    try:
-        data, _ctype = comfyui_client.fetch_view(url, filename, type, subfolder, timeout=30)
-    except ComfyError:
-        raise ComfyError("取原图失败", 502)
     tmp = base / f".{dest.name}.{uuid4().hex}.tmp"
-    tmp.write_bytes(data)
     try:
+        comfyui_client.fetch_view_to_file(url, filename, str(tmp), type, subfolder)
         os.replace(tmp, dest)
     finally:
         if tmp.exists():
@@ -289,10 +285,9 @@ def save_audio_local(output_dir: str, repo_id: str, *,
     dest = base / f"{stem}.{ext}"
     if dest.exists():
         return str(dest)
-    data, _ctype = comfyui_client.fetch_view(url, filename, type, subfolder, timeout=30)
     tmp = base / f".{dest.name}.{uuid4().hex}.tmp"
-    tmp.write_bytes(data)
     try:
+        comfyui_client.fetch_view_to_file(url, filename, str(tmp), type, subfolder)
         os.replace(tmp, dest)
     finally:
         if tmp.exists():

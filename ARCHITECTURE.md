@@ -1658,6 +1658,20 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
    探测走 `/comfyui/status` / 非回环预警 / 联机只读）、`SettingsView.test` 3 例（保存→POST、删→DELETE、失败弹窗）、
    消费点与契约锁（跨机首帧、音频三处同机、恢复/在途认提交机、三处 poll 形参）；`tsc --noEmit` 绿、前端全量
    **175 文件 / 2014 例**绿、`npm run build` 绿。**真机未验**（需重出前端 zip + APK）。
+   ⑧ **云端调用链补强（2026-10-30，同一合同的延伸）**：**(a) 进度 WS 的直连/中继变成运行时判定**——
+   `lib/comfyProgress.ts::wsUrl` 只对「回环 + 明文」目标直连，云端 https/wss 与局域网机台一律打同源
+   `/api/comfyui/ws`（后端按 `comfy_hosts` 白名单校验）。**不得**改为放宽 CSP `connect-src`：同一份 CSP
+   也罩 PC 文档，放行任意 ws 是外泄面；旧实现只在手机构建走中继，PC 连非回环时进度条整轮不出现（完成判定
+   另有 `/history` 轮询兜底，故一直未被当成故障）。**(b) UI→API 转换的 object_info 等待上限 5 s → 30 s**
+   （云端 schema 数 MB，超时静默回落内置 `WIDGET_NAMES` 会让 widget 顺序与目标机不一致）。**(c) 产物归档
+   流式化**：`image_store` 三处改用 `comfyui_client.fetch_view_to_file`（120 s 单次读超时、临时文件 +
+   `os.replace`），云端大视频不再整块进内存。**(d) 已知边界（未治，非遗漏）**：目标机缺节点类型仍被
+   `ui_to_api.is_skipped` 静默跳过——前端虚拟节点（rgthree Reroute 一类）与真缺节点在数据上同形，收紧会
+   误伤能跑的工作流；云端地址仍只有 URL、无逐机凭据（**ComfyUI 机台维度**，不是模型凭据）；云端画布不可用
+   是 CSP `frame-src` 的登记取舍。**(e) 职责切分（用户口径，2026-10-30 再确认）**：剧情生成/对话/表格/RAG
+   全是**本地模型**调用（跑在持有库与 app 后端的那一端）；**云端/另一台电脑只提供 ComfyUI 跑图**，不承担、
+   也不接收 LLM/embedding。finalize 的标签与 RAG 索引属本地侧职责——缺陷 #110 的修法是「本地侧用自己的模型
+   设置」，**不得**把 chat/embed 配置或凭据下发到 ComfyUI 宿主机。
 
 72. **手机「联机检测」弹窗：唯一的联机状态断言面，且只答电脑侧两件事（2026-10-27 用户定案）**：
    ① **需求口径**：电脑端有 ComfyUI 状态横幅（`ComfyStatusMonitor`），手机端**没有横幅**——`.comfy-monitor`

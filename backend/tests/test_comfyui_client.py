@@ -419,3 +419,50 @@ class TestIsUpDefaultPort:
 
         monkeypatch.setattr(comfyui_client, "urlopen", boom)
         assert comfyui_client.is_up("http://127.0.0.1:8188") is True
+
+
+class _StreamResp:
+    """流式响应替身：read(n) 逐块吐出，模拟 /view 大文件。"""
+
+    def __init__(self, chunks: list[bytes], ctype: str = "video/mp4"):
+        self._chunks = list(chunks)
+        self.headers = {"Content-Type": ctype}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self, size: int = -1) -> bytes:
+        return self._chunks.pop(0) if self._chunks else b""
+
+
+def test_fetch_view_to_file_流式落盘不整块读内存(monkeypatch, tmp_path):
+    seen: list[str] = []
+
+    def fake_urlopen(url, *a, **k):
+        seen.append(url)
+        return _StreamResp([b"chunk-1", b"chunk-2", b""])
+
+    monkeypatch.setattr(comfyui_client, "urlopen", fake_urlopen)
+    dest = tmp_path / "out.mp4"
+
+    ctype = comfyui_client.fetch_view_to_file(
+        "http://127.0.0.1:8188", "v.mp4", str(dest), type="output", subfolder="sub")
+
+    assert ctype == "video/mp4"
+    assert dest.read_bytes() == b"chunk-1chunk-2"
+    assert "filename=v.mp4" in seen[0] and "subfolder=sub" in seen[0]
+
+
+def test_fetch_view_to_file_白名单外主机仍按400拒绝(tmp_path):
+    dest = tmp_path / "x.bin"
+
+    try:
+        comfyui_client.fetch_view_to_file("http://evil.example.com", "a.png", str(dest))
+    except comfyui_client.ComfyError as exc:
+        assert exc.status == 400
+    else:
+        raise AssertionError("白名单外主机必须被拒")
+    assert not dest.exists()

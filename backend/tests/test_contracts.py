@@ -53,7 +53,8 @@ def test_convert_object_info复用统一ComfyUI适配器(monkeypatch):
     )
 
     assert workflow_convert._object_info("http://127.0.0.1:8188") == expected
-    assert calls == [("http://127.0.0.1:8188", 5)]
+    # 云端 schema 常达数 MB：5 s 会把「慢但可达」误判成拉不到（2026-10-30 提到 30 s）
+    assert calls == [("http://127.0.0.1:8188", 30.0)]
 
 
 def test_convert_object_info失败时保留内置映射降级(monkeypatch):

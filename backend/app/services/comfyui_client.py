@@ -3,6 +3,7 @@
 路由层只做适配（读模板、落盘、进程），不再直接拼 ComfyUI 请求。
 """
 import json
+import shutil
 import socket
 import time
 import uuid
@@ -356,6 +357,25 @@ def fetch_view(url: str, filename: str, type: str = "output", subfolder: str = "
             return r.read(), r.headers.get("Content-Type", "image/png")
     except Exception as e:
         raise ComfyError(f"取图失败：{e}", 502)
+
+
+def fetch_view_to_file(url: str, filename: str, dest: str, type: str = "output",
+                       subfolder: str = "", timeout: float = 120) -> str:
+    """流式把 /view 产物写进 `dest`，返回 Content-Type。
+
+    云端视频等大产物（数百 MB）不能整块读进内存；`timeout` 是**单次 socket 读**的
+    上限（长时间无数据才判超时，持续来流不受总时长限制），默认给云端留足余量。
+    失败抛 ComfyError；`dest` 由调用方负责清理。
+    """
+    base = _base(url)  # 白名单/协议错误按 400 透出，别被下面的兜底吞成 502
+    qs = urlencode({"filename": filename, "type": type, "subfolder": subfolder})
+    try:
+        with urlopen(base + f"/view?{qs}", timeout=timeout) as r, open(dest, "wb") as f:
+            ctype = r.headers.get("Content-Type", "application/octet-stream")
+            shutil.copyfileobj(r, f, 1024 * 1024)
+            return ctype
+    except Exception as e:
+        raise ComfyError(f"取图失败：{e}", 502) from e
 
 
 def probe_view(url: str, filename: str, type: str = "output", subfolder: str = "",

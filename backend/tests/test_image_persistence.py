@@ -18,7 +18,13 @@ def test_idempotent_image_store_reuses_path(tmp_path, monkeypatch):
     base.mkdir()
     monkeypatch.setattr("app.services.repo_meta.repo_folder", lambda output, repo: base)
     calls = []
-    monkeypatch.setattr(image_store.comfyui_client, "fetch_view", lambda *a, **k: (calls.append(1) or b"png", "image/png"))
+
+    def fake_fetch_to_file(url, filename, dest, *a, **k):
+        calls.append(1)
+        Path(dest).write_bytes(b"png")
+        return "image/png"
+
+    monkeypatch.setattr(image_store.comfyui_client, "fetch_view_to_file", fake_fetch_to_file)
 
     first = image_store.save_local(str(tmp_path), "repo", filename="a.png", idempotency_key="same")
     second = image_store.save_local(str(tmp_path), "repo", filename="a.png", idempotency_key="same")
@@ -35,10 +41,11 @@ def test_generation_archives_by_marker_when_repo_state_is_temporarily_missing(tm
     (owned / "_repo.json").write_text(
         '{"id":"old-repo-id","name":"SAVE01"}', encoding="utf-8",
     )
-    monkeypatch.setattr(
-        image_store.comfyui_client, "fetch_view",
-        lambda *args, **kwargs: (b"generated-png", "image/png"),
-    )
+    def fake_fetch_to_file(url, filename, dest, *args, **kwargs):
+        Path(dest).write_bytes(b"generated-png")
+        return "image/png"
+
+    monkeypatch.setattr(image_store.comfyui_client, "fetch_view_to_file", fake_fetch_to_file)
 
     saved = Path(image_store.save_local(
         str(tmp_path), "old-repo-id", filename="done.png", idempotency_key="prompt-1",
