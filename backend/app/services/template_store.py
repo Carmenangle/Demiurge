@@ -39,6 +39,10 @@ _TEXT_CARRIER_TYPES = ("string", "primitive", "text")
 _TEXT_CARRIER_FIELDS = frozenset({"string", "text", "value", "prompt", "positive"})
 _NEG_PROMPT_TITLE_RE = re.compile(r"negative|neg[\s_-]*prompt|负面|负向|反向", re.IGNORECASE)
 _POS_PROMPT_TITLE_RE = re.compile(r"positive|\bpos[\s_-]*prompt\b|正面|正向", re.IGNORECASE)
+# 视频生成节点上「以整数像素显式声明输出尺寸」的字段（2026-10-31 用户定案：
+# 图片的宽高要和视频的宽高一致）。这些字段在工作流里通常由 ResolutionSelector 连线供给，
+# 而画布暴露层只收无连线字段，所以按节点类型自动绑定、提交时用真实图片尺寸覆盖连线。
+_VIDEO_SIZE_NODE_TYPES = ("minimaxh3referencetovideo",)
 
 
 def _ensure_dir() -> None:
@@ -87,6 +91,10 @@ def _infer_binding(record: dict, node_id: str, field_name: str) -> str:
         return "latent_width"
     if node_type == "emptylatentimage" and name == "height":
         return "latent_height"
+    if node_type in _VIDEO_SIZE_NODE_TYPES and name == "width":
+        return "video_width"
+    if node_type in _VIDEO_SIZE_NODE_TYPES and name == "height":
+        return "video_height"
     if "loadimage" in node_type and name in ("image", "images"):
         return "base_image"
     if "cliptextencode" in node_type and name == "text":
@@ -170,6 +178,58 @@ def _auto_latent_fields(record: dict, exposed: list[dict]) -> list[dict]:
     return result
 
 
+def _widget_value_by_name(node: dict, field_name: str) -> object:
+    """UI 格式里 widgets_values 按「带 widget 的输入声明顺序」排列，据此按名取值。
+
+    位置索引会认错（H3 节点第 0 位是 prompt，1344/768 才是宽高，124 是帧数），
+    所以只取目标字段自己的那一位；API 格式或字段无 widget 时返回 None（仅影响展示默认值）。
+    """
+    names = [
+        str(item.get("name") or "").lower() for item in (node.get("inputs") or [])
+        if isinstance(item, dict) and isinstance(item.get("widget"), dict)
+    ]
+    values = node.get("widgets_values")
+    if not names or not isinstance(values, list):
+        return None
+    index = next((i for i, name in enumerate(names) if name == field_name.lower()), -1)
+    return values[index] if 0 <= index < len(values) else None
+
+
+def _auto_video_size_fields(record: dict, exposed: list[dict]) -> list[dict]:
+    """视频节点 width/height 自动绑定（与 _auto_latent_fields 同纪律：唯一候选才绑）。
+
+    这两个字段在 H3 流里由 ResolutionSelector 连线供给，画布暴露层只收无连线字段
+    ⇒ 用户无法手标，必须由这里补上 binding，提交层才能用真实首帧尺寸覆盖连线。
+    """
+    if all(any(field.get("binding") == binding for field in exposed)
+           for binding in ("video_width", "video_height")):
+        return exposed
+    video_nodes = [
+        node for node in _workflow_nodes(record)
+        if str(node.get("type") or node.get("class_type") or "").lower()
+        in _VIDEO_SIZE_NODE_TYPES
+    ]
+    if len(video_nodes) != 1:
+        return exposed
+    node = video_nodes[0]
+    node_id = str(node.get("id") or "").strip()
+    if not node_id:
+        return exposed
+    result = [*exposed]
+    for field_name, binding in (("width", "video_width"), ("height", "video_height")):
+        existing = next((field for field in result
+                         if field["node_id"] == node_id and field["field"] == field_name), None)
+        if existing:
+            existing["binding"] = binding
+        else:
+            result.append({
+                "node_id": node_id, "field": field_name, "label": field_name,
+                "control": "number", "semantic": field_name,
+                "binding": binding, "default": _widget_value_by_name(node, field_name),
+            })
+    return result
+
+
 def _normalize(record: dict) -> dict:
     """返回标准模板副本：节点 id 非空字符串、去重保序，并兼容旧输入字段。"""
     if not isinstance(record, dict):
@@ -180,6 +240,7 @@ def _normalize(record: dict) -> dict:
         inputs = _normalize_ids([*inputs, legacy])
     exposed = _normalize_exposed(record)
     exposed = _auto_latent_fields(record, exposed)
+    exposed = _auto_video_size_fields(record, exposed)
     normalized.update({
         "exposed": exposed,
         "node_order": _normalize_ids(record.get("node_order")),
@@ -188,6 +249,8 @@ def _normalize(record: dict) -> dict:
         "primary_output_node_id": str(record.get("primary_output_node_id") or "").strip(),
         "prompt_node_id": str(record.get("prompt_node_id") or "").strip(),
         "image_node_id": str(record.get("image_node_id") or "").strip(),
+        # 模板自带 LoRA 是能力的一部分（如蒸馏加速 LoRA）：提交时不清零、也不接受外部插画 LoRA。
+        "preserve_loras": bool(record.get("preserve_loras")),
     })
     return normalized
 
@@ -261,6 +324,7 @@ def save_template(data: dict, template_id: str | None = None) -> dict:
         "input_node_ids": data.get("input_node_ids", []),
         "output_node_ids": data.get("output_node_ids", []),
         "primary_output_node_id": data.get("primary_output_node_id", ""),
+        "preserve_loras": bool(data.get("preserve_loras", False)),
         "created_at": created,
         "updated_at": now,
     })

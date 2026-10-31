@@ -9,7 +9,7 @@ import time
 import uuid
 from threading import Lock
 from urllib.error import HTTPError
-from urllib.parse import urlencode, urlparse
+from urllib.parse import quote, urlencode, urlparse
 from urllib.request import ProxyHandler, Request, build_opener
 
 import requests
@@ -87,7 +87,9 @@ def fetch_object_info(
     全量结果短时缓存，避免连续搭建重复下载巨大 schema；单节点查询不缓存。
     返回 {节点名: schema}。失败抛 ComfyError。自动搭工作流的地基。"""
     base = _base(url)
-    endpoint = base + "/object_info" + (f"/{node}" if node else "")
+    # 节点类型名常带空格与冒号（LayerUtility: ImageScaleByAspectRatio V2 这类），
+    # 直接拼进路径段会打出非法 URL，探测静默失败 ⇒ 转换以为「没问到」而降级到内置表。
+    endpoint = base + "/object_info" + (f"/{quote(node, safe='')}" if node else "")
 
     def fetch() -> dict:
         try:
@@ -111,6 +113,93 @@ def fetch_object_info(
         result = fetch()
         _OBJECT_INFO_CACHE[base] = (time.monotonic(), result)
         return result
+
+
+# 逐类型探测的超时与总预算（2026-10-31 本机实测校准）。
+# 全量 /object_info 在本机 4474 类 / 9.4 MB，冷缓存要 92.9 s——任何固定秒级上限都是
+# 「白等一整个超时还拿不到」。改成只问这张图用到的类型后，真实代价集中在**第一次**：
+# ComfyUI 收到 /object_info/{node} 也要先重建整份映射，实测首问 22.15 s、其后每个
+# 0.00~0.02 s（映射已被它自己缓存）。所以：
+#   首问给 30 s（焐热服务端，之后都是免费的）；后续每个 5 s 足够；
+#   总预算 40 s 封顶，用完剩下的按「未知」处理——绝不让探测把提交时间拖成类型数 × 超时；
+#   首问超时的那几个类型补问一轮：服务端这次已经焐热了，补问几乎不花时间。
+# 客户端再叠一层「基址+类型」短缓存：批量插画连发十几张，这份开销只付一次。
+_OBJECT_INFO_TYPE_TIMEOUT = 5.0
+_OBJECT_INFO_FIRST_TYPE_TIMEOUT = 30.0
+_OBJECT_INFO_TYPE_BUDGET = 40.0
+_OBJECT_INFO_TYPE_CACHE: dict[str, tuple[float, dict | None]] = {}
+_TYPE_CACHE_MISS = object()
+
+
+def _cached_type_info(base: str, node: str) -> object:
+    key = f"{base}|{node}"
+    with _OBJECT_INFO_LOCK:
+        entry = _OBJECT_INFO_TYPE_CACHE.get(key)
+        if entry and time.monotonic() - entry[0] < _OBJECT_INFO_CACHE_TTL:
+            return entry[1]
+    return _TYPE_CACHE_MISS
+
+
+def _remember_type_info(base: str, node: str, value: dict | None) -> None:
+    with _OBJECT_INFO_LOCK:
+        _OBJECT_INFO_TYPE_CACHE[f"{base}|{node}"] = (time.monotonic(), value)
+
+
+def fetch_object_info_types(
+    url: str, types: tuple[str, ...],
+    *, timeout: float = _OBJECT_INFO_TYPE_TIMEOUT,
+    first_timeout: float = _OBJECT_INFO_FIRST_TYPE_TIMEOUT,
+    budget_seconds: float = _OBJECT_INFO_TYPE_BUDGET,
+) -> dict[str, dict | None]:
+    """按节点类型逐个拉 /object_info/{type}，合并成清单。
+
+    值语义分三档，调用方必须区分：
+      dict   = 该 ComfyUI 已注册此类型（拿到真实输入顺序）
+      None   = **确认**未注册（未注册类型回的是 200 空对象，不是 404）
+      键缺失 = 这一轮没问到（超时/断连/预算用完）＝未知，不得当成未注册
+
+    缓存的是 schema 的形状而不是模型文件名列表：/object_info/{node} 的枚举会被
+    前端「模型选项」直接消费，那一路必须新鲜，所以缓存在本函数而不是 fetch_object_info。
+    """
+    base = _base(url)
+    manifest: dict[str, dict | None] = {}
+    unasked: list[str] = []
+    deadline = time.monotonic() + budget_seconds
+
+    def ask(node: str, patient: bool) -> bool:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        cap = first_timeout if patient else timeout
+        try:
+            payload = fetch_object_info(url, node, timeout=min(cap, remaining))
+        except ComfyError:
+            return True  # 没问到，但预算还在：继续问下一个
+        entry = payload.get(node)
+        value = entry if isinstance(entry, dict) and entry else None
+        _remember_type_info(base, node, value)
+        manifest[node] = value
+        return True
+
+    heated = False  # 服务端是否已经交过答案（交过一次 ⇒ 那份映射已重建完、后续几乎免费）
+    for node in dict.fromkeys(t for t in types if t):
+        cached = _cached_type_info(base, node)
+        if cached is not _TYPE_CACHE_MISS:
+            manifest[node] = cached  # type: ignore[assignment]
+            continue
+        if not ask(node, patient=not heated):
+            unasked.append(node)  # 预算用完：后面的一律按「未知」处理
+            break
+        if node in manifest:
+            heated = True
+        else:
+            unasked.append(node)
+
+    # 补问一轮：超时发生在「服务端正在重建映射」时，此刻它已经重建完了
+    for node in list(unasked):
+        if heated and ask(node, patient=False) and node in manifest:
+            unasked.remove(node)
+    return manifest
 
 
 def _prompt_accepted(url: str, prompt_id: str, timeout: float = 8) -> bool:

@@ -1185,7 +1185,8 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
       if (measured) return measured;
       // 视频/音频单元格是固定 16:9 的占位（CSS aspect-ratio），没有 <img> 可量 ⇒ 直接给已知比例，
       // 否则会按 1（方形）估高，列底立刻参差（本轮「空隙」类问题的同一个病根）。
-      if (g.mediaType === "video" || g.mediaType === "audio") return 16 / 9;
+      // 有封面的视频走 <img> ⇒ 量到的就是视频真实宽高比（2026-10-31：9:16 不再被排成 16:9）。
+      if (g.mediaType === "audio" || (g.mediaType === "video" && !g.thumbUrl)) return 16 / 9;
       return 0;
     }),
     // ratioTick：图片量到真实宽高比后重排
@@ -1445,7 +1446,7 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
                 {col.map((g) => (
                   <div key={g.id} data-gal-page={Math.floor((idxOf.get(g.id) ?? 0) / PAGE_SIZE) + 1}
                     className={`gallery-cell ${selMode && selected.has(g.id) ? "sel" : ""}`} title={g.prompt}>
-                {g.mediaType === "video" || g.mediaType === "audio" ? (
+                {g.mediaType === "audio" || (g.mediaType === "video" && !g.thumbUrl) ? (
                   <div className="gallery-video-cell" onClick={() => selMode ? toggleSel(g.id) : setActive(g)}>
                     <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", gap: 6 }}>
                       {g.mediaType === "video" ? <Play size={22} /> : <Music size={22} />}
@@ -1465,7 +1466,8 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
                       // 2026-10-18 裂图修复：缩略图坏 ⇒ 回退原图；原图也坏 ⇒ 记为裂图
                       // （此前网格无回退，陈旧 thumb_url / 云端死链直接显示破图图标）
                       const el = e.currentTarget;
-                      if (el.dataset.fb !== "1" && g.thumbUrl && g.image_url) {
+                      // 视频封面坏了不能回退成 <img src=mp4>：渲染不出，还会被误记成裂图
+                      if (el.dataset.fb !== "1" && g.thumbUrl && g.image_url && g.mediaType !== "video") {
                         el.dataset.fb = "1";
                         el.src = g.image_url;
                         return;
@@ -1473,6 +1475,9 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
                       setBrokenIds((s) => (s.has(g.id) ? s : new Set(s).add(g.id)));
                       el.style.opacity = "0.15";
                     }} />
+                )}
+                {g.mediaType === "video" && g.thumbUrl && (
+                  <span className="gallery-media-badge">🎬</span>
                 )}
                 {g.mediaType === "video" && !selMode && (
                   <span className="gallery-media-tag" title="视频资产（点击播放）">视频</span>

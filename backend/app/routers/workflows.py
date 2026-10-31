@@ -87,6 +87,7 @@ class TemplateRequest(BaseModel):
     input_node_ids: list[str] = []   # 替换输入节点列表（左侧接线/自身 widget）
     output_node_ids: list[str] = []  # 替换输出节点列表(右侧接线)
     primary_output_node_id: str = "" # 主输出节点（多输出时优先取用此节点产物）
+    preserve_loras: bool = False     # 保留模板自带 LoRA（蒸馏加速等），不接受外部 LoRA 覆盖/清零
 
 
 @router.get("/templates")
@@ -132,6 +133,7 @@ def get_template_raw(template_id: str) -> dict:
         "input_node_ids": input_ids,
         "output_node_ids": output_ids,
         "primary_output_node_id": tpl.get("primary_output_node_id", ""),
+        "preserve_loras": bool(tpl.get("preserve_loras")),
     }
 
 
@@ -142,9 +144,15 @@ def create_template(req: TemplateRequest) -> dict:
 
 @router.put("/templates/{template_id}")
 def update_template(template_id: str, req: TemplateRequest) -> dict:
-    if template_store.get_template(template_id) is None:
+    existing = template_store.get_template(template_id)
+    if existing is None:
         raise HTTPException(status_code=404, detail="模板不存在")
-    return template_store.save_template(req.model_dump(), template_id)
+    data = req.model_dump()
+    # 缺席≠删除（同 services.secret_fields 的护栏口径）：旧前端不知道这个字段，
+    # 它保存时不会带 preserve_loras；按 False 落盘会静默关掉蒸馏 LoRA 的保留。
+    if "preserve_loras" not in req.model_fields_set and existing.get("preserve_loras"):
+        data["preserve_loras"] = True
+    return template_store.save_template(data, template_id)
 
 
 @router.delete("/templates/{template_id}")

@@ -30,9 +30,11 @@ export function NodePickerModal({ title, comfyUrl, sourcePath, onPick, onCancel 
   const retryRef = useRef(0);
   const verifyRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const MAX_RELOAD_RETRY = 6;
+  const readySeenRef = useRef(false);
 
   useEffect(() => {
     retryRef.current = 0;
+    readySeenRef.current = false;
     const post = (type: string, payload?: unknown) =>
       postToFrame(iframeRef.current?.contentWindow, type, payload, comfyUrl);
     const sendLoad = (wf: unknown) => post("load", { workflow: wf, exposedIds: [] });
@@ -43,6 +45,7 @@ export function NodePickerModal({ title, comfyUrl, sourcePath, onPick, onCancel 
       if (!isLafMessageFromStrict(ev, iframeRef.current?.contentWindow, comfyUrl)) return;
       const d = ev.data;
       if (d.type === "ready") {
+        readySeenRef.current = true;
         try {
           const r = await rawWorkflowByPath(sourcePath);
           rawRef.current = r.workflow;
@@ -78,12 +81,18 @@ export function NodePickerModal({ title, comfyUrl, sourcePath, onPick, onCancel 
     // ready 竞态兜底：扩展在挂上监听前就发了 ready 的话，load 会永远发不出去，
     // 画布停在 ComfyUI 恢复的上次会话（只剩单个节点）。补问一次触发扩展回 ready。
     // 对齐 WorkflowTemplates.tsx / WorkflowCard.tsx 的既有做法。
-    const ping = setTimeout(
-      () => postToFrame(iframeRef.current?.contentWindow, "ping_ready", undefined, comfyUrl),
-      1500,
-    );
+    const ping = setInterval(() => {
+      if (readySeenRef.current) { clearInterval(ping); return; }
+      postToFrame(iframeRef.current?.contentWindow, "ping_ready", undefined, comfyUrl);
+    }, 2000);
+    // 扩展不回 ready 时旧逻辑无任何提示（弹窗永远空白）→ 超时给出可见结论。
+    const bridgeTimeout = setTimeout(() => {
+      if (readySeenRef.current) return;
+      setHint("画布桥接未就绪：ComfyUI 页面已打开，但画布桥接扩展没有响应。请点「重新载入画布」；仍无效时重启 ComfyUI 后再试。");
+    }, 60000);
     return () => {
-      clearTimeout(ping);
+      clearInterval(ping);
+      clearTimeout(bridgeTimeout);
       if (verifyRef.current) clearTimeout(verifyRef.current);
       window.removeEventListener("message", onMsg);
     };

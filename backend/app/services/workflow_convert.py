@@ -8,7 +8,8 @@
 - 连线输入要从顶层 links 反查 [src_node_id, src_slot]。
 
 策略：优先用运行中 ComfyUI 的 /object_info 拿到每个节点的真实输入顺序（最准），
-拿不到则退回内置 WIDGET_NAMES 表。
+拿不到则退回内置 WIDGET_NAMES 表。只问这张图用到的类型，不拉全量清单——
+全量在本机要 92.9~115.4 s，必然超时会白等一整个超时还照样降级。
 """
 from __future__ import annotations
 
@@ -17,16 +18,26 @@ from app.services.workflow_parser import PASSTHROUGH_TYPES, WIDGET_NAMES
 
 # 不进入 API 格式的隐藏/UI-only 控件名
 _HIDDEN_WIDGETS = {"control_after_generate"}
+# dict 形态 widgets_values 里只服务前端预览的键（VHS 系的 videopreview 是嵌套预览数据，
+# 提交上去会以非标输入进 /prompt）
+_UI_ONLY_WIDGET_KEYS = _HIDDEN_WIDGETS | {"videopreview"}
 
-# 拉目标机全量 /object_info 的等待上限。云端 ComfyUI 的 schema 常达数 MB（节点多、
-# 链路远），超时后会静默回落到内置 WIDGET_NAMES 表、widget 顺序可能与目标机不一致。
-# 与 Adapter 默认值对齐；结果有 120 s 缓存，正常提交不会重复付这份延迟。
+# 拉目标机**全量** /object_info 的等待上限。只在调用方没给出需要的类型时用（例如
+# 直接问清单）；转换链路一律走逐类型探测，不再付这份延迟。
 _OBJECT_INFO_TIMEOUT = 30.0
 
 
-def _object_info(comfy_url: str) -> dict:
-    """经统一 ComfyUI HTTP Adapter 拉取，失败时保留转换降级语义。"""
+def _object_info(comfy_url: str, types: tuple[str, ...] = ()) -> dict:
+    """经统一 ComfyUI HTTP Adapter 拉取，失败时保留转换降级语义。
+
+    带 types ⇒ 逐类型问 /object_info/{type}：本机全量清单 4474 类 / 9.4 MB，冷缓存要
+    92.9 s，30 s 上限对它必然失败——每次提交先白等一整个超时，然后仍然退回内置表，
+    既慢又不更准（2026-10-31 生图 [submit] 超时实锤）。逐类型探测既消掉这份死等，
+    又真的拿到目标机的 widget 顺序。
+    """
     try:
+        if types:
+            return comfyui_client.fetch_object_info_types(comfy_url, types)
         return comfyui_client.fetch_object_info(comfy_url, timeout=_OBJECT_INFO_TIMEOUT)
     except comfyui_client.ComfyError:
         return {}
@@ -85,18 +96,28 @@ def ui_to_api(workflow: dict, comfy_url: str = "") -> dict:
         if isinstance(l, list) and len(l) >= 5:
             link_src[l[0]] = (str(l[1]), l[2])
 
-    object_info = _object_info(comfy_url) if comfy_url else {}
+    object_info = {}
     # 已知非执行/纯注释节点（不参与生成，不进 API 图）。
     # 在共享的穿透集上再加 PrimitiveNode：它运行期需穿透（值已并入下游 widget）。
     _NON_EXEC = PASSTHROUGH_TYPES | {"PrimitiveNode"}
+    if comfy_url:
+        # 转换只需要这张图真正用到的类型，不需要目标机上全部约 2000 个。
+        needed = tuple({
+            str(n["type"]) for n in by_id.values()
+            if isinstance(n.get("type"), str) and n["type"] not in _NON_EXEC
+        })
+        object_info = _object_info(comfy_url, needed) if needed else {}
 
     def is_skipped(node: dict) -> bool:
         """需穿透/跳过的节点：Reroute 中转、bypass/mute(mode 2/4)、笔记类、
-        以及 ComfyUI 未注册的类型（拉到 object_info 时按其清单判定）。"""
+        以及探测**确认**目标 ComfyUI 未注册的类型。
+
+        未注册在清单里是「值为 None」而不是缺键：缺键代表这一轮没问到（超时/断连），
+        按未知处理绝不跳过——否则一次网络抖动就会把好节点当废节点穿透掉。"""
         t = node.get("type")
         if t in _NON_EXEC or node.get("mode", 0) in (2, 4):
             return True
-        if object_info and t not in object_info:
+        if t in object_info and object_info[t] is None:
             return True  # ComfyUI 里没有这个节点类型 → 不可执行，跳过
         return False
 
@@ -181,6 +202,15 @@ def ui_to_api(workflow: dict, comfy_url: str = "") -> dict:
                     if nm not in _HIDDEN_WIDGETS and nm not in linked_names:
                         inputs[nm] = widgets[wi]
                     wi += 1
+        elif isinstance(widgets, dict) and widgets:
+            # 新版自定义节点（VHS_VideoCombine 等）直接用 {名: 值} 存 widget 值：
+            # 名字自带，无需按声明顺序还原；只剔除 UI 预览键与已连线键。
+            # 不做 schema 收窄：VHS 的 crf/pix_fmt/save_metadata 是按 format 动态生成的
+            # 子控件，顶层 required 里查不到；ComfyUI 对未声明的额外输入只忽略不报错。
+            for nm, value in widgets.items():
+                if nm in linked_names or nm in _UI_ONLY_WIDGET_KEYS:
+                    continue
+                inputs[nm] = value
 
         api[nid] = {"class_type": ntype, "inputs": inputs}
         # 提升到 subgraph 实例上的 widget 值：体内节点里那份是旧值，必须被实例值覆盖

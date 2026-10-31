@@ -13,8 +13,8 @@ def _ready(monkeypatch):
 def _output_info(monkeypatch):
     monkeypatch.setattr(
         workflow_submission.comfyui_client,
-        "fetch_object_info",
-        lambda _url: {"SaveImage": {"output_node": True}},
+        "fetch_object_info_types",
+        lambda _url, _types: {"SaveImage": {"output_node": True}},
     )
 
 
@@ -256,3 +256,54 @@ def test_输出文件名唯一化跳过无前缀或空前缀节点():
     workflow_submission._uniquify_output_filenames(api)
     assert "filename_prefix" not in api["1"]["inputs"]
     assert api["2"]["inputs"]["filename_prefix"] == "  "
+
+
+def _submit_with_lora_template(monkeypatch, tmp_path, *, preserve_loras, loras):
+    source = tmp_path / "workflow.json"
+    source.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(workflow_submission.template_store, "get_template", lambda _id: {
+        "source_path": str(source), "exposed": [], "prompt_node_id": "",
+        "preserve_loras": preserve_loras,
+    })
+    _ready(monkeypatch)
+    monkeypatch.setattr(workflow_submission, "ui_to_api", lambda _graph, _url: {
+        "10": {"class_type": "UNETLoader", "inputs": {"unet_name": "minimax.safetensors"}},
+        "20": {"class_type": "LoraLoaderModelOnly", "inputs": {
+            "model": ["10", 0],
+            "lora_name": "minimax_h3_turbo_v4_step600_ema.safetensors",
+            "strength_model": 1.0,
+        }},
+        "30": {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": {"clip": ["20", 0]}},
+    })
+    captured = {}
+    monkeypatch.setattr(workflow_submission.reranker, "release_accelerator_memory", lambda: None)
+    monkeypatch.setattr(
+        workflow_submission.comfyui_client,
+        "submit_prompt",
+        lambda _url, api, _client_id: captured.setdefault("api", api) or "prompt-1",
+    )
+    workflow_submission.submit_template(
+        "template-1", {}, "", "http://127.0.0.1:8188",
+        lora_mode="none", loras=loras,
+    )
+    return captured["api"]
+
+
+def test_保留模板自带LoRA时空栈不清零(monkeypatch, tmp_path):
+    """视频模板的蒸馏加速 LoRA 是 6 步采样成立的前提：空角色栈不得把它清零。"""
+    api = _submit_with_lora_template(monkeypatch, tmp_path, preserve_loras=True, loras=[])
+
+    assert api["20"]["inputs"]["strength_model"] == 1.0
+    assert api["20"]["inputs"]["lora_name"] == "minimax_h3_turbo_v4_step600_ema.safetensors"
+
+
+def test_保留模板自带LoRA时外部角色LoRA不串入(monkeypatch, tmp_path):
+    """插画链即便带了角色 LoRA，也不能写进保留 LoRA 的模板（会破坏蒸馏权重）。"""
+    api = _submit_with_lora_template(
+        monkeypatch, tmp_path, preserve_loras=True,
+        loras=[{"name": "role.safetensors", "weight": 0.8}],
+    )
+
+    assert api["20"]["inputs"]["lora_name"] == "minimax_h3_turbo_v4_step600_ema.safetensors"
+    assert api["20"]["inputs"]["strength_model"] == 1.0
+    assert "32" not in api

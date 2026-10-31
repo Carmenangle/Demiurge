@@ -8,6 +8,8 @@ const TEXT_CARRIER_TYPES = ["string", "primitive", "text"];
 const TEXT_CARRIER_FIELDS = new Set(["string", "text", "value", "prompt", "positive"]);
 const NEG_PROMPT_TITLE_RE = /negative|neg[\s_-]*prompt|负面|负向|反向/i;
 const POS_PROMPT_TITLE_RE = /positive|\bpos[\s_-]*prompt\b|正面|正向/i;
+// 视频生成节点上显式声明输出像素尺寸的节点类型（与后端 template_store._VIDEO_SIZE_NODE_TYPES 同口径）。
+const VIDEO_SIZE_NODE_TYPES = ["minimaxh3referencetovideo"];
 
 export function inferWorkflowFieldControl(field: ParsedField): ControlType {
   const name = field.name.toLowerCase();
@@ -37,6 +39,8 @@ export function inferWorkflowFieldBinding(node: ParsedNode, field: ParsedField):
   }
   if (type === "emptylatentimage" && name === "width") return "latent_width";
   if (type === "emptylatentimage" && name === "height") return "latent_height";
+  if (VIDEO_SIZE_NODE_TYPES.includes(type) && name === "width") return "video_width";
+  if (VIDEO_SIZE_NODE_TYPES.includes(type) && name === "height") return "video_height";
   if (type.includes("loadimage") && (name === "image" || name === "images")) return "base_image";
   if (type.includes("cliptextencode") && name === "text") {
     return /negative|负面|负向/.test(title) ? "negative_prompt" : "prompt";

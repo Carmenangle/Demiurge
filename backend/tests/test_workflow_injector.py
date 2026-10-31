@@ -164,3 +164,35 @@ def test_提示词不落到非文本字段():
     workflow_injector.inject_template_values(api, [], {}, "hello", "9")
     assert api["9"]["inputs"]["STRING"] == "hello"
     assert api["9"]["inputs"]["filename_prefix"] == "Demiurge_x"
+
+
+def test_视频宽高覆盖连线值():
+    """注入必须盖掉「来自 ResolutionSelector 的连线」：`inputs.width` 在 API 图里是
+    `[源节点, 槽]` 列表，写入标量即断线（2026-10-31 用户定案：图片的宽高要和视频的宽高一致，
+    而成图尺寸只由注入决定 ⇒ 这两键不覆盖连线就等于没生效）。"""
+    api = {"329": {"inputs": {"prompt": "", "width": [59, 0], "height": [59, 1]}}}
+    exposed = [
+        {"node_id": "329", "field": "width", "control": "number", "binding": "video_width"},
+        {"node_id": "329", "field": "height", "control": "number", "binding": "video_height"},
+    ]
+    missing = workflow_injector.inject_template_values(
+        api, exposed, {"329.width": 864, "329.height": 1536},
+    )
+
+    assert missing == []
+    assert api["329"]["inputs"]["width"] == 864
+    assert api["329"]["inputs"]["height"] == 1536
+
+
+def test_首帧尺寸缺失时保留模板连线():
+    """量不到尺寸（videoSize 未传）⇒ 不写这两键，视频沿用模板自带的分辨率选择器，
+    而不是把连线打断成 0/None。"""
+    api = {"329": {"inputs": {"width": [59, 0], "height": [59, 1]}}}
+    exposed = [
+        {"node_id": "329", "field": "width", "control": "number", "binding": "video_width"},
+        {"node_id": "329", "field": "height", "control": "number", "binding": "video_height"},
+    ]
+    workflow_injector.inject_template_values(api, exposed, {})
+
+    assert api["329"]["inputs"]["width"] == [59, 0]
+    assert api["329"]["inputs"]["height"] == [59, 1]

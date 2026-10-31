@@ -2209,7 +2209,8 @@ html[data-theme="liquid-glass"] .repo-card-menu {
 .gallery-cell:hover {
   border-color: var(--accent, #4a90d9);
 }
-/* M2.1/M2.2：视频资产单元格（占位 + 角标 + 标签）；瀑布流下给固定 16:9 高度 */
+/* M2.1/M2.2：视频/音频资产**占位**单元格（🎬/🎵 角标 + 标签）；瀑布流下给固定 16:9 高度。
+   有封面的视频不再走这里——它与图片同走 <img>，比例由封面量出（2026-10-31）。 */
 .gallery-video-cell {
   width: 100%;
   aspect-ratio: 16 / 9;

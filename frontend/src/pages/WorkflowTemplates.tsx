@@ -225,6 +225,9 @@ function NodeEditor({
   onSaved: () => void;
 }) {
   const [name, setName] = useState(template?.name || fileName.replace(/\.json$/i, ""));
+  // 视频/蒸馏类模板自带 LoRA 是能力的一部分（MiniMax H3 的 6 步加速 LoRA 等）：
+  // 勾上后提交既不清零、也不注入插画角色 LoRA。
+  const [preserveLoras, setPreserveLoras] = useState(!!template?.preserve_loras);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
   const [showDescribe, setShowDescribe] = useState(false);
@@ -260,6 +263,10 @@ function NodeEditor({
   useEffect(() => {
     pickedRef.current = picked;
   }, [picked]);
+  // 握手兜底：扩展连 ready 都不回时旧逻辑完全静默（画布一直空白、无提示）。
+  // readySeenRef 每轮 effect 重置；autoReloadRef 跨重挂保留，自动重挂最多一次，之后交手动按钮。
+  const readySeenRef = useRef(false);
+  const autoReloadRef = useRef(0);
 
   // key -> 暴露配置
   const [exposed, setExposed] = useState<Map<string, ExposedField>>(() => {
@@ -325,6 +332,7 @@ function NodeEditor({
       input_node_ids: d.input_node_ids,
       output_node_ids: d.output_node_ids,
       primary_output_node_id: d.primary_output_node_id || "",
+      preserve_loras: preserveLoras,
     };
     try {
       if (template) await updateTemplate(template.id, payload);
@@ -343,6 +351,7 @@ function NodeEditor({
       return;
     }
     setComfyHint("");
+    autoReloadRef.current = 0;
     try {
       const s = await comfyStatus(comfyUrl);
       if (!s.running) {
@@ -359,6 +368,7 @@ function NodeEditor({
   useEffect(() => {
     if (viewMode !== "comfy") return;
     retryRef.current = 0;
+    readySeenRef.current = false;
     const post = (type: string, payload?: unknown) =>
       postToFrame(iframeRef.current?.contentWindow, type, payload, comfyUrl);
     const sendLoad = (wf: unknown) => post("load", { workflow: wf, exposedIds: [] });
@@ -370,6 +380,7 @@ function NodeEditor({
       if (!isLafMessageFromStrict(ev, iframeRef.current?.contentWindow, comfyUrl)) return;
       const d = ev.data;
       if (d.type === "ready") {
+        readySeenRef.current = true;
         try {
           const r = await rawWorkflowByPath(sourcePath);
           rawRef.current = r.workflow;
@@ -435,12 +446,30 @@ function NodeEditor({
     window.addEventListener("message", onMsg);
     // ready 竞态兜底：扩展在我们挂上监听前就发了 ready 的话，这里补问一次。
     // 对齐 WorkflowCard.tsx / AIBuildView.tsx 的既有做法。
-    const ping = setTimeout(
-      () => postToFrame(iframeRef.current?.contentWindow, "ping_ready", undefined, comfyUrl),
-      1500,
-    );
+    // 改为周期补问：ComfyUI 冷启动时 app.setup 可能晚于首问几十秒，单次 ping 会错过；
+    // 收到 ready 后自动停。
+    const ping = setInterval(() => {
+      if (readySeenRef.current) { clearInterval(ping); return; }
+      postToFrame(iframeRef.current?.contentWindow, "ping_ready", undefined, comfyUrl);
+    }, 2000);
+    // 扩展在没有 ready 时不报错、父页也无从校验 → 只能靠超时给用户可见结论。
+    // 一次自动重挂覆盖「ComfyUI 前端改写 URL / 扩展加载偶发失败」这类瞬时故障；
+    // 第二次仍失败就交手动按钮，避免无限重挂（每次重挂都要整页重载 ComfyUI）。
+    const bridgeTimeout = setTimeout(() => {
+      if (readySeenRef.current) return;
+      if (autoReloadRef.current < 1) {
+        autoReloadRef.current += 1;
+        setComfyHint("画布桥接未响应（ComfyUI 未回 ready），正在自动重新载入画布…");
+        setReloadKey((k) => k + 1);
+      } else {
+        setComfyHint(
+          "画布桥接未就绪：ComfyUI 页面已打开，但画布桥接扩展没有响应。请点上方「重新载入画布」；仍无效时重启 ComfyUI 后再试。",
+        );
+      }
+    }, 60000);
     return () => {
-      clearTimeout(ping);
+      clearInterval(ping);
+      clearTimeout(bridgeTimeout);
       if (verifyRef.current) clearTimeout(verifyRef.current);
       window.removeEventListener("message", onMsg);
     };
@@ -487,6 +516,18 @@ function NodeEditor({
           <label>模板名称</label>
           <input value={name} onChange={(e) => setName(e.target.value)} placeholder="模板名称" />
         </div>
+        <label
+          style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, whiteSpace: "nowrap" }}
+          title="模板自带的 LoRA 是生成能力的一部分（如蒸馏加速 LoRA）：提交时保留原值，不写入插画角色 LoRA"
+        >
+          <input
+            type="checkbox"
+            checked={preserveLoras}
+            onChange={(e) => setPreserveLoras(e.target.checked)}
+            style={{ width: "auto", margin: 0 }}
+          />
+          保留模板自带 LoRA
+        </label>
         <button className="btn" onClick={toggleComfyMode} title="在真实 ComfyUI 画布中查看节点">
           {viewMode === "comfy" ? (
             <>

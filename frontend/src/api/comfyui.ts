@@ -68,6 +68,19 @@ export interface SubmitResult {
   node_count?: number;
 }
 
+// 提交类请求的超时口径（2026-10-31 实锤改的 60→90）。
+// 后端一次提交的真实耗时＝节点清单探测（冷首轮实测 22s、预算封顶 40s；120s 内二次提交≈0）+
+// /prompt 30s + 接单救回窗口 25s。60s 那道墙比后端自己的救回窗口还短，等于「后端还在正常
+// 干活、前端先判死」——图其实生成了，槽位却已删（两条孤儿产物就是这么来的）。
+const SUBMIT_TIMEOUT_MS = 90_000;
+// 文案必须点名「ComfyUI 提交」：默认文案「需求太复杂，建议把需求拆小」是 LLM 场景的，
+// 对生图提交完全误导——用户在多元数据插入面板里既没有「生图模型」也没有引擎可换，
+// 无处可拆（2026-10-19 与 2026-10-31 两次实锤）。
+const SUBMIT_TIMEOUT_HINT =
+  "ComfyUI 未在时限内接受本次任务：可能队列里还有别的任务在跑、正在加载模型，"
+  + "或工作流节点过多。这不是需求太复杂，无需拆小重发——"
+  + "请确认 ComfyUI 空闲后点「重新生成」；反复出现时看「后台活动」里的耗时。";
+
 export function submitWorkflow(
   templateId: string,
   values: Record<string, unknown>,
@@ -76,9 +89,8 @@ export function submitWorkflow(
   loras: { name: string; weight: number }[] = [],
   loraMode: "none" | "single" | "multi" = "single",
 ) {
-  // 60s 超时：后端 urlopen 30s 超时 + 模型卸载余量。无超时时后端挂起会让
-  // 前端 await 永不返回——槽位静默卡 pending，既不失败也不自愈（2026-08-29
-  // 验收「新对话没有触发生图」实锤：提交阶段挂起，2 分钟后只能靠刷新页面孤儿清理）。
+  // 提交阶段必须有超时：后端挂起时前端要能失败并走自愈/失败槽（2026-08-29 实锤：
+  // 无超时 ⇒ 槽位静默卡 pending，既不失败也不自愈，只能刷新页面靠孤儿清理）。
   return apiPost<SubmitResult>("/comfyui/submit", {
     template_id: templateId,
     values,
@@ -87,7 +99,7 @@ export function submitWorkflow(
     client_id: comfyClientId(),
     loras,
     lora_mode: loraMode,
-  }, 60_000);
+  }, SUBMIT_TIMEOUT_MS, undefined, SUBMIT_TIMEOUT_HINT);
 }
 
 export interface UploadResult {
@@ -275,16 +287,14 @@ export function saveLocalSrc(args: { src: string; repoId: string; outputDir: str
 
 // 从锁定画布回传的完整工作流直接提交生成
 export function submitGraph(workflow: unknown, url: string) {
-  // 与 submitWorkflow 同理：提交阶段必须有超时，后端挂起时前端要能失败并走自愈/失败槽。
-  // 文案要点名「提交」——默认文案「需求太复杂，建议把需求拆小」对生图提交是误导
-  // （2026-10-19 实锤：那次的真实原因是前置帧提示词编译耗光时间，与需求复杂度无关）。
+  // 与 submitWorkflow 同一条超时口径与文案：提交阶段必须有超时，且不能拿 LLM 的
+  // 「需求拆小」误导用户（2026-10-19 / 2026-10-31 两次实锤）。
   return apiPost<SubmitResult>(
     "/comfyui/submit_graph",
     { workflow, url, client_id: comfyClientId() },
-    60_000,
+    SUBMIT_TIMEOUT_MS,
     undefined,
-    "ComfyUI 未在时限内接受本次任务：可能队列里还有别的图在跑，或工作流节点过多。"
-      + "建议先确认 ComfyUI 空闲后重试；若反复出现，请检查前置提示词编译是否已超时。",
+    SUBMIT_TIMEOUT_HINT,
   );
 }
 

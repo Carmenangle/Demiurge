@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { moveComfyOutputToInput, uploadRemoteImageToInput } from "./comfyui";
+import {
+  moveComfyOutputToInput, submitGraph, submitWorkflow, uploadRemoteImageToInput,
+} from "./comfyui";
 
 describe("moveComfyOutputToInput（V1.6/P5 首尾帧顺序链）", () => {
   it("把 output 产物图 fetch 取回并上传回 input 目录，返回 input 文件名", async () => {
@@ -70,5 +72,54 @@ describe("uploadRemoteImageToInput（W3 转场参考图）", () => {
     await expect(uploadRemoteImageToInput("http://x/img.png", "http://comfy"))
       .rejects.toThrow("500");
     vi.unstubAllGlobals();
+  });
+});
+
+describe("ComfyUI 提交超时合同", () => {
+  // 真实 fetch 的行为：请求被 abort 时以 name=AbortError 拒绝
+  const stalled = (signal?: AbortSignal) => new Promise((_r, reject) => {
+    signal?.addEventListener("abort", () => {
+      const err = new Error("aborted");
+      err.name = "AbortError";
+      reject(err);
+    });
+  });
+
+  async function runUntilTimeout(call: () => Promise<unknown>): Promise<Error> {
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", vi.fn(async (_url: unknown, init?: { signal?: AbortSignal }) =>
+      stalled(init?.signal)));
+    try {
+      let settled = false;
+      const caught = call().then(
+        () => undefined,
+        (e: Error) => { settled = true; return e; },
+      );
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(settled).toBe(false); // 60s 那道墙会把「后端还在救回窗口里干活」判死
+      await vi.advanceTimersByTimeAsync(30_000);
+      return (await caught) as Error;
+    } finally {
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
+  }
+
+  it("插画提交超时=90s 且给 ComfyUI 专属文案（不再让用户拆需求）", async () => {
+    const err = await runUntilTimeout(() => submitWorkflow("t-1", {}, "http://comfy"));
+
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toContain("超过 90 秒");
+    expect(err.message).toContain("ComfyUI 未在时限内接受本次任务");
+    // 用户在多元数据插入面板里没有「生图模型」也没有引擎可换：默认文案无处可执行
+    expect(err.message).not.toContain("把需求拆小");
+  });
+
+  it("画布整图提交走同一条超时与文案", async () => {
+    const err = await runUntilTimeout(() => submitGraph({ nodes: [] }, "http://comfy"));
+
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toContain("超过 90 秒");
+    expect(err.message).not.toContain("把需求拆小");
   });
 });

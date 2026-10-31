@@ -250,6 +250,136 @@ def test_force_refresh_bypasses_object_info_cache(monkeypatch):
     assert len(calls) == 2
 
 
+def test_逐类型探测区分已注册_确认未注册_没问到(monkeypatch):
+    """三档语义必须分得开：dict=已注册、None=**确认**未注册（未注册回 200 空对象而非 404）、
+    缺键=这一轮没问到。缺键不得当成未注册，否则一次抖动就会让转换把好节点判成废节点。"""
+    def open_info(url, timeout=None):
+        node = str(url).rsplit("/", 1)[-1]
+        if node == "Ghost":
+            return _FakeResp({})  # 真实 ComfyUI：未注册类型回空对象
+        if node == "Broken":
+            raise TimeoutError("timed out")
+        return _FakeResp({node: {"input": {"required": {}}}})
+
+    monkeypatch.setattr(comfyui_client, "urlopen", open_info)
+
+    comfyui_client._OBJECT_INFO_TYPE_CACHE.clear()
+    manifest = comfyui_client.fetch_object_info_types(
+        "http://127.0.0.1:8188", ("KSampler", "Ghost", "Broken", "KSampler"),
+    )
+
+    assert manifest["KSampler"]["input"]["required"] == {}
+    assert manifest["Ghost"] is None
+    assert "Broken" not in manifest
+    assert len(manifest) == 2  # 重复类型只问一次
+
+
+def test_逐类型探测短缓存让连续提交只问一次(monkeypatch):
+    """批量插画连发十几张：探测按「基址+类型」缓存，第二张起不再打网络。"""
+    urls: list[str] = []
+
+    def open_info(url, timeout=None):
+        urls.append(str(url))
+        return _FakeResp({"KSampler": {"input": {"required": {}}}})
+
+    monkeypatch.setattr(comfyui_client, "urlopen", open_info)
+    comfyui_client._OBJECT_INFO_TYPE_CACHE.clear()
+
+    comfyui_client.fetch_object_info_types("http://127.0.0.1:8188", ("KSampler",))
+    again = comfyui_client.fetch_object_info_types("http://127.0.0.1:8188", ("KSampler",))
+
+    assert len(urls) == 1
+    assert again["KSampler"] == {"input": {"required": {}}}
+
+
+def test_逐类型探测不拉全量清单(monkeypatch):
+    """全量在本机 4474 类 / 9.4 MB、冷缓存 92.9~115.4 s：任何固定秒级上限都是「白等一场」。
+    转换链路的探测必须只打 /object_info/{type}，一次都不问裸端点。"""
+    urls: list[str] = []
+
+    def open_info(url, timeout=None):
+        urls.append(str(url))
+        return _FakeResp({"Node": {}})
+
+    monkeypatch.setattr(comfyui_client, "urlopen", open_info)
+    comfyui_client._OBJECT_INFO_TYPE_CACHE.clear()
+
+    comfyui_client.fetch_object_info_types(
+        "http://127.0.0.1:8188", ("KSampler", "CheckpointLoaderSimple"),
+    )
+
+    assert urls == [
+        "http://127.0.0.1:8188/object_info/KSampler",
+        "http://127.0.0.1:8188/object_info/CheckpointLoaderSimple",
+    ]
+
+
+def test_首问超时但服务端已交过答案时要补问一轮(monkeypatch):
+    """实测：/object_info/{node} 的首问要把整份映射重建一遍（本机 22 s），超时只说明
+    「这次没等到」，不说明「问不到」。补问几乎 0 s——不补则整张图白降级到内置 widget 表。"""
+    attempts: list[tuple[str, float]] = []
+
+    def fake_fetch(url, node="", timeout=None):
+        attempts.append((node, float(timeout)))
+        slow_first_try = node == "Slow" and sum(1 for a in attempts if a[0] == "Slow") == 1
+        if slow_first_try:
+            raise comfyui_client.ComfyError("timed out", 502)
+        return {node: {"input": {"required": {}}}}
+
+    monkeypatch.setattr(comfyui_client, "fetch_object_info", fake_fetch)
+    comfyui_client._OBJECT_INFO_TYPE_CACHE.clear()
+
+    manifest = comfyui_client.fetch_object_info_types("http://127.0.0.1:8188", ("Slow", "Fast"))
+
+    assert [a[0] for a in attempts] == ["Slow", "Fast", "Slow"]
+    assert manifest["Slow"] == {"input": {"required": {}}}  # 补问把它救回来了
+    assert attempts[0][1] >= 30  # 还没交过答案 ⇒ 首问给耐心档
+    assert attempts[2][1] <= 5   # 已焐热 ⇒ 补问用短档
+
+
+def test_带空格与冒号的类型名要转义后再问(monkeypatch):
+    """LayerUtility: ImageScaleByAspectRatio V2 这类名字直接拼 URL 是非法路径段，
+    过去会静默「没问到」⇒ 转换降级。必须转义后真正问到答案。"""
+    urls: list[str] = []
+
+    def open_info(url, timeout=None):
+        urls.append(str(url))
+        return _FakeResp({})
+
+    monkeypatch.setattr(comfyui_client, "urlopen", open_info)
+    comfyui_client._OBJECT_INFO_TYPE_CACHE.clear()
+
+    manifest = comfyui_client.fetch_object_info_types(
+        "http://127.0.0.1:8188", ("LayerUtility: ImageScaleByAspectRatio V2",),
+    )
+
+    assert urls == [
+        "http://127.0.0.1:8188/object_info/LayerUtility%3A%20ImageScaleByAspectRatio%20V2",
+    ]
+    assert manifest == {"LayerUtility: ImageScaleByAspectRatio V2": None}
+
+
+def test_逐类型探测受总预算封顶(monkeypatch):
+    """预算用完即停，剩余类型按「未知」缺键处理——把最坏情况从「类型数 × 单次超时」
+    收敛成一个常数，慢链路下提交线程不会被探测拖成长尾。"""
+    clock = {"t": 0.0}
+    monkeypatch.setattr(comfyui_client.time, "monotonic", lambda: clock["t"])
+
+    def open_info(url, timeout=None):
+        clock["t"] += 6.0  # 每次探测都慢于单次超时，模拟高负载排队
+        return _FakeResp({"Node": {}})
+
+    monkeypatch.setattr(comfyui_client, "urlopen", open_info)
+    comfyui_client._OBJECT_INFO_TYPE_CACHE.clear()
+
+    manifest = comfyui_client.fetch_object_info_types(
+        "http://127.0.0.1:8188", ("A", "B", "C", "D"), budget_seconds=15.0,
+    )
+
+    assert len(manifest) == 3
+    assert "D" not in manifest
+
+
 def test_submit_prompt_允许复杂工作流校验超过十秒(monkeypatch):
     captured = {}
 

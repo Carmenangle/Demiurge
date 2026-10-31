@@ -75,21 +75,24 @@ def submit_template(template_id: str, values: dict[str, object], prompt: str = "
     )
     if missing:
         raise WorkflowSubmissionError(422, {"missing": missing})
-    # 模板会保存编辑时的 LoRA 节点值。自动插画未选中任何 LoRA 时必须清零，
-    # 否则空角色栈会静默执行模板里遗留的任意风格/真人 LoRA。
-    if lora_mode == "none" or not loras:
-        workflow_injector.disable_all_loras(api)
-    elif loras:
-        lora_node_id = next((
-            str(field.get("node_id") or "") for field in template.get("exposed", [])
-            if str(field.get("binding") or "") == "lora_name"
-            or (str(field.get("semantic") or "") == "lora_name"
-                and str(field.get("field") or "") != "lora_name")
-        ), "")
-        if not workflow_injector.inject_lora_stack(api, lora_node_id, loras):
-            raise WorkflowSubmissionError(
-                422, "模板没有已标注且受支持的 LoRA 加载器，无法应用所选 LoRA 模式",
-            )
+    # preserve_loras：模板自带 LoRA 就是能力的一部分（如 MiniMax H3 的 6 步蒸馏加速 LoRA），
+    # 空 LoRA 栈既不能把它清零，外部角色/风格 LoRA 也不能串进来改变蒸馏链。
+    if not template.get("preserve_loras"):
+        # 模板会保存编辑时的 LoRA 节点值。自动插画未选中任何 LoRA 时必须清零，
+        # 否则空角色栈会静默执行模板里遗留的任意风格/真人 LoRA。
+        if lora_mode == "none" or not loras:
+            workflow_injector.disable_all_loras(api)
+        elif loras:
+            lora_node_id = next((
+                str(field.get("node_id") or "") for field in template.get("exposed", [])
+                if str(field.get("binding") or "") == "lora_name"
+                or (str(field.get("semantic") or "") == "lora_name"
+                    and str(field.get("field") or "") != "lora_name")
+            ), "")
+            if not workflow_injector.inject_lora_stack(api, lora_node_id, loras):
+                raise WorkflowSubmissionError(
+                    422, "模板没有已标注且受支持的 LoRA 加载器，无法应用所选 LoRA 模式",
+                )
     _uniquify_output_filenames(api)
     reranker.release_accelerator_memory()
     lease = model_lease.acquire(
@@ -115,14 +118,20 @@ def submit_graph(workflow: dict[str, object], url: str, client_id: str = "") -> 
         api = ui_to_api(workflow, normalized_url)
     except Exception as exc:  # noqa: BLE001
         raise WorkflowSubmissionError(400, f"工作流转换失败：{exc}") from exc
-    try:
-        object_info = comfyui_client.fetch_object_info(normalized_url)
-    except ComfyError as exc:
-        raise WorkflowSubmissionError(exc.status, f"无法校验工作流输出节点：{exc.detail}") from exc
+    class_types = tuple({
+        str(node.get("class_type"))
+        for node in api.values()
+        if isinstance(node, dict) and node.get("class_type")
+    })
+    # 只问这张图用到的类型：全量 /object_info 在本机 4474 类 / 9.4 MB、冷缓存 92.9~115.4 s，
+    # 30 s 上限必然失败，每次画布提交都要白等一整个超时（2026-10-31 实锤）。
+    object_info = comfyui_client.fetch_object_info_types(normalized_url, class_types)
+    if class_types and not object_info:
+        raise WorkflowSubmissionError(502, "无法校验工作流输出节点：目标 ComfyUI 未响应 /object_info")
     output_nodes = [
         node_id for node_id, node in api.items()
         if isinstance(node, dict)
-        and bool(object_info.get(str(node.get("class_type") or ""), {}).get("output_node"))
+        and bool((object_info.get(str(node.get("class_type") or "")) or {}).get("output_node"))
     ]
     if not output_nodes:
         raise WorkflowSubmissionError(

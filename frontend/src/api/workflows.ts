@@ -47,6 +47,10 @@ export const SEMANTIC_LORA_WEIGHT = "lora_weight";
 export const SEMANTIC_BASE_IMAGE = "base_image";
 export const SEMANTIC_LATENT_WIDTH = "latent_width";
 export const SEMANTIC_LATENT_HEIGHT = "latent_height";
+// 视频输出宽高（像素）：提交时用**首帧图的真实尺寸**写入视频生成节点，覆盖模板里
+// ResolutionSelector 的连线（2026-10-31 用户定案「图片的宽高要和视频的宽高一致」）。
+export const SEMANTIC_VIDEO_WIDTH = "video_width";
+export const SEMANTIC_VIDEO_HEIGHT = "video_height";
 // 音频（IndexTTS 系）：voice_text=该角色台词（写 TTS 节点 text）；voice_reference=参考音轨（音色，写 LoadAudio）；
 // voice_emotion_<key>=8 维情感向量（happy/angry/sad/fear/hate/low/surprise/neutral，0~1 混合权重）。
 export const SEMANTIC_VOICE_TEXT = "voice_text";
@@ -96,6 +100,8 @@ export interface Template {
   input_node_ids: string[];
   output_node_ids: string[];
   primary_output_node_id?: string;  // 主输出节点（多输出时优先取用）
+  /** 模板自带 LoRA 即能力的一部分（如蒸馏加速 LoRA）：提交时不清零、也不接受插画角色 LoRA。 */
+  preserve_loras?: boolean;
   created_at: number;
   updated_at: number;
 }
@@ -111,6 +117,7 @@ export interface TemplatePayload {
   input_node_ids?: string[];
   output_node_ids?: string[];
   primary_output_node_id?: string;
+  preserve_loras?: boolean;
 }
 
 export function listTemplates() {
@@ -126,6 +133,7 @@ export interface TemplateRaw {
   input_node_ids?: string[];
   output_node_ids?: string[];
   primary_output_node_id?: string;
+  preserve_loras?: boolean;
 }
 
 // 取模板原始工作流 + 暴露节点 id（供锁定画布载入）

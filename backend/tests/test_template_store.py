@@ -1,3 +1,4 @@
+from app.routers import workflows
 from app.services import template_store
 
 
@@ -172,3 +173,109 @@ def test_legacy_semantic_aliases_become_hidden_bindings_and_duplicates_are_remov
         ("width", "width", "latent_width"),
         ("height", "height", "latent_height"),
     ]
+
+
+def test_preserve_loras_默认关闭且可持久化(tmp_path, monkeypatch):
+    monkeypatch.setattr(template_store, "TEMPLATES_DIR", tmp_path)
+    # 没写过的老模板按关闭处理（保持「空 LoRA 栈清零残留 LoRA」的既有语义）
+    assert template_store._normalize({})["preserve_loras"] is False
+    saved = template_store.save_template({"name": "x", "preserve_loras": True})
+    assert template_store.get_template(saved["id"])["preserve_loras"] is True
+    assert template_store.list_templates()[0]["preserve_loras"] is True
+
+
+def test_旧前端保存模板时省略preserve_loras不清除已存开关(tmp_path, monkeypatch):
+    """保存请求缺席该字段 = 不表态（旧前端/旧 dist 不知道它），不得按 False 落盘抹掉能力开关。"""
+    monkeypatch.setattr(template_store, "TEMPLATES_DIR", tmp_path)
+    saved = template_store.save_template({"name": "video", "preserve_loras": True})
+
+    omitted = workflows.update_template(saved["id"], workflows.TemplateRequest(name="video2"))
+    assert omitted["preserve_loras"] is True
+
+    explicit = workflows.update_template(
+        saved["id"], workflows.TemplateRequest(name="video3", preserve_loras=False),
+    )
+    assert explicit["preserve_loras"] is False
+
+
+# ---------------------------------------------------------------------------
+# 视频节点 width/height 自动暴露（2026-10-31 用户定案「图片的宽高要和视频的宽高一致」）
+# H3 流的宽高由 ResolutionSelector 连线供给，而画布暴露层只收「无连线」字段
+# ⇒ 用户在前端手标不出这两键，提交层就没有落点。必须由 _auto_video_size_fields
+# 按节点类型补 binding，前端才能把首帧真实尺寸写进视频节点、盖掉那条连线。
+# ---------------------------------------------------------------------------
+_H3_NODE = {
+    "id": 329, "type": "MiniMaxH3ReferenceToVideo",
+    # widget 声明顺序与 widgets_values 一一对位：第 0 位是 prompt，1344/768 才是宽高
+    "inputs": [
+        {"name": "prompt", "type": "STRING", "widget": {"name": "prompt"}},
+        {"name": "width", "type": "INT", "widget": {"name": "width"}, "link": 553},
+        {"name": "height", "type": "INT", "widget": {"name": "height"}, "link": 554},
+        {"name": "length", "type": "INT", "widget": {"name": "length"}},
+    ],
+    "widgets_values": ["", 1344, 768, 124],
+}
+
+
+def _视频模板记录(*nodes, **over):
+    return {"workflow_data": {"nodes": list(nodes) or [_H3_NODE]}, **over}
+
+
+def test_唯一视频节点自动补上宽高binding():
+    normalized = template_store._normalize(_视频模板记录(_H3_NODE))
+
+    assert [f for f in normalized["exposed"] if f.get("binding", "").startswith("video_")] == [
+        {"node_id": "329", "field": "width", "label": "width",
+         "control": "number", "semantic": "width", "binding": "video_width", "default": 1344},
+        {"node_id": "329", "field": "height", "label": "height",
+         "control": "number", "semantic": "height", "binding": "video_height", "default": 768},
+    ]
+    # 补出来的节点必须进 ordered_node_ids，否则注入层按序取不到落点
+    assert "329" in template_store.ordered_node_ids(normalized)
+
+
+def test_两个视频节点时不猜唯一候选纪律():
+    second = {**_H3_NODE, "id": 330}
+    normalized = template_store._normalize(_视频模板记录(_H3_NODE, second))
+
+    assert [f.get("binding") for f in normalized["exposed"]
+            if str(f.get("binding", "")).startswith("video_")] == []
+
+
+def test_已手标宽高binding时不重复追加():
+    exposed = [
+        {"node_id": "329", "field": "width", "control": "number", "binding": "video_width"},
+        {"node_id": "329", "field": "height", "control": "number", "binding": "video_height"},
+    ]
+    normalized = template_store._normalize(_视频模板记录(_H3_NODE, exposed=[dict(f) for f in exposed]))
+
+    assert len(normalized["exposed"]) == 2
+    assert [(f["field"], f["binding"]) for f in normalized["exposed"]] == [
+        ("width", "video_width"), ("height", "video_height"),
+    ]
+
+
+def test_api格式视频节点同样绑上宽高():
+    """后端提交走 API 格式：class_type 认得出视频节点，宽高才有落点（默认值缺展示位不影响）。"""
+    normalized = template_store._normalize({
+        "workflow_data": {"329": {
+            "class_type": "MiniMaxH3ReferenceToVideo",
+            "inputs": {"prompt": "", "width": 1344, "height": 768, "length": 124},
+        }},
+    })
+
+    assert [(f["field"], f["binding"]) for f in normalized["exposed"]
+            if str(f.get("binding", "")).startswith("video_")] == [
+        ("width", "video_width"), ("height", "video_height"),
+    ]
+
+
+def test_图像模板不因此多出宽高键():
+    """零回归：EmptyLatentImage 仍只走 latent_* 口径，视频宽高绑定不得顺手污染图片模板。"""
+    normalized = template_store._normalize({
+        "workflow_data": {"nodes": [
+            {"id": 4, "type": "EmptyLatentImage", "widgets_values": [576, 1024, 1]},
+        ]},
+    })
+
+    assert [f["binding"] for f in normalized["exposed"]] == ["latent_width", "latent_height"]

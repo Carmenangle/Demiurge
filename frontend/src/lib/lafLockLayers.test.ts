@@ -55,3 +55,41 @@ describe("laf_lock 层级不变量", () => {
     expect(block).not.toMatch(/display:\s*[a-z]+ !important/);
   });
 });
+
+// ComfyUI 0.42 的前端会在扩展模块执行前用 Vue Router 把地址改成 "/#<clientId>"，
+// location.search 里的 laf_lock/laf_full 就此消失 → 扩展判定为非受控模式，父页永远收不到 ready
+// （画布空白、N:0、无报错）。这里把判定函数抠出来真跑一遍，钉住「按导航条目初始 URL 判定」这条。
+describe("laf_lock 模式判定", () => {
+  const fnSrc = SRC.match(/function initialSearch\(\) \{[\s\S]*?\n\}/)?.[0] ?? "";
+  const resolveSearch = (navName: string | null, curSearch: string, navThrows = false): string => {
+    const performance = {
+      getEntriesByType: () => {
+        if (navThrows) throw new Error("no navigation timing");
+        return navName === null ? [] : [{ name: navName }];
+      },
+    };
+    return new Function("performance", "location", `${fnSrc}; return initialSearch;`)(
+      performance,
+      { search: curSearch },
+    )();
+  };
+
+  it("能从源码里找到 initialSearch", () => {
+    expect(fnSrc).toContain("getEntriesByType");
+  });
+
+  it("当前地址被改写成 /#clientId 时，仍按导航条目里的初始 URL 认出锁定模式", () => {
+    expect(resolveSearch("http://127.0.0.1:8188/?laf_lock=1", "")).toBe("?laf_lock=1");
+    expect(resolveSearch("http://127.0.0.1:8188/?laf_full=1", "")).toBe("?laf_full=1");
+  });
+
+  it("没有导航条目或读不到时退回 location.search", () => {
+    expect(resolveSearch(null, "?laf_lock=1")).toBe("?laf_lock=1");
+    expect(resolveSearch(null, "?laf_lock=1", true)).toBe("?laf_lock=1");
+  });
+
+  it("判定后 LOCK/FULL 都从解析结果取值，不再直接用 location.search 构造参数", () => {
+    expect(SRC).toMatch(/new URLSearchParams\(initialSearch\(\)\)/);
+    expect(SRC).not.toMatch(/new URLSearchParams\(location\.search\)/);
+  });
+});

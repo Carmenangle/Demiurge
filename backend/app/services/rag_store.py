@@ -240,8 +240,8 @@ def index_generation(repo_id: str, cfg: EmbedConfig,
                 "model_name": model_name or "",
                 "lora_names": lora_names or "",
                 "media_type": media_type,
-                # P0-2：本机静态图同步生成缩略图（.thumbs/ 派生层）；
-                # 远程图/视频/失败一律空串，前端回落原图，不阻断入库
+                # P0-2：本机媒体同步生成缩略图（.thumbs/ 派生层）；视频走 ffmpeg 抽帧
+                # （2026-10-31），定位不到 ffmpeg/远程图/失败一律空串 ⇒ 前端回落占位或原图，不阻断入库
                 "thumb_url": thumbnail_store.thumb_url_for(image_url),
                 "derived_from": json.dumps(derived_from or [],
                                            ensure_ascii=False),

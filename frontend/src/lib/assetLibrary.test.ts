@@ -332,11 +332,20 @@ describe("P2-2 多媒体：音频入库/播放（2026-10-18 建议顺序②）",
   });
 
   it("音频资产：网格单元格（🎵）+ 详情内嵌 audio 播放器（与视频同构）", () => {
-    expect(gallery).toContain('g.mediaType === "video" || g.mediaType === "audio"');
+    expect(gallery).toContain('g.mediaType === "audio" || (g.mediaType === "video" && !g.thumbUrl)');
     expect(gallery).toContain("<Music size={22} />");
     expect(gallery).toContain('active.mediaType === "audio" ? (');
     expect(gallery).toContain("<audio src={active.image_url} controls");
     expect(gallery).toContain("🎵 音频资产");
+  });
+
+  it("视频有封面时与图片同走 <img>，占位只留给无封面/音频（2026-10-31）", () => {
+    // 封面的真实宽高比由 onLoad 量出 ⇒ 瀑布流不再按写死的 16:9 估高
+    expect(gallery).toContain('if (g.mediaType === "audio" || (g.mediaType === "video" && !g.thumbUrl)) return 16 / 9;');
+    // 角标在封面分支外补一份（占位分支内那份保持原样）
+    expect(gallery).toContain('g.mediaType === "video" && g.thumbUrl && (');
+    // 封面坏了不许回退成 <img src=mp4>
+    expect(gallery).toContain("g.mediaType !== \"video\"");
   });
 });
 

@@ -3,7 +3,18 @@
 // 能力：载入指定工作流 → 只保留暴露节点 → 锁定移动/连线/增删，但保留 widget 交互、缩放、拖视角。
 import { app } from "../../scripts/app.js";
 
-const params = new URLSearchParams(location.search);
+// ComfyUI 新版前端（0.42.0 / 前端包 1.5x）启动时会让 Vue Router 把地址改写成 "/#<clientId>"，
+// location.search 里的 laf_lock/laf_full 在扩展模块执行前就被抹掉 ⇒ 扩展不进入受控模式、
+// 父页面永远收不到 ready（现象：画布空白、左下角 N:0，且页面没有任何报错）。
+// 导航条目里的初始 URL 不受 history.replaceState 影响，用它判定；location.search 仅作兜底。
+function initialSearch() {
+  try {
+    const nav = performance.getEntriesByType("navigation")[0];
+    if (nav && nav.name) return new URL(nav.name).search;
+  } catch (e) { /* 老浏览器无 navigation timing → 退回当前地址 */ }
+  return location.search;
+}
+const params = new URLSearchParams(initialSearch());
 const LOCK = params.get("laf_lock") === "1";
 // full 模式：AI 搭工作流页右侧画布用。保留 ComfyUI 全部原生功能（工具栏/增删节点/连线），
 // 只额外挂 postMessage 协议供父页面写入整图(load)/读回画布(request_graph/request_api_prompt)。

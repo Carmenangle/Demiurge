@@ -90,11 +90,51 @@ def test_thumb_url_if_ready_only_reports_existing(tmp_path):
     assert thumbnail_store.thumb_url_if_ready(local) != ""    # 生成后可发现
 
 
-def test_non_static_extension_skipped(tmp_path):
+def test_非图非视频扩展名跳过(tmp_path):
+    src = tmp_path / "notes.txt"
+    src.write_bytes(b"hi")
+    assert thumbnail_store.ensure_thumb(src) is None
+    assert thumbnail_store.thumb_url_for(view_urls.local_view(str(src))) == ""
+
+
+def test_视频定位不到ffmpeg时回落占位(tmp_path, monkeypatch):
+    """手机端 / 未装 ComfyUI：抽不了帧就保持占位卡，绝不抛错、绝不阻断入库。"""
+    from app.services import audio_merge
+
+    monkeypatch.setattr(audio_merge, "find_ffmpeg", lambda: None)
     src = tmp_path / "clip.mp4"
     src.write_bytes(b"\x00")
     assert thumbnail_store.ensure_thumb(src) is None
     assert thumbnail_store.thumb_url_for(view_urls.local_view(str(src))) == ""
+
+
+def test_视频抽帧后走同一条归一链(tmp_path, monkeypatch):
+    """真机形状（2026-10-31）：864×1536 竖屏视频 ⇒ 封面 288×512，比例仍是 9:16。
+
+    前端 `<img>` 量到 naturalWidth/naturalHeight 即得真实宽高比，瀑布流不再按写死的
+    16:9 估高。
+    """
+    from PIL import Image
+
+    source_frame = tmp_path / "frame_src.jpg"
+    Image.new("RGB", (864, 1536), (200, 60, 60)).save(source_frame)
+
+    def _fake_extract(video_path, dest):
+        assert video_path.suffix == ".mp4"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(source_frame.read_bytes())
+        return True
+
+    monkeypatch.setattr(thumbnail_store, "extract_video_frame", _fake_extract)
+    src = tmp_path / "clip.mp4"
+    src.write_bytes(b"\x00")
+
+    thumb = thumbnail_store.ensure_thumb(src)
+    assert thumb is not None and thumb.is_file()
+    with Image.open(thumb) as opened:
+        assert opened.size == (288, 512)
+    assert not list(thumb.parent.glob("*_frame.tmp.jpg")), "抽帧临时片必须清掉"
+    assert thumbnail_store.thumb_url_if_ready(view_urls.local_view(str(src))) != ""
 
 
 def test_broken_image_silent_fallback(tmp_path):

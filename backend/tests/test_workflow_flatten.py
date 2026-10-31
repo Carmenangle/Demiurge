@@ -41,7 +41,7 @@ def test_flatten_is_noop_for_api_format_workflow():
 
 
 def test_ui_to_api_keeps_old_output_for_workflow_without_subgraphs(monkeypatch):
-    monkeypatch.setattr(workflow_convert, "_object_info", lambda _url: {})
+    monkeypatch.setattr(workflow_convert, "_object_info", lambda *_a: {})
     workflow = {
         "nodes": [{
             "id": 12, "type": "CLIPLoader",
@@ -137,7 +137,7 @@ def test_nested_subgraph_is_inlined_recursively():
 
 
 def test_ui_to_api_of_subgraph_workflow_has_no_frontend_virtual_types(monkeypatch):
-    monkeypatch.setattr(workflow_convert, "_object_info", lambda _url: {})
+    monkeypatch.setattr(workflow_convert, "_object_info", lambda *_a: {})
     workflow = _skeleton(_simple_scale_subgraph(),
                          instance_inputs=[{"name": "image", "link": 100}])
 
@@ -175,7 +175,7 @@ def _promoted_workflow(instance_link, instance_widgets_values) -> dict:
 
 
 def test_promoted_widget_value_overrides_stale_inner_value(monkeypatch):
-    monkeypatch.setattr(workflow_convert, "_object_info", lambda _url: {})
+    monkeypatch.setattr(workflow_convert, "_object_info", lambda *_a: {})
     workflow = _promoted_workflow(instance_link=None, instance_widgets_values=["bislerp"])
 
     flat, overlay = workflow_flatten.flatten(workflow)
@@ -187,7 +187,7 @@ def test_promoted_widget_value_overrides_stale_inner_value(monkeypatch):
 
 
 def test_promoted_widget_that_is_linked_is_not_overridden(monkeypatch):
-    monkeypatch.setattr(workflow_convert, "_object_info", lambda _url: {})
+    monkeypatch.setattr(workflow_convert, "_object_info", lambda *_a: {})
     workflow = _promoted_workflow(instance_link=400, instance_widgets_values=["bislerp"])
 
     flat, overlay = workflow_flatten.flatten(workflow)
@@ -268,7 +268,7 @@ def test_getnode_without_matching_setnode_drops_dangling_edge():
 
 
 def test_ui_only_frontend_nodes_are_dropped(monkeypatch):
-    monkeypatch.setattr(workflow_convert, "_object_info", lambda _url: {})
+    monkeypatch.setattr(workflow_convert, "_object_info", lambda *_a: {})
     workflow = {
         "nodes": [
             {"id": 1, "type": "LoadImage", "inputs": [],
@@ -289,7 +289,7 @@ def test_ui_only_frontend_nodes_are_dropped(monkeypatch):
 
 def test_combined_fixture_leaves_no_frontend_trace(monkeypatch):
     """综合：嵌套 subgraph + 提升 widget + Set/Get，一次走完不留前端痕迹。"""
-    monkeypatch.setattr(workflow_convert, "_object_info", lambda _url: {})
+    monkeypatch.setattr(workflow_convert, "_object_info", lambda *_a: {})
     inner = {"nodes": [_scale_node(30, 31, 32, ["nearest-exact", 1])],
              "links": [_port_link(31, 0, 30, 0), _out_link(32, 30, 0, 0)]}
     outer = {
