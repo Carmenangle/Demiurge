@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   illustrationLoraConfigurationError, illustrationRequestMedia, illustrationWorkflowMedia,
   isSegmentBridgeEvent,
-  resolveIllustrationActors, resolveVideoMode, resolveVideoTemplateChoice,
+  resolveIllustrationActors, resolveVideoMode, resolveVideoTemplateChoice, resolveVideoDuration,
+  resolveBaseImageSource, imagePixelSizeFromBlob, alignSizeForVideoNode,
   planFirstlastFrameTasks, firstlastFrameValues, firstlastSlotLayout, transitionVideoValues,
   firstParagraphEnd, lastParagraphEnd, firstlastMainOffset,
 } from "./illustrationMedia";
@@ -208,25 +209,33 @@ describe("resolveVideoMode（V1.5/B1 视频模式决策）", () => {
   });
 });
 
-describe("resolveVideoTemplateChoice（V1.5/B3 R4 触发闸门）", () => {
+describe("resolveVideoTemplateChoice（触发闸门：climax 认后端视频成稿，不认 motion）", () => {
   const preset = (over: Record<string, unknown> = {}) => ({
     templateId: "img", videoTemplateId: "vid", smartVideo: true, ...over,
   });
 
-  it("firstlast：配置了视频模板即触发，不看 motion/smartVideo（楼层触发）", () => {
-    expect(resolveVideoTemplateChoice(preset(), "firstlast", 0)).toBe(true);
-    expect(resolveVideoTemplateChoice(preset({ smartVideo: false }), "firstlast", 0)).toBe(true);
+  it("firstlast：配置了视频模板即触发，不看视频成稿/smartVideo（楼层触发）", () => {
+    expect(resolveVideoTemplateChoice(preset(), "firstlast", "")).toBe(true);
+    expect(resolveVideoTemplateChoice(preset({ smartVideo: false }), "firstlast", "")).toBe(true);
   });
 
-  it("climax：维持 smartVideo && motion>=2", () => {
-    expect(resolveVideoTemplateChoice(preset(), "climax", 1)).toBe(false);
-    expect(resolveVideoTemplateChoice(preset(), "climax", 2)).toBe(true);
-    expect(resolveVideoTemplateChoice(preset({ smartVideo: false }), "climax", 5)).toBe(false);
+  it("climax：后端编排出视频提示词即出槽", () => {
+    expect(resolveVideoTemplateChoice(preset(), "climax", "[元信息]：8 seconds，9:16")).toBe(true);
+    expect(resolveVideoTemplateChoice(preset(), "climax", "  [元信息]  ")).toBe(true);
+  });
+
+  it("climax：后端没编排视频提示词（静态画面）→ 只出图；空白串同样不算", () => {
+    expect(resolveVideoTemplateChoice(preset(), "climax", "")).toBe(false);
+    expect(resolveVideoTemplateChoice(preset(), "climax", "   \n ")).toBe(false);
+  });
+
+  it("climax：smartVideo 关是总闸，视频成稿也压不动", () => {
+    expect(resolveVideoTemplateChoice(preset({ smartVideo: false }), "climax", "视频P")).toBe(false);
   });
 
   it("没配视频模板 → 永不触发视频（firstlast 也不例外）", () => {
-    expect(resolveVideoTemplateChoice(preset({ videoTemplateId: undefined }), "firstlast", 5)).toBe(false);
-    expect(resolveVideoTemplateChoice(preset({ videoTemplateId: undefined }), "climax", 5)).toBe(false);
+    expect(resolveVideoTemplateChoice(preset({ videoTemplateId: undefined }), "firstlast", "视频P")).toBe(false);
+    expect(resolveVideoTemplateChoice(preset({ videoTemplateId: undefined }), "climax", "视频P")).toBe(false);
   });
 });
 
@@ -469,5 +478,112 @@ describe("第59刀 段桥判定 isSegmentBridgeEvent", () => {
       useVideo: false, videoMode: "firstlast",
       videoPrompt: "", transitionVideoPrompt: "bridge",
     })).toBe(false);
+  });
+});
+
+describe("视频时长解析 resolveVideoDuration（剧情判定 4–8s，兜底 5）", () => {
+  it("后端剧情判定值生效（未设显式预设时）", () => {
+    expect(resolveVideoDuration({}, { duration: 6 })).toBe(6);
+    expect(resolveVideoDuration(undefined, { duration: 8 })).toBe(8);
+  });
+
+  it("用户显式预设覆盖剧情判定值", () => {
+    expect(resolveVideoDuration({ videoDurationHint: 10 }, { duration: 6 })).toBe(10);
+  });
+
+  it("0/缺省/非法值不注入（保留模板默认）", () => {
+    expect(resolveVideoDuration({}, { duration: 0 })).toBeUndefined();
+    expect(resolveVideoDuration({}, undefined)).toBeUndefined();
+    expect(resolveVideoDuration({ videoDurationHint: 0 }, {})).toBeUndefined();
+    expect(resolveVideoDuration({}, { duration: Number.NaN })).toBeUndefined();
+  });
+});
+
+describe("resolveBaseImageSource（底图引用归一，2026-10-31 LoadImage 实锤）", () => {
+  const LOCAL_VIEW = "/api/comfyui/local-view?path=" + encodeURIComponent(
+    "C:\\demo\\userdata\\pictures\\某作品\\SAVE02\\pictures\\workflow_03780d6582af1705874d8c4f.png",
+  );
+
+  it("已完成的 local-view 相对地址不再二次包装，文件名取 path 参数的真实图片名", () => {
+    // 二次包装会取回 404 JSON（{"detail":"本地图片不存在"}）并被当图片上传，
+    // ComfyUI 报 LoadImage (#61): cannot identify image file '/ComfyUI/input/local-view?path=…'。
+    expect(resolveBaseImageSource(LOCAL_VIEW)).toEqual({
+      needsWrap: false,
+      source: LOCAL_VIEW,
+      filename: "workflow_03780d6582af1705874d8c4f.png",
+    });
+  });
+
+  it("绝对 http 地址同样不包装（含旧消息里的 127.0.0.1 写法）", () => {
+    const absolute = `http://127.0.0.1:8010${LOCAL_VIEW}`;
+    expect(resolveBaseImageSource(absolute)).toMatchObject({
+      needsWrap: false, filename: "workflow_03780d6582af1705874d8c4f.png",
+    });
+  });
+
+  it("view 地址按 filename 参数取文件名，query 里的斜杠不参与命名", () => {
+    expect(resolveBaseImageSource(
+      "/api/comfyui/view?filename=ComfyUI_00012_.png&subfolder=sub&type=output",
+    )).toEqual({
+      needsWrap: false,
+      source: "/api/comfyui/view?filename=ComfyUI_00012_.png&subfolder=sub&type=output",
+      filename: "ComfyUI_00012_.png",
+    });
+  });
+
+  it("裸本地路径需要包装，文件名取末段", () => {
+    expect(resolveBaseImageSource("D:\\out\\角色底图.png")).toEqual({
+      needsWrap: true, source: "D:\\out\\角色底图.png", filename: "角色底图.png",
+    });
+  });
+
+  it("data: 地址不包装且用占位文件名（无路径可解析）", () => {
+    expect(resolveBaseImageSource("data:image/png;base64,AAAA")).toEqual({
+      needsWrap: false, source: "data:image/png;base64,AAAA", filename: "base.png",
+    });
+  });
+});
+
+// ───────── 首帧真实像素尺寸 → 视频节点 width/height（2026-10-31 用户定案）─────────
+// 用户原话：「图片的宽高要和视频的宽高一致」。量尺寸只为覆盖模板里的分辨率连线；
+// 量不到（无 createImageBitmap / 解码失败）绝不能把整条出图链判死 ⇒ 一律退 undefined。
+describe("首帧尺寸量取与视频节点对齐", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const blob = () => new Blob([new Uint8Array([0x89, 0x50])], { type: "image/png" });
+
+  it("量到像素 ⇒ 返回真实宽高（视频与首帧逐像素对齐的数据源）", async () => {
+    vi.stubGlobal("createImageBitmap", async () => ({ width: 864, height: 1536 }));
+    await expect(imagePixelSizeFromBlob(blob())).resolves.toEqual({ width: 864, height: 1536 });
+  });
+
+  it("环境没有 createImageBitmap ⇒ undefined，不去调用、不抛（jsdom/老浏览器不卡链）", async () => {
+    await expect(imagePixelSizeFromBlob(blob())).resolves.toBeUndefined();
+  });
+
+  it("解码出 0 尺寸（坏字节）⇒ undefined 而不是把 0 提交给视频节点", async () => {
+    vi.stubGlobal("createImageBitmap", async () => ({ width: 0, height: 1536 }));
+    await expect(imagePixelSizeFromBlob(blob())).resolves.toBeUndefined();
+  });
+
+  it("createImageBitmap 抛错 ⇒ undefined（解码失败上界，不冒泡成出图失败）", async () => {
+    vi.stubGlobal("createImageBitmap", async () => { throw new Error("decode failed"); });
+    await expect(imagePixelSizeFromBlob(blob())).resolves.toBeUndefined();
+  });
+
+  it("已在 32 网格的尺寸原样通过（标准成图口径 ⇒ 取整是恒等变换）", () => {
+    expect(alignSizeForVideoNode({ width: 864, height: 1536 })).toEqual({ width: 864, height: 1536 });
+  });
+
+  it("不在网格上的尺寸就近取整到 32 的倍数（节点 step 32）", () => {
+    expect(alignSizeForVideoNode({ width: 1000, height: 1500 })).toEqual({ width: 992, height: 1504 });
+  });
+
+  it("退化的小尺寸抬到下限 32（节点 min 32，出不了非法值）", () => {
+    expect(alignSizeForVideoNode({ width: 10, height: 8 })).toEqual({ width: 32, height: 32 });
+  });
+
+  it("超上限 16384 ⇒ undefined，交回模板默认而不是提交非法尺寸", () => {
+    expect(alignSizeForVideoNode({ width: 864, height: 20000 })).toBeUndefined();
+    expect(alignSizeForVideoNode(undefined)).toBeUndefined();
   });
 });

@@ -139,10 +139,19 @@ def _extract_video_action_plan(
             "（0–15 秒）内没有对白——不得把剧情任何台词（含当下/前文/回忆/旁白转述）搬进来；"
             "声音细节只写进 sfx。\n"
         )
+    # 时长由剧情动作量判定（2026-10-31 用户定案，仅高潮模式）：4–8 秒，兜底 5。
+    # 首尾帧覆盖整段楼层，时长仍走模板/预设，不由拍数推定。
+    climax_mode = video_mode != "firstlast"
+    duration_field = "\"duration_s\":6," if climax_mode else ""
+    duration_rule = (
+        "4. duration_s：按 action_sequence 的动作量给整数秒（4–8）：单拍 4–5，两拍 6，"
+        "三拍及以上 7–8；只给剧情能演完的时长，不得为凑时长补剧情没写的动作。\n"
+        if climax_mode else ""
+    )
     system = (
         "你是视频提示词原料提取器。读下面这段剧情高潮正文（可能含防拦截标记，请还原其原义），"
         "理解人物体态、动作与声音，输出 JSON：\n"
-        "{\"action_sequence\":[{\"beat\":\"定格起点/延伸/收尾\",\"desc\":\"动作描述\"}],"
+        "{" + duration_field + "\"action_sequence\":[{\"beat\":\"定格起点/延伸/收尾\",\"desc\":\"动作描述\"}],"
         "\"subject_scene\":\"简化外貌+场景英文视觉描述\","
         "\"audio_design\":{\"music\":\"一句话音乐情绪\",\"sfx\":[\"具体音效1\",\"音效2\"],"
         "\"lines\":[{\"speaker\":\"角色名\",\"text\":\"台词原文\",\"at_s\":5}],\"sync\":\"卡拍说明\"}}\n"
@@ -160,7 +169,8 @@ def _extract_video_action_plan(
         "手掌/肉体拍击声、流水→潺潺水声、金属镣铐→铁链哗啦声、喘息/呻吟/衣料摩擦都要落到具体声音），"
         "用简洁英文描述，不写『环境声』这类抽象词。\n"
         "   - music/sync：各一句话即可。\n"
-        "4. 只输出 JSON，不要解释。"
+        + duration_rule
+        + ("5. 只输出 JSON，不要解释。" if climax_mode else "4. 只输出 JSON，不要解释。")
     )
     # 生图链同款：把当前防拦截预设组装进 system（含「不得拒答」任务框定）。
     # 预设缺失/组装失败时保持原 system，不阻断。
@@ -338,6 +348,9 @@ def _wb_comfy_scene_target(ctx: CtxLike, repo_id: str, plan, clean: str, sig: di
     # 4 run × 3 采样）该缺口导致判据档在 L1/L3 反而劣于词表档（55.3 vs 35、19.0 vs 12）；
     # 接上仲裁后 L1 55.3→35.0、L3 19.0→12.0，且 L2 的完美选点零误伤（推翻 0/12）。
     fallback_anchor_needs_arbitration = False
+    # 2026-10-31：锚点是否出自「判据档 / 词表档」这条**无计划**支路。是 ⇒ 仲裁机不再
+    # 认时间跳转那道闸（`resolve_illustration_anchor` 的 `respect_scene_boundary`）。
+    anchor_from_local_judge = False
     if anchor_override and not character_encounter and not plan:
         # 第 57 刀 · 多批派发（2026-09-24）：锚点由调用方指定 —— 判据已在本轮主路径跑过一次，
         # **不再重复调用判据 LLM**（否则 N 张图会多花 N-1 次判据调用）。
@@ -406,11 +419,13 @@ def _wb_comfy_scene_target(ctx: CtxLike, repo_id: str, plan, clean: str, sig: di
             # A′：词表档没有判据字段 ⇒ 回退在场角色全集（口径比判据档宽，两档各锁一条）。
             anchor_subjects = _frame_subject_names(present)
         fallback_anchor_needs_arbitration = True
+        anchor_from_local_judge = True
     planned_anchor = plan.get("anchor", "")
     requested_anchor = planned_anchor or fallback_anchor
     if plan or fallback_anchor_needs_arbitration:
         requested_anchor = scene_illustration.resolve_illustration_anchor(
             clean, requested_anchor,
+            respect_scene_boundary=not anchor_from_local_judge,
         )
     plan_retargeted = bool(
         plan and planned_anchor
@@ -807,10 +822,13 @@ def _wb_comfy_illustrate_env(ctx: CtxLike, plan, sig: dict, target: dict,
          "anchor": target["requested_anchor"], "scene_spec": scene_spec,
          # V1.5 默认开放：视频配置随事件透传，供 dry-run 组装「上交视频模型的参数」
          # （测试视频参数有没有正确上传；无视频工作流/节点也不影响出图）
+         # size=本锚点画面的画幅比例（2026-10-31 用户定案「图片的宽高要和视频的宽高一致」）：
+         # 此前硬编码 1280x720，竖图（9:16）楼层的视频提示词逐字写着 16:9，
+         # 模型按横画幅构图 → 首帧与成片的宽高对不上（真机实锤 da0f9576 的 [元信息]）。
          "video_config": {
              "base_url": str(ctx.get("vid_base") or ""),
              "model": str(ctx.get("vid_model") or ""),
-             "size": "1280x720",
+             "size": str(scene_spec.get("aspect_ratio") or ""),
              "proxy": str(ctx.get("vid_proxy") or ""),
          },
          "allow_anchor_fallback": (
@@ -829,8 +847,9 @@ def _wb_frames_and_video(ctx: CtxLike, illustrate_req: dict, scene_spec: dict,
 
     返回 `video_prompt_text`（未开启/失败时为空串）。逐字自 `_agency_writeback` 搬移。
 
-    `compile_video=False`（第 57 刀 · 多批派发的第 2..N 张）：只补帧描述，**不编译视频请求** ——
-    多批视频的合并是**后续步骤**，本步先只做多批生图，避免产出「N 段各自独立、未合并」的视频。
+    `compile_video=False`（2026-10-31 收窄到**只剩 firstlast 的段桥 extra**）：只补帧描述，
+    **不编译视频请求**——该张的视频由 `transition_video_request` 承载，再编一支正片就成
+    「一个槽两支视频」。高潮模式的 extra 一律 True（每张各配一支动作延伸视频，用户定案）。
     默认 True ⇒ 主链路逐字节不变（零回归锁）。
     """
     from app.services import story_frames
@@ -882,6 +901,11 @@ def _wb_frames_and_video(ctx: CtxLike, illustrate_req: dict, scene_spec: dict,
                 _merged_spec["video_subject_scene"] = _vp_plan["subject_scene"]
             if _vp_plan.get("audio_design"):
                 _merged_spec["audio_design"] = _vp_plan["audio_design"]
+            if _video_mode == "climax":
+                # 提取失败也兜底 5 秒：绝不回落到模板旧默认 12 秒（用户定案 2026-10-31）。
+                _merged_spec["video_duration_s"] = (
+                    _vp_plan.get("duration_s") or _vp_mod.CLIMAX_DURATION_FALLBACK
+                )
             illustrate_req["video_mode"] = _video_mode
             _vcfg = illustrate_req.get("video_config") or {}
             _vsk = _video_skeleton_for(ctx, _video_mode)
@@ -985,6 +1009,57 @@ def _wb_emit_illustration_trace(ctx: CtxLike, illustrate_req: dict, *, plan, sig
         ),
     )
 
+def _wb_bridge_chain(ctx: CtxLike, pending: list[dict], primary_off: int,
+                     primary_pic: str) -> None:
+    """第 59／74 刀 · firstlast 多批的**段桥链**：每张 extra 的视频 = 「前一张画面 → 本画面」。
+
+    用户口径（逐字）：「首尾帧生成就是前面的图片放首帧后面的图片放尾帧生成视频」。
+
+    ⚠ 链序＝**正文序**（段落吸附后的插入偏移），不是派发序（打分从高到低）：「前面的图片」
+      指剧情里在前的那一张，而 `select_anchor_intents` 给的是打分序——两套序混用会让「起点
+      描述」和前端真正取到的「上一张成图」指向不同画面（2026-10-31 复核发现，≥3 张必错位）。
+      偏移与 `_link_firstlast_bridges`（roleplay_turn）同源 ⇒ 描述链与槽位链必落同一序。
+    ⚠ 主图（链头候选）只作**起点**，自己不编桥：它的视频是整楼层正片，走 `_wb_frames_and_video`。
+    ⚠ 排在主图**之前**的 extra（主锚点不在正文开头，很常见）在本楼层没有「前面的图片」⇒
+      起点退回**上一楼层的尾帧画面**（`_resolve_prev_tail_desc`，与主槽正片的 W3 转场同一真源），
+      前端侧对应 `resolvePrevTailDesc().lastFrameUrl` 取那张成图 ⇒ 描述与图仍是同一画面。
+    ⚠ `build_video_request` 的 transition 分支形参语义（video_prompt.py 真源）：
+      `prev_tail_desc`=**起点**描述、`first_frame_desc`=**终点**描述。槽位自己的
+      `first_frame_desc` 是「帧任务①=上一画面」（起点），与本参数**正好相反**。
+    ⚠ 编译失败 ⇒ 该张不带 `transition_video_request`，前端退「高潮片段延续」（该槽只出图）。
+    """
+    from app.services import video_prompt as _vp_mod
+
+    chain = [{"off": int(primary_off), "pic": primary_pic, "request": None,
+              "scene_spec": None, "motion": 0}, *pending]
+    chain.sort(key=lambda item: int(item.get("off") or 0))
+    prev_pic = ""
+    for item in chain:
+        request = item.get("request")
+        own_pic = str(item.get("pic") or "")
+        if request is None:          # 主图：只当链头起点
+            prev_pic = own_pic
+            continue
+        start = prev_pic or (_resolve_prev_tail_desc(ctx) or "")
+        request["video_mode"] = "firstlast"
+        request["transition"] = "regenerate"   # 起点图＝另一条链的成图，本槽不再生成帧图
+        request["prev_tail_desc"] = start[:500].strip()
+        request["first_frame_desc"] = start[:500].strip()   # 帧任务①：上一画面（桥首帧）
+        request["last_frame_desc"] = own_pic[:500].strip()  # 帧任务②：本画面（桥尾帧）
+        try:
+            merged_spec = dict(item.get("scene_spec") or {})
+            merged_spec.setdefault("motion", int(item.get("motion") or 0))
+            request["transition_video_request"] = _vp_mod.build_video_request(
+                mode="transition", spec=merged_spec,
+                video_config=request.get("video_config") or {},
+                first_frame_desc=own_pic[:500].strip(),          # 终点＝本画面
+                prev_tail_desc=request["prev_tail_desc"],      # 起点＝上一画面
+                skeleton=_video_skeleton_for(ctx, "transition"),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        prev_pic = own_pic
+
 def _wb_comfy_extra_requests(ctx: CtxLike, repo_id: str, plan, clean: str, sig: dict,
                              pool: dict, *, primary_anchor: str, primary_motion: int,
                              prompt_override: str, transition_decision,
@@ -1004,11 +1079,11 @@ def _wb_comfy_extra_requests(ctx: CtxLike, repo_id: str, plan, clean: str, sig: 
 
     ⚠ **逐点各过一遍既有仲裁机**（在 `_wb_comfy_scene_target` 内）—— 红线 74／76 的修法
       必须对每一张都生效。⚠ **不重复调判据 LLM**（见 `anchor_override` 的说明）。
-    ⚠ 第 59 刀（视频连续化 · 用户定案「前后衔接按首尾帧生成，衔接不上就是高潮片段延续」）：
-      firstlast 模式下 extras **不再整跳过** —— 每张 extra = **段桥**：
-        首帧 = 上一张的画面（正文序链，首桥 = 主图画面）；尾帧 = 本锚点画面（槽位自己的图）；
-        桥视频复用现有 `mode="transition"` 编译（起点=prev_tail、终点=first_frame）。
-      衔接不上（上一张帧图失败）⇒ 前端退**高潮片段延续**（该槽按普通图出、视频从定格延续）。
+    ⚠ 第 59 刀（视频连续化）／第 74 刀（多批正文序链）：firstlast 模式下 extras **不再整跳过**
+      —— 每张 extra = **段桥**：起点 = 正文序里在它之前那张画面（可能是主图，也可能是前一张
+      extra），终点 = 本锚点画面（槽位自己的图）；桥视频复用 `mode="transition"` 编译，
+      成对收集后由 `_wb_bridge_chain` 统一排序落笔（派发序＝打分序，链序必须＝正文序）。
+      衔接不上（前一张是链头、没有更早的画面）⇒ 前端退**高潮片段延续**（该槽只出图）。
     """
     from app.services import scene_illustration
 
@@ -1039,8 +1114,9 @@ def _wb_comfy_extra_requests(ctx: CtxLike, repo_id: str, plan, clean: str, sig: 
     primary_off = _para_off(primary_anchor)
     if primary_off is not None:
         used_offsets.add(primary_off)
-    # 第 59 刀（视频连续化）：段链起点 = 主图画面（首桥的「上一张」）。
-    _prev_pic = str(primary_prompt or "")
+    # 第 74 刀（正文序链）：段桥的「上一张」不再随派发序（打分序）走，改由 `_wb_bridge_chain`
+    # 按**正文序**排好后统一编译 ⇒ 这里只把候选收起来。
+    _pending_bridges: list[dict] = []
     extras: list[dict] = []
     for item in scene_illustration.select_anchor_intents(items, count):
         anchor = str(item.get("anchor") or "").strip()
@@ -1068,33 +1144,29 @@ def _wb_comfy_extra_requests(ctx: CtxLike, repo_id: str, plan, clean: str, sig: 
             ctx, plan, sig, target, scene_spec, motion=target["motion"])
         if not request:
             continue
+        # 2026-10-31 用户定案「多张高潮图＝一张参考图配一支动作延伸视频，生成多个批次」：
+        # 高潮模式下第 2..N 张**各自编一支正片视频**（旧口径整批传 compile_video=False，
+        # 只有主图带 video_prompt ⇒ 前端闸门把第 2..N 张压成纯图，与用户预期不符）。
+        # firstlast 的 extra 仍由**段桥**承载视频（见本函数末尾 `_wb_bridge_chain`），此处不编正片，
+        # 否则一个槽出两支视频且帧语义重复。
+        _bridge_extra = (str(ctx.get("video_mode") or "") == "firstlast"
+                         and bool(ctx.get("comfy_video")))
         _wb_frames_and_video(
             ctx, request, scene_spec, clean, transition_decision,
-            target["motion"], compile_video=False)
-        # 第 59 刀（视频连续化）：firstlast 模式下每张 extra = **段桥**——
-        #   首帧 = 上一张的画面（正文序链，首桥 = 主图画面）；尾帧 = 本锚点画面（槽位自己的图）；
-        #   桥视频复用现有 mode="transition" 编译（起点=prev_tail、终点=first_frame）。
-        # 衔接不上（上一张帧图失败/前端拿不到桥）⇒ 前端退**高潮片段延续**（该槽按普通图出）。
-        if str(ctx.get("video_mode") or "") == "firstlast" and ctx.get("comfy_video"):
-            _own_pic = str(request.get("prompt") or "")
-            request["video_mode"] = "firstlast"
-            request["transition"] = "regenerate"     # 首帧（上一画面）需独立生成
-            request["prev_tail_desc"] = _prev_pic[:500].strip()
-            request["first_frame_desc"] = _prev_pic[:500].strip()   # 帧任务①：上一画面（桥首帧）
-            request["last_frame_desc"] = _own_pic[:500].strip()     # 帧任务②：本画面（桥尾帧）
-            try:
-                from app.services import video_prompt as _vp_mod
-                _merged_spec = dict(scene_spec)
-                _merged_spec.setdefault("motion", int(target["motion"] or 0))
-                request["transition_video_request"] = _vp_mod.build_video_request(
-                    mode="transition", spec=_merged_spec,
-                    video_config=request.get("video_config") or {},
-                    first_frame_desc=request["first_frame_desc"],
-                    prev_tail_desc=request["prev_tail_desc"],
-                    skeleton=_video_skeleton_for(ctx, "transition"),
-                )
-            except Exception:  # noqa: BLE001
-                pass   # 桥编译失败 ⇒ 前端退高潮延续（该槽按普通图出）
-            _prev_pic = _own_pic
+            target["motion"], compile_video=not _bridge_extra)
+        # 第 59 刀（视频连续化）：firstlast 模式下每张 extra = **段桥**（桥视频的起点/终点描述
+        # 与编译见下方「正文序链」——派发序是打分序，链必须按正文序，见 `_wb_bridge_chain`）。
+        if _bridge_extra:
+            _pending_bridges.append({
+                "off": final_off if final_off is not None else 0,
+                "pic": str(request.get("prompt") or ""),
+                "request": request, "scene_spec": scene_spec,
+                "motion": int(target["motion"] or 0),
+            })
         extras.append(request)
+    if _pending_bridges:
+        _wb_bridge_chain(
+            ctx, _pending_bridges,
+            primary_off if primary_off is not None else 0, str(primary_prompt or ""),
+        )
     return extras

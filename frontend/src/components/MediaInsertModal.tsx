@@ -392,28 +392,28 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
             {viewpoint === "third_person" && "第三人称：主人公算一个主体，按世界书条目取主人公性别入画。"}
           </p>
         </div>
-        {!firstlast && (
-          <label style={{ display: "block", marginBottom: 12 }}>
-            <span style={{ display: "block", marginBottom: 4, fontSize: 13 }}>批量生图数目</span>
-            <input
-              type="number"
-              min={1}
-              step={1}
-              value={batchImageCount}
-              onChange={(event) => {
-                const parsed = Number(event.target.value);
-                setBatchImageCount(
-                  Number.isFinite(parsed) && parsed >= 1 ? Math.floor(parsed) : 1,
-                );
-              }}
-              style={{ width: "100%" }}
-            />
-            <p className="bind-hint" style={{ margin: "5px 0 0" }}>
-              仅高潮点模式生效，最小 1、无上限。达到或超过高潮点数 ⇒ 全部出图；
-              少于高潮点数 ⇒ 按判据打分从高到低取前几处，各插到自己的正文位置。
-            </p>
-          </label>
-        )}
+        <label style={{ display: "block", marginBottom: 12 }}>
+          <span style={{ display: "block", marginBottom: 4, fontSize: 13 }}>批量生图数目</span>
+          <input
+            type="number"
+            min={1}
+            step={1}
+            value={batchImageCount}
+            onChange={(event) => {
+              const parsed = Number(event.target.value);
+              setBatchImageCount(
+                Number.isFinite(parsed) && parsed >= 1 ? Math.floor(parsed) : 1,
+              );
+            }}
+            style={{ width: "100%" }}
+          />
+          <p className="bind-hint" style={{ margin: "5px 0 0" }}>
+            高潮点／首尾帧两种模式都生效，最小 1、无上限。达到或超过高潮点数 ⇒ 全部出图；
+            少于 ⇒ 按判据打分从高到低取前几处，各插到自己的正文位置。
+            高潮点：每张各配一支动作延伸视频。首尾帧：每张与前一张接成一段「前图为首帧、
+            本图为尾帧」的衔接视频，落在本张图正下方。
+          </p>
+        </label>
         <div style={{ marginBottom: 12 }}>
           <span style={{ display: "block", marginBottom: 4, fontSize: 13 }}>LoRA 模式</span>
           <div className="lora-mode-switch" role="group" aria-label="LoRA 模式">
@@ -712,7 +712,7 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
           {videoTemplateId && (
             <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, fontSize: 13 }}>
               <input type="checkbox" checked={smartVideo} onChange={(e) => setSmartVideo(e.target.checked)} />
-              智能模态：剧情动作剧烈时（如奔跑/律动）自动改用视频模板，静态画面仍出图
+              智能模态：后端为这段画面编排出视频分镜时，先出图、图的正下方再挂一个视频槽（拿这张成图当首帧）；没编排的画面仍只出图
             </label>
           )}
         </>)}

@@ -9,6 +9,7 @@ import {
   resolveVideoBaseImageRef,
   resolvePrevTailDesc,
   resolveTransitionBaseImage,
+  findMediaSlotState,
   userMessageRichContent,
 } from "./chatGeneration";
 import { serializeInspirationSend, type InspirationAttachment } from "./inspirationInsert";
@@ -623,6 +624,47 @@ describe("resolveTransitionBaseImage（V1.5/W2 首帧复用·坑C 有图前提�
       videoMode: "climax", transition: "reuse",
       messages: msgs, fallback: "local://base.png",
     })).toBe("local://base.png");
+  });
+});
+
+describe("findMediaSlotState（第 74 刀：段桥取「上一张成图」的槽位读法）", () => {
+  const msgs = [
+    { id: "m1", parts: [{ type: "media-slot", slotId: "s1", status: "pending", kind: "image" }] },
+    { id: "m2", parts: [
+      { type: "image", slotId: "img", status: "ready", url: "/api/x.png" },
+      { type: "video", slotId: "vid", status: "ready", url: "/api/y.mp4" },
+      { type: "media-slot", slotId: "bad", status: "failed", kind: "image" },
+    ] },
+  ];
+
+  it("pending 槽读成 pending＋kind 作媒体类型（在途≠就绪，等待方继续轮询）", () => {
+    expect(findMediaSlotState(msgs as never, "m1", "s1"))
+      .toEqual({ status: "pending", mediaType: "image" });
+  });
+
+  it("已回填的槽没有 status 字段 ⇒ 按 ready 读；类型取 part.type", () => {
+    expect(findMediaSlotState(msgs as never, "m2", "img"))
+      .toEqual({ status: "ready", mediaType: "image", url: "/api/x.png" });
+  });
+
+  it("视频槽读成 video：不是图片 ⇒ 等待方不得拿它当图片1", () => {
+    expect(findMediaSlotState(msgs as never, "m2", "vid")?.mediaType).toBe("video");
+  });
+
+  it("失败槽原样标 failed（等待方立刻放弃，绝不干等超时）", () => {
+    expect(findMediaSlotState(msgs as never, "m2", "bad"))
+      .toEqual({ status: "failed", mediaType: "image" });
+  });
+
+  it("消息不存在 / 槽不存在 / id 为空 ⇒ undefined（不抛、不猜）", () => {
+    expect(findMediaSlotState(msgs as never, "m9", "img")).toBeUndefined();
+    expect(findMediaSlotState(msgs as never, "m2", "nope")).toBeUndefined();
+    expect(findMediaSlotState(msgs as never, "", "img")).toBeUndefined();
+    expect(findMediaSlotState(msgs as never, "m2", "")).toBeUndefined();
+  });
+
+  it("消息没有 parts 字段 ⇒ undefined（历史里的纯文本楼层）", () => {
+    expect(findMediaSlotState([{ id: "m3" }] as never, "m3", "img")).toBeUndefined();
   });
 });
 

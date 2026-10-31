@@ -134,17 +134,100 @@ export function isSegmentBridgeEvent(opts: {
     && !opts.videoPrompt && !!opts.transitionVideoPrompt;
 }
 
-/** V1.5/B3（R4）视频模板触发闸门：firstlast 是楼层触发不看 motion；climax 维持 smartVideo+motion。
- * 返回是否用视频模板（模板已配置为前提）。 */
+/** V1.5/B3（R4）视频模板触发闸门；2026-10-31 改口：climax 不再用 motion 词表判「有没有动作」，
+ * 改认**后端是否真的编排出视频提示词**（`video_prompt`）。词表闸会压掉成稿（后端已花一次 LLM
+ * 编译出 2757 字视频分镜，前端按 motion=1 静默丢弃 ⇒ 视频槽不存在且无任何界面提示）。
+ * firstlast 是楼层触发，不看视频成稿。返回是否用视频模板（模板已配置为前提）。 */
 export function resolveVideoTemplateChoice(
   preset: { videoTemplateId?: string; smartVideo?: boolean } | undefined,
   videoMode: VideoMode,
-  motion: number,
+  videoPrompt: string,
 ): boolean {
   if (videoMode === "firstlast") {
     return !!preset?.videoTemplateId;
   }
-  return !!(preset?.smartVideo && preset.videoTemplateId && motion >= 2);
+  return !!(preset?.smartVideo && preset.videoTemplateId && (videoPrompt || "").trim());
+}
+
+/** 视频时长（秒）：用户显式预设最高优先；否则用后端按剧情动作量判定的秒数
+ * （2026-10-31：4–8 秒，提取失败 5）；都缺省 → undefined，保留模板默认。 */
+export function resolveVideoDuration(
+  preset: { videoDurationHint?: number } | undefined,
+  params: { duration?: number } | undefined,
+): number | undefined {
+  const explicit = Number(preset?.videoDurationHint);
+  if (Number.isFinite(explicit) && explicit > 0) return explicit;
+  const judged = Number(params?.duration);
+  return Number.isFinite(judged) && judged > 0 ? judged : undefined;
+}
+
+/** 视频首帧/尾帧底图引用归一（2026-10-31 真机实锤）：聊天槽位里的图片 url 已是
+ * `/api/comfyui/local-view?path=…` 或 `http(s)://…` 可 fetch 地址，再套一层 localViewUrl
+ * 会取回 404 JSON（本地图片不存在），被当图片上传后 ComfyUI 报
+ * `LoadImage (#61): cannot identify image file`。只有裸本地路径才需要包装；
+ * 文件名必须从 path/filename 查询参数取真实图片名，禁止把 `local-view?path=…` 当文件名。 */
+export function resolveBaseImageSource(
+  ref: string,
+): { needsWrap: boolean; source: string; filename: string } {
+  const source = ref.trim();
+  const needsWrap = !(
+    /^(?:https?:)?\/\//i.test(source)
+    || source.startsWith("/api/")
+    || source.startsWith("data:")
+    || source.startsWith("blob:")
+  );
+  if (source.startsWith("data:")) return { needsWrap, source, filename: "base.png" };
+  let filename = "";
+  const queryAt = source.indexOf("?");
+  if (queryAt >= 0) {
+    for (const pair of source.slice(queryAt + 1).split("&")) {
+      const [key, value = ""] = pair.split("=");
+      if (key !== "path" && key !== "filename") continue;
+      try { filename = decodeURIComponent(value).split(/[\\/]/).pop() || ""; }
+      catch { filename = ""; }
+      break;
+    }
+  }
+  if (!filename) {
+    try { filename = decodeURIComponent(source.split(/[?#]/)[0].split(/[\\/]/).pop() || ""); }
+    catch { filename = source.split(/[\\/]/).pop() || ""; }
+  }
+  return { needsWrap, source, filename: filename || "base.png" };
+}
+
+/** 读取图片真实像素尺寸（2026-10-31 用户定案「图片的宽高要和视频的宽高一致」）。
+ *  用**已到手的那份字节**（底图上传前先 fetch 过，不再二次请求）量出首帧图的实际宽高，
+ *  写进视频节点的 width/height，覆盖模板里分辨率选择器的连线 ⇒ 成片与首帧逐像素对齐。
+ *  环境没有 createImageBitmap（jsdom/老浏览器）或解码失败 → undefined ⇒ 视频退回模板
+ *  自带尺寸，绝不因为量不到尺寸而把整条链判失败。 */
+export function imagePixelSizeFromBlob(
+  blob: Blob,
+): Promise<{ width: number; height: number } | undefined> {
+  const createBitmap = (globalThis as { createImageBitmap?: unknown }).createImageBitmap;
+  if (typeof createBitmap !== "function") return Promise.resolve(undefined);
+  return (createBitmap as (source: Blob) => Promise<{ width: number; height: number }>)
+    .call(globalThis, blob)
+    .then((bitmap) => {
+      const width = bitmap.width;
+      const height = bitmap.height;
+      if (width > 0 && height > 0) return { width, height };
+      return undefined;
+    })
+    .catch(() => undefined);
+}
+
+/** 视频节点尺寸对齐（2026-10-31 实测 object_info：MiniMaxH3*ToVideo 的 width/height
+ *  = INT min 32 / max 16384 / step 32）：首帧尺寸按 32 就近取整——标准图片模板的成图
+ *  本就 32 对齐（latent 是 32 的倍数、×1.5 仍对齐）⇒ 取整是恒等变换，逐像素相同；
+ *  越界（超 16384 或退化值）→ undefined，交回模板默认而不是提交非法尺寸。 */
+export function alignSizeForVideoNode(
+  size: { width: number; height: number } | undefined,
+): { width: number; height: number } | undefined {
+  if (!size) return undefined;
+  const align = (value: number) => Math.max(32, Math.round(value / 32) * 32);
+  const width = align(size.width);
+  const height = align(size.height);
+  return width <= 16384 && height <= 16384 ? { width, height } : undefined;
 }
 
 // ===== V1.6/P5 首尾帧顺序链：先出首尾帧图（图片模板生图），双图 ready 再提视频 =====

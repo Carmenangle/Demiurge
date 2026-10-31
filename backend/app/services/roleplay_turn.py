@@ -1028,7 +1028,57 @@ def _illustrate_rec(request: dict, *, repo_id, turn: int, turn_id: str,
             rec[_key] = _value
     if isinstance(request.get("transition_video_request"), dict):
         rec["transition_video_request"] = request["transition_video_request"]
+    # 第 74 刀：多批的**第几张**（index>0 才带 ⇒ 单张 rec 与改造前逐字相同，零回归锁）。
+    # 前端据此判「本条是批次图」：批次图落自己的 `anchor_offset`，不再吃首尾帧的第 34 刀
+    # 固定落点（否则 N 张批次图全叠在首段末／末段末）。
+    if index > 0:
+        rec["batch_index"] = index
     return rec
+
+
+def _is_firstlast_bridge(rec: dict) -> bool:
+    """段桥 = firstlast + 有转场请求 + **无正片请求**（与前端 `isSegmentBridgeEvent` 同判据）。"""
+    return (rec.get("video_mode") == "firstlast"
+            and isinstance(rec.get("transition_video_request"), dict)
+            and bool(rec.get("transition_video_request"))
+            and not rec.get("video_request"))
+
+
+def _link_firstlast_bridges(recs: list[dict]) -> None:
+    """第 74 刀（2026-10-31 用户口径「前面的图片放首帧、后面的图片放尾帧生成视频」）：
+    给多批的段桥 rec 就地标注 `bridge_prev_slot`＝**正文序**里离它最近的前一张画面槽 id。
+
+    为什么后端来标：「前一张」只有 rec 全集 + `anchor_offset` 才排得出来（派发序＝打分序，
+    展示序＝正文序），前端各槽只看得到自己。链序与 `_wb_bridge_chain`（agency_scene_comfy）
+    同源 ⇒ 「起点描述」与前端真正取到的「上一张成图」必指同一画面。前端据此把那张**成图**
+    当图片1，而不是像旧口径那样按文字再生成一张「上一画面」（画面对不上＝用户说的衔接不上）。
+
+    前一张落哪个槽：
+      · 前一张是**另一张桥** ⇒ 它的主槽就是它的成图（段桥主槽出普通图）。
+      · 前一张是**主图**（index 0）⇒ 首尾帧模式下主槽出的是整楼层正片**视频**，不能当图片1，
+        取它的尾帧图槽 `${主槽id}:last`（本楼层收束那一格的图，剧情上正对着下一张）。
+        槽不存在（正片走了首帧复用、没生成尾帧图）⇒ 前端有界等待后自行降级。
+      · 桥排在主图**之前**（正文序）⇒ 本轮批次里没有更早的成图 ⇒ **不标注**，前端退到
+        上一楼层的尾帧成图（与 `_wb_bridge_chain` 的起点回退 `_resolve_prev_tail_desc` 同源），
+        连上楼层尾帧图都没有才退「高潮片段延续」（第 59 刀定案）——绝不拿更晚的画面倒回去当起点。
+    """
+    bridges = [rec for rec in recs[1:] if _is_firstlast_bridge(rec)]
+    if not bridges:
+        return
+    primary_id = str(recs[0].get("id") or "")
+    chain: list[tuple[int, bool, dict]] = [
+        (int(recs[0].get("anchor_offset") or 0), True, recs[0]),
+        *((int(rec.get("anchor_offset") or 0), False, rec) for rec in bridges),
+    ]
+    chain.sort(key=lambda item: item[0])
+    prev_slot = ""
+    for _offset, is_primary, rec in chain:
+        if is_primary:
+            prev_slot = f"{primary_id}:last"
+            continue
+        if prev_slot:
+            rec["bridge_prev_slot"] = prev_slot
+        prev_slot = str(rec.get("id") or "")
 
 
 def finalize_turn(draft: TurnFinalization, hooks: TurnFinalizationHooks) -> dict:
@@ -1091,6 +1141,7 @@ def finalize_turn(draft: TurnFinalization, hooks: TurnFinalizationHooks) -> dict
             except Exception:  # noqa: BLE001 [EXC-保留] 观测失败不得打断出图链；无日志价值（trace 端点自身不可用）
                 pass
         if illustrate_recs:
+            _link_firstlast_bridges(illustrate_recs)
             result["illustrate_recs"] = illustrate_recs
     if audio_request:
         repo_id = draft.ctx.get("repo_id") or draft.ctx.get("thread_id")

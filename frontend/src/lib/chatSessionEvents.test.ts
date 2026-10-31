@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { ChatStreamEvent } from "../api/chatStreamProtocol";
 import type { ChatMessage } from "../types/chat";
 import {
-  appendAudioSlot, appendImageSlot, appendTransitionSlot, appendUnknownMessages, applyInterruptedStop, bindMediaSlotPrompt, dropMediaSlot, markMediaSlotFailed, pickFreshAssistantMedia, pruneUnsubmittedMediaSlots, reduceChatStreamEvent, resetMediaSlotForRetry, resolveMediaSlot,
+  appendAudioSlot, appendImageSlot, appendTransitionSlot, appendUnknownMessages, appendVideoSlotAfter, applyInterruptedStop, bindMediaSlotPrompt, dropMediaSlot, markMediaSlotFailed, markMediaSlotKind, pickFreshAssistantMedia, pruneUnsubmittedMediaSlots, reduceChatStreamEvent, resetMediaSlotForRetry, resolveMediaSlot,
   restoreSubmittedMediaSlots,
 } from "./chatSessionEvents";
 
@@ -451,6 +451,97 @@ describe("appendImageSlot（首尾帧副槽）", () => {
   });
 });
 
+// 2026-10-31 用户定案：高潮点「一张图 + 一个视频」，两个提示词都要能各自重新生成，
+// 原话「对应视频的槽位就在图片下方就行」⇒ 视频槽插在主图槽**紧后方**（锚点段后面
+// 可能还有正文尾段，落末尾就看不到「图下即视频」）。
+describe("appendVideoSlotAfter（高潮点视频副槽）", () => {
+  it("紧邻主图槽插入：不落到消息末尾，正文尾段仍在视频之后", () => {
+    const current: ChatMessage[] = [{
+      id: "bot", role: "assistant", text: "", parts: [
+        { type: "text", text: "高潮段正文。" },
+        { type: "media-slot", slotId: "main", status: "pending", kind: "image" },
+        { type: "text", text: "\n\n尾声正文。" },
+      ],
+    }];
+    const withVideo = appendVideoSlotAfter(current, "bot", "main:video", "main", "视频提示词");
+    expect(withVideo[0].parts?.map((part) => part.slotId ?? part.type)).toEqual([
+      "text", "main", "main:video", "text",
+    ]);
+    expect(withVideo[0].parts?.[2]).toEqual({
+      type: "media-slot", slotId: "main:video", status: "pending",
+      kind: "video", videoPrompt: "视频提示词",
+    });
+  });
+
+  it("带 videoParams 时随槽保留（时长等口径重试可逐字复用）", () => {
+    const current: ChatMessage[] = [{
+      id: "bot", role: "assistant", text: "", parts: [
+        { type: "media-slot", slotId: "main", status: "pending", kind: "image" },
+      ],
+    }];
+    const params = {
+      mode: "climax" as const, model: "", size: "864x1536", endpoint: "",
+      images: [], reference_binding: {}, warnings: [], duration: 6,
+    };
+    const withVideo = appendVideoSlotAfter(current, "bot", "main:video", "main", "视频提示词", params);
+    expect(withVideo[0].parts?.[1]).toMatchObject({ kind: "video", videoParams: params });
+  });
+
+  it("找不到锚点槽（异常态）退回末尾，绝不丢槽", () => {
+    const current: ChatMessage[] = [{
+      id: "bot", role: "assistant", text: "", parts: [
+        { type: "media-slot", slotId: "other", status: "pending", kind: "image" },
+      ],
+    }];
+    const withVideo = appendVideoSlotAfter(current, "bot", "main:video", "main", "视频提示词");
+    expect(withVideo[0].parts).toHaveLength(2);
+    expect(withVideo[0].parts?.[1]).toMatchObject({ slotId: "main:video", kind: "video" });
+  });
+
+  it("同 slotId 重复插入幂等（链上重入不产生第二个视频槽）", () => {
+    const current: ChatMessage[] = [{ id: "bot", role: "assistant", text: "" }];
+    const once = appendVideoSlotAfter(current, "bot", "main:video", "main", "视频");
+    const twice = appendVideoSlotAfter(once, "bot", "main:video", "main", "视频");
+    expect(twice[0].parts).toHaveLength(1);
+  });
+
+  it("只改目标消息，别的楼层不动", () => {
+    const current: ChatMessage[] = [
+      { id: "bot", role: "assistant", text: "", parts: [
+        { type: "media-slot", slotId: "main", status: "pending", kind: "image" },
+      ] },
+      { id: "bot2", role: "assistant", text: "", parts: [
+        { type: "media-slot", slotId: "main", status: "pending", kind: "image" },
+      ] },
+    ];
+    const withVideo = appendVideoSlotAfter(current, "bot", "main:video", "main", "视频");
+    expect(withVideo[0].parts).toHaveLength(2);
+    expect(withVideo[1].parts).toHaveLength(1);
+  });
+});
+
+// 建槽时还不知本次出图还是出视频（由插画链按 smartVideo+后端视频成稿+模板判），
+// 楼层文案此前恒写「插画」⇒ 视频槽失败显示「插画生成失败」（2026-10-31 实锤）。
+describe("markMediaSlotKind（主槽媒体类型标注）", () => {
+  const messages: ChatMessage[] = [{
+    id: "bot", role: "assistant", text: "", parts: [
+      { type: "media-slot", slotId: "s1", status: "pending", kind: "image" },
+      { type: "text", text: "正文" },
+    ],
+  }];
+
+  it("把主槽标成 video，其余 part 原样", () => {
+    const next = markMediaSlotKind(messages, "bot", "s1", "video");
+    expect(next[0].parts?.[0]).toMatchObject({ slotId: "s1", kind: "video" });
+    expect(next[0].parts?.[1]).toEqual({ type: "text", text: "正文" });
+  });
+
+  it("槽不存在时整条消息引用不变（不新建槽、不抛）", () => {
+    const next = markMediaSlotKind(messages, "bot", "ghost", "video");
+    expect(next[0].parts).toEqual(messages[0].parts);
+  });
+});
+
 // 第 34 刀：首尾帧＝**固定落点**（用户规格「第一张图在第一段下方、最后一张图在最后一段下方」）。
 // 落点由调用方（useChatSession，能拿到 preset）用与插画链同一套纯函数解析后经 placement 传入；
 // 高潮点（无 placement）逐字沿用后端 anchor_offset，不受本刀影响。
@@ -517,6 +608,48 @@ describe("第 34 刀 首尾帧固定落点（reducer 接线）", () => {
     expect(out[1].parts).toEqual([
       { type: "text", text: "第一段正文。\n\n第二段正文。" },
       { type: "media-slot", slotId: "slot-1", status: "pending", lastFrameDesc: "尾帧" },
+    ]);
+  });
+
+  // 第 74 刀（2026-10-31 首尾帧多批次）：固定落点是为「一个楼层两帧画面」设计的，
+  // N 张批次图套上去会全叠在同一处 ⇒ 批次图（batch_index>0）一律落自己的 anchor_offset。
+  it("批次图（batchIndex>0）落自己的锚点，不吃首尾帧固定落点", () => {
+    const out = reduceChatStreamEvent(current(), "bot", firstFrameEvent({
+      videoMode: "firstlast", batchIndex: 1, offset: 8, id: "slot-2",
+    }), { firstlast: true });
+    // offset 8 = 第二段开头（\n\n 之后）；固定落点会是末段末（14）⇒ 两者可分辨
+    expect(out[0].parts).toEqual([
+      { type: "text", text: "第一段正文。\n\n" },
+      { type: "media-slot", slotId: "slot-2", status: "pending", lastFrameDesc: "尾帧" },
+      { type: "text", text: "第二段正文。" },
+    ]);
+  });
+
+  it("batchIndex 缺省/0 仍走固定落点（主槽零回归）", () => {
+    for (const batchIndex of [undefined, 0]) {
+      const out = reduceChatStreamEvent(current(), "bot", firstFrameEvent({
+        videoMode: "firstlast", batchIndex,
+      }), { firstlast: true });
+      expect(out[0].parts?.[0]).toEqual({ type: "text", text: "第一段正文。\n\n第二段正文。" });
+      expect(out[0].parts?.[1]).toMatchObject({ type: "media-slot", slotId: "slot-1" });
+    }
+  });
+
+  it("两张批次图各按自己的偏移 ⇒ 两个槽不叠放", () => {
+    let out = reduceChatStreamEvent(current(), "bot", firstFrameEvent({
+      videoMode: "firstlast", batchIndex: 1, offset: 8, id: "slot-b1",
+    }), { firstlast: true });
+    out = reduceChatStreamEvent(out, "bot", firstFrameEvent({
+      videoMode: "firstlast", batchIndex: 2, offset: 6, id: "slot-b2",
+    }), { firstlast: true });
+    const slots = (out[0].parts || []).filter((p) => p.type === "media-slot");
+    expect(slots.map((p) => p.slotId)).toEqual(["slot-b2", "slot-b1"]);
+    expect(out[0].parts).toEqual([
+      { type: "text", text: "第一段正文。" },
+      { type: "media-slot", slotId: "slot-b2", status: "pending", lastFrameDesc: "尾帧" },
+      { type: "text", text: "\n\n" },
+      { type: "media-slot", slotId: "slot-b1", status: "pending", lastFrameDesc: "尾帧" },
+      { type: "text", text: "第二段正文。" },
     ]);
   });
 });

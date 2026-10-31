@@ -33,6 +33,25 @@ from app.services import prompt_clean
 # 元信息：默认时长（秒）。preset videoDurationHint 可覆盖。
 _DEFAULT_DURATION = 15
 
+# 高潮视频时长（2026-10-31 用户定案）：由剧情动作量判定，4–8 秒，提取失败兜底 5 秒。
+# 模板旧默认 12 秒单条约 6.3 分钟（实测 1.3 秒/帧），且后半段动作容易漂。
+CLIMAX_DURATION_MIN = 4
+CLIMAX_DURATION_MAX = 8
+CLIMAX_DURATION_FALLBACK = 5
+
+
+def clamp_climax_duration(value: object) -> int | None:
+    """把「剧情判定的秒数」夹到 4–8；非数字/非正数返回 None（调用方走兜底）。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    if seconds <= 0:
+        return None
+    return max(CLIMAX_DURATION_MIN, min(CLIMAX_DURATION_MAX, int(round(seconds))))
+
 # ⑥[音频] 口径（2026-09-20 用户定案）：**视频生成的音频只有效果音**。
 # 理由：台词/旁白由「多元数据插入」里的**独立音频生成功能**负责，视频提示词再写一遍
 # 会让两套音频链互相打架。用户原话：「视频生成的音频生成不包括台词，只有效果音」。
@@ -1038,6 +1057,10 @@ def build_video_request(
     negative = str(preset.get("negativePrompt") or "")
     duration_hint = int(preset.get("videoDurationHint") or 0)
     transition_duration_hint = int(preset.get("transitionDurationHint") or 0)
+    # 高潮时长（2026-10-31）：剧情动作量判定值（spec.video_duration_s）优先于模板默认；
+    # 用户显式 videoDurationHint 仍是最高优先。首尾帧/转场不走这条（各自覆盖整段/短桥段）。
+    if mode == "climax" and duration_hint <= 0:
+        duration_hint = clamp_climax_duration(spec.get("video_duration_s")) or 0
     camera = str(preset.get("videoCamera") or "")
 
     base_url = str(video_config.get("base_url") or "").strip().rstrip("/")
@@ -1099,6 +1122,7 @@ def build_video_request(
         }
 
     warnings = _missing_frame_warnings(mode, first_frame, last_frame)
+    seconds = transition_duration_hint if mode == "transition" else duration_hint
 
     return {
         "mode": mode,
@@ -1108,6 +1132,7 @@ def build_video_request(
             "prompt": prompt,                    # 编译出的视频提示词（含参考绑定职责文字）
             "images": images,                    # 参考图地址（climax 1 张 / firstlast 2 张）
             "size": size,
+            "duration": int(seconds or 0),       # 显式判定秒数（0=未判定，前端不注入，保留模板默认）
             "proxy": proxy or None,
             "content_type": "multipart/form-data" if images else "application/json",
         },
@@ -1171,7 +1196,8 @@ def parse_video_plan(reply: str) -> dict[str, Any]:
     """解析视频提示词专用提取（动作延伸 + 简化外貌/场景）的 JSON 回复。
 
     容忍 markdown 代码块包裹与破甲残留；字段不合法时只丢弃对应键，不整体失败。
-    产出 {action_sequence: [{beat, desc}], subject_scene: str}。
+    产出 {action_sequence: [{beat, desc}], subject_scene: str, duration_s: int}；
+    duration_s 是剧情判定的高潮时长，已夹到 4–8（缺省时调用方兜底 5）。
 
     拒答防御（对齐生图链）：正文性字段（desc/subject_scene/music/sfx/sync）命中
     拒答句式即丢弃该条——模型把「我不能协助这项请求」写进 JSON 时，不得让它
@@ -1247,4 +1273,7 @@ def parse_video_plan(reply: str) -> dict[str, Any]:
             design["sync"] = sync
         if design:
             out["audio_design"] = design
+    duration_s = clamp_climax_duration(data.get("duration_s"))
+    if duration_s is not None:
+        out["duration_s"] = duration_s
     return out

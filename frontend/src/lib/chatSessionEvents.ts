@@ -235,6 +235,51 @@ export function appendImageSlot(
 }
 
 /**
+ * 高潮点视频副槽（2026-10-31 用户定案「对应视频的槽位就在图片下方就行」）：
+ * 把视频槽插进**主图槽的紧后方**，不是消息末尾——锚点段后面可能还有正文尾段。
+ * 找不到主图槽（异常态）才退回末尾，绝不丢槽。
+ */
+export function appendVideoSlotAfter(
+  current: ChatMessage[], messageId: string, slotId: string, afterSlotId: string,
+  videoPrompt?: string, videoParams?: VideoParams,
+): ChatMessage[] {
+  return current.map((message) => {
+    if (message.id !== messageId) return message;
+    const parts = message.parts
+      || (message.text ? [{ type: "text" as const, text: message.text }] : []);
+    if (parts.some((part) => part.slotId === slotId)) return message;
+    const slot = {
+      type: "media-slot" as const, slotId, status: "pending" as const, kind: "video" as const,
+      ...(videoPrompt ? { videoPrompt } : {}),
+      ...(videoParams ? { videoParams } : {}),
+    };
+    const anchor = parts.findIndex((part) => part.slotId === afterSlotId);
+    if (anchor < 0) return { ...message, parts: [...parts, slot] };
+    return {
+      ...message,
+      parts: [...parts.slice(0, anchor + 1), slot, ...parts.slice(anchor + 1)],
+    };
+  });
+}
+
+/**
+ * 主槽媒体类型标注：建槽（`illustrate_request`）时还不知道本次出图还是出视频
+ * （由插画链按 smartVideo+后端视频成稿+模板判定），楼层文案此前一律写「插画」——
+ * 视频槽失败时显示「插画生成失败」，用户以为少了个视频槽（2026-10-31 实锤）。
+ * 链上决策落定后调用本函数标注，生成中/失败文案与重试提示随之对齐。
+ */
+export function markMediaSlotKind(
+  current: ChatMessage[], messageId: string, slotId: string,
+  kind: "image" | "video" | "audio",
+): ChatMessage[] {
+  return current.map((message) => message.id !== messageId ? message : {
+    ...message,
+    parts: (message.parts || []).map((part) =>
+      part.type === "media-slot" && part.slotId === slotId ? { ...part, kind } : part),
+  });
+}
+
+/**
  * 插画槽失败标记（2026-08-29 用户需求）：不再删除槽位，而是保留为 failed 态并附错误信息
  * 与重试参数快照——楼层上显示失败原因与「重新生成」按钮。
  *
@@ -481,6 +526,10 @@ function firstlastMainSlotOffset(
 ): number | undefined {
   const firstlast = placement?.firstlast ?? event.videoMode === "firstlast";
   if (!firstlast) return event.offset;
+  // 第 74 刀（2026-10-31 多批次）：批次图（`batch_index>0`，即第 2 张起）**一律**落自己的
+  // 锚点。第 34 刀的固定落点是为「一个楼层两帧画面」设计的（首段末＋末段末），
+  // N 张批次图套上去会全叠在同一处 ⇒ 用户看到的仍是「一张挤一张」。
+  if ((event.batchIndex ?? 0) > 0) return event.offset;
   return firstlastMainOffset({
     transition: event.transition,
     prevTailUrl: resolvePrevTailDesc(current)?.lastFrameUrl,

@@ -183,10 +183,14 @@ def _streamed_illustration_events(recs: list[dict]) -> list[dict]:
         }
         # V1.5/B1：视频协议可选字段透传（有值才带；旧前端/旧数据宽松忽略）
         for _key in ("video_mode", "first_frame_desc", "last_frame_desc",
-                     "prev_tail_desc", "last_frame_url", "transition"):
+                     "prev_tail_desc", "last_frame_url", "transition", "bridge_prev_slot"):
             _value = rec.get(_key)
             if isinstance(_value, str) and _value:
                 request[_key] = _value
+        # 第 74 刀：批次序号（整数，仅 index>0 才在 rec 上）⇒ 前端把批次图插到自己的锚点，
+        # 不再吃首尾帧的第 34 刀固定落点（N 张批次图全叠在同一处）。
+        if isinstance(rec.get("batch_index"), int):
+            request["batch_index"] = int(rec["batch_index"])
         # 正常链路：comfy_video 开启时 produce 层才编译 video_request，这里随事件下发
         _video_request = _video_request_for(rec)
         if _video_request:
@@ -226,6 +230,8 @@ def _video_params_payload(vr: dict) -> dict:
         "mode": vr.get("mode") or "climax",
         "model": str(submit.get("model") or ""),
         "size": str(submit.get("size") or ""),
+        # 剧情判定的高潮秒数（0=未判定；前端据此注入工作流时长节点，0 保留模板默认）
+        "duration": int(submit.get("duration") or 0),
         "endpoint": str(submit.get("endpoint") or ""),
         "images": list(submit.get("images") or []),
         "reference_binding": vr.get("reference_binding") or {},

@@ -146,6 +146,9 @@ interface IllustrationValues {
   loraWeight?: number;
   baseImage?: string;
   latentSize?: { width: number; height: number };
+  /** 视频输出像素宽高 = 首帧图真实尺寸（2026-10-31 用户定案「图片的宽高要和视频的宽高一致」）。
+   * 仅当模板暴露 video_width/video_height 绑定（H3 系视频节点）时生效。 */
+  videoSize?: { width: number; height: number };
   /** V1.2 视频最小事实：时长（秒）与镜头运动（static/pan/zoom），来自用户预设，不从模型输出读 */
   videoDuration?: number;
   videoCamera?: "static" | "pan" | "zoom";
@@ -225,6 +228,10 @@ export function illustrationTemplateValues(
       values[key] = input.latentSize.width;
     } else if (binding === "latent_height" && input.latentSize) {
       values[key] = input.latentSize.height;
+    } else if (binding === "video_width" && input.videoSize) {
+      values[key] = input.videoSize.width;
+    } else if (binding === "video_height" && input.videoSize) {
+      values[key] = input.videoSize.height;
     }
   }
   return values;

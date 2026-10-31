@@ -147,6 +147,7 @@ export interface IllustrationSubmit {
   prevTailDesc?: string;
   lastFrameUrl?: string;
   videoPrompt?: string;
+  videoParams?: VideoParams;
   transition?: string;
   transitionVideoPrompt?: string;
   transitionVideoParams?: VideoParams;
@@ -156,6 +157,25 @@ export interface IllustrationSubmit {
   // finalPrompt＝主图/正片成稿；finalFramePrompts＝首尾帧双帧成稿（首尾帧模式主槽不产成稿）。
   finalPrompt?: string;
   finalFramePrompts?: { first?: string; last?: string };
+  // 高潮点「图 + 视频」两段链（2026-10-31 用户定案「应该支持重新生成这两个……对应视频的
+  // 槽位就在图片下方」）：主槽只出图，出图成功后在其正下方追加 `:video` 副槽，再用
+  // `videoOnly` 递归提交视频——两个槽各有自己的重试快照，互不牵连。
+  // videoOnly=true ⇒ 本次只提交视频（提示词逐字用 videoPrompt，不再走 Profile 编译）；
+  // videoBaseUrl=首帧图的可取回地址（成图的 ComfyUI view URL，交底图上传段搬到视频机）。
+  videoOnly?: boolean;
+  videoBaseUrl?: string;
+  // 首帧底图来源槽（= 主图槽）：视频入库的 derived_from 用它，不再反查消息
+  // （反查会撞上「主槽还没回填 ready」的时序，把视频记到上一楼层的成图头上）。
+  videoBaseSlotId?: string;
+  // 第 74 刀（2026-10-31 用户定案「前面的图片放首帧、后面的图片放尾帧生成视频」）：
+  // 首尾帧多批次时，后端按**正文序**为每张桥图标注「上一张画面的槽」，随事件下发。
+  // 桥视频 = 图片1(首帧)←上一张成图、图片2(尾帧)←本槽成图。
+  // bridgePrevSlotId＝上一张画面的槽 id（只主槽第一次提交带，重试快照随之保留）；
+  // bridgeVideo＝本次提交是「段桥衔接视频」（视频槽自己的递归，提示词逐字用转场成稿）；
+  // bridgePrevImageUrl＝已取回到的上一张成图地址（递归时直接带上，避免二次等待）。
+  bridgePrevSlotId?: string;
+  bridgeVideo?: boolean;
+  bridgePrevImageUrl?: string;
 }
 
 // PLACEHOLDER_BODY
@@ -209,9 +229,8 @@ export function useChatSession(deps: ChatSessionDeps) {
   const illustrationViewpoint = mediaPreset?.viewpoint === "first_person"
     || mediaPreset?.viewpoint === "third_person" ? mediaPreset.viewpoint : "";
   // 高潮点批量生图数目（2026-09-24）：面板最小 1、无上限；未设/非法 ⇒ 0（后端按 1 张处理）。
-  // ⚠ 只在**非首尾帧**（即高潮点）模式下透传——首尾帧走另一条链、不受本字段影响。
-  const illustrationBatchCount = !mediaPreset?.firstlast
-    && Number.isFinite(mediaPreset?.batchImageCount)
+  // 2026-10-31 用户定案：首尾帧也走多批次（每张与前一张接成段桥视频）⇒ **两种模式都透传**。
+  const illustrationBatchCount = Number.isFinite(mediaPreset?.batchImageCount)
     && (mediaPreset?.batchImageCount as number) >= 1
     ? Math.floor(mediaPreset?.batchImageCount as number) : 0;
   const modelProxies = {
@@ -1056,9 +1075,12 @@ export function useChatSession(deps: ChatSessionDeps) {
         source: "automatic", eventVideoMode: event.videoMode,
         firstFrameDesc: event.firstFrameDesc, lastFrameDesc: event.lastFrameDesc,
         prevTailDesc: event.prevTailDesc, lastFrameUrl: event.lastFrameUrl,
-        videoPrompt: event.videoPrompt, transition: event.transition,
+        videoPrompt: event.videoPrompt, videoParams: event.videoParams,
+        transition: event.transition,
         transitionVideoPrompt: event.transitionVideoPrompt,
         transitionVideoParams: event.transitionVideoParams,
+        // 第 74 刀：段桥的「上一张画面」槽，随快照落盘 ⇒ 桥视频槽的「重新生成」也认得上一张。
+        bridgePrevSlotId: event.bridgePrevSlotId,
       };
       void submitIllustration(illustrationSubmit).catch((error) => {
         // 提交链上任何未被 failSlot 覆盖的异常都落到失败槽（可重新生成），

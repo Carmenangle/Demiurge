@@ -2124,6 +2124,9 @@ def test_第57刀_第2张_展开成两条rec且各带自己的插入位置():
     assert [rec["prompt"] for rec in recs] == ["主图", "副1"]
     assert [rec["anchor_offset"] for rec in recs] == [10, 40]
     assert [rec["id"] for rec in recs] == ["illo-req-work-3", "illo-req-work-3-1"]
+    # 第 74 刀：批次序号只标在第 2 张起（主图 rec 与改造前逐字相同 ⇒ 不多这个键）
+    assert "batch_index" not in recs[0]
+    assert recs[1]["batch_index"] == 1
 
 
 def test_第57刀_第999张_所有锚点各一条rec():
@@ -2143,6 +2146,106 @@ def test_第57刀_第999张_所有锚点各一条rec():
     assert [rec["anchor_offset"] for rec in recs] == [0, 10, 20, 30, 40]
     assert len({rec["id"] for rec in recs}) == 5          # id 全唯一
     assert recs[-1]["id"] == "illo-req-work-3-4"
+
+
+def test_段桥rec_按正文序标注上一张画面槽():
+    """第 74 刀（2026-10-31 用户口径「前面的图片放首帧、后面的图片放尾帧生成视频」）：
+    段桥 rec 必须带 `bridge_prev_slot`=**正文序**里离它最近的前一张画面槽 id，
+    前端据此把**那张成图本身**当图片1（而不是另生成一张近似的「上一画面」）。
+
+    链序与 `_wb_bridge_chain`（agency_scene_comfy）同源 ⇒ 「起点描述」与「上一张成图」
+    必指同一画面；夹在两张桥**中间**的主图也进链（它的偏移是排序锚点）。
+    第一支桥（正文序上紧跟主图之后）的前一张 = 主楼层**尾帧图槽** `${主槽id}:last`：
+    首尾帧模式下主槽出的是整楼层正片**视频**，不能当图片1；`:last` 才是本楼层收束
+    那一格的图，剧情上正对着下一张画面（`:first` 是开场那一格，方向反了）。
+    """
+    bridge = lambda prompt, anchor, tag: {          # noqa: E731  段桥=firstlast+有转场+无正片
+        "prompt": prompt, "anchor": anchor, "video_mode": "firstlast",
+        "video_request": {}, "transition_video_request": {"submit": {"prompt": tag}},
+    }
+    result = _finalize(
+        ("visible", [], {
+            "prompt": "主图", "anchor": "甲处。", "video_mode": "firstlast",
+            "video_request": {"submit": {"prompt": "正片"}},
+            "extra_requests": [
+                bridge("副1", "乙处。", "T1"), bridge("副2", "丙处。", "T2"),
+            ],
+        }, {}),
+        {"甲处。": 10, "乙处。": 40, "丙处。": 20},
+    )
+
+    recs = result["illustrate_recs"]
+    assert [rec["id"] for rec in recs] == [
+        "illo-req-work-3", "illo-req-work-3-1", "illo-req-work-3-2"]
+    assert "bridge_prev_slot" not in recs[0]                    # 主槽=正片，不是桥
+    # 正文序：乙处(40) 在 丙处(20) 之后 ⇒ 丙处那一张才是第一支桥
+    assert recs[2]["bridge_prev_slot"] == "illo-req-work-3:last"
+    assert recs[1]["bridge_prev_slot"] == "illo-req-work-3-2"
+
+
+def test_段桥rec_排在主图之前的桥不标注():
+    """边界锁：主锚点不在正文开头时，排在它**之前**的桥在本楼层没有更早的成图 ⇒
+    **不得**标注 `bridge_prev_slot`（更不能拿更晚的主图倒回去当起点）。
+    前端对应退到上一楼层尾帧成图，与后端 `_wb_bridge_chain` 的起点回退同源。"""
+    result = _finalize(
+        ("visible", [], {
+            "prompt": "主图", "anchor": "乙处。", "video_mode": "firstlast",
+            "video_request": {"submit": {"prompt": "正片"}},
+            "extra_requests": [
+                {"prompt": "副1", "anchor": "甲处。", "video_mode": "firstlast",   # 甲处在前
+                 "video_request": {}, "transition_video_request": {"submit": {"prompt": "T1"}}},
+                {"prompt": "副2", "anchor": "丙处。", "video_mode": "firstlast",   # 丙处在后
+                 "video_request": {}, "transition_video_request": {"submit": {"prompt": "T2"}}},
+            ],
+        }, {}),
+        {"甲处。": 5, "乙处。": 40, "丙处。": 90},
+    )
+
+    recs = result["illustrate_recs"]
+    assert [rec["prompt"] for rec in recs] == ["主图", "副1", "副2"]
+    assert "bridge_prev_slot" not in recs[1]                        # 甲处桥：本楼层无前一张
+    # 丙处(90) 正文序上最近的前一张是**主图**(乙处 40)，不是更靠前的副1(甲处 5)
+    assert recs[2]["bridge_prev_slot"] == "illo-req-work-3:last"
+
+
+def test_段桥rec_非桥与单张不参与链():
+    """零回归锁：高潮模式的 extra（有正片、无转场）与单张主图都**不得**多出该键。"""
+    result = _finalize(
+        ("visible", [], {
+            "prompt": "主图", "anchor": "甲处。",
+            "extra_requests": [{"prompt": "副1", "anchor": "乙处。",
+                                "video_mode": "climax",
+                                "video_request": {"submit": {"prompt": "V"}}}],
+        }, {}),
+        {"甲处。": 10, "乙处。": 40},
+    )
+    assert all("bridge_prev_slot" not in rec for rec in result["illustrate_recs"])
+
+    single = _finalize(("visible", [], {"prompt": "主图", "anchor": "甲处。",
+                                        "video_mode": "firstlast", "video_request": {},
+                                        "transition_video_request": {"submit": {"prompt": "T"}}}, {}),
+                       {"甲处。": 10})
+    assert "bridge_prev_slot" not in single["illustrate_recs"][0]
+
+
+def test_第57刀_额外请求的视频成稿必须逐条进rec():
+    """出口锁：`_illustrate_rec` 若漏拷视频字段，事件就永远没有 `video_prompt`
+    ⇒ 第 2..N 张只出图（2026-10-31 用户报的形状）。extras 与主图走同一条 rec 构造，
+    视频字段不得只对 index==0 生效。"""
+    result = _finalize(
+        ("visible", [], {
+            "prompt": "主图", "anchor": "甲处。",
+            "extra_requests": [{
+                "prompt": "副1", "anchor": "乙处。", "video_mode": "climax",
+                "video_request": {"submit": {"prompt": "V副1"}},
+            }],
+        }, {}),
+        {"甲处。": 10, "乙处。": 40},
+    )
+
+    recs = result["illustrate_recs"]
+    assert recs[1]["video_request"]["submit"]["prompt"] == "V副1"
+    assert recs[1]["video_mode"] == "climax"
 
 
 def test_第57刀_定位不到的额外请求被跳过且不影响其余():

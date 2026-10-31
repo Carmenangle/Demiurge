@@ -403,6 +403,41 @@ export function resolveTransitionBaseImage(opts: {
   return resolvePrevTailDesc(opts.messages)?.lastFrameUrl || opts.fallback;
 }
 
+// ===== 第 74 刀（2026-10-31 首尾帧多批次）：按槽位读「这一格现在有什么」=====
+// 段桥视频的图片1 = **上一张画面**的成图，而上一张画面是本回合另一条槽位：它可能还在生成
+// （pending）、已 resolve 成 image/video、失败，或压根不存在（派发异常 / 改造前的旧快照）。
+// 本函数只做一次性读取，不含等待——等待时长与降级策略属于链侧行为，留在 useIllustrationChain
+// 里更好测（waitForSlotMedia）。
+// 注意槽位的两种形态：pending/failed 仍是 `media-slot`（靠 `kind` 分辨模态），完成后槽位
+// **变成** `type: "image" | "video" | "audio"`（resolveMediaSlot 原地替换，slotId 不变）。
+interface SlotStateMessages {
+  id: string;
+  parts?: Array<{ type?: string; slotId?: string; status?: string; url?: string; kind?: string }>;
+}
+
+export interface SlotMediaState {
+  status: "pending" | "ready" | "failed";
+  mediaType: "image" | "video" | "audio" | "";
+  url?: string;
+}
+
+export function findMediaSlotState(
+  messages: readonly SlotStateMessages[], messageId: string, slotId: string,
+): SlotMediaState | undefined {
+  if (!messageId || !slotId) return undefined;
+  const parts = messages.find((message) => message.id === messageId)?.parts || [];
+  const part = parts.find((p) => p.slotId === slotId);
+  if (!part) return undefined;
+  const rawType = (part.type && part.type !== "media-slot" ? part.type : part.kind) || "";
+  // 只认三种媒体类型：`text`／未知值一律读成空串（等待方据此判「不是图片」，不猜）
+  const mediaType: SlotMediaState["mediaType"] =
+    rawType === "image" || rawType === "video" || rawType === "audio" ? rawType : "";
+  const status = part.status === "ready" || part.status === "failed"
+    ? part.status
+    : (part.type === "media-slot" ? "pending" : "ready");
+  return { status, mediaType, ...(part.url ? { url: part.url } : {}) };
+}
+
 // ===== 文本打分：从生成结果的多段文本里挑最优 =====
 // 过滤掉「有效字符占比过低」的噪声段（如纯符号/乱码），再按长度取最长的一段。
 // 有效字符 = 字母数字 + 中文。占比阈值 0.3。

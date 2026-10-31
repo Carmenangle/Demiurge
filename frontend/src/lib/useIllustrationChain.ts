@@ -36,16 +36,19 @@ import {
 } from "./imagePromptProfiles";
 import {
   illustrationLoraConfigurationError, illustrationWorkflowMedia, resolveIllustrationActors,
-  isSegmentBridgeEvent, resolveVideoMode, resolveVideoTemplateChoice, planFirstlastFrameTasks, firstlastFrameValues,
+  isSegmentBridgeEvent, resolveVideoMode, resolveVideoTemplateChoice, resolveVideoDuration,
+  resolveBaseImageSource, imagePixelSizeFromBlob, alignSizeForVideoNode,
+  planFirstlastFrameTasks, firstlastFrameValues,
   firstlastSlotLayout, transitionVideoValues, illustrationRequestMedia,
 } from "./illustrationMedia";
 import {
   resolveLoraPromptMetadata, resolveVideoBaseImageRef, resolveTransitionBaseImage, resolvePrevTailDesc,
+  findMediaSlotState, type SlotMediaState,
 } from "./chatGeneration";
 import { templateRegenerationSnapshot } from "./regeneration";
 import { resolveComfyUrl, sameComfyUrl } from "./comfyMachines";
 import { pollWorkflowResult, type PendingGeneration } from "./workflowGenerationRuntime";
-import { appendImageSlot, appendTransitionSlot, bindMediaSlotPrompt, markMediaSlotFailed, resolveMediaSlot } from "./chatSessionEvents";
+import { appendImageSlot, appendTransitionSlot, appendVideoSlotAfter, bindMediaSlotPrompt, markMediaSlotFailed, markMediaSlotKind, resolveMediaSlot } from "./chatSessionEvents";
 
 /** 插画链的 hook 闭包依赖（T2.2-A 同名 deps 注入；类型逐字抄 useChatSession 内声明）。 */
 export interface IllustrationChainDeps {
@@ -92,6 +95,32 @@ function enqueueSubmit<T>(run: () => Promise<T>): Promise<T> {
   return chained;
 }
 
+// 第 74 刀（2026-10-31 首尾帧多批次）：段桥视频要拿「上一张画面的成图」当图片1，但多批事件是
+// **逐条独立**提交的（每条 illustrate_request 各起一条链、互不 await）⇒ 两张图的完成先后
+// **不保证**（ComfyUI 队列顺序、认领重试、卡死自愈重提都会挪时间）。故做**有界等待**。
+// 判据只有两种结局：等到 ready 的图片 ⇒ 交真图；等不到（槽不存在 / 失败 / 超时 / 不是图片）
+// ⇒ 交空串，调用方退「高潮片段延续」（第 59 刀用户定案的降级）。
+// ⚠ 绝不无限等：视频槽一旦不提交就永远是 pending，是本仓 2026-08-31／09-01 两次实锤的形态。
+const BRIDGE_PREV_WAIT_MS = 300_000;
+const BRIDGE_PREV_TICK_MS = 1_000;
+
+export async function waitForSlotMedia(
+  read: (slotId: string) => SlotMediaState | undefined,
+  slotId: string,
+  opts: { timeoutMs?: number; tickMs?: number } = {},
+): Promise<string> {
+  const timeoutMs = opts.timeoutMs ?? BRIDGE_PREV_WAIT_MS;
+  const tickMs = opts.tickMs ?? BRIDGE_PREV_TICK_MS;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const state = slotId ? read(slotId) : undefined;
+    if (!state || state.status === "failed") return "";
+    if (state.status === "ready" && state.mediaType === "image" && state.url) return state.url;
+    if (Date.now() >= deadline) return "";
+    await new Promise((resolve) => setTimeout(resolve, tickMs));
+  }
+}
+
 export function useIllustrationChain({
   settings, templates, repo, threadId, cardNames, promptProfile, characterBaseImages,
   chat, modelProxies, effectivePersona, messagesRef, setMessages,
@@ -99,15 +128,17 @@ export function useIllustrationChain({
 }: IllustrationChainDeps) {
   // 剧情高潮点异步出图/出视频：后端发来 booru 提示词 + motion 动态强度，按本作品预设组 values 提交 ComfyUI，
   // 走 pollResult 现成异步闭环（徽记显示进度 + 离开继续 + 点击返回）。未预设模板 → 静默跳过。
-  // 智能模态：smartVideo 开 且 motion>=2 且 预设了视频模板 → 用视频模板，否则用图片模板。
+  // 智能模态：smartVideo 开 且 预设了视频模板 且 后端编出了视频提示词 → 出图后接视频，否则只出图。
   const submitIllustration = async (input: IllustrationSubmit) => {
     // 解构带默认值：函数体沿用局部名，签名收成对象后调用点不必再数位置（审计 C7）。
     const {
     prompt: promptIn, motion = 0, actors = [], messageId, slotId, sceneSpec, turnId = "",
     source = "automatic", eventVideoMode, firstFrameDesc = "", lastFrameDesc = "",
-    prevTailDesc = "", lastFrameUrl = "", videoPrompt = "", transition = "",
+    prevTailDesc = "", lastFrameUrl = "", videoPrompt = "", videoParams, transition = "",
     transitionVideoPrompt = "", transitionVideoParams,
     finalPrompt = "", finalFramePrompts,
+    videoOnly = false, videoBaseUrl = "", videoBaseSlotId = "",
+    bridgePrevSlotId = "", bridgeVideo = false, bridgePrevImageUrl = "",
   } = input;
   // 2026-10-18 试跑成稿直送（用户定案）：快照带成稿 ⇒ 本次是「用成稿跑图」——
   // 逐字采用、跳过编译链，且**绕过试跑闸**（显式点「重新生成」优先于批量开关；
@@ -126,7 +157,11 @@ export function useIllustrationChain({
     const retrySnapshot: IllustrationSubmit = {
       prompt: promptIn, motion, actors, messageId, slotId, sceneSpec, turnId, source,
       eventVideoMode, firstFrameDesc, lastFrameDesc, prevTailDesc, lastFrameUrl,
-      videoPrompt, transition, transitionVideoPrompt, transitionVideoParams,
+      videoPrompt, videoParams, transition, transitionVideoPrompt, transitionVideoParams,
+      videoOnly, videoBaseUrl, videoBaseSlotId,
+      // 第 74 刀：桥视频的「上一张画面」两件套随快照带走 ⇒ 视频槽的「重新生成」既认得
+      // 上一张槽（可以重等有界链），也带着当时已经取到的地址（不用再等一次）。
+      bridgePrevSlotId, bridgeVideo, bridgePrevImageUrl,
     };
     const failSlot = (stage: string, error: string) =>
       discardFailedIllustration(messageId, slotId, stage, error, "", retrySnapshot);
@@ -179,18 +214,39 @@ export function useIllustrationChain({
     }
     // V1.5/B1：事件 videoMode 优先，其次 preset.videoMode，缺省 climax
     const videoMode = resolveVideoMode(preset, eventVideoMode);
-    // V1.5/B3（R4）：firstlast 楼层触发不看 motion；climax 维持 smartVideo && motion>=2
-    const useVideo = resolveVideoTemplateChoice(preset, videoMode, motion);
-    // V1.6/P5+（2026-08-28 用户拍板）：首尾帧是独立图片模式——只配图片模板即生效；
-    // 视频模式跟随该选项推导，有视频模板才追加视频任务。
-    const useFirstlastImages = videoMode === "firstlast" && !!preset.templateId;
-    // 第 59 刀（视频连续化）：段桥 = firstlast + 后端只下发转场提示词（无正片提示词）
-    // ⇒ 该槽 = 段桥：主槽按普通图出（本锚点画面），帧任务只做首帧（上一张画面），
-    // 桥视频走 transition 块（起点=上一画面、终点=本画面）；衔接不上 ⇒ 退高潮延续（纯图）。
+    // V1.5/B3（R4）：firstlast 楼层触发不看视频成稿；climax 认「后端是否编排出视频提示词」
+    // （2026-10-31 改口：motion 词表闸会压掉后端已经编出的成稿，且压掉时界面毫无提示）
+    const useVideo = resolveVideoTemplateChoice(preset, videoMode, videoPrompt);
+    // 第 59 刀（视频连续化）＋第 74 刀（2026-10-31 多批次）：段桥 = firstlast + 后端只下发
+    // 转场提示词（无正片提示词）⇒ 该槽 = 段桥：主槽按普通图出（本锚点画面），视频走下方
+    // bridgeVideoChain；衔接不上（取不到上一张成图）⇒ 退高潮延续（本图当首帧）。
     const isSegmentBridge = isSegmentBridgeEvent({
       useVideo, videoMode, videoPrompt, transitionVideoPrompt,
     });
-    const mainIsVideo = useVideo && !isSegmentBridge;
+    // V1.6/P5+（2026-08-28 用户拍板）：首尾帧是独立图片模式——只配图片模板即生效；
+    // 视频模式跟随该选项推导，有视频模板才追加视频任务。
+    // 第 74 刀加两条缺席条件：① 段桥**不再自己重画「上一张画面」**（那一格的成图已由批次里
+    // 前一条事件产出，重画既多烧一次出图又对不上「前面的图片」这句原话）；② `videoOnly`
+    // 那次递归提交（桥视频本身）不能进帧循环——它的两帧图早已备好，再跑会给自己再生两张帧图。
+    const useFirstlastImages = videoMode === "firstlast" && !!preset.templateId && !videoOnly && !isSegmentBridge;
+    // 高潮点「一张图 → 一个视频」（2026-10-31 用户定案）：主槽出**图**，出图成功后把这张图
+    // 当首帧提交视频，落进图片正下方的 `:video` 副槽——两个槽各带自己的重试快照，图片提示词
+    // 与视频提示词都能单独「重新生成」（此前主槽被视频占用：既没出图，失败槽也只写着「插画」，
+    // 视频无从重试）。
+    const climaxVideoChain = useVideo && videoMode === "climax"
+      && !isSegmentBridge && !videoOnly;
+    // 第 74 刀：段桥的视频改走与高潮两段链同构的形态——主槽出图，图正下方挂视频槽。两支的
+    // 差别只在双帧来源（高潮＝本图当首帧；段桥＝图片1 上一张画面的成图、图片2 本槽成图，
+    // 逐字对齐用户口径「前面的图片放首帧后面的图片放尾帧生成视频」）。
+    // `isSegmentBridge` 只在**自动那次提交**为真：递归提交视频时 videoPrompt 已带上转场成稿，
+    // 判据自然失效 ⇒ 不会给自己再套一层链。
+    const bridgeVideoChain = isSegmentBridge;
+    const mainIsVideo = useVideo && !isSegmentBridge && !climaxVideoChain;
+    if (mainIsVideo) {
+      // 建槽（illustrate_request）时还不知道本次出图还是出视频 ⇒ 楼层文案此前一律写「插画」，
+      // 视频槽生成中/失败显示「插画生成中…／插画生成失败」（2026-10-31 实锤）。决策落定即标注。
+      setMessages((current) => markMediaSlotKind(current, messageId, slotId, "video"));
+    }
     const chosenId = mainIsVideo ? preset.videoTemplateId! : preset.templateId;
     if (!chosenId) {
       failSlot("configuration", "当前图/视频模式没有配置工作流模板");
@@ -228,20 +284,26 @@ export function useIllustrationChain({
     // V1.1 视频首帧底图：优先取「已完成插画」（本槽 > 最近一次），否则回退用户手动指定；
     // 模板无图像口 → 纯文生视频（resolveVideoBaseImage 返回 undefined 且不拦截）。
     // M2.1：ref 版本同时返回底图来源槽引用，视频入库时记录 derived_from。
-    const videoBaseRef = useVideo
-      ? resolveVideoBaseImageRef({
-          tpl, messageId, slotId,
-          messages: messagesRef.current,
-          manualBaseImage: baseImage || undefined,
-        })
-      : undefined;
+    // 高潮两段链的主槽是**普通图**⇒ 不参与反查（否则会把上一楼层成图当底图做图生图，
+    // 图片口径被悄悄改掉）；底图只由 `videoOnly` 那次提交使用（= 本槽刚出的成图）。
+    const videoBaseRef = videoOnly && videoBaseSlotId
+      ? { url: videoBaseUrl, sourceMessageId: messageId, sourceSlotId: videoBaseSlotId }
+      : useVideo && mainIsVideo
+        ? resolveVideoBaseImageRef({
+            tpl, messageId, slotId,
+            messages: messagesRef.current,
+            manualBaseImage: baseImage || undefined,
+          })
+        : undefined;
     // V1.5/W2 首帧复用（坑C：有图前提）：transition=reuse 且反查到上尾帧图 → 首帧底图用
     // 上尾帧图（视觉延续）。无尾帧图资产 → reuse 作废，维持原路径（独立生成首帧）。
     // 仅 firstlast 消费（climax 无首帧复用）；reuse 之外（regenerate/ambiguous/空）不复用。
-    const baseImageForUse = resolveTransitionBaseImage({
-      videoMode, transition, messages: messagesRef.current,
-      fallback: videoBaseRef?.url ?? baseImage,
-    }) || "";
+    const baseImageForUse = videoOnly
+      ? videoBaseUrl
+      : resolveTransitionBaseImage({
+          videoMode, transition, messages: messagesRef.current,
+          fallback: videoBaseRef?.url ?? baseImage,
+        }) || "";
     let negativePrompt = preset.negativePrompt?.trim() || sceneSpec?.negative_prompt || "";
     // LoRA 触发词查表与机械前置（对齐 /a 编排 lora_inject 思路）：主图与首尾帧图共用。
     // 生效 LoRA 的触发词必须逐字精确（大脑会漏写/改写 → LoRA 不生效却看不出），按文件名查触发词表
@@ -273,7 +335,9 @@ export function useIllustrationChain({
       return out;
     };
     // V1.6/P5+：首尾帧独立图片模式跳过高潮 Profile 渲染（帧提示词在生成循环内走同一 Profile 编译链单独编译）。
-    if (!useFirstlastImages) {
+    // videoOnly（高潮两段链的视频那次提交）同样跳过：视频提示词由后端编译好随事件带来，
+    // 再走一遍图片 Profile 编译只会把它改写成正图片段（入参 prompt 已是 videoPrompt 原文）。
+    if (!useFirstlastImages && !videoOnly) {
     if (finalDraft) {
       // 2026-10-18 成稿直送（用户定案）：试跑成稿已含 quality 行/风格句/LoRA 触发词
       // ⇒ 逐字采用，跳过整条编译链（storedProfile/genProfilePrompt/anima 收尾/触发词前置）。
@@ -372,6 +436,10 @@ export function useIllustrationChain({
     }
     // 底图需先上传到 ComfyUI input 目录，取回可供 LoadImage 引用的文件名
     let uploadedImage = "";
+    // 视频输出宽高 = 首帧底图真实像素尺寸（2026-10-31 用户定案「图片的宽高要和视频的宽高一致」）：
+    // 顺手量刚取到的那份字节（不二次请求），提交时覆盖模板里分辨率选择器的连线。
+    // 量不到（无 createImageBitmap／解码失败／模板没有图像口）⇒ 不写这两键，交回模板默认。
+    let videoSize: { width: number; height: number } | undefined;
     const needsImage = tpl.exposed.some((f) => workflowFieldBinding(f) === "base_image");
     // V1.1 视频分支：模板声明图像口但拿不到底图 → 拦截（不空图提交图生视频工作流）
     if (useVideo && needsImage && !baseImageForUse) {
@@ -381,8 +449,13 @@ export function useIllustrationChain({
     if (!promptOnly && needsImage && baseImageForUse) {
       mark("upload", "start", baseImageForUse);
       try {
-        const blob = await (await fetch(localViewUrl(baseImageForUse))).blob();
-        const file = new File([blob], baseImageForUse.split(/[\\/]/).pop() || "base.png", { type: blob.type || "image/png" });
+        // 底图可能已是 local-view/http 地址（已完成插画），只有裸路径才包 localViewUrl。
+        const baseSource = resolveBaseImageSource(baseImageForUse);
+        const resp = await fetch(baseSource.needsWrap ? localViewUrl(baseSource.source) : baseSource.source);
+        if (!resp.ok) throw new Error(`底图读取失败：HTTP ${resp.status}`);
+        const blob = await resp.blob();
+        if (mainIsVideo) videoSize = alignSizeForVideoNode(await imagePixelSizeFromBlob(blob));
+        const file = new File([blob], baseSource.filename, { type: blob.type || "image/png" });
         uploadedImage = (await uploadImage(file, comfyMainUrl)).name;
         mark("upload", "ok");
       } catch {
@@ -398,11 +471,41 @@ export function useIllustrationChain({
     let uploadedLastFrameImage = "";
     if (!promptOnly && useVideo && videoMode === "firstlast" && lastFrameUrl) {
       try {
-        const blob = await (await fetch(localViewUrl(lastFrameUrl))).blob();
-        const file = new File([blob], lastFrameUrl.split(/[\\/]/).pop() || "last.png", { type: blob.type || "image/png" });
+        const lastSource = resolveBaseImageSource(lastFrameUrl);
+        const resp = await fetch(lastSource.needsWrap ? localViewUrl(lastSource.source) : lastSource.source);
+        if (!resp.ok) throw new Error(`尾帧图读取失败：HTTP ${resp.status}`);
+        const blob = await resp.blob();
+        const file = new File([blob], lastSource.filename, { type: blob.type || "image/png" });
         uploadedLastFrameImage = (await uploadImage(file, comfyVideoUrl)).name;
       } catch {
         uploadedLastFrameImage = "";
+      }
+    }
+    // 第 74 刀（2026-10-31 首尾帧多批次）：段桥视频的**双帧**——图片1=上一张画面的成图（起点）、
+    // 图片2=本槽成图（终点），逐字对齐用户口径「前面的图片放首帧后面的图片放尾帧生成视频」。
+    // 两张都是**图片机**的产物、视频在**视频机**上跑 ⇒ 上一张必须按字节经后端代理取回再上传到
+    // 视频机 input（与帧循环同款跨机搬运）；本张若已由底图段传过（uploadedImage）直接复用，
+    // 不重复上传。取不到/传不上 ⇒ 两帧同图 = 「高潮片段延续」（第 59 刀定案的降级），绝不空图提交。
+    let bridgePrevInput = "";
+    let bridgeOwnInput = uploadedImage;
+    if (!promptOnly && bridgeVideo) {
+      const uploadToVideoMachine = (ref: string) => {
+        const source = resolveBaseImageSource(ref);
+        return uploadRemoteImageToInput(
+          source.needsWrap ? localViewUrl(source.source) : source.source, comfyVideoUrl,
+        );
+      };
+      if (!bridgeOwnInput && videoBaseUrl) {
+        bridgeOwnInput = await uploadToVideoMachine(videoBaseUrl).catch((error) => {
+          console.warn("[auto-video] 桥视频本帧上传失败", error);
+          return "";
+        });
+      }
+      if (bridgePrevImageUrl) {
+        bridgePrevInput = await uploadToVideoMachine(bridgePrevImageUrl).catch((error) => {
+          console.warn("[auto-video] 桥视频上一帧上传失败，退高潮片段延续", error);
+          return "";
+        });
       }
     }
     // 按 exposed 的隐藏 binding 组 values；提交 key 始终是“节点id.原字段名”。
@@ -419,8 +522,8 @@ export function useIllustrationChain({
     // firstFrameDesc/lastFrameDesc；reuse 免首帧生图（W2 已把上尾帧图复用为底图）；
     // 尾帧有事件图直接用。首帧生图失败 → 明确失败（视频必有首帧）；尾帧生图失败 →
     // 降级首帧单图（不挂死，后端 firstlast 缺尾帧有 warning）。
-    let frameFirstImage = uploadedImage;
-    let frameLastImage = uploadedLastFrameImage;
+    let frameFirstImage = bridgeVideo ? (bridgePrevInput || bridgeOwnInput) : uploadedImage;
+    let frameLastImage = bridgeVideo ? bridgeOwnInput : uploadedLastFrameImage;
     let firstFrameGenerated = false; // W3：首帧是否独立生图成功（决定要不要发转场任务）
     let frameFirstPromptId = "";
     let frameLastPromptId = "";
@@ -679,19 +782,20 @@ export function useIllustrationChain({
     // W3 转场任务（2 任务排队）：firstlast + 首帧独立生成（非 reuse）+ 后端下发转场提示词 →
     // 先提交转场视频（图片1=上尾帧、图片2=当前首帧），正片随后提交（ComfyUI 队列顺序执行）。
     // 坑F：无上尾帧图 → 降级文字转场（不拦截）；转场失败/提交失败 → 不挂死正片（仅槽位标失败）。
+    // 第 74 刀：段桥不再走这里——它的视频改挂在本槽图片正下方（bridgeVideoChain），判据
+    // `firstFrameGenerated` 天然把它挡在门外（段桥已不进帧循环），这里只服务**主槽正片**的跨楼层转场。
     if (!promptOnly && useVideo && videoMode === "firstlast" && transition !== "reuse"
         && transitionVideoPrompt && firstFrameGenerated) {
       const transitionSlotId = `${slotId}:transition`;
-      // 第 59 刀：段桥的图片1 = 本 run 刚生成的「上一张画面」（frameFirstImage 已是
-      // ComfyUI input 名，免上传）；跨楼层转场维持 resolvePrevTailDesc（上楼尾帧图）。
-      const prevTailRef = isSegmentBridge ? null : resolvePrevTailDesc(messagesRef.current);
+      const prevTailRef = resolvePrevTailDesc(messagesRef.current);
       let prevTailInput = "";
-      if (isSegmentBridge && frameFirstImage) {
-        prevTailInput = frameFirstImage;
-      } else if (prevTailRef?.lastFrameUrl) {
+      if (prevTailRef?.lastFrameUrl) {
         try {
+          // 同底图归一口径：上尾帧可能已是 local-view/data: 地址，只有裸路径才包装。
+          const prevTailSource = resolveBaseImageSource(prevTailRef.lastFrameUrl);
           prevTailInput = await uploadRemoteImageToInput(
-            localViewUrl(prevTailRef.lastFrameUrl), comfyVideoUrl,
+            prevTailSource.needsWrap ? localViewUrl(prevTailSource.source) : prevTailSource.source,
+            comfyVideoUrl,
           );
         } catch (error) {
           console.warn("[auto-video] 上尾帧图上传失败，转场降级文字转场", error);
@@ -735,13 +839,106 @@ export function useIllustrationChain({
         console.warn("[auto-video] 转场视频提交失败，正片照常", error);
       }
     }
+    // 高潮两段链的视频副槽（图片正下方）：主槽出图 → 本函数等成图 → 用成图当首帧提视频。
+    // 单独 try/catch：视频侧任何失败只标坏**视频槽**，绝不回头把已成功的图片槽判失败。
+    const videoSlotId = `${slotId}:video`;
+    const chainClimaxVideo = async (imagePromptId: string) => {
+      setMessages((current) => appendVideoSlotAfter(
+        current, messageId, videoSlotId, slotId, videoPrompt, videoParams,
+      ));
+      try {
+        // 与首尾帧帧循环同款：先自行轮询拿到成图文件名（pollResult 那条只管回填/入库）。
+        const outcome = await pollWorkflowResult(imagePromptId, comfyImageUrl, "image");
+        const outputImg = outcome.kind === "complete" ? outcome.result.images?.[0] : undefined;
+        if (!outputImg) {
+          throw new Error(outcome.kind === "failed" || outcome.kind === "stalled"
+            ? outcome.error : "首帧图未产出，视频未提交");
+        }
+        await submitIllustration({
+          ...retrySnapshot,
+          slotId: videoSlotId,
+          // 视频提示词逐字用事件带来的成稿（后端 video_prompt 编译，不再过图片 Profile）。
+          prompt: videoPrompt || prompt,
+          videoPrompt,
+          videoOnly: true,
+          eventVideoMode: videoMode,
+          videoBaseUrl: viewUrl(outputImg, comfyImageUrl),
+          videoBaseSlotId: slotId,
+          // 副槽由本链创建，不能再走自动认领（claim 只认后端发过的槽）。
+          source: "manual",
+        });
+      } catch (error) {
+        setMessages((current) => markMediaSlotFailed(
+          current, messageId, videoSlotId, "video_chain",
+          error instanceof Error ? error.message : "视频提交链失败",
+          // 首帧都没出来 ⇒ 视频槽的「重新生成」= 整条链重跑（图回主槽、视频回本槽）。
+          retrySnapshot,
+        ));
+      }
+    };
+    // 第 74 刀（2026-10-31 用户定案「前面的图片放首帧后面的图片放尾帧生成视频」）：段桥视频副槽。
+    // 与高潮两段链同构（主槽出本锚点画面的图 → 图正下方挂视频槽），差别只在双帧来源：
+    // 图片1＝**上一张画面的成图**（后端按正文序标注的 bridgePrevSlotId）、图片2＝本槽成图。
+    // 上一张与本张分属两条独立链（多批事件逐条 fire-and-forget）⇒ 完成先后不保证，故先做
+    // **有界等待**；本楼层没有前一张（该桥排在主图之前）⇒ 退回**上一楼层的尾帧成图**，
+    // 与后端 `_wb_bridge_chain` 的起点回退同源；再取不到 ⇒ 交空串、退「高潮片段延续」
+    //（两帧同本图，第 59 刀定案）：既不空图提交，也绝不让视频槽永远 pending。
+    const chainBridgeVideo = async (imagePromptId: string) => {
+      setMessages((current) => appendVideoSlotAfter(
+        current, messageId, videoSlotId, slotId, transitionVideoPrompt, transitionVideoParams,
+      ));
+      try {
+        const outcome = await pollWorkflowResult(imagePromptId, comfyImageUrl, "image");
+        const outputImg = outcome.kind === "complete" ? outcome.result.images?.[0] : undefined;
+        if (!outputImg) {
+          throw new Error(outcome.kind === "failed" || outcome.kind === "stalled"
+            ? outcome.error : "本画面成图未产出，衔接视频未提交");
+        }
+        // 读槽位走 setMessages 的函数式更新（返回同一数组 ⇒ React 直接 bail out，不触发渲染）：
+        // messagesRef 要等下一次渲染才同步，而这里是异步循环，必须拿最新状态。
+        const readSlotMedia = (sid: string) => {
+          let latest = messagesRef.current;
+          setMessages((current) => { latest = current; return current; });
+          return findMediaSlotState(latest, messageId, sid);
+        };
+        const prevImageUrl = bridgePrevSlotId
+          ? await waitForSlotMedia(readSlotMedia, bridgePrevSlotId)
+          : (resolvePrevTailDesc(messagesRef.current)?.lastFrameUrl || "");
+        await submitIllustration({
+          ...retrySnapshot,
+          slotId: videoSlotId,
+          // 提示词逐字用事件带来的转场成稿（后端 mode="transition" 编译，不再过图片 Profile）。
+          prompt: transitionVideoPrompt || prompt,
+          videoPrompt: transitionVideoPrompt,
+          videoParams: transitionVideoParams || videoParams,
+          videoOnly: true,
+          bridgeVideo: true,
+          bridgePrevImageUrl: prevImageUrl,
+          eventVideoMode: videoMode,
+          videoBaseUrl: viewUrl(outputImg, comfyImageUrl),
+          // 入库的 derived_from 记本槽图（= 终点帧，也是视频所在那一格正上方的图）。
+          videoBaseSlotId: slotId,
+          // 副槽由本链创建，不能再走自动认领（claim 只认后端发过的槽）。
+          source: "manual",
+        });
+      } catch (error) {
+        setMessages((current) => markMediaSlotFailed(
+          current, messageId, videoSlotId, "video_chain",
+          error instanceof Error ? error.message : "衔接视频提交链失败",
+          retrySnapshot,
+        ));
+      }
+    };
     // V1.6/P5+：首尾帧独立图片模式（无视频）不出高潮主图/正片——双帧图已回填，主槽语义已被占用。
     if (!(useFirstlastImages && !useVideo)) {
     const values = illustrationTemplateValues(tpl.exposed, {
       prompt, negativePrompt, loraName, loraWeight, baseImage: uploadedImage,
       latentSize,
-      // V1.2 视频最小事实：时长/镜头 = 用户预设值（模板无 exposed binding 时自然忽略）；motion 已由后端透传
-      videoDuration: mainIsVideo && preset.videoDurationHint ? preset.videoDurationHint : undefined,
+      // 时长：用户显式预设 > 后端按剧情判定的秒数（2026-10-31）；都无则保留模板默认。
+      // 段桥（第 74 刀）改按**转场**时长口径（与 W3 转场块同一 preset.transitionDurationHint 优先）。
+      videoDuration: mainIsVideo
+        ? ((bridgeVideo && preset.transitionDurationHint) || resolveVideoDuration(preset, videoParams))
+        : undefined,
       videoCamera: mainIsVideo ? preset.videoCamera : undefined,
       // V1.5/B1 视频模式 + 首尾帧描述：有值才传（模板无 exposed binding 时自然忽略）
       // 第 59 刀：段桥的主槽=普通图（本锚点画面）⇒ 视频字段全部不传
@@ -755,12 +952,18 @@ export function useIllustrationChain({
       lastFrameImage: useVideo && frameLastImage ? frameLastImage : undefined,
       // V1.5 默认开放：后端编译的 climax 视频提示词（仅视频分支注入；无模板时仍留在槽位供测试核对）
       videoPrompt: mainIsVideo && videoPrompt ? videoPrompt : undefined,
+      // 视频输出宽高 = 刚量到的首帧真实尺寸（仅视频提交；图片模板没有这两键，自然忽略）
+      videoSize: mainIsVideo ? videoSize : undefined,
     });
     try {
       // V1.1 红线：视频模板 LoRA 不自动接线（loader 结构各异），只认模板自身暴露字段；
       // 图片分支维持既有 loraStack 注入合同。第 59 刀：段桥主槽=普通图 ⇒ 图片 LoRA 照常。
       const loraStack = mainIsVideo ? [] : loras.map(({ name, weight }) => ({ name, weight }));
       const loraMode = mainIsVideo ? "none" : (preset.loraMode || "single");
+      // 两段链视频副槽的成稿与参数：高潮＝正片成稿（video_prompt）、段桥＝转场成稿
+      //（transition_video_prompt）。第 74 刀：试跑面必须两支都摆出来，否则审查只看得到图。
+      const chainVideoPrompt = climaxVideoChain ? videoPrompt : transitionVideoPrompt;
+      const chainVideoParams = climaxVideoChain ? videoParams : transitionVideoParams;
       if (promptOnly) {
         // 试跑：主图/正片（含 video 分支）的成稿上报 trace，不查 ComfyUI、不提交、不轮询。
         // 2026-10-18 成稿直送：把编译成稿写进槽位快照 ⇒「重新生成」逐字提交 ComfyUI
@@ -769,6 +972,18 @@ export function useIllustrationChain({
           current, messageId, slotId, "prompt_only", PROMPT_ONLY_NOTE,
           { ...retrySnapshot, finalPrompt: prompt },
         ));
+        if (climaxVideoChain || bridgeVideoChain) {
+          // 试跑也要把视频槽摆出来（就在图片正下方）：带**主槽同一份**成稿快照 ⇒
+          // 点它的「重新生成」= 用成稿出图 → 图成后照常接视频。
+          // 视频提示词本就从事件逐字带来（不经 Profile 编译），无需另存成稿。
+          setMessages((current) => appendVideoSlotAfter(
+            current, messageId, videoSlotId, slotId, chainVideoPrompt, chainVideoParams,
+          ));
+          setMessages((current) => markMediaSlotFailed(
+            current, messageId, videoSlotId, "prompt_only", PROMPT_ONLY_NOTE,
+            { ...retrySnapshot, finalPrompt: prompt },
+          ));
+        }
         void reportIllustrationSubmission({
           threadId, repoId: repo?.id || threadId, turnId, messageId, slotId,
           templateId: chosenId, promptId: "", prompt, promptProfile,
@@ -777,6 +992,18 @@ export function useIllustrationChain({
           valueKeys: Object.keys(values).sort(),
           source,
         }).catch(() => undefined);
+        if (climaxVideoChain || bridgeVideoChain) {
+          // 视频提示词也上报 trace（promptId 空=未提交）：试跑的产出必须**图片与视频两条都有**，
+          // 否则审查界面只看得到图片成稿，视频成稿无处核对（2026-10-31 用户需求原话）。
+          void reportIllustrationSubmission({
+            threadId, repoId: repo?.id || threadId, turnId, messageId, slotId: videoSlotId,
+            templateId: preset.videoTemplateId || "", promptId: "", prompt: chainVideoPrompt, promptProfile,
+            loraName, loraWeight, latentWidth: latentSize.width, latentHeight: latentSize.height,
+            loraMode: "none", loraNames: [],
+            valueKeys: [],
+            source,
+          }).catch(() => undefined);
+        }
         return;
       }
       // submit 计时段含 ComfyUI 探活 + 队列等待：这段正是历史上「卡 4 分钟」的嫌疑区。
@@ -810,6 +1037,8 @@ export function useIllustrationChain({
           ? { messageId: videoBaseRef.sourceMessageId, slotId: videoBaseRef.sourceSlotId }
           : undefined;
         pollResult(r.prompt_id, outputNodeIds, regeneration, target, prompt, mainIsVideo ? "video" : "image", baseSlotRef);
+        if (climaxVideoChain) void chainClimaxVideo(r.prompt_id!);
+        if (bridgeVideoChain) void chainBridgeVideo(r.prompt_id!);
       } else {
         failSlot("submit", "ComfyUI 没有返回任务 ID");
       }

@@ -582,6 +582,59 @@ def test_parse_video_plan_拒答字段丢弃_不流入提示词():
     assert "sync" not in plan["audio_design"]
 
 
+def test_clamp_climax_duration_夹到4到8():
+    # 2026-10-31 用户定案：高潮时长由剧情动作量判定，4–8 秒；非法值交调用方兜底。
+    assert video_prompt.clamp_climax_duration(3) == 4
+    assert video_prompt.clamp_climax_duration(9) == 8
+    assert video_prompt.clamp_climax_duration("6") == 6
+    assert video_prompt.clamp_climax_duration(6.6) == 7
+    assert video_prompt.clamp_climax_duration(0) is None
+    assert video_prompt.clamp_climax_duration(-2) is None
+    assert video_prompt.clamp_climax_duration(True) is None
+    assert video_prompt.clamp_climax_duration("soon") is None
+
+
+def test_parse_video_plan_duration_s_extracted_and_clamped():
+    plan = video_prompt.parse_video_plan(
+        '{"action_sequence":[{"beat":"起点","desc":"俯卧"}],"duration_s":9}'
+    )
+    assert plan["duration_s"] == 8
+    assert video_prompt.parse_video_plan('{"duration_s":"6"}')["duration_s"] == 6
+    assert "duration_s" not in video_prompt.parse_video_plan('{"duration_s":"soon"}')
+
+
+def test_build_request_climax_uses_plot_duration():
+    # 剧情判定值进提示词元信息，随 submit.duration 下发前端注入工作流时长节点。
+    req = video_prompt.build_video_request(
+        mode="climax", spec=_spec(video_duration_s=6),
+        video_config={"base_url": "https://x.com/videos", "model": "h3"},
+        first_frame="http://x/f.png",
+    )
+    assert "6 seconds" in req["submit"]["prompt"]
+    assert req["submit"]["duration"] == 6
+
+
+def test_build_request_plot_duration_does_not_override_explicit_preset():
+    req = video_prompt.build_video_request(
+        mode="climax", spec=_spec(video_duration_s=6),
+        video_config={"base_url": "https://x.com/videos", "model": "h3"},
+        preset={"videoDurationHint": 10},
+    )
+    assert "10 seconds" in req["submit"]["prompt"]
+    assert req["submit"]["duration"] == 10
+
+
+def test_build_request_firstlast_ignores_plot_duration():
+    # 首尾帧覆盖整段楼层，时长仍走模板/预设；剧情判定值只在 climax 生效。
+    req = video_prompt.build_video_request(
+        mode="firstlast", spec=_spec(video_duration_s=6),
+        video_config={"base_url": "https://x.com/videos", "model": "h3"},
+        first_frame="http://x/f.png", last_frame="http://x/l.png",
+    )
+    assert "15 seconds" in req["submit"]["prompt"]
+    assert req["submit"]["duration"] == 0
+
+
 def test_parse_video_plan_整体拒答返回空():
     # 整体无效时返回 {}，调用方据此触发拒答重试或回退纯函数兜底。
     plan = video_prompt.parse_video_plan(

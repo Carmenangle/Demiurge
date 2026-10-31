@@ -199,7 +199,7 @@ export interface MediaInsertPreset {
   styleLoraWeight?: number; // ⑥ 风格 LoRA 权重（默认 0.8）
   styleBaseImage?: string;  // ⑥ 兜底风格底图（在场角色都无底图时，gpt-image 系用）
   videoTemplateId?: string; // 视频工作流模板 id（空=不出视频，恒用图片模板）
-  smartVideo?: boolean;     // 智能模态：开=剧情动态强时(motion>=2)自动改用视频模板，否则用图片
+  smartVideo?: boolean;     // 智能模态：开=后端编排出视频分镜的画多出图后再挂视频槽，其余只出图
   // 首尾帧生成（用户定稿 2026-08-28）：图片按剧情首尾帧（首帧+尾帧）生成，视频模式随之
   // 变为 firstlast 剧情影片；关闭时视频为 climax 高潮点动作代入。旧预设按 videoMode 回填。
   firstlast?: boolean;

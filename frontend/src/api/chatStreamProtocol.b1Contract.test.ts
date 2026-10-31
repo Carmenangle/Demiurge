@@ -89,6 +89,8 @@ describe("B1 协议透传 · 跨语言端到端契约", () => {
         transition: "regenerate",
         transition_video_prompt: "转场分镜提示词",
         transition_video_params: { mode: "transition", size: "1280x720" },
+        bridge_prev_slot: "illo-req-work-3:last",
+        batch_index: 1,
       },
     };
     const event = decodeChatStreamEvent(wire);
@@ -97,6 +99,21 @@ describe("B1 协议透传 · 跨语言端到端契约", () => {
     expect(event.transition).toBe("regenerate");
     expect(event.transitionVideoPrompt).toBe("转场分镜提示词");
     expect(event.transitionVideoParams).toEqual({ mode: "transition", size: "1280x720" });
+    // 第 74 刀：段桥的「前一张画面」槽 id（图片1 的来源；主图在前时指主楼层尾帧图槽）
+    expect(event.bridgePrevSlotId).toBe("illo-req-work-3:last");
+    // 第 74 刀：批次序号（>0 ⇒ 这张图落自己的锚点，不吃首尾帧固定落点）
+    expect(event.batchIndex).toBe(1);
+  });
+
+  it("旧后端不带 bridge_prev_slot / batch_index ⇒ 字段缺席而不是空串（前端据此不建桥链）", () => {
+    const wire = {
+      protocol: "laf-chat-stream", version: 1, type: "illustrate_request",
+      data: { prompt: "p", motion: 3, actors: [], bridge_prev_slot: "" },
+    };
+    const event = decodeChatStreamEvent(wire);
+    if (event.type !== "illustrate_request") throw new Error("unreachable");
+    expect("bridgePrevSlotId" in event).toBe(false);
+    expect("batchIndex" in event).toBe(false);
   });
 });
 

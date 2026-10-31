@@ -351,8 +351,17 @@ def first_frame_anchor_offset(text: str) -> int:
     return end
 
 
-def resolve_illustration_anchor(text: str, requested_anchor: str = "") -> str:
-    """纠正模型误选的静态收束或低强度结尾钩子，保证插画仍落在视觉高潮。"""
+def resolve_illustration_anchor(
+    text: str, requested_anchor: str = "", *, respect_scene_boundary: bool = True,
+) -> str:
+    """纠正模型误选的静态收束或低强度结尾钩子，保证插画仍落在视觉高潮。
+
+    `respect_scene_boundary`（2026-10-31）：跨时间跳转那道闸**只在有显式意图帧要保护时**
+    才成立——`plan["anchor"]` / `anchor_override` 是模型或调用方**点名要画**的那一幕，
+    拿旧时段高潮去覆盖它是错的。缺计划兜底路径（`missing_plan_fallback` /
+    `local_scene_fallback` / `first_story_reply`）没有任何计划要保护，锚点只是判据档
+    LLM 的一次选点，此时这道闸会连纠偏一起压住。默认 `True` 保持旧行为。
+    """
     requested = image_prompt_extract.restore_jailbreak(requested_anchor or "").strip()
     fallback = image_prompt_extract.restore_jailbreak(
         fallback_illustration_anchor(text),
@@ -362,7 +371,9 @@ def resolve_illustration_anchor(text: str, requested_anchor: str = "") -> str:
     requested_excerpt = illustration_scene_excerpt(text, requested)
     fallback_score = _anchor_score(fallback)
     requested_score = _anchor_score(requested)
-    crosses_scene_boundary = _anchors_cross_scene_boundary(text, fallback, requested)
+    crosses_scene_boundary = respect_scene_boundary and _anchors_cross_scene_boundary(
+        text, fallback, requested,
+    )
     requested_is_action_outcome = (
         any(word in requested for word in _OUTCOME_TERMS)
         and sum(word in requested_excerpt for word in _ACTION_CONTEXT_TERMS) >= 2

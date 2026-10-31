@@ -225,8 +225,8 @@ describe("MediaInsertModal 批量生图数目（第 57 刀）", () => {
     expect(html).toContain("批量生图数目");
     expect(html).toContain('min="1"');
     expect(html).toContain('value="1"');
-    // 说明文案必须点明「仅高潮点模式生效」与两条取值口径
-    expect(html).toContain("仅高潮点模式生效");
+    // 说明文案必须点明**两种模式都生效**与两条取值口径
+    expect(html).toContain("高潮点／首尾帧两种模式都生效");
     expect(html).toContain("全部出图");
   });
 
@@ -240,14 +240,16 @@ describe("MediaInsertModal 批量生图数目（第 57 刀）", () => {
     expect(html).toContain('value="4"');
   });
 
-  it("首尾帧模式（firstlast）下整个输入框不出现（零影响首尾帧链）", () => {
+  it("首尾帧模式下同样出现（2026-10-31 用户定案：首尾帧也走多批次=段桥）", () => {
     const html = renderToStaticMarkup(
       <MediaInsertModal templates={[]} modelsDir=""
         preset={{ templateId: "", firstlast: true, batchImageCount: 4 }}
         onSave={() => {}} onClose={() => {}} />,
     );
 
-    expect(html).not.toContain("批量生图数目");
+    expect(html).toContain("批量生图数目");
+    expect(html).toContain('value="4"');
+    expect(html).toContain("前图为首帧");
   });
 
   it("非法/0 存量一律收敛到 1（脏数据不透传）", () => {

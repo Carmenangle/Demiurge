@@ -45,12 +45,29 @@ describe("isolation of illustration submit params", () => {
     expect(names).toEqual([
       "prompt", "motion", "actors", "messageId", "slotId", "sceneSpec", "turnId",
       "source", "eventVideoMode", "firstFrameDesc", "lastFrameDesc", "prevTailDesc",
-      "lastFrameUrl", "videoPrompt", "transition", "transitionVideoPrompt",
+      "lastFrameUrl", "videoPrompt", "videoParams", "transition", "transitionVideoPrompt",
       "transitionVideoParams",
       // 2026-10-18 试跑成稿直送：试跑（promptOnly）上报时把编译成稿写进快照，
       // 「重新生成」据此逐字提交 ComfyUI（不再重编译）；普通失败槽无这两键 ⇒ 仍重编译
       "finalPrompt", "finalFramePrompts",
+      // 2026-10-31 高潮点「图 + 视频」两段链：主槽只出图，成图后 `videoOnly` 递归提交
+      // `:video` 副槽；两键描述本次提交只出视频、首帧用哪张图（来源槽显式携带，不反查消息）。
+      "videoOnly", "videoBaseUrl", "videoBaseSlotId",
+      // 2026-10-31 第 74 刀（首尾帧多批次）：段桥视频的图片1＝上一张成图、图片2＝本槽成图。
+      // bridgePrevSlotId 由后端按正文序标注随事件下发；bridgeVideo/bridgePrevImageUrl 只在
+      // 视频槽那次递归里出现。
+      "bridgePrevSlotId", "bridgeVideo", "bridgePrevImageUrl",
     ]);
+  });
+
+  it("事件→提交对象逐字段接线（字段清单锁不住漏接线）", () => {
+    // 上一条锁只管 IllustrationSubmit 的**形状**；把 `bridgePrevSlotId: event.bridgePrevSlotId`
+    // 整行删掉，形状锁照样绿，而段桥视频从此退化成「拿上一楼层尾帧图」——**接线错要在出口断言**。
+    const count = (re: RegExp) => (code.match(re) || []).length;
+    expect(count(/bridgePrevSlotId:\s*event\.bridgePrevSlotId,/g)).toBe(1);
+    // 首尾帧多批次的另两键只属于**视频槽那次递归**，自动派发侧不该出现（出现即形状漂移）。
+    expect(code).not.toMatch(/bridgeVideo:/);
+    expect(code).not.toMatch(/bridgePrevImageUrl:/);
   });
 
   it("submitIllustration 只吃一个对象参数", () => {

@@ -413,6 +413,36 @@ def test_中文长横线时间切换同样保护末尾揭示锚点():
     assert si.resolve_illustration_anchor(text, requested) == requested
 
 
+def test_缺计划兜底路径的时间跳转闸可被收窄以恢复高潮纠偏():
+    """真机轮 C（2026-10-31，thread `c5c60de2` 第 13 轮）：正文里三处独立成行 `———`
+    时间跳转分隔 ⇒ 旧行为下 `_anchors_cross_scene_boundary` 把两道推翻闸一起关掉，
+    判据档选的**尾部表情帧**原样交付，`illustration.slot` 的 offset 落到 `<content>`
+    末尾（用户实锤「图片插在最尾部」）。缺计划兜底没有任何显式意图帧要保护，
+    故调用方传 `respect_scene_boundary=False` 后必须纠回高潮段。
+    """
+    text = (
+        "<content>她把外套的扣子解开，重新把兔耳发箍戴好。\n\n"
+        "———\n\n"
+        "我把那根东西抵上去，蹭了两下，一挺腰。\n\n"
+        "她整个人往前一扑，两只手按在料理台上。\n\n"
+        "———\n\n"
+        "她抬起头，灯下的眼睛里那点东西又沉下去了。\n\n"
+        "「明天下午，妈妈就把她叫到寝室来。」</content>"
+    )
+    requested = "她抬起头，灯下的眼睛里那点东西又沉下去了。"
+    fallback = "我把那根东西抵上去，蹭了两下，一挺腰。"
+
+    assert si.fallback_illustration_anchor(text) == fallback
+    assert si._anchor_score(fallback) >= si._anchor_score(requested) + 3
+    assert si._anchors_cross_scene_boundary(text, fallback, requested)
+    # 默认（显式计划档）：闸仍在 ⇒ 尾部帧原样交付，与真机交付稿同形
+    assert si.resolve_illustration_anchor(text, requested) == requested
+    # 收窄（缺计划兜底档）：纠回高潮段
+    assert si.resolve_illustration_anchor(
+        text, requested, respect_scene_boundary=False,
+    ) == fallback
+
+
 def test_插画槽位精确落在画面句末而不是下一段之后():
     text = "<content>画面发生在这里。\n\n后续段落。</content>"
     offset = si.illustration_anchor_offset(text, "画面发生在这里。")

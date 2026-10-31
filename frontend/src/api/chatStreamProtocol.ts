@@ -54,6 +54,8 @@ export interface VideoParams {
   mode: "climax" | "firstlast" | "transition";
   model: string;
   size: string;
+  /** 剧情判定的秒数（0/缺省=未判定，工作流保留模板默认） */
+  duration?: number;
   endpoint: string;
   images: string[];
   reference_binding: Record<string, string>;
@@ -68,7 +70,7 @@ export type ChatStreamEvent =
   | { type: "route"; route: MessageRoute }
   | { type: "image"; url: string; id?: string; regeneration?: RegenerationSnapshot }
   | { type: "video"; url: string; id?: string }
-  | { type: "illustrate_request"; prompt: string; motion: number; actors: string[]; sceneSpec?: IllustrationSceneSpec; id?: string; offset?: number; turnId?: string; videoMode?: "climax" | "firstlast"; firstFrameDesc?: string; lastFrameDesc?: string; prevTailDesc?: string; lastFrameUrl?: string; transition?: "reuse" | "regenerate" | "ambiguous"; videoPrompt?: string; videoParams?: VideoParams; transitionVideoPrompt?: string; transitionVideoParams?: VideoParams }
+  | { type: "illustrate_request"; prompt: string; motion: number; actors: string[]; sceneSpec?: IllustrationSceneSpec; id?: string; offset?: number; turnId?: string; videoMode?: "climax" | "firstlast"; firstFrameDesc?: string; lastFrameDesc?: string; prevTailDesc?: string; lastFrameUrl?: string; transition?: "reuse" | "regenerate" | "ambiguous"; videoPrompt?: string; videoParams?: VideoParams; transitionVideoPrompt?: string; transitionVideoParams?: VideoParams; bridgePrevSlotId?: string; batchIndex?: number }
   | { type: "audio_request"; lines: AudioDialogueLine[]; id?: string }
   | { type: "rag_status"; state: string; kind: string; count?: number }
   | { type: "inspiration"; card: StreamInspirationCard }
@@ -187,6 +189,13 @@ export function decodeChatStreamEvent(value: unknown): ChatStreamEvent {
         ...(data.transition_video_params && typeof data.transition_video_params === "object"
           ? { transitionVideoParams: data.transition_video_params as VideoParams }
           : {}),
+        // 第 74 刀 段桥：图片1 取自哪一张**成图槽**（正文序里的前一张画面）。
+        // 有了它，前端不必另生成一张「上一画面」近似图 —— 用户口径「前面的图片放首帧」。
+        ...(typeof data.bridge_prev_slot === "string" && data.bridge_prev_slot
+          ? { bridgePrevSlotId: data.bridge_prev_slot }
+          : {}),
+        // 第 74 刀：批次序号（第 2 张起才有；主图不带 ⇒ 落点口径逐字不变）
+        ...(typeof data.batch_index === "number" ? { batchIndex: data.batch_index } : {}),
       };
     case "audio_request":
       return {

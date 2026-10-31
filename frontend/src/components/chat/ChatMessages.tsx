@@ -609,12 +609,13 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
     }
     if (part.type === "media-slot") {
       const isAudio = part.kind === "audio";
+      const isVideo = part.kind === "video";
       return (
         <div className={`media-slot media-slot-${part.status || "pending"}${isAudio ? " media-slot-audio" : ""}`} key={part.slotId || `slot-${index}`}>
           {part.status === "failed" ? (
             isAudio ? (part.error || `「${part.speaker || ""}」配音生成失败`) : (
               <span className="media-slot-failed">
-                {part.error || "插画生成失败"}
+                {part.error || (isVideo ? "视频生成失败" : "插画生成失败")}
                 {onRetryIllustration && part.slotId && (
                   <button
                     type="button"
@@ -622,7 +623,9 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
                     title={
                       (part.error || "").includes("prompt_only")
                         ? "用试跑成稿直接提交 ComfyUI 出图（不受试跑开关影响）"
-                        : "用原参数重新生成这张图"
+                        : isVideo
+                          ? "用原参数重新生成这段视频"
+                          : "用原参数重新生成这张图"
                     }
                     aria-label="重新生成"
                     onClick={() => onRetryIllustration(msg.id, part.slotId!)}
@@ -636,12 +639,12 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
             <><span className="bot-spinner" /><span>正在生成 {part.speaker || ""}（{part.seq ?? "?"}/{part.total ?? "?"}）…</span></>
           ) : (
             <div className="media-slot-generating">
-              <span><span className="bot-spinner" /> 插画生成中…</span>
+              <span><span className="bot-spinner" /> {isVideo ? "视频生成中…" : "插画生成中…"}</span>
               {onCancelGeneration && part.slotId && (
                 <button
                   type="button"
                   className="media-slot-stop"
-                  title="停止本次生成"
+                  title={isVideo ? "停止本次视频生成" : "停止本次生成"}
                   aria-label="停止本次生成"
                   onClick={() => onCancelGeneration(msg.id, part.slotId!)}
                 >

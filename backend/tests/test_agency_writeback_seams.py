@@ -235,3 +235,41 @@ def test_第59刀_多批选择层滤零分锚点():
     picked = agent_agency._resolve_anchor_intent_list(ctx, text, raw)
 
     assert [x["anchor"] for x in picked] == ["A句。", "C句。"]
+
+
+# ---------------------------------------------------------------------------
+# 画幅一致性（2026-10-31 用户定案「图片的宽高要和视频的宽高一致」）
+# video_config.size 此前硬编码 "1280x720" ⇒ 竖图（9:16）楼层的 video_prompt 逐字写着
+# 「16:9」，模型按横画幅构图，首帧与成片的宽高对不上（真机实锤 da0f9576 的 [元信息] 行）。
+# size 必须跟着**本锚点** scene_spec 的画幅走；缺画幅时留空，不得回落成一个假的横屏值。
+# ---------------------------------------------------------------------------
+def _出图外壳请求(**spec_over):
+    scene_spec = {"narrative": "她站在走廊里。", "aspect_ratio": "9:16"}
+    scene_spec.update(spec_over)
+    return aag._wb_comfy_illustrate_env(
+        {"vid_base": "https://vid.example", "vid_model": "h3-mini", "vid_proxy": ""},
+        None,   # plan：无计划，只验外壳组装
+        {"at_climax": True, "visible_story": True, "local_scene_fallback": False,
+         "missing_plan_fallback": False, "first_story_reply": False,
+         "character_encounter": False},
+        {"request_prompt": "standing in corridor", "request_actors": ["甲"],
+         "requested_anchor": "她站在走廊里。"},
+        scene_spec,
+        motion=3,
+    )
+
+
+def test_视频配置的画幅跟随本锚点scene_spec():
+    assert _出图外壳请求(aspect_ratio="9:16")["video_config"]["size"] == "9:16"
+
+
+def test_视频配置不再硬编码1280x720():
+    req = _出图外壳请求(aspect_ratio="3:4")
+    assert req["video_config"]["size"] == "3:4"
+    assert "1280x720" not in str(req["video_config"])
+
+
+def test_无画幅时size留空而不是假造横屏():
+    """空串与 None 都属「这一帧没判定画幅」⇒ size 必须空着，让提示词里不出现假画幅。"""
+    assert _出图外壳请求(aspect_ratio="")["video_config"]["size"] == ""
+    assert _出图外壳请求(aspect_ratio=None)["video_config"]["size"] == ""

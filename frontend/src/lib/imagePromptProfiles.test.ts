@@ -218,4 +218,24 @@ describe("illustrationTemplateValues · 视频字段", () => {
     expect(values["3.first"]).toBe("first.png");
     expect("7.last" in values).toBe(false);
   });
+  // 2026-10-31 用户定案「图片的宽高要和视频的宽高一致」：首帧真实像素尺寸写进视频节点的
+  // width/height（后端 _auto_video_size_fields 自动暴露），覆盖模板里的分辨率选择器连线。
+  it("video_width / video_height binding 注入首帧真实尺寸（与图片逐像素对齐）", () => {
+    const exposed = [
+      { node_id: "329", field: "width", semantic: "width", binding: "video_width" },
+      { node_id: "329", field: "height", semantic: "height", binding: "video_height" },
+    ];
+    const values = illustrationTemplateValues(exposed, {
+      prompt: "p", videoSize: { width: 864, height: 1536 },
+    });
+    expect(values["329.width"]).toBe(864);
+    expect(values["329.height"]).toBe(1536);
+  });
+  it("量不到首帧尺寸 → 不写这两键（交回模板默认，不出 0×0）", () => {
+    const exposed = [
+      { node_id: "329", field: "width", semantic: "width", binding: "video_width" },
+      { node_id: "329", field: "height", semantic: "height", binding: "video_height" },
+    ];
+    expect(illustrationTemplateValues(exposed, { prompt: "p" })).toEqual({});
+  });
 });

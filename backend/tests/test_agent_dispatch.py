@@ -1542,6 +1542,41 @@ def test_extract_video_action_plan_carries_guard_preset_and_refusal_retry(monkey
     ]
 
 
+def test_extract_video_action_plan_duration_rule_only_in_climax(monkeypatch):
+    """高潮时长由剧情动作量判定（2026-10-31）：只有 climax 协议要求 duration_s；
+    首尾帧覆盖整段楼层，时长仍走模板/预设，协议里不得出现该字段。"""
+    calls: list[str] = []
+
+    def fake_chat(base, key, model, system, user, **_kw):
+        calls.append(system)
+        return '{"action_sequence":[{"beat":"起点","desc":"she kneels"}],"duration_s":7}'
+
+    monkeypatch.setattr(asc._llm, "chat", fake_chat)
+    ctx = _ctx()
+    spec = {"narrative": "她跪在石板上。"}
+
+    plan = asc._extract_video_action_plan(ctx, spec, video_mode="climax")
+    assert plan["duration_s"] == 7
+    assert '"duration_s":6' in calls[0]
+    assert "duration_s：按 action_sequence 的动作量" in calls[0]
+
+    asc._extract_video_action_plan(ctx, spec, video_mode="firstlast")
+    assert "duration_s" not in calls[1]
+
+
+def test_wb_frames_and_video_climax_falls_back_to_5s_when_extraction_fails(monkeypatch):
+    """提取失败也必须发 5 秒，不能回落到模板旧默认 12 秒（2026-10-31 用户定案）。"""
+    monkeypatch.setattr(asc, "_extract_video_action_plan", lambda *a, **k: {})
+    monkeypatch.setattr(asc, "_video_skeleton_for", lambda ctx, mode: None)
+    req = {"prompt": "p", "video_config": {}}
+    out = asc._wb_frames_and_video(
+        {"comfy_video": True, "video_mode": "climax"}, req,
+        {"narrative": "她跪在石板上。"}, "", "", 2,
+    )
+    assert req["video_request"]["submit"]["duration"] == 5
+    assert "5 seconds" in out
+
+
 def test_extract_video_action_plan_firstlast_lists_all_dialogue(monkeypatch, tmp_path):
     """firstlast 模式：首尾帧影片从头到尾覆盖剧情——提取协议要求列出全部对白并标 at_s。"""
     from app.services import preset_store
@@ -2660,7 +2695,7 @@ def test_高潮重定向保留主计划已验证角色而不依赖正文重复�
     monkeypatch.setattr(ra, "_narr", lambda *a, **k: "")
     monkeypatch.setattr(
         scene_illustration, "resolve_illustration_anchor",
-        lambda _story, _anchor: "她跌坐在石板上。",
+        lambda _story, _anchor, **_kw: "她跌坐在石板上。",
     )
     monkeypatch.setattr(
         scene_illustration, "illustration_scene_excerpt",
@@ -4166,7 +4201,12 @@ def test_第57刀_指定锚点与判据档同一条链且不重复调判据(monk
 
 
 def _stub_comfy_chain(monkeypatch) -> dict:
-    """把多批编译链换成轻量假件；返回 {built: 被编译的锚点, video: compile_video 实参}。"""
+    """把多批编译链换成轻量假件；返回 {built: 被编译的锚点, video: compile_video 实参}。
+
+    假件**模拟真实门**：`compile_video` 且 `ctx["comfy_video"]` 才产出 `video_request`
+    （与 `_wb_frames_and_video` 同构），这样「每张 extra 到底有没有视频成稿」在单测里
+    就是可断言的事实，而不是只看一个布尔形参。
+    """
     built: list[str] = []
     video: list = []
 
@@ -4175,6 +4215,19 @@ def _stub_comfy_chain(monkeypatch) -> dict:
         built.append(anchor_override)
         return {"request_prompt": f"p:{anchor_override}", "plan_retargeted": False,
                 "requested_anchor": anchor_override, "motion": 7}
+
+    def fake_frames(ctx, illustrate_req, scene_spec, clean, transition_decision, motion,
+                    *, compile_video=True):
+        video.append(compile_video)
+        if not compile_video or not ctx.get("comfy_video"):
+            return ""
+        anchor = str(illustrate_req.get("anchor") or "")
+        illustrate_req["video_mode"] = str(ctx.get("video_mode") or "climax")
+        illustrate_req["video_request"] = {
+            "mode": "climax",
+            "submit": {"prompt": f"VIDEO[{anchor}]"},
+        }
+        return f"VIDEO[{anchor}]"
 
     monkeypatch.setattr(asc, "_wb_comfy_scene_target", fake_target)
     monkeypatch.setattr(asc, "_wb_comfy_scene_spec", lambda *a, **k: {"narrative": "n"})
@@ -4186,10 +4239,7 @@ def _stub_comfy_chain(monkeypatch) -> dict:
             "motion": motion,
         },
     )
-    monkeypatch.setattr(
-        asc, "_wb_frames_and_video",
-        lambda *a, **k: video.append(k.get("compile_video")),
-    )
+    monkeypatch.setattr(asc, "_wb_frames_and_video", fake_frames)
     return {"built": built, "video": video}
 
 
@@ -4232,7 +4282,8 @@ def test_第57刀_第2张_按分取前二且跳过已出图的主锚点(monkeypa
 
     assert [item["anchor"] for item in out] == ["丙处"]      # 乙处=主图、丙处=新增
     assert stub["built"] == ["丙处"]
-    assert stub["video"] == [False]                          # 本步不编译视频
+    # 2026-10-31 用户定案：高潮多张＝每张各配一支动作延伸视频 ⇒ 第 2 张照常编视频
+    assert stub["video"] == [True]
 
 
 def test_第57刀_第999张_所有锚点都出图且保持正文序(monkeypatch):
@@ -4246,7 +4297,175 @@ def test_第57刀_第999张_所有锚点都出图且保持正文序(monkeypatch)
 
     assert [item["anchor"] for item in out] == ["甲处", "丙处", "丁处"]   # 去掉主图乙处
     assert stub["built"] == ["甲处", "丙处", "丁处"]
-    assert stub["video"] == [False, False, False]
+    assert stub["video"] == [True, True, True]
+
+
+# ── 2026-10-31 · 高潮多批各配一支视频（用户口径「多张高潮图视频＝一个参考图一个动作
+#    延伸视频，生成多个批次」）：旧口径 extras 传 compile_video=False ⇒ 第 2..N 张
+#    事件里没有 video_prompt ⇒ 前端闸门判 false ⇒ N 张图只有 1 支视频。───
+
+
+def test_视频多批_高潮多张每张各带一支视频成稿(monkeypatch):
+    """验收：climax + comfy_video ⇒ 每张 extra 自己的 `video_request`，且**逐张不同**
+    （各取材到自己那一处画面，不是把主图那支复制 N 份）。"""
+    _stub_comfy_chain(monkeypatch)
+    ctx = {**_anchors(("甲处", 10), ("乙处", 90), ("丙处", 50)),
+           "illustration_batch_count": 9, "comfy_video": True}
+
+    out = _run_extra(ctx, primary_anchor="乙处")
+
+    prompts = [str(((item.get("video_request") or {}).get("submit") or {}).get("prompt") or "")
+               for item in out]
+    assert prompts == ["VIDEO[甲处]", "VIDEO[丙处]"]
+    assert all(item.get("video_mode") == "climax" for item in out)
+
+
+def test_视频多批_视频工作流未配时extra不产出视频请求(monkeypatch):
+    """零成本锁：`comfy_video` 关（没配视频模板）⇒ extras 不得带 `video_request`，
+    与主链路「关＝零 token」同构。"""
+    _stub_comfy_chain(monkeypatch)
+    ctx = {**_anchors(("甲处", 10), ("乙处", 90)),
+           "illustration_batch_count": 9, "comfy_video": False}
+
+    out = _run_extra(ctx, primary_anchor="乙处")
+
+    assert out and all("video_request" not in item for item in out)
+
+
+def test_视频多批_首尾帧的extra不编正片仍走段桥(monkeypatch):
+    """边界锁：firstlast 的 extra 由**段桥**承载视频（transition 编译），
+    本步不得再编一支正片（否则一次出两支、且帧语义重复）。"""
+    stub = _stub_comfy_chain(monkeypatch)
+    ctx = {**_anchors(("甲处", 10), ("乙处", 90)),
+           "illustration_batch_count": 9, "comfy_video": True, "video_mode": "firstlast"}
+
+    out = _run_extra(ctx, primary_anchor="乙处", primary_prompt="主画面")
+
+    assert stub["video"] == [False]
+    assert all("video_request" not in item for item in out)
+
+
+def test_视频多批_出口每条事件各带自己的视频成稿():
+    """出口锁（service 层绿≠事件带得出）：extras 的 `video_request` 必须**逐条**进
+    `illustrate_request` 事件，否则前端闸门永远拿不到 `video_prompt`
+    ⇒ 第 2..N 张又没有视频（2026-10-31 用户报的正是这个形状）。"""
+    events = aag._streamed_illustration_events([
+        {"id": "illo-1", "prompt": "p1", "motion": 1, "actors": [], "anchor_offset": 5,
+         "video_mode": "climax", "video_request": {"submit": {"prompt": "V1"}}},
+        {"id": "illo-1-1", "prompt": "p2", "motion": 1, "actors": [], "anchor_offset": 40,
+         "video_mode": "climax", "video_request": {"submit": {"prompt": "V2"}}},
+    ])
+
+    requests = [event["illustrate_request"] for event in events]
+    assert [item.get("video_prompt") for item in requests] == ["V1", "V2"]
+    assert [item.get("video_mode") for item in requests] == ["climax", "climax"]
+    assert [event["id"] for event in events] == ["illo-1", "illo-1-1"]
+
+
+def test_段桥_转场编译起点是上一画面终点是本画面(monkeypatch):
+    """2026-10-31 用户口径「前面的图片放首帧、后面的图片放尾帧生成视频」的**文字面**锁。
+
+    `build_video_request(mode="transition")` 的形参语义（video_prompt.py 真源）：
+    `prev_tail_desc`=起点描述、`first_frame_desc`=**终点**描述。旧口径把同一个
+    `_prev_pic`（上一画面）同时喂给两个形参 ⇒ 编出的分镜首尾同文，视频原地不动。
+
+    主锚点取正文**最早**那条（甲处），extra 落在它之后 ⇒ 「前面的图片」就是主图。
+    """
+    from app.services import video_prompt as vp
+
+    _stub_comfy_chain(monkeypatch)
+    captured: list[dict] = []
+
+    def fake_build(**kwargs):
+        captured.append(kwargs)
+        return {"mode": "transition", "submit": {"prompt": "T"}}
+
+    monkeypatch.setattr(vp, "build_video_request", fake_build)
+    ctx = {**_anchors(("甲处", 90), ("乙处", 10)),
+           "illustration_batch_count": 9, "comfy_video": True, "video_mode": "firstlast"}
+
+    out = _run_extra(ctx, primary_anchor="甲处", primary_prompt="上一画面")
+
+    assert captured, "firstlast 的 extra 必须编译段桥转场请求"
+    assert out[0]["transition_video_request"]["submit"]["prompt"] == "T"
+    assert captured[0]["prev_tail_desc"] == "上一画面"       # 起点=前面的图片
+    assert captured[0]["first_frame_desc"] == "p:乙处"       # 终点=后面的图片（本锚点画面）
+    assert captured[0]["prev_tail_desc"] != captured[0]["first_frame_desc"]
+
+
+def test_段桥_链按正文序逐张传递上一画面(monkeypatch):
+    """链锁（第 74 刀）：链序＝**正文序**，不是派发序（`select_anchor_intents` 返回列表序）。
+
+    夹具故意把派发序排成 丙处→乙处（`_ANCHOR_TEXT` 里乙处在前），主图=甲处（正文最早）：
+      · 旧写法按派发序 ⇒ 丙处（正文最晚）吃到「主画面」当起点、乙处反倒从丙处起步，
+        与前端按 `anchor_offset` 取到的「上一张成图」指向不同画面（≥3 张必错位）。
+      · 现在按偏移排 ⇒ 编译顺序与起点逐张跟着剧情走。
+    """
+    from app.services import video_prompt as vp
+
+    _stub_comfy_chain(monkeypatch)
+    captured: list[dict] = []
+    monkeypatch.setattr(vp, "build_video_request",
+                        lambda **kwargs: (captured.append(kwargs),
+                                          {"mode": "transition", "submit": {"prompt": "T"}})[1])
+    ctx = {**_anchors(("甲处", 90), ("丙处", 60), ("乙处", 50)),
+           "illustration_batch_count": 9, "comfy_video": True, "video_mode": "firstlast"}
+
+    out = _run_extra(ctx, primary_anchor="甲处", primary_prompt="主画面")
+
+    assert [item["anchor"] for item in out] == ["丙处", "乙处"]   # 派发序仍是列表序
+    # 编译序＝正文序：乙处先、丙处后；起点逐张前移，绝不回头取更晚的画面
+    assert [item["prev_tail_desc"] for item in captured] == ["主画面", "p:乙处"]
+    assert [item["first_frame_desc"] for item in captured] == ["p:乙处", "p:丙处"]
+
+
+def test_段桥_主图之前的桥起点退上一楼层尾帧(monkeypatch):
+    """边界锁：主锚点不在正文开头时，排在它**之前**的那张 extra 在本楼层没有「前面的图片」。
+    起点必须退到**上一楼层的尾帧画面**（`_resolve_prev_tail_desc`，与主槽正片 W3 转场同一真源），
+    而不是空串（空串＝分镜没有起点），更不是拿更晚的主图倒回去当起点。"""
+    from app.services import video_prompt as vp
+
+    _stub_comfy_chain(monkeypatch)
+    captured: list[dict] = []
+    monkeypatch.setattr(vp, "build_video_request",
+                        lambda **kwargs: (captured.append(kwargs),
+                                          {"mode": "transition", "submit": {"prompt": "T"}})[1])
+    monkeypatch.setattr(asc, "_resolve_prev_tail_desc", lambda ctx: "上一楼层收束画面")
+    ctx = {**_anchors(("甲处", 10), ("乙处", 90), ("丙处", 50)),
+           "illustration_batch_count": 9, "comfy_video": True, "video_mode": "firstlast"}
+
+    out = _run_extra(ctx, primary_anchor="乙处", primary_prompt="主画面")
+
+    # 正文序：甲处 < 乙处(主图) < 丙处 ⇒ 甲处起步于上楼层尾帧，丙处起步于主图
+    assert [item["anchor"] for item in out] == ["甲处", "丙处"]
+    assert [item["prev_tail_desc"] for item in captured] == ["上一楼层收束画面", "主画面"]
+    assert [item["first_frame_desc"] for item in captured] == ["p:甲处", "p:丙处"]
+
+
+def test_段桥_出口每条事件各带自己的转场成稿():
+    """出口锁：段桥的 `transition_video_request` 必须逐条进 `illustrate_request` 事件，
+    且**不得**带 `video_prompt`（前端 `isSegmentBridgeEvent` 以「无正片＋有转场」认桥）；
+    第 74 刀补：`bridge_prev_slot`（图片1 取自哪一张成图）同批出口，两个出口都要带。"""
+    from app.services import agent_stream as astream
+
+    recs = [
+        {"id": "illo-1", "prompt": "p1", "motion": 1, "actors": [], "anchor_offset": 5,
+         "video_mode": "climax", "video_request": {"submit": {"prompt": "V1"}}},
+        {"id": "illo-1-1", "prompt": "p2", "motion": 1, "actors": [], "anchor_offset": 40,
+         "video_mode": "firstlast", "video_request": {}, "batch_index": 1,
+         "transition_video_request": {"submit": {"prompt": "T2"}},
+         "bridge_prev_slot": "illo-1:last"},
+    ]
+
+    for events in (aag._streamed_illustration_events(recs),
+                   astream._ordered_illustration_events(_ANCHOR_TEXT, recs)):
+        # 有序出口会夹带 delta 文本事件 ⇒ 只取出图请求
+        requests = [event["illustrate_request"] for event in events
+                    if "illustrate_request" in event]
+        assert [item.get("video_prompt") for item in requests] == ["V1", None]
+        assert [item.get("transition_video_prompt") for item in requests] == [None, "T2"]
+        assert [item.get("bridge_prev_slot") for item in requests] == [None, "illo-1:last"]
+        assert [item.get("batch_index") for item in requests] == [None, 1]
 
 
 def test_第57刀_首尾帧模式不参与多批(monkeypatch):
@@ -4659,6 +4878,50 @@ def test_缺块路径的判据锚点也要过既有仲裁机(monkeypatch):
     assert out["requested_anchor"] != _ARB_JUDGE
 
 
+def test_缺计划兜底路径不再被时间跳转闸压住纠偏(monkeypatch):
+    """接线锁（2026-10-31 真机轮 C · thread `c5c60de2` 第 13 轮）：缺计划兜底那条支路
+    必须给仲裁机传 `respect_scene_boundary=False`，而**有计划**那条支路仍传 `True`。
+
+    真机形状：正文里有独立成行的 `———` 时间跳转分隔 ⇒ `_anchors_cross_scene_boundary`
+    返回 True ⇒ 旧行为把两道推翻闸一起关掉 ⇒ 判据档选的尾部帧原样交付，插画槽落到
+    `<content>` 末尾（用户实锤「图片插在最尾部」）。那道闸的设计前提是保护**显式意图帧**
+    （`plan["anchor"]` / `anchor_override`），缺计划路径没有帧要保护，故不该压住纠偏。
+    """
+    from app.services import scene_illustration as si
+
+    text = f"第一段只是铺陈。\n\n{_ARB_KEYWORD}\n\n———\n\n{_ARB_JUDGE}"
+    seen: dict = {}
+    real = si.resolve_illustration_anchor
+
+    def _spy(_text, _anchor="", **kwargs):
+        seen.update(kwargs)
+        return real(_text, _anchor, **kwargs)
+
+    monkeypatch.setattr(si, "resolve_illustration_anchor", _spy)
+    out, keyword = _run_scene_target_on(monkeypatch, text, _ARB_JUDGE)
+
+    assert keyword == _ARB_KEYWORD
+    assert si._anchors_cross_scene_boundary(text, _ARB_KEYWORD, _ARB_JUDGE)  # 闸确实会命中
+    assert seen["respect_scene_boundary"] is False
+    assert out["requested_anchor"] == _ARB_KEYWORD  # 纠偏恢复 ⇒ 回到高潮段
+
+    # 对照组：同一段正文，**有显式主计划**时那道闸必须仍然生效（旧行为零回归）。
+    seen_plan: dict = {}
+
+    def _spy_plan(_text, _anchor="", **kwargs):
+        seen_plan.update(kwargs)
+        return real(_text, _anchor, **kwargs)
+
+    monkeypatch.setattr(si, "resolve_illustration_anchor", _spy_plan)
+    plan_out = aag._wb_comfy_scene_target(
+        {}, "", {"anchor": _ARB_JUDGE}, text,
+        _anchor_sig(visible_story=text, missing_plan_fallback=False), _anchor_pool(),
+        prompt_override="", motion=0, user_text="",
+    )
+    assert seen_plan["respect_scene_boundary"] is True
+    assert plan_out["requested_anchor"] == _ARB_JUDGE  # 计划点名的那一帧不被推翻
+
+
 def test_初遇锚点不过仲裁机(monkeypatch):
     """边界锁：新角色登场的首帧锚点是**有意指定**的画面，不得过仲裁机。
 
@@ -4780,7 +5043,7 @@ def _run_scene_target_no_arb(monkeypatch, judge_result, *, ctx=None, pool=None,
     intent = judge_result if isinstance(judge_result, tuple) else (judge_result, {})
     monkeypatch.setattr(asc, "_illustration_anchor_intent", lambda _ctx, clean, sig: intent)
     monkeypatch.setattr(
-        si, "resolve_illustration_anchor", lambda _clean, anchor: anchor,
+        si, "resolve_illustration_anchor", lambda _clean, anchor, **_kw: anchor,
     )
     monkeypatch.setattr(
         asc, "_resolve_illustration_request_actors",
@@ -4865,7 +5128,7 @@ def _run_scene_target_50(monkeypatch, judge_result, *, ctx=None, actors=None):
     intent = judge_result if isinstance(judge_result, tuple) else (judge_result, {})
     monkeypatch.setattr(asc, "_illustration_anchor_intent", lambda _ctx, clean, sig: intent)
     monkeypatch.setattr(
-        si, "resolve_illustration_anchor", lambda _clean, anchor: anchor,
+        si, "resolve_illustration_anchor", lambda _clean, anchor, **_kw: anchor,
     )
     monkeypatch.setattr(
         asc, "_resolve_illustration_request_actors",

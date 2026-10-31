@@ -395,10 +395,13 @@ def _ordered_illustration_events(result_text: str, recs: list[dict]) -> list[dic
         }
         # V1.5/B1：视频协议可选字段透传（有值才带；旧前端/旧数据宽松忽略）
         for _key in ("video_mode", "first_frame_desc", "last_frame_desc",
-                     "prev_tail_desc", "last_frame_url", "transition"):
+                     "prev_tail_desc", "last_frame_url", "transition", "bridge_prev_slot"):
             _value = rec.get(_key)
             if isinstance(_value, str) and _value:
                 request[_key] = _value
+        # 第 74 刀：批次序号 ⇒ 批次图落自己的锚点（见 agent_agency 同名注释）
+        if isinstance(rec.get("batch_index"), int):
+            request["batch_index"] = int(rec["batch_index"])
         # 正常链路：comfy_video 开启时 produce 层才编译 video_request，这里随事件下发
         _video_request = _video_request_for(rec)
         if _video_request:
