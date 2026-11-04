@@ -49,21 +49,25 @@ def test_climax_reference_binding_does_not_duplicate_action():
     assert "三人中景" not in binding
 
 
-def test_climax_ignores_style_prefix_and_respects_negative():
-    # 有参考图定调，风格声明整体停用：style_prefix 不再进入提示词
+def test_climax_ignores_style_prefix_and_retires_negative_block():
+    # 有参考图定调，风格声明整体停用：style_prefix 不再进入提示词。
+    # 第 81 刀：⑥ 负面约束同样整体退役——`MiniMaxH3ImageToVideo` 只有 `positive` 一路
+    # 输入，「worst quality / extra fingers」这类词进模型就是**正面内容**（叫它去看缺陷）。
     p = video_prompt.compile_climax_video_prompt(
-        _spec(), style_prefix="二次元日常美食", negative="禁止柔化转场",
+        _spec(), style_prefix="二次元日常美食",
     )
     assert "[风格声明]" not in p
     assert "二次元日常美食" not in p
-    assert "禁止柔化转场" in p
-    assert "禁止五官漂移" in p
+    assert "[负面约束]" not in p
+    assert "禁止柔化转场" not in p      # 预设/调用方传来的负面串不再落地
+    assert "禁止五官漂移" not in p      # scene_spec.negative_prompt 同样不进
 
 
-def test_firstlast_has_six_sections_no_style():
+def test_firstlast_has_five_sections_no_style():
     p = video_prompt.compile_firstlast_video_prompt(_spec(), style_prefix="二次元日常美食 CGDCT")
-    for marker in ("[参考绑定]", "[主体/场景]", "[时间分镜]", "[音频]", "[负面约束]"):
+    for marker in ("[参考绑定]", "[主体/场景]", "[时间分镜]", "[音频]"):
         assert marker in p
+    assert "[负面约束]" not in p    # 第 81 刀：⑥ 退役（三种形态一致）
     assert "[风格声明]" not in p
     assert "二次元日常美食" not in p
     assert "[0s–" in p  # 时间分镜切段
@@ -87,12 +91,14 @@ def test_firstlast_carries_prev_tail_for_transition():
     assert "无突兀跳切" in p
 
 
-def test_firstlast_identity_lock_only_in_negative():
+def test_firstlast_identity_lock_only_in_binding():
+    # 第 81 刀：⑥ 退役后身份锁落在 [参考绑定]，全片仍只出现一次。
     p = video_prompt.compile_firstlast_video_prompt(_spec())
-    # 身份锁只进 [负面约束] 一次，不再逐拍重申
+    assert "[负面约束]" not in p
     assert p.count("人物身份和五官不能发生变化") == 1
-    assert "[负面约束]" in p
-    # 时间分镜段内不再出现身份锁
+    binding = p.split("[参考绑定]：", 1)[1].split("\n\n", 1)[0]
+    assert "人物身份和五官不能发生变化" in binding
+    # 时间分镜段内不重申身份锁
     seg = p.split("[时间分镜]：", 1)[1].split("[音频]：", 1)[0]
     assert "人物身份和五官不能发生变化" not in seg
 
@@ -132,7 +138,7 @@ def test_firstlast_quoted_dialogue_matching_refusal_pattern_is_kept():
 
 def test_climax_bare_refusal_narrative_not_compiled_into_beats():
     # 纯函数兜底路径：narrative 本身是拒答句（主模型拒答当正文）时，
-    # 不得把它编译进 [时间分镜]；回退诚实占位，身份锁仍只在 [负面约束] 一次。
+    # 不得把它编译进 [时间分镜]；回退诚实占位，身份锁仍只出现一次（落点＝② [参考绑定]，第 81 刀）。
     spec = _spec(
         narrative="我不能协助这项请求。", subjects=[], composition=None,
         camera=None, action_sequence=[],
@@ -154,9 +160,11 @@ def test_firstlast_camera_uses_vocabulary_not_hardcoded_push():
     assert "摄像机缓缓向主体的面部移动" in seg or "固定镜头，相机完全静止" in seg
 
 
-def test_climax_identity_lock_only_in_negative():
+def test_climax_identity_lock_only_in_binding():
+    # 第 81 刀：身份锁的唯一落点是 [参考绑定]（⑥ 已退役），且全片只写一次。
     p = video_prompt.compile_climax_video_prompt(_spec())
     assert p.count("人物身份和五官不能发生变化") == 1
+    assert "人物身份和五官不能发生变化" in p.split("[参考绑定]：", 1)[1].split("\n\n", 1)[0]
     seg = p.split("[时间分镜]：", 1)[1].split("[音频]：", 1)[0]
     assert "人物身份和五官不能发生变化" not in seg
 
@@ -238,12 +246,14 @@ def test_build_request_missing_frames_warns():
     assert any("纯文生" in w for w in req["warnings"])
 
 
-def test_transition_has_six_sections_no_style():
+def test_transition_has_five_sections_no_style():
     p = video_prompt.compile_transition_video_prompt(_spec(), style_prefix="二次元日常美食 CGDCT")
     assert "[转场分镜]" in p
     assert "[参考绑定]" in p
     assert "[主体/场景]" in p
     assert "[音频]" in p
+    assert "[负面约束]" not in p    # 第 81 刀：⑥ 三种形态一起退役
+    assert "人物身份和五官不能发生变化" in p.split("[参考绑定]：", 1)[1].split("\n\n", 1)[0]
     assert "[风格声明]" not in p
 
 
@@ -320,9 +330,12 @@ def test_build_request_transition_missing_prev_tail_warns_and_degrades():
 
 
 def test_build_request_transition_section_names():
+    # ⑥ 退役 ⇒ dry-run 的区块清单只列编译器真会写出的段（谎报比少报更坏）。
     assert video_prompt._section_names("transition") == [
-        "①元信息", "②参考绑定", "③主体/场景", "④转场分镜", "⑤音频", "⑥负面约束",
+        "①元信息", "②参考绑定", "③主体/场景", "④转场分镜", "⑤音频",
     ]
+    assert video_prompt._section_names("climax")[-1] == "⑤音频"
+    assert video_prompt._section_names("firstlast")[-1] == "⑤音频"
 
 
 def test_meta_passthrough_model_name_not_hardcoded():
@@ -352,16 +365,19 @@ def test_climax_drops_dialogue_from_all_sources():
         spec, audio_lines=[{"speaker": "苏映晚", "text": "他……杀、自己……人……"}],
     )
     assert "台词=" not in p
-    assert "杀了。" not in p.split("[音频]：", 1)[1].split("[负面约束]：", 1)[0]
+    assert "杀了。" not in p.split("[音频]：", 1)[1]
 
 
-def test_negative_dedup_across_sources():
+def test_negative_sources_never_reach_the_video_prompt():
+    # 第 81 刀：⑥ 退役 ⇒ 任何一路负面串（预设 / scene_spec / 模版 negative_extra）
+    # 都不再进视频提示词——这条链没有 negative 通道，进了就是正面内容。
+    sk = video_prompt.VideoSkeleton(negative_extra="禁止字幕")
     p = video_prompt.compile_climax_video_prompt(
-        _spec(negative_prompt="禁止五官漂移"),
-        negative="禁止五官漂移 / 变成其他画风",
+        _spec(negative_prompt="禁止五官漂移"), skeleton=sk,
     )
-    assert p.count("禁止五官漂移") == 1  # preset 与 scene_spec 重复项去重
-    assert "变成其他画风" in p
+    assert "[负面约束]" not in p
+    for banned in ("禁止五官漂移", "禁止字幕"):
+        assert banned not in p
 
 
 def test_build_request_default_size_is_16_9():
@@ -511,8 +527,9 @@ def test_climax_reveal_contract_allows_one_continuous_move():
     cams = {ln.split("：", 1)[1].split("；")[0] for ln in _segments(p)}
     assert cams == {video_prompt._REVEAL_CAMERA_TILT}
     assert "甩镜头转场" not in p and "遮挡揭示转场" not in p
-    neg = p.split("[负面约束]：", 1)[1]
-    assert "运镜" not in neg and "机位变化" not in neg
+    # 第 81 刀：⑥ 整段不产出 ⇒ 不存在「用负面否掉契约自己要的运动」这条路
+    assert "[负面约束]" not in p
+    assert "运镜" not in p and "机位变化" not in p
 
 
 def test_climax_reveal_adopts_model_camera():
@@ -1005,19 +1022,23 @@ def test_skeleton_none_byte_identical():
 
 
 def test_skeleton_section_titles_and_order():
+    # 骨架仍可改标题/顺序；`negative` 键**留着**是数据兼容（已存模版的 section_order 是
+    # 六键排列），但编译器不给它写内容 ⇒ 它既不出现在提示词里，也不出现在区块清单里。
     sk = video_prompt.VideoSkeleton(
-        section_titles={"meta": "元信息·自定义", "negative": "负向约束"},
-        section_order=("negative", "audio", "segments", "subject", "binding", "meta"),
+        section_titles={"meta": "元信息·自定义", "audio": "音效"},
+        section_order=("audio", "segments", "subject", "binding", "meta", "negative"),
     )
     p = video_prompt.compile_climax_video_prompt(_spec(), skeleton=sk)
-    assert "[元信息·自定义]" in p and "[负向约束]" in p
-    # 顺序：负面约束第一、元信息最后
-    assert p.index("[负向约束]") < p.index("[音频]") < p.index("[元信息·自定义]")
-    # prompt_sections 同步反映自定义标题与编号
+    assert "[元信息·自定义]" in p and "[音效]" in p
+    # 顺序：音频第一、元信息在绑定之后
+    assert p.index("[音效]") < p.index("[时间分镜]") < p.index("[元信息·自定义]")
+    assert "[负面约束]" not in p and "[负向约束]" not in p
+    # prompt_sections 同步反映自定义标题与编号，且编号只排实际出现的区块
     req = video_prompt.build_video_request(
         mode="climax", spec=_spec(), video_config={}, skeleton=sk)
-    assert req["prompt_sections"][0] == "①负向约束"
-    assert req["prompt_sections"][-1] == "⑥元信息·自定义"
+    assert req["prompt_sections"][0] == "①音效"
+    assert req["prompt_sections"][-1] == "⑤元信息·自定义"
+    assert len(req["prompt_sections"]) == 5
 
 
 def test_skeleton_camera_band_override():
@@ -1028,8 +1049,9 @@ def test_skeleton_camera_band_override():
     assert "镜头以慢动作环绕主体" in p
     # 锁档接管这一档后，内置 band3 代表句也不出现（同一条提示词里不留两套机位）
     assert "低角度仰拍" not in p
-    # 契约的固定句被显式锁档顶掉（逐拍只剩这一句机位）
-    assert video_prompt._HOLD_CAMERA_NOFRAME not in p
+    # 逐拍机位一律是锁档那句：契约的固定机位标记被顶掉（① 仍按契约声明全程一致）
+    cams = {ln.split("：", 1)[1].split("；")[0] for ln in _segments(p)}
+    assert cams == {"镜头以慢动作环绕主体"}
 
 
 def test_skeleton_beat_labels_and_duration():
@@ -1042,11 +1064,14 @@ def test_skeleton_beat_labels_and_duration():
     assert "6 seconds" in p  # duration_hint 空 ⇒ 用模版默认时长
 
 
-def test_skeleton_negative_extra_and_meta_note():
+def test_skeleton_meta_note_consumed_and_negative_extra_inert():
+    # meta_note 进 ①；negative_extra **停止消费**（⑥ 退役）——字段仍被 store/前端当作数据面
+    # 解析回传，但写不进视频提示词。锁住这条，免得将来有人「顺手」把它接回正面流。
     sk = video_prompt.VideoSkeleton(negative_extra="禁止字幕", meta_note="H3 高服从")
     p = video_prompt.compile_climax_video_prompt(_spec(), skeleton=sk)
-    assert "禁止字幕" in p
+    assert "禁止字幕" not in p
     assert "H3 高服从" in p.split("[参考绑定]")[0]
+    assert sk.negative_extra == "禁止字幕"  # 字段本身照常解析（数据面不拆）
 
 
 def test_skeleton_from_data_defensive():
@@ -1162,22 +1187,21 @@ def test_climax_locks_identity_without_actor_names():
     assert "保持图片1中人物的身份" not in named
 
 
-def test_climax_drops_frame_conflict_negative_items():
-    """刀⑤-2：负面约束里的「cropped / bad composition」与底图冲突（底图就是裁切构图）。
+def test_climax_negative_items_never_enter_the_positive_stream():
+    """第 81 刀收掉刀⑤-2：与底图冲突的「cropped / bad composition」不再靠摘词救，
+    而是整段 ⑥ 都不产出。
 
-    图片预设是逗号分隔的一整条，`_negative` 只按 ；/／ 拆项 ⇒ 必须项内再拆，
-    否则整项比对永远命中不了。
+    原缺陷的真实形状是「图片预设的负面串以正面文本进 H3」（这条链只有 positive），
+    摘掉两个词只是止血；现在 worst quality / lowres / cropped 这类词一个都不进提示词，
+    有底图与无底图两条分支同结果。
     """
     spec = {**_spec(camera="", negative_prompt="worst quality, cropped, bad composition, text"),
             **_BEATS6}
-    p = video_prompt.compile_climax_video_prompt(
-        spec, negative="lowres, jpeg, cropped", pending_frame=True)
-    neg = p.split("[负面约束]：", 1)[1]
-    assert "cropped" not in neg and "bad composition" not in neg
-    assert "worst quality" in neg and "lowres" in neg and "text" in neg
-    assert "人物身份和五官不能发生变化" in neg
-    # 文生视频（无底图）时冲突项原样保留
-    assert "cropped" in video_prompt.compile_climax_video_prompt(spec)
+    for kwargs in ({"pending_frame": True}, {}):
+        p = video_prompt.compile_climax_video_prompt(spec, **kwargs)
+        assert "[负面约束]" not in p
+        for banned in ("worst quality", "cropped", "bad composition", "lowres", "text"):
+            assert banned not in p
 
 
 def test_build_request_climax_pending_frame_warns_honestly():
@@ -1251,3 +1275,89 @@ def test_firstlast_short_duration_has_no_zero_length_beats_and_keeps_plot():
     seg = p.split("[时间分镜]：", 1)[1].split("[音频]：", 1)[0]
     for i in range(12):
         assert f"第{i}个动作" in seg
+
+
+# ── 第 81 刀 · 提示词去冗余（2026-11-04 审核实锤）────────────────────────────
+# 真机一条 3166 字的高潮稿里：③ 逐字灌进整卡 appearance（世界书段落 + 全部角色外貌）
+# 占 61 %、④ 每拍复述一遍 45 字机位长句、⑥ 在**没有 negative 通道**的链上把
+# 「worst quality / extra fingers」当正面内容念给模型。三处都只删冗余，不加新语义。
+# ⚠ 下面的外观串是合成 fixture（真卡专名/正文不得进 tests，见隐私纪律）。
+
+_CARD_DUMP = (
+    "世界观：誓约制度把人物当作可交易的资源，戒指是权钱的徽记。；"
+    "魔戒设定：钻面里有一只眼睛，戴上后情感夺舍、肉体改造。；"
+    "纪含章(暗黄长发、成熟知性、连衣裙侧开衩)；庄听澜(螺甸紫长发、猫耳发饰、黑丝女仆装)"
+)
+
+
+def test_subject_scene_drops_card_lore_dump_and_placeholder():
+    """拆不出「画面在场角色」⇒ ③ 就不写外貌，只留衣着/场景；占位值 `(待定)` 一并滤掉。"""
+    spec = _spec(actors=[], frame_subjects=[], appearance=_CARD_DUMP,
+                 wardrobe="(待定)", locale="IB031港区·宅邸二楼走廊")
+    subject = video_prompt._subject_scene(spec)
+    assert subject == "IB031港区·宅邸二楼走廊"
+    for junk in ("誓约制度", "魔戒设定", "钻面里有一只眼睛", "待定", "庄听澜"):
+        assert junk not in subject
+
+
+def test_subject_scene_uses_frame_subjects_when_actors_empty():
+    """actors 空但判据给了画面主体 ⇒ 只取在场那一条外貌，不在这一格里的角色不写。"""
+    spec = _spec(actors=[], frame_subjects=["纪含章"], appearance=_CARD_DUMP,
+                 wardrobe="(待定)")
+    subject = video_prompt._subject_scene(spec)
+    assert "纪含章（暗黄长发、成熟知性、连衣裙侧开衩）" in subject
+    assert "庄听澜" not in subject and "誓约制度" not in subject
+
+
+def test_subject_scene_placeholder_variants_are_dropped():
+    """`(待定)` / `（待定）` / `暂无` / `-` 都不算内容；真外貌照常保留。"""
+    for wardrobe in ("(待定)", "（待定）", "暂无", "-", "待定"):
+        subject = video_prompt._subject_scene(
+            _spec(wardrobe=wardrobe, appearance="纪含章(米色针织开衫)"))
+        assert "待定" not in subject and "暂无" not in subject, wardrobe
+        assert "米色针织开衫" in subject, wardrobe
+
+
+def test_climax_prompt_carries_no_negative_block_end_to_end():
+    """走 `build_video_request` 的整链形状：预设 negativePrompt 与 scene_spec 负面
+    都不进 `submit.prompt`（这条链只有一路 positive 输入）。"""
+    req = video_prompt.build_video_request(
+        mode="climax", spec=_spec(camera=""),
+        video_config={"base_url": "https://x/v", "model": "h3"},
+        preset={"negativePrompt": "lowres, jpeg, cropped, watermark"},
+        first_frame="http://x/c.png",
+    )
+    prompt = req["submit"]["prompt"]
+    assert "[负面约束]" not in prompt
+    for banned in ("lowres", "jpeg", "cropped", "watermark", "禁止五官漂移"):
+        assert banned not in prompt
+    assert req["prompt_sections"] == [
+        "①元信息", "②参考绑定", "③主体/场景", "④时间分镜", "⑤音频",
+    ]
+
+
+def test_climax_beats_name_the_camera_without_restating_the_rule():
+    """④ 逐拍机位只报「这一拍用什么机位」；「全程一致／背景光影」由 ① 说一次。
+
+    第 79 刀的教训是别猜 H3 吃哪一句 ⇒ 每拍的机位**标记**保留，只砍与 ① 逐字重复的
+    后半句（旧形态 5 拍各复述 45 字长句）。
+    """
+    spec = {**_spec(camera=""), **_BEATS6}
+    p = video_prompt.compile_climax_video_prompt(spec, pending_frame=True)
+    cams = [ln.split("：", 1)[1].split("；")[0] for ln in _segments(p)]
+    assert set(cams) == {video_prompt._HOLD_CAMERA_FRAME}
+    assert all("全程" not in c for c in cams)
+    meta = p.split("[元信息]：", 1)[1].split("\n\n", 1)[0]
+    assert "机位、画框、景别与背景光影全程保持一致" in meta
+    assert p.count("背景光影") == 1  # 只在 ① 声明一次，不逐拍重申
+
+
+def test_climax_reveal_beat_camera_keeps_only_the_direction():
+    """大场面档同理：逐拍留方向，「全片只做这一条连续运动」收进 ① 的契约声明。"""
+    spec = _spec(camera="", composition="", actors=[], aspect_ratio="16:9", locale="港区",
+                 narrative="舰队驶入港口，海面辽阔，天际线在晨雾里连成一片。")
+    p = video_prompt.compile_climax_video_prompt(spec, size="16:9", pending_frame=True)
+    cams = {ln.split("：", 1)[1].split("；")[0] for ln in _segments(p)}
+    assert cams == {video_prompt._REVEAL_CAMERA_TILT}
+    assert "中途不间断" in p.split("[元信息]：", 1)[1].split("\n\n", 1)[0]
+    assert all("不间断" not in c for c in cams)

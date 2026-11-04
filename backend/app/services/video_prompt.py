@@ -18,7 +18,8 @@ H3 高服从字面执行，本质是「把成片逐秒、逐镜头、逐像素�
   不产出「引用不存在的图」的提示词。
 - R3 元信息三件套：模型名（透传，不硬编码）+ 时长 + 画幅（size 派生）。
 - R6 音频：无逐字对白时只写纯音乐结构，不写「台词=逐字」诱导幻觉。
-- R7 负面约束：按分隔词拆项去重。
+- R7 负面约束（第 81 刀起）：**不再进视频提示词**——这条链的节点只有 `positive` 一路
+  输入，负面清单会以正面文本进模型；身份锁改由 [参考绑定] 承担，全片一次。
 """
 from __future__ import annotations
 
@@ -113,9 +114,14 @@ _FRAME_FIDELITY_NOTE = (
 _SCENE_SHIFT_CUES = ("另一边", "来到", "走进", "走出", "片刻后", "此时", "镜头一转", "回到", "转场")
 _CAMERA_SHIFT_SLOW = "遮挡揭示转场：镜头被前景遮挡后移开，揭示新场景"
 _CAMERA_SHIFT_FAST = "甩镜头转场：镜头快速切换，伴有强烈的运动模糊效果"
+# 身份锁：⑥ 退役后（见 `SECTION_NEGATIVE` 处注释）唯一落点是 [参考绑定]，全片只写一次。
 _IDENTITY_LOCK = "人物身份和五官不能发生变化"
-# 有底图时必须从负面约束里剔除的构图项（小写比对；叫模型「别裁切」＝别照底图构图）。
-_FRAME_CONFLICT_NEGATIVES = frozenset({"cropped", "bad composition"})
+# ③ 主体/场景拼接里的占位值（`(待定)` / `暂无` / `-` 这类）：它们不携带任何信息，
+# 却会在拼接里挂成孤零零的分句（实测稿子「…递给她。，(待定)，IB031港区…」）。
+_PLACEHOLDER_WORDS = frozenset({
+    "待定", "暂定", "暂无", "未定", "未知", "待补", "待补充", "无", "略",
+    "-", "—", "–", "tbd", "n/a", "na", "none",
+})
 
 # ── 高潮「机位契约」（2026-11-04 用户定案）────────────────────────────────────
 # 高潮点延伸的镜头动不动，取决于这一帧的高潮是**主体在动**还是**世界在展开**：
@@ -130,7 +136,7 @@ _FRAME_CONFLICT_NEGATIVES = frozenset({"cropped", "bad composition"})
 # 🔴 措辞纪律（2026-11-04 第 79 刀）：**两档文案一律不得出现切镜/转场类触发词**
 # （切镜、镜头切换、转场、跳切、多机位）与运镜动作名（推拉摇移）。原因不是"模型看不懂否定式"，
 # 而是 `MiniMaxH3ImageToVideo` 的入参只有 `clip/vae/first_frame/last_frame/prompt/width/height/length`、
-# 输出只有 `positive`——**没有 negative 通道**，⑥ 那一段是以正面文本进同一条流的；
+# 输出只有 `positive`——**这条链没有 negative 通道**，六段全文（含旧 ⑥）是以正面文本进同一条流的；
 # 而 H3 官方写法手册把 `the shot cuts to / transitions to / switches to` 逐字列为**切镜触发词表**。
 # 机位怎么不动要用官方运动类型名 `Static Shot` 的**肯定式**说，而不是用「无切镜」把触发词念一遍。
 # 幅度**不是**边界（用户口径：Live2D 一样可以有很明显的动作）；边界是「只由这一格自身的形变
@@ -139,20 +145,21 @@ CLIMAX_INTENT_HOLD = "action_hold"
 CLIMAX_INTENT_REVEAL = "scene_reveal"
 # 宽画幅阈值：16:9≈1.78、4:3≈1.33 算宽；1:1、2:3、9:16 不算（用户口径「大场面一般是 16:9」）。
 _WIDE_RATIO_MIN = 1.25
-# 有底图句里点名「图片1」；文生视频（缺图守卫 R2）不得引用不存在的图。
-_HOLD_CAMERA_FRAME = ("固定镜头（Static Shot），机位、镜头、画框与景别全程逐字沿用图片1，"
-                      "背景与光影保持一致")
-_HOLD_CAMERA_NOFRAME = "固定镜头（Static Shot），机位与镜头全程不动，画面内容自行演变"
+# 逐拍机位句只回答「这一拍的机位叫什么」；「全程一致 / 沿用图片1 / 背景光影」这些
+# 全片规则由 ① 的 `_HOLD_META` + `_FRAME_FIDELITY_NOTE` 说**一次**（第 81 刀实测：审计稿
+# 5 拍各复述一遍这条 48 字长句＝240 字，占 ④ 段 535 字的四成五，而 ① 早已说过——
+# 重复不增加约束强度，只把动作事实挤出预算）。
+# 文生视频（缺图守卫 R2）不得引用不存在的图 ⇒ 无首帧时不写「图片1」。
+_HOLD_CAMERA_FRAME = "固定镜头（Static Shot），画框沿用图片1"
+_HOLD_CAMERA_NOFRAME = "固定镜头（Static Shot）"
 _HOLD_MOTION = ("主体的动作幅度按剧情需要，可以明显；但每一帧都由起始那一格画面自身的形变与"
                 "物理跟随产生——重心与躯干的往复、肢体的幅度、发丝衣料与液体的甩动，"
                 "不引入画面之外的元素、部位或道具")
 _HOLD_RHYTHM = "按剧情节奏推进，末态回到起始那一格的同一姿势，可无缝循环"
-_HOLD_META = "全片一条固定镜头（Static Shot），机位与画框全程保持一致"
-_REVEAL_CAMERA_PAN = ("镜头沿水平方向缓慢连续横移，依次揭示画面两侧的环境，"
-                      "全片只做这一条不间断的连续运动")
-_REVEAL_CAMERA_TILT = ("镜头缓慢连续向上摇摄，从近处一路扫向高处，"
-                       "全片只做这一条不间断的连续运动")
-_REVEAL_META = "全片一条连续镜头运动揭示环境，机位沿这条路径持续向前"
+_HOLD_META = "全片一条固定镜头（Static Shot），机位、画框、景别与背景光影全程保持一致"
+_REVEAL_CAMERA_PAN = "镜头沿水平方向缓慢连续横移，依次揭示画面两侧的环境"
+_REVEAL_CAMERA_TILT = "镜头缓慢连续向上摇摄，从近处一路扫向高处"
+_REVEAL_META = "全片一条连续镜头运动揭示环境，机位沿这条路径持续向前，中途不间断"
 _REVEAL_WORLD = ("画面中的世界照常运动：行人持续走动、车辆与环境元素按剧情推进，"
                  "在场人物的动作照常展开、幅度不受限制")
 # 环境展开线索（②判据）：新场景进入词（复用 _SCENE_SHIFT_CUES）＋大场面名词。
@@ -171,6 +178,11 @@ SECTION_BINDING = "binding"
 SECTION_SUBJECT = "subject"
 SECTION_SEGMENTS = "segments"
 SECTION_AUDIO = "audio"
+# ⑥ 负面约束**已退役**（第 81 刀 2026-11-04）：这条链只有 `positive` 一路输入，
+# 「worst quality / bad anatomy / extra fingers」这类词以正面文本进模型＝叫它去看缺陷。
+# 键仍留在 `SECTION_KEYS` 里是**数据兼容**，不是功能：已存模版的 `section_order` 是六键
+# 排列，删键会让那份自定义顺序校验失败并静默退回默认顺序；前端模板编辑器的键表也在这里
+# （`SECTION_KEYS_PUBLIC`）。编译器不再给这个区块写内容，摘除旋钮本身是跨层刀，另议。
 SECTION_NEGATIVE = "negative"
 SECTION_KEYS: tuple[str, ...] = (
     SECTION_META, SECTION_BINDING, SECTION_SUBJECT,
@@ -199,7 +211,9 @@ class VideoSkeleton:
     - camera_band_overrides：motion 档位(0/1/2/3) → 单句运镜文案（≤120 字）；
     - beat_labels：firstlast 的开场/中段/收尾节奏名；
     - default_duration：duration_hint 为空时的兜底秒数（转场形态同样只在显式提供时写）；
-    - negative_extra / meta_note：负面约束追加项 / 元信息追加文案。
+    - meta_note：元信息追加文案。
+    - negative_extra：**已停止消费**（⑥ 退役，见 `SECTION_NEGATIVE`）——字段照旧解析并
+      回传给模板编辑器，是为的是不拆 store/前端的既有数据面；它写不进视频提示词。
     """
 
     section_titles: dict[str, str] = field(default_factory=dict)
@@ -453,86 +467,53 @@ def _aspect_from_size(size: str) -> str:
 
 
 def _subject_scene(spec: dict[str, Any]) -> str:
-    """④ 主体/场景：可还原的视觉细节，禁止堆砌同义形容词。
+    """③ 主体/场景：只写「这一格里看得见」的可还原视觉，禁止整卡堆料。
 
-    优先 agent 提取的简化视觉描述（video_subject_scene，已去堆砌 + 专名视觉展开）；
-    否则拼接「外貌 + 衣着 + 场景」三块——外貌优先主模型英文视觉（subjects.description，
-    简洁可还原），缺失回退中文 appearance。
+    三级来源（第 81 刀收窄）：
+    1. agent 提取的简化视觉描述（video_subject_scene，已去堆砌 + 专名视觉展开）；
+    2. 画面主体（`subjects`＝出图侧的画面主体名单）的英文视觉描述；
+    3. 中文 appearance **按在场角色名逐条取**（`_appearance_by_actor` 拆得出人名才写）。
+    第 3 级拆不出人名就**不写**：整串 appearance 往往是世界书段落 + 全部角色外貌，
+    实测一条 3166 字的稿子里 ③ 占 61 %，而首帧已由 ① 逐字声明「复现图片1」——
+    堆料不补信息，只把画面主体淹没。衣着/场景两个独立维度照常拼接，占位值除外。
     """
     video_scene = str(spec.get("video_subject_scene") or "").strip()
     if video_scene:
         return video_scene
     parts: list[str] = []
-    # 外貌：优先英文视觉（subjects.description），缺失回退中文 appearance
     for subject in spec.get("subjects") or []:
         if isinstance(subject, dict):
             desc = str(subject.get("description") or "").strip()
             if desc and desc not in parts:
                 parts.append(desc)
     if not parts:
-        appearance = str(spec.get("appearance") or "").strip()
-        if appearance:
-            parts.append(appearance)
+        names = _on_frame_names(spec)
+        gloss = _appearance_by_actor(str(spec.get("appearance") or ""), names)
+        parts = [f"{name}（{gloss[name]}）" for name in names if gloss.get(name)]
     # 衣着 + 场景（独立维度，始终拼接）
     for key in ("wardrobe", "locale"):
         val = str(spec.get(key) or "").strip()
-        if val and val not in parts:
+        if val and val not in parts and not _is_placeholder(val):
             parts.append(val)
     return "，".join(parts)
 
 
-def _drop_frame_conflicts(item: str) -> str:
-    """在一条负面项内部摘掉与底图冲突的构图词，其余文字与分隔符原样保留。
+def _on_frame_names(spec: dict[str, Any]) -> list[str]:
+    """画面在场角色名：`actors` 优先，空则退判据的 `frame_subjects`（画面主体名单）。
 
-    图片预设的负面串是**逗号分隔**的一整条，`_negative` 只按 ；/／ 拆项，
-    所以「cropped / bad composition」藏在长条中间，按整项比对永远命中不了。
+    两个都空 ⇒ 空表（不硬猜主体，调用方据此放弃需要名字才能归属的写法）。
     """
-    parts = re.split(r"([,，])", item)
-    kept: list[str] = []
-    prev_sep = ""
-    for piece in parts:
-        if piece in (",", "，"):
-            prev_sep = piece
-            continue
-        if piece.strip().lower() in _FRAME_CONFLICT_NEGATIVES:
-            continue
-        if kept:
-            kept.append(prev_sep or ",")
-        kept.append(piece)
-    return "".join(kept).strip()
+    for key in ("actors", "frame_subjects"):
+        names = [str(item).strip() for item in (spec.get(key) or []) if str(item).strip()]
+        if names:
+            return list(dict.fromkeys(names))
+    return []
 
 
-def _negative(spec: dict[str, Any], preset_negative: str, extra: str = "",
-              has_frame: bool = False) -> str:
-    """⑦ 负面约束：preset + scene_spec（+ 模版 negative_extra），按分隔词拆项保序去重（R7）。
-
-    has_frame（I2V 有底图）时剔除与底图冲突的构图项：图片预设常带「cropped /
-    bad composition」，而底图本身就是第一人称裁切构图——把它写进视频负面约束，
-    等于叫模型「别照这张图裁」，首帧会主动改构图。
-    """
-    raw: list[str] = []
-    for src in (preset_negative, extra, str(spec.get("negative_prompt") or "")):
-        if not src:
-            continue
-        for item in re.split(r"[；;/／]+", str(src)):
-            item = item.strip()
-            if not item:
-                continue
-            if has_frame:
-                item = _drop_frame_conflicts(item)
-            if item:
-                raw.append(item)
-    seen: set[str] = set()
-    items: list[str] = []
-    for it in raw:
-        key = it.lower()
-        if key not in seen:
-            seen.add(key)
-            items.append(it)
-    # 身份/五官一致性是全片约束，只进 [负面约束] 一次；不再逐拍重申。
-    if _IDENTITY_LOCK not in items:
-        items.append(_IDENTITY_LOCK)
-    return "；".join(items)
+def _is_placeholder(value: str) -> bool:
+    """判断一个字段值是占位文字还是真内容（`(待定)`/`暂无`/`-` ⇒ 不是内容）。"""
+    core = re.sub(r"^\s*[\(（]?|[\)）]?\s*$", "", value).strip().lower()
+    return core in _PLACEHOLDER_WORDS
 
 
 def _appearance_by_actor(appearance: str, actors: list[str]) -> dict[str, str]:
@@ -623,6 +604,9 @@ def _reference_binding_climax(first_frame_desc: str, spec: dict[str, Any],
     has_frame（I2V 有底图）且没有在场角色名时：身份锁改用「图片1中人物」这种
     不需要名字的写法——缺名的自动帧若只声明职责，模型就没有任何一条约束要求
     沿用图里那张脸，首帧容易换人。
+
+    第 81 刀：[负面约束] 退役后，「人物身份和五官不能发生变化」这条全片锁落在
+    这里（② 是身份绑定的位置），且整条提示词只出现一次。
     """
     actors = [str(a).strip() for a in (spec.get("actors") or []) if str(a).strip()]
     if actors:
@@ -633,6 +617,7 @@ def _reference_binding_climax(first_frame_desc: str, spec: dict[str, Any],
         lines = [f"图片1={desc}（唯一参考画面，作为起始帧）"]
         if has_frame:
             lines.append("保持图片1中人物的身份、脸部、服装、发型、造型完全一致")
+    lines.append(_IDENTITY_LOCK)
     return "；".join(lines)
 
 
@@ -642,6 +627,7 @@ def _reference_binding_firstlast(first_frame_desc: str, last_frame_desc: str,
     """③ 参考绑定（firstlast 双图）：图片1=首帧、图片2=尾帧，职责钉死。
 
     缺图时诚实标注「无参考图，以文字为准」，不假装有图（R2）。
+    身份锁（⑥ 退役后）在这里只写一次。
     """
     f = (first_frame_desc or "").strip() or "楼层开头画面"
     l = (last_frame_desc or "").strip() or "楼层结尾画面"
@@ -657,6 +643,7 @@ def _reference_binding_firstlast(first_frame_desc: str, last_frame_desc: str,
     if actors:
         lines.append(f"画面角色：{'、'.join(actors)}")
         lines.append(f"保持 {_identity_gloss(spec, actors)} 的身份、脸部、服装、发型、造型完全一致")
+    lines.append(_IDENTITY_LOCK)
     return "；".join(lines)
 
 
@@ -666,6 +653,7 @@ def _reference_binding_transition(prev_tail_desc: str, first_frame_desc: str,
     """③ 参考绑定（转场双图）：图片1=上一楼层尾帧（转场起点）、图片2=当前楼层首帧（转场终点）。
 
     缺图时诚实标注「无参考图，以文字为准」（R2 同套路），不假装有图。
+    身份锁（⑥ 退役后）在这里只写一次。
     """
     pt = (prev_tail_desc or "").strip() or "上一楼层尾帧画面"
     ff = (first_frame_desc or "").strip() or "当前楼层首帧画面"
@@ -681,6 +669,7 @@ def _reference_binding_transition(prev_tail_desc: str, first_frame_desc: str,
     if actors:
         lines.append(f"画面角色：{'、'.join(actors)}")
         lines.append(f"保持 {_identity_gloss(spec, actors)} 的身份、脸部、服装、发型、造型完全一致")
+    lines.append(_IDENTITY_LOCK)
     return "；".join(lines)
 
 
@@ -1186,7 +1175,7 @@ def _climax_time_segments(spec: dict[str, Any], duration_hint: int,
     运镜取自「机位契约」（2026-11-04）：全片**一句**机位逐拍复用——`action_hold` 固定
     机位（不吃档位词表/模型运镜句），`scene_reveal` 一条连续运动。自定义模版显式锁了
     当前档（`camera_band_overrides`）时用户意图优先，仍走锁定的那句。
-    身份/五官一致性不再逐拍重申，统一收进 [负面约束]（只出现一次）。
+    身份/五官一致性不再逐拍重申，统一收进 ② [参考绑定]（第 81 刀起，全片只出现一次）。
 
     拍数受时长上界约束（见 `_bound_beats`）：`has_frame`（I2V）时首拍不重新定场。
 
@@ -1243,7 +1232,6 @@ def compile_climax_video_prompt(
     spec: dict[str, Any],
     *,
     style_prefix: str = "",
-    negative: str = "",
     duration_hint: int = 0,
     camera: str = "",
     model_name: str = "",
@@ -1255,14 +1243,15 @@ def compile_climax_video_prompt(
     skeleton: "VideoSkeleton | None" = None,
     contract: ClimaxCameraContract | None = None,
 ) -> str:
-    """高潮点·六段式（用户定稿 2026-08-28）：① 元信息 ② 参考绑定 ③ 主体/场景
-    ④ 时间分镜 ⑤ 音频 ⑥ 负面约束。风格声明已停用（有参考图定调，style_prefix 仅兼容）。
+    """高潮点·五段式（2026-11-04 第 81 刀：⑥ 负面约束退役）。
+    ① 元信息 ② 参考绑定 ③ 主体/场景 ④ 时间分镜 ⑤ 音频。
+    风格声明已停用（有参考图定调，style_prefix 仅兼容）。
 
     动作段用 [时间分镜] 逐拍切段（0–Xs / X–Ys / …），不再用「定格起点/延伸/收尾」
     长句。has_frame=True 时在元信息标注「使用输入图片作为准确起始帧」（I2V）。
     pending_frame：提示词在成图之前编译、由下游链把这一张图挂成首帧（自动插画链的形状）
     ——此时同样按 I2V 写首帧声明，否则提示词会把自己当文生视频，首帧自由构图。
-    skeleton（提示词模版骨架）：区块标题/顺序、meta_note、negative_extra、
+    skeleton（提示词模版骨架）：区块标题/顺序、meta_note、
     default_duration；None = 逐字现行为。
     contract（机位契约）：None ⇒ 就地按 `size` + spec 判定（见 resolve_climax_shot_intent）；
     ① 的契约声明与逐拍机位、动态条款由它决定，④ 的构型迁移短语在 hold 档由它裁剪。
@@ -1292,10 +1281,8 @@ def compile_climax_video_prompt(
     # climax：高潮定格时刻对白通常已说完（用户定稿 2026-08-28）——动作窗口不带台词，
     # 无论来源（audio_design.lines / comfy_audio 兜底）一律不列。
     blocks[SECTION_AUDIO] = f"[{sk.title(SECTION_AUDIO, '音频')}]：{_audio_hint(spec, audio_lines, include_lines=False)}"
-    extra_neg = sk.negative_extra
-    neg = _negative(spec, negative, extra_neg, will_have_frame)
-    if neg:
-        blocks[SECTION_NEGATIVE] = f"[{sk.title(SECTION_NEGATIVE, '负面约束')}]：{neg}"
+    # ⑥ 负面约束**不产出**（第 81 刀）：这条链的节点只有 `positive` 一路输入，
+    # 「worst quality / extra fingers」这类词进模型就是正面内容；身份锁已折进 [参考绑定]。
     return _assemble_blocks(blocks, sk)
 
 
@@ -1303,7 +1290,6 @@ def compile_firstlast_video_prompt(
     spec: dict[str, Any],
     *,
     style_prefix: str = "",
-    negative: str = "",
     duration_hint: int = 0,
     camera: str = "",
     model_name: str = "",
@@ -1316,12 +1302,12 @@ def compile_firstlast_video_prompt(
     audio_lines: list | None = None,
     skeleton: "VideoSkeleton | None" = None,
 ) -> str:
-    """首尾帧·剧情影片：六段式（H3 骨架）。
+    """首尾帧·剧情影片：五段式（H3 骨架；⑥ 负面约束已退役，见 climax 同处注释）。
 
-    区块：① 元信息 ② 双图绑定 ③ 主体/场景 ④ 时间分镜 ⑤ 音频 ⑥ 负面约束。
+    区块：① 元信息 ② 双图绑定 ③ 主体/场景 ④ 时间分镜 ⑤ 音频。
     风格声明已停用（有参考图定调）。has_first/has_last 标识是否真的提供了首/尾帧图（R2 缺图守卫）。
     skeleton（提示词模版骨架）：区块标题/顺序、beat_labels、camera_band_overrides、
-    default_duration、negative_extra、meta_note；None = 逐字现行为。
+    default_duration、meta_note；None = 逐字现行为。
     """
     sk = skeleton or VideoSkeleton()
     blocks: dict[str, str] = {}
@@ -1343,9 +1329,6 @@ def compile_firstlast_video_prompt(
                          prev_tail_desc, has_first, has_last, sk)
     )
     blocks[SECTION_AUDIO] = f"[{sk.title(SECTION_AUDIO, '音频')}]：{_audio_hint(spec, audio_lines)}"
-    neg = _negative(spec, negative, sk.negative_extra)
-    if neg:
-        blocks[SECTION_NEGATIVE] = f"[{sk.title(SECTION_NEGATIVE, '负面约束')}]：{neg}"
     return _assemble_blocks(blocks, sk)
 
 
@@ -1353,7 +1336,6 @@ def compile_transition_video_prompt(
     spec: dict[str, Any],
     *,
     style_prefix: str = "",
-    negative: str = "",
     duration_hint: int = 0,
     camera: str = "",
     model_name: str = "",
@@ -1366,8 +1348,9 @@ def compile_transition_video_prompt(
 ) -> str:
     """转场视频·短桥段：上一楼层尾帧 → 当前楼层首帧 的自然过渡。
 
-    六段式骨架（对齐 firstlast）：① 元信息 ② 参考绑定（图片1=上尾帧、
-    图片2=当前首帧）③ 主体/场景 ④ 转场分镜 ⑤ 音频 ⑥ 负面约束。风格声明已停用（有参考图定调）。
+    五段式骨架（对齐 firstlast；⑥ 负面约束已退役，见 climax 同处注释）：
+    ① 元信息 ② 参考绑定（图片1=上尾帧、图片2=当前首帧）③ 主体/场景
+    ④ 转场分镜 ⑤ 音频。风格声明已停用（有参考图定调）。
 
     坑G：时长不预设死值——duration_hint=0 时不写秒数（_meta_transition 交视频模型
     默认），不兑底 _DEFAULT_DURATION；前端提交侧有转场时长才写。
@@ -1395,9 +1378,6 @@ def compile_transition_video_prompt(
                                has_prev_tail, has_first, sk)
     )
     blocks[SECTION_AUDIO] = f"[{sk.title(SECTION_AUDIO, '音频')}]：{_audio_hint(spec, None)}"
-    neg = _negative(spec, negative, sk.negative_extra)
-    if neg:
-        blocks[SECTION_NEGATIVE] = f"[{sk.title(SECTION_NEGATIVE, '负面约束')}]：{neg}"
     return _assemble_blocks(blocks, sk)
 
 
@@ -1456,7 +1436,6 @@ def build_video_request(
     preset = preset or {}
     spec = _clean_spec(spec or {})
     style_prefix = str(preset.get("stylePrefix") or preset.get("style_template") or "")
-    negative = str(preset.get("negativePrompt") or "")
     duration_hint = int(preset.get("videoDurationHint") or 0)
     transition_duration_hint = int(preset.get("transitionDurationHint") or 0)
     # 高潮时长（2026-10-31）：剧情动作量判定值（spec.video_duration_s）优先于模板默认；
@@ -1480,7 +1459,7 @@ def build_video_request(
         has_first = bool(first_frame)
         has_last = bool(last_frame)
         prompt = compile_firstlast_video_prompt(
-            spec, style_prefix=style_prefix, negative=negative,
+            spec, style_prefix=style_prefix,
             duration_hint=duration_hint, camera=camera, model_name=model, size=size,
             first_frame_desc=first_frame_desc or "首帧/楼层开头画面",
             last_frame_desc=last_frame_desc or "尾帧/楼层结尾画面",
@@ -1498,7 +1477,7 @@ def build_video_request(
         has_prev_tail = bool(first_frame)
         has_first = bool(last_frame)
         prompt = compile_transition_video_prompt(
-            spec, style_prefix=style_prefix, negative=negative,
+            spec, style_prefix=style_prefix,
             duration_hint=transition_duration_hint, camera=camera,
             model_name=model, size=size,
             prev_tail_desc=prev_tail_desc or "上一楼层尾帧画面",
@@ -1521,7 +1500,7 @@ def build_video_request(
             spec, size_cfg, bool(first_frame) or pending_frame)
         shot_intent = {"intent": ctr.intent, "reason": ctr.reason}
         prompt = compile_climax_video_prompt(
-            spec, style_prefix=style_prefix, negative=negative,
+            spec, style_prefix=style_prefix,
             duration_hint=duration_hint, camera=camera, model_name=model, size=size,
             first_frame_desc=desc, audio_lines=audio_lines, has_frame=bool(first_frame),
             pending_frame=pending_frame,
@@ -1594,22 +1573,24 @@ def _binding_entry(role: str, source: str) -> str:
 
 
 def _section_names(mode: str, skeleton: "VideoSkeleton | None" = None) -> list[str]:
-    """提示词含哪些区块（供人核对完整性）。风格声明已停用（有参考图定调）。
+    """提示词**实际含**哪些区块（供人核对完整性）。风格声明已停用（有参考图定调）。
 
+    ⑥ 负面约束退役 ⇒ 这里不再列它：`prompt_sections` 是给人在 dry-run 里核对的清单，
+    列一个编译器不产出的区块等于谎报。骨架路径同样跳过该键（编号按实数重排）。
     skeleton（提示词模版骨架）：按自定义标题/顺序重排编号；None = 内置固定名。
     """
     if skeleton is not None and (skeleton.section_titles or skeleton.section_order):
         default_segments = "转场分镜" if mode == "transition" else "时间分镜"
         out: list[str] = []
-        for num, key in enumerate(skeleton.order(), 1):
+        for key in skeleton.order():
+            if key == SECTION_NEGATIVE:
+                continue
             fallback = default_segments if key == SECTION_SEGMENTS else _DEFAULT_SECTION_TITLES[key]
-            out.append(f"{'①②③④⑤⑥'[num - 1]}{skeleton.title(key, fallback)}")
+            out.append(f"{'①②③④⑤'[len(out)]}{skeleton.title(key, fallback)}")
         return out
-    if mode == "firstlast":
-        return ["①元信息", "②参考绑定", "③主体/场景", "④时间分镜", "⑤音频", "⑥负面约束"]
     if mode == "transition":
-        return ["①元信息", "②参考绑定", "③主体/场景", "④转场分镜", "⑤音频", "⑥负面约束"]
-    return ["①元信息", "②参考绑定", "③主体/场景", "④时间分镜", "⑤音频", "⑥负面约束"]
+        return ["①元信息", "②参考绑定", "③主体/场景", "④转场分镜", "⑤音频"]
+    return ["①元信息", "②参考绑定", "③主体/场景", "④时间分镜", "⑤音频"]
 
 
 def parse_video_plan(reply: str) -> dict[str, Any]:
