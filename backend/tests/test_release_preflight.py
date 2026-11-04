@@ -18,6 +18,48 @@ def test_release_preflight_current_tree_is_safe():
     assert preflight.validate(ROOT) == []
 
 
+def test_presets_whitelist_is_per_package(tmp_path):
+    """新增一个没列进白名单的 presets 包必须判红，已列名的包不能因为「多包」被顺手放行。"""
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    for name in (*preflight.DISTRIBUTABLE_PACKAGES, "Demiurge-something-new"):
+        target = tmp_path / "presets" / name / "payload.json"
+        target.parent.mkdir(parents=True)
+        target.write_text('{"note": "占位"}', encoding="utf-8")
+
+    errors = [e for e in preflight.validate(tmp_path) if "未清洗预设" in e]
+
+    assert errors == ["禁止上传的未清洗预设: presets/Demiurge-something-new/payload.json"]
+
+
+def test_distributable_packages_agree_with_gitignore_and_builder():
+    """三处必须同一份名单：隐私闸白名单 / .gitignore 反向豁免 / 构建脚本输出目录。
+
+    只改一处的后果是静默的：漏 .gitignore ⇒ 包内容根本不进版本库（换了机器就没了）；
+    漏隐私闸 ⇒ 未清洗的本机数据被判「合法预设」直接上传。
+    """
+    pack = importlib.util.spec_from_file_location(
+        "build_resource_pack", ROOT / "scripts" / "build_resource_pack.py"
+    )
+    assert pack and pack.loader
+    builder = importlib.util.module_from_spec(pack)
+    pack.loader.exec_module(builder)
+
+    assert tuple(builder.PACKAGE_BUILDERS) == preflight.DISTRIBUTABLE_PACKAGES
+    ignore = (ROOT / ".gitignore").read_text(encoding="utf-8").replace("\r\n", "\n")
+    listed = set(preflight.DISTRIBUTABLE_PACKAGES)
+    for name in listed:
+        assert f"!presets/{name}/\n" in ignore, name
+        assert f"!presets/{name}/**\n" in ignore, name
+    stray = [
+        line
+        for line in ignore.splitlines()
+        if line.startswith("!presets/")
+        and (name := line[len("!presets/") :].strip("/*"))
+        and name not in listed
+    ]
+    assert stray == []
+
+
 def test_private_directories_are_ignored():
     for path in (
         "backend/data/test.json",

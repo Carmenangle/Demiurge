@@ -406,8 +406,182 @@ def test_climax_prefers_visual_facts_over_raw_narrative():
     assert "drawing sword, crimson cloak in lightning" in p
     assert "leaps upward with blade raised" in p
     assert "low-angle dynamic shot" in p
-    assert "fast tracking push-in" in p
+    # 机位契约（2026-11-04）：这帧判成静机位档 ⇒ 模型运镜句不进逐拍（其余画面级要素照进）
+    assert "fast tracking push-in" not in p
     assert "孤儿院门口" not in p  # 陈旧叙事不再进入高潮动作
+
+
+def test_climax_hold_contract_locks_one_camera():
+    """静机位档：全片共用一句机位，幅度条款只在 ① 写一次，且不往 ⑥ 塞机位否定式。
+
+    用户实锤「高潮视频还是像有转场」的直接来源是逐拍换镜（每拍一句互斥机位挤在
+    4–8 秒里）＋逐拍重复长条款；第 79 刀再收一层：边界是「机位固定＋只由这一格自身
+    形变」，**幅度不是边界**（「live2d就不能有很明显的动作吗」），且 ⑥ 在这条链上会
+    并进同一条正面文本流，写「无切镜」＝把切镜触发词念给模型听。
+    """
+    p = video_prompt.compile_climax_video_prompt(
+        _spec(camera="摇臂俯拍", aspect_ratio="2:3"), size="2:3", pending_frame=True)
+    cams = [ln.split("：", 1)[1].split("；")[0] for ln in _segments(p)]
+    assert set(cams) == {video_prompt._HOLD_CAMERA_FRAME}
+    assert "摇臂俯拍" not in p  # 静机位档不吃模型运镜句（写了就自相矛盾）
+    meta = p.split("[元信息]：", 1)[1].split("\n\n", 1)[0]
+    assert "全片一条固定镜头（Static Shot）" in meta
+    assert "主体的动作幅度按剧情需要，可以明显" in meta
+    assert "不引入画面之外的元素、部位或道具" in meta
+    assert p.count("主体的动作幅度按剧情需要") == 1  # 全片规则只在 ① 写一次，不逐拍重申
+    assert "主体只做微动" not in p
+    assert "镜头切换" not in p and "机位变化" not in p
+
+
+def test_climax_positive_stream_carries_no_cut_trigger_words():
+    """H3 节点没有 negative 通道（入参 clip/vae/first_frame/last_frame/prompt/width/height/length，
+    输出只有 positive）⇒ 六段全文都是正面文本流。两档文案一律不得出现官方手册 §4.2 的
+    切镜触发词与运镜动作名，否则文案自己就是「像有转场」的来源。"""
+    triggers = ("镜头切换", "切镜", "跳切", "转场", "多机位", "推拉", "摇移",
+                "甩镜头", "cuts to", "transitions to", "switches to", "changes to")
+    hold = video_prompt.compile_climax_video_prompt(
+        _spec(camera=""), size="9:16", pending_frame=True)
+    reveal = video_prompt.compile_climax_video_prompt(
+        _spec(camera="", composition="", actors=[], aspect_ratio="16:9", locale="港区",
+              narrative="舰队驶入港口，天际线在晨雾里连成一片。"),
+        size="16:9", pending_frame=True)
+    for name, text in (("action_hold", hold), ("scene_reveal", reveal)):
+        assert [t for t in triggers if t in text] == []
+        # ⑥ 只剩通用质量词：机位/运镜类否定式一律不进
+        assert "人物身份和五官不能发生变化" in text
+
+
+def test_climax_reveal_contract_keeps_world_moving():
+    """大场面档的 ① 要写明「画面里的世界照常运动」：这一档不是冻帧，人流/车辆/水面
+    继续推进，在场人物的动作幅度也不设上限（用户口径「人流往往就是路上很多行人走动」）。"""
+    p = video_prompt.compile_climax_video_prompt(
+        _spec(camera="", composition="", actors=[], aspect_ratio="16:9", locale="港区",
+              narrative="舰队驶入港口，天际线在晨雾里连成一片。"),
+        size="16:9", pending_frame=True)
+    meta = p.split("[元信息]：", 1)[1].split("\n\n", 1)[0]
+    assert "画面中的世界照常运动" in meta and "行人持续走动" in meta
+
+
+def test_climax_hold_prunes_pose_migration_clauses():
+    """首帧＝高潮图那一格 ⇒ 它的构型是前提不是剧情。hold 档逐拍只留往复/物理跟随，
+    「抬起／踩上／滑出」这类构型迁移短语退出时间轴；纯迁移的一拍整拍退出。"""
+    spec = {**_spec(camera=""), "action_sequence": [
+        {"beat": "定格起点", "desc": "her hips rock in rhythm, the chain sways with each impact"},
+        {"beat": "延伸", "desc": "the curtain slips off the rod, dust drifting in the light"},
+        {"beat": "收尾", "desc": "she lifts her leg and plants it on the stool"},
+    ]}
+    lines = _segments(video_prompt.compile_climax_video_prompt(spec, size="9:16",
+                                                               pending_frame=True))
+    assert len(lines) == 2  # 纯迁移的收尾拍退出
+    assert "her hips rock in rhythm" in lines[0]
+    assert "slips off the rod" not in lines[1] and "dust drifting in the light" in lines[1]
+
+
+def test_climax_hold_prune_falls_back_when_every_beat_is_migration():
+    """全是迁移短语时不得把 ④ 掏空：回落原句，宁可留迁移也不让分镜凭空少一整段。"""
+    spec = {**_spec(camera=""), "action_sequence": [
+        {"beat": "延伸", "desc": "he stands up and walks to the door"},
+        {"beat": "收尾", "desc": "she lifts her arm over her head"},
+    ]}
+    lines = _segments(video_prompt.compile_climax_video_prompt(spec, size="9:16",
+                                                               pending_frame=True))
+    assert len(lines) == 2
+    assert "stands up" in lines[0] and "lifts her arm" in lines[1]
+
+
+def test_climax_reveal_and_noframe_keep_migration_clauses():
+    """裁剪只在「hold 档 + 有首帧」成立：文生视频没有首帧可锚，大场面档本来就在讲空间
+    推进——两者都保留完整动作文本。"""
+    spec = {**_spec(camera=""), "action_sequence": [
+        {"beat": "延伸", "desc": "she lifts her leg and plants it on the stool"}]}
+    no_frame = _segments(video_prompt.compile_climax_video_prompt(spec, size="9:16"))
+    reveal = _segments(video_prompt.compile_climax_video_prompt(
+        {**spec, "aspect_ratio": "16:9", "locale": "港区", "composition": "", "actors": []},
+        size="16:9", pending_frame=True))
+    assert "lifts her leg" in no_frame[0]
+    assert "lifts her leg" in reveal[0]
+
+def test_climax_reveal_contract_allows_one_continuous_move():
+    """大场面档：宽画幅＋环境线索 ⇒ 一条连续运镜（竖直线索判成上摇），
+    且负面不得写「运镜/机位变化」否掉这条契约自己要的运动；转场字面彻底退出高潮。
+    """
+    spec = _spec(camera="", composition="", actors=[], aspect_ratio="16:9",
+                 locale="港区", narrative="舰队驶入港口，天际线在晨雾里连成一片。")
+    p = video_prompt.compile_climax_video_prompt(spec, size="16:9", pending_frame=True)
+    cams = {ln.split("：", 1)[1].split("；")[0] for ln in _segments(p)}
+    assert cams == {video_prompt._REVEAL_CAMERA_TILT}
+    assert "甩镜头转场" not in p and "遮挡揭示转场" not in p
+    neg = p.split("[负面约束]：", 1)[1]
+    assert "运镜" not in neg and "机位变化" not in neg
+
+
+def test_climax_reveal_adopts_model_camera():
+    # 大场面档允许模型/预设给具体运动（比词表更贴这一帧）；静机位档才一律不吃
+    spec = _spec(camera="缓慢后拉，带出整座城市", composition="", actors=[],
+                 aspect_ratio="16:9", locale="", narrative="她站在窗前。")
+    p = video_prompt.compile_climax_video_prompt(spec, size="16:9", pending_frame=True)
+    assert "缓慢后拉，带出整座城市" in p
+
+
+def test_climax_needs_both_evidence_to_move_camera():
+    """判错代价不对称：宽画幅但无环境线索、有线索但窄幅，都留在静机位档。"""
+    wide_only = video_prompt.resolve_climax_shot_intent(
+        _spec(narrative="她抬起头。", locale=""), "16:9", True)
+    assert wide_only.intent == video_prompt.CLIMAX_INTENT_HOLD
+    cue_only = video_prompt.resolve_climax_shot_intent(
+        _spec(narrative="舰队驶入港口。", locale="港区", actors=[]), "2:3", True)
+    assert cue_only.intent == video_prompt.CLIMAX_INTENT_HOLD
+    # 证据本身要看得见，才敢说明「为什么没升格」
+    assert "港区" in cue_only.reason and "wide=2:3" in cue_only.reason
+    both = video_prompt.resolve_climax_shot_intent(
+        _spec(narrative="舰队驶入港口。", locale="港区", actors=[]), "16:9", True)
+    assert both.intent == video_prompt.CLIMAX_INTENT_REVEAL
+
+
+def test_climax_hold_uses_text2video_camera_without_frame():
+    """缺图守卫（R2）：文生视频的高潮不得在机位句里引用不存在的图片1。"""
+    intent = video_prompt.resolve_climax_shot_intent(_spec(), "", has_frame=False)
+    assert intent.intent == video_prompt.CLIMAX_INTENT_HOLD
+    assert intent.camera == video_prompt._HOLD_CAMERA_NOFRAME
+    assert "图片1" not in intent.camera
+
+
+def test_climax_ignores_the_1280x720_submit_default_as_width_evidence():
+    """`video_config.size` 空 ⇒ 提交侧仍回落 1280x720（R9 既有行为），但契约**不吃这个默认值**：
+    「没填画幅」不是「横屏」的证据，拿它当宽画幅就把默认偏向升格了。"""
+    req = video_prompt.build_video_request(
+        mode="climax",
+        spec=_spec(narrative="舰队驶入港口。", locale="港区", actors=[]),
+        video_config={}, preset={"videoDurationHint": 5},
+    )
+    assert req["submit"]["size"] == "1280x720"          # 兜底照旧
+    assert req["shot_intent"]["intent"] == video_prompt.CLIMAX_INTENT_HOLD
+    assert "wide=未知" in req["shot_intent"]["reason"]   # 证据缺位，逐字看得见
+
+
+def test_climax_beat_count_is_bounded_by_duration():
+    """零时长死拍（2026-11-04 修）：拍数不得超过秒数，否则 `dur*idx//n` 整除出
+    `0–0s / 1–1s` 这类空窗口；超量按顺序均分合并，动作事实不丢。
+    """
+    beats = [{"beat": "延伸", "desc": f"动作{i}"} for i in range(8)]
+    spec = _spec(camera="", action_sequence=beats)
+    p = video_prompt.compile_climax_video_prompt(spec, duration_hint=5, pending_frame=True)
+    lines = _segments(p)
+    assert len(lines) == 5
+    for line in lines:
+        start, end = line.split("s｜")[0].split("–")
+        assert int(end) - int(start) >= 1
+    for i in range(8):
+        assert f"动作{i}" in p  # 合并进相邻拍，不丢动作
+
+
+def test_firstlast_still_rotates_cameras_per_beats():
+    """契约只管高潮延伸：首尾帧覆盖整段桥段，逐拍换镜保留（用户口径「镜头固定的仅限高潮点」）。"""
+    spec = _spec(camera="")
+    p = video_prompt.compile_firstlast_video_prompt(spec)
+    cams = {ln.split("：", 1)[1].split("；")[0] for ln in _segments(p)}
+    assert len(cams) > 1
+    assert "全片机位静止" not in p
 
 
 def test_climax_falls_back_to_narrative_without_visual_elements():
@@ -417,10 +591,16 @@ def test_climax_falls_back_to_narrative_without_visual_elements():
     assert "纪含章抬眼笑说「开饭」，三人围坐面馆。" in p
 
 
-def test_climax_camera_prefers_model_camera_over_motion():
-    # 运镜优先主模型 camera，不按 motion 强度兜底
-    p = video_prompt.compile_climax_video_prompt(_spec(camera="摇臂俯拍", motion=3))
-    assert "摇臂俯拍" in p
+def test_climax_hold_drops_model_camera_even_at_high_motion():
+    """静机位档不吃主模型 camera（2026-11-04 契约改口径）。
+
+    旧行为「camera 优先 ⇒ 全片采用模型那句」在高潮档是缺陷：motion=3 时它常给
+    「快速推近/环绕」，与「首帧逐字复现图片1机位」直接冲突，第 2 拍就重新构图。
+    大场面档仍采用模型运镜句（见 test_climax_reveal_adopts_model_camera）。
+    """
+    p = video_prompt.compile_climax_video_prompt(
+        _spec(camera="摇臂俯拍", motion=3), pending_frame=True)
+    assert "摇臂俯拍" not in p
     assert "低机位快速丝滑运镜" not in p
 
 
@@ -582,10 +762,12 @@ def test_parse_video_plan_拒答字段丢弃_不流入提示词():
     assert "sync" not in plan["audio_design"]
 
 
-def test_clamp_climax_duration_夹到4到8():
-    # 2026-10-31 用户定案：高潮时长由剧情动作量判定，4–8 秒；非法值交调用方兜底。
+def test_clamp_climax_duration_夹到4到15():
+    # 2026-10-31 定案由动作量判定；2026-11-04 上限由 8 放到 15（兜底仍 5，下限仍 4）。
+    # 非法值交调用方兜底。
     assert video_prompt.clamp_climax_duration(3) == 4
-    assert video_prompt.clamp_climax_duration(9) == 8
+    assert video_prompt.clamp_climax_duration(9) == 9  # 8 与 15 之间不再被夹住
+    assert video_prompt.clamp_climax_duration(16) == 15
     assert video_prompt.clamp_climax_duration("6") == 6
     assert video_prompt.clamp_climax_duration(6.6) == 7
     assert video_prompt.clamp_climax_duration(0) is None
@@ -596,10 +778,10 @@ def test_clamp_climax_duration_夹到4到8():
 
 def test_parse_video_plan_duration_s_extracted_and_clamped():
     plan = video_prompt.parse_video_plan(
-        '{"action_sequence":[{"beat":"起点","desc":"俯卧"}],"duration_s":9}'
+        '{"action_sequence":[{"beat":"起点","desc":"俯卧"}],"duration_s":21}'
     )
-    assert plan["duration_s"] == 8
-    assert video_prompt.parse_video_plan('{"duration_s":"6"}')["duration_s"] == 6
+    assert plan["duration_s"] == 15
+    assert video_prompt.parse_video_plan('{"duration_s":"9"}')["duration_s"] == 9
     assert "duration_s" not in video_prompt.parse_video_plan('{"duration_s":"soon"}')
 
 
@@ -840,12 +1022,14 @@ def test_skeleton_section_titles_and_order():
 
 def test_skeleton_camera_band_override():
     sk = video_prompt.VideoSkeleton(camera_band_overrides={3: "镜头以慢动作环绕主体"})
-    # 主模型 camera 优先（既有口径）：本用例清空 spec.camera 才能看到档位覆盖
+    # 模版显式锁档 > 机位契约（用户「这一档就用这句」是显式意图，静机位档让位）
     p = video_prompt.compile_climax_video_prompt(_spec(camera=""), skeleton=sk)
     # motion=3 ⇒ band 3 ⇒ 全档使用覆盖文案
     assert "镜头以慢动作环绕主体" in p
-    # 未覆盖档位仍回落内置（同一提示词里不出现内置 band3 代表句）
+    # 锁档接管这一档后，内置 band3 代表句也不出现（同一条提示词里不留两套机位）
     assert "低角度仰拍" not in p
+    # 契约的固定句被显式锁档顶掉（逐拍只剩这一句机位）
+    assert video_prompt._HOLD_CAMERA_NOFRAME not in p
 
 
 def test_skeleton_beat_labels_and_duration():
@@ -891,3 +1075,179 @@ def test_default_skeleton_data_projection():
     assert data["section_titles"]["segments"] == "转场分镜"
     assert data["section_order"] == list(video_prompt.SECTION_KEYS)
     assert video_prompt.default_skeleton_data("climax")["section_titles"]["segments"] == "时间分镜"
+
+
+# ── 首帧保真三刀（2026-11-01 真机实锤 turn 9a1ecaae）─────────────────────────
+# 底图是「卧室里双手捧戒指的特写」，视频第 1 拍却写成「厨房台面上的抽插」，
+# 且 7 秒里换了 6 次机位、负面约束里还留着「cropped, bad composition」。
+# 下面逐刀锁：元信息声明起始帧 / 首拍不重新定场 / 无角色名也锁身份 / 剔除冲突构图项。
+
+_BEATS6 = {"action_sequence": [
+    {"beat": "定格起点", "desc": "cupped hands holding a pink ring"},
+    {"beat": "延伸", "desc": "she lifts her face"},
+    {"beat": "延伸", "desc": "she pushes the ring into his palm"},
+    {"beat": "延伸", "desc": "her breathing slows"},
+    {"beat": "收尾", "desc": "she leans onto the pillow"},
+    {"beat": "收尾", "desc": "the lamp light steadies"},
+]}
+
+
+def _segments(prompt: str) -> list[str]:
+    block = prompt.split("[时间分镜]：", 1)[1].split("\n\n", 1)[0]
+    return [ln for ln in block.split("\n") if ln.strip()]
+
+
+def test_climax_pending_frame_declares_starting_frame():
+    """刀③：自动链在成图**之前**编译提示词（first_frame 此时必为空），仍要按 I2V 声明。
+
+    旧行为只有 has_frame=True 才写「使用输入图片作为准确起始帧」，自动链恒为 False ⇒
+    这段文字在模型眼里是文生视频，首帧自由构图，底图机位/景别当场丢失。
+    """
+    p = video_prompt.compile_climax_video_prompt(
+        {**_spec(camera=""), **_BEATS6}, pending_frame=True)
+    meta = p.split("[元信息]：", 1)[1].split("\n\n", 1)[0]
+    assert "使用输入图片作为准确起始帧" in meta
+    assert "首帧必须逐字复现图片1的机位、构图、人物姿态与服装" in meta
+    # 无声明的旧路径逐字保持原样（文生视频仍不得声称有起始帧）
+    q = video_prompt.compile_climax_video_prompt({**_spec(camera=""), **_BEATS6})
+    assert "使用输入图片作为准确起始帧" not in q
+
+
+def test_climax_has_frame_and_pending_frame_are_equivalent():
+    """首帧已到（手动重试）与首帧待挂（自动链）编出同一段提示词——两条链共用一份文字。"""
+    spec = {**_spec(camera=""), **_BEATS6}
+    now = video_prompt.compile_climax_video_prompt(spec, has_frame=True)
+    later = video_prompt.compile_climax_video_prompt(spec, pending_frame=True)
+    assert now == later
+
+
+def test_climax_first_beat_holds_base_image_camera():
+    """刀④-1：有底图时首拍不得重新定场（旧行为按 motion 档位推镜/换景别）。"""
+    spec = {**_spec(camera=""), **_BEATS6}
+    first = _segments(
+        video_prompt.compile_climax_video_prompt(spec, pending_frame=True))[0]
+    assert video_prompt._HOLD_CAMERA_FRAME in first
+    old_first = _segments(video_prompt.compile_climax_video_prompt(spec))[0]
+    assert video_prompt._HOLD_CAMERA_FRAME not in old_first
+
+
+def test_climax_all_beats_share_one_camera():
+    """刀④-2 的升级形态：中段「每 2 拍换一次镜」改成**全片不换镜**。
+
+    原结论（每拍都换＝模型逐拍重新构图，定格机位活不过第 2 拍）是对的，只是收得不够：
+    5 秒里两句互斥机位照样丢首帧构图 ⇒ 高潮延伸统一成一条机位句（2026-11-04 用户定案）。
+    """
+    spec = {**_spec(camera=""), **_BEATS6}
+    cams = [ln.split("：", 1)[1].split("；")[0]
+            for ln in _segments(video_prompt.compile_climax_video_prompt(
+                spec, pending_frame=True))]
+    assert len(cams) == len(_BEATS6["action_sequence"])
+    assert set(cams) == {video_prompt._HOLD_CAMERA_FRAME}
+    # 文生视频（无首帧）同样一句到底，只是不引用图片1
+    t2v = [ln.split("：", 1)[1].split("；")[0]
+           for ln in _segments(video_prompt.compile_climax_video_prompt(spec))]
+    assert set(t2v) == {video_prompt._HOLD_CAMERA_NOFRAME}
+
+
+def test_climax_locks_identity_without_actor_names():
+    """刀⑤-1：在场角色名为空也要锁身份——否则没有任何一条约束要求沿用图里那张脸。"""
+    spec = {**_spec(actors=[], camera=""), **_BEATS6}
+    binding = video_prompt.compile_climax_video_prompt(
+        spec, pending_frame=True).split("[参考绑定]：", 1)[1].split("\n\n", 1)[0]
+    assert "保持图片1中人物的身份、脸部、服装、发型、造型完全一致" in binding
+    # 有名字时仍走原来的「角色名→样貌」写法，不重复追加无名写法
+    named = video_prompt.compile_climax_video_prompt(
+        {**_spec(camera=""), **_BEATS6}, pending_frame=True)
+    assert "图片1中心的角色为纪含章、庄听澜、邵允" in named
+    assert "保持图片1中人物的身份" not in named
+
+
+def test_climax_drops_frame_conflict_negative_items():
+    """刀⑤-2：负面约束里的「cropped / bad composition」与底图冲突（底图就是裁切构图）。
+
+    图片预设是逗号分隔的一整条，`_negative` 只按 ；/／ 拆项 ⇒ 必须项内再拆，
+    否则整项比对永远命中不了。
+    """
+    spec = {**_spec(camera="", negative_prompt="worst quality, cropped, bad composition, text"),
+            **_BEATS6}
+    p = video_prompt.compile_climax_video_prompt(
+        spec, negative="lowres, jpeg, cropped", pending_frame=True)
+    neg = p.split("[负面约束]：", 1)[1]
+    assert "cropped" not in neg and "bad composition" not in neg
+    assert "worst quality" in neg and "lowres" in neg and "text" in neg
+    assert "人物身份和五官不能发生变化" in neg
+    # 文生视频（无底图）时冲突项原样保留
+    assert "cropped" in video_prompt.compile_climax_video_prompt(spec)
+
+
+def test_build_request_climax_pending_frame_warns_honestly():
+    """刀③接线：pending_frame 的缺图警告不得再说「将以文字生成动作画面」（trace 会指错方向）。"""
+    req = video_prompt.build_video_request(
+        mode="climax", spec={**_spec(camera=""), **_BEATS6},
+        video_config={"base_url": "u", "model": "h3"}, pending_frame=True)
+    assert req["submit"]["images"] == []
+    assert req["warnings"] == ["高潮参考图编译时未产出：首帧由下游链补挂本张成图"]
+
+
+# ── 第 80 刀 · 首尾帧分镜层（2026-11-04）────────────────────────────────────
+# 离线真链路模拟（5 段剧情 / 12s）暴露三处结构性缺陷：开场定格与中段前 3 拍重复、
+# narrative 只取前 8 句导致后半剧情全丢、对白与说话人拆成两拍；5s 版另有 0s–0s 死拍。
+# ⚠ 本刀只管 firstlast 的「分镜内容」：机位口径（逐拍换镜）是第 78/79 刀用户定案，不动。
+
+
+def test_firstlast_mid_skips_opening_duplicates():
+    """开场定格已逐字带上 first_frame_desc，中段不得把同一段画面再演一遍。"""
+    opening = "她推门进来，收起伞。老周抬头看了一眼。"
+    spec = _spec(
+        narrative=f"{opening}她坐到靠窗的桌子。面端上来了。",
+        camera="", motion=0,
+    )
+    p = video_prompt.compile_firstlast_video_prompt(
+        spec, duration_hint=12, first_frame_desc=opening, last_frame_desc="她放下筷子起身。",
+    )
+    seg = p.split("[时间分镜]：", 1)[1].split("[音频]：", 1)[0]
+    assert seg.count("她推门进来，收起伞") == 1
+    assert seg.count("老周抬头看了一眼") == 1
+    assert "她坐到靠窗的桌子" in seg
+    assert "面端上来了" in seg
+
+
+def test_firstlast_covers_narrative_beyond_eight_sentences():
+    """取消 [:8] 硬截断：12 句剧情的后半也必须进分镜，不能演到「面上桌」就断。"""
+    spec = _spec(
+        narrative="".join(f"第{i}个动作发生在面馆。" for i in range(12)),
+        camera="", motion=0,
+    )
+    p = video_prompt.compile_firstlast_video_prompt(spec, duration_hint=12)
+    seg = p.split("[时间分镜]：", 1)[1].split("[音频]：", 1)[0]
+    for i in range(12):
+        assert f"第{i}个动作" in seg
+
+
+def test_firstlast_dialogue_and_speaker_share_one_beat():
+    """「还是老样子？」与「老周问。」不得拆成两拍：口型同步与说话人必须同一镜。"""
+    spec = _spec(narrative="「还是老样子？」老周问。她点头，在靠窗坐下。", camera="", motion=0)
+    p = video_prompt.compile_firstlast_video_prompt(spec, duration_hint=12)
+    seg = p.split("[时间分镜]：", 1)[1].split("[音频]：", 1)[0]
+    assert any("还是老样子" in ln and "老周问" in ln for ln in _segments(p))
+    assert "台词随口型同步" in seg
+
+
+def test_firstlast_short_duration_has_no_zero_length_beats_and_keeps_plot():
+    """5 秒 12 句：拍数≤秒数（无 0s–0s / 1s–1s 空窗口），且合并后不丢任何一句剧情。"""
+    import re
+
+    spec = _spec(
+        narrative="".join(f"第{i}个动作发生在面馆。" for i in range(12)),
+        camera="", motion=0,
+    )
+    p = video_prompt.compile_firstlast_video_prompt(spec, duration_hint=5)
+    lines = _segments(p)
+    assert len(lines) <= 5
+    for line in lines:
+        matched = re.match(r"\[(\d+)s–(\d+)s｜", line)
+        assert matched, line
+        assert int(matched.group(2)) - int(matched.group(1)) >= 1
+    seg = p.split("[时间分镜]：", 1)[1].split("[音频]：", 1)[0]
+    for i in range(12):
+        assert f"第{i}个动作" in seg

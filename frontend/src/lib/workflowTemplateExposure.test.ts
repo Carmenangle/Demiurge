@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
-  exposeWorkflowNodeFields, replaceWorkflowNodeExposure,
+  exposeWorkflowNodeFields, inferWorkflowFieldBinding, replaceWorkflowNodeExposure,
 } from "./workflowTemplateExposure";
+import type { ParsedField, ParsedNode } from "../api/workflows";
 
 describe("ComfyUI node selection exposure", () => {
   it("matches parameter-list defaults and preserves original widget names and values", () => {
@@ -94,6 +95,21 @@ describe("ComfyUI node selection exposure", () => {
     expect(fields).toContainEqual(expect.objectContaining({
       node_id: "3", field: "lang", binding: undefined,
     }));
+  });
+
+  it("H3 视频节点的两个类型都绑上输出宽高（2026-11-01 首帧链换型后不失配）", () => {
+    // 问题3：首帧底图原先走 ref2va（无帧锁定入口），换型为 MiniMaxH3ImageToVideo 之后
+    // 若这张表还只认旧类型，2026-10-31 定案的「图片宽高＝视频宽高」会静默失效。
+    const width: ParsedField = { name: "width", value: 1344, linked: false, required: true };
+    const height: ParsedField = { name: "height", value: 768, linked: false, required: true };
+    for (const classType of ["MiniMaxH3ReferenceToVideo", "MiniMaxH3ImageToVideo"]) {
+      const node: ParsedNode = {
+        id: "329", class_type: classType, title: classType, bypassed: false,
+        fields: [width, height],
+      };
+      expect(inferWorkflowFieldBinding(node, width), classType).toBe("video_width");
+      expect(inferWorkflowFieldBinding(node, height), classType).toBe("video_height");
+    }
   });
 
   it("字符串载体节点按节点标题声明 binding（Anima AIO 流没有 CLIPTextEncode）", () => {

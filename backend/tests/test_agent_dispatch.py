@@ -1559,6 +1559,9 @@ def test_extract_video_action_plan_duration_rule_only_in_climax(monkeypatch):
     assert plan["duration_s"] == 7
     assert '"duration_s":6' in calls[0]
     assert "duration_s：按 action_sequence 的动作量" in calls[0]
+    # 判据区间必须跟着夹值上限走：只抬 clamp、不改这句判据 ⇒ 模型永远按旧区间给值，放宽不生效。
+    assert "（4–15）" in calls[0]
+    assert "（4–8）" not in calls[0]
 
     asc._extract_video_action_plan(ctx, spec, video_mode="firstlast")
     assert "duration_s" not in calls[1]
@@ -1575,6 +1578,218 @@ def test_wb_frames_and_video_climax_falls_back_to_5s_when_extraction_fails(monke
     )
     assert req["video_request"]["submit"]["duration"] == 5
     assert "5 seconds" in out
+
+
+def test_extract_video_action_plan_climax_eats_the_frozen_frame(monkeypatch):
+    """首帧保真刀②（2026-11-01）：提取器必须看到「这一格到底画了什么」。
+
+    真机实锤（turn `9a1ecaae`）：底图是卧室里双手捧戒指的特写，第 1 拍却写成厨房台面上的
+    抽插——因为模型只拿到正文，「desc[0] 必须对应定格动作」这条规则在它眼里无从判定。
+    定格帧的两个证据（锚点句＋**已成稿**的出图提示词）本轮就已存在，零额外 LLM 调用。
+    """
+    calls: list[tuple[str, str]] = []
+
+    def fake_chat(base, key, model, system, user, **_kw):
+        calls.append((system, user))
+        return '{"action_sequence":[{"beat":"定格起点","desc":"cupped hands holding a ring"}]}'
+
+    monkeypatch.setattr(asc._llm, "chat", fake_chat)
+    ctx = _ctx()
+    spec = {"narrative": "她抬起头，灯下的眼睛里那点东西又沉下去了。"}
+
+    asc._extract_video_action_plan(
+        ctx, spec, video_mode="climax",
+        anchor="她抬起头，灯下的眼睛里那点东西又沉下去了。",
+        image_prompt="masterpiece, close-up, cupped hands holding a pink ring, black bunny suit",
+    )
+    system, user = calls[0]
+    assert "定格帧（视频第 1 拍必须复现这一格" in user
+    assert "锚点句：她抬起头，灯下的眼睛里那点东西又沉下去了。" in user
+    assert "该帧出图提示词：masterpiece, close-up, cupped hands holding a pink ring" in user
+    # 规则本体同步换尺：desc[0] 不再由「正文里最重的动作」决定
+    assert "desc[0] 只能复述定格帧里已经存在的视觉状态" in system
+    assert "更早或更晚时段的动作不得进入本序列" in system
+
+    # 成图提示词有上界（长 prompt 不得整条灌进提取请求）
+    asc._extract_video_action_plan(
+        ctx, spec, video_mode="climax", anchor="", image_prompt="x" * 3000)
+    assert "x" * 2000 in calls[1][1] and "x" * 2001 not in calls[1][1]
+
+
+def test_extract_video_action_plan_firstlast_keeps_old_action_rule_wording(monkeypatch):
+    """零回归锁：首尾帧的帧语义是「楼层开头/结尾」，不吃定格帧、旧文案逐字保留。"""
+    calls: list[tuple[str, str]] = []
+
+    def fake_chat(base, key, model, system, user, **_kw):
+        calls.append((system, user))
+        return '{"action_sequence":[{"beat":"起点","desc":"she kneels"}]}'
+
+    monkeypatch.setattr(asc._llm, "chat", fake_chat)
+    ctx = _ctx()
+    spec = {"narrative": "她跪在石板上，手腕扯动锁链。"}
+
+    asc._extract_video_action_plan(
+        ctx, spec, video_mode="firstlast", anchor="她跪在石板上。", image_prompt="a, b, c",
+    )
+    system, user = calls[0]
+    assert "定格帧" not in user
+    assert "锚点句" not in user
+    assert "desc[0] 必须对应当前高潮图的定格动作" in system
+
+
+def test_extract_video_action_plan_climax_allows_coherent_extension(monkeypatch):
+    """口径刀（2026-11-01 用户定案）：延伸**允许**补正文没写的动作，闸门从「证据」换成「连贯＋不越界」。
+
+    用户原话「能补正文没写的动作也允许,只要连贯就行」＋追问「连贯延伸能不能引入画面里
+    还没有的物件／装置」⇒「不允许」。所以放开的是**动作细节**，钉死的是**边界**：
+    接续定格帧的姿态/衣着/机位/物件，不得凭空造道具、家具、装置、新人物，不得换场景换时段。
+    ⚠ 这条只放开**视频**侧；生图侧的兜底动作表仍「零编造」（`test_兜底动作表不凭空触发`），
+      两处口径**故意不同**——图是画面真源、视频是画面的延伸。
+    """
+    calls: list[tuple[str, str]] = []
+
+    def fake_chat(base, key, model, system, user, **_kw):
+        calls.append((system, user))
+        return '{"action_sequence":[{"beat":"定格起点","desc":"cupped hands"}]}'
+
+    monkeypatch.setattr(asc._llm, "chat", fake_chat)
+    asc._extract_video_action_plan(
+        _ctx(), {"narrative": "她抬起头。"}, video_mode="climax", anchor="她抬起头。",
+    )
+    system = calls[0][0]
+
+    assert "**允许**补正文没写到的动作" in system
+    assert "不得凭空引入画面里还没有的道具、家具、装置或新人物" in system
+    assert "不得换场景、不得跳时段" in system
+    # 旧的一次性禁令必须消失（留着它，模型仍会只敢抄正文、演不出延伸）
+    assert "必须有正文证据；正文没写的动作不得补" not in system
+    # 边界仍然钉死（放开的只有动作细节）
+    assert "更早或更晚时段的动作不得进入本序列" in system
+
+
+def test_extract_video_action_plan_climax_bounds_to_its_own_frame(monkeypatch):
+    """多批次切段刀：把动作范围写成「上一格 → 本格 → 下一格」，同场景 N 张不再各演一遍。
+
+    真机口径：派发两张且两个锚点落在同一时段 ⇒ 取材窗口几乎相同 ⇒ 两支视频演同一段动作
+    （白花一次提取 LLM＋一支片）。邻居给的是**叙事边界**，不是硬闸（补写仍允许，只是不许演过头）。
+    """
+    calls: list[tuple[str, str]] = []
+
+    def fake_chat(base, key, model, system, user, **_kw):
+        calls.append((system, user))
+        return '{"action_sequence":[{"beat":"定格起点","desc":"cupped hands"}]}'
+
+    monkeypatch.setattr(asc._llm, "chat", fake_chat)
+    ctx = _ctx()
+    spec = {"narrative": "她跪到床上，床垫陷下去一块。"}
+
+    asc._extract_video_action_plan(
+        ctx, spec, video_mode="climax", anchor="她跪到床上，床垫陷下去一块。",
+        prev_anchor="她扶住台沿喘气。", next_anchor="她抬起头。",
+    )
+    user = calls[0][1]
+    assert "本段范围（从本格往下一格演，不得提前演出下一格的画面）" in user
+    assert "上一格：她扶住台沿喘气。" in user
+    assert "下一格：她抬起头。" in user
+
+    # 链首/链尾只有一侧邻居 ⇒ 只写那一侧，另一侧不留空行
+    asc._extract_video_action_plan(
+        ctx, spec, video_mode="climax", anchor="她跪到床上，床垫陷下去一块。",
+        next_anchor="她抬起头。",
+    )
+    assert "上一格：" not in calls[1][1]
+    assert "下一格：她抬起头。" in calls[1][1]
+
+    # 单批次（无邻居）⇒ 整块不写，逐字维持现行为
+    asc._extract_video_action_plan(
+        ctx, spec, video_mode="climax", anchor="她跪到床上，床垫陷下去一块。",
+    )
+    assert "本段范围" not in calls[2][1]
+
+    # firstlast 不吃这段（该模式覆盖整段楼层，帧语义是开头/结尾）
+    asc._extract_video_action_plan(
+        ctx, spec, video_mode="firstlast", prev_anchor="她扶住台沿喘气。",
+        next_anchor="她抬起头。",
+    )
+    assert "本段范围" not in calls[3][1]
+
+
+def test_wb_frames_and_video_multi_batch把前后格接到各张提取请求(monkeypatch):
+    """接线锁：边界来自**实际派发**的那几张，不是判据列出的全部候选。
+
+    批量数目=2 而判据列了 3 条 ⇒ 只有入选的两条互为前后格；落选那条不得出现在任何一张的
+    区间块里（否则提示词会指向一张根本不存在的画面）。批量数目<2 ⇒ 两串皆空。
+    """
+    extracted: list[dict] = []
+    monkeypatch.setattr(
+        asc, "_extract_video_action_plan",
+        lambda ctx, spec, **kw: (extracted.append(kw), {})[1])
+    monkeypatch.setattr(asc, "_video_skeleton_for", lambda ctx, mode: None)
+    from app.services import video_prompt as vp
+    monkeypatch.setattr(vp, "build_video_request", lambda **kw: None)
+
+    clean = "\n".join(["她扶住台沿喘气。", "她跪到床上，床垫陷下去一块。", "她抬起头。"])
+    ctx = {
+        "comfy_video": True, "video_mode": "climax", "illustration_batch_count": 2,
+        "illustration_anchor_intents": [
+            {"anchor": "她抬起头。", "score": 9},
+            {"anchor": "她扶住台沿喘气。", "score": 7},
+            {"anchor": "她跪到床上，床垫陷下去一块。", "score": 3},
+        ],
+    }
+    # 入选＝分高两条（抬头 9、扶台沿 7），正文序＝[扶台沿, 抬头]；跪到床上落选
+    asc._wb_frames_and_video(ctx, {"prompt": "a", "anchor": "她扶住台沿喘气。",
+                                   "video_config": {}}, {}, clean, "", 2)
+    asc._wb_frames_and_video(ctx, {"prompt": "b", "anchor": "她抬起头。",
+                                   "video_config": {}}, {}, clean, "", 2)
+
+    assert extracted[0]["prev_anchor"] == ""
+    assert extracted[0]["next_anchor"] == "她抬起头。"
+    assert extracted[1]["prev_anchor"] == "她扶住台沿喘气。"
+    assert extracted[1]["next_anchor"] == ""
+
+    # 单批次 ⇒ 不切段（判据列出的其余候选不会出片，拿它们当边界是假关系）
+    extracted.clear()
+    ctx_single = dict(ctx, illustration_batch_count=1)
+    asc._wb_frames_and_video(ctx_single, {"prompt": "a", "anchor": "她抬起头。",
+                                          "video_config": {}}, {}, clean, "", 2)
+    assert extracted[0]["prev_anchor"] == ""
+    assert extracted[0]["next_anchor"] == ""
+
+
+def test_wb_frames_and_video_climax把定格帧与待挂首帧接到下游(monkeypatch):
+    """接线锁（service 层单测绿≠调用点传了对的东西）：climax 分支逐条传下去。
+
+    · 提取器拿本张的 `anchor` + `prompt`（成图提示词终稿，`_wb_comfy_profile` 已在上游跑完）；
+    · 编译器收 `pending_frame=True`——图此刻还没产出，但前端 `chainClimaxVideo` 一定把它
+      挂成图片1 首帧 ⇒ 提示词必须按 I2V 写，否则模型自认文生视频、首帧重新构图。
+    多批次时每个 extra 传**自己**的那一条（见 `_wb_batch_extras`），视频才钉在自己那张图上。
+    """
+    from app.services import video_prompt as vp
+
+    extracted: list[dict] = []
+    monkeypatch.setattr(
+        asc, "_extract_video_action_plan",
+        lambda ctx, spec, **kw: (extracted.append(kw), {})[1])
+    monkeypatch.setattr(asc, "_video_skeleton_for", lambda ctx, mode: None)
+    built: list[dict] = []
+    monkeypatch.setattr(
+        vp, "build_video_request",
+        lambda **kw: (built.append(kw),
+                      {"mode": kw["mode"], "submit": {"prompt": "V"}})[1])
+
+    req = {"prompt": "masterpiece, close-up, cupped hands", "anchor": "她抬起头。",
+           "video_config": {}}
+    out = asc._wb_frames_and_video(
+        {"comfy_video": True, "video_mode": "climax"}, req,
+        {"narrative": "她抬起头。"}, "", "", 2,
+    )
+
+    assert out == "V"
+    assert extracted[0]["anchor"] == "她抬起头。"
+    assert extracted[0]["image_prompt"] == "masterpiece, close-up, cupped hands"
+    assert built[0]["mode"] == "climax"
+    assert built[0]["pending_frame"] is True
 
 
 def test_extract_video_action_plan_firstlast_lists_all_dialogue(monkeypatch, tmp_path):
@@ -1826,6 +2041,11 @@ def test_comfy首个用户回合即使已有开场白也兜底生成插画(monke
     assert request["anchor"] == "卡蜜莉亚站在孤儿院门前，猩红眼眸安静地注视着他。"
     # V1.5 默认开放：produce 时即 dry-run 组装视频参数，trace 记录视频提示词全文
     expected_video_prompt = request["video_request"]["submit"]["prompt"]
+    # 第 78 刀：机位契约的判定结果与证据入 trace。本场景画幅＝2:3（竖构图全身）⇒ 宽画幅
+    # 证据不成立 ⇒ action_hold（判错代价不对称，只满足一条不升格）。reason 与编译侧同源，
+    # 所以这里单独钉 intent，不让「两边都空」蒙混过关。
+    expected_shot = request["video_request"]["shot_intent"] or {}
+    assert expected_shot.get("intent") == "action_hold"
     assert trace[-1] == (
         "illustration.request",
         {
@@ -1837,6 +2057,8 @@ def test_comfy首个用户回合即使已有开场白也兜底生成插画(monke
                 "prompt_chars": len(request["prompt"]),
                 "video_prompt_chars": len(expected_video_prompt),
                 "video_prompt": expected_video_prompt,
+                "video_shot_intent": expected_shot.get("intent", ""),
+                "video_shot_reason": expected_shot.get("reason", ""),
                 # 前置观测（2026-09-22）：人称判定与画面主体收敛结果入 trace。
                 # 锚点句「…注视着他。」含第三人称代词 ⇒ `third_person`、source＝`anchor`；
                 # 该场景走词表档（无判据）⇒ 画面主体名集合为空（只有判据档才填）。
@@ -3206,20 +3428,36 @@ def test_插画事件无scene_spec则不生成视频提示词_v1_5():
     assert "video_params" not in events[0]["illustrate_request"]
 
 
-def test_视频提示词motion强度影响运镜_正常链路():
+def test_高潮机位按画面内容判定而非motion强度_正常链路():
+    """2026-11-04 契约改口径：高潮延伸的镜头由「这一帧是主体在动还是世界在展开」决定。
+
+    旧用例断言 motion 3/2/0 ⇒ 三档不同运镜句——那正是「5 秒里挤进互斥机位、镜头到处转」
+    的来源，现由机位契约接管；motion 只剩「是否补能量特效」这一处影响。
+    首尾帧/转场不受此契约（见 test_video_prompt 的 firstlast 用例）。
+    """
     from app.services import video_prompt
     base_spec = {
         "narrative": "角色动作", "appearance": "外貌", "wardrobe": "服装",
-        "locale": "场景", "actors": ["角色"], "rating": "sfw",
+        "locale": "场景", "actors": ["角色"], "rating": "sfw", "camera": "",
     }
-    def compile_for(motion):
-        spec = dict(base_spec)
-        spec["motion"] = motion
-        return video_prompt.compile_climax_video_prompt(spec)
 
-    assert "低角度仰拍，摄像机以快速弧线围绕主体运动" in compile_for(3)
-    assert "镜头绕主体旋转90度" in compile_for(2)
-    assert "摄像机缓缓向主体的面部移动，画面逐渐收窄" in compile_for(0)
+    def compile_for(motion):
+        spec = dict(base_spec, motion=motion)
+        return video_prompt.compile_climax_video_prompt(spec, pending_frame=True)
+
+    # 三档静机位：逐拍机位句完全相同，且都锁定图片1构图
+    for motion in (0, 2, 3):
+        seg = compile_for(motion).split("[时间分镜]：", 1)[1].split("[音频]：", 1)[0]
+        cams = {ln.split("：", 1)[1].split("；")[0] for ln in seg.strip().splitlines()}
+        assert cams == {video_prompt._HOLD_CAMERA_FRAME}, motion
+    # 高运动量仍补一条能量特效（但不再要求画面错位）
+    assert "能量爆发式特效，画面保持稳定" in compile_for(3)
+    assert "特效" not in compile_for(2)
+    # 宽画幅＋环境线索才升格成一条连续运镜
+    wide = video_prompt.compile_climax_video_prompt(
+        dict(base_spec, locale="港区", narrative="舰队驶入港口，海面辽阔"),
+        size="16:9", pending_frame=True)
+    assert video_prompt._REVEAL_CAMERA_PAN in wide
 
 
 def test_正文最终化后在记忆维护前立即发插画请求():

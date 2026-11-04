@@ -5,9 +5,13 @@ userdata/
 
 # 用户导入的第三方预设可能包含私有提示词、代理配置或授权受限内容；
 # 只放行经构建脚本递归清洗的发布资源包。
+# 逐包显式豁免（白名单）：新增包必须同时列在这里和 scripts/release_preflight.py 的
+# ALLOWED_PRESET_PREFIXES，两处漏一处 ⇒ 要么发布面被未清洗内容打红，要么本机数据被误上传。
 presets/*
 !presets/Demiurge-presets-regex/
 !presets/Demiurge-presets-regex/**
+!presets/Demiurge-comfyui-templates/
+!presets/Demiurge-comfyui-templates/**
 
 # 本机 Agent 记忆含调试路径、测试作品和上游地址，不属于源码发布物
 docs/memory/

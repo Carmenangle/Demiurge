@@ -413,6 +413,18 @@ def resolve_illustration_anchor(
     return requested
 
 
+# 时间跳转标记（＝场景边界）的**唯一**尺：半角连字符串 / 全角破折号串 / `* * *` 都算。
+# 选点覆盖闸（`_anchors_cross_scene_boundary`）与取材扩窗（`_is_action_context_boundary`）
+# 必须共用它——真机实锤（2026-11-01，turn `9a1ecaae`）：正文用全角 `———` 分时段，而扩窗那道
+# 只认半角 `---`，于是底图钉在跳转后的卧室捧戒指特写、取材窗口却把跳转前的厨房高潮一起装进来，
+# 视频动作链按「正文里最重的动作」起笔 ⇒ 图在卧室、分镜在厨房，首帧与文本互斥。
+_SCENE_JUMP_CORE = r"---+|——+|――+|─{2,}|\*\s*\*\s*\*"
+# 整段就是跳转标记（取材扩窗用：段落已 strip）。
+_SCENE_JUMP_LINE_RE = re.compile(rf"\s*(?:{_SCENE_JUMP_CORE})\s*")
+# 跨段搜索用（锚点之间的原文，逐行整行匹配才算跳转，句中的「——」不算）。
+_SCENE_JUMP_SPAN_RE = re.compile(rf"(?:^|\n)\s*(?:{_SCENE_JUMP_CORE})\s*(?:\n|$)")
+
+
 def _anchors_cross_scene_boundary(text: str, first: str, second: str) -> bool:
     """显式计划位于时间跳转后的新场景时，禁止拿旧时段高潮覆盖。"""
     visible = image_prompt_extract.restore_jailbreak(text or "")
@@ -421,9 +433,7 @@ def _anchors_cross_scene_boundary(text: str, first: str, second: str) -> bool:
     if left < 0 or right < 0 or left == right:
         return False
     between = visible[min(left, right):max(left, right)]
-    return bool(re.search(
-        r"(?:^|\n)\s*(?:---+|——+|\*\s*\*\s*\*)\s*(?:\n|$)", between,
-    ))
+    return bool(_SCENE_JUMP_SPAN_RE.search(between))
 
 
 def illustration_scene_excerpt(
@@ -674,7 +684,7 @@ def _nearest_timepoint_start(paragraphs: list[str], index: int, window_start: in
     return start
 
 def _is_action_context_boundary(paragraph: str) -> bool:
-    if re.fullmatch(r"\s*(?:---+|\*\s*\*\s*\*)\s*", paragraph):
+    if _SCENE_JUMP_LINE_RE.fullmatch(paragraph or ""):
         return True
     if len(paragraph) <= 60 and re.match(
         r"^\s*[^，。！？!?]{1,24}(?:转身)?(?:离开|离场|退场|走出|退出)", paragraph,
@@ -1329,6 +1339,50 @@ def _locate_anchor_paragraph(paragraphs: list[str], anchor: str) -> int | None:
         if needle and needle in _ANCHOR_MATCH_STRIP_RE.sub("", paragraph)
     ]
     return hits[0] if len(hits) == 1 else None
+
+
+def illustration_anchor_neighbours(
+    text: str, anchor: str, intents: list[dict],
+) -> tuple[str, str]:
+    """本锚点在**正文序**里的前后邻居锚点句（多批次视频用它把动作切成「这一段」）。
+
+    派发 N 张高潮图时，落在同一时段的两个锚点拿到的取材窗口**几乎相同** ⇒ N 支视频
+    重复演同一段动作（白花 N 次提取 LLM ＋ N 支片）。邻居句给出「上一格 → 本格 →
+    下一格」的叙事区间：第 k 张只演自己那一格往下的延伸，不吞掉后一张的画面。
+
+    段位定位复用 `dedupe_anchor_intents` 那把尺（`_locate_anchor_paragraph`：**唯一**命中
+    才算数——找不到或正文里重复出现 ⇒ 该侧给空串，宁缺勿猜）。
+    单批次 / 本锚点定位失败 ⇒ `("", "")`，调用方不写区间块 ⇒ 逐字维持现行为。
+    """
+    paragraphs = [
+        part for part in _ANCHOR_PARAGRAPH_SPLIT_RE.split(text or "") if part.strip()
+    ]
+    if not paragraphs:
+        return "", ""
+
+    def locate(value: str) -> int | None:
+        return _locate_anchor_paragraph(paragraphs, value)
+
+    current = locate(anchor)
+    if current is None:
+        return "", ""
+    ranked: list[tuple[int, str]] = []
+    seen: set[int] = {current}
+    for item in intents or []:
+        raw = str(item.get("anchor") or "").strip() if isinstance(item, dict) else ""
+        where = locate(raw)
+        if where is None or where in seen:
+            continue
+        seen.add(where)
+        ranked.append((where, raw))
+    prev_anchor = ""
+    next_anchor = ""
+    for where, raw in sorted(ranked):        # 正文序升序
+        if where < current:
+            prev_anchor = raw               # 反复覆盖 ⇒ 留下最靠近本格的那一条
+        elif not next_anchor:
+            next_anchor = raw              # 第一处晚于本格的
+    return prev_anchor, next_anchor
 
 
 def parse_anchor_intent(raw: str) -> dict | None:

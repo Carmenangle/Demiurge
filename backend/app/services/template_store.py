@@ -42,7 +42,9 @@ _POS_PROMPT_TITLE_RE = re.compile(r"positive|\bpos[\s_-]*prompt\b|正面|正向"
 # 视频生成节点上「以整数像素显式声明输出尺寸」的字段（2026-10-31 用户定案：
 # 图片的宽高要和视频的宽高一致）。这些字段在工作流里通常由 ResolutionSelector 连线供给，
 # 而画布暴露层只收无连线字段，所以按节点类型自动绑定、提交时用真实图片尺寸覆盖连线。
-_VIDEO_SIZE_NODE_TYPES = ("minimaxh3referencetovideo",)
+# 2026-11-01：H3 首帧链改走 MiniMaxH3ImageToVideo（ref2va 没有任何帧锁定入口，
+# 首帧只当参考图 ⇒ 第 0 帧必然不是成图），两个类型都要认，否则宽高一致静默失效。
+_VIDEO_SIZE_NODE_TYPES = ("minimaxh3referencetovideo", "minimaxh3imagetovideo")
 
 
 def _ensure_dir() -> None:

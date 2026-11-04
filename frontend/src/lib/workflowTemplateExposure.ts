@@ -9,7 +9,8 @@ const TEXT_CARRIER_FIELDS = new Set(["string", "text", "value", "prompt", "posit
 const NEG_PROMPT_TITLE_RE = /negative|neg[\s_-]*prompt|负面|负向|反向/i;
 const POS_PROMPT_TITLE_RE = /positive|\bpos[\s_-]*prompt\b|正面|正向/i;
 // 视频生成节点上显式声明输出像素尺寸的节点类型（与后端 template_store._VIDEO_SIZE_NODE_TYPES 同口径）。
-const VIDEO_SIZE_NODE_TYPES = ["minimaxh3referencetovideo"];
+// 2026-11-01：H3 首帧链改用 MiniMaxH3ImageToVideo（ref2va 无帧锁定入口），双端都要认。
+const VIDEO_SIZE_NODE_TYPES = ["minimaxh3referencetovideo", "minimaxh3imagetovideo"];
 
 export function inferWorkflowFieldControl(field: ParsedField): ControlType {
   const name = field.name.toLowerCase();

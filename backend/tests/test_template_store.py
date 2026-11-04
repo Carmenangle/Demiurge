@@ -270,6 +270,36 @@ def test_api格式视频节点同样绑上宽高():
     ]
 
 
+def test_首帧链换型后宽高binding仍落在唯一视频节点():
+    """问题3（2026-11-01）：首帧底图改接 MiniMaxH3ImageToVideo 的真 first_frame 口
+    （ref2va 只有参考图通道，第 0 帧必然不是成图）。换型同时必须保住 2026-10-31
+    定案的「图片宽高＝视频宽高」——按类型自动补的 video_width/video_height 不能因为
+    类型名换了就静默消失。槽位形态照抄改后模板：连接型输入在前，widget 输入按序占位。
+    """
+    i2v_node = {
+        "id": 329, "type": "MiniMaxH3ImageToVideo",
+        "inputs": [
+            {"name": "clip", "type": "CLIP", "link": 545},
+            {"name": "vae", "type": "VAE", "link": 546},
+            {"name": "first_frame", "type": "IMAGE", "shape": 7, "link": 548},
+            {"name": "last_frame", "type": "IMAGE", "shape": 7},
+            {"name": "prompt", "type": "STRING", "widget": {"name": "prompt"}, "link": 566},
+            {"name": "width", "type": "INT", "widget": {"name": "width"}, "link": 553},
+            {"name": "height", "type": "INT", "widget": {"name": "height"}, "link": 554},
+            {"name": "length", "type": "INT", "widget": {"name": "length"}, "link": 555},
+        ],
+        "widgets_values": ["", 1344, 768, 124],
+    }
+    normalized = template_store._normalize(_视频模板记录(i2v_node))
+
+    assert [(f["node_id"], f["field"], f["binding"], f["default"]) for f in normalized["exposed"]
+            if str(f.get("binding", "")).startswith("video_")] == [
+        ("329", "width", "video_width", 1344),
+        ("329", "height", "video_height", 768),
+    ]
+    assert "329" in template_store.ordered_node_ids(normalized)
+
+
 def test_图像模板不因此多出宽高键():
     """零回归：EmptyLatentImage 仍只走 latent_* 口径，视频宽高绑定不得顺手污染图片模板。"""
     normalized = template_store._normalize({

@@ -2313,3 +2313,107 @@ def test_第59刀_零分过滤落在本体之外_旧形态包装零回归():
 
     assert [x["anchor"] for x in si.select_anchor_intents(items, 0)] == ["A", "B"]
     assert [x["anchor"] for x in si.select_anchor_intents(items, 1)] == ["B"]
+
+
+# ── 首帧保真刀①（2026-11-01）：取材窗口与选点闸共用同一把时间跳转尺 ──────────────
+# 真机实锤（turn `9a1ecaae`）：正文用全角 `———` 分时段（厨房高潮 → 夜里卧室捧戒指），
+# 底图钉在跳转**后**的卧室特写，而取材扩窗 `_is_action_context_boundary` 只认半角 `---`
+# ⇒ 厨房那一段被一起装进窗口，视频动作链按「正文里最重的动作」起笔（图在卧室、分镜在厨房）。
+
+_JUMP_TEXT = "\n\n".join([
+    "她的里面猛地一缩，一股黏液浇下来，顺着台沿往下滴。我跟着射进去，射的时候她整个人往前扑，"
+    "抱住我的脖子，脸埋在我肩上。",
+    "锅里的糊味飘满整个厨房，两只蛮啾蹲在地上看着，啾了一声。",
+    "———",
+    "夜里的卧室只开了一盏床头灯。",
+    "她跪到床上，床垫陷下去一块。",
+    "她抬起头，灯下的眼睛里那点东西又沉下去了。",
+])
+_JUMP_ANCHOR = "她抬起头，灯下的眼睛里那点东西又沉下去了。"
+
+
+def test_取材窗口在全角时间跳转处收口_不带回旧时段():
+    """刀①主锁：锚点落在 `———` 之后 ⇒ 窗口只取跳转后的那一段，旧时段动作不得混进来。"""
+    excerpt = si.illustration_scene_excerpt(
+        _JUMP_TEXT, _JUMP_ANCHOR, subjects=["腓特烈"],
+    )
+
+    assert excerpt.endswith(_JUMP_ANCHOR)
+    assert "夜里的卧室只开了一盏床头灯。" in excerpt
+    for stale in ("厨房", "黏液", "锅", "台沿"):
+        assert stale not in excerpt, f"旧时段（厨房）内容 {stale} 漏进窗口"
+
+
+def test_全角破折号串本身即场景边界_与半角同尺():
+    """扩窗闸的段落判据：`———` / `―――` / `───` / `---` / `* * *` 一律算边界。"""
+    for marker in ("———", "―――", "───", "---", "----", "* * *", "***"):
+        assert si._is_action_context_boundary(marker), marker
+
+
+def test_时间跳转尺两处同尺():
+    """口径锁：同一串时间跳转标记，选点覆盖闸与取材扩窗必须**同时**认。
+
+    两处曾各自硬编码（扩窗只认 `---`/`* * *`，覆盖闸认全角 `——`），全角分隔正文里
+    「图钉在跳转后、窗口取跳转前」就是这么来的——只锁一处会立刻再漂移。
+    """
+    for marker in ("———", "―――", "───", "---", "----", "* * *", "***"):
+        assert si._is_action_context_boundary(marker), marker
+        text = f"她把外套解开。\n\n{marker}\n\n{_JUMP_ANCHOR}"
+        assert si._anchors_cross_scene_boundary(
+            text, "她把外套解开。", _JUMP_ANCHOR), marker
+
+
+# ── 多批次视频的「本段范围」邻居（2026-11-01，用户问「多个高潮点能不能各演自己那一段」）──
+# 派发 N 张而两个锚点落在同一时段 ⇒ 取材窗口几乎相同 ⇒ N 支视频重复演同一段动作。
+# 邻居句给出「上一格 → 本格 → 下一格」的叙事边界。定位尺刻意复用去重那把
+# （`_locate_anchor_paragraph`：唯一命中才算数），判据与 `dedupe_anchor_intents` 同源。
+
+_MULTI_TEXT = "\n".join([
+    "她扶住台沿喘气。",
+    "她跪到床上，床垫陷下去一块。",
+    "她抬起头，灯下的眼睛里那点东西又沉下去了。",
+])
+
+
+def test_邻居按正文序给出前后格_不受打分序影响():
+    """入参是**打分序**（判据产物），邻居必须按**正文序**——与第 74 刀段桥链同一口径。"""
+    intents = [
+        {"anchor": "她抬起头，灯下的眼睛里那点东西又沉下去了。", "score": 9},
+        {"anchor": "她扶住台沿喘气。", "score": 7},
+        {"anchor": "她跪到床上，床垫陷下去一块。", "score": 3},
+    ]
+
+    assert si.illustration_anchor_neighbours(
+        _MULTI_TEXT, "她扶住台沿喘气。", intents) == ("", "她跪到床上，床垫陷下去一块。")
+    assert si.illustration_anchor_neighbours(
+        _MULTI_TEXT, "她跪到床上，床垫陷下去一块。", intents) == (
+            "她扶住台沿喘气。", "她抬起头，灯下的眼睛里那点东西又沉下去了。")
+    # 链尾只有前格，后格为空串（调用方据此只写一侧）
+    assert si.illustration_anchor_neighbours(
+        _MULTI_TEXT, "她抬起头，灯下的眼睛里那点东西又沉下去了。", intents)[1] == ""
+
+
+def test_邻居只认唯一命中_定位失败就交空():
+    """宁缺勿猜：本锚点找不到、或在正文里重复出现（段位有歧义）⇒ `("", "")`。
+
+    错一个边界比没有边界更坏——提示词会指向一格并不存在的画面。
+    """
+    assert si.illustration_anchor_neighbours(_MULTI_TEXT, "正文里根本没有的一句。", [
+        {"anchor": "她扶住台沿喘气。"},
+    ]) == ("", "")
+    duplicated = "她抬起头。\n\n她抬起头。\n\n她跪到床上。"
+    assert si.illustration_anchor_neighbours(duplicated, "她抬起头。", [
+        {"anchor": "她跪到床上。"},
+    ]) == ("", "")
+
+
+def test_邻居在单锚点时不编出关系():
+    """只有一个锚点（单批次／其余候选落选）⇒ 两侧都空，调用方不写区间块。"""
+    assert si.illustration_anchor_neighbours(_MULTI_TEXT, "她扶住台沿喘气。", [
+        {"anchor": "她扶住台沿喘气。", "score": 9},
+    ]) == ("", "")
+    assert si.illustration_anchor_neighbours(_MULTI_TEXT, "她扶住台沿喘气。", []) == ("", "")
+    # 脏项（非字典 / 空 anchor）原样跳过，不抛异常
+    assert si.illustration_anchor_neighbours(_MULTI_TEXT, "她扶住台沿喘气。", [
+        "脏项", {"anchor": ""}, {"anchor": "她抬起头，灯下的眼睛里那点东西又沉下去了。"},
+    ]) == ("", "她抬起头，灯下的眼睛里那点东西又沉下去了。")

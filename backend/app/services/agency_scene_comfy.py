@@ -93,13 +93,28 @@ def _video_skeleton_for(ctx: CtxLike, mode: str):
 
 def _extract_video_action_plan(
     ctx: CtxLike, spec: dict[str, Any], video_mode: str = "climax",
+    *, anchor: str = "", image_prompt: str = "",
+    prev_anchor: str = "", next_anchor: str = "",
 ) -> dict[str, Any]:
     """选 A：从剧情原文理解体态，提取视频提示词原料（动作延伸 + 简化外貌/场景）。
+
+    `anchor` ＋ `image_prompt`（2026-11-01 定格帧真源，仅 climax 使用）：**这一格到底画了
+    什么**。二者都是本轮已经定稿的东西（锚点句＝插图的正文落点句；`image_prompt`＝
+    `_wb_comfy_profile` 之后的成图提示词终稿），所以零额外 LLM 调用。缺了它们，
+    「desc[0] 必须对应当前高潮图的定格动作」这条规则在模型眼里无从判定——它只看得见
+    正文，于是挑正文里最重的动作起笔：真机实锤（turn `9a1ecaae`）底图是卧室里双手捧戒指的
+    特写，第 1 拍却写成厨房台面上的抽插，首帧与文本互斥 ⇒ 「看不出底图的延伸」。
+    firstlast 不接（该模式的帧语义是「楼层开头/结尾」，另走 `first_frame_desc`）。
+
+    `prev_anchor` / `next_anchor`（2026-11-01 多批次切段，仅 climax 使用）：本张在**正文序**
+    里的前后两格。派发 N 张时若两个锚点落在同一时段，取材窗口几乎相同 ⇒ N 支视频重复演同
+    一段动作（白花 N 次提取＋N 支片）。给出「上一格 → 本格 → 下一格」后，第 k 张只演自己
+    那一格往下的延伸。单批次时两串皆空 ⇒ 不写区间块，逐字维持现行为。
 
     P1/P5 修复：climax [动作] 段曾退化成 subjects.description（外貌），因为
     plan_retargeted 时 action_sequence/visual_facts/composition 被清空，动作链断掉。
     这里直接从纠正后的高潮片段正文（scene_narrative）理解体态，产出：
-    - action_sequence：定格动作 → 剧情完整动作的延伸（只写剧情有证据的动作）；
+    - action_sequence：定格动作 → 剧情完整动作的延伸（**允许连贯补写**，见 action_rule）；
     - subject_scene：在场角色的简化外貌 + 场景视觉描述（去同义形容词堆砌、
       专名视觉展开），只描述在场 actors。
 
@@ -139,15 +154,42 @@ def _extract_video_action_plan(
             "（0–15 秒）内没有对白——不得把剧情任何台词（含当下/前文/回忆/旁白转述）搬进来；"
             "声音细节只写进 sfx。\n"
         )
-    # 时长由剧情动作量判定（2026-10-31 用户定案，仅高潮模式）：4–8 秒，兜底 5。
+    # 时长由剧情动作量判定（2026-10-31 用户定案，仅高潮模式），兜底 5；
+    # 上限 2026-11-04 由 8 放到 15（用户定案「上限放到 15 秒，仍按动作量判定」）。
+    # ⚠ 这句判据就是时长的**上限真源**：只抬 `clamp_climax_duration` 的夹值、不改这里，
+    # 模型永远按旧区间给值 ⇒ 夹值放宽不生效（判据的源看不见目标区间）。
     # 首尾帧覆盖整段楼层，时长仍走模板/预设，不由拍数推定。
     climax_mode = video_mode != "firstlast"
     duration_field = "\"duration_s\":6," if climax_mode else ""
     duration_rule = (
-        "4. duration_s：按 action_sequence 的动作量给整数秒（4–8）：单拍 4–5，两拍 6，"
-        "三拍及以上 7–8；只给剧情能演完的时长，不得为凑时长补剧情没写的动作。\n"
+        "4. duration_s：按 action_sequence 的动作量给整数秒（4–15）：单拍 4–6，两拍 7–9，"
+        "三拍 10–12，四拍及以上 13–15；只给剧情能演完的时长，不得为凑时长补剧情没写的动作。\n"
         if climax_mode else ""
     )
+    # 动作序列的起点语义（2026-11-01 定格帧真源）：climax 必须钉在**这一格**上，
+    # 而不是「正文里最重的动作」——见本函数 docstring 的 turn `9a1ecaae` 实锤。
+    # firstlast 逐字维持旧文案（该模式覆盖整段楼层，帧语义是开头/结尾，不走这条）。
+    if climax_mode:
+        action_rule = (
+            "1. action_sequence 是从**定格帧**往下一路演出去的延伸流程，最多8步：\n"
+            "   - desc[0] 只能复述定格帧里已经存在的视觉状态（谁、什么姿态、在何处、穿什么、"
+            "机位是什么）。定格帧＝下面「定格帧」给出的锚点句＋该帧出图提示词，两者没写到的"
+            "动作一律不得写进 desc[0]。\n"
+            "   - desc[1..] 是从这一格继续演的后续动作：**允许**补正文没写到的动作，"
+            "但必须与上一拍**连贯**——顺着定格帧已有的姿态、衣着、机位与物件物理接续下去；"
+            "不得凭空引入画面里还没有的道具、家具、装置或新人物，不得换场景、不得跳时段。\n"
+            "   - 正文若含多个时点（时间跳转／换了场景），只沿用定格帧所在那一段的动作，"
+            "更早或更晚时段的动作不得进入本序列。\n"
+            "   - 那一段里有多个动作时至少2拍（仅当确为单一动作才允许单拍）；"
+            "desc 用简洁英文视觉描述（写清谁、什么体态、做什么）。\n"
+        )
+    else:
+        action_rule = (
+            "1. action_sequence 是从高潮图定格动作到剧情完整动作的延伸流程，覆盖整段正文的动作变化，"
+            "最多8步；desc[0] 必须对应当前高潮图的定格动作，desc[1..] 必须基于剧情描述的后续动作，"
+            "剧情没写的动作不得补；正文有多个动作时至少2拍（仅当正文确为单一动作才允许单拍）；"
+            "desc 用简洁英文视觉描述（写清谁、什么体态、做什么）。\n"
+        )
     system = (
         "你是视频提示词原料提取器。读下面这段剧情高潮正文（可能含防拦截标记，请还原其原义），"
         "理解人物体态、动作与声音，输出 JSON：\n"
@@ -156,10 +198,7 @@ def _extract_video_action_plan(
         "\"audio_design\":{\"music\":\"一句话音乐情绪\",\"sfx\":[\"具体音效1\",\"音效2\"],"
         "\"lines\":[{\"speaker\":\"角色名\",\"text\":\"台词原文\",\"at_s\":5}],\"sync\":\"卡拍说明\"}}\n"
         "规则：\n"
-        "1. action_sequence 是从高潮图定格动作到剧情完整动作的延伸流程，覆盖整段正文的动作变化，"
-        "最多8步；desc[0] 必须对应当前高潮图的定格动作，desc[1..] 必须基于剧情描述的后续动作，"
-        "剧情没写的动作不得补；正文有多个动作时至少2拍（仅当正文确为单一动作才允许单拍）；"
-        "desc 用简洁英文视觉描述（写清谁、什么体态、做什么）。\n"
+        + action_rule +
         "2. subject_scene 只描述在场角色的外貌与场景：把抽象评价与同义形容词堆砌简化为直白视觉词"
         "（如「丰腴肥熟+酥雌醇媚」→「hourglass figure, large breasts, wide hips, seductive eyes」），"
         "专有名词（地名/建筑/器物）必须展开成可还原的视觉描述，不得照抄原名。\n"
@@ -185,6 +224,26 @@ def _extract_video_action_plan(
     except Exception as exc:  # noqa: BLE001 [EXC-留痕] 预设组装失败不阻断，但生成缺防拦截预设
         _LOG.warning("防拦截预设组装失败（保持原 system，本次生成缺该预设）: %s", exc)
     user_lines = [f"剧情高潮正文（可能含防拦截标记，按标记还原原义）：\n{narrative}"]
+    # 定格帧真源（climax）：锚点句＋成图提示词终稿＝这一格到底画了什么的唯一证据。
+    if climax_mode and (anchor.strip() or image_prompt.strip()):
+        frame_block = [f"锚点句：{anchor.strip()[:300]}" if anchor.strip() else ""]
+        if image_prompt.strip():
+            frame_block.append(f"该帧出图提示词：{image_prompt.strip()[:2000]}")
+        user_lines.append(
+            "定格帧（视频第 1 拍必须复现这一格，不得改机位/姿态/衣着/场景）：\n"
+            + "\n".join(part for part in frame_block if part)
+        )
+    # 本段范围（多批次才有，climax）：动作只演到自己这一格往下一格之前，
+    # 同场景的 N 张不再各演一遍同一段动作（重复＝白花 N 支片）。
+    if climax_mode and (prev_anchor.strip() or next_anchor.strip()):
+        bounds = [
+            f"上一格：{prev_anchor.strip()[:200]}" if prev_anchor.strip() else "",
+            f"下一格：{next_anchor.strip()[:200]}" if next_anchor.strip() else "",
+        ]
+        user_lines.append(
+            "本段范围（从本格往下一格演，不得提前演出下一格的画面）：\n"
+            + "\n".join(part for part in bounds if part)
+        )
     if actors:
         user_lines.append(f"在场角色：{'、'.join(actors)}")
     if appearance:
@@ -894,7 +953,27 @@ def _wb_frames_and_video(ctx: CtxLike, illustrate_req: dict, scene_spec: dict,
             # 选 A：从剧情原文理解体态，补动作延伸 + 简化外貌/场景。
             # 失败静默回退（_vp_plan 为空），不阻断出图；非 retargeted 时主模型
             # 已给 action_sequence，本提取作为兜底优先补齐，避免动作段退化。
-            _vp_plan = _extract_video_action_plan(ctx, _merged_spec, video_mode=_video_mode)
+            # 本张的前后格：只在**多批次真的派发多张**时给（批量数目 < 2 ⇒ 单张，
+            # 判据列出的其余候选不会出片，拿它们当边界会把不存在的关系写进提示词）。
+            _batch = _anchor_batch_count(ctx)
+            _prev_anchor = _next_anchor = ""
+            if _batch >= 2:
+                from app.services import scene_illustration as _si
+                _prev_anchor, _next_anchor = _si.illustration_anchor_neighbours(
+                    clean, str(illustrate_req.get("anchor") or ""),
+                    _si.select_anchor_intents(
+                        list(ctx.get("illustration_anchor_intents") or []), _batch,
+                    ),
+                )
+            _vp_plan = _extract_video_action_plan(
+                ctx, _merged_spec, video_mode=_video_mode,
+                # 定格帧真源：本张的锚点句＋已成稿的出图提示词（`_wb_comfy_profile` 已在
+                # 上游跑完）——多批次时 each extra 传自己的，视频分镜才钉在自己那张图上。
+                anchor=str(illustrate_req.get("anchor") or ""),
+                image_prompt=str(illustrate_req.get("prompt") or ""),
+                prev_anchor=_prev_anchor,
+                next_anchor=_next_anchor,
+            )
             if _vp_plan.get("action_sequence"):
                 _merged_spec["action_sequence"] = _vp_plan["action_sequence"]
             if _vp_plan.get("subject_scene"):
@@ -923,6 +1002,10 @@ def _wb_frames_and_video(ctx: CtxLike, illustrate_req: dict, scene_spec: dict,
                     # first_frame_desc 留空：图职责描述由 video_prompt 用画面级
                     # 动作瞬间（subjects/visual_facts/composition）兜底，与 [动作]
                     # 同源，避免把围绕锚点截取的可能陈旧 narrative 写进 [参考绑定]。
+                    # pending_frame：本链的提示词在这张图**之前**编译，成图由前端
+                    # chainClimaxVideo 挂成图片1首帧 ⇒ 必须按 I2V 声明起始帧，
+                    # 否则模型拿到这段文字时以为自己是文生视频，首帧自己重新构图。
+                    pending_frame=True,
                     skeleton=_vsk,
                 )
             video_prompt_text = str(
@@ -980,6 +1063,17 @@ def _wb_emit_illustration_trace(ctx: CtxLike, illustrate_req: dict, *, plan, sig
         # V1.5 默认开放：视频生成提示词记入 trace（测试模式核对提示词质量）
         video_prompt_chars=len(video_prompt_text),
         video_prompt=video_prompt_text,
+        # 高潮机位契约判定（2026-11-04）：这支视频到底判成「静机位微动」还是「一条连续
+        # 运镜揭示大场面」，以及它的判据（宽画幅值 + 命中的环境线索）。
+        # ⛔ 纯记录：不参与任何判定分支（判定已在纯函数层完成并反映进 video_prompt）。
+        # 动机＝这一档一旦判错，光看提示词只能看到结果、看不到「是哪条证据把它推过去的」，
+        # 真机就无法归因（firstlast/转场不带此字段）。
+        video_shot_intent=str(
+            ((illustrate_req.get("video_request") or {}).get("shot_intent") or {}).get("intent") or ""
+        ),
+        video_shot_reason=str(
+            ((illustrate_req.get("video_request") or {}).get("shot_intent") or {}).get("reason") or ""
+        ),
         # 前置观测（2026-09-22 · 人称「单一真源」改造第一步）：补记人称判定与画面主体。
         # 动机＝全量 `agent-trace.jsonl` 里 `viewpoint` **0 命中**（D6）⇒ 「同一帧人称判两次」
         # （D1）与「判据主体收敛失败」都不可观测，只能靠真机成图反推。

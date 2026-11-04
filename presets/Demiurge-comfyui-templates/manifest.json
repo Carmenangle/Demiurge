@@ -1,0 +1,37 @@
+{
+  "package": "Demiurge-comfyui-templates",
+  "kind": "comfyui_workflow_template",
+  "template_count": 1,
+  "templates": [
+    {
+      "id": "643baff143664bf7bb1afe44d6c37470",
+      "name": "MiniMax H3 图生视频（首帧）",
+      "template_file": "templates/MiniMax_H3_图生视频_首帧.json",
+      "workflow_file": "workflows/MiniMax_H3_图生视频_首帧.json",
+      "nodes": 41,
+      "links": 37,
+      "bindings": [
+        "base_image",
+        "video_duration",
+        "video_prompt"
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "README.md",
+      "bytes": 2444,
+      "sha256": "9d2582ce7e745d749526926d6bc94d6c713350866106cf386461897a5cbfb911"
+    },
+    {
+      "path": "templates/MiniMax_H3_图生视频_首帧.json",
+      "bytes": 70911,
+      "sha256": "ddb79693a6038e383f8f34b32f9f695a5020ce37c6e2694f963e5c92e583c30c"
+    },
+    {
+      "path": "workflows/MiniMax_H3_图生视频_首帧.json",
+      "bytes": 62595,
+      "sha256": "c23a0dcbdbf6bbf6a6e0ae453971e30c36e2be358695c8dcf80c87eaf017b2a0"
+    }
+  ]
+}

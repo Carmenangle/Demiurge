@@ -20,7 +20,11 @@ FORBIDDEN_PREFIXES = (
     "docs/合集卡",
     "handoff-",
 )
-ALLOWED_PRESET_PREFIX = "presets/Demiurge-presets-regex/"
+# 白名单而非黑名单：presets/ 下只放行由构建脚本逐个生成、逐条列名的清洗资源包。
+# 这个名单是三处一致性的锚（.gitignore 的反向豁免、构建脚本的输出目录），由
+# tests/test_release_preflight.py 逐条锁住；漏配一处 ⇒ 测试红，而不是发布面静默带出未清洗内容。
+DISTRIBUTABLE_PACKAGES = ("Demiurge-presets-regex", "Demiurge-comfyui-templates")
+ALLOWED_PRESET_PREFIXES = tuple(f"presets/{name}/".lower() for name in DISTRIBUTABLE_PACKAGES)
 # .bin 禁令针对模型权重；桌面壳自检夹具是 38 B 的签名载荷，必须随源码树进 tag
 ALLOWED_FORBIDDEN_SUFFIX_PATHS = {"desktop/tauri/testdata/updater-fixture.bin"}
 FORBIDDEN_SUFFIXES = (
@@ -177,9 +181,7 @@ def validate(root: Path) -> list[str]:
         lowered = rel.lower()
         if lowered.startswith(FORBIDDEN_PREFIXES):
             errors.append(f"禁止上传的本机数据: {rel}")
-        if lowered.startswith("presets/") and not lowered.startswith(
-            ALLOWED_PRESET_PREFIX.lower()
-        ):
+        if lowered.startswith("presets/") and not lowered.startswith(ALLOWED_PRESET_PREFIXES):
             errors.append(f"禁止上传的未清洗预设: {rel}")
         if (
             lowered.endswith(FORBIDDEN_SUFFIXES)
@@ -187,6 +189,7 @@ def validate(root: Path) -> list[str]:
         ) or Path(lowered).name in {
             ".env",
             "user_state.json",
+            "repos.json",  # 作品索引：含真实作品名（2026-11-02 P1 从设置档拆出，同为禁入面）
         }:
             errors.append(f"禁止上传的运行文件: {rel}")
         if path.stat().st_size > MAX_FILE_BYTES:
