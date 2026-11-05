@@ -274,6 +274,46 @@ def test_前端旧快照不能清掉服务端插画认领或完成结果(monkeyp
     ]
 
 
+def test_试跑槽的认领只能由失败通道清除否则回位成生产中(monkeypatch, tmp_path):
+    """第 88 刀的数据层真源（前端 `useIllustrationChain` 试跑落定所依赖的合同）。
+
+    真机症状＝用户报的「试跑槽『生产中』僵尸态」：试跑不提交 ComfyUI ⇒ promptId 恒空
+    ⇒ `bind_media_slot_prompt` 对空值直接 return False ⇒ 服务端只剩 `submissionClaim`。
+    而 `_is_settled_server_media` **认 submissionClaim**（本意是「在途任务不许被旧快照抹掉」），
+    于是客户端一旦不再提这条槽（改写正文／换设备／清 localStorage），服务端就把
+    status=pending 的槽**回位**进会话 ⇒ 楼层画「插画生成中…」＋停止键（ComfyUI 侧根本没有任务），
+    且认领已耗尽（claim 拒绝已有 claim/promptId 的槽），同槽永不再有真任务。
+    两条都要钉：① 未落定确实会回位（僵尸形状的可观测证据）；② 失败通道清除后不回位、
+    且认领释放（试跑之后同一槽仍能真出图）。
+    """
+    from app.services import repo_meta
+    monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
+    monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+    chat_snapshot._REVISIONS.clear()
+    chat_snapshot.save("thread", [{
+        "id": "bot", "role": "assistant", "text": "正文",
+        "parts": [{"type": "media-slot", "slotId": "slot-1", "status": "pending"}],
+    }])
+    assert chat_snapshot.claim_media_slot_submission("thread", "bot", "slot-1")
+
+    # ① 客户端这份快照不再提这条槽 ⇒ 认领槽原样回位（pending + submissionClaim）
+    lost = [{"id": "bot", "role": "assistant", "text": "正文", "parts": []}]
+    assert chat_snapshot.save_if_newer("thread", lost, revision=1)
+    assert chat_snapshot.load("thread")[0]["parts"] == [
+        {"type": "media-slot", "slotId": "slot-1", "status": "pending", "submissionClaim": True},
+        {"type": "text", "text": "正文"},
+    ]
+
+    # ② 落定＝失败通道（illustration-failure 路由的实现就调这个函数）：
+    # 槽连同认领一起清除，客户端那份「不再提这条槽」的快照原样落地，回位不再发生
+    # （探针 .scratch/d88_probe_snapshot.py 逐字：E remove=True→parts=[text]、F save2→parts=[]）。
+    assert chat_snapshot.remove_media_slot("thread", "bot", "slot-1")
+    assert chat_snapshot.save_if_newer("thread", lost, revision=2)
+    assert chat_snapshot.load("thread")[0]["parts"] == []
+    # 认领已释放 ⇒ 试跑之后同一槽仍可被真提交认领（否则同槽永远出不了图）
+    assert chat_snapshot.claim_media_slot_submission("thread", "bot", "slot-1")
+
+
 def _server_with_illustration(chat_snapshot, monkeypatch, tmp_path, repo_meta):
     monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
     monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")

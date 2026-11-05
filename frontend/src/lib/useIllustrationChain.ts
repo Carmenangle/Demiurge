@@ -426,13 +426,17 @@ export function useIllustrationChain({
     // reportIllustrationSubmission 进 trace（promptId 空 = 未提交），供审查比对。
     // 2026-10-18：快照带成稿（useFinalDraft）时**不短路**——显式「重新生成」要用
     // 成稿出图，试跑开关只拦自动链（见上方 useFinalDraft 注释）。
-    // 槽位在这里立刻落「试跑」终态：**可见、可重新生成、绝不悬挂**（后续若真的编译失败，
-    // 下方 failSlot 会用真实错误覆写它 ⇒ 终态永远反映最后一次尝试的真实结果）。
+    // 槽位在这里立刻落「试跑」终态：**可见、可重新生成、绝不悬挂**。后续若真的编译失败，
+    // 同一条 failSlot 会再跑一次：客户端由 markMediaSlotFailed 覆写成真实错误，服务端那条槽
+    // 已在第一次落定时被 remove_media_slot 摘掉 ⇒ 第二次 persist_illustration_failure 是 no-op
+    // ⇒ 终态永远反映最后一次尝试的真实结果，不会拿「试跑」盖住真错误。
+    // 第 88 刀：这里必须走 failSlot（=discardFailedIllustration）而不是只改本地消息——
+    // 自动链已在碰 ComfyUI 前认领了服务端槽，试跑又不提交（promptId 空 ⇒ 后端
+    // bind_media_slot_prompt 直接 return False），失败通道是**唯一**能清认领的杠杆；
+    // 不清则服务端把 status=pending 的认领槽回位进会话，楼层永久画「插画生成中…」。
     const promptOnly = settings.promptOnlyGeneration === true && !useFinalDraft;
     if (promptOnly) {
-      setMessages((current) => markMediaSlotFailed(
-        current, messageId, slotId, "prompt_only", PROMPT_ONLY_NOTE, retrySnapshot,
-      ));
+      failSlot("prompt_only", PROMPT_ONLY_NOTE);
     }
     // 底图需先上传到 ComfyUI input 目录，取回可供 LoadImage 引用的文件名
     let uploadedImage = "";

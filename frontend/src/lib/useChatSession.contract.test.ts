@@ -447,8 +447,15 @@ describe("试跑后重试出图：失败槽按钮 → retryIllustration 接线",
     expect(chatMessages).toMatch(/onRetryIllustration\(msg\.id, part\.slotId!\)/);
   });
 
-  it("试跑槽的按钮口径＝成稿直送（title 明示，不与普通失败槽混词）", () => {
-    // 2026-10-18 用户定案：试跑槽的「重新生成」意思是「直接用成稿跑图」
+  it("试跑槽的按钮口径＝成稿直送：钉判定式本体（文案 grep 会假绿）", () => {
+    // 2026-10-18 用户定案：试跑槽的「重新生成」意思是「直接用成稿跑图」。
+    // ⚠ 旧锁只 `toContain("用试跑成稿直接提交 ComfyUI 出图")`——判定式（下面那行 includes）
+    // 被改坏时文案照样躺在源码里，锁仍绿。第 88 刀补两条真证据：
+    //   · 判定式本体（本用例）；
+    //   · 真渲染（components/chat/ChatMessages.trialSlot.test.tsx：试跑槽=成稿直送／
+    //     普通失败槽=原参数重生成／未落定 pending 槽=「插画生成中…」僵尸形状）；
+    //   · 生产侧写入的 error 前缀（useIllustrationChain.test.tsx 试跑组钉 `[prompt_only]`）。
+    expect(chatMessages).toMatch(/title=\{\s*\(part\.error \|\| ""\)\.includes\("prompt_only"\)/);
     expect(chatMessages).toContain("用试跑成稿直接提交 ComfyUI 出图");
   });
 

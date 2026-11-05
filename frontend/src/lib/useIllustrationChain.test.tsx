@@ -1023,6 +1023,34 @@ describe("试跑开关（promptOnlyGeneration）", () => {
       .toEqual({ first: "编译首帧P", last: "编译尾帧P" });
   });
 
+  it("试跑必须落定服务端认领＝走失败通道（否则刷新后僵尸「插画生成中…」）", async () => {
+    // 第 88 刀（2026-11-05 用户点名「试跑槽『生产中』僵尸态」）。链路形状：
+    // ① 自动链在碰 ComfyUI **之前**认领服务端槽（claimIllustrationSubmission → submissionClaim）；
+    // ② 试跑不提交 ⇒ promptId 空 ⇒ 后端 bind_media_slot_prompt 对空值直接 return False，
+    //    认领**不会**被 promptId 覆盖；
+    // ③ 唯一能清认领的杠杆是失败通道（illustration-failure → remove_media_slot）。
+    // 未落定的后果不是「少个记录」而是**画面上永久转圈**：chat_snapshot._is_settled_server_media
+    // 认 submissionClaim ⇒ 客户端一旦不再提这条槽（改写正文／换设备／清 localStorage），
+    // 服务端把 status=pending 的槽回位进会话，楼层画「插画生成中…」＋停止键（无任务可停），
+    // 且认领已耗尽（claim 拒绝已有 claim/promptId 的槽），同槽永不再有真任务。
+    const md0 = makeDeps({ settings: { promptOnlyGeneration: true } });
+    md0.state.messages = [seededMessage()];
+    await submitChain(md0.deps, { ...baseInput, source: "automatic" });
+
+    expect(claimIllustrationSubmission).toHaveBeenCalledTimes(1);
+    expect(md0.discardFailedIllustration).toHaveBeenCalledTimes(1);
+    const call = md0.discardFailedIllustration.mock.calls[0] as unknown[];
+    expect(call.slice(0, 5)).toEqual(["m1", "s1", "prompt_only", expect.any(String), ""]);
+    expect(String(call[3])).toContain("试跑");
+    // 落定用的重试快照＝试跑槽那一份（按名取用，含原始入参）
+    expect(call[5]).toEqual(expect.objectContaining({ slotId: "s1", source: "automatic" }));
+    // 客户端终态照旧：可见、可重新生成、带成稿快照（早期落定不改变下面两条既有断言）
+    const slot = (md0.state.messages[0] as unknown as { parts: Record<string, unknown>[] }).parts[0];
+    expect(slot.status).toBe("failed");
+    expect(String(slot.error)).toContain("[prompt_only]");
+    expect(slot.retryArgs).toEqual(expect.objectContaining({ finalPrompt: "原始P" }));
+  });
+
   it("开关缺省（false）⇒ 试跑闸完全惰性：照常查 ComfyUI 并提交（零回归）", async () => {
     const md0 = makeDeps({ settings: { promptOnlyGeneration: false } });
     await submitChain(md0.deps, { ...baseInput, source: "automatic" });
