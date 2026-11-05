@@ -24,8 +24,10 @@ export const KIND_LABELS: Record<PromptTemplateKind, string> = {
   video_transition: "视频·转场短桥段",
 };
 
-/** 区块键（视频六段；顺序/标题可被模版覆盖，语义固定）。 */
-export const SECTION_KEYS = ["meta", "binding", "subject", "segments", "audio", "negative"] as const;
+/** 区块键（视频五段；顺序/标题可被模版覆盖，语义固定）。
+ * ⑥「负面约束」已于第 87 刀整条摘除：这条链的节点只有 positive 一路输入，
+ * 负面字段写不进成稿 ⇒ 编辑器里不再长出那个框。旧存档带的 ⑥ 键由后端载入时剔除。 */
+export const SECTION_KEYS = ["meta", "binding", "subject", "segments", "audio"] as const;
 export type SectionKey = (typeof SECTION_KEYS)[number];
 
 export const SECTION_KEY_LABELS: Record<SectionKey, string> = {
@@ -34,7 +36,6 @@ export const SECTION_KEY_LABELS: Record<SectionKey, string> = {
   subject: "主体/场景",
   segments: "时间分镜 / 转场分镜",
   audio: "音频",
-  negative: "负面约束",
 };
 
 export interface PromptTemplate {
@@ -58,7 +59,6 @@ export interface PromptTemplate {
   camera_band_overrides: Record<string, string>;
   beat_labels: string[];
   default_duration: number;
-  negative_extra: string;
   meta_note: string;
   created_at?: number;
   updated_at?: number;
@@ -82,7 +82,6 @@ export interface PromptTemplateBody {
   camera_band_overrides?: Record<string, string>;
   beat_labels?: string[];
   default_duration?: number;
-  negative_extra?: string;
   meta_note?: string;
   base_id?: string;           // 克隆基准（builtin:<kind> / custom:<hex>）
 }

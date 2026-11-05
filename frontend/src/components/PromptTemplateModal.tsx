@@ -454,7 +454,6 @@ export function TemplateStructureView({ tpl }: { tpl: PromptTemplate }) {
         <div style={{ marginBottom: 4 }}>节奏名：{(tpl.beat_labels || []).join(" / ")}</div>
       )}
       {tpl.default_duration ? <div style={{ marginBottom: 4 }}>默认时长：{tpl.default_duration} 秒</div> : null}
-      {tpl.negative_extra ? <div style={{ marginBottom: 4 }}>负面追加：{tpl.negative_extra}</div> : null}
       {tpl.meta_note ? <div>元信息备注：{tpl.meta_note}</div> : null}
     </div>
   );
@@ -517,7 +516,7 @@ function VideoForm({ form, patch }: { form: TemplateForm; patch: (p: Partial<Tem
   return (
     <>
       <div style={{ fontSize: 13 }}>
-        区块顺序（六段语义固定，只改排列与标题）：
+        区块顺序（五段语义固定，只改排列与标题）：
         <ol style={{ margin: "6px 0", paddingLeft: 20 }}>
           {order.map((key, idx) => (
             <li key={key} style={{ marginBottom: 4 }}>
@@ -584,10 +583,6 @@ function VideoForm({ form, patch }: { form: TemplateForm; patch: (p: Partial<Tem
           />
         </label>
       </div>
-      <label style={{ display: "block", fontSize: 13 }}>
-        负面追加词（≤1000 字符）
-        <input value={form.negative_extra} onChange={(e) => patch({ negative_extra: e.target.value })} style={{ width: "100%" }} />
-      </label>
       <label style={{ display: "block", fontSize: 13 }}>
         元信息备注（≤500 字符）
         <input value={form.meta_note} onChange={(e) => patch({ meta_note: e.target.value })} style={{ width: "100%" }} />

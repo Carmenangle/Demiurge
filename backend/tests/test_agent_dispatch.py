@@ -1757,6 +1757,121 @@ def test_wb_frames_and_video_multi_batch把前后格接到各张提取请求(mon
     assert extracted[0]["next_anchor"] == ""
 
 
+def test_extract_video_action_plan_第一人称取景合同只吃viewpoint(monkeypatch):
+    """第 84 刀 ②：提取层的取景合同只以 `viewpoint` 分档，且**插在原规则之间**不动其它行。
+
+    真机实锤（同一轮试跑成稿）：图片提示词早已声明 `first person view`、男性只有从画框下缘
+    进入的肢体，提取出的 `desc`／`subject_scene` 却把他写成画面里的完整第三人
+    （③ `a younger man behind her`、④ `The man thrusts forward`）。② 是源头这一层：
+    合同不约束，③④ 只能事后补闸。
+    ⚠ 判据**不依赖名字**——本机 `narrator="(待定)"` ⇒ 名字型闸一律空转（§8.2 元教训）。
+    """
+    calls: list[tuple[str, str]] = []
+
+    def fake_chat(base, key, model, system, user, **_kw):
+        calls.append((system, user))
+        return '{"action_sequence":[{"beat":"定格起点","desc":"cupped hands"}]}'
+
+    monkeypatch.setattr(asc._llm, "chat", fake_chat)
+    ctx = _ctx()
+    spec = {"narrative": "她抬起头，灯下的眼睛里那点东西又沉下去了。"}
+    limbs = ["a pair of hands entering from the lower frame edge gripping her waist"]
+
+    asc._extract_video_action_plan(ctx, spec, video_mode="climax", anchor="她抬起头。")
+    baseline = calls[0][0]
+
+    # 第三人称／未给人称 ⇒ 逐字节等于旧文案（带肢体事实也不新增一个字符）
+    asc._extract_video_action_plan(
+        ctx, {**spec, "viewpoint": "third_person", "narrator_limbs": limbs},
+        video_mode="climax", anchor="她抬起头。")
+    assert calls[1][0] == baseline
+
+    pov = {**spec, "viewpoint": "first_person", "narrator_limbs": limbs}
+    asc._extract_video_action_plan(ctx, pov, video_mode="climax", anchor="她抬起头。")
+    system = calls[2][0]
+    assert "【取景·第一人称】本帧的出图提示词以 `first person view` 声明" in system
+    assert "本帧已核定「叙事者在画面里可见的部位」＝" + limbs[0] in system
+    assert "不得把叙事者写成第三个完整人物" in system
+    assert "也不得在其中写 `narrator`／`camera`／`point of view` 这类元语言" in system
+    # 合同夹在规则 1 与规则 2 之间 ⇒ 原 action_rule 文案一字不动
+    assert system.index("desc[0] 只能复述定格帧里已经存在的视觉状态") \
+        < system.index("【取景·第一人称】") < system.index("2. subject_scene 只描述在场角色")
+
+
+def test_extract_video_action_plan_第一人称无肢体证据时反向收紧(monkeypatch):
+    """本帧没有肢体入画的证据 ⇒ 不写「用这些部位」，改成「他的动作一律不写进来」。
+
+    两分支必须都有：只给「部位名单」那一支，遇到纯女主体／镜头在身后的帧就等于默许模型
+    自己编一只手（真机 ② 抽出过 `his hands` 之外的 `he…`）。
+    """
+    calls: list[tuple[str, str]] = []
+
+    def fake_chat(base, key, model, system, user, **_kw):
+        calls.append((system, user))
+        return '{"action_sequence":[{"beat":"定格起点","desc":"cupped hands"}]}'
+
+    monkeypatch.setattr(asc._llm, "chat", fake_chat)
+    ctx = _ctx()
+    asc._extract_video_action_plan(
+        ctx, {"narrative": "她抬起头。", "viewpoint": "first_person"},
+        video_mode="climax", anchor="她抬起头。")
+    system = calls[0][0]
+    assert "本帧没有「叙事者在画面里可见的部位」证据 ⇒ 他的动作一律不写进 desc／subject_scene" in system
+    assert "本帧已核定「叙事者在画面里可见的部位」" not in system
+
+    # 脏载荷（非列表／空串）⇒ 走同一支，不把 None 或空项拼进句子
+    asc._extract_video_action_plan(
+        ctx, {"narrative": "她抬起头。", "viewpoint": "first_person",
+              "narrator_limbs": ["", "  "]},
+        video_mode="climax", anchor="她抬起头。")
+    assert "本帧没有「叙事者在画面里可见的部位」证据" in calls[1][0]
+
+
+def test_wb_frames_and_video_第一人称把成稿肢体tag下发给视频链(monkeypatch):
+    """接线锁：`narrator_limbs` 的真源是**本张已成稿的出图提示词**，不是正文重推。
+
+    真机那一帧 `_narrator_limb_facts` 从 335 字正文里抽不出任何肢体事实（全是台词＋心理），
+    而成稿首行明写 `a pair of hands entering from the lower frame edge gripping her waist`
+    ⇒ 视频侧只读成稿 tag，正文那一路当兜底。非第一人称 ⇒ 不写这个键 ⇒ 视频稿逐字节不变。
+    """
+    from app.services import video_prompt as vp
+
+    built: list[dict] = []
+    monkeypatch.setattr(
+        asc, "_extract_video_action_plan",
+        lambda ctx, spec, **kw: (built.append(("extract", spec)), {})[1])
+    monkeypatch.setattr(asc, "_video_skeleton_for", lambda ctx, mode: None)
+    monkeypatch.setattr(
+        vp, "build_video_request",
+        lambda **kw: (built.append(("build", kw["spec"])),
+                      {"mode": kw["mode"], "submit": {"prompt": "V"}})[1])
+
+    frame_prompt = (
+        "1girl, first person view, a pair of hands entering from the lower frame edge "
+        "gripping her waist, another hand lifting her thigh from the lower frame edge\n"
+        "masterpiece, best quality"
+    )
+    req = {"prompt": frame_prompt, "anchor": "她抬起头。", "video_config": {}}
+    out = asc._wb_frames_and_video(
+        {"comfy_video": True, "video_mode": "climax"}, req,
+        {"narrative": "她抬起头。", "viewpoint": "first_person"}, "", "", 2,
+    )
+    assert out == "V"
+    for _, spec in built:
+        assert spec["narrator_limbs"] == [
+            "a pair of hands entering from the lower frame edge gripping her waist",
+            "another hand lifting her thigh from the lower frame edge",
+        ]
+
+    # 第三人称 ⇒ 键根本不出现
+    built.clear()
+    asc._wb_frames_and_video(
+        {"comfy_video": True, "video_mode": "climax"}, req,
+        {"narrative": "她抬起头。", "viewpoint": "third_person"}, "", "", 2,
+    )
+    assert built and all("narrator_limbs" not in spec for _, spec in built)
+
+
 def test_wb_frames_and_video_climax把定格帧与待挂首帧接到下游(monkeypatch):
     """接线锁（service 层单测绿≠调用点传了对的东西）：climax 分支逐条传下去。
 
@@ -3448,7 +3563,7 @@ def test_高潮机位按画面内容判定而非motion强度_正常链路():
     # 三档静机位：逐拍机位句完全相同，且都锁定图片1构图
     for motion in (0, 2, 3):
         seg = compile_for(motion).split("[时间分镜]：", 1)[1].split("[音频]：", 1)[0]
-        cams = {ln.split("：", 1)[1].split("；")[0] for ln in seg.strip().splitlines()}
+        cams = {ln.split("｜", 1)[1].split("；")[0] for ln in seg.strip().splitlines()}
         assert cams == {video_prompt._HOLD_CAMERA_FRAME}, motion
     # 高运动量仍补一条能量特效（但不再要求画面错位）
     assert "能量爆发式特效，画面保持稳定" in compile_for(3)

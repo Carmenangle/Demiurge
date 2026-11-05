@@ -190,6 +190,34 @@ def _extract_video_action_plan(
             "剧情没写的动作不得补；正文有多个动作时至少2拍（仅当正文确为单一动作才允许单拍）；"
             "desc 用简洁英文视觉描述（写清谁、什么体态、做什么）。\n"
         )
+    # 第 84 刀（2026-11-05）：第一人称取景合同。判据**只读** `spec["viewpoint"]`（真源＝
+    # 出图侧第 51 刀 `viewpoint_scope`），第三人称／未给人称 ⇒ 空串 ⇒ system 逐字节等于旧文案。
+    # 病灶（同一轮试跑成稿）：提取层把叙事者写成画面里的完整第三人——③ `a younger man behind
+    # her`、④ `The man thrusts forward`，而图片提示词早已声明 `first person view` 且他只有
+    # 从画框下缘进入的肢体。② 是**源头**这一层：合同不约束，③④ 只能事后补闸。
+    pov_contract = ""
+    if str(spec.get("viewpoint") or "").strip() == "first_person":
+        raw_limbs = spec.get("narrator_limbs")
+        limbs = [str(item).strip() for item in raw_limbs if str(item).strip()] \
+            if isinstance(raw_limbs, (list, tuple)) else []
+        limb_line = (
+            f"   - 本帧已核定「叙事者在画面里可见的部位」＝{'、'.join(limbs)}：写他的作用只许用这些部位，"
+            "不得替他新增任何别的身体描写。\n"
+            if limbs else
+            "   - 本帧没有「叙事者在画面里可见的部位」证据 ⇒ 他的动作一律不写进 desc／subject_scene，"
+            "只写画面内人物自己的动作与物理跟随。\n"
+        )
+        pov_contract = (
+            "【取景·第一人称】本帧的出图提示词以 `first person view` 声明：镜头＝这一格的视点，"
+            "叙事者没有身形入画，最多只有局部肢体从画框边缘进入。\n"
+            + limb_line
+            + "   - desc／subject_scene 里的施动者只能取**定格帧里看得见的人物**（出图提示词已经描述过的那些）；"
+            "不得把叙事者写成第三个完整人物（`a man behind her`／`the man thrusts…`／`he…` 都不许），"
+            "要表达他的作用就写成「**具体部位＋位置**」（如 `his hands gripping her hips`）。\n"
+            "   - ⛔ 不得把上面这条解释原文照抄进 desc／subject_scene，也不得在其中写 "
+            "`narrator`／`camera`／`point of view` 这类元语言——下游视频模型不知道「叙事者」是谁，"
+            "它只处理画面里看得见的东西。\n"
+        )
     system = (
         "你是视频提示词原料提取器。读下面这段剧情高潮正文（可能含防拦截标记，请还原其原义），"
         "理解人物体态、动作与声音，输出 JSON：\n"
@@ -199,6 +227,7 @@ def _extract_video_action_plan(
         "\"lines\":[{\"speaker\":\"角色名\",\"text\":\"台词原文\",\"at_s\":5}],\"sync\":\"卡拍说明\"}}\n"
         "规则：\n"
         + action_rule +
+        pov_contract +
         "2. subject_scene 只描述在场角色的外貌与场景：把抽象评价与同义形容词堆砌简化为直白视觉词"
         "（如「丰腴肥熟+酥雌醇媚」→「hourglass figure, large breasts, wide hips, seductive eyes」），"
         "专有名词（地名/建筑/器物）必须展开成可还原的视觉描述，不得照抄原名。\n"
@@ -944,6 +973,23 @@ def _wb_frames_and_video(ctx: CtxLike, illustrate_req: dict, scene_spec: dict,
             _merged_spec = dict(scene_spec)
             if "motion" not in _merged_spec:
                 _merged_spec["motion"] = int(motion or 0)
+            # 第 84 刀（2026-11-05）：第一人称下「叙事者局部肢体入画」的事实随视频链下发
+            # ——① 的 POV 声明与 ② 的提取合同都只**消费**它，不在视频侧重推部位归属。
+            # 两路按序去重：① 本帧**成稿出图提示词**里的 `lower frame edge` tag（真源——
+            # 视频契约就是逐字复现这一格，图链写了什么就是什么）；② 图片侧
+            # `_narrator_limb_facts`（从正文抽的肢体句，兜底：真机那一帧正文全是台词＋心理，
+            # ② 抽不出任何事实，全靠 ① 才把「一只从画框下缘进来的手」带进 ①）。
+            # 非第一人称／两路皆空 ⇒ 不写本键 ⇒ 视频稿逐字节不变（零回归锁）。
+            if str(_merged_spec.get("viewpoint") or "").strip() == "first_person":
+                from app.services import image_prompt_profiles as _ipp
+                _limbs: list[str] = list(_vp_mod.frame_limb_facts(
+                    str(illustrate_req.get("prompt") or "")
+                ))
+                for _fact in (_ipp._narrator_limb_facts(_merged_spec) or []):
+                    if _fact not in _limbs:
+                        _limbs.append(_fact)
+                if _limbs:
+                    _merged_spec["narrator_limbs"] = _limbs
             # V1.6/W3：视频模式先定（前端「首尾帧生成」选项推导，缺省 climax
             # 兼容旧预设）——提取协议按模式分支：climax 定格窗口无对白，
             # firstlast 从头到尾含全部对白。

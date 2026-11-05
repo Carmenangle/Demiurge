@@ -75,7 +75,10 @@ def test_builtin_video_projection_matches_defaults():
         assert view["section_order"] == data["section_order"]
         assert view["beat_labels"] == data["beat_labels"]
         assert view["default_duration"] == data["default_duration"]
-        assert view["negative_extra"] == "" and view["meta_note"] == ""
+        assert view["meta_note"] == ""
+        # 第 87 刀：负面旋钮摘除 ⇒ 内置投影里连这个键都不该有（投影有它＝编辑器又长出死框）
+        assert "negative_extra" not in view
+        assert view["section_order"] == ["meta", "binding", "subject", "segments", "audio"]
 
 
 def test_content_hash_changes_with_content():
@@ -139,7 +142,8 @@ def test_clone_from_custom_inherits_base_chain(store_dir, client):
 def test_video_template_crud(store_dir, client):
     body = {
         "kind": "video_climax", "name": "我的高潮",
-        "section_titles": {"meta": "元信息·改"},
+        "section_titles": {"meta": "元信息·改", "negative": "旧 ⑥ 标题"},
+        "section_order": ["audio", "negative", "meta", "binding", "subject", "segments"],
         "camera_band_overrides": {"2": "镜头绕主体旋转180度"},
         "beat_labels": ["起", "承", "转"],
         "default_duration": 8, "negative_extra": "模糊", "meta_note": "备注",
@@ -148,6 +152,39 @@ def test_video_template_crud(store_dir, client):
     assert created["section_titles"] == {"meta": "元信息·改"}
     assert created["camera_band_overrides"] == {"2": "镜头绕主体旋转180度"}
     assert created["default_duration"] == 8
+    # 第 87 刀：旧客户端/旧存档带来的 ⑥ 键与负面字段**静默归一**（不 422、不判死整条模版），
+    # 归一结果是五键排列且相对顺序原样保留，负面字段落不了地。
+    assert created["section_order"] == ["audio", "meta", "binding", "subject", "segments"]
+    assert "negative_extra" not in created
+
+
+def test_legacy_six_key_record_on_disk_still_loads(store_dir):
+    """磁盘上的旧记录（六键排列 + ⑥ 标题 + negative_extra）⇒ 归一后照常读取。
+
+    判非法的代价是 `get_template` 返回 None ⇒ 用户的模版从列表里消失、生成侧静默退回内置
+    骨架，比死旋钮本身更难发现（第 87 刀的数据兼容锁）。
+    """
+    store_dir.mkdir(parents=True, exist_ok=True)
+    tid = "0123456789abcdef0123456789abcdef"
+    (store_dir / f"{tid}.json").write_text(json.dumps({
+        "kind": "video_climax", "name": "旧模版",
+        "section_order": ["segments", "negative", "meta", "binding", "subject", "audio"],
+        "section_titles": {"negative": "别要的", "audio": "声音"},
+        "camera_band_overrides": {}, "beat_labels": [],
+        "default_duration": 0, "negative_extra": "镜头切换；转场", "meta_note": "",
+        "created_at": 1.0, "updated_at": 2.0,
+    }, ensure_ascii=False), encoding="utf-8")
+
+    record = store.get_template(f"custom:{tid}")
+    assert record is not None
+    assert record["section_order"] == ["segments", "meta", "binding", "subject", "audio"]
+    assert record["section_titles"] == {"audio": "声音"}
+    assert "negative_extra" not in record
+
+    skeleton = video_prompt.VideoSkeleton.from_data(
+        store.resolve_video_skeleton(f"custom:{tid}", "climax"))
+    assert skeleton is not None
+    assert skeleton.order() == ("segments", "meta", "binding", "subject", "audio")
 
 
 # ── id 白名单 / 路径穿越 ─────────────────────────────────────────────────────

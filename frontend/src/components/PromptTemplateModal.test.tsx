@@ -10,7 +10,7 @@ const builtinAnima: PromptTemplate = {
   content_hash: "aaaa1111",
   system_text: "内置指令全文", extra_instructions: "", quality_tags: "masterpiece", negative_tags: "worst",
   section_titles: {}, section_order: [], camera_band_overrides: {},
-  beat_labels: [], default_duration: 0, negative_extra: "", meta_note: "",
+  beat_labels: [], default_duration: 0, meta_note: "",
 };
 
 const customVideo: PromptTemplate = {
@@ -19,7 +19,7 @@ const customVideo: PromptTemplate = {
   system_text: "", extra_instructions: "", quality_tags: "", negative_tags: "",
   section_titles: { meta: "元信息·改" }, section_order: [],
   camera_band_overrides: { "2": "镜头横移" }, beat_labels: ["起", "承", "合"],
-  default_duration: 6, negative_extra: "模糊", meta_note: "备注",
+  default_duration: 6, meta_note: "备注",
 };
 
 describe("PromptTemplateModal", () => {
@@ -84,7 +84,7 @@ describe("PromptTemplateModal · 新增模版", () => {
     expect(html).toContain("Niji");
   });
 
-  it("createForGroup=video 进视频表单：六段标题/运镜/节奏/时长", () => {
+  it("createForGroup=video 进视频表单：五段标题/运镜/节奏/时长，且没有负面框", () => {
     const builtinVideo: PromptTemplate = {
       ...builtinAnima, id: "builtin:video_climax", kind: "video_climax",
       name: "视频·高潮点", content_hash: "bbbb2222",
@@ -100,6 +100,10 @@ describe("PromptTemplateModal · 新增模版", () => {
     expect(html).toContain("运镜文案覆盖");
     expect(html).toContain("节奏名");
     expect(html).toContain("默认时长");
-    expect(html).toContain("负面追加词");
+    expect(html).toContain("元信息备注");
+    // 第 87 刀：死旋钮摘除 ⇒ 表单里不再长出「负面追加」输入框，区块清单也只有五段
+    expect(html).not.toContain("负面追加");
+    expect(html).not.toContain("负面约束");
+    expect(html).toContain("参考绑定");
   });
 });

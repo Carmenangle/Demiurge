@@ -17,7 +17,7 @@ const builtinImage: PromptTemplate = {
   content_hash: "aaaa1111",
   system_text: "SYS", extra_instructions: "", quality_tags: "Q", negative_tags: "N",
   section_titles: {}, section_order: [], camera_band_overrides: {},
-  beat_labels: [], default_duration: 0, negative_extra: "", meta_note: "",
+  beat_labels: [], default_duration: 0, meta_note: "",
 };
 
 const customImage: PromptTemplate = {
@@ -31,7 +31,7 @@ const customVideoClimax: PromptTemplate = {
   name: "我的高潮", base_id: "builtin:video_climax", base_hash: "bbbb2222",
   section_titles: { meta: "元信息·改" }, section_order: [],
   camera_band_overrides: { "2": "镜头横移" }, beat_labels: ["起", "承", "合"],
-  default_duration: 6, negative_extra: "模糊", meta_note: "备注",
+  default_duration: 6, meta_note: "备注",
 };
 
 const builtinVideoClimax: PromptTemplate = {
@@ -129,9 +129,12 @@ describe("promptTemplates · 表单模型", () => {
     expect(videoForm.camera_band_overrides).toEqual({ "2": "镜头横移" });
     const body = formToBody(videoForm);
     expect(body).toMatchObject({
-      kind: "video_climax", default_duration: 6, negative_extra: "模糊", meta_note: "备注",
+      kind: "video_climax", default_duration: 6, meta_note: "备注",
     });
     expect(body).not.toHaveProperty("system_text");
+    // 第 87 刀：负面旋钮整条摘除 ⇒ 请求体里不该再有这个键（后端也不再读它）
+    expect(body).not.toHaveProperty("negative_extra");
+    expect(videoForm).not.toHaveProperty("negative_extra");
   });
 
   it("emptyForm 克隆时带种子、名字清空", () => {

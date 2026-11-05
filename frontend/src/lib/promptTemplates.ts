@@ -63,7 +63,6 @@ export interface TemplateForm {
   camera_band_overrides: Record<string, string>;
   beat_labels: string[];
   default_duration: number;
-  negative_extra: string;
   meta_note: string;
 }
 
@@ -81,7 +80,6 @@ export function formFromTemplate(t: PromptTemplate): TemplateForm {
     camera_band_overrides: { ...(t.camera_band_overrides || {}) },
     beat_labels: [...(t.beat_labels || [])],
     default_duration: t.default_duration || 0,
-    negative_extra: t.negative_extra || "",
     meta_note: t.meta_note || "",
   };
 }
@@ -92,7 +90,7 @@ export function emptyForm(kind: PromptTemplateKind, seed?: PromptTemplate): Temp
     kind, name: "", system_text: "", extra_instructions: "", quality_tags: "",
     negative_tags: "", redline_lock: true, section_titles: {}, section_order: [],
     camera_band_overrides: {}, beat_labels: [], default_duration: 0,
-    negative_extra: "", meta_note: "",
+    meta_note: "",
   };
   return { ...base, kind, name: "" };
 }
@@ -113,7 +111,6 @@ export function formToBody(form: TemplateForm, baseId = ""): PromptTemplateBody 
       camera_band_overrides: form.camera_band_overrides,
       beat_labels: form.beat_labels,
       default_duration: form.default_duration,
-      negative_extra: form.negative_extra,
       meta_note: form.meta_note,
       redline_lock: form.redline_lock,
     }),

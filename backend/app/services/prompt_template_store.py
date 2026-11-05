@@ -67,12 +67,17 @@ _MAX_SECTION_TITLE = 200
 _MAX_CAMERA_BAND = 120
 _MAX_BEAT_LABEL = 50
 _MAX_BEAT_LABELS = 6
-_MAX_NEGATIVE_EXTRA = 1_000
 _MAX_META_NOTE = 500
 
 _SECTION_KEYS = video_prompt.SECTION_KEYS
 # 对外公开的区块键集合（路由层 Pydantic 校验用；与 video_prompt 单一真源）
 SECTION_KEYS_PUBLIC = _SECTION_KEYS
+# 已退役区块键（⑥ 负面约束）归一接缝：载入/入参都先剔键再校验，不判非法
+# （旧数据不该让整条模版消失）；真源在 video_prompt.prune_retired_section_keys。
+prune_retired_section_keys = video_prompt.prune_retired_section_keys
+_RETIRED_TITLE_KEYS = frozenset({video_prompt.SECTION_NEGATIVE_RETIRED})
+# 对外公开的已退役区块键（路由层入参归一用；与区块键真源同处）
+RETIRED_SECTION_KEYS_PUBLIC = _RETIRED_TITLE_KEYS
 
 
 def validate_template_id(template_id: str) -> str:
@@ -143,7 +148,6 @@ def builtin_view(kind: str) -> dict:
             "camera_band_overrides": data["camera_band_overrides"],
             "beat_labels": data["beat_labels"],
             "default_duration": data["default_duration"],
-            "negative_extra": data["negative_extra"],
             "meta_note": data["meta_note"],
             "content_hash": _content_hash(
                 json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))),
@@ -222,6 +226,8 @@ def _validate_record(record: dict) -> dict:
         for key, value in titles_raw.items():
             k = str(key or "").strip()
             v = str(value or "").strip().rstrip("：:")
+            if k in _RETIRED_TITLE_KEYS:
+                continue  # 旧模版给已退役的 ⑥ 起过名：静默丢弃该键
             if k not in _SECTION_KEYS:
                 raise ValueError(f"未知区块键：{k or '（空）'}")
             if not v:
@@ -232,10 +238,11 @@ def _validate_record(record: dict) -> dict:
         order_raw = record.get("section_order") or []
         if not isinstance(order_raw, list):
             raise ValueError("区块顺序必须是数组")
-        order = [str(item or "").strip() for item in order_raw]
+        # 遗留六键排列先剔 ⑥，再按五键校验 ⇒ 用户自定义的相对顺序原样保留
+        order = prune_retired_section_keys(order_raw)
         if order:
             if sorted(order) != sorted(_SECTION_KEYS) or len(set(order)) != len(_SECTION_KEYS):
-                raise ValueError("区块顺序必须是六个区块键的排列（缺项/重复/乱键都不允许）")
+                raise ValueError("区块顺序必须是五个区块键的排列（缺项/重复/乱键都不允许）")
         bands_raw = record.get("camera_band_overrides") or {}
         if not isinstance(bands_raw, dict):
             raise ValueError("运镜覆盖必须是对象")
@@ -267,10 +274,7 @@ def _validate_record(record: dict) -> dict:
             raise ValueError("默认时长必须是整数（秒）")
         if duration_raw and not (2 <= duration_raw <= 20):
             raise ValueError("默认时长须在 2–20 秒之间（0=不覆盖）")
-        negative_extra = str(record.get("negative_extra") or "")
         meta_note = str(record.get("meta_note") or "")
-        if len(negative_extra) > _MAX_NEGATIVE_EXTRA:
-            raise ValueError(f"负面追加词过长（≤{_MAX_NEGATIVE_EXTRA} 字符）")
         if len(meta_note) > _MAX_META_NOTE:
             raise ValueError(f"元信息备注过长（≤{_MAX_META_NOTE} 字符）")
         out.update({
@@ -279,7 +283,6 @@ def _validate_record(record: dict) -> dict:
             "camera_band_overrides": bands,
             "beat_labels": beats,
             "default_duration": duration_raw,
-            "negative_extra": negative_extra,
             "meta_note": meta_note,
         })
     return out
@@ -460,6 +463,5 @@ def resolve_video_skeleton(template_id: str, mode: str) -> dict | None:
         "camera_band_overrides": record.get("camera_band_overrides") or {},
         "beat_labels": record.get("beat_labels") or [],
         "default_duration": record.get("default_duration") or 0,
-        "negative_extra": record.get("negative_extra") or "",
         "meta_note": record.get("meta_note") or "",
     }

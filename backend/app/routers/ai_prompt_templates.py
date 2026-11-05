@@ -25,7 +25,7 @@ TemplateKind = Literal[
 _SEED_KEYS = (
     "system_text", "extra_instructions", "quality_tags", "negative_tags",
     "section_titles", "section_order", "camera_band_overrides",
-    "beat_labels", "default_duration", "negative_extra", "meta_note",
+    "beat_labels", "default_duration", "meta_note",
 )
 
 
@@ -46,7 +46,6 @@ class TemplateBody(BaseModel):
     camera_band_overrides: dict[str, str] = Field(default_factory=dict)
     beat_labels: list[str] = Field(default_factory=list)
     default_duration: int = 0
-    negative_extra: str = ""
     meta_note: str = ""
     # 克隆基准：builtin:<kind>（内置克隆）或 custom:<hex>（复制我的模版）
     base_id: str = ""
@@ -57,19 +56,24 @@ class TemplateBody(BaseModel):
             raise ValueError("system_text + extra_instructions 合计不得超过 12000 字符")
         if len(self.quality_tags) > 2_000 or len(self.negative_tags) > 2_000:
             raise ValueError("质量词/负面词各不得超过 2000 字符")
-        if len(self.negative_extra) > 1_000:
-            raise ValueError("负面追加词不得超过 1000 字符")
         if len(self.meta_note) > 500:
             raise ValueError("元信息备注不得超过 500 字符")
         if self.default_duration and not (2 <= self.default_duration <= 20):
             raise ValueError("默认时长须在 2–20 秒之间（0=不覆盖）")
+        # 遗留 ⑥ 键（第 87 刀退役）先剔再校验：旧客户端/旧存档带着它不该吃 400，
+        # 也不能让它把整条模版判死而从列表里消失。
+        self.section_titles = {
+            key: value for key, value in self.section_titles.items()
+            if key not in store.RETIRED_SECTION_KEYS_PUBLIC
+        }
+        self.section_order = store.prune_retired_section_keys(self.section_order)
         for key, value in self.section_titles.items():
             if key not in store.SECTION_KEYS_PUBLIC:
                 raise ValueError(f"未知区块键：{key}")
             if len(value) > 200:
                 raise ValueError("区块标题不得超过 200 字")
         if self.section_order and sorted(self.section_order) != sorted(store.SECTION_KEYS_PUBLIC):
-            raise ValueError("区块顺序必须是六个区块键的排列")
+            raise ValueError("区块顺序必须是五个区块键的排列")
         for key, value in self.camera_band_overrides.items():
             if key not in ("0", "1", "2", "3"):
                 raise ValueError("运镜档位键只允许 0/1/2/3")

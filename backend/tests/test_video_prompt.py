@@ -369,15 +369,18 @@ def test_climax_drops_dialogue_from_all_sources():
 
 
 def test_negative_sources_never_reach_the_video_prompt():
-    # 第 81 刀：⑥ 退役 ⇒ 任何一路负面串（预设 / scene_spec / 模版 negative_extra）
-    # 都不再进视频提示词——这条链没有 negative 通道，进了就是正面内容。
-    sk = video_prompt.VideoSkeleton(negative_extra="禁止字幕")
+    # 第 81 刀退役 ⑥、第 87 刀摘除旋钮：任何一路负面串（scene_spec 的 negative_prompt）
+    # 都不进视频提示词——这条链没有 negative 通道，进了就是正面内容。
+    # 模版侧连「能写负面」这个字段都不存在了：死旋钮不该留着骗编辑器。
+    assert not hasattr(video_prompt.VideoSkeleton(), "negative_extra")
+    assert "negative" not in video_prompt.SECTION_KEYS
+    sk = video_prompt.VideoSkeleton(section_titles={video_prompt.SECTION_AUDIO: "声音设计"})
     p = video_prompt.compile_climax_video_prompt(
         _spec(negative_prompt="禁止五官漂移"), skeleton=sk,
     )
     assert "[负面约束]" not in p
-    for banned in ("禁止五官漂移", "禁止字幕"):
-        assert banned not in p
+    assert "禁止五官漂移" not in p
+    assert "[声音设计]" in p
 
 
 def test_build_request_default_size_is_16_9():
@@ -437,7 +440,7 @@ def test_climax_hold_contract_locks_one_camera():
     """
     p = video_prompt.compile_climax_video_prompt(
         _spec(camera="摇臂俯拍", aspect_ratio="2:3"), size="2:3", pending_frame=True)
-    cams = [ln.split("：", 1)[1].split("；")[0] for ln in _segments(p)]
+    cams = [ln.split("｜", 1)[1].split("；")[0] for ln in _segments(p)]
     assert set(cams) == {video_prompt._HOLD_CAMERA_FRAME}
     assert "摇臂俯拍" not in p  # 静机位档不吃模型运镜句（写了就自相矛盾）
     meta = p.split("[元信息]：", 1)[1].split("\n\n", 1)[0]
@@ -451,7 +454,7 @@ def test_climax_hold_contract_locks_one_camera():
 
 def test_climax_positive_stream_carries_no_cut_trigger_words():
     """H3 节点没有 negative 通道（入参 clip/vae/first_frame/last_frame/prompt/width/height/length，
-    输出只有 positive）⇒ 六段全文都是正面文本流。两档文案一律不得出现官方手册 §4.2 的
+    输出只有 positive）⇒ 五段全文都是正面文本流。两档文案一律不得出现官方手册 §4.2 的
     切镜触发词与运镜动作名，否则文案自己就是「像有转场」的来源。"""
     triggers = ("镜头切换", "切镜", "跳切", "转场", "多机位", "推拉", "摇移",
                 "甩镜头", "cuts to", "transitions to", "switches to", "changes to")
@@ -463,7 +466,7 @@ def test_climax_positive_stream_carries_no_cut_trigger_words():
         size="16:9", pending_frame=True)
     for name, text in (("action_hold", hold), ("scene_reveal", reveal)):
         assert [t for t in triggers if t in text] == []
-        # ⑥ 只剩通用质量词：机位/运镜类否定式一律不进
+        # 身份锁改由 ② 参考绑定承担（⑥ 已于第 87 刀摘除）：机位/运镜类否定式一概不进
         assert "人物身份和五官不能发生变化" in text
 
 
@@ -524,7 +527,7 @@ def test_climax_reveal_contract_allows_one_continuous_move():
     spec = _spec(camera="", composition="", actors=[], aspect_ratio="16:9",
                  locale="港区", narrative="舰队驶入港口，天际线在晨雾里连成一片。")
     p = video_prompt.compile_climax_video_prompt(spec, size="16:9", pending_frame=True)
-    cams = {ln.split("：", 1)[1].split("；")[0] for ln in _segments(p)}
+    cams = {ln.split("｜", 1)[1].split("；")[0] for ln in _segments(p)}
     assert cams == {video_prompt._REVEAL_CAMERA_TILT}
     assert "甩镜头转场" not in p and "遮挡揭示转场" not in p
     # 第 81 刀：⑥ 整段不产出 ⇒ 不存在「用负面否掉契约自己要的运动」这条路
@@ -634,10 +637,10 @@ def test_climax_prefers_action_sequence_over_visual_facts():
         ],
     )
     p = video_prompt.compile_climax_video_prompt(spec)
-    assert "定格起点" in p
     assert "勺子挖出一勺奶油" in p
-    assert "延伸" in p
     assert "勺子送向嘴边，吃下" in p
+    # 第 83 刀：拍名是提取层的内部流程词，视频模型读不出含义 ⇒ 不进提示词
+    assert "定格起点" not in p and "延伸" not in p and "收尾" not in p
 
 
 def test_climax_action_sequence_skips_empty_entries():
@@ -941,7 +944,7 @@ def test_reference_binding_firstlast_and_transition_bind_identity():
     tbinding = tp.split("[参考绑定]：", 1)[1].split("\n\n", 1)[0]
     assert "画面角色：纪含章、庄听澜、邵允" in tbinding
 
-# ===== ⑥[音频]：只有效果音（2026-09-20 用户定案）=====
+# ===== ⑤[音频]：只有效果音（2026-09-20 用户定案）=====
 # 台词/旁白由「多元数据插入」里的**独立音频生成功能**负责 ⇒ 视频提示词一律不写台词；
 # 音乐结构同样不写（用户口径「只有效果音」）。数据仍留在 spec["audio_design"] 里，只是不渲染。
 
@@ -1022,11 +1025,10 @@ def test_skeleton_none_byte_identical():
 
 
 def test_skeleton_section_titles_and_order():
-    # 骨架仍可改标题/顺序；`negative` 键**留着**是数据兼容（已存模版的 section_order 是
-    # 六键排列），但编译器不给它写内容 ⇒ 它既不出现在提示词里，也不出现在区块清单里。
+    # 骨架仍可改标题/顺序（第 87 刀后键表＝五键；⑥ 已不在键表里，见遗留数据归一那两条）。
     sk = video_prompt.VideoSkeleton(
         section_titles={"meta": "元信息·自定义", "audio": "音效"},
-        section_order=("audio", "segments", "subject", "binding", "meta", "negative"),
+        section_order=("audio", "segments", "subject", "binding", "meta"),
     )
     p = video_prompt.compile_climax_video_prompt(_spec(), skeleton=sk)
     assert "[元信息·自定义]" in p and "[音效]" in p
@@ -1050,7 +1052,7 @@ def test_skeleton_camera_band_override():
     # 锁档接管这一档后，内置 band3 代表句也不出现（同一条提示词里不留两套机位）
     assert "低角度仰拍" not in p
     # 逐拍机位一律是锁档那句：契约的固定机位标记被顶掉（① 仍按契约声明全程一致）
-    cams = {ln.split("：", 1)[1].split("；")[0] for ln in _segments(p)}
+    cams = {ln.split("｜", 1)[1].split("；")[0] for ln in _segments(p)}
     assert cams == {"镜头以慢动作环绕主体"}
 
 
@@ -1064,14 +1066,32 @@ def test_skeleton_beat_labels_and_duration():
     assert "6 seconds" in p  # duration_hint 空 ⇒ 用模版默认时长
 
 
-def test_skeleton_meta_note_consumed_and_negative_extra_inert():
-    # meta_note 进 ①；negative_extra **停止消费**（⑥ 退役）——字段仍被 store/前端当作数据面
-    # 解析回传，但写不进视频提示词。锁住这条，免得将来有人「顺手」把它接回正面流。
-    sk = video_prompt.VideoSkeleton(negative_extra="禁止字幕", meta_note="H3 高服从")
+def test_skeleton_meta_note_consumed_and_no_negative_knob():
+    # meta_note 进 ①。负面旋钮整条摘掉（第 87 刀）：骨架数据里再写 `negative_extra`
+    # 也只是被忽略——锁住这条，免得将来有人「顺手」把它接回正面流。
+    sk = video_prompt.VideoSkeleton.from_data({"negative_extra": "禁止字幕", "meta_note": "H3 高服从"})
+    assert sk is not None
     p = video_prompt.compile_climax_video_prompt(_spec(), skeleton=sk)
     assert "禁止字幕" not in p
     assert "H3 高服从" in p.split("[参考绑定]")[0]
-    assert sk.negative_extra == "禁止字幕"  # 字段本身照常解析（数据面不拆）
+    assert not hasattr(sk, "negative_extra")
+
+
+def test_skeleton_legacy_six_key_data_normalizes():
+    """旧模版（六键排列 + ⑥ 标题 + negative_extra）载入 ⇒ 剔 ⑥、五键相对顺序原样保留。
+
+    第 87 刀的数据兼容锁：判非法会让 `get_template` 返回 None ⇒ 整条模版从列表里消失，
+    用户看到的是「我做的模版没了」，比留着死旋钮更糟。
+    """
+    sk = video_prompt.VideoSkeleton.from_data({
+        "section_order": ["audio", "negative", "meta", "binding", "subject", "segments"],
+        "section_titles": {"meta": "元信息·改", "negative": "不要的东西"},
+        "negative_extra": "模糊",
+    })
+    assert sk is not None
+    assert sk.section_order == ("audio", "meta", "binding", "subject", "segments")
+    assert sk.order() == ("audio", "meta", "binding", "subject", "segments")
+    assert sk.section_titles == {"meta": "元信息·改"}   # 退役键的标题一并丢弃
 
 
 def test_skeleton_from_data_defensive():
@@ -1084,7 +1104,6 @@ def test_skeleton_from_data_defensive():
         "camera_band_overrides": {"9": "x", "2": "镜头横移"},
         "beat_labels": ["起"],
         "default_duration": 99,
-        "negative_extra": "y" * 2000,
     })
     assert sk is not None
     assert sk.section_titles == {"meta": "元信息·改"}     # 坏键忽略
@@ -1092,7 +1111,6 @@ def test_skeleton_from_data_defensive():
     assert sk.camera_band_overrides == {2: "镜头横移"}      # 坏档位忽略
     assert sk.beat_labels == ("起",)
     assert sk.default_duration is None                      # 超范围忽略
-    assert sk.negative_extra == "y" * 1000                  # 截断到上限
 
 
 def test_default_skeleton_data_projection():
@@ -1163,13 +1181,13 @@ def test_climax_all_beats_share_one_camera():
     5 秒里两句互斥机位照样丢首帧构图 ⇒ 高潮延伸统一成一条机位句（2026-11-04 用户定案）。
     """
     spec = {**_spec(camera=""), **_BEATS6}
-    cams = [ln.split("：", 1)[1].split("；")[0]
+    cams = [ln.split("｜", 1)[1].split("；")[0]
             for ln in _segments(video_prompt.compile_climax_video_prompt(
                 spec, pending_frame=True))]
     assert len(cams) == len(_BEATS6["action_sequence"])
     assert set(cams) == {video_prompt._HOLD_CAMERA_FRAME}
     # 文生视频（无首帧）同样一句到底，只是不引用图片1
-    t2v = [ln.split("：", 1)[1].split("；")[0]
+    t2v = [ln.split("｜", 1)[1].split("；")[0]
            for ln in _segments(video_prompt.compile_climax_video_prompt(spec))]
     assert set(t2v) == {video_prompt._HOLD_CAMERA_NOFRAME}
 
@@ -1344,7 +1362,7 @@ def test_climax_beats_name_the_camera_without_restating_the_rule():
     """
     spec = {**_spec(camera=""), **_BEATS6}
     p = video_prompt.compile_climax_video_prompt(spec, pending_frame=True)
-    cams = [ln.split("：", 1)[1].split("；")[0] for ln in _segments(p)]
+    cams = [ln.split("｜", 1)[1].split("；")[0] for ln in _segments(p)]
     assert set(cams) == {video_prompt._HOLD_CAMERA_FRAME}
     assert all("全程" not in c for c in cams)
     meta = p.split("[元信息]：", 1)[1].split("\n\n", 1)[0]
@@ -1357,7 +1375,302 @@ def test_climax_reveal_beat_camera_keeps_only_the_direction():
     spec = _spec(camera="", composition="", actors=[], aspect_ratio="16:9", locale="港区",
                  narrative="舰队驶入港口，海面辽阔，天际线在晨雾里连成一片。")
     p = video_prompt.compile_climax_video_prompt(spec, size="16:9", pending_frame=True)
-    cams = {ln.split("：", 1)[1].split("；")[0] for ln in _segments(p)}
+    cams = {ln.split("｜", 1)[1].split("；")[0] for ln in _segments(p)}
     assert cams == {video_prompt._REVEAL_CAMERA_TILT}
     assert "中途不间断" in p.split("[元信息]：", 1)[1].split("\n\n", 1)[0]
     assert all("不间断" not in c for c in cams)
+
+
+# ── 第 82 刀 · 逐拍主语与循环断言（2026-11-04 离线检验实锤）──────────────────────
+# 第 79 刀的短语裁剪只管「不把迁移写回时间轴」，不管「剩下的句子还有没有主语」——
+# 离线重放真稿入参时 4 拍里 3 拍的**主句本身就是迁移句**，剔完只剩没有名词主语的从句；
+# ① 又无条件断言「末态回到起始那一格的同一姿势，可无缝循环」，与末拍落在另一个构型互斥。
+# 两条都由离线重放抓到，不需要出片。
+# ⚠ 下面的动作句是**按同一语法形状合成的 fixture**（把栏杆练功当场景），真机正文不进 tests。
+
+_SHIFT_FIRST_BEATS = {"action_sequence": [
+    {"beat": "定格起点",
+     "desc": "A tall dancer bends forward over a low rail, both hands on the wood"},
+    {"beat": "延伸", "desc": "The partner pushes slowly, her shoulders rock with each count"},
+    {"beat": "收尾",
+     "desc": "The shawl slips off her shoulder, swaying with each step"},
+]}
+
+_HOLD_FX = "能量爆发式特效，画面保持稳定"
+
+
+def _beat_actions(prompt: str) -> list[str]:
+    """逐拍只取动作文本段（第 0 段是机位句，特效/同步句按常量剔除）。"""
+    acts: list[str] = []
+    for line in _segments(prompt):
+        for part in line.split("｜", 1)[1].split("；")[1:]:
+            if part and part != _HOLD_FX and part != "与节拍/重音同步":
+                acts.append(part)
+    return acts
+
+
+def _meta(prompt: str) -> str:
+    return prompt.split("[元信息]：", 1)[1].split("\n\n", 1)[0]
+
+
+def test_climax_shift_pruning_does_not_leave_a_subjectless_beat():
+    """主句被剔的拍把「谁」留在句首＋回指首帧，④ 不再出现没有施动者的动作。
+
+    第 82 刀只补了构图回指（`承接图片1的同一构型，both hands gripping the edge`），
+    读的人仍不知道是谁的双手——离线重放真稿时用户实锤这条；第 83 刀把被剔主句的
+    主语短语抽回来放在最前。
+    """
+    spec = {**_spec(camera=""), **_SHIFT_FIRST_BEATS}
+    p = video_prompt.compile_climax_video_prompt(spec, pending_frame=True)
+    acts = _beat_actions(p)
+    assert len(acts) == 3
+    # 迁移过程仍然不写回时间轴
+    assert "bends forward over a low rail" not in p
+    assert "slips off her shoulder" not in p
+    # 两处「主句即迁移」的拍各补一次回指，且回指前带着主语
+    assert sum(1 for a in acts if video_prompt._FRAME_ANAPHORA in a) == 2
+    assert acts[0].startswith("A tall dancer，")
+    assert acts[2].startswith("The shawl，")
+    assert "The partner pushes slowly, her shoulders rock with each count" in acts
+    for act in acts:
+        # 没有任何一拍以回指短语开头＝每一拍都自带施动者
+        assert not act.startswith(video_prompt._FRAME_ANAPHORA), act
+        assert act[0].isupper(), act
+
+
+def test_climax_keeps_the_whole_clause_when_no_subject_can_be_recovered():
+    """抽不出主语 ⇒ 整句原样保留，宁可留一个迁移短语也不交出一句无主语的动作。"""
+    # 迁移动词在句首（主语本来就没写）
+    no_head = {"action_sequence": [
+        {"beat": "延伸", "desc": "Bends forward over the rail, both hands flat on the wood"},
+    ]}
+    p = video_prompt.compile_climax_video_prompt({**_spec(camera=""), **no_head},
+                                                 pending_frame=True)
+    assert "Bends forward over the rail" in p
+    assert video_prompt._FRAME_ANAPHORA not in p
+    # 切点左侧长过主语（整句其实在讲别的事）⇒ 同样不冒险改写
+    too_long = {"action_sequence": [
+        {"beat": "延伸",
+         "desc": "A broad shouldered young man in a damp linen shirt and rolled sleeves "
+                 "leans forward, his hands steady"},
+    ]}
+    p2 = video_prompt.compile_climax_video_prompt({**_spec(camera=""), **too_long},
+                                                  pending_frame=True)
+    assert "leans forward" in p2
+    assert video_prompt._FRAME_ANAPHORA not in p2
+
+
+def test_climax_drops_the_loop_claim_when_the_last_beat_ends_elsewhere():
+    """末拍落在别的构型 ⇒ ① 不再断言「回到起始姿势／可无缝循环」。"""
+    spec = {**_spec(camera=""), **_SHIFT_FIRST_BEATS}
+    meta = _meta(video_prompt.compile_climax_video_prompt(spec, pending_frame=True))
+    assert "可无缝循环" not in meta
+    assert "末态回到起始那一格" not in meta
+    assert "末态停在最后一拍给定的那一格" in meta
+
+
+def test_climax_keeps_the_loop_claim_when_the_last_beat_returns():
+    """末拍自己声明回位时，循环断言照旧成立（不是无条件删掉）。"""
+    beats = {"action_sequence": [
+        {"beat": "定格起点", "desc": "she keeps her hands on the counter edge"},
+        {"beat": "收尾", "desc": "she settles back to the same pose as the first frame"},
+    ]}
+    spec = {**_spec(camera=""), **beats}
+    meta = _meta(video_prompt.compile_climax_video_prompt(spec, pending_frame=True))
+    assert "可无缝循环" in meta
+
+
+def test_climax_single_beat_timeline_keeps_the_loop_claim():
+    """无动作序列时 ④ 只有一拍（画面级要素兜底）：整条时间轴就是那一格，循环成立。"""
+    spec = _spec(camera="", action_sequence=[])
+    p = video_prompt.compile_climax_video_prompt(spec, pending_frame=True)
+    assert len(_segments(p)) == 1
+    assert "可无缝循环" in _meta(p)
+
+
+def test_climax_loop_claim_follows_narrative_fallback_beats_too():
+    """narrative 兜底同样会切出多拍 ⇒ 循环断言要看这份计划，不能只认 action_sequence。"""
+    spec = _spec(camera="", composition="", action_sequence=[],
+                 narrative="她扶住横杆稳住呼吸。他绕到身后扶稳她的腰。她把重心压到左腿，右手撑住栏杆。")
+    p = video_prompt.compile_climax_video_prompt(spec, pending_frame=True)
+    assert len(_segments(p)) > 1
+    assert "可无缝循环" not in _meta(p)
+
+
+# ── 第 84 刀 · 第一人称取景贯彻（2026-11-05 真机试跑实锤）────────────────────────
+# 图片侧早就是第一人称（`profile_prompt` 首行带 `first person view`，男性只有从画框下缘
+# 进入的肢体），视频链却**一次都没读过 `viewpoint`**：成稿 ③ 写 `a younger man behind her`、
+# ④ 写 `The man thrusts forward`／`The man，承接图片1…`，把叙事者钉成画面里的第二个全身，
+# 而 ① 又要求「逐字复现图片1」⇒ 模型只能凭空补人或忽略首帧。
+# 本刀三条落点都在编译层/护栏层，**不依赖名字**（本机 `narrator="(待定)"` ⇒ 名字型闸全空转）。
+# ⚠ 下面全部是**合成 fixture**，真机正文与专名不进 tests。
+
+_POV_LIMBS = [
+    "a pair of hands entering from the lower frame edge gripping her waist",
+    "another hand lifting her thigh from the lower frame edge",
+]
+
+
+def test_climax_pov_declaration_and_limb_facts_land_in_meta():
+    """① 用肯定式声明第一人称视点，并把「哪些肢体真的进了这一格」逐字列出。"""
+    spec = {**_spec(camera=""), "viewpoint": "first_person", "narrator_limbs": list(_POV_LIMBS)}
+    meta = _meta(video_prompt.compile_climax_video_prompt(spec, pending_frame=True))
+    assert video_prompt._POV_VIEW_ANCHORED in meta
+    for limb in _POV_LIMBS:
+        assert limb in meta
+    # 两条事实自己已经带画框边缘限定 ⇒ 不再复述一遍（白占 ① 的字数预算）
+    assert video_prompt._POV_LIMB_TAIL not in meta
+
+
+def test_climax_pov_meta_adds_no_meta_language():
+    """第 68 刀措辞纪律延伸到视频侧：只写「具体部位＋位置」，不写解释句／元语言。"""
+    p = video_prompt.compile_climax_video_prompt(
+        {**_spec(camera="", composition=""), "viewpoint": "first_person",
+         "narrator_limbs": list(_POV_LIMBS)}, pending_frame=True)
+    lowered = p.lower()
+    for banned in ("narrator", "camera", "point of view", "叙述者", "镜头即", "不出现在画面"):
+        assert banned not in lowered and banned not in p, banned
+
+
+def test_climax_third_person_meta_is_byte_identical():
+    """零回归锁：`viewpoint` 缺失／非 first_person ⇒ ① 与旧稿件逐字节相同。
+
+    判据只认 `first_person` 这一个值 ⇒ 第三人称帧（用户口径「按剧情正常来」）
+    和根本没给人称的既有链路都不新增任何文本。
+    """
+    plain = video_prompt.compile_climax_video_prompt(_spec(), pending_frame=True)
+    third = video_prompt.compile_climax_video_prompt(
+        {**_spec(), "viewpoint": "third_person", "narrator_limbs": list(_POV_LIMBS)},
+        pending_frame=True)
+    assert third == plain
+    assert video_prompt._POV_VIEW_PLAIN not in plain
+
+
+def test_climax_pov_without_frame_does_not_anchor_declaration_to_image1():
+    """无首帧不得引用不存在的图：声明退成不带「图片1」的那一档。"""
+    meta = _meta(video_prompt.compile_climax_video_prompt(
+        {**_spec(camera=""), "viewpoint": "first_person"}, size="9:16"))
+    assert video_prompt._POV_VIEW_PLAIN in meta
+    assert video_prompt._POV_VIEW_ANCHORED not in meta
+
+
+def test_climax_pov_reveal_branch_uses_unanchored_declaration():
+    """大场面档机位本来就在动：「与图片1共用同一视点位置」与「沿路径持续向前」互斥，只用朴素声明。"""
+    spec = {**_spec(camera="", composition="", actors=[], aspect_ratio="16:9", locale="港区",
+                    narrative="舰队驶入港口，天际线在晨雾里连成一片。",
+                    viewpoint="first_person")}
+    meta = _meta(video_prompt.compile_climax_video_prompt(spec, size="16:9", pending_frame=True))
+    assert video_prompt._POV_VIEW_PLAIN in meta
+    assert video_prompt._POV_VIEW_ANCHORED not in meta
+
+
+def test_climax_pov_limb_tail_only_when_fact_lacks_the_marker():
+    """没带画框边缘字样的事实才补限定；已带的不重复补。"""
+    bare = _meta(video_prompt.compile_climax_video_prompt(
+        {**_spec(camera=""), "viewpoint": "first_person",
+         "narrator_limbs": ["his hands gripping her hips"]}, pending_frame=True))
+    assert "his hands gripping her hips" + video_prompt._POV_LIMB_TAIL in bare
+    mixed = _meta(video_prompt.compile_climax_video_prompt(
+        {**_spec(camera=""), "viewpoint": "first_person",
+         "narrator_limbs": [_POV_LIMBS[0], "his other hand on her hip"]}, pending_frame=True))
+    assert mixed.count(video_prompt._POV_LIMB_TAIL) == 1
+    assert "his other hand on her hip" + video_prompt._POV_LIMB_TAIL in mixed
+    empty = _meta(video_prompt.compile_climax_video_prompt(
+        {**_spec(camera=""), "viewpoint": "first_person", "narrator_limbs": []},
+        pending_frame=True))
+    assert video_prompt._POV_LIMB_TAIL not in empty
+
+
+def test_frame_limb_facts_reads_only_the_tag_line():
+    """肢体事实的成稿真源＝首行 tag；散文行里出现 `frame edge` 不算（那是环境描述）。"""
+    prompt = (
+        "1girl, " + _POV_LIMBS[0] + ", black pantyhose, " + _POV_LIMBS[1]
+        + ", " + _POV_LIMBS[0] + "\n"
+        "masterpiece, the moonlight falling across the frame edge of the balcony"
+    )
+    assert video_prompt.frame_limb_facts(prompt) == _POV_LIMBS
+    assert video_prompt.frame_limb_facts("1girl, solo, kitchen") == []
+    assert video_prompt.frame_limb_facts("") == []
+
+
+def test_climax_pov_drops_the_whole_person_subject_prefix():
+    """④ 护栏：第一人称下「整人指称」不再被补成画面里的第二个完整人物。
+
+    第 83 刀把被剔主句的主语放回句首（`The man，承接图片1…`），本刀只在这一档删掉那半句、
+    保留回指＋从句——代价是这一拍由谁做动作含糊一拍，换取口径正确（用户定案）。
+    """
+    beats = {"action_sequence": [
+        {"beat": "延伸",
+         "desc": "The man bends forward over her, her shoulders rock with each count"},
+    ]}
+    pov = _beat_actions(video_prompt.compile_climax_video_prompt(
+        {**_spec(camera=""), **beats, "viewpoint": "first_person"}, pending_frame=True))
+    assert pov[0].startswith(video_prompt._FRAME_ANAPHORA)
+    assert "The man" not in pov[0]
+    assert "her shoulders rock with each count" in pov[0]
+    # 中文整人指称同判
+    zh = video_prompt.compile_climax_video_prompt(
+        {**_spec(camera=""), "viewpoint": "first_person", "action_sequence": [
+            {"beat": "延伸", "desc": "他弓起背，她的手指扣紧台沿"}]}, pending_frame=True)
+    assert "他，" not in zh
+
+
+def test_climax_third_person_keeps_the_subject_prefix():
+    """反向锁：第三人称（或调用方没给人称）⇒ 第 83 刀行为逐字节保留。"""
+    beats = {"action_sequence": [
+        {"beat": "延伸",
+         "desc": "The man bends forward over her, her shoulders rock with each count"},
+    ]}
+    for spec_view in ({}, {"viewpoint": "third_person"}):
+        acts = _beat_actions(video_prompt.compile_climax_video_prompt(
+            {**_spec(camera=""), **beats, **spec_view}, pending_frame=True))
+        assert acts[0].startswith("The man，" + video_prompt._FRAME_ANAPHORA), spec_view
+
+
+def test_climax_pov_keeps_limbs_and_descriptive_subjects():
+    """只剔「整人指称」：肢体所有格正是该入画的形态，带描述的主语另有其人，都不动。"""
+    cases = {
+        "His hands lift her thigh, her heel strains against the stool": "His hands，",
+        "A tall woman with long hair bends forward, her apron creaks taut": "A tall woman",
+    }
+    for desc, expected in cases.items():
+        acts = _beat_actions(video_prompt.compile_climax_video_prompt(
+            {**_spec(camera=""), "viewpoint": "first_person",
+             "action_sequence": [{"beat": "延伸", "desc": desc}]}, pending_frame=True))
+        assert expected in acts[0], desc
+
+
+# ── 第 86 刀 · firstlast 说话人归属（2026-11-05，收第 80 刀登记的实测残留）────────
+# 残留原文（A/03 §14.4）：「『台词 + 说话人 + 第二句台词』复合句仍拆两拍
+# （`_is_speaker_attribution` 只认纯归属短句）」。真机第二句台词与归属**同句**，
+# 于是归属被第二句带走、第一句成了没人说过的台词。
+
+def test_firstlast_attribution_then_second_line_keeps_the_first_speaker():
+    """`「台词」老周问了一句，「第二句。」`：归属并进含引号的前一拍，两句台词都还在。"""
+    spec = _spec(narrative="「还是老样子？」老周问了一句，「面还没好。」她坐到靠窗的桌前。",
+                 camera="", motion=0)
+    lines = _segments(video_prompt.compile_firstlast_video_prompt(spec, duration_hint=12))
+    holders = [ln for ln in lines if "老周问了一句" in ln]
+    assert len(holders) == 1, lines
+    assert "还是老样子" in holders[0], lines
+    assert "面还没好" in holders[0], lines
+
+
+def test_firstlast_attribution_colon_form_merges_into_the_quoted_beat():
+    """冒号式归属 `老周说道：「…」` 与纯短句 `老周问。` 同口径：不得另起一拍。"""
+    spec = _spec(narrative="「还是老样子？」老周说道：「面还没好。」", camera="", motion=0)
+    lines = _segments(video_prompt.compile_firstlast_video_prompt(spec, duration_hint=12))
+    holders = [ln for ln in lines if "老周说道" in ln]
+    assert len(holders) == 1, lines
+    assert "还是老样子" in holders[0], lines
+
+
+def test_firstlast_event_prefix_before_quote_stays_its_own_beat():
+    """反向锁：引号前那段是**事件**（无说话动词）就不算归属，不许并进上一拍。"""
+    spec = _spec(narrative="「先坐。」她站起身，把伞挂到门后，「面还得等会儿。」",
+                 camera="", motion=0)
+    lines = _segments(video_prompt.compile_firstlast_video_prompt(spec, duration_hint=12))
+    holders = [ln for ln in lines if "她站起身" in ln]
+    assert len(holders) == 1, lines
+    assert "先坐" not in holders[0], lines
+    assert "面还得等会儿" in holders[0], lines
