@@ -206,6 +206,26 @@ _POV_VIEW_PLAIN = "第一人称视角（POV，first person view）"
 _POV_LIMB_TAIL = "，entering from the lower frame edge"
 # 第 84 刀：叙事者肢体事实的**成稿真源**——本帧出图提示词里带「画框边缘」限定的那些 tag。
 _FRAME_EDGE_MARK = "frame edge"
+# ═══ 第 90 刀（2026-11-05）：裸短语要补**归属解释**（用户判据原话）═══════════════════
+# 用户原话：「肯定是要解释信息归属于哪个对象的，短句是不够用的」。
+# 第 84 刀把图片侧第 68 刀的「不写解释句」延伸过来，结果 ① 只剩一串裸肢体 tag
+# （`a pair of hands entering from the lower frame edge gripping her waist`）——**没有任何一处
+# 说明那双手是谁的**。模型完全可以把它挂回画面里那位角色自己身上（她自己抓住自己的腰），
+# 于是第 84 刀想防的「叙事者在画面里消失」换个形式又发生了。
+# ⚠ 但**位置与形态**照图片侧的单一真源，不是把解释撒进每条短语：
+#   图片侧的归属由**中文条款**承担（`image_prompt_profiles/_base.py`【视角·第一人称·
+#   叙事者从画面下缘进入】＝「{who}的身体局部从画面下缘进入」＋【谁是{who}】），
+#   而 tag 本体按第 69 刀「只写手与腿，**不写这只手的主人**」保持裸短语；
+#   ⇒ 视频侧同构：①（全片规则位）**解释一次**，④ 每拍用一个**短回指**
+#   （`_POV_BEAT_ACTOR`）指回那句解释。逐拍重复解释会让 ④ 膨胀（模版机位句已占其三成字数），
+#   与第 81 刀「重复不增加约束强度」同口径。
+# ⚠ 措辞仍避开英文元语言 `narrator`／`camera`／`point of view`：模型不知道那是谁，
+#   且 ① 里「一条固定镜头」已经把 camera 这个词占给机位。归属要用**画面里看得见的名词**说。
+_POV_LIMB_OWNER_CLAIM = (
+    "以下从画框边缘进入的肢体属于镜头后面那一位本人"
+    "（他在这一格里只有这些局部，没有躯干与面孔），"
+    "被这些肢体接触到的部位则属于画面中的角色"
+)
 
 
 def frame_limb_facts(image_prompt: str) -> list[str]:
@@ -511,12 +531,17 @@ def _pov_shot_notes(spec: dict[str, Any], *, anchored: bool) -> tuple[str, ...]:
       （第三人称与「用户没开第一人称」的既有稿件不受任何影响）。
     ⚠ `anchored` 只在 hold 档＋有首帧时为真：无首帧不得引用不存在的图（缺图守卫 R2），
       reveal 档机位本来在动，不能再说「与图片1同一视点」。
+    第 90 刀：**有肢体事实才补归属主句**，且它排在事实列表之前——裸 tag 只说「有一双手从
+      画框下缘进来抓住她的腰」，不说那双手是谁的；归属在 ① 解释一次，④ 用 `_POV_BEAT_ACTOR`
+      回指它（图片侧同构：条款承担归属、tag 本体保持裸短语）。
+      无肢体事实 ⇒ 主句不出现（没有指代对象，写了只是白占字数）。
     """
     if not _first_person_view(spec):
         return ()
     notes = [_POV_VIEW_ANCHORED if anchored else _POV_VIEW_PLAIN]
     limbs = _pov_limb_phrase(spec)
     if limbs:
+        notes.append(_POV_LIMB_OWNER_CLAIM)
         notes.append(limbs)
     return tuple(notes)
 
@@ -1091,11 +1116,69 @@ def _transition_segments(spec: dict[str, Any],
     return "\n".join(lines)
 
 
+# ── ⑤ 的卡拍时刻与 ④ 的实际拍界对账（2026-11-05 第 91 刀）───────────────────────
+# 病灶（真机 21:27 那一轮 prompt_only 成稿，零云端）：④ 是 `0–3s / 3–6s / 6–10s`，
+# ⑤ 却写 `同步=action beats land at 0s, 5s, 9s; nothing else until end`——时刻是提取 LLM
+# 自己估的（它看不见 `_climax_time_segments` 里 `dur*idx//n` 的整除结果），编译侧从没核对，
+# 于是「卡拍时刻」落在 ④ 第 2、3 拍的**中间**，下游模型只能把音效对齐到不存在的节点上。
+# ⚠ 本刀**只改落地，不改判据**：② 提取合同里那句 sync 规则一字不动（它不该知道拍界怎么算），
+#   拍界的真源＝④ **已经写出来的那几行**（不是另算一遍，否则两条公式可以各自漂移）。
+# 失败面必须窄 ⇒ 只在「整串里恰好一处、由顿号/逗号/斜杠连接的 ≥2 个时刻，且串里没有游离时刻」
+# 时对账；无时刻、单时刻（`每 2 秒卡拍`）、两处列表、时刻被 `and` 分成两段 ⇒ 逐字节返回原串。
+# 只换数字与紧邻单位，句子其余部分（措辞/标点/句尾）一律不动 ⇒ 幂等。
+_BEAT_LINE_RE = re.compile(r"^(\d+)–\d+s")
+_BEAT_TIME_RE = re.compile(r"\d+(?:\.\d+)?\s*(?:s\b|秒)")
+_BEAT_TIME_RUN_RE = re.compile(
+    r"\d+(?:\.\d+)?\s*(?:s\b|秒)(?:\s*[、,，/]\s*\d+(?:\.\d+)?\s*(?:s\b|秒))+"
+)
+
+
+def beat_starts_from_segments(segments: str) -> list[int]:
+    """从 ④ 的成品文本里读出每拍的起点秒数（`0–3s｜…` ⇒ 0）。解析不出 ⇒ 空表。"""
+    out: list[int] = []
+    for line in (segments or "").splitlines():
+        m = _BEAT_LINE_RE.match(line.strip())
+        if m:
+            out.append(int(m.group(1)))
+    return out
+
+
+def _beat_time_unit(token: str) -> str:
+    return re.sub(r"^\d+(?:\.\d+)?", "", token).strip() or "s"
+
+
+def reconcile_sync_with_beats(sync: str, beat_starts: list[int]) -> str:
+    """把 sync 里那一串卡拍时刻逐位换成 ④ 的真实拍点；任何不确定 ⇒ 原样返回。
+
+    时刻数≠拍数时整串换成真实拍点（拍点是唯一真源，多出来的时刻本来就无处可落）。
+    """
+    text = sync or ""
+    starts = [int(v) for v in (beat_starts or [])]
+    if not starts:
+        return text
+    total = _BEAT_TIME_RE.findall(text)
+    if len(total) < 2:
+        return text
+    runs = list(_BEAT_TIME_RUN_RE.finditer(text))
+    if len(runs) != 1:
+        return text
+    run = runs[0]
+    tokens = _BEAT_TIME_RE.findall(run.group(0))
+    if len(tokens) != len(total):  # 游离时刻（`0s、5s and 9s`）⇒ 逐位换会留下错位的一格
+        return text
+    spans = [m.span() for m in _BEAT_TIME_RE.finditer(run.group(0))]
+    sep = run.group(0)[spans[0][1]:spans[1][0]] or "、"
+    units = [_beat_time_unit(t) for t in tokens]
+    rebuilt = sep.join(f"{v}{units[min(i, len(units) - 1)]}" for i, v in enumerate(starts))
+    return text[:run.start()] + rebuilt + text[run.end():]
+
+
 def _audio_hint(
     spec: dict[str, Any],
     audio_lines: list[Any] | None = None,
     *,
     include_lines: bool | None = None,
+    beat_starts: list[int] | None = None,
 ) -> str:
     """⑤ 音频：**只有效果音**（2026-09-20 用户定案）。
 
@@ -1103,6 +1186,8 @@ def _audio_hint(
     音乐结构同样不写（用户口径「只有效果音」）。两项数据仍留在 `spec["audio_design"]`
     里，只由 `_VIDEO_AUDIO_EMIT_MUSIC` / `_VIDEO_AUDIO_EMIT_LINES` 控制是否渲染。
     `audio_lines`（comfy_audio 对白）参数**保留仅为兼容**，不再进提示词。
+    `beat_starts`（2026-11-05 第 91 刀）：④ 已经落地的那几拍的真实起点；给了就把
+    `sync` 里的卡拍时刻与之对账（见 `reconcile_sync_with_beats`）。None／空 ⇒ 不碰。
     """
     audio_raw = spec.get("audio_design")
     design: dict[str, Any] = dict(audio_raw) if isinstance(audio_raw, dict) else {}
@@ -1129,6 +1214,8 @@ def _audio_hint(
                 at_txt = f"{at:g}s｜"
             lines.append(f"{at_txt}{speaker}：{text}" if speaker else f"{at_txt}{text}")
     sync = str(design.get("sync") or "").strip()
+    if beat_starts:
+        sync = reconcile_sync_with_beats(sync, beat_starts)
 
     # 无 audio_design 时：台词从 audio_lines 参数兜底
     if not design and audio_lines:
@@ -1365,10 +1452,21 @@ _POV_WHOLE_PERSON_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
+# 第 90 刀：整人指称被剔之后，这一拍的**归属主语**（不再是空着）。
+# 第 84 刀那一支写成 `f"{_FRAME_ANAPHORA}，{kept}"`＝把「谁在做」整条抹掉，只留回指。
+# 当时的取舍记在 docstring 里：「代价是这一拍的动作没有明示施动者」。用户 2026-11-05 明确
+# 不接受这个代价：「肯定是要解释信息归属于哪个对象的，短句是不够用的」——没有施动者的那一拍
+# 模型只能把动作挂到画面里已有的人物身上（于是她的膝盖／她的乳房去「driving deeper」了）。
+# ⚠ 主语的名词中心是**肢体**、不是人：`镜头后面那一位伸进画面的肢体`——「镜头后面那一位」
+#   作定语说明归属，「伸进画面的肢体」作中心语保证它仍只以局部在场（与 ① 的
+#   `_POV_LIMB_OWNER_CLAIM` 同一口径，两句互为解释，不新造第三种说法）。
+# ⚠ 本短语**自带归属**，不依赖 ① 是否列了肢体事实：本帧没有肢体证据时 ① 不写主句，
+#   若这里再用一个需要 ① 定义的短回指就成了悬空指代。
+_POV_BEAT_ACTOR = "镜头后面那一位伸进画面的肢体"
 
 
 def _prune_beat_action(desc: str, *, first_person: bool = False) -> str:
-    """逐拍裁剪＋施动者护栏（第 82/83/84 刀）。
+    """逐拍裁剪＋施动者护栏（第 82/83/84/90 刀）。
 
     `_drop_pose_shift_clauses` 只保证「不把迁移写回时间轴」，不保证「剩下的句子还有主语」：
     最常见的形态是**带主语的主句本身就是迁移**，剔完只剩分词／介词引导的从句——离线重放
@@ -1378,10 +1476,11 @@ def _prune_beat_action(desc: str, *, first_person: bool = False) -> str:
     短语更大——首帧已由 ① 逐字声明复现，迁移短语至多让动作早一拍发生）。
     整句皆迁移仍返回空串＝这一拍退出 ④。
 
-    第 84 刀：`first_person` 为真且主语是「整人指称」⇒ **只补回指、不补主语**——
-    代价是这一拍的动作没有明示施动者（模型把它挂在画面里已有的人物／镜头本身），
-    换取「叙事者不被写成第二个全身」；两害相权，后者是本帧口径错误（用户定案），
-    前者至多让动作落在谁身上含糊一拍。
+    第 84 刀：`first_person` 为真且主语是「整人指称」⇒ 不能把 `The man` 这样的主语写回去
+    （那会把叙事者钉成画面里的第二个全身，与 ①「逐字复现图片1」直接冲突）。
+    第 84 刀当时的做法是**只补回指、不补主语**；第 90 刀按用户判据改为**补归属主语**
+    `_POV_BEAT_ACTOR`——施动者说清楚（属于镜头后面那一位），形态仍只是伸进画面的肢体，
+    两个目标不再二选一。
     """
     text = (desc or "").strip()
     kept = _drop_pose_shift_clauses(text)
@@ -1395,7 +1494,7 @@ def _prune_beat_action(desc: str, *, first_person: bool = False) -> str:
     if not subject:
         return text
     if first_person and _POV_WHOLE_PERSON_RE.search(subject):
-        return f"{_FRAME_ANAPHORA}，{kept}"
+        return f"{_POV_BEAT_ACTOR}，{_FRAME_ANAPHORA}，{kept}"
     return f"{subject}，{_FRAME_ANAPHORA}，{kept}"
 
 
@@ -1529,13 +1628,17 @@ def compile_climax_video_prompt(
     subject = _subject_scene(spec)
     if subject:
         blocks[SECTION_SUBJECT] = f"[{sk.title(SECTION_SUBJECT, '主体/场景')}]：{subject}"
+    segments = _climax_time_segments(spec, duration_hint, sk, will_have_frame, ctr)
     blocks[SECTION_SEGMENTS] = (
         f"[{sk.title(SECTION_SEGMENTS, '时间分镜')}]：\n"
-        + _climax_time_segments(spec, duration_hint, sk, will_have_frame, ctr)
+        + segments
     )
     # climax：高潮定格时刻对白通常已说完（用户定稿 2026-08-28）——动作窗口不带台词，
     # 无论来源（audio_design.lines / comfy_audio 兜底）一律不列。
-    blocks[SECTION_AUDIO] = f"[{sk.title(SECTION_AUDIO, '音频')}]：{_audio_hint(spec, audio_lines, include_lines=False)}"
+    # 第 91 刀：⑤ 的卡拍时刻按**上面这段 ④** 的真实拍点对账（拍界只有一份真源＝已落地的行）。
+    audio = _audio_hint(spec, audio_lines, include_lines=False,
+                        beat_starts=beat_starts_from_segments(segments))
+    blocks[SECTION_AUDIO] = f"[{sk.title(SECTION_AUDIO, '音频')}]：{audio}"
     # ⑥ 负面约束**不产出**（第 81 刀）：这条链的节点只有 `positive` 一路输入，
     # 「worst quality / extra fingers」这类词进模型就是正面内容；身份锁已折进 [参考绑定]。
     return _assemble_blocks(blocks, sk)

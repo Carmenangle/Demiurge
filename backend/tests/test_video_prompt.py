@@ -1004,6 +1004,111 @@ def test_视频音频无音效时回退环境声():
     assert "台词=" not in p
 
 
+# ===== 第 91 刀（2026-11-05）：⑤ 的「同步」拍点必须与 ④ 的实际拍界对账 =====
+# 真机 21:27 那一轮（prompt_only 试跑，零云端）同一份成稿：
+#   ④ = `0–3s / 3–6s / 6–10s`，⑤ = `同步=action beats land at 0s, 5s, 9s; nothing else until end`
+# 时刻是提取 LLM 自己估的（它看不见 ④ 的整除结果），编译侧从没核对过 ⇒ ⑤ 把卡拍点
+# 落在 ④ 的第 2、3 拍**中间**，下游模型只能乱对齐。这一刀只改「落地」：
+# ⛔ 判据（提取合同里那句 sync 规则）一字不动，只把 ④ 已经写出来的真实拍点回填进 ⑤。
+# 失败面必须窄 ⇒ 只在「整串里恰好一处、由逗号/顿号连接的 ≥2 个时刻」时对账，
+# 其余（无时刻、单时刻如「每 2 秒卡拍」、两处以上列表、时刻散落在 and 两侧）逐字节不变。
+
+
+def _three_beat_spec(sync: str) -> dict:
+    return _spec(
+        action_sequence=[
+            {"beat": "定格起点", "desc": "she stands in the doorway, light across her back"},
+            {"beat": "延伸", "desc": "her hand tightens on the door frame"},
+            {"beat": "收尾", "desc": "the lamp glows steady behind her"},
+        ],
+        audio_design={"music": "", "sfx": ["door hinges creaking"], "lines": [], "sync": sync},
+    )
+
+
+def test_第91刀_音频同步拍点按时间分镜实际拍界改写():
+    """0s, 5s, 9s ⇒ 0s, 3s, 6s（真机那一轮 ④ 就是 0–3 / 3–6 / 6–10）。"""
+    p = video_prompt.compile_climax_video_prompt(
+        _three_beat_spec("action beats land at 0s, 5s, 9s; nothing else until end"),
+        duration_hint=10,
+    )
+
+    assert "[时间分镜]：\n0–3s" in p      # ④ 本身不受影响
+    assert "6–10s" in p
+    assert "同步=action beats land at 0s, 3s, 6s; nothing else until end" in p
+    assert "5s" not in p
+    assert "9s" not in p
+
+
+def test_第91刀_对账只换数字不动句子其余部分():
+    """顿号 + 中文「秒」同样只换时刻：措辞、标点、句尾一律保留。"""
+    got = video_prompt.reconcile_sync_with_beats(
+        "音效在 0秒、5秒、9秒 卡点，其余时间保持安静", [0, 3, 6]
+    )
+
+    assert got == "音效在 0秒、3秒、6秒 卡点，其余时间保持安静"
+
+
+def test_第91刀_两处以上时刻列表不对账():
+    """无法判定哪个列表对应拍界 ⇒ 宁可不动（失败面收窄，不误改模型的话）。"""
+    sync = "foley at 0s、5s and the echo tail at 2s、8s"
+
+    assert video_prompt.reconcile_sync_with_beats(sync, [0, 3, 6]) == sync
+
+
+def test_第91刀_时刻散落一处列表之外时不对账():
+    """`0s、3s and 6s` 只有一处逗号/顿号列表，但串里还有第三个时刻游离在外 ⇒
+    逐位替换会只改前两个、留下错位的 6s ⇒ 整条不对账。"""
+    sync = "hits at 0s、5s and 9s"
+
+    assert video_prompt.reconcile_sync_with_beats(sync, [0, 3, 6]) == sync
+
+
+def test_第91刀_无时刻或单时刻的同步逐字节不变():
+    for sync in ("按自然节奏推进", "每 2 秒卡拍", "thrust beats land on the flesh-smacking hits"):
+        assert video_prompt.reconcile_sync_with_beats(sync, [0, 3, 6]) == sync
+
+
+def test_第91刀_对账幂等且拍点已正确时不变():
+    starts = [0, 3, 6]
+    once = video_prompt.reconcile_sync_with_beats("beats land at 0s, 5s, 9s", starts)
+    assert once == "beats land at 0s, 3s, 6s"
+    assert video_prompt.reconcile_sync_with_beats(once, starts) == once
+    # 已经等于真实拍点 ⇒ 逐字节返回原串
+    assert video_prompt.reconcile_sync_with_beats("beats land at 0s, 3s, 6s", starts) == \
+        "beats land at 0s, 3s, 6s"
+
+
+def test_第91刀_时刻数与拍数不等时整列表换成真实拍点():
+    """列表长度与拍数不一致 ⇒ 逐位换会留下多/少一格 ⇒ 整串换成 ④ 的真实拍点（拍点是唯一真源）。"""
+    got = video_prompt.reconcile_sync_with_beats("hits at 0s、4s、7s、9s", [0, 3, 6])
+
+    assert got == "hits at 0s、3s、6s"
+
+
+def test_第91刀_拍点取不到时音频段逐字节不变():
+    """beat_starts 为空（④ 没解析出拍界）⇒ 完全不碰 ⑤，零回归兜底。"""
+    sync = "action beats land at 0s, 5s, 9s"
+
+    assert video_prompt.reconcile_sync_with_beats(sync, []) == sync
+    p = video_prompt.compile_climax_video_prompt(_three_beat_spec(sync), duration_hint=10)
+    assert "同步=action beats land at 0s, 3s, 6s" in p  # 正例仍在（防这条用例写反）
+
+
+def test_第91刀_firstlast不吃拍点对账():
+    """首尾帧链覆盖整段楼层、④ 走的是另一套分段（[转场起点/过渡/终点]），
+    没有可对齐的拍界 ⇒ 不传 beat_starts ⇒ ⑤ 逐字节等于旧文案。"""
+    spec = _three_beat_spec("action beats land at 0s, 5s, 9s")
+    p = video_prompt.compile_firstlast_video_prompt(spec)
+
+    assert "同步=action beats land at 0s, 5s, 9s" in p
+
+
+def test_第91刀_beat_starts_from_segments_解析与容错():
+    assert video_prompt.beat_starts_from_segments("0–3s｜a\n3–6s｜b\n6–10s｜c") == [0, 3, 6]
+    assert video_prompt.beat_starts_from_segments("") == []
+    assert video_prompt.beat_starts_from_segments("[元信息]：10 seconds\n0–1s｜a") == [0]
+
+
 # ── 2026-10-25 提示词模版：骨架覆盖（skeleton）────────────────────────────────
 # 设计合同：skeleton=None 与全部缺省字段 ⇒ 与既有输出逐字节相同（上方 62 例即锁）；
 # 骨架只覆盖文案/顺序/词表/默认值，不改分镜/参考绑定/缺图守卫/画幅派生。
@@ -1523,7 +1628,14 @@ def test_climax_pov_declaration_and_limb_facts_land_in_meta():
 
 
 def test_climax_pov_meta_adds_no_meta_language():
-    """第 68 刀措辞纪律延伸到视频侧：只写「具体部位＋位置」，不写解释句／元语言。"""
+    """① 只禁**元语言**，不禁归属解释（第 90 刀收窄，语义变更需复核）。
+
+    本锁原为第 68 刀措辞纪律的视频侧延伸——当时读成「① 里不写任何解释句」，产物就是一串
+    裸肢体 tag，没有说明那双手是谁的。用户 2026-11-05 判据「肯定是要解释信息归属于哪个对象的，
+    短句是不够用的」推翻的是**那一半**；禁词表本身不变：被禁的是模型无从对应的**英文元语言**
+    （`narrator`／`camera`／`point of view`）与第 68 刀点名的三种「读不懂」的中文说法
+    （「叙述者」「镜头即」「不出现在画面」）。归属句用画面里看得见的名词写，不落在禁表上。
+    """
     p = video_prompt.compile_climax_video_prompt(
         {**_spec(camera="", composition=""), "viewpoint": "first_person",
          "narrator_limbs": list(_POV_LIMBS)}, pending_frame=True)
@@ -1594,10 +1706,11 @@ def test_frame_limb_facts_reads_only_the_tag_line():
 
 
 def test_climax_pov_drops_the_whole_person_subject_prefix():
-    """④ 护栏：第一人称下「整人指称」不再被补成画面里的第二个完整人物。
+    """④ 护栏：第一人称下「整人指称」换成**归属主语**，既不写第二个全身，也不交白卷。
 
-    第 83 刀把被剔主句的主语放回句首（`The man，承接图片1…`），本刀只在这一档删掉那半句、
-    保留回指＋从句——代价是这一拍由谁做动作含糊一拍，换取口径正确（用户定案）。
+    第 83 刀把被剔主句的主语放回句首（`The man，承接图片1…`）⇒ 第 84 刀删掉那半句、只留回指；
+    第 90 刀按用户判据把空着的那半句补成 `_POV_BEAT_ACTOR`——名词中心是**肢体**、定语说明归属，
+    于是「谁在做这一拍」有答案，而画面里仍然只有伸进来的那一处，没有第二个全身。
     """
     beats = {"action_sequence": [
         {"beat": "延伸",
@@ -1605,7 +1718,7 @@ def test_climax_pov_drops_the_whole_person_subject_prefix():
     ]}
     pov = _beat_actions(video_prompt.compile_climax_video_prompt(
         {**_spec(camera=""), **beats, "viewpoint": "first_person"}, pending_frame=True))
-    assert pov[0].startswith(video_prompt._FRAME_ANAPHORA)
+    assert pov[0].startswith(video_prompt._POV_BEAT_ACTOR + "，" + video_prompt._FRAME_ANAPHORA)
     assert "The man" not in pov[0]
     assert "her shoulders rock with each count" in pov[0]
     # 中文整人指称同判
@@ -1613,6 +1726,33 @@ def test_climax_pov_drops_the_whole_person_subject_prefix():
         {**_spec(camera=""), "viewpoint": "first_person", "action_sequence": [
             {"beat": "延伸", "desc": "他弓起背，她的手指扣紧台沿"}]}, pending_frame=True)
     assert "他，" not in zh
+
+
+def test_第90刀_pov_beat_actor_is_a_limb_owned_by_the_camera_holder():
+    """归属主语的形状约束：中心语是肢体、有归属定语、不带任何人物全身名词。"""
+    actor = video_prompt._POV_BEAT_ACTOR
+    assert "肢体" in actor and "镜头" in actor
+    for whole_person in ("男", "人，", "man", "he ", "青年", "男子"):
+        assert whole_person not in actor, whole_person
+    # 与 ① 的归属主句同一口径（两句互相解释，不新造第三种说法）
+    assert "镜头后面那一位" in actor and "镜头后面那一位" in video_prompt._POV_LIMB_OWNER_CLAIM
+
+
+def test_第90刀_ownership_claim_lands_only_where_there_are_limb_facts():
+    """① 的归属主句跟着肢体事实走：有事实才解释（没有指代对象时写了只是白占字数）。"""
+    with_limbs = _meta(video_prompt.compile_climax_video_prompt(
+        {**_spec(camera=""), "viewpoint": "first_person",
+         "narrator_limbs": list(_POV_LIMBS)}, pending_frame=True))
+    assert video_prompt._POV_LIMB_OWNER_CLAIM in with_limbs
+    # 主句排在裸 tag 之前，模型先读到归属、再读事实列表
+    assert with_limbs.index(video_prompt._POV_LIMB_OWNER_CLAIM) < with_limbs.index(_POV_LIMBS[0])
+
+    without_limbs = _meta(video_prompt.compile_climax_video_prompt(
+        {**_spec(camera=""), "viewpoint": "first_person"}, pending_frame=True))
+    assert video_prompt._POV_LIMB_OWNER_CLAIM not in without_limbs
+    # 第三人称零回归：不新增一个字符（与 84 刀那条逐字节锁同源，这里补归属之后的形态）
+    plain = _meta(video_prompt.compile_climax_video_prompt(_spec(), pending_frame=True))
+    assert video_prompt._POV_LIMB_OWNER_CLAIM not in plain
 
 
 def test_climax_third_person_keeps_the_subject_prefix():

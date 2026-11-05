@@ -1667,6 +1667,90 @@ def test_extract_video_action_plan_climax_allows_coherent_extension(monkeypatch)
     assert "更早或更晚时段的动作不得进入本序列" in system
 
 
+def test_第91刀_climax合同钉死画框上限与视线事实(monkeypatch):
+    """第 91 刀（2026-11-05 真机试跑读数）：② 的 climax 动作规则补三条上限。
+
+    证据全部来自 21:27 那一轮**试跑**（prompt_only、零云端）的同一份成稿：
+
+    ❶ 0–3s 首拍 338 字＝④ 全部描述字数（639）的 **53 %**，内容是把 ③ 的衣着清单重列一遍。
+       旧 rule 1 原文就写着「desc[0] 只能复述定格帧里已经存在的视觉状态（谁、什么姿态、
+       在何处、**穿什么**、机位是什么）」⇒ **这不是模型失守，是合同自己要求的重复**。
+       所以这一条是**改设计**：定格状态仍要复述（锚住起点），但衣着/外貌归 ③，desc[0] 不许重列。
+    ❷ 3–6s 写 `one boot pivoting on the floor`：图片成稿既无 `boot` 也无 `floor`（逐字实测
+       False），景别还是 `cowboy shot`。旧句只禁「道具、家具、装置、新人物」，
+       **没禁画框外的身体部位与地面** ⇒ ① 那句「不引入画面之外的元素、部位或道具」在 ② 无对应。
+    ❸ 6–10s 写 `her golden eyes lift toward the viewer`，而定格帧锚点「他拉开门…」**没有任何
+       视线事实**。图片侧早已定案「视线方向按本轮画面写，⛔ 不得默认或强制让角色看向镜头」
+       （`image_prompt_profiles/_base.py` 第 31→33→42 刀那条），视频 ② 从没写这一条。
+       ⚠ 口径要说准：`viewer` **本身不是禁词**——事实明写看向镜头（＝看向叙事者）时正该写
+       `toward the viewer`；禁的是**凭空**。⇒ 本刀⛔ 不把 `viewer` 加进元语言禁词表。
+    """
+    calls: list[tuple[str, str]] = []
+
+    def fake_chat(base, key, model, system, user, **_kw):
+        calls.append((system, user))
+        return '{"action_sequence":[{"beat":"定格起点","desc":"she stands in the doorway"}]}'
+
+    monkeypatch.setattr(asc._llm, "chat", fake_chat)
+    asc._extract_video_action_plan(
+        _ctx(), {"narrative": "他拉开门，走廊尽头的灯从她背后斜切过来。"},
+        video_mode="climax", anchor="他拉开门，走廊尽头的灯从她背后斜切过来。",
+    )
+    system = calls[0][0]
+
+    # ❶ 衣着清单归 ③
+    assert "外貌与衣着清单归 subject_scene" in system
+    assert "不得在 desc[0] 把衣着重列一遍" in system
+    # ❷ 画框上限扩到身体部位与地面
+    assert "也不得引入画框里装不下的身体部位或地面" in system
+    # ❸ 视线/朝向按事实，禁的是凭空
+    assert "不得凭空用 `toward the viewer`／`at the camera` 把方向交给镜头" in system
+    assert "只有定格帧或正文明写看向镜头时才许写" in system
+
+    # 既有三条锁的锚点必须逐字还在（别的用例按 substring 断言它们）
+    assert "desc[0] 只能复述定格帧里已经存在的视觉状态" in system
+    assert "不得凭空引入画面里还没有的道具、家具、装置或新人物" in system
+    assert "不得换场景、不得跳时段" in system
+
+    # 元语言禁词表**仍只有三词**（第 90 刀口径）。它挂在第一人称支上，所以要另开一次
+    # 带 `viewpoint` 的调用才看得见；⛔ 本刀没把 `viewer` 塞进这张表——事实明写看向镜头时
+    # 正该写 `toward the viewer`，禁的是「凭空」（见上面 ❸ 的措辞）。
+    asc._extract_video_action_plan(
+        _ctx(), {"narrative": "他拉开门，走廊尽头的灯从她背后斜切过来。",
+                 "viewpoint": "first_person"},
+        video_mode="climax", anchor="他拉开门，走廊尽头的灯从她背后斜切过来。",
+    )
+    pov_system = calls[1][0]
+    assert "`narrator`／`camera`／`point of view` 这类元语言" in pov_system
+    # 三条新上限与取景合同共存，且顺序不变（rule 1 → 取景 → rule 2）
+    assert "不得凭空用 `toward the viewer`" in pov_system
+    assert pov_system.index("desc[0] 只能复述定格帧里已经存在的视觉状态") \
+        < pov_system.index("【取景·第一人称】") \
+        < pov_system.index("2. subject_scene 只描述在场角色")
+
+
+def test_第91刀_firstlast不吃这三条上限(monkeypatch):
+    """零回归锁：三条新句只进 climax 支的 action_rule，首尾帧（覆盖整段楼层）原样不动。"""
+    calls: list[tuple[str, str]] = []
+
+    def fake_chat(base, key, model, system, user, **_kw):
+        calls.append((system, user))
+        return '{"action_sequence":[{"beat":"起点","desc":"she kneels"}]}'
+
+    monkeypatch.setattr(asc._llm, "chat", fake_chat)
+    asc._extract_video_action_plan(
+        _ctx(), {"narrative": "她跪在石板上，手腕扯动锁链。"},
+        video_mode="firstlast", anchor="她跪在石板上。", image_prompt="a, b, c",
+    )
+    system = calls[0][0]
+    for absent in ("外貌与衣着清单归 subject_scene",
+                   "也不得引入画框里装不下的身体部位或地面",
+                   "把方向交给镜头"):
+        assert absent not in system
+    # 旧文案仍在（另有一条 firstlast 逐字锁守着它）
+    assert "desc[0] 必须对应当前高潮图的定格动作" in system
+
+
 def test_extract_video_action_plan_climax_bounds_to_its_own_frame(monkeypatch):
     """多批次切段刀：把动作范围写成「上一格 → 本格 → 下一格」，同场景 N 张不再各演一遍。
 
@@ -1793,6 +1877,15 @@ def test_extract_video_action_plan_第一人称取景合同只吃viewpoint(monke
     assert "本帧已核定「叙事者在画面里可见的部位」＝" + limbs[0] in system
     assert "不得把叙事者写成第三个完整人物" in system
     assert "也不得在其中写 `narrator`／`camera`／`point of view` 这类元语言" in system
+    # 第 90 刀（用户判据「肯定是要解释信息归属于哪个对象的，短句是不够用的」）：
+    # 合同从「部位＋位置」升级到「部位＋位置＋归属」，并把真机那条裸短语点名为反例。
+    # 病灶在**这一层**——`a pair of hands … gripping her waist` 是按旧合同写出来的，
+    # 归属没被要求，编译层只能在下游补闸，补不回已经丢掉的信息。
+    assert "具体部位＋位置＋归属" in system
+    assert "归属不许省略" in system
+    assert "`a pair of hands gripping her waist`" in system
+    # 部位名单只给部位 ⇒ 必须提醒「逐字照抄会丢归属」（名单与 desc 的措辞不同源）
+    assert "逐字照抄进 desc 会丢掉归属" in system
     # 合同夹在规则 1 与规则 2 之间 ⇒ 原 action_rule 文案一字不动
     assert system.index("desc[0] 只能复述定格帧里已经存在的视觉状态") \
         < system.index("【取景·第一人称】") < system.index("2. subject_scene 只描述在场角色")
