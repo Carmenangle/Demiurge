@@ -250,3 +250,72 @@ def test_dict_widgets_values有schema时仍保留format动态子控件(monkeypat
         "frame_rate": 24, "format": "video/h264-mp4",
         "crf": 19, "pix_fmt": "yuv420p10le", "save_metadata": False,
     }
+
+
+def test_rgthree_power_lora_loader动态槽展开为lora_n输入():
+    """rgthree 的 LoRA 槽是运行期动态输入（INPUT_TYPES 里只有 model/clip），
+    object_info 和内置 WIDGET_NAMES 都看不到它们。widgets_values 里带 "lora"
+    键的对象必须按顺序还原成 lora_1..N，否则整段 LoRA 在提交前被静默丢掉。"""
+    workflow = {
+        "nodes": [{
+            "id": 1446,
+            "type": "Power Lora Loader (rgthree)",
+            "inputs": [],
+            "widgets_values": [
+                {},
+                {"type": "PowerLoraLoaderHeaderWidget"},
+                {"on": True, "lora": "style.safetensors", "strength": 0.8, "strengthTwo": None},
+                {"on": False, "lora": "role.safetensors", "strength": 0.6, "strengthTwo": None},
+                {},
+                "",
+            ],
+        }],
+        "links": [],
+    }
+
+    api = workflow_convert.ui_to_api(workflow)
+
+    assert api["1446"]["inputs"] == {
+        "lora_1": {"on": True, "lora": "style.safetensors", "strength": 0.8, "strengthTwo": None},
+        "lora_2": {"on": False, "lora": "role.safetensors", "strength": 0.6, "strengthTwo": None},
+    }
+
+
+def test_rgthree_power_lora_loader空槽不留widget键():
+    workflow = {
+        "nodes": [{
+            "id": 1384,
+            "type": "Power Lora Loader (rgthree)",
+            "inputs": [],
+            "widgets_values": [{}, {"type": "PowerLoraLoaderHeaderWidget"}, {}, ""],
+        }],
+        "links": [],
+    }
+
+    api = workflow_convert.ui_to_api(workflow)
+
+    assert api["1384"]["inputs"] == {}
+
+
+def test_rgthree_power_lora_loader保留model连线并展开lora槽():
+    workflow = {
+        "nodes": [
+            {"id": 10, "type": "UNETLoader", "inputs": [],
+             "widgets_values": ["m.safetensors", "default"]},
+            {
+                "id": 1446,
+                "type": "Power Lora Loader (rgthree)",
+                "inputs": [{"name": "model", "link": 7}],
+                "widgets_values": [
+                    {"type": "PowerLoraLoaderHeaderWidget"},
+                    {"on": True, "lora": "a.safetensors", "strength": 1, "strengthTwo": None},
+                ],
+            },
+        ],
+        "links": [[7, 10, 0, 1446, 0, "MODEL"]],
+    }
+
+    api = workflow_convert.ui_to_api(workflow)
+
+    assert api["1446"]["inputs"]["model"] == ["10", 0]
+    assert "lora_1" in api["1446"]["inputs"]

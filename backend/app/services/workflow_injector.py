@@ -9,16 +9,27 @@ from copy import deepcopy
 
 _TEXT_FIELDS = ("text", "string", "prompt", "positive")
 _LORA_LOADERS = {"LoraLoader", "LoraLoaderModelOnly"}
+# 动态槽 LoRA 加载器：槽位是 API 图里的 lora_N 对象输入，不是 schema 字段
+# （ui_to_api 的 _DYNAMIC_SLOT_WIDGETS 负责把 widgets_values 展开成这一形态）。
+_LORA_ADAPTERS = {"Power Lora Loader (rgthree)"}
 
 
 def disable_all_loras(api: dict) -> None:
-    """无 LoRA 模式保留图结构，但令所有标准 LoRA 加载器不产生影响。"""
+    """无 LoRA 模式保留图结构，但令所有 LoRA 加载器不产生影响。"""
     for node in api.values():
-        if not isinstance(node, dict) or node.get("class_type") not in _LORA_LOADERS:
+        if not isinstance(node, dict):
+            continue
+        class_type = node.get("class_type")
+        if class_type not in _LORA_LOADERS and class_type not in _LORA_ADAPTERS:
             continue
         inputs = node.setdefault("inputs", {})
+        if class_type in _LORA_ADAPTERS:
+            for key, value in inputs.items():
+                if key.startswith("lora_") and isinstance(value, dict):
+                    value["on"] = False
+            continue
         inputs["strength_model"] = 0
-        if node.get("class_type") == "LoraLoader":
+        if class_type == "LoraLoader":
             inputs["strength_clip"] = 0
 
 
@@ -30,9 +41,22 @@ def inject_lora_stack(api: dict, anchor_node_id: str, loras: list[dict]) -> bool
     if not stack or not isinstance(anchor, dict):
         return False
     class_type = str(anchor.get("class_type") or "")
+    anchor_inputs = anchor.setdefault("inputs", {})
+    if class_type in _LORA_ADAPTERS:
+        # 锚点语义与标准 loader 一致：模板在锚点上的条目被本次所选 LoRA 替换
+        # （模板要保底就开 preserve_loras，提交层会整段跳过 LoRA 处理）。
+        for key in [name for name in anchor_inputs if name.startswith("lora_")]:
+            del anchor_inputs[key]
+        for index, item in enumerate(stack, start=1):
+            anchor_inputs[f"lora_{index}"] = {
+                "on": True,
+                "lora": str(item["name"]),
+                "strength": float(item.get("weight", 0.8)),
+                "strengthTwo": None,
+            }
+        return True
     if class_type not in _LORA_LOADERS:
         return False
-    anchor_inputs = anchor.setdefault("inputs", {})
 
     def apply_values(inputs: dict, item: dict) -> None:
         weight = float(item.get("weight", 0.8))
@@ -70,6 +94,63 @@ def inject_lora_stack(api: dict, anchor_node_id: str, loras: list[dict]) -> bool
                 if output_index == 0 or (class_type == "LoraLoader" and output_index == 1):
                     node["inputs"][key] = [previous_id, output_index]
     return True
+
+
+def pick_lora_anchor(api: dict, exposed: list[dict]) -> str:
+    """选 LoRA 注入锚点：模板标注优先，未标注时自动发现动态槽加载器。
+
+    自动发现只认 _LORA_ADAPTERS——标准 loader 仍要求模板显式标注，避免在
+    多加载器模板里猜错节点。优先取模型链末端（不被另一个 LoRA 加载器当作
+    model/clip 源的那一个），让新 LoRA 串在既有栈之后。
+    """
+    explicit = next((
+        str(field.get("node_id") or "") for field in exposed
+        if str(field.get("node_id") or "") in api
+        and (
+            str(field.get("binding") or "") == "lora_name"
+            or (str(field.get("semantic") or "") == "lora_name"
+                and str(field.get("field") or "") != "lora_name")
+        )
+    ), "")
+    if explicit:
+        return explicit
+    adapters = [
+        node_id for node_id, node in api.items()
+        if isinstance(node, dict) and node.get("class_type") in _LORA_ADAPTERS
+    ]
+    if not adapters:
+        return ""
+    adapter_ids = set(adapters)
+    referenced = {
+        str(value[0])
+        for node_id in adapters
+        for value in (api[node_id].get("inputs") or {}).values()
+        if isinstance(value, list) and len(value) == 2 and str(value[0]) in adapter_ids
+    }
+    for node_id in adapters:
+        if node_id not in referenced:
+            return node_id
+    return adapters[0]
+
+
+def unsupported_lora_types(api: dict) -> list[str]:
+    """API 图里出现、但注入/关闭都不认识的执行型 LoRA 节点类型（用于 422 文案）。
+
+    文本形态的 UI 栈（class_type 含 uionly）不执行 LoRA，不列入。
+    """
+    found: list[str] = []
+    for node in api.values():
+        if not isinstance(node, dict):
+            continue
+        class_type = str(node.get("class_type") or "")
+        lowered = class_type.lower()
+        if "lora" not in lowered or "uionly" in lowered:
+            continue
+        if class_type in _LORA_LOADERS or class_type in _LORA_ADAPTERS:
+            continue
+        if class_type not in found:
+            found.append(class_type)
+    return found
 
 
 def _coerce_number(value: str):

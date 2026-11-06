@@ -196,3 +196,74 @@ def test_首帧尺寸缺失时保留模板连线():
 
     assert api["329"]["inputs"]["width"] == [59, 0]
     assert api["329"]["inputs"]["height"] == [59, 1]
+
+
+def test_无lora模式关闭rgthree动态槽但保留条目():
+    api = {"1446": {"class_type": "Power Lora Loader (rgthree)", "inputs": {
+        "model": ["1", 0],
+        "lora_1": {"on": True, "lora": "a.safetensors", "strength": 1, "strengthTwo": None},
+        "lora_2": {"on": True, "lora": "b.safetensors", "strength": 0.5, "strengthTwo": None},
+    }}}
+    workflow_injector.disable_all_loras(api)
+
+    assert api["1446"]["inputs"]["lora_1"]["on"] is False
+    assert api["1446"]["inputs"]["lora_2"]["on"] is False
+    assert api["1446"]["inputs"]["lora_1"]["lora"] == "a.safetensors"  # 条目保留，只关开关
+    assert api["1446"]["inputs"]["model"] == ["1", 0]
+
+
+def test_注入lora替换rgthree动态槽的模板条目():
+    api = {"1446": {"class_type": "Power Lora Loader (rgthree)", "inputs": {
+        "model": ["1", 0],
+        "lora_1": {"on": True, "lora": "template.safetensors", "strength": 0.8, "strengthTwo": None},
+    }}}
+
+    assert workflow_injector.inject_lora_stack(api, "1446", [
+        {"name": "role.safetensors", "weight": 0.9},
+        {"name": "style.safetensors", "weight": 0.5},
+    ]) is True
+
+    inputs = api["1446"]["inputs"]
+    assert inputs["model"] == ["1", 0]
+    assert inputs["lora_1"] == {
+        "on": True, "lora": "role.safetensors", "strength": 0.9, "strengthTwo": None,
+    }
+    assert inputs["lora_2"] == {
+        "on": True, "lora": "style.safetensors", "strength": 0.5, "strengthTwo": None,
+    }
+    assert "lora_3" not in inputs
+    assert all(
+        value.get("lora") != "template.safetensors"
+        for value in inputs.values() if isinstance(value, dict)
+    )
+
+
+def test_没有标注时锚点落到模型链末端的rgthree节点():
+    api = {
+        "1504": {"class_type": "Power Lora Loader (rgthree)", "inputs": {"model": ["1", 0]}},
+        "1446": {"class_type": "Power Lora Loader (rgthree)", "inputs": {"model": ["1504", 0]}},
+        "30": {"class_type": "KSampler", "inputs": {"model": ["1446", 0]}},
+    }
+
+    assert workflow_injector.pick_lora_anchor(api, []) == "1446"
+
+
+def test_模板标注的锚点优先于自动发现():
+    api = {
+        "20": {"class_type": "LoraLoaderModelOnly", "inputs": {}},
+        "1446": {"class_type": "Power Lora Loader (rgthree)", "inputs": {}},
+    }
+    exposed = [{"node_id": "20", "field": "lora_name", "binding": "lora_name"}]
+
+    assert workflow_injector.pick_lora_anchor(api, exposed) == "20"
+
+
+def test_只列出未适配的执行型lora节点():
+    api = {
+        "1": {"class_type": "AceStepSFTLoraLoader", "inputs": {}},
+        "2": {"class_type": "WeiLinPromptUIOnlyLoraStack", "inputs": {}},
+        "3": {"class_type": "LoraLoader", "inputs": {}},
+        "4": {"class_type": "Power Lora Loader (rgthree)", "inputs": {}},
+    }
+
+    assert workflow_injector.unsupported_lora_types(api) == ["AceStepSFTLoraLoader"]

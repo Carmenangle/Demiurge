@@ -76,6 +76,15 @@ def _widget_names_from_node(node: dict) -> list[str]:
 # 这些 widget 后面会额外跟一个 UI-only 控件值（control_after_generate），消费时要多吃一格
 _SEED_LIKE = {"seed", "noise_seed", "rand_seed"}
 
+# 动态槽节点：widgets_values 里的对象条目在 API 图里是**具名输入**，但 INPUT_TYPES
+# 里没有它们（schema 查不到）。rgthree 的 Power Lora Loader 是代表：
+#   widgets_values = [{}, {type:"PowerLoraLoaderHeaderWidget"}, {on,lora,strength,strengthTwo}, …]
+# ⇒ API 输入 lora_1..N，顺序即应用顺序（load_loras 只认 LORA_ 前缀）。
+# 不展开这条，模板自带的 LoRA 会在转换时整段丢失——开没开都一样。
+_DYNAMIC_SLOT_WIDGETS: dict[str, tuple[str, str]] = {
+    "Power Lora Loader (rgthree)": ("lora", "lora_"),
+}
+
 
 def ui_to_api(workflow: dict, comfy_url: str = "") -> dict:
     """UI 格式 → API 格式。非 UI 格式（已是 API）原样返回。
@@ -177,7 +186,18 @@ def ui_to_api(workflow: dict, comfy_url: str = "") -> dict:
         # 必须逐位对齐消费——连线位也照样占一格（跳过赋值），seed 类后面多占一格
         # control_after_generate。否则后面的值会整体错位（如 sampler_name 取到数字）。
         widgets = node.get("widgets_values")
-        if isinstance(widgets, list) and widgets:
+        dynamic_slots = _DYNAMIC_SLOT_WIDGETS.get(ntype)
+        if dynamic_slots and isinstance(widgets, list) and widgets:
+            marker, prefix = dynamic_slots
+            slot = 0
+            for value in widgets:
+                if not isinstance(value, dict) or marker not in value:
+                    continue
+                slot += 1
+                key = f"{prefix}{slot}"
+                if key not in linked_names:
+                    inputs[key] = dict(value)
+        elif isinstance(widgets, list) and widgets:
             node_names = _widget_names_from_node(node)
             schema_names = _widget_names_for(ntype, object_info)
             names = node_names or schema_names

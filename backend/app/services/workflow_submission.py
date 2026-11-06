@@ -83,16 +83,15 @@ def submit_template(template_id: str, values: dict[str, object], prompt: str = "
         if lora_mode == "none" or not loras:
             workflow_injector.disable_all_loras(api)
         elif loras:
-            lora_node_id = next((
-                str(field.get("node_id") or "") for field in template.get("exposed", [])
-                if str(field.get("binding") or "") == "lora_name"
-                or (str(field.get("semantic") or "") == "lora_name"
-                    and str(field.get("field") or "") != "lora_name")
-            ), "")
+            lora_node_id = workflow_injector.pick_lora_anchor(
+                api, template.get("exposed", []),
+            )
             if not workflow_injector.inject_lora_stack(api, lora_node_id, loras):
-                raise WorkflowSubmissionError(
-                    422, "模板没有已标注且受支持的 LoRA 加载器，无法应用所选 LoRA 模式",
-                )
+                detail = "模板没有已标注且受支持的 LoRA 加载器，无法应用所选 LoRA 模式"
+                unsupported = workflow_injector.unsupported_lora_types(api)
+                if unsupported:
+                    detail += f"；检测到未适配的 LoRA 节点：{'、'.join(unsupported)}"
+                raise WorkflowSubmissionError(422, detail)
     _uniquify_output_filenames(api)
     reranker.release_accelerator_memory()
     lease = model_lease.acquire(

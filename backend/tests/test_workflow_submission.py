@@ -307,3 +307,63 @@ def test_保留模板自带LoRA时外部角色LoRA不串入(monkeypatch, tmp_pat
     assert api["20"]["inputs"]["lora_name"] == "minimax_h3_turbo_v4_step600_ema.safetensors"
     assert api["20"]["inputs"]["strength_model"] == 1.0
     assert "32" not in api
+
+
+def test_模板只有rgthree动态槽时也能注入所选LoRA(tmp_path, monkeypatch):
+    """模板没有手标 lora_name、只有 Power Lora Loader 时，锚点自动落到模型链末端；
+    模板原有条目被本次所选 LoRA 替换（与标准 loader 的锚点语义一致）。"""
+    source = tmp_path / "workflow.json"
+    source.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(workflow_submission.template_store, "get_template", lambda _id: {
+        "source_path": str(source), "exposed": [], "prompt_node_id": "",
+    })
+    _ready(monkeypatch)
+    monkeypatch.setattr(workflow_submission, "ui_to_api", lambda _graph, _url: {
+        "1504": {"class_type": "Power Lora Loader (rgthree)", "inputs": {"model": ["10", 0]}},
+        "1446": {"class_type": "Power Lora Loader (rgthree)", "inputs": {
+            "model": ["1504", 0],
+            "lora_1": {"on": True, "lora": "template.safetensors", "strength": 0.8,
+                       "strengthTwo": None},
+        }},
+        "30": {"class_type": "KSampler", "inputs": {"model": ["1446", 0]}},
+    })
+    captured = {}
+    monkeypatch.setattr(workflow_submission.reranker, "release_accelerator_memory", lambda: None)
+    monkeypatch.setattr(
+        workflow_submission.comfyui_client,
+        "submit_prompt",
+        lambda _url, api, _client_id: captured.setdefault("api", api) or "prompt-1",
+    )
+
+    workflow_submission.submit_template(
+        "template-1", {}, "", "http://127.0.0.1:8188",
+        loras=[{"name": "role.safetensors", "weight": 0.9}],
+    )
+
+    inputs = captured["api"]["1446"]["inputs"]
+    assert inputs["lora_1"] == {
+        "on": True, "lora": "role.safetensors", "strength": 0.9, "strengthTwo": None,
+    }
+    assert "lora_2" not in inputs
+    assert "lora_1" not in captured["api"]["1504"]["inputs"]  # 只动锚点，上游加载器不碰
+
+
+def test_未适配lora节点时422点名节点类型(tmp_path, monkeypatch):
+    source = tmp_path / "workflow.json"
+    source.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(workflow_submission.template_store, "get_template", lambda _id: {
+        "source_path": str(source), "exposed": [], "prompt_node_id": "",
+    })
+    _ready(monkeypatch)
+    monkeypatch.setattr(workflow_submission, "ui_to_api", lambda _graph, _url: {
+        "1": {"class_type": "AceStepSFTLoraLoader", "inputs": {}},
+    })
+
+    with pytest.raises(workflow_submission.WorkflowSubmissionError) as exc_info:
+        workflow_submission.submit_template(
+            "template-1", {}, "", "http://127.0.0.1:8188",
+            loras=[{"name": "role.safetensors", "weight": 0.8}],
+        )
+
+    assert exc_info.value.status == 422
+    assert "AceStepSFTLoraLoader" in str(exc_info.value.detail)

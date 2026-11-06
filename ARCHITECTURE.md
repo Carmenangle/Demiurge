@@ -2134,3 +2134,29 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
    （`_wb_bridge_chain` 正文序 / 主图前置的起点回退）、`test_roleplay_turn.py`（`bridge_prev_slot`
    标注与不标注两路）、`useIllustrationChain.test.tsx`（段桥链 6 例 + `waitForSlotMedia` 5 例）、
    `chatSessionEvents.test.ts`（`batch_index` 落点）、`chatStreamProtocol.b1Contract.test.ts`（wire 解码）。
+83. **动态槽 LoRA 节点（rgthree `Power Lora Loader`）：转换展开成具名输入 + 注入替换锚点槽位 + 锚点自动发现（2026-11-06 第 97 刀）**：
+   这类节点的 LoRA 槽是 `widgets_values` 里的对象条目（`{on, lora, strength, strengthTwo?}`），
+   `INPUT_TYPES` 只声明 `model`/`clip`，槽名 `lora_1..N` 在 `/object_info` 里**查不到** ⇒ 旧 `ui_to_api`
+   按声明顺序对齐时整段丢弃，模板自带的 LoRA（无论开没开）在提交图里根本不存在。三层同刀落地：
+   ① **转换展开**（`workflow_convert._DYNAMIC_SLOT_WIDGETS`，类型 →「条目标记键 + 输入前缀」）：
+   遇该类型且 `widgets_values` 是列表时，按顺序把含标记键（`lora`）的对象条目写成 `lora_1..N`；
+   空槽、头部标记（`PowerLoraLoaderHeaderWidget`）、空串跳过；`linked_names` 仍优先，
+   `model`/`clip` 连线不被 widget 覆盖。
+   ② **注入适配**（`workflow_injector._LORA_ADAPTERS`）：`disable_all_loras` 把 `lora_*` 条目的 `on` 置 false
+   （保留条目与文件名，便于画布回显；标准 `LoraLoader`/`LoraLoaderModelOnly` 仍走 strength 归零）；
+   `inject_lora_stack` 对适配器**替换**锚点自身的槽位、**不是追加**——与标准 loader 的锚点语义一致
+   （模板在锚点上的条目被本次所选 LoRA 替换；要保底就开 `preserve_loras`，提交层整段跳过 LoRA 处理）；
+   逐条写 `{on: true, lora, strength, strengthTwo: None}`（`null` 让 Python `load_loras` 回落到模型强度），
+   `model`/`clip` 连线原样保留。
+   ③ **锚点发现与失败语义**（`workflow_injector.pick_lora_anchor` / `unsupported_lora_types`）：
+   模板 `exposed` 的 `binding/semantic == "lora_name"` 仍最优先（节点必须在 API 图里）；没有标注时
+   自动发现适配器，优先**模型链末端**（没有被另一个适配器的 `model`/`clip` 输入引用的那个——替换中间
+   节点会把上游栈一起白丢），末端有多个取第一个。找不到受支持加载器 → 422，详情追加图内「未适配的
+   执行型 LoRA 节点类型」（`class_type` 含 `lora`、排除 `uionly` 与已支持类型），**绝不静默丢 LoRA**。
+   ④ **回归**：`test_workflow_convert.py` 3 例（动态槽展开／空槽不留键／`model` 连线保留）、
+   `test_workflow_injector.py` 5 例（none 关槽保留条目／注入替换／末端锚点／显式标注优先／未适配类型清单）、
+   `test_workflow_submission.py` 2 例（无标注也能注入末端适配器且不碰上游／未适配节点 422 点名类型）。
+   全量门禁（`NO_PROXY=`、不带 `-x`）：**5288 / 0F / 0E / 0S**（679.89 s，sentinel 判源码未变；
+   5278→5288 恰＝本刀 +10）；ruff / `lint-imports`（18 kept / 0 broken）/ mypy 282 files 全绿。
+   真机只读探针：krea2-AIO 节点 1446/1504 分别展开出 3/4 条真实 LoRA、锚点落 1446；Lanpaint 落 1881、
+   Anima 落 1697，三者均有下游消费者。展开见 `C/04` §3.3／§3.4 与红线 5。
