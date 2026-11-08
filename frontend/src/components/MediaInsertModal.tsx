@@ -448,8 +448,8 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
               className={`btn${firstlast ? " primary" : ""}`}
               aria-pressed={firstlast}
               onClick={() => setFirstlast(true)}
-              title="图片按剧情首尾帧（首帧+尾帧）生成；视频为全程剧情影片，含本段全部对白"
-            >首尾帧模式</button>
+              title="图片按剧情全局关键帧生成；视频为全程剧情影片，含本段全部对白"
+            >全局模式</button>
             <button
               type="button"
               className={`btn${!firstlast ? " primary" : ""}`}
@@ -460,7 +460,7 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
           </div>
           <p className="bind-hint" style={{ margin: "5px 0 0" }}>
             {firstlast
-              ? "首尾帧模式：全程覆盖剧情与对白，视频模式自动为「首尾帧剧情影片」。"
+              ? "全局模式：全程覆盖剧情与对白，视频模式自动为「首尾帧剧情影片」。"
               : "高潮点模式：高潮点单图定格，视频模式自动为「高潮点动作代入」（不带台词）。"}
           </p>
         </div>
@@ -707,7 +707,7 @@ export function MediaInsertModal({ templates, cardName, cardNames = [], modelsDi
           </label>
           <p className="bind-hint" style={{ marginTop: -8, marginBottom: 12 }}>
             定义视频提示词的区块标题/顺序、运镜文案、节奏名与默认时长（输出结构与分镜逻辑不可改）。
-            {firstlast ? "首尾帧模式含段桥转场：选「转场短桥段」模版即用于转场段。" : ""}
+            {firstlast ? "全局模式含段桥转场：选「转场短桥段」模版即用于转场段。" : ""}
           </p>
           {videoTemplateId && (
             <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, fontSize: 13 }}>

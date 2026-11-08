@@ -322,3 +322,19 @@ describe("MediaInsertModal prompt templates", () => {
     expect(html).toContain("转场短桥段");
   });
 });
+
+describe("MediaInsertModal 生图时点标签（2026-11-08：首尾帧 → 全局）", () => {
+  it("选全局时按钮/提示写「全局模式」，组内不再出现「首尾帧模式」", () => {
+    const html = renderToStaticMarkup(
+      <MediaInsertModal templates={[]} modelsDir=""
+        preset={{ templateId: "", firstlast: true }}
+        onSave={() => {}} onClose={() => {}} />,
+    );
+
+    const start = html.indexOf("生图时点");
+    const group = html.slice(start, html.indexOf("生图提示词模式", start));
+    expect(group).toContain("全局模式");
+    expect(group).toContain("全程覆盖剧情与对白");
+    expect(group).not.toContain("首尾帧模式");
+  });
+});
