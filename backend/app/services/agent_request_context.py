@@ -96,6 +96,7 @@ def from_payload(payload: Mapping[str, Any]) -> RunContext:
         prompt_profile=str(payload.get("prompt_profile") or "anima_tags"),
         prompt_profile_kind=str(payload.get("prompt_profile_kind") or ""),
         video_prompt_template_id=str(payload.get("video_prompt_template_id") or ""),
+        video_template_id=str(payload.get("video_template_id") or ""),
         appearance_source=str(payload.get("appearance_source") or "worldbook"),
         illustration_viewpoint=str(payload.get("illustration_viewpoint") or ""),
         illustration_batch_count=max(0, int(payload.get("illustration_batch_count") or 0)),

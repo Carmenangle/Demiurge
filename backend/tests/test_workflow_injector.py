@@ -17,6 +17,161 @@ def test_图像输入口为空记入缺失():
     assert missing == ["底图"]
 
 
+def test_尾帧图未提供时不算缺失且整条尾帧预处理链摘掉():
+    # 2026-11-08 实锤：H3 首帧视频模板补了 73.image（last_frame_image）后，
+    # 高潮链只带首帧 ⇒ 被当必填 422 `{"missing":["image"]}`（label 同为首帧的 image）。
+    # 真实拓扑是 73 LoadImage → 71 缩放 → 329.last_frame，只删图片节点会留下缺输入的
+    # 缩放节点 ⇒ 必须连带收掉「失去全部节点连线输入」的下游预处理节点。
+    api = {
+        "61": {"class_type": "LoadImage", "inputs": {"image": "base.png"}},
+        "73": {"class_type": "LoadImage", "inputs": {"image": "example.png"}},
+        "71": {"class_type": "ImageScale", "inputs": {"image": ["73", 0], "scale": 2}},
+        "329": {"class_type": "MiniMaxH3ImageToVideo", "inputs": {
+            "first_frame": ["61", 0], "last_frame": ["71", 0], "prompt": "",
+        }},
+    }
+    exposed = [
+        {"node_id": "61", "field": "image", "control": "image",
+         "binding": "base_image", "label": "image"},
+        {"node_id": "73", "field": "image", "control": "image",
+         "binding": "last_frame_image", "label": "image"},
+    ]
+    missing = workflow_injector.inject_template_values(
+        api, exposed, {"61.image": "uploaded.png"},
+    )
+    assert missing == []
+    assert api["61"]["inputs"]["image"] == "uploaded.png"
+    assert "73" not in api                           # 可选图节点摘掉
+    assert "71" not in api                           # 只为尾帧服务的缩放节点一并摘掉
+    assert "last_frame" not in api["329"]["inputs"]  # 不留指向已删节点的悬空连线
+    assert api["329"]["inputs"]["first_frame"] == ["61", 0]
+
+
+def test_尾帧图提供时正常注入且节点保留():
+    api = {
+        "73": {"class_type": "LoadImage", "inputs": {"image": "example.png"}},
+        "329": {"inputs": {"last_frame": ["73", 0]}},
+    }
+    exposed = [
+        {"node_id": "61", "field": "image", "control": "image", "binding": "base_image"},
+        {"node_id": "73", "field": "image", "control": "image", "binding": "last_frame_image"},
+    ]
+    missing = workflow_injector.inject_template_values(api, exposed, {
+        "61.image": "first.png", "73.image": "last.png",
+    })
+    assert missing == []
+    assert api["73"]["inputs"]["image"] == "last.png"
+    assert api["329"]["inputs"]["last_frame"] == ["73", 0]
+
+
+def test_模板只有尾帧图口时仍算必填():
+    # 可选只对「补充图口」成立：尾帧是唯一图源时缺图必须拒绝启动，不能提交空图工作流。
+    api = {"73": {"class_type": "LoadImage", "inputs": {"image": "example.png"}}}
+    exposed = [
+        {"node_id": "73", "field": "image", "control": "image",
+         "binding": "last_frame_image", "label": "尾帧"},
+    ]
+    missing = workflow_injector.inject_template_values(api, exposed, {})
+    assert missing == ["尾帧"]
+    assert "73" in api
+
+
+def test_参考图缺图时摘节点且不算缺失():
+    """第 100 刀：图片3+ 是补充口——缺哪张摘哪张（含只为它供输入的缩放下游）。"""
+    api = {
+        "61": {"class_type": "LoadImage", "inputs": {"image": "base.png"}},
+        "132": {"class_type": "LoadImage", "inputs": {"image": "example.png"}},
+        "129": {"class_type": "ImageScale", "inputs": {"image": ["132", 0], "scale": 2}},
+        "108": {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": {
+            "ref_images.ref_image_0": ["61", 0],
+            "ref_images.ref_image_2": ["129", 0],
+            "prompt": "",
+        }},
+    }
+    exposed = [
+        {"node_id": "61", "field": "image", "control": "image", "binding": "first_frame_image"},
+        {"node_id": "132", "field": "image", "control": "image", "binding": "reference_image_1"},
+    ]
+    missing = workflow_injector.inject_template_values(api, exposed, {"61.image": "first.png"})
+    assert missing == []
+    assert api["61"]["inputs"]["image"] == "first.png"
+    assert "132" not in api
+    assert "129" not in api
+    assert "ref_images.ref_image_2" not in api["108"]["inputs"]
+    assert api["108"]["inputs"]["ref_images.ref_image_0"] == ["61", 0]
+
+
+def test_参考图有值时正常注入():
+    api = {
+        "61": {"class_type": "LoadImage", "inputs": {"image": "base.png"}},
+        "132": {"class_type": "LoadImage", "inputs": {"image": "example.png"}},
+        "108": {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": {
+            "ref_images.ref_image_2": ["132", 0],
+        }},
+    }
+    exposed = [
+        {"node_id": "61", "field": "image", "control": "image", "binding": "first_frame_image"},
+        {"node_id": "132", "field": "image", "control": "image", "binding": "reference_image_1"},
+    ]
+    missing = workflow_injector.inject_template_values(api, exposed, {
+        "61.image": "first.png", "132.image": "ref1.png",
+    })
+    assert missing == []
+    assert api["132"]["inputs"]["image"] == "ref1.png"
+    assert api["108"]["inputs"]["ref_images.ref_image_2"] == ["132", 0]
+
+
+def test_参考音频缺音频时摘LoadAudio且不落模板默认音轨():
+    """第 100 刀：模板自带的示例 mp3 绝不能顶替对白音轨——空值必须摘节点。"""
+    api = {
+        "138": {"class_type": "LoadAudio", "inputs": {"audio": "example.mp3"}},
+        "200": {"class_type": "CLIPLoader", "inputs": {"clip_name": "t5.safetensors"}},
+        "108": {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": {
+            "clip": ["200", 0],
+            "ref_audios.ref_audio_0": ["138", 0],
+            "prompt": "",
+        }},
+    }
+    exposed = [
+        {"node_id": "138", "field": "audio", "control": "text", "binding": "reference_audio_1"},
+    ]
+    missing = workflow_injector.inject_template_values(api, exposed, {})
+    assert missing == []
+    assert "138" not in api
+    assert "ref_audios.ref_audio_0" not in api["108"]["inputs"]
+    assert api["108"]["inputs"]["clip"] == ["200", 0]
+
+
+def test_参考音频有值时写入LoadAudio():
+    api = {
+        "138": {"class_type": "LoadAudio", "inputs": {"audio": "example.mp3"}},
+        "108": {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": {
+            "ref_audios.ref_audio_0": ["138", 0],
+        }},
+    }
+    exposed = [
+        {"node_id": "138", "field": "audio", "control": "text", "binding": "reference_audio_1"},
+    ]
+    missing = workflow_injector.inject_template_values(
+        api, exposed, {"138.audio": "merged_dialogue.wav"},
+    )
+    assert missing == []
+    assert api["138"]["inputs"]["audio"] == "merged_dialogue.wav"
+    assert api["108"]["inputs"]["ref_audios.ref_audio_0"] == ["138", 0]
+
+
+def test_模板只有参考图口时仍算必填():
+    """补充口只对「已有主图口」成立；参考图是唯一图源时缺图必须拒绝启动。"""
+    api = {"132": {"class_type": "LoadImage", "inputs": {"image": "example.png"}}}
+    exposed = [
+        {"node_id": "132", "field": "image", "control": "image",
+         "binding": "reference_image_1", "label": "参考图1"},
+    ]
+    missing = workflow_injector.inject_template_values(api, exposed, {})
+    assert missing == ["参考图1"]
+    assert "132" in api
+
+
 def test_提示词注入首个常见文本字段():
     api = {"9": {"inputs": {"text": "old"}}}
     workflow_injector.inject_template_values(api, [], {}, "hello", "9")

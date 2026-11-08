@@ -91,6 +91,9 @@ class RunContext:
     prompt_profile_kind: str = ""
     # 视频提示词模版 id（builtin:<kind> / custom:<hex> / 空=内置默认骨架）
     video_prompt_template_id: str = ""
+    # 视频工作流模版 id（空=未知）：后端据此派生尾帧/参考图槽与默认时长，
+    # 提示词只声明模板真能消费的图片（不声明无人接收的「图片2/3/4」）。
+    video_template_id: str = ""
     appearance_source: str = "worldbook"  # worldbook / character_card
     # 画面人称手选（2026-09-20，UI＝多元数据插入面板按钮组）："" = 自动判定（按锚点段），
     # first_person / third_person = 用户手选优先（`scene_illustration.frame_viewpoint` 的 override）。
@@ -167,6 +170,7 @@ class RunContext:
             "prompt_profile": self.prompt_profile,
             "prompt_profile_kind": self.prompt_profile_kind,
             "video_prompt_template_id": self.video_prompt_template_id,
+            "video_template_id": self.video_template_id,
             "appearance_source": self.appearance_source,
             "illustration_viewpoint": self.illustration_viewpoint,
             "illustration_batch_count": self.illustration_batch_count,

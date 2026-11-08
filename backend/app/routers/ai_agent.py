@@ -88,6 +88,8 @@ class MultiAgentRequest(ImageAgentRequest):
     prompt_profile_kind: str = ""
     # 视频提示词模版 id（builtin:<kind> / custom:<hex> / 空=内置默认骨架）
     video_prompt_template_id: str = ""
+    # 视频工作流模版 id（空=未知）：后端据此派生尾帧/参考图槽与默认时长
+    video_template_id: str = ""
     appearance_source: Literal["worldbook", "character_card"] = "worldbook"
     illustration_viewpoint: Literal["", "first_person", "third_person"] = ""  # 画面人称手选（「多元数据插入」面板按钮组；空=按锚点段自动判定）
     illustration_batch_count: int = Field(default=0, ge=0)  # 高潮点模式批量生图数目（0/缺省=1 张；面板最小 1、无上限）

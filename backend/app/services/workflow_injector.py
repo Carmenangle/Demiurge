@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+import re
+
 from copy import deepcopy
 
 _TEXT_FIELDS = ("text", "string", "prompt", "positive")
@@ -12,6 +14,68 @@ _LORA_LOADERS = {"LoraLoader", "LoraLoaderModelOnly"}
 # 动态槽 LoRA 加载器：槽位是 API 图里的 lora_N 对象输入，不是 schema 字段
 # （ui_to_api 的 _DYNAMIC_SLOT_WIDGETS 负责把 widgets_values 展开成这一形态）。
 _LORA_ADAPTERS = {"Power Lora Loader (rgthree)"}
+# 可选图像绑定：尾帧由首尾帧链按需提供（尾帧生图失败的设计降级就是「只出首帧」）。
+# 为空时不算缺失，并把节点连同下游连线一起摘掉——否则模板自带的默认图（如
+# example.png）会悄悄成为尾帧；目标 ComfyUI 上还往往没有这张文件。
+# 模板若只暴露尾帧图（没有主图），它仍是唯一图口、照旧必填。
+_OPTIONAL_IMAGE_BINDINGS = {"last_frame_image"}
+# 第 100 刀：Ref2VA 的角色参考图/参考音频也是「补充口」——缺图/缺音频必须摘掉源节点，
+# 绝不能让模板自带的示例文件顶上来（LoadAudio 尤其危险：不摘会把示例 mp3 当对白音轨）。
+_OPTIONAL_REFERENCE_IMAGE_RE = re.compile(r"reference_image(?:_\d+)?")
+_OPTIONAL_REFERENCE_AUDIO_RE = re.compile(r"reference_audio(?:_\d+)?")
+
+
+def _is_optional_image_binding(binding: str) -> bool:
+    return binding in _OPTIONAL_IMAGE_BINDINGS or bool(
+        _OPTIONAL_REFERENCE_IMAGE_RE.fullmatch(binding)
+    )
+
+
+def _field_binding(field: dict) -> str:
+    """与前端 workflowFieldBinding 同口径：binding 优先，旧模板回退 semantic。"""
+    binding = str(field.get("binding") or "").strip()
+    if binding:
+        return binding
+    semantic = str(field.get("semantic") or "").strip()
+    field_name = str(field.get("field") or "").strip()
+    return semantic if semantic and semantic != field_name else ""
+
+
+def _drop_unused_media_node(api: dict, node_id: str) -> None:
+    """摘掉没拿到值的可选媒体节点（图片/音频），并连带收掉只因它才有输入的下游预处理节点。
+
+    可选输入（如 MiniMax H3 的 last_frame / ref_audios）缺键即按「无此输入」执行；但模板里
+    尾帧通常先经过缩放节点（73 LoadImage → 71 ImageScaleByAspectRatio → 329.last_frame），
+    只删图片节点会让缩放节点缺输入、整单校验失败。这里沿下游反复删除「失去全部
+    节点连线输入」的节点，再把指向它们的连线一并摘掉——329.last_frame 就是这样断开的。
+    """
+    if node_id not in api:
+        return
+    dead = {node_id}
+    while True:
+        grew = False
+        for other_id, node in list(api.items()):
+            if other_id in dead or not isinstance(node, dict):
+                continue
+            inputs = node.get("inputs")
+            if not isinstance(inputs, dict):
+                continue
+            lost = False
+            for key, value in list(inputs.items()):
+                if isinstance(value, list) and len(value) == 2 and str(value[0]) in dead:
+                    del inputs[key]
+                    lost = True
+            if not lost:
+                continue
+            # 还有别的节点连线 ⇒ 这个节点不只服务这张可选图，保留（其缺失输入由模板/ComfyUI 兜底）
+            if any(isinstance(value, list) and len(value) == 2 for value in inputs.values()):
+                continue
+            dead.add(other_id)
+            grew = True
+        if not grew:
+            break
+    for dead_id in dead:
+        api.pop(dead_id, None)
 
 
 def disable_all_loras(api: dict) -> None:
@@ -177,7 +241,8 @@ def inject_template_values(
     """套用暴露字段的用户值，并可选把 prompt 注入到指定节点的文本字段。
 
     - 仅覆盖模板暴露的字段（node_id.field）。
-    - 输入型（control == "image"）为空 → 记入 missing。
+    - 主图输入（control == "image"）为空 → 记入 missing；可选图口（尾帧）为空 →
+      从 API 图里摘掉该节点，不算缺失。
     - prompt 非空且 prompt_node_id 命中 → 写首个常见文本字段，否则首个字符串字段。
 
     原地修改 api，返回 missing（缺失必填项的标签列表）。
@@ -199,6 +264,11 @@ def inject_template_values(
             merged.setdefault(key, val)
         values = merged
     exposed_keys = {f"{f['node_id']}.{f['field']}" for f in exposed}
+    # 模板是否有「必填图口」：只有可选尾帧的模板不能把尾帧当可省（它是唯一图源）。
+    has_primary_image = any(
+        f.get("control") == "image" and not _is_optional_image_binding(_field_binding(f))
+        for f in exposed
+    )
     missing: list[str] = []
     for f in exposed:
         key = f"{f['node_id']}.{f['field']}"
@@ -210,9 +280,17 @@ def inject_template_values(
                 if alias and (alias in values):
                     val = values[alias]
                     break
-        # 输入型（图片）为空 → 缺失，拒绝启动
+        # 输入型（图片）为空：主图缺失拒绝启动；可选图口缺图则摘节点，绝不落回模板默认图
+        binding = _field_binding(f)
         if f.get("control") == "image" and (val is None or val == ""):
+            if has_primary_image and _is_optional_image_binding(binding):
+                _drop_unused_media_node(api, node_id)
+                continue
             missing.append(f.get("label") or field)
+            continue
+        # 参考音频空值：摘掉 LoadAudio（及只为它供输入的下游），不落模板默认音轨
+        if (val is None or val == "") and _OPTIONAL_REFERENCE_AUDIO_RE.fullmatch(binding):
+            _drop_unused_media_node(api, node_id)
             continue
         if val is None or key not in exposed_keys:
             continue

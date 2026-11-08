@@ -88,6 +88,8 @@ class TemplateRequest(BaseModel):
     output_node_ids: list[str] = []  # 替换输出节点列表(右侧接线)
     primary_output_node_id: str = "" # 主输出节点（多输出时优先取用此节点产物）
     preserve_loras: bool = False     # 保留模板自带 LoRA（蒸馏加速等），不接受外部 LoRA 覆盖/清零
+    # 分辨率由模板工作流自己决定（ResolutionSelector 连线），不用首帧像素尺寸覆盖
+    video_size_from_template: bool = False
 
 
 @router.get("/templates")
@@ -152,6 +154,11 @@ def update_template(template_id: str, req: TemplateRequest) -> dict:
     # 它保存时不会带 preserve_loras；按 False 落盘会静默关掉蒸馏 LoRA 的保留。
     if "preserve_loras" not in req.model_fields_set and existing.get("preserve_loras"):
         data["preserve_loras"] = True
+    # 同理：模板编辑器不认识 video_size_from_template，保存时缺席必须保留原值，
+    # 否则「交给工作流决定分辨率」会在一次无关的编辑保存后静默失效。
+    if ("video_size_from_template" not in req.model_fields_set
+            and existing.get("video_size_from_template")):
+        data["video_size_from_template"] = True
     return template_store.save_template(data, template_id)
 
 

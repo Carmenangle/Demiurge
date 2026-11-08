@@ -77,6 +77,8 @@ export interface AgentInvocation {
   promptProfileKind?: string;
   // 视频提示词模版 id（builtin:<kind> / custom:<hex> / 空=内置默认骨架）
   videoPromptTemplateId?: string;
+  // 视频工作流模版 id（空=未知；后端据此派生尾帧/参考图槽与默认时长）
+  videoTemplateId?: string;
   appearanceSource: "worldbook" | "character_card";
   illustrationViewpoint?: "" | "first_person" | "third_person";
   illustrationBatchCount?: number;
@@ -154,6 +156,7 @@ export function agentInvocationBody(request: AgentInvocation): AgentInvocationWi
     prompt_profile: request.promptProfile || "anima_tags",
     prompt_profile_kind: request.promptProfileKind || "",
     video_prompt_template_id: request.videoPromptTemplateId || "",
+    video_template_id: request.videoTemplateId || "",
     appearance_source: request.appearanceSource,
     illustration_viewpoint: request.illustrationViewpoint || "",
     illustration_batch_count: request.illustrationBatchCount || 0,
