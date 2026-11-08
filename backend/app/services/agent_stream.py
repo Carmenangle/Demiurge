@@ -409,6 +409,10 @@ def _ordered_illustration_events(result_text: str, recs: list[dict]) -> list[dic
             if _prompt:
                 request["video_prompt"] = _prompt
             request["video_params"] = _video_params_payload(_video_request)
+            # 第 99 刀：对白时间轴（见 agent_agency 同名注释；两个事件构造器必须同步）
+            _dialogue = _video_request.get("dialogue")
+            if isinstance(_dialogue, dict) and str(_dialogue.get("text") or "").strip():
+                request["video_dialogue"] = _dialogue
         # W3 转场视频（坑F/坑G）：produce 层已编译 transition_video_request，随事件下发转场提示词+参数
         _transition_vr = rec.get("transition_video_request")
         if isinstance(_transition_vr, dict):

@@ -1616,25 +1616,208 @@ def test_extract_video_action_plan_climax_eats_the_frozen_frame(monkeypatch):
     assert "x" * 2000 in calls[1][1] and "x" * 2001 not in calls[1][1]
 
 
-def test_extract_video_action_plan_firstlast_keeps_old_action_rule_wording(monkeypatch):
-    """零回归锁：首尾帧的帧语义是「楼层开头/结尾」，不吃定格帧、旧文案逐字保留。"""
+def test_extract_video_action_plan_firstlast_covers_floor_opening_to_closing(monkeypatch):
+    """批 1：firstlast 的帧语义是「楼层开头/结尾」，整段楼层都要有动作拍。
+
+    旧合同把 firstlast 写成「从**高潮图定格动作**往下的延伸」——首尾帧模式根本没有
+    高潮定格帧，desc[0] 也就无从对上；输入还只给高潮锚点那一段 ⇒ 视频只会演
+    「楼层开头 → 高潮段 → 楼层结尾」。新合同：首拍＝楼层开头画面、末拍＝楼层结尾画面，
+    输入取整轮 `floor_narrative`。
+    """
     calls: list[tuple[str, str]] = []
 
     def fake_chat(base, key, model, system, user, **_kw):
         calls.append((system, user))
-        return '{"action_sequence":[{"beat":"起点","desc":"she kneels"}]}'
+        return '{"action_sequence":[{"beat":"开场","desc":"she pushes the door open"}]}'
 
     monkeypatch.setattr(asc._llm, "chat", fake_chat)
     ctx = _ctx()
-    spec = {"narrative": "她跪在石板上，手腕扯动锁链。"}
+    spec = {
+        "narrative": "高潮段：她跪在石板上。",
+        "floor_narrative": "楼层开头她推门进屋。中段她点亮台灯。楼层结尾她合眼睡去。",
+    }
 
     asc._extract_video_action_plan(
-        ctx, spec, video_mode="firstlast", anchor="她跪在石板上。", image_prompt="a, b, c",
+        ctx, spec, video_mode="firstlast",
+        anchor="她跪在石板上。", image_prompt="a, b, c",
     )
     system, user = calls[0]
+    assert "desc[0] 必须复现楼层开头画面" in system
+    assert "desc[-1] 必须落在楼层结尾画面" in system
+    assert "desc[0] 必须对应当前高潮图的定格动作" not in system
+    assert "楼层开头她推门进屋" in user
+    assert "高潮段：她跪在石板上" not in user
     assert "定格帧" not in user
     assert "锚点句" not in user
-    assert "desc[0] 必须对应当前高潮图的定格动作" in system
+
+
+def test_批2_firstlast_ignores_climax_action_sequence_when_extract_fails(monkeypatch):
+    """firstlast 的动作流只能来自整楼层提取器。
+
+    图侧计划里的 `action_sequence` 是围绕高潮帧的延伸链（desc[0]＝那一格），与
+    「楼层开头 → 楼层结尾」互斥；提取器失败时若把它捡去当 ④ 的中段，整段楼层
+    会被演成高潮那几秒（且首拍与首帧图对不上）。
+    """
+
+    def fake_extract(ctx, spec, **kw):
+        return {}
+
+    monkeypatch.setattr(asc, "_extract_video_action_plan", fake_extract)
+    monkeypatch.setattr(asc, "_video_skeleton_for", lambda ctx, mode: None)
+
+    clean = "她推门进屋。\n\n她把伞靠在门边。\n\n她跪到床边。"
+    req = {"prompt": "图片成稿", "anchor": "她跪到床边。", "video_config": {}}
+    scene_spec = {
+        "narrative": "她跪到床边。",
+        "action_sequence": [{"beat": "定格起点", "desc": "CLIMAX-ONLY cupped hands near the ring"}],
+        "actors": ["她"], "locale": "卧室",
+    }
+    asc._wb_frames_and_video(
+        {"comfy_video": True, "video_mode": "firstlast"}, req, scene_spec, clean, "", 2,
+    )
+    prompt = req["video_request"]["submit"]["prompt"]
+    assert "CLIMAX-ONLY" not in prompt
+    assert "推门进屋" in prompt  # 退回整楼层正文逐句成拍
+
+
+def test_批3_firstlast_declares_role_refs_from_character_base_images(monkeypatch):
+    """接线：在场角色有底图 ⇒ 图片3+ 编号进 ②，与前端 `planFirstlastReferenceImages` 同序。
+
+    后端只决定「第几张图是谁」；真正上传由前端按视频模板的参考图槽完成。
+    没有底图 ⇒ 一个编号都不多报（② 保持旧稿）。
+    """
+    captured: dict = {}
+
+    def fake_extract(ctx, spec, **kw):
+        captured["spec"] = dict(spec)
+        return {}
+
+    monkeypatch.setattr(asc, "_extract_video_action_plan", fake_extract)
+    monkeypatch.setattr(asc, "_video_skeleton_for", lambda ctx, mode: None)
+
+    clean = "她推门进屋。\n\n她把伞靠在门边。"
+    req = {"prompt": "图片成稿", "anchor": "她推门进屋。", "video_config": {}}
+    scene_spec = {"narrative": "她推门进屋。", "actors": ["纪含章", "庄听澜", "邵允"]}
+    asc._wb_frames_and_video(
+        {"comfy_video": True, "video_mode": "firstlast",
+         "character_base_images": {"纪含章": "D:/base/ji.png", "邵允": "D:/base/shao.png"}},
+        req, scene_spec, clean, "", 2,
+    )
+    assert captured["spec"]["role_refs"] == ["纪含章", "邵允"]
+    prompt = req["video_request"]["submit"]["prompt"]
+    assert "图片3=纪含章" in prompt
+    assert "图片4=邵允" in prompt
+
+    # 没有底图映射 ⇒ 不写键、不多报编号
+    captured.clear()
+    req2 = {"prompt": "图片成稿", "anchor": "她推门进屋。", "video_config": {}}
+    asc._wb_frames_and_video(
+        {"comfy_video": True, "video_mode": "firstlast"}, req2,
+        {"narrative": "她推门进屋。", "actors": ["纪含章"]}, clean, "", 2,
+    )
+    assert "role_refs" not in captured["spec"]
+    assert "图片3" not in req2["video_request"]["submit"]["prompt"]
+
+
+def test_批3_extract_contract_binds_current_wardrobe_and_props(monkeypatch):
+    """提取器要拿到「当下衣着」并写明归属：道具/衣着必须落在具体角色身上。"""
+    calls: list[tuple[str, str]] = []
+
+    def fake_chat(base, key, model, system, user, **_kw):
+        calls.append((system, user))
+        return '{"action_sequence":[{"beat":"起点","desc":"x"}]}'
+
+    monkeypatch.setattr(asc._llm, "chat", fake_chat)
+    asc._extract_video_action_plan(
+        _ctx(),
+        {"narrative": "她抬起头。", "wardrobe": "纪含章：米色针织开衫；邵允：和风长衫，手提旧伞"},
+        video_mode="firstlast",
+    )
+    system, user = calls[0]
+    assert "当下衣着" in user
+    assert "米色针织开衫" in user
+    assert "随身道具必须绑定到具体角色" in system
+    # 衣着清单不得被写回动作 desc（第 91 刀口径：衣着归 subject_scene）
+    assert "外貌与衣着清单归 subject_scene" in system
+
+
+def test_批3_extract_omits_wardrobe_block_when_empty(monkeypatch):
+    """没有当下衣着 ⇒ 不产出该块（旧调用方输入逐字节不变）。"""
+    calls: list[tuple[str, str]] = []
+
+    def fake_chat(base, key, model, system, user, **_kw):
+        calls.append((system, user))
+        return "{}"
+
+    monkeypatch.setattr(asc._llm, "chat", fake_chat)
+    asc._extract_video_action_plan(_ctx(), {"narrative": "她抬起头。"}, video_mode="climax")
+    assert "当下衣着" not in calls[0][1]
+
+
+def test_wb_frames_and_video_firstlast_feeds_whole_floor_and_pending_frames(monkeypatch):
+    """批 1 接线：整轮正文进 `floor_narrative`；首尾帧按「由下游链补挂」编译。
+
+    真机病灶：④ 只吃 `scene_spec.narrative`（高潮锚点那一段），而首/尾帧描述取自
+    整轮 clean ⇒ 视频从楼层开头直接跳到高潮段再跳结尾。且编译时图还没产出、
+    调用点又不传地址 ⇒ ② 恒写「无参考图」，与前端实际挂图相反。
+    """
+    captured: dict = {}
+
+    def fake_extract(ctx, spec, **kw):
+        captured["spec"] = dict(spec)
+        return {}
+
+    monkeypatch.setattr(asc, "_extract_video_action_plan", fake_extract)
+    monkeypatch.setattr(asc, "_video_skeleton_for", lambda ctx, mode: None)
+
+    clean = (
+        "她推门进屋，收起伞。\n\n"
+        "她把伞靠在门边，点亮台灯。\n\n"
+        "她跪到床边，伸手拉上被子。"
+    )
+    req = {"prompt": "图片成稿", "anchor": "她跪到床边。", "video_config": {}}
+    scene_spec = {
+        "narrative": "她跪到床边，伸手拉上被子。",
+        "actors": ["她"], "locale": "卧室",
+    }
+    asc._wb_frames_and_video(
+        {"comfy_video": True, "video_mode": "firstlast"}, req, scene_spec, clean, "", 2,
+    )
+
+    assert "推门进屋" in captured["spec"]["floor_narrative"]
+    assert "点亮台灯" in captured["spec"]["floor_narrative"]
+    prompt = req["video_request"]["submit"]["prompt"]
+    assert "推门进屋" in prompt
+    assert "点亮台灯" in prompt
+    assert "图片1=" in prompt and "图片2=" in prompt
+    assert "无参考图" not in prompt
+
+
+def test_第103刀_wb_frames_and_video_transition_declares_frames_pending(monkeypatch):
+    """实稿发现 3 接线：转场请求也按「两张图会到」编译（上尾帧来自历史、当前首帧本链生成）。
+
+    旧接线没传 `pending_frame` ⇒ 转场 ②/④ 恒写「无参考图，以文字为准」，而前端随后
+    确实会挂两张图，模型于是按文生短桥段自己重新构图。
+    """
+    monkeypatch.setattr(asc, "_extract_video_action_plan", lambda ctx, spec, **kw: {})
+    monkeypatch.setattr(asc, "_video_skeleton_for", lambda ctx, mode: None)
+
+    req = {"prompt": "图片成稿", "anchor": "她跪到床边。", "video_config": {},
+           "transition": "regenerate"}
+    scene_spec = {"narrative": "她跪到床边。", "actors": ["她"], "locale": "卧室"}
+    asc._wb_frames_and_video(
+        {"comfy_video": True, "video_mode": "firstlast"}, req, scene_spec,
+        "她推门进屋。\n\n她跪到床边。", "", 2,
+    )
+
+    transition = req["transition_video_request"]
+    prompt = transition["submit"]["prompt"]
+    assert "无参考图" not in prompt
+    # 转场起终点按「图会到」声明为图片1/图片2（④ 也不再退化成「以文字重现」）
+    assert "图片1=" in prompt and "图片2=" in prompt
+    assert "定格于上一楼层尾帧画面" in prompt
+    assert "收束定格于当前楼层首帧画面" in prompt
+    assert any("上尾帧/当前首帧由下游链补挂" in w for w in transition["warnings"])
 
 
 def test_extract_video_action_plan_climax_allows_coherent_extension(monkeypatch):
@@ -1729,8 +1912,14 @@ def test_第91刀_climax合同钉死画框上限与视线事实(monkeypatch):
         < pov_system.index("2. subject_scene 只描述在场角色")
 
 
-def test_第91刀_firstlast不吃这三条上限(monkeypatch):
-    """零回归锁：三条新句只进 climax 支的 action_rule，首尾帧（覆盖整段楼层）原样不动。"""
+def test_第91刀_firstlast不吃画框上限与视线两条(monkeypatch):
+    """三条新句在 firstlast 支的分档（批 1 改写合同后重申）。
+
+    ❶ 衣着归位：**批 1 起 firstlast 也吃**——它现在覆盖整段楼层、最多 8 拍，把衣着清单
+       重列一遍的代价比 climax 首拍更大（`不得在 desc 里重列一遍`，逐拍生效）。
+    ❷ 画框上限、❸ 视线事实：仍是 climax 专属——两句都以「定格帧／该帧出图提示词」为判据，
+       firstlast 没有那一格，硬套会让规则失去判定对象。
+    """
     calls: list[tuple[str, str]] = []
 
     def fake_chat(base, key, model, system, user, **_kw):
@@ -1743,12 +1932,15 @@ def test_第91刀_firstlast不吃这三条上限(monkeypatch):
         video_mode="firstlast", anchor="她跪在石板上。", image_prompt="a, b, c",
     )
     system = calls[0][0]
-    for absent in ("外貌与衣着清单归 subject_scene",
-                   "也不得引入画框里装不下的身体部位或地面",
-                   "把方向交给镜头"):
+    assert "外貌与衣着清单归 subject_scene" in system
+    for absent in ("也不得引入画框里装不下的身体部位或地面",
+                   "把方向交给镜头",
+                   "desc[0] 必须对应当前高潮图的定格动作",
+                   "定格帧"):
         assert absent not in system
-    # 旧文案仍在（另有一条 firstlast 逐字锁守着它）
-    assert "desc[0] 必须对应当前高潮图的定格动作" in system
+    # 批 1 新合同：起点/终点由楼层边界定
+    assert "desc[0] 必须复现楼层开头画面" in system
+    assert "desc[-1] 必须落在楼层结尾画面" in system
 
 
 def test_extract_video_action_plan_climax_bounds_to_its_own_frame(monkeypatch):
@@ -6026,3 +6218,107 @@ def test_采样kwargs按接收方签名过滤_预设新增字段不会打挂整�
 
     merged = _accept(temperature=0.9, **kwargs)
     assert merged["temperature"] == 0.9
+
+
+# ── 第 99 刀 · 对白时间轴出口（2026-11-08）────────────────────────────────────
+
+def test_第99刀_对白时间轴随事件下发且不并进video_prompt():
+    """两个事件构造器都必须带 `video_dialogue`；`video_prompt` 逐字不动（对白块前端按
+    模板是否暴露参考音频槽决定追加）——漏一个出口，真机就静默没有对白时间轴。"""
+    from app.services import agent_stream as astream
+
+    dialogue = {
+        "ref_label": "<Audio 1>",
+        "speakers": {"S1": "甲"},
+        "timeline": [{"start": 3, "end": 7, "label": "剧情演变",
+                      "speaker": "甲", "speaker_id": "S1", "text": "开饭", "exact": True}],
+        "text": "[对白参考]：<Audio 1> …",
+        "warnings": [],
+        "line_count": 1,
+    }
+    rec = {
+        "id": "slot-1", "prompt": "p", "motion": 1, "actors": ["甲"],
+        "anchor_offset": 5, "video_mode": "firstlast",
+        "video_request": {"mode": "firstlast", "submit": {"prompt": "V"}, "dialogue": dialogue},
+    }
+
+    for events in (aag._streamed_illustration_events([rec]),
+                   astream._ordered_illustration_events("正文" * 5, [rec])):
+        requests = [event["illustrate_request"] for event in events
+                    if "illustrate_request" in event]
+        assert requests[0]["video_prompt"] == "V"
+        assert requests[0]["video_dialogue"]["text"] == dialogue["text"]
+
+
+def test_第99刀_无台词或空text不产出video_dialogue():
+    """climax / 无 TTS / 空 text ⇒ 不带该键（旧前端宽松忽略，正常模板零变化）。"""
+    from app.services import agent_stream as astream
+
+    for dialogue in (None, {}, {"text": "  "}):
+        rec = {
+            "id": "slot-1", "prompt": "p", "motion": 1, "actors": [],
+            "anchor_offset": 0,
+            "video_request": {"mode": "firstlast", "submit": {"prompt": "V"},
+                              **({"dialogue": dialogue} if dialogue is not None else {})},
+        }
+        for events in (aag._streamed_illustration_events([rec]),
+                       astream._ordered_illustration_events("正文", [rec])):
+            requests = [event["illustrate_request"] for event in events
+                        if "illustrate_request" in event]
+            assert "video_dialogue" not in requests[0]
+
+
+def test_批2_firstlast_extract_contract_asks_for_per_beat_scene(monkeypatch):
+    """批 2：整段楼层可能跨多个地点 ⇒ 每拍可带 scene，换场景必须写出来。
+
+    `_firstlast_beat_plan` 靠这个字段把「换场景」渲染成 ④ 里的转场拍；没有它，
+    面馆 → 雨街的楼层会被拍成同一间屋子里走来走去。
+    """
+    calls: list[tuple[str, str]] = []
+
+    def fake_chat(base, key, model, system, user, **_kw):
+        calls.append((system, user))
+        return '{"action_sequence":[{"beat":"起点","desc":"she walks in","scene":"noodle shop"}]}'
+
+    monkeypatch.setattr(asc._llm, "chat", fake_chat)
+    asc._extract_video_action_plan(
+        _ctx(), {"narrative": "她推门进屋。", "floor_narrative": "她推门进屋，坐下。"},
+        video_mode="firstlast",
+    )
+    system = calls[0][0]
+    assert '"scene"' in system
+    assert "换场景的那一拍必须写" in system
+    assert "同一地点" in system and "留空" in system
+    # climax 不产出 scene 字段（定格窗口只有一个地点，多一个字段只会诱发臆造）
+    asc._extract_video_action_plan(
+        _ctx(), {"narrative": "她抬起头。"}, video_mode="climax", anchor="她抬起头。")
+    assert '"scene"' not in calls[1][0]
+
+
+def test_批2_firstlast_first_person_contract_has_no_still_frame(monkeypatch):
+    """firstlast 没有定格帧：第一人称合同不得再引用「定格帧／该帧出图提示词」。
+
+    批 1 之前 firstlast 的 POV 合同是从 climax 原样继承的——判据指向一张不存在的图，
+    模型只能自己找一帧当起点。批 2 改成「本段影片／首尾帧图」口径。
+    """
+    calls: list[tuple[str, str]] = []
+
+    def fake_chat(base, key, model, system, user, **_kw):
+        calls.append((system, user))
+        return '{"action_sequence":[{"beat":"起点","desc":"she walks in"}]}'
+
+    monkeypatch.setattr(asc._llm, "chat", fake_chat)
+    limbs = ["a pair of hands entering from the lower frame edge gripping her waist"]
+    asc._extract_video_action_plan(
+        _ctx(),
+        {"narrative": "她抬起头。", "viewpoint": "first_person", "narrator_limbs": limbs},
+        video_mode="firstlast",
+    )
+    system = calls[0][0]
+    assert "【取景·第一人称】本段影片以 `first person view` 取景" in system
+    assert "首尾帧图" in system
+    assert "定格帧" not in system
+    assert "该帧出图提示词" not in system
+    # 归属与量词口径与 climax 同一条（部位＋位置＋归属），不因模式分叉
+    assert "归属不许省略" in system
+    assert "本片已核定「叙事者在画面里可见的部位」＝" + limbs[0] in system

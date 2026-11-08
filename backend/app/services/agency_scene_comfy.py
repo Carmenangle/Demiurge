@@ -91,6 +91,29 @@ def _video_skeleton_for(ctx: CtxLike, mode: str):
     return VideoSkeleton.from_data(data)
 
 
+def _video_caps_for(ctx: CtxLike) -> dict | None:
+    """视频**工作流**模板能力（第 106 刀）：拿不到模板 ⇒ None（编译层逐字保留现行为）。
+
+    真源 = `template_store.get_template` 的归一化记录 → `video_template_caps`。
+    模板未配置/被删时宁可不猜，也不要按「图片位全有」声明——那正是实稿发现 1：
+    提示词写「图片2=尾帧、图片3=角色参考图」，而实机模板只暴露 `first_frame_image`，
+    多出来的图从不上传，模型被指挥去用不存在的图。同理，模板 `video_duration`
+    默认值是成片的物理长度（前端不注入时长时），发现 2 的 15s vs 10.125s 就出在这。
+    """
+    template_id = str(ctx.get("video_template_id") or "").strip()
+    if not template_id:
+        return None
+    try:
+        from app.services import template_store
+        record = template_store.get_template(template_id)
+    except Exception as exc:  # noqa: BLE001
+        _LOG.debug("agency_scene_comfy::_video_caps_for 读取模板失败: %s", exc)
+        return None
+    if not isinstance(record, dict):
+        return None
+    return template_store.video_template_caps(record)
+
+
 def _extract_video_action_plan(
     ctx: CtxLike, spec: dict[str, Any], video_mode: str = "climax",
     *, anchor: str = "", image_prompt: str = "",
@@ -104,7 +127,8 @@ def _extract_video_action_plan(
     「desc[0] 必须对应当前高潮图的定格动作」这条规则在模型眼里无从判定——它只看得见
     正文，于是挑正文里最重的动作起笔：真机实锤（turn `9a1ecaae`）底图是卧室里双手捧戒指的
     特写，第 1 拍却写成厨房台面上的抽插，首帧与文本互斥 ⇒ 「看不出底图的延伸」。
-    firstlast 不接（该模式的帧语义是「楼层开头/结尾」，另走 `first_frame_desc`）。
+    firstlast 不接 anchor/image_prompt，改读整轮可见正文（`floor_narrative`）：该模式的帧语义
+    是「楼层开头/结尾」，首拍与末拍由楼层边界定，不由某张定格图定。
 
     `prev_anchor` / `next_anchor`（2026-11-01 多批次切段，仅 climax 使用）：本张在**正文序**
     里的前后两格。派发 N 张时若两个锚点落在同一时段，取材窗口几乎相同 ⇒ N 支视频重复演同
@@ -131,11 +155,23 @@ def _extract_video_action_plan(
     失败静默返回 {}，调用方回退现有纯函数兜底，不阻断出图。
     """
     from app.services import image_prompt_profiles, video_prompt as _vp
-    narrative = str(spec.get("protected_narrative") or spec.get("narrative") or "").strip()
+    # 批 1：firstlast 覆盖**整段楼层** ⇒ 提取器读整轮可见正文（`floor_narrative`，保留
+    # 破甲标记）；`protected_narrative` / `narrative` 只是高潮锚点那一段，服务 climax。
+    # 缺整轮正文时逐级退回，旧调用方零改动。
+    if video_mode == "firstlast":
+        narrative = str(
+            spec.get("floor_narrative")
+            or spec.get("protected_narrative")
+            or spec.get("narrative")
+            or ""
+        ).strip()
+    else:
+        narrative = str(spec.get("protected_narrative") or spec.get("narrative") or "").strip()
     if not narrative:
         return {}
     actors = [str(a).strip() for a in (spec.get("actors") or []) if str(a).strip()]
     appearance = str(spec.get("appearance") or "").strip()
+    wardrobe = str(spec.get("wardrobe") or "").strip()
     locale = str(spec.get("locale") or "").strip()
     # 台词规则按视频模式分支（用户定稿 2026-08-28）：
     # climax 定格窗口无对白；firstlast 从头到尾覆盖剧情、含全部对白并标时点。
@@ -166,9 +202,8 @@ def _extract_video_action_plan(
         "三拍 10–12，四拍及以上 13–15；只给剧情能演完的时长，不得为凑时长补剧情没写的动作。\n"
         if climax_mode else ""
     )
-    # 动作序列的起点语义（2026-11-01 定格帧真源）：climax 必须钉在**这一格**上，
-    # 而不是「正文里最重的动作」——见本函数 docstring 的 turn `9a1ecaae` 实锤。
-    # firstlast 逐字维持旧文案（该模式覆盖整段楼层，帧语义是开头/结尾，不走这条）。
+    # 动作序列的起点语义：climax 必须钉在**这一格**上（2026-11-01 定格帧真源，见
+    # turn `9a1ecaae` 实锤）；firstlast 的帧语义是「楼层开头 → 楼层结尾」，另立合同。
     if climax_mode:
         action_rule = (
             "1. action_sequence 是从**定格帧**往下一路演出去的延伸流程，最多8步：\n"
@@ -205,11 +240,21 @@ def _extract_video_action_plan(
             "desc 用简洁英文视觉描述（写清谁、什么体态、做什么）。\n"
         )
     else:
+        # 批 1（2026-11-08）：firstlast 是「楼层开头 → 楼层结尾」的整段影片，不存在定格帧
+        # 可以直接复述 ⇒ 起点由楼层开头决定、终点由楼层结尾决定，中段按正文事件铺满。
+        # 批 2：整段楼层可能跨多个地点 ⇒ 换场景的那一拍必须写 `scene`，由编译器渲染成
+        # 「场景切换：…」转场拍；同一地点每拍重复写只会把 ④ 撑成噪声。
         action_rule = (
-            "1. action_sequence 是从高潮图定格动作到剧情完整动作的延伸流程，覆盖整段正文的动作变化，"
-            "最多8步；desc[0] 必须对应当前高潮图的定格动作，desc[1..] 必须基于剧情描述的后续动作，"
-            "剧情没写的动作不得补；正文有多个动作时至少2拍（仅当正文确为单一动作才允许单拍）；"
-            "desc 用简洁英文视觉描述（写清谁、什么体态、做什么）。\n"
+            "1. action_sequence 是**整段楼层**的动作流，从楼层开头一路演到楼层结尾，最多8步；"
+            "desc[0] 必须复现楼层开头画面（谁、在何处、正做什么），"
+            "desc[-1] 必须落在楼层结尾画面（剧情的收束状态），中间的 desc 按正文事件先后铺满；"
+            "正文有多个事件时至少2拍；剧情没写的事件不得补，"
+            "场景与时段按正文走，不得把更早或更晚的楼层内容拉进来；"
+            "desc 用简洁英文视觉描述（写清谁、什么体态、做什么）；"
+            "外貌与衣着清单归 subject_scene，不得在 desc 里重列一遍。\n"
+            "   - 每拍可带 scene：那一拍所在场景的简短英文视觉描述（地点/空间/光线）；"
+            "与上一拍**同一地点就留空**，**换场景的那一拍必须写**，并在 desc 里交代"
+            "人物如何进入新地点（推门/上车/步行一段路）；同一地点不得每拍重复写。\n"
         )
     # 第 84 刀（2026-11-05）：第一人称取景合同。判据**只读** `spec["viewpoint"]`（真源＝
     # 出图侧第 51 刀 `viewpoint_scope`），第三人称／未给人称 ⇒ 空串 ⇒ system 逐字节等于旧文案。
@@ -221,19 +266,33 @@ def _extract_video_action_plan(
         raw_limbs = spec.get("narrator_limbs")
         limbs = [str(item).strip() for item in raw_limbs if str(item).strip()] \
             if isinstance(raw_limbs, (list, tuple)) else []
+        # 批 2：climax 说「本帧/定格帧」，firstlast 说「本片/首尾帧图」——后者没有定格帧，
+        # 沿用 climax 措辞会让判据指向一张不存在的图。其余条款（归属三件套、元语言禁词）
+        # 两种模式同一条，不因模式分叉。
+        scope = "本帧" if climax_mode else "本片"
+        subject_src = (
+            "**定格帧里看得见的人物**（出图提示词已经描述过的那些）"
+            if climax_mode else "**正文里真正出场的人物**"
+        )
         limb_line = (
-            f"   - 本帧已核定「叙事者在画面里可见的部位」＝{'、'.join(limbs)}：写他的作用只许用这些部位，"
+            f"   - {scope}已核定「叙事者在画面里可见的部位」＝{'、'.join(limbs)}：写他的作用只许用这些部位，"
             "不得替他新增任何别的身体描写；这份名单只给**部位**，逐字照抄进 desc 会丢掉归属"
             "（名单里的 `a pair of hands` 要在 desc 里写成 `his hands`）。\n"
             if limbs else
-            "   - 本帧没有「叙事者在画面里可见的部位」证据 ⇒ 他的动作一律不写进 desc／subject_scene，"
+            f"   - {scope}没有「叙事者在画面里可见的部位」证据 ⇒ 他的动作一律不写进 desc／subject_scene，"
             "只写画面内人物自己的动作与物理跟随。\n"
         )
-        pov_contract = (
+        pov_head = (
             "【取景·第一人称】本帧的出图提示词以 `first person view` 声明：镜头＝这一格的视点，"
             "叙事者没有身形入画，最多只有局部肢体从画框边缘进入。\n"
+            if climax_mode else
+            "【取景·第一人称】本段影片以 `first person view` 取景：首尾帧图与全片镜头都是叙事者的"
+            "视点，叙事者没有身形入画，最多只有局部肢体从画框边缘进入。\n"
+        )
+        pov_contract = (
+            pov_head
             + limb_line
-            + "   - desc／subject_scene 里的施动者只能取**定格帧里看得见的人物**（出图提示词已经描述过的那些）；"
+            + f"   - desc／subject_scene 里的施动者只能取{subject_src}；"
             "不得把叙事者写成第三个完整人物（`a man behind her`／`the man thrusts…`／`he…` 都不许），"
             "要表达他的作用就写成「**具体部位＋位置＋归属**」三件齐备"
             "（如 `his hands gripping her hips`：部位＝hands、位置＝gripping her hips、归属＝his）。\n"
@@ -250,10 +309,19 @@ def _extract_video_action_plan(
             "`narrator`／`camera`／`point of view` 这类元语言——下游视频模型不知道「叙事者」是谁，"
             "它只处理画面里看得见的东西。\n"
         )
+    # 取材范围标签：climax＝高潮那一段（原文逐字）；firstlast＝整段楼层（逐字维持旧句的另一半）。
+    scope_label = "高潮正文" if climax_mode else "楼层完整正文"
+    # 逐拍字段：climax 只有动作；firstlast 多一个可选 scene（批 2，换场景才写）。
+    seq_item_fields = (
+        "\"beat\":\"定格起点/延伸/收尾\",\"desc\":\"动作描述\""
+        if climax_mode else
+        "\"beat\":\"起点/延伸/收尾\",\"desc\":\"动作描述\","
+        "\"scene\":\"该拍场景英文视觉描述（与上一拍同一地点则留空）\""
+    )
     system = (
-        "你是视频提示词原料提取器。读下面这段剧情高潮正文（可能含防拦截标记，请还原其原义），"
+        f"你是视频提示词原料提取器。读下面这段剧情{scope_label}（可能含防拦截标记，请还原其原义），"
         "理解人物体态、动作与声音，输出 JSON：\n"
-        "{" + duration_field + "\"action_sequence\":[{\"beat\":\"定格起点/延伸/收尾\",\"desc\":\"动作描述\"}],"
+        "{" + duration_field + "\"action_sequence\":[{" + seq_item_fields + "}],"
         "\"subject_scene\":\"简化外貌+场景英文视觉描述\","
         "\"audio_design\":{\"music\":\"一句话音乐情绪\",\"sfx\":[\"具体音效1\",\"音效2\"],"
         "\"lines\":[{\"speaker\":\"角色名\",\"text\":\"台词原文\",\"at_s\":5}],\"sync\":\"卡拍说明\"}}\n"
@@ -262,7 +330,13 @@ def _extract_video_action_plan(
         pov_contract +
         "2. subject_scene 只描述在场角色的外貌与场景：把抽象评价与同义形容词堆砌简化为直白视觉词"
         "（如「丰腴肥熟+酥雌醇媚」→「hourglass figure, large breasts, wide hips, seductive eyes」），"
-        "专有名词（地名/建筑/器物）必须展开成可还原的视觉描述，不得照抄原名。\n"
+        "专有名词（地名/建筑/器物）必须展开成可还原的视觉描述，不得照抄原名；"
+        # 批 3（2026-11-08 用户 94 刀规格）：「当下衣着＋随身道具……且要知晓绑定关系（哪个
+        # 角色有这些）」。衣着清单的属主仍是 subject_scene（第 91 刀口径），这里钉的是**归属**：
+        # 多角色同框时最易出的错就是把 A 的伞/开衫写到 B 身上，或写成无主漂浮物。
+        "当下衣着与随身道具必须逐人写明归属，**随身道具必须绑定到具体角色**"
+        "（写成「谁拿着／披着／提着什么」）；不得把某角色的衣物或道具挂到另一个角色身上，"
+        "也不得写成没有归属的孤立物件。\n"
         "3. audio_design 只提取正文确有证据的声音，禁止臆造；且必须锁定在高潮片段当下：\n"
         + lines_rule
         + "   - sfx：把画面里每个可见事件映射成具体拟真音效，按出场顺序 3~8 条（如鼓掌→有节奏的"
@@ -284,7 +358,7 @@ def _extract_video_action_plan(
         )
     except Exception as exc:  # noqa: BLE001 [EXC-留痕] 预设组装失败不阻断，但生成缺防拦截预设
         _LOG.warning("防拦截预设组装失败（保持原 system，本次生成缺该预设）: %s", exc)
-    user_lines = [f"剧情高潮正文（可能含防拦截标记，按标记还原原义）：\n{narrative}"]
+    user_lines = [f"剧情{scope_label}（可能含防拦截标记，按标记还原原义）：\n{narrative}"]
     # 定格帧真源（climax）：锚点句＋成图提示词终稿＝这一格到底画了什么的唯一证据。
     if climax_mode and (anchor.strip() or image_prompt.strip()):
         frame_block = [f"锚点句：{anchor.strip()[:300]}" if anchor.strip() else ""]
@@ -309,8 +383,19 @@ def _extract_video_action_plan(
         user_lines.append(f"在场角色：{'、'.join(actors)}")
     if appearance:
         user_lines.append(f"外貌锚（需简化去堆砌）：\n{appearance}")
+    if wardrobe:
+        # 批 3：当下衣着＋随身道具（状态表 → 数据表兜底），原文可能已带角色归属；
+        # 没带归属的由合同要求按在场角色落位。空串不写块（旧调用方输入逐字节不变）。
+        user_lines.append(
+            f"当下衣着与随身道具（原文；写到它们时写明归属，哪件在谁身上／谁手上）：\n{wardrobe}"
+        )
     if locale:
-        user_lines.append(f"场景：{locale}")
+        # 批 2：firstlast 覆盖整段楼层，`locale` 只是高潮帧/当前状态所在的那个场景——
+        # 把它写成「场景」会让模型以为全片都在这里（换场景因此被吞掉）。
+        user_lines.append(
+            f"场景：{locale}" if climax_mode else
+            f"当前场景（高潮帧所在；整段楼层的场景与换场以正文为准）：{locale}"
+        )
     user = "\n\n".join(user_lines)
     try:
         raw = _llm.chat(
@@ -962,7 +1047,8 @@ def _wb_comfy_illustrate_env(ctx: CtxLike, plan, sig: dict, target: dict,
 
 def _wb_frames_and_video(ctx: CtxLike, illustrate_req: dict, scene_spec: dict,
                          clean: str, transition_decision, motion: int,
-                         *, compile_video: bool = True) -> str:
+                         *, compile_video: bool = True,
+                         audio_lines: list | None = None) -> str:
     """comfy 路径⑥：首尾帧描述/复用决策 + 视频（含转场）请求编译。
 
     返回 `video_prompt_text`（未开启/失败时为空串）。逐字自 `_agency_writeback` 搬移。
@@ -971,6 +1057,9 @@ def _wb_frames_and_video(ctx: CtxLike, illustrate_req: dict, scene_spec: dict,
     **不编译视频请求**——该张的视频由 `transition_video_request` 承载，再编一支正片就成
     「一个槽两支视频」。高潮模式的 extra 一律 True（每张各配一支动作延伸视频，用户定案）。
     默认 True ⇒ 主链路逐字节不变（零回归锁）。
+
+    `audio_lines`（第 99 刀）：本轮 TTS 台词，仅 firstlast 正片用它编「对白时间轴」
+    （`video_request["dialogue"]`）；climax/transition 分支不消费。
     """
     from app.services import story_frames
 
@@ -1028,6 +1117,26 @@ def _wb_frames_and_video(ctx: CtxLike, illustrate_req: dict, scene_spec: dict,
             _video_mode = str(ctx.get("video_mode") or "climax")
             if _video_mode not in ("climax", "firstlast"):
                 _video_mode = "climax"
+            # 批 1（2026-11-08）：firstlast 覆盖**整段楼层**——④ 与提取器都吃整轮可见正文；
+            # `scene_spec.narrative` 只是高潮锚点那一段（climax 用），不能拿它当整楼剧情。
+            # 保留破甲标记（输入层防拦截），到 `build_video_request` 的 `_clean_spec` 统一还原。
+            if _video_mode == "firstlast":
+                from app.services import image_prompt_extract as _ipe
+                _merged_spec["floor_narrative"] = _ipe.protected_narrative_text(clean)
+                # 批 2：图侧计划里的 `action_sequence` 是围绕**高潮帧**的延伸链
+                # （desc[0]＝那一格的定格动作），不是整楼层的动作流。firstlast 只认本轮
+                # 提取器产出的整楼层序列；提取失败时不得捡这条旧链去当 ④ 的中段
+                # （否则整楼层会被演成高潮那几秒）。
+                _merged_spec.pop("action_sequence", None)
+                # 批 3（2026-11-08）：参考生成——图片3 起是角色参考图。编号必须与前端
+                # `planFirstlastReferenceImages` 同口径（在场顺序、无底图不占位、同源去重），
+                # 否则「图片3=谁」整体错位；无底图 ⇒ 不写键、一个编号都不多报（R2）。
+                _role_refs = _vp_mod.firstlast_role_refs(
+                    [str(a).strip() for a in (_merged_spec.get("actors") or [])],
+                    ctx.get("character_base_images") or {},
+                )
+                if _role_refs:
+                    _merged_spec["role_refs"] = _role_refs
             # 选 A：从剧情原文理解体态，补动作延伸 + 简化外貌/场景。
             # 失败静默回退（_vp_plan 为空），不阻断出图；非 retargeted 时主模型
             # 已给 action_sequence，本提取作为兜底优先补齐，避免动作段退化。
@@ -1066,13 +1175,22 @@ def _wb_frames_and_video(ctx: CtxLike, illustrate_req: dict, scene_spec: dict,
             illustrate_req["video_mode"] = _video_mode
             _vcfg = illustrate_req.get("video_config") or {}
             _vsk = _video_skeleton_for(ctx, _video_mode)
+            # 第 106 刀（实稿发现 1/2）：模板能力决定能挂几张图、片子实际多长。
+            _vcaps = _video_caps_for(ctx)
             if _video_mode == "firstlast":
                 illustrate_req["video_request"] = _vp_mod.build_video_request(
                     mode="firstlast", spec=_merged_spec, video_config=_vcfg,
                     first_frame_desc=illustrate_req.get("first_frame_desc") or "",
                     last_frame_desc=illustrate_req.get("last_frame_desc") or "",
                     prev_tail_desc=illustrate_req.get("prev_tail_desc") or "",
+                    # 第 99 刀：对白时间轴（哪句在哪个拍说）随正片请求编译；
+                    # 是否真的用上参考音频由前端按模板是否暴露音频口决定。
+                    audio_lines=audio_lines,
+                    # 批 1：首尾帧由前端链在本请求之后成对补挂（复用或重生）⇒
+                    # 按「图会到」声明，② 不得写「无参考图」。
+                    pending_frame=True,
                     skeleton=_vsk,
+                    caps=_vcaps,
                 )
             else:
                 illustrate_req["video_request"] = _vp_mod.build_video_request(
@@ -1099,7 +1217,12 @@ def _wb_frames_and_video(ctx: CtxLike, illustrate_req: dict, scene_spec: dict,
                     # prev_tail_desc=上尾帧描述（起点）；last_frame_desc 该分支不使用。
                     first_frame_desc=illustrate_req.get("first_frame_desc") or "",
                     prev_tail_desc=illustrate_req.get("prev_tail_desc") or "",
+                    # 第 103 刀（实稿发现 3）：转场也是成图之前编译——上尾帧取历史、
+                    # 当前首帧由本链刚生成，两张图随后才由前端 W3 转场块上传挂入。
+                    # 不传 ⇒ ②/④ 恒写「无参考图，以文字为准」，模型按文生短桥段演。
+                    pending_frame=True,
                     skeleton=_video_skeleton_for(ctx, "transition"),
+                    caps=_vcaps,
                 )
         except Exception as exc:
             _LOG.debug("agency_scene_comfy::_wb_frames_and_video 兜底异常: %s", exc)
@@ -1227,6 +1350,11 @@ def _wb_bridge_chain(ctx: CtxLike, pending: list[dict], primary_off: int,
                 first_frame_desc=own_pic[:500].strip(),          # 终点＝本画面
                 prev_tail_desc=request["prev_tail_desc"],      # 起点＝上一画面
                 skeleton=_video_skeleton_for(ctx, "transition"),
+                # 与 W3 转场同一实情（第 103/106 刀）：编译时两张图都还没挂，
+                # 前端提交前会等到前槽成图 + 本槽成图 ⇒ 按「图会到」声明，不写「无参考图」；
+                # 并只声明视频模板真有的图片位（发现 1）。
+                pending_frame=True,
+                caps=_video_caps_for(ctx),
             )
         except Exception:  # noqa: BLE001
             pass

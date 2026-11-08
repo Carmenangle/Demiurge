@@ -138,6 +138,8 @@ _SPEC_TEXT_FIELDS = (
     "narrative", "appearance", "wardrobe", "locale", "camera", "composition",
     "art_direction", "negative_prompt", "protected_narrative", "draft_prompt",
     "profile_prompt", "first_frame_desc", "last_frame_desc", "prev_tail_desc",
+    # firstlast 整轮正文（批 1）：与 narrative 同一条破甲还原链，否则 @()@ 会进 ④。
+    "floor_narrative",
 )
 
 

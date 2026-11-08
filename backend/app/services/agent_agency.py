@@ -198,6 +198,11 @@ def _streamed_illustration_events(recs: list[dict]) -> list[dict]:
             if _prompt:
                 request["video_prompt"] = _prompt
             request["video_params"] = _video_params_payload(_video_request)
+            # 第 99 刀：对白时间轴（firstlast + 本轮有 TTS 台词才非空）。**不并进
+            # video_prompt**：前端只有在模板真的暴露了参考音频槽时才把它追加进去。
+            _dialogue = _video_request.get("dialogue")
+            if isinstance(_dialogue, dict) and str(_dialogue.get("text") or "").strip():
+                request["video_dialogue"] = _dialogue
         # W3 转场视频（坑F/坑G）：produce 层已编译 transition_video_request，随事件下发转场提示词+参数
         _transition_vr = rec.get("transition_video_request")
         if isinstance(_transition_vr, dict):
@@ -529,7 +534,7 @@ def _agency_writeback(ctx: CtxLike, deps, reply: str, turn: int, affinity,
                 ctx, illustration_plan, sig, target, scene_spec, motion=target["motion"])
             video_prompt_text = agency_scene_comfy._wb_frames_and_video(
                 ctx, illustrate_req, scene_spec, clean, transition_decision,
-                target["motion"])
+                target["motion"], audio_lines=audio_req.get("lines") or [])
             agency_scene_comfy._wb_emit_illustration_trace(
                 ctx, illustrate_req, plan=illustration_plan, sig=sig, pool=pool,
                 target=target, scene=scene, local_scene=sig["local_scene"],
