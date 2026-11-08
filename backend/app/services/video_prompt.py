@@ -653,6 +653,18 @@ def _subject_scene(spec: dict[str, Any]) -> str:
     return "，".join(parts)
 
 
+def _transition_subject_scene(spec: dict[str, Any]) -> str:
+    """③ 主体/场景（转场专用）：只约束过渡本身，不复述整楼层事实。
+
+    实稿发现 4：转场编译沿用整楼层 spec ⇒ ③ 写进全部角色外貌 + 「走廊+卧室+楼下侧室门」
+    三个地点（`video_subject_scene` 是整段楼层的简化视觉）。转场只有几秒、两端已经由
+    图片1/图片2 定死，整楼层清单只会让模型在过渡里凭空换场。⇒ 只留「以两张图为准」
+    的边界句；在场名单由 ② 的「画面角色」承载，这里不重复。
+    """
+    return ("主体外观与所在场景以图片1、图片2为准；"
+            "转场途中不新增人物、不换地点、不引入两张图里没有的物件或装置")
+
+
 def _on_frame_names(spec: dict[str, Any]) -> list[str]:
     """画面在场角色名：`actors` 优先，空则退判据的 `frame_subjects`（画面主体名单）。
 
@@ -776,6 +788,31 @@ def _reference_binding_climax(first_frame_desc: str, spec: dict[str, Any],
     return "；".join(lines)
 
 
+def firstlast_role_refs(actors: list[str] | tuple[str, ...],
+                        base_images: dict[str, str] | None) -> list[str]:
+    """首尾帧「参考生成」的角色参考图名单（图片3 起的编号顺序）。
+
+    与前端 `planFirstlastReferenceImages` **同口径**：按在场角色顺序、只给有角色底图的
+    才占一个槽、同一张底图只占一次（两个角色共用一张底图时后者不占位）。
+    后端只决定「第几张图是谁」；真正上传由前端按视频模板的参考图槽完成。
+    没底图的角色不占位 ⇒ 不多报一个编号（R2：不假装有图）。
+    """
+    out: list[str] = []
+    seen_names: set[str] = set()
+    seen_sources: set[str] = set()
+    for raw in actors or ():
+        name = str(raw or "").strip()
+        if not name or name in seen_names:
+            continue
+        seen_names.add(name)
+        source = str((base_images or {}).get(name) or "").strip()
+        if not source or source in seen_sources:
+            continue
+        seen_sources.add(source)
+        out.append(name)
+    return out
+
+
 def _reference_binding_firstlast(first_frame_desc: str, last_frame_desc: str,
                                  spec: dict[str, Any],
                                  has_first: bool = True, has_last: bool = True) -> str:
@@ -783,6 +820,8 @@ def _reference_binding_firstlast(first_frame_desc: str, last_frame_desc: str,
 
     缺图时诚实标注「无参考图，以文字为准」，不假装有图（R2）。
     身份锁（⑥ 退役后）在这里只写一次。
+    批 3：`spec["role_refs"]`（在场且有角色底图的名单）按序补「图片3+＝谁」——
+    首尾帧画面是所在场次的真源，角色参考图只锁「这个人长什么样」，不锁姿势与衣着。
     """
     f = (first_frame_desc or "").strip() or "楼层开头画面"
     l = (last_frame_desc or "").strip() or "楼层结尾画面"
@@ -798,6 +837,13 @@ def _reference_binding_firstlast(first_frame_desc: str, last_frame_desc: str,
     if actors:
         lines.append(f"画面角色：{'、'.join(actors)}")
         lines.append(f"保持 {_identity_gloss(spec, actors)} 的身份、脸部、服装、发型、造型完全一致")
+    for idx, raw in enumerate(spec.get("role_refs") or [], start=3):
+        name = str(raw or "").strip()
+        if name:
+            lines.append(
+                f"图片{idx}={name}（角色参考图：只锁身份、五官、发型与体型；"
+                "当下衣着、姿势与所在场景以首尾帧画面为准）"
+            )
     lines.append(_IDENTITY_LOCK)
     return "；".join(lines)
 
@@ -969,55 +1015,219 @@ def _is_attribution_lead(sentence: str) -> bool:
     )
 
 
+def _scene_key(text: str) -> str:
+    """场景比对键：大小写/空白差异不算换场景（提取模型常把同一地点换个大小写）。"""
+    return re.sub(r"\s+", " ", str(text or "")).strip().lower()
+
+
+def _firstlast_action_beats(spec: dict[str, Any]) -> list[tuple[str, str]]:
+    """firstlast ④ 的动作流：`action_sequence` → [(desc, scene)]（空 desc 丢弃）。
+
+    ⚠ 只服务 firstlast。climax 的 `_climax_beat_plan` 有自己的裁剪/折叠链（首帧构型
+    迁移短语要剔、动作序列要并拍），两套口径不能互相借用。
+    """
+    seq = spec.get("action_sequence")
+    if not isinstance(seq, list):
+        return []
+    out: list[tuple[str, str]] = []
+    for item in seq:
+        if not isinstance(item, dict):
+            continue
+        desc = str(item.get("desc") or "").strip()
+        if desc:
+            out.append((desc, str(item.get("scene") or "").strip()))
+    return out
+
+
+def _firstlast_narrative_sentences(
+    spec: dict[str, Any], first_frame_desc: str,
+) -> list[str]:
+    """整段楼层正文逐句切拍（跳过被首帧覆盖的开头句、对白归属并入台词拍）。
+
+    第 80 刀三处修正（只作用 firstlast；climax 走 `_climax_time_segments`）：
+    ① 开场定格已逐字带上 first_frame_desc（楼层开头部分），中段若从第一句起会把
+       同一段画面再演一遍——离线真链路模拟里 12s 的前 4 秒都在重复「推门收伞」。
+       只跳过**开头连续**被 opening 覆盖的那几句，后文有意重复的句子不动。
+    ② 闭引号后紧跟的「老周问。」是对白归属，与台词同拍，否则口型同步与说话人分家；
+       第 86 刀补另一半：真机更常见的是「归属＋第二句台词」同句，只认纯短句会把归属
+       整条留给第二句，第一句台词因此没人说过（`_is_attribution_lead`）。
+    ③ 取消 [:8] 硬截断：narrative 全段都得有交代，超量按时长均分合并而非丢弃。
+    """
+    narrative = str(spec.get("floor_narrative") or spec.get("narrative") or "").strip()
+    sentences = _split_narrative_beats(narrative)
+    opening = (first_frame_desc or "").strip()
+    covered = 0
+    while covered < len(sentences) and opening and sentences[covered].strip() in opening:
+        covered += 1
+    sentences = sentences[covered:]
+    merged: list[str] = []
+    for sent in sentences:
+        previous = merged[-1] if merged else ""
+        if previous and ("「" in previous or "“" in previous) and (
+                _is_speaker_attribution(sent) or _is_attribution_lead(sent)):
+            merged[-1] = f"{previous}{sent}"
+        else:
+            merged.append(sent)
+    return merged
+
+
+def _group_firstlast_quotes(sentences: list[str], groups: int) -> list[list[str]]:
+    """把正文引语按**句子顺序**分到 `groups` 个动作拍。
+
+    动作流是英文视觉描述，本身不含正文引语；对白时间轴（`match_dialogue_to_beats`）
+    靠拍里的「」逐字命中，所以换用动作拍时必须把引语按剧情位置挂回对应拍，
+    否则所有台词都会退化成「未逐字命中」的兜底排布。
+
+    归属按**相对位置**取最近的一拍（`idx*groups//total`）：第 i 句发生在全段
+    第 i/total 处，就落进覆盖该时刻的那一拍。⚠ 不能复用 `_fold_firstlast_mid` 的
+    `total*g//groups` 折叠边界——那是「把 N 拍并进 G 槽」，拿它反查句子会让引语
+    整体后移一拍（6 句 / 4 拍时「开饭了」被挂到动作已经走开的下一拍）。
+    """
+    if groups <= 0 or not sentences:
+        return [[] for _ in range(max(0, groups))]
+    total = len(sentences)
+    buckets: list[list[str]] = [[] for _ in range(groups)]
+    for idx, sent in enumerate(sentences):
+        slot = min(groups - 1, idx * groups // total)
+        for quote in _beat_quotes(sent):
+            if quote not in buckets[slot]:
+                buckets[slot].append(quote)
+    return buckets
+
+
 def _fold_firstlast_mid(
-    beats: list[tuple[str, str]], quota: int,
-) -> list[tuple[str, str]]:
+    beats: list[tuple[str, str, tuple[str, ...], tuple[str, ...]]], quota: int,
+) -> list[tuple[str, str, tuple[str, ...], tuple[str, ...]]]:
     """把中段压进 `quota` 拍：与 `_bound_beats` 同口径的均分合并（首尾各占一拍）。
 
     不能直接复用二元版 `_bound_beats`：那里 tuple 是 (label, desc)、合并的是 desc，
-    而这里 (content, extra) 要合并的是 content。分组公式 `total*idx//quota` 与
-    `_bound_beats` 逐字一致 ⇒ 拍数 ≤ 秒数时整除边界严格递增，不产生 0s–0s 空窗口；
-    组内文本保序去重合并，剧情事实一条不丢。
+    而这里 (content, extra, scenes, quotes) 要合并的是 content。分组公式 `total*idx//quota`
+    与 `_bound_beats` 逐字一致 ⇒ 拍数 ≤ 秒数时整除边界严格递增，不产生 0s–0s 空窗口；
+    组内文本保序去重合并，剧情事实一条不丢；场景按出现顺序去重保留（合并窗口里
+    如果跨了地点，转场句照旧要出现在这一拍的文本里）。引语单独带着走——第 105 刀起
+    由 `_attach_beat_quotes` 按**最终拍窗口**给预算，不能在合并前就拼进 content。
     """
     if quota <= 0 or len(beats) <= quota:
         return beats
     total = len(beats)
-    out: list[tuple[str, str]] = []
+    out: list[tuple[str, str, tuple[str, ...], tuple[str, ...]]] = []
     for idx in range(quota):
         lo = total * idx // quota
         hi = total * (idx + 1) // quota
         group = beats[lo:hi]
         if not group:
             continue
-        content = "；".join(dict.fromkeys(part for part, _ in group if part))
-        extra = "；".join(dict.fromkeys(part for _, part in group if part))
-        out.append((content or "主体动作按剧情自然演变", extra))
+        content = "；".join(dict.fromkeys(part for part, _extra, _sc, _q in group if part))
+        extra = "；".join(dict.fromkeys(part for _body, part, _sc, _q in group if part))
+        scenes = tuple(dict.fromkeys(
+            scene for _body, _extra, slots, _q in group for scene in slots if scene
+        ))
+        quotes = tuple(dict.fromkeys(
+            quote for _body, _extra, _sc, qs in group for quote in qs
+        ))
+        out.append((content or "主体动作按剧情自然演变", extra, scenes, quotes))
     return out
 
 
-def _time_segments(spec: dict[str, Any], duration_hint: int,
-                   first_frame_desc: str, last_frame_desc: str,
-                   prev_tail_desc: str,
-                   has_first: bool = True, has_last: bool = True,
-                   skeleton: "VideoSkeleton | None" = None) -> str:
-    """④ 时间分镜（firstlast 核心）：首帧→剧情逐句成拍→尾帧，覆盖整段桥段。
+def _fit_beat_quotes(quotes: tuple[str, ...], seconds: int) -> tuple[list[str], int]:
+    """按本拍时长容量取能说完的**整句**台词，返回（保留的引语，被裁掉的句数）。
 
-    - 首帧段带「上楼层尾帧」衔接上下文（转场判断融入生成，不单独判定）；
-    - 中段把 narrative 按句子切拍：每个事件/每句对白各占一拍（引语拍标台词同步）；
-      跳过已被 opening 覆盖的开头句、对白归属与台词同拍、超量均分合并不丢剧情
-      （第 80 刀，见 `_fold_firstlast_mid`）；
-    - 尾帧段收尾定格 + 拉镜头收束；缺图时诚实标注（R2）。
-    - 运镜取自镜头语言词汇表，按拍位分配（定场→换镜→收束），不再全程同一「极缓推进」。
-    - skeleton（提示词模版骨架）：beat_labels 覆盖三段节奏名、camera_band_overrides
-      覆盖运镜档位文案、default_duration 覆盖时长兜底；None = 逐字现行为。
+    实稿：15s 片子 7 拍中段、53 句台词 ⇒ 每 2 秒拍塞 8–10 句（108–230 字），
+    物理上说不完，模型只能把整段挤进两秒或直接忽略。按 `_DIALOGUE_CHARS_PER_SEC`
+    估容量：
+    - 整句装不下就停（不跳句取后文，避免同拍内台词时序错位）；
+    - 一句都装不下 ⇒ 本拍只演画面动作、不写对白（宁缺不错）。
+    被裁掉的台词数由 `build_video_request` 落进 warnings（供人核对，不静默）。
+    """
+    budget = max(0, int(seconds * _DIALOGUE_CHARS_PER_SEC))
+    kept: list[str] = []
+    used = 0
+    for quote in quotes:
+        if used + len(quote) > budget:
+            break
+        kept.append(quote)
+        used += len(quote)
+    return kept, len(quotes) - len(kept)
+
+
+def _render_beat_quotes(content: str, kept: list[str]) -> str:
+    if not kept:
+        return content
+    return content + "；本拍对白：" + "".join(f"「{q}」" for q in kept) + "；台词随口型同步"
+
+
+def _attach_beat_quotes(content: str, quotes: tuple[str, ...], seconds: int) -> str:
+    """把引语按本拍时长预算挂进 content（`_fit_beat_quotes` + 渲染的薄包装）。"""
+    if not quotes:
+        return content
+    kept, _dropped = _fit_beat_quotes(quotes, seconds)
+    return _render_beat_quotes(content, kept)
+
+
+# 拍窗口最短 2s（第 107 刀）：开场/收尾是定格拍，中段也要落得住动作。
+_DIALOGUE_BEAT_FLOOR_SECONDS = 2
+
+
+def _firstlast_beat_windows(
+    beats: list[tuple[str, str, str, tuple[str, ...]]], dur: int,
+) -> tuple[list[tuple[int, int]], int, int]:
+    """按台词量分配拍窗口（第 107 刀），返回（窗口, 纯台词秒数, 各拍最少需要秒数）。
+
+    旧实现 `dur*idx//n` 均分：15s / 5 拍每拍 3s，一句 28 字（≈6.3s）的台词物理上
+    说不完，`_fit_beat_quotes` 只能整句裁掉（实稿 844 字 3 段 15s 只剩 6/9）。
+    台词拍按 `_DIALOGUE_CHARS_PER_SEC` 配够说话时间、其余拍保 2s 定格/动作下限，
+    余量从前向后轮流补 1s（开场先得，有利于切入）。
+
+    - 所有拍需求相同（无台词 / 台词量恰好均匀）⇒ 逐字沿用旧均分，这类提示词零变化；
+    - 需求总和超过时长 ⇒ 同样退回均分——不削别拍补台词拍，只由调用方报「至少需要
+      约 Xs」，保证不出现 0s 拍，也不静默改变画面节奏。
+    """
+    n = len(beats)
+    uniform = [(dur * idx // n, dur * (idx + 1) // n) for idx in range(n)]
+    speech = [
+        math.ceil(sum(len(quote) for quote in quotes) / _DIALOGUE_CHARS_PER_SEC)
+        if quotes else 0
+        for _content, _extra, _label, quotes in beats
+    ]
+    needs = [max(_DIALOGUE_BEAT_FLOOR_SECONDS, sec) for sec in speech]
+    if len(set(needs)) == 1 or sum(needs) > dur:
+        return uniform, sum(speech), sum(needs)
+    add = [0] * n
+    for i in range(dur - sum(needs)):
+        add[i % n] += 1
+    edges = [0]
+    for need, bonus in zip(needs, add):
+        edges.append(edges[-1] + need + bonus)
+    return list(zip(edges, edges[1:])), sum(speech), sum(needs)
+
+
+def _firstlast_beat_plan(
+    spec: dict[str, Any], duration_hint: int,
+    first_frame_desc: str, last_frame_desc: str,
+    prev_tail_desc: str,
+    has_first: bool = True, has_last: bool = True,
+    skeleton: "VideoSkeleton | None" = None,
+) -> tuple[list[tuple[int, int, str, str, str]], int, dict[str, int]]:
+    """firstlast 分镜拍计划：[(start, end, label, content, extra)] + 实际时长（秒）
+    + 台词预算统计 `{quotes_total, quotes_dropped, dialogue_seconds,
+    beat_needs_seconds}`（第 105 刀：超出拍窗口容量的引语被裁掉，调用方据此落
+    warnings，不静默；第 107 刀：拍窗口按台词需求加权，`beat_needs_seconds`
+    是「台词拍按 4.5 字/秒 + 每拍 2s 下限」的总和，放不下时调用方报所需时长）。
+
+    ⚠ **单一真源**：④ 的渲染与「对白时间轴」共用这一份拍界。两边各算一遍
+    `dur*idx//n` 迟早会漂移，模型收到的「第几秒说哪句」就会对不上画面。
+
+    中段取材＝提取层 `action_sequence` 去掉 desc[0]（合同要求它**复现**首帧，纯复述）
+    或正文逐句；末拍是「**落在**尾帧」的动作收束（见第 102 刀），仍进中段。
+    每拍 scene 只在变化处渲染成转场句（见下方渲染段）。
+
+    拍数 ≤ 秒数（首尾各占一拍、中段最多 dur-2 拍）⇒ 不会出现 0s–0s 空窗口。
     """
     sk = skeleton or VideoSkeleton()
     fallback_dur = sk.default_duration if sk.default_duration else _DEFAULT_DURATION
     dur = int(duration_hint) if duration_hint else fallback_dur
-    narrative = str(spec.get("narrative") or "").strip()
     motion_raw = spec.get("motion")
     motion = int(motion_raw) if isinstance(motion_raw, (int, float)) else 0
-    model_cam = str(spec.get("camera") or "").strip()
 
     f_open = (first_frame_desc or "楼层开头画面").strip()
     l_close = (last_frame_desc or "楼层结尾画面").strip()
@@ -1029,43 +1239,42 @@ def _time_segments(spec: dict[str, Any], duration_hint: int,
     else:
         open_extra = "作为本段独立开场镜头"
 
-    # 中段：剧情逐句成拍（每事件/每对白一镜），引语拍标注台词同步。
-    # _split_narrative_beats 负责引号句合并归属 + 拒答句剔除，不把拒答正文编进分镜。
-    # 第 80 刀三处修正（只作用 firstlast；climax 走 _climax_time_segments）：
-    # ① 开场定格已逐字带上 first_frame_desc（楼层开头部分），中段若从第一句起会把
-    #    同一段画面再演一遍——离线真链路模拟里 12s 的前 4 秒都在重复「推门收伞」。
-    #    只跳过**开头连续**被 opening 覆盖的那几句，后文有意重复的句子不动。
-    # ② 闭引号后紧跟的「老周问。」是对白归属，与台词同拍，否则口型同步与说话人分家；
-    #    第 86 刀补另一半：真机更常见的是「归属＋第二句台词」同句，只认纯短句会把归属
-    #    整条留给第二句，第一句台词因此没人说过（`_is_attribution_lead`）。
-    # ③ 取消 [:8] 硬截断：narrative 全段都得有交代，超量按时长均分合并而非丢弃。
-    sentences = _split_narrative_beats(narrative)
-    opening = (first_frame_desc or "").strip()
-    covered = 0
-    while covered < len(sentences) and opening and sentences[covered].strip() in opening:
-        covered += 1
-    sentences = sentences[covered:]
-    merged_sentences: list[str] = []
-    for sent in sentences:
-        previous = merged_sentences[-1] if merged_sentences else ""
-        if previous and ("「" in previous or "“" in previous) and (
-                _is_speaker_attribution(sent) or _is_attribution_lead(sent)):
-            merged_sentences[-1] = f"{previous}{sent}"
-        else:
-            merged_sentences.append(sent)
-    mid_beats: list[tuple[str, str]] = []
-    for sent in merged_sentences:
-        content = sent
-        if "「" in sent or "“" in sent:
-            content += "；台词随口型同步"
-        mid_beats.append((content, "与节拍/重音同步" if int(motion) >= 2 else ""))
-    if not mid_beats:
-        mid_beats = [("主体动作按剧情自然演变", "")]
+    # 中段两条取材路（批 2）：优先提取层的动作流（英文视觉描述、动作/分镜更细），
+    # 不足 3 拍（只有开场＋收尾）或没有时退回批 1 的正文逐句成拍。
+    # ⚠ 只丢 desc[0]：合同要求它**复现**楼层开头画面（纯复述，与开场定格拍逐字重复）；
+    #   desc[-1] 的合同是「**落在**楼层结尾画面」，不是「只复述尾帧」——第 102 刀实稿：
+    #   真实末拍＝「把银戒慢慢戴上→靠墙→楼下闷响」，旧实现 `action[1:-1]` 整拍丢掉，
+    #   ④ 里只剩台词「这戒指，我戴上了」而没有戴戒动作。⇒ 末拍作为动作收束进中段，
+    #   尾帧由收尾拍另行定格（帧锚点仍只在收尾拍出现一次）。
+    sentences = _firstlast_narrative_sentences(spec, first_frame_desc)
+    action = _firstlast_action_beats(spec)
+    use_action = len(action) >= 3
+    mid_beats: list[tuple[str, str, tuple[str, ...], tuple[str, ...]]] = []
+    if use_action:
+        mid_action = action[1:]
+        for (desc, scene), quotes in zip(
+                mid_action, _group_firstlast_quotes(sentences, len(mid_action))):
+            # 引语是「对白时间轴」的唯一锚点：换成英文动作拍后必须按剧情位置挂回。
+            # 第 105 刀：先只带着走，等最终拍窗口算出来再按秒数预算挂进 content——
+            # 折叠合并会改变每拍的时长，提前拼进去就无从裁量（实稿 53 句塞 15s）。
+            mid_beats.append((
+                desc, "与节拍/重音同步" if motion >= 2 else "",
+                (scene,) if scene else (), tuple(quotes),
+            ))
+    else:
+        for sent in sentences:
+            content = sent
+            if "「" in sent or "“" in sent:
+                content += "；台词随口型同步"
+            mid_beats.append((content, "与节拍/重音同步" if motion >= 2 else "", (), ()))
+        if not mid_beats:
+            mid_beats = [("主体动作按剧情自然演变", "", (), ())]
     # 首尾各占一拍 ⇒ 中段最多 dur-2 拍，总拍数 ≤ dur：`dur*idx//n` 不再整除出空窗口。
     quota = max(0, dur - 2)
     if quota == 0:
         # 时长 <3s（现实下界 4，仅防御）：整段剧情并进开场拍，只留首尾两拍。
-        joined = "；".join(dict.fromkeys(content for content, _ in mid_beats if content))
+        joined = "；".join(dict.fromkeys(
+            content for content, _extra, _sc, _q in mid_beats if content))
         if joined:
             open_content = f"{open_content}；{joined}"
         mid_beats = []
@@ -1076,21 +1285,272 @@ def _time_segments(spec: dict[str, Any], duration_hint: int,
     close_content = f"收尾定格于尾帧画面：{l_close}" if has_last else f"以文字尾帧收尾：{l_close}"
     close_extra = "动作自然收束、神态定格，为下一镜头衔接留出自然过渡点"
 
-    beats: list[tuple[str, str, str]] = [(open_content, open_extra, sk.beat_label(0, "开场定格"))]
-    for content, extra in mid_beats:
-        beats.append((content, extra, sk.beat_label(1, "剧情演变")))
-    beats.append((close_content, close_extra, sk.beat_label(2, "收尾定格")))
+    open_scene = action[0][1] if use_action else ""
+    close_scene = action[-1][1] if use_action else ""
+    beats: list[tuple[str, str, str, tuple[str, ...], tuple[str, ...]]] = [(
+        open_content, open_extra, sk.beat_label(0, "开场定格"),
+        (open_scene,) if open_scene else (), (),
+    )]
+    for content, extra, scenes, quotes in mid_beats:
+        beats.append((content, extra, sk.beat_label(1, "剧情演变"), scenes, quotes))
+    beats.append((
+        close_content, close_extra, sk.beat_label(2, "收尾定格"),
+        (close_scene,) if close_scene else (), (),
+    ))
 
+    # 换场景＝一次转场拍：只在**变化**处写「场景切换：…」，同一地点（含大小写/空白差异）
+    # 不重复写。开场场景是起点、不渲染成切换；开场没给场景时中段第一个场景只「认下来」，
+    # 否则会凭空多报一次切换。
+    prev_scene = ""
+    rendered: list[tuple[str, str, str, tuple[str, ...]]] = []
+    for content, extra, label, scenes, quotes in beats:
+        prefix = ""
+        for scene in scenes:
+            key = _scene_key(scene)
+            if not key or key == _scene_key(prev_scene):
+                continue
+            if not prev_scene:
+                prev_scene = scene
+                continue
+            prefix += f"场景切换：{scene}；"
+            prev_scene = scene
+        rendered.append((prefix + content, extra, label, quotes))
+
+    n = len(rendered)
+    windows, dialogue_seconds, beat_needs_seconds = _firstlast_beat_windows(rendered, dur)
+    plan: list[tuple[int, int, str, str, str]] = []
+    quotes_total = 0
+    quotes_dropped = 0
+    for idx, (content, extra, label, quotes) in enumerate(rendered):
+        start, end = windows[idx]
+        kept, dropped = _fit_beat_quotes(quotes, end - start)
+        quotes_total += len(quotes)
+        quotes_dropped += dropped
+        plan.append((
+            start, end, label,
+            _render_beat_quotes(content, kept), extra,
+        ))
+    return plan, dur, {
+        "quotes_total": quotes_total,
+        "quotes_dropped": quotes_dropped,
+        "dialogue_seconds": dialogue_seconds,
+        "beat_needs_seconds": beat_needs_seconds,
+    }
+
+
+def _time_segments(spec: dict[str, Any], duration_hint: int,
+                   first_frame_desc: str, last_frame_desc: str,
+                   prev_tail_desc: str,
+                   has_first: bool = True, has_last: bool = True,
+                   skeleton: "VideoSkeleton | None" = None) -> str:
+    """④ 时间分镜（firstlast 核心）：首帧→动作流/逐句剧情→尾帧，覆盖整段桥段。
+
+    - 首帧段带「上楼层尾帧」衔接上下文（转场判断融入生成，不单独判定）；
+    - 中段两条取材路（批 2）：提取层 `action_sequence` ≥3 拍时用它撑分镜（英文视觉描述、
+      动作更细；只丢 desc[0]——它按合同只复述首帧，末拍是「落在尾帧」的动作收束仍进中段，
+      第 102 刀），正文引语按句子的相对位置挂回最近一拍；
+      不足 3 拍或没有时退回批 1 的正文逐句成拍（第 80 刀：跳过被 opening 覆盖的开头句、
+      对白归属与台词同拍、超量均分合并不丢剧情，见 `_fold_firstlast_mid`）；
+    - 每拍可带 scene：只在**变化**处渲染「场景切换：…」，换场景因此成为一次转场拍；
+    - 尾帧段收尾定格 + 拉镜头收束；缺图时诚实标注（R2）。
+    - 运镜取自镜头语言词汇表，按拍位分配（定场→换镜→收束），不再全程同一「极缓推进」。
+    - skeleton（提示词模版骨架）：beat_labels 覆盖三段节奏名、camera_band_overrides
+      覆盖运镜档位文案、default_duration 覆盖时长兜底；None = 逐字现行为。
+    - 拍界由 `_firstlast_beat_plan` 统一产出（与对白时间轴同一份）。
+    """
+    sk = skeleton or VideoSkeleton()
+    motion_raw = spec.get("motion")
+    motion = int(motion_raw) if isinstance(motion_raw, (int, float)) else 0
+    model_cam = str(spec.get("camera") or "").strip()
+    beats, _, _quote_stats = _firstlast_beat_plan(
+        spec, duration_hint, first_frame_desc, last_frame_desc, prev_tail_desc,
+        has_first, has_last, sk,
+    )
     lines: list[str] = []
     n = len(beats)
-    for idx, (content, extra, label) in enumerate(beats):
-        start = dur * idx // n
-        end = dur * (idx + 1) // n
+    for idx, (start, end, label, content, extra) in enumerate(beats):
         cam = model_cam or _beat_camera(
             int(motion), idx, n, content, sk.camera_band_overrides or None)
         tail = f"（{extra}）" if extra else ""
         lines.append(f"[{start}s–{end}s｜{label}]：{cam}；{content}{tail}")
     return "\n".join(lines)
+
+
+# ── 对白时间轴（第 99 刀，2026-11-08 用户定案）─────────────────────────────────
+# 用户口径：对话生成的配音是一句一句拼起来的**紧凑**录音，直接整条塞给视频模型会把
+# 「一句接一句」的节奏带进画面。所以拼接音频只当**音色/语气参考**（H3 `<Audio 1>` 的
+# reference 关系），真正「哪一句在哪个场景/动作/镜头说」由 ④ 的拍窗口决定。
+# 拍界真源 = `_firstlast_beat_plan`（不另算一遍）；台词与分镜的关联靠**引语文本**。
+_QUOTE_PAIR_RE = re.compile(r"[「“『‘]([^」”』’]*)[」”』’]")
+_DIALOGUE_UNNAMED = "旁白"
+# 中文语速估算（用于「台词比视频还长」的诚实告警）：4.5 字/秒是字幕常态值。
+_DIALOGUE_CHARS_PER_SEC = 4.5
+
+
+def _dialogue_norm(text: str) -> str:
+    """归一化台词文本：只留字母/数字/汉字，去掉标点与空白（比对用，不用于渲染）。"""
+    return re.sub(r"[^\w\u4e00-\u9fff]+", "", text or "").lower()
+
+
+def _beat_quotes(text: str) -> list[str]:
+    """取一拍里的全部引语片段（「」/“”/『』/‘’）。"""
+    return [m.group(1).strip() for m in _QUOTE_PAIR_RE.finditer(text or "") if m.group(1).strip()]
+
+
+def match_dialogue_to_beats(
+    audio_lines: list[Any] | None,
+    beats: list[tuple[int, int, str, str, str]],
+) -> list[tuple[int, tuple[int, int, str, str, str], dict[str, Any], bool]]:
+    """把本轮 TTS 台词按**顺序**落到 firstlast 的拍窗口。
+
+    返回 `[(beat_index, beat, line, exact)]`，按拍序（= 时间序）排列。
+
+    命中规则（宁可不错位，也不静默丢句）：
+    1. 文本命中：归一化后「台词 ⊂ 该拍引语」或「引语 ⊂ 台词」即算同一句；
+       只在 `cursor` 及其之后的引语拍里找，保证多句台词的先后不被打乱。
+    2. 未命中：按顺序铺到还空着的引语拍（一段引语里两句台词是常态）。
+    3. 一拍引语都没有（正文全是动作描写）：按中段拍均分。
+    """
+    entries = [
+        ln for ln in (audio_lines or [])
+        if isinstance(ln, dict) and str(ln.get("text") or "").strip()
+    ]
+    if not entries or not beats:
+        return []
+    quote_beats = [
+        (idx, _dialogue_norm("".join(_beat_quotes(beat[3]))))
+        for idx, beat in enumerate(beats)
+    ]
+    quote_beats = [(idx, quote) for idx, quote in quote_beats if quote]
+
+    out: list[tuple[int, tuple[int, int, str, str, str], dict[str, Any], bool]] = []
+    used: dict[int, int] = {}
+    pending: list[dict[str, Any]] = []
+    cursor = 0
+    for ln in entries:
+        needle = _dialogue_norm(str(ln.get("text") or ""))
+        hit = None
+        for pos in range(cursor, len(quote_beats)):
+            quote = quote_beats[pos][1]
+            if needle and (needle in quote or (len(quote) >= 2 and quote in needle)):
+                hit = pos
+                break
+        if hit is None:
+            pending.append(ln)
+            continue
+        idx = quote_beats[hit][0]
+        cursor = hit
+        used[idx] = used.get(idx, 0) + 1
+        out.append((idx, beats[idx], ln, True))
+
+    if pending:
+        free = [pos for pos, (idx, _) in enumerate(quote_beats) if idx not in used]
+        if free:
+            for i, ln in enumerate(pending):
+                idx = quote_beats[free[min(i, len(free) - 1)]][0]
+                used[idx] = used.get(idx, 0) + 1
+                out.append((idx, beats[idx], ln, False))
+        elif quote_beats:
+            # 全部引语拍都被占：追加到最后一句台词所在拍（同窗口内自然连说）。
+            target = quote_beats[-1][0]
+            for ln in pending:
+                out.append((target, beats[target], ln, False))
+        else:
+            # 一拍引语都没有（正文全是动作描写）：台词按顺序铺到中段拍，均分。
+            mids = [idx for idx in range(1, len(beats) - 1)] or [len(beats) // 2]
+            for i, ln in enumerate(pending):
+                idx = mids[i * len(mids) // len(pending)]
+                out.append((idx, beats[idx], ln, False))
+
+    out.sort(key=lambda item: item[0])
+    return out
+
+
+def build_dialogue_reference(
+    audio_lines: list[Any] | None,
+    beats: list[tuple[int, int, str, str, str]],
+    *,
+    ref_label: str = "<Audio 1>",
+) -> dict[str, Any] | None:
+    """把本轮 TTS 台词编成「对白时间轴」参考块（firstlast 专用，第 99 刀）。
+
+    用户口径（2026-11-08）：拼接音频是**紧凑**的逐句录音，整条塞给视频模型会把
+    「一句接一句」的节奏带进画面。所以它只作 `<Audio 1>` 的 reference（音色/语气），
+    「哪句在哪个镜头说」由 ④ 的拍窗口承载（拍界真源 `_firstlast_beat_plan`）。
+
+    第 105 刀（实稿发现 5）：每个拍窗口按 `_DIALOGUE_CHARS_PER_SEC` 限速，装不下的
+    整句**剔除**（与 ④ 的 `_fit_beat_quotes` 同口径）。15s 塞 53 句时 ⑤ 若照列，
+    与 ④ 自相矛盾，模型只能把整段挤进两秒。剔除句数进 warnings（不静默）。
+
+    返回结构化 dict（`text` 是可直接追加进 video_prompt 的渲染块）；无台词返回 None。
+    台词**归属**（speaker）沿用 TTS 行；正文一句引语都没有时按中段拍均分并告警。
+    """
+    matched = match_dialogue_to_beats(audio_lines, beats)
+    if not matched:
+        return None
+    speaker_ids: dict[str, str] = {}
+    timeline: list[dict[str, Any]] = []
+    dropped = 0
+    inexact = 0
+    used_chars: dict[int, int] = {}
+    for idx, beat, line, exact in matched:
+        start, end, label = int(beat[0]), int(beat[1]), str(beat[2])
+        text = re.sub(r"\s+", " ", str(line.get("text") or "")).strip()
+        capacity = max(0, int((end - start) * _DIALOGUE_CHARS_PER_SEC))
+        used = used_chars.get(idx, 0)
+        if used + len(text) > capacity:
+            dropped += 1
+            continue
+        used_chars[idx] = used + len(text)
+        name = str(line.get("speaker") or "").strip() or _DIALOGUE_UNNAMED
+        sid = speaker_ids.setdefault(name, f"S{len(speaker_ids) + 1}")
+        if not exact:
+            inexact += 1
+        timeline.append({
+            "start": start, "end": end, "label": label,
+            "speaker": name, "speaker_id": sid, "text": text, "exact": exact,
+        })
+
+    speakers = "；".join(f"({sid})={name}" for name, sid in speaker_ids.items())
+    lines = [
+        f"[对白参考]：{ref_label} 是本轮角色对白的连续参考录音（同轮 TTS 顺序拼接），"
+        "只锁定音色、语气与情绪；不要复制它的音轨，也不要沿用「一句紧接一句」的紧凑节奏"
+        "——成片人声在各拍窗口内重新生成。",
+        f"[对白说话人]：{speakers}",
+    ]
+    if timeline:
+        lines.append("[对白时间轴]：")
+        for item in timeline:
+            lines.append(
+                f"[{item['start']}s–{item['end']}s｜{item['label']}] "
+                f"({item['speaker_id']}) {item['speaker']}：<d>[Chinese] {item['text']}</d>"
+            )
+        lines.append(
+            "[对白执行]：每句台词只在所属时间窗内说完，句间留自然停顿与环境声，"
+            "口型与台词逐字对齐；参考音频的紧凑拼接不得带进画面节奏，台词逐字照读、不改写不增删。"
+        )
+    else:
+        lines.append("[对白时间轴]：（无：本轮台词均超出所在拍可说完的容量，未安排进镜头）")
+
+    warnings: list[str] = []
+    if dropped:
+        warnings.append(
+            f"{dropped} 句台词超出所在拍可说完的容量（约 {_DIALOGUE_CHARS_PER_SEC} 字/秒），"
+            "已从对白时间轴剔除：建议加长视频或精简台词"
+        )
+    if inexact:
+        warnings.append(
+            f"{inexact} 句台词未在正文引语中逐字命中，按顺序铺到空余镜头窗口（供人工核对）"
+        )
+    return {
+        "ref_label": ref_label,
+        "speakers": {sid: name for name, sid in speaker_ids.items()},
+        "timeline": timeline,
+        "text": "\n".join(lines),
+        "warnings": warnings,
+        "line_count": len(timeline),
+    }
+
 
 
 def _transition_segments(spec: dict[str, Any],
@@ -1710,6 +2170,10 @@ def compile_transition_video_prompt(
     ① 元信息 ② 参考绑定（图片1=上尾帧、图片2=当前首帧）③ 主体/场景
     ④ 转场分镜 ⑤ 音频。风格声明已停用（有参考图定调）。
 
+    ⚠ 第 104 刀：`spec` 只用来取在场角色/机位（②⑤），**不再消费整楼层的
+    `video_subject_scene` / `audio_design`**——短桥段复述整楼层事实会把别处的场景与
+    事件音效塞进过渡（③ 用 `_transition_subject_scene`、⑤ 用中性环境声）。
+
     坑G：时长不预设死值——duration_hint=0 时不写秒数（_meta_transition 交视频模型
     默认），不兑底 _DEFAULT_DURATION；前端提交侧有转场时长才写。
     skeleton（提示词模版骨架）：default_duration 仅显式提供时才写（用户选择即为意图）。
@@ -1727,7 +2191,7 @@ def compile_transition_video_prompt(
         f"[{sk.title(SECTION_BINDING, '参考绑定')}]："
         f"{_reference_binding_transition(prev_tail_desc, first_frame_desc, spec, has_prev_tail, has_first)}"
     )
-    subject = _subject_scene(spec)
+    subject = _transition_subject_scene(spec)
     if subject:
         blocks[SECTION_SUBJECT] = f"[{sk.title(SECTION_SUBJECT, '主体/场景')}]：{subject}"
     blocks[SECTION_SEGMENTS] = (
@@ -1735,7 +2199,10 @@ def compile_transition_video_prompt(
         + _transition_segments(spec, prev_tail_desc, first_frame_desc,
                                has_prev_tail, has_first, sk)
     )
-    blocks[SECTION_AUDIO] = f"[{sk.title(SECTION_AUDIO, '音频')}]：{_audio_hint(spec, None)}"
+    # 第 104 刀（实稿发现 4）：转场没有独立的音频提取，整楼层 `audio_design` 里的事件音效
+    # （实稿「楼下闷响」发生在楼层结尾）搬进几秒的桥段会让过渡凭空塞事件 ⇒ 退回中性环境声，
+    # 与「无 audio_design」时的口径逐字一致。
+    blocks[SECTION_AUDIO] = f"[{sk.title(SECTION_AUDIO, '音频')}]：{_audio_hint({})}"
     return _assemble_blocks(blocks, sk)
 
 
@@ -1749,6 +2216,21 @@ def _clean_spec(spec: dict[str, Any]) -> dict[str, Any]:
     避免 @(x)@ 残留进视频提示词。
     """
     return prompt_clean.clean_spec_text_fields(spec)
+
+
+def _caps_allows_last_frame(caps: dict[str, Any] | None) -> bool:
+    """模板是否收第二张图（尾帧 / 转场终点）。caps=None（模板未知）⇒ 保持现行为 True。"""
+    return True if not caps else bool(caps.get("supports_last_frame"))
+
+
+def _caps_reference_slots(caps: dict[str, Any] | None) -> int:
+    """模板能收的角色参考图槽数。caps=None（模板未知）⇒ 不设上限。"""
+    if not caps:
+        return 99
+    try:
+        return max(0, int(caps.get("reference_slots") or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def build_video_request(
@@ -1765,6 +2247,7 @@ def build_video_request(
     audio_lines: list | None = None,
     pending_frame: bool = False,
     skeleton: "VideoSkeleton | None" = None,
+    caps: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """组装「上交给视频模型的参数」（dry-run，不提交）。
 
@@ -1788,8 +2271,14 @@ def build_video_request(
       正片（climax/firstlast）仍走 videoDurationHint。
     - skeleton（提示词模版骨架）：自定义视频模版的区块标题/顺序/per-band 运镜/
       节奏名/默认时长；None = 逐字现行为（既有调用方零改动）。
-    - pending_frame（climax 自动链）：提示词在成图**之前**编译、首帧由下游链补挂 ⇒
-      仍按 I2V 写首帧声明与机位保持，否则这段提示词自认文生视频，首帧自己重新构图。
+    - pending_frame（climax 自动链 / firstlast 首尾帧链 / transition 转场链）：提示词在成图
+      **之前**编译、帧由下游链补挂 ⇒ 仍按 I2V/首尾帧声明，否则这段提示词自认文生视频、
+      首帧自己重新构图。firstlast 的两张图总是成对产出（复用或重生）、转场的两张图也总是
+      在提交前挂上（上尾帧来自历史、当前首帧由本链生成）⇒ 一个标记同时声明两张图。
+    - caps（视频**工作流**模板能力，见 `template_store.video_template_caps`）：None＝模板未知
+      ⇒ 逐字现行为（声明全部图片位）；给定 ⇒ 只声明模板真能消费的图片位（尾帧槽 / 参考图槽），
+      且 firstlast 未显式设时长时取模板 `video_duration` 默认值——那是成片的物理长度，
+      ① 的秒数、④ 的拍界与 `submit.duration` 必须同源（第 106 刀 · 实稿发现 1/2）。
     """
     preset = preset or {}
     spec = _clean_spec(spec or {})
@@ -1812,28 +2301,70 @@ def build_video_request(
     size = size_cfg or "1280x720"
     # 高潮机位契约判定（仅 climax；其余模式为 None——首尾帧/转场的镜头语义本就允许运动）
     shot_intent: dict[str, str] | None = None
+    # 对白时间轴（第 99 刀）：只有 firstlast 正片产出；**不拼进 video_prompt**——
+    # 模板没暴露参考音频槽时前端不追加，保持 2026-09-20「视频提示词只有效果音」口径。
+    dialogue: dict[str, Any] | None = None
+    # ④ 台词预算统计（第 105 刀）：仅 firstlast 的拍计划产出。
+    quote_stats: dict[str, int] = {}
 
     if mode == "firstlast":
-        has_first = bool(first_frame)
-        has_last = bool(last_frame)
+        # 批 1：生产链在成帧**之前**编译（图地址此时必为空），但首尾帧随后由前端链
+        # 成对挂上 ⇒ pending_frame 视为「图会到」，② 不再写「无参考图」。
+        # 第 106 刀（实稿发现 1/2）：模板能力是天花板——模板没有尾帧槽就没有「图片2」，
+        # 没有参考图槽就不声明「图片3+」；未设时长时按模板 `video_duration` 默认值排拍界，
+        # ① 的秒数与 ④ 的拍界、提交时长三处同源（实稿 15s 提示词 vs 10.125s 成片）。
+        allows_last = _caps_allows_last_frame(caps)
+        ref_limit = _caps_reference_slots(caps)
+        has_first = bool(first_frame) or pending_frame
+        has_last = (bool(last_frame) or pending_frame) and allows_last
+        # 图片3+ 角色参考图同样以模板槽数为天花板：② 的职责文字由 `role_refs` 生成，
+        # 超出槽数的只声明不剪 ⇒ 模型照样被指挥去看一张前端不会上传的图（发现 1 的同源缺口）。
+        role_refs = [str(raw).strip() for raw in (spec.get("role_refs") or []) if str(raw).strip()]
+        if len(role_refs) > ref_limit:
+            spec = {**spec, "role_refs": role_refs[:ref_limit]}
+        if duration_hint <= 0 and caps:
+            duration_hint = int(caps.get("duration") or 0)
+        ff_desc = first_frame_desc or "首帧/楼层开头画面"
+        lf_desc = last_frame_desc or "尾帧/楼层结尾画面"
+        # 拍界与 ④ 用同一份真源（`compile_firstlast_video_prompt` → `_time_segments`
+        # 内部同样调 `_firstlast_beat_plan`，入参逐字对齐才不会两边漂移）。
+        beats, beat_dur, quote_stats = _firstlast_beat_plan(
+            spec, duration_hint, ff_desc, lf_desc, prev_tail_desc,
+            has_first, has_last, skeleton,
+        )
+        dialogue = build_dialogue_reference(audio_lines, beats)
         prompt = compile_firstlast_video_prompt(
             spec, style_prefix=style_prefix,
             duration_hint=duration_hint, camera=camera, model_name=model, size=size,
-            first_frame_desc=first_frame_desc or "首帧/楼层开头画面",
-            last_frame_desc=last_frame_desc or "尾帧/楼层结尾画面",
+            first_frame_desc=ff_desc, last_frame_desc=lf_desc,
             prev_tail_desc=prev_tail_desc,
             has_first=has_first, has_last=has_last, audio_lines=audio_lines,
             skeleton=skeleton,
         )
-        images = [img for img in (first_frame, last_frame) if img]
+        images = [img for img in (first_frame, last_frame if allows_last else "") if img]
         binding = {
-            "图片1": _binding_entry(first_frame_desc or "首帧/楼层开头画面", first_frame),
-            "图片2": _binding_entry(last_frame_desc or "尾帧/楼层结尾画面", last_frame),
+            "图片1": _binding_entry(ff_desc, first_frame, pending_frame),
         }
+        if allows_last:
+            binding["图片2"] = _binding_entry(lf_desc, last_frame, pending_frame)
+        # 批 3 参考生成：图片3 起是角色参考图，编号与 ② 同源（`role_refs`，已按模板槽数裁剪），
+        # 实际文件由前端按视频模板的参考图槽上传。
+        for idx, name in enumerate(spec.get("role_refs") or [], start=3):
+            if name:
+                binding[f"图片{idx}"] = (
+                    f"{name} 的角色参考图（只锁身份、五官、发型与体型；"
+                    "当下衣着、姿势与所在场景以首尾帧画面为准）"
+                )
     elif mode == "transition":
-        # W3 转场视频：图片1=上尾帧（起点），图片2=当前首帧（终点），短桥段
-        has_prev_tail = bool(first_frame)
-        has_first = bool(last_frame)
+        # W3 转场视频：图片1=上尾帧（起点），图片2=当前首帧（终点），短桥段。
+        # 第 103 刀：转场同样在成图**之前**编译（上尾帧来自历史、当前首帧由本链刚生成），
+        # 两张图随后由前端 W3 转场块上传挂入 ⇒ pending_frame 视为「图会到」，
+        # 否则 ②/④ 恒写「无参考图，以文字为准」，与真实提交相反。
+        # 第 106 刀（实稿发现 1）：转场的「图片2=当前首帧」同样受模板能力约束——
+        # 模板没有第二图槽时，④ 按文字收束而不是宣称一张不会上传的图。
+        allows_last = _caps_allows_last_frame(caps)
+        has_prev_tail = bool(first_frame) or pending_frame
+        has_first = (bool(last_frame) or pending_frame) and allows_last
         prompt = compile_transition_video_prompt(
             spec, style_prefix=style_prefix,
             duration_hint=transition_duration_hint, camera=camera,
@@ -1843,11 +2374,14 @@ def build_video_request(
             has_prev_tail=has_prev_tail, has_first=has_first,
             skeleton=skeleton,
         )
-        images = [img for img in (first_frame, last_frame) if img]
+        images = [img for img in (first_frame, last_frame if allows_last else "") if img]
         binding = {
-            "图片1": _binding_entry(prev_tail_desc or "上一楼层尾帧画面", first_frame),
-            "图片2": _binding_entry(first_frame_desc or "当前楼层首帧画面", last_frame),
+            "图片1": _binding_entry(
+                prev_tail_desc or "上一楼层尾帧画面", first_frame, pending_frame),
         }
+        if allows_last:
+            binding["图片2"] = _binding_entry(
+                first_frame_desc or "当前楼层首帧画面", last_frame, pending_frame)
     else:
         # 参考绑定点：图片1只声明「图片1中心的角色为 X」（有在场角色时）；无在场角色
         # 才退回到 _climax_frame_role 的职责占位描述。画面级动作细节由 [时间分镜] 承载。
@@ -1871,7 +2405,22 @@ def build_video_request(
             "图片1": _binding_entry(role, first_frame),
         }
 
-    warnings = _missing_frame_warnings(mode, first_frame, last_frame, pending_frame)
+    warnings = _missing_frame_warnings(
+        mode, first_frame, last_frame, pending_frame,
+        allows_last=_caps_allows_last_frame(caps),
+    )
+    # 第 105 刀（实稿发现 5）：15s 塞 53 句 ⇒ ④ 每拍按 4.5 字/秒限速，装不下的引语
+    # 不是丢掉不提，这里如实报「裁了多少句」，让人决定是加长视频还是精简台词。
+    # 第 107 刀：拍窗口已按台词量加权，仍被裁 ⇒ 同时报「排进各拍至少需要多少秒」，
+    # 否则人只知道「裁了」，不知道要加到多长才够。
+    if quote_stats.get("quotes_dropped"):
+        need = quote_stats.get("beat_needs_seconds") or 0
+        hint = f"；本段台词排进各拍至少需要约 {need}s（当前 {beat_dur}s）" if need else ""
+        warnings.append(
+            f"④ 每拍对白按 {_DIALOGUE_CHARS_PER_SEC} 字/秒限速："
+            f"{quote_stats['quotes_dropped']}/{quote_stats['quotes_total']} 句引语"
+            f"超出所在拍可说完的容量，未写入分镜{hint}（建议加长视频或精简台词）"
+        )
     seconds = transition_duration_hint if mode == "transition" else duration_hint
 
     return {
@@ -1889,29 +2438,65 @@ def build_video_request(
         "reference_binding": binding,
         "prompt_sections": _section_names(mode, skeleton),
         "shot_intent": shot_intent,
+        # 对白时间轴（firstlast 且本轮有 TTS 台词才有；climax/transition 恒 None）
+        "dialogue": dialogue,
         "warnings": warnings,
     }
 
 
 def _missing_frame_warnings(mode: str, first_frame: str, last_frame: str,
-                            pending_frame: bool = False) -> list[str]:
-    """缺图守卫（R2）：把缺失帧的后果显式列给调用方/人核对。"""
+                            pending_frame: bool = False,
+                            *, allows_last: bool = True) -> list[str]:
+    """缺图守卫（R2）：把缺失帧的后果显式列给调用方/人核对。
+
+    `allows_last=False`（第 106 刀：模板没有第二图槽）⇒ 第二张图不会上传，
+    按「模板装不下」写实际后果，不再谎报「尾帧由下游链补挂」。
+    """
     warnings: list[str] = []
     if mode == "firstlast":
-        if not first_frame:
-            warnings.append("缺首帧图：首帧将以文字描述开场（退化为文生/待上游补图）")
-        if not last_frame:
-            warnings.append("缺尾帧图：尾帧将以文字描述收尾")
-        if not first_frame and not last_frame:
-            warnings.append("首尾帧图均缺：将退化为纯文生视频（无参考图）")
+        if pending_frame:
+            # 图在提示词编译之后才产出（前端首尾帧链）⇒ 不是「缺图」，按实际后果写。
+            if allows_last:
+                warnings.append("首尾帧图编译时未产出：首帧/尾帧由下游链补挂本张成帧")
+            else:
+                warnings.append(
+                    "首帧图编译时未产出：由下游链补挂本张成帧"
+                    "（视频模板无尾帧槽：尾帧图不会上传，收尾按文字描述）"
+                )
+        else:
+            if not first_frame:
+                warnings.append("缺首帧图：首帧将以文字描述开场（退化为文生/待上游补图）")
+            if allows_last:
+                if not last_frame:
+                    warnings.append("缺尾帧图：尾帧将以文字描述收尾")
+                if not first_frame and not last_frame:
+                    warnings.append("首尾帧图均缺：将退化为纯文生视频（无参考图）")
+            else:
+                warnings.append(
+                    "视频模板无尾帧槽：尾帧图不会上传，④ 收尾按文字描述"
+                )
     elif mode == "transition":
-        # 坑F：转场起点（上尾帧图）缺省 → 降级文字转场；终点（当前首帧图）缺省 → 文字收束
+        # 坑F：转场起点（上尾帧图）缺省 → 降级文字转场；终点（当前首帧图）缺省 → 文字收束。
+        # 第 103 刀：编译发生在成图之前（pending_frame）⇒ 两张图随后由 W3 转场块补挂，
+        # 不是「缺图」，按实际后果写，免得 trace 指错方向。
+        if pending_frame:
+            if allows_last:
+                warnings.append("转场双图编译时未产出：上尾帧/当前首帧由下游链补挂成帧")
+            else:
+                warnings.append(
+                    "转场仅一张图可挂（视频模板无第二图槽）：上尾帧由下游链补挂，"
+                    "当前首帧按文字收束"
+                )
+            return warnings
         if not first_frame:
             warnings.append("缺上尾帧图：转场降级为文字转场（以文字重现上一楼层尾帧）")
-        if not last_frame:
-            warnings.append("缺当前首帧图：转场终点以文字描述")
-        if not first_frame and not last_frame:
-            warnings.append("转场双图均缺：将退化为纯文生短桥段（无参考图）")
+        if allows_last:
+            if not last_frame:
+                warnings.append("缺当前首帧图：转场终点以文字描述")
+            if not first_frame and not last_frame:
+                warnings.append("转场双图均缺：将退化为纯文生短桥段（无参考图）")
+        else:
+            warnings.append("视频模板无第二图槽：当前首帧图不会上传，转场终点以文字描述")
     else:
         if not first_frame:
             # pending_frame（自动链）：图在提示词编译之后才产出，由下游链补挂成首帧，
@@ -1923,10 +2508,12 @@ def _missing_frame_warnings(mode: str, first_frame: str, last_frame: str,
     return warnings
 
 
-def _binding_entry(role: str, source: str) -> str:
+def _binding_entry(role: str, source: str, pending: bool = False) -> str:
     """参考绑定条目：职责 → 图地址（供人核对两层是否对应）。"""
     if source:
         return f"{role} → {source}"
+    if pending:
+        return f"{role} → （编译时未产出，由下游链补挂成帧）"
     return f"{role} → （未提供图地址，将退化为文生或由上游补图）"
 
 
@@ -1983,7 +2570,15 @@ def parse_video_plan(reply: str) -> dict[str, Any]:
             desc = prompt_clean.restore_jailbreak(str(item.get("desc") or "")).strip()
             if not desc or prompt_clean.REFUSAL_RE.search(desc):
                 continue
-            beats.append({"beat": beat or "延伸", "desc": desc})
+            entry: dict[str, str] = {"beat": beat or "延伸", "desc": desc}
+            # scene（批 2，firstlast 每拍场景）：只有非空且非拒答才收；缺省不写该键
+            # （climax 的 action_sequence 没有这个字段，逐字维持旧结构）。
+            raw_scene = item.get("scene")
+            if isinstance(raw_scene, str):
+                scene = prompt_clean.restore_jailbreak(raw_scene).strip()
+                if scene and not prompt_clean.REFUSAL_RE.search(scene):
+                    entry["scene"] = scene
+            beats.append(entry)
         if beats:
             out["action_sequence"] = beats
     subject_scene = data.get("subject_scene")
@@ -2012,17 +2607,17 @@ def parse_video_plan(reply: str) -> dict[str, Any]:
             speaker = prompt_clean.restore_jailbreak(str(ln.get("speaker") or "")).strip()
             text = prompt_clean.restore_jailbreak(str(ln.get("text") or "")).strip()
             if text:
-                entry: dict[str, Any] = {"speaker": speaker, "text": text}
+                line_entry: dict[str, Any] = {"speaker": speaker, "text": text}
                 # at_s：提取 LLM 按剧情位置推算的台词时点（秒）——数字/数字串才透传
                 at_s = ln.get("at_s")
                 if isinstance(at_s, (int, float)) and not isinstance(at_s, bool):
-                    entry["at_s"] = max(0.0, float(at_s))
+                    line_entry["at_s"] = max(0.0, float(at_s))
                 elif isinstance(at_s, str):
                     try:
-                        entry["at_s"] = max(0.0, float(at_s.strip()))
+                        line_entry["at_s"] = max(0.0, float(at_s.strip()))
                     except ValueError:
                         pass
-                lines.append(entry)
+                lines.append(line_entry)
         if lines:
             design["lines"] = lines
         sync = prompt_clean.restore_jailbreak(str(audio_design.get("sync") or "")).strip()

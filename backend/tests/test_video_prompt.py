@@ -246,6 +246,71 @@ def test_build_request_missing_frames_warns():
     assert any("纯文生" in w for w in req["warnings"])
 
 
+def test_firstlast_prefers_whole_floor_narrative_over_climax_excerpt():
+    """批 1：firstlast 覆盖整段楼层——中段取材用整轮正文，不是高潮锚点那一段。
+
+    `narrative` 仍保留为高潮段（climax 分支用）；firstlast 的整轮正文落在
+    `floor_narrative`。两者不得混用，否则视频只会演「开头 → 高潮段 → 结尾」。
+    """
+    spec = _spec(
+        narrative="高潮段：她跪到床边。",
+        floor_narrative=(
+            "开场：她推门进屋，收起伞。中段：她点亮台灯。"
+            "高潮段：她跪到床边。结尾：她合眼睡去。"
+        ),
+        camera="", motion=0,
+    )
+    p = video_prompt.compile_firstlast_video_prompt(spec, duration_hint=12)
+    seg = p.split("[时间分镜]：", 1)[1].split("[音频]：", 1)[0]
+    for frag in ("推门进屋", "点亮台灯", "跪到床边", "合眼睡去"):
+        assert frag in seg
+
+
+def test_firstlast_floor_narrative_restores_jailbreak_markers():
+    """整轮正文进提示词前必须还原破甲标记（与 narrative 同一条清洗链）。
+
+    清洗发生在 `build_video_request` 的 `_clean_spec`（`_SPEC_TEXT_FIELDS` 已登记
+    `floor_narrative`）⇒ 必须走真实组装入口，直调编译函数不经过这层。
+    """
+    req = video_prompt.build_video_request(
+        mode="firstlast",
+        spec=_spec(
+            narrative="高潮段。",
+            floor_narrative="她@(推)@门进屋。她@(坐)@到窗边。",
+            camera="", motion=0,
+        ),
+        video_config={"base_url": "u", "model": "h3"},
+        preset={"videoDurationHint": 8},
+        first_frame_desc="开场在门口", last_frame_desc="收束在窗边",
+    )
+    p = req["submit"]["prompt"]
+    assert "她推门进屋" in p
+    assert "她坐到窗边" in p
+    assert "@(推)@" not in p and "@(坐)@" not in p
+
+
+def test_build_request_firstlast_pending_frames_declare_both_images():
+    """批 1：首尾帧由前端链在编译后才挂上，② 不得再写「无参考图」。
+
+    生产调用点拿不到图地址（图在成帧之后才产出）⇒ 必须按「待挂」声明，
+    否则明明挂了图片1/2，提示词却叫模型按文字首帧自由构图。
+    """
+    req = video_prompt.build_video_request(
+        mode="firstlast", spec=_spec(),
+        video_config={"base_url": "u", "model": "h3"},
+        first_frame_desc="开场三人围坐", last_frame_desc="举杯同框",
+        pending_frame=True,
+    )
+    prompt = req["submit"]["prompt"]
+    assert "图片1=开场三人围坐（首帧/起始画面）" in prompt
+    assert "图片2=举杯同框（尾帧/目标画面）" in prompt
+    assert "无参考图" not in prompt
+    assert req["submit"]["images"] == []  # 地址确实没有，不能假装有
+    assert req["warnings"] == ["首尾帧图编译时未产出：首帧/尾帧由下游链补挂本张成帧"]
+    assert req["reference_binding"]["图片1"].endswith("（编译时未产出，由下游链补挂成帧）")
+    assert req["reference_binding"]["图片2"].endswith("（编译时未产出，由下游链补挂成帧）")
+
+
 def test_transition_has_five_sections_no_style():
     p = video_prompt.compile_transition_video_prompt(_spec(), style_prefix="二次元日常美食 CGDCT")
     assert "[转场分镜]" in p
@@ -327,6 +392,54 @@ def test_build_request_transition_missing_prev_tail_warns_and_degrades():
     assert req["submit"]["images"] == ["local://curr-first.png"]
     assert any("缺上尾帧图" in w for w in req["warnings"])
     assert "无参考图，以文字为准" in req["submit"]["prompt"]
+
+
+def test_第104刀_transition_does_not_inherit_whole_floor_subject_and_audio():
+    """实稿发现 4：转场是两帧之间的短桥段，③/⑤ 不得复述整楼层事实。
+
+    病灶：转场编译沿用整楼层 `spec` ⇒ ③ 写进整楼层的全部角色外貌与「走廊+卧室+楼下侧室门」
+    三个地点、⑤ 写进整楼层的 8 条音效（其中「楼下闷响」发生在**楼层结尾**，与转场起点
+    无关）。短桥段只有几秒，堆整楼层事实只会让模型在过渡里凭空换场、塞事件。
+    """
+    spec = _spec(
+        narrative="她推门进屋。",
+        actors=["她"],
+        locale="卧室",
+        video_subject_scene="WHOLE-FLOOR: corridor, bedroom and the downstairs door all at once",
+        audio_design={"sfx": ["downstairs muffled thud", "door slam"], "sync": "卡拍于 90s"},
+    )
+    p = video_prompt.compile_transition_video_prompt(
+        spec, prev_tail_desc="上尾帧：门口", first_frame_desc="当前首帧：床边",
+    )
+    assert "WHOLE-FLOOR" not in p
+    assert "downstairs muffled thud" not in p
+    assert "90s" not in p
+    # ③ 只保留「以两张图为准」的约束，别把整楼场景清单塞进过渡
+    assert "以图片1、图片2为准" in p
+    # ⑤ 退回中性环境声（没有转场级提取，不假装知道桥段里的音效）
+    assert "音效=环境声" in p
+
+
+def test_第103刀_transition_pending_frame_declares_both_images():
+    """实稿发现 3：转场同样在成图之前编译，图随后由 W3 转场块挂上（图片1=上尾帧、图片2=当前首帧）。
+
+    旧实现只认 first_frame/last_frame 地址 ⇒ ②/④ 恒写「无参考图，以文字为准」，
+    而前端实际会挂两张图 ⇒ 提示词自认文生、两张参考图白传。
+    """
+    req = video_prompt.build_video_request(
+        mode="transition", spec=_spec(),
+        video_config={"base_url": "https://x.com/videos", "model": "h3"},
+        first_frame_desc="当前首帧：暖光下一人",
+        prev_tail_desc="上尾帧：三人围坐举杯",
+        pending_frame=True,
+    )
+    prompt = req["submit"]["prompt"]
+    assert "无参考图" not in prompt
+    assert "图片1=上尾帧：三人围坐举杯" in prompt
+    assert "图片2=当前首帧：暖光下一人" in prompt
+    assert "由下游链补挂" in req["reference_binding"]["图片1"]
+    assert "由下游链补挂" in req["reference_binding"]["图片2"]
+    assert any("上尾帧/当前首帧由下游链补挂" in w for w in req["warnings"])
 
 
 def test_build_request_transition_section_names():
@@ -1814,3 +1927,605 @@ def test_firstlast_event_prefix_before_quote_stays_its_own_beat():
     assert len(holders) == 1, lines
     assert "先坐" not in holders[0], lines
     assert "面还得等会儿" in holders[0], lines
+
+
+# ── 第 99 刀 · 对白时间轴（2026-11-08 用户定案）──────────────────────────────
+# 用户口径：同轮 TTS 是一句一句拼起来的**紧凑**录音，整条当参考音频上传；「哪句在哪个
+# 场景/动作/镜头说」由 ④ 拍窗口承载。拼接音频只作 `<Audio 1>` 的 reference（音色/语气）。
+
+def _dialogue_lines(*pairs):
+    return [{"speaker": speaker, "text": text} for speaker, text in pairs]
+
+
+def _firstlast_request(spec, *, audio_lines=None, duration=None):
+    preset = {"videoDurationHint": duration} if duration else {}
+    return video_prompt.build_video_request(
+        mode="firstlast", spec=spec, video_config={}, preset=preset,
+        audio_lines=audio_lines,
+    )
+
+
+def test_firstlast_dialogue_matches_quote_beat_with_h3_tags():
+    """台词命中正文引语那一拍：H3 标签（<Audio 1>/<d>/（S1））与拍窗口都要对。"""
+    d = _firstlast_request(_spec(), duration=12)["dialogue"]
+    assert d is None  # 无 TTS 台词 ⇒ 不产出对白块
+
+    req = _firstlast_request(
+        _spec(), duration=12,
+        audio_lines=_dialogue_lines(("纪含章", "开饭")),
+    )
+    d = req["dialogue"]
+    assert d is not None
+    assert d["line_count"] == 1
+    item = d["timeline"][0]
+    assert item["label"] == "剧情演变"          # 正文引语所在拍，不是开场/收尾定格
+    assert item["speaker_id"] == "S1"
+    assert item["text"] == "开饭"
+    assert item["exact"] is True
+    assert "<Audio 1> 是本轮角色对白的连续参考录音" in d["text"]
+    assert "(S1)=纪含章" in d["text"]
+    assert (
+        f"[{item['start']}s–{item['end']}s｜剧情演变] (S1) 纪含章：<d>[Chinese] 开饭</d>"
+        in d["text"]
+    )
+    # 对白块**不拼进 video_prompt**：模板没暴露参考音频槽时保持「视频提示词只有效果音」
+    assert "<d>" not in req["submit"]["prompt"]
+    assert "<Audio 1>" not in req["submit"]["prompt"]
+
+
+def test_firstlast_dialogue_prose_without_quotes_spreads_over_mid_beats():
+    """正文一句引语都没有：台词按顺序铺到中段拍（不含首尾定格），并诚实标非逐字命中。"""
+    spec = _spec(narrative="她推门进来。她坐下。面端上来。", camera="", motion=0)
+    d = _firstlast_request(
+        spec, duration=15,
+        audio_lines=_dialogue_lines(("甲", "第一句"), ("乙", "第二句")),
+    )["dialogue"]
+    assert d is not None
+    assert [item["text"] for item in d["timeline"]] == ["第一句", "第二句"]
+    assert all(item["exact"] is False for item in d["timeline"])
+    plan, _, _stats = video_prompt._firstlast_beat_plan(
+        spec, 15, "首帧/楼层开头画面", "尾帧/楼层结尾画面", "", True, True, None)
+    mid_windows = {(start, end) for idx, (start, end, *_rest) in enumerate(plan)
+                   if 0 < idx < len(plan) - 1}
+    assert all((item["start"], item["end"]) in mid_windows for item in d["timeline"])
+    starts = [item["start"] for item in d["timeline"]]
+    assert starts == sorted(starts)
+    assert any("未在正文引语中逐字命中" in w for w in d["warnings"])
+
+
+def test_firstlast_dialogue_unmatched_line_uses_free_quote_beat_in_order():
+    """文本没命中但正文有引语拍：按顺序铺到空余引语拍，exact=False + 告警。"""
+    spec = _spec(narrative="「甲说第一句。」「乙说第二句。」", camera="", motion=0)
+    d = _firstlast_request(
+        spec, duration=12,
+        audio_lines=_dialogue_lines(("丙", "一句对不上的台词")),
+    )["dialogue"]
+    assert d is not None
+    assert d["timeline"][0]["exact"] is False
+    assert d["timeline"][0]["label"] == "剧情演变"
+    assert any("1 句台词未在正文引语中逐字命中" in w for w in d["warnings"])
+
+
+def test_firstlast_dialogue_speaker_ids_follow_first_appearance():
+    spec = _spec(narrative="「开饭了。」「来了。」", camera="", motion=0)
+    d = _firstlast_request(
+        spec, duration=12,
+        audio_lines=_dialogue_lines(("甲", "开饭了"), ("乙", "来了")),
+    )["dialogue"]
+    assert d is not None
+    assert d["speakers"] == {"S1": "甲", "S2": "乙"}
+    assert [item["speaker_id"] for item in d["timeline"]] == ["S1", "S2"]
+
+
+def test_第105刀_dialogue_timeline_caps_lines_by_beat_capacity():
+    """单句 96 字（≈21.3s）塞不进 6s 片的任何 2s 拍窗口 ⇒ 从时间轴剔除并诚实告警。
+
+    第 105 刀（实稿发现 5）口径变更：旧行为只告警「台词总量超过视频时长」却照列
+    全部台词，与 ④ 的拍窗口自相矛盾（15s 塞 53 句）；现在 ⑤ 与 ④ 同一限速
+    （4.5 字/秒），装不下的整句剔除，剔除句数进 warnings（不静默）。
+    """
+    long_line = "这是一句非常非常长的台词" * 8  # 96 字 ≈ 21.3s
+    spec = _spec(narrative=f"纪含章说「{long_line}」。", camera="", motion=0)
+    d = _firstlast_request(
+        spec, duration=6,
+        audio_lines=_dialogue_lines(("纪含章", long_line)),
+    )["dialogue"]
+    assert d is not None
+    assert d["line_count"] == 0
+    assert d["timeline"] == []
+    assert any("1 句台词超出所在拍可说完的容量" in w for w in d["warnings"])
+    assert "未安排进镜头" in d["text"]
+
+
+def test_第105刀_dialogue_timeline_keeps_only_lines_that_fit_window():
+    """同一拍两句台词、窗口只装得下一句 ⇒ 保序保留第一句、剔除第二句并报数（不静默）。
+
+    2s 拍窗口容量 = 2 × 4.5 = 9 字：第一句 5 字留下，第二句再 5 字超容量 ⇒ 剔除。
+    与 ④ 的 `_fit_beat_quotes` 同口径——④ 说得出几句，⑤ 就只列几句。
+    """
+    spec = _spec(narrative="「我们是朋友」「这不是朋友」。", camera="", motion=0)
+    d = _firstlast_request(
+        spec, duration=6,
+        audio_lines=_dialogue_lines(("纪含章", "我们是朋友"), ("邵允", "这不是朋友")),
+    )["dialogue"]
+    assert d is not None
+    assert [item["text"] for item in d["timeline"]] == ["我们是朋友"]
+    assert d["speakers"] == {"S1": "纪含章"}
+    assert any("1 句台词超出所在拍可说完的容量" in w for w in d["warnings"])
+
+
+def test_第105刀_firstlast_action_beats_cap_quotes_and_warn():
+    """动作流路径：8 句引语全挂一拍、加权后仍装不下 ⇒ 退回均分只写 3 句 + 顶层告警。
+
+    实稿发现 5：15s 片子的中段拍里，8–10 句（108–230 字）被整段拼进两秒拍。
+    现在按 `_DIALOGUE_CHARS_PER_SEC` 限速、保序保留整句；被裁句数进 `warnings`。
+    第 107 刀：8 × 6 字 ≈ 11s，加首尾与其余拍 2s 下限共需 17s > 15s ⇒ 本夹具
+    仍走「退回均分」失败面（加权路径的 9/9 用例见下方第 107 刀一组）。
+    """
+    quotes = [f"第{i}句长台词" for i in range(8)]  # 每句 6 字，共 48 字 ≈ 10.7s
+    spec = _spec(
+        narrative="".join(f"「{q}」" for q in quotes) + "。",
+        camera="", motion=0,
+        action_sequence=_action_beats(
+            ("OPEN-DESC they sit around the counter", ""),
+            ("She looks up and speaks", ""),
+            ("CLOSE-DESC they finish", ""),
+        ),
+    )
+    req = _firstlast_request(spec, duration=15)
+    seg = _segments_of(req["submit"]["prompt"])
+    assert "「第0句长台词」「第1句长台词」「第2句长台词」" in seg
+    assert "第3句长台词" not in seg
+    assert any("5/8 句引语" in w for w in req["warnings"])
+
+
+def test_climax_carries_no_dialogue_block():
+    """climax：高潮定格时刻对白通常已说完（2026-08-28 定案）⇒ 恒不产出对白块。"""
+    req = video_prompt.build_video_request(
+        mode="climax", spec=_spec(), video_config={},
+        audio_lines=_dialogue_lines(("纪含章", "开饭")),
+    )
+    assert req["dialogue"] is None
+
+
+# ── 批 2（2026-11-08）：firstlast ④ 吃提取层的动作流 + 每拍场景 ────────────────────
+# 用户 92／94 刀原始规格：「模版和目前的一样，不一样的是**动作、分镜都要更复杂**」，
+# 首尾帧影片覆盖「那一次对话生成的所有内容」。批 1 已把整轮正文喂进提取器，批 2 让
+# 提取出的 `action_sequence` 真正撑起 ④ 的中段：开场/收尾仍是两张帧图，中段换成动作流，
+# 正文引语按句分组附着（对白时间轴靠引语逐字命中，不能因为换成英文动作拍就丢失）。
+
+def _action_beats(*rows):
+    """[(desc, scene)] → 提取层 action_sequence 结构（scene 缺省为空串）。"""
+    return [
+        {"beat": f"第{idx}拍", "desc": desc, "scene": scene}
+        for idx, (desc, scene) in enumerate(rows)
+    ]
+
+
+def _segments_of(prompt: str) -> str:
+    return prompt.split("[时间分镜]：", 1)[1].split("[音频]：", 1)[0]
+
+
+def test_批2_firstlast_mid_beats_follow_action_sequence():
+    """中段用英文动作流（分镜更细）；只丢 desc[0]（纯复述首帧），末拍动作仍进 ④。"""
+    spec = _spec(
+        narrative="纪含章推门而入，朝众人点头。她低声说「开饭了」。庄听澜放下筷子站起身，望向门口。",
+        action_sequence=_action_beats(
+            ("OPEN-DESC pushes the door open into the noodle shop", ""),
+            ("She nods at the two women, steam curling over the wooden counter", ""),
+            ("Zhuang Tinglan sets down her chopsticks and rises from the stool", ""),
+            ("CLOSE-DESC the three stand together at the doorway", ""),
+        ),
+    )
+    p = video_prompt.compile_firstlast_video_prompt(
+        spec, duration_hint=12,
+        first_frame_desc="开场：三人已围坐面馆", last_frame_desc="三人并肩站在门口",
+    )
+    seg = _segments_of(p)
+    assert "steam curling over the wooden counter" in seg
+    assert "sets down her chopsticks" in seg
+    # 首帧由开场拍复述 ⇒ desc[0] 丢弃；末拍是「落在尾帧」的动作收束 ⇒ 保留
+    assert "定格于首帧画面：开场：三人已围坐面馆" in seg
+    assert "收尾定格于尾帧画面：三人并肩站在门口" in seg
+    assert "OPEN-DESC" not in seg
+    assert "CLOSE-DESC the three stand together at the doorway" in seg
+    # 中段三拍 + 首尾两拍 = 5 拍
+    assert seg.count("s｜") == 5
+
+
+def test_第102刀_firstlast_keeps_last_action_beat_that_lands_on_closing_frame():
+    """实稿发现 6：末拍合同是「**落在**尾帧」，不是「只复述尾帧」——整拍排除会丢高潮动作。
+
+    真实楼层（SAVE02 turn 18）末拍＝「Egil 把银戒慢慢戴上 → 靠墙 → 楼下闷响」；旧实现
+    `action[1:-1]` 把它整拍丢掉，④ 只剩台词「这戒指，我戴上了」而没有戴戒动作。
+    """
+    spec = _spec(
+        narrative="埃吉尔把银戒慢慢戴上，靠在墙边。楼下传来闷响。",
+        action_sequence=_action_beats(
+            ("OPEN-DESC she stands in the corridor holding the ring box", ""),
+            ("She lifts the silver ring to the emergency light", ""),
+            ("Egil slowly slides the silver ring onto her left ring finger, "
+             "then braces one hand against the wall", ""),
+            ("A muffled thud comes from the downstairs side room", ""),
+        ),
+    )
+    p = video_prompt.compile_firstlast_video_prompt(
+        spec, duration_hint=12,
+        first_frame_desc="门被敲了第二遍", last_frame_desc="楼下侧室的木门闷响",
+    )
+    seg = _segments_of(p)
+    assert "slides the silver ring onto her left ring finger" in seg
+    assert "A muffled thud comes from the downstairs side room" in seg
+    assert seg.index("slides the silver ring") < seg.index("收尾定格于尾帧画面")
+    # 帧锚点各只出现一次：开场拍复述首帧、收尾拍定格尾帧
+    assert "定格于首帧画面：门被敲了第二遍" in seg
+    assert seg.count("收尾定格于尾帧画面：楼下侧室的木门闷响") == 1
+
+
+def test_批2_firstlast_action_beats_keep_narrative_quotes():
+    """换成英文动作拍后，正文引语仍要附着在对应拍上：对白时间轴靠它逐字命中。"""
+    spec = _spec(
+        narrative="纪含章推门而入。她低声说「开饭了」。庄听澜放下筷子站起身。",
+        action_sequence=_action_beats(
+            ("OPEN-DESC enters the shop", ""),
+            ("She nods at the two women at the counter", ""),
+            ("Zhuang Tinglan sets down her chopsticks and rises", ""),
+            ("CLOSE-DESC the three stand at the doorway", ""),
+        ),
+    )
+    req = _firstlast_request(
+        spec, duration=12, audio_lines=_dialogue_lines(("纪含章", "开饭了")),
+    )
+    seg = _segments_of(req["submit"]["prompt"])
+    assert "「开饭了」" in seg
+    d = req["dialogue"]
+    assert d is not None
+    assert d["timeline"][0]["exact"] is True
+    assert d["timeline"][0]["text"] == "开饭了"
+
+
+def test_批2_firstlast_quotes_land_on_nearest_action_beat():
+    """6 句正文 / 5 拍中段：引语按相对位置落**最近**一拍，不能整体后移。
+
+    探针实锤（2026-11-08 真渲染）：旧分组用折叠边界反查句子，「开饭了」被挂到
+    「把碗筷收进后厨」那一拍——人物已经走开才开口，口型同步也会跟着错拍。
+    """
+    spec = _spec(
+        narrative=(
+            "纪含章推门而入，朝众人点头。她低声说「开饭了」。"
+            "庄听澜放下筷子站起身，望向门口。"
+            "三人把碗筷收拾进后厨。邵允拎起门边的旧伞说「外面下大了」。"
+            "三人挤在伞下走进雨里的长街。"
+        ),
+        action_sequence=_action_beats(
+            ("OPEN-DESC pushes the door open", ""),
+            ("She nods at the two women at the counter", ""),
+            ("They stack the bowls toward the back kitchen", ""),
+            ("Shao Yun picks up an old umbrella by the door", ""),
+            ("The three step into the rain", ""),
+            ("CLOSE-DESC walk away down the street", ""),
+        ),
+    )
+    plan, _dur, _stats = video_prompt._firstlast_beat_plan(
+        spec, 15, "开场：三人已在面馆围坐", "三人撑伞走在雨夜长街的背影", "",
+    )
+    # 7 拍（开场 + 5 中段 + 收尾）→ 15s：0–2 开场、2–4 / 4–6 / 6–8 / 8–10 / 10–12 中段、12–15 收尾
+    hits = {
+        quote: [(start, end) for start, end, _l, content, _e in plan if quote in content]
+        for quote in ("「开饭了」", "「外面下大了」")
+    }
+    assert hits["「开饭了」"] == [(2, 4)]
+    assert hits["「外面下大了」"] == [(8, 10)]
+
+
+def test_批2_firstlast_scene_change_becomes_transition_beat():
+    """每拍场景只在**变化**处渲染「场景切换」；同一地点不重复写。"""
+    spec = _spec(
+        narrative="三人吃完面。他们推门走进雨里。",
+        action_sequence=_action_beats(
+            ("OPEN-DESC they sit around the counter", "noodle shop interior"),
+            ("They finish the noodles and stand up", "noodle shop interior"),
+            ("They step out into the rain under the awning", "rainy street outside the shop"),
+            ("CLOSE-DESC they walk away along the wet pavement", "rainy street outside the shop"),
+        ),
+    )
+    seg = _segments_of(video_prompt.compile_firstlast_video_prompt(
+        spec, duration_hint=12,
+        first_frame_desc="面馆内三人围坐", last_frame_desc="雨夜街道三人背影",
+    ))
+    assert seg.count("场景切换：") == 1
+    assert "场景切换：rainy street outside the shop；" in seg
+    # 开场场景＝起点场景，不渲染成切换；中段同一场景也不重复
+    assert "noodle shop interior" not in seg
+
+
+def test_批2_firstlast_scene_without_open_scene_is_adopted_not_switched():
+    """开场没给场景时，中段第一个场景只是「认下来」，不得谎报一次切换。"""
+    spec = _spec(
+        narrative="她推门进来。她坐下。",
+        action_sequence=_action_beats(
+            ("OPEN-DESC enters", ""),
+            ("She walks to the counter", "noodle shop interior"),
+            ("She sits down by the window", "noodle shop interior"),
+            ("CLOSE-DESC she looks out the window", ""),
+        ),
+    )
+    seg = _segments_of(video_prompt.compile_firstlast_video_prompt(
+        spec, duration_hint=12, first_frame_desc="门口", last_frame_desc="窗边",
+    ))
+    assert "场景切换：" not in seg
+
+
+def test_批2_firstlast_short_action_sequence_keeps_sentence_beats():
+    """动作流不足 3 拍（只有开场＋收尾）时退回正文逐句成拍——不得退化成两拍空片。"""
+    spec = _spec(
+        narrative="她推门进来。她坐下。面端上来。",
+        action_sequence=_action_beats(
+            ("OPEN-DESC marker", ""),
+            ("CLOSE-DESC marker", ""),
+        ),
+    )
+    seg = _segments_of(video_prompt.compile_firstlast_video_prompt(
+        spec, duration_hint=12, first_frame_desc="门口", last_frame_desc="桌边",
+    ))
+    for frag in ("她推门进来", "她坐下", "面端上来"):
+        assert frag in seg
+    assert "OPEN-DESC" not in seg and "CLOSE-DESC" not in seg
+
+
+def test_批2_firstlast_without_action_sequence_is_unchanged():
+    """零回归锁：没有动作流（或空数组）⇒ ④ 逐字节等于批 1 的句子成拍。"""
+    plain = _spec(
+        narrative="她推门进来。她坐下。面端上来。",
+        floor_narrative="她推门进来。她坐下。面端上来。",
+    )
+    baseline = video_prompt.compile_firstlast_video_prompt(
+        plain, duration_hint=12, first_frame_desc="门口", last_frame_desc="桌边",
+    )
+    empty = video_prompt.compile_firstlast_video_prompt(
+        {**plain, "action_sequence": []},
+        duration_hint=12, first_frame_desc="门口", last_frame_desc="桌边",
+    )
+    assert baseline == empty
+
+
+def test_批2_firstlast_action_beats_fold_when_duration_is_short():
+    """动作拍多于时长可容纳的拍数 ⇒ 按顺序合并，场景切换不丢。"""
+    spec = _spec(
+        narrative="她推门进来。",
+        action_sequence=_action_beats(
+            ("OPEN-DESC", ""),
+            ("beat one", "noodle shop"),
+            ("beat two", "noodle shop"),
+            ("beat three", "rainy street"),
+            ("beat four", "rainy street"),
+            ("beat five", "rainy street"),
+            ("CLOSE-DESC", "rainy street"),
+        ),
+    )
+    seg = _segments_of(video_prompt.compile_firstlast_video_prompt(
+        spec, duration_hint=4, first_frame_desc="门口", last_frame_desc="街头",
+    ))
+    # 4 秒 ⇒ 中段最多 2 拍；五拍动作流被合并，但内容一条不丢
+    for frag in ("beat one", "beat two", "beat three", "beat four", "beat five"):
+        assert frag in seg
+    assert seg.count("s｜") == 4
+    assert "场景切换：rainy street；" in seg
+
+
+def test_批2_parse_video_plan_keeps_scene_and_drops_refusal():
+    plan = video_prompt.parse_video_plan(
+        '{"action_sequence":['
+        '{"beat":"起点","desc":"she walks in","scene":"rainy street"},'
+        '{"beat":"延伸","desc":"she sits","scene":"我不能协助这项请求。"}'
+        ']}'
+    )
+    seq = plan["action_sequence"]
+    assert seq[0]["scene"] == "rainy street"
+    assert "scene" not in seq[1]
+
+
+# ── 批 3（2026-11-08）：参考生成＝图片3+ 角色参考图 + 当下衣着/道具归属 ───────────
+# 用户 94 刀原始规格：「图片 1／2 作为首尾帧图片上传，3、4、5… 后续的就是角色的参考图」
+# ⇒ ② 必须把编号与角色对应关系写出来，否则模型拿到多张参考图却不知道哪张是谁。
+
+def test_批3_role_refs_mirror_frontend_reference_plan():
+    """后端编号必须与前端 `planFirstlastReferenceImages` 同口径（顺序/占位/去重）。"""
+    refs = video_prompt.firstlast_role_refs(
+        ["纪含章", "庄听澜", "邵允", "纪含章"],
+        {"纪含章": "D:/base/ji.png", "邵允": "D:/base/shao.png"},
+    )
+    assert refs == ["纪含章", "邵允"]       # 庄听澜没有底图 ⇒ 不占位
+    # 同一张底图只占一个槽（前端 seenSources 同口径，否则编号整体错位）
+    assert video_prompt.firstlast_role_refs(
+        ["甲", "乙"], {"甲": "same.png", "乙": "same.png"}) == ["甲"]
+    assert video_prompt.firstlast_role_refs(["", " ", "丙"], {"丙": ""}) == []
+
+
+def test_批3_firstlast_binds_role_reference_pictures():
+    """② 声明图片3+/角色对应；参考图只锁身份，当下衣着与姿势以首尾帧为准。"""
+    req = _firstlast_request(_spec(role_refs=["纪含章", "邵允"]), duration=12)
+    prompt = req["submit"]["prompt"]
+    binding = prompt.split("[参考绑定]：", 1)[1].split("\n\n", 1)[0]
+    assert "图片3=纪含章" in binding
+    assert "图片4=邵允" in binding
+    assert "角色参考图" in binding
+    assert "当下衣着、姿势与所在场景以首尾帧画面为准" in binding
+    assert req["reference_binding"]["图片3"].startswith("纪含章")
+    assert req["reference_binding"]["图片4"].startswith("邵允")
+
+
+def test_批3_firstlast_without_role_refs_has_no_picture3():
+    """没有角色底图 ⇒ 一个编号都不多报（R2 不假装有图；旧稿逐字节不变）。"""
+    req = _firstlast_request(_spec(), duration=12)
+    assert "图片3" not in req["submit"]["prompt"]
+    assert set(req["reference_binding"]) == {"图片1", "图片2"}
+
+
+# ── 第 106 刀 · 模板能力是图片位/时长的天花板（实稿发现 1/2）─────────────────
+# 实机视频模板（Ref2VA 0a891…）exposed 只有 `first_frame_image` / `video_prompt` /
+# `video_duration default=10` ⇒ 无尾帧槽、无角色参考图槽、成片 243 帧≈10.125s。
+# 提示词只能声明模板真能消费的图，拍界只能按真实成片时长排。
+
+_REAL_CAPS = {"supports_last_frame": False, "reference_slots": 0, "duration": 10}
+
+
+def test_第106刀_template_caps_limit_declared_images():
+    """发现 1：模板无尾帧/参考图槽 ⇒ ②④ 与提交都只认图片1，不指挥模型看空槽。
+
+    旧稿照写「图片2=尾帧、图片3=角色参考图」，但前端按 binding 消费、这些图从不上传
+    ⇒ 模型被指挥去用不存在的图片。
+    """
+    req = video_prompt.build_video_request(
+        mode="firstlast", spec=_spec(role_refs=["纪含章", "邵允"]),
+        video_config={}, preset={}, first_frame="a.png", last_frame="b.png",
+        caps=_REAL_CAPS,
+    )
+    prompt = req["submit"]["prompt"]
+    binding = prompt.split("[参考绑定]：", 1)[1].split("\n\n", 1)[0]
+    assert "图片1=" in binding
+    assert "图片2=" not in binding                    # 尾帧槽不存在
+    assert "图片3=" not in binding and "图片4=" not in binding
+    assert "尾帧（无参考图，以文字为准）" in binding
+    assert "以文字尾帧收尾" in _segments_of(prompt)    # ④ 按文字收束，不宣称图片2
+    assert req["submit"]["images"] == ["a.png"]        # 尾帧地址不提交
+    assert set(req["reference_binding"]) == {"图片1"}
+    assert any("无尾帧槽" in w for w in req["warnings"])
+
+
+def test_第106刀_template_caps_keep_slots_when_template_has_them():
+    """反向锁：模板有尾帧槽 + 2 个参考图槽 ⇒ 图片2/3/4 照常声明，第 5 张不声明。"""
+    caps = {"supports_last_frame": True, "reference_slots": 2, "duration": 0}
+    req = video_prompt.build_video_request(
+        mode="firstlast", spec=_spec(role_refs=["纪含章", "邵允", "庄听澜"]),
+        video_config={}, preset={}, first_frame="a.png", last_frame="b.png",
+        caps=caps,
+    )
+    binding = req["submit"]["prompt"].split("[参考绑定]：", 1)[1].split("\n\n", 1)[0]
+    assert "图片2=" in binding
+    assert "图片3=纪含章" in binding and "图片4=邵允" in binding
+    assert "图片5=庄听澜" not in binding               # 槽数天花板
+    assert req["submit"]["images"] == ["a.png", "b.png"]
+    assert set(req["reference_binding"]) == {"图片1", "图片2", "图片3", "图片4"}
+
+
+def test_第106刀_transition_caps_drop_second_image():
+    """发现 1（转场同源）：模板无第二图槽 ⇒ 只挂上尾帧，终点按文字收束。"""
+    req = video_prompt.build_video_request(
+        mode="transition", spec=_spec(), video_config={},
+        first_frame="prev.png", last_frame="cur.png",
+        prev_tail_desc="上一楼层尾帧画面", first_frame_desc="当前楼层首帧画面",
+        caps=_REAL_CAPS,
+    )
+    assert req["submit"]["images"] == ["prev.png"]
+    assert set(req["reference_binding"]) == {"图片1"}
+    prompt = req["submit"]["prompt"]
+    assert "图片2=" not in prompt
+    assert "以文字收束到当前楼层首帧" in prompt
+    assert any("无第二图槽" in w for w in req["warnings"])
+
+
+def test_第106刀_template_duration_default_drives_beats():
+    """发现 2：模板默认 10s ⇒ 无用户时长时 ① 秒数 / ④ 拍界 / 提交时长三处同源。"""
+    req = video_prompt.build_video_request(
+        mode="firstlast", spec=_spec(), video_config={}, preset={},
+        caps=_REAL_CAPS,
+    )
+    prompt = req["submit"]["prompt"]
+    meta = prompt.split("[元信息]：", 1)[1].split("\n\n", 1)[0]
+    assert "10 seconds" in meta
+    assert "15 seconds" not in meta                    # 不再写内置 15s 而模板只出 10s
+    assert req["submit"]["duration"] == 10
+    seg = _segments_of(prompt)
+    assert "–10s｜" in seg                             # 收尾拍落在 10s 边界
+    plan, dur, _stats = video_prompt._firstlast_beat_plan(
+        _spec(), 10, "首帧/楼层开头画面", "尾帧/楼层结尾画面", "", True, True, None)
+    assert dur == 10 and plan[-1][1] == 10
+
+    # 用户显式时长仍最高优先：hint=6 ⇒ 6s，不被模板默认覆盖
+    user = video_prompt.build_video_request(
+        mode="firstlast", spec=_spec(), video_config={},
+        preset={"videoDurationHint": 6}, caps=_REAL_CAPS,
+    )
+    assert user["submit"]["duration"] == 6
+    assert "6 seconds" in user["submit"]["prompt"]
+
+
+# ── 第 107 刀（2026-11-08）：拍窗口按台词需求加权 ──────────────────────────────
+# 844 字实稿 3 段 × 15s：旧均分把 28 字台词所在的拍压到 2s（容量 9 字），
+# `_fit_beat_quotes` 只能整句裁掉，9 句里只剩 6 句。加权后台词拍拿够 4.5 字/秒
+# 的说话时间、其余拍保 2s 定格/动作下限 ⇒ 3 段全部 9/9。
+
+def test_第107刀_firstlast_beat_windows_weight_dialogue_beats():
+    """28 字台词同拍 ⇒ 该拍 7s、其余拍各 2s；三句台词全保留（15s 9/9 的同型样本）。"""
+    spec = _spec(
+        narrative=(
+            "林雾忽然从口袋里摸出一张折了很多次的纸条，摊在桌上，低声说"
+            "「这个地址，你认得吗」。沈迟擦手的动作停了一下，凑近看了一眼，说"
+            "「认得，城南那条旧巷，前年就贴了拆迁告示」。她顿了顿，没有再"
+            "多说什么。林雾把纸条收回去，说「明天我去一趟」。"
+        ),
+        camera="", motion=0,
+        action_sequence=_action_beats(
+            ("OPEN-DESC both women hold their positions in the dim shop", ""),
+            ("Lin Wu unfolds a much-creased paper note", ""),
+            ("Shen Chi leans in to read the address on the note", ""),
+            ("CLOSE-DESC Lin Wu folds the note away and stands", ""),
+        ),
+    )
+    plan, dur, stats = video_prompt._firstlast_beat_plan(
+        spec, 15, "首帧/楼层开头画面", "尾帧/楼层结尾画面", "", True, True, None)
+    assert dur == 15
+    assert stats["quotes_total"] == 3
+    assert stats["quotes_dropped"] == 0
+    # 5 拍：开场 2s + 28 字拍 7s（ceil(28/4.5)=7）+ 两个空拍各 2s + 收尾 2s
+    assert [tuple(beat[:2]) for beat in plan] == [
+        (0, 2), (2, 9), (9, 11), (11, 13), (13, 15),
+    ]
+    pair_beat = next(content for _s, _e, _l, content, _x in plan
+                     if "「这个地址，你认得吗」" in content)
+    assert "「认得，城南那条旧巷，前年就贴了拆迁告示」" in pair_beat
+    assert any("「明天我去一趟」" in content for _s, _e, _l, content, _x in plan)
+
+
+def test_第107刀_firstlast_beat_windows_infeasible_falls_back_to_uniform():
+    """加权后仍超过时长 ⇒ 逐字退回旧均分，并报「本段台词排进各拍至少需要约 Xs」。"""
+    quotes = [f"第{i}句长台词" for i in range(8)]  # 48 字 ≈ 10.7s
+    spec = _spec(
+        narrative="".join(f"「{q}」" for q in quotes) + "。",
+        camera="", motion=0,
+        action_sequence=_action_beats(
+            ("OPEN-DESC they sit around the counter", ""),
+            ("She looks up and speaks", ""),
+            ("CLOSE-DESC they finish", ""),
+        ),
+    )
+    req = _firstlast_request(spec, duration=15)
+    plan, _dur, stats = video_prompt._firstlast_beat_plan(
+        spec, 15, "首帧/楼层开头画面", "尾帧/楼层结尾画面", "", True, True, None)
+    assert [tuple(beat[:2]) for beat in plan] == [(0, 3), (3, 7), (7, 11), (11, 15)]
+    assert stats["quotes_dropped"] == 5
+    assert any(
+        "至少需要约 17s" in w and "当前 15s" in w for w in req["warnings"]
+    ), req["warnings"]
+
+
+def test_第107刀_firstlast_beat_windows_no_dialogue_stay_uniform():
+    """无台词 ⇒ 逐字维持旧均分（开场/收尾/中段等宽），不加权、不告警。"""
+    spec = _spec(
+        narrative="她推门进来。她坐下。",
+        camera="", motion=0,
+        action_sequence=_action_beats(
+            ("OPEN-DESC enters", ""),
+            ("She walks to the counter", ""),
+            ("She sits down by the window", ""),
+            ("CLOSE-DESC she looks out the window", ""),
+        ),
+    )
+    plan, _dur, stats = video_prompt._firstlast_beat_plan(
+        spec, 15, "首帧/楼层开头画面", "尾帧/楼层结尾画面", "", True, True, None)
+    assert [tuple(beat[:2]) for beat in plan] == [
+        (0, 3), (3, 6), (6, 9), (9, 12), (12, 15),
+    ]
+    assert stats["quotes_total"] == 0
+    assert stats["quotes_dropped"] == 0
