@@ -350,6 +350,26 @@ export function resolveVideoBaseImage(opts: {
   return resolveVideoBaseImageRef(opts)?.url;
 }
 
+/** 指定槽位**已归档成图**的仓库副本地址（local-view / 相对地址 / 盘路径）。
+ *
+ * 2026-11-08 真机实锤：视频槽「重新生成」走 `videoOnly` 递归时，首帧用的是
+ * `viewUrl(...)`（ComfyUI `/view`，指向图片机）——本机 8188 一停就 502，
+ * 尽管同一张图早已由归档链写进作品目录（`workflow_<hash>.png`，槽位 url 就是它）。
+ * 归档后的槽位 url 才是「仓库的这张图」；未就绪（尚未 finalize）返回空串，
+ * 由调用方回退到 ComfyUI 地址（自动链出图后立即提视频时仍可能走到这一步）。
+ */
+export function resolveReadySlotImageUrl(
+  messages: readonly VideoBaseImageMessages[],
+  messageId: string,
+  slotId: string,
+): string {
+  if (!slotId) return "";
+  const part = messages
+    .find((m) => m.id === messageId)
+    ?.parts?.find((p) => p.slotId === slotId && p.type === "image" && p.status === "ready" && !!p.url);
+  return part?.url || "";
+}
+
 // ===== V1.5/B2 尾帧链式状态（反查，零新增持久化）=====
 // 取「最近一条已完成视频槽」的尾帧描述，供下一楼层 firstlast 首帧做衔接上下文（prevTailDesc）。
 // 与 resolveVideoBaseImageRef 同思路：倒序扫描消息 + 槽位，天然随 chat_snapshot 走，

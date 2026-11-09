@@ -22,6 +22,7 @@ vi.mock("../api/comfyui", () => ({
   uploadImage: vi.fn(async (_file: File, _url: string) => ({ name: "uploaded.png" })),
   moveComfyOutputToInput: vi.fn(async () => "moved.png"),
   uploadRemoteImageToInput: vi.fn(async () => "remote.png"),
+  mergeAudio: vi.fn(async (_args: { threadId: string; messageId: string; force?: boolean }) => ({ ok: true, url: "" })),
   localViewUrl: (p: string) => `local:${p}`,
   // 真的 viewUrl 回**后端代理可 fetch 地址**（`/api/comfyui/view?…`）——底图归一按
   // 「已是可 fetch 地址就不包 localViewUrl」判定，桩必须同形，否则测不出二次包装。
@@ -53,8 +54,8 @@ vi.mock("../api/loras", () => ({
 }));
 
 import {
-  comfyStatus, moveComfyOutputToInput, submitWorkflow, uploadImage, uploadRemoteImageToInput,
-  getResult,
+  comfyStatus, mergeAudio, moveComfyOutputToInput, submitWorkflow, uploadImage,
+  uploadRemoteImageToInput, getResult,
 } from "../api/comfyui";
 import {
   claimIllustrationSubmission, genFramePrompts, genProfilePrompt, reportIllustrationSubmission,
@@ -96,6 +97,8 @@ interface DepsOver {
   source?: "automatic" | "manual";
   /** messagesRef 内容（底图反查用；与 state.messages 各自独立）。 */
   messages?: ChatMessage[];
+  /** 第 94 刀：角色底图（参考生成的上传源）。 */
+  characterBaseImages?: Record<string, string>;
 }
 
 function makeDeps(over: DepsOver = {}) {
@@ -118,7 +121,7 @@ function makeDeps(over: DepsOver = {}) {
     threadId: "r1",
     cardNames: ["庄听澜"] as never,
     promptProfile: "krea2" as never,
-    characterBaseImages: {} as never,
+    characterBaseImages: (over.characterBaseImages ?? {}) as never,
     chat: { baseUrl: "u", apiKey: "k", modelName: "m" } as never,
     modelProxies: { chatProxyUrl: "", genProxyUrl: "", videoProxyUrl: "", embedProxyUrl: "" },
     effectivePersona: { name: "用户", content: "" } as never,
@@ -488,6 +491,124 @@ describe("useIllustrationChain 行为网", () => {
   });
 });
 
+// ───────────── 第 94 刀：首尾帧参考生成（图片3+ = 角色底图）─────────────
+describe("首尾帧参考生成 · 角色参考图上传", () => {
+  // clearAllMocks 不清实现 ⇒ 本组改了 uploadImage 的返回值就必须自己还原，
+  // 否则后面「首帧底图上传」用例会拿到 up_ 前缀的假回执。
+  afterEach(() => {
+    vi.mocked(uploadImage).mockImplementation(async (_file: File) => ({ name: "uploaded.png" }) as never);
+  });
+  const VIDEO_WITH_REFS = {
+    id: "vid1", name: "视频模板", node_order: [],
+    exposed: [
+      { node_id: "329", field: "prompt", semantic: "prompt", control: "textarea", binding: "prompt" },
+      { node_id: "71", field: "image", semantic: "image", control: "image", binding: "first_frame_image" },
+      { node_id: "72", field: "image", semantic: "image", control: "image", binding: "last_frame_image" },
+      { node_id: "81", field: "image", semantic: "image", control: "image", binding: "reference_image_1" },
+      { node_id: "82", field: "image", semantic: "image", control: "image", binding: "reference_image_2" },
+    ],
+    primary_output_node_id: "67",
+  } as never;
+  const REF_PRESET = {
+    templateId: "tpl1", videoTemplateId: "vid1", firstlast: true,
+    negativePrompt: "", appearanceSource: "worldbook", loraMode: "none",
+    characterLoras: {
+      甲: { baseImage: "D:/out/甲.png" },
+      乙: { baseImage: "D:/out/乙.png" },
+    },
+  };
+  const refInput = {
+    ...baseInput, source: "automatic" as const, actors: ["甲", "乙"],
+    sceneSpec: { narrative: "剧情N", profile: "krea2" },
+    firstFrameDesc: "甲站在船头", lastFrameDesc: "乙回头",
+  };
+  const pngBlob = async () => new Blob([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], { type: "image/png" });
+
+  beforeEach(() => {
+    vi.mocked(genFramePrompts).mockResolvedValue({
+      frames: { first: { prompt: "编译首帧P" }, last: { prompt: "编译尾帧P" } },
+    } as never);
+  });
+
+  it("按在场角色顺序上传底图 → 图片3/图片4 填进模板参考槽（同一张底图不重复上传）", async () => {
+    const fetchMock = vi.fn(async (_url: string) => ({ ok: true, status: 200, blob: pngBlob }));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.mocked(uploadImage).mockImplementation(async (file: File) => ({ name: `up_${file.name}` }) as never);
+    const md0 = makeDeps({
+      preset: REF_PRESET, templates: [TPL, VIDEO_WITH_REFS],
+      characterBaseImages: { 甲: "D:/out/甲.png", 乙: "D:/out/乙.png" },
+    });
+    await submitChain(md0.deps, refInput);
+
+    // 两张角色底图各取一次字节（裸路径走 localViewUrl 包装），按角色顺序上传
+    //（帧循环还会为视频宽高量一次首帧尺寸，这里只筛角色底图读取）
+    expect(fetchMock.mock.calls.map((call) => call[0]).filter((url) => url.startsWith("local:"))).toEqual([
+      "local:D:/out/甲.png", "local:D:/out/乙.png",
+    ]);
+    const videoCall = vi.mocked(submitWorkflow).mock.calls.find((call) => call[0] === "vid1");
+    expect(videoCall?.[1]).toMatchObject({
+      "71.image": "moved.png", "72.image": "moved.png",
+      "81.image": "up_甲.png", "82.image": "up_乙.png",
+    });
+    expect(md0.discardFailedIllustration).not.toHaveBeenCalled();
+  });
+
+  it("视频模板没有参考槽 ⇒ 明确告警、不上传参考图，正片照常提交（绝不假装交出去了）", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, blob: pngBlob })));
+    const md0 = makeDeps({
+      preset: REF_PRESET, templates: [TPL, VIDEO_TPL],
+      characterBaseImages: { 甲: "D:/out/甲.png", 乙: "D:/out/乙.png" },
+    });
+    await submitChain(md0.deps, refInput);
+
+    expect(uploadImage).not.toHaveBeenCalled();
+    const videoCall = vi.mocked(submitWorkflow).mock.calls.find((call) => call[0] === "vid1");
+    expect(JSON.stringify(videoCall?.[1])).not.toContain("reference_image");
+    expect(warn.mock.calls.some((call) => String(call[0]).includes("没有参考图槽"))).toBe(true);
+    expect(md0.discardFailedIllustration).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("在场角色缺底图 ⇒ missing 名单告警；有底图的那张仍按序上传", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, blob: pngBlob })));
+    vi.mocked(uploadImage).mockImplementation(async (file: File) => ({ name: `up_${file.name}` }) as never);
+    const md0 = makeDeps({
+      preset: REF_PRESET, templates: [TPL, VIDEO_WITH_REFS],
+      characterBaseImages: { 甲: "D:/out/甲.png" },
+    });
+    await submitChain(md0.deps, refInput);
+
+    const videoCall = vi.mocked(submitWorkflow).mock.calls.find((call) => call[0] === "vid1");
+    expect(videoCall?.[1]).toMatchObject({ "81.image": "up_甲.png" });
+    expect(videoCall?.[1] && "82.image" in (videoCall[1] as object)).toBe(false);
+    expect(warn.mock.calls.some((call) => String(call[0]).includes("没有底图"))).toBe(true);
+    warn.mockRestore();
+  });
+
+  it("中途一张上传失败 ⇒ 在此截断，后面的参考图不前移顶位（图片3/4 编号不许错位）", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, blob: pngBlob })));
+    vi.mocked(uploadImage).mockImplementation(async (file: File) => {
+      if (file.name.includes("乙")) throw new Error("远端抖动");
+      return { name: `up_${file.name}` } as never;
+    });
+    const md0 = makeDeps({
+      preset: REF_PRESET, templates: [TPL, VIDEO_WITH_REFS],
+      characterBaseImages: { 甲: "D:/out/甲.png", 乙: "D:/out/乙.png" },
+    });
+    await submitChain(md0.deps, refInput);
+
+    const videoCall = vi.mocked(submitWorkflow).mock.calls.find((call) => call[0] === "vid1");
+    // 甲（图片3）保留；乙失败 ⇒ 不提交、也不让任何后一张补到它的位置
+    expect(videoCall?.[1]).toMatchObject({ "81.image": "up_甲.png" });
+    expect(videoCall?.[1] && "82.image" in (videoCall[1] as object)).toBe(false);
+    expect(warn.mock.calls.some((call) => String(call[0]).includes("整组不提交"))).toBe(true);
+    warn.mockRestore();
+  });
+});
+
 // ───────────── 视频首帧底图引用归一（2026-10-31 LoadImage 实锤）─────────────
 // 真机事故：底图 url 已是 `/api/comfyui/local-view?path=…`，代码又套一层 localViewUrl
 // ⇒ 取回 404 JSON（34 B）当图片上传 ⇒ ComfyUI
@@ -539,6 +660,48 @@ describe("视频首帧底图上传（引用不二次包装）", () => {
     expect(md0.discardFailedIllustration).not.toHaveBeenCalled();
   });
 
+  it("主槽已归档时优先取**仓库副本**（local-view），不碰 ComfyUI /view —— 本机 8188 停掉也能上传", async () => {
+    // 2026-11-08 真机：视频槽「重新生成」带的是 viewUrl(ComfyUI /view)，本机 ComfyUI 一停
+    // 就 502「首帧底图上传 ComfyUI 失败」；同一张图早已归档进作品目录（槽位 url 即 local-view）。
+    const fetchMock = vi.fn(async (_url: string) => ({
+      ok: true, status: 200,
+      blob: async () => new Blob([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], { type: "image/png" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const md0 = makeDeps({
+      preset: videoPreset, templates: [TPL, VIDEO_WITH_IMAGE],
+      messages: [{
+        id: "m1",
+        parts: [{ type: "image", slotId: "s1", status: "ready", url: LOCAL_VIEW }],
+      }] as never,
+    });
+    await submitChain(md0.deps, videoOnlyInput("/api/comfyui/view?filename=out.png&url=http://127.0.0.1:8188"));
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe(LOCAL_VIEW);
+    expect(vi.mocked(uploadImage).mock.calls[0][0].name).toBe("workflow_03780d6582af1705874d8c4f.png");
+    expect(md0.discardFailedIllustration).not.toHaveBeenCalled();
+  });
+
+  it("主槽尚未归档（槽位非 ready）⇒ 回退 ComfyUI 地址，行为不变", async () => {
+    const fetchMock = vi.fn(async (_url: string) => ({
+      ok: true, status: 200,
+      blob: async () => new Blob([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], { type: "image/png" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const md0 = makeDeps({
+      preset: videoPreset, templates: [TPL, VIDEO_WITH_IMAGE],
+      messages: [{
+        id: "m1",
+        parts: [{ type: "media-slot", slotId: "s1", status: "pending" }],
+      }] as never,
+    });
+    await submitChain(md0.deps, videoOnlyInput("/api/comfyui/view?filename=out.png"));
+
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/comfyui/view?filename=out.png");
+    expect(vi.mocked(uploadImage).mock.calls[0][0].name).toBe("out.png");
+  });
+
   it("底图取回 404 ⇒ 不当图片上传，视频分支落 failSlot(upload)", async () => {
     const fetchMock = vi.fn(async (_url: string) => ({
       ok: false, status: 404,
@@ -553,7 +716,49 @@ describe("视频首帧底图上传（引用不二次包装）", () => {
     expect(md0.discardFailedIllustration).toHaveBeenCalledTimes(1);
     expect(md0.discardFailedIllustration.mock.calls[0][1]).toBe("s1:video");
     expect(md0.discardFailedIllustration.mock.calls[0][2]).toBe("upload");
-    expect(md0.discardFailedIllustration.mock.calls[0][3]).toBe("首帧底图上传 ComfyUI 失败");
+    expect(md0.discardFailedIllustration.mock.calls[0][3]).toBe("首帧底图上传 ComfyUI 失败：底图读取失败：HTTP 404");
+  });
+
+  it("上传瞬时失败两次后成功 ⇒ 视频照常提交（单次网络抖动不判死）", async () => {
+    // 2026-11-08 真机：远端一次 19s 抖动把整条视频判死；同一请求随后 3/3 在 0.5s 内成功。
+    const fetchMock = vi.fn(async (_url: string) => ({
+      ok: true, status: 200,
+      blob: async () => new Blob([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], { type: "image/png" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.mocked(uploadImage)
+      .mockRejectedValueOnce(new Error("503"))
+      .mockRejectedValueOnce(new Error("timeout"));
+    try {
+      const md0 = makeDeps({ preset: videoPreset, templates: [TPL, VIDEO_WITH_IMAGE] });
+      await submitChain(md0.deps, videoOnlyInput(LOCAL_VIEW));
+
+      expect(uploadImage).toHaveBeenCalledTimes(3);
+      expect(submitWorkflow).toHaveBeenCalled();
+      expect(md0.discardFailedIllustration).not.toHaveBeenCalled();
+    } finally {
+      vi.mocked(uploadImage).mockImplementation(async (_file: File) => ({ name: "uploaded.png" }) as never);
+    }
+  });
+
+  it("上传连续三次失败 ⇒ failSlot 带真实原因（可定位）", async () => {
+    const fetchMock = vi.fn(async (_url: string) => ({
+      ok: true, status: 200,
+      blob: async () => new Blob([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], { type: "image/png" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.mocked(uploadImage).mockRejectedValue(new Error("upload 500"));
+    try {
+      const md0 = makeDeps({ preset: videoPreset, templates: [TPL, VIDEO_WITH_IMAGE] });
+      await submitChain(md0.deps, videoOnlyInput(LOCAL_VIEW));
+
+      expect(uploadImage).toHaveBeenCalledTimes(3);
+      expect(md0.discardFailedIllustration).toHaveBeenCalledTimes(1);
+      expect(md0.discardFailedIllustration.mock.calls[0][2]).toBe("upload");
+      expect(String(md0.discardFailedIllustration.mock.calls[0][3])).toContain("upload 500");
+    } finally {
+      vi.mocked(uploadImage).mockImplementation(async (_file: File) => ({ name: "uploaded.png" }) as never);
+    }
   });
 
   it("裸本地路径（预设风格底图）仍走 localViewUrl 包装（原路径零回归）", async () => {
@@ -979,6 +1184,11 @@ describe("试跑开关（promptOnlyGeneration）", () => {
       ["s1", "failed", "image"],
       ["s1:video", "failed", "video"],   // 视频槽就在图片正下方，且标着 video
     ]);
+    // 2026-11-08 用户点名：试跑描述必须分图/视频口径——视频槽说「不出片/出视频」，不得沿用「出图」
+    expect(String(parts[0].error)).toContain("图片不出图");
+    expect(String(parts[1].error)).toContain("视频不出片");
+    expect(String(parts[1].error)).toContain("直接出视频");
+    expect(String(parts[1].error)).not.toContain("出图");
     // 视频槽的重试快照=整条链（图用成稿直送、图成后照常接视频）
     expect(parts[1].retryArgs).toEqual(expect.objectContaining({
       slotId: "s1", finalPrompt: "原始P", videoPrompt: "视频P",
@@ -1123,7 +1333,8 @@ describe("逐字搬移锁（T2.2-A 插画链）", () => {
     ["prompt = withLoraTriggers(prompt);", 1],
     ["const st = await comfyStatus(comfyMainUrl);", 1],
     ["failSlot(\"submit\", \"ComfyUI 没有返回任务 ID\");", 1],
-    ["pollResult(r.prompt_id, outputNodeIds, regeneration, target, prompt, mainIsVideo ? \"video\" : \"image\", baseSlotRef);", 1],
+    // 第 100 刀：提交/轮询/快照的提示词改传 submittedPrompt（视频＝成稿+对白时间轴，图片＝原值）
+    ["pollResult(r.prompt_id, outputNodeIds, regeneration, target, submittedPrompt, mainIsVideo ? \"video\" : \"image\", baseSlotRef);", 1],
   ];
 
   it("判定/副作用语句在新属主按次数出现", () => {
@@ -1167,5 +1378,154 @@ describe("源码形态锁（T2.2-A 插画链）", () => {
     ].join("\n");
     expect(view.includes(block)).toBe(true);
     expect([count(view, "useIllustrationChain("), 1]).toEqual([count(view, "useIllustrationChain("), 1]);
+  });
+});
+
+// ───────────── 第 100 刀：Ref2VA 参考音频 + 图片1 图像口 ─────────────
+// 用户口径：首尾帧不靠像素锁定，图片1/2 在提示词里声明即可；音频把本轮 TTS 分条按顺序
+// 拼成整条作「剧情内角色对白音轨」，并带上后端编译的对白时间轴（哪句/何时/哪个镜头）。
+describe("Ref2VA 参考音频与图片1（第 100 刀）", () => {
+  const DIALOGUE_TEXT = "[对白参考]：<Audio 1> 是本轮角色对白的连续参考录音（同轮 TTS 顺序拼接）。\n"
+    + "0s–2s｜(S1) 甲：走";
+  const VIDEO_DIALOGUE = {
+    ref_label: "<Audio 1>",
+    speakers: ["甲"],
+    timeline: [{ start: 0, end: 2, label: "(S1)", speaker: "甲", text: "走" }],
+    text: DIALOGUE_TEXT,
+    warnings: [],
+    line_count: 2,
+  };
+  const audioMessage = (): ChatMessage[] => [{
+    id: "m1", role: "assistant", content: "正文",
+    parts: [
+      { type: "audio", url: "local:a.wav", slotId: "audio-m1-0", seq: 1 },
+      { type: "audio", url: "local:b.wav", slotId: "audio-m1-1", seq: 2 },
+    ],
+  }] as never;
+  const REF2VA_EXPOSED = [
+    // Ref2VA 的提示词常是普通文本槽（不是 video_prompt）⇒ 视频成稿必须写进这里
+    { node_id: "6", field: "text", semantic: "prompt" },
+    { node_id: "71", field: "image", semantic: "image", binding: "first_frame_image" },
+    { node_id: "72", field: "image", semantic: "image", binding: "last_frame_image" },
+    { node_id: "91", field: "audio", semantic: "audio", binding: "reference_audio_1" },
+    { node_id: "31", field: "width", binding: "video_width" },
+    { node_id: "31", field: "height", binding: "video_height" },
+  ];
+  const REF2VA = {
+    id: "vid1", name: "参考视频", node_order: [], exposed: REF2VA_EXPOSED,
+    primary_output_node_id: "67",
+  } as never;
+  const REF2VA_PRESET = {
+    templateId: "tpl1", videoTemplateId: "vid1", firstlast: true,
+    negativePrompt: "", appearanceSource: "character_card", loraMode: "single",
+  };
+
+  beforeEach(() => {
+    vi.mocked(genFramePrompts).mockResolvedValue({
+      frames: { first: { prompt: "编译首帧P" }, last: { prompt: "编译尾帧P" } },
+    } as never);
+  });
+
+  it("分条按序拼成整条并上传参考音频槽；对白时间轴追加进视频提示词（三处同源）", { timeout: 15000 }, async () => {
+    const fetchMock = vi.fn(async (_url: string) => ({
+      ok: true, status: 200,
+      blob: async () => new Blob([new Uint8Array([1, 2])], { type: "audio/flac" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    // 视频宽高取**生成的首帧**真实尺寸（不是事件里反查到的旧底图）
+    vi.stubGlobal("createImageBitmap", vi.fn(async () => ({ width: 864, height: 1536 })));
+    vi.mocked(mergeAudio).mockResolvedValue({
+      ok: true,
+      url: "/api/comfyui/local-view?path=" + encodeURIComponent("C:\\out\\merged_ab.flac"),
+    } as never);
+    vi.mocked(uploadImage).mockImplementation(async (file: File) => ({ name: `up_${file.name}` }) as never);
+    const md0 = makeDeps({ preset: REF2VA_PRESET, templates: [TPL, REF2VA], messages: audioMessage() });
+    await submitChain(md0.deps, {
+      ...baseInput, source: "automatic", actors: [],
+      sceneSpec: { narrative: "剧情N", profile: "krea2" },
+      firstFrameDesc: "甲站在船头", lastFrameDesc: "乙回头",
+      videoPrompt: "视频成稿P", videoDialogue: VIDEO_DIALOGUE,
+    });
+
+    // 拼接只做一次（force=true：快照里可能残留旧整条）；产物上传到主视频机
+    expect(mergeAudio).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(mergeAudio).mock.calls[0][0]).toEqual({ threadId: "r1", messageId: "m1", force: true });
+    const audioUpload = vi.mocked(uploadImage).mock.calls.find((call) => call[0].name.endsWith("merged_ab.flac"));
+    expect(audioUpload?.[1]).toBe("http://127.0.0.1:8188");
+
+    const expectedPrompt = `视频成稿P\n\n${DIALOGUE_TEXT}`;
+    const videoCall = vi.mocked(submitWorkflow).mock.calls.find((call) => call[0] === "vid1");
+    // 图片1/2 = 生成的首尾帧；音频1 = 拼好的整条；提示词槽拿到的是**视频成稿 + 对白时间轴**
+    expect(videoCall?.[1]).toMatchObject({
+      "6.text": expectedPrompt,
+      "71.image": "moved.png",
+      "72.image": "moved.png",
+      "91.audio": "up_merged_ab.flac",
+      // 宽高来自生成的首帧（864×1536），不是模板默认值
+      "31.width": 864, "31.height": 1536,
+    });
+    expect(videoCall?.[3]).toBe(expectedPrompt);
+
+    // 槽位快照/轮询提示词与提交逐字同源 ⇒「重新生成」仍是同一份（含时间轴）
+    const videoPoll = md0.pollResult.mock.calls.find((call) => call[3]?.slotId === "s1");
+    expect(videoPoll?.[4]).toBe(expectedPrompt);
+    expect((videoPoll?.[2] as { prompt?: string })?.prompt).toBe(expectedPrompt);
+    expect(md0.discardFailedIllustration).not.toHaveBeenCalled();
+  });
+
+  it("模板没有参考音频槽 ⇒ 不拼接、不追加对白块（绝不引用不存在的 <Audio 1>）", { timeout: 15000 }, async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true, status: 200,
+      blob: async () => new Blob([new Uint8Array([1])], { type: "image/png" }),
+    })));
+    vi.mocked(uploadImage).mockImplementation(async () => ({ name: "uploaded.png" }) as never);
+    const noAudio = {
+      id: "vid1", name: "参考视频", node_order: [],
+      exposed: REF2VA_EXPOSED.filter((field) => field.node_id !== "91"),
+      primary_output_node_id: "67",
+    } as never;
+    const md0 = makeDeps({ preset: REF2VA_PRESET, templates: [TPL, noAudio], messages: audioMessage() });
+    await submitChain(md0.deps, {
+      ...baseInput, source: "automatic", actors: [],
+      sceneSpec: { narrative: "剧情N", profile: "krea2" },
+      firstFrameDesc: "甲站在船头", lastFrameDesc: "乙回头",
+      videoPrompt: "视频成稿P", videoDialogue: VIDEO_DIALOGUE,
+    });
+
+    expect(mergeAudio).not.toHaveBeenCalled();
+    expect(uploadImage).not.toHaveBeenCalled();
+    const videoCall = vi.mocked(submitWorkflow).mock.calls.find((call) => call[0] === "vid1");
+    expect(videoCall?.[1]).toMatchObject({ "6.text": "视频成稿P" });
+    expect(videoCall?.[3]).toBe("视频成稿P");
+    expect(warn.mock.calls.some((call) => String(call[0]).includes("没有参考音频槽"))).toBe(true);
+    expect(md0.discardFailedIllustration).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("高潮两段链的视频副槽：只有 first_frame_image 口（无 base_image）也把成图传给图片1", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true, status: 200,
+      blob: async () => new Blob([new Uint8Array([1])], { type: "image/png" }),
+    })));
+    vi.mocked(uploadImage).mockImplementation(async () => ({ name: "uploaded.png" }) as never);
+    const preset = {
+      templateId: "tpl1", videoTemplateId: "vid1", smartVideo: true,
+      negativePrompt: "", appearanceSource: "character_card", loraMode: "single",
+    };
+    const md0 = makeDeps({ preset, templates: [TPL, REF2VA] });
+    await submitChain(md0.deps, {
+      ...baseInput, source: "manual", slotId: "s1:video", prompt: "视频成稿P", videoPrompt: "视频成稿P",
+      videoOnly: true, eventVideoMode: "climax", videoBaseSlotId: "s1",
+      videoBaseUrl: "http://127.0.0.1:8188/view?filename=base.png&type=output&subfolder=",
+    });
+
+    // 底图（主槽刚出的成图）按图片1 上传到视频机；视频成稿写进通用 prompt 槽
+    expect(vi.mocked(uploadImage).mock.calls[0][0].name).toBe("base.png");
+    expect(vi.mocked(submitWorkflow).mock.calls[0][1]).toMatchObject({
+      "6.text": "视频成稿P", "71.image": "uploaded.png",
+    });
+    expect(md0.pollResult.mock.calls[0][5]).toBe("video");
+    expect(md0.discardFailedIllustration).not.toHaveBeenCalled();
   });
 });

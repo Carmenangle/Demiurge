@@ -163,6 +163,12 @@ interface IllustrationValues {
   lastFrameImage?: string;
   /** V1.5 默认开放：后端编译的 climax 视频提示词（无视频模板/模型也生成） */
   videoPrompt?: string;
+  /** 第 94 刀：首尾帧视频的角色参考图（已上传 ComfyUI input 的文件名，按「图片 3、4、5…」顺序）。
+   * 只写模板声明了 reference_image / reference_image_<n> / reference_image_files 的槽。 */
+  referenceImages?: string[];
+  /** 第 100 刀：Ref2VA 参考音频（已上传 ComfyUI input 的文件名，按「音频 1、2、3…」顺序）。
+   * 只写模板声明了 reference_audio / reference_audio_<n> 的槽；参考视频自带的音轨不在这里。 */
+  referenceAudios?: string[];
 }
 
 export type IllustrationAspectRatio = "1:1" | "2:3" | "3:2" | "3:4" | "4:3" | "9:16" | "16:9";
@@ -192,6 +198,14 @@ export function illustrationTemplateValues(
   exposed: readonly SemanticField[], input: IllustrationValues,
 ): Record<string, unknown> {
   const values: Record<string, unknown> = {};
+  const referenceImages = (input.referenceImages || [])
+    .map((name) => name.trim())
+    .filter(Boolean);
+  const referenceAudios = (input.referenceAudios || [])
+    .map((name) => name.trim())
+    .filter(Boolean);
+  let referenceSlot = 0;
+  let audioSlot = 0;
   for (const field of exposed) {
     const key = `${field.node_id}.${field.field}`;
     const binding = workflowFieldBinding(field);
@@ -232,6 +246,24 @@ export function illustrationTemplateValues(
       values[key] = input.videoSize.width;
     } else if (binding === "video_height" && input.videoSize) {
       values[key] = input.videoSize.height;
+    } else if (binding === "reference_image") {
+      if (referenceSlot < referenceImages.length) {
+        values[key] = referenceImages[referenceSlot];
+        referenceSlot += 1;
+      }
+    } else if (/^reference_image_\d+$/.test(binding)) {
+      const index = Number(binding.slice("reference_image_".length)) - 1;
+      if (index >= 0 && referenceImages[index]) values[key] = referenceImages[index];
+    } else if (binding === "reference_image_files") {
+      if (referenceImages.length) values[key] = JSON.stringify(referenceImages);
+    } else if (binding === "reference_audio") {
+      if (audioSlot < referenceAudios.length) {
+        values[key] = referenceAudios[audioSlot];
+        audioSlot += 1;
+      }
+    } else if (/^reference_audio_\d+$/.test(binding)) {
+      const index = Number(binding.slice("reference_audio_".length)) - 1;
+      if (index >= 0 && referenceAudios[index]) values[key] = referenceAudios[index];
     }
   }
   return values;

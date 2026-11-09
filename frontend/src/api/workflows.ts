@@ -55,6 +55,11 @@ export const SEMANTIC_VIDEO_HEIGHT = "video_height";
 // voice_emotion_<key>=8 维情感向量（happy/angry/sad/fear/hate/low/surprise/neutral，0~1 混合权重）。
 export const SEMANTIC_VOICE_TEXT = "voice_text";
 export const SEMANTIC_VOICE_REFERENCE = "voice_reference";
+// 首尾帧视频的「参考生成」角色参考图（第 94 刀）：图片1/2 是首尾帧，图片3、4、5… 是角色底图。
+// reference_image：一张参考图一个槽（按 exposed 顺序；标题「参考图N」可显式编号）；
+// reference_image_files：单控件吃整组文件名（PainterMiniMaxRefToVideo6 的 ref_image_files JSON）。
+export const SEMANTIC_REFERENCE_IMAGE = "reference_image";
+export const SEMANTIC_REFERENCE_IMAGE_FILES = "reference_image_files";
 export const VOICE_EMOTION_KEYS = ["happy", "angry", "sad", "fear", "hate", "low", "surprise", "neutral"] as const;
 export type VoiceEmotionKey = (typeof VOICE_EMOTION_KEYS)[number];
 export const VOICE_EMOTION_PREFIX = "voice_emotion_";
@@ -69,6 +74,8 @@ export const MEDIA_INSERT_SEMANTICS = [
   { value: SEMANTIC_LATENT_HEIGHT, label: "Latent 高度（按 Agent 画幅比例换算）" },
   { value: SEMANTIC_VOICE_TEXT, label: "角色台词（写 TTS 节点 text）" },
   { value: SEMANTIC_VOICE_REFERENCE, label: "参考音轨（音色，写 LoadAudio）" },
+  { value: SEMANTIC_REFERENCE_IMAGE, label: "角色参考图槽（首尾帧视频图片3+；标题「参考图N」可编号）" },
+  { value: SEMANTIC_REFERENCE_IMAGE_FILES, label: "角色参考图·整组（单控件 JSON 文件名数组）" },
   ...VOICE_EMOTION_KEYS.map((key) => ({
     value: voiceEmotionSemantic(key),
     label: `情感向量·${key}（写 EmotionVector 节点）`,

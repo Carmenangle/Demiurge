@@ -49,6 +49,28 @@ export interface AudioDialogueLine {
   emotion?: Record<string, number>;
 }
 
+/** 第 99 刀：对白时间轴（firstlast 正片；拼接音频只作参考，台词按拍窗口重说） */
+export interface VideoDialogueItem {
+  start: number;
+  end: number;
+  label: string;
+  speaker: string;
+  speaker_id: string;
+  text: string;
+  /** true=台词在正文引语里逐字命中；false=按顺序兜底铺到空余镜头窗口 */
+  exact: boolean;
+}
+
+export interface VideoDialogue {
+  ref_label: string;
+  speakers: Record<string, string>;
+  timeline: VideoDialogueItem[];
+  /** 可直接追加进视频提示词的渲染块（只有模板暴露参考音频槽时才追加） */
+  text: string;
+  warnings: string[];
+  line_count: number;
+}
+
 /** V1.5 默认开放：结构化视频参数（后端 dry-run 组装结果，供测试核对参数是否上传） */
 export interface VideoParams {
   mode: "climax" | "firstlast" | "transition";
@@ -70,7 +92,7 @@ export type ChatStreamEvent =
   | { type: "route"; route: MessageRoute }
   | { type: "image"; url: string; id?: string; regeneration?: RegenerationSnapshot }
   | { type: "video"; url: string; id?: string }
-  | { type: "illustrate_request"; prompt: string; motion: number; actors: string[]; sceneSpec?: IllustrationSceneSpec; id?: string; offset?: number; turnId?: string; videoMode?: "climax" | "firstlast"; firstFrameDesc?: string; lastFrameDesc?: string; prevTailDesc?: string; lastFrameUrl?: string; transition?: "reuse" | "regenerate" | "ambiguous"; videoPrompt?: string; videoParams?: VideoParams; transitionVideoPrompt?: string; transitionVideoParams?: VideoParams; bridgePrevSlotId?: string; batchIndex?: number }
+  | { type: "illustrate_request"; prompt: string; motion: number; actors: string[]; sceneSpec?: IllustrationSceneSpec; id?: string; offset?: number; turnId?: string; videoMode?: "climax" | "firstlast"; firstFrameDesc?: string; lastFrameDesc?: string; prevTailDesc?: string; lastFrameUrl?: string; transition?: "reuse" | "regenerate" | "ambiguous"; videoPrompt?: string; videoParams?: VideoParams; transitionVideoPrompt?: string; transitionVideoParams?: VideoParams; videoDialogue?: VideoDialogue; bridgePrevSlotId?: string; batchIndex?: number }
   | { type: "audio_request"; lines: AudioDialogueLine[]; id?: string }
   | { type: "rag_status"; state: string; kind: string; count?: number }
   | { type: "inspiration"; card: StreamInspirationCard }
@@ -188,6 +210,11 @@ export function decodeChatStreamEvent(value: unknown): ChatStreamEvent {
           : {}),
         ...(data.transition_video_params && typeof data.transition_video_params === "object"
           ? { transitionVideoParams: data.transition_video_params as VideoParams }
+          : {}),
+        // 第 99 刀：对白时间轴（firstlast + 本轮有 TTS 台词才下发；无 text 视为缺省）
+        ...(data.video_dialogue && typeof data.video_dialogue === "object"
+          && typeof (data.video_dialogue as Record<string, unknown>).text === "string"
+          ? { videoDialogue: data.video_dialogue as VideoDialogue }
           : {}),
         // 第 74 刀 段桥：图片1 取自哪一张**成图槽**（正文序里的前一张画面）。
         // 有了它，前端不必另生成一张「上一画面」近似图 —— 用户口径「前面的图片放首帧」。

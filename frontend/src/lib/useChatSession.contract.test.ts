@@ -47,6 +47,9 @@ describe("isolation of illustration submit params", () => {
       "source", "eventVideoMode", "firstFrameDesc", "lastFrameDesc", "prevTailDesc",
       "lastFrameUrl", "videoPrompt", "videoParams", "transition", "transitionVideoPrompt",
       "transitionVideoParams",
+      // 2026-11-08 第 99／100 刀：firstlast 对白时间轴随对象走（重试沿用同一份），
+      // 前端只在模板真有参考音频槽且音频上传成功时把它的 text 追加进视频提示词。
+      "videoDialogue",
       // 2026-10-18 试跑成稿直送：试跑（promptOnly）上报时把编译成稿写进快照，
       // 「重新生成」据此逐字提交 ComfyUI（不再重编译）；普通失败槽无这两键 ⇒ 仍重编译
       "finalPrompt", "finalFramePrompts",
@@ -294,12 +297,14 @@ describe("P5 pollResult 调用点接线锁：10 点全锁（本组 8 + R8 组 2�
   });
 
   it("主槽调用点必须带第 6/7 参（mediaType 推导 + baseSlotRef）—— **最险的一点**", () => {
+    // 第 99／100 刀：视频成稿（含对白块）可能落在通用 prompt 槽 ⇒ 提交/上报/轮询统一用
+    // submittedPrompt（= 模板无 video_prompt binding 时取视频成稿），不再用图片提示词 prompt。
     expect(chainCode).toMatch(
-      /pollResult\(r\.prompt_id, outputNodeIds, regeneration, target, prompt, mainIsVideo \? "video" : "image", baseSlotRef\)/,
+      /pollResult\(r\.prompt_id, outputNodeIds, regeneration, target, submittedPrompt, mainIsVideo \? "video" : "image", baseSlotRef\)/,
     );
     // 反向锁：7 参形态不得回退成 6 参（丢 baseSlotRef ⇒ 视频 derived_from 记录消失）
     expect(chainCode).not.toMatch(
-      /pollResult\(r\.prompt_id, outputNodeIds, regeneration, target, prompt, mainIsVideo \? "video" : "image"\)/,
+      /pollResult\(r\.prompt_id, outputNodeIds, regeneration, target, submittedPrompt, mainIsVideo \? "video" : "image"\)/,
     );
   });
 

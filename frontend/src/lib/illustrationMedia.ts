@@ -370,6 +370,39 @@ export function firstlastMainOffset(opts: {
   });
 }
 
+export interface FirstlastReferencePlan {
+  /** 按在场角色顺序去重的参考图（同一底图只留一次）；name 只用于诊断。 */
+  refs: { name: string; source: string }[];
+  /** 在场但没有角色底图的角色 —— 参考生成时视频模型只能猜外貌。 */
+  missing: string[];
+}
+
+/** 第 94 刀：首尾帧视频＝参考生成（图片1/2 首尾帧，图片3、4、5… 角色参考图）。
+ *  参考图顺序＝在场角色顺序；没底图的角色不占位，另行报出。 */
+export function planFirstlastReferenceImages(
+  actors: readonly string[],
+  characterBaseImages: Record<string, string>,
+): FirstlastReferencePlan {
+  const refs: FirstlastReferencePlan["refs"] = [];
+  const missing: string[] = [];
+  const seenNames = new Set<string>();
+  const seenSources = new Set<string>();
+  for (const raw of actors) {
+    const name = raw.trim();
+    if (!name || seenNames.has(name)) continue;
+    seenNames.add(name);
+    const source = (characterBaseImages[name] || "").trim();
+    if (!source) {
+      missing.push(name);
+      continue;
+    }
+    if (seenSources.has(source)) continue;
+    seenSources.add(source);
+    refs.push({ name, source });
+  }
+  return { refs, missing };
+}
+
 /** W3 转场视频 values：图片1=上尾帧图（转场起点）、图片2=当前首帧图（终点）。
  *  复用正片视频模板（不猜模板有 transition 分支），videoMode 仍走 firstlast；
  *  时长走 preset.transitionDurationHint（坑G：有值才写，缺省交视频模型默认，绝不兑底正片时长）。 */
@@ -389,6 +422,7 @@ export function transitionVideoValues(
     firstFrameDesc?: string;
     prevTailImage?: string;   // 图片1=上尾帧图（已上传 ComfyUI input）
     firstFrameImage?: string; // 图片2=当前首帧图（P5 生成的 input 文件名）
+    referenceImages?: string[]; // 图片3、4、5…=角色参考图（第 94 刀）
   },
 ): Record<string, unknown> {
   return illustrationTemplateValues(exposed, {
@@ -405,5 +439,6 @@ export function transitionVideoValues(
     prevTailDesc: opts.prevTailDesc?.trim() || undefined,
     firstFrameImage: opts.prevTailImage?.trim() || undefined,
     lastFrameImage: opts.firstFrameImage?.trim() || undefined,
+    referenceImages: opts.referenceImages,
   });
 }

@@ -13,7 +13,7 @@
 //   ③ 认领重试（自动路径两轮 + saveSnapshot 刷新）、提交自愈（interruptComfy 后重提一次，上限 1 次）
 //      的次数与顺序逐字保留；`IllustrationSubmit` 参数合同留在 useChatSession.ts（跨层契约，勿迁）。
 
-import { type Dispatch, type MutableRefObject, type SetStateAction } from "react";
+import { useRef, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
 import type { ChatMessage, RegenerationSnapshot } from "../types/chat";
 import type { Repo } from "../stores/repos";
 import type { useSettings } from "../stores/settings";
@@ -22,7 +22,7 @@ import type { Template } from "../api/workflows";
 import type { Model, IllustrationSubmit } from "./useChatSession";
 import {
   comfyStatus, submitWorkflow, interruptComfy, uploadImage, localViewUrl, viewUrl,
-  moveComfyOutputToInput, uploadRemoteImageToInput,
+  moveComfyOutputToInput, uploadRemoteImageToInput, mergeAudio,
 } from "../api/comfyui";
 import { listLoras } from "../api/loras";
 import {
@@ -39,13 +39,16 @@ import {
   isSegmentBridgeEvent, resolveVideoMode, resolveVideoTemplateChoice, resolveVideoDuration,
   resolveBaseImageSource, imagePixelSizeFromBlob, alignSizeForVideoNode,
   planFirstlastFrameTasks, firstlastFrameValues,
+  planFirstlastReferenceImages,
   firstlastSlotLayout, transitionVideoValues, illustrationRequestMedia,
 } from "./illustrationMedia";
 import {
-  resolveLoraPromptMetadata, resolveVideoBaseImageRef, resolveTransitionBaseImage, resolvePrevTailDesc,
+  resolveLoraPromptMetadata, resolveVideoBaseImageRef,
+  resolveReadySlotImageUrl, resolveTransitionBaseImage, resolvePrevTailDesc,
   findMediaSlotState, type SlotMediaState,
 } from "./chatGeneration";
 import { templateRegenerationSnapshot } from "./regeneration";
+import { prepareDialogueAudio } from "./dialogueAudio";
 import { resolveComfyUrl, sameComfyUrl } from "./comfyMachines";
 import { pollWorkflowResult, type PendingGeneration } from "./workflowGenerationRuntime";
 import { appendImageSlot, appendTransitionSlot, appendVideoSlotAfter, bindMediaSlotPrompt, markMediaSlotFailed, markMediaSlotKind, resolveMediaSlot } from "./chatSessionEvents";
@@ -82,8 +85,11 @@ export interface IllustrationChainDeps {
 // 第 60～66 刀之后的「试跑」开关（2026-09-28 用户需求）：跑剧情时只生成提示词、不提交 ComfyUI。
 // 动机：批量生图约 4.7 分钟/张，审查提示词不该等出图；视频同理。
 // 语义：**编译链一字不改**（60～66 刀全部照跑），只是把「提交 + 轮询」整段换成「上报 trace」。
+// 2026-11-08 用户点名：视频槽的试跑描述必须说视频（成片/出视频），不能沿用图片那套「出图」。
 const PROMPT_ONLY_NOTE =
-  "试跑：只生成提示词，未提交 ComfyUI（图片/视频均不出图）；成稿见 trace 的 illustration.submitted；点「重新生成」用成稿直接出图";
+  "试跑：只生成提示词，未提交 ComfyUI（图片不出图）；成稿见 trace 的 illustration.submitted；点「重新生成」用成稿直接出图";
+const PROMPT_ONLY_VIDEO_NOTE =
+  "试跑：只生成提示词，未提交 ComfyUI（视频不出片）；成稿见 trace 的 illustration.submitted；点「重新生成」用成稿直接出视频";
 
 // 第 58 刀（2026-09-24）：999 模式 12 个槽**同时** POST /comfyui/submit —— ComfyUI
 // 首个任务触发模型加载、其余在队列里等，5/12 张撞上 60s 提交超时（真机实锤）。
@@ -129,6 +135,10 @@ export function useIllustrationChain({
   // 剧情高潮点异步出图/出视频：后端发来 booru 提示词 + motion 动态强度，按本作品预设组 values 提交 ComfyUI，
   // 走 pollResult 现成异步闭环（徽记显示进度 + 离开继续 + 点击返回）。未预设模板 → 静默跳过。
   // 智能模态：smartVideo 开 且 预设了视频模板 且 后端编出了视频提示词 → 出图后接视频，否则只出图。
+  //
+  // 第 100 刀：同一轮（同一条消息 + 同一台视频机）的参考音频只拼一次、只传一次——正片/重试多次
+  // 提交共用同一份上传结果。失败的任务不驻留（下一个槽可重试）。
+  const dialogueAudioJobs = useRef(new Map<string, Promise<string>>()).current;
   const submitIllustration = async (input: IllustrationSubmit) => {
     // 解构带默认值：函数体沿用局部名，签名收成对象后调用点不必再数位置（审计 C7）。
     const {
@@ -139,6 +149,7 @@ export function useIllustrationChain({
     finalPrompt = "", finalFramePrompts,
     videoOnly = false, videoBaseUrl = "", videoBaseSlotId = "",
     bridgePrevSlotId = "", bridgeVideo = false, bridgePrevImageUrl = "",
+    videoDialogue,
   } = input;
   // 2026-10-18 试跑成稿直送（用户定案）：快照带成稿 ⇒ 本次是「用成稿跑图」——
   // 逐字采用、跳过编译链，且**绕过试跑闸**（显式点「重新生成」优先于批量开关；
@@ -162,6 +173,8 @@ export function useIllustrationChain({
       // 第 74 刀：桥视频的「上一张画面」两件套随快照带走 ⇒ 视频槽的「重新生成」既认得
       // 上一张槽（可以重等有界链），也带着当时已经取到的地址（不用再等一次）。
       bridgePrevSlotId, bridgeVideo, bridgePrevImageUrl,
+      // 第 100 刀：对白时间轴随快照带走 ⇒ 视频槽「重新生成」仍按同一份时间轴提交。
+      videoDialogue,
     };
     const failSlot = (stage: string, error: string) =>
       discardFailedIllustration(messageId, slotId, stage, error, "", retrySnapshot);
@@ -286,8 +299,18 @@ export function useIllustrationChain({
     // M2.1：ref 版本同时返回底图来源槽引用，视频入库时记录 derived_from。
     // 高潮两段链的主槽是**普通图**⇒ 不参与反查（否则会把上一楼层成图当底图做图生图，
     // 图片口径被悄悄改掉）；底图只由 `videoOnly` 那次提交使用（= 本槽刚出的成图）。
+    // 2026-11-08 真机实锤：videoOnly 的首帧优先用**仓库副本**（归档链写进作品目录的那张，
+    // 槽位 url 即 local-view 盘读地址）；ComfyUI `/view` 只作兜底——本机 8188 一停，
+    // /view 直接 502（「首帧底图上传 ComfyUI 失败」），而仓库那份字节还在。
+    // 未归档（自动链出图后立刻提视频）时槽位还没 ready ⇒ 回退 videoBaseUrl，行为不变。
+    const persistedBaseUrl = videoOnly && videoBaseSlotId
+      ? resolveReadySlotImageUrl(messagesRef.current, messageId, videoBaseSlotId)
+      : "";
     const videoBaseRef = videoOnly && videoBaseSlotId
-      ? { url: videoBaseUrl, sourceMessageId: messageId, sourceSlotId: videoBaseSlotId }
+      ? {
+          url: persistedBaseUrl || videoBaseUrl,
+          sourceMessageId: messageId, sourceSlotId: videoBaseSlotId,
+        }
       : useVideo && mainIsVideo
         ? resolveVideoBaseImageRef({
             tpl, messageId, slotId,
@@ -299,7 +322,7 @@ export function useIllustrationChain({
     // 上尾帧图（视觉延续）。无尾帧图资产 → reuse 作废，维持原路径（独立生成首帧）。
     // 仅 firstlast 消费（climax 无首帧复用）；reuse 之外（regenerate/ambiguous/空）不复用。
     const baseImageForUse = videoOnly
-      ? videoBaseUrl
+      ? (videoBaseRef?.url || videoBaseUrl)
       : resolveTransitionBaseImage({
           videoMode, transition, messages: messagesRef.current,
           fallback: videoBaseRef?.url ?? baseImage,
@@ -436,7 +459,7 @@ export function useIllustrationChain({
     // 不清则服务端把 status=pending 的认领槽回位进会话，楼层永久画「插画生成中…」。
     const promptOnly = settings.promptOnlyGeneration === true && !useFinalDraft;
     if (promptOnly) {
-      failSlot("prompt_only", PROMPT_ONLY_NOTE);
+      failSlot("prompt_only", mainIsVideo ? PROMPT_ONLY_VIDEO_NOTE : PROMPT_ONLY_NOTE);
     }
     // 底图需先上传到 ComfyUI input 目录，取回可供 LoadImage 引用的文件名
     let uploadedImage = "";
@@ -445,29 +468,56 @@ export function useIllustrationChain({
     // 量不到（无 createImageBitmap／解码失败／模板没有图像口）⇒ 不写这两键，交回模板默认。
     let videoSize: { width: number; height: number } | undefined;
     const needsImage = tpl.exposed.some((f) => workflowFieldBinding(f) === "base_image");
+    // 第 100 刀：Ref2VA 的「图片1」按图位置推断成 first_frame_image（不再是 base_image）。
+    // videoOnly 递归（高潮两段链）与段桥都由这里把首帧搬到视频机；firstlast 主链真正的图片1
+    // 由帧循环产出（或 reuse 上尾帧图），不走这个上传段——否则会拿反查到的旧图冒充首帧。
+    const needsFrameImage = tpl.exposed.some((f) => workflowFieldBinding(f) === "first_frame_image");
+    // 只有模板真的暴露宽高槽时才值得再取一次字节量尺寸（否则量了也没处写）。
+    const needsVideoSize = mainIsVideo && tpl.exposed.some((f) => {
+      const binding = workflowFieldBinding(f);
+      return binding === "video_width" || binding === "video_height";
+    });
+    const uploadMainImage = needsImage || (needsFrameImage && !useFirstlastImages);
     // V1.1 视频分支：模板声明图像口但拿不到底图 → 拦截（不空图提交图生视频工作流）
-    if (useVideo && needsImage && !baseImageForUse) {
+    if (useVideo && uploadMainImage && !baseImageForUse) {
       failSlot("image_required", "视频模板需要首帧底图，但当前没有可用的已完成插画，请先出图或用预设指定底图");
       return;
     }
-    if (!promptOnly && needsImage && baseImageForUse) {
+    if (!promptOnly && uploadMainImage && baseImageForUse) {
       mark("upload", "start", baseImageForUse);
-      try {
-        // 底图可能已是 local-view/http 地址（已完成插画），只有裸路径才包 localViewUrl。
-        const baseSource = resolveBaseImageSource(baseImageForUse);
-        const resp = await fetch(baseSource.needsWrap ? localViewUrl(baseSource.source) : baseSource.source);
-        if (!resp.ok) throw new Error(`底图读取失败：HTTP ${resp.status}`);
-        const blob = await resp.blob();
-        if (mainIsVideo) videoSize = alignSizeForVideoNode(await imagePixelSizeFromBlob(blob));
-        const file = new File([blob], baseSource.filename, { type: blob.type || "image/png" });
-        uploadedImage = (await uploadImage(file, comfyMainUrl)).name;
-        mark("upload", "ok");
-      } catch {
-        // 底图上传失败：图片分支退化为纯文生图；视频分支按文档终态失败（不重试乘法）
-        if (useVideo) {
-          failSlot("upload", "首帧底图上传 ComfyUI 失败");
-          return;
+      // 2026-11-08 真机：仓库副本上传在远端一次抖动中 19s 后失败，同一请求随后 3/3 在 0.5s 内成功。
+      // 取图 4xx（404 等）是确定性错误不重试；网络错误 / 5xx / 上传失败最多再试两次。
+      let uploadError: Error | undefined;
+      let uploaded = false;
+      for (let attempt = 0; attempt < 3 && !uploaded; attempt += 1) {
+        try {
+          // 底图可能已是 local-view/http 地址（已完成插画），只有裸路径才包 localViewUrl。
+          const baseSource = resolveBaseImageSource(baseImageForUse);
+          const resp = await fetch(baseSource.needsWrap ? localViewUrl(baseSource.source) : baseSource.source);
+          if (!resp.ok) {
+            const error = new Error(`底图读取失败：HTTP ${resp.status}`);
+            if (resp.status < 500) throw Object.assign(error, { fatal: true });
+            throw error;
+          }
+          const blob = await resp.blob();
+          if (mainIsVideo) videoSize = alignSizeForVideoNode(await imagePixelSizeFromBlob(blob));
+          const file = new File([blob], baseSource.filename, { type: blob.type || "image/png" });
+          uploadedImage = (await uploadImage(file, comfyMainUrl)).name;
+          uploaded = true;
+        } catch (error) {
+          uploadError = error instanceof Error ? error : new Error(String(error));
+          if ((error as { fatal?: boolean }).fatal) break;
+          if (attempt < 2) {
+            await new Promise((resolve) => setTimeout(resolve, attempt === 0 ? 300 : 900));
+          }
         }
+      }
+      if (uploaded) mark("upload", "ok");
+      else if (useVideo) {
+        // 底图上传失败：图片分支退化为纯文生图；视频分支按文档终态失败（不重试乘法）
+        const detail = (uploadError?.message || "").slice(0, 120);
+        failSlot("upload", detail ? `首帧底图上传 ComfyUI 失败：${detail}` : "首帧底图上传 ComfyUI 失败");
+        return;
       }
     }
     // V1.5/B3 firstlast 双帧：事件携带尾帧图（lastFrameUrl）→ 上传为 last_frame_image；
@@ -511,6 +561,60 @@ export function useIllustrationChain({
           return "";
         });
       }
+    }
+    // 第 94 刀（2026-11-06 用户定案）：首尾帧视频改「参考生成」——图片1/2 是在首尾帧槽，
+    // 图片3、4、5… 是在场角色底图（按角色出场顺序）。后端不知道前端选中的模板有没有参考槽，
+    // 所以由这里按模板绑定面自检：有槽才上传填值；没槽/缺底图都明确告警，绝不假装交出去了
+    //（视频照样出，但视频模型仍只能猜外貌——面板在保存前已把这两类风险摆在明面上）。
+    const referenceGeneration = mainIsVideo && videoMode === "firstlast";
+    const referencePlan = referenceGeneration
+      ? planFirstlastReferenceImages(resolvedActors, characterBaseImages)
+      : { refs: [] as { name: string; source: string }[], missing: [] as string[] };
+    const supportsReferences = tpl.exposed.some((field) => {
+      const binding = workflowFieldBinding(field);
+      return binding === "reference_image" || binding === "reference_image_files"
+        || /^reference_image_\d+$/.test(binding);
+    });
+    // 第 100 刀：Ref2VA 的参考音频槽（音频1、2、3…＝ref_audio_0..2）。没有槽 ⇒ 对白录音
+    // 无处可挂，绝不能把引用 `<Audio 1>` 的对白块塞进提示词（模型会等一条不存在的音轨）。
+    const supportsReferenceAudio = tpl.exposed.some((field) => {
+      const binding = workflowFieldBinding(field);
+      return binding === "reference_audio" || /^reference_audio_\d+$/.test(binding);
+    });
+    let referenceImages: string[] = [];
+    if (referenceGeneration && referencePlan.refs.length && !supportsReferences) {
+      console.warn(
+        "[auto-video] 视频模板没有参考图槽（reference_image / reference_image_files），角色参考图不会生效",
+        referencePlan.refs.map((ref) => ref.name),
+      );
+    }
+    if (referenceGeneration && referencePlan.refs.length && supportsReferences && !promptOnly) {
+      const uploadedBySource = new Map<string, string>();
+      for (const ref of referencePlan.refs) {
+        if (uploadedBySource.has(ref.source)) continue;
+        try {
+          const refSource = resolveBaseImageSource(ref.source);
+          const resp = await fetch(refSource.needsWrap ? localViewUrl(refSource.source) : refSource.source);
+          if (!resp.ok) throw new Error(`参考底图读取失败：HTTP ${resp.status}`);
+          const blob = await resp.blob();
+          const file = new File([blob], refSource.filename, { type: blob.type || "image/png" });
+          uploadedBySource.set(ref.source, (await uploadImage(file, comfyMainUrl)).name);
+        } catch (error) {
+          // 批 3：视频提示词已按图片3、4、5…点名「第几张是谁」⇒ 失败必须在此处**截断**，
+          // 不能再跳过让它后面的人前移顶位（前移＝编号与真人对不上，比少一张更坏）。
+          console.warn("[auto-video] 角色参考底图上传失败，其后的参考图整组不提交", ref.name, error);
+          break;
+        }
+      }
+      referenceImages = referencePlan.refs
+        .map((ref) => uploadedBySource.get(ref.source) || "")
+        .filter(Boolean);
+    }
+    if (referenceGeneration && referencePlan.missing.length) {
+      console.warn(
+        "[auto-video] 以下在场角色没有底图，参考生成只能靠模型猜外貌",
+        referencePlan.missing,
+      );
     }
     // 按 exposed 的隐藏 binding 组 values；提交 key 始终是“节点id.原字段名”。
     const latentSize = latentSizeFor(
@@ -563,6 +667,24 @@ export function useIllustrationChain({
       if (!useVideo && !plan.tasks.length) {
         failSlot("image_required", "首尾帧生图缺少画面：既无上尾帧图可复用，也无首帧/尾帧画面描述");
         return;
+      }
+      // 第 100 刀：reuse 首帧（上尾帧图）是现成图，不在帧循环里——Ref2VA 的「图片1」
+      // 仍要上传到视频机并把真实尺寸量给视频宽高（模板有 base_image 时上传段已办过，不重复）。
+      const reuseFirstFrame = plan.tasks.some((task) => task.frame === "first" && task.kind === "reuse");
+      if (mainIsVideo && reuseFirstFrame && needsFrameImage && !frameFirstImage && baseImageForUse) {
+        try {
+          const reuseSource = resolveBaseImageSource(baseImageForUse);
+          const resp = await fetch(
+            reuseSource.needsWrap ? localViewUrl(reuseSource.source) : reuseSource.source,
+          );
+          if (!resp.ok) throw new Error(`首帧底图读取失败：HTTP ${resp.status}`);
+          const blob = await resp.blob();
+          videoSize = alignSizeForVideoNode(await imagePixelSizeFromBlob(blob));
+          const file = new File([blob], reuseSource.filename, { type: blob.type || "image/png" });
+          frameFirstImage = (await uploadImage(file, comfyMainUrl)).name;
+        } catch (error) {
+          console.warn("[auto-video] reuse 首帧图上传失败，视频将缺少图片1", error);
+        }
       }
       // 逐帧 LoRA（2026-08-30 用户反馈实锤：首帧画面是谢若冰、尾帧是星织恋，
       // 却整单都挂了状态栏在场角色的 LoRA）。一轮请求只解析一次 actors，但首/尾帧
@@ -684,6 +806,18 @@ export function useIllustrationChain({
           const inputName = useVideo && !sameComfyUrl(comfyImageUrl, comfyVideoUrl)
             ? await uploadRemoteImageToInput(viewUrl(outputImg, comfyImageUrl), comfyVideoUrl)
             : await moveComfyOutputToInput(outputImg, comfyImageUrl);
+          // 第 100 刀：视频宽高必须等于真正的图片1（这一帧刚生成的首帧），
+          // 而不是事件里反查到的旧底图。量不到就保留模板默认，绝不猜。
+          if (isFirst && needsVideoSize) {
+            try {
+              const resp = await fetch(viewUrl(outputImg, comfyImageUrl));
+              if (resp.ok) {
+                videoSize = alignSizeForVideoNode(await imagePixelSizeFromBlob(await resp.blob()));
+              }
+            } catch (error) {
+              console.warn("[auto-video] 首帧尺寸测量失败，视频宽高保留模板默认", error);
+            }
+          }
           if (isFirst) { frameFirstImage = inputName; firstFrameGenerated = true; }
           else frameLastImage = inputName;
         } catch (error) {
@@ -701,7 +835,8 @@ export function useIllustrationChain({
       // 与 314 行的早期标记同 stage/同文案 ⇒ 槽位视觉不变，仅快照多带成稿。
       if (promptOnly && (frameFirstDraft || frameLastDraft)) {
         setMessages((current) => markMediaSlotFailed(
-          current, messageId, slotId, "prompt_only", PROMPT_ONLY_NOTE,
+          current, messageId, slotId, "prompt_only",
+          mainIsVideo ? PROMPT_ONLY_VIDEO_NOTE : PROMPT_ONLY_NOTE,
           { ...retrySnapshot, finalFramePrompts: { first: frameFirstDraft, last: frameLastDraft } },
         ));
       }
@@ -819,6 +954,7 @@ export function useIllustrationChain({
           firstFrameDesc,
           prevTailImage: prevTailInput || undefined,
           firstFrameImage: frameFirstImage,
+          referenceImages,
         },
       );
       try {
@@ -933,10 +1069,53 @@ export function useIllustrationChain({
         ));
       }
     };
+    // 第 100 刀（用户口径：拼接完的音频作为剧情内的角色对话音频上传）：把本轮 TTS 分条
+    // 按顺序拼成整条、上传到视频机 input，作 Ref2VA 的参考音轨。只在正片视频 + 模板真的
+    // 暴露参考音频槽时准备；等待有界，失败一律交空串 ⇒ 不带音频提交，提示词里也绝不
+    // 出现引用不存在音轨的 `<Audio 1>` 对白块。
+    let referenceAudioName = "";
+    if (mainIsVideo && videoDialogue && supportsReferenceAudio && !promptOnly) {
+      if (threadId === "home") {
+        console.warn("[auto-video] 首页草稿区没有会话快照，参考音频无法拼接");
+      } else {
+        referenceAudioName = await prepareDialogueAudio(
+          {
+            readParts: () => messagesRef.current.find((item) => item.id === messageId)?.parts || [],
+            mergeMerged: async (force) => {
+              const res = await mergeAudio({ threadId, messageId, force });
+              return res.ok ? res.url || "" : "";
+            },
+            fetchBlob: async (url) => {
+              const resp = await fetch(url);
+              if (!resp.ok) throw new Error(`对白音频读取失败：HTTP ${resp.status}`);
+              return resp.blob();
+            },
+            upload: async (blob, filename) => {
+              const file = new File([blob], filename, { type: blob.type || "audio/flac" });
+              return (await uploadImage(file, comfyMainUrl)).name;
+            },
+            warn: (message, detail) => console.warn(`[auto-video] ${message}`, detail),
+          },
+          dialogueAudioJobs,
+          `${threadId}:${messageId}:${comfyMainUrl}`,
+        );
+      }
+    } else if (mainIsVideo && videoDialogue && !supportsReferenceAudio && !promptOnly) {
+      console.warn("[auto-video] 视频模板没有参考音频槽（reference_audio），对白录音不会生效");
+    }
     // V1.6/P5+：首尾帧独立图片模式（无视频）不出高潮主图/正片——双帧图已回填，主槽语义已被占用。
     if (!(useFirstlastImages && !useVideo)) {
+    // 第 100 刀：对白块只在参考音频真的上传成功后才追加（否则引用不存在的音轨）。
+    const dialogueBlock = referenceAudioName && videoDialogue?.text ? videoDialogue.text : "";
+    const effectiveVideoPrompt = mainIsVideo && videoPrompt
+      ? (dialogueBlock ? `${videoPrompt}\n\n${dialogueBlock}` : videoPrompt)
+      : "";
+    // Ref2VA 的提示词常挂在通用 prompt 槽（节点自己的 prompt 字段）而非 video_prompt
+    // ⇒ 视频成稿（含对白时间轴）必须写进 prompt，否则视频模型读到的是插图提示词。
+    const videoPromptBound = tpl.exposed.some((f) => workflowFieldBinding(f) === "video_prompt");
+    const submittedPrompt = mainIsVideo ? (effectiveVideoPrompt || prompt) : prompt;
     const values = illustrationTemplateValues(tpl.exposed, {
-      prompt, negativePrompt, loraName, loraWeight, baseImage: uploadedImage,
+      prompt: mainIsVideo && !videoPromptBound ? submittedPrompt : prompt, negativePrompt, loraName, loraWeight, baseImage: uploadedImage,
       latentSize,
       // 时长：用户显式预设 > 后端按剧情判定的秒数（2026-10-31）；都无则保留模板默认。
       // 段桥（第 74 刀）改按**转场**时长口径（与 W3 转场块同一 preset.transitionDurationHint 优先）。
@@ -955,9 +1134,13 @@ export function useIllustrationChain({
       firstFrameImage: useVideo && frameFirstImage ? frameFirstImage : undefined,
       lastFrameImage: useVideo && frameLastImage ? frameLastImage : undefined,
       // V1.5 默认开放：后端编译的 climax 视频提示词（仅视频分支注入；无模板时仍留在槽位供测试核对）
-      videoPrompt: mainIsVideo && videoPrompt ? videoPrompt : undefined,
+      videoPrompt: mainIsVideo && effectiveVideoPrompt ? effectiveVideoPrompt : undefined,
       // 视频输出宽高 = 刚量到的首帧真实尺寸（仅视频提交；图片模板没有这两键，自然忽略）
       videoSize: mainIsVideo ? videoSize : undefined,
+      // 第 94 刀：图片3、4、5… = 在场角色参考图（仅有参考槽的视频模板消费）
+      referenceImages: referenceGeneration ? referenceImages : undefined,
+      // 第 100 刀：音频1、2、3… = 本轮对白录音（拼好的整条），仅有参考音频槽的模板消费
+      referenceAudios: referenceAudioName ? [referenceAudioName] : undefined,
     });
     try {
       // V1.1 红线：视频模板 LoRA 不自动接线（loader 结构各异），只认模板自身暴露字段；
@@ -973,8 +1156,9 @@ export function useIllustrationChain({
         // 2026-10-18 成稿直送：把编译成稿写进槽位快照 ⇒「重新生成」逐字提交 ComfyUI
         // （首尾帧图片模式不进此块——主槽无成稿，双帧成稿在帧循环末尾富化）。
         setMessages((current) => markMediaSlotFailed(
-          current, messageId, slotId, "prompt_only", PROMPT_ONLY_NOTE,
-          { ...retrySnapshot, finalPrompt: prompt },
+          current, messageId, slotId, "prompt_only",
+          mainIsVideo ? PROMPT_ONLY_VIDEO_NOTE : PROMPT_ONLY_NOTE,
+          { ...retrySnapshot, finalPrompt: submittedPrompt },
         ));
         if (climaxVideoChain || bridgeVideoChain) {
           // 试跑也要把视频槽摆出来（就在图片正下方）：带**主槽同一份**成稿快照 ⇒
@@ -984,13 +1168,13 @@ export function useIllustrationChain({
             current, messageId, videoSlotId, slotId, chainVideoPrompt, chainVideoParams,
           ));
           setMessages((current) => markMediaSlotFailed(
-            current, messageId, videoSlotId, "prompt_only", PROMPT_ONLY_NOTE,
+            current, messageId, videoSlotId, "prompt_only", PROMPT_ONLY_VIDEO_NOTE,
             { ...retrySnapshot, finalPrompt: prompt },
           ));
         }
         void reportIllustrationSubmission({
           threadId, repoId: repo?.id || threadId, turnId, messageId, slotId,
-          templateId: chosenId, promptId: "", prompt, promptProfile,
+          templateId: chosenId, promptId: "", prompt: submittedPrompt, promptProfile,
           loraName, loraWeight, latentWidth: latentSize.width, latentHeight: latentSize.height,
           loraMode, loraNames: loraStack.map((item) => item.name),
           valueKeys: Object.keys(values).sort(),
@@ -1018,13 +1202,13 @@ export function useIllustrationChain({
         return;
       }
       const r = await enqueueSubmit(() => submitWorkflow(
-        chosenId, values, comfyMainUrl, prompt, loraStack, loraMode,
+        chosenId, values, comfyMainUrl, submittedPrompt, loraStack, loraMode,
       ));
       mark("submit", "ok", chosenId);
       if (r.prompt_id) {
         void reportIllustrationSubmission({
           threadId, repoId: repo?.id || threadId, turnId, messageId, slotId,
-          templateId: chosenId, promptId: r.prompt_id, prompt, promptProfile,
+          templateId: chosenId, promptId: r.prompt_id, prompt: submittedPrompt, promptProfile,
           loraName, loraWeight, latentWidth: latentSize.width, latentHeight: latentSize.height,
           loraMode, loraNames: loraStack.map((item) => item.name),
           valueKeys: Object.keys(values).sort(),
@@ -1033,14 +1217,14 @@ export function useIllustrationChain({
         const outputNodeIds = tpl.primary_output_node_id ? [tpl.primary_output_node_id] : [];
         const target = { messageId, slotId, background: true as const };
         const regeneration = templateRegenerationSnapshot(
-          chosenId, values, comfyMainUrl, outputNodeIds, prompt, loraStack, loraMode,
+          chosenId, values, comfyMainUrl, outputNodeIds, submittedPrompt, loraStack, loraMode,
           characterLoraActor,
         );
         setMessages((current) => bindMediaSlotPrompt(current, messageId, slotId, r.prompt_id!));
         const baseSlotRef = mainIsVideo && videoBaseRef?.sourceMessageId && videoBaseRef?.sourceSlotId
           ? { messageId: videoBaseRef.sourceMessageId, slotId: videoBaseRef.sourceSlotId }
           : undefined;
-        pollResult(r.prompt_id, outputNodeIds, regeneration, target, prompt, mainIsVideo ? "video" : "image", baseSlotRef);
+        pollResult(r.prompt_id, outputNodeIds, regeneration, target, submittedPrompt, mainIsVideo ? "video" : "image", baseSlotRef);
         if (climaxVideoChain) void chainClimaxVideo(r.prompt_id!);
         if (bridgeVideoChain) void chainBridgeVideo(r.prompt_id!);
       } else {

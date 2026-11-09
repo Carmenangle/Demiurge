@@ -239,3 +239,79 @@ describe("illustrationTemplateValues · 视频字段", () => {
     expect(illustrationTemplateValues(exposed, { prompt: "p" })).toEqual({});
   });
 });
+
+// ===== 第 94 刀：首尾帧视频的角色参考图（图片 3、4、5…）=====
+describe("illustrationTemplateValues · 角色参考图", () => {
+  const refs = ["up_甲.png", "up_乙.png"];
+  it("reference_image 槽按 exposed 顺序逐张填入（图片3=第一个槽），超出槽数的参考图忽略", () => {
+    const exposed = [
+      { node_id: "81", field: "image", semantic: "image", binding: "reference_image" },
+      { node_id: "82", field: "image", semantic: "image", binding: "reference_image" },
+      { node_id: "83", field: "image", semantic: "image", binding: "reference_image" },
+    ];
+    const values = illustrationTemplateValues(exposed, { prompt: "p", referenceImages: refs });
+    // 槽比参考图多 ⇒ 只填前两个；第三个保持模板原值（不写空串）
+    expect(values).toEqual({ "81.image": "up_甲.png", "82.image": "up_乙.png" });
+  });
+  it("reference_image_<n> 槽按编号定位（与 exposed 顺序无关），1 基", () => {
+    const exposed = [
+      { node_id: "82", field: "image", semantic: "image", binding: "reference_image_2" },
+      { node_id: "81", field: "image", semantic: "image", binding: "reference_image_1" },
+    ];
+    const values = illustrationTemplateValues(exposed, { prompt: "p", referenceImages: refs });
+    expect(values).toEqual({ "81.image": "up_甲.png", "82.image": "up_乙.png" });
+  });
+  it("reference_image_files（单 JSON 控件）按参考图顺序序列化文件名", () => {
+    const exposed = [
+      { node_id: "90", field: "ref_image_files", semantic: "ref_image_files", binding: "reference_image_files" },
+    ];
+    const values = illustrationTemplateValues(exposed, { prompt: "p", referenceImages: refs });
+    expect(values["90.ref_image_files"]).toBe(JSON.stringify(refs));
+  });
+  it("没有参考图 ⇒ 三种槽都不写（模板默认值原样保留，旧模板零回归）", () => {
+    const exposed = [
+      { node_id: "81", field: "image", semantic: "image", binding: "reference_image" },
+      { node_id: "82", field: "image", semantic: "image", binding: "reference_image_2" },
+      { node_id: "90", field: "ref_image_files", semantic: "ref_image_files", binding: "reference_image_files" },
+    ];
+    expect(illustrationTemplateValues(exposed, { prompt: "p" })).toEqual({});
+  });
+});
+
+// ===== 第 100 刀：Ref2VA 参考音频（音频槽 N → 第 N+1 条）=====
+describe("illustrationTemplateValues · 参考音频", () => {
+  const audios = ["dialog_a.wav", "dialog_b.wav"];
+  it("reference_audio_<n> 槽按编号定位（与 exposed 顺序无关），1 基", () => {
+    const exposed = [
+      { node_id: "154", field: "audio", semantic: "audio", binding: "reference_audio_2" },
+      { node_id: "138", field: "audio", semantic: "audio", binding: "reference_audio_1" },
+    ];
+    const values = illustrationTemplateValues(exposed, { prompt: "p", referenceAudios: audios });
+    expect(values).toEqual({ "138.audio": "dialog_a.wav", "154.audio": "dialog_b.wav" });
+  });
+  it("reference_audio（无编号）槽按 exposed 顺序逐条填入，超出槽数的忽略", () => {
+    const exposed = [
+      { node_id: "138", field: "audio", semantic: "audio", binding: "reference_audio" },
+      { node_id: "154", field: "audio", semantic: "audio", binding: "reference_audio" },
+    ];
+    expect(illustrationTemplateValues(exposed, { prompt: "p", referenceAudios: audios }))
+      .toEqual({ "138.audio": "dialog_a.wav", "154.audio": "dialog_b.wav" });
+  });
+  it("参考图与参考音频互不串位（图片2 不拿音频、音频1 不拿图片）", () => {
+    const exposed = [
+      { node_id: "101", field: "image", semantic: "image", binding: "reference_image_2" },
+      { node_id: "138", field: "audio", semantic: "audio", binding: "reference_audio_1" },
+    ];
+    const values = illustrationTemplateValues(exposed, {
+      prompt: "p", referenceImages: ["up_甲.png"], referenceAudios: audios,
+    });
+    expect(values).toEqual({ "138.audio": "dialog_a.wav" });
+  });
+  it("没有参考音频 ⇒ 两种槽都不写（模板默认音轨原样保留）", () => {
+    const exposed = [
+      { node_id: "138", field: "audio", semantic: "audio", binding: "reference_audio" },
+      { node_id: "154", field: "audio", semantic: "audio", binding: "reference_audio_2" },
+    ];
+    expect(illustrationTemplateValues(exposed, { prompt: "p" })).toEqual({});
+  });
+});

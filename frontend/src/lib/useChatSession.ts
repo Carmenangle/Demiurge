@@ -30,7 +30,9 @@ import {
 } from "../api/ai";
 import { runVisualCiDiagnostic } from "../api/visualCi";
 import { refreshChatBackgroundActivities } from "./chatBackgroundActivity";
-import type { ChatStreamEvent, IllustrationSceneSpec, VideoParams } from "../api/chatStreamProtocol";
+import type {
+  ChatStreamEvent, IllustrationSceneSpec, VideoDialogue, VideoParams,
+} from "../api/chatStreamProtocol";
 import {
   reduce as reduceGen, initialGenState,
   blocksDialogueSubmission, streamingBotId, needsConfirm, runningPromptId,
@@ -151,6 +153,9 @@ export interface IllustrationSubmit {
   transition?: string;
   transitionVideoPrompt?: string;
   transitionVideoParams?: VideoParams;
+  // 第 99 刀：对白时间轴（firstlast 正片）。模板暴露了参考音频槽时追加到视频提示词末尾；
+  // 重试快照随本对象带走 ⇒ 「重新生成」仍按同一份时间轴提交。
+  videoDialogue?: VideoDialogue;
   // 2026-10-18 试跑成稿直送（用户定案）：试跑（promptOnly）上报时把**编译成稿**写进
   // 快照，「重新生成」据此逐字提交 ComfyUI（不再重编译）。普通失败槽无这两键 ⇒ 保持
   // 2026-08-30「manual 重试必须重编译」语义（编译链升级能生效）。
@@ -340,6 +345,9 @@ export function useChatSession(deps: ChatSessionDeps) {
     promptProfile,
     promptProfileKind,
     videoPromptTemplateId,
+    // 视频工作流模版（第 106 刀）：后端据此派生尾帧/参考图槽与默认时长，
+    // 提示词不再声明模板没有落点的「图片2/3/4」。
+    videoTemplateId: mediaPreset?.videoTemplateId || "",
     appearanceSource,
     illustrationViewpoint,
     illustrationBatchCount,
@@ -1079,6 +1087,8 @@ export function useChatSession(deps: ChatSessionDeps) {
         transition: event.transition,
         transitionVideoPrompt: event.transitionVideoPrompt,
         transitionVideoParams: event.transitionVideoParams,
+        // 第 99 刀：对白时间轴随事件进提交链（模板无参考音频槽时不消费，见 useIllustrationChain）
+        videoDialogue: event.videoDialogue,
         // 第 74 刀：段桥的「上一张画面」槽，随快照落盘 ⇒ 桥视频槽的「重新生成」也认得上一张。
         bridgePrevSlotId: event.bridgePrevSlotId,
       };

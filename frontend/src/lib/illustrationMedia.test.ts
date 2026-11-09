@@ -5,6 +5,7 @@ import {
   resolveIllustrationActors, resolveVideoMode, resolveVideoTemplateChoice, resolveVideoDuration,
   resolveBaseImageSource, imagePixelSizeFromBlob, alignSizeForVideoNode,
   planFirstlastFrameTasks, firstlastFrameValues, firstlastSlotLayout, transitionVideoValues,
+  planFirstlastReferenceImages,
   firstParagraphEnd, lastParagraphEnd, firstlastMainOffset,
 } from "./illustrationMedia";
 
@@ -271,6 +272,40 @@ describe("transitionVideoValues（W3 转场视频 2 任务排队）", () => {
       transitionDurationHint: 3, prevTailImage: "prev.png", firstFrameImage: "first.png",
     });
     expect(values["9.duration"]).toBe(3);
+  });
+
+  it("第 94 刀：转场视频同样带角色参考图（图片 3+ 走同一套槽）", () => {
+    const withRef = [
+      ...exposed,
+      { node_id: "81", field: "image", semantic: "image", binding: "reference_image" },
+    ];
+    const values = transitionVideoValues(withRef, "转场", media, latentSize, {
+      prevTailImage: "prev.png", firstFrameImage: "first.png",
+      referenceImages: ["up_甲.png"],
+    });
+    expect(values["81.image"]).toBe("up_甲.png");
+  });
+});
+
+// ===== 第 94 刀：首尾帧参考生成——图片 3、4、5… = 在场角色底图 =====
+describe("planFirstlastReferenceImages（参考图顺序与缺图清单）", () => {
+  it("按在场角色顺序取底图；没底图的角色进 missing，不占参考图位", () => {
+    const plan = planFirstlastReferenceImages(["甲", "乙", "丙"], {
+      甲: "D:/out/甲.png", 丙: "D:/out/丙.png",
+    });
+    expect(plan.refs).toEqual([
+      { name: "甲", source: "D:/out/甲.png" },
+      { name: "丙", source: "D:/out/丙.png" },
+    ]);
+    expect(plan.missing).toEqual(["乙"]);
+  });
+
+  it("角色名去重去空；同一张底图只留一张参考图（别把同一人重复编号）", () => {
+    const plan = planFirstlastReferenceImages(["甲", " 甲 ", "", "丁"], {
+      甲: "D:/out/甲.png", 丁: "D:/out/甲.png",
+    });
+    expect(plan.refs).toEqual([{ name: "甲", source: "D:/out/甲.png" }]);
+    expect(plan.missing).toEqual([]);
   });
 });
 

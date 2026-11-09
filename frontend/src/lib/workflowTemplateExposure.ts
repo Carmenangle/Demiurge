@@ -8,6 +8,10 @@ const TEXT_CARRIER_TYPES = ["string", "primitive", "text"];
 const TEXT_CARRIER_FIELDS = new Set(["string", "text", "value", "prompt", "positive"]);
 const NEG_PROMPT_TITLE_RE = /negative|neg[\s_-]*prompt|负面|负向|反向/i;
 const POS_PROMPT_TITLE_RE = /positive|\bpos[\s_-]*prompt\b|正面|正向/i;
+// 第 94 刀：参考视频节点的角色参考图槽（图片3、4、5…）。模板编辑器没有手选 binding 的入口，
+// 所以可自动识别的声明只有两种：字段名（ref_image_files 单控件）与节点标题（「参考图N」编号）。
+// ⚠ 「参考底图」是图生图输入，不匹配「参考图」，不能被这条规则抢走。
+const REF_IMAGE_TITLE_RE = /(?:参考图|角色参考|reference[\s_-]*image|\bref[\s_-]*image\b)\s*[_-]?(\d+)?/i;
 // 视频生成节点上显式声明输出像素尺寸的节点类型（与后端 template_store._VIDEO_SIZE_NODE_TYPES 同口径）。
 // 2026-11-01：H3 首帧链改用 MiniMaxH3ImageToVideo（ref2va 无帧锁定入口），双端都要认。
 const VIDEO_SIZE_NODE_TYPES = ["minimaxh3referencetovideo", "minimaxh3imagetovideo"];
@@ -42,7 +46,18 @@ export function inferWorkflowFieldBinding(node: ParsedNode, field: ParsedField):
   if (type === "emptylatentimage" && name === "height") return "latent_height";
   if (VIDEO_SIZE_NODE_TYPES.includes(type) && name === "width") return "video_width";
   if (VIDEO_SIZE_NODE_TYPES.includes(type) && name === "height") return "video_height";
-  if (type.includes("loadimage") && (name === "image" || name === "images")) return "base_image";
+  // 第 94 刀：参考视频节点的角色参考图槽（先于 base_image，否则 LoadImage 永远只会被标成底图）
+  if ((name === "ref_image_files" || name === "reference_image_files") && type.includes("ref")) {
+    return "reference_image_files";
+  }
+  const numberedRef = /^ref_image_(\d+)$/.exec(name);
+  if (numberedRef && type.includes("ref")) return `reference_image_${numberedRef[1]}`;
+  if (name === "ref_image" || name === "reference_image") return "reference_image";
+  if (type.includes("loadimage") && (name === "image" || name === "images")) {
+    const refTitle = REF_IMAGE_TITLE_RE.exec(title);
+    if (refTitle) return refTitle[1] ? `reference_image_${refTitle[1]}` : "reference_image";
+    return "base_image";
+  }
   if (type.includes("cliptextencode") && name === "text") {
     return /negative|负面|负向/.test(title) ? "negative_prompt" : "prompt";
   }

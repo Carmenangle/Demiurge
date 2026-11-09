@@ -137,3 +137,33 @@ describe("ComfyUI node selection exposure", () => {
     ]);
   });
 });
+
+// 第 94 刀：首尾帧参考生成的角色参考图槽（图片3、4、5…）
+describe("参考图槽识别", () => {
+  const field = (name: string): ParsedField => ({ name, value: "", linked: false, required: true });
+  const node = (classType: string, title: string, name: string): ParsedNode => ({
+    id: "1", class_type: classType, title, bypassed: false, fields: [field(name)],
+  });
+
+  it("参考视频节点的 ref_image_files 单控件 → reference_image_files", () => {
+    expect(inferWorkflowFieldBinding(
+      node("PainterMiniMaxRefToVideo6", "Ref2VA", "ref_image_files"),
+      field("ref_image_files"),
+    )).toBe("reference_image_files");
+  });
+
+  it("LoadImage 标题「参考图N」→ 显式编号；「参考图」→ 无编号槽", () => {
+    expect(inferWorkflowFieldBinding(node("LoadImage", "参考图2", "image"), field("image")))
+      .toBe("reference_image_2");
+    expect(inferWorkflowFieldBinding(node("LoadImage", "角色参考图", "image"), field("image")))
+      .toBe("reference_image");
+  });
+
+  it("主底图 LoadImage（标题未声明参考图）仍是 base_image，不被标题规则抢走", () => {
+    expect(inferWorkflowFieldBinding(node("LoadImage", "", "image"), field("image")))
+      .toBe("base_image");
+    // 「参考底图」是图生图输入，不是角色参考图，不能误判
+    expect(inferWorkflowFieldBinding(node("LoadImage", "参考底图", "image"), field("image")))
+      .toBe("base_image");
+  });
+});
