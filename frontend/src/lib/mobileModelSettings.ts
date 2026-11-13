@@ -17,7 +17,11 @@ export const MODEL_SETTING_KEYS = [
   "videoModels",
   "activeVideoModelId",
   "embedModel",
+  "embedPresets",
+  "activeEmbedPresetId",
   "vlmModel",
+  "vlmPresets",
+  "activeVlmPresetId",
 ] as const;
 
 export type ModelSettings = Partial<

@@ -22,8 +22,9 @@
 ## 为什么必须走第 1 条
 
 `video_width` / `video_height` 由后端按节点类型自动补，只要图里有且仅有一个视频生成节点就能恢复；
-但 `base_image` / `video_prompt` / `video_duration` **只存在于模板记录手标的 exposed 里**，
-自动推断只作用于已勾选的字段。⇒ 只搬工作流 JSON = 首帧参考口、视频提示词、时长三个入口静默消失，
+但 `base_image` / `video_prompt` / `video_duration` / `last_frame_image`
+**只存在于模板记录手标的 exposed 里**，自动推断只作用于已勾选的字段。
+⇒ 只搬工作流 JSON = 首帧参考口、视频提示词、时长、尾帧图四个入口静默消失，
 画布上看不出任何异常。这就是本包同时放 `templates/` 的原因。
 
 ## 清洗与保留

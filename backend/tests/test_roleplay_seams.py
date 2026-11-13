@@ -342,6 +342,33 @@ def test_搬移语句逐字保留():
         assert not missing, f"{fn_name} 未见逐字搬移语句（疑似被重写）：{missing}"
 
 
+def test_剧情世界书三段都剥离开场白(monkeypatch):
+    """2026-11-10 用户需求：多角色单世界书的【开场白】不得进剧情 prompt。
+
+    锚点段 / 召回段 / 动态段三条注入路径都要剥；正文里顺带提到「开场白」的句子、
+    其它设定段必须原样保留。
+    """
+    anchor = (
+        "【人物设定】\n雪影之主，冷面刺客。\n"
+        "【开场白】\n「你就是那个孽子?」\n*她按上刀柄。*\n"
+        "【好感分阶】\n阶段·冰霜杀意"
+    )
+    recall = "【角色卡·冷倾雪】\n【开场白】\n「本宫堂堂紫冷玄女……」\n【性格】\n高傲"
+    dynamic = "【剧情进展·动态】\n冷倾雪已被困于白给谷。\n【开场白】\n不该出现的初遇台词"
+    monkeypatch.setattr(agr, "_resolve_worldbook", lambda ctx, text: anchor)
+    monkeypatch.setattr(agr, "_apply_regex", lambda ctx, text, *a, **k: text)
+    ctx = {"_worldbook_recall_text": recall, "_worldbook_dynamic_text": dynamic}
+
+    wb, wb_recall = agr._rp_prepare_worldbook(ctx, "继续")
+
+    for text in (wb, wb_recall, ctx["_worldbook_dynamic_text"]):
+        assert "【开场白】" not in text
+        assert "孽子" not in text and "紫冷玄女" not in text and "不该出现" not in text
+    assert "【人物设定】" in wb and "【好感分阶】" in wb
+    assert "【性格】" in wb_recall and "高傲" in wb_recall
+    assert "冷倾雪已被困于白给谷" in ctx["_worldbook_dynamic_text"]
+
+
 # ---------------------------------------------------------------------------
 # 源码形态锁
 # ---------------------------------------------------------------------------

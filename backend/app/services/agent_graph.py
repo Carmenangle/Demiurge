@@ -222,6 +222,7 @@ from app.services.agent_graph_roleplay import (  # noqa: F401  兼容 re-export
     _rp_inject_agency_context,
     roleplay_node,
 )
+from app.services.agent_graph_chat import chat_node  # noqa: F401  聊天/群聊节点（显式模式）
 
 # 2026-09-01 用户定案：首发**不设总时长上限**——只要还在持续吐 token 就不允许截断；
 # 只有 30s 无 token 的流式读超时（llm.build_model streaming）才允许中断。
@@ -411,6 +412,7 @@ def _build_graph():
     g.add_node("edit", edit_node)
     g.add_node("answer", answer_node)
     g.add_node("roleplay", roleplay_node)
+    g.add_node("chat", chat_node)
     g.add_node("clarify", clarify_node)
     g.add_node("plan", plan_compiler_node)
     g.set_entry_point("supervisor")
@@ -419,9 +421,11 @@ def _build_graph():
                             {"generate": "generate", "video": "video", "img2img": "img2img",
                              "analyze": "analyze", "inspire": "inspire",
                              "tool_agent": "tool_agent", "answer": "answer",
-                             "edit": "edit", "roleplay": "roleplay", "clarify": "clarify", "plan": "plan"})
+                             "edit": "edit", "roleplay": "roleplay", "chat": "chat",
+                             "clarify": "clarify", "plan": "plan"})
     # 单专家任务：干完直接 END，不回 supervisor 二次判断（慢中转下省一次往返）
-    for n in ("generate", "video", "img2img", "analyze", "inspire", "tool_agent", "edit", "answer", "roleplay", "clarify", "plan"):
+    for n in ("generate", "video", "img2img", "analyze", "inspire", "tool_agent", "edit",
+              "answer", "roleplay", "chat", "clarify", "plan"):
         g.add_edge(n, END)
     return g.compile()
 
@@ -446,13 +450,25 @@ def stream_multi_agent(context: RunContext) -> Iterator[dict]:
     # 百分比自动压缩（LLM 摘要旧段，失败退机械保头保尾），对齐市面 /compact。
     _hist_budget = agent_context.resolve_history_budget(
         context.context_max_tokens, context.preset_sampling)
+    # 聊天/群聊：滚动摘要缓存 + 聊天专用摘要提示词，避免长聊每轮重复压缩旧段。
+    _summary_scope = ""
+    _summarize_fn = _history_summarizer(context)
+    _summarize_with_prior_fn = None
+    if context.interaction_mode in ("chat", "group_chat"):
+        from app.services import chat_context_summary
+        _summarize_fn, _summarize_with_prior_fn = (
+            chat_context_summary.make_summarizers(context)
+        )
+        _summary_scope = f"{context.interaction_mode}:{chat_context_summary.PROMPT_VERSION}"
     context.history = agent_context.recent_history(
         context.thread_id,
         max_tokens=_hist_budget,
         per_role=0,
         history_override=context.history_override,
         compact_trigger_pct=context.compact_trigger_pct,
-        summarize_fn=_history_summarizer(context),
+        summarize_fn=_summarize_fn,
+        summarize_with_prior_fn=_summarize_with_prior_fn,
+        summary_scope=_summary_scope,
     )
     context.skill_frags = _resolve_skills(context.agent_cfg)
     context.persona = ""
@@ -574,6 +590,12 @@ def stream_multi_agent(context: RunContext) -> Iterator[dict]:
                     yield {"approval": upd["approval"]}
                 if upd.get("route_choice"):
                     yield {"route_choice": upd["route_choice"]}
+                # 2026-11-09 聊天室：逐角色回复一次性下发；不走 result_text（避免再产一个
+                # 空白 bot 气泡/覆盖聊天楼层），前端按 speaker 各插一条消息。
+                if upd.get("chat_messages"):
+                    yield {"chat_messages": upd["chat_messages"]}
+                if upd.get("media_request"):
+                    yield {"media_request": upd["media_request"]}
                 if upd.get("result_text"):
                     final_text.append(upd["result_text"])
                     if upd.get("artifacts"):

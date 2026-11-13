@@ -14,7 +14,7 @@ SECRET_KEYS = frozenset({
     "danbooruLogin",
     "danbooruApiKey",
 })
-MODEL_LIST_KEYS = ("chatModels", "imageModels", "videoModels")
+MODEL_LIST_KEYS = ("chatModels", "imageModels", "videoModels", "vlmPresets", "embedPresets")
 MODEL_OBJ_KEYS = ("embedModel", "vlmModel")
 
 

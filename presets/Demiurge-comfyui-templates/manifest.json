@@ -8,10 +8,11 @@
       "name": "MiniMax H3 图生视频（首帧）",
       "template_file": "templates/MiniMax_H3_图生视频_首帧.json",
       "workflow_file": "workflows/MiniMax_H3_图生视频_首帧.json",
-      "nodes": 41,
-      "links": 37,
+      "nodes": 42,
+      "links": 38,
       "bindings": [
         "base_image",
+        "last_frame_image",
         "video_duration",
         "video_prompt"
       ]
@@ -20,18 +21,18 @@
   "files": [
     {
       "path": "README.md",
-      "bytes": 2444,
-      "sha256": "9d2582ce7e745d749526926d6bc94d6c713350866106cf386461897a5cbfb911"
+      "bytes": 2478,
+      "sha256": "f27dfc03976110c271faabf5c806e80406c813f570ce75351e8047664634084f"
     },
     {
       "path": "templates/MiniMax_H3_图生视频_首帧.json",
-      "bytes": 70911,
-      "sha256": "ddb79693a6038e383f8f34b32f9f695a5020ce37c6e2694f963e5c92e583c30c"
+      "bytes": 72078,
+      "sha256": "b311799f96759f115b9f32f30378bd5181af766207d001dde7c01b1f23c3b0d8"
     },
     {
       "path": "workflows/MiniMax_H3_图生视频_首帧.json",
-      "bytes": 62595,
-      "sha256": "c23a0dcbdbf6bbf6a6e0ae453971e30c36e2be358695c8dcf80c87eaf017b2a0"
+      "bytes": 63449,
+      "sha256": "4f43634c3cf893a520aacdab0dc82faf86bc8c479cb0681ea0020487ca8f1fb1"
     }
   ]
 }

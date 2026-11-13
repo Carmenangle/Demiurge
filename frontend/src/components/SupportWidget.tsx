@@ -2,7 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { Activity, X } from "lucide-react";
 import { subscribeWorkflowBuildActivities, type WorkflowBuildActivity } from "../lib/workflowBuildActivity";
 import { subscribeChatBackgroundActivities, type ChatBackgroundActivity } from "../lib/chatBackgroundActivity";
-import { subscribeComfyBackgroundActivities, type ComfyBackgroundActivity } from "../lib/comfyBackgroundActivity";
+import {
+  subscribeComfyBackgroundActivities, type ComfyActivityKind, type ComfyBackgroundActivity,
+} from "../lib/comfyBackgroundActivity";
 import { subscribeJobActivities, JOB_KIND_LABEL, type JobActivity } from "../lib/jobActivity";
 import { subscribeSubsystemActivities, type SubsystemActivity } from "../lib/subsystemActivity";
 import {
@@ -21,6 +23,12 @@ const STATUS_LABEL: Record<string, string> = {
   error: "计划失败", cancelled: "计划已取消",
 };
 const FAB_HIDDEN_KEY = "laf_support_hidden";
+// ComfyUI 在途任务标题：按媒体类型分流，视频任务不得再显示成「出图」。
+const COMFY_ACTIVITY_LABEL: Record<ComfyActivityKind, string> = {
+  image: "出图中",
+  video: "出视频中",
+  audio: "出音频中",
+};
 
 export function SupportWidget(props: {
   chat: unknown;
@@ -114,7 +122,7 @@ export function SupportWidget(props: {
         {comfyActivities.map((item) => (
           <button key={`comfy-${item.promptId}`} className="support-activity"
             onClick={() => openRepoChat(item.threadId)}>
-            <strong>出图中</strong>
+            <strong>{COMFY_ACTIVITY_LABEL[item.kind]}</strong>
             <span>{item.label}</span>
           </button>
         ))}

@@ -26,6 +26,10 @@ def run(ctx: Any, message: str, images: list[str], trace: list[str]) -> dict:
             gen_proxy_url=ctx.get("gen_proxy", ""),
             embed_proxy_url=ctx.get("embed_proxy", ""),
             search_provider=ctx.get("search_provider", ""),
+            persona_block=ctx.get("_chat_persona_block", ""),
+            # 聊天/剧情主链已按 context_max_tokens 裁剪过 ctx.history；工具专家复用同一份，
+            # 不再让 image_agent 去读 chat_memory 的全量历史（长聊会撑爆模型窗口）。
+            history=ctx.get("history"),
         ):
             if event.get("interrupted"):
                 interrupted = True
@@ -42,8 +46,22 @@ def run(ctx: Any, message: str, images: list[str], trace: list[str]) -> dict:
                 result_text.append(f"（工具专家出错：{event['error']}）")
     except Exception as exc:  # noqa: BLE001
         result_text.append(f"工具专家执行失败：{exc}")
+    text = "".join(result_text).strip()
+    if text and str(ctx.get("interaction_mode") or "story") != "story":
+        # 聊天室人设块带防拦截预设：工具专家最终答复也要还原 @()@ 标记。
+        from app.services import chat_followup, chat_room
+        text = chat_room.restore_guard_markers(ctx, text)
+        try:
+            chat_followup.note_bot(
+                str(ctx.get("thread_id") or ""), bubbles=1,
+                max_followups=ctx.get("chat_followup_max"),
+                max_reopens=ctx.get("chat_reopen_max"),
+                cadence=ctx.get("chat_cadence"),
+            )
+        except Exception:  # noqa: BLE001 [EXC-保留] 节奏状态写失败不影响工具结果
+            pass
     return {
-        "result_text": "".join(result_text).strip(),
+        "result_text": text,
         "image_recs": image_recs,
         "insp_cards": inspiration_cards,
         "trace": trace,

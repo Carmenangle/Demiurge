@@ -2,7 +2,7 @@
 // 真实失败路径：字段名/缺省值手滑即污染全链路（漏 proxy / embed_mode 会把远程模型打到本地档，
 // 见 F/11 红线 4「三元组走序列化器」）。逐字段锁死三种序列化器的形状与缺省。
 import { describe, expect, it } from "vitest";
-import { chatBody, ragEmbed, sseEmbed, POLL_TIMEOUT_MS, type Chat, type Embed } from "./ai";
+import { chatBody, ragEmbed, ragGbc, sseEmbed, POLL_TIMEOUT_MS, type Chat, type Embed } from "./ai";
 
 describe("api/ai wire 序列化器", () => {
   it("chatBody：camelCase → snake_case，proxy 缺省空串", () => {
@@ -55,6 +55,27 @@ describe("api/ai wire 序列化器", () => {
       reranker_model_dir: "",
       embed_proxy_url: "",
     });
+  });
+
+  it("ragGbc：VLM 代理必须透传（云端视觉模型与描述步骤同源），本地 Ollama 空代理＝直连", () => {
+    const gbc = {
+      exePath: "D:/gbc.exe", sam3Dir: "D:/sam3", embedDir: "D:/embed",
+      device: "cuda" as const, maxTopLevel: 10,
+    };
+    expect(ragGbc(gbc, {
+      baseUrl: "https://open.bigmodel.cn/api/paas/v4", apiKey: "sk-x",
+      modelName: "glm-4v-flash", proxyUrl: "http://127.0.0.1:7890",
+    })).toEqual({
+      gbc_exe: "D:/gbc.exe", sam3_dir: "D:/sam3", embed_dir: "D:/embed",
+      detect_device: "cuda", max_top_level: 10,
+      vlm_base_url: "https://open.bigmodel.cn/api/paas/v4",
+      vlm_api_key: "sk-x", vlm_model: "glm-4v-flash",
+      vlm_proxy: "http://127.0.0.1:7890",
+    });
+    // 本地 Ollama（回环）解析出的 proxyUrl 是空串 ⇒ 后端子进程显式直连
+    expect(ragGbc(gbc, {
+      baseUrl: "http://localhost:11434/v1", apiKey: "ollama", modelName: "qwen3vl:8b",
+    }).vlm_proxy).toBe("");
   });
 
   it("轮询超时常量保持 8s（轮询断链教训，见手册 F/11 §7）", () => {

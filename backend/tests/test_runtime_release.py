@@ -202,6 +202,48 @@ def test_runtime_build_rejects_insecure_pypi_override(monkeypatch):
         runtime_release.pip_index_args()
 
 
+def test_local_wheelhouse_replaces_index_and_forbids_network(monkeypatch, tmp_path):
+    """备好的 wheelhouse 必须彻底顶掉 index，否则「离线构建」只是看着离线。"""
+    house = tmp_path / "wheelhouse"
+    house.mkdir()
+    monkeypatch.setenv("DEMIURGE_WHEELHOUSE_DIR", str(house))
+
+    args = runtime_release.pip_index_args()
+
+    assert args[0] == "--no-index"
+    assert "--index-url" not in args
+    assert "--extra-index-url" not in args
+    assert Path(args[args.index("--find-links") + 1]) == house.resolve()
+
+
+def test_local_wheelhouse_missing_directory_fails_loudly(monkeypatch, tmp_path):
+    monkeypatch.setenv("DEMIURGE_WHEELHOUSE_DIR", str(tmp_path / "nope"))
+
+    with pytest.raises(ValueError, match="目录不存在"):
+        runtime_release.pip_index_args()
+
+
+def test_rag_install_with_wheelhouse_drops_torch_extra_index(monkeypatch, tmp_path):
+    target = runtime_release.load_targets(
+        ROOT / "release" / "runtime-targets.json"
+    )["windows-x64-full-rag"]
+    house = tmp_path / "wheelhouse"
+    house.mkdir()
+    commands = []
+    monkeypatch.setenv("DEMIURGE_WHEELHOUSE_DIR", str(house))
+    monkeypatch.setattr(
+        runtime_release, "_run",
+        lambda command, cwd: commands.append(command),
+    )
+
+    runtime_release.build_rag_tree(ROOT, target, tmp_path / "rag")
+
+    command = commands[0]
+    assert "--no-index" in command
+    assert "--extra-index-url" not in command
+    assert f"torch=={target.torch_version}" in command
+
+
 def test_rag_tree_moves_deep_licenses_out_of_site_packages(monkeypatch, tmp_path):
     target = runtime_release.load_targets(
         ROOT / "release" / "runtime-targets.json"
@@ -373,6 +415,52 @@ def test_runtime_ci_does_not_reuse_foreign_offline_npm_cache(monkeypatch, tmp_pa
     )
 
     assert commands == [["npm", "ci"]]
+
+
+class _NpmResult:
+    def __init__(self, returncode: int) -> None:
+        self.returncode = returncode
+
+
+def _patch_npm(monkeypatch, runtime_release, calls, returncode):
+    monkeypatch.setattr(
+        runtime_release.subprocess, "run",
+        lambda command, **kwargs: calls.append(command) or _NpmResult(returncode),
+    )
+    monkeypatch.setattr(runtime_release, "_run", lambda command, cwd: calls.append(command))
+
+
+def test_explicit_npm_cache_dir_installs_without_network(monkeypatch, tmp_path):
+    cache = tmp_path / "npm-cache"
+    cache.mkdir()
+    calls = []
+    monkeypatch.setenv("DEMIURGE_NPM_CACHE_DIR", str(cache))
+    _patch_npm(monkeypatch, runtime_release, calls, 0)
+
+    runtime_release.install_frontend_dependencies(tmp_path, tmp_path / "frontend", "npm")
+
+    assert calls == [["npm", "ci", "--offline", "--cache", str(cache.resolve())]]
+
+
+def test_explicit_npm_cache_dir_failure_does_not_fall_back_online(monkeypatch, tmp_path):
+    """显式指定缓存就是要求离线；装不上必须报错，不能悄悄走 `npm ci` 联网。"""
+    cache = tmp_path / "npm-cache"
+    cache.mkdir()
+    calls = []
+    monkeypatch.setenv("DEMIURGE_NPM_CACHE_DIR", str(cache))
+    _patch_npm(monkeypatch, runtime_release, calls, 1)
+
+    with pytest.raises(RuntimeError, match="离线安装前端失败"):
+        runtime_release.install_frontend_dependencies(tmp_path, tmp_path / "frontend", "npm")
+
+    assert len(calls) == 1
+
+
+def test_missing_npm_cache_directory_is_not_silently_online(monkeypatch, tmp_path):
+    monkeypatch.setenv("DEMIURGE_NPM_CACHE_DIR", str(tmp_path / "nope"))
+
+    with pytest.raises(ValueError, match="目录不存在"):
+        runtime_release.install_frontend_dependencies(tmp_path, tmp_path / "frontend", "npm")
 
 
 def test_runtime_self_check_resolves_relative_tree_before_changing_cwd(

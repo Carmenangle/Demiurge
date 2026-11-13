@@ -11,7 +11,11 @@ vit-large / convnext…，同预处理/同 CSV/同 NHWC 输入）。具体用哪
 `model.onnx` + `selected_tags.csv`）。`model_available()` 严格校验；未就绪时端点回 503 引导下载。
 
 推理参数（对齐 ComfyUI-WD14-Tagger / SmilingWolf 参考实现）：
-- 预处理：RGB → 白底 pad 正方形 → BICUBIC resize N×N → /255 → **NHWC** → batch；
+- 预处理：RGB → 白底 pad 正方形 → BICUBIC resize N×N → **RGB→BGR 且保持 0–255** → NHWC → batch；
+  ⚠ 2026-11-06 实测：v3 系模型输入是 0–255 的 BGR，`/255` 会让输出整体失准（金发→grey_hair、
+  女仆装→bikini），RGB 不换序会把颜色属性判错（金发→blue_hair）；
+- `selected_tags.csv` 的占位行（tag_id 9999999 / name "general" / category 9）**必须参与对齐**：
+  它占模型输出的第 0 维，丢掉它会让整张表错位一位（2026-11-06 实测）；
 - onnx 输出视为概率（sigmoid 已在模型内）；
 - 阈值：general(category 0) 0.35 ／ character(category 4) 0.75 ／ rating(category 9) 0.5；
 - rating(category 9) 默认剔除（是分级不是画面标签；`include_rating=True` 才保留）；
@@ -99,6 +103,8 @@ def _load_tags(model_dir: Path | str | None = None) -> list[tuple[str, int | Non
 
     兼容三列（tag_id,name,category，v3）与两列（tag_id,name，旧版）；
     跳过表头与非数字行；category 缺失按 general 处理（None）。
+    **占位行（tag_id 9999999）必须保留**：它对应模型输出的第 0 维，删掉会让后续标签全部错位一位；
+    它 category=9，由 `predict` 在出标签时剔除。
     """
     d = _dir(model_dir)
     key = str(d)
@@ -110,8 +116,6 @@ def _load_tags(model_dir: Path | str | None = None) -> list[tuple[str, int | Non
         for row in csv.reader(f):
             if len(row) < 2 or not row[0].strip().isdigit():
                 continue  # 表头/空行/脏行
-            if row[0].strip() == "9999999":
-                continue  # 占位行（category=9 的 "general" 标记），不是真标签
             name = row[1].strip()
             if not name:
                 continue
@@ -124,7 +128,7 @@ def _load_tags(model_dir: Path | str | None = None) -> list[tuple[str, int | Non
 
 
 def _preprocess(image_path: Path, input_size: int = _INPUT_SIZE, layout: str = "NHWC"):
-    """图片 → [1,N,N,3] 或 [1,3,N,N] float32（白底 pad 正方形 → BICUBIC → /255 → batch）。"""
+    """图片 → [1,N,N,3] 或 [1,3,N,N] float32（白底 pad 正方形 → BICUBIC → RGB→BGR，保持 0–255）。"""
     import numpy as np
     from PIL import Image, ImageOps
 
@@ -135,10 +139,11 @@ def _preprocess(image_path: Path, input_size: int = _INPUT_SIZE, layout: str = "
             img = ImageOps.pad(img, (max(w, h), max(w, h)),
                                color=(255, 255, 255), centering=(0.5, 0.5))
         img = img.resize((input_size, input_size), Image.Resampling.BICUBIC)
-    arr = np.asarray(img, dtype=np.float32) / 255.0
+    # v3 系（swinv2/eva02/vit/convnext）的参考预处理是 0–255 的 BGR：不 /255，且通道反序。
+    # 2026-11-06 实测：/255 ⇒ 标签整体失准；RGB 不换序 ⇒ 颜色属性判错。
+    arr = np.ascontiguousarray(np.asarray(img, dtype=np.float32)[:, :, ::-1])
     if layout == "NCHW":
-        arr = arr.transpose(2, 0, 1)
-    # 默认 NHWC：wd-swinv2-tagger-v3 的 ONNX 输入是 (1,448,448,3)，不是 NCHW。
+        arr = np.ascontiguousarray(arr.transpose(2, 0, 1))
     return np.expand_dims(arr, axis=0)
 
 
@@ -168,6 +173,8 @@ def predict(image_path: Path, *, model_dir: Path | str | None = None,
     thr[4] = threshold_character
     out: list[tuple[str, float]] = []
     for (name, category), prob in zip(tags, probs):  # zip 截断防维度错位
+        if name == "general" and category == _RATING_CATEGORY:
+            continue  # CSV 占位行（tag_id 9999999）：只为对齐输出维度，不是真标签
         if category == rating_category and not include_rating:
             continue
         threshold = thr.get(category, _DEFAULT_THRESHOLD) if category is not None else _DEFAULT_THRESHOLD

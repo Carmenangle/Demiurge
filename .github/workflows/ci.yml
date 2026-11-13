@@ -6,8 +6,9 @@ on:
   pull_request:
 
 # 后端质量门禁与 AGENTS PreCompletion / docs/memory/topic-release-audit-test.md 的判绿口径一致：
-# pip-audit（漏洞豁免见该步注释）→ ruff → import-linter → mypy（mypy_files.txt 清单）→
-# 静默捕获棘轮 → 硬编码 → wire / capability manifest 双合同 → pytest 全量。
+# pip-audit（豁免表 scripts/security-audit-allowlist.json，与 security-audit.yml 共用）→ ruff →
+# import-linter → mypy（mypy_files.txt 清单）→ 静默捕获棘轮 → 硬编码 → wire / capability manifest
+# 双合同 → pytest 全量。npm/cargo/dotnet 的漏洞扫描不阻塞每个 PR，见 security-audit.yml 的定时任务。
 # 判绿只看退出码（CI 里 junitxml 四数口径由 pytest 自身退出码承载）。
 # Runner 用 windows-latest：工程含 Windows 专属面（system_proxy/WinINET、路径清洗、
 # 完整性标签相关测试），ubuntu 上会出与本地无关的红。
@@ -42,21 +43,21 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r requirements-dev.txt
-      - name: 依赖漏洞审计（pip-audit，2026-10-24 审计卫生项）
-        # 扫描的是已装环境（runner 上即 requirements 全集）；需联网查 OSV。
-        # 命中公告即红=门禁语义；确需暂缓修复的条目用 --ignore-vuln <ID> 显式
-        # 豁免并在本行注释留因——不允许静默放宽。
-        # 现豁免四条，全部落在 chromadb（PYSEC-2026-311 / -3813 / -3814 / -3815，
-        # 对应 CVE-2026-45829/45830/45831/45833）：上游公告的 last_affected 就是当前
-        # 最新版 1.5.9，**没有修复版本可升**（PyPI 实测 1.5.9 即 2026-05-05 最新）。
-        # 可达性：本工程的 Chroma 只以嵌入式 PersistentClient 读本机目录（rag_backend /
-        # repo_meta / scenario_lab / output_path_migration），不起 chromd、不经 HttpClient、
-        # 不用多租户与 SimpleRBACAuthorizationProvider ⇒ 这四条（服务端预认证代码注入、
-        # 跨租户集合读写、RBAC 权限作用域）都不在本产品暴露的面上。
-        # ⚠ 收口条件：上游一发新版就把这四行 ignore 删掉并升级，别把豁免当永久。
+      - name: 依赖漏洞审计（运行依赖）
+        # 扫描的是 requirements 解析出的依赖图（含传递依赖）；需联网查 PyPI/OSV。
+        # 豁免不再写在本文件里：统一进 scripts/security-audit-allowlist.json，
+        # 由 scripts/security_audit.py 同时服务本 job 与 security-audit.yml 的定时扫描。
+        # 豁免规则=工具+公告号+包名三者匹配、必须带到期日（到期即红，逼人工复核）、
+        # 本次未命中的条目会在报告里提示清理。现豁免四条 chromadb（PYSEC-2026-311 /
+        # -3813 / -3814 / -3815，对应 CVE-2026-45829/45830/45833/45831），原因与
+        # 可达性论证见该 JSON 的 reason 字段；上游一发新版就删条目并升级。
         run: |
           python -m pip install pip-audit
-          python -m pip_audit --skip-editable --ignore-vuln PYSEC-2026-311 --ignore-vuln PYSEC-2026-3813 --ignore-vuln PYSEC-2026-3814 --ignore-vuln PYSEC-2026-3815
+          python ../scripts/security_audit.py pip
+      - name: 依赖漏洞审计（开发/CI 依赖）
+        # 保持旧口径：原 `pip_audit` 扫的是已装环境，requirements-dev 也在其中；
+        # 改成 -r 解析后必须显式补跑这份，避免静默缩小覆盖范围。
+        run: python ../scripts/security_audit.py pip --requirements requirements-dev.txt
       - name: ruff
         run: python -m ruff check app tests
       - name: import-linter

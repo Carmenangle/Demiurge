@@ -15,6 +15,7 @@ structured 原生通道传输的是 JSON 字符串，载不动图片，带图时
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -47,7 +48,28 @@ class FabricOutcome:
     error: str = ""
     lease_id: str = ""          # 需要批准时，批准端点要用的租约（subject）
     pending_tool: str = ""      # 等待批准的工具
+    # 本次批准需要覆盖的**确切路径**（越域读取；2026-11-05 T1）。
+    # 空 = 只需按作品根授权（写类在域内的常规形态）。
+    pending_paths: list[str] = field(default_factory=list)
+    # 等待批准的那个**具体动作**（2026-11-05 T3）：params 是环境归一后的实参，
+    # action_hash 是它的指纹。批准后按 hash 一次性授权，pending_tool 只作展示投影，
+    # 不再单独充当授权依据——同一个 file.write_text 换个路径/换个内容就是新动作。
+    pending_params: dict[str, Any] = field(default_factory=dict)
+    pending_action_hash: str = ""
     messages: list[dict] = field(default_factory=list)  # 内部对话历史（断点续跑 checkpoint）
+
+
+def action_fingerprint(operation: str, params: dict[str, Any]) -> str:
+    """动作指纹：operation + 实参的规范化 JSON 的 SHA-256（2026-11-05 T3）。
+
+    规范化 = 键排序 + 去分隔符 ⇒ 键序/缩进不同不会算成两个动作。
+    **必须在环境归一之后**算（`base/output_dir/cwd` 由注入决定），否则批准的动作和
+    实际执行的动作不是同一个。租约只存这条 hash，不复制完整命令/正文（可能很长或含密钥）。
+    """
+    payload = json.dumps({"operation": operation, "params": params},
+                         ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                         default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _manifest_lines(capabilities: list[dict]) -> str:
@@ -661,6 +683,42 @@ def _novel_scope_denial(outcome: Any, output_dir: str, repo_id: str,
         f"（worldbook.coverage 给出的受影响条目），确需整段原文时读跨章窗口（跨章即放行）。")
 
 
+def _path_domain_check(operation: str, params: dict, *, level: str,
+                       output_dir: str) -> tuple[list[str], list[str]]:
+    """执行期路径域判定（2026-11-05 T1）：返回 `(越域写路径, 越域读取路径)`。
+
+    与机械计划同口径的两条闸之一（另一条是 `plan_validator._check_paths` 的计划期词法检查）：
+    - **写着陆**越出作品域 → 一律拒绝，approval 也不给「批准一次就写出去」这条路
+      （写类越域不是授权问题，是域声明问题；full 同样拒绝——full 的既定边界只豁免
+      逐项审批与联网面，不豁免写入路径域，见 `docs/tech-manual/B-*/09` §配额与硬闸门）。
+    - **读取源**（`capability_registry.READ_PATH_PARAMS`）与 readonly 能力的路径参数
+      越域 → 只是「需要按该确切路径授权」，不是拒绝。
+    - `output_dir` 为空 = 本轮没声明作品域 ⇒ 不设路径闸（与 `plan_validator.validate`
+      的 `if allowed_prefix:` 同口径，避免「无域可比」判成「全部越域」）。
+
+    ⚠ 必须在 `inject_env_params` **之后**调用：`base/cwd/output_dir` 由环境覆盖，
+    闸门只看模型真正拿到的最终值（此前置到归一之前会把「模型传 `/`、环境已改回作品根」
+    的正常链路误判成越域写）。
+    """
+    if not str(output_dir or "").strip():
+        return [], []
+    from app.services.plan_validator import path_like_param_items  # 路径识别单一属主
+
+    reads = set(capability_registry.read_path_params(operation))
+    denied: list[str] = []
+    out_reads: list[str] = []
+    for _key, value in path_like_param_items(params):
+        if capability_sandbox.path_allowed(value, output_dir):
+            continue
+        if level == "readonly" or _key in reads:
+            out_reads.append(value)
+        elif level in ("durable", "expensive"):
+            denied.append(value)
+        # reversible 不在本闸面内（与既有执行期审批同口径：doc.attach_material 的
+        # src 本就是外部素材，收口它要先定「素材入库白名单」，不在这一刀里顺手扩）。
+    return denied, out_reads
+
+
 def run_loop(*, intent: str, history: str = "", capabilities: list[dict] | None = None,
              access_mode: str = capability_sandbox.ACCESS_APPROVAL,
              lease_id: str = "", subject: str = "",
@@ -1085,15 +1143,9 @@ def run_loop(*, intent: str, history: str = "", capabilities: list[dict] | None 
                 {"tool_result": step_record["error"]}, ensure_ascii=False)})
             continue
         level = cap.side_effect_level
-        if level in ("durable", "expensive"):
-            try:
-                capability_sandbox.authorize(active_lease, operation, path=output_dir)
-            except PermissionError:
-                outcome.status = "awaiting_approval"
-                outcome.pending_tool = operation
-                outcome.error = f"工具 {operation} 需要批准"
-                outcome.messages = messages
-                return outcome
+        # ⚠ 写类授权判定**不在这里**：必须在环境归一（base/output_dir/cwd 注入）之后，
+        # 用最终实参算出的动作指纹来判（2026-11-05 T3）。在注入前授权等于「批的是一份
+        # 还不存在的路径」——用户看到的与真正执行的不是同一个动作。
         # 2026-09-06 用户定案混合模式：云端自然输出 → 内容含敏感词（会被网关 400）时，
         # **不是机械拦截拒绝**，而是把该部分**交给本地模型改写**（本地无审核，能坦然处理
         # NSFW 设定转写）→ 改写干净则放行落盘（云端跳过这部分、继续下一步）；
@@ -1134,6 +1186,59 @@ def run_loop(*, intent: str, history: str = "", capabilities: list[dict] | None 
             search_proxy=search_proxy or "",
             chat_base=chat_base or "", chat_key=chat_key or "",
             chat_model=chat_model or "")
+        # 路径域闸门（2026-11-05 T1，与机械计划同口径；必须在环境归一**之后**）：
+        # 此前自由循环只按 output_dir 授权，模型把 path 指到作品域外也照样落盘——
+        # full 成了越域写的旁路（探针实锤：域外文件真被创建）。
+        denied_paths, out_domain_reads = _path_domain_check(
+            operation, params, level=level, output_dir=output_dir or "")
+        if denied_paths:
+            step_record["error"] = (
+                f"路径域闸门：{operation} 要写的路径 {denied_paths[0]} 越出作品域"
+                f" {output_dir}（防越权写）。这不是「批准与否」的问题——越域写批准也不放行。"
+                "请把落点改到作品域内：写正文用 base/rel_path（由环境归一），"
+                "确需绝对路径时只给 {作品根}/... 下的路径。")
+            outcome.steps.append(step_record)
+            messages.append({"role": "assistant", "content": json.dumps(
+                {"tool": operation, "params": params}, ensure_ascii=False)})
+            messages.append({"role": "user", "content": json.dumps(
+                {"tool_error": step_record["error"]}, ensure_ascii=False)})
+            if trace is not None:
+                trace("tool.blocked", operation=operation, reason="path_domain")
+            continue
+        # 写类**一次性动作**授权（2026-11-05 T3）：批准的是这一个动作（operation + 归一后
+        # 实参的指纹），不是「这个工具以后都能调」。authorize 在同锁内消费指纹 ⇒
+        # 批准 A 后改发 B、或把 A 再发一遍，都会重新回到 awaiting，而不是照跑。
+        if level in ("durable", "expensive"):
+            action_hash = action_fingerprint(operation, params)
+            try:
+                capability_sandbox.authorize(active_lease, operation, path=output_dir,
+                                             action_hash=action_hash)
+            except PermissionError:
+                outcome.status = "awaiting_approval"
+                outcome.pending_tool = operation
+                outcome.pending_params = dict(params)
+                outcome.pending_action_hash = action_hash
+                outcome.error = f"工具 {operation} 需要批准"
+                outcome.messages = messages
+                return outcome
+        # 越域**读取**：approval 逐路径授权后才读（域外原文不进上下文）；
+        # full 的越域只读是既定的「完全访问」语义，不在这一刀里收紧（写侧收紧、读侧维持）。
+        if out_domain_reads and not (
+                level == "readonly" and access_mode == capability_sandbox.ACCESS_FULL):
+            for _read_path in out_domain_reads:
+                try:
+                    capability_sandbox.authorize(active_lease, operation, path=_read_path)
+                except PermissionError:
+                    outcome.status = "awaiting_approval"
+                    outcome.pending_tool = operation
+                    outcome.pending_paths = [_read_path]
+                    # 读类不绑一次性指纹（按路径持续放行），但仍要把实参摊给用户看：
+                    # 同一个 read_text 既可能读作品内素材，也可能读域外任意文件。
+                    outcome.pending_params = dict(params)
+                    outcome.error = (f"工具 {operation} 需要批准"
+                                     f"（读取作品域外路径 {_read_path}）")
+                    outcome.messages = messages
+                    return outcome
         # 2026-09-07 治本（用户定案「按原文关键词扩写，防偏差」）：素材已读门禁——
         # 实锤：模型反复凭记忆重写短版（22:24 一轮跑完零 read_text，裴肃 949/1424/1453
         # 全不到 2200），指令层纪律拦不住。代码层强制：worldbook.upsert_repo 前

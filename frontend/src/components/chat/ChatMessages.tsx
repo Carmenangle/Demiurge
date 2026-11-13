@@ -16,6 +16,7 @@ import { normalizeMediaUrl } from "../../lib/canvasConversation";
 import { openArtifactFolder } from "../../api/artifacts";
 import { isBodyShotRatio } from "../../lib/inspirationAutoPick";
 import { orphanMediaIndexes, splitMediaChunks } from "../../lib/richMediaPlacement";
+import { retryPromptText } from "../../lib/chatSessionEvents";
 import { approvePlanTask, cancelPlanTask, deleteRecipe, getPlanTask, keepRecipe, type PlanTask } from "../../lib/planTaskActivity";
 import type { RichContent } from "../RichInput";
 import { CopyButton } from "../CopyButton";
@@ -379,13 +380,17 @@ function formatElapsed(ms: number | null): string {
   return minutes > 0 ? `${minutes}m${String(seconds).padStart(2, "0")}s` : `${seconds}s`;
 }
 
-function AssistantMessageBase({ msg, streaming, avatarState = "default", portrait, displayRegex, depth, macros, onSendImage, onMaskImage, onRunCommand, onSetCover, onPromptApproval, onRouteChoice, onRegenerate, onRegenerateWithPrompt, onCancelGeneration, onRetryIllustration, regenerating = false, onEdit, onDelete, onCreateCheckpoint, onBranch, onMergeAudio, visualCiRepoId, visualCiOutputDir, onFabricApprove }: { msg: ChatMessage; streaming?: boolean; avatarState?: AssistantAvatarState; portrait?: { name: string; url: string } | null; displayRegex?: RegexScript[]; depth?: number; macros?: { char: string; user: string }; onSendImage: (url: string) => void; onMaskImage?: (url: string) => void; onRunCommand?: (cmd: string) => void; onSetCover?: (url: string) => void; onPromptApproval?: (approval: PromptApproval, action: "submit" | "change" | "cancel", editedPrompt?: string) => Promise<void>; onRouteChoice?: (choice: RouteChoice, route: AgentRoute) => Promise<void>; onRegenerate?: (messageId: string, slotId?: string) => void; onRegenerateWithPrompt?: (messageId: string, slotId: string, prompt: string) => void; onCancelGeneration?: (messageId: string, slotId: string) => void; onRetryIllustration?: (messageId: string, slotId: string) => void; regenerating?: boolean; onEdit?: (id: string, text: string) => void; onDelete?: (id: string) => void; onCreateCheckpoint?: (id: string) => void; onBranch?: (id: string) => void; onMergeAudio?: (messageId: string) => Promise<void>; visualCiRepoId?: string; visualCiOutputDir?: string; onFabricApprove?: (approve: boolean, mode?: "approve" | "continue") => void }) {
+function AssistantMessageBase({ msg, streaming, avatarState = "default", portrait, displayRegex, depth, macros, onSendImage, onMaskImage, onRunCommand, onSetCover, onPromptApproval, onRouteChoice, onRegenerate, onRegenerateWithPrompt, onCancelGeneration, onRetryIllustration, regenerating = false, onEdit, onDelete, onCreateCheckpoint, onBranch, onMergeAudio, visualCiRepoId, visualCiOutputDir, onFabricApprove }: { msg: ChatMessage; streaming?: boolean; avatarState?: AssistantAvatarState; portrait?: { name: string; url: string } | null; displayRegex?: RegexScript[]; depth?: number; macros?: { char: string; user: string }; onSendImage: (url: string) => void; onMaskImage?: (url: string) => void; onRunCommand?: (cmd: string) => void; onSetCover?: (url: string) => void; onPromptApproval?: (approval: PromptApproval, action: "submit" | "change" | "cancel", editedPrompt?: string) => Promise<void>; onRouteChoice?: (choice: RouteChoice, route: AgentRoute) => Promise<void>; onRegenerate?: (messageId: string, slotId?: string) => void; onRegenerateWithPrompt?: (messageId: string, slotId: string, prompt: string) => void; onCancelGeneration?: (messageId: string, slotId: string) => void; onRetryIllustration?: (messageId: string, slotId: string, prompt?: string) => void; regenerating?: boolean; onEdit?: (id: string, text: string) => void; onDelete?: (id: string) => void; onCreateCheckpoint?: (id: string) => void; onBranch?: (id: string) => void; onMergeAudio?: (messageId: string) => Promise<void>; visualCiRepoId?: string; visualCiOutputDir?: string; onFabricApprove?: (approve: boolean, mode?: "approve" | "continue") => void }) {
   const [showThinking, setShowThinking] = useState(false); // 思考默认折叠（2026-08-31 深夜用户反馈：28k 长思考自动展开吞掉正文区），可手动展开
   // 非流式 agent「执行过程」面板：流式中自动展开实时可见；replace 后保留可折叠回看
   const [showTrace, setShowTrace] = useState(false);
   // 执行耗时（WorkBuddy 式「已完成 2m28s」）：流式开始记时，结束时定格。
   // 计时只活在本次挂载内 ⇒ 刷新/重开对话后为 null，标题自动退回「思考 N · 工具 M」口径。
   const [elapsedMs, setElapsedMs] = useState<number | null>(null);
+  // 失败/试跑槽「编辑提示词」：弹窗展示当前成稿并允许改写与复制；确认后按新提示词重新生成。
+  const [retryPromptEdit, setRetryPromptEdit] = useState<{
+    messageId: string; slotId: string; prompt: string; kind: "image" | "video";
+  } | null>(null);
   const [, tickElapsed] = useState(0);
   const streamStartRef = useRef<number | null>(null);
   useEffect(() => {
@@ -610,6 +615,8 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
     if (part.type === "media-slot") {
       const isAudio = part.kind === "audio";
       const isVideo = part.kind === "video";
+      // 失败/试跑槽：提示词可查看、编辑、复制（成稿存在才显示入口，避免空弹窗）。
+      const retryPrompt = !isAudio && part.status === "failed" ? retryPromptText(part) : "";
       return (
         <div className={`media-slot media-slot-${part.status || "pending"}${isAudio ? " media-slot-audio" : ""}`} key={part.slotId || `slot-${index}`}>
           {part.status === "failed" ? (
@@ -622,7 +629,9 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
                     className="media-slot-retry"
                     title={
                       (part.error || "").includes("prompt_only")
-                        ? "用试跑成稿直接提交 ComfyUI 出图（不受试跑开关影响）"
+                        ? isVideo
+                          ? "用试跑成稿直接提交 ComfyUI 出视频（不受试跑开关影响）"
+                          : "用试跑成稿直接提交 ComfyUI 出图（不受试跑开关影响）"
                         : isVideo
                           ? "用原参数重新生成这段视频"
                           : "用原参数重新生成这张图"
@@ -631,6 +640,22 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
                     onClick={() => onRetryIllustration(msg.id, part.slotId!)}
                   >
                     <RotateCw size={13} /> 重新生成
+                  </button>
+                )}
+                {onRetryIllustration && part.slotId && retryPrompt && (
+                  <button
+                    type="button"
+                    className="media-slot-retry media-slot-edit-prompt"
+                    title="查看并编辑本条提示词：可复制；保存后按新提示词重新生成"
+                    aria-label="编辑提示词"
+                    onClick={() => setRetryPromptEdit({
+                      messageId: msg.id,
+                      slotId: part.slotId!,
+                      prompt: retryPrompt,
+                      kind: isVideo ? "video" : "image",
+                    })}
+                  >
+                    <Pencil size={13} /> 编辑提示词
                   </button>
                 )}
               </span>
@@ -665,6 +690,10 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
           <div className="img-tools">
             <a className="img-tool" href={part.url} target="_blank" rel="noreferrer"><ExternalLink size={14} /> 查看原文件</a>
             <button className="img-tool" onClick={() => downloadMedia(part.url!)}><Download size={14} /> 下载</button>
+            {onSetCover && (
+              <button className="img-tool" title="把这段视频设为仓库动态封面"
+                onClick={() => onSetCover(part.url!)}><ImageIcon size={14} /> 设为封面</button>
+            )}
           </div>
         </div>
       );
@@ -971,6 +1000,10 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
               <button className="img-tool" onClick={() => onSendImage(msg.video!)}>
                 <Send size={14} /> 发送至对话
               </button>
+              {onSetCover && (
+                <button className="img-tool" title="把这段视频设为仓库动态封面"
+                  onClick={() => onSetCover(msg.video!)}><ImageIcon size={14} /> 设为封面</button>
+              )}
             </div>
           </div>
         )}
@@ -1053,7 +1086,7 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
         )}
         {onFabricApprove && !streaming && /智能编造需要批准/.test(cleanText) && (
           <div className="fabric-approval-bar">
-            <span className="fabric-approval-hint">智能编造需要批准（下一步工具等待确认）</span>
+            <span className="fabric-approval-hint">批准只放行上面那一个动作（换路径、改内容或重复发起都会重新请求批准）</span>
             <button type="button" className="cmd-chip" onClick={() => onFabricApprove(true)}>✅ 批准继续</button>
             <button type="button" className="cmd-chip" onClick={() => onFabricApprove(false)}>✖ 取消中止</button>
           </div>
@@ -1248,6 +1281,20 @@ function AssistantMessageBase({ msg, streaming, avatarState = "default", portrai
           setPromptEdit(null);
         }}
         onCancel={() => setPromptEdit(null)}
+      />
+    )}
+    {retryPromptEdit && (
+      <PromptModal
+        title={`编辑提示词（${retryPromptEdit.kind === "video" ? "视频" : "图片"}）`}
+        defaultValue={retryPromptEdit.prompt}
+        confirmText="保存并重新生成"
+        multiline
+        copyable
+        onConfirm={(edited) => {
+          onRetryIllustration?.(retryPromptEdit.messageId, retryPromptEdit.slotId, edited);
+          setRetryPromptEdit(null);
+        }}
+        onCancel={() => setRetryPromptEdit(null)}
       />
     )}
     </>

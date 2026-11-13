@@ -15,14 +15,15 @@ const readAi = (rel: string) => readFileSync(new URL(rel, AI_DIR), "utf8");
 /** 预期符号全集（按域分组；与各域模块 export 一一对应，新增域/符号必须同步登记）。 */
 const EXPECTED: Record<string, string[]> = {
   "wire.ts": [
-    "POLL_TIMEOUT_MS", "Embed", "Chat", "ChatCfg", "VlmWire",
-    "chatBody", "ragEmbed", "sseEmbed",
+    "POLL_TIMEOUT_MS", "Embed", "Chat", "ChatCfg", "VlmWire", "GbcWire",
+    "chatBody", "ragEmbed", "ragGbc", "sseEmbed",
   ],
   "attachments.ts": ["FileAttachmentMeta", "uploadAttachment", "attachmentUrl"],
   "prompts.ts": [
     "GenPromptResult", "genPrompt", "describeImage", "translateText", "DescribeResult",
     "describeWorkflow", "polishDescription", "genProfilePrompt", "FramePromptItem",
-    "genFramePrompts", "getProfilePromptDefaults", "extractKeywords",
+    "genFramePrompts", "getProfilePromptDefaults", "PortraitPromptResult", "genPortraitPrompt",
+    "extractKeywords",
   ],
   "workflowPorts.ts": ["PortOp", "PortsPlan", "workflowPorts"],
   "inspiration.ts": ["Inspiration", "fetchInspiration", "selectInspiration", "proxyImageUrl"],
@@ -30,9 +31,15 @@ const EXPECTED: Record<string, string[]> = {
     "ChatTurn", "MemorySealResult", "sealMemory", "fetchHistory", "clearCache",
     "compactHistory", "saveSnapshot", "fetchSnapshot", "editMessageRemote", "chatAppend",
     "exportSnapshot", "importSnapshot",
+    "ChatArchiveEntry", "fetchChatArchives", "restoreChatArchive",
   ],
   "agent.ts": [
-    "multiAgent", "regenerateImage", "fetchAgentRunning", "cancelAgent", "fetchRunningChatThreads",
+    "multiAgent", "chatInitiative", "ChatInitiativeResult", "chatInitiativeScan",
+    "ChatInitiativeScanItem", "ChatInitiativeScanResult",
+    "chatFollowup", "ChatFollowupResult", "chatReaction", "ChatReactionResult", "markChatRead", "fetchChatReadState", "regenerateImage",
+    "fetchAgentRunning", "cancelAgent", "fetchRunningChatThreads",
+    "CharacterRosterMember", "CharacterRosterCandidate", "CharacterRosterResult",
+    "CharacterRosterRequest", "fetchCharacterRoster",
   ],
   "agentInvocation.ts": ["AgentInvocation", "agentInvocationBody"],
   "chatQueue.ts": [
@@ -53,7 +60,8 @@ const EXPECTED: Record<string, string[]> = {
     "cancelWorkflowBuildTask",
   ],
   "rag.ts": [
-    "indexGeneration", "indexDocument", "importDocuments", "RagDoc", "listDocs", "Generation",
+    "indexGeneration", "indexDocument", "importDocuments", "ImportAssetResult", "importAssets",
+    "RagDoc", "listDocs", "Generation",
     "WEB_MATERIALS_REPO_ID", "listGenerations", "wd14Tag", "TaggerInfo", "listTaggers",
     "tagGeneration", "TagSnapshot", "listTagSnapshots", "activateTagSnapshot", "deleteTagSnapshot",
     "generateThumbs", "searchGenerations", "VisualPreferenceReason", "recordVisualPreference",
@@ -61,6 +69,9 @@ const EXPECTED: Record<string, string[]> = {
     "pruneGenerations", "pruneOrphanRepos", "RepoSyncRepo", "RepoSyncReport", "repoSyncReport",
     "repoSyncFix", "searchAssets", "listTrash", "restoreAsset", "purgeAsset", "tagFromText",
     "clearTrash", "TagStat", "tagStats", "setTags", "deleteDoc", "updateDoc",
+    "GbcMossItem", "GbcMoss", "GbcOutline", "GbcTagResult", "SavedGbc",
+    "gbcTagAsset", "getGbcGraph",
+    "MossLayoutParts", "MossLayoutPayload", "MossLayoutResult", "generateMossLayout",
   ],
   "webMaterials.ts": [
     "WebMaterial", "listWebMaterials", "WebMaterialSearchItem", "searchWebMaterials", "PixivUser",
@@ -68,6 +79,7 @@ const EXPECTED: Record<string, string[]> = {
     "saveWebMaterial", "saveWebSeries", "deleteWebMaterial", "InspirationCardImage",
     "InspirationCardAsset", "saveInspirationCard", "listInspirationCards", "getInspirationCard",
     "updateInspirationCard", "deleteInspirationCard", "ReferenceImage", "listReferenceImages",
+    "ensureWebMaterialIndex",
   ],
   "support.ts": ["supportStream"],
 };
@@ -116,14 +128,21 @@ describe("api/ai 拆分形态锁", () => {
     });
     // 反向校验：预期里的每个「非类型」符号都能从门面取到
     const typeNames = new Set([
-      "Embed", "Chat", "ChatCfg", "VlmWire", "FileAttachmentMeta", "GenPromptResult",
-      "DescribeResult", "FramePromptItem", "PortOp", "PortsPlan", "Inspiration", "ChatTurn",
+      "Embed", "Chat", "ChatCfg", "VlmWire", "GbcWire", "FileAttachmentMeta", "GenPromptResult",
+      "DescribeResult", "FramePromptItem", "PortraitPromptResult", "PortOp", "PortsPlan",
+      "Inspiration", "ChatTurn",
       "MemorySealResult", "AgentInvocation", "ChatQueueStatus", "ChatQueueTask", "SyncProgress",
       "NodePackItem", "NodePackDetail", "BuildResult", "BuildTurn", "Skeleton",
       "BuildSessionMeta", "BuildSessionFull", "WorkflowBuildTaskStatus", "WorkflowBuildTask",
-      "RagDoc", "Generation", "TaggerInfo", "TagSnapshot", "TagStat", "VisualPreferenceReason",
+      "RagDoc", "Generation", "ImportAssetResult", "TaggerInfo", "TagSnapshot", "TagStat", "VisualPreferenceReason",
       "RepoSyncRepo", "RepoSyncReport", "WebMaterial", "WebMaterialSearchItem", "PixivUser",
-      "InspirationCardImage", "InspirationCardAsset", "ReferenceImage",
+      "InspirationCardImage", "InspirationCardAsset", "ReferenceImage", "ChatArchiveEntry",
+      "GbcMossItem", "GbcMoss", "GbcOutline", "GbcTagResult", "SavedGbc",
+      "MossLayoutParts", "MossLayoutPayload", "MossLayoutResult", "ChatInitiativeResult",
+      "ChatInitiativeScanItem", "ChatInitiativeScanResult", "ChatFollowupResult",
+      "ChatReactionResult",
+      "CharacterRosterMember", "CharacterRosterCandidate", "CharacterRosterResult",
+      "CharacterRosterRequest",
     ]);
     const expectedValues = Object.values(EXPECTED).flat().filter((n) => !typeNames.has(n));
     expect(values.sort()).toEqual([...expectedValues].sort());

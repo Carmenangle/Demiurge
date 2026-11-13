@@ -37,9 +37,51 @@ def test_列表与删除(tmp_path):
     worldbook_store.save(base, "乙", _book())
     names = {s.name for s in worldbook_store.list_books(base)}
     assert names == {"甲", "乙"}
-    assert worldbook_store.delete_book(base, "甲") is True
+    assert worldbook_store.delete_book(base, "甲")["deleted"] is True
     assert worldbook_store.exists(base, "甲") is False
     assert {s.name for s in worldbook_store.list_books(base)} == {"乙"}
+
+
+def test_删整本书先留一份可改回的备份(tmp_path):
+    """2026-11-05「防误删」第 ④ 刀：改前 `delete_book` 就一句 `p.unlink()`，删了就是删了。"""
+    base = str(tmp_path)
+    worldbook_store.save(base, "甲", _book(3))
+    got = worldbook_store.delete_book(base, "甲")
+    assert got["reason"] == "ok" and got["backup"].startswith("甲.json.bak-")
+    backup = tmp_path / got["backup"]
+    assert backup.is_file()
+    assert len(json.loads(backup.read_text(encoding="utf-8"))["entries"]) == 3
+    # 备份结尾不是 .json ⇒ 不进列表，界面当场干净
+    assert worldbook_store.list_books(base) == []
+
+
+def test_备份失败就不删世界书(tmp_path, monkeypatch):
+    base = str(tmp_path)
+    worldbook_store.save(base, "甲", _book())
+    monkeypatch.setattr(worldbook_store.state_store, "backup", lambda path: None)
+    got = worldbook_store.delete_book(base, "甲")
+    assert got["deleted"] is False and got["reason"] == "backup-failed"
+    assert worldbook_store.exists(base, "甲") is True
+
+
+def test_备份期间世界书被改写则拒绝删除(tmp_path, monkeypatch):
+    """备份成功 ≠ 删除安全：两段式之间被写入的新内容不能被删走。"""
+    base = str(tmp_path)
+    worldbook_store.save(base, "甲", _book(2))
+    target = tmp_path / "甲.json"
+    real_copy = worldbook_store.state_store.copy2
+
+    def _copy_then_rewrite(source, temp):
+        real_copy(source, temp)
+        source.write_text('{"entries":[{"content":"新写"}]}', encoding="utf-8")
+
+    monkeypatch.setattr(worldbook_store.state_store, "copy2", _copy_then_rewrite)
+
+    got = worldbook_store.delete_book(base, "甲")
+
+    assert got["deleted"] is False and got["reason"] == "changed-during-backup"
+    assert "新写" in target.read_text(encoding="utf-8")
+    assert got["backup"] and (tmp_path / got["backup"]).is_file()
 
 
 def test_数组格式entries计数(tmp_path):
@@ -50,7 +92,7 @@ def test_数组格式entries计数(tmp_path):
 
 def test_读不存在返回None(tmp_path):
     assert worldbook_store.read_book(str(tmp_path), "无") is None
-    assert worldbook_store.delete_book(str(tmp_path), "无") is False
+    assert worldbook_store.delete_book(str(tmp_path), "无")["reason"] == "missing"
 
 
 def test_小仓库世界书快照隔离且只受控增改(tmp_path):
@@ -150,6 +192,27 @@ def test_curator上下文只包含主剧情实际注入的条目(tmp_path):
     assert '"index":1' not in context
     assert '"index":2' not in context
     assert "旁人未出场" not in context
+
+
+def test_零条目快照给curator的视图是空串而不是字面括号(tmp_path):
+    """清单 #8 回归：快照**存在**但零条目时，旧写法返回 `'[]'`（真值），`maybe_curate` 的
+    `if worldbook_context:` 照样挂出「【当前小仓库世界书条目（index 用于更新）】[]」⇒
+    prompt 明说有书、可写集却是空 ⇒ 模型只能凭空编 index，写回 0 条且不报错。"""
+    worldbook_store.ensure_repo_snapshot(str(tmp_path), "work", [{"entries": []}])
+    assert worldbook_store.read_repo_snapshot(str(tmp_path), "work") == {"entries": []}
+
+    assert worldbook_store.repo_snapshot_context(str(tmp_path), "work") == ""
+    assert worldbook_store.repo_snapshot_context(
+        str(tmp_path), "work", query="任意正文", allowed_indices=frozenset()) == ""
+
+    # 同一出口为空的**另一族**（覆盖面不止「零条目」）：书有条目，但可写集把这些索引全排除在外
+    # ⇒ 旧写法同样回字面 `'[]'`（真值），curator 一样收到「有书」的假承诺。
+    worldbook_store.ensure_repo_snapshot(str(tmp_path), "locked", [{"entries": [
+        {"comment": "全局机制·判定", "content": "不可写"}]}])
+    assert worldbook_store.repo_snapshot_context(
+        str(tmp_path), "locked", allowed_indices=frozenset()) == ""
+    assert worldbook_store.repo_snapshot_context(
+        str(tmp_path), "locked", allowed_indices=frozenset({0})) != ""
 
 
 def test_curator写回拒绝未注入索引但仍允许新增(tmp_path):
@@ -384,13 +447,13 @@ def test_主人公性别_角色卡条目优先于正文提及(tmp_path):
 
 # ── 第 51 刀（2026-09-22）：主人公姓名三段读取（修复 D4/D5）──
 
-def _write_protagonist_table(base: str, repo_id: str, name: str) -> None:
-    """写一张最小「主角信息表」（只含姓名列）供测试读取。"""
+def _write_protagonist_table(base: str, repo_id: str, *names: str) -> None:
+    """写一张最小「主角信息表」（只含姓名列）供测试读取。可给多行姓名列。"""
     from app.services import table_store
     tables = [{
         "name": table_store.PROTAGONIST_TABLE,
         "columns": ["姓名", "性别", "外貌特征"],
-        "rows": [[name, "女", "示例"]],
+        "rows": [[n, "女", "示例"] for n in names],
         "mode": "full", "rowPolicy": "singleton", "alwaysFill": False,
         "deletePolicy": "retain", "keyCol": "姓名",
     }]
@@ -438,6 +501,59 @@ def test_主角姓名三段读取_全空返回空串(tmp_path):
     assert worldbook_store.repo_protagonist_name(str(tmp_path), "missing", "") == ("", "")
     # ①段优先与仓库是否存在无关：缺仓库但 user_name 非空，仍返回 user_name
     assert worldbook_store.repo_protagonist_name(str(tmp_path), "missing", "甲") == ("甲", "user_name")
+
+
+# ── 2026-11-04（#10 读侧）：占位名不当真名 ──
+
+def test_占位名谓词_括号补语与词表命中():
+    """`(待定)`／`未定`／`我`／`我（玩家角色）`／纯符号 ⇒ 判「没名字」；真名不受影响。"""
+    for placeholder in ["", "   ", "(待定)", "（未定）", "【主角】", "待定", "未定",
+                        "我", "我（玩家角色）", "本人", "n/a", "N/A", "？？", "xxx"]:
+        assert worldbook_store._is_placeholder_protagonist_name(placeholder) is True, placeholder
+    for real in ["甲", "乙", "丙丁", "丁小满", "张三（少年）"]:
+        assert worldbook_store._is_placeholder_protagonist_name(real) is False, real
+
+
+def test_占位user_name不短路_继续找下一段(tmp_path):
+    """① `我` 这类占位**不算名字** ⇒ 不返回「我」，退到 ② 主角信息表的真名。"""
+    repo_id = "work"
+    _write_protagonist_table(str(tmp_path), repo_id, "乙")
+
+    assert worldbook_store.repo_protagonist_name(str(tmp_path), repo_id, "我") == ("乙", "protagonist_table")
+    assert worldbook_store.repo_protagonist_name(
+        str(tmp_path), repo_id, "我（玩家角色）") == ("乙", "protagonist_table")
+
+
+def test_表内占位名_落到世界书真名(tmp_path):
+    """② 姓名列存的是 `(待定)` ⇒ 继续 ③ 世界书，不把占位符当主人公喂进出图链。"""
+    repo_id = "work"
+    _write_protagonist_table(str(tmp_path), repo_id, "(待定)")
+    book = {"entries": [
+        {"comment": "角色卡·丙", "content": "【性别】女", "keys": ["丙", "主角"]},
+    ]}
+    worldbook_store.ensure_repo_snapshot(str(tmp_path), repo_id, [book])
+
+    assert worldbook_store.repo_protagonist_name(str(tmp_path), repo_id, "") == ("丙", "worldbook")
+
+
+def test_主角信息表逐行找真名(tmp_path):
+    """② 姓名列逐行看：首行是占位不代表整表没有真名。"""
+    repo_id = "work"
+    _write_protagonist_table(str(tmp_path), repo_id, "未定", "乙")
+
+    assert worldbook_store.repo_protagonist_name(str(tmp_path), repo_id, "") == ("乙", "protagonist_table")
+
+
+def test_三段全占位_退回空串(tmp_path):
+    """三段给的都只是占位 ⇒ ('', '')（宁缺勿猜），下游一律按「没有主角名」处理。"""
+    repo_id = "work"
+    _write_protagonist_table(str(tmp_path), repo_id, "我")
+    book = {"entries": [
+        {"comment": "角色卡·待定", "content": "【性别】男", "keys": ["待定", "主角"]},
+    ]}
+    worldbook_store.ensure_repo_snapshot(str(tmp_path), repo_id, [book])
+
+    assert worldbook_store.repo_protagonist_name(str(tmp_path), repo_id, "未定") == ("", "")
 
 
 # ── 2026-09-23（C 约束）：运行时新增条目禁建机制层、一律 constant=False ──
@@ -534,6 +650,30 @@ def test_外貌提取保留简介瞳色并兼容任意标题(tmp_path):
         assert fact in profiles
     # 非外貌的动态段不得因「整条兜底」被当进外貌
     assert "三夜未合眼" not in profiles
+
+
+def test_外貌提取剥掉角色卡里的台词引语(tmp_path):
+    """腓特烈卡把开场对白写在条目前面：引号段是剧情，不得进稳定外貌。"""
+    entries = [{
+        "comment": "角色卡·腓特烈大帝",
+        "keys": ["腓特烈大帝", "腓特烈"],
+        "content": (
+            "【角色卡·腓特烈大帝】\n\n"
+            "*身高近两米的舰娘屈起长腿坐在床边。她低下头，暗黄色的眼睛里全是宠溺——"
+            "「妈妈的奶水都是你的，乖宝宝，慢慢喝。」*\n\n"
+            "【外貌】身高近两米。暗黄色长发、温柔理性的眉眼。\n"
+            "【背景故事】当 {{user}} 把粉色戒指戴回她手上之后，她第一次觉得指挥官如此平凡。\n"
+        ),
+    }]
+
+    profiles = _visual_profiles(tmp_path, entries, "腓特烈")
+
+    assert "妈妈的奶水" not in profiles
+    # 斜体开场镜头（*…*）是剧情正文，不是稳定外貌，不得进视频身份锁。
+    assert "屈起长腿" not in profiles
+    # 以 {{user}} 为叙事对象的关系/背景句同样是剧情，不是稳定外貌。
+    assert "粉色戒指" not in profiles
+    assert "暗黄色长发" in profiles
 
 
 def test_外貌提取支持纯散文与行标签(tmp_path):

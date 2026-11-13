@@ -1,5 +1,6 @@
 //! `--self-test`：前 15 项与 WPF 壳同一份判据，两套壳各跑一遍，前 15 行输出必须一致；
-//! 第 16 项是 Tauri 独有的安装版布局，追加在末尾，不影响前 15 行对拍。
+//! 第 16—19 项是 Tauri 独有（安装版布局、按需交付、更新验签、提交闸与回滚），
+//! 一律追加在末尾，不影响前 15 行对拍。
 //! 名字逐条对齐 `desktop/Demiurge.Desktop/SelfTest.cs`，不要"顺手改名"——
 //! 改名的代价是两边输出无法机器比对。
 use std::path::{Path, PathBuf};
@@ -128,6 +129,8 @@ pub fn run() -> i32 {
             fullscreen: true,
             port: 90_000,
             geometry_version: 2,
+            // 其余字段取默认：新增设置项不该让这条夹具跟着改（它验的是几何与端口的夹取）。
+            ..ShellSettings::default()
         };
         ctx("save settings", settings.save(Some(settings_path.clone())))?;
         let loaded = ShellSettings::load(Some(settings_path.clone()));
@@ -270,6 +273,10 @@ pub fn run() -> i32 {
     //    不联网、不用私钥；生产公钥轮换不影响这组独立测试密钥。
     recorder.check("updater: signature verify", crate::updater::verify_test_fixture());
 
+    // 19 提交闸与回滚（Tauri 独有）：脚本化闸替掉真探活，验「闸不过绝不提交」「过闸才记前态」
+    //    「回退只翻指向」「回收只删孤儿」「安全模式只清运行时」。全程离线、不起真进程。
+    recorder.check("delivery: commit gate and rollback", commit_gate_test());
+
     let summary = format!("self-test: {} passed, {} failed", recorder.passed, recorder.failed);
     recorder.report.push_str(&summary);
     recorder.report.push('\n');
@@ -351,7 +358,8 @@ fn delivery_test() -> Result<(), String> {
         write_zip(&app_tree, &app_zip, "application-app-test")?;
         let app_bytes = std::fs::read(&app_zip).map_err(err_text)?;
 
-        // RAG 层：必装层，单档归档。
+        // RAG 层：P3 起是**可选层**，仍照常出现在清单里——留着它才能证明
+        // 「清单有这一层、但 required_layers 不含 ⇒ 首启既不下载也不解压」。
         let rag_tree = root.join("trees").join("rag");
         write_fixture(&rag_tree.join("site-packages").join("marker.txt"), b"fake-rag")?;
         write_fixture(
@@ -415,8 +423,8 @@ fn delivery_test() -> Result<(), String> {
             "target": "windows-x64-full-rag",
             "release_base": format!("file://{}", assets.display()).replace('\\', "/"),
             "manifest": manifest_name,
-            "required_layers": ["base", "application", "rag"],
-            "optional_layers": [],
+            "required_layers": ["base", "application"],
+            "optional_layers": ["rag"],
             "mirrors": []
         });
         let pin: crate::runtime_delivery::DeliveryPin =
@@ -426,15 +434,17 @@ fn delivery_test() -> Result<(), String> {
         std::fs::create_dir_all(&install).map_err(err_text)?;
         let mut quiet = |_: &str| {};
 
-        // ① 首次部署（file:// 下载 + 分卷合并），三层都必须落地。
+        // ① 首次部署（file:// 下载 + 分卷合并）：只落地 required 两层。
+        //    清单里明明有 rag 层、分件也在同一个 file:// 目录里，但 required 不含它
+        //    ⇒ 一次字节都不许取、一个文件都不许解，`current.json` 的 rag_id 必须留空。
         let home = root.join("home");
         let report = crate::runtime_delivery::deliver(&pin, &home, &install, None, &mut quiet)
             .map_err(|err| format!("首次部署失败：{err}"))?;
         if report.reused
             || report.base_id != "base-test"
             || report.application_id != "app-test"
-            || report.rag_id != "rag-test"
-            || report.downloaded_layers.len() != 3
+            || !report.rag_id.is_empty()
+            || report.downloaded_layers != vec!["base".to_string(), "application".to_string()]
         {
             return Err(format!("首次部署结果不符：{report:?}"));
         }
@@ -446,21 +456,16 @@ fn delivery_test() -> Result<(), String> {
                 .join("frontend")
                 .join("index.html")
                 .is_file()
-            || !runtime
-                .join("rag")
-                .join("rag-test")
-                .join("site-packages")
-                .join("marker.txt")
-                .is_file()
+            || runtime.join("rag").exists()
         {
-            return Err("解压后的运行时文件缺失".to_string());
+            return Err("解压后的运行时文件不符（可选层不该落地）".to_string());
         }
         let current: serde_json::Value =
             serde_json::from_slice(&std::fs::read(runtime.join("current.json")).map_err(err_text)?)
                 .map_err(err_text)?;
         if current.get("base_id").and_then(|value| value.as_str()) != Some("base-test")
             || current.get("application_id").and_then(|value| value.as_str()) != Some("app-test")
-            || current.get("rag_id").and_then(|value| value.as_str()) != Some("rag-test")
+            || current.get("rag_id").and_then(|value| value.as_str()) != Some("")
         {
             return Err(format!("current.json 内容不符：{current}"));
         }
@@ -493,6 +498,7 @@ fn delivery_test() -> Result<(), String> {
         )
         .map_err(|err| format!("离线 runtime-pack 部署失败：{err}"))?;
         if offline.reused
+            || !offline.rag_id.is_empty()
             || !offline_home
                 .join("runtime")
                 .join("base")
@@ -562,10 +568,648 @@ fn delivery_test() -> Result<(), String> {
         if !leftovers.is_empty() {
             return Err(format!("运行时目录遗留临时项：{leftovers:?}"));
         }
+
+        // ⑧ 清单里**根本没有 rag 层**：2026-10-30 那版契约在这里直接判死
+        //    （「运行时清单缺少 rag 层」）。P3 起 required 只有两层 ⇒ 必须照样交付成功，
+        //    并且这个资产目录里没有 rag 分件也完全不缺件。
+        let norag_assets = root.join("assets-norag");
+        std::fs::create_dir_all(&norag_assets).map_err(err_text)?;
+        // 分件要从原始字节重写：④ 为了验哈希，已经把 `assets/` 里的 part2 就地改坏了，
+        // 从那里复制会拿到坏档，报出来的就不是「缺 rag」这件事了。
+        write_fixture(&norag_assets.join(&part1), &base_bytes[..split])?;
+        write_fixture(&norag_assets.join(&part2), &base_bytes[split..])?;
+        std::fs::copy(assets.join(app_name), norag_assets.join(app_name)).map_err(err_text)?;
+        let mut norag_manifest = manifest.clone();
+        if let Some(layers) = norag_manifest["layers"].as_object_mut() {
+            layers.remove("rag");
+        }
+        norag_manifest["rag_id"] = json!("");
+        write_fixture(
+            &norag_assets.join(manifest_name),
+            serde_json::to_string_pretty(&norag_manifest)
+                .map_err(err_text)?
+                .as_bytes(),
+        )?;
+        let mut norag_value = serde_json::to_value(&pin).map_err(err_text)?;
+        norag_value["release_base"] = json!(
+            format!("file://{}", norag_assets.display()).replace('\\', "/")
+        );
+        let norag_pin: crate::runtime_delivery::DeliveryPin =
+            serde_json::from_value(norag_value).map_err(err_text)?;
+        let norag_home = root.join("home-norag");
+        let norag = crate::runtime_delivery::deliver(
+            &norag_pin,
+            &norag_home,
+            &install,
+            None,
+            &mut quiet,
+        )
+        .map_err(|err| format!("清单缺 rag 层时交付不该失败：{err}"))?;
+        if !norag.rag_id.is_empty()
+            || !norag_home
+                .join("runtime")
+                .join("base")
+                .join("base-test")
+                .join("Demiurge-Runtime.exe")
+                .is_file()
+        {
+            return Err(format!("清单缺 rag 层的交付结果不符：{norag:?}"));
+        }
+
+        // ⑨ 后台补齐（P3-b）：① 那个 home 上「清单有 rag 层、盘上没有」，现在把它补上。
+        //    走的是必装层同一条主体 ⇒ 这里要看的是**只有** rag 被下、`current.json` 的 rag_id
+        //    由空变真、以及账本落到了后端读得到的位置（`userdata/delivery.json`）。
+        if !crate::runtime_delivery::optional_layer_missing(&home) {
+            return Err("⑨ 开始前应当判定可选层缺席（current.json 的 rag_id 是空的）".to_string());
+        }
+        let backfill =
+            crate::runtime_delivery::deliver_optional(&pin, &home, &install, None, None, &mut quiet)
+                .map_err(|err| format!("后台补齐失败：{err}"))?;
+        if backfill.reused
+            || backfill.rag_id != "rag-test"
+            || backfill.downloaded_layers != vec!["rag".to_string()]
+        {
+            return Err(format!("后台补齐结果不符：{backfill:?}"));
+        }
+        if !runtime
+            .join("rag")
+            .join("rag-test")
+            .join("site-packages")
+            .join("marker.txt")
+            .is_file()
+        {
+            return Err("补齐后盘上没有 rag 层的实际内容".to_string());
+        }
+        let committed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(runtime.join("current.json")).map_err(err_text)?)
+                .map_err(err_text)?;
+        if committed.get("rag_id").and_then(|value| value.as_str()) != Some("rag-test") {
+            return Err(format!("补齐后 current.json 的 rag_id 没翻过来：{committed}"));
+        }
+        if crate::runtime_delivery::optional_layer_missing(&home) {
+            return Err("补齐后仍判定可选层缺席".to_string());
+        }
+        // 账本字段名是跨层合同：读侧＝`backend/app/services/shell_delivery.py`（有单测盯同一组名字）。
+        let ledger_path = home.join("userdata").join("delivery.json");
+        let ledger: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&ledger_path).map_err(err_text)?).map_err(err_text)?;
+        let total = ledger.get("total_bytes").and_then(|value| value.as_u64()).unwrap_or(0);
+        let done = ledger.get("done_bytes").and_then(|value| value.as_u64()).unwrap_or(0);
+        if ledger.get("state").and_then(|value| value.as_str()) != Some("done")
+            || ledger.get("layer").and_then(|value| value.as_str()) != Some("rag")
+            || ledger.get("error").and_then(|value| value.as_str()) != Some("")
+            || ledger.get("schema_version").and_then(|value| value.as_u64()) != Some(1)
+        {
+            return Err(format!("补齐账本的终态不符：{ledger}"));
+        }
+        if total != rag_bytes.len() as u64 || done != total {
+            return Err(format!(
+                "补齐账本的字节账不符：done={done} total={total}，期望 {}",
+                rag_bytes.len()
+            ));
+        }
+
+        // ⑩ 清单里一条可选层都没有（⑧ 那份 norag 夹具）⇒ 补齐是「无事可做」，
+        //    既不失败也不许留下一条没发生过的进度（否则面板会挂出假的已完成）。
+        let nothing = crate::runtime_delivery::deliver_optional(
+            &norag_pin,
+            &norag_home,
+            &install,
+            None,
+            None,
+            &mut quiet,
+        )
+        .map_err(|err| format!("清单缺可选层时补齐不该失败：{err}"))?;
+        if !nothing.reused || !nothing.downloaded_layers.is_empty() || !nothing.rag_id.is_empty() {
+            return Err(format!("清单缺可选层时的补齐结果不符：{nothing:?}"));
+        }
+        if norag_home.join("userdata").join("delivery.json").exists() {
+            return Err("无事可做的补齐把账本留在了盘上".to_string());
+        }
         Ok(())
     })();
     let _ = std::fs::remove_dir_all(&root);
     outcome
+}
+
+/// 第 19 项：提交闸与回滚（P2）。全程离线、不起真进程——夹具里的
+/// `Demiurge-Runtime.exe` 是假字节，所以这里用**脚本化闸**替掉真探活，
+/// 验的是「闸不过 ⇒ 绝不提交」「闸过 ⇒ 记前态」「回退只翻指向」「回收只删孤儿」。
+fn commit_gate_test() -> Result<(), String> {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    static GATE_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static GATE_ALLOW: AtomicBool = AtomicBool::new(false);
+    static GATE_STATE_OK: AtomicBool = AtomicBool::new(false);
+    static GATE_BASE: Mutex<Option<String>> = Mutex::new(None);
+
+    // 脚本化闸：核对交付侧真的写好了隔离状态档与空数据目录，再按开关放行/拒绝。
+    fn scripted_gate(request: &crate::runtime_delivery::GateRequest) -> Result<(), String> {
+        use std::sync::atomic::Ordering as OrderingType;
+        GATE_CALLS.fetch_add(1, OrderingType::SeqCst);
+        *GATE_BASE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some(request.base_id.clone());
+        GATE_STATE_OK.store(
+            request.state_path.is_file()
+                && request.data_dir.is_dir()
+                && request.runtime_root.join("base").join(&request.base_id).is_dir(),
+            OrderingType::SeqCst,
+        );
+        if GATE_ALLOW.load(OrderingType::SeqCst) {
+            Ok(())
+        } else {
+            Err("测试用坏层：进程一起来就退".to_string())
+        }
+    }
+
+    // 造一套「版本 v＋三层 id」的离线发布物，返回可直接喂给 deliver 的 pin。
+    fn build_release(
+        root: &Path,
+        assets: &Path,
+        version: &str,
+        base_id: &str,
+        application_id: &str,
+        rag_id: &str,
+    ) -> Result<crate::runtime_delivery::DeliveryPin, String> {
+        use serde_json::json;
+
+        let mut layers = serde_json::Map::new();
+        for (name, id, dir, marker) in [
+            ("base", base_id, "base", "base-manifest.json"),
+            ("application", application_id, "app", "application-manifest.json"),
+            ("rag", rag_id, "rag", "rag-manifest.json"),
+        ] {
+            let tree = root.join("trees").join(dir).join(version);
+            match name {
+                "base" => {
+                    write_fixture(&tree.join("Demiurge-Runtime.exe"), b"fake-runtime")?;
+                }
+                "application" => {
+                    write_fixture(
+                        &tree.join("frontend").join("index.html"),
+                        b"<html><div id=\"root\"></div></html>",
+                    )?;
+                }
+                _ => {
+                    write_fixture(&tree.join("site-packages").join("marker.txt"), b"fake-rag")?;
+                }
+            }
+            write_fixture(
+                &tree.join(marker),
+                format!("{{\"schema_version\":1,\"{name}_id\":\"{id}\"}}").as_bytes(),
+            )?;
+            let archive_name = format!("Demiurge_{name}_windows_v{version}.zip");
+            let archive = assets.join(&archive_name);
+            write_zip(&tree, &archive, &format!("{dir}-{id}"))?;
+            let bytes = std::fs::read(&archive).map_err(err_text)?;
+            layers.insert(
+                name.to_string(),
+                json!({
+                    "id": id,
+                    "archive": &archive_name,
+                    "size": bytes.len(),
+                    "sha256": sha256_bytes(&bytes),
+                    "assets": [{"name": &archive_name, "size": bytes.len(), "sha256": sha256_bytes(&bytes)}]
+                }),
+            );
+        }
+        let manifest_name = format!("Demiurge_update_windows_v{version}.json");
+        let manifest = json!({
+            "schema_version": 2,
+            "app_version": version,
+            "target": "windows-x64-full-rag",
+            "edition": "full-rag",
+            "base_id": base_id,
+            "application_id": application_id,
+            "rag_id": rag_id,
+            "layers": layers,
+        });
+        write_fixture(
+            &assets.join(&manifest_name),
+            serde_json::to_string_pretty(&manifest).map_err(err_text)?.as_bytes(),
+        )?;
+        let pin_value = json!({
+            "schema_version": 1,
+            "tag": format!("v{version}"),
+            "version": version,
+            "target": "windows-x64-full-rag",
+            "release_base": format!("file://{}", assets.display()).replace('\\', "/"),
+            "manifest": manifest_name,
+            "required_layers": ["base", "application"],
+            "optional_layers": ["rag"],
+            "mirrors": []
+        });
+        serde_json::from_value(pin_value).map_err(err_text)
+    }
+
+    let root = paths::home().join(format!("self-test-gate-{}", unique_token()));
+    let outcome = (|| -> Result<(), String> {
+        let assets = root.join("assets");
+        let install = root.join("install");
+        let home = root.join("home");
+        let runtime = home.join("runtime");
+        let downloads = home.join("downloads");
+        std::fs::create_dir_all(&install).map_err(err_text)?;
+        let mut quiet = |_: &str| {};
+
+        // ① 已提交的旧一代：三层都在盘上，current.json 指着它们（这就是「可回退的前态」）。
+        write_fixture(
+            &runtime.join("base").join("base-old").join("Demiurge-Runtime.exe"),
+            b"fake-runtime",
+        )?;
+        write_fixture(
+            &runtime.join("base").join("base-old").join("base-manifest.json"),
+            br#"{"schema_version":1,"base_id":"base-old"}"#,
+        )?;
+        write_fixture(
+            &runtime.join("apps").join("app-old").join("frontend").join("index.html"),
+            b"<html><div id=\"root\"></div></html>",
+        )?;
+        write_fixture(
+            &runtime.join("apps").join("app-old").join("application-manifest.json"),
+            br#"{"schema_version":1,"application_id":"app-old"}"#,
+        )?;
+        write_fixture(
+            &runtime.join("rag").join("rag-old").join("rag-manifest.json"),
+            br#"{"schema_version":1,"rag_id":"rag-old"}"#,
+        )?;
+        let committed = "{\"schema_version\":2,\"app_version\":\"0.1.0\",\"target\":\"windows-x64-full-rag\",\"edition\":\"full-rag\",\"base_id\":\"base-old\",\"application_id\":\"app-old\",\"rag_id\":\"rag-old\"}";
+        write_fixture(&runtime.join("current.json"), committed.as_bytes())?;
+
+        let pin = build_release(&root, &assets, "0.2.0", "base-new", "app-new", "rag-new")?;
+
+        // ② 闸拒绝 ⇒ 不提交：旧 `current.json` 逐字不动、只删本次新层、旧层不动、分件缓存保留。
+        GATE_ALLOW.store(false, Ordering::SeqCst);
+        GATE_CALLS.store(0, Ordering::SeqCst);
+        GATE_STATE_OK.store(false, Ordering::SeqCst);
+        let rejected = crate::runtime_delivery::deliver_with_gate(
+            &pin,
+            &home,
+            &install,
+            None,
+            Some(scripted_gate),
+            &mut quiet,
+        )
+        .err()
+        .ok_or("提交闸明确拒绝，交付却成功了")?;
+        if !rejected.0.contains("未通过启动自检") {
+            return Err(format!("拒绝信息里没写拒因：{rejected}"));
+        }
+        if GATE_CALLS.load(Ordering::SeqCst) == 0 {
+            return Err("提交闸一次都没被调用".to_string());
+        }
+        if !GATE_STATE_OK.load(Ordering::SeqCst) {
+            return Err("闸拿到的隔离状态档/空数据目录/候选层不完整".to_string());
+        }
+        if GATE_BASE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_deref()
+            != Some("base-new")
+        {
+            return Err("闸探的不是候选 base 层".to_string());
+        }
+        if std::fs::read_to_string(runtime.join("current.json")).map_err(err_text)? != committed {
+            return Err("拒绝提交却改写了 current.json".to_string());
+        }
+        if runtime.join("previous.json").exists() {
+            return Err("拒绝提交却写了 previous.json".to_string());
+        }
+        if runtime.join("base").join("base-new").exists()
+            || runtime.join("apps").join("app-new").exists()
+            || runtime.join("rag").join("rag-new").exists()
+        {
+            return Err("拒绝提交后新层目录没删干净".to_string());
+        }
+        if !runtime.join("base").join("base-old").join("Demiurge-Runtime.exe").is_file() {
+            return Err("拒绝提交误删了旧一代的层".to_string());
+        }
+        if !downloads
+            .join("Demiurge_base_windows_v0.2.0.zip")
+            .is_file()
+        {
+            return Err("拒绝提交把下载缓存也清了（重试会重新花流量）".to_string());
+        }
+        if let Some(leftover) = first_temp_leftover(&runtime, &downloads) {
+            return Err(format!("拒绝提交后仍有临时目录残留：{leftover}"));
+        }
+
+        // ③ 同一次交付重试（闸放行）⇒ 只用本地缓存重装配，然后提交并记下前态。
+        GATE_ALLOW.store(true, Ordering::SeqCst);
+        GATE_CALLS.store(0, Ordering::SeqCst);
+        let report = crate::runtime_delivery::deliver_with_gate(
+            &pin, &home, &install, None, Some(scripted_gate), &mut quiet,
+        )
+        .map_err(|err| format!("闸放行后仍然交付失败：{err}"))?;
+        if report.reused || report.downloaded_layers.len() != 2 {
+            return Err(format!("提交结果不符：{report:?}"));
+        }
+        if GATE_CALLS.load(Ordering::SeqCst) != 1 {
+            return Err(format!("提交闸跑了 {} 次，应为 1 次", GATE_CALLS.load(Ordering::SeqCst)));
+        }
+        let ids = crate::runtime_delivery::read_layer_ids(&runtime.join("current.json"))
+            .ok_or("提交后 current.json 读不出来")?;
+        // rag 是可选层：候选清单广告了 `rag-new` 但这次没交付，盘上只有旧一代 `rag-old`。
+        // 状态档必须留空而不是「接着挂旧的」——torch 的 DLL 跟 base 层 ABI 绑死，
+        // 拿旧一代配新一代 base 是起不来，不是少个功能。
+        if ids.base_id != "base-new"
+            || ids.application_id != "app-new"
+            || !ids.rag_id.is_empty()
+        {
+            return Err(format!("current.json 没指向候选层：{ids:?}"));
+        }
+        let previous = crate::runtime_delivery::read_layer_ids(&runtime.join("previous.json"))
+            .ok_or("提交时没有记录 previous.json")?;
+        if previous.base_id != "base-old" || previous.application_id != "app-old" {
+            return Err(format!("previous.json 记的不是上一个被提交的 commit：{previous:?}"));
+        }
+
+        // ④ 首装（没有已提交的前态）⇒ 闸必须被跳过，否则每台机器首启白等一次冷启动。
+        let fresh_home = root.join("home-fresh");
+        GATE_ALLOW.store(false, Ordering::SeqCst);
+        GATE_CALLS.store(0, Ordering::SeqCst);
+        let fresh = crate::runtime_delivery::deliver_with_gate(
+            &pin, &fresh_home, &install, None, Some(scripted_gate), &mut quiet,
+        )
+        .map_err(|err| format!("首装被提交闸拦住了：{err}"))?;
+        if GATE_CALLS.load(Ordering::SeqCst) != 0 {
+            return Err("首装没有可回退的前态，却跑了提交闸".to_string());
+        }
+        if fresh.base_id != "base-new" {
+            return Err(format!("首装结果不符：{fresh:?}"));
+        }
+
+        // ⑤ 回退：两档互换 ⇒ current 回到旧一代，坏的那份记进 previous.json。
+        let broken_bytes = std::fs::read(runtime.join("current.json")).map_err(err_text)?;
+        let (broken, used) = crate::runtime_delivery::commit_previous(&runtime)?;
+        if broken.base_id != "base-new" || used.base_id != "base-old" {
+            return Err(format!("回退换错了代际：{broken:?} -> {used:?}"));
+        }
+        let current = crate::runtime_delivery::read_layer_ids(&runtime.join("current.json"))
+            .ok_or("回退后 current.json 读不出来")?;
+        if current.base_id != "base-old"
+            || current.application_id != "app-old"
+            || current.rag_id != "rag-old"
+        {
+            return Err(format!("回退后 current.json 不是旧一代：{current:?}"));
+        }
+        if crate::runtime_delivery::read_layer_ids(&runtime.join("previous.json")).as_ref()
+            != Some(&broken)
+        {
+            return Err("回退后 previous.json 没记下坏的那一代".to_string());
+        }
+        // 两档相同 ⇒ 拒绝再翻（否则会在两代之间来回翻档）。
+        let current_bytes = std::fs::read(runtime.join("current.json")).map_err(err_text)?;
+        write_fixture(&runtime.join("previous.json"), &current_bytes)?;
+        if crate::runtime_delivery::rollback_target(&runtime).is_ok() {
+            return Err("两档指向同一代时仍然允许回退".to_string());
+        }
+        // 复位：previous.json 重新指回坏的那一代 ⇒ ⑥ 才验得出「回退点不可被回收」。
+        write_fixture(&runtime.join("previous.json"), &broken_bytes)?;
+
+        // ⑥ 回收：只删两档都不引用的孤儿代际，且年龄护栏要先挡住刚建的目录。
+        for id in ["base-orphan"] {
+            write_fixture(
+                &runtime.join("base").join(id).join("Demiurge-Runtime.exe"),
+                b"fake-runtime",
+            )?;
+            write_fixture(
+                &runtime.join("base").join(id).join("base-manifest.json"),
+                format!("{{\"schema_version\":1,\"base_id\":\"{id}\"}}").as_bytes(),
+            )?;
+        }
+        let (removed_too_soon, _) =
+            crate::runtime_delivery::prune_old_layers(&runtime, Duration::from_secs(3600));
+        if !removed_too_soon.is_empty() {
+            return Err(format!("年龄护栏没生效，刚建的目录被回收了：{removed_too_soon:?}"));
+        }
+        let (removed, failures) = crate::runtime_delivery::prune_old_layers(&runtime, Duration::ZERO);
+        if !failures.is_empty() {
+            return Err(format!("回收失败：{failures:?}"));
+        }
+        if removed != vec!["base/base-orphan".to_string()] {
+            return Err(format!("回收名单不是「只有孤儿」：{removed:?}"));
+        }
+        for path in [
+            runtime.join("base").join("base-old"),
+            runtime.join("apps").join("app-old"),
+            runtime.join("rag").join("rag-old"),
+            runtime.join("base").join("base-new"),
+        ] {
+            if !path.is_dir() {
+                return Err(format!("被两档引用的层（含回退点）被回收了：{}", path.display()));
+            }
+        }
+
+        // ⑦ 孤儿临时项扫描：护栏内不动，护栏外清掉；`.gate-*` 也在扫描面里。
+        std::fs::create_dir_all(runtime.join(".staging-leftover")).map_err(err_text)?;
+        std::fs::create_dir_all(downloads.join(".work-leftover")).map_err(err_text)?;
+        std::fs::create_dir_all(runtime.join(".gate-leftover")).map_err(err_text)?;
+        if let Some(err) = first_delete_failure(
+            crate::runtime_delivery::sweep_temp(&runtime, &downloads, Some(Duration::from_secs(3600))),
+        ) {
+            return Err(format!("年龄护栏内的清理失败：{err}"));
+        }
+        if !runtime.join(".staging-leftover").exists() {
+            return Err("年龄护栏没生效：刚建的临时目录被当成孤儿删了".to_string());
+        }
+        if let Some(err) = first_delete_failure(crate::runtime_delivery::sweep_temp(
+            &runtime,
+            &downloads,
+            Some(Duration::ZERO),
+        )) {
+            return Err(format!("孤儿临时项清理失败：{err}"));
+        }
+        for path in [
+            runtime.join(".staging-leftover"),
+            runtime.join(".gate-leftover"),
+            downloads.join(".work-leftover"),
+        ] {
+            if path.exists() {
+                return Err(format!("孤儿临时项没被清掉：{}", path.display()));
+            }
+        }
+
+        // ⑧ 安全模式「只清运行时」：三层与两档都没了，但 userdata 与下载缓存必须原样保留。
+        write_fixture(&home.join("userdata").join("keep.txt"), b"keep")?;
+        let failures = crate::runtime_delivery::wipe_runtime_layers(&runtime);
+        if !failures.is_empty() {
+            return Err(format!("清除运行时失败：{failures:?}"));
+        }
+        for path in [
+            runtime.join("base"),
+            runtime.join("apps"),
+            runtime.join("rag"),
+            runtime.join("current.json"),
+            runtime.join("previous.json"),
+        ] {
+            if path.exists() {
+                return Err(format!("安全模式没清干净：{}", path.display()));
+            }
+        }
+        if !home.join("userdata").join("keep.txt").is_file() {
+            return Err("安全模式误删了作品数据".to_string());
+        }
+        if !downloads.join("Demiurge_base_windows_v0.2.0.zip").is_file() {
+            return Err("安全模式误删了下载缓存".to_string());
+        }
+
+        // ⑨ 版本漂移判定（层升级的唯一触发点）：纯本地读档，不一致才报。
+        let drifted = crate::runtime_delivery::runtime_drift(&home, &pin);
+        if drifted.is_some() {
+            return Err(format!("干净目录里不该有漂移：{drifted:?}"));
+        }
+        write_fixture(
+            &runtime.join("current.json"),
+            b"{\"schema_version\":2,\"app_version\":\"0.1.0\",\"base_id\":\"b\",\"application_id\":\"a\",\"rag_id\":\"r\"}",
+        )?;
+        match crate::runtime_delivery::runtime_drift(&home, &pin) {
+            Some((installed, wanted)) if installed == "0.1.0" && wanted == "0.2.0" => {}
+            other => return Err(format!("漂移判定不符：{other:?}")),
+        }
+
+        // ⑩ 后台补齐也走提交闸（P3-b）：可选层不能因为「只是可选」就跳过探活——torch 的 DLL
+        //    与 base 层 ABI 绑死，坏的一代的失败形状是进程起不来，不是少个功能。
+        let opt_home = root.join("home-opt");
+        let opt_runtime = opt_home.join("runtime");
+        GATE_ALLOW.store(true, Ordering::SeqCst);
+        GATE_CALLS.store(0, Ordering::SeqCst);
+        // 前态：必装层首装（闸跳过），此时 rag 按诚实合同留空。
+        crate::runtime_delivery::deliver_with_gate(
+            &pin,
+            &opt_home,
+            &install,
+            None,
+            Some(scripted_gate),
+            &mut quiet,
+        )
+        .map_err(|err| format!("补齐用例的必装层首装失败：{err}"))?;
+        if GATE_CALLS.load(Ordering::SeqCst) != 0
+            || !crate::runtime_delivery::optional_layer_missing(&opt_home)
+        {
+            return Err("补齐用例的前态不符：首装应跳过闸，且可选层应判定为缺席".to_string());
+        }
+
+        // 闸拒绝 ⇒ 不提交：层不留在盘上、`current.json` 的 rag_id 仍为空、账本记下拒因。
+        GATE_ALLOW.store(false, Ordering::SeqCst);
+        GATE_CALLS.store(0, Ordering::SeqCst);
+        let rejected_opt = crate::runtime_delivery::deliver_optional(
+            &pin,
+            &opt_home,
+            &install,
+            None,
+            Some(scripted_gate),
+            &mut quiet,
+        )
+        .err()
+        .ok_or("可选层交付绕过了提交闸")?;
+        if GATE_CALLS.load(Ordering::SeqCst) != 1 {
+            return Err(format!(
+                "可选层补齐跑了 {} 次闸，应为 1 次",
+                GATE_CALLS.load(Ordering::SeqCst)
+            ));
+        }
+        if !rejected_opt.0.contains("未通过启动自检") {
+            return Err(format!("可选层拒绝信息里没写拒因：{rejected_opt}"));
+        }
+        if opt_runtime.join("rag").join("rag-new").exists() {
+            return Err("闸拒绝后新的 rag 层留在了盘上".to_string());
+        }
+        if crate::runtime_delivery::read_layer_ids(&opt_runtime.join("current.json"))
+            .map(|ids| ids.rag_id)
+            .as_deref()
+            != Some("")
+        {
+            return Err("闸拒绝后 current.json 的 rag_id 被写上了".to_string());
+        }
+        let failed_ledger: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(opt_home.join("userdata").join("delivery.json")).map_err(err_text)?,
+        )
+        .map_err(err_text)?;
+        if failed_ledger.get("state").and_then(|value| value.as_str()) != Some("failed")
+            || !failed_ledger
+                .get("error")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .contains("测试用坏层")
+        {
+            return Err(format!("闸拒绝后账本没记下失败：{failed_ledger}"));
+        }
+
+        // 闸放行 ⇒ 提交并翻 rag_id、把「补之前」记成回退点、账本转 done。
+        GATE_ALLOW.store(true, Ordering::SeqCst);
+        GATE_CALLS.store(0, Ordering::SeqCst);
+        let filled = crate::runtime_delivery::deliver_optional(
+            &pin,
+            &opt_home,
+            &install,
+            None,
+            Some(scripted_gate),
+            &mut quiet,
+        )
+        .map_err(|err| format!("闸放行后补齐仍失败：{err}"))?;
+        if GATE_CALLS.load(Ordering::SeqCst) != 1 || filled.reused || filled.rag_id != "rag-new" {
+            return Err(format!(
+                "补齐结果不符：{filled:?}，闸跑 {} 次",
+                GATE_CALLS.load(Ordering::SeqCst)
+            ));
+        }
+        if !opt_runtime
+            .join("rag")
+            .join("rag-new")
+            .join("rag-manifest.json")
+            .is_file()
+        {
+            return Err("闸放行后 rag 层没有落位".to_string());
+        }
+        if crate::runtime_delivery::optional_layer_missing(&opt_home) {
+            return Err("补齐提交后仍判定可选层缺席".to_string());
+        }
+        if crate::runtime_delivery::read_layer_ids(&opt_runtime.join("previous.json")).as_ref()
+            != Some(&crate::runtime_delivery::LayerIds {
+                base_id: "base-new".to_string(),
+                application_id: "app-new".to_string(),
+                rag_id: String::new(),
+            })
+        {
+            return Err("补齐时没有把「补之前」记成回退点".to_string());
+        }
+        let done_ledger: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(opt_home.join("userdata").join("delivery.json")).map_err(err_text)?,
+        )
+        .map_err(err_text)?;
+        if done_ledger.get("state").and_then(|value| value.as_str()) != Some("done")
+            || done_ledger.get("stage").and_then(|value| value.as_str()) != Some("已提交")
+        {
+            return Err(format!("补齐成功但账本终态不符：{done_ledger}"));
+        }
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(&root);
+    outcome
+}
+
+fn first_temp_leftover(runtime: &Path, downloads: &Path) -> Option<String> {
+    let prefixes = [".staging-", ".work-", ".gate-", ".current-"];
+    for dir in [runtime, downloads] {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if prefixes.iter().any(|prefix| name.starts_with(prefix)) {
+                return Some(entry.path().display().to_string());
+            }
+        }
+    }
+    None
+}
+
+fn first_delete_failure(failures: Vec<String>) -> Option<String> {
+    failures.into_iter().next()
 }
 
 fn write_fixture(path: &Path, bytes: &[u8]) -> Result<(), String> {

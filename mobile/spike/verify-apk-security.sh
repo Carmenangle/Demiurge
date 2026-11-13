@@ -57,8 +57,8 @@ echo "$NETCFG" | grep -q "localhost"; check $? "明文放行含 localhost"
 
 ENTRIES="$("$UNZIP" -Z1 "$APK" | tr '\\' '/' | tr 'A-Z' 'a-z')"
 echo "$ENTRIES" | grep -q "^assets/chaquopy/app.imy$"; check $? "Chaquopy 后端源码入包（app.imy）"
-if echo "$ENTRIES" | grep -qE "(^|/)(presets|userdata)/|(^|/)backend/data/|(^|/)user_state\.json$"; then
-    fail "包内混入用户数据（presets/userdata/backend/data/user_state.json）"
+if echo "$ENTRIES" | grep -qE "(^|/)(presets|userdata)/|(^|/)backend/data/|(^|/)(user_state|repos)\.json$"; then
+    fail "包内混入用户数据（presets/userdata/backend/data/user_state.json/repos.json）"
 else
     pass "包内无用户数据目录"
 fi

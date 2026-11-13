@@ -41,20 +41,23 @@ export function saveUserState(state: {
   return apiPost<{ ok: boolean }>("/user-state", state);
 }
 
-// 仓库改名：后端重命名输出文件夹 + 重写快照/RAG 里的图片路径
+// 仓库改名：后端重命名输出文件夹 + 重写快照/RAG 里的图片路径。
+// `error` 非空 = 文件夹没改名成功（归属冲突/目标已存在/搬运失败），调用方须回滚显示名。
 export function renameRepoFolder(args: {
   repo_id: string; old_name: string; new_name: string; output_dir: string;
 }) {
-  return apiPost<{ folder: string; snapshot?: number; rag?: number }>(
+  return apiPost<{ folder: string; snapshot?: number; rag?: number; error?: string }>(
     "/user-state/rename-folder", args,
   );
 }
 
 // 删仓库：只删该仓库在「仓库文件夹」里的作品文件夹（快照/会话/图），不碰源库角色卡/世界书。
+// 后端逐字回 `error`（2026-11-05 防误删 ②）：删一半（文件被占用）不再报「删好了」；
+// `deleted=false 且 error=""` 表示「文件夹本来就不存在」，调用方别当失败。
 export function deleteRepoFolder(args: {
   repo_id: string; name: string; output_dir: string;
 }) {
-  return apiPost<{ deleted: boolean; folder: string }>(
+  return apiPost<{ deleted: boolean; folder: string; error: string }>(
     "/user-state/delete-folder", args,
   );
 }

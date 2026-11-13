@@ -29,6 +29,20 @@ export function listWebMaterials(outputDir: string) {
   });
 }
 
+/** 历史素材补登记进资产库（P2-1 之前落盘的只有文件+provenance；幂等，反推前调用）。
+ *  assetIds 空＝补齐盘上全部缺失的。 */
+export function ensureWebMaterialIndex(outputDir: string, assetIds: string[] = []) {
+  return apiPost<{
+    registered: string[];   // 本次补上的
+    already: string[];      // 本来就在的
+    missing: string[];      // 盘上找不到文件的 id
+    failed: string[];       // 补录失败（嵌入后端不可用等，可重跑）
+  }>("/comfyui/web-materials/ensure-index", {
+    output_dir: outputDir,
+    asset_ids: assetIds,
+  });
+}
+
 // P2-1：图站素材市场（pixiv / danbooru）搜索——结果由后端登记受控下载候选，
 // 勾选后走 saveWebMaterial 落盘（安全模型不变）
 export interface WebMaterialSearchItem {

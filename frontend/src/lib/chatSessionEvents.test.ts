@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { ChatStreamEvent } from "../api/chatStreamProtocol";
 import type { ChatMessage } from "../types/chat";
 import {
-  appendAudioSlot, appendImageSlot, appendTransitionSlot, appendUnknownMessages, appendVideoSlotAfter, applyInterruptedStop, bindMediaSlotPrompt, dropMediaSlot, markMediaSlotFailed, markMediaSlotKind, pickFreshAssistantMedia, pruneUnsubmittedMediaSlots, reduceChatStreamEvent, resetMediaSlotForRetry, resolveMediaSlot,
+  appendAudioSlot, appendImageSlot, appendTransitionSlot, appendUnknownMessages, appendVideoSlotAfter, applyInterruptedStop, bindMediaSlotPrompt, dropMediaSlot, markMediaSlotFailed, markMediaSlotKind, overrideRetryPrompt, pickFreshAssistantMedia, pruneUnsubmittedMediaSlots, reduceChatStreamEvent, resetMediaSlotForRetry, resolveMediaSlot, retryPromptText,
   restoreSubmittedMediaSlots,
 } from "./chatSessionEvents";
 
@@ -699,6 +699,57 @@ describe("resetMediaSlotForRetry（2026-08-30 重试即时反馈）", () => {
     ] }];
     expect(resetMediaSlotForRetry(messages, "bot", "s1")).toEqual(messages);
     expect(resetMediaSlotForRetry(messages, "bot", "ghost")).toEqual(messages);
+  });
+});
+
+describe("失败槽编辑提示词（2026-11-10 用户需求）", () => {
+  it("图片槽展示编译成稿；没有成稿时回退原始请求", () => {
+    expect(retryPromptText({
+      type: "media-slot", slotId: "s1", status: "failed", kind: "image",
+      retryArgs: { prompt: "原始P", finalPrompt: "编译后P" },
+    })).toBe("编译后P");
+    expect(retryPromptText({
+      type: "media-slot", slotId: "s2", status: "failed", kind: "image",
+      retryArgs: { prompt: "原始P" },
+    })).toBe("原始P");
+  });
+
+  it("视频槽优先展示视频成稿，不回退成图片成稿", () => {
+    expect(retryPromptText({
+      type: "media-slot", slotId: "s1:video", status: "failed", kind: "video",
+      videoPrompt: "视频成稿",
+      retryArgs: { finalPrompt: "图片成稿", videoPrompt: "视频成稿" },
+    })).toBe("视频成稿");
+    expect(retryPromptText({
+      type: "media-slot", slotId: "s1:move", status: "failed", kind: "video",
+      retryArgs: { finalPrompt: "图片成稿", transitionVideoPrompt: "转场成稿" },
+    })).toBe("转场成稿");
+  });
+
+  it("图片槽只覆盖成稿字段：有 finalPrompt 改 finalPrompt，没有则改原始 prompt", () => {
+    expect(overrideRetryPrompt(
+      { prompt: "原始P", finalPrompt: "编译后P" }, "编译后P", "新P", "image",
+    )).toEqual({ prompt: "原始P", finalPrompt: "新P" });
+    expect(overrideRetryPrompt(
+      { prompt: "原始P" }, "原始P", "新P", "image",
+    )).toEqual({ prompt: "新P" });
+  });
+
+  it("视频槽按当前展示认领字段：转场槽只改 transitionVideoPrompt，正片槽只改 videoPrompt", () => {
+    const snapshot = {
+      finalPrompt: "图片成稿",
+      videoPrompt: "正片成稿",
+      transitionVideoPrompt: "转场成稿",
+    };
+    expect(overrideRetryPrompt(snapshot, "转场成稿", "新转场", "video"))
+      .toEqual({ ...snapshot, transitionVideoPrompt: "新转场" });
+    expect(overrideRetryPrompt(snapshot, "正片成稿", "新正片", "video"))
+      .toEqual({ ...snapshot, videoPrompt: "新正片" });
+  });
+
+  it("空编辑/坏快照不改写", () => {
+    expect(overrideRetryPrompt({ prompt: "P" }, "P", "  ", "image")).toEqual({ prompt: "P" });
+    expect(overrideRetryPrompt(null, "P", "新P", "image")).toBeNull();
   });
 });
 

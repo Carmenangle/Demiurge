@@ -168,19 +168,45 @@ def answer_node(state: AgentState) -> dict:
         text = _apply_regex(ctx, text, Placement.USER_INPUT, is_prompt=True, depth=0,
                             skip_depth_gated=True)
         run_trace.emit(ctx, "input.processed", agent="answer", processed_input=text)
+        chat_room_mode = str(ctx.get("interaction_mode") or "story") != "story"
         system = _agent_system(
             ctx, _builtin(ctx, "answer", "systemPrompt", builtin_agents.ANSWER_SYSTEM),
         )
+        # 2026-11-09 1:1 聊天＝通用 Agent + 人设。
+        # 2026-11-10：聊天人设块放到通用助手提示**之后**（最靠近生成）——实测内置
+        # 「你是通用 AI 助手…请用简洁中文回答」放在末尾会压过角色口吻，连聊天动作
+        # 选择行也被当成无关元数据忽略（用户「补一张给我」仍只回文字）。
+        persona_block = str(ctx.get("_chat_persona_block") or "").strip()
+        if persona_block:
+            if chat_room_mode:
+                system = system + "\n\n" + persona_block
+            else:
+                system = persona_block + "\n\n" + system
         # M3（2026-09-06）：正常对话长期事实注入（recency-first，同 M2；缺失不阻断）
-        try:
-            from app.services import chat_facts as _chat_facts
-            _thread = ctx.get("repo_id") or ctx.get("thread_id") or ""
-            _turn = _next_story_turn(ctx)
-            _facts_block = _chat_facts.render_facts_block(_thread, _turn)
-            if _facts_block:
-                system += "\n\n" + _facts_block
-        except Exception as exc:  # noqa: BLE001 [EXC-留痕] 记忆注入永不阻断对话，但本轮缺事实记忆
-            _LOG.warning("事实记忆注入失败（对话继续，但本轮回答缺 chat_facts 块）: %s", exc)
+        # 聊天室是独立会话线：不得读写剧情侧长期事实（否则聊天内容会污染作品记忆）。
+        if not chat_room_mode:
+            try:
+                from app.services import chat_facts as _chat_facts
+                _thread = ctx.get("repo_id") or ctx.get("thread_id") or ""
+                _turn = _next_story_turn(ctx)
+                _facts_block = _chat_facts.render_facts_block(_thread, _turn)
+                if _facts_block:
+                    system += "\n\n" + _facts_block
+            except Exception as exc:  # noqa: BLE001 [EXC-留痕] 记忆注入永不阻断对话，但本轮缺事实记忆
+                _LOG.warning("事实记忆注入失败（对话继续，但本轮回答缺 chat_facts 块）: %s", exc)
+        if chat_room_mode:
+            # 2026-11-10 用户口径：角色要有自主性——自主发照片、自主更新头像。
+            # 媒体动作提示放在系统提示最末（最靠近生成），只说明可用动作与当前装扮，
+            # 发不发由角色自己决定；不做回复后的机械补标记。
+            from app.services import chat_room as _chat_room
+            _members = _chat_room.resolve_members(ctx, mode="chat")
+            _speaker = _members[0] if _members else ""
+            _reminder = _chat_room.media_action_reminder(ctx, _speaker, query=text)
+            if _reminder:
+                system += "\n\n" + _reminder
+            # 用户明确要照片时，最后再压一次「只写拍给你看不算完成」。
+            system += _chat_room.explicit_media_hint(ctx, text)
+            system += _chat_room.repeat_guard(ctx, _speaker, user_text=text)
         user = agent_context.history_text(ctx) + text
         ans_temp = _builtin(ctx, "answer", "temperature", builtin_agents.ANSWER_TEMPERATURE)
         run_trace.emit(ctx, "model.request", agent="answer", model=ctx["chat_model"],
@@ -193,24 +219,75 @@ def answer_node(state: AgentState) -> dict:
             **_builtin_sampling(ctx, "answer"),
         )
         reply = _apply_regex(ctx, reply or "（无回复）", Placement.AI_OUTPUT, is_prompt=False, depth=0)
-        run_trace.emit(ctx, "model.response", agent="answer", content=reply)
-        # M3（2026-09-06）：门控抽取长期事实（每 CADENCE 回合一次，搭本线程模型；
-        # 失败静默跳过不阻断回复交付——抽取是增强不是依赖）
-        try:
-            from app.services import chat_facts as _chat_facts
-            _thread = ctx.get("repo_id") or ctx.get("thread_id") or ""
-            _turn = _next_story_turn(ctx)
-            _window = agent_context.history_text(ctx) + "\n\n用户：" + text + "\n助手：" + reply
-            _written = _chat_facts.maybe_extract(
-                _llm.chat, _thread, window_text=_window, turn=_turn,
-                chat_base=ctx.get("chat_base") or "", chat_key=ctx.get("chat_key") or "",
-                chat_model=ctx.get("chat_model") or "", proxy=ctx.get("chat_proxy") or "",
+        if chat_room_mode:
+            # 聊天室防拦截：预设让模型给敏感词加 @()@ 标记，流式正文落盘/展示前还原。
+            from app.services import chat_room as _chat_room
+            _members = _chat_room.resolve_members(ctx, mode="chat")
+            _speaker = _members[0] if _members else ""
+            reply = _chat_room.restore_guard_markers(
+                ctx, reply, speaker=_speaker, query=text,
             )
-            if _written:
-                run_trace.emit(ctx, "chat_facts.written", thread=_thread, turn=_turn, count=1)
-        except Exception as exc:  # noqa: BLE001 - 抽取失败不阻断回复
-            run_trace.emit(ctx, "chat_facts.error", error=str(exc))
-        return {"result_text": reply, "trace": trace, "_streamed_result": streamed}
+            # 1:1 也按聊天室口径清洗：模型常自己带【角色名】/「角色名：」前缀，
+            # 不剥掉就不像聊天气泡（2026-11-10 实锤）。
+            reply = _chat_room._clean_reply(reply, _speaker)
+            if str(ctx.get("interaction_mode") or "") == "chat":
+                # 私聊动作里误把用户写成「他」⇒「你」；群聊不碰（可能真指别人）。
+                reply = _chat_room._fix_user_reference(reply)
+        media_request = None
+        if persona_block and (
+                ctx.get("comfy_illustrate") or ctx.get("comfy_video") or ctx.get("illustrate")):
+            from app.services import chat_room
+            reply, media_request = chat_room._split_media_request(reply)
+            if not media_request and chat_room_mode:
+                # 第二道判断：主模型漏写标记（如「拍一张给你留着」只写字）时，让角色
+                # 自己再判断一次；不做关键词补标记。
+                media_request = chat_room.judge_media_action(ctx, _speaker, text, reply)
+            if chat_room_mode:
+                media_request = chat_room._promote_special_outfit_avatar(
+                    ctx, _speaker, media_request,
+                )
+                media_request = chat_room.anchor_media_request(
+                    ctx, _speaker, media_request,
+                )
+            if not reply and media_request:
+                reply = "（发来一段视频）" if media_request.get("kind") == "video" else "（发来一张自拍）"
+        run_trace.emit(ctx, "model.response", agent="answer", content=reply)
+        if chat_room_mode and reply.strip():
+            # 角色已回复：排下一次「用户不回复时的追问」（只记节奏，不额外调模型）。
+            try:
+                from app.services import chat_followup
+                chat_followup.note_bot(
+                    str(ctx.get("thread_id") or ""), bubbles=1,
+                    max_followups=ctx.get("chat_followup_max"),
+                    max_reopens=ctx.get("chat_reopen_max"),
+                    cadence=ctx.get("chat_cadence"),
+                )
+            except Exception as exc:  # noqa: BLE001 [EXC-留痕] 节奏状态写失败不影响本轮回复
+                run_trace.emit(ctx, "chat.followup_state_error", error=str(exc)[:200])
+        # M3（2026-09-06）：门控抽取长期事实（每 CADENCE 回合一次，搭本线程模型；
+        # 失败静默跳过不阻断回复交付——抽取是增强不是依赖）。
+        # 聊天室独立线：不写剧情侧事实记忆。
+        if not chat_room_mode:
+            try:
+                from app.services import chat_facts as _chat_facts
+                _thread = ctx.get("repo_id") or ctx.get("thread_id") or ""
+                _turn = _next_story_turn(ctx)
+                _window = agent_context.history_text(ctx) + "\n\n用户：" + text + "\n助手：" + reply
+                _written = _chat_facts.maybe_extract(
+                    _llm.chat, _thread, window_text=_window, turn=_turn,
+                    chat_base=ctx.get("chat_base") or "", chat_key=ctx.get("chat_key") or "",
+                    chat_model=ctx.get("chat_model") or "", proxy=ctx.get("chat_proxy") or "",
+                )
+                if _written:
+                    run_trace.emit(ctx, "chat_facts.written", thread=_thread, turn=_turn, count=1)
+            except Exception as exc:  # noqa: BLE001 - 抽取失败不阻断回复
+                run_trace.emit(ctx, "chat_facts.error", error=str(exc))
+        return {
+            "result_text": reply,
+            "trace": trace,
+            "_streamed_result": streamed,
+            **({"media_request": media_request} if media_request else {}),
+        }
     except roleplay_turn.RoleplayInterrupted as exc:
         # 用户主动停止（2026-09-04 与 roleplay_node 对齐）：中断≠失败。
         # 此前 answer_node 只捕 Exception，用户点停止会显示成「回答失败：用户已停止生成…」。

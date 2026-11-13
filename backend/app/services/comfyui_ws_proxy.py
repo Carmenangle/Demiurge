@@ -1,9 +1,6 @@
 """ComfyUI 进度 WebSocket 代理：把「浏览器直连 ComfyUI /ws」改为经本后端中继。
 
-为什么存在（M7 手机端联机）：CSP `connect-src` 只放行回环 WS、Android 网安配置明文
-仅回环且只约束 WebView 栈——前端直连 LAN PC 的 ComfyUI 进度流被双重阻断；后端
-Python socket 不受两者约束。PC 端默认不走此路径（前端构建期开关
-VITE_COMFY_PROGRESS_PROXY，PC 构建不设 ⇒ 直连行为逐字不变）。
+手机与 PC 的非回环 ComfyUI 进度经同源后端中继，避免放宽 WebView/CSP 的出站面。
 
 安全合同：
 - 目标 url 与全部 /api/comfyui 端点同口径过 url_guard.validate_comfyui_url
@@ -11,7 +8,7 @@ VITE_COMFY_PROGRESS_PROXY，PC 构建不设 ⇒ 直连行为逐字不变）。
 - WebSocket 连接不经过 local_auth 的 http 中间件——令牌校验在本端点内自做
   （X-Demiurge-Token 头或同源 cookie，与 http 路径等价）；未启用令牌时零校验。
 - WS 升级同样不经过 main 的 http 中间件（回环门禁/能力闸都是 @app.middleware("http")），
-  ⇒ 远程对端在这里自做 remote_gate 判定（与 main._remote_capability_gate 同判据）：
+  ⇒ 先复用 request_guard.inbound_verdict 校验 client/Origin/Host，再对远端复用 remote_gate：
   裸 LAF_ALLOW_REMOTE（未设令牌）的远端一律 4403，且**在建连上游之前**就关掉。
 - 出站连接绝不携带本机令牌（outbound_headers 只用于回环自取图；令牌不得流向
   ComfyUI 的访问面）。
@@ -25,6 +22,7 @@ loop.call_soon_threadsafe 推回事件循环。
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import threading
 from urllib.parse import quote
@@ -34,7 +32,7 @@ import websocket as ws_client  # pip 包名 websocket-client；手机 wheelhouse
 from fastapi import WebSocket
 
 from app.config import COMFYUI_BASE_URL
-from app.services import local_auth, remote_gate
+from app.services import local_auth, remote_gate, request_guard
 from app.services.url_guard import validate_comfyui_url
 
 UPSTREAM_CONNECT_TIMEOUT = 5.0
@@ -65,7 +63,17 @@ async def relay(ws: WebSocket, *, url: str = "", client_id: str = "") -> None:
     ):
         await ws.close(code=_CLOSE_UNAUTHORIZED)
         return
-    if remote_gate.is_remote(ws.client.host if ws.client else ""):
+    client_host = ws.client.host if ws.client else ""
+    detail = request_guard.inbound_verdict(
+        client_host=client_host,
+        origin=ws.headers.get("origin", ""),
+        host_header=ws.headers.get("host", ""),
+        allow_remote=os.environ.get("LAF_ALLOW_REMOTE", "") == "1",
+    )
+    if detail is not None:
+        await ws.close(code=_CLOSE_FORBIDDEN_TARGET)
+        return
+    if remote_gate.is_remote(client_host):
         detail = remote_gate.verdict(
             _RELAY_PATH, None, token_enabled=bool(local_auth.env_token()))
         if detail is not None:
@@ -92,8 +100,14 @@ async def relay(ws: WebSocket, *, url: str = "", client_id: str = "") -> None:
 
     def _pump_upstream() -> None:
         try:
+            # ComfyUI 目标只可能是回环或白名单 LAN，绝不能被 HTTP_PROXY/HTTPS_PROXY
+            # （Clash 等本机代理）接管。websocket-client 会读 http_proxy 环境变量把
+            # 127.0.0.1 也隧道化，代理拒绝后整条中继以 1011 关闭；而它的
+            # http_no_proxy 只在 http_proxy_host 为真时才被读取，故配一个哨兵主机
+            # 让 get_proxy_info 对任何目标都直接返回「不走代理」。
             conn = ws_client.create_connection(
-                target, timeout=UPSTREAM_CONNECT_TIMEOUT, enable_multithread=True)
+                target, timeout=UPSTREAM_CONNECT_TIMEOUT, enable_multithread=True,
+                http_proxy_host="proxy-disabled", http_no_proxy=["*"])
         except Exception:  # noqa: BLE001 — 上游不可达：整条中继结束，细节不上报客户端
             _offer(None)
             return

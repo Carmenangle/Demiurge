@@ -254,7 +254,7 @@ def test_init_db_migrates_legacy_task_table(tmp_path, monkeypatch):
             )
             """
         )
-    monkeypatch.setattr(db, "get_connection", _connection_factory(path))
+    monkeypatch.setattr(db, "_raw_connection", _connection_factory(path))
 
     db.init_db()
 

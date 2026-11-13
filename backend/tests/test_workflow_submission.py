@@ -48,6 +48,33 @@ def test_模板提交集中完成读取注入和上游提交(tmp_path, monkeypat
     assert order == ["release", "submit"]
 
 
+def test_预编译_api_workflow_优先于_source_path(monkeypatch):
+    api = {"1": {"class_type": "SaveImage", "inputs": {}}}
+    monkeypatch.setattr(workflow_submission.template_store, "get_template", lambda _id: {
+        "source_path": "does-not-exist.json", "api_workflow": api,
+        "exposed": [], "prompt_node_id": "",
+    })
+    _ready(monkeypatch)
+    captured = {}
+
+    def fake_submit(_url, value, _client_id):
+        captured["api"] = value
+        return "prompt-api"
+
+    monkeypatch.setattr(workflow_submission.reranker, "release_accelerator_memory", lambda: None)
+    monkeypatch.setattr(workflow_submission.comfyui_client, "submit_prompt", fake_submit)
+
+    result = workflow_submission.submit_template(
+        "template-api", {}, "", "http://127.0.0.1:8188",
+    )
+
+    assert result["ok"] is True
+    assert result["prompt_id"] == "prompt-api"
+    assert captured["api"]["1"]["class_type"] == "SaveImage"
+    # 模板里的快照不能被提交链就地改写（下次提交仍从原始快照复制）。
+    assert api["1"]["class_type"] == "SaveImage"
+
+
 def test_模板缺少必填输入返回422(tmp_path, monkeypatch):
     source = tmp_path / "workflow.json"
     source.write_text("{}", encoding="utf-8")

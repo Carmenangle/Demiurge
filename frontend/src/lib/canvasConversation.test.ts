@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  conversationMediaUrls, conversationTurnUrls, filterGensByConversation,
+  conversationMediaUrls, filterGensByConversation,
   isBoundInspirationCard, isStoryNode, messageMedia, normalizeMediaUrl, projectStoryNodes, projectWorkflowTools,
   pruneUnboundInspirationCards,
 } from "./canvasConversation";
@@ -31,23 +31,6 @@ describe("conversationMediaUrls", () => {
     expect(urls.has("path:b.png")).toBe(true);
     expect(urls.has("url:/v.mp4")).toBe(true);
     expect(urls.has("path:c.wav")).toBe(true);
-  });
-});
-
-describe("conversationTurnUrls", () => {
-  it("从持久化 history turns 提取媒体 URL（归一化）", () => {
-    const turns = [
-      { role: "user", content: "hi", images: ["/local-view?path=a.png"] },
-      { role: "assistant", content: "ok", images: ["http://x/v.mp4"] },
-      { role: "user", content: "no img" },
-    ];
-    const urls = conversationTurnUrls(turns);
-    expect(urls.has("path:a.png")).toBe(true);
-    expect(urls.has("url:/v.mp4")).toBe(true);
-    expect(urls.size).toBe(2);
-  });
-  it("空 turns 返回空集", () => {
-    expect(conversationTurnUrls([]).size).toBe(0);
   });
 });
 

@@ -51,16 +51,16 @@ def test_用户增词生效(style_config_file):
 
 
 def test_用户删词生效(style_config_file):
-    style_config_file({"removed": ["赋能"]})
+    style_config_file({"removed": ["掌心里"]})
     cfg = prose_style.load_config()
-    assert "赋能" not in prose_style.effective_phrases(cfg)
-    assert prose_style.lint("他被赋能了。", banned_phrases=prose_style.effective_phrases(cfg)) == []
+    assert "掌心里" not in prose_style.effective_phrases(cfg)
+    assert prose_style.lint("她摊开手，掌心里全是汗。", banned_phrases=prose_style.effective_phrases(cfg)) == []
 
 
 def test_与内置重复的增词去重(style_config_file):
-    style_config_file({"extra": ["赋能", "新词"], "removed": []})
+    style_config_file({"extra": ["掌心里", "新词"], "removed": []})
     phrases = prose_style.effective_phrases(prose_style.load_config())
-    assert phrases.count("赋能") == 1
+    assert phrases.count("掌心里") == 1
 
 
 # ── 注入段编译 ───────────────────────────────────────────────────────────────
@@ -68,7 +68,7 @@ def test_与内置重复的增词去重(style_config_file):
 def test_默认注入段含文风要求与词表():
     seg = prose_style.style_prompt_segment()
     assert "【文风要求】" in seg
-    assert "「赋能」" in seg
+    assert "「掌心里」" in seg
     assert len(seg) < 600  # 约束段控制在短量级，不吃正文额度
 
 
@@ -78,16 +78,16 @@ def test_开关关闭注入段为空(style_config_file):
 
 
 def test_注入段跟随用户增删(style_config_file):
-    style_config_file({"extra": ["自创套路"], "removed": ["赋能"]})
+    style_config_file({"extra": ["自创套路"], "removed": ["掌心里"]})
     seg = prose_style.style_prompt_segment(prose_style.load_config())
     assert "「自创套路」" in seg
-    assert "「赋能」" not in seg
+    assert "「掌心里」" not in seg
 
 
 # ── evaluate 与开关贯通 ──────────────────────────────────────────────────────
 
 def test_evaluate开关关闭跳过全部文风检测():
-    body = "这计划简直是完美的闭环。难道就这样算了？不，绝不。"
+    body = "她摊开手，掌心里全是汗。难道就这样算了？不，绝不。"
     result = narrative_ci.evaluate(body, turn=1, style_config={"enabled": False})
     assert not [item for item in result if item["source"] == "prose_style"]
     # 默认（无 style_config）仍然检测

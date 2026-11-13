@@ -509,6 +509,7 @@ function ChroniclePane({ chron, outputDir, repoId, chat, busy, setBusy, setErr, 
       const failed = fill.failed_batches ?? [];
       const skipped = fill.covered_skipped ?? [];
       setNote(`${prefix}缺口补跑：处理 ${fill.processed ?? 0} 层、新增纪要 ${fill.chronicles ?? 0} 条`
+        + (fill.key_events ? `、关键事件 ${fill.key_events} 条` : "")
         + (skipped.length
           ? `；已跳过 ${skipped.length} 批已有纪要的层（${skipped.map(([s, e]) => range(s, e)).join("、")}）`
           : "")

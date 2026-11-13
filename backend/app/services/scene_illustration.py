@@ -438,6 +438,7 @@ def _anchors_cross_scene_boundary(text: str, first: str, second: str) -> bool:
 
 def illustration_scene_excerpt(
     text: str, requested_anchor: str = "", *, subjects: list[str] | None = None,
+    expand_context: bool = True,
 ) -> str:
     """提取锚点所在高潮段作为 Profile 内容真源，避免重传整篇回复。
 
@@ -471,6 +472,9 @@ def illustration_scene_excerpt(
     if needle:
         for index, paragraph in enumerate(paragraphs):
             if needle in paragraph:
+                if not expand_context:
+                    # 分镜：只要锚点所在那一段；回扫动作链会把后续镜拉回场景起点。
+                    return paragraph
                 return _visual_action_context(paragraphs, index, subjects=subjects)
         normalized_needle = re.sub(r"\s+", "", needle)
         scored = [
@@ -492,6 +496,8 @@ def illustration_scene_excerpt(
                 fallback_illustration_anchor(source),
             ).strip()
             return (fallback or paragraphs[-1])[-2500:]
+        if not expand_context:
+            return paragraphs[best_index]
         return _visual_action_context(
             paragraphs, best_index, subjects=subjects,
         )
@@ -1041,11 +1047,23 @@ def illustration_anchor_offset(text: str, requested_anchor: str = "") -> int | N
 # 程序侧固定拼接、用户改不到（一改就是全链静默失败）。
 
 # 单条锚点的字段。⚠ 2026-09-24 **第 57 刀**新增 `score`（多批生图的排序分）。
+# 2026-11-09 新增 `shot_type` / `transition_desc`（全局模式分镜序列的镜头类型与运镜描述）；
+# 同日「覆盖式分镜」再增 `framing` / `camera_motion` / `subject_motion` / `sound_cue`
+# （景别、机位运动、主体运动、触发声/事件）——固定机位也必须写主体怎么动。
 # `ANCHOR_INTENT_FIELDS` 保持为**单条**字段集：老代码与测试按「逐字段出现在合同正文里」
 # 校验它（`test_判据合同…`）⇒ 加字段必须同时把该字段写进合同文本，否则那条锁会红。
-ANCHOR_INTENT_FIELDS = ("anchor", "composition", "subjects", "reason", "score")
+ANCHOR_INTENT_FIELDS = (
+    "anchor", "composition", "subjects", "reason", "score", "paragraphs",
+    "shot_type", "transition_desc", "image_timing", "locale",
+    "framing", "camera_position", "camera_motion", "subject_motion", "sound_cue",
+    "video_beats",
+)
 # 顶层键：判据一次输出**一整个列表**（多批生图的地基，第 57 刀）。
 ANCHOR_INTENTS_KEY = "anchors"
+# 覆盖式分镜的**关键帧**硬上限：每个关键帧只出一张图，近景写进该帧的 video_beats。
+# 2026-11-09 用户口径「文章说了什么就拍了什么」：长正文不能只取 8 帧，抬到 12 帧；
+# 仍按正文序覆盖，不做分数裁剪。
+STORYBOARD_MAX_SHOTS = 12
 
 # 只读输出合同：由 anchor_intent_system() 拼在用户判据之后，前端只读展示。
 # 字段名从 ANCHOR_INTENT_FIELDS 生成，防两处漂移。
@@ -1060,19 +1078,105 @@ ANCHOR_INTENT_CONTRACT = (
     "字段固定为 " + "、".join(ANCHOR_INTENT_FIELDS) + "，只输出严格 JSON，"
     "不要 markdown 代码块、不要任何解释文字，字符串一律用英文半角双引号：\n"
     '{"anchors": [{"anchor": "...", "composition": "...", "subjects": ["..."], '
-    '"reason": "...", "score": 0}]}\n'
-    "· anchors：本段剧情里**所有**值得配图的时刻，按它们在正文里出现的**先后**排列"
-    "（**不要**按分数排序）；一个可画的时刻都没有就输出空数组 [];\n"
+    '"reason": "...", "score": 0, "paragraphs": [0], "shot_type": "establish|cut|move|move_single", '
+    '"transition_desc": "", "image_timing": "start|mid|end", "locale": "", "framing": "", '
+    '"camera_position": "", "camera_motion": "", '
+    '"subject_motion": "", "sound_cue": "", "video_beats": ['
+    '{"duration_s": 3, "cut": false, "framing": "", "camera_position": "", "camera_motion": "", '
+    '"subject_motion": "", "description": "", "sound_cue": "", "viewpoint": "pov|observer"}]}]}\n'
+    "· anchors：本段剧情的**关键帧清单**（按自然段逐段覆盖，数量随段落数，**不设 12 上限**），"
+    "按正文先后排列（**不要**按分数排序）。"
+    "每个关键帧只生成**一张图**；同一角色/场景的多个近景（手/胸/背/腰/脚）**不要再单独出图**，"
+    "写进该关键帧的 video_beats，用同一张图生成一支多镜头视频。"
+    "必须覆盖：开场环境、人物入场、关键动作、结尾；一个可画的时刻都没有就输出 [];\n"
+    "· **覆盖账本 `paragraphs`**：每个关键帧必须写它覆盖的自然段号（输入里的 `[段 N]`），"
+    "例如 `[0,1]`；**所有自然段必须至少被一个关键帧覆盖**。纯对白段可以写进相邻关键帧的"
+    " video_beats，但段号仍要列进该帧的 `paragraphs`，并在 beats 写口型。"
+    "⛔ 单个关键帧最多覆盖 4 个自然段、最多 4 拍；超过 4 段或 4 拍必须拆成多个关键帧。\n"
+    "· **逐段覆盖（文章说了什么就拍什么）**：按自然段顺序，每个有画面/动作/环境/时间变化的"
+    "段落都必须落到某一关键帧或其 video_beats，**不得跳段**；环境与时间推进句（如「剑场的"
+    "半个下午果然比前几日安静」「收剑时天边刚起暗色」）必须成为 establish 或写进相邻帧的"
+    " beats（环境/光线变化），不能只留在正文里；\n"
+    "· **对白必须拍说话动作**：即使不生成音频、sound_cue 留空，也要在 video_beats 写清"
+    "「开口 / 嘴唇开合 / 侧脸口型 / 喉部动作」等可拍动作，**不能省略说话动作**；\n"
+    "· **细节不丢**：正文写到的动作、道具、视线、光线、时间变化按顺序写进 beats；"
+    "不要用抽象情绪替代可拍细节（「她很紧张」⇒ 写「指尖攥紧裙摆、呼吸变浅」）；\n"
+    "· **anchor 必须是画面动作句**：不能拿纯对白/引号内台词当 anchor；"
+    "对白只写进 beats 的口型（开口/嘴唇开合）；\n"
+    "· **直白镜头语言**：beats 写可见的光线/位置/动作，不照抄拟人/比喻"
+    "（「晨光爬上树冠」⇒「晨光照在树冠上」）；每段 beats 只写本镜时间窗口内的画面，"
+    "不得把其他段落的对话/动作塞进来；\n"
+    "· **图片1是本镜第 1 段的起始画面**：anchor 与图片描述写第 1 段开始时的构图/动作；"
+    "若只能提供中段/尾帧画面，`image_timing` 必须写 mid/end，并在第 1 段说明图片之前发生什么；\n"
+    "· **环境/时间变化单独成镜**：剑场、宫道、天色、光线等环境变化要成为 establish 关键帧，"
+    "或由上一镜的尾段承载；⛔ 不要把环境塞进人物关键帧的第 0 段、人物动作写在后面——"
+    "这样首帧图与视频开头对不上；\n"
+    "· **每帧写 `locale`**：该镜所在地点（从正文/所在链取），**不要沿用结尾场景**；"
+    "缺失时下游回落全局 locale；\n"
+    "· **每一拍必须写 `camera_position`**：机位方位 + 高度（左/右/前/后、平视/俯视/仰视，"
+    "中文自由文本），固定机位也要写；`camera_motion` 只写运动方式，两者不得互相替代；\n"
+    "· **身体部位必须带归属**：镜头角色（第一人称叙事者）写「镜头角色的XX」，"
+    "其他角色写「角色名的XX」；⛔ 不得只写「柱身/胸/手/腰」这类没有归属的部位名；\n"
+    "· **动作流程完整**：连续动作（进门→搁剑→走向石案→坐下→摊单）按顺序写进 beats，"
+    "第 1 段从流程起点开始，不得只留下半段；原文写「凑过去看」用推近/跟移，"
+    "不要改成硬切到特写；\n"
+    "· **性描写段落不得跳过**：按接触/动作分段给关键帧或 beats，保持逐段覆盖；"
+    "可以含蓄构图，但不允许整段消失；\n"
+    "· **第一帧必须是 establish（环境空镜）**：先交代空间与氛围（场景、道具、光线、"
+    "群演/宠物在做什么），此时主要人物可以不出现；不要用人物特写开场;\n"
+    "· **人物入场帧＝全身像关键帧**：video_beats 里按时间写「0–3s 沿红毯向前走 → "
+    "3–6s 硬切到她肩头俯拍胸部 → …」；近景只用这一张全身图，不另生图。"
+    "只有正文明确写到镜头连续穿过空间时才用 move / move_single；\n"
     "· anchor：原文中逐字出现的一句话（含标点、不含换行），必须能在正文里原样找到——"
     "归一化比对时忽略空白与各类引号，但**不做模糊匹配**，找不到即**该条**作废"
     "（其余条目照常采用）；\n"
-    "· composition：特写 / 中景 / 全身 / 双人同框 / 多人同框 / 远景；\n"
-    "· subjects：锚点那一刻画面上应出现的主要角色名；\n"
+    "· composition：特写 / 中景 / 全身 / 双人同框 / 多人同框 / 远景 / 环境空镜；\n"
+    "· subjects：关键帧画面上应出现的主要角色名；establish 可只写群演/宠物，没有人物就写 [];\n"
     "· reason：一句话说明为什么选这里（不超过 40 字）；\n"
     "· score：0–100 的整数，这一帧对读者的价值有多大（越大越该出图）。"
-    "同一段剧情里各锚点的分数必须**彼此可比**——不要都给同一个数，否则无法排序。\n"
+    "同一段剧情里各关键帧的分数必须**彼此可比**——不要都给同一个数。\n"
+    "· shot_type：关键帧之间的衔接类型。establish＝环境空镜；cut＝本关键帧单图延伸，下一关键帧"
+    "硬切进入；move＝本关键帧到下一关键帧的双图运镜（下一帧必须存在、同场景、"
+    "transition_desc 非空）；move_single＝本关键帧单图运镜（transition_desc 必填）。"
+    "拿不准就写 cut，宁硬切不乱晃。\n"
+    "· transition_desc：move / move_single 必填；establish 若机位在动也必填。≤200 字。\n"
+    "· framing / camera_motion / subject_motion / sound_cue：关键帧级别的默认景别、机位运动、"
+    "主体运动与触发声；若该帧有 video_beats，以 beats 内字段为准。"
+    "subject_motion **固定机位也必须写**（走路、呼吸起伏、胸口随步伐起伏…）。\n"
+    "· **video_beats**：本关键帧视频内部的时间轴，1–4 段；每段："
+    "`duration_s`（该段秒数，1–8，合计 5–15s）、`cut`（true＝本段开头硬切到新机位，"
+    "false＝延续上一段）、`framing`（景别/角度）、`camera_motion`（机位怎么动）、"
+    "`subject_motion`（主体怎么动，固定机位也必须有）、`description`（该段画面内容/过渡）、"
+    "`sound_cue`（触发声/事件，可空）、`viewpoint`（pov＝镜头就是叙事者本人的眼睛，"
+    "只能拍他所在位置看得到的东西，camera_position 只写「叙事者视线·角度」，不得出现他的全身；"
+    "observer＝第三人称旁观机位，可以写「她右后方/床尾/贴地」这类叙事者不在的位置，"
+    "叙事者不出现在画面里；拿不准就看这一段机位是不是叙事者本人站的位置）。\n"
+    "⛔ **每段必须写成可拍画面，不是剧情摘要**：`description` 写 60–120 字可见画面"
+    "（环境/道具、光线方向、背景活动、与上一段或图片1的连续性），"
+    "`subject_motion` 写「起始姿态 → 动作 → 终点」，`camera_position` 写「机位在哪 + 朝哪 + 高度」；"
+    "不许只写「她向前走」「气氛安静」「她停下」这种没有画面信息的短句。\n"
+    "⛔ **只扩写原文已有的事实**：不得新增原文没有的天气、光源方向、道具、颜色、数量；"
+    "原文说「新抄的席次单」就不能写成「泛黄的席次单」，原文没写光从哪来就只写「午后日光」"
+    "或「室内光」，不编造「从右侧斜射」。\n"
+    "⛔ **图片所在拍的第一句写「起帧对齐图片1：<图片里的姿态>」**，再写这一段怎么动；"
+    "不能让图片那一拍从另一个姿态开始（图片是站定，就不能从「从画面深处走来」开始）。\n"
+    "示例（两拍，注意密度）：\n"
+    "  {\"duration_s\":3,\"cut\":false,\"framing\":\"全身，主体占画面中段偏右\","
+    "\"camera_position\":\"红毯前端·低机位仰视（机位在红毯左侧一步，眼高约1.6m，朝她全身）\","
+    "\"camera_motion\":\"缓慢横移跟拍，随她向前走\","
+    "\"subject_motion\":\"她双脚交替向前，裙撑随步伐左右摆，右手护着腰侧，头纱从发顶垂到腰后\","
+    "\"description\":\"午后光从破窗斜切进仓库，红毯两侧的蛮啾停手转头；她银发高马尾随步伐晃动，"
+    "白婚纱的薄纱在脚踝翻浪，靴底踩过红毯没有声音；背景木台与铁桶白花保持静止\","
+    "\"sound_cue\":\"裙纱摩擦、远处啾声\",\"viewpoint\":\"observer\"}\n"
+    "  {\"duration_s\":3,\"cut\":true,\"framing\":\"中近景，胸口占画面下半\","
+    "\"camera_position\":\"她胸前·平视（机位在红毯侧前方，略低于胸口）\","
+    "\"camera_motion\":\"缓慢推近\","
+    "\"subject_motion\":\"她继续向前，胸口随呼吸起伏，蕾丝领口被撑起，薄纱上洇出深色湿痕\","
+    "\"description\":\"切到胸前近景；破窗的光落在蕾丝边缘，背景蛮啾模糊成色块；"
+    "她下颌微抬，呼吸加重，薄纱随步伐轻颤\",\"sound_cue\":\"呼吸声、裙纱细响\","
+    "\"viewpoint\":\"observer\"}\n"
     "（以上字段名与 anchor 校验规则是程序解析合同，不由判据决定；判定不合规时本次锚点"
-    "回退中文词表，不会中断出图。）"
+    "回退中文词表，不会中断出图；shot_type 缺失/非法按 cut 处理。）"
 )
 
 _THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>[\s\S]*?</think>", re.I)
@@ -1096,12 +1200,32 @@ _ANCHOR_MATCH_STRIP_RE = re.compile(r"[\s，。,.！？!?、；;：:…'\"“”
 _ANCHOR_NEEDLE_MATCH_RATIO = 0.6
 
 
-def anchor_intent_system(rubric: str) -> str:
-    """拼一次判据调用的 system：用户判据 + 只读输出合同（顺序不可颠倒）。"""
+STORYBOARD_JUDGE_OVERRIDE = (
+    "\n\n【分镜模式覆盖（优先于上文判据）】\n"
+    "本模式不是「选一张高潮图」，上文判据中与以下冲突的排除项一律不适用：\n"
+    "· 「带引号的成句对白只有声音、没有画面」不成立：对白必须拍说话动作"
+    "（开口 / 嘴唇开合 / 口型），可以只写口型、不写声音；\n"
+    "· 「动作只取收束的一瞬」不成立：动作过程按「进门→搁剑→走向石案→坐下→摊单」的顺序"
+    "分段，不得只留下半段；原文写「凑过去看」用推近/跟移，不要硬切到特写；\n"
+    "· 环境/时间推进句（剑场安静、天边起暗色）必须单独成 establish 镜或写进相邻帧 beats；\n"
+    "· 性描写段落不得跳过，按接触/动作分段给关键帧或 beats；\n"
+    "· 图片1必须是本镜第 1 段的起始画面；只能给中段/尾帧时用 image_timing 声明 mid/end。\n"
+)
+
+
+def anchor_intent_system(rubric: str, *, storyboard: bool = False) -> str:
+    """拼一次判据调用的 system：用户判据 + 只读输出合同（顺序不可颠倒）。
+
+    `storyboard=True`（shots 模式）时追加**程序侧覆盖条款**，盖掉单图判据里
+    「排除带引号对白 / 只取动作收束瞬间」等与分镜冲突的规则；用户 rubric 正文逐字不动。
+    """
     judgment = (rubric or "").strip()
     if not judgment:
         return ""
-    return judgment + "\n\n【输出格式（不可更改）】\n" + ANCHOR_INTENT_CONTRACT
+    contract = ANCHOR_INTENT_CONTRACT
+    if storyboard:
+        contract = contract + STORYBOARD_JUDGE_OVERRIDE
+    return judgment + "\n\n【输出格式（不可更改）】\n" + contract
 
 
 def _anchor_intent_field(payload: str, key: str) -> str:
@@ -1123,19 +1247,124 @@ def _anchor_intent_subjects(payload: str) -> list[str]:
     ]
 
 
+SHOT_TYPES = ("establish", "cut", "move", "move_single")
+
+
+def normalize_shot_type(value: object) -> str:
+    """镜头类型归一：缺失/非法/大小写混杂一律 `cut`（宁硬切不乱晃，零回归安全值）。"""
+    text = str(value or "").strip().lower()
+    return text if text in SHOT_TYPES else "cut"
+
+
+def _normalize_image_timing(value: object) -> str:
+    """图片相对本镜的时间位置：start/mid/end；缺失/非法 ⇒ start（零回归）。"""
+    text = str(value or "").strip().lower()
+    return text if text in ("start", "mid", "end") else "start"
+
+
+def _beat_duration(value: object) -> int:
+    """单段秒数：缺失/非法记 2s，夹在 1–8（合同范围）。"""
+    if isinstance(value, bool):
+        return 2
+    if isinstance(value, (int, float)):
+        number = int(value)
+    elif isinstance(value, str):
+        try:
+            number = int(float(value))
+        except ValueError:
+            return 2
+    else:
+        return 2
+    return max(1, min(8, number))
+
+
+def _anchor_text(value: object, limit: int = 0) -> str:
+    """判据自由文本统一还原破甲标记（`@全@(身)@` → `全身`）；limit>0 时截断。"""
+    text = image_prompt_extract.restore_jailbreak(str(value or "").strip())
+    return text[:limit] if limit > 0 else text
+
+
+def _normalize_beat_viewpoint(value: object) -> str:
+    """单拍视角：pov＝叙事者眼睛；observer＝第三人称旁观；未知留空（下游按画面推断）。"""
+    raw = str(value or "").strip().lower()
+    if raw in ("pov", "first_person", "first-person", "first person", "第一人称", "叙事者", "主观"):
+        return "pov"
+    if raw in ("observer", "third_person", "third-person", "third person", "第三人称", "旁观", "客观"):
+        return "observer"
+    return ""
+
+
+def _normalize_video_beats(value: object) -> list[dict]:
+    """关键帧内部的视频时间轴：最多 4 段；字段缺失一律留空，不判死。"""
+    if not isinstance(value, list):
+        return []
+    beats: list[dict] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        beats.append({
+            "duration_s": _beat_duration(item.get("duration_s")),
+            "cut": bool(item.get("cut")),
+            "framing": _anchor_text(item.get("framing"), 60),
+            "camera_position": _anchor_text(item.get("camera_position"), 100),
+            "camera_motion": _anchor_text(item.get("camera_motion"), 80),
+            "subject_motion": _anchor_text(item.get("subject_motion"), 160),
+            "description": _anchor_text(item.get("description"), 400),
+            "sound_cue": _anchor_text(item.get("sound_cue"), 60),
+            "viewpoint": _normalize_beat_viewpoint(item.get("viewpoint")),
+        })
+        if len(beats) >= 4:
+            break
+    return beats
+
+
+def _normalize_paragraphs(value: object) -> list[int]:
+    """覆盖账本：自然段号列表（非负整数、去重、保序）；缺失/非法 ⇒ []。"""
+    if not isinstance(value, (list, tuple)):
+        return []
+    out: list[int] = []
+    for item in value:
+        if isinstance(item, bool):
+            continue
+        try:
+            number = int(item)
+        except (TypeError, ValueError):
+            continue
+        if number < 0 or number in out:
+            continue
+        out.append(number)
+    return out[:32]
+
+
 def _normalize_anchor_intent(value: dict) -> dict:
     subjects = value.get("subjects")
     return {
-        "anchor": str(value.get("anchor") or "").strip(),
-        "composition": str(value.get("composition") or "").strip(),
-        "reason": str(value.get("reason") or "").strip(),
+        "anchor": _anchor_text(value.get("anchor")),
+        "composition": _anchor_text(value.get("composition")),
+        "reason": _anchor_text(value.get("reason")),
         "subjects": (
-            [str(item).strip() for item in subjects if str(item).strip()]
+            [_anchor_text(item) for item in subjects if str(item).strip()]
             if isinstance(subjects, list) else []
         ),
         # 第 57 刀（多批生图）：排序分。⚠ **缺失/非法一律记 0，不判死**——
         # 用户手改的旧判据（按单锚点输出、没有 score）必须继续可用（零回归锁）。
         "score": _anchor_intent_score(value.get("score")),
+        # 2026-11-11 全文覆盖：本帧覆盖的自然段号（输入里的 [段 N]）。
+        "paragraphs": _normalize_paragraphs(value.get("paragraphs")),
+        # 2026-11-09：全局模式分镜序列。旧判据没有这些字段 ⇒ cut/空串（零回归）。
+        "shot_type": normalize_shot_type(value.get("shot_type")),
+        "transition_desc": _anchor_text(value.get("transition_desc"), 200),
+        # 2026-11-09：图片相对本镜的时间位置（start/mid/end）；缺省 start（零回归）。
+        "image_timing": _normalize_image_timing(value.get("image_timing")),
+        # 2026-11-10：每镜所在地点（用户实锤：全局 locale 会把结尾卧房带进剑场镜头）。
+        "locale": _anchor_text(value.get("locale"), 80),
+        # 覆盖式分镜：景别/机位运动/主体运动/触发声。固定机位也必须给 subject_motion。
+        "framing": _anchor_text(value.get("framing"), 40),
+        "camera_motion": _anchor_text(value.get("camera_motion"), 60),
+        "subject_motion": _anchor_text(value.get("subject_motion"), 80),
+        "sound_cue": _anchor_text(value.get("sound_cue"), 40),
+        # 关键帧内部的视频时间轴（近景/硬切都写在这里，不再单独出图）。
+        "video_beats": _normalize_video_beats(value.get("video_beats")),
     }
 
 
@@ -1221,10 +1450,86 @@ def parse_anchor_intents(raw: str) -> list[dict]:
         "reason": _anchor_intent_field(payload, "reason"),
         "subjects": _anchor_intent_subjects(payload),
         "score": _anchor_intent_score(_anchor_intent_field(payload, "score")),
+        # 正则兜底不解析数组；覆盖账本缺失即空（调用方按 anchor 落段兜底）。
+        "paragraphs": [],
+        "shot_type": normalize_shot_type(_anchor_intent_field(payload, "shot_type")),
+        "transition_desc": _anchor_intent_field(payload, "transition_desc")[:200],
+        "framing": _anchor_intent_field(payload, "framing")[:40],
+        "camera_motion": _anchor_intent_field(payload, "camera_motion")[:60],
+        "subject_motion": _anchor_intent_field(payload, "subject_motion")[:80],
+        "sound_cue": _anchor_intent_field(payload, "sound_cue")[:40],
+        # 正则兜底不解析嵌套数组（多段视频在 JSON 正常时已解析）；缺失即空。
+        "video_beats": [],
     }
     if not (fields["anchor"] or fields["composition"] or fields["subjects"]):
         return []
     return [fields]
+
+
+def paragraph_coverage(text: str, items: list[dict]) -> dict:
+    """覆盖账本审计：自然段 → 关键帧覆盖情况。
+
+    - 优先读每个关键帧的 `paragraphs`（判据合同要求）；
+    - 旧稿没有账本时，按 `anchor` 逐字落在哪一段兜底（只认锚点句，不做模糊匹配）；
+    - 返回 `total` / `covered` / `gaps` / `ratio` / `ledger_missing`。
+    纯对白段如果被写进相邻帧 beats，必须由判据把段号列进该帧 `paragraphs`，否则算缺口。
+    """
+    paragraphs = [
+        part.strip() for part in re.split(r"\n\s*\n", text or "") if part.strip()
+    ]
+    total = len(paragraphs)
+    covered: set[int] = set()
+    ledger_missing = 0
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        numbers = _normalize_paragraphs(item.get("paragraphs"))
+        if numbers:
+            covered.update(number for number in numbers if 0 <= number < total)
+            continue
+        ledger_missing += 1
+        raw = str(item.get("anchor") or "").strip()
+        if not raw:
+            continue
+        for index, paragraph in enumerate(paragraphs):
+            if raw in paragraph:
+                covered.add(index)
+                break
+    gaps = [index for index in range(total) if index not in covered]
+    return {
+        "total": total,
+        "covered": total - len(gaps),
+        "gaps": gaps,
+        "ratio": round((total - len(gaps)) / total, 4) if total else 1.0,
+        "ledger_missing": ledger_missing,
+    }
+
+
+def coverage_anchor_intents(
+    items: list[dict], max_shots: int = STORYBOARD_MAX_SHOTS,
+) -> list[dict]:
+    """覆盖式分镜取镜：**按正文序保留首尾 + 等距抽样**，不按分数裁剪。
+
+    `max_shots <= 0` ⇒ **不抽样、全部保留**（全文逐段覆盖模式；判据自己按
+    `paragraphs` 账本决定镜头数）。只有显式给正上限时才抽样，且首尾必留。
+    """
+    if not items:
+        return []
+    try:
+        count = int(max_shots)
+    except (TypeError, ValueError):
+        count = STORYBOARD_MAX_SHOTS
+    if count <= 0:
+        return list(items)
+    if len(items) <= count:
+        return list(items)
+    if count == 1:
+        return [items[0]]
+    step = (len(items) - 1) / (count - 1)
+    picked = {0, len(items) - 1}
+    for index in range(1, count - 1):
+        picked.add(round(index * step))
+    return [item for index, item in enumerate(items) if index in picked]
 
 
 def select_anchor_intents(items: list[dict], count: int) -> list[dict]:
@@ -1247,6 +1552,24 @@ def select_anchor_intents(items: list[dict], count: int) -> list[dict]:
     )
     chosen = {index for index, _ in ranked[:count]}
     return [item for index, item in enumerate(items) if index in chosen]
+
+
+def _is_environment_anchor(item: dict) -> bool:
+    """开场环境镜（establish 或标了环境/空镜的构图）——不参与去重合并。"""
+    if normalize_shot_type(item.get("shot_type")) == "establish":
+        return True
+    composition = str(item.get("composition") or "")
+    return "环境" in composition or "空镜" in composition
+
+
+def merge_paragraph_ledger(target: dict, source: dict) -> None:
+    """合并覆盖账本：被去重/被近景合并掉的关键帧，段号不能跟着消失。"""
+    merged = sorted(set(
+        _normalize_paragraphs(target.get("paragraphs"))
+        + _normalize_paragraphs(source.get("paragraphs"))
+    ))
+    if merged:
+        target["paragraphs"] = merged
 
 
 def dedupe_anchor_intents(items: list[dict], text: str) -> list[dict]:
@@ -1283,19 +1606,25 @@ def dedupe_anchor_intents(items: list[dict], text: str) -> list[dict]:
     kept_where: list[int | None] = []
     kept_band: list[str] = []
     for item, where, band in zip(items, located, bands):
-        merge_into = _dedupe_merge_target(
+        # 环境空镜/开场建立镜不参与「同一处高潮」合并：它与同段落的人物镜是**两个镜头**
+        # （真机实锤 2026-11-09：开场远景与人物入场同段且同带 ⇒ 被吞掉，分镜直接丢开场）。
+        environment = _is_environment_anchor(item)
+        merge_into = None if environment else _dedupe_merge_target(
             where=where, band=band, kept_where=kept_where, kept_band=kept_band,
         )
         if merge_into is None:
             kept.append(item)
-            kept_where.append(where)          # None ⇒ 永不参与后续合并
-            kept_band.append(band)
+            kept_where.append(None if environment else where)  # None ⇒ 永不参与后续合并
+            kept_band.append("" if environment else band)
             continue
         # 同一处 ⇒ 分数高者留下；同分保留**已保留的**（＝正文更早）。
         if int(item.get("score") or 0) > int(kept[merge_into].get("score") or 0):
+            merge_paragraph_ledger(item, kept[merge_into])
             kept[merge_into] = item
             kept_where[merge_into] = where
             kept_band[merge_into] = band
+        else:
+            merge_paragraph_ledger(kept[merge_into], item)
     return kept
 
 

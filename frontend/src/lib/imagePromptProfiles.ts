@@ -62,14 +62,17 @@ const ANIMA_ILLUSTRATION_STYLE = [
 export function ensureAnimaIllustrationStyle(prompt: string, enabled: boolean): string {
   if (!enabled) return prompt;
   const newline = prompt.indexOf("\n");
-  if (newline < 0) return prompt;
-  const tags = prompt.slice(0, newline).trim();
-  const prose = prompt.slice(newline + 1).trim();
+  const tags = (newline < 0 ? prompt : prompt.slice(0, newline)).trim();
   const lower = tags.toLowerCase();
   const missing = ANIMA_ILLUSTRATION_STYLE.filter((tag) => !lower.includes(tag));
   const trailingComma = tags.endsWith(",");
   const merged = [tags.replace(/,\s*$/, ""), ...missing].filter(Boolean).join(", ");
-  return `${merged}${trailingComma ? "," : ""}\n${prose}`;
+  const head = `${merged}${trailingComma ? "," : ""}`;
+  // 单行提示（聊天自拍 Profile 编译失败退回通用编译器时的常见形态）也要补风格词；
+  // 两行提示（剧情插画/正常 Profile 成稿）逐字节保持原行为。
+  if (newline < 0) return head;
+  const prose = prompt.slice(newline + 1).trim();
+  return `${head}\n${prose}`;
 }
 
 function splitQualityTags(value: string): string[] {

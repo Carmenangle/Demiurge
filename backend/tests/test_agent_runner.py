@@ -26,7 +26,6 @@ def test_same_thread_run_is_rejected(monkeypatch):
 
     monkeypatch.setattr(agent_runner.agent_graph, "stream_multi_agent", stream)
     monkeypatch.setattr(agent_runner.generation_store, "persist_text", lambda *a, **k: None)
-    monkeypatch.setattr(agent_runner.chat_memory, "append_turn", lambda *a, **k: None)
     context = RunContext(thread_id="thread", message="one")
     queue = agent_runner.run_multi_stream(context)
     with pytest.raises(agent_runner.RunAlreadyActive):
@@ -40,9 +39,7 @@ def test_runner_commits_turn_once(monkeypatch):
         {"delta": "hello"}, {"done": True},
     ]))
     persisted = []
-    turns = []
     monkeypatch.setattr(agent_runner.generation_store, "persist_text", lambda *a, **k: persisted.append((a, k)))
-    monkeypatch.setattr(agent_runner.chat_memory, "append_turn", lambda *a, **k: turns.append((a, k)))
 
     events = list(agent_runner.drain(agent_runner.run_multi_stream(
         RunContext(thread_id="t2", message="question", message_id="m1")
@@ -54,9 +51,28 @@ def test_runner_commits_turn_once(monkeypatch):
         (("t2", "m1", "hello"), {}),                       # 流式半成品
         (("t2", "m1", "hello"), {"interrupted": False}),   # 收尾最终
     ]
-    assert len(turns) == 1
-    assert turns[0][0][1:4] == ("question", [], "hello")
     assert agent_runner.is_running("t2") is False
+
+
+def test_runner_不写checkpoint_快照为唯一真源(monkeypatch):
+    """2026-11-12 P6-D：所有 interaction_mode 的 Agent 回合都只维护快照。"""
+    monkeypatch.setattr(agent_runner.agent_graph, "stream_multi_agent",
+                        lambda context: iter([{"delta": "你好"}, {"done": True}]))
+    monkeypatch.setattr(agent_runner.generation_store, "persist_text", lambda *a, **k: None)
+    turns: list = []
+    monkeypatch.setattr(agent_runner.chat_snapshot, "merge_fields", lambda *a, **k: None)
+    # chat_memory 已从 agent_runner 移除；这里用「模块不存在该调用」锁住行为。
+    monkeypatch.setattr(
+        "app.services.chat_memory.append_turn",
+        lambda *a, **k: turns.append(1),
+        raising=False,
+    )
+
+    list(agent_runner.drain(agent_runner.run_multi_stream(RunContext(
+        thread_id="repo", message="在吗", message_id="m1",
+    ))))
+
+    assert turns == []
 
 
 def test_runner流式中途节流落盘半成品正文(monkeypatch):
@@ -67,8 +83,6 @@ def test_runner流式中途节流落盘半成品正文(monkeypatch):
     ]))
     persisted = []
     monkeypatch.setattr(agent_runner.generation_store, "persist_text", lambda *a, **k: persisted.append((a, k)))
-    monkeypatch.setattr(agent_runner.chat_memory, "append_turn", lambda *a, **k: None)
-
     list(agent_runner.drain(agent_runner.run_multi_stream(RunContext(
         thread_id="t3", message="问", message_id="m3",
     ))))
@@ -93,7 +107,6 @@ def test_runner在模型启动前把用户消息写入权威快照(monkeypatch):
         lambda *args: persisted.append(args), raising=False,
     )
     monkeypatch.setattr(agent_runner.generation_store, "persist_text", lambda *a, **k: None)
-    monkeypatch.setattr(agent_runner.chat_memory, "append_turn", lambda *a, **k: None)
 
     list(agent_runner.drain(agent_runner.run_multi_stream(RunContext(
         thread_id="turn", message="不能丢失的用户消息", images=["reference.png"],
@@ -114,8 +127,6 @@ def test_runner接收节点实时增量并以最终文本替换落盘(monkeypatc
     persisted = []
     monkeypatch.setattr(agent_runner.generation_store, "persist_text",
                         lambda *a, **k: persisted.append((a, k)))
-    monkeypatch.setattr(agent_runner.chat_memory, "append_turn", lambda *a, **k: None)
-
     events = list(agent_runner.drain(agent_runner.run_multi_stream(
         RunContext(thread_id="live", message="q", message_id="m", stream_output=True),
     )))
@@ -141,8 +152,6 @@ def test_runner非流式也提供即时媒体事件通道(monkeypatch):
     monkeypatch.setattr(agent_runner.agent_graph, "stream_multi_agent", stream)
     monkeypatch.setattr(agent_runner.generation_store, "persist_text", lambda *a, **k: None)
     monkeypatch.setattr(agent_runner.generation_store, "persist_media_slot", lambda *a, **k: None)
-    monkeypatch.setattr(agent_runner.chat_memory, "append_turn", lambda *a, **k: None)
-
     events = list(agent_runner.drain(agent_runner.run_multi_stream(
         RunContext(thread_id="ready", message="q", message_id="m", stream_output=False),
     )))
@@ -173,8 +182,6 @@ def test_runner即时事件先持久化正文和媒体槽(monkeypatch):
         agent_runner.generation_store, "persist_media_slot",
         lambda *args, **kwargs: persisted.append(("slot", args, kwargs)),
     )
-    monkeypatch.setattr(agent_runner.chat_memory, "append_turn", lambda *a, **k: None)
-
     list(agent_runner.drain(agent_runner.run_multi_stream(
         RunContext(thread_id="durable", message="q", message_id="bot"),
     )))
@@ -187,7 +194,6 @@ def test_runner用同一turn_id记录首尾事件(monkeypatch):
     monkeypatch.setattr(agent_runner.agent_graph, "stream_multi_agent",
                         lambda context: iter([{"delta": "答复"}, {"done": True}]))
     monkeypatch.setattr(agent_runner.generation_store, "persist_text", lambda *a, **k: None)
-    monkeypatch.setattr(agent_runner.chat_memory, "append_turn", lambda *a, **k: None)
     captured = []
     monkeypatch.setattr(agent_runner.run_trace, "emit",
                         lambda ctx, event, **data: captured.append((ctx.turn_id, event, data)))
@@ -214,7 +220,6 @@ def test_cancel_only_targets_active_run(monkeypatch):
 
     monkeypatch.setattr(agent_runner.agent_graph, "stream_multi_agent", stream)
     monkeypatch.setattr(agent_runner.generation_store, "persist_text", lambda *a, **k: None)
-    monkeypatch.setattr(agent_runner.chat_memory, "append_turn", lambda *a, **k: None)
     context = RunContext(thread_id="cancel-me", message="x")
     agent_runner.run_multi_stream(context)
     assert agent_runner.cancel("missing") is False
@@ -225,29 +230,26 @@ def test_cancel_only_targets_active_run(monkeypatch):
 
 
 def test_worker_finalizes_even_if_client_stops_draining(monkeypatch):
-    # 模拟客户端中途断开：不消费队列，worker 仍须完成 persist + append_turn + 释放所有权
+    # 模拟客户端中途断开：不消费队列，worker 仍须完成 persist + 释放所有权
     finished = threading.Event()
 
     def stream(context):
         yield {"delta": "half"}
 
     persisted = []
-    turns = []
     monkeypatch.setattr(agent_runner.agent_graph, "stream_multi_agent", stream)
-    monkeypatch.setattr(agent_runner.generation_store, "persist_text",
-                        lambda *a, **k: persisted.append((a, k)))
 
-    def append_turn(*a, **k):
-        turns.append((a, k))
-        finished.set()
+    def persist_text(*a, **k):
+        persisted.append((a, k))
+        if "interrupted" in k:   # 收尾最终版（半成品落盘不带该参数）
+            finished.set()
 
-    monkeypatch.setattr(agent_runner.chat_memory, "append_turn", append_turn)
+    monkeypatch.setattr(agent_runner.generation_store, "persist_text", persist_text)
 
     agent_runner.run_multi_stream(RunContext(thread_id="drop", message="q", message_id="m"))
     # 不调用 drain（客户端已断）
     assert finished.wait(2)
     assert len(persisted) == 2  # 流式半成品 + 收尾最终
-    assert len(turns) == 1
     assert _wait_idle("drop")
 
 
@@ -255,7 +257,6 @@ def test_thread_freed_after_run_allows_readmit(monkeypatch):
     monkeypatch.setattr(agent_runner.agent_graph, "stream_multi_agent",
                         lambda context: iter([{"done": True}]))
     monkeypatch.setattr(agent_runner.generation_store, "persist_text", lambda *a, **k: None)
-    monkeypatch.setattr(agent_runner.chat_memory, "append_turn", lambda *a, **k: None)
 
     list(agent_runner.drain(agent_runner.run_multi_stream(
         RunContext(thread_id="reuse", message="one"))))
@@ -275,8 +276,6 @@ def test_worker_error_still_finalizes(monkeypatch):
     monkeypatch.setattr(agent_runner.agent_graph, "stream_multi_agent", boom)
     monkeypatch.setattr(agent_runner.generation_store, "persist_text",
                         lambda *a, **k: persisted.append(1))
-    monkeypatch.setattr(agent_runner.chat_memory, "append_turn", lambda *a, **k: None)
-
     events = list(agent_runner.drain(agent_runner.run_multi_stream(
         RunContext(thread_id="err", message="q", message_id="m"))))
 

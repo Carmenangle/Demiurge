@@ -251,6 +251,151 @@ def test_embed_config_from_state_缺失回退远程空配置(monkeypatch, tmp_pa
     assert cfg.base_url == "" and cfg.api_key == "" and cfg.mode == "remote"
 
 
+# ===== 存量补登记（2026-11-07：反推前按需补，修「资产不存在」） =====
+
+def _write_material(tmp_path, name: str = "20261018_142845_245430_e9e717b1.jpeg",
+                    prov: dict | None = None) -> tuple[str, str]:
+    """在 tmp 素材目录放一张图（可选 provenance），返回 (url, doc_id)。"""
+    d = image_store.web_materials_dir(str(tmp_path))
+    d.mkdir(parents=True, exist_ok=True)
+    (d / name).write_bytes(_PNG)
+    if prov is not None:
+        image_store._save_provenance(d, {name: prov})
+    url = view_urls.local_view(str(d / name))
+    return url, rag_store.generation_doc_id(rag_store.WEB_MATERIALS_REPO_ID, url)
+
+
+def _usable_embed(monkeypatch):
+    from app.services import embed_resolution
+    monkeypatch.setattr(embed_resolution, "embed_from_settings", lambda: object())
+
+
+def test_ensure_历史素材补登记_向量库与主表都补齐(monkeypatch, tmp_path, store):
+    """P2-1 之前落盘的素材（只有文件+provenance）⇒ 补两条记录，created_at 取下载时间。"""
+    from app.services import asset_store
+
+    _usable_embed(monkeypatch)
+    monkeypatch.setattr(rag_store, "existing_doc_ids", lambda repo, ids: set())
+    url, aid = _write_material(tmp_path, prov={
+        "title": "DAY 48- SFW 沙滩小马", "provider": "pixiv", "tags": ["水着", "足裏"],
+        "source_url": "https://www.pixiv.net/artworks/149859505",
+        "downloaded_at": "2026-10-18T14:28:45+08:00",
+    })
+
+    res = image_store.ensure_web_material_assets(str(tmp_path), [aid])
+    assert res["registered"] == [aid] and res["failed"] == []
+    assert aid in store.docs                                       # 向量库
+    row = asset_store.get_row(aid)                                 # 主表
+    assert row is not None and row["repo_id"] == rag_store.WEB_MATERIALS_REPO_ID
+    assert row["image_url"] == url
+    assert row["created_at"] == 1792304925000                      # 下载时间，不是「现在」
+    assert "水着" in store.docs[aid]["metadata"]["tags"]
+
+
+def test_ensure_已登记不再重嵌入(monkeypatch, tmp_path, store):
+    """两侧都在 ⇒ already，绝不再调一次入库（幂等、零成本）。"""
+    from app.services import asset_store
+
+    _usable_embed(monkeypatch)
+    prov = {"title": "t", "downloaded_at": "2026-10-18T14:28:45+08:00"}
+    url, aid = _write_material(tmp_path, prov=prov)
+    assert rag_store.index_web_material_asset(url, prov) is True
+    assert asset_store.get_row(aid) is not None
+
+    def _boom(*a, **k):
+        raise AssertionError("已登记素材不该再入库")
+
+    monkeypatch.setattr(rag_store, "existing_doc_ids", lambda repo, ids: {aid})
+    monkeypatch.setattr(rag_store, "index_web_material_asset", _boom)
+    res = image_store.ensure_web_material_assets(str(tmp_path), [aid])
+    assert res["already"] == [aid] and res["registered"] == []
+
+
+def test_ensure_向量库有但主表缺_仍补(monkeypatch, tmp_path, store):
+    """打标读向量库、官方布局读主表 ⇒ 只缺一边也算「没登记」，要补。"""
+    from app.services import asset_store
+
+    _usable_embed(monkeypatch)
+    url, aid = _write_material(tmp_path, prov={"title": "t"})
+    assert store.docs == {} and asset_store.get_row(aid) is None
+
+    monkeypatch.setattr(rag_store, "existing_doc_ids", lambda repo, ids: {aid})
+    res = image_store.ensure_web_material_assets(str(tmp_path), [aid])
+    assert res["registered"] == [aid]
+    assert asset_store.get_row(aid) is not None
+
+
+def test_ensure_指定的id盘上无文件_记missing(monkeypatch, tmp_path, store):
+    _usable_embed(monkeypatch)
+    monkeypatch.setattr(rag_store, "existing_doc_ids", lambda repo, ids: set())
+    _write_material(tmp_path)                                      # 盘上是另一个 id
+    res = image_store.ensure_web_material_assets(str(tmp_path), ["gen-not-here"])
+    assert res["missing"] == ["gen-not-here"]
+    assert res["registered"] == [] and res["failed"] == []
+
+
+def test_ensure_无provenance旧文件_按文件名补(monkeypatch, tmp_path, store):
+    """比 P2-1 更早的文件连 provenance 都没有 ⇒ 最小元数据（标题=文件名），不跳过。"""
+    _usable_embed(monkeypatch)
+    monkeypatch.setattr(rag_store, "existing_doc_ids", lambda repo, ids: set())
+    _url, aid = _write_material(tmp_path)
+    res = image_store.ensure_web_material_assets(str(tmp_path), [aid])
+    assert res["registered"] == [aid]
+    assert store.docs[aid]["metadata"]["prompt"] == "20261018_142845_245430_e9e717b1.jpeg"
+
+
+def test_ensure_嵌入未配置_报可操作错误(monkeypatch, tmp_path, store):
+    """有缺失但嵌入模型没配 ⇒ 400 说清，不是静默失败。"""
+    from app.services import embed_resolution
+    from app.services.comfyui_client import ComfyError
+
+    monkeypatch.setattr(embed_resolution, "embed_from_settings", lambda: None)
+    monkeypatch.setattr(rag_store, "existing_doc_ids", lambda repo, ids: set())
+    _url, aid = _write_material(tmp_path)
+    with pytest.raises(ComfyError) as exc:
+        image_store.ensure_web_material_assets(str(tmp_path), [aid])
+    assert "嵌入模型未配置" in str(exc.value.detail)
+
+
+def test_ensure_补录失败记failed不抛(monkeypatch, tmp_path, store):
+    """入库失败（嵌入端点挂）只进 failed，端点能回结构而不是 500。"""
+    _usable_embed(monkeypatch)
+    monkeypatch.setattr(rag_store, "existing_doc_ids", lambda repo, ids: set())
+    monkeypatch.setattr(rag_store, "index_web_material_asset", lambda *a, **k: False)
+    _url, aid = _write_material(tmp_path)
+    res = image_store.ensure_web_material_assets(str(tmp_path), [aid])
+    assert res["failed"] == [aid] and res["registered"] == []
+
+
+def test_路由_ensure_index_透传参数并把400映射成HTTP(monkeypatch):
+    """端点只做薄适配：参数原样下传，ComfyError→HTTPException（接线错在这里露）。"""
+    from fastapi import HTTPException
+
+    from app.routers import comfyui
+    from app.services.comfyui_client import ComfyError
+
+    seen: dict = {}
+
+    def _fake(output_dir, asset_ids):
+        seen["args"] = (output_dir, asset_ids)
+        return {"registered": ["a"], "already": [], "missing": [], "failed": []}
+
+    monkeypatch.setattr(image_store, "ensure_web_material_assets", _fake)
+    res = comfyui.web_material_ensure_index(
+        comfyui.WebMaterialEnsureRequest(output_dir="D:/out", asset_ids=["a"]))
+    assert res == {"registered": ["a"], "already": [], "missing": [], "failed": []}
+    assert seen["args"] == ("D:/out", ["a"])
+
+    def _boom(output_dir, asset_ids):
+        raise ComfyError("嵌入模型未配置：…", 400)
+
+    monkeypatch.setattr(image_store, "ensure_web_material_assets", _boom)
+    with pytest.raises(HTTPException) as exc:
+        comfyui.web_material_ensure_index(
+            comfyui.WebMaterialEnsureRequest(output_dir="D:/out"))
+    assert exc.value.status_code == 400
+
+
 # ===== 读侧投影：素材记录带回来源字段 =====
 
 def test_list_generations_投影source字段(monkeypatch, tmp_path, store):

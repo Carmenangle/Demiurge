@@ -1,7 +1,7 @@
 // RAG 知识库与资产库（原 api/ai.ts RAG 段，2026-10-24 按资源域拆分）：
 // 入库（生成/文档）+ 列表/检索/结构化搜索 + 标签与快照 + 缩略图/视觉索引/描述 + 回收站 + 仓库同步对账 + 记录删改。
-import { apiPost } from "../client";
-import { ragEmbed, type Embed, type VlmWire } from "./wire";
+import { apiPost, apiUpload } from "../client";
+import { ragEmbed, ragGbc, type Embed, type GbcWire, type VlmWire } from "./wire";
 
 // 生图完成后把这次生成的提示词/标签/图片入全局 RAG 知识库
 // template_name / model_name / lora_names：生成溯源元数据（可选，2026-10-16 补；
@@ -112,7 +112,34 @@ export interface Generation {
     provider?: string;
     size?: number;
     downloaded_at?: string;
+    /** 本地导入（source="import"）：从文件内嵌元信息提取的提示词/生成参数 */
+    generation?: {
+      source?: string;             // comfyui | a1111 | text | container | comfyui-workflow
+      negativePrompt?: string;
+      params?: Record<string, string | number>;
+    };
+    originalName?: string;
+    byteSize?: number;
+    importedAt?: number;
   };
+}
+
+/** 资产库导入：把用户拖入/选中的图片·视频落盘到作品目录并提取内嵌元信息。 */
+export interface ImportAssetResult {
+  item: Generation;
+  embedded: boolean;      // 语义索引是否写入成功（失败不影响记录可见）
+  embedError?: string;
+}
+
+export function importAssets(repoId: string, outputDir: string, files: File[]) {
+  const form = new FormData();
+  form.append("repo_id", repoId);
+  form.append("output_dir", outputDir);
+  for (const file of files) form.append("files", file, file.name);
+  // 视频可能数百 MB：给足 10 分钟，别让默认超时把在传的大文件掐断
+  return apiUpload<{ items: ImportAssetResult[]; errors: { name: string; error: string }[] }>(
+    "/rag/assets/import", form, 10 * 60 * 1000,
+  );
 }
 
 /**
@@ -170,6 +197,79 @@ export function tagGeneration(model: string, id: string, repoId: string, embed: 
       ...ragEmbed(embed),
     },
   );
+}
+
+// GBC 场景图（2026-11-06）：WD14 出标签，GBC 产出实体/关系图。
+// 跑一次要几分钟（外部引擎 + SAM-3），所以图存在后端，详情面板按 id 取。
+// 2026-11-07：MOSS 交付形/草稿形与归一化 Layout 不再交付，官方布局 JSON 是唯一出口。
+export interface GbcMossItem { label: string; caption: string; bbox: number[]; name?: string }
+export interface GbcMoss {
+  summary: { canvas: string; caption: string };
+  items: GbcMossItem[];
+  bbox_coord_space: string;
+  bbox_format: string;
+  width?: number;
+  height?: number;
+}
+export interface GbcOutline {
+  entities: { name: string; caption: string }[];
+  relations: string[];
+  elapsed_s: number;
+  moss_items: number;
+}
+export interface GbcTagResult {
+  ok: boolean; model: string; snapshot_id: string; tags: string[]; total: number;
+  outline: GbcOutline;
+  elapsed_s: number; warning: string;
+}
+export function gbcTagAsset(
+  id: string, repoId: string, gbc: GbcWire,
+  vlm: { baseUrl: string; apiKey: string; modelName: string; proxyUrl?: string }, embed: Embed,
+) {
+  // 种子描述由后端用 WD14 标签生成（物体/服装/配饰只认标签），前端不再传
+  return apiPost<GbcTagResult>("/rag/gbc-tag", {
+    id, repo_id: repoId, ...ragGbc(gbc, vlm), ...ragEmbed(embed),
+  });
+}
+export interface SavedGbc {
+  ok: boolean;
+  /** 官方完整布局（style/cast/逐项描述；没生成过时后端回空对象） */
+  moss_layout?: Partial<MossLayoutPayload>;
+  outline?: GbcOutline;
+  engine?: Record<string, unknown>;
+  created_at?: number;
+}
+export function getGbcGraph(id: string) {
+  return apiPost<SavedGbc>("/rag/gbc-graph", { id });
+}
+
+// MOSS 官方完整布局（2026-11-07）：视觉模型写 style / caption / lighting / 角色卡 /
+// 逐项描述，实体名与 bbox 用 GBC 已存的那份。style 与角色卡按官方格式折进
+// summary.caption（官方没有独立字段），角色卡再前置到对应 character 项。
+export interface MossLayoutParts {
+  style: string;
+  caption: string;
+  lighting: string;
+  cast: { name: string; card: string }[];
+  items: { name: string; caption: string }[];
+}
+export interface MossLayoutPayload {
+  layout: GbcMoss;
+  parts: MossLayoutParts;
+  model?: string;
+  elapsed_s?: number;
+}
+export interface MossLayoutResult extends MossLayoutPayload { ok: boolean }
+export function generateMossLayout(
+  id: string, vlm: { baseUrl: string; apiKey: string; modelName: string; proxyUrl?: string },
+) {
+  return apiPost<MossLayoutResult>("/rag/moss-layout", {
+    id,
+    vlm_base_url: vlm.baseUrl || "",
+    vlm_api_key: vlm.apiKey || "",
+    vlm_model: vlm.modelName || "",
+    vlm_proxy: vlm.proxyUrl || "",
+  });
 }
 
 // 标签快照（版本化）：每次反推存一版，可切换/删除

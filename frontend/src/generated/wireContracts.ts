@@ -20,6 +20,8 @@ export interface AttachmentItemWire {
 export interface AgentInvocationWire {
   thread_id: string;
   workspace_mode: "story" | "generate" | "edit";
+  interaction_mode?: "story" | "chat" | "group_chat";
+  chat_members?: string[];
   message: string;
   images: string[];
   image_mask?: ImageMaskWire | null;
@@ -34,7 +36,7 @@ export interface AgentInvocationWire {
   video_base_url?: string;
   video_api_key?: string;
   video_model?: string;
-  video_mode?: "" | "climax" | "firstlast";
+  video_mode?: "" | "climax" | "firstlast" | "shots";
   embed_base_url?: string;
   embed_api_key?: string;
   embed_model?: string;
@@ -61,6 +63,20 @@ export interface AgentInvocationWire {
   context_count?: number;
   compact_trigger_pct?: number;
   selfheal_attempts?: number;
+  chat_guard_max_chars?: number;
+  chat_default_max_tokens?: number;
+  chat_followup_max?: number;
+  chat_reopen_max?: number;
+  chat_initiative_idle_minutes?: number;
+  chat_initiative_cooldown_minutes?: number;
+  chat_initiative_daily_max?: number;
+  chat_cadence?: "quiet" | "normal" | "frequent";
+  chat_active_window_minutes?: number;
+  chat_max_bot_turns?: number;
+  chat_min_affinity?: number;
+  chat_quiet_start?: string;
+  chat_quiet_end?: string;
+  chat_group_activity?: "quiet" | "normal" | "lively";
   preset_sampling?: Record<string, string>;
   story_turn?: number;
   history: HistoryItemWire[];
@@ -87,13 +103,16 @@ export interface AgentInvocationWire {
   prompt_profile_kind?: string;
   video_prompt_template_id?: string;
   video_template_id?: string;
+  video_duration_hint?: number;
   appearance_source?: "worldbook" | "character_card";
   illustration_viewpoint?: "" | "first_person" | "third_person";
   illustration_batch_count?: number;
   character_base_images?: Record<string, string>;
   illustration_actor_names?: string[];
   style_base_image?: string;
+  reaction_kind?: "" | "image" | "avatar";
+  reaction_prompt?: string;
   attachments?: AttachmentItemWire[];
 }
 
-export const AGENT_INVOCATION_WIRE_FIELDS = ["thread_id", "workspace_mode", "message", "images", "image_mask", "base_url", "api_key", "model", "proxy", "provider_profile", "gen_base_url", "gen_api_key", "gen_model", "video_base_url", "video_api_key", "video_model", "video_mode", "embed_base_url", "embed_api_key", "embed_model", "embed_mode", "embed_model_dir", "reranker_model_dir", "size", "image_quality", "output_dir", "repo_id", "proxy_url", "chat_proxy_url", "gen_proxy_url", "video_proxy_url", "embed_proxy_url", "search_provider", "route_model", "message_id", "user_message_id", "style_template", "agent_id", "stream_output", "context_max_tokens", "context_count", "compact_trigger_pct", "selfheal_attempts", "preset_sampling", "story_turn", "history", "approval_id", "approval_action", "edited_prompt", "forced_route", "character_dir", "card_name", "card_names", "opening_card_name", "preset_dir", "preset_name", "user_name", "user_persona", "persona_bound", "worldbook_dir", "worldbook_name", "illustrate", "comfy_illustrate", "comfy_audio", "comfy_video", "prompt_profile", "prompt_profile_kind", "video_prompt_template_id", "video_template_id", "appearance_source", "illustration_viewpoint", "illustration_batch_count", "character_base_images", "illustration_actor_names", "style_base_image", "attachments"] as const;
+export const AGENT_INVOCATION_WIRE_FIELDS = ["thread_id", "workspace_mode", "interaction_mode", "chat_members", "message", "images", "image_mask", "base_url", "api_key", "model", "proxy", "provider_profile", "gen_base_url", "gen_api_key", "gen_model", "video_base_url", "video_api_key", "video_model", "video_mode", "embed_base_url", "embed_api_key", "embed_model", "embed_mode", "embed_model_dir", "reranker_model_dir", "size", "image_quality", "output_dir", "repo_id", "proxy_url", "chat_proxy_url", "gen_proxy_url", "video_proxy_url", "embed_proxy_url", "search_provider", "route_model", "message_id", "user_message_id", "style_template", "agent_id", "stream_output", "context_max_tokens", "context_count", "compact_trigger_pct", "selfheal_attempts", "chat_guard_max_chars", "chat_default_max_tokens", "chat_followup_max", "chat_reopen_max", "chat_initiative_idle_minutes", "chat_initiative_cooldown_minutes", "chat_initiative_daily_max", "chat_cadence", "chat_active_window_minutes", "chat_max_bot_turns", "chat_min_affinity", "chat_quiet_start", "chat_quiet_end", "chat_group_activity", "preset_sampling", "story_turn", "history", "approval_id", "approval_action", "edited_prompt", "forced_route", "character_dir", "card_name", "card_names", "opening_card_name", "preset_dir", "preset_name", "user_name", "user_persona", "persona_bound", "worldbook_dir", "worldbook_name", "illustrate", "comfy_illustrate", "comfy_audio", "comfy_video", "prompt_profile", "prompt_profile_kind", "video_prompt_template_id", "video_template_id", "video_duration_hint", "appearance_source", "illustration_viewpoint", "illustration_batch_count", "character_base_images", "illustration_actor_names", "style_base_image", "reaction_kind", "reaction_prompt", "attachments"] as const;

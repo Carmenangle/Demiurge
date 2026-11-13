@@ -52,6 +52,7 @@ def test_lifespan被真实传给FastAPI():
 def test_worker与看护设施都在lifespan装配点():
     calls = _called_names(_find_fn(_tree(), "_lifespan"))
     for must in (
+        "init_db",  # 建库/迁移必须在启动装配点首步，失败要让启动失败
         "start_workflow_build_worker",
         "start_chat_agent_queue_worker",
         "start_plan_task_worker",
@@ -60,6 +61,18 @@ def test_worker与看护设施都在lifespan装配点():
     ):
         assert must in calls, f"装配点缺少 {must}"
     assert "Thread" in calls, "ComfyUI autostart 线程必须在装配点拉起"
+
+
+def test_lifespan首步建库():
+    """建库/迁移先于 worker 与看护设施：结构失败要让启动直接失败，不能带病起服务。"""
+    fn = _find_fn(_tree(), "_lifespan")
+    first = next(
+        n for n in fn.body
+        if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call)
+    )
+    func = first.value.func
+    name = func.id if isinstance(func, ast.Name) else (func.attr if isinstance(func, ast.Attribute) else "")
+    assert name == "init_db", "init_db 必须是 lifespan 的第一个动作"
 
 
 def test_autostart线程体保留看门狗登记():
@@ -79,3 +92,4 @@ def test_import无worker副作用():
         f = node.value.func
         name = f.id if isinstance(f, ast.Name) else (f.attr if isinstance(f, ast.Attribute) else "")
         assert not name.startswith("start_"), f"模块级 {name}() 调用必须收进 lifespan"
+        assert name != "init_db", "模块级 init_db() 必须收进 lifespan（import 不得建库）"

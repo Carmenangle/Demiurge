@@ -2,7 +2,7 @@
 
 钉住四条合同：
 1. 只收模型字段（ComfyUI 地址/路径等非模型设置写不进手机本机存档）；
-2. 仓库、选中项与其他设置原样保留；
+2. 仓库、选中项与其他设置原样保留（仓库在产物档 repos.json，其余在设置档）；
 3. 空密钥不抹掉本机已有非空值（与 user-state 写入同一护栏）；
 4. `/api/mobile/local-models` 永远不走反向代理（联机时由手机自己答）。
 """
@@ -76,7 +76,10 @@ def test_写本机模型保留其余状态并忽略非模型字段(phone_data: P
     }})
     assert resp.status_code == 200, resp.text
     saved = json.loads((phone_data / "user_state.json").read_text(encoding="utf-8"))
-    assert saved["repos"] == [{"id": "r1"}]
+    # 作品索引已拆到 repos.json（产物档）：写设置档时搬家，索引内容不动
+    index = json.loads((phone_data / "repos.json").read_text(encoding="utf-8"))
+    assert index["repos"] == [{"id": "r1"}]
+    assert "repos" not in saved
     assert saved["selection"] == {"repoId": "r1"}
     assert saved["settings"]["theme"] == "dark"
     assert saved["settings"]["comfyuiUrl"] == "http://pc:8188"
@@ -99,11 +102,33 @@ def test_空密钥不抹掉本机已有密钥(phone_data: Path):
     assert body["models"]["embedModel"]["apiKey"] == "embed-key"
 
 
+def test_视觉与嵌入存档随本机模型存取(phone_data: Path):
+    """存档列表必须落在「手机本机模型」面（2026-11-07）：漏键会被当非模型字段摘掉，
+    手机换档后电脑侧只剩单字段镜像，切回即丢配置。"""
+    body = _client().post("/api/mobile/local-models", json={"models": {
+        "vlmPresets": [{"id": "vp1", "name": "云端", "mode": "remote", "apiKey": "sk-vlm",
+                        "baseUrl": "https://api.example.com/v1", "modelName": "glm-4v"}],
+        "activeVlmPresetId": "vp1",
+        "embedPresets": [{"id": "ep1", "name": "本机", "mode": "remote", "apiKey": "",
+                          "baseUrl": "http://localhost:11434/v1", "modelName": "qwen3-embedding"}],
+        "activeEmbedPresetId": "ep1",
+    }}).json()
+    assert body["models"]["vlmPresets"][0]["name"] == "云端"
+    assert body["models"]["activeVlmPresetId"] == "vp1"
+    assert body["models"]["embedPresets"][0]["modelName"] == "qwen3-embedding"
+    assert body["models"]["activeEmbedPresetId"] == "ep1"
+    # 读侧同口径（密钥照常保留）
+    read = _client().get("/api/mobile/local-models").json()["models"]
+    assert read["vlmPresets"][0]["apiKey"] == "sk-vlm"
+
+
 @pytest.mark.parametrize("models,match", [
     ({"chatModels": {}}, "chatModels 必须是数组"),
     ({"embedModel": []}, "embedModel 必须是对象"),
     ({"vlmModel": "x"}, "vlmModel 必须是对象"),
     ({"activeChatModelId": 1}, "activeChatModelId 必须是字符串"),
+    ({"vlmPresets": {}}, "vlmPresets 必须是数组"),
+    ({"activeEmbedPresetId": 1}, "activeEmbedPresetId 必须是字符串"),
 ])
 def test_形状校验(phone_data: Path, models: dict, match: str):
     resp = _client().post("/api/mobile/local-models", json={"models": models})

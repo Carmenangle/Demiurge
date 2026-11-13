@@ -96,15 +96,22 @@ def _resolve_illustration_request_actors(
     return []
 
 def _protagonist_gender(ctx: CtxLike, repo_id: str, protagonist: str) -> str:
-    """主人公性别（零 LLM）：世界书条目正文优先，通用表「性别」列兜底。
+    """主人公性别（零 LLM）定序：①用户人设正文 → ②世界书主角条目 → ③通用表「性别」列。
 
     2026-09-20 用户定案：只服务主人公，且性别只作**画面事实**注入（不机械拼硬标签）。
-    两道来源都取不到 ⇒ `""`（调用方不注入，宁缺勿猜）。
+    2026-11-05 用户定案（第 52 刀）：**「以 username 的用户设定为主，世界书相关主角的条目为辅」**
+    ⇒ 人设排到最前：条目是剧情侧资料，会和用户自己写的设定冲突，冲突时以用户设定为准。
+    三道都取不到 ⇒ `""`（调用方不注入，宁缺勿猜）。
+    ⚠ 只认「女」「男」：`gender_from_text` 的声明式支会把原文吐回来（`性别：未知` ⇒ `未知`），
+      那不是性别信号，必须继续往下走，不能注入。
     """
     name = str(protagonist or "").strip()
     if not name:
         return ""
     from app.services import scene_illustration, worldbook_store
+    persona = worldbook_store.gender_from_text(str(ctx.get("user_persona") or ""), name)
+    if persona in (worldbook_store.GENDER_FEMALE, worldbook_store.GENDER_MALE):
+        return persona
     base = str(ctx.get("output_dir") or "").strip()
     if base:
         try:
@@ -125,9 +132,9 @@ def _subject_gender_map(
 
     ⚠ **用途仅限**「按画面主体的实际性别组成写人数词」（`1girl, 2boys` 这种）——
       **不做画面事实注入**（性别注入仍只对主人公，23 刀红线）。
-    ⚠ 来源定序与主人公一致：世界书条目正文优先、通用表「性别」列兜底；
-      解析不出的名**不进映射**（下游见缺 ⇒ 退回中性措辞，宁缺勿猜）。
-    ⚠ 主人公复用已算好的 `protagonist_gender`（省一次世界书 I/O）。
+    ⚠ 定序：主人公复用 `_protagonist_gender` 的结果（第 52 刀起＝人设优先）；**其余角色**
+      仍按「世界书条目正文优先、通用表「性别」列兜底」——人设只描述用户自己，不能拿来判别人。
+    ⚠ 解析不出的名**不进映射**（下游见缺 ⇒ 退回中性措辞，宁缺勿猜）。
     """
     from app.services import scene_illustration, worldbook_store
     base = str(ctx.get("output_dir") or "").strip()
@@ -223,13 +230,21 @@ def _resolve_anchor_intent_list(ctx: CtxLike, text: str, raw: str) -> list[dict]
     items = scene_illustration.dedupe_anchor_intents(
         scene_illustration.parse_anchor_intents(raw), text,
     )
+    # 2026-11-09 分镜序列：保留**去重后的正文序原始下标**，供 shot_plan 判断
+    # 「相邻锚点是否被批量数裁掉」；旧路径只多一个诊断键，不影响选择/排序。
+    items = [dict(item, original_index=index) for index, item in enumerate(items)]
     # 第 59 刀（用户定案 2026-09-25）：判据**显式打 0 分**＝「这个时刻不值得画」
     # ⇒ 无论批量上限多大都不为它建槽。⚠ 过滤落在本层（多批选择）而非
     # `select_anchor_intents` 本体——旧单锚点形态被 parse 层有意包装成 score=0
     # （零回归锁），本体过滤会误杀单条路径（真机回归 11 连红实锤）。
+    # 2026-11-11 全文覆盖：shots 模式**不能按 score 过滤**——非高潮段（环境/过程/
+    # 性描写）本来就低分，过滤掉就等于跳过整段；覆盖由 `paragraphs` 账本负责。
+    if str(ctx.get("video_mode") or "") == "shots":
+        return scene_illustration.coverage_anchor_intents(items, 0)
     items = [item for item in items if int(item.get("score") or 0) > 0]
     if not items:
         return []
+    # 2026-11-11：shot 模式已在上方返回全部；非 shots 模式仍按批量数取前 N。
     return scene_illustration.select_anchor_intents(items, _anchor_batch_count(ctx))
 
 def _anchor_batch_count(ctx: CtxLike) -> int:
@@ -262,7 +277,9 @@ def _anchor_intent_viewpoint_hint(ctx: CtxLike) -> str:
         "他的身体只在正文写到时以局部入画）。\n"
         "⇒ 选点时**优先**挑「就站在叙事者眼睛位置、一眼就能看到」的时刻；"
         "**避开**那些必须退远、绕到对方背后、或要同时看全两人全身才画得出来的时刻"
-        "（那种帧在**选点阶段**就注定画不出来）。"
+        "（那种帧在**选点阶段**就注定画不出来）。\n"
+        "⇒ 文中「身后的人 / 对面的人」若指叙事者，写成「看向镜头 / 对镜头说话」；"
+        "对白即使不生成音频，也要在 video_beats 写说话动作（开口/嘴唇开合/口型）。"
     )
 
 def _illustration_anchor_intent(ctx: CtxLike, clean: str, sig: dict) -> tuple[str, dict]:
@@ -316,7 +333,9 @@ def _illustration_anchor_intent(ctx: CtxLike, clean: str, sig: dict) -> tuple[st
         f"剧情正文：\n{text}",
     ) if part)
     started = time.monotonic()
-    system = scene_illustration.anchor_intent_system(rubric)
+    system = scene_illustration.anchor_intent_system(
+        rubric, storyboard=str(ctx.get("video_mode") or "") == "shots",
+    )
     # ⚠ 2026-10-19 实测：这里**不要**套 `system_with_preset`（生图/视频链那层防拦截预设）。
     # 用同一段 R-18 正文对照过：不套 → 模型明确拒答「I can't analyze this content…」（311 字）；
     # 套上 → 变成一句空话「What can I help you with?」（25 字），**更糟且更贵**（+7,319 字预设）。

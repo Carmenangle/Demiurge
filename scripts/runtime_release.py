@@ -322,7 +322,21 @@ def _run(command: list[str], cwd: Path, env: dict[str, str] | None = None) -> No
     subprocess.run(command, cwd=cwd, env=env, check=True)
 
 
+def wheelhouse_dir() -> Path | None:
+    """离线构建开关：设了就只能从本地 wheel 装，缺件让 pip 报错，不许悄悄回源联网。"""
+    raw = os.environ.get("DEMIURGE_WHEELHOUSE_DIR", "").strip()
+    if not raw:
+        return None
+    directory = Path(raw)
+    if not directory.is_dir():
+        raise ValueError(f"DEMIURGE_WHEELHOUSE_DIR 指向的目录不存在：{directory}")
+    return directory.resolve()
+
+
 def pip_index_args() -> list[str]:
+    house = wheelhouse_dir()
+    if house is not None:
+        return ["--no-index", "--find-links", str(house)]
     index = os.environ.get("DEMIURGE_PYPI_INDEX_URL", DEFAULT_PYPI_INDEX).strip()
     if not index.startswith("https://"):
         raise ValueError("DEMIURGE_PYPI_INDEX_URL 必须使用 HTTPS")
@@ -344,15 +358,29 @@ def npm_executable() -> str:
     return npm
 
 
+def npm_offline_cache() -> Path | None:
+    """显式指定 npm 缓存＝要求纯离线，装不上就报错，不给自己留联网退路。"""
+    raw = os.environ.get("DEMIURGE_NPM_CACHE_DIR", "").strip()
+    if not raw:
+        return None
+    directory = Path(raw)
+    if not directory.is_dir():
+        raise ValueError(f"DEMIURGE_NPM_CACHE_DIR 指向的目录不存在：{directory}")
+    return directory.resolve()
+
+
 def install_frontend_dependencies(root: Path, frontend_work: Path, npm: str, *, prefer_offline: bool = True) -> None:
     if not prefer_offline:
         _run([npm, "ci"], frontend_work)
         return
-    cache = root / "vendor" / "npm"
+    explicit = npm_offline_cache()
+    cache = explicit if explicit is not None else root / "vendor" / "npm"
     if cache.is_dir():
         offline = subprocess.run([npm, "ci", "--offline", "--cache", str(cache)], cwd=frontend_work, check=False)
         if offline.returncode == 0:
             return
+        if explicit is not None:
+            raise RuntimeError(f"DEMIURGE_NPM_CACHE_DIR 离线安装前端失败（exit {offline.returncode}）：{cache}")
         print("当前平台的 vendor/npm 不完整，回退联网安装。")
     _run([npm, "ci"], frontend_work)
 
@@ -473,7 +501,7 @@ def build_rag_tree(root: Path, target: RuntimeTarget, tree: Path) -> str:
         "-c", str(root / "release" / "requirements-rag.lock"),
         f"torch=={target.torch_version}",
     ]
-    if target.torch_index_url:
+    if target.torch_index_url and wheelhouse_dir() is None:
         install_command.extend(("--extra-index-url", target.torch_index_url))
     _run(install_command, root)
     licenses_root = tree / "licenses"

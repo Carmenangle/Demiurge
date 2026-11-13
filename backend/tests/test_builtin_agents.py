@@ -198,6 +198,19 @@ def test_命运骰点规则_既定现实不掷骰_有争议仍须掷骰():
     assert "<roll>" in r and "</roll>" in r and "[SKILL]" in r and "[ROLL]" in r
 
 
+def test_命运骰六档词表与本地档位标签同源():
+    """`[RESULT]` 行的六档词是手写副本，必须与 `agency.DEGREE_LABEL` 逐字同序。
+
+    2026-11-06 登记（D2）：两处今天相同但零锁；单边改名会让「模型被教的档位词」与
+    「CI 证据文案读的档位词」分叉。本锁只钉**默认层**——`rollInstruction` 仍可由预设覆盖，
+    覆盖层的口径（校验还是放弃编辑）尚未定。
+    """
+    from app.services import agency
+    line = next(l for l in ba.ROLL_INSTRUCTION.splitlines() if l.startswith("[RESULT]"))
+    labels = [part.strip() for part in line[len("[RESULT]"):].split("/")]
+    assert labels == list(agency.DEGREE_LABEL.values())
+
+
 # ── 2026-10-21 世界事件司门：judge.eventsEnabled + World 三类提案协议 ──
 
 def test_judge_eventsEnabled_默认可覆盖且校验():

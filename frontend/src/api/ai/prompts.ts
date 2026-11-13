@@ -94,6 +94,42 @@ export function genProfilePrompt(
   }, 120_000);
 }
 
+export interface PortraitPromptResult extends GenPromptResult {
+  profile: string;
+  name?: string;
+  appearance?: string;
+  gender?: string;
+  /** 外貌来源账本：entry / table / merged / none（后端 character_portrait 口径） */
+  appearance_origin?: string;
+  /** 本次定妆用的动作（后端从预设表随机取的那一条，回显给用户；再点一次＝换一个） */
+  pose?: string;
+}
+
+// 角色定妆底图提示词（第 92 刀）：后端**只出提示词**（读世界书条目/角色卡/通用表外貌 + 同一条
+// Profile 编译器），提交、轮询、落盘都由前端走与自动插画同一条工作流链（lib/portraitBaseImage.ts）。
+export function genPortraitPrompt(args: {
+  outputDir: string; repoId: string; name: string;
+  profile?: string;
+  appearanceSource?: "worldbook" | "character_card";
+  aspectRatio?: string; rating?: string;
+  presetDir?: string; presetName?: string; userName?: string;
+  chat: Chat;
+}) {
+  return apiPost<PortraitPromptResult>("/ai/prompt/portrait", {
+    output_dir: args.outputDir,
+    repo_id: args.repoId,
+    name: args.name,
+    profile: args.profile || "anima_tags",
+    appearance_source: args.appearanceSource || "worldbook",
+    aspect_ratio: args.aspectRatio || "9:16",
+    rating: args.rating || "sfw",
+    preset_dir: args.presetDir || "",
+    preset_name: args.presetName || "",
+    user_name: args.userName || "",
+    ...chatBody(args.chat),
+  }, 120_000);
+}
+
 export interface FramePromptItem {
   prompt: string;
   negative_prompt: string;

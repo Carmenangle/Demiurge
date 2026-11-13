@@ -157,6 +157,7 @@ def test_audit_rejects_presets_userdata_and_backend_data(tmp_path):
         "presets/GrayWill-private.json",
         "userdata/settings.json",
         "backend/data/user_state.json",
+        "backend/data/repos.json",
         "dependencies/git/.env",
         "dependencies/git/userdata/state.json",
     ):
@@ -169,6 +170,7 @@ def test_audit_rejects_presets_userdata_and_backend_data(tmp_path):
     assert "presets/GrayWill-private.json" in joined
     assert "userdata/settings.json" in joined
     assert "backend/data/user_state.json" in joined
+    assert "backend/data/repos.json" in joined
     assert "dependencies/git/.env" in joined
 
 
@@ -188,11 +190,13 @@ def test_forbidden_entries_flags_installer_payload():
         "presets\\GrayWill-a.json",
         "userdata\\state.json",
         "backend\\data\\user_state.json",
+        "backend\\data\\repos.json",
         "dependencies\\git\\.env",
     ]
 
     offenders = installers.forbidden_entries(entries)
     assert offenders == [
+        "backend\\data\\repos.json",
         "backend\\data\\user_state.json",
         "dependencies\\git\\.env",
         "presets\\GrayWill-a.json",
@@ -263,6 +267,89 @@ def test_uninstall_residue_excludes_the_app_data_key_by_design():
     )
 
 
+def test_residue_targets_add_only_cache_entries_from_the_source_of_truth(tmp_path):
+    # 静默卸载的残留口径 = 安装目录 + 开始菜单 + 档 1 缓存；设置/产物/容器一律不许进来。
+    layout = installers.data_layout
+    home = tmp_path / "home"
+    added = [
+        label.removeprefix("壳 home 缓存 ")
+        for label, _ in installers.residue_targets(Path("app"), Path("appdata"), home)
+        if label.startswith("壳 home 缓存 ")
+    ]
+    expected = [
+        f"{scope}/{name}"
+        for scope in (layout.SCOPE_SHELL_HOME, layout.SCOPE_USERDATA)
+        for name, _tier, _kind in layout.deletion_names(scope, include_settings=False)
+    ]
+    assert added == expected
+    assert len(added) == len(set(added))
+
+    added_pairs = {tuple(item.split("/", 1)) for item in added}
+    expected_pairs = {
+        (scope, name)
+        for scope in (layout.SCOPE_SHELL_HOME, layout.SCOPE_USERDATA)
+        for name, _tier, _kind in layout.deletion_names(scope, include_settings=False)
+    }
+    assert added_pairs == expected_pairs
+
+    never = {
+        (scope, name)
+        for scope, entries in layout.SCOPES.items()
+        for name, (tier, _kind) in entries.items()
+        if tier in (layout.SETTINGS, layout.PRODUCT, layout.CONTAINER)
+    }
+    assert never and not (never & added_pairs)
+
+
+def test_seed_shell_home_covers_all_three_tiers_plus_an_unregistered_name(tmp_path):
+    layout = installers.data_layout
+    seeded = installers.seed_shell_home(tmp_path / "home")
+    tiers = {layout.tier(scope, name) for (scope, name) in seeded}
+    assert {layout.CACHE, layout.SETTINGS, layout.PRODUCT, layout.UNKNOWN} <= tiers
+    assert all(path.exists() for path in seeded.values())
+    # 未登记名字必须存在且不在删除面里：白名单判据的反证。
+    unknown = [name for (scope, name) in seeded if layout.tier(scope, name) == layout.UNKNOWN]
+    assert unknown == ["zzz_not_registered"]
+
+
+def test_check_shell_home_tiers_accepts_the_contracted_outcome(tmp_path):
+    layout = installers.data_layout
+    home = tmp_path / "home"
+    seeded = installers.seed_shell_home(home)
+    receipt_lines = ["=== uninstall: cache always, settings only if checked ==="]
+    for (scope, name), path in seeded.items():
+        if layout.tier(scope, name) == layout.CACHE:
+            shutil.rmtree(path) if path.is_dir() else path.unlink()
+            receipt_lines.append(f"OK    {scope}/{name}")
+    receipt = "\n".join(receipt_lines)
+    assert installers.check_shell_home_tiers(seeded, receipt) == []
+
+
+def test_check_shell_home_tiers_reports_surviving_cache_and_lost_product(tmp_path):
+    layout = installers.data_layout
+    seeded = installers.seed_shell_home(tmp_path / "home")
+    cache_left = seeded[(layout.SCOPE_SHELL_HOME, "runtime")]
+    product_lost = seeded[(layout.SCOPE_USERDATA, "chroma")]
+    shutil.rmtree(product_lost)
+    errors = installers.check_shell_home_tiers(seeded, "")
+    assert any("runtime" in item and "仍在" in item for item in errors)
+    assert any("chroma" in item and "误删" in item for item in errors)
+    assert not any("zzz_not_registered" in item for item in errors)
+
+    # 回执里出现「KEEP <缓存名>」＝删除被拒（进程占用），必须当成失败而不是静默通过。
+    shutil.rmtree(cache_left)
+    rejected = installers.check_shell_home_tiers(
+        seeded, "KEEP  shell-home/runtime\nOK    shell-home/logs\n"
+    )
+    assert any("runtime" in item and "被拒" in item for item in rejected)
+
+
+def test_smoke_env_pins_the_shell_home_to_the_sandbox(monkeypatch):
+    # 核验绝不把钩子指向真实 %LOCALAPPDATA%：值由工作区沙箱无条件覆盖，不接受外部传入。
+    monkeypatch.setenv("DEMIURGE_SHELL_HOME", str(Path("C:/Users/whoever/AppData/Local/Demiurge")))
+    assert installers.smoke_env()["DEMIURGE_SHELL_HOME"] == str(installers.SMOKE_SHELL_HOME)
+
+
 def test_nsi_facts_read_the_active_install_mode_branch():
     # NSIS 模板把两种 RequestExecutionLevel 都写进脚本，只有 !define INSTALLMODE 选中那条生效。
     template = """!define INSTALLMODE "{mode}"
@@ -298,9 +385,10 @@ def test_runtime_delivery_pin_matches_release_contract():
     assert pin["version"] == delivery.normalize_version(tauri["version"])
     assert pin["manifest"] == delivery.manifest_name(pin["tag"], pin["target"])
     assert pin["release_base"].endswith(f"/download/{pin['tag']}")
-    # 2026-10-30 定案：RAG 改必装，可选层清空（安装版首启即取全三层）。
-    assert pin["required_layers"] == ["base", "application", "rag"]
-    assert pin["optional_layers"] == []
+    # 2026-11-03 P3：rag 降为**可选层**，首启只取 base + application（~208 MB），
+    # 那 2 GiB 的本地推理栈由后台补齐。反向锁：required 里再出现 rag 直接判失败。
+    assert pin["required_layers"] == ["base", "application"]
+    assert pin["optional_layers"] == ["rag"]
 
 
 def test_runtime_delivery_pin_render_rejects_unsafe_tag_and_repository():
@@ -355,10 +443,17 @@ def test_runtime_delivery_manifest_validation_rejects_drift():
     manifest = _manifest_fixture(pin)
     delivery.validate_manifest(manifest, pin)
 
+    # rag 是可选层：清单里**根本没有它**也必须通过（2026-10-30 那版在这里判死）。
     missing_rag = json.loads(json.dumps(manifest))
     del missing_rag["layers"]["rag"]
-    with pytest.raises(ValueError, match="rag"):
-        delivery.validate_manifest(missing_rag, pin)
+    missing_rag["rag_id"] = ""
+    delivery.validate_manifest(missing_rag, pin)
+
+    # 反过来，required 的两层少一层仍旧判死。
+    missing_base = json.loads(json.dumps(manifest))
+    del missing_base["layers"]["base"]
+    with pytest.raises(ValueError, match="base"):
+        delivery.validate_manifest(missing_base, pin)
 
     wrong_target = json.loads(json.dumps(manifest))
     wrong_target["target"] = "windows-arm64-full-rag"

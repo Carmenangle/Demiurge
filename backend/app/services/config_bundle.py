@@ -693,11 +693,11 @@ def import_bundle(zip_path: Path, *, overwrite: bool = False) -> dict:
     except zipfile.BadZipFile as exc:
         raise ConfigBundleError("不是有效的 zip 文件") from exc
 
-    # 仓库导入自己会写 user_state（新增 repos 记录），故设置必须在仓库之后合并，
+    # 仓库导入自己会写作品索引（repos.json 里新增记录），故设置必须在仓库之后合并，
     # 且要重新读一次状态——用导入前的快照保存会把新仓库记录整体抹掉。
     state = repo_meta.load_user_state()
     merged_settings = merge_settings(state.get("settings"), incoming)
-    repo_meta.save_user_state({**state, "settings": merged_settings})
+    repo_meta.save_settings(merged_settings)  # 只写设置档，索引档不动
     return {
         "settings_updated": sorted(
             key for key in incoming if key not in PRESERVE_KEYS),

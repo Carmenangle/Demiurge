@@ -1,11 +1,12 @@
 import { Plus, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { fetchProxyStatus, type ProxyStatus } from "../../api/userState";
-import { comfyStatus } from "../../api/comfyui";
+import { probeComfyHosts } from "../../api/comfyui";
 import { loadMobileRemote } from "../../api/mobileRemote";
 import { normalizeSearchProvider, SEARCH_PROVIDER_OPTIONS, type SearchProvider } from "../../lib/searchSource";
-import { DEFAULT_MACHINE_ID, isLoopbackComfyUrl, listMachines } from "../../lib/comfyMachines";
-import type { ComfyMachine, ComfyRoute, UserPersona } from "../../stores/settings";
+import { DEFAULT_MACHINE_ID, isLoopbackComfyUrl, listMachines, resolveComfyRouteIds } from "../../lib/comfyMachines";
+import type { ComfyMachine, ComfyRoute, GbcEngine } from "../../stores/settings";
+import { DEFAULT_GBC } from "../../stores/settings";
 import type { PanelProps } from "./GeneralPanel";
 import { MOBILE_PROFILE } from "../../lib/mobileProfile";
 
@@ -105,44 +106,33 @@ export function PathsPanel({ draft, setDraft }: PanelProps) {
   const machinesReadOnly = MOBILE_PROFILE && mobileRemoteActive !== false;
   // 额外机台的连通性探测结果（id → 状态）。探测走 /comfyui/status，不需要先进白名单。
   const [machineProbe, setMachineProbe] = useState<
-    Record<string, { checking: boolean; running?: boolean; detail?: string }>
+    Record<string, { checking: boolean; online?: boolean; running?: number; pending?: number; detail?: string }>
   >({});
   const probeMachine = async (id: string, url: string) => {
     const target = url.trim();
     if (!target) return;
     setMachineProbe((p) => ({ ...p, [id]: { checking: true } }));
     try {
-      const st = await comfyStatus(target);
-      setMachineProbe((p) => ({ ...p, [id]: { checking: false, running: st.running } }));
+      const result = await probeComfyHosts([target]);
+      const item = result.items.find((entry) => entry.url === target);
+      setMachineProbe((p) => ({
+        ...p,
+        [id]: {
+          checking: false,
+          online: !!item?.online,
+          running: item?.running,
+          pending: item?.pending,
+          ...(item && !item.online ? { detail: item.error || "连不上" } : {}),
+        },
+      }));
     } catch (reason) {
       setMachineProbe((p) => ({
-        ...p, [id]: { checking: false, running: false, detail: (reason as Error).message },
+        ...p, [id]: { checking: false, online: false, detail: (reason as Error).message },
       }));
     }
   };
-  const personas = draft.userPersonas || [];
-  const addPersona = () => {
-    const id = crypto.randomUUID();
-    setDraft((d) => ({
-      ...d,
-      userPersonas: [...(d.userPersonas || []), { id, name: "", content: "" }],
-      activeUserPersonaId: d.activeUserPersonaId || id,  // 首个自动选中
-    }));
-  };
-  const updatePersona = (id: string, patch: Partial<UserPersona>) =>
-    setDraft((d) => ({
-      ...d,
-      userPersonas: (d.userPersonas || []).map((p) => (p.id === id ? { ...p, ...patch } : p)),
-    }));
-  const removePersona = (id: string) =>
-    setDraft((d) => ({
-      ...d,
-      userPersonas: (d.userPersonas || []).filter((p) => p.id !== id),
-      activeUserPersonaId: d.activeUserPersonaId === id ? undefined : d.activeUserPersonaId,
-    }));
   // ---- ComfyUI 地址簿（条目 0 就是上面那个「访问地址」，这里只管额外机台）----
   const extras = draft.comfyExtra || [];
-  const route = draft.comfyRoute || {};
   const machines = listMachines(draft);
   const addMachine = () => {
     const id = crypto.randomUUID();
@@ -155,10 +145,12 @@ export function PathsPanel({ draft, setDraft }: PanelProps) {
     }));
   const removeMachine = (id: string) => {
     setDraft((d) => {
-      // 路由指着这台机的话一并清掉：留死引用会让下拉显示成「默认」，与实际解析不符
+      // 路由指着这台机的话一并清掉：留死引用会让多选框显示成「默认」，与实际解析不符
       const nextRoute: ComfyRoute = { ...(d.comfyRoute || {}) };
       for (const row of ROUTE_ROWS) {
-        if (nextRoute[row.key] === id) delete nextRoute[row.key];
+        const kept = resolveComfyRouteIds(d, row.key).filter((item) => item !== id);
+        if (kept.length) nextRoute[row.key] = kept;
+        else delete nextRoute[row.key];
       }
       return {
         ...d,
@@ -172,14 +164,21 @@ export function PathsPanel({ draft, setDraft }: PanelProps) {
       return next;
     });
   };
-  const setRoute = (key: keyof ComfyRoute, value: string) =>
+  const toggleRoute = (key: keyof ComfyRoute, id: string) =>
     setDraft((d) => {
-      // 选「默认」就删键（不落 "default" 值）：设置文件保持干净，语义与「省略＝跟随条目 0」一致
+      const current = resolveComfyRouteIds(d, key);
+      // 空列表语义＝默认机台；勾选时以默认机台为基底，取消它=只留其它机台。
+      const base = current.length ? current : [DEFAULT_MACHINE_ID];
+      const next = base.includes(id) ? base.filter((item) => item !== id) : [...base, id];
+      const cleaned = next.length ? next : [DEFAULT_MACHINE_ID];
       const nextRoute: ComfyRoute = { ...(d.comfyRoute || {}) };
-      if (value === DEFAULT_MACHINE_ID) delete nextRoute[key];
-      else nextRoute[key] = value;
+      if (cleaned.length === 1 && cleaned[0] === DEFAULT_MACHINE_ID) delete nextRoute[key];
+      else nextRoute[key] = cleaned;
       return { ...d, comfyRoute: nextRoute };
     });
+  const gbc: GbcEngine = draft.gbc ?? DEFAULT_GBC;
+  const patchGbc = (patch: Partial<GbcEngine>) =>
+    setDraft((d) => ({ ...d, gbc: { ...(d.gbc ?? DEFAULT_GBC), ...patch } }));
   return (
     <div className="settings-section">
       <h4>路径</h4>
@@ -223,60 +222,6 @@ export function PathsPanel({ draft, setDraft }: PanelProps) {
         <p className="field-hint">
           导入的角色卡按「小仓库」存进此目录：每张卡一个文件夹，含卡本体、内嵌世界书/正则与对话记录。
         </p>
-      </div>
-      <div className="field">
-        <div className="settings-actions-head" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <label style={{ margin: 0 }}>用户人设（可多档，选中的注入剧情）</label>
-          <button className="btn" onClick={addPersona}>
-            <Plus size={15} style={{ verticalAlign: "-2px", marginRight: 4 }} />新增人设
-          </button>
-        </div>
-        <p className="field-hint">
-          定制多个「我是谁」，按情况自由切换。选中档的名字填 {"{{user}}"} 宏、描述让角色知道用户是谁。不选则不注入用户人设。
-        </p>
-        {personas.length === 0 && (
-          <p className="field-hint" style={{ opacity: 0.7 }}>还没有用户人设，点「新增人设」创建一个。</p>
-        )}
-        {personas.map((p) => {
-          const active = draft.activeUserPersonaId === p.id;
-          return (
-            <div
-              key={p.id}
-              style={{
-                border: active ? "2px solid var(--accent, #6F7F5D)" : "1px solid var(--border, #ccc)",
-                borderRadius: 8, padding: 10, marginTop: 8,
-              }}
-            >
-              <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6 }}>
-                <label style={{ display: "flex", alignItems: "center", gap: 4, margin: 0, cursor: "pointer" }}>
-                  <input
-                    type="radio"
-                    name="active-user-persona"
-                    checked={active}
-                    onChange={() => setDraft((d) => ({ ...d, activeUserPersonaId: p.id }))}
-                  />
-                  {active ? "使用中" : "设为使用"}
-                </label>
-                <input
-                  style={{ flex: 1 }}
-                  value={p.name}
-                  onChange={(e) => updatePersona(p.id, { name: e.target.value })}
-                  placeholder="人设名（填 {{user}}）"
-                />
-                <button className="btn" onClick={() => removePersona(p.id)} title="删除此人设">
-                  <Trash2 size={15} />
-                </button>
-              </div>
-              <textarea
-                value={p.content}
-                onChange={(e) => updatePersona(p.id, { content: e.target.value })}
-                placeholder="你是谁：身份、外貌、性格等。让角色知道'用户是谁'。"
-                rows={3}
-                style={{ width: "100%" }}
-              />
-            </div>
-          );
-        })}
       </div>
       <div className="field">
         <label>世界书文件夹</label>
@@ -397,8 +342,8 @@ export function PathsPanel({ draft, setDraft }: PanelProps) {
               />
               {probe && !probe.checking && (
                 <p className="field-hint">
-                  {probe.running
-                    ? "已连通：这台机的 ComfyUI 在运行。"
+                  {probe.online
+                    ? `已连通：运行中 ${probe.running ?? 0} / 排队 ${probe.pending ?? 0}（分镜任务会优先分给队列短的机台）`
                     : `连不上：${probe.detail || "地址不通或 ComfyUI 未启动"}`}
                 </p>
               )}
@@ -407,32 +352,36 @@ export function PathsPanel({ draft, setDraft }: PanelProps) {
         })}
         <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginTop: 10 }}>
           {ROUTE_ROWS.map((row) => {
-            const raw = route[row.key] || "";
-            // 手改过设置里可能出现指向已删机台的 id：显示层收敛到「默认」，与实际解析一致
-            const selected = machines.some((m) => m.id === raw) ? raw : DEFAULT_MACHINE_ID;
+            const selectedIds = resolveComfyRouteIds(draft, row.key)
+              .filter((id) => machines.some((machine) => machine.id === id));
+            // 空/全未知 ⇒ 默认机台；勾选可多台，分镜任务按队列负载分发。
+            const effective = selectedIds.length ? selectedIds : [DEFAULT_MACHINE_ID];
             return (
-              <label key={row.key} style={{ display: "flex", alignItems: "center", gap: 6, margin: 0 }}>
-                {row.label}
-                <select
-                  aria-label={`${row.label}机台`}
-                  value={selected}
-                  onChange={(e) => setRoute(row.key, e.target.value)}
-                  disabled={machinesReadOnly}
-                >
-                  {machines.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.id === DEFAULT_MACHINE_ID
-                        ? `默认（${m.url || "未填写"}）`
-                        : `${m.name}（${m.url}）`}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              <div key={row.key} aria-label={`${row.label}机台`} style={{ marginTop: 6 }}>
+                <span style={{ marginRight: 8 }}>{row.label}</span>
+                {machines.map((machine) => {
+                  const label = machine.id === DEFAULT_MACHINE_ID
+                    ? `默认（${machine.url || "未填写"}）`
+                    : `${machine.name}（${machine.url}）`;
+                  return (
+                    <label key={machine.id} style={{ display: "inline-flex", alignItems: "center", gap: 4, marginRight: 12 }}>
+                      <input
+                        type="checkbox"
+                        checked={effective.includes(machine.id)}
+                        onChange={() => toggleRoute(row.key, machine.id)}
+                        disabled={machinesReadOnly}
+                      />
+                      {label}
+                    </label>
+                  );
+                })}
+              </div>
             );
           })}
         </div>
         <p className="field-hint">
-          对话里按模态选机：图片 / 视频 / 配音可分别用不同机台，省略＝默认机台。
+          对话里按模态选机：图片 / 视频 / 配音可各选**多台**；分镜任务会探测各机队列，
+          优先分给运行中/排队短的机台并行出片。全不选＝默认机台。
           跨机协作时帧图会由本工具在机台之间搬运（视频机无需能访问图片机）。
           画布与手动运转工作流永远只走默认机台。
         </p>
@@ -446,6 +395,57 @@ export function PathsPanel({ draft, setDraft }: PanelProps) {
         />
         <p className="field-hint">
           留空时自动查找 ComfyUI 整合包或 .venv/venv；不会使用本工具的 Python。
+        </p>
+      </div>
+      <div className="field">
+        <label>GBC 场景图引擎（外部工具）</label>
+        <input
+          value={gbc.exePath}
+          onChange={(e) => patchGbc({ exePath: e.target.value })}
+          placeholder="D:\\tool\\KohakuGBC\\.venv\\Scripts\\gbc.exe"
+        />
+        <div style={{ display: "flex", gap: 8, marginTop: 6, flexWrap: "wrap" }}>
+          <input
+            style={{ flex: 1, minWidth: 220 }}
+            value={gbc.sam3Dir}
+            onChange={(e) => patchGbc({ sam3Dir: e.target.value })}
+            placeholder="SAM-3 权重目录（含 *.safetensors）"
+          />
+          <input
+            style={{ flex: 1, minWidth: 220 }}
+            value={gbc.embedDir}
+            onChange={(e) => patchGbc({ embedDir: e.target.value })}
+            placeholder="EmbeddingGemma 权重目录"
+          />
+        </div>
+        <div style={{ display: "flex", gap: 16, alignItems: "center", marginTop: 6, flexWrap: "wrap" }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, margin: 0 }}>
+            检测设备
+            <select
+              value={gbc.device}
+              onChange={(e) => patchGbc({ device: e.target.value === "cpu" ? "cpu" : "cuda" })}
+            >
+              <option value="cuda">cuda（快，约 5 GB 显存）</option>
+              <option value="cpu">cpu（慢，不占显存）</option>
+            </select>
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, margin: 0 }}>
+            最多分析物体数
+            <input
+              type="number"
+              min={1}
+              max={20}
+              style={{ width: 72 }}
+              value={gbc.maxTopLevel}
+              onChange={(e) => patchGbc({ maxTopLevel: Number(e.target.value) || 1 })}
+            />
+          </label>
+        </div>
+        <p className="field-hint">
+          GBC 不是「丢一个模型目录」就能跑的打标器：它要自己那套 Python + torch，
+          外加 SAM-3 与 EmbeddingGemma 两份权重（合计约 4 GB），所以不进安装包，
+          这里填本机路径即可（网络共享盘也能填）。VLM 复用「设置 → 模型 → 视觉大模型」：
+          本地 Ollama 与 SAM-3 同时驻显存可能放不下（8 GB 卡建议检测设备选 cpu，或用云端 VLM）。
         </p>
       </div>
       <div className="field">

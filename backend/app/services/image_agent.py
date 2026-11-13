@@ -9,7 +9,7 @@
 import logging
 from typing import Annotated, Iterator
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import tool
 from langgraph.prebuilt import InjectedState
 
@@ -55,7 +55,7 @@ def _build(chat_base: str, chat_key: str, chat_model: str,
            style_template: str = "", has_images: bool = False, agent_id: str = "",
            memory_mode: str = "legacy_checkpoint", image_quality: str = "high",
            chat_proxy_url: str = "", gen_proxy_url: str = "", embed_proxy_url: str = "",
-           search_provider: str = "", cancel_event=None):
+           search_provider: str = "", cancel_event=None, persona_block: str = ""):
     """构建 agent。image_sink 收集本轮生成的图片地址，供路由透出。
     出图时后端同步落盘：下载留存→入库→追加进 chat_snapshot，前端断开也不丢。
     has_images=True（本轮用户带图）时裁剪工具集，物理上只保留 image_to_image，
@@ -175,6 +175,9 @@ def _build(chat_base: str, chat_key: str, chat_model: str,
         system_prompt = AGENT_SYSTEM_BASE
     if agent_cfg and (agent_cfg.get("memory") or "").strip():
         system_prompt += "\n\n【长期记忆（关于用户/偏好）】\n" + agent_cfg["memory"].strip()
+    # 2026-11-09 1:1 聊天＝通用 Agent + 人设：角色卡块放最前，工具规则/技能仍完整保留。
+    if (persona_block or "").strip():
+        system_prompt = persona_block.strip() + "\n\n" + system_prompt
 
     # 工具开关：自定义 Agent 可关掉某些内置工具；无 agent_cfg 时全开（原行为）
     tw = (agent_cfg or {}).get("tools") or {}
@@ -244,6 +247,45 @@ def _build(chat_base: str, chat_key: str, chat_model: str,
     )
 
 
+def _external_history_messages(
+    thread_id: str, history: list[dict] | None,
+) -> list:
+    """external_turn 的历史消息：优先用调用方传入的已预算历史。
+
+    2026-11-12 P6：1:1 聊天已停写 checkpoint，兜底改读快照（与主链同一真源）；
+    只有快照文件不存在（老会话）时才回退 checkpoint。工具专家仍优先复用
+    主链 `recent_history` 裁剪后的 `ctx.history`，不会无视 context_max_tokens。
+    """
+    source = history
+    if source is None:
+        try:
+            from app.services import chat_snapshot
+            source = chat_snapshot.load_prompt_history(thread_id)
+        except Exception as exc:  # noqa: BLE001 [EXC-留痕] 快照读不到再退 checkpoint
+            _LOG.debug("image_agent::_external_history_messages 快照兜底异常: %s", exc)
+            source = None
+    if source is None:
+        try:
+            from app.services import chat_memory
+            source = chat_memory.get_history(thread_id)
+        except Exception as exc:  # noqa: BLE001 [EXC-留痕] 读不到历史不阻断工具
+            _LOG.debug("image_agent::_external_history_messages 兜底异常: %s", exc)
+        if not source:
+            return []
+    messages: list = []
+    for item in source or []:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("content") or "")
+        if not text:
+            continue
+        messages.append(
+            HumanMessage(content=text) if item.get("role") == "user"
+            else AIMessage(content=text)
+        )
+    return messages
+
+
 def stream_agent(thread_id: str, message: str, images: list[str] | None,
                  chat_base: str, chat_key: str, chat_model: str,
                  gen_base: str, gen_key: str, gen_model: str,
@@ -254,7 +296,8 @@ def stream_agent(thread_id: str, message: str, images: list[str] | None,
                  agent_id: str = "", memory_mode: str = "legacy_checkpoint",
                  image_quality: str = "high", chat_proxy_url: str = "",
                  gen_proxy_url: str = "", embed_proxy_url: str = "",
-                 search_provider: str = "") -> Iterator[dict]:
+                 search_provider: str = "", persona_block: str = "",
+                 history: list[dict] | None = None) -> Iterator[dict]:
     """运行智能体，逐步产出事件 dict：
     {"delta": "..."} 文本增量；{"image": "url"} 生成的图片；{"error": "..."}。
     历史按 thread_id 自动载入续写、落盘（复用 checkpointer）。
@@ -271,21 +314,14 @@ def stream_agent(thread_id: str, message: str, images: list[str] | None,
                    has_images=bool(images), agent_id=agent_id, memory_mode=memory_mode,
                    image_quality=image_quality, chat_proxy_url=chat_proxy_url,
                    gen_proxy_url=gen_proxy_url, embed_proxy_url=embed_proxy_url,
-                   search_provider=search_provider, cancel_event=cancel_event)
+                   search_provider=search_provider, cancel_event=cancel_event,
+                   persona_block=persona_block)
     config = {"configurable": {"thread_id": thread_id}}
 
-    history_messages = []
-    if memory_mode == "external_turn":
-        try:
-            from app.services import chat_memory
-            from langchain_core.messages import AIMessage
-            for item in chat_memory.get_history(thread_id):
-                text = item.get("content") or ""
-                history_messages.append(HumanMessage(content=text) if item.get("role") == "user"
-                                        else AIMessage(content=text))
-        except Exception as exc:
-            _LOG.debug("image_agent::stream_agent 兜底异常: %s", exc)
-            history_messages = []
+    history_messages = (
+        _external_history_messages(thread_id, history)
+        if memory_mode == "external_turn" else []
+    )
     if images:
         content: list = [{"type": "text", "text": message or "（见图）"}]
         content += [{"type": "image_url", "image_url": {"url": u}} for u in images]

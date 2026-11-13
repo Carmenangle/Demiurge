@@ -620,6 +620,16 @@ def complete_field_coverage(
     # `… a clear primary visual focus, foreground guidance, … one coherent directional light source …`）。
     fact_set = set(factual_details)
     prose_facts = [detail for detail in details if detail in fact_set]
+    # 连续锚点（2026-11-12）：空间地标（门框/红毯/仓库…）只进 tags 行，不进
+    # 「人物被描绘为…」的散文尾巴——否则会写出「她被描绘成红毯/门框」的病句。
+    continuity = ledger.get("__continuity__")
+    scene_anchor_terms: set[str] = set()
+    if isinstance(continuity, Mapping):
+        raw_terms = continuity.get("scene_terms")
+        if isinstance(raw_terms, (list, tuple, set)):
+            scene_anchor_terms = {str(term) for term in raw_terms}
+    if profile in ("anima_tags", "niji_sections") and scene_anchor_terms:
+        prose_facts = [fact for fact in prose_facts if fact not in scene_anchor_terms]
     if profile == "krea2":
         # 第 28 刀①（2026-09-20 真机实锤）：旧实现 `prompt.rstrip(" .") + ". " + "; ".join(details)
         # + "."` ⇒ `… stands still in the room. withdrawing the fingers; a clear primary visual

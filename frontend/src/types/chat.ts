@@ -14,6 +14,8 @@ export interface MsgPart {
   status?: "pending" | "ready" | "failed";
   promptId?: string;
   error?: string;
+  /** 失败槽重试参数快照（不透明；插画槽为 `IllustrationSubmit`）。「编辑提示词」按它定位成稿字段。 */
+  retryArgs?: unknown;
   regeneration?: RegenerationSnapshot;
   /** media-slot 的媒体类型提示（占位文案/进度用；音频槽 = "audio"） */
   kind?: "image" | "video" | "audio";
@@ -36,6 +38,14 @@ export interface MsgPart {
   videoPrompt?: string;
   /** V1.5 默认开放：结构化视频参数（dry-run 组装结果，供测试核对参数是否上传） */
   videoParams?: VideoParams;
+  /** 2026-11-09 全局模式分镜序列：锚点图/镜头视频的归属与顺序（成片槽 merged=true）。 */
+  shotSequenceId?: string;
+  shotIndex?: number;
+  shotTotal?: number;
+  shotType?: "establish" | "cut" | "move" | "move_single";
+  imageKey?: string;
+  shotPhase?: "incoming" | "outgoing";
+  merged?: boolean;
 }
 
 /** 合集卡交付产物（fabric done 时后端扫描下发）：主卡/世界书等，供 Claude 式产物卡展示。
@@ -65,7 +75,7 @@ export type AgentRoute = "answer" | "generate" | "img2img" | "analyze" | "video"
  *  - 剧情节点 = roleplay / answer（roleplay 内部再串 world/recall/curator/judge）
  *  - 生成节点 = generate / img2img / video / analyze
  *  - 其余 = inspire / tool_agent / edit / clarify */
-export type MessageRoute = AgentRoute | "roleplay" | "edit" | "clarify";
+export type MessageRoute = AgentRoute | "roleplay" | "edit" | "clarify" | "chat";
 
 export interface RouteChoice {
   id: string;
@@ -120,6 +130,20 @@ export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
   text: string;
+  /** 聊天室：消息时间（epoch 秒）。用于气泡时间标签与头像条「最近消息」排序；
+   *  旧快照没有该字段时不伪造，只显示名称。 */
+  ts?: number;
+  /** 聊天室：QQ 式「戳了戳你」轻动作（system 动作，不进模型历史）。 */
+  poke?: boolean;
+  /** 聊天/群聊：发言角色名（剧情消息为空）。群聊历史与气泡标签都靠它区分说话人。 */
+  speaker?: string;
+  /** 聊天室：角色自发请求的自拍/视频（前端生成后作为媒体气泡插回聊天）。
+   *  appearance＝后端从角色条目/卡补的稳定外貌（去掉当前穿着），供 Profile 编译锁身份。 */
+  mediaRequest?: {
+    kind: "image" | "video"; prompt: string; avatar?: boolean; appearance?: string;
+    /** 已发起/已处理标记：刷新后快照补拍只处理未处理过的请求。 */
+    handled?: boolean;
+  };
   parts?: MsgPart[];   // 图文混排：有则优先按顺序渲染，文本/图片穿插
   thinking?: string;
   /** 非流式 agent 执行过程行（计划编译/自由循环经 SSE trace 事件累积）。

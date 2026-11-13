@@ -139,3 +139,24 @@ def test_整理预览_显式层数优先且快照不可读时不猜(tmp_path, mo
     fallback = narrative_router.normalize_preview(
         narrative_router.NormalizeRequest(output_dir=base, repo_id="r1", total_turns=0))
     assert fallback["total_turns"] == 0 and fallback["gaps"] == []   # 不猜层数
+
+
+def test_CI端点必须带出臂参与台账(tmp_path):
+    """清单 #3／#4 的路由侧：面板靠这份 arms 才能说「这两条判据本轮没参与」。
+
+    只在 service 层加 `load_arms` 而端点漏带 ⇒ 单测全绿、界面仍只显示「暂无诊断」，
+    正是 `T1-13` 那次的同族失败，所以按**路由出口**断言。
+    """
+    from app.services import narrative_ci
+
+    base = str(tmp_path)
+    assert narrative_router.narrative_diagnostics(output_dir=base, repo_id="r1") == {
+        "items": [], "arms": {}}
+
+    narrative_ci.save_arms(base, "r1", narrative_ci.arm_participation(has_worldbook=False), turn=6)
+    got = narrative_router.narrative_diagnostics(output_dir=base, repo_id="r1")
+
+    assert got["items"] == []          # 诊断为空 + 两臂未参与＝「空转出来的绿」那一面
+    assert got["arms"]["turn"] == 6
+    assert {v["reason"] for v in got["arms"]["arms"].values()} == {
+        "no_worldbook", "world_not_consulted"}

@@ -41,6 +41,8 @@ def submit_plan(req: PlanSubmitRequest) -> dict:
             configured_models=set(req.configured_models))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=503, detail=f"能力租约存储写入失败：{exc}") from exc
 
 
 @router.get("")
@@ -69,6 +71,9 @@ def approve_plan(task_id: str, req: ApproveRequest | None = None) -> dict:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        # 租约没落住时 approve_task 在写 lease_id 前就抛出 ⇒ 任务仍 awaiting，可重试
+        raise HTTPException(status_code=503, detail=f"能力租约存储写入失败：{exc}") from exc
 
 
 @router.post("/{task_id}/steps/{step_id}/skip")

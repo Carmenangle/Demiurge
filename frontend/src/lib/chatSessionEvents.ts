@@ -166,10 +166,20 @@ function insertSlotAtOffset(
   return parts;
 }
 
+export interface ShotSlotMeta {
+  shotSequenceId?: string;
+  shotIndex?: number;
+  shotTotal?: number;
+  shotType?: "establish" | "cut" | "move" | "move_single";
+  imageKey?: string;
+  shotPhase?: "incoming" | "outgoing";
+  merged?: boolean;
+}
+
 function appendMediaSlot(
   message: ChatMessage, slotId: string, offset?: number,
   lastFrameDesc?: string, videoPrompt?: string, videoParams?: VideoParams,
-  lastFrameUrl?: string,
+  lastFrameUrl?: string, meta?: ShotSlotMeta,
 ): ChatMessage {
   const existing = message.parts || (message.text ? [{ type: "text" as const, text: message.text }] : []);
   if (existing.some((part) => part.slotId === slotId)) return message;
@@ -177,7 +187,8 @@ function appendMediaSlot(
     ...(lastFrameDesc ? { lastFrameDesc } : {}),
     ...(lastFrameUrl ? { lastFrameUrl } : {}),
     ...(videoPrompt ? { videoPrompt } : {}),
-    ...(videoParams ? { videoParams } : {}) };
+    ...(videoParams ? { videoParams } : {}),
+    ...(meta || {}) };
   if (typeof offset === "number") {
     return { ...message, parts: insertSlotAtOffset(existing, message.text, slot, offset) };
   }
@@ -241,7 +252,7 @@ export function appendImageSlot(
  */
 export function appendVideoSlotAfter(
   current: ChatMessage[], messageId: string, slotId: string, afterSlotId: string,
-  videoPrompt?: string, videoParams?: VideoParams,
+  videoPrompt?: string, videoParams?: VideoParams, meta?: ShotSlotMeta,
 ): ChatMessage[] {
   return current.map((message) => {
     if (message.id !== messageId) return message;
@@ -252,6 +263,7 @@ export function appendVideoSlotAfter(
       type: "media-slot" as const, slotId, status: "pending" as const, kind: "video" as const,
       ...(videoPrompt ? { videoPrompt } : {}),
       ...(videoParams ? { videoParams } : {}),
+      ...(meta || {}),
     };
     const anchor = parts.findIndex((part) => part.slotId === afterSlotId);
     if (anchor < 0) return { ...message, parts: [...parts, slot] };
@@ -306,6 +318,81 @@ export function markMediaSlotFailed(
     };
     return { ...message, parts: next };
   });
+}
+
+// 「编辑提示词」读取/回写失败槽快照的提示词字段。
+// 槽位快照是不透明对象（插画为 IllustrationSubmit），这里只碰提示词相关键，不解释其它字段。
+type RetryPromptFields = {
+  finalPrompt?: unknown;
+  prompt?: unknown;
+  videoPrompt?: unknown;
+  transitionVideoPrompt?: unknown;
+};
+
+function retryText(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+/** 失败槽当前应展示/可编辑的提示词：图片槽优先编译成稿，视频槽优先视频成稿。 */
+export function retryPromptText(part: MsgPart): string {
+  const snapshot = (part.retryArgs && typeof part.retryArgs === "object")
+    ? part.retryArgs as RetryPromptFields
+    : {};
+  if (part.kind === "video") {
+    return retryText(part.videoPrompt)
+      || retryText(snapshot.videoPrompt)
+      || retryText(snapshot.transitionVideoPrompt);
+  }
+  return retryText(snapshot.finalPrompt) || retryText(snapshot.prompt);
+}
+
+/**
+ * 「编辑提示词」：把用户改过的提示词写回失败槽的重试快照。
+ *
+ * - 图片槽：试跑槽带 `finalPrompt`（编译成稿）⇒ 覆盖成稿；普通失败槽没有成稿 ⇒ 覆盖原始
+ *   `prompt`，重试仍走编译链（模板/Profile 升级能生效）。
+ * - 视频槽：只覆盖视频成稿那一键。转场/段桥槽的真源是 `transitionVideoPrompt`，按当前
+ *   展示的文案认领字段；绝不误改主图成稿（它还要给视频生成首帧图）。
+ */
+export function overrideRetryPrompt(
+  retryArgs: unknown,
+  shownPrompt: string,
+  editedPrompt: string,
+  kind: MsgPart["kind"],
+): unknown {
+  const edited = retryText(editedPrompt);
+  if (!edited || !retryArgs || typeof retryArgs !== "object" || Array.isArray(retryArgs)) {
+    return retryArgs;
+  }
+  const next = { ...(retryArgs as RetryPromptFields) };
+  if (kind === "video") {
+    const shown = retryText(shownPrompt);
+    const video = retryText(next.videoPrompt);
+    const transition = retryText(next.transitionVideoPrompt);
+    if (transition && (!video || transition === shown)) {
+      next.transitionVideoPrompt = edited;
+    } else {
+      next.videoPrompt = edited;
+    }
+    return next;
+  }
+  if (retryText(next.finalPrompt)) {
+    next.finalPrompt = edited;
+  } else {
+    next.prompt = edited;
+  }
+  return next;
+}
+
+/** 「编辑提示词」后的重试参数：无改写时原样返回快照，保持既有重试语义。 */
+export function retryArgsWithPrompt<T>(
+  snapshot: T,
+  part: MsgPart,
+  editedPrompt?: string,
+): T {
+  return ((editedPrompt || "").trim()
+    ? overrideRetryPrompt(snapshot, retryPromptText(part), editedPrompt || "", part.kind || "image")
+    : snapshot) as T;
 }
 
 /**
@@ -382,12 +469,58 @@ export function resolveMediaSlot(
       ...(part?.videoPrompt ? { videoPrompt: part.videoPrompt } : {}),
       // V1.5 默认开放：结构化视频参数随槽位保留（供测试核对参数是否上传）
       ...(part?.videoParams ? { videoParams: part.videoParams } : {}),
+      // 2026-11-09 分镜序列：顺序/归属随槽位保留，成片合并按 shotIndex 排序。
+      ...(part?.shotSequenceId ? { shotSequenceId: part.shotSequenceId } : {}),
+      ...(part?.shotIndex !== undefined ? { shotIndex: part.shotIndex } : {}),
+      ...(part?.shotTotal !== undefined ? { shotTotal: part.shotTotal } : {}),
+      ...(part?.shotType ? { shotType: part.shotType } : {}),
+      ...(part?.imageKey ? { imageKey: part.imageKey } : {}),
+      ...(part?.shotPhase ? { shotPhase: part.shotPhase } : {}),
+      ...(part?.merged ? { merged: part.merged } : {}),
       ...(regeneration ? { regeneration } : {}),
       ...(generationId ? { generationId } : {}),
     };
     if (index >= 0) parts[index] = resolved;
     else parts.push(resolved);  // 槽意外丢失也补插，绝不让已生成的图成为孤儿
     return { ...message, parts };
+  });
+}
+
+/** 2026-11-09 分镜成片槽：pending/failed 都落末尾；成功后由 resolveMergedVideoSlot 复用同槽。 */
+export function appendMergedVideoSlot(
+  current: ChatMessage[], messageId: string, slotId: string, sequenceId: string,
+  status: "pending" | "failed" = "pending", error?: string,
+): ChatMessage[] {
+  return current.map((message) => {
+    if (message.id !== messageId) return message;
+    const parts = message.parts || (message.text ? [{ type: "text" as const, text: message.text }] : []);
+    const index = parts.findIndex((part) => part.slotId === slotId);
+    const base: MsgPart = {
+      type: "media-slot", slotId, kind: "video", status,
+      shotSequenceId: sequenceId, merged: true,
+      ...(error ? { error } : {}),
+    };
+    if (index >= 0) {
+      const next = [...parts];
+      next[index] = { ...next[index], ...base, ...(error ? { error } : {}) };
+      return { ...message, parts: next };
+    }
+    return { ...message, parts: [...parts, base] };
+  });
+}
+
+export function resolveMergedVideoSlot(
+  current: ChatMessage[], messageId: string, slotId: string,
+  sequenceId: string, url: string,
+): ChatMessage[] {
+  return resolveMediaSlot(current, messageId, slotId, url, "video").map((message) => {
+    if (message.id !== messageId) return message;
+    return {
+      ...message,
+      parts: (message.parts || []).map((part) => part.slotId === slotId
+        ? { ...part, shotSequenceId: sequenceId, merged: true }
+        : part),
+    };
   });
 }
 
@@ -609,10 +742,25 @@ export function reduceChatStreamEvent(
             // 在最后一段下方」），前端自算、零 wire；高潮点逐字不动 —— 仍用后端 anchor_offset。
             firstlastMainSlotOffset(message, event, current, placement),
             event.lastFrameDesc, event.videoPrompt, event.videoParams, event.lastFrameUrl,
+            event.shotSequenceId ? {
+              shotSequenceId: event.shotSequenceId,
+              shotIndex: event.shotIndex,
+              shotTotal: event.shotTotal,
+              shotType: event.shotType,
+              imageKey: event.imageKey,
+            } : undefined,
           )
         : message);
     case "audio_request":
       // 音频对白配音不入气泡流：由 useChatSession 逐角色提交 IndexTTS，完成后聚合到剧情楼层。
+      return current;
+    case "chat_messages":
+      // 2026-11-09 聊天/群聊：由 ChatRoomView 直接消费并追加带 speaker 的气泡；
+      // 剧情会话引擎不感知该事件（保持 current 引用，不触发额外渲染）。
+      return current;
+    case "media_request":
+      // 2026-11-10 聊天室自发媒体：由 ChatRoomView 在聊天流结束后走 generate/video；
+      // 剧情会话引擎不感知（保持引用，不触发额外渲染）。
       return current;
     case "rag_status":
       // RAG 创建状态不入气泡流：由 useChatSession 派发右下角轻提示。

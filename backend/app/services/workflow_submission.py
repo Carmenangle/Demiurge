@@ -1,6 +1,7 @@
 """ComfyUI 工作流提交：模板读取、转换、注入、校验与提交。"""
 from __future__ import annotations
 
+import copy
 import json
 import uuid
 from pathlib import Path
@@ -52,17 +53,21 @@ def submit_template(template_id: str, values: dict[str, object], prompt: str = "
     template = template_store.get_template(template_id)
     if template is None:
         raise WorkflowSubmissionError(400, "模板不存在")
-    source = str(template.get("source_path") or "")
-    if not source or not Path(source).is_file():
-        raise WorkflowSubmissionError(400, "模板缺少原始工作流文件，无法启动")
-
     normalized_url = _ready_url(url)
-    try:
-        workflow = json.loads(Path(source).read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise WorkflowSubmissionError(400, f"工作流 JSON 解析失败：{exc}") from exc
-
-    api = ui_to_api(workflow, normalized_url)
+    # 2026-11-12：AIO 等含 subgraph 的模板可带预编译 API 快照；有它就直接用，
+    # 不再现场 ui_to_api（子图内 Switch/Resolution 的 widget 映射会丢失）。
+    api_workflow = template.get("api_workflow")
+    if isinstance(api_workflow, dict) and api_workflow:
+        api = copy.deepcopy(api_workflow)
+    else:
+        source = str(template.get("source_path") or "")
+        if not source or not Path(source).is_file():
+            raise WorkflowSubmissionError(400, "模板缺少原始工作流文件，无法启动")
+        try:
+            workflow = json.loads(Path(source).read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise WorkflowSubmissionError(400, f"工作流 JSON 解析失败：{exc}") from exc
+        api = ui_to_api(workflow, normalized_url)
     # 唯一输出前缀：模板自带 %date% 秒级前缀，同秒完成任务会互相覆盖输出文件
     workflow_injector.set_unique_output_prefix(
         api, f"Demiurge_{uuid.uuid4().hex[:12]}")

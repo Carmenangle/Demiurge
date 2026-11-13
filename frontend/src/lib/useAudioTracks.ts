@@ -27,7 +27,7 @@ import {
   audioTemplateValues, resolvableAudioLines, skippedAudioSpeakers, voiceReferenceFor,
 } from "./audioGeneration";
 import { appendAudioSlot, dropMediaSlot } from "./chatSessionEvents";
-import { resolveComfyUrl } from "./comfyMachines";
+import { pickComfyHostFor } from "./comfyHostPool";
 import { type PendingGeneration } from "./workflowGenerationRuntime";
 
 /** 音频链的 hook 闭包依赖（T2.2-C1 同名 deps 注入；类型逐字抄 useChatSession 内声明）。 */
@@ -90,7 +90,8 @@ export function useAudioTracks({
     const outputNodeIds = tpl.primary_output_node_id ? [tpl.primary_output_node_id] : [];
     // 地址簿按模态选机（B 段）：上传音轨 / 提交 / 轮询三处必须是**同一台机**，
     // 未配路由时与 `settings.comfyuiUrl` 同值。
-    const comfyAudioUrl = resolveComfyUrl(settings, "audio");
+    // 2026-11-09 多机台池：音频任务选当前队列最短的一台；未探测/全离线回退池内第一台。
+    const comfyAudioUrl = pickComfyHostFor(settings, "audio");
 
     let index = 0;
     for (const line of resolvable) {

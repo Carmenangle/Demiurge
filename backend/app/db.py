@@ -1,9 +1,94 @@
+import logging
 import sqlite3
 import threading
 import time
 from collections.abc import Iterator
+from pathlib import Path
 
 from app.config import DB_PATH
+from app.file_lock import exclusive_path_lock
+
+_LOG = logging.getLogger("uvicorn.error")
+
+#: `app.db` 的结构档位（写进库头的 `PRAGMA user_version`）。改表/加列就 +1，并让 `init_db`
+#: 里那条台阶能把它升上来。
+_DB_VERSION = 2
+
+
+def _backup_db() -> Path | None:
+    """用 sqlite 在线备份把 `app.db` 复制成 `app.db.bak-<时间戳>`；失败返回 None。
+
+    走 backup API 而不是复制文件：WAL 模式下单拷 `.db` 会漏掉还没落主文件的页，副本本身就
+    是个打不开的库——而这份副本存在的唯一理由是「建新之前先保住旧数据」，它必须是能打开的。
+    """
+    target = DB_PATH.with_name(f"{DB_PATH.name}.bak-{time.strftime('%Y%m%d-%H%M%S')}")
+    if target.exists():
+        return target
+    try:
+        source = sqlite3.connect(DB_PATH)
+        try:
+            destination = sqlite3.connect(target)
+            try:
+                source.backup(destination)
+            finally:
+                destination.close()
+        finally:
+            source.close()
+        return target
+    except sqlite3.Error as exc:
+        _LOG.warning("app.db 备份失败（%s → %s）：%s", DB_PATH, target.name, exc)
+        return None
+
+
+def _schema_gate() -> bool:
+    """库档位闸：True＝可以照常建表/补列；False＝库比本代码新且备份失败，什么都不许动。
+
+    只有两条分支是今天真能走到的（2026-11-02 P1 定档）：
+    - `<= 当前档` ⇒ 就地迁移。历史上所有装过的库都是档位 0，而 `init_db` 的 DDL 全是
+      `CREATE ... IF NOT EXISTS` + 补列，本来就前向兼容，所以不需要备份。
+    - `> 当前档`（降级回来，或两个版本并跑同一目录）⇒ 备份 + 建新。**备份失败绝不建新**：
+      宁可旧代码不去动新库的结构，也不拿一份可能打不开的副本换掉真数据。
+    「差距超出窗口就备份+建新」的那个窗口下界今天恒不可达（只有一档台阶），所以这里**不写
+    跑不到的分支**；等 `app.db` 出现第二档需要删列/改型的迁移时，再按
+    `docs/ROADMAP-INSTALLER-AND-UPDATE.md` P1 的规则补下界。
+    """
+    if not DB_PATH.is_file():
+        return True  # 新库没有档位可读，直接建
+    connection = sqlite3.connect(DB_PATH)
+    try:
+        version = int(connection.execute("pragma user_version").fetchone()[0])
+    finally:
+        connection.close()
+    if version <= _DB_VERSION:
+        if version < _DB_VERSION:
+            _LOG.info("app.db 档位 %d → %d：按加法迁移（建表/补列）后就地打档。",
+                      version, _DB_VERSION)
+        return True
+    backup = _backup_db()
+    if backup is None:
+        _LOG.error("app.db 档位 %d 高于本代码 %d，且备份失败 ⇒ 不动库结构。",
+                   version, _DB_VERSION)
+        return False
+    try:
+        DB_PATH.unlink()
+        for suffix in ("-wal", "-shm"):  # 主文件删了留着 WAL 会拼出一个半截旧库
+            DB_PATH.with_name(DB_PATH.name + suffix).unlink(missing_ok=True)
+    except OSError as exc:
+        _LOG.error("app.db 已备份到 %s 但删不掉原库（%s）⇒ 不动库结构。", backup, exc)
+        return False
+    _LOG.warning(
+        "app.db 档位 %d 高于本代码 %d ⇒ 已备份到 %s 并按新档重建；"
+        "资产主表是 Chroma 与磁盘的镜像，用 scripts/backfill_asset_db.py --apply 重建。",
+        version, _DB_VERSION, backup)
+    return True
+
+
+def _stamp_schema_version(connection: sqlite3.Connection) -> None:
+    """把当前档写进库头。PRAGMA 的写形态不接受绑定参数 ⇒ 只能拼字面量，
+    而值是模块级 int 常量，没有外部输入面。"""
+    if int(connection.execute("pragma user_version").fetchone()[0]) != _DB_VERSION:
+        connection.execute(f"pragma user_version={_DB_VERSION}")
+
 
 # WAL 是**写在库文件头里的持久设置**，只需切一次。
 # 2026-10-18 真机复现：并发首连（批量视觉描述 ThreadPoolExecutor）各自跑
@@ -29,13 +114,38 @@ def _ensure_wal(connection: sqlite3.Connection) -> None:
         _wal_ready = True
 
 
-def get_connection() -> sqlite3.Connection:
+# 结构初始化闸：键是**当前 DB_PATH 字符串**（测试/脚本会换路径），不能缓存成全局布尔。
+# 线程锁保证同进程只跑一次；跨进程由 `<db>.init.lock` 串行（2026-11-07 G 项）——
+# 否则两个实例同看老库时都会执行 `alter table ... add column`，后到的撞 duplicate column。
+_SCHEMA_LOCK = threading.Lock()
+_schema_ready: set[str] = set()
+
+
+def _init_lock_path() -> Path:
+    return DB_PATH.with_name(f"{DB_PATH.name}.init.lock")
+
+
+def _raw_connection() -> sqlite3.Connection:
+    """只建连接、不做结构初始化；供 `init_db` 内部使用，避免
+    `init_db → get_connection → init_db` 递归。"""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(DB_PATH)
     connection.row_factory = sqlite3.Row
     connection.execute("pragma busy_timeout=5000")
     _ensure_wal(connection)
     return connection
+
+
+def _ensure_schema() -> None:
+    """首次取连接时幂等补建结构：不跑 lifespan 的端点测试/脚本不会拿到空库。"""
+    if str(DB_PATH) in _schema_ready:
+        return
+    init_db(lazy=True)
+
+
+def get_connection() -> sqlite3.Connection:
+    _ensure_schema()
+    return _raw_connection()
 
 
 def write_with_retry(operation, attempts: int = 3) -> object:
@@ -67,8 +177,36 @@ def connection_scope() -> Iterator[sqlite3.Connection]:
         connection.close()
 
 
-def init_db() -> None:
-    with get_connection() as connection:
+def init_db(*, lazy: bool = False) -> None:
+    """建表/补列/打档位。幂等：同一 `DB_PATH` 只跑一次（懒初始化失败不落闸，下次重试）。
+
+    `lazy=True` 由 `get_connection()` 的首次补建触发；启动路径由 lifespan 显式调用，
+    异常必须向上抛让启动失败。跨进程用 `<db>.init.lock` 串行：两个实例指向同一
+    `DATA_DIR` 时，后到的会等前一个建完再进来，不会并发补列。
+    """
+    key = str(DB_PATH)
+    if key in _schema_ready:
+        return
+    with _SCHEMA_LOCK:
+        if key in _schema_ready:
+            return
+        with exclusive_path_lock(_init_lock_path(), timeout=60.0):
+            if not _schema_gate():
+                _schema_ready.add(key)
+                return
+            _create_schema()
+            _schema_ready.add(key)
+    _LOG.info(
+        "app.db 结构初始化完成（%s）：%s",
+        "首次连接补建" if lazy else "启动装配",
+        DB_PATH,
+    )
+
+
+def _create_schema() -> None:
+    """建表/补列/打档位；结构闸与幂等判定由 `init_db` 负责。"""
+    connection = _raw_connection()
+    try:
         # P1 资产主表：FTS5 **外部内容表**的列名必须与内容表（assets）列名一致。
         # 早期 schema 误用列名 `tags`（内容表实际叫 tags_json）⇒ FTS 需读列值的路径
         # （count/rebuild）报 "no such column: T.tags"。检测到旧形态先删表删触发器，
@@ -252,6 +390,19 @@ def init_db() -> None:
             );
             create index if not exists idx_asset_tags_tag
                 on asset_tags(tag, repo_id);
+            -- GBC 场景图（2026-11-06）：整图 + 两份 MOSS layout JSON。
+            -- 不入 Chroma 元数据：正文十几 KB，塞进向量库会让列表/检索读放大。
+            -- moss_layout_json（2026-11-07）：官方完整布局（style/cast/逐项，模型写文字、GBC 给框）。
+            create table if not exists asset_gbc (
+                asset_id text primary key,
+                repo_id text not null default '',
+                graph_json text not null default '{}',
+                moss_json text not null default '{}',
+                moss_draft_json text not null default '{}',
+                moss_layout_json text not null default '{}',
+                engine_json text not null default '{}',
+                created_at integer not null default 0
+            );
             -- FTS5 外部内容表（正文留在 assets，触发器同步索引；unicode61 对英文标签够用，
             -- 中文子串检索由 SQL 侧 LIKE 兜底）。⚠ 列名必须与 assets 列名逐一对应
             -- （外部内容表契约），故用 tags_json 而非 tags。
@@ -278,3 +429,15 @@ def init_db() -> None:
         if stale_fts:
             # 旧 FTS 表已重建 ⇒ 从 assets 重建索引（否则检索空）
             connection.execute("insert into assets_fts(assets_fts) values('rebuild')")
+        gbc_columns = {
+            row["name"] for row in connection.execute("pragma table_info(asset_gbc)")
+        }
+        if "moss_layout_json" not in gbc_columns:
+            connection.execute(
+                "alter table asset_gbc add column moss_layout_json text not null default '{}'"
+            )
+        _stamp_schema_version(connection)
+        connection.commit()
+    finally:
+        # Windows 上漏关连接会占住 -wal/-shm，临时目录清理报 WinError 32。
+        connection.close()

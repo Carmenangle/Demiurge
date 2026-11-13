@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
-  activeChatModel, chatBgRenderOpacity, chatModelSource, DEFAULT_LIQUID_GLASS, exportSettings,
-  importSettings, liquidGlassSceneSource, loadPersistedSettings, modelDisplayName,
-  normalizeContextBudgets, normalizeLiquidGlass, normalizeTheme, OLLAMA_DEFAULT_BASE_URL,
-  remoteModelSource, resolvedEmbedModel, resolveTheme, stripSecrets,
+  activeChatModel, activeVlmChat, addEmbedPreset, addVlmPreset, chatBgRenderOpacity, chatModelSource,
+  DEFAULT_LIQUID_GLASS, exportSettings, importSettings, liquidGlassSceneSource, loadPersistedSettings,
+  modelDisplayName, normalizeContextBudgets, normalizeLiquidGlass, normalizeTheme, OLLAMA_DEFAULT_BASE_URL,
+  remoteModelSource, removeVlmPreset, renameVlmPreset, resolvedEmbedModel, resolveTheme,
+  selectEmbedPreset, selectVlmPreset, stripSecrets, withEmbedPatch, withVlmPatch,
 } from "./settings";
 import type { Settings } from "./settings";
 
@@ -171,6 +172,48 @@ describe("liquid glass standalone theme settings", () => {
     expect(normalizeLiquidGlass(undefined).wallpaperDir).toBe("");
     expect(normalizeLiquidGlass(undefined).wallpaperHidden).toEqual([]);
     expect(normalizeLiquidGlass(undefined).wallpaperStoreDir).toBe("");
+  });
+
+  it("clamps chat behavior limits and defaults missing fields", () => {
+    expect(importSettings("{}").chatFollowupMax).toBe(3);
+    expect(importSettings(JSON.stringify({ chatFollowupMax: 99 })).chatFollowupMax).toBe(10);
+    expect(importSettings(JSON.stringify({ chatFollowupMax: -1 })).chatFollowupMax).toBe(0);
+    expect(importSettings(JSON.stringify({ chatGuardMaxChars: "bad" })).chatGuardMaxChars).toBe(900);
+    expect(importSettings(JSON.stringify({
+      chatInitiativeIdleMinutes: 15, chatInitiativeCooldownMinutes: 0,
+    }))).toMatchObject({
+      chatInitiativeIdleMinutes: 15, chatInitiativeCooldownMinutes: 0,
+    });
+    expect(importSettings("{}").chatInitiativeDailyMax).toBe(6);
+    expect(importSettings(JSON.stringify({ chatInitiativeDailyMax: 999 })).chatInitiativeDailyMax).toBe(100);
+    expect(importSettings(JSON.stringify({ chatInitiativeDailyMax: 0 })).chatInitiativeDailyMax).toBe(0);
+  });
+
+  it("聊天输出上限改为 0=跟随全局，并迁移旧 1200 兜底值", () => {
+    expect(importSettings("{}").chatDefaultMaxTokens).toBe(0);
+    // 旧存档没有语义版本：1200 是旧兜底默认，迁移为 0。
+    expect(importSettings(JSON.stringify({
+      chatDefaultMaxTokens: 1200,
+    })).chatDefaultMaxTokens).toBe(0);
+    expect(importSettings(JSON.stringify({
+      chatDefaultMaxTokens: 1200, chatOutputCapVersion: 2,
+    })).chatDefaultMaxTokens).toBe(1200);
+  });
+
+  it("聊天频率/群聊活跃度/安静时段可配置", () => {
+    expect(importSettings("{}").chatCadence).toBe("normal");
+    expect(importSettings("{}").chatGroupActivity).toBe("normal");
+    expect(importSettings(JSON.stringify({
+      chatCadence: "frequent", chatGroupActivity: "lively",
+      chatActiveWindowMinutes: 5, chatMaxBotTurns: 8, chatMinAffinity: 10,
+      chatQuietStart: "23:00", chatQuietEnd: "07:00",
+    }))).toMatchObject({
+      chatCadence: "frequent", chatGroupActivity: "lively",
+      chatActiveWindowMinutes: 5, chatMaxBotTurns: 8, chatMinAffinity: 10,
+      chatQuietStart: "23:00", chatQuietEnd: "07:00",
+    });
+    expect(importSettings(JSON.stringify({ chatCadence: "bad" })).chatCadence).toBe("normal");
+    expect(importSettings(JSON.stringify({ chatQuietStart: "" })).chatQuietStart).toBe("");
   });
 
   it("migrates legacy settings that predate the standalone theme", () => {
@@ -422,6 +465,10 @@ describe("localStorage 密钥剥离", () => {
     videoModels: [{ id: "v", apiKey: "sk-vid", baseUrl: "", modelName: "m3", proxyMode: "on" }],
     embedModel: { mode: "remote", apiKey: "sk-embed", baseUrl: "", modelName: "e", proxyMode: "on" },
     vlmModel: { mode: "remote", apiKey: "sk-vlm", baseUrl: "", modelName: "vl", proxyMode: "on" },
+    embedPresets: [{ id: "ep", name: "嵌入档", mode: "remote", apiKey: "sk-ep", baseUrl: "", modelName: "ep" }],
+    vlmPresets: [{ id: "vp", name: "视觉档", mode: "remote", apiKey: "sk-vp", baseUrl: "", modelName: "vp" }],
+    activeEmbedPresetId: "ep",
+    activeVlmPresetId: "vp",
     hfToken: "hf_x",
     civitaiToken: "civ_x",
     smitheryKey: "sm_x",
@@ -439,6 +486,9 @@ describe("localStorage 密钥剥离", () => {
     expect(out.videoModels[0].apiKey).toBe("");
     expect(out.embedModel.apiKey).toBe("");
     expect(out.vlmModel.apiKey).toBe("");
+    // 存档列表里的密钥同样要清（否则从存档切回即把 key 带进 localStorage）
+    expect(out.embedPresets![0].apiKey).toBe("");
+    expect(out.vlmPresets![0].apiKey).toBe("");
     expect(out.hfToken).toBe("");
     expect(out.civitaiToken).toBe("");
     expect(out.smitheryKey).toBe("");
@@ -482,5 +532,63 @@ describe("localStorage 密钥剥离", () => {
     expect(onDisk.hfToken).toBe("");
     expect(onDisk.chatModels[0].apiKey).toBe("");
     expect(onDisk.workflowDir).toBe("D:/wf");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 2026-11-07 用户定案：视觉 / Embedding 要有多个模型存档，选一个为主。
+// 真实失败路径：只存单字段 ⇒ 换档等于手抄地址/密钥/代理；存档不跟编辑走 ⇒
+// 切走再切回把刚改的配置丢掉。运行侧仍只认单字段镜像（activeVlmChat / resolvedEmbedModel）。
+// ---------------------------------------------------------------------------
+describe("VLM / Embedding 模型存档", () => {
+  it("旧存档迁移：现有单字段种子成一档并选为主", () => {
+    const s = importSettings(JSON.stringify({
+      vlmModel: { mode: "remote", baseUrl: "https://a/v1", modelName: "vl-a", apiKey: "k1" },
+      embedModel: { mode: "remote", baseUrl: "https://e/v1", modelName: "em-a", apiKey: "k2" },
+    }));
+    expect(s.vlmPresets).toHaveLength(1);
+    expect(s.vlmPresets![0]).toMatchObject({ modelName: "vl-a", name: "vl-a" });
+    expect(s.activeVlmPresetId).toBe(s.vlmPresets![0].id);
+    expect(s.embedPresets).toHaveLength(1);
+    expect(s.embedPresets![0].modelName).toBe("em-a");
+    expect(s.activeEmbedPresetId).toBe(s.embedPresets![0].id);
+  });
+
+  it("新增档复制当前配置；编辑写进选中档；切换档只换镜像；最后一档删不掉", () => {
+    let s = importSettings(JSON.stringify({
+      vlmModel: { mode: "remote", baseUrl: "https://a/v1", modelName: "vl-a" },
+    }));
+    const first = s.activeVlmPresetId!;
+    s = addVlmPreset(s);
+    expect(s.vlmPresets).toHaveLength(2);
+    const second = s.activeVlmPresetId!;
+    expect(second).not.toBe(first);
+    s = renameVlmPreset(s, second, "云端 B");
+    s = withVlmPatch(s, { baseUrl: "https://b/v1", modelName: "vl-b" });
+    expect(s.vlmPresets!.find((p) => p.id === second)).toMatchObject({
+      name: "云端 B", modelName: "vl-b", baseUrl: "https://b/v1",
+    });
+    // 切回第一档：运行时镜像回到 A，且两档内容互不污染
+    s = selectVlmPreset(s, first);
+    expect(activeVlmChat(s)?.modelName).toBe("vl-a");
+    expect(s.vlmPresets!.find((p) => p.id === first)!.modelName).toBe("vl-a");
+    expect(s.vlmPresets!.find((p) => p.id === second)!.modelName).toBe("vl-b");
+    // 删除选中档：自动落到剩下的那档；只剩一档时拒绝删除
+    s = removeVlmPreset(s, first);
+    expect(s.vlmPresets).toHaveLength(1);
+    expect(activeVlmChat(s)?.modelName).toBe("vl-b");
+    expect(removeVlmPreset(s, second).vlmPresets).toHaveLength(1);
+  });
+
+  it("嵌入存档同口径，且 resolvedEmbedModel 跟随选中档", () => {
+    let s = importSettings(JSON.stringify({
+      embedModel: { mode: "remote", source: "api", baseUrl: "https://e1/v1", modelName: "em-a", proxyMode: "off" },
+    }));
+    s = addEmbedPreset(s);
+    s = withEmbedPatch(s, { baseUrl: "http://localhost:11434/v1", source: "ollama", modelName: "em-b" });
+    expect(resolvedEmbedModel(s).modelName).toBe("em-b");
+    expect(resolvedEmbedModel(s).proxyUrl).toBe(""); // 回环直连
+    s = selectEmbedPreset(s, s.embedPresets![0].id);
+    expect(resolvedEmbedModel(s).modelName).toBe("em-a");
   });
 });

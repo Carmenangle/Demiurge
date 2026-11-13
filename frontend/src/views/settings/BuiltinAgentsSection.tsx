@@ -134,6 +134,10 @@ export function BuiltinAgentsSection() {
                   value={String(d.rollInstruction ?? "")} rows={6} style={{ width: "100%" }}
                   onChange={(e) => setField(a.id, "rollInstruction", e.target.value)}
                 />
+                <p className="field-hint" style={{ marginTop: 4 }}>
+                  「[RESULT]」这一行的六档词由系统按判定档位表生成：这里改写也会在注入时被重写，
+                  其余规则文字原样保留；清空整个文本框则不注入掷骰规则。
+                </p>
               </div>
             )}
             <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 8 }}>

@@ -1,10 +1,11 @@
-"""对话多轮记忆：LangGraph + SqliteSaver。
+"""对话 checkpoint 存储：LangGraph + SqliteSaver。
 
-thread_id = repoId（首页用 "home"），每个仓库一条独立对话线，历史自动落盘到
-checkpoints.db。调用方只需传「本轮用户输入」，历史由 checkpoint 载入；system 提示词
-（含 RAG 检索上下文）每轮临时注入，不写进持久化的消息列表。
+2026-11-12 P6-D 后，正常 Agent 回合以 `chat_snapshot` 为唯一真源（`agent_context`
+快照优先）；本模块只服务：legacy `/ai/chat` 流式端点、手动压缩/恢复、显式追加
+（`/chat/append`、工作流产物）。system 提示词每轮临时注入，不写进持久化消息列表。
 """
 import sqlite3
+import threading
 from typing import Iterator
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -19,6 +20,11 @@ from app.services.chat_snapshot import INTERRUPT_MARKER
 import logging
 
 _LOG = logging.getLogger("uvicorn.error")
+
+#: 每个线程只保留最新 N 个 checkpoint：最新一个就是恢复点，旧版本只是时间线。
+#: 不保留会让每次整段 state 的历史快照无限堆积（P6-C 实测单线程 3.16 GB）。
+CHECKPOINT_KEEP = 5
+_PRUNE_LOCK = threading.Lock()
 
 _saver: SqliteSaver | None = None
 
@@ -35,7 +41,11 @@ def _get_saver() -> SqliteSaver:
 
 
 def _build_graph(llm, system_text: str):
-    """每次请求用动态模型现编图（开销极小）；checkpointer 复用单例。"""
+    """每次请求用动态模型现编图（开销极小）；checkpointer 复用单例。
+
+    @deprecated 2026-11-12 P6：legacy `/ai/chat` 已改为预算裁剪 + 直接流式调用，
+    不再经由编译图。保留此函数仅为兼容可能的外部调用/测试。
+    """
 
     def call_model(state: MessagesState):
         # system + 历史(来自 checkpoint) + 本轮输入；system 不进 state，故不落盘
@@ -69,8 +79,15 @@ def append_message(thread_id: str, role: str, text: str,
 
     用于 /p 提示词、/s 出图等有价值产物落盘，刷新后可由 get_history 带出。
     role: user | assistant。
+    2026-11-12 P6-C：写入前把 data URI 大图外置成文件 + local-view 地址，
+    避免整段 checkpoint 每轮重复膨胀；落盘后只保留最新 `CHECKPOINT_KEEP` 个版本。
     """
     from langchain_core.messages import AIMessage
+
+    from app.services import chat_checkpoint_media
+
+    text = chat_checkpoint_media.externalize_text(text or "", thread_id)
+    images = chat_checkpoint_media.externalize_images(thread_id, images)
 
     if images:
         content: list = []
@@ -83,6 +100,31 @@ def append_message(thread_id: str, role: str, text: str,
     graph = _get_blank_graph()
     config = {"configurable": {"thread_id": thread_id}}
     graph.update_state(config, {"messages": [msg]})
+    try:
+        prune_thread(thread_id)
+    except sqlite3.Error as exc:  # 裁剪失败只影响磁盘，不阻断本轮落盘
+        _LOG.warning("checkpoint 裁剪失败 thread=%s: %s", thread_id, exc)
+
+
+def prune_thread(thread_id: str, keep: int | None = None) -> int:
+    """删除该线程除最新 keep 个以外的 checkpoint 与 writes；返回删除条数。
+
+    最新一个 checkpoint 已包含完整消息列表，旧版本只用于 LangGraph 时间线回溯，
+    本项目没有消费方；保留少量版本是为了异常时可人工回退。
+    """
+    thread_id = (thread_id or "").strip()
+    if not thread_id:
+        return 0
+    limit = CHECKPOINT_KEEP if keep is None else max(1, int(keep))
+    conn = _get_saver().conn
+    tail = ("DELETE FROM {table} WHERE thread_id=? AND checkpoint_id NOT IN ("
+            "SELECT checkpoint_id FROM checkpoints WHERE thread_id=? "
+            "ORDER BY rowid DESC LIMIT ?)")
+    with _PRUNE_LOCK, conn:
+        conn.execute(tail.format(table="writes"), (thread_id, thread_id, limit))
+        cur = conn.execute(tail.format(table="checkpoints"),
+                           (thread_id, thread_id, limit))
+    return int(cur.rowcount or 0)
 
 
 def append_turn(thread_id: str, user_text: str, images: list[str] | None,
@@ -115,28 +157,43 @@ def mark_interrupted(thread_id: str, user_text: str, images: list[str] | None,
 
 
 def stream_chat(llm, thread_id: str, system_text: str, user_text: str,
-                images: list[str] | None = None) -> Iterator[str]:
-    """流式产出增量文本。历史按 thread_id 自动载入并续写、落盘。
+                images: list[str] | None = None,
+                max_tokens: int = 20_000) -> Iterator[str]:
+    """流式产出增量文本；历史按预算裁剪后送模型，成功后整轮写回 checkpoint。
 
-    images 为图片 data URI（或可访问 URL）列表，非空时组成多模态 content 送 VLM。
+    2026-11-12 P6：旧实现挂 checkpointer 让图自动载入整条历史（无预算），长会话会
+    撑爆模型窗口。现在与主链同口径，取 `agent_context.recent_history` 预算内的尾部
+    （快照优先、checkpoint 回退），本轮完整回复成功后才 `append_turn` 落盘。
     """
-    graph = _build_graph(llm, system_text)
-    config = {"configurable": {"thread_id": thread_id}}
+    from app.services import agent_context
+
+    history = agent_context.recent_history(
+        thread_id, max_tokens=max_tokens, per_role=0,
+    )
+    from langchain_core.messages import AIMessage
+
+    messages: list = [SystemMessage(content=system_text)]
+    for item in history:
+        text = str(item.get("content") or "")
+        if not text:
+            continue
+        cls = HumanMessage if item.get("role") == "user" else AIMessage
+        messages.append(cls(content=text))
     if images:
-        content: list = [{"type": "text", "text": user_text}]
-        content += [{"type": "image_url", "image_url": {"url": u}} for u in images]
-        human = HumanMessage(content=content)
+        parts: list = [{"type": "text", "text": user_text}]
+        parts += [{"type": "image_url", "image_url": {"url": u}} for u in images]
+        human = HumanMessage(content=parts)
     else:
         human = HumanMessage(content=user_text)
-    for chunk, _meta in graph.stream(
-        {"messages": [human]},
-        config,
-        stream_mode="messages",
-    ):
-        delta = getattr(chunk, "content", "")
-        delta = _llm.flatten_content(delta)  # 某些 provider 分段返回
+    messages.append(human)
+
+    reply: list[str] = []
+    for chunk in llm.stream(messages):
+        delta = _llm.flatten_content(getattr(chunk, "content", ""))
         if delta:
+            reply.append(delta)
             yield delta
+    append_turn(thread_id, user_text, images, "".join(reply).strip())
 
 
 def get_history(thread_id: str) -> list[dict]:
@@ -197,8 +254,27 @@ _COMPACT_SYSTEM = (
 )
 
 
-def summarize_history(history: list[dict], llm, generations: list[dict] | None = None) -> dict:
-    """只生成摘要，不修改 checkpoint。破坏性提交由会话维护 Module 统一负责。"""
+_COMPACT_SYSTEM_CHAT = (
+    "你是角色聊天的长期记忆归档助手。把一段角色私聊/群聊历史压缩成给角色自己看的中文摘要，"
+    "供后续聊天当背景。"
+    "必须保留：角色与用户的关系、称呼、亲密程度；用户明确说过的重要偏好、禁忌与拒绝；"
+    "角色做过的承诺、约定、未完成话题；重要事件（纪念日/婚礼/装扮/第一次/重大冲突）；"
+    "当前情绪与未解决的矛盾。"
+    "不要保留：临时寒暄、重复撒娇、技术或系统说明、生图提示词、图片数量、工作流或模型名、"
+    "与角色关系无关的琐事。"
+    "用中文分点写，信息完整但不重复，不超过 1000 字。只输出摘要正文，不要客套或解释。"
+)
+
+
+def summarize_history(
+    history: list[dict], llm, generations: list[dict] | None = None,
+    *, chat_mode: bool = False,
+) -> dict:
+    """只生成摘要，不修改 checkpoint。破坏性提交由会话维护 Module 统一负责。
+
+    `chat_mode=True`：私聊/群聊用聊天专用提示词，保留关系/称呼/承诺/重要事件，
+    不把生图提示词、工作流、模型名带进角色记忆。
+    """
     hist = history
     gens = generations or []
     if not hist and not gens:
@@ -215,17 +291,22 @@ def summarize_history(history: list[dict], llm, generations: list[dict] | None =
             lines.append(f"{tag}：{txt}")
     hist_text = "\n".join(lines) or "（无文字对话）"
 
-    # 生成记录：图数 + 各图提示词（去重、限量，防超长）
-    prompts = [g.get("prompt", "").strip() for g in gens if g.get("prompt", "").strip()]
-    uniq_prompts = list(dict.fromkeys(prompts))[:20]
-    gen_text = (
-        f"本仓库累计生成图片 {len(gens)} 张。"
-        + (("\n出现过的提示词：\n" + "\n".join(f"- {p}" for p in uniq_prompts)) if uniq_prompts else "")
-    )
-
-    user_content = f"【对话历史】\n{hist_text}\n\n【生成记录（权威）】\n{gen_text}"
+    # 生成记录：图数 + 各图提示词（去重、限量，防超长）。聊天模式不带这些技术细节。
+    if chat_mode:
+        user_content = f"【对话历史】\n{hist_text}"
+        system = _COMPACT_SYSTEM_CHAT
+    else:
+        prompts = [g.get("prompt", "").strip() for g in gens if g.get("prompt", "").strip()]
+        uniq_prompts = list(dict.fromkeys(prompts))[:20]
+        gen_text = (
+            f"本仓库累计生成图片 {len(gens)} 张。"
+            + (("\n出现过的提示词：\n" + "\n".join(f"- {p}" for p in uniq_prompts))
+               if uniq_prompts else "")
+        )
+        user_content = f"【对话历史】\n{hist_text}\n\n【生成记录（权威）】\n{gen_text}"
+        system = _COMPACT_SYSTEM
     try:
-        resp = llm.invoke([SystemMessage(content=_COMPACT_SYSTEM),
+        resp = llm.invoke([SystemMessage(content=system),
                            HumanMessage(content=user_content)])
         summary = _llm.flatten_content(getattr(resp, "content", "")) or ""
     except Exception as e:
@@ -240,6 +321,22 @@ def summarize_history(history: list[dict], llm, generations: list[dict] | None =
 def replace_history(thread_id: str, messages: list[dict]) -> None:
     """严格替换对话线为给定标准历史；用于维护提交和有限补偿。"""
     clear_history(thread_id)
+    for message in messages:
+        append_message(
+            thread_id,
+            message.get("role", "assistant"),
+            message.get("content", ""),
+            message.get("images") or None,
+        )
+
+
+def rewrite_history(thread_id: str, messages: list[dict]) -> None:
+    """只重写 checkpoint 历史（P6-C 存量瘦身用），不动 prompt 审批等旁路状态。
+
+    与 replace_history 的差异：不调用 `clear_history`（它会连带清空
+    `prompt_approval_store`，而瘦身迁移不该让用户待审的审阅卡消失）。
+    """
+    _get_saver().delete_thread(thread_id)
     for message in messages:
         append_message(
             thread_id,

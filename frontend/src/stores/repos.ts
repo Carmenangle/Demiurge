@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { getUserState, renameRepoFolder } from "../api/userState";
 import { pushRepos, USER_STATE_RECONNECT_EVENT, clearUserStateFallback, markUserStateFallback } from "../lib/userStateSync";
 import { remoteActiveOnce } from "../lib/mobileProfile";
@@ -8,6 +8,7 @@ import {
   recordGeneratedRepoCover,
   replaceRepoCover,
 } from "../lib/repoOrdering";
+import type { CharacterRosterOverrides } from "../lib/characterRoster";
 
 export interface Repo {
   id: string;
@@ -19,10 +20,24 @@ export interface Repo {
   createdAt: number;
   cardName?: string; // 绑定的角色卡名（=character_store 文件夹名）；有值=剧情扮演作品
   cardNames?: string[]; // 绑定的全部角色卡；cardName 保留为开场卡兼容别名
+  /** 用户显式解除角色卡绑定（2026-11-09 修复）：为真时不再从父仓库继承角色卡。 */
+  cardsUnbound?: boolean;
+  /** 角色卡来自父仓库快照（父改/父解绑会同步）；子仓库自己绑卡后为 false。 */
+  cardsInherited?: boolean;
+  /** 独立世界书来自父仓库快照（父改会同步）；子仓库自己选书后为 false。 */
+  worldbookInherited?: boolean;
+  /** 用户人设来自父仓库快照（父改会同步）；子仓库自己选人设后为 false。 */
+  personaInherited?: boolean;
+  /** 偏置预设来自父仓库快照（父改会同步）；子仓库自己选预设后为 false。 */
+  presetInherited?: boolean;
   openingCardName?: string; // 首次空会话使用哪张卡的 first_mes
   worldbookName?: string; // 绑定的独立世界书名（worldbookDir 下的 .json 名，不含扩展名）；空=不绑独立书
   personaId?: string; // 绑定的用户人设档 id（settings.userPersonas）；空=用全局选中档
   presetName?: string; // 绑定的偏置预设名（presetDir 下的 .json 名，不含扩展名）；空=用全局选中档
+  /** 聊天/多元数据插入的角色名册覆盖（2026-11-10）：合集卡从世界书条目识别角色后的手动增删/改名/排序。 */
+  characterRoster?: CharacterRosterOverrides;
+  /** 聊天头像覆盖（角色名 → 图片 URL）：聊天自拍自动更新时写入，空白回退角色卡/定妆底图。 */
+  characterAvatars?: Record<string, string>;
 }
 
 // 一个仓库的有效绑定：自身字段优先，缺则继承父仓库，皆空则回退全局（由调用方处理全局回退）。
@@ -36,6 +51,17 @@ export interface RepoBinding {
 }
 
 const KEY = "laf_repos";
+
+/** 后端明确拒绝改名（HTTP 错误体带 detail）⇒ 返回可读原因；网络层失败（后端离线）⇒ null。
+ *  改名是乐观更新：离线时保留新名字等下次落盘用新名；后端明确拒绝必须回滚并提示用户。 */
+export function folderRenameRefusal(error: unknown): string | null {
+  if (error instanceof TypeError) return null;
+  const message = error instanceof Error ? error.message : String(error);
+  if (/failed to fetch|networkerror|load failed|network request failed|fetch failed/i.test(message)) {
+    return null;
+  }
+  return message || "后端拒绝改名，但未返回原因";
+}
 
 function load(): Repo[] {
   try {
@@ -59,29 +85,36 @@ function normalizedCards(repo: Pick<Repo, "cardName" | "cardNames" | "openingCar
   return { cardNames, openingCardName };
 }
 
-// 规范化绑定（幂等）：①旧数据 cardName 误挂子仓库→上提到父；②子仓库三项绑定为空则从父下沉一份到自身字段，
-// 使子仓库 UI 直接显示「已绑定」（快照式：之后父改绑定不回灌，子可单独修改）。无变化则返回 null（不触发写回）。
-function normalizeBindings(repos: Repo[]): Repo[] | null {
-  const liftCard = new Map<string, string>(); // parentId -> cardName（从子上提）
-  for (const r of repos) {
-    if (r.parentId && r.cardName) {
-      const parent = repos.find((p) => p.id === r.parentId);
-      if (parent && !parent.cardName) liftCard.set(r.parentId, r.cardName);
-    }
-  }
+// 规范化绑定（幂等）：只整理本仓库的 cardName/cardNames 一致性，**不再做父子传播**。
+// 2026-11-09 修复：旧实现把子仓库卡上提到父、再把父卡下沉给所有子仓库，导致
+// 「给一个子作品绑卡 → 整个父仓库和所有子作品都被写死」以及「取消绑定又被继承回来」。
+// 父子继承只在 resolveBinding 运行时发生，且显式 cardsUnbound 优先级最高。
+export function normalizeBindings(repos: Repo[]): Repo[] | null {
   let changed = false;
   const withParents = repos.map((r) => {
-    const lifted = liftCard.has(r.id) && !r.cardName ? liftCard.get(r.id) : r.cardName;
-    const current = normalizedCards({ ...r, cardName: lifted });
-    if (lifted !== r.cardName || JSON.stringify(current.cardNames) !== JSON.stringify(r.cardNames || [])
-      || current.openingCardName !== (r.openingCardName || "")) {
+    if (r.cardsUnbound) {
+      if (r.cardName || r.cardNames?.length || r.openingCardName) {
+        changed = true;
+        return { ...r, cardName: undefined, cardNames: undefined, openingCardName: undefined };
+      }
+      return r;
+    }
+    const current = normalizedCards(r);
+    if (JSON.stringify(current.cardNames) !== JSON.stringify(r.cardNames || [])
+      || current.openingCardName !== (r.openingCardName || "")
+      || current.openingCardName !== (r.cardName || "")) {
       changed = true;
-      return { ...r, cardName: current.openingCardName || undefined,
+      return {
+        ...r,
+        cardName: current.openingCardName || undefined,
         cardNames: current.cardNames.length ? current.cardNames : undefined,
-        openingCardName: current.openingCardName || undefined };
+        openingCardName: current.openingCardName || undefined,
+      };
     }
     return r;
   });
+  // 父仓库绑定作为默认值向子仓库快照下沉；子仓库自己改过/显式解绑时不被覆盖。
+  // 带 inherited 标记的子仓库在父仓库改绑或解绑时会跟着更新，保证「父改子跟着变」。
   const next = withParents.map((r) => {
     if (!r.parentId) return r;
     const parent = withParents.find((p) => p.id === r.parentId);
@@ -89,22 +122,131 @@ function normalizeBindings(repos: Repo[]): Repo[] | null {
     const patch: Partial<Repo> = {};
     const ownCards = normalizedCards(r);
     const parentCards = normalizedCards(parent);
-    if (!ownCards.cardNames.length && parentCards.cardNames.length) {
+    if (r.cardsUnbound) {
+      // 显式解绑：卡字段已由第一轮清空，这里只保证标记不被继承覆盖。
+    } else if (r.cardsInherited) {
+      const nextCards = parentCards.cardNames.length ? parentCards : { cardNames: [], openingCardName: "" };
+      if (JSON.stringify(ownCards.cardNames) !== JSON.stringify(nextCards.cardNames)
+        || ownCards.openingCardName !== nextCards.openingCardName) {
+        patch.cardNames = nextCards.cardNames.length ? nextCards.cardNames : undefined;
+        patch.openingCardName = nextCards.openingCardName || undefined;
+        patch.cardName = nextCards.openingCardName || undefined;
+      }
+    } else if (!ownCards.cardNames.length && parentCards.cardNames.length) {
       patch.cardNames = parentCards.cardNames;
       patch.openingCardName = parentCards.openingCardName;
       patch.cardName = parentCards.openingCardName;
+      patch.cardsInherited = true;
+    } else if (ownCards.cardNames.length && parentCards.cardNames.length
+      && JSON.stringify(ownCards.cardNames) === JSON.stringify(parentCards.cardNames)
+      && ownCards.openingCardName === parentCards.openingCardName) {
+      // 旧版快照复制出来的“与父完全相同”按继承处理，父改/父解绑时能继续跟随。
+      patch.cardsInherited = true;
     }
-    if (!r.worldbookName && parent.worldbookName) patch.worldbookName = parent.worldbookName;
-    if (!r.personaId && parent.personaId) patch.personaId = parent.personaId;
-    if (!r.presetName && parent.presetName) patch.presetName = parent.presetName;
+    if (r.worldbookInherited) {
+      if ((r.worldbookName || "") !== (parent.worldbookName || "")) {
+        patch.worldbookName = parent.worldbookName || undefined;
+      }
+    } else if (!r.worldbookName && parent.worldbookName) {
+      patch.worldbookName = parent.worldbookName;
+      patch.worldbookInherited = true;
+    } else if (r.worldbookName && r.worldbookName === parent.worldbookName) {
+      patch.worldbookInherited = true;
+    }
+    if (r.personaInherited) {
+      if ((r.personaId || "") !== (parent.personaId || "")) {
+        patch.personaId = parent.personaId || undefined;
+      }
+    } else if (!r.personaId && parent.personaId) {
+      patch.personaId = parent.personaId;
+      patch.personaInherited = true;
+    } else if (r.personaId && r.personaId === parent.personaId) {
+      patch.personaInherited = true;
+    }
+    if (r.presetInherited) {
+      if ((r.presetName || "") !== (parent.presetName || "")) {
+        patch.presetName = parent.presetName || undefined;
+      }
+    } else if (!r.presetName && parent.presetName) {
+      patch.presetName = parent.presetName;
+      patch.presetInherited = true;
+    } else if (r.presetName && r.presetName === parent.presetName) {
+      patch.presetInherited = true;
+    }
     if (Object.keys(patch).length) { changed = true; return { ...r, ...patch }; }
     return r;
   });
   return changed ? next : null;
 }
 
+// 纯函数：应用一次绑定 patch。空卡选择＝显式解绑（cardsUnbound=true），非空＝重新绑定。
+export function applyBindingPatch(repo: Repo, patch: Partial<RepoBinding>): Repo {
+  const next = { ...repo };
+  if ("cardNames" in patch || "openingCardName" in patch || "cardName" in patch) {
+    const requested = "cardNames" in patch ? patch.cardNames || [] : normalizedCards(next).cardNames;
+    const cardNames = [...new Set(requested.map((name) => name.trim()).filter(Boolean))];
+    const requestedOpening = patch.openingCardName || patch.cardName || "";
+    const openingCardName = cardNames.includes(requestedOpening) ? requestedOpening : cardNames[0] || "";
+    const before = normalizedCards(next);
+    const sameSelection = JSON.stringify(cardNames) === JSON.stringify(before.cardNames)
+      && openingCardName === before.openingCardName;
+    next.cardNames = cardNames.length ? cardNames : undefined;
+    next.openingCardName = openingCardName || undefined;
+    next.cardName = openingCardName || undefined;
+    // 选择没变＝保留原有继承/解绑状态（空表单原样保存不会误变成显式解绑）；
+    // 选择变了才重新判定：清空＝显式解绑，选中＝子仓库自己绑卡。
+    next.cardsUnbound = sameSelection ? Boolean(repo.cardsUnbound) : cardNames.length === 0;
+    next.cardsInherited = sameSelection ? Boolean(repo.cardsInherited) : false;
+  }
+  if ("worldbookName" in patch) {
+    const sameBook = (patch.worldbookName || "") === (repo.worldbookName || "");
+    next.worldbookName = patch.worldbookName || undefined;
+    next.worldbookInherited = sameBook ? Boolean(repo.worldbookInherited) : false;
+  }
+  if ("personaId" in patch) {
+    const samePersona = (patch.personaId || "") === (repo.personaId || "");
+    next.personaId = patch.personaId || undefined;
+    next.personaInherited = samePersona ? Boolean(repo.personaInherited) : false;
+  }
+  if ("presetName" in patch) {
+    const samePreset = (patch.presetName || "") === (repo.presetName || "");
+    next.presetName = patch.presetName || undefined;
+    next.presetInherited = samePreset ? Boolean(repo.presetInherited) : false;
+  }
+  return next;
+}
+
+// 纯函数：解析某仓库的有效绑定（自身优先，缺则继承父仓库；显式解绑不继承）。
+export function resolveRepoBinding(repo: Repo, repos: readonly Repo[]): RepoBinding {
+  const parent = repo.parentId ? repos.find((r) => r.id === repo.parentId) : undefined;
+  const ownCards = repo.cardsUnbound
+    ? { cardNames: [], openingCardName: "" }
+    : normalizedCards(repo);
+  const inheritedCards = repo.cardsInherited && parent
+    ? normalizedCards(parent)
+    : (repo.cardsUnbound || ownCards.cardNames.length || !parent
+      ? ownCards
+      : normalizedCards(parent));
+  return {
+    cardName: inheritedCards.openingCardName,
+    cardNames: inheritedCards.cardNames,
+    openingCardName: inheritedCards.openingCardName,
+    worldbookName: repo.worldbookInherited && parent
+      ? parent.worldbookName || ""
+      : repo.worldbookName || parent?.worldbookName || "",
+    personaId: repo.personaInherited && parent
+      ? parent.personaId || ""
+      : repo.personaId || parent?.personaId || "",
+    presetName: repo.presetInherited && parent
+      ? parent.presetName || ""
+      : repo.presetName || parent?.presetName || "",
+  };
+}
+
 export function useRepos() {
   const [repos, setRepos] = useState<Repo[]>(load);
+  const reposRef = useRef(repos);
+  reposRef.current = repos;
   const [hydrated, setHydrated] = useState(false); // 后端为准：拉取回填完成前，不把本地值回写后端
 
   // 启动时拉后端存档，有数据则以后端为准覆盖本地（跨浏览器/换机恢复）。
@@ -247,19 +389,33 @@ export function useRepos() {
     return id;
   };
 
-  // 改名：重名则拒绝返回 false；成功则同步后端重命名文件夹+重写图片路径
-  const renameRepo = (id: string, name: string): boolean => {
+  // 改名：重名则拒绝返回 false；成功先乐观上屏，再同步后端重命名文件夹+重写图片路径。
+  // 后端明确拒绝（归属冲突/目标已存在/搬运失败）⇒ 回滚显示名并回调原因；
+  // 后端离线 ⇒ 保留乐观改名（文件夹下次落盘会用新名）。
+  const renameRepo = (id: string, name: string, onFolderError?: (message: string) => void): boolean => {
     const target = repos.find((r) => r.id === id);
     if (!target) return false;
     if (!nameAvailable(name, target.parentId, id)) return false;
     const oldName = target.name;
     setRepos((prev) => prev.map((r) => (r.id === id ? { ...r, name } : r)));
+    const rollback = (message: string) => {
+      // 响应回来前用户可能又改了一次名：只回滚仍是本次名字的那一次，过时失败不弹错
+      const stillCurrent = reposRef.current.some((r) => r.id === id && r.name === name);
+      setRepos((prev) => prev.map((r) => (
+        r.id === id && r.name === name ? { ...r, name: oldName } : r
+      )));
+      if (stillCurrent) onFolderError?.(message);
+    };
     try {
       const settings = JSON.parse(localStorage.getItem("laf_settings") || "{}");
       const output_dir = settings.outputDir || "";
       if (output_dir) {
         renameRepoFolder({ repo_id: id, old_name: oldName, new_name: name, output_dir })
-          .catch(() => { /* 后端离线：文件夹下次落盘会用新名，旧图路径可能失效 */ });
+          .then((res) => { if (res.error) rollback(res.error); })
+          .catch((error) => {
+            const refusal = folderRenameRefusal(error);
+            if (refusal) rollback(refusal);
+          });
       }
     } catch { /* ignore */ }
     return true;
@@ -268,46 +424,18 @@ export function useRepos() {
   // 绑定角色卡/独立世界书/用户人设。patch 里字段=新值；传 "" 或 undefined 表示解绑该项。
   // 三样独立，互不影响；大仓库、小仓库都可绑。
   const bindRepo = (id: string, patch: Partial<RepoBinding>) => {
-    setRepos((prev) => prev.map((r) => {
-      if (r.id !== id) return r;
-      const next = { ...r };
-      if ("cardNames" in patch || "openingCardName" in patch || "cardName" in patch) {
-        const requested = "cardNames" in patch ? patch.cardNames || [] : normalizedCards(next).cardNames;
-        const cardNames = [...new Set(requested.map((name) => name.trim()).filter(Boolean))];
-        const requestedOpening = patch.openingCardName || patch.cardName || "";
-        const openingCardName = cardNames.includes(requestedOpening) ? requestedOpening : cardNames[0] || "";
-        next.cardNames = cardNames.length ? cardNames : undefined;
-        next.openingCardName = openingCardName || undefined;
-        next.cardName = openingCardName || undefined;
-      }
-      if ("worldbookName" in patch) next.worldbookName = patch.worldbookName || undefined;
-      if ("personaId" in patch) next.personaId = patch.personaId || undefined;
-      if ("presetName" in patch) next.presetName = patch.presetName || undefined;
-      return next;
-    }));
+    setRepos((prev) => prev.map((r) => (r.id === id ? applyBindingPatch(r, patch) : r)));
   };
 
   // 解析某仓库的有效绑定：自身字段优先，缺则继承父仓库字段。全局回退（人设/世界书目录）交给调用方。
-  const resolveBinding = (repo: Repo): RepoBinding => {
-    const parent = repo.parentId ? repos.find((r) => r.id === repo.parentId) : undefined;
-    const ownCards = normalizedCards(repo);
-    const inheritedCards = ownCards.cardNames.length || !parent ? ownCards : normalizedCards(parent);
-    return {
-      cardName: inheritedCards.openingCardName,
-      cardNames: inheritedCards.cardNames,
-      openingCardName: inheritedCards.openingCardName,
-      worldbookName: repo.worldbookName || parent?.worldbookName || "",
-      personaId: repo.personaId || parent?.personaId || "",
-      presetName: repo.presetName || parent?.presetName || "",
-    };
-  };
+  const resolveBinding = (repo: Repo): RepoBinding => resolveRepoBinding(repo, repos);
 
   // 手动选择旧图作为封面时不能改变“最新生成图”排序时间。
   const setCover = (id: string, cover: string) => {
     setRepos((prev) => replaceRepoCover(prev, id, cover));
   };
 
-  // 只有真实生成结果落盘时更新生成图时间。
+  // 只有真实生成结果落盘时更新生成图时间；图片/视频都按「最新一条」成为封面。
   const setGeneratedCover = (id: string, cover: string) => {
     setRepos((prev) => recordGeneratedRepoCover(prev, id, cover, Date.now()));
   };
@@ -320,6 +448,11 @@ export function useRepos() {
         ? { ...repo, lastUsedAt: now }
         : repo);
     });
+  };
+
+  /** 通用仓库字段补丁（如 characterRoster 名册覆盖）；不触碰父子继承规则。 */
+  const updateRepo = (id: string, patch: Partial<Repo>) => {
+    setRepos((prev) => prev.map((repo) => (repo.id === id ? { ...repo, ...patch } : repo)));
   };
 
   const relocateOutputPath = (oldDir: string, newDir: string) => {
@@ -350,7 +483,7 @@ export function useRepos() {
 
   return {
     repos, hydrated, addRepo, addCardWork, addBranch, renameRepo, bindRepo, resolveBinding,
-    setCover, setGeneratedCover, touchRepo, relocateOutputPath,
+    setCover, setGeneratedCover, touchRepo, updateRepo, relocateOutputPath,
     coverOf, deleteRepo, childrenOf,
   };
 }

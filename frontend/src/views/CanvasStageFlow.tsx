@@ -20,12 +20,12 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { GitBranch, ListOrdered, Sparkles } from "lucide-react";
-import { fetchHistory, listGenerations, listReferenceImages, proxyImageUrl, type Generation, type ReferenceImage } from "../api/ai";
+import { fetchSnapshot, listGenerations, listReferenceImages, proxyImageUrl, type Generation, type ReferenceImage } from "../api/ai";
 import { resolvedEmbedModel, useSettings } from "../stores/settings";
 import { effectiveGlobalProxyUrl } from "../lib/modelProxy";
 import type { Repo } from "../stores/repos";
 import {
-  computeAxisSnap, generationNodeType, nodeDetail, nodeAbsolutePosition, placeNewNodes, projectNodes,
+  computeAxisSnap, generationNodeType, isArchiveProductNode, nodeDetail, nodeAbsolutePosition, placeNewNodes, planStoryArrange, projectNodes,
   type CanvasNode, type GenLike, type InspirationKind, type PlacedRect,
 } from "../lib/canvasRuntime";
 import {
@@ -40,6 +40,7 @@ import {
   buildStoryNodes, buildToolCards, mergeProjectedNodes,
 } from "../lib/canvasProjection";
 import { useCanvasWfEvents } from "../lib/useCanvasWfEvents";
+import { useCanvasMediaMigration } from "../lib/useCanvasMediaMigration";
 import {
   useCanvasGenerationSaved, useCanvasInspirationDrop, useCanvasWorkflowToolCreate,
   useCtxMenuOutsideDismiss, useDetailToggleTracking, type CtxMenuState, type PendingToolCreate,
@@ -53,7 +54,7 @@ import { PresetModal } from "../components/PresetModal";
 import { CanvasCharacterModal } from "../components/CanvasCharacterModal";
 import { presetDetail } from "../api/preset";
 import type { ChatMessage } from "../types/chat";
-import { conversationMediaUrls, conversationTurnUrls, filterGensByConversation, pruneUnboundInspirationCards, projectWorkflowTools, projectStoryNodes } from "../lib/canvasConversation";
+import { conversationMediaUrls, filterGensByConversation, pruneUnboundInspirationCards, projectWorkflowTools, projectStoryNodes } from "../lib/canvasConversation";
 import { runCanvasWorkflow } from "../lib/runCanvasWorkflow";
 import { workflowGenMetadata } from "../lib/regeneration";
 import {
@@ -142,7 +143,7 @@ export function CanvasStageFlow({
   // P17（2026-09-15）：runtime / 任务恢复 / 后台活动面板的**线程键**统一走 `threadKey`。
   // 首页（无仓库）时 `repoId` 是 `""`，而约定键是 `"home"`（`useChatSession`/`ChatView` 与后端落盘都用 `home`）——
   // 两个字面量并存会让首页任务落在 `getRuntime("")` 这个孤立实例上：既不被恢复、成果也不归档。
-  // `repoId` 保留原义供 API/落盘路径（fetchHistory/listGenerations/loadLayout/saveLayout 等，「空」即「无仓库」）；
+  // `repoId` 保留原义供 API/落盘路径（fetchSnapshot/listGenerations/loadLayout/saveLayout 等，「空」即「无仓库」）；
   // 仅线程键与 `owner` 归一（`owner.repoId === "home"` 是 finalize 里「跳过作品封面 / VLM 诊断」的既有判据）。
   const threadId = threadKey(repo?.id);
 
@@ -158,22 +159,22 @@ export function CanvasStageFlow({
   // 画布只自动投影「当前对话里的实际产出」；资产库（generation_store 全量）需用户手动导入。
   // 媒体 URL 来源合并两处，避免重进画布时内存 messages 未加载完导致画布空：
   //   1. 内存 messages（实时，会话内变化即时反映）
-  //   2. 后端 /ai/chat/history（持久化真源，重进/刷新后可靠，不依赖前端加载时序）
+  //   2. 后端会话快照 /ai/chat/snapshot（与聊天显示同一真源，不再读 checkpoint）
   const liveUrls = useMemo(() => conversationMediaUrls(messages), [messages]);
   const [historyUrls, setHistoryUrls] = useState<Set<string>>(new Set());
-  // 重拉持久化对话历史中的媒体 URL（首次挂载 + laf-generation-saved 时调用）：
-  // finalize_workflow_batch 会把新产出作为助手消息 upsert 进快照/checkpoint，
+  // 重拉快照中的媒体 URL（首次挂载 + laf-generation-saved 时调用）：
+  // finalize_workflow_batch 会把新产出作为助手消息 upsert 进快照，
   // 重拉后 conversationUrls 实时包含新图 → 画布投影过滤放行 → 无需页面刷新。
-  // 返回拉到的 URL 集合：首次挂载时先拉历史再投影，避免 conversationUrls 尚空时
+  // 返回拉到的 URL 集合：首次挂载时先拉快照再投影，避免 conversationUrls 尚空时
   // refresh() 用 filterGensByConversation 把生成内容节点过滤光（首次进画布空白 bug）。
   const loadHistoryUrls = useCallback(async (): Promise<Set<string>> => {
     if (!repoId) return new Set();
     try {
-      const r = await fetchHistory(repoId);
-      const urls = conversationTurnUrls(r?.items || []);
+      const r = await fetchSnapshot(repoId);
+      const urls = conversationMediaUrls((r?.items || []) as ChatMessage[]);
       setHistoryUrls(urls);
       return urls;
-    } catch { /* 历史拉取失败不阻塞画布（仍可用内存 messages 兜底） */ }
+    } catch { /* 快照拉取失败不阻塞画布（仍可用内存 messages 兜底） */ }
     return new Set();
   }, [repoId]);
   const conversationUrls = useMemo(() => {
@@ -489,8 +490,10 @@ export function CanvasStageFlow({
   /** 占位节点（生成中）位置 → 内容节点原位替换锚点 */
   const pendingAnchorRef = useRef<PlacedRect | null>(null);
 
-  /** 收集画布上所有已占用包围盒（绝对坐标），供重叠避让 */
-  const collectOccupiedRects = useCallback((extra?: PlacedRect[]): PlacedRect[] => {
+  /** 收集画布上所有已占用包围盒（绝对坐标），供重叠避让；exclude 用于「整批重排」排除自身 */
+  const collectOccupiedRects = useCallback((
+    extra?: PlacedRect[], exclude?: ReadonlySet<string>,
+  ): PlacedRect[] => {
     const dim = (v: unknown, fb: number) => {
       const n = typeof v === "number" ? v : typeof v === "string" ? parseFloat(v) : NaN;
       return Number.isFinite(n) ? n : fb;
@@ -499,6 +502,7 @@ export function CanvasStageFlow({
     const byId = new Map(rfNodesRef.current.map((n) => [n.id, n]));
     for (const n of rfNodesRef.current) {
       if (n.parentId) continue; // 子节点已含在父组包围盒内
+      if (exclude?.has(n.id)) continue;
       const p = nodeAbsolutePosition(n, byId);
       const lyt = layoutNodesRef.current[n.id];
       rects.push({
@@ -910,32 +914,58 @@ export function CanvasStageFlow({
     });
   }, [repoId, settings.outputDir, rfEdges]);
 
-  // 整理剧情顺序：把剧情楼层按消息顺序排成蛇形网格（复用 placeNewNodes 空位避让），
-  // 写 layoutNodes + 落盘；非剧情节点保持原位不动。
+  // 媒体类型修正的兼容迁移（视频/音频曾记成 img-gen-*）：位置不丢、删过的不复活。
+  const onMediaMigrate = useCallback((nodes: Record<string, NodeLayout>, ids: string[]) => {
+    setLayoutNodes(nodes); setDeletedIds(ids);
+    deletedIdsRef.current = ids;
+    persistNow({ nodes, deletedIds: ids });
+  }, [persistNow]);
+  useCanvasMediaMigration(gens, layoutNodes, deletedIds, layoutLoaded, onMediaMigrate);
+
+  // 整理剧情顺序：剧情排 4 列主网格；生成产物（img-/video-/audio- 投影）整组算「废案」，
+  // 另起一块排到主网格右侧、不再参与主网格避让（2026-11-12 用户定案 A）。此前它们夹在楼层
+  // 中间把第 4 行从 2040 顶到 3264（SAVE02 实测）；灵感卡/参考图/输入框/工作流卡仍作障碍。
   const arrangeStoryOrder = useCallback(() => {
     const storyList = storyNodesRef.current;
     if (storyList.length === 0) { showToast("画布上还没有剧情楼层", "info"); return; }
-    const occupied = collectOccupiedRects();
-    const sizes = storyList.map((n) => ({
-      w: typeof n.style?.width === "number" ? n.style.width : CARD_W,
-      h: typeof n.style?.height === "number" ? n.style.height : 240,
-    }));
-    const positions = placeNewNodes(sizes, null, occupied, { cols: 4, originX: 24, originY: 24 });
-    const nextLayout = { ...layoutNodesRef.current };
-    storyList.forEach((n, i) => {
-      nextLayout[n.id] = {
-        ...(nextLayout[n.id] || {}),
-        x: positions[i].x, y: positions[i].y,
-        w: sizes[i].w, h: sizes[i].h,
+    const storyIds = new Set(storyList.map((n) => n.id));
+    const archiveList = rfNodesRef.current.filter(
+      (n) => !n.parentId && isArchiveProductNode(n.id) && !storyIds.has(n.id),
+    );
+    const occupied = collectOccupiedRects(
+      undefined, new Set([...storyIds, ...archiveList.map((n) => n.id)]),
+    );
+    // 尺寸真源：落盘布局优先（与避让包围盒同源），其次 style，最后按节点类型兜底
+    const sizeOf = (n: (typeof storyList)[number], fallbackH: number) => {
+      const lyt = layoutNodesRef.current[n.id];
+      return {
+        w: lyt?.w ?? (typeof n.style?.width === "number" ? n.style.width : CARD_W),
+        h: lyt?.h ?? (typeof n.style?.height === "number" ? n.style.height : fallbackH),
       };
-    });
+    };
+    const plan = planStoryArrange(
+      storyList.map((n) => ({ id: n.id, ...sizeOf(n, 240) })),
+      archiveList.map((n) => ({ id: n.id, ...sizeOf(n, 300) })),
+      occupied, { cols: 4, originX: 24, originY: 24 },
+    );
+    const placed = [...plan.story, ...plan.archive];
+    const nextLayout = { ...layoutNodesRef.current };
+    for (const p of placed) {
+      nextLayout[p.id] = { ...(nextLayout[p.id] || {}), x: p.x, y: p.y, w: p.w, h: p.h };
+    }
+    const posById = new Map(placed.map((p) => [p.id, p]));
     setLayoutNodes(nextLayout);
     setRfNodes((ns) => ns.map((n) => {
-      const idx = storyList.findIndex((s) => s.id === n.id);
-      return idx >= 0 ? { ...n, position: { x: positions[idx].x, y: positions[idx].y } } : n;
+      const p = posById.get(n.id);
+      return p ? { ...n, position: { x: p.x, y: p.y } } : n;
     }));
     persistNow({ nodes: nextLayout });
-    showToast(`已按剧情顺序整理 ${storyList.length} 个楼层`, "success");
+    showToast(
+      plan.archive.length > 0
+        ? `已整理 ${plan.story.length} 个剧情楼层，${plan.archive.length} 个废案归到右侧一组`
+        : `已按剧情顺序整理 ${plan.story.length} 个楼层`,
+      "success",
+    );
   }, [collectOccupiedRects, persistNow, showToast]);
 
   // 拖动中：实时中心点对齐吸附（绝对坐标 + 滞回释放 + 蓝色发光辅助线）

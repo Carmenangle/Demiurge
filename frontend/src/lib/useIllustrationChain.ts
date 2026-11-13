@@ -21,21 +21,23 @@ import { activeUserPersona } from "../stores/settings";
 import type { Template } from "../api/workflows";
 import type { Model, IllustrationSubmit } from "./useChatSession";
 import {
-  comfyStatus, submitWorkflow, interruptComfy, uploadImage, localViewUrl, viewUrl,
+  submitWorkflow, interruptComfy, uploadImage, localViewUrl, viewUrl,
   moveComfyOutputToInput, uploadRemoteImageToInput, mergeAudio,
 } from "../api/comfyui";
+import { ensureComfyReady } from "./comfyReadiness";
 import { listLoras } from "../api/loras";
 import {
   saveSnapshot, claimIllustrationSubmission, genFramePrompts, genProfilePrompt,
   reportIllustrationSubmission, reportIllustrationStage,
 } from "../api/ai";
 import {
-  applyProfileLoraTriggers, ensureAnimaIllustrationStyle, latentSizeFor,
+  ensureAnimaIllustrationStyle, latentSizeFor,
   replacePromptQualityLine, workflowFieldBinding, illustrationTemplateValues,
   normalizePromptProfile,
 } from "./imagePromptProfiles";
 import {
   illustrationLoraConfigurationError, illustrationWorkflowMedia, resolveIllustrationActors,
+  resolveIllustrationTemplateId, resolveVideoTemplateId,
   isSegmentBridgeEvent, resolveVideoMode, resolveVideoTemplateChoice, resolveVideoDuration,
   resolveBaseImageSource, imagePixelSizeFromBlob, alignSizeForVideoNode,
   planFirstlastFrameTasks, firstlastFrameValues,
@@ -43,15 +45,16 @@ import {
   firstlastSlotLayout, transitionVideoValues, illustrationRequestMedia,
 } from "./illustrationMedia";
 import {
-  resolveLoraPromptMetadata, resolveVideoBaseImageRef,
+  applyLoraTriggerWords, resolveLoraPromptMetadata, resolveVideoBaseImageRef,
   resolveReadySlotImageUrl, resolveTransitionBaseImage, resolvePrevTailDesc,
   findMediaSlotState, type SlotMediaState,
 } from "./chatGeneration";
 import { templateRegenerationSnapshot } from "./regeneration";
 import { prepareDialogueAudio } from "./dialogueAudio";
-import { resolveComfyUrl, sameComfyUrl } from "./comfyMachines";
+import { sameComfyUrl } from "./comfyMachines";
+import { pickComfyHostFor } from "./comfyHostPool";
 import { pollWorkflowResult, type PendingGeneration } from "./workflowGenerationRuntime";
-import { appendImageSlot, appendTransitionSlot, appendVideoSlotAfter, bindMediaSlotPrompt, markMediaSlotFailed, markMediaSlotKind, resolveMediaSlot } from "./chatSessionEvents";
+import { appendImageSlot, appendTransitionSlot, appendVideoSlotAfter, bindMediaSlotPrompt, markMediaSlotFailed, markMediaSlotKind, resolveMediaSlot, type ShotSlotMeta } from "./chatSessionEvents";
 
 /** 插画链的 hook 闭包依赖（T2.2-A 同名 deps 注入；类型逐字抄 useChatSession 内声明）。 */
 export interface IllustrationChainDeps {
@@ -94,10 +97,13 @@ const PROMPT_ONLY_VIDEO_NOTE =
 // 第 58 刀（2026-09-24）：999 模式 12 个槽**同时** POST /comfyui/submit —— ComfyUI
 // 首个任务触发模型加载、其余在队列里等，5/12 张撞上 60s 提交超时（真机实锤）。
 // ⇒ 提交**串行化**：同一时刻只有一次提交在途（模型加载只发生一次，后续提交秒回）。
-let _submitQueue: Promise<unknown> = Promise.resolve();
-function enqueueSubmit<T>(run: () => Promise<T>): Promise<T> {
-  const chained = _submitQueue.then(run, run);
-  _submitQueue = chained.catch(() => undefined);
+// 2026-11-09 多机台：提交队列按**目标机台**串行（只解决同机冷加载），跨机并行。
+const _submitQueues = new Map<string, Promise<unknown>>();
+function enqueueSubmitTo<T>(url: string, run: () => Promise<T>): Promise<T> {
+  const key = (url || "").trim().toLowerCase();
+  const previous = _submitQueues.get(key) || Promise.resolve();
+  const chained = previous.then(run, run);
+  _submitQueues.set(key, chained.catch(() => undefined));
   return chained;
 }
 
@@ -150,6 +156,8 @@ export function useIllustrationChain({
     videoOnly = false, videoBaseUrl = "", videoBaseSlotId = "",
     bridgePrevSlotId = "", bridgeVideo = false, bridgePrevImageUrl = "",
     videoDialogue,
+    shotSequenceId = "", shotIndex = 0, shotTotal = 0, shotType,
+    shotDurationS = 0, imageKey = "", incomingShotIndex, incomingShotType,
   } = input;
   // 2026-10-18 试跑成稿直送（用户定案）：快照带成稿 ⇒ 本次是「用成稿跑图」——
   // 逐字采用、跳过编译链，且**绕过试跑闸**（显式点「重新生成」优先于批量开关；
@@ -175,6 +183,9 @@ export function useIllustrationChain({
       bridgePrevSlotId, bridgeVideo, bridgePrevImageUrl,
       // 第 100 刀：对白时间轴随快照带走 ⇒ 视频槽「重新生成」仍按同一份时间轴提交。
       videoDialogue,
+      // 2026-11-09 分镜序列字段随快照带走 ⇒ 视频槽「重新生成」仍认同一镜。
+      shotSequenceId, shotIndex, shotTotal, shotType, shotDurationS, imageKey,
+      incomingShotIndex, incomingShotType,
     };
     const failSlot = (stage: string, error: string) =>
       discardFailedIllustration(messageId, slotId, stage, error, "", retrySnapshot);
@@ -227,21 +238,29 @@ export function useIllustrationChain({
     }
     // V1.5/B1：事件 videoMode 优先，其次 preset.videoMode，缺省 climax
     const videoMode = resolveVideoMode(preset, eventVideoMode);
+    // 2026-11-09 全局模式分镜序列：shots + shotSequenceId ⇒ 本槽=锚点图，
+    // 出图后按 shotType 挂 `:video`（本锚点出镜）/ `:move`（上一锚点 move 进入本锚点）。
+    const isShotSequence = videoMode === "shots" && !!shotSequenceId;
     // V1.5/B3（R4）：firstlast 楼层触发不看视频成稿；climax 认「后端是否编排出视频提示词」
     // （2026-10-31 改口：motion 词表闸会压掉后端已经编出的成稿，且压掉时界面毫无提示）
     const useVideo = resolveVideoTemplateChoice(preset, videoMode, videoPrompt);
     // 第 59 刀（视频连续化）＋第 74 刀（2026-10-31 多批次）：段桥 = firstlast + 后端只下发
     // 转场提示词（无正片提示词）⇒ 该槽 = 段桥：主槽按普通图出（本锚点画面），视频走下方
     // bridgeVideoChain；衔接不上（取不到上一张成图）⇒ 退高潮延续（本图当首帧）。
-    const isSegmentBridge = isSegmentBridgeEvent({
+    const isSegmentBridge = !isShotSequence && isSegmentBridgeEvent({
       useVideo, videoMode, videoPrompt, transitionVideoPrompt,
     });
+    // 2026-11-12 用户定案：按「生成能力」预配模板。后端逐镜下发 image_mode/video_mode，
+    // 前端只做映射；未配置对应槽时回落 legacy 模板（仍然出图，不静默失败）。
+    const imageTemplateChoice = resolveIllustrationTemplateId(preset, sceneSpec);
+    const videoTemplateChoice = resolveVideoTemplateId(preset, sceneSpec);
+    const primaryImageTemplateId = imageTemplateChoice.id || preset.templateId;
     // V1.6/P5+（2026-08-28 用户拍板）：首尾帧是独立图片模式——只配图片模板即生效；
     // 视频模式跟随该选项推导，有视频模板才追加视频任务。
     // 第 74 刀加两条缺席条件：① 段桥**不再自己重画「上一张画面」**（那一格的成图已由批次里
     // 前一条事件产出，重画既多烧一次出图又对不上「前面的图片」这句原话）；② `videoOnly`
     // 那次递归提交（桥视频本身）不能进帧循环——它的两帧图早已备好，再跑会给自己再生两张帧图。
-    const useFirstlastImages = videoMode === "firstlast" && !!preset.templateId && !videoOnly && !isSegmentBridge;
+    const useFirstlastImages = videoMode === "firstlast" && !!primaryImageTemplateId && !videoOnly && !isSegmentBridge;
     // 高潮点「一张图 → 一个视频」（2026-10-31 用户定案）：主槽出**图**，出图成功后把这张图
     // 当首帧提交视频，落进图片正下方的 `:video` 副槽——两个槽各带自己的重试快照，图片提示词
     // 与视频提示词都能单独「重新生成」（此前主槽被视频占用：既没出图，失败槽也只写着「插画」，
@@ -254,13 +273,16 @@ export function useIllustrationChain({
     // `isSegmentBridge` 只在**自动那次提交**为真：递归提交视频时 videoPrompt 已带上转场成稿，
     // 判据自然失效 ⇒ 不会给自己再套一层链。
     const bridgeVideoChain = isSegmentBridge;
-    const mainIsVideo = useVideo && !isSegmentBridge && !climaxVideoChain;
+    // shots：锚点那次提交只出图；只有 videoOnly 递归（本镜/进入运镜）才提交视频模板。
+    const mainIsVideo = useVideo && (
+      videoOnly || (!isShotSequence && !isSegmentBridge && !climaxVideoChain)
+    );
     if (mainIsVideo) {
       // 建槽（illustrate_request）时还不知道本次出图还是出视频 ⇒ 楼层文案此前一律写「插画」，
       // 视频槽生成中/失败显示「插画生成中…／插画生成失败」（2026-10-31 实锤）。决策落定即标注。
       setMessages((current) => markMediaSlotKind(current, messageId, slotId, "video"));
     }
-    const chosenId = mainIsVideo ? preset.videoTemplateId! : preset.templateId;
+    const chosenId = mainIsVideo ? videoTemplateChoice.id : imageTemplateChoice.id;
     if (!chosenId) {
       failSlot("configuration", "当前图/视频模式没有配置工作流模板");
       return;
@@ -272,8 +294,10 @@ export function useIllustrationChain({
     }
     // 地址簿按模态解析到具体机台（未配路由时与 settings.comfyuiUrl 同值）：
     // 帧任务/尾帧图都是图片模板 ⇒ 图片机台；主提交与转场沿用主模板所属模态。
-    const comfyImageUrl = resolveComfyUrl(settings, "image");
-    const comfyVideoUrl = resolveComfyUrl(settings, "video");
+    // 多机台池（2026-11-09）：图片/视频各自从池里选当前队列最短的一台；
+    // 探测缓存 10s，未探测/全离线回退池内第一台（失败可见，不阻断）。
+    const comfyImageUrl = pickComfyHostFor(settings, "image");
+    const comfyVideoUrl = pickComfyHostFor(settings, "video");
     const comfyMainUrl = mainIsVideo ? comfyVideoUrl : comfyImageUrl;
     // ⑥ 按高潮真实角色挑 LoRA/底图。single 命中时串联角色 LoRA，无命中才回退风格；
     // multi 固定加载默认风格并叠加全部在场角色 LoRA。旧 preset.loraName 只作风格兼容值。
@@ -283,7 +307,7 @@ export function useIllustrationChain({
       actors, sceneSpec?.subjects, knownActorNames,
     );
     const workflowMedia = illustrationWorkflowMedia(preset, resolvedActors, cardNames);
-    const { loras, loraName, loraWeight, baseImage, characterLora } = workflowMedia;
+    const { loras, loraName, loraWeight, baseImage, referenceImages: workflowReferenceImages, characterLora } = workflowMedia;
     // 角色 LoRA 生图：主角名 = 首个配置了角色 LoRA 的在场角色（后端据此做
     // 「角色_轮次_序号」可读命名；非角色 LoRA/兜底风格留空 → 时间戳命名）
     const characterLoraActor = characterLora
@@ -326,7 +350,7 @@ export function useIllustrationChain({
       : resolveTransitionBaseImage({
           videoMode, transition, messages: messagesRef.current,
           fallback: videoBaseRef?.url ?? baseImage,
-        }) || "";
+        }) || (mainIsVideo ? "" : workflowReferenceImages[0] || "");
     let negativePrompt = preset.negativePrompt?.trim() || sceneSpec?.negative_prompt || "";
     // LoRA 触发词查表与机械前置（对齐 /a 编排 lora_inject 思路）：主图与首尾帧图共用。
     // 生效 LoRA 的触发词必须逐字精确（大脑会漏写/改写 → LoRA 不生效却看不出），按文件名查触发词表
@@ -349,14 +373,9 @@ export function useIllustrationChain({
         return;
       }
     }
-    const withLoraTriggers = (text: string): string => {
-      let out = text;
-      for (const lora of loras) {
-        const metadata = resolveLoraPromptMetadata(loraTriggerItems, lora.name);
-        out = applyProfileLoraTriggers(out, promptProfile, metadata.additions);
-      }
-      return out;
-    };
+    const withLoraTriggers = (text: string): string => (
+      applyLoraTriggerWords(text, promptProfile, loras, loraTriggerItems)
+    );
     // V1.6/P5+：首尾帧独立图片模式跳过高潮 Profile 渲染（帧提示词在生成循环内走同一 Profile 编译链单独编译）。
     // videoOnly（高潮两段链的视频那次提交）同样跳过：视频提示词由后端编译好随事件带来，
     // 再走一遍图片 Profile 编译只会把它改写成正图片段（入参 prompt 已是 videoPrompt 原文）。
@@ -647,7 +666,7 @@ export function useIllustrationChain({
     let frameFirstMedia: ReturnType<typeof illustrationWorkflowMedia> | undefined;
     let frameLastMedia: ReturnType<typeof illustrationWorkflowMedia> | undefined;
     if (useFirstlastImages) {
-      const frameTpl = templates.find((t) => t.id === preset.templateId);
+      const frameTpl = templates.find((t) => t.id === primaryImageTemplateId);
       if (!frameTpl) {
         failSlot("configuration", "firstlast 首尾帧生图需要配置图片工作流模板");
         return;
@@ -754,7 +773,7 @@ export function useIllustrationChain({
             void reportIllustrationSubmission({
               threadId, repoId: repo?.id || threadId, turnId, messageId,
               slotId: `${slotId}${isFirst ? ":first" : ":last"}`,
-              templateId: preset.templateId!, promptId: "", prompt: framePrompt, promptProfile,
+              templateId: primaryImageTemplateId, promptId: "", prompt: framePrompt, promptProfile,
               loraName: frameMedia.loraName, loraWeight: frameMedia.loraWeight,
               latentWidth: latentSize.width, latentHeight: latentSize.height,
               loraMode: preset.loraMode || "single",
@@ -769,7 +788,7 @@ export function useIllustrationChain({
           };
           const runOnce = async (): Promise<{ prompt_id: string }> => {
             const res = await submitWorkflow(
-              preset.templateId, frameValues, comfyImageUrl,
+              primaryImageTemplateId, frameValues, comfyImageUrl,
               framePrompt, frameLoras, preset.loraMode || "single",
             );
             const pid = res.prompt_id;
@@ -857,7 +876,7 @@ export function useIllustrationChain({
           framePrompt: string,
           media: ReturnType<typeof illustrationWorkflowMedia> | undefined,
         ) => templateRegenerationSnapshot(
-          preset.templateId,
+          primaryImageTemplateId,
           buildFrameValues(framePrompt, media ?? workflowMedia),
           comfyImageUrl,
           frameOutputNodeIds,
@@ -871,7 +890,7 @@ export function useIllustrationChain({
         ) => {
           void reportIllustrationSubmission({
             threadId, repoId: repo?.id || threadId, turnId, messageId, slotId: sid,
-            templateId: preset.templateId, promptId, prompt: framePrompt, promptProfile,
+            templateId: primaryImageTemplateId, promptId, prompt: framePrompt, promptProfile,
             loraName: media.loraName, loraWeight: media.loraWeight,
             latentWidth: latentSize.width, latentHeight: latentSize.height,
             loraMode: preset.loraMode || "single",
@@ -982,9 +1001,16 @@ export function useIllustrationChain({
     // 高潮两段链的视频副槽（图片正下方）：主槽出图 → 本函数等成图 → 用成图当首帧提视频。
     // 单独 try/catch：视频侧任何失败只标坏**视频槽**，绝不回头把已成功的图片槽判失败。
     const videoSlotId = `${slotId}:video`;
-    const chainClimaxVideo = async (imagePromptId: string) => {
+    const moveSlotId = `${slotId}:move`;
+    const shotMeta: ShotSlotMeta | undefined = isShotSequence
+      ? { shotSequenceId, shotIndex, shotType, shotPhase: "outgoing" }
+      : undefined;
+    const incomingMeta: ShotSlotMeta | undefined = isShotSequence && incomingShotIndex !== undefined
+      ? { shotSequenceId, shotIndex: incomingShotIndex, shotType: "move", shotPhase: "incoming" }
+      : undefined;
+    const chainClimaxVideo = async (imagePromptId: string, targetSlotId = videoSlotId) => {
       setMessages((current) => appendVideoSlotAfter(
-        current, messageId, videoSlotId, slotId, videoPrompt, videoParams,
+        current, messageId, targetSlotId, slotId, videoPrompt, videoParams, shotMeta,
       ));
       try {
         // 与首尾帧帧循环同款：先自行轮询拿到成图文件名（pollResult 那条只管回填/入库）。
@@ -996,7 +1022,7 @@ export function useIllustrationChain({
         }
         await submitIllustration({
           ...retrySnapshot,
-          slotId: videoSlotId,
+          slotId: targetSlotId,
           // 视频提示词逐字用事件带来的成稿（后端 video_prompt 编译，不再过图片 Profile）。
           prompt: videoPrompt || prompt,
           videoPrompt,
@@ -1009,7 +1035,7 @@ export function useIllustrationChain({
         });
       } catch (error) {
         setMessages((current) => markMediaSlotFailed(
-          current, messageId, videoSlotId, "video_chain",
+          current, messageId, targetSlotId, "video_chain",
           error instanceof Error ? error.message : "视频提交链失败",
           // 首帧都没出来 ⇒ 视频槽的「重新生成」= 整条链重跑（图回主槽、视频回本槽）。
           retrySnapshot,
@@ -1023,9 +1049,10 @@ export function useIllustrationChain({
     // **有界等待**；本楼层没有前一张（该桥排在主图之前）⇒ 退回**上一楼层的尾帧成图**，
     // 与后端 `_wb_bridge_chain` 的起点回退同源；再取不到 ⇒ 交空串、退「高潮片段延续」
     //（两帧同本图，第 59 刀定案）：既不空图提交，也绝不让视频槽永远 pending。
-    const chainBridgeVideo = async (imagePromptId: string) => {
+    const chainBridgeVideo = async (imagePromptId: string, targetSlotId = videoSlotId) => {
       setMessages((current) => appendVideoSlotAfter(
-        current, messageId, videoSlotId, slotId, transitionVideoPrompt, transitionVideoParams,
+        current, messageId, targetSlotId, slotId, transitionVideoPrompt, transitionVideoParams,
+        incomingMeta,
       ));
       try {
         const outcome = await pollWorkflowResult(imagePromptId, comfyImageUrl, "image");
@@ -1046,8 +1073,8 @@ export function useIllustrationChain({
           : (resolvePrevTailDesc(messagesRef.current)?.lastFrameUrl || "");
         await submitIllustration({
           ...retrySnapshot,
-          slotId: videoSlotId,
-          // 提示词逐字用事件带来的转场成稿（后端 mode="transition" 编译，不再过图片 Profile）。
+          slotId: targetSlotId,
+          // 提示词逐字用事件带来的转场成稿（后端 mode="transition"/"shot_move" 编译）。
           prompt: transitionVideoPrompt || prompt,
           videoPrompt: transitionVideoPrompt,
           videoParams: transitionVideoParams || videoParams,
@@ -1063,7 +1090,7 @@ export function useIllustrationChain({
         });
       } catch (error) {
         setMessages((current) => markMediaSlotFailed(
-          current, messageId, videoSlotId, "video_chain",
+          current, messageId, targetSlotId, "video_chain",
           error instanceof Error ? error.message : "衔接视频提交链失败",
           retrySnapshot,
         ));
@@ -1137,8 +1164,12 @@ export function useIllustrationChain({
       videoPrompt: mainIsVideo && effectiveVideoPrompt ? effectiveVideoPrompt : undefined,
       // 视频输出宽高 = 刚量到的首帧真实尺寸（仅视频提交；图片模板没有这两键，自然忽略）
       videoSize: mainIsVideo ? videoSize : undefined,
-      // 第 94 刀：图片3、4、5… = 在场角色参考图（仅有参考槽的视频模板消费）
-      referenceImages: referenceGeneration ? referenceImages : undefined,
+      // 第 94 刀：图片3、4、5… = 在场角色参考图（仅有参考槽的视频模板消费）。
+      // 2026-11-12：图片模板（AIO Identity Edit）也消费 REF Image 1/2；图片分支传角色底图，
+      // 模板没有 reference_image_* 时 illustrationTemplateValues 自然忽略。
+      referenceImages: mainIsVideo
+        ? (referenceGeneration ? referenceImages : undefined)
+        : workflowReferenceImages,
       // 第 100 刀：音频1、2、3… = 本轮对白录音（拼好的整条），仅有参考音频槽的模板消费
       referenceAudios: referenceAudioName ? [referenceAudioName] : undefined,
     });
@@ -1196,12 +1227,13 @@ export function useIllustrationChain({
       }
       // submit 计时段含 ComfyUI 探活 + 队列等待：这段正是历史上「卡 4 分钟」的嫌疑区。
       mark("submit", "start");
-      const st = await comfyStatus(comfyMainUrl);
-      if (!st.running) {
-        failSlot("comfyui_status", "ComfyUI 尚未启动");
+      // ComfyUI 没启动时不丢任务：与拍设定妆共用同一条等待队列，启动后继续提交。
+      const ready = await ensureComfyReady(comfyMainUrl, { timeoutMs: 10 * 60 * 1000 });
+      if (!ready) {
+        failSlot("comfyui_status", "ComfyUI 启动超时，任务未提交");
         return;
       }
-      const r = await enqueueSubmit(() => submitWorkflow(
+      const r = await enqueueSubmitTo(comfyMainUrl, () => submitWorkflow(
         chosenId, values, comfyMainUrl, submittedPrompt, loraStack, loraMode,
       ));
       mark("submit", "ok", chosenId);
@@ -1227,6 +1259,16 @@ export function useIllustrationChain({
         pollResult(r.prompt_id, outputNodeIds, regeneration, target, submittedPrompt, mainIsVideo ? "video" : "image", baseSlotRef);
         if (climaxVideoChain) void chainClimaxVideo(r.prompt_id!);
         if (bridgeVideoChain) void chainBridgeVideo(r.prompt_id!);
+        if (isShotSequence && useVideo && !videoOnly) {
+          // 进入本锚点的 move 先建槽（图片1=上一锚点成图、图片2=本槽成图），
+          // 再建本锚点 outgoing 槽（图片1=本槽成图）；槽序=成片序。
+          if (incomingShotType === "move" && transitionVideoPrompt) {
+            void chainBridgeVideo(r.prompt_id!, moveSlotId);
+          }
+          if (videoPrompt && (shotType === "establish" || shotType === "cut" || shotType === "move_single")) {
+            void chainClimaxVideo(r.prompt_id!, videoSlotId);
+          }
+        }
       } else {
         failSlot("submit", "ComfyUI 没有返回任务 ID");
       }

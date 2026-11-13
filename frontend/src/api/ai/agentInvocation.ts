@@ -25,6 +25,10 @@ export interface AgentInvocation {
   threadId: string;
   message: string;
   images: string[];
+  /** 交互模式：默认 story（剧情）；chat=1:1 角色聊天；group_chat=群聊按成员顺序各回一次。 */
+  interactionMode?: "story" | "chat" | "group_chat";
+  /** 聊天室成员（角色卡名，顺序即群聊轮转顺序）；空=后端按绑定卡推断。 */
+  chatMembers?: string[];
   imageMask?: { image: string; mask: string } | null;
   workMode: WorkMode;
   chat: Chat;
@@ -52,6 +56,21 @@ export interface AgentInvocation {
   contextMaxTokens: number;
   compactTriggerPct: number; // 历史占用达有效预算该百分比即自动压缩（0=关闭；2026-09-11 条数废弃）
   selfhealAttempts: number;
+  // 聊天室行为上限（设置→聊天室）；缺省由序列化层补默认值，兼容旧调用方。
+  chatGuardMaxChars?: number;
+  chatDefaultMaxTokens?: number;
+  chatFollowupMax?: number;
+  chatReopenMax?: number;
+  chatInitiativeIdleMinutes?: number;
+  chatInitiativeCooldownMinutes?: number;
+  chatInitiativeDailyMax?: number;
+  chatCadence?: "quiet" | "normal" | "frequent";
+  chatActiveWindowMinutes?: number;
+  chatMaxBotTurns?: number;
+  chatMinAffinity?: number;
+  chatQuietStart?: string;
+  chatQuietEnd?: string;
+  chatGroupActivity?: "quiet" | "normal" | "lively";
   // 2026-09-04 设置整合：智能体参数预设（温度/采样/输入输出上限），权威源=settings。
   presetSampling: PresetSampling;
   history: { role: "user" | "assistant"; content: string }[];
@@ -70,7 +89,7 @@ export interface AgentInvocation {
   comfyIllustrate: boolean;
   comfyAudio: boolean;
   comfyVideo: boolean;
-  videoMode?: "climax" | "firstlast";
+  videoMode?: "climax" | "firstlast" | "shots";
   promptProfile: string;
   // 2026-10-25 提示词模版：promptProfile 为 custom:<id> 时同时报送其内置协议族
   //（模版被删时后端按该 kind 降级内置）；空=后端按默认 anima_tags。
@@ -79,6 +98,8 @@ export interface AgentInvocation {
   videoPromptTemplateId?: string;
   // 视频工作流模版 id（空=未知；后端据此派生尾帧/参考图槽与默认时长）
   videoTemplateId?: string;
+  // 全局模式分镜序列总时长预算（秒，0=后端按模板/正文估算）
+  videoDurationHint?: number;
   appearanceSource: "worldbook" | "character_card";
   illustrationViewpoint?: "" | "first_person" | "third_person";
   illustrationBatchCount?: number;
@@ -88,12 +109,17 @@ export interface AgentInvocation {
   attachments?: FileAttachmentMeta[];
   approvalAction?: { approvalId: string; action: "submit" | "change" | "cancel"; editedPrompt?: string };
   routeAction?: { route: import("../../types/chat").AgentRoute; userMessageId: string };
+  /** 聊天室：刚发完照片/换头像后的补话（/ai/chat/reaction）。 */
+  reactionKind?: "" | "image" | "avatar";
+  reactionPrompt?: string;
 }
 
 export function agentInvocationBody(request: AgentInvocation): AgentInvocationWire {
   return {
     thread_id: request.threadId,
     workspace_mode: workspaceModeForWire(request.workMode),
+    interaction_mode: request.interactionMode || "story",
+    chat_members: request.chatMembers || [],
     message: request.message,
     images: request.images,
     image_mask: request.imageMask || null,
@@ -126,6 +152,20 @@ export function agentInvocationBody(request: AgentInvocation): AgentInvocationWi
     context_max_tokens: request.contextMaxTokens,
     compact_trigger_pct: request.compactTriggerPct,
     selfheal_attempts: request.selfhealAttempts,
+    chat_guard_max_chars: request.chatGuardMaxChars ?? 900,
+    chat_default_max_tokens: request.chatDefaultMaxTokens ?? 0,
+    chat_followup_max: request.chatFollowupMax ?? 3,
+    chat_reopen_max: request.chatReopenMax ?? 2,
+    chat_initiative_idle_minutes: request.chatInitiativeIdleMinutes ?? 120,
+    chat_initiative_cooldown_minutes: request.chatInitiativeCooldownMinutes ?? 360,
+    chat_initiative_daily_max: request.chatInitiativeDailyMax ?? 6,
+    chat_cadence: request.chatCadence ?? "normal",
+    chat_active_window_minutes: request.chatActiveWindowMinutes ?? 15,
+    chat_max_bot_turns: request.chatMaxBotTurns ?? 5,
+    chat_min_affinity: request.chatMinAffinity ?? 30,
+    chat_quiet_start: request.chatQuietStart ?? "00:30",
+    chat_quiet_end: request.chatQuietEnd ?? "08:30",
+    chat_group_activity: request.chatGroupActivity ?? "normal",
     // 2026-09-04：智能体参数预设（settings 全局权威）→ wire 字段 preset_sampling。
     // 后端取 ctx.preset_sampling 覆盖 builtin sampling，温度/采样由 settings 决定，
     // 与 preset JSON 解耦。
@@ -157,12 +197,15 @@ export function agentInvocationBody(request: AgentInvocation): AgentInvocationWi
     prompt_profile_kind: request.promptProfileKind || "",
     video_prompt_template_id: request.videoPromptTemplateId || "",
     video_template_id: request.videoTemplateId || "",
+    video_duration_hint: request.videoDurationHint || 0,
     appearance_source: request.appearanceSource,
     illustration_viewpoint: request.illustrationViewpoint || "",
     illustration_batch_count: request.illustrationBatchCount || 0,
     character_base_images: request.characterBaseImages,
     illustration_actor_names: request.illustrationActorNames,
     style_base_image: request.styleBaseImage,
+    reaction_kind: request.reactionKind || "",
+    reaction_prompt: request.reactionPrompt || "",
     attachments: (request.attachments || []).map((a) => ({
       file_id: a.fileId,
       name: a.name,

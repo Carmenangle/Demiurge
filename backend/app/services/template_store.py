@@ -482,6 +482,9 @@ def _normalize(record: dict) -> dict:
         "image_node_id": str(record.get("image_node_id") or "").strip(),
         # 模板自带 LoRA 是能力的一部分（如蒸馏加速 LoRA）：提交时不清零、也不接受外部插画 LoRA。
         "preserve_loras": bool(record.get("preserve_loras")),
+        # 2026-11-12：可选预编译 API 快照（AIO 子图展开后修复过的扁平图）。
+        # 有它时提交直接用它；没有则仍从 source_path 现场 ui_to_api（旧模板零变化）。
+        "api_workflow": record.get("api_workflow"),
     })
     return normalized
 
@@ -603,6 +606,7 @@ def save_template(data: dict, template_id: str | None = None) -> dict:
         "primary_output_node_id": data.get("primary_output_node_id", ""),
         "preserve_loras": bool(data.get("preserve_loras", False)),
         "video_size_from_template": bool(data.get("video_size_from_template", False)),
+        "api_workflow": data.get("api_workflow"),
         "created_at": created,
         "updated_at": now,
     })

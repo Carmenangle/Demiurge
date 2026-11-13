@@ -73,7 +73,7 @@ export interface VideoDialogue {
 
 /** V1.5 默认开放：结构化视频参数（后端 dry-run 组装结果，供测试核对参数是否上传） */
 export interface VideoParams {
-  mode: "climax" | "firstlast" | "transition";
+  mode: "climax" | "firstlast" | "transition" | "shot_cut" | "shot_move" | "shot_move_single";
   model: string;
   size: string;
   /** 剧情判定的秒数（0/缺省=未判定，工作流保留模板默认） */
@@ -84,6 +84,28 @@ export interface VideoParams {
   warnings: string[];
 }
 
+/** 聊天/群聊：一个角色的单条回复（id 由后端生成，前端按 id upsert）。 */
+export interface ChatRoomMediaRequest {
+  kind: "image" | "video";
+  prompt: string;
+  /** 非常规装扮自拍：生成成功后自动替换该角色的聊天头像。 */
+  avatar?: boolean;
+  /** 角色固定外貌（后端从世界书条目/角色卡提取，已去掉当前穿着）。 */
+  appearance?: string;
+}
+
+export interface ChatRoomMessage {
+  id?: string;
+  speaker: string;
+  text: string;
+  /** 消息时间（epoch 秒）；服务端落盘与 SSE 同源，前端据此显示时间与排序。 */
+  ts?: number;
+  /** QQ 式轻动作：true＝这条是「戳了戳你」，前端渲染成居中提示而不是气泡。 */
+  poke?: boolean;
+  /** 角色自发请求的自拍/视频；前端用现有生图/视频通道生成后插回聊天。 */
+  media_request?: ChatRoomMediaRequest;
+}
+
 export type ChatStreamEvent =
   | { type: "trace"; text: string; detail?: string }
   | { type: "delta"; text: string }
@@ -92,8 +114,13 @@ export type ChatStreamEvent =
   | { type: "route"; route: MessageRoute }
   | { type: "image"; url: string; id?: string; regeneration?: RegenerationSnapshot }
   | { type: "video"; url: string; id?: string }
-  | { type: "illustrate_request"; prompt: string; motion: number; actors: string[]; sceneSpec?: IllustrationSceneSpec; id?: string; offset?: number; turnId?: string; videoMode?: "climax" | "firstlast"; firstFrameDesc?: string; lastFrameDesc?: string; prevTailDesc?: string; lastFrameUrl?: string; transition?: "reuse" | "regenerate" | "ambiguous"; videoPrompt?: string; videoParams?: VideoParams; transitionVideoPrompt?: string; transitionVideoParams?: VideoParams; videoDialogue?: VideoDialogue; bridgePrevSlotId?: string; batchIndex?: number }
+  | { type: "illustrate_request"; prompt: string; motion: number; actors: string[]; sceneSpec?: IllustrationSceneSpec; id?: string; offset?: number; turnId?: string; videoMode?: "climax" | "firstlast" | "shots"; firstFrameDesc?: string; lastFrameDesc?: string; prevTailDesc?: string; lastFrameUrl?: string; transition?: "reuse" | "regenerate" | "ambiguous"; videoPrompt?: string; videoParams?: VideoParams; transitionVideoPrompt?: string; transitionVideoParams?: VideoParams; videoDialogue?: VideoDialogue; bridgePrevSlotId?: string; batchIndex?: number; shotSequenceId?: string; shotIndex?: number; shotTotal?: number; shotType?: "establish" | "cut" | "move" | "move_single"; shotDurationS?: number; imageKey?: string; incomingShotIndex?: number; incomingShotType?: "move" }
   | { type: "audio_request"; lines: AudioDialogueLine[]; id?: string }
+  | { type: "chat_messages"; messages: ChatRoomMessage[] }
+  | {
+      type: "media_request"; kind: "image" | "video"; prompt: string;
+      avatar?: boolean; appearance?: string;
+    }
   | { type: "rag_status"; state: string; kind: string; count?: number }
   | { type: "inspiration"; card: StreamInspirationCard }
   | { type: "approval"; approval: PromptApproval }
@@ -188,6 +215,7 @@ export function decodeChatStreamEvent(value: unknown): ChatStreamEvent {
         ...(typeof data.turn_id === "string" ? { turnId: data.turn_id } : {}),
         // V1.5/B1 视频协议可选字段：宽松透传（旧后端不带 → 无这些字段）
         ...(data.video_mode === "climax" || data.video_mode === "firstlast"
+          || data.video_mode === "shots"
           ? { videoMode: data.video_mode }
           : {}),
         ...(typeof data.first_frame_desc === "string" ? { firstFrameDesc: data.first_frame_desc } : {}),
@@ -223,6 +251,19 @@ export function decodeChatStreamEvent(value: unknown): ChatStreamEvent {
           : {}),
         // 第 74 刀：批次序号（第 2 张起才有；主图不带 ⇒ 落点口径逐字不变）
         ...(typeof data.batch_index === "number" ? { batchIndex: data.batch_index } : {}),
+        // 2026-11-09 全局模式分镜序列：镜头顺序/归属（旧后端不带 ⇒ 不建序列）
+        ...(typeof data.shot_sequence_id === "string" && data.shot_sequence_id
+          ? { shotSequenceId: data.shot_sequence_id } : {}),
+        ...(typeof data.shot_index === "number" ? { shotIndex: data.shot_index } : {}),
+        ...(typeof data.shot_total === "number" ? { shotTotal: data.shot_total } : {}),
+        ...(data.shot_type === "cut" || data.shot_type === "move" || data.shot_type === "move_single"
+          ? { shotType: data.shot_type } : {}),
+        ...(typeof data.shot_duration_s === "number" ? { shotDurationS: data.shot_duration_s } : {}),
+        ...(typeof data.image_key === "string" && data.image_key
+          ? { imageKey: data.image_key } : {}),
+        ...(typeof data.incoming_shot_index === "number"
+          ? { incomingShotIndex: data.incoming_shot_index } : {}),
+        ...(data.incoming_shot_type === "move" ? { incomingShotType: "move" as const } : {}),
       };
     case "audio_request":
       return {
@@ -247,6 +288,57 @@ export function decodeChatStreamEvent(value: unknown): ChatStreamEvent {
           : [],
         ...(typeof data.id === "string" ? { id: data.id } : {}),
       };
+    case "chat_messages":
+      // 2026-11-09 聊天/群聊：逐角色回复一次性下发；空文本/空 speaker 丢弃（与后端编码同口径）。
+      return {
+        type: "chat_messages",
+        messages: Array.isArray(data.messages)
+          ? data.messages
+              .map((item): ChatRoomMessage | null => {
+                if (!item || typeof item !== "object") return null;
+                const message = item as Record<string, unknown>;
+                const text = typeof message.text === "string" ? message.text.trim() : "";
+                if (!text) return null;
+                const speaker = typeof message.speaker === "string" && message.speaker
+                  ? message.speaker : "助手";
+                const media = message.media_request;
+                const mediaRequest = media && typeof media === "object"
+                  && (media as Record<string, unknown>).kind !== undefined
+                  && typeof (media as Record<string, unknown>).prompt === "string"
+                  && ((media as Record<string, unknown>).kind === "image"
+                    || (media as Record<string, unknown>).kind === "video")
+                  ? {
+                      kind: (media as Record<string, unknown>).kind as "image" | "video",
+                      prompt: String((media as Record<string, unknown>).prompt).trim(),
+                      ...((media as Record<string, unknown>).avatar === true
+                        ? { avatar: true } : {}),
+                      ...(typeof (media as Record<string, unknown>).appearance === "string"
+                        && (media as Record<string, unknown>).appearance
+                        ? { appearance: String((media as Record<string, unknown>).appearance).trim() }
+                        : {}),
+                    }
+                  : undefined;
+                return {
+                  speaker,
+                  text,
+                  ...(typeof message.id === "string" && message.id ? { id: message.id } : {}),
+                  ...(mediaRequest && mediaRequest.prompt ? { media_request: mediaRequest } : {}),
+                };
+              })
+              .filter((item): item is ChatRoomMessage => item !== null)
+          : [],
+      };
+    case "media_request": {
+      const kind = data.kind === "image" || data.kind === "video" ? data.kind : null;
+      const prompt = typeof data.prompt === "string" ? data.prompt.trim() : "";
+      if (!kind || !prompt) throw new Error("media_request 缺少 kind 或 prompt");
+      return {
+        type: "media_request", kind, prompt,
+        ...(data.avatar === true ? { avatar: true } : {}),
+        ...(typeof data.appearance === "string" && data.appearance
+          ? { appearance: data.appearance.trim() } : {}),
+      };
+    }
     case "rag_status":
       return {
         type: "rag_status",

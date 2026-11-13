@@ -184,28 +184,35 @@ public partial class MainWindow : Window
 
     private void OnNavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs e)
     {
-        if (!Uri.TryCreate(e.Uri, UriKind.Absolute, out var uri))
+        switch (UrlPolicy.DecideNavigation(e.Uri))
         {
-            return;
+            case NavigationDecision.Allow:
+                return;
+            case NavigationDecision.OpenExternal:
+                e.Cancel = true;
+                if (Uri.TryCreate(e.Uri, UriKind.Absolute, out var external))
+                {
+                    OpenExternalUrl(external);
+                }
+                return;
+            default:
+                // 非 http(s)（file:/mailto:/ms-*/intent:/about: 等）一律拒绝，不交系统处理器。
+                e.Cancel = true;
+                ShellLog.Warn($"已拦截非 http(s) 导航：{UrlPolicy.Describe(e.Uri)}");
+                return;
         }
-        if (uri.Scheme is not ("http" or "https"))
-        {
-            return;
-        }
-        if (uri.IsLoopback || uri.Host.Equals("localhost", StringComparison.OrdinalIgnoreCase))
-        {
-            return;
-        }
-        e.Cancel = true;
-        OpenExternal(e.Uri);
     }
 
     private void OnNewWindowRequested(object? sender, CoreWebView2NewWindowRequestedEventArgs e)
     {
         e.Handled = true;
-        if (Uri.TryCreate(e.Uri, UriKind.Absolute, out var uri) && uri.Scheme is ("http" or "https"))
+        if (Uri.TryCreate(e.Uri, UriKind.Absolute, out var uri) && UrlPolicy.IsExternalHttp(uri))
         {
-            OpenExternal(e.Uri);
+            OpenExternalUrl(uri);
+        }
+        else
+        {
+            ShellLog.Warn($"已拦截非 http(s) 新窗口：{UrlPolicy.Describe(e.Uri)}");
         }
     }
 
@@ -310,7 +317,7 @@ public partial class MainWindow : Window
     {
         if (_fallbackUrl is not null)
         {
-            OpenExternal(_fallbackUrl);
+            OpenExternalUrl(new Uri(_fallbackUrl));
         }
         else if (_openLogsOnClick)
         {
@@ -318,7 +325,7 @@ public partial class MainWindow : Window
         }
         else
         {
-            OpenExternal(_runtime.BaseUrl);
+            OpenExternalUrl(new Uri(_runtime.BaseUrl));
         }
     }
 
@@ -343,7 +350,7 @@ public partial class MainWindow : Window
             };
             var menu = new Forms.ContextMenuStrip();
             menu.Items.Add("打开主界面", null, (_, _) => ActivateFromShell());
-            menu.Items.Add("在浏览器中打开", null, (_, _) => OpenExternal(_runtime.BaseUrl));
+            menu.Items.Add("在浏览器中打开", null, (_, _) => OpenExternalUrl(new Uri(_runtime.BaseUrl)));
             menu.Items.Add(new Forms.ToolStripSeparator());
             menu.Items.Add("退出", null, (_, _) => Dispatcher.BeginInvoke(new Action(Close)));
             _tray.ContextMenuStrip = menu;
@@ -398,7 +405,7 @@ public partial class MainWindow : Window
         try
         {
             Directory.CreateDirectory(ShellPaths.LogsDir);
-            OpenExternal(ShellPaths.LogsDir);
+            OpenPath(ShellPaths.LogsDir);
         }
         catch (Exception ex)
         {
@@ -406,15 +413,37 @@ public partial class MainWindow : Window
         }
     }
 
-    private static void OpenExternal(string target)
+    private static void OpenExternalUrl(Uri uri)
     {
+        if (!UrlPolicy.IsExternalHttp(uri))
+        {
+            ShellLog.Warn($"已拦截非 http(s) 外链：{UrlPolicy.Describe(uri)}");
+            return;
+        }
         try
         {
-            Process.Start(new ProcessStartInfo(target) { UseShellExecute = true });
+            Process.Start(new ProcessStartInfo(uri.AbsoluteUri) { UseShellExecute = true });
         }
         catch (Exception ex)
         {
-            ShellLog.Warn($"打开外部目标失败：{target}", ex);
+            ShellLog.Warn($"打开外部链接失败：{UrlPolicy.Describe(uri)}", ex);
+        }
+    }
+
+    private static void OpenPath(string path)
+    {
+        if (!UrlPolicy.IsLocalPath(path))
+        {
+            ShellLog.Warn($"已拦截非本地路径：{path}");
+            return;
+        }
+        try
+        {
+            Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            ShellLog.Warn("打开本地路径失败", ex);
         }
     }
 }

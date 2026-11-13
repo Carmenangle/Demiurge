@@ -49,10 +49,29 @@ class RunContext:
     forced_route: str = ""
     user_message_id: str = ""
     workspace_mode: str = "story"  # story/generate/edit；edit 直达受限作品文件 Agent
+    # 2026-11-09 聊天/群聊：显式交互模式（默认 story 零改变）。
+    # chat=1:1 角色聊天；group_chat=按群聊节奏挑人回并允许有限接话（不做无人自动聊）。
+    interaction_mode: str = "story"  # story/chat/group_chat
+    chat_members: list[str] = field(default_factory=list, compare=False)  # 聊天室成员（角色卡名，顺序即轮转顺序）
     context_max_tokens: int = 20_000
     context_count: int = 6        # 已废弃（2026-09-11 上下文 token 化）：仅为 wire 兼容保留，后端不再消费；条数约束由 token 预算唯一承担
     compact_trigger_pct: int = 80  # 历史上下文占用达到有效预算的该百分比即自动压缩（/compact 对齐；0=关闭，摘要失败退机械裁剪）
     selfheal_attempts: int = 3    # 截断自愈次数上限（0=不自愈；设置→AI 模型可调）
+    # 聊天室行为上限（设置→聊天室）：预设防拦截头/输出兜底/追问与重开次数/主动门槛。
+    chat_guard_max_chars: int = 900
+    chat_default_max_tokens: int = 0      # 0=跟随全局预设；>0=聊天独立输出上限
+    chat_followup_max: int = 3
+    chat_reopen_max: int = 2
+    chat_initiative_idle_minutes: int = 120
+    chat_initiative_cooldown_minutes: int = 360
+    chat_initiative_daily_max: int = 6    # 每角色每天最多主动发起几次（0=不限）
+    chat_cadence: str = "normal"          # quiet / normal / frequent：追问/重开延迟档位
+    chat_active_window_minutes: int = 15  # 最后一条消息后多久内算「正在聊」
+    chat_max_bot_turns: int = 5           # 连续 bot 气泡上限（超过不再追问）
+    chat_min_affinity: int = 30           # 主动/追问的最低好感度
+    chat_quiet_start: str = "00:30"       # 深夜安静时段开始（HH:MM；空=关闭）
+    chat_quiet_end: str = "08:30"         # 深夜安静时段结束（HH:MM；空=关闭）
+    chat_group_activity: str = "normal"   # quiet / normal / lively：群聊活跃度
     # 2026-09-04 设置整合：智能体参数预设（settings 全局权威：温度/top_p/top_k/frequency_penalty/
     # presence_penalty/openai_max_context/openai_max_tokens）。preset 顶层不再管理这些字段。
     # preset_store.sampling_params 已废弃；`agent_graph._roleplay_sampling` 只读 ctx.preset_sampling。
@@ -94,6 +113,8 @@ class RunContext:
     # 视频工作流模版 id（空=未知）：后端据此派生尾帧/参考图槽与默认时长，
     # 提示词只声明模板真能消费的图片（不声明无人接收的「图片2/3/4」）。
     video_template_id: str = ""
+    # 全局模式分镜序列总时长预算（秒，0=按模板/正文估算）。
+    video_duration_hint: int = 0
     appearance_source: str = "worldbook"  # worldbook / character_card
     # 画面人称手选（2026-09-20，UI＝多元数据插入面板按钮组）："" = 自动判定（按锚点段），
     # first_person / third_person = 用户手选优先（`scene_illustration.frame_viewpoint` 的 override）。
@@ -141,10 +162,26 @@ class RunContext:
             "edited_prompt": self.edited_prompt, "forced_route": self.forced_route,
             "user_message_id": self.user_message_id, "cancel_event": self.cancel_event,
             "workspace_mode": self.workspace_mode,
+            "interaction_mode": self.interaction_mode,
+            "chat_members": self.chat_members,
             "context_max_tokens": self.context_max_tokens,
             "context_count": self.context_count,
             "compact_trigger_pct": self.compact_trigger_pct,
             "selfheal_attempts": self.selfheal_attempts,
+            "chat_guard_max_chars": self.chat_guard_max_chars,
+            "chat_default_max_tokens": self.chat_default_max_tokens,
+            "chat_followup_max": self.chat_followup_max,
+            "chat_reopen_max": self.chat_reopen_max,
+            "chat_initiative_idle_minutes": self.chat_initiative_idle_minutes,
+            "chat_initiative_cooldown_minutes": self.chat_initiative_cooldown_minutes,
+            "chat_initiative_daily_max": self.chat_initiative_daily_max,
+            "chat_cadence": self.chat_cadence,
+            "chat_active_window_minutes": self.chat_active_window_minutes,
+            "chat_max_bot_turns": self.chat_max_bot_turns,
+            "chat_min_affinity": self.chat_min_affinity,
+            "chat_quiet_start": self.chat_quiet_start,
+            "chat_quiet_end": self.chat_quiet_end,
+            "chat_group_activity": self.chat_group_activity,
             # 2026-10-20 补：以下两键此前**字段有、映射表没有** ⇒ `ctx.get()` 恒返回 None，
             # 属于「声明了但永远读不到」的静默失效（探针实证：`from_payload(preset_sampling=…)`
             # 之后 `ctx.get("preset_sampling")` 仍是 None）。
@@ -171,6 +208,7 @@ class RunContext:
             "prompt_profile_kind": self.prompt_profile_kind,
             "video_prompt_template_id": self.video_prompt_template_id,
             "video_template_id": self.video_template_id,
+            "video_duration_hint": self.video_duration_hint,
             "appearance_source": self.appearance_source,
             "illustration_viewpoint": self.illustration_viewpoint,
             "illustration_batch_count": self.illustration_batch_count,
@@ -223,6 +261,8 @@ class AgentEvent(TypedDict, total=False):
     error: str
     done: bool
     illustrate_request: dict  # 高潮点出图请求（{prompt}）；前端据本地预设模板走异步 ComfyUI 闭环
+    chat_messages: list  # 2026-11-09 聊天/群聊：逐角色回复 [{id,speaker,text}]
+    media_request: dict  # 2026-11-10 聊天室自发媒体：{kind: image|video, prompt}
 
 
 # ctx 双形态（2026-10-23 mypy 收口）：图链执行上下文 RunContext（dict 协议适配器，

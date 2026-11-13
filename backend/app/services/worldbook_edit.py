@@ -112,15 +112,40 @@ def _ordered(book: dict[str, Any]) -> list[Any]:
     return []
 
 
+def _ordered_pairs(book: dict[str, Any]) -> list[tuple[str, Any]]:
+    """有序 `(容器键, 条目)` 列表：dict 保留 keyed-by-uid 的键，list 的键为空串。"""
+    raw = book.get("entries")
+    if isinstance(raw, dict):
+        return [(str(key), value) for key, value in raw.items()]
+    if isinstance(raw, list):
+        return [("", value) for value in raw]
+    return []
+
+
+def _entry_uid(key_uid: str, entry: dict[str, Any], index: int) -> str:
+    """条目稳定身份键：`id`/`uid` → 容器键 → 内容哈希。
+
+    index 会随增删漂移，不能作为名册覆盖的持久键；只有既无 id/uid 又无容器键的
+    数组条目才退到「标题 + 内容前缀」哈希（内容改了视为新条目，符合预期）。
+    """
+    explicit = str(entry.get("id") or entry.get("uid") or key_uid or "").strip()
+    if explicit:
+        return explicit
+    import hashlib
+    seed = f"{entry.get('comment') or ''}\n{str(entry.get('content') or '')[:400]}"
+    return "h:" + hashlib.sha1(seed.encode("utf-8")).hexdigest()[:16]
+
+
 def list_entries(book: dict[str, Any]) -> list[dict[str, Any]]:
-    """返回条目列表（含 index，供前端定位）。非 dict 条目跳过。"""
+    """返回条目列表（含 index 与稳定 uid，供前端定位/名册覆盖）。非 dict 条目跳过。"""
     out: list[dict[str, Any]] = []
-    for i, e in enumerate(_ordered(book)):
+    for i, (key_uid, e) in enumerate(_ordered_pairs(book)):
         if not isinstance(e, dict):
             continue
         keys = e.get("keys") or e.get("key") or []
         out.append({
             "index": i,
+            "uid": _entry_uid(key_uid, e, i),
             "content": str(e.get("content") or ""),
             "comment": str(e.get("comment") or ""),
             "keys": [str(k) for k in keys] if isinstance(keys, list) else [],

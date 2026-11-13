@@ -116,12 +116,13 @@ tasks.matching { it.name.endsWith("PythonSources") }.configureEach { dependsOn(s
 // APK 隐私白名单闸（M4）：安装包绝不带用户数据。
 // 判据是禁项扫描（不是「记得别拷」）：外层 APK + 内嵌 frontend.zip + Chaquopy 的
 // app.imy 三层都扫——presets/、userdata/、backend/data/ 与 user_state.json（模型密钥）
+// 与 repos.json（作品索引，含真实作品名；2026-11-02 用户态拆档后它单独落盘，名单必须一起加）
 // 只要出现任何一处就让构建失败。桌面 NSIS 安装器已有同类守卫（scripts/ 下），手机侧
 // 必须有独立的一份，因为出包链路完全不同。
 // ---------------------------------------------------------------------------
 val verifyApkPrivacy by tasks.registering {
     group = "verification"
-    description = "校验 APK 不含 presets/、userdata/、backend/data/ 与 user_state.json"
+    description = "校验 APK 不含 presets/、userdata/、backend/data/ 与 user_state.json/repos.json"
     val apkRoot = layout.buildDirectory.dir("outputs/apk")
     doLast {
         val apks = apkRoot.get().asFile.walkTopDown()
@@ -134,7 +135,7 @@ val verifyApkPrivacy by tasks.registering {
                 val segments = name.split('/')
                 segments.any { it == "presets" || it == "userdata" } ||
                     segments.windowed(2).any { it == listOf("backend", "data") } ||
-                    segments.last() == "user_state.json"
+                    segments.last() in setOf("user_state.json", "repos.json")
             }.map { "$where!$it" }
 
         apks.forEach { apk ->
@@ -159,3 +160,8 @@ val verifyApkPrivacy by tasks.registering {
 
 tasks.matching { it.name == "assembleDebug" || it.name == "assembleRelease" }
     .configureEach { finalizedBy(verifyApkPrivacy) }
+
+dependencies {
+    // 纯 JVM 单测（BackendOriginTest）：不引入 AndroidX，也不进 APK
+    testImplementation("junit:junit:4.13.2")
+}

@@ -5,6 +5,9 @@ import {
 import type { PanelProps } from "./GeneralPanel";
 import {
   chatModelSource, modelDisplayName, remoteModelSource, OLLAMA_DEFAULT_BASE_URL,
+  activeEmbedPreset, activeVlmPreset, addEmbedPreset, addVlmPreset,
+  embedPresetName, removeEmbedPreset, removeVlmPreset, renameEmbedPreset, renameVlmPreset,
+  selectEmbedPreset, selectVlmPreset, vlmPresetName, withEmbedPatch, withVlmPatch,
   type ChatModel, type ChatModelSource, type ImageModel, type VideoModel, type EmbedModel, type VlmModel,
 } from "../../stores/settings";
 import { discoverProviderModels } from "../../api/aiProviders";
@@ -455,6 +458,39 @@ function SourceTabs({ label, value, onChange }: {
   );
 }
 
+// 模型存档条（2026-11-07）：一档「为主」参与运行，其余存档只在切换时灌入单字段。
+// 至少保留一档——删空会让「当前用哪个」无解。
+function PresetBar({ label, options, activeId, onSelect, onAdd, onRemove }: {
+  label: string;
+  options: { id: string; name: string }[];
+  activeId?: string;
+  onSelect: (id: string) => void;
+  onAdd: () => void;
+  onRemove: () => void;
+}) {
+  return (
+    <div className="model-preset-bar" role="group" aria-label={label}>
+      <label>模型存档</label>
+      <select
+        value={activeId || ""}
+        aria-label={`${label}·选择`}
+        onChange={(e) => onSelect(e.target.value)}
+      >
+        {options.length === 0 && <option value="">（未建档）</option>}
+        {options.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+      </select>
+      <button className="btn" type="button" onClick={onAdd}>+ 新增存档</button>
+      <button
+        className="btn"
+        type="button"
+        onClick={onRemove}
+        disabled={options.length <= 1}
+        title={options.length <= 1 ? "至少保留一个存档" : "删除当前存档"}
+      >删除</button>
+    </div>
+  );
+}
+
 export function ModelsPanel({ draft, setDraft }: PanelProps) {
   const [embedProbe, setEmbedProbe] = useState<{ testing?: boolean; result?: ModelProbeResult }>({});
   const [rerankerProbe, setRerankerProbe] = useState<{ testing?: boolean; result?: ModelProbeResult }>({});
@@ -475,7 +511,7 @@ export function ModelsPanel({ draft, setDraft }: PanelProps) {
     return () => { alive = false; };
   }, []);
   const setEmbed = (patch: Partial<EmbedModel>) =>
-    setDraft((d) => ({ ...d, embedModel: { ...d.embedModel, ...patch } }));
+    setDraft((d) => withEmbedPatch(d, patch));
 
   const addChatModel = (source: ChatModelSource) =>
     setDraft((d) => ({ ...d, chatModels: [...d.chatModels, newChatModel(source)] }));
@@ -543,7 +579,7 @@ export function ModelsPanel({ draft, setDraft }: PanelProps) {
   })();
 
   const setVlm = (patch: Partial<VlmModel>) =>
-    setDraft((d) => ({ ...d, vlmModel: { ...d.vlmModel, ...patch } }));
+    setDraft((d) => withVlmPatch(d, patch));
 
   const [vlmProbe, setVlmProbe] = useState<{ testing?: boolean; result?: ModelProbeResult }>({});
 
@@ -584,6 +620,11 @@ export function ModelsPanel({ draft, setDraft }: PanelProps) {
     if (!u.trim()) return "未配置";
     return "自定义 / 中转";
   })();
+
+  const vlmPresets = draft.vlmPresets || [];
+  const activeVlm = activeVlmPreset(draft);
+  const embedPresets = draft.embedPresets || [];
+  const activeEmbed = activeEmbedPreset(draft);
 
   return (
     <>
@@ -680,7 +721,7 @@ export function ModelsPanel({ draft, setDraft }: PanelProps) {
       {/* 视觉大模型（Visual CI 验收） */}
       <div className="settings-section model-capability-card">
         <div className="model-capability-head">
-          <CapabilityTitle icon={<Eye size={18} />} title="视觉大模型" count={1}
+          <CapabilityTitle icon={<Eye size={18} />} title="视觉大模型" count={vlmPresets.length}
             configured={draft.vlmModel.mode === "local"
               // 本地 GGUF 光有路径还不够——必须先「导入 Ollama」拿到 ollamaName 才真能用，
               // 否则会误显示「已配置」而实际调不动（2026-10-18 用户实锤）。
@@ -691,10 +732,29 @@ export function ModelsPanel({ draft, setDraft }: PanelProps) {
           用于 Visual CI 自动验收插画（检查人物/动作/场景/噪点）。来源三选一：<strong>云端 API</strong>、
           <strong>本机 Ollama</strong>、<strong>本地模型（GGUF）</strong>——本地文件会导入本机 Ollama 运行，全程不走云。
         </p>
+        <PresetBar
+          label="视觉大模型存档"
+          options={vlmPresets.map((p) => ({ id: p.id, name: vlmPresetName(p) }))}
+          activeId={activeVlm?.id}
+          onSelect={(id) => setDraft((d) => selectVlmPreset(d, id))}
+          onAdd={() => setDraft(addVlmPreset)}
+          onRemove={() => { if (activeVlm) setDraft((d) => removeVlmPreset(d, activeVlm.id)); }}
+        />
         <SourceTabs label="视觉大模型来源" value={vlmTab} onChange={setVlmTab} />
         <details className="model-advanced embedding-advanced">
           <summary>连接与模型配置</summary>
           <div className="model-advanced-body">
+            {activeVlm && (
+              <div className="field">
+                <label>存档名称</label>
+                <input
+                  value={activeVlm.name}
+                  onChange={(e) => setDraft((d) => renameVlmPreset(d, activeVlm.id, e.target.value))}
+                  placeholder="例如：云端 GLM-4V / 本机 Qwen3-VL"
+                />
+                <p className="field-hint">选中的存档就是「为主」：Visual CI 验收与 GBC 打标都用它。</p>
+              </div>
+            )}
             {vlmTab === "api" && <>
               <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
                 {VLM_API_PRESETS.map((p) => (
@@ -755,17 +815,36 @@ export function ModelsPanel({ draft, setDraft }: PanelProps) {
       {/* 嵌入模型 */}
       <div className="settings-section model-capability-card">
         <div className="model-capability-head">
-          <CapabilityTitle icon={<Database size={18} />} title="Embedding" count={1}
+          <CapabilityTitle icon={<Database size={18} />} title="Embedding" count={embedPresets.length}
             configured={draft.embedModel.mode === "local" ? Boolean(draft.embedModel.modelDir) : Boolean(draft.embedModel.baseUrl && draft.embedModel.modelName)} />
         </div>
         <p className="field-hint" style={{ margin: "0 0 10px" }}>
           用于把仓库资料/生成历史向量化检索。来源三选一：<strong>云端 API</strong>（智谱 embedding-3 / OpenAI text-embedding-3）、
           <strong>本机 Ollama</strong>（如 qwen3-embedding）、<strong>本地模型文件</strong>（SentenceTransformer 目录）。
         </p>
+        <PresetBar
+          label="嵌入模型存档"
+          options={embedPresets.map((p) => ({ id: p.id, name: embedPresetName(p) }))}
+          activeId={activeEmbed?.id}
+          onSelect={(id) => setDraft((d) => selectEmbedPreset(d, id))}
+          onAdd={() => setDraft(addEmbedPreset)}
+          onRemove={() => { if (activeEmbed) setDraft((d) => removeEmbedPreset(d, activeEmbed.id)); }}
+        />
         <SourceTabs label="嵌入模型来源" value={embedTab} onChange={setEmbedTab} />
         <details className="model-advanced embedding-advanced">
           <summary>连接、模型目录与 Reranker 高级配置</summary>
           <div className="model-advanced-body">
+            {activeEmbed && (
+              <div className="field">
+                <label>存档名称</label>
+                <input
+                  value={activeEmbed.name}
+                  onChange={(e) => setDraft((d) => renameEmbedPreset(d, activeEmbed.id, e.target.value))}
+                  placeholder="例如：云端 embedding-3 / 本机 qwen3-embedding"
+                />
+                <p className="field-hint">选中的存档就是「为主」：RAG 检索与知识库都用它。</p>
+              </div>
+            )}
             {embedTab === "api" && <>
               <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
                 {EMBED_API_PRESETS.map((p) => (

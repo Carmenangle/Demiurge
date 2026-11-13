@@ -15,7 +15,7 @@ from starlette.types import Scope
 
 from app.asyncio_quiet import install_connection_reset_filter
 from app.db import init_db
-from app.services import comfy_hosts, comfy_launcher
+from app.services import comfy_hosts, comfy_launcher, repo_meta
 from app.services import comfy_watchdog
 from app.services import local_auth, remote_gate
 from app.services import request_guard
@@ -53,6 +53,8 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """运行期唯一装配点（2026-10-24 卫生刀）：持久队列 worker 与看护设施只在 uvicorn
     起服务时拉起，import 本模块零副作用——runtime_entry 自检与测试进程都因此安全。
 
+    - 建库/结构迁移（2026-11-07 E 项）：**启动首步**显式执行，失败让启动直接失败；
+      不跑 lifespan 的端点测试/脚本由 `db.get_connection()` 懒补建兜底。
     - 三个队列 worker 无停止 API，测试进程由 tests/conftest.py 的「app.main 测试导入闸」
       把 start_worker 换成 no-op；lifespan 在测试里即使被触发也拉不起真 worker。
     - ComfyUI 看门狗：托管进程死亡后按已存配置自动重启（防重启风暴 + 面板留痕）；
@@ -60,10 +62,18 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     - ComfyUI 主机簿播种（2026-10-27）：把 `data/comfy_hosts.json` 里保存过的主机重新
       登记进 url_guard 白名单，重启后非回环地址仍能提交（登记时机＝设置页保存 ComfyUI
       地址，见 routers/comfyui.py::set_config）。
+    - 用户态拆档（2026-11-02 P1）：把拆分前单档里的作品索引搬进 `data/repos.json`（产物档），
+      设置与凭据留在 `data/user_state.json`（设置档）——卸载勾选「删除用户数据」从此只带走
+      后者。搬家本身幂等，失败只留「旧档多带一份副本」，不会丢索引（细节见 repo_meta）。
     """
+    # import 本模块不得建库（否则「导入失败」与「启动失败」混在一起）；启动首步显式建库，
+    # 迁移/备份失败必须让服务起不来，不能靠懒初始化悄悄吞掉。
+    init_db()
     seeded = comfy_hosts.seed_runtime()
     if seeded:
         _LOG.info("ComfyUI 白名单已播种 %d 台主机：%s", len(seeded), ", ".join(seeded))
+    # 用户态拆档（2026-11-02 P1）：作品索引从设置档搬进 repos.json（产物档）。幂等，细节自带日志。
+    repo_meta.migrate_user_state_layout()
     start_workflow_build_worker()
     start_chat_agent_queue_worker()
     start_plan_task_worker()
@@ -75,7 +85,6 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="Local AI ComfyUI Frontend API", lifespan=_lifespan)
-init_db()
 
 # 默认只服务本机：这是单机桌面壳，含无鉴权的进程控制/文件读写接口（start/stop/interrupt/
 # save-local/local-view 等）。CORS 只挡浏览器跨源，挡不住非浏览器客户端；故加回环门禁作纵深防御。

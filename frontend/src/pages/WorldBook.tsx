@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { BookOpen, Pin, Upload, Download, Trash2, Plus, Pencil, Check, X } from "lucide-react";
+import { BookOpen, Pin, Upload, Download, Trash2, Plus, Pencil, X } from "lucide-react";
 import { PageShell } from "../components/layout/PageShell";
 import { ConfirmModal } from "../components/Modal";
+import { WorldbookEntryModal } from "../components/WorldbookEntryModal";
 import { downloadJson } from "../lib/download";
 import { listCharacters, characterDetail, type CardSummary } from "../api/characters";
 import {
@@ -22,6 +23,10 @@ export function WorldBook({ characterDir, worldbookDir }: { characterDir: string
   const [err, setErr] = useState<string | null>(null);
   const [pending, setPending] = useState<{ file: File; conflict: WorldbookConflict } | null>(null);
   const [busy, setBusy] = useState(false);
+  // 整本删除走二次确认（删的是源库里的可复用素材，误删一次影响所有还没绑定的作品）
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);  // 拖拽文件到页面：显示高亮反馈
   // 窄屏：条目面板改为盖在书单上的底部弹窗（内部滚动），避免翻完整个书单才看到条目
   const [sheetOpen, setSheetOpen] = useState(false);
@@ -84,17 +89,22 @@ export function WorldBook({ characterDir, worldbookDir }: { characterDir: string
 
   useEffect(() => {
     if (!sheetOpen) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setSheetOpen(false); };
+    // 编辑弹窗打开时 Esc 只关弹窗，不能连带把窄屏条目面板一起收起。
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && editIdx === null) setSheetOpen(false);
+    };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [sheetOpen]);
+  }, [sheetOpen, editIdx]);
 
   // 条目增删改
-  const startAdd = () => { setDraft(EMPTY_ENTRY); setEditIdx("new"); };
+  const startAdd = () => { setDraft(EMPTY_ENTRY); setErr(null); setEditIdx("new"); };
   const startEdit = (e: WBEntryItem) => {
     setDraft({ content: e.content, comment: e.comment, keys: e.keys, constant: e.constant, enabled: e.enabled });
+    setErr(null);
     setEditIdx(e.index);
   };
+  const patchDraft = (patch: Partial<WBEntryFields>) => setDraft((d) => ({ ...d, ...patch }));
   const saveEntry = async () => {
     if (!loc) return;
     if (!draft.content.trim()) { setErr("条目内容不能为空"); return; }
@@ -178,11 +188,23 @@ export function WorldBook({ characterDir, worldbookDir }: { characterDir: string
     }
   };
 
-  const removeBook = (name: string) => {
-    deleteWorldbook(worldbookDir, name).then(() => {
+  // 确认后**先删再关窗**（busy 期间弹窗保持）：请求失败时错误行留在页面上，能看清是哪一步没成。
+  const removeBook = async (name: string) => {
+    setNotice(null);
+    setDeleting(true);
+    try {
+      const r = await deleteWorldbook(worldbookDir, name);
+      // 备份文件名要当面报出来：后端是「先备份再删」，看不见就等于用户以为彻底没了。
+      setNotice(`已删除「${name}」，删除前的内容备份为 ${r.backup}`);
       if (selected?.kind === "standalone" && selected.name === name) { setSelected(null); setEntries([]); setSheetOpen(false); }
       reloadBooks();
-    }).catch((e) => setErr(String(e.message || e)));
+      setDeleteTarget(null);
+    } catch (e) {
+      setErr(String((e as Error).message || e));
+      setDeleteTarget(null);
+    } finally {
+      setDeleting(false);
+    }
   };
 
   const hasList = cards.length > 0 || books.length > 0;
@@ -227,7 +249,8 @@ export function WorldBook({ characterDir, worldbookDir }: { characterDir: string
       {!worldbookDir && characterDir && (
         <p style={{ color: "var(--text-muted)" }}>独立世界书导入需先设置「世界书文件夹」。</p>
       )}
-      {err && <p style={{ color: "var(--danger, #c0392b)" }}>{err}</p>}
+      {err && editIdx === null && <p style={{ color: "var(--danger, #c0392b)" }}>{err}</p>}
+      {notice && <p style={{ color: "var(--text-muted)" }}>{notice}</p>}
       {(characterDir || worldbookDir) && !hasList && !err && (
         <p style={{ color: "var(--text-muted)" }}>还没有世界书。导入独立世界书，或导入含 character_book 的角色卡后会在这里显示；也可直接把世界书 .json 拖到本页导入。</p>
       )}
@@ -247,7 +270,7 @@ export function WorldBook({ characterDir, worldbookDir }: { characterDir: string
                   <BookOpen size={14} style={{ marginRight: 6 }} /> {b.name}
                   <span style={{ fontSize: 11, color: "var(--text-muted)", marginLeft: 6 }}>{b.entries}</span>
                 </button>
-                <button className="btn" title="删除" style={{ padding: 4 }} onClick={() => removeBook(b.name)}>
+                <button className="btn" title="删除" style={{ padding: 4 }} onClick={() => setDeleteTarget(b.name)}>
                   <Trash2 size={13} />
                 </button>
               </div>
@@ -291,42 +314,6 @@ export function WorldBook({ characterDir, worldbookDir }: { characterDir: string
                 <button className="btn" disabled={busy} onClick={startAdd}>
                   <Plus size={14} style={{ marginRight: 6 }} /> 新增条目
                 </button>
-              </div>
-            )}
-            {editIdx !== null && (
-              <div className="chat-box" style={{ marginBottom: 10 }}>
-                <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>
-                  {editIdx === "new" ? "新增条目" : `编辑条目 #${(editIdx as number) + 1}`}
-                </div>
-                <input placeholder="标题/备注（comment）" value={draft.comment}
-                  onChange={(e) => setDraft((d) => ({ ...d, comment: e.target.value }))}
-                  style={{ width: "100%", marginBottom: 6 }} />
-                <textarea placeholder="条目内容（content）" value={draft.content} rows={4}
-                  onChange={(e) => setDraft((d) => ({ ...d, content: e.target.value }))}
-                  style={{ width: "100%", marginBottom: 6 }} />
-                <input placeholder="关键词（逗号分隔，非常驻条目按其语义检索）" value={draft.keys.join(",")}
-                  onChange={(e) => setDraft((d) => ({ ...d, keys: e.target.value.split(",").map((s) => s.trim()).filter(Boolean) }))}
-                  style={{ width: "100%", marginBottom: 6 }} />
-                <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
-                  <label style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 4 }}>
-                    <input type="checkbox" checked={draft.constant}
-                      onChange={(e) => setDraft((d) => ({ ...d, constant: e.target.checked }))} />
-                    常驻（每轮注入，不走检索）
-                  </label>
-                  <label style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 4 }}>
-                    <input type="checkbox" checked={draft.enabled}
-                      onChange={(e) => setDraft((d) => ({ ...d, enabled: e.target.checked }))} />
-                    启用
-                  </label>
-                </div>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <button className="btn primary" disabled={busy} onClick={saveEntry}>
-                    <Check size={14} style={{ marginRight: 4 }} /> 保存
-                  </button>
-                  <button className="btn" disabled={busy} onClick={() => setEditIdx(null)}>
-                    <X size={14} style={{ marginRight: 4 }} /> 取消
-                  </button>
-                </div>
               </div>
             )}
             {selected && entries.length === 0 && editIdx === null && (
@@ -381,6 +368,28 @@ export function WorldBook({ characterDir, worldbookDir }: { characterDir: string
           )}
           </div>
         </div>
+      )}
+      {editIdx !== null && (
+        <WorldbookEntryModal
+          editIdx={editIdx}
+          draft={draft}
+          busy={busy}
+          error={err}
+          onChange={patchDraft}
+          onSave={saveEntry}
+          onCancel={() => setEditIdx(null)}
+        />
+      )}
+      {deleteTarget && (
+        <ConfirmModal
+          title="删除整本世界书"
+          message={`确认删除独立世界书「${deleteTarget}」？删掉的是世界书文件夹里的源文件，已绑定它的作品下次打开就读不到这本了。删除之前，后端会先存一份备份（文件名会显示在页面上），确认删除吗？`}
+          confirmText="删除"
+          danger
+          busy={deleting}
+          onConfirm={() => { void removeBook(deleteTarget); }}
+          onCancel={() => setDeleteTarget(null)}
+        />
       )}
       {pending && (
         <ConfirmModal

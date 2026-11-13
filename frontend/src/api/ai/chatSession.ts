@@ -71,6 +71,31 @@ export function compactHistory(
   );
 }
 
+// 删除前归档（软删层）：清缓存/压缩/清空覆盖掉会话之前，后端先把原文存一份。
+// 列表只解析归档名（时间戳-原因-条数），不读正文，故 created_at/message_count 由后端给。
+export interface ChatArchiveEntry {
+  name: string;           // 归档名 = 恢复时的定位符
+  reason: string;         // clear | clear-cache | compact | restore
+  message_count: number;
+  created_at: string;     // 已格式化给人看的 `YYYY-MM-DD HH:MM:SS`
+  bytes: number;
+}
+
+export function fetchChatArchives(threadId: string) {
+  return apiGet<{ items: ChatArchiveEntry[] }>(
+    `/ai/chat/archives?thread_id=${encodeURIComponent(threadId)}`,
+  );
+}
+
+// 用某份归档整条覆盖当前会话；覆盖前后端会把当前状态也归档一份，压错了还能再压回去。
+// 恢复成功后必须「以后端为真源」重读会话（清墓碑），不能只刷本地。
+export function restoreChatArchive(threadId: string, name: string) {
+  return apiPost<{ ok: boolean; messages: number; history: number }>(
+    "/ai/chat/archives/restore",
+    { thread_id: threadId, name },
+  );
+}
+
 let lastSnapshotRevision = Date.now();
 
 // 落盘前端完整消息流快照（含工作流卡/反推卡等非对话消息），作为可靠真源。

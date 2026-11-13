@@ -29,7 +29,12 @@
       },
       "nsis": {
         "installMode": "currentUser",
+        "installerHooks": "installer/uninstall-hooks.nsh",
         "languages": ["SimpChinese", "English"],
+        "customLanguageFiles": {
+          "SimpChinese": "installer/languages/SimpChinese.nsh",
+          "English": "installer/languages/English.nsh"
+        },
         "displayLanguageSelector": false,
         "compression": "lzma",
         "startMenuFolder": "Demiurge",

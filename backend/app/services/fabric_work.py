@@ -152,13 +152,14 @@ def build_work_brief(output_dir: str, repo_id: str = "",
 
     注入位置：system（每步决策可见、不被 history 压缩丢弃）——
     让模型开局就知道已有卡纲/素材/条目/主卡，在其上继续，禁止重新通读重建。
+    `max_chars<=0` 表示不截断（调用方按上下文预算派生；0=预算未配置/无限）。
     """
     assets = scan_work_assets(output_dir, repo_id)
     items = assets.get("items") or []
     if not items:
         return ""
     body = "\n".join(items)
-    if len(body) > max_chars:
+    if max_chars > 0 and len(body) > max_chars:
         body = body[:max_chars] + "…（截断）"
     return (
         f"{_BRIEF_MARK}以下文件是本作品此前运行已落盘的产出（路径均真实存在）：\n"

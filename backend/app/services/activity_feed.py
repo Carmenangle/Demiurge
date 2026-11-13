@@ -9,6 +9,9 @@ Autopilot 计划、AI 建工作流。但下载、节点安装/更新/切内核�
 `GET /api/activity/background` 返回。不持有状态、不启动/取消任何任务、
 不改变各子系统的生命周期——唯一写入方仍是各子系统自己。
 
+唯一例外是 `runtime_delivery` 那一源（2026-11-03 P3-b）：它的写入方是**桌面壳进程**，
+经 `DATA_DIR/delivery.json` 这本账传过来。除它以外各源都是同进程内存快照。
+
 统一字段口径：
     id          稳定标识（`<source>:<key>`），前端作 React key
     kind        活动类型，前端按 `KIND_LABEL` 映射标题
@@ -41,6 +44,7 @@ KIND_LABEL = {
     "chat_maintenance": "对话后置维护",
     "table_fill": "表格整理 / 纪要索引",
     "comfy_watchdog": "ComfyUI 守护",
+    "runtime_delivery": "运行时补齐",
 }
 
 # node_update 的 phase → 中文阶段名（只列出真实会出现的值）。
@@ -263,6 +267,47 @@ def _table_fill_items() -> list[dict]:
     return items
 
 
+def _runtime_delivery_items(now: float) -> list[dict]:
+    """桌面壳后台补齐可选层（RAG，约 2 GB）——第八源，也是唯一来自**另一个进程**的源。
+
+    写入方是壳（`desktop/tauri/src/runtime_delivery.rs` 的 `DeliveryLedger`），账本落在
+    `DATA_DIR/delivery.json`；读取与陈旧口径由 `shell_delivery` 属主，这里只做统一字段的映射。
+    速率由壳算（`speed_bps`），本模块不自己差分，免得两侧各算一套对不上。
+    """
+    from app.services import shell_delivery
+    from app.services.update_progress import human_bytes
+
+    ledger = shell_delivery.read_ledger(now)
+    if ledger is None:
+        return []
+    status = str(ledger["state"])
+    updated = float(ledger["updated_at"])
+    if status != "running" and now - updated > _KEEP_DONE_S:
+        return []
+
+    total = int(ledger["total_bytes"])
+    done = int(ledger["done_bytes"])
+    progress = f"{human_bytes(done)} / {human_bytes(total)}" if total > 0 else human_bytes(done)
+    speed = int(ledger["speed_bps"])
+    if status == "running" and speed > 0:
+        progress = f"{progress} · {human_bytes(speed)}/s"
+    if status == "failed":
+        progress = ""  # 与下载同源口径：失败时只显示错误
+    return [{
+        "id": f"delivery:{ledger['layer'] or 'runtime'}",
+        "kind": "runtime_delivery",
+        "label": ledger["label"] or "运行时组件",
+        "status": status,
+        "progress": progress,
+        "detail": ledger["stage"],
+        "error": ledger["error"],
+        "target": "",  # 没有对应的设置子视图：这件事发生在壳里，不在后端配置页
+        "repo_id": "",
+        "started_at": float(ledger["started_at"]),
+        "updated_at": updated,
+    }]
+
+
 def snapshot() -> list[dict]:
     """全部外部长操作活动（不含 jobs 注册表，那一份走 GET /api/jobs）。"""
     now = time.time()
@@ -273,6 +318,7 @@ def snapshot() -> list[dict]:
         *_maintenance_items(),
         *_table_fill_items(),
         *_comfy_watchdog_items(),
+        *_runtime_delivery_items(now),
     ]
     for item in items:
         # 标题由后端定（KIND_LABEL 单一属主），前端不再维护第二份映射。

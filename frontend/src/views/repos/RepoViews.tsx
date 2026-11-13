@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Boxes, Images, Link2, MoreHorizontal, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import { type Repo } from "../../stores/repos";
 import { useSettings } from "../../stores/settings";
@@ -6,11 +6,17 @@ import { Pager } from "../../components/Pager";
 import { PageShell } from "../../components/layout/PageShell";
 import { listGenerations } from "../../api/ai";
 import { formatLastUsed, repoLastUsedAt } from "../../lib/repoPresentation";
+import { coverNeedsRepair, isVideoCover, latestGeneratedCover } from "../../lib/repoOrdering";
 import { resolvedEmbedModel, type Settings } from "../../stores/settings";
 
 type ChildrenOf = (parentId?: string) => Repo[];
 
-function useAssetCounts(repos: Repo[], childrenOf: ChildrenOf, settings: Settings): Map<string, number> {
+function useAssetCounts(
+  repos: Repo[],
+  childrenOf: ChildrenOf,
+  settings: Settings,
+  onGeneratedCover?: (id: string, cover: string) => void,
+): Map<string, number> {
   const [direct, setDirect] = useState<Record<string, number>>({});
   const ids = useMemo(() => [...new Set(repos.flatMap((repo) => [
     repo.id, ...(!repo.parentId ? childrenOf(repo.id).map((child) => child.id) : []),
@@ -19,13 +25,34 @@ function useAssetCounts(repos: Repo[], childrenOf: ChildrenOf, settings: Setting
   useEffect(() => {
     let alive = true;
     const load = () => Promise.all(ids.map(async (id) => {
-      try { return [id, (await listGenerations(id, resolvedEmbedModel(settings))).items.length] as const; }
-      catch { return [id, 0] as const; }
-    })).then((items) => { if (alive) setDirect(Object.fromEntries(items)); });
+      try { return [id, (await listGenerations(id, resolvedEmbedModel(settings))).items] as const; }
+      catch { return [id, []] as const; }
+    })).then((pairs) => {
+      if (!alive) return;
+      setDirect(Object.fromEntries(pairs.map(([id, items]) => [id, items.length])));
+      if (!onGeneratedCover) return;
+      // 历史封面回填：旧版本只在出图片时写 cover，视频资产（尤其是裁切自视频的封面）
+      // 会停在旧图。这里复用已经取回的资产列表，把「最新生成媒体」补成封面；
+      // 只在资产时间晚于 coverAt 时动，手动选封面（coverAt 不前进）不会被无休止覆盖。
+      const repoById = new Map<string, Repo>();
+      for (const repo of repos) {
+        repoById.set(repo.id, repo);
+        for (const child of childrenOf(repo.id)) repoById.set(child.id, child);
+      }
+      for (const [id, items] of pairs) {
+        const repo = repoById.get(id);
+        if (!repo) continue;
+        const latest = latestGeneratedCover(items);
+        if (latest && coverNeedsRepair(repo.cover, repo.coverAt, latest)) {
+          onGeneratedCover(id, latest.url);
+        }
+      }
+    });
     void load();
     const refresh = () => { void load(); };
     window.addEventListener("laf-generation-saved", refresh);
     return () => { alive = false; window.removeEventListener("laf-generation-saved", refresh); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [signature, settings.embedModel]);
   return useMemo(() => new Map(repos.map((repo) => {
     const idsForRepo = repo.parentId ? [repo.id] : [repo.id, ...childrenOf(repo.id).map((child) => child.id)];
@@ -33,16 +60,58 @@ function useAssetCounts(repos: Repo[], childrenOf: ChildrenOf, settings: Setting
   })), [repos, childrenOf, direct]);
 }
 
-// 仓库封面：图片加载失败（本地文件被删/ComfyUI 离线/地址失效）时回退占位，不显示破图
+// 仓库封面：图片加载失败（本地文件被删/ComfyUI 离线/地址失效）时回退占位，不显示破图。
+// 视频封面用静音循环的 <video> 呈现动态效果；进入视口才播放、离开即暂停，
+// 避免一屏几十个作品同时解码视频把首页拖慢；系统开启「减少动态效果」时只保留首帧。
 export function RepoCover({ src, name }: { src?: string; name: string }) {
   const [failed, setFailed] = useState(false);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const isVideo = isVideoCover(src);
   useEffect(() => { setFailed(false); }, [src]);  // 换封面地址后重置
+  useEffect(() => {
+    const el = videoRef.current;
+    if (!el || !isVideo || failed) return;
+    const reduced = typeof window !== "undefined"
+      && window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+    if (reduced) return;
+    const safePlay = () => { try { void el.play()?.catch(() => undefined); } catch { /* jsdom/不支持自动播放 */ } };
+    const safePause = () => { try { el.pause(); } catch { /* 未加载完的暂停失败忽略 */ } };
+    if (typeof IntersectionObserver === "undefined") {
+      safePlay();
+      return () => safePause();
+    }
+    let active = true;
+    const io = new IntersectionObserver(([entry]) => {
+      if (!active) return;
+      if (entry.isIntersecting) safePlay();
+      else safePause();
+    }, { threshold: 0.2 });
+    io.observe(el);
+    return () => { active = false; io.disconnect(); safePause(); };
+  }, [src, isVideo, failed]);
   if (!src || failed) {
     return (
       <span className="repo-cover-empty">
         <Images size={22} strokeWidth={1.4} />
         <span>暂无封面</span>
       </span>
+    );
+  }
+  if (isVideo) {
+    return (
+      <>
+        <video
+          ref={videoRef}
+          src={src}
+          muted
+          loop
+          playsInline
+          preload="metadata"
+          aria-label={`${name}封面`}
+          onError={() => setFailed(true)}
+        />
+        <span className="repo-cover-live">动态</span>
+      </>
     );
   }
   return <img src={src} alt="" aria-label={`${name}封面`} loading="lazy" onError={() => setFailed(true)} />;
@@ -162,6 +231,7 @@ export function ReposView({
   onNew,
   childrenOf,
   settings,
+  onGeneratedCover,
 }: {
   repos: Repo[];
   title: string;
@@ -173,6 +243,7 @@ export function ReposView({
   onNew: () => void;
   childrenOf: ChildrenOf;
   settings: Settings;
+  onGeneratedCover?: (id: string, cover: string) => void;
 }) {
   const [q, setQ] = useState("");
   const [page, setPage] = useState(1);
@@ -182,7 +253,7 @@ export function ReposView({
   const repoPageCount = Math.max(1, Math.ceil(shownRepos.length / REPO_PAGE_SIZE));
   const curPage = Math.min(page, repoPageCount);
   const pagedRepos = shownRepos.slice((curPage - 1) * REPO_PAGE_SIZE, curPage * REPO_PAGE_SIZE);
-  const assetCounts = useAssetCounts(pagedRepos, childrenOf, settings);
+  const assetCounts = useAssetCounts(pagedRepos, childrenOf, settings, onGeneratedCover);
   return (
     <PageShell
       title={title}
@@ -227,6 +298,7 @@ export function RepoDetailView({
   onRename,
   onDelete,
   onNewSub,
+  onGeneratedCover,
 }: {
   repo: Repo;
   children: Repo[];
@@ -238,6 +310,7 @@ export function RepoDetailView({
   onRename: (r: Repo) => void;
   onDelete: (r: Repo) => void;
   onNewSub: () => void;
+  onGeneratedCover?: (id: string, cover: string) => void;
 }) {
   const [subQ, setSubQ] = useState("");
   const [subPage, setSubPage] = useState(1);
@@ -247,7 +320,7 @@ export function RepoDetailView({
   const subPageCount = Math.max(1, Math.ceil(matched.length / SUB_PAGE_SIZE));
   const subCur = Math.min(subPage, subPageCount);
   const shownChildren = matched.slice((subCur - 1) * SUB_PAGE_SIZE, subCur * SUB_PAGE_SIZE);
-  const assetCounts = useAssetCounts(shownChildren, () => [], settings);
+  const assetCounts = useAssetCounts(shownChildren, () => [], settings, onGeneratedCover);
   return (
     <PageShell
       title={repo.name}
@@ -284,7 +357,7 @@ export function RepoDetailView({
 }
 
 export function HomeRecentWorks({
-  works, parents, coverOf, settings, childrenOf, onOpen, onBind, onRename, onDelete,
+  works, parents, coverOf, settings, childrenOf, onOpen, onBind, onRename, onDelete, onGeneratedCover,
 }: {
   works: Repo[];
   parents: Repo[];
@@ -295,8 +368,9 @@ export function HomeRecentWorks({
   onBind: (repo: Repo) => void;
   onRename: (repo: Repo) => void;
   onDelete: (repo: Repo) => void;
+  onGeneratedCover?: (id: string, cover: string) => void;
 }) {
-  const assetCounts = useAssetCounts(works, () => [], settings);
+  const assetCounts = useAssetCounts(works, () => [], settings, onGeneratedCover);
   if (!works.length) {
     return <div className="need-work"><p>在上方选择仓库与作品</p>
       <small>使用过的作品会在这里显示，最多保留最近 5 个</small></div>;

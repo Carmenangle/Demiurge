@@ -12,7 +12,10 @@ from app.services.agent_contracts import CtxLike
 import logging
 import re
 
-from app.services import llm as _llm, run_trace, builtin_agents, story_history, agent_context, prompt_compiler, roleplay_turn
+from app.services import (
+    llm as _llm, run_trace, builtin_agents, story_history, agent_context,
+    prompt_compiler, roleplay_turn, agency, worldbook,
+)
 from app.services.agent_agency import _builtin_sampling, _builtin, _illustration_visual_query, _agency_maintenance_async, _agency_prelude, _agency_propose, _agency_writeback, _emit_roleplay_ready, _illustration_anchor_offset
 from app.services.agent_context_assembly import _apply_regex, _resolve_worldbook, _recent_character_context, _resolve_personas, _render_user_persona, _temperature, _card_visual_profiles, _agent_system, _resolve_preset
 from app.services.agent_graph_state import AgentState
@@ -153,12 +156,16 @@ def _rp_prepare_worldbook(ctx: CtxLike, text: str) -> tuple[str, str]:
     if wb:
         # 世界信息正则（placement 5）：作用于世界书组装后的注入文本
         wb = _apply_regex(ctx, wb, Placement.WORLD_INFO, is_prompt=True, depth=0)
+        # 2026-11-10 用户需求：剧情模式剥掉世界书条目里的【开场白】，避免多角色条目
+        # 同时召回时模型把各角色开场白当正文复述/逐个自我介绍。只动故事注入，不动书本身。
+        wb = worldbook.strip_opening_sections(wb)
     # 世界书召回段（每轮按相关度重排）：同一套世界信息正则，但**落尾部动态块**
     # （history 之后，与数据表召回同位置）。若与锚点段拼在一起塞进世界书块（history 之前），
     # 它每轮一变就把其后的历史与全部预设片段打掉——真机实测相邻轮字节 LCP 78% → 62%。
     wb_recall = str(ctx.get("_worldbook_recall_text") or "")
     if wb_recall:
         wb_recall = _apply_regex(ctx, wb_recall, Placement.WORLD_INFO, is_prompt=True, depth=0)
+        wb_recall = worldbook.strip_opening_sections(wb_recall)
         ctx["_worldbook_recall_text"] = wb_recall
     # 世界书动态段（2026-09-13 动态区外置）：锚点条目的【剧情进展·动态】区 + 会话中途
     # 新激活的锚点条目。与召回段同一落点（尾部动态块）——留在锚点段会把分叉点拉回
@@ -166,6 +173,7 @@ def _rp_prepare_worldbook(ctx: CtxLike, text: str) -> tuple[str, str]:
     wb_dynamic = str(ctx.get("_worldbook_dynamic_text") or "")
     if wb_dynamic:
         wb_dynamic = _apply_regex(ctx, wb_dynamic, Placement.WORLD_INFO, is_prompt=True, depth=0)
+        wb_dynamic = worldbook.strip_opening_sections(wb_dynamic)
         ctx["_worldbook_dynamic_text"] = wb_dynamic
     return wb, wb_recall
 
@@ -300,9 +308,10 @@ def _rp_append_static_blocks(ctx: CtxLike, base: str, chains_head: list) -> str:
     if chains_head:
         base += "\n\n" + "\n\n".join(chains_head)
     # 命运骰点规则：注入剧情推进提示词，让主模型在关键博弈点打可审计 <roll>（用户可在编辑器改/清空）
+    # 覆盖层的 [RESULT] 六档词一律按 agency.DEGREE_LABEL 重渲染，避免与裁判/指令/CI 的档位词分叉。
     roll_rule = _builtin(ctx, "roleplay", "rollInstruction", builtin_agents.ROLL_INSTRUCTION)
     if roll_rule and roll_rule.strip():
-        base += roll_rule
+        base += agency.render_result_line(roll_rule)
     return base
 
 def _rp_substitute_macros(ctx: CtxLike, base: str, dynamic_parts: list) -> tuple[str, str]:
@@ -622,6 +631,7 @@ def _rp_prepare_visual_and_tables(
             )
         except Exception:  # noqa: BLE001 [EXC-保留] 观测失败不得打断插画链
             pass
+        # #9 正文外貌锚已移除（2026-11-11 用户口径：世界书/角色卡已有外貌，锚会与其冲突）。
         # 上下文合同·同轮成稿剥离：不再向正文轮下发内联 <illustration> JSON 义务
         # （原 build_inline_plan_instruction+格式说明 ≈ 数千字符尾部合同）。
         # 视觉锚与成稿全部交给画像链独立编译（produce 阶段 _profile_llm_fallback）。
@@ -687,6 +697,38 @@ def _rp_inject_agency_context(
         ctx, deps=deps, repo_id=repo_id, text=text, turn=turn, dynamic_parts=dynamic_parts,
     )
     return base
+
+def _verdict_fix_messages(wire_messages: list[dict], partial: str,
+                          claims: list[dict]) -> list[dict]:
+    """未遂对账续写的消息序列（2026-11-06）：复用续写装配，只换成裁定修复指令。"""
+    from app.services import roleplay_agency
+    return _roleplay_continuation_messages(
+        wire_messages, partial,
+        verdict_fix=roleplay_agency.verdict_fix_directive(claims))
+
+
+def _rp_continuation_hooks(ctx: CtxLike, wire_messages: list[dict], temp: float,
+                           sampling_kwargs: dict) -> dict:
+    """三条续写通道（截断／剧情／未遂对账）的接线。
+
+    分开是刻意的：三者给模型的指令语义不同（闭合标签／接着往下写剧情／把裁定写成未遂
+    或受挫），必须在本处显式分派，不靠 partial 的形态去猜（剧情与裁定续写的预填形态
+    与截断一模一样）。
+    """
+    def call(messages: list[dict]) -> str:
+        return _chat_with_optional_stream(
+            ctx, messages, temperature=temp, **sampling_kwargs)
+
+    return {
+        "continue_generate": lambda partial: call(_roleplay_continuation_messages(
+            wire_messages, partial,
+            think_truncated=roleplay_turn.think_truncated(partial))),
+        "continue_story": lambda partial: call(_roleplay_continuation_messages(
+            wire_messages, partial, story_incomplete=True)),
+        "continue_verdict": lambda partial, claims: call(
+            _verdict_fix_messages(wire_messages, partial, claims)),
+    }
+
 
 def roleplay_node(state: AgentState) -> dict:
     """剧情扮演节点：吃角色卡 persona（+后续世界书/表格记忆），沉浸式出演。"""
@@ -809,21 +851,8 @@ def roleplay_node(state: AgentState) -> dict:
                 ),
                 generated=_generated,
                 notify=lambda message: _notify_stream_trace(ctx, message),
-                continue_generate=lambda partial: _chat_with_optional_stream(
-                    ctx, _roleplay_continuation_messages(
-                        wire_messages, partial,
-                        think_truncated=roleplay_turn.think_truncated(partial),
-                    ),
-                    temperature=temp, **roleplay_sampling_kwargs,
-                ),
-                # 剧情续写（2026-09-21）：结构合格但剧情没写完时的补写通道。与截断续写
-                # 分开接线——两者的指令语义不同（截断＝闭合标签；剧情＝接着往下写）。
-                continue_story=lambda partial: _chat_with_optional_stream(
-                    ctx, _roleplay_continuation_messages(
-                        wire_messages, partial, story_incomplete=True,
-                    ),
-                    temperature=temp, **roleplay_sampling_kwargs,
-                ),
+                **_rp_continuation_hooks(
+                    ctx, wire_messages, temp, roleplay_sampling_kwargs),
                 finalization=finalization,
             ),
         )

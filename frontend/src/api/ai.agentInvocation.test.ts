@@ -35,9 +35,64 @@ describe("agent invocation wire contract", () => {
     });
   });
 
+  it("聊天/群聊模式与成员进 wire，缺省回落 story", () => {
+    expect(agentInvocationBody(invocation())).toMatchObject({
+      interaction_mode: "story", chat_members: [],
+    });
+    expect(agentInvocationBody({
+      ...invocation(), interactionMode: "group_chat", chatMembers: ["Cecilia", "Nozomi"],
+    })).toMatchObject({
+      interaction_mode: "group_chat", chat_members: ["Cecilia", "Nozomi"],
+    });
+  });
+
   it("搜索源未指定时 wire 送空串（后端约定「空=自动回落链 bing-cn→ddg」）", () => {
     const body = agentInvocationBody({ ...invocation(), searchProvider: undefined });
     expect(body.search_provider).toBe("");
+  });
+
+  it("透传聊天室行为上限到 wire", () => {
+    const body = agentInvocationBody({
+      ...invocation(),
+      chatGuardMaxChars: 512,
+      chatDefaultMaxTokens: 2_048,
+      chatFollowupMax: 1,
+      chatReopenMax: 0,
+      chatInitiativeIdleMinutes: 30,
+      chatInitiativeCooldownMinutes: 0,
+      chatInitiativeDailyMax: 4,
+      chatCadence: "frequent",
+      chatActiveWindowMinutes: 5,
+      chatMaxBotTurns: 8,
+      chatMinAffinity: 10,
+      chatQuietStart: "23:00",
+      chatQuietEnd: "07:00",
+      chatGroupActivity: "lively",
+    });
+    expect(body).toMatchObject({
+      chat_guard_max_chars: 512,
+      chat_default_max_tokens: 2_048,
+      chat_followup_max: 1,
+      chat_reopen_max: 0,
+      chat_initiative_idle_minutes: 30,
+      chat_initiative_cooldown_minutes: 0,
+      chat_initiative_daily_max: 4,
+      chat_cadence: "frequent",
+      chat_active_window_minutes: 5,
+      chat_max_bot_turns: 8,
+      chat_min_affinity: 10,
+      chat_quiet_start: "23:00",
+      chat_quiet_end: "07:00",
+      chat_group_activity: "lively",
+    });
+  });
+
+  it("聊天输出上限缺省为 0（跟随全局）", () => {
+    expect(agentInvocationBody(invocation())).toMatchObject({
+      chat_default_max_tokens: 0,
+      chat_cadence: "normal",
+      chat_group_activity: "normal",
+    });
   });
 
   it("uses explicit approval and route actions without rebuilding context", () => {

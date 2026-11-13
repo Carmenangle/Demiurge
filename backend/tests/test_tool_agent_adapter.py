@@ -77,3 +77,22 @@ def test_搜索源缺省时传空串(monkeypatch):
     tool_agent_adapter.run(_ctx(), "执行", [], [])
 
     assert captured["search_provider"] == ""
+
+
+def test_聊天历史按预算传入工具专家(monkeypatch):
+    """工具专家复用主链已按 context_max_tokens 裁剪的 ctx.history，不再读全量 checkpoint。"""
+    captured: dict = {}
+
+    def fake_stream(*args, **kwargs):
+        captured.update(kwargs)
+        yield {"delta": "ok"}
+
+    monkeypatch.setattr(tool_agent_adapter.image_agent, "stream_agent", fake_stream)
+    history = [
+        {"role": "user", "content": "上一问"},
+        {"role": "assistant", "content": "上一答"},
+    ]
+
+    tool_agent_adapter.run({**_ctx(), "history": history}, "执行", [], [])
+
+    assert captured["history"] == history

@@ -1,16 +1,20 @@
-"""用户本地存档：仓库列表 + 设置（含 API Key）持久化到 data/user_state.json。
+"""用户本地存档：作品索引 + 设置（含 API Key）+ 选择记忆，按卸载档位分两份落盘。
 
 此前这两块只存浏览器 localStorage，换浏览器/换机器就丢，后端 data 里的对话图片变孤儿。
 现改为落盘到 backend/data（已被 .gitignore 排除、不进打包），前端启动时以此为准恢复。
 
-隐私：user_state.json 含 API Key 等隐私，绝不上传（data 目录整体排除）。
+分档（2026-11-02 P1）：`repos.json` = 作品索引（产物档，卸载任何情况都不删）；
+`user_state.json` = 设置 + selection（设置档，勾选「删除用户数据」才删）。对外仍是一个
+UserState 三块形状，读写各按档落。档位真源见 `app/data_layout.py`。
+
+隐私：user_state.json 含 API Key 等隐私，绝不上传（data 目录整体排除）；repos.json 含真实
+作品名，同样绝不上传。
 
 分工（2026-10-24 审计中期项）：**读侧属主 = repo_meta**（load_user_state /
-setting_str_from_state / user_state_path），本路由的三处内联自读已收口；写侧属主
-仍在本路由（整体覆盖写 + selection 保留语义见 set_state）。测试注入接缝随读侧
+setting_str_from_state / user_state_path），本路由的三处内联自读已收口；写侧也自 2026-11-02
+起全部走 `repo_meta.save_repos` / `save_settings`（不再有内联覆盖写）。测试注入接缝随读侧
 改钉 `repo_meta.DATA_DIR`（见 test_user_state_ownership / test_user_state_selection）。
 """
-import json
 from pathlib import Path
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
@@ -58,16 +62,23 @@ def get_state() -> UserState:
 
 @router.post("")
 def set_state(state: UserState) -> dict[str, bool]:
-    """保存用户存档到 data/user_state.json。整体覆盖写。
+    """保存用户存档，**按档分写**：作品索引 → `repos.json`（产物档），设置与选择记忆 → `user_state.json`（设置档）。
 
-    `selection` 未出现在请求里时沿用盘上旧值：启动早期 repos/settings 的合并上传
-    不该把已记住的作品选择抹掉（旧前端也不带这个字段）。盘上旧值经读侧属主
-    repo_meta.load_user_state 取（缺失/损坏即无旧值可保）。
+    为什么拆（2026-11-02 P1）：勾选「删除用户数据」删的是设置档，而仓库索引原本住在同一份文件
+    里——「删设置」就会顺手删掉用户的作品索引，而按定案口径它属于产物，任何情况都不该被删。
+    对外形状（UserState 那三块）一个字没改，拆分只落在盘上。
 
-    密钥同理「缺席≠删除」：空密钥不清空盘上非空值（见 services.secret_fields
-    .keep_stored_secrets），整个 settings 缺席时沿用盘上旧值。**模型字段**也按缺席
-    处理（见 services.mobile_local_models.preserve_stored_models）：联机手机只回传
-    非模型设置，模型配置留在手机本机、随请求走，不能借一次手机改设置抹掉电脑那份。
+    `selection` 未出现在请求里时沿用盘上旧值：启动早期 repos/settings 的合并上传不该把已记住的
+    作品选择抹掉（旧前端也不带这个字段）。`repos` 从 2026-11-02 起同样「缺席≠删除」——旧写法会
+    把没带的字段整个盖成 null，那正是「一次整对象回写抹掉密钥/模型」的同族事故。
+
+    密钥同理：空密钥不清空盘上非空值（见 services.secret_fields.keep_stored_secrets），整个
+    settings 缺席时沿用盘上旧值。**模型字段**也按缺席处理（见
+    services.mobile_local_models.preserve_stored_models）：联机手机只回传非模型设置，模型配置
+    留在手机本机、随请求走，不能借一次手机改设置抹掉电脑那份。
+
+    `ok=false` ⇒ 存档处于「不认识且备份失败」的拒写状态（见 app.state_store）：数据原样没动，
+    但这次改动确实没落盘，绝不拿读不懂的档案做覆盖写。
     """
     existing = repo_meta.load_user_state()
     settings: object = state.settings
@@ -78,17 +89,15 @@ def set_state(state: UserState) -> dict[str, bool]:
         settings = mobile_local_models.preserve_stored_models(settings, stored)
         if isinstance(stored, dict):
             settings = keep_stored_secrets(settings, stored)
-    payload: dict = {"repos": state.repos, "settings": settings}
+
+    saved = True
+    if "repos" in state.model_fields_set:
+        saved = repo_meta.save_repos(state.repos) and saved
     if "selection" in state.model_fields_set:
-        payload["selection"] = state.selection
-    elif "selection" in existing:
-        payload["selection"] = existing.get("selection")
-    p = repo_meta.user_state_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    return {"ok": True}
+        saved = repo_meta.save_settings(settings, selection=state.selection) and saved
+    else:
+        saved = repo_meta.save_settings(settings) and saved
+    return {"ok": saved}
 
 
 class RenameRequest(BaseModel):
@@ -100,8 +109,14 @@ class RenameRequest(BaseModel):
 
 @router.post("/rename-folder")
 def rename_folder(req: RenameRequest) -> dict:
-    """仓库改名：重命名输出文件夹 + 重写快照/RAG 里的图片路径。前端 renameRepo 时调用。"""
+    """仓库改名：重命名输出文件夹 + 重写快照/RAG 里的图片路径。前端 renameRepo 时调用。
+
+    根校验与 `/delete-folder` 同口径（防误删 ⑦）：改名是 `rename` 而不是 `rmtree`，但指错根
+    同样会把别处的作品文件夹整个挪走；放行「没传」（服务侧回退配置根），不放行「传了但不是配置根」。
+    """
     from app.services import repo_meta
+    if (err := repo_meta.works_root_violation(req.output_dir)):
+        raise HTTPException(status_code=400, detail=err)
     return repo_meta.rename_folder(req.output_dir, req.repo_id, req.old_name, req.new_name)
 
 
@@ -113,8 +128,15 @@ class DeleteFolderRequest(BaseModel):
 
 @router.post("/delete-folder")
 def delete_folder(req: DeleteFolderRequest) -> dict:
-    """删仓库时清理其作品文件夹（快照卡/世界书/persona/会话/图）。只删作品自有文件夹，不碰源库。"""
+    """删仓库时清理其作品文件夹（快照卡/世界书/persona/会话/图）。只删作品自有文件夹，不碰源库。
+
+    作品根校验与 `/chat/clear-cache` 同口径（2026-10-24 审计把 sync-markers 那批补齐，
+    这条是同一面上的漏网）：`output_dir` 由客户端报上来，不校验就等于允许把任意目录指进
+    服务端的 `rmtree`。放行「没传」（服务侧回退配置根），不放行「传了但不是配置根」。
+    """
     from app.services import repo_meta
+    if (err := repo_meta.works_root_violation(req.output_dir)):
+        raise HTTPException(status_code=400, detail=err)
     return repo_meta.delete_folder(req.output_dir, req.repo_id, req.name)
 
 

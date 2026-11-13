@@ -1,5 +1,5 @@
 import type { ScenarioSnapshot } from "../api/scenario";
-import type { RepoBinding } from "../stores/repos";
+import type { Repo, RepoBinding } from "../stores/repos";
 
 export interface ScenarioBranchDeps {
   saveMessages: (repoId: string, messages: unknown[]) => Promise<unknown>;
@@ -26,6 +26,32 @@ export function completedTurn(messages: unknown[]): number {
     && "role" in item && item.role === "assistant"
     && "text" in item && typeof item.text === "string" && Boolean(item.text.trim())
   )).length;
+}
+
+/**
+ * 分支继承源作品的多元数据插入预设：按新仓库 id 深拷贝一份（嵌套 LoRA/音色不共享引用），
+ * 源预设不存在时返回 null（不无中生有空预设）。
+ */
+export function branchMediaInsertPresets<T>(
+  presets: Record<string, T> | undefined, sourceRepoId: string, childId: string,
+): Record<string, T> | null {
+  const source = presets?.[sourceRepoId];
+  if (!source) return null;
+  return { ...presets, [childId]: JSON.parse(JSON.stringify(source)) as T };
+}
+
+/** 分支继承聊天连续性字段（头像覆盖 / 名册覆盖）；没有配置时返回空补丁。 */
+export function branchChatState(
+  source: Pick<Repo, "characterAvatars" | "characterRoster">,
+): Partial<Repo> {
+  const patch: Partial<Repo> = {};
+  if (source.characterAvatars && Object.keys(source.characterAvatars).length) {
+    patch.characterAvatars = { ...source.characterAvatars };
+  }
+  if (source.characterRoster) {
+    patch.characterRoster = JSON.parse(JSON.stringify(source.characterRoster));
+  }
+  return patch;
 }
 
 export async function createScenarioBranch(

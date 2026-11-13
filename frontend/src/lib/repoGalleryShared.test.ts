@@ -4,10 +4,12 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import {
-  AI_TAG_PROMPT, fmtCreatedAt, seqOf, TAG_MODES, VISION_DESC_PROMPT, VLM_TWO_PARA_PROMPT,
+  AI_TAG_PROMPT, fmtCreatedAt, seqOf, TAG_MODES, TAG_MODE_HINT,
+  VISION_DESC_PROMPT, VLM_TWO_PARA_PROMPT,
 } from "./repoGalleryShared";
 
 const gallerySrc = readFileSync(new URL("../components/RepoGallery.tsx", import.meta.url), "utf-8");
+const shared = readFileSync(new URL("./repoGalleryShared.ts", import.meta.url), "utf-8");
 
 describe("fmtCreatedAt", () => {
   it("毫秒时间戳 → YYYY-MM-DD HH:mm（补零）", () => {
@@ -51,8 +53,13 @@ describe("VLM prompt 常量", () => {
     expect(AI_TAG_PROMPT).toContain("8-16");
   });
 
-  it("四种反推模式齐备", () => {
-    expect(TAG_MODES.map((m) => m.value)).toEqual(["vlm", "wd14", "ai", "desc"]);
+  it("五种反推模式齐备（GBC 场景图 2026-11-06 加入）", () => {
+    expect(TAG_MODES.map((m) => m.value)).toEqual(["vlm", "wd14", "gbc", "ai", "desc"]);
+    expect(TAG_MODE_HINT.gbc).toContain("MOSS");
+  });
+
+  it("GBC 种子描述不再由前端提供（后端按 WD14 标签生成）", () => {
+    expect(shared).not.toContain("GBC_CAPTION_PROMPT");
   });
 });
 

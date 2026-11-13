@@ -1,7 +1,8 @@
 """仓库元信息：repo_id → 仓库名，输出文件夹按仓库名命名，改名时同步迁移。
 
 文件夹名 = 用户对小仓库的命名（保留中文），文件夹内 _repo.json 记 {id, name}。
-仓库名来源：前端存到后端的 data/user_state.json（见 routers/user_state.py）。
+仓库名来源：后端 `data/repos.json`（作品索引，产物档）；设置与凭据在 `data/user_state.json`
+（设置档）。两档的卸载语义不同，见 `app/data_layout.py`；读写都经本模块（合并视图 + 分档写）。
 改名时重命名文件夹 + 重写快照/RAG/封面里含旧文件夹段的图片路径（否则图断）。
 """
 from __future__ import annotations
@@ -10,54 +11,126 @@ from typing import Any, cast
 
 import logging
 import json
-from uuid import uuid4
 import os
 from pathlib import Path
 from urllib.parse import quote
 
+from app import state_store
 from app.config import DATA_DIR
 from app.services.pathnames import safe_dir, safe_seg
 
 _LOG = logging.getLogger("uvicorn.error")
 
+#: 作品索引档的文件名（`DATA_DIR` 直属）。它和设置档**同层不同档**：本文件是产物（不可再生），
+#: `user_state.json` 是设置（勾选「删除用户数据」才走）。分档见 `app/data_layout.py`。
+REPOS_FILE_NAME = "repos.json"
 
-def _load_state() -> dict:
-    """读 user_state.json（repos + settings 单一属主）。缺失/损坏返回空 dict。
-
-    ⚠ `OSError` 也在吞掉之列：P8（2026-09-15）把 `sync-worldbook` 的设置读取从路由内联
-    （原写法是 `except (OSError, ValueError)` 回退空串）搬到本属主上——属主**不得比它替换掉的
-    代码更不耐错**，否则读盘失败（权限 / 删除竞态）会从「400 未配置」退化成裸异常 500。
-    """
-    p = DATA_DIR / "user_state.json"
-    if not p.is_file():
-        return {}
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except (json.JSONDecodeError, UnicodeDecodeError, TypeError, OSError):
-        return {}
+#: `save_settings(...)` 的「这轮不碰 selection」哨兵：缺席保留、显式传值（含 None）才改。
+_KEEP = object()
 
 
 def user_state_path() -> Path:
-    """user_state.json 唯一路径属主（调用期查模块属性 DATA_DIR ⇒ monkeypatch(repo_meta, "DATA_DIR") 即注入）。"""
+    """**设置档**唯一路径属主（历史名 `user_state.json`；调用期查模块属性 DATA_DIR ⇒
+    monkeypatch(repo_meta, "DATA_DIR") 即注入）。作品索引在 `repos_path()`。"""
     return DATA_DIR / "user_state.json"
 
 
-def save_user_state(payload: dict) -> None:
-    """原子写 user_state.json（repos + settings 单一属主的写半边）。
+def repos_path() -> Path:
+    """**作品索引档**唯一路径属主（`repos.json`，产物档：卸载任何一档删除都不碰它）。"""
+    return DATA_DIR / REPOS_FILE_NAME
 
-    ⚠ 既有写点 routers/user_state.set_state 仍是内联写——收敛它属后续重构，改形态
-    必须两处同改；新代码（repo_transfer 导入登记）一律走这里。
+
+def _load_state() -> dict:
+    """读用户态（repos + settings + selection 的合并视图）。缺失/损坏返回空 dict。
+
+    读侧对两份档案做合并：索引档存在就以它为准，否则沿用设置档里那份**拆分前的旧副本**
+    （迁移没跑或没跑完时仍然读得到仓库列表）。档位判定与「不认就备份+建新」都在
+    `state_store.load` 里，语义与原 `_load_state` 一致。
+
+    ⚠ `OSError` 也在吞掉之列（由 `state_store.load` 兜）：P8（2026-09-15）把 `sync-worldbook`
+    的设置读取从路由内联（原写法是 `except (OSError, ValueError)` 回退空串）搬到本属主上——属主
+    **不得比它替换掉的代码更不耐错**，否则读盘失败（权限 / 删除竞态）会从「400 未配置」退化成裸异常 500。
     """
-    p = user_state_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    temp = p.with_name(f"{p.name}.{uuid4().hex}.tmp")
+    settings_doc = state_store.load(user_state_path())
+    state = {key: value for key, value in settings_doc.items() if key != "schemaVersion"}
+    index = state_store.load(repos_path())
+    if index:
+        state["repos"] = index.get("repos")
+    return state
+
+
+def migrate_user_state_layout() -> dict:
+    """把拆分前的单档 `user_state.json` 里的 `repos` 搬进 `repos.json`（幂等，可反复调）。
+
+    整段在设置档的跨进程锁内：两个实例同时启动时只有一个搬，另一个直接看到索引档已立好。
+    锁序只允许「设置档 → 索引档」（本函数内写 `repos.json`）；反向（持索引档锁再要设置档锁）
+    会与同时启动的另一实例对撞，任何新代码都不许这么拿锁。
+
+    这次拆分本身就是「不认就备份+建新」的第一个自举用例：**先立索引档，再备份设置档，最后才
+    从设置档收掉 repos**。任何一步没成都不影响读侧正确性——`_load_state` 在没有索引档时照旧
+    读设置档里那份副本，所以备份失败的后果是「副本多留一会儿」，不是「仓库列表没了」。
+    """
+    with state_store.path_lock(user_state_path()):
+        return _migrate_user_state_layout_locked()
+
+
+def _migrate_user_state_layout_locked() -> dict:
+    if repos_path().is_file():
+        return {"moved": 0, "skipped": "index-exists"}
+    legacy = state_store.load(user_state_path())
+    if "repos" not in legacy:
+        return {"moved": 0, "skipped": "no-legacy-repos"}
+    repos = legacy["repos"]
     try:
-        temp.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        temp.replace(p)
-    finally:
-        temp.unlink(missing_ok=True)
+        if not state_store.save(repos_path(), {"repos": repos}):
+            return {"moved": 0, "skipped": "index-blocked"}
+    except OSError as exc:
+        _LOG.warning("作品索引档写入失败（%s）⇒ 仓库列表继续留在设置档里，下次再搬。", exc)
+        return {"moved": 0, "skipped": "index-write-failed"}
+    backup = state_store.backup(user_state_path())
+    if backup is None:
+        _LOG.warning("设置档备份失败 ⇒ 旧档原样保留 repos 副本（索引档已立好，读侧以它为准）。")
+        return {"moved": 1, "skipped": "backup-failed-keeps-copy"}
+    settings_doc = {k: v for k, v in legacy.items() if k not in ("schemaVersion", "repos")}
+    try:
+        state_store.save(user_state_path(), settings_doc)
+    except OSError as exc:
+        _LOG.warning("设置档收口写入失败（%s）⇒ 旧档继续带着 repos 副本。", exc)
+        return {"moved": 1, "skipped": "settings-write-failed"}
+    _LOG.info("用户态已拆成两份：作品索引 → %s（旧档备份在 %s）。", repos_path(), backup)
+    return {"moved": 1}
+
+
+def save_settings(settings: object, *, selection: object = _KEEP) -> bool:
+    """原子写**设置档**（`user_state.json`：settings + selection）。返回 False＝被拒写。
+
+    `selection` 缺席即保留盘上旧值——启动早期的合并上传不该把已记住的作品抹掉。锁内重新读盘
+    再改，所以「另一实例刚写的 selection」不会被本实例启动时那份旧副本覆盖。
+    `settings` 本身是整档快照，最后写者赢（产品语义）；锁保证的是字段不被无谓抹掉、写不交错。
+    写之前先尝试搬家，确保「只写设置档」不会顺手抹掉还没搬走的仓库索引。
+    """
+    migrate_user_state_layout()
+
+    def apply(stored: dict) -> tuple[dict, bool]:
+        doc = {k: v for k, v in stored.items() if k != "schemaVersion"}
+        if repos_path().is_file():
+            doc.pop("repos", None)  # 索引已由产物档承载，设置档不再重复存一份
+        doc["settings"] = settings
+        if selection is not _KEEP:
+            doc["selection"] = selection
+        return doc, True
+
+    return state_store.mutate(user_state_path(), apply)
+
+
+def save_repos(repos: object) -> bool:
+    """原子写**作品索引档**（`repos.json`，产物档）。返回 False＝被拒写。
+
+    整档替换（调用方给的就是全量列表）：两个实例各改一个仓库时仍是最后写者赢，这是
+    索引的既有产品语义；本层只保证写不撕裂、不与迁移交错。
+    """
+    migrate_user_state_layout()
+    return state_store.save(repos_path(), {"repos": repos if isinstance(repos, list) else []})
 
 
 def load_user_state() -> dict:
@@ -79,6 +152,11 @@ def _repo_record(repo_id: str) -> dict | None:
         if isinstance(r, dict) and r.get("id") == repo_id:
             return r
     return None
+
+
+def repo_record(repo_id: str) -> dict | None:
+    """公开读点：services 需要仓库级配置（如 characterRoster 名册覆盖）时走这里。"""
+    return _repo_record(str(repo_id or "").strip())
 
 
 def parent_folder_seg(repo_id: str) -> str:
@@ -119,6 +197,27 @@ def works_root_violation(output_dir: str) -> str | None:
 # 作品根校验的两条固定文案（单一属主）：前端按「未配置」这条弹窗并跳转设置页，**勿改字面值**。
 WORKS_ROOT_MSG = "output_dir 必须是当前配置的仓库文件夹根路径"
 WORKS_ROOT_NOT_CONFIGURED_MSG = "尚未配置「仓库文件夹」，请先在「设置 → 路径与代理」里填写后再试。"
+
+
+def worldbook_root_violation(base: str) -> str | None:
+    """整本删除世界书的源根校验（防误删 ⑦，2026-11-05）：`base` 必须等于配置的「世界书文件夹」。
+
+    与 `works_root_violation` 同口径（未配置 ⇒ 拒绝），但**更严一档**：世界书删除没有
+    「没传就回退配置根」的服务端兜底——`base` 就是删除目标的父目录，空值同样不能放行。
+    同面的 `/delete-folder` 早在 11-05 第 ② 刀补齐，这条是漏网：改前客户端指哪就删哪。
+    返回 None=通过，否则返回中文错误信息供路由转 HTTPException(400)。
+    """
+    truth = setting_dir_from_state("worldbookDir")
+    if not truth:
+        return WORLDBOOK_ROOT_NOT_CONFIGURED_MSG
+    if not _same_path(truth, base):
+        return WORLDBOOK_ROOT_MSG
+    return None
+
+
+# 世界书源根校验的两条固定文案：与作品根两条分列（配置项不同，前端文案也不同）。
+WORLDBOOK_ROOT_MSG = "base 必须是当前配置的世界书文件夹根路径"
+WORLDBOOK_ROOT_NOT_CONFIGURED_MSG = "尚未配置「世界书文件夹」，请先在「设置 → 路径与代理」里填写后再试。"
 
 
 def _same_path(a: str, b: str) -> bool:
@@ -541,15 +640,49 @@ def _rewrite_paths(repo_id: str, old_seg: str, new_seg: str, snap_folder: Path |
     return {"snapshot": snap, "rag": rag}
 
 
+def _resolve_rename_source(
+    out: Path, repo_id: str, old_dir_name: str, old_own: str,
+) -> tuple[Path | None, str, str]:
+    """定位改名源文件夹。返回 (路径, 失败状态, 失败原因)。
+
+    身份真源是 `_repo.json.id`，目录名只是候选提示：优先认带本 UUID 标记的目录
+    （含改名遗留的任意位置），其次才允许**唯一**一个无标记的历史候选。多个无标记
+    候选无法判定归属 ⇒ ambiguous；候选被其他 UUID 占用 ⇒ collision。绝不挪他仓目录。
+    """
+    marked = _find_marked_folder(out, repo_id)
+    if marked is not None:
+        return marked, "", ""
+    candidates: list[Path] = []
+    for path in (out / old_dir_name, out / old_own, out / safe_seg(repo_id)):
+        if path not in candidates and path.is_dir():
+            candidates.append(path)
+    foreign = [p for p in candidates if _marker_repo_id(p) not in ("", repo_id)]
+    own_unmarked = [p for p in candidates if _marker_repo_id(p) == ""]
+    if len(own_unmarked) == 1:
+        return own_unmarked[0], "", ""
+    if len(own_unmarked) > 1:
+        paths = "；".join(str(p) for p in own_unmarked)
+        return None, "ambiguous", f"找到多个无归属标记的同名文件夹，无法确认哪个属于本作品：{paths}"
+    if foreign:
+        paths = "；".join(str(p) for p in foreign)
+        return None, "collision", f"同名输出文件夹属于其他作品（_repo.json.id 不匹配），已拒绝改名：{paths}"
+    return None, "missing", ""
+
+
 def rename_folder(output_dir: str, repo_id: str, old_name: str, new_name: str) -> dict:
     """仓库改名时：重命名输出文件夹 + 重写快照/RAG 里的图片路径。
 
     封面在 user_state.json 里（前端改名已更新内存并回写后端），由前端负责。
     文件夹按 old_name→new_name 迁移；old 文件夹可能还是 UUID（首次从 UUID 迁移）。
-    返回 {folder, snapshot, rag}。失败不抛（尽力而为）。
+    身份按 `_repo.json.id` 解析，目录名只作候选提示；目标已被他仓占用时落到带 UUID
+    后缀的隔离目录。路径重写只在**真的发生搬移**后执行——否则会把目标文件夹里
+    别人的 chat.json 当成自己的快照改掉。
+    返回 {folder, snapshot, rag, error}。失败不抛（尽力而为），但 error 非空即
+    「文件夹没改到位」，由前端回滚改名并原样提示用户。
     """
+    counts = {"snapshot": 0, "rag": 0}
     if not output_dir:
-        return {"folder": "skip"}
+        return {"folder": "skip", **counts, "error": ""}
     out = Path(output_dir)
     # 子仓库嵌在父作品文件夹下：改子仓库名只动末段，父段（=当前状态里父名）不变。
     parent_seg = parent_folder_seg(repo_id)
@@ -557,60 +690,97 @@ def rename_folder(output_dir: str, repo_id: str, old_name: str, new_name: str) -
     new_own = safe_dir(new_name) if new_name else safe_seg(repo_id)
     old_dir_name = f"{parent_seg}/{old_own}" if parent_seg else old_own
     new_dir_name = f"{parent_seg}/{new_own}" if parent_seg else new_own
-    # 兼容旧数据：老文件夹可能是扁平末段（未嵌套）或 UUID
-    src = out / old_dir_name
-    if not src.is_dir():
-        src = out / old_own          # 旧扁平位置（迁移前的 outputDir/SAVE01）
-    if not src.is_dir():
-        src = out / safe_seg(repo_id)  # 更旧：UUID 文件夹
-    dst = out / new_dir_name
-    folder_status = "unchanged"
-    if src.is_dir() and src.resolve() != dst.resolve():
-        if dst.exists():
-            folder_status = "target_exists"  # 不覆盖（前端应已禁重名）
-        else:
-            dst.parent.mkdir(parents=True, exist_ok=True)  # 建父作品文件夹
-            src.rename(dst)
-            write_repo_marker(dst, repo_id)
-            folder_status = "renamed"
-    elif dst.is_dir():
+    src, status, error = _resolve_rename_source(out, repo_id, old_dir_name, old_own)
+    if src is not None:
+        try:
+            root_resolved = out.resolve()
+            src_resolved = src.resolve()
+        except OSError as exc:
+            return {"folder": "failed", **counts, "error": f"无法解析作品文件夹路径，已拒绝改名：{exc}"}
+        # 标记恰好落在 output_dir 根上时绝不能把整个作品库当成仓库文件夹搬走
+        if src_resolved == root_resolved or not src_resolved.is_relative_to(root_resolved):
+            return {"folder": "failed", **counts,
+                    "error": f"无法确认作品文件夹归属（指向仓库根本身或界外），已拒绝改名：{src}"}
+    dst_candidate = out / new_dir_name
+    if src is None:
+        if status != "missing":
+            return {"folder": status, **counts, "error": error}
+        # 没有源目录时也要挡住「目标名已属于他仓/已存在」的可见冲突；否则视为无事可做
+        # （仓库从未落过盘时改名是合法的，前端不应因此回滚）。
+        if dst_candidate.is_dir() and _marker_repo_id(dst_candidate) not in ("", repo_id):
+            return {"folder": "collision", **counts,
+                    "error": f"目标名称的输出文件夹属于其他作品，未做任何改动：{dst_candidate}"}
+        if dst_candidate.exists():
+            return {"folder": "target_exists", **counts,
+                    "error": f"目标文件夹已存在，未做任何改动：{dst_candidate}"}
+        return {"folder": "skip", **counts, "error": ""}
+    dst = _collision_safe_path(dst_candidate, repo_id)
+    if src.resolve() == dst.resolve():
         write_repo_marker(dst, repo_id)
-    # 重写路径：无论文件夹是否真的 rename，只要段名变了就要改引用。
+        return {"folder": "unchanged", **counts, "error": ""}
+    if dst.exists():
+        return {"folder": "target_exists", **counts,
+                "error": f"目标文件夹已存在，未覆盖：{dst}"}
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)  # 建父作品文件夹
+        src.rename(dst)
+    except OSError as exc:
+        return {"folder": "failed", **counts, "error": f"重命名输出文件夹失败：{exc}"}
+    write_repo_marker(dst, repo_id)
+    if _marker_repo_id(dst) != repo_id:
+        return {"folder": "failed", **counts,
+                "error": f"文件夹已移动，但写入归属标记 _repo.json 失败，请检查目录权限：{dst}"}
     # actual_old 用相对 output_dir 的实际旧段（含父前缀或 UUID），与落库路径一致。
-    counts = {"snapshot": 0, "rag": 0}
     try:
         actual_old_seg = str(src.relative_to(out)).replace("/", "\\")
     except ValueError:
         actual_old_seg = src.name
-    new_seg_rel = new_dir_name.replace("/", "\\")
+    new_seg_rel = str(dst.relative_to(out)).replace("/", "\\")
     if actual_old_seg != new_seg_rel:
         old_seg = quote(f"{output_dir}\\{actual_old_seg}\\")
         new_seg = quote(f"{output_dir}\\{new_seg_rel}\\")
         # 会话快照已随文件夹 rename 移动到 dst，从新文件夹内定位再重写内部旧图路径段
         counts = _rewrite_paths(repo_id, old_seg, new_seg, snap_folder=dst)
-    return {"folder": folder_status, **counts}
+    return {"folder": "renamed", **counts, "error": ""}
 
 
 def delete_folder(output_dir: str, repo_id: str, name: str = "") -> dict:
     """删仓库时清理它在「仓库文件夹」里的作品文件夹（快照卡/世界书/persona/会话/图）。
 
     只删作品自己的文件夹，**绝不碰源库**（角色卡文件夹、世界书文件夹）——源库-作品解耦：
-    源库是可复用素材，作品持自有快照。名优先按仓库名（保中文），兼容旧数据回退 UUID 文件夹。
-    返回 {deleted: bool, folder}。失败不抛（尽力而为）。
+    源库是可复用素材，作品持自有快照。目录由 UUID 标记确认，名称只用于识别需保留的歧义目录。
+    返回 `{deleted, folder, error}`。失败**不抛**（尽力而为），但**必须可见**：
+    2026-11-05「防误删」审计前这里是 `shutil.rmtree(..., ignore_errors=True)`——Windows 上
+    文件正被预览/编辑器占用时它会删掉一半却回报「删好了」，用户以为作品已清、残留半个文件夹
+    和半套图留在库里。`error` 非空即「没删净」，由调用方（前端）原样回给用户。
     """
     import shutil
-    if not (output_dir and repo_id):
-        return {"deleted": False, "folder": "skip"}
-    out = Path(output_dir)
-    own = safe_dir(name) if name else safe_seg(repo_id)
-    parent_seg = parent_folder_seg(repo_id)
-    # 优先删嵌套位置 <父名>/<子名>，兼容旧数据回退扁平末段、再回退 UUID 文件夹
-    target = out / f"{parent_seg}/{own}" if parent_seg else out / own
+    # 客户端漏传 output_dir（旧前端/直连接口）⇒ 按配置根删，而不是静默跳过：
+    # 端点已用 works_root_violation 保证传进来的根就是配置根，两者只可能是同一个目录。
+    root = output_dir or output_dir_from_state()
+    if not (root and repo_id):
+        return {"deleted": False, "folder": "skip", "error": "未配置「仓库文件夹」，作品文件夹没有删除"}
+    out = Path(root)
+    target = repo_folder_path(root, repo_id)
+    if _marker_repo_id(target) != repo_id:
+        marked = _find_marked_folder(out, repo_id)
+        if marked is not None:
+            target = marked
     if not target.is_dir():
-        target = out / own                # 旧扁平位置
+        own = safe_dir(name) if name else safe_seg(repo_id)
+        parent_seg = parent_folder_seg(repo_id)
+        candidates = [out / parent_seg / own, out / own, out / safe_seg(repo_id)]
+        target = next((path for path in candidates if path.is_dir()), target)
     if not target.is_dir():
-        target = out / safe_seg(repo_id)   # 更旧：UUID 文件夹
-    if not target.is_dir():
-        return {"deleted": False, "folder": "missing"}
-    shutil.rmtree(target, ignore_errors=True)
-    return {"deleted": not target.exists(), "folder": target.name}
+        return {"deleted": False, "folder": "missing", "error": ""}
+    try:
+        resolved = target.resolve()
+        if (_marker_repo_id(target) != repo_id or resolved == out.resolve()
+                or not resolved.is_relative_to(out.resolve())):
+            return {"deleted": False, "folder": target.name,
+                    "error": "无法确认作品文件夹归属，已拒绝删除；请核对 _repo.json.id 与仓库根路径"}
+        shutil.rmtree(target)
+    except OSError as exc:
+        return {"deleted": False, "folder": target.name,
+                "error": f"删除作品文件夹失败（可能有文件被占用）：{exc}"}
+    return {"deleted": not target.exists(), "folder": target.name, "error": ""}

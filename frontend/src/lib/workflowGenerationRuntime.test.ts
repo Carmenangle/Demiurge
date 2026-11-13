@@ -144,6 +144,18 @@ describe("workflow generation runtime", () => {
     });
   });
 
+  it("服务端在途登记带上媒体类型（视频任务面板显示为出视频）", () => {
+    const report = vi.fn();
+    const runtime = new WorkflowGenerationRuntime("work", {
+      storage: memoryStorage(), now: () => 10, schedule: () => 0,
+      reportPending: report,
+    });
+
+    runtime.track({ promptId: "p1", comfyuiUrl: "http://comfy", mediaType: "video" });
+
+    expect(report).toHaveBeenCalledWith("p1", "work", 10, "video");
+  });
+
   it("用户显式取消后即使 ComfyUI 迟到完成也不归档", async () => {
     const scheduled: Array<() => Promise<void> | void> = [];
     const watch = observer();
@@ -370,6 +382,18 @@ describe("pollWorkflowResult · 画布/弹窗运转轮询", () => {
     const outcome = await outcomePromise;
     expect(outcome).toEqual({ kind: "still_running" });
     expect(fetchResult).toHaveBeenCalledTimes(250);
+  });
+
+  it("timeoutMs 到点提前返回 still_running（头像短超时用）", async () => {
+    vi.useFakeTimers();
+    const fetchResult = vi.fn(async (): Promise<GenResult> => running);
+    const outcomePromise = pollWorkflowResult("p1", "http://comfy", "image", {
+      fetchResult, timeoutMs: 10_000,
+    });
+    await vi.advanceTimersByTimeAsync(10_000);
+    const outcome = await outcomePromise;
+    expect(outcome).toEqual({ kind: "still_running" });
+    expect(fetchResult.mock.calls.length).toBeLessThan(250);
   });
 });
 

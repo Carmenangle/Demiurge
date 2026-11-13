@@ -263,6 +263,61 @@ describe("MediaInsertModal 批量生图数目（第 57 刀）", () => {
   });
 });
 
+describe("MediaInsertModal 生图方式（文生图 / 图生图，2026-11-08）", () => {
+  it("有条目底图的旧预设回填为图生图，并说明云端与 ComfyUI 两条链路", () => {
+    const html = renderToStaticMarkup(
+      <MediaInsertModal templates={[]} modelsDir=""
+        preset={{
+          templateId: "", appearanceSource: "worldbook",
+          characterLoras: { 露娜: { loraName: "role.safetensors", baseImage: "role.png" } },
+        }}
+        onSave={() => {}} onClose={() => {}} />,
+    );
+
+    expect(html).toContain("生图方式");
+    expect(html).toMatch(/<button[^>]*aria-pressed="true"[^>]*>图生图<\/button>/);
+    expect(html).toContain("ComfyUI 注入模板「角色底图」槽位");
+    expect(html).toContain("云端模型走图生图接口");
+  });
+
+  it("显式文生图：底图明确不参与，即使预设里仍有底图绑定", () => {
+    const html = renderToStaticMarkup(
+      <MediaInsertModal templates={[]} modelsDir=""
+        preset={{
+          templateId: "", appearanceSource: "worldbook", imageMode: "text2img",
+          characterLoras: { 露娜: { loraName: "role.safetensors", baseImage: "role.png" } },
+        }}
+        onSave={() => {}} onClose={() => {}} />,
+    );
+
+    expect(html).toMatch(/<button[^>]*aria-pressed="true"[^>]*>文生图<\/button>/);
+    expect(html).toContain("已绑定的角色/风格底图不参与");
+  });
+
+  it("角色卡模式没有底图行 ⇒ 图生图按钮禁用并说明原因", () => {
+    const html = renderToStaticMarkup(
+      <MediaInsertModal templates={[]} modelsDir=""
+        preset={{ templateId: "", appearanceSource: "character_card", imageMode: "img2img" }}
+        onSave={() => {}} onClose={() => {}} />,
+    );
+
+    expect(html).toMatch(/<button[^>]*aria-pressed="true"[^>]*>文生图<\/button>/);
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>图生图<\/button>/);
+    expect(html).toContain("角色卡模式不读取底图绑定，图生图不可用");
+  });
+
+  it("选了图生图却没有任何底图 ⇒ 提前说明会退化成文生图", () => {
+    const html = renderToStaticMarkup(
+      <MediaInsertModal templates={[]} modelsDir=""
+        preset={{ templateId: "", appearanceSource: "worldbook", imageMode: "img2img" }}
+        onSave={() => {}} onClose={() => {}} />,
+    );
+
+    expect(html).toContain("还没有任何角色底图或风格底图");
+    expect(html).toContain("出图仍会退化成文生图");
+  });
+});
+
 // ===== 2026-10-25 提示词模版：生图/视频提示词模式 =====
 describe("MediaInsertModal prompt templates", () => {
   const customImage = {
@@ -270,7 +325,7 @@ describe("MediaInsertModal prompt templates", () => {
     base_id: "builtin:anima_tags", base_hash: "x", redline_lock: true, redline_lock_off_at: 0,
     system_text: "SYS", extra_instructions: "追加", quality_tags: "Q", negative_tags: "N",
     section_titles: {}, section_order: [], camera_band_overrides: {},
-    beat_labels: [], default_duration: 0, negative_extra: "", meta_note: "",
+    beat_labels: [], default_duration: 0, meta_note: "",
   };
   const customVideo = {
     ...customImage, id: "b".repeat(32), kind: "video_climax" as const, name: "我的高潮",
@@ -304,7 +359,7 @@ describe("MediaInsertModal prompt templates", () => {
         onSave={() => {}} onClose={() => {}} />,
     );
     expect(html).toContain("视频提示词模式");
-    expect(html).toContain("内置默认（六段式骨架）");
+    expect(html).toContain("内置默认（五段式骨架）");
     expect(html).toContain("★ 我的高潮");
     // 生图自定义模版不混进视频选择器
     const videoBlock = html.slice(html.indexOf("视频提示词模式"));
@@ -334,7 +389,8 @@ describe("MediaInsertModal 生图时点标签（2026-11-08：首尾帧 → 全�
     const start = html.indexOf("生图时点");
     const group = html.slice(start, html.indexOf("生图提示词模式", start));
     expect(group).toContain("全局模式");
-    expect(group).toContain("全程覆盖剧情与对白");
+    expect(group).toContain("按剧情分镜拆成多支视频");
+    expect(group).toContain("分镜序列");
     expect(group).not.toContain("首尾帧模式");
   });
 });

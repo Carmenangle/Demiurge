@@ -37,6 +37,7 @@ FORBIDDEN_PATH_PARTS = {
     "presets",
     "userdata",
     "user_state.json",
+    "repos.json",  # 作品索引：含真实作品名，与设置档同为禁入面
     "chat.json",
     "desktop.json",
     "runtime.pid",

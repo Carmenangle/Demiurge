@@ -123,7 +123,12 @@ def _setup_phone(
 
 
 def _read_state(data_dir: Path) -> dict:
-    return json.loads((data_dir / "user_state.json").read_text(encoding="utf-8"))
+    """盘上存档的合并视图：设置档 + 作品索引档（拆分后 repos 单独落 `repos.json`）。"""
+    state = json.loads((data_dir / "user_state.json").read_text(encoding="utf-8"))
+    index_path = data_dir / "repos.json"
+    if index_path.is_file():
+        state["repos"] = json.loads(index_path.read_text(encoding="utf-8")).get("repos")
+    return state
 
 
 @pytest.fixture()
@@ -320,7 +325,7 @@ def test_导入保留手机端设备路径并合并可移植设置(pc: dict, mon
     assert "apiKey" not in by_id["c2"]
     assert merged["hfToken"] == "hf-phone"
     # 顶层其他数据不丢
-    state = json.loads((phone_data / "user_state.json").read_text(encoding="utf-8"))
+    state = _read_state(phone_data)
     assert state["repos"] == [{"id": "phone-repo", "name": "手机作品"}]
     # 素材默认不覆盖同名；PC 独有素材导入手机
     assert (phone_dirs["characters"] / "卡A" / "card.json").read_bytes() == b"phone-card"
@@ -393,10 +398,16 @@ def test_路由导出与导入(pc: dict):
     app.include_router(config_transfer.router, prefix="/api/config")
     client = TestClient(app)
 
-    response = client.get("/api/config/export")
+    # 壳层下载带令牌头且自动跟随跳转：导出/拉包都必须直出文件，不得 3xx。
+    response = client.get("/api/config/export", follow_redirects=False)
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/zip"
     assert "demiurge-config-" in response.headers["content-disposition"]
+
+    pull = client.get("/api/config/pull", follow_redirects=False)
+    assert pull.status_code == 200
+    assert pull.headers["content-type"] == "application/zip"
+    assert "demiurge-config-" in pull.headers["content-disposition"]
 
     response = client.post(
         "/api/config/import",

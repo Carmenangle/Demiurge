@@ -162,6 +162,7 @@ def _resume_interrupted_messages(wire_messages: list[dict]) -> list[dict]:
 
 def _roleplay_continuation_messages(wire_messages: list[dict], partial: str,
                                     *, think_truncated: bool = False,
+                                    verdict_fix: str = "",
                                     story_incomplete: bool = False) -> list[dict]:
     """续写的消息序列：残缺/未写完的输出回喂为最后一条 assistant + 续写指令（2026-08-31）。
 
@@ -184,6 +185,23 @@ def _roleplay_continuation_messages(wire_messages: list[dict], partial: str,
             "二、</think> 之后严格按既有协议继续输出：<content>正文</content> 与后续块，"
             "格式与之前保持完全一致（包括逐字间隔标记等既有格式）；\n"
             "三、把剩余篇幅全部留给正文，正文必须写完整；再超长思考等于白烧付费额度。"
+        )
+    # verdict_fix 非空（未遂对账闸，2026-11-06）：残缺输出同样**结构已合格**，只是本轮
+    # 有裁定没落实（掷骰失败却写成得手）。指令在「接着写」之上点名要求把这些尝试写成
+    # 未遂/受挫；给「已用动作/对白呈现过失败」留一个只补收束的出口（词表档存在假阳）。
+    elif verdict_fix:
+        instruction = (
+            "你上一条消息的正文已经写到断点，但本轮有一项**世界裁定没有落实**："
+            "掷骰失败的 NPC 尝试没有被写成未遂或受挫。现在接着往下写"
+            "（你写的内容会与已有正文无缝拼成同一段故事）：\n"
+            "一、第一个字必须紧接已写出的最后一个字，直接续写后续剧情——"
+            "禁止重复已有内容、禁止改写或重新开始；\n"
+            "二、把下列尝试写成**当场落空或受挫**，让读者明确看到它们没有成功"
+            "（不得写成变相成功，也不得只字不提）：\n"
+            f"{verdict_fix}\n"
+            "三、如果上文已经用动作或对白清楚呈现了这次尝试的失败，只补一两句自然收束，不要复述；\n"
+            "四、不要重新输出 <content> 开标签，也不要输出 <think> 思考块，直接续写正文；"
+            "续写必须停在一个完整的句末标点上，然后闭合 </content>，再按协议正常输出后续块。"
         )
     # story_incomplete=True（剧情完整度闸，2026-09-21）：残缺输出**结构已合格**
     # （`</content>` 已闭合），只是剧情没写完——`roleplay_turn.open_content_for_continuation`
@@ -395,13 +413,18 @@ def _ordered_illustration_events(result_text: str, recs: list[dict]) -> list[dic
         }
         # V1.5/B1：视频协议可选字段透传（有值才带；旧前端/旧数据宽松忽略）
         for _key in ("video_mode", "first_frame_desc", "last_frame_desc",
-                     "prev_tail_desc", "last_frame_url", "transition", "bridge_prev_slot"):
+                     "prev_tail_desc", "last_frame_url", "transition", "bridge_prev_slot",
+                     "shot_sequence_id", "shot_type", "image_key", "incoming_shot_type"):
             _value = rec.get(_key)
             if isinstance(_value, str) and _value:
                 request[_key] = _value
         # 第 74 刀：批次序号 ⇒ 批次图落自己的锚点（见 agent_agency 同名注释）
         if isinstance(rec.get("batch_index"), int):
             request["batch_index"] = int(rec["batch_index"])
+        for _key in ("shot_index", "shot_total", "shot_duration_s", "incoming_shot_index"):
+            _value = rec.get(_key)
+            if isinstance(_value, int):
+                request[_key] = int(_value)
         # 正常链路：comfy_video 开启时 produce 层才编译 video_request，这里随事件下发
         _video_request = _video_request_for(rec)
         if _video_request:

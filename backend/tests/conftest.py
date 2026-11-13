@@ -135,6 +135,16 @@ def _isolate_attachment_store(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_chat_checkpoint_media(tmp_path, monkeypatch):
+    """checkpoint 内联图片外置目录落 tmp（2026-11-12 P6-C），绝不写真实 DATA_DIR。"""
+    from app.services import chat_checkpoint_media
+
+    monkeypatch.setattr(
+        chat_checkpoint_media, "CHECKPOINT_IMAGE_DIR", tmp_path / "chat_checkpoint_images",
+    )
+
+
+@pytest.fixture(autouse=True)
 def _isolate_chat_snapshot(tmp_path, monkeypatch):
     """会话快照 + 修订表落 tmp，绝不碰真实 backend/data/chat_snapshots|chat_revisions.json。
 
@@ -146,6 +156,19 @@ def _isolate_chat_snapshot(tmp_path, monkeypatch):
 
     monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path / "chat_snapshots")
     monkeypatch.setattr(chat_snapshot, "_REVISIONS_PATH", tmp_path / "chat_revisions.json")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_chat_archive(tmp_path, monkeypatch):
+    """删除前归档落 tmp，绝不碰真实 backend/data/chat_archives/。
+
+    `chat_maintenance` 的 clear/clear-cache/compact/restore 现在都会往这里写整份会话快照，
+    没盖住就是**每个用例都在用户运行态里堆备份**（且真实库体积不可逆上涨）。
+    `archive()` 只在调用时读 `ARCHIVE_DIR` ⇒ patch 模块属性即覆盖全部调用方。
+    """
+    from app.services import chat_archive
+
+    monkeypatch.setattr(chat_archive, "ARCHIVE_DIR", tmp_path / "chat_archives")
 
 
 @pytest.fixture(autouse=True)

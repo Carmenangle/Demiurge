@@ -376,6 +376,31 @@ def delete_web_material_asset(image_url: str) -> bool:
         return False
 
 
+def existing_doc_ids(repo_id: str, doc_ids: list[str]) -> set[str]:
+    """这批 doc_id 里哪些真的在向量库里（补登记查重用；不碰嵌入）。
+
+    走 chromadb 原生客户端（与 iter_export_rows 同理由：查存在性不该被嵌入配置卡住
+    ——嵌入端点掉线时，已入库的记录照样要在）。库/集合不存在一律按「都不在」返回，
+    补登记本身幂等（同 doc_id upsert），误判只会多一次写入。
+    """
+    ids = [i for i in dict.fromkeys(doc_ids) if i]
+    if not ids:
+        return set()
+    import chromadb
+
+    from app.config import CHROMA_DIR
+    if not Path(CHROMA_DIR).is_dir():
+        return set()
+    try:
+        client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+        coll = client.get_collection(_repo_collection(repo_id))
+        got = coll.get(ids=ids, include=[])
+        return {str(i) for i in (got.get("ids") or [])}
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 查不到＝按未登记处理（补登记幂等）
+        _log.warning("资产存在性检查失败 repo=%s: %s", repo_id, exc)
+        return set()
+
+
 def index_document(repo_id: str, cfg: EmbedConfig,
                    text: str, title: str = "") -> int:
     """手动参考资料入库，按段落粗切分。写入本仓库库。返回入库条数。"""
@@ -1107,14 +1132,27 @@ def list_generations_multi(repo_ids: list[str], cfg: EmbedConfig, *, limit: int 
     return out[:limit] if limit > 0 else out
 
 
+def _local_image_confirmlably_gone(p: Path) -> bool:
+    """本机留存图「确实没了」的**可判定**版本（防误删 ⑥，2026-11-05）。
+
+    文件不在 **且它所在的夹还在** ⇒ 才是「用户手动删了这张图」。连所在夹都不在 ⇒ 更可能是
+    整棵树离线（移动硬盘/网络盘没挂载、作品根被换机）——那时逐条 `is_file()` 全是假「没了」，
+    一跑清理就把本机留存的 generation 记录批量删净（图还在盘上，记录没了＝检索永久失明）。
+    判不了 ⇒ 保留，与本函数调用方 docstring 的承诺同口径。
+    """
+    return not p.is_file() and p.parent.is_dir()
+
+
 def prune_missing_generations(repo_id: str, cfg: EmbedConfig) -> int:
     """清理「僵尸记录」：指向本机留存图、但磁盘文件已不存在的 generation 条目
     （多因用户手动删磁盘文件、未走应用删除按钮，留下裂图记录）。返回删除条数。
-    只删确实缺失的：local-view 条目按磁盘文件存在性判定；legacy remote-view 直链
+    只删确实缺失的：local-view 条目按磁盘文件存在性判定，且**所在夹整体不可达时判不了⇒保留**
+    （第 6 刀：离线盘不是僵尸盘）；legacy remote-view 直链
     向 ComfyUI 探测，仅在其明确 404 时删。外部 URL 图与 ComfyUI 未起/探测异常
     （无法判定存在性）一律保留，防止误删真源。"""
     store = _store(_repo_collection(repo_id), cfg)
     removed = 0
+    unreachable = 0
     for d in _dump(_repo_collection(repo_id), cfg):
         if d.get("kind") != "generation":
             continue
@@ -1122,7 +1160,9 @@ def prune_missing_generations(repo_id: str, cfg: EmbedConfig) -> int:
         missing = False
         p = local_path_of(image_url)
         if p is not None:
-            missing = not p.is_file()
+            missing = _local_image_confirmlably_gone(p)
+            if not missing and not p.is_file():
+                unreachable += 1  # 所在夹也不在：判不了，留痕不删
         else:
             target = _remote_view_target(image_url)
             if target is not None:
@@ -1145,6 +1185,11 @@ def prune_missing_generations(repo_id: str, cfg: EmbedConfig) -> int:
             removed += 1
         except Exception as exc:  # noqa: BLE001 - 失效清理失败留痕：幽灵条目会残留
             _log.warning("失效生成图清理失败 id=%s: %s", d.get("id"), exc)
+    if unreachable:
+        _log.warning(
+            "失效清理：repo=%s 有 %d 条本机留存图**所在目录整体不可达**"
+            "（移动硬盘/网络盘未挂载？），按「判不了⇒保留」一条没删", repo_id, unreachable,
+        )
     return removed
 
 

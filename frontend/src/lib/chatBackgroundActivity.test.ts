@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mergeChatActivities } from "./chatBackgroundActivity";
+import { finishedBackgroundThreads, mergeChatActivities } from "./chatBackgroundActivity";
 import type { ChatQueueTask } from "../api/ai";
 
 const task = (over: Partial<ChatQueueTask>): ChatQueueTask => ({
@@ -19,6 +19,18 @@ describe("mergeChatActivities", () => {
       { kind: "running", threadId: "repo-1", label: "小仓库A", need: "" },
       { kind: "queued", threadId: "repo-1", label: "小仓库A", need: "第二条", taskId: "q1" },
     ]);
+  });
+
+  it("只给刚结束且当前没在看的线程补未读", () => {
+    expect(finishedBackgroundThreads(
+      ["repo-1__chat__甲", "repo-1__chat__乙"],
+      ["repo-1__chat__乙"],
+      "repo-1__chat__乙",
+    )).toEqual(["repo-1__chat__甲"]);
+    // 当前正在看的线程跑完 → 不补红点（用户就在里面）
+    expect(finishedBackgroundThreads(["a"], [], "a")).toEqual([]);
+    // 仍在跑 / home 草稿 → 不补
+    expect(finishedBackgroundThreads(["a", "home"], ["a"], "")).toEqual([]);
   });
 
   it("excludes home draft thread from both running and queued", () => {

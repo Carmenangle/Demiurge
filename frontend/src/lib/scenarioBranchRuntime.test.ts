@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { completedTurn, createScenarioBranch, type ScenarioBranchDeps } from "./scenarioBranchRuntime";
+import {
+  branchChatState, branchMediaInsertPresets, completedTurn, createScenarioBranch,
+  type ScenarioBranchDeps,
+} from "./scenarioBranchRuntime";
 
 function deps(overrides: Partial<ScenarioBranchDeps> = {}): ScenarioBranchDeps {
   return {
@@ -53,5 +56,31 @@ describe("scenario branch runtime", () => {
     expect(runtime.createSnapshot).not.toHaveBeenCalled();
     expect(runtime.forkSnapshot).not.toHaveBeenCalled();
     expect(runtime.addBranch).not.toHaveBeenCalled();
+  });
+
+  it("copies media insert presets to the new branch without sharing nested config", () => {
+    const presets = {
+      source: { templateId: "t", characterLoras: { 甲: { loraName: "a.safetensors" } } },
+    };
+    const next = branchMediaInsertPresets(presets, "source", "child");
+
+    expect(next?.child).toEqual(presets.source);
+    expect(next?.child).not.toBe(presets.source);
+    expect(next?.child.characterLoras).not.toBe(presets.source.characterLoras);
+    expect(presets).not.toHaveProperty("child");
+    expect(branchMediaInsertPresets(undefined, "source", "child")).toBeNull();
+    expect(branchMediaInsertPresets({ other: { templateId: "" } }, "source", "child")).toBeNull();
+  });
+
+  it("carries chat avatars and roster overrides to the branch", () => {
+    const avatars = { 甲: "avatar.png" };
+    const roster = { mode: "worldbook" as const, include: ["u1"] };
+    const patch = branchChatState({ characterAvatars: avatars, characterRoster: roster });
+
+    expect(patch.characterAvatars).toEqual(avatars);
+    expect(patch.characterAvatars).not.toBe(avatars);
+    expect(patch.characterRoster).toEqual(roster);
+    expect(patch.characterRoster).not.toBe(roster);
+    expect(branchChatState({})).toEqual({});
   });
 });

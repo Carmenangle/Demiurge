@@ -59,12 +59,12 @@ import {
 } from "./imagePromptProfiles";
 import {
   illustrationLoraConfigurationError, illustrationRequestMedia, illustrationWorkflowMedia,
-  resolveIllustrationActors, resolveVideoMode, resolveVideoTemplateChoice,
+  resolveIllustrationActors, resolveVideoMode, resolveVideoTemplateChoice, resolveVideoTemplateId,
   planFirstlastFrameTasks, firstlastFrameValues, firstlastSlotLayout, transitionVideoValues,
 } from "./illustrationMedia";
 import {
   applyRouteChoice, appendImageSlot, applyInterruptedStop, bindMediaSlotPrompt, markMediaSlotFailed, appendTransitionSlot,
-  failMediaSlot, reduceChatStreamEvent, resetMediaSlotForRetry, resolveMediaSlot,
+  failMediaSlot, reduceChatStreamEvent, resetMediaSlotForRetry, resolveMediaSlot, retryArgsWithPrompt,
   upsertMessages, workflowMessages, type SlotPlacement,
 } from "./chatSessionEvents";
 // C4-A Step 6：媒体种类推导（审计 R8）——工作流出图/出视频的超时合同由抓取图节点类名决定，
@@ -72,12 +72,13 @@ import {
 import { deriveWorkflowMediaType } from "./canvasWorkflowRun";
 import { recoverAgentRun, shouldRecoverAgentRun } from "./agentRecovery";
 import { deletedMessageTombstones } from "./deletedMessageTombstones";
+import { useMediaSlotReconcile } from "./mediaSlotReconcile";
 import { nextStoryTurnNo, rememberStoryTurn, resolveStoryTurn, sealTurnsOf, syncStoryTurnHighWater } from "./storyTurn";
-
 import { releaseAgentStream, type ActiveAgentStream } from "./agentStreamLifecycle";
 import type { ImageQuality, WorkMode } from "./viewRouting";
 import { useIllustrationChain } from "./useIllustrationChain";
 import { useAudioTracks } from "./useAudioTracks";
+import { useShotMerge } from "./useShotMerge";
 import { usePlanTaskFeed } from "./usePlanTaskFeed";
 import { useWorkflowResume } from "./useWorkflowResume";
 import { useSessionLoad } from "./useSessionLoad";
@@ -181,6 +182,16 @@ export interface IllustrationSubmit {
   bridgePrevSlotId?: string;
   bridgeVideo?: boolean;
   bridgePrevImageUrl?: string;
+  // 2026-11-09 全局模式分镜序列：镜头顺序/归属。anchor 主槽只出图；出图成功后
+  // 本锚点 outgoing 视频挂 `:video`，上一锚点 move 进入本锚点的视频挂 `:move`。
+  shotSequenceId?: string;
+  shotIndex?: number;
+  shotTotal?: number;
+  shotType?: "establish" | "cut" | "move" | "move_single";
+  shotDurationS?: number;
+  imageKey?: string;
+  incomingShotIndex?: number;
+  incomingShotType?: "move";
 }
 
 // PLACEHOLDER_BODY
@@ -212,12 +223,16 @@ export function useChatSession(deps: ChatSessionDeps) {
   const wfRunning = runningPromptId(gen) !== null;      // /s 工作流进行中；与 Agent 通道正交
   // 多元数据插入：插画开 且 本作品已预设图片/视频 ComfyUI 模板 → 高潮点走异步 ComfyUI 闭环（后端发 illustrate_request）
   const mediaPreset = settings.mediaInsert?.[repo?.id || ""];
-  const comfyIllustrate = !!(settings.illustrate && (mediaPreset?.templateId || mediaPreset?.videoTemplateId));
+  // 2026-11-12：图片模板按能力分槽；旧预设只有 templateId，仍视为已配文生图。
+  const hasImageTemplate = !!mediaPreset?.templateId
+    || Object.values(mediaPreset?.imageTemplates || {}).some(Boolean);
+  const resolvedVideoTemplateId = resolveVideoTemplateId(mediaPreset, undefined).id;
+  const comfyIllustrate = !!(settings.illustrate && (hasImageTemplate || resolvedVideoTemplateId));
   // 音频对白配音：剧情自动生成开 且 预设了音频模板（IndexTTS）→ 后端发 audio_request，前端逐角色配音
   const comfyAudio = !!(settings.illustrate && mediaPreset?.enableAudio && mediaPreset?.audioTemplateId);
   // 视频链独立开关：预设了视频工作流模板 → 后端才编译 video_request（含动作提取 LLM 调用）；
-  // 未配模板（mediaPreset 无 videoTemplateId）→ 不发请求、不调 LLM，零 token（与图/音链同构）。
-  const comfyVideo = !!(settings.illustrate && mediaPreset?.videoTemplateId);
+  // 未配模板 → 不发请求、不调 LLM，零 token（与图/音链同构）。
+  const comfyVideo = !!(settings.illustrate && resolvedVideoTemplateId);
   const promptProfile = normalizePromptProfile(mediaPreset?.promptProfile);
   // 2026-10-25 提示词模版：custom 模版的内置协议族（模版被删时后端按它降级）。
   // 选择时随预设落盘（promptProfileKind）；已加载列表里能查到就以后者为准。
@@ -315,6 +330,20 @@ export function useChatSession(deps: ChatSessionDeps) {
     contextMaxTokens: settings.contextMaxTokens,
     compactTriggerPct: settings.compactTriggerPct,
     selfhealAttempts: settings.selfhealAttempts,
+    chatGuardMaxChars: settings.chatGuardMaxChars,
+    chatDefaultMaxTokens: settings.chatDefaultMaxTokens,
+    chatFollowupMax: settings.chatFollowupMax,
+    chatReopenMax: settings.chatReopenMax,
+    chatInitiativeIdleMinutes: settings.chatInitiativeIdleMinutes,
+    chatInitiativeCooldownMinutes: settings.chatInitiativeCooldownMinutes,
+    chatInitiativeDailyMax: settings.chatInitiativeDailyMax,
+    chatCadence: settings.chatCadence,
+    chatActiveWindowMinutes: settings.chatActiveWindowMinutes,
+    chatMaxBotTurns: settings.chatMaxBotTurns,
+    chatMinAffinity: settings.chatMinAffinity,
+    chatQuietStart: settings.chatQuietStart,
+    chatQuietEnd: settings.chatQuietEnd,
+    chatGroupActivity: settings.chatGroupActivity,
     // 2026-09-04 设置整合：智能体参数预设（settings 全局权威，温度/采样/输入输出上限）
     presetSampling: settings.presetSampling,
     // 2026-10-20 方案 C：主对话此前**从不传代理**（`chatProxyUrl` 算了却被丢掉），
@@ -340,14 +369,16 @@ export function useChatSession(deps: ChatSessionDeps) {
     comfyIllustrate,
     comfyAudio,
     comfyVideo,
-    // 视频模式由「首尾帧生成」选项推导（用户定稿 2026-08-28）；旧预设无该字段时退 videoMode
-    videoMode: mediaPreset?.firstlast ? "firstlast" : mediaPreset?.videoMode,
+    // 视频模式：全局模式默认分镜序列（2026-11-09）；旧路径 shotSequence=false 才回退 firstlast。
+    videoMode: resolveVideoMode(mediaPreset),
     promptProfile,
     promptProfileKind,
     videoPromptTemplateId,
     // 视频工作流模版（第 106 刀）：后端据此派生尾帧/参考图槽与默认时长，
-    // 提示词不再声明模板没有落点的「图片2/3/4」。
-    videoTemplateId: mediaPreset?.videoTemplateId || "",
+    // 提示词不再声明模板没有落点的「图片2/3/4」。2026-11-12：按能力槽解析后的实际模板。
+    videoTemplateId: resolvedVideoTemplateId,
+    // 全局模式分镜序列总时长预算（0=后端按模板/正文估算）
+    videoDurationHint: mediaPreset?.videoDurationHint || 0,
     appearanceSource,
     illustrationViewpoint,
     illustrationBatchCount,
@@ -602,7 +633,8 @@ export function useChatSession(deps: ChatSessionDeps) {
           current, target.messageId, target.slotId, result.target!.url,
           result.target!.media_type, regeneration, firstGen,
         ));
-        if (result.target.media_type === "image" && owner.repoId !== "home") {
+        // 新生成内容即新封面：图片与视频都算（视频在仓库卡静音动态播放）。
+        if (["image", "video"].includes(result.target.media_type) && owner.repoId !== "home") {
           setGeneratedCover(owner.repoId, result.target.url);
         }
         // 自动插画落库后触发 Visual CI 验收诊断（非阻断，fire-and-forget）
@@ -652,8 +684,8 @@ export function useChatSession(deps: ChatSessionDeps) {
       const blocks = workflowMessages(result.messages);
       // ★ 墓碑过滤：工作流回灌消息若曾被用户删除（如删除后同一 generation 重 finalize），不得复活
       setMessages((current) => upsertMessages(current, deletedMessageTombstones.filterDeleted(threadId, blocks)));
-      const firstImage = blocks.find((message) => message.image)?.image;
-      if (firstImage && owner.repoId !== "home") setGeneratedCover(owner.repoId, firstImage);
+      const firstMedia = blocks.find((message) => message.image || message.video);
+      if (firstMedia && owner.repoId !== "home") setGeneratedCover(owner.repoId, firstMedia.image || firstMedia.video || "");
       if (result.durable && result.images.some((image) => image.indexed)) {
         window.dispatchEvent(new CustomEvent("laf-generation-saved", { detail: owner.threadId }));
       }
@@ -867,12 +899,18 @@ export function useChatSession(deps: ChatSessionDeps) {
     chat, modelProxies, effectivePersona, messagesRef, setMessages,
     pollResult, discardFailedIllustration,
   });
-  // 模板是否定义了图像输入口 / 图值是否已填 → 见 lib/chatGeneration（纯逻辑，已抽出可测）
+  useMediaSlotReconcile({ messages, threadId, setMessages });
 
   // 剧情对白音频化链（T2.2-C1 外移 → lib/useAudioTracks.ts）：submitAudio / mergeAudioTracks
   // 函数体与注释逐字随体迁入，闭包符号以同名 deps 注入；调用点（handleAgentStreamEvent / 对外 return）留在视图。
   const { submitAudio, mergeAudioTracks } = useAudioTracks({
     settings, repo, templates, onNotify, threadId, setMessages, messagesRef, pollResult,
+  });
+
+  // 2026-11-09 全局模式分镜成片：全部 shot 视频 ready 后按 shotIndex 拼接成片
+  // （任一镜 failed/pending ⇒ 不合并；编排外移 → lib/useShotMerge.ts）。
+  const { retryShotMerge } = useShotMerge({
+    messages, threadId, repoId: repo?.id, outputDir: settings.outputDir, setMessages,
   });
 
   // /s 启动：取最近一张已确认的工作流卡，用抓取到的画布工作流提交生成
@@ -1064,7 +1102,7 @@ export function useChatSession(deps: ChatSessionDeps) {
   const handleAgentStreamEvent = (botId: string, event: ChatStreamEvent) => {
     if (event.type === "image" || event.type === "video") {
       dispatch({ t: "agentImage", botId });
-      if (event.type === "image" && abortRef.current?.botId === botId && repo?.id) {
+      if (abortRef.current?.botId === botId && repo?.id) {
         setGeneratedCover(repo.id, event.url);
       }
       window.dispatchEvent(new CustomEvent("laf-generation-saved", { detail: threadId }));
@@ -1091,6 +1129,15 @@ export function useChatSession(deps: ChatSessionDeps) {
         videoDialogue: event.videoDialogue,
         // 第 74 刀：段桥的「上一张画面」槽，随快照落盘 ⇒ 桥视频槽的「重新生成」也认得上一张。
         bridgePrevSlotId: event.bridgePrevSlotId,
+        // 2026-11-09 全局模式分镜序列
+        shotSequenceId: event.shotSequenceId,
+        shotIndex: event.shotIndex,
+        shotTotal: event.shotTotal,
+        shotType: event.shotType,
+        shotDurationS: event.shotDurationS,
+        imageKey: event.imageKey,
+        incomingShotIndex: event.incomingShotIndex,
+        incomingShotType: event.incomingShotType,
       };
       void submitIllustration(illustrationSubmit).catch((error) => {
         // 提交链上任何未被 failSlot 覆盖的异常都落到失败槽（可重新生成），
@@ -1662,19 +1709,19 @@ export function useChatSession(deps: ChatSessionDeps) {
   reloadFromSnapshotRef.current = reloadFromSnapshot;
 
   // 失败槽「重新生成」（2026-08-29 用户需求）：从槽位快照恢复参数重调 submitIllustration，
-  // source 翻转为 manual 跳过自动 claim（重试是用户显式动作，不存在同槽重复消费）。
-  const retryIllustration = (messageId: string, slotId: string) => {
+  // source 翻转为 manual 跳过自动 claim；第三参数＝编辑提示词后的成稿改写（2026-11-10）。
+  const retryIllustration = (messageId: string, slotId: string, promptOverride?: string) => {
     const message = messagesRef.current.find((m) => m.id === messageId);
-    const part = message?.parts?.find((p) => p.slotId === slotId) as
-      | { retryArgs?: IllustrationSubmit }
-      | undefined;
-    const snapshot = part?.retryArgs;
-    if (!snapshot) return;
+    const found = message?.parts?.find((p) => p.slotId === slotId);
+    // 成片槽不是插画提交：只重跑拼接（分镜仍须全 ready，重拼前不清分镜）。
+    if (found?.merged) return void retryShotMerge(messageId);
+    const snapshot = found?.retryArgs as IllustrationSubmit | undefined;
+    if (!found || !snapshot) return;
     // 重试即时反馈：槽位先回 pending（重试要走帧编译+提交，秒级无反馈会被当成「点了没反应」）；
     // 再次失败时 failSlot 会带新错误与原快照，重新变回 failed+按钮。
     setMessages((current) => resetMediaSlotForRetry(current, messageId, slotId));
     // source 按名覆盖为 manual 跳过自动 claim——不再有 `args[7]` 这种位置耦合（审计 C7）。
-    void submitIllustration({ ...snapshot, source: "manual" });
+    void submitIllustration({ ...retryArgsWithPrompt(snapshot, found, promptOverride), source: "manual" });
   };
   return {
     messages, streamingId, wfRunning, uploadingWf, slowWatchPromptId, wfProgress, wfNode, queued, regeneratingIds,

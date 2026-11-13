@@ -156,6 +156,7 @@ def maintenance_instruction(
     {"ops","state_deltas","status_snapshot"}——主协议（<状态更新>/<status>）失守的轮次，
     由本轮本就在跑的维护调用顺带补齐状态写回，0 额外 LLM。开关全关时输出旧协议文案
     （拼接逐字不变，test_table_store 锁定）；无表且无抽取返回空串（上游据此跳过）。
+    关键事件不走本调用：由纪要模型在 SUMMARY 里按事件类型判断（2026-11-10）。
     """
     extract = extract_deltas or extract_snapshot
     if not tables and not extract:

@@ -4,10 +4,17 @@
 """
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
-from app.services import asset_library, asset_store, embed_resolution, rag_store
+from app.services import (
+    asset_import,
+    asset_library,
+    asset_store,
+    embed_resolution,
+    rag_store,
+    repo_meta,
+)
 from app.services.rag_backend import EmbedConfig
 
 router = APIRouter()
@@ -280,6 +287,113 @@ def tag_generation(req: TaggerTagRequest) -> dict[str, object]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+class GbcTagRequest(EmbedAuth):
+    """GBC 场景图打标：运行环境 + VLM 都走 wire 透传（与 embed 同模式）。
+
+    前端不传整图描述：种子描述由后端按 WD14 标签生成（标签是物体真源）；
+    `vlm_*` 只用于 GBC 自己给实体写观察。
+    """
+    id: str
+    repo_id: str = "home"
+    gbc_exe: str = ""
+    sam3_dir: str = ""
+    embed_dir: str = ""
+    detect_device: str = "cuda"
+    max_top_level: int = 10
+    timeout_s: int = 1800
+    vlm_base_url: str = ""
+    vlm_model: str = ""
+    vlm_api_key: str = ""
+    vlm_proxy: str = ""
+
+
+@router.post("/gbc-tag")
+def gbc_tag(req: GbcTagRequest) -> dict[str, object]:
+    """GBC 场景图打标：WD14 出标签，GBC 产出实体/关系图 + MOSS 布局 JSON。
+
+    GBC 是外部引擎（自带 torch/SAM-3），未配置或权重缺失回 503 并点名缺件。
+    """
+    from app.services import gbc_tagger
+
+    runtime = gbc_tagger.GbcRuntime(
+        exe=req.gbc_exe, sam3_dir=req.sam3_dir, embed_dir=req.embed_dir,
+        device=req.detect_device, max_top_level=req.max_top_level,
+        timeout_s=req.timeout_s,
+    )
+    try:
+        return asset_library.gbc_tag_asset(
+            req.id, req.repo_id, runtime=runtime,
+            vlm_base_url=req.vlm_base_url, vlm_model=req.vlm_model,
+            vlm_api_key=req.vlm_api_key, vlm_proxy=req.vlm_proxy, cfg=req.embed_cfg(),
+        )
+    except gbc_tagger.GbcUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except gbc_tagger.GbcFailed as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except asset_library.TaggerUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except asset_library.AssetMissing as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+class GbcGraphRequest(BaseModel):
+    id: str
+
+
+@router.post("/gbc-graph")
+def gbc_graph(req: GbcGraphRequest) -> dict[str, object]:
+    """取已存的 GBC 场景图与官方布局（详情面板用）；没有就回 ok=false，不报错。
+
+    MOSS 交付形/草稿形与归一化 Layout 已不交付（2026-11-07 用户定案：
+    官方布局 JSON 是唯一出口），从响应里摘掉，避免死字段。
+    """
+    from app.services import gbc_store, gbc_tagger
+
+    saved = gbc_store.get(req.id)
+    if saved is None:
+        return {"ok": False}
+    graph = saved.pop("graph", {})
+    saved.pop("moss", None)
+    saved.pop("moss_draft", None)
+    return {"ok": True, **saved, "outline": gbc_tagger.outline(graph)}
+
+
+class MossLayoutRequest(BaseModel):
+    id: str
+    vlm_base_url: str = ""
+    vlm_api_key: str = ""
+    vlm_model: str = ""
+    vlm_proxy: str = ""
+    hint: str = ""
+
+
+@router.post("/moss-layout")
+def moss_layout(req: MossLayoutRequest) -> dict[str, object]:
+    """已存 GBC 场景图 → MOSS 官方完整布局提示词（style/cast/逐项描述）。
+
+    文字由视觉模型按官方写法生成，实体名与 bbox 用 GBC 已存的那份（模型不改几何）；
+    style 与角色卡按官方格式折进 summary.caption / character 项。结果回存 `asset_gbc`。
+    没跑过 GBC → 400；视觉模型未配置 → 503；模型输出不可用 → 502。
+    """
+    from app.services import moss_layout as _moss_layout
+
+    try:
+        return asset_library.moss_layout_asset(
+            req.id, vlm_base_url=req.vlm_base_url, vlm_model=req.vlm_model,
+            vlm_api_key=req.vlm_api_key, vlm_proxy=req.vlm_proxy, hint=req.hint,
+        )
+    except _moss_layout.MossLayoutUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except _moss_layout.MossLayoutFailed as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except asset_library.AssetMissing as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 class TagTextRequest(EmbedAuth):
     id: str
     repo_id: str = "home"
@@ -527,6 +641,43 @@ def search_assets(req: SearchAssetsRequest) -> dict[str, object]:
 class AssetIdRequest(EmbedAuth):
     id: str
     repo_id: str = "home"
+
+
+@router.post("/assets/import")
+def import_assets(
+    files: list[UploadFile] = File(...),
+    repo_id: str = Form("home"),
+    output_dir: str = Form(""),
+) -> dict[str, object]:
+    """把用户拖入/选中的图片·视频导入资产库。
+
+    文件落到 `<仓库文件夹>/<repo_id>/pictures|videos`，读内嵌元信息（ComfyUI PNG /
+    A1111 / EXIF / 视频容器标签）→ 提示词、模型、LoRA 与生成参数；
+    单个文件失败不影响其余文件（errors 里带原始文件名与原因）。
+    嵌入配置取后端持久化设置：embedding 不可用只影响语义检索，导入本身照常成功。
+    """
+    if (err := repo_meta.works_root_violation(output_dir)):
+        raise HTTPException(status_code=400, detail=err)
+    cfg: EmbedConfig | None
+    try:
+        cfg = rag_store.embed_config_from_state()
+    except Exception:  # noqa: BLE001 [EXC-保留] 设置文件缺失/损坏只影响语义索引，不该挡住导入
+        cfg = None
+    items: list[dict] = []
+    errors: list[dict] = []
+    for upload in files:
+        name = upload.filename or ""
+        try:
+            items.append(asset_import.import_media(
+                output_dir, repo_id or "home", name, upload.file, embed_cfg=cfg,
+            ))
+        except ValueError as exc:
+            errors.append({"name": name, "error": str(exc)})
+        except Exception as exc:  # noqa: BLE001 [EXC-留痕] 单文件失败不拖垮整批导入
+            errors.append({"name": name, "error": f"导入失败：{exc}"})
+        finally:
+            upload.file.close()
+    return {"items": items, "errors": errors}
 
 
 @router.post("/assets/trash")

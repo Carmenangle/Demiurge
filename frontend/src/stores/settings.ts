@@ -119,6 +119,33 @@ export interface VlmModel {
   ollamaName?: string;
 }
 
+/** 视觉大模型存档（2026-11-07 用户定案「多个模型的存档 + 选一个为主」）：
+ *  存档是配置的库，`vlmModel` 仍是选中档的运行时镜像（所有消费端零改动）。 */
+export interface VlmPreset extends VlmModel {
+  id: string;
+  name: string;
+}
+
+/** 嵌入模型存档，语义同 VlmPreset：库是 embedPresets，运行读选中档镜像。 */
+export interface EmbedPreset extends EmbedModel {
+  id: string;
+  name: string;
+}
+
+/** GBC 场景图引擎（外部工具，2026-11-06）：torch + SAM-3 不进安装包，
+ *  这里只登记 gbc.exe 与两份权重目录；VLM 复用上面的「视觉大模型」。 */
+export interface GbcEngine {
+  exePath: string;      // gbc.exe 完整路径（自带 venv 的 console script）
+  sam3Dir: string;      // SAM-3 权重目录（含 *.safetensors）
+  embedDir: string;     // EmbeddingGemma 权重目录
+  device: "cuda" | "cpu"; // 检测/嵌入跑在哪；显存不够（本地 VLM 同时在跑）就选 cpu
+  maxTopLevel: number;  // 最多分析几个顶层物体
+}
+
+export const DEFAULT_GBC: GbcEngine = {
+  exePath: "", sam3Dir: "", embedDir: "", device: "cuda", maxTopLevel: 10,
+};
+
 export interface ImageModel {
   id: string;
   displayName?: string;
@@ -168,14 +195,25 @@ export interface CharacterVoiceBinding {
   voiceRef?: string;    // 参考音轨本地文件路径（<repo>/voices/<角色名>.wav，走 local-view）
 }
 
+// 2026-11-12 用户定案：按「生成能力」预配工作流模板，不再让用户每次切换单一模板。
+// 图片：文生图 / 图生图 / 局部重绘 / 参考生图；视频：文生视频 / 图生视频 / 首尾帧。
+// 未填的槽回落 legacy `templateId` / `videoTemplateId`，旧预设零迁移。
+export type ImageTemplateMode = "text2img" | "img2img" | "inpaint" | "reference";
+export type VideoTemplateMode = "text2video" | "image2video" | "firstlast";
+
 export interface MediaInsertPreset {
   // ⑦ 三开关：剧情自动生成时按勾选类型分发（图片/视频/音频，多选）；旧预设视为 enableImage=true
   enableImage?: boolean;   // 生成图片
   enableVideo?: boolean;   // 生成视频
   enableAudio?: boolean;   // 生成音频
   templateId: string;       // 图片工作流模板 id（空=未预设，不异步出图）
+  /** 按能力分组的图片模板；`text2img` 未填时回落 `templateId`。 */
+  imageTemplates?: Partial<Record<ImageTemplateMode, string>>;
   loraMode?: "none" | "single" | "multi"; // 无 LoRA / 高潮角色栈或风格兜底 / 默认风格+高潮角色栈
   appearanceSource?: "worldbook" | "character_card"; // 稳定外貌取世界书角色条目或绑定角色卡
+  // 2026-11-08 用户定稿：文生图=提示词+LoRA（不读底图）；图生图=底图+LoRA／云端图生图。
+  // 旧预设无该字段时按改动前的隐式口径回填（见 lib/illustrationMedia.resolveIllustrationImageMode）。
+  imageMode?: "text2img" | "img2img";
   // 画面人称（2026-09-20）：手选优先于后端自动判定（按锚点段）。空/未设 = 自动。
   // 第一人称 ⇒ 叙事者「我」不占画面；第三人称 ⇒ 主人公算一个主体。
   viewpoint?: "first_person" | "third_person";
@@ -199,10 +237,14 @@ export interface MediaInsertPreset {
   styleLoraWeight?: number; // ⑥ 风格 LoRA 权重（默认 0.8）
   styleBaseImage?: string;  // ⑥ 兜底风格底图（在场角色都无底图时，gpt-image 系用）
   videoTemplateId?: string; // 视频工作流模板 id（空=不出视频，恒用图片模板）
+  /** 按能力分组的视频模板；未填时回落 `videoTemplateId`。 */
+  videoTemplates?: Partial<Record<VideoTemplateMode, string>>;
   smartVideo?: boolean;     // 智能模态：开=后端编排出视频分镜的画多出图后再挂视频槽，其余只出图
   // 首尾帧生成（用户定稿 2026-08-28）：图片按剧情首尾帧（首帧+尾帧）生成，视频模式随之
   // 变为 firstlast 剧情影片；关闭时视频为 climax 高潮点动作代入。旧预设按 videoMode 回填。
   firstlast?: boolean;
+  /** 2026-11-09 全局模式默认分镜序列；显式 false 才回退旧整楼 firstlast 长片。 */
+  shotSequence?: boolean;
   // V1.2 视频最小事实：时长与镜头运动是用户预设（不从模型输出读），映射视频模板 exposed 隐藏 binding；
   // 空值 = 模板原值（旧预设兼容，不迁移不报错）。
   videoDurationHint?: number;   // 视频时长（秒）；0/空=模板原值
@@ -465,11 +507,12 @@ export interface ComfyMachine {
   url: string;
 }
 
-/** 按模态选机：值是 `ComfyMachine.id`；缺省＝条目 0（`comfyuiUrl`）。 */
+/** 按模态选机：值是 `ComfyMachine.id` 或 id 数组（多机台池，2026-11-09）；
+ *  缺省/空数组＝条目 0（`comfyuiUrl`）。读侧兼容旧的单字符串。 */
 export interface ComfyRoute {
-  image?: string;
-  video?: string;
-  audio?: string;
+  image?: string | string[];
+  video?: string | string[];
+  audio?: string | string[];
 }
 
 export interface Settings {
@@ -478,8 +521,13 @@ export interface Settings {
   chatModels: ChatModel[];          // 对话模型（可多个供应商）
   activeChatModelId?: string;       // 当前选中的对话模型 id
   providerProfileSemanticsVersion?: number; // v2 起只保留用户明确选择，禁止按模型名猜 wire
-  embedModel: EmbedModel;  // 知识库 RAG 嵌入模型
-  vlmModel: VlmModel;      // 视觉大模型（Visual CI 验收用）
+  embedModel: EmbedModel;  // 知识库 RAG 嵌入模型（选中存档的运行时镜像）
+  embedPresets?: EmbedPreset[];   // 嵌入模型存档库
+  activeEmbedPresetId?: string;   // 当前选中的嵌入存档 id
+  vlmModel: VlmModel;      // 视觉大模型（Visual CI 验收用；选中存档的运行时镜像）
+  vlmPresets?: VlmPreset[];       // 视觉大模型存档库
+  activeVlmPresetId?: string;     // 当前选中的视觉存档 id
+  gbc?: GbcEngine;         // GBC 场景图引擎（外部工具 + 模型目录）
   imageModels: ImageModel[];
   activeImageModelId?: string;
   videoModels: VideoModel[];
@@ -494,7 +542,7 @@ export interface Settings {
   outputDir: string; // 仓库文件夹：作品私有产物（图片+会话记录+好感度+往事+参考图）落 <此>/<作品名>/
   characterDir: string; // 角色卡文件夹：导入的卡按「小仓库」落此目录（含卡本体+内嵌世界书/正则+对话）
   worldbookDir: string; // 世界书文件夹：独立世界书文件落此目录（Phase 2）
-  presetDir: string; // 偏置预设文件夹：ST OpenAI 预设落此目录（仅剧情模式用）
+  presetDir: string; // 偏置预设文件夹：ST OpenAI 预设落此目录（剧情主生成；聊天室取 chatHistory 之前的头部做防拦截）
   activePresetName: string; // 当前激活的偏置预设名（空=不用预设，走内置扮演提示）
   userName: string; // [兼容旧数据] 用户人设名；已迁移进 userPersonas，运行时读选中档
   userPersona: string; // [兼容旧数据] 用户人设描述；已迁移进 userPersonas
@@ -542,6 +590,41 @@ export interface Settings {
   presetSampling: PresetSampling;
   // 通用：不知道该放哪个分区的设置项
   galleryRemoveFile: boolean; // 资产库删除时默认同时删除本机图片文件
+  /** 聊天室自动对话：开启后私聊打开时允许角色主动找上门（默认开）。 */
+  chatRoomAutoChat?: boolean;
+  /** 聊天室插入多元数据：开启后角色可在聊天里自发请求自拍图/视频（默认关）。 */
+  chatRoomMediaInsert?: boolean;
+  /** 聊天头像自动更新：角色生成自拍后把该图设为聊天头像（默认开；底图只作初始头像）。 */
+  chatRoomAvatarUpdate?: boolean;
+  /** 聊天室：预设防拦截头最多保留多少字符（默认 900）。 */
+  chatGuardMaxChars: number;
+  /** 聊天室：输出上限 tokens（0=跟随全局预设；>0=聊天独立上限）。 */
+  chatDefaultMaxTokens: number;
+  /** 输出上限语义版本：2=0 跟随全局；旧存档迁移用。 */
+  chatOutputCapVersion?: number;
+  /** 聊天室：同一话题最多追问次数（默认 3；0=关闭追问）。 */
+  chatFollowupMax: number;
+  /** 聊天室：会话窗口结束后最多重开次数（默认 2；0=关闭重开）。 */
+  chatReopenMax: number;
+  /** 聊天室：快照闲置多少分钟后允许主动找上门（默认 120；0=不设门槛）。 */
+  chatInitiativeIdleMinutes: number;
+  /** 聊天室：同一角色两次主动消息的最小间隔分钟数（默认 360；0=不设冷却）。 */
+  chatInitiativeCooldownMinutes: number;
+  /** 聊天室：每角色每天最多主动发起几次（默认 6；0=不限）。 */
+  chatInitiativeDailyMax: number;
+  /** 追问/重开频率档位。 */
+  chatCadence: "quiet" | "normal" | "frequent";
+  /** 最后一条消息后多久内算「正在聊」（分钟）。 */
+  chatActiveWindowMinutes: number;
+  /** 连续 bot 气泡上限（超过不再追问）。 */
+  chatMaxBotTurns: number;
+  /** 主动/追问的最低好感度。 */
+  chatMinAffinity: number;
+  /** 深夜安静时段开始/结束（HH:MM；空=关闭）。 */
+  chatQuietStart: string;
+  chatQuietEnd: string;
+  /** 群聊活跃度。 */
+  chatGroupActivity: "quiet" | "normal" | "lively";
 }
 
 export interface PresetSampling {
@@ -558,6 +641,21 @@ export const DEFAULT_CONTEXT_REMINDER_TOKENS = 12_000;
 export const DEFAULT_CONTEXT_MAX_TOKENS = 20_000;
 export const DEFAULT_COMPACT_TRIGGER_PCT = 80;
 export const DEFAULT_SELFHEAL_ATTEMPTS = 3;
+// 聊天室行为上限默认值（设置→聊天室可调）。
+export const DEFAULT_CHAT_GUARD_MAX_CHARS = 900;
+export const DEFAULT_CHAT_DEFAULT_MAX_TOKENS = 0;
+export const DEFAULT_CHAT_FOLLOWUP_MAX = 3;
+export const DEFAULT_CHAT_REOPEN_MAX = 2;
+export const DEFAULT_CHAT_INITIATIVE_IDLE_MINUTES = 120;
+export const DEFAULT_CHAT_INITIATIVE_COOLDOWN_MINUTES = 360;
+export const DEFAULT_CHAT_INITIATIVE_DAILY_MAX = 6;
+export const DEFAULT_CHAT_CADENCE = "normal" as const;
+export const DEFAULT_CHAT_ACTIVE_WINDOW_MINUTES = 15;
+export const DEFAULT_CHAT_MAX_BOT_TURNS = 5;
+export const DEFAULT_CHAT_MIN_AFFINITY = 30;
+export const DEFAULT_CHAT_QUIET_START = "00:30";
+export const DEFAULT_CHAT_QUIET_END = "08:30";
+export const DEFAULT_CHAT_GROUP_ACTIVITY = "normal" as const;
 
 // 2026-09-04：智能体参数预设默认值 = GrayWill-0.46-demiurge.json 顶层基线。
 // 用户在「设置 → 智能体 → 智能体参数预设」可改；未改走默认，与历史行为一致。
@@ -627,6 +725,7 @@ const DEFAULT: Settings = {
     ? MOBILE_DEFAULT_EMBED
     : { mode: "remote", source: "ollama", apiKey: "ollama", baseUrl: OLLAMA_DEFAULT_BASE_URL, modelName: "qwen3-embedding:latest", proxyMode: "on" },
   vlmModel: { mode: "remote", source: "ollama", apiKey: "ollama", baseUrl: OLLAMA_DEFAULT_BASE_URL, modelName: "gemma4:latest", proxyMode: "on" },
+  gbc: DEFAULT_GBC,
   imageModels: [],
   videoModels: [],
   imageStyle: "",
@@ -676,9 +775,147 @@ const DEFAULT: Settings = {
   presetSampling: DEFAULT_PRESET_SAMPLING,
   agentAccessMode: "approval",
   galleryRemoveFile: false,
+  chatRoomAutoChat: true,
+  chatRoomMediaInsert: false,
+  chatRoomAvatarUpdate: true,
+  chatGuardMaxChars: DEFAULT_CHAT_GUARD_MAX_CHARS,
+  chatDefaultMaxTokens: DEFAULT_CHAT_DEFAULT_MAX_TOKENS,
+  chatFollowupMax: DEFAULT_CHAT_FOLLOWUP_MAX,
+  chatReopenMax: DEFAULT_CHAT_REOPEN_MAX,
+  chatInitiativeIdleMinutes: DEFAULT_CHAT_INITIATIVE_IDLE_MINUTES,
+  chatInitiativeCooldownMinutes: DEFAULT_CHAT_INITIATIVE_COOLDOWN_MINUTES,
+  chatInitiativeDailyMax: DEFAULT_CHAT_INITIATIVE_DAILY_MAX,
+  chatCadence: DEFAULT_CHAT_CADENCE,
+  chatActiveWindowMinutes: DEFAULT_CHAT_ACTIVE_WINDOW_MINUTES,
+  chatMaxBotTurns: DEFAULT_CHAT_MAX_BOT_TURNS,
+  chatMinAffinity: DEFAULT_CHAT_MIN_AFFINITY,
+  chatQuietStart: DEFAULT_CHAT_QUIET_START,
+  chatQuietEnd: DEFAULT_CHAT_QUIET_END,
+  chatGroupActivity: DEFAULT_CHAT_GROUP_ACTIVITY,
 };
 
 // 旧数据迁移：单 chatModel 字段 → chatModels 列表（向后兼容）
+function normalizeEmbedModel(raw: Partial<EmbedModel>): EmbedModel {
+  return {
+    ...raw,
+    mode: raw.mode === "local" || raw.mode === "remote"
+      ? raw.mode
+      : raw.modelDir?.trim() ? "local" : "remote",
+    // 旧数据只有 baseUrl：按地址补来源（11434/ollama ⇒ Ollama），新数据保留用户显式选择。
+    source: remoteModelSource({ source: raw.source, baseUrl: String(raw.baseUrl ?? "") }),
+    proxyMode: normalizeProxyMode(raw.proxyMode),
+    apiKey: String(raw.apiKey ?? ""),
+    baseUrl: String(raw.baseUrl ?? ""),
+    modelName: String(raw.modelName ?? ""),
+  };
+}
+
+function normalizeVlmModel(raw: Partial<VlmModel>): VlmModel {
+  return {
+    ...raw,
+    mode: raw.mode === "local" || raw.mode === "remote"
+      ? raw.mode
+      : (raw.ggufPath?.trim() || raw.mmprojPath?.trim()) ? "local" : "remote",
+    source: remoteModelSource({ source: raw.source, baseUrl: String(raw.baseUrl ?? "") }),
+    proxyMode: normalizeProxyMode(raw.proxyMode),
+    apiKey: String(raw.apiKey ?? ""),
+    baseUrl: String(raw.baseUrl ?? ""),
+    modelName: String(raw.modelName ?? ""),
+  };
+}
+
+function presetDefaultName(m: { modelName?: string; mode?: string }): string {
+  const model = (m.modelName || "").trim();
+  if (model) return model;
+  return m.mode === "local" ? "本地模型" : "未命名模型";
+}
+
+function uniquePresetName(presets: { name: string }[], base: string): string {
+  if (!presets.some((p) => p.name === base)) return base;
+  let n = 2;
+  while (presets.some((p) => p.name === `${base} ${n}`)) n += 1;
+  return `${base} ${n}`;
+}
+
+/** 存档里的模型字段（去掉 id/name 与运行时 proxyUrl），用于镜像回单字段。 */
+export function vlmPresetFields(p: VlmModel): VlmModel {
+  return {
+    mode: p.mode,
+    source: p.source,
+    apiKey: p.apiKey,
+    baseUrl: p.baseUrl,
+    modelName: p.modelName,
+    proxyMode: p.proxyMode,
+    ggufPath: p.ggufPath,
+    mmprojPath: p.mmprojPath,
+    ollamaName: p.ollamaName,
+  };
+}
+
+export function embedPresetFields(p: EmbedModel): EmbedModel {
+  return {
+    mode: p.mode,
+    source: p.source,
+    apiKey: p.apiKey,
+    baseUrl: p.baseUrl,
+    modelName: p.modelName,
+    proxyMode: p.proxyMode,
+    modelDir: p.modelDir,
+    rerankerDir: p.rerankerDir,
+  };
+}
+
+function normalizeVlmPresets(
+  raw: unknown, fallback: VlmModel, activeId: unknown,
+): { presets: VlmPreset[]; activeId: string } {
+  const list = Array.isArray(raw) ? raw : [];
+  const presets: VlmPreset[] = list
+    .filter((p): p is Partial<VlmPreset> => Boolean(p) && typeof p === "object")
+    .map((p) => {
+      const fields = normalizeVlmModel(p);
+      return {
+        ...fields,
+        id: typeof p.id === "string" && p.id ? p.id : crypto.randomUUID(),
+        name: (p.name || "").trim() || presetDefaultName(fields),
+      };
+    });
+  if (presets.length === 0) {
+    const id = crypto.randomUUID();
+    return { presets: [{ ...fallback, id, name: presetDefaultName(fallback) }], activeId: id };
+  }
+  const active = presets.some((p) => p.id === activeId) ? String(activeId) : presets[0].id;
+  // 单字段是运行时真源：旧端只改过 vlmModel 时，把选中档字段对齐过去。
+  return {
+    presets: presets.map((p) => (p.id === active ? { ...p, ...fallback } : p)),
+    activeId: active,
+  };
+}
+
+function normalizeEmbedPresets(
+  raw: unknown, fallback: EmbedModel, activeId: unknown,
+): { presets: EmbedPreset[]; activeId: string } {
+  const list = Array.isArray(raw) ? raw : [];
+  const presets: EmbedPreset[] = list
+    .filter((p): p is Partial<EmbedPreset> => Boolean(p) && typeof p === "object")
+    .map((p) => {
+      const fields = normalizeEmbedModel(p);
+      return {
+        ...fields,
+        id: typeof p.id === "string" && p.id ? p.id : crypto.randomUUID(),
+        name: (p.name || "").trim() || presetDefaultName(fields),
+      };
+    });
+  if (presets.length === 0) {
+    const id = crypto.randomUUID();
+    return { presets: [{ ...fallback, id, name: presetDefaultName(fallback) }], activeId: id };
+  }
+  const active = presets.some((p) => p.id === activeId) ? String(activeId) : presets[0].id;
+  return {
+    presets: presets.map((p) => (p.id === active ? { ...p, ...fallback } : p)),
+    activeId: active,
+  };
+}
+
 function migrate(s: Record<string, unknown>): Settings {
   const merged = { ...DEFAULT, ...s } as Settings & { chatModel?: ChatModel };
   merged.theme = normalizeTheme(s.theme);
@@ -687,31 +924,32 @@ function migrate(s: Record<string, unknown>): Settings {
   merged.agentAccessMode = s.agentAccessMode === "full" ? "full" : "approval";
   merged.searchProvider = normalizeSearchProvider(s.searchProvider);
   const savedEmbed = (s.embedModel || {}) as Partial<EmbedModel>;
-  merged.embedModel = {
-    ...DEFAULT.embedModel,
-    ...savedEmbed,
-    mode: savedEmbed.mode === "local" || savedEmbed.mode === "remote"
-      ? savedEmbed.mode
-      : savedEmbed.modelDir?.trim() ? "local" : "remote",
-    // 旧数据只有 baseUrl：按地址补来源（11434/ollama ⇒ Ollama），新数据保留用户显式选择。
-    source: remoteModelSource({
-      source: savedEmbed.source,
-      baseUrl: String(savedEmbed.baseUrl ?? DEFAULT.embedModel.baseUrl),
-    }),
-    proxyMode: normalizeProxyMode(savedEmbed.proxyMode),
-  };
+  // mode/source/proxyMode 显式置回旧值：缺省要走推断（modelDir⇒local、地址⇒API/Ollama、
+  // 无 proxyMode⇒继承全局），不能被 DEFAULT 里的具体值冒充「用户显式选择」。
+  merged.embedModel = normalizeEmbedModel({
+    ...DEFAULT.embedModel, ...savedEmbed,
+    mode: savedEmbed.mode, source: savedEmbed.source, proxyMode: savedEmbed.proxyMode,
+  });
   const savedVlm = (s.vlmModel || {}) as Partial<VlmModel>;
-  merged.vlmModel = {
-    ...DEFAULT.vlmModel,
-    ...savedVlm,
-    mode: savedVlm.mode === "local" || savedVlm.mode === "remote"
-      ? savedVlm.mode
-      : (savedVlm.ggufPath?.trim() || savedVlm.mmprojPath?.trim()) ? "local" : "remote",
-    source: remoteModelSource({
-      source: savedVlm.source,
-      baseUrl: String(savedVlm.baseUrl ?? DEFAULT.vlmModel.baseUrl),
-    }),
-    proxyMode: normalizeProxyMode(savedVlm.proxyMode),
+  merged.vlmModel = normalizeVlmModel({
+    ...DEFAULT.vlmModel, ...savedVlm,
+    mode: savedVlm.mode, source: savedVlm.source, proxyMode: savedVlm.proxyMode,
+  });
+  const embedPresets = normalizeEmbedPresets(s.embedPresets, merged.embedModel, s.activeEmbedPresetId);
+  merged.embedPresets = embedPresets.presets;
+  merged.activeEmbedPresetId = embedPresets.activeId;
+  const vlmPresets = normalizeVlmPresets(s.vlmPresets, merged.vlmModel, s.activeVlmPresetId);
+  merged.vlmPresets = vlmPresets.presets;
+  merged.activeVlmPresetId = vlmPresets.activeId;
+  const savedGbc = (s.gbc || {}) as Partial<GbcEngine>;
+  const parsedTopLevel = Number(savedGbc.maxTopLevel);
+  merged.gbc = {
+    ...DEFAULT_GBC,
+    ...savedGbc,
+    device: savedGbc.device === "cpu" ? "cpu" : "cuda",
+    maxTopLevel: Number.isFinite(parsedTopLevel)
+      ? Math.min(20, Math.max(1, Math.round(parsedTopLevel)))
+      : DEFAULT_GBC.maxTopLevel,
   };
   const contextBudgets = normalizeContextBudgets(
     s.contextReminderTokens,
@@ -731,6 +969,60 @@ function migrate(s: Record<string, unknown>): Settings {
   merged.selfhealAttempts = Number.isFinite(parsedSelfheal)
     ? Math.min(5, Math.max(0, Math.round(parsedSelfheal)))
     : DEFAULT_SELFHEAL_ATTEMPTS;
+  // 聊天室行为上限：旧 settings 缺字段回默认；非法值 clamp，避免 0/负数写出奇怪行为。
+  const chatInt = (value: unknown, lo: number, hi: number, fallback: number) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed)
+      ? Math.min(hi, Math.max(lo, Math.round(parsed)))
+      : fallback;
+  };
+  const chatEnum = <T extends string>(value: unknown, allowed: readonly T[], fallback: T): T => {
+    const raw = String(value ?? "").trim().toLowerCase();
+    return (allowed as readonly string[]).includes(raw) ? raw as T : fallback;
+  };
+  const chatTime = (value: unknown, fallback: string) => {
+    if (value === undefined || value === null) return fallback;
+    const raw = String(value).trim();
+    if (!raw) return "";
+    return /^([01]\d|2[0-3]):[0-5]\d$/.test(raw) ? raw : fallback;
+  };
+  merged.chatGuardMaxChars = chatInt(
+    s.chatGuardMaxChars, 0, 5_000, DEFAULT_CHAT_GUARD_MAX_CHARS,
+  );
+  // 语义版本 2：0=跟随全局预设，>0=聊天独立上限；旧存档里的 1200 兜底值迁移为 0。
+  const chatOutputVersion = Number(s.chatOutputCapVersion);
+  merged.chatDefaultMaxTokens = chatOutputVersion >= 2
+    ? chatInt(s.chatDefaultMaxTokens, 0, 131_072, DEFAULT_CHAT_DEFAULT_MAX_TOKENS)
+    : DEFAULT_CHAT_DEFAULT_MAX_TOKENS;
+  merged.chatOutputCapVersion = 2;
+  merged.chatFollowupMax = chatInt(s.chatFollowupMax, 0, 10, DEFAULT_CHAT_FOLLOWUP_MAX);
+  merged.chatReopenMax = chatInt(s.chatReopenMax, 0, 10, DEFAULT_CHAT_REOPEN_MAX);
+  merged.chatInitiativeIdleMinutes = chatInt(
+    s.chatInitiativeIdleMinutes, 0, 10_080, DEFAULT_CHAT_INITIATIVE_IDLE_MINUTES,
+  );
+  merged.chatInitiativeCooldownMinutes = chatInt(
+    s.chatInitiativeCooldownMinutes, 0, 10_080, DEFAULT_CHAT_INITIATIVE_COOLDOWN_MINUTES,
+  );
+  merged.chatInitiativeDailyMax = chatInt(
+    s.chatInitiativeDailyMax, 0, 100, DEFAULT_CHAT_INITIATIVE_DAILY_MAX,
+  );
+  merged.chatCadence = chatEnum(
+    s.chatCadence, ["quiet", "normal", "frequent"] as const, DEFAULT_CHAT_CADENCE,
+  );
+  merged.chatActiveWindowMinutes = chatInt(
+    s.chatActiveWindowMinutes, 0, 1_440, DEFAULT_CHAT_ACTIVE_WINDOW_MINUTES,
+  );
+  merged.chatMaxBotTurns = chatInt(
+    s.chatMaxBotTurns, 1, 50, DEFAULT_CHAT_MAX_BOT_TURNS,
+  );
+  merged.chatMinAffinity = chatInt(
+    s.chatMinAffinity, -100, 100, DEFAULT_CHAT_MIN_AFFINITY,
+  );
+  merged.chatQuietStart = chatTime(s.chatQuietStart, DEFAULT_CHAT_QUIET_START);
+  merged.chatQuietEnd = chatTime(s.chatQuietEnd, DEFAULT_CHAT_QUIET_END);
+  merged.chatGroupActivity = chatEnum(
+    s.chatGroupActivity, ["quiet", "normal", "lively"] as const, DEFAULT_CHAT_GROUP_ACTIVITY,
+  );
   // 2026-09-04：旧 settings 缺 presetSampling → 逐字段 normalize，缺/非法回退 GrayWill 默认。
   merged.presetSampling = normalizePresetSampling(s.presetSampling as Partial<PresetSampling> | undefined);
   if ((!merged.chatModels || merged.chatModels.length === 0) && merged.chatModel) {
@@ -787,6 +1079,8 @@ export function stripSecrets(s: Settings): Settings {
   out.videoModels = (out.videoModels || []).map((m) => ({ ...m, apiKey: "" }));
   out.embedModel = { ...out.embedModel, apiKey: "" };
   out.vlmModel = { ...out.vlmModel, apiKey: "" };
+  out.embedPresets = (out.embedPresets || []).map((p) => ({ ...p, apiKey: "" }));
+  out.vlmPresets = (out.vlmPresets || []).map((p) => ({ ...p, apiKey: "" }));
   out.hfToken = "";
   out.civitaiToken = "";
   out.smitheryKey = "";
@@ -812,7 +1106,7 @@ export function loadPersistedSettings(storage: Storage = window.localStorage): S
     storage.setItem(KEY, JSON.stringify(cleaned));
     return cleaned;
   } catch {
-    return DEFAULT;
+    return migrate({});
   }
 }
 
@@ -885,6 +1179,130 @@ export function vlmGapMessage(s: Settings): string {
     return "未配置视觉大模型：请到「设置 → 模型 → 视觉大模型（VLM）」填写接口地址与模型名。";
   }
   return "视觉大模型不可用：请检查接口地址 / 模型名是否正确。";
+}
+
+// ── 视觉 / 嵌入模型存档（2026-11-07）：选一个为主，其余是库 ──
+// 写入口径只有一条：改字段 = 改「单字段镜像 + 选中档」，切换档 = 把该档字段灌进单字段。
+// 消费端（activeVlmChat / resolvedEmbedModel / GBC / RAG）继续只读单字段，零改动。
+
+export function vlmPresetName(p: VlmPreset): string {
+  return (p.name || "").trim() || presetDefaultName(p);
+}
+
+export function embedPresetName(p: EmbedPreset): string {
+  return (p.name || "").trim() || presetDefaultName(p);
+}
+
+export function activeVlmPreset(s: Settings): VlmPreset | null {
+  const presets = s.vlmPresets || [];
+  return presets.find((p) => p.id === s.activeVlmPresetId) || presets[0] || null;
+}
+
+export function activeEmbedPreset(s: Settings): EmbedPreset | null {
+  const presets = s.embedPresets || [];
+  return presets.find((p) => p.id === s.activeEmbedPresetId) || presets[0] || null;
+}
+
+export function withVlmPatch(s: Settings, patch: Partial<VlmModel>): Settings {
+  return {
+    ...s,
+    vlmModel: { ...s.vlmModel, ...patch },
+    vlmPresets: (s.vlmPresets || []).map((p) =>
+      p.id === s.activeVlmPresetId ? { ...p, ...patch } : p),
+  };
+}
+
+export function withEmbedPatch(s: Settings, patch: Partial<EmbedModel>): Settings {
+  return {
+    ...s,
+    embedModel: { ...s.embedModel, ...patch },
+    embedPresets: (s.embedPresets || []).map((p) =>
+      p.id === s.activeEmbedPresetId ? { ...p, ...patch } : p),
+  };
+}
+
+export function selectVlmPreset(s: Settings, id: string): Settings {
+  const preset = (s.vlmPresets || []).find((p) => p.id === id);
+  if (!preset) return s;
+  return { ...s, activeVlmPresetId: id, vlmModel: vlmPresetFields(preset) };
+}
+
+export function selectEmbedPreset(s: Settings, id: string): Settings {
+  const preset = (s.embedPresets || []).find((p) => p.id === id);
+  if (!preset) return s;
+  return { ...s, activeEmbedPresetId: id, embedModel: embedPresetFields(preset) };
+}
+
+export function addVlmPreset(s: Settings): Settings {
+  const presets = s.vlmPresets || [];
+  const preset: VlmPreset = {
+    ...vlmPresetFields(s.vlmModel),
+    id: crypto.randomUUID(),
+    name: uniquePresetName(presets, "新存档"),
+  };
+  return {
+    ...s,
+    vlmPresets: [...presets, preset],
+    activeVlmPresetId: preset.id,
+    vlmModel: vlmPresetFields(preset),
+  };
+}
+
+export function addEmbedPreset(s: Settings): Settings {
+  const presets = s.embedPresets || [];
+  const preset: EmbedPreset = {
+    ...embedPresetFields(s.embedModel),
+    id: crypto.randomUUID(),
+    name: uniquePresetName(presets, "新存档"),
+  };
+  return {
+    ...s,
+    embedPresets: [...presets, preset],
+    activeEmbedPresetId: preset.id,
+    embedModel: embedPresetFields(preset),
+  };
+}
+
+export function removeVlmPreset(s: Settings, id: string): Settings {
+  const presets = s.vlmPresets || [];
+  if (presets.length <= 1) return s; // 至少留一档：删空 = 没有「为主」的配置
+  const next = presets.filter((p) => p.id !== id);
+  if (id !== s.activeVlmPresetId) return { ...s, vlmPresets: next };
+  const fallback = next[0];
+  return {
+    ...s,
+    vlmPresets: next,
+    activeVlmPresetId: fallback.id,
+    vlmModel: vlmPresetFields(fallback),
+  };
+}
+
+export function removeEmbedPreset(s: Settings, id: string): Settings {
+  const presets = s.embedPresets || [];
+  if (presets.length <= 1) return s;
+  const next = presets.filter((p) => p.id !== id);
+  if (id !== s.activeEmbedPresetId) return { ...s, embedPresets: next };
+  const fallback = next[0];
+  return {
+    ...s,
+    embedPresets: next,
+    activeEmbedPresetId: fallback.id,
+    embedModel: embedPresetFields(fallback),
+  };
+}
+
+export function renameVlmPreset(s: Settings, id: string, name: string): Settings {
+  return {
+    ...s,
+    vlmPresets: (s.vlmPresets || []).map((p) => (p.id === id ? { ...p, name } : p)),
+  };
+}
+
+export function renameEmbedPreset(s: Settings, id: string, name: string): Settings {
+  return {
+    ...s,
+    embedPresets: (s.embedPresets || []).map((p) => (p.id === id ? { ...p, name } : p)),
+  };
 }
 
 export function modelDisplayName(model: { displayName?: string; modelName: string }): string {

@@ -3,7 +3,7 @@
 // 灵感卡封面：有图 → 图片（1:1）；无图 → 文本预览（放部分内容）。
 // 双击灵感卡 → 详情弹窗（文本内容，不是生成参数；可删图只留文本）。
 // 批量选择：图片 / 灵感卡各自支持 删除 / 发送至画布 / 插入输入框。
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Check, FileText, Folder, Images, Search, Send, Store, Trash2 } from "lucide-react";
 import { PageShell, EmptyState } from "../components/layout/PageShell";
 import { ConfirmModal } from "../components/Modal";
@@ -14,14 +14,16 @@ import { useSettings } from "../stores/settings";
 import { activeVlmChat } from "../stores/settings";
 import { vlmGapMessage } from "../stores/settings";
 import { effectiveGlobalProxyUrl } from "../lib/modelProxy";
-import { imageDataUri } from "../lib/imageData";
+import { TAG_MODES } from "../lib/repoGalleryShared";
+import {
+  generateMaterialMossLayout, loadMaterialTagView, runMaterialTag,
+} from "../lib/webMaterialTagging";
 import { UI_BUILD } from "../lib/buildInfo";
 import {
   listWebMaterials, deleteWebMaterial, type WebMaterial,
   listInspirationCards, deleteInspirationCard, updateInspirationCard,
   type InspirationCardAsset,
-  // 2026-10-18：素材也能单独生成视觉描述（原站只有 tag，没有描述）
-  describeImage, setGenerationDescription, WEB_MATERIALS_REPO_ID,
+  type SavedGbc,
 } from "../api/ai";
 
 const PAGE_SIZE = 32;
@@ -122,36 +124,117 @@ export function WebMaterialsView({
     window.setTimeout(() => setNote(null), 4000);
   };
 
-  // 视觉描述（2026-10-18）：素材来自图站，只有原站 tag、没有描述 ⇒ 详情里单独生成。
-  // 写回走资产主表（repo_id=web-materials，素材的合成仓库），语义搜索立即可见。
-  const [describingId, setDescribingId] = useState("");
-  const describeMaterial = async (m: WebMaterial) => {
+  // 反推（2026-11-07）：与资产库同一套五档；素材落在合成仓库 web-materials 的资产上。
+  // 原站标签（provenance）与反推标签（资产快照）是两套数据，详情分两个分区展示。
+  const [tagMode, setTagMode] = useState<string>(() => {
+    try {
+      const saved = localStorage.getItem("demiurge.tagMode");
+      return saved && TAG_MODES.some((m) => m.value === saved) ? saved : "vlm";
+    } catch { return "vlm"; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("demiurge.tagMode", tagMode); } catch { /* 隐私模式忽略 */ }
+  }, [tagMode]);
+  const [tagBusyId, setTagBusyId] = useState("");
+  const [tagErrors, setTagErrors] = useState<Record<string, string>>({});
+  const [tagSummaries, setTagSummaries] = useState<Record<string, string>>({});
+  const [reverseTags, setReverseTags] = useState<Record<string, { tags: string[]; label: string }>>({});
+  const [gbcSaved, setGbcSaved] = useState<Record<string, SavedGbc>>({});
+  const [mossBusy, setMossBusy] = useState<Record<string, boolean>>({});
+  const [mossErrors, setMossErrors] = useState<Record<string, string>>({});
+  const autoMossFor = useRef("");
+
+  const runTagging = async (m: WebMaterial, mode: string) => {
     if (!m.assetId) {
       flashNote("该素材还没有资产记录：重启后端后新下载的素材会自动补，旧素材需回填", "error");
       return;
     }
-    setDescribingId(m.filename);
+    const id = m.assetId;
+    // 与资产库同口径：只在「VLM 真的没配好」时给精准指引（本地 GGUF 未导入 ≠ 没填模型），
+    // 不要丢给编排层笼统的「未配置视觉模型」。
+    if (mode !== "wd14" && !activeVlmChat(settings)) {
+      flashNote(vlmGapMessage(settings), "error");
+      return;
+    }
+    setTagBusyId(m.filename);
+    setTagErrors((cur) => ({ ...cur, [id]: "" }));
+    setTagSummaries((cur) => ({ ...cur, [id]: "" }));
     try {
-      const vlm = activeVlmChat(settings);
-      if (!vlm) {
-        flashNote(vlmGapMessage(settings), "error");
-        return;
+      const r = await runMaterialTag(m, mode, {
+        vlm: activeVlmChat(settings),
+        gbc: settings.gbc,
+        embed: settings.embedModel,
+        outputDir,
+      });
+      if (r.tags) {
+        const label = (TAG_MODES.find((x) => x.value === mode)?.label || mode)
+          .replace(/（.*?）$/, "");
+        setReverseTags((cur) => ({ ...cur, [id]: { tags: r.tags!, label } }));
       }
-      const img = await imageDataUri(m.url);
-      const r = await describeImage([img], vlm,
-        "用一段简洁中文客观描述图片中的人物外观、服装、动作、场景、构图和画风；不要写提示词，不要解释。");
-      const desc = (r.prompt || "").trim();
-      if (!desc) { flashNote("视觉模型没有返回描述（可能不支持视觉）", "error"); return; }
-      await setGenerationDescription(m.assetId, WEB_MATERIALS_REPO_ID, desc, settings.embedModel);
-      setItems((cur) => cur.map((x) => (x.filename === m.filename ? { ...x, description: desc } : x)));
-      setDetailMaterial((cur) => (cur && cur.filename === m.filename ? { ...cur, description: desc } : cur));
-      flashNote("视觉描述已写回——详情里可「复制描述 / 复制提示词」。");
+      if (r.description) {
+        setItems((cur) => cur.map((x) => (x.filename === m.filename ? { ...x, description: r.description } : x)));
+        setDetailMaterial((cur) => (cur && cur.filename === m.filename ? { ...cur, description: r.description } : cur));
+      }
+      if (r.gbc) {
+        // 本轮已试过官方布局（失败时重开详情才重试），避免同次打开再触发一次付费生成
+        autoMossFor.current = id;
+        setGbcSaved((cur) => ({ ...cur, [id]: r.gbc! }));
+      }
+      if (r.mossError) setMossErrors((cur) => ({ ...cur, [id]: r.mossError! }));
+      if (!r.ok) {
+        setTagErrors((cur) => ({ ...cur, [id]: r.summary }));
+        flashNote(r.summary, "error");
+      } else {
+        setTagSummaries((cur) => ({ ...cur, [id]: r.summary }));
+        flashNote(r.summary, "success");
+      }
     } catch (e) {
-      flashNote(`生成失败：${(e as Error).message}`, "error");
+      const msg = (e as Error).message;
+      setTagErrors((cur) => ({ ...cur, [id]: msg }));
+      flashNote(`反推失败：${msg}`, "error");
     } finally {
-      setDescribingId("");
+      setTagBusyId("");
     }
   };
+
+  // 打开详情：读已存的反推标签/场景图；老场景图缺官方布局时自动补一次
+  // （与资产库详情同口径；autoMossFor 记住本次打开是否试过，避免重复付费）。
+  useEffect(() => {
+    const id = detailMaterial?.assetId || "";
+    if (!id) { autoMossFor.current = ""; return; }
+    let alive = true;
+    void loadMaterialTagView(id, settings.embedModel).then((view) => {
+      if (!alive) return;
+      if (view.tags) setReverseTags((cur) => (cur[id] ? cur : { ...cur, [id]: view.tags! }));
+      if (view.gbc) setGbcSaved((cur) => ({ ...cur, [id]: view.gbc! }));
+      const saved = view.gbc;
+      if (!saved?.outline || saved.outline.entities.length === 0) return;
+      if (saved.moss_layout?.layout || autoMossFor.current === id) return;
+      autoMossFor.current = id;
+      const vlm = activeVlmChat(settings);
+      if (!vlm) {
+        setMossErrors((cur) => ({ ...cur, [id]: vlmGapMessage(settings) }));
+        return;
+      }
+      setMossBusy((cur) => ({ ...cur, [id]: true }));
+      void generateMaterialMossLayout(id, vlm).then((r) => {
+        if (!alive) return;
+        if (r.mossLayout) {
+          setGbcSaved((cur) => {
+            const prev = cur[id];
+            return prev ? { ...cur, [id]: { ...prev, moss_layout: r.mossLayout } } : cur;
+          });
+        } else {
+          setMossErrors((cur) => ({ ...cur, [id]: r.error || "官方布局生成失败" }));
+        }
+      }).finally(() => {
+        if (alive) setMossBusy((cur) => ({ ...cur, [id]: false }));
+      });
+    });
+    return () => { alive = false; };
+    // settings 只在打开时取一次快照（反推参数由 runTagging 现取）
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detailMaterial?.assetId, settings.embedModel]);
 
   const refresh = () => {
     if (!outputDir) { setItems([]); setCards([]); setLoading(false); return; }
@@ -644,8 +727,17 @@ export function WebMaterialsView({
           onNotify={flashNote}
           onSendToChat={onSendToChat}
           onSendAsRecipe={onSendAsRecipe}
-          onDescribe={(m) => void describeMaterial(m)}
-          describing={describingId === detailMaterial.filename}
+          tagMode={tagMode}
+          onTagMode={setTagMode}
+          onRunTag={(m, mode) => void runTagging(m, mode)}
+          tagBusy={!!detailMaterial.assetId && tagBusyId === detailMaterial.filename}
+          tagError={detailMaterial.assetId ? tagErrors[detailMaterial.assetId] : ""}
+          tagSummary={detailMaterial.assetId ? tagSummaries[detailMaterial.assetId] : ""}
+          reverseTags={detailMaterial.assetId ? reverseTags[detailMaterial.assetId]?.tags : undefined}
+          reverseTagLabel={detailMaterial.assetId ? reverseTags[detailMaterial.assetId]?.label : undefined}
+          gbc={detailMaterial.assetId ? gbcSaved[detailMaterial.assetId] : undefined}
+          mossBusy={detailMaterial.assetId ? !!mossBusy[detailMaterial.assetId] : false}
+          mossError={detailMaterial.assetId ? mossErrors[detailMaterial.assetId] : ""}
         />
       )}
       {market && (

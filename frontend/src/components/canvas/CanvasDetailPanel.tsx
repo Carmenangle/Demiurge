@@ -16,6 +16,7 @@ import { AudioPlayer } from "../AudioPlayer";
 import { renderMarkdown } from "../../lib/renderMarkdown";
 import { runScripts, Placement, type RegexScript } from "../../lib/regexEngine";
 import type { CanvasNode, GenLike, NodeDetailData } from "../../lib/canvasRuntime";
+import { genMediaUrl } from "../../lib/canvasRuntime";
 import type { SendPayload } from "../SendToChatModal";
 
 /** 详情面板（视图守卫 `{detail && detailNode && ...}`）。 */
@@ -93,7 +94,7 @@ export function CanvasDetailPanel({ detailNode, detail, setDetailNode, showStory
           {/* 左侧：主预览（图/视频/音频/输入按类型） */}
           <div style={{ flex: "1 1 300px", minWidth: 240 }}>
             {detailNode.type === "video" ? (
-              <video src={(detail.gens[0] as { video_url?: string } | undefined)?.video_url || ""} controls
+              <video src={genMediaUrl(detail.gens[0])} poster={detail.gens[0]?.thumbUrl || undefined} controls
                 style={{ width: "100%", borderRadius: 10, background: "#000" }} />
             ) : detailNode.type === "audio" ? (
               <div style={{ width: "100%", aspectRatio: "16/9", borderRadius: 10, background: "rgba(255,255,255,0.03)",

@@ -58,7 +58,7 @@ def test_external_rag_finder_only_claims_owned_package(monkeypatch, tmp_path: Pa
     assert calls == [("torch.autograd", ["torch-path"])]
 
 
-def test_full_rag_self_check_reports_torch_build(monkeypatch, capsys):
+def test_attached_rag_self_check_reports_torch_build(monkeypatch, capsys):
     class TorchVersion:
         cuda = "13.0"
 
@@ -66,7 +66,7 @@ def test_full_rag_self_check_reports_torch_build(monkeypatch, capsys):
         __version__ = "2.13.0+cu130"
         version = TorchVersion()
 
-    monkeypatch.setenv("LAF_RUNTIME_EDITION", "full-rag")
+    monkeypatch.setenv("LAF_RAG_ATTACHED", "1")
     imported = []
     monkeypatch.setattr(
         runtime_entry.importlib, "import_module",
@@ -79,6 +79,46 @@ def test_full_rag_self_check_reports_torch_build(monkeypatch, capsys):
     assert payload["torch_version"] == "2.13.0+cu130"
     assert payload["torch_cuda"] == "13.0"
     assert imported[:3] == ["torch", "transformers", "sentence_transformers"]
+
+
+def test_rag_layer_absent_self_check_does_not_claim_torch(monkeypatch, capsys):
+    """P3 的诚实闸：`edition` 写着 full-rag、rag 层却没落地时，自检不许去 import torch，
+    也不许在结果里报一个不存在的 torch 版本——否则打包门禁会绿得毫无意义。"""
+    monkeypatch.setenv("LAF_RUNTIME_EDITION", "full-rag")
+    monkeypatch.setenv("LAF_RAG_ATTACHED", "0")
+    imported = []
+    monkeypatch.setattr(
+        runtime_entry.importlib, "import_module",
+        lambda name: imported.append(name) or object(),
+    )
+
+    runtime_entry.self_check()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "ok"
+    assert "torch" not in imported
+    assert "torch_version" not in payload
+
+
+def test_configure_environment_marks_attach_by_disk_not_by_state(
+    monkeypatch, tmp_path: Path,
+):
+    """挂没挂上只认盘上的目录：状态档先说有个没落地的 rag_id，再说有，标记要跟着翻。"""
+    monkeypatch.setattr(runtime_entry.sys, "meta_path", runtime_entry.sys.meta_path.copy())
+    (tmp_path / "current.json").write_text(
+        json.dumps({"edition": "full-rag", "rag_id": "layer-missing"}), encoding="utf-8",
+    )
+
+    runtime_entry.configure_environment(tmp_path)
+    assert runtime_entry.os.environ["LAF_RAG_ATTACHED"] == "0"
+
+    (tmp_path / "current.json").write_text(
+        json.dumps({"edition": "full-rag", "rag_id": "layer-1"}), encoding="utf-8",
+    )
+    (tmp_path / "rag" / "layer-1" / "site-packages").mkdir(parents=True)
+
+    runtime_entry.configure_environment(tmp_path)
+    assert runtime_entry.os.environ["LAF_RAG_ATTACHED"] == "1"
 
 
 def test_packaged_main_uses_combined_frontend_backend_port_without_console_logging(

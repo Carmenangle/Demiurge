@@ -1,7 +1,7 @@
 """作品包导入/导出（M5 · 换机迁移）：一个 zip = 一个作品。
 
 作品在磁盘上自包含（`outputDir/<作品名>/`：会话记录随图片同落，`_repo.json` 是身份
-标记，目录名只用于展示），外加 user_state.json 里的一条 repos 记录（名称/绑卡等）。
+标记，目录名只用于展示），外加作品索引档（`repos.json`）里的一条记录（名称/绑卡等）。
 导出包＝文件夹内容 + `__transfer/meta.json`（repos 记录与格式版本）；导入＝解包到
 作品根、身份证冲突时换新 id、登记 repos 记录。
 
@@ -10,7 +10,7 @@
   逃出作品根。
 - 包格式自证：缺 `__transfer/meta.json` 或 `app != "demiurge"` 即拒（防拿任意 zip
   当作品包灌进作品根）。
-- 导入只写作品根与 user_state（save_user_state 原子写）；不触碰 DATA_DIR 其他面。
+- 导入只写作品根与作品索引档（`repo_meta.save_repos` 原子写）；不触碰 DATA_DIR 其他面。
 """
 from __future__ import annotations
 
@@ -116,7 +116,7 @@ def _register_repo(new_record: dict, dest: Path) -> None:
     state = repo_meta.load_user_state()
     repos = [r for r in (state.get("repos") or []) if isinstance(r, dict)]
     repos.append(new_record)
-    repo_meta.save_user_state({**state, "repos": repos})
+    repo_meta.save_repos(repos)
     repo_meta.write_repo_marker(dest, str(new_record["id"]))
 
 

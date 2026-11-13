@@ -17,11 +17,16 @@ import sys
 import time
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(ROOT / "backend"))
 
-from runtime_delivery import normalize_version
-from stage_installer_dependencies import (
+from app import data_layout  # noqa: E402  三档名单真源，核验面不复制名单
+from runtime_delivery import normalize_version  # noqa: E402
+from stage_installer_dependencies import (  # noqa: E402
     DEFAULT_STAGING,
+    FORBIDDEN_PATH_PARTS,
+    FORBIDDEN_PATH_PREFIXES,
     PER_MACHINE_OVERLAY,
     TAURI_CONF,
     assert_installer_config,
@@ -30,25 +35,17 @@ from stage_installer_dependencies import (
     stage,
     summarize,
 )
-from updater_manifest import assert_signature_matches_pubkey, assert_updater_config
-
-ROOT = Path(__file__).resolve().parents[1]
+from updater_manifest import assert_signature_matches_pubkey, assert_updater_config  # noqa: E402
 TAURI_DIR = ROOT / "desktop" / "tauri"
 OUTPUT_DIR = ROOT / "release-output" / "installers"
 WORK_DIR = ROOT / ".installer-work"
+#: 安装/卸载核验用的壳 home 沙箱：钩子与壳都从这里取 `DEMIURGE_SHELL_HOME`。
+SMOKE_SHELL_HOME = WORK_DIR / "smoke-home"
 CLI_PACKAGE = "@tauri-apps/cli@2"
 PRODUCT_NAME = "Demiurge"
 UNINSTALL_REGISTRY_KEY = rf"Software\Microsoft\Windows\CurrentVersion\Uninstall\{PRODUCT_NAME}"
-FORBIDDEN_PATH_PARTS = {
-    "presets",
-    "userdata",
-    "user_state.json",
-    "chat.json",
-    "desktop.json",
-    "runtime.pid",
-    ".env",
-}
-FORBIDDEN_PATH_PREFIXES = ("backend/data",)
+# 禁入面只有 `stage_installer_dependencies` 一份名单：安装器核验面与暂存核验面必须同判据，
+# 否则「这一面拦住了、那一面没拦住」就成了第二条隐私面。
 UPDATER_SIGNATURE_SUFFIX = ".sig"
 
 
@@ -327,14 +324,25 @@ def build_variant(variant: str, version: str, overlay: Path | None) -> Path:
     return target
 
 
+def smoke_env() -> dict[str, str]:
+    """卸载核验用的环境：把壳 home 钉死在工作区沙箱。
+
+    钩子与壳都只认 `DEMIURGE_SHELL_HOME`，不设＝指真实 `%LOCALAPPDATA%\\Demiurge`：那样一次
+    `--smoke` 会删掉开发者本机的缓存与日志，还会往真实 home 写回执。这里无条件覆盖，
+    不接受调用方传进来的值。
+    """
+    env = dict(os.environ)
+    env["DEMIURGE_SHELL_HOME"] = str(SMOKE_SHELL_HOME)
+    return env
+
+
 def run_installed_self_test(install_dir: Path) -> list[str]:
     """安装目录里的壳必须能自检通过（隔离 home，不碰本机真实数据）。"""
-    home = WORK_DIR / "smoke-home"
+    home = SMOKE_SHELL_HOME
     if home.exists():
         shutil.rmtree(home)
     home.mkdir(parents=True)
-    env = dict(os.environ)
-    env["DEMIURGE_SHELL_HOME"] = str(home)
+    env = smoke_env()
     result = subprocess.run(
         [str(install_dir / "Demiurge.exe"), "--self-test"],
         capture_output=True,
@@ -358,27 +366,83 @@ def run_installed_self_test(install_dir: Path) -> list[str]:
     return []
 
 
-def residue_targets(install_dir: Path, appdata: Path) -> list[tuple[str, Path]]:
+def seed_shell_home(home: Path) -> dict[tuple[str, str], Path]:
+    """按三档真源铺一份「装完并跑过」的壳 home，外加一个未登记名字。
+
+    铺全部档位而不是抽几个：卸载后的断言才能同时覆盖「缓存必须消失」与「设置/产物必须留下」，
+    而未登记名字证明删除面按白名单逐名取档，不是按目录一把梭。
+    """
+    seeded: dict[tuple[str, str], Path] = {}
+    for scope, prefix in (
+        (data_layout.SCOPE_SHELL_HOME, home),
+        (data_layout.SCOPE_USERDATA, home / "userdata"),
+    ):
+        for name, (tier, kind) in sorted(data_layout.SCOPES[scope].items()):
+            if tier == data_layout.CONTAINER:
+                continue  # userdata 目录本身由父路径带出来
+            path = prefix / name
+            if kind == data_layout.DIR:
+                path.mkdir(parents=True, exist_ok=True)
+                (path / "blob.bin").write_bytes(b"x")
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"x")
+            seeded[(scope, name)] = path
+    unknown = home / "userdata" / "zzz_not_registered"
+    unknown.mkdir(parents=True, exist_ok=True)
+    (unknown / "blob.bin").write_bytes(b"x")
+    seeded[(data_layout.SCOPE_USERDATA, unknown.name)] = unknown
+    return seeded
+
+
+def check_shell_home_tiers(seeded: dict[tuple[str, str], Path], receipt: str) -> list[str]:
+    """静默卸载后的分档断言：档 1 必须消失，其余必须原样在；回执里不许出现删除失败。"""
+    errors: list[str] = []
+    for (scope, name), path in sorted(seeded.items()):
+        tier = data_layout.tier(scope, name)
+        if tier == data_layout.CACHE:
+            if path.exists():
+                errors.append(f"档 1 缓存卸载后仍在：{scope}/{name}")
+            if f"KEEP  {scope}/{name}" in receipt:
+                errors.append(f"档 1 缓存删除被拒（进程占用或权限）：{scope}/{name}")
+        elif not path.exists():
+            errors.append(f"{tier} 条目被误删：{scope}/{name}")
+    return errors
+
+
+def residue_targets(
+    install_dir: Path, appdata: Path, shell_home: Path | None = None
+) -> list[tuple[str, Path]]:
     """currentUser 静默卸载后必须消失的位置。
 
     `HKCU\\Software\\Demiurge\\Demiurge`（上次安装路径）不在此列：Tauri 生成的 NSIS 把它的清理
     绑在「删除应用数据」勾选框（`$DeleteAppDataCheckboxState = 1`）上，`/S` 永远读不到该状态。
     """
-    return [
+    targets = [
         ("安装目录", install_dir),
         (
             "开始菜单",
             appdata / "Microsoft" / "Windows" / "Start Menu" / "Programs" / PRODUCT_NAME,
         ),
     ]
+    if shell_home is not None:
+        for scope, prefix in (
+            (data_layout.SCOPE_SHELL_HOME, shell_home),
+            (data_layout.SCOPE_USERDATA, shell_home / "userdata"),
+        ):
+            for name, _tier, _kind in data_layout.deletion_names(scope, include_settings=False):
+                targets.append((f"壳 home 缓存 {scope}/{name}", prefix / name))
+    return targets
 
 
-def uninstall_residue(install_dir: Path) -> list[str]:
+def uninstall_residue(install_dir: Path, shell_home: Path | None = None) -> list[str]:
     import winreg  # Windows-only：只有 NSIS 卸载核验会走到这里
 
     appdata = Path(os.environ["APPDATA"])
     leftovers = [
-        f"{label}：{path}" for label, path in residue_targets(install_dir, appdata) if path.exists()
+        f"{label}：{path}"
+        for label, path in residue_targets(install_dir, appdata, shell_home)
+        if path.exists()
     ]
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, UNINSTALL_REGISTRY_KEY):
@@ -394,8 +458,9 @@ def smoke_install(installer: Path) -> list[str]:
         shutil.rmtree(smoke_root)
     smoke_root.mkdir(parents=True)
     install_dir = smoke_root / "app"
-    print(f"[installer] 静默安装到 {install_dir}", flush=True)
-    subprocess.run([str(installer), "/S", f"/D={install_dir}"], check=True)
+    env = smoke_env()
+    print(f"[installer] 静默安装到 {install_dir}（壳 home 沙箱 {SMOKE_SHELL_HOME}）", flush=True)
+    subprocess.run([str(installer), "/S", f"/D={install_dir}"], check=True, env=env)
 
     deadline = time.time() + 120
     while time.time() < deadline and not (install_dir / "uninstall.exe").is_file():
@@ -407,17 +472,28 @@ def smoke_install(installer: Path) -> list[str]:
     if errors:
         return errors
 
-    print("[installer] 静默卸载", flush=True)
-    subprocess.run([str(install_dir / "uninstall.exe"), "/S"], check=True)
+    seeded = seed_shell_home(SMOKE_SHELL_HOME)
+    print(f"[installer] 壳 home 已铺 {len(seeded)} 个条目（三档 + 未登记），静默卸载", flush=True)
+    subprocess.run([str(install_dir / "uninstall.exe"), "/S"], check=True, env=env)
     deadline = time.time() + 120
-    while time.time() < deadline and uninstall_residue(install_dir):
+    while time.time() < deadline and uninstall_residue(install_dir, SMOKE_SHELL_HOME):
         time.sleep(1)
-    leftovers = uninstall_residue(install_dir)
+    leftovers = uninstall_residue(install_dir, SMOKE_SHELL_HOME)
     if leftovers:
         return [f"卸载后仍有残留：{item}" for item in leftovers]
-    print("[installer] 卸载后安装目录/开始菜单/注册表登记项均消失", flush=True)
+
+    receipt_path = SMOKE_SHELL_HOME / "uninstall.log"
+    receipt = receipt_path.read_text(encoding="utf-8") if receipt_path.is_file() else ""
+    errors = check_shell_home_tiers(seeded, receipt)
+    if not receipt_path.is_file():
+        errors.insert(0, f"卸载回执缺失：{receipt_path}（钩子没跑或 home 路径没解析出来）")
+    elif "SKIP  settings (checkbox off)" not in receipt:
+        errors.insert(0, "静默卸载未走「保留设置」分支：勾选框状态在 /S 下应当读不到")
+    if errors:
+        return errors
+    print("[installer] 卸载后安装目录/开始菜单/档 1 缓存均消失，设置与产物保留（回执见 uninstall.log）", flush=True)
     shutil.rmtree(smoke_root, ignore_errors=True)
-    shutil.rmtree(WORK_DIR / "smoke-home", ignore_errors=True)
+    shutil.rmtree(SMOKE_SHELL_HOME, ignore_errors=True)
     return []
 
 

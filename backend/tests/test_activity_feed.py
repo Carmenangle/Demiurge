@@ -11,16 +11,25 @@ import time
 
 import pytest
 
-from app.services import activity_feed, agency_maintenance, lora_index, model_downloader, node_update
+from app.services import (
+    activity_feed,
+    agency_maintenance,
+    lora_index,
+    model_downloader,
+    node_update,
+    shell_delivery,
+)
 
 
 @pytest.fixture(autouse=True)
 def _isolate_sources(monkeypatch):
-    """默认四个源都空闲；各用例只覆盖自己关心的那一个，避免真实进程状态泄漏进断言。"""
+    """默认各源都空闲；各用例只覆盖自己关心的那一个，避免真实进程状态泄漏进断言。"""
     monkeypatch.setattr(model_downloader, "list_tasks", lambda: [])
     monkeypatch.setattr(node_update, "progress", lambda: {"running": False})
     monkeypatch.setattr(lora_index, "sync_progress", lambda: {"running": False})
     monkeypatch.setattr(agency_maintenance, "maintenance_snapshot", lambda: [])
+    # 补齐账本来自**另一个进程**写在 DATA_DIR 下的文件：不钉住它，本机真有一份在跑就全乱。
+    monkeypatch.setattr(shell_delivery, "read_ledger", lambda now=None: None)
 
 
 def test_download_items_map_bytes_and_kind(monkeypatch):
@@ -176,3 +185,67 @@ def test_snapshot_sorted_by_started_at_desc(monkeypatch):
          "downloaded": 1, "total": 2, "created": now, "updated_at": now},
     ])
     assert [item["label"] for item in activity_feed.snapshot()] == ["new", "old"]
+
+
+# —— 第八源：桌面壳后台补齐可选层（P3-b，跨进程账本）——————————————————————————
+
+def _ledger(now: float, **overrides) -> dict:
+    value = {
+        "layer": "rag", "label": "RAG 增强层", "state": "running", "stage": "下载分件",
+        "done_bytes": 5 * 1024 * 1024, "total_bytes": 10 * 1024 * 1024,
+        "speed_bps": 2 * 1024 * 1024, "started_at": now - 8, "updated_at": now, "error": "",
+    }
+    value.update(overrides)
+    return value
+
+
+def test_壳补齐进度投影成一条运行中活动(monkeypatch):
+    """验收口径「面板显示 RAG 下载中并给出速率」的读侧证据（写侧由自检第 17/19 项盯）。"""
+    now = time.time()
+    monkeypatch.setattr(shell_delivery, "read_ledger", lambda moment=None: _ledger(now))
+    item = activity_feed.snapshot()[0]
+
+    assert item["kind"] == "runtime_delivery" and item["title"] == "运行时补齐"
+    assert item["label"] == "RAG 增强层"
+    assert item["status"] == "running"
+    assert item["progress"] == "5.0 MB / 10.0 MB · 2.0 MB/s"
+    assert item["detail"] == "下载分件"
+    assert item["target"] == ""
+
+
+def test_补齐成功后条目转终态并保留速率位(monkeypatch):
+    now = time.time()
+    monkeypatch.setattr(shell_delivery, "read_ledger", lambda moment=None: _ledger(
+        now, state="done", stage="已提交", done_bytes=10 * 1024 * 1024, speed_bps=0))
+    item = activity_feed.snapshot()[0]
+
+    assert item["status"] == "done"
+    assert item["progress"] == "10.0 MB / 10.0 MB"
+    assert item["detail"] == "已提交"
+
+
+def test_补齐失败只显示错误不显示进度(monkeypatch):
+    now = time.time()
+    monkeypatch.setattr(shell_delivery, "read_ledger", lambda moment=None: _ledger(
+        now, state="failed", done_bytes=3 * 1024 * 1024, error="RAG 增强层未通过启动自检"))
+    item = activity_feed.snapshot()[0]
+
+    assert item["status"] == "failed"
+    assert item["progress"] == ""
+    assert item["error"] == "RAG 增强层未通过启动自检"
+
+
+def test_补齐结束超过保留期就不再显示(monkeypatch):
+    """与下载同源口径：终态条目只留 `_KEEP_DONE_S`，否则面板会永远挂着一条上次补齐。"""
+    stale = time.time() - activity_feed._KEEP_DONE_S - 5
+    monkeypatch.setattr(shell_delivery, "read_ledger", lambda moment=None: _ledger(
+        stale, state="done", updated_at=stale))
+
+    assert activity_feed.snapshot() == []
+
+
+def test_读侧判定陈旧时面板不产生条目(monkeypatch):
+    """陈旧规则住在 `shell_delivery`（30 秒无更新 ⇒ 写入方已不在）⇒ 这里必须拿不到条目。"""
+    monkeypatch.setattr(shell_delivery, "read_ledger", lambda moment=None: None)
+
+    assert activity_feed.snapshot() == []

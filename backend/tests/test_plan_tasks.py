@@ -296,6 +296,52 @@ def test_approval模式默认仍需审批(store, fake_capabilities, monkeypatch)
     assert plan_tasks.get_task(task_id)["status"] == "awaiting_approval"
 
 
+# ── 租约存储失败的真实语义（2026-11-05 T2）─────────────────────────────────
+# grant 落盘失败必须抛出而不是「内存里签成了」：queued + 无有效租约 = 假可执行态，
+# 执行器随后会把「存储坏了」表现成「用户没批准」，排查方向整个跑偏。
+
+
+def test_full模式租约写盘失败不留queued假可执行态(store, fake_capabilities, monkeypatch):
+    monkeypatch.setattr(plan_tasks, "_agent_access_mode",
+                        lambda: capability_sandbox.ACCESS_FULL)
+
+    def _boom(*_args, **_kwargs):
+        raise OSError("注入：租约盘面写入失败")
+    monkeypatch.setattr(capability_sandbox, "_save_persisted", _boom)
+
+    plan = _plan([PlanStep(id="s1", operation="test.batch", params={"template_id": "t1"})])
+    with pytest.raises(OSError, match="租约盘面写入失败"):
+        plan_tasks.submit_task(plan, output_dir=str(store["path"].parent),
+                               configured_models={"chat", "image"})
+
+    tasks = plan_tasks.list_tasks(output_dir=str(store["path"].parent))
+    assert len(tasks) == 1 and tasks[0]["status"] == "blocked", \
+        f"租约没落住的 full 任务不得留在 queued：{tasks}"
+    assert tasks[0]["lease_id"] == ""
+    assert "租约" in tasks[0]["error"], "必须写明是租约签发失败，不是用户没批准"
+    assert plan_tasks._claim_next() is None, "blocked 任务不得被执行器认领"
+
+
+def test_批准时租约写盘失败任务仍awaiting且lease不变(store, fake_capabilities, monkeypatch):
+    plan = _plan([PlanStep(id="s1", operation="test.batch", params={"template_id": "t1"})])
+    task_id = plan_tasks.submit_task(plan, output_dir=str(store["path"].parent),
+                                     configured_models={"chat", "image"})["task_id"]
+    plan_tasks._run_task(plan_tasks._claim_next(), threading.Event())
+    assert plan_tasks.get_task(task_id)["status"] == "awaiting_approval"
+
+    def _boom(*_args, **_kwargs):
+        raise OSError("注入：租约盘面写入失败")
+    monkeypatch.setattr(capability_sandbox, "_save_persisted", _boom)
+
+    with pytest.raises(OSError, match="租约盘面写入失败"):
+        plan_tasks.approve_task(task_id)
+
+    task = plan_tasks.get_task(task_id)
+    assert task["status"] == "awaiting_approval", "写盘失败不得把任务唤醒成可执行"
+    assert task["lease_id"] == "", "租约没落住就不能把 id 写进任务"
+    assert plan_tasks.get_task(task_id)["steps"][0]["status"] == "blocked"
+
+
 def test_租约撤销后expensive再次被拦(store, fake_capabilities):
     plan = _plan([PlanStep(id="s1", operation="test.batch", params={"template_id": "t1"})])
     task_id = plan_tasks.submit_task(plan, output_dir=str(store["path"].parent),

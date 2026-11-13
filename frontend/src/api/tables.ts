@@ -60,6 +60,8 @@ export interface ManualFillResult {
   calls?: number;
   applied?: number;
   chronicles?: number;
+  // 2026-11-10：重建索引时顺手补齐的「关键事件/纪念装扮」永久行数。
+  key_events?: number;
   // 2026-09-13：解析失败被跳过的批次描述（重试耗尽）。空数组 = 全部成功。
   failed_batches?: string[];
   // 2026-10-21：本次范围内已被纪要覆盖的层（连续段）。needs_confirmation 时据此让用户

@@ -13,6 +13,7 @@
 import importlib
 import inspect
 import itertools
+import json
 
 from app.services import agent_agency as aag
 
@@ -273,3 +274,220 @@ def test_无画幅时size留空而不是假造横屏():
     """空串与 None 都属「这一帧没判定画幅」⇒ size 必须空着，让提示词里不出现假画幅。"""
     assert _出图外壳请求(aspect_ratio="")["video_config"]["size"] == ""
     assert _出图外壳请求(aspect_ratio=None)["video_config"]["size"] == ""
+
+
+def test_纯卡时棘轮豁免名单收到卡名与用户名(tmp_path):
+    """清单 #5 回归：无世界书时 `exclude` 的两条人名来源（数据表行首列／`_worldbook_character_names`）
+    恒空 ⇒ 「露娜抬起头」这类正常叙述会被当「无锚点膨胀」报出来。修后＝卡名／用户名进 `exclude`
+    （只进豁免名单，不进任何 prompt），且排在最前——返回列表要 `[:40]` 截断，这两条最不该被挤掉。"""
+    from app.services import agency_scene_state as ass
+
+    ctx = {"card_names": ["露娜"], "card_name": "露娜", "opening_card_name": "",
+           "user_name": "阿明", "output_dir": str(tmp_path),
+           "_worldbook_character_names": [], "_selected_persona_names": [], "history": []}
+    _injected, _bodies, exclude, setting = ass._wb_ratchet_sources(ctx, "work")
+    assert exclude[:2] == ["露娜", "阿明"]
+    assert setting == []   # 没顺手改存量口径：无书时第 4 条那道闸门仍整关，缺席改由臂台账记进报告（#4）
+
+    ctx_with_book = dict(ctx, _worldbook_character_names=["顾凝霜"])
+    _i, _b, exclude2, _s = ass._wb_ratchet_sources(ctx_with_book, "work")
+    assert exclude2.index("露娜") < exclude2.index("顾凝霜")
+
+    # 本刀往 names 里追加的四条**可能为空**（无卡／无用户名）。空串一旦进 exclude，
+    # `n in body` 恒真 ⇒ 每个候选词都算「有人名锚点」⇒ 整道棘轮静默全绿（比误报更坏的失败）。
+    _i, _b, exclude3, _s = ass._wb_ratchet_sources(
+        dict(ctx, card_names=[], card_name="", user_name=""), "work")
+    assert "" not in exclude3
+
+
+# ---------------------------------------------------------------------------
+# 臂参与台账（清单 #3／#4）：没书所以不判 ⇒ 报告要写明「这一臂本轮没参与」
+#
+# 判据本体一个字没动（`narrative_ci.evaluate` 的 `for rule in world_rules:`、
+# `prose_style.term_ratchet_report` 的 `if set_texts:`）。这里锁的是**观测接缝**：
+# 台账必须与诊断同轮产出，并同时进 trace 与库——只落一边就会出现「界面说查过、trace 说没查」。
+# ---------------------------------------------------------------------------
+def _纯卡ctx(tmp_path, **extra):
+    ctx = {"output_dir": str(tmp_path), "card_names": ["露娜"], "card_name": "露娜",
+           "opening_card_name": "", "user_name": "阿明",
+           "_worldbook_character_names": [], "_selected_persona_names": [],
+           "_world_rules": [], "history": []}
+    return dict(ctx, **extra)
+
+
+def _快照文件(base: str, repo_id: str, payload: str) -> None:
+    """按真实读侧路径落一份世界书快照（不 monkeypatch：让 `is_file()`／JSON 解析都走真代码）。"""
+    from app.services import worldbook_store
+
+    path = worldbook_store.repo_snapshot_path(base, repo_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(payload, encoding="utf-8")
+
+
+def _跑一轮CI(ass, ctx, monkeypatch, *, turn: int = 3):
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(ass.run_trace, "emit",
+                        lambda c, event, **data: events.append((event, data)))
+    ass._wb_run_narrative_ci(ctx, "她抬起头，望向远处的雪山。", turn=turn, raw=[], repo_id="work")
+    rows = [d for _e, d in events if d.get("status") in ("evaluated", "unavailable")]
+    assert len(rows) == 1, events
+    return rows[0]
+
+
+def test_纯卡剧情轮三条臂都留痕未参与(tmp_path, monkeypatch):
+    from app.services import agency_scene_state as ass
+    from app.services import narrative_ci
+
+    ctx = _纯卡ctx(tmp_path)
+    row = _跑一轮CI(ass, ctx, monkeypatch)
+    assert row["status"] == "evaluated"        # 观测失败不许把整条 CI 拖成 unavailable
+    # 两条世界书臂都缺书 ⇒ `no_worldbook`；裁定臂不看世界书，这条 ctx 没跑过
+    # `_agency_propose` ⇒ 只能说「本轮没问过 World」，写成 `no_worldbook` 是把用户引去补书。
+    assert {v["reason"] for v in row["arms"].values()} == {
+        "no_worldbook", "world_not_consulted"}
+    assert row["arms"]["world_rule"]["participated"] is False
+    # trace 与库必须同源：面板（GET /ci）读的是库，只写 trace 等于界面看不见
+    assert narrative_ci.load_arms(ctx["output_dir"], "work") == {
+        "turn": 3, "arms": row["arms"]}
+
+
+def test_有书且喂到输入时两条世界书臂都记已参与(tmp_path, monkeypatch):
+    from app.services import agency_scene_state as ass
+    from app.services import worldbook
+
+    静态底座 = "药王谷的药材"
+    _快照文件(str(tmp_path), "work", json.dumps(
+        {"entries": [{"content": 静态底座 + worldbook.DYNAMIC_MARKER + "当日：起了雾。"}]},
+        ensure_ascii=False))
+
+    ctx = _纯卡ctx(tmp_path, _world_rules=["药王谷的药材不可带出谷外。"])
+    row = _跑一轮CI(ass, ctx, monkeypatch)
+
+    assert row["status"] == "evaluated"
+    assert row["arms"]["world_rule"] == {"participated": True, "count": 1, "reason": ""}
+    # 存量臂的输入＝快照里 DYNAMIC_MARKER **之前**的静态底座；动态区是叙事，不算存量。
+    assert row["arms"]["term_ratchet_stock"]["participated"] is True
+
+
+def test_条目只剩动态区时存量臂报的是没底座不是没书(tmp_path, monkeypatch):
+    """`empty_worldbook`／`no_static_base` 不能混用：书**有**条目、条目被动态区吃光，
+    面板该说的是「设定条目里没有静态底座」，而不是「世界书快照是空的」——后者会把用户
+    引去补书，而书其实补了也没用（要补的是条目正文，不是条数）。"""
+    from app.services import agency_scene_state as ass
+    from app.services import worldbook
+
+    _快照文件(str(tmp_path), "work", json.dumps(
+        {"entries": [{"content": worldbook.DYNAMIC_MARKER + "当日：起了雾。"}]},
+        ensure_ascii=False))
+
+    ctx = _纯卡ctx(tmp_path, _world_rules=["药王谷的药材不可带出谷外。"])
+    row = _跑一轮CI(ass, ctx, monkeypatch)
+
+    assert row["arms"]["world_rule"]["participated"] is True
+    assert row["arms"]["term_ratchet_stock"] == {
+        "participated": False, "count": 0, "reason": "no_static_base"}
+
+
+def test_快照在册但读坏时原因不能说成没有书(tmp_path, monkeypatch):
+    """清单 #3/#4 的诚实底线：文件在、解析失败 ⇒ 说「读不出来」。把它报成「这个作品没有世界书」
+    同样是句假话，而说错原因正是这一刀要消灭的东西。"""
+    from app.services import agency_scene_state as ass
+
+    _快照文件(str(tmp_path), "work", "{坏 JSON")
+    row = _跑一轮CI(ass, _纯卡ctx(tmp_path), monkeypatch)
+
+    assert row["status"] == "evaluated"
+    # 快照读坏只影响两条世界书臂；裁定臂的 `world_not_consulted` 是另一件事，不能被带成同一句话
+    assert {v["reason"] for v in row["arms"].values()} == {
+        "snapshot_unreadable", "world_not_consulted"}
+
+
+def test_台账观测不给写回链路新增抛出面(tmp_path, monkeypatch):
+    """`_wb_arm_status` 只许在「读得到／读不到」之间选，不许把异常抛回链路：
+    连 output_dir 都没有时（仓库域无从谈起）也必须降级成 `no_worldbook`，
+    而不是把已经跑完的 CI 拖成 `unavailable`——那是「观测吃掉判据」的反向耦合。"""
+    from app.services import agency_scene_state as ass
+
+    row = _跑一轮CI(ass, {"output_dir": "", "history": [], "_world_rules": []}, monkeypatch)
+
+    assert row["status"] == "evaluated"
+    assert {v["reason"] for v in row["arms"].values()} == {
+        "no_worldbook", "world_not_consulted"}
+
+
+def test_裁定投影喂进臂台账并同时进trace与库(tmp_path, monkeypatch):
+    """缺陷 4 的**接线**：`_agency_propose` 投影进 ctx 的裁定要原样抵达
+    `arm_participation` 的 `agency_claims`。参数没传／传错名 ⇒ 面板上第三条臂永远
+    报 `world_not_consulted`（哪怕本轮真判过）；台账只落 trace 不落库 ⇒ 界面看不见。
+    spy 返回哨兵：库与 trace 拿不到同一份哨兵即红。"""
+    from app.services import agency_scene_state as ass
+    from app.services import narrative_ci
+
+    投影 = [{"actor": "埃吉尔", "outcome": "reject", "degree": "none", "roll": 81, "chance": 70}]
+    哨兵 = {"agency_verdict": {"participated": True, "count": 1, "reason": ""}}
+    captured: dict = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return 哨兵
+
+    monkeypatch.setattr(narrative_ci, "arm_participation", fake)
+    ctx = _纯卡ctx(tmp_path, _agency_npc_claims=投影)
+    row = _跑一轮CI(ass, ctx, monkeypatch)
+
+    assert captured["agency_claims"] == 投影
+    assert row["arms"] is 哨兵
+    assert narrative_ci.load_arms(ctx["output_dir"], "work") == {"turn": 3, "arms": 哨兵}
+
+
+def test_未遂对账吃到本轮裁定投影与在场快照(tmp_path, monkeypatch):
+    """缺陷 4 第三段的**接线**：投影与状态栏快照都得真的进 `evaluate`。
+    少传 `agency_claims` ⇒ 这臂整轮空跑（一条诊断也不出，面板上却看不见「没核对」）；
+    少传 `scene_snapshot` ⇒ 只出现在 `[在场]` 里的角色被判「不在场」而静默，实测会吞掉
+    4/9 条真违规（召回 100% → 56%）。两个入参都按身份断言，不数次数。"""
+    from app.services import agency_scene_state as ass
+    from app.services import narrative_ci
+
+    投影 = [{"actor": "埃吉尔", "outcome": "reject", "degree": "none", "roll": 81,
+             "chance": 70, "intent": "取回押送令", "kind": "npc"}]
+    captured: dict = {}
+
+    def fake(_text, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(narrative_ci, "evaluate", fake)
+    ctx = _纯卡ctx(tmp_path, _agency_npc_claims=投影)
+    ass._wb_run_narrative_ci(ctx, "她抬起头，望向远处的雪山。", turn=3, raw=[], repo_id="work",
+                             scene_snapshot="[在场] 埃吉尔")
+
+    assert captured["agency_claims"] is 投影
+    assert captured["scene_snapshot"] == "[在场] 埃吉尔"
+
+
+def test_写回把本轮快照原样交给CI的在场闸():
+    """最后一公里：`_agency_writeback` 里那份 `snapshot`（状态写回后的真快照）必须以
+    `scene_snapshot=` 传进 `_wb_run_narrative_ci`。上面那条用例直接调接缝、绕过了写回，
+    所以写回侧的形态要在源码上单独锁（空白归一后断言，不依赖换行排版）。"""
+    import inspect
+    import re as _re
+
+    from app.services import agent_agency
+
+    src = _re.sub(r"\s+", "", inspect.getsource(agent_agency._agency_writeback))
+    assert "scene_snapshot=snapshot)" in src
+
+
+def test_判据本体没被这一刀接上台账():
+    """两条判据的源码里不得出现 `arm_participation`／`load_arms`：台账是**读数**，
+    一旦被判据读回去，「没书」就会变成一条新诊断（清单 #3／#4 明确不做的那件事）。"""
+    import inspect
+
+    from app.services import narrative_ci, prose_style
+
+    ci_src = inspect.getsource(narrative_ci.evaluate)
+    assert "for rule in world_rules:" in ci_src          # 判据仍只认自己的入参
+    assert "arm_participation" not in ci_src
+    ratchet_src = inspect.getsource(prose_style.term_ratchet_report)
+    assert "if set_texts:" in ratchet_src                # 存量闸门仍是「有设定才闸」
+    assert "arm_participation" not in ratchet_src

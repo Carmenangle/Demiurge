@@ -35,7 +35,8 @@ describe("isolation of illustration submit params", () => {
   });
 
   it("重试按名覆盖 source（不再依赖签名序）", () => {
-    expect(code).toMatch(/submitIllustration\(\{\s*\.\.\.snapshot,\s*source:\s*"manual"\s*\}\)/);
+    // 2026-11-10「编辑提示词」：重试参数经 retryArgsWithPrompt 覆盖成稿后，仍是同一个对象快照。
+    expect(code).toMatch(/submitIllustration\(\{\s*\.\.\.retryArgsWithPrompt\(snapshot, found, promptOverride\),\s*source:\s*"manual"\s*\}\)/);
   });
 
   it("IllustrationSubmit 字段清单稳定（改名/漏字段在此挡下）", () => {
@@ -60,6 +61,9 @@ describe("isolation of illustration submit params", () => {
       // bridgePrevSlotId 由后端按正文序标注随事件下发；bridgeVideo/bridgePrevImageUrl 只在
       // 视频槽那次递归里出现。
       "bridgePrevSlotId", "bridgeVideo", "bridgePrevImageUrl",
+      // 2026-11-09 全局模式分镜序列：镜头顺序/归属随提交对象走，重试仍认同一镜。
+      "shotSequenceId", "shotIndex", "shotTotal", "shotType", "shotDurationS",
+      "imageKey", "incomingShotIndex", "incomingShotType",
     ]);
   });
 
@@ -469,8 +473,13 @@ describe("试跑后重试出图：失败槽按钮 → retryIllustration 接线",
   });
 
   it("retryIllustration 读槽位 retryArgs 快照、按名翻 manual 重调（无快照静默返回）", () => {
-    expect(code).toMatch(/const snapshot = part\?\.retryArgs;/);
-    expect(code).toMatch(/if \(!snapshot\) return;/);
-    expect(code).toMatch(/submitIllustration\(\{\s*\.\.\.snapshot,\s*source:\s*"manual"\s*\}\)/);
+    expect(code).toMatch(/const snapshot = found\?\.retryArgs as IllustrationSubmit \| undefined;/);
+    expect(code).toMatch(/if \(!found \|\| !snapshot\) return;/);
+    expect(code).toMatch(/submitIllustration\(\{\s*\.\.\.retryArgsWithPrompt\(snapshot, found, promptOverride\),\s*source:\s*"manual"\s*\}\)/);
+  });
+
+  it("编辑提示词后重试：覆盖成稿字段再按 manual 提交", () => {
+    expect(code).toMatch(/promptOverride\?: string/);
+    expect(code).toMatch(/retryArgsWithPrompt\(snapshot, found, promptOverride\)/);
   });
 });

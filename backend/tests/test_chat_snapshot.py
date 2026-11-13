@@ -22,16 +22,22 @@ def test_private_alias_points_to_public_message():
     assert chat_snapshot._assistant_message is chat_snapshot.assistant_message
 
 
+def test_user_message_带秒级时间戳(monkeypatch):
+    monkeypatch.setattr(chat_snapshot.time, "time", lambda: 1762500000.9)
+    assert chat_snapshot.user_message("u1", "hi")["ts"] == 1762500000
+
+
 def test_用户消息在助手生成前落盘且重复确保不覆盖前端富内容(monkeypatch, tmp_path):
     from app.services import repo_meta
     monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
     monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+    monkeypatch.setattr(chat_snapshot.time, "time", lambda: 1762500000.9)
 
     assert chat_snapshot.ensure_user_message(
         "thread", "user-1", "继续剧情", ["reference.png"],
     )
     assert chat_snapshot.load("thread") == [{
-        "id": "user-1", "role": "user", "text": "继续剧情",
+        "id": "user-1", "role": "user", "text": "继续剧情", "ts": 1762500000,
         "parts": [
             {"type": "text", "text": "继续剧情"},
             {"type": "image", "url": "reference.png"},
@@ -163,6 +169,43 @@ def test_较旧的异步快照不得覆盖删除后的新快照(monkeypatch, tmp
     assert chat_snapshot.load("thread") == [{"id": "kept"}]
 
 
+def test_前端保存快照不会丢掉服务端未消费的media_request(monkeypatch, tmp_path):
+    from app.services import repo_meta
+    monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
+    monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+    chat_snapshot._REVISIONS.clear()
+
+    chat_snapshot.save("thread", [{
+        "id": "bot", "role": "assistant", "text": "看好了",
+        "media_request": {"kind": "image", "prompt": "海边泳装"},
+    }])
+    assert chat_snapshot.save_if_newer(
+        "thread", [{"id": "bot", "role": "assistant", "text": "看好了"}], revision=1,
+    )
+    assert chat_snapshot.load("thread")[0]["media_request"] == {
+        "kind": "image", "prompt": "海边泳装",
+    }
+
+
+def test_前端handled标记会合并进服务端media_request(monkeypatch, tmp_path):
+    from app.services import repo_meta
+    monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
+    monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+    chat_snapshot._REVISIONS.clear()
+
+    chat_snapshot.save("thread", [{
+        "id": "bot", "role": "assistant", "text": "看好了",
+        "media_request": {"kind": "image", "prompt": "海边泳装"},
+    }])
+    assert chat_snapshot.save_if_newer("thread", [{
+        "id": "bot", "role": "assistant", "text": "看好了",
+        "mediaRequest": {"kind": "image", "prompt": "海边泳装", "handled": True},
+    }], revision=1)
+    assert chat_snapshot.load("thread")[0]["media_request"] == {
+        "kind": "image", "prompt": "海边泳装", "handled": True,
+    }
+
+
 def test_生成图片按slot原位替换而不追加消息(monkeypatch, tmp_path):
     from app.services import repo_meta
     monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
@@ -186,6 +229,53 @@ def test_生成图片按slot原位替换而不追加消息(monkeypatch, tmp_path
         {"type": "image", "url": "local://image", "slotId": "slot-1", "status": "ready"},
         {"type": "text", "text": "后文"},
     ]
+
+
+def test_chat_append_聊天线程只写快照(monkeypatch, tmp_path):
+    """2026-11-12 P6：1:1 聊天/群聊以快照为唯一真源，不再补写 checkpoint。"""
+    from app.routers import ai_chat
+    from app.services import chat_memory, repo_meta
+
+    monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
+    monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+    calls: list = []
+    monkeypatch.setattr(chat_memory, "append_message", lambda *a, **k: calls.append((a, k)))
+
+    assert ai_chat.chat_append(ai_chat.AppendRequest(
+        thread_id="repo__chat__甲", role="assistant", text="给你看",
+        images=["http://a/1.png"],
+    )) == {"ok": True}
+
+    assert calls == []
+    items = chat_snapshot.load("repo__chat__甲")
+    assert len(items) == 1
+    assert items[0]["role"] == "assistant"
+    assert items[0]["text"] == "给你看"
+    assert items[0]["parts"] == [
+        {"type": "text", "text": "给你看"},
+        {"type": "image", "url": "http://a/1.png"},
+    ]
+
+
+def test_chat_append_剧情线程继续写checkpoint(monkeypatch, tmp_path):
+    """剧情画布/旧 /ai/chat 仍读 checkpoint，剧情线程保持双写。"""
+    from app.routers import ai_chat
+    from app.services import chat_memory, repo_meta
+
+    monkeypatch.setattr(chat_snapshot, "SNAP_DIR", tmp_path)
+    monkeypatch.setattr(repo_meta, "output_dir_from_state", lambda: "")
+    calls: list = []
+    monkeypatch.setattr(chat_memory, "append_message", lambda *a, **k: calls.append((a, k)))
+
+    assert ai_chat.chat_append(ai_chat.AppendRequest(
+        thread_id="repo", role="user", text="参考这张", images=["http://a/1.png"],
+    )) == {"ok": True}
+
+    assert calls == [(("repo", "user", "参考这张", ["http://a/1.png"]), {})]
+    items = chat_snapshot.load("repo")
+    assert len(items) == 1
+    assert items[0]["role"] == "user"
+    assert items[0]["parts"][-1] == {"type": "image", "url": "http://a/1.png"}
 
 
 def test_后台正文先落盘并创建稳定媒体槽(monkeypatch, tmp_path):

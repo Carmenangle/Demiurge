@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 """纪要落盘+召回测试（真实 SQLite FTS5，临时目录）：追加 / 召回 / 最近 / 进度 / 重建。"""
+import pytest
+
 from app.services import narrative_store as ns
 from app.services.narrative_memory import ChronicleEntry
 
@@ -122,6 +124,51 @@ def test_重建索引_条目不丢仍可召回(tmp_path):
 
 def test_重建_无库返回0(tmp_path):
     assert ns.rebuild(str(tmp_path), "空仓") == 0
+
+
+def test_第5刀_重建中途失败旧纪要一条不丢(tmp_path, monkeypatch):
+    """第 ⑤ 刀（防误删 2026-11-05）：重建必须是一个**原子单元**。
+
+    旧写法 `DROP TABLE` 当场落定（DDL 不开隐式事务），其后任何异常都让纪要整体蒸发——
+    正文只存这张表，内存副本随栈丢，无落盘备份。
+    """
+    base = str(tmp_path)
+    ns.append(base, "r1", _e("雪山救援的关键一幕", kws=["雪山"]))
+    ns.append(base, "r1", _e("舞会上的阴谋"))
+    before = [e.text for e in ns.recent(base, "r1", k=10)]
+    assert len(before) == 2
+
+    def boom(_conn):
+        raise RuntimeError("模拟重建中途失败")
+
+    monkeypatch.setattr(ns, "_create_chronicle", boom)
+    with pytest.raises(RuntimeError):
+        ns.rebuild(base, "r1")
+    monkeypatch.undo()  # 先解故障，再验「库里到底还剩什么」
+
+    # 失败必须**整体回滚**：条数、正文、召回能力都回到重建前
+    assert ns.count(base, "r1", layer=0) == 2
+    assert [e.text for e in ns.recent(base, "r1", k=10)] == before
+    hits = ns.recall(base, "r1", "雪山救援发生了什么", k=4)
+    assert len(hits) == 1 and "雪山救援" in hits[0].text
+
+
+def test_第5刀_回滚后同一库仍可正常重建(tmp_path, monkeypatch):
+    """回滚不是把库搞坏：解掉故障后重建照旧成功，且不出现半截重复。"""
+    base = str(tmp_path)
+    ns.append(base, "r1", _e("第一条纪要"))
+    ns.append(base, "r1", _e("第二条纪要"))
+
+    def boom(_conn):
+        raise RuntimeError("模拟重建中途失败")
+
+    monkeypatch.setattr(ns, "_create_chronicle", boom)
+    with pytest.raises(RuntimeError):
+        ns.rebuild(base, "r1")
+    monkeypatch.undo()
+
+    assert ns.rebuild(base, "r1") == 2
+    assert ns.count(base, "r1", layer=0) == 2
 
 
 def test_物理隔离_不同repo(tmp_path):

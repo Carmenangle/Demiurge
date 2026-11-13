@@ -18,24 +18,13 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # 保证 backend/ 在 path
 
-from app.services import image_store, rag_store, view_urls  # noqa: E402
+from app.services import image_store  # noqa: E402
 
-IMG = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
-
-
-def _created_at_ms(prov: dict) -> int | None:
-    raw = str(prov.get("downloaded_at") or "")
-    if not raw:
-        return None
-    try:
-        return int(datetime.fromisoformat(raw).timestamp() * 1000)
-    except ValueError:
-        return None
+IMG = set(image_store._MATERIAL_IMAGE_EXTS)
 
 
 def main() -> None:
@@ -73,14 +62,13 @@ def main() -> None:
         print("\n（dry-run，未写入。加 --apply 执行；幂等可重跑）")
         return
 
-    ok_n = failed = 0
-    for f, prov, _has in targets:
-        url = view_urls.local_view(str(f))
-        if rag_store.index_web_material_asset(url, prov, created_at=_created_at_ms(prov)):
-            ok_n += 1
-        else:
-            failed += 1
-    print(f"\n✅ indexed={ok_n} failed={failed}（failed 只留 warning 不抛；可重跑补）")
+    # 与「反推前按需补登记」同一个实现（image_store.ensure_web_material_assets）：
+    # 已登记的不再重嵌入，只补缺失的两侧记录。
+    res = image_store.ensure_web_material_assets(str(root))
+    print(f"\n✅ registered={len(res['registered'])} already={len(res['already'])} "
+          f"failed={len(res['failed'])}")
+    if res["failed"]:
+        print("（failed 只留 warning 不抛；可重跑补）")
 
 
 if __name__ == "__main__":

@@ -52,6 +52,21 @@ class ImageAgentRequest(EmbedModelReq):
     context_count: int = Field(default=6, ge=1, le=50)  # 已废弃（2026-09-11 token 化）：兼容保留，后端不再消费
     compact_trigger_pct: int = Field(default=80, ge=0, le=100)  # 历史占用达有效预算该百分比即自动压缩（0=关闭）
     selfheal_attempts: int = Field(default=3, ge=0, le=5)  # 截断自愈次数（0=不自愈）
+    # 聊天室行为上限（设置→聊天室）：缺省值与旧硬编码一致。
+    chat_guard_max_chars: int = Field(default=900, ge=0, le=5000)
+    chat_default_max_tokens: int = Field(default=0, ge=0, le=131_072)  # 0=跟随全局；>0=聊天独立上限
+    chat_followup_max: int = Field(default=3, ge=0, le=10)
+    chat_reopen_max: int = Field(default=2, ge=0, le=10)
+    chat_initiative_idle_minutes: int = Field(default=120, ge=0, le=10_080)
+    chat_initiative_cooldown_minutes: int = Field(default=360, ge=0, le=10_080)
+    chat_initiative_daily_max: int = Field(default=6, ge=0, le=100)
+    chat_cadence: Literal["quiet", "normal", "frequent"] = "normal"
+    chat_active_window_minutes: int = Field(default=15, ge=0, le=1_440)
+    chat_max_bot_turns: int = Field(default=5, ge=1, le=50)
+    chat_min_affinity: int = Field(default=30, ge=-100, le=100)
+    chat_quiet_start: str = "00:30"
+    chat_quiet_end: str = "08:30"
+    chat_group_activity: Literal["quiet", "normal", "lively"] = "normal"
     # 2026-09-04 设置整合：智能体参数预设（温度/采样/输入输出上限），从 settings 注入。
     # 权威源 = settings（前端每轮 payload），preset 顶层不再管理这些字段。
     preset_sampling: dict = Field(default_factory=dict)
@@ -65,9 +80,13 @@ class ImageAgentRequest(EmbedModelReq):
 
 class MultiAgentRequest(ImageAgentRequest):
     workspace_mode: Literal["story", "generate", "edit"] = "story"
+    interaction_mode: Literal["story", "chat", "group_chat"] = "story"  # 聊天/群聊显式模式（默认 story 零改变）
+    chat_members: list[str] = []  # 聊天室成员（角色卡名，顺序即群聊轮转顺序）；空=按绑定卡推断
     route_model: str = ""   # supervisor 判分派用的（快）模型，空则用主对话模型
     character_dir: str = ""  # 角色卡文件夹根（前端设置 characterDir），供剧情扮演读卡
     card_name: str = ""      # 本作品关联的角色卡名（空=非扮演）
+    reaction_kind: str = ""  # 聊天室：刚发完照片/换头像后的反应（image|avatar）
+    reaction_prompt: str = ""  # 刚发的照片画面提示词（给反应提供上下文）
     card_names: list[str] = []  # 本作品绑定的全部角色卡
     opening_card_name: str = "" # 新会话开场卡；card_name 为兼容别名
     preset_dir: str = ""     # 偏置预设文件夹根（前端设置 presetDir）
@@ -81,7 +100,7 @@ class MultiAgentRequest(ImageAgentRequest):
     comfy_illustrate: bool = False  # 前端已预设 ComfyUI 工作流模板：高潮点改发 illustrate_request 事件走异步闭环
     comfy_audio: bool = False  # 前端已预设音频模板（IndexTTS）：剧情产出后发 audio_request 事件逐角色配音
     comfy_video: bool = False  # 前端已预设视频模板：开=高潮点编译 video_request；关=零 token
-    video_mode: Literal["", "climax", "firstlast"] = ""  # 视频模式（缺省 climax），前端 preset.videoMode 透传；produce 层据此编译正片/转场 video_request
+    video_mode: Literal["", "climax", "firstlast", "shots"] = ""  # 视频模式（缺省 climax / shots=全局模式分镜序列）
     prompt_profile: str = "anima_tags"
     # 2026-10-25 提示词模版：prompt_profile 为 custom:<id> 时同时报送其内置协议族
     # （模版被删时后端按该 kind 降级内置，不抛错）；空=按默认 anima_tags。
@@ -90,6 +109,8 @@ class MultiAgentRequest(ImageAgentRequest):
     video_prompt_template_id: str = ""
     # 视频工作流模版 id（空=未知）：后端据此派生尾帧/参考图槽与默认时长
     video_template_id: str = ""
+    # 全局模式分镜序列的总时长预算（秒，0=按模板/正文估算）
+    video_duration_hint: int = Field(default=0, ge=0)
     appearance_source: Literal["worldbook", "character_card"] = "worldbook"
     illustration_viewpoint: Literal["", "first_person", "third_person"] = ""  # 画面人称手选（「多元数据插入」面板按钮组；空=按锚点段自动判定）
     illustration_batch_count: int = Field(default=0, ge=0)  # 高潮点模式批量生图数目（0/缺省=1 张；面板最小 1、无上限）
@@ -128,6 +149,250 @@ def multi_agent(req: MultiAgentRequest) -> StreamingResponse:
     except agent_runner.RunAlreadyActive as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     return sse_response(lambda: agent_runner.drain(q))
+
+
+@router.post("/chat/initiative")
+def chat_initiative(req: MultiAgentRequest) -> dict[str, object]:
+    """角色主动找上门（2026-11-09）：打开私聊时前端按需调用。
+
+    判定与生成都在服务层：有剧情沉淀 + 已认识且好感度够 + 聊天闲置够久 + 冷却已过。
+    不产生用户消息；生成结果已由 chat_room 落盘，前端只负责合并显示。不可发起/失败
+    时返回空 messages，前端静默跳过。
+    """
+    from app.services import agent_context, chat_room, thread_admission
+    from app.services.agent_request_context import from_payload
+
+    if req.interaction_mode != "chat":
+        return {"messages": [], "skip": "not_chat"}
+    thread_id = (req.thread_id or req.repo_id or "").strip()
+    if thread_id and thread_admission.is_active(thread_id):
+        return {"messages": [], "skip": "busy"}
+    context = from_payload(req.model_dump())
+    context["interaction_mode"] = "chat"
+    budget = agent_context.resolve_history_budget(
+        context.context_max_tokens, context.preset_sampling)
+    context.history = agent_context.recent_history(
+        context.thread_id, max_tokens=budget, per_role=0,
+        history_override=context.history_override,
+    )
+    try:
+        messages = chat_room.proactive_turn(context)
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 主动消息失败不打扰用户
+        return {"messages": [], "skip": f"error:{exc}"}
+    return {"messages": messages, "skip": "" if messages else "not_eligible"}
+
+
+@router.post("/chat/roster")
+def chat_roster(req: MultiAgentRequest) -> dict[str, object]:
+    """角色名册（2026-11-10）：合集卡从世界书条目识别角色，供聊天头像条、
+    「管理角色」面板与多元数据插入自动补全共用。
+
+    只读：不调模型、不写会话。`members` 是当前生效的角色名；`candidates` 是全部
+    启用条目（含未识别项），供前端手动勾选补漏。
+    """
+    from app.services import chat_room, chat_snapshot
+    from app.services.agent_request_context import from_payload
+
+    context = from_payload(req.model_dump())
+    context["interaction_mode"] = req.interaction_mode
+    try:
+        roster = chat_room.chat_roster(context)
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 名册读取失败返回空，前端回退绑定卡
+        return {"source": "cards", "members": [], "entries": [], "candidates": [],
+                "fallback_card": "", "member_threads": {}, "member_activity": {},
+                "error": str(exc)}
+    entries = [
+        {key: value for key, value in item.items() if key != "content"}
+        for item in (roster.get("entries") or [])
+        if isinstance(item, dict)
+    ]
+    repo_id = str(context.get("repo_id") or "")
+    source_by_name = {
+        str(item.get("name") or ""): str(item.get("source_name") or "")
+        for item in roster.get("entries") or []
+        if isinstance(item, dict)
+    }
+    member_threads: dict[str, str] = {}
+    member_activity: dict[str, float] = {}
+    for name in roster.get("members") or []:
+        thread_id = chat_room.thread_id_for_member(
+            repo_id, str(name), source_by_name.get(str(name), ""),
+        )
+        member_threads[str(name)] = thread_id
+        try:
+            member_activity[str(name)] = float(chat_snapshot.last_write_at(thread_id))
+        except Exception:  # noqa: BLE001 [EXC-保留] 没聊过的角色按 0 排序
+            member_activity[str(name)] = 0.0
+    return {
+        "source": roster.get("source") or "cards",
+        "members": roster.get("members") or [],
+        "entries": entries,
+        "candidates": roster.get("candidates") or [],
+        "fallback_card": roster.get("fallback_card") or "",
+        "member_threads": member_threads,
+        "member_activity": member_activity,
+    }
+
+
+@router.post("/chat/initiative/scan")
+def chat_initiative_scan(req: MultiAgentRequest) -> dict[str, object]:
+    """扫描角色名册并给够格的角色写主动开场（2026-11-10）。
+
+    每位角色写进自己的私聊线程；单次最多 2 人。前端只把当前角色的消息上屏，
+    其他角色只记未读红点，从而让「未打开角色也有新消息」可验证。
+    """
+    from app.services import agent_context, chat_room, thread_admission
+    from app.services.agent_request_context import from_payload
+
+    if req.interaction_mode != "chat":
+        return {"results": []}
+    thread_id = (req.thread_id or req.repo_id or "").strip()
+    if thread_id and thread_admission.is_active(thread_id):
+        return {"results": []}
+    context = from_payload(req.model_dump())
+    context["interaction_mode"] = "chat"
+    budget = agent_context.resolve_history_budget(
+        context.context_max_tokens, context.preset_sampling)
+    context.history = agent_context.recent_history(
+        context.thread_id, max_tokens=budget, per_role=0,
+        history_override=context.history_override,
+    )
+    try:
+        results = chat_room.scan_initiatives(context, limit=2)
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 扫描失败不打扰用户
+        return {"results": [], "skip": f"error:{exc}"}
+    return {"results": results}
+
+
+@router.post("/chat/followup")
+def chat_followup(req: MultiAgentRequest) -> dict[str, object]:
+    """长时间不回复时的追问 / 会话窗口结束后的重开（2026-11-10）。
+
+    前端私聊打开期间按固定间隔轮询；后端按 `chat_followup` 的节奏与上限决定是否
+    真正生成。不在窗口/未到时间/达到上限时返回空 messages 与 skip 原因，前端静默。
+    """
+    from app.services import agent_context, chat_followup as followup_state, chat_room, thread_admission
+    from app.services.agent_request_context import from_payload
+
+    if req.interaction_mode != "chat":
+        return {"messages": [], "thread_id": "", "speaker": "", "kind": "", "skip": "not_chat"}
+    thread_id = (req.thread_id or req.repo_id or "").strip()
+    if thread_id and thread_admission.is_active(thread_id):
+        return {"messages": [], "thread_id": thread_id, "speaker": "", "kind": "", "skip": "busy"}
+    # 老会话（本功能上线前已有私聊）第一次打开：把最后一条角色消息当作「刚说完」，
+    # 让追问/重开节奏从此刻起算，避免旧聊天永远停在过去。
+    if thread_id and not followup_state.is_tracked(thread_id):
+        try:
+            from app.services import chat_snapshot
+            last_items = chat_snapshot.load(thread_id)
+            if last_items and str(last_items[-1].get("role") or "") == "assistant":
+                followup_state.note_bot(
+                    thread_id, bubbles=1,
+                    max_followups=req.chat_followup_max,
+                    max_reopens=req.chat_reopen_max,
+                    cadence=req.chat_cadence,
+                )
+        except Exception as exc:  # noqa: BLE001 [EXC-留痕] bootstrap 失败不阻断后续判定
+            return {"messages": [], "thread_id": thread_id, "speaker": "", "kind": "",
+                    "skip": f"bootstrap_error:{exc}"}
+    kind = followup_state.due(
+        thread_id,
+        max_followups=req.chat_followup_max,
+        max_reopens=req.chat_reopen_max,
+        max_bot_turns=req.chat_max_bot_turns,
+        active_window_minutes=req.chat_active_window_minutes,
+        quiet_start=req.chat_quiet_start,
+        quiet_end=req.chat_quiet_end,
+    )
+    if not kind:
+        return {"messages": [], "thread_id": thread_id, "speaker": "", "kind": "", "skip": "not_due"}
+    context = from_payload(req.model_dump())
+    context["interaction_mode"] = "chat"
+    budget = agent_context.resolve_history_budget(
+        context.context_max_tokens, context.preset_sampling)
+    context.history = agent_context.recent_history(
+        context.thread_id, max_tokens=budget, per_role=0,
+        history_override=context.history_override,
+    )
+    members = chat_room.resolve_members(context, mode="chat")
+    speaker = (members[0] if members else "").strip()
+    if not speaker:
+        return {"messages": [], "thread_id": thread_id, "speaker": "", "kind": "", "skip": "no_speaker"}
+    try:
+        messages = chat_room.followup_turn(
+            context, speaker=speaker, thread_id=thread_id, kind=kind,
+        )
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 追问失败不打扰用户
+        return {"messages": [], "thread_id": thread_id, "speaker": speaker,
+                "kind": "", "skip": f"error:{exc}"}
+    return {
+        "messages": messages,
+        "thread_id": thread_id,
+        "speaker": speaker,
+        "kind": kind if messages else "",
+        "skip": "" if messages else "not_eligible",
+    }
+
+
+@router.post("/chat/reaction")
+def chat_reaction(req: MultiAgentRequest) -> dict[str, object]:
+    """角色刚发完照片/换完头像后补一句反应（2026-11-10 用户口径）。
+
+    不产生用户消息：生成一条角色消息写进当前私聊线程，前端合并上屏。
+    """
+    from app.services import agent_context, chat_room, thread_admission
+    from app.services.agent_request_context import from_payload
+
+    if req.interaction_mode != "chat":
+        return {"messages": [], "thread_id": "", "speaker": "", "skip": "not_chat"}
+    thread_id = (req.thread_id or req.repo_id or "").strip()
+    if not thread_id:
+        return {"messages": [], "thread_id": "", "speaker": "", "skip": "no_thread"}
+    if thread_admission.is_active(thread_id):
+        return {"messages": [], "thread_id": thread_id, "speaker": "", "skip": "busy"}
+    context = from_payload(req.model_dump())
+    context["interaction_mode"] = "chat"
+    budget = agent_context.resolve_history_budget(
+        context.context_max_tokens, context.preset_sampling)
+    context.history = agent_context.recent_history(
+        context.thread_id, max_tokens=budget, per_role=0,
+        history_override=context.history_override,
+    )
+    members = chat_room.resolve_members(context, mode="chat")
+    speaker = (members[0] if members else "").strip()
+    if not speaker:
+        return {"messages": [], "thread_id": thread_id, "speaker": "", "skip": "no_speaker"}
+    try:
+        messages = chat_room.reaction_turn(
+            context, speaker=speaker, thread_id=thread_id,
+            kind=req.reaction_kind, prompt=req.reaction_prompt,
+        )
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 反应失败只少一句，不打扰聊天
+        return {"messages": [], "thread_id": thread_id, "speaker": speaker,
+                "skip": f"error:{exc}"}
+    return {
+        "messages": messages, "thread_id": thread_id, "speaker": speaker,
+        "skip": "" if messages else "not_eligible",
+    }
+
+
+class ChatReadRequest(BaseModel):
+    """私聊已读上报（2026-11-10）：前端可见且滚到底时调用。"""
+    thread_id: str = ""
+    last_ts: float = 0.0
+
+
+@router.get("/chat/read")
+def get_chat_read(thread_id: str = "") -> dict[str, object]:
+    """读取私聊已读状态（前端渲染「已读/未读」圆点用）。"""
+    from app.services import chat_read_state
+    return {"state": chat_read_state.get(thread_id)}
+
+
+@router.post("/chat/read")
+def chat_read(req: ChatReadRequest) -> dict[str, object]:
+    from app.services import chat_read_state
+    return {"ok": True, "state": chat_read_state.mark_read(req.thread_id, req.last_ts)}
 
 
 class MemorySealRequest(BaseModel):

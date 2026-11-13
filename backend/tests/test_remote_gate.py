@@ -50,8 +50,21 @@ def test_回环对端不算远程():
     assert remote_gate.is_remote("localhost") is False
     assert remote_gate.is_remote("192.168.1.5") is True
     assert remote_gate.is_remote("") is True
-    # 注：IPv6 回环 "::1" 经 request_guard._host_of（按冒号切端口）会被判成空主机 ⇒
-    # 非 回环 ⇒ 远端。这与 inbound_verdict 的既有语义一致（保守拒绝），闸不另开口子。
+
+
+@pytest.mark.parametrize("host", ["::1", "0:0:0:0:0:0:0:1"])
+def test_ipv6回环不落入远程能力面(host):
+    assert remote_gate.is_remote(host) is False
+    remote_gate.ensure_write_scope(host, "C:/anywhere")
+    assert main_module.request_guard.inbound_verdict(
+        client_host=host, origin="http://[::1]:5173",
+        host_header="[::1]:8010", allow_remote=False,
+    ) is None
+
+
+@pytest.mark.parametrize("host", ["::", "2001:db8::1", "fe80::1", "::ffff:192.168.1.5"])
+def test_ipv6非回环仍是远程(host):
+    assert remote_gate.is_remote(host) is True
 
 
 def test_路径域_数据根与作品根内放行_外部拒绝(monkeypatch: pytest.MonkeyPatch, tmp_path):

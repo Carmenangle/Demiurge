@@ -326,6 +326,36 @@ def test_anima拒答兜底合并混合语言角色条目的具体英文外貌():
     assert "narrow red eyes" in prompt
 
 
+def test_条目银发狐耳蕾丝眼罩进兜底与字段账本_模型拒答不丢设定():
+    """凌霄镜7（gemma4 拒答）实锤：外貌已进 SceneSpec，但规则表缺这几条 ⇒
+    兜底退回 `A woman`，条目里的银发/狐耳/眼罩全丢。规则表补齐后兜底与账本必须带上。"""
+    scene = {
+        **_scene("nsfw"),
+        "actors": ["妲千沁"],
+        "appearance": (
+            "妲千沁：【外貌】超模级别的剑修,一头银色高马尾、狐耳挺立,"
+            "鼻尖以上戴面具式蕾丝眼罩,露出的下半张脸朱唇娇艳。"
+        ),
+        "narrative": "她睡中哼一声，小臂往里收了一寸，手指松开一分，人没醒。",
+        "wardrobe": "",
+        "locale": "天狐宫后山矮屋榻上",
+    }
+
+    prompt = profiles.deterministic_fallback("anima_tags", scene)
+
+    for fact in ("silver hair", "a high ponytail", "fox ears", "a lace eye mask"):
+        assert fact in prompt
+    ledger = profiles.prompt_field_ledger(prompt, scene)
+    assert set(ledger["appearance"]["expected"]) >= {
+        "silver hair", "a high ponytail", "fox ears", "a lace eye mask",
+    }
+    # 模型写成 `silver high ponytail`（银发与高马尾同句）时不得判成漏写银发再补一条。
+    missing = profiles._missing_visual_facts(
+        "1girl, solo, silver high ponytail, fox ears, lace eye mask", scene,
+    )
+    assert not ({"silver hair", "a high ponytail", "fox ears", "a lace eye mask"} & set(missing))
+
+
 def test_anima完整拒答尾缀不得进入最终提示词():
     refusal = (
         "I can't help with this request. The prompt describes content involving intimate "
@@ -659,6 +689,15 @@ def test_anima系统提示要求可见装置并禁止普通剧情清单():
     assert "不要照搬示例" in system
     assert "人物的面部、目光、动作、接触点或人物关系" in system
     assert "物件只能作为辅助视觉装置" in system
+
+
+def test_anima系统提示要求定格静态一帧():
+    """anima 档必须和 natural/moss 一样声明「定格帧」，不能写动作过程。"""
+    system = profiles._system("anima_tags", {"rating": "sfw"})
+
+    assert "定格·静态一帧" in system
+    assert "不写动作的开始、过程、先后或结果" in system
+    assert "walking / entering / turning / reaching" in system
 
 
 def test_niji把结构化结果组装为四段():
@@ -7760,3 +7799,42 @@ def test_moss档第一人称进入未覆盖防呆登记():
 
     assert "moss_caption" in msg
     assert "红线 79" in msg
+
+
+def test_连续锚点进入字段账本并由补全写进tags行():
+    """scene_anchor / wardrobe_anchor 必须可验收、可补写，且空间词不能变成人物病句。"""
+    scene = {
+        "narrative": "她站在门边。",
+        "appearance": "",
+        "wardrobe": "",
+        "locale": "",
+        "actors": ["腓特烈"],
+        "rating": "sfw",
+        "scene_anchor": "旧仓库的门框旁，红毯铺到台子",
+        "wardrobe_anchor": "腓特烈：白色婚纱",
+    }
+    prompt = "1girl, standing\nA girl stands still."
+
+    ledger = profiles.prompt_field_ledger(prompt, scene)
+    assert ledger["location"]["required"] is True
+    assert "a wooden door frame" in ledger["location"]["expected"]
+    assert "a red carpet" in ledger["location"]["expected"]
+    assert "a wedding dress" in ledger["wardrobe"]["expected"]
+    assert ledger["__continuity__"]["scene_terms"]
+
+    repaired, _ = profiles.complete_field_coverage("anima_tags", prompt, scene)
+    tags, prose = repaired.splitlines()
+    assert "a wooden door frame" in tags
+    assert "a red carpet" in tags
+    assert "a wedding dress" in tags
+    # 空间地标只进 tags；若被当成人物状态会出「depicted with a door frame」病句。
+    assert "a wedding dress" in prose
+    assert "a wooden door frame" not in prose
+
+
+def test_无锚点时字段账本不新增连续槽():
+    ledger = profiles.prompt_field_ledger("1girl, standing\nA girl stands still.", {
+        "narrative": "她站着。", "appearance": "", "wardrobe": "", "locale": "",
+        "actors": ["她"], "rating": "sfw",
+    })
+    assert "__continuity__" not in ledger

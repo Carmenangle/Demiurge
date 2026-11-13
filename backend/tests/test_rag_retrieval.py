@@ -189,6 +189,50 @@ def test_prune_removes_only_missing_local_generation(tmp_path, monkeypatch):
     assert deleted == ["missing"]
 
 
+def test_第6刀_所在夹整体不可达时判不了就保留(tmp_path, monkeypatch):
+    """「离线盘没挂载」不等于「文件被删」（防误删 ⑥，2026-11-05）。
+
+    旧本地分支只问 `not p.is_file()` ⇒ 整棵树不在线（移动硬盘/网络盘离线）时**每条**本机留存图
+    都算「没了」，清理一跑就把 RAG 记录批量删净——图还在盘上，记录没了＝检索永久失明。
+    这也与本函数 docstring 的承诺相反：「无法判定存在性一律保留」。
+    """
+    offline = tmp_path / "离线盘" / "作品甲" / "pictures" / "a.png"
+    deleted = []
+
+    class FakeStore:
+        def delete(self, ids):
+            deleted.extend(ids)
+
+    rows = [{"id": "offline", "kind": "generation",
+             "image_url": f"http://127.0.0.1:8010/api/local-view?path={offline}"}]
+    monkeypatch.setattr(rag_store, "_store", lambda *_args: FakeStore())
+    monkeypatch.setattr(rag_store, "_dump", lambda *_args: rows)
+    monkeypatch.setattr(rag_store, "_probe_external_image", lambda url, timeout=8: "unreachable")
+
+    assert rag_store.prune_missing_generations("repo", rag_backend.EmbedConfig()) == 0
+    assert deleted == []
+
+
+def test_第6刀_夹还在而文件没了照旧删(tmp_path, monkeypatch):
+    """零回归锁：用户手动删了图（所在夹仍在）⇒ 仍是「确实缺失」，照旧清掉裂图记录。"""
+    folder = tmp_path / "作品甲" / "pictures"
+    folder.mkdir(parents=True)
+    deleted = []
+
+    class FakeStore:
+        def delete(self, ids):
+            deleted.extend(ids)
+
+    rows = [{"id": "gone", "kind": "generation",
+             "image_url": f"http://127.0.0.1:8010/api/local-view?path={folder / 'a.png'}"}]
+    monkeypatch.setattr(rag_store, "_store", lambda *_args: FakeStore())
+    monkeypatch.setattr(rag_store, "_dump", lambda *_args: rows)
+    monkeypatch.setattr(rag_store, "_probe_external_image", lambda url, timeout=8: "unreachable")
+
+    assert rag_store.prune_missing_generations("repo", rag_backend.EmbedConfig()) == 1
+    assert deleted == ["gone"]
+
+
 def test_prune_deletes_legacy_remote_view_only_when_comfyui_confirms_missing(monkeypatch):
     """legacy remote-view 直链（未落盘留存）只有 ComfyUI 明确 404 才算裂图。"""
     deleted = []

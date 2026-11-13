@@ -222,6 +222,28 @@ def inject_env_params(params: dict, operation: str, *,
     return written
 
 
+# 路径参数语义（单一属主，2026-11-05 T1）───────────────────────────────────
+# 执行期路径域闸门（`fabric_loop._path_domain_check`）要区分两种「绝对路径」：
+#   写着陆 = 本次动作**写到哪** → 必须落在作品域内，越域一律拒绝（两种访问标准同口径）；
+#   读取源 = 本次动作**从哪读** → 本身不落盘，越域读取在 approval 下按该确切路径授权，
+#            full 维持既定的完全访问。
+# 判据是**反向登记表**：durable/expensive 里未登记的路径参数一律按「写」处理
+# （fail-closed，与 plan_validator 计划期词法检查同口径）。所以新增「读外部文件」
+# 型能力必须在这里显式登记，否则会被误判成越域写——登记表只有一份消费方，
+# 不写「写着陆」表是为了避免造出只被测试引用的装饰字段。
+READ_PATH_PARAMS: dict[str, tuple[str, ...]] = {
+    # 从外部导入一张 ST/通用卡：path 是源文件，落点由配置真源（角色卡源库）决定。
+    "character.import_source": ("path",),
+    # 机械转写：读外部 ST 卡/世界书，写落在环境注入的 base（作品域）。
+    "character.migrate_mechanical": ("path",),
+}
+
+
+def read_path_params(operation: str) -> tuple[str, ...]:
+    """该能力里表示「读取源」的路径参数名（越域可读，但 approval 需按该路径授权）。"""
+    return READ_PATH_PARAMS.get(operation, ())
+
+
 # ── 内容交付自由循环能力面（单一属主，2026-09-10）────────────────────────────
 # doc 交付型任务（合集卡/角色卡/世界书/设定文档，固化02/03/04）走 fabric 自由循环时
 # 可见的操作集合。此前散落在 agent_graph._CARD_DELIVERY_ALLOWED（硬编码 frozenset），

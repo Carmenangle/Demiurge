@@ -447,19 +447,25 @@ services/  深模块层。业务逻辑全在这。彼此可依赖，但不 impor
 | `node_update` | 节点 Git 安装/更新、ComfyUI 本体拉取/切版和依赖预检；解析 Git/Pip 输出为对象进度、接收字节、速度与依赖清单，HEAD 变化才算真实更新。当前任务原子持久化，重启中断不会继续伪装运行 | 节点安装只允许可信 Git HTTPS 源并限制在 `custom_nodes`；共享依赖默认停在确认态；路由和前端统一消费 `UpdateProgress`，不得恢复 Manager 黑盒队列的“队列清空即成功”判断 |
 | `task_progress_store` | 后台任务进度的 UTF-8 JSON 原子快照、容量限制和重启中断归一 | 只存可恢复的状态，不存密钥和线程对象；高频调用方必须节流写盘，测试必须隔离真实 `DATA_DIR` |
 | `llm` | 建模型 + `normalize_base_url`（/v1 规则）+ `flatten_content`（分段展平）+ `chat_messages_stream`（流式增量与完整原文双输出） | 需要 base_url 归一、展平或流式调用 → 调这里，别内联；流式已由项目层控制重试，SDK 内层重试关闭，避免重试乘法 |
-| `agent_graph` | 多 Agent 主编排。编辑模式（`workspace_mode=edit`）默认直达 `edit_node`，但**委派强命令先放行到 `plan`**（2026-09-05 修复：制作合集卡/角色卡/世界书类请求在编辑模式下不再被只读编辑 Agent 拦截，见 `plan_compiler.is_doc_delegation_intent` 的卡交付模式）；无卡对话、带附件请求仍由 Supervisor 语义分派；**有卡纯文本直达 Roleplay**；**委派强命令层**（Autopilot P1，规模词×资产动作/显式计划语言/卡与文档交付，疑问信号一票否决）零模型直达 `plan` 路由，模糊表达保持剧情默认（fail-safe：委派误入只编译计划可取消，剧情误入污染记忆不可逆）。**智能编造执行分派（2026-09-06）**：full 模式走自由循环；approval 模式内容生成型任务（卡/书/文档交付，固化02/03 场景，`is_doc_delegation_intent` 命中）走**自由循环断点审批**（durable/expensive 能力逐个确认，checkpoint 存 `fabric_checkpoint`，批准后 `grant_operation` 追加租约授权并从断点续跑）；approval 其余（批量生图等确定性任务）走计划编译+机械执行——机械执行器不调 LLM，承载不了「读素材→LLM 写条目」的内容生成 | 编辑模式普通排错请求仍直达 `edit_node`（受限文件工具）；委派强命令不得进入 Roleplay/生图/MCP 分派；模糊任务理解仍改 Supervisor；强执行规则必须保守、可单测；**路由界限改动必须先分明三轴判别并跑路由单测矩阵**（见 docs/ROADMAP-AUTOPILOT.md「路由界限」）；approval 自由循环意图判定同样只读 `ctx.message`（剥离附件全文），防小说正文污染疑问/规模词 |
+| `agent_graph` | 多 Agent 主编排。**显式聊天/群聊（2026-11-09）**：`interaction_mode=chat` 按无卡作品路由（`answer`/`tool_agent`/`generate`/`plan`…），不落 roleplay；`group_chat` 的 `chat` 路由只在该模式可用，默认多角色轮转、明确创作命令仍走专家；默认 `story` 路径逐字不变。编辑模式（`workspace_mode=edit`）默认直达 `edit_node`，但**委派强命令先放行到 `plan`**（2026-09-05 修复：制作合集卡/角色卡/世界书类请求在编辑模式下不再被只读编辑 Agent 拦截，见 `plan_compiler.is_doc_delegation_intent` 的卡交付模式）；无卡对话、带附件请求仍由 Supervisor 语义分派；**有卡纯文本直达 Roleplay**；**委派强命令层**（Autopilot P1，规模词×资产动作/显式计划语言/卡与文档交付，疑问信号一票否决）零模型直达 `plan` 路由，模糊表达保持剧情默认（fail-safe：委派误入只编译计划可取消，剧情误入污染记忆不可逆）。**智能编造执行分派（2026-09-06）**：full 模式走自由循环；approval 模式内容生成型任务（卡/书/文档交付，固化02/03 场景，`is_doc_delegation_intent` 命中）走**自由循环断点审批**（durable/expensive 能力逐个确认，checkpoint 存 `fabric_checkpoint`，批准后 `grant_operation` 追加租约授权并从断点续跑）；approval 其余（批量生图等确定性任务）走计划编译+机械执行——机械执行器不调 LLM，承载不了「读素材→LLM 写条目」的内容生成 | 编辑模式普通排错请求仍直达 `edit_node`（受限文件工具）；委派强命令不得进入 Roleplay/生图/MCP 分派；模糊任务理解仍改 Supervisor；强执行规则必须保守、可单测；**路由界限改动必须先分明三轴判别并跑路由单测矩阵**（见 docs/ROADMAP-AUTOPILOT.md「路由界限」）；approval 自由循环意图判定同样只读 `ctx.message`（剥离附件全文），防小说正文污染疑问/规模词 |
 | `agent_support` / `agent_retrieval` / `agent_context_assembly` / `agent_fabric` / `agent_agency` / `agent_stream` | `agent_graph` 方案 B 拆分（2026-09-16，主文件 5184→1736，见 `docs/memory/agent-graph-seam-plan-2026-09-16.md`）后的六个单向接缝域，全部逐字节搬移 + re-export 兼容：`agent_support`=跨簇微助手（`_proxy_kw`）；`agent_retrieval`=检索召回域（世界书/RAG/知识召回接缝）；`agent_context_assembly`=上下文装配域（历史/角色/世界书/人设注入文本装配）；`agent_fabric`=自由循环域（fabric 循环/断点审批/checkpoint/知识目录）；`agent_agency`=能动性域（表格维护/`_agency_writeback`/媒体动作提取）；`agent_stream`=流式出口域（流式开关/续写消息/插画事件排序）。主文件留驻：AgentState、supervisor 路由、八个媒体节点、`plan_compiler_node`、`roleplay_node`、`_build_graph`/`_graph`、`stream_multi_agent` | 依赖**严格单向**：`agent_graph` → 六模块，六模块互不反向、不 import `agent_graph`（勿新增反向 import）；改域内逻辑 → 对应模块；**monkeypatch 判据=谁在调用期查这个名字**——消费方已搬走的 patch 改指新属主，消费方留驻的照旧打 `ag` 走 re-export；re-export 名单是兼容层，新代码不得新增跨簇裸引用 |
 | `roleplay_turn` | 剧情回合执行事务：主生成后依次做状态/插画写回、输出正则、原位锚点、正文与插画请求提前发布，再同步完成本轮表格、纪要、Curator/世界书维护后返回 Agent 终态 | 改发布与维护顺序只动这里并测公开 Interface；正文/插画必须先发布以启动 ComfyUI，但下一轮 Agent 不得在维护完成前读取旧状态；维护响应不得写入对话 |
 | `edit_agent` / `edit_agent_profiles` / `edit_session` / `edit_publication` | 编辑主管确定性选择六类专家；`edit_session` 在工具层强制只读/写入意图、先列后写、先读后覆盖和写前+完成前机械校验；`edit_publication` 把小仓库产物受控发布到后端设置中的 characterDir/presetDir，并支持 PNG 附件保存为头像/表情；排错可按当前 repo/turn 读取脱敏 Trace | 普通文件工具只操作当前小仓库；源库根只读后端 user_state，不信任请求路径；角色卡内部必须扁平且 worldbook/regex 只走侧车；PNG 卡元数据迁移仍走导入 UI |
 | `edit_import_adapter` | 外部 JSON 资源到 Demiurge 的确定性转换：纯角色卡只生成扁平 card，内嵌内容拆为 worldbook/regex 侧车；独立世界书统一 entries/key/enabled；预设剥离连接鉴权并补项目扩展；正则补 ID 和运行字段后编译校验 | 只读当前小仓库内源 JSON，默认拒绝覆盖目标且不删除源文件；PNG 卡必须走现有角色卡导入入口保留头像与元数据 |
 | `edit_artifacts` | 编辑产物机械校验：Demiurge 归一化角色卡、世界书侧车、预设 identifier/order、注入字段、`thinking_chains`、三层正则字段与编译、Python 语法及基础 JSON | 自动推断必须先按项目文件名和归一化卡字段识别，禁止因 `card.json.regex_scripts` 把整卡误判为正则；格式失败写 Trace，禁止把模型自述当验证结果 |
 | `project_files` | 当前小仓库文件权限单一属主：根由 `repo_meta.output_dir_from_state()` + `repo_folder(repo_id)` 后端解析；提供列出、UTF-8 读取、原子写入、精确替换 | 拒绝绝对路径、`.`/`..`、符号链接逃逸、二进制/非 UTF-8、目录和超过 1 MiB 的文件；不提供删除；模型/前端不能指定根目录 |
-| `agent_graph.roleplay_node` | 酒馆 Agent（剧情扮演节点）：作品可绑定多张角色卡，并由 `opening_card_name` 决定空会话第一句及首个真实剧情回复唯一可注入的角色描述；后续在世界书检索后，只把本轮输入直接角色名与本轮输入精确触发的世界书 key 当作角色出场证据，均未命中时才回退最近一条 AI 剧情。历史回退按角色最后出现分句识别离开/离场/不在、否定离场及重新入场；角色名采用最长非重叠实体匹配，避免“莉亚/卡蜜莉亚”串卡。`constant`、Dense、BM25 条目可以提供设定但不得激活角色卡。`_resolve_personas` 只发送选中卡的非空字段，并把 `description/personality/scenario/mes_example` 分别送入对应预设 marker；禁止因已绑定而全量发送或把四类字段折叠成描述。后续叠世界书/表格记忆。模型漏 `<status>` 时沿用已持久化快照；未闭合 `<状态更新>` 或 `<illustration>` 仍按尾部控制块剥离；本地高潮兜底锚点被输出正则改写后，只能在最终显示正文重新定位。状态/表格/插画后处理异常时必须用结构化解析器返回干净可见正文，禁止把原始控制块或提示词回退给前端 | 单卡 `card_name` 仅为开场卡兼容别名；其他绑定卡不得出现在开场；同轮多卡仅在本轮均有直接/精确证据时注入；空描述不注入；有卡作品的通用对话统一并入 roleplay |
+| `agent_graph.roleplay_node` | 酒馆 Agent（剧情扮演节点）：作品可绑定多张角色卡，并由 `opening_card_name` 决定空会话第一句及首个真实剧情回复唯一可注入的角色描述；后续在世界书检索后，角色出场证据＝本轮输入直接角色名 ∪ 本轮输入精确触发的世界书 key ∪ 最新一条非空 AI 剧情 `<status>` 的 `[在场]`（只认绑定卡名）∪ 最近一条 AI 剧情回退；`[在场]` 只追加未入选的绑定卡，仅因在场入选的卡受 12k 字符追加预算（超预算记 `cast.resolved.dropped_for_budget` 不注入）。历史回退按角色最后出现分句识别离开/离场/不在、否定离场及重新入场；角色名采用最长非重叠实体匹配，避免“莉亚/卡蜜莉亚”串卡。`constant`、Dense、BM25 条目可以提供设定但不得激活角色卡。`_resolve_personas` 只发送选中卡的非空字段，并把 `description/personality/scenario/mes_example` 分别送入对应预设 marker；禁止因已绑定而全量发送或把四类字段折叠成描述。后续叠世界书/表格记忆。模型漏 `<status>` 时沿用已持久化快照；未闭合 `<状态更新>` 或 `<illustration>` 仍按尾部控制块剥离；本地高潮兜底锚点被输出正则改写后，只能在最终显示正文重新定位。状态/表格/插画后处理异常时必须用结构化解析器返回干净可见正文，禁止把原始控制块或提示词回退给前端 | 单卡 `card_name` 仅为开场卡兼容别名；其他绑定卡不得出现在开场；同轮多卡仅在本轮均有直接/精确/在场证据时注入；空描述不注入；世界书无角色条目时卡本身就是人设/外貌真源，不得因无条目跳过在场卡；有卡作品的通用对话统一并入 roleplay |
 | `agent_context` | Agent 上下文窗口：各取 6 条、token 预算、历史文本与依赖上文的执行提示词整理。生成历史按 **前端显式可见历史 → 已存在的聊天快照 → 仅快照文件不存在时才回退 checkpoint** 取值；显式 `[]` 和空快照都表示历史已清空，禁止旧 checkpoint 复活已删消息 | 改上下文选择/裁剪 → 这里；`agent_graph` 不内联 token 算法。任何新入口都必须遵守同一历史优先级 |
+| `cast_resolver` | 角色名册/在场选角合同单一属主（2026-11-09）：纯逻辑、零 I/O。输入绑定卡全集与四类证据（用户点名、世界书角色名、最近剧情回退、最新 `<status>` 的 `[在场]`），输出 `CastView{members,present,selected,responders,sources}`；`_resolve_personas` 是当前唯一消费者，聊天/群聊复用同一成员全集。`[在场]` 只追加未入选的绑定卡，不把未在场/未点名的卡塞进来 | 新增选角证据 → 只改这里并补双侧测试；状态栏解析留在 `agent_context_assembly`，本模块不读盘、不解析 `<status>`；内容闸门（description 非空）与追加预算留在调用方；禁止在聊天/群聊另写一套选角口径 |
+| `chat_room` / `agent_graph_chat` | 聊天/群聊执行域（2026-11-09）：**1:1 chat＝通用 Agent 套人设**——按无卡作品路由，`answer`/`tool_agent` 的系统提示前置角色卡人设块（工具、生图、检索、计划能力全保留），不落 roleplay、不读写剧情 `chat_facts`；**group_chat** 普通纯文本**确定性直达 `chat`**（不再交 Supervisor LLM 自由选择，防被判成 answer 只回一人），明确生图/视频/找灵感强命令仍走专家；逐条 `chat_messages` 经 `stream_sink` 即时下发并写独立快照。**私聊每人独立线程**：`<repo>__chat__<角色段>`（角色段=可读名+短哈希），群聊 `<repo>__group`，切角色即切历史；**1:1 普通文本零 LLM 直达 `answer`**。**进入私聊扫描名册**：`POST /ai/chat/initiative/scan` 零 LLM 预检后给最多 2 名够格角色各写自己的线程，当前角色上屏、其他只亮未读；生成中允许切换角色（前端断流、后端续写旧线程）。**群聊互相识别**：每位成员按本人视角看整段对话——自己的话是 `assistant`，其他成员的发言转成 `user` + `【群成员·名】`，因此可以接用户的话，也可以直接接其他角色的话；聊天/群聊按整段对话入模（token 预算裁剪），不走剧情 `last_story_round` 单轮瘦身。**群聊节奏对齐 starlit-desktop**：初始最多 `RESPONDERS` 人回，角色间可有限接话，但受 `AI_CHAIN_MAX` / `AI_NO_OWNER_MAX` / `BUBBLES_PER_TURN` 硬上限约束，并做跨角色 4-gram 去重；模型可输出 `[NO_MESSAGE]` 主动沉默，禁止无限互相接话。**聊天室多元数据**：开启设置后，模型可在回复末尾写 `[SELFIE: ...]`/`[VIDEO: ...]`/`[AVATAR: ...]`，`chat_room` 拆出 marker 后经 `chat_messages.media_request` 下发（1:1 走 `answer` 路由时改用独立 `media_request` SSE 事件）；前端用现有 generate/video 通道生成并插回聊天，生成结果计入资产库。**聊天自拍提示词（2026-11-11）**：`media_request` 可带 `appearance`（后端 `chat_room.anchor_media_request` 从角色条目/卡提取的固定外貌，截掉【穿着】）；前端必须用该字段走 `genProfilePrompt` + 预设 `qualityPrompt` + Anima 二次元风格锁（正向先删 `photorealistic`/`realistic photography` 等写实标签，不能只靠负向），禁止退回通用 `/ai/prompt` 自由扩写；后端协议编码、前端解码、快照与群聊 `chat_messages` 四处同步透传，漏一侧即退回无身份锚的旧路径；主动/追问/重开不得在末行注入当前装扮，`repeat_guard` 对最近 8 条里重复 ≥2 次的剧情名词强制换题。**头像自拍**：`[AVATAR]` 是「非常规装扮自拍」（婚纱/泳装/兔女郎/礼服等），`media_request.avatar=true`；只有该标记且 `chatRoomAvatarUpdate` 开启时才替换 `repo.characterAvatars[speaker]`；普通 `[SELFIE]` 不覆盖头像，避免有纪念意义的头像被普通自拍顶掉；自拍姿势由后端随机池注入提示。该规则与作品无关，所有仓库/角色统一生效。**成员来源两档**：绑定卡 ≥2 或单卡有人设字段 → `cards`；单卡且 `description/personality/scenario/mes_example` 全空 + 世界书有角色条目 → `worldbook`（合集卡名册）；仓库 `characterRoster.mode` 可强制。1:1 普通文本零 LLM 直达 `answer`（不再先跑 Supervisor），人设取同名卡/世界书条目正文。**聊天室防拦截（2026-11-10）**：私聊/群聊/主动消息的系统提示前置当前剧情预设 `chatHistory` 之前的防拦截头部（与剧情主生成同源；无预设或读不到时用内置精简许可），并追加「聊天不是剧情正文」边界（预设里的灰魂/推演者不是本轮角色）；回复落盘/展示前用 `prompt_clean.restore_jailbreak` 还原 `@()@` 拆字标记，覆盖 1:1 `answer`、`tool_agent`、群聊与主动消息。**追问/续聊（2026-11-10）**：`chat_followup` 按 starlit `ConversationRunner` 节奏判定——角色发话后 60–180s 首追、第 2/3 次退避 2–5min/10–40min、单话题最多 3 次、连续 bot 气泡 ≥5 条收住、15min 会话窗口、窗口结束后 20–90min 可重开且最多 2 次、00:30–08:30 最多 1 条；前端私聊每 20s 轮询 `POST /ai/chat/followup`，老会话首次打开时把最后一条角色消息当作「刚说完」bootstrap；生成与主动消息共用 `thread_admission.admit` + `chat_initiative.claim`。 | 成员顺序/1:1 取首位/空回复丢弃/取消即停都只在本域；追问/重开不得在用户刚发言后触发、空回复也要 mark（防每轮重试烧钱）、不做全局并发上限；防拦截只取预设头部，并按句过滤文风/句长/格式要求（「拒绝平淡对话，每句≥10字」「文风有激情150字以上」也不得进私聊）与「NSFW 怎么写」（解剖学/体位/体液/道具/官能描写），只留不拒绝/不淡化 + `@` 拆字规则；世界书条目按星伴 persona 四段式抽取（基本身份/与用户关系/性格与边界/说话方式/相处方式），背景故事/原著名场面/其他角色关系/NSFW 玩法索引/好感分阶不得进私聊；私聊人设块末尾接自然聊天块（一条一个意思、不客服式关心、不排比长比喻、不重复最近用词），`repeat_guard` 对最近 8 条重复 ≥2 次的剧情名词强制换题；内置兜底不得教模型打 `@()@` 标记（无还原链）；聊天只注入 `chat_story_context` 的**角色当前状态 + 关键事件 + 数据表**（世界书/预设正文/往事纪要都不进私聊，**不注入剧情正文**），不触发剧情插画与剧情记忆；`chat_messages` 与 `media_request` 必须同时补后端协议编码、前端解码与 reducer 测试；群聊第一版不做无人自动聊；默认 `story` 路径零改动 |
+| `character_roster` | 合集卡角色名册单一属主（2026-11-10，纯逻辑）：`worldbook_store.detect_character_entries` 多信号识别（显式角色卡标记/人物视觉画像/名字像人名 + 身份外貌性格等档案信号/弱代词信号，**不要求「角色条目」前缀**），排除事件/势力/机制/地点/物品类条目；按稳定 uid（id/uid → 容器键 → 内容哈希）应用仓库 `characterRoster` 覆盖（include/exclude/rename/order）；**同名条目合并为一个角色**（正文拼接）；**低置信只进管理面板候选、不自动进聊天成员**；作品名/绑定卡名/阵营/种族/地点/组织/章节/编号型条目不识别。`chat_room.chat_roster` 是唯一调用方，同时服务聊天头像条、主动聊天选人、多元数据插入角色行与 `POST /ai/chat/roster`（后者返回 `member_threads` 与各角色快照 `member_activity`，前端按新→旧排序）。**头像**：聊天自拍覆盖（`repo.characterAvatars`，设置→通用「聊天头像自动更新」控制）→ 角色卡 avatar → 定妆底图（世界书全名与短名按包含/最长公共前缀匹配）→ 首字；9:16 底图圆形内 contain 白底不裁切。 | 新增识别信号 → 只改这里与 `worldbook_store` 判定并补测试；不得在聊天/多元数据插入各写一套角色名识别；覆盖键禁止用易变 index；名册显示上限 32，单轮实际发言仍由 `RESPONDERS`/`AI_NO_OWNER_MAX`/`AI_CHAIN_MAX` 约束；条目正文编辑仍归世界书页面 |
+| `chat_story_context` | 聊天/群聊的剧情资料单一属主（2026-11-09/11-10）：只取**角色当前状态表**（`character_state.load_state` 的 `叙事`/`数值`，按发言人前缀取，标明「与纪要/表格冲突时以此为准」）+ **关键事件/纪念装扮账本**（任务与事件表里类型=关键事件的行，新→旧、限量）+ 相关数据表行（全局表/主角信息表/当前发言人的重要角色表），拼成紧凑背景块；**世界书、预设正文、往事纪要都不进私聊**；附「与用户关系判断」提示——资料无见面记录按陌生人/冷淡，有记录按资料熟悉度；**禁止注入剧情正文**。各块失败只丢该块并留 trace，字符上限 `3600`（`compact` 追问/主动 `2200`）；关键事件块排在普通表格之前，预算不足时优先保住婚礼/婚纱等永久事实 | 状态/表格/关键事件读取只在此模块；不得在 chat_room / answer 内联第二套注入；不得把剧情历史、世界书或完整纪要正文灌进聊天；关系判断提示不得省略，避免角色对陌生人自来熟或对熟人失忆 |
+| `key_events` | 关键事件/纪念装扮账本单一属主（2026-11-10）：**主路径不穷举词表**——纪要抽取模型在 `SUMMARY_SYSTEM` 里按事件类型判断（关系里程碑、身份/命运转折、重大得失、关键仪式与装扮、重大冲突、第一次等，口径见 `key_event_contract.KEY_EVENT_GUIDE`），同一次调用输出 `key_events`；`roleplay_agency.maybe_summarize` 落纪要后把候选写进「任务与事件表」永久行（名称=`[关键事件] 第N回合·标题`，类型=关键事件，状态=已完成，进展=细节）。重建索引模型也输出同一字段（`ManualFillResult.key_events`）。每轮另有零 LLM 高置信词表兜底（婚礼/婚纱/礼服等，不要求穷举）。同一回合按名称 upsert，不产生重复；只有计划、正文没发生则不记 | 只写任务与事件表，不改纪要/状态；词表只兜底，新增事件类型改 `KEY_EVENT_GUIDE` 让模型判断，不得无限扩词表；摘要摘录必须去 `<think>`/`<status>` 并优先抓装扮关键词；写入失败只留痕，不得阻断正文、维护或重建索引 |
+| `chat_initiative` | 角色主动找上门的判定与冷却单一属主（2026-11-09/11-10）：有剧情沉淀（非空数据表，或角色状态有叙事/数值；往事纪要不单独算）+ 状态表已有该角色好感度且 ≥30 + 该角色私聊快照闲置 ≥2h + 距上次主动 ≥6h 才发起；`POST /ai/chat/initiative` 单角色按需调用，`POST /ai/chat/initiative/scan` 进入私聊时扫描名册（零 LLM 预检，最多 2 人）并把开场写进各自 `<repo>__chat__<角色段>` 快照；不产生用户消息，失败/沉默静默跳过。**并发保护（不做全局并发上限）**：主动生成先 `claim(thread_id)` 原子占位（两次扫描只能一次生成），再 `thread_admission.admit` 与用户发送共用同一把 thread 锁（该线程已有活动运行则跳过，trace 记 `in_flight`/`thread_busy`）；冷却状态文件读改写加 `_STATE_LOCK`。不同角色 thread 之间与剧情线程互不阻塞，可并行 | 冷却/门槛/闲置判定只在这里；`decide` 必须接受目标角色 thread_id（每角色独立闲置/冷却）；claim/admission 必须在 finally 释放（异常、沉默都释放）；不得引入全局并发数量上限或排队，只防同线程内容互相干扰；不得后台常驻轮询推送（需要推送通道时另立合同）；不得在未认识/无剧情沉淀时硬发消息；主动消息必须写回该角色独立快照 |
 | `task_session_store` | 任务会话登记单一属主（上下文合同 P1，2026-09-11）：讨论/委派型任务**首次命中即登记**，接续轮先查登记（显式状态，不从对话猜词）；材料（附件 fileId / 首链任务句 `created_intent` / 产物路径 `product_paths`）每轮从登记重建。TTL 6h、一线程一活跃任务、上限 50 条，存储复用 `task_progress_store` | 改接续判定或材料重建 → 这里；**禁止并入 `fabric_checkpoints` / `recipe_offers` 命名空间**（会让对话里的「批准」被当成别的语义授权）；登记失败不得阻断主流程 |
 | `prompt_compiler` | 最终消息编译接缝：OpenAI 兼容档保留历史后 system 原位；Claude 兼容档把历史后约束编译为贴近末轮 user 的本轮执行合同，不得全部前移到 system 头。Roleplay 启用自动插画时，完整插画说明仍在头部事实上下文，但还必须把短 `near_generation_contract` 作为最后一条生成近端 system 放在当前 user 前，避免长预设、世界书及“全部中文”等宽泛规则稀释当前 Profile 格式与事实覆盖要求。输出最终 messages、provider profile 与逐段位置 manifest | `provider_profile` 描述接口 wire，不描述模型家族；OpenAI Chat Completions 代理即使承载 Claude 模型仍选 OpenAI 兼容。旧设置统一迁到 OpenAI 档，只有 v2 后用户明确选择才保留 Claude 档；Roleplay 禁止按模型名猜供应商。Compiler 只拥有消息位置，不拥有预设、世界书或表格内容 |
-| `agent_contracts` | 编排契约单一属主：`RunContext`(dataclass) + `ModelConfig` + `AgentEvent`。多卡固定字段为 `card_names/opening_card_name`，`card_name` 是兼容别名；生图外貌来源为 `appearance_source=worldbook|character_card`。`history_override` 保存本次请求显式上传的可见历史；`stream_output/stream_sink` 控制节点实时增量出口。**RunContext 既是 dataclass 又当 dict 用**，由 `extras` 与 `_legacy()` 支撑 | 新固定字段必须同时加入 dataclass、`_legacy()`、实时请求、后台队列和双端测试；图节点新增跨节点标记还必须声明进 `AgentState`；**动了这些方法必须重启后端** |
-| `agent_request_context` | 即时请求与持久队列共用的 `RunContext` 构造真源；统一默认值、多卡去重、开场卡兼容、显式空历史和全部模型/代理/插画字段 | 新请求字段只在请求模型、前端 `AgentInvocation` 编码和这里各声明一次；禁止 router 或 worker 再手写第二套转换 |
+| `agent_contracts` | 编排契约单一属主：`RunContext`(dataclass) + `ModelConfig` + `AgentEvent`。多卡固定字段为 `card_names/opening_card_name`，`card_name` 是兼容别名；生图外貌来源为 `appearance_source=worldbook|character_card`。`history_override` 保存本次请求显式上传的可见历史；`stream_output/stream_sink` 控制节点实时增量出口；`interaction_mode`（story/chat/group_chat）与 `chat_members` 是聊天室显式入口，默认 story 零改变。**RunContext 既是 dataclass 又当 dict 用**，由 `extras` 与 `_legacy()` 支撑 | 新固定字段必须同时加入 dataclass、`_legacy()`、实时请求、后台队列和双端测试；图节点新增跨节点标记还必须声明进 `AgentState`；**动了这些方法必须重启后端** |
+| `agent_request_context` | 即时请求与持久队列共用的 `RunContext` 构造真源；统一默认值、多卡去重、开场卡兼容、显式空历史和全部模型/代理/插画/聊天室字段 | 新请求字段只在请求模型、前端 `AgentInvocation` 编码和这里各声明一次；禁止 router 或 worker 再手写第二套转换 |
 | `agent_knowledge` | 固化知识库唯一属主（2026-09-04 skill 化）：`DATA_DIR/agent_knowledge/*.md`（gitignored 运行态）的目录/上限常量、元数据列举、正文读取与**注入模式配置**收敛于此；技能文档带 frontmatter（`skill`/`whenToUse`/`tools`，read 时 content 去头）。注入模式 `settings.agentKnowledge={mode: smart\|always, always_docs}`（user_state 真源）：smart（默认）= `agent_graph._knowledge_catalog_text` 只注入【固化技能库】目录行+指令，命中场景由模型先 `knowledge.load_doc` 拉全文（capability knowledge 类别，readonly）；always=老行为全量常驻（上限只管无 frontmatter 普通知识）；always_docs 名单回退常驻。GET/PUT `/agents/knowledge/config`（须在 `/knowledge/{name}` 前）；设置页 AgentPanel 有模式开关 | 目录/上限/配置读写只在此模块；三固化 skill 文档 tools 引用必须真实存在于 capability 注册表（测试合同防漂移）；novel.* 脚本辅助层（固化02 §2.5）独立服务 `novel_tools.py`，extract/charfacts 支持 work_dir 作品域 base（推导在 handlers，服务层纯路径） |
 | `chat_agent_queue` | 忙时消息持久队列；headless worker 必须把 `MultiAgentRequest` 的工作区模式、历史、卡、预设、人设、世界书、插画、流式选择和模型参数完整还原成 `RunContext`。排队 payload 的历史只是入队时快照；任务认领执行时重新读取当前可见 `chat_snapshot`，保证看到前一轮最终正文。认领跳过 `thread_admission` 活跃 thread 的任务（保持 queued 可取消，消除认领→RunAlreadyActive→退回抖动）；cancel 支持 queued 直接取消与 running 协作取消（发取消信号后抢占标记 cancelled，worker 迟到的 `_finish` 被 `status='running'` 守卫拒绝、终态不复活；已落终态的任务取消时 `get()` 以事实为准不覆盖）；`_public` 只暴露 payload 的 `images/message` 摘要，不泄露含密钥的完整 payload | 新增直连参数时同步补队列映射与回归测试；编辑任务排队后仍必须走编辑 Agent；禁止用入队时旧 history 覆盖执行时快照 |
 | `thread_admission` | 线程准入单一真源：同一 thread 只允许一个活动运行（抢占登记，重复抛 `RunAlreadyActive`）、带所有权校验的 release（旧运行不得误删新登记）、协作取消信号；30 分钟泄漏看门狗在 `is_active/active_threads/admit` 前自动清理崩溃未 release 的登记并记日志，防止单次崩溃永久阻塞该 thread | 零重依赖（threading/dataclass）。「谁在跑/能不能再开/如何取消」只在这里改，agent_runner 与队列 worker 复用 |
@@ -501,6 +507,7 @@ services/  深模块层。业务逻辑全在这。彼此可依赖，但不 impor
 | `pathnames` | `safe_seg` 文件名清洗单点 | 需要清路径片段 → 用它 |
 | `workflow_parser` / `workflow_convert` | UI↔API 转换；`PASSTHROUGH_TYPES` 共享。UI 的无名 `widgets_values` 优先按节点自身 `inputs[].widget.name` 还原，旧格式再回退实时 `object_info` 与内置表；新版 `COMBO` schema 也是 widget；**dict 形态 `widgets_values`（VHS_VideoCombine 等）按名直取**，只剔 `control_after_generate`/`videopreview`，不按 schema 收窄（format 动态子控件不在顶层 required，收窄会丢编码参数）。实时 schema **按图内节点类型逐条问 `/object_info/{type}`**（`comfyui_client.fetch_object_info_types`），清单是三值语义：`dict`＝已注册、`None`＝**确认**未注册、**键缺失**＝没问到（超时/断连/预算用完），只有 `None` 才允许 `is_skipped` 剥节点 | 改穿透集 → 改 parser 的共享常量；**PrimitiveNode 差异是有意的，别合并**；不得让 `object_info` 拿不到导致模板默认参数丢失，也**不得把「没问到」当成「未安装」**而静默删节点 |
 | `character_card` | 角色卡格式单一属主：解析 TavernCard V1/V2/V3（JSON 或 PNG 内嵌 `chara`/`ccv3` tEXt，base64）、归一到 `NormalizedCard`、拆出内嵌 `character_book`/`regex_scripts`。纯逻辑无 I/O，可单测 | 新增卡格式/字段 → 只改这里；PNG tEXt 解析是自实现（无第三方依赖），别引库 |
+| `character_portrait` | **角色定妆（一键底图）单一属主**（第 92 刀，2026-11-06）：零 LLM 取一个角色的稳定形象——外貌定序＝世界书条目／角色卡（显式源）→ 通用表【外貌】/【穿着】融合（2026-11-11 正文外貌锚已移除）；性别定序＝条目正文 → 通用表「性别」列；组「单人·第三人称·全身＋正面朝向镜头、双眼看向镜头·动作从预设表随机取一条·无剧情动作」画面合同后交给 `image_prompt_profiles.generate_result`（第 93 刀定全身，第 95 刀把「回转约 20°」改成正脸看镜头），并带回来源账本 `entry/anchor/table/merged/none` 与本次动作 `pose`。**只出提示词**：不提交 ComfyUI、不落盘、不碰 LoRA 栈，**也不写 LoRA 触发词**（提交/轮询/写回 `baseImage` 与触发词前置都在前端 `lib/portraitBaseImage.ts`） | ⛔ 画面合同 `viewpoint="third_person"`／`narrator=""`／主体恒该角色一人**不留旋钮**——带进预设的第一人称会让第一人称闸把该角色从主体名单与模型载荷里一起摘掉 ⇒ 出「没有人的空镜」；⛔ 提交侧不许另立 values/LoRA 组装口径，必须复用 `illustrationWorkflowMedia`+`illustrationTemplateValues`+`latentSizeFor`；`portraitGateReason` 是唯一判据（既是面板禁用又是链开工闸）；缺料（`none`）照常出稿，性别解析不出不写 `subject_genders` |
 | `character_store` | 角色卡落盘：每张卡=一个文件夹，`description/first_mes/creator_notes` 可原位编辑（空值有效），稳定头像为 `avatar.png`，可选表情为 `expressions/<表情名>.png`。绑定保存把整组卡快照到当前仓库；运行时按当前小仓库→父作品→旧快照→源库读取。`characterPortrait` 用最长非重叠角色名识别最后明确发言者，当前回复无角色名时参考最近一组“上一条 AI + 当前用户”保持非开场角色连续性；表情评分只看该发言者所在分句，避免多人情绪串用，再对该卡全部自定义表情名做词面+情绪语义评分；表情名不限制固定枚举，未命中回退头像 | 头像/表情只在角色卡的媒体弹窗管理且只接受 PNG，不得放回绑定弹窗；表情文件名应表达适用情绪/状态（可复合命名）；不得用全局第一角色名决定多角色头像；卡正文编辑保留其他字段和侧车；快照已有卡不覆盖 |
 | `worldbook_store` | 独立世界书与当前小仓库快照落盘。Curator 上下文只渲染主 Roleplay 本轮实际注入的 index；`apply_repo_ops` 在服务端再次校验允许集合，越界 `worldbook_update` 拒绝，`worldbook_add` 仍允许。角色更新只替换唯一 `【剧情进展·动态】` 并保留基础底座 | 独立世界书增删改 → 这里；检索/条目解析仍归 `worldbook`。角色长期动态是主要更新对象；机制/规则/历史背景默认只读，除非正文明确永久改变且有直接 evidence；即时外观状态归状态表 |
 | `regex_engine` | 正则引擎单一属主：对标 ST engine.js 纯逻辑。`run_scripts(text, placement, scripts, *, is_markdown, is_prompt, is_edit, depth, skip_depth_gated)`——三档过滤(markdownOnly仅显示/promptOnly仅发送/皆非改存储源)+placement(1用户输入/2AI输出/3快捷命令/5世界信息/6推理/**7出图提示词=Demiurge 扩展，破甲还原+清洗成干净 booru 串**)+depth门控；`skip_depth_gated`=跳过设了 min/maxDepth 的脚本，处理**本轮实时输入**时置真（深度语义只该作用于历史楼层，而 live 输入生成时尚未入历史，否则「删 history 最后一条用户消息」maxDepth=1 会把 depth=0 的当前输入误擦空→用户消息不进 prompt）；`from_st_dict` 归一 camelCase；JS→Python 方言转换(命名组 `(?<x>)`→`(?P<x>)`、flag、`$1`/`$<name>`/`{{match}}`/trimStrings)。无 I/O 可单测 | 改正则语义/新 placement → 这里；**前端 `lib/regexEngine.ts` 是同逻辑 JS 版**(显示层 markdownOnly 用，原生 JS 正则方言天然一致)，两者行为须对齐；roleplay_node 对 live 用户输入调 `_apply_regex(skip_depth_gated=True)` |
@@ -527,15 +534,16 @@ types/       共享类型。
 | 模块 | 职责 |
 |------|------|
 | `useChatSession` | 聊天会话引擎：messages、聊天/队列编排、快照与媒体落盘 Adapter。新输入只在 Agent 槽占用时进入持久队列；ComfyUI 槽占用时直接开始下一轮对话。快照图片瘦身是异步事务：只有消息数组仍是任务起点的同一版本、仓库仍相同且 Agent 未启动时，才允许写 localStorage、后端快照和 React 内存；版本失效必须在任何写入前整体放弃。删除、重新生成、显式历史、导航后台化和自动插画提交合同保持不变；ComfyUI pending/轮询/恢复/finalize 顺序委托 `workflowGenerationRuntime` | 不得只保护 `setMessages` 而仍让旧瘦身任务写持久层；不得重新内联 pending localStorage、轮询计数或恢复分支；不得用 `wfRunning` 阻塞普通对话；界面提示、媒体原位回填和进度 WS 留在 Hook |
+| `ChatRoomView` / `lib/chatRoom` | 角色聊天/群聊视图与纯逻辑（2026-11-09）：**渲染在 ChatView 原本的对话区内，不使用弹窗**；顶部模式条「剧情 / 私聊 / 群聊」切换，消息流与输入栏复用主界面布局。私聊只取一位角色；群聊按节奏挑人回应并允许角色间有限接话，同一角色连发气泡只标一次名字；**成员选择条只显示角色卡自带头像（不显示名字）**，头像取作品快照/源库 `avatar.png`，无头像回退首字；私聊打开时按需调用 `/ai/chat/initiative` 让角色主动找上门；私聊 `<repo>__chat` / 群聊 `<repo>__group` 两条独立会话线，历史带 `【speaker】` 前缀；**顶部维护动作按当前模式分流**（剧情用剧情 thread，私聊/群聊用对应 `__chat/__group` thread；压缩/导入导出/清空/恢复不再只作用于剧情）；**未读小红点**由 `lib/chatRoomUnread` 按线程+发言人记录，模式条与成员头像各显示；成员解析、默认勾选、消息 upsert 全在 `lib/chatRoom`，组件只负责渲染与发送 | 不得把群聊轮转/选角写进组件或另写一套 cast 口径；头像不得用昵称/首字硬编码替代角色卡头像（仅无头像时回退）；聊天不得复用剧情 `threadId`、不得触发插画/剧情记忆；顶部维护动作不得在聊天模式误操作剧情 thread；群聊不做无人自动聊，切回剧情后剧情会话不受影响 |
 | `useChatAgentQueue` / `useChatTransfer` | 队列提交/取消/恢复和会话导入导出事务 | `useChatSession` 只传依赖与消费结果，不得重新复制 API 顺序 |
 | `useChatPresentationAssets` / `useChatUnreadTracker` | 角色头像表情投影与后台完成未读跟踪 | `ChatView` 只渲染投影结果，不直接维护跨刷新状态 |
 | `useTableWorkflows` | 表格统计、重建、手动补表与覆盖确认的前端事务 | `TableModal` 只保留弹窗本地输入和展示，不直接编排 API |
-| `chatGeneration` | 生成流程的纯判定/整形：图像门、文本打分、快照瘦身、纯文本历史、重跑消息、当前 LoRA 精确绑定和作者建议质量词筛选。提示词组装是固定两阶段合同：先由 Profile 融合「剧情高潮提炼＋角色条目稳定外貌」；Profile 完成后再按实际加载 LoRA 的完整文件名查表，机械注入精确触发词和筛选后的作者质量建议，并与已生成提示词大小写不敏感去重；查表失败必须显式失败，禁止提交缺失第三阶段的图。Anima 最终结构固定为首行「当前 LoRA 触发词 → 作者建议质量词 → 作品固定质量词 → 剧情内容 tags」的单一逗号序列，第二行仅为英文解释文段；`imagePromptProfiles.illustrationTemplateValues` 按语义独立组值 | pending/轮询/finalize 不属于此 Module；提示词质量词不受尺寸换算影响，采样参数仍归工作流模板 |
+| `chatGeneration` | 生成流程的纯判定/整形：图像门、文本打分、快照瘦身、纯文本历史、重跑消息、当前 LoRA 精确绑定和作者建议质量词筛选。提示词组装是固定两阶段合同：先由 Profile 融合「剧情高潮提炼＋角色条目稳定外貌」；Profile 完成后再按实际加载 LoRA 的完整文件名查表，机械注入精确触发词和筛选后的作者质量建议，并与已生成提示词大小写不敏感去重；查表失败必须显式失败，禁止提交缺失第三阶段的图（**第 93 刀**：这一步收成唯一消费口 `applyLoraTriggerWords(prompt, profile, loras, items)`，自动插画与一键定妆两条链都只委托它，不在本地再拼一份取词/前置逻辑）。Anima 最终结构固定为首行「当前 LoRA 触发词 → 作者建议质量词 → 作品固定质量词 → 剧情内容 tags」的单一逗号序列，第二行仅为英文解释文段；`imagePromptProfiles.illustrationTemplateValues` 按语义独立组值 | pending/轮询/finalize 不属于此 Module；提示词质量词不受尺寸换算影响，采样参数仍归工作流模板 |
 | `generationLifecycle` | Agent/ComfyUI 正交双槽 reducer + 派生 selector；只由 Agent 槽阻塞新对话，工作流槽继续独立保留 prompt、进度和停止所有权。**新增生成状态改这里，别加影子 ref** |
 | `workflowGenerationRuntime` | ComfyUI 生成生命周期深模块：可同时持有 ComfyUI FIFO 中多个 `prompt_id`，负责 pending 存储、提交时 `threadId/repoId/outputDir` 归属快照、提交后守望、恢复检查、轮询节奏、连续丢失、超时保留和幂等 finalize 双闸 | Hook 通过 Observer 接收完成/失败/释放/超时；前台与恢复路径必须共用同一 Runtime 实例。新任务提交给 ComfyUI 原生队列，不在浏览器另造易丢失的预提交队列；仓库切换不得改变已提交任务的归属 |
 | `workflowOrchestration` | 工作流输入口编排 hook（读节点→AI 出计划→写画布） |
 | `workflowCapture` | laf_lock 帧事务：单次请求/回复及隐藏完整画布的 load→ops→原生 API 图抓取；统一来源校验、重试、超时和清理。NodeCard IFrame 载入前通过 `clearComfyStorage` 清理 localStorage/sessionStorage 中工作流残留，防止之前打开的大工作流被 ComfyUI 会话恢复覆盖导致只显示整图而非单个节点。`clearComfyStorage` 是 async（localStorage/sessionStorage 同步清 + `await _clearComfyIndexedDB` 等 IndexedDB 删除完成）；`installLoadGraphLock` 在文件顶层 + LOCK/FULL setup 双点包装 `app.loadGraphData` 加互斥锁（任意时刻只跑一个载图），防止 ComfyUI 初始化恢复流程 `loadGraphData(旧图)` 与 laf_lock `loadGraphData(新图)` 交叉造成 `_nodes` 同 id 重复节点/丢节点；`applyLoad` 有 `applyLoadRunning` 防重入 | `WorkflowCard`、`AIBuildView` 不得自行监听同类 `api_prompt` 生命周期；节点局部画布的自愈时序仍归各自展示场景 |
-| `workflowTemplateExposure` | 参数清单与画布选择节点时，将未连线字段确定性转换为 `ExposedField`；字段名、label、semantic、默认值均保持原工作流定义，节点类型只生成不可见内部 binding | 旧人工别名迁移到 binding；禁止仅凭 `width/height/text/image` 猜用途；移除节点同步移除暴露字段 |
+| `workflowTemplateExposure` | 参数清单与画布选择节点时，将未连线字段确定性转换为 `ExposedField`；字段名、label、semantic、默认值均保持原工作流定义，节点类型只生成不可见内部 binding（**第 94 刀**：参考图槽 `reference_image`／`reference_image_<n>`／`reference_image_files` 的推断与后端 `template_store._infer_binding` 逐条镜像，缺一边＝画布看得见、提交没值且无报错） | 旧人工别名迁移到 binding；禁止仅凭 `width/height/text/image` 猜用途；移除节点同步移除暴露字段 |
 | `workflowLoraData` | 多元数据生成的 LoRA 确定性补全：按最终 API 图精确识别 LoRA，提炼作者质量标签，生成建议权重与正向 CLIP 覆盖 ops；触发词固定第一行，去重质量词固定第二行开头，负向 CLIP 不得修改 |
 | `viewRouting` | `parseHash`/`buildHash`/`calcSize` 纯函数 |
 | `lafLock` | laf_lock 子帧 postMessage 协议原语（`lockUrl`/`postToFrame`/`isLafMessage`） |
@@ -545,8 +553,10 @@ types/       共享类型。
 | `agentRecovery` | Agent SSE 断开后的后台状态与快照补偿轮询；完成后由 `useChatSession` 合并消息并刷新资产库 |
 | `useResizableChatInput` | 输入框拖动、键盘调整与高度持久化 |
 | `useChatMaintenance` | token 提醒、完整压缩与清缓存事务；拥有确认、快照提交和错误反馈 |
-| `api/chatStreamProtocol` | 对话流事件 v1 判别联合与唯一解码入口；未知版本/事件立即失败 |
+| `api/chatStreamProtocol` | 对话流事件 v1 判别联合与唯一解码入口；未知版本/事件立即失败。2026-11-09 新增 `chat_messages`（聊天/群聊逐角色回复 `{id,speaker,text,ts,poke}`），空文本/空 speaker 丢弃；`ts` 为 epoch 秒，快照与 SSE 同源，用于气泡时间标签与头像条排序（只按各私聊线程最后一条消息时间，打开/选中/未读不参与）；`poke=true` 是 QQ 式「戳了戳你」动作，居中文案渲染且不进模型历史 |
+| `comfyReadiness` | ComfyUI 就绪等待队列（2026-11-10）：并发拍摄/定妆任务先 `ensureComfyReady`，共享一次探活与自动启动；ComfyUI 未启动时排队等待而不是直接判死，10 分钟未就绪才报超时 | 依赖 `api/comfyui` 的 status/start；只做等待与状态广播，不写业务数据、不阻塞聊天前台；设置里的 ComfyUI 路径由 `ChatView` 注入 |
 | `chatSessionEvents` | 消息归并纯 reducer；消费已解码事件并更新文本、媒体、审批与路由选择。文本与 `media-slot` 都是有序 `parts`，后续 delta 追加在槽后；完成按 slotId 原位替换 pending 槽或已有图片/视频，失败只删除 pending 槽并合并相邻正文 |
+| `mediaSlotReconcile` | 剧情媒体槽兜底（2026-11-11）：本地仍有 pending 媒体槽时每 6s 读后端快照，按 `messageId + slotId` 用 ready 结果原位替换（轮询中断/切标签页/另一标签页先完成）；只读快照、不提交任务、不改写后端，`home` 线程不请求 |
 | `textTools` | 文本清理、拼接、字符间插入、统计、UTF-8 转义/反解和 OpenCC 简繁转换的浏览器端纯函数 | 新文本工具算法进这里并补 Vitest；`views/tools` 只持有表单状态和展示，输入文本不得上传后端 |
 | `quickTextTools` | 快捷工具浮标到 `textTools` 的纯适配层：统一默认选项、分隔符解码与紧凑统计结果 | `QuickToolsWidget` 只持有本地 UI 状态；不得复制六项文本算法。快捷工具与后台活动通过 `laf-floating-panel-open` 互斥展开 |
 | `AppBody` | 根壳下面的页面分派器及所有页面级 `React.lazy` 边界；首页未选择仓库/作品时展示最近 3–5 个作品，选中父仓库时展示其子作品，选中作品才进入对话 | `App.tsx` 只拥有导航、仓库选择、根状态和弹窗；父仓库仅有一个子作品时自动选择；新增页面映射进 `AppBody`。聊天、设置、资产、工作流、节点和工具不得重新静态导入根壳 |
@@ -728,9 +738,9 @@ RAG 构建使用 `backend/requirements-reranker.txt` 声明直接能力、`relea
 
 桌面化只允许加一层**薄壳**：壳负责窗口、单实例、托盘、窗口位置与 Runtime 生命周期；业务能力、鉴权、数据与壁纸渲染仍全部走同源 HTTP，不得新增壳专用业务 IPC。实现位于 `desktop/Demiurge.Desktop`（WPF + WebView2，`net8.0-windows`，框架依赖发布），复用现有 Runtime 与端口合同，不复制业务。
 
-**端口与复用**：唯一真源＝`DEMIURGE_PORT` → `LAF_RUNTIME_PORT` → 壳持久化值 → `8010`。前端 `API_BASE` 默认钉在 `http://127.0.0.1:8010/api`，因此壳**禁止静默换端口**；改端口必须同时以匹配的 `VITE_API_BASE` 重建前端。端口上已有服务时，只有 `/api/health` 返回 `{"status":"ok"}` 且 `/` 返回含 `id="root"` 的前端文档才复用（复用进程永不回收）；只有 API 的开发后端明确报错（提示设 `LAF_FRONTEND_DIST` 或关闭它），端口被非 Demiurge 程序占用时同样报错。
+**端口与复用**：唯一真源＝`DEMIURGE_PORT` → `LAF_RUNTIME_PORT` → 壳持久化值 → `8010`。前端 `API_BASE` 默认钉在 `http://127.0.0.1:8010/api`，因此壳**禁止静默换端口**；改端口必须同时以匹配的 `VITE_API_BASE` 重建前端。端口上已有服务时，只有 `/api/health` 返回 `{"status":"ok"}` 且 `/` 返回含 `id="root"` 的前端文档才复用（复用进程永不回收）；只有 API 的开发后端、或端口被非 Demiurge 程序占用时，WPF 壳报错并提示设 `LAF_FRONTEND_DIST` / 关闭占用者；**Tauri 壳在此之上先弹窗写明占用进程的映像名 / PID / 完整路径，用户点「是」才结束它并继续启动**（2026-11-08，见下 Tauri 条；安装版没有 `stop-dev.bat` 时的自救出口）。
 
-**启动与回收**：便携模式从包根 `data/runtime/current.json` 取 `base_id`，启动 `data/runtime/base/<base_id>/Demiurge-Runtime.exe`（工作目录＝`data/runtime`），注入 `LAF_RUNTIME_ROOT`/`LAF_RUNTIME_STATE`/`LAF_DATA_DIR`（=`data/userdata`）/`LAF_NO_BROWSER=1`/`LAF_RUNTIME_PORT`，并写 `data/runtime/runtime.pid`；仓库模式用 `backend/.venv/Scripts/python.exe -m uvicorn app.main:app`，要求 `frontend/dist` 存在（`DEMIURGE_FRONTEND_DIST` 可覆盖），并设 `LAF_FRONTEND_DIST`。就绪判定＝`/api/health`，默认 180 秒（`DEMIURGE_READY_TIMEOUT_SECONDS` 5–900）。退出按 PID 两段式 `taskkill /T` → `/T /F` → `Kill(entireProcessTree:true)`，子进程另绑 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 的 Job 对象兜底；只回收自己启动的进程树，禁止按端口杀进程。
+**启动与回收**：便携模式从包根 `data/runtime/current.json` 取 `base_id`，启动 `data/runtime/base/<base_id>/Demiurge-Runtime.exe`（工作目录＝`data/runtime`），注入 `LAF_RUNTIME_ROOT`/`LAF_RUNTIME_STATE`/`LAF_DATA_DIR`（=`data/userdata`）/`LAF_NO_BROWSER=1`/`LAF_RUNTIME_PORT`，并写 `data/runtime/runtime.pid`；仓库模式用 `backend/.venv/Scripts/python.exe -m uvicorn app.main:app`，要求 `frontend/dist` 存在（`DEMIURGE_FRONTEND_DIST` 可覆盖），并设 `LAF_FRONTEND_DIST`。就绪判定＝`/api/health`，默认 180 秒（`DEMIURGE_READY_TIMEOUT_SECONDS` 5–900）。退出按 PID 两段式 `taskkill /T` → `/T /F` → `Kill(entireProcessTree:true)`，子进程另绑 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 的 Job 对象兜底；只回收自己启动的进程树，**禁止盲按端口杀进程**——Tauri 的端口占用清理必须先解析出 PID 与映像路径、把占用者摆给用户，点头才杀（见下 Tauri 条）。
 
 **单实例与壳状态**：`Local\Demiurge.Desktop.SingleInstance` 互斥 + `Local\Demiurge.Desktop.Activate` 事件；第二实例唤醒第一实例后立即退出。托盘菜单＝打开主界面/在浏览器中打开/退出；关窗即退出并回收 Runtime（不保留后台驻留）。窗口位置/大小/最大化与端口存 `%LOCALAPPDATA%\Demiurge\desktop.json`（启动时回夹到虚拟屏幕），日志 `logs\desktop.log`、`logs\runtime.log`、`logs\self-test.log`，WebView2 数据 `webview2\`；`DEMIURGE_SHELL_HOME` 整体覆盖该目录。WebView2 仅允许 loopback 导航，外链与 `NewWindow` 交系统浏览器；`DEMIURGE_WEBVIEW2_ARGS` 可注入调试参数（如 CDP 端口）。浏览器直连必须继续可用，壳不是运行前提。
 
@@ -738,7 +748,7 @@ RAG 构建使用 `backend/requirements-reranker.txt` 声明直接能力、`relea
 
 **验证与边界（2026-10-23 首刀）**：构建 0 警告 0 错误；`--self-test` 15/15；壳拉起开发 Runtime 约 7 秒就绪、页面同源 API 正常；第二实例 344 ms 退出；关窗 4 秒内回收 venv 重定向器 + 实际解释器两层并释放端口；外部复用的 Runtime 在壳退出后存活；仅 API 的 8010 被拒绝且原进程存活。第二刀（装配）实测：真实 `dotnet publish` + 真实 7z 组装出的用户包解压后，包根 `Demiurge.exe --self-test` 仍 15/15，且复用外部健康服务时 WebView2 正常渲染、壳退出后服务存活，快捷方式 `.lnk` 的 Target/WorkingDirectory/Icon 指向包内 exe。`.github` 两段工作流改动只能在下一次 tag 发布时真机验证。**未做（当时）**：安装器/自动更新/代码签名（本机无 NSIS/Inno Setup/signtool，签名需证书）、macOS/Linux 壳。**2026-10-24 更新：安装器已重开（见下「安装版布局」），自动更新骨架已落（见下「自动更新骨架」），Authenticode 代码签名按用户定案推迟；macOS/Linux 壳仍未做。**scene 壁纸的**页面内实时渲染已在第三刀完成**（见「架构深化进度」49 与下段），当时记录的「没有页面内渲染器、没有任何 scene 同源路由」已作废：现在的路由是 `GET /api/user-state/wallpapers/workshop/scene-pkg`（只交包字节，不是上游插件的 `/wallpaper-engine/*` 前缀），解码与渲染全在前端，壳依旧不越权解码/渲染。细节见 `docs/tech-manual/G-contracts-release/16-contracts-and-gates.md` 与 `docs/memory/topic-release-audit-test.md` 同日「桌面壳」两节。
 
-**Tauri 2 换壳（`desktop/tauri/`，2026-10-24）**：同一薄壳合同与端口/复用规则，实现换为 Tauri 2 + WebView2；构建产物 release 为 `Demiurge.exe`（debug 仍叫 `demiurge-shell.exe`），可拷成仓库根 `Demiurge.exe`。启动顺序固定为「先开窗、再拉服务」，启动页逐项报进度，失败停在窗口内写明原因。关窗改为三选一：**隐藏到托盘**（运行时续跑）/ **彻底关闭**（先回收**自启**运行时再退出，前端窗口随进程关闭）/ **取消**；启动失败时关窗即退出。托盘菜单＝显示主窗口 / 重启后端 / 检查更新… / 彻底关闭；重启与退出只处理自启运行时，端口上外部复用的健康服务永不回收，重启项明确拒绝而非误杀；重启成功后整页重载并恢复标题。2026-10-24 真机验证：三种关窗选择、托盘重启（新旧 PID 不同、约 10 秒内就绪、页面重载）、托盘彻底关闭（进程树与 8010 释放）、外部复用拒绝（服务存活）均通过，release `--self-test` 当时 15/15（现随自检扩容为 18 项）。WPF 壳保留「关窗即退出并回收」的旧行为，该定案只落在 Tauri 新壳。
+**Tauri 2 换壳（`desktop/tauri/`，2026-10-24）**：同一薄壳合同与端口/复用规则，实现换为 Tauri 2 + WebView2；构建产物 release 为 `Demiurge.exe`（debug 仍叫 `demiurge-shell.exe`），可拷成仓库根 `Demiurge.exe`。启动顺序固定为「先开窗、再拉服务」，启动页逐项报进度，失败停在窗口内写明原因。关窗改为三选一：**隐藏到托盘**（运行时续跑）/ **彻底关闭**（先回收**自启**运行时再退出，前端窗口随进程关闭）/ **取消**；启动失败时关窗即退出。托盘菜单＝显示主窗口 / 重启后端 / 检查更新… / 彻底关闭；重启与退出只处理自启运行时，端口上外部复用的健康服务永不回收，重启项明确拒绝而非误杀；重启成功后整页重载并恢复标题。2026-10-24 真机验证：三种关窗选择、托盘重启（新旧 PID 不同、约 10 秒内就绪、页面重载）、托盘彻底关闭（进程树与 8010 释放）、外部复用拒绝（服务存活）均通过，release `--self-test` 当时 15/15（现为 19 项）。**端口占用清理（2026-11-08）**：启动时「端口被占」或「已有健康后端但不带前端」不再只报错——`GetExtendedTcpTable`（IPv4+IPv6 监听表）解析 PID、`QueryFullProcessImageNameW` 读映像路径，弹窗写明占用者，用户确认后 `taskkill /PID /T /F`、等端口释放（上限 10 秒）再继续启动；拿不到 PID / 用户拒绝 / 杀不掉都停在失败页。判定「像不像 Demiurge」只影响警告语，杀不杀由用户决定。托盘「重启后端」共用同一条路径。WPF 壳保留「关窗即退出并回收」「端口被占只报错」的旧行为，这些定案只落在 Tauri 新壳。
 
 **安装版布局（Tauri，2026-10-24 第一步）**：安装目录可能只读，因此只放壳与 `dependencies\git\cmd`（可选 `dependencies\ffmpeg\bin`）；`runtime/`（`current.json`、`base/<base_id>`、`apps/`、`rag/`）、`userdata/`、`runtime.pid`、日志、`desktop.json`、`webview2/` 全部落在 `%LOCALAPPDATA%\Demiurge`（`DEMIURGE_SHELL_HOME` 可整体覆盖）。运行时识别顺序固定为**便携包 → 仓库 → 安装版**，保证「把 release exe 拷进仓库根」仍用 `.venv`；安装版只在 `home/runtime/current.json` 存在时认，运行时尚未部署时明确报错并打印期望路径。拉起运行时前把 `dependencies\git\cmd` 与可选的 `dependencies\ffmpeg\bin` 前置进子进程 `PATH`（便携包同享该注入），补上「MinGit 随包却没挂 PATH」的缺口。自检增至 **18 项**：前 15 项继续与 WPF 逐行对齐，第 16 项验安装版布局与依赖目录收集，第 17 项跑运行时按需交付（见「运行时按需交付」条），第 18 项验自动更新验签（见「自动更新骨架」条）；整份 `diff` 必然比 WPF 多四行（多三条 PASS + summary 计数不同），不是漂移。隔离 home 下 debug / release 均 **18/18**；WPF 壳同时跑 15/15，前 15 行归一换行后逐行一致。安装器本体见下条，运行时交付见再下条；Authenticode 代码签名按用户定案推迟到客户端版完整落地。
 
@@ -809,7 +819,7 @@ generation 资产检索与剧情 `retrieve` 物理隔离：展示 prompt 永远�
 
 `model_lease` 是本进程 GPU 能力租约 Runtime。ComfyUI 提交优先级最高，可要求释放 VLM、Reranker 与本地 Embedding Adapter；各 Adapter 自己拥有真实卸载函数，Runtime 不 import 模型实现。租约解释的是本进程已知占用与排队原因，不等于跨进程精确显存计量。
 
-`scenario_lab` 的完整快照同时包含作品文件、SQLite 数据库和仓库专属 Chroma collections。SQLite 使用 backup API 并显式关闭连接；不可变媒体优先硬链接；v2 manifest 记录版本、回合、文件 SHA-256、源 size/mtime 和向量集合。新快照先在同目录 staging 完成后原子发布；未变化非数据库文件复用上个 manifest 的哈希，避免每回合重新读取全部图片。恢复只允许空目标仓库，绝不覆盖正式时间线；文件或 Chroma 恢复失败必须清理本次写入，多候选实验后续分支失败必须回滚前面已完成候选。前端每个完成回合按 `turn:N` 去重创建快照；`scenarioBranchRuntime` 统一拥有保存消息、匹配/创建快照、fork、登记本地分支和导航顺序；从历史消息分支只能使用同回合快照，找不到时必须拒绝。反事实候选之间物理隔离，不自动合并，用户选择只记录正式候选 ID。
+`scenario_lab` 的完整快照同时包含作品文件、SQLite 数据库和仓库专属 Chroma collections。SQLite 使用 backup API 并显式关闭连接；不可变媒体优先硬链接；v2 manifest 记录版本、回合、文件 SHA-256、源 size/mtime 和向量集合。新快照先在同目录 staging 完成后原子发布；未变化非数据库文件复用上个 manifest 的哈希，避免每回合重新读取全部图片。恢复只允许空目标仓库，绝不覆盖正式时间线；文件或 Chroma 恢复失败必须清理本次写入，多候选实验后续分支失败必须回滚前面已完成候选。前端每个完成回合按 `turn:N` 去重创建快照；`scenarioBranchRuntime` 统一拥有保存消息、匹配/创建快照、fork、登记本地分支和导航顺序；从历史消息分支只能使用同回合快照，找不到时必须拒绝。**分支继承**：私聊/群聊线程（`<repo>__chat*`、`<repo>__group*`）不在仓库文件夹里，fork 时按快照 `manifest.created_at` 复制到新仓库前缀，只保留时间点之前的消息（缺 `ts` 的旧消息保留）；前端同一步把源作品的 `settings.mediaInsert` 深拷贝到新分支并继承 `characterAvatars` / `characterRoster`。反事实候选之间物理隔离，不自动合并，用户选择只记录正式候选 ID。
 
 `capability_sandbox` 提供短期、可撤销、精确到 operation/path/domain/tool 的能力租约，并分两档访问标准：`approval`（默认，按 capability 逐条授权）与 `full`（通配放行，租约记录 `mode="full"` + `approved_by`，审计可查；仍受撤销/过期约束）。`plan_tasks` 在 full 模式提交任务时自动签 full 租约，approval 模式保持逐项审批。`procedure_skills` 从脱敏 Trace 提议流程，必须经用户审核、dry-run、受支持 Adapter 检查和能力授权后才执行。Prompt Skill 与 Procedure Skill 是两个 Module；外部 Smithery Skill/MCP 默认关闭并标记 `external_unreviewed`。当前 Procedure 执行面刻意只开放已注册安全 Adapter，未知动作不得退回任意 shell/MCP 执行。
 
@@ -836,7 +846,7 @@ generation 资产检索与剧情 `retrieve` 物理隔离：展示 prompt 永远�
 本次只做保持现有行为的深化，不机械拆 `agent_graph`，不改变剧情、NSFW、提示词 Profile、LoRA、ComfyUI 或资产检索协议。当前架构综合 **9.1/10**：边界与依赖 9.3、状态事务 9.3、结构化与 Trace 9.0、性能 9.0、测试与回归 9.6、前端职责 9.0、文档与领域语言 9.0。评分依据是可执行合同与失败路径测试，不以文件数量或界面是否可见代替。
 
 验收基线（**2026-08-11 当时快照，数字已过期，勿当当前基线引用**；当前口径见本文「测试」节与 `docs/tech-manual/G-contracts-release/17-regression-playbook.md`）：Ruff 通过；17/17 import-linter 合同保持；mypy 39 个契约文件通过；硬编码与 wire 门禁通过；后端 1212 项、前端 338 项、Playwright 3 项全通过；生产构建通过。
-**当前基线（2026-10-29 实测复核，以本行为准；上一版 2026-09-15 的 `17 kept`/48 文件/2686 例/855 例全部作废）**：ruff `All checks passed!`（`check app tests`）；`lint-imports` = `Contracts: 18 kept, 0 broken`；mypy `Success: no issues found in 279 source files`（`backend/mypy_files.txt`）；后端 pytest **4702 passed / 0 failed / 0 error / 0 skipped**（267 个 `tests/test_*.py`，全量不带 `-x` 实测 626.88s；判绿只认 `--junitxml` 的 `tests/failures/errors/skipped` 四数）；前端 vitest **181 文件 / 2061 例 / 0 failed / 0 error / 0 skipped**；`check:wire` 与 `check:manifest` exit 0；`tsc --noEmit` 与 `vite build` 通过；专名闸 `scripts/release_preflight.py` 在 1642 个 Git 跟踪文件上 **0 命中**（闸的覆盖面＝Git 跟踪面，含代码注释；见 `MEMORY.md` §5 隐私红线）。OpenCC 字典仍形成约 516 KiB gzip 的按需 chunk，但不进入首屏，只有打开快捷/完整文本工具才加载，因此记录为可观察的非阻断性能边界，不为消除 warning 改变繁简转换语义。
+**当前基线（2026-11-08 收尾实测复核，以本行为准；上一版 2026-10-29 的 4702/0/0/0、181 文件/2061 例、279 文件全部作废）**：ruff `All checks passed!`（`check app tests`）；`lint-imports` = `Contracts: 18 kept, 0 broken`；mypy `Success: no issues found in 284 source files`（`backend/mypy_files.txt`）；后端 pytest **5449 passed / 0 failed / 0 error / 0 skipped**（293 个 `tests/test_*.py`，`NO_PROXY=`＋`CODEBUDDY_SAFE_DELETE_ENABLED=0`，全量不带 `-x`，junit `time=758.9s`；判绿只认 `--junitxml` 的 `tests/failures/errors/skipped` 四数）；前端 vitest **201 文件 / 2338 例 / 0 failed / 0 error / 0 skipped**；`check:wire` 与 `check:manifest` exit 0；`tsc --noEmit` 与 `vite build` 通过；专名闸 `scripts/release_preflight.py` 在 1761 个可选文件上 **0 命中**（闸的覆盖面＝Git 跟踪面，含代码注释；见 `MEMORY.md` §5 隐私红线）。OpenCC 字典仍形成约 516 KiB gzip 的按需 chunk，但不进入首屏，只有打开快捷/完整文本工具才加载，因此记录为可观察的非阻断性能边界，不为消除 warning 改变繁简转换语义。
 
 ### Theme Runtime Seam
 
@@ -865,7 +875,7 @@ generation 资产检索与剧情 `retrieve` 物理隔离：展示 prompt 永远�
 | 模块 | 状态 | 拥有什么 | 边界 |
 |------|------|---------|------|
 | `character_state` | ✅ | 动态状态单一属主：按 `repo_id` 存可变状态（`数值`+`叙事`字段，每字段带 provenance 证据+turn+source）、`parse_deltas`/`apply_deltas`（带 from→to 审计历史，封顶 200；数值 `add` 累加 / `set` 仅对不存在字段播种初值，已存在忽略）、`render_state_block`（紧凑 kv+内联证据）。**手改/回滚(缺口6)**：`current_turn`/`set_fields`(设精确值非累加，数值 clamp，标 `source=user`)/`rollback_last`(还原到审计 `from` + 弹历史)。落盘 `<base>/<repo_id>/state.json` 物理隔离 | core 字段永不被本模块写；纯逻辑无 I/O 可单测，load/save 是唯一 I/O；base 由调用方注入不读 config；`state.py` 路由(GET/PATCH/rollback)只做 HTTP 适配，前端 StatePanel 消费 |
-| `agency` | ✅ | 能动性**纯逻辑（0 I/O 0 LLM 全单测）**：`judge`(core依据→好感度门槛→掷骰) + `classify_roll(roll,chance)` **六档**(大成功/极难/困难/普通成功/失败/大失败，对齐正文 `<roll>` 语汇，骰≥96 恒大失败) + `should_consult_world`(廉价门控) + `tier_index`/`crossed_tier`(插画跨档)。裁判是确定性规则不是模型 | 吃好感度**快照**，**不 import `character_state`/`agent_graph`**；裁判不得做成 LLM 调用。正文 `<roll>` 由剧情推进 Agent 的 `rollInstruction` 提示词驱动(主模型打)，与本模块隐形裁判(管 NPC 自主行动)同一套六档语汇；2026-10-21 起 `judge` 还裁定 `kind=event/user_action`（事件需 who/source 且不吃好感门槛，用户行动同理） |
+| `agency` | ✅ | 能动性**纯逻辑（0 I/O 0 LLM 全单测）**：`judge`(core依据→好感度门槛→掷骰) + `classify_roll(roll,chance)` **六档**(大成功/极难/困难/普通成功/失败/大失败，对齐正文 `<roll>` 语汇，骰≥96 恒大失败) + `should_consult_world`(廉价门控) + `tier_index`/`crossed_tier`(插画跨档)。裁判是确定性规则不是模型 | 吃好感度**快照**，**不 import `character_state`/`agent_graph`**；裁判不得做成 LLM 调用。正文 `<roll>` 由剧情推进 Agent 的 `rollInstruction` 提示词驱动(主模型打)，与本模块隐形裁判(管 NPC 自主行动)同一套六档语汇（2026-11-06 第 98 刀起，覆盖层注入前按 `DEGREE_LABEL` 重渲染 `[RESULT]` 行，用户改词不再分叉）；2026-10-21 起 `judge` 还裁定 `kind=event/user_action`（事件需 who/source 且不吃好感门槛，用户行动同理） |
 | `scene_illustration` | ✅ | 剧情插画**纯逻辑（0 I/O 0 LLM 全单测）**：`decide_trigger`(优先级 显式>失控>**场景nsfw\|climax**>跨档>每N段，跨档复用 `agency.crossed_tier`) + `build_scene_request`(从「段落动作+core外观+state衣着/场景」拼 prompt，非空过滤，出图管线的裸拼接降级档) + `fallback_illustration_anchor`（只在 `<content>` 正文评分，忽略 think/控制块，物体放置、具体体位与高潮动作优先；回忆性总结降权）+ `resolve_illustration_anchor`（模型锚定静态收束、比喻尾句或低强度钩子时纠正到正文最强可见动作；明确结果句与前文形成动作因果链时保留模型锚点。2026-10-31 加 `respect_scene_boundary`（默认 `True` 保持旧行为）：「`---`/`———` 时间跳转之后的新场景要保护」这道闸**只在确有显式意图帧要保护时**成立——`plan["anchor"]`/`anchor_override` 是点名要画的那一幕，拿旧时段高潮覆盖它是错的；缺计划兜底（`missing_plan_fallback`/`local_scene_fallback`/`first_story_reply`）没有任何计划要保护，那道闸会连高潮纠偏一起压住（锚点悄悄落到正文末尾），调用方对该支路传 `False`。🔴 3 分门槛与 `_FALLBACK_ANCHOR_TERMS` 打分表不因本参数改变）+ `illustration_scene_excerpt`（从当前场景边界连续保留姿态建立、关键物件、反复动作、身体反应到结果句的完整因果窗口，遇真正离场/转场截断）+ `illustration_anchor_offset`（高潮锚点逐字/破甲还原优先，轻微改写按段落相似度映射；指定锚点完全无效则失败关闭，禁止回退消息末尾）+ renderer 注册表(纯 dict) | 触发是规则不是导演 Agent；吃标量快照，**不 import `character_state`/`agent_graph`/`workflow_submission`/`image_gen`**（scene-illustration-purity 合同强制）；本模块不拥有出图管线 |
 | `scene_classify` | ✅ | 场景分类**纯逻辑（0 I/O 0 LLM）**：`normalize_scene`(模型给的场景字段→合法标签，中文别名+子串匹配+兜底空串)。标签 `dialogue/action/emotion/conflict/nsfw/climax`。信号复用 supervisor 路由那次 LLM（零额外往返），此处只解析规整 | **不 import `llm`/`agent_graph`**（scene-classify-purity 合同强制）；只规整不调模型 |
 | `image_prompt_extract` | ✅ | 自动插画的纯逻辑接缝：主 Roleplay 在正文后附隐藏 `<illustration>`，同时保存 anchor、镜头、艺术决策、subjects、画幅、动作草稿与当前 Profile 完整成稿。模块在 JSON 解析前允许调用方把块内容经过与正文相同的 `AI_OUTPUT` 正则，以还原预设改变的结构；随后剥块并校验 `anchor/camera/composition/subjects.weight/prompt/profile_prompt/motion/aspect_ratio`。模型若在同一个 JSON 字符串中插入完整 `<think>...</think>` 后继续输出，解析前只剥离该续写控制段并恢复前后文本；未闭合、无法恢复或仍为坏 JSON 才整体剥离并返回空计划。anchor 必须取所描绘高潮段末句；禁止无证据选余韵/对话尾句，但**显式计划**（`plan["anchor"]` / `anchor_override`）若位于 `---`/`———` 等时间跳转后的末尾揭示场景，必须保留该新场景，不能用前一时段分数更高的高潮覆盖；该保护**不**适用于无计划的兜底选点（那时锚点只是判据档的一次选点，交给高潮纠偏，见 `scene_illustration.respect_scene_boundary`，2026-10-31）。高潮上下文保留当前场景连续动作窗口，允许少量环境/反应桥段但遇离场/转场立即截断，防止稀疏抽样丢失复合动作或带入旧角色；视觉命题必须保留造成状态变化的动作链，静态肖像只能作次级信息。`visible_narrative_text` 只读取 `<content>`，排除思考、状态、表格和插画控制块，故隐藏成稿不显示、不入正文长度。比例只允许 `1:1/2:3/3:2/3:4/4:3/9:16/16:9`；主计划缺失时由 `scene_illustration.infer_aspect_ratio` 纯规则选择 | **不 import `llm`/`agent_graph`/`roleplay_agency`/`character_state`**；Profile 格式归 `image_prompt_profiles`，本模块只持有隐藏块协议；LoRA 触发词只按本次最终生效 LoRA 的完整文件名精确读取，空触发词不注入 |
@@ -912,6 +922,18 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
 
 多元数据插入顶部的“角色外貌来源”是互斥合同：`条目模式(worldbook)` 只读取当前小仓库世界书中本轮命中的 `角色卡·` 视觉条目，并允许按角色配置 LoRA/底图与兜底图片；`角色卡模式(character_card)` 只读取当前小仓库绑定角色卡的 `description`，按本轮出现卡名筛选，未点名时回退开场卡，同时禁止消费角色 LoRA、角色底图和兜底图片，旧预设残留也必须忽略，仅保留可选全局风格 LoRA。新请求不得在两种来源间隐式降级；缺字段的旧调用保留旧兼容回退。LoRA 选择器以 `/loras/available` 的磁盘扫描为真源；请求加载、瞬时失败或后端重启期间必须继续显示并保留作品已保存的绑定，自动重试后仍失败才展示错误与手动重试，禁止把“列表暂不可用”伪装成“无角色 LoRA”。
 
+**角色底图一键定妆合同（2026-11-06，第 92 刀）**：用户规格＝「角色底图在没有的情况下，但是有绑定多元数据插入的生图工作流模版时，可以利用该工作流一键生成，生成时会参考角色条目外貌，使用绑定的角色lora和风格lora去生成」。层次：`POST /ai/prompt/portrait`（`services/character_portrait.py`）**只出提示词**——一次定妆是分钟级 ComfyUI 任务，塞进同步 HTTP 会让前端请求先判死而 ComfyUI 仍在跑（第 88 刀拆掉的僵尸态形状），故提交／轮询／落盘／写回 `baseImage` 全在前端 `lib/portraitBaseImage.ts`，且**必须**复用插画链三真源 `illustrationWorkflowMedia(preset,[name],[name])`／`illustrationTemplateValues`／`latentSizeFor` 与 `submitWorkflow`/`pollWorkflowResult`/`saveLocal(subdir="portraits")`；面板里「保存」用的整段预设组装抽成唯一口径 `buildPreset()`，定妆读同一份（两处各组装一遍＝底图与剧情成稿的配置必然漂移）。画面合同三处写死不留旋钮：`viewpoint="third_person"`、`narrator=""`、`actors＝frame_subjects＝[该角色]`，narrative 为确定性 prose（一人、正面朝向镜头＋双眼看向镜头、全身从头顶到脚底含鞋子、纯色影棚、无剧情动作／他人／道具），`wardrobe`／`locale` 留空——底图要的是跨楼层稳定形象而非某一格剧情；带入预设的第一人称会让 `_first_person_narrator` 把该角色从主体名单**和模型载荷**里一起摘掉 ⇒ 空镜。`rating` 恒 `sfw`（`nsfw` 只影响 anima 质量行）。可用性判据唯一真源 `portraitGateReason`（缺角色名／缺模板／模板无提示词槽／无 ComfyUI 地址／无对话模型），既禁用按钮又拒绝链开工；运行参数（`chat`／`comfyUrl`／`presetDir`／`presetName`／`userName`）由宿主 `ChatView` 以 `portraitRuntime` 注入，缺位＝该宿主没备好这条链 ⇒ 按钮不出现。五档来源账本（`entry`/`anchor`/`table`/`merged`/`none`）经 `appearance_origin` 回前端回显并进 `illustration.portrait` Trace（只记类别，不记外貌正文）；全部取不到照常出稿。⛔ 五类失败（空提示词／无 `prompt_id`／轮询超时／完成无图／落盘无路径）一律抛错且不返回路径——半途成功一旦被写回底图，坏图就成了该角色后续所有出图的长期锚点；模板无 LoRA 槽却带 LoRA 栈 ⇒ 后端 422 原样透出，不静默清栈。展开见 `docs/tech-manual/A-roleplay-illustration/03` §24 与其红线 82、`C-comfyui-media/13` §3.9 与红线 22。
+
+**定妆成功即落预设合同（2026-11-07，第 92 刀增补）**：`generatePortraitBaseImage` 成功返回后，面板必须立刻经 `onPersist` 把带 `characterLoras[name].baseImage` 的整段预设写回本作品（宿主 `ChatView.applyMediaInsertPreset(preset, false)` 写 `settings.mediaInsert[repo.id]`，不关闭面板），**不得依赖用户再点一次「保存」**——2026-11-07 实锤：某作品某存档里的一个角色底图只留在 `portraits/` 磁盘（`20261106_160921_949056_c3d072c7.png`），而 `user_state.json` 该作品的 `mediaInsert` 里没有任何 `characterLoras` 绑定，Trace 也只有 2026-11-06 16:06 那一次 `illustration.portrait` ⇒ 一次成功定妆等于白跑。落盘时 `buildPreset` 还须强制补上该角色 `baseImage`（图片分区收起时 `characterLoras` 整体缺席）。批量补齐是串行多次落盘：行集真源必须是 `rowsRef.current`（不是点击那一刻的闭包 `rows`），否则后一次落盘会把前几张刚补好的 `baseImage` 覆盖回空。保护：`MediaInsertModal.portrait.test.tsx` 12 例（含「批量补齐两张：后一次自动落盘必须带上前一张」、双候选/删除/入库失败降级）。
+
+**定妆产物入库与双候选底图合同（2026-11-08，第 99 刀）**：定妆产物**也是一次生成**，落盘成功后必须经 `deps.index(...)` 入资产库（面板注入 `indexGeneration(repoId || "home", {prompt, image_url: localViewUrl(imagePath), template_name, lora_names}, runtime.embed)`，同一 `/rag/index-generation` 契约），`PortraitRuntime` 因此新增必填 `embed`（`resolvedEmbedModel(settings)`）；**入库失败只降级**（`indexed=false`、面板黄字提示），**不回滚**底图绑定与落盘。已有底图时仍允许「一键生成底图」，但**不直接覆盖**：新旧路径并列存入 `CharRow.baseCandidates`（**只存面板内存、绝不写预设**），两张都可点开 `openLightbox(localViewUrl(path))` 看大图，每张右上角红色 ×；候选 ≥2 时**保存与再定妆都禁用**，删到剩一张才写回 `baseImage` 并立即 `persistPortrait`（删到 0 张只清字段），上传新图替换并清空候选。🔴 「底图再次丢失」真因＝运行中的 `frontend/dist` 早于 `onPersist` 修复源码（00:05 定妆 vs 修复 mtime 00:27），不是后端丢数据——改完前端**必须重建 dist**（8010 挂 dist），资产库入库是预设再次丢失时的找回旁路。保护：`lib/portraitBaseImage.test.ts` 26 例＋`MediaInsertModal.portrait.test.tsx` 12 例。
+
+**定妆触发词与取景合同（2026-11-06，第 93 刀）**：用户指令＝「修复触发词功能，顺便看看我之前对于建议提示词的功能是怎么参考的，还有用的就是通用表里的外貌本身，要的是全身图，人物站姿要斜20°能看到隐约的侧身和背身，动作你就随机预设几个动作更方便看清身体细节」。**缺陷**：第 92 刀的定妆链把 LoRA 节点接上了却没前置触发词，而 Profile 侧明令模型不得写触发词（两头都不写 ⇒ LoRA 半生效，无报错、无判红、图不像那个人），违反本册既有的「Profile 完成后再按实际加载 LoRA 的完整文件名查表机械注入」三阶段合同。**修法**：取词（`promptAdditionsForSelectedLora`＝`triggers` 必带 ＋ `suggested_prompt` 过四类质量词表）与前置（`applyProfileLoraTriggers`＝前置到质量行最前、全局去重、大小写不敏感）**一字未改**，只把「逐条查表 → 前置 → 缺记录硬失败」收成单一真源 `chatGeneration.applyLoraTriggerWords`，自动插画（`useIllustrationChain.ts:330`，形态锁三串字面留在原地）与一键定妆（`portraitBaseImage.ts:154-155`，提交前 `deps.listLoras()`）两条链都只委托它；`loraMode="none"` 空栈 ⇒ 不查表、逐字节不变。🔴 取景合同改写：`_PORTRAIT_FRAMING` 写死全身（头顶到脚底含鞋子）＋~~四分之三侧后（身体相对镜头回转约 20°，正面之外读得出侧身与背身轮廓）~~（**第 95 刀撤销，见下条**），动作从 `_PORTRAIT_POSES`（六条原地站姿，**不含道具与位移**）随机取一条——换动作＝再点一次，不开放旋钮；`generate_portrait` 先定条再下传 ⇒ 回传的 `pose` 与 scene 里那句逐字相同，并一路进响应字段／面板文案／Trace（记固定措辞，可枚举，不含外貌正文）。⚠ 外貌源口径**登记未决**：`collect_appearance` 仍是「条目优先 ＋ 通用表融合」（第 92 刀那句「参考角色条目外貌」与本轮那句「用的就是通用表里的外貌本身」之间取的是第三态），改成「只读通用表」属跨口径决策，待用户判。展开见 `A/03` §25 与红线 83、`C/13` 红线 23。
+
+**定妆取景改「正面看向镜头」合同（2026-11-06，第 95 刀）**：真机实锤——第 93 刀的「身体回转约 20°、正面为主、略带背身」被图片 Profile 的「机位由内容反推」规则（`image_prompt_profile_templates.py`【画面自洽·机位由内容反推】）放大成 `three-quarter back view / body turned slightly away from camera / head turned back over shoulder`，成稿同时留着「正面朝向镜头」与背身 tag ⇒ 自相矛盾、底图钉歪。用户口径＝「你不如就正常说看向镜头就行」。**修法**：`_PORTRAIT_FRAMING` 改「正面朝向镜头、双眼看向镜头」＋全身（头顶到脚底含鞋子）＋站姿自然正面，`_PORTRAIT_POSES` 六条全部换成正面可读姿势（禁「回望／背在身后／侧后／背身」），后端测试逐条断言表里无背向措辞、成稿必含「看向镜头」；前端新增唯一机位判据 `portraitCameraViolation`（中英背身措辞表），`generatePortraitBaseImage` 在空提示词检查后、任何提交前命中即抛错——背身成稿一旦落盘并写回 `baseImage`，就成了该角色后续所有出图的长期锚点。⛔ 别把「侧身」一词也塞进判据（会误伤正常站姿），判据只认明确的背向/回望措辞。展开见 `A/03` §25.6 与红线 83。
+
+**定妆画幅 9:16 合同（2026-11-08，第 101 刀）**：用户截图实锤——2:3 定妆成稿（真机 1056×1536）**图片本身**就在小腿处截断，脚与鞋出画；底图是后续所有出图的形象锚点，合同里写死的「全身（头顶到脚底含鞋子）」必须由画幅保证，不能只写在 prose 里。画幅因此固定 **9:16**：`latentSizeFor("9:16")`＝**576×1024**（最长边 1024 档；用户把最长边调到 2048 ⇒ 1152×2048），模板 1.5× 上采样后成稿 864×1536。四个默认值同口径、缺一即漂移：前端 `PORTRAIT_ASPECT_RATIO`（`lib/portraitBaseImage.ts`）既喂 `/ai/prompt/portrait` 的 `aspect_ratio` 又喂 latent 尺寸；后端 `character_portrait.DEFAULT_ASPECT_RATIO`、路由 `PortraitPromptRequest.aspect_ratio`、前端请求体 `genPortraitPrompt` 兜底同为 `"9:16"`。⚠ 已存 2:3 底图不会被自动重画（像素里脚已经没了），只有重新定妆才得到 9:16 版本；换幅不改画面合同其余部分（第三人称／正面看向镜头／纯色影棚／动作表随机）。展开见 `A/03` §29 与 §4.1 签名块。
+
 自动插画 LoRA 采用三态合同，旧预设缺字段时迁移为 `single`：`none` 只消费角色/风格底图，提交前把工作流内标准 LoRA 加载器权重归零；`single` 按高潮画面人物顺序串联全部已配置角色 LoRA，命中至少一个角色时严禁注入风格 LoRA 及其触发词，全部未命中才使用风格兜底；`multi` 固定先加载默认风格 LoRA，再按高潮人物顺序叠加每个角色 LoRA，完整文件名去重。顾凝霜＋苏映晚的 multi 栈必须包含 Ogipote 默认风格、沈明澜与何舒野，single 栈则只含沈明澜与何舒野。角色配置全集只用于校验，禁止整体并入 `actors`；人物名单优先取最终高潮正文，正文未显式写名时再回退合法 subjects、本轮输入与状态 `[在场]`。外貌资料只按最终人物名单裁切，绝不能作为出场证据。主 Roleplay 的 `<illustration>.subjects` 必须列出高潮画面中每一名实际可见角色并使用配置中的精确名称；后端再以高潮正文校正并过滤 subjects。`<status>` 整体仍是不透明显示快照，但角色兜底必须确定性读取其中精确的 `[在场]` 单行；不能只读 `character_state.叙事[在场]`，因为真实预设通常只维护快照而不生成同名叙事 delta。相关回归必须走真实 `extract_status_snapshot → writeback → load_state`，禁止 mock `_narr` 伪造在场人物。`illustration.request` Trace 必须同时记录 `actor_candidates/status_actors/actors`，便于区分配置丢失、状态恢复失败和后续协议丢失。多人 LoRA 不新增 Agent 调用：`workflow_injector` 复用模板已标注的 `LoraLoaderModelOnly` 或 `LoraLoader` 为链首，动态复制后续加载器，串联 MODEL（完整加载器同时串联 CLIP），并把原下游统一重接到链尾。重生成快照必须保存 LoRA 栈和模式。Anima 使用风格 LoRA 时，内容行还必须机械加入手绘二次元媒介锁定词，避免只有触发词但基础模型仍落入真人域。
 
 **高潮视频首帧保真合同（2026-11-01，第 75 刀）**：自动插画链的 `video_prompt` 在**成图之前**编译，所以编译期 `first_frame` 恒空——这不代表成片是文生视频。`build_video_request` / `compile_climax_video_prompt` 因此带 `pending_frame`，下游统一用派生值 `will_have_frame = has_frame or pending_frame` 决定四件事：元信息声明「使用输入图片作为准确起始帧：首帧必须逐字复现图片1的机位、构图、人物姿态与服装」、首拍/单拍改用固定镜头（climax 走契约的肯定式文案 `固定镜头（Static Shot）…`，第 79 刀起；firstlast/transition 仍是「不做任何推拉摇移」那句，未受契约管辖）、~~中段每 2 拍才换一次镜~~（第 78 刀升级为**高潮全片一句机位**，见下）。R2 缺图守卫同步改口：climax + `pending_frame` 只记「高潮参考图编译时未产出：首帧由下游链补挂本张成图」，禁止谎报无参考图。`band_overrides`（提示词模版骨架）的优先级仍在固定镜头之上——用户显式选的运镜不得被本地保真文案覆盖；🔴 模型自带 `camera` 的优先权**已于第 78 刀撤销**：静机位档一律不吃，大场面档才采纳（展开见 `A/03` §12）。~~负面约束里有底图冲突项时必须剔掉（`cropped` / `bad composition`：底图本身是第一人称裁切构图），且剔项要落在**条内**~~（**第 81 刀撤销**：`[负面约束]` 整段已不再进视频提示词，剔项逻辑与 `_FRAME_CONFLICT_NEGATIVES` 一起删除；图片预设的负面串只进**生图**链，视频链根本没有 negative 通道，见下「高潮视频五段式与去冗余合同」）。时段的唯一尺是 `scene_illustration._SCENE_JUMP_CORE`（半角连字符串／全角破折号串／`* * *`），选点覆盖闸与取材扩窗**必须共用它**，否则底图钉在跳转后的新场景、分镜却演跳转前的旧时段。动作序列的起点真源是**定格帧**＝本张的锚点句＋终稿出图提示词（截 300／2000 字，仅 climax 消费）：`desc[0]` 只能复述这一格已存在的视觉状态，更早或更晚时段的动作不得进入本序列；firstlast 的帧语义（开头/结尾）逐字维持旧口径。
@@ -929,11 +951,17 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
 
 **高潮视频的画框上限与拍点对账合同（2026-11-05 第 91 刀）**：现场＝同一份 21:27 试跑成稿（`prompt_only`、零云端），五段逐字读数 ① 262 字／③ 355 字／④ 三拍 `0–3s·3–6s·6–10s`／⑤ 五条音效＋一句 `同步=`。这一刀把两处**结构性**错位说清楚，并撤回两条我自己的误判。❶ **首拍重述衣着不是模型失守，是旧合同自己要求的**——`action_rule` 原文写着 `desc[0]` 要复述「谁、什么姿态、在何处、**穿什么**、机位是什么」，所以删「穿什么」、把衣着清单钉回 `subject_scene` 是**改设计**而非补闸；判据＝首拍拿到的是 `0–Xs` 这一格的全部文字预算，重列＝把动作增量挤出自己的拍窗（真机读数：首拍占 ④ 描述总量 338/639＝**53 %**，按新合同手写的应然稿 220/487＝**45 %**）。❷ **画框装不下的东西与凭空的视线方向**：`desc[1..]` 的「不得凭空引入画面里还没有的道具、家具、装置或新人物」之后补「**也不得引入画框里装不下的身体部位或地面**（景别以该帧出图提示词为准）」，并新增一条视线句——「定格帧和正文都没写谁看向镜头，就不得凭空用 `toward the viewer`／`at the camera` 把方向交给镜头；背向式姿势就是背向，不默认」。🔴 这一条的**口径边界**：`viewer` **不是一律禁的词**，违的是**凭空** ⇒ 判据写成事实校验，⛔ 不许把它塞进第 90 刀那张三词元语言表。图片侧两句并存、各管一件事，别混：`_FP_PROSE_NO_META_CLAUSE`（`image_prompt_profiles/_base.py:2888`）确实把 `camera`／`narrator`／`viewer`／`point of view` 列进**散文行元语言**禁表，禁的是「把观看装置本身写进画面描述」（真机 `back turned toward the camera, back facing viewer`）；而视线句（`:3051-3052`、`:3166-3168`，第 31→33→42 刀那条）定案「视线方向按本轮画面事实写……⛔ 不得默认或强制让角色看向镜头（没写就不写）」，并在 `:3052` 括注「只有本轮事实明写看向镜头时才可写」——往禁表加词只会拦住**合法**的事实明写那一档；同理**负面例句不写进合同**（真机那句 `one boot pivoting on the floor` 只按类别禁，逐字列出反而 priming——与第 90 刀点名 `a pair of hands gripping her waist` 不同，那是在教「该补什么」）。三条合同句一律落在**规则 1 之内**，以保住第 90 刀的顺序锁 `rule1 → 【取景·第一人称】 → rule2`。❸ **⑤ 的卡拍时刻与 ④ 的实际拍界对账**：`beat_starts_from_segments()` 从 ④ **已落地的成品行**（`^(\d+)–\d+s`）取拍点，`reconcile_sync_with_beats()` 在 `_audio_hint` 落地前把 `sync` 里那一串时刻**逐位**换成真实拍点（真机 21:27 那一稿写的 `0s, 5s, 9s` 对 ④ 的 `0–3/3–6/6–10` ⇒ 收成 `0s, 3s, 6s`）。🔴 **拍界只有一个真源＝④ 成品行**，⛔ 另算一遍 `_climax_beat_plan` 正是「两处各算一次、互相对不上」的成因；失败面（无拍点／无时刻／单时刻如 `每 2 秒卡拍`／两处列表／列表外还有游离时刻）一律**逐字节返回原串**，时刻数≠拍数时**整列表换成真实拍点**（不接受模型自己数的拍数），替换只动数字与紧邻单位 ⇒ 句子其余一字不动且**幂等**。⛔ ② 提取合同里那句 `sync` 判据一字未动——它不该知道拍界怎么算（判据与真源分层，与第 90 刀同口径）；firstlast 与转场两支不传 `beat_starts` ⇒ ⑤ 逐字节不变。归因方法沿用离线重放（零 LLM、零云端）：同入参过当前代码后与真机稿的行级差异**恰好 ⑤ 那一行**，①／③／④ 逐字节相同 ⇒ 差值可归因本刀；⚠ 应然稿是我手写的、**n=0 次真机调用**，只证明编译层吃得住这种输入，不证明提取层下一轮真会这么写。另撤回一条：「第一人称帧没写主角肢体入镜＝第 90 刀没生效」不成立，用户判据「**如果画面没有主角当然不强调主角肢体入镜啊**」⇒ 无肢体证据时的静默是第 84 刀设计的正确行为。测试面＝`test_video_prompt.py` **126→136**（10 条 `test_第91刀_*`）＋ `test_agent_dispatch.py` 2 条（含 firstlast 反向锁）＋修订 POV 合同那条（元语言表只在第一人称支存在，测试须带 `viewpoint` 再调一次才取得到那份 system）。🔴 残留：⑤ 的 sfx 与 ④ 同源泄漏（`faint creak of floorboards under her boots`——画框上限本刀只治 ④）、`_prune_beat_action` 按从句剔迁移会留残句（`she turns half a，承接图片1的同一构型，…`）、图片侧 `_FP_PROSE_META_REWRITES` 不覆盖 `the viewer`、锚点漂移未归因。展开见 `A/03` §23、`G/10` 条目 23、`docs/memory/topic-video-chain.md`「第 91 刀」。
 
+**首尾帧参考生成合同（2026-11-06，第 94 刀）**：用户规格＝「**选择首尾帧生成视频时，要确认有没有参考角色底图**……不是首尾帧生成，而是**参考生成视频**：图片 1／2 作为首尾帧图片上传，3、4、5… 后续的就是角色的参考图」。**激活条件先说死**：`MiniMaxH3ImageToVideo` 只有 `first_frame`／`last_frame`、没有参考图输入；`MiniMaxH3ReferenceToVideo` 有 `ref_image_1..9`、没有帧锁定；能同时成立的 Ref2VA → `MiniMaxH3AddGuide`×2 是**模板数据**改写，而打包闸 `test_pack_rejects_ref2va_backslide` 仍明确拦着 ⇒ 本刀**不改模板包、不改打包闸**。链在运行期按用户当前模板自检：无参考槽 ⇒ `console.warn` 后**不带参考图提交**（视频照出，绝不谎报）；换一版带参考槽的模板后本刀自动生效。**三种绑定语义唯一**：`reference_image`（按 `exposed` 顺序占位）、`reference_image_<n>`（1 基序位）、`reference_image_files`（JSON 文件名数组，Painter 单控件）；推断必须双端镜像——前端 `workflowTemplateExposure.ts:14`／`:50-58` ↔ 后端 `template_store.py:45`／`:108-118`，缺一边的表现是「画布上看得见、提交时没值」且无任何报错。**顺序与去重只有一份口径**：`illustrationMedia.planFirstlastReferenceImages` 按 `resolvedActors`（与提示词在场角色同源）取序，缺底图者进 `missing` **不占槽位**（占了会让后面的人顶到错的编号），同一 source 只上一次；链门槛＝`mainIsVideo && videoMode === "firstlast"`，⛔ 不放宽成 `mainIsVideo`（高潮点两段链会多出无谓上传并打乱既有「一次上传」断言）；上传复用 `resolveBaseImageSource`（已是可 fetch 地址禁止再套 `localViewUrl`），单张失败只跳过该张并告警。面板用同一个 `workflowFieldBinding` 判参考槽并显示三类风险（角色卡模式不吃底图／模板无参考槽／缺底图名单），缺图给「一键补齐缺失底图（N）」——串行复用第 92／93 刀定妆链。🔴 残留（未动）：视频提示词仍只编号图片1／2，参考图 3+ 的 `<Picture N>` 与「上传失败后面前移」要等模板换型定案后一并解决。展开见 `A/03` §26 与红线 84、`docs/memory/topic-video-chain.md`「第 94 刀」。
+
+**生图方式显式开关合同（2026-11-08，第 98 刀）**：多元数据插入预设新增 `imageMode: "text2img" | "img2img"`，唯一解析真源＝`illustrationMedia.resolveIllustrationImageMode`。**文生图**＝提示词＋角色/风格 LoRA，角色底图与风格底图**不参与**两条出图链：云端 `illustrationRequestMedia` 传空 `character_base_images`/`style_base_image` ⇒ 后端 `cloud_renderer` 走 `image_gen.generate`（`/images/generations`）；ComfyUI `illustrationWorkflowMedia` 返回 `baseImage: ""` ⇒ 模板即使有 `base_image` 槽也不注入。**图生图**＝底图＋LoRA（ComfyUI 模板 `base_image` 槽）或底图＋云端模型（`/images/edits`），按在场角色取角色底图、都未命中回退风格底图。旧预设没有该字段时按改动前的隐式口径回填：`appearanceSource === "worldbook"` 且配置了角色/风格底图 ⇒ `img2img`，否则 `text2img`（角色卡模式从不读底图 ⇒ 恒 `text2img`），**升级零回归**。面板「生图方式」二选一：角色卡模式禁用图生图（没有底图行可维护）；图生图但零底图、或所选模板没有 `base_image` 槽时必须提前告警「会退化为文生图」，⛔ 不得假装已锁一致性。后端**不新增开关字段**：开关的语义就是「送不送底图」，多一个后端布尔就会与底图映射形成两处判据、必然漂移。保护：`illustrationMedia.test.ts`、`MediaInsertModal.test.tsx`、`MediaInsertModal.imageMode.test.tsx`。
+
 **模版负面旋钮摘除与旧数据归一合同（2026-11-05，第 87 刀）**：视频模版的区块键表由六键降到**五键**，`VideoSkeleton.negative_extra` 字段、后端路由字段面与前端模板编辑器的「负面追加」输入框**整条摘除**（一处判据＝`video_prompt.prune_retired_section_keys`，`prompt_template_store` **复用真源**、不同层各写一份）。🔴 **合同的核心是「归一优先于判非法」而不是「哪个键该删」**：已存模版的 `section_order` 是六键排列，若按新键表判非法 ⇒ `get_template` 返回 None ⇒ **整条模版从列表里消失**，这个失败形状比一个死旋钮更难发现（用户只会说「我的模版没了」）；所以载入时把 `section_order` 里的 `negative` **剔除而非拒收**，余下五键的**相对顺序原样保留**，同时剔除 `section_titles.negative` 与 `negative_extra`。锁分三面：`not hasattr(VideoSkeleton(), "negative_extra")`、内置投影里不含该键（投影有它＝编辑器又长出死框）、旧六键记录归一后照常读取且顺序不退化。⛔ 别把这理解成「负面词有别的出口」：`MiniMaxH3ImageToVideo` 只有 `positive` 一路输入，禁止内容只能在正面文本里正向描述（第 78 刀机位契约）；图片链的 `negativePrompt` 与生图负面照常，**不在这条合同面上**。展开见 `A/03` §21、`docs/memory/topic-video-chain.md`「第 87 刀」。
 
 **自动插画槽的服务端落定合同（2026-11-05，第 88 刀）**：认领与落定是**两件事**，缺一不可。自动链在碰 ComfyUI **之前**就写服务端认领（`illustration-claim` → `submissionClaim: True`，`status` 仍 `pending`），而 `_is_settled_server_media` 认「有 `promptId` **或** 有 `submissionClaim`」即为已落定 ⇒ 客户端后续快照不再提这一格时，服务端会把这条 `pending` 槽**回位**进会话。因此任何**不会提交**的分支（试跑 `promptOnlyGeneration`、编译期早退）都必须显式走**失败通道**落定：`discardFailedIllustration` → `illustration-failure` → `remove_media_slot`（＋ trace 记 `slot_removed`），只改本地消息不算落定——服务端认领还**永久占位**（`claim_media_slot_submission` 拒绝已有 `promptId`/`submissionClaim` 的槽，那条僵尸格连重新生成都点不动）。渲染层的判据由此可反推：`status:"pending"`＋`submissionClaim` 就是「插画生成中…」＋一个没有任务可停的停止按钮。⚠ 恢复路径上的 `pruneUnsubmittedMediaSlots` **不能替代落定**（只剪 `pending && !promptId`，而认领槽会被服务端先回位）。合同连带一条测试纪律：**只 grep 源文件的锁是假绿**——终态文案/前缀这类判据必须有「渲染出的 DOM」或「调用形状」断言在场。展开见 `A/03` §21.3、`docs/memory/topic-video-chain.md`「第 88 刀」。
 
 **firstlast 对白归属并拍合同（2026-11-05，第 86 刀）**：`「台词」＋归属＋「第二句台词」`这类复合句里，归属必须与**含引号的前一拍**同拍，否则口型同步句挂在没人说过的那拍上。判据是**两条谓词的或**，且两条都以「短 ≤`_ATTRIBUTION_MAX_LEN` ＋ 标点 ＋ 说话动词表」同一份常量为准：`_is_speaker_attribution`（整句无引号、动词收尾）与 `_is_attribution_lead`（只看**引号前那段**，动词**不要求收尾**）。🔴 为什么必须加第二条而不是把第一条放宽：`_split_narrative_beats` 的引号分支对带引号的句子**整条返回**，第一条的「不含引号」判据在这种句子上恒 False，**根本不进判定**——「动词表不全」是误诊。⛔ 不许改 `_split_narrative_beats`（climax 共用，拆「一句两引号」＝重造节拍形态，撞第 80 刀的拍数／零时长窗口锁）；⛔ 必须留**事件前缀反向锁**（`她站起身，把伞挂到门后，「…」` 无说话动词 ⇒ 不并拍），否则「短＋标点收尾」会吞掉真事件拍。展开见 `A/03` §21.1、`docs/memory/topic-video-chain.md`「第 86 刀」。
+
+**剧情对白音频接入参考视频合同（2026-11-08，第 99／100 刀）**：用户口径＝把本轮「一句一句生成、顺序拼好的」TTS 录音作为剧情内角色对白音频上传参考视频节点；**拼好的音频只作参考音轨**（H3 `<Audio 1>`，锁音色/语气/情绪），「哪句在哪个场景/动作/镜头说」由后端的**对白时间轴**承载——紧凑拼接不得把「一句紧接一句」的节奏带进画面。**后端**只在 firstlast 正片、且本轮 TTS `lines` 非空时，用与 ④ 分镜同一份 `_firstlast_beat_plan` 拍界调 `build_dialogue_reference`，产出 `video_dialogue {ref_label, speakers, timeline, text, warnings, line_count}`；台词按归一化子串与正文引语**顺序**匹配（未命中的句子按顺序铺到空余引语拍，正文无引语则均分到中段拍并告警；总字数按 4.5 字/秒估算，超过视频时长也告警）。⛔ `dialogue` **不得并进 `video_prompt`**：只有前端确认模板真的暴露参考音频槽、且整条音频上传成功后，才把 `text` 追加到视频提示词末尾；无槽/上传失败 ⇒ 不追加（模型不能等一条不存在的音轨），视频照常提交。两个事件构造器（`agent_agency` 与 `agent_stream`）必须同步挂 `video_dialogue`，无台词/空 text ⇒ 键缺席。**音频链**（前端 `lib/dialogueAudio.ts`）：等分条落定（无音轨 8 s 宽限、签名稳定 1.5 s、总上限 300 s，绝不挂死视频槽）→ 选 ≥2 条走 `/comfyui/merge-audio`（`force=true`；成功后后端移除分条、只留整条）→ 取整条 → 上传视频机 input → 写 `reference_audio`（独立游标）或 `reference_audio_<n>`（1 基）；同轮 `threadId:messageId:comfyMainUrl` 只拼/传一次，失败空串返回且不缓存，`videoDialogue` 随重试快照带走。**Ref2VA 槽位按图位置推断**（`template_store._ref2va_binding`，先 `workflow_flatten` 再沿同类型连线上溯 `LoadImage`/`LoadAudio`）：`ref_image_0/1 → first_frame_image/last_frame_image`、`ref_image_N≥2 → reference_image_{N-1}`、`ref_audio_N → reference_audio_{N+1}`；位置优先于字段名/标题推断，同一源节点接多槽则弃用该 binding。参考图/参考音频是**可选补充口**：空值摘源节点及孤儿下游、不记 `missing`，⛔ 绝不落回模板自带的 `example.png`/示例 mp3（尤其 `LoadAudio` 会冒充对白音轨）；但模板只有参考图口时它仍是唯一图源、照旧必填。模板没有 `video_prompt` binding 时，视频成稿（含对白块）必须落通用 `prompt` 槽并统一用 `submittedPrompt` 提交/上报/轮询，否则视频模型读到插图提示词。保护：`test_video_prompt.py` 6 例＋`test_agent_dispatch.py` 2 例＋`test_template_store.py` 2 例＋`test_workflow_injector.py` 5 例（定向 465 passed）；前端 `dialogueAudio.test.ts` 15 例＋`imagePromptProfiles.test.ts`＋`useIllustrationChain.test.tsx` 3 例（定向 102 例、`tsc` 0）。展开见 `A/03` §28、`C/13` §3.11＋红线 25、`docs/memory/topic-video-chain.md`「对白时间轴＋Ref2VA 参考音频/图片口」。
 
 **纪要 vs 角色条目（两种数据，非二选一）**：`character_state` 记「结构化活状态」（好感度数值+态度/心情/所在），同一人物按身份替换字段值；`narrative_store`/`narrative_memory` 记「事件叙事」（概览+详细纪要+重要对白+出场人物），以完整会话快照计算回合，每到填表频率永久新建一条独立索引卡，自动流程只增不改且不压缩删除。展示编号固定为 `T<层级>-<rowid>`（如 `T1-1/T1-2`），回合区间只作副标题，编辑正文不得改变卡身份；按 trigram/人物相关性召回，主 Roleplay 只读最多 10 条概览。抽取失败跳过且旧纪要不动；用户显式手动重填时才允许按相交消息范围局部替换。FTS5 trigram 旁路召回（中文免分词）与世界书 Chroma 语义检索互补。
 
@@ -1010,7 +1038,7 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
 ### 现状真源（先读这个，防止重复建设）
 
 - **剧情→图**：自动插画全链路已落地（能动性引擎支柱 3：高潮锚点 → 四 Profile → LoRA → ComfyUI/云端 → `messageId+slotId` 原位槽）。
-- **剧情→视频**：V1.1–V1.3 已落地——smartVideo 切视频模板时已完成插画作为首帧底图注入（`resolveVideoBaseImage` 优先级：本槽已完成插画 > 最近一次已完成插画 > 用户手动指定 > 模板无图像口=文生视频；pending 不等待=时序红线；**底图引用已是可直接 fetch 的地址（`/api/comfyui/local-view?…`/`http(s)://`）时必须原样取用，禁止再套 `localViewUrl`**——2026-10-31 真机 `LoadImage (#61) cannot identify image file` 即二次包装取回 404 JSON 所致，归一函数 `resolveBaseImageSource` 同时从 `path` 参数解真实图名并在 `!resp.ok` 时失败）；视频 scene_spec 最小事实合同（motion/镜头运动来自预设，零新增 LLM，禁止从模型输出读 camera；**2026-10-31 起高潮时长改由剧情判定**：复用既有动作提取那次 LLM 调用输出 `duration_s`，`clamp_climax_duration` 夹到 4–15 秒（上限 2026-11-04 由 8 放到 15，提取判据里的区间同批改）、提取失败兜底 5 秒，用户预设 `videoDurationHint` 仍最高优先；判定值经 `video_params.duration` 随事件下发，前端 `resolveVideoDuration` 解析后绑定模板 `video_duration`，0/缺省=未判定保留模板默认；firstlast/transition 不读剧情值）；视频槽独立超时（图片 150/210 tries，视频 450 tries/15min 释放 busy / 630/40min 上限）、SSE/快照/恢复/瘦身全链路验证（`durableFinalizeSucceeded` 合并 images+videos 校验）。云端 `video_gen` 仍仅文生视频无参考图（V1.4 等 Provider）；**2026-10-31 用户定案，高潮点改「两段链」**：主槽按普通图出，成图到手后 `chainClimaxVideo` 以 `videoOnly` 递归提交到 `${slotId}:video` 副槽，副槽由 `appendVideoSlotAfter` 插在**主图槽的紧后方**（用户原话「对应视频的槽位就在图片下方就行」），两个槽各带自己的重试快照——图片槽重试＝重跑整条链，视频槽重试＝只重跑视频且首帧沿用同一张成图（`videoBaseUrl` + `videoBaseSlotId` 显式携带，不反查消息）；**2026-10-31 用户定案「图片的宽高要和视频的宽高一致」**：提示词侧 `video_config.size` 取本锚点 `scene_spec.aspect_ratio`（缺值留空，禁止再硬编码 `1280x720`），成片像素侧前端顺手量已到手的首帧字节（`imagePixelSizeFromBlob`）→ 按 32 就近对齐（`alignSizeForVideoNode`）→ 经 `video_width`/`video_height` 绑定覆盖模板里的 ResolutionSelector 连线；量不到 ⇒ 两键缺席、交回模板默认，绝不因量不到尺寸判死整条链；**2026-10-31 多批定案（条 80）**：climax 批量 ≥2 ⇒ 每张图各一支动作延伸视频（逐张独立、不合并）；firstlast 批量 ≥2 ⇒ 段桥（前图当首帧、后图当尾帧），每张落自己的正文锚点，链序＝正文序。
+- **剧情→视频**：V1.1–V1.3 已落地——smartVideo 切视频模板时已完成插画作为首帧底图注入（`resolveVideoBaseImage` 优先级：本槽已完成插画 > 最近一次已完成插画 > 用户手动指定 > 模板无图像口=文生视频；pending 不等待=时序红线；**底图引用已是可直接 fetch 的地址（`/api/comfyui/local-view?…`/`http(s)://`）时必须原样取用，禁止再套 `localViewUrl`**——2026-10-31 真机 `LoadImage (#61) cannot identify image file` 即二次包装取回 404 JSON 所致，归一函数 `resolveBaseImageSource` 同时从 `path` 参数解真实图名并在 `!resp.ok` 时失败）；视频 scene_spec 最小事实合同（motion/镜头运动来自预设，零新增 LLM，禁止从模型输出读 camera；**2026-10-31 起高潮时长改由剧情判定**：复用既有动作提取那次 LLM 调用输出 `duration_s`，`clamp_climax_duration` 夹到 4–15 秒（上限 2026-11-04 由 8 放到 15，提取判据里的区间同批改）、提取失败兜底 5 秒，用户预设 `videoDurationHint` 仍最高优先；判定值经 `video_params.duration` 随事件下发，前端 `resolveVideoDuration` 解析后绑定模板 `video_duration`，0/缺省=未判定保留模板默认；firstlast/transition 不读剧情值）；视频槽独立超时（图片 150/210 tries，视频 450 tries/15min 释放 busy / 630/40min 上限）、SSE/快照/恢复/瘦身全链路验证（`durableFinalizeSucceeded` 合并 images+videos 校验）。云端 `video_gen` 仍仅文生视频无参考图（V1.4 等 Provider）；**2026-10-31 用户定案，高潮点改「两段链」**：主槽按普通图出，成图到手后 `chainClimaxVideo` 以 `videoOnly` 递归提交到 `${slotId}:video` 副槽，副槽由 `appendVideoSlotAfter` 插在**主图槽的紧后方**（用户原话「对应视频的槽位就在图片下方就行」），两个槽各带自己的重试快照——图片槽重试＝重跑整条链，视频槽重试＝只重跑视频且首帧沿用同一张成图（`videoBaseUrl` + `videoBaseSlotId` 显式携带，不反查消息）；**2026-10-31 用户定案「图片的宽高要和视频的宽高一致」**：提示词侧 `video_config.size` 取本锚点 `scene_spec.aspect_ratio`（缺值留空，禁止再硬编码 `1280x720`），成片像素侧前端顺手量已到手的首帧字节（`imagePixelSizeFromBlob`）→ 按 32 就近对齐（`alignSizeForVideoNode`）→ 经 `video_width`/`video_height` 绑定覆盖模板里的 ResolutionSelector 连线；量不到 ⇒ 两键缺席、交回模板默认，绝不因量不到尺寸判死整条链；**2026-10-31 多批定案（条 80）**：climax 批量 ≥2 ⇒ 每张图各一支动作延伸视频（逐张独立、不合并）；firstlast 批量 ≥2 ⇒ 段桥（前图当首帧、后图当尾帧），每张落自己的正文锚点，链序＝正文序。**2026-11-08（第 106 刀）`video_template_id` 随 wire 下发**：前端所选视频**工作流**模板的 id 从 `preset.videoTemplateId` → `MultiAgentRequest` → `RunContext` → `ctx`，`template_store.video_template_caps(record)` 从模板 exposed 派生 `{supports_last_frame, reference_slots, duration}`；提示词只声明模板真能消费的图片位（无 `last_frame_image` 就不写「图片2=尾帧」，`reference_image_N` 上限内才写「图片3+」），firstlast 未设时长时 ①秒数／④拍界／`submit.duration` 同取模板 `video_duration` 默认值；`caps=None`（模板未知／旧链路）逐字维持旧行为。⚠ 前端只按 binding 消费图片，声明模板没有的槽位＝指挥模型去看一张不会上传的图。
 - **联网灵感**：`web_search` 已收编为搜索源 Adapter 注册表（M1.1 ✅：`SearchAdapter` 协议 + DDG 默认实现，可插 Bing/SearXNG/商业 API）；**文字源现有两个（2026-09-10）**：`bing-cn`（cn.bing.com，国内**直连**可用）与 `ddg`（需代理）；未显式指定 provider 时按 `_AUTO_CHAIN=("bing-cn","ddg")` **依次回落**取首个有结果的源（= 不配代理也能搜），显式 provider 只试该源不回落；`inspiration.search_and_refine(..., search_provider=…)` 的 `search_provider` 随 `RunContext.search_provider` 从设置项透传（空=自动链）；`image_search`（M1.2 ✅：`BingImageSearchAdapter`，返回 `{thumb_url, full_url, source_url, title}`）；`inspiration.search_and_refine` 搜索摘要 → 对话模型整理成「标题+内容」中文总结 + 图片结果（失败降级 `images=[]`）；`/ai/image-proxy` 后端图片代理（`image_proxy.py`：限 http(s) + 5MB + image/* Content-Type）；`/comfyui/web-materials/*` 上网素材基础 CRUD（`image_store` 下载到 `_web_materials/`，M1.3 🔶 部分落地：基础链路就位，魔数/SSRF/域名策略/大小上限/原子落盘待补）；持久化由 `generation_store.persist_inspiration` 写会话快照（thread 级，M1.4 资产库化未开始）。
 - **可复用底座已就位**：`visual_asset_index`（图向量+RRF）、`visual_preference`（二选一 Elo）、`model_lease`（GPU 租约）、`instruction_provenance`（外部内容低权限标记）、`model_downloader` 的受控下载事务（临时文件+校验+落盘）。
 
@@ -2134,6 +2162,152 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
    （`_wb_bridge_chain` 正文序 / 主图前置的起点回退）、`test_roleplay_turn.py`（`bridge_prev_slot`
    标注与不标注两路）、`useIllustrationChain.test.tsx`（段桥链 6 例 + `waitForSlotMedia` 5 例）、
    `chatSessionEvents.test.ts`（`batch_index` 落点）、`chatStreamProtocol.b1Contract.test.ts`（wire 解码）。
+
+81. **智能编造执行期三道收口：路径域闸对齐 / 租约原子提交 / 批准绑定单个动作并一次性消费（2026-11-05）**：
+   全库架构与安全审计（`docs/PLAN-CAPABILITY-SECURITY-HARDENING-2026-11-05.md`）实锤三条，均在自由循环
+   （`fabric_loop`）而不是机械计划里：① **full 是越域写的旁路**——机械计划有「params 里的绝对路径必须落在
+   作品域内」，自由循环只按 `output_dir` 授权，探针里 `file.write_text` 把文件真写到了作品根之外；
+   ② **approval 越域读不进审批**——同一个 `file.read_text` 既可能读作品内素材也可能读域外任意文件，
+   而审批只报工具名；③ **租约盘面吞异常**——`_save_persisted` 失败被 `except OSError: pass` 吃掉，
+   `grant/revoke` 在盘面根本没写成功时也返回成功 ⇒ 用户以为已撤销，后端重载后权限复活。
+   ① **T1 路径域闸**：`fabric_loop._path_domain_check`（环境归一**之后**判定）——durable/expensive 的
+   越域写**一律拒绝并回填可操作指引**（越域写不是「批准与否」的问题，批准也不放行）；readonly 的越域读
+   在 approval 下逐路径 awaiting、**full 保持既定「完全访问」的越域只读语义**（写侧收紧、读侧维持，是刻意
+   差异不是漏网）。两条闸互补：提交期词法（`plan_validator._check_paths`，`PureWindowsPath`）挡「声明就越权」，
+   执行期 `capability_sandbox.path_allowed`（`Path.resolve()`）挡「运行时算出来的实际路径越权」；
+   「哪个参数是路径」只有 `capability_registry.READ_PATH_PARAMS` 一个属主。
+   ② **T2 原子提交**：`capability_sandbox._commit(mutator)` 是唯一租约变更接缝——同一把 `_LOCK` 内
+   「深拷贝 → 改副本 → 副本落盘 → 用副本替换内存」，`_save_persisted` 走 同目录 tmp → `flush`+`os.fsync`
+   → `os.replace`，**OSError 一律上抛**（清理 tmp 的二次异常不得覆盖原始异常），`changed=False` 不落盘。
+   由此得到四条真实语义：批准写盘失败 ⇒ **保留断点 + 「请重试批准」**（不删进度）；取消写盘失败 ⇒
+   报「取消失败」且**不宣称已取消**（内存也不半提交）；起始租约签不出 ⇒ 智能编造**不起跑**；
+   full 模式计划提交撞租约失败 ⇒ 任务置 `blocked`（不是 `queued` 假可执行态，认领器只取 queued），
+   租约类端点对 `OSError` 回 **503**，与 400/403/404/`{"ok": false}` 各归各位。
+   ③ **T3 批准绑定动作**：`fabric_loop.action_fingerprint(operation, params)` = env 归一后
+   `{operation, params}` 规范化 JSON（键排序 + 去分隔符）的 SHA-256，**租约只存 hash，不复制完整命令/正文**；
+   `authorize` 在**同锁内**消费一次性条目 ⇒ 并发至多一次成功、改参数（换路径/换内容/换 overwrite）算新动作、
+   重复同一动作第二次仍 awaiting、**消费发生在 dispatch 前 ⇒ handler 抛错也算这次批准已用**（重试必须重批）。
+   向后兼容靠一条判据：**不传 `action_hash` = 持续授权**（机械计划整计划批准、演示流程、越域读取路径授权
+   全部零行为变化），`full` 放行且**不消费**。续跑提示带 pending action 要求逐字重发；审批文本摊出
+   operation + 归一后实参 + 实际路径/命令（`command` 永不截断，其余超长值明示「仅展示摘要」），
+   已知密钥字段脱敏（脱敏只改展示：这些键由环境注入，重发时被同一真值覆盖回去，不影响指纹），
+   参数按**围栏纯文本**渲染且围栏长度随正文最长反引号串增长（模型写的正文不得按 HTML 执行）。
+   ④ **旧断点迁移**：旧 `awaiting` 断点没有 `action_hash` ⇒ **不补授 `operation + 作品根`**（那等于替用户
+   批了他没见过的新动作＝静默提权），保留 `messages/steps` 让模型重发、按新合同重批；旧 `running` 断点不丢 steps。
+   ⑤ **红检抓出的真实缺陷（本轮唯一新 bug）**：`grant_operation` 的幂等分支连**已消费**条目一起命中 ⇒
+   再批同一动作时报「已授权」而 `authorize` 仍判已消费，形成 批准→再拦→再批准 永圈
+   （与 2026-09-14 修过的「过期租约批准死循环」同形）。修法＝命中已消费条目时**重新装填**
+   （`consumed=False`，不新增条目、不扩授权面），而不是追加第二条。
+   ⑥ **红线**：`full` 不是 OS 沙箱（`shell=True` 的命令仍可用绝对路径、起子进程，本轮收紧的是路径域与
+   审批粒度，命令仍不解析/不黑名单化）；越域写不得被「批准」放行；一次性语义只加在写类，读类保持按路径
+   持续授权；不得为了「让旧测试变绿」恢复一次批准连续写的持续授权。
+   ⑦ **验证**：后端新增 `test_fabric_path_domain.py` **15** / `test_capability_lease_persistence.py` **11** /
+   `test_lease_storage_failure_api.py` **7** / `test_fabric_action_approval.py` **24**（含「批准后首个动作就是 B」
+   「同一条域外路径重复读不停顿」「再批一次可再消费一次」），`test_fabric_approval.py` **9**（旧「一次批准后连续
+   写三次到 step_limit」按合同拆成用只读工具制造 step_limit 的 running 断点回归）；
+   前端新增 `ChatMessages.fabricApproval.test.tsx` **11**（含读后端源码的跨语言文案契约）。
+   定向 29 文件 **640 passed / 0F / 0E / 0S**（`_tmp/junit_t3c.xml`）、`src/components/chat` **81 passed / 13 文件**、
+   `tsc --noEmit` 无输出、`ruff check` 通过。受控红检四次：不消费 ⇒ **恰 7 红**；指纹只认工具名 ⇒ **恰 4 红**；
+   旧断点补授作品根 ⇒ **恰 1 红**；审批措辞回退 ⇒ **恰 1 红**（全部随即恢复并复跑）。
+   **§7 审批链验收（同日续刀，零 LLM 花费）**：真实浏览器与 HTTP 两臂都走完。零花费的办法是只替掉「出站 LLM」
+   这一件事——`_tmp/stub_llm_server.py`（OpenAI 兼容桩，按消息字面串选回复、同一条规则可用 `sequence` 逐拍推进）
+   + `_tmp/probe_fabric_chain_app.py`（`LAF_DATA_DIR` 指到 `%TEMP%`，并把故障注入收在**唯一那条落盘原语**上：
+   `capability_sandbox._save_persisted` 只在标记文件存在时抛 OSError），于是真 graph、真审批闸、真断点/租约盘面、
+   真写盘一样没被替掉。五臂结论：approval 下任务→固化询问→直接跑→执行期**真挂起**；批准时租约写盘失败 ⇒ 屏上
+   「审批失败：租约存储写入失败（…）。断点已保留」**且断点仍在、动作指纹逐字未变**、目标文件没写出去、租约里没多出授权、
+   这一轮**一次都没叫自由循环模型**（T2 的「不许谎报成功」由此拿到界面级证据）；撤障重批 ⇒ 同一动作逐字执行→落盘→断点被清；
+   批准后模型改了路径 ⇒ **重新挂起**且指纹变化、被批准的那条动作一次都没执行；full 对照组 ⇒ 域内写**不逐条审批**、
+   一拍交付、屏上不出审批条、盘面不留 awaiting，越出作品域的写**照样被路径域闸拦下**（trace `tool.blocked`）且是
+   **拒绝**不是挂起——「full 只豁免逐项审批与联网面、不豁免写入域」这条边界第一次被真链路证明。
+   界面证据＝`frontend/e2e-manual/fabric-approval-chain.spec.ts` **3 例**（真实 vite 5174 + 隔离后端 8011 + 系统 Edge），
+   HTTP 证据＝`_tmp/probe_fabric_chain_http.py 甲|乙|丙|丁`，一键起栈 `_tmp/run_chain_stack.sh`（⚠ 必须先 reset 再起后端：
+   `_load_persisted` 在 import 期读盘，反了会把旧租约读回内存）。受控红检第五次：把 T2 的失败分支改回「先删断点再报失败」⇒
+   **恰 1 例红**（红在保留断言，前面的文案断言仍绿），随即按 sha1 逐字节还原并复跑回绿。🔴 **顺带查出的合同缺口（未修）**：
+   审批词「批准/取消」**没有零 LLM 强制路由**——`supervisor_node` 的强制路由只覆盖配方询问答复与委派意图
+   （`agent_graph_supervisor.py:144-215`），`SUPERVISOR_SYSTEM` 也没写审批词该往哪派，所以「批准」要靠**主管模型**判到
+   `plan` 才落到 `_pc_approval_word_reply`（`agent_graph_plan.py:456-482`，由 `plan_compiler_node:498` 调用）；桩替它派了 `route=plan`
+   故本验收成立，但真机若主管把「批准」派去 `dialogue`，待批断点不会被消费，用户看到的就是「点了没反应」。
+   修法要先定口径：按「存在 awaiting 断点 + 消息归一后 ∈ {批准,取消,cancel,撤销}」做零 LLM 前置路由，还是把审批词
+   写进主管派单判据。**仍未做（如实记）**：活模型真触发待批（要一次真实调用，等用户点名授权）、全量门禁
+   （Ruff/import-linter/mypy/全量 pytest/`npm test`/`npm run build`）——按用户口径等明确说「收尾」再跑。手册展开见
+   `docs/tech-manual/B-agent-orchestration/09-backend-autopilot.md`，一手档案见
+   `docs/memory/topic-release-audit-test.md` 的「2026-11-05 能力租约与动作级审批」一节。
+
+82. **World 裁定 → 叙事指令 → CI 未遂对账的三段闭环（缺陷 4，2026-11-06 S1–S3）**：
+   缺陷 4 本体（2026-08-29 登记、长期未修）：`agency.judge` 判失败的自主尝试被 `narrative_directive`
+   要求「必须写成未遂或受挫」，但那句 directive 在 roleplay 节点就被 `pop` 掉，回看侧从未拿到裁定
+   ⇒ **没有任何一道闸验证正文照没照做**，只能人肉盯。三段分别落刀：
+   ① **S1 投影通道**：`_agency_propose` 把 `verdicts` 另投影一份进 `ctx["_agency_npc_claims"]`
+   （进函数先置 `None`——`ctx` 跨轮复用，留着上一轮的投影＝拿旧裁定核对新正文，是假核对）；
+   臂台账（清单 #3/#4 同一处）为这条臂加三态原因码 `world_not_consulted`／`no_proposal`／
+   `no_rolled_attempt`，计数口径与 directive 同为 `roll > 0`，且**不走世界书阶梯**（把「没问过 World」
+   引成「去补世界书」是方向性错误）。
+   ② **S3 真语料定档**（零 LLM、只读 `backend/data/logs/agent-trace*`）：4889 条记录 / 68 个 World 轮 /
+   57 条裁定 / 24 条 reject，其中 **18 条已掷骰的 reject 能与正文配对**；逐条人工读正文定标签＝
+   **9 违规 / 7 合规 / 2 无从判定** ⇒ 违规率 **9/16 ≈ 56%**，**据此纠正 2026-11-05「只在 4 条样本里
+   出现 1 次、不算系统性」的旧结论**（那份样本只覆盖一个作品，其余三个作品从没数过）。
+   ③ **词表 × 表面 × 在场闸的网格实测**：定档＝**命中面 `story_history.prose_only`（清洗属主，
+   按 `prompt_clean.CONTEXT_SLIM_TAGS` 剥净 `<roll>`/`<status>`）＋ 17 个失败措辞 ＋ 全名在场闸
+   （正文 ∪ `[在场]` 快照）**。用生产代码重放这 18 条：`报红 11 = 9 真违规 + 2 假阳，漏报 0`，
+   精确率 **82%** / 召回率 **100%**。四个候选被数据直接否掉：`退回来`（唯一一次洗白真违规，1/9＝11%）、
+   `失败`（两次都只出现在 `<roll>` 块里＝骰点自写的结果，不证明正文照做）、**别名腿**（分段／去衔称／
+   取前两字：82%→75%，多指控一条合规正文）、**只查正文不查 `[在场]`**（4/9 条真违规的角色名只在状态栏
+   出现，召回从 100% 掉到 56%）。剩下的 2 条假阳全是「合规但一个失败词都没用」的写法（靠对白让步、
+   动作收回演出拒绝）⇒ **82% 是词表档的地板而非没调好**，唯一压低它的办法是加词，而加词按实测拿召回换精确。
+   ④ **S2 判据本体**：`narrative_ci.check_verdict_attempts` + `CODE_NPC_VERDICT_BREAK = "npc_verdict_break"`
+   （`severity=warning`，不阻断、不改写正文），人群过滤 `verdict_attempt_claims` 与生成侧那句
+   「必须写成未遂或受挫」在 kind × outcome × roll 网格上**逐字同源**；`evaluate` 新增两参
+   （`agency_claims`／`scene_snapshot`，默认空 ⇒ 手动 CI 端点与旧调用逐字同行为）；写回侧本轮真快照
+   经 `_wb_run_narrative_ci(scene_snapshot=…)` 抵达在场闸；前端 `NARRATIVE_CI_CODES` 补中文标签，
+   码字面串由跨语言契约锁住。
+   ⑤ **红线**：台账只观测、判据不得读回（既有锁）；这臂不许升级成阻断或改写；不许为提精确率加词；
+   `event`（预兆/余波）与 `user_action`（禁止变相成功）两类指令措辞不是失败词能核对的，一律不判；
+   **「未承接」类（角色根本没进正文）实测 npc 零命中 ⇒ 有意不建**，不是漏建。
+   ⑥ **验证**：新增后端 12 例（未遂对账 9 + 写回接线 2 + 定档词表 1），定向 7 文件
+   **378 passed / 0F / 0E / 0S**；受控红检四次各 **恰 1 红**（加回 `退回来` / 命中面退回原文 /
+   接缝不传 `scene_snapshot` / 写回不传快照），每次按 sha1 逐字节还原；`ruff`、`mypy`、
+   `lint-imports`（18 KEPT / 0 broken）、硬编码门禁通过；前端 `src/components/chat` + `src/api`
+   **177 passed / 33 文件**、`tsc --noEmit` exit 0。
+   ⑦ **第 96 刀（2026-11-06 用户点名「走 1，上回合闸」）把「只报告」升级为生成侧修复**：
+   `roleplay_turn` 新增**非致命**裁定闸 `_repair_verdict_attempts`——判据**复用**
+   `narrative_ci.violating_verdict_claims`（报告臂与修正侧逐字同源，绝不各写一份；该函数由
+   `check_verdict_attempts` 抽出，诊断文案与证据不变），命中即把
+   `roleplay_agency.verdict_fix_directive`（角色／意图／D100／阈值／档位标签）回灌一次**限时续写**。
+   接线是**独立钩子** `continue_verdict`（与 `continue_generate`／`continue_story` 三者分开，
+   默认 `None` ⇒ 未接线时逐字节等于旧行为）。四条纪律：**只续写不整段重掷**（`generate` 全程 1 次，
+   源码锁＋用例锁；拼接契约抽 `_stitch_story_continuation` 与剧情续写逐字同源）、
+   **每轮最多一次付费调用**（预算复用 `selfheal_attempts`、限时 `SELFHEAL_*`）、
+   **每轮先查 `user_interrupted`**、**自己写的进度提示收尾按登记原文清除**（失败才留一条汇总）。
+   两条出口都接：`execute_turn` 直路与 `_selfheal_loop` 成功支，且**排在 `_complete_story` 之前**
+   （裁定续写本身推进剧情，顺序反过来会白烧一次调用；源码锁钉住两侧顺序）。续写指令单列一支
+   （`agent_stream._roleplay_continuation_messages(..., verdict_fix=…)`），要求「当场落空或受挫」，
+   允许一两次自然收束、不许重出 `<content>`／`<think>`；接线收在 `agent_graph_roleplay._rp_continuation_hooks`
+   （三个续写钩子共享同一 `call(messages)` 闭包，`roleplay_node` 因此保持 ≤150 行）。
+   **验证**：新增 `tests/test_roleplay_verdict_gate.py` **30 例**（判据／指令／闸／自愈路径／顺序锁／接线锁），
+   定向 11 文件 **574 passed / 0F / 0E / 0S**；受控红检四次：未接线 ⇒ 恰 1 红（接线锁）、
+   去掉词表护栏 ⇒ 4 红、两闸顺序对调 ⇒ 恰 1 红（顺序锁）、注入额外 `hooks.generate()` ⇒ 恰 2 红
+   （两条「不重掷」锁），每次 sha1 逐字节还原；`ruff` / `mypy`（282 文件）/ `lint-imports`
+   （18 KEPT / 0 broken）通过。
+   **仍未做（如实记）**：生成侧修复的**真机降幅未测**（需真模型花费，等点名）。
+   **全量门禁（2026-11-06）**：后端 **5278 passed / 0F / 0E / 0S**（`full_gate_pytest.py`，
+   跑批期间源码未变的哨兵有效）、`ruff` ✓、`mypy` 282 文件 ✓、`lint-imports` 18 kept / 0 broken ✓、
+   wire/manifest 无漂移、`release_preflight` ✓（1734 文件 / 167.3 MiB）、`git diff --check` ✓。
+   首轮 3 红均非本刀逻辑回归：1 条第 94 刀第三臂入台账后旧断言未同步（`test_narrative_router.py`），
+   2 条本机 `NO_PROXY` 含 `[::1]` 让 httpx 0.28.1 构造即抛 `Invalid port`（去掉该变量复跑绿）；
+   同批把测试夹具真实角色名换虚构名、e2e 哨兵密钥拆写，过专名/密钥预检。两条顺带实测的偏差已在**第 95 刀**收口：① `_check_world_rule_violation`
+   （`narrative_ci.py:559`）改为**只判禁止类且一条规则的全部约束逐条核对**，正向义务
+   （必须/应当/务必）**有意不判**——旧实现把「必须 X」当「禁止 X」，正文照做反被指控；
+   新增 3 例、受控红检两次各**恰 1 红**（见 `A/02` §3.9 前的待收口项）；② `<roll>` 六档词表
+   **默认层**已加同源锁（`test_builtin_agents.py:201`）；**覆盖层已在第 98 刀收口**（用户选 A）：
+   `agency.render_result_line`（`agency.py:38`）在注入前把用户可编辑 `rollInstruction` 的 `[RESULT]`
+   行按 `DEGREE_LABEL` 重渲染（只改该行、其余文字逐字节保留；无该行/空文本原样返回，清空仍＝不掷骰），
+   接线 `agent_graph_roleplay.py:306`，前端该文本框下注明「六档词由系统生成」；新增
+   `tests/test_roll_instruction_render.py` **10 例**（新增文件 10 passed、相邻 7 文件 **491 passed**），
+   受控红检拆接线**恰 1 红**／停渲染**4 红**，均 sha1 逐字节还原；`ruff`·`mypy`·`lint-imports` 18 kept 全过。展开见
+   `docs/tech-manual/A-roleplay-illustration/02-backend-roleplay-engine.md`（§3.8.2 裁定续写闸、§3.9 未遂对账臂、红线 19–21）与
+   `docs/tech-manual/B-agent-orchestration/01-backend-agent-orchestration.md`（§3.8 裁定→回看接缝）；
+   一手档案见 `docs/memory/npc-agency-verdict-reconciliation-2026-11-06.md`（18 条逐条台账 + 网格数字 +
+   被否候选 + 复现口径）。
 83. **动态槽 LoRA 节点（rgthree `Power Lora Loader`）：转换展开成具名输入 + 注入替换锚点槽位 + 锚点自动发现（2026-11-06 第 97 刀）**：
    这类节点的 LoRA 槽是 `widgets_values` 里的对象条目（`{on, lora, strength, strengthTwo?}`），
    `INPUT_TYPES` 只声明 `model`/`clip`，槽名 `lora_1..N` 在 `/object_info` 里**查不到** ⇒ 旧 `ui_to_api`
@@ -2160,3 +2334,811 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
    5278→5288 恰＝本刀 +10）；ruff / `lint-imports`（18 kept / 0 broken）/ mypy 282 files 全绿。
    真机只读探针：krea2-AIO 节点 1446/1504 分别展开出 3/4 条真实 LoRA、锚点落 1446；Lanpaint 落 1881、
    Anima 落 1697，三者均有下游消费者。展开见 `C/04` §3.3／§3.4 与红线 5。
+
+84. **GBC 场景图打标＝外部引擎接进资产库（WD14 出标签 → GBC 按标签分析实体/关系图 → `asset_gbc` 表，2026-11-06）**：
+   用户定案分工**「wd14 是标签，gbc 是根据标签分析文段内容」**——WD14 仍是唯一标签器，GBC 不吃图像标签以外的职责，
+   也不替换任何既有模式（`TAG_MODES` 由四档变五档，`gbc` 与 `wd14`/`vlm`/`ai`/`desc` 平级可选）。
+   **为什么是外部引擎而不是模型**：GBC 在自己的 venv 里跑 torch + SAM-3 + EmbeddingGemma（`gbc.exe` 控制台脚本，
+   `python -m kohakugbc` 跑不起来），torch/CUDA 与 ≈4 GB 权重没法像 WD14 那样「丢一个 ONNX 目录」就完事
+   ⇒ 不进安装包；设置（`Settings.gbc`，`PathsPanel`「GBC 场景图引擎」）只登记 `gbc.exe` 路径、SAM-3 权重目录、
+   EmbeddingGemma 权重目录、检测设备（cuda|cpu）与最多物体数；**VLM 复用「视觉大模型」**（本地 Ollama / OpenAI 兼容），
+   密钥经子进程环境变量 `DEMIURGE_GBC_VLM_KEY` 传入，**不落 `config.py`**；VLM 的 `proxyMode` 解析结果也一并透传
+   （`vlm_proxy`）——GBC 子进程按与描述步骤同一个代理地址出站，直连时显式清掉继承来的系统代理，本机 Ollama 靠
+   `NO_PROXY` 始终直连（云端视觉模型与本地视觉模型两种来源共用这一条通道）。
+   **英文落词合同**：GBC 的 `grounded()` 要求 WD14 标签里的名词在描述里**逐字出现**（精确/单数/复数），中文描述无法落词
+   ⇒ 前端在调 GBC 前先用 VLM 生成一段点名物体的英文描述（`GBC_CAPTION_PROMPT`），再连同 WD14 标签一起提交。
+   **后端**：`services/gbc_tagger.py`（config/job 生成、子进程执行、杀进程树、MOSS 映射）＋ `services/gbc_store.py`
+   （`asset_gbc`，`db._DB_VERSION` 1→2 纯加法迁移）＋ `asset_library.gbc_tag_asset`（编排：WD14 预测 → GBC → MOSS →
+   存图 → `add_tag_snapshot(model="gbc")`）；路由 `POST /api/rag/gbc-tag`、`POST /api/rag/gbc-graph`，
+   错误映射 GbcUnavailable→503 / GbcFailed→502 / TaggerUnavailable→503 / AssetMissing→404 / ValueError→400。
+   **MOSS layout JSON**：交付形 `{summary:{canvas,caption}, items:[{label,caption,bbox}], bbox_coord_space:"abs_centralized",
+   bbox_format:"yxyx"}`（`label` 只有 object/character 两档，人物词表判档），草稿形额外带 `width/height` 与 `name`、
+   左原点 xyxy；交付形**不带画布尺寸** ⇒ 用 MOSS 生图必须按 `img_size` 精确出图。整图与两份 JSON 都存表，
+   随硬删/清空回收站一起删（`asset_store.delete_rows`/`clear_trash` 同步删 `asset_gbc`）。
+   2026-11-07 晚出口收敛：两份 MOSS JSON 只是**存档**，面板不再交付（见下「交付出口收敛」）。
+   🔴 **子进程环境地雷**：机器级 `NO_PROXY` 含 `[::1]` 时 httpx 0.28.1 的 `get_environment_proxies` 认不出 IPv6，
+   拼出非法图案 `all://*[::1]` ⇒ GBC 的 api 引擎建客户端即死，表相是 `lane 'vlm' unit 'api-0': I/O loop did not start`
+   （与后端测试环境的 `InvalidURL: Invalid port: ':1]'` 同根）。修在 `_sanitized_no_proxy`（解包 `[...]`、丢弃畸形项、
+   保底本机直连），`test_no_proxy_sanitized_for_gbc_child` 用真实 httpx 复现失败路径锁住。
+   🔴 **检测设备名必须带序号**：GBC 的 torch 运行时把设备名原样交给 `torch.cuda.set_device()`，裸 `cuda` 会让
+   `torch-cuda-all` 工作线程一启动就抛 `ValueError: Expected a torch.device with a specified index or an integer,
+   but got:cuda` 并**静默死掉**（线程级异常只进子进程 stderr，`communicate()` 到退出才拿得到）⇒ 任务留在 ready
+   队列没人消费，进程挂到 1800 s 超时、`nvidia-smi` 全程 0 %，而 GBC 自己的 `unit_busy.detect@local≈1.0` 却
+   `model.batches=0`。修在 `_device()` 补默认序号（`cuda`→`cuda:0`、`cuda:N` 原样、非 cuda 归 `cpu`），
+   `test_detect_device_gets_index` 钉住；超时消息改为带子进程日志尾巴（挂起时唯一线索）。
+   🔴 **云端 VLM 协议差异（2026-11-07 真机）**：GBC 的 `flavour="openai"` 默认发 `response_format` json_schema strict，
+   DeepSeek 直接 400（`This response_format type is unavailable now`）⇒ 请求被当空回复、实体静默丢弃，整图只剩
+   image 根顶点；且推理模型的 reasoning tokens 挤占 GBC 写死的 512 输出预算（实测 457 tokens）⇒ 即使改 prompt 模式，
+   正文 JSON 仍会被截断。`build_config` 对**非 loopback 端点**加 `structured="prompt"` + `sampling.max_tokens=4096`，
+   本机端点保持 grammar；真机同一 job 复跑＝4 顶点/6 边、0 fault。
+   🔴 **VLM 故障不得再当成功交付（2026-11-07 真机扣费事故）**：云端对 NSFW 场景的实体描述回 HTTP 500 时，
+   GBC 把失败当「没有描述」吞掉（`job.end ok=true`），仍写出一张只有 image 根顶点的图并报成功 ⇒ 用户付了
+   「一次成功的整图描述 + 两次失败的实体描述」的钱，却拿到空图。现在 `run_one` 在返回前调用
+   `_empty_graph_error`：**0 个 entity 顶点且 report 里有 VLM 故障** ⇒ 抛 `GbcFailed`（502），
+   `gbc_tag_asset` 因此不会 `gbc_store.save`、不写标签快照；故障取证先读 `report/events.jsonl` 的
+   `fault.taken`（只认 `error_node=="chat"` 或消息含 `from POST`，detect/cpu 故障不背锅），提不到再用
+   `summary.json` 的车道计数兜底。云端端点给「切到本地视觉模型（如 qwen3vl:8b）重跑」的指引，本地端点只提示
+   检查模型；**0 实体但无故障仍按原行为成功**（多半是描述没点名物体）。前端同步止损：整图英文描述按资产
+   缓存（`lib/gbcCaptionCache.ts`，localStorage `demiurge.gbcCaptions`，上限 80 条），换模型重跑先复用缓存、
+   不再为同一张图重复付整图描述的钱。回归 `test_gbc_tagger.py` 19 例、`gbcCaptionCache.test.ts` 8 例；
+   后端全量 **5410 / 0F / 0E / 0S**（944.2 s、drift=0）、前端 200 文件 2310 例 + `npm run build` 0。
+   🔴 **交付出口收敛（2026-11-07 晚用户定案）**：用户实测「复制 MOSS JSON 的效果远不如官方布局提示词」
+   ⇒ 删除「复制 MOSS JSON / 复制 MOSS 草稿 / 复制 Layout（构图）」与「生成官方布局提示词」按钮，
+   **GBC 打标成功后自动走 `/api/rag/moss-layout`**；`/gbc-tag` 与 `/gbc-graph` 不再返回 `moss`/`moss_draft`/`layout`
+   （图与两份 JSON 仍存 `asset_gbc`），`gbc_tagger.to_layout_map` 删除。老资产（有实体、无官方布局）打开详情时
+   自动补生成一次，失败在面板显示并允许重开详情重试；面板只留「复制官方布局 JSON」。
+   回归 `test_gbc_tagger.py` 19 例（新增 `gbc-graph` 响应不泄漏死字段）、`gbcOfficialLayout.test.ts` 4 例；
+   后端全量 **5410 / 0F / 0E / 0S**（junit 904.0 s / gate 920.1 s、drift=0）、前端 200 文件 2310 例
+   + `npm run build` 0；真机 dev 5173 + 8010 打开已存档资产，面板只剩「复制官方布局 JSON」+ 预览。
+   **成本与设备**：CPU 单图 ≈4—11 分钟（基线 663.8 s／149 calls／9 次 VLM）；cuda:0 实测整轮 **333.9 s / 7 实体**
+   （detect 4 批 4 项共 31.3 s、SAM-3 载入 25.8 s／峰值 3180 MB，VLM 仍是瓶颈＝本地 qwen3vl:8b），GBC 进程整体占
+   ≈5.2 GB 显存（实测 5276 MiB），与本地 8B VLM 同跑时 8188 MiB 卡上合计 ≈7.8 GB（能跑但只剩 ≈380 MiB）
+   ⇒ 8 GB 卡要与 ComfyUI、本地 VLM 错峰。回归 `tests/test_gbc_tagger.py`（19 例）。
+   展开见手册 `D/05` §3.11 与红线 14。
+
+85. **视觉 / 嵌入模型多存档（2026-11-07 用户定案「多个模型的存档，选一个为主」）**：
+   用户原话「视觉模型和 embedding 模型没有添加选项……多个模型的存档我想要有，然后选择一个为主」。
+   **数据面**：`Settings.vlmPresets[]` / `embedPresets[]`（元素＝原 `VlmModel`/`EmbedModel` + `id` + `name`）
+   ＋ `activeVlmPresetId` / `activeEmbedPresetId`；**单字段 `vlmModel`/`embedModel` 仍是选中档的运行时镜像**，
+   `activeVlmChat` / `resolvedEmbedModel` / GBC 打标 / RAG / 联机随请求下发全部零改动继续读镜像。
+   **写入口径只有两条**（`stores/settings.ts`）：改字段＝`withVlmPatch`/`withEmbedPatch`（同时写镜像与选中档）；
+   切换＝`select*Preset`（把该档字段灌进镜像）；新增档复制当前配置、改名只动 `name`、至少保留一档
+   （删空＝「为主」无解，UI 末档删除按钮禁用）。
+   **迁移**：旧存档没有 presets ⇒ 用现有单字段种子成一档并选中；归一化时 `mode`/`source`/`proxyMode`
+   必须显式置回**旧值**再合并，否则 `DEFAULT` 里的 `remote`/`ollama`/`on` 会冒充用户显式选择
+   （症状：旧数据缺 `source` 时地址推断失效、缺 `proxyMode` 不再迁成「继承全局」；`settings.test.ts` 锁住）。
+   **密钥**：`stripSecrets` 递归清预设 `apiKey`（localStorage/导出仍不落密钥）；后端唯一属主
+   `secret_fields.MODEL_LIST_KEYS` 扩到 `vlmPresets`/`embedPresets` ⇒ 配置包导出剥密钥、空密钥写侧护栏、
+   联机字段面共用同一张表。**联机**：`mobileModelSettings.MODEL_SETTING_KEYS` 与
+   `mobile_local_models.MODEL_KEYS` 同步加 4 键（两个列表 + 两个选中 id），跨语言合同测试对表；
+   手机存档只落手机、电脑侧缺席沿用盘上旧值。
+   **回归**：`settings.test.ts`（迁移种子／切档镜像／编辑回写／末档禁删／密钥剥离）、
+   `ModelsPanel.test.tsx`（两条存档条的增、切、删与禁用态）、
+   `test_mobile_local_models.py`（存档随本机模型存取 + 数组/字符串形状校验）。
+
+86. **架构与安全复查：入站接线、UUID 删除归属、备份完整性（2026-11-07）**：
+   **判断**：已有清晰分层、能力租约、SSRF/入站请求闸、DOMPurify/CSP 与归档保护；当前主要薄弱点是
+   同一规则在不同入口漏接，以及破坏性操作仍用名称/文件存在性代替身份与完整性。本轮不重写框架，
+   只修复已复现的四项问题。对 233 个 services Python 文件做 AST 导入扫描，未发现 services→routers
+   依赖；这不是完整依赖图或所有运行时动态导入的证明。安全定位仍是本地优先、显式受信联机，不能据此
+   宣称具备公网多租户隔离。本机用户管理的命令/MCP、约定的本地文件读取面维持既有信任合同。
+   - **WS 入站三闸补接**：`comfyui_ws_proxy.relay` 在令牌校验之后、能力闸/accept/上游连接之前复用
+     `request_guard.inbound_verdict`。未开放远端时，非回环客户端即使有令牌也拒绝；外站/null Origin、
+     外站 Host 同样拒绝，零上游连接。缺失 Origin、回环任意端口、远端显式开关保持原有判据，
+     不引入第二份 Origin 白名单；拒绝发生于握手前时，网络侧返回 HTTP 403。
+   - **裸 IPv6 回环修复**：`is_loopback_client` 先判断完整 IP，再兼容 URL/authority；`::1` 与展开式
+     回环不再被按冒号切坏后误判为远端，非回环 IPv6 仍受远程能力闸约束。
+   - **删除按 UUID，而非请求名称**：`repo_meta.delete_folder` 先用现有规范/同名隔离解析，再按 marker
+     找回遗留目录；删除前复核 `_repo.json.id == repo_id` 与解析后的根内范围，作品根自身不可删除。
+     `A:B`/`A?B` 清洗碰撞不再删错仓库；无标记、坏标记或他仓标记返回可见 error，保留目录与前端条目，
+     不自动补标记。真正不存在的目录仍回 missing 非错误。旧无标记目录会被保守拒绝，这是有意收紧。
+   - **备份成功必须有完整副本**：`state_store.backup` 先复制到同目录唯一 UUID 临时文件，完整后在进程内
+     锁中逐字节判重/选择时间戳序号，再原子发布；仅内容相同才复用。同秒内容变化保留两版，失败半文件
+     不能成为删除源文件的依据，OSError 保持最多两次尝试并清理临时文件。未新增运行依赖。
+   **验证**：先 RED 复现 WS/IPv6 6 例、删除归属 8 例、备份 7 例失败，再实施修复；14 文件定向回归
+   JUnit **290 tests / 0 failures / 0 errors / 0 skipped**。四个生产模块及对应测试 Ruff 通过，四模块
+   mypy 通过。新进程、隔离 DATA_DIR、IPv4/IPv6 随机端口上的真实 Uvicorn+WS 探针 **32/32**，覆盖
+   恶意头拒绝且零上游连接、合法双向文本/下行二进制、IPv6、令牌、同名仓库删除保护、世界书删除前
+   备份当前内容且保留旧版。探针关闭 lifespan worker，不证明后台队列启动；未重启用户主服务、未触碰
+   真实用户数据、未调用付费模型。未跑全量门禁或前端构建，历史全绿数字不作为本轮证据。
+   本地证据：`_tmp/audit-103db3ad-combined.xml`、`_tmp/audit-103db3ad-live.json`；展开见手册
+   `C/04` §4.7、`G/10` §3.1、`E/07` §3.3/§3.9。
+   **仍待收口（未修，不得视作已治本）**：
+   - `repo_meta.rename_folder` 仍按 old_name 猜源目录；同名清洗碰撞的改名链需单独补失败复现与 UUID 护栏，
+     本轮删除修复不能替代改名链修复。**✅ 已收口（见条目 88，2026-11-07）**。
+   - Android `MainActivity.configureWebView` 导航与下载只检查回环主机、不锁后端完整 origin，下载还附加
+     本机令牌头；同机另一端口具备凭证接收条件。源码与 Cookie 跨端口语义已复核，未做 Android 实机利用
+     验证；后续应统一导航/下载 origin，并验证下载重定向不向跨源携带凭证。
+     **✅ 已收口（见条目 90，2026-11-07；真机利用验证仍未做）**。
+   - Tauri `open_in_system_browser` 将被拒导航与新窗口 URL 直接交 explorer，最终出口没有 HTTP(S)
+     协议白名单；可能触发自定义协议处理器，不能据此宣称任意代码执行。需替身 opener 测试与 WebView2
+     真机验证后收口，避免破坏合法外链。
+   - 备份锁只保护同进程选名/发布，不覆盖跨进程或源文件写入→备份→删除的完整事务；外部并发修改与
+     删除竞态仍需在调用方做事务级设计，不能把本轮备份完整性修复夸成全面并发安全。
+   - `main.py` 导入时仍调用 `init_db()`，不是零副作用导入；这是可测试性债务，不等于已证明真实数据污染。
+     依赖仅离线核对声明/锁文件，未查当前漏洞库；scene 解码器也未穷尽审计。
+
+87. **GBC → 归一化 Layout 构图 JSON（2026-11-07，当日撤回）**：
+   用户先看到 GBC 能转 MOSS Layout 后定案「直接转成 Layout 格式，用来控制构图」，实现了
+   `gbc_tagger.to_layout_map(graph)`（实体名 → 归一化 xyxy，`/gbc-tag` 与 `/gbc-graph` 都返回 `layout`）。
+   同日用户实测后改判 **「复制 MOSS JSON 的效果远不如官方布局提示词」** ⇒ 归一化 Layout、MOSS 交付形/草稿形
+   与手动「生成官方布局提示词」按钮**全部撤除**，`to_layout_map` 与对应测试删除；两个端点只回场景图摘要与
+   官方布局，交付物只剩官方布局 JSON（见下段）。保留此条只为记录撤除事实，别再复活这三个出口。
+   同轮曾实现「四语言训练 caption（2×2）」＋ `POST /api/rag/caption-variants`，但用户判断反推已产英文、
+   翻译可自行用百度/谷歌 ⇒ **按钮与整条中文 caption 链全部撤除**（`caption_variants.py` / `tag_vocab.py` /
+   路由 / 测试一并删除），翻译不进入产品链路。词表 CSV 属运行期数据，保留但无代码引用。
+   **回归**：`test_gbc_tagger.py` 19 例、`gbcOfficialLayout.test.ts` 4 例、`ai.facade.test.ts` 导出清单同步；
+   撤回前布局链曾因并发会话改写全量判废，本链按最新全量口径记录（见 #84 尾）。
+   展开见手册 `D/05` §3.11 与 §4.1。
+
+   **官方完整布局（唯一交付物，2026-11-07 同日扩展）**：用户定案「要官方式完整布局提示词，含 style/cast/逐项描述，
+   这些内容作用在 MOSS 的情况」。**文字归视觉模型、几何归 GBC**：`services/moss_layout.py` 让视觉模型按官方写法
+   产出 `{style, caption, lighting, cast, items}`（style 40–100 词以 `Palette:` 收尾；caption 120–250 词七步；
+   cast 只给 character 的稳定外貌；items 30–80 词），`compose` 按 Penna 折法把 style/`Characters:`/`Lighting:`
+   折进 `summary.caption`、角色卡前置到对应 character 项，`label`/`bbox` 仍取 `gbc_tagger.to_moss`
+   （`include_name=True` 只补名字），**模型坐标一律不采用**。新路由 `POST /api/rag/moss-layout`（503 无视觉模型 /
+   502 模型或解析失败 / 404 无资产 / 400 无 GBC 存档或场景图无实体）；空实体时直接 400、不调模型。
+   存档新列 `asset_gbc.moss_layout_json`（旧库 `pragma table_info` 探测后 `alter table` 补列），
+   `/gbc-graph` 回放，重开面板不重跑。**前端不再提供手动生成按钮**：GBC 打标成功后 `reverseOne` 直接
+   `await genMossLayout(g.id)`，失败计入该图失败原因并提示重开详情重试；老资产（有实体但无 `moss_layout`）打开详情时
+   由 effect 自动补生成。面板只留「复制官方布局 JSON」+ style/角色卡/逐项预览。
+   回归：`test_moss_layout.py` 新增 15 例（skeleton/compose/角色卡去重/parse 容错/路由状态码 +
+   asset 层四道闸：无存档/无实体/非本机图/缺 VLM、拼装后回存），
+   `test_gbc_tagger.py` 补存档列迁移与「`gbc-graph` 不泄漏死字段」，后端全量按最新口径记录；真机冒烟
+   （DeepSeek `deepseek-flash` + 合成四实体几何）4/4 名称匹配、1 张角色卡、官方坐标原样、style 87 词；
+   真实存档资产 GBC 图无实体 ⇒ 只验到空实体 400 分支。
+
+88. **仓库改名链：UUID 身份解析、碰撞隔离与拒绝可见回滚（2026-11-07，A 项）**：
+   **问题**：`repo_meta.rename_folder` 按 `old_name` 直接拼候选目录，而 `safe_dir` 会把 `A:B`/`A?B`
+   清洗成同一个 `A_B` ⇒ 命中他人 UUID 的文件夹时会把整棵目录搬走；`src` 缺失且目标已存在时还会
+   走 `elif dst.is_dir(): write_repo_marker(dst, repo_id)` 把他仓 `_repo.json` 改成本仓；并且不论是否
+   真的发生搬移都会 `_rewrite_paths(..., snap_folder=dst)` ⇒ `target_exists` 时改写目标文件夹里
+   别人的 `chat.json`。前端 `renameRepo` 只做乐观改名并吞掉全部错误，后端拒绝对用户完全不可见。
+   **后端**：新增 `_resolve_rename_source` —— 先按 `_repo.json.id` 找回任意位置的遗留目录（标记是
+   唯一身份）；无标记时仅当候选（规范旧位/扁平旧位/UUID 位）**唯一**才放行；多个无标记候选 ⇒
+   `ambiguous`，候选属他仓 ⇒ `collision`，均返回可见 `error` 且零改动。目标名先过
+   `_collision_safe_path`（他仓占用 ⇒ `<名> [UUID前8位]` 隔离目录）；目标已存在且非本仓 ⇒
+   `target_exists` 不覆盖、不写 marker；搬移后写 marker 并复核 id；源解析为作品根自身或根外 ⇒
+   拒绝搬根。**路径重写只在 `folder_status == "renamed"` 后执行**。返回固定含 `error` 字段。
+   **前端**：`stores/repos.ts` 保持乐观上屏；响应 `error` 非空 ⇒ 回滚显示名并回调原因，`App.tsx`
+   弹 `AlertModal`；`folderRenameRefusal` 区分「后端明确拒绝（HTTP detail）」与「网络层失败（后端离线）」，
+   后者保留乐观改名；回滚只作用于「当前仍是本次新名」的那一次，过时响应不回滚新名也不弹旧错。
+   **回归**：`test_repo_meta_nesting.py` 新增 8 例（清洗碰撞拒绝 / 唯一无标记放行 / 多候选 ambiguous /
+   源缺失不覆盖他仓 marker / 目标已存在不重写快照 / 成功重写路径与 marker / 仓库根自标拒绝搬根 /
+   他仓占名改落隔离目录）；`reposRename.test.tsx` 3 例（拒绝回滚+提示 / 离线保留乐观 / 过时响应不覆盖新名）。
+   定向：后端 `test_repo_meta_nesting`+`test_user_state_delete_folder` **37 passed**，Ruff 与 mypy 通过；
+   前端 `src/stores` **52 passed**、`tsc --noEmit` 无输出。✅ 2026-11-08 收尾复跑：后端全量 **5449 / 0F / 0E / 0S**（758.9 s，junitxml）。
+   展开见手册 `E/07` §3.3。
+
+89. **备份-删除收成一个可复核接缝（2026-11-07，B 项）**：
+   **问题**：`state_store.backup()` 已保证副本完整，但「备份成功」不等于「删除时源文件还是那一份」——
+   backup 与 unlink 两段式之间被另一个后端实例/用户编辑写入的新内容会被静默删走；`_reject_and_rebuild`
+   与 `worldbook_store.delete_book` 各写一遍同样的两段式，失败语义也各拼一份。
+   **收口**：`state_store.delete_with_backup(path)` 成为唯一删除入口：同进程 per-path 锁内
+   `backup → 重新读取源文件与备份逐字节比较 → 相同才 unlink`，不一致/源缺失/读不动一律不删；
+   返回 `{deleted, backup, reason, error}`，`reason ∈ ok/missing/backup-failed/changed-during-backup/unlink-failed`。
+   `_reject_and_rebuild`（备份成功→复核→删，任一失败进拒写集）与 `worldbook_store.delete_book` 都改调它；
+   世界书路由把 `changed-during-backup` 映射 **409**（不是服务器 500）。
+   **边界**：只串行化同进程删除，不承诺跨进程锁，也不把「源文件写入→备份→删除」变成原子事务
+   （复核与 unlink 之间仍有窗口）；要全封闭需所有写方参与同一锁或禁止同一 `DATA_DIR` 双实例。
+   **回归**：`test_state_store.py` 33 例（新增 7：内容变化不删 / 源消失 missing / 备份失败零 unlink /
+   删除成功留备份 / 删除失败错误可见 / 拒绝重建遇变化即拒写 / 源码接线锁〔AST：两个调用方只许调
+   `delete_with_backup`〕）；`test_worldbook_store.py` +1；`test_worldbook_router.py` +1（409）。
+   红检：把 `delete_book` 改回旧两段式 ⇒ 3 例红（接线锁 + 世界书行为 + 路由 409），恢复后定向
+   **108 passed / 0F / 0E / 0S**，ruff 与 mypy 通过。✅ 2026-11-08 收尾复跑：后端全量 **5449 / 0F / 0E / 0S**（758.9 s，junitxml）。
+   展开见手册 `E/07` §3.9 与 §3.10 ④。
+
+90. **Android 壳导航/下载/子请求锁到后端完整 origin（2026-11-07，C 项）**：
+   **问题**：`MainActivity.configureWebView` 的 `shouldOverrideUrlLoading` 与 `setDownloadListener`
+   都只校验主机 `127.0.0.1`、不锁端口；下载还会把 `X-Demiurge-Token` 头附到该 URL 上。Cookie 按主机
+   而非按端口隔离，壳层端口又是运行时协商（8010 占用时在 18010–18099 随机），同机任意监听端口都具备
+   接收凭证的条件。
+   **收口**：新增纯 Java `BackendOrigin.matches(baseUrl, candidate)`（`java.net.URI`，不依赖
+   `android.net.Uri`，可跑 JVM 单测）：比较 scheme + host + 有效端口（http→80 / https→443 归一），
+   IPv6 方括号归一、协议与主机大小写归一；拒绝 userinfo、空 host、无 authority、非 http(s) 以及任何
+   解析失败（fail-closed）。导航（`shouldOverrideUrlLoading`）、下载（`setDownloadListener`）与
+   **WebView 出站总闸**（`shouldInterceptRequest`）三个入口都改调它，令牌头仍只在 origin 判据通过
+   之后添加。总闸对 blob/data/about 放行（内核自处理、不走网络），其余非后端 origin 一律返回
+   **204 空响应**——不提交文档（200 空体会把 WebView 留在外部 URL 上，真机实测）；`baseUrl` 标
+   `volatile`（总闸在网络线程读）。
+   **回归**：`BackendOriginTest` **10 例**（origin 向量 8 + `MainActivity` 源码接线锁 2：导航/下载两入口
+   + 子请求总闸）。受控红检：两个入口退回 host-only ⇒ 恰好 1 例红；补总闸前先加接线锁 ⇒ 恰好 1 例红
+   （`shouldInterceptRequest` 缺失），恢复后 10 例全绿。
+   **后端配套**：Android `DownloadManager` 会跟随跳转并转发自定义头 ⇒ 导出链
+   （`/api/transfer/export`、`/api/config/export`、`/api/config/pull`、附件下载）的回归改用
+   `follow_redirects=False` 并断言 200/直出文件，出现 3xx 即红（三个测试文件定向 66 例通过）。
+   **真机验证（2026-11-07，REP-AN00 / Android 15 / WebView 145，无线 adb + WebView CDP +
+   机内 8011 监听器）**：修复前 iframe 到 `http://127.0.0.1:8011` 实收 **869 B**，带
+   `Cookie: demiurge_token=…`（`shouldOverrideUrlLoading` 不管 iframe ⇒ 导航锁被绕过）；程序化导航
+   （CDP `Page.navigate`）收 **847 B**、`isDownload:true` 但未落盘（下载闸生效）。补总闸后同一 iframe
+   **0 B**、程序化导航 `net::ERR_ABORTED` 且页面停在原 URL；同源附件下载 **37 B** 正常落盘、
+   同源 iframe 与 `#/settings` 导航正常。⇒ 总闸的必要性由真机证成，JVM 单测覆盖不到 WebView 回调
+   的覆盖面。
+   **边界/未验**：WebSocket 握手不经 `shouldInterceptRequest`，CSP 仍放行 `ws://127.0.0.1:*`（PC
+   ComfyUI 进度需要），本轮未真机验 WS；下载重定向的逐跳 origin 校验仍未实现（当前由「导出端点不得
+   3xx」约束）；Cookie 按主机不按端口隔离是协议本身，壳层只能靠出站总闸封住 HTTP 路径。顺手观察
+   （未定性、未修）：本机 blob: iframe 加载为空文档、srcdoc 正常，总闸对 blob 放行 ⇒ 疑似
+   `frame-ancestors 'none'` 继承或 WebView 行为，与本项无关。
+   展开见手册 `F/11` §3.11.2；真机复核步骤见 `G/17` §4.4（门禁命令见 `G/16` §4.1）。
+   ✅ **2026-11-08 收尾复跑**：无 Gradle wrapper，用 javac + JUnit4.13.2 直跑同两份源文件 ⇒ **10/10 OK**。
+
+91. **壳层外链与导航协议白名单收成纯策略（2026-11-07，D 项）**：
+   **问题**：Tauri 导航钩子用「不是 file: 就放行」的反向规则，`mailto:` / `ms-*:` / `intent:` 等系统协议
+   能直接送进 `explorer.exe`；新窗口回调自己起进程、与导航出口各写一份判定；WPF 壳的「打开外链 / 日志目录」
+   共用同一段 `Process.Start`，本地路径与 URL 不分。判定分散在两处必然漂移（HTTP 修了、新窗口忘了）。
+   **收口**：两个壳各抽纯策略模块（Tauri `desktop/tauri/src/url_policy.rs`；WPF `desktop/Demiurge.Desktop/UrlPolicy.cs`），
+   测试向量一致：① `is_navigation_allowed` 只放行 tauri/about 页与回环 http(s)（端口不限＝端口真源单一）；
+   ② `is_external_http` 只放行带非空主机的 http(s)；③ 其余 scheme 与外站一律「拒绝导航并转系统浏览器」；
+   新窗口一律拒绝并转系统浏览器。Tauri 唯一出口 `open_in_system_browser(&Url)` 内部再校验一次，
+   `Command::new("explorer")` 全仓只出现一次；WPF 唯一出口 `MainWindow.OpenExternalUrl(Uri)` 同样自校验，
+   本地路径走独立的 `OpenPath`（必须是完全限定路径）。日志只打印 scheme + host，不落 path/query。
+   **回归**：Tauri `cargo test` 14 例（url_policy 4 例，含 15 条判定向量与源码接线锁：explorer 唯一出口、
+   出口自校验、导航/新窗口都走门面）；WPF `--self-test` 19 项（新增外链白名单 / 导航三分支 / 日志脱敏 3 项）。
+   红检：新窗口钩子私自起进程 ⇒ 接线锁 1 例红；WPF 日志带 path ⇒ 1 项 FAIL；修后分别 14 passed / 19 passed。
+   **边界**：只改壳层「把 URL 交给操作系统」的入口，不改变后端 `request_guard` 的 Origin/Host 判定（属主不变）；
+   系统浏览器自身如何解释 URL 不在本策略管辖内。
+   展开见手册 `G/16` §3.5。
+   ✅ **2026-11-08 收尾复跑**：`cargo test` **14/14**、WPF `--self-test` **19/19**；仍未做真人点击验证。
+
+92. **启动建库收进 lifespan，import 不再有副作用（2026-11-07，E 项）**：
+   **问题**：`main.py` 模块级直接调 `init_db()`，import 即建库——端点测试/脚本只要 import 应用就动 `DATA_DIR`；
+   建库失败发生在 import 期，错误形态是「模块导入失败」而不是「服务启动失败」；worker/看门狗装配点也分散在
+   多个 startup 钩子里。
+   **收口**：`init_db()` 成为 `_lifespan` 第一个动作（失败＝启动失败，不带病起服务），模块级调用删除；
+   装配点统一到 `_lifespan`（init_db → 三个 worker → watchdog → 连接重置过滤器 → ComfyUI autostart 线程）。
+   `db.py` 以 **`DB_PATH` 为键**做幂等（`_schema_ready: set[str]` + 锁，进入锁后双检），并保留懒初始化兜底：
+   `get_connection()` 首次取连接时以 `init_db(lazy=True)` 补建，供不跑 lifespan 的端点测试/脚本使用；
+   懒建失败不落「已就绪」标记，下次重试；日志区分「启动装配」与「首次连接补建」。
+   **回归**：`test_db_lazy_init.py` 6 例（首连补建 / 同路径一次 / 换路径重建 / 日志区分 / import main 不建库 /
+   lifespan 建库失败则启动失败）；`test_main_startup_hooks.py` 5 例 AST 锁（lifespan 真传给 FastAPI、
+   worker/看护全在装配点、init_db 是首步、autostart 线程消费返回值、模块级无 `start_*` / `init_db`）。
+   红检：把 lifespan 里的建库异常吞掉 ⇒「启动失败」1 例红；修后定向 24 例全绿（含 F 的 13 例）。
+   **边界**：懒初始化只保证结构存在，不替代启动期迁移顺序；多进程同时首连仍靠 SQLite 自身串行化，
+   `_schema_ready` 是进程内缓存，不是跨进程锁。
+   展开见手册 `E/07` §3.11。
+   ✅ **2026-11-08 收尾复跑**：后端全量 **5449 / 0F / 0E / 0S**（758.9 s，junitxml）。
+
+93. **定时依赖审计与场景包畸形输入边界（2026-11-07，F 项）**：
+   **问题**：依赖漏洞原先只在 CI 里对 Python 做一次性忽略清单（`--ignore-vuln`），npm/cargo/dotnet 无扫描，
+   忽略项没有到期日，也没有「扫描器自己挂了」的判据——空结果会被当成通过。场景包解码器只测正常包，
+   超深嵌套 / 超大数组 / NaN/Infinity / 未知 op / 重复 id 均无边界用例。
+   **收口**：`scripts/security_audit.py` 成为四种扫描器的唯一报告属主（`pip-audit` / `npm audit --omit=dev` /
+   `cargo audit` / `dotnet list package --vulnerable --include-transitive`），统一豁免表
+   `scripts/security-audit-allowlist.json`（工具 + 公告号 + 包名，`expires` 到期即红；过期条目全局红，
+   本次未命中的有效条目列为「可清理」且按工具过滤，别家工具的豁免不误报）。扫描器执行失败 = 退出码 1 +
+   显式「本次结果无效」，并抑制「未发现/可清理」等绿色措辞。CI 每次 PR 跑 pip（运行 + 开发依赖）；
+   `.github/workflows/security-audit.yml` 每周一 03:00 UTC 加手动触发跑四生态。场景包侧只补测试与两处
+   vendor 加固：`containsEmbeddedScript` 改显式栈迭代（50k 层嵌套数组原会 `RangeError`），
+   `parseVec3`/`parseVec2` 要求各分量全部 `Number.isFinite`（`Infinity` 原会经 `parseFloat` 变成图层
+   `w/h`，整帧空白）。
+   **回归**：`test_security_audit_allowlist.py` 13 例（到期 / 匹配 / 可清理 / 跨工具 / 字段校验 / 真实表可解析 /
+   扫描失败必红且不输出绿色措辞 / pip 去重 / 四解析器）；`decodeScenePackage.test.ts` 新增 5 例
+   （深嵌套 / 超大数组 / 非有限数 / 未知算子 / 重复 id 与父子环），场景目录 122 例全绿。
+   真机（2026-11-07）：pip 运行依赖命中 4 条 chromadb 公告（PYSEC-2026-311/3813/3814/3815，均已在豁免表，
+   到期 2027-01-31），开发依赖重试后同样 4 条全豁免；npm 0 命中。漏洞库有时效：以上只代表扫描当日。
+   **边界/未验**：cargo/dotnet 两条 job 只做 YAML 静态校验，未在本机真跑，首次真实证据来自下一次定时/手动
+   CI；chromadb 豁免的前提是产品只用内嵌 `PersistentClient`，一旦启用 HTTP/RBAC 必须重审。
+   展开见手册 `G/16` §3.6 与 `F/11` §3.8。
+   ✅ **2026-11-08 收尾复跑**：后端全量 **5449 / 0F / 0E / 0S**（扫描器结论仍只代表 2026-11-07 当日）。
+
+94. **跨进程写安全：文件锁原语 + 建库/用户态读改写串行化（2026-11-07，G/H 项）**：
+   **问题**：`db._SCHEMA_LOCK` / `_schema_ready` 是进程内状态，两个实例同看一份老库时会都执行
+   `alter table … add column`，后到的撞 `duplicate column`（老库种子下可稳定复现）；`repo_meta.save_settings`
+   是「先 load 再 save」两段式，两个实例各拿旧副本回写——未显式提供的 `selection` 会被另一实例的
+   旧快照抹掉（与 2026-10-28「整体覆盖写」同族，触发器换成了并发）。
+   **收口**：新增 `app/file_lock.py`：`exclusive_path_lock(path, timeout)` 的锁文件**独立于目标**
+   （目标会被 `replace()` 换 inode），Windows `msvcrt.locking` / POSIX `fcntl.flock` 锁首字节，
+   进程内再按解析后的路径分桶叠线程锁，同线程可重入（`delete_with_backup → backup/save` 不自锁死），
+   等锁超时抛 `LockTimeout`（属「操作失败」，不能当「没有并发」）。
+   DB 侧：`init_db` 的闸门整段包进 `<db>.init.lock`，进程内双检 → 拿文件锁 → 再双检 ⇒ 两实例串行建库/迁移。
+   用户态侧：`state_store` 的 `save` / `mutate` / `delete_with_backup` 共用 `<名>.lock`；`save` 仍是整档替换，
+   `mutate(path, apply)` 是唯一「锁内读最新 → 改 → 有变化才写」接缝，`apply` 返回显式 `(新档, changed)`
+   （合法假值不兼任变化标志）。`repo_meta.save_settings` 改走 `mutate`（未带的 `selection` 在锁内从最新档继承）；
+   `migrate_user_state_layout` 整段持设置档锁，锁序只许「设置档 → 索引档」。`delete_with_backup` 的
+   「备份 → 逐字节复核 → unlink」整段也在同一把锁内；锁不可用 ⇒ 返回 `lock-failed` 且不删，
+   保持「删除接缝从不抛错」。
+   **边界（诚实口径）**：锁只覆盖本代码的写入方——外部手工编辑/编辑器保存仍不在锁内，所以删除前的
+   逐字节复核必须保留；`settings` 与 `repos` 都是整档快照，跨实例仍是最后写者赢，锁保证的是
+   「字段不被无谓抹掉 + 写不交错」，不是字段级合并；`user_state.json` 与 `repos.json` 两次写不构成跨文件事务。
+   锁文件常驻不删（删了会出现两把不同的锁同时生效）；`.lock` 不在 `data_layout` 登记 ⇒ 卸载面按
+   `unknown` 保留，零/单字节、可再生。
+   **回归**：`test_file_lock.py` 4 例（跨进程互斥 / 超时 / 同线程重入 / 不同路径不阻塞）；
+   `test_db_cross_process_init.py` 1 例（老库种子 + 两子进程同时迁移；红检＝`duplicate column name: worker_id`）；
+   `test_cross_process_state.py` 3 例（两进程并发追加不丢更新 / `save_settings` 等锁并继承另一实例持锁期间写入的
+   `selection` / AST 接线锁：`save_settings` 只许调 `mutate`）。受控红检：去掉 `mutate` 的文件锁 ⇒ 恰好
+   「并发追加」1 例红；把 `save_settings` 改回 load→save ⇒ 恰好接线锁 1 例红。定向 160 例 0F/0E/0S；
+   ruff 与 mypy 通过（`state_store.py`、`file_lock.py` 已入 `mypy_files.txt`）。✅ 2026-11-08 收尾复跑：后端全量 **5449 / 0F / 0E / 0S**（758.9 s，junitxml）。
+   展开见手册 `E/07` §3.12（并同步 §3.9/§3.11 的旧边界）与 `G/17` §2。
+
+95. **上网素材详情接入资产库五档反推（2026-11-07，前端-only）**：
+   **问题**：上网素材详情此前只有「生成视觉描述」一条链（`describeImage` + `setGenerationDescription`），
+   而资产库详情已具备五档反推（`vlm` 两段式 / `wd14` / `gbc` / `ai` / `desc`）。素材本身同样有 `assetId`
+   （合成仓库 `web-materials`），三个后端打标端点只认 `asset_id + repo_id` ⇒ 能力其实已通，缺的是编排与
+   界面；且原站标签（`_provenance`）与反推标签（资产快照）是两套数据，旧面板把两者混在一起，
+   说不清「复制的是哪一套」。
+   **收口**：新增 `frontend/src/lib/webMaterialTagging.ts` 作素材反推唯一编排点（`runMaterialTag` /
+   `loadMaterialTagView` / `generateMaterialMossLayout`）：`wd14` → `tagGeneration`；`vlm`/`ai` →
+   `tagFromText`（两段式带 `saveDescription`）；`desc` 只写描述不动快照；`gbc` 复用资产库同一条链——
+   `gbcCaptionCache` 命中即免整图描述、未命中先 `describeImage(GBC_CAPTION_PROMPT)` 后 `saveGbcCaption`，
+   `gbcTagAsset` 成功后自动 `generateMossLayout`（失败保留 outline + `mossError`，重开详情自动重试一次）。
+   `WebMaterialDetailModal` 拆成「原站标签 / 反推打标 / 反推标签 / 视觉描述（只读）/ GBC 场景图」五区，
+   原站与反推各自独立复制；GBC 区与资产库同口径，只留「复制官方布局 JSON」。模式选择记忆在
+   `localStorage["demiurge.tagMode"]`；缺 VLM 时用 `activeVlmChat`/`vlmGapMessage` 精确提示。
+   **边界**：没 `assetId` 的旧素材仍只提示「重启后端后新下载的素材会自动补」；描述写回主表（语义搜索
+   可见）不改 provenance；VLM 配置判定以 `activeVlmChat` 为准（本地 GGUF 未导入 ≠ 未配置）；
+   官方布局生成失败不回滚已存 GBC 图。后端零改动。
+   **回归**：`webMaterialTagging.test.ts` 13 例（五档路由 / caption 复用与新建 / GBC 未配置 /
+   布局失败保留 outline / 快照回读 active 回落 latest / 布局补生成）、`webMaterialsMarket.test.ts`
+   源锁 7 例（五档选择器、双标签分区、GBC 只剩官方布局复制）、`assetLibrary.test.ts` 两处断言改锁
+   新链路；前端全量 201 文件 / 2328 例、`tsc --noEmit` 0、`npm run build` 0。
+   **真浏览器（dev 5173 + 8010，真实已存档素材）**：详情面板五档下拉、原站标签（9）与反推标签分区、
+   视觉描述只读提示、`开始反推` 均在；切 WD14 后提示随档变化且 `localStorage["demiurge.tagMode"]`
+   落 `wd14`（已复原 `vlm`）；未点「开始反推」（不写真实资产、不计费），该素材无场景图故 GBC 区不显示。
+   展开见手册 `D/05` §3.11。
+
+96. **上网素材反推「资产不存在」：历史素材按需补登记（2026-11-07，后端 + 前端）**：
+   **问题**：素材详情点「开始反推」回 `资产不存在`（404）。取证（真实库）：4 张素材的旧资产记录把
+   `image_url` 存成了**带 origin 的绝对形式**（`http://127.0.0.1:8010/api/comfyui/local-view?…`），
+   而 2026-10-24 同源化后 `view_urls.local_view` 产出**根相对**形式；`assetId = generation_doc_id(repo, url)`
+   ⇒ 两种形式算出两个 id，打标端点按当前相对形式查 Chroma 全部 404（SQLite 侧另有 5 条绝对形式行，
+   其中 1 条是真幽灵：对应文件已不在盘上）。`image_store.list_web_materials` 无条件合成 `assetId`，
+   所以按钮永远可点；VLM/GBC 档更糟——视觉模型的钱先花掉再报错。完全没记录的历史素材（P2-1 之前落盘、
+   或入库失败只 warning）同样落到这条 404 上。
+   **收口**：后端新增 `image_store.ensure_web_material_assets(output_dir, asset_ids=None)`（幂等）：按
+   `generation_doc_id(WEB_MATERIALS_REPO_ID, local_view_url)` 从盘上算出 assetId，**同时**核对 Chroma
+   （`rag_store.existing_doc_ids`，走原生客户端、不卡嵌入端点）与 SQLite 主表，**缺任一侧才补**；补录复用
+   `index_web_material_asset`（同 doc_id ⇒ upsert 幂等），`created_at` 取 `provenance.downloaded_at` 保持
+   原始时间序。返回 `{registered, already, missing, failed}`；确实有缺项且嵌入未配置 ⇒ `ComfyError(400)`。
+   路由 `POST /api/comfyui/web-materials/ensure-index`（`output_dir` + `asset_ids`；空=补齐全部）；
+   `scripts/index_web_materials.py --apply` 改走同一函数，不再有第二套判重。
+   **前端**：`ensureWebMaterialIndex()` 进 `api/ai/webMaterials.ts`；`runMaterialTag` 在**任何档分派之前**
+   补登记（VLM/GBC 不再先花钱），不在 `registered/already` 里就止损并说清 failed（补登记失败：嵌入模型
+   没配好或不可用）/ missing（磁盘上找不到这张素材的文件）。`MaterialTagDeps` 增 `outputDir`（素材根目录）。
+   **边界**：只认「盘上有文件」的素材；绝对 origin 形式的旧记录不迁移也不删除（补登记按当前形式新建一条，
+   内容重复但 id 不同——清理属另一条线）；补登记确实写 Chroma + SQLite；只按 doc_id 判存在性，
+   除嵌入外不改任何元数据；`assets` 主表读失败时退化为只看向量库（upsert 幂等）。
+   **回归**：`tests/test_web_material_assets.py` 新增 8 例（两侧补齐且 `created_at` 沿用 provenance /
+   已登记不重嵌入 / 单侧缺仍补 / 指定 id 无文件记 missing / 无 provenance 按文件名 / 嵌入未配置 400 /
+   补录失败记 failed / 路由透传与 400 映射），与 `test_web_material_ingest.py` 合计 30 例绿；
+   `webMaterialTagging.test.ts` 17 例、`webMaterialsMarket.test.ts` 新增接线源锁、`ai.facade.test.ts`
+   导出清单登记 `ensureWebMaterialIndex`。后端定向 30 例 + ruff + mypy 绿；前端全量 201 文件 / 2333 例、
+   `tsc --noEmit` 0、`npm run build` 0。
+   **真机**：4 张存量素材全部补登；失败资产 `gen-1a30bfe7…` 的 `list_generations` 命中、复调 0.01 s
+   `already`；浏览器（5173 + 8010，真实素材）点「开始反推」（WD14 本地免计费）⇒ 43 个标签落地、
+   `资产不存在` 消失（选择框已复原 `gbc`，未触发云端计费）。展开见手册 `D/05` §3.11 与 `C/04` 端点表。
+
+97. **GBC 官方布局姿态纠正：WD14 姿态标签优先于 VLM 写的 GBC 观察（2026-11-07，后端 + 前端）**：
+   **问题**：趴在沙地上的素材，官方布局（MOSS）写成 `sitting`。取证定位到**源头不是布局模型**：GBC 的
+   英文描述由视觉模型写（`detail_caption` = "… sitting on sand."、实体 caption = "… sitting with her legs
+   spread …"），布局模型拿到的 GBC 摘要里全是坐姿词，即便提示词写明「以图为准」也照抄这个锚点——同一张图
+   WD14 给的是 `on_stomach, lying, looking_back`，两套事实冲突时旧管线无条件信了文字。
+   **收口三层**：① **源头**：`GBC_CAPTION_PROMPT` 要求按「身体哪些部位接地」写姿态（躯干水平且胸腹朝地
+   必须写 `lying face-down`，不得写 `sitting`）；caption 缓存 key `demiurge.gbcCaptions` → `.v2` 作废旧
+   描述（图没变，但旧文字不可信）。② **注入**：`moss_layout.POSE_TAGS` / `select_pose_tags` / `pose_hint`
+   只挑姿态与朝向标签（归一化、保序去重），`digest(graph, tags)` 在实体清单前插「姿态标签（WD14 分类器，
+   可靠）」＋「姿态判定（按标签，优先于 GBC 观察）」两行；`SYSTEM` 增「先看图和姿态标签、身体与地面的接触
+   决定姿势、不得照抄 GBC 姿势词」，`items` 同步要求与 caption 一致。标签真源＝**本轮建图实际用的那份
+   WD14 结果**：`gbc_tag_asset` 把 `[name for name, _score in scored]` 存进 `engine.tags`，
+   `moss_layout_asset` 优先用它、老存档回落 `asset_store.tags_of_row(row)`（新增的主表标签解析唯一入口）。
+   ③ **确定性兜底**：视觉模型有时不产出 `girl` 项，`compose` 会退回 GBC 旧描述 ⇒ `align_character_pose`
+   在标签判定为卧姿时把 character 兜底文本里的 `sitting/seated/sits` 按标签改写（保留大小写），不让存档
+   继续带坐姿词。
+   **边界**：不做新的姿态推断——只用 WD14 独立分类器的结果；白名单只收姿态/朝向，颜色服装等照旧不进
+   digest；确定性改写只作用于 **character 兜底文本**，模型自写的 items 不被二次改写；GBC 引擎、坐标与
+   `to_moss` 几何零改动；GBC 的 `engine` 只是多存一个 tags 数组，旧行兼容。
+   **验证**：离线 A/B（同一张沙地图、同一模型）：只加规则=仍 `sitting`；规则＋姿态标签= `lying face-down /
+   on her stomach`。真机（隔离 8013 + 真实库、本地 qwen3vl:8b）：`POST /api/rag/moss-layout` 200、
+   51.2 s，落库布局 6306 B，`sitting/seated` 0 命中，summary 与 girl 项均为 `lying face-down on her
+   stomach`；改前存档备份在 `_tmp/moss_layout_before_pose_fix.json`。
+   **回归**：`tests/test_moss_layout.py` 22 例（新增姿态标签归一化与过滤 / `pose_hint` 朝向优先 / digest
+   只注入姿态标签且排在实体之前 / engine tags 优先与回落主表 / 兜底句按标签改写 / 无标签保持原样 / 动词与
+   大小写改写）；`repoGalleryShared.test.ts` 锁 caption 提示词的接地与「never sitting」，`gbcCaptionCache.test.ts`
+   锁 v2 键并断言 v1 条目被忽略。后端全量 **5425 / 0F / 0E / 0S**（junit 812.74 s、不带 `-x`、`NO_PROXY=`；
+   本链 +7＝`test_moss_layout` 15→22，其余 +8 属并发会话；运行窗口内 `backend/tests/**` 零改动）；
+   前端全量 **201 文件 / 2335 例**、`tsc --noEmit` 0、`npm run build` 0；ruff / mypy（3 文件）/
+   import-linter（18 kept）/ 硬编码检查全绿。展开见手册 `D/05` §3.11。
+
+98. **GBC 起不来「engine host 'local' exited (1)」：显存争用与根因可见（2026-11-07，后端）**：
+   **失败形状**：GBC 打标回 `GBC 运行失败：… ValueError: engine hosts failed to start: local: engine
+   host 'local' exited (1)`，用 `data/tmp/gbc/<ts>/` 的 `config.py` 原样复放才拿到更早的 stderr：
+   `placement does not fit: cuda:0: needs 5.00 GiB, 3.08 GiB free (less 5% headroom): detector
+   weights and activations 5.00 GiB`。GBC 在**启动时**按当前空闲显存一次性校验（检测器固定 5 GiB），
+   而本机 Ollama 在上一次布局/描述请求后仍把 `qwen3vl:8b` 钉在显存里（5.1 GiB）⇒ 8188 MiB 卡只剩
+   3.08 GiB，`local` host 直接 exit 1。**不是代码回归**：失败轮（`20261107-194858`，40.0 s）与成功轮
+   （`20261107-184816`，360.5 s / 7 实体）的 `config.py` 逐字节相同，是**顺序工作流**（先生成官方布局、
+   再打标）的显存抢占。**收口两条**：① **启动前卸载本机 VLM**：`run_one` 在 spawn 前调
+   `_unload_local_vlm(vlm_base_url, vlm_model)`——只认回环地址上的 Ollama（`/api/ps` 可读）、只卸
+   **配置里那个**且 `size_vram > 0` 的模型（`POST /api/generate {keep_alive: 0}`）；GBC 真调 VLM 时
+   Ollama 自动重载（显存不够就部分落 CPU），即回到冷启动可跑形态；非 Ollama 端点 / 模型不在显存 /
+   请求失败一律放过（卸载不是 GBC 的前置条件）。② **失败摘要给根因**：`_failure_summary` 按
+   `placement does not fit` / `GiB free` / `CUDA out of memory` / `engine host` / `No such file` /
+   `not found` 提取前 4 行并滤掉 traceback 源码行，命中显存类追加「关掉占显存的程序（ComfyUI 里加载的
+   模型、本地大模型服务）后重试，或把检测设备改成 cpu」。
+   **边界**：不自动关 ComfyUI、不改 `Settings.gbc.device`；远程 Ollama / 云端 VLM 不碰（显存不在本机）；
+   只卸当前模型、不动其它驻留模型；卸载失败不阻塞运行。
+   **验证**：真机复刻先预热 qwen3vl（VRAM 7803/8184、剩 154 MiB、`/api/ps` 5,479,008,829 B）⇒ 同 job
+   调 `run_one` ⇒ 预检后 `/api/ps` 为空、显存回到 6229 MiB 空闲、GBC 正常启动；整轮 **443.5 s**、
+   **9 顶点 / 19 边**（1258×2048），图存 `_tmp/gbc_vram_live_graph.json`；跑完 Ollama 已按需重载模型。
+   **回归**：`tests/test_gbc_tagger.py` 26 例（19→26，+7：Ollama 根路径归一 / 驻留模型卸载体 /
+   CPU-only 不卸 / 远程端点不碰 / 外来 payload 不炸 / 失败摘要命中 placement 根因 / 无特征退回末 6 行）；
+   后端全量 **5432 / 0F / 0E / 0S**（junit 744.39 s / gate 750.1 s、drift=0、不带 `-x`、`NO_PROXY=`；
+   +7 恰＝新测，别的会话本轮无新增）；ruff / mypy（契约清单 284 文件）/ import-linter（18 kept）/ 硬编码 /
+   silent-except 全绿。展开见手册 `D/05` §3.11。
+
+99. **反向提示词的物体真源收敛到 WD14：种子描述按标签拼 + 官方布局输出闸（2026-11-07，后端 + 前端）**：
+   **失败形状**：用户对比「生成图 vs 反推前的源图」——源图是银发独角少女、白色连体泳衣、**没有剑也没有
+   任何文字**，生成图却有一把大剑 + 画面上方的 "Sword of the Sea" 标题。用户重申既有分工定案：
+   **「wd14 的标签准，以其标签为准；gbc 主要是空间感强构图清晰但识图标签关键词有问题，两个要组合」**。
+   **三层放大链（均已取证）**：① 前端 `GBC_CAPTION_PROMPT` 让 VLM「点名每个物体」自由写整图描述 ⇒
+   写出图里没有的 `sword`/`gloves`/`bowtie`/`bikini top`，而这段文字既是 GBC 的 `detail_caption` 也是
+   `grounded()` 的落词依据；② GBC 逐实体 VLM 在错误上下文里继续放大（角被认成铜管乐器）；
+   ③ 官方布局模型把 `sword` 写了 10 次并**凭空造出标题**（该串只存在于这条资产的 `moss_layout_json`）。
+   **收口三刀**：① **种子描述唯一属主＝标签**：`gbc_tagger.caption_from_tags()` 把 WD14 标签拼成
+   `Objects in the image: girl, horns, white one-piece swimsuit, …` 纯名词清单（`tag_element` 同构过滤：
+   非物体/`-ing` 词尾/部件头/人物头/身体/表情/视线/元标签/姿态全丢；`2girls`→`girls`、括号去噪、
+   **词尾包含去重**），阈值 `TAG_THRESHOLD=0.35` ⇒ 低分噪声（事故里的 `sword` 0.2）不进描述 ⇒
+   `grounded()` 落不了词 ⇒ 成不了实体；`gbc_tag_asset` 不再收 `caption`，前端整条链（`gbcCaptionCache.ts`
+   + `GBC_CAPTION_PROMPT` + `/gbc-tag` 的 `caption` 字段）删除 ⇒ **GBC 打标零整图描述费用**；一个可用
+   物体标签都没有 ⇒ 400 止损，不跑必然 0 实体的图。② **官方布局以标签为唯一物表**：`digest` 从只喂姿态
+   子集改为**喂全量标签**（标注「物体/服装/配饰的唯一真源，按置信度排序」），`SYSTEM` 增硬约束 ③
+   「标签里没有的物体一律不得写、冲突以标签为准；构图/朝向/光线/场景/颜色才以图为准」，caption 第 (3)
+   步写 `white_one-piece_swimsuit` 不得写成 bikini、第 (7) 步不得编标题且只有文字类标签在场＋图中能看清
+   才写原文（**例外**：图上真印着的署名/引流块可原样转写，WD14 常漏打），cast 角色卡服饰同样只认标签。
+   ③ **输出闸（确定性）**：`find_violations()` 查手持物（动词+限定词+≤4 词，身体/抽象/自然宾语白名单放过
+   "holding her breath"、"the breeze carrying her hair"）、画面内文字（引号串，无文字类标签即违规；
+   `_CREDIT_MARKERS` 命中 patreon/fanbox/pixiv/@/© 等则跳过该段并继续找下一段）、泳装款型
+   （**只在标签明说对立款型时**才判：bikini↔one-piece/school swimsuit 双向；`slingshot_swimsuit`
+   这类未归族标签只是叫法不同，不判）；命中 ⇒ 违规清单+原文回灌**纠正重试一次**，仍违规 ⇒
+   `MossLayoutFailed`(502)。**闸只拦能被标签证伪的断言，不拦「标签没提到」的断言**。
+   **边界**：构图/位置/遮挡/光线/场景/颜色**不拦**（WD14 不产这些）；无标签的老资产闸不生效（无权威
+   词表，保持原行为）；阈值只有一处；标签分数表仍**全量**交给 GBC（过滤交给它自己的 `tag_threshold`，
+   描述是第二道闸）；GBC 引擎、`to_moss`、坐标零改动。
+   **离线取证（真实存档，零计费只读）**：唯一含该标题的资产重放 ⇒ 旧种子描述里 `bowtie/gloves/
+   bikini top/holding sword` 全是图里没有的，新描述是 `Objects in the image: girl, horns, white
+   one-piece swimsuit, thighlet, horn ornament, jewelry, bracelet.`；`find_violations` 打在**已存布局**
+   上 ⇒ **6 条违规全命中**（手持物 ×2、标题 ×1、bikini 与 `white one-piece swimsuit` 冲突 ×3）。
+   ⚠ 老资产已存布局不自动更新，须重跑。**全库误报复核**（`_tmp/audit_gate_fp.py`，`mode=ro` 只读）：
+   闸打在 `asset_gbc` 全部行上（标签走生产解析路径），3 份已存布局 **收窄前 0/3/1/6 → 收窄后 0/0/6**；
+   两条误报＝`slingshot_swimsuit` 被写成 bikini（图里真有泳装，只是叫法不同）＋真印在图上的
+   `fanbox/patreon/fansky` 署名块（WD14 漏打 `signature`）⇒ 两条规则各自收窄，事故资产仍 6 条。
+   跑前跑后 `app.db` 的 `size|mtime_ns|sha1` 逐字节相同。**教训：新闸上线前必须拿全量真实存档跑误报，
+   只验事故那一条会把「拦得住」误当成「拦得对」。**
+   **回归**：`test_gbc_tagger.py` 26→**32**（+6：事故原标签→精确描述 / 数量短语归一与词尾去重 /
+   无物体标签返回空串 / `gbc_tag_asset` 用标签拼描述且低分 sword 仍在分数表 / 无可用标签不跑 GBC /
+   路由不再收 `caption`）、`test_moss_layout.py` 22→**33**（+11：digest 全量标签与三段顺序 / 无标签不出
+   标签行 / 伪造剑与标题判违规 / 标签支持的剑与 `english_text` 放行 / "holding her breath" 不误报 /
+   无标签不拦 / 泳装双向冲突 / **未归族泳装叫法不判** / **署名块放行且署名在前仍抓出后面的编造标题** /
+   命中重试一次 / 干净直返 / 重试仍违规判失败）。后端全量
+   **5449 / 0F / 0E / 0S**（junit 859.84 s / gate 866.1 s、drift=0「源码在跑批期间未变」、不带 `-x`、
+   `NO_PROXY=`；较上轮 5432 的 **+17 恰＝本轮新测 6+11**，其中收窄误报后复跑 5447→5449＝+2）；
+   ruff（app+tests）/ mypy（契约清单 284 文件）/
+   import-linter（18 kept）/ 硬编码 / silent-except / release_preflight（10/10）全绿；前端 `tsc --noEmit` 0、
+   **200 文件 / 2324 例**（删掉 `gbcCaptionCache.test.ts` 整档 8 例，其余按新契约改写）、`npm run build` 0。展开见手册 `D/05` §3.11。
+
+100. **首尾帧视频＝「整楼层影片」：整轮正文成拍、换场成转场拍、图片3+ 角色参考图（2026-11-08，后端 + 前端）**：
+   **失败形状（批 1）**：④ 只吃 `scene_spec.narrative`（高潮锚点那一段），首/尾帧描述却取自整轮
+   `clean` ⇒ 视频从楼层开头直接跳到高潮段再跳结尾；而且编译发生在成图之前 ⇒ ② 恒写「无参考图」，
+   与前端随后挂上的首帧/尾帧相反。
+   **批 1 收口**：firstlast 以 `floor_narrative`＝整轮可见正文（`protected_narrative_text(clean)`，
+   保留破甲标记、由 `_clean_spec` 统一还原）同时喂 ④ 与提取器；`build_video_request(..., pending_frame=True)`
+   让 ② 按「图会到」声明；缺图守卫改述为「首帧/尾帧由下游链补挂本张成帧」。`protected_narrative`／
+   `narrative` 仍只服务 climax。
+   **批 2**：④ 中段优先取提取层 `action_sequence`（≥3 拍；**只丢 desc[0]**——合同要求它「复现」开头
+   画面＝纯复述；第 102 刀修正：末拍合同是「**落在**结尾画面」不是「只复述尾帧」，整拍丢弃会吞掉
+   高潮动作，实稿戴戒动作即由此丢），否则退回正文逐句成拍；每拍可带 `scene`，只在**换场**那一拍
+   渲染「场景切换：…」；图侧计划里的 `action_sequence`
+   是围绕高潮帧的延伸链，firstlast 必须 `pop` 掉（提取失败时若捡它当整楼层动作流，整段会被演成高潮
+   那几秒）；引语按**相对位置**落最近拍（`slot = idx*groups//total`，⛔ 不得用折叠边界反推，否则整体
+   后移一拍）；firstlast 的 POV 合同说「本片／正文里真正出场的人物／首尾帧图」，⛔ 不出现「定格帧」。
+   拍界唯一真源 `_firstlast_beat_plan`（④ 渲染与对白时间轴共用，入参逐字对齐）。
+   **批 3**：② 补齐「图片3、4、5…＝角色参考图」（第 94 刀规格逐字）；名单真源
+   `firstlast_role_refs(actors, ctx["character_base_images"])` **镜像前端 `planFirstlastReferenceImages`**
+   （在场顺序、无底图不占位、同源去重），后端只决定「第几张是谁」，上传由前端按模板参考图槽完成；
+   无底图 ⇒ 不写 `role_refs`、不多报编号（R2 不假装有图）。角色参考图**只锁身份**（五官/发型/体型），
+   当下衣着、姿势与场景以首尾帧为准。提取器吃「当下衣着与随身道具」（状态表 → 数据表兜底，空则不写
+   该块），合同要求**随身道具必须绑定到具体角色**（不得把 A 的伞/外套写到 B 身上、不得写无主物件），
+   衣着清单仍归 `subject_scene`（第 91 刀口径，不进 desc）。前端参考底图上传**中途失败即截断**
+   （后续整组不提交），⛔ 不许跳过让后面的人前移顶位——编号一旦错位就是把 A 的脸标成 B。
+   **边界**：firstlast 的 `locale` 只表示高潮帧/当前状态所在场景（换场以正文为准）；时长由用户模板/
+   预设决定，不按剧情量夹。**回归**：`test_video_prompt.py` 158 例＋`test_agent_dispatch.py` 276 例
+   ＝定向两文件 **434 passed**；前端 `useIllustrationChain.test.tsx` **62 例**（含「中途失败即截断」）、
+   `tsc --noEmit` 0、`npm run build` 0（dist 已重建）。展开见手册 `A/03` §30、`C/13` §3.11。
+
+101. **全局模式分镜序列 + ComfyUI 多机台池：一图一镜、按正文序拼成片、按队列负载分机（2026-11-09，后端 + 前端）**：
+
+   **背景**：firstlast 的单条长视频把「硬切」与「运镜」混在一条提示词里；图片1之外没有场景几何/
+   视差/画外信息，任何推拉摇移只能靠模型脑补（2026-11-09 8s 样片实测：无硬切、背景持续漂移）。
+   用户定案：按剧情分镜拆镜头——**硬切镜头＝单图动态延伸**（像高潮点一样每图单独一支），
+   **运镜镜头＝单图/双图一条连续路径**（提示词详写过渡），最后按正文序拼接；拆支不增加总时长，
+   且能「生成一张图就提交一支视频」流水线并行。
+
+   **后端合同**：`shot_plan.build_shot_plan` 是分镜分流唯一真源——每个保留锚点只生成一张图，
+   `shot_type` 表示**从本锚点出发**的镜头（`establish` / `cut` / `move` / `move_single`）；
+   **关键帧分镜**：判据输出 2–8 个关键帧（首帧 establish 环境空镜、默认沿主动线推近 5–10s，
+   人物入场帧＝全身像），每个关键帧只出一张图；手/胸/背/腰/脚等近景写进该帧 `video_beats`
+   （1–4 段、段间硬切、合计 5–15s），**不再单独生图**。判据漏开场/入场时
+   `prepare_storyboard_anchors` 从正文补拍（逐字，不另调 LLM）；近景合并遇上一帧是
+   `move`（双图运镜）或 `establish`（环境）时跳过。`video_beats` 由 ④ 编译成
+   「0–3s｜…；3–6s｜硬切…」；cut 不再写「能量爆发式特效」。**逐拍视角**：每段带
+   `viewpoint`（`pov`＝叙事者眼睛 / `observer`＝第三人称旁观）；图片所在拍以作品/图片视角为准
+   （图片已锁在视频第 N 秒），其余拍按判据显式标签或机位句反推；同一支视频可混合视角，
+   ④ 逐段标「第一人称/第三人称」，POV 段只写「叙事者视线·角度」，旁观段保留原机位；
+   ⛔ POV 机位只归一「她右后方/肩后/床尾/红毯一侧/贴地」这类角色外部位置，叙事者站得住的
+   「院墙外/窄道入口/院门内侧/门内三步/案侧/床沿上方」原样保留。④ 每段必须写成可拍画面
+   （description 60–120 字含环境/道具/光线/背景/连续性，subject_motion 起始→动作→终点），
+   只扩写原文已有事实；description <40 字或缺环境/光线/动作时产「分镜信息过稀」warning。
+   趋势守卫：POV 段叙事者本名→「镜头角色」；图片所在拍首句必须含图片姿态（站/坐/躺/蹲）；
+   每拍硬事实清单缺失即重试；抽象词禁表（深邃/不容置疑/气场/命运/意味/仿佛/似乎等）。
+   `move` 的双图视频
+   挂在**下一锚点**事件（复用 `bridge_prev_slot`），缺下一锚点/跨场景/`transition_desc` 空/末锚点
+   ⇒ 降级 `cut`；**关键帧数不按面板批量数或总时长预算裁剪**（用户定案「不要压缩」），预算不足时抬总时长并 warning，不砍帧；
+   有 beats 时按时段合计出片，无 beats 时按类型夹值（establish 5–10s / cut 3–6s / move_single 4–10s / move 5–15s；
+   单图硬切过长必自造运动，2026-11-09 离线模拟定案）；提示词段 `shot_establish` / `shot_establish_move`（环境空镜，只锁空间/道具/光线）/ `shot_cut`（固定机位单图或 beats 多镜头）/ `shot_move_single`
+   （单图一条连续路径）/ `shot_move`（双图首尾帧 + 一条连续路径），均不逐拍换镜；
+   `shot_move` 的 ④ 中段取**两锚点之间的正文窗口**，`transition_desc` 只进 ① 与每拍 camera
+   （⛔ 不得把路径当叙事重复，2026-11-09 离线模拟实锤并修）。成片由
+   `video_merge.merge_videos` + `POST /comfyui/merge-videos` 拼接：同参数 `-c copy`、异参重编码、
+   幂等、暂统一 `-an`（无音轨并 warning）。
+
+   **前端合同**：`useIllustrationChain` 的 shots 模式主槽只出图（`mainIsVideo=false`），图完成后
+   立即提交 `:video`（establish/cut/move_single）或 `:move`（上一锚点 move 进入本锚点）；`shotSequence` 是
+   barrier 纯逻辑（全部 shotIndex ready、无 failed/pending），`useShotMerge` 负责拼接与 `:merged`
+   槽回填，失败标 failed 可重试；顺序只认 shotIndex，不按完成序。分镜与成片同时展示。
+
+   **多机台池**：`comfyRoute` 从单 id 扩展为 `string | string[]`，`resolveComfyUrls` 是唯一池解析；
+   `pickComfyHostFor(settings, "image"|"video"|"audio")` 按 `score = running*2 + pending` 选最低，
+   10s 缓存、同分轮转、全离线回退池第一台；`POST /comfyui/probe` 并行探测最多 16 台的 `/queue`，
+   地址簿按模态多选 checkbox。提交按 URL 串行（同机冷加载）、跨机并行；**提交失败不自动换机重试**。
+
+   **零回归**：`video_mode="firstlast"` 或事件无 `shot_sequence_id` ⇒ 旧整楼事件字段、提示词与
+   提交顺序逐字节不变；旧预设无 `shotSequence` 字段仍走 firstlast。
+
+   **回归**：后端 `test_shot_plan.py` 12 例 / `test_shot_sequence_dispatch.py` 2 例 /
+   `test_video_merge.py` 5 例 / `test_comfy_probe.py` 3 例 / `test_video_prompt.py` 186 例 /
+   `test_roleplay_turn.py`；前端 `shotSequence.test.ts` 4 / `useShotMerge.test.tsx` 7 /
+   `comfyHostPool.test.ts` 4 / `comfyMachines.test.ts` 21 / `PathsPanel.test.tsx` 11 /
+   `useIllustrationChain.test.tsx` 64（含 shots/cut 与 move incoming 两例） /
+   `MediaInsertModal.test.tsx` 25；`tsc --noEmit` 与
+   `npm run build`。展开见手册 `A/03` §3.12c＋红线 85、`C/13` §3.8b/§3.8c＋红线 26/27、
+   `F/15` §3.6＋红线 12。
+
+102. **全自动分镜连续锚点：scene_anchor / wardrobe_anchor 从正文与状态块派生（2026-11-12，后端）**：
+   用户实锤「手工在验证脚本里逐镜写死 anchor 只能救一次，全自动生产不一定做得到」。
+   **合同**：`shot_plan` 是连续锚点唯一属主——`prepare_storyboard_anchors` 末尾
+   `assign_scene_anchors` 按「显式转场（`镜头一转`/`转场`/`另一边(?!的)`/整行分隔线）+
+   locale 双字相似度」分组，给每个保留锚点写 `scene_key` / `scene_anchor`（同场景共用；
+   取首镜段落或新场景边界前最后一条固定地标所在句，并汇总本场景各锚点/beats 的
+   `_SPATIAL_LANDMARK_RE` 地标）；`parse_wardrobe_anchors` 从 `<status>` 的 `[在场]`
+   括号解析 `角色→服装`（强服装词过滤动作/数量括号），`wardrobe_anchor_for` 按本镜
+   `actors` 拼接。`build_shot_plan(present=…)` 自动注入；生产 `build_shot_requests`
+   写进每镜 `scene_spec`（环境镜保留空间锚点、清空服装锚点），request 带
+   `shot_scene_key`。**Prompt 合同**：`image_prompt_profiles` 的 `_COMMON` 要求同场景
+   共用空间关系、同角色服装锚点优先；`prompt_field_ledger` 新增 `__continuity__` 诊断槽，
+   把锚点明确写出的门框/红毯/婚纱等映射成英文并进 `location`/`wardrobe` expected，
+   由 `complete_field_coverage` 确定性补写；空间地标只进 anima/niji tags 行。
+   **零回归**：锚点字段缺省时 `prompt_field_ledger` 不新增槽、旧 scene_spec 行为逐字节不变。
+   **回归**：`test_shot_plan.py` +6 / `test_shot_sequence_dispatch.py` +1 /
+   `test_image_prompt_profiles.py` +2；真实作品《堕落魔戒》SAVE02（23 镜）自动分成
+   仓库/卧室两组。展开见手册 `A/03` §3.5/§3.6。
+
+   **场景卡与空场景环境图（2026-11-12 追补，用户 1+2）**：`assign_scene_anchors` 额外给
+   每个锚点写完整 `scene_window`（含同场景地标后缀，≤1200 字），`build_shot_plan` 按
+   `scene_key` 调 `scene_card.extract_scene_card` 生成 `ShotPlan.scene_cards`。
+   `scene_card` 为纯函数、零 LLM：抽 `space_type/architecture/fixed_props/layout/lighting/
+   palette/camera/landmarks/missing/inferred`；方位只认本分句，红毯等路径类才允许跨逗号找
+   「铺到/通向/延伸到」目标，门类建筑无方位默认 `entrance`，`同场景地标：` 召回后缀单独落
+   `landmarks` 不当正文，颜色只取建筑/陈设所在分句，完全无光时 `inferred=lighting` 并由
+   `build_scene_prompt` 补 `soft ambient lighting`；地标中的固定物（如只在入场镜出现的
+   `侧门`）回收进建筑/陈设表，`台前/走廊` 等方位词不当物件；平台+门+红毯加显式空间约束
+   （台独立、门嵌墙不立台上、红毯起点可见侧门）。`scene_card_llm` 为可选补全层：对话模型
+   从同一 `scene_window` 抽 `architecture/fixed_props/layout/relations/lighting/palette`，
+   每条建筑/陈设/关系必须带原文 `evidence`（逐字或 4 字片段重合 ≥0.5），过不了证据校验的
+   条目丢弃；模型失败/JSON 非法回退规则卡；跨建筑/陈设同物去重、同义词归并、条件取更长者、
+   `missing` 按最终卡重算；台阶/红毯/门约束按词根识别（platform/carpet/door），LLM 写
+   `raised wooden platform` 也能触发；室外空间用 exterior panorama，稀疏正文把 inferred
+   结构细节写进提示词，`fully furnished` 只在有 fixed_props 时出现。`scene_reference` 把卡转成
+   **16:9 室内全景**提示词（`unpopulated interior` + 房间清单前置；不是 `empty scene`，
+   后者会被模型理解成空房间），经 `submit_template` → `fetch_result`/`fetch_view_to_file`
+   落 `scene_refs/<scene_key>.png`（默认 1024×576 → 1536×864），写 sidecar（prompt/
+   template）与 `manifest.json`；sidecar 提示词与当前卡不一致时自动重出。`probe_shot_plan`
+   新增 `--scene-refs/--scene-template/--scene-lora/--scene-width/--scene-height/--scene-out/
+   --scene-force`。**画幅合同（2026-11-12 15:50 用户定案）**：场地参考固定 **16:9**
+   （1024×576 → 1536×864，提示词硬写 `16:9 landscape composition`），角色参考图固定
+   **9:16**（576×1024 @1024 → 864×1536，与定妆同源）；两者是分工，不是二选一。混用时
+   场地图**只能当参考、不得进基底槽**——真机 `Krea2-平铺图生图` 的 `ResizeImageMaskNode`
+   硬写 `576×1024 + crop=center` 且未 exposed（`center`＝保比例裁切），16:9 输入只剩约
+   31.6% 横向；且 `latent_width/height` 绑的 `EmptyLatentImage` 输出未接线 ⇒ 传画幅空转、
+   输出恒 864×1536。故「16:9 场地图 + 9:16 出图」不能靠 VAEEncode 拼接。
+   **回归**：`test_scene_card.py` 16 例 + `test_scene_card_llm.py` 7 例 +
+   `test_scene_reference.py` 7 例 + `test_shot_plan.py`（含 scene_cards 断言）65 例
+   = 95 passed / junit 四数全 0；
+   真机《堕落魔戒》SAVE02 两场景均无人物、16:9 整间入画。
+   **未做**：scene_refs 作为逐镜 img2img 底图、多参考图平铺、多角色网格图、
+   节点 101 改为跟随画幅的 binding。
+
+   **角色当前状态底图（2026-11-12 下午追补，首轮 3 张真机出图）**：新增
+   `character_state_card`（规则层、零 LLM）：身份走 `collect_appearance` + 预设
+   `characterLoras[name].baseImage`，服装走 `shot_plan.parse_wardrobe_anchors`／正文分句，
+   `state_text` 只取**含该角色名的原句**（对白整块剥除；「她」句须满足「片段里点过该角色名
+   **且**段落级最近点名的是她」），缺事实进 `missing`、冲突（表=男/正文用她）清空性别并
+   fail-closed；`build_state_scene` 喂 `image_prompt_profiles.generate_result`，与一键定妆
+   同一编译器，`viewpoint`/`narrator`/主体名单/`_FRAMING_PREFIX`（全身含鞋＋正面睁眼）写死。
+   `character_reference` 用图生图模板锁身份：**底图先 `/upload/image` 再填 `base_image`**
+   （绝对路径直填报 `Invalid image file`），`width=height=0` 不覆盖模板尺寸，输出恒 864×1536；
+   sidecar 按 `(prompt, state_hash)` 失效，manifest/cards 按角色名**合并**（单角色补跑
+   不覆盖其余记录）。`scene_reference.build_template_values` 提为公共填写器并加 `base_image`
+   binding；`shot_plan.CLOTHING_CUES` 公开为服装词表单一真源。CLI `probe_character_refs`
+   支持 `--turn/--message/--characters/--force/--rebuild-manifest`。
+   **回归**：`test_character_state_card.py` + `test_character_reference.py` 覆盖串人／
+   对白剥除／性别冲突／缺底图／上传失败／不覆盖尺寸／缓存／manifest 合并；
+   定向 8 文件 **128 passed / junit 四数全 0**，ruff 0、scoped mypy 0、`git diff --check` OK。
+   真机《堕落魔戒》SAVE02 `character_refs/current/` 三张 864×1536 均人工放大验收通过；
+   腓特烈本轮没被写到 ⇒ 回退 turn 18 并在卡里标 `state_from_previous_turn:18`。
+   **未做**：接入逐镜出图链、LLM 补全状态卡、多角色网格图；⚠ 18:47 另一会话给状态卡
+   加过 `<roll>` 清理／`prompt_clean.restore_jailbreak`／选片段／古风服装词表，本轮未回滚。
+
+103. **工作流模板按生成能力分槽 + 逐镜自动选择（2026-11-12，前端 + 后端）**：
+   用户定案「把文生图/图生图/文生视频/图生视频/文生音频模板提前配好，打开对应开关就自动用，
+   不要每次切换；用户选文生图但全局链路需要图生图时不能没有办法」。
+   **预设合同**：`MediaInsertPreset` 新增 `imageTemplates`（`text2img`/`img2img`/`inpaint`/
+   `reference`）与 `videoTemplates`（`text2video`/`image2video`/`firstlast`）；legacy
+   `templateId`/`videoTemplateId` 仍是默认槽，旧预设零迁移。**能力判定**：
+   `imageTemplateCapabilities` 只看 exposed 的 `base_image`/`mask`/`reference_image*`，
+   纯提示词模板＝文生图。**逐镜解析**：`resolveIllustrationTemplateId(preset, sceneSpec)`
+   以 `sceneSpec.image_mode` 优先，未配对应槽回落 legacy 并标 `fallback`；
+   `resolveVideoTemplateId` 同理，`resolveVideoTemplateChoice` 按解析后的实际模板判视频链。
+   `useIllustrationChain` 的主图/首尾帧模板与 `useChatSession` 的 `videoTemplateId` 都改走解析器；
+   `MediaInsertModal` 新增四个图片槽 + 三个视频槽，未配置的槽不阻断保存、运行时回落默认。
+   **后端**：`build_shot_requests` 在每镜 `scene_spec` 写 `image_mode`（当前默认 `text2img`），
+   为参考图链留出逐镜 `img2img` 的入口。**零回归**：旧预设只有 legacy 槽时解析结果与原行为一致。
+   **回归**：`illustrationMedia.test.ts` 新增能力分组/图片与视频解析 4 例、
+   `MediaInsertModal.imageMode.test.tsx` 新增槽位保存 1 例、`useIllustrationChain.test.tsx`
+   形态锁同步新行；定向前端 5 文件 **190 例**、`tsc` 0；后端
+   `test_shot_sequence_dispatch.py` 5 例。展开见手册 `C/13` §3.10＋红线 24。
+
+   **AIO 三变体与 api_workflow（2026-11-12 追补）**：用户上传的 `krea2-AIO全能流.json`
+   含 80 节点、5 个 LoadImage、2 个 VAEEncode、1 个 KSampler（denoise 0.8）、3 个
+   `Fast Groups Bypasser`；参考生图是 Krea2 Identity Edit（`de87fd4b…` context 节点 +
+   `8f30a637…` 模型 loader），不是 OpenPose。拆成 `Krea2-AIO-文生图`（a28c17c6…）、
+   `Krea2-AIO-图生图`（bd2a6d2a…）、`Krea2-AIO-参考编辑`（212dcb59…）三条模板；
+   AIO 子图展开会丢 `ResolutionSelector`/`EmptyLatentImage` 的 widget 映射，新增模板字段
+   `api_workflow`（预编译 API 快照），`workflow_submission.submit_template` 优先 deepcopy 使用。
+   **真机复验判定 AIO 不可用**：比例可修成 576×1024，但 `Krea2EditModelPatch` 的内部 source
+   仍取默认 0002/0009/0016，注入的角色底图没有进内部 source（输出光头男性）；模板自带的
+   平涂线稿 LoRA 也被内部 edit 模型链覆盖。⇒ AIO 三变体留库实验、不再自动接线。
+   **生产改用平铺 `Krea2-平铺图生图`（e8bbc2c9…）**：从现有 Krea2 文生图模板拆出
+   LoadImage→ResizeImageMaskNode 576×1024→VAEEncode→KSamplerAdvanced(start 3/7≈0.57)→
+   二段采样，无 subgraph；UNET 换成已安装的 `Krea2-krea2Anime_v15_int8_convrot`；暴露
+   base_image/prompt/negative_prompt/lora_name/lora_weight。预设 `c5c60de2…` 的
+   `imageTemplates.img2img` 指向它。真机用腓特烈底图 + 平涂线稿 LoRA 复验：输出
+   **864×1536**、金发黑裙、平涂线稿，与底图同一人；提交 119.04s。**未做**：把同场景
+   建立镜写成图生图底图（当前底图仍是角色底图）。
+   **回归**：`test_workflow_submission.py` +1（api_workflow 优先且不改写模板快照）。
+
+   **婚礼堂三步前置流程（2026-11-12 晚追补，probe 层）**：`backend/scripts/probe_wedding_video_flow.py`
+   按用户点名顺序「场景图 → 角色状态图 → 编辑后分镜图」把上面那条「未做」在**离线 probe 层**
+   落实：① `scenes/` 用 `a546d311…` 出 2 张 16:9 空场景；② `characters/` 出 1 张 9:16 腓特烈
+   当前状态；③ `shots/` 出 8 张 9:16 分镜。🔴 真机实锤本条的「金发黑裙」**不是提示词写漏**：
+   预设 `characterLoras["腓特烈"].baseImage` 就是黑礼服定妆照，而本模板一阶段
+   `cfg=1 / start_at_step=3`（denoise≈0.57）属「以底图为准的轻量重绘」，
+   白婚纱提示词只换来一层白头纱；镜 1 定稿第二段的 `several manjiu` 还会在画面两侧串出
+   两个拿抄本的小人。⇒ 状态底图改用同批次已编译的 `_tmp/luoluo_916/shot_01.png`
+   （864×1536 白婚纱全身像），原定妆照写进 `portrait_base_image` 留证；提示词只取
+   tag 行 + 白婚纱/solo 锁定 + 当前状态锚点，负面词压 `black dress / manjiu / bystanders`。
+   🔴 **分屏事故与单幅连贯基底（第二次真机修正）**：单 `base_image` 槽无法同时收
+   16:9 场景图与 9:16 角色图（`ResizeImageMaskNode(576,1024,"center")` 会裁掉 16:9
+   约 68% 横向）。首版把「上区场景 + 下区角色」拼成分栏板上传，shot_00 **成图原样
+   画成上下两幅分屏拼贴** ⇒ 与黑裙同源：`cfg=1 / start_at_step=3`（denoise≈0.57）
+   **继承输入图几何**，提示词尾部的 `BOARD_NOTE` 与 `split screen` 负面词都压不住。
+   ⇒ 已停后台任务止损（只废 1 张，留证 `shot_00_SPLITSCREEN_REJECTED.png`），
+   改 `build_reference_board(..., with_character=...)` 输出**一张无分界的连贯画面**：
+   环境镜（tag 行无 `1girl`，本批次仅 shot_0）＝16:9 场景完整放竖幅中央 +
+   上下同图模糊羽化补边；人物镜 ＝ 9:16 白婚纱角色状态图全幅基底 +
+   场景图 14% 模糊氛围混色。`shot_has_character()` 按实际出图提示词首行分派，
+   manifest 记 `base_mode`。`NEGATIVE_SHOT` 补 `diptych / two stacked images /
+   horizontal divider / upper and lower panels`。⛔ 不改用 AIO 三变体
+   （本条已有真机判定不可用）。镜 6/7 原稿露骨 ⇒ `NEUTRAL_PROMPTS` 中性化并标
+   `content_neutralized`。`蛮啾`／`我` 无底图 ⇒ 显式 `missing_character_refs`。
+   `flow_manifest.json` 三步分开跑时累积合并（`merge_flow_steps`），兼容旧版顶层格式。
+   零 LLM / 零云端 / 不依赖 8010，直调服务层 + `submit_template`。
+   **8 宫格目视复核**：8/8 均为单一连续竖幅镜头，无分屏/硬分界、无黑裙回潮、
+   无露骨内容、无明显身体畸变；场景分组正确（0–5 礼堂、6–7 卧室），
+   shot_07 的蛮啾与扫帚落地。抓到 **shot_02 深棕发 / shot_07 黑发**两处身份漂移
+   ⇒ 镜 7 中性化时漏写发色、镜 2 原稿 `dark-yellow` 被理解成深棕；
+   补 `HAIR_ANCHOR_TAGS`（加在权重最高的 tag 行）与
+   `NEGATIVE_SHOT` 的 `dark brown hair / black hair / dark hair`，
+   只让这两镜 prompt 变化 ⇒ 仅重出 2 张，其余 6 张 skip。
+   **回归**：`test_wedding_video_flow.py` 18 例（场景分组、中性化、环境镜基底
+   不裁切且逐行无硬分界、人物镜基底上下像素连续、镜型分派、tag 行去 manjiu、
+   黑裙/分屏/发色负面词、发色锚点只作用于 2 镜、白婚纱状态底图、总览累积）。
+   **仍未做（生产层）**：参考图接进 `build_shot_requests` / `useIllustrationChain`、
+   多槽模板生产接线、捧花与项圈可见性。展开见
+   `docs/handoff-2026-11-12-scene-reference.md` §8.7。
+
+   **🔴 用户定案：抛弃参考底图方案，回归逐镜文生图（2026-11-12 21:19）**：
+   用户原话「抛弃之前场景图加角色底图那套方案，因为本地图像模型局限太大了，
+   还是正常按照分镜来，不管画面前后差异了」。⇒ `stage_shots` 改为
+   **每镜独立文生图**（`TEMPLATE_SHOT = a546d311…`，576×1024 → 864×1536，
+   `image_mode=text2img_per_shot`），连续性只保留提示词层软锚点；
+   `build_reference_board` 标 DEPRECATED 保留留档，测试用**源码文本锁**
+   禁止 `stage_shots` 再引用它。**三条已实证走不通的路（不要再绕）**：
+   ① 单槽 + PIL 合成基底——7 张人物镜只有 2 张不同底图（组内逐像素相同，MAD=0.0），
+   空间完全不受控，同一句 `warehouse` 被画成柱廊/开阔礼堂/工业厂房；
+   ② `Krea2-AIO` 双图——**确实是双图且两槽都生效**（`reference_image_1/2` 各接一个
+   VAEEncode → 子图 `source_latent`/`source_latent_b`；`base_image` 只进预览不进 VAEEncode；
+   互换 ref 后 MAD=26.5），但它是 **in-context 画布**，输出「上角色/中花屏/下场景」
+   三段堆叠，补 `target_latent`、给明确融合指令都压不住。⇒ 本条早前「AIO 不可用」
+   的表述应修正为「双槽生效，但输出形态是拼接画布，不适用于单幅分镜」；
+   ③ 继续调 AIO 参数（`fit_mode`/`ref_boost`/`grounding_px`）——ROI 太低，已停。
+   ⚠ 旁证（未采纳）：GPT-image `images/edits` 多图字段 45 s 可出单一画面且场景/人物
+   都对，但需云端 key；当前 7 个 `imageModels` 的 `apiKey` 全空（10-28 事故遗留）。
+
+104. **逐镜图片提示词编译器：外貌锚点走 WD14、构图走 framing/camera_motion（2026-11-12，后端）**：
+   用户实锤 `shot_07` 出图「角色外貌歪 + 构图全错」（臀腿特写、脸挤角落、蛮啾贴门框），
+   并指出「**过程中的分镜也没获取**」。取证：`review_still_*.json` 里
+   `framing=中景/门口与床`、`camera_motion=固定`、`video_beats` 4 拍、`image_timing=at/4s`、
+   `character_refs[].base_image` **全都在，却一个都没进 `image_prompt`** —— 提示词只有
+   tag 行 + 一段自然语言，构图与身份全靠模型自己猜；而 `image_mode=text2img` 让底图也不参与。
+   **落刀**：新增 `app/services/shot_prompt_composer.py`（纯函数）——
+   ① `appearance_anchor()` 用 **WD14 `predict(include_rating=False)`** 对角色状态图反推外貌
+   （实测 `blonde hair 0.935`/`long hair 0.895`/`yellow eyes 0.823`/`large breasts 0.746`），
+   并剔除被更具体标签包含的短标签（`breasts` 被 `large breasts` 覆盖）；
+   ② `framing_tags()` 把 `中景/门口与床` 编成 `medium shot` + `two subjects in one frame`
+   （无 `/` 时整句判多主体）；③ `camera_tags()` 把 `固定` 编成 `static camera`；
+   ④ `compose_shot_prompt()` **只追加不改写**：追加物落在权重最高的 tag 行末尾 + 一行
+   `[构图]` 英文短句，原稿 tag 与自然语言正文逐字保留（审阅稿可对照）。
+   **接线**：`probe_wedding_video_flow.shot_prompt(shot, *, neutralize=False, appearance=None)`，
+   `stage_shots` 一次算好锚点供全部镜复用；`--stage shots` 会打印「外貌锚点（WD14 自动）」；
+   手写 `HAIR_ANCHOR_TAGS` 降级为拿不到 WD14 时的兜底。
+   **真机 A/B**：`shot_07` 提示词 862→1101 字符，画面从臀腿特写 → 「从门口看进去的中景、
+   左右门框入画、蛮啾门口前景＋床上女人后景同框、脸完整对称、金发」。
+   **回归**：`test_shot_prompt_composer.py` 9 例（景别/多主体/机位/只追加/不重复/无输入安全）
+   ＋ `test_wedding_video_flow.py` 20 例。
+   ⚠ **未做**：`video_beats` 目前只用到 `framing`/`camera_motion`，**尚未按 `image_time_s`
+   选对应拍**把该拍 `description` 也编译进去；构图短句是英文自然语言，Krea2 编码器对
+   「前后景层次」只有中等遵循度。展开见 `docs/handoff-2026-11-12-scene-reference.md` §8.8。
+
+
+### NSFW 生成能力验证（2026-11-12 23:22，本地真机）
+
+用户判死标准：「不是说你来生成 nsfw 桥段，而是**确定本地模型能生成**才达标」。
+
+**结论：PASS，2/2 镜。** 判据不是肉眼看，是 **WD14 tagger 的 rating**（`predict(include_rating=True)`）：
+
+| 镜 | 提示词 | rating | 关键标签 |
+|---|---|---|---|
+| shot_06 | 原稿 1100 字符 | `explicit 0.9865` | breasts 0.997 / nipples 0.986 / leash 0.992 / sweat 0.981 |
+| shot_07 | 原稿 862 字符 | `explicit 0.9625` | breasts 0.966 / pussy 0.907 / on_back 0.881 / open_door 0.933 |
+
+**链路自检（同一次运行打印）**：
+- 模板 `Krea2-高清文生图优化流` exposed = `lora_name/lora_weight/prompt/latent_width/latent_height`，
+  **没有 `negative_prompt` 槽** ⇒ 历史负面词其实从未注入过，真正的内容压制只来自 `NEUTRAL_PROMPTS`；
+- 负面词含 `NSFW/nude/explicit/sexual fluids` = **False**（已删）；
+- `shot_prompt()` 默认 `neutralize=False`。
+
+**已改（三个压制点全部拆除）**：
+1. `NEUTRAL_PROMPTS` 由「默认生效」改为 **opt-in**（`shot_prompt(..., neutralize=True)` / CLI `--neutralize`），
+   镜 6/7 默认走原稿露骨提示词；
+2. `NEGATIVE_CHARACTER` / `NEGATIVE_SHOT` 删掉 `NSFW, nude, exposed breasts, sexual fluids, explicit`，
+   只保留换人/变形/串人/质量/文字/裁切这类**质量约束**；
+3. 后端 `backend/app` 复核：**没有任何 NSFW 过滤**（`image_gen` 的 `moderation:"low"` 是云端接口参数；
+   `nsfw_requires_named` 是「必须点名、不许编造」的质量约束；模板侧也无 safety checker）。
+- 新增 `backend/scripts/probe_nsfw_capability.py`：用原稿提示词跑本地模型 → WD14 判 rating →
+  输出 `_tmp/nsfw_capability/report.json`。**这是可复跑的能力回归**，不是一次性手动确认。
+- 已知边界：验证脚本走纯原稿，`shot_07` 原稿 tag 行无 `hair` ⇒ 出图 `brown_hair 0.927`；
+  交付脚本 `_tmp/build_shots_16x9.py --raw` 会补发色锚点，两者差异已记录。
+
+### 追加：单主体约束（2026-11-12 23:55）
+
+真机复核全量 8 镜时抓到 `shot_02` —— `characters=['腓特烈']`、tag 行也有 `solo`，
+却画出**两个一模一样的金发女人**。⇒ `solo` 在 Krea2 上压不住复制。
+
+落刀 `shot_prompt_composer.is_single_human()` + `compose_shot_prompt(single_subject=...)`：
+本镜只有一个人（排除「我」这个第一人称、排除蛮啾这类小动物）时，往 tag 行补
+`only one person in frame, no duplicate characters`，构图句补
+`Exactly one person appears in this frame; do not duplicate or mirror her.`
+真机重出 `shot_02`：提示词 1651→1806 字符，画面从「两个人」→「**一人、金发白婚纱、
+全身含白鞋、红毯木构礼堂**」，无复制、无分屏、无文字。
+
+⚠ 仍未解决：`shot_04` 手里的纸/文件会被模型画上**可辨认文字**（原稿提到信/抄本），
+正向 `no text` 对 SD 系几乎无效，而本模板**没有 negative_prompt 槽**，只能靠改叙述或换模板。

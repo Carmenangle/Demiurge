@@ -170,7 +170,8 @@ describe("生成溯源元数据链路（模板 / 模型 / LoRA 能真的显示�
     expect(src).toContain('<DetailKV label="模型">');
     expect(src).toContain('<DetailKV label="LoRA">');
     expect(src).toContain('<DetailKV label="尺寸">{detailImgSize.w} × {detailImgSize.h}</DetailKV>');
-    expect(src).toContain('<DetailKV label="生成时间">');
+    // 导入资产与生成资产共用同一键值行，标签随 source 切换（2026-11-12 资产导入）。
+    expect(src).toContain('<DetailKV label={active.source === "import" ? "导入时间" : "生成时间"}>');
     expect(src).toContain('<DetailKV label="作品">');
     // 其余区块也各成分区
     expect(src).toContain('title="提示词"');

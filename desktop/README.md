@@ -151,31 +151,35 @@ WebView2 子进程 12 个。但踩到一个**必做项**：
 
 WPF 壳的换壳实现，合同不变（同源 8010 + 无业务 IPC）。当前状态：端口解析、健康/前端文档探测、
 复用已在跑的服务、拉起运行时（便携包 / 仓库 / 安装版三种）、就绪超时、Job Object + taskkill 回收、
-窗口状态持久化、单实例（基础版）、18 项 `--self-test`（前 15 项对齐 WPF 判据，第 16 项为安装版布局，
-第 17 项为运行时交付，第 18 项为自动更新验签）。
+窗口状态持久化、单实例（基础版）、19 项 `--self-test`（前 15 项对齐 WPF 判据，第 16 项为安装版布局，
+第 17 项为运行时交付，第 18 项为自动更新验签，第 19 项为提交闸与回滚）。
 
 安装版（2026-10-24 第一步）：程序与 `dependencies\git` 留在安装目录，`runtime/`、`userdata/`、`runtime.pid`、
 日志、`desktop.json`、`webview2/` 全部在 `%LOCALAPPDATA%\Demiurge`；识别顺序＝便携包 → 仓库 → 安装版。
 拉起运行时前把 `dependencies\git\cmd`（MinGit）与可选的 `dependencies\ffmpeg\bin` 前置进子进程 `PATH`，
 修掉「便携包带了 MinGit 却没人挂上去、干净机器上 git 能力失效」的缺口。
 
-运行时交付（2026-10-24 第三步；2026-10-30 改 RAG 必装）：安装版首次启动发现 `runtime/current.json` 缺层时，
-按壳内嵌的 `release/runtime-delivery.json` pin 一次补齐 `base+application+rag`——在线走 `ureq` + 显式挂载的
+运行时交付（2026-10-24 第三步；2026-10-30 曾改 RAG 必装，**2026-11-03 P3-a 推翻：`rag` 降为可选层**）：安装版首次启动发现 `runtime/current.json` 缺层时，
+按壳内嵌的 `release/runtime-delivery.json` pin 补齐**必装层 `base+application`**——在线走 `ureq` + 显式挂载的
 系统 TLS（schannel）+ Range 续传，离线认安装目录 `runtime-pack\` 与 `%LOCALAPPDATA%\Demiurge\downloads\`
-两个入口。`--with-rag` 与可选层已删除。解压到 `.staging-<token>` 再改名部署，`current.json` 最后原子写，
-失败不留半套状态；进度走启动页文案，不新增业务 IPC。细节见 `desktop/tauri/README.md`。
+两个入口。`rag` 只在盘上真挂着时才写进 `current.json` 的 `rag_id`（没落地留空，不谎报）；**后台补齐已落（2026-11-03 P3-b）**：可选层单独一条入口 `backfill_optional_runtime`，走同一具交付主体与同一个提交闸。解压到 `.staging-<token>` 再改名部署，`current.json` 最后原子写，
+失败不留半套状态；必装层进度走启动页文案，可选层补齐的字节进度走 `userdata\delivery.json` 一本账（壳写、后端只读投影成「后台活动」面板的一条），**两者都不是业务 IPC**。细节见 `desktop/tauri/README.md`。
 
-已含：托盘（左键唤出 / 菜单「显示主窗口 · 重启后端 · 检查更新… · 彻底关闭」）、关窗三选一（隐藏 / 彻底关闭 / 取消）、
+已含：托盘（左键唤出 / 菜单「显示主窗口 · 重启后端 · 补齐 RAG · 检查更新… · 彻底关闭」）、关窗三选一（隐藏 / 彻底关闭 / 取消）、
 托盘重启后端（只处理自启运行时，外部复用明确拒绝）、第二实例激活既有窗口、
+**启动时端口被占则先问「结束占用进程并重启」**（弹窗写明占用者 PID/路径，用户点头才杀；安装版没有
+`stop-dev.bat` 时的自救出口）、
 `portable_release.py --desktop-dir` 同时接受两套壳产物（包内统一落名 `Demiurge.exe`）。
 
 启动体验（2026-10-23 第三刀）：**先开窗、再拉服务**。双击后立刻看到窗口逐项报进度
 （检查服务 → 复用/启动后端 → 等健康 → 图像服务 → 打开界面）；失败就停在窗口里写原因，
 不再出现「双击没反应」。产物拷成仓库根 `Demiurge.exe` 即可双击启动，替代 `start-dev` / `stop-dev`。
+想让它在开始菜单里可搜：给仓库根 `Demiurge.exe` 建一个快捷方式（起始位置 = 仓库根）放进
+`%APPDATA%\Microsoft\Windows\Start Menu\Programs`；便携包用包根 `install-shortcut.bat`，安装版由 NSIS 直接生成。
 
 ```
 cd desktop/tauri && cargo build
-target\debug\demiurge-shell.exe --self-test    # 18 项：前 15 项与 WPF 同一份判据
+target\debug\demiurge-shell.exe --self-test    # 19 项：前 15 项与 WPF 同一份判据
 ```
 
 细节见 `desktop/tauri/README.md`。
@@ -185,16 +189,25 @@ target\debug\demiurge-shell.exe --self-test    # 18 项：前 15 项与 WPF 同�
 目标：双击 → 选安装路径 → 正常安装；依赖（不含本地模型）随包或按需获取，目标机不需要 Python/Node。
 
 1. ✅ **安装版布局**（第一步，已落）：程序与 MinGit 留安装目录；`runtime/`、`userdata/`、`runtime.pid`、日志、
-   `desktop.json`、`webview2/` 全在 `%LOCALAPPDATA%\Demiurge`；依赖前置进运行时 `PATH`；自检 16/16（当时；现为 18 项）。
+   `desktop.json`、`webview2/` 全在 `%LOCALAPPDATA%\Demiurge`；依赖前置进运行时 `PATH`；自检 16/16（当时；现为 19 项）。
 2. ✅ **NSIS 双安装器**（第二步，已落）：`currentUser`（默认，不弹 UAC）+ `perMachine`（可选，需 UAC），用
    `tauri build --config` 覆盖同一份代码；WebView2 用 `embedBootstrapper`；语言 `SimpChinese`；自定义安装路径页。
    两个安装器各 29.6 MiB（含更新签名），装了 → 包内 `--self-test` 18/18 → 静默卸载清掉安装目录/开始菜单/「添加删除程序」登记项；
    预设/userdata/`backend/data`/`.env` 由三层机械守卫拦在安装资源之外。
-3. ✅ **运行时按需交付**（第三步，已落；2026-10-30 改三层必装）：安装器只带壳 + MinGit；首次启动按嵌入 pin
-   （`release/runtime-delivery.json`）一次补齐 `base+application+rag`，在线下载与离线双入口（安装目录
+3. ✅ **运行时按需交付**（第三步，已落；2026-10-30 曾改三层必装，**2026-11-03 P3-a 推翻：`rag` 降为可选层**）：安装器只带壳 + MinGit；首次启动按嵌入 pin
+   （`release/runtime-delivery.json`）只补齐 `base+application`（≈208 MB）即可用，`rag`（≈2 GB）后补，在线下载与离线双入口（安装目录
    `runtime-pack\`、`%LOCALAPPDATA%\Demiurge\downloads\`）并存。层体积/哈希只认
-   `Demiurge_update_<平台>_<tag>.json`，pin 不复制；失败不写 `current.json`；自检第 17 项用纯 `file://` 夹具覆盖
-   组装/复用/离线/坏档/磁盘不足/清单漂移。
+   `Demiurge_update_<平台>_<tag>.json`，pin 不复制；失败不写 `current.json`；`current.json` 的 `rag_id` 只写盘上真挂着的代际（没落地就留空）；
+   自检第 17 项用纯 `file://` 夹具覆盖组装/复用/离线/坏档/磁盘不足/清单漂移/**清单缺 rag 层照样交付成功**/**可选层补齐与进度账本（⑨⑩）**。
+   ✅ **后台补齐（2026-11-03 P3-b）**：进应用问一次 → 托盘「补齐 RAG」常驻 → 面板「运行时补齐」一条（字节 / 总量 / 速率）→
+   完成且过闸才**建议**重启后端（**不自动重启**，不加开关）。⏳ 未就绪时的功能级降级未做（P3-c）；
+   🔴 剩下三件事只有安装版真机（VM 通道）算数：**webview 真把「运行时补齐」画出来**、弹窗真出现、重启真吃到这层（外加**壳自己写**的那本真账本）。
+   「面板拿到的那份 JSON」已在真 uvicorn 进程上验到（隔离 `LAF_DATA_DIR` + 手写 `delivery.json` ⇒ `title="运行时补齐"`、`progress="384.0 MB / 1.9 GB · 18.0 MB/s"`；
+   `done` 在 120 s 窗内还在；`running` 60 s 没更新就消失；坏 JSON 只让条目消失、HTTP 仍 200）⇒ 读侧不再只有单测支撑。
+   （2026-11-03 晚更正原先的原因口径：不是「开发态布局永远触发不了」——把 `DEMIURGE_SHELL_HOME` 指到仓库外隔离目录、
+   再在安装目录放一个指向 `release-output\runtime-pack` 的**目录联接**，`Demiurge.exe --install-runtime`
+   就能在开发机上把离线交付完整走通并写出 `current.json`（`rag_id` 空、提交闸按合同跳过），
+   所以「离线摆放」与「首启不过闸、可选层补齐才过闸」已在真壳上有实据，只剩上面那三条要真机。）
 4. ✅ **CI 切换**（第四步，已落）：`desktop-shell` job 从 `dotnet publish` 切到 Tauri（Rust stable + Node 22 +
    Python 3.13.11），先渲染 pin，再装配依赖 → `build_installers.py --skip-stage --version <tag>` → 自检 →
    上传两个安装器与 `SHA256SUMS.txt`。2026-10-30 起裸包归档与 `portable-release.yml` 下游组装整体删除，
@@ -210,12 +223,12 @@ target\debug\demiurge-shell.exe --self-test    # 18 项：前 15 项与 WPF 同�
 **否 = 彻底关闭**（先回收自己拉起的运行时，再退出壳，前端窗口一并消失）；**取消 = 留在窗口**。
 启动失败时例外：关窗即退出。
 
-托盘菜单＝显示主窗口 / 重启后端 / 检查更新… / 彻底关闭。重启与退出都只处理**自启**运行时；端口上外部复用的
-健康服务永不回收，重启项会弹窗拒绝而不是误杀。
+托盘菜单＝显示主窗口 / 重启后端 / 补齐 RAG / 检查更新… / 彻底关闭。重启与退出都只处理**自启**运行时；端口上外部复用的
+健康服务永不回收，重启项会弹窗拒绝而不是误杀。「补齐 RAG」是可选层后台补齐的常驻入口（进应用时问过一次的复用通道）。
 
 WPF 壳保持旧行为（关窗即退出并回收），决策只在新壳落地。
 实跑证据（2026-10-24）：三种关窗选择均按上述语义生效；托盘重启后新旧后端 PID 不同、页面整页重载；
-外部复用时重启被拒绝且服务存活（壳退出后仍在）；彻底关闭后后端进程树消失、8010 释放；release 产物 `--self-test` 当时 15/15（现 18/18）。
+外部复用时重启被拒绝且服务存活（壳退出后仍在）；彻底关闭后后端进程树消失、8010 释放；release 产物 `--self-test` 当时 15/15（现 19/19）。
 
 ## 验证记录（2026-10-23）
 
@@ -233,7 +246,7 @@ WPF 壳保持旧行为（关窗即退出并回收），决策只在新壳落地�
 
 第三刀（Tauri 安装版布局，2026-10-24）：
 
-- `cargo build` 与 `cargo build --release` 均通过；隔离 `DEMIURGE_SHELL_HOME` 下 debug / release `--self-test` 都是 **16/16**（当时；现为 18 项）。
+- `cargo build` 与 `cargo build --release` 均通过；隔离 `DEMIURGE_SHELL_HOME` 下 debug / release `--self-test` 都是 **16/16**（当时；现为 19 项）。
 - 与 WPF 壳对拍：前 15 行文本一致；比较时需归一换行（WPF CRLF / Tauri LF），否则裸 `diff` 会全行不同。
 - 第 16 项覆盖：安装目录只放程序、`runtime`/`userdata`/`runtime.pid` 全在 home、运行时 exe 从 `runtime/base/<base_id>` 解析、
   MinGit 与可选 ffmpeg 的依赖目录被正确收集并去重。
@@ -253,7 +266,7 @@ WPF 壳保持旧行为（关窗即退出并回收），决策只在新壳落地�
 - **预设不泄露（用户硬要求）三层守卫实测**：安装包 385 条目、真实安装树 378 文件， forbidden 命中 **0**；
   仓库里的 `presets\GrayWill-*.json` 从未进过暂存树。守卫脚本对注入的 `presets/`、`userdata/`、
   `backend/data/`、`.env` 一律抛错，回归测试 12 项覆盖（`backend/tests/test_installer_release.py`；现 23 项）。
-- 真机静默装 → 隔离 `DEMIURGE_SHELL_HOME` 下包内 `Demiurge.exe --self-test` **16/16**（当时；现 18/18）→ 静默卸载，
+- 真机静默装 → 隔离 `DEMIURGE_SHELL_HOME` 下包内 `Demiurge.exe --self-test` **16/16**（当时；现 19/19）→ 静默卸载，
   `uninstall_residue` 核验三处全清：安装目录、开始菜单 `Demiurge` 与「添加/删除程序」登记项 `HKCU\...\Uninstall\Demiurge`；
   `HKCU\Software\Demiurge\Demiurge` 里那条「上次安装路径」默认值按 Tauri 模板**只在勾选「删除应用数据」时**
   （`${DeleteAppDataCheckboxState}=1` 分支）才清，`/S` 静默卸载有意留着给重装恢复路径，它不含用户数据。

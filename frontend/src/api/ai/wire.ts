@@ -30,6 +30,12 @@ export type ChatCfg = { baseUrl: string; apiKey: string; modelName: string };
 /** 视觉模型三元组（由设置透传；后端不解析 local/remote 两态，避免口径漂移） */
 export type VlmWire = { base_url: string; api_key: string; model: string; proxy: string };
 
+/** GBC 外部引擎（设置 → 路径）；VLM 由 GbcWire 单独透传（GBC 用它读实体描述）。 */
+export type GbcWire = {
+  exePath: string; sam3Dir: string; embedDir: string;
+  device: "cuda" | "cpu"; maxTopLevel: number;
+};
+
 export function chatBody(chat: Chat) {
   return {
     base_url: chat.baseUrl,
@@ -58,5 +64,24 @@ export function sseEmbed(embed?: Embed) {
     embed_model_dir: embed?.modelDir || "",
     reranker_model_dir: embed?.rerankerDir || "",
     embed_proxy_url: embed?.proxyUrl || "",
+  };
+}
+/** GBC 打标：外部引擎路径 + 它自己调用的 VLM（同一个视觉大模型）。
+ *  `proxyUrl` 必须透传：描述走 /ai/describe-image 会按模型级代理解析，GBC 子进程若拿不到
+ *  同一地址，就会出现「描述成功、GBC 调 VLM 直连失败」的分裂（云端视觉模型常踩）。 */
+export function ragGbc(
+  gbc: GbcWire,
+  vlm: { baseUrl: string; apiKey: string; modelName: string; proxyUrl?: string },
+) {
+  return {
+    gbc_exe: gbc.exePath || "",
+    sam3_dir: gbc.sam3Dir || "",
+    embed_dir: gbc.embedDir || "",
+    detect_device: gbc.device || "cuda",
+    max_top_level: gbc.maxTopLevel || 10,
+    vlm_base_url: vlm.baseUrl || "",
+    vlm_api_key: vlm.apiKey || "",
+    vlm_model: vlm.modelName || "",
+    vlm_proxy: vlm.proxyUrl || "",
   };
 }

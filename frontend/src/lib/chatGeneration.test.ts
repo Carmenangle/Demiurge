@@ -4,7 +4,7 @@ import {
   prependLoraTriggers, prepareConversationRegeneration, resolveGenerationPrompt,
   acceptSlimmedMessages, canCommitSnapshot,
   promptAdditionsForSelectedLora, triggersForSelectedLora, shouldDeleteEditSource,
-  resolveLoraPromptMetadata,
+  resolveLoraPromptMetadata, applyLoraTriggerWords,
   resolveVideoBaseImage,
   resolveVideoBaseImageRef,
   resolvePrevTailDesc,
@@ -103,6 +103,16 @@ describe("promptHistory", () => {
       { role: "user", content: "用户请求" },
       { role: "assistant", content: "剧情正文" },
       { role: "assistant", content: "旧正文（无 route）" },
+    ]);
+  });
+  it("聊天/群聊消息进上下文时保留 speaker 前缀（与后端同口径）", () => {
+    const visible: ChatMessage[] = [
+      { id: "u1", role: "user", text: "你们好" },
+      { id: "a1", role: "assistant", text: "你好呀", route: "chat", speaker: "甲" },
+    ];
+    expect(promptHistory(visible)).toEqual([
+      { role: "user", content: "你们好" },
+      { role: "assistant", content: "【甲】你好呀" },
     ]);
   });
   it("工作流媒体气泡（图/视频/音频提示词）不进上下文", () => {
@@ -332,6 +342,42 @@ describe("LoRA 触发词精确绑定", () => {
     expect(prompt).not.toContain("unused_token");
     expect(prompt.toLowerCase().match(/sharp focus/g)).toHaveLength(1);
     expect(prompt.toLowerCase().match(/high quality/g)).toHaveLength(1);
+  });
+});
+
+// 第 93 刀：自动插画与一键定妆共用这一条前置真源（模型侧被明令不许写触发词，见 Profile 模板）。
+describe("applyLoraTriggerWords", () => {
+  const data = [
+    {
+      lora_name: "style.safetensors", triggers: ["style_token"], missing: false,
+      suggested_prompt: "masterpiece, 1girl, red dress",
+    },
+    { lora_name: "character.safetensors", triggers: ["character_token"], missing: false, suggested_prompt: "" },
+    { lora_name: "gone.safetensors", triggers: ["gone_token"], missing: true, suggested_prompt: "" },
+  ];
+  const stack = [{ name: "style.safetensors" }, { name: "character.safetensors" }];
+
+  it("逐条按栈顺序前置：后处理的栈尾（角色 LoRA）落在最前面", () => {
+    expect(applyLoraTriggerWords("best quality\n1girl, blue hair", "anima_tags", stack, data))
+      .toBe("character_token, style_token, masterpiece, best quality\n1girl, blue hair");
+  });
+
+  it("建议提示词里的内容与构图词不进来（只吃质量词）", () => {
+    const out = applyLoraTriggerWords("best quality\n1girl, blue hair", "anima_tags", stack, data);
+    expect(out).not.toContain("red dress");
+    expect(out.toLowerCase().match(/1girl/g)).toHaveLength(1);  // 内容行原样，触发词没另塞一个
+  });
+
+  it("空栈 ⇒ 逐字节不变（loraMode=none 不改一个字）", () => {
+    expect(applyLoraTriggerWords("best quality\n1girl", "anima_tags", [], data))
+      .toBe("best quality\n1girl");
+  });
+
+  it("查不到精确元数据（未登记或文件已缺失）⇒ 抛错并点名那条 LoRA", () => {
+    expect(() => applyLoraTriggerWords("q", "anima_tags", [{ name: "unknown.safetensors" }], data))
+      .toThrow("实际加载的 LoRA 没有精确元数据记录：unknown.safetensors");
+    expect(() => applyLoraTriggerWords("q", "anima_tags", [{ name: "gone.safetensors" }], data))
+      .toThrow("实际加载的 LoRA 没有精确元数据记录：gone.safetensors");
   });
 });
 

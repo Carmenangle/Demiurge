@@ -32,7 +32,7 @@ def encode_event(event: Mapping[str, object]) -> ChatStreamEvent | None:
     """编码一个内部事件；完成信号由 SSE 传输层收尾，不重复进入 payload。"""
     signals: list[str] = []
     for key in ("trace", "delta", "thinking", "replace", "route", "image", "video",
-                "illustrate_request", "audio_request",
+                "illustrate_request", "audio_request", "chat_messages", "media_request",
                 "insp", "rag_status", "approval", "route_choice", "artifacts", "error"):
         if key in event and event[key] is not None:
             signals.append(key)
@@ -137,6 +137,64 @@ def encode_event(event: Mapping[str, object]) -> ChatStreamEvent | None:
         if event.get("id"):
             audio_data["id"] = str(event["id"])
         return _wire("audio_request", audio_data)
+    if kind == "chat_messages":
+        # 2026-11-09 聊天室：逐角色回复一次性下发。空文本/空 speaker 丢弃（不产空气泡），
+        # speaker 缺省时用「助手」兜底，保证消息仍可展示。
+        items = event["chat_messages"]
+        if not isinstance(items, list):
+            raise ValueError("chat_messages 事件必须是列表")
+        clean_messages: list[dict] = []
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            text = str(item.get("text") or "").strip()
+            if not text:
+                continue
+            entry: dict = {
+                "speaker": str(item.get("speaker") or "助手").strip() or "助手",
+                "text": text,
+            }
+            if item.get("id"):
+                entry["id"] = str(item["id"])
+            # ts：聊天室气泡时间标签与「最近消息」排序；非法值直接丢弃。
+            ts = item.get("ts")
+            if isinstance(ts, (int, float)) and not isinstance(ts, bool) and ts > 0:
+                entry["ts"] = int(ts)
+            # QQ 式「戳了戳你」：只传标记，文本仍可能是空/占位；前端按居中动作渲染。
+            if item.get("poke") is True:
+                entry["poke"] = True
+            media = item.get("media_request")
+            if isinstance(media, Mapping):
+                media_kind = str(media.get("kind") or "").strip()
+                media_prompt = str(media.get("prompt") or "").strip()
+                if media_kind in ("image", "video") and media_prompt:
+                    entry["media_request"] = {
+                        "kind": media_kind, "prompt": media_prompt,
+                    }
+                    if media.get("avatar") is True:
+                        # 非常规装扮自拍：前端生成成功后自动替换聊天头像。
+                        entry["media_request"]["avatar"] = True
+                    appearance = str(media.get("appearance") or "").strip()
+                    if appearance:
+                        # 角色固定外貌：前端 Profile 编译锁发色/瞳色/身高。
+                        entry["media_request"]["appearance"] = appearance
+            clean_messages.append(entry)
+        return _wire("chat_messages", {"messages": clean_messages})
+    if kind == "media_request":
+        media = event["media_request"]
+        if not isinstance(media, Mapping):
+            return None
+        media_kind = str(media.get("kind") or "").strip()
+        media_prompt = str(media.get("prompt") or "").strip()
+        if media_kind not in ("image", "video") or not media_prompt:
+            return None
+        payload: dict[str, object] = {"kind": media_kind, "prompt": media_prompt}
+        if media.get("avatar") is True:
+            payload["avatar"] = True
+        appearance = str(media.get("appearance") or "").strip()
+        if appearance:
+            payload["appearance"] = appearance
+        return _wire("media_request", payload)
     if kind == "insp":
         return _wire("inspiration", {"card": event["insp"]})
     if kind == "rag_status":

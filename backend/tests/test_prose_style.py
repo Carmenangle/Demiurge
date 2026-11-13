@@ -14,11 +14,19 @@ def codes(result):
 
 # ── 固定搭配词表 ─────────────────────────────────────────────────────────────
 
-def test_空洞大词与套话命中():
-    result = prose_style.lint("她运转灵力，整套剑法宛如被赋能一般。值得注意的是，剑意仍未收敛。")
+def test_套路搭配与套话命中():
+    """2026-11-03 词表换血：内置档从「互联网黑话」换成**真实成稿里复发的剧情套路搭配**。"""
+    result = prose_style.lint("她摊开手，掌心里全是汗。值得注意的是，剑意仍未收敛。")
     assert prose_style.CODE_STYLE_BANNED_PHRASE in codes(result)
     evidence = "".join(item["evidence"] for item in result)
-    assert "赋能" in evidence and "值得注意的是" in evidence
+    assert "掌心里" in evidence and "值得注意的是" in evidence
+
+
+def test_旧黑话档已剔除_剧情正文不再靠它撑场面():
+    """赋能／闭环那 9 条在 97 个剧情轮里 0 命中，已从内置表删掉（用户想拦可在设置里自己加回）。"""
+    for gone in ("赋能", "闭环", "抓手", "底层逻辑", "颗粒度", "先说答案"):
+        assert gone not in prose_style.EXACT_PHRASES
+        assert prose_style.lint(f"这套剑法宛如被{gone}一般。") == []
 
 
 def test_讨好腔命中():
@@ -27,7 +35,7 @@ def test_讨好腔命中():
 
 
 def test_防拦截拆字先还原再检测():
-    result = prose_style.lint("这套剑法 @(赋)@(能)@ 了整座剑阵。")
+    result = prose_style.lint("她摊开手，@(掌)@(心)@(朝)@(上)@ 向着灯。")
     assert prose_style.CODE_STYLE_BANNED_PHRASE in codes(result)
 
 
@@ -107,7 +115,7 @@ def test_干净样文零误报():
 # ── narrative_ci 并流 ────────────────────────────────────────────────────────
 
 def test_narrative_ci并流文风诊断带turn与id():
-    result = narrative_ci.evaluate("这计划简直是完美的闭环。", turn=7)
+    result = narrative_ci.evaluate("她摊开手，掌心里全是汗。", turn=7)
     style = [item for item in result if item["code"] == prose_style.CODE_STYLE_BANNED_PHRASE]
     assert len(style) == 1
     assert style[0]["turn"] == 7
@@ -168,6 +176,58 @@ def test_文风注入段禁用破折号且自身不带破折号():
 
     assert "禁止使用破折号" in segment
     assert segment.count("——") == 1  # 仅在「——」引用符号本身处出现，禁令句不再示范用法
+
+
+# ── 千字归一的句式闸门 + 外来排版形态（2026-11-03 体检驱动）───────────────────
+
+def test_不是而是闸门按千字归一_长篇两处不报():
+    """2026-11-03 真实成稿复测：单轮正文 2000–9000 字，旧口径「≥2 即报」不看篇幅
+    ⇒ 30.9% 的剧情轮被打红，多数只是长篇里两处合法对比句。
+
+    新阈值 = max(2, ceil(0.8 处每千字))：短轮仍 ≥2 报；4000 字以上要 4 处才报。
+    """
+    short = "他不是不想救，而是来不及救。她不是不知道危险，而是不肯回头。"
+    assert prose_style.CODE_STYLE_PATTERN_REPEAT in codes(prose_style.lint(short))
+
+    long_body = short + "夜里的走廊很长，灯一盏一盏地灭，风从窗缝里挤进来。" * 250
+    assert len(long_body) > 6000, "样本得够长才测得出归一"
+    assert prose_style.CODE_STYLE_PATTERN_REPEAT not in codes(prose_style.lint(long_body))
+
+    dense = "他不是不想救，而是来不及救。" * 6 + "夜里的走廊很长，灯一盏一盏地灭。" * 120
+    assert prose_style.CODE_STYLE_PATTERN_REPEAT in codes(prose_style.lint(dense))
+
+
+def test_半角逗号成规模检出与全角数字千分位不误报():
+    """模型写长段会整片滑到半角（体检：一个存档单轮 141 处）⇒ ≥2 处即报；
+    但千分位「1,000」与逗号后接空白的写法不是中文断句，不算。"""
+    half = "他转身离开,门在身后合上,雨还下着。"
+    assert prose_style.CODE_STYLE_HALFWIDTH_COMMA in codes(prose_style.lint(half))
+    assert prose_style.CODE_STYLE_HALFWIDTH_COMMA not in codes(
+        prose_style.lint("他转身离开，门在身后合上，雨还下着。"))
+    assert prose_style.CODE_STYLE_HALFWIDTH_COMMA not in codes(
+        prose_style.lint("账上只剩 1,000 枚金币,他数了两遍，又数了一遍。"))
+    assert prose_style.CODE_STYLE_HALFWIDTH_COMMA not in codes(
+        prose_style.lint("他转身离开,门在身后合上。屋里再没有别的声音，也没有人开口。"))
+
+
+def test_星号包句强调检出():
+    """体检：16/97 轮出现 *星号包句*，其中 56/60 处包的是整句（场景头／系统旁白）
+    ⇒ 外来 markdown 排版，出现即报（阈值 1）；`**粗体**` 同一条，不重复计数。"""
+    starred = "*清晨的走廊还没什么人。*他推开门，站到窗边。"
+    assert prose_style.CODE_STYLE_STAR_EMPHASIS in codes(prose_style.lint(starred))
+    bold = "他把**铜钥匙**放在桌上，转身走了。"
+    assert prose_style.CODE_STYLE_STAR_EMPHASIS in codes(prose_style.lint(bold))
+    assert prose_style.CODE_STYLE_STAR_EMPHASIS not in codes(
+        prose_style.lint("他把铜钥匙放在桌上，转身走了。"))
+
+
+def test_注入段同步禁用半角逗号与星号强调():
+    """一份两用：新增判据必须同时进生成侧约束段，否则只在事后打红、不预防。"""
+    segment = prose_style.style_prompt_segment({"enabled": True})
+
+    assert "半角逗号" in segment
+    assert "星号" in segment
+    assert len(segment) < 600, "约束段控制在短量级，不吃正文额度"
 
 
 # ── 跨来源术语棘轮（style_term_ratchet）──────────────────────────────────────
@@ -303,3 +363,64 @@ def test_术语棘轮缺省setting时message逐字不变():
         "术语棘轮：多字词「经脉」注入层 1 处、正文 1 处（合计 6 次 ≥6）"
         "——疑似被反复重新确认，请核对该说法在剧情里是否真的发生过；"
         "若只是给动作补的名目，应清掉。")
+
+
+def test_术语棘轮存量闸门_设定撑得住的高频不报():
+    """排序不够，得关：2026-11-03 拿生产留痕复测，该码占 prose_style 诊断 275/454＝61%、
+    每轮报满 8 条（上限即饱和），top 词条全是题材专名——体检语料某作的「戒指」「戴上」
+    用量/存量只有 0.2/0.6，按 2026-09-23「霜月宫这种多次出现还能理解」的口径本就不该打红。
+
+    ⇒ 用量 ≤ 设定存量（ratio < 1）判「设定撑得住」直接不报；设定里 0 存量的经脉型仍照报。
+    """
+    injected = ("戒指、戒指、戒指；经脉、经脉、经脉。",)
+    bodies = ("戒指、戒指、戒指；经脉、经脉、经脉。",)
+    setting = ("戒指。" * 8 + "经脉。",)  # 戒指 存量 8 > 用量 6；经脉 存量 1 < 用量 6
+
+    got = _terms(prose_style.term_ratchet_report(
+        injected=injected, bodies=bodies, setting=setting))
+
+    assert "戒指" not in got
+    assert "经脉" in got
+
+
+def test_术语棘轮缺省setting不过滤_等价矩阵锁():
+    """不传 setting（生产取不到设定存量时的退路）⇒ 闸门不参与，行为与改造前逐字相同。"""
+    injected = ("戒指、戒指、戒指。",)
+
+    items = prose_style.term_ratchet_report(injected=injected, bodies=injected)
+
+    assert _terms(items) == ["戒指"]
+
+
+def test_术语棘轮存量闸门口径落在同族代表上():
+    """闸门必须在「去重选代表」**之后**判，否则闸门自己造假阳。
+
+    掌心＝正主（用量 16／设定存量 20 ⇒ 设定撑得住，本该整族静默）；
+    掌心里＝它的滑窗片段（用量 6／设定存量 0）。旧写法先闸门 ⇒ 代表被闸掉，片段失去解释者，
+    顶着「设定里从未出现（更像模型自造的说法）」冒出来＝**报的比改之前还差**。
+    """
+    injected = ("掌心、掌心、掌心、掌心、掌心、掌心、掌心里、掌心里、掌心里、掌心里。",)
+    bodies = ("掌心、掌心、掌心、掌心、掌心里、掌心里。",)
+    setting = ("掌心、" * 20,)  # 掌心 存量 20 > 用量 16；掌心里 在设定里 0 次
+
+    got = _terms(prose_style.term_ratchet_report(
+        injected=injected, bodies=bodies, setting=setting))
+
+    assert "掌心" not in got, "正主是设定撑得住的高频，不该报"
+    assert "掌心里" not in got, "片段的正主都不膨胀，片段更不膨胀"
+
+
+def test_术语棘轮碎片解释者不被存量闸门吞掉():
+    """「好感度」是合法表字段（设定存量 10 ＞ 叙事用量 7 ⇒ 自己出闸），但它是「好感」的解释者。
+
+    碎片判定若只看**过了闸**的池子，正主出闸后「好感」(用量 15) 就成了无人解释的孤词被报出来；
+    判定改看全量池后，7 ≥ 0.4×15 ⇒「好感」判片段，整族静默。
+    """
+    injected = ("好感、好感、好感、好感度、好感度、好感度。" * 2,)
+    bodies = ("好感、好感。好感度。",)
+    setting = ("好感度、" * 10,)
+
+    got = _terms(prose_style.term_ratchet_report(
+        injected=injected, bodies=bodies, setting=setting))
+
+    assert got == []

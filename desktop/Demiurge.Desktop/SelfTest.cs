@@ -54,6 +54,45 @@ internal static class SelfTest
             RuntimeHost.IsFrontendDocument("<html><body><div id=\"root\"></div></body></html>") &&
             !RuntimeHost.IsFrontendDocument("{\"detail\":\"Not Found\"}"));
 
+        Check("url: 外链只允许 http(s)", () =>
+            UrlPolicy.IsExternalHttp(new Uri("https://example.com/x?q=1")) &&
+            UrlPolicy.IsExternalHttp(new Uri("http://127.0.0.1:8010/")) &&
+            !UrlPolicy.IsExternalHttp(new Uri("file:///C:/Windows/System32/calc.exe")) &&
+            !UrlPolicy.IsExternalHttp(new Uri("javascript:alert(1)")) &&
+            !UrlPolicy.IsExternalHttp(new Uri("mailto:x@example.com")) &&
+            !UrlPolicy.IsExternalHttp(new Uri("ms-settings:privacy")) &&
+            !UrlPolicy.IsExternalHttp(new Uri("intent://scan/#Intent;scheme=zxing;end")) &&
+            !UrlPolicy.IsExternalHttp(new Uri("tauri://localhost/boot.html")) &&
+            !UrlPolicy.IsExternalHttp(new Uri("about:blank")));
+
+        Check("url: 导航判定（回环放行 / 外站转浏览器 / 其余拒绝）", () =>
+            UrlPolicy.DecideNavigation("http://127.0.0.1:8010/") == NavigationDecision.Allow &&
+            UrlPolicy.DecideNavigation("http://localhost:8021/index.html") == NavigationDecision.Allow &&
+            UrlPolicy.DecideNavigation("http://[::1]:8010/") == NavigationDecision.Allow &&
+            UrlPolicy.DecideNavigation("https://example.com/x?q=1") == NavigationDecision.OpenExternal &&
+            UrlPolicy.DecideNavigation("http://127.0.0.1.evil.com/") == NavigationDecision.OpenExternal &&
+            UrlPolicy.DecideNavigation("http://127.0.0.1@evil.com/") == NavigationDecision.OpenExternal &&
+            UrlPolicy.DecideNavigation("file:///C:/Windows/System32/calc.exe") == NavigationDecision.Block &&
+            UrlPolicy.DecideNavigation("javascript:alert(1)") == NavigationDecision.Block &&
+            UrlPolicy.DecideNavigation("mailto:x@example.com") == NavigationDecision.Block &&
+            UrlPolicy.DecideNavigation("ms-settings:privacy") == NavigationDecision.Block &&
+            UrlPolicy.DecideNavigation("intent://scan/#Intent;scheme=zxing;end") == NavigationDecision.Block &&
+            UrlPolicy.DecideNavigation("tauri://localhost/boot.html") == NavigationDecision.Block &&
+            UrlPolicy.DecideNavigation("about:blank") == NavigationDecision.Block &&
+            UrlPolicy.DecideNavigation("not a url") == NavigationDecision.Block);
+
+        Check("url: 日志只留 scheme + host", () =>
+            UrlPolicy.Describe("https://example.com/path?token=secret") == "https://example.com" &&
+            UrlPolicy.Describe("mailto:x@example.com") == "mailto://example.com" &&
+            UrlPolicy.Describe("not a url") == "<无法解析>");
+
+        Check("path: 本地路径与 URL 分离", () =>
+            UrlPolicy.IsLocalPath(@"C:\Users\Public\demiurge.log") &&
+            UrlPolicy.IsLocalPath(@"\\server\share\demiurge.log") &&
+            !UrlPolicy.IsLocalPath("https://example.com/log") &&
+            !UrlPolicy.IsLocalPath("file:///C:/Windows/win.ini") &&
+            !UrlPolicy.IsLocalPath("mailto:x@example.com"));
+
         Check("port: 65536 rejected", () =>
         {
             try

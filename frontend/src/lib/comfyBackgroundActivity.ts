@@ -6,10 +6,17 @@ import { listComfyPending, type ComfyPendingItem } from "../api/comfyui";
 import type { Repo } from "../stores/repos";
 import { repoActivityLabel } from "./repoPresentation";
 
+export type ComfyActivityKind = "image" | "video" | "audio";
+
 export interface ComfyBackgroundActivity {
   promptId: string;
   threadId: string;
   label: string;  // 仓库显示名
+  kind: ComfyActivityKind;  // 媒体类型：面板按它显示「出图/出视频/出音频」
+}
+
+function activityKind(value: unknown): ComfyActivityKind {
+  return value === "video" || value === "audio" ? value : "image";
 }
 
 const STALE_MS = 30 * 60 * 1000;  // 只影响面板展示；任务生命周期归 WorkflowGenerationRuntime 所有
@@ -45,11 +52,14 @@ export function scanComfyActivities(
     if (!key?.startsWith("laf_pending_gen_")) continue;
     const threadId = key.slice("laf_pending_gen_".length);
     if (!threadId) continue;  // 遗留空键（P17 前拼串笔误），已由迁移链并入 home
-    let pending: { prompt_id: string; createdAt: number }[] = [];
+    let pending: { prompt_id: string; createdAt: number; mediaType?: string }[] = [];
     try { pending = JSON.parse(storage.getItem(key) || "[]"); } catch { continue; }
     const fresh = pending.filter((item) => now - item.createdAt <= STALE_MS);
     for (const item of fresh) {
-      items.push({ promptId: item.prompt_id, threadId, label: label(threadId) });
+      items.push({
+        promptId: item.prompt_id, threadId, label: label(threadId),
+        kind: activityKind(item.mediaType),
+      });
     }
   }
   return items;
@@ -104,7 +114,7 @@ export function mergeComfyActivities(
     if (now - Number(item.created_at || 0) * 1000 > STALE_MS) continue;  // 后端已 prune，再兜一层
     seen.add(promptId);
     const threadId = String(item.thread_id || "home");
-    items.push({ promptId, threadId, label: label(threadId) });
+    items.push({ promptId, threadId, label: label(threadId), kind: activityKind(item.kind) });
   }
   return items;
 }

@@ -30,7 +30,16 @@ describe("scanComfyActivities", () => {
     });
     const result = scanComfyActivities(NOW, label, ls as Storage);
     expect(result).toHaveLength(1);
-    expect(result[0]).toMatchObject({ promptId: "p1", threadId: "repo-a", label: "仓库A" });
+    expect(result[0]).toMatchObject({ promptId: "p1", threadId: "repo-a", label: "仓库A", kind: "image" });
+  });
+
+  it("视频任务带 kind=video（后台活动不得把它显示成出图）", () => {
+    const ls = mockStorage({
+      "laf_pending_gen_repo-a": JSON.stringify([
+        { prompt_id: "p-video", createdAt: NOW - 1000, mediaType: "video" },
+      ]),
+    });
+    expect(scanComfyActivities(NOW, label, ls as Storage)[0].kind).toBe("video");
   });
 
   it("过期任务（超30分钟）不展示", () => {
@@ -96,7 +105,7 @@ describe("scanComfyActivities", () => {
 
 describe("mergeComfyActivities（服务端登记补齐跨端可见性）", () => {
   const local: ComfyBackgroundActivity[] = [
-    { promptId: "p1", threadId: "repo-a", label: "仓库A" },
+    { promptId: "p1", threadId: "repo-a", label: "仓库A", kind: "image" },
   ];
 
   it("本浏览器没见过的服务端任务会补进来（换浏览器/清缓存场景）", () => {
@@ -132,6 +141,13 @@ describe("mergeComfyActivities（服务端登记补齐跨端可见性）", () =>
       { prompt_id: "", thread_id: "repo-a", created_at: NOW / 1000 },
     ], label, NOW);
     expect(merged).toHaveLength(1);
+  });
+
+  it("服务端补入的任务保留媒体类型（跨端也能认出视频）", () => {
+    const merged = mergeComfyActivities(local, [
+      { prompt_id: "p-video", thread_id: "repo-a", created_at: NOW / 1000, kind: "video" },
+    ], label, NOW);
+    expect(merged.find((item) => item.promptId === "p-video")?.kind).toBe("video");
   });
 });
 

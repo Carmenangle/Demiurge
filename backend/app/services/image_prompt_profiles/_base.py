@@ -959,6 +959,14 @@ _VAGUE_IDENTITY_RE = re.compile(
 # 不含角色专名；当前 wardrobe/正文中的服装变化会覆盖条目里的基础【穿着】段。
 _VISUAL_FACT_RULES: tuple[tuple[str, str, str], ...] = (
     (r"漆黑墨发|华贵墨发|墨发|乌黑(?:长)?发|黑发", "glossy jet-black hair", r"\b(?:jet-black|raven|ebony|black) hair\b"),
+    # 2026-11-11：银发/狐耳/蕾丝眼罩此前**不在表里** ⇒ 角色条目外貌虽然已进 SceneSpec，
+    # 兜底与字段账本都扫不到 ⇒ 模型拒答时成稿退回「A woman」，条目外貌全丢（凌霄镜7 实锤）。
+    # 只翻译可视属性、不含角色专名；输出判据放宽到「银发 + 马尾/头发」同句，避免模型写
+    # `silver high ponytail` 却被判「没写银发」而重复补一条。
+    (r"银发|银色?(?:长发|秀发|高马尾)|一头银色", "silver hair", r"\bsilver\b[^.]{0,24}\b(?:hair|ponytail)\b"),
+    (r"高马尾", "a high ponytail", r"\b(?:high )?ponytail\b"),
+    (r"狐耳|狐妖耳", "fox ears", r"\bfox ears\b"),
+    (r"蕾丝眼罩|面具式眼罩", "a lace eye mask", r"\b(?:lace )?eye (?:mask|blindfold)\b"),
     (r"发团|发髻|盘发", "hair gathered into a rounded bun", r"\b(?:hair )?(?:bun|updo|chignon)\b"),
     (r"紫玉金髻|紫玉.{0,4}(?:簪|髻|钗)", "a purple jade and gold hair ornament", r"purple jade.{0,35}(?:hair|ornament|pin)|(?:hair|ornament|pin).{0,35}purple jade"),
     (r"朱唇|红唇", "full crimson lips", r"\b(?:crimson|red|scarlet|vermilion) lips\b"),
@@ -3413,6 +3421,43 @@ _LOCATION_RULES = (
     (r"森林|树林", "forest"),
 )
 
+# 连续锚点专用词表（2026-11-12）：只服务 `scene_anchor` / `wardrobe_anchor`，
+# **不改** narrative/appearance 的既有映射 ⇒ 旧作品零回归。锚点没写的一律不补，
+# 这里只把「锚点已明确写出」的空间/服装事实翻成可验收的英文短语。
+_ANCHOR_SPATIAL_RULES = (
+    (r"门框|侧门|木门|大门", "a wooden door frame"),
+    (r"红毯|地毯", "a red carpet"),
+    (r"仓库", "a warehouse interior"),
+    (r"礼堂|大厅", "a hall interior"),
+    (r"走廊|长廊", "a corridor"),
+    (r"木板台|台子|舞台", "a raised wooden platform"),
+    (r"帷幔|纱幔|白纱", "white drapery"),
+    (r"卧室|寝殿", "a bedchamber"),
+)
+_ANCHOR_WARDROBE_RULES = (
+    (r"婚纱", "a wedding dress"),
+    (r"头纱|面纱", "a wedding veil"),
+    (r"礼服", "a formal dress"),
+    (r"长裙|短裙|纱裙", "a long dress"),
+    (r"长袍|袍服|袍", "a robe"),
+    (r"西装", "a suit"),
+    (r"制服", "a uniform"),
+    (r"铠甲|甲胄", "armor"),
+    (r"披风|斗篷", "a cloak"),
+    (r"高跟鞋", "high heels"),
+    (r"靴", "boots"),
+    (r"丝袜", "stockings"),
+    (r"项圈", "a collar"),
+    (r"围裙", "an apron"),
+)
+
+
+def _mapped_anchor_facts(source: str, rules) -> list[str]:
+    """锚点文本 → 可验收英文短语；只映已写出的词，不做同义扩写。"""
+    return list(dict.fromkeys(
+        phrase for pattern, phrase in rules if re.search(pattern, source or "")
+    ))
+
 
 def _evidenced_visual_facts(scene: Mapping[str, object]) -> list[str]:
     """开放类型视觉事实：只信任带本轮正文证据且为英文成稿的条目。"""
@@ -3460,6 +3505,11 @@ def prompt_field_ledger(prompt: str, scene: Mapping[str, object]) -> dict[str, d
     """逐字段验收最终成稿；只记录可由 SceneSpec 客观验证的事实。"""
     fact_scene = _scene_for_facts(scene)
     appearance_source = str(fact_scene.get("appearance") or "")
+    # 连续锚点（2026-11-12）：只验收锚点**明确写出**的空间/服装事实，锚点没写不补。
+    scene_anchor = str(fact_scene.get("scene_anchor") or "").strip()
+    wardrobe_anchor = str(fact_scene.get("wardrobe_anchor") or "").strip()
+    scene_terms = _mapped_anchor_facts(scene_anchor, _ANCHOR_SPATIAL_RULES)
+    wardrobe_anchor_terms = _mapped_anchor_facts(wardrobe_anchor, _ANCHOR_WARDROBE_RULES)
     subjects = fact_scene.get("subjects")
     subject_visuals = "\n".join(
         str(item.get("description") or "") for item in subjects
@@ -3468,6 +3518,7 @@ def prompt_field_ledger(prompt: str, scene: Mapping[str, object]) -> dict[str, d
     wardrobe_source = "\n".join((
         appearance_source,
         str(fact_scene.get("wardrobe") or ""),
+        wardrobe_anchor,
         str(fact_scene.get("narrative") or "") if re.search(
             r"衣|裙|袍|袜|dress|robe|skirt|stocking", str(fact_scene.get("narrative") or ""), re.I,
         ) else "",
@@ -3478,6 +3529,7 @@ def prompt_field_ledger(prompt: str, scene: Mapping[str, object]) -> dict[str, d
         if fact not in _mapped_wardrobe_facts_from(appearance_source)
     ]
     wardrobe_expected = _mapped_wardrobe_facts_from(wardrobe_source)
+    wardrobe_expected.extend(wardrobe_anchor_terms)
     # 2026-10-30：有角色段落头 ⇒ 英文外观事实**按主体条目**取（含「中文名＋英文外貌」
     # 这种 `isascii()` 判假、旧实现整段漏掉的情形）；无段落头才走旧的整块拆分。
     scoped_groups = _subject_appearance_fact_groups(fact_scene)
@@ -3518,6 +3570,8 @@ def prompt_field_ledger(prompt: str, scene: Mapping[str, object]) -> dict[str, d
     ]))
     locale = str(fact_scene.get("locale") or "")
     locations = [phrase for pattern, phrase in _LOCATION_RULES if re.search(pattern, locale)]
+    # 场景锚点的固定地标也是可验收的空间事实：模型漏写时由字段账本补写。
+    locations.extend(scene_terms)
     if locale.isascii() and re.search(r"[A-Za-z]{3}", locale):
         locations.append(locale.strip(" ,.;"))
     requirements = {
@@ -3525,7 +3579,7 @@ def prompt_field_ledger(prompt: str, scene: Mapping[str, object]) -> dict[str, d
         "wardrobe": bool(str(fact_scene.get("wardrobe") or "").strip() or wardrobe_expected),
         "action": bool(actions),
         "visual_facts": bool(visual_facts),
-        "location": bool(locale.strip()),
+        "location": bool(locale.strip() or scene_terms),
         "camera": True,
         "composition": True,
         "lighting": True,
@@ -3577,5 +3631,17 @@ def prompt_field_ledger(prompt: str, scene: Mapping[str, object]) -> dict[str, d
             "required": required,
             "covered": bool(covered or not required),
             "expected": phrases,
+        }
+    if scene_anchor or wardrobe_anchor:
+        # 只进诊断/trace，不参与覆盖判定：锚点原文与已映射英文词分列，便于判读
+        # 「模型没写」还是「词表没覆盖」。
+        ledger["__continuity__"] = {
+            "required": False,
+            "covered": True,
+            "expected": [],
+            "scene_anchor": scene_anchor,
+            "wardrobe_anchor": wardrobe_anchor,
+            "scene_terms": scene_terms,
+            "wardrobe_terms": wardrobe_anchor_terms,
         }
     return ledger

@@ -8,11 +8,10 @@ _knowledge_catalog_text）。本模块是同一目录的唯一属主——目录
 在这里，供对话注入、技能固化与设置页「固化知识库」展示共用同一份真源。
 
 真源目录: DATA_DIR/agent_knowledge/（gitignored 运行态，仅 *.md）。
-注入模式配置: DATA_DIR/user_state.json settings.agentKnowledge（gitignored 运行态）。
+注入模式配置: 设置档 user_state.json 的 settings.agentKnowledge（gitignored 运行态）。
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 # ── 目录与上限常量（唯一属主：对话注入与设置页展示共用）────────────────────────
@@ -166,12 +165,6 @@ def read_doc(name: str) -> dict:
 # always：全量常驻注入（老行为，KNOWLEDGE_MAX_FILES 生效）。
 
 
-def _user_state_path() -> Path:
-    from app.services import repo_meta
-
-    return repo_meta.user_state_path()  # 2026-10-24 收口：路径唯一属主
-
-
 def _validate_doc_name(name: str) -> str:
     """技能文档主名安全校验（供 read/write 共用）：无路径成分/盘符/隐藏前缀。"""
     if not name or name.startswith(".") or "/" in name or "\\" in name or ":" in name:
@@ -255,20 +248,22 @@ def skill_catalog_text(limit: int = 160) -> str:
 
 
 def injection_config() -> dict:
-    """读取注入模式配置；缺失/坏档 → {}（调用方按 smart 缺省处理）。"""
-    try:
-        state = json.loads(_user_state_path().read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    cfg = (state.get("settings") or {}).get("agentKnowledge")
+    """读取注入模式配置；缺失/坏档 → {}（调用方按 smart 缺省处理）。
+
+    2026-11-02 P1：改走属主 `repo_meta.load_user_state`——原先这里自己读设置档文件，
+    会绕开档位闸（「不认就备份+建新」）整层判定。
+    """
+    from app.services import repo_meta
+
+    settings = repo_meta.load_user_state().get("settings")
+    cfg = settings.get("agentKnowledge") if isinstance(settings, dict) else None
     return cfg if isinstance(cfg, dict) else {}
 
 
 def save_injection_config(cfg: dict) -> dict:
-    """读-改-写 user_state.json 的 settings.agentKnowledge（保留其它 settings 键）。"""
+    """读-改-写设置档的 settings.agentKnowledge（保留其它 settings 键）。"""
     from app.services import repo_meta
 
-    path = _user_state_path()
     state = repo_meta.load_user_state()  # 2026-10-24 收口：读点唯一属主（缺失/损坏回 {}）
     settings = dict(state.get("settings") or {})
     settings["agentKnowledge"] = {
@@ -276,7 +271,5 @@ def save_injection_config(cfg: dict) -> dict:
         "always_docs": [str(name) for name in (cfg.get("always_docs") or [])
                         if str(name).strip()],
     }
-    state["settings"] = settings
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    repo_meta.save_settings(settings)  # 只写设置档：作品索引在 repos.json，不经这里
     return settings["agentKnowledge"]

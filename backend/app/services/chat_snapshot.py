@@ -9,6 +9,7 @@ import json
 import os
 import re
 import threading
+import time
 
 from app.config import DATA_DIR
 from app.services.pathnames import safe_seg
@@ -89,6 +90,18 @@ def _path(thread_id: str):
             except OSError:
                 return legacy  # 搬迁失败 → 继续用旧位置，不丢数据
     return new_path
+
+
+def last_write_at(thread_id: str) -> float:
+    """快照文件最近写入时间（epoch 秒）；不存在/读不到返回 0。
+
+    供聊天主动发起判定「用户刚聊过就别打扰」——快照是聊天历史的真源，mtime 比前端
+    自报时间可靠（换端/刷新后仍然成立）。
+    """
+    try:
+        return _path(thread_id).stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 def _save_unlocked(thread_id: str, messages: list) -> None:
@@ -214,6 +227,44 @@ def _reattach_missing_media(parts: list, missing: list) -> list:
     return merged
 
 
+def _preserve_server_media_request(current: list, incoming: list) -> list:
+    """防止前端快照保存把服务端还没消费的 media_request 抹掉。
+
+    前端消息用 camelCase `mediaRequest`，后端 `_persist` 用 snake_case
+    `media_request`；两边都可能带「已处理」标记。这里只做一件事：
+    前端没带媒体字段时保留服务端那份；两边都带时合并，前端字段优先。
+    """
+    def media_of(item: object) -> dict | None:
+        if not isinstance(item, dict):
+            return None
+        value = item.get("media_request") or item.get("mediaRequest")
+        return value if isinstance(value, dict) else None
+
+    current_by_id = {
+        item.get("id"): item
+        for item in current
+        if isinstance(item, dict) and item.get("id")
+    }
+    merged: list = []
+    for item in incoming:
+        if not isinstance(item, dict):
+            merged.append(item)
+            continue
+        current_media = media_of(current_by_id.get(item.get("id")))
+        incoming_media = media_of(item)
+        if current_media and not incoming_media:
+            item = {**item, "media_request": current_media}
+        elif current_media and incoming_media:
+            combined = {**current_media, **incoming_media}
+            item = {
+                key: value for key, value in item.items()
+                if key not in ("media_request", "mediaRequest")
+            }
+            item["media_request"] = combined
+        merged.append(item)
+    return merged
+
+
 def _preserve_server_media_state(current: list, incoming: list) -> list:
     """合并服务端媒体状态，防止前端旧快照把插画回滚成 pending 或整张抹掉。
 
@@ -313,7 +364,11 @@ def save_if_newer(thread_id: str, messages: list, revision: int) -> bool:
         _save_unlocked(
             thread_id,
             _preserve_server_media_state(
-                current, _preserve_server_text(current, messages)),
+                current,
+                _preserve_server_media_request(
+                    current, _preserve_server_text(current, messages),
+                ),
+            ),
         )
         _REVISIONS[key] = revision
         _persist_revisions(_REVISIONS)
@@ -369,8 +424,13 @@ def to_prompt_history(messages: list) -> list[dict]:
             if message.get("image") or message.get("video") or message.get("audio"):
                 continue
             route = message.get("route")
-            if route and route not in ("roleplay", "answer"):
+            if route and route not in ("roleplay", "answer", "chat"):
                 continue  # 生图/视频/反推/灵感/工具等非剧情路由
+            # 2026-11-09 聊天/群聊：快照里的 speaker 必须带回 prompt，否则群聊历史里
+            # 所有角色回复都退化成无名的 assistant，下一轮 model 分不清谁说过什么。
+            speaker = str(message.get("speaker") or "").strip()
+            if speaker:
+                text = f"【{speaker}】{text}"
         history.append({"role": role, "content": text})
     return history
 
@@ -475,7 +535,11 @@ def user_message(mid: str, text: str, images: list[str] | None = None,
                 "mime": item.get("mime", ""),
                 "size": item.get("size", 0),
             })
-    message: dict[str, object] = {"id": mid, "role": "user", "text": text}
+    # ts：聊天室气泡的「名称 + 日期 + 时刻」与头像条最近消息排序都用它；
+    # 旧快照没有该字段时不伪造（前端只显示名称）。
+    message: dict[str, object] = {
+        "id": mid, "role": "user", "text": text, "ts": int(time.time()),
+    }
     if parts:
         message["parts"] = parts
     return message

@@ -130,6 +130,27 @@ def test_中继上游二进制帧(client: TestClient) -> None:
         fake.stop()
 
 
+def test_环境代理不得接管回环上游(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """HTTP_PROXY/HTTPS_PROXY（Clash 等）不得把 127.0.0.1 上游隧道化。
+
+    websocket-client 会读 http_proxy 环境变量；代理拒绝回环目标时整条中继以 1011
+    关闭（2026-11-09 本机实测：未设 NO_PROXY 时 9 个中继用例全红）。
+    """
+    monkeypatch.delenv("no_proxy", raising=False)
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:1")
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
+    fake = FakeComfy(frames=['{"type":"status"}'])
+    fake.start()
+    try:
+        with client.websocket_connect(
+            f"/api/comfyui/ws?url=http://127.0.0.1:{fake.port}"
+        ) as ws:
+            assert ws.receive_text() == '{"type":"status"}'
+    finally:
+        fake.stop()
+
+
 def test_客户端到上游方向的帧也中继(client: TestClient) -> None:
     fake = FakeComfy()
     fake.start()
@@ -199,6 +220,63 @@ def test_令牌启用时无凭据拒绝_头或cookie放行(client: TestClient, m
         fake.stop()
 
 
+@pytest.mark.parametrize("headers", [
+    {"Origin": "https://untrusted.example"},
+    {"Origin": "null"},
+    {"Host": "untrusted.example"},
+])
+def test_ws入站头拒绝且不连接上游(client, monkeypatch, headers):
+    monkeypatch.delenv("LAF_ALLOW_REMOTE", raising=False)
+    monkeypatch.delenv("LAF_LOCAL_TOKEN", raising=False)
+    fake = FakeComfy(frames=['{"type":"status"}'])
+    fake.start()
+    try:
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with client.websocket_connect(
+                f"/api/comfyui/ws?url=http://127.0.0.1:{fake.port}", headers=headers,
+            ) as ws:
+                ws.receive_text()
+        assert exc.value.code == 4403
+        assert fake.paths == []
+    finally:
+        fake.stop()
+
+
+@pytest.mark.parametrize("origin", ["", "http://localhost:15173", "http://[::1]:15173"])
+def test_ws合法来源保持帧中继(client, monkeypatch, origin):
+    monkeypatch.delenv("LAF_ALLOW_REMOTE", raising=False)
+    monkeypatch.delenv("LAF_LOCAL_TOKEN", raising=False)
+    fake = FakeComfy(frames=['{"type":"status"}'])
+    fake.start()
+    try:
+        with client.websocket_connect(
+            f"/api/comfyui/ws?url=http://127.0.0.1:{fake.port}",
+            headers={"Origin": origin} if origin else {},
+        ) as ws:
+            assert ws.receive_text() == '{"type":"status"}'
+        assert len(fake.paths) == 1
+    finally:
+        fake.stop()
+
+
+def test_ws未开放远端时有效令牌也不能绕过回环门(remote_client, monkeypatch):
+    monkeypatch.delenv("LAF_ALLOW_REMOTE", raising=False)
+    monkeypatch.setenv("LAF_LOCAL_TOKEN", "t0k-test")
+    fake = FakeComfy(frames=['{"type":"status"}'])
+    fake.start()
+    try:
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with remote_client.websocket_connect(
+                f"/api/comfyui/ws?url=http://127.0.0.1:{fake.port}",
+                headers={HEADER_NAME: "t0k-test"},
+            ) as ws:
+                ws.receive_text()
+        assert exc.value.code == 4403
+        assert fake.paths == []
+    finally:
+        fake.stop()
+
+
 # ── L2 联机：WS 升级不经过 http 中间件，能力闸必须在端点内自做 ──
 
 def test_裸远端WS在建连上游前以4403关闭(
@@ -225,6 +303,7 @@ def test_远端令牌三件套齐备时WS放行(
     remote_client: TestClient, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("LAF_LOCAL_TOKEN", "t0k-l2")
+    monkeypatch.setenv("LAF_ALLOW_REMOTE", "1")
     fake = FakeComfy(frames=['{"type":"status"}'])
     fake.start()
     try:

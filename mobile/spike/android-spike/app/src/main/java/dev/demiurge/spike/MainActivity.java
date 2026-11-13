@@ -34,6 +34,7 @@ import android.widget.Toast;
 import com.chaquo.python.Python;
 import com.chaquo.python.android.AndroidPlatform;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
@@ -41,6 +42,7 @@ import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.security.SecureRandom;
+import java.util.Collections;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
@@ -70,7 +72,8 @@ public class MainActivity extends Activity {
     private boolean logOpen = true;
     private String token = "";
     private int port = 8010;
-    private String baseUrl = "";
+    // shouldInterceptRequest 在网络线程上读，必须跨线程可见
+    private volatile String baseUrl = "";
     private boolean bootstrapLoaded = false;
     private boolean authRetryDone = false;
     // M4 运行时：健康监控 + 前台服务 + 退后台暂停（PLAN §7）
@@ -161,8 +164,8 @@ public class MainActivity extends Activity {
         webView.setDownloadListener((url, userAgent, contentDisposition,
                                      mimetype, contentLength) -> {
             Uri uri = Uri.parse(url);
-            if (!"127.0.0.1".equals(uri.getHost())) {
-                Log.w(TAG, "blocked download from non-local host: " + uri.getHost());
+            if (!BackendOrigin.matches(baseUrl, url)) {
+                Log.w(TAG, "blocked download from foreign origin");
                 return;
             }
             try {
@@ -201,16 +204,39 @@ public class MainActivity extends Activity {
                 }
             }
         });
-        // 只允许停留在本机后端：任何外部 scheme（intent://、market://…）与外部主机一律拦掉
+        // 只允许停留在后端完整 origin（scheme + host + 端口）：外部 scheme
+        //（intent://、market://…）、外部主机、同机其他端口一律拦掉
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 Uri url = request.getUrl();
-                boolean allowed = "http".equals(url.getScheme()) && "127.0.0.1".equals(url.getHost());
+                boolean allowed = BackendOrigin.matches(baseUrl, request.getUrl().toString());
                 if (!allowed) {
-                    Log.w(TAG, "blocked navigation: " + url.getScheme() + "://" + url.getHost());
+                    Log.w(TAG, "blocked navigation: " + url.getScheme() + "://"
+                            + url.getHost() + ":" + url.getPort());
                 }
                 return !allowed;
+            }
+
+            // 导航回调只管主框架主动跳转：iframe / 子资源会绕过它直接出网
+            //（真机实测 iframe 到 8011 拿到了 Cookie）。这里是 WebView 的唯一出站闸，
+            // 只放行后端完整 origin；blob/data/about 由内核自行处理，不经网络。
+            @Override
+            public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                Uri url = request.getUrl();
+                String scheme = url.getScheme();
+                if ("blob".equals(scheme) || "data".equals(scheme) || "about".equals(scheme)) {
+                    return null;
+                }
+                if (BackendOrigin.matches(baseUrl, request.getUrl().toString())) {
+                    return null;
+                }
+                Log.w(TAG, "blocked request: " + scheme + "://"
+                        + url.getHost() + ":" + url.getPort());
+                // 204 = 不提交文档：主框架导航停在原页，iframe 保持空白；
+                // 用 200 空体会把 WebView 留在外部 URL 上（真机实测）
+                return new WebResourceResponse("text/plain", "utf-8", 204, "No Content",
+                        Collections.emptyMap(), new ByteArrayInputStream(new byte[0]));
             }
 
             @Override

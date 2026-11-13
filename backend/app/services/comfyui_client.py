@@ -528,3 +528,29 @@ def upload_image(url: str, filename: str, data: bytes, content_type: str = "imag
     sub = res.get("subfolder", "")
     ref = f"{sub}/{name}" if sub else name
     return ref
+
+
+def queue_summary(url: str, timeout: float = 3.0) -> dict:
+    """探测一台 ComfyUI 的队列负载：running/pending 条数与延迟。
+
+    供多机台池选择「队列最短/空闲」的机台（2026-11-09）。失败不抛：
+    返回 `online=False` + error，调用方回退下一台/默认机。
+    """
+    started = time.monotonic()
+    try:
+        with urlopen(_base(url) + "/queue", timeout=timeout) as response:
+            queue = json.loads(response.read())
+        running = _queue_prompt_ids(queue, "queue_running")
+        pending = _queue_prompt_ids(queue, "queue_pending")
+        return {
+            "url": url, "online": True,
+            "running": len(running), "pending": len(pending),
+            "score": len(running) * 2 + len(pending),
+            "latency_ms": round((time.monotonic() - started) * 1000),
+        }
+    except Exception as exc:  # noqa: BLE001 [EXC-保留] 探测是分发辅助，失败不得阻断提交
+        return {
+            "url": url, "online": False, "running": 0, "pending": 0,
+            "score": 10 ** 6, "latency_ms": round((time.monotonic() - started) * 1000),
+            "error": str(exc)[:160],
+        }

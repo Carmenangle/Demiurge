@@ -21,18 +21,21 @@ from PIL import Image
 from app.routers import rag as rag_router
 from app.services import rag_store, wd14_tagger
 
-# 5 个标签：3 general(cat 0) + 1 character(cat 4) + 1 rating(cat 9)（与 _make_mini_onnx 输出维度对齐）
-_TAGS = [("1girl", 0), ("solo", 0), ("long_hair", 0), ("ArtistName", 4), ("sensitive", 9)]
+# 6 个标签：占位行(9999999,"general",9) + 3 general(cat 0) + 1 character(cat 4) + 1 rating(cat 9)
+# 占位行必须参与对齐：它占模型输出的第 0 维
+_TAGS = [("general", 9), ("1girl", 0), ("solo", 0), ("long_hair", 0), ("ArtistName", 4),
+         ("sensitive", 9)]
 _N = len(_TAGS)
+_GAIN = 0.05 / 255.0  # 输入是 0–255，故按原 /255 口径折算，等效原来 w=0.05
 
 
 def _make_mini_onnx(path: Path) -> None:
-    """造最小 tagger：output = B + W·mean(input)（W 每通道 0.05 只加前三个 tag）。"""
+    """造最小 tagger：output = B + W·mean(input)（W 每通道只加前三个真标签，占位行恒 0）。"""
     w = np.zeros((3, _N), dtype=np.float32)
-    w[0, 0] = 0.05
-    w[1, 1] = 0.05
-    w[2, 2] = 0.05
-    b = np.array([0.9, 0.8, 0.2, 0.9, 0.9], dtype=np.float32)
+    w[0, 1] = _GAIN
+    w[1, 2] = _GAIN
+    w[2, 3] = _GAIN
+    b = np.array([0.9, 0.9, 0.8, 0.2, 0.9, 0.9], dtype=np.float32)
     nodes = [
         # NHWC 输入：[1,448,448,3] → 对 H,W 两轴(1,2)取均值 → [1,1,1,3]
         # （GlobalAveragePool 是 NCHW 语义，会把 448 当通道 ⇒ 不能用于 NHWC）
@@ -58,7 +61,8 @@ def _make_mini_onnx(path: Path) -> None:
 
 def _write_tags_csv(path: Path) -> None:
     lines = ["tag_id,name,category"]
-    lines += [f"{i + 1},{name},{cat}" for i, (name, cat) in enumerate(_TAGS)]
+    ids = [9999999] + [i + 1 for i, _t in enumerate(_TAGS[1:])]
+    lines += [f"{tid},{name},{cat}" for tid, (name, cat) in zip(ids, _TAGS)]
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -115,8 +119,24 @@ def test_preprocess_shape_and_range(tmp_path):
     batch = wd14_tagger._preprocess(src)
     assert batch.shape == (1, 448, 448, 3)  # NHWC（wd-swinv2-tagger-v3 要求）
     assert batch.dtype == np.float32
-    assert 0.0 <= float(batch.min()) and float(batch.max()) <= 1.0
-    assert float(batch.mean()) > 0.99  # 白图 pad 白底 + resize，均值仍接近 1
+    assert 0.0 <= float(batch.min()) and float(batch.max()) <= 255.0  # v3 系不做 /255
+    assert float(batch.mean()) > 250.0  # 白图 pad 白底 + resize，均值仍接近 255
+
+
+def test_preprocess_swaps_rgb_to_bgr(tmp_path):
+    """v3 参考实现喂 BGR：纯红图在第 0 通道应为 0、第 2 通道应为 255（2026-11-06 实测修正）。"""
+    src = _make_image(tmp_path / "red.png", (255, 0, 0), size=(64, 64))
+    batch = wd14_tagger._preprocess(src, input_size=64)
+    assert tuple(batch[0, 0, 0]) == (0.0, 0.0, 255.0)
+
+
+def test_placeholder_row_keeps_alignment(model, tmp_path):
+    """占位行（9999999/general/9）必须留在对齐表里，但绝不能出现在输出标签中。"""
+    src = _make_image(tmp_path / "white.png", (255, 255, 255))
+    names = [n for n, _c in wd14_tagger._load_tags()]
+    assert names[0] == "general" and len(names) == _N
+    tags = dict(wd14_tagger.predict(src, include_rating=True))
+    assert "general" not in tags
 
 
 def test_reverse_tags_thresholds_rating_and_order(model, tmp_path):

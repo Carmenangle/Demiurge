@@ -7,7 +7,7 @@ WPF 壳（`../Demiurge.Desktop`）的换壳实现。**合同不变**：
 壳只干四件事：解析端口、确认服务可用（健康 + 前端文档）、必要时拉起运行时并等就绪、把窗口指过去。
 业务全在后端与前端，壳不掺和。
 
-## 状态（更新至 2026-10-24）
+## 状态（更新至 2026-11-03）
 
 | 项 | 状态 | 说明 |
 | --- | --- | --- |
@@ -26,15 +26,16 @@ WPF 壳（`../Demiurge.Desktop`）的换壳实现。**合同不变**：
 | 根目录入口 | ✅ | 编译产物拷成仓库根 `Demiurge.exe` 即可双击启动，替代 `start-dev` / `stop-dev` |
 | 单实例 + 激活既有窗口 | ✅ | 互斥量判唯一 + 命名事件 `Local\Demiurge.Desktop.Activate`；第二实例 SetEvent 后退出，第一个把窗口 show+置前 |
 | WebView2 数据目录 | ✅ 必做 | 见下：默认目录在本机建不出来 |
-| `--self-test` 18 项 | ✅ | 前 15 项与 WPF 同一份判据、同一串名字；第 16 项是 Tauri 独有的安装版布局，第 17 项是运行时交付，第 18 项是自动更新验签 |
-| 运行时按需交付 | ✅ | 首次启动发现安装版缺层 → 按嵌入 pin 在线下载或从 `runtime-pack`/`downloads` 离线装配；`base+application+rag` 三层全部必装（2026-10-30 定案） |
+| `--self-test` 19 项 | ✅ | 前 15 项与 WPF 同一份判据、同一串名字；第 16 项是 Tauri 独有的安装版布局，第 17 项是运行时交付，第 18 项是自动更新验签，第 19 项是交付提交闸与回滚 |
+| 运行时按需交付 | ✅ | 首次启动发现安装版缺层 → 按嵌入 pin 在线下载或从 `runtime-pack`/`downloads` 离线装配；必装层只有 `base+application`，`rag` 是**可选层**（2026-10-30 曾定案三层必装，**2026-11-03 P3-a 推翻**）；可选层后台补齐与进度可见 **2026-11-03 P3-b 已落** |
 | 交付 CLI | ✅ | `Demiurge.exe --install-runtime`；便携布局下拒绝执行（退出码 2） |
-| 托盘 + 关窗询问 | ✅ | 托盘左键唤出，菜单「显示主窗口 / 重启后端 / 检查更新… / 彻底关闭」；关窗时询问「隐藏到托盘 / 彻底关闭 / 取消」，不再直接隐藏 |
+| 托盘 + 关窗询问 | ✅ | 托盘左键唤出，菜单「显示主窗口 / 重启后端 / 补齐 RAG / 检查更新… / 彻底关闭」；关窗时询问「隐藏到托盘 / 彻底关闭 / 取消」，不再直接隐藏 |
 | 重启后端 | ✅ | 托盘菜单项：回收**自启**运行时 → 重新拉起 → 等健康 → 整页重载；端口上外部复用的服务明确拒绝，不误杀 |
+| 端口占用清理 | ✅ | 启动时端口被占（含「健康但没有前端」的旧后端）→ 弹窗写明占用进程名 / PID / 完整路径，用户点「是」才 `taskkill /T /F` 并等端口释放后继续启动；拒绝、无法识别 PID 或杀不掉都停在失败页。安装版没有 `stop-dev.bat` 时的自救出口 |
 | 自动更新骨架 | ✅ 测试密钥 | 托盘「检查更新…」→ 检查 → 下载 → minisign 验签 → 停自启运行时 → NSIS `passive` 安装；**只对 currentUser 安装版开放** |
 | 更新清单 | ✅ | `scripts/updater_manifest.py` 把签名原文、版本、资产 URL 绑成 `latest.json`；拒绝签名版本漂移、HTTP 端点与 `-Machine` 变体 |
 | 打包装配 | ✅ 非发行 | `portable_release.py --desktop-dir` 同时认 WPF `Demiurge.exe` 与 Tauri `demiurge-shell.exe`，包内一律落名 `Demiurge.exe`；2026-10-30 起便携包退出正式发行，只作本地调试 |
-| NSIS 双安装器 | ✅ | `currentUser`（默认，不弹 UAC）+ `perMachine`（覆盖文件产出，需 UAC）；一套代码 `tauri build --config` 两次；装完包内 `--self-test` 18/18 |
+| NSIS 双安装器 | ✅ | `currentUser`（默认，不弹 UAC）+ `perMachine`（覆盖文件产出，需 UAC）；一套代码 `tauri build --config` 两次；装完包内 `--self-test` 18/18（2026-10-24 当时；P2 起 19 项） |
 | 安装资源白名单 | ✅ 🔴 | `bundle.resources` 只允许 `installer-staging/dependencies → dependencies`；预设/userdata/`backend/data`/`.env` 有三层守卫（配置断言 → 暂存树审计 → 产物与安装目录扫描） |
 
 ## 🔴 WebView2 数据目录必须显式指定
@@ -86,7 +87,7 @@ WPF 壳（`../Demiurge.Desktop`）的换壳实现。**合同不变**：
    `targets == ["nsis"]`、`nsis.installMode == currentUser`、`webviewInstallMode.type == embedBootstrapper`。
    有人把 `../../presets` 之类塞进资源表 ⇒ 构建直接拒。
 2. **暂存树**：`audit_staging()` 只允许顶层 `dependencies/`，其下只允许 `git/` 与 `MANIFEST.json`；
-   命中 `presets`/`userdata`/`backend/data`/`.env`/`user_state.json`/`chat.json`/`desktop.json`/`runtime.pid`
+   命中 `presets`/`userdata`/`backend/data`/`.env`/`user_state.json`/`repos.json`/`chat.json`/`desktop.json`/`runtime.pid`
    或符号链接、特殊文件 ⇒ 失败。暂存目录本身被 `desktop/tauri/.gitignore:/installer-staging` 忽略。
 3. **产物与真装**：`7z l` 全清单扫禁止项；静默安装后再扫安装目录树。
 
@@ -158,23 +159,61 @@ $evi = "$env:TEMP\demiurge-installer-evidence"
    先在这两处找，校验通过就不再联网；`release_base` 不可达也能装完（自检第 17 项就是拿
    `file:///nonexistent-…` 证明的）。
 
-**层策略**：`base + application + rag` 三层全部必装（2026-10-30 定案）。首次启动一次拉齐，RAG 分卷逐卷续传；
-`--with-rag` 与 `optional_layers` 已删除，清单缺 `rag` 层在 Python/Rust 两侧都直接判失败。
+**层策略**（2026-11-03 P3-a 改写）：必装层只有 `base + application`（≈208 MB，装上壳就能对话、建作品、走向量库检索），
+`rag`（≈2 GB，torch / sentence-transformers 本地推理栈）是**可选层**——首次启动不再拉它，`current.json` 的 `rag_id` 留空。
+2026-10-30「三层全部必装、`optional_layers` 已删除、清单缺 `rag` 层两侧判失败」的定案**已被推翻**：现在取层循环由 pin 驱动，
+`runtime-delivery.json` 与 `scripts/runtime_delivery.py` 的 `REQUIRED_LAYERS`/`OPTIONAL_LAYERS` 是两侧唯一真源，
+清单**可以没有** `rag` 层（有则照常校验分卷与逐卷续传）。未就绪时的功能级降级（P3-c）未做；
+**后台补齐与进度可见已落（2026-11-03 P3-b）**，见下节。
 
 **落盘顺序**（失败绝不写 `current.json`）：
 
 ```
 校验 pin/清单 → 空间预检(size×3+256MiB) → 逐层：本地或下载 → 校验分卷 → 组装归档 → 校验归档
-→ 解到 runtime/.staging-<token> → 改名部署（旧层移到 staging/stale 可回滚）
-→ 最后写 current.json（临时文件 + 改名替换）
+→ 解到 runtime/.staging-<token> → 改名部署（同 id 旧层挪进 .staging-<token>/stale，失败时放回）
+→ 提交闸：候选层起在隔离目录 runtime/.gate-<token>（空 userdata + 现抢端口 + 去令牌）
+   探 GET /api/health 的 status=="ok" 且 GET / 含 id="root"（240 s × 2 次；首装没有回退点 ⇒ 跳过）
+→ 过闸才写 current.json（临时文件 + 改名替换；三层 id 变了顺带把上一份写进 previous.json 作回退点）
 ```
 
-失败只清理自己创建的 `.staging-*`、`.work-*`、坏档；`current.json` 保持原样（没有就仍然没有）。
+闸不过 ⇒ 放回旧层、只删本次新建的层、保留 `downloads\` 分件缓存，`current.json` 逐字不变。
+失败只清理自己创建的 `.staging-*`、`.work-*`、`.gate-*`、坏档；`current.json` 保持原样（没有就仍然没有）。
 磁盘不足的报错会直接列出 `runtime-pack` 与 `downloads` 两个离线目录。
+启动侧还有第二道网：新版本起不来时 `rollback_to_previous()` 与 `previous.json` 两档互换后重试一次，
+连上一版也起不来才给「只清运行时、保留作品数据」的安全模式（便携包与仓库布局不提供该选项）。
+层目录最多留**两代**（当前 + 回退点），正常启动成功后回收更老的代际（24 小时护栏，`DEMIURGE_PRUNE_PREVIOUS=0` 关闭）。
 
 **自动化边界**：`try_install_runtime` 只在**安装版布局**触发；便携包、仓库、非安装布局都不碰。
 进度复用启动页既有文案通道（不是业务 IPC）。`--install-runtime` 在便携布局下拒绝执行（退出码 2），
 避免把层写进包目录。
+
+## RAG 后台补齐（2026-11-03，P3-b）
+
+P3-a 把首启降到 ≈208 MB，这一节负责「那 2 GB 什么时候来、用户凭什么看得见、来了怎么接上」。
+入口三条，出口一个：**进应用后问一次 → 拒绝则托盘「补齐 RAG」常驻 → 补齐成功只建议重启，绝不自动重启**。
+
+| 件 | 职责 |
+| --- | --- |
+| `src/optional_layer.rs` | 编排：启动后那一次询问、托盘入口、单飞护栏、成功后的重启建议。不含交付逻辑 |
+| `src/runtime_delivery.rs` `deliver_optional` / `backfill_optional_runtime` / `optional_layer_missing` | 只交付「清单真提供、盘上还缺」的可选层，与必装层同一具主体、**同一个提交闸** |
+| `src/runtime_delivery.rs` `DeliveryLedger` | 进度账本**写入方**（唯一）：`userdata\delivery.json`，约每秒一次 tick，临时文件 + 改名 |
+| `backend/app/services/shell_delivery.py` | 同一本账的**读取方**（唯一）：陈旧判定与宽容解析都在这，坏档返回 `None` 不抛 |
+| `backend/app/services/activity_feed.py` `_runtime_delivery_items` | 投影成「后台活动」面板的 `runtime_delivery` 一条（标题「运行时补齐」），**前端零改动** |
+
+- **为什么是文件而不是 IPC**：壳与后端此前只有启动时单向注入的 5 个环境变量，壳的进度只写在启动页文案里，
+  进应用后就再也看不见。`userdata\delivery.json` 是两侧第一条跨进程通道，仍在「壳不承载业务」的合同内
+  （它只装字节数与阶段名，登记在卸载分档的**缓存档**，卸载随缓存清）。
+- **陈旧口径**：`running` 且 30 秒没更新 ⇒ 判死不再显示（壳崩掉时没人改终态，判据放读侧，写侧不需要
+  「先收掉上次的僵尸账」）；`done` / `failed` 沿用面板统一的 120 秒保留期。速率由壳算（`speed_bps`）。
+- **闸不许跳过**：可选层同样先探活再提交——torch 的 DLL 与 base 层 ABI 绑死，坏 `rag` 层的失败形状是
+  **进程起不来**，不是少个功能。闸不过 ⇒ 保持原版本、`current.json` 逐字不变、账本写 `failed` 带拒因。
+- **不自动重启**：后端读的是启动时注入的运行时目录，不重启接不上新层；但重启会打断正在进行的生成，
+  所以只弹「RAG 组件已就绪 / 重启后端后生效，现在重启吗」，点头才调既有「重启后端」（自带外部复用拒绝等四条护栏）。
+  不加设置项、不加启用开关。
+- **只问一回**：拒绝（或这个版本的清单根本不提供 `rag`）才写 `desktop.json` 的 `OptionalLayerOfferDone`；
+  接受但下载失败**不写**，下次启动照旧再问。开发态仓库布局读不到 `current.json` ⇒ 一句话都不会弹。
+- **单飞**：`AppState.delivering` 期间托盘「重启后端」「检查更新」都拒绝（三者都改写 `current.json`）；
+  退出不拦——分件落在 `downloads\` 且 Range 续传，中途关掉是接着下。
 
 ## 自动更新（2026-10-24，骨架 + 测试密钥）
 
@@ -238,7 +277,7 @@ cd desktop/tauri
 cargo build                 # 调试版带控制台，方便看输出
 cargo build --release
 
-# 自检（18 项：前 15 项与 WPF 壳同一份判据，第 16 项安装版布局，第 17 项运行时交付，第 18 项自动更新验签）
+# 自检（19 项：前 15 项与 WPF 壳同一份判据，第 16 项安装版布局，第 17 项运行时交付，第 18 项自动更新验签，第 19 项提交闸与回滚）
 .\target\debug\demiurge-shell.exe --self-test
 
 # 手动补运行时（安装版；base + application + rag 三层全装）
@@ -264,9 +303,16 @@ copy desktop\tauri\target\release\Demiurge.exe Demiurge.exe
 
 启动失败时例外：窗口停在错误页，关窗即退出（没有需要保活的东西）。
 
-托盘菜单：显示主窗口 / 重启后端 / 检查更新… / 彻底关闭。「重启后端」「彻底关闭」都只处理自启运行时；
+托盘菜单：显示主窗口 / 重启后端 / 补齐 RAG / 检查更新… / 彻底关闭。「重启后端」「彻底关闭」都只处理自启运行时；
 端口上原本就有、且健康且带前端的服务属于外部复用，**永不回收**，重启项会弹窗明确拒绝。
 WPF 壳保持旧行为（关窗即退出并回收），决策只在新壳落地。
+
+端口被占用时的自救（2026-11-08）：启动链发现端口上不是「健康且带前端」的服务时（典型是被旧后端占着、
+或那个后端没带 `LAF_FRONTEND_DIST`），先弹「Demiurge 启动被阻塞」——写明占用进程的映像名、PID、完整路径。
+用户点「是」才结束它（`taskkill /T /F`）并等端口释放，然后继续正常启动；点「否」就停在失败页并附同样的占用信息。
+目的：安装版没有 `stop-dev.bat` 时不被旧进程永久锁死。占用者不是已知 Demiurge 映像（`Demiurge.exe` /
+`Demiurge-Runtime.exe` / 仓库 `backend\.venv` 的 python）时，弹窗额外警告一句，但杀不杀仍由用户决定；
+连 PID 都识别不到（受保护进程）时只报错，不猜也不杀。
 
 实跑证据（2026-10-24，debug + release）：
 
@@ -279,6 +325,11 @@ WPF 壳保持旧行为（关窗即退出并回收），决策只在新壳落地�
   「重启后端被拒绝：当前后端是外部复用的服务」并弹警告；关掉警告后外部服务仍健康，
   托盘彻底关闭后外部进程继续存活。
 - release 产物 `--self-test` 当时 15/15（自检扩容后为 18/18）；根 `Demiurge.exe` 启动、关窗选是、托盘彻底关闭均复跑通过。
+- 端口占用清理（2026-11-08）：`cargo test --release` **20 例全绿**；其中 `port_holder_resolves_own_listener`
+  用真实 `GetExtendedTcpTable` 把自己监听的临时端口解析回本进程 PID（同时验证 IPv4 表与映像路径可读），
+  `cleanup_prompt_*` 三例锁住弹窗正文（PID/路径、外来进程警告、有无前端的不同措辞、拿不到 PID 时不给清理入口）。
+  重建后的壳 `--self-test` **19/19**。⚠ 真机弹窗未在开发机上点过：用户当前的 8010 是「健康且带前端」的外部
+  后端，走的是复用分支；要验清理路径得先制造一个不带前端的 8010（或在别的端口起一个占位进程，设 `DEMIURGE_PORT`）。
 
 > Win11 提示：新托盘图标默认进「隐藏的图标」浮出层，壳无法强制提升；首次若看不到 Demiurge，
 > 请在任务栏溢出区把它拖到常显位置。
@@ -307,11 +358,12 @@ desktop\tauri\target\release\Demiurge.exe --self-test
 
 - `src/paths.rs` — 本地数据布局、便携包/仓库/安装版识别、自带依赖目录（对应 WPF `ShellPaths.cs`）
 - `src/settings.rs` — 窗口几何与端口持久化（对应 `ShellSettings.cs`）
-- `src/runtime_host.rs` — 探活/复用/拉起/等就绪/回收 + 依赖 PATH 前置（对应 `RuntimeHost.cs`）
+- `src/runtime_host.rs` — 探活/复用/拉起/等就绪/回收 + 依赖 PATH 前置 + 端口占用者定位与清理（对应 `RuntimeHost.cs`；清理是 Tauri 侧新增形态）
 - `src/job.rs` — Job 对象回收进程树（对应 `ChildProcessJob.cs`）
 - `src/http_probe.rs` — 裸 TCP 的最小 HTTP GET（**不走代理**，对应 WPF `UseProxy=false`）
-- `src/selftest.rs` — 18 项自检（前 15 项对应 `SelfTest.cs`，第 16 项安装版布局，第 17 项运行时交付，第 18 项自动更新验签）
-- `src/runtime_delivery.rs` — pin/清单校验、在线续传、离线双入口、分卷组装、安全解压与原子部署
+- `src/selftest.rs` — 19 项自检（前 15 项对应 `SelfTest.cs`，第 16 项安装版布局，第 17 项运行时交付，第 18 项自动更新验签，第 19 项提交闸与回滚）
+- `src/runtime_delivery.rs` — pin/清单校验、在线续传、离线双入口、分卷组装、安全解压与原子部署；必装/可选两档共享同一具主体（`LayerScope`），`DeliveryLedger` 是 `userdata\delivery.json` 的唯一写入方
+- `src/optional_layer.rs` — 可选层（RAG）后台补齐的编排：启动后那一次询问、托盘入口、单飞护栏、成功后只**建议**重启后端
 - `src/updater.rs` — 托盘更新入口、安装版适用面判定、minisign 验签夹具（测试公钥在 `testdata/`）
 - `scripts/updater_manifest.py` — `latest.json` 渲染与更新配置守卫（签名版本绑定、HTTPS、拒绝 `-Machine`）
 - `Cargo.toml` — `ureq`（`native-tls` 特性）+ 直接依赖 `native-tls`（`Fetcher::new()` 里显式 `tls_connector` 接线，**漏接等于没有 TLS 后端**）+ `zip`（deflate）+ `sha2` + `tauri-plugin-updater`（含 `minisign-verify`）；`windows-sys` 供磁盘空间/Job 等 Win32 调用

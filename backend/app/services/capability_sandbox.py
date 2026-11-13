@@ -1,7 +1,9 @@
 """短期能力租约：外部技能与流程只能执行被明确批准的机械权限。"""
 from __future__ import annotations
 
+import copy
 import json as _json
+import os
 import threading
 import time
 import uuid
@@ -35,14 +37,50 @@ def _load_persisted(now: Callable[[], float] = time.time) -> None:
         pass
 
 
-def _save_persisted() -> None:
+def _save_persisted(state: dict[str, dict[str, Any]] | None = None) -> None:
+    """原子发布租约盘面：同目录临时文件 → flush+fsync → `os.replace`。
+
+    **失败不吞**（2026-11-05 T2 实锤：此前吞 OSError，grant/revoke 在盘面根本没写
+    成功时也返回成功，用户以为已批准/已撤销）。失败时旧 JSON 逐字节不变（替换未
+    发生），临时文件清理的二次异常不得覆盖原始异常。
+    """
+    snapshot = state if state is not None else _LEASES
+    payload = _json.dumps(list(snapshot.values()), ensure_ascii=False, indent=2)
+    tmp = LEASE_FILE.with_name(
+        f".{LEASE_FILE.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         LEASE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        LEASE_FILE.write_text(
-            _json.dumps(list(_LEASES.values()), ensure_ascii=False, indent=2),
-            encoding="utf-8")
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, LEASE_FILE)
     except OSError:
-        pass
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _commit(mutator: Callable[[dict[str, dict[str, Any]]], tuple[Any, bool]]) -> Any:
+    """租约变更的唯一提交接缝（2026-11-05 T2）。
+
+    同一把锁内完成「深拷贝当前状态 → 改副本 → 副本落盘 → 用副本替换内存」。
+    因此：① 并发变更不会在锁外写旧快照（丢另一线程刚提交的租约）；② 落盘失败时
+    内存保持旧状态并向上抛 OSError，调用方绝不可能拿到「假成功」。
+
+    `mutator(staged)` 返回 `(结果, 是否有变化)`；无变化（重复授权、租约不存在）
+    不落盘也不替换内存，避免只读语义的调用白付一次磁盘写。
+    """
+    with _LOCK:
+        staged = copy.deepcopy(_LEASES)
+        result, changed = mutator(staged)
+        if changed:
+            _save_persisted(staged)
+            _LEASES.clear()
+            _LEASES.update(staged)
+    return result
 
 
 _load_persisted()
@@ -87,25 +125,33 @@ def grant(subject: str, capabilities: list[dict[str, str]], *, ttl_seconds: int 
         "expires_at": current + max(1, min(ttl_seconds, 86400)),
         "approved_by": approved_by or "user", "revoked": False,
     }
-    with _LOCK:
-        _LEASES[lease_id] = lease
-    _save_persisted()
+    def _add(staged: dict[str, dict[str, Any]]) -> tuple[None, bool]:
+        staged[lease_id] = lease
+        return None, True
+
+    _commit(_add)
     return dict(lease)
 
 
 def grant_operation(lease_id: str, operation: str, *, path: str = "", tool: str = "",
-                      domain: str = "",
+                      domain: str = "", action_hash: str = "",
                       now: Callable[[], float] = time.time) -> dict[str, Any]:
     """往已有租约追加一条能力授权（approval 自由循环批准后调用）。
 
     与 grant 不同：不新建租约，只把用户刚批准的 operation/path 追加进现有租约，
     让 awaiting_approval 的自由循环从断点续跑时该操作可执行。
+
+    `action_hash` 非空 = **一次性动作授权**（2026-11-05 T3）：只有同一个动作
+    （operation + 环境归一后的 params + 路径）能命中，且 authorize 消费一次即失效。
+    留空 = 既有的持续授权语义（机械计划整计划批准、演示流程、越域读取路径授权）。
     """
     operation = str(operation or "").strip()
     if not operation:
         raise ValueError("缺少 operation")
-    with _LOCK:
-        lease = _LEASES.get(lease_id)
+    action_hash = str(action_hash or "").strip()
+
+    def _append(staged: dict[str, dict[str, Any]]) -> tuple[dict[str, Any], bool]:
+        lease = staged.get(lease_id)
         if not lease or lease.get("revoked"):
             raise PermissionError("能力租约不存在或已撤销")
         if float(lease.get("expires_at") or 0) <= now():
@@ -115,25 +161,45 @@ def grant_operation(lease_id: str, operation: str, *, path: str = "", tool: str 
             raise PermissionError("能力租约已过期")
         caps = lease.setdefault("capabilities", [])
         for item in caps:
-            if item.get("operation") == operation and item.get("path", "") == str(path or ""):
-                return dict(lease)
-        caps.append({"operation": operation,
-                     "path": str(path or "").strip(),
-                     "domain": str(domain or "").strip().lower(),
-                     "tool": str(tool or "").strip()})
-        result = dict(lease)
-    _save_persisted()
-    return result
+            if (item.get("operation") == operation
+                    and item.get("path", "") == str(path or "")
+                    # 幂等分支必须连动作指纹一起比：不同 hash 不能撞进「已授权」短路
+                    # （否则批准 A 等于同时批了 B；2026-11-05 T3）。
+                    and str(item.get("action_hash") or "") == action_hash):
+                if action_hash and item.get("consumed"):
+                    # 命中的是**已消费**的一次性条目 ⇒ 用户此刻是「把同一个动作再批一次」。
+                    # 必须重新装填，否则 grant_operation 报「已授权」而 authorize 仍判 consumed
+                    # → 批准→再拦→再批准 死循环（与 2026-09-14 修过的过期租约批准死循环同形）。
+                    item["consumed"] = False
+                    return dict(lease), True
+                return dict(lease), False
+        entry: dict[str, Any] = {
+            "operation": operation,
+            "path": str(path or "").strip(),
+            "domain": str(domain or "").strip().lower(),
+            "tool": str(tool or "").strip(),
+        }
+        if action_hash:
+            entry["action_hash"] = action_hash
+            entry["consumed"] = False
+        caps.append(entry)
+        return dict(lease), True
+
+    return _commit(_append)
 
 
 def revoke(lease_id: str) -> bool:
-    with _LOCK:
-        lease = _LEASES.get(lease_id)
+    """撤销租约。返回 True 只代表**盘面已落住**（2026-11-05 T2）；写盘失败抛 OSError，
+    调用方不得宣称已取消——否则重载后权限复活，用户以为取消了但下一步仍能执行。"""
+
+    def _mark(staged: dict[str, dict[str, Any]]) -> tuple[bool, bool]:
+        lease = staged.get(lease_id)
         if not lease:
-            return False
+            return False, False
         lease["revoked"] = True
-    _save_persisted()
-    return True
+        return True, True
+
+    return _commit(_mark)
 
 
 def lease_registered(lease_id: str) -> bool:
@@ -153,17 +219,24 @@ def renew(lease_id: str, *, ttl_seconds: int = 86400,
     续期只延长 expires_at，**不扩大授权清单**（追加授权仍走 grant_operation 逐条）；
     撤销/不存在的租约不可续。
     """
-    with _LOCK:
-        lease = _LEASES.get(str(lease_id or ""))
+    def _extend(staged: dict[str, dict[str, Any]]) -> tuple[dict[str, Any], bool]:
+        lease = staged.get(str(lease_id or ""))
         if not lease or lease.get("revoked"):
             raise PermissionError("能力租约不存在或已撤销，无法续期")
         lease["expires_at"] = now() + max(1, min(ttl_seconds, 86400))
-        result = dict(lease)
-    _save_persisted()
-    return result
+        return dict(lease), True
+
+    return _commit(_extend)
 
 
-def _path_allowed(requested: str, root: str) -> bool:
+def path_allowed(requested: str, root: str) -> bool:
+    """执行期路径域判定（公开接缝，2026-11-05 T1）：`requested` 是否落在 `root` 内。
+
+    用 `Path.resolve()` 而非词法比较——`..`、链接与大小写差异都要按真实文件系统归一。
+    计划提交期的词法检查另有属主（`plan_validator._check_paths`，按 `PureWindowsPath`
+    比较），两条闸口径互补：提交期挡「声明就越权」，执行期挡「运行时算出来的实际路径越权」。
+    `root` 为空 = 未声明路径域，只有同样为空的 `requested` 通过。
+    """
     if not root:
         return not requested
     if not requested:
@@ -177,25 +250,46 @@ def _path_allowed(requested: str, root: str) -> bool:
 
 
 def authorize(lease_id: str, operation: str, *, path: str = "", domain: str = "",
-              tool: str = "",
+              tool: str = "", action_hash: str = "",
               now: Callable[[], float] = time.time) -> dict[str, Any]:
-    with _LOCK:
-        lease = dict(_LEASES.get(lease_id) or {})
-    if not lease or lease.get("revoked") or float(lease.get("expires_at") or 0) <= now():
-        raise PermissionError("能力租约不存在、已撤销或已过期")
-    if lease.get("mode") == ACCESS_FULL:
-        return lease
-    for capability in lease.get("capabilities") or []:
-        if capability.get("operation") not in {operation, "*"}:
-            continue
-        if capability.get("tool") and capability.get("tool") != tool:
-            continue
-        if capability.get("domain") and capability.get("domain") != domain.lower():
-            continue
-        if capability.get("path") and not _path_allowed(path, capability["path"]):
-            continue
-        return lease
-    raise PermissionError(f"租约未授权操作：{operation}")
+    """执行期授权判定。带 `action_hash` 的一次性动作授权在这一步**消费**（2026-11-05 T3）。
+
+    合同：
+    - 一次性条目（`action_hash` 非空）必须 hash 相等且未消费才放行，放行即置 `consumed`；
+      判定与消费在同锁内完成 ⇒ 并发 authorize 至多一次成功，handler 抛错也算已使用
+      （要重试必须重新批准，不给「批一次跑 N 次」留口子）。
+    - full 租约直接放行、**不消费**（既定语义：用户已整体授权）。
+    - 无 `action_hash` 的条目 = 持续授权，保持机械计划整计划批准 / 演示流程 /
+      越域读取路径授权的既有行为；调用方不传 action_hash 时也不会命中一次性条目。
+    """
+
+    def _check(staged: dict[str, dict[str, Any]]) -> tuple[dict[str, Any], bool]:
+        lease = staged.get(str(lease_id or ""))
+        if not lease:
+            raise PermissionError("能力租约不存在、已撤销或已过期")
+        if lease.get("revoked") or float(lease.get("expires_at") or 0) <= now():
+            raise PermissionError("能力租约不存在、已撤销或已过期")
+        if lease.get("mode") == ACCESS_FULL:
+            return dict(lease), False
+        for capability in lease.get("capabilities") or []:
+            if capability.get("operation") not in {operation, "*"}:
+                continue
+            if capability.get("tool") and capability.get("tool") != tool:
+                continue
+            if capability.get("domain") and capability.get("domain") != domain.lower():
+                continue
+            if capability.get("path") and not path_allowed(path, capability["path"]):
+                continue
+            bound = str(capability.get("action_hash") or "")
+            if bound:
+                if bound != str(action_hash or "") or capability.get("consumed"):
+                    continue
+                capability["consumed"] = True
+                return dict(lease), True
+            return dict(lease), False
+        raise PermissionError(f"租约未授权操作：{operation}")
+
+    return _commit(_check)
 
 
 def active(subject: str = "", *,

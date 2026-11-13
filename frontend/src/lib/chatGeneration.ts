@@ -6,6 +6,7 @@ import { regenerationPrompt } from "./regeneration";
 import { deserializeInspirationSend } from "./inspirationInsert";
 import type { Template } from "../api/workflows";
 import type { RichContent } from "../components/RichInput";
+import { applyProfileLoraTriggers, type PromptProfileValue } from "./imagePromptProfiles";
 export { prependLoraTriggers } from "./imagePromptProfiles";
 
 interface LoraTriggerRecord {
@@ -101,16 +102,25 @@ export function promptHistory(msgs: readonly ChatMessage[]): PromptHistoryItem[]
     if (message.system) return [];
     // 顶层媒体气泡（工作流/Agent 产出的图/视频/音频，带提示词文本）不进剧情上下文
     if (message.image || message.video || message.audio) return [];
-    // 生成/灵感/工具等非剧情路由的消息（生图/视频/反推提示词）不进剧情上下文
+    // 生成/灵感/工具等非剧情路由的消息（生图/视频/反推提示词）不进剧情上下文；
+    // 2026-11-09 聊天/群聊路线也放行，并给带 speaker 的 assistant 补前缀（与后端
+    // chat_snapshot.to_prompt_history 同口径）。
     if (message.role === "assistant" && message.route
-      && message.route !== "roleplay" && message.route !== "answer") {
+      && message.route !== "roleplay" && message.route !== "answer"
+      && message.route !== "chat") {
       return [];
     }
     const text = (message.text || "").trim() || (message.parts || [])
       .filter((part) => part.type === "text" && part.text?.trim())
       .map((part) => part.text!.trim())
       .join("\n");
-    return text ? [{ role: message.role, content: text }] : [];
+    if (!text) return [];
+    return [{
+      role: message.role,
+      content: message.role === "assistant" && message.speaker
+        ? `【${message.speaker}】${text}`
+        : text,
+    }];
   });
 }
 
@@ -246,6 +256,28 @@ export function resolveLoraPromptMetadata(
     found,
     additions: found ? promptAdditionsForSelectedLora(items, selectedLoraName) : [],
   };
+}
+
+// 生效 LoRA 的「触发词＋建议提示词质量词」机械前置——两条出图链（自动插画 / 一键定妆）的唯一真源。
+// 为什么由程序写而不是让模型写：触发词必须逐字精确，模型会翻译或漏写 ⇒ LoRA 不生效却看不出来；
+// Profile 侧还明令模型「不得添加 LoRA 触发词、LoRA 权重」。缺精确元数据记录 ⇒ 抛错，不静默出图
+//（一张不像角色的图被钉成角色底图，比一条报错贵得多）。
+// 逐条按 loras 顺序前置 ⇒ 后处理的词落在更前面（栈尾＝角色 LoRA 的触发词最靠前）。
+export function applyLoraTriggerWords(
+  prompt: string,
+  profile: PromptProfileValue | string,
+  loras: readonly { name: string }[],
+  items: readonly LoraTriggerRecord[],
+): string {
+  let out = prompt;
+  for (const lora of loras) {
+    const metadata = resolveLoraPromptMetadata(items, lora.name);
+    if (!metadata.found) {
+      throw new Error(`实际加载的 LoRA 没有精确元数据记录：${lora.name}`);
+    }
+    out = applyProfileLoraTriggers(out, profile, metadata.additions);
+  }
+  return out;
 }
 
 export function resolveGenerationPrompt(

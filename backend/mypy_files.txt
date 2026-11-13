@@ -2,6 +2,7 @@ app/__init__.py
 app/asyncio_quiet.py
 app/config.py
 app/db.py
+app/file_lock.py
 app/generated/__init__.py
 app/generated/wire_contracts.py
 app/main.py
@@ -68,6 +69,7 @@ app/services/agent_context_assembly.py
 app/services/agent_contracts.py
 app/services/agent_fabric.py
 app/services/agent_graph.py
+app/services/agent_graph_chat.py
 app/services/agent_graph_nodes.py
 app/services/agent_graph_plan.py
 app/services/agent_graph_roleplay.py
@@ -96,14 +98,17 @@ app/services/canvas_store.py
 app/services/capability_handlers.py
 app/services/capability_registry.py
 app/services/capability_sandbox.py
+app/services/cast_resolver.py
 app/services/character_belief.py
 app/services/character_card.py
+app/services/character_portrait.py
 app/services/character_state.py
 app/services/character_store.py
 app/services/chat_agent_queue.py
 app/services/chat_facts.py
 app/services/chat_maintenance.py
 app/services/chat_memory.py
+app/services/chat_room.py
 app/services/chat_snapshot.py
 app/services/chat_stream_protocol.py
 app/services/collection_artifacts.py
@@ -221,6 +226,8 @@ app/services/scenario_lab.py
 app/services/scene_classify.py
 app/services/scene_illustration.py
 app/services/scene_renderers.py
+app/services/shot_plan.py
+app/services/shot_prompt_composer.py
 app/services/skeleton_store.py
 app/services/skills_store.py
 app/services/smithery_client.py
@@ -249,6 +256,7 @@ app/services/transition_extract.py
 app/services/update_progress.py
 app/services/url_guard.py
 app/services/video_gen.py
+app/services/video_merge.py
 app/services/video_prompt.py
 app/services/view_urls.py
 app/services/visual_asset_index.py
@@ -277,3 +285,4 @@ app/services/worldbook_coverage.py
 app/services/worldbook_edit.py
 app/services/worldbook_greenlight.py
 app/services/worldbook_store.py
+app/state_store.py

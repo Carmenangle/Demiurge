@@ -566,6 +566,33 @@ def narrative_directive(verdicts: list[agency.Verdict]) -> str:
     return "\n\n".join(sections)
 
 
+def verdict_fix_directive(claims: Any) -> str:
+    """把「判失败但正文没写成未遂」的裁定改写成续写指令条目（回合闸回灌自愈用）。
+
+    人群与 `narrative_ci.verdict_attempt_claims` 同源（npc / 已掷骰 / 判失败 / 有 intent），
+    措辞复用 `agency.DEGREE_LABEL` 单一档位表——本函数不另写一套中文，避免两处漂移。
+    空人群返回空串（调用方据此不触发续写）。
+    """
+    lines: list[str] = []
+    for claim in claims or ():
+        if not isinstance(claim, dict):
+            continue
+        if (str(claim.get("kind") or "") != "npc"
+                or int(claim.get("roll") or 0) <= 0
+                or str(claim.get("outcome") or "") != agency.OUTCOME_REJECT):
+            continue
+        actor = str(claim.get("actor") or "").strip()
+        intent = str(claim.get("intent") or "").strip()
+        if not actor or not intent:
+            continue
+        degree = str(claim.get("degree") or "")
+        label = agency.DEGREE_LABEL.get(degree, degree or "失败")
+        roll = int(claim.get("roll") or 0)
+        chance = int(claim.get("chance") or 0)
+        lines.append(f"- {actor}：「{intent}」（D100={roll}／阈值 {chance}，已裁为{label}）")
+    return "\n".join(lines)
+
+
 def agency_lost(verdicts: list[agency.Verdict]) -> bool:
     """是否有配角强得手（大成功/极难/困难成功）→ 用户短期失控，插画阶段当高潮点。
     普通成功(partial)只算基本达成，不触发失控。"""
@@ -794,15 +821,23 @@ def maybe_curate(
         except Exception:  # noqa: BLE001  单条写入失败不阻断其余
             continue
     worldbook_written = 0
+    # op 取出来放在写手判断之外：旧写法整段在 `if deps.worldbook_fn is not None` 内部，
+    # 无世界书快照（纯卡作品）时 curator 按 CURATOR_SYSTEM 承诺产出的 add/update 被**连 trace
+    # 一起**丢掉，症状与「curator 没提出 op」逐字相同。同时把 :779 同函数用的非 list 防御对齐
+    # （模型返回 JSON 对象时，旧写法会在 `for it in items` 上抛 TypeError）。
+    wb_ops = [it for it in (items if isinstance(items, list) else [])
+              if isinstance(it, dict)
+              and str(it.get("op") or "").strip() in ("worldbook_add", "worldbook_update")]
     if deps.worldbook_fn is not None:
-        wb_ops = [it for it in items if isinstance(it, dict)
-                  and str(it.get("op") or "").strip() in ("worldbook_add", "worldbook_update")]
         try:
             worldbook_written = deps.worldbook_fn(wb_ops)
             _trace(deps, "worldbook.writeback", ops=wb_ops, applied=worldbook_written)
         except Exception:  # noqa: BLE001  世界书维护失败不阻断正文/RAG
             worldbook_written = 0
             _trace(deps, "worldbook.writeback", ops=wb_ops, applied=0, status="error")
+    elif wb_ops:
+        _trace(deps, "worldbook.writeback", ops=wb_ops, applied=0,
+               status="skipped", reason="no_worldbook_writer")
     written += worldbook_written
     if events is not None:
         events.append({"kind": "curator", "state": "ok", "count": written})
@@ -867,6 +902,7 @@ def maybe_summarize(
         if entry is not None and not narrative_memory.chronicle_within_limits(
                 entry.overview, entry.text):
             original_facts = list(entry.facts)
+            original_key_events = list(entry.key_events)
             _trace(deps, "agent.compress", agent="chronicle",
                    overview_chars=len(entry.overview), detail_chars=len(entry.text))
             compressed = deps.chat_fn(
@@ -879,6 +915,8 @@ def maybe_summarize(
             )
             if entry is not None and not entry.facts and original_facts:
                 entry.facts = original_facts  # 事实账本素材不因压缩丢失
+            if entry is not None and not entry.key_events and original_key_events:
+                entry.key_events = original_key_events  # 关键事件不因压缩丢失
         if entry is None or not narrative_memory.chronicle_within_limits(
                 entry.overview, entry.text):
             if events is not None:
@@ -887,6 +925,18 @@ def maybe_summarize(
                    reason="empty_summary_or_over_limit")
             return False
         narrative_store.append(deps.state_base, repo_id, entry)
+        if entry.key_events:
+            # 2026-11-10：关键事件不靠穷举词表——纪要模型按事件类型判断后，同一次调用
+            # 的结果写进任务与事件表永久账本；重建索引/整理索引都不会冲掉。
+            try:
+                from app.services import key_events
+                recorded = key_events.record_judged(
+                    deps.state_base, repo_id, entry.key_events, default_turn=turn)
+                _trace(deps, "memory.key_event", agent="chronicle",
+                       recorded=recorded, candidates=len(entry.key_events))
+            except Exception as exc:  # noqa: BLE001 账本失败不阻断纪要落盘
+                _trace(deps, "memory.key_event", agent="chronicle",
+                       status="error", error=str(exc)[:200])
         if entry.facts:
             from app.services import temporal_fact_store
 

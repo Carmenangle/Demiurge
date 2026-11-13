@@ -2,7 +2,7 @@
   "id": "24073813-2bf5-44d7-8997-14ccf86bbb18",
   "revision": 0,
   "last_node_id": 333,
-  "last_link_id": 566,
+  "last_link_id": 567,
   "nodes": [
     {
       "id": 12,
@@ -193,7 +193,7 @@
       ],
       "flags": {},
       "order": 23,
-      "mode": 4,
+      "mode": 0,
       "inputs": [
         {
           "label": "image",
@@ -1024,6 +1024,43 @@
       ]
     },
     {
+      "id": 77,
+      "type": "GetNode",
+      "pos": [
+        5311.903807933464,
+        519.9957831868039
+      ],
+      "size": [
+        210,
+        60
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 6,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "label": "IMAGE",
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            567
+          ]
+        }
+      ],
+      "title": "Get_尾帧图像",
+      "properties": {
+        "Node name for S&R": "GetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
+        "widget_ue_connectable": {}
+      },
+      "widgets_values": [
+        "尾帧图像"
+      ]
+    },
+    {
       "id": 241,
       "type": "KSamplerSelect",
       "pos": [
@@ -1621,7 +1658,7 @@
       ],
       "flags": {},
       "order": 31,
-      "mode": 4,
+      "mode": 0,
       "inputs": [
         {
           "label": "IMAGE",
@@ -1660,7 +1697,7 @@
       ],
       "flags": {},
       "order": 13,
-      "mode": 4,
+      "mode": 0,
       "inputs": [
         {
           "label": "image",
@@ -1910,7 +1947,8 @@
           "localized_name": "last_frame",
           "name": "last_frame",
           "type": "IMAGE",
-          "shape": 7
+          "shape": 7,
+          "link": 567
         },
         {
           "label": "prompt",
@@ -2776,6 +2814,14 @@
       329,
       4,
       "STRING"
+    ],
+    [
+      567,
+      77,
+      0,
+      329,
+      3,
+      "IMAGE"
     ]
   ],
   "groups": [

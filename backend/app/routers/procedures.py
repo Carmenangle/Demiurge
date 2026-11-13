@@ -40,14 +40,22 @@ class RunRequest(BaseModel):
 
 @router.post("/capabilities")
 def grant(req: GrantRequest):
-    return capability_sandbox.grant(
-        req.subject, [item.model_dump() for item in req.capabilities], ttl_seconds=req.ttl_seconds,
-    )
+    try:
+        return capability_sandbox.grant(
+            req.subject, [item.model_dump() for item in req.capabilities], ttl_seconds=req.ttl_seconds,
+        )
+    except OSError as exc:
+        # 盘面没落住 = 授权没生效（2026-11-05 T2）：如实 5xx，不能返回租约让用户以为已批准
+        raise HTTPException(status_code=503, detail=f"能力租约存储写入失败：{exc}") from exc
 
 
 @router.delete("/capabilities/{lease_id}")
 def revoke(lease_id: str):
-    return {"ok": capability_sandbox.revoke(lease_id)}
+    try:
+        return {"ok": capability_sandbox.revoke(lease_id)}
+    except OSError as exc:
+        # 撤销写盘失败必须报错：返回 ok:true 会让重载后权限复活（用户以为取消了）
+        raise HTTPException(status_code=503, detail=f"能力租约存储写入失败：{exc}") from exc
 
 
 @router.post("/propose")

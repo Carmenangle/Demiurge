@@ -53,6 +53,32 @@ afterEach(() => {
   container = null;
 });
 
+describe("ModelsPanel · 模型存档（多个配置选一个为主）", () => {
+  it("视觉 / 嵌入各有存档条：可新增、切换、删除，最后一档禁止删除", () => {
+    mount();
+    for (const label of ["视觉大模型存档", "嵌入模型存档"]) {
+      const bar = () => container!.querySelector(`[aria-label="${label}"]`);
+      expect(bar(), label).toBeTruthy();
+      // 迁移保证至少一档（当前配置就是第一档），不会出现空存档
+      expect(bar()!.querySelectorAll("option"), label).toHaveLength(1);
+      click(buttonIn(bar(), "+ 新增存档"));
+      expect(bar()!.querySelectorAll("option"), label).toHaveLength(2);
+
+      const select = bar()!.querySelector("select") as HTMLSelectElement;
+      const firstId = select.options[0].value;
+      act(() => {
+        select.value = firstId;
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      expect((bar()!.querySelector("select") as HTMLSelectElement).value, label).toBe(firstId);
+
+      click(buttonIn(bar(), "删除"));
+      expect(bar()!.querySelectorAll("option"), label).toHaveLength(1);
+      expect(buttonIn(bar(), "删除")?.disabled, label).toBe(true);
+    }
+  });
+});
+
 describe("ModelsPanel · 来源三分（云端 API / 本机 Ollama / 本地模型）", () => {
   it("对话模型提供三个独立新增入口，卡片带来源徽标", () => {
     mount();

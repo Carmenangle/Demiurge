@@ -26,17 +26,22 @@ _NAMESPACE = "comfy-pending"
 
 _TASKS: dict[str, dict] = task_progress_store.load(_NAMESPACE)
 _LOCK = threading.Lock()
+_KINDS = frozenset({"image", "video", "audio"})
 
 
 def _persist_locked() -> None:
     task_progress_store.save(_NAMESPACE, _TASKS)
 
 
-def track(prompt_id: str, thread_id: str, created_at: float = 0.0) -> dict:
+def track(prompt_id: str, thread_id: str, created_at: float = 0.0,
+          kind: str = "image") -> dict:
     """登记一个在途 prompt（幂等：同 prompt_id 覆盖）。
 
     `created_at` 只接受「合理的 epoch 秒」：客户端若误传毫秒（1.7e12）或 0，
     统一回退到服务端当前时间——否则 TTL 永远算不出过期，僵尸条目会留在面板上。
+
+    `kind`：媒体类型（image/video/audio）。后台活动面板靠它显示「出图/出视频」，
+    不能一律写成出图（2026-11-08 用户实锤：视频任务显示成出图）。
     """
     pid = str(prompt_id or "").strip()
     if not pid:
@@ -45,11 +50,13 @@ def track(prompt_id: str, thread_id: str, created_at: float = 0.0) -> dict:
     created = float(created_at or 0)
     if not (_EPOCH_FLOOR <= created <= now + 60):
         created = now
+    media_kind = str(kind or "").strip().lower()
     entry = {
         "prompt_id": pid,
         "thread_id": str(thread_id or "home"),
         "created_at": created,
         "updated_at": now,
+        "kind": media_kind if media_kind in _KINDS else "image",
     }
     with _LOCK:
         _TASKS[pid] = entry

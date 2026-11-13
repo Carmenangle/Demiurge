@@ -2373,3 +2373,59 @@ def test_自愈全败_可见正文不足200字仍判死():
             hooks,
         )
     assert "writeback" not in order
+
+
+
+def test_shot_rec_carries_shot_fields_and_skips_batch_index():
+
+    rec = roleplay_turn._illustrate_rec({
+
+        "prompt": "p", "motion": 1, "actors": ["A"], "anchor": "锚点",
+
+        "video_mode": "shots", "shot_sequence_id": "seq", "shot_index": 1,
+
+        "shot_total": 3, "shot_type": "move", "shot_duration_s": 5,
+
+        "image_key": "seq:1", "incoming_shot_index": 0, "incoming_shot_type": "move",
+
+        "transition_video_request": {"submit": {"prompt": "move-prompt"}},
+
+    }, repo_id="r", turn=2, turn_id="t", anchor_offset=10, index=1)
+
+    assert rec["shot_sequence_id"] == "seq"
+
+    assert rec["shot_index"] == 1
+
+    assert rec["shot_total"] == 3
+
+    assert rec["shot_type"] == "move"
+
+    assert rec["shot_duration_s"] == 5
+
+    assert rec["image_key"] == "seq:1"
+
+    assert rec["incoming_shot_index"] == 0
+
+    assert rec["incoming_shot_type"] == "move"
+
+    assert "batch_index" not in rec
+
+
+
+def test_link_shot_moves_marks_previous_rec_in_text_order():
+
+    recs = [
+
+        {"id": "a"},
+
+        {"id": "b", "incoming_shot_index": 0},
+
+        {"id": "c", "incoming_shot_index": 1},
+
+    ]
+
+    roleplay_turn._link_shot_moves(recs)
+
+    assert recs[1]["bridge_prev_slot"] == "a"
+
+    assert recs[2]["bridge_prev_slot"] == "b"

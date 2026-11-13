@@ -252,3 +252,73 @@ def test_思考事件编码():
     event = protocol.encode_event({"thinking": "先推演再落笔"})
     assert event == {"protocol": "laf-chat-stream", "version": 1,
                      "type": "thinking", "data": {"text": "先推演再落笔"}}
+
+
+def test_聊天室自发媒体请求编码():
+    """2026-11-10 聊天室多元数据：1:1 answer 路由的自发媒体请求单独上 wire，
+    前端在聊天流结束后走 generate/video 生成并插回媒体气泡。"""
+    event = protocol.encode_event({"media_request": {"kind": "video", "prompt": "撩起衣角"}})
+    assert event == {"protocol": "laf-chat-stream", "version": 1,
+                     "type": "media_request", "data": {"kind": "video", "prompt": "撩起衣角"}}
+
+
+def test_非常规装扮自拍标记编码为头像自拍():
+    """[AVATAR] = 非常规装扮自拍：wire 必须带 avatar=True，前端据此自动替换聊天头像。"""
+    event = protocol.encode_event({
+        "media_request": {"kind": "image", "prompt": "婚纱自拍", "avatar": True},
+    })
+    assert event == {"protocol": "laf-chat-stream", "version": 1,
+                     "type": "media_request",
+                     "data": {"kind": "image", "prompt": "婚纱自拍", "avatar": True}}
+
+
+def test_聊天室消息里的头像自拍标记保留avatar():
+    event = protocol.encode_event({"chat_messages": [{
+        "id": "m1", "speaker": "腓特烈大帝", "text": "看。",
+        "media_request": {"kind": "image", "prompt": "婚纱自拍", "avatar": True},
+    }]})
+    assert event is not None
+    assert event["data"]["messages"][0]["media_request"] == {
+        "kind": "image", "prompt": "婚纱自拍", "avatar": True,
+    }
+
+
+def test_聊天室自发媒体请求保留角色外貌锚点():
+    """角色固定外貌必须过 wire（1:1 独立事件与群聊 chat_messages 两条路都认）。"""
+    appearance = "腓特烈大帝：【外貌】暗黄色长发；暗黄色眼睛；身高近两米"
+    event = protocol.encode_event({"media_request": {
+        "kind": "image", "prompt": "婚纱自拍", "appearance": appearance,
+    }})
+    assert event == {"protocol": "laf-chat-stream", "version": 1,
+                     "type": "media_request",
+                     "data": {"kind": "image", "prompt": "婚纱自拍",
+                              "appearance": appearance}}
+
+    messages_event = protocol.encode_event({"chat_messages": [{
+        "id": "m1", "speaker": "腓特烈大帝", "text": "看。",
+        "media_request": {"kind": "image", "prompt": "婚纱自拍", "appearance": appearance},
+    }]})
+    assert messages_event is not None
+    assert messages_event["data"]["messages"][0]["media_request"] == {
+        "kind": "image", "prompt": "婚纱自拍", "appearance": appearance,
+    }
+
+
+def test_聊天室消息透传合法时间戳并丢弃非法值():
+    event = protocol.encode_event({"chat_messages": [
+        {"id": "m1", "speaker": "腓特烈大帝", "text": "看。", "ts": 1762500000},
+        {"id": "m2", "speaker": "腓特烈大帝", "text": "嗯。", "ts": True},
+        {"id": "m3", "speaker": "腓特烈大帝", "text": "好。", "ts": "bad"},
+    ]})
+    assert event is not None
+    messages = event["data"]["messages"]
+    assert messages[0]["ts"] == 1762500000
+    assert "ts" not in messages[1]
+    assert "ts" not in messages[2]
+
+
+def test_聊天室自发媒体请求非法时静默丢弃():
+    """kind 非 image/video 或 prompt 为空 ⇒ 不产事件（不把脏请求交给前端生成）。"""
+    assert protocol.encode_event({"media_request": {"kind": "audio", "prompt": "x"}}) is None
+    assert protocol.encode_event({"media_request": {"kind": "image", "prompt": "  "}}) is None
+    assert protocol.encode_event({"media_request": "不是映射"}) is None

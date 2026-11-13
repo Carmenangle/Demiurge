@@ -1,0 +1,90 @@
+name: security-audit
+
+# 定时依赖漏洞审计（2026-11-07 新增，F 常设项）。
+# 为什么不在每个 PR 上跑四个生态：cargo-audit 要现场编译、dotnet restore 也慢，
+# 而且漏洞库每天变化，用「合并那一刻」的扫描结果代表不了「用着这一刻」的风险。
+# ⇒ PR 门禁只保留便宜的 pip-audit（ci.yml），其余三个生态每周扫一次 + 支持手动触发。
+#
+# 豁免只有一张表：scripts/security-audit-allowlist.json，由 scripts/security_audit.py 消费。
+# 规则：工具 + 公告号 + 包名三者匹配；必须写 reason 与 expires；到期即红（即使公告已消失，
+# 也要求人工复核后删条目或续期）；本次未命中的条目会在报告里列为「可清理」。
+#
+# ⚠ 扫描通过 ≠ 安全：报告只代表扫描当日的公开漏洞库命中，漏洞库会随上游更新而变化。
+# 每个 job 的 Markdown 报告（含扫描日期与覆盖范围）会写进 Actions 的 Step Summary。
+
+on:
+  schedule:
+    # 每周一 03:00 UTC（北京时间 11:00）。错开整点发布高峰即可，无业务时区依赖。
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: windows-latest
+    # 与 ci.yml 同一理由：production 面是 Windows，requirements 的解析结果要和生产一致。
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: 安装 pip-audit
+        run: python -m pip install --upgrade pip pip-audit
+      - name: pip-audit（backend/requirements.txt，含传递依赖）
+        run: python scripts/security_audit.py pip
+      - name: pip-audit（backend/requirements-dev.txt，含运行依赖）
+        run: python scripts/security_audit.py pip --requirements backend/requirements-dev.txt
+
+  npm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: 校验 lockfile 与 package.json 同步
+        working-directory: frontend
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: npm audit --omit=dev（仅生产依赖）
+        run: python scripts/security_audit.py npm
+
+  cargo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-${{ runner.os }}-v1
+      - name: 安装 cargo-audit（仅首次或缓存失效时编译）
+        run: command -v cargo-audit >/dev/null 2>&1 || cargo install cargo-audit --locked
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: cargo audit（desktop/tauri/Cargo.lock，含传递依赖）
+        run: python scripts/security_audit.py cargo
+
+  dotnet:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: restore（生成 project.assets.json，--vulnerable 依赖它）
+        run: dotnet restore desktop/Demiurge.Desktop/Demiurge.Desktop.csproj
+      - name: dotnet list package --vulnerable --include-transitive
+        run: python scripts/security_audit.py dotnet

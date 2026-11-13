@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from app.services.agent_contracts import CtxLike
-from typing import Any
+from typing import Any, Iterable
 
 from app.services import run_trace
 from app.services.agency_illustration_actors import _build_image_prompt, _status_snapshot_value
@@ -108,6 +108,17 @@ def _wb_ratchet_sources(
     """
     injected: list[str] = []
     names: list[str] = []
+    # 纯卡（无世界书）时下面两条人名来源（数据表行首列／`_worldbook_character_names`）恒空
+    # ⇒ 卡名与用户名会被当「无锚点膨胀」误报（清单 #5）。这里只往 **exclude** 里补，
+    # 不进任何 prompt；且放在最前——返回列表要 `[:40]` 截断，这两条最不该被挤掉。
+    for value in (
+        *(str(n).strip() for n in (ctx.get("card_names") or []) if str(n).strip()),
+        str(ctx.get("card_name") or "").strip(),
+        str(ctx.get("opening_card_name") or "").strip(),
+        str(ctx.get("user_name") or "").strip(),
+        *(str(n).strip() for n in (ctx.get("_selected_persona_names") or []) if str(n).strip()),
+    ):
+        names.append(value)
     dyn = str(ctx.get("_worldbook_dynamic_text") or "")
     recall = str(ctx.get("_worldbook_recall_text") or "")
     if dyn:
@@ -145,8 +156,10 @@ def _wb_setting_sources(ctx: CtxLike, repo_id: str) -> list[str]:
 
     用途：用户 2026-09-23 口径——「霜月宫多次出现能理解（主角大半后宫在此、后期势力归男主），
     但经脉，你看设定条目都不怎么提及，就前期提了一嘴，结果一个个女主角找的借口都是经脉」。
-    ⇒ 判据＝「**叙事用量 vs 设定存量**」。此处给出存量：含设定条目 + 角色卡（不含动态区，
-    动态区是叙事、已算进注入层）。失败退回空 ⇒ 报告退回按频次排序，与改造前一致。
+    ⇒ 判据＝「**叙事用量 vs 设定存量**」。此处给出存量：只取小仓库世界书快照的设定条目
+    （不含动态区，动态区是叙事、已算进注入层）；**角色卡并不在里面**（2026-11-04 核代码改正旧的
+    「含设定条目 + 角色卡」说法）⇒ 纯卡作品必然空返回、存量闸门整道关闭，这一臂的缺席由
+    `_wb_arm_status` 记进台账（清单 #4）。失败退回空 ⇒ 报告退回按频次排序，与改造前一致。
     """
     try:
         from app.services import worldbook, worldbook_store
@@ -166,17 +179,54 @@ def _wb_setting_sources(ctx: CtxLike, repo_id: str) -> list[str]:
     except Exception:  # noqa: BLE001 棘轮输入缺失不影响 CI 其余项
         return []
 
+def _wb_arm_status(ctx: CtxLike, repo_id: str, *, rules: Iterable[str],
+                   setting: Iterable[str]) -> dict:
+    """臂参与台账（清单 #3／#4＋缺陷 4）：输入为空 ⇒ 那一臂本轮**根本没被评估**。
+
+    「没书所以不判」是可辩护的，不可辩护的是报告把空转渲染成干净——世界规则臂是
+    `for rule in world_rules:`、棘轮存量臂是 `if set_texts:`，两者空跑都不留一行诊断，
+    与「查过、没问题」在存储层逐字同形。第三条臂读 `_agency_propose` 投影下来的裁定：
+    裁判判过的「未遂/受挫」过去到不了 CI（指令在 roleplay 节点就被 pop 掉了），此处先把
+    「本轮到底有没有裁定可核对」记进台账。这里只观测（判据一个字不动），把原因交给
+    trace 与诊断面板。快照读失败同样只降级成「不知道」，不影响诊断本身。
+    """
+    from app.services import narrative_ci
+
+    has_file = False
+    book: dict | None = None
+    try:
+        from app.services import worldbook_store
+
+        base = ctx.get("output_dir") or ""
+        has_file = worldbook_store.repo_snapshot_path(base, repo_id).is_file()
+        book = worldbook_store.read_repo_snapshot(base, repo_id)
+    except Exception:  # noqa: BLE001 观测读失败不能把已跑完的 CI 拖成 unavailable
+        has_file, book = False, None
+    entries = (book or {}).get("entries") or []
+    return narrative_ci.arm_participation(
+        world_rules=rules, stock_sources=setting,
+        has_worldbook=bool(has_file), readable=bool(book), worldbook_entries=len(entries),
+        agency_claims=ctx.get("_agency_npc_claims"),
+    )
+
 def _wb_run_narrative_ci(ctx: CtxLike, clean: str, *, turn: int, raw: list,
-                         repo_id: str) -> None:
-    """连续性 CI 评估 + 落盘（永不阻断/改写正文）。逐字自 `_agency_writeback` 搬移。"""
+                         repo_id: str, scene_snapshot: str = "") -> None:
+    """连续性 CI 评估 + 落盘（永不阻断/改写正文）。逐字自 `_agency_writeback` 搬移。
+
+    `scene_snapshot`＝本轮状态写回后的状态栏文本，只喂给未遂对账的**在场闸**：实测有
+    4/9 条真违规的角色名只出现在 `[在场]`、不在正文，缺这一腿召回从 100% 掉到 56%。
+    裁定投影（`_agency_npc_claims`）在这里只取「有／没有」（`None` → 空 ⇒ 该臂不跑），
+    台账那边仍读原始 `None`／`[]`／全未掷三态，两者用途不同，不要「顺手统一」。
+    """
     try:
         from app.services import narrative_ci
 
         injected, bodies, exclude, setting = _wb_ratchet_sources(ctx, repo_id)
+        rules = ctx.get("_world_rules") or ()
         diagnostics = narrative_ci.evaluate(
             clean, turn=turn, facts=ctx.get("_continuity_facts") or (), raw_deltas=raw,
             beliefs=ctx.get("_continuity_beliefs") or (),
-            world_rules=ctx.get("_world_rules") or (),
+            world_rules=rules,
             recent_openings=[
                 (m.get("content") or "").strip()[:15]
                 for m in reversed(_history_messages(ctx))
@@ -187,13 +237,17 @@ def _wb_run_narrative_ci(ctx: CtxLike, clean: str, *, turn: int, raw: list,
             style_bodies=bodies,
             style_exclude=exclude,
             style_setting=setting,
+            agency_claims=ctx.get("_agency_npc_claims") or (),
+            scene_snapshot=scene_snapshot,
         )
         saved = narrative_ci.save(
             ctx.get("output_dir") or "", repo_id, diagnostics,
         )
+        arms = _wb_arm_status(ctx, repo_id, rules=rules, setting=setting)
+        narrative_ci.save_arms(ctx.get("output_dir") or "", repo_id, arms, turn=turn)
         run_trace.emit(
             ctx, "narrative.ci", status="evaluated", count=len(diagnostics), saved=saved,
-            codes=[item.get("code", "") for item in diagnostics],
+            codes=[item.get("code", "") for item in diagnostics], arms=arms,
         )
     except Exception as exc:  # noqa: BLE001 CI 永不阻断或改写正文
         run_trace.emit(ctx, "narrative.ci", status="unavailable", error=str(exc))

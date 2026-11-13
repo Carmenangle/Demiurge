@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import sys
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -47,6 +48,53 @@ def test_full_snapshot_and_isolated_fork(monkeypatch, tmp_path):
         assert conn.execute("select value from facts").fetchone()[0] == "source"
     (target / "state.json").write_text('{"位置":"王宫"}', encoding="utf-8")
     assert json.loads((source / "state.json").read_text(encoding="utf-8"))["位置"] == "城外"
+
+
+def test_fork_copies_chat_threads_before_branch_point(monkeypatch, tmp_path):
+    output = _configure(monkeypatch, tmp_path)
+    monkeypatch.setattr(scenario_lab, "DATA_DIR", tmp_path / "data")
+    source = repo_meta.repo_folder(str(output), "source")
+    (source / "chat.json").write_text('[{"text":"剧情"}]', encoding="utf-8")
+    (source / "tables.json").write_text('{"表":[{"行":1}]}', encoding="utf-8")
+    now = time.time()
+    chat = output / "source__chat__alice_abc123"
+    chat.mkdir()
+    (chat / "chat.json").write_text(json.dumps([
+        {"id": "past", "text": "分支前", "ts": now - 60},
+        {"id": "future", "text": "分支后", "ts": now + 3600},
+        {"id": "undated", "text": "旧消息没有时间戳"},
+        {"id": "ms", "text": "毫秒时间戳", "ts": int(now * 1000) - 60_000},
+    ], ensure_ascii=False), encoding="utf-8")
+    group = output / "source__group"
+    group.mkdir()
+    (group / "chat.json").write_text(json.dumps([
+        {"id": "g-past", "text": "群聊过去", "ts": now - 120},
+        {"id": "g-future", "text": "群聊未来", "ts": now + 7200},
+    ], ensure_ascii=False), encoding="utf-8")
+    legacy = tmp_path / "data" / "chat_snapshots"
+    legacy.mkdir(parents=True)
+    (legacy / "source__chat__bob_def456.json").write_text(
+        json.dumps([{"id": "legacy", "text": "旧落点线程"}], ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    snapshot = scenario_lab.create_snapshot(str(output), "source")
+    result = scenario_lab.fork_snapshot(
+        str(output), "source", snapshot["snapshot_id"], "branch",
+    )
+
+    branch_chat = output / "branch__chat__alice_abc123"
+    assert [m["id"] for m in json.loads((branch_chat / "chat.json").read_text(encoding="utf-8"))] == [
+        "past", "undated", "ms",
+    ]
+    assert [m["id"] for m in json.loads(
+        (output / "branch__group" / "chat.json").read_text(encoding="utf-8")
+    )] == ["g-past"]
+    assert (output / "branch__chat__bob_def456" / "chat.json").is_file()
+    assert result["chat_threads"] == 3
+    assert result["chat_messages"] == 5
+    target = repo_meta.repo_folder(str(output), "branch")
+    assert json.loads((target / "tables.json").read_text(encoding="utf-8"))["表"][0]["行"] == 1
 
 
 def test_fork_refuses_non_empty_target(monkeypatch, tmp_path):
@@ -144,6 +192,11 @@ def test_experiment_rolls_back_completed_branches_when_later_fork_fails(monkeypa
     output = _configure(monkeypatch, tmp_path)
     source = repo_meta.repo_folder(str(output), "source")
     (source / "chat.json").write_text("[]", encoding="utf-8")
+    thread = output / "source__chat__alice_abc123"
+    thread.mkdir()
+    (thread / "chat.json").write_text(
+        json.dumps([{"id": "1", "text": "hi", "ts": time.time() - 10}]), encoding="utf-8",
+    )
     snap = scenario_lab.create_snapshot(str(output), "source")
     occupied = repo_meta.repo_folder(str(output), "branch-b")
     (occupied / "user.txt").write_text("keep", encoding="utf-8")
@@ -157,4 +210,5 @@ def test_experiment_rolls_back_completed_branches_when_later_fork_fails(monkeypa
 
     branch_a = repo_meta.repo_folder_path(str(output), "branch-a")
     assert not (branch_a / "chat.json").exists()
+    assert not (output / "branch-a__chat__alice_abc123").exists()
     assert (occupied / "user.txt").read_text(encoding="utf-8") == "keep"

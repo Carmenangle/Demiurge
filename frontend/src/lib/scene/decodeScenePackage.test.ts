@@ -1927,3 +1927,128 @@ describe("对象效果：云层流动（effects/waterflow）", () => {
     expect(readScenePackage(bytes).manifest.userBindings).toEqual(["flowon", "flowspeed"]);
   });
 });
+
+/**
+ * 场景包是外来不可信输入（创意工坊下载的 .pkg）。畸形数据必须止步于「这次解码报可读错误 /
+ * 这个对象被忽略」，不能把 Worker 打崩成无法归因的栈溢出，也不能把 NaN/Infinity 写进清单
+ * 让播放器画一张空画面。这里只钉边界，良性场景的解码结果逐字不变。
+ */
+describe("畸形输入边界", () => {
+  const png = () => new Uint8Array(encodePng(4, 4, new Uint8Array(4 * 4 * 4).fill(255)));
+  const bgFiles = () => [
+    jsonEntry("bg.image.json", { material: "bg.material.json", width: 1920, height: 1080 }),
+    jsonEntry("bg.material.json", { passes: [{ shader: "genericimage2", textures: ["bg"] }] }),
+    { path: "materials/bg.tex", bytes: png() },
+  ];
+  const bg = { name: "bg", image: "bg.image.json", origin: "960 540 0", size: "1920 1080 0" };
+  const scenePkg = (objects: unknown[]) =>
+    buildPkg([
+      jsonEntry("project.json", { type: "scene", file: "scene.json" }),
+      jsonEntry("scene.json", {
+        general: { orthogonalprojection: { width: 1920, height: 1080 } },
+        objects,
+      }),
+      ...bgFiles(),
+    ]);
+  const layersOf = (bytes: Uint8Array) =>
+    readScenePackage(bytes).manifest.layers as Array<Record<string, any>>;
+
+  it("超深嵌套的无关字段不让解码器炸栈（JSON.parse 能解，清单脚本扫描也不能递归到溢出）", () => {
+    // 嵌套放在没有语义的字段上：良性场景里它必须被忽略，而不是让整张壁纸退回静态图。
+    const depth = 50_000;
+    const deep = "[".repeat(depth) + "]".repeat(depth);
+    const sceneText =
+      `{"general":{"orthogonalprojection":{"width":1920,"height":1080}},` +
+      `"objects":[${JSON.stringify(bg)}],"junk":${deep}}`;
+    const bytes = buildPkg([
+      jsonEntry("project.json", { type: "scene", file: "scene.json" }),
+      { path: "scene.json", bytes: encoder.encode(sceneText) },
+      ...bgFiles(),
+    ]);
+    expect(layersOf(bytes)).toHaveLength(1);
+  });
+
+  it("超大 objects 数组按线性代价处理，垃圾对象不生成图层", () => {
+    const junk = Array.from({ length: 30_000 }, (_, i) => ({ id: i + 10, name: `junk${i}` }));
+    const manifest = readScenePackage(scenePkg([bg, ...junk])).manifest;
+    expect(manifest.layers).toHaveLength(1);
+    expect(manifest.scripted).toBe(false);
+  });
+
+  it("NaN/Infinity 用户值不得把非有限数写进图层几何", () => {
+    // 用户属性来自 JS 对象（不受 JSON 字面量限制），Infinity 能一路穿到 scale 广播。
+    const bound = {
+      name: "bg",
+      image: "bg.image.json",
+      size: "1920 1080 0",
+      origin: { user: "px", value: "960 540 0" },
+      scale: { user: "ps", value: "1 1 1" },
+      alpha: { user: "pa", value: 1 },
+    };
+    const manifest = readScenePackage(scenePkg([bound]), {
+      px: NaN,
+      ps: Infinity,
+      pa: -Infinity,
+    }).manifest;
+    const [boundLayer] = manifest.layers as Array<Record<string, unknown>>;
+    for (const key of ["x", "y", "w", "h", "alpha", "angle"]) {
+      expect(Number.isFinite(boundLayer[key]), `${key} 必须是有限数`).toBe(true);
+    }
+  });
+
+  it("未知算子与畸形算子条目只被忽略，不影响已知算子的解析", () => {
+    const bytes = buildPkg([
+      jsonEntry("project.json", { type: "scene", file: "scene.json" }),
+      jsonEntry("scene.json", {
+        general: { orthogonalprojection: { width: 1920, height: 1080 } },
+        objects: [
+          bg,
+          {
+            id: 2,
+            name: "birds",
+            particle: "p.json",
+            instanceoverride: { controlpoint1: "10 20 0" },
+          },
+        ],
+      }),
+      ...bgFiles(),
+      jsonEntry("p.json", {
+        maxcount: 8,
+        material: "p.material.json",
+        emitter: [{ name: "sphererandom", rate: 4 }],
+        initializer: [{ name: "lifetimerandom", min: 1, max: 1 }],
+        operator: [
+          { name: "movement" },
+          { name: "controlpointattract", controlpoint: 1, scale: 64, threshold: 512 },
+          { name: "__no_such_operator__", strength: 999 },
+          null,
+          42,
+        ],
+        renderer: [{ name: "sprite" }],
+      }),
+      jsonEntry("p.material.json", {
+        passes: [{ blending: "additive", shader: "genericparticle", textures: ["fog"] }],
+      }),
+      { path: "materials/fog.tex", bytes: png() },
+    ]);
+    const [sys] = (readScenePackage(bytes).manifest as { particles3d?: Array<Record<string, any>> })
+      .particles3d ?? [];
+    expect(sys).toBeTruthy();
+    expect(sys.attractions).toEqual([{ x: 10, y: 20, scale: 64, threshold: 512 }]);
+  });
+
+  it("重复 id 与父子环按文档顺序确定解析，不卡死", () => {
+    // 父子链遍历必须「首个同 id 对象胜出」且遇环即停：find 的顺序就是解析结果，
+    // 环上不能无限上溯（播放器会整帧卡死）。
+    const layers = layersOf(
+      scenePkg([
+        { id: 1, name: "dupA", image: "bg.image.json", origin: "100 100 0" },
+        { id: 1, name: "dupB", image: "bg.image.json", origin: "200 200 0" },
+        { id: 2, name: "child", parent: 1, image: "bg.image.json", origin: "10 10 0" },
+        { id: 3, name: "cycleA", parent: 4, image: "bg.image.json", origin: "0 0 0" },
+        { id: 4, name: "cycleB", parent: 3, image: "bg.image.json", origin: "0 0 0" },
+      ]),
+    );
+    expect(layers.map((layer) => layer.x)).toEqual([100, 200, 110, 0, 0]);
+  });
+});

@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import threading
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -502,6 +503,46 @@ def _split_dynamic(content: str) -> tuple[str, str]:
         base, dyn = content.split(DYNAMIC_MARKER, 1)
         return base.rstrip(), dyn.strip()
     return content, ""
+
+
+# 开场白段（2026-11-10 用户需求）：合集卡世界书里每个角色条目常带【开场白】，
+# 多个角色条目同时被召回时，模型会把各角色的开场白当成正文复述/逐个自我介绍。
+# 这里只认**行首标题**（【开场白】/【开场白·角色】/ # 开场白 / 开场白：），不碰正文里
+# 顺带提到「开场白」的句子；段体延续到下一个行首标题（【...】/# 标题）为止。
+_OPENING_HEADING_RE = re.compile(
+    r"^[ \t]*(?:[-*+][ \t]+)?"
+    r"(?:【\s*开场白[^】]*】|#{1,6}[ \t]*开场白|开场白[ \t]*[：:])[^\n]*$"
+)
+_SECTION_HEADING_RE = re.compile(
+    r"^[ \t]*(?:[-*+][ \t]+)?"
+    r"(?:【[^】\n]+】|#{1,6}[ \t]+\S[^\n]*)[ \t]*$"
+)
+
+
+def strip_opening_sections(text: str) -> str:
+    """剥掉世界书文本里的【开场白】段，其余内容逐字节保留。
+
+    场景：剧情模式的世界书注入。开场白是「第一次见面」的静态台词，长线剧情里既可能
+    让多个角色各自念开场白，也可能把已过去的初遇场景重新拉回当前时间线。只删除
+    「行首标题 + 段体」，不删正文里顺带出现的「开场白」三个字；无命中时原样返回，
+    保证前缀缓存不被无意义改写。
+    """
+    if not text:
+        return text
+    kept: list[str] = []
+    dropping = False
+    removed = False
+    for line in text.splitlines(keepends=True):
+        heading = line.strip()
+        if _OPENING_HEADING_RE.match(heading):
+            dropping = True
+            removed = True
+            continue
+        if _SECTION_HEADING_RE.match(heading):
+            dropping = False
+        if not dropping:
+            kept.append(line)
+    return "".join(kept) if removed else text
 
 
 def _session_file_read(state_path: str | None) -> dict[str, Any] | None:

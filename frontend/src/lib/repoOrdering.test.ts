@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { Repo } from "../stores/repos";
 import {
+  coverNeedsRepair,
+  isVideoCover,
+  latestGeneratedCover,
   orderReposByLatestGeneration,
   recordGeneratedRepoCover,
   replaceRepoCover,
@@ -12,6 +15,60 @@ const repo = (id: string, createdAt: number, coverAt?: number, parentId?: string
   createdAt,
   ...(coverAt === undefined ? {} : { coverAt }),
   ...(parentId === undefined ? {} : { parentId }),
+});
+
+describe("视频封面识别", () => {
+  it("识别直链、ComfyUI view 与 local-view 查询串里的视频", () => {
+    expect(isVideoCover("http://x/v.mp4")).toBe(true);
+    expect(isVideoCover("http://x/view?filename=out.webm&subfolder=")).toBe(true);
+    expect(isVideoCover("/local-view?path=D%3A%5Cwork%5Cv.mov")).toBe(true);
+    expect(isVideoCover("https://x/clip.MKV?token=1")).toBe(true);
+  });
+
+  it("图片、动图与无扩展名地址不误判", () => {
+    expect(isVideoCover("http://x/a.png")).toBe(false);
+    expect(isVideoCover("http://x/a.gif?filename=a.gif")).toBe(false);
+    expect(isVideoCover("/local-view?path=D%3A%5Cwork%5Ca.webp")).toBe(false);
+    expect(isVideoCover("http://x/media?id=abc")).toBe(false);
+    expect(isVideoCover(undefined)).toBe(false);
+  });
+});
+
+describe("历史封面回填", () => {
+  const item = (patch: {
+    source?: string;
+    mediaType?: "image" | "video" | "audio";
+    image_url?: string;
+    created_at?: number;
+  }) => ({ image_url: "/media/a.png", created_at: 100, ...patch });
+
+  it("类型跟着最新一条走：最新视频用视频封面，最新图片用图片封面", () => {
+    expect(latestGeneratedCover([
+      item({ mediaType: "image", created_at: 100 }),
+      item({ mediaType: "video", image_url: "/media/v.mp4", created_at: 200 }),
+    ])).toEqual({ url: "/media/v.mp4", at: 200 });
+    expect(latestGeneratedCover([
+      item({ mediaType: "video", image_url: "/media/v.mp4", created_at: 100 }),
+      item({ mediaType: "image", image_url: "/media/new.png", created_at: 200 }),
+    ])).toEqual({ url: "/media/new.png", at: 200 });
+  });
+
+  it("跳过联网/本地导入与音频资产", () => {
+    expect(latestGeneratedCover([
+      item({ source: "web", created_at: 300 }),
+      item({ source: "import", created_at: 400 }),
+      item({ mediaType: "audio", created_at: 500 }),
+      item({ mediaType: "image", created_at: 100 }),
+    ])).toEqual({ url: "/media/a.png", at: 100 });
+    expect(latestGeneratedCover([])).toBeNull();
+  });
+
+  it("只在新媒体晚于 coverAt 且地址不同时回填", () => {
+    expect(coverNeedsRepair("/old.png", 100, { url: "/v.mp4", at: 200 })).toBe(true);
+    expect(coverNeedsRepair("/v.mp4", 100, { url: "/v.mp4", at: 200 })).toBe(false);
+    expect(coverNeedsRepair("/old.png", 200, { url: "/v.mp4", at: 200 })).toBe(false);
+    expect(coverNeedsRepair(undefined, undefined, null)).toBe(false);
+  });
 });
 
 describe("repository generation ordering", () => {

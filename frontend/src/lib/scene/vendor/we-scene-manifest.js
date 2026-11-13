@@ -2157,18 +2157,24 @@ export function parseMdlRig(buf) {
         clips: parseMdlClips(buf, dv, q),
     };
 }
-function containsEmbeddedScript(value, seen = new Set()) {
-    if (value === null || typeof value !== 'object')
-        return false;
-    if (seen.has(value))
-        return false;
-    seen.add(value);
-    if (!Array.isArray(value)) {
-        const record = value;
-        if (typeof record.script === 'string' && record.script.trim() !== '')
+function containsEmbeddedScript(root) {
+    // 场景包是不可信输入：显式栈遍历，别用递归——JSON.parse 能解 5 万层嵌套数组，
+    // 递归到这里会抛 RangeError，让整张壁纸退回静态图（2026-11-07 畸形输入用例实锤）。
+    const seen = new Set();
+    const stack = [root];
+    while (stack.length > 0) {
+        const value = stack.pop();
+        if (value === null || typeof value !== 'object')
+            continue;
+        if (seen.has(value))
+            continue;
+        seen.add(value);
+        if (!Array.isArray(value) && typeof value.script === 'string' && value.script.trim() !== '')
             return true;
+        for (const child of Object.values(value))
+            stack.push(child);
     }
-    return Object.values(value).some(child => containsEmbeddedScript(child, seen));
+    return false;
 }
 function buildSceneManifestVia(access, token, userProperties) {
     let scene = access.readJson('scene.json');
@@ -2344,7 +2350,8 @@ function buildSceneManifestVia(access, token, userProperties) {
         val = bindingValueOf(val);
         if (typeof val === 'string') {
             const parts = val.trim().split(/\s+/).map(parseFloat);
-            if (parts.length >= 3 && !parts.some(isNaN))
+            // NaN 与 ±Infinity 都拒：用户属性来自 JS 对象，Infinity 能一路广播成图层宽高。
+            if (parts.length >= 3 && parts.every(Number.isFinite))
                 return [parts[0], parts[1], parts[2]];
         }
         return def;
@@ -2355,7 +2362,7 @@ function buildSceneManifestVia(access, token, userProperties) {
             return [val, val];
         if (typeof val === 'string') {
             const parts = val.trim().split(/\s+/).map(parseFloat);
-            if (parts.length >= 2 && !parts.some(isNaN))
+            if (parts.length >= 2 && parts.every(Number.isFinite)) // 同 parseVec3：拒 NaN/Infinity
                 return [parts[0], parts[1]];
         }
         return def;

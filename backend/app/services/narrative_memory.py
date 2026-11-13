@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import Any
 
 from app.services import structured_output
+from app.services.key_event_contract import KEY_EVENT_GUIDE
 from app.services.structured_contracts import RichChronicle
 
 CADENCE = 3              # 每 N 个 assistant 回合抽一次纪要（默认对齐剧情表每三条一统计）
@@ -50,6 +52,8 @@ class ChronicleEntry:
     dialogue: str = ""     # 本段关键对白（资产表展示，不进主上下文）
     characters: list[str] = field(default_factory=list)
     facts: list[dict[str, str]] = field(default_factory=list)
+    # 2026-11-10：关键事件候选（模型按事件类型判断，不落纪要库；由调用方写永久账本）。
+    key_events: list[dict[str, Any]] = field(default_factory=list)
     seq: int = 0           # 展示序号（派生值，不落库）：同层按回合排第几条，由 assign_sequence 填
 
     def card_id(self) -> str:
@@ -101,20 +105,25 @@ def should_summarize(last_summarized_turn: int, current_turn: int, *,
 
 SUMMARY_SYSTEM = (
     "你是剧情纪要员。把给定的最近三轮角色扮演整理成一条内容充实的事件纪要。"
-    "保留关键事件、因果、人物行动、关系与局势变化，不写状态数值。输出 JSON："
+    "保留关键事件、因果、人物行动、关系与局势变化，不写状态数值。"
+    "用户明确点名的婚礼/订婚/纪念日/生日与关键装扮（婚纱/礼服等）必须写进纪要，"
+    "不得被同窗口其它剧情挤掉。输出 JSON："
     "{\"overview\":\"一句概览，不超过30字\","
     "\"chronicle\":\"详细纪要，完整说明这三轮发生的事情与变化，不超过300字\","
     "\"dialogue\":\"重要对白原文，没有则空串\","
     "\"characters\":[\"实际出场人物\"],\"keywords\":[\"人物\",\"地点\",\"事件\"],"
+    "\"key_events\":[{\"title\":\"短标题\",\"detail\":\"关键细节\","
+    "\"turn\":9,\"characters\":[\"人物\"]}],"
     "\"facts\":[{\"subject\":\"实体\",\"predicate\":\"关系/世界属性\","
     "\"object\":\"值\",\"evidence\":\"剧情中的直接证据\"}]}。"
     "facts 只写可长期查询的世界/实体事实，不写好感、态度、心情、所在、身体或衣着状态；"
     "没有则空数组。"
-        "若本次剧情使某条既有事实过期（同一实体同一属性出现新状态），给该条 fact 附"
+    "若本次剧情使某条既有事实过期（同一实体同一属性出现新状态），给该条 fact 附"
     " \"supersedes_id\":\"<现存事实清单里的 id 前缀>\"——旧事实会收口但时间线保留；"
     "只允许引用清单里真实存在的 id，没有对应项或不确定就留空串，绝不编造；"
     "实体已消亡也写成一条新事实（如 状态=已覆灭），不存在删除。"
-"只输出 JSON。"
+    + KEY_EVENT_GUIDE +
+    "只输出 JSON。"
 )
 
 
@@ -163,6 +172,7 @@ def parse_rich_summary(raw: str, *, turn_start: int = 0,
         dialogue=payload.dialogue.strip()[:_DIALOGUE_MAX],
         characters=unique_list(payload.characters, 12), keywords=unique_list(payload.keywords, 16),
         facts=[fact.model_dump() for fact in payload.facts[:12]],
+        key_events=[event.model_dump() for event in payload.key_events[:8]],
         turn_start=turn_start, turn_end=turn_end,
     )
 
@@ -181,9 +191,11 @@ def chronicle_within_limits(overview: str, detail: str) -> bool:
 COMPRESS_SYSTEM = (
     "你是剧情纪要压缩员。把给定的超字数纪要改写到上限内："
     "overview 一句概览不超过30字；chronicle 详细纪要不超过300字。"
-    "保留关键事件、因果、人物行动与局势变化，删细节不删脉络。输出 JSON："
+    "保留关键事件、因果、人物行动与局势变化，删细节不删脉络；"
+    "婚礼/订婚/纪念日/生日与关键装扮（婚纱/礼服等）不得省略。输出 JSON："
     "{\"overview\":\"…\",\"chronicle\":\"…\",\"dialogue\":\"重要对白原文，没有则空串\","
-    "\"characters\":[\"实际出场人物\"],\"keywords\":[\"人物\",\"地点\",\"事件\"],\"facts\":[]}。"
+    "\"characters\":[\"实际出场人物\"],\"keywords\":[\"人物\",\"地点\",\"事件\"],"
+    "\"key_events\":[],\"facts\":[]}。"
     "只输出 JSON。"
 )
 

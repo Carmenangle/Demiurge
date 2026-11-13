@@ -102,7 +102,7 @@ def test_plan_compiler_approval内容型走自由循环并落checkpoint(tmp_path
 
     work = tmp_path / "作品"
     work.mkdir()
-    target = tmp_path / "note.txt"
+    target = work / "note.txt"
     chat = _fake_chat([
         {"tool": "file.write_text",
          "params": {"path": str(target), "content": "x"}},
@@ -136,10 +136,14 @@ def test_plan_compiler_approval内容型走自由循环并落checkpoint(tmp_path
     capability_sandbox._reset_for_tests()
 
 
-def test_approval_step_limit保留断点_继续可接续(tmp_path, monkeypatch):
-    """2026-09-07 治本（实锤：step_limit 后 checkpoint 被无条件 delete，
-    用户无法再接续）。修复后：_fabric_approval_word 只在 done 删断点，
-    step_limit/error 保留 running 断点；用户后续「继续」可 resumable 恢复。"""
+def test_running断点_step_limit保留并可接续(tmp_path, monkeypatch):
+    """2026-09-07 治本的独立回归：step_limit 后断点必须保留（running）且再接续得到进度。
+
+    2026-11-05 T3 拆刀：此前这条用「批准后连续写三次」制造 step_limit，而连续同参数
+    durable 写在新合同下第二次就会重新请求批准（一次一批一个动作），那条路径已不存在。
+    本用例改用**只读工具**（在域内、不触发批准）把循环跑到步数上限，从而把
+    「断点保留 / 可接续」与「审批粒度」两件事解耦——只测前者。
+    """
     from app.services import fabric_checkpoint
     monkeypatch.setattr(plan_tasks, "_agent_access_mode",
                         lambda: capability_sandbox.ACCESS_APPROVAL)
@@ -150,13 +154,10 @@ def test_approval_step_limit保留断点_继续可接续(tmp_path, monkeypatch):
 
     work = tmp_path / "作品"
     work.mkdir()
-    # 模型永远调工具不 done → step_limit
-    chat = _fake_chat([
-        {"tool": "file.write_text", "params": {"path": str(tmp_path / "x.txt"), "content": "x"}},
-        {"tool": "file.write_text", "params": {"path": str(tmp_path / "x.txt"), "content": "x"}},
-        {"tool": "file.write_text", "params": {"path": str(tmp_path / "x.txt"), "content": "x"}},
-        {"tool": "file.write_text", "params": {"path": str(tmp_path / "x.txt"), "content": "x"}},
-    ])
+    probe = work / "_prep"
+    probe.mkdir()
+    # 模型永远调同一个只读工具、永不 done → 全程不需要批准，纯粹跑到 step_limit
+    chat = _fake_chat([{"tool": "file.list_dir", "params": {"path": str(probe)}}])
     ctx = {
         "chat_base": "b", "chat_key": "k", "chat_model": "m",
         "workspace_mode": "story", "has_mcp": False, "agent_cfg": None,
@@ -167,17 +168,12 @@ def test_approval_step_limit保留断点_继续可接续(tmp_path, monkeypatch):
     _seed_already_asked(ctx)
 
     res = ag.plan_compiler_node(state)
-    # 首次 awaiting（第一个 write 被拦）
-    assert "需要批准" in res["result_text"]
-    assert fabric_checkpoint.pending(output_dir=str(work))
-
-    # 批准续跑 → 授予 write → 模型连续写 3 次后 step_limit
-    res2 = ag._fabric_approval_word("批准", ctx, str(work), [])
-    assert "step_limit" in res2["result_text"], f"应 step_limit 而非删除: {res2}"
+    assert "step_limit" in res["result_text"], f"应 step_limit 而非删除: {res}"
     # 关键断言：step_limit 后断点必须保留（running），用户可再接续
     pend = fabric_checkpoint.pending(output_dir=str(work))
     assert pend, "step_limit 后断点必须保留，不能删除"
     assert pend[0]["status"] == "running"
+    assert not pend[0].get("pending_tool"), "running 断点没有待批动作，不得携带 pending_tool"
     # 再接续：resumable 能取到（模拟用户「继续补写」重发）
     cp = fabric_checkpoint.resumable(output_dir=str(work), thread_id="work")
     assert cp is not None and cp["status"] == "running"
@@ -240,7 +236,7 @@ def test_批准过期租约自动续期续跑_断点不删进度保留(tmp_path,
 
     work = tmp_path / "作品"
     work.mkdir()
-    target = tmp_path / "note.txt"
+    target = work / "note.txt"
     chat = _fake_chat([
         {"tool": "file.write_text", "params": {"path": str(target), "content": "x"}},
         {"tool": "file.write_text", "params": {"path": str(target), "content": "x"}},
@@ -285,7 +281,7 @@ def test_批准租约已撤销时删断点并明确提示重发(tmp_path, monkey
     work.mkdir()
     chat = _fake_chat([
         {"tool": "file.write_text",
-         "params": {"path": str(tmp_path / "note.txt"), "content": "x"}},
+         "params": {"path": str(work / "note.txt"), "content": "x"}},
     ])
     ctx = {
         "chat_base": "b", "chat_key": "k", "chat_model": "m",
@@ -304,4 +300,94 @@ def test_批准租约已撤销时删断点并明确提示重发(tmp_path, monkey
     assert "审批失败" in res2["result_text"]
     assert "重新发起" in res2["result_text"], "必须告知出路：重发任务"
     assert not fabric_checkpoint.pending(output_dir=str(work)), "无法接续的断点应清理"
+    capability_sandbox._reset_for_tests()
+
+
+# ── 租约存储失败（2026-11-05 T2）────────────────────────────────────────────
+# 授权/撤销写盘失败 ≠ 授权失败：断点与已完成步骤必须保留，且不得宣称「已取消」。
+# 此前 except Exception → delete(cp["id"]) 把进度一起丢掉，用户只能从头再跑一遍。
+
+
+def _start_until_awaiting(tmp_path, monkeypatch):
+    """跑到「模型要写作品域内文件 → 落 awaiting_approval 断点」，返回作品根/目标路径/上下文。"""
+    monkeypatch.setattr(plan_tasks, "_agent_access_mode",
+                        lambda: capability_sandbox.ACCESS_APPROVAL)
+    store: dict = {}
+    monkeypatch.setattr(task_progress_store, "load", lambda ns: store.get(ns, {}))
+    monkeypatch.setattr(task_progress_store, "save",
+                        lambda ns, tasks, limit=100: store.update({ns: tasks}))
+
+    work = tmp_path / "作品"
+    work.mkdir()
+    target = work / "note.txt"
+    chat = _fake_chat([
+        {"tool": "file.write_text", "params": {"path": str(target), "content": "x"}},
+        {"tool": "file.write_text", "params": {"path": str(target), "content": "x"}},
+        {"done": True, "reply": "合集卡已整理完成"},
+    ])
+    ctx = {
+        "chat_base": "b", "chat_key": "k", "chat_model": "m",
+        "workspace_mode": "story", "has_mcp": False, "agent_cfg": None,
+        "message": "根据这本小说制作合集卡", "output_dir": str(work),
+        "repo_id": "work", "thread_id": "work", "chat_fn": chat,
+    }
+    _seed_already_asked(ctx)
+    res = ag.plan_compiler_node({"user_text": ctx["message"], "images": [], "_ctx": ctx})
+    assert "需要批准" in res["result_text"]
+    return work, target, ctx
+
+
+def test_批准时租约写盘失败断点保留并可重试(tmp_path, monkeypatch):
+    work, target, ctx = _start_until_awaiting(tmp_path, monkeypatch)
+    cp_before = fabric_checkpoint.pending(output_dir=str(work))[0]
+
+    failing = {"on": True}
+
+    def _boom(*_args, **_kwargs):
+        if failing["on"]:
+            raise OSError("注入：租约盘面写入失败")
+
+    monkeypatch.setattr(capability_sandbox, "_save_persisted", _boom)
+
+    res = ag._fabric_approval_word("批准", ctx, str(work), [])
+    assert "租约存储写入失败" in res["result_text"], res
+    assert "断点已保留" in res["result_text"], "必须给出「可重试」的出路"
+    assert not target.exists(), "授权没落住时不得执行被拦工具"
+
+    pend = fabric_checkpoint.pending(output_dir=str(work))
+    assert pend and pend[0]["id"] == cp_before["id"], "断点不得被删或换 id"
+    assert pend[0]["pending_tool"] == "file.write_text"
+
+    # 故障解除后重试「批准」：这才是 T2 要的闭环——失败可重试，不是进度报废
+    failing["on"] = False
+    res2 = ag._fabric_approval_word("批准", ctx, str(work), [])
+    assert "合集卡已整理完成" in res2["result_text"], res2
+    assert target.is_file()
+    assert not fabric_checkpoint.pending(output_dir=str(work))
+    capability_sandbox._reset_for_tests()
+
+
+def test_取消时租约写盘失败不宣称已取消(tmp_path, monkeypatch):
+    work, _target, ctx = _start_until_awaiting(tmp_path, monkeypatch)
+    lease_id = fabric_checkpoint.pending(output_dir=str(work))[0]["lease_id"]
+
+    failing = {"on": True}
+
+    def _boom(*_args, **_kwargs):
+        if failing["on"]:
+            raise OSError("注入：租约盘面写入失败")
+
+    monkeypatch.setattr(capability_sandbox, "_save_persisted", _boom)
+
+    res = ag._fabric_approval_word("取消", ctx, str(work), [])
+    assert "取消失败" in res["result_text"], res
+    assert "已取消" not in res["result_text"], "撤销没落住时不能报已取消"
+    assert fabric_checkpoint.pending(output_dir=str(work)), "断点必须留着等重试"
+    assert capability_sandbox.lease_registered(lease_id), "内存租约也不得半提交"
+
+    failing["on"] = False
+    res2 = ag._fabric_approval_word("取消", ctx, str(work), [])
+    assert "已取消智能编造" in res2["result_text"], res2
+    assert not fabric_checkpoint.pending(output_dir=str(work))
+    assert not capability_sandbox.lease_registered(lease_id), "重试取消必须真的撤销"
     capability_sandbox._reset_for_tests()

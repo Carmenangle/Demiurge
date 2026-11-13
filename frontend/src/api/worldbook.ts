@@ -45,8 +45,10 @@ export function worldbookDetail(base: string, name: string) {
   );
 }
 
+// 整本删除独立世界书。后端删之前先落一份 `<名>.json.bak-<时间戳>`（2026-11-05 防误删 ④）：
+// 备份没成功就**不删**（此时回 500，`backup` 为空）；成功时回备份文件名，界面要让用户看得见能找回。
 export function deleteWorldbook(base: string, name: string) {
-  return apiPost<{ ok: boolean }>("/worldbook/delete", { base, name });
+  return apiPost<{ ok: boolean; backup: string }>("/worldbook/delete", { base, name });
 }
 
 // ⑤ 条目级增删改。定位二选一：独立书 {base,name}；卡内嵌 {characterDir,cardName}

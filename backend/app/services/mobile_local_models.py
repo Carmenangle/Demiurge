@@ -26,12 +26,20 @@ MODEL_KEYS: tuple[str, ...] = (
     "activeChatModelId",
     "activeImageModelId",
     "activeVideoModelId",
+    "activeVlmPresetId",
+    "activeEmbedPresetId",
     *MODEL_OBJ_KEYS,
 )
 
 _LIST_KEYS = frozenset(MODEL_LIST_KEYS)
 _OBJ_KEYS = frozenset(MODEL_OBJ_KEYS)
-_ID_KEYS = frozenset({"activeChatModelId", "activeImageModelId", "activeVideoModelId"})
+_ID_KEYS = frozenset({
+    "activeChatModelId",
+    "activeImageModelId",
+    "activeVideoModelId",
+    "activeVlmPresetId",
+    "activeEmbedPresetId",
+})
 
 
 class LocalModelError(ValueError):
@@ -93,12 +101,11 @@ def write_models(patch: object) -> dict:
     前端会推一份按 stripSecrets 清空的副本，不能借此把手机上的真 key 抹掉。
     """
     incoming = _validate(patch)
-    state = repo_meta.load_user_state()
-    settings = dict(_settings(state))
+    settings = dict(_settings(repo_meta.load_user_state()))
     for key, value in incoming.items():
         settings[key] = keep_stored_secrets(value, settings.get(key), key)
-    state["settings"] = settings
-    repo_meta.save_user_state(state)
+    # 只写设置档：selection 缺席保留，作品索引住在 repos.json，不经这里。
+    repo_meta.save_settings(settings)
     return _pick(settings)
 
 

@@ -52,7 +52,7 @@ async function mount(
   vi.resetModules();
   vi.stubEnv("VITE_MOBILE_PROFILE", "1");  // 手机形态：联机只读与手机口径提示都在这条分支
   vi.stubEnv("VITE_API_BASE", "/api");
-  const fetchSpy = vi.fn(async (input: unknown) => {
+  const fetchSpy = vi.fn(async (input: unknown, _init?: { body?: string }) => {
     const url = String(input);
     if (url.includes("/mobile/remote")) {
       // pending＝后端迟迟不答（真机冷启动窗口）；fail＝连续失败（走重试后回落）
@@ -64,6 +64,17 @@ async function mount(
         json: async () => ({
           supported: true, enabled: active, active, token_set: true,
           base_url: active ? "http://192.0.2.10:8010" : "",
+        }),
+      };
+    }
+    if (url.includes("/comfyui/probe")) {
+      return {
+        ok: true,
+        json: async () => ({
+          items: [{
+            url: "https://cloud.example.com:8188", online: true,
+            running: 0, pending: 0, score: 0, latency_ms: 1,
+          }],
         }),
       };
     }
@@ -98,11 +109,18 @@ function button(label: string) {
     .find((b) => (b.textContent ?? "").includes(label)) as HTMLButtonElement | undefined;
 }
 
-// 面板里还有一个「联网搜索源」下拉：地址簿的三个按 aria-label 收窄
-function selects() {
+// 地址簿按模态三个 checkbox 组；machineText 用「默认」或机台名收窄。
+function routeCheckbox(label: string, machineText: string): HTMLInputElement | undefined {
+  const group = container?.querySelector(`[aria-label="${label}机台"]`);
+  const labels = Array.from(group?.querySelectorAll("label") ?? []);
+  const hit = labels.find((item) => (item.textContent ?? "").includes(machineText));
+  return hit?.querySelector("input[type='checkbox']") as HTMLInputElement | undefined;
+}
+
+function routeCheckboxes(): HTMLInputElement[] {
   return Array.from(
-    container?.querySelectorAll("select[aria-label$='机台']") ?? [],
-  ) as HTMLSelectElement[];
+    container?.querySelectorAll("[aria-label$='机台'] input[type='checkbox']") ?? [],
+  ) as HTMLInputElement[];
 }
 
 function deleteButtons() {
@@ -117,14 +135,6 @@ function setInput(el: HTMLInputElement, value: string) {
   });
 }
 
-function setSelect(el: HTMLSelectElement, value: string) {
-  const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!;
-  act(() => {
-    setter.call(el, value);
-    el.dispatchEvent(new Event("change", { bubbles: true }));
-  });
-}
-
 afterEach(() => {
   act(() => { root?.unmount(); });
   root = null;
@@ -135,33 +145,33 @@ afterEach(() => {
 });
 
 describe("PathsPanel · ComfyUI 地址簿（D 段）", () => {
-  it("额外机台进下拉；选择按模态写回 comfyRoute，选「默认」删键", async () => {
+  it("额外机台进多选池；按模态写回数组，全部取消后删键回默认", async () => {
     await mount({
       comfyExtra: [{ id: "m2", name: "云 A100", url: "https://cloud.example.com:8188" }],
       comfyRoute: { video: "m2" },
     });
-    const sel = selects();
-    expect(sel).toHaveLength(3);  // 图片 / 视频 / 配音
-    expect(sel.map((s) => s.value)).toEqual(["default", "m2", "default"]);
-    expect(Array.from(sel[0].options).map((o) => o.textContent)).toEqual([
-      "默认（http://127.0.0.1:8188）",
-      "云 A100（https://cloud.example.com:8188）",
-    ]);
+    expect(routeCheckbox("视频", "云 A100")?.checked).toBe(true);
+    expect(routeCheckbox("视频", "默认")?.checked).toBe(false);
+    expect(routeCheckbox("图片", "默认")?.checked).toBe(true);
 
-    setSelect(sel[0], "m2");
-    expect(current.comfyRoute).toEqual({ video: "m2", image: "m2" });
+    act(() => { routeCheckbox("图片", "云 A100")!.click(); });
+    expect(current.comfyRoute?.image).toEqual(["default", "m2"]);
 
-    setSelect(sel[0], "default");
-    expect(current.comfyRoute?.image).toBeUndefined();
+    act(() => { routeCheckbox("图片", "默认")!.click(); });
+    expect(current.comfyRoute?.image).toEqual(["m2"]);
+
+    act(() => { routeCheckbox("图片", "云 A100")!.click(); });
     expect("image" in (current.comfyRoute || {})).toBe(false);
   });
 
-  it("路由指向已删机台 ⇒ 下拉显示「默认」（与实际解析一致，不留死引用）", async () => {
+  it("路由指向已删机台 ⇒ 多选池回落到「默认」（与实际解析一致，不留死引用）", async () => {
     await mount({
       comfyExtra: [],
       comfyRoute: { video: "gone" },
     });
-    expect(selects().map((s) => s.value)).toEqual(["default", "default", "default"]);
+    expect(routeCheckbox("图片", "默认")?.checked).toBe(true);
+    expect(routeCheckbox("视频", "默认")?.checked).toBe(true);
+    expect(routeCheckbox("配音", "默认")?.checked).toBe(true);
   });
 
   it("新增机台落成空条目；改名/改地址写回草稿", async () => {
@@ -193,10 +203,10 @@ describe("PathsPanel · ComfyUI 地址簿（D 段）", () => {
     expect(deleteButtons()).toHaveLength(2);
     act(() => { deleteButtons()[0].click(); });
     expect(current.comfyExtra!.map((m) => m.id)).toEqual(["m3"]);
-    expect(current.comfyRoute).toEqual({ image: "m3" });
+    expect(current.comfyRoute).toEqual({ image: ["m3"] });
   });
 
-  it("探测额外机台：走 /comfyui/status 问那台机，连上后给出结论", async () => {
+  it("探测额外机台：走 /comfyui/probe 问队列，连上后给出运行/排队结论", async () => {
     const fetchSpy = await mount({
       comfyExtra: [{ id: "m2", name: "云", url: "https://cloud.example.com:8188" }],
     });
@@ -204,11 +214,13 @@ describe("PathsPanel · ComfyUI 地址簿（D 段）", () => {
     await flush();
     const hit = fetchSpy.mock.calls.some((call) => {
       const url = String(call[0]);
-      return url.includes("/comfyui/status")
-        && url.includes(encodeURIComponent("https://cloud.example.com:8188"));
+      const body = String((call[1] as { body?: string } | undefined)?.body ?? "");
+      return url.includes("/comfyui/probe")
+        && body.includes("https://cloud.example.com:8188");
     });
     expect(hit).toBe(true);
     expect(text()).toContain("已连通");
+    expect(text()).toContain("排队");
   });
 
   it("默认地址非回环 ⇒ 预警原生画布不可用；回环地址不预警", async () => {
@@ -230,7 +242,7 @@ describe("PathsPanel · ComfyUI 地址簿（D 段）", () => {
     expect(text()).toContain("真源在电脑");
     expect(button("新增机台")!.disabled).toBe(true);
     expect(deleteButtons()[0].disabled).toBe(true);
-    expect(selects().every((s) => s.disabled)).toBe(true);
+    expect(routeCheckboxes().every((s) => s.disabled)).toBe(true);
   });
 
   it("未联机 ⇒ 地址簿可编辑", async () => {
@@ -239,7 +251,7 @@ describe("PathsPanel · ComfyUI 地址簿（D 段）", () => {
     });
     expect(button("新增机台")!.disabled).toBe(false);
     expect(deleteButtons()[0].disabled).toBe(false);
-    expect(selects().some((s) => s.disabled)).toBe(false);
+    expect(routeCheckboxes().some((s) => s.disabled)).toBe(false);
   });
 
   // 真机 0.30.14-beta 实测：开机头几秒（电脑掉线时窗口更长）地址簿先按可编辑渲染，
@@ -247,7 +259,7 @@ describe("PathsPanel · ComfyUI 地址簿（D 段）", () => {
   it("联机状态还没读到时先按只读渲染（且不说「真源在电脑」）", async () => {
     await mount({}, { remote: "pending" });
     expect(button("新增机台")!.disabled).toBe(true);
-    expect(selects().every((s) => s.disabled)).toBe(true);
+    expect(routeCheckboxes().every((s) => s.disabled)).toBe(true);
     expect(text()).not.toContain("真源在电脑");
   });
 
@@ -259,7 +271,7 @@ describe("PathsPanel · ComfyUI 地址簿（D 段）", () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(1300); });
       await act(async () => { await vi.advanceTimersByTimeAsync(1300); });
       expect(button("新增机台")!.disabled).toBe(false);
-      expect(selects().some((s) => s.disabled)).toBe(false);
+      expect(routeCheckboxes().some((s) => s.disabled)).toBe(false);
     } finally {
       vi.useRealTimers();
     }

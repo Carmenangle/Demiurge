@@ -45,7 +45,8 @@ class _AgentStub:
                 raise ev[1]
 
 
-def _patch_build(monkeypatch, events, memory_mode="external_turn", history=None, **overrides):
+def _patch_build(monkeypatch, events, memory_mode="external_turn", history=None,
+                 stream_history=None, **overrides):
     stub = _AgentStub(events)
     seen_kwargs: dict = {}
 
@@ -66,6 +67,8 @@ def _patch_build(monkeypatch, events, memory_mode="external_turn", history=None,
         gen_base="gb", gen_key="gk", gen_model="gm",
         memory_mode=memory_mode,
     )
+    if stream_history is not None:
+        kwargs["history"] = stream_history
     kwargs.update(overrides)
     return list(image_agent.stream_agent(**kwargs)), stub, seen_kwargs
 
@@ -181,6 +184,51 @@ def test_external_turn历史注入在输入之前(monkeypatch):
     msgs = stub.payload["messages"]
     assert [type(m) for m in msgs] == [HumanMessage, AIMessage, HumanMessage]
     assert [m.content for m in msgs] == ["上一问", "上一答", "画一张图"]
+
+
+def test_external_turn优先使用调用方已裁剪历史(monkeypatch):
+    """传入 history 时不再读 checkpoint 全量历史（长聊由主链预算负责裁剪）。"""
+    checkpoint_history = [{"role": "user", "content": "旧 checkpoint 全量"}]
+    budgeted = [
+        {"role": "user", "content": "预算内上一问"},
+        {"role": "assistant", "content": "预算内上一答"},
+    ]
+    chunk = lambda text: types.SimpleNamespace(content=text)  # noqa: E731
+    events = [("chunk", chunk("好"), {"langgraph_node": "model"})]
+
+    events_out, stub, _kw = _patch_build(
+        monkeypatch, events, memory_mode="external_turn",
+        history=checkpoint_history, stream_history=budgeted,
+    )
+
+    assert events_out == [{"delta": "好"}]
+    contents = [m.content for m in stub.payload["messages"]]
+    assert contents == ["预算内上一问", "预算内上一答", "画一张图"]
+
+
+def test_external_turn_fallback_prefers_snapshot(monkeypatch):
+    """P6：聊天停写 checkpoint 后，兜底先读快照；快照存在时不再读 checkpoint。"""
+    from app.services import chat_snapshot
+
+    monkeypatch.setattr(
+        chat_snapshot, "load_prompt_history",
+        lambda _tid: [{"role": "user", "content": "快照上一问"}],
+    )
+    monkeypatch.setattr(
+        chat_memory, "get_history",
+        lambda _tid: (_ for _ in ()).throw(AssertionError("不应读 checkpoint")),
+    )
+    chunk = lambda text: types.SimpleNamespace(content=text)  # noqa: E731
+    stub = _AgentStub([("chunk", chunk("好"), {"langgraph_node": "model"})])
+    monkeypatch.setattr(image_agent, "_build", lambda *a, **k: stub)
+
+    out = list(image_agent.stream_agent(
+        "t1", "画一张图", None, "cb", "ck", "cm", "gb", "gk", "gm",
+        memory_mode="external_turn",
+    ))
+
+    assert out == [{"delta": "好"}]
+    assert [m.content for m in stub.payload["messages"]] == ["快照上一问", "画一张图"]
 
 
 def test_入参透传_build_与repo_id回退thread_id(monkeypatch):

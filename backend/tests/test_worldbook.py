@@ -33,6 +33,46 @@ def test_parse_empty():
     assert wb.parse_entries({"entries": []}) == []
 
 
+# ── 剧情模式开场白剥离（2026-11-10 用户需求）─────────────────────────────────
+def test_strip_opening_sections_removes_section_until_next_heading():
+    text = (
+        "【人物设定】\n雪影之主，冷面刺客。\n"
+        "【开场白】\n「你就是那个孽子?」\n*她按上刀柄。*\n"
+        "【好感分阶】\n阶段·冰霜杀意"
+    )
+    out = wb.strip_opening_sections(text)
+    assert "人物设定" in out and "好感分阶" in out
+    assert "开场白" not in out and "孽子" not in out and "按上刀柄" not in out
+
+
+def test_strip_opening_sections_leaves_inline_mentions_and_missing_case():
+    inline = "【人物设定】\n她的开场白很温柔，常拿这句话试探人。"
+    assert wb.strip_opening_sections(inline) == inline
+    assert wb.strip_opening_sections("") == ""
+    assert wb.strip_opening_sections("【设定】\n正常内容") == "【设定】\n正常内容"
+
+
+def test_strip_opening_sections_handles_multiple_sections_and_eof():
+    text = "【开场白】\n第一段\n【设定】\n保留\n【开场白·乙】\n第二段"
+    out = wb.strip_opening_sections(text)
+    assert "第一段" not in out and "第二段" not in out
+    assert "【设定】\n保留" in out
+
+
+def test_strip_opening_sections_supports_markdown_headings():
+    text = "## 角色\n# 开场白\n初遇台词\n## 性格\n冷淡"
+    out = wb.strip_opening_sections(text)
+    assert "初遇台词" not in out
+    assert "## 角色" in out and "## 性格" in out and "冷淡" in out
+
+
+def test_strip_opening_sections_supports_bullet_prefixed_headings():
+    text = "- 【开场白】\n初遇台词\n- 【设定】\n保留"
+    out = wb.strip_opening_sections(text)
+    assert "初遇台词" not in out
+    assert "- 【设定】\n保留" in out
+
+
 def test_assemble_constant_always_included(monkeypatch):
     # 检索置空 → 只剩 constant
     monkeypatch.setattr(wb, "_retrieve", lambda *a, **k: [])

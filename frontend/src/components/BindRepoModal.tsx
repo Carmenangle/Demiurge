@@ -25,7 +25,9 @@ export function BindRepoModal({
   const [cards, setCards] = useState<CardSummary[]>([]);
   const [books, setBooks] = useState<WorldbookSummary[]>([]);
   const [presets, setPresets] = useState<PresetSummary[]>([]);
-  const initialCards = repo.cardNames?.length ? repo.cardNames : (repo.cardName ? [repo.cardName] : []);
+  const initialCards = repo.cardsUnbound
+    ? []
+    : (repo.cardNames?.length ? repo.cardNames : (repo.cardName ? [repo.cardName] : []));
   const [cardNames, setCardNames] = useState<string[]>(initialCards);
   const [openingCardName, setOpeningCardName] = useState(
     initialCards.includes(repo.openingCardName || "") ? repo.openingCardName! : initialCards[0] || "",

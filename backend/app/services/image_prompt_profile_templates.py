@@ -67,6 +67,14 @@ _COMMON = (
     "发型、发饰、五官、体型、当前服装和鞋袜翻译成具体英文，禁止用 preserve identity、"
     "established appearance、stable appearance 或 current clothing condition 等空泛身份锁代替。"
     "角色条目的基础穿着只作默认值，剧情正文或 wardrobe 中的脱下、破损、凌乱、沾污等当前状态优先。"
+    # 【连续锚点】（2026-11-12 用户口径）：手工逐镜写 anchor 只能救一次，生产必须
+    # 自动派生并让每一镜遵守；否则同场景的门/窗/台/毯与同角色服装会各画一套。
+    "输入若带 scene_anchor（同场景空间/陈设锚点）与 wardrobe_anchor（同角色当前服装锚点），"
+    "必须保持其空间地标、陈设位置与服装轮廓：同场景所有镜头共用同一套门/窗/台/毯/墙与"
+    "固定道具的位置关系，不得为了容纳锚点而新增未出现的门/窗/道具，也不得改变机位去回避锚点；"
+    "只取与当前镜头可见范围相符的锚点部分，近景可以只露局部。"
+    "wardrobe_anchor 优先于角色条目的基础穿着；只有 narrative 明确写出的换装、脱下、破损、"
+    "沾污才能改变它。锚点与 narrative 冲突时，以 narrative 的当前状态为准并保留锚点的空间关系。"
     "任何剧情关键物件若没有可靠英文通用名，必须用材质、几何外形与尺度、可见结构或运动方式、当前功能及"
     "与人物/环境的交互来建立可画身份；只采用输入证据支持的维度，不猜内部原理，也不得因缺少术语而省略。"
     "人物、服装、动作、镜头、光影、背景和构图必须彼此一致。"
@@ -156,6 +164,13 @@ _ANIMA_SYSTEM = _COMMON + (
     "光线传播、细节主次和叙事情绪；最高细节留给剧情关键主体或关键部位，其余内容按层级逐渐概括。"
     "不得写 Her body:、Bound:、Position:、Appearance:、Action: 等标题式小段或任何冒号标签；"
     "同一句内的可见属性只用英文逗号连接；不得输出 JSON 之外的内容。"
+    # 【定格·静态一帧】（2026-11-10 用户实锤：anima 档缺这条，镜1 被写成
+    # 「走过去→坐下→摊开」的过程）：图片是单帧结果，过程留给视频线。
+    "【定格·静态一帧】把这一刻**定格**成一张静止画面：只写这一帧里**已经呈现**的状态，用静态陈述句；"
+    "不写动作的开始、过程、先后或结果，不写时间推进（begins to / starts to / then / before / after / "
+    "continues to / slowly / gradually / is about to 这类），也不写「即将发生」的动作。"
+    "第一行动作 tag 只写定格姿势（standing / sitting / kneeling / leaning / lying），"
+    "不写 walking / entering / turning / reaching 等过程词；过程留给视频线。"
     # 【事实边界】（2026-09-20 用户口径）：三档在**同一份窗口**下会各自脑补出互斥的场景——
     # L1 真机实锤：anima 写 `teacher office / wooden desk`、natural 与 niji 写
     # `bed / mattress / bedside lamp / dark bedroom`，而原文是**教室**（窗口 59 字里没有地点）。

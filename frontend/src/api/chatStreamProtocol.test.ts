@@ -35,6 +35,73 @@ describe("chat stream protocol", () => {
       .toEqual({ type: "trace", text: "🧭 主管分派 → 智能编造计划" });
   });
 
+  it("decodes chat room messages and drops empty text (2026-11-09)", () => {
+    expect(decodeChatStreamEvent(event("chat_messages", {
+      messages: [
+        { id: "m1", speaker: "甲", text: " 你好 " },
+        { speaker: "乙", text: "   " },
+      ],
+    }))).toEqual({
+      type: "chat_messages",
+      messages: [{ id: "m1", speaker: "甲", text: "你好" }],
+    });
+    expect(decodeChatStreamEvent(event("chat_messages", {
+      messages: [{
+        id: "m2", speaker: "甲", text: "看。",
+        media_request: { kind: "image", prompt: "撩起衣角的自拍" },
+      }],
+    }))).toEqual({
+      type: "chat_messages",
+      messages: [{
+        id: "m2", speaker: "甲", text: "看。",
+        media_request: { kind: "image", prompt: "撩起衣角的自拍" },
+      }],
+    });
+    expect(decodeChatStreamEvent(event("chat_messages", {})))
+      .toEqual({ type: "chat_messages", messages: [] });
+  });
+
+  it("preserves avatar flag on special-outfit selfies (2026-11-10)", () => {
+    expect(decodeChatStreamEvent(event("media_request", {
+      kind: "image", prompt: "婚纱自拍", avatar: true,
+    }))).toEqual({
+      type: "media_request", kind: "image", prompt: "婚纱自拍", avatar: true,
+    });
+    expect(decodeChatStreamEvent(event("chat_messages", {
+      messages: [{
+        id: "m3", speaker: "腓特烈大帝", text: "看。",
+        media_request: { kind: "image", prompt: "婚纱自拍", avatar: true },
+      }],
+    }))).toEqual({
+      type: "chat_messages",
+      messages: [{
+        id: "m3", speaker: "腓特烈大帝", text: "看。",
+        media_request: { kind: "image", prompt: "婚纱自拍", avatar: true },
+      }],
+    });
+  });
+
+  it("preserves appearance anchor on selfie requests (2026-11-11)", () => {
+    const appearance = "腓特烈大帝：【外貌】暗黄色长发；暗黄色眼睛";
+    expect(decodeChatStreamEvent(event("media_request", {
+      kind: "image", prompt: "婚纱自拍", appearance,
+    }))).toEqual({
+      type: "media_request", kind: "image", prompt: "婚纱自拍", appearance,
+    });
+    expect(decodeChatStreamEvent(event("chat_messages", {
+      messages: [{
+        id: "m4", speaker: "腓特烈大帝", text: "看。",
+        media_request: { kind: "image", prompt: "婚纱自拍", appearance },
+      }],
+    }))).toEqual({
+      type: "chat_messages",
+      messages: [{
+        id: "m4", speaker: "腓特烈大帝", text: "看。",
+        media_request: { kind: "image", prompt: "婚纱自拍", appearance },
+      }],
+    });
+  });
+
   it("rejects unknown versions and event types", () => {
     expect(() => decodeChatStreamEvent({ ...event("delta", { text: "x" }), version: 2 }))
       .toThrow("不支持的对话流协议");

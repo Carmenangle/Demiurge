@@ -40,6 +40,15 @@ class TemporalFactCandidate(BaseModel):
     supersedes_id: str = ""
 
 
+class KeyEventCandidate(BaseModel):
+    """关键事件/纪念装扮候选：由纪要/重建模型按事件类型判断，不靠穷举词表。"""
+
+    title: str = ""
+    detail: str = ""
+    turn: int = 0
+    characters: list[str] = Field(default_factory=list)
+
+
 class RichChronicle(BaseModel):
     overview: str = ""
     chronicle: str = ""
@@ -48,6 +57,7 @@ class RichChronicle(BaseModel):
     characters: list[str] = Field(default_factory=list)
     keywords: list[str] = Field(default_factory=list)
     facts: list[TemporalFactCandidate] = Field(default_factory=list)
+    key_events: list[KeyEventCandidate] = Field(default_factory=list)
 
     @field_validator("overview", "chronicle", "summary", "dialogue", mode="before")
     @classmethod
@@ -68,6 +78,7 @@ class RichChronicle(BaseModel):
 class ManualFillResult(BaseModel):
     ops: list[dict[str, Any]] = Field(default_factory=list)
     chronicles: list[RichChronicle] = Field(default_factory=list)
+    key_events: list[KeyEventCandidate] = Field(default_factory=list)
 
 
 class PlanStep(BaseModel):

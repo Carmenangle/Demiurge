@@ -326,6 +326,10 @@ class TurnExecutionHooks:
     # 与 continue_generate 分开是**刻意**的：截断续写给模型的指令是「闭合 </content>」，
     # 剧情续写给的是「接着往下写」，两者语义不同，必须由接线侧显式选（不靠猜）。
     continue_story: Callable[[str], str] | None = None
+    # 未遂对账续写（可选，2026-11-06）：入参=(续写预填串, 未落实的裁定列表)，返回=续写调用
+    # 的原始输出；缺省（None）＝该闸关闭，行为逐字节等于旧版。与 continue_story 再分开一次
+    # 是同一理由：此处的指令是「把这次尝试写成未遂/受挫」，不是泛泛的「接着写」。
+    continue_verdict: Callable[[str, list[dict]], str] | None = None
 
 
 
@@ -637,15 +641,47 @@ def open_content_for_continuation(reply: str) -> str:
     return head + rest[:matches[-1].start()].rstrip("\r\n")
 
 
-def _try_story_continuation(turn: TurnExecution, hooks: TurnExecutionHooks,
-                            prefill: str, reason: str) -> str:
-    """剧情没写完时的续写（**非致命**）：契约与截断续写一致，差异有三——
+def _stitch_story_continuation(turn: TurnExecution, hooks: TurnExecutionHooks,
+                               prefill: str, continuation: str, *, label: str) -> str:
+    """在**已合格正文**上拼接一段续写（剧情闸与未遂对账闸共用，2026-11-06 抽出）。
 
+    契约与截断续写一致，差异有三——
     ① 半句**不回退**：`truncate_to_sentence_boundary` 会把「没写完的尾巴」切掉，而这条
        尾巴正是要接上的东西；
     ② 模型画蛇添足重开 `<content>` 时只摘掉**开头**那个开标签（防拼出嵌套 content）；
     ③ 失败一律返回空串——调用方按「照原样发布」处理，不判死、不整段重掷（正文已合格）。
+    `label` 只影响提示文案（「剧情续写」/「裁定续写」），拼接契约一字不差。
     """
+    hooks.generated(continuation)  # 每次生成（含续写）都留痕
+    body = _CONTENT_OPEN_LEAD_RE.sub("", _strip_think(continuation).lstrip(), count=1)
+    if re.search(r"<content\b", body, re.I):
+        # 续写里又插了一个 <content> 开标签（**开头**那个已被摘掉）⇒ 正文会留下字面标签，
+        # 宁可不要这段续写。判定只作用于续写输出：预填里那个 <content> 本就在，不算重复。
+        _selfheal_notice(turn, hooks, f"⚠️ {label}重复输出了 <content> 标签，按已生成正文发布")
+        return ""
+    added = re.split(r"</content\s*>", body, maxsplit=1, flags=re.I)[0]
+    added = re.sub(r"<content\b[^>]*>", "", added, flags=re.I)
+    if len(added.strip()) < CONTINUATION_MIN_NEW_CHARS:
+        _selfheal_notice(turn, hooks, f"⚠️ {label}无有效新增正文（空回/懒闭合），按已生成正文发布")
+        return ""
+    assembled = prefill + body
+    try:
+        ensure_complete_visible_content(assembled)
+    except TruncatedRoleplayOutput as exc:
+        if _content_open_unclosed(assembled):
+            closed = _autoclose_content(assembled)
+            if closed:
+                _selfheal_notice(turn, hooks, f"⚠️ {label}只差闭合标签，已补 </content>")
+                return closed
+        _selfheal_notice(turn, hooks, f"⚠️ {exc}（{label}后结构不完整），按已生成正文发布")
+        return ""
+    _selfheal_notice(turn, hooks, f"⚠️ {label}完（补写 {len(added.strip())} 字）")
+    return assembled
+
+
+def _try_story_continuation(turn: TurnExecution, hooks: TurnExecutionHooks,
+                            prefill: str, reason: str) -> str:
+    """剧情没写完时的续写（**非致命**；拼接契约见 `_stitch_story_continuation`）。"""
     _selfheal_notice(turn, hooks, f"⚠️ {reason}，正在续写补全剧情…")
     continue_story = hooks.continue_story
     if continue_story is None:  # 防御：调用方已判定接线后才进来
@@ -655,31 +691,86 @@ def _try_story_continuation(turn: TurnExecution, hooks: TurnExecutionHooks,
     except Exception as exc:  # noqa: BLE001 - 续写失败不影响已合格的正文
         _selfheal_notice(turn, hooks, f"⚠️ 剧情续写调用失败（{exc}），按已生成正文发布")
         return ""
-    hooks.generated(continuation)  # 每次生成（含续写）都留痕
-    body = _CONTENT_OPEN_LEAD_RE.sub("", _strip_think(continuation).lstrip(), count=1)
-    if re.search(r"<content\b", body, re.I):
-        # 续写里又插了一个 <content> 开标签（**开头**那个已被摘掉）⇒ 正文会留下字面标签，
-        # 宁可不要这段续写。判定只作用于续写输出：预填里那个 <content> 本就在，不算重复。
-        _selfheal_notice(turn, hooks, "⚠️ 剧情续写重复输出了 <content> 标签，按已生成正文发布")
-        return ""
-    added = re.split(r"</content\s*>", body, maxsplit=1, flags=re.I)[0]
-    added = re.sub(r"<content\b[^>]*>", "", added, flags=re.I)
-    if len(added.strip()) < CONTINUATION_MIN_NEW_CHARS:
-        _selfheal_notice(turn, hooks, "⚠️ 剧情续写无有效新增正文（空回/懒闭合），按已生成正文发布")
-        return ""
-    assembled = prefill + body
+    return _stitch_story_continuation(turn, hooks, prefill, continuation, label="剧情续写")
+
+
+def _clear_own_notices(turn: TurnExecution, start: int) -> None:
+    """只清本闸自己登记过的进度提示（不碰其他模块的 ⚠️ 告警/诊断）。"""
+    own = turn.selfheal_notices[start:]
+    del turn.selfheal_notices[start:]
+    for line in own:
+        for index in range(len(turn.trace) - 1, -1, -1):
+            if turn.trace[index] == line:
+                del turn.trace[index]
+                break
+
+
+def _repair_verdict_attempts(turn: TurnExecution, hooks: TurnExecutionHooks, reply: str,
+                             *, now: Callable[[], float] = time.monotonic) -> str:
+    """未遂对账回合闸（2026-11-06 用户定案）：判失败却写成得手 ⇒ 续写纠正（**非致命**）。
+
+    只报告臂（`narrative_ci` 的 `npc_verdict_break`）实测有 56% 的违规率，那是**生成侧**
+    问题；本闸把同一判据接到回合流水线上，命中后在**同一份正文**上续写，把该尝试写成
+    未遂/受挫。纪律与剧情完整度闸同源：
+    - **只续写、不重掷**：结构已合格的正文绝不作废；
+    - **非致命**：补不动/调用失败按原样发布，只留一条汇总；
+    - **预算复用 `selfheal_attempts`**（0＝关闭），但每轮**最多一次**调用——
+      续写后仍违规不追打（词表判据有 2/11 假阳，追打等于拿钱换假阳）；
+    - 用户停止 ⇒ 不再花任何调用；未接线（`continue_verdict=None`）⇒ 逐字节等于旧行为。
+    """
+    continue_verdict = hooks.continue_verdict
+    if continue_verdict is None:
+        return reply
+    if max(0, min(5, int(turn.selfheal_attempts))) <= 0:
+        return reply
+    claims = turn.ctx.get("_agency_npc_claims")
+    if not claims:
+        return reply
+    from app.services import narrative_ci, roleplay_agency
+
+    violations = narrative_ci.violating_verdict_claims(
+        reply, claims,
+        scene_snapshot=roleplay_agency.extract_status_snapshot(reply))
+    if not violations:
+        return reply
+    if user_interrupted(turn.ctx):
+        turn.trace.append("⏹ 裁定续写已中止（用户停止，按已生成正文发布）")
+        return reply
+    prefill = open_content_for_continuation(reply)
+    if not prefill:
+        return reply
+    names = "、".join(dict.fromkeys(
+        str(claim.get("actor") or "").strip() for claim in violations
+        if str(claim.get("actor") or "").strip()))
+    notices_start = len(turn.selfheal_notices)
+    _selfheal_notice(turn, hooks, f"⚠️ 裁定未落实（{names}），正在续写纠正…")
+    _set_selfheal_deadline(turn.ctx, now() + SELFHEAL_CALL_TIMEOUT_SECONDS)
     try:
-        ensure_complete_visible_content(assembled)
-    except TruncatedRoleplayOutput as exc:
-        if _content_open_unclosed(assembled):
-            closed = _autoclose_content(assembled)
-            if closed:
-                _selfheal_notice(turn, hooks, "⚠️ 剧情续写只差闭合标签，已补 </content>")
-                return closed
-        _selfheal_notice(turn, hooks, f"⚠️ {exc}（剧情续写后结构不完整），按已生成正文发布")
-        return ""
-    _selfheal_notice(turn, hooks, f"⚠️ 剧情续写完（补写 {len(added.strip())} 字）")
-    return assembled
+        continuation = continue_verdict(prefill, violations) or ""
+    except Exception as exc:  # noqa: BLE001 - 续写失败不影响已合格的正文
+        _selfheal_notice(turn, hooks, f"⚠️ 裁定续写调用失败（{exc}），按已生成正文发布")
+        continuation = ""
+    finally:
+        _set_selfheal_deadline(turn.ctx, None)
+    candidate = ""
+    if continuation:
+        candidate = _stitch_story_continuation(
+            turn, hooks, prefill, continuation, label="裁定续写")
+    _clear_own_notices(turn, notices_start)
+    if not candidate:
+        turn.trace.append(
+            f"⚠️ 未遂对账：{len(violations)} 条裁定未落实，续写未生效（按当前正文发布）")
+        return reply
+    remaining = narrative_ci.violating_verdict_claims(
+        candidate, violations,
+        scene_snapshot=roleplay_agency.extract_status_snapshot(candidate))
+    if remaining:
+        turn.trace.append(
+            f"⚠️ 未遂对账：已回灌 {len(violations)} 条裁定续写，"
+            f"仍有 {len(remaining)} 条未检出未遂/受挫（按当前正文发布）")
+    else:
+        turn.trace.append(f"🔧 未遂对账：已回灌 {len(violations)} 条裁定并续写纠正")
+    return candidate
 
 
 def _complete_story(turn: TurnExecution, hooks: TurnExecutionHooks, reply: str,
@@ -906,8 +997,10 @@ def _selfheal_loop(turn: TurnExecution, hooks: TurnExecutionHooks, reply: str,
     # ⚠ 拼接语义与截断自愈**完全一致**（用户明令）：仍在既有正文上续写
     # （`open_content_for_continuation` ＋ `_try_story_continuation`），**不回退句尾、
     # 不整段重掷**；非致命——补不动／预算用尽一律按当前正文发布，绝不作废已付费正文。
-    # 预算＝`selfheal_attempts`（与截断自愈同源设置，0＝关闭）；两段各自计费上界
-    # ⇒ 单轮附加调用 ≤ 2 × selfheal_attempts（截断自愈 ≤ N ＋ 剧情续写 ≤ N）。
+    # 预算＝`selfheal_attempts`（与截断自愈同源设置，0＝关闭）；三段各自计费上界
+    # ⇒ 单轮附加调用 ≤ 2 × selfheal_attempts ＋ 1（未遂对账每轮最多一次）。
+    # 未遂对账排在剧情闸**之前**：它的续写本身就在往下写剧情，倒序会白烧一次调用。
+    reply = _repair_verdict_attempts(turn, hooks, reply, now=now)
     reply = _complete_story(turn, hooks, reply, now=now)
     return finalize_turn(TurnFinalization(
         ctx=turn.ctx,
@@ -973,6 +1066,9 @@ def execute_turn(turn: TurnExecution, hooks: TurnExecutionHooks,
     if meta_leaks:
         turn.trace.append(
             f"⚠️ 正文元话语残留已剥离 {len(meta_leaks)} 行：{meta_leaks[0][:40]}")
+    # 未遂对账闸（2026-11-06 用户定案）：掷骰失败却写成得手 ⇒ 在同一份正文上续写纠正；
+    # 补不动按原样发布（非致命、不整段重掷）。排在剧情闸之前，只判一次。
+    reply = _repair_verdict_attempts(turn, hooks, reply, now=now)
     # 剧情完整度闸（2026-09-21 用户定案）：结构合格 ≠ 剧情写完。判为「没写完」就再续写一轮
     # （复用截断续写的拼接契约），补不动/预算用尽按当前正文发布——非致命、绝不判死。
     reply = _complete_story(turn, hooks, reply, now=now)
@@ -1031,8 +1127,17 @@ def _illustrate_rec(request: dict, *, repo_id, turn: int, turn_id: str,
     # 第 74 刀：多批的**第几张**（index>0 才带 ⇒ 单张 rec 与改造前逐字相同，零回归锁）。
     # 前端据此判「本条是批次图」：批次图落自己的 `anchor_offset`，不再吃首尾帧的第 34 刀
     # 固定落点（否则 N 张批次图全叠在首段末／末段末）。
-    if index > 0:
+    if index > 0 and str(request.get("video_mode") or "") != "shots":
         rec["batch_index"] = index
+    # 2026-11-09 全局模式分镜序列：镜头归属与顺序字段（有值才带，旧路径逐字节不变）。
+    for _key in ("shot_sequence_id", "shot_type", "image_key", "incoming_shot_type"):
+        _value = request.get(_key)
+        if isinstance(_value, str) and _value:
+            rec[_key] = _value
+    for _key in ("shot_index", "shot_total", "shot_duration_s", "incoming_shot_index"):
+        _value = request.get(_key)
+        if isinstance(_value, int):
+            rec[_key] = int(_value)
     return rec
 
 
@@ -1079,6 +1184,20 @@ def _link_firstlast_bridges(recs: list[dict]) -> None:
         if prev_slot:
             rec["bridge_prev_slot"] = prev_slot
         prev_slot = str(rec.get("id") or "")
+
+
+def _link_shot_moves(recs: list[dict]) -> None:
+    """2026-11-09 分镜序列：给「进入本锚点」的 move 镜标上一锚点槽 id。
+
+    镜头归属采用出发锚点语义：move 的视频请求挂在**下一锚点** rec 上，
+    `incoming_shot_index` 记起始锚点下标；本函数按正文序把上一条 rec 的 id
+    写进 `bridge_prev_slot`，前端复用 `waitForSlotMedia` 有界等待上一张成图。
+    """
+    prev_id = ""
+    for rec in recs:
+        if rec.get("incoming_shot_index") is not None and prev_id:
+            rec["bridge_prev_slot"] = prev_id
+        prev_id = str(rec.get("id") or "")
 
 
 def finalize_turn(draft: TurnFinalization, hooks: TurnFinalizationHooks) -> dict:
@@ -1142,6 +1261,8 @@ def finalize_turn(draft: TurnFinalization, hooks: TurnFinalizationHooks) -> dict
                 pass
         if illustrate_recs:
             _link_firstlast_bridges(illustrate_recs)
+            if any(rec.get("shot_sequence_id") for rec in illustrate_recs):
+                _link_shot_moves(illustrate_recs)
             result["illustrate_recs"] = illustrate_recs
     if audio_request:
         repo_id = draft.ctx.get("repo_id") or draft.ctx.get("thread_id")

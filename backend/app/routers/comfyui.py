@@ -50,6 +50,44 @@ def status(url: str = COMFYUI_BASE_URL) -> dict[str, object]:
     return {"running": _is_up(url), "managed": comfy_launcher.is_managed()}
 
 
+class ProbeHostsRequest(BaseModel):
+    urls: list[str] = []
+
+
+@router.post("/probe")
+def probe_hosts(req: ProbeHostsRequest) -> dict[str, object]:
+    """批量探测 ComfyUI 机台队列（多机台池分发用，2026-11-09）。
+
+    逐台过 url_guard；非法/超限不抛整体错误，只在该条目回 error。并行探测，
+    单台 3s 超时；所有失败都由前端回退默认机，不阻断提交。
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    raw = [str(url or "").strip() for url in req.urls]
+    urls: list[str] = []
+    for url in raw:
+        if url and url not in urls:
+            urls.append(url)
+    if len(urls) > 16:
+        urls = urls[:16]
+
+    def one(url: str) -> dict[str, object]:
+        try:
+            validate_comfyui_url(url)
+        except ValueError as exc:
+            return {
+                "url": url, "online": False, "running": 0, "pending": 0,
+                "score": 10 ** 6, "latency_ms": 0, "error": str(exc)[:160],
+            }
+        return comfyui_client.queue_summary(url)
+
+    if not urls:
+        return {"items": []}
+    with ThreadPoolExecutor(max_workers=min(8, len(urls))) as pool:
+        items = list(pool.map(one, urls))
+    return {"items": items}
+
+
 @router.get("/resources")
 def resource_status() -> dict[str, object]:
     from app.services import model_lease
@@ -195,6 +233,7 @@ class PendingTrackRequest(BaseModel):
     prompt_id: str
     thread_id: str = "home"
     created_at: float = 0.0        # 秒；缺省用服务端当前时间
+    kind: str = "image"            # 媒体类型：面板据此显示「出图/出视频/出音频」
 
 
 class PendingFinishRequest(BaseModel):
@@ -208,7 +247,7 @@ def track_pending(req: PendingTrackRequest) -> dict[str, object]:
     此前只在浏览器 localStorage 里记，换浏览器/清缓存就丢了在跑任务（2026-10-19）。
     """
     try:
-        item = comfy_pending.track(req.prompt_id, req.thread_id, req.created_at)
+        item = comfy_pending.track(req.prompt_id, req.thread_id, req.created_at, req.kind)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"ok": True, "item": item}
@@ -462,6 +501,33 @@ def merge_audio(req: MergeAudioRequest) -> dict[str, object]:
     return {"ok": True, "url": url}
 
 
+class MergeVideosRequest(BaseModel):
+    thread_id: str = ""
+    message_id: str = ""
+    repo_id: str = ""
+    output_dir: str = ""
+    sequence_id: str = ""
+    urls: list[str] = []
+    force: bool = False
+
+
+@router.post("/merge-videos")
+def merge_videos(req: MergeVideosRequest) -> dict[str, object]:
+    """全局模式分镜成片：按顺序拼接 shot 视频（ffmpeg，2026-11-09）。
+
+    只接受已落盘的 local-view 地址；同 sequence_id 幂等，force=True 覆盖。
+    失败返回 400，前端保留各分镜并标成片槽失败（不产出残缺成片）。
+    """
+    from app.services import video_merge
+    result = video_merge.merge_videos(
+        req.urls, output_dir=req.output_dir, repo_id=req.repo_id,
+        sequence_id=req.sequence_id, force=req.force,
+    )
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=str(result.get("error") or "视频拼接失败"))
+    return result
+
+
 # ===== 上网素材：联网搜索下载的图片存到 outputDir/_web_materials/ =====
 
 class WebMaterialSaveRequest(BaseModel):
@@ -496,6 +562,25 @@ def web_material_save(req: WebMaterialSaveRequest) -> dict[str, object]:
 def web_material_list(req: WebMaterialListRequest) -> dict[str, object]:
     """列出 _web_materials/ 下所有图片。"""
     return {"items": image_store.list_web_materials(req.output_dir)}
+
+
+class WebMaterialEnsureRequest(BaseModel):
+    output_dir: str = ""
+    asset_ids: list[str] = []      # 空＝补齐盘上全部缺失的
+
+
+@router.post("/web-materials/ensure-index")
+def web_material_ensure_index(req: WebMaterialEnsureRequest) -> dict[str, object]:
+    """历史素材补登记进资产库（反推/写描述前调用；幂等）。
+
+    2026-11-07：P2-1 之前落盘的素材只有文件 + provenance，资产库里查不到 ⇒ 详情里
+    「开始反推」一律回「资产不存在」。这里按需补录（与保存链同一函数、同 doc_id），
+    前端拿到 missing/failed 时给明确提示，而不是让用户去跑补录脚本。
+    """
+    try:
+        return image_store.ensure_web_material_assets(req.output_dir, req.asset_ids)
+    except ComfyError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)
 
 
 class WebMaterialSaveSeriesRequest(BaseModel):

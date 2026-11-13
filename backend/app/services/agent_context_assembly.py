@@ -15,6 +15,7 @@ from app.services import llm as _llm
 from app.services.agent_support import (  # noqa: F401  跨簇底座
     _proxy_kw,
 )
+from app.services.cast_resolver import resolve_cast
 
 _LOG = logging.getLogger("uvicorn.error")
 
@@ -108,6 +109,50 @@ def _active_fallback_names(names: list[str], text: str) -> list[str]:
     return selected
 
 
+# `[在场]` 追加的人设预算：只约束「仅因在场入选」的卡，不改变旧三条入选路径与单卡回退。
+# 第一张仅在场卡始终允许（保证纯机制书 + 多卡时至少有一个在场角色进 prompt），
+# 后续追加卡按字段原文字数累计，超预算记 trace 后跳过，避免多张富描述卡撑爆 system。
+_PRESENT_PERSONA_EXTRA_BUDGET = 12_000
+
+
+def _status_line_value(snapshot: str, label: str) -> str:
+    """读取状态栏里指定单行的最后一个值；与图像链 `_status_snapshot_value` 同口径。"""
+    matches = re.findall(
+        rf"(?m)^\s*\[{re.escape(label)}\]\s*(.*?)\s*$",
+        snapshot or "",
+    )
+    return matches[-1].strip() if matches else ""
+
+
+def _latest_status_present(ctx: CtxLike, names: list[str]) -> list[str]:
+    """最新一条非空 AI 剧情里的 `[在场]`，只认绑定卡名。
+
+    只看最新一条 AI 消息：最新剧情没有 `<status>` 就按「本轮没有在场证据」处理，
+    不回溯更旧的快照——旧快照可能已离场，拿它补人设会把「对应场合」变成「上一场」。
+    与图像链一样只读 `<status>` 块，避免把正文里的普通提及当成在场；解析失败只降级为
+    「没有在场证据」，不阻断人设链。
+    """
+    if not names:
+        return []
+    try:
+        from app.services import roleplay_agency
+
+        for item in reversed(ctx.get("history") or []):
+            if item.get("role") != "assistant":
+                continue
+            content = str(item.get("content") or "").strip()
+            if not content:
+                continue
+            snapshot = roleplay_agency.extract_status_snapshot(content)
+            if not snapshot:
+                return []
+            line = _status_line_value(snapshot, "在场")
+            return _mentioned_bound_names(names, line) if line else []
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 状态栏坏了不能阻断人设解析
+        _LOG.warning("cast 状态栏在场解析失败（按无在场处理）: %s", exc)
+    return []
+
+
 def _card_source(ctx: CtxLike, selected_name: str = "") -> tuple[str, str]:
     """作品用卡/世界书/正则的读取 base：**快照优先**。
 
@@ -171,23 +216,34 @@ def _resolve_personas(
     ctx: CtxLike, query: str = "", *, opening_only: bool = False, fallback_query: str = "",
     worldbook_names: list[str] | None = None,
 ) -> str:
-    """只注入本轮出场角色的非空 description；首轮固定为开场卡。"""
+    """只注入本轮出场角色的非空 description；首轮固定为开场卡。
+
+    2026-11-09：选角证据新增最新 `<status>` 的 `[在场]`，解决多卡 + 纯机制世界书
+    （无角色条目）时只能靠点名/上轮正文、在场角色选不上的问题。旧三条证据与单卡
+    回退顺序不变；`[在场]` 只追加未入选的绑定卡，且只对「仅因在场入选」的卡应用
+    追加预算，避免多张富描述卡撑爆 system。
+    """
     names = _bound_card_names(ctx)
+    opening = str(ctx.get("opening_card_name") or ctx.get("card_name") or "").strip()
     if opening_only:
-        opening = str(ctx.get("opening_card_name") or ctx.get("card_name") or "").strip()
-        selected = [opening] if opening in names else []
+        cast = resolve_cast(names, opening_only=True, opening_name=opening)
     else:
-        explicit = set(worldbook_names or [])
-        direct = set(_mentioned_bound_names(names, query))
-        selected = [name for name in names if name in direct or name in explicit]
-        if not selected and fallback_query:
-            selected = _active_fallback_names(names, fallback_query)
+        direct = _mentioned_bound_names(names, query)
+        explicit = list(worldbook_names or [])
+        fallback = _active_fallback_names(names, fallback_query) if fallback_query else []
+        present = _latest_status_present(ctx, names)
+        cast = resolve_cast(
+            names, mentioned=direct, worldbook=explicit, fallback=fallback, present=present,
+        )
+    selected = cast.selected
 
     profiles: list[str] = []
     personalities: list[str] = []
     scenarios: list[str] = []
     dialogue_examples: list[str] = []
     injected_names: list[str] = []
+    present_extra_chars = 0
+    dropped_for_budget: list[str] = []
     try:
         from app.services import character_store, instruction_provenance
         for name in selected:
@@ -195,6 +251,18 @@ def _resolve_personas(
             card = character_store.read_card(base, card_name) if base and card_name else None
             description = str((card or {}).get("description") or "").strip()
             if not description:
+                continue
+            block_chars = len(description) + sum(
+                len(str((card or {}).get(key) or "").strip())
+                for key in ("personality", "scenario", "mes_example")
+            )
+            source = cast.sources.get(name, "")
+            if (
+                source == "present"
+                and present_extra_chars > 0
+                and present_extra_chars + block_chars > _PRESENT_PERSONA_EXTRA_BUDGET
+            ):
+                dropped_for_budget.append(card_name)
                 continue
             profiles.append(instruction_provenance.wrap(
                 f"角色卡：{card_name}",
@@ -212,6 +280,8 @@ def _resolve_personas(
                         f"【角色：{card_name}】\n{value}",
                     ))
             injected_names.append(card_name)
+            if source == "present":
+                present_extra_chars += block_chars
     except Exception:  # noqa: BLE001
         profiles = []
         personalities = []
@@ -222,6 +292,12 @@ def _resolve_personas(
     ctx["_selected_persona_personality"] = "\n\n".join(personalities)
     ctx["_selected_persona_scenario"] = "\n\n".join(scenarios)
     ctx["_selected_persona_examples"] = "\n\n".join(dialogue_examples)
+    run_trace.emit(
+        ctx, "cast.resolved", agent="cast",
+        members=cast.members, present=cast.present, selected=cast.selected,
+        responders=cast.responders, injected=injected_names,
+        sources=cast.sources, dropped_for_budget=dropped_for_budget,
+    )
     if not profiles:
         return ""
     selection = (
@@ -436,10 +512,14 @@ def _worldbook_session_key(ctx: CtxLike) -> str:
     return "|".join(part for part in parts if part)
 
 
-def _resolve_worldbook(ctx: CtxLike, query: str) -> str:
+def _resolve_worldbook(
+    ctx: CtxLike, query: str, *, use_greenlight: bool = True,
+) -> str:
     """卡内嵌世界书：constant 常驻 + 非常驻按当前上下文语义检索，组装注入文本。
 
     查询用「最近历史 + 本轮输入」以贴合当前剧情。无卡/无书/读不到 → 空串。
+    `use_greenlight=False`：聊天室用，跳过每轮约 8k token 的世界书绿灯 LLM，
+    只保留 BM25/keyword/constant 的确定性命中。
     """
     ctx["_selected_worldbook_indices"] = []
     ctx["_keyword_worldbook_indices"] = []
@@ -480,10 +560,12 @@ def _resolve_worldbook(ctx: CtxLike, query: str) -> str:
         # 决策上下文=最近 2 条消息**全文**（宽于检索 scan 的尾 1800 字）。选中条目经
         # recall_override **替换召回轨**（BM25 退场）；keyword 点名与 constant 仍保底。
         # ran 且无 error ⇒ 用绿灯结果（选空也压制 BM25，同 A/B 语义）；否则退回 BM25。
-        greenlight = _worldbook_greenlight(ctx, entries, query)
-        recall_override = (
-            greenlight.positions if greenlight.ran and not greenlight.error else None
-        )
+        recall_override = None
+        if use_greenlight:
+            greenlight = _worldbook_greenlight(ctx, entries, query)
+            recall_override = (
+                greenlight.positions if greenlight.ran and not greenlight.error else None
+            )
         # 会话内稳定序列（2026-09-12）：条目按首次激活顺序单调追加 → 注入文本跨轮只增不改，
         # 上游前缀缓存才能命中（重排版每轮整块换序，位于其后的历史与尾部合同全部作废）。
         # 取不到会话键时退回无状态的重排版，行为与改动前一致。
@@ -529,7 +611,10 @@ def _resolve_worldbook(ctx: CtxLike, query: str) -> str:
         ctx["_worldbook_recall_text"] = selection.recall_text
         ctx["_worldbook_dynamic_text"] = getattr(selection, "dynamic_text", "")
         return selection.text
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        # 兜底保留（世界书读失败不该打断正文），但「书读坏了」与「没书」原本症状逐字相同
+        # ——都是空串、零留痕，现场只能靠读代码分辨。补一条失败事件。
+        run_trace.emit(ctx, "worldbook.resolve_failed", error=str(exc)[:200])
         return ""
 
 
@@ -603,6 +688,10 @@ def _worldbook_sources(ctx: CtxLike) -> list[dict]:
     """读取卡快照/源卡与绑定独立书，仅供首次建立小仓库世界书快照。"""
     from app.services import character_store, worldbook_store
     books: list[dict] = []
+    # `card_name` 原本只在下面的 for 里绑定；无绑定卡时循环不执行，独立书兜底段会读到
+    # 未赋值变量 ⇒ UnboundLocalError，并被 `_resolve_worldbook` 的兜底吞成空串（零留痕），
+    # 连带把 `_curator_worldbook_fn` 那条调用链一起打断。缺省成空串＝「没有可当书名的卡」。
+    card_name = ""
     for name in _bound_card_names(ctx):
         character_dir, card_name = _card_source(ctx, name)
         if character_dir and card_name:
@@ -696,6 +785,24 @@ def _curator_worldbook_context(ctx: dict, repo_id: str) -> str:
     return worldbook_store.repo_snapshot_context(ctx.get("output_dir") or "", repo_id)
 
 
+_CURATOR_WORLDBOOK_SHARE = 0.3
+
+
+def _curator_worldbook_max_chars(ctx: CtxLike) -> int:
+    """Curator 世界书视图上限：用户上下文预算的 30%（默认 20k → 6k）。
+
+    2026-11-12：旧实现写死 6000 字符，调大 contextMaxTokens 不生效。返回 0 时
+    由 `repo_snapshot_context` 的默认上限兜底（预算未配置/无限）。
+    """
+    from app.services import agent_context
+    setting = ctx.get("context_max_tokens")
+    budget = agent_context.resolve_history_budget(
+        setting if isinstance(setting, int) else 0,
+        ctx.get("preset_sampling"),
+    )
+    return max(1, int(budget * _CURATOR_WORLDBOOK_SHARE)) if budget > 0 else 0
+
+
 def _curator_worldbook_context_fn(ctx: CtxLike, repo_id: str):
     from app.services import worldbook_store
     base = ctx.get("output_dir") or ""
@@ -707,9 +814,12 @@ def _curator_worldbook_context_fn(ctx: CtxLike, repo_id: str):
         # 2026-08-30 成本实锤：整本世界书快照 ≈2万字符/轮（JSON 转义后实测 4.4 万字符）。
         # curator 的世界书改写范围本就限定在本轮相关条目（allowed），视图只给这些条目、
         # 按与正文的命中排序并截断到片段预算——改写能力保留，全书参照撤销。
+        # 2026-11-12：上限改为按用户上下文预算派生（30%），不再写死 6000。
+        max_chars = _curator_worldbook_max_chars(ctx)
+        kwargs = {"max_chars": max_chars} if max_chars > 0 else {}
         return worldbook_store.repo_snapshot_context(
             base, repo_id, query=window_text or "",
-            max_chars=6_000, allowed_indices=allowed,
+            allowed_indices=allowed, **kwargs,
         )
 
     return context

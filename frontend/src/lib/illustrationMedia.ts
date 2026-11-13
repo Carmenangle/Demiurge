@@ -1,11 +1,76 @@
-import type { MediaInsertPreset } from "../stores/settings";
-import { illustrationTemplateValues } from "./imagePromptProfiles";
+import type { ImageTemplateMode, MediaInsertPreset, VideoTemplateMode } from "../stores/settings";
+import { illustrationTemplateValues, workflowFieldBinding } from "./imagePromptProfiles";
 import type { SemanticField } from "./imagePromptProfiles";
 
 export interface IllustrationLora {
   name: string;
   weight: number;
   character: boolean;
+}
+
+/** 模板实际具备的生成能力（2026-11-12）：只按 exposed 槽位判定，不猜节点内部。 */
+export type ImageTemplateCapability = ImageTemplateMode;
+
+function _bindings(template: { exposed: readonly SemanticField[] } | undefined): Set<string> {
+  return new Set((template?.exposed || []).map((field) => workflowFieldBinding(field)));
+}
+
+/** 图片模板可承担的能力列表；纯文生图模板没有 base_image/reference/mask。 */
+export function imageTemplateCapabilities(
+  template: { exposed: readonly SemanticField[] } | undefined,
+): ImageTemplateCapability[] {
+  const bindings = _bindings(template);
+  const hasBase = bindings.has("base_image");
+  const hasMask = bindings.has("mask");
+  const hasReference = [...bindings].some((binding) => (
+    binding === "reference_image" || binding === "reference_image_files"
+    || /^reference_image_\d+$/.test(binding)
+  ));
+  const capabilities: ImageTemplateCapability[] = [];
+  if (!hasBase && !hasMask && !hasReference) capabilities.push("text2img");
+  if (hasBase) capabilities.push("img2img");
+  if (hasMask) capabilities.push("inpaint");
+  if (hasReference) capabilities.push("reference");
+  return capabilities.length ? capabilities : ["text2img"];
+}
+
+/** 逐镜选择图片模板：优先场景要求的模式，未配置时回落 legacy `templateId`。
+ *  `fallback=true` 表示请求的模式没有配模板（调用方应告警，但仍然出图）。 */
+export function resolveIllustrationTemplateId(
+  preset: Pick<MediaInsertPreset, "templateId" | "imageTemplates" | "imageMode"> | undefined,
+  sceneSpec: unknown,
+): { id: string; mode: ImageTemplateMode; fallback: boolean } {
+  const requested = (sceneSpec as { image_mode?: unknown } | null | undefined)?.image_mode;
+  const mode: ImageTemplateMode = requested === "img2img" || requested === "inpaint"
+    || requested === "reference" || requested === "text2img"
+    ? requested
+    : preset?.imageMode === "img2img" ? "img2img" : "text2img";
+  const mapped = preset?.imageTemplates?.[mode] || "";
+  const legacy = preset?.templateId || "";
+  return {
+    id: mapped || legacy,
+    mode,
+    fallback: !!legacy && !mapped && mode !== "text2img",
+  };
+}
+
+/** 逐镜选择视频模板：首尾帧/图生视频/文生视频各走各的槽，未填回落 `videoTemplateId`。 */
+export function resolveVideoTemplateId(
+  preset: Pick<MediaInsertPreset, "videoTemplateId" | "videoTemplates" | "firstlast"> | undefined,
+  sceneSpec: unknown,
+): { id: string; mode: VideoTemplateMode; fallback: boolean } {
+  const requested = (sceneSpec as { video_mode?: unknown } | null | undefined)?.video_mode;
+  const mode: VideoTemplateMode = requested === "text2video"
+    || requested === "image2video" || requested === "firstlast"
+    ? requested
+    : preset?.firstlast ? "firstlast" : "image2video";
+  const mapped = preset?.videoTemplates?.[mode] || "";
+  const legacy = preset?.videoTemplateId || "";
+  return {
+    id: mapped || legacy,
+    mode,
+    fallback: !!legacy && !mapped && mode !== "text2video",
+  };
 }
 
 export function resolveIllustrationActors(
@@ -34,9 +99,24 @@ export function illustrationLoraConfigurationError(
   return "";
 }
 
+/** 生图方式（2026-11-08 用户定稿）：文生图=提示词+LoRA，不读底图；图生图=底图+LoRA／云端图生图。
+ *  旧预设没有 imageMode ⇒ 按改动前的隐式口径回填：条目模式且配了角色/风格底图才走图生图
+ *  （此前底图是否参与由「有没有绑定底图」隐式决定）；角色卡模式从不读底图（旧行为）⇒ 文生图。 */
+export function resolveIllustrationImageMode(
+  preset: Pick<MediaInsertPreset,
+    "imageMode" | "appearanceSource" | "characterLoras" | "styleBaseImage"> | undefined,
+): "text2img" | "img2img" {
+  if (preset?.appearanceSource === "character_card") return "text2img";
+  if (preset?.imageMode === "text2img" || preset?.imageMode === "img2img") return preset.imageMode;
+  const hasCharacterBase = Object.values(preset?.characterLoras || {})
+    .some((binding) => !!binding.baseImage);
+  return hasCharacterBase || !!preset?.styleBaseImage ? "img2img" : "text2img";
+}
+
 export function illustrationRequestMedia(preset: MediaInsertPreset | undefined, cardNames: string[]) {
   const useCharacterCards = preset?.appearanceSource === "character_card";
   const characterLoras = useCharacterCards ? {} : preset?.characterLoras || {};
+  const useBaseImages = resolveIllustrationImageMode(preset) === "img2img";
   // 2026-10-20 实锤（用户：「总不能因为我只绑定了兜底的风格 LoRA 这个功能就失效了吧」）：
   // 演员池此前**只**取 `characterLoras` 的键 ⇒ 只绑风格 LoRA（兜底）时映射为空
   // ⇒ `illustrationActorNames=[]` ⇒ 后端 `known=[]` ⇒ `actor_count=0`
@@ -46,15 +126,15 @@ export function illustrationRequestMedia(preset: MediaInsertPreset | undefined, 
   // 「没有角色 LoRA」不等于「没有角色」，外貌描述本就不该依赖 LoRA 绑定。
   const loraNames = Object.keys(characterLoras);
   return {
-    characterBaseImages: Object.fromEntries(
+    characterBaseImages: useBaseImages ? Object.fromEntries(
       Object.entries(characterLoras)
         .filter(([, binding]) => binding.baseImage)
         .map(([name, binding]) => [name, binding.baseImage as string]),
-    ),
+    ) : {},
     illustrationActorNames: [...new Set(
       useCharacterCards || loraNames.length === 0 ? cardNames : loraNames,
     )],
-    styleBaseImage: useCharacterCards ? "" : preset?.styleBaseImage || "",
+    styleBaseImage: useBaseImages ? preset?.styleBaseImage || "" : "",
   };
 }
 
@@ -65,11 +145,16 @@ export function illustrationWorkflowMedia(
   const characterLoras = useCharacterCards ? {} : preset.characterLoras || {};
   const mode = preset.loraMode || "single";
   const candidates = actors.length ? [...new Set(actors)] : cardNames.slice(0, 1);
+  // 文生图：底图一律不参与（模板有 base_image 槽也不注入），LoRA 照常；
+  // 图生图：按在场角色取角色底图，都没命中才回退风格底图。
+  const useBaseImages = resolveIllustrationImageMode(preset) === "img2img";
   let baseImage = "";
-  for (const name of candidates) {
-    const binding = characterLoras[name];
-    if (!binding) continue;
-    if (binding.baseImage) { baseImage = binding.baseImage; break; }
+  if (useBaseImages) {
+    for (const name of candidates) {
+      const binding = characterLoras[name];
+      if (!binding) continue;
+      if (binding.baseImage) { baseImage = binding.baseImage; break; }
+    }
   }
   const styleName = preset.styleLora || preset.loraName || "";
   const styleWeight = preset.styleLoraWeight ?? preset.loraWeight ?? 0.8;
@@ -94,27 +179,40 @@ export function illustrationWorkflowMedia(
       addLora({ name: styleName, weight: styleWeight, character: false });
     }
   }
-  if (!useCharacterCards && !baseImage) baseImage = preset.styleBaseImage || "";
+  if (useBaseImages && !baseImage) baseImage = preset.styleBaseImage || "";
+  // 2026-11-12：参考生图模板（AIO Identity Edit）需要 REF Image 1/2。
+  // 取本镜在场角色已绑定的底图，按出场顺序；text2img 也返回，但只有模板暴露
+  // reference_image_* 时才会被 illustrationTemplateValues 写入。
+  const referenceImages = candidates
+    .map((name) => characterLoras[name]?.baseImage || "")
+    .filter((value) => !!value.trim());
   const primary = loras[0];
   return {
     loras,
     loraName: primary?.name || "",
     loraWeight: primary?.weight ?? 0.8,
     baseImage,
+    referenceImages,
     characterLora: loras.some((lora) => lora.character),
   };
 }
 
-export type VideoMode = "climax" | "firstlast";
+export type VideoMode = "climax" | "firstlast" | "shots";
 
 /** V1.5/B1 视频模式决策：事件 videoMode 优先，其次 preset.firstlast（首尾帧生成选项，
  * 用户定稿 2026-08-28：视频模式由图片生成选项推导），再退 preset.videoMode（旧预设兼容），缺省 climax。 */
 export function resolveVideoMode(
-  preset: { videoMode?: VideoMode; firstlast?: boolean } | undefined,
+  preset: { videoMode?: VideoMode; firstlast?: boolean; shotSequence?: boolean } | undefined,
   eventVideoMode?: string,
 ): VideoMode {
-  if (eventVideoMode === "climax" || eventVideoMode === "firstlast") return eventVideoMode;
-  if (preset?.firstlast) return "firstlast";
+  if (eventVideoMode === "climax" || eventVideoMode === "firstlast" || eventVideoMode === "shots") {
+    return eventVideoMode;
+  }
+  if (preset?.firstlast) {
+    // 2026-11-09 新保存的全局模式写 shotSequence=true ⇒ 分镜序列；
+    // 旧预设没有该字段 ⇒ 保持整楼 firstlast（向后兼容，避免老作品行为突变）。
+    return preset.shotSequence === true ? "shots" : "firstlast";
+  }
   if (preset?.videoMode === "climax" || preset?.videoMode === "firstlast") {
     return preset.videoMode;
   }
@@ -139,14 +237,15 @@ export function isSegmentBridgeEvent(opts: {
  * 编译出 2757 字视频分镜，前端按 motion=1 静默丢弃 ⇒ 视频槽不存在且无任何界面提示）。
  * firstlast 是楼层触发，不看视频成稿。返回是否用视频模板（模板已配置为前提）。 */
 export function resolveVideoTemplateChoice(
-  preset: { videoTemplateId?: string; smartVideo?: boolean } | undefined,
+  preset: Pick<MediaInsertPreset, "videoTemplateId" | "videoTemplates" | "firstlast" | "smartVideo"> | undefined,
   videoMode: VideoMode,
   videoPrompt: string,
 ): boolean {
-  if (videoMode === "firstlast") {
-    return !!preset?.videoTemplateId;
+  const hasTemplate = !!resolveVideoTemplateId(preset, undefined).id;
+  if (videoMode === "firstlast" || videoMode === "shots") {
+    return hasTemplate;
   }
-  return !!(preset?.smartVideo && preset.videoTemplateId && (videoPrompt || "").trim());
+  return !!(preset?.smartVideo && hasTemplate && (videoPrompt || "").trim());
 }
 
 /** 视频时长（秒）：用户显式预设最高优先；否则用后端按剧情动作量判定的秒数

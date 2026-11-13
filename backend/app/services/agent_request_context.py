@@ -18,6 +18,14 @@ def from_payload(payload: Mapping[str, Any]) -> RunContext:
     bound_cards = list(dict.fromkeys(card_names + ([card_name] if card_name else [])))
     opening_card = str(payload.get("opening_card_name") or "").strip()
     opening_card = opening_card or card_name or (bound_cards[0] if bound_cards else "")
+    interaction_mode = str(payload.get("interaction_mode") or "story").strip().lower()
+    if interaction_mode not in ("chat", "group_chat"):
+        interaction_mode = "story"
+    chat_members = [
+        str(name).strip()
+        for name in (payload.get("chat_members") or [])
+        if str(name).strip()
+    ]
     mask = payload.get("image_mask")
 
     return RunContext(
@@ -67,10 +75,44 @@ def from_payload(payload: Mapping[str, Any]) -> RunContext:
         forced_route=str(payload.get("forced_route") or ""),
         user_message_id=str(payload.get("user_message_id") or ""),
         workspace_mode=str(payload.get("workspace_mode") or "story"),
+        interaction_mode=interaction_mode,
+        chat_members=list(dict.fromkeys(chat_members)),
         context_max_tokens=int(payload.get("context_max_tokens", 20_000)),
         context_count=int(payload.get("context_count", 6)),
         compact_trigger_pct=max(0, min(100, int(payload.get("compact_trigger_pct", 80)))),
         selfheal_attempts=max(0, min(5, int(payload.get("selfheal_attempts", 3)))),
+        chat_guard_max_chars=max(0, min(5000, int(payload.get("chat_guard_max_chars", 900)))),
+        chat_default_max_tokens=max(
+            0, min(131_072, int(payload.get("chat_default_max_tokens", 0))),
+        ),
+        chat_followup_max=max(0, min(10, int(payload.get("chat_followup_max", 3)))),
+        chat_reopen_max=max(0, min(10, int(payload.get("chat_reopen_max", 2)))),
+        chat_initiative_idle_minutes=max(
+            0, min(10_080, int(payload.get("chat_initiative_idle_minutes", 120))),
+        ),
+        chat_initiative_cooldown_minutes=max(
+            0, min(10_080, int(payload.get("chat_initiative_cooldown_minutes", 360))),
+        ),
+        chat_initiative_daily_max=max(
+            0, min(100, int(payload.get("chat_initiative_daily_max", 6))),
+        ),
+        chat_cadence=(
+            str(payload.get("chat_cadence") or "normal")
+            if str(payload.get("chat_cadence") or "normal") in ("quiet", "normal", "frequent")
+            else "normal"
+        ),
+        chat_active_window_minutes=max(
+            0, min(1_440, int(payload.get("chat_active_window_minutes", 15))),
+        ),
+        chat_max_bot_turns=max(1, min(50, int(payload.get("chat_max_bot_turns", 5)))),
+        chat_min_affinity=max(-100, min(100, int(payload.get("chat_min_affinity", 30)))),
+        chat_quiet_start=str(payload.get("chat_quiet_start", "00:30") or ""),
+        chat_quiet_end=str(payload.get("chat_quiet_end", "08:30") or ""),
+        chat_group_activity=(
+            str(payload.get("chat_group_activity") or "normal")
+            if str(payload.get("chat_group_activity") or "normal") in ("quiet", "normal", "lively")
+            else "normal"
+        ),
         # 2026-09-04 设置整合：智能体参数预设（采样 + 输入/输出上限）从 settings 注入，
         # 后端不再从 preset 顶层取这些字段（preset_store.sampling_params 已废弃）。
         # 字段缺省由 `_roleplay_sampling` / chat 透传层用 builtin default 兜底。
@@ -97,6 +139,7 @@ def from_payload(payload: Mapping[str, Any]) -> RunContext:
         prompt_profile_kind=str(payload.get("prompt_profile_kind") or ""),
         video_prompt_template_id=str(payload.get("video_prompt_template_id") or ""),
         video_template_id=str(payload.get("video_template_id") or ""),
+        video_duration_hint=max(0, int(payload.get("video_duration_hint") or 0)),
         appearance_source=str(payload.get("appearance_source") or "worldbook"),
         illustration_viewpoint=str(payload.get("illustration_viewpoint") or ""),
         illustration_batch_count=max(0, int(payload.get("illustration_batch_count") or 0)),

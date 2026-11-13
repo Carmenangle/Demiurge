@@ -29,6 +29,67 @@ def test_live_and_queued_payload_share_one_context_contract():
     assert context.character_base_images == {"Cecilia": "portrait.png"}
 
 
+def test_chat_behavior_limits_roundtrip_and_clamp():
+    context = from_payload({
+        "thread_id": "repo-1__chat",
+        "message": "在吗",
+        "chat_guard_max_chars": 512,
+        "chat_default_max_tokens": 2_048,
+        "chat_followup_max": 1,
+        "chat_reopen_max": 0,
+        "chat_initiative_idle_minutes": 30,
+        "chat_initiative_cooldown_minutes": 0,
+        "chat_initiative_daily_max": 3,
+        "chat_cadence": "frequent",
+        "chat_active_window_minutes": 5,
+        "chat_max_bot_turns": 8,
+        "chat_min_affinity": 10,
+        "chat_quiet_start": "23:00",
+        "chat_quiet_end": "07:00",
+        "chat_group_activity": "lively",
+    })
+    assert context.chat_guard_max_chars == 512
+    assert context.chat_default_max_tokens == 2_048
+    assert context.chat_followup_max == 1
+    assert context.chat_reopen_max == 0
+    assert context.chat_initiative_idle_minutes == 30
+    assert context.chat_initiative_cooldown_minutes == 0
+    assert context.chat_initiative_daily_max == 3
+    assert context.chat_cadence == "frequent"
+    assert context.chat_active_window_minutes == 5
+    assert context.chat_max_bot_turns == 8
+    assert context.chat_min_affinity == 10
+    assert context.chat_quiet_start == "23:00"
+    assert context.chat_quiet_end == "07:00"
+    assert context.chat_group_activity == "lively"
+    # RunContext 的 get() 必须能读到（漏进 _legacy 映射会静默返回 None）。
+    assert context.get("chat_followup_max") == 1
+    assert context.get("chat_initiative_daily_max") == 3
+    assert context.get("chat_cadence") == "frequent"
+
+    clamped = from_payload({
+        "thread_id": "r", "message": "x",
+        "chat_followup_max": 99, "chat_reopen_max": -3,
+        "chat_guard_max_chars": 99_999, "chat_default_max_tokens": -1,
+        "chat_initiative_idle_minutes": 99_999,
+        "chat_initiative_daily_max": 999,
+        "chat_cadence": "unknown", "chat_group_activity": "unknown",
+        "chat_active_window_minutes": 99_999, "chat_max_bot_turns": 0,
+        "chat_min_affinity": 999,
+    })
+    assert clamped.chat_followup_max == 10
+    assert clamped.chat_reopen_max == 0
+    assert clamped.chat_guard_max_chars == 5_000
+    assert clamped.chat_default_max_tokens == 0
+    assert clamped.chat_initiative_idle_minutes == 10_080
+    assert clamped.chat_initiative_daily_max == 100
+    assert clamped.chat_cadence == "normal"
+    assert clamped.chat_group_activity == "normal"
+    assert clamped.chat_active_window_minutes == 1_440
+    assert clamped.chat_max_bot_turns == 1
+    assert clamped.chat_min_affinity == 100
+
+
 def test_explicit_empty_history_is_not_replaced_by_checkpoint_fallback():
     context = from_payload({"thread_id": "repo-1", "message": "重开", "history": []})
     assert context.history_override == []
@@ -37,6 +98,25 @@ def test_explicit_empty_history_is_not_replaced_by_checkpoint_fallback():
 def test_missing_history_keeps_legacy_fallback_available():
     context = from_payload({"thread_id": "repo-1", "message": "继续"})
     assert context.history_override is None
+
+
+def test_interaction_mode_and_members_roundtrip():
+    context = from_payload({
+        "thread_id": "repo-1__chat",
+        "message": "在吗",
+        "interaction_mode": "group_chat",
+        "chat_members": ["甲", "乙", "甲", " "],
+    })
+    assert context.interaction_mode == "group_chat"
+    assert context.chat_members == ["甲", "乙"]
+    assert context.get("interaction_mode") == "group_chat"
+    assert context.get("chat_members") == ["甲", "乙"]
+
+    # 未知/空值一律回落 story（旧前端不传 = 剧情模式零改变）。
+    assert from_payload({"thread_id": "r", "message": "x"}).interaction_mode == "story"
+    assert from_payload({
+        "thread_id": "r", "message": "x", "interaction_mode": "unknown",
+    }).interaction_mode == "story"
 
 
 def test_batch_image_count_defaults_to_zero_when_absent():

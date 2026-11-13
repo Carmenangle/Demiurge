@@ -136,6 +136,77 @@ def gen_profile_prompt(req: ProfilePromptRequest) -> dict[str, object]:
     return {**result, "profile": kind}
 
 
+class PortraitPromptRequest(ChatModelReq):
+    output_dir: str = ""           # 作品仓库文件夹：读世界书条目／通用表／外貌锚的根
+    repo_id: str = ""
+    name: str                      # 定妆角色名（与多元数据插入的 characterLoras 键同源）
+    profile: str = "anima_tags"
+    appearance_source: str = "worldbook"   # worldbook=角色条目外貌 | character_card=卡正文
+    aspect_ratio: str = "9:16"
+    rating: str = "nsfw"
+    pose: str = ""                     # 定妆动作；空＝后端从预设表随机取一条
+    preset_dir: str = ""
+    preset_name: str = ""
+    user_name: str = ""
+
+
+@router.post("/prompt/portrait")
+def gen_portrait_prompt(req: PortraitPromptRequest) -> dict[str, object]:
+    """角色定妆底图提示词（第 92 刀）：**只出提示词**，提交/回收由前端走同一条工作流链。
+
+    与 `/prompt/profile` 的唯一差别在画面合同——不接剧情、不接预设人称，画面主体恒为该角色
+    一人、第三人称（口径与红线见 `services/character_portrait.py` 模块头）。
+    """
+    from app.services import character_portrait
+
+    kind, record, template_id = _resolve_image_template(req.profile)
+    overrides = _image_template_overrides(kind, record)
+    try:
+        result = character_portrait.generate_portrait(
+            req.output_dir, req.repo_id, req.name,
+            profile=kind,
+            appearance_source=req.appearance_source,
+            aspect_ratio=req.aspect_ratio,
+            rating=req.rating,
+            pose=req.pose,
+            generate_text=lambda system, user: chat(
+                req.base_url, req.api_key, req.model, system, user,
+                temperature=0.3, proxy=req.proxy,
+            ),
+            overrides=overrides,
+            preset_dir=req.preset_dir,
+            preset_name=req.preset_name,
+            user_name=req.user_name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        from app.services import run_trace
+
+        run_trace.emit(
+            {"turn_id": "", "thread_id": req.repo_id, "repo_id": req.repo_id},
+            "illustration.portrait",
+            name=req.name,
+            profile=kind,
+            prompt_template_id=template_id,
+            appearance_source=req.appearance_source,
+            # 来源账本＝事实**实际**来自哪一路（entry/table/merged/none）：
+            # 「底图不像本人」的第一手归因量，只记类别不记外貌正文。
+            appearance_origin=result.get("appearance_origin", ""),
+            gender=result.get("gender", ""),
+            aspect_ratio=req.aspect_ratio,
+            rating=req.rating,
+            # 随机动作的归因量：预设表里的固定措辞，不含角色名与外貌正文。
+            pose=result.get("pose", ""),
+            strategy=result.get("strategy", "direct"),
+            validation_errors=result.get("validation_errors", []),
+            prompt_chars=len(str(result.get("prompt") or "")),
+        )
+    except Exception:  # noqa: BLE001 [EXC-保留] 遥测发射 best-effort：Trace 不得阻断提示词生成
+        pass
+    return result
+
+
 class FramePromptsRequest(ChatModelReq):
     profile: str
     scene: dict[str, object]

@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -403,6 +404,10 @@ def rebuild(base: str, repo_id: str) -> int:
 
     读出全部纪要 → 重建虚拟表 → 按 body() 重算 trigram 索引重插。返回重建的条数。
     正文/元数据不丢（存在 UNINDEXED 列，只是重算索引）。base/repo_id 空或无库 → 0。
+
+    ⚠ 第 5 刀（2026-11-05「防误删」⑤）：`DROP` + 重建 + 重插包在**一个显式事务**里。
+      SQLite 的 DDL 不自动开事务 ⇒ 旧写法里那句 `DROP TABLE` 当场落定，其后任何异常都让纪要
+      **整体蒸发且不可追**（正文只存这张表，内存副本随栈丢）。现在异常 ⇒ ROLLBACK ⇒ 旧表原样、库照样可用。
     """
     if not (base and repo_id) or not db_path(base, repo_id).is_file():
         return 0
@@ -413,16 +418,24 @@ def rebuild(base: str, repo_id: str) -> int:
             "turn_start, turn_end, layer, keywords FROM chronicle "
             "ORDER BY rowid ASC").fetchall()
         entries = [_row_to_entry(r) for r in rows]
-        conn.execute("DROP TABLE chronicle")
-        _ensure_schema(conn)
-        for e in entries:
-            conn.execute(
-                "INSERT INTO chronicle(body, overview, text, dialogue, characters, "
-                "turn_start, turn_end, layer, keywords) VALUES (?,?,?,?,?,?,?,?,?)",
-                (e.body(), e.short_overview(), e.text, e.dialogue,
-                 "\n".join(e.characters), e.turn_start, e.turn_end, e.layer,
-                 "\n".join(e.keywords)))
-        conn.commit()
+        conn.isolation_level = None  # 本函数自管事务（_connect 建表后已 commit，此处无未决事务）
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DROP TABLE chronicle")
+            # 直接建表，**不走** _ensure_schema——它末尾那句 commit() 会把这个事务提前提交掉。
+            _create_chronicle(conn)
+            for e in entries:
+                conn.execute(
+                    "INSERT INTO chronicle(body, overview, text, dialogue, characters, "
+                    "turn_start, turn_end, layer, keywords) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (e.body(), e.short_overview(), e.text, e.dialogue,
+                     "\n".join(e.characters), e.turn_start, e.turn_end, e.layer,
+                     "\n".join(e.keywords)))
+            conn.execute("COMMIT")
+        except Exception:
+            with suppress(sqlite3.Error):  # 事务可能已自行结束：回滚失败不得盖掉真异常
+                conn.execute("ROLLBACK")
+            raise
         return len(entries)
     finally:
         conn.close()

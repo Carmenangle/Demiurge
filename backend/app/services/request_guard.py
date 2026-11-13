@@ -71,7 +71,7 @@ def _is_loopback_host(host: str) -> bool:
 
 def is_loopback_client(host: str) -> bool:
     """客户端地址是否回环（remote_gate 等远程能力闸复用；与 inbound_verdict 同一判定源）。"""
-    return _is_loopback_host(_host_of(host))
+    return _is_loopback_host(host) or _is_loopback_host(_host_of(host))
 
 
 def origin_allowed(origin: str) -> bool:

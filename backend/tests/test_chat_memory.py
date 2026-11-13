@@ -10,7 +10,7 @@ import types
 import pytest
 from langchain_core.messages import AIMessage
 
-from app.services import chat_memory
+from app.services import agent_context, chat_memory
 
 
 @pytest.fixture(autouse=True)
@@ -128,6 +128,25 @@ def test_summarize_history_空输入不调模型():
     assert fake.seen == []
 
 
+def test_summarize_history_chat_mode_uses_chat_prompt_and_drops_image_tech():
+    """私聊手动压缩：保留关系/称呼，不把生图提示词/生成记录带进角色记忆。"""
+    hist = [{"role": "user", "content": "以后叫我主人", "images": []}]
+    gens = [{"prompt": "masterpiece, 1girl, silver hair"}]
+    fake = _FakeLLM("关系摘要")
+
+    result = chat_memory.summarize_history(hist, fake, gens, chat_mode=True)
+
+    assert result["ok"] is True
+    assert result["summary"] == "关系摘要"
+    system = fake.seen[0][0].content
+    user = fake.seen[0][1].content
+    assert "长期记忆归档" in system
+    assert "称呼" in system
+    assert "生图提示词" in system
+    assert "生成记录" not in user
+    assert "masterpiece" not in user
+
+
 def test_summarize_history_拼接历史与生成记录():
     hist = [
         {"role": "user", "content": "画场景1", "images": []},
@@ -188,48 +207,147 @@ def test_replace_history_严格替换():
     assert hist[1]["images"] == ["http://a/i.png"]
 
 
-class _StubGraph:
-    """替身编译图：记录传给 stream 的输入，按脚本吐 (chunk, meta)。"""
+def _png_data_uri() -> str:
+    import base64
+
+    return "data:image/png;base64," + base64.b64encode(b"\x89PNG\r\n\x1a\nfake").decode()
+
+
+def test_append_message_外置内联图片不再写进checkpoint():
+    """P6-C：checkpoint 每轮存整段 state，data URI 必须落盘换成小地址。"""
+    from app.services import chat_checkpoint_media
+
+    chat_memory.append_message("t-img", "user", "看图", [_png_data_uri()])
+
+    hist = chat_memory.get_history("t-img")
+    url = hist[0]["images"][0]
+    assert url.startswith("/api/comfyui/local-view?path=")
+    assert "data:image" not in str(hist)
+    files = list(chat_checkpoint_media.CHECKPOINT_IMAGE_DIR.rglob("*.png"))
+    assert files and files[0].read_bytes().startswith(b"\x89PNG")
+
+
+def test_append_message_正文内嵌data_uri也外置():
+    chat_memory.append_message(
+        "t-img-text", "assistant", f"参考图：![x]({_png_data_uri()})",
+    )
+
+    text = chat_memory.get_history("t-img-text")[0]["content"]
+    assert "data:image" not in text
+    assert "/api/comfyui/local-view?path=" in text
+
+
+def test_checkpoint_每线程只保留最新N个(monkeypatch):
+    """P6-C：旧 checkpoint 只是时间线，最新一个已含完整历史。"""
+    monkeypatch.setattr(chat_memory, "CHECKPOINT_KEEP", 3)
+
+    for index in range(8):
+        chat_memory.append_message("t-keep", "user", f"m{index}")
+
+    conn = chat_memory._get_saver().conn
+    count = conn.execute(
+        "select count(*) from checkpoints where thread_id='t-keep'",
+    ).fetchone()[0]
+    assert count == 3
+    remaining = {
+        row[0] for row in conn.execute(
+            "select checkpoint_id from checkpoints where thread_id='t-keep'",
+        )
+    }
+    orphans = {
+        row[0] for row in conn.execute(
+            "select distinct checkpoint_id from writes where thread_id='t-keep'",
+        )
+    }
+    assert orphans <= remaining
+    # 历史本身不丢：最新 checkpoint 仍含全部消息。
+    assert [h["content"] for h in chat_memory.get_history("t-keep")] == [
+        f"m{index}" for index in range(8)
+    ]
+
+
+class _StubStreamLLM:
+    """替身流式模型：记录送模消息，按脚本吐 chunk。"""
 
     def __init__(self, chunks):
         self._chunks = chunks
         self.seen: list = []
 
-    def stream(self, payload, config, stream_mode=None):
-        self.seen.append((payload, config, stream_mode))
-        yield from self._chunks
+    def stream(self, messages):
+        self.seen.append(messages)
+        return iter(self._chunks)
 
 
 def test_stream_chat_产出增量与空块跳过(monkeypatch):
     chunk = lambda text: types.SimpleNamespace(content=text)  # noqa: E731
-    stub = _StubGraph([(chunk("你"), {}), (chunk(""), {}),
-                       (chunk([{"type": "text", "text": "好"}]), {})])
-    monkeypatch.setattr(chat_memory, "_build_graph", lambda llm, system: stub)
+    stub = _StubStreamLLM([chunk("你"), chunk(""), chunk([{"type": "text", "text": "好"}])])
+    monkeypatch.setattr(
+        agent_context, "recent_history",
+        lambda *_a, **_k: [
+            {"role": "user", "content": "旧问"},
+            {"role": "assistant", "content": "旧答"},
+        ],
+    )
+    turns: list = []
+    monkeypatch.setattr(chat_memory, "append_turn", lambda *a, **k: turns.append((a, k)))
 
-    deltas = list(chat_memory.stream_chat(object(), "t11", "系统词", "用户输入"))
+    deltas = list(chat_memory.stream_chat(stub, "t11", "系统词", "用户输入"))
 
     assert deltas == ["你", "好"]                       # 空块被跳过；分段 content 被展平
-    payload, config, mode = stub.seen[0]
-    assert mode == "messages"
-    assert config == {"configurable": {"thread_id": "t11"}}
-    assert payload["messages"][0].content == "用户输入"
+    msgs = stub.seen[0]
+    assert [type(m).__name__ for m in msgs] == [
+        "SystemMessage", "HumanMessage", "AIMessage", "HumanMessage",
+    ]
+    assert msgs[0].content == "系统词"
+    assert [m.content for m in msgs[1:]] == ["旧问", "旧答", "用户输入"]
+    # 本轮完整回复成功后整轮写回 checkpoint。
+    assert turns == [(("t11", "用户输入", None, "你好"), {})]
 
 
 def test_stream_chat_多模态构造(monkeypatch):
-    stub = _StubGraph([])
-    monkeypatch.setattr(chat_memory, "_build_graph", lambda llm, system: stub)
+    stub = _StubStreamLLM([])
+    monkeypatch.setattr(agent_context, "recent_history", lambda *_a, **_k: [])
+    monkeypatch.setattr(chat_memory, "append_turn", lambda *_a, **_k: None)
 
     deltas = list(chat_memory.stream_chat(
-        object(), "t12", "系统词", "看图说", ["http://a/1.png"]))
+        stub, "t12", "系统词", "看图说", ["http://a/1.png"]))
 
     assert deltas == []
-    (payload, _config, _mode), = stub.seen
-    content = payload["messages"][0].content
+    messages = stub.seen[0]
+    assert len(messages) == 2                           # system + 本轮多模态输入
+    content = messages[-1].content
     assert content[0] == {"type": "text", "text": "看图说"}
     assert content[1] == {"type": "image_url", "image_url": {"url": "http://a/1.png"}}
 
 
-def test_stream_chat_走真实编译图_非流式模型不产增量():
-    """真图 + 假模型（无 token 级回调）：图能跑通、不炸；是否有增量取决于模型可流式性。"""
-    deltas = list(chat_memory.stream_chat(_FakeLLM("完整回复"), "t13", "系统词", "输入"))
-    assert all(isinstance(d, str) for d in deltas)
+def test_stream_chat_按预算裁剪历史(monkeypatch):
+    """legacy /ai/chat 不再让 checkpointer 灌全量历史（P6-B）。"""
+    seen: dict = {}
+    monkeypatch.setattr(
+        agent_context, "recent_history",
+        lambda _thread, **kwargs: seen.update(kwargs) or [],
+    )
+    monkeypatch.setattr(chat_memory, "append_turn", lambda *_a, **_k: None)
+
+    list(chat_memory.stream_chat(
+        _StubStreamLLM([]), "t13", "系统词", "输入", max_tokens=123))
+
+    assert seen == {"max_tokens": 123, "per_role": 0}
+
+
+def test_stream_chat_失败不落盘(monkeypatch):
+    class _Boom:
+        def stream(self, _messages):
+            def gen():
+                yield types.SimpleNamespace(content="半")
+                raise RuntimeError("上游断开")
+            return gen()
+
+    monkeypatch.setattr(agent_context, "recent_history", lambda *_a, **_k: [])
+    turns: list = []
+    monkeypatch.setattr(chat_memory, "append_turn", lambda *a, **k: turns.append((a, k)))
+
+    with pytest.raises(RuntimeError):
+        list(chat_memory.stream_chat(_Boom(), "t14", "系统词", "输入"))
+
+    assert turns == []

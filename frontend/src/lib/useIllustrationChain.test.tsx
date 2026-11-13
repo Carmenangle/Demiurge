@@ -15,8 +15,13 @@ import type { SlotMediaState } from "./chatGeneration";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
+vi.mock("./comfyReadiness", () => ({
+  ensureComfyReady: vi.fn(async () => true),
+}));
+
 vi.mock("../api/comfyui", () => ({
   comfyStatus: vi.fn(async () => ({ running: true })),
+  probeComfyHosts: vi.fn(async () => ({ items: [] })),
   submitWorkflow: vi.fn(async () => ({ prompt_id: "pid-1", node_count: 1 })),
   interruptComfy: vi.fn(async () => undefined),
   uploadImage: vi.fn(async (_file: File, _url: string) => ({ name: "uploaded.png" })),
@@ -54,9 +59,10 @@ vi.mock("../api/loras", () => ({
 }));
 
 import {
-  comfyStatus, mergeAudio, moveComfyOutputToInput, submitWorkflow, uploadImage,
+  mergeAudio, moveComfyOutputToInput, submitWorkflow, uploadImage,
   uploadRemoteImageToInput, getResult,
 } from "../api/comfyui";
+import { ensureComfyReady } from "./comfyReadiness";
 import {
   claimIllustrationSubmission, genFramePrompts, genProfilePrompt, reportIllustrationSubmission,
 } from "../api/ai";
@@ -173,7 +179,7 @@ const baseInput = { prompt: "原始P", messageId: "m1", slotId: "s1", source: "m
 // 用例隔离：vi.mock 的调用计数与 mockResolvedValue 覆盖会跨用例泄漏 ⇒ 每例重置默认实现。
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.mocked(comfyStatus).mockResolvedValue({ running: true } as never);
+  vi.mocked(ensureComfyReady).mockResolvedValue(true);
   vi.mocked(submitWorkflow).mockResolvedValue({ prompt_id: "pid-1", node_count: 1 } as never);
   vi.mocked(claimIllustrationSubmission).mockResolvedValue({ claimed: true } as never);
   vi.mocked(genProfilePrompt).mockResolvedValue({ prompt: "编译后P", negative_prompt: "" } as never);
@@ -301,14 +307,14 @@ describe("useIllustrationChain 行为网", () => {
     }));
   });
 
-  it("ComfyUI 未启动 → failSlot(comfyui_status,「ComfyUI 尚未启动」)", async () => {
-    vi.mocked(comfyStatus).mockResolvedValue({ running: false } as never);
+  it("ComfyUI 长时间未就绪 → failSlot(comfyui_status,「ComfyUI 启动超时，任务未提交」)", async () => {
+    vi.mocked(ensureComfyReady).mockResolvedValue(false);
     const md0 = makeDeps();
     await submitChain(md0.deps, { ...baseInput });
     const { discardFailedIllustration } = md0;
     const call = discardFailedIllustration.mock.calls[0];
     expect(call[2]).toBe("comfyui_status");
-    expect(call[3]).toBe("ComfyUI 尚未启动");
+    expect(call[3]).toBe("ComfyUI 启动超时，任务未提交");
   });
 
   it("submitWorkflow 无 prompt_id → failSlot(submit,「ComfyUI 没有返回任务 ID」)", async () => {
@@ -361,6 +367,102 @@ describe("useIllustrationChain 行为网", () => {
     expect(submitWorkflow).toHaveBeenCalledTimes(2);       // 图 + 视频，各一次
     const parts = (md0.state.messages[0] as unknown as { parts: Record<string, unknown>[] }).parts;
     expect(parts.map((p) => [p.slotId, p.kind])).toEqual([["s1", "image"], ["s1:video", "video"]]);
+    expect(md0.discardFailedIllustration).not.toHaveBeenCalled();
+  });
+
+  it("shots/cut：主槽只出图，图完成后立即提交 `:video` 单图延伸", async () => {
+    const preset = {
+      templateId: "tpl1", videoTemplateId: "vid1", smartVideo: true,
+      negativePrompt: "", appearanceSource: "character_card", loraMode: "single",
+    };
+    const md0 = makeDeps({ preset });
+    md0.state.messages = [{
+      id: "m1", role: "assistant", text: "正文",
+      parts: [{ type: "media-slot", slotId: "s1", status: "pending", kind: "image" }],
+    }] as never;
+    await submitChain(md0.deps, {
+      ...baseInput, eventVideoMode: "shots", shotSequenceId: "seq1",
+      shotIndex: 0, shotTotal: 2, shotType: "cut", imageKey: "k0",
+      videoPrompt: "视频成稿CUT",
+    });
+    expect(submitWorkflow).toHaveBeenCalledTimes(2);
+    expect(submitWorkflow).toHaveBeenNthCalledWith(
+      2, "vid1", expect.anything(), "http://127.0.0.1:8188", expect.anything(), [], "none",
+    );
+    const parts = (md0.state.messages[0] as unknown as { parts: Record<string, unknown>[] }).parts;
+    expect(parts.map((p) => [p.slotId, p.kind])).toEqual([["s1", "image"], ["s1:video", "video"]]);
+    const videoSlot = parts.find((p) => p.slotId === "s1:video");
+    expect(videoSlot).toMatchObject({
+      shotSequenceId: "seq1", shotIndex: 0, shotType: "cut", shotPhase: "outgoing",
+    });
+    expect(md0.pollResult.mock.calls[1][3]).toMatchObject({ slotId: "s1:video" });
+    expect(md0.discardFailedIllustration).not.toHaveBeenCalled();
+  });
+
+  it("shots/establish：环境空镜主槽出图后同样提交 `:video`", async () => {
+    const preset = {
+      templateId: "tpl1", videoTemplateId: "vid1", smartVideo: true,
+      negativePrompt: "", appearanceSource: "character_card", loraMode: "single",
+    };
+    const md0 = makeDeps({ preset });
+    md0.state.messages = [{
+      id: "m1", role: "assistant", text: "正文",
+      parts: [{ type: "media-slot", slotId: "s1", status: "pending", kind: "image" }],
+    }] as never;
+    await submitChain(md0.deps, {
+      ...baseInput, eventVideoMode: "shots", shotSequenceId: "seq1",
+      shotIndex: 0, shotTotal: 2, shotType: "establish", imageKey: "k0",
+      videoPrompt: "环境镜成稿",
+    });
+    expect(submitWorkflow).toHaveBeenCalledTimes(2);
+    const parts = (md0.state.messages[0] as unknown as { parts: Record<string, unknown>[] }).parts;
+    expect(parts.map((p) => [p.slotId, p.kind])).toEqual([["s1", "image"], ["s1:video", "video"]]);
+    expect(parts.find((p) => p.slotId === "s1:video")).toMatchObject({
+      shotSequenceId: "seq1", shotIndex: 0, shotType: "establish", shotPhase: "outgoing",
+    });
+    expect(md0.discardFailedIllustration).not.toHaveBeenCalled();
+  });
+
+  it("shots/move incoming：上一锚点的双图视频挂本锚点 `:move`，用过渡成稿", async () => {
+    const preset = {
+      templateId: "tpl1", videoTemplateId: "vid1", smartVideo: true,
+      negativePrompt: "", appearanceSource: "character_card", loraMode: "single",
+    };
+    const messages = [{
+      id: "m1", role: "assistant", text: "正文",
+      parts: [
+        { type: "text", text: "正文" },
+        { type: "media-slot", slotId: "s0", status: "ready", kind: "image", url: "http://comfy/prev.png" },
+      ],
+    }] as never;
+    const md0 = makeDeps({ preset, messages });
+    md0.state.messages = [{
+      id: "m1", role: "assistant", text: "正文",
+      parts: [
+        { type: "text", text: "正文" },
+        { type: "media-slot", slotId: "s0", status: "ready", kind: "image", url: "http://comfy/prev.png" },
+        { type: "media-slot", slotId: "s1", status: "pending", kind: "image" },
+      ],
+    }] as never;
+    await submitChain(md0.deps, {
+      ...baseInput, eventVideoMode: "shots", shotSequenceId: "seq1",
+      shotIndex: 1, shotTotal: 2, shotType: "cut",
+      incomingShotIndex: 0, incomingShotType: "move", bridgePrevSlotId: "s0",
+      transitionVideoPrompt: "双图过渡成稿MOVE",
+    });
+    expect(submitWorkflow).toHaveBeenCalledTimes(2);
+    expect(submitWorkflow).toHaveBeenNthCalledWith(
+      2, "vid1", expect.anything(), "http://127.0.0.1:8188", expect.anything(), [], "none",
+    );
+    const parts = (md0.state.messages[0] as unknown as { parts: Record<string, unknown>[] }).parts;
+    const slots = parts.filter((p) => p.type === "media-slot");
+    expect(slots.map((p) => [p.slotId, p.kind])).toEqual([
+      ["s0", "image"], ["s1", "image"], ["s1:move", "video"],
+    ]);
+    expect(parts.find((p) => p.slotId === "s1:move")).toMatchObject({
+      shotSequenceId: "seq1", shotIndex: 0, shotType: "move", shotPhase: "incoming",
+    });
+    expect(md0.pollResult.mock.calls[1][3]).toMatchObject({ slotId: "s1:move" });
     expect(md0.discardFailedIllustration).not.toHaveBeenCalled();
   });
 
@@ -1141,7 +1243,7 @@ describe("试跑开关（promptOnlyGeneration）", () => {
     await submitChain(md0.deps, { ...baseInput, source: "automatic" });
 
     // ① 全程不碰 ComfyUI（状态检查也不查：ComfyUI 没开也必须能试跑）
-    expect(comfyStatus).not.toHaveBeenCalled();
+    expect(ensureComfyReady).not.toHaveBeenCalled();
     expect(submitWorkflow).not.toHaveBeenCalled();
     expect(md0.pollResult).not.toHaveBeenCalled();
     // ② 成稿照常上报 —— 与真出图**同一形状**（交接文档 §6 的六项检查表在试跑下原样可用）
@@ -1264,7 +1366,7 @@ describe("试跑开关（promptOnlyGeneration）", () => {
   it("开关缺省（false）⇒ 试跑闸完全惰性：照常查 ComfyUI 并提交（零回归）", async () => {
     const md0 = makeDeps({ settings: { promptOnlyGeneration: false } });
     await submitChain(md0.deps, { ...baseInput, source: "automatic" });
-    expect(comfyStatus).toHaveBeenCalledTimes(1);
+    expect(ensureComfyReady).toHaveBeenCalledTimes(1);
     expect(submitWorkflow).toHaveBeenCalledTimes(1);
     expect(md0.pollResult).toHaveBeenCalledTimes(1);
   });
@@ -1303,7 +1405,7 @@ describe("试跑开关（promptOnlyGeneration）", () => {
   it("普通失败槽（快照无成稿）重试仍重编译（2026-08-30 定案不回退）", async () => {
     // 首轮：ComfyUI 没起 → failSlot(comfyui_status)；快照只有原始入参、无 finalPrompt
     // ⚠ 夹具的 discardFailedIllustration 是空 mock（不真改消息状态）⇒ 从调用参数取快照
-    vi.mocked(comfyStatus).mockResolvedValue({ running: false } as never);
+    vi.mocked(ensureComfyReady).mockResolvedValue(false);
     const md0 = makeDeps({ settings: { promptOnlyGeneration: false } });
     md0.state.messages = [seededMessage()];
     await submitChain(md0.deps, { ...baseInput, source: "automatic",
@@ -1314,7 +1416,7 @@ describe("试跑开关（promptOnlyGeneration）", () => {
     const snapshot = md0.discardFailedIllustration.mock.calls[0][5] as Record<string, unknown>;
     expect(snapshot.finalPrompt).toBeUndefined();     // 无成稿
     // 二轮：ComfyUI 起了，重试 ⇒ 照旧重编译后提交（编译链升级能生效）
-    vi.mocked(comfyStatus).mockResolvedValue({ running: true } as never);
+    vi.mocked(ensureComfyReady).mockResolvedValue(true);
     const md1 = makeDeps({ settings: { promptOnlyGeneration: false } });
     await submitChain(md1.deps, { ...snapshot, source: "manual" });
     expect(submitWorkflow).toHaveBeenCalledTimes(1);
@@ -1328,10 +1430,10 @@ describe("逐字搬移锁（T2.2-A 插画链）", () => {
     ["const preset = settings.mediaInsert?.[repo?.id || \"\"];", 1],
     ["if (!claim.claimed) {", 1],
     ["const useVideo = resolveVideoTemplateChoice(preset, videoMode, videoPrompt);", 1],
-    ["const useFirstlastImages = videoMode === \"firstlast\" && !!preset.templateId && !videoOnly && !isSegmentBridge;", 1],
+    ["const useFirstlastImages = videoMode === \"firstlast\" && !!primaryImageTemplateId && !videoOnly && !isSegmentBridge;", 1],
     ["throw new Error(`实际加载的 LoRA 没有精确元数据记录：${lora.name}`);", 1],
     ["prompt = withLoraTriggers(prompt);", 1],
-    ["const st = await comfyStatus(comfyMainUrl);", 1],
+    ["const ready = await ensureComfyReady(comfyMainUrl, { timeoutMs: 10 * 60 * 1000 });", 1],
     ["failSlot(\"submit\", \"ComfyUI 没有返回任务 ID\");", 1],
     // 第 100 刀：提交/轮询/快照的提示词改传 submittedPrompt（视频＝成稿+对白时间轴，图片＝原值）
     ["pollResult(r.prompt_id, outputNodeIds, regeneration, target, submittedPrompt, mainIsVideo ? \"video\" : \"image\", baseSlotRef);", 1],

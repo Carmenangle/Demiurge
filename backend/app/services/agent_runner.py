@@ -9,7 +9,7 @@ import threading
 import time
 from typing import Iterator
 
-from app.services import agent_graph, chat_memory, chat_snapshot, generation_store, run_trace, thread_admission
+from app.services import agent_graph, chat_snapshot, generation_store, run_trace, thread_admission
 from app.services.agent_contracts import AgentEvent, RunContext
 from app.services.thread_admission import RunAlreadyActive  # noqa: F401  重导出，保调用方不变
 
@@ -106,6 +106,20 @@ def run_multi_stream(context: RunContext) -> "queue.Queue":
             approval_updates.append(event["approval"])
         if event.get("route_choice"):
             route_choice_updates.append(event["route_choice"])
+        # 2026-11-09 聊天：图片/视频消息由 generate 等节点落盘，补 speaker/route，
+        # 刷新后聊天室仍按角色标签展示（群聊由 chat_room 统一落盘的消息不带媒体）。
+        if context.interaction_mode in ("chat", "group_chat") and (event.get("image") or event.get("video")):
+            media_id = str(event.get("id") or event.get("image_id") or "")
+            speaker = next((name for name in context.chat_members if name), "") or context.card_name
+            if media_id and speaker:
+                try:
+                    chat_snapshot.merge_fields(
+                        context.thread_id, media_id, speaker=speaker, route="chat",
+                        ts=int(time.time()),
+                    )
+                except Exception as exc:  # noqa: BLE001 - 补标签失败不影响媒体交付
+                    _LOG.warning("聊天媒体 speaker 落盘失败 thread=%s mid=%s: %s",
+                                 context.thread_id, media_id, exc)
         q.put(event)
 
     # 即使正文关闭流式，也要允许 Roleplay 在最终正文就绪后立即发 replace/插画请求；
@@ -128,17 +142,28 @@ def run_multi_stream(context: RunContext) -> "queue.Queue":
                 generation_store.persist_text(
                     context.thread_id, context.message_id, text, interrupted=interrupted,
                 )
+                # 2026-11-09 聊天：正文由 answer/tool/generate 等节点产生，补上 speaker/route，
+                # 刷新后聊天室仍能按角色标签还原这条回复（群聊 chat 路由不产正文，自动跳过）。
+                if context.interaction_mode in ("chat", "group_chat") and context.message_id and text:
+                    speaker = next(
+                        (name for name in context.chat_members if name), "",
+                    ) or context.card_name
+                    if speaker:
+                        try:
+                            chat_snapshot.merge_fields(
+                                context.thread_id, context.message_id,
+                                speaker=speaker, route="chat", ts=int(time.time()),
+                            )
+                        except Exception as exc:  # noqa: BLE001 - 补标签失败不影响回复交付
+                            _LOG.warning("聊天回复 speaker 落盘失败 thread=%s mid=%s: %s",
+                                         context.thread_id, context.message_id, exc)
                 for approval in approval_updates:
                     generation_store.persist_prompt_approval(context.thread_id, approval)
                 for route_choice in route_choice_updates:
                     generation_store.persist_route_choice(context.thread_id, route_choice)
-                try:
-                    chat_memory.append_turn(
-                        context.thread_id, context.message, context.input_images(),
-                        text, interrupted=interrupted,
-                    )
-                except Exception as exc:  # noqa: BLE001 - 收尾不阻断，但记忆漏记必须留痕
-                    _LOG.warning("对话记忆落盘失败 thread=%s: %s", context.thread_id, exc)
+                # 2026-11-12 P6-D：Agent 回合以 chat_snapshot 为唯一真源，不再写
+                # checkpoint。checkpoint 只保留显式追加（/chat/append、工作流产物）、
+                # legacy /ai/chat 与手动压缩/恢复；这样整段 state 不会每轮重复落库。
                 run_trace.emit(
                     context, "turn.completed",
                     interrupted=interrupted,

@@ -66,8 +66,12 @@ type RuntimeOptions = {
   now?: () => number;
   fetchResult?: typeof getResult;
   schedule?: (callback: () => void, delayMs: number) => unknown;
-  /** 服务端在途登记（默认 POST /comfyui/pending；测试可注入 noop）。 */
-  reportPending?: (promptId: string, threadId: string, createdAt: number) => void;
+  /** 服务端在途登记（默认 POST /comfyui/pending；测试可注入 noop）。
+   *  kind 供后台活动面板区分出图/出视频/出音频。 */
+  reportPending?: (
+    promptId: string, threadId: string, createdAt: number,
+    kind?: "image" | "video" | "audio",
+  ) => void;
   /** 服务端终态清除（默认 POST /comfyui/pending/finish；测试可注入 noop）。 */
   clearPending?: (promptId: string) => void;
 };
@@ -314,13 +318,19 @@ export async function pollWorkflowResult(
     fetchResult?: typeof getResult;
     schedule?: (callback: () => void, delayMs: number) => unknown;
     now?: () => number;
+    /** 单次调用的额外硬超时；到点返回 still_running（头像等短任务用）。 */
+    timeoutMs?: number;
   } = {},
 ): Promise<WorkflowPollOutcome> {
   const fetchResult = opts.fetchResult || getResult;
   const schedule = opts.schedule || ((callback, delayMs) => setTimeout(callback, delayMs));
   const now = opts.now || (() => Date.now());
+  const startedAt = now();
   let state = initialTickState();
   for (;;) {
+    if (opts.timeoutMs != null && now() - startedAt >= opts.timeoutMs) {
+      return { kind: "still_running" };
+    }
     let result: GenResult | null = null;
     let observation: WorkflowFetchObservation;
     try {
@@ -386,7 +396,10 @@ export class WorkflowGenerationRuntime {
   private readonly now: () => number;
   private readonly fetchResult: typeof getResult;
   private readonly schedule: (callback: () => void, delayMs: number) => unknown;
-  private readonly reportPending: (promptId: string, threadId: string, createdAt: number) => void;
+  private readonly reportPending: (
+    promptId: string, threadId: string, createdAt: number,
+    kind?: "image" | "video" | "audio",
+  ) => void;
   private readonly clearPending: (promptId: string) => void;
   private readonly finalized = new Set<string>();
   private readonly cancelled = new Set<string>();
@@ -399,9 +412,9 @@ export class WorkflowGenerationRuntime {
     this.fetchResult = options.fetchResult || getResult;
     this.schedule = options.schedule || ((callback, delayMs) => setTimeout(callback, delayMs));
     // 服务端登记只是镜像：失败（后端未起/超时）不得影响生成链，故 fire-and-forget 吞错。
-    this.reportPending = options.reportPending ?? ((promptId, key, createdAt) => {
+    this.reportPending = options.reportPending ?? ((promptId, key, createdAt, kind) => {
       if (!SERVER_MIRROR_ENABLED) return;
-      void registerComfyPending(promptId, key, createdAt).catch(() => {});
+      void registerComfyPending(promptId, key, createdAt, kind).catch(() => {});
     });
     this.clearPending = options.clearPending ?? ((promptId) => {
       if (!SERVER_MIRROR_ENABLED) return;
@@ -440,7 +453,7 @@ export class WorkflowGenerationRuntime {
     this.write(next);
     const entry = next.find((item) => item.prompt_id === input.promptId)!;
     // 服务端镜像（跨浏览器可见；localStorage 仍是判重/恢复的主存）。
-    this.reportPending(entry.prompt_id, this.threadId, entry.createdAt);
+    this.reportPending(entry.prompt_id, this.threadId, entry.createdAt, entry.mediaType);
     return entry;
   }
 

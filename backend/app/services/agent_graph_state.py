@@ -21,6 +21,8 @@ class AgentState(TypedDict, total=False):
     images: list                   # 本轮上传图片 url
     attachments: list              # 本轮对话附件元信息 [{file_id,name,mime,size}]（已并入 user_text 参考段）
     result_text: str               # 专家产出的文本回复
+    chat_messages: list            # 2026-11-09 聊天室逐角色回复 [{id,speaker,text}]；必须声明，否则 LangGraph 静默丢弃
+    media_request: dict            # 2026-11-11 1:1 聊天自发媒体请求 {kind,prompt,avatar?,appearance?}；必须声明，否则 SSE 拿不到
     artifacts: list                # 2026-09-08 产物卡：fabric 终局下发的交付物元数据列表
                                    # （必须声明，否则 LangGraph TypedDict schema 静默丢弃该键）
     image_recs: list               # 生图产出 [{id,url}]

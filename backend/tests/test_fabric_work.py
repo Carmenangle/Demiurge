@@ -108,6 +108,18 @@ def test_brief超长截断(tmp_path):
     assert "截断" in brief
 
 
+def test_brief_max_chars为零表示不截断(tmp_path):
+    """预算未配置/无限时传 0：前序产出档案不截断（旧实现 0 会只剩省略号）。"""
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "长文档.md").write_text("长" * 9000, encoding="utf-8")
+
+    brief = fabric_work.build_work_brief(str(tmp_path), "r1", max_chars=0)
+
+    assert "长" * 100 in brief
+    assert "截断" not in brief
+
+
 def test_charfacts库根跨作品扫描_已知有意豁免锁():
     """T6.2（2026-09-17 用户拍板永久豁免，二轮审计 #23 同判）：`_scan_charfacts`
     root=库根时会跨作品列出别的作品的素材段——**有意保留**，理由见

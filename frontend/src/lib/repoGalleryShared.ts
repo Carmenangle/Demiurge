@@ -2,16 +2,18 @@
 // RepoGallery 仍是消费方属主；本文件只放无 React 依赖的纯数据/纯函数（接口即测试面）。
 // 反推模式（2026-10-18 用户定案：WD14 / 视觉模型 / VLM 两段式共用一个按钮 + 模式选择）。
 // vlm 与 ComfyUI「反推动漫」工作流同构：第一段＝质量+内容 tag 行，空行后第二段＝自然语言描述。
-export type TagMode = "vlm" | "wd14" | "ai" | "desc";
+export type TagMode = "vlm" | "wd14" | "gbc" | "ai" | "desc";
 export const TAG_MODES: { value: string; label: string }[] = [
   { value: "vlm", label: "VLM 两段式（标签+描述）" },
   { value: "wd14", label: "WD14 本地（纯标签）" },
+  { value: "gbc", label: "GBC 场景图（标签＋关系图＋MOSS）" },
   { value: "ai", label: "视觉模型（纯标签）" },
   { value: "desc", label: "视觉描述（只写描述）" },
 ];
 export const TAG_MODE_HINT: Record<string, string> = {
   vlm: "反推（两段式）：质量+内容 tag 行 + 自然语言描述——标签存快照，描述写回资产",
   wd14: "反推（WD14 本地）：只出 danbooru 标签，快、不动描述",
+  gbc: "反推（GBC 场景图）：WD14 出标签，GBC 按标签＋英文场景描述产出实体/关系图与 MOSS 布局 JSON；较慢，需在设置里配 GBC 引擎",
   ai: "反推（视觉模型）：只出标签，不动描述",
   desc: "视觉描述：只生成一段自然语言描述（不碰标签），可用于补素材/资产的描述",
 };

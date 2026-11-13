@@ -75,14 +75,23 @@ def resolve_history_budget(context_max_tokens: int, preset_sampling: Any) -> int
     return min(setting, model_budget)
 
 
-def _compact_history(items: list[dict], costs: list[int], budget: int,
-                     summarize_fn: Callable[[list[dict]], str | None]) -> list[dict] | None:
+def _compact_history(
+    items: list[dict], costs: list[int], budget: int,
+    summarize_fn: Callable[[list[dict]], str | None] | None,
+    summarize_with_prior_fn: Callable[[list[dict], str], str | None] | None = None,
+    thread_id: str = "", summary_scope: str = "",
+) -> list[dict] | None:
     """自动压缩（对齐 /compact）：旧段交给 LLM 摘要，近期一半预算内原样保留。
 
     摘要挂在 assistant 角色消息上（AI 记忆语义）；LLM 失败/空摘要返回 None，
     调用方 fail-open 退回机械保头保尾裁剪。
+
+    `summary_scope` 非空时走线程级滚动摘要缓存：只把新增旧段合并进已有摘要，
+    同一段历史不会每轮重复摘要（2026-11-12）。
     """
-    if summarize_fn is None or len(items) < 3:
+    if summarize_fn is None and summarize_with_prior_fn is None:
+        return None
+    if len(items) < 3:
         return None
     keep_tail_budget = max(1, budget // 2)
     tail: list[dict] = []
@@ -100,12 +109,41 @@ def _compact_history(items: list[dict], costs: list[int], budget: int,
     old = items[:split]
     if not old or not tail:
         return None
-    summary = summarize_fn(old)
+
+    summary: str | None = None
+    if summary_scope and thread_id and summarize_with_prior_fn is not None:
+        from app.services import chat_context_summary
+        cache = chat_context_summary.load(thread_id, summary_scope)
+        if (cache and 0 <= int(cache["covered"]) <= len(old)
+                and chat_context_summary.digest(old[:int(cache["covered"])])
+                == cache["tail_hash"]):
+            prior = str(cache["summary"])
+            delta = old[int(cache["covered"]):]
+            summary = (
+                summarize_with_prior_fn(delta, prior) if delta else prior
+            )
+        else:
+            summary = summarize_fn(old) if summarize_fn is not None else None
+        if summary:
+            chat_context_summary.save(
+                thread_id, summary_scope,
+                covered=len(old), tail_hash=chat_context_summary.digest(old),
+                summary=summary,
+            )
+    else:
+        summary = summarize_fn(old) if summarize_fn is not None else None
     if not summary:
         return None
-    head_msg = {"role": "assistant",
-                "content": ("【历史压缩摘要（以上是更早对话的自动摘要：任务目标与演变、"
-                            "已确认的决定与设定、用户否决项、待办均在此）】\n" + summary)}
+    if summary_scope:
+        # 缓存可能来自更大的预算；本轮按当前预算裁一下展示长度，避免摘要吃掉尾部原文。
+        cap = max(200, budget // 8)
+        display_summary = summary[:cap].rstrip() if len(summary) > cap else summary
+        head_text = ("【更早对话的长期摘要（人物关系、称呼、承诺与重要事件；"
+                     "不是本轮正在发生）】\n" + display_summary)
+    else:
+        head_text = ("【历史压缩摘要（以上是更早对话的自动摘要：任务目标与演变、"
+                     "已确认的决定与设定、用户否决项、待办均在此）】\n" + summary)
+    head_msg = {"role": "assistant", "content": head_text}
     return [head_msg] + list(reversed(tail))
 
 
@@ -114,12 +152,15 @@ def recent_history(thread_id: str, max_tokens: int = 20_000,
                    history_override: list[dict] | None = None,
                    compact_trigger_pct: int = 0,
                    summarize_fn: Callable[[list[dict]], str | None] | None = None,
+                   summarize_with_prior_fn: Callable[[list[dict], str], str | None] | None = None,
+                   summary_scope: str = "",
                    ) -> list[dict]:
     """按 token 预算取历史；per_role<=0 不限条数（2026-09-11 条数废弃，token 唯一权威）。
 
     超预算且配置了 summarize_fn 时自动压缩（compact_trigger_pct% 触发，对齐
     Claude Code auto-compact）：旧段 LLM 摘要 + 近期原文；压缩失败退回机械
     保头保尾裁剪（零 LLM 成本，绝不因压缩失败丢历史）。
+    `summary_scope` 非空时启用线程级滚动摘要缓存，避免同一段旧历史每轮重压。
     """
     try:
         if history_override is not None:
@@ -163,9 +204,14 @@ def recent_history(thread_id: str, max_tokens: int = 20_000,
         # 自动压缩（/compact 对齐）：达到触发百分比即压旧段为摘要；
         # 未配压缩（pct<=0 或无 summarize_fn）走原有机械路径。
         trigger = budget * compact_trigger_pct / 100.0
-        if (compact_trigger_pct > 0 and summarize_fn is not None
+        if (compact_trigger_pct > 0
+                and (summarize_fn is not None or summarize_with_prior_fn is not None)
                 and len(items) >= 3 and total > trigger):
-            compacted = _compact_history(items, costs, budget, summarize_fn)
+            compacted = _compact_history(
+                items, costs, budget, summarize_fn,
+                summarize_with_prior_fn=summarize_with_prior_fn,
+                thread_id=thread_id, summary_scope=summary_scope,
+            )
             if compacted is not None:
                 return compacted
         if total <= budget:
@@ -214,7 +260,12 @@ def recent_history(thread_id: str, max_tokens: int = 20_000,
 
 
 def history_text(ctx: Any) -> str:
-    """把历史拼成供 Supervisor 和回答节点使用的单轮上下文。"""
+    """把历史拼成供 Supervisor 和回答节点使用的单轮上下文。
+
+    聊天/群聊不再在这里追加固定字符硬上限（旧 6000 字）：`ctx.history` 已由
+    `recent_history` 按用户「上下文预算」+ 模型窗口裁剪，这里再截一刀等于让用户的
+    设置失效，也会把最旧的消息踢掉、破坏前缀缓存。上下文长度的唯一权威是 token 预算。
+    """
     history = ctx.get("history") or []
     if not history:
         return ""

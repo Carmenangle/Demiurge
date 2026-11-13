@@ -6,6 +6,7 @@ import { NodeResizer, Handle, Position } from "@xyflow/react";
 import { CARD_W, INSPIRATION_META, type CardNodeProps } from "./CanvasTypes";
 import { NodeCard } from "../WorkflowCard";
 import { AudioPlayer } from "../AudioPlayer";
+import { genMediaUrl } from "../../lib/canvasRuntime";
 import { runScripts, Placement } from "../../lib/regexEngine";
 import { renderMarkdown } from "../../lib/renderMarkdown";
 import { useStableDetailsOpen } from "../../lib/useStableDetailsOpen";
@@ -332,7 +333,7 @@ export const CardNodeComponent = memo(function CardNodeComponent({ id, data, sel
         <div style={{ display: "flex", gap: 8, flex: 1, minHeight: 0 }}>
           {/* 左侧：视频 */}
           <div style={{ flex: "0 0 55%", minWidth: 0 }}>
-            <video src={(d.gens[0] as { video_url?: string } | undefined)?.video_url || ""} controls
+            <video src={genMediaUrl(d.gens[0])} poster={d.gens[0]?.thumbUrl || undefined} controls
               style={{ width: "100%", aspectRatio: "16/9", borderRadius: 6, background: "#000" }} />
           </div>
           {/* 右侧：提示词 + 视频参数 */}
@@ -358,8 +359,8 @@ export const CardNodeComponent = memo(function CardNodeComponent({ id, data, sel
           <div style={{ flex: "0 0 45%", minWidth: 0, borderRadius: 6, background: "rgba(255,255,255,0.03)",
             display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 6, padding: 8 }}>
             <span style={{ fontSize: 18 }}>🎵</span><span style={{ fontSize: 11 }}>音频</span>
-            {d.gens[0]?.audio_url && (
-              <audio src={d.gens[0].audio_url} controls style={{ width: "100%", marginTop: 4 }} />
+            {genMediaUrl(d.gens[0]) && (
+              <audio src={genMediaUrl(d.gens[0])} controls style={{ width: "100%", marginTop: 4 }} />
             )}
           </div>
           {/* 右侧：提示词 + 音频参数 */}

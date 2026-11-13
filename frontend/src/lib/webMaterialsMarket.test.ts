@@ -404,17 +404,68 @@ describe("素材标签搜索 + 批量发送（2026-10-18）", () => {
   });
 });
 
-describe("素材视觉描述（2026-10-18 用户建议）", () => {
-  it("素材详情可单独生成视觉描述（原站只有 tag，没有描述）", () => {
-    expect(detail).toContain("生成视觉描述");
-    expect(detail).toContain("onDescribe");
-    expect(view).toContain("describeMaterial");
-    expect(view).toContain("WEB_MATERIALS_REPO_ID");
-    expect(view).toContain("setGenerationDescription(m.assetId, WEB_MATERIALS_REPO_ID");
+describe("素材反推 · 五档与资产库对齐（2026-11-07 用户需求）", () => {
+  const tagging = readFileSync(new URL("./webMaterialTagging.ts", import.meta.url), "utf8");
+
+  it("详情面板提供五档选择 + 开始反推（复用资产库模式表与说明）", () => {
+    expect(detail).toContain("TAG_MODES");
+    expect(detail).toContain("TAG_MODE_HINT");
+    expect(detail).toContain("开始反推");
+    expect(detail).toContain("反推打标");
   });
 
-  it("素材列表带 assetId/description（后端从主表投影，供描述落库与回显）", () => {
+  it("原站标签与反推标签分区展示、各自可复制", () => {
+    expect(detail).toContain("原站标签（");
+    expect(detail).toContain("反推标签");
+    expect(detail).toContain("复制反推标签");
+  });
+
+  it("GBC 场景图区只留官方布局 JSON 复制入口", () => {
+    expect(detail).toContain("GBC 场景图");
+    expect(detail).toContain("复制官方布局 JSON");
+    expect(detail).not.toContain("复制 MOSS");
+  });
+
+  it("视觉描述改为反推结果只读展示（不再有独立生成按钮）", () => {
+    expect(detail).toContain("视觉描述");
+    expect(detail).not.toContain("生成视觉描述");
+    expect(detail).not.toContain("onDescribe");
+  });
+
+  it("页面接线：编排 lib + 打开详情回读快照 + 老场景图自动补官方布局", () => {
+    expect(view).toContain("runMaterialTag");
+    expect(view).toContain("loadMaterialTagView");
+    expect(view).toContain("generateMaterialMossLayout");
+    expect(view).toContain('localStorage.getItem("demiurge.tagMode")');
+  });
+
+  it("编排 lib：五档端点 + 打标后自动生成官方布局（GBC 不再自写整图描述）", () => {
+    expect(tagging).toContain("WEB_MATERIALS_REPO_ID");
+    expect(tagging).toContain("tagGeneration");
+    expect(tagging).toContain("gbcTagAsset");
+    expect(tagging).toContain("generateMossLayout");
+    expect(tagging).toContain("VISION_DESC_PROMPT");
+    expect(tagging).toContain("VLM_TWO_PARA_PROMPT");
+    expect(tagging).toContain("AI_TAG_PROMPT");
+    // 种子描述改由后端按 WD14 标签生成 ⇒ 前端整图描述与缓存整条摘除
+    expect(tagging).not.toContain("loadGbcCaptions");
+    expect(tagging).not.toContain("saveGbcCaption");
+    expect(tagging).not.toContain("GBC_CAPTION_PROMPT");
+  });
+
+  it("素材列表带 assetId/description（后端从主表投影，供反推与回显）", () => {
     expect(api).toContain("assetId?: string");
     expect(api).toContain("description?: string");
+  });
+
+  it("反推前按需补登记历史素材（修「资产不存在」；先补再花视觉模型的钱）", () => {
+    expect(api).toContain("ensureWebMaterialIndex");
+    expect(api).toContain("/comfyui/web-materials/ensure-index");
+    const run = tagging.slice(tagging.indexOf("export async function runMaterialTag"));
+    expect(run).toContain("ensureWebMaterialIndex(deps.outputDir, [id])");
+    expect(run).toContain("没登记进资产库");
+    // 顺序红线：补登记必须在任何视觉模型调用（describeImage）之前
+    expect(run.indexOf("ensureWebMaterialIndex")).toBeLessThan(run.indexOf("describeImage"));
+    expect(view).toContain("outputDir,");
   });
 });

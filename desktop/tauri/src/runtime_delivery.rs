@@ -8,8 +8,20 @@
 //! - 落位是内容寻址：`runtime/base/<base_id>`、`runtime/apps/<application_id>`、`runtime/rag/<rag_id>`；
 //!   先解压到 `runtime/.staging-*` 再改名，`current.json` 用临时文件 + 改名替换。
 //! - 失败只清理自己写的临时目录与坏下载，不碰用户数据（`userdata/`、预设、日志）。
+//!   唯一的例外是 `userdata/delivery.json`（P3-b 的后台补齐进度账本）：它只有字节数与阶段名，
+//!   不含任何用户内容，登记在 `backend/app/data_layout.py` 的**缓存档**，卸载随缓存一起删。
 //! - 离线入口：`<安装目录>\runtime-pack\` 与 `%LOCALAPPDATA%\Demiurge\downloads\`；有完整清单与
 //!   分件时完全不联网。
+//!
+//! 提交合同（P2，2026-11-02）——「翻车不等于永久打不开」的四条：
+//! - **提交闸**：`current.json` 只在候选运行时被探活证明能起之后才改写。只在「已提交过、
+//!   且那一份现在还能起」时跑（首装没有可回退的东西，闸只会白加一次冷启动）。
+//! - **前态**：提交时三层 id 有变化才写 `previous.json`，记录的是「上一个被提交的 commit」，
+//!   不是「上一次尝试」。旧层是内容寻址，换版本＝换 id，所以旧层目录本来就不会被删；
+//!   回收策略是「新提交成功启动过之后再删孤儿代际」（见 `prune_old_layers`）。
+//! - **拒绝提交**：闸不过 ⇒ 放回同 id 旧目录、只删本次新建的层目录、旧 `current.json` 逐字
+//!   不动、拒因既写日志也进错误串；`downloads/` 的分件缓存保留 ⇒ 重试只做本地重合并，不花流量。
+//! - **临时项**：`.staging-*` / `.work-*` 在装配前扫一次（`sweep_temp`），删除失败不再被 `let _ =` 吞掉。
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -22,12 +34,28 @@ use sha2::{Digest, Sha256};
 /// 构建期嵌入的交付 pin。CI 在构建壳之前按 release tag 重写 `release/runtime-delivery.json`。
 pub const PIN_JSON: &str = include_str!("../../../release/runtime-delivery.json");
 
-const REQUIRED_LAYERS: [&str; 3] = ["base", "application", "rag"];
-const OPTIONAL_LAYERS: [&str; 0] = [];
+/// 必装层：装上壳就得能用起来的下限（对话、作品、检索的向量库都在这里）。
+/// `rag` **不在**这一档：它 ~2 GiB，装的是 torch / sentence-transformers 这类本地推理栈，
+/// 缺席时应用照跑，只是本地嵌入档与 Reranker 不可选（2026-11-03 P3 定案）。
+const REQUIRED_LAYERS: [&str; 2] = ["base", "application"];
+const OPTIONAL_LAYERS: [&str; 1] = ["rag"];
 const DOWNLOAD_CHUNK: usize = 256 * 1024;
 /// 解压体积估计：归档多为 PyInstaller/前端压缩产物，留 3 倍余量。
 const EXTRACT_FACTOR: u64 = 3;
 const SPACE_MARGIN: u64 = 256 * 1024 * 1024;
+
+/// 一次交付管哪几层。
+///
+/// `Required` ＝首启/升级的正常路径（只碰必装层，rag 缺席也不报错）。
+/// `Optional` ＝ P3-b 的后台补齐：只下「pin 说是可选、清单里真有、盘上还缺」的那几层。
+/// 两档走**同一条主体**（同一套校验、同一个提交闸、同一次落位），只是层的集合不同——
+/// 可选层绝不能因为「只是可选」就跳过探活：torch 的 DLL 与 base 层 ABI 绑死，
+/// 坏的一代的失败形状是进程起不来，不是少个功能。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayerScope {
+    Required,
+    Optional,
+}
 
 #[derive(Debug)]
 pub struct DeliveryError(pub String);
@@ -125,6 +153,48 @@ pub struct DeliveryReport {
     pub reused: bool,
 }
 
+/// 一次提交涉及的三层 id。`rag_id` 允许为空（RAG 后补时它还不存在）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayerIds {
+    pub base_id: String,
+    pub application_id: String,
+    pub rag_id: String,
+}
+
+/// 一份状态档（`current.json` / `previous.json` / 闸用的临时档）的读取结果。
+#[derive(Debug, Clone)]
+pub struct StateDoc {
+    pub ids: LayerIds,
+    pub app_version: String,
+    pub target: String,
+    pub edition: String,
+    pub schema_version: u64,
+}
+
+/// 提交闸要探的那个候选运行时怎么起：路径全部由交付侧给，**绝不指向真实数据**。
+#[derive(Debug, Clone)]
+pub struct GateRequest {
+    /// `home/runtime`：层目录的根，探活要在这里起 exe。
+    pub runtime_root: PathBuf,
+    /// 安装目录：只为把壳自带的 MinGit / ffmpeg 前置进 PATH，与真实启动同一份合同。
+    pub install_dir: PathBuf,
+    /// `runtime/.gate-<token>/current.json`：写的是候选三层 id。
+    pub state_path: PathBuf,
+    /// `runtime/.gate-<token>/userdata`：候选层的 `LAF_DATA_DIR`，空的，用完即删。
+    pub data_dir: PathBuf,
+    /// 候选 base 层 id：用来定位 `base/<id>/Demiurge-Runtime.exe`。
+    pub base_id: String,
+}
+
+/// 提交闸。`None` = 不过闸（自检与首装）；`Some` = 提交前必须过的探活，返回 `Err(拒因)`。
+pub(crate) type GateFn = fn(&GateRequest) -> Result<(), String>;
+
+/// 维护入口（`--install-runtime`）用来念「这次装哪几层」的文案真源，免得再出现
+/// 一句写死三层、和契约对不上的横幅。
+pub fn required_layers_text() -> String {
+    REQUIRED_LAYERS.join(" + ")
+}
+
 pub fn embedded_pin() -> Result<DeliveryPin, DeliveryError> {
     let pin: DeliveryPin = serde_json::from_str(PIN_JSON)
         .map_err(|err| DeliveryError(format!("内置运行时交付 pin 无法解析：{err}")))?;
@@ -138,20 +208,132 @@ pub fn is_portable_layout(exe_dir: &Path) -> bool {
     crate::paths::resolve_package(exe_dir).is_some()
 }
 
+/// 安装版首次启动（或 `--install-runtime`、托盘「检查更新」里的运行时漂移分支）调用：
+/// 把运行时部署到 `home()/runtime`。**生产入口一律带提交闸**。
 pub fn ensure_installed_runtime(
     install_dir: &Path,
     progress: &mut dyn FnMut(&str),
 ) -> Result<DeliveryReport, DeliveryError> {
     let pin = embedded_pin()?;
-    deliver(&pin, &crate::paths::home(), install_dir, None, progress)
+    deliver_with_gate(
+        &pin,
+        &crate::paths::home(),
+        install_dir,
+        None,
+        Some(crate::runtime_host::probe_candidate),
+        progress,
+    )
 }
 
-/// 自检与单测入口：允许注入 pin / home / 可用磁盘空间。
+/// 自检与单测入口：注入 pin / home / 可用磁盘空间，**不带提交闸**。
+/// 自检夹具里的 `Demiurge-Runtime.exe` 是假字节（起不来），所以闸本身由第 19 项用
+/// 脚本化闸单独验证，不能让第 17 项去跑真探活。
 pub(crate) fn deliver(
     pin: &DeliveryPin,
     home: &Path,
     install_dir: &Path,
     free_bytes_override: Option<u64>,
+    progress: &mut dyn FnMut(&str),
+) -> Result<DeliveryReport, DeliveryError> {
+    deliver_with_gate(pin, home, install_dir, free_bytes_override, None, progress)
+}
+
+/// 必装层交付（首启 / 升级 / 维护入口）。
+pub(crate) fn deliver_with_gate(
+    pin: &DeliveryPin,
+    home: &Path,
+    install_dir: &Path,
+    free_bytes_override: Option<u64>,
+    gate: Option<GateFn>,
+    progress: &mut dyn FnMut(&str),
+) -> Result<DeliveryReport, DeliveryError> {
+    deliver_with_scope(
+        pin,
+        home,
+        install_dir,
+        free_bytes_override,
+        gate,
+        LayerScope::Required,
+        &mut None,
+        progress,
+    )
+}
+
+/// 后台补齐（P3-b）：只交付可选层里「清单真提供、盘上还缺」的那几层，并把进度落到
+/// `userdata/delivery.json`。走的是必装层同一条主体（同一套校验、同一个提交闸），
+/// 差别只有层的集合，以及这次多一本对外可见的账。
+pub(crate) fn deliver_optional(
+    pin: &DeliveryPin,
+    home: &Path,
+    install_dir: &Path,
+    free_bytes_override: Option<u64>,
+    gate: Option<GateFn>,
+    progress: &mut dyn FnMut(&str),
+) -> Result<DeliveryReport, DeliveryError> {
+    let mut ledger = Some(DeliveryLedger::new(home, &pin.optional_layers));
+    let outcome = deliver_with_scope(
+        pin,
+        home,
+        install_dir,
+        free_bytes_override,
+        gate,
+        LayerScope::Optional,
+        &mut ledger,
+        progress,
+    );
+    if let Some(ledger) = ledger.as_mut() {
+        match &outcome {
+            // 这个版本没有可选组件可下（清单不含，或早已挂着且指向也翻好了）⇒ 不留账本：
+            // 面板不该显示一条没发生过的补齐。
+            Ok(report) if report.downloaded_layers.is_empty() && report.rag_id.is_empty() => {
+                ledger.discard()
+            }
+            Ok(_) => ledger.finish_ok(),
+            Err(err) => ledger.finish_err(&err.0),
+        }
+    }
+    outcome
+}
+
+/// 生产入口：托盘「补齐 RAG」与进应用后的那一次询问都走这里，**带提交闸**。
+pub fn backfill_optional_runtime(
+    install_dir: &Path,
+    progress: &mut dyn FnMut(&str),
+) -> Result<DeliveryReport, DeliveryError> {
+    let pin = embedded_pin()?;
+    deliver_optional(
+        &pin,
+        &crate::paths::home(),
+        install_dir,
+        None,
+        Some(crate::runtime_host::probe_candidate),
+        progress,
+    )
+}
+
+/// 可选层还没挂上吗。
+///
+/// 判据是 `current.json` 的 `rag_id` 是否为空——P3-a 定过这条诚实合同（状态档只写盘上真挂着的
+/// 那代），所以「空」既覆盖「还没下」也覆盖「下坏了被闸拒掉」，不会谎报。
+/// 读不到 `current.json` 返回 `false`：那是连必装层都还没提交的布局（开发态、或首启交付链还在跑），
+/// 该由首启那条路径处理，后台补齐不抢跑。
+pub fn optional_layer_missing(home: &Path) -> bool {
+    match read_layer_ids(&home.join("runtime").join("current.json")) {
+        Some(ids) => ids.rag_id.trim().is_empty(),
+        None => false,
+    }
+}
+
+/// 交付主体。`gate = Some` 时 `current.json` 只在候选运行时被探活证明能起之后才改写；
+/// `ledger = Some` 时每一秒的字节 tick 额外落一份 `userdata/delivery.json`（见 `DeliveryLedger`）。
+fn deliver_with_scope(
+    pin: &DeliveryPin,
+    home: &Path,
+    install_dir: &Path,
+    free_bytes_override: Option<u64>,
+    gate: Option<GateFn>,
+    scope: LayerScope,
+    ledger: &mut Option<DeliveryLedger>,
     progress: &mut dyn FnMut(&str),
 ) -> Result<DeliveryReport, DeliveryError> {
     validate_pin(pin).map_err(DeliveryError)?;
@@ -162,6 +344,12 @@ pub(crate) fn deliver(
     fs::create_dir_all(&downloads)?;
     let local_dirs = vec![install_dir.join("runtime-pack"), downloads.clone()];
 
+    // 装配前扫一次无主残留：同一进程内交付是单飞的（托盘与启动互斥），所以不设年龄护栏。
+    let orphans = sweep_temp(&runtime_root, &downloads, None);
+    for failure in &orphans {
+        crate::shell_log::warn(&format!("清理上次残留的临时目录失败：{failure}"));
+    }
+
     progress("读取运行时清单…");
     let manifest = match find_offline_manifest(pin, &local_dirs)? {
         Some(manifest) => manifest,
@@ -169,29 +357,89 @@ pub(crate) fn deliver(
     };
     validate_manifest(pin, &manifest).map_err(DeliveryError)?;
 
-    let mut needed: Vec<&str> = Vec::new();
-    for name in REQUIRED_LAYERS {
-        if !manifest.layers.contains_key(name) {
-            return Err(DeliveryError(format!("运行时清单缺少 {name} 层")));
+    // 这次管哪几层：必装档里缺层是硬错误；可选档只认「清单真的提供」的那几条——
+    // 不提供不是失败，只是这个版本没有可选组件（`windows-x64` 无 rag 的那一类发行）。
+    let declared: &Vec<String> = match scope {
+        LayerScope::Required => &pin.required_layers,
+        LayerScope::Optional => &pin.optional_layers,
+    };
+    let mut offered: Vec<&str> = Vec::new();
+    for name in declared {
+        if !manifest.layers.contains_key(name.as_str()) {
+            if scope == LayerScope::Required {
+                return Err(DeliveryError(format!("运行时清单缺少 {name} 层")));
+            }
+            continue;
         }
+        offered.push(name.as_str());
+    }
+    let mut needed: Vec<&str> = Vec::new();
+    for name in &offered {
         if !layer_installed(name, &runtime_root, manifest.layer_id(name)) {
-            needed.push(name);
+            needed.push(*name);
         }
     }
 
+    let rag_on_disk = installed_rag_id(&runtime_root, &manifest);
+    // 「这次提交之后 rag 会不会真在盘上」：已经在，或这次就把它下下来。
+    // 否则留空——盘上残留的旧一代绝不能接着挂（torch 的 DLL 与 base 层 ABI 绑死）。
+    let takes_optional_rag = needed.iter().any(|name| *name == "rag") && !manifest.rag_id.trim().is_empty();
+    let candidate = LayerIds {
+        base_id: manifest.base_id.clone(),
+        application_id: manifest.application_id.clone(),
+        rag_id: if !rag_on_disk.is_empty() || takes_optional_rag {
+            manifest.rag_id.clone()
+        } else {
+            String::new()
+        },
+    };
+    // 提交闸只在「已提交过、那一份现在还能起、且这次要换指向」时跑。
+    // 首装没有可回退的东西，闸只会给每台机器白加一次冷启动（torch 导入是分钟级）。
+    let guarded: Option<LayerIds> = match read_layer_ids(&runtime_root.join("current.json")) {
+        Some(committed)
+            if committed != candidate && bootable_installed(&runtime_root, &committed) =>
+        {
+            Some(committed)
+        }
+        _ => None,
+    };
+
     if needed.is_empty() {
-        write_current(&runtime_root, &manifest, &manifest.rag_id)?;
+        if offered.is_empty() {
+            progress("这个版本没有提供可选组件，无需补齐");
+            return Ok(DeliveryReport {
+                base_id: manifest.base_id.clone(),
+                application_id: manifest.application_id.clone(),
+                rag_id: candidate.rag_id.clone(),
+                downloaded_layers: Vec::new(),
+                reused: true,
+            });
+        }
+        // 层文件都在盘上不等于 commit 不用变：候选层已解压好但 `current.json` 还指着旧一代时，
+        // 这条路径就是「只翻指向」的升级，同样必须过闸。
+        run_gate(
+            gate,
+            guarded.as_ref(),
+            &runtime_root,
+            install_dir,
+            &candidate,
+            &manifest,
+            progress,
+        )?;
+        let rag_after = installed_rag_id(&runtime_root, &manifest);
+        commit(&runtime_root, &manifest, &rag_after)?;
         progress("运行时已就绪，无需重复部署");
         return Ok(DeliveryReport {
             base_id: manifest.base_id.clone(),
             application_id: manifest.application_id.clone(),
-            rag_id: manifest.rag_id.clone(),
+            rag_id: rag_after,
             downloaded_layers: Vec::new(),
             reused: true,
         });
     }
 
     let mut required_bytes = SPACE_MARGIN;
+    let mut asset_bytes: u64 = 0;
     for name in &needed {
         let layer = &manifest.layers[*name];
         let all_local = layer
@@ -201,8 +449,14 @@ pub(crate) fn deliver(
         required_bytes = required_bytes
             .saturating_add(if all_local { 0 } else { layer.size })
             .saturating_add(layer.size.saturating_mul(EXTRACT_FACTOR));
+        for asset in &layer.assets {
+            asset_bytes = asset_bytes.saturating_add(asset.size);
+        }
     }
     ensure_space(home, required_bytes, free_bytes_override)?;
+    if let Some(ledger) = ledger.as_mut() {
+        ledger.set_total(asset_bytes);
+    }
 
     let token = unique_token();
     let staging = runtime_root.join(format!(".staging-{token}"));
@@ -216,18 +470,34 @@ pub(crate) fn deliver(
             let layer = &manifest.layers[*name];
             let label = layer_label(name);
             progress(&format!("准备{label}…"));
-            let archive = acquire_layer(&fetcher, pin, name, layer, &local_dirs, &downloads, &work, progress)?;
+            let archive = acquire_layer(
+                &fetcher,
+                pin,
+                name,
+                layer,
+                &local_dirs,
+                &downloads,
+                &work,
+                &mut *ledger,
+                progress,
+            )?;
             progress(&format!("解压{label}…"));
             extract_zip_stripped(&archive, &staging.join(name))
                 .map_err(|err| DeliveryError(format!("{label}解压失败：{err}")))?;
         }
+        if let Some(ledger) = ledger.as_mut() {
+            ledger.set_stage("解压落位");
+        }
 
         let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
+        // 本次「凭空新建」的层目录：闸不过时只删这些，旧提交指向的目录绝不碰。
+        let mut created: Vec<PathBuf> = Vec::new();
         let deployed = (|| -> Result<(), DeliveryError> {
             for name in &needed {
                 let target = layer_dir(&runtime_root, name, manifest.layer_id(name));
                 let stale = staging.join("stale").join(name);
-                if target.exists() {
+                let pre_existing = target.exists();
+                if pre_existing {
                     if let Some(parent) = stale.parent() {
                         fs::create_dir_all(parent)?;
                     }
@@ -238,28 +508,321 @@ pub(crate) fn deliver(
                     fs::create_dir_all(parent)?;
                 }
                 fs::rename(staging.join(name), &target)?;
+                if !pre_existing {
+                    created.push(target);
+                }
             }
             Ok(())
         })();
         if let Err(err) = deployed {
-            rollback(&moved);
+            restore_moved_layers(&moved);
             return Err(err);
         }
 
-        write_current(&runtime_root, &manifest, &manifest.rag_id)?;
+        if let Some(ledger) = ledger.as_mut() {
+            ledger.set_stage("启动自检");
+        }
+        if let Err(err) = run_gate(
+            gate,
+            guarded.as_ref(),
+            &runtime_root,
+            install_dir,
+            &candidate,
+            &manifest,
+            progress,
+        ) {
+            restore_moved_layers(&moved);
+            let leaked = discard_layers(&created);
+            return Err(DeliveryError(format!(
+                "{}{}{}",
+                err.0,
+                cleanup_note(&leaked),
+                CACHE_KEPT_NOTE
+            )));
+        }
+        if let Some(ledger) = ledger.as_mut() {
+            ledger.set_stage("提交");
+        }
+
+        // 提交时按**盘上现状**重写 rag_id：过了闸也可能出现标记文件不合格的情况，那种时候
+        // 宁可留空也不写没挂着的代际（P3-a 的诚实合同）。
+        let rag_after = installed_rag_id(&runtime_root, &manifest);
+        commit(&runtime_root, &manifest, &rag_after)?;
         progress("运行时部署完成");
         Ok(DeliveryReport {
             base_id: manifest.base_id.clone(),
             application_id: manifest.application_id.clone(),
-            rag_id: manifest.rag_id.clone(),
+            rag_id: rag_after,
             downloaded_layers: needed.iter().map(|name| name.to_string()).collect(),
             reused: false,
         })
     })();
 
-    let _ = fs::remove_dir_all(&staging);
-    let _ = fs::remove_dir_all(&work);
+    // 临时目录删除失败不再吞掉：它意味着几个 GB 留在盘上，必须能在日志里看到路径。
+    for path in [&staging, &work] {
+        if let Err(err) = fs::remove_dir_all(path) {
+            if path.exists() {
+                crate::shell_log::warn(&format!("清理临时目录失败：{}（{err}）", path.display()));
+            }
+        }
+    }
     outcome
+}
+
+/// 提交闸：`Some(gate)` 且存在「能起的前一代」时，用候选层起一个隔离进程探活。
+///
+/// 探活跑在 `runtime/.gate-<token>/` 里：状态档写候选三层 id，`LAF_DATA_DIR` 指到同目录的
+/// 空 `userdata`，用完即删。⚠ 有意的取舍：这样只能证明「这一层能起」，证明不了「带着用户的
+/// 数据能起」——后者由启动侧的回退（`runtime_host` 的 `commit_previous`）兜第二道网。
+fn run_gate(
+    gate: Option<GateFn>,
+    guarded: Option<&LayerIds>,
+    runtime_root: &Path,
+    install_dir: &Path,
+    candidate: &LayerIds,
+    manifest: &Manifest,
+    progress: &mut dyn FnMut(&str),
+) -> Result<(), DeliveryError> {
+    let Some(gate) = gate else {
+        return Ok(());
+    };
+    let Some(previous) = guarded else {
+        crate::shell_log::info("提交自检跳过：没有可回退的已提交版本（首次部署或旧提交已不可启动）");
+        return Ok(());
+    };
+    crate::shell_log::info(&format!(
+        "提交自检开始：候选 base={} app={} rag={}，前一代 base={} app={} rag={}",
+        candidate.base_id, candidate.application_id, candidate.rag_id,
+        previous.base_id, previous.application_id, previous.rag_id
+    ));
+    progress("新运行时就位，正在做启动自检（可能要几分钟）…");
+
+    let gate_dir = runtime_root.join(format!(".gate-{}", unique_token()));
+    let state_path = gate_dir.join("current.json");
+    let data_dir = gate_dir.join("userdata");
+    fs::create_dir_all(&data_dir)?;
+    let state = serde_json::json!({
+        "schema_version": manifest.schema_version,
+        "app_version": manifest.app_version,
+        "target": manifest.target,
+        "edition": manifest.edition,
+        "base_id": candidate.base_id,
+        "application_id": candidate.application_id,
+        "rag_id": candidate.rag_id,
+    });
+    write_state_file(&state_path, &state)?;
+
+    let request = GateRequest {
+        runtime_root: runtime_root.to_path_buf(),
+        install_dir: install_dir.to_path_buf(),
+        state_path,
+        data_dir,
+        base_id: candidate.base_id.clone(),
+    };
+    let outcome = gate(&request);
+
+    let leaked = match fs::remove_dir_all(&gate_dir) {
+        Ok(()) => Vec::new(),
+        Err(err) if gate_dir.exists() => vec![format!("{}（{err}）", gate_dir.display())],
+        Err(_) => Vec::new(),
+    };
+    match outcome {
+        Ok(()) => {
+            crate::shell_log::info("提交自检通过：候选运行时健康检查与前端页面都就绪");
+            progress("启动自检通过，正在提交新版本…");
+            Ok(())
+        }
+        Err(reason) => {
+            crate::shell_log::warn(&format!("提交自检未通过：{reason}"));
+            Err(DeliveryError(format!(
+                "新运行时未通过启动自检，已保持原版本不提交：{reason}{}{}",
+                cleanup_note(&leaked),
+                CACHE_KEPT_NOTE
+            )))
+        }
+    }
+}
+
+/// 拒绝提交时删掉本次新建的层目录；失败路径逐条回报，不再 `let _ =` 吞掉。
+fn discard_layers(created: &[PathBuf]) -> Vec<String> {
+    created
+        .iter()
+        .filter(|dir| dir.exists())
+        .filter_map(|dir| match fs::remove_dir_all(dir) {
+            Ok(()) => {
+                crate::shell_log::info(&format!("已删除未通过自检的新层：{}", dir.display()));
+                None
+            }
+            Err(err) => Some(format!("{}（{err}）", dir.display())),
+        })
+        .collect()
+}
+
+fn cleanup_note(leaked: &[String]) -> String {
+    if leaked.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n\n以下临时内容清理失败，需要手动删除：\n{}",
+        leaked.join("\n")
+    )
+}
+
+/// 拒绝提交后的固定收尾说明：分件缓存留在 `downloads/`，重试只做本地重合并与重解压。
+const CACHE_KEPT_NOTE: &str = "\n\n已下载的分件保留在本地缓存里，重试不会重复下载。";
+
+// ── 进度账本（P3-b 后台补齐）──────────────────────────────────────────────────
+
+/// 账本文件名：`userdata/delivery.json`。读侧＝`backend/app/services/shell_delivery.py`
+/// （再由 `activity_feed` 投影进「后台活动」面板），名字同时登记在
+/// `backend/app/data_layout.py` 的**缓存**档 ⇒ 卸载随缓存一起删。
+const LEDGER_NAME: &str = "delivery.json";
+
+/// 后台补齐的进度账本。壳是唯一写入方，另一个进程只读。
+///
+/// 🔴 这是壳与后端之间**第一条跨进程通道**：此前两侧只有启动时单向注入的 5 个环境变量
+/// （`LAF_RUNTIME_ROOT` / `LAF_RUNTIME_STATE` / `LAF_DATA_DIR` / `LAF_RUNTIME_PORT` /
+/// `LAF_NO_BROWSER`），壳的进度只写启动页文案。所以文件位置、字段名和陈旧口径都是跨层合同，
+/// 改一侧必须同步另一侧（`backend/tests/test_shell_delivery.py` 盯读侧，第 17/19 项自检盯写侧）。
+///
+/// 落盘节奏跟着分件下载的 1 秒 tick 走。壳中途崩掉时没人把 `running` 改成终态，所以
+/// **陈旧判据放在读侧**（按 `updated_at` 年龄），这边不留需要谁去清的僵尸状态。
+/// 写入用「临时文件 + rename」：读侧任何一刻拿到的都是完整的旧档或完整的新档。
+struct DeliveryLedger {
+    path: PathBuf,
+    layer: String,
+    label: String,
+    state: &'static str,
+    stage: &'static str,
+    done_bytes: u64,
+    total_bytes: u64,
+    speed_bps: u64,
+    started_at: f64,
+    updated_at: f64,
+    last_tick_at: f64,
+    last_tick_done: u64,
+    /// 本次任务里已经拿完的分件字节数：`done = asset_base + 当前分件已写字节`。
+    asset_base: u64,
+    error: String,
+}
+
+impl DeliveryLedger {
+    fn new(home: &Path, layers: &[String]) -> Self {
+        let started = now_epoch();
+        let names: Vec<&str> = layers.iter().map(String::as_str).collect();
+        Self {
+            path: home.join("userdata").join(LEDGER_NAME),
+            layer: names.join("+"),
+            label: names.iter().map(|name| layer_label(name)).collect::<Vec<_>>().join("、"),
+            state: "running",
+            stage: "准备清单",
+            done_bytes: 0,
+            total_bytes: 0,
+            speed_bps: 0,
+            started_at: started,
+            updated_at: started,
+            last_tick_at: started,
+            last_tick_done: 0,
+            asset_base: 0,
+            error: String::new(),
+        }
+    }
+
+    /// 记下这次的总字节（＝待交付那几层的分件字节数之和），分件下载进度按它算百分比。
+    fn set_total(&mut self, bytes: u64) {
+        self.total_bytes = bytes;
+        self.stage = "下载分件";
+        self.flush();
+    }
+
+    fn set_stage(&mut self, stage: &'static str) {
+        self.stage = stage;
+        self.flush();
+    }
+
+    /// 当前分件已写 `written` 字节：一秒一次，顺带算出这次的瞬时速率（读侧不再自己攒状态）。
+    fn tick(&mut self, written: u64) {
+        self.done_bytes = self.asset_base.saturating_add(written).min(self.total_bytes);
+        let now = now_epoch();
+        let elapsed = now - self.last_tick_at;
+        if elapsed < 0.5 {
+            return;
+        }
+        let delta = self.done_bytes.saturating_sub(self.last_tick_done);
+        self.speed_bps = (delta as f64 / elapsed).max(0.0) as u64;
+        self.last_tick_at = now;
+        self.last_tick_done = self.done_bytes;
+        self.flush();
+    }
+
+    /// 一个分件到手（本地复用与真下载都算）：字节账推进，速率起点跟着走。
+    fn end_asset(&mut self, size: u64) {
+        self.asset_base = self.asset_base.saturating_add(size);
+        self.done_bytes = self.asset_base.min(self.total_bytes);
+        self.last_tick_done = self.done_bytes;
+        self.last_tick_at = now_epoch();
+        self.flush();
+    }
+
+    fn finish_ok(&mut self) {
+        self.state = "done";
+        self.stage = "已提交";
+        self.done_bytes = self.total_bytes;
+        self.speed_bps = 0;
+        self.flush();
+    }
+
+    fn finish_err(&mut self, reason: &str) {
+        self.state = "failed";
+        self.speed_bps = 0;
+        self.error = reason.to_string();
+        self.flush();
+    }
+
+    /// 无事可做时删掉账本：面板不该显示一条没发生过的补齐。删不掉也不报错——
+    /// 下次交付会整体覆盖，未登记进任何删除面之外的路径都由缓存档兜着。
+    fn discard(&mut self) {
+        if let Err(err) = fs::remove_file(&self.path) {
+            if self.path.exists() {
+                crate::shell_log::warn(&format!("清理补齐进度账本失败：{}（{err}）", self.path.display()));
+            }
+        }
+    }
+
+    fn flush(&mut self) {
+        self.updated_at = now_epoch();
+        let value = serde_json::json!({
+            "schema_version": 1,
+            "layer": self.layer,
+            "label": self.label,
+            "state": self.state,
+            "stage": self.stage,
+            "done_bytes": self.done_bytes,
+            "total_bytes": self.total_bytes,
+            "speed_bps": self.speed_bps,
+            "started_at": self.started_at,
+            "updated_at": self.updated_at,
+            "shell_pid": std::process::id(),
+            "error": self.error,
+        });
+        if let Some(parent) = self.path.parent() {
+            if let Err(err) = fs::create_dir_all(parent) {
+                crate::shell_log::warn(&format!("创建进度账本目录失败：{err}"));
+                return;
+            }
+        }
+        // 账本只是可观测性，写坏它不能把正在进行的交付带崩。
+        if let Err(err) = write_state_file(&self.path, &value) {
+            crate::shell_log::warn(&format!("写入补齐进度账本失败：{err}"));
+        }
+    }
+}
+
+fn now_epoch() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs_f64())
+        .unwrap_or(0.0)
 }
 
 // ── pin / 清单校验 ──────────────────────────────────────────────────────────
@@ -539,7 +1102,7 @@ fn fetch_manifest(
                 let _ = fs::remove_file(&dest);
             }
             progress(&format!("下载运行时清单（{source}）…"));
-            if let Err(err) = fetcher.fetch(&url, &dest, progress, "运行时清单") {
+            if let Err(err) = fetcher.fetch(&url, &dest, progress, "运行时清单", &mut None) {
                 errors.push(format!("{url}: {err}"));
                 break;
             }
@@ -588,11 +1151,12 @@ impl Fetcher {
         dest: &Path,
         progress: &mut dyn FnMut(&str),
         label: &str,
+        ledger: &mut Option<DeliveryLedger>,
     ) -> Result<(), DeliveryError> {
         if url.starts_with("file://") {
             self.copy_file(url, dest)
         } else if url.starts_with("https://") || url.starts_with("http://") {
-            self.http(url, dest, progress, label)
+            self.http(url, dest, progress, label, ledger)
         } else {
             Err(DeliveryError(format!("不支持的下载地址：{url}")))
         }
@@ -624,6 +1188,7 @@ impl Fetcher {
         dest: &Path,
         progress: &mut dyn FnMut(&str),
         label: &str,
+        ledger: &mut Option<DeliveryLedger>,
     ) -> Result<(), DeliveryError> {
         let existing = dest.metadata().map(|meta| meta.len()).unwrap_or(0);
         let mut request = self.agent.get(url);
@@ -660,6 +1225,11 @@ impl Fetcher {
             if last_report.elapsed() >= Duration::from_secs(1) {
                 last_report = Instant::now();
                 progress(&format!("{label}：已下载 {}", human_bytes(written)));
+                // `written` 含续传已有的字节（206 时起点就是 `existing`），所以账本这边
+                // 直接按「这个分件现在手上有几字节」推进，续传不会重复计数。
+                if let Some(ledger) = ledger.as_mut() {
+                    ledger.tick(written);
+                }
             }
         }
         output.flush()?;
@@ -675,6 +1245,7 @@ fn acquire_layer(
     local_dirs: &[PathBuf],
     downloads: &Path,
     work: &Path,
+    ledger: &mut Option<DeliveryLedger>,
     progress: &mut dyn FnMut(&str),
 ) -> Result<PathBuf, DeliveryError> {
     let label = layer_label(name);
@@ -683,6 +1254,9 @@ fn acquire_layer(
     for (index, asset) in layer.assets.iter().enumerate() {
         if let Some(found) = find_verified(local_dirs, asset) {
             asset_paths.push(found);
+            if let Some(ledger) = ledger.as_mut() {
+                ledger.end_asset(asset.size);
+            }
             continue;
         }
         let dest = downloads.join(&asset.name);
@@ -696,7 +1270,10 @@ fn acquire_layer(
             asset.name,
             human_bytes(asset.size)
         ));
-        download_asset(fetcher, &sources, asset, &dest, &label, progress)?;
+        download_asset(fetcher, &sources, asset, &dest, &label, &mut *ledger, progress)?;
+        if let Some(ledger) = ledger.as_mut() {
+            ledger.end_asset(asset.size);
+        }
         asset_paths.push(dest);
     }
 
@@ -731,6 +1308,7 @@ fn download_asset(
     asset: &Asset,
     dest: &Path,
     label: &str,
+    ledger: &mut Option<DeliveryLedger>,
     progress: &mut dyn FnMut(&str),
 ) -> Result<(), DeliveryError> {
     if dest.is_file() {
@@ -749,7 +1327,7 @@ fn download_asset(
     for source in sources {
         let url = url_join(source, &asset.name);
         for attempt in 0..2 {
-            match fetcher.fetch(&url, dest, progress, label) {
+            match fetcher.fetch(&url, dest, progress, label, &mut *ledger) {
                 Ok(()) => match verify_file(dest, asset.size, &asset.sha256) {
                     Ok(()) => return Ok(()),
                     Err(err) => {
@@ -918,7 +1496,44 @@ fn marker_id(dir: &Path, file: &str, key: &str) -> Option<String> {
     value.get(key)?.as_str().map(str::to_string)
 }
 
-fn write_current(runtime_root: &Path, manifest: &Manifest, rag_id: &str) -> Result<(), DeliveryError> {
+/// 清单广告的这代 rag 层**真的在盘上**才写进状态档。
+///
+/// rag 从 P3 起是可选层：没交付时 `current.json` 的 `rag_id` 必须留空，否则启动入口会去挂
+/// 一个不存在的 `site-packages`。id 对不上也不行——留在盘上的旧一代 rag 不能接着挂，
+/// torch 的 DLL 与 base 层 ABI 相互绑定（见 `runtime-layered.spec` 里 msvcp140 那段），
+/// 错配的代价是进程起不来，而不是「少个功能」。
+fn installed_rag_id(runtime_root: &Path, manifest: &Manifest) -> String {
+    if !manifest.layers.contains_key("rag") || manifest.rag_id.trim().is_empty() {
+        return String::new();
+    }
+    if layer_installed("rag", runtime_root, &manifest.rag_id) {
+        manifest.rag_id.clone()
+    } else {
+        String::new()
+    }
+}
+
+/// 提交：先记前态，再翻 `current.json`。
+///
+/// `previous.json` 只在三层 id 真的变化时写，内容是**上一个被提交的 commit**（不是上一次尝试），
+/// 所以「探活失败」「解压失败」都不会污染回退点。
+fn commit(runtime_root: &Path, manifest: &Manifest, rag_id: &str) -> Result<(), DeliveryError> {
+    let candidate = LayerIds {
+        base_id: manifest.base_id.clone(),
+        application_id: manifest.application_id.clone(),
+        rag_id: rag_id.to_string(),
+    };
+    if let Some(previous) = read_state(&runtime_root.join("current.json")) {
+        if previous.ids != candidate {
+            crate::shell_log::info(&format!(
+                "记录前一代提交：base {}→{}、app {}→{}、rag {}→{}",
+                previous.ids.base_id, candidate.base_id,
+                previous.ids.application_id, candidate.application_id,
+                previous.ids.rag_id, candidate.rag_id
+            ));
+            write_state_file(&runtime_root.join("previous.json"), &state_value(&previous))?;
+        }
+    }
     let state = serde_json::json!({
         "schema_version": manifest.schema_version,
         "app_version": manifest.app_version,
@@ -928,23 +1543,284 @@ fn write_current(runtime_root: &Path, manifest: &Manifest, rag_id: &str) -> Resu
         "application_id": manifest.application_id,
         "rag_id": rag_id,
     });
-    let payload = serde_json::to_vec_pretty(&state)?;
-    let tmp = runtime_root.join(format!(".current-{}.json", unique_token()));
+    write_state_file(&runtime_root.join("current.json"), &state)
+}
+
+fn state_value(doc: &StateDoc) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": doc.schema_version,
+        "app_version": doc.app_version,
+        "target": doc.target,
+        "edition": doc.edition,
+        "base_id": doc.ids.base_id,
+        "application_id": doc.ids.application_id,
+        "rag_id": doc.ids.rag_id,
+    })
+}
+
+/// 状态档写入都是临时文件 + rename：读侧永远只会看到「旧的完整档」或「新的完整档」。
+fn write_state_file(path: &Path, state: &serde_json::Value) -> Result<(), DeliveryError> {
+    let payload = serde_json::to_vec_pretty(state)?;
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("current.json");
+    let tmp = path.with_file_name(format!(".{file_name}-{}", unique_token()));
     fs::write(&tmp, payload)?;
-    if let Err(err) = fs::rename(&tmp, runtime_root.join("current.json")) {
+    if let Err(err) = fs::rename(&tmp, path) {
         let _ = fs::remove_file(&tmp);
-        return Err(DeliveryError(format!("写入 current.json 失败：{err}")));
+        return Err(DeliveryError(format!(
+            "写入 {} 失败：{err}",
+            path.display()
+        )));
     }
     Ok(())
 }
 
-fn rollback(moved: &[(PathBuf, PathBuf)]) {
+fn read_state(path: &Path) -> Option<StateDoc> {
+    let text = fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let read_id = |key: &str| -> String {
+        value
+            .get(key)
+            .and_then(|item| item.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let ids = LayerIds {
+        base_id: read_id("base_id"),
+        application_id: read_id("application_id"),
+        rag_id: read_id("rag_id"),
+    };
+    if ids.base_id.trim().is_empty() || ids.application_id.trim().is_empty() {
+        return None;
+    }
+    Some(StateDoc {
+        ids,
+        app_version: read_id("app_version"),
+        target: read_id("target"),
+        edition: read_id("edition"),
+        schema_version: value
+            .get("schema_version")
+            .and_then(|item| item.as_u64())
+            .unwrap_or(0),
+    })
+}
+
+pub fn read_layer_ids(path: &Path) -> Option<LayerIds> {
+    read_state(path).map(|doc| doc.ids)
+}
+
+/// 「这一代现在起得来吗」的静态判据：base + application 的标记文件都合格。
+/// RAG 不参与判定——它缺了只是功能降级，不该因此放弃回退点（P3 还要把它改成可后补）。
+fn bootable_installed(runtime_root: &Path, ids: &LayerIds) -> bool {
+    layer_installed("base", runtime_root, &ids.base_id)
+        && layer_installed("application", runtime_root, &ids.application_id)
+}
+
+/// 能不能回退：只判据、不写盘。返回（坏的当前代，可用的前一代）。
+pub fn rollback_target(runtime_root: &Path) -> Result<(LayerIds, LayerIds), String> {
+    let current = read_layer_ids(&runtime_root.join("current.json"))
+        .ok_or_else(|| "current.json 缺失或没有可用的层 id".to_string())?;
+    let previous = read_layer_ids(&runtime_root.join("previous.json"))
+        .ok_or_else(|| "没有前一代提交（previous.json 缺失或内容不完整）".to_string())?;
+    if previous == current {
+        return Err("前一代与当前提交相同，回退没有意义".to_string());
+    }
+    if !bootable_installed(runtime_root, &previous) {
+        return Err("前一代的层文件不完整，无法回退".to_string());
+    }
+    Ok((current, previous))
+}
+
+/// 回退：`current.json` 改指前一代，`previous.json` 改成那份坏的（这样它不会被回收，
+/// 也不会被下一轮回退当成可用点——两档互换后 `rollback_target` 会因「相同」直接拒绝）。
+///
+/// 两次 rename 之间崩溃的后果：`current` 仍指坏代、`previous` 也变成坏代 ⇒ 下次启动
+/// 判定「相同」不再回退，行为与不回退一致，不会来回翻档。
+pub fn commit_previous(runtime_root: &Path) -> Result<(LayerIds, LayerIds), String> {
+    let (broken, used) = rollback_target(runtime_root)?;
+    let broken_doc = read_state(&runtime_root.join("current.json"))
+        .ok_or_else(|| "current.json 读不出来".to_string())?;
+    let used_doc = read_state(&runtime_root.join("previous.json"))
+        .ok_or_else(|| "previous.json 读不出来".to_string())?;
+    write_state_file(&runtime_root.join("previous.json"), &state_value(&broken_doc))
+        .map_err(|err| err.to_string())?;
+    write_state_file(&runtime_root.join("current.json"), &state_value(&used_doc))
+        .map_err(|err| err.to_string())?;
+    crate::shell_log::warn(&format!(
+        "已回退到前一代运行时：base {}→{}、app {}→{}",
+        broken.base_id, used.base_id, broken.application_id, used.application_id
+    ));
+    Ok((broken, used))
+}
+
+/// 已装运行时的 `app_version` 与本壳 pin 不一致 ⇒ 层需要升级。纯本地读档，零流量。
+pub fn runtime_drift(home: &Path, pin: &DeliveryPin) -> Option<(String, String)> {
+    let doc = read_state(&home.join("runtime").join("current.json"))?;
+    let installed = normalize_version(&doc.app_version)?;
+    if installed == pin.version {
+        return None;
+    }
+    Some((doc.app_version, pin.version.clone()))
+}
+
+/// 回收上一次崩掉的临时目录：`runtime/.staging-*` 与 `downloads/.work-*`。
+/// `min_age` 是给「壳启动路径」留的护栏（并行的 `--install-runtime` 可能正在写）；
+/// 交付自己调用时传 `None`（同进程单飞）。返回删除失败的路径清单，不再 `let _ =` 吞掉。
+pub fn sweep_temp(
+    runtime_root: &Path,
+    downloads: &Path,
+    min_age: Option<Duration>,
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    for (dir, prefix) in [
+        (runtime_root, ".staging-"),
+        (downloads, ".work-"),
+        (runtime_root, ".gate-"),
+    ] {
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy().to_string();
+            if !name.starts_with(prefix) {
+                continue;
+            }
+            if let Some(limit) = min_age {
+                let old = entry
+                    .metadata()
+                    .and_then(|meta| meta.modified())
+                    .ok()
+                    .map(|modified| modified.elapsed().unwrap_or(Duration::from_secs(u64::MAX)))
+                    .unwrap_or(Duration::from_secs(u64::MAX));
+                if old < limit {
+                    continue;
+                }
+            }
+            let path = entry.path();
+            if let Err(err) = fs::remove_dir_all(&path) {
+                if path.exists() {
+                    failures.push(format!("{}（{err}）", path.display()));
+                }
+            }
+        }
+    }
+    failures
+}
+
+/// 旧代回收：删掉既不被 `current.json` 也不被 `previous.json` 引用的层目录。
+///
+/// 两档引用的目录**绝不进名单**（那是回退点）；再加 `min_age` 护栏，防误杀刚改名进来、
+/// 还没提交的候选层（装配中途的目录只有分钟级年龄）。代际上限＝2 ⇒ 磁盘代价上限写进手册。
+pub fn prune_old_layers(runtime_root: &Path, min_age: Duration) -> (Vec<String>, Vec<String>) {
+    let keep = |name: &str| -> Vec<String> {
+        read_layer_ids(&runtime_root.join(name))
+            .map(|ids| vec![ids.base_id, ids.application_id, ids.rag_id])
+            .unwrap_or_default()
+    };
+    let mut referenced = keep("current.json");
+    referenced.extend(keep("previous.json"));
+    let mut removed = Vec::new();
+    let mut failures = Vec::new();
+    for layer in ["base", "apps", "rag"] {
+        let Ok(entries) = fs::read_dir(runtime_root.join(layer)) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str().map(str::to_string) else {
+                continue;
+            };
+            if referenced.iter().any(|id| *id == name) {
+                continue;
+            }
+            let old = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .map(|modified| modified.elapsed().unwrap_or(Duration::from_secs(u64::MAX)))
+                .unwrap_or(Duration::from_secs(u64::MAX));
+            if old < min_age {
+                continue;
+            }
+            let path = entry.path();
+            match fs::remove_dir_all(&path) {
+                Ok(()) => removed.push(format!("{layer}/{name}")),
+                Err(err) => failures.push(format!("{}（{err}）", path.display())),
+            }
+        }
+    }
+    (removed, failures)
+}
+
+/// 安全模式的「只清运行时」：精确删三层与两档状态，`userdata/`、`downloads/`、`logs/` 一律不碰。
+/// 返回失败清单（拒绝对宽泛目录动手，也不假装删干净了）。
+pub fn wipe_runtime_layers(runtime_root: &Path) -> Vec<String> {
+    let mut targets: Vec<PathBuf> = vec![
+        runtime_root.join("base"),
+        runtime_root.join("apps"),
+        runtime_root.join("rag"),
+        runtime_root.join("current.json"),
+        runtime_root.join("previous.json"),
+    ];
+    targets.extend(
+        fs::read_dir(runtime_root)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| {
+                        path.file_name()
+                            .and_then(|name| name.to_str())
+                            .map(|name| name.starts_with('.'))
+                            .unwrap_or(false)
+                    })
+                    .collect::<Vec<PathBuf>>()
+            })
+            .unwrap_or_default(),
+    );
+    let mut failures = Vec::new();
+    for path in targets {
+        if !path.exists() {
+            continue;
+        }
+        let outcome = if path.is_dir() {
+            fs::remove_dir_all(&path)
+        } else {
+            fs::remove_file(&path)
+        };
+        if let Err(err) = outcome {
+            failures.push(format!("{}（{err}）", path.display()));
+        }
+    }
+    crate::shell_log::warn(&format!(
+        "安全模式：已清除运行时目录 {}（失败 {} 项）；作品数据与下载缓存保留",
+        runtime_root.display(),
+        failures.len()
+    ));
+    failures
+}
+
+pub fn downloads_dir(home: &Path) -> PathBuf {
+    home.join("downloads")
+}
+
+/// 落位失败时把先前挪走的同 id 旧目录放回原位；失败逐条写日志（不静默）。
+fn restore_moved_layers(moved: &[(PathBuf, PathBuf)]) {
     for (target, stale) in moved.iter().rev() {
         if !target.exists() && stale.exists() {
             if let Some(parent) = target.parent() {
                 let _ = fs::create_dir_all(parent);
             }
-            let _ = fs::rename(stale, target);
+            if let Err(err) = fs::rename(stale, target) {
+                crate::shell_log::warn(&format!(
+                    "放回旧层失败：{} → {}（{err}）",
+                    stale.display(),
+                    target.display()
+                ));
+            }
         }
     }
 }
@@ -1055,7 +1931,7 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
-fn unique_token() -> String {
+pub(crate) fn unique_token() -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
@@ -1089,8 +1965,15 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("建临时目录");
         let dest = dir.join("probe.bin");
         let mut progress = |_: &str| {};
+        let mut no_ledger: Option<DeliveryLedger> = None;
         let err = Fetcher::new()
-            .fetch(&format!("https://127.0.0.1:{port}/"), &dest, &mut progress, "测试")
+            .fetch(
+                &format!("https://127.0.0.1:{port}/"),
+                &dest,
+                &mut progress,
+                "测试",
+                &mut no_ledger,
+            )
             .expect_err("对端立即断开，TLS 握手必须失败");
         let _ = server.join();
         let _ = std::fs::remove_dir_all(&dir);

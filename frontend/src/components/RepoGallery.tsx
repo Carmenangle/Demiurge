@@ -1,5 +1,5 @@
 import { useEffect, useCallback, useMemo, useRef, useState, type ReactNode } from "react";
-import { Check, ChevronDown, ExternalLink, Eye, FileText, Images, Music, Play, Plus, RotateCcw, Search, Send, Sparkles, Tag, Trash2, X } from "lucide-react";
+import { Check, ChevronDown, ExternalLink, Eye, FileText, Images, Music, Play, Plus, RotateCcw, Search, Send, Sparkles, Tag, Trash2, Upload, X } from "lucide-react";
 import { activeVlmChat, vlmGapMessage, useSettings } from "../stores/settings";
 import {
   listGenerations, deleteDoc, setTags, describeImage, tagStats, pruneGenerations, pruneOrphanRepos,
@@ -7,9 +7,10 @@ import {
   indexVisualGenerations, recordVisualPreference, type VisualPreferenceReason,
   generateThumbs, listTaggers, tagGeneration, listTagSnapshots, activateTagSnapshot,
   type TaggerInfo, type TagSnapshot,
+  gbcTagAsset, getGbcGraph, generateMossLayout, type SavedGbc,
   // P1-3 结构化搜索（FTS5）＋ P1-2 回收站（2026-10-18）
   searchAssets, listTrash, restoreAsset, purgeAsset, clearTrash, tagFromText,
-  describeMissingAssets,
+  describeMissingAssets, importAssets,
 } from "../api/ai";
 import { parseAssetQuery, removeTagFromQuery } from "../lib/assetQuery";
 import { useOverlayRoute } from "../lib/overlayRoute";
@@ -31,6 +32,15 @@ import type { ToastItem } from "./canvas/CanvasTypes";
 // 合并展示时给每张图附带来源仓库 id（资产库按仓库名搜索用）
 export type GenWithRepo = Generation & { repoId?: string };
 
+// 导入支持的本机媒体扩展名（与后端 media_metadata 的 IMAGE_/VIDEO_SUFFIXES 对齐）
+const IMPORT_MEDIA_EXT = /\.(png|jpe?g|webp|gif|bmp|avif|mp4|webm|mov|mkv|m4v|avi)$/i;
+
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;
+  return `${(n / 1024 ** 3).toFixed(2)} GB`;
+}
 
 /** 详情面板分区：小标题 + 上分隔线 + 留白（2026-10-16 加分层感；此前各段平铺成一坨）。 */
 function DetailSection({ title, extra, children, first = false }: {
@@ -276,13 +286,14 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
     }).catch(() => { /* 后端未就绪时静默走默认 */ });
     return () => { alive = false; };
   }, []);
-  // Toast 队列：非阻断状态提示（打标/删除/描述/索引等）用 2s 自动渐隐弹窗替代模态框
+  // Toast 队列：非阻断状态提示（打标/删除/描述/索引等）用自动渐隐弹窗替代模态框。
+  // 错误留更久（6s）：失败文案常带下一步怎么做（如「切本地视觉模型重跑」），2.2s 读不完。
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const toastIdRef = useRef(0);
   const showToast = useCallback((msg: string, kind: "info" | "error" | "success" = "info") => {
     const id = ++toastIdRef.current;
     setToasts((prev) => [...prev, { id, msg, kind }]);
-    setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 2200);
+    setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), kind === "error" ? 6000 : 2200);
   }, []);
   const [selMode, setSelMode] = useState(false);     // 批量选择模式（增强页开）
   const [selected, setSelected] = useState<Set<string>>(new Set());  // 选中的图 id
@@ -338,6 +349,13 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
       ? active.loraNames
       : (active.lora_names || "").split(",").map((s) => s.trim()).filter(Boolean))
     : [];
+  // 本地导入提取的生成参数（source_meta.generation；非导入记录为 undefined）
+  const genMeta = active?.sourceMeta?.generation;
+  const genParams = genMeta?.params || {};
+  const genParam = (key: string) => {
+    const value = genParams[key];
+    return value === undefined || value === null || value === "" ? "" : String(value);
+  };
 
   const [preferenceBase, setPreferenceBase] = useState<GenWithRepo | null>(null);
   const [preferenceReason, setPreferenceReason] = useState<VisualPreferenceReason>("character");
@@ -360,6 +378,72 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
   // 图像描述/反推一律用「视觉大模型（VLM）」——不能用普通对话模型（云对话模型普遍拒识图，
   // 2026-10-18 用户实测「素材/资产生成描述后仍空」根因就在此：claude 经第三方代理拒答）。
   const vlmChat = activeVlmChat(settings);
+  // GBC 场景图：按资产 id 缓存（跑一次几分钟，切详情/切模式不该重跑）。
+  // 打开详情时按需取一次后端已存的那份；没跑过就是空。
+  const [gbcGraphs, setGbcGraphs] = useState<Record<string, SavedGbc>>({});
+  const activeGbc = active ? gbcGraphs[active.id] : undefined;
+  // 官方完整布局：GBC 打标成功后自动生成（用户定案只交付这份 JSON），
+  // 生成一次要几十秒（视觉模型写五段文字），按资产记 busy/错误。
+  const [mossBusy, setMossBusy] = useState<Record<string, boolean>>({});
+  const [mossErrors, setMossErrors] = useState<Record<string, string>>({});
+
+  // 自动生成官方布局：GBC 打标成功分支与「打开老资产」都走它。
+  // 不弹 toast：批量打标逐张弹会刷屏，结果由调用方的汇总 / 面板错误区呈现。
+  const genMossLayout = async (id: string): Promise<{ ok: boolean; elapsed_s?: number; error?: string }> => {
+    if (!id || mossBusy[id]) return { ok: false, error: "正在生成" };
+    if (!vlmChat) {
+      const msg = vlmGapMessage(settings);
+      setMossErrors((m) => ({ ...m, [id]: msg }));
+      return { ok: false, error: msg };
+    }
+    setMossBusy((m) => ({ ...m, [id]: true }));
+    setMossErrors((m) => ({ ...m, [id]: "" }));
+    try {
+      const r = await generateMossLayout(id, vlmChat);
+      setGbcGraphs((m) => ({
+        ...m,
+        [id]: {
+          ...(m[id] || { ok: true }),
+          moss_layout: { layout: r.layout, parts: r.parts, model: r.model, elapsed_s: r.elapsed_s },
+        },
+      }));
+      return { ok: true, elapsed_s: r.elapsed_s || 0 };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setMossErrors((m) => ({ ...m, [id]: msg }));
+      return { ok: false, error: msg };
+    } finally {
+      setMossBusy((m) => ({ ...m, [id]: false }));
+    }
+  };
+
+  useEffect(() => {
+    const id = active?.id;
+    if (!id || gbcGraphs[id]) return;
+    let alive = true;
+    void getGbcGraph(id)
+      .then((saved) => {
+        if (alive && saved.ok) setGbcGraphs((m) => ({ ...m, [id]: saved }));
+      })
+      .catch(() => { /* 没跑过 GBC / 后端未就绪：详情里不显示这一段 */ });
+    return () => { alive = false; };
+  }, [active?.id, gbcGraphs]);
+
+  // 老资产 / 上次生成失败：打开详情时补生成一次（重开详情可再试）。
+  // ref 记住本次打开是否试过，避免批量打标更新其它资产时反复触发生成。
+  const autoLayoutFor = useRef("");
+  useEffect(() => {
+    const id = active?.id;
+    if (!id) { autoLayoutFor.current = ""; return; }
+    const saved = gbcGraphs[id];
+    if (!saved || autoLayoutFor.current === id) return;
+    if (!saved.ok || saved.moss_layout?.layout || (saved.outline?.entities.length ?? 0) === 0) {
+      autoLayoutFor.current = id;
+      return;
+    }
+    autoLayoutFor.current = id;
+    void genMossLayout(id);
+  }, [active?.id, gbcGraphs]);
 
   const key = repoIds.join(",");
   const reposSet = repoIds;
@@ -424,6 +508,46 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
     return () => { alive = false; if (retryTimer) clearTimeout(retryTimer); };
   };
 
+  // ── 导入（2026-11-08）────────────────────────────────────────────────
+  // 拖入 / 选择本地图片·视频 → 落盘到 <仓库文件夹>/<作品>/pictures|videos，
+  // 并读取内嵌元信息（ComfyUI PNG / A1111 / EXIF / 视频容器标签）→ 提示词与生成参数。
+  // 多仓库（资产库聚合页）先选目标作品；子仓库页只有一个仓库时直达。
+  const importInputRef = useRef<HTMLInputElement | null>(null);
+  const dragDepthRef = useRef(0);
+  const [dragActive, setDragActive] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importPick, setImportPick] = useState<File[] | null>(null);
+
+  const runImport = async (targetRepo: string, files: File[]) => {
+    setImporting(true);
+    try {
+      const r = await importAssets(targetRepo, settings.outputDir || "", files);
+      const ok = r.items.length;
+      const failed = r.errors.length;
+      if (ok > 0) refresh();
+      if (ok === 0 && failed > 0) showToast(`导入失败：${r.errors[0].error}`, "error");
+      else if (failed > 0) showToast(`已导入 ${ok} 个，${failed} 个失败：${r.errors[0].error}`, "info");
+      else showToast(`已导入 ${ok} 个文件，元信息已提取`, "success");
+    } catch (e) {
+      showToast(`导入失败：${(e as Error).message}`, "error");
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const startImport = (files: File[]) => {
+    const media = files.filter((f) => IMPORT_MEDIA_EXT.test(f.name));
+    if (media.length === 0) {
+      showToast("只支持图片（png/jpg/webp…）和视频（mp4/webm/mov…）文件。", "error");
+      return;
+    }
+    if (repoIds.length === 1) { void runImport(repoIds[0], media); return; }
+    setImportPick(media);
+  };
+
+  const dragHasFiles = (e: React.DragEvent) =>
+    Array.from(e.dataTransfer?.types || []).includes("Files");
+
   // 加载下一页 / 直达第 N 页：用 **offset 区间取**（2026-10-19）。
   // 旧实现只走 keyset 游标 ⇒ 前端永远算不出总页数，也只能一页页顺序翻（用户实锤）。
   // 现在 items 始终是「从头累积的前缀」，所以：offset = items.length。
@@ -473,8 +597,8 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
       setLoadMoreError((e as Error)?.message || "加载失败");
     }
     finally { loadingMoreRef.current = false; setLoadingMore(false); }
-    // 等一帧让 React 把新 items 提交进 DOM：跳页的调用方（loadMore(n).then(scroll)）
-    // 要能立刻 scrollIntoView 到刚加载出来的项，否则目标节点还不存在 ⇒ 静默不滚动。
+    // 等一帧让 React 把新 items 提交进 DOM：跳页的调用方（loadMore(n).then(scrollToPage)）
+    // 要能量到刚加载出来的项，否则目标节点还不存在 ⇒ 静默不滚动。
     await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
   };
 
@@ -531,15 +655,95 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
   // ── 跳页（输入框 / 末页）──────────────────────────────────────────────
   // 有 offset 支持后不再需要「升级全量」：目标页没加载就从当前前缀末尾一次取到那里
   // （limit = 目标页*32 − 已加载数），代价只是一笔请求；加载完滚到该页第一张。
-  const scrollToPage = (n: number) => {
-    const el = document.querySelector(`[data-gal-page="${n}"]`);
-    if (el) el.scrollIntoView({ block: "start", behavior: "smooth" });
+  //
+  // ⚠ 落位不能用 scrollIntoView({behavior:"smooth"})（2026-11-07 用户实锤：点末页停在半路）。
+  //   平滑动画的目标偏移在调用那一刻算定；一次跳远页会新挂几百个格子，图片 onLoad 后
+  //   瀑布流按真实宽高比重排，页面高度从 ~5.6k 拉到 ~17k ⇒ 动画跑完仍停在旧偏移
+  //   （实测 3098/14050，停在 4 页附近，锚点实际在 10994）。
+  //   也不能只按固定时间窗逐帧跟随：主线程在挂载/解码图片时被压住，实测 1.5s 只跑了 8 帧，
+  //   窗口一关布局接着变 ⇒ 仍差 3000~7000px。改为「按活动跟随」：网格高度变化或实际挪了
+  //   滚动位置都重新对齐，2.5s 无活动收工（硬上限 8s）；用户一操作立刻让位。
+  const jumpTimerRef = useRef(0);
+  const pendingJumpRef = useRef(0);
+  const scrollParentOf = (el: Element | null): HTMLElement | null => {
+    for (let p = el?.parentElement ?? null; p; p = p.parentElement) {
+      const oy = getComputedStyle(p).overflowY;
+      if ((oy === "auto" || oy === "scroll" || oy === "overlay") && p.scrollHeight > p.clientHeight) {
+        return p as HTMLElement;
+      }
+    }
+    return (document.scrollingElement as HTMLElement | null) ?? null;
   };
+  const alignPageTop = (n: number): number => {   // 返回实际移动像素（0＝本来就在位/已夹到底）
+    const anchors = document.querySelectorAll<HTMLElement>(`[data-gal-page="${n}"]`);
+    if (anchors.length === 0) return 0;
+    const scroller = scrollParentOf(anchors[0]);
+    if (!scroller) return 0;
+    const before = scroller.scrollTop;
+    // 第 1 页＝回到页面真顶部（含工具栏与「共 N 条」），不是「第一行贴到吸顶栏下」
+    if (n === 1) { scroller.scrollTop = 0; return Math.abs(scroller.scrollTop - before); }
+    // 瀑布流是**列优先** DOM：第 n 页的格子分散在多列，取最靠上的那个当页首
+    let top = Infinity;
+    anchors.forEach((el) => { const t = el.getBoundingClientRect().top; if (t < top) top = t; });
+    // 吸顶工具条会盖住容器顶部：对齐时让出它的高度，否则页首第一行被压在栏下
+    const bar = document.querySelector<HTMLElement>(".asset-toolbar-sticky");
+    const delta = top - scroller.getBoundingClientRect().top - (bar ? bar.offsetHeight : 0);
+    if (Math.abs(delta) > 1) scroller.scrollTop = before + delta;
+    return Math.abs(scroller.scrollTop - before);   // 夹到 0/底部时按实际位移算
+  };
+  const stopJump = () => {
+    pendingJumpRef.current = 0;
+    if (jumpTimerRef.current) { window.clearTimeout(jumpTimerRef.current); jumpTimerRef.current = 0; }
+  };
+  const scrollToPage = (n: number) => {
+    stopJump();
+    pendingJumpRef.current = n;
+    alignPageTop(n);
+    // ⚠ 只盯「网格高度」不够：瀑布流在列间重排时可以总高不变却把页首挪走（实测差 186px）。
+    //   所以高度变化 **或** 实际挪了滚动位置都算活动；2.5s 无活动收工，硬上限 8s。
+    const startedAt = Date.now();
+    let lastActivity = startedAt;
+    let lastHeight = -1;
+    const tick = () => {
+      jumpTimerRef.current = 0;
+      if (pendingJumpRef.current !== n) return;
+      const grid = document.querySelector<HTMLElement>(".gallery-masonry");
+      const height = grid ? Math.round(grid.getBoundingClientRect().height) : -1;
+      let active = height !== lastHeight;
+      lastHeight = height;
+      if (alignPageTop(n) > 1) active = true;
+      const now = Date.now();
+      if (active) lastActivity = now;
+      if (now - lastActivity > 2500 || now - startedAt > 8000) { pendingJumpRef.current = 0; return; }
+      jumpTimerRef.current = window.setTimeout(tick, 120);
+    };
+    jumpTimerRef.current = window.setTimeout(tick, 120);
+  };
+  // 用户一操作就放弃跟随，别和手动滚动抢位置
+  useEffect(() => {
+    const stop = () => {
+      pendingJumpRef.current = 0;
+      if (jumpTimerRef.current) { window.clearTimeout(jumpTimerRef.current); jumpTimerRef.current = 0; }
+    };
+    window.addEventListener("wheel", stop, { passive: true });
+    window.addEventListener("touchstart", stop, { passive: true });
+    window.addEventListener("pointerdown", stop);
+    window.addEventListener("keydown", stop);
+    return () => {
+      window.removeEventListener("wheel", stop);
+      window.removeEventListener("touchstart", stop);
+      window.removeEventListener("pointerdown", stop);
+      window.removeEventListener("keydown", stop);
+      if (jumpTimerRef.current) window.clearTimeout(jumpTimerRef.current);
+    };
+  }, []);
   const jumpToPage = (target: number | "last") => {
     const last = Math.max(1, pagerCount);
     const n = target === "last" ? last : Math.max(1, Math.min(last, Math.floor(target) || 1));
     if (n * PAGE_SIZE <= items.length) { jumpRetryRef.current = 0; setPage(n); scrollToPage(n); return; }   // 已加载
     if (clientFiltering) { setPage(Math.min(n, pageCount)); scrollToPage(Math.min(n, pageCount)); return; }
+    // 全部已加载时 loadMore 会早退（没有更多可取）⇒ 页码与落位都要在这里直接落定
+    if (totalCount > 0 && items.length >= totalCount) { jumpRetryRef.current = 0; setPage(n); scrollToPage(n); return; }
     // ⚠ 2026-10-19 用户实锤：「点 11 页却先跳到 2 页，要再点一次才行」。
     //   根因＝自动加载链正在跑时 `loadingMoreRef` 为 true，`loadMore(n)` 被并发闸
     //   提前 return ⇒ 这次跳页请求**静默丢失**，随后自动链把页码一级级爬上去。
@@ -857,6 +1061,38 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
       });
       return { ok: true, summary: `${result.total} 个标签（第 ${snaps?.snapshots.length ?? 1} 版）` };
     }
+    if (mode === "gbc") {
+      const gbc = settings.gbc;
+      if (!gbc?.exePath?.trim() || !gbc.sam3Dir?.trim() || !gbc.embedDir?.trim()) {
+        showToast("GBC 引擎未配置：请到「设置 → 路径 → GBC 场景图引擎」填 gbc.exe 与两份权重目录。", "error");
+        return { ok: false, summary: "GBC 引擎未配置" };
+      }
+      if (!vlmChat) { showToast(vlmGapMessage(settings), "error"); return { ok: false, summary: "未配置视觉模型" }; }
+      // GBC 的种子描述由后端用 WD14 标签生成（物体/服装/配饰只认标签）；前端不再
+      // 花一次视觉模型调用写整图描述，也不再缓存
+      const result = await gbcTagAsset(g.id, repoId, gbc, vlmChat, embed);
+      const snaps = await refreshSnapshots(g.id, repoId);
+      patchItem(g.id, {
+        tags: result.tags,
+        ...(snaps ? { tag_snapshots: JSON.stringify(snaps.snapshots), active_tag_snapshot: snaps.active } : {}),
+      });
+      setGbcGraphs((m) => ({
+        ...m,
+        [g.id]: { ok: true, outline: result.outline, engine: { vlm_model: vlmChat.modelName } },
+      }));
+      // 用户定案：GBC 打标完直接出官方布局 JSON（唯一交付物），不再给按钮。
+      const layout = await genMossLayout(g.id);
+      const base = `${result.total} 个标签 · ${result.outline.entities.length} 物体 / `
+        + `${result.outline.relations.length} 条关系（${Math.round(result.elapsed_s)}s）`
+        + (result.warning ? `；${result.warning}` : "");
+      if (!layout.ok) {
+        return {
+          ok: false,
+          summary: `${base}；官方布局生成失败：${layout.error}（重新打开详情会自动重试）`,
+        };
+      }
+      return { ok: true, summary: `${base}；官方布局已生成（${Math.round(layout.elapsed_s || 0)}s）` };
+    }
     if (!vlmChat) { showToast(vlmGapMessage(settings), "error"); return { ok: false, summary: "未配置视觉模型" }; }
     const imgForModel = await imageDataUri(g.image_url);
     // 纯描述模式：只写描述，不产标签、不动快照
@@ -928,9 +1164,10 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
       const detail = `成功 ${ok} / 失败 ${failed}`;
       await finishJob(jobId, "done", { detail });
       const head = errs.length > 0 ? `${detail}；首条失败：${errs[0]}` : detail;
+      const copyHint = mode === "gbc" ? "复制官方布局 JSON" : "复制标签 / 复制提示词";
       showToast(targets.length > 1
-        ? `批量反推完成（${head}）——详情里可「复制标签 / 复制提示词」。`
-        : errs.length === 0 ? "反推完成：1 张——详情里可「复制标签 / 复制提示词」。" : `反推失败：${errs[0]}`,
+        ? `批量反推完成（${head}）——详情里可「${copyHint}」。`
+        : errs.length === 0 ? `反推完成：1 张——详情里可「${copyHint}」。` : `反推失败：${errs[0]}`,
         failed === targets.length ? "error" : "success");
     } catch (e) {
       if (jobId) { await finishJob(jobId, "failed", { error: (e as Error).message }); }
@@ -1218,7 +1455,37 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
   ].filter(Boolean);
 
   return (
-    <div style={{ marginTop: hideTitle ? 0 : 28 }}>
+    <div style={{ marginTop: hideTitle ? 0 : 28 }}
+      onDragEnter={(e) => {
+        if (!dragHasFiles(e)) return;
+        e.preventDefault();
+        dragDepthRef.current += 1;
+        setDragActive(true);
+      }}
+      onDragOver={(e) => {
+        if (!dragHasFiles(e)) return;
+        e.preventDefault();   // 必须：不拦截 dragover 浏览器不会把这里当投放区
+        e.dataTransfer.dropEffect = "copy";
+      }}
+      onDragLeave={(e) => {
+        if (!dragHasFiles(e)) return;
+        dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+        if (dragDepthRef.current === 0) setDragActive(false);
+      }}
+      onDrop={(e) => {
+        if (!dragHasFiles(e)) return;
+        e.preventDefault();
+        dragDepthRef.current = 0;
+        setDragActive(false);
+        startImport(Array.from(e.dataTransfer.files || []));
+      }}>
+      <input ref={importInputRef} type="file" multiple accept="image/*,video/*"
+        style={{ display: "none" }}
+        onChange={(e) => {
+          const files = Array.from(e.target.files || []);
+          e.target.value = "";   // 同一个文件再次选择也要能触发 onChange
+          startImport(files);
+        }} />
       {!hideTitle && <h3 style={{ margin: "4px 0 12px", fontSize: 15 }}>生成内容</h3>}
       {/* P1-3：已选标签 chips（tag: 语法解析结果，点 ✕ 移除该项） */}
       {structured.tags.length > 0 && (
@@ -1285,8 +1552,14 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
                 {semanticMode ? "语义搜索：开" : "语义搜索"}
               </button>
             </div>
-            {/* 第二行 · 筛选与维护：批量选择 / 标签统计 / 回收站 / 维护菜单 */}
+            {/* 第二行 · 筛选与维护：导入 / 批量选择 / 标签统计 / 回收站 / 维护菜单 */}
             <div className="asset-toolbar-row asset-toolbar-manage">
+              <button className="btn" disabled={importing}
+                onClick={() => importInputRef.current?.click()}
+                title="导入本地图片/视频：也可以直接把文件拖进本页。文件会存进所选作品的 pictures/videos 文件夹，并尝试读取其中的提示词、模型与生成参数">
+                <Upload size={14} style={{ verticalAlign: "-2px", marginRight: 4 }} />
+                {importing ? "导入中…" : "导入"}
+              </button>
               <button className="btn" onClick={() => { setSelMode((v) => !v); setSelected(new Set()); }}>
                 {selMode ? "退出多选" : "批量选择"}
               </button>
@@ -1698,12 +1971,36 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
                   </DetailKV>
                 )}
                 {active.mediaType === "video" ? (
-                  <DetailKV label="尺寸">视频</DetailKV>
+                  <DetailKV label="尺寸">
+                    {genParam("width") && genParam("height")
+                      ? `${genParam("width")} × ${genParam("height")}`
+                      : "视频"}
+                  </DetailKV>
                 ) : detailImgSize ? (
                   <DetailKV label="尺寸">{detailImgSize.w} × {detailImgSize.h}</DetailKV>
                 ) : null}
+                {genParam("sampler") && (
+                  <DetailKV label="采样器"><span style={{ fontFamily: "monospace" }}>{genParam("sampler")}</span></DetailKV>
+                )}
+                {genParam("steps") && <DetailKV label="采样步数">{genParam("steps")}</DetailKV>}
+                {genParam("cfg") && <DetailKV label="CFG">{genParam("cfg")}</DetailKV>}
+                {genParam("seed") && <DetailKV label="种子"><span style={{ fontFamily: "monospace" }}>{genParam("seed")}</span></DetailKV>}
+                {genParam("scheduler") && <DetailKV label="调度器">{genParam("scheduler")}</DetailKV>}
+                {genParam("denoise") && <DetailKV label="降噪">{genParam("denoise")}</DetailKV>}
+                {genParam("fps") && <DetailKV label="帧率">{genParam("fps")} fps</DetailKV>}
+                {genParam("durationSeconds") && (
+                  <DetailKV label="时长">{genParam("durationSeconds")} 秒</DetailKV>
+                )}
+                {(genParam("modelHash") || genParam("vae")) && (
+                  <DetailKV label="校验">
+                    {[genParam("modelHash") && `模型 ${genParam("modelHash")}`,
+                      genParam("vae") && `VAE ${genParam("vae")}`].filter(Boolean).join(" · ")}
+                  </DetailKV>
+                )}
                 {fmtCreatedAt(active.created_at) && (
-                  <DetailKV label="生成时间">{fmtCreatedAt(active.created_at)}</DetailKV>
+                  <DetailKV label={active.source === "import" ? "导入时间" : "生成时间"}>
+                    {fmtCreatedAt(active.created_at)}
+                  </DetailKV>
                 )}
                 {(active.repoId || "") && (
                   <DetailKV label="作品">
@@ -1711,12 +2008,29 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
                   </DetailKV>
                 )}
               </DetailSection>
-              {/* P2-1：素材资产来源（上网素材入库即资产记录；generation 链无此段） */}
+              {/* P2-1：素材资产来源（上网素材入库即资产记录；generation 链无此段）
+                  2026-11-08：本地导入（source=import）同样在此展示原文件名/大小/元信息格式 */}
               {active.source ? (
                 <DetailSection title="来源">
                   <DetailKV label="渠道">
-                    {active.source === "web" ? "联网素材" : active.source}
+                    {active.source === "web" ? "联网素材"
+                      : active.source === "import" ? "本地导入"
+                        : active.source}
                   </DetailKV>
+                  {active.sourceMeta?.originalName && (
+                    <DetailKV label="原文件">{active.sourceMeta.originalName}</DetailKV>
+                  )}
+                  {typeof active.sourceMeta?.byteSize === "number" && (
+                    <DetailKV label="大小">{fmtBytes(active.sourceMeta.byteSize)}</DetailKV>
+                  )}
+                  {genMeta?.source && (
+                    <DetailKV label="元信息">
+                      {({
+                        comfyui: "ComfyUI 工作流", a1111: "A1111 / Forge", text: "提示词文本",
+                        container: "视频容器标签", "comfyui-workflow": "ComfyUI 界面工作流（未反解）",
+                      } as Record<string, string>)[genMeta.source] || genMeta.source}
+                    </DetailKV>
+                  )}
                   {active.sourceMeta?.author && (
                     <DetailKV label="作者">{active.sourceMeta.author}</DetailKV>
                   )}
@@ -1762,6 +2076,17 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
                 <div style={{ fontSize: 13, lineHeight: 1.6, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
                   {active.prompt || "（无提示词记录）"}
                 </div>
+                {genMeta?.negativePrompt && (
+                  <div style={{ marginTop: 10 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                      <span style={{ fontSize: 11.5, color: "var(--text-muted)" }}>负面提示词（从文件元信息提取）</span>
+                      <CopyButton text={genMeta.negativePrompt} className="img-tool" />
+                    </div>
+                    <div style={{ fontSize: 12.5, lineHeight: 1.6, whiteSpace: "pre-wrap", wordBreak: "break-word", color: "var(--text-muted)" }}>
+                      {genMeta.negativePrompt}
+                    </div>
+                  </div>
+                )}
               </DetailSection>
               <DetailSection title="视觉描述">
                 {active.description
@@ -1815,6 +2140,74 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
                   )}
                 </div>
               </DetailSection>
+              {activeGbc?.ok && activeGbc.outline && (
+                <DetailSection title="GBC 场景图">
+                  <div style={{ fontSize: 12, lineHeight: 1.7 }}>
+                    {activeGbc.outline.entities.map((e) => (
+                      <div key={e.name}>
+                        <strong>{e.name}</strong>{e.caption ? `：${e.caption}` : ""}
+                      </div>
+                    ))}
+                    {activeGbc.outline.relations.map((r, i) => (
+                      <div key={`rel-${i}`} style={{ color: "var(--text-muted)", marginTop: 2 }}>{r}</div>
+                    ))}
+                    {activeGbc.outline.entities.length === 0 && (
+                      <div style={{ color: "var(--text-muted)" }}>
+                        这张图没有解析出物体（可换一段场景描述重跑）。
+                      </div>
+                    )}
+                  </div>
+                  <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                    {activeGbc.moss_layout?.layout && (
+                      <CopyButton
+                        text={JSON.stringify(activeGbc.moss_layout.layout, null, 2)}
+                        label="复制官方布局 JSON"
+                        className="btn"
+                      />
+                    )}
+                    {!activeGbc.moss_layout?.layout && mossBusy[active.id] && (
+                      <span className="field-hint">官方布局生成中…</span>
+                    )}
+                  </div>
+                  {activeGbc.moss_layout?.layout && (
+                    <p className="field-hint" style={{ marginTop: 4 }}>
+                      官方布局 bbox 以原图中心为原点（y 在前）；MOSS 出图尺寸必须等于原图，否则框会整体偏移。
+                    </p>
+                  )}
+                  {mossErrors[active.id] && (
+                    <p className="field-hint" style={{ marginTop: 4, color: "var(--danger, #d33)" }}>
+                      {mossErrors[active.id]}（重新打开详情会自动重试）
+                    </p>
+                  )}
+                  {activeGbc.moss_layout?.layout && activeGbc.moss_layout.parts && (
+                    <div style={{ marginTop: 6, fontSize: 12, lineHeight: 1.7 }}>
+                      <div><strong>Style</strong>：{activeGbc.moss_layout.parts.style}</div>
+                      {activeGbc.moss_layout.parts.cast.length > 0 && (
+                        <div style={{ marginTop: 2 }}>
+                          <strong>角色卡</strong>
+                          {activeGbc.moss_layout.parts.cast.map((c) => (
+                            <div key={c.name} style={{ color: "var(--text-muted)" }}>{c.name}：{c.card}</div>
+                          ))}
+                        </div>
+                      )}
+                      <div style={{ marginTop: 2 }}>
+                        <strong>逐项描述</strong>
+                        {activeGbc.moss_layout.parts.items.map((it, i) => (
+                          <div key={`${it.name}-${i}`} style={{ color: "var(--text-muted)" }}>
+                            {it.name}：{it.caption}
+                          </div>
+                        ))}
+                      </div>
+                      <div style={{ marginTop: 2, color: "var(--text-muted)" }}>
+                        由 {activeGbc.moss_layout.model || "视觉模型"} 生成
+                        {activeGbc.moss_layout.elapsed_s
+                          ? `（${Math.round(activeGbc.moss_layout.elapsed_s)}s）` : ""}；
+                        style 与角色卡已折进 summary.caption（官方格式没有独立字段）。
+                      </div>
+                    </div>
+                  )}
+                </DetailSection>
+              )}
               {enhanced && (
                 <DetailSection title="偏好比较">
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
@@ -1859,6 +2252,42 @@ export function RepoGallery({ repoIds, embed, repoNames, hideTitle, enhanced, on
                 </button>
               )}
               <button className="btn primary" style={{ marginLeft: "auto" }} onClick={() => setActive(null)}>关闭</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {dragActive && (
+        <div className="asset-drop-overlay" aria-hidden>
+          <Upload size={30} />
+          <div>松开即可导入到{repoIds.length === 1
+            ? (repoNames?.[repoIds[0]] || "本作品")
+            : "所选作品"}</div>
+          <div style={{ fontSize: 12.5, opacity: 0.8 }}>
+            图片 / 视频；会尝试读取文件里的提示词与生成参数
+          </div>
+        </div>
+      )}
+      {importPick && (
+        <div className="modal-mask" onClick={() => setImportPick(null)}>
+          <div className="modal" style={{ maxWidth: 460 }} onClick={(e) => e.stopPropagation()}>
+            <h3 style={{ marginTop: 0 }}>导入到哪个作品？</h3>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 320, overflowY: "auto" }}>
+              {repoIds.map((id) => (
+                <button key={id} className="btn" style={{ justifyContent: "flex-start" }}
+                  onClick={() => {
+                    const files = importPick;
+                    setImportPick(null);
+                    void runImport(id, files);
+                  }}>
+                  {repoNames?.[id] || id}
+                </button>
+              ))}
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 12 }}>
+              <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                共 {importPick.length} 个文件
+              </span>
+              <button className="btn" style={{ marginLeft: "auto" }} onClick={() => setImportPick(null)}>取消</button>
             </div>
           </div>
         </div>

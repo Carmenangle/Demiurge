@@ -26,7 +26,7 @@ from fastapi import HTTPException
 
 from app.routers import narrative as narrative_router
 from app.routers import worldbook as worldbook_router
-from app.services import character_store, worldbook_store
+from app.services import character_store, repo_meta, worldbook_store
 from app.services.pathnames import safe_dir
 
 CARD = "卡蜜莉亚"
@@ -47,6 +47,13 @@ def _seed_standalone(tmp_path, entries: list[dict] | None = None) -> str:
     base = str(tmp_path)
     worldbook_store.save(base, BOOK, _book(entries))
     return base
+
+
+def _wire_worldbook_dir(monkeypatch, configured: str | None) -> None:
+    """钉住 `worldbookDir` 的配置真源（`repo_meta._load_state` 是唯一读入口，无缓存）。"""
+    monkeypatch.setattr(repo_meta, "_load_state", lambda: {
+        "repos": [], "settings": {"worldbookDir": configured or ""},
+    })
 
 
 def _seed_card(tmp_path) -> str:
@@ -220,6 +227,58 @@ def test_delete_entry_越界404且文案逐字且不落盘(tmp_path):
     assert _text(_card_file(base)) == before
 
 
+# ── /worldbook/delete 整本删除（2026-11-05「防误删」第 ④ 刀）─────────────────
+
+
+def test_delete_整本删除回报备份文件名且真源消失(tmp_path, monkeypatch):
+    base = _seed_standalone(tmp_path)
+    _wire_worldbook_dir(monkeypatch, base)  # 第 ⑦ 刀后 `base` 必须等于配置根
+    got = worldbook_router.delete_worldbook(worldbook_router.WorldbookRef(base=base, name=BOOK))
+    assert got["ok"] is True and got["backup"].startswith(f"{safe_dir(BOOK)}.json.bak-")
+    assert worldbook_store.read_book(base, BOOK) is None
+    assert (Path(base) / got["backup"]).is_file()          # 备份看得见、可手动改回
+
+
+def test_delete_备份失败报500且书一个字没少(tmp_path, monkeypatch):
+    """改前这里与「不存在」糊成一句 404「世界书不存在或删除失败」，用户分不清删没删。"""
+    base = _seed_standalone(tmp_path)
+    before = _text(_standalone_file(base))
+    _wire_worldbook_dir(monkeypatch, base)  # 第 ⑦ 刀后 `base` 必须等于配置根
+    monkeypatch.setattr(worldbook_store.state_store, "backup", lambda path: None)
+    with pytest.raises(HTTPException) as ei:
+        worldbook_router.delete_worldbook(worldbook_router.WorldbookRef(base=base, name=BOOK))
+    assert ei.value.status_code == 500
+    assert "没有删除" in ei.value.detail
+    assert _text(_standalone_file(base)) == before
+
+
+def test_delete_备份期间被改写报409且保留新内容(tmp_path, monkeypatch):
+    """备份后、删除前被写入的新版本不能被静默删走（2026-11-07 B 项）。"""
+    base = _seed_standalone(tmp_path)
+    _wire_worldbook_dir(monkeypatch, base)
+    real_copy = worldbook_store.state_store.copy2
+
+    def _copy_then_rewrite(source, temp):
+        real_copy(source, temp)
+        source.write_text('{"entries":[]}', encoding="utf-8")
+
+    monkeypatch.setattr(worldbook_store.state_store, "copy2", _copy_then_rewrite)
+    with pytest.raises(HTTPException) as ei:
+        worldbook_router.delete_worldbook(worldbook_router.WorldbookRef(base=base, name=BOOK))
+    assert ei.value.status_code == 409
+    assert "发生变化" in ei.value.detail
+    assert "entries" in _text(_standalone_file(base))
+
+
+def test_delete_不存在报404且文案逐字(tmp_path, monkeypatch):
+    _wire_worldbook_dir(monkeypatch, str(tmp_path))  # 第 ⑦ 刀后 `base` 必须等于配置根
+    with pytest.raises(HTTPException) as ei:
+        worldbook_router.delete_worldbook(
+            worldbook_router.WorldbookRef(base=str(tmp_path), name="没这本书"))
+    assert ei.value.status_code == 404
+    assert ei.value.detail == "世界书不存在"
+
+
 # ── repo 快照三端点（narrative.py，内联同一形状）────────────────────────────
 
 
@@ -335,3 +394,53 @@ def test_六个变更端点都走唯一条目接缝(tmp_path, monkeypatch):
         narrative_router.repo_worldbook_entry_delete(narrative_router.RepoWorldbookEntryDelete(
             output_dir=snap_base, repo_id="r", index=9))
     assert len(seen) == n_before + 1
+
+
+# ── /worldbook/delete 的源根校验（防误删 ⑦，2026-11-05）──────────────────────
+
+
+def test_第7刀_整本删除的base必须等于配置的世界书文件夹(tmp_path, monkeypatch):
+    """改前 `base` 由客户端报上来直接喂 `unlink` ⇒ 指到哪删到哪。
+
+    同面的 `/delete-folder` 早在 11-05 第 ② 刀过了 `works_root_violation`，这条是漏网；
+    世界书删除**没有**「没传就回退配置根」的服务端兜底 ⇒ 没传也要拒。
+    """
+    wb_root = tmp_path / "世界书库"
+    elsewhere = tmp_path / "别的库"
+    _wire_worldbook_dir(monkeypatch, str(wb_root))
+    worldbook_store.save(str(elsewhere), BOOK, _book())
+
+    with pytest.raises(HTTPException) as exc:
+        worldbook_router.delete_worldbook(worldbook_router.WorldbookRef(
+            base=str(elsewhere), name=BOOK))
+
+    assert exc.value.status_code == 400
+    assert _standalone_file(str(elsewhere)).is_file()  # 一个字没动
+
+
+def test_第7刀_同根照旧删得掉并留备份(tmp_path, monkeypatch):
+    """零回归：真实界面传的就是设置里那个 `worldbookDir` ⇒ 守卫不得挡掉正常删除。"""
+    wb_root = tmp_path / "世界书库"
+    _wire_worldbook_dir(monkeypatch, str(wb_root))
+    worldbook_store.save(str(wb_root), BOOK, _book())
+
+    got = worldbook_router.delete_worldbook(worldbook_router.WorldbookRef(
+        base=str(wb_root), name=BOOK))
+
+    assert got["ok"] is True and got["backup"]
+    assert not _standalone_file(str(wb_root)).is_file()
+
+
+def test_第7刀_未配置世界书文件夹时拒绝(tmp_path, monkeypatch):
+    """与 `works_root_violation` 同口径：未配置 ⇒ 拒绝，而不是放行「随便一个目录」。"""
+    wb_root = tmp_path / "世界书库"
+    _wire_worldbook_dir(monkeypatch, None)
+    worldbook_store.save(str(wb_root), BOOK, _book())
+
+    with pytest.raises(HTTPException) as exc:
+        worldbook_router.delete_worldbook(worldbook_router.WorldbookRef(
+            base=str(wb_root), name=BOOK))
+
+    assert exc.value.status_code == 400
+    assert "世界书文件夹" in str(exc.value.detail)
+    assert _standalone_file(str(wb_root)).is_file()

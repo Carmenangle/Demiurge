@@ -90,7 +90,10 @@ export function useManualTableFill(
       const sealedNote = response.sealed_overlap
         ? `；已封口替换 ${response.sealed_overlap} 条旧纪要（数据保留可恢复）`
         : "";
-      setResult(`处理 ${response.processed ?? 0} 层；通用表写入 ${response.applied ?? 0} 项；新增纪要 ${response.chronicles ?? 0} 条${sealedNote}${skipNote}${failNote}。`);
+      const keyEventNote = response.key_events
+        ? `；关键事件账本新增/更新 ${response.key_events} 条（婚礼/婚纱等永久保留）`
+        : "";
+      setResult(`处理 ${response.processed ?? 0} 层；通用表写入 ${response.applied ?? 0} 项；新增纪要 ${response.chronicles ?? 0} 条${keyEventNote}${sealedNote}${skipNote}${failNote}。`);
       await load();
       reloadAll();
     } catch (error) {

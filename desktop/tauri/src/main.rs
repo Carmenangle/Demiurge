@@ -11,13 +11,15 @@
 //! 隐藏时运行时继续跑（手机端要连就得常驻），彻底关闭会回收自己拉起的运行时再退出。
 //! 启动失败时关窗即退出（没有需要保活的东西）。
 //!
-//! 托盘菜单（2026-10-24）：显示主窗口 / 重启后端 / 检查更新 / 彻底关闭。重启与退出都只处理
-//! **自己拉起的**运行时；端口上复用的外部服务永不回收，重启项会明确拒绝而不是误杀。
+//! 托盘菜单（2026-10-24，2026-11-03 加「补齐 RAG」）：显示主窗口 / 重启后端 / 补齐 RAG /
+//! 检查更新 / 彻底关闭。重启与退出都只处理**自己拉起的**运行时；端口上复用的外部服务永不回收，
+//! 重启项会明确拒绝而不是误杀。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod dialog;
 mod http_probe;
 mod job;
+mod optional_layer;
 mod paths;
 mod runtime_delivery;
 mod runtime_host;
@@ -26,6 +28,7 @@ mod settings;
 mod shell_log;
 mod single_instance;
 mod updater;
+mod url_policy;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -36,6 +39,7 @@ use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 use runtime_host::RuntimeHost;
 use settings::ShellSettings;
+use url_policy::is_navigation_allowed;
 
 fn main() {
     // 必须在读窗口几何之前声明 DPI 感知：Tauri 要等事件循环初始化才设置，
@@ -60,7 +64,10 @@ fn run_install_runtime() -> i32 {
         .ok()
         .and_then(|path| path.parent().map(|parent| parent.to_path_buf()))
         .unwrap_or_else(|| std::path::PathBuf::from("."));
-    println!("Demiurge 运行时安装：base + application + rag");
+    println!(
+        "Demiurge 运行时安装：{}",
+        runtime_delivery::required_layers_text()
+    );
     println!("安装目录：{}", exe_dir.display());
     if runtime_delivery::is_portable_layout(&exe_dir) {
         println!("当前是便携包布局，运行时已随包提供，无需按需交付。");
@@ -130,6 +137,7 @@ fn run_app() -> i32 {
         restarting: Arc::new(AtomicBool::new(false)),
         quitting: Arc::new(AtomicBool::new(false)),
         updating: Arc::new(AtomicBool::new(false)),
+        delivering: Arc::new(AtomicBool::new(false)),
         port,
     };
     let host_slot = Arc::clone(&state.host);
@@ -215,6 +223,8 @@ struct AppState {
     restarting: Arc<AtomicBool>,
     quitting: Arc<AtomicBool>,
     updating: Arc<AtomicBool>,
+    /// 可选层（RAG）后台补齐在跑：`current.json` 的另一个写入者，期间拒绝重启后端与检查更新。
+    delivering: Arc<AtomicBool>,
     port: u16,
 }
 
@@ -253,13 +263,18 @@ fn boot(handle: AppHandle, state: AppState) {
         }
     }
     state.booting.store(false, Ordering::SeqCst);
+    // 进应用后那一次「要不要后台补齐 RAG」的询问（每次安装只问一回）。放在 booting 落回之后：
+    // 弹窗挂多久都不该把托盘的重启/检查更新一起冻成「正在启动」。
+    optional_layer::offer_after_boot(&handle);
 }
 
 /// 拉起并等就绪。启动与托盘「重启后端」共用同一条路径，避免两套启动逻辑漂移。
 fn start_runtime(handle: &AppHandle, port: u16) -> Result<RuntimeHost, String> {
     let mut host = RuntimeHost::new(port);
     let push = |message: &str| step(handle, message);
-    host.ensure_ready(push).map_err(|err| err.to_string())?;
+    let confirm_cleanup = |conflict: &runtime_host::PortConflict| confirm_port_cleanup(conflict);
+    host.ensure_ready(push, confirm_cleanup)
+        .map_err(|err| err.to_string())?;
 
     // 图像服务不阻塞进入界面：ComfyUI 冷启 8~10 分钟，这里只报状态。
     step(handle, "检查图像服务（ComfyUI）…");
@@ -277,6 +292,26 @@ fn start_runtime(handle: &AppHandle, port: u16) -> Result<RuntimeHost, String> {
     };
     step(handle, comfy);
     Ok(host)
+}
+
+/// 端口被占用：把占用者摆给用户，只有明确点「是」才结束进程并继续启动。
+/// 安装版没有 `stop-dev.bat`，这是用户被旧后端锁死时唯一的自救出口；
+/// 因此弹窗必须写清「杀的是哪个进程」，而不是替用户默认清理。
+fn confirm_port_cleanup(conflict: &runtime_host::PortConflict) -> bool {
+    let Some(text) = conflict.cleanup_prompt() else {
+        shell_log::warn("端口被占用，但识别不到占用进程的 PID，不提供清理");
+        return false;
+    };
+    let confirmed = dialog::ask_confirm("Demiurge 启动被阻塞", &text);
+    if let Some(holder) = conflict.holder.as_ref() {
+        shell_log::info(&format!(
+            "端口占用询问：pid={} path={} ⇒ {}",
+            holder.pid,
+            holder.image_path,
+            if confirmed { "用户同意结束" } else { "用户拒绝" }
+        ));
+    }
+    confirmed
 }
 
 /// 推进一步：写壳日志 + 更新 boot 页那一行。
@@ -364,18 +399,19 @@ fn build_window_with(
         )
         .data_directory(data_dir)
         // 导航白名单（对齐 WPF 壳 MainWindow 的 OnNavigationStarting/OnNewWindowRequested）：
-        // 主窗口只留本应用自己的页面，其余导航取消并转系统浏览器——外链不应把壳带往外站。
+        // 主窗口只留本应用自己的页面，其余导航取消；只有 http(s) 外链才转系统浏览器，
+        // file:/ms-*/intent: 等系统协议一律不交处理器。
         .on_navigation(|url| {
-            if navigation_allowed(url) {
+            if is_navigation_allowed(url) {
                 true
             } else {
-                open_in_system_browser(url.as_str());
+                open_in_system_browser(url);
                 false
             }
         })
-        // 新窗口（target=_blank）一律不开应用内窗：外链交系统浏览器（WPF 壳同口径）。
+        // 新窗口（target=_blank）一律不开应用内窗：http(s) 外链交系统浏览器，其余直接拒绝。
         .on_new_window(|url, _features| {
-            open_in_system_browser(url.as_str());
+            open_in_system_browser(&url);
             tauri::webview::NewWindowResponse::Deny
         });
     if let (Some(left), Some(top)) = (window_settings.left, window_settings.top) {
@@ -390,52 +426,39 @@ fn build_window_with(
     Ok(())
 }
 
-/// 导航白名单判定：只放行本应用自己的页面——tauri 协议页（boot.html 兜底页，Windows 上
-/// 表现为 http(s)://tauri.localhost）与回环 http(s)（后端送达的应用页、ComfyUI 等本机服务，
-/// 端口由协商决定故不限）。其余 scheme（file:/data:/javascript:）与外站主机一律拒绝。
-fn navigation_allowed(url: &tauri::Url) -> bool {
-    match url.scheme() {
-        "tauri" | "about" => true,
-        "http" | "https" => {
-            let host = url.host_str().unwrap_or("");
-            host.eq_ignore_ascii_case("tauri.localhost") || is_loopback_host(host)
-        }
-        _ => false,
+/// 被拒导航/新窗口的唯一出口：只有 http(s) 外链才交系统默认浏览器。
+/// 内部再校验一次协议白名单，防止未来新调用点绕过；日志只留 scheme + host。
+fn open_in_system_browser(url: &tauri::Url) {
+    if !url_policy::is_external_http(url) {
+        shell_log::warn(&format!(
+            "已拦截非 http(s) 外链，不交系统处理器：{}",
+            url_policy::describe(url)
+        ));
+        return;
+    }
+    shell_log::warn(&format!(
+        "已拦截站内导航，转交系统浏览器：{}",
+        url_policy::describe(url)
+    ));
+    // 壳是 Windows-only；非 Windows 仅留痕（编译可过）。
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("explorer").arg(url.as_str()).spawn();
     }
 }
 
-fn is_loopback_host(host: &str) -> bool {
-    if host.eq_ignore_ascii_case("localhost") {
-        return true;
-    }
-    // url crate 的 host_str() 对 IPv6 返回带方括号的 "[::1]"
-    let bare = host.trim_start_matches('[').trim_end_matches(']');
-    bare.parse::<std::net::IpAddr>()
-        .map(|ip| ip.is_loopback())
-        .unwrap_or(false)
-}
-
-/// 被拒导航/新窗口转交系统默认浏览器。explorer 直接接 URL，不经 cmd 元字符解析；
-/// 壳是 Windows-only，非 Windows 仅留痕（编译可过）。
-#[cfg(target_os = "windows")]
-fn open_in_system_browser(url: &str) {
-    shell_log::warn(&format!("已拦截非本机导航，转交系统浏览器：{url}"));
-    let _ = std::process::Command::new("explorer").arg(url).spawn();
-}
-
-#[cfg(not(target_os = "windows"))]
-fn open_in_system_browser(url: &str) {
-    shell_log::warn(&format!("已拦截非本机导航（平台无系统浏览器回调，仅记录）：{url}"));
-}
-
-/// 托盘：左键唤出窗口，菜单「显示主窗口 / 重启后端 / 彻底关闭」。
+/// 托盘：左键唤出窗口，菜单「显示主窗口 / 重启后端 / 补齐 RAG / 检查更新 / 彻底关闭」。
 /// 关窗后壳还活着，全靠这块把入口留住；彻底关闭会先回收运行时再退出。
 fn build_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let show_item = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
     let restart_item = MenuItem::with_id(app, "restart", "重启后端", true, None::<&str>)?;
+    let backfill_item = MenuItem::with_id(app, "backfill-rag", "补齐 RAG", true, None::<&str>)?;
     let update_item = MenuItem::with_id(app, "update", "检查更新…", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "彻底关闭", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show_item, &restart_item, &update_item, &quit_item])?;
+    let menu = Menu::with_items(
+        app,
+        &[&show_item, &restart_item, &backfill_item, &update_item, &quit_item],
+    )?;
     let icon = app
         .default_window_icon()
         .cloned()
@@ -450,6 +473,7 @@ fn build_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .on_menu_event(|app, event| match event.id().as_ref() {
             "show" => activate(app),
             "restart" => restart_backend(app),
+            "backfill-rag" => optional_layer::start(app),
             "update" => check_updates(app),
             "quit" => begin_quit(app),
             _ => {}
@@ -478,6 +502,14 @@ fn check_updates(app: &AppHandle) {
         dialog::show_info(
             "请稍候",
             "Demiurge 正在启动或重启后端，请等完成后再检查更新。",
+        );
+        return;
+    }
+    if state.delivering.load(Ordering::SeqCst) {
+        dialog::show_info(
+            "正在补齐 RAG",
+            "RAG 组件正在后台下载，进度见「后台活动」面板。\n\
+             请等它结束再检查更新（两者都会改写运行时提交档）。",
         );
         return;
     }
@@ -528,6 +560,13 @@ fn restart_backend(app: &AppHandle) {
     }
     if state.updating.load(Ordering::SeqCst) {
         dialog::show_info("正在更新", "更新正在下载或安装，请等完成后再重启后端。");
+        return;
+    }
+    if state.delivering.load(Ordering::SeqCst) {
+        dialog::show_info(
+            "正在补齐 RAG",
+            "RAG 组件正在后台下载，补齐完成后会询问是否重启。\n请等它结束再手动重启后端。",
+        );
         return;
     }
     if state.restarting.swap(true, Ordering::SeqCst) {
@@ -681,48 +720,5 @@ fn persist_geometry(window: &tauri::WebviewWindow) {
     settings.fullscreen = fullscreen;
     if let Err(err) = settings.save(None) {
         shell_log::warn(&format!("保存窗口几何失败：{err}"));
-    }
-}
-
-#[cfg(test)]
-mod navigation_tests {
-    use super::{is_loopback_host, navigation_allowed};
-
-    fn url(s: &str) -> tauri::Url {
-        tauri::Url::parse(s).unwrap()
-    }
-
-    #[test]
-    fn 本应用页面放行() {
-        // 后端送达的应用页（端口协商，不限）与 tauri 协议兜底页
-        assert!(navigation_allowed(&url("http://127.0.0.1:8010/")));
-        assert!(navigation_allowed(&url("http://127.0.0.1:8010/api/user-state")));
-        assert!(navigation_allowed(&url("http://localhost:8021/index.html")));
-        assert!(navigation_allowed(&url("http://[::1]:8010/")));
-        assert!(navigation_allowed(&url("https://127.0.0.1:8010/")));
-        assert!(navigation_allowed(&url("http://tauri.localhost/boot.html")));
-        assert!(navigation_allowed(&url("tauri://localhost/boot.html")));
-        assert!(navigation_allowed(&url("about:blank")));
-    }
-
-    #[test]
-    fn 外站与异常scheme拒绝() {
-        assert!(!navigation_allowed(&url("http://evil.com/")));
-        assert!(!navigation_allowed(&url("https://192.168.1.5:8010/")));
-        // 前缀伪装不是回环：主机名判定按整体，不做子串
-        assert!(!navigation_allowed(&url("http://127.0.0.1.evil.com/")));
-        assert!(!navigation_allowed(&url("file:///C:/Windows/win.ini")));
-        assert!(!navigation_allowed(&url("data:text/html,<script>alert(1)</script>")));
-    }
-
-    #[test]
-    fn loopback判定() {
-        assert!(is_loopback_host("127.0.0.1"));
-        assert!(is_loopback_host("127.8.8.8"));
-        assert!(is_loopback_host("LOCALHOST"));
-        assert!(is_loopback_host("::1"));
-        assert!(!is_loopback_host("192.168.1.5"));
-        assert!(!is_loopback_host("localhost.attacker.com"));
-        assert!(!is_loopback_host(""));
     }
 }

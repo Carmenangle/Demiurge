@@ -5,7 +5,7 @@ import { type Repo, type RepoBinding, type useRepos } from "./stores/repos";
 import { SectionPlaceholder } from "./modes/SectionPlaceholder";
 import { saveSnapshot, chatAppend, type InspirationCardAsset } from "./api/ai";
 import { createScenarioSnapshot, forkScenarioSnapshot, listScenarioSnapshots } from "./api/scenario";
-import { createScenarioBranch } from "./lib/scenarioBranchRuntime";
+import { createScenarioBranch, branchChatState, branchMediaInsertPresets } from "./lib/scenarioBranchRuntime";
 import { SendToChatModal, type SendPayload } from "./components/SendToChatModal";
 import { pushInspirationsToCanvas, pushInspirationsToChat } from "./lib/inspirationInsert";
 const SettingsView = lazy(() => import("./views/settings/SettingsView").then((m) => ({ default: m.SettingsView })));
@@ -44,6 +44,7 @@ export interface AppBodyProps {
   relocateOutputPath: ReturnType<typeof useRepos>["relocateOutputPath"];
   setCover: ReturnType<typeof useRepos>["setCover"];
   setGeneratedCover: ReturnType<typeof useRepos>["setGeneratedCover"];
+  updateRepo: ReturnType<typeof useRepos>["updateRepo"];
   childrenOf: ReturnType<typeof useRepos>["childrenOf"];
   coverOf: ReturnType<typeof useRepos>["coverOf"];
   browseRepoId: string | null;
@@ -104,6 +105,7 @@ export function AppBody(props: AppBodyProps) {
         <ChatView key={activeWork.id} repo={activeWork} workMode={props.workMode}
         settings={settings} update={settingsStore.update} presets={settingsStore}
         setCover={props.setCover} setGeneratedCover={props.setGeneratedCover}
+        updateRepo={(patch) => props.updateRepo(activeWork.id, patch)}
         onBranch={async (binding, messages, isLatest) => {
           const parentId = activeWork.parentId;
           if (!parentId) return;
@@ -125,6 +127,14 @@ export function AppBody(props: AppBodyProps) {
             });
             if (result.status === "missing_snapshot") {
               window.alert("该历史回合没有完整世界状态快照，已拒绝创建状态错位的分支。");
+            } else if (result.status === "created") {
+              // 分支延续源作品的多元数据插入设置与聊天展示状态；聊天/群聊记录由后端随分叉复制。
+              const mediaInsert = branchMediaInsertPresets(
+                settings.mediaInsert, activeWork.id, result.childId,
+              );
+              if (mediaInsert) settingsStore.update({ mediaInsert });
+              const chatState = branchChatState(activeWork);
+              if (Object.keys(chatState).length) props.updateRepo(result.childId, chatState);
             }
           } catch (error) {
             window.alert(`完整分支创建失败：${error instanceof Error ? error.message : String(error)}`);
@@ -138,7 +148,8 @@ export function AppBody(props: AppBodyProps) {
         coverOf={props.coverOf} settings={settings} onBack={props.onClearRepo}
         onOpen={(work) => props.onOpenWork(selectedRepo.id, work.id)}
         onRename={props.onRename} onBind={props.onBind} onDelete={props.onDelete}
-        onNewSub={() => props.onNewSub(selectedRepo.id)} />;
+        onNewSub={() => props.onNewSub(selectedRepo.id)}
+        onGeneratedCover={props.setGeneratedCover} />;
     }
     return <HomeLauncher
       onCharacterCards={() => props.onGoSection("assets", "character-cards")}
@@ -158,12 +169,14 @@ export function AppBody(props: AppBodyProps) {
             ? props.onOpenWork(repo.parentId, repo.id)
             : props.setBrowseRepoId(repo.id)}
           onRename={props.onRename} onBind={props.onBind} onDelete={props.onDelete}
-          onNewSub={() => props.onNewSub(browseRepo.id)} />;
+          onNewSub={() => props.onNewSub(browseRepo.id)}
+          onGeneratedCover={props.setGeneratedCover} />;
       }
       return <ReposView repos={props.childrenOf(undefined)} title="作品仓库"
         coverOf={props.coverOf} onOpen={(repo) => props.setBrowseRepoId(repo.id)}
         onRename={props.onRename} onBind={props.onBind} onDelete={props.onDelete}
-        onNew={props.onNewRepo} childrenOf={props.childrenOf} settings={settings} />;
+        onNew={props.onNewRepo} childrenOf={props.childrenOf} settings={settings}
+        onGeneratedCover={props.setGeneratedCover} />;
     }
     if (props.subView === "generations") return (
       <>

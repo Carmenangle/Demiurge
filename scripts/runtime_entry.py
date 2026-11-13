@@ -14,6 +14,7 @@ from pathlib import Path
 
 
 _DLL_DIRECTORY_HANDLES: list[object] = []
+_RAG_ATTACHED_ROOTS: set[str] = set()
 _RAG_PACKAGE_PREFIXES = frozenset({
     "scipy", "sentence_transformers", "sklearn", "torch", "transformers",
 })
@@ -60,6 +61,30 @@ def runtime_state(root: Path) -> dict:
     return json.loads(state_path.read_text(encoding="utf-8"))
 
 
+def _attach_rag_packages(root: Path, rag_id: str) -> bool:
+    """把 rag 层的 site-packages 挂进本进程；没这一层就返回 False。
+
+    rag 自 P3 起是**可选层**（首启不交付，后台补齐），所以「挂没挂上」只能看盘上有没有
+    这个目录，**不能看 `edition` 字符串**——状态档会一边写着 `full-rag` 一边根本没有 torch。
+    幂等：补齐后要再挂一次，重复调用不能把路径插两遍。
+    """
+    if not rag_id:
+        return False
+    rag_packages = root / "rag" / rag_id / "site-packages"
+    if not rag_packages.is_dir():
+        return False
+    if str(rag_packages) not in sys.path:
+        sys.path.insert(0, str(rag_packages))
+    # finder 每次都要装（它自己会先去重再插到最前）；DLL 句柄只认第一次，重复加会泄漏句柄。
+    _install_external_rag_finder(rag_packages)
+    if os.name == "nt" and str(rag_packages) not in _RAG_ATTACHED_ROOTS:
+        for dll_dir in (rag_packages, rag_packages / "torch" / "lib"):
+            if dll_dir.is_dir():
+                _DLL_DIRECTORY_HANDLES.append(os.add_dll_directory(str(dll_dir)))
+    _RAG_ATTACHED_ROOTS.add(str(rag_packages))
+    return True
+
+
 def configure_environment(root: Path) -> dict:
     state = runtime_state(root)
     edition = str(state.get("edition") or os.environ.get("LAF_RUNTIME_EDITION", "full-rag"))
@@ -72,16 +97,8 @@ def configure_environment(root: Path) -> dict:
     elif backend_archive.is_file():
         sys.path.insert(0, str(backend_archive))
 
-    rag_id = str(state.get("rag_id", ""))
-    if rag_id:
-        rag_packages = root / "rag" / rag_id / "site-packages"
-        if rag_packages.is_dir():
-            sys.path.insert(0, str(rag_packages))
-            _install_external_rag_finder(rag_packages)
-            if os.name == "nt":
-                for dll_dir in (rag_packages, rag_packages / "torch" / "lib"):
-                    if dll_dir.is_dir():
-                        _DLL_DIRECTORY_HANDLES.append(os.add_dll_directory(str(dll_dir)))
+    attached = _attach_rag_packages(root, str(state.get("rag_id", "")))
+    os.environ["LAF_RAG_ATTACHED"] = "1" if attached else "0"
 
     # 数据目录：优先用启动器传入的 LAF_DATA_DIR（指向 data/userdata），
     # 独立运行时回退到 exe 同级 data（开发/自检场景）。
@@ -100,7 +117,8 @@ def configure_environment(root: Path) -> dict:
 
 def self_check() -> None:
     modules = []
-    if os.environ.get("LAF_RUNTIME_EDITION") == "full-rag":
+    # 只验**真挂上了**的依赖：`edition` 是发行目标的名字，rag 层缺席时它照样写着 full-rag。
+    if os.environ.get("LAF_RAG_ATTACHED") == "1":
         modules.extend(("torch", "transformers", "sentence_transformers"))
     modules.extend((
         "app.main", "chromadb", "langchain_chroma", "langgraph",

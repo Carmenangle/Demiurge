@@ -72,20 +72,49 @@ export function diffComfyHosts(
   };
 }
 
+/** 某模态配置的机台 id 列表（读侧兼容旧单字符串；空/未知 id 由调用方回退默认机）。 */
+export function resolveComfyRouteIds(
+  settings: Pick<Settings, "comfyRoute">,
+  modality?: ComfyModality | null,
+): string[] {
+  const raw = modality ? settings.comfyRoute?.[modality] : "";
+  if (!raw) return [];
+  const values = Array.isArray(raw) ? raw : [raw];
+  const out: string[] = [];
+  for (const item of values) {
+    const id = String(item || "").trim();
+    if (id && !out.includes(id)) out.push(id);
+  }
+  return out;
+}
+
 /**
- * 某个模态该用哪台机：`comfyRoute[modality]` 指向的条目，**缺省或指向未知 id 都回退条目 0**。
+ * 某模态的**机台池**（2026-11-09）：`comfyRoute[modality]` 指向的一台或多台机；
+ * 缺省/全部未知 ⇒ 回退条目 0。按 URL 去重，顺序＝配置顺序。
  *
  * 提交/落盘必须用这里返回的**具体 URL**——名字只是标签，历史与重新生成快照记的都是 URL。
  */
+export function resolveComfyUrls(
+  settings: Pick<Settings, "comfyuiUrl" | "comfyExtra" | "comfyRoute">,
+  modality?: ComfyModality | null,
+): string[] {
+  const machines = listMachines(settings);
+  const head = machines[0]?.url || "";
+  const wanted = resolveComfyRouteIds(settings, modality);
+  const urls: string[] = [];
+  for (const id of wanted) {
+    const url = machines.find((machine) => machine.id === id)?.url;
+    if (url && !urls.some((existing) => sameComfyUrl(existing, url))) urls.push(url);
+  }
+  return urls.length ? urls : (head ? [head] : []);
+}
+
+/** 旧单台调用点：池里的第一台（多机台分发请用 `comfyHostPool.pickComfyHost`）。 */
 export function resolveComfyUrl(
   settings: Pick<Settings, "comfyuiUrl" | "comfyExtra" | "comfyRoute">,
   modality?: ComfyModality | null,
 ): string {
-  const machines = listMachines(settings);
-  const head = machines[0]?.url || "";
-  const wanted = modality ? settings.comfyRoute?.[modality] : "";
-  if (!wanted) return head;
-  return machines.find((m) => m.id === wanted)?.url || head;
+  return resolveComfyUrls(settings, modality)[0] || "";
 }
 
 /** 由 URL 反查显示名（历史/快照只存 URL）；反查不到原样返回 URL，绝不丢信息。 */

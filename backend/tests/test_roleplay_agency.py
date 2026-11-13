@@ -611,6 +611,30 @@ def test_维护可在无RAG时受控修改当前仓库世界书(tmp_path):
         {"op": "worldbook_update", "index": 0, "text": "新设定", "evidence": "剧情已确认"},
     ]
 
+
+def test_curator产出世界书op但无写手时留痕不静默丢弃(tmp_path):
+    """2026-11-03 纯卡盘点实锤（清单 #6）：无世界书快照时 `_curator_worldbook_fn` 返回 None，
+    而旧写法把「取 op + 写回 + trace」整段塞在 `if deps.worldbook_fn is not None` 里
+    ⇒ curator 按 CURATOR_SYSTEM 承诺产出的 add/update **连 trace 一起**蒸发，症状与
+    「curator 没提出 op」逐字相同。补 skipped 留痕；写入条数仍为 0（不改行为）。"""
+    traces = []
+    deps = ra.AgencyDeps(
+        chat_fn=lambda *a, **k: '[{"op":"worldbook_add","text":"新事实"}]',
+        rng=random.Random(0), state_base=str(tmp_path),
+        curator_gate=1.0, index_fn=lambda t, ti: None, worldbook_fn=None,
+        trace_fn=lambda event, **data: traces.append((event, data)),
+    )
+
+    assert ra.maybe_curate(
+        deps, window_text="剧情", chat_base="b", chat_key="k", chat_model="m",
+    ) == 0
+    event = next(data for name, data in traces if name == "worldbook.writeback")
+    assert (event["status"], event["reason"], event["applied"]) == (
+        "skipped", "no_worldbook_writer", 0,
+    )
+    assert event["ops"] == [{"op": "worldbook_add", "text": "新事实"}]
+
+
 def test_思考内幻影协议标签跨界匹配不吞正文():
     """2026-08-31 实锤复刻：think 里复述协议清单产生幻影 <状态更新>，懒匹配从 think 内
     一路吃到真块闭合 (3390,11977)，旧「完全包含」判断放行跨界匹配，正文随整段被剥掉，
@@ -805,3 +829,40 @@ def test_三段指令顺序固定():
                                "大成功", intent="登门", kind="event", who="埃姆登")
     assert ra.agency_lost([won_event, user]) is False
     assert ra.agency_lost([npc]) is False
+
+
+def test_零条目快照时curator不再挂世界书列表段落(tmp_path):
+    """清单 #8 整链（走**真**的 context 闭包与真快照，不桩掉出问题的环节）：
+    快照存在但零条目 ⇒ `repo_snapshot_context` 现在返回 `""`（旧为字面 `'[]'`，是真值）
+    ⇒ `maybe_curate` 的 `if worldbook_context:` 整段不拼 ⇒ 模型不再读到
+    「【当前小仓库世界书条目（index 用于更新）】[]」这种「说有书、可写集却是空」的假承诺。"""
+    from app.services import agent_context_assembly as assembly
+    from app.services import worldbook_store
+
+    seen: dict[str, str] = {}
+
+    def _chat(base, key, model, system, window, **kw):
+        seen["system"] = system
+        return "[]"
+
+    worldbook_store.ensure_repo_snapshot(str(tmp_path), "work", [{"entries": []}])
+    ctx = {"output_dir": str(tmp_path), "repo_id": "work", "_selected_worldbook_indices": []}
+    context_fn = assembly._curator_worldbook_context_fn(ctx, "work")
+    assert context_fn is not None, "零条目快照仍应保留写手侧（worldbook_add 是它自举的唯一路）"
+    assert context_fn("她往前走了一步。") == ""
+
+    deps = ra.AgencyDeps(chat_fn=_chat, rng=random.Random(0), state_base=str(tmp_path),
+                         curator_gate=1.0, index_fn=lambda t, ti: None, worldbook_fn=None,
+                         worldbook_context_fn=context_fn)
+    assert ra.maybe_curate(deps, window_text="她往前走了一步。",
+                           chat_base="b", chat_key="k", chat_model="m") == 0
+    assert "当前小仓库世界书条目" not in seen["system"]
+
+    worldbook_store.ensure_repo_snapshot(str(tmp_path), "booked", [{"entries": [
+        {"comment": "角色卡·顾凝霜", "content": "顾凝霜：银发。"}]}])
+    ctx2 = {"output_dir": str(tmp_path), "repo_id": "booked", "_selected_worldbook_indices": [0]}
+    deps2 = ra.AgencyDeps(chat_fn=_chat, rng=random.Random(0), state_base=str(tmp_path),
+                          curator_gate=1.0, index_fn=lambda t, ti: None, worldbook_fn=None,
+                          worldbook_context_fn=assembly._curator_worldbook_context_fn(ctx2, "booked"))
+    ra.maybe_curate(deps2, window_text="她往前走了一步。", chat_base="b", chat_key="k", chat_model="m")
+    assert "当前小仓库世界书条目" in seen["system"]   # 有书时照挂＝本次改动不缩小既有覆盖

@@ -104,6 +104,7 @@ from app.services.agency_scene_comfy import (  # noqa: F401  兼容 re-export
     _wb_frames_and_video,
     _wb_emit_illustration_trace,
     _wb_comfy_extra_requests,
+    build_shot_requests,
 )
 
 _LOG = logging.getLogger("uvicorn.error")
@@ -183,7 +184,8 @@ def _streamed_illustration_events(recs: list[dict]) -> list[dict]:
         }
         # V1.5/B1：视频协议可选字段透传（有值才带；旧前端/旧数据宽松忽略）
         for _key in ("video_mode", "first_frame_desc", "last_frame_desc",
-                     "prev_tail_desc", "last_frame_url", "transition", "bridge_prev_slot"):
+                     "prev_tail_desc", "last_frame_url", "transition", "bridge_prev_slot",
+                     "shot_sequence_id", "shot_type", "image_key", "incoming_shot_type"):
             _value = rec.get(_key)
             if isinstance(_value, str) and _value:
                 request[_key] = _value
@@ -191,6 +193,10 @@ def _streamed_illustration_events(recs: list[dict]) -> list[dict]:
         # 不再吃首尾帧的第 34 刀固定落点（N 张批次图全叠在同一处）。
         if isinstance(rec.get("batch_index"), int):
             request["batch_index"] = int(rec["batch_index"])
+        for _key in ("shot_index", "shot_total", "shot_duration_s", "incoming_shot_index"):
+            _value = rec.get(_key)
+            if isinstance(_value, int):
+                request[_key] = int(_value)
         # 正常链路：comfy_video 开启时 produce 层才编译 video_request，这里随事件下发
         _video_request = _video_request_for(rec)
         if _video_request:
@@ -298,7 +304,10 @@ def _agency_prelude(ctx: CtxLike, text: str):
             parts.append(character_state.render_state_block(st))
         st_block = ("\n\n" + "\n\n".join(parts)) if parts else ""
         return deps, turn, affinity, st_block
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        # 组装失败＝整条能动性子图蒸发（state 块／世界 Agent／curator／表格全没），原本零留痕，
+        # 与「用户主动关闭能动性」在 trace 里看不出差别。deps 还没造出来，只能直接打 run_trace。
+        run_trace.emit(ctx, "agency.prelude_failed", error=str(exc)[:200])
         return None, 0, None, ""
 
 
@@ -329,21 +338,60 @@ def _next_story_turn(ctx: CtxLike) -> int:
     ) + 1
 
 
+def _tail_text(text: str, max_chars: int) -> str:
+    """保留文本尾部 `max_chars` 字；`max_chars<=0` 表示不限（不能写成 [-0:]）。"""
+    if max_chars <= 0:
+        return text
+    return text[-max_chars:]
+
+
+# World Agent 是回合前的旁路咨询：总输入预算跟随用户「上下文预算」，core（在场角色设定）
+# 与 scene（最近剧情）各占一半。2026-11-12 用户实锤：旧实现写死 core 8000 / 历史
+# 1200、2000 字符，调大 `contextMaxTokens` 也不生效。
+_WORLD_AGENT_CORE_SHARE = 0.5
+
+
+def _world_agent_context_limits(ctx: CtxLike) -> tuple[int, int]:
+    """返回 (core 上限, scene 历史上限)，单位字符；0 表示不限。
+
+    `resolve_history_budget` 已把用户设置与模型窗口收敛成 token 预算；中日韩约
+    1 字 1 token，这里直接按字符当预算用（英文按 4 字/token，属于保守使用）。
+    """
+    setting = ctx.get("context_max_tokens")
+    budget = agent_context.resolve_history_budget(
+        setting if isinstance(setting, int) else 0,
+        ctx.get("preset_sampling"),
+    )
+    if budget <= 0:
+        return 0, 0
+    core = max(1, int(budget * _WORLD_AGENT_CORE_SHARE))
+    return core, max(1, budget - core)
+
+
 def _agency_propose(ctx: CtxLike, deps, affinity, wb: str, text: str = "") -> tuple[str, bool]:
     """阶段 A：世界提案 + 裁判。首轮无好感按中性值交给 World，不静默跳过。"""
     ctx["_agency_goal_deltas"] = []
+    # 缺陷 4：裁定过去只汇成一句叙事指令，指令在 roleplay 节点被 pop ⇒ 写回侧的 CI 无从
+    # 核对「本轮要求正文体现的未遂到底写没写」。这里把 verdicts 另投影一份给台账。
+    # 进函数先置 None：`ctx` 跨轮复用，留着上一轮的投影＝拿旧裁定核对新正文（假核对）。
+    ctx["_agency_npc_claims"] = None
     if deps is None:
         run_trace.emit(ctx, "agent.skipped", agent="world", reason="agency_unavailable")
         return "", False
     try:
         from app.services import roleplay_agency
-        core = _agency_core_context(ctx, wb, text)
-        history = agent_context.history_text(ctx)[-1200:].strip()
+        core_limit, scene_limit = _world_agent_context_limits(ctx)
+        core = _agency_core_context(
+            ctx, wb, text, max_chars=core_limit, history_max_chars=scene_limit,
+        )
+        history_limit = max(1, scene_limit - len(text.strip())) if scene_limit > 0 else 0
+        history = _tail_text(agent_context.history_text(ctx), history_limit)
         scene = "\n\n".join(part for part in (history, text.strip()) if part)
         verdicts = roleplay_agency.consult_world(
             deps, chat_base=ctx["chat_base"], chat_key=ctx["chat_key"],
             chat_model=ctx["chat_model"], core=core, scene=scene, affinity=affinity,
             proxy=ctx.get("chat_proxy", ""))
+        ctx["_agency_npc_claims"] = [vars(verdict) for verdict in verdicts]
         if not verdicts:
             return "", False
         ctx["_agency_goal_deltas"] = [
@@ -361,10 +409,17 @@ def _agency_propose(ctx: CtxLike, deps, affinity, wb: str, text: str = "") -> tu
         return "", False
 
 
-def _agency_core_context(ctx: CtxLike, wb: str, text: str, *, max_chars: int = 8_000) -> str:
-    """从已召回世界书中只取在场 NPC 相关条目，避免把整本书重复交给 World。"""
+def _agency_core_context(
+    ctx: CtxLike, wb: str, text: str, *, max_chars: int = 0,
+    history_max_chars: int = 0,
+) -> str:
+    """从已召回世界书中只取在场 NPC 相关条目，避免把整本书重复交给 World。
+
+    `max_chars` / `history_max_chars` 由 `_world_agent_context_limits` 按用户上下文预算
+    派生；0 表示不限。旧实现写死 core 8000、历史 2000 字符，已移除。
+    """
     persona = (ctx.get("persona") or "").strip()
-    history = agent_context.history_text(ctx)[-2_000:]
+    history = _tail_text(agent_context.history_text(ctx), history_max_chars)
     scene = f"{history}\n{text}"
     present: list[str] = []
     for raw in re.findall(r"\[在场\]\s*([^\n<]+)", scene):
@@ -377,7 +432,8 @@ def _agency_core_context(ctx: CtxLike, wb: str, text: str, *, max_chars: int = 8
     if not selected and wb.strip():
         selected = chunks[:2] if chunks else [wb.strip()]
     parts = [part for part in (persona, "\n\n".join(selected)) if part]
-    return "\n\n".join(parts)[:max_chars]
+    joined = "\n\n".join(parts)
+    return joined[:max_chars] if max_chars > 0 else joined
 
 
 
@@ -500,7 +556,8 @@ def _agency_writeback(ctx: CtxLike, deps, reply: str, turn: int, affinity,
         clean, raw, before, after, snapshot, st = agency_scene_state._wb_apply_state(
             ctx, deps, clean, turn=turn, repo_id=repo_id, card_name=card_name)
         # 连续性 CI（永不阻断或改写正文）
-        agency_scene_state._wb_run_narrative_ci(ctx, clean, turn=turn, raw=raw, repo_id=repo_id)
+        agency_scene_state._wb_run_narrative_ci(
+            ctx, clean, turn=turn, raw=raw, repo_id=repo_id, scene_snapshot=snapshot)
         # 阶段 D 前置：可见正文 + 在场/衣着/所在 + 高潮触发信号
         scene = ctx.get("scene") or ""
         sig = agency_scene_state._wb_scene_signals(
@@ -511,6 +568,24 @@ def _agency_writeback(ctx: CtxLike, deps, reply: str, turn: int, affinity,
         # 初选出图提示词/动作/角色（comfy 与非 comfy 两条路径共用）
         prompt_override, motion, actors = agency_scene_state._wb_initial_illustration_prompt(
             ctx, deps, illustration_plan, sig, user_text=user_text)
+        # 全局模式分镜序列（2026-11-09）：每个保留锚点一条请求；第一条作主请求，
+        # 其余进 extra_requests。没有锚点/请求 ⇒ 本轮不出图（trace 明示，不静默）。
+        if ctx.get("video_mode") == "shots" and ctx.get("comfy_illustrate"):
+            pool = agency_scene_comfy._wb_comfy_actor_pool(
+                ctx, repo_id, card_name, illustration_plan, actors, sig,
+                user_text=user_text)
+            requests = build_shot_requests(
+                ctx, repo_id, illustration_plan, clean, sig, pool,
+                primary_motion=motion, user_text=user_text)
+            if requests:
+                main = requests[0]
+                main["extra_requests"] = requests[1:]
+                return think_head + clean, [], main, audio_req
+            run_trace.emit(
+                ctx, "illustration.shot_plan", status="skipped",
+                reason="no_anchor_or_request",
+            )
+            return think_head + clean, [], {}, audio_req
         # comfy_illustrate：不同步 render，把 prompt + motion + actors 作为出图请求返回，
         # 前端据 motion 智能选图/视频、据 actors 按角色选 LoRA/底图，走异步 ComfyUI 闭环。
         # 七段接缝依次组装（候选角色池 → 提示词/锚点 → scene_spec → Profile →

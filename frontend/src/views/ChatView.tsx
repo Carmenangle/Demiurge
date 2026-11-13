@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, lazy, Suspense } from "react";
+import { ensureChatActivityWatch } from "../lib/chatBackgroundActivity";
+import { configureComfyAutoStart } from "../lib/comfyReadiness";
 import {
   ArrowDown,
   Boxes,
@@ -9,6 +11,7 @@ import {
   Image as ImageIcon,
   Table,
   MessagesSquare,
+  MessageCircle,
   Archive,
   Palette,
   PanelRight,
@@ -25,11 +28,12 @@ import {
   Minimize2,
   MessageSquarePlus,
   Plus,
-  FileText, MoreHorizontal } from "lucide-react";
+  FileText, MoreHorizontal, History } from "lucide-react";
 import { type Repo, type RepoBinding } from "../stores/repos";
 import { type WorkMode } from "../lib/viewRouting";
-import { modelDisplayName, resolvedEmbedModel, useSettings, activeUserPersona, OLLAMA_DEFAULT_BASE_URL } from "../stores/settings";
+import { modelDisplayName, resolvedEmbedModel, useSettings, activeUserPersona, OLLAMA_DEFAULT_BASE_URL, type MediaInsertPreset } from "../stores/settings";
 import { effectiveGlobalProxyUrl, globalProxyAddress, resolveEndpointProxy } from "../lib/modelProxy";
+import { ChatArchiveModal } from "../components/ChatArchiveModal";
 import { KnowledgeModal } from "../components/KnowledgeModal";
 import { NarrativeCiPanel } from "../components/chat/NarrativeCiPanel";
 import { TableModal } from "../components/TableModal";
@@ -55,13 +59,20 @@ import {
 import { templateSelectorOptions } from "../lib/promptTemplates";
 import { subscribePlanTaskActivities, approvePlanTask, cancelPlanTask, type PlanTaskActivity } from "../lib/planTaskActivity";
 import { UserMessage, AssistantMessage, InspirationCard, PortsPlanCard } from "../components/chat/ChatMessages";
+import { ChatRoomView } from "../components/chat/ChatRoomView";
+import { chatRoomThreadId, type ChatRoomMode } from "../lib/chatRoom";
+import { addUnread, getUnread, subscribeUnread } from "../lib/chatRoomUnread";
 import { ModelSwitcher, SizeSwitcher } from "../components/chat/ChatControls";
 import { useMobileViewport } from "../lib/useMobileViewport";
 import { comfyStatus, startComfy, localViewUrl } from "../api/comfyui";
 import { listAgents, type Agent } from "../api/agents";
 import { listTemplates, type Template } from "../api/workflows";
-import { indexDocument, proxyImageUrl } from "../api/ai";
+import {
+  indexDocument, proxyImageUrl, compactHistory, clearCache as clearCacheThread,
+  fetchCharacterRoster, type CharacterRosterResult,
+} from "../api/ai";
 import { resolveImageSize, supportsImageQuality } from "../lib/viewRouting";
+import { resolveComfyUrl } from "../lib/comfyMachines";
 import { useGenerationPreferences } from "../lib/generationPreferences";
 import { useWorkflowTemplatePicker } from "../lib/workflowTemplatePicker";
 import { useResizableChatInput } from "../lib/useResizableChatInput";
@@ -80,6 +91,7 @@ export function ChatView({
   presets,
   setCover,
   setGeneratedCover,
+  updateRepo,
   onBack,
   initialImage,
   onImageConsumed,
@@ -92,6 +104,8 @@ export function ChatView({
   presets: Pick<ReturnType<typeof useSettings>, "addStylePreset" | "updateStylePreset" | "removeStylePreset">;
   setCover: (id: string, cover: string) => void;
   setGeneratedCover: (id: string, cover: string) => void;
+  /** 仓库字段补丁（合集卡角色名册覆盖等）。 */
+  updateRepo?: (patch: Partial<Repo>) => void;
   onBack?: () => void;
   initialImage?: string | null;              // 从资产库「发送至对话」带来的图，挂载后插入输入框
   onImageConsumed?: () => void;
@@ -107,6 +121,49 @@ export function ChatView({
   const cardName = repo?.openingCardName || repo?.cardName || cardNames[0] || "";
   const mediaInsertOn = Boolean(settings.mediaInsert?.[repo?.id || ""]?.templateId);
   const characterDir = settings.characterDir || "";
+  // 合集卡角色名册（2026-11-10）：作品只绑一张「作品名卡」时，聊天/群聊/多元数据插入的
+  // 角色来自世界书条目；后端识别 + 仓库 characterRoster 覆盖，前端只消费同一份结果。
+  const [chatRoster, setChatRoster] = useState<CharacterRosterResult | null>(null);
+  const [chatRosterRefreshKey, setChatRosterRefreshKey] = useState(0);
+  // 后台活动轮询跨剧情/私聊模式常驻：私聊生成中切走，跑完后仍能补未读红点。
+  useEffect(() => { ensureChatActivityWatch(); }, []);
+  // ComfyUI 未启动时，拍摄/定妆任务统一排队；能自动拉起就自动拉起。
+  useEffect(() => {
+    configureComfyAutoStart(settings.comfyuiPath || "", settings.comfyuiPython || "");
+  }, [settings.comfyuiPath, settings.comfyuiPython]);
+  const chatRosterNames = chatRoster?.source === "worldbook" && chatRoster.members.length
+    ? chatRoster.members : cardNames;
+  useEffect(() => {
+    if (!repo?.id) {
+      setChatRoster(null);
+      return;
+    }
+    let alive = true;
+    fetchCharacterRoster({
+      repoId: repo.id,
+      outputDir: settings.outputDir || "",
+      characterDir,
+      cardName: repo.cardName || "",
+      cardNames,
+      openingCardName: repo.openingCardName || "",
+      worldbookDir: settings.worldbookDir || "",
+      worldbookName: repo.worldbookName || "",
+      interactionMode: "chat",
+    }).then((result) => {
+      if (alive) setChatRoster(result);
+    }).catch(() => {
+      // 后端离线/名册读失败：回退绑定卡，聊天室仍可用。
+      if (alive) setChatRoster({
+        source: "cards", members: cardNames, entries: [], candidates: [],
+        fallback_card: repo.cardName || cardNames[0] || "",
+      });
+    });
+    return () => { alive = false; };
+  }, [
+    repo?.id, repo?.cardName, repo?.openingCardName, repo?.worldbookName,
+    repo?.characterRoster, settings.characterDir, settings.outputDir, settings.worldbookDir,
+    chatRosterRefreshKey,
+  ]); // eslint-disable-line react-hooks/exhaustive-deps
   // 仓库绑定预设优先于全局设置
   const resolvedPresetName = repo?.presetName || settings.activePresetName;
   const { displayRegex, characterPortraits } = useChatPresentationAssets(
@@ -379,8 +436,99 @@ export function ChatView({
   // 知识库：手动参考资料入库弹窗
   const [showKnowledge, setShowKnowledge] = useState(false);
   const [indexingDoc, setIndexingDoc] = useState(false);
+  const [showArchives, setShowArchives] = useState(false);
   // 多 Agent（Supervisor/LangGraph）已成为唯一模式：自由文本走 /multi-agent，复用同一生命周期。
   // 单 agent 对外入口已下线（其大脑降级为多 Agent 的 tool_agent 专家节点，承接 MCP/工具串联）。
+
+  // 对话区交互模式（2026-11-09）：剧情 / 私聊 / 群聊。提前声明，顶部维护动作要按当前线程分流。
+  const [interactionMode, setInteractionMode] = useState<"story" | ChatRoomMode>("story");
+  // 私聊每个角色独立线程（2026-11-10）：ChatRoomView 上报当前角色，顶部维护/未读都按它算。
+  const [chatActiveSpeaker, setChatActiveSpeaker] = useState("");
+  useEffect(() => {
+    if (!chatRosterNames.length) {
+      setChatActiveSpeaker("");
+      return;
+    }
+    setChatActiveSpeaker((prev) => (chatRosterNames.includes(prev) ? prev : chatRosterNames[0]));
+  }, [chatRosterNames.join("\u0000")]); // eslint-disable-line react-hooks/exhaustive-deps
+  const chatThreadId = repo
+    ? (interactionMode === "group_chat"
+      ? chatRoomThreadId(repo.id, "group_chat")
+      : (chatRoster?.member_threads?.[chatActiveSpeaker]
+        || chatRoomThreadId(repo.id, "chat", interactionMode === "chat" ? chatActiveSpeaker : "")))
+    : "";
+  const [chatRoomRefreshKey, setChatRoomRefreshKey] = useState(0);
+  const [chatMaintenanceBusy, setChatMaintenanceBusy] = useState(false);
+  const [chatRoomBusy, setChatRoomBusy] = useState(false);
+  const reloadChatRoom = useCallback(async () => {
+    deletedMessageTombstones.clear(chatThreadId);
+    setChatRoomRefreshKey((key) => key + 1);
+  }, [chatThreadId]);
+  const {
+    snapshotFileRef: chatSnapshotFileRef,
+    handleExportChat: exportChatRoom,
+    handleImportChatFile: importChatRoomFile,
+  } = useChatTransfer(
+    chatThreadId || "home__chat", repo?.name || "会话", reloadChatRoom, showToast,
+  );
+  const compactChatRoom = useCallback(async () => {
+    if (!chatThreadId) return;
+    setChatMaintenanceBusy(true);
+    try {
+      await compactHistory(chatThreadId, chat, embed);
+      await reloadChatRoom();
+      showToast("聊天室上下文已压缩");
+    } catch (err) {
+      showToast(`聊天室压缩失败：${err instanceof Error ? err.message : String(err)}`, "error");
+    } finally {
+      setChatMaintenanceBusy(false);
+    }
+  }, [chatThreadId, chat, embed, reloadChatRoom, showToast]);
+  const clearChatRoom = useCallback(async () => {
+    if (!chatThreadId) return;
+    if (!window.confirm("清空聊天室记录？剧情对话不受影响。")) return;
+    setChatMaintenanceBusy(true);
+    try {
+      // output_dir 留空：只清聊天室快照/附件，不碰作品共用的 reference 参考图。
+      await clearCacheThread(chatThreadId, "");
+      await reloadChatRoom();
+      showToast("聊天室记录已清空");
+    } catch (err) {
+      showToast(`清空聊天室失败：${err instanceof Error ? err.message : String(err)}`, "error");
+    } finally {
+      setChatMaintenanceBusy(false);
+    }
+  }, [chatThreadId, reloadChatRoom, showToast]);
+  // 私聊未读 = 所有角色线程之和（每个角色一条独立线）；群聊仍是一条线。
+  const privateChatThreads = useMemo(
+    () => chatRosterNames.map((name) => (
+      chatRoster?.member_threads?.[name] || chatRoomThreadId(repo?.id, "chat", name)
+    )),
+    [repo?.id, chatRoster, chatRosterNames.join("\u0000")], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  const privateChatThreadKey = privateChatThreads.join("|");
+  const groupChatThreadId = repo ? chatRoomThreadId(repo.id, "group_chat") : "";
+  const [chatModeUnread, setChatModeUnread] = useState(() => ({
+    private: privateChatThreads.reduce((sum, id) => sum + getUnread(id).total, 0),
+    group: getUnread(groupChatThreadId).total,
+  }));
+  useEffect(() => {
+    const update = () => setChatModeUnread({
+      private: privateChatThreads.reduce((sum, id) => sum + getUnread(id).total, 0),
+      group: getUnread(groupChatThreadId).total,
+    });
+    update();
+    return subscribeUnread(update);
+  }, [privateChatThreadKey, groupChatThreadId]); // eslint-disable-line react-hooks/exhaustive-deps
+  const switchInteractionMode = (next: "story" | ChatRoomMode) => {
+    // 切走时还在生成：后端会继续跑完，先记一条未读，回来能看到小红点。
+    if (interactionMode !== "story" && interactionMode !== next && chatRoomBusy) {
+      addUnread(chatThreadId, interactionMode === "chat" ? chatActiveSpeaker : "", 1);
+    }
+    // 进入聊天/群聊时重拉名册：带上各角色快照最新 mtime，头像按新→旧排序。
+    if (next !== "story") setChatRosterRefreshKey((key) => key + 1);
+    setInteractionMode(next);
+  };
 
   // 聊天会话引擎：messages/生成生命周期/持久化/编排全部集中在 useChatSession（见 lib/useChatSession）。
   const {
@@ -535,13 +683,33 @@ export function ChatView({
   const [showTables, setShowTables] = useState(false);
   // 手机端会话工具浮层（≤720px 时功能按钮组收进浮标；桌面 display:contents 布局不变）
   const [headToolsOpen, setHeadToolsOpen] = useState(false);
+  // 对话区交互模式（2026-11-09）：剧情 / 私聊 / 群聊共用原本的对话界面，不用弹窗。
   const [showMediaInsert, setShowMediaInsert] = useState(false);
+  // 关掉多元数据弹窗后定妆才完成：先暂存结果，弹小窗让用户确认插入，再自动定位到该角色行。
+  const [pendingPortrait, setPendingPortrait] = useState<{
+    preset: MediaInsertPreset; name: string;
+  } | null>(null);
+  const [mediaInsertFocus, setMediaInsertFocus] = useState("");
+  // 暂存结果首次打开面板时用它当 preset：不依赖设置存储的异步落定，角色行一定带新底图。
+  const [mediaInsertPresetOverride, setMediaInsertPresetOverride] = useState<MediaInsertPreset | null>(null);
+  const mediaInsertOpenRef = useRef(false);
+  useEffect(() => { mediaInsertOpenRef.current = showMediaInsert; }, [showMediaInsert]);
   const [chatDragOver, setChatDragOver] = useState(false);  // 拖拽文件到对话页面：显示高亮反馈（图片/媒体/任意文件都会进 RichInput）
   const handleSetCover = useCallback((url: string) => {
     const id = repoIdRef.current;
     if (id) setCoverRef.current(id, url);
   }, []);
   const hasRepo = !!repo;
+  // 保存多元数据插入预设：`close=false` 专供一键定妆成功后的即时落盘——
+  // 底图已产出就不能再等一次手点「保存」（2026-11-07 埃吉尔底图只留在磁盘、预设里没有）。
+  const applyMediaInsertPreset = (preset: MediaInsertPreset, close: boolean) => {
+    const key = repo?.id || "";
+    update({
+      illustrate: true,
+      mediaInsert: { ...(settings.mediaInsert || {}), [key]: preset },
+    });
+    if (close) setShowMediaInsert(false);
+  };
 
   const submitDocument = (title: string, text: string) => {
     setIndexingDoc(true);
@@ -731,6 +899,39 @@ export function ChatView({
               <span className="head-tool-text">{contentView === "canvas" ? "对话" : "画布"}</span>
             </button>
             {cardName && (
+              <div className="interaction-mode-tabs" role="group" aria-label="对话模式">
+                <button
+                  type="button"
+                  className={interactionMode === "story" ? "active" : ""}
+                  onClick={() => switchInteractionMode("story")}
+                  title="剧情模式：推进剧情、触发状态与自动插画"
+                >
+                  剧情
+                </button>
+                <button
+                  type="button"
+                  className={interactionMode === "chat" ? "active" : ""}
+                  onClick={() => switchInteractionMode("chat")}
+                  title="私聊：通用 Agent 套角色人设，可问答/创作/生图/检索"
+                >
+                  <MessageCircle size={13} /> 私聊
+                  {chatModeUnread.private > 0 && <span className="mode-unread-dot" />}
+                </button>
+                <button
+                  type="button"
+                  className={interactionMode === "group_chat" ? "active" : ""}
+                  onClick={() => switchInteractionMode("group_chat")}
+                  disabled={chatRosterNames.length < 2}
+                  title={chatRosterNames.length < 2
+                    ? "群聊至少需要两个角色（可绑多张角色卡，或让世界书识别出角色条目）"
+                    : "群聊：按节奏挑人回应，角色间可互相接话；明确生图/检索/计划仍走专家"}
+                >
+                  <MessagesSquare size={13} /> 群聊
+                  {chatModeUnread.group > 0 && <span className="mode-unread-dot" />}
+                </button>
+              </div>
+            )}
+            {cardName && (
               <button
                 className="btn icon-only"
                 onClick={() => setShowTables(true)}
@@ -781,7 +982,11 @@ export function ChatView({
             <button
               className={`btn icon-only head-tool-labeled ${mediaInsertOn ? "primary" : ""}`}
               aria-pressed={mediaInsertOn}
-              onClick={() => setShowMediaInsert(true)}
+              onClick={() => {
+                setMediaInsertFocus("");
+                setMediaInsertPresetOverride(null);
+                setShowMediaInsert(true);
+              }}
               title={`多元数据插入${mediaInsertOn ? "（开）" : "（关）"}：勾选随剧情自动生成的内容类型（图片/视频/音频），并分别预设 ComfyUI 工作流模板 + 按角色参数（LoRA/底图/参考音轨）。保存预设会自动开启剧情自动生成`}
             >
               <Clapperboard size={15} />
@@ -793,9 +998,16 @@ export function ChatView({
             <div className="head-tool-group head-tools-more" role="group" aria-label="会话维护">
             <button
               className="btn icon-only"
-              onClick={compact}
-              disabled={compacting || !!streamingId || wfRunning}
-              title="压缩上下文：总结从第一条到最后一条的完整会话，并保留最后成果图；不受普通 Agent 最近 6+6 条读取范围限制"
+              onClick={() => {
+                if (interactionMode === "story") compact();
+                else void compactChatRoom();
+              }}
+              disabled={interactionMode === "story"
+                ? (compacting || !!streamingId || wfRunning)
+                : (chatMaintenanceBusy || chatRoomBusy)}
+              title={interactionMode === "story"
+                ? "压缩上下文：总结从第一条到最后一条的完整会话，并保留最后成果图；不受普通 Agent 最近 6+6 条读取范围限制"
+                : "压缩聊天室上下文：只压缩当前私聊/群聊的完整会话，不影响剧情对话"}
             >
               <Archive size={15} />
               <span className="head-tool-text">压缩</span>
@@ -804,17 +1016,28 @@ export function ChatView({
             {repo && <NarrativeCiPanel outputDir={settings.outputDir} repoId={repo.id} />}
             <button
               className="btn icon-only"
-              onClick={handleExportChat}
-              title="导出会话：把本作品的完整会话记录导出为 JSON（备份或搬到别处）"
+              onClick={() => {
+                if (interactionMode === "story") void handleExportChat();
+                else void exportChatRoom();
+              }}
+              title={interactionMode === "story"
+                ? "导出会话：把本作品的完整会话记录导出为 JSON（备份或搬到别处）"
+                : "导出聊天室会话：只导出当前私聊/群聊记录"}
             >
               <Download size={15} />
               <span className="head-tool-text">导出</span>
             </button>
             <button
               className="btn icon-only"
-              onClick={() => snapshotFileRef.current?.click()}
-              disabled={compacting || !!streamingId}
-              title="导入会话：导入 JSON 会话记录，整体覆盖本作品当前会话"
+              onClick={() => (interactionMode === "story"
+                ? snapshotFileRef
+                : chatSnapshotFileRef).current?.click()}
+              disabled={interactionMode === "story"
+                ? (compacting || !!streamingId)
+                : (chatMaintenanceBusy || chatRoomBusy)}
+              title={interactionMode === "story"
+                ? "导入会话：导入 JSON 会话记录，整体覆盖本作品当前会话"
+                : "导入聊天室会话：只覆盖当前私聊/群聊记录"}
             >
               <Upload size={15} />
               <span className="head-tool-text">导入</span>
@@ -823,14 +1046,38 @@ export function ChatView({
               ref={snapshotFileRef} type="file" accept="application/json,.json"
               hidden onChange={handleImportChatFile}
             />
+            <input
+              ref={chatSnapshotFileRef} type="file" accept="application/json,.json"
+              hidden onChange={importChatRoomFile}
+            />
             <button
               className="btn icon-only"
-              onClick={clearCache}
-              disabled={compacting || !!streamingId}
-              title="清除缓存：清空当前对话内容并删除本仓库上传的参考图（reference 文件夹）；资产库与知识库保留"
+              onClick={() => {
+                if (interactionMode === "story") clearCache();
+                else void clearChatRoom();
+              }}
+              disabled={interactionMode === "story"
+                ? (compacting || !!streamingId)
+                : (chatMaintenanceBusy || chatRoomBusy)}
+              title={interactionMode === "story"
+                ? "清除缓存：清空当前对话内容并删除本仓库上传的参考图（reference 文件夹）；资产库与知识库保留"
+                : "清空聊天室记录：只清当前聊天室的快照/附件，不碰剧情对话和作品参考图"}
             >
               <Trash2 size={15} />
-              <span className="head-tool-text">清缓存</span>
+              <span className="head-tool-text">{interactionMode === "story" ? "清缓存" : "清空"}</span>
+            </button>
+            <button
+              className="btn icon-only"
+              onClick={() => setShowArchives(true)}
+              disabled={interactionMode === "story"
+                ? (compacting || !!streamingId)
+                : (chatMaintenanceBusy || chatRoomBusy)}
+              title={interactionMode === "story"
+                ? "恢复对话：清除缓存／压缩／清除对话之前的完整会话都会自动归档，挑一份整条覆盖回来（资产库与知识库不受影响）"
+                : "恢复聊天室：从当前私聊/群聊的归档里挑一份覆盖回来"}
+            >
+              <History size={15} />
+              <span className="head-tool-text">恢复</span>
             </button>
             </div>
             </div>
@@ -884,6 +1131,30 @@ export function ChatView({
         </div>
       )}
 
+      {interactionMode !== "story" && repo ? (
+        <div className="chat-layout">
+          <div className="chat-col">
+            <ChatRoomView
+              repo={repo}
+              settings={settings}
+              chat={chat}
+              gen={genModel}
+              video={videoModel}
+              embed={embed}
+              templates={templates}
+              mode={interactionMode}
+              roster={chatRoster}
+              onRefreshRoster={() => setChatRosterRefreshKey((key) => key + 1)}
+              onActiveSpeakerChange={setChatActiveSpeaker}
+              updateRepo={updateRepo}
+              refreshToken={chatRoomRefreshKey}
+              onBusyChange={setChatRoomBusy}
+              onCompactContext={compactChatRoom}
+              compactBusy={chatMaintenanceBusy}
+            />
+          </div>
+        </div>
+      ) : (
       <div className="chat-layout">
         <div className="chat-col">
           {contentView === "canvas" ? (
@@ -1442,6 +1713,7 @@ export function ChatView({
           </div>
         )}
       </div>
+      )}
 
       {showTables && (
         <TableModal
@@ -1462,6 +1734,14 @@ export function ChatView({
           onClose={() => setShowKnowledge(false)}
         />
       )}
+      {showArchives && (
+        <ChatArchiveModal
+          threadId={interactionMode === "story" ? threadId : chatThreadId}
+          onRestored={interactionMode === "story" ? reloadAfterImport : reloadChatRoom}
+          onNotify={showToast}
+          onClose={() => setShowArchives(false)}
+        />
+      )}
       {confirmReq && (
         <ConfirmModal
           title="确认操作"
@@ -1480,6 +1760,21 @@ export function ChatView({
           onClose={() => setShowPromptTemplates(false)}
         />
       )}
+      {pendingPortrait && (
+        <ConfirmModal
+          title="底图生成完毕"
+          message={`「${pendingPortrait.name}」的底图已生成，是否插入对应角色配置处？`
+            + "确认后会打开多元数据插入并定位到该角色，点「保存」即可。"}
+          confirmText="插入并去保存"
+          onConfirm={() => {
+            setMediaInsertPresetOverride(pendingPortrait.preset);
+            setMediaInsertFocus(pendingPortrait.name);
+            setShowMediaInsert(true);
+            setPendingPortrait(null);
+          }}
+          onCancel={() => setPendingPortrait(null)}
+        />
+      )}
       {showMediaInsert && (
         <MediaInsertModal
           templates={templates}
@@ -1488,18 +1783,42 @@ export function ChatView({
           modelsDir={settings.modelsDir || (settings.comfyuiPath ? `${settings.comfyuiPath}/models` : "")}
           repoId={repo?.id || ""}
           outputDir={settings.outputDir || ""}
-          preset={settings.mediaInsert?.[repo?.id || ""]}
+          // 合集卡：角色行从世界书名册自动补全，用户不必逐个手输名字。
+          rosterNames={chatRoster?.source === "worldbook" ? chatRoster.members : []}
+          preset={mediaInsertPresetOverride ?? settings.mediaInsert?.[repo?.id || ""]}
+          focusCharacter={mediaInsertFocus}
+          portraitRuntime={{
+            chat,
+            comfyUrl: resolveComfyUrl(settings, "image"),
+            presetDir: settings.presetDir || "",
+            presetName: resolvedPresetName || "",
+            userName: (repo?.personaId
+              && (settings.userPersonas || []).find((p) => p.id === repo.personaId)?.name)
+              || personaName,  // 与 useChatSession 的 effectivePersona 同口径：仓库绑定人设优先
+            embed,
+          }}
           promptTemplateBuiltins={promptTemplateBuiltins}
           promptTemplateItems={promptTemplateItems}
-          onSave={(preset) => {
-            const key = repo?.id || "";
-            update({
-              illustrate: true,
-              mediaInsert: { ...(settings.mediaInsert || {}), [key]: preset },
-            });
-            setShowMediaInsert(false);
+          onPersist={(preset) => {
+            // 面板开着才即时落盘；面板关着时由 onPortraitReady 暂存并弹确认窗。
+            if (mediaInsertOpenRef.current) applyMediaInsertPreset(preset, false);
           }}
-          onClose={() => setShowMediaInsert(false)}
+          onPortraitReady={(name, preset) => {
+            if (!mediaInsertOpenRef.current) setPendingPortrait({ preset, name });
+          }}
+          onSave={(preset) => {
+            mediaInsertOpenRef.current = false;
+            applyMediaInsertPreset(preset, true);
+            setMediaInsertPresetOverride(null);
+            setMediaInsertFocus("");
+          }}
+          onClose={() => {
+            // 同步置位：关闭后极短时间内完成的定妆也必须走「确认插入」，不能抢跑自动落盘。
+            mediaInsertOpenRef.current = false;
+            setShowMediaInsert(false);
+            setMediaInsertPresetOverride(null);
+            setMediaInsertFocus("");
+          }}
         />
       )}
     </div>

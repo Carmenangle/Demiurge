@@ -290,7 +290,8 @@ def _rewrite_json_references(
     destinations = {_path_key(source): destination for source, destination in files}
     from app.services import repo_meta
 
-    candidates = [repo_meta.user_state_path()]  # 路径唯一属主（2026-10-24 收口）
+    # 两份档案都要改：仓库记录里的封面/图片路径在作品索引档，settings.outputDir 在设置档。
+    candidates = [repo_meta.repos_path(), repo_meta.user_state_path()]
     snapshots = DATA_DIR / "chat_snapshots"
     if snapshots.is_dir():
         candidates.extend(snapshots.glob("*.json"))  # 未随作品文件夹迁移的存量会话（回退位置）

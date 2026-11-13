@@ -140,6 +140,43 @@ export const NARRATIVE_CI_CODES: Record<string, string> = {
   relationship_change: "关系剧变",
   world_rule_break: "违反世界规则",
   character_belief_conflict: "认知与事实矛盾",
+  // 缺陷 4 第三段：World 判失败的自主尝试，正文没写成未遂/受挫（提示级，非定罪——
+  // 2026-11-06 真语料实测精确 82%／召回 100%，剩下的假阳是「合规但没用失败措辞」的写法）。
+  npc_verdict_break: "判失败没写未遂",
+};
+
+// 臂参与台账：前两条判据的输入来自世界书，没书时整臂不跑（不产出诊断）；第三条来自
+// 本轮 World 裁定（缺陷 4）。面板必须把「没参与」和原因显示出来，否则空列表分不清
+// 「查过没问题」与「空转」。臂名/原因码与后端 `narrative_ci.py` 逐字同串，由
+// `NarrativeCiPanel.arms.test.tsx` 的跨语言契约锁住（后端改名 ⇒ 前端测试红）。
+export interface NarrativeCiArmStatus {
+  participated: boolean;
+  count: number;
+  reason: string;
+}
+
+export interface NarrativeCiArmsReport {
+  turn: number;
+  arms: Record<string, NarrativeCiArmStatus>;
+}
+
+export const NARRATIVE_CI_ARM_ORDER = ["world_rule", "term_ratchet_stock", "agency_verdict"] as const;
+
+export const NARRATIVE_CI_ARM_LABELS: Record<string, string> = {
+  world_rule: "世界规则",
+  term_ratchet_stock: "棘轮·设定存量",
+  agency_verdict: "World 裁定",
+};
+
+export const NARRATIVE_CI_ARM_REASONS: Record<string, string> = {
+  no_worldbook: "这个作品没有世界书，判据没有输入",
+  snapshot_unreadable: "世界书快照读不出来（损坏或格式不对），判据没有输入",
+  empty_worldbook: "世界书快照是空的，判据没有输入",
+  no_rule_lines: "世界书里没有「禁止／必须／唯一」这类规则句",
+  no_static_base: "世界书条目里没有静态设定底座",
+  world_not_consulted: "本轮没有可核对的 World 裁定（未咨询，或咨询失败）",
+  no_proposal: "World 本轮没有提出任何自主行动",
+  no_rolled_attempt: "World 有提案但都没掷骰（被前置门槛拦下），正文未被要求体现",
 };
 
 // 手动运行 Narrative CI（内容中立，只保存诊断，不修改正文）
@@ -149,12 +186,14 @@ export function runNarrativeCi(outputDir: string, repoId: string, text: string, 
   });
 }
 
-// 列出诊断（可按状态/代码过滤）
+// 列出诊断（可按状态/代码过滤）＋最近一轮的臂参与台账
 export function listNarrativeCi(outputDir: string, repoId: string, status = "", code = "") {
   const q = new URLSearchParams({ output_dir: outputDir, repo_id: repoId });
   if (status) q.set("status", status);
   if (code) q.set("code", code);
-  return apiGet<{ items: NarrativeDiagnostic[] }>(`/narrative/ci?${q.toString()}`);
+  return apiGet<{ items: NarrativeDiagnostic[]; arms?: NarrativeCiArmsReport | null }>(
+    `/narrative/ci?${q.toString()}`,
+  );
 }
 
 // 处置诊断（fixed / foreshadow / retcon / accepted）

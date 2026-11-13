@@ -6,11 +6,24 @@ outputDir/<父名>/<子名>/，父名=卡名唯一，不再撞。
 """
 from __future__ import annotations
 
+from urllib.parse import quote
+
 from app.services import repo_meta
 
 
 def _state(*repos: dict) -> dict:
     return {"repos": list(repos)}
+
+
+def _write_chat(folder, image_url: str = "") -> None:
+    folder.mkdir(parents=True, exist_ok=True)
+    body = f'[{{"image_url":"{image_url}"}}]' if image_url else '[{"text":"对话"}]'
+    (folder / "chat.json").write_text(body, encoding="utf-8")
+
+
+def _write_marker(folder, repo_id: str, name: str = "") -> None:
+    (folder / "_repo.json").write_text(
+        f'{{"id":"{repo_id}","name":"{name}"}}', encoding="utf-8")
 
 
 def test_同名子仓库嵌套后文件夹段不再冲突(monkeypatch):
@@ -166,6 +179,7 @@ def test_delete_folder_优先删嵌套位置(monkeypatch, tmp_path):
     nested = out / "九霄仙纪" / "SAVE01"
     nested.mkdir(parents=True)
     (nested / "chat.json").write_text("[]", encoding="utf-8")
+    (nested / "_repo.json").write_text('{"id":"c1"}', encoding="utf-8")
     res = repo_meta.delete_folder(str(out), "c1", "SAVE01")
     assert res["deleted"] is True
     assert not nested.exists()
@@ -184,4 +198,181 @@ def test_rename_子仓库_嵌套内改末段(monkeypatch, tmp_path):
     res = repo_meta.rename_folder(str(out), "c1", "SAVE01", "存档甲")
     assert res["folder"] == "renamed"
     assert (out / "九霄仙纪" / "存档甲" / "chat.json").is_file()
+    assert not src.exists()
+
+
+# ── 改名身份解析：UUID 标记是唯一身份，名字只是候选提示 ──────────────────────
+
+
+def test_rename_清洗碰撞的旧名指向他仓目录时拒绝(monkeypatch, tmp_path):
+    # A:B 与 A?B 清洗后同为 A_B。旧实现按名拼路径，会把 b1 的文件夹整体挪走。
+    monkeypatch.setattr(repo_meta, "_load_state", lambda: _state(
+        {"id": "a1", "name": "新名"},
+        {"id": "b1", "name": "A?B"},
+    ))
+    out = tmp_path
+    foreign = out / "A_B"
+    _write_chat(foreign)
+    _write_marker(foreign, "b1", "A?B")
+
+    res = repo_meta.rename_folder(str(out), "a1", "A:B", "新名")
+
+    assert res["folder"] != "renamed"
+    assert res["error"]
+    assert foreign.is_dir()
+    assert repo_meta._marker_repo_id(foreign) == "b1"
+    assert (foreign / "chat.json").read_text(encoding="utf-8") == '[{"text":"对话"}]'
+    assert not (out / "新名").exists()
+
+
+def test_rename_无标记旧目录唯一时仍可改并补标记(monkeypatch, tmp_path):
+    # 历史遗留目录没有 _repo.json：仅一个候选时才允许按名迁移（改名非破坏性）。
+    monkeypatch.setattr(repo_meta, "_load_state", lambda: _state(
+        {"id": "p1", "name": "九霄仙纪"},
+        {"id": "c1", "name": "存档甲", "parentId": "p1"},
+    ))
+    out = tmp_path
+    src = out / "九霄仙纪" / "SAVE01"
+    _write_chat(src)
+
+    res = repo_meta.rename_folder(str(out), "c1", "SAVE01", "存档甲")
+
+    dst = out / "九霄仙纪" / "存档甲"
+    assert res["folder"] == "renamed"
+    assert res["error"] == ""
+    assert (dst / "chat.json").is_file()
+    assert repo_meta._marker_repo_id(dst) == "c1"
+    assert not src.exists()
+
+
+def test_rename_多个无标记候选时拒绝且不重写路径(monkeypatch, tmp_path):
+    # 嵌套位与扁平位各有一个无标记同名目录 ⇒ 无法判定归属，宁可拒绝也不猜。
+    monkeypatch.setattr(repo_meta, "_load_state", lambda: _state(
+        {"id": "p1", "name": "九霄仙纪"},
+        {"id": "c1", "name": "存档甲", "parentId": "p1"},
+    ))
+    out = tmp_path
+    nested = out / "九霄仙纪" / "旧名"
+    flat = out / "旧名"
+    _write_chat(nested)
+    _write_chat(flat)
+
+    res = repo_meta.rename_folder(str(out), "c1", "旧名", "存档甲")
+
+    assert res["folder"] == "ambiguous"
+    assert res["error"]
+    assert nested.is_dir() and flat.is_dir()
+    assert not (out / "九霄仙纪" / "存档甲").exists()
+    assert (nested / "chat.json").read_text(encoding="utf-8") == '[{"text":"对话"}]'
+    assert (flat / "chat.json").read_text(encoding="utf-8") == '[{"text":"对话"}]'
+
+
+def test_rename_源缺失不覆盖他仓目标标记(monkeypatch, tmp_path):
+    # 旧实现 src 不存在时会走 elif dst.is_dir() 分支，把他仓 _repo.json 改成自己。
+    monkeypatch.setattr(repo_meta, "_load_state", lambda: _state(
+        {"id": "p1", "name": "九霄仙纪"},
+        {"id": "c1", "name": "新名", "parentId": "p1"},
+        {"id": "b1", "name": "别家", "parentId": "p1"},
+    ))
+    out = tmp_path
+    foreign = out / "九霄仙纪" / "新名"
+    _write_chat(foreign)
+    _write_marker(foreign, "b1", "别家")
+
+    res = repo_meta.rename_folder(str(out), "c1", "旧名", "新名")
+
+    assert res["folder"] != "renamed"
+    assert res["error"]
+    assert repo_meta._marker_repo_id(foreign) == "b1"
+    assert (foreign / "chat.json").read_text(encoding="utf-8") == '[{"text":"对话"}]'
+
+
+def test_rename_目标已存在时不重写快照路径(monkeypatch, tmp_path):
+    # 目标已存在 ⇒ 没有发生搬移，绝不能拿 dst 当「新快照位置」去改别人的 chat.json。
+    monkeypatch.setattr(repo_meta, "_load_state", lambda: _state(
+        {"id": "p1", "name": "九霄仙纪"},
+        {"id": "c1", "name": "新名", "parentId": "p1"},
+    ))
+    out = tmp_path
+    old_seg = quote(f"{tmp_path}\\九霄仙纪\\旧名\\")
+    src = out / "九霄仙纪" / "旧名"
+    _write_chat(src, image_url=f"{old_seg}img.png")
+    _write_marker(src, "c1", "旧名")
+    dst = out / "九霄仙纪" / "新名"
+    _write_chat(dst, image_url=f"{old_seg}img.png")
+    before = (dst / "chat.json").read_text(encoding="utf-8")
+
+    res = repo_meta.rename_folder(str(out), "c1", "旧名", "新名")
+
+    assert res["folder"] == "target_exists"
+    assert res["error"]
+    assert res["snapshot"] == 0
+    assert (dst / "chat.json").read_text(encoding="utf-8") == before
+    assert src.is_dir()
+
+
+def test_rename_成功后重写快照与marker(monkeypatch, tmp_path):
+    monkeypatch.setattr(repo_meta, "_load_state", lambda: _state(
+        {"id": "p1", "name": "九霄仙纪"},
+        {"id": "c1", "name": "存档甲", "parentId": "p1"},
+    ))
+    out = tmp_path
+    old_seg = quote(f"{tmp_path}\\九霄仙纪\\旧名\\")
+    new_seg = quote(f"{tmp_path}\\九霄仙纪\\存档甲\\")
+    src = out / "九霄仙纪" / "旧名"
+    _write_chat(src, image_url=f"{old_seg}img.png")
+    _write_marker(src, "c1", "旧名")
+
+    res = repo_meta.rename_folder(str(out), "c1", "旧名", "存档甲")
+
+    dst = out / "九霄仙纪" / "存档甲"
+    body = (dst / "chat.json").read_text(encoding="utf-8")
+    assert res["folder"] == "renamed"
+    assert res["error"] == ""
+    assert res["snapshot"] >= 1
+    assert new_seg in body and old_seg not in body
+    assert repo_meta._marker_repo_id(dst) == "c1"
+    assert not src.exists()
+
+
+def test_rename_仓库根自身带标记时拒绝搬根(monkeypatch, tmp_path):
+    # _find_marked_folder 若把 output_dir 根当成「本仓目录」，搬根会整个挪走作品库。
+    monkeypatch.setattr(repo_meta, "_load_state", lambda: _state(
+        {"id": "r1", "name": "新名"},
+    ))
+    out = tmp_path
+    _write_chat(out)
+    _write_marker(out, "r1", "旧名")
+
+    res = repo_meta.rename_folder(str(out), "r1", "旧名", "新名")
+
+    assert res["folder"] != "renamed"
+    assert res["error"]
+    assert out.is_dir()
+    assert (out / "chat.json").is_file()
+    assert not (out / "新名").exists()
+
+
+def test_rename_目标被他仓UUID占用时改到隔离目录(monkeypatch, tmp_path):
+    # A:B 与 A?B 同父同清洗名：b1 已占 A_B，c1 改名必须落到带 UUID 后缀的隔离目录。
+    monkeypatch.setattr(repo_meta, "_load_state", lambda: _state(
+        {"id": "p1", "name": "九霄仙纪"},
+        {"id": "c1", "name": "A?B", "parentId": "p1"},
+        {"id": "b1", "name": "A:B", "parentId": "p1"},
+    ))
+    out = tmp_path
+    foreign = out / "九霄仙纪" / "A_B"
+    _write_chat(foreign)
+    _write_marker(foreign, "b1", "A:B")
+    src = out / "九霄仙纪" / "旧名"
+    _write_chat(src)
+    _write_marker(src, "c1", "旧名")
+
+    res = repo_meta.rename_folder(str(out), "c1", "旧名", "A?B")
+
+    isolated = out / "九霄仙纪" / "A_B [c1]"
+    assert res["folder"] == "renamed"
+    assert isolated.is_dir()
+    assert repo_meta._marker_repo_id(isolated) == "c1"
+    assert repo_meta._marker_repo_id(foreign) == "b1"
     assert not src.exists()

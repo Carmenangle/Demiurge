@@ -33,6 +33,9 @@ import { WORKS_ROOT_UNCONFIGURED_EVENT } from "./api/client";
 import { recentWorks as selectRecentWorks } from "./lib/repoPresentation";
 import { MOBILE_PROFILE } from "./lib/mobileProfile";
 import { hasPendingComfyGeneration, hasServerPendingComfyGeneration } from "./lib/comfyBackgroundActivity";
+import {
+  folderRemovalFailures, repoDeletionBlockReason, type FolderRemoval,
+} from "./lib/repoDeletionGuard";
 
 // 页面边界按需加载；应用壳、后台活动和快捷工具保持常驻。
 const SupportWidget = lazy(() => import("./components/SupportWidget").then((m) => ({ default: m.SupportWidget })));
@@ -75,6 +78,7 @@ export function App() {
   }, [settings.theme, lg.rotationEnabled, lg.rotationInterval, lg.wallpapers.length, lg.activeWallpaperId]);
   const {
     repos, hydrated: reposHydrated, addRepo, addCardWork, addBranch, renameRepo, bindRepo, resolveBinding,
+    updateRepo,
     setCover, setGeneratedCover, touchRepo,
     relocateOutputPath, coverOf, deleteRepo, childrenOf,
   } = useRepos();
@@ -156,6 +160,8 @@ export function App() {
   const [creating, setCreating] = useState(false);
   const [creatingSubFor, setCreatingSubFor] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<Repo | null>(null);
+  /** 后端明确拒绝文件夹改名时的可见提示（显示名已回滚）。 */
+  const [renameAlert, setRenameAlert] = useState<string | null>(null);
   const [binding, setBinding] = useState<Repo | null>(null);
   const [deleting, setDeleting] = useState<Repo | null>(null);
   const [delBlocked, setDelBlocked] = useState<string | null>(null);
@@ -436,6 +442,7 @@ export function App() {
             relocateOutputPath={relocateOutputPath}
             setCover={setCover}
             setGeneratedCover={setGeneratedCover}
+            updateRepo={updateRepo}
             childrenOf={childrenOf}
             coverOf={coverOf}
             browseRepoId={browseRepoId}
@@ -537,10 +544,17 @@ export function App() {
           defaultValue={renaming.name}
           confirmText="保存"
           onConfirm={(name) => {
-            if (!renameRepo(renaming.id, name)) { setNameErr("同层级已有同名，请换一个名字。"); return; }
+            if (!renameRepo(renaming.id, name, setRenameAlert)) { setNameErr("同层级已有同名，请换一个名字。"); return; }
             setRenaming(null);
           }}
           onCancel={() => setRenaming(null)}
+        />
+      )}
+      {renameAlert && (
+        <AlertModal
+          title="改名未生效"
+          message={renameAlert}
+          onClose={() => setRenameAlert(null)}
         />
       )}
       {binding && (
@@ -565,36 +579,31 @@ export function App() {
             const target = deleting;
             setDeleting(null);
             const ids = [target.id, ...childrenOf(target.id).map((c) => c.id)];
-            // 先查本浏览器（同步、零延迟），再查服务端登记（换浏览器/清缓存后仍能挡住删除）。
-            if (hasPendingComfyGeneration(ids) || await hasServerPendingComfyGeneration(ids)) {
-              setDelBlocked(`「${target.name}」还有生图任务未完成，已阻止删除。请等待归档完成或先显式停止任务。`);
-              return;
-            }
-            for (const id of ids) {
-              try {
-                if ((await fetchAgentRunning(id)).running) {
-                  setDelBlocked(`「${target.name}」还有剧情或插画任务在运行，已阻止删除。`);
-                  return;
-                }
-              } catch { /* 后台状态不可用时仍继续检查本地资产 */ }
-            }
-            let hasAssets = false;
-            for (const id of ids) {
-              try {
-                const r = await listGenerations(id, resolvedEmbedModel(settings));
-                if ((r.items || []).length > 0) { hasAssets = true; break; }
-              } catch { /* 查询失败按无资产处理 */ }
-            }
-            if (hasAssets) {
-              setDelBlocked(`「${target.name}」里还有生成图（资产），已阻止删除。请先在资产库删除这些图片，再删仓库。`);
-              return;
-            }
+            const blocked = await repoDeletionBlockReason(target.name, ids, {
+              hasLocalPending: hasPendingComfyGeneration,
+              hasServerPending: hasServerPendingComfyGeneration,
+              isAgentRunning: async (id) => (await fetchAgentRunning(id)).running,
+              hasAssets: async (id) => ((await listGenerations(id, resolvedEmbedModel(settings))).items || []).length > 0,
+            });
+            if (blocked) { setDelBlocked(blocked); return; }
             // 源库-作品解耦：删仓库只清作品自己的文件夹（快照卡/世界书/persona/会话/图），
             // 绝不碰源库角色卡与独立世界书（它们是可复用素材，供别的作品继续用）。父+子文件夹都清。
             if (settings.outputDir) {
+              // 文件夹没删干净就保留仓库条目：删一半却把条目抹掉，会留下没人认领的孤儿文件夹
+              // （deleted=false 且 error 为空是「文件夹本来就不存在」，那不算失败）。
+              const removals: FolderRemoval[] = [];
               for (const r of [target, ...childrenOf(target.id)]) {
-                await deleteRepoFolder({ repo_id: r.id, name: r.name, output_dir: settings.outputDir })
-                  .catch(() => { /* 文件夹不存在则忽略 */ });
+                try {
+                  const res = await deleteRepoFolder({ repo_id: r.id, name: r.name, output_dir: settings.outputDir });
+                  removals.push({ name: r.name, error: res.error });
+                } catch (error) {
+                  removals.push({ name: r.name, error: (error as Error).message });
+                }
+              }
+              const failed = folderRemovalFailures(removals);
+              if (failed.length) {
+                setDelBlocked(`作品文件夹没能删干净，仓库条目已保留，可稍后重试：${failed.join("；")}`);
+                return;
               }
             }
             deleteRepo(target.id);

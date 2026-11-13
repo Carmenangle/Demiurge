@@ -297,6 +297,9 @@ def save_audio_local(output_dir: str, repo_id: str, *,
 
 # ===== 上网素材：联网搜索下载的图片，存到 outputDir/_web_materials/ =====
 
+#: 素材目录里算「图片素材」的扩展名（列表与补登记共用一份，防两处漂移）
+_MATERIAL_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
+
 
 def web_materials_dir(output_dir: str) -> Path:
     """上网素材目录：outputDir/_web_materials/。"""
@@ -535,7 +538,7 @@ def list_web_materials(output_dir: str) -> list[dict]:
         desc_by_asset = {}
     items = []
     for f in sorted(d.iterdir(), key=lambda x: x.name, reverse=True):
-        if f.is_file() and f.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"):
+        if f.is_file() and f.suffix.lower() in _MATERIAL_IMAGE_EXTS:
             meta = provenance.get(f.name, {})
             url = view_urls.local_view(str(f))
             asset_id = rag_store.generation_doc_id(rag_store.WEB_MATERIALS_REPO_ID, url)
@@ -558,6 +561,80 @@ def list_web_materials(output_dir: str) -> list[dict]:
                 "size": meta.get("size") or 0,
             })
     return items
+
+
+def _prov_created_ms(prov: dict) -> int | None:
+    """provenance.downloaded_at → 毫秒时间戳（存量补登记保序用；解析失败返回 None）。"""
+    raw = str(prov.get("downloaded_at") or "")
+    if not raw:
+        return None
+    try:
+        return int(datetime.fromisoformat(raw).timestamp() * 1000)
+    except ValueError:
+        return None
+
+
+def ensure_web_material_assets(output_dir: str, asset_ids: list[str] | None = None) -> dict:
+    """把已在盘、但没登记进资产库的上网素材补登记（幂等；反推/写描述前调用）。
+
+    素材是「先落盘、后入库」（save_web_material）：P2-1（2026-10-18）之前保存的存量
+    只有文件 + provenance ⇒ 资产库里查不到，打标端点只会回「资产不存在」，而且
+    VLM/GBC 档会先花掉视觉模型调用再撞上这个错。这里按需补录，与保存链同一个
+    index_web_material_asset（同 image_url ⇒ 同 doc_id，天然幂等）。
+
+    asset_ids 为空＝补全部缺失；只看 _web_materials 顶层图片（子目录是灵感卡等）。
+    「已登记」＝向量库与资产主表都有：打标读向量库、官方布局读主表，任一缺席都算缺。
+    返回 {registered, already, missing, failed}（均为 assetId 列表）：
+    missing＝请求的 id 在盘上找不到文件；failed＝补录失败（只留 warning，可重跑）。
+    """
+    if not output_dir:
+        raise ComfyError("未配置输出图片路径", 400)
+    from app.services import asset_store, rag_store, view_urls
+
+    d = web_materials_dir(output_dir)
+    wanted = {i for i in (asset_ids or []) if i}
+    provenance = _load_provenance(d) if d.is_dir() else {}
+    on_disk: dict[str, tuple[Path, dict]] = {}
+    if d.is_dir():
+        for f in sorted(d.iterdir()):
+            if not f.is_file() or f.suffix.lower() not in _MATERIAL_IMAGE_EXTS:
+                continue
+            url = view_urls.local_view(str(f))
+            aid = rag_store.generation_doc_id(rag_store.WEB_MATERIALS_REPO_ID, url)
+            if wanted and aid not in wanted:
+                continue
+            # 无 provenance 的旧文件按最小元数据补（与 scripts/index_web_materials.py 同口径）
+            on_disk[aid] = (f, provenance.get(f.name) or {"title": f.name})
+    result: dict[str, list[str]] = {
+        "registered": [], "already": [], "missing": sorted(wanted - set(on_disk)),
+        "failed": [],
+    }
+    if not on_disk:
+        return result
+
+    in_chroma = rag_store.existing_doc_ids(rag_store.WEB_MATERIALS_REPO_ID, list(on_disk))
+    try:
+        in_sqlite = {str(a.get("id")) for a in
+                     asset_store.list_assets([rag_store.WEB_MATERIALS_REPO_ID])}
+    except Exception:  # noqa: BLE001 [EXC-留痕] 主表不可用时只按向量库判（upsert 幂等）
+        in_sqlite = set(in_chroma)
+    todo = [aid for aid in on_disk if aid not in in_chroma or aid not in in_sqlite]
+    result["already"] = [aid for aid in on_disk if aid not in todo]
+    if not todo:
+        return result
+
+    from app.services import embed_resolution
+    if embed_resolution.embed_from_settings() is None:
+        raise ComfyError(
+            "嵌入模型未配置：历史素材补登记需要先配置嵌入模型（设置 → 模型）", 400)
+    for aid in todo:
+        f, prov = on_disk[aid]
+        url = view_urls.local_view(str(f))
+        if rag_store.index_web_material_asset(url, prov, created_at=_prov_created_ms(prov)):
+            result["registered"].append(aid)
+        else:
+            result["failed"].append(aid)
+    return result
 
 
 def delete_web_material(output_dir: str, filename: str) -> bool:

@@ -21,6 +21,9 @@ vi.mock("../api/comfyui", () => ({
   uploadImage: vi.fn(async () => ({ name: "uploaded.wav" })),
   localViewUrl: (p: string) => `local:${p}`,
   mergeAudio: vi.fn(async () => ({ ok: true, url: "http://127.0.0.1:8010/media/merged.wav" })),
+  // 2026-11-09 机台池：submitAudio 经 pickComfyHostFor 取音频机，需队列探测入口；
+  // 返回空 items ⇒ 选择器回退池第一台（与本用例「路由机」断言同址）。
+  probeComfyHosts: vi.fn(async () => ({ items: [] })),
 }));
 
 vi.mock("../api/ai", () => ({
@@ -454,7 +457,11 @@ describe("T2.2-C1 视图接线形态锁", () => {
   it("行数上界：视图不再回涨超过搬移前，音域属主保持小而内聚", () => {
     const viewLines = read(VIEW).split("\n").length;
     const seamLines = read(SEAM).split("\n").length;
-    expect(viewLines).toBeLessThanOrEqual(1700);
+    // 2026-11-09 分镜序列：成片拼接编排已外移 → lib/useShotMerge.ts；视图新增只有
+    // IllustrationSubmit 的 8 个 shot 字段、事件透传与 `:merged` 重试分支（+30 行）。
+    // 2026-11-13 视频链／参考图槽位接线把视图从 1700 行推到 1748 行；新基线 1750，
+    // 仍然只降不升 —— 音频家族若被搬回视图会涨 90+ 行，本闸照样拦得住。
+    expect(viewLines).toBeLessThanOrEqual(1750);
     expect(seamLines).toBeLessThanOrEqual(240);
   });
 

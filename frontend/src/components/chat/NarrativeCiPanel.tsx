@@ -2,8 +2,13 @@ import { useCallback, useEffect, useState } from "react";
 import { ShieldCheck } from "lucide-react";
 import {
   listNarrativeCi,
+  NARRATIVE_CI_ARM_LABELS,
+  NARRATIVE_CI_ARM_ORDER,
+  NARRATIVE_CI_ARM_REASONS,
   NARRATIVE_CI_CODES,
   resolveNarrativeCi,
+  type NarrativeCiArmStatus,
+  type NarrativeCiArmsReport,
   type NarrativeDiagnostic,
 } from "../../api/narrative";
 
@@ -32,9 +37,60 @@ interface NarrativeCiPanelProps {
   repoId: string;
 }
 
+/** 判据参与台账（清单 #3／#4＋缺陷 4）：本轮没输入的判据**根本没跑**，必须写在空列表前面。
+ *
+ * 臂名白名单来自 `NARRATIVE_CI_ARM_ORDER`（后端加一臂就得在这里登记，否则界面看不见）。
+ * 单独导出是为了让「界面说了什么」可测——只测 service 会漏掉「面板拿不到 arms」这一层。
+ */
+export function CiArmLedger({ arms, hasItems }: {
+  arms: NarrativeCiArmsReport | null;
+  hasItems: boolean;
+}) {
+  const rows: { key: string; label: string; arm: NarrativeCiArmStatus }[] = [];
+  for (const key of NARRATIVE_CI_ARM_ORDER) {
+    const arm = arms?.arms?.[key];
+    if (arm) rows.push({ key, label: NARRATIVE_CI_ARM_LABELS[key] ?? key, arm });
+  }
+  const idleCount = rows.filter((row) => !row.arm.participated).length;
+
+  return (
+    <>
+      {rows.length > 0 && (
+        <div className="nci-arms">
+          <div className="nci-arms-head">第 {arms?.turn ?? 0} 轮判据参与情况</div>
+          {rows.map((row) => (
+            <div
+              key={row.key}
+              className={`nci-arm ${row.arm.participated ? "nci-arm-on" : "nci-arm-idle"}`}
+            >
+              <span className="nci-arm-name">{row.label}</span>
+              <span className="nci-arm-state">
+                {row.arm.participated ? `已评估（输入 ${row.arm.count} 条）` : "本轮未参与"}
+              </span>
+              {!row.arm.participated && (
+                <span className="nci-arm-reason">
+                  {NARRATIVE_CI_ARM_REASONS[row.arm.reason] ?? row.arm.reason}
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {!hasItems && (
+        <div className="nci-empty">
+          {idleCount > 0
+            ? "暂无未处置的一致性诊断（上面标出的判据本轮没有输入，未参与＝没查，不等于查过没问题）。"
+            : "暂无未处置的一致性诊断。"}
+        </div>
+      )}
+    </>
+  );
+}
+
 /** 非阻断 Narrative CI 诊断面板：不修改正文，只展示与处置。 */
 export function NarrativeCiPanel({ outputDir, repoId }: NarrativeCiPanelProps) {
   const [items, setItems] = useState<NarrativeDiagnostic[]>([]);
+  const [arms, setArms] = useState<NarrativeCiArmsReport | null>(null);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -46,6 +102,7 @@ export function NarrativeCiPanel({ outputDir, repoId }: NarrativeCiPanelProps) {
     try {
       const result = await listNarrativeCi(outputDir, repoId, "open");
       setItems(result.items ?? []);
+      setArms(result.arms ?? null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "加载失败");
     } finally {
@@ -87,9 +144,7 @@ export function NarrativeCiPanel({ outputDir, repoId }: NarrativeCiPanelProps) {
         <div className="nci-body">
           {error && <div className="nci-error">{error}</div>}
           {loading && <div className="nci-loading">加载中…</div>}
-          {!loading && items.length === 0 && (
-            <div className="nci-empty">暂无未处置的一致性诊断。</div>
-          )}
+          {!loading && <CiArmLedger arms={arms} hasItems={items.length > 0} />}
           {!loading &&
             items.map((item) => (
               <div key={item.id} className={`nci-item ${SEVERITY_CLASS[item.severity] ?? ""}`}>

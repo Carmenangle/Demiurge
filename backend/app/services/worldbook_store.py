@@ -23,6 +23,7 @@ import re
 import shutil
 import time
 
+from app import state_store
 from app.services import repo_meta
 from app.services.pathnames import safe_dir
 
@@ -95,12 +96,28 @@ def read_book(base: str, name: str) -> dict[str, Any] | None:
         return None
 
 
-def delete_book(base: str, name: str) -> bool:
+def delete_book(base: str, name: str) -> dict:
+    """删整本独立世界书：**先复制成 `<名>.json.bak-<时间戳>`，复核未被改写才删**。
+
+    返回 `{"deleted", "reason", "backup", "error"}`，`reason` 给路由选状态码
+    （`missing`=404，`changed-during-backup`=409，`backup-failed`/`unlink-failed`=500，
+    都不许报「删好了」）：世界书是用户手写的设定资产，源库-作品解耦下作品只持快照，
+    真源删掉就没了；备份后、删除前被写入的新版本同样不能被静默删走。
+    `backup` 只给**文件名**（目录就是用户自己配的 worldbookDir，不必再曝一条绝对路径）。
+    备份名结尾不是 `.json` ⇒ 不进 `list_books`，删完列表立刻干净，`worldbookDir` 里
+    只多一个看得见、可手动改回的文件。
+    """
     p = _path(base, name)
     if not p.is_file():
-        return False
-    p.unlink()
-    return not p.is_file()
+        return {"deleted": False, "reason": "missing", "backup": "", "error": "世界书不存在"}
+    result = state_store.delete_with_backup(p)
+    backup = result["backup"]
+    if not result["deleted"]:
+        _LOG.error("世界书 %s 删除未完成（%s）：%s", p, result["reason"], result["error"])
+        return {"deleted": False, "reason": result["reason"],
+                "backup": backup.name if backup else "",
+                "error": "世界书不存在" if result["reason"] == "missing" else result["error"]}
+    return {"deleted": True, "reason": "ok", "backup": backup.name if backup else "", "error": ""}
 
 
 class WorldbookSyncError(Exception):
@@ -339,9 +356,22 @@ _NON_CHARACTER_TITLE_RE = re.compile(
     r"系统|机制|规则|指令|设定集|世界观|"
     r"势力|种族|宗门|皇室|组织|阵营|体系|境界|心决|功法|法术|技能|"
     r"地点|场景|地图|区域|城池|遗迹|物品|道具|装备|资源|经济|"
-    r"任务|玩法|指南|说明|前言|目录|索引",
+    r"任务|玩法|指南|说明|前言|目录|索引|"
+    # 2026-11-10 合集卡误识别实锤：作品名/阵营/地点/组织/章节同样不带「角色」字样，
+    # 只靠人物代词+外貌词会把它们收进名册。以下按「非人物实体」类别补充。
+    r"航线|舰队|舰娘|舰船|舰种|港区|镇守府|海域|港口|岛屿|荒岛|大陆|"
+    r"王国|帝国|联邦|共和国|公国|财团|公司|集团|商会|公会|教会|军团|军队|部队|"
+    r"后宫|阵营|派系|重樱|铁血|皇家|白鹰|东煌|北方联合|撒丁|鸢尾|维希|"
+    r"学院|学园|基地|要塞|总部|分部|支部|"
+    r"活动|联动|档案|报告|记录|情报|计划|战役|战争|历史|"
+    r"篇|章|卷|幕|话|集|结局|番外|外传|前传|后日谈",
     re.I,
 )
+# 章节/卷名常以「篇/章/卷/幕/话/集」结尾；单靠上面的包含匹配会误伤正文，
+# 这里只判标题结尾（如「梦境篇」「第三卷」）。
+_NON_CHARACTER_SUFFIX_RE = re.compile(r"(?:篇|章|卷|幕|话|集|结局|番外|外传|前传|后日谈)$")
+# 编号型条目（IB031 / B-03 / A1）通常是人设编号、事件编号或资源编号，不是角色名。
+_ROSTER_CODE_RE = re.compile(r"^[A-Za-z]{1,5}[-_ ]?\d{1,4}$")
 # 剧情/性格/好感等段落里也会有「金眸」「红发」这类外貌词，但它们是**动态或非外貌**事实；
 # 把它们当稳定画像会污染提示词（真机 2026-10-23：开场白/命定危机整段被收进来）。
 _DENIED_SECTION_RE = re.compile(
@@ -531,6 +561,10 @@ def _cue_spans(
             text = text[prefix.end():].strip()
         if len(text) < 4:
             continue
+        # 关系/背景段的线索句常以 {{user}} 为叙事对象（「当 {{user}} 把戒指戴回她手上…」），
+        # 那是剧情不是稳定外貌；条目外貌本身应写在【外貌】等结构化块里。
+        if "{{user}}" in text:
+            continue
         if any(not (end <= block_start or start >= block_end)
                for block_start, block_end, _ in blocks):
             continue
@@ -564,9 +598,192 @@ def _visual_profile_name(item: dict[str, Any], content: str) -> str:
     return "角色"
 
 
+# ── 聊天名册：世界书角色条目识别（2026-11-10）────────────────────────────────
+# 合集卡把角色全部放在世界书里，卡本身只是作品名；聊天/群聊/多元数据插入需要一份
+# 「有哪些角色」的名册。这里不要求条目写「角色卡/角色条目」前缀——真实合集卡里大量
+# 条目只用普通标题或 keys 命名，靠标题 + 人物档案信号多路判定，并给出置信度供 UI 复核。
+_ROSTER_GENERIC_NAMES = {
+    "角色", "人物", "角色卡", "人物卡", "角色条目", "人物条目",
+    "角色设定", "人物设定", "新条目", "条目", "主角", "配角", "群像",
+    # 2026-11-10：阵营/种族/作品/地点类泛名一律不当作角色。
+    "舰娘", "舰船", "舰种", "阵营", "势力", "组织", "国家", "帝国", "王国",
+    "城市", "岛屿", "海域", "航线", "舰队", "财团", "公司", "集团", "商会",
+    "公会", "教会", "后宫", "学院", "学园", "基地", "要塞", "总部", "分部",
+    "支部", "世界观", "设定集", "时间线", "年表", "档案", "报告", "记录",
+    "情报", "计划", "任务", "事件", "战役", "战争", "历史",
+}
+_ROSTER_NAME_RE = re.compile(r"^[\w\u4e00-\u9fff·•.\-]{1,16}$", re.U)
+_ROSTER_PROFILE_RE = re.compile(
+    r"身份|性别|年龄|身高|体型|职业|门派|出身|来历|背景|简介|设定|"
+    r"性格|气质|外貌|容貌|长相|样貌|外表|形象|"
+    r"\b(?:identity|profile|background|personality|appearance|age|gender)\b",
+    re.I,
+)
+# 「只对人物才有」的档案信号：外貌/身体/性别年龄身高/身份职业/性格。
+# 势力/地点条目里也可能顺带描写成员，所以它只作**必要不充分**条件：必须同时有
+# 人物身体词，或条目本身带显式角色卡标记/能抽出人物视觉画像。
+_ROSTER_PERSON_RE = re.compile(
+    r"性别|年龄|身高|体型|身材|外貌|容貌|长相|样貌|外表|形象|发型|发色|"
+    r"眼睛|眼眸|瞳色|双眸|肤色|肌肤|身份|职业|称号|性格|气质|"
+    r"\b(?:gender|age|height|appearance|hair|eyes?|skin|identity|personality)\b",
+    re.I,
+)
+_ROSTER_MECHANISM_RE = re.compile(r"^(?:系统判定机制|全局机制|局部机制|机制)", re.I)
+
+
+def _roster_clean_name(value: object) -> str:
+    text = re.sub(r"^[【\[]\s*|\s*[】\]]$", "", str(value or "").strip()).strip()
+    text = re.sub(r"^(?:角色卡|人物卡|角色条目|人物条目)\s*[·：:]\s*", "", text)
+    text = re.sub(r"(?:的)?(?:角色卡|人物卡|角色条目|人物条目)$", "", text).strip()
+    return text
+
+
+def _roster_name_like(value: object) -> str:
+    text = _roster_clean_name(value)
+    if not text or text in _ROSTER_GENERIC_NAMES:
+        return ""
+    if not _ROSTER_NAME_RE.match(text):
+        return ""
+    if text.isdigit() or _ROSTER_CODE_RE.match(text):
+        return ""
+    # 作品名/阵营/地点/章节/组织等非人物实体一律不当角色名。
+    if _NON_CHARACTER_TITLE_RE.search(text) or _NON_CHARACTER_SUFFIX_RE.search(text):
+        return ""
+    return text
+
+
+def _roster_entry_name(item: dict[str, Any], content: str) -> str:
+    """从条目标题/正文小标题/keys 里取角色名；取不到返回空串（不硬造「角色」）。"""
+    comment = str(item.get("comment") or "").strip()
+    if "角色卡·" in comment:
+        name = _roster_name_like(comment.split("角色卡·", 1)[-1])
+        if name:
+            return name
+    for pattern in (
+        r"【角色卡·([^】\n]{1,30})】",
+        r"【(?:角色|人物)\s*[：:·]\s*([^】\n]{1,30})】",
+    ):
+        match = re.search(pattern, content)
+        if match:
+            name = _roster_name_like(match.group(1))
+            if name:
+                return name
+    # 无前缀合集卡常见写法：正文第一段就是「【林昭】…」；只认像人名且不是
+    # 外貌/身份/性格等档案小标题的标题行，避免把【外貌】、【性格】当角色名。
+    for line in content.splitlines()[:4]:
+        heading = _heading_of(line.strip())
+        if not heading:
+            continue
+        label = heading[0]
+        if _PERSON_HEADING_RE.search(label) or _ROSTER_PROFILE_RE.search(label):
+            continue
+        name = _roster_name_like(label)
+        if name:
+            return name
+    name = _roster_name_like(comment)
+    if name:
+        return name
+    keys = item.get("keys") or []
+    if isinstance(keys, str):
+        keys = [keys]
+    for key in keys:
+        name = _roster_name_like(key)
+        if name:
+            return name
+    return ""
+
+
+def detect_character_entries(
+    book: dict[str, Any] | None, *, include_uids: set[str] | frozenset[str] | None = None,
+    exclude_names: set[str] | frozenset[str] | None = None, limit: int = 64,
+) -> list[dict[str, Any]]:
+    """从世界书识别角色名册（零 LLM，确定性）。
+
+    判据（满足其一才进成员池）：
+    1. 标题/小标题显式写角色卡/人物卡/角色条目（高置信）；
+    2. 能抽出人物视觉画像（复用 `_visual_profile_candidate`，中置信）；
+    3. 名字可判定 + 正文既有**人物身体词**又有人物档案信号（中置信）；
+    4. 仅有人物代词 + 档案信号（低置信，只进管理面板候选，不自动进聊天成员）；
+    5. 用户手动 include 的 uid（confidence=manual，可补进被自动判据漏掉的条目）。
+
+    非人物实体（作品名/阵营/种族/地点/组织/章节/编号…）默认排除；`exclude_names`
+    额外排除作品绑定的卡名/仓库名（合集卡名就是作品标题，不是角色）。
+    返回 `{uid,index,name,comment,confidence,has_visual,gender,content}`，content 截断 2400 字
+    仅供人设拼装，API 层会剔除。
+    """
+    from app.services import worldbook_edit
+
+    if not book:
+        return []
+    include = set(include_uids or ())
+    excluded = {str(name).strip() for name in (exclude_names or ()) if str(name).strip()}
+    out: list[dict[str, Any]] = []
+    for item in worldbook_edit.list_entries(book):
+        if not item.get("enabled"):
+            continue
+        uid = str(item.get("uid") or "")
+        manual = uid in include
+        content = str(item.get("content") or "").strip()
+        if not content:
+            continue
+        comment = str(item.get("comment") or "").strip()
+        if not manual and (
+            _NON_CHARACTER_TITLE_RE.search(comment) or _ROSTER_MECHANISM_RE.search(comment)
+        ):
+            continue
+        name = _roster_entry_name(item, content)
+        if not name and manual:
+            name = _roster_clean_name(comment)[:24] or f"角色{item.get('index', 0) + 1}"
+        if not name or name in excluded:
+            continue
+        marker = _character_marker(item, content)
+        visual = bool(_visual_profile_candidate(item))
+        body_cue = bool(_PERSON_BODY_CUE_RE.search(content))
+        person_cue = bool(_ROSTER_PERSON_RE.search(content))
+        pronoun = bool(_PERSON_PRONOUN_RE.search(content))
+        has_visual = visual or body_cue
+        if manual:
+            confidence = "manual"
+        elif marker:
+            confidence = "high"
+        elif visual or (body_cue and person_cue):
+            confidence = "medium"
+        elif pronoun and person_cue:
+            confidence = "low"
+        else:
+            continue
+        out.append({
+            "uid": uid,
+            "index": int(item.get("index") or 0),
+            "name": name,
+            "comment": comment,
+            "confidence": confidence,
+            "has_visual": has_visual,
+            "gender": gender_from_text(content, name),
+            "content": content[:2400],
+        })
+    rank = {"manual": 0, "high": 1, "medium": 2, "low": 3}
+    out.sort(key=lambda entry: (rank.get(entry["confidence"], 9), entry["index"]))
+    return out[:max(1, limit)]
+
+
+# 角色卡里的「…」/“…”是台词或剧情引语，不是稳定外貌。腓特烈卡把开场床戏对白
+# 写在角色条目最前面，抽取器按「外貌线索句」整句收进来 ⇒ 视频提示词的身份锁里
+# 出现 NSFW 台词（2026-11-11 审阅实锤）。在抽取前统一剥掉引号段。
+_QUOTED_SPAN_RE = re.compile(r"[「『“\"][^」』”\"]{1,400}[」』”\"]")
+# 单星号斜体在角色卡里通常是**开场剧情镜头**（`*壁炉的火光把她的侧脸镀成蜜色…*`），
+# 不是稳定外貌；整段收进来会让视频身份锁出现剧情正文（2026-11-11 腓特烈卡实锤）。
+# 只剥单星号：`**加粗标题**` 是结构标记，必须保留给标题/标签解析。
+_ITALIC_PROSE_RE = re.compile(r"(?<!\*)\*(?!\*)([^*\n]{2,400}?)\*(?!\*)")
+
+
+def _strip_scene_prose(text: str) -> str:
+    return _ITALIC_PROSE_RE.sub("", _QUOTED_SPAN_RE.sub("", text or ""))
+
+
 def _visual_profile_candidate(item: dict[str, Any]) -> str:
     """单条条目的外貌画像文本；抽不到外貌信号 ⇒ 空串（不注入）。"""
-    content = str(item.get("content") or "").strip()
+    content = _strip_scene_prose(str(item.get("content") or "")).strip()
     if not content:
         return ""
     marker = _character_marker(item, content)
@@ -675,6 +892,11 @@ def repo_snapshot_context(base: str, repo_id: str, *, query: str = "",
                 selected.append(clipped)
             break
         selected.append(item)
+    if not selected:
+        # 空视图返回空串而不是字面 `'[]'`：`maybe_curate` 用 `if worldbook_context:` 决定挂不挂
+        # 那一段，`'[]'` 是真值 ⇒ curator 读到「【当前小仓库世界书条目（index 用于更新）】[]」，
+        # 被暗示「有书、只是列表空」，于是凭空编 index；而可写集恒空 ⇒ 整批驳回且不报错（清单 #8）。
+        return ""
     return json.dumps(selected, ensure_ascii=False, separators=(",", ":"))
 
 
@@ -809,6 +1031,40 @@ def repo_protagonist_gender(base: str, repo_id: str, name: str) -> str:
     return repo_character_gender(base, repo_id, name)
 
 
+# ── 主人公姓名的「占位名」口径（2026-11-04 用户定案，补第 51 刀的读侧）──
+
+# 真机取证：主角信息表的姓名列里，六个作品有五个存的是**占位符**而非专名——
+# `(待定)`／`未定`／`我`／`我（玩家角色）`。而 `_first_cell` 只判「非空」，
+# 于是这些值会被当**真名**喂进出图链（锚点／视角主体／判死），
+# 第一人称叙事的作品里就凭空多出一个「叫『我』的角色」。占位名一律视为**没名字**，
+# 让三段继续往下找真名，全找不到 ⇒ 退回 `("", "")`（宁缺勿猜，与既有口径一致）。
+_PLACEHOLDER_NAME_WORDS = frozenset({
+    "我", "本人", "自己", "用户", "玩家", "主角", "主人公", "角色",
+    "待定", "未定", "暂定", "未填", "留空", "未知", "不详", "未详",
+    "无", "无名", "名字", "姓名", "n/a", "na", "nil", "none", "null",
+})
+# 整串只由这些字符组成 ⇒ 没有专名（`?` `？` `-` `…` `xxx` `×` …）。
+_PLACEHOLDER_NAME_MARKS = frozenset("?？×x*·、。，,.—–-_…~～ ")
+# 成对括号补语：`我（玩家角色）` 的核是 `我`，`(待定)` 的核是 `待定`。
+_BRACKETED_TAIL = re.compile(r"[（(【\[{｛][^（）()\[\]【】{}｛｝]*[)）\]】}｝]")
+
+
+def _is_placeholder_protagonist_name(raw: Any) -> bool:
+    """候选主人公姓名是否为**占位名**（不是真专名）⇒ True 表示「等于没名字」。
+
+    判据：剥掉成对括号补语 → 去空白 → 转小写，然后
+      ① 空串；② 命中占位词表；③ 整串只由标点／`x`／`?` 类符号组成。
+    真名不受影响：`丁小满`、`张三（少年）`（核 `张三`）都判 False。
+    """
+    core = _BRACKETED_TAIL.sub("", str(raw or ""))
+    core = "".join(core.split()).lower()
+    if not core:
+        return True
+    if core in _PLACEHOLDER_NAME_WORDS:
+        return True
+    return all(ch in _PLACEHOLDER_NAME_MARKS or ch in "x×?？*" for ch in core)
+
+
 def repo_protagonist_name(
     base: str, repo_id: str, user_name: str = "",
 ) -> tuple[str, str]:
@@ -816,33 +1072,37 @@ def repo_protagonist_name(
 
     第 51 刀（2026-09-22 用户定案「给 FP2 建真源」）：修复 **D4／D5** ——
     叙事者真源不能只靠 `ctx["user_name"]`（生产里常空 ⇒ 第 42 刀数据层保护集体空转），
-    也不存在反向解析主角名的函数。三段定序（取第一个非空者）：
+    也不存在反向解析主角名的函数。三段定序（取第一个**非空且非占位**者）：
 
-      ① `user_name` 非空 ⇒ `(user_name, "user_name")`；
-      ② 通用表「主角信息表」姓名列（单卡）非空 ⇒ `(name, "protagonist_table")`；
+      ① `user_name` ⇒ `(user_name, "user_name")`；
+      ② 通用表「主角信息表」姓名列（单卡）⇒ `(name, "protagonist_table")`；
       ③ 世界书「主角」条目兜底：comment／keys 含「主角」或「主人公」且形如
          `角色卡·<名>` 的条目 ⇒ `(<名>, "worldbook")`。
 
-    三段都取不到 ⇒ `("", "")`（**宁缺勿猜**）。读盘／解析失败一律降级为空，不抛。
+    2026-11-04 补：每段取值先过 `_is_placeholder_protagonist_name`——
+    `(待定)`／`未定`／`我`／`我（玩家角色）` 这类占位**不算名字**，本段跳过、继续找下一段
+    （② 的姓名列逐行看，第一行是占位不代表整表没有真名）。三段都给不出真名 ⇒
+    `("", "")`（**宁缺勿猜**）。读盘／解析失败一律降级为空，不抛。
 
     ⚠ `source` 只用于观察与审计，不进入任何判定分支；姓名空 ⇒ 一律返回空串。
     """
     uname = str(user_name or "").strip()
-    if uname:
+    if uname and not _is_placeholder_protagonist_name(uname):
         return uname, "user_name"
     if base and repo_id:
         # ② 通用表「主角信息表」姓名列（单卡表即该卡的值）。
         try:
             from app.services import table_store
-            name = table_store._first_cell(
+            names = table_store.column_values(
                 table_store.load(base, repo_id),
                 table_store.PROTAGONIST_TABLE, "姓名",
             )
         except Exception as exc:  # noqa: BLE001 — 表格读失败不得打断出图链
             _LOG.warning("repo_protagonist_name 主角信息表读取失败 base=%s repo=%s: %s", base, repo_id, exc)
-            name = ""
-        if name:
-            return name, "protagonist_table"
+            names = []
+        for name in names:
+            if not _is_placeholder_protagonist_name(name):
+                return name, "protagonist_table"
         # ③ 世界书「主角」条目兜底（只认 `角色卡·<名>` 这种明确身份，不猜正文首行）。
         try:
             from app.services import worldbook_edit
@@ -865,7 +1125,7 @@ def repo_protagonist_name(
                         continue
                     if comment.startswith("角色卡·"):
                         cand = comment[len("角色卡·"):].strip()
-                        if cand:
+                        if cand and not _is_placeholder_protagonist_name(cand):
                             return cand, "worldbook"
         except Exception as exc:  # noqa: BLE001 — 世界书读失败不得打断出图链
             _LOG.warning("repo_protagonist_name 世界书兜底读取失败 base=%s repo=%s: %s", base, repo_id, exc)

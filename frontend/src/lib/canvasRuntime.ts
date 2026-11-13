@@ -101,7 +101,11 @@ export interface GenLike {
   description?: string;
   created_at?: number;
   repo_id?: string;
-  /** 视频/音频节点：media_type + 对应 URL（video_url / audio_url） */
+  /** 视频/音频节点：media_type + 对应 URL（video_url / audio_url）
+      ⚠ 后端真源是 camelCase `mediaType`，且视频/音频地址就写在 `image_url` 里
+      （RAG 生成记录只有一个地址字段）⇒ 判定/播放一律走 `generationNodeType` / `genMediaUrl`，
+      不要在组件里直接读 `video_url`。 */
+  mediaType?: "video" | "audio" | "image";
   media_type?: "video" | "audio" | "image";
   video_url?: string;
   audio_url?: string;
@@ -117,11 +121,73 @@ export interface GenLike {
   referenceContent?: string; // 音频参考内容
 }
 
-/** 判断一条 generation 的节点类型：视频 > 音频 > 图片 */
+/**
+ * 判断一条 generation 的节点类型：视频 > 音频 > 图片。
+ * 判定真源是后端 `list_generations` 的 camelCase `mediaType`（视频/音频记录**没有**
+ * `video_url`/`audio_url` 字段，地址在 `image_url`）；`media_type` 与 URL 只作历史兼容。
+ */
 export function generationNodeType(g: GenLike): CanvasNodeType {
-  if (g.media_type === "video" || (g.video_url || "").trim()) return "video";
-  if (g.media_type === "audio" || (g.audio_url || "").trim()) return "audio";
+  const mt = g.mediaType || g.media_type;
+  if (mt === "video") return "video";
+  if (mt === "audio") return "audio";
+  if (mt === "image") return "image-group";
+  if ((g.video_url || "").trim()) return "video";
+  if ((g.audio_url || "").trim()) return "audio";
   return "image-group";
+}
+
+/**
+ * 生成记录的播放地址（视频/音频节点唯一出口）。
+ * 后端把媒体地址统一写进 `image_url`（RAG generation 只有一个地址字段），
+ * `video_url`/`audio_url` 只是旧调用方/云端链的别名 ⇒ 优先别名，兜底 image_url。
+ */
+export function genMediaUrl(g: GenLike | undefined): string {
+  if (!g) return "";
+  const type = generationNodeType(g);
+  if (type === "video") return (g.video_url || g.image_url || "").trim();
+  if (type === "audio") return (g.audio_url || g.image_url || "").trim();
+  return g.image_url || "";
+}
+
+export interface MediaLayoutMigration {
+  nodes: Record<string, PlacedRect>;
+  deletedIds: string[];
+  changed: boolean;
+}
+
+/**
+ * 兼容迁移：视频/音频记录此前被误判成图组（`generationNodeType` 只认 snake_case），
+ * 画布把它们的布局与删除黑名单记在 `img-gen-<id>` 下。类型判定修好后节点 id 变成
+ * `video-gen-` / `audio-gen-`，旧键必须跟着改名，否则**位置丢失**、被删过的节点**复活**。
+ *
+ * 幂等：旧键不存在或新键已存在时不动。
+ */
+export function migrateMediaLayoutKeys(
+  gens: ReadonlyArray<GenLike>,
+  nodes: Readonly<Record<string, PlacedRect>>,
+  deletedIds: ReadonlyArray<string>,
+): MediaLayoutMigration {
+  const nextNodes: Record<string, PlacedRect> = { ...nodes };
+  const nextDeleted = [...deletedIds];
+  let changed = false;
+  for (const g of gens) {
+    const type = generationNodeType(g);
+    if (type !== "video" && type !== "audio") continue;
+    const oldId = `img-gen-${g.id}`;
+    const newId = `${type}-gen-${g.id}`;
+    const rect = nextNodes[oldId];
+    if (rect && !nextNodes[newId]) {
+      nextNodes[newId] = rect;
+      delete nextNodes[oldId];
+      changed = true;
+    }
+    const di = nextDeleted.indexOf(oldId);
+    if (di >= 0) {
+      nextDeleted[di] = newId;
+      changed = true;
+    }
+  }
+  return { nodes: nextNodes, deletedIds: nextDeleted, changed };
 }
 
 // ---- 投影 ----
@@ -318,6 +384,132 @@ export function placeNewNodes(
 }
 
 /**
+ * 整理分组判定：该节点是否属于「废案组」（生成产物）。
+ *
+ * 用户定案（2026-11-12 A 口径）：画布上**所有**生成产物节点都算废案——
+ * 每次重新生成留下的旧图组/视频/音频不再参与剧情主网格避让，整理时整组
+ * 另起一块排到主网格右侧，剧情才能连续排满、不被顶出上千像素空洞。
+ *
+ * 只认投影节点 id 前缀（`img-gen-` / `video-gen-` / `audio-gen-`，见 `projectNodes`）。
+ * 灵感卡、参考图、输入框、工作流卡是素材/工具，不算废案，仍留在原地。
+ */
+export function isArchiveProductNode(id: string): boolean {
+  return /^(img|video|audio)-gen-/.test(id);
+}
+
+/**
+ * 整理分组：把一批节点排成「行优先」网格（左→右、上→下）。
+ *
+ * 排的是**一整块**：组内行与行之间严格连续（行高取该行最高卡），只有整块
+ * 与既有节点（`occupied`）重叠时才整体下移。
+ * - 不能逐行各自避让：障碍夹在组中间时，逐行会让第 2 行掉到障碍下面、第 3 行
+ *   再回到原基线，组内出现上百像素空洞（2026-11-12 用户实锤「整理剧情乱七八糟」）。
+ * - `occupied` 只应传**不被本组整理**的节点包围盒；被整理的节点自己不能参与避让，
+ *   否则每个目标格都会撞到自己的旧位置，整批被推到远处。
+ * - 调用侧用它排两组（剧情主网格 / 废案组）时，把先排好的一组矩形并入 `occupied`，
+ *   保证两组永不重叠。
+ */
+export function arrangeStoryGrid(
+  sizes: ReadonlyArray<{ w: number; h: number }>,
+  occupied: ReadonlyArray<PlacedRect> = [],
+  opts: StoryGridOptions = {},
+): Array<{ x: number; y: number }> {
+  const { cols = 4, gapX = 24, gapY = 24, originX = 24, originY = 24 } = opts;
+  if (sizes.length === 0) return [];
+  const colW = Math.max(...sizes.map((s) => s.w)) + gapX;
+
+  // 组内相对行位：每行高度取该行最高卡，行间只隔 gapY（不避让）
+  const rows: Array<{ count: number; h: number }> = [];
+  for (let start = 0; start < sizes.length; start += cols) {
+    const row = sizes.slice(start, start + cols);
+    rows.push({ count: row.length, h: Math.max(...row.map((s) => s.h)) });
+  }
+  const blockW = Math.max(...rows.map((r) => r.count)) * colW - gapX;
+  const blockH = rows.reduce((sum, r) => sum + r.h, 0) + gapY * (rows.length - 1);
+
+  // 整块避让：整块包围盒与障碍重叠就整体下移，组内结构不变
+  let y = originY;
+  let guard = 0;
+  while (overlapsAny(originX, y, blockW, blockH, occupied, gapX, gapY) && guard < 1000) {
+    y += gapY;
+    guard += 1;
+  }
+
+  const out: Array<{ x: number; y: number }> = [];
+  let rowY = y;
+  for (const r of rows) {
+    for (let col = 0; col < r.count; col += 1) {
+      out.push({ x: originX + col * colW, y: rowY });
+    }
+    rowY += r.h + gapY;
+  }
+  return out;
+}
+
+function overlapsAny(
+  x: number, y: number, w: number, h: number,
+  occupied: ReadonlyArray<PlacedRect>, gapX: number, gapY: number,
+): boolean {
+  return occupied.some((r) =>
+    x < r.x + r.w + gapX && x + w + gapX > r.x
+    && y < r.y + r.h + gapY && y + h + gapY > r.y);
+}
+
+export interface StoryGridOptions {
+  cols?: number;
+  gapX?: number;
+  gapY?: number;
+  originX?: number;
+  originY?: number;
+}
+
+/** 剧情主网格与废案组之间的横向留白：足够肉眼分成两组，又不至于要横滚半屏 */
+export const ARCHIVE_GAP_X = 96;
+
+export interface ArrangeSize {
+  id: string;
+  w: number;
+  h: number;
+}
+
+export interface ArrangePlacement {
+  id: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/**
+ * 整理编排（纯计算）：剧情主网格 + 废案组。
+ *
+ * 两组各排一整块（`arrangeStoryGrid`），废案组从剧情网格实际右边界 + `ARCHIVE_GAP_X`
+ * 起排，剧情矩形并入障碍 ⇒ 两组永不重叠、互不避让出洞。废案为空时只返回剧情组。
+ */
+export function planStoryArrange(
+  story: ReadonlyArray<ArrangeSize>,
+  archive: ReadonlyArray<ArrangeSize> = [],
+  obstacles: ReadonlyArray<PlacedRect> = [],
+  opts: StoryGridOptions = {},
+): { story: ArrangePlacement[]; archive: ArrangePlacement[] } {
+  const storyPos = arrangeStoryGrid(story, obstacles, opts);
+  const storyPlaced: ArrangePlacement[] = story.map((s, i) => ({ id: s.id, ...storyPos[i], w: s.w, h: s.h }));
+  if (archive.length === 0) return { story: storyPlaced, archive: [] };
+  const right = storyPlaced.length > 0
+    ? Math.max(...storyPlaced.map((p) => p.x + p.w))
+    : (opts.originX ?? 24);
+  const archivePos = arrangeStoryGrid(
+    archive,
+    [...obstacles, ...storyPlaced],
+    { ...opts, originX: right + ARCHIVE_GAP_X },
+  );
+  return {
+    story: storyPlaced,
+    archive: archive.map((s, i) => ({ id: s.id, ...archivePos[i], w: s.w, h: s.h })),
+  };
+}
+
+/**
  * 选中节点中心对齐：选中节点中心 vs 所有未选中节点中心，分别按 x/y 找最近 1 个匹配。
  * - 中心 y 相同（距离 < hintPx）→ 出水平贯穿辅助线（线在选中节点中心 y 处）
  * - 中心 x 相同（距离 < hintPx）→ 出竖向贯穿辅助线（线在选中节点中心 x 处）
@@ -433,7 +625,9 @@ export function nodeDetail(node: CanvasNode, byGroup: Map<string, GenLike[]>): N
       title: node.type === "video" ? `视频 · ${gens.length} 段` : `音频 · ${gens.length} 段`,
       gens,
       prompt: first.prompt || "",
-      imageUrls: gens.map((g) => g.image_url || "").filter(Boolean),
+      // 视频/音频节点这里存的是**媒体地址**（后端写在 image_url 里），消费方按 type 决定用
+      // <video>/<audio> 还是 <img>；不能假设它是图片。
+      imageUrls: gens.map((g) => genMediaUrl(g)).filter(Boolean),
     };
   }
   if (node.type === "image-group") {

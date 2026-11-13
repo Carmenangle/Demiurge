@@ -9,7 +9,10 @@ import threading
 import uuid
 from dataclasses import dataclass
 
-from app.services import agent_runner, attachment_store, chat_memory, chat_snapshot, rag_store, repo_meta
+from app.services import (
+    agent_runner, attachment_store, chat_archive, chat_memory, chat_snapshot,
+    rag_store, repo_meta,
+)
 from app.services.pathnames import safe_seg
 from app.services.rag_backend import EmbedConfig
 
@@ -48,9 +51,44 @@ def _ensure_idle(thread_id: str) -> None:
         raise MaintenanceConflict("该对话仍有后台生成任务，请等待完成或先停止")
 
 
+def _is_chat_thread(thread_id: str) -> bool:
+    """私聊/群聊线程命名：<repo>__chat__<角色> / <repo>__group。"""
+    return "__chat" in thread_id or "__group" in thread_id
+
+
+def _clear_chat_summary(thread_id: str) -> None:
+    """清空/压缩/恢复会话后让滚动摘要缓存失效；失败只留日志，不阻断主流程。"""
+    try:
+        from app.services import chat_context_summary
+        chat_context_summary.clear_thread(thread_id)
+    except Exception as exc:  # noqa: BLE001 [EXC-留痕] 缓存清理失败不影响会话维护
+        _LOG.warning("清理聊天摘要缓存失败 thread=%s: %s", thread_id, exc)
+
+
 def _revision(history: list[object]) -> str:
     raw = json.dumps(history, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _read_snapshot(thread_id: str) -> list:
+    """严格读快照：读不动 ⇒ MaintenanceFailed（当成「没有历史」会把真源静默覆盖掉）。"""
+    try:
+        return chat_snapshot.load_strict(thread_id)
+    except Exception as exc:
+        raise MaintenanceFailed(f"读取消息快照失败：{exc}") from exc
+
+
+def _archive(thread_id: str, snapshot: list, reason: str, history: list | None = None) -> str:
+    """删除前的归档闸：**归档没成就一个字都不删**（fail-closed）。
+
+    空会话返回 ""（没东西可丢，不是失败）。异常面刻意收宽：`chat_archive` 的 OSError（磁盘满/
+    权限/目录不可建）与 JSON 不可序列化都必须落到 MaintenanceFailed，否则端点裸 500、
+    而且——更糟的是——调用方可能在异常之外继续删。
+    """
+    try:
+        return chat_archive.archive(thread_id, snapshot, reason, history)
+    except Exception as exc:
+        raise MaintenanceFailed(f"删除前归档对话失败：{exc}") from exc
 
 
 def _message_images(message: dict) -> list[str]:
@@ -135,6 +173,8 @@ def _latest_result_image(snapshot: list[dict], generations: list[dict]) -> str:
 def clear(thread_id: str) -> dict:
     with _lock(thread_id):
         _ensure_idle(thread_id)
+        # 软删层：清的是 checkpoint，快照还在；归档留一份「当时的完整会话」，恢复对话取它
+        _archive(thread_id, _read_snapshot(thread_id), chat_archive.REASON_CLEAR)
         try:
             chat_memory.clear_history(thread_id)
         except Exception as exc:
@@ -144,14 +184,17 @@ def clear(thread_id: str) -> dict:
             attachment_store.delete_thread(thread_id)
         except Exception as exc:  # noqa: BLE001 - 附件清理失败不阻断主流程
             raise MaintenanceFailed(f"清理会话附件失败：{exc}") from exc
+        _clear_chat_summary(thread_id)
     return {"ok": True}
 
 
 def clear_cache(thread_id: str, output_dir: str) -> ClearCacheResult:
     with _lock(thread_id):
         _ensure_idle(thread_id)
+        old_snapshot = _read_snapshot(thread_id)
+        # 软删层：这一步之后快照就被整条抹掉，归档失败 ⇒ 一个文件都不动
+        _archive(thread_id, old_snapshot, chat_archive.REASON_CLEAR_CACHE)
         try:
-            old_snapshot = chat_snapshot.load_strict(thread_id)
             chat_snapshot.save(thread_id, [])
         except Exception as exc:
             raise MaintenanceFailed(f"清空消息快照失败：{exc}") from exc
@@ -180,6 +223,7 @@ def clear_cache(thread_id: str, output_dir: str) -> ClearCacheResult:
                     raise MaintenanceFailed(f"删除参考图失败：{exc}") from exc
                 if reference.exists():
                     raise MaintenanceFailed("删除参考图失败：目录仍然存在")
+        _clear_chat_summary(thread_id)
         return ClearCacheResult(removed=removed)
 
 
@@ -199,7 +243,9 @@ def compact(thread_id: str, llm, embed_cfg: EmbedConfig) -> dict:
     except Exception as exc:
         raise MaintenanceFailed(f"读取生成记录失败：{exc}") from exc
     full_history = _snapshot_history(old_snapshot) or history
-    result = chat_memory.summarize_history(full_history, llm, generations)
+    result = chat_memory.summarize_history(
+        full_history, llm, generations, chat_mode=_is_chat_thread(thread_id),
+    )
     if not result.get("ok"):
         error = result.get("error")
         if error:
@@ -226,6 +272,8 @@ def compact(thread_id: str, llm, embed_cfg: EmbedConfig) -> dict:
         current_snapshot = chat_snapshot.load_strict(thread_id)
         if _revision([current, current_snapshot]) != revision:
             raise MaintenanceConflict("对话在压缩期间已更新，请重试")
+        # 软删层：压缩把整条会话换成一条摘要，原文只留摘要里那几句 ⇒ 先原样归档
+        _archive(thread_id, old_snapshot, chat_archive.REASON_COMPACT, history)
         try:
             chat_snapshot.save(thread_id, [message])
         except Exception as exc:
@@ -242,6 +290,7 @@ def compact(thread_id: str, llm, embed_cfg: EmbedConfig) -> dict:
             except Exception as roll_exc:  # noqa: BLE001 - 回滚失败必须留痕，否则记忆静默分叉
                 _LOG.warning("压缩后对话记忆回滚失败 thread=%s: %s", thread_id, roll_exc)
             raise MaintenanceFailed(f"写入摘要对话失败：{exc}") from exc
+        _clear_chat_summary(thread_id)
 
     return {
         "ok": True,
@@ -249,3 +298,45 @@ def compact(thread_id: str, llm, embed_cfg: EmbedConfig) -> dict:
         "image_count": result.get("image_count", 0),
         "message": message,
     }
+
+
+def list_archives(thread_id: str) -> list[dict]:
+    """该会话可恢复的归档清单（新的在前）。纯读，不进写事务。"""
+    return chat_archive.list_archives(thread_id)
+
+
+def restore(thread_id: str, name: str) -> dict:
+    """把某份归档整条覆盖回会话（快照真源 + checkpoint 历史）。
+
+    恢复本身也是破坏性写入 ⇒ 动手前先把「当前状态」归档一份，压错了还能压回去。
+    归档名不合法/读不动 ⇒ `ValueError`（路由按 400 回，不是服务内部故障）。
+    """
+    with _lock(thread_id):
+        _ensure_idle(thread_id)
+        try:
+            payload = chat_archive.read_archive(thread_id, name)
+        except chat_archive.ArchiveNameError as exc:
+            raise ValueError(str(exc)) from exc
+        current_snapshot = _read_snapshot(thread_id)
+        _archive(thread_id, current_snapshot, chat_archive.REASON_RESTORE)
+        messages = payload["messages"]
+        # 归档里快照为空（当时只有 checkpoint 历史）⇒ 只回历史，不凭空造消息：
+        # 现造一批 id 写快照，正是 chat_snapshot._is_wholesale_replacement 拦的那种形态。
+        if messages:
+            try:
+                chat_snapshot.save(thread_id, messages)
+            except Exception as exc:
+                raise MaintenanceFailed(f"写入恢复快照失败：{exc}") from exc
+        derived = _snapshot_history(messages) or payload["history"]
+        if derived:
+            try:
+                chat_memory.replace_history(thread_id, derived)
+            except Exception as exc:
+                if messages:
+                    try:
+                        chat_snapshot.save(thread_id, current_snapshot)
+                    except Exception as roll_exc:  # noqa: BLE001 - 回滚失败必须留痕，否则快照静默分叉
+                        _LOG.warning("恢复对话后快照回滚失败 thread=%s: %s", thread_id, roll_exc)
+                raise MaintenanceFailed(f"恢复对话记忆失败：{exc}") from exc
+        _clear_chat_summary(thread_id)
+    return {"ok": True, "messages": len(messages), "history": len(derived)}

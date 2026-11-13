@@ -149,15 +149,18 @@ def test_climax_bare_refusal_narrative_not_compiled_into_beats():
     assert p.count("人物身份和五官不能发生变化") == 1
 
 
-def test_firstlast_camera_uses_vocabulary_not_hardcoded_push():
-    # 运镜不再全程「极缓推进」，首拍定场（固定/缓推）、尾拍拉远收束
+def test_firstlast_locks_camera_across_beats():
+    """2026-11-09 止血：firstlast 只给两张静图，逐拍换镜会让模型在单图空间里
+    自己发明机位（真机成片持续漂移/乱晃）⇒ 全片固定机位，不再逐拍换镜。"""
     p = video_prompt.compile_firstlast_video_prompt(
         _spec(narrative="她推门而入。", camera="", motion=0),
     )
     seg = p.split("[时间分镜]：", 1)[1].split("[音频]：", 1)[0]
-    assert "极缓推进" not in seg
-    assert "镜头慢慢拉远" in seg  # 收尾拍拉远
-    assert "摄像机缓缓向主体的面部移动" in seg or "固定镜头，相机完全静止" in seg
+    cams = {ln.split("：", 1)[1].split("；")[0] for ln in seg.strip().splitlines()}
+    assert cams == {video_prompt._HOLD_CAMERA_FRAME}
+    assert "全片一条固定镜头（Static Shot）" in p
+    assert "镜头慢慢拉远" not in p
+    assert "摄像机缓缓向主体的面部移动" not in p
 
 
 def test_climax_identity_lock_only_in_binding():
@@ -506,12 +509,12 @@ def test_build_request_default_size_is_16_9():
 
 def test_build_request_restores_jailbreak_markers_in_spec():
     req = video_prompt.build_video_request(
-        mode="climax", spec=_spec(appearance="纪含章(米@(色)@针织开衫)"),
+        mode="climax", spec=_spec(locale="面@(馆)@内景"),
         video_config={"base_url": "https://x.com/videos", "model": "h3"},
     )
     prompt = req["submit"]["prompt"]
     assert "@(" not in prompt and ")@" not in prompt  # 无残留破甲标记
-    assert "米色" in prompt and "米@(色)@" not in prompt  # 已还原成正常文字
+    assert "面馆内景" in prompt and "面@(馆)@" not in prompt  # 已还原成正常文字
 
 
 def test_build_request_restores_markers_in_firstlast():
@@ -708,13 +711,81 @@ def test_climax_beat_count_is_bounded_by_duration():
         assert f"动作{i}" in p  # 合并进相邻拍，不丢动作
 
 
-def test_firstlast_still_rotates_cameras_per_beats():
-    """契约只管高潮延伸：首尾帧覆盖整段桥段，逐拍换镜保留（用户口径「镜头固定的仅限高潮点」）。"""
-    spec = _spec(camera="")
-    p = video_prompt.compile_firstlast_video_prompt(spec)
+def test_firstlast_ignores_model_camera_and_band_overrides():
+    """止血契约：模型自报运镜与模版逐拍档位都不再驱动 firstlast；全片固定机位。"""
+    spec = _spec(camera="摇臂俯拍", motion=3)
+    sk = video_prompt.VideoSkeleton(camera_band_overrides={3: "镜头以慢动作环绕主体"})
+    p = video_prompt.compile_firstlast_video_prompt(spec, skeleton=sk)
     cams = {ln.split("：", 1)[1].split("；")[0] for ln in _segments(p)}
-    assert len(cams) > 1
-    assert "全片机位静止" not in p
+    assert cams == {video_prompt._HOLD_CAMERA_FRAME}
+    assert "摇臂俯拍" not in p
+    assert "镜头以慢动作环绕主体" not in p
+    assert "全片一条固定镜头（Static Shot）" in p
+
+
+def test_shot_cut_locks_camera_and_single_image():
+    spec = _spec(narrative="她推门而入。", camera="摇臂俯拍", motion=3, shot_duration_s=5)
+    req = video_prompt.build_video_request(
+        mode="shot_cut", spec=spec,
+        video_config={"base_url": "http://x", "model": "h3"},
+        first_frame="http://x/f.png",
+    )
+    assert req["submit"]["duration"] == 5
+    assert req["submit"]["images"] == ["http://x/f.png"]
+    prompt = req["submit"]["prompt"]
+    assert _camera_phrases(prompt) == {video_prompt._HOLD_CAMERA_FRAME}
+    assert "摇臂俯拍" not in prompt
+    assert "全片一条固定镜头（Static Shot）" in prompt
+
+
+def test_shot_move_single_uses_one_continuous_path():
+    spec = _spec(
+        narrative="她推门而入，走到沙发前。", camera="", motion=0,
+        shot_duration_s=5, shot_camera="镜头从门口缓慢横移到沙发",
+    )
+    req = video_prompt.build_video_request(
+        mode="shot_move_single", spec=spec,
+        video_config={"base_url": "http://x", "model": "h3"},
+        first_frame="http://x/f.png",
+    )
+    prompt = req["submit"]["prompt"]
+    assert _camera_phrases(prompt) == {video_prompt._SHOT_MOVE_CAMERA}
+    assert "镜头从门口缓慢横移到沙发" in prompt
+    assert "全片一条连续运镜" in prompt
+    assert "全片一条固定镜头（Static Shot）" not in prompt
+
+
+def test_shot_move_binds_two_frames_and_one_path():
+    spec = _spec(
+        narrative="她走到沙发前坐下。", camera="", motion=2,
+        shot_duration_s=6, shot_camera="镜头从门口推进到沙发，跟随她坐下",
+    )
+    req = video_prompt.build_video_request(
+        mode="shot_move", spec=spec,
+        video_config={"base_url": "http://x", "model": "h3"},
+        first_frame="http://x/a.png", last_frame="http://x/b.png",
+        first_frame_desc="门口", last_frame_desc="沙发",
+    )
+    assert req["submit"]["duration"] == 6
+    assert req["submit"]["images"] == ["http://x/a.png", "http://x/b.png"]
+    prompt = req["submit"]["prompt"]
+    assert "图片1=门口" in prompt
+    assert "图片2=沙发" in prompt
+    assert "镜头从门口推进到沙发，跟随她坐下" in prompt
+    assert _camera_phrases(prompt) == {video_prompt._SHOT_MOVE_CAMERA}
+    assert "全片一条固定镜头（Static Shot）" not in prompt
+
+
+def test_shot_move_without_last_frame_warns_but_still_compiles():
+    spec = _spec(narrative="她走到沙发前坐下。", shot_duration_s=6,
+                 shot_camera="镜头从门口推进到沙发")
+    req = video_prompt.build_video_request(
+        mode="shot_move", spec=spec,
+        video_config={"base_url": "http://x", "model": "h3"},
+        first_frame="http://x/a.png",
+    )
+    assert req["submit"]["images"] == ["http://x/a.png"]
+    assert any("缺尾帧图" in w for w in req["warnings"])
 
 
 def test_climax_falls_back_to_narrative_without_visual_elements():
@@ -959,8 +1030,8 @@ def test_parse_video_plan_整体拒答返回空():
     assert plan == {}
 
 
-def test_reference_binding_binds_identity_gloss_from_subjects():
-    # subjects 的 name→description 是「角色→样貌」真源，优先用它做身份绑定
+def test_reference_binding_does_not_repeat_subject_appearance():
+    # 外貌已由图片1承载；[参考绑定] 只写角色名，不再复述 subjects 的样貌描述。
     spec = _spec(
         subjects=[
             {"name": "纪含章", "description": "beige cardigan, chestnut long hair", "weight": 1.2},
@@ -971,28 +1042,25 @@ def test_reference_binding_binds_identity_gloss_from_subjects():
     p = video_prompt.compile_climax_video_prompt(spec)
     binding = p.split("[参考绑定]：", 1)[1].split("\n\n", 1)[0]
     assert "图片1中心的角色为纪含章、庄听澜、邵允" in binding
-    assert "纪含章（beige cardigan, chestnut long hair）" in binding
-    assert "庄听澜（pink hoodie, lollipop）" in binding
-    assert "邵允（wa-style robe, tea cup）" in binding
+    for text in ("beige cardigan", "pink hoodie", "wa-style robe"):
+        assert text not in binding
 
 
-def test_reference_binding_binds_identity_gloss_from_appearance():
-    # 无 subjects 时回退 appearance 的「名字(外貌)」格式，拆出角色→样貌映射
+def test_reference_binding_does_not_repeat_appearance_card():
     spec = _spec(appearance="纪含章(米色针织开衫+陶杯)、庄听澜(粉卫衣+棒棒糖)、邵允(和风长衫+茶盏)")
     p = video_prompt.compile_climax_video_prompt(spec)
     binding = p.split("[参考绑定]：", 1)[1].split("\n\n", 1)[0]
-    assert "纪含章（米色针织开衫+陶杯）" in binding
-    assert "庄听澜（粉卫衣+棒棒糖）" in binding
-    assert "邵允（和风长衫+茶盏）" in binding
+    assert "图片1中心的角色为纪含章、庄听澜、邵允" in binding
+    for text in ("米色针织开衫", "粉卫衣", "和风长衫"):
+        assert text not in binding
 
 
-def test_reference_binding_binds_identity_gloss_from_plain_appearance():
-    # 纯文本无分隔：用 actors 名字做前缀匹配，拆出单角色样貌（其余角色只写名字）
+def test_reference_binding_plain_appearance_does_not_repeat_card():
     spec = _spec(appearance="纪含章米色针织开衫，栗色长发")
     p = video_prompt.compile_climax_video_prompt(spec)
     binding = p.split("[参考绑定]：", 1)[1].split("\n\n", 1)[0]
-    assert "纪含章（米色针织开衫，栗色长发）" in binding
-    assert "庄听澜" in binding  # 无样貌数据，只写名字
+    assert "纪含章" in binding
+    assert "米色针织开衫" not in binding and "栗色长发" not in binding
 
 
 def test_reference_binding_does_not_reflow_appearance_when_subject_scene_exists():
@@ -1042,20 +1110,21 @@ def test_build_request_no_unbound_person_warning():
 
 
 def test_reference_binding_firstlast_and_transition_bind_identity():
-    # firstlast / transition 同样带「画面角色」+ 角色样貌绑定
+    # firstlast / transition 同样带「画面角色」，但不复述角色卡外貌
     p = video_prompt.compile_firstlast_video_prompt(
         _spec(appearance="纪含章(米色针织开衫)、庄听澜(粉卫衣)、邵允(和风长衫)"),
         first_frame_desc="开场三人围坐", last_frame_desc="举杯同框",
     )
     binding = p.split("[参考绑定]：", 1)[1].split("\n\n", 1)[0]
     assert "画面角色：纪含章、庄听澜、邵允" in binding
-    assert "纪含章（米色针织开衫）" in binding
+    assert "米色针织开衫" not in binding
     tp = video_prompt.compile_transition_video_prompt(
         _spec(appearance="纪含章(米色针织开衫)、庄听澜(粉卫衣)、邵允(和风长衫)"),
         prev_tail_desc="三人围坐面馆举杯", first_frame_desc="面馆暖光庄听澜抿汤",
     )
     tbinding = tp.split("[参考绑定]：", 1)[1].split("\n\n", 1)[0]
     assert "画面角色：纪含章、庄听澜、邵允" in tbinding
+    assert "米色针织开衫" not in tbinding
 
 # ===== ⑤[音频]：只有效果音（2026-09-20 用户定案）=====
 # 台词/旁白由「多元数据插入」里的**独立音频生成功能**负责 ⇒ 视频提示词一律不写台词；
@@ -1358,6 +1427,15 @@ def _segments(prompt: str) -> list[str]:
     return [ln for ln in block.split("\n") if ln.strip()]
 
 
+def _camera_phrases(prompt: str) -> set[str]:
+    """从 ④ 每行取机位句：兼容 climax 的 `0–5s｜机位` 与 firstlast 的 `[0s–2s｜拍名]：机位`。"""
+    out: set[str] = set()
+    for line in _segments(prompt):
+        tail = line.split("｜", 1)[1].split("；", 1)[0]
+        out.add(tail.rsplit("：", 1)[-1].strip())
+    return out
+
+
 def test_climax_pending_frame_declares_starting_frame():
     """刀③：自动链在成图**之前**编译提示词（first_frame 此时必为空），仍要按 I2V 声明。
 
@@ -1536,22 +1614,23 @@ def test_subject_scene_drops_card_lore_dump_and_placeholder():
         assert junk not in subject
 
 
-def test_subject_scene_uses_frame_subjects_when_actors_empty():
-    """actors 空但判据给了画面主体 ⇒ 只取在场那一条外貌，不在这一格里的角色不写。"""
+def test_subject_scene_uses_frame_subjects_without_repeating_appearance():
+    """actors 空但判据给了画面主体 ⇒ 只写名字，外貌由图片1承载；不在这一格的角色不写。"""
     spec = _spec(actors=[], frame_subjects=["纪含章"], appearance=_CARD_DUMP,
                  wardrobe="(待定)")
     subject = video_prompt._subject_scene(spec)
-    assert "纪含章（暗黄长发、成熟知性、连衣裙侧开衩）" in subject
+    assert "纪含章" in subject
+    assert "暗黄长发" not in subject and "连衣裙侧开衩" not in subject
     assert "庄听澜" not in subject and "誓约制度" not in subject
 
 
 def test_subject_scene_placeholder_variants_are_dropped():
-    """`(待定)` / `（待定）` / `暂无` / `-` 都不算内容；真外貌照常保留。"""
+    """`(待定)` / `（待定）` / `暂无` / `-` 都不算内容；角色名与场景照常保留。"""
     for wardrobe in ("(待定)", "（待定）", "暂无", "-", "待定"):
         subject = video_prompt._subject_scene(
             _spec(wardrobe=wardrobe, appearance="纪含章(米色针织开衫)"))
         assert "待定" not in subject and "暂无" not in subject, wardrobe
-        assert "米色针织开衫" in subject, wardrobe
+        assert "纪含章" in subject, wardrobe
 
 
 def test_climax_prompt_carries_no_negative_block_end_to_end():
@@ -2529,3 +2608,565 @@ def test_第107刀_firstlast_beat_windows_no_dialogue_stay_uniform():
     ]
     assert stats["quotes_total"] == 0
     assert stats["quotes_dropped"] == 0
+
+
+def test_cut_beats_include_camera_position_before_motion():
+    """机位必须交代「从哪拍」：方位/高度写在景别之后、机位运动之前。"""
+    spec = _spec(
+        shot_duration_s=4,
+        shot_video_beats=[{
+            "duration_s": 4, "cut": False, "framing": "中近景/过肩第一人称",
+            "camera_position": "叙事者右肩后上方·略俯视（越过右肩拍她的双手与席次单）",
+            "camera_motion": "轻微推近", "subject_motion": "",
+            "description": "她把席次单在石案上摊平，嘴唇开合（无声音）",
+            "sound_cue": "",
+        }],
+    )
+    prompt = _video_req("shot_cut", spec)["submit"]["prompt"]
+
+    assert "中近景/过肩第一人称；叙事者右肩后上方·略俯视" in prompt
+    assert prompt.index("叙事者右肩后上方") < prompt.index("轻微推近")
+
+
+def test_cut_with_video_beats_compiles_hard_cut_timeline_without_fx():
+    spec = _spec(
+        shot_duration_s=8,
+        shot_video_beats=[
+            {"duration_s": 3, "cut": False, "framing": "全身",
+             "camera_motion": "跟拍", "subject_motion": "她沿红毯向前走",
+             "description": "从门前红毯跟着她往仓库中心走"},
+            {"duration_s": 3, "cut": True, "framing": "胸部俯拍",
+             "camera_motion": "固定", "subject_motion": "胸口随呼吸与步伐起伏",
+             "description": "从她肩头俯视胸部"},
+            {"duration_s": 2, "cut": True, "framing": "脚部特写",
+             "camera_motion": "固定", "subject_motion": "裙摆扫过鞋跟",
+             "description": "硬切到高跟鞋"},
+        ],
+    )
+    req = _video_req("shot_cut", spec)
+    prompt = req["submit"]["prompt"]
+    assert "0–3s｜" in prompt
+    assert "3–6s｜硬切" in prompt
+    assert "6–8s｜硬切" in prompt
+    assert "胸部俯拍" in prompt
+    assert "能量爆发式特效" not in prompt
+    assert "图片1为唯一人物" in prompt
+    assert req["submit"]["duration"] == 8
+
+
+def test_cut_with_beats_first_person_injects_pov_note():
+    """第一人称下 cut+beats 必须带 POV 声明（否则多镜头会被写成第三人称旁观）。"""
+    beats = [
+        {"duration_s": 3, "cut": False, "framing": "中景",
+         "camera_motion": "固定", "subject_motion": "她抬头看向镜头",
+         "description": "她开口说话"},
+        {"duration_s": 3, "cut": True, "framing": "手部特写",
+         "camera_motion": "固定", "subject_motion": "指尖压在纸面",
+         "description": "笔尖停在名字上"},
+    ]
+    first = _video_req("shot_cut", _spec(
+        viewpoint="first_person", shot_duration_s=6, shot_video_beats=beats,
+    ))
+    prompt = first["submit"]["prompt"]
+    assert "第一人称视角" in prompt
+    # 多拍/硬切：不能再说「与图片1共用同一视点位置」，否则与切镜互斥。
+    assert "镜头与图片1共用同一视点位置" not in prompt
+    assert video_prompt._POV_VIEW_MULTI in prompt
+
+    third = _video_req("shot_cut", _spec(shot_duration_s=6, shot_video_beats=beats))
+    assert "第一人称视角" not in third["submit"]["prompt"]
+
+
+def test_cut_with_single_pov_beat_keeps_anchored_viewpoint():
+    """单拍连续镜头仍然锁「与图片1共用同一视点位置」（零回归）。"""
+    beats = [{
+        "duration_s": 5, "cut": False, "framing": "近景",
+        "camera_motion": "固定", "subject_motion": "她抬眼看向镜头",
+        "description": "她抬眼",
+    }]
+    prompt = _video_req("shot_cut", _spec(
+        viewpoint="first_person", shot_duration_s=5, shot_video_beats=beats,
+    ))["submit"]["prompt"]
+    assert video_prompt._POV_VIEW_ANCHORED in prompt
+    assert video_prompt._POV_VIEW_MULTI not in prompt
+
+
+def test_cut_beats_do_not_share_image_scene_across_locations():
+    """多场景镜不能写「所有段共用图片1的场景」：侧门→走廊→卧室必须按分镜逐段换场。"""
+    beats = [
+        {"duration_s": 3, "cut": False, "framing": "全身",
+         "camera_position": "叙事者视点·平视", "camera_motion": "固定",
+         "subject_motion": "她侧身挤过侧门", "description": "旧仓库侧门"},
+        {"duration_s": 3, "cut": True, "framing": "中景",
+         "camera_position": "走廊前端·平视", "camera_motion": "跟移",
+         "subject_motion": "她一手提裙一手扶墙", "description": "堆着旧箱子的走廊"},
+        {"duration_s": 3, "cut": True, "framing": "近景",
+         "camera_position": "卧室门内·平视", "camera_motion": "固定",
+         "subject_motion": "她低头", "description": "卧室床边，项圈在床头"},
+    ]
+    prompt = _video_req("shot_cut", _spec(
+        shot_duration_s=9, shot_video_beats=beats,
+    ))["submit"]["prompt"]
+
+    assert "所有段共用图片1的人物与场景" not in prompt
+    assert "场景与空间按[时间分镜]逐段写明的为准" in prompt
+    assert "段间切景只换机位与取景，不新增人物" in prompt
+
+
+def test_establish_beats_use_space_reference_not_shared_scene():
+    """环境镜多段跨空间时，只锁图片1的空间/道具/光线，不锁「共用场景」。"""
+    beats = [
+        {"duration_s": 4, "cut": False, "framing": "远景",
+         "camera_position": "仓库门外·平视", "camera_motion": "横移",
+         "subject_motion": "白纱鼓动", "description": "废弃仓库木门半拆"},
+        {"duration_s": 4, "cut": True, "framing": "中景",
+         "camera_position": "红毯中段·平视", "camera_motion": "固定",
+         "subject_motion": "铁桶白花轻晃", "description": "红毯铺到木板台"},
+    ]
+    prompt = _video_req("shot_establish", _establish_spec(
+        shot_duration_s=8, shot_video_beats=beats,
+    ))["submit"]["prompt"]
+
+    assert "本片以图片1的空间、道具与光线为准" in prompt
+    assert "所有段共用图片1的人物与场景" not in prompt
+
+
+def test_pov_single_beat_drops_third_person_camera_position():
+    """纯 POV 单拍：第三人称机位归一成「叙事者视线·角度」，背面角度也删掉。"""
+    beats = [{
+        "duration_s": 4, "cut": False, "framing": "全身，侧后方",
+        "camera_position": "她右后方·平视（机位在她肩后，拍头纱与发尾）",
+        "camera_motion": "固定", "subject_motion": "她沿红毯向前走",
+        "description": "她沿红毯走",
+    }]
+    pov = _video_req("shot_cut", _spec(
+        viewpoint="first_person", shot_duration_s=4, shot_video_beats=beats,
+    ))["submit"]["prompt"]
+
+    assert "她右后方" not in pov
+    assert "肩后" not in pov
+    assert "侧后方" not in pov
+    assert "叙事者视线·平视" in pov
+    assert "全身" in pov
+    # 单拍连续镜头仍走 anchored 声明（不是多拍声明）。
+    assert video_prompt._POV_VIEW_ANCHORED in pov
+    assert video_prompt._POV_VIEW_MULTI not in pov
+
+
+def test_mixed_shot_labels_pov_and_observer_beats():
+    """POV 与旁观同片：逐拍标第一/第三人称，只清洗 POV 拍，旁观机位原样保留。"""
+    beats = [
+        {"duration_s": 3, "cut": False, "framing": "全身，侧后方",
+         "camera_position": "她右后方·平视（机位在她肩后，拍头纱与发尾）",
+         "camera_motion": "固定", "subject_motion": "她沿红毯向前走",
+         "description": "她沿红毯走"},
+        {"duration_s": 3, "cut": True, "framing": "特写",
+         "camera_position": "地面·俯视（机位贴地，拍鞋跟与裙摆下缘）",
+         "camera_motion": "固定", "subject_motion": "鞋跟踩在红毯上",
+         "description": "鞋跟与裙摆"},
+    ]
+    mixed = _video_req("shot_cut", _spec(
+        viewpoint="first_person", shot_duration_s=6, shot_video_beats=beats,
+    ))["submit"]["prompt"]
+
+    # 图片在 0s ⇒ 第 1 拍按图片视角走 POV，机位被清洗；第 2 拍按机位反推为旁观。
+    assert "她右后方" not in mixed
+    assert "机位贴地" in mixed
+    assert "第一人称" in mixed and "第三人称" in mixed
+    assert video_prompt._POV_VIEW_MIXED in mixed
+    assert "叙事者视线·平视" in mixed
+    assert "鞋跟踩在红毯上" in mixed
+    assert "每一段都是镜头后面那一位本人的视线" not in mixed
+
+    third = _video_req("shot_cut", _spec(
+        shot_duration_s=6, shot_video_beats=beats,
+    ))["submit"]["prompt"]
+    assert "她右后方" in third
+    assert "机位贴地" in third
+    assert video_prompt._OBSERVER_VIEW_NOTE in third
+
+
+def test_image_beat_viewpoint_matches_locked_image_second():
+    """图片锁在第 3 秒：那一拍必须跟图片视角走 POV，前面的旁观拍保持旁观。"""
+    beats = [
+        {"duration_s": 3, "cut": False, "framing": "全身",
+         "camera_position": "她右后方·平视（机位在她肩后）",
+         "camera_motion": "固定", "subject_motion": "她沿红毯向前走",
+         "description": "她沿红毯走"},
+        {"duration_s": 3, "cut": True, "framing": "中景",
+         "camera_position": "红毯一侧·平视（机位在红毯左侧）",
+         "camera_motion": "固定", "subject_motion": "她停在台前",
+         "description": "她停在台前"},
+    ]
+    prompt = _video_req("shot_cut", _spec(
+        viewpoint="first_person", shot_duration_s=6,
+        shot_image_timing="at", image_time_s=3,
+        shot_video_beats=beats,
+    ))["submit"]["prompt"]
+
+    assert "第三人称；全身；她右后方·平视（机位在她肩后）" in prompt
+    assert "第一人称；起帧对齐图片1；中景；叙事者视线·平视" in prompt
+    assert "红毯左侧" not in prompt
+    assert video_prompt._POV_VIEW_MIXED in prompt
+
+
+def test_explicit_beat_viewpoint_overrides_camera_inference():
+    """判据显式标 observer 时，即使机位句像 POV，也不按 POV 清洗。"""
+    beats = [
+        {"duration_s": 3, "cut": False, "framing": "全身",
+         "camera_position": "叙事者视点·平视", "camera_motion": "固定",
+         "subject_motion": "她站在门口", "description": "她站在门口"},
+        {"duration_s": 3, "cut": True, "framing": "近景",
+         "camera_position": "叙事者视点·平视", "camera_motion": "固定",
+         "subject_motion": "她抬眼", "description": "她抬眼",
+         "viewpoint": "observer"},
+    ]
+    prompt = _video_req("shot_cut", _spec(
+        viewpoint="first_person", shot_duration_s=6, shot_video_beats=beats,
+    ))["submit"]["prompt"]
+
+    # 第 1 拍按图片视角走 POV；第 2 拍显式 observer ⇒ 原样保留机位句。
+    assert "第一人称；起帧对齐图片1；全身；叙事者视点·平视" in prompt
+    assert "第三人称；近景；叙事者视点·平视" in prompt
+    assert video_prompt._POV_VIEW_MIXED in prompt
+
+
+def test_pov_beats_keep_narrator_referenced_camera_position():
+    """以叙事者为参照的机位（叙事者视点/镜头角色）不能被误删。"""
+    beats = [{
+        "duration_s": 4, "cut": False, "framing": "近景",
+        "camera_position": "叙事者视点·略俯视（机位在床沿上方，正对她的侧脸）",
+        "camera_motion": "固定", "subject_motion": "她侧躺睡沉",
+        "description": "月光落在床沿",
+    }]
+    prompt = _video_req("shot_cut", _spec(
+        viewpoint="first_person", shot_duration_s=4, shot_video_beats=beats,
+    ))["submit"]["prompt"]
+
+    assert "叙事者视点·略俯视" in prompt
+
+
+def test_pov_replaces_narrator_name_with_camera_role():
+    """第一人称段不得把叙事者写成第三人本名（凌霄镜8 的「凌渊」趋势）。"""
+    beats = [{
+        "duration_s": 3, "cut": False, "framing": "全身",
+        "camera_position": "叙事者视点·平视", "camera_motion": "固定",
+        "subject_motion": "凌渊穿衣收剑，理正衣带",
+        "description": "凌渊走到门外，晨光照在宫道上", "viewpoint": "pov",
+    }]
+    pov = _video_req("shot_cut", _spec(
+        viewpoint="first_person", narrator="凌渊", shot_duration_s=3,
+        shot_video_beats=beats,
+    ))["submit"]["prompt"]
+    assert "凌渊" not in pov
+    assert "镜头角色穿衣收剑" in pov
+
+    third = _video_req("shot_cut", _spec(
+        narrator="凌渊", shot_duration_s=3, shot_video_beats=beats,
+    ))["submit"]["prompt"]
+    assert "凌渊穿衣收剑" in third
+
+
+def test_image_pose_is_explicit_at_image_beat():
+    """图片所在拍必须显式写起帧姿态，防止站定却从远处走来。"""
+    beats = [{
+        "duration_s": 3, "cut": False, "framing": "全身",
+        "camera_position": "叙事者视点·平视", "camera_motion": "固定",
+        "subject_motion": "她坐在石案边，从腰间抽出席次单",
+        "description": "石案被日光照亮，席次单在案面展开", "viewpoint": "pov",
+    }]
+    prompt = _video_req("shot_cut", _spec(
+        shot_duration_s=3, shot_video_beats=beats, image_pose="坐",
+    ))["submit"]["prompt"]
+    assert "起帧对齐图片1；起帧：坐姿" in prompt
+
+
+def test_pov_keeps_compatible_camera_position():
+    """叙事者站得住的机位（院墙外/窄道入口）不能被削成一句「叙事者视线·仰视」。"""
+    beats = [{
+        "duration_s": 3, "cut": False, "framing": "远景仰拍",
+        "camera_position": "院墙外·仰视树冠（机位在窄道入口，镜头朝檐角）",
+        "camera_motion": "固定", "subject_motion": "狐尾槐树冠在日光里轻晃",
+        "description": "日头照在院墙与树冠上，窄道空着，叶影落在檐角",
+        "viewpoint": "pov",
+    }]
+    prompt = _video_req("shot_cut", _spec(
+        viewpoint="first_person", shot_duration_s=3, shot_video_beats=beats,
+    ))["submit"]["prompt"]
+
+    assert "院墙外·仰视树冠（机位在窄道入口，镜头朝檐角）" in prompt
+    assert "叙事者视线·仰视" not in prompt
+
+
+def test_sparse_beats_emit_warning_and_rich_beats_do_not():
+    """④ 稀疏拍必须告警；写足环境/光线/动作的拍不告警。"""
+    sparse = [{
+        "duration_s": 3, "cut": False, "framing": "远景",
+        "camera_position": "机位在入口", "camera_motion": "固定",
+        "subject_motion": "", "description": "窄道空着", "viewpoint": "pov",
+    }]
+    sparse_req = _video_req("shot_cut", _spec(
+        shot_duration_s=3, shot_video_beats=sparse,
+    ))
+    assert any("分镜信息过稀" in warning for warning in sparse_req["warnings"])
+
+    rich = [{
+        "duration_s": 3, "cut": False, "framing": "远景仰拍",
+        "camera_position": "院墙外·仰视树冠（机位在窄道入口，镜头朝檐角）",
+        "camera_motion": "固定",
+        "subject_motion": "狐尾槐树冠在日光里轻晃，叶影落在檐角",
+        "description": "午后日光穿过院墙，落在空旷的窄道与檐角；树冠叶片轻晃，"
+                       "斑驳叶影在石板上缓慢移动，窄道空无一人，只有尘埃在光柱里浮动",
+        "viewpoint": "pov",
+    }]
+    rich_req = _video_req("shot_cut", _spec(
+        shot_duration_s=3, shot_video_beats=rich,
+    ))
+    assert not any("分镜信息过稀" in warning for warning in rich_req["warnings"])
+
+
+def test_first_person_rewrites_behind_person_to_camera():
+    """第一人称下「等身后那人看清」必须改成「等镜头看清」，不能写成第三人旁观。"""
+    beats = [{
+        "duration_s": 5, "cut": False, "framing": "全身",
+        "camera_motion": "固定", "subject_motion": "收势停住，等身后那人看清",
+        "description": "她每一式到收势都停一停",
+    }]
+    prompt = _video_req("shot_cut", _spec(
+        viewpoint="first_person", shot_duration_s=5, shot_video_beats=beats,
+    ))["submit"]["prompt"]
+    assert "等镜头看清" in prompt
+    assert "身后那人" not in prompt
+
+    third = _video_req("shot_cut", _spec(shot_duration_s=5, shot_video_beats=beats))
+    assert "身后那人" in third["submit"]["prompt"]
+
+
+def test_image_timing_mid_declared_in_prompt():
+    """图片是中段/尾帧时，视频提示词必须交代时间，不能当首帧直接用。"""
+    beats = [{
+        "duration_s": 6, "cut": False, "framing": "全身",
+        "camera_motion": "固定", "subject_motion": "她收势停住",
+        "description": "剑势走到收势",
+    }]
+    mid = _video_req("shot_cut", _spec(
+        shot_duration_s=6, shot_image_timing="mid", shot_video_beats=beats,
+    ))["submit"]["prompt"]
+    assert "图片1=本镜中段画面" in mid
+    # 用户 2026-11-10：必须交代图片对应本镜**第几秒**，不能只说「中段」。
+    assert "本镜第 3 秒" in mid
+
+    end = _video_req("shot_cut", _spec(
+        shot_duration_s=6, shot_image_timing="end", shot_video_beats=beats,
+    ))["submit"]["prompt"]
+    assert "图片1=本镜尾帧画面" in end
+    assert "本镜第 6 秒" in end
+
+    explicit = _video_req("shot_cut", _spec(
+        shot_duration_s=6, shot_image_timing="mid", shot_video_beats=beats,
+        image_time_s=5,
+    ))["submit"]["prompt"]
+    assert "本镜第 5 秒" in explicit
+
+
+def test_image_at_declared_as_not_first_frame():
+    """锚点落在第 2 段时，视频提示词必须说「不是首帧」并给出秒数。"""
+    beats = [
+        {"duration_s": 3, "cut": False, "framing": "远景俯拍", "camera_motion": "固定",
+         "subject_motion": "叶影轻晃", "description": "院落窄道空着"},
+        {"duration_s": 3, "cut": True, "framing": "全景", "camera_motion": "跟移",
+         "subject_motion": "她快步走来", "description": "她从宫道方向走来"},
+    ]
+    prompt = _video_req("shot_establish_move", _spec(
+        shot_duration_s=15, shot_image_timing="at", image_time_s=3,
+        shot_camera="缓慢推进", shot_video_beats=beats,
+    ))["submit"]["prompt"]
+
+    assert "本镜第 3 秒" in prompt
+    assert "不是首帧" in prompt
+    # 图片不是首帧时，不能再写「不要引入主要人物」把人物挡在 0s 之前。
+    assert "不要引入主要人物" not in prompt
+
+
+def test_speech_beats_use_silent_mouth_wording():
+    """对白口型统一为「嘴唇开合（无声音）」，不再写「开口说话」。"""
+    beats = [{
+        "duration_s": 5, "cut": False, "framing": "近景",
+        "camera_motion": "固定", "subject_motion": "她开口说话",
+        "description": "她开口说话，说第一句",
+    }]
+    prompt = _video_req("shot_cut", _spec(
+        shot_duration_s=5, shot_video_beats=beats,
+    ))["submit"]["prompt"]
+    assert "嘴唇开合（无声音）" in prompt
+    assert "开口说话" not in prompt
+
+
+def test_prepare_to_speak_does_not_become_prepare_mouth_open():
+    """「准备开口说话」不能被拼成「准备嘴唇开合（无声音）」。"""
+    beats = [{
+        "duration_s": 5, "cut": False, "framing": "近景",
+        "camera_motion": "固定", "subject_motion": "她抬头准备开口说话",
+        "description": "她抬起头，准备开口说话",
+    }]
+    prompt = _video_req("shot_cut", _spec(
+        shot_duration_s=5, shot_video_beats=beats,
+    ))["submit"]["prompt"]
+
+    assert "准备嘴唇开合" not in prompt
+    assert "嘴唇微张" in prompt
+
+
+def test_first_person_binds_narrator_body_parts():
+    """第一人称下裸部位名必须补「镜头角色的」归属（用户 2026-11-10）。"""
+    beats = [{
+        "duration_s": 5, "cut": False, "framing": "近景",
+        "camera_motion": "固定", "subject_motion": "柱身贴近她的腰",
+        "description": "他的柱身压在她腰侧",
+    }]
+    prompt = _video_req("shot_cut", _spec(
+        viewpoint="first_person", shot_duration_s=5, shot_video_beats=beats,
+    ))["submit"]["prompt"]
+    assert "镜头角色的柱身" in prompt
+    assert "他的柱身" not in prompt
+
+    third = _video_req("shot_cut", _spec(shot_duration_s=5, shot_video_beats=beats))
+    assert "镜头角色的柱身" not in third["submit"]["prompt"]
+
+
+# ── 2026-11-09 覆盖式分镜：环境空镜 / 景别与主体运动 ──────────────────────────
+def _establish_spec(**overrides):
+    base = _spec()
+    base.update({
+        "establish": True, "actors": [], "appearance": "", "wardrobe": "",
+        "composition": "环境空镜", "shot_framing": "远景/环境空镜",
+        "shot_subject_motion": "蛮啾在梯子上挂花，尘埃在斜光里浮动",
+        "shot_camera_motion": "缓慢推近", "shot_sound_cue": "门轴声",
+    })
+    base.update(overrides)
+    return base
+
+
+def _video_req(mode: str, spec: dict, **kwargs):
+    return video_prompt.build_video_request(
+        mode=mode, spec=spec,
+        video_config={"base_url": "http://x", "model": "h3", "size": "16:9"},
+        pending_frame=True, **kwargs,
+    )
+
+
+def test_establish_binding_has_no_identity_lock():
+    req = _video_req("shot_establish", _establish_spec())
+    prompt = req["submit"]["prompt"]
+    assert "环境空镜" in prompt
+    assert "图片1中心的角色为" not in prompt
+    assert "人物身份和五官不能发生变化" not in prompt
+    assert "蛮啾在梯子上挂花" in prompt
+    assert "门轴声" in prompt
+    assert "图片2" not in prompt
+
+
+def test_establish_video_binds_role_refs_when_character_named():
+    """环境镜锚点/主体点名了角色且有底图 ⇒ 图片2=该角色（妲千沁入场场景）。"""
+    req = _video_req("shot_establish", _establish_spec(role_refs=["妲千沁"]))
+    prompt = req["submit"]["prompt"]
+    assert "图片2=妲千沁" in prompt
+    assert "角色参考图" in prompt
+    assert req["reference_binding"]["图片2"].startswith("妲千沁")
+
+
+def test_establish_move_path_written_once():
+    spec = _establish_spec(shot_camera="镜头从木门沿红毯缓慢推近中央台子")
+    req = _video_req("shot_establish_move", spec)
+    prompt = req["submit"]["prompt"]
+    assert prompt.count("镜头从木门沿红毯缓慢推近中央台子") == 1
+    assert "镜头沿本片声明的路径连续移动" in prompt
+
+
+def test_cut_shot_includes_framing_and_subject_motion():
+    spec = _spec(
+        shot_framing="胸部俯拍",
+        shot_subject_motion="她持续前行，胸口随步伐一起一伏",
+    )
+    req = _video_req("shot_cut", spec)
+    prompt = req["submit"]["prompt"]
+    assert "胸部俯拍" in prompt
+    assert "胸口随步伐一起一伏" in prompt
+
+
+def test_cut_shot_binds_role_refs_from_image2():
+    """分镜视频：图片1=本镜画面，图片2 起=角色底图（与图片生成模式无关）。"""
+    spec = _spec(role_refs=["腓特烈", "蛮啾"], shot_duration_s=3)
+    req = _video_req("shot_cut", spec)
+    prompt = req["submit"]["prompt"]
+    binding = req["reference_binding"]
+    assert "图片2=腓特烈" in prompt
+    assert "图片3=蛮啾" in prompt
+    assert "角色参考图" in prompt
+    assert binding["图片2"].startswith("腓特烈")
+    assert binding["图片3"].startswith("蛮啾")
+
+
+def test_cut_shot_role_refs_limited_by_template_slots():
+    """模板参考槽是天花板：只有 1 个槽时不得声明图片3。"""
+    spec = _spec(role_refs=["甲", "乙"])
+    req = _video_req("shot_cut", spec, caps={"duration": 6, "reference_slots": 1})
+    prompt = req["submit"]["prompt"]
+    assert "图片2=甲" in prompt
+    assert "图片3=乙" not in prompt
+
+
+def test_cut_shot_role_refs_lock_appearance_not_clothing():
+    """底图可能不是当前造型（婚纱模式）：角色参考只锁外貌，服装/姿势以图片1为准。"""
+    spec = _spec(
+        actors=["腓特烈"], role_refs=["腓特烈"], wardrobe="白色婚纱",
+        appearance="腓特烈：暗黄色长发，身高近两米", shot_duration_s=3,
+    )
+    prompt = _video_req("shot_cut", spec)["submit"]["prompt"]
+
+    assert "服装、姿势与场景以图片1为准" in prompt
+    assert "不参考底图的服装与姿势" in prompt
+    assert "的身份、脸部、服装、发型、造型完全一致" not in prompt
+
+
+def test_cut_beats_with_role_refs_declare_appearance_only():
+    spec = _spec(
+        actors=["腓特烈"], role_refs=["腓特烈"], shot_duration_s=3,
+        shot_video_beats=[{
+            "duration_s": 3, "cut": False, "framing": "全身",
+            "camera_position": "叙事者前方·平视", "camera_motion": "固定",
+            "subject_motion": "她站在侧门口", "description": "她站在侧门口",
+            "sound_cue": "",
+        }],
+    )
+    prompt = _video_req("shot_cut", spec)["submit"]["prompt"]
+
+    assert "角色外貌只按角色参考图锁定" in prompt
+    assert "图片2=腓特烈 的角色参考图" in prompt
+    assert "不参考底图的服装与姿势" in prompt
+
+
+def test_appearance_by_actor_matches_longer_card_name_without_swallowing_prefix():
+    """角色配置名=腓特烈、条目名=腓特烈大帝：要认成同一人，且不能把「大帝：…」当前缀残余。"""
+    assert video_prompt._appearance_by_actor(
+        "腓特烈大帝：身高近两米，暗黄色长发。", ["腓特烈"],
+    ) == {"腓特烈": "身高近两米，暗黄色长发。"}
+    # 多角色段落头同理：配置名是条目名前缀时不得丢外貌。
+    assert video_prompt._appearance_by_actor(
+        "腓特烈大帝：暗黄色长发。\n奥古斯特：螺甸紫长发。", ["腓特烈", "奥古斯特"],
+    ) == {"腓特烈": "暗黄色长发。", "奥古斯特": "螺甸紫长发。"}
+
+
+def test_appearance_by_actor_header_wins_over_parens_inside_profile():
+    """长角色卡外貌正文常带括号（尺寸110+）：不能把括号前的短语当角色名。"""
+    appearance = (
+        "腓特烈大帝：【外貌】身高近两米（比 {{user}} 高出一个头）。\n"
+        "奥古斯特：螺甸紫长发（及腰）。"
+    )
+    assert video_prompt._appearance_by_actor(appearance, ["腓特烈"]) == {
+        "腓特烈": "【外貌】身高近两米（比 {{user}} 高出一个头）。",
+    }
+    # 单行 `名字(外貌)` 格式仍走括号分支（零回归）。
+    assert video_prompt._appearance_by_actor(
+        "纪含章（米色针织开衫，栗色长发）", ["纪含章"],
+    ) == {"纪含章": "米色针织开衫，栗色长发"}

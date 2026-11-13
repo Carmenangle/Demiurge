@@ -17,8 +17,8 @@ DEFAULT_TAURI_CONF = ROOT / "desktop" / "tauri" / "tauri.conf.json"
 DEFAULT_TARGET = "windows-x64-full-rag"
 PIN_SCHEMA_VERSION = 1
 MANIFEST_SCHEMA_VERSION = 2
-REQUIRED_LAYERS = ("base", "application", "rag")
-OPTIONAL_LAYERS: tuple[str, ...] = ()
+REQUIRED_LAYERS = ("base", "application")
+OPTIONAL_LAYERS: tuple[str, ...] = ("rag",)
 VERSION_PATTERN = re.compile(r"^v?(\d+)\.(\d+)(?:\.(\d+))?$")
 TARGET_PATTERN = re.compile(r"^[0-9a-z][0-9a-z-]*$")
 REPOSITORY_PATTERN = re.compile(r"^[0-9A-Za-z_.-]+/[0-9A-Za-z_.-]+$")
@@ -225,7 +225,7 @@ def verify_layer_assets(manifest: dict, assets_dir: Path) -> None:
                 value.update(block)
         return value.hexdigest()
 
-    for name in REQUIRED_LAYERS:
+    for name in (*REQUIRED_LAYERS, *OPTIONAL_LAYERS):
         layer = manifest["layers"].get(name)
         if layer is None:
             continue

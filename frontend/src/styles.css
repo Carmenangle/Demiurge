@@ -1495,6 +1495,7 @@ textarea.text-tool-short-input { height: auto; min-height: 0; resize: none; over
 .repo-cover-wrap { position: relative; }
 
 .repo-cover {
+  position: relative;
   aspect-ratio: 4 / 3;
   width: 100%;
   border-radius: var(--radius);
@@ -1526,10 +1527,29 @@ textarea.text-tool-short-input { height: auto; min-height: 0; resize: none; over
   box-shadow: var(--shadow-card);
 }
 
-.repo-cover img {
+.repo-cover img,
+.repo-cover video {
   width: 100%;
   height: 100%;
   object-fit: cover;
+  display: block;
+  pointer-events: none;   /* 点击穿透给外层 .repo-cover，打开作品 */
+}
+
+/* 动态视频封面角标：自动播放被系统限制时也能看出这是视频封面 */
+.repo-cover-live {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 11px;
+  line-height: 1.5;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+  backdrop-filter: blur(4px);
 }
 
 .repo-name {
@@ -3098,6 +3118,25 @@ html[data-theme="liquid-glass"] .repo-card-menu {
   flex-wrap: wrap;
 }
 
+/* 模型存档条（2026-11-07）：视觉 / Embedding 多档配置，选一档为主 */
+.model-preset-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+.model-preset-bar > label { font-size: 12px; color: var(--text-muted); }
+.model-preset-bar select {
+  flex: 1 1 180px;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+}
+
 .model-test-row {
   display: flex;
   align-items: flex-start;
@@ -4107,6 +4146,11 @@ textarea.state-value { min-height: 58px; }
   border-color: var(--danger, #c84b4b);
 }
 
+/* 失败/试跑槽：重新生成 + 编辑提示词并排时留出间距 */
+.media-slot-failed .media-slot-retry + .media-slot-edit-prompt {
+  margin-left: 8px;
+}
+
 /* 灵感卡：代码块风格（深色等宽），与对话文字区分 */
 .insp-card {
   border: 1px solid #2b2f3a;
@@ -4218,6 +4262,14 @@ textarea.state-value { min-height: 58px; }
 .insp-insert:hover { background: var(--accent, #4a7); color: var(--accent-text); border-color: transparent; }
 
 .img-card img {
+  display: block;
+  width: 100%;
+  max-width: 360px;
+}
+
+/* 视频必须与图片同规格：缺这条时 <video> 按原始像素铺开（1056×1536 就是 1056 CSS px），
+   比上方成图宽三倍、比视口还高，首帧永远装不进一屏。 */
+.img-card video {
   display: block;
   width: 100%;
   max-width: 360px;
@@ -7813,11 +7865,69 @@ html:is([data-theme="bright"], [data-theme="night"], [data-theme="green"], [data
   max-height: calc(100vh - 160px);
   overflow-y: auto;
 }
+/* 书单图标固定为单行尺寸：书名换行/变长时不得把 svg 当弹性项压窄 */
+.worldbook-library .nav-item > svg {
+  flex: 0 0 14px;
+  width: 14px;
+  height: 14px;
+  min-width: 14px;
+}
 .worldbook-content { min-width: 0; }
 .worldbook-index.is-empty { visibility: hidden; }
 /* 条目面板的弹层外壳只在窄屏出现（≤720px），桌面保持原有三栏 */
 .worldbook-sheet-mask,
 .worldbook-sheet-head { display: none; }
+
+/* 世界书条目编辑：独立弹窗（不再挤在条目列表顶部） */
+.worldbook-entry-mask { z-index: 1200; }
+.worldbook-entry-modal { width: min(760px, 94vw); }
+.worldbook-entry-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.worldbook-entry-head h3 { margin: 0 0 4px; }
+.worldbook-entry-subtitle { margin: 0; font-size: 12px; color: var(--text-muted); }
+.worldbook-entry-close { padding: 6px; flex-shrink: 0; }
+.worldbook-entry-form { display: grid; gap: 14px; }
+.worldbook-entry-field { display: grid; gap: 6px; font-size: 12px; color: var(--text-muted); }
+.worldbook-entry-field > span { font-size: 12px; font-weight: 600; color: var(--text); }
+.worldbook-entry-field input,
+.worldbook-entry-field textarea {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px 10px;
+  font: inherit;
+  background: var(--surface);
+  color: var(--text);
+  margin: 0;
+}
+.worldbook-entry-field textarea {
+  min-height: 240px;
+  resize: vertical;
+  line-height: 1.65;
+}
+.worldbook-entry-field small { font-size: 11px; line-height: 1.5; color: var(--text-muted); }
+.worldbook-entry-switches {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 18px;
+}
+.worldbook-entry-switches label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text);
+}
+.worldbook-entry-switches input[type="checkbox"] { width: auto; margin: 0; padding: 0; }
+.worldbook-entry-error { margin: 0; font-size: 12px; color: var(--danger, #c0392b); }
+.worldbook-entry-modal .modal-actions { margin-top: 18px; }
 
 /* 设置 → 模型：四类能力以状态卡呈现，模型的高级字段默认折叠。 */
 .model-capability-grid {
@@ -8082,6 +8192,21 @@ html:is([data-theme="bright"], [data-theme="night"], [data-theme="green"], [data
 .nci-error { color: #f87171; font-size: 12px; }
 .nci-loading { color: var(--text-muted, #999); font-size: 12px; }
 .nci-empty { color: var(--text-muted, #999); font-size: 12px; text-align: center; padding: 12px 0; }
+.nci-arms {
+  border: 1px dashed var(--border, #333);
+  border-radius: 8px;
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.nci-arms-head { color: var(--text-muted, #999); font-size: 11px; }
+.nci-arm { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; font-size: 12px; }
+.nci-arm-name { color: var(--text, #eee); }
+.nci-arm-state { color: var(--text-muted, #999); }
+.nci-arm-on .nci-arm-state { color: #34d399; }
+.nci-arm-idle .nci-arm-state { color: #fbbf24; }
+.nci-arm-reason { color: var(--text-muted, #999); font-size: 11px; }
 .nci-item {
   border: 1px solid var(--border, #333);
   border-radius: 8px;
@@ -10758,6 +10883,26 @@ html[data-theme="liquid-glass"] .asset-toolbar-sticky {
   margin-bottom: 0;
 }
 .asset-toolbar-row { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; min-width: 0; }
+/* 资产库导入（2026-11-08）：把文件拖到页面任意处时的整页投放提示。
+   pointer-events:none 是关键——提示层本身不能吃掉 drop 事件。 */
+.asset-drop-overlay {
+  position: fixed;
+  inset: 10px;
+  z-index: 1100;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 2px dashed var(--primary, #3b82f6);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--bg) 76%, transparent);
+  color: var(--text);
+  font-size: 15px;
+  pointer-events: none;
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+}
 .asset-toolbar-find { flex-wrap: nowrap; }
 .asset-search { position: relative; flex: 1 1 220px; min-width: 140px; max-width: 520px; }
 .asset-search-icon {
@@ -11203,4 +11348,660 @@ html[data-theme="liquid-glass"] .asset-maint-menu {
    ============================================================ */
 @media (max-width: 720px), (pointer: coarse) and (hover: none) and (max-width: 1024px) {
   .template-path-dir { display: none; }
+}
+
+/* ============================================================
+   聊天 / 群聊（2026-11-09 第一版）
+   显式交互模式：私聊 / 多角色群聊；独立会话线，不推进剧情。
+   ============================================================ */
+.chatroom-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(8, 12, 18, 0.48);
+  backdrop-filter: blur(3px);
+}
+.chatroom-shell {
+  width: min(1080px, 100%);
+  height: min(780px, 100%);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+}
+.chatroom-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--grad-band);
+}
+.chatroom-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.chatroom-title strong {
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chatroom-thread {
+  color: var(--text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chatroom-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+.chatroom-mode {
+  display: inline-flex;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2);
+}
+.chatroom-mode button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.chatroom-mode button.active {
+  color: var(--accent-text);
+  background: var(--accent);
+}
+.chatroom-mode button:disabled { opacity: 0.45; cursor: not-allowed; }
+.chatroom-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.chatroom-icon-btn:hover { color: var(--text); background: var(--surface-2); }
+.chatroom-icon-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.chatroom-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.chatroom-members {
+  flex: 0 0 220px;
+  padding: 12px;
+  overflow-y: auto;
+  border-right: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.chatroom-members-title {
+  margin-bottom: 8px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+.chatroom-member {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 8px;
+  margin-bottom: 4px;
+  text-align: left;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  cursor: pointer;
+}
+.chatroom-member:hover { background: var(--surface); }
+.chatroom-member.active {
+  border-color: var(--accent);
+  background: var(--surface);
+}
+.chatroom-member:disabled { opacity: 0.55; cursor: not-allowed; }
+.chatroom-avatar {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 26px;
+  height: 26px;
+  font-size: 12px;
+  color: var(--accent-text);
+  background: var(--accent);
+  border-radius: 50%;
+  overflow: hidden;
+}
+.chatroom-avatar img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  /* 角色底图常是 9:16：完整装进圆形头像，两侧留白（白底），不裁掉头/脚。 */
+  object-fit: contain;
+  background: #fff;
+  border-radius: 50%;
+  display: block;
+}
+.chatroom-member-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chatroom-order {
+  flex: 0 0 auto;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  font-size: 10px;
+  line-height: 17px;
+  text-align: center;
+  color: var(--accent-text);
+  background: var(--accent);
+  border-radius: 999px;
+}
+.chatroom-hint {
+  margin: 10px 2px 0;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+.chatroom-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+.chatroom-stream {
+  flex: 1;
+  padding: 16px;
+  overflow-y: auto;
+  background: var(--bg);
+}
+.chatroom-empty {
+  margin: 24px auto;
+  max-width: 420px;
+  font-size: 12.5px;
+  line-height: 1.7;
+  text-align: center;
+  color: var(--text-muted);
+}
+.chatroom-msg {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.chatroom-msg.user,
+.chatroom-msg.system { flex-direction: column; }
+.chatroom-msg.user { align-items: flex-end; }
+.chatroom-msg.system { align-items: center; }
+.chatroom-msg-avatar {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+  font-size: 12px;
+  color: var(--accent-text);
+  background: var(--accent);
+  border-radius: 50%;
+  overflow: hidden;
+}
+.chatroom-msg-avatar img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #fff;
+  border-radius: 50%;
+  display: block;
+}
+.chatroom-msg-body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+  /* 左右气泡同一最大宽度（约 2/3）：角色从左往右，用户从右往左镜像，视觉对称。 */
+  max-width: 66.67%;
+}
+.chatroom-msg.user .chatroom-msg-body {
+  align-items: flex-end;
+  max-width: 66.67%;
+}
+.chatroom-msg.system .chatroom-msg-body {
+  align-items: center;
+  max-width: 100%;
+}
+/* QQ 风格消息头：名称 + 已读圆点；时间改为「间隔分隔条」，不再挂在每条气泡上。 */
+.chatroom-msg-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 0 0 3px 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.chatroom-msg.user .chatroom-msg-meta {
+  margin: 0 4px 3px 0;
+}
+/* 已读/送达圆点：角色消息右侧红=未读、绿=已读；用户消息左侧红=发送中/失败、绿=已送达。 */
+.chatroom-read-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  align-self: center;
+  transition: background-color 0.2s ease, box-shadow 0.2s ease;
+}
+.chatroom-read-dot.read {
+  background: #2ecc71;
+  box-shadow: 0 0 0 2px rgba(46, 204, 113, 0.18);
+}
+.chatroom-read-dot.unread {
+  background: #e74c3c;
+  box-shadow: 0 0 0 2px rgba(231, 76, 60, 0.18);
+}
+.chatroom-msg-name {
+  color: var(--text);
+  font-weight: 600;
+}
+/* QQ 风格时间分隔：首条，或与上一条间隔 ≥10 分钟 / 跨天时出现。 */
+.chatroom-time-divider {
+  display: flex;
+  justify-content: center;
+  margin: 14px 0 10px;
+}
+.chatroom-time-divider span {
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.chatroom-bubble {
+  max-width: 100%;
+  padding: 9px 12px;
+  font-size: 13px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.chatroom-msg.user .chatroom-bubble {
+  /* 用户气泡与角色气泡同一套底/边框/字号，只保留右对齐区分；不再用整块主题色，
+     避免私聊里用户消息看起来像另一种组件（2026-11-10 用户口径）。 */
+  color: var(--text);
+  background: var(--surface);
+  border-color: var(--border);
+}
+.chatroom-msg.system .chatroom-bubble {
+  max-width: 100%;
+  font-size: 12px;
+  color: var(--text-muted);
+  background: transparent;
+  border-style: dashed;
+}
+/* 消息级操作：编辑 / 重新发送 / 重新生成 / 删除；悬停显示，触屏常显。 */
+.chatroom-msg-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.chatroom-msg:hover .chatroom-msg-actions,
+.chatroom-msg:focus-within .chatroom-msg-actions { opacity: 1; }
+.chatroom-msg.user .chatroom-msg-actions { justify-content: flex-end; }
+.chatroom-msg-actions button {
+  padding: 1px 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.chatroom-msg-actions button:hover:not(:disabled) {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.chatroom-msg-actions button:disabled { opacity: 0.45; cursor: not-allowed; }
+.chatroom-edit { width: 100%; }
+.chatroom-edit textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  resize: vertical;
+}
+.chatroom-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+@media (hover: none) {
+  .chatroom-msg-actions { opacity: 1; }
+}
+.chatroom-media {
+  display: block;
+  max-width: min(100%, 520px);
+  max-height: 420px;
+  margin-bottom: 6px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  object-fit: contain;
+  background: var(--surface-2);
+}
+.chatroom-typing {
+  margin: 4px 2px 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.chatroom-typing-cancel {
+  margin-left: 8px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.chatroom-typing-cancel:hover { color: var(--accent, #4a7); }
+/* 上下文堆叠提醒：私聊记录变多时提示压缩，不阻塞聊天。 */
+.chatroom-context-hint {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+  border-bottom: 1px solid var(--border);
+}
+.chatroom-context-hint.full {
+  color: var(--text);
+  background: color-mix(in srgb, var(--warning) 14%, var(--surface));
+}
+.chatroom-context-text { flex: 1; min-width: 0; }
+.chatroom-context-actions { display: flex; flex: 0 0 auto; gap: 8px; }
+/* 多元数据插入：从「底图生成完毕」小窗跳进来时高亮目标角色行。 */
+.media-insert-row.portrait-focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+/* QQ 式「戳了戳你」：居中动作提示，不占气泡位。 */
+.chatroom-poke {
+  margin: 6px 0 12px;
+  font-size: 11.5px;
+  text-align: center;
+  color: var(--text-muted);
+}
+.chatroom-compose {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+.chatroom-compose textarea {
+  flex: 1;
+  min-height: 40px;
+  max-height: 160px;
+  padding: 10px 12px;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  resize: none;
+}
+.chatroom-compose textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.chatroom-send {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 40px;
+  padding: 0 16px;
+  font-size: 13px;
+  color: var(--accent-text);
+  background: var(--accent);
+  border: 0;
+  border-radius: 10px;
+  cursor: pointer;
+}
+.chatroom-send.stop { background: var(--danger); }
+.chatroom-send:disabled { opacity: 0.45; cursor: not-allowed; }
+
+@media (max-width: 720px), (pointer: coarse) and (hover: none) and (max-width: 1024px) {
+  .chatroom-overlay { padding: 0; }
+  .chatroom-shell {
+    width: 100%;
+    height: 100%;
+    border-radius: 0;
+  }
+  .chatroom-body { flex-direction: column; }
+  .chatroom-members {
+    flex: 0 0 auto;
+    display: flex;
+    gap: 6px;
+    padding: 8px 10px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .chatroom-members-title,
+  .chatroom-hint { display: none; }
+  .chatroom-member {
+    flex: 0 0 auto;
+    width: auto;
+    margin: 0;
+    white-space: nowrap;
+  }
+  .chatroom-title strong { font-size: 13px; }
+  .chatroom-thread { display: none; }
+  .chatroom-bubble { max-width: 100%; }
+  .chatroom-media { max-width: 100%; }
+}
+
+/* ============================================================
+   聊天 / 群聊（2026-11-09，主界面内联版）
+   模式条在 ChatView 顶栏；消息流与输入栏占用原本对话区，不使用弹窗。
+   ============================================================ */
+.interaction-mode-tabs {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2);
+}
+.interaction-mode-tabs button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-muted);
+  background: transparent;
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.interaction-mode-tabs button.active {
+  color: var(--accent-text);
+  background: var(--accent);
+}
+.interaction-mode-tabs .mode-unread-dot {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--danger, #e5484d);
+  box-shadow: 0 0 0 1.5px var(--surface);
+  pointer-events: none;
+}
+.interaction-mode-tabs button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.chatroom-inline {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+.chatroom-member-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--grad-band);
+  flex: 0 0 auto;
+  overflow-x: auto;
+}
+.chatroom-mode-label {
+  flex: 0 0 auto;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.chatroom-member-chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 1 auto;
+  overflow-x: auto;
+}
+.chatroom-chip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  padding: 3px;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.chatroom-unread-dot {
+  position: absolute;
+  top: -1px;
+  right: -1px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--danger, #e5484d);
+  box-shadow: 0 0 0 2px var(--surface);
+  pointer-events: none;
+}
+.chatroom-chip.active {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.chatroom-chip:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.chatroom-chip .chatroom-avatar {
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  font-size: 11px;
+}
+.chatroom-bar-hint {
+  flex: 1 1 200px;
+  min-width: 120px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chatroom-stream.chat-stream {
+  gap: 12px;
+  padding: 18px 12px;
+}
+.chatroom-stream .chatroom-msg { margin-bottom: 0; }
+.chatroom-compose-wrap { padding: 0 4px; }
+.chatroom-compose-wrap .chatroom-compose {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+@media (max-width: 720px), (pointer: coarse) and (hover: none) and (max-width: 1024px) {
+  .interaction-mode-tabs button { padding: 4px 8px; }
+  .chatroom-bar-hint { display: none; }
+  .chatroom-mode-label { display: none; }
+  .chatroom-member-bar { padding: 6px 8px; gap: 6px; }
+  .chatroom-stream.chat-stream { padding: 12px 8px; }
+  .chatroom-compose-wrap { padding: 0 2px; }
+  .chatroom-context-hint { flex-direction: column; align-items: stretch; padding: 8px 10px; }
+  .chatroom-context-actions { justify-content: flex-end; }
 }

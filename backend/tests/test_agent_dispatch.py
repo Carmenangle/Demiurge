@@ -18,6 +18,14 @@ from app.services import roleplay_agency as ra
 from app.services.agent_contracts import RunContext
 
 
+@pytest.fixture(autouse=True)
+def _isolate_followup_state(monkeypatch, tmp_path):
+    """聊天追问节奏落盘隔离：answer/tool/supervisor 的聊天用例不得写真实运行态文件。"""
+    from app.services import chat_followup
+
+    monkeypatch.setattr(chat_followup, "_STATE_PATH", tmp_path / "followup.json")
+
+
 def _ctx(**over) -> dict:
     base = {"chat_base": "b", "chat_key": "k", "chat_model": "m"}
     base.update(over)
@@ -133,6 +141,191 @@ def test_多角色persona只发送本轮出场角色描述并按剧情选择生�
     assert ag._card_visual_profiles(ctx, "米拉走进房间") == "米拉：黑发金眼"
     ctx["_illustration_visual_profiles"] = "米拉：黑发金眼"
     assert ag._illustration_appearance(ctx) == "米拉：黑发金眼"
+
+
+def test_单卡绑定时未点名也注入该卡而多卡仍守点名纪律(monkeypatch):
+    """合集卡的卡名是**作品标题**，既不会出现在用户输入里、也不会出现在正文里 ⇒ 三条
+    入选路径全断，卡层在多轮剧情中恒不注入（角色身份只能全压在世界书一侧）。只绑一张卡
+    时没有「把甲的外貌转给乙」要防，退回注入它。
+
+    零回归面：description 为空的骨架卡（现网 33/34 张）仍返回空串 ⇒ 提示词逐字节不变。
+    """
+    from app.services import character_store
+
+    cards = {"星垂平野": {"description": "银甲，左颊有疤"}, "潮声旅馆": {"description": "黑发金眼"}}
+    monkeypatch.setattr(character_store, "read_card", lambda _base, name: cards.get(name))
+
+    solo = _ctx(character_dir="cards", card_name="星垂平野", opening_card_name="星垂平野",
+                card_names=["星垂平野"])
+    later = ag._resolve_personas(solo, "他走近了些，气氛有点僵。")
+    assert "【角色：星垂平野】" in later and "银甲，左颊有疤" in later
+
+    # 多卡：未点名仍不注入（点名纪律是角色间外观隔离的前提）
+    duo = _ctx(character_dir="cards", card_name="星垂平野", opening_card_name="星垂平野",
+               card_names=["星垂平野", "潮声旅馆"])
+    assert ag._resolve_personas(duo, "他走近了些，气氛有点僵。") == ""
+
+    # 空 description 的骨架卡：回退选上了也被内容闸门挡下 ⇒ 现状数据一字不变
+    cards["星垂平野"]["description"] = ""
+    assert ag._resolve_personas(solo, "他走近了些，气氛有点僵。") == ""
+
+
+def test_多卡纯机制书时状态栏在场角色进入人设(monkeypatch):
+    """纯机制世界书（无角色条目）时，旧三条入选路径可能全断——只靠上轮正文回退
+    还会被 2000 字尾部截断。最新 `<status>` 的 `[在场]` 是场景真源：只认绑定卡名，
+    且只追加未入选的卡，不把不在场/未点名的卡塞进来。"""
+    from app.services import character_store
+
+    cards = {"星垂平野": {"description": "银甲，左颊有疤"}, "潮声旅馆": {"description": "黑发金眼"}}
+    monkeypatch.setattr(character_store, "read_card", lambda _base, name: cards.get(name))
+    long_body = "随后剧情继续推进。" * 400
+    history = [{
+        "role": "assistant",
+        "content": f"<status>\n[在场] 潮声旅馆\n</status>\n{long_body}",
+    }]
+    ctx = _ctx(character_dir="cards", card_name="星垂平野", opening_card_name="星垂平野",
+               card_names=["星垂平野", "潮声旅馆"], history=history)
+    events = []
+    monkeypatch.setattr(
+        aga.run_trace, "emit", lambda ctx_, event, **data: events.append((event, data)),
+    )
+
+    out = ag._resolve_personas(ctx, "继续。")
+
+    assert "【角色：潮声旅馆】" in out and "黑发金眼" in out
+    assert "星垂平野" not in out
+    assert ctx["_selected_persona_names"] == ["潮声旅馆"]
+    cast_event = next(data for event, data in events if event == "cast.resolved")
+    assert cast_event["present"] == ["潮声旅馆"]
+    assert cast_event["sources"]["潮声旅馆"] == "present"
+
+
+def test_最新剧情没有在场行时不回溯旧快照(monkeypatch):
+    """`[在场]` 只看最新一条非空 AI 消息：最新消息没有 `<status>` 或没有 `[在场]`
+    时按「本轮没有在场证据」处理，不能拿上一场的人继续补人设。"""
+    from app.services import character_store
+
+    cards = {"星垂平野": {"description": "银甲，左颊有疤"}, "潮声旅馆": {"description": "黑发金眼"}}
+    monkeypatch.setattr(character_store, "read_card", lambda _base, name: cards.get(name))
+    old_status = "<status>\n[在场] 潮声旅馆\n</status>\n旧剧情正文。"
+    for latest in (
+        "<status>\n[时间] 夜晚\n</status>\n新一轮正文。",
+        "普通回答，没有状态栏。",
+    ):
+        ctx = _ctx(
+            character_dir="cards", card_name="星垂平野", opening_card_name="星垂平野",
+            card_names=["星垂平野", "潮声旅馆"],
+            history=[
+                {"role": "assistant", "content": old_status},
+                {"role": "assistant", "content": latest},
+            ],
+        )
+        assert ag._resolve_personas(ctx, "继续。") == ""
+
+
+def test_状态栏在场与角色条目命中注入同一张卡(monkeypatch):
+    """对齐证明：同一张卡，由「世界书角色条目命中」或「状态栏 [在场]」入选，
+    注入文本必须逐字相同；否则纯机制书那条路仍是二等公民。"""
+    from app.services import character_store
+
+    cards = {"星垂平野": {"description": "银甲，左颊有疤"}, "潮声旅馆": {"description": "黑发金眼"}}
+    monkeypatch.setattr(character_store, "read_card", lambda _base, name: cards.get(name))
+    long_body = "随后剧情继续推进。" * 400
+    status_ctx = _ctx(
+        character_dir="cards", card_name="星垂平野", opening_card_name="星垂平野",
+        card_names=["星垂平野", "潮声旅馆"],
+        history=[{
+            "role": "assistant",
+            "content": f"<status>\n[在场] 潮声旅馆\n</status>\n{long_body}",
+        }],
+    )
+    book_ctx = _ctx(character_dir="cards", card_name="星垂平野", opening_card_name="星垂平野",
+                    card_names=["星垂平野", "潮声旅馆"])
+
+    by_status = ag._resolve_personas(status_ctx, "继续。")
+    by_book = ag._resolve_personas(book_ctx, "继续。", worldbook_names=["潮声旅馆"])
+
+    assert by_status == by_book
+
+
+def test_状态栏在场但卡无描述或未绑定时不注入(monkeypatch):
+    """内容闸门与绑定名单仍是硬边界：在场不等于一定注入。"""
+    from app.services import character_store
+
+    cards = {"星垂平野": {"description": "银甲，左颊有疤"}, "潮声旅馆": {"description": ""}}
+    monkeypatch.setattr(character_store, "read_card", lambda _base, name: cards.get(name))
+    long_body = "随后剧情继续推进。" * 400
+    empty_desc = _ctx(
+        character_dir="cards", card_name="星垂平野", opening_card_name="星垂平野",
+        card_names=["星垂平野", "潮声旅馆"],
+        history=[{
+            "role": "assistant",
+            "content": f"<status>\n[在场] 潮声旅馆\n</status>\n{long_body}",
+        }],
+    )
+    unbound = _ctx(
+        character_dir="cards", card_name="星垂平野", opening_card_name="星垂平野",
+        card_names=["星垂平野", "潮声旅馆"],
+        history=[{
+            "role": "assistant",
+            "content": f"<status>\n[在场] 不存在的人\n</status>\n{long_body}",
+        }],
+    )
+
+    assert ag._resolve_personas(empty_desc, "继续。") == ""
+    assert ag._resolve_personas(unbound, "继续。") == ""
+
+
+def test_开场首轮仍只注入开场卡(monkeypatch):
+    """首轮只看 opening_card_name；`[在场]` 不得把其他卡提前拉进开场。"""
+    from app.services import character_store
+
+    cards = {"星垂平野": {"description": "银甲，左颊有疤"}, "潮声旅馆": {"description": "黑发金眼"}}
+    monkeypatch.setattr(character_store, "read_card", lambda _base, name: cards.get(name))
+    long_body = "随后剧情继续推进。" * 400
+    ctx = _ctx(
+        character_dir="cards", card_name="星垂平野", opening_card_name="星垂平野",
+        card_names=["星垂平野", "潮声旅馆"],
+        history=[{
+            "role": "assistant",
+            "content": f"<status>\n[在场] 潮声旅馆\n</status>\n{long_body}",
+        }],
+    )
+
+    out = ag._resolve_personas(ctx, "继续。", opening_only=True)
+
+    assert "【角色：星垂平野】" in out and "银甲，左颊有疤" in out
+    assert "潮声旅馆" not in out
+
+
+def test_仅在场追加的人设受预算约束(monkeypatch):
+    """多张富描述卡同时在场时，第一张仅在场卡仍注入（保证至少一人有设定），
+    后续追加按原文预算截停并记 trace，避免 system 被撑爆。"""
+    from app.services import character_store
+
+    cards = {name: {"description": "甲" * 30} for name in ("星垂平野", "潮声旅馆", "临江客栈")}
+    monkeypatch.setattr(character_store, "read_card", lambda _base, name: cards.get(name))
+    monkeypatch.setattr(aga, "_PRESENT_PERSONA_EXTRA_BUDGET", 10)
+    long_body = "随后剧情继续推进。" * 400
+    ctx = _ctx(
+        character_dir="cards", card_name="星垂平野", opening_card_name="星垂平野",
+        card_names=["星垂平野", "潮声旅馆", "临江客栈"],
+        history=[{
+            "role": "assistant",
+            "content": f"<status>\n[在场] 星垂平野、潮声旅馆、临江客栈\n</status>\n{long_body}",
+        }],
+    )
+    events = []
+    monkeypatch.setattr(
+        aga.run_trace, "emit", lambda ctx_, event, **data: events.append((event, data)),
+    )
+
+    out = ag._resolve_personas(ctx, "继续。")
+
+    assert "【角色：星垂平野】" in out
+    assert "潮声旅馆" not in out and "临江客栈" not in out
+    cast_event = next(data for event, data in events if event == "cast.resolved")
+    assert cast_event["dropped_for_budget"] == ["潮声旅馆", "临江客栈"]
 
 
 def test_插画外貌查询从被长正文裁掉的最新状态栏恢复在场角色(tmp_path):
@@ -260,6 +453,16 @@ def test_本轮筛选角色卡分别保留预设字段(monkeypatch):
     assert "米拉：别出声。" in ctx["_selected_persona_examples"]
 
 
+def test_curator_worldbook_context_follows_context_budget():
+    """Curator 世界书视图随 contextMaxTokens 缩放，不再写死 6000。"""
+    assert aga._curator_worldbook_max_chars(
+        _ctx(context_max_tokens=20_000, preset_sampling={})) == 6_000
+    assert aga._curator_worldbook_max_chars(
+        _ctx(context_max_tokens=100_000, preset_sampling={})) == 30_000
+    assert aga._curator_worldbook_max_chars(
+        _ctx(context_max_tokens=0, preset_sampling={})) == 0
+
+
 def test_主剧情世界书选择范围贯通到curator读写与trace(monkeypatch, tmp_path):
     repo_id = "work"
     book = {"entries": [
@@ -291,6 +494,58 @@ def test_主剧情世界书选择范围贯通到curator读写与trace(monkeypatc
     ]) == 1
     scope = next(data for event, data in events if event == "worldbook.update_scope")
     assert scope == {"allowed_indices": [0], "rejected_indices": [1]}
+
+
+def test_无绑定卡时世界书来源读取不撞未赋值卡名(tmp_path):
+    """2026-11-03 纯卡盘点实锤（清单 #17）：`card_name` 原本只在 `_bound_card_names` 的 for 里
+    赋值，一张绑定卡都没有时循环不执行，而独立书兜底段 `if wb_dir and not wb_name and card_name`
+    仍要读它 ⇒ UnboundLocalError，并被 `_resolve_worldbook` 的兜底吞成空串（零留痕），连带打断
+    `_curator_worldbook_fn` 那条链。修复＝循环外初始化空串（＝「没有可当书名的卡」）。"""
+    ctx = _ctx(
+        worldbook_dir=str(tmp_path), worldbook_name="",
+        card_names=[], card_name="", opening_card_name="",
+    )
+
+    assert aga._worldbook_sources(ctx) == []
+
+
+def test_世界书读坏了返回空串但留下失败事件(monkeypatch):
+    """清单 #16：兜底保留（读坏了不该打断正文），但「书读坏了」与「没书」原本症状逐字相同
+    ——都是空串、零留痕，现场只能靠读代码分辨。补一条 worldbook.resolve_failed 把两者分开。"""
+    events = []
+    monkeypatch.setattr(
+        ag.run_trace, "emit", lambda ctx, event, **data: events.append((event, data)),
+    )
+
+    def _boom(_ctx):
+        raise RuntimeError("快照读不出来")
+
+    monkeypatch.setattr(aga, "_repo_worldbook", _boom)
+    ctx = _ctx(output_dir="out", repo_id="work")
+
+    assert ag._resolve_worldbook(ctx, "本轮正文") == ""
+    failed = next(data for event, data in events if event == "worldbook.resolve_failed")
+    assert "快照读不出来" in failed["error"]
+
+
+def test_能动性子图组装异常留下失败事件(monkeypatch):
+    """清单 #16（同族）：组装炸了＝整条子图蒸发（state 块／世界 Agent／curator／表格全没），
+    原本零留痕，与「用户主动关闭能动性」在 trace 里看不出差别。deps 还没造出来，
+    留痕只能直接打 run_trace。"""
+    events = []
+    monkeypatch.setattr(
+        ag.run_trace, "emit", lambda ctx, event, **data: events.append((event, data)),
+    )
+
+    def _boom(_ctx):
+        raise RuntimeError("回合号算炸了")
+
+    monkeypatch.setattr(aag, "_next_story_turn", _boom)
+    ctx = _ctx(output_dir="out", repo_id="work", card_name="露娜", character_dir="cards")
+
+    assert aag._agency_prelude(ctx, "本轮正文") == (None, 0, None, "")
+    failed = next(data for event, data in events if event == "agency.prelude_failed")
+    assert "回合号算炸了" in failed["error"]
 
 
 def test_世界书模糊召回不激活角色卡且当前精确别名优先(monkeypatch):
@@ -436,6 +691,53 @@ def test_世界书激活窗口不扫描已离场的旧历史角色():
 
     assert "苏映晚" in scan
     assert "顾凝霜" not in scan
+
+
+def test_群聊模式由Supervisor选择群聊或通用专家():
+    """群聊不是只会闲聊：普通对话走 chat 路由，明确生图仍走生成专家。"""
+    assert _route("大家好", ctx=_ctx(
+        interaction_mode="group_chat", card_name="甲", character_dir="cards",
+        chat_fn=lambda *_a, **_k: _decision("chat"),
+    )) == "chat"
+    assert _route("画一张猫", ctx=_ctx(
+        interaction_mode="group_chat", card_name="甲", character_dir="cards",
+        chat_fn=lambda *_a, **_k: _decision("generate"),
+    )) == "generate"
+
+
+def test_群聊普通文本不依赖Supervisor选择():
+    """普通群聊必须稳定走多角色轮转，不能被 Supervisor LLM 判成 answer。"""
+    def should_not_call(*_args, **_kwargs):
+        raise AssertionError("群聊普通文本不应调用 Supervisor LLM")
+
+    assert _route("你好", ctx=_ctx(
+        interaction_mode="group_chat", chat_fn=should_not_call,
+        card_name="甲", character_dir="cards",
+    )) == "chat"
+
+
+def test_聊天模式按通用Agent路由且拒绝落入剧情():
+    """1:1 聊天＝通用 Agent 套人设：有卡也不能被强制并入 roleplay。"""
+    ctx = _ctx(
+        interaction_mode="chat", card_name="甲", character_dir="cards",
+        chat_fn=lambda *_a, **_k: _decision("answer"),
+    )
+
+    assert _dispatch("你好", ctx=ctx)["route"] == "answer"
+    assert "甲" in str(ctx.get("_chat_persona_block") or "")
+
+    # 主管模型即使判 roleplay，也不可用 ⇒ 回落通用对话（不是剧情推进）。
+    assert _route("继续", ctx=_ctx(
+        interaction_mode="chat", card_name="甲", character_dir="cards",
+        chat_fn=lambda *_a, **_k: _decision("roleplay"),
+    )) == "answer"
+
+
+def test_剧情模式默认不进入聊天节点():
+    # 不传 interaction_mode = 旧请求：必须保持原分派（有卡纯文本 -> roleplay）。
+    assert _route("继续", ctx=_ctx(
+        card_name="甲", character_dir="cards",
+    )) == "roleplay"
 
 
 def _decision(route: str, confidence: str = "high", alternatives=None) -> str:
@@ -1342,6 +1644,84 @@ def test_世界agent收到本轮输入与召回后的npc条目(monkeypatch, tmp_
         "value": "维持对主角的长期掌控",
         "evidence": "World Agent依据在场角色core与本轮场景推导",
     }]
+
+
+def test_world_agent上下文跟随用户预算而不是写死字符(monkeypatch, tmp_path):
+    """World Agent 的 core/scene 上限由 contextMaxTokens 派生（旧 8000/1200/2000 已移除）。"""
+    captured = {}
+    deps = ra.AgencyDeps(
+        chat_fn=lambda *a, **k: "[]", rng=random.Random(0), state_base=str(tmp_path),
+    )
+
+    def consult(current, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(ra, "consult_world", consult)
+    history_text = "开头标记" + ("甲" * 5000) + "[在场] 甲" + ("尾" * 1000)
+    ctx = _ctx(
+        context_max_tokens=20_000, preset_sampling={},
+        history=[{"role": "assistant", "content": history_text}],
+    )
+    wb = "【角色卡·甲】" + ("甲" * 20_000)
+
+    ag._agency_propose(ctx, deps, None, wb, "推进")
+
+    # 20k token 预算对半：core 10k、scene 历史 10k（旧实现分别是 8k / 1.2k）。
+    assert len(captured["core"]) == 10_000
+    assert "开头标记" in captured["scene"]
+    assert len(captured["scene"]) <= 10_005
+    assert aag._world_agent_context_limits(ctx) == (10_000, 10_000)
+    assert aag._world_agent_context_limits(_ctx(context_max_tokens=0, preset_sampling={})) == (0, 0)
+
+
+def test_agency_propose把裁定投影进ctx供CI对账(monkeypatch, tmp_path):
+    """缺陷 4 的**产出口**：verdicts 过去只汇成一句叙事指令，指令在 roleplay 节点被
+    `pop` 掉 ⇒ 写回侧的 narrative_ci 拿不到「本轮到底要求正文体现什么」，正文写没写
+    「未遂」无人核对。这里只投影一份（判据与 pop 语义一字不动）。"""
+    deps = ra.AgencyDeps(
+        chat_fn=lambda *a, **k: "[]", rng=random.Random(0), state_base=str(tmp_path),
+    )
+    裁定 = agency.Verdict(
+        "埃吉尔", agency.OUTCOME_REJECT, agency.DEGREE_NONE, 81, 70, "困难",
+        intent="签发押送令", goal="把主角押回港区",
+    )
+    monkeypatch.setattr(ra, "consult_world", lambda current, **kwargs: [裁定])
+    ctx = _ctx(history=[{"role": "assistant", "content": "[在场] 埃吉尔"}])
+
+    directive, _lost = ag._agency_propose(ctx, deps, None, "core", "签字放行")
+
+    assert ctx["_agency_npc_claims"] == [vars(裁定)]
+    # 投影是给台账读的**副本**，指令文本本身不受这一刀影响
+    assert "必须写成未遂或受挫" in directive
+
+
+def test_agency_propose三种没裁定的分支各自留不同投影(monkeypatch, tmp_path):
+    """`ctx` 跨节点复用，上一轮的投影必须被本轮**说清去向**，否则 S2 的新臂会拿旧轮
+    裁定来核对新正文（假核对，比没核对更坏）：
+    ① 问了 World、一条提案也没有 ⇒ 空列表 ⇒ 台账记 `no_proposal`；
+    ② 没有 deps／World 调用抛错 ⇒ `None` ⇒ 台账记 `world_not_consulted`。"""
+    deps = ra.AgencyDeps(
+        chat_fn=lambda *a, **k: "[]", rng=random.Random(0), state_base=str(tmp_path),
+    )
+    旧投影 = [{"actor": "上一轮", "roll": 43}]
+
+    monkeypatch.setattr(ra, "consult_world", lambda current, **kwargs: [])
+    ctx = _ctx(history=[], _agency_npc_claims=旧投影)
+    assert ag._agency_propose(ctx, deps, None, "core", "推进") == ("", False)
+    assert ctx["_agency_npc_claims"] == []
+
+    ctx = _ctx(history=[], _agency_npc_claims=旧投影)
+    assert ag._agency_propose(ctx, None, None, "core", "推进") == ("", False)
+    assert ctx["_agency_npc_claims"] is None
+
+    def 抛错(current, **kwargs):
+        raise RuntimeError("上游 500")
+
+    monkeypatch.setattr(ra, "consult_world", 抛错)
+    ctx = _ctx(history=[], _agency_npc_claims=旧投影)
+    assert ag._agency_propose(ctx, deps, None, "core", "推进") == ("", False)
+    assert ctx["_agency_npc_claims"] is None
 
 
 def test_comfy高潮提取失败时把中文正文作为Profile场景源而非旧prompt(monkeypatch, tmp_path):
@@ -3833,7 +4213,8 @@ def test_高潮机位按画面内容判定而非motion强度_正常链路():
 
     旧用例断言 motion 3/2/0 ⇒ 三档不同运镜句——那正是「5 秒里挤进互斥机位、镜头到处转」
     的来源，现由机位契约接管；motion 只剩「是否补能量特效」这一处影响。
-    首尾帧/转场不受此契约（见 test_video_prompt 的 firstlast 用例）。
+    首尾帧自 2026-11-09 也改为全片固定机位（见 test_video_prompt 的 firstlast 用例）；
+    转场短桥段仍不受此契约。
     """
     from app.services import video_prompt
     base_spec = {
@@ -4451,6 +4832,176 @@ def test_answer_node_用户停止显示中断而非回答失败(monkeypatch):
     assert out.get("_interrupted") is True
     assert not (out.get("result_text") or "").startswith("回答失败")
     assert rt.RoleplayInterrupted is not None  # 引用保真
+
+
+def test_answer_node_聊天模式注入角色人设(monkeypatch):
+    """1:1 聊天＝通用 Agent 套人设：通用助手提示在前，人设块必须紧随其后进入系统提示。"""
+    seen: dict = {}
+    ctx = _ctx(
+        repo_id="work", thread_id="work__chat", chat_base="b", chat_key="k", chat_model="m",
+        interaction_mode="chat", _chat_persona_block="【角色】甲：沉默的剑客",
+    )
+
+    def fake_stream(base, key, model, messages, **_kw):
+        seen["messages"] = messages
+        return "在。"
+
+    monkeypatch.setattr(ag._llm, "chat_messages_stream", fake_stream)
+    out = ag.answer_node({"user_text": "你好", "images": [], "_ctx": ctx})
+
+    assert out["result_text"] == "在。"
+    assert "【角色】甲：沉默的剑客" in seen["messages"][0]["content"]
+
+
+def test_answer_node_聊天模式还原预设破甲标记(monkeypatch, tmp_path):
+    """聊天室防拦截：预设要求的 @()@ 拆字标记必须在 1:1 回复里还原后再落盘/展示。"""
+    from app.services import preset_store
+
+    preset = {
+        "prompts": [{"identifier": "guard", "content": "防拦截规则生效"}],
+        "prompt_order": [{"order": [{"identifier": "guard", "enabled": True}]}],
+    }
+    monkeypatch.setattr(preset_store, "read_preset", lambda *_a, **_k: preset)
+    ctx = _ctx(
+        repo_id="work", thread_id="work__chat", chat_base="b", chat_key="k", chat_model="m",
+        interaction_mode="chat", _chat_persona_block="【角色】甲：沉默的剑客",
+        preset_dir=str(tmp_path), preset_name="p",
+    )
+    monkeypatch.setattr(
+        ag._llm, "chat_messages_stream",
+        lambda base, key, model, messages, **_kw: "她@的@(乳)@头",
+    )
+
+    out = ag.answer_node({"user_text": "你好", "images": [], "_ctx": ctx})
+
+    assert out["result_text"] == "她的乳头"
+
+
+def test_answer_node_聊天模式剥掉角色名前缀(monkeypatch):
+    """1:1 聊天也按聊天室口径清洗：模型自带【角色名】/角色名前缀时不能原样进气泡。"""
+    ctx = _ctx(
+        repo_id="work", thread_id="work__chat", chat_base="b", chat_key="k", chat_model="m",
+        interaction_mode="chat", _chat_persona_block="【角色】甲：沉默的剑客",
+        card_name="甲", card_names=["甲"], chat_members=["甲"],
+    )
+    monkeypatch.setattr(
+        ag._llm, "chat_messages_stream",
+        lambda base, key, model, messages, **_kw: "【甲】（笑）你好。",
+    )
+    out = ag.answer_node({"user_text": "你好", "images": [], "_ctx": ctx})
+
+    assert out["result_text"] == "（笑）你好。"
+
+
+def test_answer_node_私聊把指代用户的第三人称改成你(monkeypatch):
+    ctx = _ctx(
+        repo_id="work", thread_id="work__chat", chat_base="b", chat_key="k", chat_model="m",
+        interaction_mode="chat", _chat_persona_block="【角色】甲：沉默的剑客",
+        card_name="甲", card_names=["甲"], chat_members=["甲"],
+    )
+    monkeypatch.setattr(
+        ag._llm, "chat_messages_stream",
+        lambda base, key, model, messages, **_kw: "好，让他看个够。",
+    )
+    out = ag.answer_node({"user_text": "你好", "images": [], "_ctx": ctx})
+
+    assert out["result_text"] == "好，让你看个够。"
+
+
+def test_answer_node_群聊不改第三人称(monkeypatch):
+    """群聊里「他」可能真指另一位角色，只有 1:1 才做用户引用改写。"""
+    ctx = _ctx(
+        repo_id="work", thread_id="work__group", chat_base="b", chat_key="k", chat_model="m",
+        interaction_mode="group_chat", _chat_persona_block="【角色】甲：沉默的剑客",
+        card_name="甲", card_names=["甲"], chat_members=["甲"],
+    )
+    monkeypatch.setattr(
+        ag._llm, "chat_messages_stream",
+        lambda base, key, model, messages, **_kw: "她让他看个够。",
+    )
+    out = ag.answer_node({"user_text": "你好", "images": [], "_ctx": ctx})
+
+    assert out["result_text"] == "她让他看个够。"
+
+
+def test_answer_node_聊天模式拆出自发媒体标记(monkeypatch):
+    """2026-11-10 聊天室多元数据：1:1 聊天开着自动插画/视频时，模型回复里的
+    [SELFIE]/[VIDEO] marker 必须拆成 media_request 交给前端生成，正文不含 marker。"""
+    ctx = _ctx(
+        repo_id="work", thread_id="work__chat", chat_base="b", chat_key="k", chat_model="m",
+        interaction_mode="chat", _chat_persona_block="【角色】甲：沉默的剑客",
+        comfy_illustrate=True,
+    )
+    monkeypatch.setattr(
+        ag._llm, "chat_messages_stream",
+        lambda base, key, model, messages, **_kw: "想看吗？\n[SELFIE: 甲撩起衣角，红烛暖光]",
+    )
+    out = ag.answer_node({"user_text": "你好", "images": [], "_ctx": ctx})
+
+    assert out["result_text"] == "想看吗？"
+    assert out["media_request"] == {"kind": "image", "prompt": "甲撩起衣角，红烛暖光"}
+
+
+def test_answer_node_未开媒体开关时保留标记原文(monkeypatch):
+    """媒体开关全关 ⇒ 不解析 marker（不误删正文），保持剧情侧旧行为。"""
+    ctx = _ctx(
+        repo_id="work", thread_id="work__chat", chat_base="b", chat_key="k", chat_model="m",
+        interaction_mode="chat", _chat_persona_block="【角色】甲：沉默的剑客",
+    )
+    monkeypatch.setattr(
+        ag._llm, "chat_messages_stream",
+        lambda base, key, model, messages, **_kw: "想看吗？[SELFIE: 甲撩起衣角]",
+    )
+    out = ag.answer_node({"user_text": "你好", "images": [], "_ctx": ctx})
+
+    assert "[SELFIE: 甲撩起衣角]" in out["result_text"]
+    assert "media_request" not in out
+
+
+def test_answer_node_仅有媒体标记时补占位正文(monkeypatch):
+    """纯媒体回复（无正文）不能变空气泡：补一句占位文案，media_request 照常下发。"""
+    ctx = _ctx(
+        repo_id="work", thread_id="work__chat", chat_base="b", chat_key="k", chat_model="m",
+        interaction_mode="chat", _chat_persona_block="【角色】甲：沉默的剑客",
+        comfy_video=True,
+    )
+    monkeypatch.setattr(
+        ag._llm, "chat_messages_stream",
+        lambda base, key, model, messages, **_kw: "[VIDEO: 甲解开衣襟]",
+    )
+    out = ag.answer_node({"user_text": "你好", "images": [], "_ctx": ctx})
+
+    assert out["result_text"] == "（发来一段视频）"
+    assert out["media_request"] == {"kind": "video", "prompt": "甲解开衣襟"}
+
+
+def test_answer_node_聊天模式人设块在通用助手提示之后(monkeypatch):
+    """私聊主回合走 answer：人设/频道合同要排在通用助手提示之后、动作选择之前。
+
+    2026-11-10 实锤：内置「你是通用 AI 助手…请用简洁中文回答」原本在系统提示末尾，
+    会压过私聊口吻与聊天动作行，用户明说「补一张给我」仍只回文字。
+    """
+    seen: dict = {}
+    ctx = _ctx(
+        repo_id="work", thread_id="work__chat", chat_base="b", chat_key="k", chat_model="m",
+        interaction_mode="chat", _chat_persona_block="【角色】甲：沉默的剑客",
+        comfy_illustrate=True,
+    )
+
+    def fake_stream(base, key, model, messages, **_kw):
+        seen["system"] = messages[0]["content"]
+        return "好。\n[动作: 无]"
+
+    monkeypatch.setattr(ag._llm, "chat_messages_stream", fake_stream)
+    out = ag.answer_node({"user_text": "在吗", "images": [], "_ctx": ctx})
+
+    system = seen["system"]
+    assert system.index("【角色】甲：沉默的剑客") > system.index("通用 AI 助手")
+    assert "每轮收尾：聊天动作" in system
+    assert system.index("每轮收尾：聊天动作") > system.index("【角色】甲：沉默的剑客")
+    # 收尾控制行不能漏进气泡，也不能被当成媒体请求。
+    assert out["result_text"] == "好。"
+    assert "media_request" not in out
 
 
 def test_answer_node_非用户停止的普通失败仍报回答失败(monkeypatch):
@@ -5650,9 +6201,12 @@ def test_第48刀_收窄只作用于契约主体_取材仍按未收窄的判据�
     seen: dict = {}
     real_excerpt = si.illustration_scene_excerpt
 
-    def _spy(text, requested_anchor="", *, subjects=None):
+    def _spy(text, requested_anchor="", *, subjects=None, expand_context=True):
         seen["subjects"] = list(subjects or [])
-        return real_excerpt(text, requested_anchor, subjects=subjects)
+        return real_excerpt(
+            text, requested_anchor, subjects=subjects,
+            expand_context=expand_context,
+        )
 
     monkeypatch.setattr(si, "illustration_scene_excerpt", _spy)
     judged = (_ARB_JUDGE, {"subjects": ["甲", "丙"], "composition": "双人同框"})
@@ -6025,6 +6579,55 @@ def test_主人公性别注入到外观段(monkeypatch):
         pool=dict(_anchor_pool(), request_actors=["乙"]),
     )
     assert "【性别】" not in out2["request_appearance"]
+
+
+# ── 第 52 刀（#10 定序）：主人公性别以「用户人设」为主（2026-11-05 用户定案）──
+
+
+def _gender_sources(monkeypatch, *, persona: str, book_gender: str = "", tables: list | None = None) -> dict:
+    """把 `_protagonist_gender` 的三道来源钉成显式桩（零 I/O、零 LLM），只测定序。"""
+    monkeypatch.setattr(worldbook_store, "repo_protagonist_gender", lambda *_a: book_gender)
+    monkeypatch.setattr(aa, "_repo_tables_for_facts", lambda *_a: tables or [])
+    return {"output_dir": "作品根", "user_name": "甲", "user_persona": persona}
+
+
+def test_第52刀_人设声明的性别压过世界书条目(monkeypatch):
+    """用户定案「以 username 的用户设定为主，世界书相关主角的条目为辅」。
+
+    旧定序把世界书条目排在最前 ⇒ 用户在人设里写明「女」，成图仍按条目里的「男」画。
+    """
+    ctx = _gender_sources(monkeypatch, persona="【性别】女", book_gender="男")
+    assert aa._protagonist_gender(ctx, "r", "甲") == "女"
+
+
+def test_第52刀_人设没有性别信号时逐字节退回世界书条目(monkeypatch):
+    """零回归锁：人设读不出性别 ⇒ 不得凭空造值，仍按旧定序走条目。"""
+    ctx = _gender_sources(monkeypatch, persona="她喜欢在雨里站着。", book_gender="男")
+    assert aa._protagonist_gender(ctx, "r", "甲") == "男"
+
+
+def test_第52刀_人设与条目都取不到时通用表列兜底(monkeypatch):
+    """零回归锁：第三道来源（通用表「性别」列）位次与行为都不变。"""
+    tables = [{"columns": ["姓名", "性别"], "rows": [["甲", "女"]]}]
+    ctx = _gender_sources(monkeypatch, persona="", book_gender="", tables=tables)
+    assert aa._protagonist_gender(ctx, "r", "甲") == "女"
+
+
+def test_第52刀_人设里的非性别声明不算命中(monkeypatch):
+    """⚠ `gender_from_text` 的声明式支会把原文吐回来（`性别：未知` ⇒ `未知`）。
+
+    「未知」不是性别信号 ⇒ 不得注入，也不得挡住后面的条目/表列（宁缺勿猜）。
+    """
+    ctx = _gender_sources(monkeypatch, persona="性别：未知", book_gender="男")
+    assert aa._protagonist_gender(ctx, "r", "甲") == "男"
+    ctx2 = _gender_sources(monkeypatch, persona="性别：未知")
+    assert aa._protagonist_gender(ctx2, "r", "甲") == ""
+
+
+def test_第52刀_主人公名为空时一个字都不读(monkeypatch):
+    """零回归锁：无名 ⇒ 不调条目也不查表（旧行为），返回空串。"""
+    ctx = _gender_sources(monkeypatch, persona="【性别】女", book_gender="男")
+    assert aa._protagonist_gender(ctx, "r", "") == ""
 
 
 # ── 2026-09-23（A 治本）：curator 可写集剔除机制层 + 补回在场角色卡 ──

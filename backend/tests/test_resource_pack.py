@@ -62,7 +62,7 @@ H3_TYPE = "MiniMaxH3ImageToVideo"
 
 
 def _fixture_record(**overrides):
-    """最小可用的模板记录：一个视频节点 + first_frame 接线 + 三条手标绑定。"""
+    """最小可用的模板记录：视频节点 + 首/尾帧接线 + 四条手标绑定（#58 后）。"""
     graph = {
         "nodes": [
             {"id": 61, "type": "LoadImage", "inputs": [], "outputs": [{"name": "IMAGE"}],
@@ -71,12 +71,13 @@ def _fixture_record(**overrides):
              "inputs": [
                  {"name": "prompt", "type": "STRING", "link": None},
                  {"name": "first_frame", "type": "IMAGE", "link": 7},
+                 {"name": "last_frame", "type": "IMAGE", "link": 9},
              ],
              "outputs": [{"name": "IMAGE"}],
              "widgets_values": {"videopreview": {"params": {"cos_url": "https://x.example/a.mp4"}},
                                 "length": 124}},
         ],
-        "links": [[7, 61, 0, 329, 1, "IMAGE"]],
+        "links": [[7, 61, 0, 329, 1, "IMAGE"], [9, 61, 0, 329, 2, "IMAGE"]],
     }
     record = {
         "id": ITEM_ID,
@@ -93,6 +94,7 @@ def _fixture_record(**overrides):
             {"node_id": "61", "field": "image", "binding": "base_image"},
             {"node_id": "329", "field": "prompt", "binding": "video_prompt"},
             {"node_id": "329", "field": "length", "binding": "video_duration"},
+            {"node_id": "73", "field": "image", "binding": "last_frame_image"},
         ],
         "workflow_data": graph,
     }
@@ -138,7 +140,7 @@ def test_build_template_pack_writes_record_and_bare_graph(tmp_path):
     assert template["workflow_data"]["nodes"][1]["type"] == H3_TYPE
     # 裸图与记录内嵌图同源：顶层就是 nodes/links
     graph = json.loads((output / "workflows" / "MiniMax_H3_图生视频_首帧.json").read_text(encoding="utf-8"))
-    assert len(graph["nodes"]) == 2 and len(graph["links"]) == 1
+    assert len(graph["nodes"]) == 2 and len(graph["links"]) == 2
 
 
 def test_pack_rejects_missing_manual_binding(tmp_path):
@@ -202,9 +204,10 @@ def test_host_and_denylist_gates(tmp_path):
 
 
 def test_committed_template_pack_restores_every_binding():
-    """换机重装的真实恢复证据：包里的记录过一遍 _normalize，五条绑定必须齐。
+    """换机重装的真实恢复证据：包里的记录过一遍 _normalize，六条绑定必须齐。
 
-    video_width/video_height 由后端按节点类型自动补，另外三条只在 exposed 里手标过。
+    video_width/video_height 由后端按节点类型自动补，另外四条（含 #58 的
+    last_frame_image）只在 exposed 里手标过。
     """
     from app.services import template_store
 
@@ -223,6 +226,7 @@ def test_committed_template_pack_restores_every_binding():
         "video_duration",
         "video_width",
         "video_height",
+        "last_frame_image",
     }
     assert normalized["preserve_loras"] is True
     assert normalized["primary_output_node_id"] == "67"
@@ -232,3 +236,93 @@ def test_committed_template_pack_restores_every_binding():
         if str(node.get("type") or "").lower() in template_store._VIDEO_SIZE_NODE_TYPES
     ]
     assert [node["type"] for node in video_nodes] == [H3_TYPE]
+
+
+# --- #58：尾帧 binding 化（2026-11-04）-------------------------------------
+
+def test_pack_rejects_missing_last_frame_link(tmp_path):
+    """#58：329.last_frame 没接线＝尾帧图静默丢弃，构建必须判死。"""
+    record = _fixture_record()
+    last = next(s for s in record["workflow_data"]["nodes"][1]["inputs"]
+                if s["name"] == "last_frame")
+    last["link"] = None
+    record["workflow_data"]["links"] = [
+        l for l in record["workflow_data"]["links"] if l[0] != 9
+    ]
+
+    try:
+        _build_from(tmp_path, record)
+    except ValueError as error:
+        assert "尾帧链丢失" in str(error)
+    else:
+        raise AssertionError("329.last_frame 未接线的模板包应该构建失败")
+
+
+def test_pack_rejects_missing_last_frame_binding(tmp_path):
+    """尾帧 LoadImage 的 binding 丢了，前端 lastFrameImage 就无处注入。"""
+    record = _fixture_record()
+    record["exposed"] = [f for f in record["exposed"]
+                         if f["binding"] != "last_frame_image"]
+
+    try:
+        _build_from(tmp_path, record)
+    except ValueError as error:
+        assert "last_frame_image" in str(error)
+    else:
+        raise AssertionError("缺少 last_frame_image 绑定的模板包应该构建失败")
+
+
+def test_committed_template_pack_last_frame_is_wired():
+    """已提交的模板包：尾帧变量必须真被读到，且库文件与投影逐字同步。"""
+    package = ROOT / "presets" / resource_pack.TEMPLATE_PACKAGE
+    graph = json.loads(
+        (package / "workflows" / "MiniMax_H3_图生视频_首帧.json").read_text(encoding="utf-8")
+    )
+    node = next(n for n in graph["nodes"] if str(n.get("id")) == "329")
+    assert node["type"] == H3_TYPE
+    last = next(s for s in node["inputs"] if s["name"] == "last_frame")
+    assert last.get("link") is not None, "329.last_frame 未接线 ⇒ 尾帧图静默丢弃"
+    link = next(l for l in graph["links"] if l[0] == last.get("link"))
+    assert str(link[3]) == "329"
+    src = next(n for n in graph["nodes"] if str(n.get("id")) == str(link[1]))
+    assert src["type"] == "GetNode", link
+    assert "尾帧图像" in str(src.get("widgets_values"))
+
+    record = json.loads(
+        (package / "templates" / "MiniMax_H3_图生视频_首帧.json").read_text(encoding="utf-8")
+    )
+    bound = [f for f in record["exposed"] if f.get("binding") == "last_frame_image"]
+    assert len(bound) == 1
+    assert str(bound[0]["node_id"]) == "73" and bound[0]["field"] == "image"
+
+    # 本机工作流库文件是 gitignored 的运行态；干净检出没有它 ⇒ 不判红。
+    lib = ROOT / "backend" / "data" / "workflows" / "MiniMax_H3_图生视频_首帧.json"
+    if not lib.is_file():
+        return
+    lib_graph = json.loads(lib.read_text(encoding="utf-8"))
+    lib_node = next(n for n in lib_graph["nodes"] if str(n.get("id")) == "329")
+    lib_last = next(s for s in lib_node["inputs"] if s["name"] == "last_frame")
+    assert lib_last.get("link") == last.get("link"), "库文件重导入会退回「无尾帧」"
+
+
+def test_committed_template_pack_api_graph_has_both_frames():
+    """#58 加码：UI 接线在≠API 提交生效。
+
+    第 77 刀把尾帧支路 71/73/75 留成 mode=4（mute），ui_to_api 的 is_skipped
+    会整条剔除 ⇒ 329.last_frame 在 API 图里根本不存在。只查 UI link 抓不到这个。
+    """
+    from app.services.workflow_convert import ui_to_api
+
+    package = ROOT / "presets" / resource_pack.TEMPLATE_PACKAGE
+    graph = json.loads(
+        (package / "workflows" / "MiniMax_H3_图生视频_首帧.json").read_text(encoding="utf-8")
+    )
+    api = ui_to_api(graph, "")   # 离线展平，不查 object_info
+    node = api.get("329")
+    assert node and node["class_type"] == H3_TYPE
+    for name in ("first_frame", "last_frame"):
+        assert isinstance(node["inputs"].get(name), list), (
+            f"{name} 在 API 图里缺席：尾帧支路可能仍是 mode=4 静音"
+        )
+    assert node["inputs"]["first_frame"] != node["inputs"]["last_frame"]
+    assert "73" in api, "尾帧 LoadImage 被剔除，lastFrameImage 注入口不存在"

@@ -90,6 +90,8 @@ class TemplateRequest(BaseModel):
     preserve_loras: bool = False     # 保留模板自带 LoRA（蒸馏加速等），不接受外部 LoRA 覆盖/清零
     # 分辨率由模板工作流自己决定（ResolutionSelector 连线），不用首帧像素尺寸覆盖
     video_size_from_template: bool = False
+    # 2026-11-12：可选预编译 API 快照（AIO 子图展开后修复过的扁平图）；有它时提交直接用它
+    api_workflow: dict | None = None
 
 
 @router.get("/templates")

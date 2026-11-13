@@ -85,7 +85,7 @@ pub fn verify_test_fixture() -> Result<(), String> {
     Ok(())
 }
 
-/// 托盘「检查更新…」：检查 → 确认 → 下载并验签 → 停自启运行时 → 交给 NSIS 安装器。
+/// 托盘「检查更新…」：先看运行时层的版本漂移，再检查 → 确认 → 下载并验签 → 停自启运行时 → 交给 NSIS 安装器。
 /// Windows 上安装成功会由插件直接退出进程，安装器随后重启新版本。
 pub fn check_for_updates(
     app: AppHandle,
@@ -102,6 +102,12 @@ pub fn check_for_updates(
         updating.store(false, Ordering::SeqCst);
         return;
     }
+    // 运行时层（base/application/rag）与壳的 pin 不一致时，这一步才是大头：2.2 GB 的交付
+    // 不能在事件循环线程上跑，所以问过用户之后交给独立线程；这次点击到此结束，不叠 shell 更新。
+    if let Some(exe_dir) = ask_runtime_drift() {
+        std::thread::spawn(move || deliver_runtime(exe_dir, updating));
+        return;
+    }
     tauri::async_runtime::spawn(async move {
         if let Err(err) = run_update(app.clone(), host).await {
             shell_log::warn(&format!("自动更新失败：{err}"));
@@ -109,6 +115,81 @@ pub fn check_for_updates(
         }
         updating.store(false, Ordering::SeqCst);
     });
+}
+
+/// 已装运行时的 `app_version` 与本壳内置 pin 不一致 ⇒ 问一句要不要现在交付。
+///
+/// 为什么不自动下：一是「不要浪费我的流量」是用户定的默认，二是启动线程上同步跑 2.2 GB
+/// 会把首启阻塞翻倍（非阻塞首启是 P3 的范围）。判定本身是纯本地读一个 json，零流量。
+/// 返回 `Some(exe_dir)` 表示「有漂移且用户同意交付」。
+fn ask_runtime_drift() -> Option<std::path::PathBuf> {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.to_path_buf()))?;
+    let pin = match crate::runtime_delivery::embedded_pin() {
+        Ok(pin) => pin,
+        Err(err) => {
+            shell_log::warn(&format!("读取内置交付 pin 失败：{err}"));
+            return None;
+        }
+    };
+    let (installed, wanted) = crate::runtime_delivery::runtime_drift(&crate::paths::home(), &pin)?;
+    shell_log::info(&format!("运行时版本漂移：已装 {installed}，本壳期望 {wanted}"));
+    if !dialog::ask_confirm(
+        "运行时更新",
+        &format!(
+            "已安装的运行时是 {installed}，本程序期望 {wanted}。\n\n\
+             是：现在下载并自检新运行时（约 2.2 GB；已下载过的分件会复用，不重复下载）。\n\
+             自检不过会自动保持原版本，不会把现在能用的那套换掉。\n\
+             否：这次不动，继续检查程序本体的更新。\n\n\
+             现在跑着的版本在下次启动前保持可用。"
+        ),
+    ) {
+        shell_log::info("用户选择暂不更新运行时");
+        return None;
+    }
+    Some(exe_dir)
+}
+
+/// 后台交付运行时：过提交闸才翻 `current.json`，所以失败也不会弄坏现在能用的那一套。
+fn deliver_runtime(exe_dir: std::path::PathBuf, updating: Arc<AtomicBool>) {
+    let mut progress = |message: &str| shell_log::info(&format!("运行时交付：{message}"));
+    let outcome = crate::runtime_delivery::ensure_installed_runtime(&exe_dir, &mut progress);
+    let (caption, text) = match outcome {
+        Ok(report) => {
+            // rag 是可选层（P3）：没落地时这里必须是空的，不能念出一个不存在的 id。
+            let rag = if report.rag_id.is_empty() {
+                "未安装"
+            } else {
+                report.rag_id.as_str()
+            };
+            shell_log::info(&format!(
+                "运行时交付完成：base={} application={} rag={}",
+                report.base_id, report.application_id, rag
+            ));
+            (
+                "运行时已就绪",
+                format!(
+                    "新运行时已通过启动自检并提交（base={}、app={}、rag={}）。\n\
+                     下次启动 Demiurge 时生效；现在跑着的版本继续可用。\n\
+                     旧版本保留着，新版真起不来会自动退回。",
+                    report.base_id, report.application_id, rag
+                ),
+            )
+        }
+        Err(err) => {
+            shell_log::warn(&format!("运行时交付失败：{err}"));
+            (
+                "运行时未更新",
+                format!(
+                    "{err}\n\n日志：{}",
+                    crate::shell_log::dir().display()
+                ),
+            )
+        }
+    };
+    dialog::show_info(caption, &text);
+    updating.store(false, Ordering::SeqCst);
 }
 
 /// 自动更新只对 currentUser 安装版开放。

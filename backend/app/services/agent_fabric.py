@@ -643,13 +643,15 @@ def _fabric_run_args(ctx: Any, *, intent: str, history: str,
         if plan_compiler.is_doc_delegation_intent(_delivery):
             from app.services import fabric_work
             # 缓存不是无脑读取（2026-09-07 用户定案）：前序产出档案的注入量受
-            # 上下文预算约束——取 context_max_tokens 的 20% 且封顶 4000 字符；
-            # 无上限（0）用默认 4000；预算被调小时缓存自动缩量，不让档案挤占
-            # 历史与本体注入，避免「缓存反客为主」。
+            # 上下文预算约束——取有效上下文预算的 20%；2026-11-12 移除 4000 字封顶，
+            # 预算调大时档案可同步变长；预算未配置/无限时 0 = 不截断。
+            from app.services import agent_context
             _ctx_budget = ctx.get("context_max_tokens")
-            _brief_budget = 4000
-            if isinstance(_ctx_budget, int) and _ctx_budget > 0:
-                _brief_budget = max(800, min(4000, _ctx_budget // 5))
+            _budget = agent_context.resolve_history_budget(
+                _ctx_budget if isinstance(_ctx_budget, int) else 0,
+                ctx.get("preset_sampling"),
+            )
+            _brief_budget = max(800, _budget // 5) if _budget > 0 else 0
             work_brief = fabric_work.build_work_brief(
                 output_dir, repo_id, max_chars=_brief_budget)
     except Exception:  # noqa: BLE001 - 档案生成失败不阻断 run
@@ -836,6 +838,110 @@ def _recipe_hard_replay(hit: dict, score: float, ctx: Any, output_dir: str,
         "trace": trace + [f"🧩 命中固化流程《{hit.get('name')}》，整条重放"]}
 
 
+def _approval_action_binding(operation: str) -> tuple[bool, bool]:
+    """(是否写类, 是否读类越域) —— 决定批准授的是「一次性动作」还是「按路径持续放行」。
+
+    写类（durable/expensive）绑动作指纹：批准 A 之后改发 B、或把 A 再发一遍都要重新批准。
+    readonly 越域读取按路径放行（T1 口径：读同一文件多次不打断，换文件必重新批准），
+    不绑指纹。
+    """
+    from app.services import capability_registry as _cr
+
+    cap = _cr.get(operation)
+    level = getattr(cap, "side_effect_level", "durable") if cap else "durable"
+    return level in ("durable", "expensive"), level == "readonly"
+
+
+def _approval_grant_paths(cp: dict, operation: str, output_dir: str) -> list[str]:
+    """本次批准要写进租约的确切路径清单（2026-11-05 T1）。
+
+    写类（durable/expensive）保留「作品根」授权——越域写已经在执行期被闸门拒绝，
+    批准只覆盖域内。readonly 的越域读取**只授 pending_paths 里那几条**：
+    给作品根等于什么都没授（作品根覆盖不到域外文件），给域外父目录等于扩权。
+
+    ⚠ 写类断点若缺 `pending_action_hash`（T3 之前落盘的旧断点）返回空清单：
+    不补授 operation+作品根，那等于替用户把它没见过的新动作一起批了（静默提权）。
+    """
+    binds_action, is_readonly = _approval_action_binding(operation)
+    extra = [str(p) for p in (cp.get("pending_paths") or []) if str(p).strip()]
+    if binds_action:
+        if not str(cp.get("pending_action_hash") or "").strip():
+            return []
+        return [output_dir] + [p for p in extra if p != output_dir]
+    return extra or [output_dir]
+
+
+def _approval_grant_hash(cp: dict, operation: str) -> str:
+    """写类批准要绑定的动作指纹；非写类返回空（走路径授权，不消费）。"""
+    binds_action, _ = _approval_action_binding(operation)
+    return str(cp.get("pending_action_hash") or "") if binds_action else ""
+
+
+_APPROVAL_SECRET_KEYS = ("chat_key", "api_key", "apikey", "secret", "password", "authorization")
+_APPROVAL_VALUE_LIMIT = 240
+# 命令类参数必须完整可见：脚本被截断=用户批了一条自己没看全的命令，审批失去意义。
+_APPROVAL_FULL_TEXT_KEYS = ("command",)
+
+
+def _approval_param_preview(params: dict) -> dict:
+    """审批卡用的参数副本（2026-11-05 T3）：密钥脱敏 + 超长值截断，不改原 params。
+
+    脱敏只改**展示**；动作指纹仍按原值算——这些键由环境注入，批准后模型重发时会被同一真值
+    覆盖回去，所以打码不会让「批准的动作」和「执行的动作」对不上。
+    """
+    preview: dict = {}
+    for key, value in (params or {}).items():
+        if str(key).lower() in _APPROVAL_SECRET_KEYS and isinstance(value, str) and value:
+            preview[key] = "***（密钥已隐藏）"
+            continue
+        if isinstance(value, str) and len(value) > _APPROVAL_VALUE_LIMIT:
+            if str(key) in _APPROVAL_FULL_TEXT_KEYS:
+                preview[key] = value
+            else:
+                preview[key] = (value[:_APPROVAL_VALUE_LIMIT]
+                                + f"…（原文 {len(value)} 字，仅展示摘要，批准即放行完整内容）")
+            continue
+        preview[key] = value
+    return preview
+
+
+def _approval_action_block(operation: str, params: dict) -> str:
+    """把待批动作渲染成 Markdown 纯文本代码块（前端按文本渲染，不当 HTML 执行）。"""
+    import json as _json
+
+    body = _json.dumps(
+        {"operation": operation, "params": _approval_param_preview(params)},
+        ensure_ascii=False, indent=2, sort_keys=True, default=str)
+    # 围栏长度取「正文里最长的反引号串 + 1」（至少 3）：内容含 ``` 也不会提前闭合。
+    longest = max((len(m.group()) for m in re.finditer(r"`+", body)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return f"{fence}json\n{body}\n{fence}"
+
+
+def _fabric_approval_text(outcome: Any) -> str:
+    """待批提示（2026-11-05 T1 补路径、T3 补完整动作）。
+
+    只报工具名不足以批准——同一个 `file.read_text` 既可能读作品内的素材，也可能读
+    域外任意文件，用户看到的必须是本次真正要放行什么：operation + 归一后的实参 + 实际路径。
+    """
+    _paths = [str(p) for p in (getattr(outcome, "pending_paths", None) or []) if str(p).strip()]
+    _op = str(outcome.pending_tool or "")
+    head = f"智能编造需要批准：下一步将执行「{_op}」"
+    if _paths:
+        head += f"，读取作品域外的 {_paths[0]}"
+    _params = getattr(outcome, "pending_params", None) or {}
+    if not _params:
+        return head + "。回复「批准」继续、「取消」中止。"
+    # 有动作指纹 = 写类一次性授权；没有 = 读类按路径持续放行。措辞不能混着说，
+    # 否则用户会以为「批准读 A」也放行「重复读 A」的反面（读类重复同路径不重批）。
+    binds = bool(str(getattr(outcome, "pending_action_hash", "") or "").strip())
+    scope = ("批准只放行这一个动作——换路径、改内容或重复发起都会重新请求批准"
+             if binds else "批准放行上面这一条路径的读取（同一路径不重复请求批准）")
+    return (head + f"。\n\n本次放行的确切动作（{scope}）：\n\n"
+            + _approval_action_block(_op, _params)
+            + "\n\n回复「批准」继续、「取消」中止。")
+
+
 def _fabric_approval_word(word: str, ctx: Any, output_dir: str,
                           trace: list[str]) -> dict | None:
     """对话审批词处理 approval 自由循环 checkpoint（2026-09-06）。
@@ -851,6 +957,11 @@ def _fabric_approval_word(word: str, ctx: Any, output_dir: str,
     if word in ("取消", "cancel", "撤销"):
         try:
             _sb.revoke(str(cp.get("lease_id") or ""))
+        except OSError as exc:
+            # 撤销没落住 = 权限还在（后端重载即复活）。保留断点、如实报失败，
+            # 不能删断点后宣称「已取消」（2026-11-05 T2）。
+            return {"result_text": f"取消失败：租约存储写入失败（{exc}）。"
+                                   "断点已保留，请重试「取消」。", "trace": trace}
         except Exception:  # noqa: BLE001
             pass
         fabric_checkpoint.delete(cp["id"])
@@ -858,10 +969,19 @@ def _fabric_approval_word(word: str, ctx: Any, output_dir: str,
     # 批准:追加租约授权 → 从断点续跑。
     # running 断点（step_limit/error 后）无 pending_tool，跳过授权直接续跑。
     _pending_tool = str(cp.get("pending_tool") or "")
+    _grant_hash = _approval_grant_hash(cp, _pending_tool) if _pending_tool else ""
     if _pending_tool:
         _lease_id = str(cp.get("lease_id") or "")
+        _grant_paths = _approval_grant_paths(cp, _pending_tool, output_dir)
+
+        def _grant_all() -> None:
+            for _path in _grant_paths:
+                # 写类带 action_hash = 一次性动作授权；读类 hash 为空 = 按路径持续放行
+                _sb.grant_operation(_lease_id, _pending_tool, path=_path,
+                                    action_hash=_grant_hash)
+
         try:
-            _sb.grant_operation(_lease_id, _pending_tool, path=output_dir)
+            _grant_all()
         except PermissionError as exc:
             # 2026-09-14 修复：断点停在审批点超过租约 TTL（24h）时租约已过期。
             # 用户此刻的批准=新的授权动作 → 先续期救活租约再追加授权，断点与
@@ -870,7 +990,12 @@ def _fabric_approval_word(word: str, ctx: Any, output_dir: str,
             if "已过期" in str(exc) and _sb.lease_registered(_lease_id):
                 try:
                     _sb.renew(_lease_id)
-                    _sb.grant_operation(_lease_id, _pending_tool, path=output_dir)
+                    _grant_all()
+                except OSError as exc2:
+                    # 续期/追加授权写盘失败：授权没生效，但断点与已完成步骤必须保留
+                    # （删断点 = 丢进度，用户只能从头再跑一遍）。2026-11-05 T2。
+                    return {"result_text": f"审批失败：租约存储写入失败（{exc2}）。"
+                                           "断点已保留，请重试「批准」。", "trace": trace}
                 except Exception as exc2:  # noqa: BLE001 - 续期/追加仍失败则中止
                     fabric_checkpoint.delete(cp["id"])
                     return {"result_text": f"审批失败：{exc2}", "trace": trace}
@@ -879,6 +1004,9 @@ def _fabric_approval_word(word: str, ctx: Any, output_dir: str,
                 fabric_checkpoint.delete(cp["id"])
                 return {"result_text": f"审批失败：{exc}（断点已清理，请重新发起任务）",
                         "trace": trace}
+        except OSError as exc:
+            return {"result_text": f"审批失败：租约存储写入失败（{exc}）。"
+                                   "断点已保留，请重试「批准」。", "trace": trace}
         except Exception as exc:  # noqa: BLE001 - 其他异常同样中止
             fabric_checkpoint.delete(cp["id"])
             return {"result_text": f"审批失败：{exc}", "trace": trace}
@@ -889,10 +1017,28 @@ def _fabric_approval_word(word: str, ctx: Any, output_dir: str,
     # 已执行直接 done——2026-09-06 实锤）。已完成步骤保留不重跑。
     import json as _json
     resume_messages = list(cp.get("messages") or [])
+    _pending_params = cp.get("pending_params") or {}
+    _binds_action = bool(_pending_tool) and _approval_action_binding(_pending_tool)[0]
+    if _binds_action and not _grant_hash:
+        # 旧断点（T3 之前落盘）没有动作指纹：不补授权，让模型重新发起、按新合同重批。
+        _granted_note = ("审批合同已升级为「一次一批一个动作」，本轮待批动作缺少动作指纹，"
+                         "已跳过授权。请重新发起下一步动作（会按新合同再次请求批准）。"
+                         "不要重复其他已完成步骤。")
+    elif _binds_action and _pending_params:
+        _granted_note = ("用户已批准这一个动作："
+                         + _json.dumps({"tool": _pending_tool,
+                                        "params": _approval_param_preview(_pending_params)},
+                                       ensure_ascii=False, sort_keys=True, default=str)
+                         + "。请逐字重发该动作执行（base/output_dir/cwd/repo_id/chat_* 由系统"
+                         "重新注入，不必原样回填）。改动任何参数都算新动作，会重新请求批准；"
+                         "不要重复其他已完成步骤。")
+    elif _pending_tool:
+        _granted_note = (f"用户已批准操作「{_pending_tool}」。"
+                         "请重新发起该操作执行（不要重复其他已完成步骤）。")
+    else:
+        _granted_note = "用户已确认接续，请从中断处继续（不要重复已完成的步骤）。"
     resume_messages.append({"role": "user", "content": _json.dumps(
-        {"approval_granted": f"用户已批准操作「{cp.get('pending_tool') or ''}」。"
-                             "请重新发起该操作执行（不要重复其他已完成步骤）。"},
-        ensure_ascii=False)})
+        {"approval_granted": _granted_note}, ensure_ascii=False)})
     # 2026-09-07 治本：续跑也要每步保存断点（重试的资本）——批准后进入新一轮
     # 自由循环，若不带 checkpoint_fn，期间 step_limit/error 时断点停在旧状态，
     # 甚至被误删，用户无法再接续（21:54 实锤：step_limit 后 checkpoint 被清空）。
@@ -930,11 +1076,16 @@ def _fabric_approval_word(word: str, ctx: Any, output_dir: str,
     if outcome.status == "awaiting_approval":
         cp.update({
             "pending_tool": outcome.pending_tool,
+            "pending_paths": list(outcome.pending_paths),
+            # 2026-11-05 T3：批准要放行「这一个动作」，断点必须存下动作本体，
+            # 否则续跑时拿不到 hash，只能退化成整 operation 通配授权。
+            "pending_params": dict(outcome.pending_params),
+            "pending_action_hash": outcome.pending_action_hash,
             "messages": outcome.messages, "steps": outcome.steps,
             "status": "awaiting_approval",
         })
         fabric_checkpoint.save(cp)
-        return {"result_text": f"智能编造需要批准：下一步将「{outcome.pending_tool}」。回复「批准」继续、「取消」中止。",
+        return {"result_text": _fabric_approval_text(outcome),
                 "trace": trace + ["🧵 智能编造等待审批"]}
     if outcome.status == "done":
         # 仅完成清理断点；step_limit/error 保留 running 断点供用户再接续
@@ -963,10 +1114,15 @@ def _run_fabric_content_loop(ctx, state, *, intent_text, judge_text, text,
     最近灵感卡/历史附件/提示词规范注入讨论历史（上下文合同 P1）。
     """
     from app.services import capability_sandbox, fabric_checkpoint, fabric_loop
-    lease = capability_sandbox.grant(
-        subject=f"fabric:{ctx.get('thread_id') or ctx.get('message_id') or 'sess'}",
-        capabilities=[], ttl_seconds=86400, approved_by="pending",
-        mode=capability_sandbox.ACCESS_APPROVAL)
+    try:
+        lease = capability_sandbox.grant(
+            subject=f"fabric:{ctx.get('thread_id') or ctx.get('message_id') or 'sess'}",
+            capabilities=[], ttl_seconds=86400, approved_by="pending",
+            mode=capability_sandbox.ACCESS_APPROVAL)
+    except OSError as exc:
+        # 起始租约没落住（2026-11-05 T2）：批准时无处追加授权，断点必然悬空 ⇒ 不起跑
+        return {"result_text": f"智能编造未能开始：租约存储写入失败（{exc}）。"
+                               "请确认后端数据目录可写后重试。", "trace": trace}
     history_text = _fabric_knowledge_history(ctx, text, task_type=task_type)
     cp_id = f"fabric:{ctx.get('thread_id') or ctx.get('message_id') or 'sess'}"
     repo_id = str(ctx.get("repo_id") or ctx.get("thread_id") or "")
@@ -1019,10 +1175,12 @@ def _run_fabric_content_loop(ctx, state, *, intent_text, judge_text, text,
             "delivery_intent": judge_text,
             "messages": outcome.messages, "steps": outcome.steps,
             "lease_id": lease["id"], "pending_tool": outcome.pending_tool,
+            "pending_paths": list(outcome.pending_paths),
+            "pending_params": dict(outcome.pending_params),
+            "pending_action_hash": outcome.pending_action_hash,
             "output_dir": output_dir, "repo_id": repo_id, "thread_id": thread_id,
         })
-        return {"result_text": f"智能编造需要批准：下一步将「{outcome.pending_tool}」。"
-                               f"回复「批准」继续、「取消」中止。",
+        return {"result_text": _fabric_approval_text(outcome),
                 "trace": trace + ["🧵 智能编造等待审批"]}
     # 2026-09-07 重试资本：仅「完成」清理断点；step_limit/error 保留 running 断点，
     # 用户点「批准继续」可从断点续跑（不再需要重新发完整指令）。

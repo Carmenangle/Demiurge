@@ -274,16 +274,103 @@ def _delete_collections(repo_id: str) -> None:
 
 def _clear_branch_payload(output_dir: str, repo_id: str) -> None:
     target = repo_meta.repo_folder_path(output_dir, repo_id)
-    if not target.is_dir():
-        return
-    for path in target.iterdir():
-        if path.name == "_repo.json":
-            continue
-        if path.is_dir():
-            shutil.rmtree(path)
-        else:
-            path.unlink()
+    if target.is_dir():
+        for path in target.iterdir():
+            if path.name == "_repo.json":
+                continue
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
     _delete_collections(repo_id)
+    _clear_chat_threads(output_dir, repo_id)
+
+
+def _chat_thread_sources(output_dir: str, repo_id: str) -> dict[str, Path]:
+    """该作品的私聊/群聊线程：线程名 → chat.json 路径。
+
+    线程落点协议属主是 `chat_snapshot._path`：配了仓库文件夹时
+    `<outputDir>/<threadId>/chat.json`（扁平目录，不为线程建 `_repo.json`），
+    历史数据在 `DATA_DIR/chat_snapshots/<threadId>.json`（首次读取时才惰性迁移）。
+    两处都扫，避免分支丢掉尚未迁移过的旧线程。
+    """
+    prefix = f"{repo_id}__"
+    found: dict[str, Path] = {}
+    root = Path(output_dir)
+    if root.is_dir():
+        for child in sorted(root.iterdir()):
+            if not child.is_dir() or not child.name.startswith(prefix):
+                continue
+            snapshot = child / "chat.json"
+            if snapshot.is_file():
+                found[child.name] = snapshot
+    legacy_root = DATA_DIR / "chat_snapshots"
+    if legacy_root.is_dir():
+        for path in sorted(legacy_root.glob("*.json")):
+            if path.stem.startswith(prefix):
+                found.setdefault(path.stem, path)
+    return found
+
+
+def _timestamp_ms(value: Any) -> int | None:
+    """聊天消息时间戳归一：秒（前端 `Date.now()/1000`）与毫秒（1e11 以上）都认。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        return None
+    return int(value * 1000) if value < 100_000_000_000 else int(value)
+
+
+def _copy_chat_threads(output_dir: str, source_repo_id: str, target_repo_id: str,
+                       cutoff_ms: int) -> tuple[list[Path], int]:
+    """把分支时间点之前的私聊/群聊线程复制到新分支。
+
+    只复制源作品名前缀的线程，线程名把源 id 换成目标 id；消息按 `ts` 过滤，
+    时间戳缺失的旧消息保留（旧数据没有 ts，不能凭时间丢弃）。失败时清掉已写的线程。
+    """
+    created: list[Path] = []
+    total = 0
+    try:
+        for thread_name, source_path in _chat_thread_sources(output_dir, source_repo_id).items():
+            try:
+                raw = json.loads(source_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                _LOG.warning("分支聊天线程读取失败（跳过 %s）: %s", source_path, exc)
+                continue
+            if not isinstance(raw, list):
+                continue
+            kept: list[Any] = []
+            for message in raw:
+                if isinstance(message, dict) and cutoff_ms > 0:
+                    ts = _timestamp_ms(message.get("ts"))
+                    if ts is not None and ts > cutoff_ms:
+                        continue
+                kept.append(message)
+            if not kept:
+                continue
+            target_name = target_repo_id + thread_name[len(source_repo_id):]
+            target_dir = Path(output_dir) / target_name
+            target_dir.mkdir(parents=True, exist_ok=True)
+            payload = _replace_paths(kept, "", "", source_repo_id, target_repo_id)
+            tmp = target_dir / "chat.json.tmp"
+            tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(target_dir / "chat.json")
+            created.append(target_dir)
+            total += len(kept)
+    except Exception:
+        for folder in reversed(created):
+            shutil.rmtree(folder, ignore_errors=True)
+        raise
+    return created, total
+
+
+def _clear_chat_threads(output_dir: str, repo_id: str) -> None:
+    """删掉该仓库前缀的聊天线程目录（仅分支回滚用；前缀是 UUID + `__`，不会误伤别的作品）。"""
+    root = Path(output_dir)
+    if not root.is_dir():
+        return
+    prefix = f"{repo_id}__"
+    for child in root.iterdir():
+        if child.is_dir() and child.name.startswith(prefix):
+            shutil.rmtree(child, ignore_errors=True)
 
 
 def fork_snapshot(output_dir: str, source_repo_id: str, snapshot_id: str,
@@ -305,6 +392,8 @@ def fork_snapshot(output_dir: str, source_repo_id: str, snapshot_id: str,
         raise FileExistsError("目标仓库不是空仓库，拒绝覆盖")
     payload = root / "payload"
     copied: list[Path] = []
+    thread_dirs: list[Path] = []
+    chat_messages = 0
     try:
         for source in sorted(payload.rglob("*")):
             if not source.is_file() or source.name == "_repo.json":
@@ -331,16 +420,24 @@ def fork_snapshot(output_dir: str, source_repo_id: str, snapshot_id: str,
                 continue
         repo_meta.write_repo_marker(target, target_repo_id)
         vectors = _restore_collections(root, manifest, target_repo_id, old_folder, str(target))
+        # 私聊/群聊是独立线程（不在仓库文件夹里），按分支快照时间点补一份到新分支。
+        thread_dirs, chat_messages = _copy_chat_threads(
+            output_dir, source_repo_id, target_repo_id,
+            int(manifest.get("created_at") or 0),
+        )
     except Exception:
         for path in reversed(copied):
             try:
                 path.unlink()
             except OSError:
                 pass
+        for folder in reversed(thread_dirs):
+            shutil.rmtree(folder, ignore_errors=True)
         _delete_collections(target_repo_id)
         raise
     return {"ok": True, "snapshot_id": snapshot_id, "source_repo_id": source_repo_id,
-            "target_repo_id": target_repo_id, "files": len(copied), "vectors": vectors}
+            "target_repo_id": target_repo_id, "files": len(copied), "vectors": vectors,
+            "chat_threads": len(thread_dirs), "chat_messages": chat_messages}
 
 
 def create_experiment(output_dir: str, source_repo_id: str, snapshot_id: str,

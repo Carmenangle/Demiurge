@@ -43,6 +43,21 @@ def strip_prompt_compounds(text: str) -> str:
     return _PROMPT_COMPOUND_RE.sub("", text or "")
 
 
+def path_like_param_items(params: dict[str, Any] | None) -> list[tuple[str, str]]:
+    """params 里像绝对路径的 (键, 值) 对——需要按参数名分写/读语义时用（执行期闸门）。"""
+    return [(key, value) for key, value in (params or {}).items()
+            if isinstance(value, str) and PATH_LIKE_RE.match(value)]
+
+
+def path_like_params(params: dict[str, Any] | None) -> list[str]:
+    """params 里像绝对路径的字符串值（路径识别单一属主，机械计划与自由循环共用）。
+
+    只扫顶层字符串：列表型路径参数（如 `task.digest_materials.paths`）不在本判据面内，
+    与既有 `_out_domain_paths` 口径一致——扩大识别面要连同两条执行期闸一起改。
+    """
+    return [value for _key, value in path_like_param_items(params)]
+
+
 def _requires_generation(intent: str) -> bool:
     """意图文本是否要求出图/提交（复合词剥离后判定，防「生图提示词」误命中）。"""
     return bool(re.search(r"出图|生图|生成图|生成图片|生成视频|提交",
@@ -260,9 +275,7 @@ def _check_paths(plan: GenerationPlan, allowed_prefix: str,
     for step in plan.steps:
         if str((by_op.get(step.operation) or {}).get("side_effect_level")) == "readonly":
             continue
-        for key, value in step.params.items():
-            if not isinstance(value, str) or not PATH_LIKE_RE.match(value):
-                continue
+        for key, value in path_like_param_items(step.params):
             try:
                 candidate = PureWindowsPath(value)
                 candidate.relative_to(prefix)

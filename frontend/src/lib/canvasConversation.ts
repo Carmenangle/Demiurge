@@ -39,18 +39,6 @@ export function conversationMediaUrls(messages: ChatMessage[]): Set<string> {
   return urls;
 }
 
-/** 从后端持久化 history（/ai/chat/history 的 items）提取媒体 URL。
- *  重进画布时内存 messages 可能尚未加载完，此来源保证「对话实际内容自动导入」不依赖前端状态。 */
-export function conversationTurnUrls(turns: ReadonlyArray<{ images?: readonly string[] }>): Set<string> {
-  const urls = new Set<string>();
-  for (const t of turns) {
-    for (const img of t.images || []) {
-      if (img) urls.add(normalizeMediaUrl(img));
-    }
-  }
-  return urls;
-}
-
 /**
  * 过滤生成记录：只保留其媒体 URL 出现在当前对话里的。
  * 对话为空时返回空（新作品/未绑定 = 画布为空，符合「没绑定则没有」）。

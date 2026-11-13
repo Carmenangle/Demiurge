@@ -6,6 +6,7 @@ import {
   listMachines,
   machineLabelOf,
   resolveComfyUrl,
+  resolveComfyUrls,
   sameComfyUrl,
 } from "./comfyMachines";
 import type { Settings } from "../stores/settings";
@@ -77,6 +78,35 @@ describe("resolveComfyUrl", () => {
 
   it("地址为空 ⇒ 回空串（调用方沿用既有 `|| \"\"` 语义）", () => {
     expect(resolveComfyUrl({ comfyuiUrl: "" } as Settings, "image")).toBe("");
+  });
+});
+
+describe("resolveComfyUrls（多机台池，2026-11-09）", () => {
+  it("数组按配置序返回 URL，且按 URL 去重", () => {
+    const pool = {
+      ...twoMachines,
+      comfyRoute: { image: ["lan", "cloud", "lan"] },
+    } as unknown as Settings;
+    expect(resolveComfyUrls(pool, "image")).toEqual([
+      "http://192.168.1.9:8188",
+      "https://cloud.example.com:8188",
+    ]);
+  });
+
+  it("旧单字符串兼容；空数组/未知 id 回退条目 0", () => {
+    expect(resolveComfyUrls(twoMachines, "video")).toEqual([
+      "https://cloud.example.com:8188",
+    ]);
+    const empty = {
+      ...twoMachines,
+      comfyRoute: { image: [] as string[] },
+    } as unknown as Settings;
+    expect(resolveComfyUrls(empty, "image")).toEqual(["http://127.0.0.1:8188"]);
+    const stale = {
+      ...twoMachines,
+      comfyRoute: { image: ["gone"] },
+    } as unknown as Settings;
+    expect(resolveComfyUrls(stale, "image")).toEqual(["http://127.0.0.1:8188"]);
   });
 });
 

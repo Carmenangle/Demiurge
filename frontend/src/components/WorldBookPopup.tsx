@@ -2,7 +2,8 @@
 // 复用 WorldBook.tsx 的条目渲染逻辑（照搬源代码），去掉左栏书列表，
 // 中间条目移到左侧占 2/3，右侧条目导航占 1/3。不损害原 WorldBook.tsx 源代码。
 import { useEffect, useRef, useState } from "react";
-import { Pin, Plus, Pencil, Check, X, Trash2 } from "lucide-react";
+import { Pin, Plus, Pencil, X, Trash2 } from "lucide-react";
+import { WorldbookEntryModal } from "./WorldbookEntryModal";
 import {
   listWorldbookEntries, addWorldbookEntry, updateWorldbookEntry, deleteWorldbookEntry,
   repoWorldbookEntries, repoWorldbookEntryAdd, repoWorldbookEntryUpdate, repoWorldbookEntryDelete,
@@ -41,21 +42,26 @@ export function WorldBookPopup({
      'name' in location ? location.name : location.card_name]);
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    // 条目编辑弹窗打开时 Esc 只关上层弹窗，不能连带关掉整本世界书弹窗。
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && editIdx === null) onClose();
+    };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, editIdx]);
 
   const scrollToEntry = (index: number) => {
     setActiveIdx(index);
     entryRefs.current[index]?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
 
-  const startAdd = () => { setDraft(EMPTY_ENTRY); setEditIdx("new"); };
+  const startAdd = () => { setDraft(EMPTY_ENTRY); setErr(null); setEditIdx("new"); };
   const startEdit = (e: WBEntryItem) => {
     setDraft({ content: e.content, comment: e.comment, keys: e.keys, constant: e.constant, enabled: e.enabled });
+    setErr(null);
     setEditIdx(e.index);
   };
+  const patchDraft = (patch: Partial<WBEntryFields>) => setDraft((d) => ({ ...d, ...patch }));
   const saveEntry = async () => {
     if (!draft.content.trim()) { setErr("条目内容不能为空"); return; }
     setBusy(true); setErr(null);
@@ -85,6 +91,7 @@ export function WorldBookPopup({
   };
 
   return (
+    <>
     <div className="modal-mask">
       <div className="modal" style={{ width: "90vw", maxWidth: 1200, maxHeight: "85vh", display: "flex", flexDirection: "column" }} onClick={(e) => e.stopPropagation()}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
@@ -93,7 +100,7 @@ export function WorldBookPopup({
             <X size={18} />
           </button>
         </div>
-        {err && <p style={{ color: "var(--danger, #c0392b)", fontSize: 13, margin: "4px 0" }}>{err}</p>}
+        {err && editIdx === null && <p style={{ color: "var(--danger, #c0392b)", fontSize: 13, margin: "4px 0" }}>{err}</p>}
         <div style={{ marginBottom: 10 }}>
           <button className="btn" disabled={busy} onClick={startAdd}>
             <Plus size={14} style={{ marginRight: 6 }} /> 新增条目
@@ -102,42 +109,6 @@ export function WorldBookPopup({
         {/* 左侧条目内容（2/3）+ 右侧条目导航（1/3）—— 照搬 WorldBook.tsx 中栏+右栏逻辑 */}
         <div className="worldbook-popup-layout" style={{ flex: 1, minHeight: 0 }}>
           <div className="worldbook-popup-content">
-            {editIdx !== null && (
-              <div className="chat-box" style={{ marginBottom: 10 }}>
-                <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>
-                  {editIdx === "new" ? "新增条目" : `编辑条目 #${(editIdx as number) + 1}`}
-                </div>
-                <input placeholder="标题/备注（comment）" value={draft.comment}
-                  onChange={(e) => setDraft((d) => ({ ...d, comment: e.target.value }))}
-                  style={{ width: "100%", marginBottom: 6 }} />
-                <textarea placeholder="条目内容（content）" value={draft.content} rows={4}
-                  onChange={(e) => setDraft((d) => ({ ...d, content: e.target.value }))}
-                  style={{ width: "100%", marginBottom: 6 }} />
-                <input placeholder="关键词（逗号分隔，非常驻条目按其语义检索）" value={draft.keys.join(",")}
-                  onChange={(e) => setDraft((d) => ({ ...d, keys: e.target.value.split(",").map((s) => s.trim()).filter(Boolean) }))}
-                  style={{ width: "100%", marginBottom: 6 }} />
-                <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
-                  <label style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 4 }}>
-                    <input type="checkbox" checked={draft.constant}
-                      onChange={(e) => setDraft((d) => ({ ...d, constant: e.target.checked }))} />
-                    常驻（每轮注入，不走检索）
-                  </label>
-                  <label style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 4 }}>
-                    <input type="checkbox" checked={draft.enabled}
-                      onChange={(e) => setDraft((d) => ({ ...d, enabled: e.target.checked }))} />
-                    启用
-                  </label>
-                </div>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <button className="btn primary" disabled={busy} onClick={saveEntry}>
-                    <Check size={14} style={{ marginRight: 4 }} /> 保存
-                  </button>
-                  <button className="btn" disabled={busy} onClick={() => setEditIdx(null)}>
-                    <X size={14} style={{ marginRight: 4 }} /> 取消
-                  </button>
-                </div>
-              </div>
-            )}
             {entries.length === 0 && editIdx === null && (
               <p style={{ color: "var(--text-muted)" }}>该世界书没有条目。点「新增条目」添加。</p>
             )}
@@ -194,5 +165,17 @@ export function WorldBookPopup({
         </div>
       </div>
     </div>
+    {editIdx !== null && (
+      <WorldbookEntryModal
+        editIdx={editIdx}
+        draft={draft}
+        busy={busy}
+        error={err}
+        onChange={patchDraft}
+        onSave={saveEntry}
+        onCancel={() => setEditIdx(null)}
+      />
+    )}
+    </>
   );
 }

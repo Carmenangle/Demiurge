@@ -125,6 +125,18 @@ def _agency_maintenance(ctx: CtxLike, deps, clean: str, turn: int,
         repo_id = ctx.get("repo_id") or ctx.get("thread_id") or ""
         card_name = ctx.get("card_name") or ""
         _table_maintenance(ctx, deps, repo_id, clean, turn)
+        # 关键事件/纪念装扮账本（2026-11-10）：这里只做零 LLM 的高置信词表兜底；
+        # 维护模型按事件类型判断的 key_events 由纪要抽取（SUMMARY）产出并写入同一账本。
+        try:
+            from app.services import key_events
+            recorded = key_events.record_turn(
+                ctx.get("output_dir") or "", repo_id, turn=turn,
+                user=str(ctx.get("message") or ""), assistant=clean,
+            )
+            if recorded:
+                run_trace.emit(ctx, "memory.key_event", turn=turn, recorded=recorded)
+        except Exception as exc:  # noqa: BLE001 账本失败只留痕，不阻断维护
+            run_trace.emit(ctx, "memory.key_event", status="error", error=str(exc)[:200])
         _belief_maintenance(ctx, repo_id, clean, turn)
         from app.services import narrative_memory, table_store
         cadence = max(1, int(table_store.load_config(
@@ -202,6 +214,7 @@ def _table_maintenance(ctx: CtxLike, deps, repo_id: str, clean: str, turn: int) 
     writeback 与主链同源，快照落盘前做好感行对账）；模型回旧数组时优雅降级为只应用
     表格 ops，快照兜底仍由主链 ensure_status_snapshot 承担。need_deltas=False 时
     增量固定不应用——主协议已取得过增量，维护再取会双计。
+    关键事件不走本调用：由纪要抽取 SUMMARY 按事件类型判断。
     """
     try:
         from app.services import character_state, roleplay_agency

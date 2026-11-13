@@ -233,6 +233,23 @@ def test_独立profile把连续高潮窗口完整映射回防拦截原文():
     assert "@(掐)@着她的脖子" in protected
 
 
+def test_分镜取材只要锚点段落不回扫上下文():
+    """expand_context=False 时只返回锚点所在那一段，不把场景开头带回分镜。"""
+    text = (
+        "旧仓库的木门被拆掉了一半，海风灌进来。\n\n"
+        "腓特烈从侧门走进来的时候，蛮啾停了手。\n\n"
+        "她走到台前停下，把手里的花束换到左手。\n\n"
+        "蛮啾们炸开一片啾啾声。"
+    )
+    excerpt = si.illustration_scene_excerpt(
+        text, "她走到台前停下", expand_context=False,
+    )
+
+    assert excerpt.startswith("她走到台前停下")
+    assert "旧仓库的木门" not in excerpt
+    assert "腓特烈" not in excerpt
+
+
 def test_无指定锚点时按高潮词选段而非整篇正文():
     text = "日常铺垫。\n\n她在决战关头拔剑冲向高台。\n\n众人返回营地。"
 
@@ -2089,6 +2106,39 @@ def test_第57刀_空数组退回无锚点():
     assert si.parse_anchor_intent('{"anchors": []}') is None
 
 
+def test_全文覆盖_账本段落号解析与缺口审计():
+    """覆盖账本：`paragraphs` 必须逐段覆盖；缺口按段号返回，不靠人眼。"""
+    raw = (
+        '{"anchors": ['
+        '{"anchor": "第一段动作。", "paragraphs": [0, 1], "score": 10},'
+        '{"anchor": "第四段动作。", "paragraphs": [3], "score": 10}'
+        "]}"
+    )
+    items = si.parse_anchor_intents(raw)
+    assert items[0]["paragraphs"] == [0, 1]
+    text = "第一段动作。\n\n第二段对白。\n\n第三段动作。\n\n第四段动作。"
+    coverage = si.paragraph_coverage(text, items)
+    assert coverage["total"] == 4
+    assert coverage["gaps"] == [2]
+    assert coverage["ledger_missing"] == 0
+    items[1]["paragraphs"] = [2, 3]
+    assert si.paragraph_coverage(text, items)["gaps"] == []
+
+
+def test_全文覆盖_零上限不抽样():
+    """全文模式 `max_shots=0` ⇒ 全部保留，不按 12 镜等距抽样。"""
+    items = [{"anchor": f"第{i}段。", "paragraphs": [i]} for i in range(20)]
+    assert len(si.coverage_anchor_intents(items, 0)) == 20
+    assert len(si.coverage_anchor_intents(items, 12)) == 12
+
+
+def test_全文覆盖_去重合并时账本不丢段():
+    target = {"paragraphs": [0]}
+    source = {"paragraphs": [1, 2]}
+    si.merge_paragraph_ledger(target, source)
+    assert target["paragraphs"] == [0, 1, 2]
+
+
 def test_第57刀_单张出图取分最高且同分取正文更早():
     """口径锁（用户定案「数量 < 高潮点数 ⇒ 按分从高到低」）：
 
@@ -2135,6 +2185,80 @@ def test_第57刀_合同同时声明数组与score():
     # `ANCHOR_INTENT_FIELDS` 是**单条**字段集，逐字段都必须出现在合同正文里
     for field in si.ANCHOR_INTENT_FIELDS:
         assert field in contract
+
+
+def test_关键帧合同声明逐段覆盖与说话动作():
+    """2026-11-09 用户口径：文章说了什么就拍什么；对白必须有说话动作。"""
+    contract = si.ANCHOR_INTENT_CONTRACT
+
+    assert "逐段覆盖" in contract
+    assert "说话动作" in contract
+    assert "不设 12 上限" in contract
+    assert "覆盖账本" in contract
+    assert "paragraphs" in contract and "paragraphs" in si.ANCHOR_INTENT_FIELDS
+    assert "image_timing" in contract and "image_timing" in si.ANCHOR_INTENT_FIELDS
+    assert "locale" in contract and "locale" in si.ANCHOR_INTENT_FIELDS
+    assert "起始画面" in contract
+    assert "环境/时间变化单独成镜" in contract
+    assert "性描写段落不得跳过" in contract
+    assert si.STORYBOARD_MAX_SHOTS == 12
+    # ⚠ 人称提示只进判据 user 消息（见 test_agent_dispatch 的红线锁），不写进静态合同。
+
+    assert si._normalize_image_timing("mid") == "mid"
+    assert si._normalize_image_timing("END") == "end"
+    assert si._normalize_image_timing("whatever") == "start"
+
+
+def test_关键帧合同声明逐拍视角():
+    """video_beats 必须逐拍标 pov/observer：有些镜头叙事者不在机位上。"""
+    contract = si.ANCHOR_INTENT_CONTRACT
+
+    assert '"viewpoint": "pov|observer"' in contract
+    assert "叙事者本人" in contract
+    assert "第三人称旁观机位" in contract
+    assert si._normalize_beat_viewpoint("pov") == "pov"
+    assert si._normalize_beat_viewpoint("first_person") == "pov"
+    assert si._normalize_beat_viewpoint("第三人称") == "observer"
+    assert si._normalize_beat_viewpoint("observer") == "observer"
+    assert si._normalize_beat_viewpoint("不确定") == ""
+
+    item = si._normalize_anchor_intent({
+        "anchor": "她站在门口。",
+        "video_beats": [
+            {"duration_s": 2, "description": "她沿红毯走", "viewpoint": "POV"},
+            {"duration_s": 2, "description": "她停在台前", "viewpoint": "第三人称"},
+            {"duration_s": 2, "description": "两人对视"},
+        ],
+    })
+    assert [beat["viewpoint"] for beat in item["video_beats"]] == ["pov", "observer", ""]
+
+
+def test_判据字段破甲标记还原():
+    """判据自由文本里的 `@全@(身)@` 必须在归一化时就还原，不能漏进景别/beats。"""
+    item = si._normalize_anchor_intent({
+        "anchor": "@角@色@甲@站@在@门口。",
+        "framing": "@全@(身)@/中远景",
+        "subjects": ["@角@色@甲"],
+        "video_beats": [{"duration_s": 3, "description": "角色甲@开@口@说@话"}],
+    })
+
+    assert item["anchor"] == "角色甲站在门口。"
+    assert item["framing"] == "全身/中远景"
+    assert item["subjects"] == ["角色甲"]
+    assert item["video_beats"][0]["description"] == "角色甲开口说话"
+
+
+def test_分镜模式覆盖条款盖掉单图判据的对白排除():
+    """单图 rubric 明确排除「带引号对白」与「动作过程」；分镜模式必须用程序侧覆盖盖掉。"""
+    plain = si.anchor_intent_system("用户判据")
+    storyboard = si.anchor_intent_system("用户判据", storyboard=True)
+
+    assert "分镜模式覆盖" not in plain
+    assert "分镜模式覆盖" in storyboard
+    assert "带引号的成句对白" in storyboard
+    assert "说话动作" in storyboard
+    assert "性描写段落不得跳过" in storyboard
+    assert "image_timing" in storyboard
 
 
 def test_第57刀_属性测试_多锚点解析永不抛异常():
@@ -2248,6 +2372,25 @@ def test_第57刀_去重_结果保持正文原序且同分保留更早的():
     merged = si.dedupe_anchor_intents(items, text)
 
     assert [item["anchor"] for item in merged] == ["他抵着她的唇角。", "她垂下眼。"]
+
+
+def test_第57刀_去重_环境开场镜不被同段人物镜吞掉():
+    """环境空镜与同段落人物镜是两个镜头：去重只服务「同一处高潮」，不得吞掉开场。
+
+    2026-11-09 多文段实测：开场远景与人物入场同段且同高度带 ⇒ 旧逻辑按高分合并，
+    分镜直接丢掉开场（某仙侠作品实锤）。
+    """
+    text = "她站在院门口，腿上还留着殿前站了半日的酸。她走进院门。"
+    items = [
+        {"anchor": "她站在院门口，腿上还留着殿前站了半日的酸。", "score": 52,
+         "shot_type": "move", "composition": "环境空镜"},
+        {"anchor": "她走进院门。", "score": 80,
+         "shot_type": "cut", "composition": "全身"},
+    ]
+
+    merged = si.dedupe_anchor_intents(items, text)
+
+    assert [item["score"] for item in merged] == [52, 80]
 
 
 def test_第57刀_去重_空表与单条原样返回():

@@ -69,10 +69,12 @@ TEMPLATE_PACKAGE_ITEMS: tuple[dict[str, Any], ...] = (
         "record_id": "643baff143664bf7bb1afe44d6c37470",
         "stem": "MiniMax_H3_图生视频_首帧",
         "name": "MiniMax H3 图生视频（首帧）",
-        # 这三条只存在于记录手标的 exposed 里：_infer_binding 只对已 exposed 的字段生效，
+        # 这四条只存在于记录手标的 exposed 里：_infer_binding 只对已 exposed 的字段生效，
         # 所以「只装图本体」会丢它们 —— 包必须装整条记录，见 build_template_pack 的断言。
-        "manual_bindings": ("base_image", "video_prompt", "video_duration"),
+        # #58：last_frame_image 是尾帧 LoadImage 的注入口，缺它前端 lastFrameImage 静默丢弃。
+        "manual_bindings": ("base_image", "video_prompt", "video_duration", "last_frame_image"),
         "first_frame_field": "first_frame",
+        "last_frame_field": "last_frame",
         # 换型后的类型逐条写进清单：下一条模板可以是别的节点类型，断言不能替它假定答案。
         "expected_node_type": "MiniMaxH3ImageToVideo",
     },
@@ -253,7 +255,7 @@ def _assert_graph_intact(before: dict, after: dict) -> None:
 
 
 def _assert_template_publishable(record: dict, item: dict) -> None:
-    """钉住「换型 + 绑定」这两件真正会静默丢失的事。"""
+    """钉住「换型 + 绑定 + 首尾帧接线」这几件真正会静默丢失的事。"""
     if str(record.get("name") or "") != item["name"]:
         raise ValueError(f"模板名与点名清单不符: {record.get('name')!r} != {item['name']!r}")
     for key in ("source_path", "created_at", "updated_at"):
@@ -286,6 +288,16 @@ def _assert_template_publishable(record: dict, item: dict) -> None:
     )
     if not frame or frame.get("link") is None:
         raise ValueError(f"节点 {node.get('id')} 的 {item['first_frame_field']} 没有接线（首帧链丢失）")
+    # #58：SetNode「尾帧图像」写了变量但没人读是静默的 ⇒ 必须钉住 GetNode → last_frame。
+    last_frame = next(
+        (slot for slot in node.get("inputs") or []
+         if str(slot.get("name")) == item["last_frame_field"]),
+        None,
+    )
+    if not last_frame or last_frame.get("link") is None:
+        raise ValueError(
+            f"节点 {node.get('id')} 的 {item['last_frame_field']} 没有接线（尾帧链丢失）"
+        )
     if str(node.get("type")) != item["expected_node_type"]:
         raise ValueError(
             f"首帧链节点类型回退成 {node.get('type')}（应为 {item['expected_node_type']}）"
@@ -358,8 +370,9 @@ def build_template_pack(root: Path, output: Path) -> list[Path]:
 ## 为什么必须走第 1 条
 
 `video_width` / `video_height` 由后端按节点类型自动补，只要图里有且仅有一个视频生成节点就能恢复；
-但 `base_image` / `video_prompt` / `video_duration` **只存在于模板记录手标的 exposed 里**，
-自动推断只作用于已勾选的字段。⇒ 只搬工作流 JSON = 首帧参考口、视频提示词、时长三个入口静默消失，
+但 `base_image` / `video_prompt` / `video_duration` / `last_frame_image`
+**只存在于模板记录手标的 exposed 里**，自动推断只作用于已勾选的字段。
+⇒ 只搬工作流 JSON = 首帧参考口、视频提示词、时长、尾帧图四个入口静默消失，
 画布上看不出任何异常。这就是本包同时放 `templates/` 的原因。
 
 ## 清洗与保留

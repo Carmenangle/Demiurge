@@ -11,6 +11,9 @@ const ragApi = readFileSync(new URL("../api/ai/rag.ts", import.meta.url), "utf8"
 const styles = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
 const indexHtml = readFileSync(new URL("../../index.html", import.meta.url), "utf8");
 const view = readFileSync(new URL("../views/WebMaterialsView.tsx", import.meta.url), "utf8");
+// 2026-11-07：素材反推五档收进 lib/webMaterialTagging + 详情面板
+const materialTagging = readFileSync(new URL("./webMaterialTagging.ts", import.meta.url), "utf8");
+const materialDetail = readFileSync(new URL("../components/WebMaterialDetailModal.tsx", import.meta.url), "utf8");
 const settings = readFileSync(new URL("../stores/settings.ts", import.meta.url), "utf8");
 const syncModal = readFileSync(new URL("../components/RepoSyncModal.tsx", import.meta.url), "utf8");
 const supportWidget = readFileSync(new URL("../components/SupportWidget.tsx", import.meta.url), "utf8");
@@ -267,17 +270,17 @@ describe("图像描述/反推改用视觉大模型 VLM（2026-10-18 用户实测
     expect(settings).not.toContain("resolveModelProxy(vlm.proxyMode, globalProxyAddress(s), s.proxyEnabled),\n  };\n}\n\n/** activeVlmChat 返 null");
   });
 
-  it("RepoGallery 不再用普通对话模型做描述/反推，改用 vlmChat，并带未配置护栏", () => {
+  it("RepoGallery 描述/反推只用 vlmChat，普通对话模型不得喂图像", () => {
     expect(gallery).toContain("const vlmChat = activeVlmChat(settings);");
-    expect(gallery).not.toContain("activeChatModel(settings)");
+    expect(gallery).not.toMatch(/describeImage\([^)]*activeChatModel/);
     expect(gallery).toContain("describeImage([imgForModel], vlmChat!");
     expect(gallery).toContain("if (!vlmChat) { showToast(vlmGapMessage(settings), \"error\"); return; }");
   });
 
   it("WebMaterialsView 素材描述也改用 activeVlmChat", () => {
-    expect(view).toContain("const vlm = activeVlmChat(settings);");
-    expect(view).toContain("describeImage([img], vlm,");
-    expect(view).not.toContain("describeImage([img], activeChatModel(settings)");
+    expect(view).toContain("vlm: activeVlmChat(settings)");
+    expect(view).toContain("flashNote(vlmGapMessage(settings), \"error\")");
+    expect(view).not.toContain("activeChatModel(settings)");
   });
 });
 
@@ -289,9 +292,15 @@ describe("反推按钮图标随模式变 + toast 引导（#3/#4，2026-10-18 用
     expect(gallery).toContain("<Sparkles size={11} />");
   });
 
-  it("生成后 toast 指引去详情里复制（提升可发现性）", () => {
-    expect(gallery).toContain("详情里可「复制标签 / 复制提示词」");
-    expect(view).toContain("详情里可「复制描述 / 复制提示词」");
+  it("生成后 toast 指引去详情里复制（提升可发现性；GBC 模式只指引官方布局 JSON）", () => {
+    expect(gallery).toContain(
+      'const copyHint = mode === "gbc" ? "复制官方布局 JSON" : "复制标签 / 复制提示词";',
+    );
+    expect(gallery).toContain("详情里可「${copyHint}」");
+    // 素材侧：结果摘要直接回显在详情，复制入口常驻（反推标签 / 官方布局 JSON）
+    expect(view).toContain("flashNote(r.summary, \"success\")");
+    expect(materialTagging).toContain("官方布局已生成");
+    expect(materialDetail).toContain("复制官方布局 JSON");
   });
 });
 
@@ -496,6 +505,29 @@ describe("统一后台任务进度（2026-10-18：视觉索引/补缩略图/同�
     expect(gallery).toContain("void loadMore(n).then(() => scrollToPage(n));");
     expect(gallery).toContain("data-gal-page=");
     expect(gallery).not.toContain("setPendingJump(");
+  });
+
+  // 2026-11-07 用户实锤：点第 11 页（末页）页码高亮变了，内容区却没滚到对应位置。
+  // 根因＝平滑 scrollIntoView 的目标偏移在调用那刻算定；跳远页新挂几百个格子后瀑布流
+  // 按真实宽高比重排，页面拉长数倍 ⇒ 动画跑完仍停在旧偏移（实测停在 4 页附近）。
+  it("跳页落位：即时对齐真实滚动容器并跟随重排（不用 smooth scrollIntoView）", () => {
+    expect(gallery).not.toMatch(/\.scrollIntoView\(/);
+    // 滚动容器从锚点祖先里找（.app-body overflow:auto），落位走 scrollTop
+    expect(gallery).toContain("const scrollParentOf = (el: Element | null): HTMLElement | null =>");
+    expect(gallery).toContain("const alignPageTop = (n: number): number =>");
+    // 吸顶工具条盖住容器顶部：对齐要让出它的高度，否则页首第一行压在栏下
+    expect(gallery).toContain('document.querySelector<HTMLElement>(".asset-toolbar-sticky")');
+    // 第 1 页＝回到页面真顶部（含工具栏与「共 N 条」）
+    expect(gallery).toContain("if (n === 1) { scroller.scrollTop = 0;");
+    // 全部已加载时 loadMore 会早退（没有更多可取）⇒ 页码与落位必须在这里直接落定
+    expect(gallery).toContain("if (totalCount > 0 && items.length >= totalCount) { jumpRetryRef.current = 0; setPage(n); scrollToPage(n); return; }");
+    // 跟随窗口：网格高度变化 **或** 实际挪了滚动位置都算活动
+    // （瀑布流列间重排可以总高不变却把页首挪走，实测差 186px）
+    expect(gallery).toContain("if (alignPageTop(n) > 1) active = true;");
+    expect(gallery).toContain("now - lastActivity > 2500 || now - startedAt > 8000");
+    // 用户一操作立刻让位，别和手动滚动抢位置
+    expect(gallery).toContain('window.addEventListener("wheel", stop, { passive: true });');
+    expect(gallery).toContain('window.addEventListener("pointerdown", stop);');
   });
 
   // 2026-10-19：媒体类型筛选从「前端过滤已加载项」改为「下推 SQL」。

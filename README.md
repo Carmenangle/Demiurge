@@ -68,6 +68,23 @@ minisign -V -p SHA256SUMS.pub -m SHA256SUMS.txt -x SHA256SUMS.minisign
 只跑本机），请走杀软的误报提交通道反馈，或先在 [VirusTotal](https://www.virustotal.com)
 上传安装包核对多引擎结果再决定。
 
+### 卸载：删什么、留什么
+
+程序数据都在 `%LOCALAPPDATA%\Demiurge`（不随安装目录走），卸载按**三档**处理，逐名白名单判定：
+
+| 档 | 内容 | 卸载行为 |
+| --- | --- | --- |
+| 缓存 | `runtime`（三层解包）、`downloads`、`logs`、`tmp`/`temp`、缩略图、节点缓存 | **总删**，不给选项 |
+| 设置 | `desktop.json`、`webview2`、`user_state.json`（设置与凭据）、ComfyUI 地址与密钥、`lan_token.txt` | 仅勾选「删除设置与缓存」时删 |
+| 产物 | 作品仓库、作品索引 `repos.json`、预设、角色卡、世界书、会话快照、RAG 索引、模型权重 | **任何情况都不删** |
+
+- 不勾选 ⇒ 下次安装默认回到原位置（注册表记住了安装目录），设置与凭据照旧。
+- 静默卸载 `uninstall.exe /S` 读不到勾选框，按「保留设置」处理。
+- 升级（`/UPDATE`）不触发这套删除逻辑，运行时的换层由壳自己管。
+- 每次卸载在本机留一份逐名回执：`%LOCALAPPDATA%\Demiurge\uninstall.log`（每行 `OK`/`KEEP`/`SKIP`）。
+- 卸载完成会**当面告诉你删了什么、留了什么**（路径按本机实际位置显示）：没勾选时是「缓存（运行时与已下载的分件）已清除；设置、凭据与作品数据都保留在 `%LOCALAPPDATA%\Demiurge`」，勾选时是「设置与凭据（API 密钥、联机令牌、窗口记忆）已连同缓存一起清除；作品数据仍保留在其中的 `userdata`」。静默卸载（`/S`）跳过这个提示，只留回执文件。
+- 存档自带版本号（JSON 的 `schemaVersion`、SQLite 的 `PRAGMA user_version`）：本版本读不懂的存档先备份成 `<文件名>.bak-<时间戳>` 再重建；**备份失败就拒绝写入**，绝不拿空设置覆盖你已有的档案。要彻底清除程序数据（含作品与凭据）请手动删除 `%LOCALAPPDATA%\Demiurge` 整个目录。
+
 **四步跑到第一张图**（完整图文步骤见 [图解快速开始](docs/guide/quick-start.md)（10 步配图）；详细文字说明见 [教程 01 · 快速开始](docs/tutorials/01-quick-start.md)）：
 
 1. 解压后启动（Windows 双击 `Demiurge.exe`，其他平台运行启动脚本），界面即 `http://127.0.0.1:8010`。

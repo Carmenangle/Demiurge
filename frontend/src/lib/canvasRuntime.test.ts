@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  autoLayout, computeAxisSnap, groupKeyOf, nodeAbsolutePosition, nodeDetail, placeNewNodes, projectNodes,
+  arrangeStoryGrid, autoLayout, computeAxisSnap, genMediaUrl, generationNodeType, groupKeyOf, isArchiveProductNode,
+  migrateMediaLayoutKeys, nodeAbsolutePosition, nodeDetail, placeNewNodes, planStoryArrange, projectNodes,
 } from "./canvasRuntime";
 
 const makeGen = (id: string, prompt: string, ts = 0) =>
@@ -214,6 +215,218 @@ describe("canvasRuntime", () => {
           expect(ov).toBe(false);
         }
       }
+    });
+  });
+
+  describe("arrangeStoryGrid", () => {
+    it("按行优先排列，每行高度取该行最高卡（不是全局最高）", () => {
+      const sizes = [
+        { w: 240, h: 240 }, { w: 240, h: 240 },
+        { w: 180, h: 320 },
+      ];
+
+      const ps = arrangeStoryGrid(sizes, [], { cols: 2, originX: 24, originY: 24 });
+
+      expect(ps[0]).toEqual({ x: 24, y: 24 });
+      expect(ps[1]).toEqual({ x: 24 + 240 + 24, y: 24 });
+      // 第一行最高 240 → 第二行从 24+240+24 开始；若误用全局最高 320 会变成 368。
+      expect(ps[2]).toEqual({ x: 24, y: 24 + 240 + 24 });
+    });
+
+    it("整块下移避开非剧情节点，剧情节点自身不参与避让", () => {
+      const occupied = [{ x: 24, y: 24, w: 240, h: 240 }];
+      const ps = arrangeStoryGrid([{ w: 240, h: 240 }], occupied, { gapY: 24 });
+
+      expect(ps[0].y).toBe(24 + 240 + 24);
+    });
+
+    it("组内连续：障碍夹在组中间也不给组内开洞（整块避让，不逐行各自避让）", () => {
+      const sizes = [{ w: 240, h: 240 }, { w: 240, h: 240 }, { w: 240, h: 240 }];
+      // 障碍正卡在第 2 行的目标位置
+      const occupied = [{ x: 24, y: 24 + 240 + 24, w: 240, h: 240 }];
+
+      const ps = arrangeStoryGrid(sizes, occupied, { cols: 1, originX: 24, originY: 24 });
+
+      // 整块被推到障碍下方；行距恒为「行高 + gapY」，中间不出现额外空洞
+      expect(ps[0].y).toBe(24 + 240 + 24 + 240 + 24);
+      expect(ps[1].y - ps[0].y).toBe(240 + 24);
+      expect(ps[2].y - ps[1].y).toBe(240 + 24);
+    });
+
+    it("多卡片之间不重叠", () => {
+      const sizes = [
+        { w: 240, h: 240 }, { w: 180, h: 320 }, { w: 240, h: 240 },
+        { w: 180, h: 320 }, { w: 240, h: 240 },
+      ];
+      const ps = arrangeStoryGrid(sizes, [], { cols: 3 });
+      const rects = ps.map((p, i) => ({ ...p, ...sizes[i] }));
+      for (let i = 0; i < rects.length; i++) {
+        for (let j = i + 1; j < rects.length; j++) {
+          const a = rects[i], b = rects[j];
+          const ov = a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+          expect(ov).toBe(false);
+        }
+      }
+    });
+
+    it("空列表返回空", () => {
+      expect(arrangeStoryGrid([])).toEqual([]);
+    });
+  });
+
+  describe("媒体类型判定（后端 camelCase `mediaType` 是唯一真源）", () => {
+    // 后端 `list_generations` 返回 {mediaType, image_url, thumbUrl}，**没有** media_type / video_url
+    // ⇒ 视频/音频记录的地址就在 image_url 里（RAG 只有一个地址字段）。
+    const videoGen = { ...makeGen("gen-v1", "视频提示词"), mediaType: "video" as const };
+    const audioGen = { ...makeGen("a1", ""), mediaType: "audio" as const };
+
+    it("mediaType=video / audio 判成对应节点，不再退化成图组", () => {
+      expect(generationNodeType(videoGen)).toBe("video");
+      expect(generationNodeType(audioGen)).toBe("audio");
+      expect(generationNodeType(makeGen("i1", "图"))).toBe("image-group");
+    });
+
+    it("历史 media_type 与 URL 字段仍兼容（优先级：显式类型 > URL）", () => {
+      expect(generationNodeType({ ...makeGen("v2", ""), media_type: "video" })).toBe("video");
+      expect(generationNodeType({ ...makeGen("v3", ""), video_url: "/x.mp4" })).toBe("video");
+      expect(generationNodeType({ ...makeGen("a2", ""), audio_url: "/x.wav" })).toBe("audio");
+    });
+
+    it("genMediaUrl：播放地址取 image_url 兜底（后端唯一地址字段）", () => {
+      expect(genMediaUrl(videoGen)).toBe("/img/gen-v1.png");
+      expect(genMediaUrl({ ...videoGen, video_url: "/v1.mp4" })).toBe("/v1.mp4");
+      expect(genMediaUrl(audioGen)).toBe("/img/a1.png");
+      expect(genMediaUrl(undefined)).toBe("");
+    });
+
+    it("projectNodes 对真实视频记录产出 video-gen-<id> 节点", () => {
+      const { nodes } = projectNodes([videoGen]);
+      expect(nodes[0].type).toBe("video");
+      expect(nodes[0].id).toBe("video-gen-v1");
+    });
+
+    it("migrateMediaLayoutKeys：旧 img-gen 键与删除黑名单跟着类型改名（位置不丢、删掉的不复活）", () => {
+      const rect = { x: 1, y: 2, w: 3, h: 4 };
+      const r = migrateMediaLayoutKeys([videoGen], { "img-gen-gen-v1": rect }, ["img-gen-gen-v1", "story-x"]);
+
+      expect(r.changed).toBe(true);
+      expect(r.nodes["video-gen-gen-v1"]).toEqual(rect);
+      expect(r.nodes["img-gen-gen-v1"]).toBeUndefined();
+      expect(r.deletedIds).toEqual(["video-gen-gen-v1", "story-x"]);
+
+      // 幂等：再跑一次不动
+      const again = migrateMediaLayoutKeys([videoGen], r.nodes, r.deletedIds);
+      expect(again.changed).toBe(false);
+      expect(again.nodes).toEqual(r.nodes);
+    });
+
+    it("migrateMediaLayoutKeys：图片记录与已迁移记录不参与", () => {
+      const r = migrateMediaLayoutKeys([makeGen("i1", "图")], { "img-gen-i1": { x: 0, y: 0, w: 1, h: 1 } }, []);
+      expect(r.changed).toBe(false);
+    });
+  });
+
+  describe("isArchiveProductNode（整理时的废案组判定）", () => {
+    it("生成产物节点算废案", () => {
+      expect(isArchiveProductNode("img-gen-da0d1bc25f30f7f1aeda435a4d3151bb3cb77f3c")).toBe(true);
+      expect(isArchiveProductNode("video-gen-abc123")).toBe(true);
+      expect(isArchiveProductNode("audio-gen-abc123")).toBe(true);
+    });
+
+    it("剧情/输入/工具/素材节点不算废案", () => {
+      expect(isArchiveProductNode("story-3ff8f4ad-ab52-4958")).toBe(false);
+      expect(isArchiveProductNode("input-1a2b3c4d")).toBe(false);
+      expect(isArchiveProductNode("wftool-tpl-1")).toBe(false);
+      expect(isArchiveProductNode("insp-1a2b3c4d")).toBe(false);
+      expect(isArchiveProductNode("ref-1a2b3c4d")).toBe(false);
+    });
+
+    it("废案组排在剧情网格右侧且与剧情矩形不重叠", () => {
+      // 剧情 4 楼 → 3 列 2 行；废案组从这里算出的右边界 + 96 起排
+      const storySizes = [
+        { w: 240, h: 240 }, { w: 240, h: 240 }, { w: 240, h: 240 },
+        { w: 180, h: 320 },
+      ];
+      const storyPs = arrangeStoryGrid(storySizes, [], { cols: 3, originX: 24, originY: 24 });
+      const right = Math.max(...storyPs.map((p, i) => p.x + storySizes[i].w));
+      const storyRects = storyPs.map((p, i) => ({ ...p, ...storySizes[i] }));
+
+      const archiveSizes = [{ w: 240, h: 300 }, { w: 240, h: 300 }];
+      const archivePs = arrangeStoryGrid(archiveSizes, storyRects, { cols: 4, originX: right + 96, originY: 24 });
+
+      expect(archivePs[0].x).toBe(right + 96);
+      const overlaps = (a: { x: number; y: number; w: number; h: number }, r: { x: number; y: number; w: number; h: number }) =>
+        a.x < r.x + r.w && a.x + a.w > r.x && a.y < r.y + r.h && a.y + a.h > r.y;
+      for (const ap of archivePs) {
+        const a = { ...ap, ...archiveSizes[archivePs.indexOf(ap)] };
+        for (const r of storyRects) expect(overlaps(a, r)).toBe(false);
+      }
+    });
+  });
+
+  describe("整理分组：剧情主网格 + 废案组（真实尺寸序列）", () => {
+    // 真实画布形态：14 楼（12 张 240×240 + 2 张 180×320，按 4 列排），
+    // 两张灵感卡卡在剧情带中间（x=264/504，y=568~968）。
+    const storySizes = [
+      ...[0, 1, 2].flatMap(() => [{ w: 240, h: 240 }, { w: 240, h: 240 }, { w: 240, h: 240 }, { w: 180, h: 320 }]),
+      { w: 240, h: 240 }, { w: 240, h: 240 },
+    ];
+    const cards = [
+      { x: 264, y: 568, w: 180, h: 320 },
+      { x: 504, y: 648, w: 180, h: 320 },
+    ];
+
+    it("剧情整块连续：4 行行距恒为行高 + gapY，不被灵感卡逐行打洞", () => {
+      const ps = arrangeStoryGrid(storySizes, cards, { cols: 4, originX: 24, originY: 24 });
+
+      expect(ps).toHaveLength(14);
+      // 块高 = 3×320 + 240 + 3×24 = 1272；卡底 968 + gap 24 = 992，步进 24 落到 1008
+      expect(ps[0]).toEqual({ x: 24, y: 1008 });
+      for (const i of [4, 8, 12]) expect(ps[i].y - ps[0].y).toBe(i / 4 * 344);
+      // 4 列 x 轴固定
+      expect(ps.map((p) => p.x).slice(0, 4)).toEqual([24, 288, 552, 816]);
+    });
+
+    it("废案组排在剧情右边界 + 96，整组不重叠", () => {
+      const storyPs = arrangeStoryGrid(storySizes, cards, { cols: 4, originX: 24, originY: 24 });
+      const storyRects = storyPs.map((p, i) => ({ ...p, ...storySizes[i] }));
+      const right = Math.max(...storyPs.map((p, i) => p.x + storySizes[i].w)); // 996
+      const archiveSizes = Array.from({ length: 9 }, () => ({ w: 240, h: 300 }));
+
+      const ps = arrangeStoryGrid(archiveSizes, [...cards, ...storyRects], {
+        cols: 4, originX: right + 96, originY: 24,
+      });
+
+      expect(right).toBe(996);
+      expect(ps[0]).toEqual({ x: 1092, y: 24 });
+      expect(ps.map((p) => p.y)).toEqual([24, 24, 24, 24, 348, 348, 348, 348, 672]);
+      const rects = ps.map((p) => ({ ...p, w: 240, h: 300 }));
+      for (const a of rects) {
+        for (const r of storyRects) {
+          expect(a.x < r.x + r.w && a.x + a.w > r.x && a.y < r.y + r.h && a.y + a.h > r.y).toBe(false);
+        }
+      }
+    });
+
+    it("planStoryArrange：两组一次算完，废案从主网格右边界 + 96 起；废案为空时只回剧情组", () => {
+      const story = storySizes.map((s, i) => ({ id: `s${i}`, ...s }));
+      const archive = Array.from({ length: 9 }, (_, i) => ({ id: `a${i}`, w: 240, h: 300 }));
+      const opts = { cols: 4, originX: 24, originY: 24 };
+
+      const plan = planStoryArrange(story, archive, cards, opts);
+
+      expect(plan.story.map((p) => p.id)).toEqual(story.map((s) => s.id));
+      expect(plan.story[0]).toEqual({ id: "s0", x: 24, y: 1008, w: 240, h: 240 });
+      expect(plan.archive[0]).toEqual({ id: "a0", x: 1092, y: 24, w: 240, h: 300 });
+      for (const a of plan.archive) {
+        for (const s of plan.story) {
+          expect(a.x < s.x + s.w && a.x + a.w > s.x && a.y < s.y + s.h && a.y + a.h > s.y).toBe(false);
+        }
+      }
+
+      const only = planStoryArrange(story, [], cards, opts);
+      expect(only.archive).toEqual([]);
+      expect(only.story).toHaveLength(14);
     });
   });
 

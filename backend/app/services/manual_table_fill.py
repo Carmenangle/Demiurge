@@ -2,18 +2,20 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
 from app.services import (
-    chat_snapshot, narrative_memory, narrative_store, repo_meta, structured_output,
-    table_store, table_update,
+    chat_snapshot, key_event_contract, narrative_memory, narrative_store, repo_meta,
+    structured_output, table_store, table_update,
 )
 from app.services.structured_contracts import ManualFillResult
 
 CHRONICLE_UID = "__chronicle__"
+_LOG = logging.getLogger("uvicorn.error")
 # 2026-09-13 补数实锤：不传 max_tokens 时网关走自家默认输出上限，一批多表 ops+纪要的
 # 大 JSON 会被截断（「模型未返回完整 JSON」）。8192 远低于 deepseek-v4-flash 输出上限
 # 393216（cap_max_tokens 兜底 min 语义），足够容纳整批 ops 与纪要。
@@ -300,12 +302,17 @@ def _manual_system(tables: list[dict[str, Any]], include_chronicle: bool) -> str
         "你是剧情数据库填表 Agent。只根据给定的有编号对话回合处理本次指定表。"
         "通用表严格遵守列名、身份列和更新规则；同一身份已有行时输出 update，不重复 insert。"
         "纪要表每个批次输出一条丰富纪要，保留概览、完整因果、重要对白和实际出场人物；"
+        "用户明确点名的婚礼/订婚/纪念日/生日与关键装扮（婚纱/礼服等）必须写进纪要，"
+        "不得被同批次其它剧情挤掉；"
         "概览 overview 不超过30字，详细纪要 chronicle 不超过300字。"
         "只输出 JSON：{\"ops\":[通用表 insert/update/delete 操作],"
         "\"chronicles\":[{\"overview\":\"短概览\",\"chronicle\":\"详细纪要\","
-        "\"dialogue\":\"重要对白\",\"characters\":[\"人物\"],\"keywords\":[\"关键词\"]}]}。"
+        "\"dialogue\":\"重要对白\",\"characters\":[\"人物\"],\"keywords\":[\"关键词\"]}],"
+        "\"key_events\":[{\"title\":\"短标题\",\"detail\":\"关键细节\","
+        "\"turn\":9,\"characters\":[\"人物\"]}]}。"
         f"\n指定通用表：{json.dumps(table_specs, ensure_ascii=False)}"
         f"\n是否处理纪要表：{'是' if include_chronicle else '否'}"
+        + "\n\n" + key_event_contract.KEY_EVENT_GUIDE
     )
 
 
@@ -419,6 +426,7 @@ def run_manual_fill(*, base: str, repo_id: str, card_name: str,
     max_retry = max(0, int(config.get("maxRetry", 0)))   # 2026-09-13：接上既有配置（原裸抛）
     generated_ops: list[dict[str, Any]] = []
     generated_entries: list[narrative_memory.ChronicleEntry] = []
+    generated_key_events: list[dict[str, Any]] = []
     calls = 0
     failed_batches: list[str] = []
     skipped_covered: list[tuple[int, int]] = []
@@ -507,6 +515,15 @@ def run_manual_fill(*, base: str, repo_id: str, card_name: str,
                     op for op in table_update.sanitize_ops(ops)
                     if isinstance(op, dict) and str(op.get("table") or "") in allowed_names
                 )
+            batch_key_events = data.get("key_events")
+            if isinstance(batch_key_events, list):
+                for raw_event in batch_key_events:
+                    if not isinstance(raw_event, dict):
+                        continue
+                    event = dict(raw_event)
+                    if not event.get("turn"):
+                        event["turn"] = batch_end
+                    generated_key_events.append(event)
             if include_chronicle:
                 # 2026-10-20 实锤「整理索引跑完了，纪要表还是没更新」：
                 # 下面三段都会**静默**失败，且都不进 failed_batches ⇒ 用户只看到「0 条」：
@@ -578,6 +595,17 @@ def run_manual_fill(*, base: str, repo_id: str, card_name: str,
         table_store.save(base, repo_id, tables)
     for entry in generated_entries:
         narrative_store.append(base, repo_id, entry)
+    # 关键事件/纪念装扮账本（2026-11-10）：重建索引不只依赖模型摘要——用户点名且正文
+    # 实际发生的婚礼/婚纱等写入「任务与事件表」永久行；摘要漏写也不会丢。
+    key_event_rows = 0
+    if CHRONICLE_UID in selected:
+        try:
+            from app.services import key_events
+            key_event_rows = key_events.backfill_turns(
+                base, repo_id, turns, ranges=batches, events=generated_key_events,
+            )
+        except Exception as exc:  # noqa: BLE001 账本失败不阻断重建
+            _LOG.warning("重建索引时关键事件账本失败 repo=%s: %s", repo_id, exc)
     sealed_overlap = 0
     if replaced_rowids:
         sealed = narrative_store.normalize_apply(
@@ -600,6 +628,8 @@ def run_manual_fill(*, base: str, repo_id: str, card_name: str,
     return {
         "ok": True, "needs_confirmation": False, "processed": processed,
         "calls": calls, "applied": applied, "chronicles": len(generated_entries),
+        # 2026-11-10：重建索引时顺手补齐的「关键事件/纪念装扮」永久行数。
+        "key_events": key_event_rows,
         # 2026-09-13：解析失败被跳过的批次（重试耗尽）。空串 = 全部成功。
         "failed_batches": failed_batches,
         # 2026-10-20：越界被丢弃的区间（同时已写进 failed_batches，这里给程序化消费方）。

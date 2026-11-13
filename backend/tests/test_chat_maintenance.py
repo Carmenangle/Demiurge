@@ -22,6 +22,46 @@ def test_clear_only_clears_checkpoint(monkeypatch):
     assert calls == ["repo"]
 
 
+def test_clear_removes_chat_summary_cache(monkeypatch):
+    from app.services import chat_context_summary
+
+    _idle(monkeypatch)
+    called: list[str] = []
+    monkeypatch.setattr(chat_maintenance.chat_memory, "clear_history", lambda thread: None)
+    monkeypatch.setattr(chat_context_summary, "clear_thread", lambda thread: called.append(thread))
+
+    assert chat_maintenance.clear("repo__chat__甲") == {"ok": True}
+    assert called == ["repo__chat__甲"]
+
+
+def test_compact_chat_thread_uses_chat_summary_and_clears_cache(monkeypatch):
+    from app.services import chat_context_summary
+
+    _idle(monkeypatch)
+    seen: dict = {}
+    called: list[str] = []
+    monkeypatch.setattr(
+        chat_maintenance.chat_memory, "get_history",
+        lambda thread: [{"role": "user", "content": "以后叫我主人", "images": []}],
+    )
+    monkeypatch.setattr(chat_maintenance.chat_snapshot, "load_strict", lambda thread: [])
+    monkeypatch.setattr(chat_maintenance.rag_store, "list_generations", lambda thread, cfg: [])
+
+    def summarize(hist, llm, gens, **kwargs):
+        seen.update(kwargs)
+        return {"ok": True, "summary": "关系摘要", "image_count": 0}
+
+    monkeypatch.setattr(chat_maintenance.chat_memory, "summarize_history", summarize)
+    monkeypatch.setattr(chat_maintenance.chat_snapshot, "save", lambda thread, value: None)
+    monkeypatch.setattr(chat_maintenance.chat_memory, "replace_history", lambda thread, value: None)
+    monkeypatch.setattr(chat_context_summary, "clear_thread", lambda thread: called.append(thread))
+
+    chat_maintenance.compact("repo__chat__甲", FakeLLM(), object())
+
+    assert seen.get("chat_mode") is True
+    assert called == ["repo__chat__甲"]
+
+
 def test_clear_cache_only_deletes_reference(tmp_path, monkeypatch):
     _idle(monkeypatch)
     repo = tmp_path / "repo"
@@ -85,7 +125,7 @@ def test_compact_commits_same_summary_to_memory_and_snapshot(monkeypatch):
     monkeypatch.setattr(chat_maintenance.chat_snapshot, "load_strict", lambda thread: old_snapshot)
     monkeypatch.setattr(chat_maintenance.rag_store, "list_generations", lambda thread, cfg: [{"prompt": "p"}])
     summarized = []
-    def summarize(hist, llm, gens):
+    def summarize(hist, llm, gens, **_k):
         summarized.extend(hist)
         return {"ok": True, "summary": "摘要正文", "image_count": 1}
     monkeypatch.setattr(chat_maintenance.chat_memory, "summarize_history", summarize)
@@ -113,7 +153,7 @@ def test_compact_falls_back_to_latest_generation_image(monkeypatch):
         {"prompt": "old", "image_url": "local://old.png", "created_at": 1},
         {"prompt": "new", "image_url": "local://new.png", "created_at": 2},
     ])
-    monkeypatch.setattr(chat_maintenance.chat_memory, "summarize_history", lambda hist, llm, gens: {
+    monkeypatch.setattr(chat_maintenance.chat_memory, "summarize_history", lambda hist, llm, gens, **_k: {
         "ok": True, "summary": "摘要正文", "image_count": 2,
     })
     monkeypatch.setattr(chat_maintenance.chat_snapshot, "save", lambda thread, value: None)

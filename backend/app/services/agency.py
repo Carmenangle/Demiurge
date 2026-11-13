@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import random
+import re
 from dataclasses import dataclass
 
 OUTCOME_ACCEPT = "accept"
@@ -28,6 +29,22 @@ DEGREE_LABEL = {
     DEGREE_CRIT: "大成功", DEGREE_HARD: "极难成功", DEGREE_FULL: "困难成功",
     DEGREE_PARTIAL: "普通成功", DEGREE_NONE: "失败", DEGREE_FUMBLE: "大失败",
 }
+
+# 正文 <roll> 的 `[RESULT]` 行前缀；六档词只认上方 DEGREE_LABEL。
+RESULT_LINE_PREFIX = "[RESULT] "
+_RESULT_LINE_RE = re.compile(r"(?m)^([ \t]*)\[RESULT\][^\r\n]*(?=\r?$)")
+
+
+def render_result_line(text: str) -> str:
+    """把每条 `[RESULT]` 行重渲染为 DEGREE_LABEL 六档词（覆盖层注入前的最后一道同源）。
+
+    只改已存在的行：其余文字逐字节保留；无该行或空文本原样返回——清空 rollInstruction
+    仍等于「不掷骰」，不替用户补输出格式。
+    """
+    if not text:
+        return text
+    line = RESULT_LINE_PREFIX + "/".join(DEGREE_LABEL.values())
+    return _RESULT_LINE_RE.sub(lambda m: m.group(1) + line, text)
 
 
 @dataclass

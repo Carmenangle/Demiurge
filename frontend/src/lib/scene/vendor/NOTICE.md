@@ -23,7 +23,7 @@ Demiurge 的 scene 壁纸实时渲染用的两个文件是从第三方 MIT 插�
 视频纹理 / 视频纹理逐帧重采 / 雨丝 spritetrail / 格式串时钟（保存态 scriptproperties、
 不按框宽截断、字号 ×1.25）/ 场景对象顺序（order）/ REFRACT 折射粒子补丁）：
 
-- `we-scene-manifest.js` — `dda2d3126acb56d61c258ce201aa19567450a3e496c45c16ca76c9b86e272e13`
+- `we-scene-manifest.js` — `def1c3dc53965f2773856757e4dd2fe35678941c68e52912ca2f5b402b0ab566`
 - `we-scene-player-html.js` — `04fb3941a0378526b0a45c371780cefc5882b634d1fa35e6a2cc3a69e5dcf18a`
 
 ## 改动清单（全部改动，逐字）
@@ -298,6 +298,20 @@ Demiurge 的 scene 壁纸实时渲染用的两个文件是从第三方 MIT 插�
       缺 `normalTexUrl` 的系统播放器整条跳过——绝不退回「直接画反照率」。
     - `operator.sizechange` ⇒ `sizeGrow: [startvalue, endvalue]`（生命期内插值）。
 
+18. **Demiurge 改动⑰：畸形输入边界（不可信场景包）。**（2026-11-07，F 项）
+
+    - `containsEmbeddedScript` 从递归改为**显式栈遍历**：`JSON.parse` 能解 5 万层嵌套数组，
+      递归版在这类 `scene.json` 上抛 `RangeError: Maximum call stack size exceeded`，
+      Worker 只能把整张壁纸退回静态预览。嵌套放在无任何语义的字段上也一样中招，
+      所以修复点必须在「扫全树」这一层，而不是逐个字段加深度限制。
+    - `parseVec3` / `parseVec2` 的字符串分支从 `!parts.some(isNaN)` 改为
+      `parts.every(Number.isFinite)`：用户属性来自 JS 对象（不受 JSON 字面量限制），
+      `Infinity` 经标量→向量广播后写成 `"Infinity Infinity Infinity"`，`parseFloat`
+      原样通过旧判据 ⇒ 图层 `w/h` 变成 `Infinity`，播放器画一张空画面。
+      现在非有限分量整条回退到调用方的缺省值。
+    回归：`decodeScenePackage.test.ts` 的「畸形输入边界」5 例（深嵌套 / 超大数组 /
+    NaN+Infinity / 未知算子 / 重复 id 与父子环）。
+
 **已知限制（本刀范围）**：蒙皮权重固定 4 骨骼；附件跟随只走「最近祖先」的刚性子树，多级
 puppet 嵌套未实现；脚本引擎仍不执行（`scripted:true` 场景渲染静态结构 + `animationlayers`，
 但点击切姿势、`scriptproperties` 的动态求值不跑）。文字只认五族固定形状：§7 的时钟惯用法、
@@ -308,7 +322,7 @@ puppet 嵌套未实现；脚本引擎仍不执行（`scripted:true` 场景渲染
 `effects/waterwaves` 与 `effects/foliagesway` 未实现 ⇒ 角色的「飘动效果」`bigbdriftingeffect`
 仍是未生效键，不进面板。
 
-除上述 17 项外**没有任何**逻辑改动。
+除上述 18 项外**没有任何**逻辑改动。
 
 ### `we-scene-player-html.js`（上游 `lib/scene-player.js`）
 
@@ -539,6 +553,7 @@ puppet 嵌套未实现；脚本引擎仍不执行（`scripted:true` 场景渲染
   图层发射搜 `typeof modelJson.puppet === 'string'`，可见性搜 `isObjectVisible`，
   蒙皮/动画搜 `MDL_FLAG_SKIN_BLEND`、`buildPuppetPayload`、`animationOf`、`followOf`，
   视差开关搜 `cameraParallax:`，用户预设搜 `noteBinding` / `manifest.userBindings`。
+  畸形容错搜 `containsEmbeddedScript`（显式栈，别改回递归）与 `parts.every(Number.isFinite)`。
   文字补丁搜 `textSpecOf` / `textLayerOf` / `canvasOriginValue` / `scanIfBlocks` / `condHolds` /
   `dateFormatOf`（日期模板求值），字号规则搜 `resolveObjectTransform` 回传的 `scale`
   与 `const sizeScale = transform.scale`（**整条父链含最外层根组**，别再用 `innerScale`）

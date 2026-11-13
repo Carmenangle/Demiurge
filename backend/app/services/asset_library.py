@@ -11,7 +11,7 @@ import json
 import re
 import threading
 
-from app.services import asset_store, rag_store
+from app.services import asset_store, gbc_tagger, rag_store
 from app.services.rag_backend import EmbedConfig
 
 
@@ -341,6 +341,109 @@ def tag_asset_with(asset_id: str, repo_id: str, model: str,
         raise ValueError("无法写入标签快照（条目被锁定或不存在）")
     return {"ok": True, "model": spec.id, "snapshot_id": snap["id"],
             "tags": snap["tags"], "total": len(snap["tags"])}
+
+
+def gbc_tag_asset(asset_id: str, repo_id: str, *,
+                  runtime: gbc_tagger.GbcRuntime, vlm_base_url: str, vlm_model: str,
+                  vlm_api_key: str, vlm_proxy: str = "", cfg: EmbedConfig) -> dict[str, object]:
+    """GBC 场景图打标：WD14 标签 → 种子描述 → 实体/关系图 + MOSS 布局 JSON。
+
+    与 WD14 打标同样走「本机留存图片 + 新建标签快照」；图本身落 `asset_gbc` 侧表
+    （一次跑几分钟，重开详情不该再跑一遍）。GBC 环境/权重缺失抛 GbcUnavailable。
+    种子描述只由标签拼成：标签是物体的唯一真源，视觉模型不再参与「图里有什么」。
+    """
+    from app.services import gbc_store, tagger_registry, thumbnail_store, wd14_tagger
+
+    spec = tagger_registry.resolve(None)
+    if not wd14_tagger.model_available(spec.dir):
+        raise TaggerUnavailable(f"WD14 模型未安装：GBC 路线仍需 WD14 出标签（{spec.dir}）")
+    items = rag_store.list_generations(repo_id, cfg)
+    item = next((i for i in items if i.get("id") == asset_id), None)
+    if item is None:
+        raise AssetMissing("资产不存在")
+    path = thumbnail_store.local_path_of_url(str(item.get("image_url") or ""))
+    if path is None:
+        raise ValueError("仅支持本机留存图片（远程图取不到字节）")
+
+    scored = tagger_registry.predict(None, path)[:gbc_tagger.MAX_TAGS]
+    # 种子描述只写标签里真有的物体（VLM 写描述会添剑/标题、把泳衣写成比基尼，
+    # 2026-11-07 实锤）。门槛与 GBC 的 tag_threshold 同一处。
+    caption = gbc_tagger.caption_from_tags(
+        [name for name, score in scored if score >= gbc_tagger.TAG_THRESHOLD])
+    if not caption:
+        raise ValueError(
+            "WD14 没有识别出可用于 GBC 的物体标签（只有场景/身体/姿态标签），无法驱动场景图："
+            + "、".join(name for name, _score in scored[:12]))
+    graph = gbc_tagger.run_one(
+        image_path=path, caption=caption,
+        tags={name: score for name, score in scored},
+        rt=runtime, vlm_base_url=vlm_base_url, vlm_model=vlm_model,
+        vlm_api_key=vlm_api_key, vlm_proxy=vlm_proxy, key=asset_id,
+    )
+    moss = gbc_tagger.to_moss(graph)
+    moss_draft = gbc_tagger.to_moss(graph, draft=True)
+    tags = [name for name, _score in scored]
+    gbc_store.save(asset_id, repo_id, graph=graph, moss=moss, moss_draft=moss_draft, engine={
+        "exe": runtime.exe, "sam3_dir": runtime.sam3_dir, "embed_dir": runtime.embed_dir,
+        "device": runtime.device, "max_top_level": runtime.max_top_level,
+        "vlm_model": vlm_model, "caption": caption.strip(),
+        "tagger": spec.id, "elapsed_s": graph.get("_elapsed_s") or 0,
+        "tags": tags,
+    })
+    snap = rag_store.add_tag_snapshot(asset_id, repo_id, cfg, tags,
+                                      model="gbc", label="GBC 场景图")
+    return {
+        "ok": True,
+        "model": "gbc",
+        "snapshot_id": snap["id"] if snap else "",
+        "tags": snap["tags"] if snap else tags,
+        "total": len(snap["tags"]) if snap else len(tags),
+        "outline": gbc_tagger.outline(graph),
+        "elapsed_s": graph.get("_elapsed_s") or 0,
+        "warning": "" if snap else "标签快照未写入（条目被锁定）——场景图已保存",
+    }
+
+
+def moss_layout_asset(asset_id: str, *, vlm_base_url: str, vlm_model: str,
+                      vlm_api_key: str, vlm_proxy: str = "", hint: str = "") -> dict[str, object]:
+    """已存 GBC 场景图 → 官方完整布局（style/cast/逐项描述由视觉模型写，几何用 GBC 的）。
+
+    读图走 `assets` 主表（不需要嵌入配置）；布局回存 `asset_gbc.moss_layout_json`，
+    详情面板下次打开直接取，不重复跑模型。没有场景图时先让用户跑 GBC（400）。
+    """
+    import time
+
+    from app.services import asset_store, gbc_store, moss_layout, thumbnail_store
+
+    saved = gbc_store.get(asset_id)
+    if saved is None or not (saved.get("graph") or {}).get("vertices"):
+        raise ValueError("这张图还没有 GBC 场景图：先跑一次 GBC 打标再生成官方布局")
+    if not moss_layout.skeleton(saved["graph"]):
+        raise ValueError(
+            "这张图的 GBC 场景图没有实体（items 为空）：WD14 没有识别出可用物体标签，"
+            "换一张主体更清晰的图重跑 GBC，再生成官方布局")
+    row = asset_store.get_row(asset_id)
+    if row is None:
+        raise AssetMissing("资产不存在")
+    path = thumbnail_store.local_path_of_url(str(row.get("image_url") or ""))
+    if path is None:
+        raise ValueError("仅支持本机留存图片（远程图取不到字节）")
+    if not (vlm_base_url or "").strip() or not (vlm_model or "").strip():
+        raise moss_layout.MossLayoutUnavailable(
+            "MOSS 官方布局需要一个视觉大模型：请先在「设置 → 模型」配置 VLM")
+
+    engine_tags = (saved.get("engine") or {}).get("tags")
+    tags = engine_tags if isinstance(engine_tags, list) else asset_store.tags_of_row(row)
+    started = time.monotonic()
+    written = moss_layout.write(
+        saved["graph"], path, base_url=vlm_base_url, api_key=vlm_api_key,
+        model=vlm_model, proxy=vlm_proxy, hint=hint, tags=tags,
+    )
+    payload = moss_layout.compose(saved["graph"], written, tags=tags)
+    payload["model"] = vlm_model
+    payload["elapsed_s"] = round(time.monotonic() - started, 1)
+    gbc_store.save_layout(asset_id, payload)
+    return {"ok": True, **payload}
 
 
 def save_tag_text(asset_id: str, repo_id: str, *, text: str, model: str, label: str,

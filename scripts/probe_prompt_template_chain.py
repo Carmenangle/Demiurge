@@ -106,7 +106,7 @@ def main() -> int:
         "section_titles": {"meta": "元信息·探针"},
         "camera_band_overrides": {"2": "探镜：镜头缓慢横移"},
         "beat_labels": ["起", "承", "合"], "default_duration": 6,
-        "negative_extra": "探针负面追加", "meta_note": "探针备注",
+        "meta_note": "探针备注",
     })
     vctx = {"video_prompt_template_id": f"custom:{vtpl['id']}"}
     sk = asc._video_skeleton_for(vctx, "climax")
@@ -119,7 +119,7 @@ def main() -> int:
             "kind": f"video_{mode}", "name": f"探针·{mode}",
             "section_titles": {"meta": "元信息·探针"},
             "camera_band_overrides": {band_key: "探镜：镜头缓慢横移"},
-            "default_duration": 6, "negative_extra": "探针负面追加", "meta_note": "探针备注",
+            "default_duration": 6, "meta_note": "探针备注",
         })
         sk = asc._video_skeleton_for(
             {"video_prompt_template_id": f"custom:{mtpl['id']}"}, mode)
@@ -128,7 +128,10 @@ def main() -> int:
         print(f"[4] {mode}: sections={req['prompt_sections']}")
         print(f"    first block: {text.split(chr(10) + chr(10))[0][:90]}")
         assert "元信息·探针" in text and "探镜：镜头缓慢横移" in text
-        assert "探针负面追加" in text and "6 seconds" in text
+        assert "6 seconds" in text
+        # 第 87 刀：负面旋钮已摘除 ⇒ 数据面上没有这个字段，成稿里也不该出现负面区块
+        assert "负面约束" not in text, f"{mode} 又产出了负面区块"
+        assert len(req["prompt_sections"]) == 5, req["prompt_sections"]
 
     # ⑤ 删除后降级（不抛错）
     store.delete_template(tpl["id"])

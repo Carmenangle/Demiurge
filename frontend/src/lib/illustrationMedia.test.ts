@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   illustrationLoraConfigurationError, illustrationRequestMedia, illustrationWorkflowMedia,
+  resolveIllustrationImageMode,
+  imageTemplateCapabilities, resolveIllustrationTemplateId, resolveVideoTemplateId,
   isSegmentBridgeEvent,
   resolveIllustrationActors, resolveVideoMode, resolveVideoTemplateChoice, resolveVideoDuration,
   resolveBaseImageSource, imagePixelSizeFromBlob, alignSizeForVideoNode,
@@ -30,7 +32,8 @@ describe("character-card illustration media", () => {
   it("ignores role LoRA and images but keeps the optional global style LoRA", () => {
     expect(illustrationWorkflowMedia(legacyBindings, ["露娜"], ["露娜"])).toEqual({
       loras: [{ name: "style.safetensors", weight: 0.7, character: false }],
-      loraName: "style.safetensors", loraWeight: 0.7, baseImage: "", characterLora: false,
+      loraName: "style.safetensors", loraWeight: 0.7, baseImage: "", referenceImages: [],
+      characterLora: false,
     });
   });
 });
@@ -188,6 +191,62 @@ describe("illustration LoRA modes", () => {
     const config = { ...preset, loraMode: "multi" as const, styleLora: "" };
     const media = illustrationWorkflowMedia(config, ["甲"], ["白露谷"]);
     expect(illustrationLoraConfigurationError(config, media)).toContain("默认风格 LoRA");
+  });
+});
+
+describe("生图方式（文生图 / 图生图，2026-11-08）", () => {
+  const preset = {
+    templateId: "tpl",
+    appearanceSource: "worldbook" as const,
+    loraMode: "single" as const,
+    characterLoras: {
+      甲: { loraName: "a.safetensors", loraWeight: 0.9, baseImage: "a.png" },
+    },
+    styleLora: "style.safetensors",
+    styleLoraWeight: 0.7,
+    styleBaseImage: "fallback.png",
+  };
+
+  it("文生图：LoRA 照常，角色/风格底图在云端请求与 ComfyUI 工作流里都不参与", () => {
+    const text2img = { ...preset, imageMode: "text2img" as const };
+    expect(illustrationRequestMedia(text2img, ["甲"])).toEqual({
+      characterBaseImages: {}, illustrationActorNames: ["甲"], styleBaseImage: "",
+    });
+    expect(illustrationWorkflowMedia(text2img, ["甲"], ["甲"])).toMatchObject({
+      loras: [{ name: "a.safetensors", weight: 0.9, character: true }],
+      baseImage: "",
+    });
+  });
+
+  it("图生图：底图与 LoRA 同时参与（云端拿角色/风格底图，ComfyUI 拿 base_image）", () => {
+    const img2img = { ...preset, imageMode: "img2img" as const };
+    expect(illustrationRequestMedia(img2img, ["甲"])).toMatchObject({
+      characterBaseImages: { 甲: "a.png" }, styleBaseImage: "fallback.png",
+    });
+    expect(illustrationWorkflowMedia(img2img, ["甲"], ["甲"])).toMatchObject({
+      loras: [{ name: "a.safetensors", weight: 0.9, character: true }],
+      baseImage: "a.png",
+    });
+  });
+
+  it("旧预设按改动前的隐式口径回填：有条目底图=图生图，无底图/角色卡模式=文生图", () => {
+    expect(resolveIllustrationImageMode(preset)).toBe("img2img");
+    expect(resolveIllustrationImageMode({
+      ...preset, characterLoras: { 甲: { loraName: "a.safetensors" } }, styleBaseImage: "",
+    })).toBe("text2img");
+    expect(resolveIllustrationImageMode({ ...preset, appearanceSource: "character_card" }))
+      .toBe("text2img");
+  });
+
+  it("图生图但一张底图都没有时退回文生图，不凭空造参考图", () => {
+    const empty = {
+      ...preset, imageMode: "img2img" as const,
+      characterLoras: { 甲: { loraName: "a.safetensors" } }, styleBaseImage: "",
+    };
+    expect(illustrationWorkflowMedia(empty, ["甲"], ["甲"])).toMatchObject({ baseImage: "" });
+    expect(illustrationRequestMedia(empty, ["甲"])).toMatchObject({
+      characterBaseImages: {}, styleBaseImage: "",
+    });
   });
 });
 
@@ -620,5 +679,58 @@ describe("首帧尺寸量取与视频节点对齐", () => {
   it("超上限 16384 ⇒ undefined，交回模板默认而不是提交非法尺寸", () => {
     expect(alignSizeForVideoNode({ width: 864, height: 20000 })).toBeUndefined();
     expect(alignSizeForVideoNode(undefined)).toBeUndefined();
+  });
+});
+
+describe("模板能力分组与逐镜自动选择（2026-11-12）", () => {
+  const field = (binding: string) => ({
+    node_id: "1", field: binding, semantic: binding, binding,
+  });
+
+  it("纯提示词模板＝文生图；base_image＝图生图；base+mask＝重绘；reference_image＝参考生图", () => {
+    expect(imageTemplateCapabilities({ exposed: [field("prompt")] })).toEqual(["text2img"]);
+    expect(imageTemplateCapabilities({ exposed: [field("prompt"), field("base_image")] }))
+      .toEqual(["img2img"]);
+    expect(imageTemplateCapabilities({
+      exposed: [field("prompt"), field("base_image"), field("mask")],
+    })).toEqual(["img2img", "inpaint"]);
+    expect(imageTemplateCapabilities({
+      exposed: [field("prompt"), field("reference_image_1")],
+    })).toEqual(["reference"]);
+  });
+
+  it("后端要求 img2img 且已配图生图模板 ⇒ 用该模板", () => {
+    expect(resolveIllustrationTemplateId({
+      templateId: "t-text", imageMode: "text2img",
+      imageTemplates: { text2img: "t-text", img2img: "t-i2i" },
+    }, { image_mode: "img2img" })).toEqual({
+      id: "t-i2i", mode: "img2img", fallback: false,
+    });
+  });
+
+  it("后端要求 img2img 但未配图生图模板 ⇒ 回落文生图并标记 fallback", () => {
+    expect(resolveIllustrationTemplateId({
+      templateId: "t-text", imageMode: "text2img",
+    }, { image_mode: "img2img" })).toEqual({
+      id: "t-text", mode: "img2img", fallback: true,
+    });
+    // 场景没写 image_mode 时沿用旧全局开关，旧预设逐字不变。
+    expect(resolveIllustrationTemplateId({
+      templateId: "t-text", imageMode: "img2img",
+    }, undefined)).toMatchObject({ id: "t-text", mode: "img2img", fallback: true });
+  });
+
+  it("视频模板按首尾帧/图生视频分槽，未配回落 legacy", () => {
+    expect(resolveVideoTemplateId({
+      videoTemplateId: "v-legacy", firstlast: true,
+      videoTemplates: { firstlast: "v-firstlast" },
+    }, undefined)).toEqual({ id: "v-firstlast", mode: "firstlast", fallback: false });
+    expect(resolveVideoTemplateId({
+      videoTemplateId: "v-legacy", firstlast: false,
+      videoTemplates: { image2video: "v-i2v" },
+    }, undefined)).toEqual({ id: "v-i2v", mode: "image2video", fallback: false });
+    expect(resolveVideoTemplateId({
+      videoTemplateId: "v-legacy", firstlast: false,
+    }, undefined)).toEqual({ id: "v-legacy", mode: "image2video", fallback: true });
   });
 });

@@ -351,10 +351,16 @@ def _pc_run_full_loop(ctx: CtxLike, state: AgentState, *, text: str, judge_text:
     if plan_tasks._agent_access_mode() != capability_sandbox.ACCESS_FULL:
         return None
     from app.services import fabric_checkpoint
-    lease = capability_sandbox.grant(
-        subject=f"fabric:{ctx.get('thread_id') or ctx.get('message_id') or 'sess'}",
-        capabilities=[], ttl_seconds=86400, approved_by="full_mode",
-        mode=capability_sandbox.ACCESS_FULL)
+    try:
+        lease = capability_sandbox.grant(
+            subject=f"fabric:{ctx.get('thread_id') or ctx.get('message_id') or 'sess'}",
+            capabilities=[], ttl_seconds=86400, approved_by="full_mode",
+            mode=capability_sandbox.ACCESS_FULL)
+    except OSError as exc:
+        # 租约盘面没落住（2026-11-05 T2）：内存里有租约、后端一重启就没——不能带着这种
+        # 假授权状态跑完整条 free loop（中途 durable 步骤会莫名再被拦）。如实报错，不跑。
+        return {"result_text": f"完全访问授权失败：租约存储写入失败（{exc}）。"
+                               "请确认后端数据目录可写后重试。", "trace": trace}
     history_text = _fabric_knowledge_history(ctx, text)
     cp_id = f"fabric:{ctx.get('thread_id') or ctx.get('message_id') or 'sess'}"
     thread_id = str(ctx.get("thread_id") or "")

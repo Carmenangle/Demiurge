@@ -89,8 +89,14 @@ def _supervisor_route(text: str, image_count: int, ctx: CtxLike) -> tuple[str, b
 _ROUTE_TOOL = {p.route: p.tool_key for p in _agent_plugins.all_plugins() if p.tool_key}
 
 _ROUTE_LABELS = {p.route: p.label for p in _agent_plugins.all_plugins()}
+# 2026-11-09 群聊路由：只在 interaction_mode=group_chat 时可用（_route_available 夹）。
+_ROUTE_LABELS["chat"] = "群聊"
 
 _ROUTE_DESCRIPTIONS = {p.route: p.description for p in _agent_plugins.all_plugins()}
+_ROUTE_DESCRIPTIONS["chat"] = (
+    "多角色群聊：用户发言后，绑定卡成员按顺序各回复一次；适合角色间对话/互动。"
+    "用户明确要求生图、视频、检索、工具或计划时不要选它。"
+)
 
 def _explicit_card_route(text: str, ctx: CtxLike) -> str:
     """角色卡纯文本中的强执行命令走零 LLM 分派；模糊表达仍按剧情处理。"""
@@ -108,7 +114,27 @@ def _explicit_card_route(text: str, ctx: CtxLike) -> str:
             return route
     return ""
 
+
+# 1:1 聊天普通文本不再先过 Supervisor（每次私聊都多一次路由模型调用，成本翻倍且
+# 路由提示词前缀难复用）。只有明确工具/文件类请求才保留给专家；生图/视频/找灵感
+# 由 `_explicit_card_route` 零 LLM 判定，计划类在前面由 plan_compiler 处理。
+_CHAT_TOOLISH_RE = re.compile(
+    r"搜索|查询|查一下|查查|联网|网页|打开|读取|写入|执行|运行|脚本|文件|工具|MCP", re.I,
+)
+
+
+def _chat_expert_route(text: str, ctx: CtxLike) -> str:
+    if ctx.get("has_mcp") and _CHAT_TOOLISH_RE.search(text or ""):
+        return "tool_agent"
+    return ""
+
 def _route_available(route: str, has_images: bool, ctx: CtxLike) -> bool:
+    interaction_mode = str(ctx.get("interaction_mode") or "story")
+    # 2026-11-09 聊天/群聊是通用 Agent 的两种交互外壳，不能再落回剧情 node。
+    if route == "roleplay" and interaction_mode in ("chat", "group_chat"):
+        return False
+    if route == "chat":
+        return interaction_mode == "group_chat" and not has_images
     return _agent_plugins.route_available(
         route, has_images=has_images, has_card=_has_card(ctx),
         has_mcp=bool(ctx.get("has_mcp")), agent_cfg=ctx.get("agent_cfg"),
@@ -146,6 +172,38 @@ def supervisor_node(state: AgentState) -> dict:
     run_trace.emit(ctx, "agent.started", agent="supervisor")
     text = state.get("user_text", "")
     has_images = bool(state.get("images"))
+    # 2026-11-09 聊天/群聊都不是「只会闲聊」的独立通道，而是通用 Agent 的两种交互外壳：
+    # - chat（1:1）：按无卡作品路由（answer / tool_agent / generate / plan…），
+    #   并把角色人设块预置进 ctx，由 answer / tool_agent 注入系统提示；
+    # - group_chat：默认由 Supervisor 选 chat 路由（多角色按顺序各回一次）；
+    #   用户明确要求生图/检索/工具/计划时仍可走对应专家，不把群聊锁死成闲聊。
+    interaction_mode = str(ctx.get("interaction_mode") or "story").strip().lower()
+    chat_mode = interaction_mode == "chat"
+    if chat_mode:
+        from app.services import chat_followup, chat_room, chat_story_context
+        if str(text or "").strip():
+            # 用户开口：重置「长时间没回」的追问/重开节奏（note_user 只改节奏，不阻断聊天）。
+            try:
+                chat_followup.note_user(str(ctx.get("thread_id") or ""))
+            except Exception as exc:  # noqa: BLE001 [EXC-留痕] 节奏状态写失败不影响本轮回复
+                run_trace.emit(ctx, "chat.followup_state_error", error=str(exc)[:200])
+        members = chat_room.resolve_members(ctx, mode="chat")
+        speaker = members[0] if members else ""
+        # 1:1 聊天＝人设 + 剧情资料（纪要/表格/世界书）。剧情资料只取沉淀后的少量背景，
+        # 不注入剧情正文；tool_agent / answer 都从 `_chat_persona_block` 读同一份。
+        story = chat_story_context.build_for_speaker(
+            ctx, speaker=speaker, members=members, query=text,
+        )
+        # 顺序＝[跨轮稳定头][本轮动态段]：persona_block 不含每轮变化的内容，
+        # 剧情资料/自主性在它之后，稳定头才能命中上游 prompt 前缀缓存。
+        ctx["_chat_persona_block"] = "\n\n".join(
+            part for part in (
+                chat_room.persona_block(ctx), story, chat_room.chat_topic_autonomy(),
+                chat_room.chat_natural_chat(),
+            ) if part
+        )
+    # 聊天/群聊按无卡作品路由：否则有卡作品会被强制并入 roleplay，丢掉通用 Agent 能力。
+    has_card_for_routing = _has_card(ctx) and interaction_mode == "story"
     # 委派强命令只判原始用户指令：附件参考块（file_reference_blocks，文本类可长达
     # 100k 字）已追加进 user_text，小说正文必然命中疑问词（为什么/？…）导致
     # 一票否决误杀「制作合集卡」类强命令（2026-09-05 实锤）。ctx.message 是剥离
@@ -178,8 +236,9 @@ def supervisor_node(state: AgentState) -> dict:
             return {"route": "plan", "trace": trace}
         run_trace.emit(ctx, "agent.completed", agent="supervisor", route="edit", forced=True)
         return {"route": "edit", "trace": state.get("trace", []) + ["📝 进入编辑模式"]}
-    # 对话兜底：关联角色卡的作品默认走剧情扮演，否则通用对话。
-    chat_default = "roleplay" if _has_card(ctx) else "answer"
+    # 对话兜底：剧情作品默认走剧情扮演；1:1 聊天走通用对话；群聊走多角色轮转。
+    chat_default = "roleplay" if has_card_for_routing else (
+        "chat" if interaction_mode == "group_chat" and not has_images else "answer")
     forced_route = str(ctx.get("forced_route") or "").strip().lower()
     if forced_route:
         route = forced_route if _route_available(forced_route, has_images, ctx) else chat_default
@@ -206,7 +265,18 @@ def supervisor_node(state: AgentState) -> dict:
                        forced=False, scene=ctx.get("scene") or "")
         trace = state.get("trace", []) + ["🧭 主管分派 → 智能编造计划"]
         return {"route": "plan", "trace": trace}
-    elif _has_card(ctx) and not has_images:
+    elif interaction_mode == "chat" and not has_images:
+        # 私聊普通文本零 LLM 直达 answer（人设已在 `_chat_persona_block`）。
+        # 2026-11-10 成本口径：此前每句闲聊都先跑一次 Supervisor 路由，实测
+        # 「你好」也是 2 次模型调用；明确生图/视频/找灵感/工具仍走专家。
+        route = _explicit_card_route(text, ctx) or _chat_expert_route(text, ctx) or "answer"
+        ctx["scene"] = scene_classify.infer_scene(text)
+    elif interaction_mode == "group_chat" and not has_images:
+        # 群聊普通文本默认走多角色轮转；只有明确生图/视频/找灵感强命令才改走专家。
+        # 不再把「普通聊天」交给 Supervisor LLM 自由选择，避免它选成 answer 导致只有单人回复。
+        route = _explicit_card_route(text, ctx) or "chat"
+        ctx["scene"] = scene_classify.infer_scene(text)
+    elif has_card_for_routing and not has_images:
         # 作品剧情纯文本最终本就会并入 roleplay；无需先把历史再提交给 Supervisor。
         # 图片附件仍交 Supervisor，避免把图生图/反推误判为剧情。
         route = _explicit_card_route(text, ctx) or "roleplay"
@@ -232,11 +302,13 @@ def supervisor_node(state: AgentState) -> dict:
     if not _route_available(route, has_images, ctx):
         route = chat_default
     # 有卡作品里的通用对话统一并入剧情扮演（保持人设不掉线）；非扮演路由（生图等）不受影响。
-    if route == "answer" and _has_card(ctx):
+    # 1:1 聊天例外：它已经由 persona_block 注入人设，保持 answer/tool_agent 的通用能力。
+    if route == "answer" and has_card_for_routing:
         route = "roleplay"
     label = {"generate": "生图专家", "img2img": "图生图专家", "analyze": "反推专家",
              "inspire": "灵感专家", "tool_agent": "工具专家", "video": "视频专家",
-             "roleplay": "剧情扮演", "answer": "对话", "plan": "智能编造计划"}.get(route, route)
+             "roleplay": "剧情扮演", "answer": "对话", "chat": "群聊",
+             "plan": "智能编造计划"}.get(route, route)
     run_trace.emit(ctx, "agent.completed", agent="supervisor", route=route,
                    forced=bool(forced_route), scene=ctx.get("scene") or "")
     trace = state.get("trace", []) + [f"🧭 主管分派 → {label}"]

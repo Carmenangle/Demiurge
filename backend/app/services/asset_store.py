@@ -44,6 +44,11 @@ def _json_list(raw) -> list:
     return [t.strip() for t in text.split(",") if t.strip()]
 
 
+def tags_of_row(row: dict) -> list[str]:
+    """主表行 → 标签列表（tags_json 解析唯一入口，跨模块读标签走这里）。"""
+    return [str(tag) for tag in _json_list(row.get("tags_json"))]
+
+
 def _parse_json_dict(raw) -> dict:
     text = str(raw or "").strip()
     if not text:
@@ -233,6 +238,7 @@ def delete_rows(ids: list[str]) -> int:
         with conn:
             conn.execute(f"delete from assets where id in ({_placeholders(ids)})", ids)
             conn.execute(f"delete from asset_tags where asset_id in ({_placeholders(ids)})", ids)
+            conn.execute(f"delete from asset_gbc where asset_id in ({_placeholders(ids)})", ids)
         return len(ids)
     finally:
         conn.close()
@@ -287,6 +293,7 @@ def clear_trash(repo_ids: list[str]) -> int:
             if ids:
                 conn.execute(f"delete from assets where id in ({_placeholders(ids)})", ids)
                 conn.execute(f"delete from asset_tags where asset_id in ({_placeholders(ids)})", ids)
+                conn.execute(f"delete from asset_gbc where asset_id in ({_placeholders(ids)})", ids)
         return len(ids)
     finally:
         conn.close()

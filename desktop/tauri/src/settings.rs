@@ -25,6 +25,9 @@ pub struct ShellSettings {
     pub fullscreen: bool,
     pub port: i64,
     pub geometry_version: u32,
+    /// 可选层（RAG）的「要不要后台补齐」已经问过一成了断（用户拒了，或这个版本根本没有可选层）
+    /// ⇒ 启动时不再重复问，托盘那条入口留着随时能手动补（P3-b）。
+    pub optional_layer_offer_done: bool,
 }
 
 impl Default for ShellSettings {
@@ -38,6 +41,7 @@ impl Default for ShellSettings {
             fullscreen: false,
             port: DEFAULT_PORT as i64,
             geometry_version: 0,
+            optional_layer_offer_done: false,
         }
     }
 }

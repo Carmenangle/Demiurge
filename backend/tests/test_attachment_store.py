@@ -295,7 +295,8 @@ def test_upload_and_download_roundtrip(monkeypatch, tmp_path):
     assert body["name"] == "计划.md"
     assert body["size"] == len("内容正文".encode("utf-8"))
 
-    d = client.get(f"/{body['file_id']}")
+    # 壳层下载带令牌头且自动跟随跳转：下载端点必须直出文件，不得 3xx。
+    d = client.get(f"/{body['file_id']}", follow_redirects=False)
     assert d.status_code == 200
     assert d.content == "内容正文".encode("utf-8")
     assert "attachment" in d.headers.get("content-disposition", "")

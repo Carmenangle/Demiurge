@@ -7,6 +7,21 @@ export interface ComfyStatus {
   managed: boolean;
 }
 
+export interface ComfyHostLoad {
+  url: string;
+  online: boolean;
+  running: number;
+  pending: number;
+  score: number;
+  latency_ms: number;
+  error?: string;
+}
+
+/** 批量探测机台队列（多机台池分发用；后端并行、单台 3s 超时、逐台过白名单）。 */
+export function probeComfyHosts(urls: string[]) {
+  return apiPost<{ items: ComfyHostLoad[] }>("/comfyui/probe", { urls }, 10_000);
+}
+
 export function comfyStatus(url: string) {
   // 6s 超时：NodeCard 等组件用它做 5s 轮询探活。后端 is_up 最坏可达 ~10s（HTTP 5s + TCP 5s），
   // 且 8010 繁忙时响应更慢——若无超时，单次请求挂起会让调用方的轮询链永久中断（表现为
@@ -149,6 +164,7 @@ export interface ComfyPendingItem {
   thread_id: string;
   created_at: number;   // epoch 秒
   updated_at?: number;
+  kind?: "image" | "video" | "audio";   // 媒体类型（旧记录可能缺失 ⇒ 按图片）
 }
 
 export function listComfyPending() {
@@ -156,10 +172,13 @@ export function listComfyPending() {
   return apiGet<{ items: ComfyPendingItem[] }>("/comfyui/pending", 8_000);
 }
 
-export function registerComfyPending(promptId: string, threadId: string, createdAt: number) {
+export function registerComfyPending(
+  promptId: string, threadId: string, createdAt: number,
+  kind: "image" | "video" | "audio" = "image",
+) {
   return apiPost<{ ok: boolean; item: ComfyPendingItem }>(
     "/comfyui/pending",
-    { prompt_id: promptId, thread_id: threadId, created_at: createdAt / 1000 },
+    { prompt_id: promptId, thread_id: threadId, created_at: createdAt / 1000, kind },
     8_000,
   );
 }
@@ -224,6 +243,25 @@ export function mergeAudio(args: { threadId: string; messageId: string; force?: 
   });
 }
 
+// 全局模式分镜成片：按顺序拼接各 shot 视频（后端 ffmpeg concat + 落盘）
+export function mergeShotVideos(args: {
+  threadId: string; messageId: string; repoId: string; outputDir: string;
+  sequenceId: string; urls: string[]; force?: boolean;
+}) {
+  return apiPost<{
+    ok: boolean; url: string; path: string; duration: number;
+    width: number; height: number; warnings: string[];
+  }>("/comfyui/merge-videos", {
+    thread_id: args.threadId,
+    message_id: args.messageId,
+    repo_id: args.repoId,
+    output_dir: args.outputDir,
+    sequence_id: args.sequenceId,
+    urls: args.urls,
+    force: !!args.force,
+  }, 180_000);
+}
+
 // 拼出经后端代理的取图地址
 export function viewUrl(img: ResultImage, url: string): string {
   const qs = new URLSearchParams({
@@ -255,9 +293,10 @@ export async function uploadRemoteImageToInput(srcUrl: string, comfyuiUrl: strin
   return (await uploadImage(file, comfyuiUrl)).name;
 }
 
-// 把原图留存到设置的 outputDir，返回本地文件路径
+// 把原图留存到设置的 outputDir，返回本地文件路径。
+// subdir 非空时落到 <repo>/<subdir>/ 子夹（与 saveLocalSrc 同口径；定妆底图 → portraits）。
 export function saveLocal(args: {
-  img: ResultImage; repoId: string; outputDir: string; url: string;
+  img: ResultImage; repoId: string; outputDir: string; url: string; subdir?: string;
 }) {
   return apiPost<{ ok: boolean; path: string }>("/comfyui/save-local", {
     filename: args.img.filename,
@@ -266,6 +305,7 @@ export function saveLocal(args: {
     repo_id: args.repoId,
     output_dir: args.outputDir,
     url: args.url,
+    subdir: args.subdir || "",
   });
 }
 

@@ -1,0 +1,33 @@
+{
+  "description": "定时依赖审计豁免表（scripts/security_audit.py 唯一消费方，PR 与定时任务共用）。字段 tool/id/package/reason/expires；expires 当天仍有效、次日起失效（到期即使公告已消失也会让门禁变红，逼人工复核）；本次扫描未命中的条目会在报告里列为「可清理」。禁止留永久条目。",
+  "entries": [
+    {
+      "tool": "pip-audit",
+      "id": "PYSEC-2026-311",
+      "package": "chromadb",
+      "reason": "CVE-2026-45829（服务端预认证代码注入，GHSA-f4j7-r4q5-qw2c）；上游 last_affected = 1.5.9（当前最新版），无修复版本可升；本工程 Chroma 只以嵌入式 PersistentClient 读本机目录（rag_backend / repo_meta / scenario_lab / output_path_migration），不起 chromd、不经 HttpClient ⇒ 预认证代码注入路径不在本产品暴露面上",
+      "expires": "2027-01-31"
+    },
+    {
+      "tool": "pip-audit",
+      "id": "PYSEC-2026-3813",
+      "package": "chromadb",
+      "reason": "CVE-2026-45830（任意已认证用户可越权读取集合，GHSA-2wm9-hf6c-p5cr）；上游 last_affected = 1.5.9（当前最新版），无修复版本可升；本工程只用单机嵌入式客户端，不暴露多租户/已认证用户面",
+      "expires": "2027-01-31"
+    },
+    {
+      "tool": "pip-audit",
+      "id": "PYSEC-2026-3814",
+      "package": "chromadb",
+      "reason": "CVE-2026-45833（代码注入，GHSA-36p7-vc44-83pf）；上游 last_affected = 1.5.9（当前最新版），无修复版本可升；注入面在 HTTP 服务端，本工程不起 chromd、不经 HttpClient，仅本机嵌入式 PersistentClient",
+      "expires": "2027-01-31"
+    },
+    {
+      "tool": "pip-audit",
+      "id": "PYSEC-2026-3815",
+      "package": "chromadb",
+      "reason": "CVE-2026-45831（SimpleRBACAuthorizationProvider 授权范围校验缺失，GHSA-xph7-9rjv-w5fr）；上游 last_affected = 1.5.9（当前最新版），无修复版本可升；本工程未启用 RBAC 授权提供方，只用默认嵌入式客户端",
+      "expires": "2027-01-31"
+    }
+  ]
+}

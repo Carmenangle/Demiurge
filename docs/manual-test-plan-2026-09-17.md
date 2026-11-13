@@ -135,6 +135,7 @@ Trace 落 `backend/data/logs/agent-trace.jsonl`（按大小轮转）。
 |------|------|
 | `cd frontend && npx playwright test --config playwright.e2e-manual.config.ts --output=../_tmp/e2e-canvas-workflow-rN` | 画布事件→DOM 真链路（需 8010+5173 在跑，**--output 每次换新目录**） |
 | `cd frontend && npx playwright test --config playwright.e2e-manual.config.ts e2e-manual/doc-illustration.spec.ts --output=../_tmp/e2e-doc-illu-rN` | 文档插画链 |
+| `cd frontend && E2E_ANCHOR_WORKS_ROOT=<OS tmp 下的隔离作品根> npx playwright test --config playwright.e2e-manual.config.ts e2e-manual/appearance-anchor.spec.ts --output=../_tmp/e2e-anchor-rN` | 正文外貌锚审核区（#9，2026-11-04）：候选→采纳/改写/驳回/删除＋锚库落盘核对。⚠ 该变量**必填且必须指向临时目录**（未设即报错退出，防止往真实作品库写锚）；需后端 8011（隔离 `LAF_DATA_DIR`）+ vite `VITE_API_BASE=http://127.0.0.1:8011/api` |
 | `cd backend && ./.venv/Scripts/python.exe -m pytest tests -q --junitxml=../_tmp/junit.xml` | 后端全量（判绿只认 junitxml failures/errors） |
 | `python scripts/redcheck.py --plan scripts/redcheck_t63_plan.json` | 形态锁红检（T6.4） |
 | `python scripts/coverage_gate.py --check` | 覆盖率软门禁秒检 |

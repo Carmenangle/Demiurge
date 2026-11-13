@@ -277,7 +277,8 @@ def check_narrative(req: NarrativeCIRequest) -> dict[str, object]:
 def narrative_diagnostics(output_dir: str, repo_id: str, status: str = "") -> dict[str, object]:
     from app.services import narrative_ci
 
-    return {"items": narrative_ci.list_diagnostics(output_dir, repo_id, status=status)}
+    return {"items": narrative_ci.list_diagnostics(output_dir, repo_id, status=status),
+            "arms": narrative_ci.load_arms(output_dir, repo_id)}
 
 
 class NarrativeCIResolveRequest(BaseModel):

@@ -13,6 +13,7 @@ turn/id/status 由 narrative_ci.diagnostic_entry 统一补齐。lint 前先还�
 """
 from __future__ import annotations
 
+import math
 import re
 from collections import Counter
 from collections.abc import Iterable
@@ -34,15 +35,27 @@ CODE_STYLE_LIVING_REVIEW = "style_living_review"      # S2 LLM 活人感通审�
 CODE_STYLE_WORD_ECHO = "style_word_echo"              # 同词连用排比（没有，没有，没有）
 CODE_STYLE_MICRO_PARAGRAPH = "style_micro_paragraph"  # 两三字短语单独成段（左手。手松了。）
 CODE_STYLE_TERM_RATCHET = "style_term_ratchet"        # 跨来源术语棘轮（同一多字词被反复确认）
+CODE_STYLE_HALFWIDTH_COMMA = "style_halfwidth_comma"  # 中文正文用半角逗号「,」断句
+CODE_STYLE_STAR_EMPHASIS = "style_star_emphasis"      # *星号包句* 强调／场景头（markdown 残留）
 
-# 单轮出现即报（warning）：空洞大词 / 套话 / 讨好腔 / 起手式。
+# 单轮出现即报（warning）：套路搭配 / 套话 / 讨好腔。
+#
+# 2026-11-03 真实成稿体检**换血**：旧表的「空洞大词」档 9 条（赋能/闭环/抓手/底层逻辑/颗粒度/
+# 顶层设计/降维打击/组合拳/护城河）＋「先说答案」在 97 个剧情轮里 **0 命中**，而真正每轮都在
+# 复发的剧情套路一条都没有 ⇒ 那张表对剧情文体是死表（只可能拦住聊天里的互联网黑话）。
+# 新增档按**取证口径**入表：≥4 个剧情轮命中 且 设定锚点 ≤1。锚点＝世界书/角色卡里本来就这么写，
+# 锚点高的不能当 AI 腔禁（微微 86／一丝 171／下意识 15／无意识地 16／僵了一下 4／顿了一下 6），
+# 那是**设定自己的措辞**，禁了等于跟世界书吵架——与术语棘轮的存量闸门同一条道理。
+# 套话与讨好腔两档同样 0 命中，但它们的误报率是零（正常中文叙述不会写「综上所述」），留着当保险丝。
 EXACT_PHRASES: tuple[str, ...] = (
-    # 空洞大词
-    "赋能", "闭环", "抓手", "底层逻辑", "颗粒度", "顶层设计",
-    "降维打击", "组合拳", "护城河",
+    # 剧情套路搭配（括注＝体检实测命中轮数／设定锚点）
+    "掌心里",        # 11/97 轮｜锚 1
+    "掌心朝上",      # 7/97 轮｜锚 0
+    "颤了一下",      # 6/97 轮｜锚 0
+    "喉结上下",      # 4/97 轮｜锚 0（「喉结滚动」这个写法本文语料 0 次，复发形态是「喉结上下滚动」）
     # 套话
     "值得注意的是", "不难发现", "众所周知", "综上所述", "总而言之",
-    "毋庸置疑", "不得不说", "先说答案",
+    "毋庸置疑", "不得不说",
     # 讨好腔
     "稳稳地接住", "稳稳的接住", "你的观察很敏锐", "你的观察很明锐",
     "我理解你的感受", "这是一个很好的问题",
@@ -55,6 +68,21 @@ _DENSITY_PER_KILO = 2.5
 
 # 「不是A，而是B／不是A，是B」模板族：单轮 ≥2 次才报（单次在正常中文里合法）。
 _NOT_BUT_RE = re.compile(r"不是[^。！？；\n]{1,18}，?(?:而是|是)")
+# 但「≥2 次」不看篇幅就是错的判据：真实成稿单轮正文 2000–9000 字（体检 97 轮中位约 4800），
+# 旧口径下 30.9% 的剧情轮被打红，其中多数只是长篇里两处合法对比句。⇒ 改按**千字密度**归一：
+# 阈值 = max(2, ceil(每千字 _PATTERN_PER_KILO))。2026-11-03 体检实测各档报出的轮数
+# （旧 23 轮 → K=0.6 报 18／K=0.8 报 12／K=1.0 报 6）；取 0.8——短轮（<2500 字）保持
+# 「≥2 即报」不变，长轮要 4–6 处才算模板化，剩下的都是密度真超的（如 6 处／3000 字）。
+_PATTERN_PER_KILO = 0.8
+# 半角逗号：汉字之间用「,」断句（应为「，」）——模型写长段会整片滑到半角，一个存档单轮 141 处。
+# 右看排除数字与空白（千分位 1,000、英文列表 "a, b" 不算）。体检 15/97 轮有、**13 轮 ≥2 处** ⇒ 取 2。
+# ⚠ 数的是 `lint()` 里的口径（**破甲还原之后**）：拆字正文 `…长@(发)@,@指@(尖)@…` 原文里逗号被
+#   `@()` 包着，还原前测只有 9 轮——还原前计数会系统性低估（实测 4 轮 0 → 149/178 处）。
+_HALFWIDTH_COMMA_RE = re.compile(r"(?<=[一-鿿]),(?=[^0-9\s])")
+_HALFWIDTH_COMMA_MIN = 2
+# 星号包句：*……* / **……** 做强调或场景头。体检 16/97 轮有，60 处里 56 处包的是**整句**（场景头／系统旁白），
+# 不是词级轻强调 ⇒ 出现即模板化（阈值 1）；前后各多一个星号不再重复计数（`(?<!\*)`／`(?!\*)`）。
+_STAR_EMPHASIS_RE = re.compile(r"(?<!\*)\*{1,2}[^*\n]{1,40}\*{1,2}(?!\*)")
 # 同词连用排比：「没有，没有，没有」——同一 1-6 字词紧邻重复 ≥3 次。
 _WORD_ECHO_RE = re.compile(r"([\u4e00-\u9fff]{1,6})(?:[，、,\s]+\1){2}")
 # 微段落：两三字短语单独成段（「左手。」「手松了。」）——单轮 ≥2 段即模板化。
@@ -107,6 +135,7 @@ def lint(text: str, *, recent_openings: list[str] | tuple[str, ...] = (),
             ))
     diagnostics.extend(_check_punct_density(body))
     diagnostics.extend(_check_pattern_repeat(body))
+    diagnostics.extend(_check_typography(body))
     diagnostics.extend(_check_word_echo(body))
     diagnostics.extend(_check_micro_paragraph(body))
     diagnostics.extend(_check_rhythm(body))
@@ -147,10 +176,13 @@ def _check_punct_density(body: str) -> list[dict]:
 def _check_pattern_repeat(body: str) -> list[dict]:
     out: list[dict] = []
     matches = list(_NOT_BUT_RE.finditer(body))
-    if len(matches) >= 2:
+    kilo = max(len(body), 1) / 1000.0
+    limit = max(2, math.ceil(_PATTERN_PER_KILO * kilo))
+    if len(matches) >= limit:
         out.append(_diagnostic(
             CODE_STYLE_PATTERN_REPEAT,
-            f"「不是…而是…」句式单轮重复 {len(matches)} 次（≥2 即模板化）。",
+            f"「不是…而是…」句式单轮 {len(matches)} 处／{len(body)} 字"
+            f"（密度 {len(matches) / kilo:.1f} 处每千字 ≥{_PATTERN_PER_KILO}，本轮闸门 {limit} 处）。",
             _context(body, matches[0].start(), matches[0].end()),
         ))
     qa = _SELF_QA_RE.search(body)
@@ -168,6 +200,32 @@ def _check_pattern_repeat(body: str) -> list[dict]:
             CODE_STYLE_SELF_QA,
             "对话回声句式（…吗？…了。不，你…）。",
             _context(body, echo.start(), echo.end()),
+        ))
+    return out
+
+
+def _check_typography(body: str) -> list[dict]:
+    """标点／排版的形态缺陷：中文正文里的半角逗号、*星号包句* 强调。
+
+    与密度项不同，这两条是**外来形态**（半角标点、markdown 强调符），不是「中文里合法但用多了
+    才腻」的句式 ⇒ 判据是「有没有成规模地出现」，不看上下文。
+    """
+    out: list[dict] = []
+    commas = list(_HALFWIDTH_COMMA_RE.finditer(body))
+    if len(commas) >= _HALFWIDTH_COMMA_MIN:
+        first = commas[0]
+        out.append(_diagnostic(
+            CODE_STYLE_HALFWIDTH_COMMA,
+            f"中文正文用半角逗号「,」断句 {len(commas)} 处，应改全角「，」。",
+            _context(body, first.start(), first.end()),
+        ))
+    stars = list(_STAR_EMPHASIS_RE.finditer(body))
+    if stars:
+        out.append(_diagnostic(
+            CODE_STYLE_STAR_EMPHASIS,
+            f"正文出现 {len(stars)} 处 *星号包句*（首处「{stars[0].group(0)[:24]}」），"
+            "强调要写进句子，不用排版符号凑。",
+            _context(body, stars[0].start(), stars[0].end()),
         ))
     return out
 
@@ -272,6 +330,11 @@ _TERM_MAX_LEN = 4
 _TERM_MIN_TOTAL = 6       # 跨「注入层 + 正文」合计出现次数下限
 _TERM_MAX_REPORT = 8      # 单轮最多报几项（按次数降序）
 _TERM_FRAGMENT_RATIO = 0.4  # 更长候选词达本词此比例 ⇒ 判本词为切词碎片（见 term_ratchet_report）
+# 「设定支撑的高频」不是本缺陷（2026-09-23 用户口径「霜月宫这种多次出现还能理解」）。原实现只用
+# 用量/存量**排序**、照样报 ⇒ 2026-11-03 体检实测该码占生产留痕 275/454＝61%、每轮报满 8 条，
+# 且 top 词条全是题材专名（体检语料某作的「戒指」「戴上」用量/存量只有 0.2/0.6）。
+# ⇒ 比值 < 本阈值视为设定撑得住，直接不报；设定里 0 存量的（无锚点膨胀）不受影响。
+_TERM_STOCK_RATIO_GATE = 1.0
 
 # 高频虚词/泛用词：跨来源出现属正常，不构成术语棘轮。
 _TERM_STOPWORDS = frozenset((
@@ -325,6 +388,10 @@ def term_ratchet_report(*, injected: Iterable[str] = (),
     典型命中＝「经脉」（2026-09-23 实锤）：注入层 16+ 次、最近数轮正文也在用，
     而正文里「看经脉」「守经脉」**0 命中** ⇒ 被反复确认的是**持久层里的名目**，不是剧情。
 
+    传 `setting` 时另有一道**存量闸门**（`_TERM_STOCK_RATIO_GATE`）：叙事用量 ≤ 设定存量的
+    词属「设定撑得住的高频」，直接不报——2026-11-03 拿真实留痕复测，不闸时该码占 prose_style
+    诊断 61%、每轮报满 8 条，报出来的 top 是题材专名（「戒指」「戴上」「好感」「地点」）。
+
     exclude 传角色名/称呼等合法高频词；**含名字的更长/更短片段一并豁免**
     （否则「沈映」「映澜」这类切词碎片仍会冒出来）。
 
@@ -356,28 +423,47 @@ def term_ratchet_report(*, injected: Iterable[str] = (),
         and term not in skip and not any(s in term or term in s for s in skip)
         and term[0] not in _TERM_EDGE_CHARS and term[-1] not in _TERM_EDGE_CHARS
     }
-    # 「切词碎片」片区：若某个**更长**候选词的出现次数已达本词的 40%，说明本词多是作为
-    # 更长词的片段出现，而非独立术语（实测：「天狐」被「天狐媚体」解释、「月宫／霜月」被
-    # 「霜月宫」解释；「了一／一下」是动词短语片段）。不剔掉它们，报告会被碎片刷屏。
+    # 「切词碎片」片区：若某个**更长候选词**的出现次数已达本词的 40%，说明本词多是作为更长词的
+    # 片段出现，而非独立术语（实测：「天狐」被「天狐媚体」解释、「月宫／霜月」被「霜月宫」解释；
+    # 「了一／一下」是动词短语片段）。不剔掉它们，报告会被碎片刷屏。
+    # ⚠ 解释者**只能取候选池内**（即自己也过了 min_total 的更长词）。2026-11-03 试过把 5–6 字
+    # gram 也纳进来，想抓住「好感→好感度」「任指挥官→前任指挥官」这类正主没过阈值、只点名碎片
+    # 的情形——三条真术语单测当场翻红：「霜月宫」被「霜月宫弟」（9→4）吃掉、「经脉」被
+    # 「他腕上那处经」吃掉。定长 gram 的扩写几乎总能凑够 0.4×n，不是可用的解释信号，这条路作废。
+    # ⚠ 判定看的是**未过存量闸的全量池**：更长同族词哪怕自己被判「设定撑得住」而出不了闸，它
+    # 仍然有权解释自己的短片段——「好感度」是合法表字段时，顶它出来的「好感」不是膨胀。
     fragments = {
         term for term, n in pool.items()
         if any(len(other) > len(term) and term in other and cnt >= _TERM_FRAGMENT_RATIO * n
                for other, cnt in pool.items())
     }
     candidates = [(term, n) for term, n in pool.items() if term not in fragments]
-    # 次数降序、同次数先短后长；再抑制「含已收录词」的词（避免 经脉/经脉图 一族重复占位）
+    # 次数降序、同次数先短后长；再抑制「含已收录词」的词（避免 经脉/经脉图 一族重复占位）。
+    # ⚠ 同族代表取**用量占优**的那个，不是字数最长的那个——「原提案：同族保留最长词」在此不成立：
+    #   掌心 45 次 vs 滑窗凑出的「掌心里」8 次，先长后短会把真正的棘轮词换成一个介词尾巴。
+    #   而「碎片顶替正主」那种情形（长词次数 ≥ 短词的 40%）已由上面的 fragments 收口：短词出局，
+    #   长词自然成为代表。两条规则各管一段，不重叠。
+    # ⚠ 这里**不提前截断**：存量闸门的口径落在「同族代表」上。先截 8 条再闸门 ⇒ 被闸掉的族空占
+    #   席位；先闸门再去重 ⇒ 代表出闸后，同族里次数较低、设定里 0 存量的片段会顶着
+    #   「无锚点膨胀」冒出来＝**闸门自己造的假阳**。故顺序＝去重选代表 → 闸门 → 截断。
     candidates.sort(key=lambda kv: (-kv[1], len(kv[0]), kv[0]))
     accepted: list[tuple[str, int]] = []
     for term, n in candidates:
         if any(term in seen or seen in term for seen, _ in accepted):
             continue
         accepted.append((term, n))
-        if len(accepted) >= max_report:
-            break
+    # 存量闸门：传了 setting 时，「叙事用量 ≤ 设定存量」的代表判为**设定撑得住的高频**，整族静默。
+    # 2026-11-03 体检：不闸时该码占生产留痕 275/454＝61%、每轮报满 8 条，top 全是题材专名
+    # （体检语料某作的「戒指／戴上」用量/存量仅 0.2/0.6）——按 2026-09-23 用户口径本就不该打红。
+    if set_texts:
+        accepted = [(term, n) for term, n in accepted
+                    if stock.get(term, 0) == 0 or n >= _TERM_STOCK_RATIO_GATE * stock[term]]
+    accepted = accepted[:max_report]
     # 2026-09-23 用户口径（续「对经脉执着」）：单看频次无法区分「设定支撑的高频」与
     # 「无锚点膨胀」。用户原话——「霜月宫这种多次出现还能理解（主角大半后宫在此、后期势力归男主），
     # 但这个经脉，你看设定条目都不怎么提及，就前期提了一嘴，结果一个个女主角找的借口都是经脉」。
-    # ⇒ 传 setting（设定存量来源：世界书设定条目 + 角色卡静态底座）时，按「用量/存量」降序重排，
+    # ⇒ 传 setting（设定存量来源＝小仓库世界书快照的设定条目静态底座；**不含角色卡**，
+    #   2026-11-04 核代码改正）时，按「用量/存量」降序重排，
     #   并把设定里完全没有的（日常描写词，如 指腹/掌心/里侧）排到最后。缺省时顺序逐字不变。
     if set_texts:
         accepted.sort(key=lambda kv: (
@@ -426,6 +512,8 @@ def style_prompt_segment(config: dict | None = None) -> str:
         "正文禁止使用破折号「——」断句；需要插入或转折时改用逗号、句号或冒号；"
         "省略号「……」全文克制，每千字不超过两处；"
         "不用自问自答句式（难道…？不，…）；不用「首先/其次/最后」式三段表态；"
+        "中文句子一律用全角标点，禁止汉字之间用半角逗号「,」断句；"
+        "禁止用星号把整句包起来做强调或场景头；"
         "句长长短交错，避免每句等长。"
     )
 

@@ -275,7 +275,7 @@ describe("逐字搬移锁（T2.1-D2 详情面板）", () => {
     ['width: detailNode.type === "story" ? "92vw" : 760,', 1],
     ["runScripts(detailNode.storyText, Placement.AI_OUTPUT, displayRegex, { isMarkdown: true, depth: 0 })", 1],
     ["本楼层无配图 / 视频 / 音频", 1],
-    ["(detail.gens[0] as { video_url?: string } | undefined)?.video_url", 1],
+    ["genMediaUrl(detail.gens[0])", 1],
     ["原图尺寸", 1],
     ["requestDelete([detailNode.id]);", 1],
     ["first.templateName || \"\"", 1],

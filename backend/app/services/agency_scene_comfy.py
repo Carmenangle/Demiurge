@@ -482,7 +482,8 @@ def _wb_comfy_actor_pool(ctx: CtxLike, repo_id: str, card_name: str, plan, actor
 def _wb_comfy_scene_target(ctx: CtxLike, repo_id: str, plan, clean: str, sig: dict,
                            pool: dict, *, prompt_override: str, motion: int,
                            user_text: str, anchor_override: str = "",
-                           subjects_override: list | None = None) -> dict:
+                           subjects_override: list | None = None,
+                           expand_to_scene: bool = True) -> dict:
     """comfy 路径②：提示词落定 + 锚点定位 + 高潮重定向 + 终选角色与外貌。
 
     返回 dict（键为原内联局部名；`motion` 可能被重定向改写）。逐字搬移。
@@ -627,6 +628,9 @@ def _wb_comfy_scene_target(ctx: CtxLike, repo_id: str, plan, clean: str, sig: di
         anchor_from_local_judge = True
     planned_anchor = plan.get("anchor", "")
     requested_anchor = planned_anchor or fallback_anchor
+    # 分镜按锚点段落取材：给 subjects 会让摘录回扫到该角色首次出现的场景起点，
+    # 后续镜全撞到第一段；高潮点仍保留 subjects 的场景扩窗。
+    excerpt_subjects = list(anchor_subjects) if expand_to_scene else None
     if plan or fallback_anchor_needs_arbitration:
         requested_anchor = scene_illustration.resolve_illustration_anchor(
             clean, requested_anchor,
@@ -639,7 +643,8 @@ def _wb_comfy_scene_target(ctx: CtxLike, repo_id: str, plan, clean: str, sig: di
     )
     if plan_retargeted:
         corrected_scene = scene_illustration.illustration_scene_excerpt(
-            visible_story, requested_anchor, subjects=anchor_subjects,
+            visible_story, requested_anchor, subjects=excerpt_subjects,
+            expand_context=expand_to_scene,
         )
         # 重定向只替换错误高潮动作，不能把 Krea2 的英文动作底座也清空；
         # 否则独立 Profile 一旦拒答，只能退回没有角色和剧情事实的通用模板。
@@ -654,7 +659,8 @@ def _wb_comfy_scene_target(ctx: CtxLike, repo_id: str, plan, clean: str, sig: di
         request_actors = list(dict.fromkeys(request_actors + retarget_actors))
     scene_narrative = encounter_narrative if character_encounter else (
             scene_illustration.illustration_scene_excerpt(
-                visible_story, requested_anchor, subjects=anchor_subjects,
+                visible_story, requested_anchor, subjects=excerpt_subjects,
+                expand_context=expand_to_scene,
             )
         )
     final_actors = _resolve_illustration_request_actors(
@@ -1470,3 +1476,330 @@ def _wb_comfy_extra_requests(ctx: CtxLike, repo_id: str, plan, clean: str, sig: 
             primary_off if primary_off is not None else 0, str(primary_prompt or ""),
         )
     return extras
+
+
+def _environment_scene_spec(scene_spec: dict, anchor: dict) -> dict:
+    """环境空镜（establish）：清掉主要人物事实，只留空间/道具/光线。
+
+    判据的 establish 镜可以点名群演/宠物（subjects），但**不能带主要角色的
+    appearance/角色参考图**——否则 Profile 会把它画成人物特写，开场环境又丢了。
+    """
+    spec = dict(scene_spec)
+    text = str(anchor.get("anchor") or "").strip()
+    spec["narrative"] = text
+    spec["protected_narrative"] = text
+    spec["appearance"] = ""
+    spec["wardrobe"] = ""
+    spec["actors"] = []
+    for key in ("subjects", "frame_subjects", "role_refs",
+                "appearance_sources", "subject_genders"):
+        spec.pop(key, None)
+    spec["establish"] = True
+    framing = str(anchor.get("framing") or "").strip()
+    camera = str(anchor.get("camera_motion") or "").strip()
+    spec["composition"] = framing or "远景/环境空镜"
+    if camera:
+        spec["camera"] = camera
+    return spec
+
+
+def build_shot_requests(
+    ctx: CtxLike, repo_id: str, plan, clean: str, sig: dict, pool: dict,
+    *, primary_motion: int, user_text: str,
+) -> list[dict]:
+    """全局模式分镜序列：每个保留锚点编译一条出图请求 + 该锚点的镜头视频请求。
+
+    镜头归属采用**出发锚点**语义：
+    - cut / move_single：本锚点出图后挂本镜视频（`video_request`）；
+    - move：本锚点 → 下一锚点的双图运镜，挂在**下一锚点**的请求上
+      （`transition_video_request` + `incoming_shot_index`），复用前端
+      `bridge_prev_slot` 有界等待。
+    返回按**正文序**排列的请求列表；第一条作为主请求，其余进 `extra_requests`。
+    """
+    from app.services import scene_illustration, shot_plan, video_prompt as _vp_mod
+
+    anchors = list(ctx.get("illustration_anchor_intents") or [])
+    if not anchors:
+        return []
+    main_actors = [str(name).strip() for name in (pool.get("known") or []) if str(name).strip()]
+    # 覆盖式分镜：保证开场有 establish；判据漏了就从开场正文补一条（不另调 LLM）。
+    anchors = shot_plan.prepare_storyboard_anchors(anchors, clean, main_actors)
+    sequence_id = f"shotseq-{repo_id}-{ctx.get('turn_id') or ctx.get('turn') or ''}"
+    total_s = int(ctx.get("video_duration_hint") or 0)
+    caps = _video_caps_for(ctx)
+    caps_duration = int((caps or {}).get("duration") or 0)
+    # `[在场]` 原文是服装锚点的唯一真源：全自动生产不逐镜手写，统一从状态块派生。
+    present = str(sig.get("present") or "")
+    # 先按同一批锚点建一次计划，只为拿**夹值后的**图片秒数：正式 sp 要等
+    # _wb_comfy_scene_target 重定向完才能建，但「本帧落点」必须在生成图片提示词前写进
+    # narrative/protected。直接用 raw beats 的秒数会在夹值后漂移（cut 8s→6s 时
+    # 第 2 段起点 4s→3s），导致提示词写第 4 秒、视频元信息写第 3 秒。
+    pre_plan = shot_plan.build_shot_plan(
+        anchors, clean, sequence_id=f"{sequence_id}-pre",
+        total_s=total_s, caps_duration=caps_duration, main_actors=main_actors,
+        present=present,
+    )
+    focus_seconds = [item.image_time_s for item in pre_plan.items]
+
+    compiled: list[dict] = []
+    for index, anchor in enumerate(anchors):
+        is_establish = scene_illustration.normalize_shot_type(anchor.get("shot_type")) == "establish"
+        target = _wb_comfy_scene_target(
+            ctx, repo_id, plan, clean, sig, pool,
+            prompt_override="", motion=primary_motion, user_text=user_text,
+            anchor_override=str(anchor.get("anchor") or ""),
+            subjects_override=anchor.get("subjects"),
+            # 分镜每镜按自己的锚点段落取材；不能再回扫到场景起点（镜3 重合）。
+            expand_to_scene=False,
+        )
+        final_anchor = str(target.get("requested_anchor") or anchor.get("anchor") or "").strip()
+        scene_spec = _wb_comfy_scene_spec(ctx, repo_id, plan, clean, sig, pool, target)
+        _wb_first_person_frame_filter(ctx, scene_spec)
+        if is_establish:
+            scene_spec = _environment_scene_spec(scene_spec, anchor)
+        else:
+            # 景别/机位由判据的覆盖式分镜给出：图片构图与视频机位都以它为准。
+            framing = str(anchor.get("framing") or "").strip()
+            camera_motion = str(anchor.get("camera_motion") or "").strip()
+            if framing:
+                scene_spec["composition"] = framing
+            if camera_motion:
+                scene_spec["camera"] = camera_motion
+        # 全自动连续锚点：同一场景各镜共用空间地标，同一角色共用服装锚点。
+        # 两者都由 shot_plan 从正文/`[在场]` 派生，禁止在这里逐镜写死。
+        # 2026-11-12：逐镜声明图片生成能力；前端按能力槽选模板（未配则回落文生图）。
+        scene_spec["image_mode"] = str(scene_spec.get("image_mode") or "text2img")
+        scene_anchor = str(anchor.get("scene_anchor") or "").strip()
+        if scene_anchor:
+            scene_spec["scene_anchor"] = scene_anchor
+        wardrobe_anchor = shot_plan.wardrobe_anchor_for(
+            [str(name) for name in (scene_spec.get("actors") or []) if str(name).strip()],
+            pre_plan.wardrobe_by_actor,
+        )
+        if wardrobe_anchor:
+            scene_spec["wardrobe_anchor"] = wardrobe_anchor
+        if scene_anchor or wardrobe_anchor:
+            run_trace.emit(
+                ctx, "illustration.shot_anchor", shot_index=index,
+                scene_key=str(anchor.get("scene_key") or ""),
+                scene_anchor_chars=len(scene_anchor),
+                wardrobe_actors=[
+                    str(name) for name in (scene_spec.get("actors") or []) if str(name).strip()
+                ],
+            )
+        # 图片输入与高潮点生图同口径：段落摘录保持全文，只在末尾追加「本帧落点」
+        # 定位本镜是哪一刻（同段多镜不撞图，也不砍段落上下文）。秒数用 pre_plan 的
+        # **夹值后**结果，与后面 shot_image_time_s 同源（见上方 pre_plan 注释）。
+        focus_second = (
+            focus_seconds[index] if index < len(focus_seconds)
+            else shot_plan.image_position_for_anchor(anchor)[0]
+        )
+        scene_spec["narrative"] = shot_plan.with_frame_focus(
+            str(scene_spec.get("narrative") or ""), final_anchor, focus_second,
+        )
+
+        protected = str(scene_spec.get("protected_narrative") or "")
+        if protected:
+            # 防御性：protected_narrative 是 Profile 的**模型可见叙事**（优先生效），
+            # 它的「本帧落点」必须与 narrative 用同一个秒数；漏传 second 会写「首帧」，
+            # 把第 N 秒的图又按首帧画（用户 2026-11-10 实锤的同一条问题）。
+            scene_spec["protected_narrative"] = shot_plan.with_frame_focus(
+                protected, final_anchor, focus_second,
+            )
+        scene_spec = _wb_comfy_profile(ctx, plan, scene_spec, target["plan_retargeted"])
+        request = _wb_comfy_illustrate_env(
+            ctx, plan, sig, target, scene_spec, motion=target["motion"])
+        if not request:
+            continue
+        request["anchor"] = final_anchor
+        if is_establish:
+            # 环境镜不选角色 LoRA/底图；前端 actor 列表必须为空。
+            request["actors"] = []
+        compiled.append({
+            "request": request,
+            "scene_spec": scene_spec,
+            # 本镜实际出场角色（establish 已被清空）：角色底图编号绑定的真源。
+            "actors": [str(name) for name in (request.get("actors") or []) if str(name).strip()],
+            "shot_type": scene_illustration.normalize_shot_type(anchor.get("shot_type")),
+            "transition_desc": str(anchor.get("transition_desc") or "").strip()[:200],
+            "framing": str(anchor.get("framing") or "").strip()[:40],
+            "camera_motion": str(anchor.get("camera_motion") or "").strip()[:60],
+            "subject_motion": str(anchor.get("subject_motion") or "").strip()[:80],
+            "sound_cue": str(anchor.get("sound_cue") or "").strip()[:40],
+            "image_timing": str(anchor.get("image_timing") or "start").strip()[:8] or "start",
+            "video_beats": anchor.get("video_beats") or [],
+            "original_index": anchor.get("original_index", index),
+            "anchor": final_anchor,
+            "scene_key": str(anchor.get("scene_key") or ""),
+        })
+    if not compiled:
+        return []
+
+    anchor_dicts = [{
+        "anchor": item["anchor"],
+        "shot_type": item["shot_type"],
+        "transition_desc": item["transition_desc"],
+        "framing": item["framing"],
+        "camera_motion": item["camera_motion"],
+        "subject_motion": item["subject_motion"],
+        "sound_cue": item["sound_cue"],
+        "image_timing": item["image_timing"],
+        "video_beats": item["video_beats"],
+        "original_index": item["original_index"],
+    } for item in compiled]
+    sp = shot_plan.build_shot_plan(
+        anchor_dicts, clean, sequence_id=sequence_id,
+        total_s=total_s, caps_duration=caps_duration, main_actors=main_actors,
+    )
+    requests = [item["request"] for item in compiled]
+    for index, shot in enumerate(sp.items):
+        if index >= len(compiled):
+            break
+        request = requests[index]
+        request["video_mode"] = "shots"
+        request["shot_sequence_id"] = sp.sequence_id
+        request["shot_index"] = shot.shot_index
+        request["shot_total"] = sp.total_shots
+        request["shot_type"] = shot.shot_type
+        request["shot_duration_s"] = shot.duration_s
+        request["image_key"] = shot.image_key
+        request["shot_transition_desc"] = shot.transition_desc
+        request["shot_framing"] = shot.framing
+        request["shot_camera_motion"] = shot.camera_motion
+        request["shot_subject_motion"] = shot.subject_motion
+        request["shot_sound_cue"] = shot.sound_cue
+        request["shot_image_timing"] = shot.image_timing
+        # 图片对应的具体秒数（用户 2026-11-10：必须交代图片在本镜第几秒）。
+        request["shot_image_time_s"] = shot.image_time_s
+        request["shot_locale"] = shot.locale
+        # 同场景分组键：前端/审阅据此把后续镜与建立镜归到同一空间（参考图链的上游）。
+        request["shot_scene_key"] = str(compiled[index].get("scene_key") or shot.scene_key)
+        # 出场角色 ↔ 视频角色参考图（图片2 起步；图片1 是本镜画面）。用户 2026-11-10：
+        # 只要角色在**视频画面里出场**（主体/场景/锚点/帧主体点名）且配了底图，就按出场
+        # 顺序作为图片2、图片3…；环境镜 actors 被清空但锚点点名了角色时也要绑定。
+        actual_actors = [str(name) for name in (compiled[index].get("actors") or [])]
+        anchor_subjects = [
+            str(name).strip() for name in (anchor.get("subjects") or []) if str(name).strip()
+        ]
+        known_actors = {str(name).strip() for name in main_actors if str(name).strip()}
+        scene_spec_for_cast = compiled[index]["scene_spec"]
+        frame_subjects = [
+            str(name).strip() for name in (scene_spec_for_cast.get("frame_subjects") or [])
+            if str(name).strip() in known_actors
+        ]
+        # 点名扫描只认**本镜时间分镜 + 锚点句**，不扫整段 narrative（窗口常含相邻
+        # 段落，下一镜才出场的角色会被提前绑定成图片2）。名单顺序＝底图编号顺序。
+        shot_characters = shot_plan.shot_cast_names(
+            actual_actors, anchor_subjects, frame_subjects, main_actors,
+            anchor_text=str(anchor.get("anchor") or ""), beats=shot.video_beats,
+        )
+        character_refs, missing_character_refs = shot_plan.bind_character_images(
+            shot_characters,
+            ctx.get("character_base_images")
+            if isinstance(ctx.get("character_base_images"), dict) else {},
+        )
+        bound_names = {str(ref.get("name") or "") for ref in character_refs}
+        request["shot_characters"] = shot_characters
+        request["shot_prompt_actors"] = actual_actors
+        request["shot_character_refs"] = character_refs
+        request["shot_missing_character_refs"] = missing_character_refs
+        request["shot_unbound_characters"] = [
+            name for name in shot_characters if name not in bound_names
+        ]
+        # 动作归属守卫（2026-11-11 用户实锤）：`手腕被拽`/`手探出画面` 这类没有
+        # 施动者或身体部位归属的拍，直接报给调用方；NSFW 器官/性状态必须点名。
+        beat_text = "\n".join(
+            f"{beat.get('subject_motion') or ''}；{beat.get('description') or ''}"
+            for beat in (shot.video_beats or []) if isinstance(beat, dict)
+        )
+        ownership_errors = shot_plan.ownership_errors(
+            beat_text,
+            cast=shot_characters,
+            require_named=shot_plan.nsfw_requires_named(
+                beat_text, str(compiled[index]["scene_spec"].get("rating") or ""),
+            ),
+        )
+        request["shot_ownership_errors"] = ownership_errors
+        if ownership_errors:
+            run_trace.emit(
+                ctx, "illustration.shot_ownership",
+                shot_index=shot.shot_index, errors=ownership_errors,
+            )
+        spec = dict(compiled[index]["scene_spec"])
+        # 视频角色参考图：图片1=本镜画面，图片2 起=角色底图（move 由 firstlast 分支从
+        # 图片3 起）。只传有底图的角色；缺底图的已由 shot_missing_character_refs 报出。
+        if character_refs:
+            spec["role_refs"] = [str(ref.get("name") or "") for ref in character_refs]
+        spec["shot_duration_s"] = shot.duration_s
+        spec["shot_framing"] = shot.framing
+        spec["shot_camera_motion"] = shot.camera_motion
+        spec["shot_subject_motion"] = shot.subject_motion
+        spec["shot_sound_cue"] = shot.sound_cue
+        spec["shot_image_timing"] = shot.image_timing
+        spec["image_time_s"] = shot.image_time_s
+        # 每镜地点：判据给了就覆盖全局，避免「结尾卧房」带进剑场镜头（2026-11-10 用户实锤）。
+        if shot.locale:
+            spec["locale"] = shot.locale
+        # 关键帧内部时间轴（近景/硬切写在这里，不再单独出图）；move 的双图运镜不吃它。
+        if shot.video_beats and shot.shot_type != "move":
+            spec["shot_video_beats"] = shot.video_beats
+        if shot.shot_type == "establish":
+            # 环境空镜：有机位运动 ⇒ 一条连续路径；纯固定 ⇒ 固定机位（主体只有环境/群演）。
+            spec["shot_camera"] = shot.transition_desc
+            request["video_request"] = _vp_mod.build_video_request(
+                mode=("shot_establish_move" if shot.transition_desc else "shot_establish"),
+                spec=spec, video_config=request.get("video_config") or {},
+                pending_frame=True, skeleton=_video_skeleton_for(ctx, "climax"), caps=caps,
+            )
+        elif shot.shot_type == "cut":
+            request["video_request"] = _vp_mod.build_video_request(
+                mode="shot_cut", spec=spec, video_config=request.get("video_config") or {},
+                pending_frame=True, skeleton=_video_skeleton_for(ctx, "climax"), caps=caps,
+            )
+        elif shot.shot_type == "move_single":
+            spec["shot_camera"] = shot.transition_desc
+            request["video_request"] = _vp_mod.build_video_request(
+                mode="shot_move_single", spec=spec,
+                video_config=request.get("video_config") or {},
+                pending_frame=True, skeleton=_video_skeleton_for(ctx, "climax"), caps=caps,
+            )
+        elif shot.shot_type == "move":
+            if index + 1 >= len(requests):
+                continue
+            next_request = requests[index + 1]
+            move_spec = dict(compiled[index + 1]["scene_spec"])
+            move_spec["shot_duration_s"] = shot.duration_s
+            move_spec["shot_camera"] = shot.transition_desc
+            # 叙事窗口＝两锚点之间的正文：④ 每拍演**中间过渡内容**（动作/画面），
+            # 机位路径只在 ① 与每拍 camera 契约里写一次。⛔ 不能把 transition_desc
+            # 当 narrative 塞进 ④——那会让每一拍都重述一遍完整运镜路径，模型会把
+            # 「一条连续路径」读成逐拍重复走一遍（离线模拟 2026-11-09 实锤）。
+            window = ""
+            if shot.start_offset is not None and shot.end_offset is not None:
+                start = max(0, shot.start_offset - len(shot.start_anchor))
+                window = clean[start:shot.end_offset].strip()
+            move_spec["narrative"] = window or shot.transition_desc
+            move_spec.pop("floor_narrative", None)
+            next_request["transition_video_request"] = _vp_mod.build_video_request(
+                mode="shot_move", spec=move_spec,
+                video_config=next_request.get("video_config") or {},
+                first_frame_desc=shot.start_anchor,
+                last_frame_desc=shot.end_anchor,
+                pending_frame=True,
+                skeleton=_video_skeleton_for(ctx, "firstlast"), caps=caps,
+            )
+            next_request["incoming_shot_index"] = shot.shot_index
+            next_request["incoming_shot_type"] = "move"
+    for warning in sp.warnings:
+        run_trace.emit(ctx, "illustration.shot_plan", status="warning", warning=warning)
+    run_trace.emit(
+        ctx, "illustration.shot_plan", status="ok",
+        sequence_id=sp.sequence_id, total_shots=sp.total_shots,
+        total_duration_s=sp.total_duration_s, warnings=sp.warnings,
+        shots=[
+            {"index": item.shot_index, "type": item.shot_type,
+             "duration_s": item.duration_s, "anchor": item.start_anchor[:80]}
+            for item in sp.items
+        ],
+    )
+    return requests

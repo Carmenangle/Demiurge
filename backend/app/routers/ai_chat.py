@@ -1,4 +1,6 @@
 """对话端点：多轮对话流(LangGraph+RAG)、历史/清空/追加、消息流快照存取、AI 客服。"""
+import uuid
+
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -120,6 +122,32 @@ def chat_compact(req: CompactRequest) -> dict[str, object]:
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@router.get("/chat/archives")
+def chat_archives(thread_id: str = "home") -> dict[str, object]:
+    """列出该会话「删除前归档」（清缓存/压缩/清空覆盖掉的原文），供「恢复对话」挑一份。"""
+    from app.services import chat_archive
+    return {"items": chat_archive.list_archives(thread_id)}
+
+
+class RestoreRequest(BaseModel):
+    thread_id: str = "home"
+    name: str = ""                 # 归档名（来自 /chat/archives 的 items[].name）
+
+
+@router.post("/chat/archives/restore")
+def chat_archives_restore(req: RestoreRequest) -> dict[str, object]:
+    """用归档整条覆盖当前会话；覆盖前把当前状态也归档一份，压错了还能再压回去。"""
+    from app.services import chat_maintenance
+    try:
+        return chat_maintenance.restore(req.thread_id, req.name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except chat_maintenance.MaintenanceConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except chat_maintenance.MaintenanceFailed as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 class AppendRequest(BaseModel):
     thread_id: str = "home"
     role: str = "assistant"        # user | assistant
@@ -131,12 +159,24 @@ class AppendRequest(BaseModel):
 def chat_append(req: AppendRequest) -> dict[str, object]:
     """把已生成的有价值消息（提示词/图片）直接落盘到 thread，刷新后保留。
 
-    不调用模型，仅写 checkpoint。用于 /p、/s 等工作流产物持久化。
+    2026-11-12 P6：1:1 聊天/群聊以快照为唯一真源，只写快照；剧情线程仍补写
+    checkpoint（画布媒体与旧 /ai/chat 历史回填依赖它）。不调用模型。
     """
-    from app.services import chat_memory
+    from app.services import chat_memory, chat_snapshot
     if not req.text and not req.images:
         return {"ok": False}
-    chat_memory.append_message(req.thread_id, req.role, req.text, req.images or None)
+    mid = str(uuid.uuid4())
+    if req.role == "assistant":
+        message = chat_snapshot.assistant_message(mid, req.text)
+        parts = ([{"type": "text", "text": req.text}] if req.text else [])
+        parts += [{"type": "image", "url": url} for url in (req.images or []) if url]
+        if parts:
+            message["parts"] = parts
+    else:
+        message = chat_snapshot.user_message(mid, req.text, req.images or None)
+    chat_snapshot.upsert(req.thread_id, message)
+    if "__chat" not in req.thread_id and "__group" not in req.thread_id:
+        chat_memory.append_message(req.thread_id, req.role, req.text, req.images or None)
     return {"ok": True}
 
 

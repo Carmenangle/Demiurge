@@ -28,6 +28,18 @@ def test_track_and_snapshot():
     assert [entry["prompt_id"] for entry in comfy_pending.snapshot()] == ["p1"]
 
 
+def test_track_keeps_media_kind():
+    """后台活动面板按 kind 显示出图/出视频；视频任务不得再标成出图（2026-11-08 用户实锤）。"""
+    assert comfy_pending.track("p-video", "repo-a", kind="video")["kind"] == "video"
+    assert comfy_pending.track("p-audio", "repo-a", kind="audio")["kind"] == "audio"
+    assert comfy_pending.track("p-image", "repo-a", kind="image")["kind"] == "image"
+
+
+def test_track_defaults_and_invalid_kind_to_image():
+    assert comfy_pending.track("p1", "repo-a")["kind"] == "image"
+    assert comfy_pending.track("p2", "repo-a", kind="gif")["kind"] == "image"
+
+
 def test_track_is_idempotent_and_overwrites_thread():
     comfy_pending.track("p1", "old-repo")
     comfy_pending.track("p1", "new-repo")

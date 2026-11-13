@@ -49,6 +49,13 @@ describe("image prompt profiles", () => {
     expect(ensureAnimaIllustrationStyle("quality\ncontent", false)).toBe("quality\ncontent");
   });
 
+  it("Anima单行提示也补手绘二次元媒介（聊天自拍退回通用编译时的形态）", () => {
+    expect(ensureAnimaIllustrationStyle("masterpiece, 1girl, wedding dress", true)).toBe(
+      "masterpiece, 1girl, wedding dress, anime illustration, hand-drawn anime style, "
+      + "2d cel shading, non-photorealistic",
+    );
+  });
+
   it("Anima、自然语言与Niji都只前置当前LoRA触发词且不重复", () => {
     expect(applyProfileLoraTriggers("中文自然语言段落。", "anima_tags", ["style_x"]))
       .toBe("style_x, 中文自然语言段落。");

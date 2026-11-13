@@ -85,7 +85,7 @@ def _agent_access_mode() -> str:
 
 
 # full 租约不按 GPU 步数缩 TTL：完全访问的承诺是全程免中断，租约只作为可撤销的
-# 熔断器存在（内存态、随进程消失）；grant 内部 clamp 86400s。
+# 熔断器存在（落盘持久，重启后由 _load_persisted 恢复未过期条目）；grant 内部 clamp 86400s。
 FULL_LEASE_TTL_SECONDS = 86_400
 
 
@@ -175,10 +175,20 @@ def submit_task(plan: GenerationPlan, *, output_dir: str, repo_id: str = "",
                  json.dumps(step.inputs_from, ensure_ascii=False), now))
         connection.commit()
     if _agent_access_mode() == capability_sandbox.ACCESS_FULL:
-        lease = capability_sandbox.grant(
-            subject=task_id, capabilities=[{"operation": "*", "path": ""}],
-            ttl_seconds=_full_lease_ttl(plan), approved_by="full_mode",
-            mode=capability_sandbox.ACCESS_FULL)
+        try:
+            lease = capability_sandbox.grant(
+                subject=task_id, capabilities=[{"operation": "*", "path": ""}],
+                ttl_seconds=_full_lease_ttl(plan), approved_by="full_mode",
+                mode=capability_sandbox.ACCESS_FULL)
+        except OSError as exc:
+            # 租约盘面没落住 = 这个 full 任务一执行就必被 authorize 拦。
+            # 留 queued 是「假可执行态」（2026-11-05 T2）：改判 blocked + 写明原因后原样抛出。
+            with get_connection() as connection:
+                connection.execute(
+                    "update plan_tasks set status='blocked', error=?, updated_at=? where id=?",
+                    (f"full 模式租约签发失败（租约存储写入）：{exc}", _now(), task_id))
+            _publish_progress(task_id, "blocked")
+            raise
         with get_connection() as connection:
             connection.execute("update plan_tasks set lease_id=?, updated_at=? where id=?",
                                (lease["id"], _now(), task_id))
@@ -494,19 +504,19 @@ def _step_paths(step) -> list[str]:
 
     兼容两种步骤形态：DB Row（params_json）与 Pydantic PlanStep（params）。
     """
-    from app.services.plan_validator import PATH_LIKE_RE
+    from app.services.plan_validator import path_like_params
     try:  # DB Row（键索引）
         params = json.loads(step["params_json"] or "{}")
     except (TypeError, IndexError, KeyError):  # Pydantic PlanStep
         params = dict(getattr(step, "params", {}) or {})
-    return [v for v in params.values() if isinstance(v, str) and PATH_LIKE_RE.match(v)]
+    return path_like_params(params)
 
 
 def _out_domain_paths(step, output_dir: str) -> list[str]:
     """越出作品域的读取路径（readonly 越域读取需要审批授权）。"""
     if not output_dir:
         return _step_paths(step)
-    return [p for p in _step_paths(step) if not capability_sandbox._path_allowed(p, output_dir)]
+    return [p for p in _step_paths(step) if not capability_sandbox.path_allowed(p, output_dir)]
 
 
 def _step_level(operation: str) -> str:

@@ -106,14 +106,48 @@ interface PromptProps {
   /** 多行（textarea）：用于图像提示词这类长文本。多行下 Enter 换行、Ctrl/⌘+Enter 提交。 */
   multiline?: boolean;
   rows?: number;
+  /** 显示「复制」按钮：试跑/失败槽的提示词要能直接拷去外部工具核对。 */
+  copyable?: boolean;
   onConfirm: (value: string) => void;
   onCancel: () => void;
 }
 
-export function PromptModal({ title, defaultValue = "", confirmText = "确认", multiline = false, rows = 12, onConfirm, onCancel }: PromptProps) {
+async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch { /* 权限/非安全上下文 → 走 execCommand 兜底 */ }
+  try {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    const ok = document.execCommand("copy");
+    area.remove();
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+export function PromptModal({ title, defaultValue = "", confirmText = "确认", multiline = false, rows = 12, copyable = false, onConfirm, onCancel }: PromptProps) {
   const [value, setValue] = useState(defaultValue);
+  const [copied, setCopied] = useState(false);
   useEsc(onCancel);
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(false), 1500);
+    return () => clearTimeout(timer);
+  }, [copied]);
   const submit = () => { if (value.trim()) onConfirm(value.trim()); };
+  const copy = async () => {
+    if (!value.trim()) return;
+    setCopied(await copyText(value));
+  };
   return (
     <div className="modal-mask">
       <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -136,6 +170,11 @@ export function PromptModal({ title, defaultValue = "", confirmText = "确认", 
           />
         )}
         <div className="modal-actions">
+          {copyable && (
+            <button className="btn" onClick={copy} disabled={!value.trim()}>
+              {copied ? "已复制" : "复制"}
+            </button>
+          )}
           <button className="btn" onClick={onCancel}>
             取消
           </button>

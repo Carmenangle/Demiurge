@@ -14,7 +14,7 @@ from typing import Callable
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
-from app.services import character_store, worldbook_edit, worldbook_store
+from app.services import character_store, repo_meta, worldbook_edit, worldbook_store
 
 router = APIRouter()
 
@@ -74,10 +74,27 @@ class WorldbookRef(BaseModel):
 
 @router.post("/delete")
 def delete_worldbook(ref: WorldbookRef) -> dict[str, object]:
-    ok = worldbook_store.delete_book(ref.base, ref.name)
-    if not ok:
-        raise HTTPException(status_code=404, detail="世界书不存在或删除失败")
-    return {"ok": True}
+    """删整本世界书：service 先备份 `.bak-<时间戳>`，复核未被改写才删。
+
+    「不存在」（404）与「没删成」（500）分开报：改前两者糊成一句「世界书不存在或删除失败」，
+    用户分不清是没删还是删了没删净。备份后内容被改写 ⇒ 409：不是服务器故障，也不能删。
+
+    源根校验（防误删 ⑦）：`base` 由客户端报上来，且这条链路**没有**「没传就回退配置根」的
+    服务端兜底——`base` 就是删除目标的父目录，所以空值也不放行。
+    """
+    if err := repo_meta.worldbook_root_violation(ref.base):
+        raise HTTPException(status_code=400, detail=err)
+    result = worldbook_store.delete_book(ref.base, ref.name)
+    if not result["deleted"]:
+        reason = result["reason"]
+        if reason == "missing":
+            status = 404
+        elif reason == "changed-during-backup":
+            status = 409
+        else:
+            status = 500
+        raise HTTPException(status_code=status, detail=result["error"])
+    return {"ok": True, "backup": result["backup"]}
 
 
 # ── ⑤ 条目级增删改：独立世界书(base+name) / 卡内嵌(character_dir+card_name)统一定位 ──

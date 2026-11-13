@@ -72,6 +72,8 @@ _FIRSTLAST_BEATS = ("开场定格", "主体演变", "收尾定格")
 # 镜头语言词汇表（单一事实来源：docs 外链《镜头运动》《镜头角度》）。
 # 句式与文档「提示词：」一致，可直接交给 MiniMax H3；按 motion 强度分档，
 # 开场定场、中段循环换镜、收尾收束，避免「每拍同一个运镜」的退化。
+# ⚠ 2026-11-09：firstlast 已停用本词汇表（单图无空间信息，逐拍换镜必晃）；
+# 保留给后续多镜头/场景板管线，当前只有 `_beat_camera` 的保留调用面。
 _CAMERA_ESTABLISH = {
     0: "固定镜头，相机完全静止，零运动，只记录画面内的动作",
     2: "摄像机缓缓向主体的面部移动，画面逐渐收窄",
@@ -111,9 +113,15 @@ _FRAME_FIDELITY_NOTE = (
     "；使用输入图片作为准确起始帧："
     "首帧必须逐字复现图片1的机位、构图、人物姿态与服装，再从该定格继续演变"
 )
+# 环境空镜的首帧声明：没有人物，锁的是空间/道具/光线（不能写「人物姿态与服装」）。
+_ESTABLISH_FRAME_NOTE = (
+    "；使用输入图片作为准确起始帧："
+    "首帧必须逐字复现图片1的机位、构图、空间关系、道具与光线，再从该定格继续演变"
+)
 # 剧情句含场景切换提示词时改用转场型运镜（衔接/转场的导演思维）。
-# ⚠ 只在 firstlast 生效：climax 走下方「机位契约」，逐拍换镜（含这里的甩镜头/遮挡揭示
-# 转场句）是高潮视频「像有转场」的直接来源（2026-11-04 用户实锤）。
+# ⚠ 曾只在 firstlast 生效；2026-11-09 firstlast 固定机位后不再触发。climax 走下方
+# 「机位契约」，逐拍换镜（含这里的甩镜头/遮挡揭示转场句）是高潮视频「像有转场」的
+# 直接来源（2026-11-04 用户实锤）。本句保留给后续多镜头/场景板管线。
 _SCENE_SHIFT_CUES = ("另一边", "来到", "走进", "走出", "片刻后", "此时", "镜头一转", "回到", "转场")
 _CAMERA_SHIFT_SLOW = "遮挡揭示转场：镜头被前景遮挡后移开，揭示新场景"
 _CAMERA_SHIFT_FAST = "甩镜头转场：镜头快速切换，伴有强烈的运动模糊效果"
@@ -171,6 +179,35 @@ _RETURN_CUES = (
     "same stance", "as before",
 )
 _HOLD_META = "全片一条固定镜头（Static Shot），机位、画框、景别与背景光影全程保持一致"
+# 2026-11-09 分镜序列：运镜镜头全片只走一条连续路径，不逐拍换镜。
+_SHOT_MOVE_CAMERA = "镜头沿本片声明的路径连续移动，中途不换镜、不重新构图"
+# ① 只写一次完整路径；「中途不换镜」由 ④ 每拍的 `_SHOT_MOVE_CAMERA` 承担，
+# 避免元信息与每拍契约把同一句重复两遍（2026-11-09 离线模拟实锤）。
+_SHOT_MOVE_META = "全片一条连续运镜：{path}"
+# 环境空镜（establish）：只交代空间/道具/群演，不引入主要人物。
+_ESTABLISH_HOLD_META = (
+    "全片一条固定镜头（Static Shot），机位、画框与空间关系不变；"
+    "画面保持环境级运动（道具、群演、光线与尘埃继续动），不要引入主要人物"
+)
+_ESTABLISH_MOVE_META = (
+    "全片一条连续运镜：{path}；镜头沿这条路径持续移动，"
+    "画面只交代空间与环境（道具、群演、光线继续动），不要引入主要人物"
+)
+# 图片落在第 N 秒的环境开场：前段只演环境，图片所在秒起人物按分镜入画。
+_ESTABLISH_MOVE_LATE_META = (
+    "全片一条连续运镜：{path}；镜头沿这条路径持续移动，"
+    "前段只交代空间与环境（道具、群演、光线继续动），"
+    "到图片1所在秒数对齐构图后，人物按[时间分镜]继续"
+)
+_ESTABLISH_HOLD_LATE_META = (
+    "全片一条固定镜头（Static Shot），机位、画框与空间关系不变；"
+    "前段只演环境级运动（道具、群演、光线与尘埃继续动），"
+    "到图片1所在秒数对齐构图后，人物按[时间分镜]继续"
+)
+_ESTABLISH_WORLD = (
+    "环境中的世界照常运动：道具、白纱/窗帘、光线与尘埃持续变化，"
+    "群演或宠物按各自动作继续，不要凭空加入主要人物"
+)
 _REVEAL_CAMERA_PAN = "镜头沿水平方向缓慢连续横移，依次揭示画面两侧的环境"
 _REVEAL_CAMERA_TILT = "镜头缓慢连续向上摇摄，从近处一路扫向高处"
 _REVEAL_META = "全片一条连续镜头运动揭示环境，机位沿这条路径持续向前，中途不间断"
@@ -201,6 +238,20 @@ _TILT_UP_CUES = ("高楼", "大厦", "塔楼", "耸立", "天际线", "尖顶", 
 _POV_VIEW_ANCHORED = "第一人称视角（POV，first person view），镜头与图片1共用同一视点位置"
 # 运镜档（`scene_reveal`）不绑图片1：机位本来就在动，绑了就是与「沿这条路径持续向前」互斥。
 _POV_VIEW_PLAIN = "第一人称视角（POV，first person view）"
+# 多拍/多机位分镜：段间本来就要硬切换机位，不能再锁「与图片1共用同一视点位置」。
+# 保留 POV 的实质约束（每段都是叙事者本人的视线），只放开机位位置与视线方向。
+_POV_VIEW_MULTI = (
+    "第一人称视角（POV，first person view），每一段都是镜头后面那一位本人的视线；"
+    "按[时间分镜]改变景别与视线方向，不得切到第三人称机位，不得出现镜头角色的全身"
+)
+# 同一支视频里既有 POV 又有第三人称旁观：逐段标注视角，不再全局锁一种。
+_POV_VIEW_MIXED = (
+    "混合视角（POV，first person view）：标『第一人称』的段是镜头后面那一位本人的视线，"
+    "不得出现他的全身；标『第三人称』的段是旁观机位，叙事者不在画面里；"
+    "段间硬切按段切换视角，不得把两种视角混在同一段"
+)
+# 全片旁观：只写肯定式旁观取景，避免出现「第一人称」触发词。
+_OBSERVER_VIEW_NOTE = "第三人称旁观机位：按[时间分镜]执行各段机位，画面按旁观视角取景"
 # 肢体事实的呈现限定：只有**没带**画框边缘字样的事实才补这一句（成稿 tag 自己已经带，
 # 复述一遍就是白占 ① 的字数预算——与第 81 刀「重复不增加约束强度」同口径）。
 _POV_LIMB_TAIL = "，entering from the lower frame edge"
@@ -400,6 +451,10 @@ def _beat_camera(motion: int, idx: int, total: int, desc: str = "",
     """第 idx/total 拍的运镜：开场定场、收尾收束、中段按档位循环换镜；
     单拍用档位代表句；句子带场景切换提示时改用转场型运镜。
 
+    ⚠ 2026-11-09：firstlast 已改为全片固定机位，不再调用本函数（单图无空间
+    信息，逐拍换镜会把首帧定格的机位/景别在第 2 拍就丢掉）。保留给后续多镜头/
+    场景板管线；当前唯一调用面是保留测试与未来的镜头序列生成。
+
     band_overrides（提示词模版骨架）：该档有覆盖文案时，全档位统一用它
     （用户显式选择「这一档就用这句」）；缺键回落内置词汇表。
     has_frame（I2V 有底图）：首拍改成「逐字保持图片1机位」，中段每 2 拍才换一次镜
@@ -524,25 +579,38 @@ def _pov_limb_phrase(spec: dict[str, Any]) -> str:
     return body + _POV_LIMB_TAIL
 
 
-def _pov_shot_notes(spec: dict[str, Any], *, anchored: bool) -> tuple[str, ...]:
+def _pov_limb_notes(spec: dict[str, Any]) -> tuple[str, ...]:
+    """叙事者肢体事实的归属说明；无事实 ⇒ 空元组。"""
+    limbs = _pov_limb_phrase(spec)
+    if not limbs:
+        return ()
+    return (_POV_LIMB_OWNER_CLAIM, limbs)
+
+
+def _pov_shot_notes(spec: dict[str, Any], *, anchored: bool,
+                    cuts: bool = False, force: bool = False) -> tuple[str, ...]:
     """第一人称镜头声明（进 ① 的 notes 尾部）。
 
     ⚠ 零回归锁：`viewpoint` 缺失／非 `first_person` ⇒ 空元组 ⇒ ① 逐字节等于旧行为
       （第三人称与「用户没开第一人称」的既有稿件不受任何影响）。
+    ⚠ `force=True`：分镜逐拍显式标了 pov（作品级未必是第一人称）时，
+      绕过作品级 `viewpoint` 闸门，按这一支视频的逐拍视角发 POV 声明。
     ⚠ `anchored` 只在 hold 档＋有首帧时为真：无首帧不得引用不存在的图（缺图守卫 R2），
       reveal 档机位本来在动，不能再说「与图片1同一视点」。
+    ⚠ `cuts=True`（shot_video_beats 有多拍/硬切）⇒ 用多拍声明：段间本来就要换机位，
+      再写「与图片1共用同一视点位置」就是同一条提示词里的硬互斥。
     第 90 刀：**有肢体事实才补归属主句**，且它排在事实列表之前——裸 tag 只说「有一双手从
       画框下缘进来抓住她的腰」，不说那双手是谁的；归属在 ① 解释一次，④ 用 `_POV_BEAT_ACTOR`
       回指它（图片侧同构：条款承担归属、tag 本体保持裸短语）。
       无肢体事实 ⇒ 主句不出现（没有指代对象，写了只是白占字数）。
     """
-    if not _first_person_view(spec):
+    if not force and not _first_person_view(spec):
         return ()
-    notes = [_POV_VIEW_ANCHORED if anchored else _POV_VIEW_PLAIN]
-    limbs = _pov_limb_phrase(spec)
-    if limbs:
-        notes.append(_POV_LIMB_OWNER_CLAIM)
-        notes.append(limbs)
+    if cuts:
+        notes = [_POV_VIEW_MULTI]
+    else:
+        notes = [_POV_VIEW_ANCHORED if anchored else _POV_VIEW_PLAIN]
+    notes.extend(_pov_limb_notes(spec))
     return tuple(notes)
 
 
@@ -622,29 +690,28 @@ def _aspect_from_size(size: str) -> str:
 
 
 def _subject_scene(spec: dict[str, Any]) -> str:
-    """③ 主体/场景：只写「这一格里看得见」的可还原视觉，禁止整卡堆料。
+    """③ 主体/场景：只写「这一格里看得见」的角色名、当前衣着与场景。
 
-    三级来源（第 81 刀收窄）：
-    1. agent 提取的简化视觉描述（video_subject_scene，已去堆砌 + 专名视觉展开）；
-    2. 画面主体（`subjects`＝出图侧的画面主体名单）的英文视觉描述；
-    3. 中文 appearance **按在场角色名逐条取**（`_appearance_by_actor` 拆得出人名才写）。
-    第 3 级拆不出人名就**不写**：整串 appearance 往往是世界书段落 + 全部角色外貌，
-    实测一条 3166 字的稿子里 ③ 占 61 %，而首帧已由 ① 逐字声明「复现图片1」——
-    堆料不补信息，只把画面主体淹没。衣着/场景两个独立维度照常拼接，占位值除外。
+    ⛔ 不再复述角色外貌：图片1 在生成时已经接收了角色卡/条目的外貌，视频只需要
+    知道「谁、当前什么状态、在哪」。旧实现从 `subjects`/`appearance` 复制整段卡面，
+    导致 ③ 被 300–400 字的外貌淹没（2026-11-11 用户实锤）。
+    1. `video_subject_scene`（已含「角色名（当前状态）+ 场景」）优先；
+    2. 否则只写画面角色名；
+    3. 再拼当前衣着（wardrobe）与地点（locale），占位值除外。
     """
     video_scene = str(spec.get("video_subject_scene") or "").strip()
     if video_scene:
         return video_scene
     parts: list[str] = []
+    # `subjects` 是**本帧画面事实**（动作/姿态/光线），不是角色卡；可以保留。
+    # ⛔ 只删 `appearance` 整卡兜底：外貌已由图片1承载。
     for subject in spec.get("subjects") or []:
         if isinstance(subject, dict):
             desc = str(subject.get("description") or "").strip()
             if desc and desc not in parts:
                 parts.append(desc)
     if not parts:
-        names = _on_frame_names(spec)
-        gloss = _appearance_by_actor(str(spec.get("appearance") or ""), names)
-        parts = [f"{name}（{gloss[name]}）" for name in names if gloss.get(name)]
+        parts = list(_on_frame_names(spec))
     # 衣着 + 场景（独立维度，始终拼接）
     for key in ("wardrobe", "locale"):
         val = str(spec.get(key) or "").strip()
@@ -692,6 +759,39 @@ def _appearance_by_actor(appearance: str, actors: list[str]) -> dict[str, str]:
     src = (appearance or "").strip()
     if not src:
         return {}
+    # 先判「名字：外貌」段落头，再判 `名字(外貌)`：长角色卡的外貌正文里常带括号
+    # （`乳房（尺寸110+）`），旧顺序会把这些括号前的短语当角色名，返回一整张垃圾映射
+    # ⇒ 视频身份锁拿不到真外貌（2026-11-11 堕落魔戒实锤）。
+    lines = [ln for ln in src.splitlines() if ln.strip()]
+    header = re.compile(r"^\s*([^\s：:]+)\s*[：:]\s*(.+)$")
+    if lines and all(header.match(ln) for ln in lines):
+        mapped: dict[str, str] = {}
+        for ln in lines:
+            m = header.match(ln)
+            if m:
+                mapped[m.group(1).strip()] = m.group(2).strip()
+        if len(lines) == 1:
+            # 单条也可能是「腓特烈大帝：…」：角色配置名常是条目名的一部分
+            # （腓特烈 / 腓特烈大帝）。精确优先，其次取唯一以 actor 开头的条目键；
+            # ⛔ 不能走下面的前缀兜底，否则会把「大帝：…」整段当成外貌（2026-11-11 实锤）。
+            for actor in actors:
+                if actor in mapped:
+                    return {actor: mapped[actor]}
+                candidates = [key for key in mapped if key.startswith(actor)]
+                if len(candidates) == 1:
+                    return {actor: mapped[candidates[0]]}
+            # 没有 actor 命中 ⇒ 可能是整卡 dump（`世界观：…；纪含章(…)`）：
+            # 继续走括号分支，不能把整条 dump 当成某个角色的外貌。
+        else:
+            resolved: dict[str, str] = {}
+            for actor in actors:
+                if actor in mapped:
+                    resolved[actor] = mapped[actor]
+                    continue
+                candidates = [key for key in mapped if key.startswith(actor)]
+                if len(candidates) == 1:
+                    resolved[actor] = mapped[candidates[0]]
+            return resolved or mapped
     paren = re.findall(r"([^\s、;；，,]+?)\s*[\(（]([^\)）]+)[\)）]", src)
     if paren:
         out: dict[str, str] = {}
@@ -700,15 +800,6 @@ def _appearance_by_actor(appearance: str, actors: list[str]) -> dict[str, str]:
             if name and desc:
                 out[name] = desc
         return out
-    lines = [ln for ln in src.splitlines() if ln.strip()]
-    header = re.compile(r"^\s*([^\s：:]+)\s*[：:]\s*(.+)$")
-    if len(lines) >= 2 and all(header.match(ln) for ln in lines):
-        mapped: dict[str, str] = {}
-        for ln in lines:
-            m = header.match(ln)
-            if m:
-                mapped[m.group(1).strip()] = m.group(2).strip()
-        return mapped
     # 纯文本（无括号/冒号/换行分隔）：用 actors 名字做前缀匹配，拆出「名字 + 外貌」。
     for actor in sorted(actors, key=len, reverse=True):
         if src.startswith(actor) and len(src) > len(actor):
@@ -721,27 +812,12 @@ def _appearance_by_actor(appearance: str, actors: list[str]) -> dict[str, str]:
 
 
 def _identity_gloss(spec: dict[str, Any], actors: list[str]) -> str:
-    """角色身份样貌绑定串：让视频模型把「角色名」对应到具体长相。
+    """视频身份锁只写角色名，不复述角色卡外貌。
 
-    样貌来源：subjects(name→description 英文视觉) 优先，缺失回退 appearance
-    （中文纯外貌，见 _appearance_by_actor）。都缺的角色只写名字（诚实，不硬凑）。
-    当 agent 已产出简化外貌/场景（video_subject_scene）时，不再用原始中文
-    appearance 兜底——否则堆砌词（丰腴肥熟/酥雌醇媚）会经参考绑定回流，违背 P4。"""
-    gloss: dict[str, str] = {}
-    for subject in spec.get("subjects") or []:
-        if isinstance(subject, dict):
-            name = str(subject.get("name") or "").strip()
-            subj_desc = str(subject.get("description") or "").strip()
-            if name and subj_desc:
-                gloss[name] = subj_desc
-    app_gloss: dict[str, str] = {}
-    if not str(spec.get("video_subject_scene") or "").strip():
-        app_gloss = _appearance_by_actor(str(spec.get("appearance") or ""), actors)
-    parts: list[str] = []
-    for actor in actors:
-        desc: str | None = gloss.get(actor) or app_gloss.get(actor)
-        parts.append(f"{actor}（{desc}）" if desc else actor)
-    return "、".join(parts)
+    外貌已由图片1（生成时接收角色卡/条目）与图片2+角色底图承载；视频文本再复述
+    300–400 字卡面只会淹没动作与机位（2026-11-11 用户口径：光图片就涵盖外貌）。
+    """
+    return "、".join(actor for actor in actors if actor)
 
 
 def _climax_frame_role(spec: dict[str, Any], first_frame_desc: str = "") -> str:
@@ -776,12 +852,32 @@ def _reference_binding_climax(first_frame_desc: str, spec: dict[str, Any],
     这里（② 是身份绑定的位置），且整条提示词只出现一次。
     """
     actors = [str(a).strip() for a in (spec.get("actors") or []) if str(a).strip()]
+    timing = str(spec.get("shot_image_timing") or "start").strip().lower()
+    second = int(spec.get("image_time_s") or 0)
+    late_frame = timing in ("mid", "end", "at")
+    if spec.get("establish"):
+        # 环境空镜：不锁人物身份，只锁空间/道具/光线（否则模型会把开场画成人物特写）。
+        if late_frame:
+            return (
+                f"图片1=本镜第 {second} 秒的画面"
+                "（空间、道具、光线与人物均按图片1；不要额外添加图片里没有的主要人物）"
+            )
+        return "图片1=本镜环境空镜的起始画面（只锁空间、道具与光线；不要凭空添加主要人物）"
     if actors:
         lines = [f"图片1中心的角色为{'、'.join(actors)}"]
-        lines.append(f"保持 {_identity_gloss(spec, actors)} 的身份、脸部、服装、发型、造型完全一致")
+        if spec.get("role_refs"):
+            # 底图可能不是当前造型（腓特烈婚纱模式）：角色参考只锁外貌，
+            # 服装/姿势/场景一律以本镜生成的图片1为准（用户 2026-11-11 定案）。
+            lines.append(
+                "服装、姿势与场景以图片1为准；角色外貌只按角色参考图锁定"
+                "（不参考底图的服装与姿势）"
+            )
+        else:
+            lines.append(f"保持 {_identity_gloss(spec, actors)} 的身份、脸部、服装、发型、造型完全一致")
     else:
         desc = _climax_frame_role(spec, first_frame_desc)
-        lines = [f"图片1={desc}（唯一参考画面，作为起始帧）"]
+        anchor = f"本镜第 {second} 秒的画面" if late_frame else "起始帧"
+        lines = [f"图片1={desc}（唯一参考画面，作为{anchor}）"]
         if has_frame:
             lines.append("保持图片1中人物的身份、脸部、服装、发型、造型完全一致")
     lines.append(_IDENTITY_LOCK)
@@ -1252,14 +1348,16 @@ def _firstlast_beat_plan(
     mid_beats: list[tuple[str, str, tuple[str, ...], tuple[str, ...]]] = []
     if use_action:
         mid_action = action[1:]
-        for (desc, scene), quotes in zip(
+        for (desc, scene), group_quotes in zip(
                 mid_action, _group_firstlast_quotes(sentences, len(mid_action))):
             # 引语是「对白时间轴」的唯一锚点：换成英文动作拍后必须按剧情位置挂回。
             # 第 105 刀：先只带着走，等最终拍窗口算出来再按秒数预算挂进 content——
             # 折叠合并会改变每拍的时长，提前拼进去就无从裁量（实稿 53 句塞 15s）。
+            # 变量名不用裸 `quotes`：mypy 在函数级复用品名，list[str] 推断会污染后面
+            # 所有 tuple[str, ...] 解构，产生六处连锁类型错误。
             mid_beats.append((
                 desc, "与节拍/重音同步" if motion >= 2 else "",
-                (scene,) if scene else (), tuple(quotes),
+                (scene,) if scene else (), tuple(group_quotes),
             ))
     else:
         for sent in sentences:
@@ -1316,7 +1414,6 @@ def _firstlast_beat_plan(
             prev_scene = scene
         rendered.append((prefix + content, extra, label, quotes))
 
-    n = len(rendered)
     windows, dialogue_seconds, beat_needs_seconds = _firstlast_beat_windows(rendered, dur)
     plan: list[tuple[int, int, str, str, str]] = []
     quotes_total = 0
@@ -1338,11 +1435,25 @@ def _firstlast_beat_plan(
     }
 
 
+def _firstlast_camera_lock(has_first: bool) -> tuple[str, str]:
+    """firstlast 全片机位止血（2026-11-09 用户定案）。
+
+    首尾帧只给模型两张静图：图片1之外没有场景几何、视差和画外信息。逐拍换镜
+    （环绕/手持/快速推近）会逼模型在单图空间里自己发明机位，真机成片表现为持续
+    漂移/乱晃（用户提供的 8s 样片：scene 检测无硬切，沙发/灯/边桌等背景特征在缓慢
+    位移，人物构图同时被推近）。故 firstlast 默认全片一条固定镜头，只让主体在格内
+    动作；等场景板/previz 参考链落地、图片1之外真的有空间依据后，才允许恢复一条
+    连续运镜。
+    """
+    return (_HOLD_CAMERA_FRAME if has_first else _HOLD_CAMERA_NOFRAME, _HOLD_META)
+
+
 def _time_segments(spec: dict[str, Any], duration_hint: int,
                    first_frame_desc: str, last_frame_desc: str,
                    prev_tail_desc: str,
                    has_first: bool = True, has_last: bool = True,
-                   skeleton: "VideoSkeleton | None" = None) -> str:
+                   skeleton: "VideoSkeleton | None" = None,
+                   camera_override: str = "") -> str:
     """④ 时间分镜（firstlast 核心）：首帧→动作流/逐句剧情→尾帧，覆盖整段桥段。
 
     - 首帧段带「上楼层尾帧」衔接上下文（转场判断融入生成，不单独判定）；
@@ -1352,25 +1463,21 @@ def _time_segments(spec: dict[str, Any], duration_hint: int,
       不足 3 拍或没有时退回批 1 的正文逐句成拍（第 80 刀：跳过被 opening 覆盖的开头句、
       对白归属与台词同拍、超量均分合并不丢剧情，见 `_fold_firstlast_mid`）；
     - 每拍可带 scene：只在**变化**处渲染「场景切换：…」，换场景因此成为一次转场拍；
-    - 尾帧段收尾定格 + 拉镜头收束；缺图时诚实标注（R2）。
-    - 运镜取自镜头语言词汇表，按拍位分配（定场→换镜→收束），不再全程同一「极缓推进」。
-    - skeleton（提示词模版骨架）：beat_labels 覆盖三段节奏名、camera_band_overrides
-      覆盖运镜档位文案、default_duration 覆盖时长兜底；None = 逐字现行为。
+    - 尾帧段收尾定格；默认全片固定机位（2026-11-09 止血），缺图时诚实标注（R2）。
+    - `camera_override` 非空 ⇒ 分镜序列的运镜镜头：全片复用同一条连续路径，不逐拍换镜。
+    - 机位：默认全片一条固定镜头（Static Shot）；`camera_band_overrides` 不参与。
+    - skeleton（提示词模版骨架）：beat_labels 覆盖三段节奏名、default_duration 覆盖
+      时长兜底；None = 逐字现行为。
     - 拍界由 `_firstlast_beat_plan` 统一产出（与对白时间轴同一份）。
     """
     sk = skeleton or VideoSkeleton()
-    motion_raw = spec.get("motion")
-    motion = int(motion_raw) if isinstance(motion_raw, (int, float)) else 0
-    model_cam = str(spec.get("camera") or "").strip()
     beats, _, _quote_stats = _firstlast_beat_plan(
         spec, duration_hint, first_frame_desc, last_frame_desc, prev_tail_desc,
         has_first, has_last, sk,
     )
+    cam = camera_override.strip() or _firstlast_camera_lock(has_first)[0]
     lines: list[str] = []
-    n = len(beats)
-    for idx, (start, end, label, content, extra) in enumerate(beats):
-        cam = model_cam or _beat_camera(
-            int(motion), idx, n, content, sk.camera_band_overrides or None)
+    for start, end, label, content, extra in beats:
         tail = f"（{extra}）" if extra else ""
         lines.append(f"[{start}s–{end}s｜{label}]：{cam}；{content}{tail}")
     return "\n".join(lines)
@@ -1923,6 +2030,42 @@ _POV_WHOLE_PERSON_RE = re.compile(
 # ⚠ 本短语**自带归属**，不依赖 ① 是否列了肢体事实：本帧没有肢体证据时 ① 不写主句，
 #   若这里再用一个需要 ① 定义的短回指就成了悬空指代。
 _POV_BEAT_ACTOR = "镜头后面那一位伸进画面的肢体"
+# 第一人称下「身后那人 / 身后的人」就是叙事者＝镜头，不能写成第三人称旁观。
+# 2026-11-09 用户复审实锤：「等身后那人看清」在第一人称分镜里是错的。
+# 只替换名词短语、保留前面的动词（「等…看清」→「等镜头看清」）。
+_POV_BEHIND_PERSON_RE = re.compile(r"身后那?人")
+
+
+def _pov_rewrite_beat_text(text: str) -> str:
+    """第一人称 beats 改写：把「身后那人」指代换成「镜头」。"""
+    return _POV_BEHIND_PERSON_RE.sub("镜头", text)
+
+
+# 第一人称叙事者的男性部位必须带归属（用户 2026-11-10：不能只写「柱身」）。
+_POV_NARRATOR_PART_RE = re.compile(
+    r"(?<!镜头角色的)(?:他的)?(柱身|阴茎|肉棒|阳具|龟头|囊袋|前列腺)"
+)
+
+
+def _pov_bind_narrator_parts(text: str) -> str:
+    return _POV_NARRATOR_PART_RE.sub(r"镜头角色的\1", text)
+
+
+def _pov_replace_narrator(text: str, narrator: str) -> str:
+    """第一人称段不得把叙事者写成第三人本名；统一换成「镜头角色」。"""
+    name = str(narrator or "").strip()
+    if not name:
+        return text
+    return text.replace(name, "镜头角色")
+
+
+def _silent_speech_text(text: str) -> str:
+    """对白只拍口型、不生成音频：统一写成「嘴唇开合（无声音）」。"""
+    # 「准备开口说话」先收成「嘴唇微张」，避免下面的全局替换拼出
+    # 「准备嘴唇开合（无声音）」这种别扭句。
+    value = text.replace("准备开口说话", "嘴唇微张").replace("准备开口", "嘴唇微张")
+    value = value.replace("开口说话", "嘴唇开合（无声音）")
+    return re.sub(r"嘴唇开合(?!（无声音）)", "嘴唇开合（无声音）", value)
 
 
 def _prune_beat_action(desc: str, *, first_person: bool = False) -> str:
@@ -2077,7 +2220,20 @@ def compile_climax_video_prompt(
     blocks: dict[str, str] = {}
     meta = _meta(duration_hint, "" if ctr.holds_camera else camera,
                  model_name, size, sk.default_duration)
-    frame_note = _FRAME_FIDELITY_NOTE if will_have_frame else ""
+    timing = str(spec.get("shot_image_timing") or "start").strip().lower()
+    if will_have_frame and timing in ("mid", "end", "at"):
+        # 图片不是首帧：不能再写「作为准确起始帧/首帧必须复现图片1」，否则
+        # 视频模型会把中段构图塞进 0s（用户 2026-11-10 实锤：镜0 图片是 3–6s）。
+        second = int(spec.get("image_time_s") or 0)
+        frame_note = (
+            f"；输入图片不是首帧：图片1只是本镜第 {second} 秒的构图锚点，"
+            f"不得当作视频第 0 秒；先按[时间分镜]演到第 {second} 秒，再对齐图片1的构图继续"
+        )
+    else:
+        frame_note = (
+            _ESTABLISH_FRAME_NOTE if spec.get("establish")
+            else (_FRAME_FIDELITY_NOTE if will_have_frame else "")
+        ) if will_have_frame else ""
     note = "；".join(p for p in (*ctr.notes, sk.meta_note) if p)
     note = f"；{note}" if note else ""
     blocks[SECTION_META] = f"[{sk.title(SECTION_META, '元信息')}]：{meta}{frame_note}{note}"
@@ -2088,7 +2244,10 @@ def compile_climax_video_prompt(
     subject = _subject_scene(spec)
     if subject:
         blocks[SECTION_SUBJECT] = f"[{sk.title(SECTION_SUBJECT, '主体/场景')}]：{subject}"
-    segments = _climax_time_segments(spec, duration_hint, sk, will_have_frame, ctr)
+    segments = (
+        _shot_beats_segments(spec) if spec.get("shot_video_beats")
+        else _climax_time_segments(spec, duration_hint, sk, will_have_frame, ctr)
+    )
     blocks[SECTION_SEGMENTS] = (
         f"[{sk.title(SECTION_SEGMENTS, '时间分镜')}]：\n"
         + segments
@@ -2101,7 +2260,13 @@ def compile_climax_video_prompt(
     blocks[SECTION_AUDIO] = f"[{sk.title(SECTION_AUDIO, '音频')}]：{audio}"
     # ⑥ 负面约束**不产出**（第 81 刀）：这条链的节点只有 `positive` 一路输入，
     # 「worst quality / extra fingers」这类词进模型就是正面内容；身份锁已折进 [参考绑定]。
-    return _assemble_blocks(blocks, sk)
+    prompt = _assemble_blocks(blocks, sk)
+    # 对白口型措辞全局归一（含 move/hold 路径）：不得残留「开口说话」。
+    prompt = _silent_speech_text(prompt)
+    if _first_person_view(spec):
+        # 第一人称：叙事者＝镜头，他的部位必须带「镜头角色的」归属，不能裸写部位名。
+        prompt = _pov_bind_narrator_parts(prompt)
+    return prompt
 
 
 def compile_firstlast_video_prompt(
@@ -2119,20 +2284,32 @@ def compile_firstlast_video_prompt(
     has_last: bool = True,
     audio_lines: list | None = None,
     skeleton: "VideoSkeleton | None" = None,
+    camera_override: str = "",
 ) -> str:
     """首尾帧·剧情影片：五段式（H3 骨架；⑥ 负面约束已退役，见 climax 同处注释）。
 
     区块：① 元信息 ② 双图绑定 ③ 主体/场景 ④ 时间分镜 ⑤ 音频。
     风格声明已停用（有参考图定调）。has_first/has_last 标识是否真的提供了首/尾帧图（R2 缺图守卫）。
-    skeleton（提示词模版骨架）：区块标题/顺序、beat_labels、camera_band_overrides、
-    default_duration、meta_note；None = 逐字现行为。
+    `camera_override` 非空 ⇒ 分镜序列的 move 镜头：① 写一次完整路径，④ 每拍用短句
+    复用同一条路径，不逐拍换镜；空 ⇒ 旧整楼 firstlast 固定机位（零回归）。
     """
     sk = skeleton or VideoSkeleton()
     blocks: dict[str, str] = {}
-    note = f"；{sk.meta_note}" if sk.meta_note else ""
+    path = camera_override.strip()
+    if path:
+        camera_note = _SHOT_MOVE_META.format(path=path)
+        beat_camera = _SHOT_MOVE_CAMERA
+    else:
+        beat_camera, camera_note = _firstlast_camera_lock(has_first)
+    # 覆盖式分镜：景别/主体运动/触发声同样进 ①（固定机位也必须有主体运动）。
+    motion_note = "；".join(_shot_motion_notes(spec))
+    if motion_note:
+        camera_note = f"{camera_note}；{motion_note}" if camera_note else motion_note
+    meta_notes = "；".join(p for p in (camera_note, sk.meta_note) if p)
+    note = f"；{meta_notes}" if meta_notes else ""
     blocks[SECTION_META] = (
         f"[{sk.title(SECTION_META, '元信息')}]："
-        f"{_meta(duration_hint, camera, model_name, size, sk.default_duration)}{note}"
+        f"{_meta(duration_hint, '', model_name, size, sk.default_duration)}{note}"
     )
     blocks[SECTION_BINDING] = (
         f"[{sk.title(SECTION_BINDING, '参考绑定')}]："
@@ -2144,7 +2321,8 @@ def compile_firstlast_video_prompt(
     blocks[SECTION_SEGMENTS] = (
         f"[{sk.title(SECTION_SEGMENTS, '时间分镜')}]：\n"
         + _time_segments(spec, duration_hint, first_frame_desc, last_frame_desc,
-                         prev_tail_desc, has_first, has_last, sk)
+                         prev_tail_desc, has_first, has_last, sk,
+                         camera_override=beat_camera)
     )
     blocks[SECTION_AUDIO] = f"[{sk.title(SECTION_AUDIO, '音频')}]：{_audio_hint(spec, audio_lines)}"
     return _assemble_blocks(blocks, sk)
@@ -2233,6 +2411,460 @@ def _caps_reference_slots(caps: dict[str, Any] | None) -> int:
         return 0
 
 
+def _shot_seconds(spec: dict[str, Any], duration_hint: int,
+                  caps: dict[str, Any] | None) -> int:
+    """单镜时长：分镜计划 > 调用方预算 > 模板默认 > 内置兜底。"""
+    value = int(spec.get("shot_duration_s") or 0)
+    if value > 0:
+        return value
+    if duration_hint > 0:
+        return int(duration_hint)
+    if caps:
+        value = int(caps.get("duration") or 0)
+        if value > 0:
+            return value
+    return _DEFAULT_DURATION
+
+
+# 第一人称下「机位在她右后方 / 床尾 / 贴地」这类第三人称位置会与
+# 「镜头＝叙事者眼睛」互斥：只归一这些明确站到角色外部的机位，
+# 叙事者站得住的机位（院墙外/窄道入口/院门内侧/门内三步/案侧/床沿上方）原样保留。
+# 原始 beat 仍留在审阅稿的「关键帧内部时间轴」里，供定位判据问题。
+_POV_GAZE_RE = re.compile(r"(略俯视|俯视|仰视|平视|侧视|回望|回看)")
+_POV_CAMERA_KEEP_MARKS = ("叙事者", "镜头角色", "第一人称", "POV", "视点")
+# 第一人称下「侧后方/背后/背面」是第三人称机位角度；保留景别，去掉这个角度。
+_POV_BACK_ANGLE_RE = re.compile(r"[，,/]?\s*(?:侧后方|正后方|背后|背面)\s*")
+# 只有这些「明确站到角色外部」的机位才需要归一；叙事者站得住的机位
+# （院墙外/窄道入口/院门内侧/门内三步/案侧/床沿上方）必须原样保留。
+_POV_THIRD_PERSON_CAMERA_RE = re.compile(
+    r"机位在(?:她|他)(?:的)?(?:右|左)(?:后|前)方"
+    r"|(?:她|他)(?:的)?(?:右|左)(?:后|前)方"
+    r"|肩后|床尾|红毯(?:左侧|右侧|一侧|侧前方|前端)|厂房上方|柱脚前|贴地"
+)
+# 判据没显式给 viewpoint 时的保守反推：
+#   POV＝机位句里出现叙事者/第一人称/视点/画框边缘；
+#   旁观＝明确在角色右后/左前/肩后、床尾、红毯一侧、贴地等叙事者不在的位置。
+#   ⛔ 「机位在她背后/身后/侧后方」不列入旁观：叙事者本人可能就站在那里。
+# ⛔ 不能用裸「镜头角色」当 POV 证据：第三人称作品也用它指画面里的主人公
+#   （「女管事目光在镜头角色身上停了一瞬」「镜头角色仰倒在铁管旁」），会把旁观拍误判成 POV。
+_BEAT_POV_MARKERS = (
+    "叙事者", "第一人称", "POV", "视点", "镜头后", "画面下缘", "画框边缘",
+)
+_BEAT_OBSERVER_RE = re.compile(
+    r"机位在(?:她|他)(?:的)?(?:右|左)(?:后|前)方"
+    r"|(?:她|他)(?:的)?(?:右|左)(?:后|前)方"
+    r"|肩后|床尾|红毯(?:左侧|右侧|一侧|侧前方|前端)|厂房上方|柱脚前|贴地|旁观|第三人称"
+)
+
+
+def _explicit_beat_viewpoint(beat: dict[str, Any]) -> str:
+    """判据逐拍显式标的视角（优先于反推）。"""
+    raw = str(beat.get("viewpoint") or "").strip().lower()
+    if raw in ("pov", "first_person", "first-person", "first person", "第一人称", "叙事者", "主观"):
+        return "pov"
+    if raw in ("observer", "third_person", "third-person", "third person", "第三人称", "旁观", "客观"):
+        return "observer"
+    return ""
+
+
+def _infer_beat_viewpoint(beat: dict[str, Any]) -> str:
+    """从机位句反推单拍视角；两类线索同时出现或都没有 ⇒ 交给图片视角兜底。"""
+    text = " ".join(
+        str(beat.get(key) or "")
+        for key in ("camera_position", "framing", "description", "subject_motion")
+    )
+    pov = any(mark in text for mark in _BEAT_POV_MARKERS)
+    observer = bool(_BEAT_OBSERVER_RE.search(text))
+    if pov and not observer:
+        return "pov"
+    if observer and not pov:
+        return "observer"
+    return ""
+
+
+def _beat_viewpoint(beat: dict[str, Any]) -> str:
+    return _explicit_beat_viewpoint(beat) or _infer_beat_viewpoint(beat)
+
+
+def _beat_seconds(beat: dict[str, Any]) -> int:
+    try:
+        return max(1, int(float(beat.get("duration_s") or 2)))
+    except (TypeError, ValueError):
+        return 2
+
+
+def _image_beat_index(spec: dict[str, Any], beats: list[dict[str, Any]]) -> int:
+    """图片落在第几拍：图片已锁在视频第 N 秒，那一拍的视角必须跟图片一致。"""
+    if not beats:
+        return 0
+    timing = str(spec.get("shot_image_timing") or "start").strip().lower()
+    if timing == "end":
+        return len(beats) - 1
+    if timing == "start":
+        return 0
+    try:
+        target = int(spec.get("image_time_s") or 0)
+    except (TypeError, ValueError):
+        target = 0
+    cursor = 0
+    for index, beat in enumerate(beats):
+        duration = _beat_seconds(beat)
+        if cursor <= target < cursor + duration:
+            return index
+        cursor += duration
+    return len(beats) - 1
+
+
+def _shot_viewpoint_plan(spec: dict[str, Any]) -> tuple[str, list[str]]:
+    """本支视频的视角计划：返回 (pov|observer|mixed, 每拍有效视角)。
+
+    图片所在拍以作品/图片视角为准（图片已经锁在视频第 N 秒），
+    其余拍优先吃判据的 `viewpoint`，没标再从机位句反推，最后落回图片视角。
+    """
+    beats = [beat for beat in (spec.get("shot_video_beats") or [])
+             if isinstance(beat, dict)]
+    image_view = "pov" if _first_person_view(spec) else "observer"
+    if not beats:
+        return image_view, []
+    image_index = _image_beat_index(spec, beats)
+    effective: list[str] = []
+    for index, beat in enumerate(beats):
+        viewpoint = _beat_viewpoint(beat) or image_view
+        if index == image_index:
+            viewpoint = image_view
+        effective.append(viewpoint)
+    if all(viewpoint == "pov" for viewpoint in effective):
+        return "pov", effective
+    if all(viewpoint == "observer" for viewpoint in effective):
+        return "observer", effective
+    return "mixed", effective
+
+
+def _pov_safe_camera_position(text: str) -> str:
+    """POV 拍只归一明确站到角色外部的机位，其余原样保留。
+
+    ⛔ 「她右后方」「肩后」「床尾」「贴地」不能原样送进 POV 段：模型会照它切到
+      叙事者不可能站的位置，POV 与机位描述二选一。
+    ✅ 「院墙外·仰视树冠（机位在窄道入口，镜头朝檐角）」「机位在门内三步，正对她」
+      「机位在案侧，随她落座」是叙事者站得住的位置，必须保留，不能削成一句「叙事者视线」。
+    ⚠ 这是编译守卫，不修改判据原始 beat；第三人称旁观拍原样保留。
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    if any(mark in raw for mark in _POV_CAMERA_KEEP_MARKS):
+        return raw
+    if _POV_THIRD_PERSON_CAMERA_RE.search(raw):
+        gaze = _POV_GAZE_RE.search(raw)
+        return f"叙事者视线·{gaze.group(1)}" if gaze else ""
+    return raw
+
+
+def _pov_safe_framing(text: str) -> str:
+    """POV 拍删掉景别里隐含的第三人称背面角度，保留景别本身。"""
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    cleaned = _POV_BACK_ANGLE_RE.sub("", raw).strip(" ，,/")
+    return cleaned or raw
+
+
+_IMAGE_ALIGN_PREFIX = "起帧对齐图片1"
+_IMAGE_ALIGN_RE = re.compile(r"^\s*起帧对齐图片1[：:，,；;]?\s*")
+
+
+def _shot_beats_segments(spec: dict[str, Any]) -> str:
+    """关键帧内部时间轴：段间硬切、段内按该段机位；近景不再单独出图。"""
+    beats = spec.get("shot_video_beats") or []
+    mode, viewpoints = _shot_viewpoint_plan(spec)
+    narrator = str(spec.get("narrator") or "").strip()
+    image_pose = str(spec.get("image_pose") or "").strip()
+    image_index = _image_beat_index(
+        spec, [beat for beat in beats if isinstance(beat, dict)],
+    )
+    lines: list[str] = []
+    cursor = 0
+    for index, beat in enumerate(beats):
+        if not isinstance(beat, dict):
+            continue
+        duration = _beat_seconds(beat)
+        start, end = cursor, cursor + duration
+        cursor = end
+        fallback_viewpoint = "pov" if _first_person_view(spec) else "observer"
+        viewpoint = viewpoints[index] if index < len(viewpoints) else fallback_viewpoint
+        parts: list[str] = []
+        if index > 0 and beat.get("cut"):
+            parts.append("硬切")
+        if mode == "mixed":
+            parts.append("第一人称" if viewpoint == "pov" else "第三人称")
+        # 图片锁在第 N 秒：只有图片所在拍写「起帧对齐图片1」；
+        # 判据/本地模型写在别的拍上的同句一律剥掉，避免整支护词每拍都重对齐。
+        if index == image_index:
+            parts.append(_IMAGE_ALIGN_PREFIX)
+            if image_pose:
+                parts.append(f"起帧：{image_pose}姿")
+        for key in ("framing", "camera_position", "camera_motion", "subject_motion", "description"):
+            value = str(beat.get(key) or "").strip()
+            if key == "description":
+                value = _IMAGE_ALIGN_RE.sub("", value)
+            if viewpoint == "pov":
+                value = _pov_replace_narrator(value, narrator)
+                if key == "framing":
+                    value = _pov_safe_framing(value)
+                if key == "camera_position":
+                    value = _pov_safe_camera_position(value)
+                if key in ("subject_motion", "description"):
+                    value = _pov_rewrite_beat_text(value)
+            if value and key in ("subject_motion", "description"):
+                value = _silent_speech_text(value)
+            if value:
+                parts.append(value)
+        sound = str(beat.get("sound_cue") or "").strip()
+        if sound:
+            parts.append(f"声音：{sound}")
+        if parts:
+            lines.append(f"{start}–{end}s｜" + "；".join(parts))
+    return "\n".join(lines)
+
+
+def _image_timing_notes(spec: dict[str, Any]) -> tuple[str, ...]:
+    """图片相对本镜的位置（start/mid/end）——中段/尾帧必须明说，否则模型会把图当首帧。
+
+    用户 2026-11-10 实锤：只说「中段/尾帧」不够，图片提示词必须能对上本镜**第几秒**，
+    否则首帧图与视频开头对不上。秒数优先取 `image_time_s`，缺省按本镜时长推算。
+    """
+    timing = str(spec.get("shot_image_timing") or "").strip().lower()
+    if timing not in ("mid", "end", "at"):
+        return ()
+    try:
+        duration = int(spec.get("shot_duration_s") or 0)
+    except (TypeError, ValueError):
+        duration = 0
+    try:
+        second = int(spec.get("image_time_s") or 0)
+    except (TypeError, ValueError):
+        second = 0
+    if second <= 0:
+        if timing == "end":
+            second = max(1, duration)
+        else:
+            second = max(1, (duration or 2) // 2)
+    span = f"，共 {duration} 秒" if duration > 0 else ""
+    if timing == "at":
+        return (
+            f"图片1=本镜第 {second} 秒的画面（不是首帧{span}）："
+            f"视频从本镜第 1 段的起点开始演，先演完第 {second} 秒之前的段，"
+            "到图片1的构图时对齐，再继续后面的段",
+        )
+    if timing == "mid":
+        return (
+            f"图片1=本镜中段画面（本镜第 {second} 秒{span}）："
+            "视频从本镜第 1 段的起点开始演，到图片1的构图时对齐，再继续",
+        )
+    return (
+        f"图片1=本镜尾帧画面（本镜第 {second} 秒{span}）："
+        "视频从本镜第 1 段的起点开始演，最后落到图片1的构图",
+    )
+
+
+def _shot_role_ref_notes(spec: dict[str, Any], start_index: int = 2) -> tuple[str, ...]:
+    """分镜视频的角色参考图绑定：图片1=本镜画面，图片2 起=角色底图。
+
+    用户 2026-11-10 口径：视频靠角色底图锁外貌，与图片生成模式（文生图/图生图）无关。
+    `share_last_frame` 型（move）由 firstlast 分支从图片3 起绑定，不走本函数。
+    """
+    names = [str(name).strip() for name in (spec.get("role_refs") or []) if str(name).strip()]
+    if not names:
+        return ()
+    parts = [
+        f"图片{start_index + index}={name} 的角色参考图"
+        "（只锁身份、五官、发型与体型；当下衣着、姿势与所在场景以图片1为准）"
+        for index, name in enumerate(names)
+    ]
+    return ("视频角色参考：" + "；".join(parts),)
+
+
+def _beats_have_cuts(spec: dict[str, Any]) -> bool:
+    """本镜的时间分镜是否包含多拍/硬切（决定 POV 声明能否继续锁图片1视点）。"""
+    beats = [beat for beat in (spec.get("shot_video_beats") or [])
+             if isinstance(beat, dict)]
+    return len(beats) > 1 or any(bool(beat.get("cut")) for beat in beats)
+
+
+def _shot_beats_contract(spec: dict[str, Any]) -> ClimaxCameraContract:
+    """关键帧多镜头：图片1 锁人物身份/造型，场景与机位按[时间分镜]逐段执行。
+
+    ⛔ 不再写「所有段共用图片1的场景」：多场景镜（侧门→走廊→卧室、榻边→水盆→门边）
+      与这条硬约束互斥，模型只能二选一（丢场景或丢参考图）。场景切换以 ④ 明写的段为准。
+    """
+    if spec.get("establish"):
+        first_note = (
+            "本片以图片1的空间、道具与光线为准；按[时间分镜]逐段执行，"
+            "段间硬切只换机位与取景，不新增主要人物"
+        )
+    elif spec.get("role_refs"):
+        first_note = (
+            "图片1=本镜人物、服装、姿势与场景参考；角色外貌只按角色参考图锁定；"
+            "按[时间分镜]逐段执行，段间硬切到新机位，段内按该段机位运动；"
+            "所有段以图片1的人物身份与造型为准，不重新设定人物；"
+            "场景与空间按[时间分镜]逐段写明的为准，段间切景只换机位与取景，不新增人物"
+        )
+    else:
+        first_note = (
+            "本片以图片1为唯一人物、服装与场景参考；按[时间分镜]逐段执行，"
+            "段间硬切到新机位，段内按该段机位运动；"
+            "所有段以图片1的人物身份与造型为准，不重新设定人物；"
+            "场景与空间按[时间分镜]逐段写明的为准，段间切景只换机位与取景，不新增人物"
+        )
+    notes: list[str] = [first_note]
+    # 视角按这一支视频的逐拍计划走：图片所在拍的视角与图片一致；
+    # 其余拍吃判据的 viewpoint，没标再从机位句反推。
+    # - pov：全局 POV 声明（多拍/硬切不再锁图片1视点）；
+    # - observer：不注入 POV，明确叙事者不在画面里；
+    # - mixed：全局混合声明 + ④ 每段标「第一人称/第三人称」。
+    viewpoint_mode, _viewpoints = _shot_viewpoint_plan(spec)
+    if viewpoint_mode == "pov":
+        notes.extend(_pov_shot_notes(
+            spec, anchored=True, cuts=_beats_have_cuts(spec), force=True,
+        ))
+    elif viewpoint_mode == "mixed":
+        notes.append(_POV_VIEW_MIXED)
+        notes.extend(_pov_limb_notes(spec))
+    else:
+        notes.append(_OBSERVER_VIEW_NOTE)
+    notes.extend(_image_timing_notes(spec))
+    notes.extend(_shot_role_ref_notes(spec, 2))
+    sound = str(spec.get("shot_sound_cue") or "").strip()
+    if sound:
+        notes.append(f"本帧触发声/事件：{sound}")
+    return ClimaxCameraContract(
+        intent=CLIMAX_INTENT_REVEAL, reason="shot_beats",
+        camera="", notes=tuple(notes), beat_fx="", beat_sync="",
+    )
+
+
+def _shot_motion_notes(spec: dict[str, Any]) -> tuple[str, ...]:
+    """覆盖式分镜的景别/主体运动/触发声：固定机位也必须让身体在动。"""
+    notes: list[str] = []
+    framing = str(spec.get("shot_framing") or "").strip()
+    if framing:
+        notes.append(f"景别/角度：{framing}")
+    motion = str(spec.get("shot_subject_motion") or "").strip()
+    if motion:
+        notes.append(f"主体运动（固定机位也必须有）：{motion}")
+    cue = str(spec.get("shot_sound_cue") or "").strip()
+    if cue:
+        notes.append(f"本镜触发声/事件：{cue}")
+    return tuple(notes)
+
+
+def _shot_hold_contract(spec: dict[str, Any], has_frame: bool) -> ClimaxCameraContract:
+    """cut 镜头：全片固定机位，只让主体在格内做动态延伸。"""
+    return ClimaxCameraContract(
+        intent=CLIMAX_INTENT_HOLD, reason="shot_cut",
+        camera=_HOLD_CAMERA_FRAME if has_frame else _HOLD_CAMERA_NOFRAME,
+        notes=(_HOLD_META, *_pov_shot_notes(spec, anchored=has_frame),
+               *_image_timing_notes(spec), *_shot_role_ref_notes(spec, 2),
+               _HOLD_MOTION, _hold_rhythm(spec), *_shot_motion_notes(spec)),
+        # 2026-11-09 用户定案：「能量爆发式特效」对分镜没有意义，cut 不写特效句。
+        beat_fx="", beat_sync="",
+    )
+
+
+def _shot_establish_contract(spec: dict[str, Any]) -> ClimaxCameraContract:
+    """环境空镜：固定机位或一条连续路径，只演环境级运动。"""
+    path = str(spec.get("shot_camera") or "").strip()
+    late = str(spec.get("shot_image_timing") or "").strip().lower() in ("mid", "end", "at")
+    if path:
+        meta = _ESTABLISH_MOVE_LATE_META if late else _ESTABLISH_MOVE_META
+        return ClimaxCameraContract(
+            intent=CLIMAX_INTENT_REVEAL, reason="shot_establish_move",
+            camera=_SHOT_MOVE_CAMERA,
+            notes=(meta.format(path=path), *_image_timing_notes(spec),
+                   *_shot_role_ref_notes(spec, 2),
+                   *_shot_motion_notes(spec), _ESTABLISH_WORLD),
+            beat_fx="", beat_sync="",
+        )
+    meta = _ESTABLISH_HOLD_LATE_META if late else _ESTABLISH_HOLD_META
+    return ClimaxCameraContract(
+        intent=CLIMAX_INTENT_HOLD, reason="shot_establish",
+        camera=_HOLD_CAMERA_FRAME,
+        notes=(meta, *_image_timing_notes(spec),
+               *_shot_role_ref_notes(spec, 2),
+               *_shot_motion_notes(spec), _HOLD_MOTION, _hold_rhythm(spec)),
+        beat_fx="", beat_sync="",
+    )
+
+
+def _shot_move_single_contract(spec: dict[str, Any]) -> ClimaxCameraContract:
+    """move_single：单图 + ①声明的同一条连续机位路径，不逐拍换镜。"""
+    path = str(spec.get("shot_camera") or "").strip() or _REVEAL_CAMERA_PAN
+    motion = int(spec.get("motion") or 0)
+    return ClimaxCameraContract(
+        intent=CLIMAX_INTENT_REVEAL, reason="shot_move_single",
+        camera=_SHOT_MOVE_CAMERA,
+        notes=(_SHOT_MOVE_META.format(path=path), *_pov_shot_notes(spec, anchored=False),
+               *_image_timing_notes(spec), *_shot_role_ref_notes(spec, 2),
+               _REVEAL_WORLD, *_shot_motion_notes(spec)),
+        beat_fx="", beat_sync=_climax_beat_sync(motion),
+    )
+
+
+# 分镜稀疏守卫：只查「这一段能不能拍」，不评价文学质量。
+_SPARSE_ENV_CUES = (
+    "光", "影", "阳", "灯", "窗", "门", "墙", "桌", "案", "地", "天", "夜", "晨", "暮",
+    "雨", "风", "尘", "烟", "云", "树", "花", "草", "石", "木", "铁", "水", "火",
+    "雪", "月", "衣", "裙", "发", "耳",
+)
+_SPARSE_ACTION_CUES = (
+    "走", "站", "坐", "躺", "转", "抬", "伸", "握", "放", "推", "拉", "按", "跪", "趴",
+    "抱", "靠", "退", "进", "停", "看", "望", "笑", "说", "开", "合", "落", "起",
+    "晃", "抖", "颤", "蹭", "贴", "压", "抽", "掀", "盖", "穿", "脱", "解", "扣",
+    "迈", "跑", "踢", "抓", "扶", "撑", "俯", "仰", "倾", "摆", "卷",
+    "挂", "鼓", "飘", "吹", "垂", "扬", "拍", "揉", "摸", "碰",
+)
+# 特写/近景/局部本来就不需要交代环境与光线；不能拿环境词表误判为稀疏。
+_SPARSE_CLOSEUP_CUES = (
+    "特写", "近景", "中近景", "手部", "面部", "眼部", "嘴角", "局部", "微距",
+)
+
+
+def _sparse_beat_warnings(spec: dict[str, Any]) -> list[str]:
+    """④ 每段是否写成了可拍画面；稀疏拍不静默通过，汇总成一条 warning。"""
+    beats = [beat for beat in (spec.get("shot_video_beats") or [])
+             if isinstance(beat, dict)]
+    if not beats:
+        return []
+    issues: list[str] = []
+    for index, beat in enumerate(beats, start=1):
+        description = str(beat.get("description") or "").strip()
+        subject = str(beat.get("subject_motion") or "").strip()
+        camera = str(beat.get("camera_position") or "").strip()
+        framing = str(beat.get("framing") or "").strip()
+        if not description and not subject:
+            issues.append(f"第{index}段无画面/动作")
+            continue
+        missing: list[str] = []
+        if len(description) < 40:
+            missing.append(f"description仅{len(description)}字")
+        combined = f"{framing}{camera}{subject}{description}"
+        closeup = any(cue in framing for cue in _SPARSE_CLOSEUP_CUES)
+        if not closeup and not any(cue in combined for cue in _SPARSE_ENV_CUES):
+            missing.append("缺环境/道具/光线")
+        if not any(cue in combined for cue in _SPARSE_ACTION_CUES):
+            missing.append("缺主体动作")
+        if not camera:
+            missing.append("缺机位")
+        if missing:
+            issues.append(f"第{index}段({'、'.join(missing)})")
+    if not issues:
+        return []
+    return [
+        "④ 分镜信息过稀：" + "；".join(issues)
+        + "；视频模型只能自行补全（按合同写足 60–120 字可见画面）"
+    ]
+
+
 def build_video_request(
     *,
     mode: str,
@@ -2282,6 +2914,14 @@ def build_video_request(
     """
     preset = preset or {}
     spec = _clean_spec(spec or {})
+    # 分镜角色参考图：图片1=本镜画面，图片2 起=角色底图（move 由 firstlast 分支从图片3 起）。
+    # 槽数以模板能力为天花板：多声明一张前端不会上传的图，比少一张更坏（第 106 刀同源）。
+    if mode in ("shot_cut", "shot_move_single", "shot_establish", "shot_establish_move"):
+        ref_limit = _caps_reference_slots(caps)
+        role_refs = [
+            str(name).strip() for name in (spec.get("role_refs") or []) if str(name).strip()
+        ][:ref_limit]
+        spec = {**spec, "role_refs": role_refs}
     style_prefix = str(preset.get("stylePrefix") or preset.get("style_template") or "")
     duration_hint = int(preset.get("videoDurationHint") or 0)
     transition_duration_hint = int(preset.get("transitionDurationHint") or 0)
@@ -2299,7 +2939,8 @@ def build_video_request(
     # 否则「没填画幅」会被读成「横屏 ⇒ 宽画幅成立」，正好把默认偏向升格，与判错代价不对称相反。
     size_cfg = str(video_config.get("size") or "").strip()
     size = size_cfg or "1280x720"
-    # 高潮机位契约判定（仅 climax；其余模式为 None——首尾帧/转场的镜头语义本就允许运动）
+    # 高潮机位契约判定（仅 climax；其余模式为 None——firstlast 自 2026-11-09 起
+    # 固定机位，转场短桥段仍允许运动）
     shot_intent: dict[str, str] | None = None
     # 对白时间轴（第 99 刀）：只有 firstlast 正片产出；**不拼进 video_prompt**——
     # 模板没暴露参考音频槽时前端不追加，保持 2026-09-20「视频提示词只有效果音」口径。
@@ -2355,6 +2996,92 @@ def build_video_request(
                     f"{name} 的角色参考图（只锁身份、五官、发型与体型；"
                     "当下衣着、姿势与所在场景以首尾帧画面为准）"
                 )
+    elif mode in ("shot_cut", "shot_move_single"):
+        # 2026-11-09 分镜序列：cut＝单图固定机位动态延伸；move_single＝单图一条连续运镜。
+        shot_seconds = _shot_seconds(spec, duration_hint, caps)
+        has_frame = bool(first_frame) or pending_frame
+        desc = _climax_frame_role(spec, first_frame_desc)
+        ctr = (
+            _shot_beats_contract(spec) if spec.get("shot_video_beats")
+            else (_shot_hold_contract(spec, has_frame) if mode == "shot_cut"
+                  else _shot_move_single_contract(spec))
+        )
+        shot_intent = {"intent": ctr.intent, "reason": ctr.reason}
+        prompt = compile_climax_video_prompt(
+            spec, style_prefix=style_prefix,
+            duration_hint=shot_seconds, camera="", model_name=model, size=size,
+            first_frame_desc=desc, audio_lines=[], has_frame=bool(first_frame),
+            pending_frame=pending_frame, skeleton=skeleton, contract=ctr,
+        )
+        images = [first_frame] if first_frame else []
+        actors = [str(a).strip() for a in (spec.get("actors") or []) if str(a).strip()]
+        role = f"图片1中心的角色为{'、'.join(actors)}" if actors else desc
+        binding = {"图片1": _binding_entry(role, first_frame)}
+        # 图片2+：角色参考底图（只锁外貌；不参与本镜构图/动作）。
+        for idx, name in enumerate(
+            [str(n).strip() for n in (spec.get("role_refs") or []) if str(n).strip()], start=2,
+        ):
+            binding[f"图片{idx}"] = (
+                f"{name} 的角色参考图（只锁身份、五官、发型与体型；"
+                "当下衣着、姿势与所在场景以图片1为准）"
+            )
+    elif mode in ("shot_establish", "shot_establish_move"):
+        # 2026-11-09 覆盖式分镜：环境空镜——只演空间/道具/群演，不锁人物身份。
+        shot_seconds = _shot_seconds(spec, duration_hint, caps)
+        has_frame = bool(first_frame) or pending_frame
+        ctr = (
+            _shot_beats_contract(spec) if spec.get("shot_video_beats")
+            else _shot_establish_contract(spec)
+        )
+        shot_intent = {"intent": ctr.intent, "reason": ctr.reason}
+        desc = "本镜环境空镜的起始画面"
+        # 运镜型环境镜：逐拍机位必须用 ① 声明的路径，不能被 spec.camera（如「摇臂俯拍」）
+        # 抢走——两者会互相矛盾（离线模拟 2026-11-09 实锤）。
+        establish_spec = (
+            {k: v for k, v in spec.items() if k != "camera"}
+            if mode == "shot_establish_move" else spec
+        )
+        prompt = compile_climax_video_prompt(
+            establish_spec, style_prefix=style_prefix,
+            duration_hint=shot_seconds, camera="", model_name=model, size=size,
+            first_frame_desc=desc, audio_lines=[], has_frame=bool(first_frame),
+            pending_frame=pending_frame, skeleton=skeleton, contract=ctr,
+        )
+        images = [first_frame] if first_frame else []
+        binding = {"图片1": _binding_entry(desc, first_frame, pending_frame)}
+        # 环境镜也允许角色参考：锚点/主体点名了角色（如妲千沁入场）且配了底图 ⇒ 图片2+。
+        for idx, name in enumerate(
+            [str(n).strip() for n in (spec.get("role_refs") or []) if str(n).strip()], start=2,
+        ):
+            binding[f"图片{idx}"] = (
+                f"{name} 的角色参考图（只锁身份、五官、发型与体型；"
+                "当下衣着、姿势与所在场景以图片1为准）"
+            )
+    elif mode == "shot_move":
+        # 2026-11-09 分镜序列：两张锚点图 + ①一条完整运镜路径 + ④同一条路径逐拍复用。
+        allows_last = _caps_allows_last_frame(caps)
+        has_first = bool(first_frame) or pending_frame
+        has_last = (bool(last_frame) or pending_frame) and allows_last
+        shot_seconds = _shot_seconds(spec, duration_hint, caps)
+        path = str(spec.get("shot_camera") or "").strip() or _REVEAL_CAMERA_PAN
+        ff_desc = first_frame_desc or "本镜起始画面"
+        lf_desc = last_frame_desc or "本镜结束画面"
+        # ⚠ 分镜的叙事窗口是 spec.narrative（本镜两锚点之间）；绝不带整楼 floor_narrative。
+        move_spec = {k: v for k, v in spec.items() if k != "floor_narrative"}
+        if not str(move_spec.get("narrative") or "").strip():
+            move_spec = {**move_spec, "narrative": str(move_spec.get("shot_narrative") or "")}
+        prompt = compile_firstlast_video_prompt(
+            move_spec, style_prefix=style_prefix,
+            duration_hint=shot_seconds, camera="", model_name=model, size=size,
+            first_frame_desc=ff_desc, last_frame_desc=lf_desc, prev_tail_desc="",
+            has_first=has_first, has_last=has_last, audio_lines=None,
+            skeleton=skeleton, camera_override=path,
+        )
+        images = [img for img in (first_frame, last_frame if allows_last else "") if img]
+        binding = {"图片1": _binding_entry(ff_desc, first_frame, pending_frame)}
+        if allows_last:
+            binding["图片2"] = _binding_entry(lf_desc, last_frame, pending_frame)
+        shot_intent = {"intent": "shot_move", "reason": path[:80]}
     elif mode == "transition":
         # W3 转场视频：图片1=上尾帧（起点），图片2=当前首帧（终点），短桥段。
         # 第 103 刀：转场同样在成图**之前**编译（上尾帧来自历史、当前首帧由本链刚生成），
@@ -2405,10 +3132,15 @@ def build_video_request(
             "图片1": _binding_entry(role, first_frame),
         }
 
+    warning_mode = (
+        "firstlast" if mode == "shot_move"
+        else ("establish" if mode in ("shot_establish", "shot_establish_move") else mode)
+    )
     warnings = _missing_frame_warnings(
-        mode, first_frame, last_frame, pending_frame,
+        warning_mode, first_frame, last_frame, pending_frame,
         allows_last=_caps_allows_last_frame(caps),
     )
+    warnings.extend(_sparse_beat_warnings(spec))
     # 第 105 刀（实稿发现 5）：15s 塞 53 句 ⇒ ④ 每拍按 4.5 字/秒限速，装不下的引语
     # 不是丢掉不提，这里如实报「裁了多少句」，让人决定是加长视频还是精简台词。
     # 第 107 刀：拍窗口已按台词量加权，仍被裁 ⇒ 同时报「排进各拍至少需要多少秒」，
@@ -2421,7 +3153,14 @@ def build_video_request(
             f"{quote_stats['quotes_dropped']}/{quote_stats['quotes_total']} 句引语"
             f"超出所在拍可说完的容量，未写入分镜{hint}（建议加长视频或精简台词）"
         )
-    seconds = transition_duration_hint if mode == "transition" else duration_hint
+    if mode in ("shot_cut", "shot_move", "shot_move_single"):
+        seconds = _shot_seconds(spec, duration_hint, caps)
+    elif mode in ("shot_establish", "shot_establish_move"):
+        seconds = _shot_seconds(spec, duration_hint, caps)
+    elif mode == "transition":
+        seconds = transition_duration_hint
+    else:
+        seconds = duration_hint
 
     return {
         "mode": mode,
@@ -2475,6 +3214,12 @@ def _missing_frame_warnings(mode: str, first_frame: str, last_frame: str,
                 warnings.append(
                     "视频模板无尾帧槽：尾帧图不会上传，④ 收尾按文字描述"
                 )
+    elif mode == "establish":
+        # 环境空镜：图在编译之后才产出（pending_frame）⇒ 按「下游补挂」写，不说成缺图。
+        if pending_frame:
+            warnings.append("环境空镜底图编译时未产出：首帧由下游链补挂本张成图")
+        elif not first_frame:
+            warnings.append("缺环境空镜底图：将以文字描述生成场景")
     elif mode == "transition":
         # 坑F：转场起点（上尾帧图）缺省 → 降级文字转场；终点（当前首帧图）缺省 → 文字收束。
         # 第 103 刀：编译发生在成图之前（pending_frame）⇒ 两张图随后由 W3 转场块补挂，

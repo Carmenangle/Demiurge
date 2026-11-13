@@ -128,7 +128,10 @@ def api(workspace: dict) -> TestClient:
 
 
 def test_路由导出返回zip附件(api: TestClient, workspace: dict):
-    resp = api.get("/api/transfer/export", params={"repo_id": "repo-1"})
+    # Android 壳的 DownloadManager 会附上 X-Demiurge-Token 且自动跟随跳转；
+    # 导出端点必须直出文件，出现 3xx 就意味着令牌可能被带向别处。
+    resp = api.get("/api/transfer/export", params={"repo_id": "repo-1"},
+                   follow_redirects=False)
     assert resp.status_code == 200
     assert resp.headers["content-disposition"].startswith("attachment")
     with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
