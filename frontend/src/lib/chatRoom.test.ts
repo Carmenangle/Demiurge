@@ -74,8 +74,8 @@ describe("聊天 / 群聊纯逻辑", () => {
   });
 
   it("合集卡旧开场卡名不在名册时回退名册首位（不锁死在作品名）", () => {
-    expect(resolveChatRoomMembers("chat", ["林昭", "苏晚"], ["堕落魔戒"])).toEqual(["林昭"]);
-    expect(resolveChatRoomMembers("group_chat", ["林昭", "苏晚"], ["堕落魔戒"]))
+    expect(resolveChatRoomMembers("chat", ["林昭", "苏晚"], ["示例作品甲"])).toEqual(["林昭"]);
+    expect(resolveChatRoomMembers("group_chat", ["林昭", "苏晚"], ["示例作品甲"]))
       .toEqual(["林昭", "苏晚"]);
   });
 

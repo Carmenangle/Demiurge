@@ -613,7 +613,7 @@ def judge_anchors(
 def _scoped_appearance(base_spec: dict, names: list[str]) -> str:
     """从基础外貌串按角色名拆出本镜外貌；拆不出就空（不把别人的卡面塞进来）。
 
-    基础串有两种格式：`凌若冰：…\\n妲千沁：…`（逐角色段落）与 `黑桃、苹果、你`
+    基础串有两种格式：`示例角色乙：…\\n示例角色甲：…`（逐角色段落）与 `黑桃、苹果、你`
     （只是名单）。后者不是外貌，必须先识别掉；其余交给 `_appearance_by_actor`
     按名字拆（`腓特烈大帝` 也能归到配置名 `腓特烈`）。
     """
@@ -658,7 +658,7 @@ def _spec_for(
     scoped = [name for name in subjects if name in known]
     if item.shot_type == "establish":
         # 环境空镜默认不选主要角色/外貌；但锚点/上下文已解析出**具体角色**时
-        # （如「她把剑搁在门后」→ 妲千沁），必须保留该角色的条目外貌，否则图片
+        # （如「她把剑搁在门后」→ 示例角色甲），必须保留该角色的条目外貌，否则图片
         # 只剩「A woman」，用不上银发/狐耳/眼罩等设定（用户 2026-11-11 实锤）。
         spec.update({
             "establish": True,
@@ -865,7 +865,7 @@ def _resolve_generic_subjects(
 ) -> list[str]:
     """把「她 / the primary adult character」这类泛称解析成配置角色。
 
-    用户 2026-11-10：正文只写「她」时，仍应能按上下文认出妲千沁并使用其角色条目外貌。
+    用户 2026-11-10：正文只写「她」时，仍应能按上下文认出示例角色甲并使用其角色条目外貌。
     规则很保守：只有**当前主体全是泛称/为空**且上下文只命中**唯一**一个配置角色时才替换；
     多角色命中或没有命中 ⇒ 原样返回，绝不猜。
     """
@@ -951,7 +951,7 @@ def simulate(
             if str(name).strip() in configured_actors
         ]
         # 与生产同一条纯函数：点名扫描只认锚点句 + 本镜时间分镜；整段 narrative
-        # 会把相邻段落里才出场的角色提前绑成图片2（堕落魔戒镜0 实锤）。
+        # 会把相邻段落里才出场的角色提前绑成图片2（示例作品甲镜0 实锤）。
         video_cast = shot_plan.shot_cast_names(
             shot_actors, shot_subjects, frame_subjects, configured_actors,
             anchor_text=item.start_anchor, beats=item.video_beats,
@@ -968,7 +968,7 @@ def simulate(
             dict(character_base_images or {}) if use_character_images else {}
         )
         # 缺底图的角色**不占图片编号**：视频只上传真有底图的角色，若把缺底图的也预排
-        # 成图片2，后面有底图的角色就会写成图片3，与真实请求错位（堕落魔戒镜0 实锤：
+        # 成图片2，后面有底图的角色就会写成图片3，与真实请求错位（示例作品甲镜0 实锤：
         # 蛮啾无底图却占图片2、腓特烈变成图片3，而视频提示词只声明图片2=腓特烈）。
         character_refs, missing_character_refs = shot_plan.bind_character_images(
             video_cast, base_images, include_missing=False,

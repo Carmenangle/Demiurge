@@ -2847,24 +2847,24 @@ def test_pov_beats_keep_narrator_referenced_camera_position():
 
 
 def test_pov_replaces_narrator_name_with_camera_role():
-    """第一人称段不得把叙事者写成第三人本名（凌霄镜8 的「凌渊」趋势）。"""
+    """第一人称段不得把叙事者写成第三人本名（凌霄镜8 的「示例角色丙」趋势）。"""
     beats = [{
         "duration_s": 3, "cut": False, "framing": "全身",
         "camera_position": "叙事者视点·平视", "camera_motion": "固定",
-        "subject_motion": "凌渊穿衣收剑，理正衣带",
-        "description": "凌渊走到门外，晨光照在宫道上", "viewpoint": "pov",
+        "subject_motion": "示例角色丙穿衣收剑，理正衣带",
+        "description": "示例角色丙走到门外，晨光照在宫道上", "viewpoint": "pov",
     }]
     pov = _video_req("shot_cut", _spec(
-        viewpoint="first_person", narrator="凌渊", shot_duration_s=3,
+        viewpoint="first_person", narrator="示例角色丙", shot_duration_s=3,
         shot_video_beats=beats,
     ))["submit"]["prompt"]
-    assert "凌渊" not in pov
+    assert "示例角色丙" not in pov
     assert "镜头角色穿衣收剑" in pov
 
     third = _video_req("shot_cut", _spec(
-        narrator="凌渊", shot_duration_s=3, shot_video_beats=beats,
+        narrator="示例角色丙", shot_duration_s=3, shot_video_beats=beats,
     ))["submit"]["prompt"]
-    assert "凌渊穿衣收剑" in third
+    assert "示例角色丙穿衣收剑" in third
 
 
 def test_image_pose_is_explicit_at_image_beat():
@@ -3067,12 +3067,12 @@ def test_establish_binding_has_no_identity_lock():
 
 
 def test_establish_video_binds_role_refs_when_character_named():
-    """环境镜锚点/主体点名了角色且有底图 ⇒ 图片2=该角色（妲千沁入场场景）。"""
-    req = _video_req("shot_establish", _establish_spec(role_refs=["妲千沁"]))
+    """环境镜锚点/主体点名了角色且有底图 ⇒ 图片2=该角色（示例角色甲入场场景）。"""
+    req = _video_req("shot_establish", _establish_spec(role_refs=["示例角色甲"]))
     prompt = req["submit"]["prompt"]
-    assert "图片2=妲千沁" in prompt
+    assert "图片2=示例角色甲" in prompt
     assert "角色参考图" in prompt
-    assert req["reference_binding"]["图片2"].startswith("妲千沁")
+    assert req["reference_binding"]["图片2"].startswith("示例角色甲")
 
 
 def test_establish_move_path_written_once():

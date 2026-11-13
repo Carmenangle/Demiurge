@@ -1551,12 +1551,12 @@ def _collection_book() -> dict:
 
 def test_合集卡单卡四类人设全空时自动走世界书名册(monkeypatch):
     monkeypatch.setattr(chat_room, "_read_card", lambda _ctx, _name: {
-        "name": "堕落魔戒", "description": "", "personality": "",
+        "name": "示例作品甲", "description": "", "personality": "",
         "scenario": "", "mes_example": "", "first_mes": "开场白",
     })
     monkeypatch.setattr(chat_room, "_repo_worldbook", lambda _ctx: _collection_book())
     monkeypatch.setattr(chat_room, "_repo_roster_overrides", lambda _ctx: {})
-    ctx = _ctx(card_name="堕落魔戒", card_names=["堕落魔戒"], chat_members=[],
+    ctx = _ctx(card_name="示例作品甲", card_names=["示例作品甲"], chat_members=[],
                interaction_mode="chat")
 
     roster = chat_room.chat_roster(ctx)
@@ -1597,16 +1597,16 @@ def test_仓库显式名册模式覆盖自动判定(monkeypatch):
 
 def test_世界书模式人设取角色条目正文(monkeypatch):
     monkeypatch.setattr(chat_room, "_read_card", lambda _ctx, _name: {
-        "name": "堕落魔戒", "description": "", "personality": "",
+        "name": "示例作品甲", "description": "", "personality": "",
         "scenario": "", "mes_example": "",
     })
     monkeypatch.setattr(chat_room, "_repo_worldbook", lambda _ctx: _collection_book())
     monkeypatch.setattr(chat_room, "_repo_roster_overrides", lambda _ctx: {})
-    ctx = _ctx(card_name="堕落魔戒", card_names=["堕落魔戒"], chat_members=[],
+    ctx = _ctx(card_name="示例作品甲", card_names=["示例作品甲"], chat_members=[],
                interaction_mode="chat")
 
     block = chat_room.persona_block(ctx, "林昭")
 
     assert "你现在以「林昭」的身份" in block
     assert "青云宗掌门" in block
-    assert "堕落魔戒" not in block
+    assert "示例作品甲" not in block

@@ -761,7 +761,7 @@ def _appearance_by_actor(appearance: str, actors: list[str]) -> dict[str, str]:
         return {}
     # 先判「名字：外貌」段落头，再判 `名字(外貌)`：长角色卡的外貌正文里常带括号
     # （`乳房（尺寸110+）`），旧顺序会把这些括号前的短语当角色名，返回一整张垃圾映射
-    # ⇒ 视频身份锁拿不到真外貌（2026-11-11 堕落魔戒实锤）。
+    # ⇒ 视频身份锁拿不到真外貌（2026-11-11 示例作品甲实锤）。
     lines = [ln for ln in src.splitlines() if ln.strip()]
     header = re.compile(r"^\s*([^\s：:]+)\s*[：:]\s*(.+)$")
     if lines and all(header.match(ln) for ln in lines):
@@ -3049,7 +3049,7 @@ def build_video_request(
         )
         images = [first_frame] if first_frame else []
         binding = {"图片1": _binding_entry(desc, first_frame, pending_frame)}
-        # 环境镜也允许角色参考：锚点/主体点名了角色（如妲千沁入场）且配了底图 ⇒ 图片2+。
+        # 环境镜也允许角色参考：锚点/主体点名了角色（如示例角色甲入场）且配了底图 ⇒ 图片2+。
         for idx, name in enumerate(
             [str(n).strip() for n in (spec.get("role_refs") or []) if str(n).strip()], start=2,
         ):

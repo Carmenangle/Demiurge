@@ -3,8 +3,8 @@
 把「角色样貌」按正常途径补齐：世界书条目 / 角色卡 / 通用表 → `character_portrait.collect_appearance`
 → 定妆画面合同 → 图片 Profile 编译 → 文生图模板（角色 LoRA ＋ 风格 LoRA）→ `portraits/<file>.png`。
 
-为什么需要它：`character_reference` 是**图生图锁身份**，没有定妆底图就出不了参考图；而凌霄仙母录
-三个角色（凌若冰/舞姬恋/妲千沁）都只有角色 LoRA、没有 `baseImage`。定妆链本来只在前端
+为什么需要它：`character_reference` 是**图生图锁身份**，没有定妆底图就出不了参考图；而示例作品乙
+三个角色（示例角色乙/示例角色丁/示例角色甲）都只有角色 LoRA、没有 `baseImage`。定妆链本来只在前端
 （`lib/portraitBaseImage.ts`）走，服务端没有等价入口，这里补上同一个口径。
 
 用法（backend 目录）：
@@ -12,7 +12,7 @@
 ```powershell
 .venv/Scripts/python scripts/probe_portrait.py `
   --repo-id 09f79e6f-1ae8-4468-ba2d-8a764bbaafc9 --preset 09f79e6f-1ae8-4468-ba2d-8a764bbaafc9 `
-  --characters "凌若冰,妲千沁"
+  --characters "示例角色乙,示例角色甲"
 ```
 
 默认**不改用户设置**（不写回 `characterLoras[name].baseImage`）；确认成图后再加 `--bind`。

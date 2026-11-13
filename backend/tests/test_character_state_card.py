@@ -1,6 +1,6 @@
 """角色当前状态卡（2026-11-12）。
 
-这里锁的是**串人**与**编造**两类失败：真机 `堕落魔戒 SAVE02` 第 19 轮里，埃吉尔的名字出现在
+这里锁的是**串人**与**编造**两类失败：真机 `示例作品甲 SAVE02` 第 19 轮里，埃吉尔的名字出现在
 下一句，而「她手里捏着那份抄本」实际是奥古斯特的动作——若按「命中句 ±1」取窗口，参考图
 就会画成埃吉尔拿抄本。同样，`[在场]` 只有位置/动作时不能编出服装，性别表与正文冲突时
 不能直接把表值喂给编译器。
@@ -67,10 +67,10 @@ def test_pronoun_sentences_rejected_when_character_never_named():
 
 
 def test_pronoun_sentences_kept_in_single_actor_fragment_with_name():
-    """凌霄仙母录那种单人片段仍要能收「她」句，不能被上一条修法误伤。"""
-    text = "妲千沁把外衫褪到石案上。\n\n她抬起眼，眼睛还很亮。"
-    window, _ = character_state_card.state_window(text, "妲千沁")
-    assert "妲千沁把外衫褪到石案上" in window
+    """示例作品乙那种单人片段仍要能收「她」句，不能被上一条修法误伤。"""
+    text = "示例角色甲把外衫褪到石案上。\n\n她抬起眼，眼睛还很亮。"
+    window, _ = character_state_card.state_window(text, "示例角色甲")
+    assert "示例角色甲把外衫褪到石案上" in window
     assert "她抬起眼" in window
 
 
@@ -92,14 +92,14 @@ def test_pronoun_sentences_before_target_is_named_are_not_stolen():
 
 
 def test_state_window_keeps_she_sentences_in_single_character_paragraph():
-    """凌霄仙母录的实验片段通篇只有妲千沁一人（多数句子以「她」开头），必须收。"""
+    """示例作品乙的实验片段通篇只有示例角色甲一人（多数句子以「她」开头），必须收。"""
     text = (
         "日头爬到檐角那株狐尾槐的树冠上。"
-        "妲千沁便从前殿回来了。"
+        "示例角色甲便从前殿回来了。"
         "她走得比平日急，靴底在窄道上连声响。"
         "她把剑搁在门后，走过去在石案边坐下。"
     )
-    window, _ = character_state_card.state_window(text, "妲千沁", others=["凌若冰", "舞姬恋"])
+    window, _ = character_state_card.state_window(text, "示例角色甲", others=["示例角色乙", "示例角色丁"])
     assert "她走得比平日急" in window
     assert "她把剑搁在门后" in window
 
@@ -120,7 +120,7 @@ def test_state_window_drops_she_sentences_when_paragraph_has_others():
 
 def test_clean_text_restores_jailbreak_markers():
     """`@嘴@(唇)@` 是防拦截拆字，还原成「嘴唇」再进画面描述。"""
-    cleaned = character_state_card._clean_text("凌若冰@嘴@(唇)@从上面松开。")
+    cleaned = character_state_card._clean_text("示例角色乙@嘴@(唇)@从上面松开。")
     assert "@" not in cleaned
     assert "嘴唇" in cleaned
 
@@ -128,14 +128,14 @@ def test_clean_text_restores_jailbreak_markers():
 def test_clean_text_drops_roll_panel():
     """`<roll>` 里的 `[TYPE]/[SKILL] 75[基础45（…）]` 是数值面板，不是画面。"""
     text = (
-        "<status>[在场] 凌若冰</status>"
+        "<status>[在场] 示例角色乙</status>"
         "<roll>[TYPE] 反攻夺取主导权[SKILL] 75[基础45（…）+20（…）]</roll>"
-        "<content>凌若冰跪坐着，抬眼看他。</content>"
+        "<content>示例角色乙跪坐着，抬眼看他。</content>"
     )
     cleaned = character_state_card._clean_text(text)
     assert "[TYPE]" not in cleaned
     assert "[SKILL]" not in cleaned
-    assert "凌若冰跪坐着" in cleaned
+    assert "示例角色乙跪坐着" in cleaned
 
 
 def test_wardrobe_reads_present_parentheses_not_other_dialogue(monkeypatch):

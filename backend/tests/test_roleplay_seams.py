@@ -353,8 +353,8 @@ def test_剧情世界书三段都剥离开场白(monkeypatch):
         "【开场白】\n「你就是那个孽子?」\n*她按上刀柄。*\n"
         "【好感分阶】\n阶段·冰霜杀意"
     )
-    recall = "【角色卡·冷倾雪】\n【开场白】\n「本宫堂堂紫冷玄女……」\n【性格】\n高傲"
-    dynamic = "【剧情进展·动态】\n冷倾雪已被困于白给谷。\n【开场白】\n不该出现的初遇台词"
+    recall = "【角色卡·示例角色戊】\n【开场白】\n「本宫堂堂紫冷玄女……」\n【性格】\n高傲"
+    dynamic = "【剧情进展·动态】\n示例角色戊已被困于示例地点乙。\n【开场白】\n不该出现的初遇台词"
     monkeypatch.setattr(agr, "_resolve_worldbook", lambda ctx, text: anchor)
     monkeypatch.setattr(agr, "_apply_regex", lambda ctx, text, *a, **k: text)
     ctx = {"_worldbook_recall_text": recall, "_worldbook_dynamic_text": dynamic}
@@ -366,7 +366,7 @@ def test_剧情世界书三段都剥离开场白(monkeypatch):
         assert "孽子" not in text and "紫冷玄女" not in text and "不该出现" not in text
     assert "【人物设定】" in wb and "【好感分阶】" in wb
     assert "【性格】" in wb_recall and "高傲" in wb_recall
-    assert "冷倾雪已被困于白给谷" in ctx["_worldbook_dynamic_text"]
+    assert "示例角色戊已被困于示例地点乙" in ctx["_worldbook_dynamic_text"]
 
 
 # ---------------------------------------------------------------------------

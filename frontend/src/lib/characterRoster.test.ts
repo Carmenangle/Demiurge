@@ -11,7 +11,7 @@ function roster(over: Partial<CharacterRosterResult> = {}): CharacterRosterResul
     members: ["林昭", "苏晚"],
     entries: [{ name: "林昭" }, { name: "苏晚" }],
     candidates: [],
-    fallback_card: "堕落魔戒",
+    fallback_card: "示例作品甲",
     ...over,
   };
 }
@@ -43,7 +43,7 @@ describe("角色名册覆盖解析", () => {
 
 describe("名册成员选择", () => {
   it("世界书名册优先于绑定卡回退", () => {
-    expect(rosterNamesOf(roster(), ["堕落魔戒"])).toEqual(["林昭", "苏晚"]);
+    expect(rosterNamesOf(roster(), ["示例作品甲"])).toEqual(["林昭", "苏晚"]);
   });
 
   it("世界书名册为空时回退绑定卡", () => {

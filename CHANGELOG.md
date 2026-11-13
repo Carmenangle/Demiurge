@@ -25,7 +25,7 @@
 
 - **堕落 · 婚礼堂完整视频前置流程（2026-11-12，离线 probe）**：新增
   `backend/scripts/probe_wedding_video_flow.py`，按「场景图 → 角色当前状态图 →
-  编辑后逐镜分镜图」三步产出《堕落魔戒》SAVE02 婚礼堂 8 镜 / 66s 的参考素材：
+  编辑后逐镜分镜图」三步产出《示例作品甲》SAVE02 婚礼堂 8 镜 / 66s 的参考素材：
   2 张 16:9 空场景、1 张 9:16 白婚纱角色状态图、8 张 9:16 分镜图。
   因生产图生图模板只有一个 `base_image` 槽且对 16:9 做 `center` 裁切，
   逐镜按镜型构造 **9:16 单幅连贯基底**（环境镜＝场景图竖幅羽化延展；
@@ -84,8 +84,8 @@
   用文生图模板逐场景生成**无人物**环境图（默认 **16:9** 1024×576 → 1536×864，`unpopulated
   interior` + 房间清单前置，广角室内全景而不是从门口看进去），按 `scene_key` 落盘并写
   manifest/sidecar，提示词变化自动重出；`ShotPlan` 新增 `scene_cards`，`probe_shot_plan
-  --scene-refs` 可直接产出全部场景图。真机《堕落魔戒》SAVE02 两场景均无人物、整间入画；
-  另跨题材验证凌霄仙母录（庭院泉池）、神权大陆（院门口老槐）、英雄败于邪恶（废弃工厂）
+  --scene-refs` 可直接产出全部场景图。真机《示例作品甲》SAVE02 两场景均无人物、整间入画；
+  另跨题材验证示例作品乙（庭院泉池）、示例作品丙（院门口老槐）、英雄败于邪恶（废弃工厂）
   三张 16:9 空场景，均无人物。
   **画幅分工（2026-11-12 15:50 用户定案）**：场地参考固定 **16:9**、角色参考图固定 **9:16**
   （与一键定妆同源，576×1024 @1024 → 864×1536），两条链不共用画幅。⚠ 16:9 场地图不得直接
@@ -96,7 +96,7 @@
 - **角色当前状态底图（2026-11-12 下午）**：新增 `character_state_card`（零 LLM 状态卡）、
   `character_reference`（图生图锁身份）、`probe_character_refs` CLI；`scene_reference`
   的模板填写器提为 `build_template_values` 并支持 `base_image`；`shot_plan.CLOTHING_CUES`
-  公开为服装词表真源。真机《堕落魔戒》SAVE02 产出埃吉尔／奥古斯特／腓特烈三张
+  公开为服装词表真源。真机《示例作品甲》SAVE02 产出埃吉尔／奥古斯特／腓特烈三张
   **864×1536（9:16）**参考图（含 sidecar / manifest / cards），全部人工放大验收通过。
   关键修法：底图先 `/upload/image`（绝对路径直填会 `Invalid image file`）、画幅不传
   （模板 Resize 硬写 576×1024）、取景写死「全身含鞋＋正面睁眼」、状态只收含该角色名的
@@ -124,7 +124,7 @@
   仍取默认图、风格 LoRA 被内部 edit 模型链覆盖，输出人物与角色底图不一致；AIO 三变体保留
   在模板库作实验，不再自动接线。生产改用 **`Krea2-平铺图生图`**：LoadImage→Resize 576×1024→
   VAEEncode→KSamplerAdvanced（start 3/7≈0.57）→二段采样，无 subgraph；暴露 base_image /
-  prompt / negative_prompt / 风格 LoRA。预设 `堕落魔戒` 的 `imageTemplates.img2img` 已指向它；
+  prompt / negative_prompt / 风格 LoRA。预设 `示例作品甲` 的 `imageTemplates.img2img` 已指向它；
   真机用腓特烈底图 + 平涂线稿 LoRA 复验输出 864×1536，角色与画风一致。
   新增模板字段 `api_workflow`（预编译 API 快照），含 subgraph 的模板可绕过 `ui_to_api`
   的子图 widget 丢失；提交时优先使用并 deepcopy。

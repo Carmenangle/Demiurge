@@ -2918,7 +2918,7 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
    由 `complete_field_coverage` 确定性补写；空间地标只进 anima/niji tags 行。
    **零回归**：锚点字段缺省时 `prompt_field_ledger` 不新增槽、旧 scene_spec 行为逐字节不变。
    **回归**：`test_shot_plan.py` +6 / `test_shot_sequence_dispatch.py` +1 /
-   `test_image_prompt_profiles.py` +2；真实作品《堕落魔戒》SAVE02（23 镜）自动分成
+   `test_image_prompt_profiles.py` +2；真实作品《示例作品甲》SAVE02（23 镜）自动分成
    仓库/卧室两组。展开见手册 `A/03` §3.5/§3.6。
 
    **场景卡与空场景环境图（2026-11-12 追补，用户 1+2）**：`assign_scene_anchors` 额外给
@@ -2952,7 +2952,7 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
    **回归**：`test_scene_card.py` 16 例 + `test_scene_card_llm.py` 7 例 +
    `test_scene_reference.py` 7 例 + `test_shot_plan.py`（含 scene_cards 断言）65 例
    = 95 passed / junit 四数全 0；
-   真机《堕落魔戒》SAVE02 两场景均无人物、16:9 整间入画。
+   真机《示例作品甲》SAVE02 两场景均无人物、16:9 整间入画。
    **未做**：scene_refs 作为逐镜 img2img 底图、多参考图平铺、多角色网格图、
    节点 101 改为跟随画幅的 binding。
 
@@ -2972,7 +2972,7 @@ agent_graph.roleplay_node（编排，升级为能动性子图）
    **回归**：`test_character_state_card.py` + `test_character_reference.py` 覆盖串人／
    对白剥除／性别冲突／缺底图／上传失败／不覆盖尺寸／缓存／manifest 合并；
    定向 8 文件 **128 passed / junit 四数全 0**，ruff 0、scoped mypy 0、`git diff --check` OK。
-   真机《堕落魔戒》SAVE02 `character_refs/current/` 三张 864×1536 均人工放大验收通过；
+   真机《示例作品甲》SAVE02 `character_refs/current/` 三张 864×1536 均人工放大验收通过；
    腓特烈本轮没被写到 ⇒ 回退 turn 18 并在卡里标 `state_from_previous_turn:18`。
    **未做**：接入逐镜出图链、LLM 补全状态卡、多角色网格图；⚠ 18:47 另一会话给状态卡
    加过 `<roll>` 清理／`prompt_clean.restore_jailbreak`／选片段／古风服装词表，本轮未回滚。

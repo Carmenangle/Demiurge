@@ -1,7 +1,7 @@
 """验证「本地模型能生成 NSFW」——不是生成内容，是验链路不做内容审查。
 
 判定链（全程本地，零云端）：
-  1. 用《堕落魔戒》镜 6 的**原稿露骨提示词**提交 ComfyUI（`Krea2-高清文生图优化流`）；
+  1. 用《示例作品甲》镜 6 的**原稿露骨提示词**提交 ComfyUI（`Krea2-高清文生图优化流`）；
   2. 负面词取 `probe_wedding_video_flow.NEGATIVE_SHOT`（已确认不含 NSFW/nude/explicit）；
   3. 出图后用 **WD14 tagger** 反推，`include_rating=True` 取 rating；
   4. rating 命中 `explicit` / `questionable` ⇒ PASS（模型确实把露骨内容画出来了）。

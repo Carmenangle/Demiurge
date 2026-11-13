@@ -1,10 +1,10 @@
-"""《堕落魔戒》婚礼堂（8 镜 / 66s）完整视频前置流程：场景 → 角色状态图 → 编辑后分镜图。
+"""婚礼堂回合（8 镜 / 66s）完整视频前置流程：场景 → 角色状态图 → 编辑后分镜图。
 
 数据真源：`_tmp/review_still_luoluo.json`（11-11 定稿 8 镜，`message=bff28b0a…`，
 `viewpoint=first_person`，在场「我 / 腓特烈白色婚纱 / 蛮啾」）。
 
 三步严格按用户 2026-11-12 交代的顺序执行，产物统一落在
-`userdata/pictures/堕落魔戒/SAVE02/video_flow/wedding/`：
+`userdata/pictures/<DEMIURGE_WORK_TITLE>/SAVE02/video_flow/wedding/`：
 
 1. `scenes/`    —— 16:9 空场景环境图（2 张：旧仓库礼堂 / 卧室），场景卡取自同源
    LLM 补全批次 `_tmp/scene_refs/luoluo_save02_llm/manifest.json`。
@@ -34,12 +34,16 @@
 · 角色状态图提示词只复用 11-11 镜 1 定稿的 tag 行（丢掉会串人的 manjiu 段），
   零 LLM、零云端，状态卡与状态哈希照常落盘保留证据链。
 
-运行：`python backend/scripts/probe_wedding_video_flow.py --stage all [--force] [--dry-run]`
+运行（作品目录名由环境变量注入，源码不写本机真实作品名——隐私闸要求）：
+    set DEMIURGE_WORK_TITLE=<本机作品目录名>
+    python backend/scripts/probe_wedding_video_flow.py --stage all [--force] [--dry-run]
+未设置该变量时脚本会在参数解析后直接报错退出，不会把产物写进中性占位目录。
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -64,8 +68,12 @@ REPO_ID = "c5c60de2-18f1-4b88-b15a-5d4f3f5e652e"
 MESSAGE_ID = "bff28b0a-f9b7-4168-b2ff-4c0274eeecb1"
 REVIEW = ROOT / "_tmp" / "review_still_luoluo.json"
 SCENE_MANIFEST = ROOT / "_tmp" / "scene_refs" / "luoluo_save02_llm" / "manifest.json"
-CHAT = ROOT / "userdata" / "pictures" / "堕落魔戒" / "SAVE02" / "chat.json"
-OUT = ROOT / "userdata" / "pictures" / "堕落魔戒" / "SAVE02" / "video_flow" / "wedding"
+# 本机作品目录名只从环境变量注入：公开仓库不得出现本机真实专名（release_preflight 隐私闸）。
+# 未设置时用中性占位，并在 main() 里 fail-fast，避免默默把产物写到错误目录。
+WORK_TITLE_DEFAULT = "sample_work"
+WORK_TITLE = os.environ.get("DEMIURGE_WORK_TITLE", "").strip() or WORK_TITLE_DEFAULT
+CHAT = ROOT / "userdata" / "pictures" / WORK_TITLE / "SAVE02" / "chat.json"
+OUT = ROOT / "userdata" / "pictures" / WORK_TITLE / "SAVE02" / "video_flow" / "wedding"
 
 TEMPLATE_TEXT2IMG = "a546d311e3dd45cd9c50ab0aae82a1c2"      # Krea2 高清文生图（16:9）
 TEMPLATE_IMG2IMG = "e8bbc2c970734c90a75bf8de1409dbd6"      # Krea2 平铺图生图（9:16）
@@ -578,7 +586,7 @@ def merge_flow_steps(prev: dict, current: dict) -> dict:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="堕落魔戒·婚礼堂完整视频前置流程（三步）")
+    parser = argparse.ArgumentParser(description="婚礼堂完整视频前置流程（三步）")
     parser.add_argument("--stage", default="all",
                         choices=["scenes", "characters", "shots", "all"])
     parser.add_argument("--url", default="")
@@ -589,6 +597,11 @@ def main() -> int:
     parser.add_argument("--neutralize", action="store_true", help="镜 6/7 改用中性化提示词（默认关闭：R-18 不过滤）")
     parser.add_argument("--timeout", type=int, default=600, help="单镜等待秒数")
     args = parser.parse_args()
+    if WORK_TITLE == WORK_TITLE_DEFAULT:
+        parser.error(
+            "请先设置 DEMIURGE_WORK_TITLE=<本机作品目录名>；"
+            "源码只保留中性占位，避免把真实作品名带进公开仓库"
+        )
 
     settings = repo_meta.load_user_state().get("settings") or {}
     url = args.url or str(settings.get("comfyuiUrl") or "") or "http://127.0.0.1:8188"

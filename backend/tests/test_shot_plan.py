@@ -668,14 +668,14 @@ def test_resolve_image_position_matches_anchor_beat():
     """锚点落在第 2 段 ⇒ 图片不是首帧，位置是 3s（用户 2026-11-10 实锤）。"""
     item = shot_plan.ShotPlanItem(
         shot_index=0, shot_type="establish",
-        start_anchor="日头爬到檐角那株狐尾槐的树冠上，钟磬声才刚落定，妲千沁便从前殿回来了。",
+        start_anchor="日头爬到檐角那株狐尾槐的树冠上，钟磬声才刚落定，示例角色甲便从前殿回来了。",
         end_anchor="", transition_desc="", duration_s=15,
         video_mode="shot_establish_move", image_key="s:0", end_image_key="",
         image_timing="start",
         video_beats=[
             {"duration_s": 3, "description": "日头照在狐尾槐树冠上，钟磬声刚落，院落窄道空着"},
             {"duration_s": 3, "description": "她从宫道方向走来，衣摆随急步晃动",
-             "subject_motion": "妲千沁穿窄道快步走向院门，狐耳尖压着"},
+             "subject_motion": "示例角色甲穿窄道快步走向院门，狐耳尖压着"},
         ],
     )
 
@@ -714,11 +714,11 @@ def test_resolve_image_position_move_stays_first_frame():
 def test_bind_character_images_orders_and_reports_missing():
     """图片2 起步绑定角色底图；缺底图的角色默认不占编号，避免后续整体前移。"""
     bindings, missing = shot_plan.bind_character_images(
-        ["妲千沁", "腓特烈", "蛮啾"],
-        {"妲千沁": "a.png", "腓特烈": "b.png"},
+        ["示例角色甲", "腓特烈", "蛮啾"],
+        {"示例角色甲": "a.png", "腓特烈": "b.png"},
     )
     assert bindings == [
-        {"name": "妲千沁", "image_index": 2, "base_image": "a.png", "has_base_image": True},
+        {"name": "示例角色甲", "image_index": 2, "base_image": "a.png", "has_base_image": True},
         {"name": "腓特烈", "image_index": 3, "base_image": "b.png", "has_base_image": True},
     ]
     assert missing == ["蛮啾"]
@@ -727,12 +727,12 @@ def test_bind_character_images_orders_and_reports_missing():
 def test_bind_character_images_include_missing_keeps_planned_slot():
     """审阅侧预排槽位：底图没配也占图片3，标 has_base_image=False。"""
     bindings, missing = shot_plan.bind_character_images(
-        ["妲千沁", "蛮啾"],
-        {"妲千沁": "a.png"},
+        ["示例角色甲", "蛮啾"],
+        {"示例角色甲": "a.png"},
         include_missing=True,
     )
     assert bindings == [
-        {"name": "妲千沁", "image_index": 2, "base_image": "a.png", "has_base_image": True},
+        {"name": "示例角色甲", "image_index": 2, "base_image": "a.png", "has_base_image": True},
         {"name": "蛮啾", "image_index": 3, "base_image": "", "has_base_image": False},
     ]
     assert missing == ["蛮啾"]
@@ -766,12 +766,12 @@ def test_shot_cast_names_ignores_roles_only_in_neighbouring_paragraph():
 def test_shot_cast_names_keeps_anchor_named_role_even_when_beats_clear():
     """环境镜 beats 没写人，但锚点句点名了配置角色 ⇒ 仍要绑定（用户 2026-11-10 口径）。"""
     cast = shot_plan.shot_cast_names(
-        [], [], [], ["妲千沁"],
-        anchor_text="妲千沁便从前殿回来了。",
+        [], [], [], ["示例角色甲"],
+        anchor_text="示例角色甲便从前殿回来了。",
         beats=[{"description": "庭院空着", "subject_motion": ""}],
     )
 
-    assert cast == ["妲千沁"]
+    assert cast == ["示例角色甲"]
 
 
 def test_shot_cast_names_keeps_prompt_actors_and_filters_unknown_subjects():
@@ -792,21 +792,21 @@ def test_ownership_errors_flags_bare_body_part_and_passive():
 
 def test_ownership_errors_accepts_named_bindings():
     text = (
-        "镜头角色的手牵着妲千沁的手腕；"
-        "妲千沁的腰侧、腹股沟被镜头角色的隔布蹭磨"
+        "镜头角色的手牵着示例角色甲的手腕；"
+        "示例角色甲的腰侧、腹股沟被镜头角色的隔布蹭磨"
     )
-    assert shot_plan.ownership_errors(text, cast=["妲千沁"]) == []
+    assert shot_plan.ownership_errors(text, cast=["示例角色甲"]) == []
 
 
 def test_ownership_errors_requires_name_in_nsfw():
     text = "镜头角色的肉棒贴她臂弯外侧"
-    assert shot_plan.ownership_errors(text, cast=["妲千沁"], require_named=True)
-    assert shot_plan.ownership_errors(text, cast=["妲千沁"], require_named=False) == []
+    assert shot_plan.ownership_errors(text, cast=["示例角色甲"], require_named=True)
+    assert shot_plan.ownership_errors(text, cast=["示例角色甲"], require_named=False) == []
 
 
 def test_ownership_errors_allows_pronoun_after_name_in_sentence():
-    text = "镜头角色的肉棒贴妲千沁的臂弯外侧，沿她的腕骨碾到指根"
-    assert shot_plan.ownership_errors(text, cast=["妲千沁"], require_named=True) == []
+    text = "镜头角色的肉棒贴示例角色甲的臂弯外侧，沿她的腕骨碾到指根"
+    assert shot_plan.ownership_errors(text, cast=["示例角色甲"], require_named=True) == []
 
 
 def test_ownership_errors_allows_subject_continuity_within_sentence():

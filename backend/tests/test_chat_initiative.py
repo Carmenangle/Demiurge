@@ -360,7 +360,7 @@ def test_proactive_turn_only_current_character_in_per_character_thread(monkeypat
             {"name": "林昭", "content": "林昭是青云宗掌门，她性格清冷。"},
             {"name": "苏晚", "content": "苏晚是药王谷弟子，她性格温和。"},
         ],
-        "fallback_card": "堕落魔戒",
+        "fallback_card": "示例作品甲",
     }
     ctx.chat_members = ["林昭"]
 
@@ -391,7 +391,7 @@ def test_scan_initiatives_writes_each_member_to_own_thread(monkeypatch, tmp_path
             {"name": "林昭", "content": "林昭是青云宗掌门，她性格清冷。"},
             {"name": "苏晚", "content": "苏晚是药王谷弟子，她性格温和。"},
         ],
-        "fallback_card": "堕落魔戒",
+        "fallback_card": "示例作品甲",
     }
 
     results = chat_room.scan_initiatives(ctx, limit=2)

@@ -75,18 +75,18 @@ def test_阵营地点作品名与编号不识别为角色():
         {"comment": "腓特烈大帝", "content": "腓特烈大帝是铁血的战列舰，她银发红眸，身高一百八十，性格威严。", "keys": ["腓特烈大帝"]},
     ])
 
-    roster = character_roster.build(book, exclude_names={"堕落魔戒"})
+    roster = character_roster.build(book, exclude_names={"示例作品甲"})
 
     assert _names(roster) == ["腓特烈大帝"]
 
 
 def test_作品卡名同名条目不进名册():
     book = _book([
-        {"comment": "堕落魔戒", "content": "堕落魔戒是这部作品的名字，她与他都在其中。", "keys": ["堕落魔戒"]},
+        {"comment": "示例作品甲", "content": "示例作品甲是这部作品的名字，她与他都在其中。", "keys": ["示例作品甲"]},
         {"comment": "腓特烈大帝", "content": "腓特烈大帝是战列舰，她银发红眸，身高一百八十。", "keys": ["腓特烈大帝"]},
     ])
 
-    assert _names(character_roster.build(book, exclude_names={"堕落魔戒"})) == ["腓特烈大帝"]
+    assert _names(character_roster.build(book, exclude_names={"示例作品甲"})) == ["腓特烈大帝"]
     # 即使不传 exclude_names，作品名条目也没有人物身体/档案信号，本来就不会进名册。
     assert _names(character_roster.build(book)) == ["腓特烈大帝"]
 

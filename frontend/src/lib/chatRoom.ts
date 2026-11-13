@@ -102,7 +102,7 @@ export function formatChatTimeDivider(
 
 /** 成员解析：显式勾选 ∩ 当前成员池（绑定卡或世界书名册）；无效/空则回退成员池首项。
  *  ⚠ 不能保留「不在成员池里的名字」：合集卡切换名册后，旧的开场卡名会把私聊锁在
- *  一个不存在的角色上（2026-11-10 实锤「堕落魔戒」被当成角色）。 */
+ *  一个不存在的角色上（2026-11-10 实锤「示例作品甲」被当成角色）。 */
 export function resolveChatRoomMembers(
   mode: ChatRoomMode,
   cardNames: readonly string[],

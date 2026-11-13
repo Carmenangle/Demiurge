@@ -19,8 +19,8 @@ chat.json 最新 assistant 正文
 
 ```powershell
 .venv/Scripts/python scripts/probe_character_refs.py `
-  --chat ../userdata/pictures/堕落魔戒/SAVE02/chat.json `
-  --repo ../userdata/pictures/堕落魔戒 --repo-id c5c60de2-18f1-4b88-b15a-5d4f3f5e652e `
+  --chat ../userdata/pictures/示例作品甲/SAVE02/chat.json `
+  --repo ../userdata/pictures/示例作品甲 --repo-id c5c60de2-18f1-4b88-b15a-5d4f3f5e652e `
   --llm live --limit 3
 ```
 
@@ -221,7 +221,7 @@ def main() -> int:
     if args.limit > 0:
         names = names[: args.limit]
 
-    # 地点字段各家写法不同：堕落魔戒用 `[地点]`，凌霄仙母录用 `[所在]`。
+    # 地点字段各家写法不同：示例作品甲用 `[地点]`，示例作品乙用 `[所在]`。
     locale = fields.get("地点", "") or fields.get("所在", "") or ""
     scene_key = args.scene_key
     scene = scene_card.extract_scene_card(text, scene_key=scene_key, locale=locale)
